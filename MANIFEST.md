@@ -119,3 +119,24 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [ ] **Orchestration as form shell** (`.fsh`): flatten + run + four-way validate — replacing the bash harness.
 - [ ] **First proof: one recipe four-way end-to-end on the clean fsh flatten** ← the decider.
 - [ ] `form-cli` + `fsh` native surfaces; origin repo consumes this kernel (one-home enforced).
+
+## What's still missing — the roadmap to a working, self-observing, self-learning native form-cli
+
+The recipes for self-observe, self-learn, and the form-cli largely **exist and cross four-way** (29 learning
+cells, 23 form-cli cells, the framebuffer + calibration stack, host-exec, http-client, form-asm). What's missing
+is the **live/runtime closure** and the **build** — we have the body and organs; we lack the heartbeat and the
+eyes-on-execution:
+
+1. **The keystone — flatten self-derivation + standing native build (the decider).** Gates everything. fkwu must
+   flatten its own recipes with no Go in the seam and produce a standing form-cli binary. (Regenerate the
+   committed bootstrap table once, or close self-host flatten.) Until this, the assembled body does not *run*.
+2. **The live RUNTIME witness (self-observe gap).** No cell yet watches execution itself — which recipe fired,
+   JIT hit/miss, which cell was touched last by which recipe, what's hot. The framebuffer watches *thoughts*;
+   this watches the *running kernel*. The realest new piece. The eyes-on-execution.
+3. **The live LEARNING loop closure (self-learn gap).** Rich learning recipes, but the loop that takes real
+   runtime outcomes → updates the champion / moves the weights *live* is not wired. `transient-log` +
+   `capture-correction` are the seed; the continuous accumulation is missing.
+4. **Cognition at native speed — the JIT in the live path.** The hot LLM/RAG cells must crystallize through
+   fkwu's self-JIT / form-asm lowering live, not tree-walked. The asm exists; wiring it under live cognition remains.
+
+Load-bearing: **1 (runs natively) + 2 (watches itself run)** are the minimum "core we can observe and trust."
