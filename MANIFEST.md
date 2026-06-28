@@ -31,6 +31,12 @@ receipt — *c-bootstrap fkwu on metal, no go/rust/clang/bash/python in the runt
   `field-domain-grammars`) and scoped core teachings (`teachings/` — one-engine, name-resolution-as-recipe,
   structural-composition, form-first-reasoning, prose-as-recipe) alongside the axiom teachings. Curated to what
   makes the kernel **self-describing and self-building** — not the whole app KB.
+- The **substrate and stack, 100% Form-native (Go/Rust/TS-free)**. The local-file substrate is *already* proven
+  four-way and lives here (`substrate/` — `form-fs` 14-bit, `storage-port`, `resource-port` 7-bit,
+  `host-kernel-carrier`); the HTTP *client* is native (`http/http-client`). The HTTP *server*/TCP and the
+  *production* DB integration (postgres, today the Python fan-out carrier) are Form targets authored on this
+  same minimal surface — no Go/Rust/TS. **BMF cursor and full BML are IN by necessity**: they are the language
+  the substrate, HTTP, and production integration are written in (`grammars/bmf-*`, `bml-native-north-star`).
 
 ## Architecture decisions (2026-06-28)
 
