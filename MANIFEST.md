@@ -26,6 +26,26 @@ receipt — *c-bootstrap fkwu on metal, no go/rust/clang/bash/python in the runt
 - `form-cli` and the **form shell** (`fsh`) — the native agent surfaces.
 - The **Form-native recipes** (`.fk`) — the body.
 - The **minimal surface** of the Go / Rust / TS walkers — ported *only* for four-way validation, never as the runtime.
+- The **knowledge body** the kernel reasons / learns / builds from: the grammar specs (BMF — `grammars/bmf-core`,
+  `bmf-grammar`, `shell-grammar`, `grammar-loader`; BML — `bml-native-north-star`; the form field parser —
+  `field-domain-grammars`) and scoped core teachings (`teachings/` — one-engine, name-resolution-as-recipe,
+  structural-composition, form-first-reasoning, prose-as-recipe) alongside the axiom teachings. Curated to what
+  makes the kernel **self-describing and self-building** — not the whole app KB.
+
+## Architecture decisions (2026-06-28)
+
+**T_flat is NOT the foundation — the flatten must be fkwu-self-derivable.** `T_flat` is a ~580 KB *bin-go-made*
+blob; starting on it carries a Go dependency in the seed and the opaque marker-fragility that tangled the
+origin's flatten path. Decision: fkwu flattens `form-flatten.fk` from its own c-bootstrap primitives (or a
+minimal flatten baked into `runtime/fkwu-uni.c`), with **no pre-made Go table in the seam**; thereafter any
+flatten table is a *regenerable cache fkwu makes itself*, never a committed Go artifact. `T_flat` sits here only
+as a flagged crutch (`flatten/README.md`), scheduled for replacement. This is the real test of the restart.
+
+**Minimal walkers; fkwu owns the native path.** The Go/Rust/TS walkers do the minimum — independent
+proof-oracles that witness four-way agreement on the *pure-recipe* surface, never feature-bearers. Everything we
+natively own lives in / derives from **fkwu**: the JIT (crystallize-on-heat), the host-OS surface (resource
+ports, host-io, GPU), and the Form→asm lowering. The walkers never duplicate the JIT or the rich host surface;
+they only confirm a recipe computes the same value four ways. Build out fkwu; keep the walkers thin and shrinking.
 
 **OUT (stays in the origin / private repo, never here):**
 - The Python app and carriers (~3,400 `.py`), the full Go/Rust/TS kernels, the web/API/substrate-service.
