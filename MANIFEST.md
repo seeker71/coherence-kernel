@@ -98,7 +98,9 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] Foundation seeded: five axioms + minimal surface + core (`axioms/`, `surface/`).
 - [x] Runtime + flatten brought in, **no bash / no python**: `runtime/fkwu-uni.c` (the c-bootstrap),
       `flatten/` (`form-parse`, `form-flatten`, `fourth-flatten-driver`, `T_flat`). Tree verified `.sh`=0, `.py`=0.
-- [ ] One `cc` seed → standing `fkwu` binary (documented one-liner).
+- [x] One `cc` seed → standing `fkwu` binary. **PROVEN 2026-06-28**: `cc -O2 -pthread runtime/fkwu-uni.c -o fkwu`
+      builds a native Mach-O arm64 binary in the clean repo and executes — zero Go, zero bin-go, one C seed.
+      The sovereign runtime floor is real here.
 - [ ] Minimal Go/Rust/TS surface walkers for four-way validation (`.go/.rs/.ts`, no build scripts — `fsh` drives builds).
 - [ ] **Orchestration as form shell** (`.fsh`): flatten + run + four-way validate — replacing the bash harness.
 - [ ] **First proof: one recipe four-way end-to-end on the clean fsh flatten** ← the decider.
