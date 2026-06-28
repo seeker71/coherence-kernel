@@ -58,11 +58,28 @@ flatten on fkwu self-host. This tests the single question that justifies the res
 flatten path actually clean?* If a clean axiom-first kernel inherits the `T_flat`/marker ad-hoc-ness,
 it is just a second mess. The first proof is where we find out, before moving anything.
 
+## Hard constraint — no bash, no python (the structural gate)
+
+This repo contains **zero `.sh` and zero `.py` files.** Ever. The bash was never the kernel — it
+lived only in the origin's orchestration scripts (`validate.sh`, `fourth-arm.sh`, `build-form-cli.sh`).
+Here the orchestration itself is **form shell** (`.fsh`, fkwu-native), and the runtime/recipes/walkers
+carry no bash or python by their nature (`.c` / `.fk` / `.form` / `.go` / `.rs` / `.ts`).
+
+The one allowed seed is a **single `cc` command** that compiles `runtime/fkwu-uni.c` into the
+c-bootstrap `fkwu` binary — a documented one-liner, not a script in the tree. After that, `fkwu` exists
+and **`fsh` orchestrates everything** (flatten, run, four-way validate) on the native runtime. Go/Rust/TS
+walker builds are likewise invoked from `fsh` via host-exec, for validation only.
+
+A repo gate enforces it: any `.sh` or `.py` landing in the tree fails the gate. (When `fsh` is standing,
+the gate is itself an `.fsh` check; until then it is a one-line `find` run by hand at review.)
+
 ## Status
 
 - [x] Foundation seeded: five axioms + minimal surface + core (`axioms/`, `surface/`).
-- [ ] c-bootstrap `fkwu` (committed bootstrap C + build) assembled minimally here.
-- [ ] Minimal Go/Rust/TS surface walkers for four-way validation.
-- [ ] **First proof: one recipe four-way end-to-end on the clean flatten** ← the decider.
-- [ ] `form-cli` + `fsh` native surfaces.
-- [ ] Origin repo consumes this kernel (submodule/package); one-home enforced.
+- [x] Runtime + flatten brought in, **no bash / no python**: `runtime/fkwu-uni.c` (the c-bootstrap),
+      `flatten/` (`form-parse`, `form-flatten`, `fourth-flatten-driver`, `T_flat`). Tree verified `.sh`=0, `.py`=0.
+- [ ] One `cc` seed → standing `fkwu` binary (documented one-liner).
+- [ ] Minimal Go/Rust/TS surface walkers for four-way validation (`.go/.rs/.ts`, no build scripts — `fsh` drives builds).
+- [ ] **Orchestration as form shell** (`.fsh`): flatten + run + four-way validate — replacing the bash harness.
+- [ ] **First proof: one recipe four-way end-to-end on the clean fsh flatten** ← the decider.
+- [ ] `form-cli` + `fsh` native surfaces; origin repo consumes this kernel (one-home enforced).
