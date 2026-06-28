@@ -37,6 +37,14 @@ receipt — *c-bootstrap fkwu on metal, no go/rust/clang/bash/python in the runt
   *production* DB integration (postgres, today the Python fan-out carrier) are Form targets authored on this
   same minimal surface — no Go/Rust/TS. **BMF cursor and full BML are IN by necessity**: they are the language
   the substrate, HTTP, and production integration are written in (`grammars/bmf-*`, `bml-native-north-star`).
+- The **cognition + observability layer — the kernel's telos: a core we can observe and trust.** Form-native
+  LLM (`cognition/` — the whisper-tiny transformer stack four-way: `transformer-block` 511,
+  `transformer-generate`, `whisper-block0` 1023; the matvec lowered to asm bytes, `form-asm-float` **2047**) and
+  RAG grounded retrieval (`rag-ask` / `rag-embed` / `rag-retrieve`, four-way). And the **observe/trust** stack
+  (`observe/`): `thought-framebuffer` (watch the kernel form a thought) + the calibration stack
+  (`conviction-curve`, `correction-reflex`, `confidence-earned`, `self-watch`) that measures whether the
+  kernel's confidence is *earned*. Observability and trustworthiness are first-class kernel organs here, not
+  bolt-ons — a sovereign mind that can be watched thinking and trusted exactly as far as it has measured itself.
 
 ## Architecture decisions (2026-06-28)
 
