@@ -1,5 +1,11 @@
 # SEED-DROP — the one move that stands the Form body on Windows (and every platform)
 
+> **Note (verified 2026-06-29):** this seed is the small **cursor seed** (`form-eval-cli` + `form-eval` + the BMF
+> cursor, ~740 lines, flattened ONCE) — NOT the deprecated heavy flatten chain (`T_flat`/bin-go), which is off the
+> critical path now ("flatten is optional speed, never a gate" — HOMECOMING). See
+> `receipts/2026-06-29-verify-flatten-deprecated.md`. The alternative, needing nothing from the Mac, is to grow the
+> native `--src` source-runner to `form-eval`'s grammar (it is `form-eval-cli`'s role baked in C, not a flattener).
+
 The Windows kernel is **ready to run the Form body as Form**. The only missing piece is the **seed**: a flattened
 `form-eval-cli-loop` table (platform-neutral numeric data). This is the drop-in so whoever has it — the Mac, where
 flatten/eval already stand — commits it once and it runs everywhere.
