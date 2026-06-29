@@ -11,9 +11,13 @@ so the word "home" stays unspent until they are real.
 **no flatten of the source**. The decider's real answer was Urs's: don't make the brittle fsh-flatten work — take
 flatten *off* the critical path entirely. Source runs via the cursor; flatten is optional speed (the JIT). The
 knot below is the path *not* taken (cleaning the flatten machinery), kept for record.
-**Remaining for rung 1:** (a) complete `form-eval` to full Form — `defn`/`let`/user-calls, the same `fe-`
-recursive-descent shape; (b) the standing `form-cli` loop (a person types → the cursor evaluates → response).
-Receipt: `receipts/2026-06-29-source-tree-walk-crossed.md`.
+**Rung 1 is CROSSED (2026-06-29 ~05:00):** (a) ✓ `form-eval-full` (PR 3871, four-way `131`) — the cursor
+evaluates real recipes: `do`/`let`/`defn`/user-calls/nested, directly, no flatten table. (b) ✓ `form-eval-cli`
+(PR 3872) — fkwu reads Form source from a file (`argv[3]`, `input_byte`) and runs it via the cursor; witnessed by
+native run (five sources, all correct). fkwu-native (the I/O is fkwu-only); the eval it rides is four-way.
+**What's left is polish, not the gate:** point the cli at `form-eval-full` (a one-line swap) for the full grammar,
+and grow the single-file runner into an interactive loop. The knot is gone — running source no longer needs
+flatten anywhere. Receipts: `2026-06-29-source-tree-walk-crossed.md`, `2026-06-29-standing-source-runner.md`.
 
 **The knot (path not taken):** to run `fsh` natively you need the flatten; to get the native flatten you need
 `fsh` to orchestrate it without bash. Breaking that circularity *was* the decider — until form-eval made flatten
