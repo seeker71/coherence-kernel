@@ -468,30 +468,60 @@ static long long fk_slen;
 static int fk_sws(char c) { return c == 32 || c == 9 || c == 10 || c == 13; }
 static void fk_sskip(void) { while (fk_spos < fk_slen) { char c = fk_srctext[fk_spos]; if (fk_sws(c)) { fk_spos = fk_spos + 1; } else if (c == 59) { while (fk_spos < fk_slen && fk_srctext[fk_spos] != 10) { fk_spos = fk_spos + 1; } } else { break; } } }
 static int fk_sym_eq(long long s, long long n, const char *w) { long long i = 0; while (w[i] != 0) { if (i >= n || fk_srctext[s + i] != w[i]) { return 0; } i = i + 1; } return i == n; }
+static long long fk_arg_s, fk_arg_n, fk_fname_s, fk_fname_n;   /* stone 2: the defn's single arg + fn name (offset,len in srctext) */
+static int fk_sym_eq2(long long s1, long long n1, long long s2, long long n2) { if (n1 != n2) { return 0; } long long i = 0; while (i < n1) { if (fk_srctext[s1 + i] != fk_srctext[s2 + i]) { return 0; } i = i + 1; } return 1; }
+static long long fk_sym_end(long long s) { while (s < fk_slen) { char d = fk_srctext[s]; if (fk_sws(d) || d == 40 || d == 41) { break; } s = s + 1; } return s; }
 static long long fk_optag(long long s, long long n) { if (fk_sym_eq(s, n, "add")) { return 3; } if (fk_sym_eq(s, n, "sub")) { return 4; } if (fk_sym_eq(s, n, "mul")) { return 42; } if (fk_sym_eq(s, n, "div")) { return 10; } if (fk_sym_eq(s, n, "mod")) { return 11; } if (fk_sym_eq(s, n, "le")) { return 5; } if (fk_sym_eq(s, n, "eq")) { return 102; } if (fk_sym_eq(s, n, "if")) { return 6; } return -1; }
+static long long fk_smknode(long long t0, long long c1, long long c2, long long c3) { long long k = fk_node_count; fk_node_count = fk_node_count + 1; fk_node[k][0] = t0; fk_node[k][1] = c1; fk_node[k][2] = c2; fk_node[k][3] = c3; return k; }
 static long long fk_sparse(void) {
  fk_sskip();
  if (fk_spos >= fk_slen) { return 0; }
  char c = fk_srctext[fk_spos];
  if (c == 40) {
   fk_spos = fk_spos + 1; fk_sskip();
-  long long s = fk_spos; while (fk_spos < fk_slen) { char d = fk_srctext[fk_spos]; if (fk_sws(d) || d == 40 || d == 41) { break; } fk_spos = fk_spos + 1; }
-  long long tag = fk_optag(s, fk_spos - s);
-  long long ar = (tag == 6) ? 3 : 2;
-  long long c1 = 0, c2 = 0, c3 = 0;
-  if (ar >= 1) { c1 = fk_sparse(); }
-  if (ar >= 2) { c2 = fk_sparse(); }
-  if (ar >= 3) { c3 = fk_sparse(); }
-  fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
-  long long k = fk_node_count; fk_node_count = fk_node_count + 1; fk_node[k][0] = tag; fk_node[k][1] = c1; fk_node[k][2] = c2; fk_node[k][3] = c3; return k;
+  long long s = fk_spos; fk_spos = fk_sym_end(fk_spos); long long hn = fk_spos - s;
+  /* stone 2: (defn name (arg) body) — register the single arg + fn name, body becomes fn[0]. */
+  if (fk_sym_eq(s, hn, "defn")) {
+   fk_sskip(); long long ns2 = fk_spos; fk_spos = fk_sym_end(fk_spos); fk_fname_s = ns2; fk_fname_n = fk_spos - ns2;
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 40) { fk_spos = fk_spos + 1; }
+   fk_sskip(); long long as2 = fk_spos; fk_spos = fk_sym_end(fk_spos); fk_arg_s = as2; fk_arg_n = fk_spos - as2;
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   long long body = fk_sparse();
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   return body;
+  }
+  long long tag = fk_optag(s, hn);
+  if (tag >= 0) {
+   long long ar = (tag == 6) ? 3 : 2;
+   long long c1 = 0, c2 = 0, c3 = 0;
+   if (ar >= 1) { c1 = fk_sparse(); }
+   if (ar >= 2) { c2 = fk_sparse(); }
+   if (ar >= 3) { c3 = fk_sparse(); }
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   return fk_smknode(tag, c1, c2, c3);
+  }
+  /* a self-call to the defn'd fn: (f X) -> tag 7 (call fn[0] with one arg). */
+  if (fk_fname_n > 0 && fk_sym_eq2(s, hn, fk_fname_s, fk_fname_n)) {
+   long long c1 = fk_sparse();
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   return fk_smknode(7, c1, 0, 0);
+  }
+  /* unknown head: consume to ) and yield 0 (honest no-op for un-stoned grammar). */
+  while (fk_spos < fk_slen && fk_srctext[fk_spos] != 41) { fk_spos = fk_spos + 1; } if (fk_spos < fk_slen) { fk_spos = fk_spos + 1; } return fk_smknode(1, 0, 0, 0);
  }
- long long neg = 0; if (c == 45) { neg = 1; fk_spos = fk_spos + 1; }
- long long v = 0; while (fk_spos < fk_slen) { char d = fk_srctext[fk_spos]; if (d < 48 || d > 57) { break; } v = v * 10 + (d - 48); fk_spos = fk_spos + 1; }
- if (neg) { v = 0 - v; }
- long long k = fk_node_count; fk_node_count = fk_node_count + 1; fk_node[k][0] = 1; fk_node[k][1] = v; fk_node[k][2] = 0; fk_node[k][3] = 0; return k;
+ if ((c >= 48 && c <= 57) || (c == 45 && fk_spos + 1 < fk_slen && fk_srctext[fk_spos + 1] >= 48 && fk_srctext[fk_spos + 1] <= 57)) {
+  long long neg = 0; if (c == 45) { neg = 1; fk_spos = fk_spos + 1; }
+  long long v = 0; while (fk_spos < fk_slen) { char d = fk_srctext[fk_spos]; if (d < 48 || d > 57) { break; } v = v * 10 + (d - 48); fk_spos = fk_spos + 1; }
+  if (neg) { v = 0 - v; }
+  return fk_smknode(1, v, 0, 0);
+ }
+ /* a bare symbol: the defn's arg -> tag 2 (the frame value); else honest 0. */
+ long long s = fk_spos; fk_spos = fk_sym_end(fk_spos);
+ if (fk_arg_n > 0 && fk_sym_eq2(s, fk_spos - s, fk_arg_s, fk_arg_n)) { return fk_smknode(2, 0, 0, 0); }
+ return fk_smknode(1, 0, 0, 0);
 }
 extern int atoi(const char *);
-static int fk_run_src(const char *path) {
+static int fk_run_src(const char *path, long long arg) {
 #if defined(_WIN32)
  int fd = open(path, 0x8000);
 #else
@@ -500,12 +530,13 @@ static int fk_run_src(const char *path) {
  if (fd < 0) { return 2; }
  long long g = read(fd, fk_srctext, 262143); close(fd); if (g < 0) { return 3; }
  fk_slen = g; fk_spos = 0; fk_srctext[g] = 0;
- fk_node_count = 0; long long root = fk_sparse(); fk_fn[0] = root; fk_fn_count = 1;
- fk_vs[0] = 0; fk_vsp = 1;
+ fk_arg_n = 0; fk_fname_n = 0; fk_node_count = 0;
+ long long root = fk_sparse(); fk_fn[0] = root; fk_fn_count = 1;
+ fk_vs[0] = arg << 1; fk_vsp = 1;
  fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
  return 0;
 }
-static int fk_run(int argc, char **argv) { if (argc < 2) { return 1; } if (argc >= 3 && argv[1][0] == 45 && argv[1][1] == 45) { return fk_run_src(argv[2]); } int fd = open(argv[1], 0); if (fd < 0) { return 2; } long long got = read(fd, fk_buf, 1048575); if (got < 0) { return 3; } fk_buf[got] = 0; long long nf = fk_next(); fk_fn_count = nf; long long k = 0; while (k < nf) { fk_fn[k] = fk_next(); k = k + 1; } long long nr = fk_next(); fk_node_count = nr; long long r = 0; while (r < nr) { fk_node[r][0] = fk_next(); fk_node[r][1] = fk_next(); fk_node[r][2] = fk_next(); fk_node[r][3] = fk_next(); r = r + 1; } long long ns = fk_next(); fk_sinit(); long long si = 0; while (si < ns) { long long sl = fk_next(); if (fk_sp >= fk_scap_s) { fk_scap_s = fk_scap_s * 2; fk_so = realloc(fk_so, fk_scap_s * 8); fk_sl = realloc(fk_sl, fk_scap_s * 8); } while (fk_sbp + sl > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } fk_so[fk_sp] = fk_sbp; fk_sl[fk_sp] = sl; long long bj = 0; while (bj < sl) { fk_sb[fk_sbp] = (char)fk_next(); fk_sbp = fk_sbp + 1; bj = bj + 1; } fk_sp = fk_sp + 1; si = si + 1; } long long a = 0; if (argc > 2) { a = atoi(argv[2]) << 1; } if (argc > 3) { int sfd = open(argv[3], 0); if (sfd >= 0) { long long sg = read(sfd, fk_src, 262143); if (sg >= 0) { fk_src[sg] = 0; } } } fk_vs[0] = a; fk_vsp = 1; if (argc > 4) { fk_hot = atoi(argv[4]); } if (argc > 5 && argv[5][0] == 106) { fk_nat_code[0] = fk_demo_inc; fk_nat_len[0] = 8; } long long rootv; fk_heat[0] = fk_heat[0] + 1; if (fk_hot > 0 && fk_heat[0] >= fk_hot && fk_nat_code[0] != 0) { fk_njit = fk_njit + 1; rootv = fk_native_call(fk_nat_code[0], fk_nat_len[0], fk_vs[0] >> 1) << 1; } else { rootv = fk_walk(fk_fn[0], 0); } fk_pv_root(fk_fn[0], rootv); long long t = 1; while (t <= 255) { fk_pr(fk_arms[t]); t = t + 1; } fk_pr(fk_njit); return 0; }
+static int fk_run(int argc, char **argv) { if (argc < 2) { return 1; } if (argc >= 3 && argv[1][0] == 45 && argv[1][1] == 45) { return fk_run_src(argv[2], argc > 3 ? atoi(argv[3]) : 0); } int fd = open(argv[1], 0); if (fd < 0) { return 2; } long long got = read(fd, fk_buf, 1048575); if (got < 0) { return 3; } fk_buf[got] = 0; long long nf = fk_next(); fk_fn_count = nf; long long k = 0; while (k < nf) { fk_fn[k] = fk_next(); k = k + 1; } long long nr = fk_next(); fk_node_count = nr; long long r = 0; while (r < nr) { fk_node[r][0] = fk_next(); fk_node[r][1] = fk_next(); fk_node[r][2] = fk_next(); fk_node[r][3] = fk_next(); r = r + 1; } long long ns = fk_next(); fk_sinit(); long long si = 0; while (si < ns) { long long sl = fk_next(); if (fk_sp >= fk_scap_s) { fk_scap_s = fk_scap_s * 2; fk_so = realloc(fk_so, fk_scap_s * 8); fk_sl = realloc(fk_sl, fk_scap_s * 8); } while (fk_sbp + sl > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } fk_so[fk_sp] = fk_sbp; fk_sl[fk_sp] = sl; long long bj = 0; while (bj < sl) { fk_sb[fk_sbp] = (char)fk_next(); fk_sbp = fk_sbp + 1; bj = bj + 1; } fk_sp = fk_sp + 1; si = si + 1; } long long a = 0; if (argc > 2) { a = atoi(argv[2]) << 1; } if (argc > 3) { int sfd = open(argv[3], 0); if (sfd >= 0) { long long sg = read(sfd, fk_src, 262143); if (sg >= 0) { fk_src[sg] = 0; } } } fk_vs[0] = a; fk_vsp = 1; if (argc > 4) { fk_hot = atoi(argv[4]); } if (argc > 5 && argv[5][0] == 106) { fk_nat_code[0] = fk_demo_inc; fk_nat_len[0] = 8; } long long rootv; fk_heat[0] = fk_heat[0] + 1; if (fk_hot > 0 && fk_heat[0] >= fk_hot && fk_nat_code[0] != 0) { fk_njit = fk_njit + 1; rootv = fk_native_call(fk_nat_code[0], fk_nat_len[0], fk_vs[0] >> 1) << 1; } else { rootv = fk_walk(fk_fn[0], 0); } fk_pv_root(fk_fn[0], rootv); long long t = 1; while (t <= 255) { fk_pr(fk_arms[t]); t = t + 1; } fk_pr(fk_njit); return 0; }
 #if defined(_WIN32)
 int main(int argc, char **argv) { return fk_run(argc, argv); }
 #else
