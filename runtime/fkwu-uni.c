@@ -473,6 +473,15 @@ static int fk_sym_eq2(long long s1, long long n1, long long s2, long long n2) { 
 static long long fk_sym_end(long long s) { while (s < fk_slen) { char d = fk_srctext[s]; if (fk_sws(d) || d == 40 || d == 41) { break; } s = s + 1; } return s; }
 static long long fk_optag(long long s, long long n) { if (fk_sym_eq(s, n, "add")) { return 3; } if (fk_sym_eq(s, n, "sub")) { return 4; } if (fk_sym_eq(s, n, "mul")) { return 42; } if (fk_sym_eq(s, n, "div")) { return 10; } if (fk_sym_eq(s, n, "mod")) { return 11; } if (fk_sym_eq(s, n, "le")) { return 5; } if (fk_sym_eq(s, n, "eq")) { return 102; } if (fk_sym_eq(s, n, "if")) { return 6; } return -1; }
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3) { long long k = fk_node_count; fk_node_count = fk_node_count + 1; fk_node[k][0] = t0; fk_node[k][1] = c1; fk_node[k][2] = c2; fk_node[k][3] = c3; return k; }
+static long long fk_smklit(long long v) { return fk_smknode(1, v, 0, 0); }
+/* stone 3: a binding stack maps a name -> a FRAME SLOT (the arg is slot 0; each let takes the next slot).
+   A bare bound name lowers to tag 110 (read fk_vs[fp+slot]); a let lowers to tag 109 (store then body);
+   a function reserves fk_maxslot slots (tag 111). Over-reserve is safe (form-flatten over-reserves too). */
+static long long fk_bd_s[128], fk_bd_n[128], fk_bd_off[128], fk_bd_top, fk_maxslot;
+static long long fk_bd_lookup(long long s, long long n) { long long i = fk_bd_top; while (i > 0) { i = i - 1; if (fk_sym_eq2(s, n, fk_bd_s[i], fk_bd_n[i])) { return fk_bd_off[i]; } } return -1; }
+static void fk_bd_push(long long s, long long n, long long off) { if (fk_bd_top < 128) { fk_bd_s[fk_bd_top] = s; fk_bd_n[fk_bd_top] = n; fk_bd_off[fk_bd_top] = off; fk_bd_top = fk_bd_top + 1; } }
+static void fk_bd_pop(void) { if (fk_bd_top > 0) { fk_bd_top = fk_bd_top - 1; } }
+static long long fk_parse_do(void);
 static long long fk_sparse(void) {
  fk_sskip();
  if (fk_spos >= fk_slen) { return 0; }
@@ -480,15 +489,27 @@ static long long fk_sparse(void) {
  if (c == 40) {
   fk_spos = fk_spos + 1; fk_sskip();
   long long s = fk_spos; fk_spos = fk_sym_end(fk_spos); long long hn = fk_spos - s;
-  /* stone 2: (defn name (arg) body) — register the single arg + fn name, body becomes fn[0]. */
+  /* (defn name (arg) body): arg -> slot 0; body becomes fn[0], wrapped in a reserve over its lets. */
   if (fk_sym_eq(s, hn, "defn")) {
    fk_sskip(); long long ns2 = fk_spos; fk_spos = fk_sym_end(fk_spos); fk_fname_s = ns2; fk_fname_n = fk_spos - ns2;
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 40) { fk_spos = fk_spos + 1; }
-   fk_sskip(); long long as2 = fk_spos; fk_spos = fk_sym_end(fk_spos); fk_arg_s = as2; fk_arg_n = fk_spos - as2;
+   fk_sskip(); long long as2 = fk_spos; fk_spos = fk_sym_end(fk_spos); long long alen = fk_spos - as2;
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   fk_bd_top = 0; fk_maxslot = 0; fk_bd_push(as2, alen, 0);
    long long body = fk_sparse();
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   if (fk_maxslot > 0) { body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0); }
    return body;
+  }
+  if (fk_sym_eq(s, hn, "do")) { return fk_parse_do(); }
+  /* (let name val body): a 3-element standalone let — store val at the next slot, eval body in scope. */
+  if (fk_sym_eq(s, hn, "let")) {
+   fk_sskip(); long long ns = fk_spos; fk_spos = fk_sym_end(fk_spos); long long nlen = fk_spos - ns;
+   long long val = fk_sparse();
+   long long slot = fk_maxslot + 1; fk_maxslot = slot; fk_bd_push(ns, nlen, slot);
+   long long body = fk_sparse(); fk_bd_pop();
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   return fk_smknode(109, fk_smklit(slot), val, body);
   }
   long long tag = fk_optag(s, hn);
   if (tag >= 0) {
@@ -500,25 +521,48 @@ static long long fk_sparse(void) {
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
    return fk_smknode(tag, c1, c2, c3);
   }
-  /* a self-call to the defn'd fn: (f X) -> tag 7 (call fn[0] with one arg). */
   if (fk_fname_n > 0 && fk_sym_eq2(s, hn, fk_fname_s, fk_fname_n)) {
    long long c1 = fk_sparse();
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
    return fk_smknode(7, c1, 0, 0);
   }
-  /* unknown head: consume to ) and yield 0 (honest no-op for un-stoned grammar). */
-  while (fk_spos < fk_slen && fk_srctext[fk_spos] != 41) { fk_spos = fk_spos + 1; } if (fk_spos < fk_slen) { fk_spos = fk_spos + 1; } return fk_smknode(1, 0, 0, 0);
+  while (fk_spos < fk_slen && fk_srctext[fk_spos] != 41) { fk_spos = fk_spos + 1; } if (fk_spos < fk_slen) { fk_spos = fk_spos + 1; } return fk_smklit(0);
  }
  if ((c >= 48 && c <= 57) || (c == 45 && fk_spos + 1 < fk_slen && fk_srctext[fk_spos + 1] >= 48 && fk_srctext[fk_spos + 1] <= 57)) {
   long long neg = 0; if (c == 45) { neg = 1; fk_spos = fk_spos + 1; }
   long long v = 0; while (fk_spos < fk_slen) { char d = fk_srctext[fk_spos]; if (d < 48 || d > 57) { break; } v = v * 10 + (d - 48); fk_spos = fk_spos + 1; }
   if (neg) { v = 0 - v; }
-  return fk_smknode(1, v, 0, 0);
+  return fk_smklit(v);
  }
- /* a bare symbol: the defn's arg -> tag 2 (the frame value); else honest 0. */
+ /* a bare symbol: a bound name -> tag 110 (read its frame slot); else an honest 0. */
  long long s = fk_spos; fk_spos = fk_sym_end(fk_spos);
- if (fk_arg_n > 0 && fk_sym_eq2(s, fk_spos - s, fk_arg_s, fk_arg_n)) { return fk_smknode(2, 0, 0, 0); }
- return fk_smknode(1, 0, 0, 0);
+ long long off = fk_bd_lookup(s, fk_spos - s);
+ if (off >= 0) { return fk_smknode(110, fk_smklit(off), 0, 0); }
+ return fk_smklit(0);
+}
+/* (do f1 f2 .. fn): sequence forms (tag 69 = eval-first/return-rest). A do-let `(let name val)` binds
+   `name` to the next slot for the REST of the do (the common bind-the-rest pattern). */
+static long long fk_parse_do(void) {
+ fk_sskip();
+ if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) { if (fk_spos < fk_slen) { fk_spos = fk_spos + 1; } return fk_smklit(0); }
+ if (fk_srctext[fk_spos] == 40) {
+  long long p = fk_spos + 1; while (p < fk_slen && fk_sws(fk_srctext[p])) { p = p + 1; }
+  long long he = fk_sym_end(p);
+  if (fk_sym_eq(p, he - p, "let")) {
+   fk_spos = he; fk_sskip();
+   long long ns = fk_spos; fk_spos = fk_sym_end(fk_spos); long long nlen = fk_spos - ns;
+   long long val = fk_sparse();
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   long long slot = fk_maxslot + 1; fk_maxslot = slot; fk_bd_push(ns, nlen, slot);
+   long long rest = fk_parse_do(); fk_bd_pop();
+   return fk_smknode(109, fk_smklit(slot), val, rest);
+  }
+ }
+ long long node = fk_sparse();
+ fk_sskip();
+ if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) { if (fk_spos < fk_slen) { fk_spos = fk_spos + 1; } return node; }
+ long long rest = fk_parse_do();
+ return fk_smknode(69, node, rest, 0);
 }
 extern int atoi(const char *);
 static int fk_run_src(const char *path, long long arg) {
@@ -530,7 +574,7 @@ static int fk_run_src(const char *path, long long arg) {
  if (fd < 0) { return 2; }
  long long g = read(fd, fk_srctext, 262143); close(fd); if (g < 0) { return 3; }
  fk_slen = g; fk_spos = 0; fk_srctext[g] = 0;
- fk_arg_n = 0; fk_fname_n = 0; fk_node_count = 0;
+ fk_arg_n = 0; fk_fname_n = 0; fk_node_count = 0; fk_bd_top = 0; fk_maxslot = 0;
  long long root = fk_sparse(); fk_fn[0] = root; fk_fn_count = 1;
  fk_vs[0] = arg << 1; fk_vsp = 1;
  fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
