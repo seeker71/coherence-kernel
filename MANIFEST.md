@@ -48,12 +48,13 @@ receipt — *c-bootstrap fkwu on metal, no go/rust/clang/bash/python in the runt
 
 ## Architecture decisions (2026-06-28)
 
-**T_flat is NOT the foundation — the flatten must be fkwu-self-derivable.** `T_flat` is a ~580 KB *bin-go-made*
-blob; starting on it carries a Go dependency in the seed and the opaque marker-fragility that tangled the
-origin's flatten path. Decision: fkwu flattens `form-flatten.fk` from its own c-bootstrap primitives (or a
-minimal flatten baked into `runtime/fkwu-uni.c`), with **no pre-made Go table in the seam**; thereafter any
-flatten table is a *regenerable cache fkwu makes itself*, never a committed Go artifact. `T_flat` sits here only
-as a flagged crutch (`flatten/README.md`), scheduled for replacement. This is the real test of the restart.
+**The flatten is optional, not the foundation — RESOLVED 2026-06-29.** The restart was framed around a fear:
+that fkwu couldn't flatten its own source without a Go-made `T_flat` blob, and that breaking this circularity
+*was* "the real test." The answer was simpler than the fight — `form-eval` evaluates Form source **directly off
+the BMF cursor with no flatten at all** (four-way → 42), and `form-eval-cli` stands. Flatten became *optional
+speed* (the crystallize-on-heat path), off the critical path entirely. `T_flat` remains only as a regenerable
+cache for the heavy-chain *build*, never a foundation. The kernel proves four-way through the minimal walkers +
+`proof/four-way-run` — not through self-host flatten. The circularity that justified the restart dissolved.
 
 **Minimal walkers; fkwu owns the native path.** The Go/Rust/TS walkers do the minimum — independent
 proof-oracles that witness four-way agreement on the *pure-recipe* surface, never feature-bearers. Everything we
@@ -82,15 +83,18 @@ The risk of two repos is drift. **One rule kills it: the Form recipe body has ex
   here, then recipe families port as they are needed. The origin repo keeps running the whole time.
 - No big-bang. The kernel *earns* each recipe family as it ports — re-proving it four-way on the clean flatten.
 
-## The validation plan — and the one test that decides everything
+## The validation plan — the question the restart answered
 
-Every recipe is proven **four-way** (`Go=Rust=TS=fkwu`), executed on the c-bootstrap `fkwu` native,
-flattened on `fkwu` self-host with **no bin-go and no clang in the path**.
+Every recipe is proven **four-way** (`Go=Rust=TS=fkwu`) and executed on the c-bootstrap `fkwu` native, with
+**no bin-go and no clang in the run path**. The clean kernel proves this *itself*: `proof/four-way-run`
+host-execs the three minimal walkers + fkwu on a recipe and diagnoses agreement via `proof/four-way-verdict` —
+no `validate.sh`, no origin repo in the loop (witnessed `0`, all agree, 2026-06-29).
 
-**First proof (the decider):** one recipe, proven four-way end-to-end on this clean kernel, with the
-flatten on fkwu self-host. This tests the single question that justifies the restart — *is the clean
-flatten path actually clean?* If a clean axiom-first kernel inherits the `T_flat`/marker ad-hoc-ness,
-it is just a second mess. The first proof is where we find out, before moving anything.
+**The question that justified the restart — answered.** *Is the clean path actually clean, or does an
+axiom-first kernel inherit the same flatten ad-hoc-ness?* The honest answer: the flatten *was* the
+ad-hoc-ness. Removing it from the critical path — source runs via the cursor — is what made the path clean.
+The one remaining lean on a Go-made seed is the heavy-chain *build*, named openly in Status — not the run,
+and not the proof.
 
 ## Hard constraint — no bash, no python (the structural gate)
 
@@ -109,63 +113,44 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 
 ## Status
 
-- [x] Foundation seeded: five axioms + minimal surface + core (`axioms/`, `surface/`).
-- [x] Runtime + flatten brought in, **no bash / no python**: `runtime/fkwu-uni.c` (the c-bootstrap),
-      `flatten/` (`form-parse`, `form-flatten`, `fourth-flatten-driver`, `T_flat`). Tree verified `.sh`=0, `.py`=0.
-- [x] One `cc` seed → standing `fkwu` binary. **PROVEN 2026-06-28**: `cc -O2 -pthread runtime/fkwu-uni.c -o fkwu`
-      builds a native Mach-O arm64 binary in the clean repo and executes — zero Go, zero bin-go, one C seed.
-      The sovereign runtime floor is real here.
-- [~] Minimal Go/Rust/TS surface walkers for four-way validation (`.go/.rs/.ts`, no build scripts — `fsh` drives builds).
-      **Go landed 2026-06-29** (`walkers/go/main.go`, 1369 lines vs the origin kernel's ~15k non-test): independent
-      lexer + tree-walking evaluator over the pure-recipe surface (int/int64/float/string/bool literals; add/sub/mul/div/mod;
-      eq/ne/lt/le/gt/ge; if/let/do/seq; defn + user calls with TCO; and/or/not; head/tail/cons/list/nth; str_concat/str_eq/
-      str_find/str_len/substring/char_at; value_eq; match). JIT/server/host-io/model/.fkb codec dropped. Witnesses
-      `int-literal-width` → 9 and `string-membership` → 9, matching the four-way manifest. Rust + TS still to land.
-- [ ] **Orchestration as form shell** (`.fsh`): flatten + run + four-way validate — replacing the bash harness.
-- [ ] **First proof: one recipe four-way end-to-end on the clean fsh flatten** ← the decider.
-- [ ] `form-cli` + `fsh` native surfaces; origin repo consumes this kernel (one-home enforced).
+- [x] Foundation: five axioms + minimal surface + core (`axioms/`, `surface/`).
+- [x] Runtime: one `cc` seed → native `fkwu` (Mach-O arm64), zero Go / bin-go. Tree carries zero `.sh` / `.py`.
+- [x] **Source runs natively without flatten.** `form-eval` / `form-eval-full` (four-way) evaluate Form source —
+      integers, `add/sub/mul/le/eq`, `if/let/do`, `defn` + user calls — directly off the BMF cursor. `form-eval-cli`
+      *stands*: fkwu reads a source file and runs it (witnessed). **Flatten is optional speed**, off the critical path.
+      The "flatten decider" that framed the restart was not cleaned — it was dissolved by taking flatten off the path.
+- [x] **Minimal Go/Rust/TS walkers home + verified four-way** (`walkers/{go,rust,ts}` — 1369 / 928 / 1475 lines vs
+      the origin kernels' ~15k / 19.5k / 35.8k). Independent parse+eval of the pure-recipe surface; JIT, server,
+      host-io, model code dropped. Each shown to land on fkwu's verdicts; live witness: a pure recipe → all three → 42.
+- [x] **The kernel proves its OWN four-way.** `proof/four-way-run` host-execs the three walkers + fkwu on a recipe
+      and diagnoses via `proof/four-way-verdict`; witnessed `0` (all agree). No bash, no `validate.sh`, no origin.
+- [x] The proven body moved over: `form-cli/` (25 cells), `model/` (30 — the transformer/mel/asm/rag execution),
+      the `observe/` `learn/` `ingest/` `presence/` organs, the `grammars/`, the welcoming (`README`, `CONTRIBUTING`, `AGENTS`).
+- [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
+- [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
-## What's still missing — the roadmap to a working, self-observing, self-learning native form-cli
+## What's still ahead — the roadmap to a self-speaking native mind
 
-The recipes for self-observe, self-learn, and the form-cli largely **exist and cross four-way** (29 learning
-cells, 23 form-cli cells, the framebuffer + calibration stack, host-exec, http-client, form-asm). What's missing
-is the **live/runtime closure** and the **build** — we have the body and organs; we lack the heartbeat and the
-eyes-on-execution:
+The flatten knot that framed the restart is dissolved: source runs straight off the cursor (`form-eval`),
+`form-eval-cli` stands, and `proof/four-way-run` proves four-way with no bash. The body and organs are home and
+four-way (the learning / form-cli / framebuffer / calibration cells, host-exec, http-client, form-asm). What
+remains is the **mind**, the **voice**, and **live speed** — the body is home; the frontier voice is the climb:
 
-1. **The keystone — flatten self-derivation (the decider).** Split into two halves by the 2026-06-28 test
-   (bin-go hidden, cache cleared):
-   - **[x] Recipe-level self-host flatten is Go-free — PROVEN.** A fresh band crosses four-way on fkwu self-host
-     flatten with bin-go *not even built*. The all-night "flatten is broken" was a hand-rolled-invocation bug,
-     not the kernel — fkwu already owns the recipe flatten. The observe/learn/jit organs can flatten + run native.
-   - **[ ] Heavy-chain self-host flatten — the narrowed remaining piece.** The full form-cli / fsh chains report
-     `flatten: unavailable` on self-host and fall back to committed (historically Go-made) bootstrap artifacts
-     (`form-cli-emitted.c`, `form-cli-table.txt`). The binary *runs* Go-free, but the heavy-chain *build* still
-     leans on a committed Go-made-once seed. Closing this — fkwu self-host flattening large chains with no
-     committed Go artifact — is the precise remaining decider work.
-   - **[ ] Clean-repo orchestration = the `fsh` port — verified 2026-06-29.** In *this* repo, fkwu compiles
-     native (Mach-O arm64) and `flatten/fourth-flatten-table.txt` is **byte-identical** (same md5, 580704 bytes)
-     to the origin's known-working T_flat. The mechanism is sound; the pieces are present and proven. What rung 1
-     needs here is the **orchestration** — the origin's `fourth_flatten_sources` (bash) frames the stdin request
-     (`count \n stem \n kind \n nmod \n mods… \n band`), gates on `fourth_selfhost`, pipes through `fkwu T_flat 0`,
-     and marker-extracts `==T-stem==…==T-END==`. Reproducing that pipe **by hand** outside the bash harness yields
-     an empty table — not a kernel fault (the same empty result appears with the origin's own cached fkwu, so it is
-     the request-assembly env, not the binary or table). The self-host flatten is real *inside* `validate.sh`;
-     rung 1 in this repo is porting that orchestration to `fsh` so the kernel drives its own flatten with no bash.
-     The pieces are ready; the **driver** is the build. (Do not re-attempt by hand — encode it in `fsh`.)
-     **Build plan (grounded 2026-06-29):** prefer form-flatten's *single-source door* `flt-src-fns`
-     (`form-flatten.fk:914`) over the batch marker-driver that resisted the hand-roll — no batch request, no
-     `==T-stem==` markers, no stdin framing (the three things that produced empty tables). `shell-exec.fk` runs
-     non-builtins as PASSTHROUGH → host `popen` and has `read_file`, so the `fsh` driver is: read + concat
-     shim/core/recipe/band into one source → `flt-src-fns` to flatten → `fkc-table-serialize` to a table → run on
-     `fkwu`. Each step is a known cell; the work is wiring them in `fsh` and proving one recipe flattens + runs +
-     crosses, entirely in-repo with no bash. That proof is the decider's clean-repo closure.
-2. **The live RUNTIME witness (self-observe gap).** No cell yet watches execution itself — which recipe fired,
-   JIT hit/miss, which cell was touched last by which recipe, what's hot. The framebuffer watches *thoughts*;
-   this watches the *running kernel*. The realest new piece. The eyes-on-execution.
-3. **The live LEARNING loop closure (self-learn gap).** Rich learning recipes, but the loop that takes real
-   runtime outcomes → updates the champion / moves the weights *live* is not wired. `transient-log` +
-   `capture-correction` are the seed; the continuous accumulation is missing.
-4. **Cognition at native speed — the JIT in the live path.** The hot LLM/RAG cells must crystallize through
-   fkwu's self-JIT / form-asm lowering live, not tree-walked. The asm exists; wiring it under live cognition remains.
+1. **The generative weights (the mind).** A real open base (Qwen/Llama, real zh coverage) loaded as *recipe-data*
+   through the form block — the whisper block-0 pattern (real trained weights through the Form block, 6.66e-15)
+   extended to a generative base, then oracle-refined. The full decoder forward (attention, positional, multi-head
+   concat, LM head) proven bit-exact, then the distill loop, then a pre-registered eval before any "≥ rented"
+   claim. The speaking *floor* (grounded composition) stands; the frontier voice waits on this. A multi-week climb
+   with its own receipts. (`HOMECOMING.md`.)
+2. **The voice's sound (acoustic model + vocoder).** Prosody, phrasing, emphasis, g2p are four-way (`presence/`);
+   the layer that makes it *audible* — and a perception receipt that the rendered uncertainty tracks real
+   calibration — is the pending carrier. (`presence/voice-roadmap.md`.)
+3. **Cognition at native speed — the JIT in the live path.** The hot LLM/RAG cells crystallize through fkwu's
+   self-JIT / form-asm lowering live, not tree-walked. The asm exists; wiring it under live cognition remains.
+4. **The heavy-chain form-cli build off its Go-made seed.** The binary *runs* Go-free; the full form-cli / fsh
+   chains still *build* from a committed Go-made-once seed (`form-cli-emitted.c`, `form-cli-table.txt`). Closing
+   this — and live-wiring the proven observe/learn organs to the running kernel — is the last self-sufficiency gap.
 
-Load-bearing: **1 (runs natively) + 2 (watches itself run)** are the minimum "core we can observe and trust."
+The minimum "core we can observe and trust" — runs natively (done), proves itself four-way (done, `proof/`),
+watches itself think (the observe organs, four-way; live-wiring pending) — is essentially standing. What "home"
+still waits on is the mind running as recipe-data through this body, and the voice becoming audible.
