@@ -659,9 +659,41 @@ static int fk_sym_eq(long long s, long long n, const char *w) { long long i = 0;
 static long long fk_arg_s, fk_arg_n, fk_fname_s, fk_fname_n;   /* stone 2: the defn's single arg + fn name (offset,len in srctext) */
 static int fk_sym_eq2(long long s1, long long n1, long long s2, long long n2) { if (n1 != n2) { return 0; } long long i = 0; while (i < n1) { if (fk_srctext[s1 + i] != fk_srctext[s2 + i]) { return 0; } i = i + 1; } return 1; }
 static long long fk_sym_end(long long s) { while (s < fk_slen) { char d = fk_srctext[s]; if (fk_sws(d) || d == 40 || d == 41) { break; } s = s + 1; } return s; }
-static long long fk_optag(long long s, long long n) { if (fk_sym_eq(s, n, "add")) { return 3; } if (fk_sym_eq(s, n, "sub")) { return 4; } if (fk_sym_eq(s, n, "mul")) { return 42; } if (fk_sym_eq(s, n, "div")) { return 10; } if (fk_sym_eq(s, n, "mod")) { return 11; } if (fk_sym_eq(s, n, "le")) { return 5; } if (fk_sym_eq(s, n, "eq")) { return 102; } if (fk_sym_eq(s, n, "if")) { return 6; } return -1; }
+static long long fk_optag(long long s, long long n) { if (fk_sym_eq(s, n, "add")) { return 3; } if (fk_sym_eq(s, n, "sub")) { return 4; } if (fk_sym_eq(s, n, "mul")) { return 42; } if (fk_sym_eq(s, n, "div")) { return 10; } if (fk_sym_eq(s, n, "mod")) { return 11; } if (fk_sym_eq(s, n, "le")) { return 5; } if (fk_sym_eq(s, n, "eq")) { return 102; } if (fk_sym_eq(s, n, "if")) { return 6; } if (fk_sym_eq(s, n, "cons")) { return 19; } if (fk_sym_eq(s, n, "head")) { return 20; } if (fk_sym_eq(s, n, "tail")) { return 21; } if (fk_sym_eq(s, n, "len")) { return 22; } if (fk_sym_eq(s, n, "nth")) { return 23; } if (fk_sym_eq(s, n, "str_len")) { return 25; } if (fk_sym_eq(s, n, "str_eq")) { return 26; } if (fk_sym_eq(s, n, "str_concat")) { return 27; } if (fk_sym_eq(s, n, "str_byte_at")) { return 28; } if (fk_sym_eq(s, n, "char_at")) { return 28; } if (fk_sym_eq(s, n, "substring")) { return 29; } if (fk_sym_eq(s, n, "str_find")) { return 30; } if (fk_sym_eq(s, n, "str_to_int")) { return 31; } if (fk_sym_eq(s, n, "int_to_str")) { return 32; } if (fk_sym_eq(s, n, "byte_to_str")) { return 33; } if (fk_sym_eq(s, n, "host-exec")) { return 136; } return -1; }
+/* stone 4: list + string ops. Tags + arities match the flatten/form-flatten.fk flt-ops map 1:1 (the
+   flattener's own name->tag table) — the SAME ops the table-executor fk_walk already runs, reused not
+   reimplemented. fk_oparity gives the source-path arity per tag: if(6)/substring(29)/str_find(30) are 3-ary;
+   head/tail/len/str_len/str_to_int/int_to_str/byte_to_str are 1-ary; all else 2-ary. (list ...) and "..."
+   string literals are handled directly in fk_sparse, not here. */
+static long long fk_oparity(long long tag) { if (tag == 6 || tag == 29 || tag == 30) { return 3; } if (tag == 20 || tag == 21 || tag == 22 || tag == 25 || tag == 31 || tag == 32 || tag == 33) { return 1; } return 2; }
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3) { long long k = fk_node_count; fk_node_count = fk_node_count + 1; fk_node[k][0] = t0; fk_node[k][1] = c1; fk_node[k][2] = c2; fk_node[k][3] = c3; return k; }
 static long long fk_smklit(long long v) { return fk_smknode(1, v, 0, 0); }
+/* stone 4: a "..." string literal. fk_spos is at the opening quote. Copy the body bytes (handling \" \\ \n \t)
+   into the string scratch, intern via the same fk_sintern/fk_sbuf pool the table-executor uses, and build a
+   tag-24 node carrying the pool INDEX (the SAME shape fk_walk's tag-24 reads: it returns index<<1). The string
+   pool is shared with the runtime, so a literal authored from source is byte-identical to one fk_sbuf made. */
+static long long fk_smkstr(void) {
+ fk_spos = fk_spos + 1;            /* skip opening quote */
+ fk_sinit();
+ long long start = fk_sbp;
+ while (fk_spos < fk_slen && fk_srctext[fk_spos] != 34) {
+  char ch = fk_srctext[fk_spos];
+  if (ch == 92 && fk_spos + 1 < fk_slen) {
+   char e = fk_srctext[fk_spos + 1];
+   if (e == 110) { ch = 10; fk_spos = fk_spos + 1; }
+   else if (e == 116) { ch = 9; fk_spos = fk_spos + 1; }
+   else if (e == 114) { ch = 13; fk_spos = fk_spos + 1; }
+   else if (e == 34) { ch = 34; fk_spos = fk_spos + 1; }
+   else if (e == 92) { ch = 92; fk_spos = fk_spos + 1; }
+  }
+  while (fk_sbp + 1 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); }
+  fk_sb[fk_sbp] = ch; fk_sbp = fk_sbp + 1;
+  fk_spos = fk_spos + 1;
+ }
+ if (fk_spos < fk_slen && fk_srctext[fk_spos] == 34) { fk_spos = fk_spos + 1; }  /* skip closing quote */
+ long long idx = fk_sintern(start, fk_sbp - start);
+ return fk_smknode(24, idx, 0, 0);
+}
 /* stone 3: a binding stack maps a name -> a FRAME SLOT (the arg is slot 0; each let takes the next slot).
    A bare bound name lowers to tag 110 (read fk_vs[fp+slot]); a let lowers to tag 109 (store then body);
    a function reserves fk_maxslot slots (tag 111). Over-reserve is safe (form-flatten over-reserves too). */
@@ -699,9 +731,27 @@ static long long fk_sparse(void) {
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
    return fk_smknode(109, fk_smklit(slot), val, body);
   }
+  /* stone 4: (list a b ...) desugars to a right-folded cons chain ending in the empty-list literal (tag 18).
+     A variadic surface form built from the SAME cons(19)/nil(18) the table executor runs. (empty) is bare nil. */
+  if (fk_sym_eq(s, hn, "list")) {
+   long long items[256]; long long ni = 0;
+   while (ni < 256) {
+    fk_sskip();
+    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) { break; }
+    items[ni] = fk_sparse(); ni = ni + 1;
+   }
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   long long acc = fk_smknode(18, 0, 0, 0);   /* nil */
+   while (ni > 0) { ni = ni - 1; acc = fk_smknode(19, items[ni], acc, 0); }
+   return acc;
+  }
+  if (fk_sym_eq(s, hn, "empty")) {
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   return fk_smknode(18, 0, 0, 0);
+  }
   long long tag = fk_optag(s, hn);
   if (tag >= 0) {
-   long long ar = (tag == 6) ? 3 : 2;
+   long long ar = fk_oparity(tag);
    long long c1 = 0, c2 = 0, c3 = 0;
    if (ar >= 1) { c1 = fk_sparse(); }
    if (ar >= 2) { c2 = fk_sparse(); }
@@ -716,6 +766,8 @@ static long long fk_sparse(void) {
   }
   while (fk_spos < fk_slen && fk_srctext[fk_spos] != 41) { fk_spos = fk_spos + 1; } if (fk_spos < fk_slen) { fk_spos = fk_spos + 1; } return fk_smklit(0);
  }
+ /* stone 4: a bare "..." string literal. */
+ if (c == 34) { return fk_smkstr(); }
  if ((c >= 48 && c <= 57) || (c == 45 && fk_spos + 1 < fk_slen && fk_srctext[fk_spos + 1] >= 48 && fk_srctext[fk_spos + 1] <= 57)) {
   long long neg = 0; if (c == 45) { neg = 1; fk_spos = fk_spos + 1; }
   long long v = 0; while (fk_spos < fk_slen) { char d = fk_srctext[fk_spos]; if (d < 48 || d > 57) { break; } v = v * 10 + (d - 48); fk_spos = fk_spos + 1; }
@@ -763,6 +815,9 @@ static int fk_run_src(const char *path, long long arg) {
  long long g = read(fd, fk_srctext, 262143); close(fd); if (g < 0) { return 3; }
  fk_slen = g; fk_spos = 0; fk_srctext[g] = 0;
  fk_arg_n = 0; fk_fname_n = 0; fk_node_count = 0; fk_bd_top = 0; fk_maxslot = 0;
+ fk_sinit();   /* stone 4: size the string pool (fk_scap_b>0) before any string op — the table path does
+                  this when loading strings; the source path must too, else int_to_str/byte_to_str/str_concat
+                  spin forever on the `while (fk_sbp+n > fk_scap_b) fk_scap_b *= 2` grow loop (0*2==0). */
  long long root = fk_sparse(); fk_fn[0] = root; fk_fn_count = 1;
  fk_vs[0] = arg << 1; fk_vsp = 1;
  fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
