@@ -147,6 +147,13 @@ eyes-on-execution:
      the request-assembly env, not the binary or table). The self-host flatten is real *inside* `validate.sh`;
      rung 1 in this repo is porting that orchestration to `fsh` so the kernel drives its own flatten with no bash.
      The pieces are ready; the **driver** is the build. (Do not re-attempt by hand — encode it in `fsh`.)
+     **Build plan (grounded 2026-06-29):** prefer form-flatten's *single-source door* `flt-src-fns`
+     (`form-flatten.fk:914`) over the batch marker-driver that resisted the hand-roll — no batch request, no
+     `==T-stem==` markers, no stdin framing (the three things that produced empty tables). `shell-exec.fk` runs
+     non-builtins as PASSTHROUGH → host `popen` and has `read_file`, so the `fsh` driver is: read + concat
+     shim/core/recipe/band into one source → `flt-src-fns` to flatten → `fkc-table-serialize` to a table → run on
+     `fkwu`. Each step is a known cell; the work is wiring them in `fsh` and proving one recipe flattens + runs +
+     crosses, entirely in-repo with no bash. That proof is the decider's clean-repo closure.
 2. **The live RUNTIME witness (self-observe gap).** No cell yet watches execution itself — which recipe fired,
    JIT hit/miss, which cell was touched last by which recipe, what's hot. The framebuffer watches *thoughts*;
    this watches the *running kernel*. The realest new piece. The eyes-on-execution.
