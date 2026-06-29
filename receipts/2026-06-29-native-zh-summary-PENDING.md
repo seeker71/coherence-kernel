@@ -2,7 +2,10 @@
 
 **Status: PENDING — and pending is honest, not failure.** This receipt records where a requested capability
 TRULY stands. It is not a success dressed up; it is the floor named plainly, per the standard-receipt
-(body / c-bootstrap / toolchain-free / platforms / honest-floor). 1 of 6 rungs observed, 5 pending.
+(body / c-bootstrap / toolchain-free / platforms / honest-floor). Updated 2026-06-29 ~03:00: **1 rung observed,
+3 rung-SHAPES now four-way (2/4/6 via PRs 3853/3854/3855), rung 3 the keystone, rung 5 the gate — both still
+pending.** Tonight's sub-agents built the scaffolding (how to decode, how to distill, how to benchmark); the
+trained generative weights (rung 3) and the emitted summary (rung 5) did NOT move and were not faked.
 
 **Requested:** a Chinese-language summary of the core axiom, produced by a form-native NL emitter running on this
 Mac's GPU, learned from a native/local/remote oracle, witnessed to be at least as good as the best rented model.
@@ -11,11 +14,11 @@ Mac's GPU, learned from a native/local/remote oracle, witnessed to be at least a
 | # | Rung | State | Evidence / gap |
 |---|------|-------|----------------|
 | 1 | Transformer forward on the M4 Max GPU, bit-exact | **observed** | 2026-06-29-gpu-ffn-forward.md (FFN forward, GPU y == CPU y, \|Δ\|=0) |
-| 2 | Form-native NL emitter (sampling/argmax → text) | pending | no generative text path exists in the body |
-| 3 | Trained GENERATIVE weights | pending | we have whisper-tiny (transcription, block-0), not a generative LM |
-| 4 | Learned from an oracle (distillation loop) | pending | learning-loop + learning-witness prove the SHAPE; no live distillation run |
-| 5 | The Chinese summary itself | pending | the only thing that could emit it tonight is the RENTED mind (Sema) — faking it is forbidden |
-| 6 | Witnessed ≥ best rented model | pending | requires both the model (rung 3) and a witnessed benchmark; none exists ("none = honest") |
+| 2 | Form-native NL emitter (sampling/argmax → text) | **shape four-way** | `nl-emitter.fk` greedy argmax decode + EOS, four-way 11111 (PR 3853). The *decode logic* is proven; wiring to a trained decoder's real logits + a real tokenizer is pending. |
+| 3 | Trained GENERATIVE weights | **pending — the keystone** | still whisper-tiny (transcription, block-0), not a generative LM. With the shapes (2/4/6) proven, this is now the one gating rung: a real distillation run produces the weights every other rung is waiting to receive. |
+| 4 | Learned from an oracle (distillation loop) | **shape four-way** | `oracle-distill.fk` (PR 3854) proves the logic: error drops, generalize→sovereign, mimic→copy, local+remote oracles both valid. No live distillation *run* yet. |
+| 5 | The Chinese summary itself | pending | gated on rung 3. The only thing that could emit it tonight is the RENTED mind (Sema) — faking it is forbidden. Unchanged by tonight's scaffolding. |
+| 6 | Witnessed ≥ best rented model | **shape four-way** | `native-vs-rented.fk` (PR 3855): native≥rented earns observed, rented is a verify-alternative, never laundered. Needs the real model (rung 3) + a real benchmark run. |
 
 **Why this receipt cannot be a success tonight, honestly:** rung 5 is the gate. A Chinese paragraph written by
 Sema (the rented frontier mind) and stamped "native NL emitter on GPU" would be the exact lie the standard-receipt
