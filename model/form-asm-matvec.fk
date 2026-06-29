@@ -1,0 +1,143 @@
+; form-asm-matvec.fk — native float compute as Form→asm BYTES, no rustc/clang. The first cell of
+; sovereign inference compute: the matvec inner product (a dot) composed from form-asm's f64 instructions
+; over a buffer pointer, the way ll-buffer composes alloc/store/load/free. Every instruction is an
+; fa-* encoder already byte-identical to the clang oracle (form-asm-float 2047), so a composition of them
+; is correct by construction; this recipe proves the COMPOSITION emits the exact program bytes four-way.
+;
+; fam-dot2: x0 points at four contiguous f64 [a0, a1, b0, b1]; returns d0 = a0*b0 + a1*b1, folded the
+; SAME downward order as transformer-block.fk's tb-dot (j = cols-1 .. 0) so the native result is the
+; recipe's result bit-for-bit, not epsilon-close. The body:
+;   ldr d1,[x0,#8]  ; a1     ldr d2,[x0,#24] ; b1     fmul d0,d1,d2 ; d0 = a1*b1   (j=1)
+;   ldr d1,[x0,#0]  ; a0     ldr d2,[x0,#16] ; b0     fmul d1,d1,d2 ; d1 = a0*b0   (j=0)
+;   fadd d0,d1,d0   ; d0 = a0*b0 + a1*b1                ret
+; (fa-ldr-d takes the SCALED immediate: byte offset / 8, so #8 -> 1, #24 -> 3, #16 -> 2.)
+;
+; A full matvec is rows of this dot (y[i] = dot(W[i], x)); the row/col loop generalizes fam-dot2 the way
+; ll-buf wraps a loop around alloc/store/load/free — the next rung. This is the sovereign native lane:
+; form-asm bytes -> form-macho/recipe-dylib -> fkwu dlopen+call over its own f64 pool. rustc's
+; jit-tensor-emit matvec is the bootstrap-oracle speed reference only.
+;
+; preludes: form-stdlib/form-asm.fk
+;
+; Proven by: form-stdlib/tests/form-asm-matvec-band.fk (four-way; byte-identity vs the ARM/clang oracle)
+
+(do
+    (defn fam-dot2 ()
+        (append (fa-ldr-d 1 0 1)            ; ldr d1,[x0,#8]   a1
+            (append (fa-ldr-d 2 0 3)        ; ldr d2,[x0,#24]  b1
+                (append (fa-fmul 0 1 2)     ; fmul d0,d1,d2    d0 = a1*b1
+                    (append (fa-ldr-d 1 0 0)    ; ldr d1,[x0,#0]   a0
+                        (append (fa-ldr-d 2 0 2)    ; ldr d2,[x0,#16]  b0
+                            (append (fa-fmul 1 1 2)     ; fmul d1,d1,d2    d1 = a0*b0
+                                (append (fa-fadd 0 1 0) ; fadd d0,d1,d0    d0 = a0*b0 + a1*b1
+                                    (fa-ret)))))))))    ; ret
+
+    ; fam-dot-loop: the dot as a LOOP over n elements (the matvec row kernel, no unrolling) — x0=a base,
+    ; x1=b base, x2=n; returns d0 = sum_j a[j]*b[j], j=0..n. Pointer-increment so no register-indexed load
+    ; is needed; the same instruction family ll-buf uses for its loop, now over f64. Branch offsets are in
+    ; INSTRUCTIONS (the lo-streq discipline): b.ge exits +9 to the ret; b loops -9 back to the compare.
+    ;   0 movz x3,#0 (j)   1 movz x4,#0   2 scvtf d0,x4 (acc=0.0)
+    ;   3 cmp x3,x2   4 b.ge +9(end)   5 ldr d1,[x0]   6 ldr d2,[x1]   7 fmul d3,d1,d2   8 fadd d0,d0,d3
+    ;   9 add x0,#8   10 add x1,#8   11 add x3,#1   12 b -9(loop)   13 ret
+    ; (Upward fold; tb-dot's exact downward fold for bit-exact-vs-recipe needs register-shifted addressing
+    ; — a named follow-up. This proves the LOOP emits four-way; correctness of each instruction is inherited
+    ; from form-asm-float/form-asm. A full 2-D matvec wraps an outer row loop around this.)
+    (defn fam-dot-loop ()
+        (append (fa-movz-x 3 0)
+            (append (fa-movz-x 4 0)
+                (append (fa-scvtf 0 4)
+                    (append (fa-cmp-r 3 2)
+                        (append (fa-bcond 10 9)
+                            (append (fa-ldr-d 1 0 0)
+                                (append (fa-ldr-d 2 1 0)
+                                    (append (fa-fmul 3 1 2)
+                                        (append (fa-fadd 0 0 3)
+                                            (append (fa-add-x-imm 0 0 8)
+                                                (append (fa-add-x-imm 1 1 8)
+                                                    (append (fa-add-x-imm 3 3 1)
+                                                        (append (fa-b-off -9)
+                                                            (fa-ret)))))))))))))))
+
+    ; fam-matvec: the FULL 2-D matvec — the outer ROW loop around fam-dot-loop's body, the rung the
+    ; header named ("A full matvec is rows of this dot … the next rung"). y[i] = sum_j W[i][j]*x[j],
+    ; W row-major m×n contiguous f64. Same upward-counted fold as fam-dot-loop (and bj-dot-fam, its
+    ; tree-walker twin) — so the native result is the recipe's result, bit-for-bit. The arm64 ABI is
+    ; the natural matvec signature, args in x0..x4: x0=W base (advances across ALL elements row-major,
+    ; so after a row it already points at the next row), x1=x base (reset to x7 each row), x2=n cols,
+    ; x3=m rows, x4=y out. No register-indexed addressing, no rustc/clang; one program emits the whole
+    ; matvec. Branch offsets in INSTRUCTIONS (the lo-streq discipline): inner b.ge +9 / b -9 are
+    ; fam-dot-loop's; the new outer offsets are b.ge END +19 and b ROW -19. 23 instructions = 92 bytes.
+    ;   0 add x7,x1,#0 (save x base)  1 movz x5,#0 (i=0)
+    ;   ROW(2): 2 cmp x5,x3   3 b.ge END(+19)   4 add x1,x7,#0 (reset x ptr)
+    ;           5 movz x6,#0 (j=0)   6 movz x8,#0   7 scvtf d0,x8 (acc=0.0)
+    ;   INN(8): 8 cmp x6,x2   9 b.ge INNEND(+9)   10 ldr d1,[x0]   11 ldr d2,[x1]
+    ;           12 fmul d3,d1,d2   13 fadd d0,d0,d3   14 add x0,#8   15 add x1,#8
+    ;           16 add x6,#1   17 b INN(-9)
+    ;   INNEND(18): 18 str d0,[x4] (y[i]=acc)   19 add x4,#8   20 add x5,#1   21 b ROW(-19)
+    ;   END(22): 22 ret
+    (defn fam-matvec ()
+        (append (fa-add-x-imm 7 1 0)
+            (append (fa-movz-x 5 0)
+                (append (fa-cmp-r 5 3)
+                    (append (fa-bcond 10 19)
+                        (append (fa-add-x-imm 1 7 0)
+                            (append (fa-movz-x 6 0)
+                                (append (fa-movz-x 8 0)
+                                    (append (fa-scvtf 0 8)
+                                        (append (fa-cmp-r 6 2)
+                                            (append (fa-bcond 10 9)
+                                                (append (fa-ldr-d 1 0 0)
+                                                    (append (fa-ldr-d 2 1 0)
+                                                        (append (fa-fmul 3 1 2)
+                                                            (append (fa-fadd 0 0 3)
+                                                                (append (fa-add-x-imm 0 0 8)
+                                                                    (append (fa-add-x-imm 1 1 8)
+                                                                        (append (fa-add-x-imm 6 6 1)
+                                                                            (append (fa-b-off -9)
+                                                                                (append (fa-str-d 0 4 0)
+                                                                                    (append (fa-add-x-imm 4 4 8)
+                                                                                        (append (fa-add-x-imm 5 5 1)
+                                                                                            (append (fa-b-off -19)
+                                                                                                (fa-ret))))))))))))))))))))))))
+
+    ; fam-ss-sqrt: the RMSNorm / LayerNorm reduction CORE as Form->asm bytes — sqrt(sum_j x[j]^2),
+    ; the L2 norm (= sqrt(n) * RMS). This is the first NONLINEAR op on the native lane after the matvec:
+    ; the gap form-native-models.form names ("exp/sin/cos/rsqrt for softmax/RoPE/RMSNorm/SwiGLU as asm").
+    ; The accumulator loop is fam-dot-loop's twin with ONE buffer squared in place (fmul d2,d1,d1), and the
+    ; new ground is the trailing fsqrt OUTSIDE the loop (fa-fsqrt, proven byte-exact in form-asm-float 2047)
+    ; — a reduction that ends in a transcendental, not just the linear dot. ABI: x0 = x base, w1 = n (the
+    ; counter compare rides the 32-bit fa-cmp-r, a count is small), returns d0 = sqrt(sum x^2). 13 arm64
+    ; instructions = 52 bytes; branch offsets in INSTRUCTIONS (lo-streq discipline): b.ge exits +7 to the
+    ; fsqrt, b loops -7 back to the compare.
+    ;   0 movz x3,#0 (j)   1 movz x4,#0   2 scvtf d0,x4 (acc=0.0)
+    ;   3 cmp w3,w1   4 b.ge +7(end)   5 ldr d1,[x0]   6 fmul d2,d1,d1 (x^2)   7 fadd d0,d0,d2
+    ;   8 add x0,#8   9 add x3,#1   10 b -7(loop)   11 fsqrt d0,d0   12 ret
+    (defn fam-ss-sqrt ()
+        (append (fa-movz-x 3 0)
+            (append (fa-movz-x 4 0)
+                (append (fa-scvtf 0 4)
+                    (append (fa-cmp-r 3 1)
+                        (append (fa-bcond 10 7)
+                            (append (fa-ldr-d 1 0 0)
+                                (append (fa-fmul 2 1 1)
+                                    (append (fa-fadd 0 0 2)
+                                        (append (fa-add-x-imm 0 0 8)
+                                            (append (fa-add-x-imm 3 3 1)
+                                                (append (fa-b-off -7)
+                                                    (append (fa-fsqrt 0 0)
+                                                        (fa-ret))))))))))))))
+
+    ; fam-rsqrt: the reciprocal-sqrt 1/sqrt(x) as Form->asm bytes — the RMSNorm/RoPE/SwiGLU normalizer
+    ; (RMSNorm scale = g / sqrt(mean(x^2)+eps); RoPE inv-freq = 1/base^(2i/d); rsqrt is the shared core).
+    ; The next nonlinear rung after fam-ss-sqrt: it closes a transcendental in a RECIPROCAL — the first
+    ; fa-fdiv on the witnessed native lane, and the first FLOAT CONSTANT materialized via fa-fmov-imm
+    ; (#1.0 = imm8 0x70). Scalar, no loop. ABI: d0 = x, returns d0 = 1/sqrt(x). 4 arm64 instructions = 16
+    ; bytes, byte-identical to the clang -O2 oracle for `1.0/__builtin_sqrt(x)`:
+    ;   0 fsqrt d0,d0 (1e61c000)   1 fmov d1,#1.0 (1e6e1001)   2 fdiv d0,d1,d0 (1e601820)   3 ret (d65f03c0)
+    (defn fam-rsqrt ()
+        (append (fa-fsqrt 0 0)
+            (append (fa-fmov-imm 1 112)
+                (append (fa-fdiv 0 1 0)
+                    (fa-ret)))))
+
+    0)
