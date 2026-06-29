@@ -1,14 +1,19 @@
-# SEED-DROP — the one move that stands the Form body on Windows (and every platform)
+# SEED-DROP — a flatten/`form-eval` door (no longer a gate; the body already runs via `--src`)
 
-> **Note (verified 2026-06-29):** this seed is the small **cursor seed** (`form-eval-cli` + `form-eval` + the BMF
-> cursor, ~740 lines, flattened ONCE) — NOT the deprecated heavy flatten chain (`T_flat`/bin-go), which is off the
-> critical path now ("flatten is optional speed, never a gate" — HOMECOMING). See
-> `receipts/2026-06-29-verify-flatten-deprecated.md`. The alternative, needing nothing from the Mac, is to grow the
-> native `--src` source-runner to `form-eval`'s grammar (it is `form-eval-cli`'s role baked in C, not a flattener).
+> **SUPERSEDED for the run path (2026-06-29).** The Form body already runs on `fkwu` **without any seed**: the
+> kernel's own C-bootstrap source-runner, `fkwu --src file.fk`, runs real multi-function/list/recursion body cells
+> (`observe/native-vs-rented.fk` → `11111`, bit-identical to the proof walkers; no Go, no flatten, no T_flat). See
+> `receipts/2026-06-29-src-stone5-real-cell-on-fkwu.md`. So "standing the body on Windows" is **done** via `--src`.
+>
+> This doc is retained only for the *other* door: running source through `form-eval` (the Form meta-evaluator)
+> instead of the C source-runner. That door wants the small **cursor seed** (`form-eval-cli` + `form-eval` + the
+> BMF cursor, ~740 lines, flattened ONCE) — a flatten *cache*, never a gate (`T_flat`/bin-go heavy chain stays
+> deprecated; "flatten is optional speed" — HOMECOMING). It is optional: a speed/parity convenience, not a
+> requirement for the body to run.
 
-The Windows kernel is **ready to run the Form body as Form**. The only missing piece is the **seed**: a flattened
-`form-eval-cli-loop` table (platform-neutral numeric data). This is the drop-in so whoever has it — the Mac, where
-flatten/eval already stand — commits it once and it runs everywhere.
+The kernel runs the Form body as Form today via `--src`. The seed below is the optional `form-eval` door — a
+flattened `form-eval-cli-loop` table (platform-neutral numeric data) that lets `form-eval` itself run on a kernel
+without exercising the C front-end. Useful, not required.
 
 ## What the seed IS
 
