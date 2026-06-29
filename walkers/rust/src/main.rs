@@ -18,7 +18,7 @@
 //   literals: integer, float (incl. scientific notation), string, true/false, ()
 //   build-verbs: do seq let if defn params  add sub mul div mod
 //                eq ne lt le gt ge  and or not
-//   natives:    head tail cons empty list  str_concat str_eq
+//   natives:    head tail cons empty list nth len  str_concat str_eq
 //
 // CLI parity with the full kernel's default source path: `form-walker-rust
 // a.fk b.fk ...` concatenates the files with '\n', evaluates, and prints the
@@ -552,16 +552,24 @@ fn build_verb(verb: &str, args: Vec<Rc<Node>>) -> Rc<Node> {
         "or" => Rc::new(Node::Logic(LOG_OR, args)),
         "not" => Rc::new(Node::Logic(LOG_NOT, args)),
         "defn" => {
-            // (defn <name> (<params>...) <body>) — params is a parenthesized
-            // form, lowered by `params`/`do`-as-block to a Block of Idents.
+            // (defn <name> (<params>...) <body>). The params form `(a b c)` is
+            // itself a parenthesized s-expr, so the full kernel reads it through
+            // the same build_verb path: its head `a` is the "verb", b/c its
+            // "args". The full kernel's defn then takes `children(params)` as the
+            // param idents — i.e. head-name + arg-names. We reconstruct exactly
+            // that param list here. `()` (Null) → no params; `(params a b)` →
+            // Block. Faithful to the full kernel's repackaging.
             let name = ident_name(&args[0]);
             let params: Vec<String> = match &*args[1] {
-                Node::Block(ps) => ps.iter().map(|p| ident_name(p)).collect(),
                 Node::Null => Vec::new(),
-                // a single bare ident param: (defn f x body) is not the shape,
-                // but keep the same faithful repackaging as the full kernel,
-                // which reads children of the params block.
-                _ => vec![ident_name(&args[1])],
+                Node::Block(ps) => ps.iter().map(|p| ident_name(p)).collect(),
+                Node::Fncall(head, rest) => {
+                    let mut ps = vec![head.clone()];
+                    ps.extend(rest.iter().map(|p| ident_name(p)));
+                    ps
+                }
+                Node::Ident(s) => vec![s.clone()],
+                _ => panic!("defn: malformed params for {}", name),
             };
             Rc::new(Node::Fndef(name, params, args[2].clone()))
         }
@@ -806,6 +814,35 @@ fn call_native(name: &str, arg_nodes: &[Rc<Node>], env: &Env) -> Option<Value> {
             Some(Value::Str(Rc::from(s.as_str())))
         }
         "str_eq" => Some(bool_int(str_of(&args[0]) == str_of(&args[1]))),
+        // nth / len — pure list accessors in the cons/head/tail family. Faithful
+        // to the full kernel's natives. They sit just past the named surface but
+        // are the same pure list shape and are what a real manifest band
+        // (value-execution, verdict 7) folds over; kept minimal: no dict tag.
+        "nth" => Some(if let Value::List(xs) = &args[0] {
+            let i = args[1].as_int();
+            if i < 0 || (i as usize) >= xs.len() {
+                Value::Null
+            } else {
+                xs[i as usize].clone()
+            }
+        } else {
+            Value::Null
+        }),
+        "len" => Some(match &args[0] {
+            Value::List(xs) => {
+                // Dict-aware: a "__dict__"-tagged list reports pair count,
+                // matching the full kernel's len. A plain list reports its
+                // length.
+                if let Some(Value::Str(s)) = xs.first() {
+                    if &**s == "__dict__" {
+                        return Some(Value::Int(((xs.len() - 1) / 2) as i64));
+                    }
+                }
+                Value::Int(xs.len() as i64)
+            }
+            Value::Str(s) => Value::Int(s.len() as i64),
+            _ => Value::Int(0),
+        }),
         _ => None,
     }
 }
