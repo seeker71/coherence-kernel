@@ -16,7 +16,7 @@ FKWU="${1:-/tmp/fkwu}"
 RUN="$(mktemp)"
 {
   echo '(do'
-  sed -n '50,99p' flatten/form-flatten.fk       # the flt-ops defn (the manifest table)
+  sed -n '50,105p' flatten/form-flatten.fk      # the flt-ops defn (the manifest table)
   sed '1s/^(do$//' flatten/gen-source-walker-table.fk
 } > "$RUN"
 "$FKWU" --src "$RUN" > runtime/fkwu-optable.h

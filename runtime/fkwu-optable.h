@@ -140,6 +140,8 @@ static const struct fk_optab_row fk_optab[] = {
   { "add_u32", 2, 40 },
   { "bnot_u32", 1, 41 },
   { "mul", 2, 42 },
+  { "empty", 0, 18 },
+  { "list", -1, 19 },
 
 };
 static const long long fk_optab_n = sizeof(fk_optab)/sizeof(fk_optab[0]);
