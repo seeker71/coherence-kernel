@@ -247,6 +247,92 @@ static const unsigned char fk_demo_inc[] = {
  0x48, 0x89, 0xF8, 0x48, 0x83, 0xC0, 0x01, 0xC3   /* mov rax,rdi; add rax,1; ret  (arg in RDI) */
 #endif
 };
+/* ── host world-sensors (host-kernel.form: world-sensors port VIA-HOST, allowed) ──
+   WiFi SSID/signal (wlanapi), Bluetooth radio + paired count (bthprops), battery +
+   memory load (kernel32). Afferent reads, plain C, same pattern as the camera/mic
+   carriers; each degrades to an honest sentinel ("" / -1 / 0) if the API is absent.
+   They stream into the mesh as readings: wifi SSID -> WHERE (place), bt -> WHO/near,
+   power+mem -> vitality (observe/host-sensors-mesh.fk). */
+#if defined(_WIN32)
+extern unsigned int WlanOpenHandle(unsigned int, void *, unsigned int *, void **);
+extern unsigned int WlanCloseHandle(void *, void *);
+extern unsigned int WlanEnumInterfaces(void *, void *, void **);
+extern unsigned int WlanQueryInterface(void *, const void *, int, void *, unsigned int *, void **, void *);
+extern void WlanFreeMemory(void *);
+static long long fk_wifi_query(char *ssid_out, long long cap, long long *signal_out) {
+ *signal_out = -1; ssid_out[0] = 0; void *h = 0; unsigned int neg = 0; long long ret = -1;
+ if (WlanOpenHandle(2, 0, &neg, &h) != 0) { return -1; }
+ void *iflist = 0;
+ if (WlanEnumInterfaces(h, 0, &iflist) == 0 && iflist != 0) {
+  unsigned int n = *(unsigned int *)iflist;
+  if (n > 0) {
+   unsigned char *guid = (unsigned char *)iflist + 8;   /* InterfaceInfo[0].InterfaceGuid */
+   void *pconn = 0; unsigned int sz = 0;
+   if (WlanQueryInterface(h, guid, 7, 0, &sz, &pconn, 0) == 0 && pconn != 0) {  /* opcode 7 = current_connection */
+    unsigned char *p = (unsigned char *)pconn;
+    unsigned int slen = *(unsigned int *)(p + 520);      /* wlanAssociationAttributes.dot11Ssid.uSSIDLength */
+    if (slen > 32) { slen = 32; }
+    long long j = 0; while (j < (long long)slen && j < cap - 1) { ssid_out[j] = (char)p[524 + j]; j = j + 1; }
+    ssid_out[j] = 0;
+    unsigned int sig = *(unsigned int *)(p + 576);       /* wlanSignalQuality 0..100 */
+    if (sig <= 100) { *signal_out = (long long)sig; }
+    ret = (long long)slen;
+    WlanFreeMemory(pconn);
+   }
+  }
+  WlanFreeMemory(iflist);
+ }
+ WlanCloseHandle(h, 0);
+ return ret;
+}
+static long long fk_wifi_ssid(void) { char s[64]; long long sig; if (fk_wifi_query(s, 64, &sig) < 0) { return fk_sbuf("", 0); } return fk_sbuf(s, fk_cstrlen(s)); }
+static long long fk_wifi_signal(void) { char s[64]; long long sig; fk_wifi_query(s, 64, &sig); return sig; }
+struct fk_btrp { unsigned long dwSize; };
+struct fk_btsp { unsigned long dwSize; int fReturnAuthenticated; int fReturnRemembered; int fReturnUnknown; int fReturnConnected; int fIssueInquiry; unsigned char cTimeoutMultiplier; void *hRadio; };
+struct fk_btdi { unsigned long dwSize; unsigned long long Address; unsigned long ulClassofDevice; int fConnected; int fRemembered; int fAuthenticated; unsigned short stLastSeen[8]; unsigned short stLastUsed[8]; unsigned short szName[248]; };
+extern void *BluetoothFindFirstRadio(struct fk_btrp *, void **);
+extern int BluetoothFindRadioClose(void *);
+extern int CloseHandle(void *);
+extern void *BluetoothFindFirstDevice(struct fk_btsp *, struct fk_btdi *);
+extern int BluetoothFindNextDevice(void *, struct fk_btdi *);
+extern int BluetoothFindDeviceClose(void *);
+static long long fk_bt_present(void) { struct fk_btrp p; p.dwSize = sizeof p; void *hr = 0; void *f = BluetoothFindFirstRadio(&p, &hr); if (f == 0) { return 0; } if (hr != 0) { CloseHandle(hr); } BluetoothFindRadioClose(f); return 1; }
+static long long fk_bt_count(void) { struct fk_btsp sp; sp.dwSize = sizeof sp; sp.fReturnAuthenticated = 1; sp.fReturnRemembered = 1; sp.fReturnUnknown = 0; sp.fReturnConnected = 1; sp.fIssueInquiry = 0; sp.cTimeoutMultiplier = 0; sp.hRadio = 0; struct fk_btdi di; di.dwSize = sizeof di; void *f = BluetoothFindFirstDevice(&sp, &di); if (f == 0) { return 0; } long long c = 1; while (BluetoothFindNextDevice(f, &di) != 0) { c = c + 1; } BluetoothFindDeviceClose(f); return c; }
+struct fk_sps { unsigned char ACLineStatus; unsigned char BatteryFlag; unsigned char BatteryLifePercent; unsigned char SystemStatusFlag; unsigned long BatteryLifeTime; unsigned long BatteryFullLifeTime; };
+extern int GetSystemPowerStatus(struct fk_sps *);
+static long long fk_power(void) { struct fk_sps s; if (GetSystemPowerStatus(&s) == 0) { return -1; } return (long long)s.BatteryLifePercent; }
+struct fk_msx { unsigned long dwLength; unsigned long dwMemoryLoad; unsigned long long a, b, c, d, e, f2, g; };
+extern int GlobalMemoryStatusEx(struct fk_msx *);
+static long long fk_memload(void) { struct fk_msx m; m.dwLength = sizeof m; if (GlobalMemoryStatusEx(&m) == 0) { return -1; } return (long long)m.dwMemoryLoad; }
+#else
+static long long fk_wifi_ssid(void) { return fk_sbuf("", 0); }
+static long long fk_wifi_signal(void) { return -1; }
+static long long fk_bt_present(void) { return -1; }
+static long long fk_bt_count(void) { return -1; }
+static long long fk_power(void) { return -1; }
+static long long fk_memload(void) { return -1; }
+#endif
+static long long fk_sensors_report(void) {
+ long long count = 0;
+#if defined(_WIN32)
+ char ssid[64]; long long sig = -1; fk_wifi_query(ssid, 64, &sig);
+#else
+ char ssid[1]; ssid[0] = 0; long long sig = -1;
+#endif
+ long long bt = fk_bt_present(); long long btc = (bt > 0) ? fk_bt_count() : 0;
+ long long pw = fk_power(); long long mm = fk_memload();
+ printf("host-sensors  (Windows: wlanapi + bthprops + kernel32)\n");
+ printf("  wifi    where    ssid=%s  signal=%d\n", ssid[0] ? ssid : "(none)", (int)sig);
+ printf("  bt      who      radio=%d  paired/near=%d\n", (int)bt, (int)btc);
+ printf("  power   vitality battery=%d\n", (int)pw);
+ printf("  memory  vitality load=%d\n", (int)mm);
+ if (ssid[0]) { count = count + 1; }
+ if (bt > 0) { count = count + 1; }
+ if (pw >= 0) { count = count + 1; }
+ if (mm >= 0) { count = count + 1; }
+ printf("live sensors: %d\n", (int)count);
+ return count;
+}
 static long long fk_tempdir() { char *e = getenv("TMPDIR"); static char d[4096]; long long n = 0; if (e != 0) { while (e[n] != 0 && n < 4095) { d[n] = e[n]; n = n + 1; } } if (n == 0) { d[0] = 47; d[1] = 116; d[2] = 109; d[3] = 112; n = 4; } while (n > 1 && d[n - 1] == 47) { n = n - 1; } d[n] = 0; mkdir(d, 0777); return fk_sbuf(d, n); } static long long fk_keyeq(long long a, long long b) { if (a == b) { return 1; } if (a < 0 || b < 0 || a >= fk_sp || b >= fk_sp || fk_sl[a] != fk_sl[b]) { return 0; } long long j = 0; while (j < fk_sl[a]) { if (fk_sb[fk_so[a] + j] != fk_sb[fk_so[b] + j]) { return 0; } j = j + 1; } return 1; } static long long fk_file_mtime(long long pv) { static char p[4096]; fk_cstr(pv, p, 4096);
 #ifdef FK_HAVE_STAT_HEADER
  struct stat st; if (stat(p, &st) != 0) { return -2; } return ((long long)st.st_mtime) << 1;
@@ -362,7 +448,7 @@ struct timeval { long tv_sec; int tv_usec; }; extern int gettimeofday(struct tim
 #else
  return 1;
 #endif
-    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; } if (t == 214) { return fk_sense_stream(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 215) { return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1; }
+    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; } if (t == 214) { return fk_sense_stream(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 215) { return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 216) { return fk_wifi_ssid(); } if (t == 217) { return fk_wifi_signal() << 1; } if (t == 218) { return fk_bt_present() << 1; } if (t == 219) { return fk_bt_count() << 1; } if (t == 220) { return fk_power() << 1; } if (t == 221) { return fk_memload() << 1; } if (t == 222) { return fk_sensors_report() << 1; }
 #ifndef _WIN32
  if (t == 200) { static char p200[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p200, 4096); return fk_path_is_dir(p200) ? 2 : 0; } if (t == 202) { static char r202[4096]; static char s202[256]; fk_cstr(fk_walk(fk_node[i][1], fp), r202, 4096); fk_cstr(fk_walk(fk_node[i][2], fp), s202, 256); fk_inv_reset(); fk_inv_walk(r202, r202, s202, fk_walk(fk_node[i][3], fp)); return fk_inv_rows; }
 #else
