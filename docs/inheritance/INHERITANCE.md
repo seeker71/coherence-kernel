@@ -50,7 +50,13 @@ The homecoming is complete when ALL hold, checkable from this repo with no old-r
    (Go=Rust=TS=fkwu) with **no bash, no validate.sh, no origin**. ✅ (host-exec = optag 136,
    `fwv-verdict` computes the verdict; perturbation-verified: agree→0, walker-odd→2, fkwu-odd→1;
    `fkwu proof/four-way-run.tbl` → 0. Receipt: `receipts/2026-06-29-kernel-self-proves-four-way.md`.
-   Bridge: this recipe's source→table flatten is hand-bridged until `--src` stone 4 = strings/lists.)
+   Bridge: this recipe's source→table flatten is **still hand-bridged**. Stone 4 (strings + lists run from
+   `--src`) is **home** (`receipts/2026-06-29-stone-4-strings-lists.md`) — necessary but not sufficient. The
+   remaining gap is named exactly: **stone 5** — multiple named functions (a function table, CALL=tag 12) +
+   multi-arg `defn`/call (packed args) + multi-file prelude loading — which `four-way-verdict.fk` (7 fns, 4
+   args) and `form-flatten.fk` (231 fns, 199 multi-arg) require before the flattener self-hosts. Per
+   `flatten/SEED-DROP.md`, the full grammar more likely lands as the flattened **cursor seed**, retiring the
+   `--src` C grammar rather than growing it to stone 5.)
 3. The 706 worklist bodies are home in their faculties and re-prove here. ⏳ (in waves)
 4. This file + the ledger reference every old-repo content category. ✅ (this map)
 5. New work can be authored, proven, and run entirely in this repo. ⏳ (follows 2+3)
