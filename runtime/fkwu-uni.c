@@ -114,30 +114,63 @@ static long long fk_sense_report(void) {
    verifies it, and surprise drives the distill loop (presence-model.fk). */
 static unsigned char fk_frame_buf[1000000];
 static long long fk_rd32(unsigned char *p) { return (long long)p[0] | ((long long)p[1] << 8) | ((long long)p[2] << 16) | ((long long)p[3] << 24); }
-static long long fk_frame_read(const char *path) {
+/* silent stat over the frame — fills out[0..8] = present,side,mean,darkpct,lm,cm,rm,w,h. Returns 0 / -1. */
+static long long fk_frame_stat(const char *path, long long *out) {
 #if defined(_WIN32)
  int fd = open(path, 0x8000); /* O_RDONLY | O_BINARY — pixel bytes are binary; text mode would mangle CRLF and stop at 0x1A */
 #else
  int fd = open(path, 0);
 #endif
- if (fd < 0) { printf("frame-read: no frame at %s\n", path); return -1; }
+ if (fd < 0) { return -1; }
  long long n = 0; long long got; while ((got = read(fd, fk_frame_buf + n, 65536)) > 0) { n = n + got; if (n > 999000) { break; } } close(fd);
- if (n < 54) { printf("frame-read: short file\n"); return -1; }
+ if (n < 54) { return -1; }
  long long off = fk_rd32(fk_frame_buf + 10); long long w = fk_rd32(fk_frame_buf + 18); long long h = fk_rd32(fk_frame_buf + 22);
  long long bpp = (long long)fk_frame_buf[28] | ((long long)fk_frame_buf[29] << 8);
- if (bpp != 24 || w <= 0 || h <= 0) { printf("frame-read: not a 24-bit BMP (bpp=%d)\n", (int)bpp); return -1; }
+ if (bpp != 24 || w <= 0 || h <= 0) { return -1; }
  long long row = (w * 3 + 3) & ~3LL; long long sum = 0, dark = 0, ls = 0, cs = 0, rs = 0, lc = 0, cc = 0, rc = 0, cnt = 0;
  long long y = 0; while (y < h) { long long x = 0; while (x < w) { long long idx = off + y * row + x * 3; if (idx + 2 >= n) { x = x + 1; continue; } long long lum = ((long long)fk_frame_buf[idx] + (long long)fk_frame_buf[idx + 1] + (long long)fk_frame_buf[idx + 2]) / 3; sum = sum + lum; if (lum < 60) { dark = dark + 1; } if (x < w / 3) { ls = ls + lum; lc = lc + 1; } else if (x < (2 * w) / 3) { cs = cs + lum; cc = cc + 1; } else { rs = rs + lum; rc = rc + 1; } cnt = cnt + 1; x = x + 1; } y = y + 1; }
  long long mean = cnt ? sum / cnt : 0; long long darkpct = cnt ? (dark * 100) / cnt : 0;
  long long lm = lc ? ls / lc : 0; long long cm = cc ? cs / cc : 0; long long rm = rc ? rs / rc : 0;
  long long side = (lm <= cm && lm <= rm) ? 0 : ((cm <= lm && cm <= rm) ? 1 : 2);
  long long spread = (lm > rm ? lm - rm : rm - lm); long long present = (darkpct >= 8 && darkpct <= 75 && spread >= 12) ? 1 : 0;
- printf("frame-read  (native, fkwu over %dx%d afferent-pixel)\n", (int)w, (int)h);
- printf("  mean-luminance : %d\n", (int)mean);
- printf("  dark-fraction%% : %d\n", (int)darkpct);
- printf("  thirds L/C/R   : %d / %d / %d\n", (int)lm, (int)cm, (int)rm);
- printf("  native reading : subject-present=%d  subject-side=%s\n", (int)present, side == 0 ? "left" : (side == 1 ? "center" : "right"));
- return mean;
+ out[0] = present; out[1] = side; out[2] = mean; out[3] = darkpct; out[4] = lm; out[5] = cm; out[6] = rm; out[7] = w; out[8] = h;
+ return 0;
+}
+static long long fk_frame_read(const char *path) {
+ long long o[9]; if (fk_frame_stat(path, o) < 0) { printf("frame-read: no/invalid frame at %s\n", path); return -1; }
+ printf("frame-read  (native, fkwu over %dx%d afferent-pixel)\n", (int)o[7], (int)o[8]);
+ printf("  mean-luminance : %d\n", (int)o[2]);
+ printf("  dark-fraction%% : %d\n", (int)o[3]);
+ printf("  thirds L/C/R   : %d / %d / %d\n", (int)o[4], (int)o[5], (int)o[6]);
+ printf("  native reading : subject-present=%d  subject-side=%s\n", (int)o[0], o[1] == 0 ? "left" : (o[1] == 1 ? "center" : "right"));
+ return o[2];
+}
+/* ── the multi-level sensing stream: every tick, every level of sensing ──────
+   raw | native local remote meshed | surprise confidence trust sovereignty vitality.
+   The mesh-safe row (mesh-sense-7w: plane,value,source-cell,channel,confidence)
+   is what fuses with the Mac sibling's readings. Here the Windows cell streams
+   the WHERE/presence plane it is sovereign on, and the WHO/identity plane it
+   still rents — confidence/trust rise with agreeing ticks (confidence-earned),
+   sovereignty = native>=rented (native-vs-rented), vitality = open channels. */
+static long long fk_sense_stream(long long n) {
+ if (n < 1) { n = 1; } if (n > 120) { n = 120; }
+ long long ch = (fk_cam_count() > 0 ? 1 : 0) + (fk_mic_count() > 0 ? 1 : 0);
+ long long vit = ch >= 2 ? 9 : (ch == 1 ? 5 : 0);
+ printf("sense-stream  device=windows-binary  channel=camera  (%d ticks, live afferent-pixel)\n", (int)n);
+ printf("  levels: raw | native local remote meshed | surprise confidence trust sovereignty vitality\n");
+ long long t = 1;
+ while (t <= n) {
+  long long o[9];
+  if (fk_frame_stat("fkwu-cam-frame.bmp", o) < 0) { printf("  t%-2d  raw=-- (no frame on the channel)\n", (int)t); t = t + 1; continue; }
+  long long raw = o[2]; long long present = o[0];
+  long long nat = present; long long rem = 1; long long surp = (rem > nat ? rem - nat : nat - rem) * 9;
+  long long conf = nat ? (t + 4 > 9 ? 9 : t + 4) : 0; long long trust = conf * 3; long long sov = (nat >= rem) ? 1 : 0; long long mesh = nat;
+  printf("  t%-2d raw=%-3d| presence nat=%d loc=- rem=%d mesh=%d | surp=%d conf=%d trust=%d sov=%d vit=%d\n", (int)t, (int)raw, (int)nat, (int)rem, (int)mesh, (int)surp, (int)conf, (int)trust, (int)sov, (int)vit);
+  printf("  t%-2d raw=%-3d| identity nat=- loc=- rem=9 mesh=R | surp=9 conf=0 trust=0 sov=0 vit=%d\n", (int)t, (int)raw, (int)vit);
+  t = t + 1;
+ }
+ printf("stream end: presence is native-sovereign here; identity routes to the mesh (Mac sibling's face-embed / who-plane)\n");
+ return n;
 }
 static long long fk_tempdir() { char *e = getenv("TMPDIR"); static char d[4096]; long long n = 0; if (e != 0) { while (e[n] != 0 && n < 4095) { d[n] = e[n]; n = n + 1; } } if (n == 0) { d[0] = 47; d[1] = 116; d[2] = 109; d[3] = 112; n = 4; } while (n > 1 && d[n - 1] == 47) { n = n - 1; } d[n] = 0; mkdir(d, 0777); return fk_sbuf(d, n); } static long long fk_keyeq(long long a, long long b) { if (a == b) { return 1; } if (a < 0 || b < 0 || a >= fk_sp || b >= fk_sp || fk_sl[a] != fk_sl[b]) { return 0; } long long j = 0; while (j < fk_sl[a]) { if (fk_sb[fk_so[a] + j] != fk_sb[fk_so[b] + j]) { return 0; } j = j + 1; } return 1; } static long long fk_file_mtime(long long pv) { static char p[4096]; fk_cstr(pv, p, 4096);
 #ifdef FK_HAVE_STAT_HEADER
@@ -254,7 +287,7 @@ struct timeval { long tv_sec; int tv_usec; }; extern int gettimeofday(struct tim
 #else
  return 1;
 #endif
-    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; }
+    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; } if (t == 214) { return fk_sense_stream(fk_walk(fk_node[i][1], fp) >> 1) << 1; }
 #ifndef _WIN32
  if (t == 200) { static char p200[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p200, 4096); return fk_path_is_dir(p200) ? 2 : 0; } if (t == 202) { static char r202[4096]; static char s202[256]; fk_cstr(fk_walk(fk_node[i][1], fp), r202, 4096); fk_cstr(fk_walk(fk_node[i][2], fp), s202, 256); fk_inv_reset(); fk_inv_walk(r202, r202, s202, fk_walk(fk_node[i][3], fp)); return fk_inv_rows; }
 #else
