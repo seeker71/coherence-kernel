@@ -670,6 +670,10 @@ static long long fk_bd_lookup(long long s, long long n) { long long i = fk_bd_to
 static void fk_bd_push(long long s, long long n, long long off) { if (fk_bd_top < 128) { fk_bd_s[fk_bd_top] = s; fk_bd_n[fk_bd_top] = n; fk_bd_off[fk_bd_top] = off; fk_bd_top = fk_bd_top + 1; } }
 static void fk_bd_pop(void) { if (fk_bd_top > 0) { fk_bd_top = fk_bd_top - 1; } }
 static long long fk_parse_do(void);
+/* stone 4: a function table. Each top-level (defn name ...) gets its own fn-index (>=1); a call to a
+   registered name lowers to tag 12 (call-by-index, single-arg). A non-defn top form is the root (fn[0]). */
+static long long fk_fnsym_s[256], fk_fnsym_n[256], fk_fnidx[256], fk_fntop, fk_defn_next, fk_root;
+static long long fk_fn_lookup(long long s, long long n) { long long i = 0; while (i < fk_fntop) { if (fk_sym_eq2(s, n, fk_fnsym_s[i], fk_fnsym_n[i])) { return fk_fnidx[i]; } i = i + 1; } return -1; }
 static long long fk_sparse(void) {
  fk_sskip();
  if (fk_spos >= fk_slen) { return 0; }
@@ -709,10 +713,15 @@ static long long fk_sparse(void) {
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
    return fk_smknode(tag, c1, c2, c3);
   }
-  if (fk_fname_n > 0 && fk_sym_eq2(s, hn, fk_fname_s, fk_fname_n)) {
+  /* call: any registered function name (INCLUDING self — each defn is registered before its body is
+     parsed) -> tag 12 (call fk_fn[idx] with one arg). This replaces the old fn[0]-only self-call (tag 7),
+     which was wrong once there is more than one function. A 0-arg call parses a dummy 0 off the immediate
+     ) — the callee reads no slot, so it is inert. */
+  long long fidx = fk_fn_lookup(s, hn);
+  if (fidx >= 0) {
    long long c1 = fk_sparse();
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
-   return fk_smknode(7, c1, 0, 0);
+   return fk_smknode(12, fidx, c1, 0);
   }
   while (fk_spos < fk_slen && fk_srctext[fk_spos] != 41) { fk_spos = fk_spos + 1; } if (fk_spos < fk_slen) { fk_spos = fk_spos + 1; } return fk_smklit(0);
  }
@@ -753,6 +762,40 @@ static long long fk_parse_do(void) {
  return fk_smknode(69, node, rest, 0);
 }
 extern int atoi(const char *);
+/* one top-level form: (do ...) is transparent (its inner forms are top-level too); (defn ...) registers
+   a function at its own index; anything else is the root expression. Multi-arg defns push each arg name
+   to slots 0..k-1 (callable single-arg via tag 12 today; multi-arg calls are the next stone). */
+static void fk_parse_top(void) {
+ fk_sskip();
+ if (fk_spos >= fk_slen) { return; }
+ if (fk_srctext[fk_spos] == 40) {
+  long long p = fk_spos + 1; while (p < fk_slen && fk_sws(fk_srctext[p])) { p = p + 1; }
+  long long he = fk_sym_end(p);
+  if (fk_sym_eq(p, he - p, "do")) {
+   fk_spos = he;
+   while (1) { fk_sskip(); if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) { break; } fk_parse_top(); }
+   if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   return;
+  }
+  if (fk_sym_eq(p, he - p, "defn")) {
+   fk_spos = he; fk_sskip();
+   long long ns2 = fk_spos; fk_spos = fk_sym_end(fk_spos); long long nlen2 = fk_spos - ns2;
+   long long idx = fk_defn_next; fk_defn_next = fk_defn_next + 1;
+   if (fk_fntop < 256) { fk_fnsym_s[fk_fntop] = ns2; fk_fnsym_n[fk_fntop] = nlen2; fk_fnidx[fk_fntop] = idx; fk_fntop = fk_fntop + 1; }
+   fk_fname_s = ns2; fk_fname_n = nlen2;
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 40) { fk_spos = fk_spos + 1; }
+   fk_bd_top = 0; fk_maxslot = 0; long long na = 0;
+   while (1) { fk_sskip(); if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) { break; } long long as = fk_spos; fk_spos = fk_sym_end(fk_spos); fk_bd_push(as, fk_spos - as, na); if (na > fk_maxslot) { fk_maxslot = na; } na = na + 1; }
+   if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   long long body = fk_sparse();
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   if (fk_maxslot > 0) { body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0); }
+   if (idx >= 0 && idx < 4096) { fk_fn[idx] = body; }
+   return;
+  }
+ }
+ fk_root = fk_sparse();
+}
 static int fk_run_src(const char *path, long long arg) {
 #if defined(_WIN32)
  int fd = open(path, 0x8000);
@@ -763,7 +806,12 @@ static int fk_run_src(const char *path, long long arg) {
  long long g = read(fd, fk_srctext, 262143); close(fd); if (g < 0) { return 3; }
  fk_slen = g; fk_spos = 0; fk_srctext[g] = 0;
  fk_arg_n = 0; fk_fname_n = 0; fk_node_count = 0; fk_bd_top = 0; fk_maxslot = 0;
- long long root = fk_sparse(); fk_fn[0] = root; fk_fn_count = 1;
+ fk_fntop = 0; fk_defn_next = 1; fk_root = -1;
+ while (1) { fk_sskip(); if (fk_spos >= fk_slen) { break; } fk_parse_top(); }
+ if (fk_root >= 0) { fk_fn[0] = fk_root; }
+ else if (fk_defn_next > 1) { fk_fn[0] = fk_fn[fk_defn_next - 1]; } /* single/last defn, staged-arg driven (stones 1-2) */
+ else { fk_fn[0] = fk_smklit(0); }
+ fk_fn_count = fk_defn_next;
  fk_vs[0] = arg << 1; fk_vsp = 1;
  fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
  return 0;
