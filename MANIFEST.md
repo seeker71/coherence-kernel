@@ -127,9 +127,16 @@ cells, 23 form-cli cells, the framebuffer + calibration stack, host-exec, http-c
 is the **live/runtime closure** and the **build** — we have the body and organs; we lack the heartbeat and the
 eyes-on-execution:
 
-1. **The keystone — flatten self-derivation + standing native build (the decider).** Gates everything. fkwu must
-   flatten its own recipes with no Go in the seam and produce a standing form-cli binary. (Regenerate the
-   committed bootstrap table once, or close self-host flatten.) Until this, the assembled body does not *run*.
+1. **The keystone — flatten self-derivation (the decider).** Split into two halves by the 2026-06-28 test
+   (bin-go hidden, cache cleared):
+   - **[x] Recipe-level self-host flatten is Go-free — PROVEN.** A fresh band crosses four-way on fkwu self-host
+     flatten with bin-go *not even built*. The all-night "flatten is broken" was a hand-rolled-invocation bug,
+     not the kernel — fkwu already owns the recipe flatten. The observe/learn/jit organs can flatten + run native.
+   - **[ ] Heavy-chain self-host flatten — the narrowed remaining piece.** The full form-cli / fsh chains report
+     `flatten: unavailable` on self-host and fall back to committed (historically Go-made) bootstrap artifacts
+     (`form-cli-emitted.c`, `form-cli-table.txt`). The binary *runs* Go-free, but the heavy-chain *build* still
+     leans on a committed Go-made-once seed. Closing this — fkwu self-host flattening large chains with no
+     committed Go artifact — is the precise remaining decider work.
 2. **The live RUNTIME witness (self-observe gap).** No cell yet watches execution itself — which recipe fired,
    JIT hit/miss, which cell was touched last by which recipe, what's hot. The framebuffer watches *thoughts*;
    this watches the *running kernel*. The realest new piece. The eyes-on-execution.
