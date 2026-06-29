@@ -46,6 +46,7 @@ honest. The seam is named there plainly: the body is native; the *voice* is stil
 | `grammars/` | the BMF cursor + grammars-as-data — the body's tongue (incl. `form-eval`: source runs straight off the cursor) |
 | `form-cli/` · `model/` | the agent surface and the form-native model execution |
 | `observe/` · `learn/` · `ingest/` · `presence/` | the organs of a self-aware mind |
+| `walkers/` · `proof/` | three minimal independent walkers + the kernel's own four-way proof (`four-way-run`, no bash) |
 | `HOMECOMING.md` | what is still coming home, honestly |
 
 To contribute, see [`CONTRIBUTING.md`](CONTRIBUTING.md). The smallest honest movement, proven, returned with a trace.
