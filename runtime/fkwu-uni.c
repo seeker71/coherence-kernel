@@ -649,7 +649,14 @@ struct timeval { long tv_sec; int tv_usec; }; extern int gettimeofday(struct tim
    PLATFORM-NEUTRAL seed (form-flatten.fk flattened once, on the Mac) — committing that data
    lets Form flatten Form here with no C parser at all. Stones 1-3 (literals/ops/if, defn+
    recursion, do+let) prove the circularity is breakable on Windows; they are the bootstrap,
-   not the destination. Witnessed: fkwu --src run a .fk file. */
+   not the destination. Witnessed: fkwu --src run a .fk file.
+
+   The op vocabulary itself is DATA, not C: there is no per-op if-chain. The
+   (name arity tag) rows and the comparison/boolean rewrites live in the GENERATED
+   runtime/fkwu-optable.h (from flt-ops, the same single source the flattener reads;
+   regen via flatten/gen-source-walker.sh). Adding a value op = a manifest row, never
+   a C edit. Only the control forms defn/do/let/if and the two structural literals
+   (empty)/(list ..) keep hand-written shape here — their shape is not a flat emit. */
 static char fk_srctext[262144];
 static long long fk_spos;
 static long long fk_slen;
@@ -659,15 +666,48 @@ static int fk_sym_eq(long long s, long long n, const char *w) { long long i = 0;
 static long long fk_arg_s, fk_arg_n, fk_fname_s, fk_fname_n;   /* stone 2: the defn's single arg + fn name (offset,len in srctext) */
 static int fk_sym_eq2(long long s1, long long n1, long long s2, long long n2) { if (n1 != n2) { return 0; } long long i = 0; while (i < n1) { if (fk_srctext[s1 + i] != fk_srctext[s2 + i]) { return 0; } i = i + 1; } return 1; }
 static long long fk_sym_end(long long s) { while (s < fk_slen) { char d = fk_srctext[s]; if (fk_sws(d) || d == 40 || d == 41) { break; } s = s + 1; } return s; }
-static long long fk_optag(long long s, long long n) { if (fk_sym_eq(s, n, "add")) { return 3; } if (fk_sym_eq(s, n, "sub")) { return 4; } if (fk_sym_eq(s, n, "mul")) { return 42; } if (fk_sym_eq(s, n, "div")) { return 10; } if (fk_sym_eq(s, n, "mod")) { return 11; } if (fk_sym_eq(s, n, "le")) { return 5; } if (fk_sym_eq(s, n, "eq")) { return 102; } if (fk_sym_eq(s, n, "if")) { return 6; } if (fk_sym_eq(s, n, "cons")) { return 19; } if (fk_sym_eq(s, n, "head")) { return 20; } if (fk_sym_eq(s, n, "tail")) { return 21; } if (fk_sym_eq(s, n, "len")) { return 22; } if (fk_sym_eq(s, n, "nth")) { return 23; } if (fk_sym_eq(s, n, "str_len")) { return 25; } if (fk_sym_eq(s, n, "str_eq")) { return 26; } if (fk_sym_eq(s, n, "str_concat")) { return 27; } if (fk_sym_eq(s, n, "str_byte_at")) { return 28; } if (fk_sym_eq(s, n, "char_at")) { return 28; } if (fk_sym_eq(s, n, "substring")) { return 29; } if (fk_sym_eq(s, n, "str_find")) { return 30; } if (fk_sym_eq(s, n, "str_to_int")) { return 31; } if (fk_sym_eq(s, n, "int_to_str")) { return 32; } if (fk_sym_eq(s, n, "byte_to_str")) { return 33; } if (fk_sym_eq(s, n, "host-exec")) { return 136; } return -1; }
-/* stone 4: list + string ops. Tags + arities match the flatten/form-flatten.fk flt-ops map 1:1 (the
-   flattener's own name->tag table) — the SAME ops the table-executor fk_walk already runs, reused not
-   reimplemented. fk_oparity gives the source-path arity per tag: if(6)/substring(29)/str_find(30) are 3-ary;
-   head/tail/len/str_len/str_to_int/int_to_str/byte_to_str are 1-ary; all else 2-ary. (list ...) and "..."
-   string literals are handled directly in fk_sparse, not here. */
-static long long fk_oparity(long long tag) { if (tag == 6 || tag == 29 || tag == 30) { return 3; } if (tag == 20 || tag == 21 || tag == 22 || tag == 25 || tag == 31 || tag == 32 || tag == 33) { return 1; } return 2; }
+/* ── DATA-DRIVEN op dispatch — the last C-work made permanent ─────────────────
+   There is no per-op `if (fk_sym_eq(s, hn, "head")) ...` chain any more. The
+   (name arity tag) rows and the rewrite rules are DATA: fkwu-optable.h, GENERATED
+   from flt-ops (form-flatten.fk, from native-op-manifest.fk) by
+   flatten/gen-source-walker-table.fk — the SAME single source the flattener reads.
+   Adding a value op is a manifest row + regen, NEVER a C edit. The control forms
+   defn/do/let/if and the two structural literals (list .. ) / "..": those stay in
+   fk_sparse because their SHAPE is not a flat (tag arity) emit. Everything else —
+   every primitive, every comparison/boolean rewrite — flows through these tables. */
+#include "fkwu-optable.h"
+/* match a source symbol [s,s+n) against a C string by length-and-bytes. */
+static int fk_optname_eq(long long s, long long n, const char *w) { long long i = 0; while (w[i] != 0) { if (i >= n || fk_srctext[s + i] != w[i]) { return 0; } i = i + 1; } return i == n; }
+/* op-table lookup: source symbol -> row index in fk_optab, or -1. */
+static long long fk_optab_find(long long s, long long n) { long long i = 0; while (i < fk_optab_n) { if (fk_optname_eq(s, n, fk_optab[i].name)) { return i; } i = i + 1; } return -1; }
+/* rewrite-table lookup: source symbol -> row index in fk_rwtab, or -1. */
+static long long fk_rwtab_find(long long s, long long n) { long long i = 0; while (i < fk_rwtab_n) { if (fk_optname_eq(s, n, fk_rwtab[i].name)) { return i; } i = i + 1; } return -1; }
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3) { long long k = fk_node_count; fk_node_count = fk_node_count + 1; fk_node[k][0] = t0; fk_node[k][1] = c1; fk_node[k][2] = c2; fk_node[k][3] = c3; return k; }
 static long long fk_smklit(long long v) { return fk_smknode(1, v, 0, 0); }
+/* ── generic rewrite instantiator: build a lowered node tree from an RPN program ──
+   A rewrite row (fk_rwtab[r]) is name + arity + a postfix int program over:
+     ARG i  = (0 i)   -> args[i] (the i-th already-parsed operand node)
+     LIT v  = (1 v)   -> fk_smklit(v)
+     NODE t n = (2 t n) -> fk_smknode(t, <n nodes popped off the build stack>)
+   Children precede the NODE that consumes them, so one left-to-right pass with a
+   small stack materialises the whole shape. This is the EXACT lowering vocabulary
+   the flattener's flt-low uses (if/le/sub on 6/5/4, lt/eq on 103/102), now read as
+   data: gt/ge/lt/eq/and/or/not/abs are rows, not hand-written C. */
+static long long fk_rw_build(long long r, long long *args) {
+ long long st[32]; long long sp = 0;
+ const long long *p = fk_rwtab[r].prog; long long np = fk_rwtab[r].nprog; long long k = 0;
+ while (k < np) {
+  long long opc = p[k];
+  if (opc == 0) { st[sp] = args[p[k + 1]]; sp = sp + 1; k = k + 2; }
+  else if (opc == 1) { st[sp] = fk_smklit(p[k + 1]); sp = sp + 1; k = k + 2; }
+  else { long long t = p[k + 1]; long long n = p[k + 2]; long long c1 = 0, c2 = 0, c3 = 0;
+         if (n >= 3) { c3 = st[sp - 1]; sp = sp - 1; }
+         if (n >= 2) { c2 = st[sp - 1]; sp = sp - 1; }
+         if (n >= 1) { c1 = st[sp - 1]; sp = sp - 1; }
+         st[sp] = fk_smknode(t, c1, c2, c3); sp = sp + 1; k = k + 3; }
+ }
+ return sp > 0 ? st[sp - 1] : fk_smklit(0);
+}
 /* stone 4: a "..." string literal. fk_spos is at the opening quote. Copy the body bytes (handling \" \\ \n \t)
    into the string scratch, intern via the same fk_sintern/fk_sbuf pool the table-executor uses, and build a
    tag-24 node carrying the pool INDEX (the SAME shape fk_walk's tag-24 reads: it returns index<<1). The string
@@ -736,19 +776,30 @@ static long long fk_sparse(void) {
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
    return fk_smknode(109, fk_smklit(slot), val, body);
   }
-  /* lists + comparisons (stone 5): head(20)/tail(21)/cons(19)/empty(18); (list ..) -> nested cons;
-     gt/lt lower to if(le ..) 0 1; ge -> le(b,a). gt(a,b)=if(le a b) 0 1 = 1 iff a>b. */
-  if (fk_sym_eq(s, hn, "head")) { long long a = fk_sparse(); fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; } return fk_smknode(20, a, 0, 0); }
-  if (fk_sym_eq(s, hn, "tail")) { long long a = fk_sparse(); fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; } return fk_smknode(21, a, 0, 0); }
-  if (fk_sym_eq(s, hn, "cons")) { long long a = fk_sparse(); long long b = fk_sparse(); fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; } return fk_smknode(19, a, b, 0); }
+  /* two STRUCTURAL literals whose shape is not a flat (tag arity) emit:
+     (empty) is the nil value; (list a b ..) lowers to nested cons. Everything
+     else with a value tag flows through the data tables below. */
   if (fk_sym_eq(s, hn, "empty")) { fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; } return fk_smknode(18, 0, 0, 0); }
   if (fk_sym_eq(s, hn, "list")) { return fk_parse_list(); }
-  if (fk_sym_eq(s, hn, "gt")) { long long a = fk_sparse(); long long b = fk_sparse(); fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; } return fk_smknode(6, fk_smknode(5, a, b, 0), fk_smklit(0), fk_smklit(1)); }
-  if (fk_sym_eq(s, hn, "lt")) { long long a = fk_sparse(); long long b = fk_sparse(); fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; } return fk_smknode(6, fk_smknode(5, b, a, 0), fk_smklit(0), fk_smklit(1)); }
-  if (fk_sym_eq(s, hn, "ge")) { long long a = fk_sparse(); long long b = fk_sparse(); fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; } return fk_smknode(5, b, a, 0); }
-  long long tag = fk_optag(s, hn);
-  if (tag >= 0) {
-   long long ar = fk_oparity(tag);
+  /* (if cond then else): the one control form with a value position; 3-ary tag-6
+     emit. defn/do/let are handled above; if rides here so the boolean rewrites
+     (and/or/not/abs) that LOWER to it find a real (if ...) target. */
+  if (fk_sym_eq(s, hn, "if")) { long long c1 = fk_sparse(); long long c2 = fk_sparse(); long long c3 = fk_sparse(); fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; } return fk_smknode(6, c1, c2, c3); }
+  /* DATA-DRIVEN rewrite: gt/ge/lt/eq/and/or/not/abs are rows in fk_rwtab. Parse
+     `arity` operands, then instantiate the row's RPN lowering template. Mirrors
+     the flattener's flt-low — rules as data, not a hand-written C case per name. */
+  long long rw = fk_rwtab_find(s, hn);
+  if (rw >= 0) {
+   long long ra = fk_rwtab[rw].arity; long long args[4]; long long ai = 0;
+   while (ai < ra) { args[ai] = fk_sparse(); ai = ai + 1; }
+   fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   return fk_rw_build(rw, args);
+  }
+  /* DATA-DRIVEN primitive: read (arity, tag) from fk_optab (the manifest table),
+     parse `arity` args, emit fk_smknode(tag, ...). Adding an op is a manifest row. */
+  long long oi = fk_optab_find(s, hn);
+  if (oi >= 0) {
+   long long ar = fk_optab[oi].arity; long long tag = fk_optab[oi].tag;
    long long c1 = 0, c2 = 0, c3 = 0;
    if (ar >= 1) { c1 = fk_sparse(); }
    if (ar >= 2) { c2 = fk_sparse(); }
