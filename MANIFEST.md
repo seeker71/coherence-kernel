@@ -115,7 +115,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] One `cc` seed → standing `fkwu` binary. **PROVEN 2026-06-28**: `cc -O2 -pthread runtime/fkwu-uni.c -o fkwu`
       builds a native Mach-O arm64 binary in the clean repo and executes — zero Go, zero bin-go, one C seed.
       The sovereign runtime floor is real here.
-- [ ] Minimal Go/Rust/TS surface walkers for four-way validation (`.go/.rs/.ts`, no build scripts — `fsh` drives builds).
+- [~] Minimal Go/Rust/TS surface walkers for four-way validation (`.go/.rs/.ts`, no build scripts — `fsh` drives builds).
+      **Go landed 2026-06-29** (`walkers/go/main.go`, 1369 lines vs the origin kernel's ~15k non-test): independent
+      lexer + tree-walking evaluator over the pure-recipe surface (int/int64/float/string/bool literals; add/sub/mul/div/mod;
+      eq/ne/lt/le/gt/ge; if/let/do/seq; defn + user calls with TCO; and/or/not; head/tail/cons/list/nth; str_concat/str_eq/
+      str_find/str_len/substring/char_at; value_eq; match). JIT/server/host-io/model/.fkb codec dropped. Witnesses
+      `int-literal-width` → 9 and `string-membership` → 9, matching the four-way manifest. Rust + TS still to land.
 - [ ] **Orchestration as form shell** (`.fsh`): flatten + run + four-way validate — replacing the bash harness.
 - [ ] **First proof: one recipe four-way end-to-end on the clean fsh flatten** ← the decider.
 - [ ] `form-cli` + `fsh` native surfaces; origin repo consumes this kernel (one-home enforced).
