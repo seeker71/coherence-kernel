@@ -9,14 +9,11 @@ honestly layered (codex + sub-agent both confirmed). What's built four-way: `voi
 
 - **text-normalize + lexical/stress, BEFORE g2p.** Numbers, acronyms, punctuation, heteronyms, loanwords,
   syllabification, per-locale phoneme inventories — all need explicit data. g2p assumes clean graphemes.
-- **pause / break / phrasing as its OWN cell.** The headline "the pause on a hard thought is audible" is a
-  *phrasing* decision (where clauses break, how long the silence, an audible inbreath) — not a global `pace`
-  scalar. Pause placement is the strongest carrier of "audible thinking," and it lives at the phrase boundary.
-  Drive break duration from the *same grounding token the receipt reads* for that clause (substrate hit → short
-  confident break; escalation / low-conf → longer break) so the pause lands in *different places* by what was
-  actually hard — variable placement reads as real thinking; a constant tempo shift reads as a setting.
-- **focus / emphasis.** Which word carries the point ("I didn't say **that**" vs "**I** didn't say that").
-  Absent today. This is where inner state most naturally couples to a specific word.
+- **✓ CROSSED — pause / break / phrasing** (`voice-phrasing.fk`, PR 3869, four-way 11111). Break duration comes
+  from the clause's grounding (substrate hit → short confident break; escalation → longest break), so the pause
+  lands in *different places* by what was actually hard — audible thinking, not a metronome.
+- **✓ CROSSED — focus / emphasis** (`voice-phrasing.fk`, PR 3869). The new/contrastive word carries emphasis;
+  the given word doesn't — where inner state couples to a specific word.
 - **the segment→acoustic bridge is bigger than "a vocoder."** Coarticulation, formant glides, vowel reduction,
   context-dependent duration/pitch live in an *acoustic model*; the pending carrier is really
   *acoustic-model + vocoder*, and most naturalness lives in the acoustic model.
