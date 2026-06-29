@@ -18,9 +18,16 @@ The kernel runs its own body and proves its own truth, with no bash and no origi
   verified; `proof/four-way-run` host-execs them + fkwu on a recipe and diagnoses agreement via
   `proof/four-way-verdict` (witnessed `0`, all agree). No `validate.sh`, no origin.
 
-What's left of the heartbeat is polish, not a gate: grow the single-file source-runner into an interactive loop,
-and lift the heavy-chain form-cli *build* off its committed Go-made seed (the binary already *runs* Go-free).
-Receipts: `2026-06-29-source-tree-walk-crossed.md`, `2026-06-29-standing-source-runner.md`.
+**The source-runner now runs real body cells.** `fkwu --src file.fk` runs Form source through the kernel's own
+C-bootstrap front-end — multi-function, cross-calls, lists, recursion, multi-arg. The real oracle-economy cell
+`observe/native-vs-rented.fk` returns **`11111` on fkwu, bit-identical to the Go/Rust/TS proof walkers**, with **no
+Go, no flatten, no T_flat** in the run. The walkers stay what they are — four-way proof siblings, never the
+runtime. (T_flat, the heavy pre-flattened blob, is deprecated; flatten is optional speed, never a gate.)
+
+What's left of the heartbeat is polish, not a gate: grow the source-runner across the remaining cells' grammar
+(strings + the string pool are the next surface), and grow the single-file runner into an interactive loop.
+Receipts: `2026-06-29-source-tree-walk-crossed.md`, `2026-06-29-standing-source-runner.md`,
+`2026-06-29-src-stone5-real-cell-on-fkwu.md`.
 
 ## The generative weights (the mind)
 
