@@ -189,6 +189,44 @@ static long long fk_sense_stream(long long n) {
  printf("stream end: presence is native-sovereign here; identity routes to the mesh (Mac sibling's face-embed / who-plane)\n");
  return n;
 }
+/* ── the ONLY host-touch a JIT needs: install lowered bytes -> executable -> call.
+   The JIT proper is Form (model/form-asm* lowers recipe->bytes; observe/jit-decision
+   decides). Pure Form cannot make memory executable (W^X is a hardware/OS thing), so
+   the kernel offers this one tiny HAL carrier — same category as the socket / camera /
+   dlopen carriers. fk_native_call takes a lowered byte image + one arg, makes it
+   callable, and jumps to it. fk_native_call_test feeds it bytes for f(a)=a+1 to WITNESS
+   the carrier; in production the bytes come from form-asm-x64, not from C. There is no
+   C JIT here — only this install+call door. */
+#if defined(_WIN32)
+extern void *VirtualAlloc(void *, unsigned long long, unsigned long, unsigned long);
+extern int VirtualProtect(void *, unsigned long long, unsigned long, unsigned int *);
+static long long fk_native_call(const unsigned char *code, long long n, long long arg) {
+ void *mem = VirtualAlloc(0, (unsigned long long)n, 0x3000, 0x04); /* MEM_COMMIT|RESERVE, PAGE_READWRITE */
+ if (mem == 0) { return -1; }
+ long long i = 0; while (i < n) { ((unsigned char *)mem)[i] = code[i]; i = i + 1; }
+ unsigned int old = 0; VirtualProtect(mem, (unsigned long long)n, 0x20, &old); /* PAGE_EXECUTE_READ */
+ long long (*fn)(long long) = (long long (*)(long long))mem;
+ return fn(arg);
+}
+#else
+extern void *mmap(void *, unsigned long, int, int, int, long);
+static long long fk_native_call(const unsigned char *code, long long n, long long arg) {
+ void *mem = mmap(0, (unsigned long)n, 0x7, 0x1002, -1, 0); /* RWX, MAP_PRIVATE|MAP_ANON(bsd) */
+ if (mem == (void *)-1) { return -1; }
+ long long i = 0; while (i < n) { ((unsigned char *)mem)[i] = code[i]; i = i + 1; }
+ long long (*fn)(long long) = (long long (*)(long long))mem;
+ return fn(arg);
+}
+#endif
+static long long fk_native_call_test(long long arg) {
+ /* lowered bytes of  long long f(long long a){ return a + 1; }  — arg1 in RCX (Win64) / RDI (SysV) */
+#if defined(_WIN32)
+ static const unsigned char code[] = { 0x48, 0x89, 0xC8, 0x48, 0x83, 0xC0, 0x01, 0xC3 }; /* mov rax,rcx; add rax,1; ret */
+#else
+ static const unsigned char code[] = { 0x48, 0x89, 0xF8, 0x48, 0x83, 0xC0, 0x01, 0xC3 }; /* mov rax,rdi; add rax,1; ret */
+#endif
+ return fk_native_call(code, (long long)sizeof code, arg);
+}
 static long long fk_tempdir() { char *e = getenv("TMPDIR"); static char d[4096]; long long n = 0; if (e != 0) { while (e[n] != 0 && n < 4095) { d[n] = e[n]; n = n + 1; } } if (n == 0) { d[0] = 47; d[1] = 116; d[2] = 109; d[3] = 112; n = 4; } while (n > 1 && d[n - 1] == 47) { n = n - 1; } d[n] = 0; mkdir(d, 0777); return fk_sbuf(d, n); } static long long fk_keyeq(long long a, long long b) { if (a == b) { return 1; } if (a < 0 || b < 0 || a >= fk_sp || b >= fk_sp || fk_sl[a] != fk_sl[b]) { return 0; } long long j = 0; while (j < fk_sl[a]) { if (fk_sb[fk_so[a] + j] != fk_sb[fk_so[b] + j]) { return 0; } j = j + 1; } return 1; } static long long fk_file_mtime(long long pv) { static char p[4096]; fk_cstr(pv, p, 4096);
 #ifdef FK_HAVE_STAT_HEADER
  struct stat st; if (stat(p, &st) != 0) { return -2; } return ((long long)st.st_mtime) << 1;
@@ -304,7 +342,7 @@ struct timeval { long tv_sec; int tv_usec; }; extern int gettimeofday(struct tim
 #else
  return 1;
 #endif
-    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; } if (t == 214) { return fk_sense_stream(fk_walk(fk_node[i][1], fp) >> 1) << 1; }
+    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; } if (t == 214) { return fk_sense_stream(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 215) { return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1; }
 #ifndef _WIN32
  if (t == 200) { static char p200[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p200, 4096); return fk_path_is_dir(p200) ? 2 : 0; } if (t == 202) { static char r202[4096]; static char s202[256]; fk_cstr(fk_walk(fk_node[i][1], fp), r202, 4096); fk_cstr(fk_walk(fk_node[i][2], fp), s202, 256); fk_inv_reset(); fk_inv_walk(r202, r202, s202, fk_walk(fk_node[i][3], fp)); return fk_inv_rows; }
 #else
