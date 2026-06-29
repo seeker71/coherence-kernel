@@ -119,12 +119,14 @@ static long long fk_sense_report(void) {
    Its native home is Form: the `.fk` cells already exist (surprise-receipt,
    confidence-earned, native-vs-rented, observe/sense-stream.fk) and compute the
    same values on this kernel (witnessed hand-flattened). It lives in C only
-   because the automatic flattener / source-runner is not yet standing on Windows
-   (windows-home rung 4). Two rungs retire it: (1) stand form-eval-cli/flatten on
-   Windows -> run the stream LOGIC as Form, delete fk_sense_stream + this math;
-   (2) form-asm-on-Windows -> lower the 307k-pixel walk to asm bytes (a tree-walk
-   can't loop it). The seed then shrinks back to the HAL (grab + raw bytes).
-   See receipts/2026-06-29-windows-homecoming-status.md. */
+   because the source-runner SEED (a flattened form-eval-cli-loop, platform-neutral
+   numeric data) is not yet committed here — the Windows kernel itself is PROVEN
+   able to run recipes/stdin/eval natively, so this is a shared-seed gap, NOT a
+   Windows gap. Two rungs retire it: (1) commit the generated seed -> run the
+   stream LOGIC as Form (observe/sense-stream.fk), delete fk_sense_stream + this
+   math; (2) form-asm-on-Windows -> lower the 307k-pixel walk to asm bytes (a
+   tree-walk can't loop it). The seed then shrinks to the HAL (grab + raw bytes).
+   See receipts/2026-06-29-windows-flatten-reground.md. */
 static unsigned char fk_frame_buf[1000000];
 static long long fk_rd32(unsigned char *p) { return (long long)p[0] | ((long long)p[1] << 8) | ((long long)p[2] << 16) | ((long long)p[3] << 24); }
 /* silent stat over the frame — fills out[0..8] = present,side,mean,darkpct,lm,cm,rm,w,h. Returns 0 / -1. */
