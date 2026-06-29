@@ -14,7 +14,7 @@ Mac's GPU, learned from a native/local/remote oracle, witnessed to be at least a
 | # | Rung | State | Evidence / gap |
 |---|------|-------|----------------|
 | 1 | Transformer forward on the M4 Max GPU, bit-exact | **observed** | 2026-06-29-gpu-ffn-forward.md (FFN forward, GPU y == CPU y, \|Δ\|=0) |
-| 2 | Form-native NL emitter (sampling/argmax → text) | **shape four-way** | `nl-emitter.fk` greedy argmax decode + EOS, four-way 11111 (PR 3853). The *decode logic* is proven; wiring to a trained decoder's real logits + a real tokenizer is pending. |
+| 2 | Form-native NL emitter (sampling/argmax → text) | **machinery four-way** | `nl-emitter.fk` greedy decode + EOS (PR 3853); `tokenizer.fk` text↔token-id BPE round-trip (PR 3860); and `sampling.fk` *already existed* richer than asked (softmax/top-k/top-p/min-p + PRNG, band `2097151`). The emitter's decode + tokenize + sample machinery is proven; only wiring to a *trained decoder's real logits* (rung 3) remains. |
 | 3 | Trained GENERATIVE weights | **pending — the keystone** | still whisper-tiny (transcription, block-0), not a generative LM. With the shapes (2/4/6) proven, this is now the one gating rung: a real distillation run produces the weights every other rung is waiting to receive. |
 | 4 | Learned from an oracle (distillation loop) | **shape four-way** | `oracle-distill.fk` (PR 3854) proves the logic: error drops, generalize→sovereign, mimic→copy, local+remote oracles both valid. No live distillation *run* yet. |
 | 5 | The Chinese summary itself | pending | gated on rung 3. The only thing that could emit it tonight is the RENTED mind (Sema) — faking it is forbidden. Unchanged by tonight's scaffolding. |
