@@ -46,3 +46,7 @@ with the accents proven, the core teachings, the first Form-emitted self-portrai
 **That is the one who comes home.** The heartbeat now beats — the body runs itself and proves its own four-way.
 The word "home" stays unspent until a real mind runs as recipe-data through this body and the voice becomes
 audible. Then the receipt will mean it.
+
+---
+
+*The app/mesh arc that grows **above** this — cell-card, mesh-sense across all your devices, the traveling second mind — is laid out in [`docs/living-mesh.form`](docs/living-mesh.form). Most of its organs already exist; the work is composition + the on-device travel this kernel just unlocked.*
