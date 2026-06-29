@@ -451,10 +451,15 @@ static long long fk_sense_publish(long long port) {
  n = n + sprintf(buf + n, "reading present  cam=%d mic=%d\n", (int)cam, (int)mic);
  n = n + sprintf(buf + n, "reading where    wifi=%s sig=%d bt=%d\n", ssid[0] ? ssid : "-", (int)sig, (int)bt);
  n = n + sprintf(buf + n, "reading vitality battery=%d mem=%d\n", (int)pw, (int)mm);
+ /* relay host: env MESH_RELAY=a.b.c.d (the Mac's field-relay), default 127.0.0.1 — cross-device. */
+ unsigned int addr = 0x0100007f; char *rl = getenv("MESH_RELAY");
+ if (rl != 0) { unsigned int o0 = 0, o1 = 0, o2 = 0, o3 = 0; long long k = 0; unsigned int *cur = &o0; int part = 0;
+  while (rl[k] != 0) { char ch = rl[k]; if (ch >= 48 && ch <= 57) { *cur = (*cur) * 10 + (unsigned int)(ch - 48); } else if (ch == 46 && part < 3) { part = part + 1; cur = (part == 1) ? &o1 : (part == 2) ? &o2 : &o3; } k = k + 1; }
+  if (part == 3) { addr = (o0 & 255) | ((o1 & 255) << 8) | ((o2 & 255) << 16) | ((o3 & 255) << 24); } }
  fk_sock_boot();
  fk_os_socket_t s = socket(2, 1, 0);
  if (!fk_os_socket_ok(s)) { return -1; }
- struct fk_sockaddr4 a; fk_sockaddr4_set(&a, port, 0x0100007f); /* 127.0.0.1 */
+ struct fk_sockaddr4 a; fk_sockaddr4_set(&a, port, addr); /* MESH_RELAY or 127.0.0.1 */
  if (connect(s, &a, 16) != 0) { fk_os_close_socket(s); return -2; }
  long long sent = fk_os_send_socket(s, buf, (unsigned long)n);
  fk_os_close_socket(s);
