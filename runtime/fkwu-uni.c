@@ -518,11 +518,46 @@ static long long fk_mesh_discover(long long port) {
  fk_os_close_socket(s);
  return got;
 }
+/* ── mesh RENDEZVOUS SERVER (the new-repo core, proven on the kernel's own carriers):
+   PUBLIC ACCESS via a listening socket, PERSISTENCE via an append-only registry file,
+   DISCOVERY via the roster read-back. mesh_registry(port) accepts one registration, appends
+   it to mesh-cells.txt, acks; mesh_roster() reads the persisted registry. This is the server's
+   CARRIER layer; its routing/registry LOGIC is Form (comes home as .fk at the cursor seed). */
+static long long fk_mesh_registry(long long port) {
+ fk_sock_boot();
+ fk_os_socket_t ls = socket(2, 1, 0);
+ if (!fk_os_socket_ok(ls)) { return -1; }
+ int yes = 1; fk_os_setsockopt_reuse(ls, &yes);
+ struct fk_sockaddr4 a; fk_sockaddr4_set(&a, port, 0);
+ if (bind(ls, &a, 16) != 0) { fk_os_close_socket(ls); return -2; }
+ if (listen(ls, 4) != 0) { fk_os_close_socket(ls); return -3; }
+ fk_os_socket_t cs = accept(ls, 0, 0);
+ if (!fk_os_socket_ok(cs)) { fk_os_close_socket(ls); return -4; }
+ static char rbuf[8192]; long long got = fk_os_recv_socket(cs, rbuf, 8191);
+ if (got > 0) {
+  int fd = open("mesh-cells.txt", 1 | 0x100 | 0x8 | 0x8000, 0666); /* O_WRONLY|O_CREAT|O_APPEND|O_BINARY — append-only registry */
+  if (fd >= 0) { write(fd, rbuf, (unsigned long)got); write(fd, "\n---\n", 5); close(fd); }
+  fk_os_send_socket(cs, "registered\n", 11);
+ }
+ fk_os_close_socket(cs); fk_os_close_socket(ls);
+ return got;
+}
+static long long fk_mesh_roster(void) {
+ int fd = open("mesh-cells.txt", 0x8000); /* O_RDONLY|O_BINARY — read the persisted registry */
+ if (fd < 0) { return 0; }
+ static char buf[65536]; long long n = 0; long long g;
+ while ((g = read(fd, buf + n, 8192)) > 0) { n = n + g; if (n > 60000) { break; } }
+ close(fd);
+ long long j = 0; while (j < n) { putchar((int)(unsigned char)buf[j]); j = j + 1; }
+ return n;
+}
 #else
 static long long fk_sense_publish(long long port) { (void)port; return -1; }
 static long long fk_mesh_serve(long long port) { (void)port; return -1; }
 static long long fk_mesh_announce(long long port) { (void)port; return -1; }
 static long long fk_mesh_discover(long long port) { (void)port; return -1; }
+static long long fk_mesh_registry(long long port) { (void)port; return -1; }
+static long long fk_mesh_roster(void) { return -1; }
 #endif
 /* ── PUBLIC-API proxy channel (cross-network rendezvous): register the cell + detect peers
    through https://api.coherencycoin.com over Windows-native TLS (WinHTTP — the kernel's
@@ -594,7 +629,7 @@ struct timeval { long tv_sec; int tv_usec; }; extern int gettimeofday(struct tim
 #else
  return 1;
 #endif
-    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; } if (t == 214) { return fk_sense_stream(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 215) { return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 216) { return fk_wifi_ssid(); } if (t == 217) { return fk_wifi_signal() << 1; } if (t == 218) { return fk_bt_present() << 1; } if (t == 219) { return fk_bt_count() << 1; } if (t == 220) { return fk_power() << 1; } if (t == 221) { return fk_memload() << 1; } if (t == 222) { return fk_sensors_report() << 1; } if (t == 223) { return fk_sense_publish(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 224) { return fk_mesh_serve(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 225) { return fk_mesh_announce(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 226) { return fk_mesh_discover(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 227) { return fk_api_health() << 1; } if (t == 228) { return fk_mesh_register() << 1; } if (t == 229) { return fk_mesh_detect() << 1; }
+    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; } if (t == 214) { return fk_sense_stream(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 215) { return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 216) { return fk_wifi_ssid(); } if (t == 217) { return fk_wifi_signal() << 1; } if (t == 218) { return fk_bt_present() << 1; } if (t == 219) { return fk_bt_count() << 1; } if (t == 220) { return fk_power() << 1; } if (t == 221) { return fk_memload() << 1; } if (t == 222) { return fk_sensors_report() << 1; } if (t == 223) { return fk_sense_publish(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 224) { return fk_mesh_serve(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 225) { return fk_mesh_announce(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 226) { return fk_mesh_discover(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 227) { return fk_api_health() << 1; } if (t == 228) { return fk_mesh_register() << 1; } if (t == 229) { return fk_mesh_detect() << 1; } if (t == 230) { return fk_mesh_registry(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 231) { return fk_mesh_roster() << 1; }
 #ifndef _WIN32
  if (t == 200) { static char p200[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p200, 4096); return fk_path_is_dir(p200) ? 2 : 0; } if (t == 202) { static char r202[4096]; static char s202[256]; fk_cstr(fk_walk(fk_node[i][1], fp), r202, 4096); fk_cstr(fk_walk(fk_node[i][2], fp), s202, 256); fk_inv_reset(); fk_inv_walk(r202, r202, s202, fk_walk(fk_node[i][3], fp)); return fk_inv_rows; }
 #else
