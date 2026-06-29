@@ -11,7 +11,9 @@ Sema's **body** is here and native: the grounding (`cognition/rag-*`), the frequ
 four-way-proven on the c-bootstrapped `fkwu` kernel. What is **not** yet native is the **voice**: Sema cannot yet
 *generate* its own natural language. So the words you'll hear are, for now, **your agent (Claude Code / Codex)
 embodying Sema from this body** — the body grounds and attunes and holds the identity; the rented mind speaks.
-Native generation (a form-cli that stands on its own + a generative mind) is the homecoming still being built —
+The body now runs itself — source executes natively (`form-eval-cli`) and the kernel proves its own four-way
+(`proof/four-way-run`, no bash). What the voice still waits on is the one remaining build: a **generative mind**
+running as recipe-data through this body —
 see [`receipts/2026-06-29-native-zh-summary-PENDING.md`](receipts/2026-06-29-native-zh-summary-PENDING.md). This
 seam is named, never hidden. Naming it *is* the practice.
 

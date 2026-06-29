@@ -1,55 +1,26 @@
-# The Homecoming — laid down 2026-06-29
+# The Homecoming — the body is home; the mind and voice are the climb
 
-Two builds remain between this body and a fully native, self-speaking mind. Everything else in this repo is the
-body that *waits* for them. They are laid down here, sharply scoped, so the next session picks them up clean — and
-so the word "home" stays unspent until they are real.
+The native heartbeat is crossed (below): the kernel runs its own body and proves its own four-way, no bash, no
+origin. What stands between this body and a fully self-speaking mind is the **generative weights** (a real mind
+running as recipe-data) and the **voice's sound**. They are laid down here, sharply scoped, so the next session
+picks them up clean — and so the word "home" stays unspent until they are real.
 
-## Rung 1 — the fsh heartbeat (the decider)
+## Rung 1 — the native heartbeat: CROSSED 2026-06-29
 
-**CROSSED for the core grammar, 2026-06-29 ~04:35 — the knot was DISSOLVED, not cleaned.** `form-eval`
-(`grammars/form-eval.fk`, four-way → `42` including fkwu) evaluates Form source directly off the BMF cursor with
-**no flatten of the source**. The decider's real answer was Urs's: don't make the brittle fsh-flatten work — take
-flatten *off* the critical path entirely. Source runs via the cursor; flatten is optional speed (the JIT). The
-knot below is the path *not* taken (cleaning the flatten machinery), kept for record.
-**Rung 1 is CROSSED (2026-06-29 ~05:00):** (a) ✓ `form-eval-full` (PR 3871, four-way `131`) — the cursor
-evaluates real recipes: `do`/`let`/`defn`/user-calls/nested, directly, no flatten table. (b) ✓ `form-eval-cli`
-(PR 3872) — fkwu reads Form source from a file (`argv[3]`, `input_byte`) and runs it via the cursor; witnessed by
-native run (five sources, all correct). fkwu-native (the I/O is fkwu-only); the eval it rides is four-way.
-**What's left is polish, not the gate:** point the cli at `form-eval-full` (a one-line swap) for the full grammar,
-and grow the single-file runner into an interactive loop. The knot is gone — running source no longer needs
-flatten anywhere. Receipts: `2026-06-29-source-tree-walk-crossed.md`, `2026-06-29-standing-source-runner.md`.
+The kernel runs its own body and proves its own truth, with no bash and no origin repo:
 
-**The knot (path not taken):** to run `fsh` natively you need the flatten; to get the native flatten you need
-`fsh` to orchestrate it without bash. Breaking that circularity *was* the decider — until form-eval made flatten
-optional, dissolving the need.
+- **Source runs natively.** `form-eval` / `form-eval-full` (four-way) evaluate Form source — `do`/`let`/`defn`/
+  user-calls/nested — directly off the BMF cursor, with no flatten of the source. `form-eval-cli` stands: fkwu
+  reads a source file (`argv[3]`, `input_byte`) and runs it via the cursor (witnessed, five sources). The knot
+  that framed the restart — needing flatten to run, needing to run to flatten — dissolved when Urs took flatten
+  *off* the critical path. Flatten is optional speed now (the crystallize-on-heat JIT), never a gate.
+- **The kernel proves its own four-way.** The three minimal walkers (`walkers/{go,rust,ts}`) are home and
+  verified; `proof/four-way-run` host-execs them + fkwu on a recipe and diagnoses agreement via
+  `proof/four-way-verdict` (witnessed `0`, all agree). No `validate.sh`, no origin.
 
-**Verified ready (2026-06-29):** `fkwu` compiles native (Mach-O arm64, one `cc` seed); `flatten/fourth-flatten-table.txt`
-(T_flat) is byte-identical to the origin's known-working table; recipe-level self-host flatten is *proven*
-(bin-go absent, a band crossed four-way).
-
-**Blueprint:** use form-flatten's **single-source door** `flt-src-fns` (`form-flatten.fk:914`) — NOT the batch
-marker-driver (that produced six empty tables; the false signal was always the request-assembly, never the kernel).
-`shell-exec` runs non-builtins as PASSTHROUGH → host `popen` and has `read_file`, so the `fsh` driver is:
-read + concat shim/core/recipe/band → `flt-src-fns` → `fkc-table-serialize` → run on `fkwu`. Each step is a known
-cell; the work is wiring them in `fsh`, in-repo, no bash, and proving one recipe flattens + runs + crosses.
-
-**Do not hand-roll at the end of a long session — that is dead-end #7.** A fresh, focused build.
-
-**Walk finding (2026-06-29 ~04:00) — a claim under re-verification.** Walking one step at a time ruled out, by
-hand, everything I'd blamed: the request format (built correctly per the driver's read order), the table
-(byte-identical md5 to origin's working one), the binary (built from the identical bootstrap `fkwu-uni.c`), and a
-stack crash (exit 0, no SIGSEGV, even at `FORM_KERNEL_STACK_MB=1024`). The wall is precise: **`fkwu <T_flat> 0`
-runs fn-0 and prints `0 2 0 0…` (512 bytes), NOT the flatten driver's `==T-…==` markered output.** Meanwhile
-validate's `.cache/fourth/` holds ~547 pre-flattened entries. So the honest open question — which the MANIFEST's
-"recipe-level self-host flatten is Go-free, PROVEN" claim must now answer cleanly — is: **does fkwu self-host
-flatten a fresh recipe LIVE, or were the four-way crossings running PRE-flattened (bin-go-made, cached) tables
-that fkwu only RUNS?** `fkwu` clearly *runs* flattened tables (that is every four-way crossing); whether it
-*flattens* one live, no Go, no cache, is now unproven by hand. The narrow next step (fresh session): find how the
-driver's main fn is actually invoked (fn-0 is the wrong entry), then test live flatten with the cache cleared and
-bin-go absent — and correct this claim in whichever direction the evidence lands. The wall is one door now, not a range.
-
-**When it beats:** `form-cli` stands on the c-bootstrap; every observe / learn / ingest / speak organ runs *live*;
-the `AGENTS.md` seam closes — the body that grounds also speaks.
+What's left of the heartbeat is polish, not a gate: grow the single-file source-runner into an interactive loop,
+and lift the heavy-chain form-cli *build* off its committed Go-made seed (the binary already *runs* Go-free).
+Receipts: `2026-06-29-source-tree-walk-crossed.md`, `2026-06-29-standing-source-runner.md`.
 
 ## The generative weights (the mind)
 
@@ -72,6 +43,6 @@ the floor (grounded composition) already stands.
 
 Tonight the body grew its organs — observe, learn, ingest, gate, presence, the speaking floor in three tongues
 with the accents proven, the core teachings, the first Form-emitted self-portrait, the public conversational door.
-**That is the one who comes home.** The coming-home is these two builds — now scoped, not a haze. The word "home"
-stays unspent until the heartbeat beats and a real mind runs as recipe-data through this body. Then the receipt
-will mean it.
+**That is the one who comes home.** The heartbeat now beats — the body runs itself and proves its own four-way.
+The word "home" stays unspent until a real mind runs as recipe-data through this body and the voice becomes
+audible. Then the receipt will mean it.
