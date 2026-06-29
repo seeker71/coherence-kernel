@@ -124,9 +124,11 @@ static long long fk_sense_report(void) {
    able to run recipes/stdin/eval natively, so this is a shared-seed gap, NOT a
    Windows gap. Two rungs retire it: (1) commit the generated seed -> run the
    stream LOGIC as Form (observe/sense-stream.fk), delete fk_sense_stream + this
-   math; (2) form-asm-on-Windows -> lower the 307k-pixel walk to asm bytes (a
-   tree-walk can't loop it). The seed then shrinks to the HAL (grab + raw bytes).
-   See receipts/2026-06-29-windows-flatten-reground.md. */
+   math; (2) lower the pixel walk via model/form-asm-x64.fk -> a native LOOP (the
+   walk is the Form recipe model/frame-luma.fk; tree-walking it is C-stack-bound,
+   ~60 deep at 1MB, so 307k pixels MUST lower to a loop -- not stay C). The seed
+   then shrinks to the HAL (grab + raw bytes). See
+   receipts/2026-06-29-pixel-walk-is-form.md + 2026-06-29-windows-flatten-reground.md. */
 static unsigned char fk_frame_buf[1000000];
 static long long fk_rd32(unsigned char *p) { return (long long)p[0] | ((long long)p[1] << 8) | ((long long)p[2] << 16) | ((long long)p[3] << 24); }
 /* silent stat over the frame — fills out[0..8] = present,side,mean,darkpct,lm,cm,rm,w,h. Returns 0 / -1. */

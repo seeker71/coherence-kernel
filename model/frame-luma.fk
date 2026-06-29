@@ -1,0 +1,46 @@
+; frame-luma.fk — the pixel walk as a FORM recipe, not C.
+;
+; Mean luminance over a captured frame's bytes, expressed as a tail-recursive
+; accumulate over str_byte_at. This is the recipe that the C scaffold
+; (fk_frame_read's luminance math) stands in for — and it does NOT need to be C.
+; The witnessed single-arg accumulate `f(n)=if(le n 0) 0 (add n (f (n-1)))` ran
+; native on fkwu (Windows): f(5)=15, f(50)=1275, f(10000)=50005000. This is its
+; multi-arg sibling over a byte buffer — the exact same add/sub/le/if/call family.
+;
+; ITS HOME IS LOWERED, NOT TREE-WALKED. The tree-walker recurses on the C stack,
+; and fk_walk has a large frame (~17 KB/level), so depth is STACK-bound — ~60 at
+; a 1 MB stack, ~10k at 512 MB (the same recipe, deeper with more stack: the
+; limit is the interpreter's recursion, not Form). A 307,200-pixel frame would
+; need ~5 GB of stack tree-walked — infeasible. Lowered to a native LOOP it is
+; O(1) stack. So the walk is not "C vs Form"; it is interpreter-recursion vs
+; lowered-loop. The lowering lane is in this repo:
+;   model/form-asm-x64.fk     Form -> x64 bytes (a real loop, no recursion)
+;   model/form-asm.fk / -matvec.fk    the matvec already lowers four-way
+;   the self-JIT crystallize  proven ~13x on this tag family
+;                             (receipts/2026-06-29-jit-live-crystallize.md)
+; The recipe that proves four-way IS the recipe that lowers to native — one
+; engine, no hand-C twin.
+;
+; preludes: core.fk
+(do
+    ; sum a luminance proxy (one byte per stride) from i to end. Tail-recursive:
+    ; (s i end stride acc) -> acc. LOWERED, this compiles to a counted native loop
+    ; (i is the induction var, acc the accumulator) — no stack growth at all.
+    (defn luma-sum (s i end stride acc)
+        (if (le end i) acc
+            (luma-sum s (add i stride) end stride
+                      (add acc (str_byte_at s i)))))
+
+    ; mean over the sampled bytes: sum / count, count = (end - off) / stride.
+    (defn luma-mean (s off end stride)
+        (div (luma-sum s off end stride 0)
+             (div (sub end off) stride)))
+
+    ; read the frame, mean its luminance. read_file yields the bytes (binary on a
+    ; binary-opened carrier — read_file needs O_BINARY on Windows, a one-line
+    ; carrier fix, NOT body logic); offset 54 skips the BMP header; stride 3 reads
+    ; one channel. NO C math: the walk IS this recipe, lowered.
+    (defn frame-luma (path)
+        (do (let s (read_file path))
+            (luma-mean s 54 (str_len s) 3)))
+    0)
