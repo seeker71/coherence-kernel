@@ -524,6 +524,63 @@ static long long fk_mesh_serve(long long port) { (void)port; return -1; }
 static long long fk_mesh_announce(long long port) { (void)port; return -1; }
 static long long fk_mesh_discover(long long port) { (void)port; return -1; }
 #endif
+/* ── PUBLIC-API proxy channel (cross-network rendezvous): register the cell + detect peers
+   through https://api.coherencycoin.com over Windows-native TLS (WinHTTP — the kernel's
+   libcrypto TLS is unavailable on Windows). LAN broadcast (mesh_announce/discover) joins
+   same-network cells; this proxy joins cells on DIFFERENT networks via the public API. */
+#if defined(_WIN32)
+extern void *WinHttpOpen(const unsigned short *, unsigned long, const unsigned short *, const unsigned short *, unsigned long);
+extern void *WinHttpConnect(void *, const unsigned short *, unsigned short, unsigned long);
+extern void *WinHttpOpenRequest(void *, const unsigned short *, const unsigned short *, const unsigned short *, const unsigned short *, const unsigned short **, unsigned long);
+extern int WinHttpSendRequest(void *, const unsigned short *, unsigned long, void *, unsigned long, unsigned long, unsigned long long);
+extern int WinHttpReceiveResponse(void *, void *);
+extern int WinHttpQueryDataAvailable(void *, unsigned long *);
+extern int WinHttpReadData(void *, void *, unsigned long, unsigned long *);
+extern int WinHttpCloseHandle(void *);
+static void fk_widen(const char *s, unsigned short *w, long long cap) { long long i = 0; while (s[i] != 0 && i < cap - 1) { w[i] = (unsigned short)(unsigned char)s[i]; i = i + 1; } w[i] = 0; }
+static long long fk_https(const char *path, const char *method, const char *body, long long blen, char *out, long long cap) {
+ static unsigned short wa[16], wh[64], wp[512], wm[8], wct[64];
+ fk_widen("fkwu", wa, 16); fk_widen("api.coherencycoin.com", wh, 64); fk_widen(path, wp, 512); fk_widen(method, wm, 8);
+ void *hS = WinHttpOpen(wa, 0, 0, 0, 0); /* DEFAULT_PROXY */
+ if (hS == 0) { return -1; }
+ void *hC = WinHttpConnect(hS, wh, 443, 0);
+ if (hC == 0) { WinHttpCloseHandle(hS); return -2; }
+ void *hR = WinHttpOpenRequest(hC, wm, wp, 0, 0, 0, 0x00800000); /* WINHTTP_FLAG_SECURE */
+ if (hR == 0) { WinHttpCloseHandle(hC); WinHttpCloseHandle(hS); return -3; }
+ const unsigned short *hdr = 0; unsigned long hdrlen = 0;
+ if (blen > 0) { fk_widen("Content-Type: application/json\r\n", wct, 64); hdr = wct; hdrlen = 0xFFFFFFFFu; }
+ long long rc = -4;
+ if (WinHttpSendRequest(hR, hdr, hdrlen, (void *)body, (unsigned long)blen, (unsigned long)blen, 0) && WinHttpReceiveResponse(hR, 0)) {
+  long long total = 0; unsigned long avail = 0;
+  while (WinHttpQueryDataAvailable(hR, &avail) && avail > 0) {
+   if (total + (long long)avail > cap - 1) { avail = (unsigned long)(cap - 1 - total); }
+   if (avail == 0) { break; }
+   unsigned long got = 0;
+   if (!WinHttpReadData(hR, out + total, avail, &got) || got == 0) { break; }
+   total = total + (long long)got;
+  }
+  out[total] = 0; rc = total;
+ }
+ WinHttpCloseHandle(hR); WinHttpCloseHandle(hC); WinHttpCloseHandle(hS);
+ return rc;
+}
+static long long fk_api_health(void) { static char out[8192]; long long n = fk_https("/api/health", "GET", 0, 0, out, 8192); if (n > 0) { long long j = 0; while (j < n) { putchar((int)(unsigned char)out[j]); j = j + 1; } putchar(10); } return n; }
+static long long fk_mesh_register(void) {
+ static char body[4096]; int n;
+ long long mic = fk_mic_count(); long long cam = fk_cam_count();
+ char ssid[64]; long long sig = -1; fk_wifi_query(ssid, 64, &sig);
+ long long pw = fk_power(); long long mm = fk_memload();
+ n = sprintf(body, "{\"cell\":\"windows-binary\",\"present\":{\"cam\":%d,\"mic\":%d},\"where\":{\"wifi\":\"%s\",\"sig\":%d},\"vitality\":{\"battery\":%d,\"mem\":%d}}", (int)cam, (int)mic, ssid[0] ? ssid : "-", (int)sig, (int)pw, (int)mm);
+ static char out[8192]; long long r = fk_https("/api/mesh/register", "POST", body, n, out, 8192);
+ if (r > 0) { long long j = 0; while (j < r) { putchar((int)(unsigned char)out[j]); j = j + 1; } putchar(10); }
+ return r;
+}
+static long long fk_mesh_detect(void) { static char out[16384]; long long n = fk_https("/api/mesh/cells", "GET", 0, 0, out, 16384); if (n > 0) { long long j = 0; while (j < n) { putchar((int)(unsigned char)out[j]); j = j + 1; } putchar(10); } return n; }
+#else
+static long long fk_api_health(void) { return -1; }
+static long long fk_mesh_register(void) { return -1; }
+static long long fk_mesh_detect(void) { return -1; }
+#endif
 static int fk_sock_getaddrinfo(const char *h, const char *p, const struct addrinfo *i, struct addrinfo **r) { fk_sock_boot(); return getaddrinfo(h, p, i, r); }
 static int fk_sock_socket(int af, int ty, int pr) { fk_sock_boot(); fk_os_socket_t s = socket(af, ty, pr); if (!fk_os_socket_ok(s)) { return -1; } return (int)s; }
 static int fk_sock_connect(int fd, const void *a, unsigned int n) { fk_sock_boot(); return connect((fk_os_socket_t)(unsigned int)fd, a, n); }
@@ -537,7 +594,7 @@ struct timeval { long tv_sec; int tv_usec; }; extern int gettimeofday(struct tim
 #else
  return 1;
 #endif
-    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; } if (t == 214) { return fk_sense_stream(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 215) { return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 216) { return fk_wifi_ssid(); } if (t == 217) { return fk_wifi_signal() << 1; } if (t == 218) { return fk_bt_present() << 1; } if (t == 219) { return fk_bt_count() << 1; } if (t == 220) { return fk_power() << 1; } if (t == 221) { return fk_memload() << 1; } if (t == 222) { return fk_sensors_report() << 1; } if (t == 223) { return fk_sense_publish(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 224) { return fk_mesh_serve(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 225) { return fk_mesh_announce(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 226) { return fk_mesh_discover(fk_walk(fk_node[i][1], fp) >> 1) << 1; }
+    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; } if (t == 214) { return fk_sense_stream(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 215) { return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 216) { return fk_wifi_ssid(); } if (t == 217) { return fk_wifi_signal() << 1; } if (t == 218) { return fk_bt_present() << 1; } if (t == 219) { return fk_bt_count() << 1; } if (t == 220) { return fk_power() << 1; } if (t == 221) { return fk_memload() << 1; } if (t == 222) { return fk_sensors_report() << 1; } if (t == 223) { return fk_sense_publish(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 224) { return fk_mesh_serve(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 225) { return fk_mesh_announce(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 226) { return fk_mesh_discover(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 227) { return fk_api_health() << 1; } if (t == 228) { return fk_mesh_register() << 1; } if (t == 229) { return fk_mesh_detect() << 1; }
 #ifndef _WIN32
  if (t == 200) { static char p200[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p200, 4096); return fk_path_is_dir(p200) ? 2 : 0; } if (t == 202) { static char r202[4096]; static char s202[256]; fk_cstr(fk_walk(fk_node[i][1], fp), r202, 4096); fk_cstr(fk_walk(fk_node[i][2], fp), s202, 256); fk_inv_reset(); fk_inv_walk(r202, r202, s202, fk_walk(fk_node[i][3], fp)); return fk_inv_rows; }
 #else
