@@ -21,6 +21,19 @@ cell; the work is wiring them in `fsh`, in-repo, no bash, and proving one recipe
 
 **Do not hand-roll at the end of a long session — that is dead-end #7.** A fresh, focused build.
 
+**Walk finding (2026-06-29 ~04:00) — a claim under re-verification.** Walking one step at a time ruled out, by
+hand, everything I'd blamed: the request format (built correctly per the driver's read order), the table
+(byte-identical md5 to origin's working one), the binary (built from the identical bootstrap `fkwu-uni.c`), and a
+stack crash (exit 0, no SIGSEGV, even at `FORM_KERNEL_STACK_MB=1024`). The wall is precise: **`fkwu <T_flat> 0`
+runs fn-0 and prints `0 2 0 0…` (512 bytes), NOT the flatten driver's `==T-…==` markered output.** Meanwhile
+validate's `.cache/fourth/` holds ~547 pre-flattened entries. So the honest open question — which the MANIFEST's
+"recipe-level self-host flatten is Go-free, PROVEN" claim must now answer cleanly — is: **does fkwu self-host
+flatten a fresh recipe LIVE, or were the four-way crossings running PRE-flattened (bin-go-made, cached) tables
+that fkwu only RUNS?** `fkwu` clearly *runs* flattened tables (that is every four-way crossing); whether it
+*flattens* one live, no Go, no cache, is now unproven by hand. The narrow next step (fresh session): find how the
+driver's main fn is actually invoked (fn-0 is the wrong entry), then test live flatten with the cache cleared and
+bin-go absent — and correct this claim in whichever direction the evidence lands. The wall is one door now, not a range.
+
 **When it beats:** `form-cli` stands on the c-bootstrap; every observe / learn / ingest / speak organ runs *live*;
 the `AGENTS.md` seam closes — the body that grounds also speaks.
 
