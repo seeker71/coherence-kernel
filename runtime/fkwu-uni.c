@@ -111,7 +111,20 @@ static long long fk_sense_report(void) {
    luminance, dark-fraction, and a left/center/right band (a coarse subject
    position cue). Platform-neutral (file IO + byte math); only CAPTURE is a
    Windows carrier. This is the native model's perception; the rented oracle
-   verifies it, and surprise drives the distill loop (presence-model.fk). */
+   verifies it, and surprise drives the distill loop (presence-model.fk).
+
+   SCAFFOLD — pending compost (carrier-last debt, named 2026-06-29):
+   The pixel/luminance MATH below and ALL of fk_sense_stream's level logic
+   (surprise / confidence / trust / sovereignty / the row) is BODY, not carrier.
+   Its native home is Form: the `.fk` cells already exist (surprise-receipt,
+   confidence-earned, native-vs-rented, observe/sense-stream.fk) and compute the
+   same values on this kernel (witnessed hand-flattened). It lives in C only
+   because the automatic flattener / source-runner is not yet standing on Windows
+   (windows-home rung 4). Two rungs retire it: (1) stand form-eval-cli/flatten on
+   Windows -> run the stream LOGIC as Form, delete fk_sense_stream + this math;
+   (2) form-asm-on-Windows -> lower the 307k-pixel walk to asm bytes (a tree-walk
+   can't loop it). The seed then shrinks back to the HAL (grab + raw bytes).
+   See receipts/2026-06-29-windows-homecoming-status.md. */
 static unsigned char fk_frame_buf[1000000];
 static long long fk_rd32(unsigned char *p) { return (long long)p[0] | ((long long)p[1] << 8) | ((long long)p[2] << 16) | ((long long)p[3] << 24); }
 /* silent stat over the frame — fills out[0..8] = present,side,mean,darkpct,lm,cm,rm,w,h. Returns 0 / -1. */
