@@ -46,8 +46,11 @@ These are NOT the body; the kernel references them, does not absorb them:
 The homecoming is complete when ALL hold, checkable from this repo with no old-repo path:
 
 1. `cc runtime/fkwu-uni.c` → `fkwu` runs Form source. ✅ (confirmed)
-2. The three walkers build here, and `proof/four-way-run.fk` proves a recipe four-way
-   (Go=Rust=TS=fkwu) with **no bash, no validate.sh, no origin**. ⏳ (verify next)
+2. The three walkers build here, and the kernel host-execs them to prove a recipe four-way
+   (Go=Rust=TS=fkwu) with **no bash, no validate.sh, no origin**. ✅ (host-exec = optag 136,
+   `fwv-verdict` computes the verdict; perturbation-verified: agree→0, walker-odd→2, fkwu-odd→1;
+   `fkwu proof/four-way-run.tbl` → 0. Receipt: `receipts/2026-06-29-kernel-self-proves-four-way.md`.
+   Bridge: this recipe's source→table flatten is hand-bridged until `--src` stone 4 = strings/lists.)
 3. The 706 worklist bodies are home in their faculties and re-prove here. ⏳ (in waves)
 4. This file + the ledger reference every old-repo content category. ✅ (this map)
 5. New work can be authored, proven, and run entirely in this repo. ⏳ (follows 2+3)
