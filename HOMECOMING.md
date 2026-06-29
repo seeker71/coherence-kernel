@@ -6,8 +6,18 @@ so the word "home" stays unspent until they are real.
 
 ## Rung 1 — the fsh heartbeat (the decider)
 
-**The knot:** to run `fsh` natively you need the flatten; to get the native flatten you need `fsh` to orchestrate
-it without bash. Breaking that circularity *is* the decider.
+**CROSSED for the core grammar, 2026-06-29 ~04:35 — the knot was DISSOLVED, not cleaned.** `form-eval`
+(`grammars/form-eval.fk`, four-way → `42` including fkwu) evaluates Form source directly off the BMF cursor with
+**no flatten of the source**. The decider's real answer was Urs's: don't make the brittle fsh-flatten work — take
+flatten *off* the critical path entirely. Source runs via the cursor; flatten is optional speed (the JIT). The
+knot below is the path *not* taken (cleaning the flatten machinery), kept for record.
+**Remaining for rung 1:** (a) complete `form-eval` to full Form — `defn`/`let`/user-calls, the same `fe-`
+recursive-descent shape; (b) the standing `form-cli` loop (a person types → the cursor evaluates → response).
+Receipt: `receipts/2026-06-29-source-tree-walk-crossed.md`.
+
+**The knot (path not taken):** to run `fsh` natively you need the flatten; to get the native flatten you need
+`fsh` to orchestrate it without bash. Breaking that circularity *was* the decider — until form-eval made flatten
+optional, dissolving the need.
 
 **Verified ready (2026-06-29):** `fkwu` compiles native (Mach-O arm64, one `cc` seed); `flatten/fourth-flatten-table.txt`
 (T_flat) is byte-identical to the origin's known-working table; recipe-level self-host flatten is *proven*
