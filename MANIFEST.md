@@ -137,6 +137,16 @@ eyes-on-execution:
      (`form-cli-emitted.c`, `form-cli-table.txt`). The binary *runs* Go-free, but the heavy-chain *build* still
      leans on a committed Go-made-once seed. Closing this — fkwu self-host flattening large chains with no
      committed Go artifact — is the precise remaining decider work.
+   - **[ ] Clean-repo orchestration = the `fsh` port — verified 2026-06-29.** In *this* repo, fkwu compiles
+     native (Mach-O arm64) and `flatten/fourth-flatten-table.txt` is **byte-identical** (same md5, 580704 bytes)
+     to the origin's known-working T_flat. The mechanism is sound; the pieces are present and proven. What rung 1
+     needs here is the **orchestration** — the origin's `fourth_flatten_sources` (bash) frames the stdin request
+     (`count \n stem \n kind \n nmod \n mods… \n band`), gates on `fourth_selfhost`, pipes through `fkwu T_flat 0`,
+     and marker-extracts `==T-stem==…==T-END==`. Reproducing that pipe **by hand** outside the bash harness yields
+     an empty table — not a kernel fault (the same empty result appears with the origin's own cached fkwu, so it is
+     the request-assembly env, not the binary or table). The self-host flatten is real *inside* `validate.sh`;
+     rung 1 in this repo is porting that orchestration to `fsh` so the kernel drives its own flatten with no bash.
+     The pieces are ready; the **driver** is the build. (Do not re-attempt by hand — encode it in `fsh`.)
 2. **The live RUNTIME witness (self-observe gap).** No cell yet watches execution itself — which recipe fired,
    JIT hit/miss, which cell was touched last by which recipe, what's hot. The framebuffer watches *thoughts*;
    this watches the *running kernel*. The realest new piece. The eyes-on-execution.
