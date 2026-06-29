@@ -655,8 +655,9 @@ struct timeval { long tv_sec; int tv_usec; }; extern int gettimeofday(struct tim
    (name arity tag) rows and the comparison/boolean rewrites live in the GENERATED
    runtime/fkwu-optable.h (from flt-ops, the same single source the flattener reads;
    regen via flatten/gen-source-walker.sh). Adding a value op = a manifest row, never
-   a C edit. Only the control forms defn/do/let/if and the two structural literals
-   (empty)/(list ..) keep hand-written shape here — their shape is not a flat emit. */
+   a C edit. Only the control forms defn/do/let/if keep hand-written shape here —
+   their eval semantics are special. Every VALUE form is data: arity-0 ((empty)->18),
+   arity-1/2/3 primitives, and the arity -1 VARIADIC sentinel ((list ..)->cons/19). */
 static char fk_srctext[262144];
 static long long fk_spos;
 static long long fk_slen;
@@ -667,14 +668,15 @@ static long long fk_arg_s, fk_arg_n, fk_fname_s, fk_fname_n;   /* stone 2: the d
 static int fk_sym_eq2(long long s1, long long n1, long long s2, long long n2) { if (n1 != n2) { return 0; } long long i = 0; while (i < n1) { if (fk_srctext[s1 + i] != fk_srctext[s2 + i]) { return 0; } i = i + 1; } return 1; }
 static long long fk_sym_end(long long s) { while (s < fk_slen) { char d = fk_srctext[s]; if (fk_sws(d) || d == 40 || d == 41) { break; } s = s + 1; } return s; }
 /* ── DATA-DRIVEN op dispatch — the last C-work made permanent ─────────────────
-   There is no per-op `if (fk_sym_eq(s, hn, "head")) ...` chain any more. The
+   There is no per-op fk_sym_eq head/empty/list chain any more. The
    (name arity tag) rows and the rewrite rules are DATA: fkwu-optable.h, GENERATED
    from flt-ops (form-flatten.fk, from native-op-manifest.fk) by
    flatten/gen-source-walker-table.fk — the SAME single source the flattener reads.
-   Adding a value op is a manifest row + regen, NEVER a C edit. The control forms
-   defn/do/let/if and the two structural literals (list .. ) / "..": those stay in
-   fk_sparse because their SHAPE is not a flat (tag arity) emit. Everything else —
-   every primitive, every comparison/boolean rewrite — flows through these tables. */
+   Adding a value op is a manifest row + regen, NEVER a C edit. Only the control
+   forms defn/do/let/if stay hand-written (special eval semantics); the string
+   literal "..." is the one non-symbol leaf. Every VALUE form — every primitive,
+   (empty) (arity 0), (list ..) (arity -1 variadic), every comparison/boolean
+   rewrite — flows through these data tables. */
 #include "fkwu-optable.h"
 /* match a source symbol [s,s+n) against a C string by length-and-bytes. */
 static int fk_optname_eq(long long s, long long n, const char *w) { long long i = 0; while (w[i] != 0) { if (i >= n || fk_srctext[s + i] != w[i]) { return 0; } i = i + 1; } return i == n; }
@@ -746,7 +748,7 @@ static long long fk_parse_do(void);
    registered name lowers to tag 12 (call-by-index, single-arg). A non-defn top form is the root (fn[0]). */
 static long long fk_fnsym_s[256], fk_fnsym_n[256], fk_fnidx[256], fk_fntop, fk_defn_next, fk_root, fk_fnar[4096];
 static long long fk_fn_lookup(long long s, long long n) { long long i = 0; while (i < fk_fntop) { if (fk_sym_eq2(s, n, fk_fnsym_s[i], fk_fnsym_n[i])) { return fk_fnidx[i]; } i = i + 1; } return -1; }
-static long long fk_parse_list(void); /* (list a b ..) -> nested cons(.., empty) */
+static long long fk_parse_variadic(long long tag); /* arity -1: parse-until-close, fold right via tag -> nil(18) */
 static long long fk_sparse(void) {
  fk_sskip();
  if (fk_spos >= fk_slen) { return 0; }
@@ -776,11 +778,6 @@ static long long fk_sparse(void) {
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
    return fk_smknode(109, fk_smklit(slot), val, body);
   }
-  /* two STRUCTURAL literals whose shape is not a flat (tag arity) emit:
-     (empty) is the nil value; (list a b ..) lowers to nested cons. Everything
-     else with a value tag flows through the data tables below. */
-  if (fk_sym_eq(s, hn, "empty")) { fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; } return fk_smknode(18, 0, 0, 0); }
-  if (fk_sym_eq(s, hn, "list")) { return fk_parse_list(); }
   /* (if cond then else): the one control form with a value position; 3-ary tag-6
      emit. defn/do/let are handled above; if rides here so the boolean rewrites
      (and/or/not/abs) that LOWER to it find a real (if ...) target. */
@@ -796,10 +793,15 @@ static long long fk_sparse(void) {
    return fk_rw_build(rw, args);
   }
   /* DATA-DRIVEN primitive: read (arity, tag) from fk_optab (the manifest table),
-     parse `arity` args, emit fk_smknode(tag, ...). Adding an op is a manifest row. */
+     parse `arity` args, emit fk_smknode(tag, ...). Adding an op is a manifest row.
+     arity 0 (e.g. (empty) -> tag 18 nil) emits a bare node; arity -1 is the
+     VARIADIC sentinel: parse operands until the close paren and fold them right
+     into a chain via the row's tag (cons/19) ending in nil (tag 18). (list ..)
+     is therefore a DATA row, not a hand-written C case. */
   long long oi = fk_optab_find(s, hn);
   if (oi >= 0) {
    long long ar = fk_optab[oi].arity; long long tag = fk_optab[oi].tag;
+   if (ar < 0) { return fk_parse_variadic(tag); }
    long long c1 = 0, c2 = 0, c3 = 0;
    if (ar >= 1) { c1 = fk_sparse(); }
    if (ar >= 2) { c2 = fk_sparse(); }
@@ -863,13 +865,18 @@ static long long fk_parse_do(void) {
  long long rest = fk_parse_do();
  return fk_smknode(69, node, rest, 0);
 }
-/* (list a b ..) -> cons(a, cons(b, .. empty)); the closing ) yields empty (tag 18, the nil value 1). */
-static long long fk_parse_list(void) {
+/* GENERIC VARIADIC FOLD (arity -1 in fk_optab). Parse operands until the close
+   paren and fold them right into a chain via `tag` ending in nil (tag 18). For
+   (list a b ..) tag is cons/19, yielding cons(a, cons(b, .. empty)); the closing
+   ) yields empty (tag 18, the nil value 1). This is the ONE mechanism that makes
+   `list` a data row instead of a hand-written C case — any future variadic
+   structural form is another (name -1 tag) manifest row, never a C edit. */
+static long long fk_parse_variadic(long long tag) {
  fk_sskip();
  if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) { if (fk_spos < fk_slen) { fk_spos = fk_spos + 1; } return fk_smknode(18, 0, 0, 0); }
  long long h = fk_sparse();
- long long t = fk_parse_list();
- return fk_smknode(19, h, t, 0);
+ long long t = fk_parse_variadic(tag);
+ return fk_smknode(tag, h, t, 0);
 }
 extern int atoi(const char *);
 /* one top-level form: (do ...) is transparent (its inner forms are top-level too); (defn ...) registers
