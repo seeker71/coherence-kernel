@@ -15,3 +15,19 @@ the downward right-fold matvec, `precise` (no FMA fusion) to stay bit-exact.
 
 **Meaning:** the body's transformer-block forward is not only four-way on the kernels — it runs on real GPU
 silicon and agrees to the bit with the proven recipe. A thought, computed on the GPU, witnessed.
+
+## Alternatives (receipt-alternatives, added 2026-06-29 02:17 MDT)
+
+This receipt is a living seed, not a dead record. Its alternatives, each by role:
+
+- **VERIFY** — the CPU twin (same op-order right-fold + Taylor gelu). Result: `[-0.2156026, 0.2974416]`,
+  identical to the GPU (|Δ|=0.00e+00). Confirmed. *(This is the alternative the receipt already carried.)*
+- **VERIFY** — the four-way kernel walk of `form-glsl-ffn-fwd` (Go=Rust=TS=fkwu) crossing `11111`: the recipe's
+  *shape* is confirmed independently of any GPU.
+- **IMPROVE** — the sovereign-native path: the FFN matvec lowered to **Form→asm bytes** (`form-asm-float` 2047),
+  dropping the Metal/Obj-C carrier exactly as clang is dropped by the byte-gate. Same result, no host GPU-API
+  carrier. Promotable when the asm lane runs the full FFN.
+- **PLAY** — the workgroup size (the recipe proves `fglsl-ffn-fwd "64"` and `"32"` agree): a free knob to explore
+  occupancy on the M4 Max without changing the result.
+- **LEARN** — outcome recorded: bit-exact success. Had the GPU diverged from the CPU, this slot would hold the
+  divergence — a bug caught and a branch learned. The slot keeps both; tonight it holds a confirmation.
