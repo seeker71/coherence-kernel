@@ -1227,6 +1227,9 @@ static long long fk_jprim2(long long tag, long long a, long long b) {
  if (tag == 42) { if (fk_isf(a) || fk_isf(b)) { return fk_fbox(fk_num(a) * fk_num(b)); } return ((a >> 1) * (b >> 1)) << 1; }
  if (tag == 5) { return (fk_num(a) <= fk_num(b)) ? 2 : 0; }
  if (tag == 102) { return (fk_num(a) == fk_num(b)) ? 2 : 0; }
+ if (tag == 103) { return (fk_num(a) < fk_num(b)) ? 2 : 0; }    /* lt — mirrors fk_walk tag-103 */
+ if (tag == 10) { if (fk_isf(a) || fk_isf(b)) { return fk_fbox(fk_num(a) / fk_num(b)); } return ((a >> 1) / (b >> 1)) << 1; }   /* div — mirrors fk_walk tag-10 (float-aware) */
+ if (tag == 11) { if (fk_isf(a) || fk_isf(b)) { double x = fk_num(a); double y = fk_num(b); return fk_fbox(x - y * (double)((long long)(x / y))); } return ((a >> 1) % (b >> 1)) << 1; }   /* mod — mirrors fk_walk tag-11 (float-aware) */
  if (tag == 27) {   /* str_concat — mirrors fk_walk's tag-27 exactly */
   long long sa = a >> 1; long long sb = b >> 1;
   if (sa < 0 || sa >= fk_sp || sb < 0 || sb >= fk_sp) { return 0 - 2; }
@@ -1426,6 +1429,19 @@ static void fk_jemit(long long i, int tail) {
   fk_jpatch4(jdone, (int)(fk_jbp - (jdone + 4)));      /* DONE */
   return;
  }
+ if (t == 10 || t == 11 || t == 103) {                 /* div / mod / lt: 2-arg carrier fk_jprim2(tag,a,b), float-aware (mirrors fk_walk) */
+  fk_jemit(fk_node[i][1], 0); fk_jb1(0x50);            /* a -> push */
+  fk_jemit(fk_node[i][2], 0); fk_jb1(0x50);            /* b -> push (top) */
+  /* stack top->down: b,a. fk_jprim2 args: arg0=tag, arg1=a, arg2=b. Re-stage. */
+  fk_jb1(0x59);                                        /* pop rcx (b) */
+  fk_jb1(0x58);                                        /* pop rax (a) */
+  fk_jb1(0x51);                                        /* push rcx (arg2=b) */
+  fk_jb1(0x50);                                        /* push rax (arg1=a) */
+  fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4((int)t); /* mov rax,tag */
+  fk_jb1(0x50);                                        /* push rax (arg0=tag) */
+  fk_jcarrier((void *)fk_jprim2, 3);
+  return;
+ }
  if (t == 25 || t == 54 || t == 53) {                  /* str_len / float_to_int / str_to_float: 1-arg carrier */
   fk_jemit(fk_node[i][1], 0);                          /* arg -> rax */
   fk_jb1(0x50);                                        /* push rax (arg1=val) */
@@ -1512,11 +1528,11 @@ static void fk_jemit(long long i, int tail) {
  }
  if (t == 7 || t == 12 || t == 240 || t == 241) {                                        /* fn call: SELF-recursion native; OTHER-fn via carrier */
   long long callee = (t == 7) ? fk_jit_self : fk_node[i][1];
-  long long argc; long long an[3]; an[0] = -1; an[1] = -1; an[2] = -1;
+  long long argc; long long an[6]; { long long zi = 0; while (zi < 6) { an[zi] = -1; zi = zi + 1; } }
   if (t == 241) {                                        /* variadic call: args in a 242-cons chain */
    long long cell = fk_node[i][2]; long long cnt = 0;
-   while (cell >= 0 && fk_node[cell][0] == 242) { if (cnt < 3) { an[cnt] = fk_node[cell][1]; } cnt = cnt + 1; cell = fk_node[cell][2]; }
-   if (cnt > 3) { if (getenv("FK_JIT_WITNESS")) { printf("[jit-bail] call arity %lld > 3 at node %lld\n", cnt, i); } fk_jit_ok = 0; return; } /* lowers arity 0..3 */
+   while (cell >= 0 && fk_node[cell][0] == 242) { if (cnt < 6) { an[cnt] = fk_node[cell][1]; } cnt = cnt + 1; cell = fk_node[cell][2]; }
+   if (cnt > 6) { if (getenv("FK_JIT_WITNESS")) { printf("[jit-bail] call arity %lld > 6 at node %lld\n", cnt, i); } fk_jit_ok = 0; return; } /* lowers arity 0..6 */
    argc = cnt;
   } else {
    argc = (t == 240) ? 2 : 1;
@@ -1691,8 +1707,8 @@ static int fk_run_src(const char *path, long long arg) {
     else if (rt == 240) { ac = 2; aargs[0] = fk_walk(fk_node[root][2], 0); aargs[1] = fk_walk(fk_node[root][3], 0); }
     else { /* 241 variadic: walk the 242-cons chain (ac may be 0 for a nullary recipe like (slen)) */
      long long cell = fk_node[root][2];
-     while (cell >= 0 && fk_node[cell][0] == 242) { if (ac < 3) { aargs[ac] = fk_walk(fk_node[cell][1], 0); } ac = ac + 1; cell = fk_node[cell][2]; }
-     if (ac > 3) { aok = 0; }   /* 0/1/2/3 args all lower; >3 out of scope */
+     while (cell >= 0 && fk_node[cell][0] == 242) { if (ac < 6) { aargs[ac] = fk_walk(fk_node[cell][1], 0); } ac = ac + 1; cell = fk_node[cell][2]; }
+     if (ac > 6) { aok = 0; }   /* 0..6 args all lower; >6 out of scope */
     }
     long long n = aok ? fk_jit_lower(callee) : 0;
     if (n > 0) {
