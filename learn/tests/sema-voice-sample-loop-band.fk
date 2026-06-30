@@ -1,0 +1,99 @@
+; preludes:
+;   presence/formant-vocoder.fk
+;   learn/sema-voice-sample-loop.fk
+;
+; sema-voice-sample-loop-band -- desired voice target plus sample A/B loop.
+;
+; Verdict 32767:
+;   1     target names Sema's warm/grounded/honest voice profile
+;   2     target keeps the chosen warm mid register and rounded formants
+;   4     formant-vocoder renders an inspectable waveform
+;   8     fingerprint carries duration, energy, voicing, and first phoneme
+;   16    one nudge moves a rough profile closer to target
+;   32    one nudge does not erase difference or imitate the target outright
+;   64    low confidence narrows pitch range
+;   128   low confidence delays onset against high confidence
+;   256   clean local audio sample is admissible
+;   512   cloud or missing-audio samples cannot promote
+;   1024  challenger sample scores above incumbent
+;   2048  clean challenger promotes by A/B margin
+;   4096  fail/timeout/undo keep incumbent
+;   8192  receipt preserves target, listener, intelligibility, and WER evidence
+;   16384 receipt names Form-native loop with neural vocoder pending
+
+(do
+    (defn svsl-band-score (cond bit) (if cond bit 0))
+    (defn svsl-band-rough ()
+        (svsl-profile "rough"
+                      145 620 1250 2850 130
+                      55 82 48 42 44 2))
+    (defn svsl-band-incumbent (target)
+        (svsl-sample (svsl-band-rough) 55 72 18 160 1 970101 0 0 0))
+    (defn svsl-band-challenger (target)
+        (svsl-sample (svsl-nudge (svsl-band-rough) target 8) 84 91 4 120 1 970102 0 0 0))
+    (defn svsl-band-cloud (target)
+        (svsl-sample (svsl-nudge (svsl-band-rough) target 8) 96 98 0 90 0 970103 0 0 0))
+    (defn svsl-band-missing-audio (target)
+        (svsl-sample (svsl-nudge (svsl-band-rough) target 8) 96 98 0 90 1 0 0 0 0))
+    (defn svsl-band-fail (target)
+        (svsl-sample (svsl-nudge (svsl-band-rough) target 8) 96 98 0 90 1 970104 1 0 0))
+    (defn svsl-band-timeout (target)
+        (svsl-sample (svsl-nudge (svsl-band-rough) target 8) 96 98 0 90 1 970105 0 1 0))
+    (defn svsl-band-undo (target)
+        (svsl-sample (svsl-nudge (svsl-band-rough) target 8) 96 98 0 90 1 970106 0 0 1))
+
+    (defn sema-voice-sample-loop-band ()
+        (do
+            (let target (svsl-target))
+            (let rough (svsl-band-rough))
+            (let nudged (svsl-nudge rough target 8))
+            (let low (svsl-shaped target target 1))
+            (let high (svsl-shaped target target 5))
+            (let rendered (svsl-render target))
+            (let fp (svsl-fingerprint target))
+            (let incumbent (svsl-band-incumbent target))
+            (let challenger (svsl-band-challenger target))
+            (let receipt (svsl-receipt incumbent challenger target 20))
+            (let c0 (svsl-band-score (str_eq (svsl-id target) "sema-warm-grounded-honest") 1))
+            (let c1 (svsl-band-score (and (eq (svsl-f0 target) 165)
+                                          (and (eq (svsl-f1 target) 500)
+                                               (and (eq (svsl-f2 target) 900)
+                                                    (eq (svsl-f3 target) 2500)))) 2))
+            (let c2 (svsl-band-score (and (eq (len rendered) (fv-total-duration (svsl-frames target)))
+                                          (gt (fv-energy rendered) 0)) 4))
+            (let c3 (svsl-band-score (and (eq (nth fp 0) (fv-total-duration (svsl-frames target)))
+                                          (and (eq (nth fp 1) (fv-total-energy (svsl-frames target)))
+                                               (and (eq (nth fp 2) 2)
+                                                    (eq (nth fp 3) 1)))) 8))
+            (let c4 (svsl-band-score (gt (svsl-fit nudged target) (svsl-fit rough target)) 16))
+            (let c5 (svsl-band-score (and (lt (svsl-fit nudged target) 1000)
+                                          (not (eq (svsl-f1 nudged) (svsl-f1 target)))) 32))
+            (let c6 (svsl-band-score (lt (svsl-range low) (svsl-range high)) 64))
+            (let c7 (svsl-band-score (eq (svsl-honest-confidence-shape? low high) 1) 128))
+            (let c8 (svsl-band-score (eq (svsl-clean? challenger) 1) 256))
+            (let c9 (svsl-band-score (and (eq (svsl-clean? (svsl-band-cloud target)) 0)
+                                          (eq (svsl-clean? (svsl-band-missing-audio target)) 0)) 512))
+            (let c10 (svsl-band-score (gt (svsl-score challenger target)
+                                          (svsl-score incumbent target)) 1024))
+            (let c11 (svsl-band-score (eq (svsl-promote? incumbent challenger target 20) 1) 2048))
+            (let c12 (svsl-band-score
+                (and (str_eq (svsl-route incumbent (svsl-band-fail target) target 20) "keep-incumbent")
+                     (and (str_eq (svsl-route incumbent (svsl-band-timeout target) target 20) "keep-incumbent")
+                          (str_eq (svsl-route incumbent (svsl-band-undo target) target 20) "keep-incumbent")))
+                4096))
+            (let c13 (svsl-band-score (and (str_eq (svsl-rec-target receipt) "sema-warm-grounded-honest")
+                                           (and (eq (svsl-rec-listener receipt) 84)
+                                                (and (eq (svsl-rec-intelligible receipt) 91)
+                                                     (eq (svsl-rec-wer receipt) 4)))) 8192))
+            (let c14 (svsl-band-score (and (str_eq (svsl-rec-kind receipt) "sema-voice-sample-loop")
+                                           (and (eq (svsl-rec-native-form receipt) 1)
+                                                (eq (svsl-rec-neural-vocoder receipt) 0))) 16384))
+            (add
+                (add
+                    (add (add c0 c1) (add c2 c3))
+                    (add (add c4 c5) (add c6 c7)))
+                (add
+                    (add (add c8 c9) (add c10 c11))
+                    (add (add c12 c13) c14)))))
+
+    (sema-voice-sample-loop-band))
