@@ -32,6 +32,19 @@ output through the cached-pipeline run-stage**, while the four non-`fexp` kernel
 private array) faults or mis-binds on the Adreno**, while the simple kernels are fine. rung2 ran these same
 shaders fine when each dispatch created a *fresh* pipeline (the old leaking run-stage).
 
+## CORRECTION (further debugging — read this)
+- Recreating the sel-2/sel-5 pipelines **per-dispatch did NOT fix them** (the recipe currently has that change
+  at the top of `run-stage`; it can be reverted — it neither helped nor hurt). So "cached vs fresh pipeline" is
+  **not** the root.
+- The "silu writes 0" finding was from a **coherency-confounded isolation test**: I set `gate[0]` with a host
+  `c_u32_set` on the mapped buffer and silu read 0 → `silu(0)*u = 0`. Host writes to the mapped SSBO may not be
+  GPU-visible the way I assumed, so that test is **unsound**. In the *real* forward `gate` is GPU-written by the
+  Wg matmul, so silu's real-input behavior is **unverified**. Do NOT trust the "silu broken" conclusion.
+- What IS solid: decode-attn (sel 5) sentinel-survives (no-op) with VK_SUCCESS on all creates; block L0 with the
+  `gqacp` V-copy attention still hung (~84s) — but the hung stage was inferred from an earlier decode-attn-garbage
+  run, not re-confirmed with gqacp. **Re-bisect block L0 cleanly with the gqacp pre** (which gives correct
+  `gate`) before blaming silu.
+
 ## Next moves (in order)
 1. **Minimal fix to try first:** in run-stage, **do NOT cache** the sel-2 and sel-5 pipelines — create those
    two per-dispatch (as the old run-stage did) while keeping sel 0/1/3/4 cached. If that makes silu write 0.731
