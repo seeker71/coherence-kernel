@@ -1,0 +1,160 @@
+; macos-sema-voice-teacher-carrier.fk -- local intelligible teacher samples.
+;
+; This is deliberately not native Sema TTS. It is a local host teacher carrier:
+; macOS `say` renders candidate voices, ffmpeg normalizes the wav, local
+; whisper.cpp on Metal transcribes it, and Form records whether the sample
+; clears the Sema local-oracle bar. These rows can teach the native acoustic
+; model; they do not promote global Sema voice authority by themselves.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   presence/formant-vocoder.fk
+;   learn/sema-voice-sample-loop.fk
+;   learn/sema-voice-local-oracle-receipt.fk
+
+(do
+    (defn mstc-model () "/Users/ursmuff/.cache/whisper.cpp/ggml-large-v3-turbo.bin")
+    (defn mstc-device () "macos-arm64-m4-max")
+    (defn mstc-oracle () "whisper.cpp-large-v3-turbo")
+    (defn mstc-locale () "en")
+    (defn mstc-text () "Open speech flows.")
+    (defn mstc-out-dir () (str_concat (temp_dir) "/sema-voice-teacher-carrier"))
+    (defn mstc-max-wer () 25)
+
+    (defn mstc-cat3 (a b c) (str_concat a (str_concat b c)))
+    (defn mstc-cat4 (a b c d) (str_concat a (str_concat b (str_concat c d))))
+    (defn mstc-q (s) (mstc-cat3 "'" s "'"))
+    (defn mstc-digit (n) (substring "0123456789" n (add n 1)))
+    (defn mstc-int-str (n)
+        (if (lt n 10) (mstc-digit n)
+            (str_concat (mstc-int-str (div n 10)) (mstc-digit (mod n 10)))))
+
+    (defn mstc-aiff-path (id)
+        (mstc-cat4 (mstc-out-dir) "/voice-" (mstc-int-str id) ".aiff"))
+    (defn mstc-wav-path (id)
+        (mstc-cat4 (mstc-out-dir) "/voice-" (mstc-int-str id) ".wav"))
+
+    (defn mstc-say-command (voice aiff text)
+        (str_concat
+            (str_concat "say -v " (mstc-q voice))
+            (str_concat
+                (str_concat " -o " (mstc-q aiff))
+                (str_concat " " (mstc-q text)))))
+    (defn mstc-ffmpeg-command (aiff wav)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (mstc-q aiff))
+            (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le " (mstc-q wav))))
+    (defn mstc-whisper-command (wav)
+        (str_concat
+            (str_concat "whisper-cli -m " (mstc-q (mstc-model)))
+            (str_concat
+                (str_concat " -f " (mstc-q wav))
+                (str_concat " " (mstc-cat3 "-l " (mstc-locale) " -nt -np")))))
+
+    (defn mstc-render (voice id)
+        (do
+            (let _mk (fs_mkdir (mstc-out-dir)))
+            (let _say (host-exec (mstc-say-command voice (mstc-aiff-path id) (mstc-text)) ""))
+            (let _ff (host-exec (mstc-ffmpeg-command (mstc-aiff-path id) (mstc-wav-path id)) ""))
+            (mstc-wav-path id)))
+
+    (defn mstc-transcript (wav)
+        (host-exec (mstc-whisper-command wav) ""))
+
+    (defn mstc-byte-hash-loop (bs i n acc)
+        (if (ge i n) acc
+            (mstc-byte-hash-loop bs (add i 257) n
+                                 (mod (add (mul acc 31) (str_byte_at bs i)) 1000000007))))
+    (defn mstc-audio-hash (path)
+        (do
+            (let bs (read_file path))
+            (mstc-byte-hash-loop bs 0 (str_len bs) 1)))
+
+    (defn mstc-wer (hyp)
+        (if (str_eq hyp (mstc-text)) 0
+            (if (str_eq hyp "") 100
+                (sw-wer (sw-tokens hyp) (sw-tokens (mstc-text))))))
+
+    (defn mstc-teacher-sample (audio-hash transcript)
+        (svsl-sample (svsl-target)
+                     88
+                     (if (le (mstc-wer transcript) (mstc-max-wer)) 94 0)
+                     (mstc-wer transcript)
+                     120
+                     1
+                     audio-hash
+                     0
+                     0
+                     0))
+
+    (defn mstc-row-from (id voice audio-hash transcript)
+        (list "macos-sema-voice-teacher-row"
+              id
+              voice
+              audio-hash
+              transcript
+              (mstc-wer transcript)
+              (if (le (mstc-wer transcript) (mstc-max-wer)) 1 0)
+              "host-teacher-not-native-authority"
+              (svlor-row id
+                         (mstc-locale)
+                         (mstc-text)
+                         transcript
+                         (mstc-oracle)
+                         (mstc-device)
+                         (mstc-teacher-sample audio-hash transcript)
+                         (svlor-audio audio-hash 16000 1)
+                         1
+                         1
+                         (svlor-controls 0 0 0))))
+
+    (defn mstc-row-kind       (r) (nth r 0))
+    (defn mstc-row-id         (r) (nth r 1))
+    (defn mstc-row-voice      (r) (nth r 2))
+    (defn mstc-row-hash       (r) (nth r 3))
+    (defn mstc-row-transcript (r) (nth r 4))
+    (defn mstc-row-wer        (r) (nth r 5))
+    (defn mstc-row-pass       (r) (nth r 6))
+    (defn mstc-row-authority  (r) (nth r 7))
+    (defn mstc-row-svlor      (r) (nth r 8))
+
+    (defn mstc-row (id voice)
+        (do
+            (let wav (mstc-render voice id))
+            (let transcript (mstc-transcript wav))
+            (mstc-row-from id voice (mstc-audio-hash wav) transcript)))
+
+    (defn mstc-host-tools-ready? ()
+        (if (str_eq (host-exec "command -v say >/dev/null && command -v ffmpeg >/dev/null && command -v whisper-cli >/dev/null && printf 1 || printf 0" "") "1") 1 0))
+    (defn mstc-ready? ()
+        (if (and (eq (fs_exists (mstc-model)) 1) (eq (mstc-host-tools-ready?) 1)) 1 0))
+
+    (defn mstc-run-flo ()
+        (if (eq (mstc-ready?) 1)
+            (mstc-row 983002 "Flo (English (US))")
+            (mstc-row-from 983002 "Flo (English (US))" 0 "")))
+
+    (defn mstc-verdict (row)
+        (add
+            (add
+                (add (if (str_eq (mstc-row-kind row) "macos-sema-voice-teacher-row") 1 0)
+                     (if (gt (mstc-row-hash row) 0) 2 0))
+                (add (if (eq (mstc-row-pass row) 1) 4 0)
+                     (if (str_eq (mstc-row-authority row) "host-teacher-not-native-authority") 8 0)))
+            (add
+                (add (if (eq (svlor-valid? (mstc-row-svlor row)) 1) 16 0)
+                     (if (eq (svlor-oracle-success? (mstc-row-svlor row) (mstc-max-wer)) 1) 32 0))
+                (add (if (str_eq (svlor-oracle-name (mstc-row-svlor row)) (mstc-oracle)) 64 0)
+                     (if (str_eq (svlor-device (mstc-row-svlor row)) (mstc-device)) 128 0)))))
+
+    (defn mstc-run-verdict ()
+        (if (eq (mstc-ready?) 1)
+            (mstc-verdict (mstc-run-flo))
+            0))
+
+    (defn mstc-run-wer ()
+        (if (eq (mstc-ready?) 1)
+            (mstc-row-wer (mstc-run-flo))
+            999))
+
+    0)
