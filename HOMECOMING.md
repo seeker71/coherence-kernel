@@ -45,9 +45,17 @@ embed→stack→finalLN→logits path (`receipts/2026-06-30-decoder-forward-full
 `model/tests/transformer-forward-full-band.fk`, verdict 63 four-way, perturbation-deterministic) — at small
 fixed width in the tree-walker.
 
-**Remains:** the forward at REAL width (d_model=384+ over `ll-buffer` / `form-asm-matvec`, the one-engine
-native lane); the real weights loaded as recipe-data — a real open base (Qwen/Llama, real zh coverage) through
-the form block, the whisper block-0 pattern extended to a generative base (**3b**); then the `oracle-distill`
+**Done — the same forward at REAL WIDTH (d_model=384, ff=1536 — whisper-tiny's widths):** matvec, FFN,
+attention/softmax, the masked-self+cross+FFN decoder block (multi-head 6×64), and the composed
+embed→stack→finalLN→logits path, all bit-exact four-way (band `model/tests/transformer-forward-d384-band.fk`,
+verdict 63 on fkwu/go/rust/ts, perturbation-deterministic — `receipts/2026-06-30-decoder-forward-d384.md`).
+**Honest split:** this is the tree-walker fp64 lane; `form-asm-matvec` emits ARM64 (does not execute on
+fkwu/Windows), and the x86_64 native lane is integer-only — a native x86_64 f64 matvec is the named next step.
+
+**Remains:** the forward over the **native** lane (an x86_64 f64 matvec through fkwu's f64 pool, the
+one-engine native lane — ARM64 emits today); the real weights loaded as recipe-data — a real open base
+(Qwen/Llama, real zh coverage) through the form block, the whisper block-0 pattern extended to a generative
+base (**3b**); then the `oracle-distill`
 loop; and a **pre-registered eval metric** before any "≥ rented" claim. These are the next steps, each with its
 own receipt, sized by doing them. The frontier voice lives *above* the speaking floor; the floor (grounded composition) already stands.
 
