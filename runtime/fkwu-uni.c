@@ -948,8 +948,26 @@ static long long fk_sparse(void) {
  /* stone 4: a bare "..." string literal. */
  if (c == 34) { return fk_smkstr(); }
  if ((c >= 48 && c <= 57) || (c == 45 && fk_spos + 1 < fk_slen && fk_srctext[fk_spos + 1] >= 48 && fk_srctext[fk_spos + 1] <= 57)) {
-  long long neg = 0; if (c == 45) { neg = 1; fk_spos = fk_spos + 1; }
-  long long v = 0; while (fk_spos < fk_slen) { char d = fk_srctext[fk_spos]; if (d < 48 || d > 57) { break; } v = v * 10 + (d - 48); fk_spos = fk_spos + 1; }
+  /* number leaf: integer OR float. A '.' or a valid 'e'/'E' exponent makes it a FLOAT — intern the
+     whole literal text (incl "1.5e-05") and wrap it in str_to_float (tag 53 = strtod), the same float
+     value the flattener's flt-float-lit produces. Else an integer literal (tag 1). */
+  long long start = fk_spos;
+  if (c == 45) { fk_spos = fk_spos + 1; }
+  while (fk_spos < fk_slen && fk_srctext[fk_spos] >= 48 && fk_srctext[fk_spos] <= 57) { fk_spos = fk_spos + 1; }
+  int isf = 0;
+  if (fk_spos < fk_slen && fk_srctext[fk_spos] == 46) { isf = 1; fk_spos = fk_spos + 1; while (fk_spos < fk_slen && fk_srctext[fk_spos] >= 48 && fk_srctext[fk_spos] <= 57) { fk_spos = fk_spos + 1; } }
+  if (fk_spos < fk_slen && (fk_srctext[fk_spos] == 101 || fk_srctext[fk_spos] == 69)) {
+   long long pe = fk_spos + 1; if (pe < fk_slen && (fk_srctext[pe] == 43 || fk_srctext[pe] == 45)) { pe = pe + 1; }
+   if (pe < fk_slen && fk_srctext[pe] >= 48 && fk_srctext[pe] <= 57) { isf = 1; fk_spos = pe + 1; while (fk_spos < fk_slen && fk_srctext[fk_spos] >= 48 && fk_srctext[fk_spos] <= 57) { fk_spos = fk_spos + 1; } }
+  }
+  if (isf) {
+   fk_sinit(); long long ps = fk_sbp; long long k = start;
+   while (k < fk_spos) { while (fk_sbp + 1 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } fk_sb[fk_sbp] = fk_srctext[k]; fk_sbp = fk_sbp + 1; k = k + 1; }
+   long long idx = fk_sintern(ps, fk_sbp - ps);
+   return fk_smknode(53, fk_smknode(24, idx, 0, 0), 0, 0);
+  }
+  long long v = 0; long long j = start; int neg = 0; if (fk_srctext[j] == 45) { neg = 1; j = j + 1; }
+  while (j < fk_spos) { v = v * 10 + (fk_srctext[j] - 48); j = j + 1; }
   if (neg) { v = 0 - v; }
   return fk_smklit(v);
  }
