@@ -12,6 +12,10 @@ This defines the Form-owned packet that must feed the existing host
 tagged argument vector, rooted frame, source/exception maps, deopt metadata, and
 W^X/sealed install state.
 
+Amended after the args-vector ABI witness: the admitted byte image now loads
+from the `long long *args` pointer (`[rdi]` on SysV, `[rcx]` on Win64). The
+older one-register carrier payload is rejected for this membrane.
+
 ## Witness
 
 Run:
@@ -30,32 +34,33 @@ Observed:
 
 Meaning:
 
-- `1`: byte membrane, native-call-plan, and host-membrane receipts compose.
-- `2`: one-argument ingress packet is safe.
-- `4`: two-argument ingress packet is safe.
-- `8`: exact byte image is preserved.
-- `16`: without host byte ingress, safe packet remains pending.
-- `32`: with host ingress, passing path selects native.
-- `64`: guard failure deopts.
-- `128`: runtime failure selects exception.
-- `256`: invalidation rewalks.
-- `512`: parity failure deopts.
-- `1024`: stale cache melts.
-- `2048`: byte-count mismatch rejects.
-- `4096`: invalid byte rejects.
-- `8192`: untagged argument rejects.
-- `16384`: too many arguments reject.
-- `32768`: frame smaller than arg vector rejects.
-- `65536`: foreign `c-lowering` owner rejects.
-- `131072`: unknown ABI rejects.
-- `262144`: missing source map rejects.
-- `524288`: missing W^X/sealed state rejects.
-- `1048576`: bad byte-membrane receipt rejects.
+- `1`: byte membrane, native-call-plan, host-membrane, and args-vector payload
+  receipts compose.
+- `2`: SysV one-argument arg-vector ingress packet is safe.
+- `4`: Win64 one-argument arg-vector ingress packet is safe.
+- `8`: SysV two-argument arg-vector ingress packet is safe.
+- `16`: the old register-argument carrier payload rejects.
+- `32`: exact SysV arg-vector byte image is preserved.
+- `64`: without host byte ingress, safe packet remains pending.
+- `128`: with host ingress, passing path selects native.
+- `256`: guard failure deopts.
+- `512`: runtime failure selects exception.
+- `1024`: invalidation rewalks.
+- `2048`: parity failure deopts.
+- `4096`: stale cache melts.
+- `8192`: byte-count mismatch rejects.
+- `16384`: invalid byte rejects.
+- `32768`: untagged argument rejects.
+- `65536`: too many arguments reject.
+- `131072`: frame smaller than arg vector rejects.
+- `262144`: foreign `c-lowering` owner rejects.
+- `524288`: unknown ABI rejects.
+- `1048576`: missing source, missing W^X/sealed state, and bad byte-membrane receipt reject.
 
 ## Honest boundary
 
 This still does not expose arbitrary Form byte lists to the runtime host
 primitive. It makes the ingress contract precise enough to wire: the host door
-may only consume Form-owned valid bytes with a matching byte count, tagged
-arguments, a rooted frame, source and exception maps, deopt metadata, ABI
+may only consume Form-owned valid args-vector bytes with a matching byte count,
+tagged arguments, a rooted frame, source and exception maps, deopt metadata, ABI
 agreement, W^X/sealed state, and positive generation.
