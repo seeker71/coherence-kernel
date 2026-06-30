@@ -240,6 +240,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       live voice on `oracle-guide` with `6` receipts missing; demo clean input proves `3/3` rows move open dictation
       to `native-open-asr-source` and Sema live voice to `native-sema-voice` under the same WER/confidence/latency
       and control gates.
+- [x] **Speech authority model selection added.** `learn/speech-authority-model-selection.fk` joins model metrics to
+      global live authority (`32767`): current ASR/TTS remain `prototype-asr` and `sema-voice-sample-loop` under
+      `oracle-guide` with `0/2` global speech-native authority, `6` missing live receipts, and `0` admitted native
+      neural parameters; demo clean receipts select `native-open-asr-source` and `native-sema-voice` with `2/2`
+      global speech-native authority. NL2NL and audio2audio keep their current native/scoped arms.
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
