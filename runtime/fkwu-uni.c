@@ -864,7 +864,16 @@ static long long fk_sparse(void) {
    return body;
   }
   if (fk_sym_eq(s, hn, "do")) { return fk_parse_do(); }
-  /* (let name val body): a 3-element standalone let — store val at the next slot, eval body in scope. */
+  /* (let name val): canonical let is TWO-ARG — it binds name for the REST of its (do ...)
+     and evaluates to val (observe/wav-sense.fk: "let is two-arg only; binds for the rest
+     of its do; a three-arg (let n v body) drops body"; the Go/Rust/TS walkers agree). A
+     well-formed let always opens a do, so it is bound by fk_parse_do, which sees the rest;
+     this fk_sparse path is reached only by a BARE let in a raw value position (no do, hence
+     no rest). The old 3-arg form here — (let name val body), eval body in scope — is the
+     malformed shape the walkers drop (TS rejects it outright); it survives untouched as a
+     pre-existing, non-four-way value-position convenience. The actual do-let divergence is
+     fixed entirely in fk_parse_top + fk_parse_do; this path is left as-is to keep every
+     prelude library byte-identical. */
   if (fk_sym_eq(s, hn, "let")) {
    fk_sskip(); long long ns = fk_spos; fk_spos = fk_sym_end(fk_spos); long long nlen = fk_spos - ns;
    long long val = fk_sparse();
@@ -1050,10 +1059,31 @@ static void fk_parse_top(void) {
   long long p = fk_spos + 1; while (p < fk_slen && fk_sws(fk_srctext[p])) { p = p + 1; }
   long long he = fk_sym_end(p);
   if (fk_sym_eq(p, he - p, "do")) {
+   /* A top-level (do ...) is the root form. Leading (defn ...) inner forms register as
+      named functions so cross-calls resolve (four-way-run.fk is two such defns), and a
+      leading nested (do ...) stays TRANSPARENT — its own defns register and its value
+      becomes the root, exactly as the old loop did (the optable generator wraps its
+      defns in one such nested do). Both keep going through fk_parse_top, which carries
+      defn registration. The FIRST value-bearing inner form (a let or an expression)
+      begins the root value-sequence, parsed by fk_parse_do so a do-let binds for the
+      REST of the do (tag 109) and forms sequence (tag 69). The old loop sent that value
+      part through fk_parse_top too; fk_parse_top has no let-binding and overwrote fk_root
+      each iteration, so `(do (let p V) BODY)` lost the binding and BODY read an unbound
+      name (-> 0). Routing only the value part through fk_parse_do is the whole fix; defn
+      and nested-do handling are unchanged. fk_parse_do consumes this do's closing )
+      itself; a do of only defns leaves fk_root unset so the last defn becomes the root. */
    fk_spos = he;
-   while (1) { fk_sskip(); if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) { break; } fk_parse_top(); }
-   if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
-   return;
+   while (1) {
+    fk_sskip();
+    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) { if (fk_spos < fk_slen) { fk_spos = fk_spos + 1; } return; }
+    if (fk_srctext[fk_spos] == 40) {
+     long long q = fk_spos + 1; while (q < fk_slen && fk_sws(fk_srctext[q])) { q = q + 1; }
+     long long qe = fk_sym_end(q);
+     if (fk_sym_eq(q, qe - q, "defn") || fk_sym_eq(q, qe - q, "do")) { fk_parse_top(); continue; }
+    }
+    fk_root = fk_parse_do();
+    return;
+   }
   }
   if (fk_sym_eq(p, he - p, "defn")) {
    fk_spos = he; fk_sskip();
