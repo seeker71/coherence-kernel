@@ -126,6 +126,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       and diagnoses via `proof/four-way-verdict`; witnessed `0` (all agree). No bash, no `validate.sh`, no origin.
 - [x] The proven body moved over: `form-cli/` (25 cells), `model/` (30 — the transformer/mel/asm/rag execution),
       the `observe/` `learn/` `ingest/` `presence/` organs, the `grammars/`, the welcoming (`README`, `CONTRIBUTING`, `AGENTS`).
+- [x] **The offer/ack control core** — `control/offer-ack-core.fk`: the five Form control primitives (fail, stop,
+      choice, exceptions, async) as thin expressions over ONE mechanism (`oac-kind` + `oac-offer`), derived from
+      axiom-5. Four-way-proven in the origin (1023); re-proof here pends the Form-native eval lane (the C `--src`
+      seed does not carry `oac-offer`'s indirect call by design). See `receipts/2026-06-29-offer-ack-control-core.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
