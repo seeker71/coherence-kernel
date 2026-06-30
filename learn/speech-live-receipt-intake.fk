@@ -1,0 +1,111 @@
+; speech-live-receipt-intake.fk -- real live speech receipt intake for promotion.
+;
+; The promotion readiness ledger says each global live lane needs three real
+; live native receipts. This cell defines the compact receipt row and the exact
+; validation/counting law. It proves two things without faking today's status:
+; pending/dirty rows do not promote, and three clean real live rows would satisfy
+; the global promotion gate for a lane.
+;
+; preludes:
+;   learn/speech-model-metrics-report.fk
+;   learn/speech-oracle-native-backlog.fk
+;   learn/speech-next-trial-scheduler.fk
+;   learn/speech-open-asr-trial-window.fk
+;   learn/sema-voice-trial-window.fk
+;   learn/speech-current-status-ledger.fk
+;   learn/speech-global-promotion-readiness.fk
+
+(do
+    (defn slri-row (lane id device oracle audio-hash sample-rate channels truth oracle-wer native-wer
+                         confidence latency-ms local consent fail timeout undo)
+        (list "speech-live-receipt"
+              lane id device oracle audio-hash sample-rate channels truth oracle-wer native-wer
+              confidence latency-ms local consent fail timeout undo))
+    (defn slri-lane        (r) (nth r 1))
+    (defn slri-id          (r) (nth r 2))
+    (defn slri-device      (r) (nth r 3))
+    (defn slri-oracle      (r) (nth r 4))
+    (defn slri-audio-hash  (r) (nth r 5))
+    (defn slri-sample-rate (r) (nth r 6))
+    (defn slri-channels    (r) (nth r 7))
+    (defn slri-truth       (r) (nth r 8))
+    (defn slri-oracle-wer  (r) (nth r 9))
+    (defn slri-native-wer  (r) (nth r 10))
+    (defn slri-confidence  (r) (nth r 11))
+    (defn slri-latency-ms  (r) (nth r 12))
+    (defn slri-local       (r) (nth r 13))
+    (defn slri-consent     (r) (nth r 14))
+    (defn slri-fail        (r) (nth r 15))
+    (defn slri-timeout     (r) (nth r 16))
+    (defn slri-undo        (r) (nth r 17))
+
+    (defn slri-audio-present? (r)
+        (if (and (gt (slri-audio-hash r) 0)
+                 (and (gt (slri-sample-rate r) 0) (gt (slri-channels r) 0))) 1 0))
+    (defn slri-control-clean? (r)
+        (if (eq (add (add (slri-fail r) (slri-timeout r)) (slri-undo r)) 0) 1 0))
+    (defn slri-valid? (r)
+        (if (and (str_eq (nth r 0) "speech-live-receipt")
+                 (and (eq (slri-local r) 1)
+                      (and (eq (slri-consent r) 1)
+                           (and (eq (slri-audio-present? r) 1)
+                                (eq (slri-control-clean? r) 1))))) 1 0))
+    (defn slri-native-success? (r max-wer min-confidence max-latency)
+        (if (and (eq (slri-valid? r) 1)
+                 (and (le (slri-native-wer r) max-wer)
+                      (and (le (slri-oracle-wer r) max-wer)
+                           (and (ge (slri-confidence r) min-confidence)
+                                (le (slri-latency-ms r) max-latency))))) 1 0))
+
+    (defn slri-count-lane (rows lane max-wer min-confidence max-latency)
+        (if (eq (len rows) 0) 0
+            (add
+                (if (str_eq (slri-lane (head rows)) lane)
+                    (slri-native-success? (head rows) max-wer min-confidence max-latency)
+                    0)
+                (slri-count-lane (tail rows) lane max-wer min-confidence max-latency))))
+
+    (defn slri-ready? (rows lane required max-wer min-confidence max-latency)
+        (if (ge (slri-count-lane rows lane max-wer min-confidence max-latency) required) 1 0))
+
+    (defn slri-current-rows ()
+        (empty))
+
+    (defn slri-demo-open-rows ()
+        (list
+            (slri-row "live-open-dictation" 9701 "macos-arm64-m4-max" "whisper.cpp-large-v3-turbo-metal" 970101 16000 1 "i am" 0 0 92 130 1 1 0 0 0)
+            (slri-row "live-open-dictation" 9702 "macos-arm64-m4-max" "whisper.cpp-large-v3-turbo-metal" 970102 16000 1 "truth alone triumphs" 0 0 91 134 1 1 0 0 0)
+            (slri-row "live-open-dictation" 9703 "macos-arm64-m4-max" "whisper.cpp-large-v3-turbo-metal" 970103 16000 1 "open speech flows" 0 0 90 139 1 1 0 0 0)))
+
+    (defn slri-demo-voice-rows ()
+        (list
+            (slri-row "sema-live-voice" 9801 "macos-arm64-m4-max" "whisper.cpp-large-v3-turbo-metal" 980101 16000 1 "Open speech flows." 0 0 94 110 1 1 0 0 0)
+            (slri-row "sema-live-voice" 9802 "macos-arm64-m4-max" "whisper.cpp-large-v3-turbo-metal" 980102 16000 1 "Open speech flows." 0 0 93 112 1 1 0 0 0)
+            (slri-row "sema-live-voice" 9803 "macos-arm64-m4-max" "whisper.cpp-large-v3-turbo-metal" 980103 16000 1 "Open speech flows." 0 0 92 115 1 1 0 0 0)))
+
+    (defn slri-dirty-rows ()
+        (list
+            (slri-row "live-open-dictation" 9704 "macos-arm64-m4-max" "whisper.cpp-large-v3-turbo-metal" 0 16000 1 "i am" 0 0 92 130 1 1 0 0 0)
+            (slri-row "sema-live-voice" 9804 "macos-arm64-m4-max" "whisper.cpp-large-v3-turbo-metal" 980104 16000 1 "Open speech flows." 0 0 92 115 1 1 1 0 0)))
+
+    (defn slri-report ()
+        (do
+            (let current (slri-current-rows))
+            (let open-demo (slri-demo-open-rows))
+            (let voice-demo (slri-demo-voice-rows))
+            (let dirty (slri-dirty-rows))
+            (let required 3)
+            (list "speech-live-receipt-intake"
+                  (slri-count-lane current "live-open-dictation" 25 80 2000)
+                  (slri-count-lane current "sema-live-voice" 25 80 2000)
+                  required
+                  (slri-ready? open-demo "live-open-dictation" required 25 80 2000)
+                  (slri-ready? voice-demo "sema-live-voice" required 25 80 2000)
+                  (slri-count-lane dirty "live-open-dictation" 25 80 2000)
+                  (slri-count-lane dirty "sema-live-voice" 25 80 2000)
+                  "current-real-live-receipts-empty"
+                  "three-clean-real-live-receipts-promote-a-lane"
+                  1
+                  0)))
+
+    0)
