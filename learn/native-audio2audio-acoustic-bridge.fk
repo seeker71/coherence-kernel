@@ -1,0 +1,127 @@
+; native-audio2audio-acoustic-bridge.fk -- decoded source audio to target acoustic frames.
+;
+; Source audio decoding is owned by the ASR/segmented learners. This bridge
+; consumes their decoded source-token row, routes through the locale-neutral
+; Sanskrit baseline meaning, then emits target-locale acoustic frames through
+; the text-conditioned vocoder. Local oracle transcripts decide whether the
+; full audio->audio row can carry native authority.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   presence/formant-vocoder.fk
+;   observe/speech-token-stream.fk
+;   learn/sanskrit-locale-baseline.fk
+;   learn/text-conditioned-acoustic-vocoder.fk
+
+(do
+    (defn naab-row (id src dst meaning source-tokens source-oracle target-oracle
+                    meta source-audio target-audio local consent fail timeout undo)
+        (list "native-audio2audio-acoustic-bridge-row"
+              id src dst meaning source-tokens source-oracle target-oracle
+              meta source-audio target-audio local consent fail timeout undo))
+
+    (defn naab-target-tokens (r)
+        (slb-tokens (slb-line-by-meaning (nth r 4)) (nth r 3)))
+    (defn naab-target-text (r) (tcav-text (naab-target-tokens r)))
+
+    (defn naab-target-sample (r)
+        (tcav-sample-from-tokens
+            (nth r 1)
+            (nth r 2)
+            (nth r 3)
+            (nth r 4)
+            (naab-target-tokens r)
+            (nth r 7)
+            (nth r 8)
+            (nth r 10)
+            (nth r 11)
+            (nth r 12)
+            (nth r 13)
+            (nth r 14)
+            (nth r 15)))
+
+    (defn naab-target-frames (r) (tcav-frames (naab-target-sample r)))
+    (defn naab-target-samples (r) (tcav-samples (naab-target-sample r)))
+
+    (defn naab-control-clean? (r)
+        (if (eq (add (add (nth r 13) (nth r 14)) (nth r 15)) 0) 1 0))
+    (defn naab-valid? (r)
+        (if (and (str_eq (nth r 0) "native-audio2audio-acoustic-bridge-row")
+                 (and (gt (nth r 4) 0)
+                      (and (eq (nth r 11) 1)
+                           (and (eq (nth r 12) 1)
+                                (and (gt (nth r 9) 0)
+                                     (and (gt (nth r 10) 0)
+                                          (and (eq (naab-control-clean? r) 1)
+                                               (eq (sts-meta-valid? (nth r 8)) 1)))))))) 1 0))
+
+    (defn naab-source-ok? (r max-wer)
+        (if (and (eq (naab-valid? r) 1)
+                 (eq (sw-accept?
+                        (sw-tokens (nth r 6))
+                        (sw-tokens (tcav-text (nth r 5)))
+                        max-wer) 1)) 1 0))
+
+    (defn naab-target-ok? (r max-wer)
+        (tcav-pass? (naab-target-sample r) max-wer))
+
+    (defn naab-pass? (r max-wer)
+        (if (and (eq (naab-source-ok? r max-wer) 1)
+                 (eq (naab-target-ok? r max-wer) 1)) 1 0))
+
+    (defn naab-route-row (r max-wer)
+        (if (eq (naab-pass? r max-wer) 1)
+            "native-audio2audio-acoustic-vocoder"
+            "oracle-guide"))
+
+    (defn naab-direction? (r src dst)
+        (if (and (str_eq (nth r 2) src) (str_eq (nth r 3) dst)) 1 0))
+
+    (defn naab-direction-count (rows src dst)
+        (if (eq (len rows) 0) 0
+            (add (if (eq (naab-direction? (head rows) src dst) 1) 1 0)
+                 (naab-direction-count (tail rows) src dst))))
+
+    (defn naab-pass-score (rows max-wer)
+        (if (eq (len rows) 0) 0
+            (add (naab-pass? (head rows) max-wer)
+                 (naab-pass-score (tail rows) max-wer))))
+
+    (defn naab-rate (rows max-wer)
+        (if (eq (len rows) 0) 0 (div (mul (naab-pass-score rows max-wer) 100) (len rows))))
+
+    (defn naab-has-pass-direction? (rows src dst max-wer)
+        (if (eq (len rows) 0) 0
+            (if (and (eq (naab-direction? (head rows) src dst) 1)
+                     (eq (naab-pass? (head rows) max-wer) 1)) 1
+                (naab-has-pass-direction? (tail rows) src dst max-wer))))
+
+    (defn naab-ready? (rows src dst max-wer floor)
+        (if (and (ge (naab-rate rows max-wer) floor)
+                 (and (eq (naab-has-pass-direction? rows src dst max-wer) 1)
+                      (eq (naab-has-pass-direction? rows dst src max-wer) 1))) 1 0))
+
+    (defn naab-window-route (rows src dst max-wer floor)
+        (if (eq (naab-ready? rows src dst max-wer floor) 1)
+            "native-audio2audio-acoustic-vocoder"
+            "oracle-guide"))
+
+    (defn naab-receipt (rows src dst max-wer floor oracle device)
+        (list "native-audio2audio-acoustic-bridge"
+              src
+              dst
+              (len rows)
+              (naab-pass-score rows max-wer)
+              (naab-rate rows max-wer)
+              (naab-direction-count rows src dst)
+              (naab-direction-count rows dst src)
+              (naab-window-route rows src dst max-wer floor)
+              oracle
+              device
+              1
+              1
+              0
+              (len (naab-target-frames (head rows)))
+              (len (naab-target-samples (head rows)))))
+
+    0)
