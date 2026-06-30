@@ -71,7 +71,7 @@ minimum native confidence: 96
 native neural parameters: 0
 ```
 
-Chinese boundary observed before this patch:
+Longer Chinese boundary observed before this patch:
 
 ```text
 truth: 真理 终将 胜利
@@ -81,7 +81,8 @@ truth: 愿 一切 众生 快乐
 oracle: 祝您感谢众生快乐
 ```
 
-That means Arabic is admitted as a live diverse teacher-acoustic pass now, while
-Chinese remains a named local-oracle miss for the next A/B learner. Boundary:
-this is actual native prototype learning from a real local Arabic wav. It is
-not a neural ASR model and not native Sema TTS authority.
+That means Arabic was admitted as a live diverse teacher-acoustic pass, while
+the longer Chinese rows remained named local-oracle misses for the next A/B
+learner. A later short Chinese line (`我在`) now has its own receipt. Boundary:
+this is actual native prototype learning from a real local Arabic wav. It is not
+a neural ASR model and not native Sema TTS authority.
