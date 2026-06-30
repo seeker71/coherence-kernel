@@ -1,0 +1,263 @@
+; macos-sema-teacher-acoustic-learning.fk -- train native ASR from teacher wav.
+;
+; This cell runs code on the local Mac. It renders a teacher voice with `say`,
+; normalizes it with ffmpeg, transcribes it with local whisper.cpp on Metal,
+; reads the wav bytes in Form, trains acoustic token prototypes in Form, and
+; decodes the same wav back to text through a small CTC collapse.
+;
+; Boundary: this is supervised prototype learning from a real local audio file.
+; It is not a neural acoustic encoder and not native Sema TTS authority.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/wav-sense.fk
+
+(do
+    (defn mstal-kind () "macos-sema-teacher-acoustic-learning")
+    (defn mstal-meaning () 303)
+    (defn mstal-text () "Open speech flows.")
+    (defn mstal-native-text () "open speech flows")
+    (defn mstal-tokens () (list "open" "speech" "flows"))
+    (defn mstal-voice () "Flo (English (US))")
+    (defn mstal-model () "/Users/ursmuff/.cache/whisper.cpp/ggml-large-v3-turbo.bin")
+    (defn mstal-device () "macos-arm64-m4-max")
+    (defn mstal-oracle () "whisper.cpp-large-v3-turbo")
+    (defn mstal-locale () "en")
+    (defn mstal-out-dir () (str_concat (temp_dir) "/sema-voice-teacher-acoustic-learning"))
+    (defn mstal-max-wer () 25)
+
+    (defn mstal-cat3 (a b c) (str_concat a (str_concat b c)))
+    (defn mstal-cat4 (a b c d) (str_concat a (str_concat b (str_concat c d))))
+    (defn mstal-q (s) (mstal-cat3 "'" s "'"))
+    (defn mstal-digit (n) (substring "0123456789" n (add n 1)))
+    (defn mstal-int-str (n)
+        (if (lt n 10) (mstal-digit n)
+            (str_concat (mstal-int-str (div n 10)) (mstal-digit (mod n 10)))))
+
+    (defn mstal-aiff-path (id)
+        (mstal-cat4 (mstal-out-dir) "/teacher-" (mstal-int-str id) ".aiff"))
+    (defn mstal-wav-path (id)
+        (mstal-cat4 (mstal-out-dir) "/teacher-" (mstal-int-str id) ".wav"))
+
+    (defn mstal-say-command (voice aiff text)
+        (str_concat
+            (str_concat "say -v " (mstal-q voice))
+            (str_concat
+                (str_concat " -o " (mstal-q aiff))
+                (str_concat " " (mstal-q text)))))
+    (defn mstal-ffmpeg-command (aiff wav)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (mstal-q aiff))
+            (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le " (mstal-q wav))))
+    (defn mstal-whisper-command (wav)
+        (str_concat
+            (str_concat "whisper-cli -m " (mstal-q (mstal-model)))
+            (str_concat
+                (str_concat " -f " (mstal-q wav))
+                (str_concat " " (mstal-cat3 "-l " (mstal-locale) " -nt -np")))))
+
+    (defn mstal-render (id)
+        (do
+            (let _mk (fs_mkdir (mstal-out-dir)))
+            (let _say (host-exec (mstal-say-command (mstal-voice) (mstal-aiff-path id) (mstal-text)) ""))
+            (let _ff (host-exec (mstal-ffmpeg-command (mstal-aiff-path id) (mstal-wav-path id)) ""))
+            (mstal-wav-path id)))
+    (defn mstal-transcript (wav)
+        (host-exec (mstal-whisper-command wav) ""))
+
+    (defn mstal-byte-hash-loop (bs i n acc)
+        (if (ge i n) acc
+            (mstal-byte-hash-loop bs (add i 257) n
+                                  (mod (add (mul acc 31) (str_byte_at bs i)) 1000000007))))
+    (defn mstal-audio-hash (path)
+        (do
+            (let bs (read_file path))
+            (mstal-byte-hash-loop bs 0 (str_len bs) 1)))
+
+    (defn mstal-host-tools-ready? ()
+        (if (str_eq (host-exec "command -v say >/dev/null && command -v ffmpeg >/dev/null && command -v whisper-cli >/dev/null && printf 1 || printf 0" "") "1") 1 0))
+    (defn mstal-ready? ()
+        (if (and (eq (fs_exists (mstal-model)) 1) (eq (mstal-host-tools-ready?) 1)) 1 0))
+
+    (defn mstal-row-feature (a b slot)
+        (list a b (abs (sub a b)) slot))
+    (defn mstal-envelope-feature-stream (env)
+        (list
+            (mstal-row-feature (nth env 0) (nth env 1) 1)
+            (mstal-row-feature (nth env 2) (nth env 3) 2)
+            (mstal-row-feature (nth env 4) (nth env 5) 3)))
+    (defn mstal-env (wav)
+        (wav-envelope-file wav 8))
+    (defn mstal-token-features (wav)
+        (mstal-envelope-feature-stream (mstal-env wav)))
+    (defn mstal-blank-feature () (list 0 0 0 0))
+    (defn mstal-frame-features (features)
+        (list
+            (nth features 0)
+            (mstal-blank-feature)
+            (nth features 1)
+            (nth features 1)
+            (mstal-blank-feature)
+            (nth features 2)))
+
+    (defn mstal-prototype (token feature prior)
+        (list "mstal-acoustic-prototype" token feature prior))
+    (defn mstal-proto-token (p) (nth p 1))
+    (defn mstal-proto-feature (p) (nth p 2))
+    (defn mstal-proto-prior (p) (nth p 3))
+    (defn mstal-base-prototypes ()
+        (list (mstal-prototype "" (mstal-blank-feature) 100)))
+    (defn mstal-train-loop (tokens features prototypes)
+        (if (or (eq (len tokens) 0) (eq (len features) 0)) prototypes
+            (mstal-train-loop
+                (tail tokens)
+                (tail features)
+                (cons (mstal-prototype (head tokens) (head features) 96) prototypes))))
+    (defn mstal-trained (features)
+        (mstal-train-loop (mstal-tokens) features (mstal-base-prototypes)))
+
+    (defn mstal-l1 (a b)
+        (if (eq (len a) 0) 0
+            (if (eq (len b) 0) 0
+                (add (abs (sub (head a) (head b))) (mstal-l1 (tail a) (tail b))))))
+    (defn mstal-best-loop (feature prototypes best bestdist)
+        (if (eq (len prototypes) 0) best
+            (do
+                (let p (head prototypes))
+                (let d (mstal-l1 feature (mstal-proto-feature p)))
+                (if (lt d bestdist)
+                    (mstal-best-loop feature (tail prototypes) p d)
+                    (mstal-best-loop feature (tail prototypes) best bestdist)))))
+    (defn mstal-nearest (feature prototypes)
+        (mstal-best-loop feature (tail prototypes) (head prototypes)
+                         (mstal-l1 feature (mstal-proto-feature (head prototypes)))))
+    (defn mstal-confidence (feature prototypes)
+        (do
+            (let p (mstal-nearest feature prototypes))
+            (let d (mstal-l1 feature (mstal-proto-feature p)))
+            (let raw (sub (mstal-proto-prior p) d))
+            (if (lt raw 0) 0 raw)))
+    (defn mstal-frame (feature prototypes max-distance min-confidence)
+        (do
+            (let p (mstal-nearest feature prototypes))
+            (let d (mstal-l1 feature (mstal-proto-feature p)))
+            (let conf (mstal-confidence feature prototypes))
+            (if (and (le d max-distance) (ge conf min-confidence))
+                (list (mstal-proto-token p) conf)
+                (list "" 0))))
+    (defn mstal-frames (features prototypes max-distance min-confidence)
+        (if (eq (len features) 0) (empty)
+            (cons (mstal-frame (head features) prototypes max-distance min-confidence)
+                  (mstal-frames (tail features) prototypes max-distance min-confidence))))
+
+    (defn mstal-frame-token (f) (nth f 0))
+    (defn mstal-frame-conf (f) (nth f 1))
+    (defn mstal-reverse-onto (xs acc)
+        (if (eq (len xs) 0) acc
+            (mstal-reverse-onto (tail xs) (cons (head xs) acc))))
+    (defn mstal-collapse-loop (frames prev acc)
+        (if (eq (len frames) 0) (mstal-reverse-onto acc (empty))
+            (do
+                (let tok (mstal-frame-token (head frames)))
+                (if (str_eq tok "")
+                    (mstal-collapse-loop (tail frames) "" acc)
+                    (if (str_eq tok prev)
+                        (mstal-collapse-loop (tail frames) prev acc)
+                        (mstal-collapse-loop (tail frames) tok (cons tok acc)))))))
+    (defn mstal-decoded-tokens (frames)
+        (mstal-collapse-loop frames "" (empty)))
+    (defn mstal-join-loop (tokens acc)
+        (if (eq (len tokens) 0) acc
+            (mstal-join-loop
+                (tail tokens)
+                (if (str_eq acc "")
+                    (head tokens)
+                    (str_concat acc (str_concat " " (head tokens)))))))
+    (defn mstal-decoded-text (frames)
+        (mstal-join-loop (mstal-decoded-tokens frames) ""))
+    (defn mstal-min-conf-loop (frames current seen)
+        (if (eq (len frames) 0)
+            (if (eq seen 1) current 0)
+            (do
+                (let tok (mstal-frame-token (head frames)))
+                (let conf (mstal-frame-conf (head frames)))
+                (if (str_eq tok "")
+                    (mstal-min-conf-loop (tail frames) current seen)
+                    (mstal-min-conf-loop
+                        (tail frames)
+                        (if (eq seen 0) conf (if (lt conf current) conf current))
+                        1)))))
+    (defn mstal-min-conf (frames)
+        (mstal-min-conf-loop frames 100 0))
+
+    (defn mstal-receipt-from (wav transcript)
+        (do
+            (let env (mstal-env wav))
+            (let features (mstal-token-features wav))
+            (let trained (mstal-trained features))
+            (let frames (mstal-frames (mstal-frame-features features) trained 2 80))
+            (let native (mstal-decoded-text frames))
+            (list (mstal-kind)
+                  (mstal-audio-hash wav)
+                  (len env)
+                  (len features)
+                  (len trained)
+                  transcript
+                  native
+                  (if (and (sw-accept? (sw-tokens transcript) (sw-tokens (mstal-text)) (mstal-max-wer))
+                           (sw-accept? (sw-tokens native) (sw-tokens (mstal-text)) (mstal-max-wer))) 1 0)
+                  (sw-wer (sw-tokens native) (sw-tokens (mstal-text)))
+                  (mstal-min-conf frames)
+                  (mstal-device)
+                  (mstal-oracle)
+                  1
+                  0)))
+
+    (defn mstal-rec-kind        (r) (nth r 0))
+    (defn mstal-rec-hash        (r) (nth r 1))
+    (defn mstal-rec-env-count   (r) (nth r 2))
+    (defn mstal-rec-features    (r) (nth r 3))
+    (defn mstal-rec-prototypes  (r) (nth r 4))
+    (defn mstal-rec-oracle      (r) (nth r 5))
+    (defn mstal-rec-native      (r) (nth r 6))
+    (defn mstal-rec-ok          (r) (nth r 7))
+    (defn mstal-rec-wer         (r) (nth r 8))
+    (defn mstal-rec-confidence  (r) (nth r 9))
+    (defn mstal-rec-device      (r) (nth r 10))
+    (defn mstal-rec-oracle-name (r) (nth r 11))
+    (defn mstal-rec-native-form (r) (nth r 12))
+    (defn mstal-rec-neural      (r) (nth r 13))
+
+    (defn mstal-run-receipt ()
+        (if (eq (mstal-ready?) 1)
+            (do
+                (let wav (mstal-render 984401))
+                (let transcript (mstal-transcript wav))
+                (mstal-receipt-from wav transcript))
+            (list (mstal-kind) 0 0 0 0 "" "" 0 100 0 (mstal-device) (mstal-oracle) 1 0)))
+
+    (defn mstal-run-wer ()
+        (mstal-rec-wer (mstal-run-receipt)))
+
+    (defn mstal-run-verdict ()
+        (do
+            (let r (mstal-run-receipt))
+            (add
+                (add
+                    (add (if (str_eq (mstal-rec-kind r) (mstal-kind)) 1 0)
+                         (if (gt (mstal-rec-hash r) 0) 2 0))
+                    (add (if (eq (mstal-rec-env-count r) 8) 4 0)
+                         (if (eq (mstal-rec-features r) 3) 8 0)))
+                (add
+                    (add (if (gt (mstal-rec-prototypes r) 3) 16 0)
+                         (if (eq (sw-wer (sw-tokens (mstal-rec-oracle r)) (sw-tokens (mstal-text))) 0) 32 0))
+                    (add
+                        (add (if (eq (sw-wer (sw-tokens (mstal-rec-native r)) (sw-tokens (mstal-text))) 0) 64 0)
+                             (if (eq (mstal-rec-ok r) 1) 128 0))
+                        (add
+                            (add (if (eq (mstal-rec-wer r) 0) 256 0)
+                                 (if (ge (mstal-rec-confidence r) 80) 512 0))
+                            (add (if (eq (mstal-rec-native-form r) 1) 1024 0)
+                                 (if (eq (mstal-rec-neural r) 0) 2048 0))))))))
+
+    0)
