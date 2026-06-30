@@ -220,6 +220,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       (`32767`): the live Sema voice backlog remains local-oracle `0/1`, native `0/1`, WER `100`, while the scoped
       `tcav-warm-mid-cadence-v1-window` candidate passes the local oracle `1/1`, native scoped trial `1/1`, WER `0`,
       and cuts the challenger for that trial window without claiming global live Sema voice authority.
+- [x] **Speech current status ledger added.** `learn/speech-current-status-ledger.fk` composes the metrics report,
+      backlog, scheduler, open-ASR trial, and Sema voice trial into one executable status row (`32767`): global live
+      authority remains oracle-held (`4/5` oracle, `0/5` native), scoped trial windows are native (`3/3` oracle and
+      `3/3` native), native neural weights remain `0`, native Sema voice organs remain `6`, and C seed growth remains
+      `0`.
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
