@@ -1,0 +1,129 @@
+; macos-open-dictation-carrier.fk -- live free-transcript ASR receipt.
+;
+; The utterance is not a closed prompt ID. The host renders a local utterance
+; with `say`, lowers it to wav with `ffmpeg`, asks local Whisper on Metal for a
+; free transcript, and passes only measured text/audio facts into the Form
+; open-dictation receipt. Native open ASR remains pending, so the live route is
+; expected to stay oracle until a native candidate supplies transcript text.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   learn/speech-loopback-promotion.fk
+;   form/form-stdlib/observed-auto-learning.fk
+;   learn/open-dictation-transcript-learning.fk
+
+(do
+    (defn modc-model () "/Users/ursmuff/.cache/whisper.cpp/ggml-large-v3-turbo.bin")
+    (defn modc-device () "macos-arm64-m4-max")
+    (defn modc-oracle () "whisper.cpp-large-v3-turbo")
+    (defn modc-locale () "en")
+    (defn modc-voice () "Samantha")
+    (defn modc-text () "Open speech flows.")
+    (defn modc-out-dir () (str_concat (temp_dir) "/sema-open-dictation-form"))
+
+    (defn modc-cat3 (a b c) (str_concat a (str_concat b c)))
+    (defn modc-cat4 (a b c d) (str_concat a (str_concat b (str_concat c d))))
+    (defn modc-q (s) (modc-cat3 "'" s "'"))
+
+    (defn modc-aiff-path () (modc-cat3 (modc-out-dir) "/" "open-dictation.aiff"))
+    (defn modc-wav-path () (modc-cat3 (modc-out-dir) "/" "open-dictation.wav"))
+
+    (defn modc-say-command (aiff text)
+        (str_concat
+            (str_concat "say -v " (modc-q (modc-voice)))
+            (str_concat
+                (str_concat " -o " (modc-q aiff))
+                (str_concat " " (modc-q text)))))
+    (defn modc-ffmpeg-command (aiff wav)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (modc-q aiff))
+            (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le " (modc-q wav))))
+    (defn modc-whisper-command (model wav locale)
+        (str_concat
+            (str_concat "whisper-cli -m " (modc-q model))
+            (str_concat
+                (str_concat " -f " (modc-q wav))
+                (str_concat " " (modc-cat3 "-l " locale " -nt -np")))))
+
+    (defn modc-render ()
+        (do
+            (let _say (host-exec (modc-say-command (modc-aiff-path) (modc-text)) ""))
+            (let _ffmpeg (host-exec (modc-ffmpeg-command (modc-aiff-path) (modc-wav-path)) ""))
+            (modc-wav-path)))
+
+    (defn modc-transcript (wav)
+        (host-exec (modc-whisper-command (modc-model) wav (modc-locale)) ""))
+
+    (defn modc-byte-hash-loop (bs i n acc)
+        (if (ge i n) acc
+            (modc-byte-hash-loop bs (add i 257) n
+                                 (mod (add (mul acc 31) (str_byte_at bs i)) 1000000007))))
+    (defn modc-audio-hash (path)
+        (do
+            (let bs (read_file path))
+            (modc-byte-hash-loop bs 0 (str_len bs) 1)))
+
+    (defn modc-row (wav transcript)
+        (odtl-row 9001
+                  (modc-locale)
+                  (modc-text)
+                  transcript
+                  ""
+                  (odtl-audio (modc-audio-hash wav) 16000 1)
+                  1
+                  (odtl-native 0 0 0)
+                  1
+                  (odtl-control-row 1 0 0 0 0)))
+
+    (defn modc-summary (row)
+        (odtl-summary (list row row row row) 25 80 2000 4 0 0 3))
+
+    (defn modc-verdict (row summary)
+        (add
+            (add
+                (add (if (str_eq (odtl-kind row) "open-dictation-transcript") 1 0)
+                     (if (eq (odtl-audio-present? row) 1) 2 0))
+                (add (if (eq (odtl-oracle-success? row 25) 1) 4 0)
+                     (if (eq (odtl-oracle-wer row) 0) 8 0)))
+            (add
+                (add (if (str_eq (odtl-summary-route summary) "oracle") 16 0)
+                     (if (str_eq (odtl-summary-mode summary) "online-reversible-ab") 32 0))
+                (add (if (str_eq (odtl-summary-action summary) "continue") 64 0)
+                     (add (if (eq (odtl-native-local row) 0) 128 0)
+                          (if (eq (odtl-summary-count summary) 4) 256 0))))))
+
+    (defn modc-field-code (row summary)
+        (add
+            (add (mul (odtl-summary-count summary) 100000000)
+                 (mul (odtl-summary-oracle summary) 10000000))
+            (add
+                (add (mul (odtl-summary-native summary) 1000000)
+                     (mul (odtl-oracle-wer row) 1000))
+                (odtl-native-wer row))))
+
+    (defn modc-host-tools-ready? ()
+        (if (str_eq (host-exec "command -v say >/dev/null && command -v ffmpeg >/dev/null && command -v whisper-cli >/dev/null && printf 1 || printf 0" "") "1") 1 0))
+    (defn modc-ready? ()
+        (if (and (eq (fs_exists (modc-model)) 1) (eq (modc-host-tools-ready?) 1)) 1 0))
+
+    (defn modc-run ()
+        (if (eq (modc-ready?) 1)
+            (do
+                (let _mk (fs_mkdir (modc-out-dir)))
+                (let wav (modc-render))
+                (let transcript (modc-transcript wav))
+                (let row (modc-row wav transcript))
+                (modc-verdict row (modc-summary row)))
+            0))
+
+    (defn modc-run-field-code ()
+        (if (eq (modc-ready?) 1)
+            (do
+                (let _mk (fs_mkdir (modc-out-dir)))
+                (let wav (modc-render))
+                (let transcript (modc-transcript wav))
+                (let row (modc-row wav transcript))
+                (modc-field-code row (modc-summary row)))
+            0))
+
+    0)
