@@ -210,12 +210,18 @@ static long long fk_native_call(const unsigned char *code, long long n, long lon
 }
 #else
 extern void *mmap(void *, unsigned long, int, int, int, long);
+extern int mprotect(void *, unsigned long, int);
 static long long fk_native_call(const unsigned char *code, long long n, long long arg) {
- void *mem = mmap(0, (unsigned long)n, 0x7, 0x1002, -1, 0); /* RWX, MAP_PRIVATE|MAP_ANON(bsd) */
+#if defined(__x86_64__) || defined(__amd64__)
+ void *mem = mmap(0, (unsigned long)n, 0x3, 0x1002, -1, 0); /* RW, MAP_PRIVATE|MAP_ANON(bsd) */
  if (mem == (void *)-1) { return -1; }
  long long i = 0; while (i < n) { ((unsigned char *)mem)[i] = code[i]; i = i + 1; }
+ if (mprotect(mem, (unsigned long)n, 0x5) != 0) { return -1; } /* RX */
  long long (*fn)(long long) = (long long (*)(long long))mem;
  return fn(arg);
+#else
+ (void)code; (void)n; (void)arg; return -1;
+#endif
 }
 #endif
 static long long fk_native_call_test(long long arg) {
@@ -1756,12 +1762,21 @@ static long long fk_native_call_args(const unsigned char *code, long long n, lon
  long long k = 0; while (k < n) { ((unsigned char *)mem)[k] = code[k]; k = k + 1; }
  unsigned int old = 0; VirtualProtect(mem, (unsigned long long)n, 0x20, &old);
 #else
- void *mem = mmap(0, (unsigned long)n, 0x7, 0x1002, -1, 0);
+#if defined(__x86_64__) || defined(__amd64__)
+ void *mem = mmap(0, (unsigned long)n, 0x3, 0x1002, -1, 0);
  if (mem == (void *)-1) { return fk_nothing; }
  long long k = 0; while (k < n) { ((unsigned char *)mem)[k] = code[k]; k = k + 1; }
-#endif
+ if (mprotect(mem, (unsigned long)n, 0x5) != 0) { return fk_nothing; }
  long long (*fn)(long long *) = (long long (*)(long long *))mem;
  return fn(args);
+#else
+ (void)code; (void)n; (void)args; return fk_nothing;
+#endif
+#endif
+#if defined(_WIN32)
+ long long (*fn)(long long *) = (long long (*)(long long *))mem;
+ return fn(args);
+#endif
 }
 /* install a crystallized image to an executable page ONCE; the caller caches the returned
    pointer (no per-call VirtualAlloc). Returns 0 on failure. fk_natfn typedef'd earlier. */
@@ -1772,11 +1787,19 @@ static fk_natfn fk_nat_install(const unsigned char *code, long long n) {
  long long k = 0; while (k < n) { ((unsigned char *)mem)[k] = code[k]; k = k + 1; }
  unsigned int old = 0; VirtualProtect(mem, (unsigned long long)n, 0x20, &old);
 #else
- void *mem = mmap(0, (unsigned long)n, 0x7, 0x1002, -1, 0);
+#if defined(__x86_64__) || defined(__amd64__)
+ void *mem = mmap(0, (unsigned long)n, 0x3, 0x1002, -1, 0);
  if (mem == (void *)-1) { return 0; }
  long long k = 0; while (k < n) { ((unsigned char *)mem)[k] = code[k]; k = k + 1; }
-#endif
+ if (mprotect(mem, (unsigned long)n, 0x5) != 0) { return 0; }
  return (fk_natfn)mem;
+#else
+ (void)code; (void)n; return 0;
+#endif
+#endif
+#if defined(_WIN32)
+ return (fk_natfn)mem;
+#endif
 }
 /* installed native body + length per fn, for --src crystallization. */
 static const unsigned char *fk_src_nat[4096];

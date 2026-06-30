@@ -8,9 +8,10 @@ Added:
 - `observe/tests/jit-host-wx-audit-band.fk`
 
 This audits the host install/call membrane against the JIT track's W^X
-requirement. The current Windows door writes bytes into RW memory and flips the
-page to RX. The current POSIX door still maps RWX, so native completion remains
-pending there until the carrier changes to write-then-execute sealing.
+requirement. Windows and POSIX x64 now both write bytes into RW memory and flip
+the page to RX before calling or caching the native slot. Non-x64 POSIX hosts
+return unavailable for these x64 payloads instead of executing them. The old
+POSIX RWX policy is retained in the witness only as a rejected historical shape.
 
 ## Witness
 
@@ -33,11 +34,11 @@ Meaning:
 - `1`: byte-ingress, args-vector, host-membrane, and post-ingress receipts
   compose.
 - `2`: current Win64 host memory policy is W^X-safe.
-- `4`: current POSIX host memory policy is not W^X-safe.
-- `8`: future POSIX write-then-execute policy is W^X-safe.
-- `16`: current POSIX install is not ready.
-- `32`: current POSIX install remains pending, not native.
-- `64`: future POSIX install is ready.
+- `4`: current POSIX x64 host memory policy is W^X-safe.
+- `8`: old POSIX RWX memory policy is not W^X-safe.
+- `16`: current POSIX x64 install is ready.
+- `32`: current non-x64 POSIX install remains pending/unavailable.
+- `64`: old POSIX RWX install is not ready.
 - `128`: current Win64 install is ready.
 - `256`: future ready install selects native on a passing path.
 - `512`: guard failure deopts.
@@ -55,6 +56,7 @@ Meaning:
 
 ## Honest boundary
 
-This still does not change `runtime/fkwu-uni.c` or expose arbitrary Form byte
-lists to the host function pointer. It prevents the track from overclaiming the
-current POSIX install door: RWX memory is not a completed native JIT membrane.
+This still does not expose arbitrary Form byte lists to the host function
+pointer. The C seed change is carrier-only: it repairs the host executable-page
+membrane, guards x64 payload execution by architecture, and adds no optimizer
+meaning or lowering rule to C.
