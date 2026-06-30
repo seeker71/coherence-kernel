@@ -255,10 +255,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
       selects the ASR -> neutral Form -> formant route. `open-dictation-transcript` is now a live-observed ASR
       receipt candidate, but does not displace the closed-set prototype until a native open-ASR candidate emits
-      local transcript text. `small-transformer-nl` remains trainable but not
+      local transcript text. `native-open-asr-ctc` is now present as a Form-native CTC token-stream decoder
+      candidate, but is not live-selected until real audio can emit frame tokens. `small-transformer-nl` remains trainable but not
       live-selected; `diffusion-codec-speech` is present but not ready because no Form-native executable kernel
       receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; the band
-      returns `8191`.
+      returns `16383`.
 - [x] **Open dictation transcript receipt added.** `learn/open-dictation-transcript-learning.fk` admits arbitrary
       utterance rows with consentful side-channel truth, local free oracle transcripts, optional native transcript
       candidates, Unicode token WER, and choice/cut/fail/undo/timeout promotion gates (`16383`). The macOS carrier
@@ -266,6 +267,13 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `ffmpeg`, transcribes it with local Whisper on Apple Metal, and returns live verdict `511` with field code
       `440000100`: four oracle successes, zero native successes, oracle WER `0`, native WER `100`. This removes
       the closed prompt-ID assumption from the receipt path; it does not claim native open ASR yet.
+- [x] **Speech token stream + native CTC open-ASR candidate added.** `observe/speech-token-stream.fk` makes the
+      side-channel stream explicit: words plus `<NODE>`, `<SOURCE>`, `<CHANNEL>`, `<INTERFACE>`, `<CHOICE>`,
+      `<FAIL>`, `<UNDO>`, `<TIMEOUT>`, `<CUT>`, `<OBSERVE>`, `<GRADE>`, `<FEEDBACK>`, `<REPAIR>`, `<RECEIPT>`,
+      `<STATE>`, `<MEMORY>`, and `<SCOPE>` tokens, each carrying confidence, warmth, cadence, hesitation,
+      excitement, and attunement metadata (`32767`). `observe/open-asr-ctc.fk` collapses acoustic frame-token
+      streams into that token stream, emits free transcript text, and lowers the result into open-dictation
+      promotion (`32767`). Live audio-to-frame-token emission remains pending.
 - [x] **The offer/ack control core** — `control/offer-ack-core.fk`: the five Form control primitives (fail, stop,
       choice, exceptions, async) as thin expressions over ONE mechanism (`oac-kind` + `oac-offer`), derived from
       axiom-5. Four-way-proven in the origin (1023); re-proof here pends the Form-native eval lane (the C `--src`

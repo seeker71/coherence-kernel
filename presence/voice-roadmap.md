@@ -76,16 +76,21 @@ romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, 
 each pair's before/after NL rate, audio rate, route, and shifted flag, so the aggregate native route has per-pair
 witness rows. `speech-locale-learning-window` 16383 takes selected seed `2` into a numeric `sa<->la` observed
 window: all four lanes train from guided to native route code, clean controls plus A/B evidence promote the
-challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 8191 selects today's native arms:
+challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 16383 selects today's native arms:
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, and the deterministic
 formant vocoder for TTS/audio target rendering. The open-dictation transcript receipt is now live-observed too:
 `open-dictation-transcript-learning` 16383 scores arbitrary utterance rows with side-channel truth, local free
 oracle transcripts, optional native candidates, Unicode WER, and reversible controls; `macos-open-dictation-carrier`
 511 witnessed `Open speech flows.` through local `say` -> wav -> Whisper Metal with oracle WER 0 and no native
-open-ASR candidate yet. The transformer path is trainable but not live-selected for speech yet; diffusion/codec
-speech is a named candidate only, pending a Form-native executable kernel and receipt. The live Metal anchor set
-now stands at 7/7, so `full-metal-native` is an honest route for the closed-prompt carrier. Native open ASR and
-native neural ASR/TTS remain the next named climbs.
+live acoustic frame-token emitter yet. `speech-token-stream` 32767 now carries words plus `<NODE>`, `<SOURCE>`,
+`<CHANNEL>`, `<INTERFACE>`, `<CHOICE>`, `<FAIL>`, `<UNDO>`, `<TIMEOUT>`, `<CUT>`, `<OBSERVE>`, `<GRADE>`,
+`<FEEDBACK>`, `<REPAIR>`, `<RECEIPT>`, `<STATE>`, `<MEMORY>`, and `<SCOPE>` tokens with confidence, warmth,
+cadence, hesitation, excitement, and attunement metadata. `open-asr-ctc` 32767 collapses frame tokens into that
+stream and lowers the transcript into the open-dictation gate, but remains unselected until real audio can emit
+frame tokens. The transformer path is trainable but not live-selected for speech yet; diffusion/codec speech is a
+named candidate only, pending a Form-native executable kernel and receipt. The live Metal anchor set now stands at
+7/7, so `full-metal-native` is an honest route for the closed-prompt carrier. Live native acoustic token emission
+and native neural ASR/TTS remain the next named climbs.
 
 ## What the siblings caught — missing first-class layers (the roadmap)
 
