@@ -45,17 +45,15 @@ Cross-locale learning should grow reciprocal trust: `bidirectional-locale-roundt
 A->A, and B->B to improve before route trust expands. If one direction leads, it routes `oracle-guide` and asks
 for the return path instead of pretending the missing side failed.
 
-Mac metal now has the first reciprocal audio-locale training receipt: `audio-locale-native-training` 8191 defines
-the Form-side guide, and `presence/macos-speech-roundtrip-carrier.fk` now owns the macOS loop. It invokes local
-`say`, `ffmpeg`, and `whisper.cpp-large-v3-turbo` through Form `host-exec` on Apple Metal for three Coherence
-Network `en<->de` prompt pairs. The native nearest-prototype model moved from 0% pretrain success to 83%
-post-training success, with A->B at 66% and B->A at 100%; the live Form verdict was 511. Wav byte extraction is
-in Form (`read_file` + `str_byte_at`), and the carrier passes wav paths rather than feature arrays. The carrier
-now consumes each wav before constructing the next path, so direct-source mutable path strings cannot leak between
-samples; the rewitnessed combined code is `511121010836700`. `audio-locale-route-shift-ledger` 8191 now records
-before/after native audio route movement, and the live carrier-first/ledger-second Metal witness returned
-`1012100010008301` (`shifted=1`, metric `12100010008301`). This is not open ASR: it is oracle-valid prototype
-learning over a closed prompt corpus.
+Mac metal now has three reciprocal audio-locale training anchors: `en<->de`, `en<->es`, and `en<->id`.
+`audio-locale-native-training` 8191 defines the Form-side guide, and `presence/macos-speech-roundtrip-carrier.fk`
+owns the macOS loop. It invokes local `say`, `ffmpeg`, and `whisper.cpp-large-v3-turbo` through Form `host-exec`
+on Apple Metal for closed Coherence prompt pairs. The first `en<->de` anchor moved from 0% pretrain success to 83%
+post-training success, with A->B at 66% and B->A at 100%; the `en<->es` and `en<->id` variants both returned
+12/12 oracle-ok, 12/12 native, and 100% reciprocal directions. Wav byte extraction is in Form (`read_file` +
+`str_byte_at`), and the carrier passes wav paths rather than feature arrays. The Indonesian side uses the same
+Damayanti local voice for train/eval on this device because that is the installed macOS voice boundary. This is
+not open ASR: it is oracle-valid prototype learning over a closed prompt corpus.
 
 Pair selection should stay diverse and grounded in our own corpus first: `coherence-network-self-corpus` 8191
 observes the translated Coherence Network web/CLI message bundles (`en`, `de`, `es`, `fr`, `id`, `pt-br`) as
@@ -75,7 +73,9 @@ window: all four lanes train from guided to native route code, clean controls pl
 challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 4095 selects today's native arms:
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, and the deterministic
 formant vocoder for TTS/audio target rendering. The transformer path is trainable but not live-selected for speech
-yet; diffusion/codec speech is a named candidate only, pending a Form-native executable kernel and receipt.
+yet; diffusion/codec speech is a named candidate only, pending a Form-native executable kernel and receipt. The
+live Metal anchor set now stands at 3/5, so two more reciprocal live pairs remain before `full-metal-native` is
+an honest route.
 
 ## What the siblings caught — missing first-class layers (the roadmap)
 
