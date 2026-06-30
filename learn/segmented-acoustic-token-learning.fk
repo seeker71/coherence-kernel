@@ -1,0 +1,253 @@
+; segmented-acoustic-token-learning.fk -- local wav segments teach open ASR tokens.
+;
+; The acoustic token emitter can already turn feature rows into CTC frames. This
+; cell adds the next Form-owned learning bridge: wav/envelope windows become
+; segmented feature rows; local oracle transcript tokens align with those rows;
+; clean, consentful samples intern token prototypes; decoded source tokens then
+; route through the Sanskrit/multi-locale baseline to a locale-neutral meaning
+; and target-locale token row.
+;
+; This is still a supervised prototype learner, not a neural acoustic encoder.
+; It makes the live carrier contract sharper: host audio may hand the body a wav
+; path, but segmentation, token learning, receipt scoring, and neutral rendering
+; are Form-native.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/speech-token-stream.fk
+;   observe/open-asr-ctc.fk
+;   observe/acoustic-token-emitter.fk
+;   learn/sanskrit-locale-baseline.fk
+; optional:
+;   observe/wav-sense.fk                         ; for satl-wav-feature-stream
+;   learn/open-dictation-transcript-learning.fk  ; for satl-open-row lowering
+
+(do
+    (defn satl-row-feature (a b)
+        (list a b (abs (sub a b)) (div (add a b) 2)))
+
+    (defn satl-envelope-feature-stream (env)
+        (list
+            (satl-row-feature (nth env 0) (nth env 1))
+            (satl-row-feature (nth env 2) (nth env 3))
+            (satl-row-feature (nth env 4) (nth env 5))
+            (satl-row-feature (nth env 6) (nth env 7))))
+
+    (defn satl-wav-feature-stream (path step)
+        (satl-envelope-feature-stream (wav-envelope-file path step)))
+
+    (defn satl-take (xs n)
+        (if (or (eq n 0) (eq (len xs) 0)) (empty)
+            (cons (head xs) (satl-take (tail xs) (sub n 1)))))
+
+    (defn satl-sample (id meaning src dst truth-text oracle-text tokens token-features frame-features
+                       audio-hash latency-ms meta consent fail timeout undo)
+        (list "segmented-acoustic-token-sample"
+              id meaning src dst truth-text oracle-text tokens token-features frame-features
+              audio-hash latency-ms meta consent fail timeout undo))
+
+    (defn satl-id             (s) (nth s 1))
+    (defn satl-meaning        (s) (nth s 2))
+    (defn satl-src            (s) (nth s 3))
+    (defn satl-dst            (s) (nth s 4))
+    (defn satl-truth-text     (s) (nth s 5))
+    (defn satl-oracle-text    (s) (nth s 6))
+    (defn satl-tokens         (s) (nth s 7))
+    (defn satl-token-features (s) (nth s 8))
+    (defn satl-frame-features (s) (nth s 9))
+    (defn satl-audio-hash     (s) (nth s 10))
+    (defn satl-latency-ms     (s) (nth s 11))
+    (defn satl-meta           (s) (nth s 12))
+    (defn satl-consent        (s) (nth s 13))
+    (defn satl-fail           (s) (nth s 14))
+    (defn satl-timeout        (s) (nth s 15))
+    (defn satl-undo           (s) (nth s 16))
+
+    (defn satl-clean? (s)
+        (if (and (eq (satl-consent s) 1)
+                 (eq (add (add (satl-fail s) (satl-timeout s)) (satl-undo s)) 0)) 1 0))
+
+    (defn satl-oracle-ok? (s max-wer)
+        (if (and (eq (satl-clean? s) 1)
+                 (eq (sw-accept? (sw-tokens (satl-oracle-text s))
+                                 (sw-tokens (satl-truth-text s))
+                                 max-wer) 1)) 1 0))
+
+    (defn satl-align-loop (tokens features prototypes prior-confidence)
+        (if (or (eq (len tokens) 0) (eq (len features) 0)) prototypes
+            (satl-align-loop
+                (tail tokens)
+                (tail features)
+                (ate-learn prototypes (head tokens) (head features) prior-confidence)
+                prior-confidence)))
+
+    (defn satl-learn-sample (s prototypes max-wer prior-confidence)
+        (if (eq (satl-oracle-ok? s max-wer) 1)
+            (satl-align-loop (satl-tokens s) (satl-token-features s) prototypes prior-confidence)
+            prototypes))
+
+    (defn satl-learn-loop (samples prototypes max-wer prior-confidence)
+        (if (eq (len samples) 0) prototypes
+            (satl-learn-loop
+                (tail samples)
+                (satl-learn-sample (head samples) prototypes max-wer prior-confidence)
+                max-wer
+                prior-confidence)))
+
+    (defn satl-trained-prototypes (samples prototypes max-wer prior-confidence)
+        (satl-learn-loop samples prototypes max-wer prior-confidence))
+
+    (defn satl-open-row (s prototypes max-distance min-confidence)
+        (ate-open-row-with-meta
+            (satl-id s)
+            (satl-src s)
+            (satl-truth-text s)
+            (satl-oracle-text s)
+            (satl-frame-features s)
+            prototypes
+            max-distance
+            min-confidence
+            (satl-audio-hash s)
+            (satl-latency-ms s)
+            (sts-warmth (satl-meta s))
+            (sts-cadence (satl-meta s))
+            (sts-hesitation (satl-meta s))
+            (sts-excitement (satl-meta s))
+            (sts-attunement (satl-meta s))))
+
+    (defn satl-frames (s prototypes max-distance min-confidence)
+        (ate-frames (satl-frame-features s) prototypes max-distance min-confidence))
+
+    (defn satl-decoded-text (s prototypes max-distance min-confidence)
+        (oact-transcript (satl-frames s prototypes max-distance min-confidence)))
+
+    (defn satl-native-ok? (s prototypes max-wer max-distance min-confidence max-latency)
+        (if (and (eq (satl-oracle-ok? s max-wer) 1)
+                 (and (le (satl-latency-ms s) max-latency)
+                      (and (ge (oact-min-conf (satl-frames s prototypes max-distance min-confidence)) min-confidence)
+                           (eq (sw-accept?
+                                  (sw-tokens (satl-decoded-text s prototypes max-distance min-confidence))
+                                  (sw-tokens (satl-truth-text s))
+                                  max-wer) 1)))) 1 0))
+
+    (defn satl-token-member? (xs x)
+        (if (eq (len xs) 0) 0
+            (if (str_eq (head xs) x) 1 (satl-token-member? (tail xs) x))))
+
+    (defn satl-overlap (a b)
+        (if (eq (len a) 0) 0
+            (add (satl-token-member? b (head a)) (satl-overlap (tail a) b))))
+
+    (defn satl-line-score (tokens locale row)
+        (satl-overlap tokens (slb-tokens row locale)))
+
+    (defn satl-best-line-loop (tokens locale rows best best-score)
+        (if (eq (len rows) 0) best
+            (do
+                (let row (head rows))
+                (let score (satl-line-score tokens locale row))
+                (if (gt score best-score)
+                    (satl-best-line-loop tokens locale (tail rows) row score)
+                    (satl-best-line-loop tokens locale (tail rows) best best-score)))))
+
+    (defn satl-best-line (tokens locale rows)
+        (if (eq (len rows) 0) (slb-empty-line)
+            (satl-best-line-loop tokens locale (tail rows) (head rows)
+                                 (satl-line-score tokens locale (head rows)))))
+
+    (defn satl-decoded-tokens (s prototypes max-distance min-confidence)
+        (oact-tokens (satl-frames s prototypes max-distance min-confidence)))
+
+    (defn satl-decoded-meaning (s prototypes rows max-distance min-confidence)
+        (slb-meaning
+            (satl-best-line
+                (satl-decoded-tokens s prototypes max-distance min-confidence)
+                (satl-src s)
+                rows)))
+
+    (defn satl-target (s prototypes rows max-distance min-confidence)
+        (do
+            (let meaning (satl-decoded-meaning s prototypes rows max-distance min-confidence))
+            (list "segmented-acoustic-target"
+                  meaning
+                  (satl-dst s)
+                  (slb-tokens (slb-line-by-meaning meaning) (satl-dst s))
+                  (satl-meta s))))
+
+    (defn satl-target-kind    (t) (nth t 0))
+    (defn satl-target-meaning (t) (nth t 1))
+    (defn satl-target-tokens  (t) (nth t 3))
+    (defn satl-target-meta    (t) (nth t 4))
+
+    (defn satl-oracle-score (samples max-wer)
+        (if (eq (len samples) 0) 0
+            (add (satl-oracle-ok? (head samples) max-wer)
+                 (satl-oracle-score (tail samples) max-wer))))
+
+    (defn satl-native-score (samples prototypes max-wer max-distance min-confidence max-latency)
+        (if (eq (len samples) 0) 0
+            (add (satl-native-ok? (head samples) prototypes max-wer max-distance min-confidence max-latency)
+                 (satl-native-score (tail samples) prototypes max-wer max-distance min-confidence max-latency))))
+
+    (defn satl-rate (wins total)
+        (if (eq total 0) 0 (div (mul wins 100) total)))
+
+    (defn satl-native-rate (samples prototypes max-wer max-distance min-confidence max-latency)
+        (satl-rate
+            (satl-native-score samples prototypes max-wer max-distance min-confidence max-latency)
+            (len samples)))
+
+    (defn satl-direction? (s src dst)
+        (if (and (str_eq (satl-src s) src) (str_eq (satl-dst s) dst)) 1 0))
+
+    (defn satl-direction-count (samples src dst)
+        (if (eq (len samples) 0) 0
+            (add (if (eq (satl-direction? (head samples) src dst) 1) 1 0)
+                 (satl-direction-count (tail samples) src dst))))
+
+    (defn satl-direction-native-score (samples prototypes max-wer max-distance min-confidence max-latency src dst)
+        (if (eq (len samples) 0) 0
+            (add
+                (if (eq (satl-direction? (head samples) src dst) 1)
+                    (satl-native-ok? (head samples) prototypes max-wer max-distance min-confidence max-latency)
+                    0)
+                (satl-direction-native-score
+                    (tail samples) prototypes max-wer max-distance min-confidence max-latency src dst))))
+
+    (defn satl-has-native-direction? (samples prototypes max-wer max-distance min-confidence max-latency src dst)
+        (if (gt (satl-direction-native-score samples prototypes max-wer max-distance min-confidence max-latency src dst) 0) 1 0))
+
+    (defn satl-ready? (samples prototypes src dst max-wer max-distance min-confidence max-latency floor)
+        (if (and (ge (satl-native-rate samples prototypes max-wer max-distance min-confidence max-latency) floor)
+                 (and (eq (satl-has-native-direction? samples prototypes max-wer max-distance min-confidence max-latency src dst) 1)
+                      (eq (satl-has-native-direction? samples prototypes max-wer max-distance min-confidence max-latency dst src) 1))) 1 0))
+
+    (defn satl-route (samples prototypes src dst max-wer max-distance min-confidence max-latency floor)
+        (if (eq (satl-ready? samples prototypes src dst max-wer max-distance min-confidence max-latency floor) 1)
+            "native"
+            "oracle-guide"))
+
+    (defn satl-receipt (samples prototypes src dst max-wer max-distance min-confidence max-latency floor oracle device)
+        (list "segmented-acoustic-token-learning"
+              device
+              oracle
+              src
+              dst
+              (len samples)
+              (satl-oracle-score samples max-wer)
+              (satl-native-score samples prototypes max-wer max-distance min-confidence max-latency)
+              (satl-native-rate samples prototypes max-wer max-distance min-confidence max-latency)
+              (satl-direction-count samples src dst)
+              (satl-direction-count samples dst src)
+              floor
+              (satl-route samples prototypes src dst max-wer max-distance min-confidence max-latency floor)
+              1
+              0))
+
+    (defn satl-rec-kind          (r) (nth r 0))
+    (defn satl-rec-oracle        (r) (nth r 2))
+    (defn satl-rec-route         (r) (nth r 12))
+    (defn satl-rec-native-form   (r) (nth r 13))
+    (defn satl-rec-neural-metal  (r) (nth r 14))
+
+    0)
