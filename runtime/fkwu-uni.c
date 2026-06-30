@@ -767,7 +767,7 @@ static long long fk_sym_end(long long s) { while (s < fk_slen) { char d = fk_src
    (empty) (arity 0), (list ..) (arity -1 variadic), every comparison/boolean
    rewrite — flows through these data tables. */
 #include "fkwu-optable.h"
-#include "fkwu-formeval.h"   /* embedded form-eval meta-evaluator, for the --feval eval path */
+/* --feval reads grammars/form-eval.fk at runtime (no embedded blob / no codegen) — see fk_run_feval */
 /* match a source symbol [s,s+n) against a C string by length-and-bytes. */
 static int fk_optname_eq(long long s, long long n, const char *w) { long long i = 0; while (w[i] != 0) { if (i >= n || fk_srctext[s + i] != w[i]) { return 0; } i = i + 1; } return i == n; }
 /* op-table lookup: source symbol -> row index in fk_optab, or -1. */
@@ -1207,7 +1207,7 @@ static int fk_run_src(const char *path, long long arg) {
  return 0;
 }
 /* --feval: run a recipe THROUGH form-eval (Form), not fk_walk directly. The C seed bootstraps the
-   embedded form-eval meta-evaluator (fk_formeval_src); form-eval reads the recipe as a STRING and
+   form-eval meta-evaluator (read live from grammars/form-eval.fk); form-eval reads the recipe as a STRING and
    evaluates it. The recipe source is escaped into a Form string literal and appended as the final
    (fe-eval "<recipe>") form, so the whole bundle is one --src-shaped program that fk_parse_top +
    fk_walk run — but the recipe's value is computed by fe-eval, in Form, on fk_walk. The root form is
@@ -1224,10 +1224,19 @@ static int fk_run_feval(const char *path) {
  char rbuf[131072];
  long long rg = read(fd, rbuf, 131071); close(fd); if (rg < 0) { return 3; }
  rbuf[rg] = 0;
- /* build the bundle into fk_srctext: <embedded form-eval> + "\n(fe-eval \"<escaped recipe>\")\n" */
+ /* build into fk_srctext: <char_at/ord helpers> + <form-eval read from its canonical .fk at runtime>
+    + "\n(fe-eval \"<escaped recipe>\")\n". No embedded blob, no codegen step (the repo IS the body;
+    form-eval is read live from grammars/form-eval.fk, never a drifting C-string copy). */
  long long w = 0; long long cap = 262143;
- const char *fe = fk_formeval_src;
- while (fe[0] != 0) { if (w >= cap) { return 4; } fk_srctext[w] = fe[0]; w = w + 1; fe = fe + 1; }
+ const char *helpers = "(defn char_at (s i) (substring s i (add i 1)))\n(defn ord (c) (str_byte_at c 0))\n";
+ long long hi = 0; while (helpers[hi] != 0) { if (w >= cap) { return 4; } fk_srctext[w] = helpers[hi]; w = w + 1; hi = hi + 1; }
+#if defined(_WIN32)
+ int efd = open("grammars/form-eval.fk", 0x8000);
+#else
+ int efd = open("grammars/form-eval.fk", 0);
+#endif
+ if (efd < 0) { return 5; } /* run --feval from the repo root (grammars/form-eval.fk must be reachable) */
+ long long eg = read(efd, fk_srctext + w, cap - w - 1); close(efd); if (eg < 0) { return 5; } w = w + eg;
  const char *tail = "\n(fe-eval \"";
  long long ti = 0; while (tail[ti] != 0) { if (w >= cap) { return 4; } fk_srctext[w] = tail[ti]; w = w + 1; ti = ti + 1; }
  /* escape the recipe into a Form string literal: backslash, double-quote, newline, CR. The recipe is
