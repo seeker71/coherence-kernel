@@ -32,6 +32,13 @@ target-derived waveform from Sema's f0/formant profile, renders it locally, and 
 code `110100002`, WER `100`, route `oracle-guide`. The carrier is real and observable; the current waveform is not
 yet intelligible speech.
 
+That miss now changes the algorithm instead of sitting as prose:
+`sema-voice-oracle-miss-learning` 32767 turns the WER-100 row into
+`train-text-conditioned-acoustic-vocoder`, keeping authority on `oracle-guide` and naming the next trainable
+candidate. The recipe is g2p, phoneme timing, prosody contour, acoustic token emission, segmented acoustic
+learning, the Sema voice loop, and the same local-oracle WER bar. The selector's speech receipt now returns
+`2097151` with that action exposed.
+
 The promotion window is now executable too: `speech-loopback-promotion` 2047 turns those single-sample loopback
 receipts into native/oracle authority over time. Native wins only after enough clean samples; fail, timeout, undo,
 or regression returns authority to the oracle.
@@ -89,7 +96,7 @@ romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, 
 each pair's before/after NL rate, audio rate, route, and shifted flag, so the aggregate native route has per-pair
 witness rows. `speech-locale-learning-window` 16383 takes selected seed `2` into a numeric `sa<->la` observed
 window: all four lanes train from guided to native route code, clean controls plus A/B evidence promote the
-challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 262143 selects today's native arms:
+challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 2097151 selects today's native arms:
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, `sema-voice-sample-loop`
 over the deterministic formant vocoder for TTS, and `prototype-asr-sema-voice-audio2audio` for audio-to-audio
 target rendering. The raw formant vocoder and raw formant audio2audio route remain the carriers underneath, but
