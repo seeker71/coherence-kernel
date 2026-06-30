@@ -267,6 +267,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       text stays ASCII until the WER tokenizer grows Unicode word support. The anchor set now counts `4/5` live
       anchors, leaves `1` live pair anchor pending, and keeps the route at `metal-anchored-native-guide`. The band
       returns `32767`.
+- [x] **Fifth live Metal pair anchor added.** `presence/macos-en-it-speech-roundtrip-variant.fk` reuses the same
+      Form-owned macOS carrier for `en<->it`; live Apple Metal returned carrier verdict `511`, base field-code
+      `12120000000000000`, and trained field-code `12121210001000100` (`12/12` oracle, `0/12` native before
+      training, `12/12` native after training, `100%` reciprocal A/B and B/A). The anchor set now counts `5/5`
+      live anchors and routes `full-metal-native` for the closed-prompt local audio-locale carrier. Unicode WER,
+      open dictation, and native neural ASR/TTS remain pending. The band returns `32767`.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
