@@ -1,0 +1,303 @@
+; jit-source-byte-pipeline.fk - hot Form source to exact byte payload.
+;
+; This composes the static analyzer with a compact exact byte-list membrane. A
+; hot source recipe must pass the pre-JIT lint gate, select a checked/direct
+; lowering, emit exact Form-owned x64 bytes, preserve those bytes through load,
+; and only then route native/deopt/exception/rewalk. The fuller byte membrane is
+; separately witnessed in observe/jit-byte-list-membrane.fk; this cell stays
+; compact enough to fit beside the static analyzer in one source-runner pass.
+;
+; preludes:
+;   model/form-asm-x64.fk
+;   observe/jit-runtime-fault.fk
+;   observe/form-static-analyzer.fk
+
+(do
+    (defn jsbp-native () 1)
+    (defn jsbp-deopt () 2)
+    (defn jsbp-exception-action () 3)
+    (defn jsbp-rewalk () 4)
+    (defn jsbp-reject () 5)
+
+    (defn jsbp-add1 () 1)
+    (defn jsbp-array () 2)
+    (defn jsbp-field () 3)
+    (defn jsbp-div () 4)
+
+    ; maps = (source guard fault deopt root abi reloc safepoint exception)
+    (defn jsbp-map (source guard fault deopt root abi reloc safepoint exception)
+        (list source guard fault deopt root abi reloc safepoint exception))
+    (defn jsbp-map-source (m) (nth m 0))
+    (defn jsbp-map-guard (m) (nth m 1))
+    (defn jsbp-map-fault (m) (nth m 2))
+    (defn jsbp-map-deopt (m) (nth m 3))
+    (defn jsbp-map-root (m) (nth m 4))
+    (defn jsbp-map-abi (m) (nth m 5))
+    (defn jsbp-map-reloc (m) (nth m 6))
+    (defn jsbp-map-safepoint (m) (nth m 7))
+    (defn jsbp-map-exception (m) (nth m 8))
+
+    ; source plan:
+    ; ("source-byte-plan" owner expr env op hot maps generation)
+    (defn jsbp-plan (owner expr env op hot maps generation)
+        (list "source-byte-plan" owner expr env op hot maps generation))
+    (defn jsbp-plan? (p) (if (eq (len p) 8) (str_eq (nth p 0) "source-byte-plan") 0))
+    (defn jsbp-owner (p) (nth p 1))
+    (defn jsbp-expr (p) (nth p 2))
+    (defn jsbp-env (p) (nth p 3))
+    (defn jsbp-op (p) (nth p 4))
+    (defn jsbp-hot (p) (nth p 5))
+    (defn jsbp-maps (p) (nth p 6))
+    (defn jsbp-generation (p) (nth p 7))
+    (defn jsbp-source (p) (jsbp-map-source (jsbp-maps p)))
+    (defn jsbp-guard (p) (jsbp-map-guard (jsbp-maps p)))
+    (defn jsbp-fault (p) (jsbp-map-fault (jsbp-maps p)))
+    (defn jsbp-deopt (p) (jsbp-map-deopt (jsbp-maps p)))
+    (defn jsbp-root (p) (jsbp-map-root (jsbp-maps p)))
+    (defn jsbp-abi (p) (jsbp-map-abi (jsbp-maps p)))
+    (defn jsbp-reloc (p) (jsbp-map-reloc (jsbp-maps p)))
+    (defn jsbp-safepoint (p) (jsbp-map-safepoint (jsbp-maps p)))
+    (defn jsbp-exception (p) (jsbp-map-exception (jsbp-maps p)))
+
+    (defn jsbp-op-ok? (op)
+        (if (eq op (jsbp-add1)) 1
+            (if (eq op (jsbp-array)) 1
+                (if (eq op (jsbp-field)) 1
+                    (if (eq op (jsbp-div)) 1 0)))))
+
+    (defn jsbp-static-clean? (p)
+        (if (eq (jsbp-plan? p) 1)
+            (fsa-allow-jit? (jsbp-expr p) (jsbp-env p))
+            0))
+
+    (defn jsbp-maps-ok? (p)
+        (if (str_eq (jsbp-owner p) "form-backend")
+            (if (eq (jsbp-op-ok? (jsbp-op p)) 1)
+                (if (eq (jsbp-hot p) 1)
+                    (if (eq (jsbp-source p) 1)
+                        (if (eq (jsbp-guard p) 1)
+                            (if (eq (jsbp-fault p) 1)
+                                (if (eq (jsbp-deopt p) 1)
+                                    (if (eq (jsbp-root p) 1)
+                                        (if (eq (jsbp-abi p) 1)
+                                            (if (eq (jsbp-reloc p) 1)
+                                                (if (eq (jsbp-safepoint p) 1)
+                                                    (if (eq (jsbp-exception p) 1) 1 0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jsbp-bytes (p)
+        (if (eq (jsbp-op p) (jsbp-add1))
+            (x64-cat (list (x64-mov-rax-rdi) (x64-add-rax-imm8 1) (x64-ret)))
+            (if (eq (jsbp-op p) (jsbp-array))
+                (x64-array-get-checked)
+                (if (eq (jsbp-op p) (jsbp-field))
+                    (x64-field-load-checked 16)
+                    (if (eq (jsbp-op p) (jsbp-div)) (x64-div-checked) (empty))))))
+
+    ; compact exact-byte payload:
+    ; ("source-byte-payload" owner bytes source guard fault deopt root abi reloc safepoint exception)
+    (defn jsbp-payload (owner bytes source guard fault deopt root abi reloc safepoint exception)
+        (list "source-byte-payload" owner bytes source guard fault deopt root abi reloc safepoint exception))
+    (defn jsbp-payload? (p) (if (eq (len p) 12) (str_eq (nth p 0) "source-byte-payload") 0))
+    (defn jsbp-payload-owner (p) (nth p 1))
+    (defn jsbp-payload-bytes (p) (nth p 2))
+    (defn jsbp-payload-source (p) (nth p 3))
+    (defn jsbp-payload-guard (p) (nth p 4))
+    (defn jsbp-payload-fault (p) (nth p 5))
+    (defn jsbp-payload-deopt (p) (nth p 6))
+    (defn jsbp-payload-root (p) (nth p 7))
+    (defn jsbp-payload-abi (p) (nth p 8))
+    (defn jsbp-payload-reloc (p) (nth p 9))
+    (defn jsbp-payload-safepoint (p) (nth p 10))
+    (defn jsbp-payload-exception (p) (nth p 11))
+
+    ; compact loaded slot:
+    ; ("source-byte-loaded" payload writable executable sealed generation)
+    (defn jsbp-loaded (payload writable executable sealed generation)
+        (list "source-byte-loaded" payload writable executable sealed generation))
+    (defn jsbp-loaded? (l) (if (eq (len l) 6) (str_eq (nth l 0) "source-byte-loaded") 0))
+    (defn jsbp-loaded-payload (l) (nth l 1))
+    (defn jsbp-loaded-writable (l) (nth l 2))
+    (defn jsbp-loaded-executable (l) (nth l 3))
+    (defn jsbp-loaded-sealed (l) (nth l 4))
+    (defn jsbp-loaded-generation (l) (nth l 5))
+
+    (defn jsbp-byte? (b)
+        (if (ge b 0) (if (lt b 256) 1 0) 0))
+    (defn jsbp-byte-list? (xs)
+        (if (eq (len xs) 0)
+            1
+            (if (eq (jsbp-byte? (head xs)) 1) (jsbp-byte-list? (tail xs)) 0)))
+    (defn jsbp-eq-list (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0)
+                1
+                (if (eq (head a) (head b)) (jsbp-eq-list (tail a) (tail b)) 0))
+            0))
+    (defn jsbp-has? (xs x)
+        (if (eq (len xs) 0)
+            0
+            (if (eq (head xs) x) 1 (jsbp-has? (tail xs) x))))
+
+    (defn jsbp-payload-safe? (payload)
+        (if (eq (jsbp-payload? payload) 1)
+            (if (str_eq (jsbp-payload-owner payload) "form-backend")
+                (if (gt (len (jsbp-payload-bytes payload)) 0)
+                    (if (eq (jsbp-byte-list? (jsbp-payload-bytes payload)) 1)
+                        (if (eq (jsbp-payload-source payload) 1)
+                            (if (eq (jsbp-payload-guard payload) 1)
+                                (if (eq (jsbp-payload-fault payload) 1)
+                                    (if (eq (jsbp-payload-deopt payload) 1)
+                                        (if (eq (jsbp-payload-root payload) 1)
+                                            (if (eq (jsbp-payload-abi payload) 1)
+                                                (if (eq (jsbp-payload-reloc payload) 1)
+                                                    (if (eq (jsbp-payload-safepoint payload) 1)
+                                                        (if (eq (jsbp-payload-exception payload) 1) 1 0)
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jsbp-byte-payload (p)
+        (if (eq (jsbp-static-clean? p) 1)
+            (if (eq (jsbp-maps-ok? p) 1)
+                (jsbp-payload "form-backend" (jsbp-bytes p)
+                    (jsbp-source p) (jsbp-guard p) (jsbp-fault p)
+                    (jsbp-deopt p) (jsbp-root p) (jsbp-abi p)
+                    (jsbp-reloc p) (jsbp-safepoint p) (jsbp-exception p))
+                (empty))
+            (empty)))
+
+    (defn jsbp-load (p)
+        (if (eq (jsbp-payload-safe? (jsbp-byte-payload p)) 1)
+            (jsbp-loaded (jsbp-byte-payload p) 0 1 1 (jsbp-generation p))
+            (empty)))
+
+    (defn jsbp-loaded-safe? (loaded)
+        (if (eq (jsbp-loaded? loaded) 1)
+            (if (eq (jsbp-payload-safe? (jsbp-loaded-payload loaded)) 1)
+                (if (eq (jsbp-loaded-writable loaded) 0)
+                    (if (eq (jsbp-loaded-executable loaded) 1)
+                        (if (eq (jsbp-loaded-sealed loaded) 1)
+                            (if (gt (jsbp-loaded-generation loaded) 0) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jsbp-admit? (p)
+        (if (eq (jsbp-payload-safe? (jsbp-byte-payload p)) 1)
+            (if (eq (jsbp-loaded-safe? (jsbp-load p)) 1) 1 0)
+            0))
+
+    (defn jsbp-action (p guard-ok runtime-ok invalidated parity-ok)
+        (if (eq (jsbp-admit? p) 1)
+            (if (eq invalidated 1)
+                (jsbp-rewalk)
+                (if (eq guard-ok 1)
+                    (if (eq runtime-ok 1)
+                        (if (eq parity-ok 1) (jsbp-native) (jsbp-deopt))
+                        (jsbp-exception-action))
+                    (jsbp-deopt)))
+            (jsbp-reject)))
+
+    (defn jsbp-bytes-preserved? (p)
+        (if (eq (jsbp-admit? p) 1)
+            (jsbp-eq-list (jsbp-payload-bytes (jsbp-loaded-payload (jsbp-load p))) (jsbp-bytes p))
+            0))
+
+    (defn jsbp-good-add1 ()
+        (jsbp-plan "form-backend" (fsa-good-expr) (fsa-default-env) (jsbp-add1)
+            1 (jsbp-map 1 1 1 1 1 1 1 1 1) 1))
+    (defn jsbp-good-array ()
+        (jsbp-plan "form-backend" (fsa-good-expr) (fsa-default-env) (jsbp-array)
+            1 (jsbp-map 1 1 1 1 1 1 1 1 1) 1))
+    (defn jsbp-good-field ()
+        (jsbp-plan "form-backend" (fsa-good-expr) (fsa-default-env) (jsbp-field)
+            1 (jsbp-map 1 1 1 1 1 1 1 1 1) 1))
+    (defn jsbp-good-div ()
+        (jsbp-plan "form-backend" (fsa-good-expr) (fsa-default-env) (jsbp-div)
+            1 (jsbp-map 1 1 1 1 1 1 1 1 1) 1))
+    (defn jsbp-static-bad ()
+        (jsbp-plan "form-backend" (fsa-divzero-expr) (fsa-default-env) (jsbp-div)
+            1 (jsbp-map 1 1 1 1 1 1 1 1 1) 1))
+    (defn jsbp-cold ()
+        (jsbp-plan "form-backend" (fsa-good-expr) (fsa-default-env) (jsbp-add1)
+            0 (jsbp-map 1 1 1 1 1 1 1 1 1) 1))
+    (defn jsbp-foreign ()
+        (jsbp-plan "c-lowering" (fsa-good-expr) (fsa-default-env) (jsbp-add1)
+            1 (jsbp-map 1 1 1 1 1 1 1 1 1) 1))
+    (defn jsbp-no-source ()
+        (jsbp-plan "form-backend" (fsa-good-expr) (fsa-default-env) (jsbp-add1)
+            1 (jsbp-map 0 1 1 1 1 1 1 1 1) 1))
+    (defn jsbp-no-deopt ()
+        (jsbp-plan "form-backend" (fsa-good-expr) (fsa-default-env) (jsbp-add1)
+            1 (jsbp-map 1 1 1 0 1 1 1 1 1) 1))
+    (defn jsbp-zero-generation ()
+        (jsbp-plan "form-backend" (fsa-good-expr) (fsa-default-env) (jsbp-add1)
+            1 (jsbp-map 1 1 1 1 1 1 1 1 1) 0))
+
+    (defn jsbp-bit (cond bit) (if cond bit 0))
+    (defn jit-source-byte-pipeline-check ()
+        (add
+            (jsbp-bit (eq (jsbp-static-clean? (jsbp-good-add1)) 1) 1)
+            (add
+                (jsbp-bit (eq (jsbp-admit? (jsbp-good-add1)) 1) 2)
+                (add
+                    (jsbp-bit (eq (jsbp-admit? (jsbp-good-array)) 1) 4)
+                    (add
+                        (jsbp-bit (eq (jsbp-admit? (jsbp-good-field)) 1) 8)
+                        (add
+                            (jsbp-bit (eq (jsbp-admit? (jsbp-good-div)) 1) 16)
+                            (add
+                                (jsbp-bit (eq (jsbp-bytes-preserved? (jsbp-good-add1)) 1) 32)
+                                (add
+                                    (jsbp-bit (eq (jsbp-bytes-preserved? (jsbp-good-array)) 1) 64)
+                                        (add
+                                            (jsbp-bit (eq (jsbp-byte-list? (jsbp-bytes (jsbp-good-div))) 1) 128)
+                                        (add
+                                            (jsbp-bit (eq (jsbp-action (jsbp-good-add1) 1 1 0 1) (jsbp-native)) 256)
+                                            (add
+                                                (jsbp-bit (eq (jsbp-action (jsbp-good-add1) 0 1 0 1) (jsbp-deopt)) 512)
+                                                (add
+                                                    (jsbp-bit (eq (jsbp-action (jsbp-good-add1) 1 0 0 1) (jsbp-exception-action)) 1024)
+                                                    (add
+                                                        (jsbp-bit (eq (jsbp-action (jsbp-good-add1) 1 1 1 1) (jsbp-rewalk)) 2048)
+                                                        (add
+                                                            (jsbp-bit (eq (jsbp-action (jsbp-good-add1) 1 1 0 0) (jsbp-deopt)) 4096)
+                                                            (add
+                                                                (jsbp-bit (eq (jsbp-action (jsbp-static-bad) 1 1 0 1) (jsbp-reject)) 8192)
+                                                                (add
+                                                                    (jsbp-bit (eq (jsbp-action (jsbp-cold) 1 1 0 1) (jsbp-reject)) 16384)
+                                                                    (add
+                                                                        (jsbp-bit (eq (jsbp-action (jsbp-foreign) 1 1 0 1) (jsbp-reject)) 32768)
+                                                                        (add
+                                                                            (jsbp-bit (eq (jsbp-action (jsbp-no-source) 1 1 0 1) (jsbp-reject)) 65536)
+                                                                            (add
+                                                                                (jsbp-bit (eq (jsbp-action (jsbp-no-deopt) 1 1 0 1) (jsbp-reject)) 131072)
+                                                                                (add
+                                                                                    (jsbp-bit (eq (jsbp-action (jsbp-zero-generation) 1 1 0 1) (jsbp-reject)) 262144)
+                                                                                    (add
+                                                                                        (jsbp-bit (eq (jsbp-has? (jsbp-bytes (jsbp-good-array)) 115) 1) 524288)
+                                                                                        (jsbp-bit (eq (jrf-attributed? (jrf-div-ex)) 1) 1048576)))))))))))))))))))))
+
+    0)
