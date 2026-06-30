@@ -1,0 +1,116 @@
+; jit-deopt-cache.fk - guarded deopt, melt, invalidation, and cache receipts.
+;
+; This rung ties installed native code to its profile signature. It names the
+; actions for install, keep, invalidate, deopt, melt, and rewalk, while requiring
+; attributed exception receipts on deopt.
+
+(do
+    (defn jdc-install () 1)
+    (defn jdc-keep () 2)
+    (defn jdc-invalidate () 3)
+    (defn jdc-deopt () 4)
+    (defn jdc-melt () 5)
+    (defn jdc-rewalk () 6)
+
+    (defn jdc-state-empty () 0)
+    (defn jdc-state-profiled () 1)
+    (defn jdc-state-specialized () 2)
+    (defn jdc-state-deoptimized () 3)
+    (defn jdc-state-melted () 4)
+
+    ; cache receipt:
+    ; ("cache" fn site signature state age hits guard-fails invalidated fallback exception-kind source-sig)
+    (defn jdc-entry (fn site signature state age hits guard-fails invalidated fallback exception-kind source-sig)
+        (list "cache" fn site signature state age hits guard-fails invalidated fallback exception-kind source-sig))
+    (defn jdc-entry? (e) (if (eq (len e) 12) (str_eq (nth e 0) "cache") 0))
+    (defn jdc-fn (e) (nth e 1))
+    (defn jdc-site (e) (nth e 2))
+    (defn jdc-signature (e) (nth e 3))
+    (defn jdc-state (e) (nth e 4))
+    (defn jdc-age (e) (nth e 5))
+    (defn jdc-hits (e) (nth e 6))
+    (defn jdc-guard-fails (e) (nth e 7))
+    (defn jdc-invalidated (e) (nth e 8))
+    (defn jdc-fallback (e) (nth e 9))
+    (defn jdc-exception-kind (e) (nth e 10))
+    (defn jdc-source-sig (e) (nth e 11))
+
+    (defn jdc-source-match? (e profile)
+        (if (eq (jdc-signature e) (jpr-signature profile))
+            (if (eq (jdc-source-sig e) (jpr-signature profile)) 1 0)
+            0))
+
+    (defn jdc-hot-installable? (profile fault)
+        (if (eq (jtp-action profile 0 fault) (jtp-specialize)) 1
+            (if (eq (jtp-action profile 0 fault) (jtp-crystallize)) 1 0)))
+
+    (defn jdc-deopt-safe? (e fault)
+        (if (eq (jdc-fallback e) 1)
+            (if (eq (jrf-attributed? fault) 1)
+                (if (eq (jdc-exception-kind e) (jrf-kind fault)) 1 0)
+                0)
+            0))
+
+    (defn jdc-cold-or-stale? (e profile)
+        (if (eq (jd-melt? (jpr-heat profile)) 1)
+            1
+            (if (gt (jdc-age e) 100)
+                (if (lt (jdc-hits e) 2) 1 0)
+                0)))
+
+    (defn jdc-action (e profile fault)
+        (if (eq (jdc-entry? e) 1)
+            (if (eq (jdc-invalidated e) 1)
+                (jdc-rewalk)
+                (if (eq (jdc-source-match? e profile) 1)
+                    (if (eq (jpr-deopt profile) (jpr-deopt-none))
+                        (if (gt (jdc-guard-fails e) 0)
+                            (if (eq (jdc-deopt-safe? e fault) 1) (jdc-deopt) (jdc-invalidate))
+                            (if (eq (jdc-state e) (jdc-state-specialized))
+                                (if (eq (jdc-cold-or-stale? e profile) 1) (jdc-melt) (jdc-keep))
+                                (if (eq (jdc-hot-installable? profile fault) 1) (jdc-install) (jdc-keep))))
+                        (if (eq (jdc-deopt-safe? e fault) 1) (jdc-deopt) (jdc-invalidate)))
+                    (jdc-invalidate)))
+            (jdc-rewalk)))
+
+    (defn jdc-parity-after-invalidation? (e profile fault)
+        (if (eq (jdc-action e profile fault) (jdc-rewalk)) 1 0))
+
+    (defn jdc-empty-entry ()
+        (jdc-entry 7 2 (jpr-signature (jpr-array-sample 100 40)) (jdc-state-empty) 0 0 0 0 1 (jrf-guard) (jpr-signature (jpr-array-sample 100 40))))
+    (defn jdc-specialized-entry ()
+        (jdc-entry 7 2 (jpr-signature (jpr-array-sample 100 40)) (jdc-state-specialized) 5 20 0 0 1 (jrf-guard) (jpr-signature (jpr-array-sample 100 40))))
+    (defn jdc-source-miss ()
+        (jdc-entry 7 2 999 (jdc-state-specialized) 5 20 0 0 1 (jrf-guard) 999))
+    (defn jdc-guard-fail ()
+        (jdc-entry 7 2 (jpr-signature (jpr-array-sample 100 40)) (jdc-state-specialized) 5 20 1 0 1 (jrf-guard) (jpr-signature (jpr-array-sample 100 40))))
+    (defn jdc-invalidated-entry ()
+        (jdc-entry 7 2 (jpr-signature (jpr-array-sample 100 40)) (jdc-state-specialized) 5 20 0 1 1 (jrf-guard) (jpr-signature (jpr-array-sample 100 40))))
+    (defn jdc-stale-entry ()
+        (jdc-entry 7 2 (jpr-signature (jpr-array-sample 100 40)) (jdc-state-specialized) 120 1 0 0 1 (jrf-guard) (jpr-signature (jpr-array-sample 100 40))))
+    (defn jdc-no-fallback ()
+        (jdc-entry 7 2 (jpr-signature (jpr-array-sample 100 40)) (jdc-state-specialized) 5 20 1 0 0 (jrf-guard) (jpr-signature (jpr-array-sample 100 40))))
+    (defn jdc-guard-ex ()
+        (jrf-exception (jrf-guard) "guard-fail" (jrf-sample-source) (jrf-sample-stack) (list 1 0)))
+
+    (defn jdc-bit (cond bit) (if cond bit 0))
+    (defn jit-deopt-cache-check ()
+        (add
+            (jdc-bit (eq (jdc-action (jdc-empty-entry) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jdc-install)) 1)
+            (add
+                (jdc-bit (eq (jdc-action (jdc-specialized-entry) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jdc-keep)) 2)
+                (add
+                    (jdc-bit (eq (jdc-action (jdc-source-miss) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jdc-invalidate)) 4)
+                    (add
+                        (jdc-bit (eq (jdc-action (jdc-guard-fail) (jpr-array-sample 100 40) (jdc-guard-ex)) (jdc-deopt)) 8)
+                        (add
+                            (jdc-bit (eq (jdc-action (jdc-invalidated-entry) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jdc-rewalk)) 16)
+                            (add
+                                (jdc-bit (eq (jdc-action (jdc-stale-entry) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jdc-melt)) 32)
+                                (add
+                                    (jdc-bit (eq (jdc-action (jdc-specialized-entry) (jpr-cool-guard-sample) (jdc-guard-ex)) (jdc-invalidate)) 64)
+                                    (add
+                                        (jdc-bit (eq (jdc-action (jdc-no-fallback) (jpr-array-sample 100 40) (jdc-guard-ex)) (jdc-invalidate)) 128)
+                                        (jdc-bit (eq (jdc-parity-after-invalidation? (jdc-invalidated-entry) (jpr-array-sample 100 40) (jrf-bounds-ex)) 1) 256)))))))))
+
+    0)

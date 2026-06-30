@@ -1,0 +1,153 @@
+; jit-native-ir.fk - Form-owned native IR lowering and interpreter witness.
+;
+; This is the executable lowering target below jit-emitter-bundle.fk. It emits
+; compact IR instruction rows with source attribution and interprets the guarded
+; native path in Form. It is still not host machine code; it is the Form-owned
+; native IR contract that a later host-code emitter must preserve.
+;
+; preludes: observe/jit-runtime-fault.fk observe/jit-emitter-bundle.fk
+
+(do
+    (defn jnir-op-guard () 1)
+    (defn jnir-op-bounds () 2)
+    (defn jnir-op-null () 3)
+    (defn jnir-op-divzero () 4)
+    (defn jnir-op-return () 5)
+
+    ; instruction = ("ir" op arg source)
+    (defn jnir-instr (op arg source)
+        (list "ir" op arg source))
+    (defn jnir-instr? (i) (if (eq (len i) 4) (str_eq (nth i 0) "ir") 0))
+    (defn jnir-op (i) (nth i 1))
+    (defn jnir-arg (i) (nth i 2))
+    (defn jnir-source (i) (nth i 3))
+
+    ; program = ("program" block ops source)
+    (defn jnir-program (block ops source)
+        (list "program" block ops source))
+    (defn jnir-program? (p) (if (eq (len p) 4) (str_eq (nth p 0) "program") 0))
+    (defn jnir-block (p) (nth p 1))
+    (defn jnir-ops (p) (nth p 2))
+    (defn jnir-program-source (p) (nth p 3))
+
+    (defn jnir-ops-attributed? (ops)
+        (if (eq (len ops) 0)
+            1
+            (if (eq (jnir-instr? (head ops)) 1)
+                (if (eq (jrf-source-complete? (jnir-source (head ops))) 1)
+                    (jnir-ops-attributed? (tail ops))
+                    0)
+                0)))
+
+    (defn jnir-has-op? (ops op)
+        (if (eq (len ops) 0)
+            0
+            (if (eq (jnir-op (head ops)) op) 1 (jnir-has-op? (tail ops) op))))
+
+    (defn jnir-lower-with-check (block source check-op)
+        (if (eq (jeb-block-safe? block) 1)
+            (if (eq (jrf-source-complete? source) 1)
+                (jnir-program block
+                    (list
+                        (jnir-instr (jnir-op-guard) 1 source)
+                        (jnir-instr check-op 1 source)
+                        (jnir-instr (jnir-op-return) 1 source))
+                    source)
+                (empty))
+            (empty)))
+
+    (defn jnir-lower-array (block source)
+        (jnir-lower-with-check block source (jnir-op-bounds)))
+    (defn jnir-lower-field (block source)
+        (jnir-lower-with-check block source (jnir-op-null)))
+    (defn jnir-lower-div (block source)
+        (jnir-lower-with-check block source (jnir-op-divzero)))
+
+    (defn jnir-program-safe? (p)
+        (if (eq (jnir-program? p) 1)
+            (if (eq (jeb-block-safe? (jnir-block p)) 1)
+                (if (eq (jrf-source-complete? (jnir-program-source p)) 1)
+                    (jnir-ops-attributed? (jnir-ops p))
+                    0)
+                0)
+            0))
+
+    (defn jnir-run-action (program dispatch)
+        (if (eq (jnir-program-safe? program) 1)
+            (if (eq (jeb-dispatch-invalidated dispatch) 1)
+                (jeb-dispatch-rewalk)
+                (if (eq (jeb-dispatch-guard-ok dispatch) 1)
+                    (if (eq (jeb-dispatch-runtime-ok dispatch) 1)
+                        (jeb-dispatch-native)
+                        (if (eq (jrf-attributed? (jeb-dispatch-exception-of dispatch)) 1)
+                            (jeb-dispatch-exception)
+                            (jeb-dispatch-deopt)))
+                    (jeb-dispatch-deopt)))
+            (jeb-dispatch-rewalk)))
+
+    (defn jnir-run-value (program dispatch)
+        (if (eq (jnir-run-action program dispatch) (jeb-dispatch-native))
+            (jeb-dispatch-native-value dispatch)
+            (if (eq (jnir-run-action program dispatch) (jeb-dispatch-exception))
+                (jrf-kind (jeb-dispatch-exception-of dispatch))
+                (jeb-dispatch-walker-value dispatch))))
+
+    (defn jnir-parity? (program dispatch)
+        (if (eq (jnir-run-action program dispatch) (jeb-dispatch-native))
+            (if (eq (jeb-dispatch-native-value dispatch) (jeb-dispatch-walker-value dispatch)) 1 0)
+            1))
+
+    (defn jnir-source ()
+        (jrf-source "form" "observe/tests/jit-native-ir-band.fk" 27 5 4))
+    (defn jnir-bad-source ()
+        (jrf-source "form" "" 0 0 0))
+    (defn jnir-array-program ()
+        (jnir-lower-array (jeb-block-good) (jnir-source)))
+    (defn jnir-field-program ()
+        (jnir-lower-field (jeb-block-good) (jnir-source)))
+    (defn jnir-div-program ()
+        (jnir-lower-div (jeb-block-good) (jnir-source)))
+    (defn jnir-bad-program ()
+        (jnir-lower-array (jeb-block-good) (jnir-bad-source)))
+    (defn jnir-native-dispatch ()
+        (jeb-dispatch (jeb-block-good) 1 1 0 42 42 (jeb-guard-ex)))
+    (defn jnir-deopt-dispatch ()
+        (jeb-dispatch (jeb-block-good) 0 1 0 42 41 (jeb-guard-ex)))
+    (defn jnir-exception-dispatch ()
+        (jeb-dispatch (jeb-block-good) 1 0 0 42 41 (jeb-guard-ex)))
+    (defn jnir-rewalk-dispatch ()
+        (jeb-dispatch (jeb-block-good) 1 1 1 42 41 (jeb-guard-ex)))
+    (defn jnir-bad-exception-dispatch ()
+        (jeb-dispatch (jeb-block-good) 1 0 0 42 41 (jeb-bad-ex)))
+
+    (defn jnir-bit (cond bit) (if cond bit 0))
+    (defn jit-native-ir-check ()
+        (add
+            (jnir-bit (eq (jnir-program-safe? (jnir-array-program)) 1) 1)
+            (add
+                (jnir-bit (eq (jnir-has-op? (jnir-ops (jnir-array-program)) (jnir-op-bounds)) 1) 2)
+                (add
+                    (jnir-bit (eq (jnir-has-op? (jnir-ops (jnir-field-program)) (jnir-op-null)) 1) 4)
+                    (add
+                        (jnir-bit (eq (jnir-has-op? (jnir-ops (jnir-div-program)) (jnir-op-divzero)) 1) 8)
+                        (add
+                            (jnir-bit (eq (jnir-run-action (jnir-array-program) (jnir-native-dispatch)) (jeb-dispatch-native)) 16)
+                            (add
+                                (jnir-bit (eq (jnir-run-value (jnir-array-program) (jnir-native-dispatch)) 42) 32)
+                                (add
+                                    (jnir-bit (eq (jnir-run-action (jnir-array-program) (jnir-deopt-dispatch)) (jeb-dispatch-deopt)) 64)
+                                    (add
+                                        (jnir-bit (eq (jnir-run-value (jnir-array-program) (jnir-deopt-dispatch)) 41) 128)
+                                        (add
+                                            (jnir-bit (eq (jnir-run-action (jnir-array-program) (jnir-exception-dispatch)) (jeb-dispatch-exception)) 256)
+                                            (add
+                                                (jnir-bit (eq (jnir-run-value (jnir-array-program) (jnir-exception-dispatch)) (jrf-guard)) 512)
+                                                (add
+                                                    (jnir-bit (eq (jnir-run-action (jnir-array-program) (jnir-rewalk-dispatch)) (jeb-dispatch-rewalk)) 1024)
+                                                    (add
+                                                        (jnir-bit (eq (jnir-program-safe? (jnir-bad-program)) 0) 2048)
+                                                        (add
+                                                            (jnir-bit (eq (jnir-run-action (jnir-array-program) (jnir-bad-exception-dispatch)) (jeb-dispatch-deopt)) 4096)
+                                                            (jnir-bit (eq (jnir-parity? (jnir-array-program) (jnir-native-dispatch)) 1) 8192))))))))))))))
+
+    0)

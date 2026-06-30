@@ -1,0 +1,131 @@
+; jit-register-lowering.fk - CPU/GPU register-aware lowering receipts.
+;
+; This policy records virtual register pressure, physical register class,
+; root/fault maps, SIMD width, GPU occupancy/coalescing, and precision parity.
+; It is a Form-native lowering contract, not a machine-code emitter.
+
+(do
+    (defn jrl-fallback () 0)
+    (defn jrl-cpu-scalar () 1)
+    (defn jrl-cpu-simd () 2)
+    (defn jrl-gpu-scalar () 3)
+    (defn jrl-gpu-warp () 4)
+    (defn jrl-spill () 5)
+    (defn jrl-deopt () 6)
+
+    (defn jrl-lane-cpu () 301)
+    (defn jrl-lane-gpu () 302)
+
+    ; register receipt:
+    ; ("reg" lane regcat vregs physregs spills root-map simd-width occupancy shared coalesced precision fault-map source-sig)
+    (defn jrl-plan (lane regcat vregs physregs spills root-map simd-width occupancy shared coalesced precision fault-map source-sig)
+        (list "reg" lane regcat vregs physregs spills root-map simd-width occupancy shared coalesced precision fault-map source-sig))
+    (defn jrl-plan? (p) (if (eq (len p) 14) (str_eq (nth p 0) "reg") 0))
+    (defn jrl-lane (p) (nth p 1))
+    (defn jrl-regcat (p) (nth p 2))
+    (defn jrl-vregs (p) (nth p 3))
+    (defn jrl-physregs (p) (nth p 4))
+    (defn jrl-spills (p) (nth p 5))
+    (defn jrl-root-map (p) (nth p 6))
+    (defn jrl-simd-width (p) (nth p 7))
+    (defn jrl-occupancy (p) (nth p 8))
+    (defn jrl-shared (p) (nth p 9))
+    (defn jrl-coalesced (p) (nth p 10))
+    (defn jrl-precision (p) (nth p 11))
+    (defn jrl-fault-map (p) (nth p 12))
+    (defn jrl-source-sig (p) (nth p 13))
+
+    (defn jrl-simd-profile ()
+        (list 60 1 1000 10 1 (jpr-call-mono) (jpr-float) (jpr-buffer) 0 (jpr-none) 0 (jpr-index-range) (jpr-stack-normal) (jpr-cpu-simd) (jpr-gpu-none) (jpr-deopt-none) 11))
+
+    (defn jrl-source-match? (p profile)
+        (if (eq (jrl-source-sig p) (jpr-signature profile)) 1 0))
+
+    (defn jrl-base-safe? (p profile fault)
+        (if (eq (jrl-plan? p) 1)
+            (if (eq (jrl-source-match? p profile) 1)
+                (if (eq (jrl-root-map p) 1)
+                    (if (eq (jrl-fault-map p) 1)
+                        (jrf-attributed? fault)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jrl-pressure-fits? (p)
+        (if (le (jrl-vregs p) (jrl-physregs p)) 1 0))
+
+    (defn jrl-spill-ok? (p)
+        (if (gt (jrl-spills p) 0)
+            (if (eq (jrl-root-map p) 1) 1 0)
+            0))
+
+    (defn jrl-cpu-action (p profile)
+        (if (eq (jrl-pressure-fits? p) 1)
+            (if (eq (jpr-cpu profile) (jpr-cpu-simd))
+                (if (gt (jrl-simd-width p) 1) (jrl-cpu-simd) (jrl-fallback))
+                (if (eq (jpr-cpu profile) (jpr-cpu-scalar)) (jrl-cpu-scalar) (jrl-fallback)))
+            (if (eq (jrl-spill-ok? p) 1) (jrl-spill) (jrl-fallback))))
+
+    (defn jrl-gpu-action (p profile)
+        (if (eq (jrl-pressure-fits? p) 1)
+            (if (gt (jrl-occupancy p) 0)
+                (if (eq (jrl-coalesced p) 1)
+                    (if (eq (jrl-precision p) 1)
+                        (if (eq (jpr-gpu profile) (jpr-gpu-warp)) (jrl-gpu-warp)
+                            (if (eq (jpr-gpu profile) (jpr-gpu-scalar)) (jrl-gpu-scalar) (jrl-fallback)))
+                        (jrl-fallback))
+                    (jrl-fallback))
+                (jrl-fallback))
+            (if (eq (jrl-spill-ok? p) 1) (jrl-spill) (jrl-fallback))))
+
+    (defn jrl-action (p profile fault)
+        (if (eq (jpr-deopt profile) (jpr-deopt-none))
+            (if (eq (jrl-base-safe? p profile fault) 1)
+                (if (eq (jrl-lane p) (jrl-lane-cpu))
+                    (jrl-cpu-action p profile)
+                    (if (eq (jrl-lane p) (jrl-lane-gpu)) (jrl-gpu-action p profile) (jrl-fallback)))
+                (jrl-fallback))
+            (jrl-deopt)))
+
+    (defn jrl-parity? (native-plan walk-plan profile fault)
+        (if (eq (jrl-action native-plan profile fault) (jrl-action walk-plan profile fault))
+            (if (eq (jrl-source-sig native-plan) (jrl-source-sig walk-plan)) 1 0)
+            0))
+
+    (defn jrl-cpu-scalar-plan ()
+        (jrl-plan (jrl-lane-cpu) (jpr-cpu-scalar) 4 8 0 1 1 0 0 0 1 1 (jpr-signature (jpr-array-sample 100 40))))
+    (defn jrl-cpu-simd-plan ()
+        (jrl-plan (jrl-lane-cpu) (jpr-cpu-simd) 8 16 0 1 4 0 0 0 1 1 (jpr-signature (jrl-simd-profile))))
+    (defn jrl-gpu-warp-plan ()
+        (jrl-plan (jrl-lane-gpu) (jpr-gpu-warp) 16 32 0 1 1 8 2 1 1 1 (jpr-signature (jpr-gpu-sample))))
+    (defn jrl-spill-plan ()
+        (jrl-plan (jrl-lane-cpu) (jpr-cpu-simd) 20 8 12 1 4 0 0 0 1 1 (jpr-signature (jrl-simd-profile))))
+    (defn jrl-no-root-plan ()
+        (jrl-plan (jrl-lane-cpu) (jpr-cpu-scalar) 4 8 0 0 1 0 0 0 1 1 (jpr-signature (jpr-array-sample 100 40))))
+    (defn jrl-no-fault-map ()
+        (jrl-plan (jrl-lane-cpu) (jpr-cpu-scalar) 4 8 0 1 1 0 0 0 1 0 (jpr-signature (jpr-array-sample 100 40))))
+    (defn jrl-source-miss ()
+        (jrl-plan (jrl-lane-cpu) (jpr-cpu-scalar) 4 8 0 1 1 0 0 0 1 1 999))
+
+    (defn jrl-bit (cond bit) (if cond bit 0))
+    (defn jit-register-lowering-check ()
+        (add
+            (jrl-bit (eq (jrl-action (jrl-cpu-scalar-plan) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jrl-cpu-scalar)) 1)
+            (add
+                (jrl-bit (eq (jrl-action (jrl-cpu-simd-plan) (jrl-simd-profile) (jrf-bounds-ex)) (jrl-cpu-simd)) 2)
+                (add
+                    (jrl-bit (eq (jrl-action (jrl-gpu-warp-plan) (jpr-gpu-sample) (jrf-bounds-ex)) (jrl-gpu-warp)) 4)
+                    (add
+                        (jrl-bit (eq (jrl-action (jrl-spill-plan) (jrl-simd-profile) (jrf-bounds-ex)) (jrl-spill)) 8)
+                        (add
+                            (jrl-bit (eq (jrl-action (jrl-no-root-plan) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jrl-fallback)) 16)
+                            (add
+                                (jrl-bit (eq (jrl-action (jrl-no-fault-map) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jrl-fallback)) 32)
+                                (add
+                                    (jrl-bit (eq (jrl-action (jrl-source-miss) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jrl-fallback)) 64)
+                                    (add
+                                        (jrl-bit (eq (jrl-action (jrl-cpu-scalar-plan) (jpr-cool-guard-sample) (jrf-bounds-ex)) (jrl-deopt)) 128)
+                                        (jrl-bit (eq (jrl-parity? (jrl-cpu-simd-plan) (jrl-cpu-simd-plan) (jrl-simd-profile) (jrf-bounds-ex)) 1) 256)))))))))
+
+    0)

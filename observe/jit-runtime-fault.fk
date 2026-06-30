@@ -1,0 +1,165 @@
+; jit-runtime-fault.fk - JIT runtime checks, exceptions, stack trace, source attribution.
+;
+; This is the safety contract for the Form-native JIT track. Native code may
+; specialize array/list/dict/field/numeric access only when it preserves the
+; walker's runtime fault semantics:
+;   - bounds checks before indexed access
+;   - null/nothing checks before dereference
+;   - div/mod zero checks before numeric division
+;   - type/shape checks before direct field/container access
+;   - thrown exception receipts with stack frames and source attribution
+;
+; This cell is a Form receipt model, not the runtime throw implementation. The
+; later native emitter must produce this shape when a guard or runtime check
+; fails instead of returning `nothing` or silently deopting past the fault.
+
+(do
+    (defn jrf-bounds () 101)
+    (defn jrf-null-ref () 102)
+    (defn jrf-div-zero () 103)
+    (defn jrf-type () 104)
+    (defn jrf-overflow () 105)
+    (defn jrf-guard () 106)
+
+    ; source = ("source" language path line column span)
+    (defn jrf-source (language path line column span)
+        (list "source" language path line column span))
+    (defn jrf-source? (s)
+        (if (eq (len s) 6) (str_eq (nth s 0) "source") 0))
+    (defn jrf-source-language (s) (nth s 1))
+    (defn jrf-source-path (s) (nth s 2))
+    (defn jrf-source-line (s) (nth s 3))
+    (defn jrf-source-column (s) (nth s 4))
+    (defn jrf-source-span (s) (nth s 5))
+
+    ; frame = ("frame" fn site source)
+    (defn jrf-frame (fn site source)
+        (list "frame" fn site source))
+    (defn jrf-frame? (f)
+        (if (eq (len f) 4) (str_eq (nth f 0) "frame") 0))
+    (defn jrf-frame-fn (f) (nth f 1))
+    (defn jrf-frame-site (f) (nth f 2))
+    (defn jrf-frame-source (f) (nth f 3))
+
+    ; exception = ("exception" kind op source stack detail)
+    (defn jrf-exception (kind op source stack detail)
+        (list "exception" kind op source stack detail))
+    (defn jrf-exception? (e)
+        (if (eq (len e) 6) (str_eq (nth e 0) "exception") 0))
+    (defn jrf-kind (e) (nth e 1))
+    (defn jrf-op (e) (nth e 2))
+    (defn jrf-source-of (e) (nth e 3))
+    (defn jrf-stack (e) (nth e 4))
+    (defn jrf-detail (e) (nth e 5))
+
+    (defn jrf-runtime-kind? (kind)
+        (if (eq kind (jrf-bounds)) 1
+            (if (eq kind (jrf-null-ref)) 1
+                (if (eq kind (jrf-div-zero)) 1
+                    (if (eq kind (jrf-type)) 1
+                        (if (eq kind (jrf-overflow)) 1
+                            (if (eq kind (jrf-guard)) 1 0)))))))
+
+    (defn jrf-source-complete? (s)
+        (if (eq (jrf-source? s) 1)
+            (if (gt (str_len (jrf-source-path s)) 0)
+                (if (gt (jrf-source-line s) 0)
+                    (if (gt (jrf-source-column s) 0)
+                        (if (gt (jrf-source-span s) 0) 1 0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jrf-same-source? (a b)
+        (if (str_eq (jrf-source-path a) (jrf-source-path b))
+            (if (eq (jrf-source-line a) (jrf-source-line b))
+                (if (eq (jrf-source-column a) (jrf-source-column b))
+                    (if (eq (jrf-source-span a) (jrf-source-span b)) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jrf-stack-attributed? (stack)
+        (if (eq (len stack) 0)
+            0
+            (if (eq (jrf-frame? (head stack)) 1)
+                (jrf-source-complete? (jrf-frame-source (head stack)))
+                0)))
+
+    (defn jrf-attributed? (e)
+        (if (eq (jrf-exception? e) 1)
+            (if (eq (jrf-runtime-kind? (jrf-kind e)) 1)
+                (if (eq (jrf-source-complete? (jrf-source-of e)) 1)
+                    (if (eq (jrf-stack-attributed? (jrf-stack e)) 1)
+                        (jrf-same-source? (jrf-source-of e) (jrf-frame-source (head (jrf-stack e))))
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jrf-bounds-ok? (index length)
+        (if (ge index 0) (if (lt index length) 1 0) 0))
+
+    (defn jrf-null-ok? (value)
+        (if (nothing? value) 0 1))
+
+    (defn jrf-div-ok? (denominator)
+        (if (eq denominator 0) 0 1))
+
+    (defn jrf-index-safe? (index length source)
+        (if (eq (jrf-bounds-ok? index length) 1)
+            1
+            (if (eq (jrf-source-complete? source) 1) 0 0)))
+
+    (defn jrf-native-walk-parity? (native-ex walk-ex)
+        (if (eq (jrf-kind native-ex) (jrf-kind walk-ex))
+            (if (str_eq (jrf-op native-ex) (jrf-op walk-ex))
+                (if (eq (jrf-same-source? (jrf-source-of native-ex) (jrf-source-of walk-ex)) 1)
+                    (if (eq (len (jrf-stack native-ex)) (len (jrf-stack walk-ex))) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jrf-sample-source ()
+        (jrf-source "form" "observe/tests/jit-runtime-fault-band.fk" 44 17 3))
+
+    (defn jrf-caller-source ()
+        (jrf-source "form" "observe/tests/jit-runtime-fault-band.fk" 12 5 8))
+
+    (defn jrf-sample-stack ()
+        (list
+            (jrf-frame 77 4 (jrf-sample-source))
+            (jrf-frame 12 1 (jrf-caller-source))))
+
+    (defn jrf-bounds-ex ()
+        (jrf-exception (jrf-bounds) "array-get" (jrf-sample-source) (jrf-sample-stack) (list 3 6)))
+
+    (defn jrf-null-ex ()
+        (jrf-exception (jrf-null-ref) "field-load" (jrf-sample-source) (jrf-sample-stack) (list 0 0)))
+
+    (defn jrf-div-ex ()
+        (jrf-exception (jrf-div-zero) "div" (jrf-sample-source) (jrf-sample-stack) (list 9 0)))
+
+    (defn jrf-type-ex ()
+        (jrf-exception (jrf-type) "hash-get" (jrf-sample-source) (jrf-sample-stack) (list 14 43)))
+
+    (defn jrf-bit (cond bit) (if cond bit 0))
+    (defn jit-runtime-fault-check ()
+        (add
+            (jrf-bit (eq (jrf-attributed? (jrf-bounds-ex)) 1) 1)
+            (add
+                (jrf-bit (eq (jrf-attributed? (jrf-null-ex)) 1) 2)
+                (add
+                    (jrf-bit (eq (jrf-attributed? (jrf-div-ex)) 1) 4)
+                    (add
+                        (jrf-bit (eq (jrf-attributed? (jrf-type-ex)) 1) 8)
+                        (add
+                            (jrf-bit (eq (jrf-bounds-ok? 6 3) 0) 16)
+                            (add
+                                (jrf-bit (eq (jrf-null-ok? (nothing)) 0) 32)
+                                (add
+                                    (jrf-bit (eq (jrf-div-ok? 0) 0) 64)
+                                    (jrf-bit (eq (jrf-native-walk-parity? (jrf-bounds-ex) (jrf-bounds-ex)) 1) 128)))))))))
+
+    0)

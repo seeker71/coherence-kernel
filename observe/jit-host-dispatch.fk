@@ -1,0 +1,133 @@
+; jit-host-dispatch.fk - Form-owned host dispatch packet and cache witness.
+;
+; This layer sits above jit-native-ir.fk and below future host machine code. It
+; proves the runtime integration shape without C lowering: a Form-owned packet
+; can be installed, looked up, executed, invalidated, and refused if it is not
+; sourced from the Form IR.
+;
+; preludes: observe/jit-runtime-fault.fk observe/jit-emitter-bundle.fk observe/jit-native-ir.fk
+
+(do
+    (defn jhd-install () 1)
+    (defn jhd-hit () 2)
+    (defn jhd-miss () 3)
+    (defn jhd-reject () 4)
+
+    ; packet = ("host-packet" owner target program signature installed valid source-map guard-map fault-map deopt-map)
+    (defn jhd-packet (owner target program signature installed valid source-map guard-map fault-map deopt-map)
+        (list "host-packet" owner target program signature installed valid source-map guard-map fault-map deopt-map))
+    (defn jhd-packet? (p) (if (eq (len p) 11) (str_eq (nth p 0) "host-packet") 0))
+    (defn jhd-owner (p) (nth p 1))
+    (defn jhd-target (p) (nth p 2))
+    (defn jhd-program (p) (nth p 3))
+    (defn jhd-signature (p) (nth p 4))
+    (defn jhd-installed (p) (nth p 5))
+    (defn jhd-valid (p) (nth p 6))
+    (defn jhd-source-map (p) (nth p 7))
+    (defn jhd-guard-map (p) (nth p 8))
+    (defn jhd-fault-map (p) (nth p 9))
+    (defn jhd-deopt-map (p) (nth p 10))
+
+    (defn jhd-target-cpu () 1)
+    (defn jhd-target-gpu () 2)
+
+    (defn jhd-form-owned? (p)
+        (if (str_eq (jhd-owner p) "form-ir") 1 0))
+
+    (defn jhd-target-ok? (p)
+        (if (eq (jhd-target p) (jhd-target-cpu)) 1
+            (if (eq (jhd-target p) (jhd-target-gpu)) 1 0)))
+
+    (defn jhd-packet-safe? (p)
+        (if (eq (jhd-packet? p) 1)
+            (if (eq (jhd-form-owned? p) 1)
+                (if (eq (jhd-target-ok? p) 1)
+                    (if (eq (jnir-program-safe? (jhd-program p)) 1)
+                        (if (eq (jhd-source-map p) 1)
+                            (if (eq (jhd-guard-map p) 1)
+                                (if (eq (jhd-fault-map p) 1)
+                                    (if (eq (jhd-deopt-map p) 1) 1 0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jhd-install-action (p)
+        (if (eq (jhd-packet-safe? p) 1) (jhd-install) (jhd-reject)))
+
+    ; cache = ("dispatch-cache" signature packet)
+    (defn jhd-cache (signature packet)
+        (list "dispatch-cache" signature packet))
+    (defn jhd-cache? (c) (if (eq (len c) 3) (str_eq (nth c 0) "dispatch-cache") 0))
+    (defn jhd-cache-signature (c) (nth c 1))
+    (defn jhd-cache-packet (c) (nth c 2))
+
+    (defn jhd-lookup-action (cache signature)
+        (if (eq (jhd-cache? cache) 1)
+            (if (eq (jhd-cache-signature cache) signature)
+                (if (eq (jhd-packet-safe? (jhd-cache-packet cache)) 1)
+                    (if (eq (jhd-installed (jhd-cache-packet cache)) 1)
+                        (if (eq (jhd-valid (jhd-cache-packet cache)) 1) (jhd-hit) (jhd-miss))
+                        (jhd-miss))
+                    (jhd-reject))
+                (jhd-miss))
+            (jhd-miss)))
+
+    (defn jhd-execute-action (cache signature dispatch)
+        (if (eq (jhd-lookup-action cache signature) (jhd-hit))
+            (jnir-run-action (jhd-program (jhd-cache-packet cache)) dispatch)
+            (jeb-dispatch-rewalk)))
+
+    (defn jhd-execute-value (cache signature dispatch)
+        (if (eq (jhd-lookup-action cache signature) (jhd-hit))
+            (jnir-run-value (jhd-program (jhd-cache-packet cache)) dispatch)
+            (jeb-dispatch-walker-value dispatch)))
+
+    (defn jhd-invalidate (p)
+        (jhd-packet (jhd-owner p) (jhd-target p) (jhd-program p) (jhd-signature p) (jhd-installed p) 0 (jhd-source-map p) (jhd-guard-map p) (jhd-fault-map p) (jhd-deopt-map p)))
+
+    (defn jhd-packet-cpu ()
+        (jhd-packet "form-ir" (jhd-target-cpu) (jnir-array-program) 7003 1 1 1 1 1 1))
+    (defn jhd-packet-gpu ()
+        (jhd-packet "form-ir" (jhd-target-gpu) (jnir-array-program) 7004 1 1 1 1 1 1))
+    (defn jhd-packet-foreign ()
+        (jhd-packet "c-lowering" (jhd-target-cpu) (jnir-array-program) 7003 1 1 1 1 1 1))
+    (defn jhd-packet-no-fault-map ()
+        (jhd-packet "form-ir" (jhd-target-cpu) (jnir-array-program) 7003 1 1 1 1 0 1))
+    (defn jhd-cache-cpu ()
+        (jhd-cache 7003 (jhd-packet-cpu)))
+    (defn jhd-cache-invalid ()
+        (jhd-cache 7003 (jhd-invalidate (jhd-packet-cpu))))
+
+    (defn jhd-bit (cond bit) (if cond bit 0))
+    (defn jit-host-dispatch-check ()
+        (add
+            (jhd-bit (eq (jhd-install-action (jhd-packet-cpu)) (jhd-install)) 1)
+            (add
+                (jhd-bit (eq (jhd-install-action (jhd-packet-gpu)) (jhd-install)) 2)
+                (add
+                    (jhd-bit (eq (jhd-install-action (jhd-packet-foreign)) (jhd-reject)) 4)
+                    (add
+                        (jhd-bit (eq (jhd-install-action (jhd-packet-no-fault-map)) (jhd-reject)) 8)
+                        (add
+                            (jhd-bit (eq (jhd-lookup-action (jhd-cache-cpu) 7003) (jhd-hit)) 16)
+                            (add
+                                (jhd-bit (eq (jhd-lookup-action (jhd-cache-cpu) 7004) (jhd-miss)) 32)
+                                (add
+                                    (jhd-bit (eq (jhd-lookup-action (jhd-cache-invalid) 7003) (jhd-miss)) 64)
+                                    (add
+                                        (jhd-bit (eq (jhd-execute-action (jhd-cache-cpu) 7003 (jnir-native-dispatch)) (jeb-dispatch-native)) 128)
+                                        (add
+                                            (jhd-bit (eq (jhd-execute-value (jhd-cache-cpu) 7003 (jnir-native-dispatch)) 42) 256)
+                                            (add
+                                                (jhd-bit (eq (jhd-execute-action (jhd-cache-cpu) 7003 (jnir-deopt-dispatch)) (jeb-dispatch-deopt)) 512)
+                                                (add
+                                                    (jhd-bit (eq (jhd-execute-action (jhd-cache-cpu) 7003 (jnir-exception-dispatch)) (jeb-dispatch-exception)) 1024)
+                                                    (add
+                                                        (jhd-bit (eq (jhd-execute-action (jhd-cache-invalid) 7003 (jnir-native-dispatch)) (jeb-dispatch-rewalk)) 2048)
+                                                        (jhd-bit (eq (jhd-execute-value (jhd-cache-invalid) 7003 (jnir-native-dispatch)) 42) 4096)))))))))))))
+
+    0)

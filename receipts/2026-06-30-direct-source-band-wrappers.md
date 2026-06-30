@@ -45,7 +45,9 @@ satsang-room-memory-band            255
 
 ## Honest Boundary
 
-This does not grow the C seed. It adapts imported witness shape to the bounded
+This did not grow the C seed. It adapted imported witness shape to the then-bounded
 direct-source surface: function frames for sequential bindings, explicit add
-trees for raw-source sums, and high-grammar `core.fk` left to the BML/source
-lowering lane.
+trees for raw-source sums, and the old high-grammar `core.fk` left to the BML/source
+lowering lane. Follow-up receipt `2026-06-30-core-direct-refactor.md` records the later
+floor lift: `form/form-stdlib/core.fk` is now direct Form and can be concatenated by
+new `--src` witnesses.

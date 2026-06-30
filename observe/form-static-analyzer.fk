@@ -1,0 +1,256 @@
+; form-static-analyzer.fk - compile-time lint/static analysis for Form.
+;
+; This is the pre-execution and pre-JIT gate for the optimizer track. It works
+; over a small lowered Form AST row shape. The source parser/compiler can feed
+; this shape later; the analyzer itself is already executable Form.
+;
+; Checks proven here:
+;   - every node carries complete source attribution
+;   - variables and callees are bound
+;   - calls match known arity
+;   - literal div/mod by zero is rejected before execution/lowering
+;   - literal list nth out-of-bounds is rejected before direct access
+;   - head/tail over a statically empty list is rejected before direct access
+;
+; preludes: observe/jit-runtime-fault.fk
+
+(do
+    (defn fsa-code-missing-source () 201)
+    (defn fsa-code-unbound () 202)
+    (defn fsa-code-arity () 203)
+    (defn fsa-code-div-zero () 204)
+    (defn fsa-code-bounds () 205)
+    (defn fsa-code-null-ref () 206)
+
+    (defn fsa-severity-error () 3)
+    (defn fsa-issue (code source detail)
+        (list "issue" code (fsa-severity-error) source detail))
+    (defn fsa-issue-code (i) (nth i 1))
+    (defn fsa-issue-severity (i) (nth i 2))
+
+    (defn fsa-source-ok ()
+        (jrf-source "form" "observe/tests/form-static-analyzer-band.fk" 30 7 4))
+    (defn fsa-source-call ()
+        (jrf-source "form" "observe/tests/form-static-analyzer-band.fk" 44 11 6))
+    (defn fsa-source-bad ()
+        (jrf-source "form" "" 0 0 0))
+
+    ; env binding = ("fn" name arity pure) or ("var" name 0 1)
+    (defn fsa-fn-bind (name arity pure) (list "fn" name arity pure))
+    (defn fsa-var-bind (name) (list "var" name 0 1))
+    (defn fsa-bind-kind (b) (nth b 0))
+    (defn fsa-bind-name (b) (nth b 1))
+    (defn fsa-bind-arity (b) (nth b 2))
+    (defn fsa-bind-pure (b) (nth b 3))
+
+    (defn fsa-env-find (env name)
+        (if (eq (len env) 0)
+            (empty)
+            (if (str_eq (fsa-bind-name (head env)) name)
+                (head env)
+                (fsa-env-find (tail env) name))))
+    (defn fsa-found? (b) (if (eq (len b) 0) 0 1))
+    (defn fsa-fn-bound? (env name)
+        (if (eq (fsa-found? (fsa-env-find env name)) 1)
+            (if (str_eq (fsa-bind-kind (fsa-env-find env name)) "fn") 1 0)
+            0))
+    (defn fsa-var-bound? (env name)
+        (if (eq (fsa-found? (fsa-env-find env name)) 1)
+            (if (str_eq (fsa-bind-kind (fsa-env-find env name)) "var") 1 0)
+            0))
+
+    (defn fsa-default-env ()
+        (list
+            (fsa-fn-bind "add" 2 1)
+            (fsa-fn-bind "sub" 2 1)
+            (fsa-fn-bind "mul" 2 1)
+            (fsa-fn-bind "div" 2 1)
+            (fsa-fn-bind "mod" 2 1)
+            (fsa-fn-bind "eq" 2 1)
+            (fsa-fn-bind "lt" 2 1)
+            (fsa-fn-bind "head" 1 1)
+            (fsa-fn-bind "tail" 1 1)
+            (fsa-fn-bind "nth" 2 1)
+            (fsa-fn-bind "len" 1 1)
+            (fsa-var-bind "x")))
+
+    ; AST rows:
+    ;   ("int" value source)
+    ;   ("nothing" 0 source)
+    ;   ("var" name source)
+    ;   ("list" items source)
+    ;   ("call" name args source)
+    (defn fsa-int (value source) (list "int" value source))
+    (defn fsa-nothing (source) (list "nothing" 0 source))
+    (defn fsa-var (name source) (list "var" name source))
+    (defn fsa-list-lit (items source) (list "list" items source))
+    (defn fsa-call (name args source) (list "call" name args source))
+
+    (defn fsa-tag (expr) (nth expr 0))
+    (defn fsa-source (expr) (if (str_eq (fsa-tag expr) "call") (nth expr 3) (nth expr 2)))
+    (defn fsa-int-value (expr) (nth expr 1))
+    (defn fsa-var-name (expr) (nth expr 1))
+    (defn fsa-list-items (expr) (nth expr 1))
+    (defn fsa-call-name (expr) (nth expr 1))
+    (defn fsa-call-args (expr) (nth expr 2))
+    (defn fsa-int? (expr) (str_eq (fsa-tag expr) "int"))
+    (defn fsa-list? (expr) (str_eq (fsa-tag expr) "list"))
+
+    (defn fsa-append (a b)
+        (if (eq (len a) 0) b (cons (head a) (fsa-append (tail a) b))))
+
+    (defn fsa-source-issues (expr)
+        (if (eq (jrf-source-complete? (fsa-source expr)) 1)
+            (empty)
+            (list (fsa-issue (fsa-code-missing-source) (fsa-source expr) "missing-source"))))
+
+    (defn fsa-var-issues (expr env)
+        (if (eq (fsa-var-bound? env (fsa-var-name expr)) 1)
+            (empty)
+            (list (fsa-issue (fsa-code-unbound) (fsa-source expr) (fsa-var-name expr)))))
+
+    (defn fsa-call-unbound-issues (expr env)
+        (if (eq (fsa-fn-bound? env (fsa-call-name expr)) 1)
+            (empty)
+            (list (fsa-issue (fsa-code-unbound) (fsa-source expr) (fsa-call-name expr)))))
+
+    (defn fsa-call-arity-issues (expr env)
+        (if (eq (fsa-fn-bound? env (fsa-call-name expr)) 1)
+            (if (eq (fsa-bind-arity (fsa-env-find env (fsa-call-name expr))) (len (fsa-call-args expr)))
+                (empty)
+                (list (fsa-issue (fsa-code-arity) (fsa-source expr) (fsa-call-name expr))))
+            (empty)))
+
+    (defn fsa-second (xs) (head (tail xs)))
+
+    (defn fsa-div-zero? (expr)
+        (if (eq (len (fsa-call-args expr)) 2)
+            (if (str_eq (fsa-call-name expr) "div")
+                (if (eq (fsa-int? (fsa-second (fsa-call-args expr))) 1)
+                    (if (eq (fsa-int-value (fsa-second (fsa-call-args expr))) 0) 1 0)
+                    0)
+                (if (str_eq (fsa-call-name expr) "mod")
+                    (if (eq (fsa-int? (fsa-second (fsa-call-args expr))) 1)
+                        (if (eq (fsa-int-value (fsa-second (fsa-call-args expr))) 0) 1 0)
+                        0)
+                    0))
+            0))
+
+    (defn fsa-div-zero-issues (expr)
+        (if (eq (fsa-div-zero? expr) 1)
+            (list (fsa-issue (fsa-code-div-zero) (fsa-source expr) (fsa-call-name expr)))
+            (empty)))
+
+    (defn fsa-nth-oob? (expr)
+        (if (str_eq (fsa-call-name expr) "nth")
+            (if (eq (len (fsa-call-args expr)) 2)
+                (if (eq (fsa-list? (head (fsa-call-args expr))) 1)
+                    (if (eq (fsa-int? (fsa-second (fsa-call-args expr))) 1)
+                        (if (ge (fsa-int-value (fsa-second (fsa-call-args expr))) 0)
+                            (if (lt (fsa-int-value (fsa-second (fsa-call-args expr))) (len (fsa-list-items (head (fsa-call-args expr))))) 0 1)
+                            1)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn fsa-bounds-issues (expr)
+        (if (eq (fsa-nth-oob? expr) 1)
+            (list (fsa-issue (fsa-code-bounds) (fsa-source expr) "nth"))
+            (empty)))
+
+    (defn fsa-empty-deref? (expr)
+        (if (eq (len (fsa-call-args expr)) 1)
+            (if (str_eq (fsa-call-name expr) "head")
+                (if (eq (fsa-list? (head (fsa-call-args expr))) 1)
+                    (if (eq (len (fsa-list-items (head (fsa-call-args expr)))) 0) 1 0)
+                    0)
+                (if (str_eq (fsa-call-name expr) "tail")
+                    (if (eq (fsa-list? (head (fsa-call-args expr))) 1)
+                        (if (eq (len (fsa-list-items (head (fsa-call-args expr)))) 0) 1 0)
+                        0)
+                    0))
+            0))
+
+    (defn fsa-null-issues (expr)
+        (if (eq (fsa-empty-deref? expr) 1)
+            (list (fsa-issue (fsa-code-null-ref) (fsa-source expr) (fsa-call-name expr)))
+            (empty)))
+
+    (defn fsa-analyze-args (args env)
+        (if (eq (len args) 0)
+            (empty)
+            (fsa-append (fsa-analyze-expr (head args) env) (fsa-analyze-args (tail args) env))))
+
+    (defn fsa-call-static-issues (expr env)
+        (fsa-append
+            (fsa-call-unbound-issues expr env)
+            (fsa-append
+                (fsa-call-arity-issues expr env)
+                (fsa-append
+                    (fsa-div-zero-issues expr)
+                    (fsa-append (fsa-bounds-issues expr) (fsa-null-issues expr))))))
+
+    (defn fsa-analyze-expr (expr env)
+        (fsa-append
+            (fsa-source-issues expr)
+            (if (str_eq (fsa-tag expr) "var")
+                (fsa-var-issues expr env)
+                (if (str_eq (fsa-tag expr) "call")
+                    (fsa-append (fsa-analyze-args (fsa-call-args expr) env) (fsa-call-static-issues expr env))
+                    (if (str_eq (fsa-tag expr) "list")
+                        (fsa-analyze-args (fsa-list-items expr) env)
+                        (empty))))))
+
+    (defn fsa-count-code (issues code)
+        (if (eq (len issues) 0)
+            0
+            (add (if (eq (fsa-issue-code (head issues)) code) 1 0)
+                 (fsa-count-code (tail issues) code))))
+
+    (defn fsa-has-error? (issues)
+        (if (eq (len issues) 0)
+            0
+            (if (ge (fsa-issue-severity (head issues)) (fsa-severity-error))
+                1
+                (fsa-has-error? (tail issues)))))
+
+    (defn fsa-allow-execute? (expr env) (if (eq (fsa-has-error? (fsa-analyze-expr expr env)) 1) 0 1))
+    (defn fsa-allow-jit? (expr env) (fsa-allow-execute? expr env))
+
+    (defn fsa-good-expr ()
+        (fsa-call "add"
+            (list (fsa-var "x" (fsa-source-ok))
+                  (fsa-call "mul" (list (fsa-int 2 (fsa-source-ok)) (fsa-int 3 (fsa-source-ok))) (fsa-source-call)))
+            (fsa-source-call)))
+    (defn fsa-unbound-expr () (fsa-call "add" (list (fsa-var "z" (fsa-source-ok)) (fsa-int 1 (fsa-source-ok))) (fsa-source-call)))
+    (defn fsa-arity-expr () (fsa-call "add" (list (fsa-int 1 (fsa-source-ok))) (fsa-source-call)))
+    (defn fsa-divzero-expr () (fsa-call "div" (list (fsa-var "x" (fsa-source-ok)) (fsa-int 0 (fsa-source-ok))) (fsa-source-call)))
+    (defn fsa-modzero-expr () (fsa-call "mod" (list (fsa-var "x" (fsa-source-ok)) (fsa-int 0 (fsa-source-ok))) (fsa-source-call)))
+    (defn fsa-nth-oob-expr () (fsa-call "nth" (list (fsa-list-lit (list (fsa-int 1 (fsa-source-ok)) (fsa-int 2 (fsa-source-ok))) (fsa-source-ok)) (fsa-int 3 (fsa-source-ok))) (fsa-source-call)))
+    (defn fsa-head-empty-expr () (fsa-call "head" (list (fsa-list-lit (empty) (fsa-source-ok))) (fsa-source-call)))
+    (defn fsa-missing-source-expr () (fsa-call "add" (list (fsa-int 1 (fsa-source-ok)) (fsa-int 2 (fsa-source-ok))) (fsa-source-bad)))
+
+    (defn fsa-bit (cond bit) (if cond bit 0))
+    (defn form-static-analyzer-check ()
+        (add
+            (fsa-bit (eq (fsa-allow-jit? (fsa-good-expr) (fsa-default-env)) 1) 1)
+            (add
+                (fsa-bit (eq (fsa-count-code (fsa-analyze-expr (fsa-unbound-expr) (fsa-default-env)) (fsa-code-unbound)) 1) 2)
+                (add
+                    (fsa-bit (eq (fsa-count-code (fsa-analyze-expr (fsa-arity-expr) (fsa-default-env)) (fsa-code-arity)) 1) 4)
+                    (add
+                        (fsa-bit (eq (fsa-count-code (fsa-analyze-expr (fsa-divzero-expr) (fsa-default-env)) (fsa-code-div-zero)) 1) 8)
+                        (add
+                            (fsa-bit (eq (fsa-count-code (fsa-analyze-expr (fsa-modzero-expr) (fsa-default-env)) (fsa-code-div-zero)) 1) 16)
+                            (add
+                                (fsa-bit (eq (fsa-count-code (fsa-analyze-expr (fsa-nth-oob-expr) (fsa-default-env)) (fsa-code-bounds)) 1) 32)
+                                (add
+                                    (fsa-bit (eq (fsa-count-code (fsa-analyze-expr (fsa-head-empty-expr) (fsa-default-env)) (fsa-code-null-ref)) 1) 64)
+                                    (add
+                                        (fsa-bit (eq (fsa-count-code (fsa-analyze-expr (fsa-missing-source-expr) (fsa-default-env)) (fsa-code-missing-source)) 1) 128)
+                                        (add
+                                            (fsa-bit (eq (fsa-allow-execute? (fsa-divzero-expr) (fsa-default-env)) 0) 256)
+                                            (fsa-bit (eq (fsa-allow-jit? (fsa-nth-oob-expr) (fsa-default-env)) 0) 512))))))))))
+
+    0)

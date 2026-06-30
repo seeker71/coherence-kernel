@@ -24,9 +24,12 @@ Each body carries a nullary self-proving `<name>-check` that returns an all-1s w
 
 A missing dep or a wrong computation drops a digit; the witness must equal the body's
 **origin four-way witness** (`proven-bodies-from-old-repo.txt`) to count as re-proven.
-Non-`core` prelude deps are concatenated ahead of the body (deps-first); `core.fk` is
-**intrinsic to `--src`** and must NOT be concatenated (doing so re-defines builtins and
-floors the run). All deps of this wave are within the wave (see closure note).
+Non-`core` prelude deps are concatenated ahead of the body (deps-first). At the time of
+this wave, `core.fk` was the old BML core and was treated as **intrinsic to `--src`**;
+concatenating it floored the run. As of the 2026-06-30 direct-core refactor,
+`form/form-stdlib/core.fk` is parseable direct Form and may be concatenated by new
+witnesses. Historical wave commands and witnesses remain recorded as run. All deps of
+this wave are within the wave (see closure note).
 
 ## Brought home this wave — 17 bodies (+ 17 bands)
 
