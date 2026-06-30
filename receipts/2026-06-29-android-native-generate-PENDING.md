@@ -1,5 +1,8 @@
 # Receipt — Rung 3: KV-cache generation reference validated; on-device blocked on a run-stage leak (PENDING)
 
+**SUPERSEDED:** this was the honest floor before the 2026-06-30 fixes. The current witnessed Rung 3 receipt is
+[`receipts/2026-06-29-android-native-generate.md`](2026-06-29-android-native-generate.md).
+
 **Status: PENDING — honest, not faked.** The full greedy-generation **reference** is built and validated
 **bit-exact against ollama** (the named oracle). The device generation recipe (real attention: Wq/Wk, RoPE,
 causal softmax over a KV cache) is built and its non-attention path runs, but a **Vulkan object leak in the
