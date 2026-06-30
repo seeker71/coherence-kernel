@@ -1267,14 +1267,48 @@ static long long fk_jprim1(long long tag, long long a) {
  }
  return fk_nothing;
 }
+/* ── LIST/CONS carriers (tags 18-23) — pure value ops over the pair arena, taking
+   ALREADY-EVALUATED tagged words and returning the tagged result. Each mirrors fk_walk's
+   tag case EXACTLY (same arena guards, same melt-on-cons, same chain walk) so a lowered
+   cons/head/tail/len/nth can NEVER drift from the walker. cons (19) is the one that can
+   allocate: it pushes h,t onto fk_vs (as the walker does via fk_vp) BEFORE the melt check
+   so the GC sees them as roots and relocates them, then reads the relocated words back —
+   bit-identical to the walker's tag-19 path. The JIT itself holds no live pairs across this
+   call (its intermediates are in registers/machine-stack), so fk_vs is the correct, only
+   root set, exactly as in the walker. */
+static void fk_arena(void);
+static void fk_melt(void);
+static void fk_vp(long long v);
+static long long fk_jlist2(long long tag, long long a, long long b) {
+ if (tag == 19) {   /* cons h t — mirrors fk_walk tag-19 exactly (fk_vp roots + melt + grow guard) */
+  fk_vp(a); fk_vp(b);
+  if (fk_cap == 0) { fk_arena(); }
+  if (fk_hp * 100 >= fk_cap * 90) { fk_melt(); }
+  if (fk_hp + 1 >= fk_cap) { fk_vsp = fk_vsp - 2; return 1; }
+  fk_hp = fk_hp + 1; fk_hh[fk_hp] = fk_vs[fk_vsp - 2]; fk_ht[fk_hp] = fk_vs[fk_vsp - 1];
+  fk_vsp = fk_vsp - 2; return (fk_hp << 1) | 1;
+ }
+ if (tag == 23) {   /* nth x k — mirrors fk_walk tag-23 (x evaluated, k evaluated) */
+  long long p = a >> 1; long long k23 = b >> 1;
+  while (p >= 1 && p <= fk_hp && k23 > 0) { p = fk_ht[p] >> 1; k23 = k23 - 1; }
+  if (p < 1 || p > fk_hp) { return 1; }
+  return fk_hh[p];
+ }
+ return fk_nothing;
+}
+static long long fk_jlist1(long long tag, long long a) {
+ if (tag == 20) { long long p = a >> 1; if (p < 1 || p > fk_hp) { return 1; } return fk_hh[p]; }  /* head */
+ if (tag == 21) { long long p = a >> 1; if (p < 1 || p > fk_hp) { return 1; } return fk_ht[p]; }  /* tail */
+ if (tag == 22) { long long p = a >> 1; long long n = 0; while (p >= 1 && p <= fk_hp) { n = n + 1; p = fk_ht[p] >> 1; } return n << 1; }  /* len */
+ return fk_nothing;
+}
 /* inter-fn CALL carrier: dispatch fn `callee` with up to 2 args through the WALKER
    (always byte-identical). The lowered call to another fn routes here, so a JITed fn
    can call ANY other fn (JITed or not) correctly; native-entry chaining is the perf
    follow-on, correctness is here first. */
-static long long fk_jcall(long long callee, long long argc, long long a, long long b) {
+static long long fk_jcall(long long callee, long long argc, const long long *args) {
  long long fp = fk_vsp;
- if (argc >= 1) { fk_vs[fk_vsp] = a; fk_vsp = fk_vsp + 1; }
- if (argc >= 2) { fk_vs[fk_vsp] = b; fk_vsp = fk_vsp + 1; }
+ long long k = 0; while (k < argc) { fk_vs[fk_vsp] = args[k]; fk_vsp = fk_vsp + 1; k = k + 1; }
  long long r = fk_walk_body(fk_fn[callee], fp);
  fk_vsp = fp;
  return r;
@@ -1284,6 +1318,7 @@ static long long fk_jbp;
 static long long fk_jit_self;   /* fn index being lowered: self-calls must target it */
 static int fk_jit_ok;           /* cleared to 0 by emit on any unsupported shape */
 static long long fk_jit_entry;  /* byte offset of the post-prologue entry (TCO jmp target) */
+static long long fk_jit_frame;  /* frame slots fn needs (args + let-locals); set by fk_jit_lower */
 static void fk_jb1(unsigned char x) { if (fk_jbp < 16384) { fk_jb[fk_jbp] = x; } fk_jbp = fk_jbp + 1; }
 static void fk_jb4(int x) { fk_jb1(x & 0xff); fk_jb1((x >> 8) & 0xff); fk_jb1((x >> 16) & 0xff); fk_jb1((x >> 24) & 0xff); }
 static void fk_jb8(long long x) { int k = 0; while (k < 8) { fk_jb1((x >> (8 * k)) & 0xff); k = k + 1; } }
@@ -1335,7 +1370,9 @@ static void fk_jcarrier(void *fn, int nargs) {
 static long long fk_jprim2(long long tag, long long a, long long b);
 static long long fk_jprim1(long long tag, long long a);
 static long long fk_jprim3(long long tag, long long a, long long b, long long c);
-static long long fk_jcall(long long callee, long long argc, long long a, long long b);
+static long long fk_jlist2(long long tag, long long a, long long b);
+static long long fk_jlist1(long long tag, long long a);
+static long long fk_jcall(long long callee, long long argc, const long long *args);
 /* tail self-call (sum-shaped): compute all new args into temporaries (machine stack),
    write them into the rbp args array IN PLACE, then jmp to the post-prologue entry.
    Constant stack — the native twin of fk_walk_body's trampoline. */
@@ -1427,6 +1464,40 @@ static void fk_jemit(long long i, int tail) {
   fk_jcarrier((void *)fk_jprim3, 4);
   return;
  }
+ if (t == 18) {                                        /* empty: nil value = 1 (no carrier needed) */
+  fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4(1); /* mov rax,1 */
+  return;
+ }
+ if (t == 20 || t == 21 || t == 22) {                  /* head/tail/len: 1-arg list carrier fk_jlist1(tag,a) */
+  fk_jemit(fk_node[i][1], 0);                          /* arg -> rax */
+  fk_jb1(0x50);                                        /* push rax (arg1=val) */
+  fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4((int)t); /* mov rax,tag */
+  fk_jb1(0x50);                                        /* push rax (arg0=tag) */
+  fk_jcarrier((void *)fk_jlist1, 2);
+  return;
+ }
+ if (t == 19 || t == 23) {                             /* cons/nth: 2-arg list carrier fk_jlist2(tag,a,b) */
+  fk_jemit(fk_node[i][1], 0); fk_jb1(0x50);            /* a -> push */
+  fk_jemit(fk_node[i][2], 0); fk_jb1(0x50);            /* b -> push (top) */
+  /* stack top->down: b,a. fk_jlist2 args: arg0=tag, arg1=a, arg2=b. Re-stage. */
+  fk_jb1(0x59);                                        /* pop rcx (b) */
+  fk_jb1(0x58);                                        /* pop rax (a) */
+  fk_jb1(0x51);                                        /* push rcx (arg2=b) */
+  fk_jb1(0x50);                                        /* push rax (arg1=a) */
+  fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4((int)t); /* mov rax,tag */
+  fk_jb1(0x50);                                        /* push rax (arg0=tag) */
+  fk_jcarrier((void *)fk_jlist2, 3);
+  return;
+ }
+ if (t == 109) {                                       /* let slot val body: store val into rbp[slot], eval body */
+  long long li = fk_node[i][1];
+  if (fk_node[li][0] != 1) { fk_jit_ok = 0; return; }  /* slot index must be a literal (it always is) */
+  long long slot = fk_node[li][1];
+  fk_jemit(fk_node[i][2], 0);                           /* val -> rax (never tail) */
+  fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x85); fk_jb4((int)(slot * 8)); /* mov [rbp+slot*8],rax */
+  fk_jemit(fk_node[i][3], tail);                        /* body — tail position preserved */
+  return;
+ }
  if (t == 6) {                                                                           /* if test then else */
   fk_jemit(fk_node[i][1], 0);                            /* test (never tail) */
   fk_jb1(0x48); fk_jb1(0x85); fk_jb1(0xC0);              /* test rax,rax */
@@ -1441,88 +1512,94 @@ static void fk_jemit(long long i, int tail) {
  }
  if (t == 7 || t == 12 || t == 240 || t == 241) {                                        /* fn call: SELF-recursion native; OTHER-fn via carrier */
   long long callee = (t == 7) ? fk_jit_self : fk_node[i][1];
-  long long argc; long long a0; long long a1 = -1;
+  long long argc; long long an[3]; an[0] = -1; an[1] = -1; an[2] = -1;
   if (t == 241) {                                        /* variadic call: args in a 242-cons chain */
-   long long cell = fk_node[i][2]; long long cnt = 0; long long n0 = -1; long long n1 = -1;
-   while (cell >= 0 && fk_node[cell][0] == 242) { if (cnt == 0) { n0 = fk_node[cell][1]; } else if (cnt == 1) { n1 = fk_node[cell][1]; } cnt = cnt + 1; cell = fk_node[cell][2]; }
-   if (cnt > 2) { fk_jit_ok = 0; return; }               /* this POC lowers arity 0/1/2 */
-   argc = cnt; a0 = n0; a1 = n1;
+   long long cell = fk_node[i][2]; long long cnt = 0;
+   while (cell >= 0 && fk_node[cell][0] == 242) { if (cnt < 3) { an[cnt] = fk_node[cell][1]; } cnt = cnt + 1; cell = fk_node[cell][2]; }
+   if (cnt > 3) { if (getenv("FK_JIT_WITNESS")) { printf("[jit-bail] call arity %lld > 3 at node %lld\n", cnt, i); } fk_jit_ok = 0; return; } /* lowers arity 0..3 */
+   argc = cnt;
   } else {
    argc = (t == 240) ? 2 : 1;
-   a0 = (t == 7) ? fk_node[i][1] : fk_node[i][2];
-   a1 = (t == 240) ? fk_node[i][3] : -1;
+   an[0] = (t == 7) ? fk_node[i][1] : fk_node[i][2];
+   an[1] = (t == 240) ? fk_node[i][3] : -1;
   }
   if (callee != fk_jit_self) {
-   /* ── INTER-FUNCTION call: emit a call to fk_jcall(callee, argc, a, b). The carrier
-      dispatches the callee through the walker (always byte-identical), so a JITed fn
-      can call ANY other fn correctly — not only itself. Args: a0/a1 (or 0). */
-   if (argc >= 1) { fk_jemit(a0, 0); } else { fk_jb1(0x48); fk_jb1(0x31); fk_jb1(0xC0); } /* a0 or 0 */
-   fk_jb1(0x50);                                         /* push (arg3 = b, used iff argc==2... but layout below) */
-   if (argc >= 2) { fk_jemit(a1, 0); } else { fk_jb1(0x48); fk_jb1(0x31); fk_jb1(0xC0); }
-   fk_jb1(0x50);                                         /* push */
-   /* stack now: [rsp]=a1val, [rsp+8]=a0val. fk_jcall(callee,argc,a,b): arg0=callee@[rsp],
-      arg1=argc@[rsp+8], arg2=a@[rsp+16], arg3=b@[rsp+24]. Re-stage: pop both, push in order. */
-   fk_jb1(0x59);                                         /* pop rcx (a1val -> b) */
-   fk_jb1(0x58);                                         /* pop rax (a0val -> a) */
-   fk_jb1(0x51);                                         /* push rcx (arg3=b) */
-   fk_jb1(0x50);                                         /* push rax (arg2=a) */
+   /* ── INTER-FUNCTION call: emit a call to fk_jcall(callee, argc, argsptr). The carrier
+      dispatches the callee through the walker (always byte-identical), so a JITed fn can
+      call ANY other fn correctly — not only itself, for ANY arity 0..3. We build the
+      evaluated-args array on the machine stack (arg0 at the lowest address) and pass its
+      pointer; fk_jcarrier's `and rsp,-16` only moves rsp DOWN, leaving this array intact
+      above it. */
+   long long k = argc;
+   while (k > 0) { k = k - 1; fk_jemit(an[k], 0); fk_jb1(0x50); } /* push argN-1 ... arg0 (arg0 ends on top = lowest addr) */
+   /* args array now at [rsp .. rsp+argc*8); arg0=[rsp]. Capture ptr, then stage carrier args. */
+   if (argc == 0) { fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xE0); }   /* mov rax,rsp (ptr; empty array, unread) */
+   else { fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xE0); }             /* mov rax,rsp (argsptr) */
+   fk_jb1(0x50);                                         /* push rax (arg2=argsptr, staged last carrier-arg slot) */
    fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4((int)argc); fk_jb1(0x50); /* mov rax,argc; push (arg1) */
    fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4((int)callee); fk_jb1(0x50); /* mov rax,callee; push (arg0) */
-   fk_jcarrier((void *)fk_jcall, 4);                     /* result in rax */
+   /* stack top->down: callee, argc, argsptr, [arg0..argN-1]. fk_jcarrier reads 3 carrier
+      args from [rsp],[rsp+8],[rsp+16] and restores rsp to rsp+3*8 — exactly past the 3
+      staged carrier args, leaving the argc*8 args region to be cleaned below. */
+   fk_jcarrier((void *)fk_jcall, 3);                     /* result in rax */
+   if (argc > 0) { fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xC4); fk_jb1((unsigned char)(argc * 8)); } /* add rsp,argc*8 (drop args array) */
    return;
   }
-  /* ── SELF-recursion (callee == self): native call/jmp, as in the #59 POC. */
-  if (argc < 1) { fk_jit_ok = 0; return; }               /* 0-arg self-recursion not handled here */
-  /* evaluate new args into temporaries (machine stack) — old slots still intact */
-  fk_jemit(a0, 0); fk_jb1(0x50);                         /* a0 -> rax ; push */
-  if (argc == 2) { fk_jemit(a1, 0); fk_jb1(0x50); }      /* a1 -> rax ; push */
+  /* ── SELF-recursion (callee == self): native call/jmp, as in the #59 POC. Arity 1..3. */
+  if (argc < 1) { if (getenv("FK_JIT_WITNESS")) { printf("[jit-bail] 0-arg self-recursion at node %lld\n", i); } fk_jit_ok = 0; return; } /* 0-arg self-recursion not handled here */
+  /* evaluate new args into temporaries (machine stack), pushed arg0 first ... argN-1 last */
+  { long long k = 0; while (k < argc) { fk_jemit(an[k], 0); fk_jb1(0x50); k = k + 1; } }
   if (tail) {
-   /* TAIL self-call: write new args into the rbp array IN PLACE, jmp entry. Constant
-      stack — the native twin of the walker's trampoline; sum(1000000) runs flat. */
-   if (argc == 1) {
-    fk_jb1(0x58);                                        /* pop rax (a0) */
-    fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x45); fk_jb1(0); /* mov [rbp+0],rax */
-   } else {
-    fk_jb1(0x59);                                        /* pop rcx (a1) */
-    fk_jb1(0x58);                                        /* pop rax (a0) */
-    fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x45); fk_jb1(0);     /* mov [rbp+0],rax  (slot0) */
-    fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x4D); fk_jb1(8);     /* mov [rbp+8],rcx  (slot1) */
-   }
+   /* TAIL self-call: write new args into the rbp array IN PLACE, jmp entry. Constant stack —
+      the native twin of the walker's trampoline; sum(1000000) runs flat. Stack top = argN-1. */
+   long long k = argc;
+   while (k > 0) { k = k - 1; fk_jb1(0x58); /* pop rax (arg k) */ fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x45); fk_jb1((unsigned char)(k * 8)); /* mov [rbp+k*8],rax */ }
    fk_jb1(0xE9); long long js = fk_jbp; fk_jb4(0);       /* jmp entry */
    fk_jpatch4(js, (int)(fk_jit_entry - (js + 4)));
    return;
   }
-  /* NON-tail self-call (e.g. fac's (mul n (fac …))): real native recursion. */
-  if (argc == 1) {
-   fk_jb1(0x58);                                         /* pop rax (a0) */
-   fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xEC); fk_jb1(8);  /* sub rsp,8 */
-   fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x04); fk_jb1(0x24); /* mov [rsp],rax  (args[0]) */
-   fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xE1);             /* mov rcx,rsp */
-  } else {
-   fk_jb1(0x59);                                         /* pop rcx (a1) */
-   fk_jb1(0x58);                                         /* pop rax (a0) */
-   fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xEC); fk_jb1(16); /* sub rsp,16 */
-   fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x04); fk_jb1(0x24);             /* mov [rsp],rax   (args[0]) */
-   fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x4C); fk_jb1(0x24); fk_jb1(8);  /* mov [rsp+8],rcx (args[1]) */
-   fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xE1);             /* mov rcx,rsp */
+  /* NON-tail self-call (e.g. fac's (mul n (fac …))): real native recursion. The temporaries
+     (pushed arg0 first ... argN-1 last) are in REVERSE array order on the stack (top=argN-1,
+     deepest=arg0). Reserve a FRAME*8 args region BELOW them (frame = args + let-locals, so
+     the callee's let stores have room), copy each temp into its args[k] slot (let-slots stay
+     scratch), pass rcx = args ptr, native call to offset 0. */
+  { long long fr = fk_jit_frame; if (fr < argc) { fr = argc; }
+    fk_jb1(0x48); fk_jb1(0x81); fk_jb1(0xEC); fk_jb4((int)(fr * 8)); /* sub rsp,frame*8 (args[] region below the temps) */
+    /* temps now sit above the region: temp(argN-1) at [rsp+fr*8+0], ... arg0 at
+       [rsp+fr*8+(argc-1)*8]. Copy temp -> args[k]. */
+    { long long k = 0; while (k < argc) {
+       long long src = fr * 8 + ((argc - 1 - k) * 8);    /* temp holding arg k */
+       fk_jb1(0x48); fk_jb1(0x8B); fk_jb1(0x84); fk_jb1(0x24); fk_jb4((int)src); /* mov rax,[rsp+src] */
+       fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x84); fk_jb1(0x24); fk_jb4((int)(k * 8)); /* mov [rsp+k*8],rax */
+       k = k + 1; } }
+    fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xE1);            /* mov rcx,rsp (args ptr) */
+#if defined(_WIN32)
+    fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xEC); fk_jb1(32);/* sub rsp,32 (Win64 shadow) */
+#endif
+    fk_jb1(0xE8); long long cs = fk_jbp; fk_jb4(0);      /* call rel32 -> offset 0 (full prologue sets rbp) */
+    fk_jpatch4(cs, (int)(0 - (cs + 4)));
+#if defined(_WIN32)
+    fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xC4); fk_jb1(32);/* add rsp,32 (undo shadow) */
+#endif
+    fk_jb1(0x48); fk_jb1(0x81); fk_jb1(0xC4); fk_jb4((int)(fr * 8 + argc * 8)); /* add rsp,frame*8+temps (drop both) */
   }
-#if defined(_WIN32)
-  fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xEC); fk_jb1(32);  /* sub rsp,32 (Win64 shadow) */
-#endif
-  fk_jb1(0xE8); long long cs = fk_jbp; fk_jb4(0);        /* call rel32 -> offset 0 (full prologue sets rbp) */
-  fk_jpatch4(cs, (int)(0 - (cs + 4)));
-#if defined(_WIN32)
-  fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xC4); fk_jb1(32);  /* add rsp,32 (undo shadow) */
-#endif
-  fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xC4); if (argc == 1) { fk_jb1(8); } else { fk_jb1(16); } /* add rsp,args region */
   return;
  }
  if (getenv("FK_JIT_WITNESS")) { printf("[jit-bail] unsupported tag %lld at node %lld\n", t, i); }
  fk_jit_ok = 0;   /* any other tag: not in the lowerable family — bail */
 }
+/* fk_jit_frame (declared above): number of frame slots fn f needs (args + let-locals). The
+   args array the ENTRY and every native self-call build must be this many longs, else a let
+   store (mov [rbp+slot*8]) or a slot read writes/reads past the array. Captured from the
+   body's reserve wrapper (tag 111, slot-count literal) when present; else = arity. */
 /* lower fn f's body into fk_jb; returns length if the whole tree is in-family, else 0. */
 static long long fk_jit_lower(long long f) {
  fk_jbp = 0; fk_jit_ok = 1; fk_jit_self = f;
+ /* frame size = max(arity, maxslot+1). maxslot lives in the reserve wrapper (tag 111). */
+ { long long body = fk_fn[f]; long long fr = (f >= 0 && f < 4096) ? fk_fnar[f] : 1;
+   if (body >= 0 && fk_node[body][0] == 111) { long long li = fk_node[body][1];
+     if (li >= 0 && fk_node[li][0] == 1) { long long ms = fk_node[li][1] + 1; if (ms > fr) { fr = ms; } } }
+   if (fr < 1) { fr = 1; } fk_jit_frame = fr; }
  fk_jb1(0x55);                                  /* push rbp */
 #if defined(_WIN32)
  fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xCD);       /* mov rbp,rcx (args ptr) */
@@ -1576,6 +1653,20 @@ static int fk_run_src(const char *path, long long arg) {
  else { fk_fn[0] = fk_smklit(0); }
  fk_fn_count = fk_defn_next;
  fk_vs[0] = arg << 1; fk_vsp = 1;
+ /* ── FK_JIT_SCAN (opt-in measurement, prints nothing on the default path): attempt to LOWER
+    every top-level defn and report crystallize-vs-bail per fn. This is the payoff readout —
+    how much of a multi-fn bundle (e.g. form-eval) lowers whole, and which tags still bail.
+    It installs nothing and changes no result; it only measures fk_jit_lower over each body. */
+ if (getenv("FK_JIT_SCAN")) {
+  long long fi = 1; long long ok = 0; long long bail = 0;
+  while (fi < fk_defn_next) {
+   long long n = fk_jit_lower(fi);
+   if (n > 0) { ok = ok + 1; if (getenv("FK_JIT_SCAN_V")) { printf("[scan] fn%lld LOWERS (%lld bytes)\n", fi, n); } }
+   else { bail = bail + 1; if (getenv("FK_JIT_SCAN_V")) { printf("[scan] fn%lld BAILS\n", fi); } }
+   fi = fi + 1;
+  }
+  printf("[scan] lowered=%lld bailed=%lld total=%lld\n", ok, bail, ok + bail);
+ }
  /* ── IN-PROCESS SELF-JIT gate (opt-in via env FK_JIT; default path byte-identical) ──
     When the root form is a direct call (callee arg…) to a function whose body lowers in
     the integer-arithmetic + pure-self-recursion family, crystallize that function's node
@@ -1591,14 +1682,17 @@ static int fk_run_src(const char *path, long long arg) {
   if (want && (rt == 12 || rt == 240 || rt == 241)) {
    long long callee = fk_node[root][1];
    if (callee >= 0 && callee < 4096) {
-    /* collect the root call's outer args (evaluated once on the walker) */
-    long long aargs[2]; aargs[0] = 0; aargs[1] = 0; long long ac = 0; int aok = 1;
+    /* collect the root call's outer args (evaluated once on the walker). The array is sized
+       generously (4096 slots) and zero-initialized so the callee's let-local slots (beyond
+       the args) start clean and a let-using root fn lowers with a correctly-sized frame. */
+    long long aargs[4096]; { long long zi = 0; while (zi < 4096) { aargs[zi] = 0; zi = zi + 1; } }
+    long long ac = 0; int aok = 1;
     if (rt == 12) { ac = 1; aargs[0] = fk_walk(fk_node[root][2], 0); }
     else if (rt == 240) { ac = 2; aargs[0] = fk_walk(fk_node[root][2], 0); aargs[1] = fk_walk(fk_node[root][3], 0); }
     else { /* 241 variadic: walk the 242-cons chain (ac may be 0 for a nullary recipe like (slen)) */
      long long cell = fk_node[root][2];
-     while (cell >= 0 && fk_node[cell][0] == 242) { if (ac < 2) { aargs[ac] = fk_walk(fk_node[cell][1], 0); } ac = ac + 1; cell = fk_node[cell][2]; }
-     if (ac > 2) { aok = 0; }   /* 0/1/2 args all lower; >2 out of POC scope */
+     while (cell >= 0 && fk_node[cell][0] == 242) { if (ac < 3) { aargs[ac] = fk_walk(fk_node[cell][1], 0); } ac = ac + 1; cell = fk_node[cell][2]; }
+     if (ac > 3) { aok = 0; }   /* 0/1/2/3 args all lower; >3 out of scope */
     }
     long long n = aok ? fk_jit_lower(callee) : 0;
     if (n > 0) {
