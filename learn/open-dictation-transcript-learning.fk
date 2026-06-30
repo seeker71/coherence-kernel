@@ -1,0 +1,150 @@
+; open-dictation-transcript-learning.fk -- free transcript receipts for open ASR.
+;
+; Closed prompt ID learning already exists. This cell admits the next surface:
+; an arbitrary utterance with side-channel truth, a local oracle transcript, and
+; an optional native transcript candidate. The body owns tokenization, WER,
+; consent/control gates, and promotion. Until a native open-ASR candidate is
+; supplied locally, the route stays oracle.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   learn/speech-loopback-promotion.fk
+;   form/form-stdlib/observed-auto-learning.fk
+
+(do
+    (defn odtl-audio (audio-hash sample-rate channels) (list audio-hash sample-rate channels))
+    (defn odtl-native (native-local native-conf latency-ms) (list native-local native-conf latency-ms))
+    (defn odtl-control-row (choice-open cut fail timeout undo) (list choice-open cut fail timeout undo))
+
+    (defn odtl-row (sample-id locale truth-text oracle-text native-text audio
+                    oracle-local native consent controls)
+        (list "open-dictation-transcript"
+              sample-id
+              locale
+              truth-text
+              oracle-text
+              native-text
+              audio
+              oracle-local
+              native
+              consent
+              controls))
+
+    (defn odtl-kind         (r) (nth r 0))
+    (defn odtl-sample-id    (r) (nth r 1))
+    (defn odtl-locale       (r) (nth r 2))
+    (defn odtl-truth-text   (r) (nth r 3))
+    (defn odtl-oracle-text  (r) (nth r 4))
+    (defn odtl-native-text  (r) (nth r 5))
+    (defn odtl-audio-row    (r) (nth r 6))
+    (defn odtl-oracle-local (r) (nth r 7))
+    (defn odtl-native-row   (r) (nth r 8))
+    (defn odtl-consent      (r) (nth r 9))
+    (defn odtl-controls-row (r) (nth r 10))
+
+    (defn odtl-audio-hash   (r) (nth (odtl-audio-row r) 0))
+    (defn odtl-sample-rate  (r) (nth (odtl-audio-row r) 1))
+    (defn odtl-channels     (r) (nth (odtl-audio-row r) 2))
+    (defn odtl-native-local (r) (nth (odtl-native-row r) 0))
+    (defn odtl-native-conf  (r) (nth (odtl-native-row r) 1))
+    (defn odtl-latency-ms   (r) (nth (odtl-native-row r) 2))
+    (defn odtl-choice-open  (r) (nth (odtl-controls-row r) 0))
+    (defn odtl-cut          (r) (nth (odtl-controls-row r) 1))
+    (defn odtl-fail         (r) (nth (odtl-controls-row r) 2))
+    (defn odtl-timeout      (r) (nth (odtl-controls-row r) 3))
+    (defn odtl-undo         (r) (nth (odtl-controls-row r) 4))
+
+    (defn odtl-nonempty? (s) (if (gt (str_len s) 0) 1 0))
+    (defn odtl-truth-tokens  (r) (sw-tokens (odtl-truth-text r)))
+    (defn odtl-oracle-tokens (r) (sw-tokens (odtl-oracle-text r)))
+    (defn odtl-native-tokens (r) (sw-tokens (odtl-native-text r)))
+
+    (defn odtl-audio-present? (r)
+        (if (and (gt (odtl-audio-hash r) 0)
+                 (and (gt (odtl-sample-rate r) 0) (gt (odtl-channels r) 0))) 1 0))
+
+    (defn odtl-control-clean? (r)
+        (if (eq (add (add (odtl-fail r) (odtl-timeout r)) (odtl-undo r)) 0) 1 0))
+
+    (defn odtl-valid? (r)
+        (if (and (eq (odtl-consent r) 1)
+                 (and (eq (odtl-oracle-local r) 1)
+                      (and (eq (odtl-audio-present? r) 1)
+                           (and (eq (odtl-nonempty? (odtl-truth-text r)) 1)
+                                (eq (odtl-nonempty? (odtl-oracle-text r)) 1))))) 1 0))
+
+    (defn odtl-effective-fail (r)
+        (if (or (eq (odtl-fail r) 1) (eq (odtl-valid? r) 0)) 1 0))
+
+    (defn odtl-text-wer (hyp truth)
+        (if (str_eq hyp truth) 0
+            (if (str_eq hyp "") 100
+                (sw-wer (sw-tokens hyp) (sw-tokens truth)))))
+    (defn odtl-oracle-wer (r) (odtl-text-wer (odtl-oracle-text r) (odtl-truth-text r)))
+    (defn odtl-native-wer (r) (odtl-text-wer (odtl-native-text r) (odtl-truth-text r)))
+
+    (defn odtl-oracle-success? (r max-wer)
+        (if (and (eq (odtl-valid? r) 1)
+                 (and (eq (odtl-control-clean? r) 1)
+                      (le (odtl-oracle-wer r) max-wer))) 1 0))
+
+    (defn odtl-native-success? (r max-wer min-conf max-latency)
+        (if (and (eq (odtl-valid? r) 1)
+                 (and (eq (odtl-control-clean? r) 1)
+                      (and (eq (odtl-native-local r) 1)
+                           (and (le (odtl-native-wer r) max-wer)
+                                (and (ge (odtl-native-conf r) min-conf)
+                                     (le (odtl-latency-ms r) max-latency)))))) 1 0))
+
+    (defn odtl-to-promotion-sample (r max-wer min-conf max-latency)
+        (slp-sample
+            (odtl-native-success? r max-wer min-conf max-latency)
+            (odtl-oracle-success? r max-wer)
+            (odtl-effective-fail r)
+            (odtl-timeout r)
+            (odtl-undo r)))
+
+    (defn odtl-window-samples (rows max-wer min-conf max-latency)
+        (if (eq (len rows) 0) (empty)
+            (cons (odtl-to-promotion-sample (head rows) max-wer min-conf max-latency)
+                  (odtl-window-samples (tail rows) max-wer min-conf max-latency))))
+
+    (defn odtl-route-window (rows max-wer min-conf max-latency
+                             min-samples margin max-control-debt min-native-score)
+        (slp-route
+            (odtl-window-samples rows max-wer min-conf max-latency)
+            min-samples
+            margin
+            max-control-debt
+            min-native-score))
+
+    (defn odtl-controls (r)
+        (oal-controls (odtl-choice-open r) (odtl-fail r) (odtl-cut r) (odtl-undo r) (odtl-timeout r)))
+    (defn odtl-mode (r ab-enabled) (oal-mode 1 (odtl-controls r) ab-enabled))
+    (defn odtl-control-action (r) (oal-control-action (odtl-controls r)))
+
+    (defn odtl-summary (rows max-wer min-conf max-latency
+                        min-samples margin max-control-debt min-native-score)
+        (do
+            (let samples (odtl-window-samples rows max-wer min-conf max-latency))
+            (let first (head rows))
+            (list "open-dictation-transcript-summary"
+                  (len rows)
+                  (slp-native-score samples)
+                  (slp-oracle-score samples)
+                  (slp-control-debt-score samples)
+                  (odtl-route-window rows max-wer min-conf max-latency
+                                     min-samples margin max-control-debt min-native-score)
+                  (odtl-mode first 1)
+                  (odtl-control-action first))))
+
+    (defn odtl-summary-kind   (s) (nth s 0))
+    (defn odtl-summary-count  (s) (nth s 1))
+    (defn odtl-summary-native (s) (nth s 2))
+    (defn odtl-summary-oracle (s) (nth s 3))
+    (defn odtl-summary-debt   (s) (nth s 4))
+    (defn odtl-summary-route  (s) (nth s 5))
+    (defn odtl-summary-mode   (s) (nth s 6))
+    (defn odtl-summary-action (s) (nth s 7))
+
+    0)
