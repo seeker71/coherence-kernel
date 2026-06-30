@@ -1,0 +1,149 @@
+; jit-host-exception-bridge.fk - host ingress exception attribution bridge.
+;
+; Host byte ingress must not claim native completion unless runtime-fault exits
+; route to full-stack source-attributed exceptions. This cell composes the host
+; ingress readiness receipt with jit-runtime-stack-attribution before the host
+; path may return `exception`.
+;
+; preludes:
+;   observe/jit-runtime-fault.fk
+;   observe/jit-runtime-stack-attribution.fk
+;   observe/jit-host-ingress-readiness.fk
+
+(do
+    ; receipt = ("host-exception-bridge-receipt" name total expected source maps)
+    (defn jheb-receipt (name total expected source maps)
+        (list "host-exception-bridge-receipt" name total expected source maps))
+    (defn jheb-receipt? (r) (if (eq (len r) 6) (str_eq (nth r 0) "host-exception-bridge-receipt") 0))
+    (defn jheb-total (r) (nth r 2))
+    (defn jheb-expected (r) (nth r 3))
+    (defn jheb-source (r) (nth r 4))
+    (defn jheb-maps (r) (nth r 5))
+
+    (defn jheb-receipt-ok? (r)
+        (if (eq (jheb-receipt? r) 1)
+            (if (eq (jheb-total r) (jheb-expected r))
+                (if (eq (jheb-source r) 1)
+                    (if (eq (jheb-maps r) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jheb-host-ingress () (jheb-receipt "host-ingress-readiness" 1048575 1048575 1 1))
+    (defn jheb-runtime-stack () (jheb-receipt "runtime-stack-attribution" 1023 1023 1 1))
+    (defn jheb-runtime-fault () (jheb-receipt "runtime-fault" 255 255 1 1))
+    (defn jheb-checked-access () (jheb-receipt "checked-access-payload" 2097151 2097151 1 1))
+    (defn jheb-bad-host-ingress () (jheb-receipt "host-ingress-readiness" 1048574 1048575 1 1))
+    (defn jheb-bad-runtime-stack () (jheb-receipt "runtime-stack-attribution" 1022 1023 1 1))
+
+    (defn jheb-receipts-ok? ()
+        (if (eq (jheb-receipt-ok? (jheb-host-ingress)) 1)
+            (if (eq (jheb-receipt-ok? (jheb-runtime-stack)) 1)
+                (if (eq (jheb-receipt-ok? (jheb-runtime-fault)) 1)
+                    (if (eq (jheb-receipt-ok? (jheb-checked-access)) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    ; bridge = ("host-exception-bridge" ingress full-stack source exception deopt parity generation)
+    (defn jheb-bridge (ingress full-stack source exception deopt parity generation)
+        (list "host-exception-bridge" ingress full-stack source exception deopt parity generation))
+    (defn jheb-bridge? (b) (if (eq (len b) 8) (str_eq (nth b 0) "host-exception-bridge") 0))
+    (defn jheb-ingress (b) (nth b 1))
+    (defn jheb-full-stack (b) (nth b 2))
+    (defn jheb-source-map (b) (nth b 3))
+    (defn jheb-exception-map (b) (nth b 4))
+    (defn jheb-deopt-map (b) (nth b 5))
+    (defn jheb-parity (b) (nth b 6))
+    (defn jheb-generation (b) (nth b 7))
+
+    (defn jheb-complete? (b ex)
+        (if (eq (jheb-bridge? b) 1)
+            (if (eq (jheb-receipts-ok?) 1)
+                (if (eq (jhir-ready? (jheb-ingress b)) 1)
+                    (if (eq (jheb-full-stack b) 1)
+                        (if (eq (jheb-source-map b) 1)
+                            (if (eq (jheb-exception-map b) 1)
+                                (if (eq (jheb-deopt-map b) 1)
+                                    (if (eq (jheb-parity b) 1)
+                                        (if (gt (jheb-generation b) 0)
+                                            (jrsa-exception-complete? ex)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jheb-action (b ex status guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (jheb-complete? b ex) 1)
+            (jhir-action (jheb-ingress b) status guard-ok runtime-ok invalidated parity-ok stale)
+            (jhir-reject)))
+
+    (defn jheb-good () (jheb-bridge (jhir-future-x64) 1 1 1 1 1 1))
+    (defn jheb-current () (jheb-bridge (jhir-current-nonx64) 1 1 1 1 1 1))
+    (defn jheb-no-full-stack () (jheb-bridge (jhir-future-x64) 0 1 1 1 1 1))
+    (defn jheb-no-source () (jheb-bridge (jhir-future-x64) 1 0 1 1 1 1))
+    (defn jheb-no-exception () (jheb-bridge (jhir-future-x64) 1 1 0 1 1 1))
+    (defn jheb-zero-generation () (jheb-bridge (jhir-future-x64) 1 1 1 1 1 0))
+
+    (defn jheb-live-status41 () (jhir-status 41 (native_call_test 41)))
+
+    (defn jheb-bit (cond bit) (if cond bit 0))
+    (defn jheb-front-bits (live41)
+        (add
+            (jheb-bit (eq (jheb-receipts-ok?) 1) 1)
+            (add
+                (jheb-bit (eq (jhir-admissible-status? live41) 1) 2)
+                (add
+                    (jheb-bit (eq (jheb-complete? (jheb-good) (jrsa-bounds-ex)) 1) 4)
+                    (add
+                        (jheb-bit (eq (jheb-action (jheb-good) (jrsa-bounds-ex) (jhir-ok) 1 0 0 1 0) (jhir-exception)) 8)
+                        (add
+                            (jheb-bit (eq (jrsa-exception-complete? (jrsa-bounds-ex)) 1) 16)
+                            (jheb-bit (eq (jrsa-exception-parity? (jrsa-bounds-ex) (jrsa-bounds-ex)) 1) 32)))))))
+
+    (defn jheb-reject-bits ()
+        (add
+            (jheb-bit (eq (jrsa-exception-parity? (jrsa-bounds-ex) (jrsa-caller-source-mismatch-ex)) 0) 64)
+            (add
+                (jheb-bit (eq (jheb-complete? (jheb-good) (jrsa-source-mismatch-ex)) 0) 128)
+                (add
+                    (jheb-bit (eq (jheb-complete? (jheb-no-full-stack) (jrsa-bounds-ex)) 0) 256)
+                    (add
+                        (jheb-bit (eq (jheb-receipt-ok? (jheb-bad-host-ingress)) 0) 16384)
+                        (jheb-bit (eq (jheb-receipt-ok? (jheb-bad-runtime-stack)) 0) 32768))))))
+
+    (defn jheb-route-bits ()
+        (add
+            (jheb-bit (eq (jheb-action (jheb-current) (jrsa-bounds-ex) (jhir-unavailable) 1 0 0 1 0) (jhir-deopt)) 512)
+            (add
+                (jheb-bit (eq (jheb-action (jheb-good) (jrsa-bounds-ex) (jhir-ok) 0 1 0 1 0) (jhir-deopt)) 1024)
+                (add
+                    (jheb-bit (eq (jheb-action (jheb-good) (jrsa-bounds-ex) (jhir-ok) 1 1 1 1 0) (jhir-rewalk)) 2048)
+                    (add
+                        (jheb-bit (eq (jheb-action (jheb-good) (jrsa-bounds-ex) (jhir-ok) 1 1 0 1 1) (jhir-melt)) 4096)
+                        (jheb-bit (eq (jheb-action (jheb-good) (jrsa-bounds-ex) (jhir-ok) 1 1 0 0 0) (jhir-deopt)) 8192))))))
+
+    (defn jheb-map-bits ()
+        (add
+            (jheb-bit (eq (jheb-complete? (jheb-no-source) (jrsa-bounds-ex)) 0) 65536)
+            (add
+                (jheb-bit (eq (jheb-complete? (jheb-no-exception) (jrsa-bounds-ex)) 0) 131072)
+                (jheb-bit (eq (jheb-complete? (jheb-zero-generation) (jrsa-bounds-ex)) 0) 262144))))
+
+    (defn jit-host-exception-bridge-check ()
+        (do
+            (let live41 (jheb-live-status41))
+            (add
+                (jheb-front-bits live41)
+                (add
+                    (jheb-reject-bits)
+                    (add
+                        (jheb-route-bits)
+                        (jheb-map-bits)))))
+
+    0)
