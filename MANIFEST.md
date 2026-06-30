@@ -190,8 +190,13 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Multilocale audio2audio acoustic sweep added.** `learn/multilocale-audio2audio-acoustic-sweep.fk` applies
       the decoded-token audio2audio acoustic bridge across five reciprocal baseline pairs (`en<->de`, `en<->es`,
       `zh<->ar`, `fr<->id`, `sa<->la`) with local-oracle source/target transcript gates, Unicode token preservation,
-      controls, consent/audio rejection, and native/guide route receipts (`32767`). The speech selector now sees the
-      sweep-backed audio2audio candidate and returns `16777215`.
+      controls, consent/audio rejection, and native/guide route receipts (`32767`). The speech selector sees the
+      sweep-backed audio2audio candidate; the Metal authority row below now selects it.
+- [x] **Metal audio2audio acoustic authority added.** `learn/metal-audio2audio-acoustic-authority.fk` composes the
+      sweep's stable decoded-token acoustic summary with the seven live Metal pair anchors (`32767`). It routes
+      `metal-witnessed-audio2audio-acoustic`, selects `native-audio2audio-acoustic-vocoder` for the scoped
+      decoded-token audio2audio arm, keeps `live-open-mic-pending` and neural Metal pending, and moves the speech
+      selector to `33554431`.
 - [x] **Speech loopback promotion added.** `learn/speech-loopback-promotion.fk` turns native loopback receipts into
       rolling authority windows (`2047`): clean long windows promote native; short, failed, timed-out, undone, or
       regressing windows route back to oracle.
@@ -286,9 +291,9 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `sema-voice-sample-loop` (`target-fit-listener-wer-ab-formant-vocoder`) over the raw formant carrier,
-      NL2NL selects `closed-set-locale-form`, and audio2audio
-      selects `prototype-asr-sema-voice-audio2audio` (`prototype-asr-neutral-form-sema-voice-loop`) over the raw
-      ASR -> neutral Form -> formant route. `open-dictation-transcript` is now a live-observed ASR
+      NL2NL selects `closed-set-locale-form`, and audio2audio selects
+      `native-audio2audio-acoustic-vocoder` for the decoded-token, metal-witnessed acoustic route.
+      `open-dictation-transcript` is now a live-observed ASR
       receipt candidate, but does not displace the closed-set prototype until a native open-ASR candidate emits
       local transcript text. `native-open-asr-ctc` is now present as a Form-native CTC token-stream decoder
       candidate, `native-acoustic-token-emitter` is present as the supervised Form feature-to-frame bridge, and
@@ -297,8 +302,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       live-selected; `diffusion-codec-speech` is present but not ready because no Form-native executable kernel
       receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; after the live
       Sema formant WER-100 miss, it also exposes the voice miss action and the concrete
-      `text-conditioned-acoustic-vocoder` Form kernel plus the native audio2audio acoustic bridge and multilocale
-      audio2audio acoustic sweep. The band returns `16777215`.
+      `text-conditioned-acoustic-vocoder` Form kernel plus the native audio2audio acoustic bridge, multilocale
+      audio2audio acoustic sweep, and Metal acoustic authority row. The audio2audio arm now selects
+      `native-audio2audio-acoustic-vocoder` for the decoded-token, metal-witnessed scope. The band returns
+      `33554431`.
 - [x] **Open dictation transcript receipt added.** `learn/open-dictation-transcript-learning.fk` admits arbitrary
       utterance rows with consentful side-channel truth, local free oracle transcripts, optional native transcript
       candidates, Unicode token WER, and choice/cut/fail/undo/timeout promotion gates (`16383`). The macOS carrier

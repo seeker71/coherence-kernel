@@ -37,7 +37,7 @@ That miss now changes the algorithm instead of sitting as prose:
 `train-text-conditioned-acoustic-vocoder`, keeping authority on `oracle-guide` and naming the next trainable
 candidate. The recipe is g2p, phoneme timing, prosody contour, acoustic token emission, segmented acoustic
 learning, the Sema voice loop, and the same local-oracle WER bar. The selector's speech receipt now returns
-`16777215` with that action and the multilocale audio2audio sweep exposed.
+`33554431` with that action, the multilocale audio2audio sweep, and the Metal acoustic authority row exposed.
 
 The named candidate is now executable too: `text-conditioned-acoustic-vocoder` 32767 turns target tokens into
 G2P phones, shapes duration/pitch/amplitude from voice-side metadata, emits native source-filter frames, and
@@ -53,8 +53,13 @@ transcripts. It is still a decoded-token bridge, not live open microphone author
 
 That bridge now has a diverse sweep: `multilocale-audio2audio-acoustic-sweep` 32767 runs the same decoded-token
 audio2audio acoustic path over `en<->de`, `en<->es`, `zh<->ar`, `fr<->id`, and `sa<->la`, preserving Unicode
-target tokens and voice-side metadata. It still waits for live segmented source-audio receipts before taking over
-the selected audio2audio arm.
+target tokens and voice-side metadata. By itself, the sweep still does not claim live segmented source-audio
+authority.
+
+The sweep now meets live Metal evidence: `metal-audio2audio-acoustic-authority` 32767 composes stable acoustic
+sweep summaries with the seven live Metal pair anchors and routes `metal-witnessed-audio2audio-acoustic`. The
+selector now chooses `native-audio2audio-acoustic-vocoder` for this decoded-token, metal-witnessed audio2audio
+scope. It still does not claim live open microphone source authority or neural speech.
 
 The promotion window is now executable too: `speech-loopback-promotion` 2047 turns those single-sample loopback
 receipts into native/oracle authority over time. Native wins only after enough clean samples; fail, timeout, undo,
@@ -113,10 +118,11 @@ romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, 
 each pair's before/after NL rate, audio rate, route, and shifted flag, so the aggregate native route has per-pair
 witness rows. `speech-locale-learning-window` 16383 takes selected seed `2` into a numeric `sa<->la` observed
 window: all four lanes train from guided to native route code, clean controls plus A/B evidence promote the
-challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 16777215 selects today's native arms:
+challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 33554431 selects today's native arms:
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, `sema-voice-sample-loop`
-over the deterministic formant vocoder for TTS, and `prototype-asr-sema-voice-audio2audio` for audio-to-audio
-target rendering. The raw formant vocoder and raw formant audio2audio route remain the carriers underneath, but
+over the deterministic formant vocoder for TTS, and `native-audio2audio-acoustic-vocoder` for decoded-token,
+metal-witnessed audio-to-audio target rendering. The raw formant vocoder and Sema voice loop route remain lower
+scoring carriers underneath, but
 generated target speech is now selected by target fit, listener evidence, intelligibility, WER, and latency. The
 open-dictation transcript receipt is now live-observed too:
 `open-dictation-transcript-learning` 16383 scores arbitrary utterance rows with side-channel truth, local free
