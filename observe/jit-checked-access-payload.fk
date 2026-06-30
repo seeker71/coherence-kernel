@@ -1,0 +1,156 @@
+; jit-checked-access-payload.fk - checked direct-access x64 payload witness.
+;
+; This cell moves the direct-access rungs from policy into concrete Form-emitted
+; x64 byte payloads. The bytes are still not passed to the host install/call
+; membrane here, but every admitted payload must carry source, fault, deopt,
+; root, ABI, safepoint, and exception maps before the loader contract accepts it.
+;
+; preludes:
+;   model/form-asm-x64.fk
+;   observe/jit-runtime-fault.fk
+;   observe/jit-loader-contract.fk
+
+(do
+    (defn jcap-array () 1)
+    (defn jcap-field () 2)
+    (defn jcap-div () 3)
+
+    ; request:
+    ; ("checked-access" owner access source guard fault deopt root abi safepoint exception)
+    (defn jcap-request (owner access source guard fault deopt root abi safepoint exception)
+        (list "checked-access" owner access source guard fault deopt root abi safepoint exception))
+    (defn jcap-request? (r) (if (eq (len r) 11) (str_eq (nth r 0) "checked-access") 0))
+    (defn jcap-owner (r) (nth r 1))
+    (defn jcap-access (r) (nth r 2))
+    (defn jcap-source (r) (nth r 3))
+    (defn jcap-guard (r) (nth r 4))
+    (defn jcap-fault (r) (nth r 5))
+    (defn jcap-deopt (r) (nth r 6))
+    (defn jcap-root (r) (nth r 7))
+    (defn jcap-abi (r) (nth r 8))
+    (defn jcap-safepoint (r) (nth r 9))
+    (defn jcap-exception (r) (nth r 10))
+
+    (defn jcap-access-ok? (access)
+        (if (eq access (jcap-array)) 1
+            (if (eq access (jcap-field)) 1
+                (if (eq access (jcap-div)) 1 0))))
+
+    (defn jcap-safe-request? (r)
+        (if (eq (jcap-request? r) 1)
+            (if (str_eq (jcap-owner r) "form-backend")
+                (if (eq (jcap-access-ok? (jcap-access r)) 1)
+                    (if (eq (jcap-source r) 1)
+                        (if (eq (jcap-guard r) 1)
+                            (if (eq (jcap-fault r) 1)
+                                (if (eq (jcap-deopt r) 1)
+                                    (if (eq (jcap-root r) 1)
+                                        (if (eq (jcap-abi r) 1)
+                                            (if (eq (jcap-safepoint r) 1)
+                                                (if (eq (jcap-exception r) 1) 1 0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jcap-bytes (r)
+        (if (eq (jcap-access r) (jcap-array))
+            (x64-array-get-checked)
+            (if (eq (jcap-access r) (jcap-field))
+                (x64-field-load-checked 16)
+                (if (eq (jcap-access r) (jcap-div)) (x64-div-checked) (empty)))))
+
+    (defn jcap-payload (r)
+        (if (eq (jcap-safe-request? r) 1)
+            (jlc-payload "form-backend" 1 (len (jcap-bytes r))
+                (jcap-source r) (jcap-guard r) (jcap-fault r) (jcap-deopt r)
+                (jcap-root r) (jcap-abi r) 1 (jcap-safepoint r) (jcap-exception r))
+            (empty)))
+
+    (defn jcap-load (r generation)
+        (if (eq (jlc-payload-safe? (jcap-payload r)) 1)
+            (jlc-load (jcap-payload r) generation)
+            (empty)))
+
+    (defn jcap-action (r generation guard-ok runtime-ok invalidated parity-ok)
+        (jlc-execute-action (jcap-load r generation) guard-ok runtime-ok invalidated parity-ok))
+
+    (defn jcap-fault-ex (access)
+        (if (eq access (jcap-array))
+            (jrf-bounds-ex)
+            (if (eq access (jcap-field)) (jrf-null-ex) (jrf-div-ex))))
+
+    (defn jcap-fault-attributed? (access)
+        (jrf-attributed? (jcap-fault-ex access)))
+
+    (defn jcap-eq-list (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0)
+                1
+                (if (eq (head a) (head b)) (jcap-eq-list (tail a) (tail b)) 0))
+            0))
+
+    (defn jcap-has? (xs x)
+        (if (eq (len xs) 0)
+            0
+            (if (eq (head xs) x) 1 (jcap-has? (tail xs) x))))
+
+    (defn jcap-good-array () (jcap-request "form-backend" (jcap-array) 1 1 1 1 1 1 1 1))
+    (defn jcap-good-field () (jcap-request "form-backend" (jcap-field) 1 1 1 1 1 1 1 1))
+    (defn jcap-good-div () (jcap-request "form-backend" (jcap-div) 1 1 1 1 1 1 1 1))
+    (defn jcap-foreign () (jcap-request "c-lowering" (jcap-array) 1 1 1 1 1 1 1 1))
+    (defn jcap-no-source () (jcap-request "form-backend" (jcap-array) 0 1 1 1 1 1 1 1))
+    (defn jcap-no-fault () (jcap-request "form-backend" (jcap-array) 1 1 0 1 1 1 1 1))
+    (defn jcap-no-exception () (jcap-request "form-backend" (jcap-array) 1 1 1 1 1 1 1 0))
+
+    (defn jcap-bit (cond bit) (if cond bit 0))
+    (defn jit-checked-access-payload-check ()
+        (add
+            (jcap-bit (eq (jlc-payload-safe? (jcap-payload (jcap-good-array))) 1) 1)
+            (add
+                (jcap-bit (eq (jlc-payload-safe? (jcap-payload (jcap-good-field))) 1) 2)
+                (add
+                    (jcap-bit (eq (jlc-payload-safe? (jcap-payload (jcap-good-div))) 1) 4)
+                    (add
+                        (jcap-bit (eq (jcap-eq-list (x64-array-get-checked) (jcap-bytes (jcap-good-array))) 1) 8)
+                        (add
+                            (jcap-bit (eq (jcap-eq-list (x64-field-load-checked 16) (jcap-bytes (jcap-good-field))) 1) 16)
+                            (add
+                                (jcap-bit (eq (jcap-eq-list (x64-div-checked) (jcap-bytes (jcap-good-div))) 1) 32)
+                                (add
+                                    (jcap-bit (eq (jcap-has? (jcap-bytes (jcap-good-array)) 115) 1) 64)
+                                    (add
+                                        (jcap-bit (eq (jcap-has? (jcap-bytes (jcap-good-field)) 116) 1) 128)
+                                        (add
+                                            (jcap-bit (eq (jcap-has? (jcap-bytes (jcap-good-div)) 247) 1) 256)
+                                            (add
+                                                (jcap-bit (eq (jcap-fault-attributed? (jcap-array)) 1) 512)
+                                                (add
+                                                    (jcap-bit (eq (jcap-fault-attributed? (jcap-field)) 1) 1024)
+                                                    (add
+                                                        (jcap-bit (eq (jcap-fault-attributed? (jcap-div)) 1) 2048)
+                                                        (add
+                                                            (jcap-bit (eq (jcap-action (jcap-good-array) 1 1 1 0 1) (jlc-native)) 4096)
+                                                            (add
+                                                                (jcap-bit (eq (jcap-action (jcap-good-array) 1 0 1 0 1) (jlc-deopt)) 8192)
+                                                                (add
+                                                                    (jcap-bit (eq (jcap-action (jcap-good-array) 1 1 0 0 1) (jlc-exception)) 16384)
+                                                                    (add
+                                                                        (jcap-bit (eq (jcap-action (jcap-good-array) 1 1 1 1 1) (jlc-rewalk)) 32768)
+                                                                        (add
+                                                                            (jcap-bit (eq (jcap-action (jcap-good-array) 1 1 1 0 0) (jlc-deopt)) 65536)
+                                                                            (add
+                                                                                (jcap-bit (eq (len (jcap-payload (jcap-foreign))) 0) 131072)
+                                                                                (add
+                                                                                    (jcap-bit (eq (len (jcap-payload (jcap-no-source))) 0) 262144)
+                                                                                    (add
+                                                                                        (jcap-bit (eq (len (jcap-payload (jcap-no-fault))) 0) 524288)
+                                                                                        (jcap-bit (eq (len (jcap-payload (jcap-no-exception))) 0) 1048576)))))))))))))))))))))
+
+    0)
