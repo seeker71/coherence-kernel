@@ -245,6 +245,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `oracle-guide` with `0/2` global speech-native authority, `6` missing live receipts, and `0` admitted native
       neural parameters; demo clean receipts select `native-open-asr-source` and `native-sema-voice` with `2/2`
       global speech-native authority. NL2NL and audio2audio keep their current native/scoped arms.
+- [x] **Speech host/device receipt intake added.** `learn/speech-host-device-receipt-intake.fk` lowers local
+      host/device observations into the same live receipt and authority laws (`32767`): Android AAudio
+      closed-prompt capture is carried as training evidence but cannot count as global open dictation; current Sema
+      live voice remains WER `100`; shared Android rows require `shared-safe=1`; current ASR/TTS global speech
+      authority stays `0/2`, while demo clean mixed Mac/Android rows promote ASR/TTS to `2/2`.
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
