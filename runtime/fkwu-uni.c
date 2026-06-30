@@ -1181,6 +1181,183 @@ static void fk_parse_top(void) {
  }
  fk_root = fk_sparse();
 }
+/* ══ IN-PROCESS SELF-JIT (proof-of-concept, integer-arithmetic + self-recursion) ══
+   When a --src function is hot AND its whole body is in the lowerable family
+   (literal / arg-slot / add / sub / mul / le / eq / if / PURE-SELF-recursion), the
+   running kernel lowers ITS node tree to x86-64 BYTES here, installs them executable
+   via the existing fk_native_call HAL door, and dispatches the call natively — the
+   recursion runs entirely in native code (its own asm `call`), so the whole recursive
+   computation crystallizes, bit-identical and ~order-of-magnitude faster than the walk.
+
+   HONEST SCOPE: this C lowerer is a PROOF-OF-CONCEPT of the in-process fusion (Lane A's
+   install door + a real tree->bytes lowerer in one running process). The DESTINATION is
+   Lane B's Form emitter (model/form-asm-x64.fk / fkc-nat-expr) run in-process — the same
+   recipe that proves four-way lowering to asm bytes — NOT this C twin. This proves the
+   wire end-to-end for one op-family; it deliberately does NOT cover form-eval's hot
+   string/list/cons ops, and it bails (installs nothing) on any tag outside the family,
+   so a non-lowerable function always falls back to the tree-walker, byte-identical.
+
+   ABI we emit:  long long fn(long long *args)  — args ptr in RCX (Win64) / RDI (SysV);
+   args[k] = tagged value of slot k; result tagged in RAX. RBP holds the args ptr through
+   the body. Recursion builds a fresh args array on the native stack and `call rel32`s to
+   fn's own entry (offset 0), so each frame is independent — runs on fkwu's 256MB thread
+   stack (FORM_KERNEL_STACK_MB), the same stack the walker recurses on. */
+static unsigned char fk_jb[16384];
+static long long fk_jbp;
+static long long fk_jit_self;   /* fn index being lowered: self-calls must target it */
+static int fk_jit_ok;           /* cleared to 0 by emit on any unsupported shape */
+static long long fk_jit_entry;  /* byte offset of the post-prologue entry (TCO jmp target) */
+static void fk_jb1(unsigned char x) { if (fk_jbp < 16384) { fk_jb[fk_jbp] = x; } fk_jbp = fk_jbp + 1; }
+static void fk_jb4(int x) { fk_jb1(x & 0xff); fk_jb1((x >> 8) & 0xff); fk_jb1((x >> 16) & 0xff); fk_jb1((x >> 24) & 0xff); }
+static void fk_jb8(long long x) { int k = 0; while (k < 8) { fk_jb1((x >> (8 * k)) & 0xff); k = k + 1; } }
+static void fk_jpatch4(long long at, int v) { fk_jb[at] = v & 0xff; fk_jb[at+1] = (v >> 8) & 0xff; fk_jb[at+2] = (v >> 16) & 0xff; fk_jb[at+3] = (v >> 24) & 0xff; }
+static void fk_jemit(long long i, int tail);
+static void fk_jbin(long long i) {
+ fk_jemit(fk_node[i][1], 0); fk_jb1(0x50);            /* eval left -> rax ; push rax */
+ fk_jemit(fk_node[i][2], 0); fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xC1); /* eval right -> rax ; mov rcx,rax */
+ fk_jb1(0x58);                                     /* pop rax (left) -> rax=left, rcx=right */
+}
+/* tail self-call (sum-shaped): compute all new args into temporaries (machine stack),
+   write them into the rbp args array IN PLACE, then jmp to the post-prologue entry.
+   Constant stack — the native twin of fk_walk_body's trampoline. */
+static void fk_jemit(long long i, int tail) {
+ long long t = fk_node[i][0];
+ if (t == 111) { fk_jemit(fk_node[i][2], tail); return; }   /* reserve: pass tail through to the body */
+ if (t == 1) { fk_jb1(0x48); fk_jb1(0xB8); fk_jb8(fk_node[i][1] << 1); return; }        /* lit -> mov rax,imm64(tagged) */
+ if (t == 2) { fk_jb1(0x48); fk_jb1(0x8B); fk_jb1(0x85); fk_jb4(0); return; }            /* slot 0 -> mov rax,[rbp+0] */
+ if (t == 110) {
+  long long li = fk_node[i][1];
+  if (fk_node[li][0] != 1) { fk_jit_ok = 0; return; }   /* slot index must be a literal */
+  long long slot = fk_node[li][1];
+  fk_jb1(0x48); fk_jb1(0x8B); fk_jb1(0x85); fk_jb4((int)(slot * 8)); return;             /* mov rax,[rbp+slot*8] */
+ }
+ if (t == 3) { fk_jbin(i); fk_jb1(0x48); fk_jb1(0x01); fk_jb1(0xC8); return; }            /* add rax,rcx */
+ if (t == 4) { fk_jbin(i); fk_jb1(0x48); fk_jb1(0x29); fk_jb1(0xC8); return; }            /* sub rax,rcx */
+ if (t == 42) {                                                                          /* mul: (a>>1)*(b>>1)<<1 */
+  fk_jbin(i);
+  fk_jb1(0x48); fk_jb1(0xD1); fk_jb1(0xF8);          /* sar rax,1 */
+  fk_jb1(0x48); fk_jb1(0xD1); fk_jb1(0xF9);          /* sar rcx,1 */
+  fk_jb1(0x48); fk_jb1(0x0F); fk_jb1(0xAF); fk_jb1(0xC1); /* imul rax,rcx */
+  fk_jb1(0x48); fk_jb1(0xD1); fk_jb1(0xE0);          /* shl rax,1 */
+  return;
+ }
+ if (t == 5 || t == 102) {                                                               /* le / eq -> 2 or 0 */
+  fk_jbin(i);
+  fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC2); fk_jb4(2);   /* mov rdx,2  (no flag dep) */
+  fk_jb1(0x49); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4(0);   /* mov r8,0   (no flag dep) */
+  fk_jb1(0x48); fk_jb1(0x39); fk_jb1(0xC8);              /* cmp rax,rcx (flags last) */
+  if (t == 5) { fk_jb1(0x4C); fk_jb1(0x0F); fk_jb1(0x4E); fk_jb1(0xC2); }  /* cmovle r8,rdx */
+  else        { fk_jb1(0x4C); fk_jb1(0x0F); fk_jb1(0x44); fk_jb1(0xC2); }  /* cmove  r8,rdx */
+  fk_jb1(0x4C); fk_jb1(0x89); fk_jb1(0xC0);              /* mov rax,r8 */
+  return;
+ }
+ if (t == 6) {                                                                           /* if test then else */
+  fk_jemit(fk_node[i][1], 0);                            /* test (never tail) */
+  fk_jb1(0x48); fk_jb1(0x85); fk_jb1(0xC0);              /* test rax,rax */
+  fk_jb1(0x0F); fk_jb1(0x84); long long jz = fk_jbp; fk_jb4(0);   /* jz else (patch) */
+  fk_jemit(fk_node[i][2], tail);                         /* then — tail position preserved */
+  fk_jb1(0xE9); long long je = fk_jbp; fk_jb4(0);        /* jmp end (skip else). harmless dead code if then ended in a tail-jmp. */
+  long long elsep = fk_jbp;
+  fk_jpatch4(jz, (int)(elsep - (jz + 4)));
+  fk_jemit(fk_node[i][3], tail);                         /* else — tail position preserved */
+  fk_jpatch4(je, (int)(fk_jbp - (je + 4)));              /* end = here (the pop rbp; ret follows) */
+  return;
+ }
+ if (t == 7 || t == 12 || t == 240 || t == 241) {                                        /* PURE SELF-recursion only */
+  long long callee = (t == 7) ? fk_jit_self : fk_node[i][1];
+  if (callee != fk_jit_self) { fk_jit_ok = 0; return; }  /* only self-calls lower here */
+  long long argc; long long a0; long long a1 = -1;
+  if (t == 241) {                                        /* variadic call: args in a 242-cons chain */
+   long long cell = fk_node[i][2]; long long cnt = 0; long long n0 = -1; long long n1 = -1;
+   while (cell >= 0 && fk_node[cell][0] == 242) { if (cnt == 0) { n0 = fk_node[cell][1]; } else if (cnt == 1) { n1 = fk_node[cell][1]; } cnt = cnt + 1; cell = fk_node[cell][2]; }
+   if (cnt < 1 || cnt > 2) { fk_jit_ok = 0; return; }    /* this POC lowers arity 1 and 2 */
+   argc = cnt; a0 = n0; a1 = n1;
+  } else {
+   argc = (t == 240) ? 2 : 1;
+   a0 = (t == 7) ? fk_node[i][1] : fk_node[i][2];
+   a1 = (t == 240) ? fk_node[i][3] : -1;
+  }
+  /* evaluate new args into temporaries (machine stack) — old slots still intact */
+  fk_jemit(a0, 0); fk_jb1(0x50);                         /* a0 -> rax ; push */
+  if (argc == 2) { fk_jemit(a1, 0); fk_jb1(0x50); }      /* a1 -> rax ; push */
+  if (tail) {
+   /* TAIL self-call: write new args into the rbp array IN PLACE, jmp entry. Constant
+      stack — the native twin of the walker's trampoline; sum(1000000) runs flat. */
+   if (argc == 1) {
+    fk_jb1(0x58);                                        /* pop rax (a0) */
+    fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x45); fk_jb1(0); /* mov [rbp+0],rax */
+   } else {
+    fk_jb1(0x59);                                        /* pop rcx (a1) */
+    fk_jb1(0x58);                                        /* pop rax (a0) */
+    fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x45); fk_jb1(0);     /* mov [rbp+0],rax  (slot0) */
+    fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x4D); fk_jb1(8);     /* mov [rbp+8],rcx  (slot1) */
+   }
+   fk_jb1(0xE9); long long js = fk_jbp; fk_jb4(0);       /* jmp entry */
+   fk_jpatch4(js, (int)(fk_jit_entry - (js + 4)));
+   return;
+  }
+  /* NON-tail self-call (e.g. fac's (mul n (fac …))): real native recursion. */
+  if (argc == 1) {
+   fk_jb1(0x58);                                         /* pop rax (a0) */
+   fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xEC); fk_jb1(8);  /* sub rsp,8 */
+   fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x04); fk_jb1(0x24); /* mov [rsp],rax  (args[0]) */
+   fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xE1);             /* mov rcx,rsp */
+  } else {
+   fk_jb1(0x59);                                         /* pop rcx (a1) */
+   fk_jb1(0x58);                                         /* pop rax (a0) */
+   fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xEC); fk_jb1(16); /* sub rsp,16 */
+   fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x04); fk_jb1(0x24);             /* mov [rsp],rax   (args[0]) */
+   fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0x4C); fk_jb1(0x24); fk_jb1(8);  /* mov [rsp+8],rcx (args[1]) */
+   fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xE1);             /* mov rcx,rsp */
+  }
+#if defined(_WIN32)
+  fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xEC); fk_jb1(32);  /* sub rsp,32 (Win64 shadow) */
+#endif
+  fk_jb1(0xE8); long long cs = fk_jbp; fk_jb4(0);        /* call rel32 -> offset 0 (full prologue sets rbp) */
+  fk_jpatch4(cs, (int)(0 - (cs + 4)));
+#if defined(_WIN32)
+  fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xC4); fk_jb1(32);  /* add rsp,32 (undo shadow) */
+#endif
+  fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xC4); if (argc == 1) { fk_jb1(8); } else { fk_jb1(16); } /* add rsp,args region */
+  return;
+ }
+ if (getenv("FK_JIT_WITNESS")) { printf("[jit-bail] unsupported tag %lld at node %lld\n", t, i); }
+ fk_jit_ok = 0;   /* any other tag: not in the lowerable family — bail */
+}
+/* lower fn f's body into fk_jb; returns length if the whole tree is in-family, else 0. */
+static long long fk_jit_lower(long long f) {
+ fk_jbp = 0; fk_jit_ok = 1; fk_jit_self = f;
+ fk_jb1(0x55);                                  /* push rbp */
+#if defined(_WIN32)
+ fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xCD);       /* mov rbp,rcx (args ptr) */
+#else
+ fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xFD);       /* mov rbp,rdi (args ptr) */
+#endif
+ fk_jit_entry = fk_jbp;                          /* TCO jmp target: rbp already = args ptr */
+ fk_jemit(fk_fn[f], 1);                          /* body in TAIL position -> rax */
+ fk_jb1(0x5D);                                   /* pop rbp */
+ fk_jb1(0xC3);                                   /* ret */
+ if (fk_jit_ok == 0 || fk_jbp > 16384) { return 0; }
+ return fk_jbp;
+}
+/* install fk_jb[0..n) executable and call it with an args array (tagged values). */
+static long long fk_native_call_args(const unsigned char *code, long long n, long long *args) {
+#if defined(_WIN32)
+ void *mem = VirtualAlloc(0, (unsigned long long)n, 0x3000, 0x04);
+ if (mem == 0) { return fk_nothing; }
+ long long k = 0; while (k < n) { ((unsigned char *)mem)[k] = code[k]; k = k + 1; }
+ unsigned int old = 0; VirtualProtect(mem, (unsigned long long)n, 0x20, &old);
+#else
+ void *mem = mmap(0, (unsigned long)n, 0x7, 0x1002, -1, 0);
+ if (mem == (void *)-1) { return fk_nothing; }
+ long long k = 0; while (k < n) { ((unsigned char *)mem)[k] = code[k]; k = k + 1; }
+#endif
+ long long (*fn)(long long *) = (long long (*)(long long *))mem;
+ return fn(args);
+}
+/* installed native body + length per fn, for --src crystallization. */
+static const unsigned char *fk_src_nat[4096];
+static long long fk_src_nat_len[4096];
 static int fk_run_src(const char *path, long long arg) {
 #if defined(_WIN32)
  int fd = open(path, 0x8000);
@@ -1203,6 +1380,44 @@ static int fk_run_src(const char *path, long long arg) {
  else { fk_fn[0] = fk_smklit(0); }
  fk_fn_count = fk_defn_next;
  fk_vs[0] = arg << 1; fk_vsp = 1;
+ /* ── IN-PROCESS SELF-JIT gate (opt-in via env FK_JIT; default path byte-identical) ──
+    When the root form is a direct call (callee arg…) to a function whose body lowers in
+    the integer-arithmetic + pure-self-recursion family, crystallize that function's node
+    tree to native bytes HERE, in this running process, install it executable via the
+    fk_native_call HAL door, and run the whole (self-recursive) call natively. njit++ marks
+    the flip; result is bit-identical to the walk. Any non-lowerable shape installs nothing
+    and falls straight through to fk_walk. */
+ {
+  char *je = getenv("FK_JIT");
+  long long want = (je && je[0] && je[0] != 48) ? 1 : 0;   /* FK_JIT set and not "0" */
+  long long root = fk_fn[0];
+  long long rt = fk_node[root][0];
+  if (want && (rt == 12 || rt == 240 || rt == 241)) {
+   long long callee = fk_node[root][1];
+   if (callee >= 0 && callee < 4096) {
+    /* collect the root call's outer args (evaluated once on the walker) */
+    long long aargs[2]; long long ac = 0; int aok = 1;
+    if (rt == 12) { ac = 1; aargs[0] = fk_walk(fk_node[root][2], 0); }
+    else if (rt == 240) { ac = 2; aargs[0] = fk_walk(fk_node[root][2], 0); aargs[1] = fk_walk(fk_node[root][3], 0); }
+    else { /* 241 variadic: walk the 242-cons chain */
+     long long cell = fk_node[root][2];
+     while (cell >= 0 && fk_node[cell][0] == 242) { if (ac < 2) { aargs[ac] = fk_walk(fk_node[cell][1], 0); } ac = ac + 1; cell = fk_node[cell][2]; }
+     if (ac < 1 || ac > 2) { aok = 0; }
+    }
+    long long n = aok ? fk_jit_lower(callee) : 0;
+    if (n > 0) {
+     unsigned char *img = malloc(n);
+     long long ci = 0; while (ci < n) { img[ci] = fk_jb[ci]; ci = ci + 1; }
+     fk_src_nat[callee] = img; fk_src_nat_len[callee] = n;
+     fk_njit = fk_njit + 1;
+     if (getenv("FK_JIT_WITNESS")) { printf("[jit] fn%lld crystallized in-process: %lld bytes, njit=%lld (native dispatch)\n", callee, n, fk_njit); }
+     long long rv = fk_native_call_args(img, n, aargs);
+     fk_pv(rv);
+     return 0;
+    }
+   }
+  }
+ }
  fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
  return 0;
 }
