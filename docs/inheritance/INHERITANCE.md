@@ -18,8 +18,8 @@ source that stays where it is, mapped here so the kernel knows its full inherita
 
 - **Inherited proven ledger:** `proven-bodies-from-old-repo.txt` — the 1198 four-way-proven
   recipes from the old `fourth-arm-bands.txt`. This is the authority on what is proven.
-- **Worklist:** `worklist-bodies-to-bring-home.txt` — the **671** proven bodies not yet here
-  (160 already home). Each migrates into its faculty (`observe/ learn/ presence/ cognition/
+- **Worklist:** `worklist-bodies-to-bring-home.txt` — the **660** proven bodies not yet here
+  (171 already home). Each migrates into its faculty (`observe/ learn/ presence/ cognition/
   model/ gate/ runtime/ substrate/ grammars/ …`) and re-proves on this repo's own four-way.
 - Source of the bodies: `Coherence-Network/form/form-stdlib/*.fk` (2286 total; 1198 proven).
 - **Wave manifests** (bodies brought home, faculty, what they compose, re-prove status):
@@ -31,6 +31,11 @@ source that stays where it is, mapped here so the kernel knows its full inherita
     native (no Go, no flatten): **15 reach their full origin witness on current-main `fkwu`**;
     `learning-readout` + `beings-channel` are HOME and reach full witness only on the stone-S2c
     general-arity runtime (multi-arg packed-call gap, named, closing as that stone lands).
+  - [`wave-3-observe-gate-cognition.md`](wave-3-observe-gate-cognition.md) — 11 bodies + 11 bands
+    (observe 4 · gate 3 · learn 2 · cognition 2). **8 RE-PROVE to full origin witness on
+    `fkwu --src`** standalone; 3 (`nearest-shape`, `tool-channel`, `choice-receipt`) come home as
+    deps that re-prove **transitively** inside a let-free consumer band, their own standalone
+    band `--src`-pending on the `do/let`-block floor (named gap, closing in the cursor-seed pivot).
 
 ## Referenced — carriers & knowledge (stay in old repo, mapped here)
 
