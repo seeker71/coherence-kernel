@@ -24,7 +24,7 @@ receipts into native/oracle authority over time. Native wins only after enough c
 or regression returns authority to the oracle.
 
 The live carrier boundary is now named: `speech-loopback-carrier-receipt` 4095 admits real local TTS/STT loopback
-measurements into the same promotion law. A host carrier must render and capture locally, provide audio metadata
+measurements into the same promotion guide. A host carrier must render and capture locally, provide audio metadata
 and local oracle/native transcripts, and the Form body rejects cloud or missing-audio rows before they can promote.
 
 Recipe A/B is now native too: `speech-loopback-recipe-ab` 2047 groups those measured receipts by recipe id and
@@ -46,7 +46,7 @@ A->A, and B->B to improve before route trust expands. If one direction leads, it
 for the return path instead of pretending the missing side failed.
 
 Mac metal now has the first reciprocal audio-locale training receipt: `audio-locale-native-training` 8191 defines
-the Form-side law, and `presence/macos-speech-roundtrip-carrier.fk` now owns the macOS loop. It invokes local
+the Form-side guide, and `presence/macos-speech-roundtrip-carrier.fk` now owns the macOS loop. It invokes local
 `say`, `ffmpeg`, and `whisper.cpp-large-v3-turbo` through Form `host-exec` on Apple Metal for three Coherence
 Network `en<->de` prompt pairs. The native nearest-prototype model moved from 0% pretrain success to 83%
 post-training success, with A->B at 66% and B->A at 100%; the live Form verdict was 511. Wav byte extraction is
@@ -60,9 +60,9 @@ then samples far-apart ready pairs from those rows. Chinese, Arabic, and Latin a
 bundles exist; Indigenous rows are specific (`nv`, `chr`) and stay pending until consentful corpora exist.
 
 The model choice is now executable rather than conversational: `sanskrit-locale-baseline` 2047 provides a small
-romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, and `la`; `multilocale-nl-audio-pipeline`
+romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, `la`, `zh`, and `ar`; `multilocale-nl-audio-pipeline`
 8191 proves closed-set NL->neutral Form->NL and audio-feature->neutral Form->audio-target loops over reciprocal
-`en<->de`, `en<->es`, `fr<->id`, and `sa<->la`. `speech-model-auto-selection` 4095 selects today's native arms:
+`en<->de`, `en<->es`, `zh<->ar`, `fr<->id`, and `sa<->la`. `speech-model-auto-selection` 4095 selects today's native arms:
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, and the deterministic
 formant vocoder for TTS/audio target rendering. The transformer path is trainable but not live-selected for speech
 yet; diffusion/codec speech is a named candidate only, pending a Form-native executable kernel and receipt.

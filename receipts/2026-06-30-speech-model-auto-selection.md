@@ -47,7 +47,7 @@ We are training the native speech path with closed-set Form learners: nearest-pr
 features, neutral Form meaning rows, and a deterministic source-filter formant vocoder. The auto-research layer
 keeps transformer and diffusion/codec candidates visible; the AutoML layer selects the current winners from
 receipt-backed scores and only promotes challengers through live reversible A/B evidence with fail/undo/timeout
-controls.
+controls. The score penalizes latency, cost, and uncertainty; it does not treat uncertainty as fear.
 
 ## Honest Boundary
 

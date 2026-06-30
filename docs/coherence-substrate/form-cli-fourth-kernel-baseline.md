@@ -283,7 +283,7 @@ STOP DUPLICATING THE FLOOR: channel-protocol-choice-floor.fk hand-mirrors ~18 si
 
 ### [HIGH] Resolve oracle-ensure / oracle-distillation proof grounding: drive native-vs-oracle gates over REAL captured corpus, not fixtures
 
-- **Why:** OVERNIGHT CORNERSTONE. oracle-ensure.fk is exemplary brain-Form/hands-host-io separation — keep its shape. But oracle-distillation-learning's odl-*-receipt fixtures (lines 226-295) are invented magic numbers (token 900/160, quality 88/84) and the 'native beats oracle' gate runs over them — proof-theater risk. oracle-distill-corpus.fk already holds MEASURED 949-turn held-out counts and is the right exemplar. form-cli-model is a hand-frozen data cell with no band proving it matches the trainer's current output.
+- **Why:** OVERNIGHT CORNERSTONE. oracle-ensure.fk is exemplary brain-Form/hands-host-io separation — keep its shape. But oracle-distillation-learning's odl-*-receipt fixtures (lines 226-295) are invented magic numbers (token 900/160, quality 88/84) and the 'native beats oracle' gate runs over them — a proof-theater gap. oracle-distill-corpus.fk already holds MEASURED 949-turn held-out counts and is the right exemplar. form-cli-model is a hand-frozen data cell with no band proving it matches the trainer's current output.
 - **Action:** Drive odl-native-wins?/odl-c-ready? over real io-match / native-training-receipt rows (the oracle-distill-corpus pattern), move prose floor/north-star lists out of executable code; add a band that diffs form_cli_train_predict.sh output against the form-cli-model data cell so a stale model is caught. Single-source teacher-state strings across oracle-ensure/gaps/oracle-catalog.
 
 ### [MED] Collapse the duplicate engines: one BML front-end, one cursor engine, one HTTP server

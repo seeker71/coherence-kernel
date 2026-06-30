@@ -64,6 +64,6 @@ undo journals, runtime route receipts, and accumulated A/B windows still need to
 be fed into this cell by `form-cli`/`fsh` or the host carrier. The richer
 `learn/champion-challenger.fk` lineage body is not concatenated into this direct
 band because its value-native float half is outside the current bounded `--src`
-surface; this cell carries the same integer promotion law over lowered window
-counts. The algorithmic control law is present and witnessed; the live plumbing
+surface; this cell carries the same integer promotion guide over lowered window
+counts. The algorithmic control guide is present and witnessed; the live plumbing
 remains pending.
