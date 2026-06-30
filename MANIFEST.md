@@ -192,6 +192,14 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       the short Chinese baseline line `我在`: `Eddy (Chinese) -> ffmpeg -> whisper.cpp/Metal -l zh`, Form wav
       sensing, three Chinese acoustic prototypes, native CTC decode, live verdict `16383`, live WER `0`, minimum
       confidence `96`, native neural parameters `0`. Longer Chinese baseline phrases remain named oracle misses.
+- [x] **Live Chinese source-target bridge added.** `learn/live-chinese-source-target-bridge.fk` connects the live
+      Chinese ASR receipt to the Sanskrit baseline and target acoustic data: source `zh` WER `0`, meaning `303`,
+      target `en`, two target tokens, two compact target acoustic frames, live verdict `8191`, confidence `96`,
+      neural parameters `0`. The upstream learning set is now named honestly: `3` live teacher utterances, `163440`
+      observed wav bytes on this Mac, `9` feature rows, `8` nonblank learned prototypes, `11` scoped prototype rows
+      including blanks, `1` effective prototype epoch per sample, `0` neural epochs, in-sample teacher accuracy
+      `3/3 = 100%`, and held-out live samples `0`. This is scoped source-audio -> target-acoustic movement, not
+      global audio2audio authority.
 - [x] **Sema voice oracle miss learning added.** `learn/sema-voice-oracle-miss-learning.fk` makes the live WER-100
       miss change the algorithm (`32767`): authority stays `oracle-guide`, and AutoML now names
       `text-conditioned-acoustic-vocoder` as the next trainable candidate with g2p, phoneme timing, prosody,
@@ -210,6 +218,8 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       prototype ASR, Sema voice sample loop TTS, closed-set locale Form NL2NL, and native source-window audio2audio;
       native neural weight parameters admitted are `0` while native Sema voice organs are present; live open
       dictation is oracle `4/4` and native `0/4`; Sema live voice live-native pass is `0/1`, WER `100`, oracle-guide.
+      The same executable report now carries the live learning counters and fails its band if the stated samples,
+      bytes, prototype rows, epochs, or held-out boundary drift.
 - [x] **Speech model metrics trend added.** `learn/speech-model-metrics-trend.fk` records before/after movement
       (`32767`): Mac Metal reciprocal audio moved native `0->83`; multiseed NL/audio moved `0->100`; live open
       dictation remains local-oracle `100` / native `0`; Sema live voice remains native `0`, WER `100`. The trend
