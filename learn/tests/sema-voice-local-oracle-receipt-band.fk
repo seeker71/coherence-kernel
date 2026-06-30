@@ -1,0 +1,126 @@
+; preludes:
+;   observe/stt-wer.fk
+;   presence/formant-vocoder.fk
+;   learn/sema-voice-sample-loop.fk
+;   learn/sema-voice-local-oracle-receipt.fk
+;
+; sema-voice-local-oracle-receipt-band -- local STT bar for Sema samples.
+;
+; Verdict 32767:
+;   1     row names the Sema local-oracle surface
+;   2     local audio hash and sample hash agree
+;   4     local oracle transcript reaches truth with zero WER
+;   8     wrong transcript fails the oracle bar
+;   16    cloud/nonlocal sample cannot pass
+;   32    missing audio cannot pass
+;   64    fail, timeout, and undo block the row
+;   128   clean rendered sample passes the local oracle bar
+;   256   passing sample is valid
+;   512   wrong oracle is invalid even with a strong sample
+;   1024  receipt records oracle success
+;   2048  receipt records promotion authority
+;   4096  receipt preserves oracle, device, and audio hash
+;   8192  receipt preserves target, sample score, and zero WER
+;   16384 receipt names Form-native voice with neural vocoder pending
+
+(do
+    (defn svlor-band-score (cond bit) (if cond bit 0))
+    (defn svlor-band-truth () "Open speech flows.")
+    (defn svlor-band-bad-text () "Open closed blocks.")
+    (defn svlor-band-rough ()
+        (svsl-profile "rough"
+                      145 620 1250 2850 130
+                      55 82 48 42 44 2))
+    (defn svlor-band-incumbent ()
+        (svsl-sample (svlor-band-rough) 56 70 22 160 1 971001 0 0 0))
+    (defn svlor-band-candidate ()
+        (svsl-sample (svsl-nudge (svlor-band-rough) (svsl-target) 8)
+                     88 94 0 110 1 971002 0 0 0))
+    (defn svlor-band-cloud ()
+        (svsl-sample (svsl-nudge (svlor-band-rough) (svsl-target) 8)
+                     88 94 0 110 0 971002 0 0 0))
+    (defn svlor-band-missing ()
+        (svsl-sample (svsl-nudge (svlor-band-rough) (svsl-target) 8)
+                     88 94 0 110 1 0 0 0 0))
+    (defn svlor-band-row-with (sample text controls)
+        (svlor-row 971002 "en" (svlor-band-truth) text
+                   "whisper.cpp-large-v3-turbo"
+                   "macos-apple-metal"
+                   sample
+                   (svlor-audio (svsl-sample-audio-hash sample) 16000 1)
+                   1 1 controls))
+    (defn svlor-band-row ()
+        (svlor-band-row-with (svlor-band-candidate) (svlor-band-truth)
+                             (svlor-controls 0 0 0)))
+    (defn svlor-band-bad-row ()
+        (svlor-band-row-with (svlor-band-candidate) (svlor-band-bad-text)
+                             (svlor-controls 0 0 0)))
+    (defn svlor-band-cloud-row ()
+        (svlor-band-row-with (svlor-band-cloud) (svlor-band-truth)
+                             (svlor-controls 0 0 0)))
+    (defn svlor-band-missing-row ()
+        (svlor-band-row-with (svlor-band-missing) (svlor-band-truth)
+                             (svlor-controls 0 0 0)))
+    (defn svlor-band-fail-row ()
+        (svlor-band-row-with (svlor-band-candidate) (svlor-band-truth)
+                             (svlor-controls 1 0 0)))
+    (defn svlor-band-timeout-row ()
+        (svlor-band-row-with (svlor-band-candidate) (svlor-band-truth)
+                             (svlor-controls 0 1 0)))
+    (defn svlor-band-undo-row ()
+        (svlor-band-row-with (svlor-band-candidate) (svlor-band-truth)
+                             (svlor-controls 0 0 1)))
+    (defn svlor-band-rec ()
+        (svlor-receipt (svlor-band-incumbent) (svlor-band-row) (svsl-target) 10 20))
+
+    (defn svlor-band-good-score ()
+        (add
+            (add
+                (add (svlor-band-score (str_eq (svlor-kind (svlor-band-row)) "sema-voice-local-oracle-row") 1)
+                     (svlor-band-score (eq (svlor-audio-consistent? (svlor-band-row)) 1) 2))
+                (add (svlor-band-score (eq (svlor-oracle-wer (svlor-band-row)) 0) 4)
+                     (svlor-band-score (eq (svlor-oracle-success? (svlor-band-row) 10) 1) 128)))
+            (svlor-band-score (eq (svlor-valid? (svlor-band-row)) 1) 256)))
+
+    (defn svlor-band-reject-score ()
+        (add
+            (add
+                (add (svlor-band-score (eq (svlor-oracle-success? (svlor-band-bad-row) 10) 0) 8)
+                     (svlor-band-score (eq (svlor-oracle-success? (svlor-band-cloud-row) 10) 0) 16))
+                (add (svlor-band-score (eq (svlor-oracle-success? (svlor-band-missing-row) 10) 0) 32)
+                     (svlor-band-score
+                (and (eq (svlor-oracle-success? (svlor-band-fail-row) 10) 0)
+                     (and (eq (svlor-oracle-success? (svlor-band-timeout-row) 10) 0)
+                          (eq (svlor-oracle-success? (svlor-band-undo-row) 10) 0)))
+                64)))
+            (svlor-band-score (eq (svlor-valid? (svlor-band-bad-row)) 0) 512)))
+
+    (defn svlor-band-receipt-score ()
+        (add
+            (add
+                (svlor-band-score (eq (svlor-rec-oracle-ok (svlor-band-rec)) 1) 1024)
+                (svlor-band-score (eq (svlor-rec-promoted (svlor-band-rec)) 1) 2048))
+            (add
+                (add
+                    (svlor-band-score
+                        (and (str_eq (svlor-rec-oracle (svlor-band-rec)) "whisper.cpp-large-v3-turbo")
+                             (and (str_eq (svlor-rec-device (svlor-band-rec)) "macos-apple-metal")
+                                  (eq (svlor-rec-audio-hash (svlor-band-rec)) 971002)))
+                        4096)
+                    (svlor-band-score
+                        (and (str_eq (svlor-rec-target (svlor-band-rec)) "sema-warm-grounded-honest")
+                             (and (gt (svlor-rec-sample-score (svlor-band-rec)) 0)
+                                  (eq (svlor-rec-oracle-wer (svlor-band-rec)) 0)))
+                        8192))
+                (svlor-band-score
+                    (and (str_eq (svlor-rec-kind (svlor-band-rec)) "sema-voice-local-oracle-receipt")
+                         (and (eq (svlor-rec-native-form (svlor-band-rec)) 1)
+                              (eq (svlor-rec-neural-vocoder (svlor-band-rec)) 0)))
+                    16384))))
+
+    (defn sema-voice-local-oracle-receipt-band ()
+        (add
+            (add (svlor-band-good-score) (svlor-band-reject-score))
+            (svlor-band-receipt-score)))
+
+    (sema-voice-local-oracle-receipt-band))
