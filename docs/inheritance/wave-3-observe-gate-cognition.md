@@ -23,9 +23,11 @@ fkwu --src /tmp/b.fk    # -> the band's witness integer
 
 The band file is the four-way prover — its top-level expression evaluates to an all-1s (or
 bit-packed) witness. Non-`core` deps are concatenated ahead of the body, deps-first, in the
-order of the band's `; preludes:` line; `core.fk` is **intrinsic to `--src`** and must NOT be
-concatenated. A re-proven body's `--src` witness equals its **origin four-way witness**
-(`proven-bodies-from-old-repo.txt`).
+order of the band's `; preludes:` line. At the time of this wave, `core.fk` was the old
+BML core and was treated as **intrinsic to `--src`**; concatenating it floored the run. As
+of the 2026-06-30 direct-core refactor, `form/form-stdlib/core.fk` is parseable direct
+Form and may be concatenated by new witnesses. A re-proven body's `--src` witness equals
+its **origin four-way witness** (`proven-bodies-from-old-repo.txt`).
 
 ### The `do/let`-block `--src` floor — named exactly
 

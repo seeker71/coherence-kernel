@@ -1,0 +1,229 @@
+; jit-profile-receipt.fk - Form-native JIT profile receipts and category collapse.
+;
+; This is the first optimizer-track cell after jit-decision/native-crystallize:
+; per-instance observations collapse into numeric categories that a Form-native
+; JIT can specialize against with guards. It does not lower code and does not
+; inspect host internals. It names the receipt shape the later inliner, field
+; accessor, array/hash/tree specializers, register allocator, and deopt/melt
+; witness can share.
+;
+; Receipt shape:
+;   (fn site instance heat pure target ret container shape key field index stack cpu gpu deopt latency)
+;
+; `instance`, `heat`, and `latency` are evidence. The category signature ignores
+; those changing counters and keeps the stable specialization facts: fn/site,
+; target category, return category, container representation, shape, key, field,
+; index, stack form, CPU register class, GPU register class, and deopt class.
+;
+; Four-way/plain-source intent: pure Form data + arithmetic. The current fkwu
+; --src witness is observe/tests/jit-profile-receipt-band.fk.
+
+(do
+    ; value and call target categories
+    (defn jpr-none () 0)
+    (defn jpr-int () 11)
+    (defn jpr-float () 12)
+    (defn jpr-bool () 13)
+    (defn jpr-string () 14)
+    (defn jpr-symbol () 15)
+    (defn jpr-orderable () 16)
+    (defn jpr-call-mono () 31)
+    (defn jpr-call-poly () 32)
+    (defn jpr-call-mega () 33)
+
+    ; container representation categories
+    (defn jpr-list () 41)       ; cons-list, direct only for head/tail
+    (defn jpr-array () 42)      ; indexed array/vector semantics
+    (defn jpr-dict () 43)       ; key/value dictionary semantics
+    (defn jpr-hashmap () 44)    ; hash table representation
+    (defn jpr-rbtree () 45)     ; ordered tree representation
+    (defn jpr-buffer () 46)     ; native indexed buffer lane
+
+    ; index/stack/register/deopt categories
+    (defn jpr-index-none () 0)
+    (defn jpr-index-head () 51)
+    (defn jpr-index-tail () 52)
+    (defn jpr-index-const () 53)
+    (defn jpr-index-range () 54)
+    (defn jpr-stack-normal () 61)
+    (defn jpr-stack-tail () 62)
+    (defn jpr-stack-elided () 63)
+    (defn jpr-cpu-none () 0)
+    (defn jpr-cpu-scalar () 71)
+    (defn jpr-cpu-simd () 72)
+    (defn jpr-gpu-none () 0)
+    (defn jpr-gpu-scalar () 81)
+    (defn jpr-gpu-warp () 82)
+    (defn jpr-deopt-none () 0)
+    (defn jpr-deopt-guard () 91)
+    (defn jpr-deopt-melt () 92)
+
+    (defn jpr-fn (r) (nth r 0))
+    (defn jpr-site (r) (nth r 1))
+    (defn jpr-instance (r) (nth r 2))
+    (defn jpr-heat (r) (nth r 3))
+    (defn jpr-pure (r) (nth r 4))
+    (defn jpr-target (r) (nth r 5))
+    (defn jpr-ret (r) (nth r 6))
+    (defn jpr-container (r) (nth r 7))
+    (defn jpr-shape (r) (nth r 8))
+    (defn jpr-key (r) (nth r 9))
+    (defn jpr-field (r) (nth r 10))
+    (defn jpr-index (r) (nth r 11))
+    (defn jpr-stack (r) (nth r 12))
+    (defn jpr-cpu (r) (nth r 13))
+    (defn jpr-gpu (r) (nth r 14))
+    (defn jpr-deopt (r) (nth r 15))
+    (defn jpr-latency (r) (nth r 16))
+
+    (defn jpr-hot-pure? (r)
+        (if (eq (jpr-pure r) 1)
+            (if (ge (jpr-heat r) 5) 1 0)
+            0))
+
+    (defn jpr-melt? (r)
+        (if (lt (jpr-heat r) 2)
+            1
+            (if (eq (jpr-deopt r) (jpr-deopt-none)) 0 1)))
+
+    (defn jpr-inline? (r)
+        (if (eq (jpr-hot-pure? r) 1)
+            (if (eq (jpr-target r) (jpr-call-mono)) 1 0)
+            0))
+
+    (defn jpr-stack-collapse? (r)
+        (if (eq (jpr-stack r) (jpr-stack-tail))
+            1
+            (if (eq (jpr-stack r) (jpr-stack-elided)) 1 0)))
+
+    (defn jpr-field-direct? (r)
+        (if (gt (jpr-shape r) 0)
+            (if (gt (jpr-field r) 0) 1 0)
+            0))
+
+    (defn jpr-list-direct? (r)
+        (if (eq (jpr-container r) (jpr-list))
+            (if (eq (jpr-index r) (jpr-index-head))
+                1
+                (if (eq (jpr-index r) (jpr-index-tail)) 1 0))
+            0))
+
+    (defn jpr-array-direct? (r)
+        (if (eq (jpr-container r) (jpr-array))
+            (if (eq (jpr-index r) (jpr-index-const))
+                1
+                (if (eq (jpr-index r) (jpr-index-range)) 1 0))
+            (if (eq (jpr-container r) (jpr-buffer))
+                (if (eq (jpr-index r) (jpr-index-const))
+                    1
+                    (if (eq (jpr-index r) (jpr-index-range)) 1 0))
+                0)))
+
+    (defn jpr-index-direct? (r)
+        (if (eq (jpr-list-direct? r) 1) 1 (jpr-array-direct? r)))
+
+    (defn jpr-hash-direct? (r)
+        (if (eq (jpr-container r) (jpr-dict))
+            (if (gt (jpr-key r) 0) 1 0)
+            (if (eq (jpr-container r) (jpr-hashmap))
+                (if (gt (jpr-key r) 0) 1 0)
+                0)))
+
+    (defn jpr-tree-direct? (r)
+        (if (eq (jpr-container r) (jpr-rbtree))
+            (if (eq (jpr-key r) (jpr-orderable)) 1 0)
+            0))
+
+    (defn jpr-cpu-reg? (r)
+        (if (eq (jpr-cpu r) (jpr-cpu-scalar))
+            1
+            (if (eq (jpr-cpu r) (jpr-cpu-simd)) 1 0)))
+
+    (defn jpr-gpu-reg? (r)
+        (if (eq (jpr-gpu r) (jpr-gpu-scalar))
+            1
+            (if (eq (jpr-gpu r) (jpr-gpu-warp)) 1 0)))
+
+    ; Bit mask:
+    ; 1 crystallize, 2 inline, 4 stack collapse, 8 field direct, 16 index direct,
+    ; 32 dict/hash direct, 64 tree direct, 128 CPU register lane, 256 GPU register lane.
+    (defn jpr-opt-mask (r)
+        (add
+            (if (eq (jpr-hot-pure? r) 1) 1 0)
+            (add
+                (if (eq (jpr-inline? r) 1) 2 0)
+                (add
+                    (if (eq (jpr-stack-collapse? r) 1) 4 0)
+                    (add
+                        (if (eq (jpr-field-direct? r) 1) 8 0)
+                        (add
+                            (if (eq (jpr-index-direct? r) 1) 16 0)
+                            (add
+                                (if (eq (jpr-hash-direct? r) 1) 32 0)
+                                (add
+                                    (if (eq (jpr-tree-direct? r) 1) 64 0)
+                                    (add
+                                        (if (eq (jpr-cpu-reg? r) 1) 128 0)
+                                        (if (eq (jpr-gpu-reg? r) 1) 256 0))))))))))
+
+    (defn jpr-mix (h x) (mod (add (mul h 131) x) 1000000007))
+    (defn jpr-fold (xs h)
+        (if (eq (len xs) 0)
+            h
+            (jpr-fold (tail xs) (jpr-mix h (head xs)))))
+
+    (defn jpr-category-fields (r)
+        (list
+            (jpr-fn r)
+            (jpr-site r)
+            (jpr-pure r)
+            (jpr-target r)
+            (jpr-ret r)
+            (jpr-container r)
+            (jpr-shape r)
+            (jpr-key r)
+            (jpr-field r)
+            (jpr-index r)
+            (jpr-stack r)
+            (jpr-cpu r)
+            (jpr-gpu r)
+            (jpr-deopt r)))
+
+    (defn jpr-signature (r) (jpr-fold (jpr-category-fields r) 17))
+    (defn jpr-same-category? (a b) (if (eq (jpr-signature a) (jpr-signature b)) 1 0))
+
+    (defn jpr-array-sample (instance latency)
+        (list 7 2 instance 8 1 (jpr-call-mono) (jpr-int) (jpr-array) 1201 (jpr-none) 3 (jpr-index-const) (jpr-stack-tail) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) latency))
+
+    (defn jpr-array-shape2 ()
+        (list 7 2 103 8 1 (jpr-call-mono) (jpr-int) (jpr-array) 1202 (jpr-none) 3 (jpr-index-const) (jpr-stack-tail) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) 39))
+
+    (defn jpr-hash-sample ()
+        (list 9 4 200 9 1 (jpr-call-mono) (jpr-int) (jpr-hashmap) 2201 (jpr-string) 0 (jpr-index-none) (jpr-stack-normal) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) 31))
+
+    (defn jpr-tree-sample ()
+        (list 10 5 300 7 1 (jpr-call-poly) (jpr-int) (jpr-rbtree) 0 (jpr-orderable) 0 (jpr-index-none) (jpr-stack-normal) (jpr-cpu-none) (jpr-gpu-none) (jpr-deopt-none) 88))
+
+    (defn jpr-cool-guard-sample ()
+        (list 11 6 400 1 1 (jpr-call-mono) (jpr-int) (jpr-array) 3301 (jpr-none) 0 (jpr-index-range) (jpr-stack-normal) (jpr-cpu-simd) (jpr-gpu-none) (jpr-deopt-guard) 120))
+
+    (defn jpr-gpu-sample ()
+        (list 12 7 500 8 1 (jpr-call-poly) (jpr-float) (jpr-buffer) 0 (jpr-none) 0 (jpr-index-range) (jpr-stack-normal) (jpr-cpu-none) (jpr-gpu-warp) (jpr-deopt-none) 19))
+
+    (defn jpr-bit (cond bit) (if cond bit 0))
+    (defn jit-profile-receipt-check ()
+        (add
+            (jpr-bit (eq (jpr-same-category? (jpr-array-sample 100 40) (jpr-array-sample 101 35)) 1) 1)
+            (add
+                (jpr-bit (eq (jpr-same-category? (jpr-array-sample 100 40) (jpr-array-shape2)) 0) 2)
+                (add
+                    (jpr-bit (eq (jpr-opt-mask (jpr-array-sample 100 40)) 159) 4)
+                    (add
+                        (jpr-bit (eq (jpr-opt-mask (jpr-hash-sample)) 163) 8)
+                        (add
+                            (jpr-bit (eq (jpr-opt-mask (jpr-tree-sample)) 65) 16)
+                            (add
+                                (jpr-bit (eq (jpr-melt? (jpr-cool-guard-sample)) 1) 32)
+                                (jpr-bit (eq (jpr-opt-mask (jpr-gpu-sample)) 273) 64)))))))
+
+    0)

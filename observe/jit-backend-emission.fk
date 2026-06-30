@@ -1,0 +1,158 @@
+; jit-backend-emission.fk - compact Form-owned backend emission bundle witness.
+;
+; The full runtime->emitter->IR->dispatch source already approaches the current
+; fkwu --src envelope. This backend cell consumes the witnessed dispatch packet
+; as a compact summary row and emits backend bundles for CPU/GPU targets without
+; C lowering. It does not execute host machine code.
+
+(do
+    (defn jbe-x64 () 1)
+    (defn jbe-arm64 () 2)
+    (defn jbe-ptx () 3)
+    (defn jbe-native () 10)
+    (defn jbe-deopt () 11)
+    (defn jbe-exception () 12)
+    (defn jbe-rewalk () 13)
+
+    ; packet summary:
+    ; ("packet-summary" owner target program-ok installed valid source guard fault deopt ops native-value walker-value)
+    (defn jbe-packet (owner target program-ok installed valid source guard fault deopt ops native-value walker-value)
+        (list "packet-summary" owner target program-ok installed valid source guard fault deopt ops native-value walker-value))
+    (defn jbe-packet? (p) (if (eq (len p) 13) (str_eq (nth p 0) "packet-summary") 0))
+    (defn jbe-p-owner (p) (nth p 1))
+    (defn jbe-p-target (p) (nth p 2))
+    (defn jbe-p-program-ok (p) (nth p 3))
+    (defn jbe-p-installed (p) (nth p 4))
+    (defn jbe-p-valid (p) (nth p 5))
+    (defn jbe-p-source (p) (nth p 6))
+    (defn jbe-p-guard (p) (nth p 7))
+    (defn jbe-p-fault (p) (nth p 8))
+    (defn jbe-p-deopt (p) (nth p 9))
+    (defn jbe-p-ops (p) (nth p 10))
+    (defn jbe-p-native-value (p) (nth p 11))
+    (defn jbe-p-walker-value (p) (nth p 12))
+
+    ; bundle = ("backend" owner packet target code-size abi reloc safepoint exception deopt root source)
+    (defn jbe-bundle (owner packet target code-size abi reloc safepoint exception deopt root source)
+        (list "backend" owner packet target code-size abi reloc safepoint exception deopt root source))
+    (defn jbe-bundle? (b) (if (eq (len b) 12) (str_eq (nth b 0) "backend") 0))
+    (defn jbe-b-owner (b) (nth b 1))
+    (defn jbe-b-packet (b) (nth b 2))
+    (defn jbe-b-target (b) (nth b 3))
+    (defn jbe-b-code-size (b) (nth b 4))
+    (defn jbe-b-abi (b) (nth b 5))
+    (defn jbe-b-reloc (b) (nth b 6))
+    (defn jbe-b-safepoint (b) (nth b 7))
+    (defn jbe-b-exception (b) (nth b 8))
+    (defn jbe-b-deopt (b) (nth b 9))
+    (defn jbe-b-root (b) (nth b 10))
+    (defn jbe-b-source (b) (nth b 11))
+
+    (defn jbe-packet-safe? (p)
+        (if (eq (jbe-packet? p) 1)
+            (if (str_eq (jbe-p-owner p) "form-ir")
+                (if (eq (jbe-p-program-ok p) 1)
+                    (if (eq (jbe-p-installed p) 1)
+                        (if (eq (jbe-p-valid p) 1)
+                            (if (eq (jbe-p-source p) 1)
+                                (if (eq (jbe-p-guard p) 1)
+                                    (if (eq (jbe-p-fault p) 1)
+                                        (if (eq (jbe-p-deopt p) 1) 1 0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jbe-target-compatible? (packet target)
+        (if (eq (jbe-p-target packet) 1)
+            (if (eq target (jbe-x64)) 1 (if (eq target (jbe-arm64)) 1 0))
+            (if (eq (jbe-p-target packet) 2)
+                (if (eq target (jbe-ptx)) 1 0)
+                0)))
+
+    (defn jbe-emit (packet target)
+        (if (eq (jbe-packet-safe? packet) 1)
+            (if (eq (jbe-target-compatible? packet target) 1)
+                (jbe-bundle "form-backend" packet target (mul (jbe-p-ops packet) 4) 1 1 1 1 1 1 1)
+                (empty))
+            (empty)))
+
+    (defn jbe-bundle-safe? (b)
+        (if (eq (jbe-bundle? b) 1)
+            (if (str_eq (jbe-b-owner b) "form-backend")
+                (if (eq (jbe-packet-safe? (jbe-b-packet b)) 1)
+                    (if (eq (jbe-target-compatible? (jbe-b-packet b) (jbe-b-target b)) 1)
+                        (if (gt (jbe-b-code-size b) 0)
+                            (if (eq (jbe-b-abi b) 1)
+                                (if (eq (jbe-b-reloc b) 1)
+                                    (if (eq (jbe-b-safepoint b) 1)
+                                        (if (eq (jbe-b-exception b) 1)
+                                            (if (eq (jbe-b-deopt b) 1)
+                                                (if (eq (jbe-b-root b) 1)
+                                                    (if (eq (jbe-b-source b) 1) 1 0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jbe-execute-action (bundle guard-ok runtime-ok invalidated)
+        (if (eq (jbe-bundle-safe? bundle) 1)
+            (if (eq invalidated 1)
+                (jbe-rewalk)
+                (if (eq guard-ok 1)
+                    (if (eq runtime-ok 1) (jbe-native) (jbe-exception))
+                    (jbe-deopt)))
+            (jbe-rewalk)))
+
+    (defn jbe-execute-value (bundle guard-ok runtime-ok invalidated)
+        (if (eq (jbe-execute-action bundle guard-ok runtime-ok invalidated) (jbe-native))
+            (jbe-p-native-value (jbe-b-packet bundle))
+            (jbe-p-walker-value (jbe-b-packet bundle))))
+
+    (defn jbe-cpu-packet () (jbe-packet "form-ir" 1 1 1 1 1 1 1 1 3 42 41))
+    (defn jbe-gpu-packet () (jbe-packet "form-ir" 2 1 1 1 1 1 1 1 3 42 41))
+    (defn jbe-foreign-packet () (jbe-packet "c-lowering" 1 1 1 1 1 1 1 1 3 42 41))
+    (defn jbe-invalid-packet () (jbe-packet "form-ir" 1 1 1 0 1 1 1 1 3 42 41))
+    (defn jbe-no-deopt-bundle () (jbe-bundle "form-backend" (jbe-cpu-packet) (jbe-x64) 12 1 1 1 1 0 1 1))
+    (defn jbe-foreign-bundle () (jbe-bundle "c-lowering" (jbe-cpu-packet) (jbe-x64) 12 1 1 1 1 1 1 1))
+
+    (defn jbe-bit (cond bit) (if cond bit 0))
+    (defn jit-backend-emission-check ()
+        (add
+            (jbe-bit (eq (jbe-bundle-safe? (jbe-emit (jbe-cpu-packet) (jbe-x64))) 1) 1)
+            (add
+                (jbe-bit (eq (jbe-bundle-safe? (jbe-emit (jbe-cpu-packet) (jbe-arm64))) 1) 2)
+                (add
+                    (jbe-bit (eq (jbe-bundle-safe? (jbe-emit (jbe-gpu-packet) (jbe-ptx))) 1) 4)
+                    (add
+                        (jbe-bit (eq (len (jbe-emit (jbe-cpu-packet) (jbe-ptx))) 0) 8)
+                        (add
+                            (jbe-bit (eq (jbe-bundle-safe? (jbe-emit (jbe-foreign-packet) (jbe-x64))) 0) 16)
+                            (add
+                                (jbe-bit (eq (jbe-bundle-safe? (jbe-emit (jbe-invalid-packet) (jbe-x64))) 0) 32)
+                                (add
+                                    (jbe-bit (eq (jbe-bundle-safe? (jbe-no-deopt-bundle)) 0) 64)
+                                    (add
+                                        (jbe-bit (eq (jbe-bundle-safe? (jbe-foreign-bundle)) 0) 128)
+                                        (add
+                                            (jbe-bit (eq (jbe-b-code-size (jbe-emit (jbe-cpu-packet) (jbe-x64))) 12) 256)
+                                            (add
+                                                (jbe-bit (eq (jbe-execute-action (jbe-emit (jbe-cpu-packet) (jbe-x64)) 1 1 0) (jbe-native)) 512)
+                                                (add
+                                                    (jbe-bit (eq (jbe-execute-value (jbe-emit (jbe-cpu-packet) (jbe-x64)) 1 1 0) 42) 1024)
+                                                    (add
+                                                        (jbe-bit (eq (jbe-execute-action (jbe-emit (jbe-cpu-packet) (jbe-x64)) 0 1 0) (jbe-deopt)) 2048)
+                                                        (jbe-bit (eq (jbe-execute-action (jbe-emit (jbe-cpu-packet) (jbe-x64)) 1 0 0) (jbe-exception)) 4096)))))))))))))
+
+    0)
