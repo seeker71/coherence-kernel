@@ -196,7 +196,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       sweep's stable decoded-token acoustic summary with the seven live Metal pair anchors (`32767`). It routes
       `metal-witnessed-audio2audio-acoustic`, selects `native-audio2audio-acoustic-vocoder` for the scoped
       decoded-token audio2audio arm, keeps `live-open-mic-pending` and neural Metal pending, and moves the speech
-      selector to `33554431`.
+      selector forward; the later live open-ASR source authority row moves the current selector to `67108863`.
 - [x] **Speech loopback promotion added.** `learn/speech-loopback-promotion.fk` turns native loopback receipts into
       rolling authority windows (`2047`): clean long windows promote native; short, failed, timed-out, undone, or
       regressing windows route back to oracle.
@@ -303,9 +303,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; after the live
       Sema formant WER-100 miss, it also exposes the voice miss action and the concrete
       `text-conditioned-acoustic-vocoder` Form kernel plus the native audio2audio acoustic bridge, multilocale
-      audio2audio acoustic sweep, and Metal acoustic authority row. The audio2audio arm now selects
+      audio2audio acoustic sweep, Metal acoustic authority row, and live open-ASR source authority training row.
+      The audio2audio arm now selects
       `native-audio2audio-acoustic-vocoder` for the decoded-token, metal-witnessed scope. The band returns
-      `33554431`.
+      `67108863`.
 - [x] **Open dictation transcript receipt added.** `learn/open-dictation-transcript-learning.fk` admits arbitrary
       utterance rows with consentful side-channel truth, local free oracle transcripts, optional native transcript
       candidates, Unicode token WER, and choice/cut/fail/undo/timeout promotion gates (`16383`). The macOS carrier
@@ -313,6 +314,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `ffmpeg`, transcribes it with local Whisper on Apple Metal, and returns live verdict `511` with field code
       `440000100`: four oracle successes, zero native successes, oracle WER `0`, native WER `100`. This removes
       the closed prompt-ID assumption from the receipt path; it does not claim native open ASR yet.
+- [x] **Live open-ASR source authority learning added.** `learn/live-open-asr-source-authority.fk` turns the live
+      open-dictation miss into an executable source-ASR training action (`32767`): oracle WER `0` plus native WER
+      `100` routes `train-live-segmented-open-asr-source` toward `native-segmented-acoustic-learning`, while
+      authority remains `oracle-guide` until a local native transcript candidate wins. The speech selector now
+      exposes this live Metal training path and returns `67108863`.
 - [x] **Speech token stream + native CTC open-ASR candidate added.** `observe/speech-token-stream.fk` makes the
       side-channel stream explicit: words plus `<NODE>`, `<SOURCE>`, `<CHANNEL>`, `<INTERFACE>`, `<CHOICE>`,
       `<FAIL>`, `<UNDO>`, `<TIMEOUT>`, `<CUT>`, `<OBSERVE>`, `<GRADE>`, `<FEEDBACK>`, `<REPAIR>`, `<RECEIPT>`,
