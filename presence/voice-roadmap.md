@@ -76,7 +76,7 @@ romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, 
 each pair's before/after NL rate, audio rate, route, and shifted flag, so the aggregate native route has per-pair
 witness rows. `speech-locale-learning-window` 16383 takes selected seed `2` into a numeric `sa<->la` observed
 window: all four lanes train from guided to native route code, clean controls plus A/B evidence promote the
-challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 32767 selects today's native arms:
+challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 65535 selects today's native arms:
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, and the deterministic
 formant vocoder for TTS/audio target rendering. The open-dictation transcript receipt is now live-observed too:
 `open-dictation-transcript-learning` 16383 scores arbitrary utterance rows with side-channel truth, local free
@@ -88,7 +88,10 @@ live segmented open-ASR route yet. `speech-token-stream` 32767 now carries words
 cadence, hesitation, excitement, and attunement metadata. `open-asr-ctc` 32767 collapses frame tokens into that
 stream and lowers the transcript into the open-dictation gate. `acoustic-token-emitter` 32767 now learns
 oracle-aligned acoustic token prototypes and emits blank/nonblank CTC frames by Form-native L1 distance plus
-earned confidence. It remains unselected until live mic audio supplies segmented feature rows that win receipts.
+earned confidence. `segmented-acoustic-token-learning` 32767 now turns wav/envelope segments plus consentful
+local-oracle transcript tokens into learned source-token prototypes, then routes decoded `sa<->la` source speech
+through neutral meaning to target-locale tokens. It remains unselected until live mic audio supplies streaming
+segmented feature rows that win receipts.
 The transformer path is trainable but not live-selected for speech yet; diffusion/codec speech is a
 named candidate only, pending a Form-native executable kernel and receipt. The live Metal anchor set now stands at
 7/7, so `full-metal-native` is an honest route for the closed-prompt carrier. Live segmented mic feature rows,
