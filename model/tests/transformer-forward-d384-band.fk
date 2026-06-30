@@ -1,0 +1,133 @@
+; transformer-forward-d384-band.fk — the decoder forward at REAL WIDTH (d_model=384, whisper-tiny's
+; width) proven bit-exact, four-way. The bridge from toy-width proof (#82 at d=4) to real-model width.
+;
+; preludes: transformer-numerics.fk transformer-block.fk transformer-mh.fk transformer-decoder.fk transformer-generate.fk
+;
+; #82 (transformer-decoder-fwd-band.fk) + the full-forward band proved the decoder forward BIT-EXACT
+; four-way at d_model=4. The recipes are width-agnostic — the SAME dot/matvec/softmax/layernorm/gelu walk
+; folds over any width. This band runs that identical forward at d_model=384 (whisper-tiny's width) AND
+; ff=1536 (whisper-tiny's real FFN width), multi-head 6×64, and proves it crosses BIT-EXACT four-way at
+; real width.
+;
+; CONFIG (recipe-data, generated — no 384-wide hand literals; the weights ARE recipe-data, the
+; north-star shape, just not yet a REAL open base — that is the named remaining, 3b):
+;   d_model=384, n_head=6, head_dim=64, ff=1536, seq=3, vocab=64, eps=1e-5, scale=1/8=0.125.
+;   Every matrix/vector is a deterministic generator (mkrow/mkmat/mkseq) so the input is reproducible
+;   on every engine and the values are varied & bounded (well-conditioned exp/softmax at real width).
+;   (seq=3 keeps the end-to-end forward affordable for the tree-walkers; d_model=384 / ff=1536 — the
+;   actual "real width" claim — are full whisper-tiny width.)
+;
+; METHODOLOGY — identical to #82: bit-exact, not "close". Each claim recomputes a piece at d=384 and
+; asserts with `eq` (the exact IEEE-754 double comparison shared by all four kernels) that the result is
+; BIT-IDENTICAL to a reference double captured at full fp64 precision from the THREE independent walkers
+; (Go, Rust, TypeScript), which printed all 17 significant digits and agreed bit-for-bit with one another
+; AND with fkwu. fkwu's `%.15g` print shows fewer digits, but the underlying double is proven identical
+; THROUGH `eq` (a claim returns its bit on fkwu exactly when fkwu's double equals the walker literal).
+;
+; RUN SHAPE: the combined verdict (add c1..c56 in ONE process) crosses 63 four-way — fkwu, Go, Rust, TS —
+;   in ~15s on fkwu --src. Two design points keep it tractable at real width: (1) the end-to-end claims
+;   share ONE forward, threaded through ARG-bound helpers (ck-lh→ck-lf→ck-lg) rather than recomputed or
+;   `let`-bound (`let` mis-binds list values on the walkers; recompute triples the d=384 forward); (2) the
+;   FFN biases are named cz1/cz2, NOT c1/c2 — c1..c6 are the claim names, and a collision silently feeds
+;   a claim-FN where a bias-vector belongs, corrupting the forward. Both are real teeth this band has.
+;
+; NATIVE-LANE HONEST SPLIT (model/form-asm-matvec.fk + cognition/ll-buffer.fk):
+;   The form-asm matvec/dot (fam-dot-loop, fam-matvec) emits ARM64 (arm64 ABI: ldr d, fmul, fadd, the
+;   x0..x4 row/col loop). On THIS kernel (fkwu on Windows / x86_64) those ARM64 BYTES do not execute —
+;   the native byte-exec dylib lane is Mac/arm64. So at d=384 the bit-exact forward proven here is in the
+;   TREE-WALKER fp64 (four-way), NOT yet over the native form-asm-matvec bytes on fkwu. The form-asm
+;   matvec folds the SAME downward/upward order as tb-dot by construction (see form-asm-matvec.fk header),
+;   so when the x86_64 lane (model/form-asm-x64.fk) carries fam-matvec it is bit-exact-by-construction;
+;   wiring fam-matvec through fkwu's f64 pool on x86_64 is the named next native step.
+;
+; Verdict 63 (1+2+4+8+16+32) when every claim lands at d_model=384:
+;    1  matvec@384            tb-dot/tb-matvec over a 384-wide row, bit-exact (the foundation)
+;    2  FFN@384               tb-ffn: 384→1536→384 with gelu, bit-exact
+;    4  attention/softmax@384 tb-attend-one: softmax over seq keys of 384-dim q·k, bit-exact
+;    8  decoder block@384     tb-dec-block: masked self + cross + FFN, multi-head 6×64, bit-exact
+;   16  FULL forward@384      ids → embed+pos → dec-stack → final LN → logits, last hidden bit-exact
+;   32  forward shape+argmax  logits has vocab=64 entries and greedy argmax is deterministic
+;
+; Remaining for the mind (named, not papered over — receipts/2026-06-30-decoder-forward-d384.md):
+;   (a) the native form-asm-matvec lane on fkwu (x86_64 fam-matvec through the f64 pool — ARM64 emits but
+;       does not execute here; this proof is tree-walker fp64 four-way), and
+;   (b) REAL WEIGHTS as recipe-data — a real open base (Qwen/Llama) loaded through the form block (3b,
+;       the big remaining). This band proves real WIDTH on generated recipe-data weights, not real weights.
+
+(do
+  ; ===== deterministic d=384 config — recipe-data generators (no hand literals) =====
+  (defn dm () 384) (defn ff () 1536) (defn vocab () 64) (defn seqlen () 3)
+  (defn nh () 6) (defn hd () 64) (defn scale () 0.125) (defn eps () 0.00001)
+  ; a length-n row from (base, slope): x[j] = base + slope*(j+1)
+  (defn mkrow (n i base slope)
+    (if (eq n 0) (empty) (cons (add base (mul slope (add i 1.0))) (mkrow (sub n 1) (add i 1.0) base slope))))
+  ; an m×n matrix; row r perturbs base & slope so rows differ (still small/bounded)
+  (defn mkmat (m r ncols base slope)
+    (if (eq m 0) (empty)
+        (cons (mkrow ncols 0.0 (add base (mul 0.00001 r)) (add slope (mul 0.0000003 r)))
+              (mkmat (sub m 1) (add r 1.0) ncols base slope))))
+  ; a seq of s position-vectors of width dm; position p perturbs base & slope
+  (defn mkseq (s p)
+    (if (eq s 0) (empty)
+        (cons (mkrow (dm) 0.0 (add 0.02 (mul 0.003 p)) (add 0.00008 (mul 0.0000005 p)))
+              (mkseq (sub s 1) (add p 1.0)))))
+
+  (defn xs () (mkseq (seqlen) 0.0))                          ; seq × 384 decoder input
+  (defn enc () (mkseq (seqlen) 3.0))                         ; seq × 384 encoder output (cross-attn k/v)
+  (defn g1 () (mkrow (dm) 0.0 1.0 0.0)) (defn be1 () (tb-zeros (dm)))
+  (defn g2 () (mkrow (dm) 0.0 1.0 0.0)) (defn be2 () (tb-zeros (dm)))
+  (defn g3 () (mkrow (dm) 0.0 1.0 0.0)) (defn be3 () (tb-zeros (dm)))
+  (defn gf () (mkrow (dm) 0.0 1.0 0.0)) (defn bf () (tb-zeros (dm)))
+  (defn wq () (mkmat (dm) 0.0 (dm) 0.0006 0.0000005))
+  (defn wk () (mkmat (dm) 0.0 (dm) 0.0005 0.0000004))
+  (defn wv () (mkmat (dm) 0.0 (dm) 0.0007 0.0000006))
+  (defn wo () (mkmat (dm) 0.0 (dm) 0.0004 0.0000003))
+  (defn cq () (mkmat (dm) 0.0 (dm) 0.00065 0.00000055))
+  (defn ck () (mkmat (dm) 0.0 (dm) 0.00055 0.00000045))
+  (defn cv () (mkmat (dm) 0.0 (dm) 0.00075 0.00000065))
+  (defn co () (mkmat (dm) 0.0 (dm) 0.00045 0.00000035))
+  (defn bz () (tb-zeros (dm)))
+  (defn w1 () (mkmat (ff) 0.0 (dm) 0.0003 0.0000002))        ; 1536 × 384
+  (defn w2 () (mkmat (dm) 0.0 (ff) 0.0002 0.0000001))        ; 384 × 1536
+  (defn cz1 () (tb-zeros (ff)))        ; FFN bias b1 (length ff). NOT c1 — c1..c6 are the claim names.
+  (defn cz2 () (tb-zeros (dm)))        ; FFN bias b2 (length dm).
+
+  ; vocab=64 token-embedding table (64 × 384), a seq-position table, seq token ids.
+  (defn embed () (mkmat (vocab) 0.0 (dm) 0.01 0.00002))
+  (defn pos () (mkseq (seqlen) 10.0))
+  (defn mkids (s i) (if (eq s 0) (empty) (cons (add (mul i 7) 3) (mkids (sub s 1) (add i 1)))))
+  (defn ids () (mkids (seqlen) 0))                           ; seq ids (3,10,17), all < vocab=64
+
+  ; the 26-param decoder layer (self q/k/v/o, cross q/k/v/o, FFN) the stack folds over.
+  (defn layer () (list (g1) (be1) (wq) (bz) (wk) (bz) (wv) (bz) (wo) (bz)
+                       (g2) (be2) (cq) (bz) (ck) (bz) (cv) (bz) (co) (bz)
+                       (g3) (be3) (w1) (cz1) (w2) (cz2)))
+  (defn layers () (list (layer)))
+
+  ; ===== the full forward, composed end-to-end at d=384 =====
+  (defn din () (tb-embed-seq (embed) (pos) (ids)))
+  (defn dout () (tb-dec-stack (din) (enc) (eps) (nh) (hd) (scale) (layers)))
+
+  ; ----- the six bit-exact claims (reference doubles: fkwu = go = rust = ts, full fp64) -----
+  ; 1: matvec@384 — first element of Wq · x[0] (a 384-wide dot).
+  (defn c1 () (if (eq (head (tb-matvec (wq) (head (xs)))) 0.009653286400000004) 1 0))
+  ; 2: FFN@384 — first element of the 384→1536→384 FFN on x[0].
+  (defn c2 () (if (eq (head (tb-ffn (w1) (cz1) (w2) (cz2) (head (xs)))) 0.3154508484374375) 2 0))
+  ; 4: attention/softmax@384 — first element of single-head attend over seq keys (q/k/v projected).
+  (defn c3 () (if (eq (head (tb-attend-one (head (tb-proj-seq (wq) (bz) (xs)))
+                                           (tb-proj-seq (wk) (bz) (xs))
+                                           (tb-proj-seq (wv) (bz) (xs)) (scale))) 0.01241902426620797) 4 0))
+  ; 8: decoder block@384 — first element of position 0 after the full masked-self+cross+FFN block.
+  (defn c4 () (if (eq (head (head (tb-dec-layer (xs) (enc) (eps) (nh) (hd) (scale) (layer)))) 5.057696003407669) 8 0))
+  ; 16+32 share ONE forward, threaded through ARG-bound helpers (ck-lh→ck-lf→ck-lg) so dout is computed
+  ; once and the SAME doubles feed both claims (see header RUN SHAPE: arg-bind, not `let`).
+  ; 16: FULL forward@384 — last hidden after embed+pos → dec-stack → final LN, bit-exact (two probes).
+  ; 32: forward shape + argmax — logits has vocab=64 entries, greedy argmax deterministic (= 63 here).
+  (defn ck-lg (lh lf lg)
+    (add (if (and (eq (head lh) 5.115357901486989) (eq (head lf) -1.727546116407077)) 16 0)
+         (if (and (eq (len lg) 64) (eq (tb-argmax lg) 63)) 32 0)))
+  (defn ck-lf (lh lf) (ck-lg lh lf (tb-logits (embed) lf)))
+  (defn ck-lh (lh) (ck-lf lh (tb-vec-add (tb-vec-mul (tn-layernorm lh (eps)) (gf)) (bf))))
+  (defn c56 (d) (ck-lh (tb-last d)))
+
+  (add (c1) (add (c2) (add (c3) (add (c4) (c56 (dout)))))))
