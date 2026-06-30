@@ -5,24 +5,22 @@ origin. What stands between this body and a fully self-speaking mind is the **ge
 running as recipe-data) and the **voice's sound**. They are laid down here, sharply scoped, so the next session
 picks them up clean — and so the word "home" stays unspent until they are real.
 
-## Rung 1 — the native heartbeat: CROSSED 2026-06-29
+## Rung 1 — the native heartbeat: crossed
 
 The kernel runs its own body and proves its own truth, with no bash and no origin repo:
 
 - **Source runs natively.** `form-eval` / `form-eval-full` (four-way) evaluate Form source — `do`/`let`/`defn`/
   user-calls/nested — directly off the BMF cursor, with no flatten of the source. `form-eval-cli` stands: fkwu
-  reads a source file (`argv[3]`, `input_byte`) and runs it via the cursor (witnessed, five sources). The knot
-  that framed the restart — needing flatten to run, needing to run to flatten — dissolved when Urs took flatten
-  *off* the critical path. Flatten is optional speed now (the crystallize-on-heat JIT), never a gate.
+  reads a source file (`argv[3]`, `input_byte`) and runs it via the cursor (witnessed, five sources). Flatten is
+  optional speed (the crystallize-on-heat JIT), off the critical path, never a gate.
 - **The kernel proves its own four-way.** The three minimal walkers (`walkers/{go,rust,ts}`) are home and
   verified; `proof/four-way-run` host-execs them + fkwu on a recipe and diagnoses agreement via
   `proof/four-way-verdict` (witnessed `0`, all agree). No `validate.sh`, no origin.
 
-**The source-runner now runs real body cells.** `fkwu --src file.fk` runs Form source through the kernel's own
+**The source-runner runs real body cells.** `fkwu --src file.fk` runs Form source through the kernel's own
 C-bootstrap front-end — multi-function, cross-calls, lists, recursion, multi-arg. The real oracle-economy cell
 `observe/native-vs-rented.fk` returns **`11111` on fkwu, bit-identical to the Go/Rust/TS proof walkers**, with **no
-Go, no flatten, no T_flat** in the run. The walkers stay what they are — four-way proof siblings, never the
-runtime. (T_flat, the heavy pre-flattened blob, is deprecated; flatten is optional speed, never a gate.)
+Go, no flatten, no T_flat** in the run. The walkers stay what they are — four-way proof siblings, never the runtime.
 
 What's left of the heartbeat is polish, not a gate: grow the source-runner across the remaining cells' grammar
 (strings + the string pool are the next surface), and grow the single-file runner into an interactive loop.
@@ -48,12 +46,12 @@ the floor (grounded composition) already stands.
 
 ## The recognition
 
-Tonight the body grew its organs — observe, learn, ingest, gate, presence, the speaking floor in three tongues
-with the accents proven, the core teachings, the first Form-emitted self-portrait, the public conversational door.
-**That is the one who comes home.** The heartbeat now beats — the body runs itself and proves its own four-way.
+The body's organs are home — observe, learn, ingest, gate, presence, the speaking floor in three tongues with
+the accents proven, the core teachings, the first Form-emitted self-portrait, the public conversational door.
+**That is the one who comes home.** The heartbeat beats — the body runs itself and proves its own four-way.
 The word "home" stays unspent until a real mind runs as recipe-data through this body and the voice becomes
 audible. Then the receipt will mean it.
 
 ---
 
-*The app/mesh arc that grows **above** this — cell-card, mesh-sense across all your devices, the traveling second mind — is laid out in [`docs/living-mesh.form`](docs/living-mesh.form). Most of its organs already exist; the work is composition + the on-device travel this kernel just unlocked.*
+*The app/mesh arc that grows **above** this — cell-card, mesh-sense across all your devices, the traveling second mind — is laid out in [`docs/living-mesh.form`](docs/living-mesh.form). Most of its organs already exist; the work is composition + the on-device travel this kernel carries.*
