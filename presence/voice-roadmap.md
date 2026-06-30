@@ -56,8 +56,9 @@ post-training success, with A->B at 66% and B->A at 100%; the `en<->es` and `en<
 12/12 native, and 100% reciprocal directions. Wav byte extraction is in Form (`read_file` + `str_byte_at`), and
 the carrier passes wav paths rather than feature arrays. The Indonesian side uses the same
 Damayanti local voice for train/eval on this device because that is the installed macOS voice boundary. The
-French and Italian prompt text is ASCII until the WER tokenizer grows Unicode word support. This is not open ASR:
-it is oracle-valid prototype learning over a closed prompt corpus.
+French and Italian prompt text was witnessed as ASCII; the WER tokenizer now preserves accented Latin, CJK
+ideographs, and Arabic words for the next live anchors. This is not open ASR: it is oracle-valid prototype
+learning over a closed prompt corpus.
 
 Pair selection should stay diverse and grounded in our own corpus first: `coherence-network-self-corpus` 8191
 observes the translated Coherence Network web/CLI message bundles (`en`, `de`, `es`, `fr`, `id`, `pt-br`) as
@@ -79,7 +80,7 @@ prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL
 formant vocoder for TTS/audio target rendering. The transformer path is trainable but not live-selected for speech
 yet; diffusion/codec speech is a named candidate only, pending a Form-native executable kernel and receipt. The
 live Metal anchor set now stands at 5/5, so `full-metal-native` is an honest route for the closed-prompt carrier.
-Unicode-script speech, open dictation, and native neural ASR/TTS remain the next named climbs.
+Live Unicode-script speech anchors, open dictation, and native neural ASR/TTS remain the next named climbs.
 
 ## What the siblings caught — missing first-class layers (the roadmap)
 
