@@ -142,6 +142,8 @@ static const struct fk_optab_row fk_optab[] = {
   { "mul", 2, 42 },
   { "empty", 0, 18 },
   { "list", -1, 19 },
+  { "nothing", 0, 137 },
+  { "nothing?", 1, 138 },
 
 };
 static const long long fk_optab_n = sizeof(fk_optab)/sizeof(fk_optab[0]);

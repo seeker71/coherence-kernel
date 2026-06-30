@@ -16,7 +16,11 @@ FKWU="${1:-/tmp/fkwu}"
 RUN="$(mktemp)"
 {
   echo '(do'
-  sed -n '50,105p' flatten/form-flatten.fk      # the flt-ops defn (the manifest table)
+  # the flt-ops defn (the manifest table) — span derived, not hardcoded, so adding
+  # an op row (a (nothing)/value row) never silently truncates the table here.
+  OPS_BEG="$(grep -n '^(defn flt-ops ()' flatten/form-flatten.fk | head -1 | cut -d: -f1)"
+  OPS_END="$(awk "NR>$OPS_BEG && /^\(defn /{print NR-1; exit}" flatten/form-flatten.fk)"
+  sed -n "${OPS_BEG},${OPS_END}p" flatten/form-flatten.fk
   sed '1s/^(do$//' flatten/gen-source-walker-table.fk
 } > "$RUN"
 "$FKWU" --src "$RUN" > runtime/fkwu-optable.h
