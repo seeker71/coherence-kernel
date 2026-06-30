@@ -200,6 +200,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       per-pair coverage (`32767`): `13` locales tracked, `11` ready, `8` live-anchor/carrier-live, `2`
       consent-pending (`nv`, `chr`); `12` pair rows include `10` native and `2` oracle-guided. Unicode anchors
       remain explicit: `en<->zh` `10/12 = 83%`, `en<->ar` `12/12 = 100%`.
+- [x] **Speech oracle/native backlog added.** `learn/speech-oracle-native-backlog.fk` records the remaining
+      oracle-held speech gaps (`32767`): native neural weight parameters admitted are `0`, native Sema voice organs
+      remain `6`, live open dictation is local-oracle `4/4` but native `0/4`, and the current Sema live voice sample
+      is local-oracle `0/1`, native `0/1`, WER `100`. The next actions are segmented open-ASR learning and
+      render-and-oracle-next for the text-conditioned acoustic vocoder candidate.
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
