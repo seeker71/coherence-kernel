@@ -77,7 +77,7 @@ This repo is **public-able by construction** — there are no private parts to e
 
 ## The parallel discipline — how this work and the origin work stay coherent
 
-The risk of two repos is drift. **One rule kills it: the Form recipe body has exactly one home.**
+The drift pressure between two repos is handled by one guide: the Form recipe body has exactly one home.
 
 - Recipes are content-addressed: the same `.fk` interns to the same NodeID on either kernel, so the
   body is naturally shareable — but only if there is no second *copy* to diverge.
@@ -215,10 +215,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       selection is deterministic for receipts, randomizable by a carrier, and the band returns `2047`.
 - [x] **Sanskrit baseline + multilocale NL/audio pipeline added.** `learn/sanskrit-locale-baseline.fk` records
       romanized Sanskrit seed lines with ready locale renderings for `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`,
-      and `la`; `zh` and `ar` stay backfill targets. `learn/multilocale-nl-audio-pipeline.fk` proves
+      `la`, `zh`, and `ar`; full Coherence Network `zh`/`ar` bundles remain backfill targets.
+      `learn/multilocale-nl-audio-pipeline.fk` proves
       `text(A) -> neutral Form meaning -> text(B)` and
       `audio(A) features -> neutral Form meaning -> audio(B) target` over reciprocal `en<->de`, `en<->es`,
-      `fr<->id`, and `sa<->la` loops. The baseline band returns `2047`; the pipeline band returns `8191`.
+      `zh<->ar`, `fr<->id`, and `sa<->la` loops. The baseline band returns `2047`; the pipeline band returns `8191`.
       This is closed-set Form learning, not open ASR/translation.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects

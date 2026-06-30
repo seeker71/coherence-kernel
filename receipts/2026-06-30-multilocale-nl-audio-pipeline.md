@@ -5,7 +5,8 @@
 Added `learn/sanskrit-locale-baseline.fk` and `learn/multilocale-nl-audio-pipeline.fk`.
 
 The new baseline uses romanized Sanskrit seed phrases with ready renderings for `sa`, `en`, `de`, `es`, `fr`,
-`id`, `pt-br`, and `la`. `zh` and `ar` are named as consentful backfill targets, not marked ready.
+`id`, `pt-br`, `la`, `zh`, and `ar`. The full Coherence Network `zh` and `ar` bundles still wait for translated
+rows; this small baseline now has ready script tokens.
 
 The pipeline proves the closed-set route:
 
@@ -40,11 +41,12 @@ Output:
 
 ## Result
 
-The band covers four reciprocal pairs:
+The band covers five reciprocal pairs:
 
 ```text
 en <-> de
 en <-> es
+zh <-> ar
 fr <-> id
 sa <-> la
 ```
