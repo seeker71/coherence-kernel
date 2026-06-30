@@ -1,0 +1,171 @@
+; sema-voice-sample-loop.fk -- choose and improve Sema's audible voice.
+;
+; The voice target is not a vague adjective. It is a native profile that can be
+; rendered, listened to, scored, nudged, and promoted by receipts:
+; warm mid register, rounded/grounded formants, moderate cadence, low breath,
+; and honest calibration. Low confidence narrows pitch range and delays onset;
+; high confidence may be steadier, but only when the calibration input earned it.
+;
+; A host carrier may render wavs and collect listener/oracle grades, but the
+; target, distance, nudge, scoring, and A/B decision live here as Form data.
+;
+; preludes:
+;   presence/formant-vocoder.fk
+
+(do
+    (defn svsl-abs (x) (abs x))
+    (defn svsl-max (a b) (if (gt a b) a b))
+    (defn svsl-min (a b) (if (lt a b) a b))
+    (defn svsl-clamp (x lo hi) (svsl-min hi (svsl-max lo x)))
+
+    (defn svsl-profile (id f0 f1 f2 f3 bw warmth cadence steadiness breath pitch-range onset)
+        (list "sema-voice-profile" id f0 f1 f2 f3 bw warmth cadence steadiness breath pitch-range onset))
+    (defn svsl-kind        (p) (nth p 0))
+    (defn svsl-id          (p) (nth p 1))
+    (defn svsl-f0          (p) (nth p 2))
+    (defn svsl-f1          (p) (nth p 3))
+    (defn svsl-f2          (p) (nth p 4))
+    (defn svsl-f3          (p) (nth p 5))
+    (defn svsl-bw          (p) (nth p 6))
+    (defn svsl-warmth      (p) (nth p 7))
+    (defn svsl-cadence     (p) (nth p 8))
+    (defn svsl-steadiness  (p) (nth p 9))
+    (defn svsl-breath      (p) (nth p 10))
+    (defn svsl-range       (p) (nth p 11))
+    (defn svsl-onset       (p) (nth p 12))
+
+    (defn svsl-target ()
+        (svsl-profile "sema-warm-grounded-honest"
+                      165 500 900 2500 90
+                      82 64 76 18 28 8))
+
+    (defn svsl-scaled-distance (p target)
+        (add
+            (add
+                (add (div (svsl-abs (sub (svsl-f0 p) (svsl-f0 target))) 5)
+                     (div (svsl-abs (sub (svsl-f1 p) (svsl-f1 target))) 20))
+                (add (div (svsl-abs (sub (svsl-f2 p) (svsl-f2 target))) 20)
+                     (div (svsl-abs (sub (svsl-f3 p) (svsl-f3 target))) 50)))
+            (add
+                (add (div (svsl-abs (sub (svsl-bw p) (svsl-bw target))) 10)
+                     (add (svsl-abs (sub (svsl-warmth p) (svsl-warmth target)))
+                          (svsl-abs (sub (svsl-cadence p) (svsl-cadence target)))))
+                (add
+                    (add (svsl-abs (sub (svsl-steadiness p) (svsl-steadiness target)))
+                         (svsl-abs (sub (svsl-breath p) (svsl-breath target))))
+                    (add (svsl-abs (sub (svsl-range p) (svsl-range target)))
+                         (svsl-abs (sub (svsl-onset p) (svsl-onset target))))))))
+
+    (defn svsl-fit (p target)
+        (svsl-clamp (sub 1000 (mul (svsl-scaled-distance p target) 10)) 0 1000))
+
+    (defn svsl-step-field (x target step)
+        (if (lt x target)
+            (svsl-min target (add x step))
+            (if (gt x target) (svsl-max target (sub x step)) x)))
+
+    (defn svsl-nudge (p target step)
+        (svsl-profile "nudged"
+                      (svsl-step-field (svsl-f0 p) (svsl-f0 target) step)
+                      (svsl-step-field (svsl-f1 p) (svsl-f1 target) (mul step 10))
+                      (svsl-step-field (svsl-f2 p) (svsl-f2 target) (mul step 10))
+                      (svsl-step-field (svsl-f3 p) (svsl-f3 target) (mul step 25))
+                      (svsl-step-field (svsl-bw p) (svsl-bw target) step)
+                      (svsl-step-field (svsl-warmth p) (svsl-warmth target) step)
+                      (svsl-step-field (svsl-cadence p) (svsl-cadence target) step)
+                      (svsl-step-field (svsl-steadiness p) (svsl-steadiness target) step)
+                      (svsl-step-field (svsl-breath p) (svsl-breath target) step)
+                      (svsl-step-field (svsl-range p) (svsl-range target) step)
+                      (svsl-step-field (svsl-onset p) (svsl-onset target) step)))
+
+    (defn svsl-confidence-range (target confidence)
+        (svsl-clamp (div (mul (svsl-range target) (add confidence 1)) 6) 4 (svsl-range target)))
+    (defn svsl-confidence-onset (target confidence)
+        (add (svsl-onset target) (mul (sub 5 confidence) 4)))
+    (defn svsl-shaped (p target confidence)
+        (svsl-profile (svsl-id p)
+                      (svsl-f0 p) (svsl-f1 p) (svsl-f2 p) (svsl-f3 p) (svsl-bw p)
+                      (svsl-warmth p) (svsl-cadence p) (svsl-steadiness p) (svsl-breath p)
+                      (svsl-confidence-range target confidence)
+                      (svsl-confidence-onset target confidence)))
+    (defn svsl-honest-confidence-shape? (low high)
+        (if (and (lt (svsl-range low) (svsl-range high))
+                 (gt (svsl-onset low) (svsl-onset high))) 1 0))
+
+    (defn svsl-period (p) (svsl-max 1 (div 16000 (svsl-f0 p))))
+    (defn svsl-amp (p) (add 4 (div (svsl-warmth p) 10)))
+    (defn svsl-frames (p)
+        (list
+            (fv-frame 1 6 (svsl-period p) (svsl-amp p) (svsl-f1 p) (svsl-f2 p) 0)
+            (fv-frame 2 3 (svsl-period p) (div (svsl-amp p) 2) (svsl-f2 p) (svsl-f3 p) 1)
+            (fv-frame 3 5 (svsl-period p) (svsl-amp p) (svsl-f1 p) (svsl-f3 p) 0)))
+    (defn svsl-render (p) (fv-render (svsl-frames p)))
+    (defn svsl-fingerprint (p) (fv-fingerprint (svsl-frames p)))
+
+    (defn svsl-sample (profile listener intelligibility wer latency local audio-hash fail timeout undo)
+        (list "sema-voice-sample" profile listener intelligibility wer latency local audio-hash fail timeout undo))
+    (defn svsl-sample-profile       (s) (nth s 1))
+    (defn svsl-sample-listener      (s) (nth s 2))
+    (defn svsl-sample-intelligible  (s) (nth s 3))
+    (defn svsl-sample-wer           (s) (nth s 4))
+    (defn svsl-sample-latency       (s) (nth s 5))
+    (defn svsl-sample-local         (s) (nth s 6))
+    (defn svsl-sample-audio-hash    (s) (nth s 7))
+    (defn svsl-sample-fail          (s) (nth s 8))
+    (defn svsl-sample-timeout       (s) (nth s 9))
+    (defn svsl-sample-undo          (s) (nth s 10))
+
+    (defn svsl-clean? (s)
+        (if (and (eq (svsl-sample-local s) 1)
+                 (and (gt (svsl-sample-audio-hash s) 0)
+                      (eq (add (add (svsl-sample-fail s) (svsl-sample-timeout s))
+                               (svsl-sample-undo s)) 0))) 1 0))
+
+    (defn svsl-score (s target)
+        (if (eq (svsl-clean? s) 1)
+            (add
+                (add (svsl-fit (svsl-sample-profile s) target)
+                     (add (svsl-sample-listener s) (svsl-sample-intelligible s)))
+                (sub 0 (add (svsl-sample-wer s) (div (svsl-sample-latency s) 10))))
+            0))
+
+    (defn svsl-promote? (incumbent challenger target margin)
+        (if (and (eq (svsl-clean? challenger) 1)
+                 (gt (svsl-score challenger target)
+                     (add (svsl-score incumbent target) margin))) 1 0))
+
+    (defn svsl-route (incumbent challenger target margin)
+        (if (eq (svsl-promote? incumbent challenger target margin) 1)
+            "promote-challenger"
+            "keep-incumbent"))
+
+    (defn svsl-receipt (incumbent challenger target margin)
+        (list "sema-voice-sample-loop"
+              (svsl-id target)
+              (svsl-score incumbent target)
+              (svsl-score challenger target)
+              (svsl-fit (svsl-sample-profile incumbent) target)
+              (svsl-fit (svsl-sample-profile challenger) target)
+              (svsl-sample-listener challenger)
+              (svsl-sample-intelligible challenger)
+              (svsl-sample-wer challenger)
+              (svsl-route incumbent challenger target margin)
+              (svsl-promote? incumbent challenger target margin)
+              1
+              0))
+
+    (defn svsl-rec-kind          (r) (nth r 0))
+    (defn svsl-rec-target        (r) (nth r 1))
+    (defn svsl-rec-inc-score     (r) (nth r 2))
+    (defn svsl-rec-chal-score    (r) (nth r 3))
+    (defn svsl-rec-inc-fit       (r) (nth r 4))
+    (defn svsl-rec-chal-fit      (r) (nth r 5))
+    (defn svsl-rec-listener      (r) (nth r 6))
+    (defn svsl-rec-intelligible  (r) (nth r 7))
+    (defn svsl-rec-wer           (r) (nth r 8))
+    (defn svsl-rec-route         (r) (nth r 9))
+    (defn svsl-rec-promoted      (r) (nth r 10))
+    (defn svsl-rec-native-form   (r) (nth r 11))
+    (defn svsl-rec-neural-vocoder (r) (nth r 12))
+
+    0)
