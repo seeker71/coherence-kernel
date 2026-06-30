@@ -83,9 +83,11 @@ romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, 
 each pair's before/after NL rate, audio rate, route, and shifted flag, so the aggregate native route has per-pair
 witness rows. `speech-locale-learning-window` 16383 takes selected seed `2` into a numeric `sa<->la` observed
 window: all four lanes train from guided to native route code, clean controls plus A/B evidence promote the
-challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 65535 selects today's native arms:
-prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, and the deterministic
-formant vocoder for TTS/audio target rendering. The open-dictation transcript receipt is now live-observed too:
+challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 131071 selects today's native arms:
+prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, and `sema-voice-sample-loop`
+over the deterministic formant vocoder for TTS/audio target rendering. The raw formant vocoder remains the
+carrier, but generated samples are now selected by target fit, listener evidence, intelligibility, WER, and
+latency. The open-dictation transcript receipt is now live-observed too:
 `open-dictation-transcript-learning` 16383 scores arbitrary utterance rows with side-channel truth, local free
 oracle transcripts, optional native candidates, Unicode WER, and reversible controls; `macos-open-dictation-carrier`
 511 witnessed `Open speech flows.` through local `say` -> wav -> Whisper Metal with oracle WER 0 and no native

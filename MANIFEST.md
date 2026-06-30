@@ -257,7 +257,8 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       observed-sweep bridge bands remain `255`, `511`, and `32767`.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
-      `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
+      `sema-voice-sample-loop` (`target-fit-listener-wer-ab-formant-vocoder`) over the raw formant carrier,
+      NL2NL selects `closed-set-locale-form`, and audio2audio
       selects the ASR -> neutral Form -> formant route. `open-dictation-transcript` is now a live-observed ASR
       receipt candidate, but does not displace the closed-set prototype until a native open-ASR candidate emits
       local transcript text. `native-open-asr-ctc` is now present as a Form-native CTC token-stream decoder
@@ -266,7 +267,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       live-selected until real audio can emit segmented token frames over winning receipts. `small-transformer-nl` remains trainable but not
       live-selected; `diffusion-codec-speech` is present but not ready because no Form-native executable kernel
       receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; the band
-      returns `65535`.
+      returns `131071`.
 - [x] **Open dictation transcript receipt added.** `learn/open-dictation-transcript-learning.fk` admits arbitrary
       utterance rows with consentful side-channel truth, local free oracle transcripts, optional native transcript
       candidates, Unicode token WER, and choice/cut/fail/undo/timeout promotion gates (`16383`). The macOS carrier
