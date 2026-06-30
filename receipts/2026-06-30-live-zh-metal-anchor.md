@@ -95,7 +95,7 @@ zh: Eddy (Chinese (China mainland))
 
 ## Anchor Ledger
 
-`learn/metal-live-pair-anchors.fk` now counts six live reciprocal anchors:
+At this receipt, `learn/metal-live-pair-anchors.fk` counted six live reciprocal anchors:
 
 ```text
 en<->de
@@ -115,6 +115,7 @@ The anchor band returns:
 ## Honest Boundary
 
 This is live Unicode-script closed-prompt audio, not open dictation. Chinese
-has crossed the local Metal carrier floor; Arabic remains pending on this Mac
-because the installed voice set did not expose an Arabic `say` voice in the
-checked host list. Native neural ASR/TTS is still pending.
+has crossed the local Metal carrier floor. A later check found the local Majed
+Arabic voice and crossed `en<->ar` as well; see
+`receipts/2026-06-30-live-ar-metal-anchor.md`. Native neural ASR/TTS is still
+pending.
