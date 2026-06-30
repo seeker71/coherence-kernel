@@ -1,0 +1,183 @@
+; speech-model-auto-selection.fk -- auto-research and auto-ML choose speech arms.
+;
+; This answers the model-layout question as executable data. The selector does
+; not pretend the final neural speech model exists. It ranks candidates by local
+; receipts: native Form ownership, executable micro-kernel presence, training
+; readiness, live observation, Metal lowering, quality, latency, cost, and risk.
+; Diffusion/codec speech is named as a candidate family, but cannot win before
+; there is a Form-native executable kernel and a measured receipt.
+;
+; preludes:
+;   form/form-stdlib/observed-auto-learning.fk
+
+(do
+    (defn smas-candidate (id task layout body-cell micro-kernel native-form trainable
+                          live-observed metal-lowered corpus-ready quality latency cost risk)
+        (list "speech-model-candidate"
+              id task layout body-cell micro-kernel native-form trainable
+              live-observed metal-lowered corpus-ready quality latency cost risk))
+
+    (defn smas-kind          (c) (nth c 0))
+    (defn smas-id            (c) (nth c 1))
+    (defn smas-task          (c) (nth c 2))
+    (defn smas-layout        (c) (nth c 3))
+    (defn smas-body          (c) (nth c 4))
+    (defn smas-micro         (c) (nth c 5))
+    (defn smas-native        (c) (nth c 6))
+    (defn smas-trainable     (c) (nth c 7))
+    (defn smas-live          (c) (nth c 8))
+    (defn smas-metal         (c) (nth c 9))
+    (defn smas-corpus        (c) (nth c 10))
+    (defn smas-quality       (c) (nth c 11))
+    (defn smas-latency       (c) (nth c 12))
+    (defn smas-cost          (c) (nth c 13))
+    (defn smas-risk          (c) (nth c 14))
+
+    (defn smas-catalog ()
+        (list
+            (smas-candidate
+                "prototype-asr"
+                "asr"
+                "nearest-l1-wav-feature-prototype"
+                "observe/asr-prompt-id.fk+learn/audio-locale-native-training.fk"
+                "integer-l1-distance"
+                1 1 1 0 1
+                83 24 4 6)
+            (smas-candidate
+                "closed-set-locale-form"
+                "nl2nl"
+                "token-overlap-to-neutral-meaning"
+                "learn/multilocale-nl-audio-pipeline.fk"
+                "integer-token-overlap"
+                1 1 1 0 1
+                100 8 2 5)
+            (smas-candidate
+                "formant-vocoder"
+                "tts"
+                "source-filter-formant-frames"
+                "presence/formant-vocoder.fk"
+                "deterministic-source-filter"
+                1 0 0 0 1
+                45 4 1 4)
+            (smas-candidate
+                "prototype-asr-formant-audio2audio"
+                "audio2audio"
+                "prototype-asr-neutral-form-formant-vocoder"
+                "learn/multilocale-nl-audio-pipeline.fk+presence/formant-vocoder.fk"
+                "l1-feature-route+source-filter"
+                1 1 1 0 1
+                50 30 5 7)
+            (smas-candidate
+                "small-transformer-nl"
+                "nl2nl"
+                "two-block-residual-transformer"
+                "model/transformer-corpus-train.fk"
+                "matvec-softmax-backprop"
+                1 1 0 1 1
+                35 80 12 8)
+            (smas-candidate
+                "diffusion-codec-speech"
+                "audio2audio"
+                "diffusion-or-codec-denoiser"
+                "pending"
+                "pending"
+                0 0 0 0 0
+                0 200 80 30)
+            (smas-candidate
+                "macos-say-whisper-oracle"
+                "oracle"
+                "host-tts-plus-whisper-metal"
+                "presence/macos-speech-roundtrip-carrier.fk"
+                "host-effect"
+                0 0 1 1 1
+                95 60 30 20)))
+
+    (defn smas-ready? (c)
+        (if (and (eq (smas-native c) 1)
+                 (and (eq (smas-corpus c) 1)
+                      (and (gt (smas-quality c) 0)
+                           (not (str_eq (smas-body c) "pending"))))) 1 0))
+
+    (defn smas-score (c)
+        (if (eq (smas-ready? c) 0) 0
+            (add
+                (add
+                    (add (smas-quality c) (mul (smas-native c) 30))
+                    (add (mul (smas-trainable c) 12) (mul (smas-live c) 10)))
+                (add
+                    (add (mul (smas-metal c) 8) (mul (smas-corpus c) 6))
+                    (sub 0 (add (div (smas-latency c) 4)
+                                (add (smas-cost c) (smas-risk c))))))))
+
+    (defn smas-empty ()
+        (smas-candidate "" "" "" "" "" 0 0 0 0 0 0 9999 9999 9999))
+
+    (defn smas-better? (a b)
+        (if (gt (smas-score a) (smas-score b)) 1 0))
+
+    (defn smas-best-loop (task rows best)
+        (if (eq (len rows) 0) best
+            (do
+                (let c (head rows))
+                (if (and (str_eq (smas-task c) task)
+                         (eq (smas-better? c best) 1))
+                    (smas-best-loop task (tail rows) c)
+                    (smas-best-loop task (tail rows) best)))))
+
+    (defn smas-best (task) (smas-best-loop task (smas-catalog) (smas-empty)))
+
+    (defn smas-find (id rows)
+        (if (eq (len rows) 0) (smas-empty)
+            (if (str_eq (smas-id (head rows)) id)
+                (head rows)
+                (smas-find id (tail rows)))))
+    (defn smas-candidate-for (id) (smas-find id (smas-catalog)))
+
+    (defn smas-research-active? ()
+        (if (and (gt (len (smas-catalog)) 1)
+                 (not (str_eq (smas-id (smas-candidate-for "diffusion-codec-speech")) ""))) 1 0))
+
+    (defn smas-automl-active? ()
+        (if (and (not (str_eq (smas-id (smas-best "asr")) ""))
+                 (and (not (str_eq (smas-id (smas-best "tts")) ""))
+                      (not (str_eq (smas-id (smas-best "nl2nl")) "")))) 1 0))
+
+    (defn smas-ab-authority (champ-score chall-score samples min-samples margin)
+        (oal-ab-authority champ-score chall-score samples min-samples margin))
+
+    (defn smas-live-mode (choice-open fail cut undo timeout ab-enabled)
+        (oal-mode 1 (oal-controls choice-open fail cut undo timeout) ab-enabled))
+
+    (defn smas-control-action (choice-open fail cut undo timeout)
+        (oal-control-action (oal-controls choice-open fail cut undo timeout)))
+
+    (defn smas-receipt ()
+        (list "speech-model-auto-selection"
+              (smas-id (smas-best "asr"))
+              (smas-layout (smas-best "asr"))
+              (smas-id (smas-best "tts"))
+              (smas-layout (smas-best "tts"))
+              (smas-id (smas-best "nl2nl"))
+              (smas-layout (smas-best "nl2nl"))
+              (smas-id (smas-best "audio2audio"))
+              (smas-layout (smas-best "audio2audio"))
+              (smas-research-active?)
+              (smas-automl-active?)
+              (smas-ready? (smas-candidate-for "diffusion-codec-speech"))
+              (smas-live-mode 1 0 1 0 0 1)))
+
+    (defn smas-rec-kind        (r) (nth r 0))
+    (defn smas-rec-asr         (r) (nth r 1))
+    (defn smas-rec-asr-layout  (r) (nth r 2))
+    (defn smas-rec-tts         (r) (nth r 3))
+    (defn smas-rec-tts-layout  (r) (nth r 4))
+    (defn smas-rec-nl          (r) (nth r 5))
+    (defn smas-rec-nl-layout   (r) (nth r 6))
+    (defn smas-rec-audio       (r) (nth r 7))
+    (defn smas-rec-audio-layout (r) (nth r 8))
+    (defn smas-rec-research    (r) (nth r 9))
+    (defn smas-rec-automl      (r) (nth r 10))
+    (defn smas-rec-diffusion-ready (r) (nth r 11))
+    (defn smas-rec-mode        (r) (nth r 12))
+
+    0)

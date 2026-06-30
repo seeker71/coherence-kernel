@@ -19,7 +19,14 @@ cc -O2 -o fkwu runtime/fkwu-uni.c
 gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp
 ```
 
-Verify it runs the body — a **real cell**, native, with no Go, no flatten, no T_flat:
+Verify the direct source bootstrap first:
+
+```sh
+./fkwu --src bootstrap/ground.fk                 # -> 42
+./fkwu --src bootstrap/ground-recursive.fk 10    # -> 55
+```
+
+Then verify it runs the body — a **real cell**, native, with no Go, no flatten, no T_flat:
 
 ```sh
 ( cat observe/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > /tmp/nvr.fk
@@ -31,6 +38,9 @@ cross-calls, lists, recursion). The direction of travel is the native walker pro
 made smaller until it disappears. The Go/Rust/TS kernels under `walkers/` are **four-way proof siblings only** —
 never the runtime; you never run the body on them. (`fkwu` also runs Form off the BMF cursor via `form-eval`, and
 loads flattened numeric tables; flatten is optional speed, never a gate — see [`HOMECOMING.md`](HOMECOMING.md).)
+
+The trailing `10` on `ground-recursive.fk` is a checkout convention; the current direct-source Form surface accepts
+the CLI value but does not expose it as a Form primitive. Do not grow the C seed just to make that argument visible.
 
 Rule for changes: if a patch grows `runtime/fkwu-uni.c`, it must either be a short-lived checkout-witness repair
 with an explicit shrink receipt, or it should be rejected in favor of moving that capability into the native

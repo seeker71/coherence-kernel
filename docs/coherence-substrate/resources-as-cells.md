@@ -151,7 +151,7 @@ effect lands in an existing `catCall` native.
 
 | Universal shape | Afferent native | Efferent native |
 |---|---|---|
-| Bytes / Text (file) | `read_file`, `read_file_bytes`, `read_file_slice`, `file_byte_at` | `write_file_text`, `write_file_bytes` |
+| Bytes / Text (file) | `read_file`, `read_file_slice`, `str_byte_at` | `write_file_text`, `file_append_bytes` |
 | Bytes (network) | `socket_recv`, `socket_accept` | `socket_send`, `socket_connect`, `socket_listen` |
 | Recipe (durable) | `read_form_binary`, `channel-read` | `write_form_binary`, `channel-append` |
 | Scalar (time) | `now_unix_ms` | — |

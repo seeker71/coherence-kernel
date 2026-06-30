@@ -1,0 +1,294 @@
+; multilocale-nl-audio-pipeline.fk -- NL/audio loops through neutral Form meaning.
+;
+; The model here is intentionally closed-set and observable:
+;   text A -> neutral meaning -> text B
+;   audio A features -> neutral meaning -> audio B target row
+;
+; A local oracle teaches and audits. Native authority grows only when the Form
+; learner improves after oracle-valid samples, reciprocal A/B and B/A pairs pass,
+; and the measured floor is reached. Audio target rows carry confidence,
+; attunement, excitement, and cadence metadata so speech can learn more than
+; words without hiding those values.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/asr-prompt-id.fk
+;   learn/sanskrit-locale-baseline.fk
+
+(do
+    (defn mlap-meta (confidence attunement excitement cadence)
+        (list "audio-affect-metadata" confidence attunement excitement cadence))
+    (defn mlap-meta-kind       (m) (nth m 0))
+    (defn mlap-meta-confidence (m) (nth m 1))
+    (defn mlap-meta-attunement (m) (nth m 2))
+    (defn mlap-meta-excitement (m) (nth m 3))
+    (defn mlap-meta-cadence    (m) (nth m 4))
+    (defn mlap-score-valid? (x) (if (and (ge x 0) (le x 100)) 1 0))
+    (defn mlap-meta-valid? (m)
+        (if (and (str_eq (mlap-meta-kind m) "audio-affect-metadata")
+                 (and (eq (mlap-score-valid? (mlap-meta-confidence m)) 1)
+                      (and (eq (mlap-score-valid? (mlap-meta-attunement m)) 1)
+                           (and (eq (mlap-score-valid? (mlap-meta-excitement m)) 1)
+                                (eq (mlap-score-valid? (mlap-meta-cadence m)) 1))))) 1 0))
+
+    (defn mlap-nl-sample (meaning src dst src-tokens dst-tokens oracle-meaning fail timeout undo)
+        (list "multilocale-nl-sample"
+              meaning src dst src-tokens dst-tokens oracle-meaning fail timeout undo))
+    (defn mlap-nl-kind    (s) (nth s 0))
+    (defn mlap-nl-meaning (s) (nth s 1))
+    (defn mlap-nl-src     (s) (nth s 2))
+    (defn mlap-nl-dst     (s) (nth s 3))
+    (defn mlap-nl-src-t   (s) (nth s 4))
+    (defn mlap-nl-dst-t   (s) (nth s 5))
+    (defn mlap-nl-oracle  (s) (nth s 6))
+    (defn mlap-nl-fail    (s) (nth s 7))
+    (defn mlap-nl-timeout (s) (nth s 8))
+    (defn mlap-nl-undo    (s) (nth s 9))
+
+    (defn mlap-audio-sample (meaning src dst dst-tokens oracle-tokens features meta fail timeout undo)
+        (list "multilocale-audio-sample"
+              meaning src dst dst-tokens oracle-tokens features meta fail timeout undo))
+    (defn mlap-audio-kind    (s) (nth s 0))
+    (defn mlap-audio-meaning (s) (nth s 1))
+    (defn mlap-audio-src     (s) (nth s 2))
+    (defn mlap-audio-dst     (s) (nth s 3))
+    (defn mlap-audio-dst-t   (s) (nth s 4))
+    (defn mlap-audio-oracle  (s) (nth s 5))
+    (defn mlap-audio-feat    (s) (nth s 6))
+    (defn mlap-audio-meta    (s) (nth s 7))
+    (defn mlap-audio-fail    (s) (nth s 8))
+    (defn mlap-audio-timeout (s) (nth s 9))
+    (defn mlap-audio-undo    (s) (nth s 10))
+
+    (defn mlap-nl-clean? (s)
+        (if (eq (add (add (mlap-nl-fail s) (mlap-nl-timeout s)) (mlap-nl-undo s)) 0) 1 0))
+    (defn mlap-audio-clean? (s)
+        (if (eq (add (add (mlap-audio-fail s) (mlap-audio-timeout s)) (mlap-audio-undo s)) 0) 1 0))
+
+    (defn mlap-nl-oracle-ok? (s)
+        (if (and (eq (mlap-nl-clean? s) 1)
+                 (eq (mlap-nl-oracle s) (mlap-nl-meaning s))) 1 0))
+    (defn mlap-audio-oracle-ok? (s max-wer)
+        (if (and (eq (mlap-audio-clean? s) 1)
+                 (eq (sw-accept? (mlap-audio-oracle s) (mlap-audio-dst-t s) max-wer) 1)) 1 0))
+
+    (defn mlap-token-member? (xs x)
+        (if (eq (len xs) 0) 0
+            (if (str_eq (head xs) x) 1 (mlap-token-member? (tail xs) x))))
+    (defn mlap-overlap (a b)
+        (if (eq (len a) 0) 0
+            (add (mlap-token-member? b (head a)) (mlap-overlap (tail a) b))))
+
+    (defn mlap-text-score (tokens locale row)
+        (mlap-overlap tokens (slb-tokens row locale)))
+
+    (defn mlap-best-text-loop (tokens locale rows best best-score)
+        (if (eq (len rows) 0) best
+            (do
+                (let row (head rows))
+                (let score (mlap-text-score tokens locale row))
+                (if (gt score best-score)
+                    (mlap-best-text-loop tokens locale (tail rows) row score)
+                    (mlap-best-text-loop tokens locale (tail rows) best best-score)))))
+
+    (defn mlap-best-text (tokens locale rows)
+        (if (eq (len rows) 0) (slb-empty-line)
+            (mlap-best-text-loop tokens locale (tail rows) (head rows)
+                                 (mlap-text-score tokens locale (head rows)))))
+
+    (defn mlap-text-meaning (tokens locale rows)
+        (slb-meaning (mlap-best-text tokens locale rows)))
+
+    (defn mlap-text-render (tokens src dst rows)
+        (slb-tokens (mlap-best-text tokens src rows) dst))
+
+    (defn mlap-nl-native-ok? (s rows max-wer)
+        (if (and (eq (mlap-nl-oracle-ok? s) 1)
+                 (and (eq (mlap-text-meaning (mlap-nl-src-t s) (mlap-nl-src s) rows)
+                          (mlap-nl-meaning s))
+                      (eq (sw-accept?
+                              (mlap-text-render (mlap-nl-src-t s) (mlap-nl-src s) (mlap-nl-dst s) rows)
+                              (mlap-nl-dst-t s)
+                              max-wer) 1))) 1 0))
+
+    (defn mlap-row-present? (rows meaning)
+        (if (eq (len rows) 0) 0
+            (if (eq (slb-meaning (head rows)) meaning) 1
+                (mlap-row-present? (tail rows) meaning))))
+
+    (defn mlap-add-row (rows meaning)
+        (if (eq (mlap-row-present? rows meaning) 1) rows
+            (do
+                (let row (slb-line-by-meaning meaning))
+                (if (eq (slb-meaning row) 0) rows (cons row rows)))))
+
+    (defn mlap-nl-learn-loop (samples rows)
+        (if (eq (len samples) 0) rows
+            (if (eq (mlap-nl-oracle-ok? (head samples)) 1)
+                (mlap-nl-learn-loop (tail samples) (mlap-add-row rows (mlap-nl-meaning (head samples))))
+                (mlap-nl-learn-loop (tail samples) rows))))
+    (defn mlap-nl-trained-rows (samples rows) (mlap-nl-learn-loop samples rows))
+
+    (defn mlap-audio-predict-meaning (s candidates)
+        (if (eq (len candidates) 0) 0
+            (pid-id (pid-nearest (mlap-audio-feat s) candidates))))
+
+    (defn mlap-audio-render (s candidates)
+        (slb-tokens (slb-line-by-meaning (mlap-audio-predict-meaning s candidates))
+                    (mlap-audio-dst s)))
+
+    (defn mlap-audio-target (s candidates)
+        (list "multilocale-audio-target"
+              (mlap-audio-predict-meaning s candidates)
+              (mlap-audio-dst s)
+              (mlap-audio-render s candidates)
+              (mlap-audio-meta s)))
+    (defn mlap-target-kind    (t) (nth t 0))
+    (defn mlap-target-meaning (t) (nth t 1))
+    (defn mlap-target-locale  (t) (nth t 2))
+    (defn mlap-target-tokens  (t) (nth t 3))
+    (defn mlap-target-meta    (t) (nth t 4))
+
+    (defn mlap-audio-native-ok? (s candidates max-wer)
+        (if (and (eq (mlap-audio-oracle-ok? s max-wer) 1)
+                 (and (eq (mlap-meta-valid? (mlap-audio-meta s)) 1)
+                      (and (eq (mlap-audio-predict-meaning s candidates) (mlap-audio-meaning s))
+                           (eq (sw-accept? (mlap-audio-render s candidates)
+                                           (mlap-audio-dst-t s)
+                                           max-wer) 1)))) 1 0))
+
+    (defn mlap-audio-candidate (s)
+        (pid-candidate (mlap-audio-meaning s) (mlap-audio-dst-t s) (mlap-audio-feat s)))
+
+    (defn mlap-audio-learn-loop (samples candidates max-wer)
+        (if (eq (len samples) 0) candidates
+            (if (eq (mlap-audio-oracle-ok? (head samples) max-wer) 1)
+                (mlap-audio-learn-loop (tail samples)
+                                       (cons (mlap-audio-candidate (head samples)) candidates)
+                                       max-wer)
+                (mlap-audio-learn-loop (tail samples) candidates max-wer))))
+    (defn mlap-audio-trained-candidates (samples candidates max-wer)
+        (mlap-audio-learn-loop samples candidates max-wer))
+
+    (defn mlap-rate (wins total)
+        (if (eq total 0) 0 (div (mul wins 100) total)))
+
+    (defn mlap-nl-score (samples rows max-wer)
+        (if (eq (len samples) 0) 0
+            (add (mlap-nl-native-ok? (head samples) rows max-wer)
+                 (mlap-nl-score (tail samples) rows max-wer))))
+    (defn mlap-audio-score (samples candidates max-wer)
+        (if (eq (len samples) 0) 0
+            (add (mlap-audio-native-ok? (head samples) candidates max-wer)
+                 (mlap-audio-score (tail samples) candidates max-wer))))
+    (defn mlap-nl-oracle-score (samples)
+        (if (eq (len samples) 0) 0
+            (add (mlap-nl-oracle-ok? (head samples))
+                 (mlap-nl-oracle-score (tail samples)))))
+    (defn mlap-audio-oracle-score (samples max-wer)
+        (if (eq (len samples) 0) 0
+            (add (mlap-audio-oracle-ok? (head samples) max-wer)
+                 (mlap-audio-oracle-score (tail samples) max-wer))))
+
+    (defn mlap-nl-rate (samples rows max-wer)
+        (mlap-rate (mlap-nl-score samples rows max-wer) (len samples)))
+    (defn mlap-audio-rate (samples candidates max-wer)
+        (mlap-rate (mlap-audio-score samples candidates max-wer) (len samples)))
+
+    (defn mlap-nl-direction? (s src dst)
+        (if (and (str_eq (mlap-nl-src s) src) (str_eq (mlap-nl-dst s) dst)) 1 0))
+    (defn mlap-audio-direction? (s src dst)
+        (if (and (str_eq (mlap-audio-src s) src) (str_eq (mlap-audio-dst s) dst)) 1 0))
+
+    (defn mlap-nl-dir-score (samples rows max-wer src dst)
+        (if (eq (len samples) 0) 0
+            (add
+                (if (eq (mlap-nl-direction? (head samples) src dst) 1)
+                    (mlap-nl-native-ok? (head samples) rows max-wer)
+                    0)
+                (mlap-nl-dir-score (tail samples) rows max-wer src dst))))
+    (defn mlap-audio-dir-score (samples candidates max-wer src dst)
+        (if (eq (len samples) 0) 0
+            (add
+                (if (eq (mlap-audio-direction? (head samples) src dst) 1)
+                    (mlap-audio-native-ok? (head samples) candidates max-wer)
+                    0)
+                (mlap-audio-dir-score (tail samples) candidates max-wer src dst))))
+
+    (defn mlap-nl-has-native-dir? (samples rows max-wer src dst)
+        (if (gt (mlap-nl-dir-score samples rows max-wer src dst) 0) 1 0))
+    (defn mlap-audio-has-native-dir? (samples candidates max-wer src dst)
+        (if (gt (mlap-audio-dir-score samples candidates max-wer src dst) 0) 1 0))
+
+    (defn mlap-pair (a b) (list "mlap-pair" a b))
+    (defn mlap-pair-a (p) (nth p 1))
+    (defn mlap-pair-b (p) (nth p 2))
+
+    (defn mlap-pair-ready? (nl-samples audio-samples rows candidates max-wer pair)
+        (do
+            (let a (mlap-pair-a pair))
+            (let b (mlap-pair-b pair))
+            (if (and (eq (mlap-nl-has-native-dir? nl-samples rows max-wer a b) 1)
+                     (and (eq (mlap-nl-has-native-dir? nl-samples rows max-wer b a) 1)
+                          (and (eq (mlap-audio-has-native-dir? audio-samples candidates max-wer a b) 1)
+                               (eq (mlap-audio-has-native-dir? audio-samples candidates max-wer b a) 1)))) 1 0)))
+
+    (defn mlap-ready-pair-count (nl-samples audio-samples rows candidates max-wer pairs)
+        (if (eq (len pairs) 0) 0
+            (add (mlap-pair-ready? nl-samples audio-samples rows candidates max-wer (head pairs))
+                 (mlap-ready-pair-count nl-samples audio-samples rows candidates max-wer (tail pairs)))))
+
+    (defn mlap-ready? (nl-samples audio-samples rows candidates pairs max-wer floor)
+        (if (and (ge (mlap-nl-rate nl-samples rows max-wer) floor)
+                 (and (ge (mlap-audio-rate audio-samples candidates max-wer) floor)
+                      (ge (mlap-ready-pair-count nl-samples audio-samples rows candidates max-wer pairs) 2))) 1 0))
+
+    (defn mlap-route (nl-samples audio-samples rows candidates pairs max-wer floor)
+        (if (eq (mlap-ready? nl-samples audio-samples rows candidates pairs max-wer floor) 1)
+            "native"
+            "oracle-guide"))
+
+    (defn mlap-shift? (nl-samples audio-samples before-rows after-rows before-candidates after-candidates pairs max-wer floor)
+        (if (and (or (lt (mlap-nl-rate nl-samples before-rows max-wer) floor)
+                     (lt (mlap-audio-rate audio-samples before-candidates max-wer) floor))
+                 (str_eq (mlap-route nl-samples audio-samples after-rows after-candidates pairs max-wer floor)
+                         "native")) 1 0))
+
+    (defn mlap-receipt (nl-samples audio-samples rows candidates pairs max-wer floor oracle device)
+        (list "multilocale-nl-audio-pipeline"
+              device
+              oracle
+              (len nl-samples)
+              (len audio-samples)
+              (mlap-nl-oracle-score nl-samples)
+              (mlap-audio-oracle-score audio-samples max-wer)
+              (mlap-nl-score nl-samples rows max-wer)
+              (mlap-audio-score audio-samples candidates max-wer)
+              (mlap-nl-rate nl-samples rows max-wer)
+              (mlap-audio-rate audio-samples candidates max-wer)
+              (mlap-ready-pair-count nl-samples audio-samples rows candidates max-wer pairs)
+              floor
+              (mlap-route nl-samples audio-samples rows candidates pairs max-wer floor)
+              1
+              1
+              0))
+
+    (defn mlap-rec-kind                (r) (nth r 0))
+    (defn mlap-rec-device              (r) (nth r 1))
+    (defn mlap-rec-oracle              (r) (nth r 2))
+    (defn mlap-rec-nl-count            (r) (nth r 3))
+    (defn mlap-rec-audio-count         (r) (nth r 4))
+    (defn mlap-rec-nl-oracle-ok        (r) (nth r 5))
+    (defn mlap-rec-audio-oracle-ok     (r) (nth r 6))
+    (defn mlap-rec-nl-native-ok        (r) (nth r 7))
+    (defn mlap-rec-audio-native-ok     (r) (nth r 8))
+    (defn mlap-rec-nl-rate             (r) (nth r 9))
+    (defn mlap-rec-audio-rate          (r) (nth r 10))
+    (defn mlap-rec-ready-pairs         (r) (nth r 11))
+    (defn mlap-rec-floor               (r) (nth r 12))
+    (defn mlap-rec-route               (r) (nth r 13))
+    (defn mlap-rec-oracle-metal        (r) (nth r 14))
+    (defn mlap-rec-native-form         (r) (nth r 15))
+    (defn mlap-rec-native-neural-metal (r) (nth r 16))
+
+    0)
