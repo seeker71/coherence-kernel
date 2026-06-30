@@ -1,0 +1,162 @@
+; sema-voice-candidate-search.fk -- rank next Sema voice synthesis samples.
+;
+; The live Sema formant carrier currently fails the local oracle STT bar with
+; WER 100. sema-voice-oracle-miss-learning.fk names the broad next model. This
+; cell makes the next movement concrete: rank local, consented, Form-native
+; candidate recipes by oracle WER improvement, target fit, intelligibility,
+; listener grade, latency, and clean controls.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   presence/formant-vocoder.fk
+;   learn/sema-voice-sample-loop.fk
+;   learn/sema-voice-local-oracle-receipt.fk
+;   learn/sema-voice-oracle-miss-learning.fk
+
+(do
+    (defn svcs-recipe (id layout g2p timing prosody acoustic segmented source-filter native-form neural-ready)
+        (list "sema-voice-candidate-recipe"
+              id layout g2p timing prosody acoustic segmented source-filter native-form neural-ready))
+
+    (defn svcs-recipe-kind          (r) (nth r 0))
+    (defn svcs-recipe-id            (r) (nth r 1))
+    (defn svcs-recipe-layout        (r) (nth r 2))
+    (defn svcs-recipe-g2p           (r) (nth r 3))
+    (defn svcs-recipe-timing        (r) (nth r 4))
+    (defn svcs-recipe-prosody       (r) (nth r 5))
+    (defn svcs-recipe-acoustic      (r) (nth r 6))
+    (defn svcs-recipe-segmented     (r) (nth r 7))
+    (defn svcs-recipe-source-filter (r) (nth r 8))
+    (defn svcs-recipe-native-form   (r) (nth r 9))
+    (defn svcs-recipe-neural-ready  (r) (nth r 10))
+
+    (defn svcs-text-conditioned-recipe ()
+        (svcs-recipe "text-conditioned-acoustic-vocoder"
+                     "text+voice-meta-to-source-filter-frames"
+                     1 1 1 1 1 1 1 0))
+
+    (defn svcs-formant-retune-recipe ()
+        (svcs-recipe "formant-retune"
+                     "target-profile-to-source-filter-frames"
+                     0 0 1 0 0 1 1 0))
+
+    (defn svcs-neural-pending-recipe ()
+        (svcs-recipe "neural-vocoder-pending"
+                     "external-neural-vocoder-placeholder"
+                     1 1 1 1 1 0 0 1))
+
+    (defn svcs-candidate (id recipe row before-wer source)
+        (list "sema-voice-candidate" id recipe row before-wer source))
+
+    (defn svcs-kind       (c) (nth c 0))
+    (defn svcs-id         (c) (nth c 1))
+    (defn svcs-recipe-row (c) (nth c 2))
+    (defn svcs-row        (c) (nth c 3))
+    (defn svcs-before-wer (c) (nth c 4))
+    (defn svcs-source     (c) (nth c 5))
+
+    (defn svcs-after-wer (c) (svlor-oracle-wer (svcs-row c)))
+    (defn svcs-improvement (c)
+        (svsl-max 0 (sub (svcs-before-wer c) (svcs-after-wer c))))
+
+    (defn svcs-recipe-ready? (recipe)
+        (if (and (eq (svcs-recipe-native-form recipe) 1)
+                 (eq (svcs-recipe-neural-ready recipe) 0)) 1 0))
+
+    (defn svcs-recipe-bonus (recipe)
+        (add
+            (add
+                (add (mul (svcs-recipe-g2p recipe) 8)
+                     (mul (svcs-recipe-timing recipe) 8))
+                (add (mul (svcs-recipe-prosody recipe) 6)
+                     (mul (svcs-recipe-acoustic recipe) 10)))
+            (add
+                (mul (svcs-recipe-segmented recipe) 10)
+                (mul (svcs-recipe-source-filter recipe) 6))))
+
+    (defn svcs-valid? (c)
+        (if (and (eq (svcs-recipe-ready? (svcs-recipe-row c)) 1)
+                 (eq (svlor-valid? (svcs-row c)) 1)) 1 0))
+
+    (defn svcs-score (c target)
+        (if (eq (svcs-valid? c) 1)
+            (add
+                (add
+                    (mul (svcs-improvement c) 20)
+                    (div (svsl-fit (svsl-sample-profile (svlor-sample (svcs-row c))) target) 10))
+                (add
+                    (add (mul (svsl-sample-intelligible (svlor-sample (svcs-row c))) 3)
+                         (mul (svsl-sample-listener (svlor-sample (svcs-row c))) 2))
+                    (add (svcs-recipe-bonus (svcs-recipe-row c))
+                         (sub 0 (div (svsl-sample-latency (svlor-sample (svcs-row c))) 10)))))
+            0))
+
+    (defn svcs-better (a b target)
+        (if (gt (svcs-score a target) (svcs-score b target)) a b))
+
+    (defn svcs-best-loop (best rest target)
+        (if (eq (len rest) 0) best
+            (svcs-best-loop (svcs-better (head rest) best target) (tail rest) target)))
+
+    (defn svcs-best (candidates target)
+        (if (eq (len candidates) 0)
+            (svcs-candidate "none" (svcs-formant-retune-recipe)
+                            (svlor-row 0 "en" "" "" "" ""
+                                       (svsl-sample (svsl-target) 0 0 100 0 0 0 0 0 0)
+                                       (svlor-audio 0 0 0) 0 0 (svlor-controls 0 0 0))
+                            100
+                            "empty")
+            (svcs-best-loop (head candidates) (tail candidates) target)))
+
+    (defn svcs-route (candidate target max-wer margin)
+        (if (and (eq (svlor-oracle-success? (svcs-row candidate) max-wer) 1)
+                 (gt (svcs-score candidate target) margin))
+            "native-sema-voice"
+            (if (and (eq (svcs-valid? candidate) 1)
+                     (gt (svcs-improvement candidate) 0))
+                "oracle-guided-next-sample"
+                "reject-or-repair")))
+
+    (defn svcs-action (candidate target max-wer margin)
+        (if (str_eq (svcs-route candidate target max-wer margin) "native-sema-voice")
+            "promote-candidate"
+            (if (str_eq (svcs-route candidate target max-wer margin) "oracle-guided-next-sample")
+                "render-and-oracle-next"
+                "repair-candidate-source")))
+
+    (defn svcs-receipt (live candidates target max-wer margin)
+        (do
+            (let best (svcs-best candidates target))
+            (list "sema-voice-candidate-search"
+                  (svom-carrier live)
+                  (svom-wer live)
+                  (svcs-id best)
+                  (svcs-recipe-id (svcs-recipe-row best))
+                  (svcs-after-wer best)
+                  (svcs-improvement best)
+                  (svcs-score best target)
+                  (svcs-route best target max-wer margin)
+                  (svcs-action best target max-wer margin)
+                  (svcs-source best)
+                  (svlor-oracle-name (svcs-row best))
+                  (svlor-device (svcs-row best))
+                  (svcs-recipe-native-form (svcs-recipe-row best))
+                  (svcs-recipe-neural-ready (svcs-recipe-row best)))))
+
+    (defn svcs-rec-kind         (r) (nth r 0))
+    (defn svcs-rec-carrier      (r) (nth r 1))
+    (defn svcs-rec-live-wer     (r) (nth r 2))
+    (defn svcs-rec-winner       (r) (nth r 3))
+    (defn svcs-rec-recipe       (r) (nth r 4))
+    (defn svcs-rec-after-wer    (r) (nth r 5))
+    (defn svcs-rec-improvement  (r) (nth r 6))
+    (defn svcs-rec-score        (r) (nth r 7))
+    (defn svcs-rec-route        (r) (nth r 8))
+    (defn svcs-rec-action       (r) (nth r 9))
+    (defn svcs-rec-source       (r) (nth r 10))
+    (defn svcs-rec-oracle       (r) (nth r 11))
+    (defn svcs-rec-device       (r) (nth r 12))
+    (defn svcs-rec-native-form  (r) (nth r 13))
+    (defn svcs-rec-neural-ready (r) (nth r 14))
+
+    0)
