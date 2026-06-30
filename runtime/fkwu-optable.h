@@ -106,6 +106,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "mesh_detect", 0, 229 },
   { "mesh_registry", 1, 230 },
   { "mesh_roster", 0, 231 },
+  { "cuda_matvec", 0, 232 },
   { "file_open", 1, 133 },
   { "file_read", 2, 134 },
   { "file_close", 1, 135 },
@@ -160,4 +161,3 @@ static const struct fk_rwtab_row fk_rwtab[] = {
 
 };
 static const long long fk_rwtab_n = sizeof(fk_rwtab)/sizeof(fk_rwtab[0]);
-
