@@ -225,6 +225,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       authority remains oracle-held (`4/5` oracle, `0/5` native), scoped trial windows are native (`3/3` oracle and
       `3/3` native), native neural weights remain `0`, native Sema voice organs remain `6`, and C seed growth remains
       `0`.
+- [x] **Speech global promotion readiness added.** `learn/speech-global-promotion-readiness.fk` turns scoped trial
+      wins into an executable global-authority gate (`32767`): open dictation has scoped native `2/2` and Sema live
+      voice has scoped native `1/1`, but both still need `3` real live native receipts with WER `<=25` and clean
+      controls before global authority can move. Today `0` lanes are global-native-ready, `2` remain oracle-guided,
+      and `6` real live receipts are missing.
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
