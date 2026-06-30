@@ -27,8 +27,8 @@ a stale doc comment, now retuned so the gate grep is clean.
 `flt-ops` (in `flatten/form-flatten.fk`) is the ONE table. The flattener special-cases
 `(empty)`/`(list ..)` in `flt-form2` *before* `flt-op`, so these new rows never gate the
 flatten path — they exist purely so the GENERATED `runtime/fkwu-optable.h` carries them as
-data. `flatten/gen-source-walker-table.fk` (a Form recipe) emits the header; the wrapper
-splices flt-ops (now lines 50–105) into it. The C dispatch reads the row's arity:
+data. `flatten/gen-source-walker-table.fk` (a Form recipe) emits the header; the
+temporary capture splices flt-ops (now lines 50–105) into it. The C dispatch reads the row's arity:
 `-1` → variadic fold, `0` → bare node, `1/2/3` → fixed-arity emit.
 
 ## Gate (cc -O2 -o /tmp/fkwu runtime/fkwu-uni.c; all via --src)
@@ -57,9 +57,9 @@ No value form remains hand-cased.
 - `(head (list 9))` → 9, `(head (list 1 2 3 4 5))` → 1
 
 **Full data loop closed:** the new kernel (with `list`/`empty` as data) regenerates the
-byte-identical `fkwu-optable.h` via `flatten/gen-source-walker.sh /tmp/fkwu` — proof that
-the generator recipe (which itself uses `(list ...)` heavily) runs on the very kernel whose
-`list` is now data, not a hand-written case.
+byte-identical `fkwu-optable.h` via `flatten/gen-source-walker-table.fk` plus a temporary
+host capture — proof that the generator recipe (which itself uses `(list ...)` heavily)
+runs on the very kernel whose `list` is now data, not a hand-written case.
 
 ## The honest floor
 
