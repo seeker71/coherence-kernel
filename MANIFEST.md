@@ -33,7 +33,8 @@ receipt — *c-bootstrap fkwu on metal, no go/rust/clang/bash/python in the runt
   makes the kernel **self-describing and self-building** — not the whole app KB.
 - The **substrate and stack, 100% Form-native (Go/Rust/TS-free)**. The local-file substrate is *already* proven
   four-way and lives here (`substrate/` — `form-fs` 14-bit, `storage-port`, `resource-port` 7-bit,
-  `host-kernel-carrier`); the HTTP *client* is native (`http/http-client`). The HTTP *server*/TCP and the
+  `host-kernel-carrier`, `cell-type` — the eval-level type/contract system: a type IS the offered
+  interface, a mismatch acks the first-class nothing); the HTTP *client* is native (`http/http-client`). The HTTP *server*/TCP and the
   *production* DB integration (postgres, today the Python fan-out carrier) are Form targets authored on this
   same minimal surface — no Go/Rust/TS. **BMF cursor and full BML are IN by necessity**: they are the language
   the substrate, HTTP, and production integration are written in (`grammars/bmf-*`, `bml-native-north-star`).
