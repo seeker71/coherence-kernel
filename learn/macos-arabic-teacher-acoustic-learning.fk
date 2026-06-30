@@ -1,0 +1,143 @@
+; macos-arabic-teacher-acoustic-learning.fk -- Arabic teacher wav trains native ASR.
+;
+; This is the first non-Latin live teacher-acoustic learner. It reuses the
+; Form-owned acoustic prototype machinery from macos-sema-teacher-acoustic-learning,
+; but the host teacher is Arabic: macOS `say` renders Majed, ffmpeg normalizes
+; the wav, local whisper.cpp on Metal transcribes it, and Form reads the wav
+; envelope, trains Arabic token prototypes, and decodes the learned frames.
+;
+; Boundary: scoped supervised prototype learning. This is not a neural acoustic
+; encoder, not native Sema TTS authority, and not a claim that Chinese has passed
+; the same bar; the current Chinese probe remains an oracle miss.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/wav-sense.fk
+;   learn/macos-sema-teacher-acoustic-learning.fk
+
+(do
+    (defn matal-kind () "macos-arabic-teacher-acoustic-learning")
+    (defn matal-meaning () 302)
+    (defn matal-locale () "ar")
+    (defn matal-voice () "Majed")
+    (defn matal-text () "الحقيقة وحدها تنتصر")
+    (defn matal-tokens () (sw-tokens (matal-text)))
+    (defn matal-out-dir () (str_concat (temp_dir) "/sema-arabic-teacher-acoustic-learning"))
+
+    (defn matal-aiff-path (id)
+        (mstal-cat4 (matal-out-dir) "/arabic-" (mstal-int-str id) ".aiff"))
+    (defn matal-wav-path (id)
+        (mstal-cat4 (matal-out-dir) "/arabic-" (mstal-int-str id) ".wav"))
+    (defn matal-say-command (voice aiff text)
+        (str_concat
+            (str_concat "say -v " (mstal-q voice))
+            (str_concat
+                (str_concat " -o " (mstal-q aiff))
+                (str_concat " " (mstal-q text)))))
+    (defn matal-ffmpeg-command (aiff wav)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (mstal-q aiff))
+            (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le " (mstal-q wav))))
+    (defn matal-whisper-command (wav)
+        (str_concat
+            (str_concat "whisper-cli -m " (mstal-q (mstal-model)))
+            (str_concat
+                (str_concat " -f " (mstal-q wav))
+                (str_concat " -l ar -nt -np"))))
+
+    (defn matal-render (id)
+        (do
+            (let _mk (fs_mkdir (matal-out-dir)))
+            (let _say (host-exec (matal-say-command (matal-voice) (matal-aiff-path id) (matal-text)) ""))
+            (let _ff (host-exec (matal-ffmpeg-command (matal-aiff-path id) (matal-wav-path id)) ""))
+            (matal-wav-path id)))
+    (defn matal-transcript (wav)
+        (host-exec (matal-whisper-command wav) ""))
+    (defn matal-ready? ()
+        (mstal-ready?))
+
+    (defn matal-trained (features)
+        (mstal-train-loop (matal-tokens) features (mstal-base-prototypes)))
+    (defn matal-native-text (features trained)
+        (mstal-decoded-text
+            (mstal-frames (mstal-frame-features features) trained 2 80)))
+
+    (defn matal-receipt-from (wav transcript)
+        (do
+            (let env (mstal-env wav))
+            (let features (mstal-token-features wav))
+            (let trained (matal-trained features))
+            (let frames (mstal-frames (mstal-frame-features features) trained 2 80))
+            (let native (mstal-decoded-text frames))
+            (list (matal-kind)
+                  (matal-locale)
+                  (matal-meaning)
+                  (mstal-audio-hash wav)
+                  (len env)
+                  (len features)
+                  (len trained)
+                  transcript
+                  native
+                  (if (and (sw-accept? (sw-tokens transcript) (matal-tokens) (mstal-max-wer))
+                           (sw-accept? (sw-tokens native) (matal-tokens) (mstal-max-wer))) 1 0)
+                  (sw-wer (sw-tokens native) (matal-tokens))
+                  (mstal-min-conf frames)
+                  (mstal-device)
+                  (mstal-oracle)
+                  1
+                  0)))
+
+    (defn matal-rec-kind        (r) (nth r 0))
+    (defn matal-rec-locale      (r) (nth r 1))
+    (defn matal-rec-meaning     (r) (nth r 2))
+    (defn matal-rec-hash        (r) (nth r 3))
+    (defn matal-rec-env-count   (r) (nth r 4))
+    (defn matal-rec-features    (r) (nth r 5))
+    (defn matal-rec-prototypes  (r) (nth r 6))
+    (defn matal-rec-oracle      (r) (nth r 7))
+    (defn matal-rec-native      (r) (nth r 8))
+    (defn matal-rec-ok          (r) (nth r 9))
+    (defn matal-rec-wer         (r) (nth r 10))
+    (defn matal-rec-confidence  (r) (nth r 11))
+    (defn matal-rec-device      (r) (nth r 12))
+    (defn matal-rec-oracle-name (r) (nth r 13))
+    (defn matal-rec-native-form (r) (nth r 14))
+    (defn matal-rec-neural      (r) (nth r 15))
+
+    (defn matal-run-receipt ()
+        (if (eq (matal-ready?) 1)
+            (do
+                (let wav (matal-render 984501))
+                (let transcript (matal-transcript wav))
+                (matal-receipt-from wav transcript))
+            (list (matal-kind) (matal-locale) (matal-meaning) 0 0 0 0 "" "" 0 100 0
+                  (mstal-device) (mstal-oracle) 1 0)))
+
+    (defn matal-run-wer ()
+        (matal-rec-wer (matal-run-receipt)))
+
+    (defn matal-run-verdict ()
+        (do
+            (let r (matal-run-receipt))
+            (add
+                (add
+                    (add (if (str_eq (matal-rec-kind r) (matal-kind)) 1 0)
+                         (if (str_eq (matal-rec-locale r) "ar") 2 0))
+                    (add (if (eq (matal-rec-meaning r) 302) 4 0)
+                         (if (gt (matal-rec-hash r) 0) 8 0)))
+                (add
+                    (add (if (eq (matal-rec-env-count r) 8) 16 0)
+                         (if (eq (matal-rec-features r) 3) 32 0))
+                    (add
+                        (add (if (gt (matal-rec-prototypes r) 3) 64 0)
+                             (if (eq (sw-wer (sw-tokens (matal-rec-oracle r)) (matal-tokens)) 0) 128 0))
+                        (add
+                            (add (if (eq (sw-wer (sw-tokens (matal-rec-native r)) (matal-tokens)) 0) 256 0)
+                                 (if (eq (matal-rec-ok r) 1) 512 0))
+                            (add
+                                (add (if (eq (matal-rec-wer r) 0) 1024 0)
+                                     (if (ge (matal-rec-confidence r) 80) 2048 0))
+                                (add (if (eq (matal-rec-native-form r) 1) 4096 0)
+                                     (if (eq (matal-rec-neural r) 0) 8192 0)))))))))
+
+    0)
