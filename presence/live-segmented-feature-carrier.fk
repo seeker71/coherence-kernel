@@ -1,0 +1,114 @@
+; live-segmented-feature-carrier.fk -- observed wav/envelope rows into open ASR.
+;
+; The host carrier may render or capture a local wav and hand the body an
+; envelope/audio receipt. The body owns feature-row construction, acoustic-token
+; emission, CTC transcript collapse, WER, and promotion. This is the compact
+; Form membrane that live CoreAudio/AAudio/WASAPI carriers must satisfy.
+;
+; This is not a live microphone implementation and not a neural ASR model.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   learn/speech-loopback-promotion.fk
+;   form/form-stdlib/observed-auto-learning.fk
+;   learn/open-dictation-transcript-learning.fk
+;   observe/speech-token-stream.fk
+;   observe/open-asr-ctc.fk
+;   observe/acoustic-token-emitter.fk
+
+(do
+    (defn lsfc-control (choice cut fail timeout undo) (list choice cut fail timeout undo))
+    (defn lsfc-row (id locale truth oracle envelope audio-hash latency meta local-audio oracle-local consent controls)
+        (list "live-segmented-feature-carrier" id locale truth oracle envelope audio-hash latency meta
+              local-audio oracle-local consent controls))
+
+    (defn lsfc-row-feature (a b) (list a b (abs (sub a b)) (div (add a b) 2)))
+    (defn lsfc-feature-stream (r)
+        (do
+            (let e (nth r 5))
+            (list
+                (lsfc-row-feature (nth e 0) (nth e 1))
+                (lsfc-row-feature (nth e 2) (nth e 3))
+                (lsfc-row-feature (nth e 4) (nth e 5))
+                (lsfc-row-feature (nth e 6) (nth e 7)))))
+
+    (defn lsfc-take (xs n)
+        (if (or (eq n 0) (eq (len xs) 0)) (empty)
+            (cons (head xs) (lsfc-take (tail xs) (sub n 1)))))
+
+    (defn lsfc-align-loop (tokens features prototypes prior-confidence)
+        (if (or (eq (len tokens) 0) (eq (len features) 0)) prototypes
+            (lsfc-align-loop
+                (tail tokens)
+                (tail features)
+                (ate-learn prototypes (head tokens) (head features) prior-confidence)
+                prior-confidence)))
+
+    (defn lsfc-clean? (r)
+        (if (eq (add (add (nth (nth r 12) 2) (nth (nth r 12) 3)) (nth (nth r 12) 4)) 0) 1 0))
+
+    (defn lsfc-ready? (r)
+        (if (and (str_eq (nth r 0) "live-segmented-feature-carrier")
+                 (and (eq (nth r 9) 1)
+                      (and (eq (nth r 10) 1)
+                           (and (eq (nth r 11) 1)
+                                (and (eq (lsfc-clean? r) 1)
+                                     (and (gt (nth r 6) 0)
+                                          (and (eq (len (lsfc-feature-stream r)) 4)
+                                               (eq (sts-meta-valid? (nth r 8)) 1)))))))) 1 0))
+
+    (defn lsfc-open-row (r prototypes max-distance min-confidence)
+        (ate-open-row-with-meta
+            (nth r 1)
+            (nth r 2)
+            (nth r 3)
+            (nth r 4)
+            (lsfc-feature-stream r)
+            prototypes
+            max-distance
+            min-confidence
+            (nth r 6)
+            (nth r 7)
+            (sts-warmth (nth r 8))
+            (sts-cadence (nth r 8))
+            (sts-hesitation (nth r 8))
+            (sts-excitement (nth r 8))
+            (sts-attunement (nth r 8))))
+
+    (defn lsfc-native-ok? (r prototypes max-wer max-distance min-confidence max-latency)
+        (if (eq (lsfc-ready? r) 1)
+            (odtl-native-success? (lsfc-open-row r prototypes max-distance min-confidence)
+                                  max-wer min-confidence max-latency)
+            0))
+
+    (defn lsfc-open-rows (rows prototypes max-distance min-confidence)
+        (if (eq (len rows) 0) (empty)
+            (cons (lsfc-open-row (head rows) prototypes max-distance min-confidence)
+                  (lsfc-open-rows (tail rows) prototypes max-distance min-confidence))))
+
+    (defn lsfc-route (rows prototypes max-wer max-distance min-confidence max-latency min-samples margin max-debt min-native)
+        (odtl-summary-route
+            (odtl-summary
+                (lsfc-open-rows rows prototypes max-distance min-confidence)
+                max-wer min-confidence max-latency min-samples margin max-debt min-native)))
+
+    (defn lsfc-receipt (rows prototypes max-wer max-distance min-confidence max-latency min-samples margin max-debt min-native oracle device)
+        (do
+            (let first (head rows))
+            (list "live-segmented-feature-carrier"
+                  (len rows)
+                  (len (lsfc-feature-stream first))
+                  (lsfc-ready? first)
+                  (lsfc-native-ok? first prototypes max-wer max-distance min-confidence max-latency)
+                  (odtl-oracle-success? (lsfc-open-row first prototypes max-distance min-confidence) max-wer)
+                  (lsfc-route rows prototypes max-wer max-distance min-confidence max-latency min-samples margin max-debt min-native)
+                  oracle
+                  device
+                  (nth first 6)
+                  (nth first 7)
+                  (sts-confidence (nth first 8))
+                  (sts-attunement (nth first 8))
+                  1
+                  0)))
+
+    0)

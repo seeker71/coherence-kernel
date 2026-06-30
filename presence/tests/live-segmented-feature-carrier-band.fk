@@ -1,0 +1,95 @@
+; preludes:
+;   observe/stt-wer.fk
+;   learn/speech-loopback-promotion.fk
+;   form/form-stdlib/observed-auto-learning.fk
+;   learn/open-dictation-transcript-learning.fk
+;   observe/speech-token-stream.fk
+;   observe/open-asr-ctc.fk
+;   observe/acoustic-token-emitter.fk
+;   presence/live-segmented-feature-carrier.fk
+;
+; live-segmented-feature-carrier-band -- observed feature rows feed open ASR.
+;
+; Verdict 32767:
+;   1     carrier row kind is live segmented feature carrier
+;   2     envelope lowers to four Form feature rows
+;   4     local audio/oracle/consent/clean gates make the carrier ready
+;   8     trained prototypes emit the native transcript
+;   16    untrained prototypes do not pass native open ASR
+;   32    open-dictation oracle transcript still passes
+;   64    four native rows route native through open-dictation promotion
+;   128   one row stays oracle-guided
+;   256   fail/timeout/undo blocks readiness
+;   512   missing consent blocks readiness
+;   1024  audio hash and latency are carried
+;   2048  confidence and attunement metadata are carried
+;   4096  receipt carries local oracle and device
+;   8192  native Form true, neural Metal pending
+;   16384 decoded token stream carries the transcript words
+
+(do
+    (defn lsfc-band-score (cond bit) (if cond bit 0))
+    (defn lsfc-band-truth () "open speech flows")
+    (defn lsfc-band-env () (list 9 7 4 6 3 8 0 0))
+    (defn lsfc-band-meta () (sts-meta 93 82 70 6 44 89))
+    (defn lsfc-band-row-with (controls consent)
+        (lsfc-row 9701 "en" (lsfc-band-truth) (lsfc-band-truth)
+                  (lsfc-band-env) 970101 31 (lsfc-band-meta)
+                  1 1 consent controls))
+    (defn lsfc-band-row () (lsfc-band-row-with (lsfc-control 1 0 0 0 0) 1))
+    (defn lsfc-band-bad-row (fail timeout undo consent)
+        (lsfc-band-row-with (lsfc-control 1 0 fail timeout undo) consent))
+    (defn lsfc-band-base () (list (ate-prototype "" (list 0 0 0 0) 100)))
+    (defn lsfc-band-trained ()
+        (lsfc-align-loop
+            (sw-tokens (lsfc-band-truth))
+            (lsfc-take (lsfc-feature-stream (lsfc-band-row)) 3)
+            (lsfc-band-base)
+            96))
+
+    (defn live-segmented-feature-carrier-band ()
+        (do
+            (let row (lsfc-band-row))
+            (let trained (lsfc-band-trained))
+            (let base (lsfc-band-base))
+            (let rows4 (list row row row row))
+            (let rec (lsfc-receipt rows4 trained 25 2 80 2000 4 0 0 3
+                                   "whisper.cpp-large-v3-turbo-metal"
+                                   "macos-arm64-m4-max"))
+            (let frames (ate-frames (lsfc-feature-stream row) trained 2 80))
+            (let stream (oact-stream 9701 "live-segmented-feature-carrier" "audio"
+                                     frames
+                                     (oact-meta frames 82 70 6 44 89)))
+            (let c0 (lsfc-band-score (str_eq (nth row 0) "live-segmented-feature-carrier") 1))
+            (let c1 (lsfc-band-score (eq (len (lsfc-feature-stream row)) 4) 2))
+            (let c2 (lsfc-band-score (eq (lsfc-ready? row) 1) 4))
+            (let c3 (lsfc-band-score (eq (lsfc-native-ok? row trained 25 2 80 2000) 1) 8))
+            (let c4 (lsfc-band-score (eq (lsfc-native-ok? row base 25 2 80 2000) 0) 16))
+            (let c5 (lsfc-band-score (odtl-oracle-success? (lsfc-open-row row trained 2 80) 25) 32))
+            (let c6 (lsfc-band-score (str_eq (nth rec 6) "native") 64))
+            (let c7 (lsfc-band-score (str_eq (lsfc-route (list row) trained 25 2 80 2000 4 0 0 3) "oracle") 128))
+            (let c8 (lsfc-band-score
+                        (and (eq (lsfc-ready? (lsfc-band-bad-row 1 0 0 1)) 0)
+                             (and (eq (lsfc-ready? (lsfc-band-bad-row 0 1 0 1)) 0)
+                                  (eq (lsfc-ready? (lsfc-band-bad-row 0 0 1 1)) 0))) 256))
+            (let c9 (lsfc-band-score (eq (lsfc-ready? (lsfc-band-bad-row 0 0 0 0)) 0) 512))
+            (let c10 (lsfc-band-score (and (eq (nth rec 9) 970101)
+                                           (eq (nth rec 10) 31)) 1024))
+            (let c11 (lsfc-band-score (and (eq (nth rec 11) 93)
+                                           (eq (nth rec 12) 89)) 2048))
+            (let c12 (lsfc-band-score
+                        (and (str_eq (nth rec 7) "whisper.cpp-large-v3-turbo-metal")
+                             (str_eq (nth rec 8) "macos-arm64-m4-max")) 4096))
+            (let c13 (lsfc-band-score (and (eq (nth rec 13) 1)
+                                           (eq (nth rec 14) 0)) 8192))
+            (let c14 (lsfc-band-score (and (str_eq (sts-transcript stream) (lsfc-band-truth))
+                                           (eq (sts-count-tag stream (sts-receipt-tag)) 1)) 16384))
+            (add
+                (add
+                    (add (add c0 c1) (add c2 c3))
+                    (add (add c4 c5) (add c6 c7)))
+                (add
+                    (add (add c8 c9) (add c10 c11))
+                    (add (add c12 c13) c14)))))
+
+    (live-segmented-feature-carrier-band))

@@ -196,7 +196,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       sweep's stable decoded-token acoustic summary with the seven live Metal pair anchors (`32767`). It routes
       `metal-witnessed-audio2audio-acoustic`, selects `native-audio2audio-acoustic-vocoder` for the scoped
       decoded-token audio2audio arm, keeps `live-open-mic-pending` and neural Metal pending, and moves the speech
-      selector forward; later source-window audio2audio authority moves the current selector to `268435455`.
+      selector forward; later live feature-carrier rows move the current selector to `536870911`.
 - [x] **Speech loopback promotion added.** `learn/speech-loopback-promotion.fk` turns native loopback receipts into
       rolling authority windows (`2047`): clean long windows promote native; short, failed, timed-out, undone, or
       regressing windows route back to oracle.
@@ -304,10 +304,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       Sema formant WER-100 miss, it also exposes the voice miss action and the concrete
       `text-conditioned-acoustic-vocoder` Form kernel plus the native audio2audio acoustic bridge, multilocale
       audio2audio acoustic sweep, Metal acoustic authority row, live open-ASR source authority training row,
-      multilocale segmented source-ASR window candidate, and source-window audio2audio authority row.
+      multilocale segmented source-ASR window candidate, source-window audio2audio authority row, and live
+      segmented feature carrier.
       The audio2audio arm now selects
       `native-source-window-audio2audio-acoustic` for the segmented-source-window, metal-witnessed scope. The band
-      returns `268435455`.
+      returns `536870911`.
 - [x] **Open dictation transcript receipt added.** `learn/open-dictation-transcript-learning.fk` admits arbitrary
       utterance rows with consentful side-channel truth, local free oracle transcripts, optional native transcript
       candidates, Unicode token WER, and choice/cut/fail/undo/timeout promotion gates (`16383`). The macOS carrier
@@ -320,7 +321,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `100` routes `train-live-segmented-open-asr-source` toward `native-segmented-acoustic-learning`, while
       authority remains `oracle-guide` until a local native transcript candidate wins. The speech selector now
       exposes this live Metal training path; the later source-window audio2audio authority moves the selector to
-      `268435455`.
+      `536870911`.
 - [x] **Speech token stream + native CTC open-ASR candidate added.** `observe/speech-token-stream.fk` makes the
       side-channel stream explicit: words plus `<NODE>`, `<SOURCE>`, `<CHANNEL>`, `<INTERFACE>`, `<CHOICE>`,
       `<FAIL>`, `<UNDO>`, `<TIMEOUT>`, `<CUT>`, `<OBSERVE>`, `<GRADE>`, `<FEEDBACK>`, `<REPAIR>`, `<RECEIPT>`,
@@ -344,12 +345,18 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       source-token prototypes from native score `0` to `6/6`, all three reciprocal pairs become ready, and the
       route shifts to `native-multilocale-segmented-source` only inside that witnessed window. The speech selector
       now exposes this ASR candidate without displacing `prototype-asr`; the later source-window audio2audio
-      authority moves the selector to `268435455`.
+      authority and live feature carrier move the selector to `536870911`.
 - [x] **Source-window audio2audio authority added.** `learn/source-window-audio2audio-authority.fk` composes the
       multilocale segmented source-ASR window with the Metal audio2audio acoustic authority (`32767`): source speech
       now routes through native source tokens, neutral Form meaning, and target acoustic frames as one witnessed
       authority row. AutoML now selects `native-source-window-audio2audio-acoustic` for the audio2audio arm and
-      returns `268435455`, while live mic streaming and neural speech remain pending.
+      the later live feature-carrier row moves the selector to `536870911`, while live mic streaming and neural
+      speech remain pending.
+- [x] **Live segmented feature carrier contract added.** `presence/live-segmented-feature-carrier.fk` admits
+      observed local wav/envelope facts into native open-ASR candidate rows (`32767`): eight-window envelopes lower
+      to four Form feature rows, acoustic-token prototypes emit CTC frames, and four passing native rows can route
+      through open-dictation promotion. AutoML now sees this ASR candidate and returns `536870911`, but selected ASR
+      remains `prototype-asr` until real live capture windows win.
 - [x] **Speech-token training source policy added.** `learn/speech-token-training-source.fk` separates token label
       provenance into local oracle, consentful corpus, and internal-state inference rows (`32767`). Local oracle
       and corpus rows may train transcript words and metadata; internal state can train confidence, warmth,
