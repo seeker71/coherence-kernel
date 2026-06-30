@@ -1,0 +1,132 @@
+; acoustic-token-emitter.fk -- Form-native acoustic features to CTC token frames.
+;
+; This is the missing bridge after open-asr-ctc: audio features become frame
+; tokens inside the body. It is deliberately a small supervised prototype
+; learner, not a claim that a neural acoustic encoder is done. A local oracle or
+; consentful transcript side channel can align a feature vector to a token; the
+; body interns that as a prototype and later emits CTC frames by integer L1
+; nearest match, distance, and earned confidence.
+;
+; preludes:
+;   observe/wav-sense.fk
+;   observe/stt-wer.fk
+;   learn/speech-loopback-promotion.fk
+;   form/form-stdlib/observed-auto-learning.fk
+;   learn/open-dictation-transcript-learning.fk
+;   observe/speech-token-stream.fk
+;   observe/open-asr-ctc.fk
+
+(do
+    (defn ate-prototype (token features prior-confidence)
+        (list "acoustic-token-prototype" token features prior-confidence))
+    (defn ate-proto-kind (p) (nth p 0))
+    (defn ate-token      (p) (nth p 1))
+    (defn ate-features   (p) (nth p 2))
+    (defn ate-prior-conf (p) (nth p 3))
+
+    (defn ate-learn (prototypes token features prior-confidence)
+        (cons (ate-prototype token features prior-confidence) prototypes))
+
+    (defn ate-wav-prototype (token path step prior-confidence)
+        (ate-prototype token (wav-envelope-file path step) prior-confidence))
+
+    (defn ate-l1 (a b)
+        (if (eq (len a) 0) 0
+            (if (eq (len b) 0) 0
+                (add (abs (sub (head a) (head b))) (ate-l1 (tail a) (tail b))))))
+
+    (defn ate-best-loop (features prototypes best bestdist)
+        (if (eq (len prototypes) 0) best
+            (do
+                (let p (head prototypes))
+                (let d (ate-l1 features (ate-features p)))
+                (if (lt d bestdist)
+                    (ate-best-loop features (tail prototypes) p d)
+                    (ate-best-loop features (tail prototypes) best bestdist)))))
+
+    (defn ate-nearest (features prototypes)
+        (ate-best-loop features (tail prototypes) (head prototypes)
+                       (ate-l1 features (ate-features (head prototypes)))))
+
+    (defn ate-best-distance (features prototypes)
+        (ate-l1 features (ate-features (ate-nearest features prototypes))))
+
+    (defn ate-conf-from-distance (prototype distance)
+        (do
+            (let raw (sub (ate-prior-conf prototype) distance))
+            (if (lt raw 0) 0 raw)))
+
+    (defn ate-confidence (features prototypes)
+        (do
+            (let p (ate-nearest features prototypes))
+            (ate-conf-from-distance p (ate-best-distance features prototypes))))
+
+    (defn ate-confident? (features prototypes max-distance min-confidence)
+        (if (and (le (ate-best-distance features prototypes) max-distance)
+                 (ge (ate-confidence features prototypes) min-confidence)) 1 0))
+
+    (defn ate-frame (features prototypes max-distance min-confidence)
+        (do
+            (let p (ate-nearest features prototypes))
+            (let d (ate-best-distance features prototypes))
+            (if (eq (ate-confident? features prototypes max-distance min-confidence) 1)
+                (oact-frame (ate-token p) (ate-conf-from-distance p d))
+                (oact-frame "" 0))))
+
+    (defn ate-wav-frame (path step prototypes max-distance min-confidence)
+        (ate-frame (wav-envelope-file path step) prototypes max-distance min-confidence))
+
+    (defn ate-frames (feature-stream prototypes max-distance min-confidence)
+        (if (eq (len feature-stream) 0) (empty)
+            (cons (ate-frame (head feature-stream) prototypes max-distance min-confidence)
+                  (ate-frames (tail feature-stream) prototypes max-distance min-confidence))))
+
+    (defn ate-open-row-with-meta (sample-id locale truth-text oracle-text feature-stream prototypes
+                                  max-distance min-confidence audio-hash latency-ms
+                                  warmth cadence hesitation excitement attunement)
+        (oact-open-row-with-meta
+            sample-id
+            locale
+            truth-text
+            oracle-text
+            (ate-frames feature-stream prototypes max-distance min-confidence)
+            audio-hash
+            latency-ms
+            warmth
+            cadence
+            hesitation
+            excitement
+            attunement))
+
+    (defn ate-open-row (sample-id locale truth-text oracle-text feature-stream prototypes
+                       max-distance min-confidence audio-hash latency-ms)
+        (ate-open-row-with-meta sample-id locale truth-text oracle-text feature-stream prototypes
+                                max-distance min-confidence audio-hash latency-ms
+                                80 70 10 60 85))
+
+    (defn ate-receipt (sample-id locale feature-stream prototypes max-distance min-confidence frames row)
+        (list "acoustic-token-emitter-receipt"
+              sample-id
+              locale
+              (len feature-stream)
+              (len frames)
+              (oact-transcript frames)
+              (oact-min-conf frames)
+              (odtl-native-success? row 25 80 2000)
+              (odtl-native-local row)
+              (odtl-audio-hash row)
+              (odtl-control-action row)))
+
+    (defn ate-receipt-kind       (r) (nth r 0))
+    (defn ate-receipt-sample-id  (r) (nth r 1))
+    (defn ate-receipt-locale     (r) (nth r 2))
+    (defn ate-receipt-features   (r) (nth r 3))
+    (defn ate-receipt-frames     (r) (nth r 4))
+    (defn ate-receipt-transcript (r) (nth r 5))
+    (defn ate-receipt-confidence (r) (nth r 6))
+    (defn ate-receipt-success    (r) (nth r 7))
+    (defn ate-receipt-native     (r) (nth r 8))
+    (defn ate-receipt-audio-hash (r) (nth r 9))
+    (defn ate-receipt-action     (r) (nth r 10))
+
+    0)

@@ -256,10 +256,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       selects the ASR -> neutral Form -> formant route. `open-dictation-transcript` is now a live-observed ASR
       receipt candidate, but does not displace the closed-set prototype until a native open-ASR candidate emits
       local transcript text. `native-open-asr-ctc` is now present as a Form-native CTC token-stream decoder
-      candidate, but is not live-selected until real audio can emit frame tokens. `small-transformer-nl` remains trainable but not
+      candidate, and `native-acoustic-token-emitter` is present as the supervised Form feature-to-frame bridge,
+      but neither is live-selected until real audio can emit segmented token frames. `small-transformer-nl` remains trainable but not
       live-selected; `diffusion-codec-speech` is present but not ready because no Form-native executable kernel
       receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; the band
-      returns `16383`.
+      returns `32767`.
 - [x] **Open dictation transcript receipt added.** `learn/open-dictation-transcript-learning.fk` admits arbitrary
       utterance rows with consentful side-channel truth, local free oracle transcripts, optional native transcript
       candidates, Unicode token WER, and choice/cut/fail/undo/timeout promotion gates (`16383`). The macOS carrier
@@ -273,7 +274,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `<STATE>`, `<MEMORY>`, and `<SCOPE>` tokens, each carrying confidence, warmth, cadence, hesitation,
       excitement, and attunement metadata (`32767`). `observe/open-asr-ctc.fk` collapses acoustic frame-token
       streams into that token stream, emits free transcript text, and lowers the result into open-dictation
-      promotion (`32767`). Live audio-to-frame-token emission remains pending.
+      promotion (`32767`).
+- [x] **Native acoustic token emitter added.** `observe/acoustic-token-emitter.fk` admits consentful
+      oracle-aligned acoustic token prototypes, emits blank/nonblank CTC frames by integer L1 distance plus earned
+      confidence, and lowers those frames through `open-asr-ctc` into the open-dictation promotion gate. The band
+      returns `32767`. This is a supervised native frame-token emitter, not a finished neural acoustic encoder;
+      live mic audio still needs a segmented feature-row carrier before it can displace the closed-prompt ASR route.
 - [x] **The offer/ack control core** — `control/offer-ack-core.fk`: the five Form control primitives (fail, stop,
       choice, exceptions, async) as thin expressions over ONE mechanism (`oac-kind` + `oac-offer`), derived from
       axiom-5. Four-way-proven in the origin (1023); re-proof here pends the Form-native eval lane (the C `--src`
