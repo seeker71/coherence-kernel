@@ -1,0 +1,149 @@
+; speech-token-training-source.fk -- where speech-token labels may come from.
+;
+; Speech token training needs provenance. A local oracle can label words and
+; confidence from measured audio. A consentful translated corpus can label text
+; and route/scope tokens. Internal state can infer voice-side metadata and
+; control/evidence tokens, but it must not pretend to be transcript truth.
+;
+; preludes:
+;   observe/speech-token-stream.fk
+
+(do
+    (defn stts-clamp (x) (if (lt x 0) 0 (if (gt x 100) 100 x)))
+
+    (defn stts-controls (choice fail cut undo timeout)
+        (list choice fail cut undo timeout))
+    (defn stts-choice  (c) (nth c 0))
+    (defn stts-fail    (c) (nth c 1))
+    (defn stts-cut     (c) (nth c 2))
+    (defn stts-undo    (c) (nth c 3))
+    (defn stts-timeout (c) (nth c 4))
+
+    (defn stts-clean-controls? (c)
+        (if (eq (add (add (stts-fail c) (stts-cut c))
+                     (add (stts-undo c) (stts-timeout c))) 0) 1 0))
+
+    (defn stts-internal-state (confidence valence hardness surprise grounded)
+        (list "speech-token-internal-state" confidence valence hardness surprise grounded))
+    (defn stts-state-confidence (s) (nth s 1))
+    (defn stts-state-valence    (s) (nth s 2))
+    (defn stts-state-hardness   (s) (nth s 3))
+    (defn stts-state-surprise   (s) (nth s 4))
+    (defn stts-state-grounded   (s) (nth s 5))
+
+    (defn stts-meta-from-state (s)
+        (do
+            (let conf (stts-clamp (mul (stts-state-confidence s) 20)))
+            (let warmth (stts-clamp (mul (stts-state-valence s) 10)))
+            (let cadence (stts-clamp (sub 100 (mul (stts-state-hardness s) 10))))
+            (let hesitation (stts-clamp (add (sub 100 conf) (mul (stts-state-hardness s) 5))))
+            (let excitement (stts-clamp (mul (stts-state-surprise s) 20)))
+            (let attunement (stts-clamp (add (mul (stts-state-grounded s) 20) warmth)))
+            (sts-meta conf warmth cadence hesitation excitement attunement)))
+
+    (defn stts-row (id kind source channel interface label-scope consent words meta controls evidence scope)
+        (list "speech-token-training-source"
+              id kind source channel interface label-scope consent words meta controls evidence scope))
+    (defn stts-kind        (r) (nth r 0))
+    (defn stts-id          (r) (nth r 1))
+    (defn stts-source-kind (r) (nth r 2))
+    (defn stts-source      (r) (nth r 3))
+    (defn stts-channel     (r) (nth r 4))
+    (defn stts-interface   (r) (nth r 5))
+    (defn stts-label-scope (r) (nth r 6))
+    (defn stts-consent     (r) (nth r 7))
+    (defn stts-words       (r) (nth r 8))
+    (defn stts-meta        (r) (nth r 9))
+    (defn stts-controls-row (r) (nth r 10))
+    (defn stts-evidence    (r) (nth r 11))
+    (defn stts-scope       (r) (nth r 12))
+
+    (defn stts-local-oracle-row (id oracle channel words wer audio-hash meta)
+        (stts-row id "local-oracle" oracle channel "local-oracle-transcript"
+                  "words+meta" 1 words meta (stts-controls 1 0 0 0 0)
+                  (str_concat "wer:" (str_concat (int_to_str wer)
+                                                 (str_concat ":audio:" (int_to_str audio-hash))))
+                  "utterance"))
+
+    (defn stts-corpus-row (id corpus words meta)
+        (stts-row id "consentful-corpus" corpus "text-sidecar" "translated-corpus"
+                  "words+meta" 1 words meta (stts-controls 1 0 0 0 0)
+                  "consentful-text-alignment"
+                  "corpus-line"))
+
+    (defn stts-internal-row (id state words controls)
+        (stts-row id "internal-state-inference" "internal-state" "state-sidechannel"
+                  "voice-meta-inference" "meta-only" 1 words
+                  (stts-meta-from-state state) controls
+                  "inferred-meta-not-transcript-truth"
+                  "utterance-state"))
+
+    (defn stts-consented-clean? (r)
+        (if (and (eq (stts-consent r) 1)
+                 (and (eq (stts-clean-controls? (stts-controls-row r)) 1)
+                      (eq (sts-meta-valid? (stts-meta r)) 1))) 1 0))
+
+    (defn stts-word-truth? (r)
+        (if (and (not (str_eq (stts-source-kind r) "internal-state-inference"))
+                 (str_eq (stts-label-scope r) "words+meta")) 1 0))
+
+    (defn stts-can-train-words? (r)
+        (if (and (eq (stts-consented-clean? r) 1)
+                 (eq (stts-word-truth? r) 1)) 1 0))
+
+    (defn stts-can-train-meta? (r)
+        (stts-consented-clean? r))
+
+    (defn stts-control-tokens (controls meta)
+        (list
+            (sts-choice (if (eq (stts-choice controls) 1) "open" "closed") meta)
+            (sts-fail (if (eq (stts-fail controls) 1) "fail" "clear") meta)
+            (sts-cut (if (eq (stts-cut controls) 1) "cut" "clear") meta)
+            (sts-undo (if (eq (stts-undo controls) 1) "undo" "clear") meta)
+            (sts-timeout (if (eq (stts-timeout controls) 1) "timeout" "clear") meta)))
+
+    (defn stts-training-stream (r)
+        (do
+            (let meta (stts-meta r))
+            (sts-append
+                (list
+                    (sts-node (int_to_str (stts-id r)) meta)
+                    (sts-source (stts-source r) meta)
+                    (sts-channel (stts-channel r) meta)
+                    (sts-interface (stts-interface r) meta))
+                (sts-append
+                    (stts-control-tokens (stts-controls-row r) meta)
+                    (sts-append
+                        (list
+                            (sts-observe (stts-source-kind r) meta)
+                            (sts-grade (stts-evidence r) meta)
+                            (sts-memory (stts-label-scope r) meta)
+                            (sts-scope (stts-scope r) meta))
+                        (sts-append
+                            (sts-word-tokens (stts-words r) meta)
+                            (list (sts-receipt "speech-token-training-source" meta))))))))
+
+    (defn stts-count-word-trainable (rows)
+        (if (eq (len rows) 0) 0
+            (add (stts-can-train-words? (head rows))
+                 (stts-count-word-trainable (tail rows)))))
+
+    (defn stts-count-meta-trainable (rows)
+        (if (eq (len rows) 0) 0
+            (add (stts-can-train-meta? (head rows))
+                 (stts-count-meta-trainable (tail rows)))))
+
+    (defn stts-receipt (rows)
+        (list "speech-token-training-source-receipt"
+              (len rows)
+              (stts-count-word-trainable rows)
+              (stts-count-meta-trainable rows)
+              "local-oracle+consentful-corpus+internal-state"))
+
+    (defn stts-rec-kind       (r) (nth r 0))
+    (defn stts-rec-count      (r) (nth r 1))
+    (defn stts-rec-word-rows  (r) (nth r 2))
+    (defn stts-rec-meta-rows  (r) (nth r 3))
+    (defn stts-rec-sources    (r) (nth r 4))
+
+    0)
