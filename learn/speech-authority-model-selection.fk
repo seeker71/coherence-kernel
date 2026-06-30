@@ -1,0 +1,146 @@
+; speech-authority-model-selection.fk -- select model arms from global authority.
+;
+; Metrics name the current arms. Global authority update names when live
+; receipts are strong enough to move ASR/TTS authority. This cell joins them:
+; current empty live receipts keep ASR/TTS on oracle-guided arms, while the demo
+; clean receipt set proves the same law selects native ASR/TTS routes.
+;
+; preludes:
+;   learn/speech-model-metrics-report.fk
+;   learn/speech-oracle-native-backlog.fk
+;   learn/speech-next-trial-scheduler.fk
+;   learn/speech-open-asr-trial-window.fk
+;   learn/sema-voice-trial-window.fk
+;   learn/speech-current-status-ledger.fk
+;   learn/speech-global-promotion-readiness.fk
+;   learn/speech-live-receipt-intake.fk
+;   learn/speech-global-authority-update.fk
+
+(do
+    (defn sams-arm (task id authority live-count required missing neural-parameters native-form route-note)
+        (list "speech-authority-model-arm"
+              task id authority live-count required missing neural-parameters native-form route-note))
+
+    (defn sams-arm-kind       (a) (nth a 0))
+    (defn sams-arm-task       (a) (nth a 1))
+    (defn sams-arm-id         (a) (nth a 2))
+    (defn sams-arm-authority  (a) (nth a 3))
+    (defn sams-arm-count      (a) (nth a 4))
+    (defn sams-arm-required   (a) (nth a 5))
+    (defn sams-arm-missing    (a) (nth a 6))
+    (defn sams-arm-neural     (a) (nth a 7))
+    (defn sams-arm-native     (a) (nth a 8))
+    (defn sams-arm-note       (a) (nth a 9))
+
+    (defn sams-missing-update (lane)
+        (list "speech-global-authority-update-lane"
+              lane 0 3 3 "oracle-guide" 25 80 2000 "choice-cut-fail-undo-timeout-clean"))
+
+    (defn sams-find-update (lane rows)
+        (if (eq (len rows) 0) (sams-missing-update lane)
+            (if (str_eq (sgau-lane-name (head rows)) lane)
+                (head rows)
+                (sams-find-update lane (tail rows)))))
+
+    (defn sams-current-asr-id (u)
+        (if (str_eq (sgau-lane-route u) "native-open-asr-source")
+            "native-open-asr-source"
+            (nth (smmr-composition) 1)))
+
+    (defn sams-current-tts-id (u)
+        (if (str_eq (sgau-lane-route u) "native-sema-voice")
+            "native-sema-voice"
+            (nth (smmr-composition) 2)))
+
+    (defn sams-speech-authority (u)
+        (if (str_eq (sgau-lane-route u) "oracle-guide")
+            "oracle-guide"
+            "global-native"))
+
+    (defn sams-asr-arm (updates)
+        (do
+            (let u (sams-find-update "live-open-dictation" updates))
+            (sams-arm "asr"
+                      (sams-current-asr-id u)
+                      (sams-speech-authority u)
+                      (sgau-lane-count u)
+                      (sgau-lane-required u)
+                      (sgau-lane-missing u)
+                      0
+                      1
+                      (sgau-lane-route u))))
+
+    (defn sams-tts-arm (updates)
+        (do
+            (let u (sams-find-update "sema-live-voice" updates))
+            (sams-arm "tts"
+                      (sams-current-tts-id u)
+                      (sams-speech-authority u)
+                      (sgau-lane-count u)
+                      (sgau-lane-required u)
+                      (sgau-lane-missing u)
+                      0
+                      1
+                      (sgau-lane-route u))))
+
+    (defn sams-nl2nl-arm ()
+        (sams-arm "nl2nl"
+                  (nth (smmr-composition) 3)
+                  "native-form-anchor"
+                  7 7 0 0 1
+                  "closed-prompt-and-locale-neutral-form"))
+
+    (defn sams-audio2audio-arm ()
+        (sams-arm "audio2audio"
+                  (nth (smmr-composition) 4)
+                  "metal-scoped-native"
+                  7 7 0 0 1
+                  "source-window-audio2audio-metal-authority"))
+
+    (defn sams-global-native? (a)
+        (if (str_eq (sams-arm-authority a) "global-native") 1 0))
+
+    (defn sams-oracle-guide? (a)
+        (if (str_eq (sams-arm-authority a) "oracle-guide") 1 0))
+
+    (defn sams-selection (updates scope-note)
+        (do
+            (let asr (sams-asr-arm updates))
+            (let tts (sams-tts-arm updates))
+            (let nl (sams-nl2nl-arm))
+            (let audio (sams-audio2audio-arm))
+            (list "speech-authority-model-selection"
+                  asr
+                  tts
+                  nl
+                  audio
+                  (add (sams-global-native? asr) (sams-global-native? tts))
+                  (add (sams-oracle-guide? asr) (sams-oracle-guide? tts))
+                  4
+                  (add (sams-arm-neural asr)
+                       (add (sams-arm-neural tts)
+                            (add (sams-arm-neural nl) (sams-arm-neural audio))))
+                  (sgau-missing-total updates)
+                  1
+                  0
+                  scope-note)))
+
+    (defn sams-current-selection ()
+        (sams-selection (sgau-current-updates)
+                        "current-real-live-receipts-keep-speech-oracle-guided"))
+
+    (defn sams-demo-selection ()
+        (sams-selection (sgau-demo-updates)
+                        "demo-clean-real-live-receipts-promote-speech-native"))
+
+    (defn sams-report ()
+        (list "speech-authority-model-selection-report"
+              (sams-current-selection)
+              (sams-demo-selection)
+              "global-live-authority-selects-asr-tts"
+              "nl2nl-and-audio2audio-keep-current-native-scoped-arms"
+              "scoped-trial-windows-do-not-promote-global-speech"
+              1
+              0))
+
+    0)
