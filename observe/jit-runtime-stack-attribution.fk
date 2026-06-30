@@ -1,0 +1,135 @@
+; jit-runtime-stack-attribution.fk - full-stack source attribution for JIT faults.
+;
+; The earlier runtime-fault receipt proves that every exception has a source and
+; a non-empty attributed stack head. This cell tightens the native JIT contract:
+; every stack frame must carry complete source attribution, the exception source
+; must match the throwing frame, and native/walker parity must compare the full
+; stack, not only stack depth.
+;
+; preludes:
+;   observe/jit-runtime-fault.fk
+
+(do
+    (defn jrsa-source-top ()
+        (jrf-source "form" "observe/tests/jit-runtime-stack-attribution-band.fk" 18 9 5))
+    (defn jrsa-source-mid ()
+        (jrf-source "form" "observe/tests/jit-runtime-stack-attribution-band.fk" 11 7 4))
+    (defn jrsa-source-root ()
+        (jrf-source "form" "observe/tests/jit-runtime-stack-attribution-band.fk" 4 3 2))
+    (defn jrsa-source-bad ()
+        (jrf-source "form" "" 0 0 0))
+    (defn jrsa-source-other ()
+        (jrf-source "form" "observe/tests/jit-runtime-stack-attribution-band.fk" 29 5 3))
+
+    (defn jrsa-stack-good ()
+        (list
+            (jrf-frame 301 6 (jrsa-source-top))
+            (jrf-frame 201 4 (jrsa-source-mid))
+            (jrf-frame 101 1 (jrsa-source-root))))
+    (defn jrsa-stack-bad-caller ()
+        (list
+            (jrf-frame 301 6 (jrsa-source-top))
+            (jrf-frame 201 4 (jrsa-source-bad))
+            (jrf-frame 101 1 (jrsa-source-root))))
+    (defn jrsa-stack-site-mismatch ()
+        (list
+            (jrf-frame 301 6 (jrsa-source-top))
+            (jrf-frame 201 5 (jrsa-source-mid))
+            (jrf-frame 101 1 (jrsa-source-root))))
+    (defn jrsa-stack-source-mismatch ()
+        (list
+            (jrf-frame 301 6 (jrsa-source-top))
+            (jrf-frame 201 4 (jrsa-source-other))
+            (jrf-frame 101 1 (jrsa-source-root))))
+
+    (defn jrsa-all-frames-attributed? (stack)
+        (if (eq (len stack) 0)
+            1
+            (if (eq (jrf-frame? (head stack)) 1)
+                (if (eq (jrf-source-complete? (jrf-frame-source (head stack))) 1)
+                    (jrsa-all-frames-attributed? (tail stack))
+                    0)
+                0)))
+
+    (defn jrsa-frame-same? (a b)
+        (if (eq (jrf-frame? a) 1)
+            (if (eq (jrf-frame? b) 1)
+                (if (eq (jrf-frame-fn a) (jrf-frame-fn b))
+                    (if (eq (jrf-frame-site a) (jrf-frame-site b))
+                        (jrf-same-source? (jrf-frame-source a) (jrf-frame-source b))
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jrsa-stack-same? (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0)
+                1
+                (if (eq (jrsa-frame-same? (head a) (head b)) 1)
+                    (jrsa-stack-same? (tail a) (tail b))
+                    0))
+            0))
+
+    (defn jrsa-exception-complete? (e)
+        (if (eq (jrf-exception? e) 1)
+            (if (eq (jrf-runtime-kind? (jrf-kind e)) 1)
+                (if (eq (jrf-source-complete? (jrf-source-of e)) 1)
+                    (if (gt (len (jrf-stack e)) 0)
+                        (if (eq (jrsa-all-frames-attributed? (jrf-stack e)) 1)
+                            (jrf-same-source? (jrf-source-of e) (jrf-frame-source (head (jrf-stack e))))
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jrsa-exception-parity? (native-ex walk-ex)
+        (if (eq (jrf-kind native-ex) (jrf-kind walk-ex))
+            (if (str_eq (jrf-op native-ex) (jrf-op walk-ex))
+                (if (eq (jrf-same-source? (jrf-source-of native-ex) (jrf-source-of walk-ex)) 1)
+                    (jrsa-stack-same? (jrf-stack native-ex) (jrf-stack walk-ex))
+                    0)
+                0)
+            0))
+
+    (defn jrsa-bounds-ex ()
+        (jrf-exception (jrf-bounds) "array-get" (jrsa-source-top) (jrsa-stack-good) (list 9 3)))
+    (defn jrsa-div-ex ()
+        (jrf-exception (jrf-div-zero) "div" (jrsa-source-top) (jrsa-stack-good) (list 8 0)))
+    (defn jrsa-empty-stack-ex ()
+        (jrf-exception (jrf-bounds) "array-get" (jrsa-source-top) (empty) (list 9 3)))
+    (defn jrsa-bad-caller-ex ()
+        (jrf-exception (jrf-bounds) "array-get" (jrsa-source-top) (jrsa-stack-bad-caller) (list 9 3)))
+    (defn jrsa-source-mismatch-ex ()
+        (jrf-exception (jrf-bounds) "array-get" (jrsa-source-other) (jrsa-stack-good) (list 9 3)))
+    (defn jrsa-site-mismatch-ex ()
+        (jrf-exception (jrf-bounds) "array-get" (jrsa-source-top) (jrsa-stack-site-mismatch) (list 9 3)))
+    (defn jrsa-caller-source-mismatch-ex ()
+        (jrf-exception (jrf-bounds) "array-get" (jrsa-source-top) (jrsa-stack-source-mismatch) (list 9 3)))
+    (defn jrsa-op-mismatch-ex ()
+        (jrf-exception (jrf-bounds) "hash-get" (jrsa-source-top) (jrsa-stack-good) (list 9 3)))
+
+    (defn jrsa-bit (cond bit) (if cond bit 0))
+    (defn jit-runtime-stack-attribution-check ()
+        (add
+            (jrsa-bit (eq (jrsa-exception-complete? (jrsa-bounds-ex)) 1) 1)
+            (add
+                (jrsa-bit (eq (jrsa-all-frames-attributed? (jrsa-stack-good)) 1) 2)
+                (add
+                    (jrsa-bit (eq (jrsa-exception-complete? (jrsa-empty-stack-ex)) 0) 4)
+                    (add
+                        (jrsa-bit (eq (jrsa-exception-complete? (jrsa-bad-caller-ex)) 0) 8)
+                        (add
+                            (jrsa-bit (eq (jrsa-exception-complete? (jrsa-source-mismatch-ex)) 0) 16)
+                            (add
+                                (jrsa-bit (eq (jrsa-exception-parity? (jrsa-bounds-ex) (jrsa-bounds-ex)) 1) 32)
+                                (add
+                                    (jrsa-bit (eq (jrsa-exception-parity? (jrsa-bounds-ex) (jrsa-caller-source-mismatch-ex)) 0) 64)
+                                    (add
+                                        (jrsa-bit (eq (jrsa-exception-parity? (jrsa-bounds-ex) (jrsa-site-mismatch-ex)) 0) 128)
+                                        (add
+                                            (jrsa-bit (eq (jrsa-exception-parity? (jrsa-bounds-ex) (jrsa-op-mismatch-ex)) 0) 256)
+                                            (jrsa-bit (eq (jrsa-exception-complete? (jrsa-div-ex)) 1) 512))))))))))
+
+    0)
