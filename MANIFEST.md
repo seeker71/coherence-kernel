@@ -233,6 +233,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       multilocale shift observable per reciprocal pair: before/after NL rate, before/after audio rate,
       before/after route, and a shifted flag. The band returns `4095`, proves five pairs shift from
       `oracle-guide` to `native`, keeps one-way evidence guided, and still records native neural Metal as pending.
+- [x] **Selected speech locale learning window added.** `learn/speech-locale-learning-window.fk` turns a seeded
+      diverse pair into one numeric observed learning window: seed `2` selects the Sanskrit/Latin baseline lane,
+      A->B/B->A/A->A/B->B lanes train from `0` to `100` NL/audio rates, route code shifts `0->1`, clean controls
+      plus A/B evidence promote the challenger, local oracle/Metal and Form-native flags are present, and neural
+      Metal/diffusion remain pending. The band returns `16383`.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio

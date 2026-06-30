@@ -70,7 +70,9 @@ romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, 
 8191 proves closed-set NL->neutral Form->NL and audio-feature->neutral Form->audio-target loops over reciprocal
 `en<->de`, `en<->es`, `zh<->ar`, `fr<->id`, and `sa<->la`. `multilocale-route-shift-ledger` 4095 now records
 each pair's before/after NL rate, audio rate, route, and shifted flag, so the aggregate native route has per-pair
-witness rows. `speech-model-auto-selection` 4095 selects today's native arms:
+witness rows. `speech-locale-learning-window` 16383 takes selected seed `2` into a numeric `sa<->la` observed
+window: all four lanes train from guided to native route code, clean controls plus A/B evidence promote the
+challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 4095 selects today's native arms:
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, and the deterministic
 formant vocoder for TTS/audio target rendering. The transformer path is trainable but not live-selected for speech
 yet; diffusion/codec speech is a named candidate only, pending a Form-native executable kernel and receipt.
