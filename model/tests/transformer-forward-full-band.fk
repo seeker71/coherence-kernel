@@ -1,0 +1,98 @@
+; transformer-forward-full-band.fk — the FULL decoder forward proven bit-exact, four-way (HOMECOMING 3a).
+;
+; preludes: transformer-numerics.fk transformer-block.fk transformer-mh.fk transformer-decoder.fk transformer-generate.fk
+;
+; The #82 band (transformer-decoder-fwd-band.fk) proved the decoder BLOCK forward bit-exact four-way
+; (attention core → multi-head → the full block). This band WRAPS that block with the two pieces a
+; generative mind needs to speak — positional (token+position embedding) and the LM head (final LN →
+; d_model→vocab logits) — and proves the COMPOSED end-to-end forward:
+;
+;   ids → tb-embed-seq(embed,pos)  →  tb-dec-stack(block)  →  final-LN  →  tb-logits(embed·state)
+;
+; over a fixed small config that EXTENDS the #82 config with a vocab=5 embedding table, a 3-position
+; positional table, and 3 token ids:  seq=3, d_model=4, vocab=5, n_head=2, head_dim=2, eps=1e-5.
+;
+; METHODOLOGY — identical to #82: bit-exact, not "close". Each claim recomputes a piece and asserts
+; with `eq` that the result is BIT-IDENTICAL to a reference double captured at full fp64 precision from
+; the three INDEPENDENT walkers (Go, Rust, TypeScript), which printed all 17 significant digits and
+; agreed bit-for-bit with one another. `eq` is the exact IEEE-754 double comparison shared by all four
+; kernels, so the band returns the SAME verdict (63) on fkwu, Go, Rust, and TS exactly when all four
+; compute the identical double. fkwu's `%.15g` print shows fewer digits, but the underlying double is
+; proven identical THROUGH `eq` (probe: logits[0] prints 0.424874985612513 on fkwu vs
+; 0.42487498561251347 on the walkers — the SAME double; eq against the walker literal returns 1).
+;
+; The wrap adds NO new arithmetic over the proven fp64 dot/matvec/add/layernorm of the #82 block — only
+; per-position vector-add (embedding), one more layernorm, and one matvec (logits) — so the value walk
+; is bit-deterministic by construction, exactly why it crosses four-way.
+;
+; Verdict 63 (1+2+4+8+16+32) when every claim lands:
+;    1  positional embedding     tb-embed-pos: token_embed[id] + positional_embed[pos], bit-exact
+;    2  embedded sequence shape   tb-embed-seq maps 3 ids → a 3×4 sequence
+;    4  LM head logits            tb-logits: final-LN state · embedding → vocab=5 logits, bit-exact
+;    8  logits distinguish        two near-equal vocab logits are DIFFERENT doubles (not collapsed)
+;   16  FULL forward end-to-end   ids → embed+pos → decoder stack → final LN → logits, last hidden bit-exact
+;   32  forward shape + argmax    logits has 5 entries (= vocab) and greedy argmax is deterministic
+;
+; Remaining for the mind (named, not papered over — see receipts/2026-06-30-decoder-forward-full.md):
+;   real WIDTH (d_model=384+ over ll-buffer / form-asm-matvec — not attempted here; recipe is
+;   width-agnostic, proof is at d_model=4 in the tree-walker), and real WEIGHTS as recipe-data
+;   (a real open base — Qwen/Llama — loaded through the form block; 3b, the big remaining).
+
+(do
+  ; ===== fixed config: #82's block params + embed/pos/ids for the wrap =====
+  (defn enc () (list (list 0.2 0.1 0.0 0.3) (list 0.4 0.3 0.2 0.1)))
+  (defn g1 () (list 1.0 1.0 1.0 1.0)) (defn be1 () (list 0.0 0.0 0.0 0.0))
+  (defn g2 () (list 1.1 0.9 1.0 1.0)) (defn be2 () (list 0.01 0.02 0.0 0.0))
+  (defn g3 () (list 1.0 1.0 1.0 1.0)) (defn be3 () (list 0.0 0.0 0.0 0.0))
+  (defn gf () (list 1.0 1.0 1.0 1.0)) (defn bf () (list 0.0 0.0 0.0 0.0))
+  (defn wq () (list (list 0.1 0.0 0.0 0.0) (list 0.0 0.1 0.0 0.0) (list 0.0 0.0 0.1 0.0) (list 0.0 0.0 0.0 0.1)))
+  (defn wk () (list (list 0.2 0.0 0.0 0.0) (list 0.0 0.2 0.0 0.0) (list 0.0 0.0 0.2 0.0) (list 0.0 0.0 0.0 0.2)))
+  (defn wv () (list (list 0.3 0.1 0.0 0.0) (list 0.0 0.3 0.1 0.0) (list 0.0 0.0 0.3 0.1) (list 0.1 0.0 0.0 0.3)))
+  (defn wo () (list (list 1.0 0.0 0.0 0.0) (list 0.0 1.0 0.0 0.0) (list 0.0 0.0 1.0 0.0) (list 0.0 0.0 0.0 1.0)))
+  (defn bz () (list 0.0 0.0 0.0 0.0))
+  (defn w1 () (list (list 0.1 0.2 0.0 0.0) (list 0.0 0.1 0.2 0.0) (list 0.0 0.0 0.1 0.2) (list 0.2 0.0 0.0 0.1)))
+  (defn w2 () (list (list 0.5 0.0 0.0 0.0) (list 0.0 0.5 0.0 0.0) (list 0.0 0.0 0.5 0.0) (list 0.0 0.0 0.0 0.5)))
+  (defn eps () 0.00001)
+  (defn nh () 2) (defn hd () 2) (defn sc () 0.7071067811865476)
+
+  ; vocab=5 token-embedding table, 3-position positional table, 3 token ids.
+  (defn embed () (list (list 0.10 0.20 0.30 0.40)
+                       (list 0.50 0.60 0.70 0.80)
+                       (list 0.90 1.00 1.10 1.20)
+                       (list 0.15 0.25 0.35 0.45)
+                       (list 0.55 0.65 0.75 0.85)))
+  (defn pos () (list (list 0.01 0.02 0.03 0.04)
+                     (list 0.05 0.06 0.07 0.08)
+                     (list 0.09 0.10 0.11 0.12)))
+  (defn ids () (list 2 0 4))
+
+  ; the 26-param decoder layer the stack folds over (the #82 block).
+  (defn layer () (list (g1) (be1) (wq) (bz) (wk) (bz) (wv) (bz) (wo) (bz)
+                       (g2) (be2) (wq) (bz) (wk) (bz) (wv) (bz) (wo) (bz)
+                       (g3) (be3) (w1) (bz) (w2) (bz)))
+  (defn layers () (list (layer)))
+
+  ; the wrap, composed end-to-end.
+  (defn din () (tb-embed-seq (embed) (pos) (ids)))                                  ; positional embedding
+  (defn dout () (tb-dec-stack (din) (enc) (eps) (nh) (hd) (sc) (layers)))           ; #82 decoder block
+  (defn last () (tb-last (dout)))
+  (defn lnf () (tb-vec-add (tb-vec-mul (tn-layernorm (last) (eps)) (gf)) (bf)))     ; final layernorm
+  (defn logits () (tb-logits (embed) (lnf)))                                        ; LM head
+
+  ; --- the six bit-exact claims (reference doubles: go = rust = ts, full fp64 precision) ---
+  ; 1: positional embedding — din[0][0] = embed[ids[0]][0] + pos[0][0] = embed[2][0]+0.01 = 0.90+0.01.
+  (defn c1 () (if (eq (head (head (din))) 0.91) 1 0))
+  ; 2: embedded sequence shape — 3 ids → 3×4.
+  (defn c2 () (if (and (eq (len (din)) 3) (eq (len (head (din))) 4)) 2 0))
+  ; 4: LM head logits — final-LN state projected through the (tied) embedding to vocab=5.
+  (defn c3 () (if (eq (head (logits)) 0.42487498561251347) 4 0))
+  ; 8: logits distinguish — logits[4] is a DIFFERENT double than logits[0] (not collapsed by truncation).
+  (defn c4 () (if (and (eq (head (tail (tail (tail (tail (logits)))))) 0.4248749856125127)
+                       (not (eq (head (logits)) 0.4248749856125127))) 8 0))
+  ; 16: FULL forward end-to-end — the last hidden state (after stack+finalLN) is bit-exact.
+  (defn c5 () (if (and (eq (head (last)) 0.2571013168575855)
+                       (eq (head (lnf)) -1.4999679467539497)) 16 0))
+  ; 32: forward shape + greedy argmax — logits has vocab=5 entries, argmax is deterministic (= 0 here).
+  (defn c6 () (if (and (eq (len (logits)) 5) (eq (tb-argmax (logits)) 0)) 32 0))
+
+  (add (c1) (add (c2) (add (c3) (add (c4) (add (c5) (c6)))))))
