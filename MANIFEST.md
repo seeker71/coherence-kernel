@@ -188,6 +188,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       the same live path to Arabic: `Majed -> ffmpeg -> whisper.cpp/Metal -l ar`, Form wav sensing, four Arabic
       acoustic token prototypes, native CTC decode, live verdict `16383`, live WER `0`, minimum confidence `96`,
       native neural parameters `0`. The paired Chinese probe is named honestly as an oracle miss, not promoted.
+- [x] **macOS Chinese teacher acoustic learning added.** `learn/macos-chinese-teacher-acoustic-learning.fk` admits
+      the short Chinese baseline line `我在`: `Eddy (Chinese) -> ffmpeg -> whisper.cpp/Metal -l zh`, Form wav
+      sensing, three Chinese acoustic prototypes, native CTC decode, live verdict `16383`, live WER `0`, minimum
+      confidence `96`, native neural parameters `0`. Longer Chinese baseline phrases remain named oracle misses.
 - [x] **Sema voice oracle miss learning added.** `learn/sema-voice-oracle-miss-learning.fk` makes the live WER-100
       miss change the algorithm (`32767`): authority stays `oracle-guide`, and AutoML now names
       `text-conditioned-acoustic-vocoder` as the next trainable candidate with g2p, phoneme timing, prosody,
