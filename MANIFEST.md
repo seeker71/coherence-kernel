@@ -253,6 +253,13 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `1012120012010001`, and field-code `12121210001000100` (`12/12` oracle, `12/12` native, `100%`
       reciprocal A/B and B/A). `learn/metal-live-pair-anchors.fk` now counts `2/5` live anchors, leaves `3`
       live pair anchors pending, and keeps the route at `metal-anchored-native-guide`. The band returns `32767`.
+- [x] **Third live Metal pair anchor added.** `presence/macos-en-id-speech-roundtrip-variant.fk` reuses the
+      same Form-owned macOS carrier for `en<->id`; live Apple Metal returned carrier verdict `511`, base
+      field-code `12120000000000000`, and trained field-code `12121210001000100` (`12/12` oracle, `0/12` native
+      before training, `12/12` native after training, `100%` reciprocal A/B and B/A). The Indonesian side uses the
+      same local Damayanti voice for train/eval because that is the installed macOS voice boundary. The anchor set
+      now counts `3/5` live anchors, leaves `2` live pair anchors pending, and keeps the route at
+      `metal-anchored-native-guide`. The band returns `32767`.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
