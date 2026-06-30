@@ -231,15 +231,16 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `fr<->id`, and `pt-br<->zh` all retain reciprocal A->B/B->A/A->A/B->B lanes, start guided, end native,
       keep controls clean, promote by A/B evidence, and preserve the local oracle/device while neural Metal and
       diffusion remain pending. The band returns `32767`.
-- [x] **Five live Metal pair anchors stand — `5/5`, `full-metal-native` for the closed-prompt carrier.**
-      The Form-owned macOS carrier runs `en<->de`, `en<->es`, `en<->id`, `en<->fr`, and `en<->it` on live Apple
+- [x] **Six live Metal pair anchors stand — `6/6`, `full-metal-native` for the closed-prompt carrier.**
+      The Form-owned macOS carrier runs `en<->de`, `en<->es`, `en<->id`, `en<->fr`, `en<->it`, and `en<->zh` on live Apple
       Metal (one `presence/macos-*-speech-roundtrip-variant.fk` per pair; carrier verdict `511` each).
-      `learn/metal-live-pair-anchors.fk` counts `5/5` live anchors and routes `full-metal-native` for the
+      `learn/metal-live-pair-anchors.fk` counts `6/6` live anchors and routes `full-metal-native` for the
       closed-prompt local audio-locale carrier; `learn/metal-observed-sweep-bridge.fk` binds the live route-shift
       receipts to the multiseed sweep (band `32767`). Per-pair training moves native success from `0%` toward
-      `83–100%`; each pair's trained field-code records its oracle/native/reciprocal counts. Prompt text stays
-      ASCII and the Indonesian side reuses the installed Damayanti voice for train/eval, both at the macOS voice
-      boundary. Live Unicode-script anchors, open dictation, and native neural ASR/TTS remain pending.
+      `83–100%`; each pair's trained field-code records its oracle/native/reciprocal counts. Chinese is the first
+      live Unicode-script audio anchor (`en<->zh`: 10/12 oracle-ok, 10/12 native, 83% total, A->B 66%, B->A 100%).
+      The Indonesian side reuses the installed Damayanti voice for train/eval, both at the macOS voice boundary.
+      Live Arabic-script anchoring, open dictation, and native neural ASR/TTS remain pending.
 - [x] **Unicode transcript token lane added.** `observe/stt-wer.fk` now owns shared `sw-tokens`: ASCII
       punctuation still lowercases/splits, accented Latin stays inside words, CJK ideographs become per-character
       tokens, and Arabic words stay grouped while Arabic/CJK punctuation is dropped as delimiters. The macOS
