@@ -1043,6 +1043,82 @@ static long long fk_parse_variadic(long long tag) {
  return fk_smknode(tag, h, t, 0);
 }
 extern int atoi(const char *);
+/* stone 4 (two-pass): PRE-SCAN. The body parse below registers each (defn ...) as it reaches it, one
+   pass — so a call to a LATER-defined function misses fk_fn_lookup and lowers to a no-op (forward and
+   mutual references fail). This pre-scan walks the source first and registers every top-level defn's
+   name + fn-index + arity BEFORE any body is parsed, so all names are known when bodies lower. It only
+   registers (it builds no bodies); the body pass then LOOKS UP the index already registered for each
+   name (fk_fn_lookup) and just fills fk_fn[idx]. Container shape mirrors fk_parse_top exactly: a
+   top-level (do ...) is transparent — its inner forms scan as top-level too (recursively), so defns
+   inside the root do register; a bare top-level (defn ...) registers directly; anything else is opaque
+   (skipped as one balanced form). Read-only over fk_srctext; leaves fk_spos untouched (operates on a
+   local cursor). */
+static void fk_sskip_at(long long *pp) {
+ long long p = *pp;
+ while (p < fk_slen) { char c = fk_srctext[p]; if (fk_sws(c)) { p = p + 1; } else if (c == 59) { while (p < fk_slen && fk_srctext[p] != 10) { p = p + 1; } } else { break; } }
+ *pp = p;
+}
+static long long fk_skip_balanced(long long p) {
+ /* p sits just past a '(' or at a leaf token; skip one whole form, return position just past it. */
+ fk_sskip_at(&p);
+ if (p >= fk_slen) { return p; }
+ if (fk_srctext[p] == 40) {
+  long long depth = 1; p = p + 1;
+  while (p < fk_slen && depth > 0) {
+   char c = fk_srctext[p];
+   if (c == 59) { while (p < fk_slen && fk_srctext[p] != 10) { p = p + 1; } continue; }
+   if (c == 40) { depth = depth + 1; }
+   else if (c == 41) { depth = depth - 1; }
+   p = p + 1;
+  }
+  return p;
+ }
+ return fk_sym_end(p);
+}
+static void fk_prescan_seq(long long *pp);
+static void fk_prescan_form(long long *pp) {
+ long long p = *pp; fk_sskip_at(&p);
+ if (p >= fk_slen || fk_srctext[p] != 40) { *pp = fk_skip_balanced(p); return; }
+ long long h = p + 1; while (h < fk_slen && fk_sws(fk_srctext[h])) { h = h + 1; }
+ long long he = fk_sym_end(h);
+ if (fk_sym_eq(h, he - h, "do")) {
+  /* transparent: scan inner sequence to the matching close, then consume it */
+  long long q = he;
+  fk_prescan_seq(&q);
+  *pp = q;
+  return;
+ }
+ if (fk_sym_eq(h, he - h, "defn")) {
+  long long ns = he; fk_sskip_at(&ns); long long ne = fk_sym_end(ns); long long nlen = ne - ns;
+  /* register the name at the NEXT fn-index, mirroring the body pass's allocation order */
+  long long idx = fk_defn_next; fk_defn_next = fk_defn_next + 1;
+  if (fk_fntop < 256) { fk_fnsym_s[fk_fntop] = ns; fk_fnsym_n[fk_fntop] = nlen; fk_fnidx[fk_fntop] = idx; fk_fntop = fk_fntop + 1; }
+  /* count arity from the (ARGS...) list so self/forward calls read it */
+  long long a = ne; fk_sskip_at(&a);
+  long long na = 0;
+  if (a < fk_slen && fk_srctext[a] == 40) {
+   a = a + 1;
+   while (1) { fk_sskip_at(&a); if (a >= fk_slen || fk_srctext[a] == 41) { break; } a = fk_sym_end(a); na = na + 1; }
+  }
+  if (idx >= 0 && idx < 4096) { fk_fnar[idx] = na; }
+  *pp = fk_skip_balanced(p);   /* skip the whole defn form opaquely */
+  return;
+ }
+ *pp = fk_skip_balanced(p);
+}
+static void fk_prescan_seq(long long *pp) {
+ long long p = *pp;
+ while (1) {
+  fk_sskip_at(&p);
+  if (p >= fk_slen) { *pp = p; return; }
+  if (fk_srctext[p] == 41) { *pp = p + 1; return; }
+  fk_prescan_form(&p);
+ }
+}
+static void fk_prescan_defns(void) {
+ long long p = 0;
+ while (1) { fk_sskip_at(&p); if (p >= fk_slen) { break; } fk_prescan_form(&p); }
+}
 /* one top-level form: (do ...) is transparent (its inner forms are top-level too); (defn ...) registers
    a function at its own index; anything else is the root expression. Multi-arg defns push each arg name
    to slots 0..k-1 (callable single-arg via tag 12 today; multi-arg calls are the next stone). */
@@ -1082,8 +1158,13 @@ static void fk_parse_top(void) {
   if (fk_sym_eq(p, he - p, "defn")) {
    fk_spos = he; fk_sskip();
    long long ns2 = fk_spos; fk_spos = fk_sym_end(fk_spos); long long nlen2 = fk_spos - ns2;
-   long long idx = fk_defn_next; fk_defn_next = fk_defn_next + 1;
-   if (fk_fntop < 256) { fk_fnsym_s[fk_fntop] = ns2; fk_fnsym_n[fk_fntop] = nlen2; fk_fnidx[fk_fntop] = idx; fk_fntop = fk_fntop + 1; }
+   /* two-pass: the pre-scan (fk_prescan_defns) already registered this name + index + arity. LOOK UP
+      the index it assigned rather than allocating a fresh one, so the fn-index the body fills matches
+      the one every call site (incl. forward/mutual references) resolves to. Fallback to the old
+      allocate-on-the-fly path only if the name is somehow unregistered (defensive; pre-scan covers all
+      top-level defns). */
+   long long idx = fk_fn_lookup(ns2, nlen2);
+   if (idx < 0) { idx = fk_defn_next; fk_defn_next = fk_defn_next + 1; if (fk_fntop < 256) { fk_fnsym_s[fk_fntop] = ns2; fk_fnsym_n[fk_fntop] = nlen2; fk_fnidx[fk_fntop] = idx; fk_fntop = fk_fntop + 1; } }
    fk_fname_s = ns2; fk_fname_n = nlen2;
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 40) { fk_spos = fk_spos + 1; }
    fk_bd_top = 0; fk_maxslot = 0; long long na = 0;
@@ -1113,6 +1194,8 @@ static int fk_run_src(const char *path, long long arg) {
                   this when loading strings; the source path must too, else int_to_str/byte_to_str/str_concat
                   spin forever on the `while (fk_sbp+n > fk_scap_b) fk_scap_b *= 2` grow loop (0*2==0). */
  fk_fntop = 0; fk_defn_next = 1; fk_root = -1;   /* stone 4+5: multi-function root logic, preserved */
+ fk_prescan_defns();   /* two-pass: register every top-level defn name+index+arity BEFORE bodies, so forward + mutual references resolve */
+ fk_spos = 0;
  while (1) { fk_sskip(); if (fk_spos >= fk_slen) { break; } fk_parse_top(); }
  if (fk_root >= 0) { fk_fn[0] = fk_root; }
  else if (fk_defn_next > 1) { fk_fn[0] = fk_fn[fk_defn_next - 1]; } /* single/last defn, staged-arg driven (stones 1-2) */
