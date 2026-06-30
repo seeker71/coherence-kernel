@@ -238,6 +238,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       A->B/B->A/A->A/B->B lanes train from `0` to `100` NL/audio rates, route code shifts `0->1`, clean controls
       plus A/B evidence promote the challenger, local oracle/Metal and Form-native flags are present, and neural
       Metal/diffusion remain pending. The band returns `16383`.
+- [x] **Multiseed speech learning sweep added.** `learn/multiseed-speech-learning-sweep.fk` runs seeds `0..4`
+      through the selected-window receipt as one executable movement: `zh<->ar`, `en<->id`, `sa<->la`,
+      `fr<->id`, and `pt-br<->zh` all retain reciprocal A->B/B->A/A->A/B->B lanes, start guided, end native,
+      keep controls clean, promote by A/B evidence, and preserve the local oracle/device while neural Metal and
+      diffusion remain pending. The band returns `32767`.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
