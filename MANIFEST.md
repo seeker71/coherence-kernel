@@ -174,6 +174,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       measured transcript into the Sema local-oracle gate. The contract band returns `2047`; the live probe returned
       `479`, field code `110100002`, WER `100`, route `oracle-guide`. This closes the live carrier gap but proves
       the current formant waveform is not yet intelligible speech.
+- [x] **macOS Sema voice teacher carrier added.** `presence/macos-sema-voice-teacher-carrier.fk` runs real local
+      teacher audio (`say -> ffmpeg -> whisper.cpp/Metal`) and lowers it into Sema local-oracle rows while refusing
+      native authority. A manual ten-voice sweep transcribed `Open speech flows.` exactly for all ten voices; the
+      repeatable Form carrier uses `Flo (English (US))`, contract band `4095`, live WER `0`. This is teacher
+      material for native acoustic/vocoder learning, not native Sema TTS.
 - [x] **Sema voice oracle miss learning added.** `learn/sema-voice-oracle-miss-learning.fk` makes the live WER-100
       miss change the algorithm (`32767`): authority stays `oracle-guide`, and AutoML now names
       `text-conditioned-acoustic-vocoder` as the next trainable candidate with g2p, phoneme timing, prosody,
