@@ -1,0 +1,234 @@
+; macos-speech-roundtrip-carrier.fk -- Form-owned local speech loop carrier.
+;
+; This replaces the temporary JS carrier. The orchestration, prompt rows,
+; transcript tokenization, receipt construction, and route verdict are Form.
+; Host effects stay behind the Form `host-exec` door until native TTS/ASR
+; replaces `say`, `ffmpeg`, and `whisper-cli`.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/asr-prompt-id.fk
+;   observe/wav-sense.fk
+;   learn/audio-locale-native-training.fk
+
+(do
+    (defn masr-model () "/Users/ursmuff/.cache/whisper.cpp/ggml-large-v3-turbo.bin")
+    (defn masr-device () "macos-arm64-m4-max")
+    (defn masr-oracle () "whisper.cpp-large-v3-turbo")
+    (defn masr-a () "en")
+    (defn masr-b () "de")
+    (defn masr-max-wer () 25)
+    (defn masr-floor () 50)
+    (defn masr-out-dir () (str_concat (temp_dir) "/sema-mac-audio-locale-form"))
+
+    (defn masr-cat3 (a b c) (str_concat a (str_concat b c)))
+    (defn masr-cat4 (a b c d) (str_concat a (str_concat b (str_concat c d))))
+    (defn masr-cat5 (a b c d e) (str_concat a (str_concat b (str_concat c (str_concat d e)))))
+    (defn masr-cat6 (a b c d e f) (str_concat a (str_concat b (str_concat c (str_concat d (str_concat e f))))))
+    (defn masr-q (s) (masr-cat3 "'" s "'"))
+
+    (defn masr-prompt (key en-id de-id en-text de-text)
+        (list key en-id de-id en-text de-text))
+    (defn masr-key (p) (nth p 0))
+    (defn masr-en-id (p) (nth p 1))
+    (defn masr-de-id (p) (nth p 2))
+    (defn masr-en-text (p) (nth p 3))
+    (defn masr-de-text (p) (nth p 4))
+
+    (defn masr-board ()
+        (masr-prompt "hatiSuci-board-empty" 201 101
+                     "The board is clear. Nothing is waiting."
+                     "Die Tafel ist leer. Nichts wartet."))
+    (defn masr-enter ()
+        (masr-prompt "hatiSuci-reg-enter" 202 102
+                     "Enter the house."
+                     "Ins Haus eintreten."))
+    (defn masr-gather ()
+        (masr-prompt "hatiSuci-gather-ask" 203 103
+                     "Ask everyone."
+                     "Alle fragen."))
+    (defn masr-prompts () (list (masr-board) (masr-enter) (masr-gather)))
+
+    (defn masr-id (p locale)
+        (if (str_eq locale "en") (masr-en-id p) (masr-de-id p)))
+    (defn masr-text (p locale)
+        (if (str_eq locale "en") (masr-en-text p) (masr-de-text p)))
+    (defn masr-train-voice (locale)
+        (if (str_eq locale "en") "Samantha" "Anna"))
+    (defn masr-eval-voice (locale)
+        (if (str_eq locale "en") "Eddy (English (US))" "Eddy (German (Germany))"))
+    (defn masr-voice (locale split)
+        (if (str_eq split "train") (masr-train-voice locale) (masr-eval-voice locale)))
+    (defn masr-whisper-locale (locale) locale)
+
+    (defn masr-aiff-path (prompt locale split)
+        (masr-cat6 (masr-out-dir) "/" (masr-key prompt) "-" locale (masr-cat3 "-" split ".aiff")))
+    (defn masr-wav-path (prompt locale split)
+        (masr-cat6 (masr-out-dir) "/" (masr-key prompt) "-" locale (masr-cat3 "-" split ".wav")))
+
+    (defn masr-say-command (voice aiff text)
+        (str_concat
+            (str_concat "say -v " (masr-q voice))
+            (str_concat
+                (str_concat " -o " (masr-q aiff))
+                (str_concat " " (masr-q text)))))
+    (defn masr-ffmpeg-command (aiff wav)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (masr-q aiff))
+            (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le " (masr-q wav))))
+    (defn masr-whisper-command (model wav locale)
+        (str_concat
+            (str_concat "whisper-cli -m " (masr-q model))
+            (str_concat
+                (str_concat " -f " (masr-q wav))
+                (str_concat " " (masr-cat3 "-l " (masr-whisper-locale locale) " -nt -np")))))
+
+    (defn masr-render (prompt locale split)
+        (do
+            (let _say
+                (host-exec
+                    (masr-say-command
+                        (masr-voice locale split)
+                        (masr-aiff-path prompt locale split)
+                        (masr-text prompt locale))
+                    ""))
+            (let _ffmpeg
+                (host-exec
+                    (masr-ffmpeg-command
+                        (masr-aiff-path prompt locale split)
+                        (masr-wav-path prompt locale split))
+                    ""))
+            (masr-wav-path prompt locale split)))
+
+    (defn masr-transcript (wav locale model)
+        (host-exec (masr-whisper-command model wav locale) ""))
+
+    (defn masr-snoc (xs x)
+        (if (eq (len xs) 0) (cons x (empty))
+            (cons (head xs) (masr-snoc (tail xs) x))))
+    (defn masr-digit? (b) (if (and (ge b 48) (le b 57)) 1 0))
+    (defn masr-upper? (b) (if (and (ge b 65) (le b 90)) 1 0))
+    (defn masr-lower? (b) (if (and (ge b 97) (le b 122)) 1 0))
+    (defn masr-alnum? (b)
+        (if (or (eq (masr-digit? b) 1)
+                (or (eq (masr-upper? b) 1) (eq (masr-lower? b) 1))) 1 0))
+    (defn masr-lower-byte (b) (if (eq (masr-upper? b) 1) (add b 32) b))
+    (defn masr-flush-token (cur token-acc)
+        (if (str_eq cur "") token-acc (masr-snoc token-acc cur)))
+    (defn masr-token-loop (source i n cur token-acc)
+        (if (ge i n)
+            (masr-flush-token cur token-acc)
+            (do
+                (let b (str_byte_at source i))
+                (if (eq (masr-alnum? b) 1)
+                    (masr-token-loop source (add i 1) n
+                                     (str_concat cur (byte_to_str (masr-lower-byte b)))
+                                     token-acc)
+                    (masr-token-loop source (add i 1) n "" (masr-flush-token cur token-acc))))))
+    (defn masr-tokens (text) (masr-token-loop text 0 (str_len text) "" (empty)))
+    (defn masr-truth (p locale) (masr-tokens (masr-text p locale)))
+
+    (defn masr-candidate (prompt locale)
+        (do
+            (let wav (masr-render prompt locale "train"))
+            (alnt-wav-candidate (masr-id prompt locale) (masr-truth prompt locale) wav)))
+
+    (defn masr-samples-for (prompt model)
+        (do
+            (let wav-a (masr-render prompt (masr-a) "eval"))
+            (let oracle-a (masr-tokens (masr-transcript wav-a (masr-a) model)))
+            (let sample-ba
+                (alnt-wav-sample (masr-id prompt (masr-a)) (masr-b) (masr-a)
+                                 (masr-truth prompt (masr-a)) oracle-a wav-a 0 0 0))
+            (let sample-aa
+                (alnt-wav-sample (masr-id prompt (masr-a)) (masr-a) (masr-a)
+                                 (masr-truth prompt (masr-a)) oracle-a wav-a 0 0 0))
+            (let wav-b (masr-render prompt (masr-b) "eval"))
+            (let oracle-b (masr-tokens (masr-transcript wav-b (masr-b) model)))
+            (let sample-ab
+                (alnt-wav-sample (masr-id prompt (masr-b)) (masr-a) (masr-b)
+                                 (masr-truth prompt (masr-b)) oracle-b wav-b 0 0 0))
+            (let sample-bb
+                (alnt-wav-sample (masr-id prompt (masr-b)) (masr-b) (masr-b)
+                                 (masr-truth prompt (masr-b)) oracle-b wav-b 0 0 0))
+            (list
+                sample-ab
+                sample-ba
+                sample-aa
+                sample-bb)))
+
+    (defn masr-append (xs ys)
+        (if (eq (len xs) 0) ys (cons (head xs) (masr-append (tail xs) ys))))
+
+    (defn masr-live-candidates ()
+        (list
+            (masr-candidate (masr-board) (masr-a))
+            (masr-candidate (masr-board) (masr-b))
+            (masr-candidate (masr-enter) (masr-a))
+            (masr-candidate (masr-enter) (masr-b))
+            (masr-candidate (masr-gather) (masr-a))
+            (masr-candidate (masr-gather) (masr-b))))
+
+    (defn masr-live-samples (model)
+        (masr-append
+            (masr-samples-for (masr-board) model)
+            (masr-append
+                (masr-samples-for (masr-enter) model)
+                (masr-samples-for (masr-gather) model))))
+
+    (defn masr-live-base-receipt (samples candidates)
+        (alnt-receipt samples candidates (masr-a) (masr-b)
+                      (masr-max-wer) (masr-floor) (masr-oracle) (masr-device)))
+    (defn masr-live-receipt (samples candidates)
+        (alnt-trained-receipt samples candidates (masr-a) (masr-b)
+                              (masr-max-wer) (masr-floor) (masr-oracle) (masr-device)))
+
+    (defn masr-verdict (r)
+        (add
+            (add
+                (add (if (str_eq (alnt-rec-kind r) "audio-locale-native-training") 1 0)
+                     (if (str_eq (alnt-rec-device r) (masr-device)) 2 0))
+                (add (if (str_eq (alnt-rec-oracle r) (masr-oracle)) 4 0)
+                     (if (ge (alnt-rec-count r) 4) 8 0)))
+            (add
+                (add (if (ge (mul (alnt-rec-oracle-ok r) 2) (alnt-rec-count r)) 16 0)
+                     (if (ge (alnt-rec-rate r) (masr-floor)) 32 0))
+                (add (if (eq (alnt-rec-has-ab r) 1) 64 0)
+                     (add (if (eq (alnt-rec-has-ba r) 1) 128 0)
+                          (if (str_eq (alnt-rec-route r) "native") 256 0))))))
+
+    (defn masr-metric-code (r)
+        (add
+            (add
+                (mul (alnt-rec-count r) 10000000000)
+                (mul (alnt-rec-oracle-ok r) 100000000))
+            (add
+                (add (mul (alnt-rec-native-ok r) 1000000)
+                     (mul (alnt-rec-rate r) 10000))
+                (add (mul (alnt-rec-ab-rate r) 100)
+                     (alnt-rec-ba-rate r)))))
+
+    (defn masr-host-tools-ready? ()
+        (if (str_eq (host-exec "command -v say >/dev/null && command -v ffmpeg >/dev/null && command -v whisper-cli >/dev/null && printf 1 || printf 0" "") "1") 1 0))
+    (defn masr-ready? ()
+        (if (and (eq (fs_exists (masr-model)) 1) (eq (masr-host-tools-ready?) 1)) 1 0))
+
+    (defn masr-run ()
+        (if (eq (masr-ready?) 1)
+            (do
+                (let _mk (fs_mkdir (masr-out-dir)))
+                (let candidates (masr-live-candidates))
+                (let samples (masr-live-samples (masr-model)))
+                (masr-verdict (masr-live-receipt samples candidates)))
+            0))
+
+    (defn masr-run-metric-code ()
+        (if (eq (masr-ready?) 1)
+            (do
+                (let _mk (fs_mkdir (masr-out-dir)))
+                (let candidates (masr-live-candidates))
+                (let samples (masr-live-samples (masr-model)))
+                (masr-metric-code (masr-live-receipt samples candidates)))
+            0))
+
+    0)

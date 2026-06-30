@@ -41,3 +41,25 @@ adb shell '/data/local/tmp/fkwu /data/local/tmp/loop-table.txt 0 /data/local/tmp
 ```
 
 The body runs on the phone. Next: the input_byte EOF bounds-guard (so the loop terminates cleanly everywhere), then the same observation on Windows, then the clang-free form-asm build that turns the c-bootstrap row from clang-built to fully sovereign.
+
+## Follow-up, 2026-06-30
+
+The checkout seed now carries the bounded `input_byte` EOF guard: staged input records `fk_src_len`, and reads
+outside that length return `0`. Local macOS smoke over the committed `flatten/form-eval-cli-loop.tbl` confirms an
+empty staged input starts with `0` instead of an unbounded noise stream.
+
+Fresh Android phone-metal follow-up used the pinned USB device `R5CW20DK17A` and an isolated temp directory,
+`/data/local/tmp/codex-408b-c8GKyC`, on the same Galaxy S23 Ultra row (`SM-S918U1`, `arm64-v8a`, SDK `36`). The
+NDK r27c `aarch64-linux-android34-clang` build returned:
+
+```
+native-vs-rented direct source: 11111
+host-os membrane direct source: 8191
+speech-loopback carrier law:    4095
+guarded table loop add:         42
+guarded table loop empty EOF:   0
+```
+
+This closes the named Android EOF seed bug as observed on device metal and promotes the Android direct-source row
+in `form/form-stdlib/host-os-membrane.fk`. It does **not** claim the concrete AAudio/AudioRecord/AudioTrack
+speech loopback carrier; that still needs a real local audio/TTS/STT receipt.

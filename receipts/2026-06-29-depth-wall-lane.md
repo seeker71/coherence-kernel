@@ -30,7 +30,7 @@ the wall barely moved (~60 -> ~125, i.e. the trampoline frame recursing, not loo
 
 A correct TCO must thread through ALL call paths and preserve the combination + offer-ack semantics — that is a
 careful, dedicated change to the shared evaluator with full re-validation of the 80 observing recipes, the offer
-protocol, and the table path. Rushing it risked regressing a working system, so the incomplete attempt was
+protocol, and the table path. Rushing it could have regressed a working system, so the incomplete attempt was
 **reverted to clean main** (native-vs-rented 11111, acc(50) 1275 intact). Naming the gap is the honest move here,
 not shipping a half-engaged trampoline.
 

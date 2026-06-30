@@ -1,0 +1,179 @@
+; multilocale-route-shift-ledger.fk -- per-pair oracle-to-native shift witness.
+;
+; The pipeline receipt already says whether the whole multilocale NL/audio loop
+; routes native. This ledger makes the shift visible per reciprocal pair:
+; before/after NL rate, before/after audio rate, before/after route, and whether
+; that pair actually moved from oracle-guide to native. A pair can be already
+; held, newly shifted, or still guided without hiding inside an aggregate count.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/asr-prompt-id.fk
+;   learn/sanskrit-locale-baseline.fk
+;   learn/multilocale-nl-audio-pipeline.fk
+
+(do
+    (defn mrsl-rate (wins total)
+        (if (eq total 0) 0 (div (mul wins 100) total)))
+
+    (defn mrsl-nl-dir-count (samples src dst)
+        (if (eq (len samples) 0) 0
+            (add
+                (if (eq (mlap-nl-direction? (head samples) src dst) 1) 1 0)
+                (mrsl-nl-dir-count (tail samples) src dst))))
+
+    (defn mrsl-audio-dir-count (samples src dst)
+        (if (eq (len samples) 0) 0
+            (add
+                (if (eq (mlap-audio-direction? (head samples) src dst) 1) 1 0)
+                (mrsl-audio-dir-count (tail samples) src dst))))
+
+    (defn mrsl-nl-pair-count (samples pair)
+        (add
+            (mrsl-nl-dir-count samples (mlap-pair-a pair) (mlap-pair-b pair))
+            (mrsl-nl-dir-count samples (mlap-pair-b pair) (mlap-pair-a pair))))
+
+    (defn mrsl-audio-pair-count (samples pair)
+        (add
+            (mrsl-audio-dir-count samples (mlap-pair-a pair) (mlap-pair-b pair))
+            (mrsl-audio-dir-count samples (mlap-pair-b pair) (mlap-pair-a pair))))
+
+    (defn mrsl-nl-pair-score (samples rows max-wer pair)
+        (add
+            (mlap-nl-dir-score samples rows max-wer (mlap-pair-a pair) (mlap-pair-b pair))
+            (mlap-nl-dir-score samples rows max-wer (mlap-pair-b pair) (mlap-pair-a pair))))
+
+    (defn mrsl-audio-pair-score (samples candidates max-wer pair)
+        (add
+            (mlap-audio-dir-score samples candidates max-wer (mlap-pair-a pair) (mlap-pair-b pair))
+            (mlap-audio-dir-score samples candidates max-wer (mlap-pair-b pair) (mlap-pair-a pair))))
+
+    (defn mrsl-nl-pair-rate (samples rows max-wer pair)
+        (mrsl-rate
+            (mrsl-nl-pair-score samples rows max-wer pair)
+            (mrsl-nl-pair-count samples pair)))
+
+    (defn mrsl-audio-pair-rate (samples candidates max-wer pair)
+        (mrsl-rate
+            (mrsl-audio-pair-score samples candidates max-wer pair)
+            (mrsl-audio-pair-count samples pair)))
+
+    (defn mrsl-pair-route (nl-samples audio-samples rows candidates max-wer floor pair)
+        (if (and (ge (mrsl-nl-pair-rate nl-samples rows max-wer pair) floor)
+                 (and (ge (mrsl-audio-pair-rate audio-samples candidates max-wer pair) floor)
+                      (eq (mlap-pair-ready? nl-samples audio-samples rows candidates max-wer pair) 1)))
+            "native"
+            "oracle-guide"))
+
+    (defn mrsl-shifted? (before-route after-route)
+        (if (and (str_eq before-route "oracle-guide") (str_eq after-route "native")) 1 0))
+
+    (defn mrsl-row (pair before-nl after-nl before-audio after-audio
+                         before-route after-route shifted)
+        (list "multilocale-route-shift-row"
+              (mlap-pair-a pair)
+              (mlap-pair-b pair)
+              before-nl
+              after-nl
+              before-audio
+              after-audio
+              before-route
+              after-route
+              shifted))
+
+    (defn mrsl-row-kind          (r) (nth r 0))
+    (defn mrsl-row-a             (r) (nth r 1))
+    (defn mrsl-row-b             (r) (nth r 2))
+    (defn mrsl-row-before-nl     (r) (nth r 3))
+    (defn mrsl-row-after-nl      (r) (nth r 4))
+    (defn mrsl-row-before-audio  (r) (nth r 5))
+    (defn mrsl-row-after-audio   (r) (nth r 6))
+    (defn mrsl-row-before-route  (r) (nth r 7))
+    (defn mrsl-row-after-route   (r) (nth r 8))
+    (defn mrsl-row-shifted       (r) (nth r 9))
+
+    (defn mrsl-empty-row ()
+        (list "multilocale-route-shift-row" "" "" 0 0 0 0 "oracle-guide" "oracle-guide" 0))
+
+    (defn mrsl-make-row (nl-samples audio-samples before-rows after-rows
+                                    before-candidates after-candidates max-wer floor pair)
+        (do
+            (let before-nl (mrsl-nl-pair-rate nl-samples before-rows max-wer pair))
+            (let after-nl (mrsl-nl-pair-rate nl-samples after-rows max-wer pair))
+            (let before-audio (mrsl-audio-pair-rate audio-samples before-candidates max-wer pair))
+            (let after-audio (mrsl-audio-pair-rate audio-samples after-candidates max-wer pair))
+            (let before-route
+                (mrsl-pair-route nl-samples audio-samples before-rows before-candidates max-wer floor pair))
+            (let after-route
+                (mrsl-pair-route nl-samples audio-samples after-rows after-candidates max-wer floor pair))
+            (mrsl-row pair before-nl after-nl before-audio after-audio
+                      before-route after-route (mrsl-shifted? before-route after-route))))
+
+    (defn mrsl-ledger-loop (pairs nl-samples audio-samples before-rows after-rows
+                                  before-candidates after-candidates max-wer floor)
+        (if (eq (len pairs) 0) (empty)
+            (cons
+                (mrsl-make-row nl-samples audio-samples before-rows after-rows
+                               before-candidates after-candidates max-wer floor (head pairs))
+                (mrsl-ledger-loop (tail pairs) nl-samples audio-samples before-rows after-rows
+                                  before-candidates after-candidates max-wer floor))))
+
+    (defn mrsl-ledger (pairs nl-samples audio-samples before-rows after-rows
+                             before-candidates after-candidates max-wer floor)
+        (mrsl-ledger-loop pairs nl-samples audio-samples before-rows after-rows
+                          before-candidates after-candidates max-wer floor))
+
+    (defn mrsl-find-row (rows a b)
+        (if (eq (len rows) 0) (mrsl-empty-row)
+            (if (and (str_eq (mrsl-row-a (head rows)) a)
+                     (str_eq (mrsl-row-b (head rows)) b))
+                (head rows)
+                (mrsl-find-row (tail rows) a b))))
+
+    (defn mrsl-shift-count (rows)
+        (if (eq (len rows) 0) 0
+            (add (mrsl-row-shifted (head rows)) (mrsl-shift-count (tail rows)))))
+
+    (defn mrsl-after-native-count (rows)
+        (if (eq (len rows) 0) 0
+            (add
+                (if (str_eq (mrsl-row-after-route (head rows)) "native") 1 0)
+                (mrsl-after-native-count (tail rows)))))
+
+    (defn mrsl-before-oracle-count (rows)
+        (if (eq (len rows) 0) 0
+            (add
+                (if (str_eq (mrsl-row-before-route (head rows)) "oracle-guide") 1 0)
+                (mrsl-before-oracle-count (tail rows)))))
+
+    (defn mrsl-route (rows)
+        (if (eq (mrsl-after-native-count rows) (len rows)) "native" "oracle-guide"))
+
+    (defn mrsl-receipt (rows floor oracle device)
+        (list "multilocale-route-shift-ledger"
+              device
+              oracle
+              (len rows)
+              (mrsl-shift-count rows)
+              (mrsl-before-oracle-count rows)
+              (mrsl-after-native-count rows)
+              floor
+              (mrsl-route rows)
+              1
+              1
+              0))
+
+    (defn mrsl-rec-kind           (r) (nth r 0))
+    (defn mrsl-rec-device         (r) (nth r 1))
+    (defn mrsl-rec-oracle         (r) (nth r 2))
+    (defn mrsl-rec-pairs          (r) (nth r 3))
+    (defn mrsl-rec-shifted        (r) (nth r 4))
+    (defn mrsl-rec-before-oracle  (r) (nth r 5))
+    (defn mrsl-rec-after-native   (r) (nth r 6))
+    (defn mrsl-rec-floor          (r) (nth r 7))
+    (defn mrsl-rec-route          (r) (nth r 8))
+    (defn mrsl-rec-oracle-metal   (r) (nth r 9))
+    (defn mrsl-rec-native-form    (r) (nth r 10))
+    (defn mrsl-rec-neural-metal   (r) (nth r 11))
+
+    0)

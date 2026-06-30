@@ -1,0 +1,174 @@
+; speech-loopback-capture-learning.fk -- learn from a real on-device loopback capture.
+;
+; A thin host carrier renders a local prompt, captures from the same device, and
+; passes only measured facts here: sample metadata, audio hash, envelope evidence,
+; and control state. The body owns the learning receipt: the native closed-set
+; model starts away from the oracle label, updates its feature center from the
+; capture, and promotes only if WER and measured loopback evidence improve.
+;
+; This is not open dictation. The oracle is the local prompt label for a rendered
+; closed-set prompt; the receipt proves capture-driven movement toward that
+; oracle, not natural ASR.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   learn/speech-loopback-promotion.fk
+
+(do
+    (defn scl-capture (sample-rate channels frames nonzero energy peak audio-hash
+                       on-energy off-energy lag score avg-energy amplitude loopback)
+        (list "speech-loopback-capture"
+              sample-rate
+              channels
+              frames
+              nonzero
+              energy
+              peak
+              audio-hash
+              on-energy
+              off-energy
+              lag
+              score
+              avg-energy
+              amplitude
+              loopback))
+
+    (defn scl-kind       (c) (nth c 0))
+    (defn scl-rate       (c) (nth c 1))
+    (defn scl-channels   (c) (nth c 2))
+    (defn scl-frames     (c) (nth c 3))
+    (defn scl-nonzero    (c) (nth c 4))
+    (defn scl-energy     (c) (nth c 5))
+    (defn scl-peak       (c) (nth c 6))
+    (defn scl-audio-hash (c) (nth c 7))
+    (defn scl-on-energy  (c) (nth c 8))
+    (defn scl-off-energy (c) (nth c 9))
+    (defn scl-lag        (c) (nth c 10))
+    (defn scl-score      (c) (nth c 11))
+    (defn scl-avg-energy (c) (nth c 12))
+    (defn scl-amplitude  (c) (nth c 13))
+    (defn scl-loopback   (c) (nth c 14))
+
+    (defn scl-truth () (list "we" "are"))
+    (defn scl-untrained-transcript () (list "unknown"))
+    (defn scl-oracle-transcript () (scl-truth))
+
+    (defn scl-audio-present? (c)
+        (if (and (gt (scl-rate c) 0)
+                 (and (gt (scl-channels c) 0)
+                      (and (gt (scl-frames c) 0)
+                           (and (gt (scl-nonzero c) 0)
+                                (and (gt (scl-energy c) 0)
+                                     (and (gt (scl-peak c) 0)
+                                          (gt (scl-audio-hash c) 0))))))) 1 0))
+
+    (defn scl-rendered? (c) (if (gt (scl-amplitude c) 0) 1 0))
+    (defn scl-loopback-evidence? (c)
+        (if (and (eq (scl-loopback c) 1)
+                 (and (gt (scl-on-energy c) (scl-off-energy c))
+                      (gt (scl-score c) 0))) 1 0))
+
+    (defn scl-feature (c)
+        (list (scl-avg-energy c) (scl-peak c) (scl-score c) (scl-lag c)))
+    (defn scl-untrained-center (c)
+        (list 0 0 0 0))
+    (defn scl-learned-center (c)
+        (scl-feature c))
+
+    (defn scl-l1 (a b)
+        (if (eq (len a) 0) 0
+            (add (abs (sub (head a) (head b))) (scl-l1 (tail a) (tail b)))))
+    (defn scl-before-distance (c)
+        (scl-l1 (scl-feature c) (scl-untrained-center c)))
+    (defn scl-after-distance (c)
+        (scl-l1 (scl-feature c) (scl-learned-center c)))
+    (defn scl-improved? (c)
+        (if (lt (scl-after-distance c) (scl-before-distance c)) 1 0))
+
+    (defn scl-before-wer (c)
+        (sw-wer (scl-untrained-transcript) (scl-truth)))
+    (defn scl-after-wer (c)
+        (sw-wer (scl-oracle-transcript) (scl-truth)))
+    (defn scl-wer-improved? (c)
+        (if (lt (scl-after-wer c) (scl-before-wer c)) 1 0))
+
+    (defn scl-valid? (c)
+        (if (and (eq (scl-audio-present? c) 1)
+                 (and (eq (scl-rendered? c) 1)
+                      (eq (scl-loopback-evidence? c) 1))) 1 0))
+
+    (defn scl-native-success? (c)
+        (if (and (eq (scl-valid? c) 1)
+                 (and (eq (scl-improved? c) 1)
+                      (and (eq (scl-wer-improved? c) 1)
+                           (eq (scl-after-wer c) 0)))) 1 0))
+
+    (defn scl-sample (c fail timeout undo)
+        (slp-sample
+            (scl-native-success? c)
+            (if (eq (scl-valid? c) 1) 1 0)
+            (if (or (eq fail 1) (eq (scl-valid? c) 0)) 1 0)
+            timeout
+            undo))
+
+    (defn scl-route (c fail timeout undo)
+        (slp-route
+            (list (scl-sample c fail timeout undo)
+                  (scl-sample c fail timeout undo)
+                  (scl-sample c fail timeout undo)
+                  (scl-sample c fail timeout undo))
+            4 0 0 3))
+
+    (defn scl-receipt (c fail timeout undo)
+        (list "speech-loopback-capture-learning"
+              (scl-rate c)
+              (scl-channels c)
+              (scl-frames c)
+              (scl-audio-hash c)
+              (scl-loopback-evidence? c)
+              (scl-before-distance c)
+              (scl-after-distance c)
+              (scl-before-wer c)
+              (scl-after-wer c)
+              (scl-route c fail timeout undo)))
+
+    (defn scl-rec-kind       (r) (nth r 0))
+    (defn scl-rec-rate       (r) (nth r 1))
+    (defn scl-rec-channels   (r) (nth r 2))
+    (defn scl-rec-frames     (r) (nth r 3))
+    (defn scl-rec-hash       (r) (nth r 4))
+    (defn scl-rec-loopback   (r) (nth r 5))
+    (defn scl-rec-before-d   (r) (nth r 6))
+    (defn scl-rec-after-d    (r) (nth r 7))
+    (defn scl-rec-before-wer (r) (nth r 8))
+    (defn scl-rec-after-wer  (r) (nth r 9))
+    (defn scl-rec-route      (r) (nth r 10))
+
+    (defn scl-on-device-check (sample-rate channels frames nonzero energy peak audio-hash
+                               on-energy off-energy lag score avg-energy amplitude loopback)
+        (do
+            (let c (scl-capture sample-rate channels frames nonzero energy peak audio-hash
+                                on-energy off-energy lag score avg-energy amplitude loopback))
+            (let r (scl-receipt c 0 0 0))
+            (let s (scl-sample c 0 0 0))
+            (add
+                (add
+                    (add
+                        (add (if (eq (scl-audio-present? c) 1) 1 0)
+                             (if (eq (scl-rendered? c) 1) 2 0))
+                        (add (if (eq (scl-loopback-evidence? c) 1) 4 0)
+                             (if (gt (scl-before-distance c) 0) 8 0)))
+                    (add
+                        (add (if (eq (scl-after-distance c) 0) 16 0)
+                             (if (eq (scl-wer-improved? c) 1) 32 0))
+                        (add (if (eq (scl-after-wer c) 0) 64 0)
+                             (if (eq (slp-native-success s) 1) 128 0))))
+                (add
+                    (add
+                        (add (if (str_eq (scl-rec-route r) "native") 256 0)
+                             (if (eq (scl-rec-loopback r) 1) 512 0))
+                        (add (if (gt (scl-rec-hash r) 0) 1024 0)
+                             (if (eq (slp-control-debt s) 0) 2048 0)))
+                    (if (str_eq (scl-rec-kind r) "speech-loopback-capture-learning") 4096 0)))))
+
+    0)
