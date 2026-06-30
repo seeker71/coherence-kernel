@@ -1,0 +1,214 @@
+; jit-byte-list-membrane.fk - exact Form byte-list membrane before host install.
+;
+; Earlier loader receipts carried byte counts after emission. This cell keeps
+; the actual Form-emitted byte list in the admitted/loadable payload, validates
+; every byte, and only then adapts the payload into the existing loader action
+; contract. It is still not an mmap/fk_native_call implementation.
+;
+; preludes:
+;   model/form-asm-x64.fk
+;   observe/jit-runtime-fault.fk
+;   observe/jit-loader-contract.fk
+
+(do
+    ; byte payload:
+    ; ("byte-payload" owner target bytes source guard fault deopt root abi reloc safepoint exception)
+    (defn jblm-payload (owner target bytes source guard fault deopt root abi reloc safepoint exception)
+        (list "byte-payload" owner target bytes source guard fault deopt root abi reloc safepoint exception))
+    (defn jblm-payload? (p) (if (eq (len p) 13) (str_eq (nth p 0) "byte-payload") 0))
+    (defn jblm-owner (p) (nth p 1))
+    (defn jblm-target (p) (nth p 2))
+    (defn jblm-bytes (p) (nth p 3))
+    (defn jblm-source (p) (nth p 4))
+    (defn jblm-guard (p) (nth p 5))
+    (defn jblm-fault (p) (nth p 6))
+    (defn jblm-deopt (p) (nth p 7))
+    (defn jblm-root (p) (nth p 8))
+    (defn jblm-abi (p) (nth p 9))
+    (defn jblm-reloc (p) (nth p 10))
+    (defn jblm-safepoint (p) (nth p 11))
+    (defn jblm-exception (p) (nth p 12))
+
+    ; loaded exact-byte slot:
+    ; ("byte-loaded" payload writable executable sealed generation)
+    (defn jblm-loaded (payload writable executable sealed generation)
+        (list "byte-loaded" payload writable executable sealed generation))
+    (defn jblm-loaded? (l) (if (eq (len l) 6) (str_eq (nth l 0) "byte-loaded") 0))
+    (defn jblm-loaded-payload (l) (nth l 1))
+    (defn jblm-writable (l) (nth l 2))
+    (defn jblm-executable (l) (nth l 3))
+    (defn jblm-sealed (l) (nth l 4))
+    (defn jblm-generation (l) (nth l 5))
+
+    (defn jblm-byte? (b)
+        (if (ge b 0) (if (lt b 256) 1 0) 0))
+
+    (defn jblm-byte-list? (xs)
+        (if (eq (len xs) 0)
+            1
+            (if (eq (jblm-byte? (head xs)) 1) (jblm-byte-list? (tail xs)) 0)))
+
+    (defn jblm-eq-list (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0)
+                1
+                (if (eq (head a) (head b)) (jblm-eq-list (tail a) (tail b)) 0))
+            0))
+
+    (defn jblm-has? (xs x)
+        (if (eq (len xs) 0)
+            0
+            (if (eq (head xs) x) 1 (jblm-has? (tail xs) x))))
+
+    (defn jblm-payload-safe? (p)
+        (if (eq (jblm-payload? p) 1)
+            (if (str_eq (jblm-owner p) "form-backend")
+                (if (gt (len (jblm-bytes p)) 0)
+                    (if (eq (jblm-byte-list? (jblm-bytes p)) 1)
+                        (if (eq (jblm-source p) 1)
+                            (if (eq (jblm-guard p) 1)
+                                (if (eq (jblm-fault p) 1)
+                                    (if (eq (jblm-deopt p) 1)
+                                        (if (eq (jblm-root p) 1)
+                                            (if (eq (jblm-abi p) 1)
+                                                (if (eq (jblm-reloc p) 1)
+                                                    (if (eq (jblm-safepoint p) 1)
+                                                        (if (eq (jblm-exception p) 1) 1 0)
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jblm-adapt-loader-payload (p)
+        (if (eq (jblm-payload-safe? p) 1)
+            (jlc-payload "form-backend" (jblm-target p) (len (jblm-bytes p))
+                (jblm-source p) (jblm-guard p) (jblm-fault p) (jblm-deopt p)
+                (jblm-root p) (jblm-abi p) (jblm-reloc p)
+                (jblm-safepoint p) (jblm-exception p))
+            (empty)))
+
+    (defn jblm-load (p generation)
+        (if (eq (jlc-payload-safe? (jblm-adapt-loader-payload p)) 1)
+            (jblm-loaded p 0 1 1 generation)
+            (empty)))
+
+    (defn jblm-loaded-safe? (l)
+        (if (eq (jblm-loaded? l) 1)
+            (if (eq (jblm-payload-safe? (jblm-loaded-payload l)) 1)
+                (if (eq (jblm-writable l) 0)
+                    (if (eq (jblm-executable l) 1)
+                        (if (eq (jblm-sealed l) 1)
+                            (if (gt (jblm-generation l) 0) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jblm-action (p generation guard-ok runtime-ok invalidated parity-ok)
+        (if (eq (jblm-loaded-safe? (jblm-load p generation)) 1)
+            (jlc-execute-action (jlc-load (jblm-adapt-loader-payload p) generation)
+                guard-ok runtime-ok invalidated parity-ok)
+            (jlc-reject)))
+
+    (defn jblm-loaded-bytes (l)
+        (jblm-bytes (jblm-loaded-payload l)))
+
+    (defn jblm-win64-add1 ()
+        (jblm-payload "form-backend" 1
+            (x64-cat (list (x64-mov-rax-rcx) (x64-add-rax-imm8 1) (x64-ret)))
+            1 1 1 1 1 1 1 1 1))
+    (defn jblm-sysv-add1 ()
+        (jblm-payload "form-backend" 1
+            (x64-cat (list (x64-mov-rax-rdi) (x64-add-rax-imm8 1) (x64-ret)))
+            1 1 1 1 1 1 1 1 1))
+    (defn jblm-checked-array ()
+        (jblm-payload "form-backend" 1 (x64-array-get-checked) 1 1 1 1 1 1 1 1 1))
+    (defn jblm-checked-field ()
+        (jblm-payload "form-backend" 1 (x64-field-load-checked 16) 1 1 1 1 1 1 1 1 1))
+    (defn jblm-checked-div ()
+        (jblm-payload "form-backend" 1 (x64-div-checked) 1 1 1 1 1 1 1 1 1))
+    (defn jblm-arbitrary ()
+        (jblm-payload "form-backend" 1 (list 85 72 137 229 195) 1 1 1 1 1 1 1 1 1))
+    (defn jblm-foreign ()
+        (jblm-payload "c-lowering" 1 (list 195) 1 1 1 1 1 1 1 1 1))
+    (defn jblm-empty ()
+        (jblm-payload "form-backend" 1 (empty) 1 1 1 1 1 1 1 1 1))
+    (defn jblm-bad-byte ()
+        (jblm-payload "form-backend" 1 (list 72 256 195) 1 1 1 1 1 1 1 1 1))
+    (defn jblm-negative-byte ()
+        (jblm-payload "form-backend" 1 (list 72 -1 195) 1 1 1 1 1 1 1 1 1))
+    (defn jblm-no-source ()
+        (jblm-payload "form-backend" 1 (list 195) 0 1 1 1 1 1 1 1 1))
+    (defn jblm-no-deopt ()
+        (jblm-payload "form-backend" 1 (list 195) 1 1 1 0 1 1 1 1 1))
+    (defn jblm-no-exception ()
+        (jblm-payload "form-backend" 1 (list 195) 1 1 1 1 1 1 1 1 0))
+    (defn jblm-writable-loaded ()
+        (jblm-loaded (jblm-arbitrary) 1 1 0 1))
+
+    (defn jblm-bit (cond bit) (if cond bit 0))
+    (defn jit-byte-list-membrane-check ()
+        (add
+            (jblm-bit (eq (jblm-payload-safe? (jblm-win64-add1)) 1) 1)
+            (add
+                (jblm-bit (eq (jblm-payload-safe? (jblm-sysv-add1)) 1) 2)
+                (add
+                    (jblm-bit (eq (jblm-payload-safe? (jblm-checked-array)) 1) 4)
+                    (add
+                        (jblm-bit (eq (jblm-payload-safe? (jblm-checked-field)) 1) 8)
+                        (add
+                            (jblm-bit (eq (jblm-payload-safe? (jblm-checked-div)) 1) 16)
+                            (add
+                                (jblm-bit (eq (jblm-payload-safe? (jblm-arbitrary)) 1) 32)
+                                (add
+                                    (jblm-bit (eq (jblm-eq-list (jblm-loaded-bytes (jblm-load (jblm-win64-add1) 1)) (jblm-bytes (jblm-win64-add1))) 1) 64)
+                                    (add
+                                        (jblm-bit (eq (jblm-eq-list (jblm-loaded-bytes (jblm-load (jblm-checked-array) 1)) (x64-array-get-checked)) 1) 128)
+                                        (add
+                                            (jblm-bit (eq (jlc-payload-safe? (jblm-adapt-loader-payload (jblm-arbitrary))) 1) 256)
+                                            (add
+                                                (jblm-bit (eq (jblm-loaded-safe? (jblm-load (jblm-arbitrary) 1)) 1) 512)
+                                                (add
+                                                    (jblm-bit (eq (jblm-loaded-safe? (jblm-load (jblm-arbitrary) 0)) 0) 1024)
+                                                    (add
+                                                        (jblm-bit (eq (jblm-loaded-safe? (jblm-writable-loaded)) 0) 2048)
+                                                        (add
+                                                            (jblm-bit (eq (jblm-action (jblm-arbitrary) 1 1 1 0 1) (jlc-native)) 4096)
+                                                            (add
+                                                                (jblm-bit (eq (jblm-action (jblm-arbitrary) 1 0 1 0 1) (jlc-deopt)) 8192)
+                                                                (add
+                                                                    (jblm-bit (eq (jblm-action (jblm-arbitrary) 1 1 0 0 1) (jlc-exception)) 16384)
+                                                                    (add
+                                                                        (jblm-bit (eq (jblm-action (jblm-arbitrary) 1 1 1 1 1) (jlc-rewalk)) 32768)
+                                                                        (add
+                                                                            (jblm-bit (eq (jblm-action (jblm-arbitrary) 1 1 1 0 0) (jlc-deopt)) 65536)
+                                                                            (add
+                                                                                (jblm-bit (eq (jblm-action (jblm-bad-byte) 1 1 1 0 1) (jlc-reject)) 131072)
+                                                                                (add
+                                                                                    (jblm-bit (eq (jblm-action (jblm-foreign) 1 1 1 0 1) (jlc-reject)) 262144)
+                                                                                    (add
+                                                                                        (jblm-bit (eq (jblm-payload-safe? (jblm-empty)) 0) 524288)
+                                                                                        (add
+                                                                                            (jblm-bit (eq (jblm-payload-safe? (jblm-bad-byte)) 0) 1048576)
+                                                                                            (add
+                                                                                                (jblm-bit (eq (jblm-payload-safe? (jblm-negative-byte)) 0) 2097152)
+                                                                                                (add
+                                                                                                    (jblm-bit (eq (jblm-payload-safe? (jblm-no-source)) 0) 4194304)
+                                                                                                    (add
+                                                                                                        (jblm-bit (eq (jblm-payload-safe? (jblm-no-deopt)) 0) 8388608)
+                                                                                                        (add
+                                                                                                            (jblm-bit (eq (jblm-payload-safe? (jblm-no-exception)) 0) 16777216)
+                                                                                                            (add
+                                                                                                                (jblm-bit (eq (jblm-has? (jblm-bytes (jblm-checked-array)) 115) 1) 33554432)
+                                                                                                                (jblm-bit (eq (jrf-attributed? (jrf-div-ex)) 1) 67108864))))))))))))))))))))))))))))
+
+    0)
