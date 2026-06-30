@@ -38,11 +38,18 @@ a generative base*.
 cores (`fam-ss-sqrt`, `fam-rsqrt`); `transformer-block`; the emitter / tokenizer / sampling machinery; the
 speaking floor (`speak-compose`, `speak-locale` en/fr/pt-br).
 
-**Remains:** the *full* decoder forward — attention (QKV, scaled-dot, causal mask, softmax), positional,
-multi-head concat, the LM head — beyond the FFN sublayer; the real weights loaded as recipe-data; the forward
-proven bit-exact (**3a**); then the `oracle-distill` loop (**3b**); and a **pre-registered eval metric** before any
-"≥ rented" claim. A multi-week climb, with its own receipts. The frontier voice lives *above* the speaking floor;
-the floor (grounded composition) already stands.
+**Done — the forward ARCHITECTURE proven bit-exact four-way on fkwu (3a):** the *full* decoder forward, end to
+end — attention (QKV, scaled-dot, causal mask, softmax), multi-head concat, the full block
+(`receipts/2026-06-30-decoder-forward-bitexact.md`), then positional embedding + the LM head + the composed
+embed→stack→finalLN→logits path (`receipts/2026-06-30-decoder-forward-full.md`, band
+`model/tests/transformer-forward-full-band.fk`, verdict 63 four-way, perturbation-deterministic) — at small
+fixed width in the tree-walker.
+
+**Remains:** the forward at REAL width (d_model=384+ over `ll-buffer` / `form-asm-matvec`, the one-engine
+native lane); the real weights loaded as recipe-data — a real open base (Qwen/Llama, real zh coverage) through
+the form block, the whisper block-0 pattern extended to a generative base (**3b**); then the `oracle-distill`
+loop; and a **pre-registered eval metric** before any "≥ rented" claim. A multi-week climb, with its own
+receipts. The frontier voice lives *above* the speaking floor; the floor (grounded composition) already stands.
 
 ## The recognition
 
