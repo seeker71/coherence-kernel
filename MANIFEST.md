@@ -216,6 +216,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       local-oracle `100` / native `0`, the native segmented acoustic learner earns `2/2` trial-window passes, reaches
       native rate `100` over the `50` floor, and cuts the challenger for that window while explicitly not claiming
       global live open-ASR authority.
+- [x] **Sema voice trial window added.** `learn/sema-voice-trial-window.fk` executes the queued TCAV voice trial
+      (`32767`): the live Sema voice backlog remains local-oracle `0/1`, native `0/1`, WER `100`, while the scoped
+      `tcav-warm-mid-cadence-v1-window` candidate passes the local oracle `1/1`, native scoped trial `1/1`, WER `0`,
+      and cuts the challenger for that trial window without claiming global live Sema voice authority.
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
