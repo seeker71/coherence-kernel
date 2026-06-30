@@ -260,6 +260,13 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       same local Damayanti voice for train/eval because that is the installed macOS voice boundary. The anchor set
       now counts `3/5` live anchors, leaves `2` live pair anchors pending, and keeps the route at
       `metal-anchored-native-guide`. The band returns `32767`.
+- [x] **Fourth live Metal pair anchor added.** `presence/macos-en-fr-speech-roundtrip-variant.fk` reuses the
+      same Form-owned macOS carrier for `en<->fr`; live Apple Metal returned carrier verdict `511`, base
+      field-code `12100000000000000`, and trained field-code `12101008301000066` (`10/12` oracle, `0/12` native
+      before training, `10/12` native after training, `83%` total, `100%` A/B and `66%` B/A). The French prompt
+      text stays ASCII until the WER tokenizer grows Unicode word support. The anchor set now counts `4/5` live
+      anchors, leaves `1` live pair anchor pending, and keeps the route at `metal-anchored-native-guide`. The band
+      returns `32767`.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
