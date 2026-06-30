@@ -1,0 +1,204 @@
+; jit-args-vector-payload.fk - exact arg-vector payload ABI witness.
+;
+; fk_native_call_args calls generated code as fn(long long *args). This cell
+; makes that host membrane explicit: native payload bytes must load from the
+; argument vector pointer, not from the carrier's first integer register.
+
+(do
+    (defn javp-native () 1)
+    (defn javp-deopt () 2)
+    (defn javp-exception () 3)
+    (defn javp-rewalk () 4)
+    (defn javp-melt () 5)
+    (defn javp-reject () 6)
+    (defn javp-pending () 7)
+
+    ; receipt = ("args-vector-receipt" name total expected source maps)
+    (defn javp-receipt (name total expected source maps)
+        (list "args-vector-receipt" name total expected source maps))
+    (defn javp-receipt? (r) (if (eq (len r) 6) (str_eq (nth r 0) "args-vector-receipt") 0))
+    (defn javp-total (r) (nth r 2))
+    (defn javp-expected (r) (nth r 3))
+    (defn javp-source-ok (r) (nth r 4))
+    (defn javp-maps (r) (nth r 5))
+
+    (defn javp-receipt-ok? (r)
+        (if (eq (javp-receipt? r) 1)
+            (if (eq (javp-total r) (javp-expected r))
+                (if (eq (javp-source-ok r) 1)
+                    (if (eq (javp-maps r) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn javp-byte-ingress () (javp-receipt "byte-ingress-args" 2097151 2097151 1 1))
+    (defn javp-post-ingress () (javp-receipt "post-ingress-sweep" 1048575 1048575 1 1))
+    (defn javp-host-membrane () (javp-receipt "host-membrane-readiness" 524287 524287 1 1))
+    (defn javp-byte-membrane () (javp-receipt "byte-list-membrane" 134217727 134217727 1 1))
+    (defn javp-bad-post-ingress () (javp-receipt "post-ingress-sweep" 1048574 1048575 1 1))
+
+    (defn javp-receipts-ok? ()
+        (if (eq (javp-receipt-ok? (javp-byte-ingress)) 1)
+            (if (eq (javp-receipt-ok? (javp-post-ingress)) 1)
+                (if (eq (javp-receipt-ok? (javp-host-membrane)) 1)
+                    (if (eq (javp-receipt-ok? (javp-byte-membrane)) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn javp-byte? (b) (if (ge b 0) (if (lt b 256) 1 0) 0))
+    (defn javp-byte-list? (xs)
+        (if (eq (len xs) 0)
+            1
+            (if (eq (javp-byte? (head xs)) 1) (javp-byte-list? (tail xs)) 0)))
+    (defn javp-eq-list (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0)
+                1
+                (if (eq (head a) (head b)) (javp-eq-list (tail a) (tail b)) 0))
+            0))
+
+    ; SysV: mov rax, [rdi]; add rax, 2; ret
+    (defn javp-sysv-add1-bytes () (list 72 139 7 72 131 192 2 195))
+    ; Win64: mov rax, [rcx]; add rax, 2; ret
+    (defn javp-win64-add1-bytes () (list 72 139 1 72 131 192 2 195))
+    ; SysV: mov rax, [rdi]; add rax, [rdi+8]; ret
+    (defn javp-sysv-add2-bytes () (list 72 139 7 72 3 71 8 195))
+    ; Win64: mov rax, [rcx]; add rax, [rcx+8]; ret
+    (defn javp-win64-add2-bytes () (list 72 139 1 72 3 65 8 195))
+    ; Old carrier ABI: mov rax, rdi; add rax, 1; ret
+    (defn javp-sysv-register-add1-bytes () (list 72 137 248 72 131 192 1 195))
+
+    (defn javp-abi-ok? (abi)
+        (if (str_eq abi "sysv")
+            1
+            (if (str_eq abi "win64") 1 0)))
+
+    (defn javp-exact-payload? (abi arity bytes)
+        (if (str_eq abi "sysv")
+            (if (eq arity 1)
+                (javp-eq-list bytes (javp-sysv-add1-bytes))
+                (if (eq arity 2) (javp-eq-list bytes (javp-sysv-add2-bytes)) 0))
+            (if (str_eq abi "win64")
+                (if (eq arity 1)
+                    (javp-eq-list bytes (javp-win64-add1-bytes))
+                    (if (eq arity 2) (javp-eq-list bytes (javp-win64-add2-bytes)) 0))
+                0)))
+
+    ; payload = ("args-vector-payload" owner abi bytes arity frame source exception deopt wx sealed generation)
+    (defn javp-payload (owner abi bytes arity frame source exception deopt wx sealed generation)
+        (list "args-vector-payload" owner abi bytes arity frame source exception deopt wx sealed generation))
+    (defn javp-payload? (p) (if (eq (len p) 12) (str_eq (nth p 0) "args-vector-payload") 0))
+    (defn javp-owner (p) (nth p 1))
+    (defn javp-abi (p) (nth p 2))
+    (defn javp-bytes (p) (nth p 3))
+    (defn javp-arity (p) (nth p 4))
+    (defn javp-frame (p) (nth p 5))
+    (defn javp-source (p) (nth p 6))
+    (defn javp-exception-map (p) (nth p 7))
+    (defn javp-deopt-map (p) (nth p 8))
+    (defn javp-wx (p) (nth p 9))
+    (defn javp-sealed (p) (nth p 10))
+    (defn javp-generation (p) (nth p 11))
+
+    (defn javp-payload-safe? (p)
+        (if (eq (javp-payload? p) 1)
+            (if (eq (javp-receipts-ok?) 1)
+                (if (str_eq (javp-owner p) "form-backend")
+                    (if (eq (javp-abi-ok? (javp-abi p)) 1)
+                        (if (gt (len (javp-bytes p)) 0)
+                            (if (eq (javp-byte-list? (javp-bytes p)) 1)
+                                (if (le (javp-arity p) 6)
+                                    (if (ge (javp-frame p) (javp-arity p))
+                                        (if (eq (javp-exact-payload? (javp-abi p) (javp-arity p) (javp-bytes p)) 1)
+                                            (if (eq (javp-source p) 1)
+                                                (if (eq (javp-exception-map p) 1)
+                                                    (if (eq (javp-deopt-map p) 1)
+                                                        (if (eq (javp-wx p) 1)
+                                                            (if (eq (javp-sealed p) 1)
+                                                                (if (gt (javp-generation p) 0) 1 0)
+                                                                0)
+                                                            0)
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn javp-action (p host-ingress guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (javp-payload-safe? p) 1)
+            (if (eq host-ingress 1)
+                (if (eq stale 1)
+                    (javp-melt)
+                    (if (eq invalidated 1)
+                        (javp-rewalk)
+                        (if (eq guard-ok 1)
+                            (if (eq runtime-ok 1)
+                                (if (eq parity-ok 1) (javp-native) (javp-deopt))
+                                (javp-exception))
+                            (javp-deopt))))
+                (javp-pending))
+            (javp-reject)))
+
+    (defn javp-sysv-add1 () (javp-payload "form-backend" "sysv" (javp-sysv-add1-bytes) 1 1 1 1 1 1 1 1))
+    (defn javp-win64-add1 () (javp-payload "form-backend" "win64" (javp-win64-add1-bytes) 1 1 1 1 1 1 1 1))
+    (defn javp-sysv-add2 () (javp-payload "form-backend" "sysv" (javp-sysv-add2-bytes) 2 2 1 1 1 1 1 1))
+    (defn javp-win64-add2 () (javp-payload "form-backend" "win64" (javp-win64-add2-bytes) 2 2 1 1 1 1 1 1))
+    (defn javp-old-register-payload () (javp-payload "form-backend" "sysv" (javp-sysv-register-add1-bytes) 1 1 1 1 1 1 1 1))
+    (defn javp-bad-byte () (javp-payload "form-backend" "sysv" (list 72 300 195) 1 1 1 1 1 1 1 1))
+    (defn javp-bad-abi () (javp-payload "form-backend" "unknown" (javp-sysv-add1-bytes) 1 1 1 1 1 1 1 1))
+    (defn javp-no-source () (javp-payload "form-backend" "sysv" (javp-sysv-add1-bytes) 1 1 0 1 1 1 1 1))
+    (defn javp-no-wx () (javp-payload "form-backend" "sysv" (javp-sysv-add1-bytes) 1 1 1 1 1 0 1 1))
+
+    (defn javp-bit (cond bit) (if cond bit 0))
+    (defn jit-args-vector-payload-check ()
+        (add
+            (javp-bit (eq (javp-receipts-ok?) 1) 1)
+            (add
+                (javp-bit (eq (javp-payload-safe? (javp-sysv-add1)) 1) 2)
+                (add
+                    (javp-bit (eq (javp-payload-safe? (javp-win64-add1)) 1) 4)
+                    (add
+                        (javp-bit (eq (javp-payload-safe? (javp-sysv-add2)) 1) 8)
+                        (add
+                            (javp-bit (eq (javp-payload-safe? (javp-win64-add2)) 1) 16)
+                            (add
+                                (javp-bit (eq (javp-eq-list (javp-bytes (javp-sysv-add1)) (javp-sysv-add1-bytes)) 1) 32)
+                                (add
+                                    (javp-bit (eq (javp-eq-list (javp-bytes (javp-win64-add1)) (javp-win64-add1-bytes)) 1) 64)
+                                    (add
+                                        (javp-bit (eq (javp-eq-list (javp-bytes (javp-sysv-add2)) (javp-sysv-add2-bytes)) 1) 128)
+                                        (add
+                                            (javp-bit (eq (javp-payload-safe? (javp-old-register-payload)) 0) 256)
+                                            (add
+                                                (javp-bit (eq (javp-action (javp-sysv-add1) 0 1 1 0 1 0) (javp-pending)) 512)
+                                                (add
+                                                    (javp-bit (eq (javp-action (javp-sysv-add1) 1 1 1 0 1 0) (javp-native)) 1024)
+                                                    (add
+                                                        (javp-bit (eq (javp-action (javp-sysv-add1) 1 0 1 0 1 0) (javp-deopt)) 2048)
+                                                        (add
+                                                            (javp-bit (eq (javp-action (javp-sysv-add1) 1 1 0 0 1 0) (javp-exception)) 4096)
+                                                            (add
+                                                                (javp-bit (eq (javp-action (javp-sysv-add1) 1 1 1 1 1 0) (javp-rewalk)) 8192)
+                                                                (add
+                                                                    (javp-bit (eq (javp-action (javp-sysv-add1) 1 1 1 0 0 0) (javp-deopt)) 16384)
+                                                                    (add
+                                                                        (javp-bit (eq (javp-action (javp-sysv-add1) 1 1 1 0 1 1) (javp-melt)) 32768)
+                                                                        (add
+                                                                            (javp-bit (eq (javp-payload-safe? (javp-bad-byte)) 0) 65536)
+                                                                            (add
+                                                                                (javp-bit (eq (javp-payload-safe? (javp-bad-abi)) 0) 131072)
+                                                                                (add
+                                                                                    (javp-bit (eq (javp-payload-safe? (javp-no-source)) 0) 262144)
+                                                                                    (add
+                                                                                        (javp-bit (eq (javp-payload-safe? (javp-no-wx)) 0) 524288)
+                                                                                        (javp-bit (eq (javp-receipt-ok? (javp-bad-post-ingress)) 0) 1048576)))))))))))))))))))))
+
+    0)
