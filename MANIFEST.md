@@ -287,6 +287,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       target-locale tokens through neutral meaning. The focused band returns `32767` over `sa<->la`: bad oracle,
       timeout, or missing consent blocks credit, and reciprocal directions are required before the native route
       opens. Neural ASR/TTS and live mic streaming remain pending.
+- [x] **Speech-token training source policy added.** `learn/speech-token-training-source.fk` separates token label
+      provenance into local oracle, consentful corpus, and internal-state inference rows (`32767`). Local oracle
+      and corpus rows may train transcript words and metadata; internal state can train confidence, warmth,
+      cadence, hesitation, excitement, attunement, controls, evidence, memory, and scope, but is explicitly
+      blocked from claiming transcript truth.
 - [x] **The offer/ack control core** — `control/offer-ack-core.fk`: the five Form control primitives (fail, stop,
       choice, exceptions, async) as thin expressions over ONE mechanism (`oac-kind` + `oac-offer`), derived from
       axiom-5. Four-way-proven in the origin (1023); re-proof here pends the Form-native eval lane (the C `--src`

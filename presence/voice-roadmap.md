@@ -91,7 +91,9 @@ oracle-aligned acoustic token prototypes and emits blank/nonblank CTC frames by 
 earned confidence. `segmented-acoustic-token-learning` 32767 now turns wav/envelope segments plus consentful
 local-oracle transcript tokens into learned source-token prototypes, then routes decoded `sa<->la` source speech
 through neutral meaning to target-locale tokens. It remains unselected until live mic audio supplies streaming
-segmented feature rows that win receipts.
+segmented feature rows that win receipts. `speech-token-training-source` 32767 answers where those labels come
+from: local oracle and consentful corpus rows may teach words plus metadata; internal state may infer voice-side
+metadata/control/evidence labels, but not transcript truth.
 The transformer path is trainable but not live-selected for speech yet; diffusion/codec speech is a
 named candidate only, pending a Form-native executable kernel and receipt. The live Metal anchor set now stands at
 7/7, so `full-metal-native` is an honest route for the closed-prompt carrier. Live segmented mic feature rows,
