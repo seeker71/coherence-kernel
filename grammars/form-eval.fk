@@ -3,15 +3,24 @@
 ; the cursor reads and computes directly; flatten becomes optional SPEED (the JIT path). Mirrors form-parse.fk's
 ; recursive-descent over the cursor (no tokenizer, the BMF discipline), but each node returns its VALUE not a cell.
 ;
-; Grammar form-eval now evaluates (the fuller grammar — a real meta-circular core):
-;   expr   := integer | symbol | '(' form ')'
-;   form   := (op a b)            op in {add,sub,mul,div,mod,le,lt,gt,ge,eq}   ; all binary builtins
+; Grammar form-eval now evaluates (a real meta-circular core + STRING/LIST/FLOAT values):
+;   expr   := integer | float | string | symbol | '(' form ')'
+;   float  := a number literal carrying '.' or 'e'/'E'  -> (str_to_float <literal-text>)
+;   string := '"' ... '"'  (escapes \n \" \\ handled)   -> the literal's inner text
+;   form   := (op a b)            op in {add,sub,mul,div,mod,le,lt,gt,ge,eq}   ; binary builtins (float-aware)
 ;           | (if c t e)                                                       ; conditional
 ;           | (let name val body)                                             ; lexical binding
 ;           | (defn name (params...) body)                                    ; register a function
 ;           | (do e1 e2 ...)                                                   ; sequence, threading env
+;           | (prim arg...)        prim a STRING/LIST kernel op               ; variadic, applied by name (fe-prim)
 ;           | (fname arg...)        fname a user-defined function             ; THE meta-circular call
 ;   symbol := lookup in the environment (a var bound by let, or an arg bound at a call)
+;
+; STRING/LIST/FLOAT values are OPAQUE to form-eval: a string/list/float value passes straight through the
+; (value end-pos env) triple; the kernel primitive (str_concat, head, str_to_float, ...) does the work. The new
+; work is mostly PARSING — fe-expr2 branches on '"' (fe-str) and on a float-marker inside a number (fe-num); the
+; new ops route through fe-prim (collect args -> fe-prim-apply by name). String prims: str_concat str_eq substring
+; str_len str_byte_at str_to_float ; list prims: list cons head tail empty nth len.
 ;
 ; State threads as (value, end-pos, env). The ENV is the new thread: an assoc-list of bindings, each a cons-chain
 ; cell terminated by integer 0 (our nil). Two entry kinds: variable (list name 0 value), and function
@@ -20,7 +29,8 @@
 ; This is the milestone: a recipe with a user-defined function — (do (defn f (n) (add n 1)) (f 5)) — runs THROUGH
 ; the Form walker on the c-bootstrapped fkwu kernel, integers all the way down, no host interpreter.
 ;
-; Four-way by grammars/tests/form-eval-band.fk (verdict 1023 — all ten claims, the milestone is claim 64).
+; Four-way by grammars/tests/form-eval-band.fk (verdict 65535 — sixteen claims: 1..512 the meta-circular core,
+; 1024..32768 the STRING/LIST/FLOAT value kinds; the user-call milestone is claim 64).
 ;
 ; preludes: form-stdlib/core.fk
 
@@ -62,14 +72,53 @@
     (defn fe-close (s pos)
         (if (ge (fe-skip s pos) (fe-len s)) (fe-skip s pos) (add (fe-skip s pos) 1)))
 
-    ; --- expr := integer | symbol | '(' form ')' ; returns (value end-pos env) ---
+    ; --- expr := integer | float | string | symbol | '(' form ')' ; returns (value end-pos env) ---
+    ;   '"' (char 34) opens a STRING literal; a number literal carrying '.' or 'e'/'E' is a FLOAT literal.
     (defn fe-expr (s pos env) (fe-expr2 s (fe-skip s pos) env))
     (defn fe-expr2 (s pos env)
         (if (eq (fe-at s pos) 40) (fe-form s (add pos 1) env)
-            (if (fe-isdigit (fe-at s pos)) (fe-int s pos env) (fe-sym s pos env))))
+            (if (eq (fe-at s pos) 34) (fe-str s pos env)
+                (if (fe-isdigit (fe-at s pos)) (fe-num s pos env) (fe-sym s pos env)))))
+    ; number literal: scan the whole token; if it carries '.' / 'e' / 'E' it is a FLOAT (str_to_float the
+    ; literal text), else an INTEGER (the existing digit-fold). Both return (value end-pos env).
+    (defn fe-num (s pos env)
+        (fe-num2 s pos (fe-sym-end s pos) env))
+    (defn fe-num2 (s a b env)
+        (if (eq (fe-isfloat s a b) 1)
+            (list (str_to_float (substring s a b)) b env)
+            (fe-int s a env)))
+    ; does the token s[a..b) contain a float marker ('.' 46 | 'e' 101 | 'E' 69) ?
+    (defn fe-isfloat (s a b)
+        (if (ge a b) 0
+            (if (eq (fe-at s a) 46) 1
+                (if (eq (fe-at s a) 101) 1
+                    (if (eq (fe-at s a) 69) 1 (fe-isfloat s (add a 1) b))))))
     (defn fe-int (s pos env)
         (fe-int2 (fe-digits s pos 0) env))
     (defn fe-int2 (d env) (list (fe-fst d) (fe-snd d) env))
+    ; --- string literal: from the opening '"' at pos, scan to the closing '"'; the VALUE is the
+    ;     literal's inner text (substring of the source). Escapes (\" \\ \n) are handled minimally —
+    ;     see fe-str-end / fe-str-val. end-pos advances past the closing quote. ---
+    (defn fe-str (s pos env)
+        (fe-str2 s (add pos 1) (fe-str-end s (add pos 1)) env))
+    ; end of the literal's inner text: index of the closing '"' (34), skipping escaped chars.
+    (defn fe-str-end (s i)
+        (if (ge i (fe-len s)) i
+            (if (eq (fe-at s i) 34) i
+                (if (eq (fe-at s i) 92) (fe-str-end s (add i 2)) (fe-str-end s (add i 1))))))
+    ; value = unescaped inner text [a..b); end-pos = b+1 (past the closing quote)
+    (defn fe-str2 (s a b env) (list (fe-unesc s a b "") (add b 1) env))
+    ; build the unescaped string by walking [i..b): '\' introduces an escape (\n -> LF, \" -> ", \\ -> \,
+    ; any other escaped char passes through literally). No-escape source returns its own substring.
+    (defn fe-unesc (s i b acc)
+        (if (ge i b) acc
+            (if (eq (fe-at s i) 92)
+                (fe-unesc s (add i 2) b (str_concat acc (fe-esc-ch (fe-at s (add i 1)))))
+                (fe-unesc s (add i 1) b (str_concat acc (substring s i (add i 1)))))))
+    (defn fe-esc-ch (c)
+        (if (eq c 110) "\n"
+            (if (eq c 34) "\""
+                (if (eq c 92) "\\" "?"))))
     (defn fe-sym (s pos env)
         (fe-sym2 s pos (fe-sym-end s pos) env))
     (defn fe-sym2 (s a b env)
@@ -84,12 +133,28 @@
                 (if (str_eq op "do") (fe-do s pos env)
                     (if (str_eq op "defn") (fe-defn s pos env)
                         (if (fe-isbuiltin op) (fe-bin op s pos env)
-                            (fe-call op s pos env)))))))
+                            (if (fe-isprim op) (fe-prim op s pos env)
+                                (fe-call op s pos env))))))))
     (defn fe-isbuiltin (op)
         (if (str_eq op "add") 1 (if (str_eq op "sub") 1 (if (str_eq op "mul") 1
             (if (str_eq op "div") 1 (if (str_eq op "mod") 1 (if (str_eq op "le") 1
                 (if (str_eq op "lt") 1 (if (str_eq op "gt") 1 (if (str_eq op "ge") 1
                     (if (str_eq op "eq") 1 0)))))))))))
+    ; primitive (string/list/float) kernel ops — variadic-arity, collected then applied by name.
+    (defn fe-isprim (op)
+        (if (str_eq op "str_concat") 1
+        (if (str_eq op "str_eq") 1
+        (if (str_eq op "substring") 1
+        (if (str_eq op "str_len") 1
+        (if (str_eq op "str_byte_at") 1
+        (if (str_eq op "str_to_float") 1
+        (if (str_eq op "list") 1
+        (if (str_eq op "cons") 1
+        (if (str_eq op "head") 1
+        (if (str_eq op "tail") 1
+        (if (str_eq op "empty") 1
+        (if (str_eq op "nth") 1
+        (if (str_eq op "len") 1 0))))))))))))))
 
     ; --- binary builtin: (op a b) ---
     (defn fe-bin (op s pos env) (fe-bin-a op s (fe-expr s pos env)))
@@ -107,6 +172,32 @@
         (if (str_eq op "gt") (if (gt a b) 1 0)
         (if (str_eq op "ge") (if (ge a b) 1 0)
         (if (str_eq op "eq") (if (eq a b) 1 0) 0)))))))))))
+
+    ; --- primitive (string / list / float) ops: (op arg...) — variadic-arity.
+    ;     Collect ALL args into a value-list (the same cons-chain fe-args builds for user calls), then
+    ;     apply the kernel op by name, pulling positional args by head/tail. The values are OPAQUE to
+    ;     form-eval — a string value, list value, or float value passes straight through (value end-pos env). ---
+    (defn fe-prim (op s pos env) (fe-prim-fin op s (fe-args s pos env)))
+    (defn fe-prim-fin (op s av)
+        (list (fe-prim-apply op (fe-fst av)) (fe-snd av) (fe-thd av)))
+    ; positional arg accessors over the collected value-list
+    (defn fe-a0 (vs) (head vs))
+    (defn fe-a1 (vs) (head (tail vs)))
+    (defn fe-a2 (vs) (head (tail (tail vs))))
+    (defn fe-prim-apply (op vs)
+        (if (str_eq op "list") vs
+        (if (str_eq op "empty") (empty)
+        (if (str_eq op "str_concat") (str_concat (fe-a0 vs) (fe-a1 vs))
+        (if (str_eq op "str_eq") (if (str_eq (fe-a0 vs) (fe-a1 vs)) 1 0)
+        (if (str_eq op "substring") (substring (fe-a0 vs) (fe-a1 vs) (fe-a2 vs))
+        (if (str_eq op "str_len") (str_len (fe-a0 vs))
+        (if (str_eq op "str_byte_at") (str_byte_at (fe-a0 vs) (fe-a1 vs))
+        (if (str_eq op "str_to_float") (str_to_float (fe-a0 vs))
+        (if (str_eq op "cons") (cons (fe-a0 vs) (fe-a1 vs))
+        (if (str_eq op "head") (head (fe-a0 vs))
+        (if (str_eq op "tail") (tail (fe-a0 vs))
+        (if (str_eq op "nth") (nth (fe-a0 vs) (fe-a1 vs))
+        (if (str_eq op "len") (len (fe-a0 vs)) 0))))))))))))))
 
     ; --- conditional: (if c t e) — evaluate c, then only the taken branch must be evaluated for value,
     ;     but we evaluate both arms for position to find the close (pure walk, no host short-circuit needed
@@ -173,9 +264,13 @@
     ; --- skip an expression (no eval) — needed to find a defn body's end without evaluating it.
     ;     Returns the end-pos just past the expression. ---
     (defn fe-skip-expr (s pos) (fe-skip-expr2 s (fe-skip s pos)))
+    ; a string literal is skipped to just past its closing '"'; a number (int OR float) ends at the next
+    ; delimiter (fe-sym-end carries '.' 'e' 'E'); a symbol likewise. '"' must be checked before the
+    ; number/symbol cases since fe-sym-end would stop at whitespace INSIDE a quoted string.
     (defn fe-skip-expr2 (s pos)
         (if (eq (fe-at s pos) 40) (fe-skip-list s (add pos 1))
-            (if (fe-isdigit (fe-at s pos)) (fe-snd (fe-digits s pos 0)) (fe-sym-end s pos))))
+            (if (eq (fe-at s pos) 34) (add (fe-str-end s (add pos 1)) 1)
+                (fe-sym-end s pos))))
     (defn fe-skip-list (s pos)
         (if (eq (fe-at s (fe-skip s pos)) 41) (add (fe-skip s pos) 1)
             (fe-skip-list s (fe-skip-expr s (fe-skip s pos)))))
