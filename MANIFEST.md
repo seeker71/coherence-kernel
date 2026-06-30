@@ -152,8 +152,8 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Native speech stack observed on real metal.** `presence/native-speech-stack.fk` composes STT agreement,
       sequence-aligned WER, text normalization, g2p, phoneme timing, contour, grounded phrasing, honest prosody,
       and speaker decision into one direct-source witness. The band returns `2047` on local arm64 `fkwu`;
-      individual repaired bands now return STT overlap `127`, STT WER `255`, text-normalize `255`,
-      speaker-embed `255`, and presence-feature `15`. The honest gap is still the live ASR decode path plus the
+      individual repaired bands now return STT overlap `127`, STT WER `255`, Unicode tokenization `4095`,
+      text-normalize `255`, speaker-embed `255`, and presence-feature `15`. The honest gap is still the live ASR decode path plus the
       natural acoustic model/neural vocoder.
 - [x] **First native speech loopback added.** `presence/formant-vocoder.fk` renders source-filter/formant integer
       waveform samples from phoneme frames (`511`), `observe/asr-prompt-id.fk` recognizes a closed prompt set from
@@ -239,7 +239,14 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       receipts to the multiseed sweep (band `32767`). Per-pair training moves native success from `0%` toward
       `83–100%`; each pair's trained field-code records its oracle/native/reciprocal counts. Prompt text stays
       ASCII and the Indonesian side reuses the installed Damayanti voice for train/eval, both at the macOS voice
-      boundary. Unicode WER, open dictation, and native neural ASR/TTS remain pending.
+      boundary. Live Unicode-script anchors, open dictation, and native neural ASR/TTS remain pending.
+- [x] **Unicode transcript token lane added.** `observe/stt-wer.fk` now owns shared `sw-tokens`: ASCII
+      punctuation still lowercases/splits, accented Latin stays inside words, CJK ideographs become per-character
+      tokens, and Arabic words stay grouped while Arabic/CJK punctuation is dropped as delimiters. The macOS
+      carrier now calls this shared tokenizer instead of its old ASCII-only local scanner. The tokenizer is compact
+      enough to keep the observed-sweep prelude under the current direct-source function-table ceiling. The focused
+      band `observe/tests/stt-tokenize-unicode-band.fk` returns `4095`; existing STT WER, macOS carrier, and
+      observed-sweep bridge bands remain `255`, `511`, and `32767`.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
