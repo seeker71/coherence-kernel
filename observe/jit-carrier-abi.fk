@@ -1,0 +1,118 @@
+; jit-carrier-abi.fk - bridge Form-emitted x64 bytes to the host install/call carrier ABI.
+;
+; The host membrane already exposes `native_call_test`, a one-arg install+call
+; carrier whose hardcoded payload computes f(a)=a+1. This cell proves the same
+; payload is emitted as Form data by model/form-asm-x64.fk for both Win64 and
+; SysV ABIs, and classifies the live carrier result without pretending every
+; host can execute writable->executable pages in this checkout.
+;
+; preludes: model/form-asm-x64.fk
+
+(do
+    (defn jca-ok () 1)
+    (defn jca-unavailable () 2)
+    (defn jca-mismatch () 3)
+
+    (defn jca-eq-list (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0)
+                1
+                (if (eq (head a) (head b)) (jca-eq-list (tail a) (tail b)) 0))
+            0))
+
+    (defn jca-has? (xs x)
+        (if (eq (len xs) 0)
+            0
+            (if (eq (head xs) x) 1 (jca-has? (tail xs) x))))
+
+    (defn jca-last (xs)
+        (if (eq (len (tail xs)) 0) (head xs) (jca-last (tail xs))))
+
+    ; Exact byte images used by fk_native_call_test:
+    ;   Win64: mov rax,rcx; add rax,1; ret
+    ;   SysV : mov rax,rdi; add rax,1; ret
+    (defn jca-win64-add1-bytes ()
+        (x64-cat (list (x64-mov-rax-rcx) (x64-add-rax-imm8 1) (x64-ret))))
+    (defn jca-sysv-add1-bytes ()
+        (x64-cat (list (x64-mov-rax-rdi) (x64-add-rax-imm8 1) (x64-ret))))
+
+    (defn jca-expected-win64 () (list 72 137 200 72 131 192 1 195))
+    (defn jca-expected-sysv () (list 72 137 248 72 131 192 1 195))
+
+    (defn jca-byte-image (abi bytes source maps)
+        (list "carrier-byte-image" abi bytes source maps))
+    (defn jca-image? (img) (if (eq (len img) 5) (str_eq (nth img 0) "carrier-byte-image") 0))
+    (defn jca-image-abi (img) (nth img 1))
+    (defn jca-image-bytes (img) (nth img 2))
+    (defn jca-image-source (img) (nth img 3))
+    (defn jca-image-maps (img) (nth img 4))
+
+    (defn jca-image-safe? (img)
+        (if (eq (jca-image? img) 1)
+            (if (gt (len (jca-image-bytes img)) 0)
+                (if (eq (jca-image-source img) 1)
+                    (if (eq (jca-image-maps img) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jca-win64-image ()
+        (jca-byte-image "win64" (jca-win64-add1-bytes) 1 1))
+    (defn jca-sysv-image ()
+        (jca-byte-image "sysv" (jca-sysv-add1-bytes) 1 1))
+    (defn jca-foreign-image ()
+        (jca-byte-image "c-lowering" (jca-expected-win64) 1 1))
+    (defn jca-no-source-image ()
+        (jca-byte-image "win64" (jca-win64-add1-bytes) 0 1))
+
+    (defn jca-carrier-status (arg observed)
+        (if (eq observed -1)
+            (jca-unavailable)
+            (if (eq observed (add arg 1)) (jca-ok) (jca-mismatch))))
+
+    (defn jca-carrier-admissible? (status)
+        (if (eq status (jca-ok))
+            1
+            (if (eq status (jca-unavailable)) 1 0)))
+
+    (defn jca-carrier-complete? (status)
+        (if (eq status (jca-ok)) 1 0))
+
+    (defn jca-bit (cond bit) (if cond bit 0))
+    (defn jit-carrier-abi-check ()
+        (do
+            (let live41 (native_call_test 41))
+            (let live99 (native_call_test 99))
+            (let status41 (jca-carrier-status 41 live41))
+            (let status99 (jca-carrier-status 99 live99))
+            (add
+                (jca-bit (eq (jca-eq-list (jca-win64-add1-bytes) (jca-expected-win64)) 1) 1)
+                (add
+                    (jca-bit (eq (jca-eq-list (jca-sysv-add1-bytes) (jca-expected-sysv)) 1) 2)
+                    (add
+                        (jca-bit (eq (len (jca-win64-add1-bytes)) 8) 4)
+                        (add
+                            (jca-bit (eq (len (jca-sysv-add1-bytes)) 8) 8)
+                            (add
+                                (jca-bit (eq (jca-has? (jca-win64-add1-bytes) 131) 1) 16)
+                                (add
+                                    (jca-bit (eq (jca-last (jca-sysv-add1-bytes)) 195) 32)
+                                    (add
+                                        (jca-bit (eq (jca-image-safe? (jca-win64-image)) 1) 64)
+                                        (add
+                                            (jca-bit (eq (jca-image-safe? (jca-sysv-image)) 1) 128)
+                                            (add
+                                                (jca-bit (str_eq (jca-image-abi (jca-foreign-image)) "c-lowering") 256)
+                                                (add
+                                                    (jca-bit (eq (jca-image-safe? (jca-no-source-image)) 0) 512)
+                                                    (add
+                                                        (jca-bit (eq (jca-carrier-admissible? status41) 1) 1024)
+                                                        (add
+                                                            (jca-bit (eq (jca-carrier-admissible? status99) 1) 2048)
+                                                            (add
+                                                                (jca-bit (eq (jca-carrier-status 41 0) (jca-mismatch)) 4096)
+                                                                (add
+                                                                    (jca-bit (eq (jca-carrier-complete? (jca-ok)) 1) 8192)
+                                                                    (jca-bit (eq (jca-carrier-complete? (jca-unavailable)) 0) 16384))))))))))))))))
+
+    0)
