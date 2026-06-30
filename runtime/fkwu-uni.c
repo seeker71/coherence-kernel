@@ -616,6 +616,64 @@ static long long fk_api_health(void) { return -1; }
 static long long fk_mesh_register(void) { return -1; }
 static long long fk_mesh_detect(void) { return -1; }
 #endif
+/* ── GPU matvec on a real RTX via the CUDA DRIVER API (nvcuda.dll) — fkwu's OWN host carrier,
+   the CUDA twin of fk_metal_matvec_f32_native. No python, no nvcc, no NVRTC, no CUDA toolkit:
+   LoadLibraryA the driver, JIT the Form-emitted PTX (matvec.ptx = the four-way fptx-matvec) at
+   CU_JIT_OPTIMIZATION_LEVEL(=7)=0 so mul.f32/add.f32 stay UNFUSED (two roundings), dispatch one
+   thread per row, and compare BIT-EXACT to the CPU f32 downward right-fold (volatile blocks the
+   CPU FMA so both sides are two roundings). The driver's built-in PTX JIT is intrinsic to the GPU. */
+#if defined(_WIN32)
+static long long fk_cuda_matvec(void) {
+ void *h = LoadLibraryA("nvcuda.dll");
+ if (h == 0) { printf("cuda: nvcuda.dll not found\n"); return -1; }
+ typedef int (*F1)(unsigned); typedef int (*F2)(int*, int); typedef int (*F3)(char*, int, int);
+ typedef int (*F4)(void**, unsigned, int); typedef int (*F5)(void**, const void*, unsigned, int*, void**);
+ typedef int (*F6)(void**, void*, const char*); typedef int (*F7)(unsigned long long*, unsigned long long);
+ typedef int (*F8)(unsigned long long, const void*, unsigned long long); typedef int (*F9)(void*, unsigned long long, unsigned long long);
+ typedef int (*F10)(void*, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, void*, void**, void**);
+ typedef int (*F11)(void);
+ F1 cuInit = (F1)GetProcAddress(h, "cuInit"); F2 cuDeviceGet = (F2)GetProcAddress(h, "cuDeviceGet");
+ F3 cuDeviceGetName = (F3)GetProcAddress(h, "cuDeviceGetName"); F4 cuCtxCreate = (F4)GetProcAddress(h, "cuCtxCreate_v2");
+ F5 cuModuleLoadDataEx = (F5)GetProcAddress(h, "cuModuleLoadDataEx"); F6 cuModuleGetFunction = (F6)GetProcAddress(h, "cuModuleGetFunction");
+ F7 cuMemAlloc = (F7)GetProcAddress(h, "cuMemAlloc_v2"); F8 cuMemcpyHtoD = (F8)GetProcAddress(h, "cuMemcpyHtoD_v2");
+ F9 cuMemcpyDtoH = (F9)GetProcAddress(h, "cuMemcpyDtoH_v2"); F10 cuLaunchKernel = (F10)GetProcAddress(h, "cuLaunchKernel");
+ F11 cuCtxSynchronize = (F11)GetProcAddress(h, "cuCtxSynchronize");
+ if (!cuInit || !cuCtxCreate || !cuModuleLoadDataEx || !cuLaunchKernel) { printf("cuda: missing entry points\n"); return -2; }
+ if (cuInit(0) != 0) { printf("cuda: cuInit failed\n"); return -3; }
+ int dev = 0; if (cuDeviceGet(&dev, 0) != 0) { return -4; }
+ char gname[256]; gname[0] = 0; cuDeviceGetName(gname, 256, dev);
+ void *ctx = 0; if (cuCtxCreate(&ctx, 0, dev) != 0) { printf("cuda: ctx create failed\n"); return -5; }
+ int fd = open("gpu/fptx-matvec.ptx", 0x8000); if (fd < 0) { printf("cuda: gpu/fptx-matvec.ptx not found\n"); return -6; }
+ static char ptx[131072]; long long pn = 0, g; while ((g = read(fd, ptx + pn, 8192)) > 0) { pn = pn + g; if (pn > 120000) { break; } } close(fd); ptx[pn] = 0;
+ int jopt[1]; void *jval[1]; jopt[0] = 7; jval[0] = (void*)0; /* CU_JIT_OPTIMIZATION_LEVEL = 0 */
+ void *mod = 0; if (cuModuleLoadDataEx(&mod, ptx, 1, jopt, jval) != 0) { printf("cuda: PTX JIT failed\n"); return -7; }
+ void *fn = 0; if (cuModuleGetFunction(&fn, mod, "form_matvec_f32") != 0) { printf("cuda: no form_matvec_f32\n"); return -8; }
+ unsigned rows = 3, cols = 4;
+ float W[12] = {0.1f,0.2f,0.3f,0.7f, 0.11f,0.13f,0.17f,0.19f, 0.9f,0.8f,0.123456f,0.654321f};
+ float X[4] = {0.5f,0.25f,0.125f,0.333333f}; float Y[3] = {0.0f,0.0f,0.0f};
+ unsigned long long dW = 0, dX = 0, dY = 0;
+ cuMemAlloc(&dW, 48); cuMemcpyHtoD(dW, W, 48); cuMemAlloc(&dX, 16); cuMemcpyHtoD(dX, X, 16);
+ cuMemAlloc(&dY, 12); cuMemcpyHtoD(dY, Y, 12);
+ void *args[5]; args[0] = &dW; args[1] = &dX; args[2] = &dY; args[3] = &rows; args[4] = &cols;
+ if (cuLaunchKernel(fn, 1, 1, 1, rows, 1, 1, 0, 0, args, 0) != 0) { printf("cuda: launch failed\n"); return -9; }
+ cuCtxSynchronize(); cuMemcpyDtoH(Y, dY, 12);
+ printf("GPU: %s  CUDA driver-API PTX-JIT -O0 (nvcuda.dll; no python, no nvcc, no nvrtc)\n", gname);
+ printf("recipe: form-ptx fptx-matvec -> form_matvec_f32 (f32 matvec, downward right-fold, 2 roundings)\n");
+ long long agree = 0; long long i;
+ for (i = 0; i < (long long)rows; i = i + 1) {
+  volatile float acc = 0.0f; long long j;
+  for (j = (long long)cols - 1; j >= 0; j = j - 1) { volatile float prod = W[i * (long long)cols + j] * X[j]; acc = prod + acc; }
+  float cpu = acc; float gpu = Y[i];
+  union { float f; unsigned u; } cg, cc; cg.f = gpu; cc.f = cpu;
+  int ex = (cg.u == cc.u); if (ex) { agree = agree + 1; }
+  printf("  row %lld: GPU=%.9g (0x%08x)  CPU=%.9g (0x%08x)  %s\n", i, (double)gpu, cg.u, (double)cpu, cc.u, ex ? "BIT-EXACT" : "DIFF");
+ }
+ printf("AGREEMENT: %lld/%u  ALL-BIT-EXACT=%s\n", agree, rows, (agree == (long long)rows) ? "true" : "false");
+ return agree;
+}
+#else
+static long long fk_cuda_matvec(void) { return -1; }
+#endif
 static int fk_sock_getaddrinfo(const char *h, const char *p, const struct addrinfo *i, struct addrinfo **r) { fk_sock_boot(); return getaddrinfo(h, p, i, r); }
 static int fk_sock_socket(int af, int ty, int pr) { fk_sock_boot(); fk_os_socket_t s = socket(af, ty, pr); if (!fk_os_socket_ok(s)) { return -1; } return (int)s; }
 static int fk_sock_connect(int fd, const void *a, unsigned int n) { fk_sock_boot(); return connect((fk_os_socket_t)(unsigned int)fd, a, n); }
@@ -629,7 +687,7 @@ struct timeval { long tv_sec; int tv_usec; }; extern int gettimeofday(struct tim
 #else
  return 1;
 #endif
-    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; } if (t == 214) { return fk_sense_stream(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 215) { return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 216) { return fk_wifi_ssid(); } if (t == 217) { return fk_wifi_signal() << 1; } if (t == 218) { return fk_bt_present() << 1; } if (t == 219) { return fk_bt_count() << 1; } if (t == 220) { return fk_power() << 1; } if (t == 221) { return fk_memload() << 1; } if (t == 222) { return fk_sensors_report() << 1; } if (t == 223) { return fk_sense_publish(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 224) { return fk_mesh_serve(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 225) { return fk_mesh_announce(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 226) { return fk_mesh_discover(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 227) { return fk_api_health() << 1; } if (t == 228) { return fk_mesh_register() << 1; } if (t == 229) { return fk_mesh_detect() << 1; } if (t == 230) { return fk_mesh_registry(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 231) { return fk_mesh_roster() << 1; }
+    } if (t == 133) { static char p70[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p70, 4096); int fd70 = open(p70, 0); return ((long long)fd70) << 1; } if (t == 134) { long long fd71 = fk_walk(fk_node[i][1], fp) >> 1; long long max71 = fk_walk(fk_node[i][2], fp) >> 1; if (fd71 < 0 || max71 <= 0) { return fk_sbuf("", 0); } fk_sinit(); while (fk_sbp + max71 > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } long long got71 = read((int)fd71, fk_sb + fk_sbp, max71); if (got71 <= 0) { return fk_sbuf("", 0); } return fk_sintern(fk_sbp, got71) << 1; } if (t == 135) { long long fd72 = fk_walk(fk_node[i][1], fp) >> 1; if (fd72 < 0) { return -2; } return ((long long)close((int)fd72)) << 1; } if (t == 203) { return fk_metal_matvec_fixture_native(); } if (t == 204) { long long m204 = fk_walk(fk_node[i][1], fp); fk_vp(m204); long long k204 = fk_walk(fk_node[i][2], fp); fk_vp(k204); long long b204 = fk_walk(fk_node[i][3], fp); fk_vsp = fk_vsp - 2; return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204); } if (t == 205) { return fk_mic_count() << 1; } if (t == 206) { return fk_cam_count() << 1; } if (t == 207) { return fk_mic_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 208) { return fk_cam_name(fk_walk(fk_node[i][1], fp) >> 1); } if (t == 209) { return fk_mic_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 210) { return fk_cam_health(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 211) { return fk_sense_report() << 1; } if (t == 212) { return fk_cam_grab(fk_walk(fk_node[i][1], fp) >> 1, "fkwu-cam-frame.bmp") << 1; } if (t == 213) { return fk_frame_read("fkwu-cam-frame.bmp") << 1; } if (t == 214) { return fk_sense_stream(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 215) { return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 216) { return fk_wifi_ssid(); } if (t == 217) { return fk_wifi_signal() << 1; } if (t == 218) { return fk_bt_present() << 1; } if (t == 219) { return fk_bt_count() << 1; } if (t == 220) { return fk_power() << 1; } if (t == 221) { return fk_memload() << 1; } if (t == 222) { return fk_sensors_report() << 1; } if (t == 223) { return fk_sense_publish(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 224) { return fk_mesh_serve(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 225) { return fk_mesh_announce(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 226) { return fk_mesh_discover(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 227) { return fk_api_health() << 1; } if (t == 228) { return fk_mesh_register() << 1; } if (t == 229) { return fk_mesh_detect() << 1; } if (t == 230) { return fk_mesh_registry(fk_walk(fk_node[i][1], fp) >> 1) << 1; } if (t == 231) { return fk_mesh_roster() << 1; } if (t == 232) { return fk_cuda_matvec() << 1; }
 #ifndef _WIN32
  if (t == 200) { static char p200[4096]; fk_cstr(fk_walk(fk_node[i][1], fp), p200, 4096); return fk_path_is_dir(p200) ? 2 : 0; } if (t == 202) { static char r202[4096]; static char s202[256]; fk_cstr(fk_walk(fk_node[i][1], fp), r202, 4096); fk_cstr(fk_walk(fk_node[i][2], fp), s202, 256); fk_inv_reset(); fk_inv_walk(r202, r202, s202, fk_walk(fk_node[i][3], fp)); return fk_inv_rows; }
 #else
