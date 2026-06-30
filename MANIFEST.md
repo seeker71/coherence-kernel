@@ -169,6 +169,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       metadata, sample-hash consistency, consent, clean controls, and a transcript under the WER threshold before
       they can promote. This is the Form gate; a fresh live Sema-formant wav through local Whisper remains the next
       carrier receipt.
+- [x] **Live Sema formant oracle probe added.** `presence/macos-sema-voice-local-oracle-carrier.fk` renders a
+      target-derived Sema formant waveform locally, runs `whisper.cpp-large-v3-turbo` on Apple Metal, and feeds the
+      measured transcript into the Sema local-oracle gate. The contract band returns `2047`; the live probe returned
+      `479`, field code `110100002`, WER `100`, route `oracle-guide`. This closes the live carrier gap but proves
+      the current formant waveform is not yet intelligible speech.
 - [x] **Speech loopback promotion added.** `learn/speech-loopback-promotion.fk` turns native loopback receipts into
       rolling authority windows (`2047`): clean long windows promote native; short, failed, timed-out, undone, or
       regressing windows route back to oracle.
