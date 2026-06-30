@@ -1,20 +1,14 @@
 # coherence-kernel — the clean, axiom-first, c-bootstrapped fkwu-native sovereign core
 
-> Working name; changeable. Started 2026-06-28 from the Coherence-Network body, as a clean
-> restart that begins *on* the sovereignty floor instead of climbing toward it through legacy infra.
+> Working name; changeable.
 
 ## Why this exists
 
 The sovereign core — five axioms + a minimal host surface + the c-bootstrap `fkwu` runtime +
-the Form-native recipes — is small (~450 lines of axioms/surface + ~700 `.fk` recipes). In the
-origin repo it is buried under ~3,400 Python files, the full Go/Rust/TS kernels, the web/API/app,
-and private tissue. That buried-ness is friction, not difficulty: building a standing native shell
-there meant fighting a `T_flat` marker maze, a bin-go convenience trap, and committed-bootstrap
-tangles — accumulated cruft, not a hard problem.
-
-A clean repo built **axiom-first, fkwu-native from line one** has none of that. The sovereignty
-receipt — *c-bootstrap fkwu on metal, no go/rust/clang/bash/python in the runtime* — becomes the
-**floor you start on**, not a rung you climb toward.
+the Form-native recipes — is small (~450 lines of axioms/surface + ~700 `.fk` recipes). This repo
+holds exactly that core, built **axiom-first, fkwu-native from line one**. The sovereignty
+receipt — *c-bootstrap fkwu on metal, no go/rust/clang/bash/python in the runtime* — is the
+**floor this repo starts on**.
 
 ## Scope — what lives here, and what never does
 
@@ -52,15 +46,13 @@ receipt — *c-bootstrap fkwu on metal, no go/rust/clang/bash/python in the runt
   kernel's confidence is *earned*. Observability and trustworthiness are first-class kernel organs here, not
   bolt-ons — a sovereign mind that can be watched thinking and trusted exactly as far as it has measured itself.
 
-## Architecture decisions (2026-06-28)
+## Architecture decisions
 
-**The flatten is optional, not the foundation — RESOLVED 2026-06-29.** The restart was framed around a fear:
-that fkwu couldn't flatten its own source without a Go-made `T_flat` blob, and that breaking this circularity
-*was* "the real test." The answer was simpler than the fight — `form-eval` evaluates Form source **directly off
-the BMF cursor with no flatten at all** (four-way → 42), and `form-eval-cli` stands. Flatten became *optional
-speed* (the crystallize-on-heat path), off the critical path entirely. `T_flat` remains only as a regenerable
+**Flatten is optional, not the foundation.** `form-eval` evaluates Form source **directly off
+the BMF cursor with no flatten at all** (four-way → 42), and `form-eval-cli` stands. Flatten is *optional
+speed* (the crystallize-on-heat path), off the critical path entirely. `T_flat` is a regenerable
 cache for the heavy-chain *build*, never a foundation. The kernel proves four-way through the minimal walkers +
-`proof/four-way-run` — not through self-host flatten. The circularity that justified the restart dissolved.
+`proof/four-way-run`, not through self-host flatten.
 
 **Minimal walkers; fkwu owns the native path.** The Go/Rust/TS walkers do the minimum — independent
 proof-oracles that witness four-way agreement on the *pure-recipe* surface, never feature-bearers. Everything we
@@ -89,25 +81,22 @@ The drift pressure between two repos is handled by one guide: the Form recipe bo
   here, then recipe families port as they are needed. The origin repo keeps running the whole time.
 - No big-bang. The kernel *earns* each recipe family as it ports — re-proving it four-way on the clean flatten.
 
-## The validation plan — the question the restart answered
+## The validation plan
 
 Every recipe is proven **four-way** (`Go=Rust=TS=fkwu`) and executed on the c-bootstrap `fkwu` native, with
 **no bin-go and no clang in the run path**. The clean kernel proves this *itself*: `proof/four-way-run`
 host-execs the three minimal walkers + fkwu on a recipe and diagnoses agreement via `proof/four-way-verdict` —
-no `validate.sh`, no origin repo in the loop (witnessed `0`, all agree, 2026-06-29).
+no `validate.sh`, no origin repo in the loop (witnessed `0`, all agree).
 
-**The question that justified the restart — answered.** *Is the clean path actually clean, or does an
-axiom-first kernel inherit the same flatten ad-hoc-ness?* The honest answer: the flatten *was* the
-ad-hoc-ness. Removing it from the critical path — source runs via the cursor — is what made the path clean.
-The one remaining lean on a Go-made seed is the heavy-chain *build*, named openly in Status — not the run,
+The path is clean because source runs via the cursor, with flatten off the critical path. The one
+remaining lean on a Go-made seed is the heavy-chain form-cli *build*, named openly in Status — not the run,
 and not the proof.
 
 ## Hard constraint — no bash, no python (the structural gate)
 
-This repo contains **zero `.sh` and zero `.py` files.** Ever. The bash was never the kernel — it
-lived only in the origin's orchestration scripts (`validate.sh`, `fourth-arm.sh`, `build-form-cli.sh`).
-Here the orchestration itself is **form shell** (`.fsh`, fkwu-native), and the runtime/recipes/walkers
-carry no bash or python by their nature (`.c` / `.fk` / `.form` / `.go` / `.rs` / `.ts`).
+This repo contains **zero `.sh` and zero `.py` files.** Ever. Orchestration is **form shell**
+(`.fsh`, fkwu-native), and the runtime/recipes/walkers carry no bash or python by their nature
+(`.c` / `.fk` / `.form` / `.go` / `.rs` / `.ts`).
 
 The one allowed seed is a **single `cc` command** that compiles `runtime/fkwu-uni.c` into the
 c-bootstrap `fkwu` binary — a documented one-liner, not a script in the tree. The fresh-checkout witness lives
@@ -128,7 +117,6 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Source runs natively without flatten.** `form-eval` / `form-eval-full` (four-way) evaluate Form source —
       integers, `add/sub/mul/le/eq`, `if/let/do`, `defn` + user calls — directly off the BMF cursor. `form-eval-cli`
       *stands*: fkwu reads a source file and runs it (witnessed). **Flatten is optional speed**, off the critical path.
-      The "flatten decider" that framed the restart was not cleaned — it was dissolved by taking flatten off the path.
 - [x] **Fresh checkout grounding stands.** `cc -O2 -o fkwu runtime/fkwu-uni.c` plus `./fkwu --src` over
       `bootstrap/ground.fk` witnesses `42`, `bootstrap/ground-recursive.fk 10` witnesses `55`, and
       `observe/native-vs-rented.fk` with `(native-vs-rented-check)` witnesses `11111`; no flattened source-runner
@@ -243,36 +231,15 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `fr<->id`, and `pt-br<->zh` all retain reciprocal A->B/B->A/A->A/B->B lanes, start guided, end native,
       keep controls clean, promote by A/B evidence, and preserve the local oracle/device while neural Metal and
       diffusion remain pending. The band returns `32767`.
-- [x] **Metal-observed sweep bridge added.** `learn/metal-observed-sweep-bridge.fk` connects the live macOS
-      Metal `en<->de` audio route-shift receipt (`12` samples, `10` oracle-ok, `0%->83%`, shifted) to the
-      multiseed sweep. The bridge routes `metal-anchored-native-guide`, records `1/5` live pair anchors with
-      `4` still needed, and explicitly refuses `full-metal-native` until more live pairs are observed. The band
-      returns `32767`.
-- [x] **Second live Metal pair anchor added.** `presence/macos-en-es-speech-roundtrip-variant.fk` reuses the
-      Form-owned macOS carrier for `en<->es`; live Apple Metal returned carrier verdict `511`, route-shift
-      `1012120012010001`, and field-code `12121210001000100` (`12/12` oracle, `12/12` native, `100%`
-      reciprocal A/B and B/A). `learn/metal-live-pair-anchors.fk` now counts `2/5` live anchors, leaves `3`
-      live pair anchors pending, and keeps the route at `metal-anchored-native-guide`. The band returns `32767`.
-- [x] **Third live Metal pair anchor added.** `presence/macos-en-id-speech-roundtrip-variant.fk` reuses the
-      same Form-owned macOS carrier for `en<->id`; live Apple Metal returned carrier verdict `511`, base
-      field-code `12120000000000000`, and trained field-code `12121210001000100` (`12/12` oracle, `0/12` native
-      before training, `12/12` native after training, `100%` reciprocal A/B and B/A). The Indonesian side uses the
-      same local Damayanti voice for train/eval because that is the installed macOS voice boundary. The anchor set
-      now counts `3/5` live anchors, leaves `2` live pair anchors pending, and keeps the route at
-      `metal-anchored-native-guide`. The band returns `32767`.
-- [x] **Fourth live Metal pair anchor added.** `presence/macos-en-fr-speech-roundtrip-variant.fk` reuses the
-      same Form-owned macOS carrier for `en<->fr`; live Apple Metal returned carrier verdict `511`, base
-      field-code `12100000000000000`, and trained field-code `12101008301000066` (`10/12` oracle, `0/12` native
-      before training, `10/12` native after training, `83%` total, `100%` A/B and `66%` B/A). The French prompt
-      text stays ASCII until the WER tokenizer grows Unicode word support. The anchor set now counts `4/5` live
-      anchors, leaves `1` live pair anchor pending, and keeps the route at `metal-anchored-native-guide`. The band
-      returns `32767`.
-- [x] **Fifth live Metal pair anchor added.** `presence/macos-en-it-speech-roundtrip-variant.fk` reuses the same
-      Form-owned macOS carrier for `en<->it`; live Apple Metal returned carrier verdict `511`, base field-code
-      `12120000000000000`, and trained field-code `12121210001000100` (`12/12` oracle, `0/12` native before
-      training, `12/12` native after training, `100%` reciprocal A/B and B/A). The anchor set now counts `5/5`
-      live anchors and routes `full-metal-native` for the closed-prompt local audio-locale carrier. Unicode WER,
-      open dictation, and native neural ASR/TTS remain pending. The band returns `32767`.
+- [x] **Five live Metal pair anchors stand — `5/5`, `full-metal-native` for the closed-prompt carrier.**
+      The Form-owned macOS carrier runs `en<->de`, `en<->es`, `en<->id`, `en<->fr`, and `en<->it` on live Apple
+      Metal (one `presence/macos-*-speech-roundtrip-variant.fk` per pair; carrier verdict `511` each).
+      `learn/metal-live-pair-anchors.fk` counts `5/5` live anchors and routes `full-metal-native` for the
+      closed-prompt local audio-locale carrier; `learn/metal-observed-sweep-bridge.fk` binds the live route-shift
+      receipts to the multiseed sweep (band `32767`). Per-pair training moves native success from `0%` toward
+      `83–100%`; each pair's trained field-code records its oracle/native/reciprocal counts. Prompt text stays
+      ASCII and the Indonesian side reuses the installed Damayanti voice for train/eval, both at the macOS voice
+      boundary. Unicode WER, open dictation, and native neural ASR/TTS remain pending.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
@@ -295,10 +262,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 
 ## What's still ahead — the roadmap to a self-speaking native mind
 
-The flatten knot that framed the restart is dissolved: source runs straight off the cursor (`form-eval`),
-`form-eval-cli` stands, and `proof/four-way-run` proves four-way with no bash. The body and organs are home and
-four-way (the learning / form-cli / framebuffer / calibration cells, host-exec, http-client, form-asm). What
-remains is the **mind**, the **voice**, and **live speed** — the body is home; the frontier voice is the climb:
+Source runs straight off the cursor (`form-eval`), `form-eval-cli` stands, and `proof/four-way-run` proves
+four-way with no bash. The body and organs are home and four-way (the learning / form-cli / framebuffer /
+calibration cells, host-exec, http-client, form-asm). What remains is the **mind**, the **voice**, and
+**live speed** — the body is home; the frontier voice is the climb:
 
 1. **The generative weights (the mind).** A real open base (Qwen/Llama, real zh coverage) loaded as *recipe-data*
    through the form block — the whisper block-0 pattern (real trained weights through the Form block, 6.66e-15)
