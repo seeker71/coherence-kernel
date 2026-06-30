@@ -183,6 +183,15 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       render candidates after the live WER-100 miss (`32767`): only local, consented, clean, Form-native,
       non-neural-ready rows can score; WER improvement, target fit, intelligibility, listener grade, latency, and
       recipe coverage decide whether to render the next oracle sample or promote through the same STT bar.
+- [x] **Sema voice vocoder oracle bridge added.** `learn/sema-voice-vocoder-oracle-bridge.fk` feeds native
+      `text-conditioned-acoustic-vocoder` sample row shapes into the Sema local-oracle STT bar (`32767`):
+      target/oracle text, locale, audio hash, consent, fail/timeout/undo, oracle, and device become the receipt
+      evidence. The full TCAV + candidate-search composition stays split until the direct-source ceiling is lifted.
+- [x] **Speech model metrics report added.** `learn/speech-model-metrics-report.fk` records the current model size,
+      composition, success rates, voice quality, and native-vs-local-oracle rates (`32767`): selected arms are
+      prototype ASR, Sema voice sample loop TTS, closed-set locale Form NL2NL, and native source-window audio2audio;
+      native neural parameters claimed are `0`; live open dictation is oracle `4/4` and native `0/4`; Sema live
+      voice is native `0/1`, WER `100`, oracle-guide.
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
