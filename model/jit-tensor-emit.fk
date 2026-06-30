@@ -14,196 +14,62 @@
 ;
 ; The string IS the cell: an emitted source text is content-addressed like any value, so two
 ; identical emissions intern to one NodeID — the crystallization cache comes free.
+;
+; UPLIFTED (2026-06-29, stone 7 follow-on): the per-op/per-ISA MATVEC and AFFINE-TRAIN spines that
+; used to live here are RETIRED — they now emit THROUGH model/tensor-ir.fk's data-driven IR. The
+; matvec/affine-train entries below are thin delegations to tir-matvec-* / tir-affine-train-*, which
+; walk (kernel-spec + backend TABLE) -> source with NO per-ISA `if`. The ISA (MSL vs CUDA) and the
+; precision (f32/f16/bf16) are TABLE rows, not hand-written emitter bodies. Proven byte-identical to
+; the old spines (the M4-Max-bit-exact MSL reference still holds): model/tests/tensor-ir-band.fk.
+; What is NOT yet IR-expressible (and so stays hand-authored below): the Rust cdylib oracle matvec
+; (no Rust/cdylib backend table yet), and the BLOCK kernels (mlp/resid/attn/whisper/llama/gqa/decode)
+; whose bodies compose transcendentals (fexp/fgelu/ftanh), RMSNorm/LayerNorm Newton-sqrt, softmax,
+; and RoPE — IR ops the tensor IR names (exp/tanh/gelu/barrier/workgroup) but does not yet realize.
+; Those are the named next rows, NOT a silent drop.
+;
+; preludes: tensor-ir.fk
 
 (defn jte-matvec-rust (fname)
   (str_concat "#[no_mangle] pub unsafe extern fn "
   (str_concat fname
               " (w: *const f64, x: *const f64, y: *mut f64, rows: i64, cols: i64) { let r = rows as usize; let c = cols as usize; let mut i = 0usize; while i < r { let row = w.add(i * c); let mut acc = 0.0f64; let mut j = c; while j > 0 { j -= 1; acc = *row.add(j) * *x.add(j) + acc; } *y.add(i) = acc; i += 1; } }")))
 
-; jte-matvec-msl-spine — the SAME emitter discipline pointed at the GPU: Metal Shading Language
-; source for the matvec, one thread per output row (rows are independent — parallelism without
-; touching the fold), inner loop accumulating j DOWN exactly like tb-dot and the rust emission
-; above. ONE spine; precision arrives as DATA (elemty = the lane's storage type, accty = the
-; accumulator type), so half and bfloat are rows, never copies of the emitter.
-;
-; The conversion chain the spine declares (per format-arith's cross-precision discipline — each
-; side held to its declared precision, the gate defined BY the format's own semantics):
-;   load    elemty -> accty   exact (every half/bfloat value is representable in fp32)
-;   mul/add in accty          two roundings, split through the named temporary p so no
-;                             conformant Metal compiler can contract them into an fma
-;   store   accty -> elemty   ONE rounding, round-to-nearest-even (MSL conversions and
-;                             format-arith's fq-rne agree on the tie rule)
-; For the fp32 lane the conversions are identities — the spine names the chain uniformly.
-; MEASURED on this shape (M4 Max, mathMode safe): every lane's output rows bit-exact vs a CPU
-; reference computed in the same chain (scripts/metal_matvec_audit.sh). No #include needed —
-; kernel/device/constant/uint/half/bfloat are language-level, so the source stays one quote-free
-; line, a plain Form string like its rust sibling.
-
-(defn jte-matvec-msl-spine (fname elemty accty)
-  (str_concat "kernel void "
-  (str_concat fname
-  (str_concat "(device const "
-  (str_concat elemty
-  (str_concat "* w [[buffer(0)]], device const "
-  (str_concat elemty
-  (str_concat "* x [[buffer(1)]], device "
-  (str_concat elemty
-  (str_concat "* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; device const "
-  (str_concat elemty
-  (str_concat "* row = w + i * cols; "
-  (str_concat accty
-  (str_concat " acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; "
-  (str_concat accty
-  (str_concat " p = "
-  (str_concat accty
-  (str_concat "(row[j]) * "
-  (str_concat accty
-  (str_concat "(x[j]); acc = p + acc; } y[i] = "
-  (str_concat elemty "(acc); }")))))))))))))))))))))
-
-; format rows — the lane's MSL storage type and accumulator type as data. The accumulator is
-; fp32 in every current lane (M1 format-arith's e.g.: accumulate wide, store in the lane format,
-; one rounding at the boundary); a future lane that accumulates differently is a new row here,
-; not a new emitter. "bf16" carries the Metal-version gate: MSL bfloat is Metal 3.1+ — the live
-; witness checks at runtime and skips-with-name where absent.
+; jte-matvec-msl — RETIRED hand-spine; now the IR's tir-matvec-msl-fmt (Metal lane, one thread per
+; output row, the SAME downward two-rounding dot). Precision (f32/f16/bf16) is a TABLE row in the IR
+; (tir-msl-table-el over tir-msl-elem), not a copy of the emitter. The M4-Max bit-exact reference
+; (scripts/metal_matvec_audit.sh) still holds — the emitted MSL is byte-for-byte the old spine
+; (model/tests/tensor-ir-band.fk). jte-msl-elem stays as the lane's storage-type row (still used by
+; the block/affine-train MSL kernels below, which the IR does not yet carry).
 (defn jte-msl-elem (fmt) (if (str_eq fmt "f16") "half" (if (str_eq fmt "bf16") "bfloat" "float")))
 (defn jte-msl-acc (fmt) "float")
 
-(defn jte-matvec-msl-fmt (fname fmt) (jte-matvec-msl-spine fname (jte-msl-elem fmt) (jte-msl-acc fmt)))
+(defn jte-matvec-msl-fmt (fname fmt) (tir-matvec-msl-fmt fname fmt))
 (defn jte-matvec-msl (fname) (jte-matvec-msl-fmt fname "f32"))
 
-; --- affine-layer TRAINING-STEP kernel, emitted as a Form recipe (the learning kernel on metal) ---
-; One GPU thread per output row i of y = W·x + b. It computes the forward dot (the SAME downward
-; right-fold as tb-dot / the matvec spine, so the order matches the recipe), the SSE residual and
-; per-row loss, the upstream grad g = 2(y_i - t_i), then applies the SGD update IN PLACE:
-;   row_i[j] -= lr · g · x[j]   (this row of dW = outer(g, x))      b[i] -= lr · g   (db = g).
-; This is transformer-backprop.fk's tbp-step, one row, on the GPU: every thread owns row i, reads
-; its whole row before writing it, so there is no cross-thread aliasing. The Form recipe transformer-
-; backprop.fk (fp64, proven 127 three-way) is the algorithm; this is its GPU carrier, gated bit-exact
-; against an fp32 CPU reference in the lane's own semantics (metal_backprop_audit.sh). Buffers: w,b,x,t
-; in the lane elem type; loss, lr, and every accumulator in the fp32 acc type (accumulate-wide).
-(defn jte-train-msl-sig (fname el ac)
-  (str_concat "kernel void "
-  (str_concat fname
-  (str_concat "(device "
-  (str_concat el
-  (str_concat "* w [[buffer(0)]], device "
-  (str_concat el
-  (str_concat "* b [[buffer(1)]], device const "
-  (str_concat el
-  (str_concat "* x [[buffer(2)]], device const "
-  (str_concat el
-  (str_concat "* t [[buffer(3)]], device "
-  (str_concat ac
-  (str_concat "* loss [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant "
-  (str_concat ac
-  "& lr [[buffer(7)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; ")))))))))))))))
-(defn jte-train-msl-fwd (el ac)
-  (str_concat "device " (str_concat el
-  (str_concat "* row = w + i * cols; " (str_concat ac
-  (str_concat " acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; " (str_concat ac
-  (str_concat " p = " (str_concat ac
-  (str_concat "(row[j]) * " (str_concat ac
-  (str_concat "(x[j]); acc = p + acc; } " (str_concat ac
-  (str_concat " y = acc + " (str_concat ac
-  (str_concat "(b[i]); " (str_concat ac
-  (str_concat " d = y - " (str_concat ac
-  (str_concat "(t[i]); loss[i] = d * d; " (str_concat ac
-  " g = 2.0f * d; ")))))))))))))))))))))
-(defn jte-train-msl-upd (el ac)
-  (str_concat "uint k = cols; while (k > 0) { k -= 1; row[k] = " (str_concat el
-  (str_concat "(" (str_concat ac
-  (str_concat "(row[k]) - lr * g * " (str_concat ac
-  (str_concat "(x[k])); } b[i] = " (str_concat el
-  (str_concat "(" (str_concat ac
-  "(b[i]) - lr * g); }")))))))))))
-(defn jte-affine-train-msl-spine (fname el ac)
-  (str_concat (jte-train-msl-sig fname el ac)
-  (str_concat (jte-train-msl-fwd el ac) (jte-train-msl-upd el ac))))
-(defn jte-affine-train-msl-fmt (fname fmt) (jte-affine-train-msl-spine fname (jte-msl-elem fmt) (jte-msl-acc fmt)))
+; --- affine-layer TRAINING-STEP kernel — RETIRED hand-spine; now the IR's tir-affine-train-msl-fmt ---
+; One GPU thread per output row i of y = W·x + b: the forward dot (the IR's shared tir-dot-down), the
+; SSE residual + per-row loss, the upstream grad g = 2(y_i - t_i), then the SGD update IN PLACE
+; (row_i[j] -= lr·g·x[j] ; b[i] -= lr·g). transformer-backprop.fk's tbp-step, one row, on the GPU;
+; gated bit-exact vs an fp32 CPU reference (metal_backprop_audit.sh). The forward/update body is now
+; the IR train body (tir-train-tail + tir-train-update), the memory model is the MSL table — byte-for-
+; byte the old spine across f32/f16/bf16 (model/tests/tensor-ir-band.fk).
+(defn jte-affine-train-msl-fmt (fname fmt) (tir-affine-train-msl-fmt fname fmt))
 (defn jte-affine-train-msl (fname) (jte-affine-train-msl-fmt fname "f32"))
 
 
-; --- CUDA / NVIDIA (RTX, sm_89) lane: __global__ twins of the MSL matvec + affine-train spines ---
-; The Metal lane's exact transform for NVIDIA, every byte still authored by this recipe:
-;   kernel void                  -> __global__ void
-;   device / device const / [[buffer(n)]]  -> plain pointers (drop the qualifiers)
-;   constant uint& rows ...      -> unsigned rows ...        constant <ac>& lr -> <ac> lr (by value)
-;   uint i [[thread_position_in_grid]]  -> unsigned i = blockIdx.x * blockDim.x + threadIdx.x
-; The ARITHMETIC BODY is byte-for-byte the MSL body — same downward right-fold, same two-rounding
-; mul-then-add, fp32 accumulator. Compiled with nvcc --fmad=false (no FMA contraction) the GPU
-; result is the recipe's result to the last bit; scripts/cuda_matvec_audit.sh / cuda_affine_train_audit.sh
-; gate it bit-exact against the CPU right-fold (the CUDA twins of metal_matvec_audit.sh / metal_backprop_audit.sh).
-; No `extern "C"` — that needs quote chars (the recipe stays a plain Form string, like the rust sibling's
-; `extern fn`); the audit's host main() calls the kernel in the same .cu, so C++ mangling is irrelevant.
-; elem/acc rows mirror jte-msl-elem/acc: f32 is the bit-exact ground; the __half / __nv_bfloat16 lanes
-; are the next rung (one RNE store at the lane boundary, same as the MSL f16/bf16 lanes).
-(defn jte-cuda-elem (fmt) (if (str_eq fmt "f16") "__half" (if (str_eq fmt "bf16") "__nv_bfloat16" "float")))
-(defn jte-cuda-acc (fmt) "float")
-
-(defn jte-matvec-cuda-spine (fname elemty accty)
-  (str_concat "__global__ void "
-  (str_concat fname
-  (str_concat "(const "
-  (str_concat elemty
-  (str_concat "* w, const "
-  (str_concat elemty
-  (str_concat "* x, "
-  (str_concat elemty
-  (str_concat "* y, unsigned rows, unsigned cols) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= rows) return; const "
-  (str_concat elemty
-  (str_concat "* row = w + i * cols; "
-  (str_concat accty
-  (str_concat " acc = 0.0f; unsigned j = cols; while (j > 0) { j -= 1; "
-  (str_concat accty
-  (str_concat " p = "
-  (str_concat accty
-  (str_concat "(row[j]) * "
-  (str_concat accty
-  (str_concat "(x[j]); acc = p + acc; } y[i] = "
-  (str_concat elemty "(acc); }")))))))))))))))))))))
-(defn jte-matvec-cuda-fmt (fname fmt) (jte-matvec-cuda-spine fname (jte-cuda-elem fmt) (jte-cuda-acc fmt)))
+; --- CUDA / NVIDIA (RTX, sm_89) lane — RETIRED hand-spines; now the IR's tir-matvec-cuda-fmt /
+;     tir-affine-train-cuda-fmt. The CUDA memory model (`__global__ void`, plain pointers, `unsigned`
+;     index, `blockIdx.x*blockDim.x+threadIdx.x`) is the CUDA TABLE row in model/tensor-ir.fk; the
+;     arithmetic body is the SAME shared IR spine as MSL, byte-for-byte (the proof that the per-ISA
+;     difference is the only DATA). Compiled with nvcc --fmad=false the GPU result is the recipe's to
+;     the last bit (scripts/cuda_matvec_audit.sh / cuda_affine_train_audit.sh). The f32 ground and the
+;     __half / __nv_bfloat16 lanes are TABLE rows (tir-cuda-elem), proven byte-identical to the old
+;     spines across all three formats (model/tests/tensor-ir-band.fk). jte-cuda-elem stays as the
+;     CUDA elem/acc rows now live in the IR (tir-cuda-elem) — no CUDA block kernel remains here to need them.
+(defn jte-matvec-cuda-fmt (fname fmt) (tir-matvec-cuda-fmt fname fmt))
 (defn jte-matvec-cuda (fname) (jte-matvec-cuda-fmt fname "f32"))
 
-(defn jte-train-cuda-sig (fname el ac)
-  (str_concat "__global__ void "
-  (str_concat fname
-  (str_concat "("
-  (str_concat el
-  (str_concat "* w, "
-  (str_concat el
-  (str_concat "* b, const "
-  (str_concat el
-  (str_concat "* x, const "
-  (str_concat el
-  (str_concat "* t, "
-  (str_concat ac
-  (str_concat "* loss, unsigned rows, unsigned cols, "
-  (str_concat ac
-  " lr) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= rows) return; ")))))))))))))))
-(defn jte-train-cuda-fwd (el ac)
-  (str_concat el
-  (str_concat "* row = w + i * cols; " (str_concat ac
-  (str_concat " acc = 0.0f; unsigned j = cols; while (j > 0) { j -= 1; " (str_concat ac
-  (str_concat " p = " (str_concat ac
-  (str_concat "(row[j]) * " (str_concat ac
-  (str_concat "(x[j]); acc = p + acc; } " (str_concat ac
-  (str_concat " y = acc + " (str_concat ac
-  (str_concat "(b[i]); " (str_concat ac
-  (str_concat " d = y - " (str_concat ac
-  (str_concat "(t[i]); loss[i] = d * d; " (str_concat ac
-  " g = 2.0f * d; "))))))))))))))))))))
-(defn jte-train-cuda-upd (el ac)
-  (str_concat "unsigned k = cols; while (k > 0) { k -= 1; row[k] = " (str_concat el
-  (str_concat "(" (str_concat ac
-  (str_concat "(row[k]) - lr * g * " (str_concat ac
-  (str_concat "(x[k])); } b[i] = " (str_concat el
-  (str_concat "(" (str_concat ac
-  "(b[i]) - lr * g); }")))))))))))
-(defn jte-affine-train-cuda-spine (fname el ac)
-  (str_concat (jte-train-cuda-sig fname el ac)
-  (str_concat (jte-train-cuda-fwd el ac) (jte-train-cuda-upd el ac))))
-(defn jte-affine-train-cuda-fmt (fname fmt) (jte-affine-train-cuda-spine fname (jte-cuda-elem fmt) (jte-cuda-acc fmt)))
+(defn jte-affine-train-cuda-fmt (fname fmt) (tir-affine-train-cuda-fmt fname fmt))
 (defn jte-affine-train-cuda (fname) (jte-affine-train-cuda-fmt fname "f32"))
 
 

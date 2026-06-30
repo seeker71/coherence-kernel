@@ -82,6 +82,43 @@
     (str_concat (tb-slot tbl "st")
     (str_concat "acc" (str_concat (tb-slot tbl "stc") ";")))))
 
+; tir-store-into: the named-tie store of an arbitrary acc-typed EXPRESSION into an lvalue —
+; `lval = st( expr )stc;`. The same one-rounding acc->elem boundary as tir-store-y, generalized
+; so the affine-train weight/bias updates flow through the SAME store op, not a hand-rolled cast.
+(defn tir-store-into (tbl lval expr)
+    (str_concat lval
+    (str_concat " = "
+    (str_concat (tb-slot tbl "st")
+    (str_concat expr (str_concat (tb-slot tbl "stc") ";"))))))
+
+; ── affine-layer (y = W·x + b) TRAINING-STEP body, authored ONCE, ISA-free. Forward dot (the SHARED
+;    tir-dot-down) -> bias add -> SSE residual + per-row loss -> upstream grad g = 2(y-t) -> SGD update
+;    of this row's dW = outer(g,x) and db = g, IN PLACE. The fold is tb-dot's downward right-fold; the
+;    update loop counts DOWN over cols exactly like the forward dot; every load widens elem->acc and
+;    every store rounds acc->elem ONCE through the named cast slots. Memory model (kw / sig / row decl /
+;    idx type) arrives from the backend table — the arithmetic is the SAME bytes for MSL and CUDA.
+(defn tir-train-tail (tbl)
+    (str_concat (tir-acc tbl)
+    (str_concat " y = acc + "
+    (str_concat (tir-ld tbl "b[i]")
+    (str_concat "; "
+    (str_concat (tir-acc tbl)
+    (str_concat " d = y - "
+    (str_concat (tir-ld tbl "t[i]")
+    (str_concat "; loss[i] = d * d; "
+    (str_concat (tir-acc tbl)
+    " g = 2.0f * d; "))))))))))
+
+(defn tir-train-update (tbl)
+    (str_concat (tb-slot tbl "idx")
+    (str_concat " k = cols; while (k > 0) { k -= 1; "
+    (str_concat (tir-store-into tbl "row[k]"
+                  (str_concat (tir-ld tbl "row[k]")
+                  (str_concat " - lr * g * " (tir-ld tbl "x[k]"))))
+    (str_concat " } "
+    (tir-store-into tbl "b[i]"
+        (str_concat (tir-ld tbl "b[i]") " - lr * g")))))))
+
 ; ─────────────────────────────────────────────────────────────────────────────────────────────
 ; THE GENERIC EMITTER — walks (kernel-name + backend table) -> target source. The memory-model
 ; tokens come from the table; the arithmetic spine is the shared IR body. NO per-ISA `if`.
@@ -100,6 +137,22 @@
     (str_concat (tir-store-y tbl)
     " }"))))))))
 
+; tir-emit-affine-train: ONE SGD step of y = W·x + b. One thread per output row i (each thread owns
+; row i, reads its whole row before writing — no cross-thread aliasing). It reads ONLY named slots —
+; "kw" / "tsig" (the training signature, mutable w/b) / "trowdecl" (the MUTABLE per-thread row pointer,
+; no `const`) — then the shared IR train body (dot-down + bias/loss/grad tail + in-place update).
+; NO per-ISA `if`; the MSL and CUDA bodies are byte-identical save the table's memory model.
+(defn tir-emit-affine-train (fname tbl)
+    (str_concat (tb-slot tbl "kw")
+    (str_concat fname
+    (str_concat (tb-slot tbl "tsig")
+    (str_concat " if (i >= rows) return; "
+    (str_concat (tb-slot tbl "trowdecl")
+    (str_concat (tir-dot-down tbl)
+    (str_concat (tir-train-tail tbl)
+    (str_concat (tir-train-update tbl)
+    " }")))))))))
+
 ; ─────────────────────────────────────────────────────────────────────────────────────────────
 ; BACKEND TABLES — pure DATA. Adding a target = one of these lists; NO emitter body per target.
 ; The slots carry the whole per-ISA surface:
@@ -110,38 +163,6 @@
 ;   st/stc   the store CAST wrapper           elem     store type (for the cast)
 ; f32 lane shown; an f16/bf16 lane is the same table with elem -> "half"/"bfloat", acc unchanged.
 ; ─────────────────────────────────────────────────────────────────────────────────────────────
-
-; ── Apple GPU / Metal (MSL) — the metal-PROVEN lane (M4 Max bit-exact, jte-matvec-msl / sk-msl).
-(defn tir-msl-table ()
-    (list
-        (list "kw"      "kernel void ")
-        (list "idx"     "uint")
-        (list "acc"     "float")
-        (list "elem"    "float")
-        (list "rowdecl" "device const float* row = w + i * cols; ")
-        (list "ld"      "float(")
-        (list "ldc"     ")")
-        (list "wref"    "row[j]")
-        (list "xref"    "x[j]")
-        (list "st"      "float(")
-        (list "stc"     ")")
-        (list "sig"  "(device const float* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) {")))
-
-; ── NVIDIA / CUDA (PTX-bound, sm_89) — structural twin; same shared body, CUDA memory model.
-(defn tir-cuda-table ()
-    (list
-        (list "kw"      "__global__ void ")
-        (list "idx"     "unsigned")
-        (list "acc"     "float")
-        (list "elem"    "float")
-        (list "rowdecl" "const float* row = w + i * cols; ")
-        (list "ld"      "float(")
-        (list "ldc"     ")")
-        (list "wref"    "row[j]")
-        (list "xref"    "x[j]")
-        (list "st"      "float(")
-        (list "stc"     ")")
-        (list "sig"  "(const float* w, const float* x, float* y, unsigned rows, unsigned cols) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x;")))
 
 ; ── Vulkan / Android (SPIR-V via GLSL) — structural twin; same shared body, GLSL memory model. GLSL has
 ;    no device-pointer scratch, so rowdecl is empty and the weight reference inlines the row offset
@@ -163,8 +184,100 @@
         (list "stc"     "")
         (list "sig"  " { uint i = gl_GlobalInvocationID.x;")))
 
+; ─────────────────────────────────────────────────────────────────────────────────────────────
+; PRECISION-PARAMETERIZED TABLES — the lane's storage type (elem) is the ONLY parameter. The whole
+; per-format surface (sig, rowdecl, store cast) is COMPOSED from `el`; acc stays the wide fp32
+; accumulator and the load always widens elem->fp32 ("float("). So an f16/bf16/f32 lane is the SAME
+; emitter over a DIFFERENT el — never a copy of the spine (the jte-msl-elem/jte-cuda-elem rows the
+; hand-emitter carried, now generated). fp32 (el="float") reproduces tir-msl-table/tir-cuda-table
+; byte-for-byte; el="half"/"bfloat" (MSL) / el="__half"/"__nv_bfloat16" (CUDA) are the wide-store lanes.
+(defn tir-msl-table-el (el)
+    (list
+        (list "kw"      "kernel void ")
+        (list "idx"     "uint")
+        (list "acc"     "float")
+        (list "elem"    el)
+        (list "rowdecl" (str_concat "device const " (str_concat el "* row = w + i * cols; ")))
+        (list "ld"      "float(")
+        (list "ldc"     ")")
+        (list "wref"    "row[j]")
+        (list "xref"    "x[j]")
+        (list "st"      (str_concat el "("))
+        (list "stc"     ")")
+        (list "trowdecl" (str_concat "device " (str_concat el "* row = w + i * cols; ")))
+        (list "tsig"
+            (str_concat "(device "
+            (str_concat el
+            (str_concat "* w [[buffer(0)]], device "
+            (str_concat el
+            (str_concat "* b [[buffer(1)]], device const "
+            (str_concat el
+            (str_concat "* x [[buffer(2)]], device const "
+            (str_concat el
+                        "* t [[buffer(3)]], device float* loss [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant float& lr [[buffer(7)]], uint i [[thread_position_in_grid]]) {")))))))))
+        (list "sig"
+            (str_concat "(device const "
+            (str_concat el
+            (str_concat "* w [[buffer(0)]], device const "
+            (str_concat el
+            (str_concat "* x [[buffer(1)]], device "
+            (str_concat el
+                        "* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) {")))))))))
+
+(defn tir-cuda-table-el (el)
+    (list
+        (list "kw"      "__global__ void ")
+        (list "idx"     "unsigned")
+        (list "acc"     "float")
+        (list "elem"    el)
+        (list "rowdecl" (str_concat "const " (str_concat el "* row = w + i * cols; ")))
+        (list "ld"      "float(")
+        (list "ldc"     ")")
+        (list "wref"    "row[j]")
+        (list "xref"    "x[j]")
+        (list "st"      (str_concat el "("))
+        (list "stc"     ")")
+        (list "trowdecl" (str_concat el "* row = w + i * cols; "))
+        (list "tsig"
+            (str_concat "("
+            (str_concat el
+            (str_concat "* w, "
+            (str_concat el
+            (str_concat "* b, const "
+            (str_concat el
+            (str_concat "* x, const "
+            (str_concat el
+                        "* t, float* loss, unsigned rows, unsigned cols, float lr) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x;")))))))))
+        (list "sig"
+            (str_concat "(const "
+            (str_concat el
+            (str_concat "* w, const "
+            (str_concat el
+            (str_concat "* x, "
+            (str_concat el
+                        "* y, unsigned rows, unsigned cols) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x;")))))))))
+
+; format-name -> lane elem type (the jte-msl-elem / jte-cuda-elem rows, now data on the format axis)
+(defn tir-msl-elem  (fmt) (if (str_eq fmt "f16") "half"   (if (str_eq fmt "bf16") "bfloat"        "float")))
+(defn tir-cuda-elem (fmt) (if (str_eq fmt "f16") "__half" (if (str_eq fmt "bf16") "__nv_bfloat16" "float")))
+
+; the canonical f32 lane is the precision builder at el="float" — ONE table-builder, no duplicated rows.
+; (kept as named handles; the M4-Max-bit-exact MSL reference is tir-msl-table -> tir-msl-table-el "float".)
+(defn tir-msl-table  () (tir-msl-table-el  "float"))
+(defn tir-cuda-table () (tir-cuda-table-el "float"))
+
 ; ── per-target one-call entries (the public surface; same shape as jte-matvec-msl) ──
-(defn tir-matvec-msl  (fname) (tir-emit-matvec fname (tir-msl-table)))
-(defn tir-matvec-cuda (fname) (tir-emit-matvec fname (tir-cuda-table)))
+(defn tir-matvec-msl-fmt  (fname fmt) (tir-emit-matvec fname (tir-msl-table-el  (tir-msl-elem  fmt))))
+(defn tir-matvec-cuda-fmt (fname fmt) (tir-emit-matvec fname (tir-cuda-table-el (tir-cuda-elem fmt))))
+(defn tir-matvec-msl  (fname) (tir-matvec-msl-fmt  fname "f32"))
+(defn tir-matvec-cuda (fname) (tir-matvec-cuda-fmt fname "f32"))
 (defn tir-matvec-glsl (fname) (tir-emit-matvec fname (tir-glsl-table)))
+
+; ── affine-train one-call entries — the SAME IR train body, MSL and CUDA memory models from the tables.
+;    (GLSL has no training reference in the hand-emitter; it is a NEW table row when an Android train
+;    audit is authored, not a new emitter — honest absence, not a faked lane.)
+(defn tir-affine-train-msl-fmt  (fname fmt) (tir-emit-affine-train fname (tir-msl-table-el  (tir-msl-elem  fmt))))
+(defn tir-affine-train-cuda-fmt (fname fmt) (tir-emit-affine-train fname (tir-cuda-table-el (tir-cuda-elem fmt))))
+(defn tir-affine-train-msl  (fname) (tir-affine-train-msl-fmt  fname "f32"))
+(defn tir-affine-train-cuda (fname) (tir-affine-train-cuda-fmt fname "f32"))
 

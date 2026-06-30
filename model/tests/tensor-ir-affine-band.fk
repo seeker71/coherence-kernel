@@ -1,0 +1,152 @@
+; tensor-ir-affine-band — the data-driven tensor IR now emits the AFFINE-LAYER TRAINING STEP (y = W·x + b,
+; one SGD step) across MSL and CUDA, all precision lanes, from the SAME shared spine + backend TABLES — with
+; NO regression on the proven jit-tensor-emit hand-spines it RETIRES. Self-contained (no external prelude):
+; it inlines the IR engine (tb-slot + tir-dot-down + tir-train-tail + tir-train-update + the precision table
+; builders tir-{msl,cuda}-table-el over tir-{msl,cuda}-elem) and the PROVEN reference emitters (the OLD
+; jte-affine-train spines, f32 + f16 + bf16), then checks the IR output is BYTE-FOR-BYTE the reference. All
+; recipe ops are defn / str_concat / str_eq / if / list-via-function-args (no `let`-bound lists) so it crosses
+; FOUR-WAY (fkwu + go + rust + ts).
+;
+; Verdict 31 when every claim lands:
+;   1   IR affine-train MSL  f32  ≡ the proven jte-affine-train-msl  "f32"  (no regression; diff=0)
+;   2   IR affine-train CUDA f32  ≡ the proven jte-affine-train-cuda "f32"  (the second ISA from ONE IR body)
+;   4   IR affine-train MSL  f16  ≡ the proven jte-affine-train-msl  "f16"  (precision is a TABLE row, not a copy)
+;   8   IR affine-train CUDA bf16 ≡ the proven jte-affine-train-cuda "bf16" (the wide-store lane, both ISAs)
+;  16   the shared train update splits the store through the elem cast — the NON-fused two-rounding acc-step
+;       extends into the SGD update (row[k] = elem(acc-expr); — one rounding at the lane boundary)
+;
+; The MSL and CUDA train bodies are byte-identical save the memory model (kernel/__global__, device/plain ptr,
+; thread index, idx type) — exactly the per-ISA surface the backend TABLE carries; the forward dot + bias/loss/
+; grad tail + in-place update are emitted ONCE. Proven on metal: the MSL f32 lane is the M4 Max bit-exact
+; reference (metal_backprop_audit), now flowing through this engine. CUDA is structural here (RTX/cuda_affine_
+; train_audit covers its metal run). f16/bf16 are the wide-store lanes (one RNE at the lane boundary).
+
+; ── the IR engine (verbatim shape of model/tensor-ir.fk: tb-slot + dot-down + train body + precision tables) ──
+(defn tb-slot (tbl key)
+    (if (eq (len tbl) 0) ""
+        (if (str_eq (head (head tbl)) key) (head (tail (head tbl)))
+            (tb-slot (tail tbl) key))))
+(defn tir-acc (tbl) (tb-slot tbl "acc"))
+(defn tir-ld (tbl ref)
+    (str_concat (tb-slot tbl "ld") (str_concat ref (tb-slot tbl "ldc"))))
+(defn tir-dot-down (tbl)
+    (str_concat (tir-acc tbl)
+    (str_concat " acc = 0.0f; "
+    (str_concat (tb-slot tbl "idx")
+    (str_concat " j = cols; while (j > 0) { j -= 1; "
+    (str_concat (tir-acc tbl)
+    (str_concat " p = "
+    (str_concat (tir-ld tbl (tb-slot tbl "wref"))
+    (str_concat " * "
+    (str_concat (tir-ld tbl (tb-slot tbl "xref"))
+    (str_concat "; acc = p + acc; } " "")))))))))))
+(defn tir-store-into (tbl lval expr)
+    (str_concat lval
+    (str_concat " = "
+    (str_concat (tb-slot tbl "st")
+    (str_concat expr (str_concat (tb-slot tbl "stc") ";"))))))
+(defn tir-train-tail (tbl)
+    (str_concat (tir-acc tbl)
+    (str_concat " y = acc + "
+    (str_concat (tir-ld tbl "b[i]")
+    (str_concat "; "
+    (str_concat (tir-acc tbl)
+    (str_concat " d = y - "
+    (str_concat (tir-ld tbl "t[i]")
+    (str_concat "; loss[i] = d * d; "
+    (str_concat (tir-acc tbl)
+    " g = 2.0f * d; "))))))))))
+(defn tir-train-update (tbl)
+    (str_concat (tb-slot tbl "idx")
+    (str_concat " k = cols; while (k > 0) { k -= 1; "
+    (str_concat (tir-store-into tbl "row[k]"
+                  (str_concat (tir-ld tbl "row[k]")
+                  (str_concat " - lr * g * " (tir-ld tbl "x[k]"))))
+    (str_concat " } "
+    (tir-store-into tbl "b[i]"
+        (str_concat (tir-ld tbl "b[i]") " - lr * g")))))))
+(defn tir-emit-affine-train (fname tbl)
+    (str_concat (tb-slot tbl "kw")
+    (str_concat fname
+    (str_concat (tb-slot tbl "tsig")
+    (str_concat " if (i >= rows) return; "
+    (str_concat (tb-slot tbl "trowdecl")
+    (str_concat (tir-dot-down tbl)
+    (str_concat (tir-train-tail tbl)
+    (str_concat (tir-train-update tbl)
+    " }")))))))))
+
+; ── precision-parameterized backend TABLES (verbatim shape of model/tensor-ir.fk) ──
+(defn tir-msl-table-el (el)
+    (list
+        (list "kw" "kernel void ") (list "idx" "uint") (list "acc" "float") (list "elem" el)
+        (list "rowdecl" (str_concat "device const " (str_concat el "* row = w + i * cols; ")))
+        (list "ld" "float(") (list "ldc" ")") (list "wref" "row[j]") (list "xref" "x[j]")
+        (list "st" (str_concat el "(")) (list "stc" ")")
+        (list "trowdecl" (str_concat "device " (str_concat el "* row = w + i * cols; ")))
+        (list "tsig"
+            (str_concat "(device "
+            (str_concat el
+            (str_concat "* w [[buffer(0)]], device "
+            (str_concat el
+            (str_concat "* b [[buffer(1)]], device const "
+            (str_concat el
+            (str_concat "* x [[buffer(2)]], device const "
+            (str_concat el
+                        "* t [[buffer(3)]], device float* loss [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant float& lr [[buffer(7)]], uint i [[thread_position_in_grid]]) {")))))))))))
+(defn tir-cuda-table-el (el)
+    (list
+        (list "kw" "__global__ void ") (list "idx" "unsigned") (list "acc" "float") (list "elem" el)
+        (list "rowdecl" (str_concat "const " (str_concat el "* row = w + i * cols; ")))
+        (list "ld" "float(") (list "ldc" ")") (list "wref" "row[j]") (list "xref" "x[j]")
+        (list "st" (str_concat el "(")) (list "stc" ")")
+        (list "trowdecl" (str_concat el "* row = w + i * cols; "))
+        (list "tsig"
+            (str_concat "("
+            (str_concat el
+            (str_concat "* w, "
+            (str_concat el
+            (str_concat "* b, const "
+            (str_concat el
+            (str_concat "* x, const "
+            (str_concat el
+                        "* t, float* loss, unsigned rows, unsigned cols, float lr) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x;")))))))))))
+(defn tir-msl-elem  (fmt) (if (str_eq fmt "f16") "half"   (if (str_eq fmt "bf16") "bfloat"        "float")))
+(defn tir-cuda-elem (fmt) (if (str_eq fmt "f16") "__half" (if (str_eq fmt "bf16") "__nv_bfloat16" "float")))
+(defn tir-affine-train-msl-fmt  (fname fmt) (tir-emit-affine-train fname (tir-msl-table-el  (tir-msl-elem  fmt))))
+(defn tir-affine-train-cuda-fmt (fname fmt) (tir-emit-affine-train fname (tir-cuda-table-el (tir-cuda-elem fmt))))
+
+; ── the PROVEN reference emitters (the OLD jit-tensor-emit.fk hand-spines, retired by the IR above) ──
+(defn jte-msl-elem (fmt) (if (str_eq fmt "f16") "half" (if (str_eq fmt "bf16") "bfloat" "float")))
+(defn jte-cuda-elem (fmt) (if (str_eq fmt "f16") "__half" (if (str_eq fmt "bf16") "__nv_bfloat16" "float")))
+(defn jte-train-msl-sig (fname el ac)
+  (str_concat "kernel void " (str_concat fname (str_concat "(device " (str_concat el (str_concat "* w [[buffer(0)]], device " (str_concat el (str_concat "* b [[buffer(1)]], device const " (str_concat el (str_concat "* x [[buffer(2)]], device const " (str_concat el (str_concat "* t [[buffer(3)]], device " (str_concat ac (str_concat "* loss [[buffer(4)]], constant uint& rows [[buffer(5)]], constant uint& cols [[buffer(6)]], constant " (str_concat ac "& lr [[buffer(7)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; ")))))))))))))))
+(defn jte-train-msl-fwd (el ac)
+  (str_concat "device " (str_concat el (str_concat "* row = w + i * cols; " (str_concat ac (str_concat " acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; " (str_concat ac (str_concat " p = " (str_concat ac (str_concat "(row[j]) * " (str_concat ac (str_concat "(x[j]); acc = p + acc; } " (str_concat ac (str_concat " y = acc + " (str_concat ac (str_concat "(b[i]); " (str_concat ac (str_concat " d = y - " (str_concat ac (str_concat "(t[i]); loss[i] = d * d; " (str_concat ac " g = 2.0f * d; ")))))))))))))))))))))
+(defn jte-train-msl-upd (el ac)
+  (str_concat "uint k = cols; while (k > 0) { k -= 1; row[k] = " (str_concat el (str_concat "(" (str_concat ac (str_concat "(row[k]) - lr * g * " (str_concat ac (str_concat "(x[k])); } b[i] = " (str_concat el (str_concat "(" (str_concat ac "(b[i]) - lr * g); }")))))))))))
+(defn jte-affine-train-msl-fmt (fname fmt)
+  (str_concat (jte-train-msl-sig fname (jte-msl-elem fmt) "float")
+  (str_concat (jte-train-msl-fwd (jte-msl-elem fmt) "float") (jte-train-msl-upd (jte-msl-elem fmt) "float"))))
+(defn jte-train-cuda-sig (fname el ac)
+  (str_concat "__global__ void " (str_concat fname (str_concat "(" (str_concat el (str_concat "* w, " (str_concat el (str_concat "* b, const " (str_concat el (str_concat "* x, const " (str_concat el (str_concat "* t, " (str_concat ac (str_concat "* loss, unsigned rows, unsigned cols, " (str_concat ac " lr) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= rows) return; ")))))))))))))))
+(defn jte-train-cuda-fwd (el ac)
+  (str_concat el (str_concat "* row = w + i * cols; " (str_concat ac (str_concat " acc = 0.0f; unsigned j = cols; while (j > 0) { j -= 1; " (str_concat ac (str_concat " p = " (str_concat ac (str_concat "(row[j]) * " (str_concat ac (str_concat "(x[j]); acc = p + acc; } " (str_concat ac (str_concat " y = acc + " (str_concat ac (str_concat "(b[i]); " (str_concat ac (str_concat " d = y - " (str_concat ac (str_concat "(t[i]); loss[i] = d * d; " (str_concat ac " g = 2.0f * d; "))))))))))))))))))))
+(defn jte-train-cuda-upd (el ac)
+  (str_concat "unsigned k = cols; while (k > 0) { k -= 1; row[k] = " (str_concat el (str_concat "(" (str_concat ac (str_concat "(row[k]) - lr * g * " (str_concat ac (str_concat "(x[k])); } b[i] = " (str_concat el (str_concat "(" (str_concat ac "(b[i]) - lr * g); }")))))))))))
+(defn jte-affine-train-cuda-fmt (fname fmt)
+  (str_concat (jte-train-cuda-sig fname (jte-cuda-elem fmt) "float")
+  (str_concat (jte-train-cuda-fwd (jte-cuda-elem fmt) "float") (jte-train-cuda-upd (jte-cuda-elem fmt) "float"))))
+
+; ── the verdict: IR output ≡ proven reference, per ISA × precision; non-fused store via exact str_eq ──
+(defn aff-c0 () (if (str_eq (tir-affine-train-msl-fmt  "tr" "f32")  (jte-affine-train-msl-fmt  "tr" "f32"))  1 0))
+(defn aff-c1 () (if (str_eq (tir-affine-train-cuda-fmt "tr" "f32")  (jte-affine-train-cuda-fmt "tr" "f32"))  2 0))
+(defn aff-c2 () (if (str_eq (tir-affine-train-msl-fmt  "tr" "f16")  (jte-affine-train-msl-fmt  "tr" "f16"))  4 0))
+(defn aff-c3 () (if (str_eq (tir-affine-train-cuda-fmt "tr" "bf16") (jte-affine-train-cuda-fmt "tr" "bf16")) 8 0))
+; bit-16: the shared update's store splits through the elem cast — the non-fused two-rounding boundary
+;         extends into the SGD weight write: row[k] = half( float(row[k]) - lr * g * float(x[k]) );
+(defn aff-update-ref ()
+    "uint k = cols; while (k > 0) { k -= 1; row[k] = half(float(row[k]) - lr * g * float(x[k])); } b[i] = half(float(b[i]) - lr * g);")
+(defn aff-c4 () (if (str_eq (tir-train-update (tir-msl-table-el "half")) (aff-update-ref)) 16 0))
+(defn aff-verdict () (add (aff-c0) (add (aff-c1) (add (aff-c2) (add (aff-c3) (aff-c4))))))
+(aff-verdict)

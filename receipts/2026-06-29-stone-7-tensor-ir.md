@@ -128,5 +128,11 @@ This is a step ON the path: one engine (the recipe that proves four-way IS the r
 ISA), the ISA as data, the metal-proven path preserved bit-exact. It points at the north star — fewer
 special cases, more generic recipes — and away from nothing.
 
-Source `model/tensor-ir.fk` sha256: `ea21c39680a1c03e139c75643d889b9ecf17bb086f4cefeaed2c8e27db25ca19`
+> Follow-on (2026-06-29): the IR now also carries the AFFINE-LAYER TRAINING STEP, and PRECISION (f32/f16/
+> bf16) became its own data axis (table-builders over `tir-{msl,cuda}-elem`). `jit-tensor-emit.fk`'s matvec
+> AND affine-train MSL/CUDA hand-spines are RETIRED — they emit through the IR, byte-identical across all 12
+> lanes (`receipts/2026-06-29-uplift-jit-emit-through-ir.md`, band `model/tests/tensor-ir-affine-band.fk` =
+> four-way 31). The block kernels (FFN/softmax/attention/RoPE) remain the named next stone.
+
+Source `model/tensor-ir.fk` sha256: `ea21c39680a1c03e139c75643d889b9ecf17bb086f4cefeaed2c8e27db25ca19` (this receipt's stone; the follow-on raises it)
 Band   `model/tests/tensor-ir-band.fk` sha256: `37cb1cb9174c7ceabc28881456109ad976117a2b86dee06d39fc530bc57d3fef`
