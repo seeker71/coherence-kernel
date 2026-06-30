@@ -136,7 +136,11 @@ data-driven ops/rewrites end to end.
 
 ## Regenerating
 
+Pure Form, zero bash (the `gen-source-walker.sh` wrapper was composted —
+see `receipts/2026-06-29-optable-regen-is-form-no-bash.md`). From the repo root:
+
 ```sh
-flatten/gen-source-walker.sh          # rewrites runtime/fkwu-optable.h from flt-ops
+fkwu --src flatten/gen-source-walker.fk        # splice flt-ops -> /tmp/gen-source-walker-combined.fk (pure Form)
+fkwu --src /tmp/gen-source-walker-combined.fk  # generator writes runtime/fkwu-optable.h via write_file_text
 cc -O2 -o /tmp/fkwu runtime/fkwu-uni.c
 ```
