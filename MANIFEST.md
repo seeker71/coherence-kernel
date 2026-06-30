@@ -192,6 +192,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       prototype ASR, Sema voice sample loop TTS, closed-set locale Form NL2NL, and native source-window audio2audio;
       native neural parameters claimed are `0`; live open dictation is oracle `4/4` and native `0/4`; Sema live
       voice is native `0/1`, WER `100`, oracle-guide.
+- [x] **Speech model metrics trend added.** `learn/speech-model-metrics-trend.fk` records before/after movement
+      (`32767`): Mac Metal reciprocal audio moved native `0->83`; multiseed NL/audio moved `0->100`; live open
+      dictation remains local-oracle `100` / native `0`; Sema live voice remains native `0`, WER `100`. The trend
+      report counts `2` native-shifted lanes, `2` oracle-held lanes, and average native rate `45`.
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
