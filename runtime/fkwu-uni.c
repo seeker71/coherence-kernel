@@ -767,6 +767,7 @@ static long long fk_sym_end(long long s) { while (s < fk_slen) { char d = fk_src
    (empty) (arity 0), (list ..) (arity -1 variadic), every comparison/boolean
    rewrite — flows through these data tables. */
 #include "fkwu-optable.h"
+#include "fkwu-formeval.h"   /* embedded form-eval meta-evaluator, for the --feval eval path */
 /* match a source symbol [s,s+n) against a C string by length-and-bytes. */
 static int fk_optname_eq(long long s, long long n, const char *w) { long long i = 0; while (w[i] != 0) { if (i >= n || fk_srctext[s + i] != w[i]) { return 0; } i = i + 1; } return i == n; }
 /* op-table lookup: source symbol -> row index in fk_optab, or -1. */
@@ -1205,7 +1206,63 @@ static int fk_run_src(const char *path, long long arg) {
  fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
  return 0;
 }
-static int fk_run(int argc, char **argv) { if (argc < 2) { return 1; } if (argc >= 3 && argv[1][0] == 45 && argv[1][1] == 45) { return fk_run_src(argv[2], argc > 3 ? atoi(argv[3]) : 0); } int fd = open(argv[1], 0); if (fd < 0) { return 2; } long long got = read(fd, fk_buf, 1048575); if (got < 0) { return 3; } fk_buf[got] = 0; long long nf = fk_next(); fk_fn_count = nf; long long k = 0; while (k < nf) { fk_fn[k] = fk_next(); k = k + 1; } long long nr = fk_next(); fk_node_count = nr; long long r = 0; while (r < nr) { fk_node[r][0] = fk_next(); fk_node[r][1] = fk_next(); fk_node[r][2] = fk_next(); fk_node[r][3] = fk_next(); r = r + 1; } long long ns = fk_next(); fk_sinit(); long long si = 0; while (si < ns) { long long sl = fk_next(); if (fk_sp >= fk_scap_s) { fk_scap_s = fk_scap_s * 2; fk_so = realloc(fk_so, fk_scap_s * 8); fk_sl = realloc(fk_sl, fk_scap_s * 8); } while (fk_sbp + sl > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } fk_so[fk_sp] = fk_sbp; fk_sl[fk_sp] = sl; long long bj = 0; while (bj < sl) { fk_sb[fk_sbp] = (char)fk_next(); fk_sbp = fk_sbp + 1; bj = bj + 1; } fk_sp = fk_sp + 1; si = si + 1; } long long a = 0; if (argc > 2) { a = atoi(argv[2]) << 1; } if (argc > 3) { int sfd = open(argv[3], 0); if (sfd >= 0) { long long sg = read(sfd, fk_src, 262143); if (sg >= 0) { fk_src[sg] = 0; } } } fk_vs[0] = a; fk_vsp = 1; if (argc > 4) { fk_hot = atoi(argv[4]); } if (argc > 5 && argv[5][0] == 106) { fk_nat_code[0] = fk_demo_inc; fk_nat_len[0] = 8; } long long rootv; fk_heat[0] = fk_heat[0] + 1; if (fk_hot > 0 && fk_heat[0] >= fk_hot && fk_nat_code[0] != 0) { fk_njit = fk_njit + 1; rootv = fk_native_call(fk_nat_code[0], fk_nat_len[0], fk_vs[0] >> 1) << 1; } else { rootv = fk_walk(fk_fn[0], 0); } fk_pv_root(fk_fn[0], rootv); long long t = 1; while (t <= 255) { fk_pr(fk_arms[t]); t = t + 1; } fk_pr(fk_njit); return 0; }
+/* --feval: run a recipe THROUGH form-eval (Form), not fk_walk directly. The C seed bootstraps the
+   embedded form-eval meta-evaluator (fk_formeval_src); form-eval reads the recipe as a STRING and
+   evaluates it. The recipe source is escaped into a Form string literal and appended as the final
+   (fe-eval "<recipe>") form, so the whole bundle is one --src-shaped program that fk_parse_top +
+   fk_walk run — but the recipe's value is computed by fe-eval, in Form, on fk_walk. The root form is
+   (fe-eval ...), whose value is the meta-eval's result; we print it by value-kind (int/float/nothing)
+   so an integer result prints as an integer (the fk_pv_root root-op heuristic would mis-key on a
+   recipe that returns a string, which is outside this mode's numeric scope). */
+static int fk_run_feval(const char *path) {
+#if defined(_WIN32)
+ int fd = open(path, 0x8000);
+#else
+ int fd = open(path, 0);
+#endif
+ if (fd < 0) { return 2; }
+ char rbuf[131072];
+ long long rg = read(fd, rbuf, 131071); close(fd); if (rg < 0) { return 3; }
+ rbuf[rg] = 0;
+ /* build the bundle into fk_srctext: <embedded form-eval> + "\n(fe-eval \"<escaped recipe>\")\n" */
+ long long w = 0; long long cap = 262143;
+ const char *fe = fk_formeval_src;
+ while (fe[0] != 0) { if (w >= cap) { return 4; } fk_srctext[w] = fe[0]; w = w + 1; fe = fe + 1; }
+ const char *tail = "\n(fe-eval \"";
+ long long ti = 0; while (tail[ti] != 0) { if (w >= cap) { return 4; } fk_srctext[w] = tail[ti]; w = w + 1; ti = ti + 1; }
+ /* escape the recipe into a Form string literal: backslash, double-quote, newline, CR. The recipe is
+    a one-line value once escaped (newlines -> \n) so fe-str scans it as a single literal. */
+ long long ri = 0;
+ while (ri < rg) {
+  char c = rbuf[ri];
+  if (w + 2 >= cap) { return 4; }
+  if (c == 92) { fk_srctext[w] = 92; fk_srctext[w + 1] = 92; w = w + 2; }
+  else if (c == 34) { fk_srctext[w] = 92; fk_srctext[w + 1] = 34; w = w + 2; }
+  else if (c == 10) { fk_srctext[w] = 92; fk_srctext[w + 1] = 110; w = w + 2; }
+  else if (c == 13) { /* drop CR */ }
+  else { fk_srctext[w] = c; w = w + 1; }
+  ri = ri + 1;
+ }
+ const char *end = "\")\n";
+ long long ei = 0; while (end[ei] != 0) { if (w >= cap) { return 4; } fk_srctext[w] = end[ei]; w = w + 1; ei = ei + 1; }
+ fk_srctext[w] = 0; fk_slen = w; fk_spos = 0;
+ /* same parse+walk pipeline as fk_run_src */
+ fk_arg_n = 0; fk_fname_n = 0; fk_node_count = 0; fk_bd_top = 0; fk_maxslot = 0;
+ fk_sinit();
+ fk_fntop = 0; fk_defn_next = 1; fk_root = -1;
+ fk_prescan_defns();
+ fk_spos = 0;
+ while (1) { fk_sskip(); if (fk_spos >= fk_slen) { break; } fk_parse_top(); }
+ if (fk_root >= 0) { fk_fn[0] = fk_root; }
+ else if (fk_defn_next > 1) { fk_fn[0] = fk_fn[fk_defn_next - 1]; }
+ else { fk_fn[0] = fk_smklit(0); }
+ fk_fn_count = fk_defn_next;
+ fk_vs[0] = 0; fk_vsp = 1;
+ long long rv = fk_walk(fk_fn[0], 0);
+ fk_pv(rv);   /* print the meta-eval result by value-kind (int / float / nothing) */
+ return 0;
+}
+static int fk_run(int argc, char **argv) { if (argc < 2) { return 1; } if (argc >= 3 && argv[1][0] == 45 && argv[1][1] == 45 && argv[1][2] == 102 && argv[1][3] == 101) { return fk_run_feval(argv[2]); } if (argc >= 3 && argv[1][0] == 45 && argv[1][1] == 45) { return fk_run_src(argv[2], argc > 3 ? atoi(argv[3]) : 0); } int fd = open(argv[1], 0); if (fd < 0) { return 2; } long long got = read(fd, fk_buf, 1048575); if (got < 0) { return 3; } fk_buf[got] = 0; long long nf = fk_next(); fk_fn_count = nf; long long k = 0; while (k < nf) { fk_fn[k] = fk_next(); k = k + 1; } long long nr = fk_next(); fk_node_count = nr; long long r = 0; while (r < nr) { fk_node[r][0] = fk_next(); fk_node[r][1] = fk_next(); fk_node[r][2] = fk_next(); fk_node[r][3] = fk_next(); r = r + 1; } long long ns = fk_next(); fk_sinit(); long long si = 0; while (si < ns) { long long sl = fk_next(); if (fk_sp >= fk_scap_s) { fk_scap_s = fk_scap_s * 2; fk_so = realloc(fk_so, fk_scap_s * 8); fk_sl = realloc(fk_sl, fk_scap_s * 8); } while (fk_sbp + sl > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); } fk_so[fk_sp] = fk_sbp; fk_sl[fk_sp] = sl; long long bj = 0; while (bj < sl) { fk_sb[fk_sbp] = (char)fk_next(); fk_sbp = fk_sbp + 1; bj = bj + 1; } fk_sp = fk_sp + 1; si = si + 1; } long long a = 0; if (argc > 2) { a = atoi(argv[2]) << 1; } if (argc > 3) { int sfd = open(argv[3], 0); if (sfd >= 0) { long long sg = read(sfd, fk_src, 262143); if (sg >= 0) { fk_src[sg] = 0; } } } fk_vs[0] = a; fk_vsp = 1; if (argc > 4) { fk_hot = atoi(argv[4]); } if (argc > 5 && argv[5][0] == 106) { fk_nat_code[0] = fk_demo_inc; fk_nat_len[0] = 8; } long long rootv; fk_heat[0] = fk_heat[0] + 1; if (fk_hot > 0 && fk_heat[0] >= fk_hot && fk_nat_code[0] != 0) { fk_njit = fk_njit + 1; rootv = fk_native_call(fk_nat_code[0], fk_nat_len[0], fk_vs[0] >> 1) << 1; } else { rootv = fk_walk(fk_fn[0], 0); } fk_pv_root(fk_fn[0], rootv); long long t = 1; while (t <= 255) { fk_pr(fk_arms[t]); t = t + 1; } fk_pr(fk_njit); return 0; }
 #if defined(_WIN32)
 int main(int argc, char **argv) { return fk_run(argc, argv); }
 #else
