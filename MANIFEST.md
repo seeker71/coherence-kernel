@@ -179,6 +179,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       native authority. A manual ten-voice sweep transcribed `Open speech flows.` exactly for all ten voices; the
       repeatable Form carrier uses `Flo (English (US))`, contract band `4095`, live WER `0`. This is teacher
       material for native acoustic/vocoder learning, not native Sema TTS.
+- [x] **macOS teacher acoustic learning added.** `learn/macos-sema-teacher-acoustic-learning.fk` now consumes a
+      real local teacher wav as learning input: `say -> ffmpeg -> whisper.cpp/Metal`, then Form reads the wav
+      envelope, trains four acoustic token prototypes, decodes the learned frames, and returns live verdict `4095`,
+      live WER `0`, minimum confidence `96`, native neural parameters `0`. This is executable native prototype
+      learning from audio, not a global ASR/TTS authority promotion.
 - [x] **Sema voice oracle miss learning added.** `learn/sema-voice-oracle-miss-learning.fk` makes the live WER-100
       miss change the algorithm (`32767`): authority stays `oracle-guide`, and AutoML now names
       `text-conditioned-acoustic-vocoder` as the next trainable candidate with g2p, phoneme timing, prosody,
