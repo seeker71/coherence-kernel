@@ -37,9 +37,9 @@ That miss now changes the algorithm instead of sitting as prose:
 `train-text-conditioned-acoustic-vocoder`, keeping authority on `oracle-guide` and naming the next trainable
 candidate. The recipe is g2p, phoneme timing, prosody contour, acoustic token emission, segmented acoustic
 learning, the Sema voice loop, and the same local-oracle WER bar. The selector's speech receipt now returns
-`268435455` with that action, the multilocale audio2audio sweep, the Metal acoustic authority row, the
+`536870911` with that action, the multilocale audio2audio sweep, the Metal acoustic authority row, the
 live open-ASR source training action, the multilocale segmented source window, and the source-window audio2audio
-authority exposed.
+authority plus live segmented feature carrier exposed.
 
 The named candidate is now executable too: `text-conditioned-acoustic-vocoder` 32767 turns target tokens into
 G2P phones, shapes duration/pitch/amplitude from voice-side metadata, emits native source-filter frames, and
@@ -120,7 +120,7 @@ romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, 
 each pair's before/after NL rate, audio rate, route, and shifted flag, so the aggregate native route has per-pair
 witness rows. `speech-locale-learning-window` 16383 takes selected seed `2` into a numeric `sa<->la` observed
 window: all four lanes train from guided to native route code, clean controls plus A/B evidence promote the
-challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 268435455 selects today's native arms:
+challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 536870911 selects today's native arms:
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, `sema-voice-sample-loop`
 over the deterministic formant vocoder for TTS, and `native-source-window-audio2audio-acoustic` for segmented-source-window,
 metal-witnessed audio-to-audio target rendering. The raw formant vocoder and Sema voice loop route remain lower
@@ -144,6 +144,8 @@ through neutral meaning to target-locale tokens. `multilocale-segmented-source-w
 reciprocal pairs become ready, and AutoML sees the candidate without moving ASR authority away from `prototype-asr`.
 `source-window-audio2audio-authority` 32767 now composes that source window with the Metal acoustic audio2audio
 authority so the selected audio2audio arm is no longer decoded-token-only.
+`live-segmented-feature-carrier` 32767 now names the live wav/envelope feature-row membrane: observed local audio
+facts lower to feature rows, acoustic-token frames, CTC transcript text, and open-dictation promotion rows.
 `live-open-asr-source-authority` 32767 now turns the live
 open-dictation WER gap into `train-live-segmented-open-asr-source`, keeping ASR authority on `oracle-guide`
 until a local native transcript wins. `speech-token-training-source` 32767 answers where those labels come
@@ -151,8 +153,8 @@ from: local oracle and consentful corpus rows may teach words plus metadata; int
 metadata/control/evidence labels, but not transcript truth.
 The transformer path is trainable but not live-selected for speech yet; diffusion/codec speech is a
 named candidate only, pending a Form-native executable kernel and receipt. The live Metal anchor set now stands at
-7/7, so `full-metal-native` is an honest route for the closed-prompt carrier. Live segmented mic feature rows,
-open-ASR promotion windows, and native neural ASR/TTS remain the next named climbs.
+7/7, so `full-metal-native` is an honest route for the closed-prompt carrier. Real CoreAudio/AAudio/WASAPI capture
+feeding the live segmented feature row, open-ASR promotion windows, and native neural ASR/TTS remain the next named climbs.
 
 ## What the siblings caught — missing first-class layers (the roadmap)
 
