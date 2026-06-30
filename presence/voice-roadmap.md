@@ -59,9 +59,11 @@ learning over a closed prompt corpus.
 
 Pair selection should stay diverse and grounded in our own corpus first: `coherence-network-self-corpus` 8191
 observes the translated Coherence Network web/CLI message bundles (`en`, `de`, `es`, `fr`, `id`, `pt-br`) as
-ready training material, with 2064 shared key paths and 10320 EN-to-other pairs. `diverse-locale-pairing` 2047
-then samples far-apart ready pairs from those rows. Chinese, Arabic, and Latin are backfill targets until those
-bundles exist; Indigenous rows are specific (`nv`, `chr`) and stay pending until consentful corpora exist.
+ready training material, with 2064 shared key paths and 10320 EN-to-other pairs. `diverse-locale-pairing` 8191
+now samples far-apart ready pairs from either those rows or the Sanskrit baseline, so `zh`, `ar`, `sa`, and `la`
+can enter closed-set training before full Coherence bundles land. Full `zh`/`ar`/`la` bundles remain useful
+backfill targets; Indigenous rows are specific (`nv`, `chr`) and stay pending until consentful corpora exist. The
+pair guide exposes A->B, B->A, A->A, and B->B lanes for each seeded pair.
 
 The model choice is now executable rather than conversational: `sanskrit-locale-baseline` 2047 provides a small
 romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, `la`, `zh`, and `ar`; `multilocale-nl-audio-pipeline`

@@ -216,9 +216,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       and `pt-br` are ready; `zh`, `ar`, and `la` are backfill targets until translated bundles land. Observed
       counts are 2064 shared key paths and 10320 EN-to-other pairs; the band returns `8191`.
 - [x] **Diverse locale pairing guide added.** `learn/diverse-locale-pairing.fk` chooses far-apart A/B locale
-      pairs for the reciprocal loop from the self-corpus-ready rows; Chinese, Arabic, and Latin are named as
-      backfill targets, and specific Indigenous rows are not marked ready until consentful corpora exist. Seeded
-      selection is deterministic for receipts, randomizable by a carrier, and the band returns `2047`.
+      pairs for the reciprocal loop from self-corpus-ready or Sanskrit-baseline-ready rows. Chinese, Arabic,
+      Sanskrit, and Latin are available in the small baseline while full `zh`/`ar`/`la` Coherence bundles remain
+      backfill targets; specific Indigenous rows are not marked ready until consentful corpora exist. Seeded
+      selection is deterministic for receipts, randomizable by a carrier, exposes A->B/B->A/A->A/B->B lanes, and
+      the band returns `8191`.
 - [x] **Sanskrit baseline + multilocale NL/audio pipeline added.** `learn/sanskrit-locale-baseline.fk` records
       romanized Sanskrit seed lines with ready locale renderings for `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`,
       `la`, `zh`, and `ar`; full Coherence Network `zh`/`ar` bundles remain backfill targets.
