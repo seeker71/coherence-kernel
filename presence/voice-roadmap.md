@@ -52,7 +52,9 @@ Network `en<->de` prompt pairs. The native nearest-prototype model moved from 0%
 post-training success, with A->B at 66% and B->A at 100%; the live Form verdict was 511. Wav byte extraction is
 in Form (`read_file` + `str_byte_at`), and the carrier passes wav paths rather than feature arrays. The carrier
 now consumes each wav before constructing the next path, so direct-source mutable path strings cannot leak between
-samples; the rewitnessed combined code is `511121010836700`. This is not open ASR: it is oracle-valid prototype
+samples; the rewitnessed combined code is `511121010836700`. `audio-locale-route-shift-ledger` 8191 now records
+before/after native audio route movement, and the live carrier-first/ledger-second Metal witness returned
+`1012100010008301` (`shifted=1`, metric `12100010008301`). This is not open ASR: it is oracle-valid prototype
 learning over a closed prompt corpus.
 
 Pair selection should stay diverse and grounded in our own corpus first: `coherence-network-self-corpus` 8191

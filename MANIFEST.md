@@ -207,6 +207,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       and the Form body extracts the integer audio features before routing. The carrier now also consumes each
       generated wav before constructing the next path, avoiding retained mutable path strings in the direct-source
       surface; the live combined witness returned `511121010836700`.
+- [x] **Audio route-shift ledger added.** `learn/audio-locale-route-shift-ledger.fk` records before/after native
+      audio score, rate, A->B/B->A rates, route, and shifted flag for reciprocal audio locale windows. The band
+      returns `8191`. Composed with the macOS carrier on local Apple Metal, the carrier-first/ledger-second witness
+      returned `1012100010008301` (`shifted=1`, metric `12100010008301`).
 - [x] **Coherence Network self-corpus added.** `learn/coherence-network-self-corpus.fk` records the translated
       Coherence Network web/CLI message bundles as consentful training material: `en`, `de`, `es`, `fr`, `id`,
       and `pt-br` are ready; `zh`, `ar`, and `la` are backfill targets until translated bundles land. Observed
