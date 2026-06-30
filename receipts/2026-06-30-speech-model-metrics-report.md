@@ -18,7 +18,8 @@ cat learn/speech-model-metrics-report.fk \
 
 Current report:
 
-- Native neural parameters claimed: `0`.
+- Native neural weight parameters admitted: `0`.
+- Native Sema voice organs/components present: `6`.
 - Selected arms: ASR `prototype-asr`, TTS `sema-voice-sample-loop`, NL2NL
   `closed-set-locale-form`, audio2audio
   `native-source-window-audio2audio-acoustic`.
@@ -26,6 +27,6 @@ Current report:
 - Live `en<->zh` anchor: `10/12 = 83%`.
 - Live `en<->ar` anchor: `12/12 = 100%`.
 - Live open dictation: local oracle `4/4 = 100%`, native `0/4 = 0%`.
-- Sema live voice: native pass `0/1 = 0%`, WER `100`, route `oracle-guide`.
+- Sema live voice: live-native pass `0/1 = 0%`, WER `100`, route `oracle-guide`; native voice machinery is present but the live rendered sample has not passed.
 - Voice target: f0 `165`, warmth `82`, cadence `64`, steadiness `76`,
   breath `18`; current live formant voice is not intelligible enough yet.

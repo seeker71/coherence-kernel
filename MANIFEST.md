@@ -190,12 +190,16 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech model metrics report added.** `learn/speech-model-metrics-report.fk` records the current model size,
       composition, success rates, voice quality, and native-vs-local-oracle rates (`32767`): selected arms are
       prototype ASR, Sema voice sample loop TTS, closed-set locale Form NL2NL, and native source-window audio2audio;
-      native neural parameters claimed are `0`; live open dictation is oracle `4/4` and native `0/4`; Sema live
-      voice is native `0/1`, WER `100`, oracle-guide.
+      native neural weight parameters admitted are `0` while native Sema voice organs are present; live open
+      dictation is oracle `4/4` and native `0/4`; Sema live voice live-native pass is `0/1`, WER `100`, oracle-guide.
 - [x] **Speech model metrics trend added.** `learn/speech-model-metrics-trend.fk` records before/after movement
       (`32767`): Mac Metal reciprocal audio moved native `0->83`; multiseed NL/audio moved `0->100`; live open
       dictation remains local-oracle `100` / native `0`; Sema live voice remains native `0`, WER `100`. The trend
       report counts `2` native-shifted lanes, `2` oracle-held lanes, and average native rate `45`.
+- [x] **Speech locale coverage matrix added.** `learn/speech-locale-coverage-matrix.fk` records per-locale and
+      per-pair coverage (`32767`): `13` locales tracked, `11` ready, `8` live-anchor/carrier-live, `2`
+      consent-pending (`nv`, `chr`); `12` pair rows include `10` native and `2` oracle-guided. Unicode anchors
+      remain explicit: `en<->zh` `10/12 = 83%`, `en<->ar` `12/12 = 100%`.
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
