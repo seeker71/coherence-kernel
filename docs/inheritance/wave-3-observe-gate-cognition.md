@@ -74,10 +74,9 @@ This is the precise honesty bar: a body returning the floor/`0` is **never** cla
 `--src`-proven. `nearest-shape`/`tool-channel`/`choice-receipt` are claimed exactly as
 **home + transitively-proven + standalone-band-`--src`-pending**.
 
-## New `--src` gap observed this wave
+## The `--src` `do/let`-block gap
 
-The `do/let`-block floor is **broader than wave-2 recorded**: wave-2 named "let-bound bare
-cons-lists degenerate"; wave-3 confirms *any* `(do (let cN …) … )` band returns `0` on `--src`,
+The `do/let`-block floor is the full shape: *any* `(do (let cN …) … )` band returns `0` on `--src`,
 even when every bound value is a scalar `(if …)` and the underlying body is pure-integer
 recursion (verified directly: `(do (let c0 (if (eq (gcd 48 36) 12) 1 0)) c0)` → `0`, while
 `(gcd 48 36)` → `12` and `(add (if …) (if …))` → correct). This is why the let-free

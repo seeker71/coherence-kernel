@@ -96,10 +96,9 @@ emitters, not a larger C seed.
 
 ## What This Does Not Claim
 
-Do not require, invent, or wait for a flattened `form-eval-cli-loop.tbl` seed.
-That framing is obsolete: the direct source bootstrap is the standing entry.
+The direct source bootstrap is the standing entry; no flattened
+`form-eval-cli-loop.tbl` seed is required to ground or run the body.
 
 The optional flattened `form-eval-cli-loop` path is a cache/parity door for the
 Form meta-evaluator, not a gate for running the body. If a richer cell does not
-fit the current `--src` surface, name the actual coverage gap instead of
-claiming a missing table seed.
+fit the current `--src` surface, name the actual coverage gap.
