@@ -24,7 +24,7 @@ Added `learn/audio-locale-native-training.fk` and `presence/macos-speech-roundtr
 
 The Form carrier renders local macOS `say` audio for reciprocal English/German Coherence Network strings through
 `host-exec`, converts it with local `ffmpeg`, runs a local Whisper oracle through `host-exec`, passes wav paths
-and oracle tokens into the Form training law, and lets Form read the wav bytes, extract integer audio features,
+and oracle tokens into the Form training guide, and lets Form read the wav bytes, extract integer audio features,
 run native prediction, gate on oracle WER, learn from oracle-valid samples, require reciprocal A/B coverage, and
 make the 50% route decision. No JavaScript carrier remains.
 
@@ -124,6 +124,21 @@ Metric code layout:
 ```text
 count=12, oracle_ok=10, native_ok=10, native_rate=83, ab_rate=66, ba_rate=100
 ```
+
+## Path Discipline Follow-Up
+
+The direct-source string surface can keep mutable path strings alive across calls. The carrier now avoids retaining
+an output-root/path while constructing later paths: `masr-render` builds command paths inline, and
+`masr-samples-for` consumes the A-side wav into transcript/features before rendering the B-side wav.
+
+Rewitnessed live with one combined verdict/metric expression:
+
+```text
+511121010836700
+```
+
+That decodes to verdict `511` and metric code `121010836700`. The run showed `whisper.cpp` loading the Metal
+backend on Apple M4 Max and reading the six eval wav files from the local carrier directory.
 
 Training material:
 
