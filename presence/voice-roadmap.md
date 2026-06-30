@@ -37,7 +37,8 @@ That miss now changes the algorithm instead of sitting as prose:
 `train-text-conditioned-acoustic-vocoder`, keeping authority on `oracle-guide` and naming the next trainable
 candidate. The recipe is g2p, phoneme timing, prosody contour, acoustic token emission, segmented acoustic
 learning, the Sema voice loop, and the same local-oracle WER bar. The selector's speech receipt now returns
-`33554431` with that action, the multilocale audio2audio sweep, and the Metal acoustic authority row exposed.
+`67108863` with that action, the multilocale audio2audio sweep, the Metal acoustic authority row, and the
+live open-ASR source training action exposed.
 
 The named candidate is now executable too: `text-conditioned-acoustic-vocoder` 32767 turns target tokens into
 G2P phones, shapes duration/pitch/amplitude from voice-side metadata, emits native source-filter frames, and
@@ -118,7 +119,7 @@ romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, 
 each pair's before/after NL rate, audio rate, route, and shifted flag, so the aggregate native route has per-pair
 witness rows. `speech-locale-learning-window` 16383 takes selected seed `2` into a numeric `sa<->la` observed
 window: all four lanes train from guided to native route code, clean controls plus A/B evidence promote the
-challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 33554431 selects today's native arms:
+challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 67108863 selects today's native arms:
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, `sema-voice-sample-loop`
 over the deterministic formant vocoder for TTS, and `native-audio2audio-acoustic-vocoder` for decoded-token,
 metal-witnessed audio-to-audio target rendering. The raw formant vocoder and Sema voice loop route remain lower
@@ -127,8 +128,9 @@ generated target speech is now selected by target fit, listener evidence, intell
 open-dictation transcript receipt is now live-observed too:
 `open-dictation-transcript-learning` 16383 scores arbitrary utterance rows with side-channel truth, local free
 oracle transcripts, optional native candidates, Unicode WER, and reversible controls; `macos-open-dictation-carrier`
-511 witnessed `Open speech flows.` through local `say` -> wav -> Whisper Metal with oracle WER 0 and no native
-live segmented open-ASR route yet. `speech-token-stream` 32767 now carries words plus `<NODE>`, `<SOURCE>`,
+511 witnessed `Open speech flows.` through local `say` -> wav -> Whisper Metal with oracle WER 0 and native WER
+100, and the new source authority row turns that miss into training instead of promotion. `speech-token-stream`
+32767 now carries words plus `<NODE>`, `<SOURCE>`,
 `<CHANNEL>`, `<INTERFACE>`, `<CHOICE>`, `<FAIL>`, `<UNDO>`, `<TIMEOUT>`, `<CUT>`, `<OBSERVE>`, `<GRADE>`,
 `<FEEDBACK>`, `<REPAIR>`, `<RECEIPT>`, `<STATE>`, `<MEMORY>`, and `<SCOPE>` tokens with confidence, warmth,
 cadence, hesitation, excitement, and attunement metadata. `open-asr-ctc` 32767 collapses frame tokens into that
@@ -136,8 +138,9 @@ stream and lowers the transcript into the open-dictation gate. `acoustic-token-e
 oracle-aligned acoustic token prototypes and emits blank/nonblank CTC frames by Form-native L1 distance plus
 earned confidence. `segmented-acoustic-token-learning` 32767 now turns wav/envelope segments plus consentful
 local-oracle transcript tokens into learned source-token prototypes, then routes decoded `sa<->la` source speech
-through neutral meaning to target-locale tokens. It remains unselected until live mic audio supplies streaming
-segmented feature rows that win receipts. `speech-token-training-source` 32767 answers where those labels come
+through neutral meaning to target-locale tokens. `live-open-asr-source-authority` 32767 now turns the live
+open-dictation WER gap into `train-live-segmented-open-asr-source`, keeping ASR authority on `oracle-guide`
+until a local native transcript wins. `speech-token-training-source` 32767 answers where those labels come
 from: local oracle and consentful corpus rows may teach words plus metadata; internal state may infer voice-side
 metadata/control/evidence labels, but not transcript truth.
 The transformer path is trainable but not live-selected for speech yet; diffusion/codec speech is a
