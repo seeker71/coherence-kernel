@@ -164,6 +164,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       low breath, and honest confidence shaping. Local rendered samples are scored by target fit, listener
       preference, intelligibility, WER, and latency; cloud, missing-audio, fail, timeout, or undo rows cannot
       promote. This is the Form-native taste/improvement loop for generated samples, not a neural natural vocoder.
+- [x] **Sema voice local-oracle STT bar added.** `learn/sema-voice-local-oracle-receipt.fk` joins the Sema sample
+      loop to the shared STT WER cell (`32767`): generated voice samples need local oracle STT, local audio
+      metadata, sample-hash consistency, consent, clean controls, and a transcript under the WER threshold before
+      they can promote. This is the Form gate; a fresh live Sema-formant wav through local Whisper remains the next
+      carrier receipt.
 - [x] **Speech loopback promotion added.** `learn/speech-loopback-promotion.fk` turns native loopback receipts into
       rolling authority windows (`2047`): clean long windows promote native; short, failed, timed-out, undone, or
       regressing windows route back to oracle.

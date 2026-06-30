@@ -1,0 +1,125 @@
+; sema-voice-local-oracle-receipt.fk -- STT bar for Sema voice samples.
+;
+; The Sema voice sample loop owns target fit and A/B choice. This cell adds the
+; missing transcript bar: a local carrier may render a Sema voice sample and run
+; a local STT oracle, but the body owns the admissibility rule. A sample can
+; move native voice only when the rendered audio is local, hash-consistent, clean,
+; consented, and the local oracle transcript reaches the side-channel truth.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   presence/formant-vocoder.fk
+;   learn/sema-voice-sample-loop.fk
+
+(do
+    (defn svlor-audio (audio-hash sample-rate channels)
+        (list audio-hash sample-rate channels))
+    (defn svlor-controls (fail timeout undo)
+        (list fail timeout undo))
+
+    (defn svlor-row (sample-id locale truth-text oracle-text oracle-name device
+                     sample audio oracle-local consent controls)
+        (list "sema-voice-local-oracle-row"
+              sample-id locale truth-text oracle-text oracle-name device
+              sample audio oracle-local consent controls))
+
+    (defn svlor-kind         (r) (nth r 0))
+    (defn svlor-sample-id    (r) (nth r 1))
+    (defn svlor-locale       (r) (nth r 2))
+    (defn svlor-truth-text   (r) (nth r 3))
+    (defn svlor-oracle-text  (r) (nth r 4))
+    (defn svlor-oracle-name  (r) (nth r 5))
+    (defn svlor-device       (r) (nth r 6))
+    (defn svlor-sample       (r) (nth r 7))
+    (defn svlor-audio-row    (r) (nth r 8))
+    (defn svlor-oracle-local (r) (nth r 9))
+    (defn svlor-consent      (r) (nth r 10))
+    (defn svlor-controls-row (r) (nth r 11))
+
+    (defn svlor-audio-hash   (r) (nth (svlor-audio-row r) 0))
+    (defn svlor-sample-rate  (r) (nth (svlor-audio-row r) 1))
+    (defn svlor-channels     (r) (nth (svlor-audio-row r) 2))
+    (defn svlor-fail         (r) (nth (svlor-controls-row r) 0))
+    (defn svlor-timeout      (r) (nth (svlor-controls-row r) 1))
+    (defn svlor-undo         (r) (nth (svlor-controls-row r) 2))
+
+    (defn svlor-nonempty? (s) (if (gt (str_len s) 0) 1 0))
+    (defn svlor-truth-tokens  (r) (sw-tokens (svlor-truth-text r)))
+    (defn svlor-oracle-tokens (r) (sw-tokens (svlor-oracle-text r)))
+    (defn svlor-oracle-wer (r)
+        (if (str_eq (svlor-oracle-text r) (svlor-truth-text r)) 0
+            (if (str_eq (svlor-oracle-text r) "") 100
+                (sw-wer (svlor-oracle-tokens r) (svlor-truth-tokens r)))))
+
+    (defn svlor-audio-present? (r)
+        (if (and (gt (svlor-audio-hash r) 0)
+                 (and (gt (svlor-sample-rate r) 0) (gt (svlor-channels r) 0))) 1 0))
+
+    (defn svlor-audio-consistent? (r)
+        (if (and (eq (svlor-audio-present? r) 1)
+                 (eq (svlor-audio-hash r)
+                     (svsl-sample-audio-hash (svlor-sample r)))) 1 0))
+
+    (defn svlor-control-clean? (r)
+        (if (and (eq (add (add (svlor-fail r) (svlor-timeout r)) (svlor-undo r)) 0)
+                 (eq (svsl-clean? (svlor-sample r)) 1)) 1 0))
+
+    (defn svlor-wer-consistent? (r)
+        (if (eq (svsl-sample-wer (svlor-sample r)) (svlor-oracle-wer r)) 1 0))
+
+    (defn svlor-valid? (r)
+        (if (and (eq (svlor-consent r) 1)
+                 (and (eq (svlor-oracle-local r) 1)
+                      (and (eq (svlor-control-clean? r) 1)
+                           (and (eq (svlor-audio-consistent? r) 1)
+                                (and (eq (svlor-wer-consistent? r) 1)
+                                     (and (eq (svlor-nonempty? (svlor-truth-text r)) 1)
+                                          (eq (svlor-nonempty? (svlor-oracle-text r)) 1))))))) 1 0))
+
+    (defn svlor-oracle-success? (r max-wer)
+        (if (and (eq (svlor-valid? r) 1)
+                 (le (svlor-oracle-wer r) max-wer)) 1 0))
+
+    (defn svlor-promote? (incumbent r target max-wer margin)
+        (if (and (eq (svlor-oracle-success? r max-wer) 1)
+                 (eq (svsl-promote? incumbent (svlor-sample r) target margin) 1)) 1 0))
+
+    (defn svlor-route (incumbent r target max-wer margin)
+        (if (eq (svlor-promote? incumbent r target max-wer margin) 1)
+            "native-sema-voice"
+            "oracle-guide"))
+
+    (defn svlor-receipt (incumbent r target max-wer margin)
+        (list "sema-voice-local-oracle-receipt"
+              (svlor-sample-id r)
+              (svlor-locale r)
+              (svsl-id target)
+              (svlor-oracle-name r)
+              (svlor-device r)
+              (svlor-audio-hash r)
+              (svlor-oracle-wer r)
+              (svsl-score (svlor-sample r) target)
+              (svsl-fit (svsl-sample-profile (svlor-sample r)) target)
+              (svlor-route incumbent r target max-wer margin)
+              (svlor-oracle-success? r max-wer)
+              (svlor-promote? incumbent r target max-wer margin)
+              1
+              0))
+
+    (defn svlor-rec-kind          (r) (nth r 0))
+    (defn svlor-rec-sample-id     (r) (nth r 1))
+    (defn svlor-rec-locale        (r) (nth r 2))
+    (defn svlor-rec-target        (r) (nth r 3))
+    (defn svlor-rec-oracle        (r) (nth r 4))
+    (defn svlor-rec-device        (r) (nth r 5))
+    (defn svlor-rec-audio-hash    (r) (nth r 6))
+    (defn svlor-rec-oracle-wer    (r) (nth r 7))
+    (defn svlor-rec-sample-score  (r) (nth r 8))
+    (defn svlor-rec-target-fit    (r) (nth r 9))
+    (defn svlor-rec-route         (r) (nth r 10))
+    (defn svlor-rec-oracle-ok     (r) (nth r 11))
+    (defn svlor-rec-promoted      (r) (nth r 12))
+    (defn svlor-rec-native-form   (r) (nth r 13))
+    (defn svlor-rec-neural-vocoder (r) (nth r 14))
+
+    0)
