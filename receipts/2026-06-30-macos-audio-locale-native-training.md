@@ -140,6 +140,19 @@ Rewitnessed live with one combined verdict/metric expression:
 That decodes to verdict `511` and metric code `121010836700`. The run showed `whisper.cpp` loading the Metal
 backend on Apple M4 Max and reading the six eval wav files from the local carrier directory.
 
+The carrier can also be composed with `learn/audio-locale-route-shift-ledger.fk` when the carrier is loaded first
+and the ledger second. The live composed witness returned:
+
+```text
+1012100010008301
+```
+
+That decodes to `shifted=1` and route-shift metric `12100010008301`:
+
+```text
+count=12, oracle_ok=10, before_native=0, after_native=10, before_rate=0, after_rate=83, shifted=1
+```
+
 Training material:
 
 ```text
