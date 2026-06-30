@@ -178,7 +178,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       miss change the algorithm (`32767`): authority stays `oracle-guide`, and AutoML now names
       `text-conditioned-acoustic-vocoder` as the next trainable candidate with g2p, phoneme timing, prosody,
       acoustic token emission, segmented acoustic learning, and the same local-oracle WER bar. The speech selector
-      now exposes this action and returns `2097151`.
+      now exposes this action.
+- [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
+      named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
+      duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
+      whether authority remains `oracle-guide` or can promote `native-acoustic-vocoder`. The selector now points at
+      this concrete Form kernel and returns `4194303`.
 - [x] **Speech loopback promotion added.** `learn/speech-loopback-promotion.fk` turns native loopback receipts into
       rolling authority windows (`2047`): clean long windows promote native; short, failed, timed-out, undone, or
       regressing windows route back to oracle.
@@ -283,8 +288,8 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       live-selected until real audio can emit segmented token frames over winning receipts. `small-transformer-nl` remains trainable but not
       live-selected; `diffusion-codec-speech` is present but not ready because no Form-native executable kernel
       receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; after the live
-      Sema formant WER-100 miss, it also exposes the voice miss action and acoustic-vocoder next candidate. The
-      band returns `2097151`.
+      Sema formant WER-100 miss, it also exposes the voice miss action and the concrete
+      `text-conditioned-acoustic-vocoder` Form kernel. The band returns `4194303`.
 - [x] **Open dictation transcript receipt added.** `learn/open-dictation-transcript-learning.fk` admits arbitrary
       utterance rows with consentful side-channel truth, local free oracle transcripts, optional native transcript
       candidates, Unicode token WER, and choice/cut/fail/undo/timeout promotion gates (`16383`). The macOS carrier
