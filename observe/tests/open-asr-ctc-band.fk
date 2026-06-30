@@ -1,0 +1,116 @@
+; preludes:
+;   observe/stt-wer.fk
+;   learn/speech-loopback-promotion.fk
+;   form/form-stdlib/observed-auto-learning.fk
+;   learn/open-dictation-transcript-learning.fk
+;   observe/speech-token-stream.fk
+;   observe/open-asr-ctc.fk
+;
+; open-asr-ctc-band -- native CTC token decoder into open dictation.
+;
+; Verdict 32767:
+;   1     blank/repeat collapse yields three transcript tokens
+;   2     native free transcript text is emitted
+;   4     confidence is the minimum nonblank frame confidence
+;   8     decoded native transcript succeeds under WER
+;   16    native CTC rows route native through open-dictation promotion
+;   32    wrong token sequence fails native WER
+;   64    low confidence blocks native success even with correct text
+;   128   fail control becomes control debt
+;   256   row remains an open transcript, not a prompt-id receipt
+;   512   summary preserves native/oracle counts
+;   1024  oracle credit still passes for a low-confidence native row
+;   2048  empty frames emit empty text and zero confidence
+;   4096  observed mode is reversible A/B
+;   8192  decoder row carries audio metadata into the receipt
+;   16384 decoder emits the special-token stream with voice metadata
+
+(do
+    (defn oact-test-truth () "Open speech flows.")
+
+    (defn oact-good-frames ()
+        (list
+            (oact-frame "open" 96)
+            (oact-frame "" 100)
+            (oact-frame "speech" 94)
+            (oact-frame "speech" 94)
+            (oact-frame "" 100)
+            (oact-frame "flows" 91)))
+
+    (defn oact-bad-frames ()
+        (list
+            (oact-frame "open" 96)
+            (oact-frame "" 100)
+            (oact-frame "noise" 93)
+            (oact-frame "" 100)
+            (oact-frame "flows" 91)))
+
+    (defn oact-low-frames ()
+        (list
+            (oact-frame "open" 96)
+            (oact-frame "" 100)
+            (oact-frame "speech" 61)
+            (oact-frame "" 100)
+            (oact-frame "flows" 91)))
+
+    (defn oact-good-row ()
+        (oact-open-row 9101 "en" (oact-test-truth) (oact-test-truth) (oact-good-frames) 828201 18))
+    (defn oact-bad-row ()
+        (oact-open-row 9102 "en" (oact-test-truth) (oact-test-truth) (oact-bad-frames) 828202 18))
+    (defn oact-low-row ()
+        (oact-open-row 9103 "en" (oact-test-truth) (oact-test-truth) (oact-low-frames) 828203 18))
+    (defn oact-fail-row ()
+        (odtl-row 9104 "en" (oact-test-truth) (oact-test-truth)
+                  (oact-transcript (oact-good-frames))
+                  (odtl-audio 828204 16000 1)
+                  1
+                  (odtl-native 1 (oact-min-conf (oact-good-frames)) 18)
+                  1
+                  (odtl-control-row 1 0 1 0 0)))
+
+    (defn oact-band-score (cond bit) (if cond bit 0))
+
+    (defn open-asr-ctc-band ()
+        (do
+            (let good (oact-good-row))
+            (let bad (oact-bad-row))
+            (let low (oact-low-row))
+            (let fail (oact-fail-row))
+            (let empty-frames (empty))
+            (let meta (oact-meta (oact-good-frames) 80 70 10 60 85))
+            (let stream (oact-stream 9101 "native-open-asr" "audio" (oact-good-frames) meta))
+            (let good-window (list good good good good))
+            (let summary (oact-route good-window))
+            (let low-sample (odtl-to-promotion-sample low 25 80 2000))
+            (let c0 (oact-band-score (eq (len (oact-tokens (oact-good-frames))) 3) 1))
+            (let c1 (oact-band-score (str_eq (oact-transcript (oact-good-frames)) "open speech flows") 2))
+            (let c2 (oact-band-score (eq (oact-min-conf (oact-good-frames)) 91) 4))
+            (let c3 (oact-band-score (eq (odtl-native-success? good 25 80 2000) 1) 8))
+            (let c4 (oact-band-score (str_eq (odtl-summary-route summary) "native") 16))
+            (let c5 (oact-band-score (and (eq (odtl-native-success? bad 25 80 2000) 0)
+                                          (gt (odtl-native-wer bad) 25)) 32))
+            (let c6 (oact-band-score (and (eq (odtl-native-success? low 25 80 2000) 0)
+                                          (eq (odtl-native-wer low) 0)) 64))
+            (let c7 (oact-band-score (eq (slp-control-debt (odtl-to-promotion-sample fail 25 80 2000)) 1) 128))
+            (let c8 (oact-band-score (str_eq (odtl-kind good) "open-dictation-transcript") 256))
+            (let c9 (oact-band-score (and (eq (odtl-summary-native summary) 4)
+                                          (eq (odtl-summary-oracle summary) 4)) 512))
+            (let c10 (oact-band-score (and (eq (slp-oracle-success low-sample) 1)
+                                           (eq (slp-native-success low-sample) 0)) 1024))
+            (let c11 (oact-band-score (and (str_eq (oact-transcript empty-frames) "")
+                                           (eq (oact-min-conf empty-frames) 0)) 2048))
+            (let c12 (oact-band-score (str_eq (odtl-summary-mode summary) "online-reversible-ab") 4096))
+            (let c13 (oact-band-score (and (eq (odtl-audio-hash good) 828201)
+                                           (eq (odtl-sample-rate good) 16000)) 8192))
+            (let c14 (oact-band-score (and (str_eq (sts-transcript stream) "open speech flows")
+                                           (and (eq (sts-count-tag stream (sts-node-tag)) 1)
+                                                (eq (sts-attunement meta) 85))) 16384))
+            (add
+                (add
+                    (add (add c0 c1) (add c2 c3))
+                    (add (add c4 c5) (add c6 c7)))
+                (add
+                    (add (add c8 c9) (add c10 c11))
+                    (add (add c12 c13) c14)))))
+
+    (open-asr-ctc-band))

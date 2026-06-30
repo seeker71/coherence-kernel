@@ -1,0 +1,103 @@
+; open-asr-ctc.fk -- native free-transcript ASR decoder candidate.
+;
+; This is the first native open-ASR candidate after the open-dictation receipt:
+; it decodes a stream of acoustic token frames with CTC-style blank/repeat
+; collapse, produces free transcript text, carries confidence, and lowers into
+; the open-dictation promotion gate. It does not claim the acoustic encoder is
+; done; audio -> frame-token emission remains the next missing carrier.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   learn/speech-loopback-promotion.fk
+;   form/form-stdlib/observed-auto-learning.fk
+;   learn/open-dictation-transcript-learning.fk
+;   observe/speech-token-stream.fk
+
+(do
+    (defn oact-frame (token conf) (list token conf))
+    (defn oact-token (f) (nth f 0))
+    (defn oact-conf  (f) (nth f 1))
+
+    (defn oact-reverse-onto (xs acc)
+        (if (eq (len xs) 0) acc
+            (oact-reverse-onto (tail xs) (cons (head xs) acc))))
+
+    (defn oact-collapse-loop (frames prev acc)
+        (if (eq (len frames) 0) (oact-reverse-onto acc (empty))
+            (do
+                (let f (head frames))
+                (let tok (oact-token f))
+                (if (str_eq tok "")
+                    (oact-collapse-loop (tail frames) "" acc)
+                    (if (str_eq tok prev)
+                        (oact-collapse-loop (tail frames) prev acc)
+                        (oact-collapse-loop (tail frames) tok (cons tok acc)))))))
+
+    (defn oact-tokens (frames) (oact-collapse-loop frames "" (empty)))
+
+    (defn oact-join-loop (tokens acc)
+        (if (eq (len tokens) 0) acc
+            (oact-join-loop
+                (tail tokens)
+                (if (str_eq acc "")
+                    (head tokens)
+                    (str_concat acc (str_concat " " (head tokens)))))))
+
+    (defn oact-transcript (frames) (oact-join-loop (oact-tokens frames) ""))
+
+    (defn oact-min-conf-loop (frames current seen)
+        (if (eq (len frames) 0)
+            (if (eq seen 1) current 0)
+            (do
+                (let f (head frames))
+                (let tok (oact-token f))
+                (if (str_eq tok "")
+                    (oact-min-conf-loop (tail frames) current seen)
+                    (oact-min-conf-loop
+                        (tail frames)
+                        (if (eq seen 0) (oact-conf f) (if (lt (oact-conf f) current) (oact-conf f) current))
+                        1)))))
+
+    (defn oact-min-conf (frames) (oact-min-conf-loop frames 100 0))
+
+    (defn oact-meta (frames warmth cadence hesitation excitement attunement)
+        (sts-meta (oact-min-conf frames) warmth cadence hesitation excitement attunement))
+
+    (defn oact-stream (sample-id source channel frames meta)
+        (sts-append
+            (list
+                (sts-node sample-id meta)
+                (sts-source source meta)
+                (sts-channel channel meta)
+                (sts-interface "open-asr-ctc" meta)
+                (sts-observe "frame-token-collapse" meta))
+            (sts-append
+                (sts-word-tokens (oact-tokens frames) meta)
+                (list (sts-receipt "open-dictation-transcript" meta)))))
+
+    (defn oact-stream-transcript (sample-id source channel frames meta)
+        (sts-transcript (oact-stream sample-id source channel frames meta)))
+
+    (defn oact-open-row-with-meta (sample-id locale truth-text oracle-text frames audio-hash latency-ms
+                                   warmth cadence hesitation excitement attunement)
+        (do
+            (let meta (oact-meta frames warmth cadence hesitation excitement attunement))
+            (odtl-row sample-id
+                      locale
+                      truth-text
+                      oracle-text
+                      (oact-stream-transcript sample-id "native-open-asr" "audio" frames meta)
+                      (odtl-audio audio-hash 16000 1)
+                      1
+                      (odtl-native 1 (sts-confidence meta) latency-ms)
+                      1
+                      (odtl-control-row 1 0 0 0 0))))
+
+    (defn oact-open-row (sample-id locale truth-text oracle-text frames audio-hash latency-ms)
+        (oact-open-row-with-meta sample-id locale truth-text oracle-text frames audio-hash latency-ms
+                                 80 70 10 60 85))
+
+    (defn oact-route (rows)
+        (odtl-summary rows 25 80 2000 4 0 0 3))
+
+    0)
