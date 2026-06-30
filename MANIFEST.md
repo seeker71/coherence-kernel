@@ -184,6 +184,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       envelope, trains four acoustic token prototypes, decodes the learned frames, and returns live verdict `4095`,
       live WER `0`, minimum confidence `96`, native neural parameters `0`. This is executable native prototype
       learning from audio, not a global ASR/TTS authority promotion.
+- [x] **macOS Arabic teacher acoustic learning added.** `learn/macos-arabic-teacher-acoustic-learning.fk` extends
+      the same live path to Arabic: `Majed -> ffmpeg -> whisper.cpp/Metal -l ar`, Form wav sensing, four Arabic
+      acoustic token prototypes, native CTC decode, live verdict `16383`, live WER `0`, minimum confidence `96`,
+      native neural parameters `0`. The paired Chinese probe is named honestly as an oracle miss, not promoted.
 - [x] **Sema voice oracle miss learning added.** `learn/sema-voice-oracle-miss-learning.fk` makes the live WER-100
       miss change the algorithm (`32767`): authority stays `oracle-guide`, and AutoML now names
       `text-conditioned-acoustic-vocoder` as the next trainable candidate with g2p, phoneme timing, prosody,
