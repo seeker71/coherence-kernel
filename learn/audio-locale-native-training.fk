@@ -1,0 +1,205 @@
+; audio-locale-native-training.fk -- reciprocal locale audio training receipt.
+;
+; A thin host carrier may synthesize and oracle-transcribe audio, but the native
+; authority check lives here. Training candidates are Form data backed by local
+; wav paths. Evaluation samples carry truth words, local-oracle words, and wav
+; paths. The body reads the wav bytes, extracts features, predicts the prompt id by nearest prototype,
+; scores oracle WER, learns only from oracle-valid samples, counts native
+; successes, and only routes native when A->B and B->A are both present and the
+; native success rate reaches the requested floor.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/asr-prompt-id.fk
+;   observe/wav-sense.fk
+
+(do
+    (defn alnt-sample (id src dst truth oracle features fail timeout undo)
+        (list "audio-locale-native-sample"
+              id src dst truth oracle features fail timeout undo))
+    (defn alnt-kind     (s) (nth s 0))
+    (defn alnt-id       (s) (nth s 1))
+    (defn alnt-src      (s) (nth s 2))
+    (defn alnt-dst      (s) (nth s 3))
+    (defn alnt-truth    (s) (nth s 4))
+    (defn alnt-oracle   (s) (nth s 5))
+    (defn alnt-features (s) (nth s 6))
+    (defn alnt-fail     (s) (nth s 7))
+    (defn alnt-timeout  (s) (nth s 8))
+    (defn alnt-undo     (s) (nth s 9))
+
+    (defn alnt-control-clean? (s)
+        (if (eq (add (add (alnt-fail s) (alnt-timeout s)) (alnt-undo s)) 0) 1 0))
+
+    (defn alnt-window-abs (bs n i step)
+        (do
+            (let w (mul (div (div (sub n 44) 8) 2) 2))
+            (wav-abs-sum bs (add 44 (mul i w)) (add 44 (mul (add i 1) w)) step 0)))
+
+    (defn alnt-wav-peak-loop (bs i end step best)
+        (if (ge i end) best
+            (do
+                (let a (abs2 (wav-sample bs i)))
+                (alnt-wav-peak-loop bs (add i step) end step (if (ge a best) a best)))))
+
+    (defn alnt-wav-peak (bs n step)
+        (alnt-wav-peak-loop bs 44 n step 0))
+
+    (defn alnt-cross? (v last)
+        (if (or (and (lt v 0) (gt last 0)) (and (gt v 0) (lt last 0))) 1 0))
+
+    (defn alnt-next-last (v last)
+        (if (eq v 0) last v))
+
+    (defn alnt-wav-zc-loop (bs i end step last acc)
+        (if (ge i end) acc
+            (do
+                (let v (wav-sample bs i))
+                (alnt-wav-zc-loop bs (add i step) end step
+                                  (alnt-next-last v last)
+                                  (add acc (alnt-cross? v last))))))
+
+    (defn alnt-wav-zero-cross (bs n step)
+        (alnt-wav-zc-loop bs 44 n step 0 0))
+
+    (defn alnt-wav-features (path)
+        (do
+            (let bs (read_file path))
+            (let n (str_len bs))
+            (list n
+                  (wav-abs-sum bs 44 n 16 0)
+                  (alnt-wav-peak bs n 16)
+                  (alnt-wav-zero-cross bs n 16)
+                  (alnt-window-abs bs n 0 16)
+                  (alnt-window-abs bs n 1 16)
+                  (alnt-window-abs bs n 2 16)
+                  (alnt-window-abs bs n 3 16)
+                  (alnt-window-abs bs n 4 16)
+                  (alnt-window-abs bs n 5 16)
+                  (alnt-window-abs bs n 6 16)
+                  (alnt-window-abs bs n 7 16))))
+
+    (defn alnt-wav-sample (id src dst truth oracle path fail timeout undo)
+        (alnt-sample id src dst truth oracle (alnt-wav-features path) fail timeout undo))
+
+    (defn alnt-candidate (id truth features)
+        (pid-candidate id truth features))
+    (defn alnt-wav-candidate (id truth path)
+        (alnt-candidate id truth (alnt-wav-features path)))
+
+    (defn alnt-predict-id (s candidates)
+        (pid-id (pid-nearest (alnt-features s) candidates)))
+
+    (defn alnt-oracle-ok? (s max-wer)
+        (if (and (eq (alnt-control-clean? s) 1)
+                 (eq (sw-accept? (alnt-oracle s) (alnt-truth s) max-wer) 1)) 1 0))
+
+    (defn alnt-native-ok? (s candidates max-wer)
+        (if (and (eq (alnt-oracle-ok? s max-wer) 1)
+                 (eq (alnt-predict-id s candidates) (alnt-id s))) 1 0))
+
+    (defn alnt-sample-candidate (s)
+        (alnt-candidate (alnt-id s) (alnt-truth s) (alnt-features s)))
+
+    (defn alnt-learn-loop (samples candidates max-wer)
+        (if (eq (len samples) 0) candidates
+            (if (eq (alnt-oracle-ok? (head samples) max-wer) 1)
+                (alnt-learn-loop (tail samples)
+                                 (cons (alnt-sample-candidate (head samples)) candidates)
+                                 max-wer)
+                (alnt-learn-loop (tail samples) candidates max-wer))))
+
+    (defn alnt-trained-candidates (samples candidates max-wer)
+        (alnt-learn-loop samples candidates max-wer))
+
+    (defn alnt-count (samples)
+        (len samples))
+
+    (defn alnt-native-score (samples candidates max-wer)
+        (if (eq (len samples) 0) 0
+            (add (alnt-native-ok? (head samples) candidates max-wer)
+                 (alnt-native-score (tail samples) candidates max-wer))))
+
+    (defn alnt-oracle-score (samples max-wer)
+        (if (eq (len samples) 0) 0
+            (add (alnt-oracle-ok? (head samples) max-wer)
+                 (alnt-oracle-score (tail samples) max-wer))))
+
+    (defn alnt-rate (wins total)
+        (if (eq total 0) 0 (div (mul wins 100) total)))
+
+    (defn alnt-native-rate (samples candidates max-wer)
+        (alnt-rate (alnt-native-score samples candidates max-wer) (alnt-count samples)))
+
+    (defn alnt-direction? (s src dst)
+        (if (and (str_eq (alnt-src s) src) (str_eq (alnt-dst s) dst)) 1 0))
+
+    (defn alnt-direction-count (samples src dst)
+        (if (eq (len samples) 0) 0
+            (add (if (eq (alnt-direction? (head samples) src dst) 1) 1 0)
+                 (alnt-direction-count (tail samples) src dst))))
+
+    (defn alnt-direction-native-score (samples candidates max-wer src dst)
+        (if (eq (len samples) 0) 0
+            (add
+                (if (eq (alnt-direction? (head samples) src dst) 1)
+                    (alnt-native-ok? (head samples) candidates max-wer)
+                    0)
+                (alnt-direction-native-score (tail samples) candidates max-wer src dst))))
+
+    (defn alnt-direction-rate (samples candidates max-wer src dst)
+        (alnt-rate
+            (alnt-direction-native-score samples candidates max-wer src dst)
+            (alnt-direction-count samples src dst)))
+
+    (defn alnt-has-direction? (samples src dst)
+        (if (gt (alnt-direction-count samples src dst) 0) 1 0))
+
+    (defn alnt-audio-to-audio-ready? (samples candidates a b max-wer floor)
+        (if (and (eq (alnt-has-direction? samples a b) 1)
+                 (and (eq (alnt-has-direction? samples b a) 1)
+                      (ge (alnt-native-rate samples candidates max-wer) floor))) 1 0))
+
+    (defn alnt-route (samples candidates a b max-wer floor)
+        (if (eq (alnt-audio-to-audio-ready? samples candidates a b max-wer floor) 1)
+            "native"
+            "oracle-guide"))
+
+    (defn alnt-receipt (samples candidates a b max-wer floor oracle-name device)
+        (list "audio-locale-native-training"
+              device
+              oracle-name
+              a b
+              (alnt-count samples)
+              (alnt-oracle-score samples max-wer)
+              (alnt-native-score samples candidates max-wer)
+              (alnt-native-rate samples candidates max-wer)
+              (alnt-direction-rate samples candidates max-wer a b)
+              (alnt-direction-rate samples candidates max-wer b a)
+              (alnt-has-direction? samples a b)
+              (alnt-has-direction? samples b a)
+              floor
+              (alnt-route samples candidates a b max-wer floor)))
+
+    (defn alnt-trained-receipt (samples candidates a b max-wer floor oracle-name device)
+        (alnt-receipt samples
+                      (alnt-trained-candidates samples candidates max-wer)
+                      a b max-wer floor oracle-name device))
+
+    (defn alnt-rec-kind       (r) (nth r 0))
+    (defn alnt-rec-device     (r) (nth r 1))
+    (defn alnt-rec-oracle     (r) (nth r 2))
+    (defn alnt-rec-a          (r) (nth r 3))
+    (defn alnt-rec-b          (r) (nth r 4))
+    (defn alnt-rec-count      (r) (nth r 5))
+    (defn alnt-rec-oracle-ok  (r) (nth r 6))
+    (defn alnt-rec-native-ok  (r) (nth r 7))
+    (defn alnt-rec-rate       (r) (nth r 8))
+    (defn alnt-rec-ab-rate    (r) (nth r 9))
+    (defn alnt-rec-ba-rate    (r) (nth r 10))
+    (defn alnt-rec-has-ab     (r) (nth r 11))
+    (defn alnt-rec-has-ba     (r) (nth r 12))
+    (defn alnt-rec-floor      (r) (nth r 13))
+    (defn alnt-rec-route      (r) (nth r 14))
+
+    0)

@@ -1,0 +1,82 @@
+; formant-vocoder.fk -- first native source-filter voice carrier.
+;
+; This is not natural neural TTS. It is the smallest useful native vocoder
+; shape: phoneme frames render to integer waveform samples by a deterministic
+; source-filter/formant rule. The borrowed design is eSpeak/WORLD-shaped:
+; explicit source, explicit formant color, explicit duration, measurable output.
+;
+; A frame is (phoneme duration pitch-period amplitude formant1 formant2 noise?).
+; noise? = 0 means voiced periodic source; noise? = 1 means unvoiced deterministic
+; noise. The output is a list of signed integer samples.
+
+(do
+    (defn fv-frame (phoneme duration pitch amplitude formant1 formant2 noise)
+        (list phoneme duration pitch amplitude formant1 formant2 noise))
+    (defn fv-phoneme  (f) (nth f 0))
+    (defn fv-duration (f) (nth f 1))
+    (defn fv-pitch    (f) (nth f 2))
+    (defn fv-amp      (f) (nth f 3))
+    (defn fv-f1       (f) (nth f 4))
+    (defn fv-f2       (f) (nth f 5))
+    (defn fv-noise    (f) (nth f 6))
+
+    (defn fv-period (f) (if (lt (fv-pitch f) 1) 1 (fv-pitch f)))
+    (defn fv-color-amp (f) (add (fv-amp f) (div (add (fv-f1 f) (fv-f2 f)) 100)))
+
+    (defn fv-voiced-sample (f tick)
+        (if (lt (mod tick (fv-period f)) (div (fv-period f) 2))
+            (fv-color-amp f)
+            (sub 0 (fv-color-amp f))))
+
+    (defn fv-noise-sample (f tick)
+        (if (eq (mod (add tick (fv-f1 f)) 2) 0)
+            (fv-color-amp f)
+            (sub 0 (fv-color-amp f))))
+
+    (defn fv-sample (f tick)
+        (if (eq (fv-noise f) 1)
+            (fv-noise-sample f tick)
+            (fv-voiced-sample f tick)))
+
+    (defn fv-render-frame-at (f tick)
+        (if (ge tick (fv-duration f)) (empty)
+            (cons (fv-sample f tick) (fv-render-frame-at f (add tick 1)))))
+    (defn fv-render-frame (f) (fv-render-frame-at f 0))
+
+    (defn fv-append (a b)
+        (if (eq (len a) 0) b
+            (cons (head a) (fv-append (tail a) b))))
+
+    (defn fv-render (frames)
+        (if (eq (len frames) 0) (empty)
+            (fv-append (fv-render-frame (head frames)) (fv-render (tail frames)))))
+
+    (defn fv-energy (samples)
+        (if (eq (len samples) 0) 0
+            (add (abs (head samples)) (fv-energy (tail samples)))))
+
+    (defn fv-total-duration (frames)
+        (if (eq (len frames) 0) 0
+            (add (fv-duration (head frames)) (fv-total-duration (tail frames)))))
+
+    (defn fv-frame-energy (f) (mul (fv-duration f) (fv-color-amp f)))
+    (defn fv-total-energy (frames)
+        (if (eq (len frames) 0) 0
+            (add (fv-frame-energy (head frames)) (fv-total-energy (tail frames)))))
+
+    (defn fv-voiced? (f) (if (eq (fv-noise f) 0) 1 0))
+    (defn fv-voiced-count (frames)
+        (if (eq (len frames) 0) 0
+            (add (fv-voiced? (head frames)) (fv-voiced-count (tail frames)))))
+
+    (defn fv-first-phoneme (frames)
+        (if (eq (len frames) 0) 0 (fv-phoneme (head frames))))
+
+    ; Stable loopback fingerprint for closed-set ASR promotion.
+    (defn fv-fingerprint (frames)
+        (list (fv-total-duration frames)
+              (fv-total-energy frames)
+              (fv-voiced-count frames)
+              (fv-first-phoneme frames)))
+
+    0)
