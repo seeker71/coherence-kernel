@@ -1,18 +1,47 @@
 ; form-eval.fk — the source tree-walk, in Form, on the BMF cursor: Form source string -> value, evaluated AS it
-; is read, with NO flatten table. This dissolves the flatten knot for the core grammar: running a recipe no longer
-; REQUIRES flattening — the cursor reads and computes directly; flatten becomes optional SPEED (the JIT path).
-; Mirrors form-parse.fk's recursive-descent over the cursor (no tokenizer, the BMF discipline), but each node
-; returns its VALUE instead of a cell. Grammar (the first stone): expr := integer | '(' op a (b) ')'; op := add|sub|le|if.
-; State threads as (value, end-pos). Completion to full Form (defn/let/user-calls) extends this same shape; this
-; proves the principle four-way on our own kernel. Self-contained over core.
+; is read, with NO flatten table. This dissolves the flatten knot: running a recipe no longer REQUIRES flattening —
+; the cursor reads and computes directly; flatten becomes optional SPEED (the JIT path). Mirrors form-parse.fk's
+; recursive-descent over the cursor (no tokenizer, the BMF discipline), but each node returns its VALUE not a cell.
 ;
-; Four-way by tests/form-eval-band.fk.
+; Grammar form-eval now evaluates (the fuller grammar — a real meta-circular core):
+;   expr   := integer | symbol | '(' form ')'
+;   form   := (op a b)            op in {add,sub,mul,div,mod,le,lt,gt,ge,eq}   ; all binary builtins
+;           | (if c t e)                                                       ; conditional
+;           | (let name val body)                                             ; lexical binding
+;           | (defn name (params...) body)                                    ; register a function
+;           | (do e1 e2 ...)                                                   ; sequence, threading env
+;           | (fname arg...)        fname a user-defined function             ; THE meta-circular call
+;   symbol := lookup in the environment (a var bound by let, or an arg bound at a call)
+;
+; State threads as (value, end-pos, env). The ENV is the new thread: an assoc-list of bindings, each a cons-chain
+; cell terminated by integer 0 (our nil). Two entry kinds: variable (list name 0 value), and function
+; (list name 1 params body-pos) — params is a list of name-strings, body-pos the source position of the body expr,
+; re-evaluated under (current-env + arg bindings) on each call so a defn sees ITSELF (recursion is free).
+; This is the milestone: a recipe with a user-defined function — (do (defn f (n) (add n 1)) (f 5)) — runs THROUGH
+; the Form walker on the c-bootstrapped fkwu kernel, integers all the way down, no host interpreter.
+;
+; Four-way by grammars/tests/form-eval-band.fk (verdict 1023 — all ten claims, the milestone is claim 64).
 ;
 ; preludes: form-stdlib/core.fk
 
 (do
+    ; --- result triples (value end-pos env) ---
     (defn fe-fst (pr) (head pr))
     (defn fe-snd (pr) (head (tail pr)))
+    (defn fe-thd (pr) (head (tail (tail pr))))
+    ; --- env: assoc-list, cons-chained, 0-terminated ---
+    (defn fe-emp () 0)
+    (defn fe-var (nm vl) (list nm 0 vl))
+    (defn fe-fn (nm params bodypos) (list nm 1 params bodypos))
+    (defn fe-e-nm (e) (head e))
+    (defn fe-e-kind (e) (head (tail e)))
+    (defn fe-e-a (e) (head (tail (tail e))))
+    (defn fe-e-b (e) (head (tail (tail (tail e)))))
+    (defn fe-bind (env e) (cons e env))
+    (defn fe-look (env nm)
+        (if (eq env 0) 0
+            (if (str_eq (fe-e-nm (head env)) nm) (head env) (fe-look (tail env) nm))))
+    ; --- cursor primitives over the source string ---
     (defn fe-at (s pos) (ord (char_at s pos)))
     (defn fe-len (s) (str_len s))
     (defn fe-isdigit (c) (and (ge c 48) (ge 57 c)))
@@ -29,24 +58,151 @@
     (defn fe-sym-end (s pos)
         (if (ge pos (fe-len s)) pos
             (if (eq (fe-isdelim (fe-at s pos)) 1) pos (fe-sym-end s (add pos 1)))))
-    (defn fe-expr (s pos) (fe-expr2 s (fe-skip s pos)))
-    (defn fe-expr2 (s pos)
-        (if (eq (fe-at s pos) 40) (fe-list s (add pos 1)) (fe-digits s pos 0)))
-    (defn fe-list (s pos) (fe-op s pos (fe-sym-end s pos)))
-    (defn fe-op (s a b) (fe-byop (substring s a b) s b))
-    (defn fe-byop (op s pos) (if (str_eq op "if") (fe-if s pos) (fe-bin op s pos)))
-    (defn fe-bin (op s pos) (fe-bin-a op s (fe-expr s pos)))
-    (defn fe-bin-a (op s ae) (fe-bin-b op s (fe-fst ae) (fe-expr s (fe-snd ae))))
-    (defn fe-bin-b (op s a be) (list (fe-apply op a (fe-fst be)) (fe-close s (fe-snd be))))
-    (defn fe-apply (op a b)
-        (if (str_eq op "add") (add a b)
-            (if (str_eq op "sub") (sub a b)
-                (if (str_eq op "le") (if (le a b) 1 0) (add a b)))))
-    (defn fe-if (s pos) (fe-if-c s (fe-expr s pos)))
-    (defn fe-if-c (s ce) (fe-if-t s (fe-fst ce) (fe-expr s (fe-snd ce))))
-    (defn fe-if-t (s c te) (fe-if-e s c (fe-fst te) (fe-expr s (fe-snd te))))
-    (defn fe-if-e (s c t ee) (list (if (eq c 0) (fe-fst ee) t) (fe-close s (fe-snd ee))))
+    ; advance past a closing ')' (with leading ws) — list terminator
     (defn fe-close (s pos)
         (if (ge (fe-skip s pos) (fe-len s)) (fe-skip s pos) (add (fe-skip s pos) 1)))
-    (defn fe-eval (s) (fe-fst (fe-expr s 0)))
-)
+
+    ; --- expr := integer | symbol | '(' form ')' ; returns (value end-pos env) ---
+    (defn fe-expr (s pos env) (fe-expr2 s (fe-skip s pos) env))
+    (defn fe-expr2 (s pos env)
+        (if (eq (fe-at s pos) 40) (fe-form s (add pos 1) env)
+            (if (fe-isdigit (fe-at s pos)) (fe-int s pos env) (fe-sym s pos env))))
+    (defn fe-int (s pos env)
+        (fe-int2 (fe-digits s pos 0) env))
+    (defn fe-int2 (d env) (list (fe-fst d) (fe-snd d) env))
+    (defn fe-sym (s pos env)
+        (fe-sym2 s pos (fe-sym-end s pos) env))
+    (defn fe-sym2 (s a b env)
+        (list (fe-e-a (fe-look env (substring s a b))) b env))
+
+    ; --- form := dispatch on the head symbol ---
+    (defn fe-form (s pos env) (fe-head s (fe-skip s pos) env))
+    (defn fe-head (s pos env) (fe-disp (substring s pos (fe-sym-end s pos)) s (fe-sym-end s pos) env))
+    (defn fe-disp (op s pos env)
+        (if (str_eq op "if") (fe-if s pos env)
+            (if (str_eq op "let") (fe-let s pos env)
+                (if (str_eq op "do") (fe-do s pos env)
+                    (if (str_eq op "defn") (fe-defn s pos env)
+                        (if (fe-isbuiltin op) (fe-bin op s pos env)
+                            (fe-call op s pos env)))))))
+    (defn fe-isbuiltin (op)
+        (if (str_eq op "add") 1 (if (str_eq op "sub") 1 (if (str_eq op "mul") 1
+            (if (str_eq op "div") 1 (if (str_eq op "mod") 1 (if (str_eq op "le") 1
+                (if (str_eq op "lt") 1 (if (str_eq op "gt") 1 (if (str_eq op "ge") 1
+                    (if (str_eq op "eq") 1 0)))))))))))
+
+    ; --- binary builtin: (op a b) ---
+    (defn fe-bin (op s pos env) (fe-bin-a op s (fe-expr s pos env)))
+    (defn fe-bin-a (op s ae) (fe-bin-b op s (fe-fst ae) (fe-expr s (fe-snd ae) (fe-thd ae))))
+    (defn fe-bin-b (op s a be)
+        (list (fe-apply op a (fe-fst be)) (fe-close s (fe-snd be)) (fe-thd be)))
+    (defn fe-apply (op a b)
+        (if (str_eq op "add") (add a b)
+        (if (str_eq op "sub") (sub a b)
+        (if (str_eq op "mul") (mul a b)
+        (if (str_eq op "div") (div a b)
+        (if (str_eq op "mod") (mod a b)
+        (if (str_eq op "le") (if (le a b) 1 0)
+        (if (str_eq op "lt") (if (lt a b) 1 0)
+        (if (str_eq op "gt") (if (gt a b) 1 0)
+        (if (str_eq op "ge") (if (ge a b) 1 0)
+        (if (str_eq op "eq") (if (eq a b) 1 0) 0)))))))))))
+
+    ; --- conditional: (if c t e) — evaluate c, then only the taken branch must be evaluated for value,
+    ;     but we evaluate both arms for position to find the close (pure walk, no host short-circuit needed
+    ;     for correctness here since arms are pure). We thread the cond's env into both arms. ---
+    ; SHORT-CIRCUIT is load-bearing: only the taken arm is evaluated, the other is merely SKIPPED for position.
+    ; (Without this a recursive (if base 0 (recur)) never terminates — the dead arm would recurse forever.)
+    (defn fe-if (s pos env) (fe-if-c s (fe-expr s pos env)))
+    (defn fe-if-c (s ce) (fe-if-arms s (fe-fst ce) (fe-snd ce) (fe-thd ce)))
+    (defn fe-if-arms (s c tpos env)
+        (if (eq c 0)
+            (fe-if-pick s env (fe-skip-expr s tpos))           ; cond false: then-end is else-start
+            (fe-if-then s env (fe-expr s tpos env))))           ; cond true: eval then, then skip else
+    ; cond true: te = (val then-end env'); skip the else arm; close past the if's ')'
+    (defn fe-if-then (s env te)
+        (list (fe-fst te) (fe-close s (fe-skip-expr s (fe-snd te))) (fe-thd te)))
+    ; cond false: evaluate the else arm (which begins at epos), close past the if's ')'
+    (defn fe-if-pick (s env epos) (fe-if-else s (fe-expr s epos env)))
+    (defn fe-if-else (s ee) (list (fe-fst ee) (fe-close s (fe-snd ee)) (fe-thd ee)))
+
+    ; --- let: (let name val body) — bind name to val, eval body in the extended env,
+    ;     return body's value; the binding does NOT escape (env returned is the original). ---
+    (defn fe-let (s pos env)
+        (fe-let-nm s (fe-skip s pos) env))
+    (defn fe-let-nm (s pos env)
+        (fe-let-v s (fe-sym-end s pos) (substring s pos (fe-sym-end s pos)) env))
+    (defn fe-let-v (s pos nm env)
+        (fe-let-b s nm env (fe-expr s pos env)))
+    (defn fe-let-b (s nm env ve)
+        (fe-let-fin s env (fe-expr s (fe-snd ve)
+            (fe-bind env (fe-var nm (fe-fst ve))))))
+    ; after the body we sit at the body's end; advance past the let's own ')'; binding does NOT escape (env0).
+    (defn fe-let-fin (s env0 be)
+        (list (fe-fst be) (fe-close s (fe-snd be)) env0))
+
+    ; --- do: (e1 e2 ... ) — evaluate each child threading env child-to-child, value is the last child's. ---
+    (defn fe-do (s pos env) (fe-do-loop s (fe-skip s pos) env 0))
+    (defn fe-do-loop (s pos env last)
+        (if (eq (fe-at s pos) 41) (list last (add pos 1) env)
+            (fe-do-step s (fe-expr s pos env))))
+    (defn fe-do-step (s ce)
+        (fe-do-loop s (fe-skip s (fe-snd ce)) (fe-thd ce) (fe-fst ce)))
+
+    ; --- defn: (defn name (params...) body) — register a function entry, skip the body, extend env. ---
+    (defn fe-defn (s pos env) (fe-defn-nm s (fe-skip s pos) env))
+    (defn fe-defn-nm (s pos env)
+        (fe-defn-p s (fe-sym-end s pos) (substring s pos (fe-sym-end s pos)) env))
+    ; params list begins at '(' ; collect param name-strings
+    (defn fe-defn-p (s pos nm env)
+        (fe-defn-b s nm (fe-params s (add (fe-skip s pos) 1)) env))
+    ; body begins right after the params ')' ; we DON'T evaluate it now — store its position
+    (defn fe-defn-b (s nm pe env)
+        (fe-defn-fin s nm (fe-fst pe) (fe-skip s (fe-snd pe)) env))
+    (defn fe-defn-fin (s nm params bodypos env)
+        (list 0 (fe-close s (fe-skip-expr s bodypos))
+            (fe-bind env (fe-fn nm params bodypos))))
+    ; collect param names until ')' ; returns (params-list end-pos)
+    (defn fe-params (s pos)
+        (if (eq (fe-at s (fe-skip s pos)) 41) (list 0 (add (fe-skip s pos) 1))
+            (fe-params-step s (fe-skip s pos))))
+    (defn fe-params-step (s pos)
+        (fe-params-cons (substring s pos (fe-sym-end s pos)) (fe-params s (fe-sym-end s pos))))
+    (defn fe-params-cons (nm rest) (list (cons nm (fe-fst rest)) (fe-snd rest)))
+
+    ; --- skip an expression (no eval) — needed to find a defn body's end without evaluating it.
+    ;     Returns the end-pos just past the expression. ---
+    (defn fe-skip-expr (s pos) (fe-skip-expr2 s (fe-skip s pos)))
+    (defn fe-skip-expr2 (s pos)
+        (if (eq (fe-at s pos) 40) (fe-skip-list s (add pos 1))
+            (if (fe-isdigit (fe-at s pos)) (fe-snd (fe-digits s pos 0)) (fe-sym-end s pos))))
+    (defn fe-skip-list (s pos)
+        (if (eq (fe-at s (fe-skip s pos)) 41) (add (fe-skip s pos) 1)
+            (fe-skip-list s (fe-skip-expr s (fe-skip s pos)))))
+
+    ; --- user call: (fname arg...) — look up fn, evaluate args, bind to params, eval body. ---
+    (defn fe-call (op s pos env)
+        (fe-call-f op env (fe-look env op) s pos env))
+    (defn fe-call-f (op env fn s pos callenv)
+        (fe-call-a fn s (fe-args s pos callenv) callenv))
+    ; fe-args collects (arg-values-list end-pos env) — env threads through arg eval
+    (defn fe-args (s pos env)
+        (if (eq (fe-at s (fe-skip s pos)) 41) (list 0 (add (fe-skip s pos) 1) env)
+            (fe-args-step s (fe-expr s pos env))))
+    (defn fe-args-step (s ae) (fe-args-cons (fe-fst ae) (fe-args s (fe-snd ae) (fe-thd ae))))
+    (defn fe-args-cons (v rest) (list (cons v (fe-fst rest)) (fe-snd rest) (fe-thd rest)))
+    ; bind params to arg values atop the call env, then eval the body at the stored position
+    (defn fe-call-a (fn s av callenv)
+        (fe-call-b fn s (fe-fst av) (fe-snd av) callenv))
+    (defn fe-call-b (fn s args endpos callenv)
+        (list (fe-fst (fe-expr s (fe-e-b fn)
+                  (fe-zip (fe-e-a fn) args callenv)))
+              endpos callenv))
+    ; zip params (name-list) with args (value-list) into env entries
+    (defn fe-zip (params args env)
+        (if (eq params 0) env
+            (fe-zip (tail params) (tail args)
+                (fe-bind env (fe-var (head params) (head args))))))
+
+    ; --- entry point ---
+    (defn fe-eval (s) (fe-fst (fe-expr s 0 (fe-emp)))))
