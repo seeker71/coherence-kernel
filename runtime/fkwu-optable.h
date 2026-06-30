@@ -16,6 +16,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "str_eq", 2, 26 },
   { "str_concat", 2, 27 },
   { "str_byte_at", 2, 28 },
+  { "char_at", 2, 28 },
   { "substring", 3, 29 },
   { "str_find", 3, 30 },
   { "str_to_int", 1, 31 },
