@@ -1,5 +1,14 @@
 # SEED-DROP — a flatten/`form-eval` door (no longer a gate; the body already runs via `--src`)
 
+> **P1 WITNESSED (2026-06-29).** The cursor seed is committed — `flatten/form-eval-cli-loop.tbl`
+> (flattened `form-eval-cli-loop`, `nf=153`) — and a recipe reduces through `form-eval` (Form) on the
+> C **table-executor**, NOT the `--src` parser (`fk_sparse`): `fkwu flatten/form-eval-cli-loop.tbl 0 t.fk`
+> with `(add 40 2)` → 42, `(do (let x 40) (add x 2))` → 42 (the same `let` via `--src` returns 2 — a
+> `fk_sparse` bug, so the seed path is a demonstrably different, correct reducer). The seed is produced by
+> bin-go (bootstrap flattener, named honestly — not the runtime) because both fkwu-native flatten paths are
+> still blocked. Coverage + the Phase-2 gap + the broken-circle detail:
+> `receipts/2026-06-29-cursor-seed-p1-form-eval-reducer.md`.
+
 > **SUPERSEDED for the run path (2026-06-29).** The Form body already runs on `fkwu` **without any seed**: the
 > kernel's own C-bootstrap source-runner, `fkwu --src file.fk`, runs real multi-function/list/recursion body cells
 > (`observe/native-vs-rented.fk` → `11111`, bit-identical to the proof walkers; no Go, no flatten, no T_flat). See
