@@ -1,0 +1,187 @@
+; jit-native-admission.fk - Form-owned admission gate for real native dispatch.
+;
+; This composes the already witnessed static analyzer, backend byte emitter, and
+; loader/executor contract. It still does not call mmap or a host function
+; pointer. Its job is narrower and stricter: a future native dispatch may only
+; cross the host install/call membrane after this Form-owned chain admits it.
+;
+; preludes:
+;   observe/jit-runtime-fault.fk
+;   observe/form-static-analyzer.fk
+;   observe/jit-backend-bytes.fk
+;   observe/jit-loader-contract.fk
+
+(do
+    (defn jna-native () 1)
+    (defn jna-deopt () 2)
+    (defn jna-exception () 3)
+    (defn jna-rewalk () 4)
+    (defn jna-reject () 5)
+
+    ; admission = ("native-admission" expr env request generation signature)
+    (defn jna-admission (expr env request generation signature)
+        (list "native-admission" expr env request generation signature))
+    (defn jna-admission? (a) (if (eq (len a) 6) (str_eq (nth a 0) "native-admission") 0))
+    (defn jna-expr (a) (nth a 1))
+    (defn jna-env (a) (nth a 2))
+    (defn jna-request (a) (nth a 3))
+    (defn jna-generation (a) (nth a 4))
+    (defn jna-signature (a) (nth a 5))
+
+    (defn jna-output (a) (jbb-emit (jna-request a)))
+
+    (defn jna-output-matches-request? (request output)
+        (if (eq (jbb-output-safe? output) 1)
+            (if (str_eq (jbb-owner request) (jbb-out-owner output))
+                (if (eq (jbb-target request) (jbb-out-target output)) 1 0)
+                0)
+            0))
+
+    (defn jna-payload-from (request output)
+        (jlc-payload
+            (jbb-out-owner output)
+            (jbb-out-target output)
+            (len (jbb-payload output))
+            (jbb-source output)
+            (jbb-guard-map request)
+            (jbb-fault-map request)
+            (jbb-deopt output)
+            (jbb-root output)
+            (jbb-abi request)
+            (jbb-reloc output)
+            (jbb-safepoint output)
+            (jbb-exception output)))
+
+    (defn jna-static-clean? (a)
+        (if (eq (jna-admission? a) 1)
+            (fsa-allow-jit? (jna-expr a) (jna-env a))
+            0))
+
+    (defn jna-form-bytes? (a)
+        (if (eq (jna-admission? a) 1)
+            (if (eq (jbb-safe-request? (jna-request a)) 1)
+                (if (eq (jna-output-matches-request? (jna-request a) (jna-output a)) 1) 1 0)
+                0)
+            0))
+
+    (defn jna-payload-safe? (a)
+        (if (eq (jna-form-bytes? a) 1)
+            (jlc-payload-safe? (jna-payload-from (jna-request a) (jna-output a)))
+            0))
+
+    (defn jna-loaded (a)
+        (if (eq (jna-payload-safe? a) 1)
+            (jlc-load (jna-payload-from (jna-request a) (jna-output a)) (jna-generation a))
+            (empty)))
+
+    (defn jna-loaded-safe? (a)
+        (jlc-loaded-safe? (jna-loaded a)))
+
+    (defn jna-admit? (a)
+        (if (eq (jna-static-clean? a) 1)
+            (if (eq (jna-form-bytes? a) 1)
+                (if (eq (jna-payload-safe? a) 1)
+                    (if (eq (jna-loaded-safe? a) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    ; execution intent = ("native-intent" admission guard-ok runtime-ok invalidated parity-ok native walker exception)
+    (defn jna-intent (admission guard-ok runtime-ok invalidated parity-ok native-value walker-value exception-kind)
+        (list "native-intent" admission guard-ok runtime-ok invalidated parity-ok native-value walker-value exception-kind))
+    (defn jna-intent? (i) (if (eq (len i) 9) (str_eq (nth i 0) "native-intent") 0))
+    (defn jna-intent-admission (i) (nth i 1))
+    (defn jna-guard-ok (i) (nth i 2))
+    (defn jna-runtime-ok (i) (nth i 3))
+    (defn jna-invalidated (i) (nth i 4))
+    (defn jna-parity-ok (i) (nth i 5))
+    (defn jna-native-value (i) (nth i 6))
+    (defn jna-walker-value (i) (nth i 7))
+    (defn jna-exception-kind (i) (nth i 8))
+
+    (defn jna-action (intent)
+        (if (eq (jna-intent? intent) 1)
+            (if (eq (jna-admit? (jna-intent-admission intent)) 1)
+                (jlc-execute-action
+                    (jna-loaded (jna-intent-admission intent))
+                    (jna-guard-ok intent)
+                    (jna-runtime-ok intent)
+                    (jna-invalidated intent)
+                    (jna-parity-ok intent))
+                (jna-reject))
+            (jna-reject)))
+
+    (defn jna-value (intent)
+        (if (eq (jna-action intent) (jna-native))
+            (jna-native-value intent)
+            (if (eq (jna-action intent) (jna-exception))
+                (jna-exception-kind intent)
+                (jna-walker-value intent))))
+
+    (defn jna-good-admission ()
+        (jna-admission (fsa-good-expr) (fsa-default-env) (jbb-good-x64) 1 8001))
+    (defn jna-static-bad-admission ()
+        (jna-admission (fsa-divzero-expr) (fsa-default-env) (jbb-good-x64) 1 8002))
+    (defn jna-foreign-admission ()
+        (jna-admission (fsa-good-expr) (fsa-default-env) (jbb-foreign) 1 8003))
+    (defn jna-no-source-admission ()
+        (jna-admission (fsa-good-expr) (fsa-default-env) (jbb-no-source) 1 8004))
+    (defn jna-zero-generation-admission ()
+        (jna-admission (fsa-good-expr) (fsa-default-env) (jbb-good-x64) 0 8005))
+
+    (defn jna-native-intent ()
+        (jna-intent (jna-good-admission) 1 1 0 1 42 41 (jrf-div-zero)))
+    (defn jna-guard-fail-intent ()
+        (jna-intent (jna-good-admission) 0 1 0 1 42 41 (jrf-guard)))
+    (defn jna-runtime-fail-intent ()
+        (jna-intent (jna-good-admission) 1 0 0 1 42 41 (jrf-div-zero)))
+    (defn jna-invalidated-intent ()
+        (jna-intent (jna-good-admission) 1 1 1 1 42 41 (jrf-guard)))
+    (defn jna-parity-fail-intent ()
+        (jna-intent (jna-good-admission) 1 1 0 0 42 41 (jrf-guard)))
+    (defn jna-static-bad-intent ()
+        (jna-intent (jna-static-bad-admission) 1 1 0 1 42 41 (jrf-div-zero)))
+    (defn jna-foreign-intent ()
+        (jna-intent (jna-foreign-admission) 1 1 0 1 42 41 (jrf-guard)))
+    (defn jna-no-source-intent ()
+        (jna-intent (jna-no-source-admission) 1 1 0 1 42 41 (jrf-guard)))
+    (defn jna-zero-generation-intent ()
+        (jna-intent (jna-zero-generation-admission) 1 1 0 1 42 41 (jrf-guard)))
+
+    (defn jna-bit (cond bit) (if cond bit 0))
+    (defn jit-native-admission-check ()
+        (add
+            (jna-bit (eq (jna-static-clean? (jna-good-admission)) 1) 1)
+            (add
+                (jna-bit (eq (jna-form-bytes? (jna-good-admission)) 1) 2)
+                (add
+                    (jna-bit (eq (jna-payload-safe? (jna-good-admission)) 1) 4)
+                    (add
+                        (jna-bit (eq (jna-loaded-safe? (jna-good-admission)) 1) 8)
+                        (add
+                            (jna-bit (eq (jna-admit? (jna-good-admission)) 1) 16)
+                            (add
+                                (jna-bit (eq (jna-action (jna-native-intent)) (jna-native)) 32)
+                                (add
+                                    (jna-bit (eq (jna-value (jna-native-intent)) 42) 64)
+                                    (add
+                                        (jna-bit (eq (jna-action (jna-guard-fail-intent)) (jna-deopt)) 128)
+                                        (add
+                                            (jna-bit (eq (jna-value (jna-guard-fail-intent)) 41) 256)
+                                            (add
+                                                (jna-bit (eq (jna-action (jna-runtime-fail-intent)) (jna-exception)) 512)
+                                                (add
+                                                    (jna-bit (eq (jna-value (jna-runtime-fail-intent)) (jrf-div-zero)) 1024)
+                                                    (add
+                                                        (jna-bit (eq (jna-action (jna-invalidated-intent)) (jna-rewalk)) 2048)
+                                                        (add
+                                                            (jna-bit (eq (jna-action (jna-parity-fail-intent)) (jna-deopt)) 4096)
+                                                            (add
+                                                                (jna-bit (eq (jna-action (jna-static-bad-intent)) (jna-reject)) 8192)
+                                                                (add
+                                                                    (jna-bit (eq (jna-action (jna-foreign-intent)) (jna-reject)) 16384)
+                                                                    (add
+                                                                        (jna-bit (eq (jna-action (jna-no-source-intent)) (jna-reject)) 32768)
+                                                                        (jna-bit (eq (jna-action (jna-zero-generation-intent)) (jna-reject)) 65536)))))))))))))))))
+
+    0)
