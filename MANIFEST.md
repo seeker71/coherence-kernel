@@ -205,6 +205,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       remain `6`, live open dictation is local-oracle `4/4` but native `0/4`, and the current Sema live voice sample
       is local-oracle `0/1`, native `0/1`, WER `100`. The next actions are segmented open-ASR learning and
       render-and-oracle-next for the text-conditioned acoustic vocoder candidate.
+- [x] **Speech next-trial scheduler added.** `learn/speech-next-trial-scheduler.fk` chooses the next
+      oracle-to-native learning trial from the backlog (`32767`): open dictation is first because the local oracle
+      already has `4/4` clean samples while native is `0/4`; the challenger is
+      `native-segmented-acoustic-learning` with promotion gated by native rate, WER, and clean
+      choice/cut/fail/undo/timeout controls. Sema live voice is queued for `tcav-warm-mid-cadence-v1` after a local
+      render passes the STT oracle bar.
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
