@@ -1,0 +1,73 @@
+; transformer-decoder-fwd-band.fk — the DECODER FORWARD proven bit-exact, four-way (HOMECOMING 3a, first step).
+;
+; preludes: transformer-numerics.fk transformer-block.fk transformer-mh.fk transformer-decoder.fk
+;
+; HOMECOMING's "generative weights" names what stands between this body and a self-speaking
+; mind: the FFN sublayer is already bit-exact on metal, but the rest of the decoder forward —
+; ATTENTION (QKᵀ/√d, causal mask, softmax, ×V), multi-head concat, the full block — was not yet
+; PROVEN bit-exact on the c-bootstrap fkwu kernel. This band proves the forward ARCHITECTURE
+; (not yet real weights as recipe-data — that is 3b territory) over a fixed small config:
+;   seq=3, d_model=4, n_head=2, head_dim=2, eps=1e-5, scale=1/√head_dim.
+;
+; METHODOLOGY — bit-exact, not "close". Each claim recomputes a transformer piece and asserts
+; with `eq` that the result is BIT-IDENTICAL to a reference double. Every reference literal was
+; captured at full fp64 precision from the three INDEPENDENT walkers (Go, Rust, TypeScript), which
+; print all 17 significant digits and agreed bit-for-bit with one another. `eq` on a float is the
+; exact IEEE-754 double comparison shared by all four kernels, so a claim returning its bit only
+; when fkwu's computed double equals that walker-captured reference IS the four-way agreement: the
+; band returns the SAME verdict (63) on fkwu, Go, Rust, and TS exactly when all four compute the
+; identical double. fkwu's `%.15g` print shows fewer digits, but the underlying double is proven
+; identical through `eq`, not through the truncated display.
+;
+; Verdict 63 (1+2+4+8+16+32) when every claim lands:
+;    1  scaled-dot-product attention  softmax(QKᵀ/√d)·V — first context element
+;    2  numerically-stable softmax    max-subtract, pinned reduction order
+;    4  causal-masked attention       query i attends only to keys 0..i (autoregressive mask)
+;    8  multi-head concat             2 heads × hd=2 attention, concatenated back to d_model=4
+;   16  full decoder block forward    causal self-attn → cross-attn → FFN, all pre-LN + residual
+;   32  shape preservation            the block maps a 3×4 sequence to a 3×4 sequence
+;
+; All arithmetic is the proven fp64 dot/matvec/exp/sqrt of transformer-numerics + transformer-block;
+; the decoder adds NO new arithmetic (only mask windows + head slices + concat), so the value walk
+; is bit-deterministic by construction — exactly why it crosses four-way. Real open-base weights
+; (Qwen/Llama) loaded as recipe-data, the positional + LM-head wrap, and composition at real width
+; remain (named in receipts/2026-06-30-decoder-forward-bitexact.md).
+
+(do
+  ; ===== fixed small config: seq=3, d_model=4, n_head=2, head_dim=2 =====
+  (defn dx () (list (list 0.1 0.2 0.3 0.4) (list 0.5 0.6 0.7 0.8) (list 0.9 1.0 1.1 1.2)))
+  (defn enc () (list (list 0.2 0.1 0.0 0.3) (list 0.4 0.3 0.2 0.1)))
+  (defn g1 () (list 1.0 1.0 1.0 1.0)) (defn be1 () (list 0.0 0.0 0.0 0.0))
+  (defn g2 () (list 1.1 0.9 1.0 1.0)) (defn be2 () (list 0.01 0.02 0.0 0.0))
+  (defn g3 () (list 1.0 1.0 1.0 1.0)) (defn be3 () (list 0.0 0.0 0.0 0.0))
+  (defn wq () (list (list 0.1 0.0 0.0 0.0) (list 0.0 0.1 0.0 0.0) (list 0.0 0.0 0.1 0.0) (list 0.0 0.0 0.0 0.1)))
+  (defn wk () (list (list 0.2 0.0 0.0 0.0) (list 0.0 0.2 0.0 0.0) (list 0.0 0.0 0.2 0.0) (list 0.0 0.0 0.0 0.2)))
+  (defn wv () (list (list 0.3 0.1 0.0 0.0) (list 0.0 0.3 0.1 0.0) (list 0.0 0.0 0.3 0.1) (list 0.1 0.0 0.0 0.3)))
+  (defn wo () (list (list 1.0 0.0 0.0 0.0) (list 0.0 1.0 0.0 0.0) (list 0.0 0.0 1.0 0.0) (list 0.0 0.0 0.0 1.0)))
+  (defn bz () (list 0.0 0.0 0.0 0.0))
+  (defn w1 () (list (list 0.1 0.2 0.0 0.0) (list 0.0 0.1 0.2 0.0) (list 0.0 0.0 0.1 0.2) (list 0.2 0.0 0.0 0.1)))
+  (defn w2 () (list (list 0.5 0.0 0.0 0.0) (list 0.0 0.5 0.0 0.0) (list 0.0 0.0 0.5 0.0) (list 0.0 0.0 0.0 0.5)))
+  (defn eps () 0.00001)
+  (defn nh () 2) (defn hd () 2) (defn sc () 0.7071067811865476)
+
+  ; the projected q/k/v sequences (shared by the attention claims).
+  (defn pq () (tb-proj-seq (wq) (bz) (dx)))
+  (defn pk () (tb-proj-seq (wk) (bz) (dx)))
+  (defn pv () (tb-proj-seq (wv) (bz) (dx)))
+  ; the full decoder block forward: causal self-attn -> cross-attn -> FFN, all pre-LN residual.
+  (defn db () (tb-dec-block (dx) (enc) (eps) (g1) (be1) (wq) (bz) (wk) (bz) (wv) (bz) (wo) (bz)
+                            (g2) (be2) (wq) (bz) (wk) (bz) (wv) (bz) (wo) (bz)
+                            (nh) (hd) (sc) (g3) (be3) (w1) (bz) (w2) (bz)))
+
+  ; --- the six bit-exact claims (reference doubles: go = rust = ts, full fp64 precision) ---
+  (defn c1 () (if (eq (head (head (tb-attn-seq (pq) (pk) (pv) (sc)))) 0.21060339456851332) 1 0))
+  (defn c2 () (if (eq (head (tn-softmax (list 2.0 1.0 0.1 3.0))) 0.23608682003817824) 2 0))
+  (defn c3 () (if (eq (head (head (tail (tb-attn-seq-causal (pq) (pk) (pv) (sc))))) 0.1305883022368571) 4 0))
+  (defn c4 () (if (and (eq (head (head (tb-mh-causal (pq) (pk) (pv) (nh) (hd) (sc)))) 0.05)
+                       (eq (len (head (tb-mh-causal (pq) (pk) (pv) (nh) (hd) (sc)))) 4)) 8 0))
+  (defn c5 () (if (and (eq (head (head (db))) -0.2828392705729456)
+                   (and (eq (head (head (tail (tail (db))))) 0.5171607294270544)
+                        (eq (head (tail (head (tail (db))))) 0.6101938136508804))) 16 0))
+  (defn c6 () (if (and (eq (len (db)) 3) (eq (len (head (db))) 4)) 32 0))
+
+  (add (c1) (add (c2) (add (c3) (add (c4) (add (c5) (c6)))))))
