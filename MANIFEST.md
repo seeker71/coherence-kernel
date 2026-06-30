@@ -174,6 +174,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       measured transcript into the Sema local-oracle gate. The contract band returns `2047`; the live probe returned
       `479`, field code `110100002`, WER `100`, route `oracle-guide`. This closes the live carrier gap but proves
       the current formant waveform is not yet intelligible speech.
+- [x] **Sema voice oracle miss learning added.** `learn/sema-voice-oracle-miss-learning.fk` makes the live WER-100
+      miss change the algorithm (`32767`): authority stays `oracle-guide`, and AutoML now names
+      `text-conditioned-acoustic-vocoder` as the next trainable candidate with g2p, phoneme timing, prosody,
+      acoustic token emission, segmented acoustic learning, and the same local-oracle WER bar. The speech selector
+      now exposes this action and returns `2097151`.
 - [x] **Speech loopback promotion added.** `learn/speech-loopback-promotion.fk` turns native loopback receipts into
       rolling authority windows (`2047`): clean long windows promote native; short, failed, timed-out, undone, or
       regressing windows route back to oracle.
@@ -277,8 +282,9 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `native-segmented-acoustic-learning` is present as the local-oracle segment learner, but none are
       live-selected until real audio can emit segmented token frames over winning receipts. `small-transformer-nl` remains trainable but not
       live-selected; `diffusion-codec-speech` is present but not ready because no Form-native executable kernel
-      receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; the band
-      returns `262143`.
+      receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; after the live
+      Sema formant WER-100 miss, it also exposes the voice miss action and acoustic-vocoder next candidate. The
+      band returns `2097151`.
 - [x] **Open dictation transcript receipt added.** `learn/open-dictation-transcript-learning.fk` admits arbitrary
       utterance rows with consentful side-channel truth, local free oracle transcripts, optional native transcript
       candidates, Unicode token WER, and choice/cut/fail/undo/timeout promotion gates (`16383`). The macOS carrier

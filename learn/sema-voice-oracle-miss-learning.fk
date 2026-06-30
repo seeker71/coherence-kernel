@@ -1,0 +1,170 @@
+; sema-voice-oracle-miss-learning.fk -- learn from the live Sema voice miss.
+;
+; The live macOS Sema formant carrier is observable, local, and Metal-backed,
+; but the local oracle returned WER 100 for the target utterance. This cell
+; turns that miss into an AutoML action: do not promote the raw formant carrier;
+; train a text-conditioned acoustic/vocoder bridge that can be tested against
+; the same local-oracle bar.
+;
+; preludes:
+;   learn/sema-voice-local-oracle-receipt.fk
+
+(do
+    (defn svom-live (carrier verdict field-code wer route oracle device
+                     audio-present row-valid oracle-ok fail timeout undo)
+        (list "sema-voice-oracle-live"
+              carrier verdict field-code wer route oracle device
+              audio-present row-valid oracle-ok fail timeout undo))
+
+    (defn svom-kind          (r) (nth r 0))
+    (defn svom-carrier       (r) (nth r 1))
+    (defn svom-verdict       (r) (nth r 2))
+    (defn svom-field-code    (r) (nth r 3))
+    (defn svom-wer           (r) (nth r 4))
+    (defn svom-route         (r) (nth r 5))
+    (defn svom-oracle        (r) (nth r 6))
+    (defn svom-device        (r) (nth r 7))
+    (defn svom-audio-present (r) (nth r 8))
+    (defn svom-row-valid     (r) (nth r 9))
+    (defn svom-oracle-ok     (r) (nth r 10))
+    (defn svom-fail          (r) (nth r 11))
+    (defn svom-timeout       (r) (nth r 12))
+    (defn svom-undo          (r) (nth r 13))
+
+    (defn svom-macos-live-miss ()
+        (svom-live "macos-sema-voice-local-oracle-carrier"
+                   479
+                   110100002
+                   100
+                   "oracle-guide"
+                   "whisper.cpp-large-v3-turbo"
+                   "macos-arm64-m4-max"
+                   1 1 0 0 0 0))
+
+    (defn svom-passing-live ()
+        (svom-live "macos-sema-voice-local-oracle-carrier"
+                   511
+                   111000001
+                   0
+                   "native-sema-voice"
+                   "whisper.cpp-large-v3-turbo"
+                   "macos-arm64-m4-max"
+                   1 1 1 0 0 0))
+
+    (defn svom-no-audio-live ()
+        (svom-live "macos-sema-voice-local-oracle-carrier"
+                   0
+                   0
+                   100
+                   "oracle-guide"
+                   "whisper.cpp-large-v3-turbo"
+                   "macos-arm64-m4-max"
+                   0 0 0 0 0 0))
+
+    (defn svom-fail-live ()
+        (svom-live "macos-sema-voice-local-oracle-carrier"
+                   0
+                   0
+                   100
+                   "oracle-guide"
+                   "whisper.cpp-large-v3-turbo"
+                   "macos-arm64-m4-max"
+                   1 0 0 1 0 0))
+
+    (defn svom-control-clean? (r)
+        (if (eq (add (add (svom-fail r) (svom-timeout r)) (svom-undo r)) 0) 1 0))
+
+    (defn svom-carrier-ok? (r)
+        (if (and (eq (svom-audio-present r) 1)
+                 (and (eq (svom-row-valid r) 1)
+                      (eq (svom-control-clean? r) 1))) 1 0))
+
+    (defn svom-pass? (r max-wer)
+        (if (and (eq (svom-carrier-ok? r) 1)
+                 (and (eq (svom-oracle-ok r) 1)
+                      (and (le (svom-wer r) max-wer)
+                           (str_eq (svom-route r) "native-sema-voice")))) 1 0))
+
+    (defn svom-miss? (r max-wer)
+        (if (and (eq (svom-carrier-ok? r) 1)
+                 (and (eq (svom-pass? r max-wer) 0)
+                      (and (gt (svom-wer r) max-wer)
+                           (str_eq (svom-route r) "oracle-guide")))) 1 0))
+
+    (defn svom-repair? (r)
+        (if (or (eq (svom-audio-present r) 0)
+                (or (eq (svom-row-valid r) 0)
+                    (not (eq (svom-control-clean? r) 1)))) 1 0))
+
+    (defn svom-next-candidate (r max-wer)
+        (if (eq (svom-pass? r max-wer) 1)
+            "native-sema-voice"
+            (if (eq (svom-repair? r) 1)
+                "repair-live-carrier"
+                "text-conditioned-acoustic-vocoder")))
+
+    (defn svom-action (r max-wer)
+        (if (eq (svom-pass? r max-wer) 1)
+            "promote-native-sema-voice"
+            (if (eq (svom-repair? r) 1)
+                "repair-carrier"
+                "train-text-conditioned-acoustic-vocoder")))
+
+    (defn svom-authority (r max-wer)
+        (if (eq (svom-pass? r max-wer) 1) "native-sema-voice" "oracle-guide"))
+
+    (defn svom-priority (r max-wer)
+        (if (eq (svom-miss? r max-wer) 1)
+            (add 50 (sub (svom-wer r) max-wer))
+            (if (eq (svom-repair? r) 1) 100 0)))
+
+    (defn svom-trainable? (r max-wer)
+        (if (and (eq (svom-miss? r max-wer) 1)
+                 (str_eq (svom-next-candidate r max-wer)
+                         "text-conditioned-acoustic-vocoder")) 1 0))
+
+    (defn svom-recipe ()
+        (list "g2p"
+              "phoneme-timing"
+              "prosody-contour"
+              "acoustic-token-emitter"
+              "segmented-acoustic-learning"
+              "sema-voice-sample-loop"
+              "local-oracle-wer"))
+
+    (defn svom-recipe-has? (xs name)
+        (if (eq (len xs) 0) 0
+            (if (str_eq (head xs) name) 1 (svom-recipe-has? (tail xs) name))))
+
+    (defn svom-receipt (r max-wer)
+        (list "sema-voice-oracle-miss-learning"
+              (svom-carrier r)
+              (svom-oracle r)
+              (svom-device r)
+              (svom-verdict r)
+              (svom-field-code r)
+              (svom-wer r)
+              (svom-authority r max-wer)
+              (svom-action r max-wer)
+              (svom-next-candidate r max-wer)
+              (svom-priority r max-wer)
+              (svom-trainable? r max-wer)
+              1
+              0))
+
+    (defn svom-rec-kind        (r) (nth r 0))
+    (defn svom-rec-carrier     (r) (nth r 1))
+    (defn svom-rec-oracle      (r) (nth r 2))
+    (defn svom-rec-device      (r) (nth r 3))
+    (defn svom-rec-verdict     (r) (nth r 4))
+    (defn svom-rec-field-code  (r) (nth r 5))
+    (defn svom-rec-wer         (r) (nth r 6))
+    (defn svom-rec-authority   (r) (nth r 7))
+    (defn svom-rec-action      (r) (nth r 8))
+    (defn svom-rec-candidate   (r) (nth r 9))
+    (defn svom-rec-priority    (r) (nth r 10))
+    (defn svom-rec-trainable   (r) (nth r 11))
+    (defn svom-rec-native-form (r) (nth r 12))
+    (defn svom-rec-neural-vocoder-ready (r) (nth r 13))
+
+    0)
