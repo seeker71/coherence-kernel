@@ -37,6 +37,19 @@ source that stays where it is, mapped here so the kernel knows its full inherita
     deps that re-prove **transitively** inside a let-free consumer band, their own standalone
     band `--src`-pending on the `do/let`-block floor (named gap, closing in the cursor-seed pivot).
 
+## Core lifts — raising the abstraction share once bodies are home
+
+Not homecoming waves (the bodies were already here); these collapse repeated *structure* into one
+high-grammar base, re-proven on `fkwu --src`.
+
+- [`uplift-1-sensor-organ-template.md`](uplift-1-sensor-organ-template.md) — the observe/ sensing
+  family's repeated `port + plane + reading + fusion` spine becomes ONE 19-line base template
+  ([`observe/sensor-organ-template.fk`](../../observe/sensor-organ-template.fk)) over
+  `world-sensor-floor`. Three sensors re-expressed as thin subclasses (scene-features, motion-sense,
+  same-room) — each **6–8 code lines vs 51–67**, each `--src` witness equal to its original
+  (`111`/`1111`/`11111`). Names the stored-fn-value/closure gap that blocks the cleaner data-row form,
+  and the rest-of-family plan.
+
 ## Referenced — carriers & knowledge (stay in old repo, mapped here)
 
 These are NOT the body; the kernel references them, does not absorb them:
