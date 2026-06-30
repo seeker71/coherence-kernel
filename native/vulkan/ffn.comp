@@ -1,0 +1,58 @@
+#version 450
+
+// form-native FFN forward y = W2*gelu(W1*x + b1) + b2, ONE compute dispatch (Android/Vulkan lane).
+// The GPU twin of fptx-ffn-fwd (CUDA) and jte-mlp-fwd-msl (Metal): phase 1 each invocation strides
+// hidden units k -> a[k] = gelu(W1[k].x + b1[k]); barrier(); phase 2 strides outputs i -> y[i] = W2[i].a + b2[i].
+// `precise` -> NoContraction (no fma) so the matvecs are the same DOWNWARD right-fold as the PTX/MSL/CPU
+// lanes; gelu is the recipe's OWN 14-term Taylor fexp + ftanh, never the driver's tanh(). Same .spv on Adreno/Mali.
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, binding = 0) readonly  buffer W1 { float w1[]; };
+layout(std430, binding = 1) readonly  buffer B1 { float b1[]; };
+layout(std430, binding = 2) readonly  buffer W2 { float w2[]; };
+layout(std430, binding = 3) readonly  buffer B2 { float b2[]; };
+layout(std430, binding = 4) readonly  buffer X  { float x[]; };
+layout(std430, binding = 5) writeonly buffer Y  { float y[]; };
+layout(std430, binding = 6)           buffer A  { float a[]; };
+
+layout(push_constant) uniform Push { uint indim; uint hid; uint outd; } pc;
+
+float fexp(float v) {
+    float s = v;
+    int k = 0;
+    while (abs(s) > 0.5) { s = s * 0.5; k = k + 1; }
+    float n = 1.0;
+    float term = 1.0;
+    float acc = 1.0;
+    for (int q = 0; q < 14; ++q) { term = term * (s / n); acc = acc + term; n = n + 1.0; }
+    while (k > 0) { acc = acc * acc; k = k - 1; }
+    return acc;
+}
+
+float fgelu(float v) {
+    float z = 0.7978845608028654 * (v + 0.044715 * (v * (v * v)));
+    float e = fexp(2.0 * z);
+    float th = (e - 1.0) / (e + 1.0);
+    return (0.5 * v) * (1.0 + th);
+}
+
+void main() {
+    for (uint k = gl_LocalInvocationID.x; k < pc.hid; k += gl_WorkGroupSize.x) {
+        precise float acc = 0.0;
+        for (int j = int(pc.indim) - 1; j >= 0; --j) {
+            precise float prod = w1[k * pc.indim + uint(j)] * x[uint(j)];
+            acc = prod + acc;
+        }
+        a[k] = fgelu(acc + b1[k]);
+    }
+    barrier();
+    for (uint i = gl_LocalInvocationID.x; i < pc.outd; i += gl_WorkGroupSize.x) {
+        precise float acc2 = 0.0;
+        for (int j = int(pc.hid) - 1; j >= 0; --j) {
+            precise float prod = w2[i * pc.hid + uint(j)] * a[uint(j)];
+            acc2 = prod + acc2;
+        }
+        y[i] = acc2 + b2[i];
+    }
+}
+

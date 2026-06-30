@@ -16,7 +16,9 @@ FKWU="${1:-/tmp/fkwu}"
 RUN="$(mktemp)"
 {
   echo '(do'
-  sed -n '50,105p' flatten/form-flatten.fk      # the flt-ops defn (the manifest table)
+  # the flt-ops defn (the manifest table), extracted by its OWN boundaries — from its
+  # (defn line to the next top-level (defn — so growing flt-ops never needs a line-range edit.
+  awk '/^\(defn flt-ops \(/{g=1} g && /^\(defn / && !/^\(defn flt-ops \(/{exit} g' flatten/form-flatten.fk
   sed '1s/^(do$//' flatten/gen-source-walker-table.fk
 } > "$RUN"
 "$FKWU" --src "$RUN" > runtime/fkwu-optable.h

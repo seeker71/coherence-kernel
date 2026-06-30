@@ -1,0 +1,153 @@
+; form-vulkan.fk — drive the GPU's Vulkan driver DIRECTLY from Form, no clang. This REPLACED a rented
+; hand-written C carrier (NDK-clang-compiled) that was deleted once this lane worked: there C made the
+; vk* calls; here, the FORM RECIPE makes them, through the kernel's FFI carriers (c_dlsym / c_call / c_alloc
+; / c_u32_get / c_u64_set …). libvulkan.so is a NAMED host carrier, exactly like libSystem — the recipe is
+; the body, the driver is the door. clang is gone from the orchestration; the compute body is already
+; Form-emitted SPIR-V (model/form-glsl.fk -> fglsl-matvec). Proven on a real Adreno 740 (Galaxy S23):
+; fv-matvec dispatches the matvec on the GPU and returns 1111 — y bit-exact to the CPU fkwu fold
+; [40,87,21,57]. See receipts/2026-06-29-android-gpu-vulkan.md.
+;
+; KERNEL CONSTRAINTS this recipe lives inside (both real, both worked around, neither faked):
+;   - user `defn`s take <=2 args (the source-runner's call forms are 1-/2-arg; 3+ silently yields 0). So all
+;     helpers are <=2-arg; extra state lives in the arena. Carriers (c_u32_set etc.) take any arity — they
+;     dispatch by tag, not through the call form.
+;   - `let` does not bind here. State is one c_alloc'd ARENA threaded as the single arg `a`; every Vulkan
+;     struct sits at a fixed byte offset in it; `do` sequences; `add` does pointer arithmetic (pointers are
+;     plain Form ints, addr<<1 on the tagged lane). calloc zeroes the arena, so only non-zero fields are set.
+
+(do
+    (defn vl (n) (c_dlsym "libvulkan.so" n))
+
+    ; ── light probe: the GPU's identity, read from Form (no compute). sel 0=vendorID(Qualcomm 0x5143=20803)
+    ;    1=apiVersion 2=driverVersion 3=deviceID. Arena: 0 InstanceCreateInfo · 64 instance · 72 pdCount ·
+    ;    80 pDevices · 144 PhysicalDeviceProperties (apiVersion@0 driverVersion@4 vendorID@8 deviceID@12). ──
+    (defn fv-probe-id (a sel)
+        (do
+            (c_u32_set a 0 1)
+            (c_call (vl "vkCreateInstance") (list a 0 (add a 64)))
+            (c_u32_set a 72 8)
+            (c_call (vl "vkEnumeratePhysicalDevices") (list (c_u64_get a 64) (add a 72) (add a 80)))
+            (c_call (vl "vkGetPhysicalDeviceProperties") (list (c_u64_get a 80) (add a 144)))
+            (if (eq sel 0) (c_u32_get a 152)
+              (if (eq sel 1) (c_u32_get a 144)
+                (if (eq sel 2) (c_u32_get a 148) (c_u32_get a 156))))))
+    (defn fv-vendor () (fv-probe-id (c_alloc 2048) 0))
+    (defn fv-instance-version (p)
+        (do (c_call (vl "vkEnumerateInstanceVersion") (list p)) (c_u32_get p 0)))
+    (defn fv-version () (fv-instance-version (c_alloc 4)))
+
+    ; ── fv-matvec: the full compute dispatch. y = W*x on the GPU, W(4x5) x(5) y(4), the fglsl-matvec .spv. ──
+    ;    Arena map (bytes): 0 InstanceCreateInfo(64) · 64 instance · 72 pdCount · 80 pDevices · 912 QueueCI ·
+    ;    952 prio · 960 DeviceCI · 1032 device · 1040 queue · 1048 MemoryProperties · 1600 BufferCI scratch ·
+    ;    1664 MemReq scratch(typeBits@1680) · 1688 MemAllocI scratch · 1728 bufHandles[3] · 1752 memHandles[3]
+    ;    · 1776 mapPtrs[3] · 1800 DSLBinding[3] · 1872 DSLCreateI · 1904 setLayout · 1912 PoolSize · 1920
+    ;    PoolCreateI · 1960 pool · 1968 SetAllocI · 2008 descSet · 2016 BufferInfo[3] · 2088 Write[3] · 2280
+    ;    PushConstRange · 2296 PipeLayoutCI · 2344 pipeLayout · 2352 ShaderModCI · 2392 module · 2400
+    ;    ComputePipeCI(stage embedded @2424) · 2520 pipeline · 2528 pushData(rows,cols) · 2536 CmdPoolCI ·
+    ;    2560 cmdPool · 2568 CmdBufAllocI · 2600 cmdBuf · 2608 BeginI · 2640 SubmitI · 2712 FenceCI · 2728 fence
+    (defn mtype (a i)                                  ; scan memoryTypes for HOST_VISIBLE|HOST_COHERENT (&6==6)
+        (if (ge i (c_u32_get (add a 1048) 0)) 999
+          (if (eq (band (c_u32_get (add a 1048) (add 4 (mul i 8))) 6) 6)
+            (if (eq (band (shr_u32 (c_u32_get a 1680) i) 1) 1) i (mtype a (add i 1)))
+            (mtype a (add i 1)))))
+    (defn bsz (s) (if (eq s 0) 80 (if (eq s 1) 20 16)))   ; W=20f x=5f y=4f
+    (defn mkbuf (a s)                                  ; create storage buffer s, host-visible mem, bind, map
+        (do
+            (c_u32_set a 1600 12)(c_u64_set a 1624 (bsz s))(c_u32_set a 1632 32)
+            (c_call (vl "vkCreateBuffer") (list (c_u64_get a 1032) (add a 1600) 0 (add a (add 1728 (mul s 8)))))
+            (c_call (vl "vkGetBufferMemoryRequirements") (list (c_u64_get a 1032) (c_u64_get a (add 1728 (mul s 8))) (add a 1664)))
+            (c_u32_set a 1688 5)(c_u64_set a 1704 (c_u64_get a 1664))(c_u32_set a 1712 (mtype a 0))
+            (c_call (vl "vkAllocateMemory") (list (c_u64_get a 1032) (add a 1688) 0 (add a (add 1752 (mul s 8)))))
+            (c_call (vl "vkBindBufferMemory") (list (c_u64_get a 1032) (c_u64_get a (add 1728 (mul s 8))) (c_u64_get a (add 1752 (mul s 8))) 0))
+            (c_call (vl "vkMapMemory") (list (c_u64_get a 1032) (c_u64_get a (add 1752 (mul s 8))) 0 (bsz s) 0 (add a (add 1776 (mul s 8)))))
+            s))
+    (defn setbind (a i)                               ; VkDescriptorSetLayoutBinding[i]: storage, compute
+        (do (c_u32_set a (add 1800 (mul i 24)) i)(c_u32_set a (add 1804 (mul i 24)) 7)
+            (c_u32_set a (add 1808 (mul i 24)) 1)(c_u32_set a (add 1812 (mul i 24)) 32) i))
+    (defn setwrite (a i)                              ; VkWriteDescriptorSet[i] + VkDescriptorBufferInfo[i]
+        (do (c_u64_set a (add 2016 (mul i 24)) (c_u64_get a (add 1728 (mul i 8))))
+            (c_u64_set a (add 2032 (mul i 24)) -1)                       ; range = VK_WHOLE_SIZE
+            (c_u32_set a (add 2088 (mul i 64)) 35)
+            (c_u64_set a (add 2104 (mul i 64)) (c_u64_get a 2008))
+            (c_u32_set a (add 2112 (mul i 64)) i)(c_u32_set a (add 2120 (mul i 64)) 1)(c_u32_set a (add 2124 (mul i 64)) 7)
+            (c_u64_set a (add 2136 (mul i 64)) (add a (add 2016 (mul i 24)))) i))
+    ; ── inputs as INTEGER lists (the single source of truth) + IEEE754 helpers so the GPU buffers are filled
+    ;    FROM the integers and the reference is computed FROM the integers — no baked f32 constants. ──
+    (defn wlist () (list 3 1 4 1 5 9 2 6 5 3 1 1 1 1 1 0 3 1 4 1))   ; W, row-major 4x5
+    (defn xlist () (list 2 7 1 8 3))                                  ; x
+    (defn i2fexp (n e) (if (lt n 2) e (i2fexp (div n 2) (add e 1))))  ; floor(log2 n)
+    (defn i2f2 (n e) (bor (shl_u32 (add 127 e) 23) (sub (shl_u32 n (sub 23 e)) 8388608)))
+    (defn i2f (n) (if (eq n 0) 0 (i2f2 n (i2fexp n 0))))             ; small non-neg int -> f32 bits
+    (defn f2i2 (b e) (shr_u32 (bor 8388608 (band b 8388607)) (sub 23 e)))
+    (defn f2i (b) (if (eq b 0) 0 (f2i2 b (sub (band (shr_u32 b 23) 255) 127))))  ; f32 bits -> int (exact ints)
+    (defn fillW (a i) (if (ge i 20) a                                 ; fill W from wlist via i2f
+        (do (c_u32_set (c_u64_get a 1776) (mul i 4) (i2f (nth (wlist) i))) (fillW a (add i 1)))))
+    (defn fillx (a i) (if (ge i 5) a
+        (do (c_u32_set (c_u64_get a 1784) (mul i 4) (i2f (nth (xlist) i))) (fillx a (add i 1)))))
+    (defn fv-spv () "native/vulkan/matvec.spv")
+    (defn fv-go (a)                                   ; the whole dispatch; returns the arena (y is at *mapPtr[2])
+        (do
+            (c_u32_set a 0 1)
+            (c_call (vl "vkCreateInstance") (list a 0 (add a 64)))
+            (c_u32_set a 72 8)
+            (c_call (vl "vkEnumeratePhysicalDevices") (list (c_u64_get a 64) (add a 72) (add a 80)))
+            (c_u32_set a 912 2)(c_u32_set a 936 1)(c_u32_set a 952 1065353216)(c_u64_set a 944 (add a 952))
+            (c_u32_set a 960 3)(c_u32_set a 980 1)(c_u64_set a 984 (add a 912))
+            (c_call (vl "vkCreateDevice") (list (c_u64_get a 80) (add a 960) 0 (add a 1032)))
+            (c_call (vl "vkGetDeviceQueue") (list (c_u64_get a 1032) 0 0 (add a 1040)))
+            (c_call (vl "vkGetPhysicalDeviceMemoryProperties") (list (c_u64_get a 80) (add a 1048)))
+            (mkbuf a 0)(mkbuf a 1)(mkbuf a 2)
+            (fillW a 0)(fillx a 0)
+            (setbind a 0)(setbind a 1)(setbind a 2)
+            (c_u32_set a 1872 32)(c_u32_set a 1892 3)(c_u64_set a 1896 (add a 1800))
+            (c_call (vl "vkCreateDescriptorSetLayout") (list (c_u64_get a 1032) (add a 1872) 0 (add a 1904)))
+            (c_u32_set a 1912 7)(c_u32_set a 1916 3)
+            (c_u32_set a 1920 33)(c_u32_set a 1940 1)(c_u32_set a 1944 1)(c_u64_set a 1952 (add a 1912))
+            (c_call (vl "vkCreateDescriptorPool") (list (c_u64_get a 1032) (add a 1920) 0 (add a 1960)))
+            (c_u32_set a 1968 34)(c_u64_set a 1984 (c_u64_get a 1960))(c_u32_set a 1992 1)(c_u64_set a 2000 (add a 1904))
+            (c_call (vl "vkAllocateDescriptorSets") (list (c_u64_get a 1032) (add a 1968) (add a 2008)))
+            (setwrite a 0)(setwrite a 1)(setwrite a 2)
+            (c_call (vl "vkUpdateDescriptorSets") (list (c_u64_get a 1032) 3 (add a 2088) 0 0))
+            (c_u32_set a 2280 32)(c_u32_set a 2288 8)
+            (c_u32_set a 2296 30)(c_u32_set a 2316 1)(c_u64_set a 2320 (add a 1904))(c_u32_set a 2328 1)(c_u64_set a 2336 (add a 2280))
+            (c_call (vl "vkCreatePipelineLayout") (list (c_u64_get a 1032) (add a 2296) 0 (add a 2344)))
+            (c_u32_set a 2352 16)(c_u64_set a 2376 (str_len (read_file (fv-spv))))(c_u64_set a 2384 (c_str_addr (read_file (fv-spv))))
+            (c_call (vl "vkCreateShaderModule") (list (c_u64_get a 1032) (add a 2352) 0 (add a 2392)))
+            (c_u32_set a 2400 29)
+            (c_u32_set a 2424 18)(c_u32_set a 2444 32)(c_u64_set a 2448 (c_u64_get a 2392))(c_u64_set a 2456 (c_str_addr "main"))
+            (c_u64_set a 2472 (c_u64_get a 2344))
+            (c_call (vl "vkCreateComputePipelines") (list (c_u64_get a 1032) 0 1 (add a 2400) 0 (add a 2520)))
+            (c_u32_set a 2528 4)(c_u32_set a 2532 5)
+            (c_u32_set a 2536 39)
+            (c_call (vl "vkCreateCommandPool") (list (c_u64_get a 1032) (add a 2536) 0 (add a 2560)))
+            (c_u32_set a 2568 40)(c_u64_set a 2584 (c_u64_get a 2560))(c_u32_set a 2592 0)(c_u32_set a 2596 1)
+            (c_call (vl "vkAllocateCommandBuffers") (list (c_u64_get a 1032) (add a 2568) (add a 2600)))
+            (c_u32_set a 2608 42)
+            (c_call (vl "vkBeginCommandBuffer") (list (c_u64_get a 2600) (add a 2608)))
+            (c_call (vl "vkCmdBindPipeline") (list (c_u64_get a 2600) 1 (c_u64_get a 2520)))
+            (c_call (vl "vkCmdBindDescriptorSets") (list (c_u64_get a 2600) 1 (c_u64_get a 2344) 0 1 (add a 2008) 0 0))
+            (c_call (vl "vkCmdPushConstants") (list (c_u64_get a 2600) (c_u64_get a 2344) 32 0 8 (add a 2528)))
+            (c_call (vl "vkCmdDispatch") (list (c_u64_get a 2600) 1 1 1))
+            (c_call (vl "vkEndCommandBuffer") (list (c_u64_get a 2600)))
+            (c_u32_set a 2712 8)
+            (c_call (vl "vkCreateFence") (list (c_u64_get a 1032) (add a 2712) 0 (add a 2728)))
+            (c_u32_set a 2640 4)(c_u32_set a 2680 1)(c_u64_set a 2688 (add a 2600))
+            (c_call (vl "vkQueueSubmit") (list (c_u64_get a 1040) 1 (add a 2640) (c_u64_get a 2728)))
+            (c_call (vl "vkWaitForFences") (list (c_u64_get a 1032) 1 (add a 2728) 1 -1))
+            a))
+    ; ── self-verify INDEPENDENTLY: decode each GPU output (f32 bits -> int via f2i) and compare to the matvec
+    ;    computed FRESH in Form from the same integer inputs (dot of W-row r with x). No baked expected outputs:
+    ;    both sides are computed, GPU vs CPU, on the same data. returns 1111 iff all 4 rows agree. ──
+    (defn dot (w x) (if (eq (len x) 0) 0 (add (mul (head w) (head x)) (dot (tail w) (tail x)))))
+    (defn wrow (r) (list (nth (wlist) (mul r 5)) (nth (wlist) (add (mul r 5) 1))
+                         (nth (wlist) (add (mul r 5) 2)) (nth (wlist) (add (mul r 5) 3)) (nth (wlist) (add (mul r 5) 4))))
+    (defn ckrow (a r)                                 ; GPU row r (decoded) == Form dot of W-row r with x ?
+        (if (eq (f2i (c_u32_get (c_u64_get a 1792) (mul r 4))) (dot (wrow r) (xlist))) 1 0))
+    (defn fv-check (a)
+        (add (mul (ckrow a 0) 1000) (add (mul (ckrow a 1) 100) (add (mul (ckrow a 2) 10) (ckrow a 3)))))
+    ; guard at the top: on a host without libvulkan, return 0 instead of dereferencing null map pointers.
+    (defn fv-matvec ()
+        (if (eq (c_dlsym "libvulkan.so" "vkCreateInstance") 0) 0
+          (fv-check (fv-go (c_alloc 16384)))))
+
+    (fv-matvec))
