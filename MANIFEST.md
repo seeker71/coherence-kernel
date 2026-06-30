@@ -242,7 +242,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       Arabic is the second live Unicode-script audio anchor (`en<->ar`: 12/12 oracle-ok, 12/12 native, 100% total,
       A->B 100%, B->A 100%) using the local Majed voice.
       The Indonesian side reuses the installed Damayanti voice for train/eval, both at the macOS voice boundary.
-      Open dictation and native neural ASR/TTS remain pending.
+      Open transcript receipt support now lives separately; native open ASR and native neural ASR/TTS remain pending.
 - [x] **Unicode transcript token lane added.** `observe/stt-wer.fk` now owns shared `sw-tokens`: ASCII
       punctuation still lowercases/splits, accented Latin stays inside words, CJK ideographs become per-character
       tokens, and Arabic words stay grouped while Arabic/CJK punctuation is dropped as delimiters. The macOS
@@ -253,10 +253,19 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
-      selects the ASR -> neutral Form -> formant route. `small-transformer-nl` remains trainable but not
+      selects the ASR -> neutral Form -> formant route. `open-dictation-transcript` is now a live-observed ASR
+      receipt candidate, but does not displace the closed-set prototype until a native open-ASR candidate emits
+      local transcript text. `small-transformer-nl` remains trainable but not
       live-selected; `diffusion-codec-speech` is present but not ready because no Form-native executable kernel
       receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; the band
-      returns `4095`.
+      returns `8191`.
+- [x] **Open dictation transcript receipt added.** `learn/open-dictation-transcript-learning.fk` admits arbitrary
+      utterance rows with consentful side-channel truth, local free oracle transcripts, optional native transcript
+      candidates, Unicode token WER, and choice/cut/fail/undo/timeout promotion gates (`16383`). The macOS carrier
+      `presence/macos-open-dictation-carrier.fk` renders `Open speech flows.` locally with `say`, lowers it with
+      `ffmpeg`, transcribes it with local Whisper on Apple Metal, and returns live verdict `511` with field code
+      `440000100`: four oracle successes, zero native successes, oracle WER `0`, native WER `100`. This removes
+      the closed prompt-ID assumption from the receipt path; it does not claim native open ASR yet.
 - [x] **The offer/ack control core** — `control/offer-ack-core.fk`: the five Form control primitives (fail, stop,
       choice, exceptions, async) as thin expressions over ONE mechanism (`oac-kind` + `oac-offer`), derived from
       axiom-5. Four-way-proven in the origin (1023); re-proof here pends the Form-native eval lane (the C `--src`
@@ -284,9 +293,10 @@ calibration cells, host-exec, http-client, form-asm). What remains is the **mind
    claim. The speaking *floor* (grounded composition) stands; the frontier voice waits on this. A multi-week climb
    with its own receipts. (`HOMECOMING.md`.)
 2. **The voice's sound (ASR + acoustic model + vocoder).** Prosody, phrasing, emphasis, g2p, a source-filter
-   formant vocoder, closed-set prompt recognition, loopback carrier receipts, and recipe A/B promotion now stand
-   as native measured cells (`presence/`, `observe/`, `learn/`). The natural acoustic model/neural vocoder, open ASR
-   decode, and perception receipt that rendered uncertainty tracks real calibration remain the pending carrier.
+   formant vocoder, closed-set prompt recognition, loopback carrier receipts, open transcript receipts, and recipe
+   A/B promotion now stand as native measured cells (`presence/`, `observe/`, `learn/`). The natural acoustic
+   model/neural vocoder, native open ASR decode, and perception receipt that rendered uncertainty tracks real
+   calibration remain the pending carrier.
    (`presence/voice-roadmap.md`.)
 3. **Cognition at native speed — the JIT in the live path.** The hot LLM/RAG cells crystallize through fkwu's
    self-JIT / form-asm lowering live, not tree-walked. The asm exists; wiring it under live cognition remains.
