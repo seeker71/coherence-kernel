@@ -196,7 +196,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       sweep's stable decoded-token acoustic summary with the seven live Metal pair anchors (`32767`). It routes
       `metal-witnessed-audio2audio-acoustic`, selects `native-audio2audio-acoustic-vocoder` for the scoped
       decoded-token audio2audio arm, keeps `live-open-mic-pending` and neural Metal pending, and moves the speech
-      selector forward; the later live open-ASR source authority row moves the current selector to `67108863`.
+      selector forward; later ASR source rows move the current selector to `134217727`.
 - [x] **Speech loopback promotion added.** `learn/speech-loopback-promotion.fk` turns native loopback receipts into
       rolling authority windows (`2047`): clean long windows promote native; short, failed, timed-out, undone, or
       regressing windows route back to oracle.
@@ -303,10 +303,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; after the live
       Sema formant WER-100 miss, it also exposes the voice miss action and the concrete
       `text-conditioned-acoustic-vocoder` Form kernel plus the native audio2audio acoustic bridge, multilocale
-      audio2audio acoustic sweep, Metal acoustic authority row, and live open-ASR source authority training row.
+      audio2audio acoustic sweep, Metal acoustic authority row, live open-ASR source authority training row, and
+      multilocale segmented source-ASR window candidate.
       The audio2audio arm now selects
       `native-audio2audio-acoustic-vocoder` for the decoded-token, metal-witnessed scope. The band returns
-      `67108863`.
+      `134217727`.
 - [x] **Open dictation transcript receipt added.** `learn/open-dictation-transcript-learning.fk` admits arbitrary
       utterance rows with consentful side-channel truth, local free oracle transcripts, optional native transcript
       candidates, Unicode token WER, and choice/cut/fail/undo/timeout promotion gates (`16383`). The macOS carrier
@@ -318,7 +319,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       open-dictation miss into an executable source-ASR training action (`32767`): oracle WER `0` plus native WER
       `100` routes `train-live-segmented-open-asr-source` toward `native-segmented-acoustic-learning`, while
       authority remains `oracle-guide` until a local native transcript candidate wins. The speech selector now
-      exposes this live Metal training path and returns `67108863`.
+      exposes this live Metal training path; the later multilocale source window moves the selector to `134217727`.
 - [x] **Speech token stream + native CTC open-ASR candidate added.** `observe/speech-token-stream.fk` makes the
       side-channel stream explicit: words plus `<NODE>`, `<SOURCE>`, `<CHANNEL>`, `<INTERFACE>`, `<CHOICE>`,
       `<FAIL>`, `<UNDO>`, `<TIMEOUT>`, `<CUT>`, `<OBSERVE>`, `<GRADE>`, `<FEEDBACK>`, `<REPAIR>`, `<RECEIPT>`,
@@ -337,6 +338,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       target-locale tokens through neutral meaning. The focused band returns `32767` over `sa<->la`: bad oracle,
       timeout, or missing consent blocks credit, and reciprocal directions are required before the native route
       opens. Neural ASR/TTS and live mic streaming remain pending.
+- [x] **Multilocale segmented source-ASR window added.** `learn/multilocale-segmented-source-window.fk` lifts the
+      segmented source learner across `sa<->la`, `en<->zh`, and `ar<->en` (`32767`): six local-oracle samples train
+      source-token prototypes from native score `0` to `6/6`, all three reciprocal pairs become ready, and the
+      route shifts to `native-multilocale-segmented-source` only inside that witnessed window. The speech selector
+      now exposes this ASR candidate without displacing `prototype-asr` and returns `134217727`.
 - [x] **Speech-token training source policy added.** `learn/speech-token-training-source.fk` separates token label
       provenance into local oracle, consentful corpus, and internal-state inference rows (`32767`). Local oracle
       and corpus rows may train transcript words and metadata; internal state can train confidence, warmth,
