@@ -33,8 +33,9 @@ receipt — *c-bootstrap fkwu on metal, no go/rust/clang/bash/python in the runt
   makes the kernel **self-describing and self-building** — not the whole app KB.
 - The **substrate and stack, 100% Form-native (Go/Rust/TS-free)**. The local-file substrate is *already* proven
   four-way and lives here (`substrate/` and `form/form-stdlib/` — `form-fs` 14-bit, `storage-port`,
-  `resource-port` 7-bit, `host-kernel-carrier`, `cell-type` — the eval-level type/contract system: a type IS
-  the offered interface, a mismatch acks the first-class nothing — plus `tool-channel` and `auth-port`). The
+  `resource-port` 7-bit, `host-kernel-carrier`, `host-os-membrane`, `cell-type` — the eval-level type/contract
+  system: a type IS the offered interface, a mismatch acks the first-class nothing — plus `tool-channel` and
+  `auth-port`). The
   HTTP body is here in both its historical top-level room (`http/`) and its stdlib path
   (`form/form-stdlib/http-*`, `kernel-http`, `http-layer`, `http-socket`, `room-carrier-http`), with witness
   bands under `form/form-stdlib/tests/`. `fkwu` owns the native HTTP/socket floor (`http_get`, `sock_request`,
@@ -110,7 +111,8 @@ carry no bash or python by their nature (`.c` / `.fk` / `.form` / `.go` / `.rs` 
 
 The one allowed seed is a **single `cc` command** that compiles `runtime/fkwu-uni.c` into the
 c-bootstrap `fkwu` binary — a documented one-liner, not a script in the tree. The fresh-checkout witness lives
-in `BOOTSTRAP.md`: build `fkwu`, then run `./fkwu --src` on the real body cell
+in `BOOTSTRAP.md`: build `fkwu`, run the direct-source bootstrap cells `bootstrap/ground.fk` (`42`) and
+`bootstrap/ground-recursive.fk 10` (`55`), then run `./fkwu --src` on the real body cell
 `observe/native-vs-rented.fk` and get `11111`. No flattened `form-eval-cli-loop.tbl` seed is required for
 grounding. After that, `fkwu` exists and **`fsh` orchestrates everything** (flatten, run, four-way validate) on
 the native runtime as that shell surface stands. Go/Rust/TS walker builds are likewise invoked from `fsh` via
@@ -128,8 +130,15 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       *stands*: fkwu reads a source file and runs it (witnessed). **Flatten is optional speed**, off the critical path.
       The "flatten decider" that framed the restart was not cleaned — it was dissolved by taking flatten off the path.
 - [x] **Fresh checkout grounding stands.** `cc -O2 -o fkwu runtime/fkwu-uni.c` plus `./fkwu --src` over
+      `bootstrap/ground.fk` witnesses `42`, `bootstrap/ground-recursive.fk 10` witnesses `55`, and
       `observe/native-vs-rented.fk` with `(native-vs-rented-check)` witnesses `11111`; no flattened source-runner
       table seed is part of the grounding bootstrap.
+- [x] **Host OS generic membrane added.** `form/form-stdlib/host-os-membrane.fk` makes platform support,
+      device-metal evidence, host-resource doors, pending concrete carriers, and C-seed shrink state inspectable
+      as Form data. The band returns `8191`. macOS arm64, Windows amd64, and Android arm64 are marked
+      metal/direct-source observed; Windows arm64 is a named target
+      awaiting first metal receipt. `runtime/fkwu-uni.c` also gained the bounded `input_byte` EOF guard required
+      by the Android table-loop receipt, with the destination still `form-owned-staged-input`.
 - [x] **Minimal Go/Rust/TS walkers home + verified four-way** (`walkers/{go,rust,ts}` — 1369 / 928 / 1475 lines vs
       the origin kernels' ~15k / 19.5k / 35.8k). Independent parse+eval of the pure-recipe surface; JIT, server,
       host-io, model code dropped. Each shown to land on fkwu's verdicts; live witness: a pure recipe → all three → 42.
@@ -172,6 +181,52 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech loopback recipe A/B added.** `learn/speech-loopback-recipe-ab.fk` compares incumbent/challenger
       TTS/ASR recipe windows over measured carrier receipts (`2047`): challenger cutover requires native route plus
       better native score or lower latency; fail, timeout, undo, short windows, or cloud/control debt keep the incumbent.
+- [x] **Speech loopback carrier run added.** `presence/speech-loopback-carrier-run.fk` makes the host carrier's
+      render/capture/oracle/readiness facts into one Form-owned run row. It gates Android/macOS/Windows carrier
+      facts through the host membrane, lowers native loopback into carrier receipts (`511`), and feeds
+      carrier-gated recipe A/B (`2047`). Both new witnesses ran locally and on Android phone metal; concrete
+      AAudio/CoreAudio/WASAPI capture still owes a real audio receipt.
+- [x] **Android end-to-end capture learning receipt added.** `learn/speech-loopback-capture-learning.fk` consumes
+      real on-device AAudio render/capture facts, proves loopback envelope evidence, moves the closed-prompt
+      native model toward the local oracle label, improves WER from untrained to oracle, and routes native over a
+      clean learned window. The band returns `8191`, and the same Form check returned `8191` on Android phone
+      metal from measured capture facts: 23,200 frames, nonzero audio, loopback score `446225`, and no retained
+      raw audio.
+- [x] **Bidirectional locale roundtrip guide added.** `learn/bidirectional-locale-roundtrip.fk` makes the
+      transcript/translation side channel reciprocal: A->B, B->A, A->A, and B->B must all improve before native
+      route trust expands. One-way progress is not punished; it asks for the return path (`oracle-guide`). The
+      band returns `2047`.
+- [x] **Mac metal reciprocal audio-locale training crossed 50%.** `learn/audio-locale-native-training.fk` admits
+      reciprocal audio samples, local-oracle WER, oracle-valid prototype learning, and native route gating at a
+      requested floor. The band returns `8191`. The Form-owned macOS carrier
+      `presence/macos-speech-roundtrip-carrier.fk` invokes local `say`, `ffmpeg`, and
+      `whisper.cpp-large-v3-turbo` through `host-exec` on Apple Metal over Coherence Network `en<->de` strings;
+      it moved native success from `0%` pretrain to `83%` post-training (`A->B 66%`, `B->A 100%`, live verdict
+      `511`, metric code `121010836700`).
+      Wav byte extraction is now Form-owned through `read_file` and `str_byte_at`; the carrier passes wav paths
+      and the Form body extracts the integer audio features before routing.
+- [x] **Coherence Network self-corpus added.** `learn/coherence-network-self-corpus.fk` records the translated
+      Coherence Network web/CLI message bundles as consentful training material: `en`, `de`, `es`, `fr`, `id`,
+      and `pt-br` are ready; `zh`, `ar`, and `la` are backfill targets until translated bundles land. Observed
+      counts are 2064 shared key paths and 10320 EN-to-other pairs; the band returns `8191`.
+- [x] **Diverse locale pairing guide added.** `learn/diverse-locale-pairing.fk` chooses far-apart A/B locale
+      pairs for the reciprocal loop from the self-corpus-ready rows; Chinese, Arabic, and Latin are named as
+      backfill targets, and specific Indigenous rows are not marked ready until consentful corpora exist. Seeded
+      selection is deterministic for receipts, randomizable by a carrier, and the band returns `2047`.
+- [x] **Sanskrit baseline + multilocale NL/audio pipeline added.** `learn/sanskrit-locale-baseline.fk` records
+      romanized Sanskrit seed lines with ready locale renderings for `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`,
+      and `la`; `zh` and `ar` stay backfill targets. `learn/multilocale-nl-audio-pipeline.fk` proves
+      `text(A) -> neutral Form meaning -> text(B)` and
+      `audio(A) features -> neutral Form meaning -> audio(B) target` over reciprocal `en<->de`, `en<->es`,
+      `fr<->id`, and `sa<->la` loops. The baseline band returns `2047`; the pipeline band returns `8191`.
+      This is closed-set Form learning, not open ASR/translation.
+- [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
+      choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
+      `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
+      selects the ASR -> neutral Form -> formant route. `small-transformer-nl` remains trainable but not
+      live-selected; `diffusion-codec-speech` is present but not ready because no Form-native executable kernel
+      receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; the band
+      returns `4095`.
 - [x] **The offer/ack control core** — `control/offer-ack-core.fk`: the five Form control primitives (fail, stop,
       choice, exceptions, async) as thin expressions over ONE mechanism (`oac-kind` + `oac-offer`), derived from
       axiom-5. Four-way-proven in the origin (1023); re-proof here pends the Form-native eval lane (the C `--src`

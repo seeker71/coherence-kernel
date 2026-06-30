@@ -31,6 +31,42 @@ Recipe A/B is now native too: `speech-loopback-recipe-ab` 2047 groups those meas
 cuts from incumbent to challenger only when the challenger already routes native and wins on measured score or
 latency. Explicit fail, timeout, and undo controls keep the incumbent.
 
+The host carrier now has a Form-owned run row: `speech-loopback-carrier-run` lowers platform readiness, local
+render/capture/oracle facts, native loopback, and recipe A/B into one auditable record. The receipt half returns
+511; the carrier-gated A/B half returns 2047. Both were witnessed on local metal and Android phone metal. This is
+still not real AAudio/CoreAudio/WASAPI capture; it is the exact row those thin carriers must emit.
+
+Android now has the first real capture-learning receipt: AAudio rendered a short local prompt, AAudio captured
+23,200 microphone frames, envelope evidence showed the prompt in the capture, and Android `fkwu` returned 8191
+from `speech-loopback-capture-learning`. The learned closed-prompt route moves from an untrained native transcript
+toward the local oracle label and routes native over a clean window. This is still closed-set, not open dictation.
+
+Cross-locale learning should grow reciprocal trust: `bidirectional-locale-roundtrip` 2047 asks for A->B, B->A,
+A->A, and B->B to improve before route trust expands. If one direction leads, it routes `oracle-guide` and asks
+for the return path instead of pretending the missing side failed.
+
+Mac metal now has the first reciprocal audio-locale training receipt: `audio-locale-native-training` 8191 defines
+the Form-side law, and `presence/macos-speech-roundtrip-carrier.fk` now owns the macOS loop. It invokes local
+`say`, `ffmpeg`, and `whisper.cpp-large-v3-turbo` through Form `host-exec` on Apple Metal for three Coherence
+Network `en<->de` prompt pairs. The native nearest-prototype model moved from 0% pretrain success to 83%
+post-training success, with A->B at 66% and B->A at 100%; the live Form verdict was 511. Wav byte extraction is
+in Form (`read_file` + `str_byte_at`), and the carrier passes wav paths rather than feature arrays. This is not
+open ASR: it is oracle-valid prototype learning over a closed prompt corpus.
+
+Pair selection should stay diverse and grounded in our own corpus first: `coherence-network-self-corpus` 8191
+observes the translated Coherence Network web/CLI message bundles (`en`, `de`, `es`, `fr`, `id`, `pt-br`) as
+ready training material, with 2064 shared key paths and 10320 EN-to-other pairs. `diverse-locale-pairing` 2047
+then samples far-apart ready pairs from those rows. Chinese, Arabic, and Latin are backfill targets until those
+bundles exist; Indigenous rows are specific (`nv`, `chr`) and stay pending until consentful corpora exist.
+
+The model choice is now executable rather than conversational: `sanskrit-locale-baseline` 2047 provides a small
+romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, and `la`; `multilocale-nl-audio-pipeline`
+8191 proves closed-set NL->neutral Form->NL and audio-feature->neutral Form->audio-target loops over reciprocal
+`en<->de`, `en<->es`, `fr<->id`, and `sa<->la`. `speech-model-auto-selection` 4095 selects today's native arms:
+prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, and the deterministic
+formant vocoder for TTS/audio target rendering. The transformer path is trainable but not live-selected for speech
+yet; diffusion/codec speech is a named candidate only, pending a Form-native executable kernel and receipt.
+
 ## What the siblings caught — missing first-class layers (the roadmap)
 
 - **text-normalize + lexical/stress, BEFORE g2p.** Numbers, acronyms, punctuation, heteronyms, loanwords,
