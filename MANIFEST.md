@@ -182,8 +182,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
-      whether authority remains `oracle-guide` or can promote `native-acoustic-vocoder`. The selector now points at
-      this concrete Form kernel and returns `4194303`.
+      whether authority remains `oracle-guide` or can promote `native-acoustic-vocoder`.
+- [x] **Native audio2audio acoustic bridge added.** `learn/native-audio2audio-acoustic-bridge.fk` composes decoded
+      source-audio tokens with the Sanskrit/locale-neutral baseline and the text-conditioned vocoder (`32767`):
+      `sa<->la` source token rows route to target-locale acoustic frames with local-oracle transcript gates,
+      reciprocal direction checks, voice-side metadata preservation, and native/guide authority receipts. The speech
+      selector now sees this concrete audio2audio candidate and returns `8388607`.
 - [x] **Speech loopback promotion added.** `learn/speech-loopback-promotion.fk` turns native loopback receipts into
       rolling authority windows (`2047`): clean long windows promote native; short, failed, timed-out, undone, or
       regressing windows route back to oracle.
@@ -289,7 +293,8 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       live-selected; `diffusion-codec-speech` is present but not ready because no Form-native executable kernel
       receipt exists yet. The selector composes observed auto-learning and reversible A/B controls; after the live
       Sema formant WER-100 miss, it also exposes the voice miss action and the concrete
-      `text-conditioned-acoustic-vocoder` Form kernel. The band returns `4194303`.
+      `text-conditioned-acoustic-vocoder` Form kernel plus the native audio2audio acoustic bridge. The band returns
+      `8388607`.
 - [x] **Open dictation transcript receipt added.** `learn/open-dictation-transcript-learning.fk` admits arbitrary
       utterance rows with consentful side-channel truth, local free oracle transcripts, optional native transcript
       candidates, Unicode token WER, and choice/cut/fail/undo/timeout promotion gates (`16383`). The macOS carrier
