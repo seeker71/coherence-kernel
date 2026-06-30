@@ -1,0 +1,287 @@
+; jit-replacement-runtime-integration.fk - replacement carrier runtime handoff.
+;
+; This is the install/call lifecycle contract that sits between the hot-recipe
+; native witness sweep and rung 20. It is Form-only: no C lowering, no host
+; function pointer call. It proves the replacement carrier must carry the
+; Form-emitted byte payload, W^X slot, rooted call frame, source-attributed
+; exception stack, guarded deopt, invalidation rewalk, stale melt, and parity.
+
+(do
+    (defn jrri-native () 1)
+    (defn jrri-deopt () 2)
+    (defn jrri-exception () 3)
+    (defn jrri-rewalk () 4)
+    (defn jrri-melt () 5)
+    (defn jrri-reject () 6)
+    (defn jrri-pending () 7)
+
+    (defn jrri-ok () 1)
+    (defn jrri-unavailable () 2)
+    (defn jrri-mismatch () 3)
+
+    ; receipt = ("replacement-runtime-receipt" name total expected source maps)
+    (defn jrri-receipt (name total expected source maps)
+        (list "replacement-runtime-receipt" name total expected source maps))
+    (defn jrri-receipt? (r) (if (eq (len r) 6) (str_eq (nth r 0) "replacement-runtime-receipt") 0))
+    (defn jrri-total (r) (nth r 2))
+    (defn jrri-expected (r) (nth r 3))
+    (defn jrri-source (r) (nth r 4))
+    (defn jrri-maps (r) (nth r 5))
+
+    (defn jrri-receipt-ok? (r)
+        (if (eq (jrri-receipt? r) 1)
+            (if (eq (jrri-total r) (jrri-expected r))
+                (if (eq (jrri-source r) 1)
+                    (if (eq (jrri-maps r) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jrri-native-witness () (jrri-receipt "native-witness-sweep" 4194303 4194303 1 1))
+    (defn jrri-bootstrap-exit () (jrri-receipt "bootstrap-exit-carrier" 1048575 1048575 1 1))
+    (defn jrri-host-exception () (jrri-receipt "host-exception-bridge" 524287 524287 1 1))
+    (defn jrri-runtime-stack () (jrri-receipt "runtime-stack-attribution" 1023 1023 1 1))
+    (defn jrri-byte-ingress () (jrri-receipt "byte-ingress-args" 2097151 2097151 1 1))
+    (defn jrri-loader () (jrri-receipt "loader-contract" 16383 16383 1 1))
+    (defn jrri-bad-native-witness () (jrri-receipt "native-witness-sweep" 4194302 4194303 1 1))
+    (defn jrri-no-source-receipt () (jrri-receipt "host-exception-bridge" 524287 524287 0 1))
+    (defn jrri-no-map-receipt () (jrri-receipt "bootstrap-exit-carrier" 1048575 1048575 1 0))
+
+    (defn jrri-receipts-ok? ()
+        (if (eq (jrri-receipt-ok? (jrri-native-witness)) 1)
+            (if (eq (jrri-receipt-ok? (jrri-bootstrap-exit)) 1)
+                (if (eq (jrri-receipt-ok? (jrri-host-exception)) 1)
+                    (if (eq (jrri-receipt-ok? (jrri-runtime-stack)) 1)
+                        (if (eq (jrri-receipt-ok? (jrri-byte-ingress)) 1)
+                            (if (eq (jrri-receipt-ok? (jrri-loader)) 1) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    ; payload = ("replacement-payload" owner bytes byte-count abi args source guard fault deopt root generation)
+    (defn jrri-payload (owner bytes byte-count abi args source guard fault deopt root generation)
+        (list "replacement-payload" owner bytes byte-count abi args source guard fault deopt root generation))
+    (defn jrri-payload? (p) (if (eq (len p) 12) (str_eq (nth p 0) "replacement-payload") 0))
+    (defn jrri-owner (p) (nth p 1))
+    (defn jrri-bytes (p) (nth p 2))
+    (defn jrri-byte-count (p) (nth p 3))
+    (defn jrri-abi (p) (nth p 4))
+    (defn jrri-args (p) (nth p 5))
+    (defn jrri-source-map (p) (nth p 6))
+    (defn jrri-guard-map (p) (nth p 7))
+    (defn jrri-fault-map (p) (nth p 8))
+    (defn jrri-deopt-map (p) (nth p 9))
+    (defn jrri-root-map (p) (nth p 10))
+    (defn jrri-payload-generation (p) (nth p 11))
+
+    (defn jrri-byte? (b) (if (ge b 0) (if (lt b 256) 1 0) 0))
+    (defn jrri-byte-list? (xs)
+        (if (eq (len xs) 0)
+            1
+            (if (eq (jrri-byte? (head xs)) 1) (jrri-byte-list? (tail xs)) 0)))
+    (defn jrri-tagged-args? (xs)
+        (if (eq (len xs) 0)
+            1
+            (if (eq (mod (head xs) 2) 0) (jrri-tagged-args? (tail xs)) 0)))
+    (defn jrri-abi-ok? (p)
+        (if (str_eq (jrri-abi p) "sysv") 1 (if (str_eq (jrri-abi p) "win64") 1 0)))
+
+    (defn jrri-payload-ready? (p)
+        (if (eq (jrri-payload? p) 1)
+            (if (eq (jrri-receipts-ok?) 1)
+                (if (str_eq (jrri-owner p) "form-backend")
+                    (if (gt (len (jrri-bytes p)) 0)
+                        (if (eq (jrri-byte-count p) (len (jrri-bytes p)))
+                            (if (eq (jrri-byte-list? (jrri-bytes p)) 1)
+                                (if (eq (jrri-abi-ok? p) 1)
+                                    (if (eq (jrri-tagged-args? (jrri-args p)) 1)
+                                        (if (eq (jrri-source-map p) 1)
+                                            (if (eq (jrri-guard-map p) 1)
+                                                (if (eq (jrri-fault-map p) 1)
+                                                    (if (eq (jrri-deopt-map p) 1)
+                                                        (if (eq (jrri-root-map p) 1)
+                                                            (if (gt (jrri-payload-generation p) 0) 1 0)
+                                                            0)
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    ; slot = ("replacement-slot" replacement no-c-growth wx executable writable sealed installed valid generation)
+    (defn jrri-slot (replacement no-c-growth wx executable writable sealed installed valid generation)
+        (list "replacement-slot" replacement no-c-growth wx executable writable sealed installed valid generation))
+    (defn jrri-slot? (s) (if (eq (len s) 10) (str_eq (nth s 0) "replacement-slot") 0))
+    (defn jrri-replacement (s) (nth s 1))
+    (defn jrri-no-c-growth (s) (nth s 2))
+    (defn jrri-wx (s) (nth s 3))
+    (defn jrri-executable (s) (nth s 4))
+    (defn jrri-writable (s) (nth s 5))
+    (defn jrri-sealed (s) (nth s 6))
+    (defn jrri-installed (s) (nth s 7))
+    (defn jrri-valid (s) (nth s 8))
+    (defn jrri-slot-generation (s) (nth s 9))
+
+    (defn jrri-slot-ready? (s)
+        (if (eq (jrri-slot? s) 1)
+            (if (eq (jrri-replacement s) 1)
+                (if (eq (jrri-no-c-growth s) 1)
+                    (if (eq (jrri-wx s) 1)
+                        (if (eq (jrri-executable s) 1)
+                            (if (eq (jrri-writable s) 0)
+                                (if (eq (jrri-sealed s) 1)
+                                    (if (eq (jrri-installed s) 1)
+                                        (if (eq (jrri-valid s) 1)
+                                            (if (gt (jrri-slot-generation s) 0) 1 0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    ; frame = ("replacement-frame" args roots stack source exception parity)
+    (defn jrri-frame (args roots stack source exception parity)
+        (list "replacement-frame" args roots stack source exception parity))
+    (defn jrri-frame? (f) (if (eq (len f) 7) (str_eq (nth f 0) "replacement-frame") 0))
+    (defn jrri-frame-args (f) (nth f 1))
+    (defn jrri-roots (f) (nth f 2))
+    (defn jrri-stack (f) (nth f 3))
+    (defn jrri-frame-source (f) (nth f 4))
+    (defn jrri-exception-map (f) (nth f 5))
+    (defn jrri-frame-parity (f) (nth f 6))
+
+    (defn jrri-frame-ready? (f)
+        (if (eq (jrri-frame? f) 1)
+            (if (gt (jrri-frame-args f) 0)
+                (if (eq (jrri-roots f) 1)
+                    (if (eq (jrri-stack f) 1)
+                        (if (eq (jrri-frame-source f) 1)
+                            (if (eq (jrri-exception-map f) 1)
+                                (if (eq (jrri-frame-parity f) 1) 1 0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jrri-ready? (p s f)
+        (if (eq (jrri-payload-ready? p) 1)
+            (if (eq (jrri-slot-ready? s) 1)
+                (if (eq (jrri-frame-ready? f) 1) 1 0)
+                0)
+            0))
+
+    (defn jrri-ready-route (status guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq status (jrri-mismatch))
+            (jrri-reject)
+            (if (eq status (jrri-unavailable))
+                (jrri-deopt)
+                (if (eq stale 1)
+                    (jrri-melt)
+                    (if (eq invalidated 1)
+                        (jrri-rewalk)
+                        (if (eq guard-ok 1)
+                            (if (eq runtime-ok 1)
+                                (if (eq parity-ok 1) (jrri-native) (jrri-deopt))
+                                (jrri-exception))
+                            (jrri-deopt)))))))
+
+    (defn jrri-action (p s f status guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (jrri-no-c-growth s) 0)
+            (jrri-reject)
+            (if (eq (jrri-ready? p s f) 1)
+                (jrri-ready-route status guard-ok runtime-ok invalidated parity-ok stale)
+                (jrri-pending))))
+
+    (defn jrri-good-bytes () (list 72 139 7 72 131 192 2 195))
+    (defn jrri-good-payload () (jrri-payload "form-backend" (jrri-good-bytes) 8 "sysv" (list 82) 1 1 1 1 1 1))
+    (defn jrri-bad-count () (jrri-payload "form-backend" (jrri-good-bytes) 7 "sysv" (list 82) 1 1 1 1 1 1))
+    (defn jrri-bad-byte () (jrri-payload "form-backend" (list 72 300 195) 3 "sysv" (list 82) 1 1 1 1 1 1))
+    (defn jrri-foreign-payload () (jrri-payload "c-lowering" (jrri-good-bytes) 8 "sysv" (list 82) 1 1 1 1 1 1))
+    (defn jrri-no-fault-payload () (jrri-payload "form-backend" (jrri-good-bytes) 8 "sysv" (list 82) 1 1 0 1 1 1))
+    (defn jrri-untagged-payload () (jrri-payload "form-backend" (jrri-good-bytes) 8 "sysv" (list 41) 1 1 1 1 1 1))
+    (defn jrri-good-slot () (jrri-slot 1 1 1 1 0 1 1 1 1))
+    (defn jrri-pending-slot () (jrri-slot 1 1 1 0 0 1 0 1 1))
+    (defn jrri-c-growth-slot () (jrri-slot 0 0 1 1 0 1 1 1 1))
+    (defn jrri-writable-slot () (jrri-slot 1 1 1 1 1 1 1 1 1))
+    (defn jrri-stale-slot () (jrri-slot 1 1 1 1 0 1 1 0 1))
+    (defn jrri-good-frame () (jrri-frame 1 1 1 1 1 1))
+    (defn jrri-no-stack-frame () (jrri-frame 1 1 0 1 1 1))
+    (defn jrri-no-exception-frame () (jrri-frame 1 1 1 1 0 1))
+
+    (defn jrri-bit (cond bit) (if cond bit 0))
+    (defn jrri-front-bits ()
+        (add
+            (jrri-bit (eq (jrri-receipts-ok?) 1) 1)
+            (add
+                (jrri-bit (eq (jrri-payload-ready? (jrri-good-payload)) 1) 2)
+                (add
+                    (jrri-bit (eq (jrri-slot-ready? (jrri-good-slot)) 1) 4)
+                    (add
+                        (jrri-bit (eq (jrri-frame-ready? (jrri-good-frame)) 1) 8)
+                        (jrri-bit (eq (jrri-ready? (jrri-good-payload) (jrri-good-slot) (jrri-good-frame)) 1) 16))))))
+
+    (defn jrri-route-bits ()
+        (add
+            (jrri-bit (eq (jrri-action (jrri-good-payload) (jrri-pending-slot) (jrri-good-frame) (jrri-ok) 1 1 0 1 0) (jrri-pending)) 32)
+            (add
+                (jrri-bit (eq (jrri-action (jrri-good-payload) (jrri-good-slot) (jrri-good-frame) (jrri-ok) 1 1 0 1 0) (jrri-native)) 64)
+                (add
+                    (jrri-bit (eq (jrri-action (jrri-good-payload) (jrri-good-slot) (jrri-good-frame) (jrri-ok) 0 1 0 1 0) (jrri-deopt)) 128)
+                    (add
+                        (jrri-bit (eq (jrri-action (jrri-good-payload) (jrri-good-slot) (jrri-good-frame) (jrri-ok) 1 0 0 1 0) (jrri-exception)) 256)
+                        (add
+                            (jrri-bit (eq (jrri-action (jrri-good-payload) (jrri-good-slot) (jrri-good-frame) (jrri-ok) 1 1 1 1 0) (jrri-rewalk)) 512)
+                            (add
+                                (jrri-bit (eq (jrri-action (jrri-good-payload) (jrri-good-slot) (jrri-good-frame) (jrri-ok) 1 1 0 0 0) (jrri-deopt)) 1024)
+                                (add
+                                    (jrri-bit (eq (jrri-action (jrri-good-payload) (jrri-good-slot) (jrri-good-frame) (jrri-ok) 1 1 0 1 1) (jrri-melt)) 2048)
+                                    (add
+                                        (jrri-bit (eq (jrri-action (jrri-good-payload) (jrri-good-slot) (jrri-good-frame) (jrri-unavailable) 1 1 0 1 0) (jrri-deopt)) 4096)
+                                        (jrri-bit (eq (jrri-action (jrri-good-payload) (jrri-good-slot) (jrri-good-frame) (jrri-mismatch) 1 1 0 1 0) (jrri-reject)) 8192)))))))))
+
+    (defn jrri-reject-bits ()
+        (add
+            (jrri-bit (eq (jrri-action (jrri-good-payload) (jrri-c-growth-slot) (jrri-good-frame) (jrri-ok) 1 1 0 1 0) (jrri-reject)) 16384)
+            (add
+                (jrri-bit (eq (jrri-payload-ready? (jrri-bad-count)) 0) 32768)
+                (add
+                    (jrri-bit (eq (jrri-payload-ready? (jrri-bad-byte)) 0) 65536)
+                    (add
+                        (jrri-bit (eq (jrri-payload-ready? (jrri-foreign-payload)) 0) 131072)
+                        (add
+                            (jrri-bit (eq (jrri-payload-ready? (jrri-no-fault-payload)) 0) 262144)
+                            (add
+                                (jrri-bit (eq (jrri-payload-ready? (jrri-untagged-payload)) 0) 524288)
+                                (add
+                                    (jrri-bit (eq (jrri-slot-ready? (jrri-writable-slot)) 0) 1048576)
+                                    (add
+                                        (jrri-bit (eq (jrri-slot-ready? (jrri-stale-slot)) 0) 2097152)
+                                        (add
+                                            (jrri-bit (eq (jrri-frame-ready? (jrri-no-stack-frame)) 0) 4194304)
+                                            (add
+                                                (jrri-bit (eq (jrri-frame-ready? (jrri-no-exception-frame)) 0) 8388608)
+                                                (add
+                                                    (jrri-bit (eq (jrri-receipt-ok? (jrri-bad-native-witness)) 0) 16777216)
+                                                    (add
+                                                        (jrri-bit (eq (jrri-receipt-ok? (jrri-no-source-receipt)) 0) 33554432)
+                                                        (jrri-bit (eq (jrri-receipt-ok? (jrri-no-map-receipt)) 0) 67108864))))))))))))))
+
+    (defn jit-replacement-runtime-integration-check ()
+        (add (jrri-front-bits) (add (jrri-route-bits) (jrri-reject-bits))))
+
+    0)
