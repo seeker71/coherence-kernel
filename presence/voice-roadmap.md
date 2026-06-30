@@ -37,8 +37,8 @@ That miss now changes the algorithm instead of sitting as prose:
 `train-text-conditioned-acoustic-vocoder`, keeping authority on `oracle-guide` and naming the next trainable
 candidate. The recipe is g2p, phoneme timing, prosody contour, acoustic token emission, segmented acoustic
 learning, the Sema voice loop, and the same local-oracle WER bar. The selector's speech receipt now returns
-`67108863` with that action, the multilocale audio2audio sweep, the Metal acoustic authority row, and the
-live open-ASR source training action exposed.
+`134217727` with that action, the multilocale audio2audio sweep, the Metal acoustic authority row, the
+live open-ASR source training action, and the multilocale segmented source window exposed.
 
 The named candidate is now executable too: `text-conditioned-acoustic-vocoder` 32767 turns target tokens into
 G2P phones, shapes duration/pitch/amplitude from voice-side metadata, emits native source-filter frames, and
@@ -119,7 +119,7 @@ romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, 
 each pair's before/after NL rate, audio rate, route, and shifted flag, so the aggregate native route has per-pair
 witness rows. `speech-locale-learning-window` 16383 takes selected seed `2` into a numeric `sa<->la` observed
 window: all four lanes train from guided to native route code, clean controls plus A/B evidence promote the
-challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 67108863 selects today's native arms:
+challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 134217727 selects today's native arms:
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, `sema-voice-sample-loop`
 over the deterministic formant vocoder for TTS, and `native-audio2audio-acoustic-vocoder` for decoded-token,
 metal-witnessed audio-to-audio target rendering. The raw formant vocoder and Sema voice loop route remain lower
@@ -138,7 +138,10 @@ stream and lowers the transcript into the open-dictation gate. `acoustic-token-e
 oracle-aligned acoustic token prototypes and emits blank/nonblank CTC frames by Form-native L1 distance plus
 earned confidence. `segmented-acoustic-token-learning` 32767 now turns wav/envelope segments plus consentful
 local-oracle transcript tokens into learned source-token prototypes, then routes decoded `sa<->la` source speech
-through neutral meaning to target-locale tokens. `live-open-asr-source-authority` 32767 now turns the live
+through neutral meaning to target-locale tokens. `multilocale-segmented-source-window` 32767 lifts that path across
+`sa<->la`, `en<->zh`, and `ar<->en`: six local-oracle source rows train from native score 0 to 6/6, all three
+reciprocal pairs become ready, and AutoML sees the candidate without moving ASR authority away from `prototype-asr`.
+`live-open-asr-source-authority` 32767 now turns the live
 open-dictation WER gap into `train-live-segmented-open-asr-source`, keeping ASR authority on `oracle-guide`
 until a local native transcript wins. `speech-token-training-source` 32767 answers where those labels come
 from: local oracle and consentful corpus rows may teach words plus metadata; internal state may infer voice-side
