@@ -19,6 +19,13 @@ The next stone is now placed: `formant-vocoder` 511 renders inspectable source-f
 when confidence and WER pass. This is deliberately smaller than open dictation or natural TTS; it is the first
 route-shiftable native speech loop.
 
+The desired sound now has an executable target and taste loop: `sema-voice-sample-loop` 32767 names Sema's warm
+mid, rounded, grounded voice profile; renders candidate profiles through the native formant vocoder; scores local
+samples by target fit, listener preference, intelligibility, WER, and latency; and promotes a challenger only
+under clean local evidence. Low-confidence samples narrow pitch range and delay onset, so the honesty principle is
+audible in the generated candidates instead of left as prose. This is still a deterministic formant carrier and
+sample-selection loop, not a natural neural vocoder.
+
 The promotion window is now executable too: `speech-loopback-promotion` 2047 turns those single-sample loopback
 receipts into native/oracle authority over time. Native wins only after enough clean samples; fail, timeout, undo,
 or regression returns authority to the oracle.

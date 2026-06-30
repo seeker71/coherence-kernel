@@ -159,6 +159,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       waveform samples from phoneme frames (`511`), `observe/asr-prompt-id.fk` recognizes a closed prompt set from
       measured loopback features (`255`), and `presence/native-speech-loopback.fk` gates route shift by confidence
       and WER (`1023`). This is native closed-set speech, not open ASR or natural neural TTS.
+- [x] **Sema voice sample loop added.** `learn/sema-voice-sample-loop.fk` turns the desired sound into an
+      executable target and A/B receipt (`32767`): warm mid register, rounded/grounded formants, moderate cadence,
+      low breath, and honest confidence shaping. Local rendered samples are scored by target fit, listener
+      preference, intelligibility, WER, and latency; cloud, missing-audio, fail, timeout, or undo rows cannot
+      promote. This is the Form-native taste/improvement loop for generated samples, not a neural natural vocoder.
 - [x] **Speech loopback promotion added.** `learn/speech-loopback-promotion.fk` turns native loopback receipts into
       rolling authority windows (`2047`): clean long windows promote native; short, failed, timed-out, undone, or
       regressing windows route back to oracle.
@@ -319,8 +324,9 @@ calibration cells, host-exec, http-client, form-asm). What remains is the **mind
    claim. The speaking *floor* (grounded composition) stands; the frontier voice waits on this. A multi-week climb
    with its own receipts. (`HOMECOMING.md`.)
 2. **The voice's sound (ASR + acoustic model + vocoder).** Prosody, phrasing, emphasis, g2p, a source-filter
-   formant vocoder, closed-set prompt recognition, loopback carrier receipts, open transcript receipts, and recipe
-   A/B promotion now stand as native measured cells (`presence/`, `observe/`, `learn/`). The natural acoustic
+   formant vocoder, Sema's voice target/sample loop, closed-set prompt recognition, loopback carrier receipts,
+   open transcript receipts, and recipe A/B promotion now stand as native measured cells (`presence/`, `observe/`,
+   `learn/`). The natural acoustic
    model/neural vocoder, native open ASR decode, and perception receipt that rendered uncertainty tracks real
    calibration remain the pending carrier.
    (`presence/voice-roadmap.md`.)
