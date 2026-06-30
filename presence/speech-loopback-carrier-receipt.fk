@@ -1,0 +1,124 @@
+; speech-loopback-carrier-receipt.fk -- real local TTS/STT loopback measurement contract.
+;
+; The host carrier owns audio I/O: render locally, play/capture locally, run local
+; oracle STT/TTS, and pass only measured facts into the body. The body owns the
+; receipt law: local-only, audio-present, WER-scored, control-clean samples can
+; feed speech-loopback-promotion. Cloud or missing audio becomes control debt.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   learn/speech-loopback-promotion.fk
+
+(do
+    (defn slc-receipt (sample-id prompt-id text-hash audio-hash sample-rate channels
+                       tts-local stt-local truth oracle native native-conf latency-ms
+                       fail timeout undo)
+        (list "speech-loopback-carrier-receipt"
+              sample-id
+              prompt-id
+              text-hash
+              audio-hash
+              sample-rate
+              channels
+              tts-local
+              stt-local
+              truth
+              oracle
+              native
+              native-conf
+              latency-ms
+              fail
+              timeout
+              undo))
+
+    (defn slc-kind        (r) (nth r 0))
+    (defn slc-sample-id   (r) (nth r 1))
+    (defn slc-prompt-id   (r) (nth r 2))
+    (defn slc-text-hash   (r) (nth r 3))
+    (defn slc-audio-hash  (r) (nth r 4))
+    (defn slc-sample-rate (r) (nth r 5))
+    (defn slc-channels    (r) (nth r 6))
+    (defn slc-tts-local   (r) (nth r 7))
+    (defn slc-stt-local   (r) (nth r 8))
+    (defn slc-truth       (r) (nth r 9))
+    (defn slc-oracle      (r) (nth r 10))
+    (defn slc-native      (r) (nth r 11))
+    (defn slc-native-conf (r) (nth r 12))
+    (defn slc-latency-ms  (r) (nth r 13))
+    (defn slc-fail        (r) (nth r 14))
+    (defn slc-timeout     (r) (nth r 15))
+    (defn slc-undo        (r) (nth r 16))
+
+    (defn slc-local? (r)
+        (if (and (eq (slc-tts-local r) 1) (eq (slc-stt-local r) 1)) 1 0))
+
+    (defn slc-audio-present? (r)
+        (if (and (gt (slc-audio-hash r) 0)
+                 (and (gt (slc-sample-rate r) 0) (gt (slc-channels r) 0))) 1 0))
+
+    (defn slc-valid? (r)
+        (if (and (eq (slc-local? r) 1) (eq (slc-audio-present? r) 1)) 1 0))
+
+    (defn slc-control-clean? (r)
+        (if (eq (add (add (slc-fail r) (slc-timeout r)) (slc-undo r)) 0) 1 0))
+
+    (defn slc-effective-fail (r)
+        (if (or (eq (slc-fail r) 1) (eq (slc-valid? r) 0)) 1 0))
+
+    (defn slc-oracle-wer (r) (sw-wer (slc-oracle r) (slc-truth r)))
+    (defn slc-native-wer (r) (sw-wer (slc-native r) (slc-truth r)))
+
+    (defn slc-oracle-success? (r max-wer)
+        (if (and (eq (slc-valid? r) 1)
+                 (and (eq (slc-control-clean? r) 1)
+                      (le (slc-oracle-wer r) max-wer))) 1 0))
+
+    (defn slc-native-success? (r max-wer min-conf max-latency)
+        (if (and (eq (slc-valid? r) 1)
+                 (and (eq (slc-control-clean? r) 1)
+                      (and (le (slc-native-wer r) max-wer)
+                           (and (ge (slc-native-conf r) min-conf)
+                                (le (slc-latency-ms r) max-latency))))) 1 0))
+
+    (defn slc-to-promotion-sample (r max-wer min-conf max-latency)
+        (slp-sample
+            (slc-native-success? r max-wer min-conf max-latency)
+            (slc-oracle-success? r max-wer)
+            (slc-effective-fail r)
+            (slc-timeout r)
+            (slc-undo r)))
+
+    (defn slc-window-samples (receipts max-wer min-conf max-latency)
+        (if (eq (len receipts) 0) (empty)
+            (cons (slc-to-promotion-sample (head receipts) max-wer min-conf max-latency)
+                  (slc-window-samples (tail receipts) max-wer min-conf max-latency))))
+
+    (defn slc-route-window (receipts max-wer min-conf max-latency
+                            min-samples margin max-control-debt min-native-score)
+        (slp-route
+            (slc-window-samples receipts max-wer min-conf max-latency)
+            min-samples
+            margin
+            max-control-debt
+            min-native-score))
+
+    (defn slc-summary (receipts max-wer min-conf max-latency
+                       min-samples margin max-control-debt min-native-score)
+        (do
+            (let samples (slc-window-samples receipts max-wer min-conf max-latency))
+            (list "speech-loopback-carrier-summary"
+                  (len receipts)
+                  (slp-native-score samples)
+                  (slp-oracle-score samples)
+                  (slp-control-debt-score samples)
+                  (slc-route-window receipts max-wer min-conf max-latency
+                                    min-samples margin max-control-debt min-native-score))))
+
+    (defn slc-summary-kind (s) (nth s 0))
+    (defn slc-summary-count (s) (nth s 1))
+    (defn slc-summary-native (s) (nth s 2))
+    (defn slc-summary-oracle (s) (nth s 3))
+    (defn slc-summary-debt (s) (nth s 4))
+    (defn slc-summary-route (s) (nth s 5))
+
+    0)

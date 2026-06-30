@@ -1002,6 +1002,8 @@ static long long fk_sparse(void) {
  long long s = fk_spos; fk_spos = fk_sym_end(fk_spos);
  long long off = fk_bd_lookup(s, fk_spos - s);
  if (off >= 0) { return fk_smknode(110, fk_smklit(off), 0, 0); }
+ if (fk_sym_eq(s, fk_spos - s, "true")) { return fk_smklit(1); }
+ if (fk_sym_eq(s, fk_spos - s, "false")) { return fk_smklit(0); }
  long long vfidx = fk_fn_lookup(s, fk_spos - s);
  if (vfidx >= 0) { return fk_smknode(243, vfidx, 0, 0); }
  return fk_smklit(0);
@@ -1686,4 +1688,3 @@ int main(int argc, char **argv) { return fk_run(argc, argv); }
 #else
 extern char *getenv(const char *); typedef void *fk_pthread_t; typedef struct { long fk_pa_sig; char fk_pa_opaque[64]; } fk_pthread_attr_t; extern int pthread_attr_init(fk_pthread_attr_t *); extern int pthread_attr_setstacksize(fk_pthread_attr_t *, unsigned long); extern int pthread_create(fk_pthread_t *, const fk_pthread_attr_t *, void *(*)(void *), void *); extern int pthread_join(fk_pthread_t, void **); static int fk_run_argc; static char **fk_run_argv; static int fk_run_ret; static void *fk_run_thunk(void *p) { (void)p; fk_run_ret = fk_run(fk_run_argc, fk_run_argv); return 0; } int main(int argc, char **argv) { fk_run_argc = argc; fk_run_argv = argv; unsigned long mb = 256; char *e = getenv("FORM_KERNEL_STACK_MB"); if (e) { int v = atoi(e); if (v > 0) { mb = (unsigned long)v; } } fk_pthread_attr_t at; pthread_attr_init(&at); pthread_attr_setstacksize(&at, mb * 1024UL * 1024UL); fk_pthread_t th; if (pthread_create(&th, &at, fk_run_thunk, 0) != 0) { return fk_run(argc, argv); } pthread_join(th, 0); return fk_run_ret; }
 #endif
-

@@ -32,12 +32,16 @@ receipt — *c-bootstrap fkwu on metal, no go/rust/clang/bash/python in the runt
   structural-composition, form-first-reasoning, prose-as-recipe) alongside the axiom teachings. Curated to what
   makes the kernel **self-describing and self-building** — not the whole app KB.
 - The **substrate and stack, 100% Form-native (Go/Rust/TS-free)**. The local-file substrate is *already* proven
-  four-way and lives here (`substrate/` — `form-fs` 14-bit, `storage-port`, `resource-port` 7-bit,
-  `host-kernel-carrier`, `cell-type` — the eval-level type/contract system: a type IS the offered
-  interface, a mismatch acks the first-class nothing); the HTTP *client* is native (`http/http-client`). The HTTP *server*/TCP and the
-  *production* DB integration (postgres, today the Python fan-out carrier) are Form targets authored on this
-  same minimal surface — no Go/Rust/TS. **BMF cursor and full BML are IN by necessity**: they are the language
-  the substrate, HTTP, and production integration are written in (`grammars/bmf-*`, `bml-native-north-star`).
+  four-way and lives here (`substrate/` and `form/form-stdlib/` — `form-fs` 14-bit, `storage-port`,
+  `resource-port` 7-bit, `host-kernel-carrier`, `cell-type` — the eval-level type/contract system: a type IS
+  the offered interface, a mismatch acks the first-class nothing — plus `tool-channel` and `auth-port`). The
+  HTTP body is here in both its historical top-level room (`http/`) and its stdlib path
+  (`form/form-stdlib/http-*`, `kernel-http`, `http-layer`, `http-socket`, `room-carrier-http`), with witness
+  bands under `form/form-stdlib/tests/`. `fkwu` owns the native HTTP/socket floor (`http_get`, `sock_request`,
+  `tls_request`, `socket_*`). The rich BML server stack is authored here; direct `--src` covers the narrower
+  raw-Form lane, while full BML/source lowering remains the honest execution lane for the high-grammar bands.
+  **BMF cursor and full BML are IN by necessity**: they are the language the substrate, HTTP, and production
+  integration are written in (`grammars/bmf-*`, `bml-native-north-star`).
 - The **cognition + observability layer — the kernel's telos: a core we can observe and trust.** Form-native
   LLM (`cognition/` — the whisper-tiny transformer stack four-way: `transformer-block` 511,
   `transformer-generate`, `whisper-block0` 1023; the matvec lowered to asm bytes, `form-asm-float` **2047**) and
@@ -105,9 +109,12 @@ Here the orchestration itself is **form shell** (`.fsh`, fkwu-native), and the r
 carry no bash or python by their nature (`.c` / `.fk` / `.form` / `.go` / `.rs` / `.ts`).
 
 The one allowed seed is a **single `cc` command** that compiles `runtime/fkwu-uni.c` into the
-c-bootstrap `fkwu` binary — a documented one-liner, not a script in the tree. After that, `fkwu` exists
-and **`fsh` orchestrates everything** (flatten, run, four-way validate) on the native runtime. Go/Rust/TS
-walker builds are likewise invoked from `fsh` via host-exec, for validation only.
+c-bootstrap `fkwu` binary — a documented one-liner, not a script in the tree. The fresh-checkout witness lives
+in `BOOTSTRAP.md`: build `fkwu`, then run `./fkwu --src` on the real body cell
+`observe/native-vs-rented.fk` and get `11111`. No flattened `form-eval-cli-loop.tbl` seed is required for
+grounding. After that, `fkwu` exists and **`fsh` orchestrates everything** (flatten, run, four-way validate) on
+the native runtime as that shell surface stands. Go/Rust/TS walker builds are likewise invoked from `fsh` via
+host-exec, for validation only.
 
 A repo gate enforces it: any `.sh` or `.py` landing in the tree fails the gate. (When `fsh` is standing,
 the gate is itself an `.fsh` check; until then it is a one-line `find` run by hand at review.)
@@ -120,6 +127,9 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       integers, `add/sub/mul/le/eq`, `if/let/do`, `defn` + user calls — directly off the BMF cursor. `form-eval-cli`
       *stands*: fkwu reads a source file and runs it (witnessed). **Flatten is optional speed**, off the critical path.
       The "flatten decider" that framed the restart was not cleaned — it was dissolved by taking flatten off the path.
+- [x] **Fresh checkout grounding stands.** `cc -O2 -o fkwu runtime/fkwu-uni.c` plus `./fkwu --src` over
+      `observe/native-vs-rented.fk` with `(native-vs-rented-check)` witnesses `11111`; no flattened source-runner
+      table seed is part of the grounding bootstrap.
 - [x] **Minimal Go/Rust/TS walkers home + verified four-way** (`walkers/{go,rust,ts}` — 1369 / 928 / 1475 lines vs
       the origin kernels' ~15k / 19.5k / 35.8k). Independent parse+eval of the pure-recipe surface; JIT, server,
       host-io, model code dropped. Each shown to land on fkwu's verdicts; live witness: a pure recipe → all three → 42.
@@ -127,6 +137,41 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       and diagnoses via `proof/four-way-verdict`; witnessed `0` (all agree). No bash, no `validate.sh`, no origin.
 - [x] The proven body moved over: `form-cli/` (25 cells), `model/` (30 — the transformer/mel/asm/rag execution),
       the `observe/` `learn/` `ingest/` `presence/` organs, the `grammars/`, the welcoming (`README`, `CONTRIBUTING`, `AGENTS`).
+- [x] **HTTP/std-stack body imported.** `form/form-stdlib/` now carries `kernel-http`, parse/render/request/server,
+      serve/client/exchange, adapter/layer/socket, room HTTP carrier, auth/resource/tool/storage carriers, and the
+      focused witness bands. The top-level `http/` copies match the stdlib HTTP files byte-for-byte. Live native
+      smoke: real socket loopback (`111111111`) and `http_get` against a one-shot local TCP peer (`11` = 200 + body).
+      The direct-source socket smoke lives at `form/form-stdlib/tests/fkwu-src-socket-loopback-band.fk`; BML bands
+      are present as the old proven body, and re-running them here waits on the full BML/source-lowering lane.
+- [x] **Somatic coherence loop merged.** `form/form-stdlib/somatic-coherence-loop.fk` makes the embodied practice
+      executable: ground -> attune -> consent -> move small -> integrate -> witness. The band returns `255`; no
+      depth without consent, no speed without integration, no completion without witness.
+- [x] **Observed auto-learning controller merged.** `form/form-stdlib/observed-auto-learning.fk` composes the
+      somatic gate, route fitness, posterior sufficiency, integer A/B promotion counts, and
+      choice/fail/cut/undo/timeout controls into one source-runnable decision cell. The band returns `4095`: live
+      observation changes the mode from `batch-search` to `online-reversible-ab`. Live carrier feeds for clocks,
+      undo journals, and accumulated A/B windows remain the named next integration step; the richer
+      `learn/champion-challenger.fk` lineage stays named rather than forced through this bounded direct-source lane.
+- [x] **Native speech stack observed on real metal.** `presence/native-speech-stack.fk` composes STT agreement,
+      sequence-aligned WER, text normalization, g2p, phoneme timing, contour, grounded phrasing, honest prosody,
+      and speaker decision into one direct-source witness. The band returns `2047` on local arm64 `fkwu`;
+      individual repaired bands now return STT overlap `127`, STT WER `255`, text-normalize `255`,
+      speaker-embed `255`, and presence-feature `15`. The honest gap is still the live ASR decode path plus the
+      natural acoustic model/neural vocoder.
+- [x] **First native speech loopback added.** `presence/formant-vocoder.fk` renders source-filter/formant integer
+      waveform samples from phoneme frames (`511`), `observe/asr-prompt-id.fk` recognizes a closed prompt set from
+      measured loopback features (`255`), and `presence/native-speech-loopback.fk` gates route shift by confidence
+      and WER (`1023`). This is native closed-set speech, not open ASR or natural neural TTS.
+- [x] **Speech loopback promotion added.** `learn/speech-loopback-promotion.fk` turns native loopback receipts into
+      rolling authority windows (`2047`): clean long windows promote native; short, failed, timed-out, undone, or
+      regressing windows route back to oracle.
+- [x] **Speech loopback carrier receipt added.** `presence/speech-loopback-carrier-receipt.fk` defines the real
+      local TTS/STT loopback measurement contract (`4095`): local-only carrier flags, audio hash/sample-rate/channel
+      metadata, oracle/native WER, latency, fail/timeout/undo, and lowering into promotion samples. Cloud or
+      missing-audio receipts become control debt and cannot promote native.
+- [x] **Speech loopback recipe A/B added.** `learn/speech-loopback-recipe-ab.fk` compares incumbent/challenger
+      TTS/ASR recipe windows over measured carrier receipts (`2047`): challenger cutover requires native route plus
+      better native score or lower latency; fail, timeout, undo, short windows, or cloud/control debt keep the incumbent.
 - [x] **The offer/ack control core** — `control/offer-ack-core.fk`: the five Form control primitives (fail, stop,
       choice, exceptions, async) as thin expressions over ONE mechanism (`oac-kind` + `oac-offer`), derived from
       axiom-5. Four-way-proven in the origin (1023); re-proof here pends the Form-native eval lane (the C `--src`
@@ -153,9 +198,11 @@ remains is the **mind**, the **voice**, and **live speed** — the body is home;
    concat, LM head) proven bit-exact, then the distill loop, then a pre-registered eval before any "≥ rented"
    claim. The speaking *floor* (grounded composition) stands; the frontier voice waits on this. A multi-week climb
    with its own receipts. (`HOMECOMING.md`.)
-2. **The voice's sound (acoustic model + vocoder).** Prosody, phrasing, emphasis, g2p are four-way (`presence/`);
-   the layer that makes it *audible* — and a perception receipt that the rendered uncertainty tracks real
-   calibration — is the pending carrier. (`presence/voice-roadmap.md`.)
+2. **The voice's sound (ASR + acoustic model + vocoder).** Prosody, phrasing, emphasis, g2p, a source-filter
+   formant vocoder, closed-set prompt recognition, loopback carrier receipts, and recipe A/B promotion now stand
+   as native measured cells (`presence/`, `observe/`, `learn/`). The natural acoustic model/neural vocoder, open ASR
+   decode, and perception receipt that rendered uncertainty tracks real calibration remain the pending carrier.
+   (`presence/voice-roadmap.md`.)
 3. **Cognition at native speed — the JIT in the live path.** The hot LLM/RAG cells crystallize through fkwu's
    self-JIT / form-asm lowering live, not tree-walked. The asm exists; wiring it under live cognition remains.
 4. **The heavy-chain form-cli build off its Go-made seed.** The binary *runs* Go-free; the full form-cli / fsh

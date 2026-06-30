@@ -5,6 +5,32 @@ honestly layered (codex + sub-agent both confirmed). What's built four-way: `voi
 (locales-as-data), `prosody-contour`, `phoneme-timing`. Locales: de/en/es/fr/id/pt-br, one engine. The sound
 (acoustic model + vocoder) is the pending carrier; tonight macOS `say` filled the gap as a host stand-in.
 
+## Real-metal reground (2026-06-30)
+
+The direct `fkwu --src` lane now witnesses the speech floor on local arm64 metal:
+`stt-agree` 127, `stt-wer` 255, `text-normalize` 255,
+`voice-prosody/g2p/phoneme-timing/voice-phrasing/prosody-contour` 11111 each, `speaker-embed` 255, and the
+composed `native-speech-stack` 2047. This is the native decision and pre-acoustic stack, not finished sound. The
+next improvements are live audio -> mel -> transcript candidate receipts, WER/agreement promotion gates, lexical
+stress/heteronym data before g2p, and the acoustic-model + vocoder bridge.
+
+The next stone is now placed: `formant-vocoder` 511 renders inspectable source-filter samples, `asr-prompt-id`
+255 recognizes a closed prompt set from loopback features, and `native-speech-loopback` 1023 routes native only
+when confidence and WER pass. This is deliberately smaller than open dictation or natural TTS; it is the first
+route-shiftable native speech loop.
+
+The promotion window is now executable too: `speech-loopback-promotion` 2047 turns those single-sample loopback
+receipts into native/oracle authority over time. Native wins only after enough clean samples; fail, timeout, undo,
+or regression returns authority to the oracle.
+
+The live carrier boundary is now named: `speech-loopback-carrier-receipt` 4095 admits real local TTS/STT loopback
+measurements into the same promotion law. A host carrier must render and capture locally, provide audio metadata
+and local oracle/native transcripts, and the Form body rejects cloud or missing-audio rows before they can promote.
+
+Recipe A/B is now native too: `speech-loopback-recipe-ab` 2047 groups those measured receipts by recipe id and
+cuts from incumbent to challenger only when the challenger already routes native and wins on measured score or
+latency. Explicit fail, timeout, and undo controls keep the incumbent.
+
 ## What the siblings caught — missing first-class layers (the roadmap)
 
 - **text-normalize + lexical/stress, BEFORE g2p.** Numbers, acronyms, punctuation, heteronyms, loanwords,
