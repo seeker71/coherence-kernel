@@ -48,8 +48,8 @@ fixed width in the tree-walker.
 **Remains:** the forward at REAL width (d_model=384+ over `ll-buffer` / `form-asm-matvec`, the one-engine
 native lane); the real weights loaded as recipe-data — a real open base (Qwen/Llama, real zh coverage) through
 the form block, the whisper block-0 pattern extended to a generative base (**3b**); then the `oracle-distill`
-loop; and a **pre-registered eval metric** before any "≥ rented" claim. A multi-week climb, with its own
-receipts. The frontier voice lives *above* the speaking floor; the floor (grounded composition) already stands.
+loop; and a **pre-registered eval metric** before any "≥ rented" claim. These are the next steps, each with its
+own receipt, sized by doing them. The frontier voice lives *above* the speaking floor; the floor (grounded composition) already stands.
 
 ## The recognition
 
