@@ -230,6 +230,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       voice has scoped native `1/1`, but both still need `3` real live native receipts with WER `<=25` and clean
       controls before global authority can move. Today `0` lanes are global-native-ready, `2` remain oracle-guided,
       and `6` real live receipts are missing.
+- [x] **Speech live receipt intake added.** `learn/speech-live-receipt-intake.fk` defines the real-live receipt row
+      and counting law for that promotion gate (`32767`): current live receipt counts remain `0/3` for open
+      dictation and `0/3` for Sema live voice, while the demo proves that three clean local/consented/audio-present
+      receipts with oracle/native WER `<=25`, confidence `>=80`, latency `<=2000`, and clean controls would satisfy
+      a lane. Missing audio or fail controls earn no credit.
 - [x] **Text-conditioned acoustic vocoder bridge added.** `learn/text-conditioned-acoustic-vocoder.fk` makes the
       named TTS candidate executable (`32767`): target tokens become G2P phones, voice-side metadata shapes
       duration/pitch/amplitude, frames render through the native source-filter carrier, and local-oracle WER decides
