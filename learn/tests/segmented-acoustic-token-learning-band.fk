@@ -1,0 +1,167 @@
+; preludes:
+;   observe/stt-wer.fk
+;   observe/speech-token-stream.fk
+;   observe/open-asr-ctc.fk
+;   observe/acoustic-token-emitter.fk
+;   learn/sanskrit-locale-baseline.fk
+;   learn/segmented-acoustic-token-learning.fk
+;
+; segmented-acoustic-token-learning-band -- wav segments teach token ASR.
+;
+; Verdict 32767:
+;   1     wav/envelope segmentation yields four native feature rows
+;   2     oracle-valid source tokens learn acoustic token prototypes
+;   4     untrained source ASR fails and trained source ASR succeeds
+;   8     trained CTC transcript decodes the Sanskrit source utterance
+;   16    decoded source tokens route through neutral meaning to Latin target tokens
+;   32    reciprocal sa->la and la->sa audio directions are present
+;   64    reciprocal trained window routes native at the 50% floor
+;   128   one-way window remains oracle-guided
+;   256   bad oracle transcript blocks learning
+;   512   timeout blocks native credit
+;   1024  missing consent blocks native credit
+;   2048  target row preserves voice-side metadata
+;   4096  sample carries audio hash and latency for open-dictation lowering
+;   8192  receipt names local Metal oracle and pending neural Metal
+;   16384 special token stream carries decoded transcript plus receipt token
+
+(do
+    (defn satl-band-score (cond bit) (if cond bit 0))
+    (defn satl-band-meta () (sts-meta 92 82 71 8 44 88))
+    (defn satl-band-blank () (list 0 0 0 0))
+    (defn satl-band-base-prototypes ()
+        (list (ate-prototype "" (satl-band-blank) 100)))
+
+    (defn satl-band-sa-env () (list 9 7 4 6 3 8 0 0))
+    (defn satl-band-la-env () (list 8 5 5 5 2 7 0 0))
+    (defn satl-band-sa-token-features ()
+        (satl-take (satl-envelope-feature-stream (satl-band-sa-env)) 3))
+    (defn satl-band-la-token-features ()
+        (satl-take (satl-envelope-feature-stream (satl-band-la-env)) 3))
+    (defn satl-band-frame-stream (features)
+        (list
+            (nth features 0)
+            (satl-band-blank)
+            (nth features 1)
+            (nth features 1)
+            (satl-band-blank)
+            (nth features 2)))
+
+    (defn satl-band-row () (slb-line-by-meaning 302))
+    (defn satl-band-sa-text () "satyam eva jayate")
+    (defn satl-band-la-text () "veritas sola vincit")
+    (defn satl-band-sa-sample ()
+        (satl-sample
+            9301 302 "sa" "la"
+            (satl-band-sa-text)
+            (satl-band-sa-text)
+            (slb-tokens (satl-band-row) "sa")
+            (satl-band-sa-token-features)
+            (satl-band-frame-stream (satl-band-sa-token-features))
+            930101
+            24
+            (satl-band-meta)
+            1 0 0 0))
+    (defn satl-band-la-sample ()
+        (satl-sample
+            9302 302 "la" "sa"
+            (satl-band-la-text)
+            (satl-band-la-text)
+            (slb-tokens (satl-band-row) "la")
+            (satl-band-la-token-features)
+            (satl-band-frame-stream (satl-band-la-token-features))
+            930102
+            25
+            (satl-band-meta)
+            1 0 0 0))
+    (defn satl-band-bad-oracle ()
+        (satl-sample
+            9303 302 "sa" "la"
+            (satl-band-sa-text)
+            "wrong words"
+            (slb-tokens (satl-band-row) "sa")
+            (satl-band-sa-token-features)
+            (satl-band-frame-stream (satl-band-sa-token-features))
+            930103
+            24
+            (satl-band-meta)
+            1 0 0 0))
+    (defn satl-band-timeout ()
+        (satl-sample
+            9304 302 "sa" "la"
+            (satl-band-sa-text)
+            (satl-band-sa-text)
+            (slb-tokens (satl-band-row) "sa")
+            (satl-band-sa-token-features)
+            (satl-band-frame-stream (satl-band-sa-token-features))
+            930104
+            24
+            (satl-band-meta)
+            1 0 1 0))
+    (defn satl-band-no-consent ()
+        (satl-sample
+            9305 302 "sa" "la"
+            (satl-band-sa-text)
+            (satl-band-sa-text)
+            (slb-tokens (satl-band-row) "sa")
+            (satl-band-sa-token-features)
+            (satl-band-frame-stream (satl-band-sa-token-features))
+            930105
+            24
+            (satl-band-meta)
+            0 0 0 0))
+
+    (defn satl-band-samples () (list (satl-band-sa-sample) (satl-band-la-sample)))
+    (defn satl-band-one-way () (list (satl-band-sa-sample)))
+
+    (defn segmented-acoustic-token-learning-band ()
+        (do
+            (let base (satl-band-base-prototypes))
+            (let samples (satl-band-samples))
+            (let trained (satl-trained-prototypes samples base 25 96))
+            (let sa (satl-band-sa-sample))
+            (let la (satl-band-la-sample))
+            (let rows (slb-lines))
+            (let target (satl-target sa trained rows 2 80))
+            (let receipt (satl-receipt samples trained "sa" "la" 25 2 80 2000 50
+                                       "whisper.cpp-large-v3-turbo-metal"
+                                       "macos-arm64-m4-max"))
+            (let stream-meta (oact-meta (satl-frames sa trained 2 80) 82 71 8 44 88))
+            (let stream (oact-stream 9301 "native-segmented-acoustic-learning" "audio"
+                                     (satl-frames sa trained 2 80)
+                                     stream-meta))
+            (let bad-trained (satl-trained-prototypes (list (satl-band-bad-oracle)) base 25 96))
+            (let c0 (satl-band-score (and (eq (len (satl-envelope-feature-stream (satl-band-sa-env))) 4)
+                                          (eq (nth (nth (satl-envelope-feature-stream (satl-band-sa-env)) 0) 2) 2)) 1))
+            (let c1 (satl-band-score (gt (len trained) (len base)) 2))
+            (let c2 (satl-band-score (and (eq (satl-native-ok? sa base 25 2 80 2000) 0)
+                                          (eq (satl-native-ok? sa trained 25 2 80 2000) 1)) 4))
+            (let c3 (satl-band-score (str_eq (satl-decoded-text sa trained 2 80) (satl-band-sa-text)) 8))
+            (let c4 (satl-band-score (and (eq (satl-target-meaning target) 302)
+                                          (str_eq (head (satl-target-tokens target)) "veritas")) 16))
+            (let c5 (satl-band-score (and (eq (satl-direction-count samples "sa" "la") 1)
+                                          (eq (satl-direction-count samples "la" "sa") 1)) 32))
+            (let c6 (satl-band-score (str_eq (satl-rec-route receipt) "native") 64))
+            (let c7 (satl-band-score (str_eq (satl-route (satl-band-one-way) trained "sa" "la" 25 2 80 2000 50) "oracle-guide") 128))
+            (let c8 (satl-band-score (and (eq (satl-oracle-ok? (satl-band-bad-oracle) 25) 0)
+                                          (eq (satl-native-ok? sa bad-trained 25 2 80 2000) 0)) 256))
+            (let c9 (satl-band-score (eq (satl-native-ok? (satl-band-timeout) trained 25 2 80 2000) 0) 512))
+            (let c10 (satl-band-score (eq (satl-native-ok? (satl-band-no-consent) trained 25 2 80 2000) 0) 1024))
+            (let c11 (satl-band-score (and (str_eq (satl-target-kind target) "segmented-acoustic-target")
+                                           (eq (sts-attunement (satl-target-meta target)) 88)) 2048))
+            (let c12 (satl-band-score (and (eq (satl-audio-hash sa) 930101)
+                                           (eq (satl-latency-ms sa) 24)) 4096))
+            (let c13 (satl-band-score (and (str_eq (satl-rec-oracle receipt) "whisper.cpp-large-v3-turbo-metal")
+                                           (and (eq (satl-rec-native-form receipt) 1)
+                                                (eq (satl-rec-neural-metal receipt) 0))) 8192))
+            (let c14 (satl-band-score (and (str_eq (sts-transcript stream) (satl-band-sa-text))
+                                           (eq (sts-count-tag stream (sts-receipt-tag)) 1)) 16384))
+            (add
+                (add
+                    (add (add c0 c1) (add c2 c3))
+                    (add (add c4 c5) (add c6 c7)))
+                (add
+                    (add (add c8 c9) (add c10 c11))
+                    (add (add c12 c13) c14)))))
+
+    (segmented-acoustic-token-learning-band))
