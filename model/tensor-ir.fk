@@ -1,0 +1,170 @@
+; tensor-ir.fk — ONE precision-explicit tensor IR; the target ISA is DATA, not a hand-written emitter.
+;
+; THE SMELL THIS CLOSES (Grok's #2): form-glsl.fk / form-ptx.fk / jit-tensor-emit.fk (MSL) / the CUDA
+; spines each RE-WRITE the same numeric discipline — a downward right-fold dot, an explicit NON-fused
+; mul+add (two roundings, split through a named temporary so no conformant compiler contracts it into
+; an fma), recipe-Taylor exp/tanh/gelu, barrier/workgroup load/store — in that ISA's syntax. The
+; arithmetic body of jte-matvec-msl-spine and jte-matvec-cuda-spine is BYTE-FOR-BYTE identical; only
+; the memory-model scaffolding (`kernel void` vs `__global__ void`, `device const T*` vs `const T*`,
+; `[[thread_position_in_grid]]` vs `blockIdx.x*blockDim.x+threadIdx.x`) differs. That difference is the
+; only thing that is per-ISA, so that difference is the only thing that should be DATA.
+;
+; THE ONE IR (the small, precision-explicit op set every backend shares):
+;   right-fold-dot  — the serial DOWNWARD dot, j = cols-1..0 (tb-dot's a0·b0 + (a1·b1 + (… + 0.0))).
+;   acc-step        — the two-rounding accumulate ladder: p = T(a)*T(b); acc = p + acc. The mul and the
+;                     add are SEPARATE roundings, split through the named temporary `p`, never fused.
+;   exp / tanh / gelu — the transcendentals as NAMED ops, realized by the recipe's OWN 14-term Taylor
+;                     (halving-reduce + square-back), never the hardware ex2.approx / tanh intrinsic.
+;   load / store    — typed memory access (load widens elem->acc exactly; store rounds acc->elem once, RNE).
+;   barrier / workgroup — the memory-model primitives (one threadgroup per problem row / per token).
+; A KERNEL (matvec / ffn / surprise) is a composition of these ops — authored ONCE, here, ISA-free.
+;
+; BACKENDS ARE DATA. Each target (MSL, PTX/CUDA, SPIR-V/GLSL) is a TABLE of (slot -> fragment) rows: the
+; memory-model header (kernel keyword, buffer qualifier, index expression, scratch qualifier) plus the
+; precision row (elem/acc type names). ONE generic emitter — tir-emit-* — walks (kernel-spec + backend
+; table) -> target source. Adding a backend is adding a TABLE, never a new emitter .fk. The generic
+; emitter has NO per-ISA `if` chain: it only ever does tb-slot lookups by name (grep-proven).
+;
+; CONFORMANCE BY CONSTRUCTION: the IR-emitted Mac MSL is the SAME string the proven jte-matvec-msl /
+; sk-msl produce — the body spine is shared, the memory model is the MSL table — so the M4 Max bit-exact
+; reference still holds, now flowing through this engine. Proven: model/tests/tensor-ir-band.fk.
+;
+; preludes: form-stdlib/core.fk
+
+; ─────────────────────────────────────────────────────────────────────────────────────────────
+; BACKEND TABLE — a list of (slot-name fragment) rows. tb-slot looks a fragment up by name. This is
+; the ENTIRE per-ISA surface: the generic emitter reads ONLY these named fragments, never an ISA `if`.
+; ─────────────────────────────────────────────────────────────────────────────────────────────
+(defn tb-slot (tbl key)
+    (if (eq (len tbl) 0) ""
+        (if (str_eq (head (head tbl)) key)
+            (head (tail (head tbl)))
+            (tb-slot (tail tbl) key))))
+
+; ── precision rows: the lane's storage (elem) and accumulator (acc) type NAMES, as data. fp32 is the
+;    bit-exact ground; a half/bfloat lane is a NEW ROW (different elem), never a copy of the emitter.
+(defn tir-elem (tbl) (tb-slot tbl "elem"))
+(defn tir-acc  (tbl) (tb-slot tbl "acc"))
+
+; ─────────────────────────────────────────────────────────────────────────────────────────────
+; THE IR ARITHMETIC SPINE — authored ONCE, ISA-free. The precision-explicit op bodies. Each takes the
+; backend table (for elem/acc type names only) and emits the SAME numeric discipline as a string.
+; ─────────────────────────────────────────────────────────────────────────────────────────────
+
+; acc-step / right-fold-dot: the two-rounding downward dot over a `row` and `x`, length `cols`, into
+; an `acc` of the accumulator type. p = acc(row[j]) * acc(x[j]); acc = p + acc — SEPARATE roundings,
+; split through `p`, j counting DOWN from cols. The literal heart of tb-dot / the matvec spines.
+; The load is a NAMED op realized by two data slots: the per-element CAST ("ld"/"ldc" — a precision-
+; explicit "cast( … )" for the pointer-model ISAs, MSL/CUDA: ld = "float(" / ldc = ")"; empty for GLSL
+; whose buffer is already float) wrapping a per-backend element REFERENCE ("wref" for the weight, the
+; logical `x[j]` shared). The pointer ISAs read row[j]; GLSL reads w[i*cols+uint(j)] — the addressing is
+; data, not a per-ISA `if`. ONE spine; cast + addressing arrive as table rows.
+(defn tir-ld (tbl ref)
+    (str_concat (tb-slot tbl "ld")
+    (str_concat ref (tb-slot tbl "ldc"))))
+
+(defn tir-dot-down (tbl)
+    (str_concat (tir-acc tbl)
+    (str_concat " acc = 0.0f; "
+    (str_concat (tb-slot tbl "idx")
+    (str_concat " j = cols; while (j > 0) { j -= 1; "
+    (str_concat (tir-acc tbl)
+    (str_concat " p = "
+    (str_concat (tir-ld tbl (tb-slot tbl "wref"))
+    (str_concat " * "
+    (str_concat (tir-ld tbl (tb-slot tbl "xref"))
+    (str_concat "; acc = p + acc; } "
+    "")))))))))))
+
+; store: one rounding acc->elem at the lane boundary (RNE), the named-tie store.
+(defn tir-store-y (tbl)
+    (str_concat "y[i] = "
+    (str_concat (tb-slot tbl "st")
+    (str_concat "acc" (str_concat (tb-slot tbl "stc") ";")))))
+
+; ─────────────────────────────────────────────────────────────────────────────────────────────
+; THE GENERIC EMITTER — walks (kernel-name + backend table) -> target source. The memory-model
+; tokens come from the table; the arithmetic spine is the shared IR body. NO per-ISA `if`.
+; ─────────────────────────────────────────────────────────────────────────────────────────────
+;
+; tir-emit-matvec: y = W·x. One thread per output row (rows independent — parallelism without touching
+; the fold). It reads ONLY named slots — "kw" / "sig" (signature), "rowdecl" (the per-thread row
+; pointer, empty on GLSL) — then the shared IR spine (dot-down + store). NO per-ISA `if`.
+(defn tir-emit-matvec (fname tbl)
+    (str_concat (tb-slot tbl "kw")
+    (str_concat fname
+    (str_concat (tb-slot tbl "sig")
+    (str_concat " if (i >= rows) return; "
+    (str_concat (tb-slot tbl "rowdecl")
+    (str_concat (tir-dot-down tbl)
+    (str_concat (tir-store-y tbl)
+    " }"))))))))
+
+; ─────────────────────────────────────────────────────────────────────────────────────────────
+; BACKEND TABLES — pure DATA. Adding a target = one of these lists; NO emitter body per target.
+; The slots carry the whole per-ISA surface:
+;   kw       kernel keyword                   sig      the parameter signature up to the open brace
+;   idx      loop-counter type                rowdecl  the per-thread row-pointer declaration
+;   acc      accumulator decl type            ld/ldc   the load CAST wrapper ("float(" / ")" | "" / "")
+;   wref     weight element reference         xref     vector element reference
+;   st/stc   the store CAST wrapper           elem     store type (for the cast)
+; f32 lane shown; an f16/bf16 lane is the same table with elem -> "half"/"bfloat", acc unchanged.
+; ─────────────────────────────────────────────────────────────────────────────────────────────
+
+; ── Apple GPU / Metal (MSL) — the metal-PROVEN lane (M4 Max bit-exact, jte-matvec-msl / sk-msl).
+(defn tir-msl-table ()
+    (list
+        (list "kw"      "kernel void ")
+        (list "idx"     "uint")
+        (list "acc"     "float")
+        (list "elem"    "float")
+        (list "rowdecl" "device const float* row = w + i * cols; ")
+        (list "ld"      "float(")
+        (list "ldc"     ")")
+        (list "wref"    "row[j]")
+        (list "xref"    "x[j]")
+        (list "st"      "float(")
+        (list "stc"     ")")
+        (list "sig"  "(device const float* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) {")))
+
+; ── NVIDIA / CUDA (PTX-bound, sm_89) — structural twin; same shared body, CUDA memory model.
+(defn tir-cuda-table ()
+    (list
+        (list "kw"      "__global__ void ")
+        (list "idx"     "unsigned")
+        (list "acc"     "float")
+        (list "elem"    "float")
+        (list "rowdecl" "const float* row = w + i * cols; ")
+        (list "ld"      "float(")
+        (list "ldc"     ")")
+        (list "wref"    "row[j]")
+        (list "xref"    "x[j]")
+        (list "st"      "float(")
+        (list "stc"     ")")
+        (list "sig"  "(const float* w, const float* x, float* y, unsigned rows, unsigned cols) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x;")))
+
+; ── Vulkan / Android (SPIR-V via GLSL) — structural twin; same shared body, GLSL memory model. GLSL has
+;    no device-pointer scratch, so rowdecl is empty and the weight reference inlines the row offset
+;    w[i*cols+uint(j)]; the buffer is already float so the load/store CAST slots are empty. `precise`
+;    on acc/p keeps mul+add unfused — the SAME two-rounding acc-step, the GLSL way. Buffers/layout are
+;    in the sig (std430). elem stays "float" so the (empty-cast) store is plain `y[i] = acc;`.
+(defn tir-glsl-table ()
+    (list
+        (list "kw"      "void ")
+        (list "idx"     "uint")
+        (list "acc"     "precise float")
+        (list "elem"    "float")
+        (list "rowdecl" "")
+        (list "ld"      "")
+        (list "ldc"     "")
+        (list "wref"    "w[i * cols + uint(j)]")
+        (list "xref"    "x[uint(j)]")
+        (list "st"      "")
+        (list "stc"     "")
+        (list "sig"  " { uint i = gl_GlobalInvocationID.x;")))
+
+; ── per-target one-call entries (the public surface; same shape as jte-matvec-msl) ──
+(defn tir-matvec-msl  (fname) (tir-emit-matvec fname (tir-msl-table)))
+(defn tir-matvec-cuda (fname) (tir-emit-matvec fname (tir-cuda-table)))
+(defn tir-matvec-glsl (fname) (tir-emit-matvec fname (tir-glsl-table)))
+
