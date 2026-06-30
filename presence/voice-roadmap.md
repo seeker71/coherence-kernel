@@ -26,6 +26,12 @@ under clean local evidence. Low-confidence samples narrow pitch range and delay 
 audible in the generated candidates instead of left as prose. This is still a deterministic formant carrier and
 sample-selection loop, not a natural neural vocoder.
 
+The first live Sema-formant oracle probe now exists: `macos-sema-voice-local-oracle-carrier` 2047 builds a
+target-derived waveform from Sema's f0/formant profile, renders it locally, and runs local
+`whisper.cpp-large-v3-turbo` on Apple Metal. The live result is intentionally not dressed up: verdict `479`, field
+code `110100002`, WER `100`, route `oracle-guide`. The carrier is real and observable; the current waveform is not
+yet intelligible speech.
+
 The promotion window is now executable too: `speech-loopback-promotion` 2047 turns those single-sample loopback
 receipts into native/oracle authority over time. Native wins only after enough clean samples; fail, timeout, undo,
 or regression returns authority to the oracle.
