@@ -243,6 +243,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `fr<->id`, and `pt-br<->zh` all retain reciprocal A->B/B->A/A->A/B->B lanes, start guided, end native,
       keep controls clean, promote by A/B evidence, and preserve the local oracle/device while neural Metal and
       diffusion remain pending. The band returns `32767`.
+- [x] **Metal-observed sweep bridge added.** `learn/metal-observed-sweep-bridge.fk` connects the live macOS
+      Metal `en<->de` audio route-shift receipt (`12` samples, `10` oracle-ok, `0%->83%`, shifted) to the
+      multiseed sweep. The bridge routes `metal-anchored-native-guide`, records `1/5` live pair anchors with
+      `4` still needed, and explicitly refuses `full-metal-native` until more live pairs are observed. The band
+      returns `32767`.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
