@@ -1202,6 +1202,81 @@ static void fk_parse_top(void) {
    the body. Recursion builds a fresh args array on the native stack and `call rel32`s to
    fn's own entry (offset 0), so each frame is independent — runs on fkwu's 256MB thread
    stack (FORM_KERNEL_STACK_MB), the same stack the walker recurses on. */
+/* ── GENERAL primitive + inter-fn CARRIERS (the JIT calls these, not per-op asm) ──
+   The reframe: "string/float/list ops" are NOT special JIT features — they are RECIPES
+   over primitives. The JIT only needs (1) any-kind literals (handled by emitting the
+   interned tagged word) and (2) the ability to emit a CALL to a kind-correct carrier.
+   Then ALL recipes lower as recipes; the value-correctness lives in ONE place (the same
+   computation fk_walk runs), so a lowered float add can NEVER drift from the walker.
+
+   fk_jprim2(tag,a,b) / fk_jprim1(tag,a) take ALREADY-EVALUATED tagged words and return
+   the tagged result — bit-identical to fk_walk's tag case. CORRECTNESS NOTE: add/sub/mul/
+   le/eq are float-aware here (via fk_num/fk_fbox), so lowering them as carrier calls is
+   correct for float operands (the #59 int-inline was WRONG for floats — fchk would return
+   an integer-add answer). The int-inline survives only behind a provably-int fast path. */
+static long long fk_isf(long long v);
+static double fk_num(long long v);
+static long long fk_fbox(double d);
+static long long fk_walk_body(long long i, long long fp);
+static long long fk_keyeq(long long a, long long b);
+static long long fk_jprim2(long long tag, long long a, long long b) {
+ if (tag == 3) { if (fk_isf(a) || fk_isf(b)) { return fk_fbox(fk_num(a) + fk_num(b)); } return a + b; }
+ if (tag == 4) { if (fk_isf(a) || fk_isf(b)) { return fk_fbox(fk_num(a) - fk_num(b)); } return a - b; }
+ if (tag == 42) { if (fk_isf(a) || fk_isf(b)) { return fk_fbox(fk_num(a) * fk_num(b)); } return ((a >> 1) * (b >> 1)) << 1; }
+ if (tag == 5) { return (fk_num(a) <= fk_num(b)) ? 2 : 0; }
+ if (tag == 102) { return (fk_num(a) == fk_num(b)) ? 2 : 0; }
+ if (tag == 27) {   /* str_concat — mirrors fk_walk's tag-27 exactly */
+  long long sa = a >> 1; long long sb = b >> 1;
+  if (sa < 0 || sa >= fk_sp || sb < 0 || sb >= fk_sp) { return 0 - 2; }
+  long long ln = fk_sl[sa] + fk_sl[sb];
+  while (fk_sbp + ln > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); }
+  long long off = fk_sbp; long long k = 0;
+  while (k < fk_sl[sa]) { fk_sb[off + k] = fk_sb[fk_so[sa] + k]; k = k + 1; }
+  long long m = 0; while (m < fk_sl[sb]) { fk_sb[off + fk_sl[sa] + m] = fk_sb[fk_so[sb] + m]; m = m + 1; }
+  return fk_sintern(off, ln) << 1;
+ }
+ if (tag == 26) { return fk_keyeq(a >> 1, b >> 1) ? 2 : 0; }   /* str_eq — mirrors fk_walk tag-26 */
+ if (tag == 28) {   /* str_byte_at — mirrors fk_walk tag-28 */
+  long long sa = a >> 1; long long k = b >> 1;
+  if (sa < 0 || sa >= fk_sp || k < 0 || k >= fk_sl[sa]) { return 0 - 2; }
+  return ((long long)(unsigned char)fk_sb[fk_so[sa] + k]) << 1;
+ }
+ return fk_nothing;
+}
+static long long fk_jprim3(long long tag, long long a, long long b, long long c) {
+ if (tag == 29) {   /* substring — mirrors fk_walk tag-29 */
+  long long sa = a >> 1; long long lo = b >> 1; long long hi = c >> 1;
+  if (sa < 0 || sa >= fk_sp || lo < 0 || hi < lo || hi > fk_sl[sa]) { return 0 - 2; }
+  long long ln = hi - lo;
+  while (fk_sbp + ln > fk_scap_b) { fk_scap_b = fk_scap_b * 2; fk_sb = realloc(fk_sb, fk_scap_b); }
+  long long j = 0; while (j < ln) { fk_sb[fk_sbp + j] = fk_sb[fk_so[sa] + lo + j]; j = j + 1; }
+  return fk_sintern(fk_sbp, ln) << 1;
+ }
+ return fk_nothing;
+}
+static long long fk_jprim1(long long tag, long long a) {
+ if (tag == 25) { long long sa = a >> 1; if (sa < 0 || sa >= fk_sp) { return 0; } return fk_sl[sa] << 1; }  /* str_len */
+ if (tag == 54) { return ((long long)fk_num(a)) << 1; }                                                    /* float_to_int */
+ if (tag == 53) {   /* str_to_float — mirrors fk_walk's tag-53 exactly */
+  long long sa = a >> 1; if (sa < 0 || sa >= fk_sp) { return fk_fbox(0.0); }
+  char tmp[128]; long long n = fk_sl[sa]; if (n > 126) { n = 126; }
+  long long j = 0; while (j < n) { tmp[j] = fk_sb[fk_so[sa] + j]; j = j + 1; } tmp[n] = 0;
+  return fk_fbox(strtod(tmp, 0));
+ }
+ return fk_nothing;
+}
+/* inter-fn CALL carrier: dispatch fn `callee` with up to 2 args through the WALKER
+   (always byte-identical). The lowered call to another fn routes here, so a JITed fn
+   can call ANY other fn (JITed or not) correctly; native-entry chaining is the perf
+   follow-on, correctness is here first. */
+static long long fk_jcall(long long callee, long long argc, long long a, long long b) {
+ long long fp = fk_vsp;
+ if (argc >= 1) { fk_vs[fk_vsp] = a; fk_vsp = fk_vsp + 1; }
+ if (argc >= 2) { fk_vs[fk_vsp] = b; fk_vsp = fk_vsp + 1; }
+ long long r = fk_walk_body(fk_fn[callee], fp);
+ fk_vsp = fp;
+ return r;
+}
 static unsigned char fk_jb[16384];
 static long long fk_jbp;
 static long long fk_jit_self;   /* fn index being lowered: self-calls must target it */
@@ -1217,13 +1292,56 @@ static void fk_jbin(long long i) {
  fk_jemit(fk_node[i][2], 0); fk_jb1(0x48); fk_jb1(0x89); fk_jb1(0xC1); /* eval right -> rax ; mov rcx,rax */
  fk_jb1(0x58);                                     /* pop rax (left) -> rax=left, rcx=right */
 }
+/* ── emit a CALL to a C carrier at absolute address `fn`, with `nargs` (0..3) args
+   already pushed on the machine stack (last-pushed = argN-1, so they pop in order).
+   Robust stack realignment (works at any incoming alignment): save rsp, align to 16,
+   pad + shadow, pop the staged args into the ABI arg registers, call, restore rsp.
+   Result (tagged word) is left in rax. Win64 ABI: args in rcx,rdx,r8 (+32B shadow);
+   SysV: rdi,rsi,rdx (no shadow). The carrier preserves rbp (callee-saved), so the
+   args pointer survives the call. */
+static void fk_jcarrier(void *fn, int nargs) {
+ /* operands are on the stack: caller pushed arg_{n-1} first ... arg0 last, so
+    arg0 = [rsp+0], arg1 = [rsp+8], ...  Read them into the ABI arg registers, then
+    realign + call, then restore rsp to ABOVE the consumed args (rsp + nargs*8). */
+#if defined(_WIN32)
+ if (nargs >= 1) { fk_jb1(0x48); fk_jb1(0x8B); fk_jb1(0x0C); fk_jb1(0x24); }            /* mov rcx,[rsp] */
+ if (nargs >= 2) { fk_jb1(0x48); fk_jb1(0x8B); fk_jb1(0x54); fk_jb1(0x24); fk_jb1(8); } /* mov rdx,[rsp+8] */
+ if (nargs >= 3) { fk_jb1(0x4C); fk_jb1(0x8B); fk_jb1(0x44); fk_jb1(0x24); fk_jb1(16);} /* mov r8,[rsp+16] */
+ if (nargs >= 4) { fk_jb1(0x4C); fk_jb1(0x8B); fk_jb1(0x4C); fk_jb1(0x24); fk_jb1(24);} /* mov r9,[rsp+24] */
+#else
+ if (nargs >= 1) { fk_jb1(0x48); fk_jb1(0x8B); fk_jb1(0x3C); fk_jb1(0x24); }            /* mov rdi,[rsp] */
+ if (nargs >= 2) { fk_jb1(0x48); fk_jb1(0x8B); fk_jb1(0x74); fk_jb1(0x24); fk_jb1(8); } /* mov rsi,[rsp+8] */
+ if (nargs >= 3) { fk_jb1(0x48); fk_jb1(0x8B); fk_jb1(0x54); fk_jb1(0x24); fk_jb1(16);} /* mov rdx,[rsp+16] */
+ if (nargs >= 4) { fk_jb1(0x48); fk_jb1(0x8B); fk_jb1(0x4C); fk_jb1(0x24); fk_jb1(24);} /* mov rcx,[rsp+24] */
+#endif
+ /* compute the post-consume rsp into r11 (caller-saved, but we use it only here): */
+ fk_jb1(0x4C); fk_jb1(0x8D); fk_jb1(0x5C); fk_jb1(0x24); fk_jb1((unsigned char)(nargs * 8)); /* lea r11,[rsp+nargs*8] */
+ fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xE4); fk_jb1(0xF0); /* and rsp,-16 (align down) */
+ fk_jb1(0x41); fk_jb1(0x53);                          /* push r11  (save restore-target) */
+ fk_jb1(0x41); fk_jb1(0x53);                          /* push r11  (pad -> rsp 16-aligned) */
+#if defined(_WIN32)
+ fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xEC); fk_jb1(32);/* sub rsp,32 (Win64 shadow; keeps 16-align) */
+#endif
+ fk_jb1(0x48); fk_jb1(0xB8); fk_jb8((long long)(unsigned long long)fn); /* mov rax,&fn */
+ fk_jb1(0xFF); fk_jb1(0xD0);                          /* call rax  (result -> rax) */
+#if defined(_WIN32)
+ fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xC4); fk_jb1(32);/* add rsp,32 */
+#endif
+ fk_jb1(0x48); fk_jb1(0x83); fk_jb1(0xC4); fk_jb1(8); /* add rsp,8 (discard pad) */
+ fk_jb1(0x5C);                                        /* pop rsp  (rsp <- saved restore-target) */
+}
+static long long fk_jprim2(long long tag, long long a, long long b);
+static long long fk_jprim1(long long tag, long long a);
+static long long fk_jprim3(long long tag, long long a, long long b, long long c);
+static long long fk_jcall(long long callee, long long argc, long long a, long long b);
 /* tail self-call (sum-shaped): compute all new args into temporaries (machine stack),
    write them into the rbp args array IN PLACE, then jmp to the post-prologue entry.
    Constant stack — the native twin of fk_walk_body's trampoline. */
 static void fk_jemit(long long i, int tail) {
  long long t = fk_node[i][0];
  if (t == 111) { fk_jemit(fk_node[i][2], tail); return; }   /* reserve: pass tail through to the body */
- if (t == 1) { fk_jb1(0x48); fk_jb1(0xB8); fk_jb8(fk_node[i][1] << 1); return; }        /* lit -> mov rax,imm64(tagged) */
+ if (t == 1) { fk_jb1(0x48); fk_jb1(0xB8); fk_jb8(fk_node[i][1] << 1); return; }        /* int lit -> mov rax,imm64(tagged) */
+ if (t == 24) { fk_jb1(0x48); fk_jb1(0xB8); fk_jb8(fk_node[i][1] << 1); return; }       /* STRING lit: tagged word = poolidx<<1 (known at lower-time, interned at parse) */
  if (t == 2) { fk_jb1(0x48); fk_jb1(0x8B); fk_jb1(0x85); fk_jb4(0); return; }            /* slot 0 -> mov rax,[rbp+0] */
  if (t == 110) {
   long long li = fk_node[i][1];
@@ -1231,24 +1349,80 @@ static void fk_jemit(long long i, int tail) {
   long long slot = fk_node[li][1];
   fk_jb1(0x48); fk_jb1(0x8B); fk_jb1(0x85); fk_jb4((int)(slot * 8)); return;             /* mov rax,[rbp+slot*8] */
  }
- if (t == 3) { fk_jbin(i); fk_jb1(0x48); fk_jb1(0x01); fk_jb1(0xC8); return; }            /* add rax,rcx */
- if (t == 4) { fk_jbin(i); fk_jb1(0x48); fk_jb1(0x29); fk_jb1(0xC8); return; }            /* sub rax,rcx */
- if (t == 42) {                                                                          /* mul: (a>>1)*(b>>1)<<1 */
-  fk_jbin(i);
-  fk_jb1(0x48); fk_jb1(0xD1); fk_jb1(0xF8);          /* sar rax,1 */
-  fk_jb1(0x48); fk_jb1(0xD1); fk_jb1(0xF9);          /* sar rcx,1 */
-  fk_jb1(0x48); fk_jb1(0x0F); fk_jb1(0xAF); fk_jb1(0xC1); /* imul rax,rcx */
-  fk_jb1(0x48); fk_jb1(0xD1); fk_jb1(0xE0);          /* shl rax,1 */
+ if (t == 3 || t == 4 || t == 42 || t == 5 || t == 102) {
+  /* float-aware arith/cmp. The #59 int-inline is WRONG for float operands, so we GUARD
+     at runtime: if EITHER operand is a boxed float (tagged word <= fk_fbase-2, a huge
+     negative), call the kind-correct carrier fk_jprim2 (bit-identical to fk_walk); else
+     run the fast int-inline. This keeps fac/sum/fib native-fast (provably int at runtime)
+     AND makes 0.5+0.25 correct — the float-correctness gate. */
+  fk_jbin(i);                                          /* rax=left, rcx=right */
+  /* threshold = fk_fbase - 2 (the float-band ceiling) */
+  fk_jb1(0x49); fk_jb1(0xB9); fk_jb8(-9000000000000000000LL - 2); /* mov r9,fk_fbase-2 */
+  fk_jb1(0x4C); fk_jb1(0x39); fk_jb1(0xC8);            /* cmp rax,r9 */
+  fk_jb1(0x0F); fk_jb1(0x8E); long long jf1 = fk_jbp; fk_jb4(0); /* jle FLOAT (left is float) */
+  fk_jb1(0x4C); fk_jb1(0x39); fk_jb1(0xC9);            /* cmp rcx,r9 */
+  fk_jb1(0x0F); fk_jb1(0x8E); long long jf2 = fk_jbp; fk_jb4(0); /* jle FLOAT (right is float) */
+  /* ── INT fast path (rax=left, rcx=right) ── */
+  if (t == 3) { fk_jb1(0x48); fk_jb1(0x01); fk_jb1(0xC8); }                                /* add rax,rcx */
+  else if (t == 4) { fk_jb1(0x48); fk_jb1(0x29); fk_jb1(0xC8); }                           /* sub rax,rcx */
+  else if (t == 42) { fk_jb1(0x48); fk_jb1(0xD1); fk_jb1(0xF8); fk_jb1(0x48); fk_jb1(0xD1); fk_jb1(0xF9); fk_jb1(0x48); fk_jb1(0x0F); fk_jb1(0xAF); fk_jb1(0xC1); fk_jb1(0x48); fk_jb1(0xD1); fk_jb1(0xE0); } /* mul */
+  else { /* le (5) / eq (102) */
+   fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC2); fk_jb4(2);
+   fk_jb1(0x49); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4(0);
+   fk_jb1(0x48); fk_jb1(0x39); fk_jb1(0xC8);
+   if (t == 5) { fk_jb1(0x4C); fk_jb1(0x0F); fk_jb1(0x4E); fk_jb1(0xC2); }
+   else        { fk_jb1(0x4C); fk_jb1(0x0F); fk_jb1(0x44); fk_jb1(0xC2); }
+   fk_jb1(0x4C); fk_jb1(0x89); fk_jb1(0xC0);
+  }
+  fk_jb1(0xE9); long long jdone = fk_jbp; fk_jb4(0);   /* jmp DONE */
+  /* ── FLOAT path: call fk_jprim2(tag, left, right) ── */
+  long long fp_lbl = fk_jbp;
+  fk_jpatch4(jf1, (int)(fp_lbl - (jf1 + 4)));
+  fk_jpatch4(jf2, (int)(fp_lbl - (jf2 + 4)));
+  fk_jb1(0x51);                                        /* push rcx (arg2=right) */
+  fk_jb1(0x50);                                        /* push rax (arg1=left) */
+  fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4((int)t); /* mov rax,tag */
+  fk_jb1(0x50);                                        /* push rax (arg0=tag) */
+  fk_jcarrier((void *)fk_jprim2, 3);                   /* result in rax */
+  fk_jpatch4(jdone, (int)(fk_jbp - (jdone + 4)));      /* DONE */
   return;
  }
- if (t == 5 || t == 102) {                                                               /* le / eq -> 2 or 0 */
-  fk_jbin(i);
-  fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC2); fk_jb4(2);   /* mov rdx,2  (no flag dep) */
-  fk_jb1(0x49); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4(0);   /* mov r8,0   (no flag dep) */
-  fk_jb1(0x48); fk_jb1(0x39); fk_jb1(0xC8);              /* cmp rax,rcx (flags last) */
-  if (t == 5) { fk_jb1(0x4C); fk_jb1(0x0F); fk_jb1(0x4E); fk_jb1(0xC2); }  /* cmovle r8,rdx */
-  else        { fk_jb1(0x4C); fk_jb1(0x0F); fk_jb1(0x44); fk_jb1(0xC2); }  /* cmove  r8,rdx */
-  fk_jb1(0x4C); fk_jb1(0x89); fk_jb1(0xC0);              /* mov rax,r8 */
+ if (t == 25 || t == 54 || t == 53) {                  /* str_len / float_to_int / str_to_float: 1-arg carrier */
+  fk_jemit(fk_node[i][1], 0);                          /* arg -> rax */
+  fk_jb1(0x50);                                        /* push rax (arg1=val) */
+  fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4((int)t); /* mov rax,tag */
+  fk_jb1(0x50);                                        /* push rax (arg0=tag) */
+  fk_jcarrier((void *)fk_jprim1, 2);                   /* result in rax */
+  return;
+ }
+ if (t == 27 || t == 26 || t == 28) {                  /* str_concat / str_eq / str_byte_at: 2-arg carrier */
+  fk_jemit(fk_node[i][1], 0); fk_jb1(0x50);            /* left -> push */
+  fk_jemit(fk_node[i][2], 0); fk_jb1(0x50);            /* right -> push (top) */
+  /* fk_jprim2(tag,a,b): arg0=tag@[rsp], arg1=a@[rsp+8], arg2=b@[rsp+16].
+     Stack top->down is now right,left. Re-stage to tag,left,right. */
+  fk_jb1(0x59);                                        /* pop rcx (right) */
+  fk_jb1(0x58);                                        /* pop rax (left) */
+  fk_jb1(0x51);                                        /* push rcx (arg2=right=b) */
+  fk_jb1(0x50);                                        /* push rax (arg1=left=a) */
+  fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4((int)t); /* mov rax,tag */
+  fk_jb1(0x50);                                        /* push rax (arg0=tag) */
+  fk_jcarrier((void *)fk_jprim2, 3);
+  return;
+ }
+ if (t == 29) {                                        /* substring: 3-arg carrier fk_jprim3(tag,a,b,c) */
+  fk_jemit(fk_node[i][1], 0); fk_jb1(0x50);            /* a -> push */
+  fk_jemit(fk_node[i][2], 0); fk_jb1(0x50);            /* b -> push */
+  fk_jemit(fk_node[i][3], 0); fk_jb1(0x50);            /* c -> push (top) */
+  /* stack top->down: c,b,a. fk_jprim3 args: arg0=tag, arg1=a, arg2=b, arg3=c. Re-stage. */
+  fk_jb1(0x41); fk_jb1(0x5A);                          /* pop r10 (c) */
+  fk_jb1(0x59);                                        /* pop rcx (b) */
+  fk_jb1(0x58);                                        /* pop rax (a) */
+  fk_jb1(0x41); fk_jb1(0x52);                          /* push r10 (arg3=c) */
+  fk_jb1(0x51);                                        /* push rcx (arg2=b) */
+  fk_jb1(0x50);                                        /* push rax (arg1=a) */
+  fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4(29);/* mov rax,29 */
+  fk_jb1(0x50);                                        /* push rax (arg0=tag) */
+  fk_jcarrier((void *)fk_jprim3, 4);
   return;
  }
  if (t == 6) {                                                                           /* if test then else */
@@ -1263,20 +1437,40 @@ static void fk_jemit(long long i, int tail) {
   fk_jpatch4(je, (int)(fk_jbp - (je + 4)));              /* end = here (the pop rbp; ret follows) */
   return;
  }
- if (t == 7 || t == 12 || t == 240 || t == 241) {                                        /* PURE SELF-recursion only */
+ if (t == 7 || t == 12 || t == 240 || t == 241) {                                        /* fn call: SELF-recursion native; OTHER-fn via carrier */
   long long callee = (t == 7) ? fk_jit_self : fk_node[i][1];
-  if (callee != fk_jit_self) { fk_jit_ok = 0; return; }  /* only self-calls lower here */
   long long argc; long long a0; long long a1 = -1;
   if (t == 241) {                                        /* variadic call: args in a 242-cons chain */
    long long cell = fk_node[i][2]; long long cnt = 0; long long n0 = -1; long long n1 = -1;
    while (cell >= 0 && fk_node[cell][0] == 242) { if (cnt == 0) { n0 = fk_node[cell][1]; } else if (cnt == 1) { n1 = fk_node[cell][1]; } cnt = cnt + 1; cell = fk_node[cell][2]; }
-   if (cnt < 1 || cnt > 2) { fk_jit_ok = 0; return; }    /* this POC lowers arity 1 and 2 */
+   if (cnt > 2) { fk_jit_ok = 0; return; }               /* this POC lowers arity 0/1/2 */
    argc = cnt; a0 = n0; a1 = n1;
   } else {
    argc = (t == 240) ? 2 : 1;
    a0 = (t == 7) ? fk_node[i][1] : fk_node[i][2];
    a1 = (t == 240) ? fk_node[i][3] : -1;
   }
+  if (callee != fk_jit_self) {
+   /* ── INTER-FUNCTION call: emit a call to fk_jcall(callee, argc, a, b). The carrier
+      dispatches the callee through the walker (always byte-identical), so a JITed fn
+      can call ANY other fn correctly — not only itself. Args: a0/a1 (or 0). */
+   if (argc >= 1) { fk_jemit(a0, 0); } else { fk_jb1(0x48); fk_jb1(0x31); fk_jb1(0xC0); } /* a0 or 0 */
+   fk_jb1(0x50);                                         /* push (arg3 = b, used iff argc==2... but layout below) */
+   if (argc >= 2) { fk_jemit(a1, 0); } else { fk_jb1(0x48); fk_jb1(0x31); fk_jb1(0xC0); }
+   fk_jb1(0x50);                                         /* push */
+   /* stack now: [rsp]=a1val, [rsp+8]=a0val. fk_jcall(callee,argc,a,b): arg0=callee@[rsp],
+      arg1=argc@[rsp+8], arg2=a@[rsp+16], arg3=b@[rsp+24]. Re-stage: pop both, push in order. */
+   fk_jb1(0x59);                                         /* pop rcx (a1val -> b) */
+   fk_jb1(0x58);                                         /* pop rax (a0val -> a) */
+   fk_jb1(0x51);                                         /* push rcx (arg3=b) */
+   fk_jb1(0x50);                                         /* push rax (arg2=a) */
+   fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4((int)argc); fk_jb1(0x50); /* mov rax,argc; push (arg1) */
+   fk_jb1(0x48); fk_jb1(0xC7); fk_jb1(0xC0); fk_jb4((int)callee); fk_jb1(0x50); /* mov rax,callee; push (arg0) */
+   fk_jcarrier((void *)fk_jcall, 4);                     /* result in rax */
+   return;
+  }
+  /* ── SELF-recursion (callee == self): native call/jmp, as in the #59 POC. */
+  if (argc < 1) { fk_jit_ok = 0; return; }               /* 0-arg self-recursion not handled here */
   /* evaluate new args into temporaries (machine stack) — old slots still intact */
   fk_jemit(a0, 0); fk_jb1(0x50);                         /* a0 -> rax ; push */
   if (argc == 2) { fk_jemit(a1, 0); fk_jb1(0x50); }      /* a1 -> rax ; push */
@@ -1396,13 +1590,13 @@ static int fk_run_src(const char *path, long long arg) {
    long long callee = fk_node[root][1];
    if (callee >= 0 && callee < 4096) {
     /* collect the root call's outer args (evaluated once on the walker) */
-    long long aargs[2]; long long ac = 0; int aok = 1;
+    long long aargs[2]; aargs[0] = 0; aargs[1] = 0; long long ac = 0; int aok = 1;
     if (rt == 12) { ac = 1; aargs[0] = fk_walk(fk_node[root][2], 0); }
     else if (rt == 240) { ac = 2; aargs[0] = fk_walk(fk_node[root][2], 0); aargs[1] = fk_walk(fk_node[root][3], 0); }
-    else { /* 241 variadic: walk the 242-cons chain */
+    else { /* 241 variadic: walk the 242-cons chain (ac may be 0 for a nullary recipe like (slen)) */
      long long cell = fk_node[root][2];
      while (cell >= 0 && fk_node[cell][0] == 242) { if (ac < 2) { aargs[ac] = fk_walk(fk_node[cell][1], 0); } ac = ac + 1; cell = fk_node[cell][2]; }
-     if (ac < 1 || ac > 2) { aok = 0; }
+     if (ac > 2) { aok = 0; }   /* 0/1/2 args all lower; >2 out of POC scope */
     }
     long long n = aok ? fk_jit_lower(callee) : 0;
     if (n > 0) {
