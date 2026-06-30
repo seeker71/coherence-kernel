@@ -1,0 +1,301 @@
+; text-conditioned-acoustic-vocoder.fk -- text/neutral Form to acoustic voice frames.
+;
+; The live Sema formant probe already proved the host/Metal oracle membrane, but
+; missed intelligibility. This cell is the next native bridge named by that miss:
+; locale-neutral target tokens become G2P phones, phones become Sema-shaped
+; acoustic/vocoder frames, frames render through the existing Form source-filter
+; carrier, and the local oracle transcript decides authority.
+;
+; This is a deterministic micro-kernel, not a neural vocoder. It makes the
+; training target executable while keeping authority on oracle-guide until
+; samples pass the same local STT bar.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   presence/formant-vocoder.fk
+;   observe/speech-token-stream.fk
+;   learn/sanskrit-locale-baseline.fk
+
+(do
+    (defn tcav-max (a b) (if (gt a b) a b))
+    (defn tcav-min (a b) (if (lt a b) a b))
+    (defn tcav-clamp (x lo hi) (tcav-min hi (tcav-max lo x)))
+
+    (defn tcav-profile (id f0 f1 f2 warmth cadence)
+        (list "text-conditioned-acoustic-profile" id f0 f1 f2 warmth cadence))
+    (defn tcav-profile-id      (p) (nth p 1))
+    (defn tcav-profile-f0      (p) (nth p 2))
+    (defn tcav-profile-f1      (p) (nth p 3))
+    (defn tcav-profile-f2      (p) (nth p 4))
+    (defn tcav-profile-warmth  (p) (nth p 5))
+    (defn tcav-profile-cadence (p) (nth p 6))
+    (defn tcav-sema-profile ()
+        (tcav-profile "sema-warm-grounded-honest" 165 500 900 82 64))
+
+    (defn tcav-append (a b)
+        (if (eq (len a) 0) b
+            (cons (head a) (tcav-append (tail a) b))))
+
+    (defn tcav-join-loop (tokens acc)
+        (if (eq (len tokens) 0) acc
+            (tcav-join-loop
+                (tail tokens)
+                (if (str_eq acc "")
+                    (head tokens)
+                    (str_concat acc (str_concat " " (head tokens)))))))
+    (defn tcav-text (tokens) (tcav-join-loop tokens ""))
+
+    (defn tcav-lexeme (word phones)
+        (list "text-conditioned-acoustic-lexeme" word phones))
+    (defn tcav-lex-word   (l) (nth l 1))
+    (defn tcav-lex-phones (l) (nth l 2))
+    (defn tcav-empty-lexeme () (tcav-lexeme "" (empty)))
+
+    (defn tcav-lexicon ()
+        (list
+            (tcav-lexeme "open" (list "ow" "p" "eh" "n"))
+            (tcav-lexeme "speech" (list "s" "p" "iy" "ch"))
+            (tcav-lexeme "flows" (list "f" "l" "ow" "z"))
+            (tcav-lexeme "satyam" (list "s" "aa" "t" "y" "aa" "m"))
+            (tcav-lexeme "eva" (list "eh" "v" "aa"))
+            (tcav-lexeme "jayate" (list "j" "aa" "y" "aa" "t" "eh"))
+            (tcav-lexeme "veritas" (list "v" "eh" "r" "iy" "t" "aa" "s"))
+            (tcav-lexeme "sola" (list "s" "ow" "l" "aa"))
+            (tcav-lexeme "vincit" (list "v" "iy" "n" "ch" "iy" "t"))))
+
+    (defn tcav-find-lexeme (word rows)
+        (if (eq (len rows) 0) (tcav-empty-lexeme)
+            (if (str_eq word (tcav-lex-word (head rows)))
+                (head rows)
+                (tcav-find-lexeme word (tail rows)))))
+
+    (defn tcav-g2p-token (word)
+        (do
+            (let row (tcav-find-lexeme word (tcav-lexicon)))
+            (if (str_eq (tcav-lex-word row) "") (list word) (tcav-lex-phones row))))
+
+    (defn tcav-g2p (tokens)
+        (if (eq (len tokens) 0) (empty)
+            (tcav-append (tcav-g2p-token (head tokens)) (tcav-g2p (tail tokens)))))
+
+    (defn tcav-vowel? (p)
+        (if (or (str_eq p "aa")
+                (or (str_eq p "eh")
+                    (or (str_eq p "iy") (str_eq p "ow")))) 1 0))
+    (defn tcav-sonorant? (p)
+        (if (or (str_eq p "m")
+                (or (str_eq p "n")
+                    (or (str_eq p "l")
+                        (or (str_eq p "r")
+                            (or (str_eq p "v")
+                                (or (str_eq p "w") (str_eq p "y"))))))) 1 0))
+    (defn tcav-noise? (p)
+        (if (or (eq (tcav-vowel? p) 1) (eq (tcav-sonorant? p) 1)) 0 1))
+
+    (defn tcav-phone-code (p)
+        (if (str_eq p "aa") 1
+            (if (str_eq p "eh") 2
+                (if (str_eq p "iy") 3
+                    (if (str_eq p "ow") 4
+                        (if (str_eq p "p") 5
+                            (if (str_eq p "s") 6
+                                (if (str_eq p "ch") 7
+                                    (if (str_eq p "f") 8
+                                        (if (str_eq p "l") 9
+                                            (if (str_eq p "z") 10
+                                                (if (str_eq p "n") 11
+                                                    (if (str_eq p "t") 12
+                                                        (if (str_eq p "y") 13
+                                                            (if (str_eq p "m") 14
+                                                                (if (str_eq p "v") 15
+                                                                    (if (str_eq p "r") 16
+                                                                        (if (str_eq p "j") 17 99)))))))))))))))))
+
+    (defn tcav-phone-base-duration (p)
+        (if (eq (tcav-vowel? p) 1) 6
+            (if (eq (tcav-sonorant? p) 1) 4 3)))
+
+    (defn tcav-duration (p meta)
+        (tcav-clamp
+            (sub (add (tcav-phone-base-duration p) (div (sts-hesitation meta) 20))
+                 (div (sts-cadence meta) 40))
+            2
+            9))
+
+    (defn tcav-effective-f0 (profile meta)
+        (tcav-clamp
+            (add (tcav-profile-f0 profile)
+                 (sub (div (sts-excitement meta) 8) (div (sts-hesitation meta) 12)))
+            90
+            260))
+    (defn tcav-pitch (profile meta)
+        (tcav-max 1 (div 16000 (tcav-effective-f0 profile meta))))
+
+    (defn tcav-amplitude (meta)
+        (add 3 (div (add (sts-warmth meta) (sts-confidence meta)) 25)))
+
+    (defn tcav-f1-offset (p)
+        (if (str_eq p "aa") 110
+            (if (str_eq p "eh") 60
+                (if (str_eq p "iy") -80
+                    (if (str_eq p "ow") -30 0)))))
+    (defn tcav-f2-offset (p)
+        (if (str_eq p "aa") 40
+            (if (str_eq p "eh") 120
+                (if (str_eq p "iy") 260
+                    (if (str_eq p "ow") -120 0)))))
+
+    (defn tcav-vocoder-frame (phone profile meta)
+        (fv-frame
+            (tcav-phone-code phone)
+            (tcav-duration phone meta)
+            (tcav-pitch profile meta)
+            (tcav-amplitude meta)
+            (add (tcav-profile-f1 profile) (tcav-f1-offset phone))
+            (add (tcav-profile-f2 profile) (tcav-f2-offset phone))
+            (tcav-noise? phone)))
+
+    (defn tcav-acoustic-frame (phone frame meta)
+        (list "text-conditioned-acoustic-frame" phone frame meta))
+    (defn tcav-af-kind  (f) (nth f 0))
+    (defn tcav-af-phone (f) (nth f 1))
+    (defn tcav-af-frame (f) (nth f 2))
+    (defn tcav-af-meta  (f) (nth f 3))
+
+    (defn tcav-frame-loop (phones profile meta)
+        (if (eq (len phones) 0) (empty)
+            (cons
+                (tcav-acoustic-frame (head phones)
+                                     (tcav-vocoder-frame (head phones) profile meta)
+                                     meta)
+                (tcav-frame-loop (tail phones) profile meta))))
+
+    (defn tcav-acoustic-frames (tokens profile meta)
+        (tcav-frame-loop (tcav-g2p tokens) profile meta))
+
+    (defn tcav-vocoder-frames (frames)
+        (if (eq (len frames) 0) (empty)
+            (cons (tcav-af-frame (head frames)) (tcav-vocoder-frames (tail frames)))))
+
+    (defn tcav-render (tokens profile meta)
+        (fv-render (tcav-vocoder-frames (tcav-acoustic-frames tokens profile meta))))
+
+    (defn tcav-stream (sample-id tokens meta)
+        (sts-append
+            (list
+                (sts-node sample-id meta)
+                (sts-source "text-conditioned-acoustic-vocoder" meta)
+                (sts-channel "tts" meta)
+                (sts-interface "form-native-vocoder-frame" meta)
+                (sts-observe "g2p-phoneme-timing-prosody" meta))
+            (sts-append
+                (sts-word-tokens tokens meta)
+                (list (sts-receipt "local-oracle-wer" meta)))))
+
+    (defn tcav-sample-from-tokens (id src dst meaning tokens oracle-text meta
+                                   audio-hash local consent fail timeout undo)
+        (list "text-conditioned-acoustic-vocoder-sample"
+              id src dst meaning tokens (tcav-text tokens) oracle-text meta
+              audio-hash local consent fail timeout undo))
+
+    (defn tcav-sample (id src dst meaning oracle-text meta audio-hash local consent fail timeout undo)
+        (tcav-sample-from-tokens
+            id src dst meaning (slb-tokens (slb-line-by-meaning meaning) dst)
+            oracle-text meta audio-hash local consent fail timeout undo))
+
+    (defn tcav-kind        (s) (nth s 0))
+    (defn tcav-id          (s) (nth s 1))
+    (defn tcav-src         (s) (nth s 2))
+    (defn tcav-dst         (s) (nth s 3))
+    (defn tcav-meaning     (s) (nth s 4))
+    (defn tcav-tokens      (s) (nth s 5))
+    (defn tcav-target-text (s) (nth s 6))
+    (defn tcav-oracle-text (s) (nth s 7))
+    (defn tcav-meta        (s) (nth s 8))
+    (defn tcav-audio-hash  (s) (nth s 9))
+    (defn tcav-local       (s) (nth s 10))
+    (defn tcav-consent     (s) (nth s 11))
+    (defn tcav-fail        (s) (nth s 12))
+    (defn tcav-timeout     (s) (nth s 13))
+    (defn tcav-undo        (s) (nth s 14))
+
+    (defn tcav-phones (s) (tcav-g2p (tcav-tokens s)))
+    (defn tcav-frames (s) (tcav-acoustic-frames (tcav-tokens s) (tcav-sema-profile) (tcav-meta s)))
+    (defn tcav-samples (s) (tcav-render (tcav-tokens s) (tcav-sema-profile) (tcav-meta s)))
+
+    (defn tcav-control-clean? (s)
+        (if (eq (add (add (tcav-fail s) (tcav-timeout s)) (tcav-undo s)) 0) 1 0))
+    (defn tcav-valid? (s)
+        (if (and (str_eq (tcav-kind s) "text-conditioned-acoustic-vocoder-sample")
+                 (and (eq (tcav-local s) 1)
+                      (and (eq (tcav-consent s) 1)
+                           (and (gt (tcav-audio-hash s) 0)
+                                (and (eq (tcav-control-clean? s) 1)
+                                     (eq (sts-meta-valid? (tcav-meta s)) 1)))))) 1 0))
+
+    (defn tcav-oracle-wer (s)
+        (if (str_eq (tcav-oracle-text s) (tcav-target-text s)) 0
+            (if (str_eq (tcav-oracle-text s) "") 100
+                (sw-wer (sw-tokens (tcav-oracle-text s))
+                        (sw-tokens (tcav-target-text s))))))
+
+    (defn tcav-pass? (s max-wer)
+        (if (and (eq (tcav-valid? s) 1)
+                 (le (tcav-oracle-wer s) max-wer)) 1 0))
+
+    (defn tcav-observed-miss-action ()
+        "train-text-conditioned-acoustic-vocoder")
+
+    (defn tcav-action (s max-wer)
+        (if (eq (tcav-pass? s max-wer) 1)
+            "promote-native-acoustic-vocoder"
+            (if (eq (tcav-valid? s) 1)
+                (tcav-observed-miss-action)
+                "repair-text-conditioned-carrier")))
+
+    (defn tcav-route (s max-wer)
+        (if (eq (tcav-pass? s max-wer) 1) "native-acoustic-vocoder" "oracle-guide"))
+    (defn tcav-authority (s max-wer) (tcav-route s max-wer))
+
+    (defn tcav-receipt (s max-wer oracle device)
+        (list "text-conditioned-acoustic-vocoder"
+              (tcav-id s)
+              (tcav-src s)
+              (tcav-dst s)
+              (tcav-meaning s)
+              (len (tcav-tokens s))
+              (len (tcav-phones s))
+              (len (tcav-frames s))
+              (len (tcav-samples s))
+              (tcav-oracle-wer s)
+              (tcav-route s max-wer)
+              (tcav-action s max-wer)
+              oracle
+              device
+              (tcav-audio-hash s)
+              1
+              1
+              0
+              1))
+
+    (defn tcav-rec-kind         (r) (nth r 0))
+    (defn tcav-rec-id           (r) (nth r 1))
+    (defn tcav-rec-src          (r) (nth r 2))
+    (defn tcav-rec-dst          (r) (nth r 3))
+    (defn tcav-rec-meaning      (r) (nth r 4))
+    (defn tcav-rec-token-count  (r) (nth r 5))
+    (defn tcav-rec-phone-count  (r) (nth r 6))
+    (defn tcav-rec-frame-count  (r) (nth r 7))
+    (defn tcav-rec-sample-count (r) (nth r 8))
+    (defn tcav-rec-wer          (r) (nth r 9))
+    (defn tcav-rec-route        (r) (nth r 10))
+    (defn tcav-rec-action       (r) (nth r 11))
+    (defn tcav-rec-oracle       (r) (nth r 12))
+    (defn tcav-rec-device       (r) (nth r 13))
+    (defn tcav-rec-audio-hash   (r) (nth r 14))
+    (defn tcav-rec-native-form  (r) (nth r 15))
+    (defn tcav-rec-micro-kernel (r) (nth r 16))
+    (defn tcav-rec-neural-metal (r) (nth r 17))
+    (defn tcav-rec-local-oracle (r) (nth r 18))
+
+    0)
