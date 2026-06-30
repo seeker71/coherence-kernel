@@ -248,6 +248,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       multiseed sweep. The bridge routes `metal-anchored-native-guide`, records `1/5` live pair anchors with
       `4` still needed, and explicitly refuses `full-metal-native` until more live pairs are observed. The band
       returns `32767`.
+- [x] **Second live Metal pair anchor added.** `presence/macos-en-es-speech-roundtrip-variant.fk` reuses the
+      Form-owned macOS carrier for `en<->es`; live Apple Metal returned carrier verdict `511`, route-shift
+      `1012120012010001`, and field-code `12121210001000100` (`12/12` oracle, `12/12` native, `100%`
+      reciprocal A/B and B/A). `learn/metal-live-pair-anchors.fk` now counts `2/5` live anchors, leaves `3`
+      live pair anchors pending, and keeps the route at `metal-anchored-native-guide`. The band returns `32767`.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
