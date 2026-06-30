@@ -1,0 +1,116 @@
+; jit-source-cache-lifecycle.fk - source-byte cache/deopt/melt lifecycle.
+;
+; Compact lifecycle receipt over the hot source -> exact byte pipeline. It keeps
+; the source-runner envelope small while proving install, keep, deopt, exception,
+; rewalk, melt, and reject decisions after exact bytes are admitted.
+;
+; preludes:
+;   model/form-asm-x64.fk
+;   observe/jit-runtime-fault.fk
+;   observe/form-static-analyzer.fk
+;   observe/jit-source-byte-pipeline.fk
+
+(do
+    (defn jscl-install () 1)
+    (defn jscl-keep () 2)
+    (defn jscl-deopt () 3)
+    (defn jscl-exception-action () 4)
+    (defn jscl-rewalk () 5)
+    (defn jscl-melt () 6)
+    (defn jscl-reject () 7)
+
+    (defn jscl-entry? (e) (if (eq (len e) 10) (str_eq (nth e 0) "source-cache") 0))
+    (defn jscl-plan (e) (nth e 1))
+    (defn jscl-state (e) (nth e 2))
+    (defn jscl-sig (e) (nth e 3))
+    (defn jscl-age (e) (nth e 4))
+    (defn jscl-hits (e) (nth e 5))
+    (defn jscl-guard-fails (e) (nth e 6))
+    (defn jscl-invalidated (e) (nth e 7))
+    (defn jscl-fallback (e) (nth e 8))
+    (defn jscl-exkind (e) (nth e 9))
+
+    (defn jscl-row (plan state age hits guard-fails invalidated fallback exkind)
+        (list "source-cache" plan state 9001 age hits guard-fails invalidated fallback exkind))
+    (defn jscl-source-miss ()
+        (list "source-cache" (jsbp-good-add1) 1 999 5 20 0 0 1 (jrf-guard)))
+
+    (defn jscl-stale? (e)
+        (if (gt (jscl-age e) 100)
+            (if (lt (jscl-hits e) 2) 1 0)
+            0))
+
+    (defn jscl-deopt-safe? (e fault)
+        (if (eq (jscl-fallback e) 1)
+            (if (eq (jrf-attributed? fault) 1)
+                (if (eq (jscl-exkind e) (jrf-kind fault)) 1 0)
+                0)
+            0))
+
+    (defn jscl-action (e guard-ok runtime-ok invalidated parity-ok fault)
+        (if (eq (jscl-entry? e) 1)
+            (if (eq (jsbp-admit? (jscl-plan e)) 1)
+                (if (eq (jscl-sig e) 9001)
+                    (if (eq (jscl-invalidated e) 1)
+                        (jscl-rewalk)
+                        (if (eq invalidated 1)
+                            (jscl-rewalk)
+                            (if (eq (jscl-state e) 2)
+                                (jscl-rewalk)
+                                (if (eq (jscl-state e) 0)
+                                    (jscl-install)
+                                    (if (eq (jscl-stale? e) 1)
+                                        (jscl-melt)
+                                        (if (eq guard-ok 1)
+                                            (if (eq runtime-ok 1)
+                                                (if (eq parity-ok 1)
+                                                    (if (gt (jscl-guard-fails e) 0)
+                                                        (if (eq (jscl-deopt-safe? e fault) 1) (jscl-deopt) (jscl-reject))
+                                                        (jscl-keep))
+                                                    (if (eq (jscl-deopt-safe? e fault) 1) (jscl-deopt) (jscl-reject)))
+                                                (if (eq (jrf-attributed? fault) 1) (jscl-exception-action) (jscl-reject)))
+                                            (if (eq (jscl-deopt-safe? e fault) 1) (jscl-deopt) (jscl-reject))))))))
+                    (jscl-reject))
+                (jscl-reject))
+            (jscl-reject)))
+
+    (defn jscl-guard-ex ()
+        (jrf-exception (jrf-guard) "guard-fail" (jrf-sample-source) (jrf-sample-stack) (list 1 0)))
+    (defn jscl-bad-ex ()
+        (jrf-exception (jrf-guard) "guard-fail" (jrf-sample-source) (empty) (list 1 0)))
+
+    (defn jscl-bit (cond bit) (if cond bit 0))
+    (defn jit-source-cache-lifecycle-check ()
+        (add
+            (jscl-bit (eq (jscl-action (jscl-row (jsbp-good-add1) 0 0 0 0 0 1 (jrf-guard)) 1 1 0 1 (jscl-guard-ex)) (jscl-install)) 1)
+            (add
+                (jscl-bit (eq (jscl-action (jscl-row (jsbp-good-add1) 1 5 20 0 0 1 (jrf-guard)) 1 1 0 1 (jscl-guard-ex)) (jscl-keep)) 2)
+                (add
+                    (jscl-bit (eq (jscl-action (jscl-row (jsbp-good-add1) 1 5 20 1 0 1 (jrf-guard)) 0 1 0 1 (jscl-guard-ex)) (jscl-deopt)) 4)
+                    (add
+                        (jscl-bit (eq (jscl-action (jscl-row (jsbp-good-add1) 1 5 20 0 0 1 (jrf-div-zero)) 1 0 0 1 (jrf-div-ex)) (jscl-exception-action)) 8)
+                        (add
+                            (jscl-bit (eq (jscl-action (jscl-row (jsbp-good-add1) 1 5 20 0 1 1 (jrf-guard)) 1 1 0 1 (jscl-guard-ex)) (jscl-rewalk)) 16)
+                            (add
+                                (jscl-bit (eq (jscl-action (jscl-row (jsbp-good-add1) 1 5 20 0 0 1 (jrf-guard)) 1 1 1 1 (jscl-guard-ex)) (jscl-rewalk)) 32)
+                                (add
+                                    (jscl-bit (eq (jscl-action (jscl-row (jsbp-good-add1) 1 5 20 0 0 1 (jrf-guard)) 1 1 0 0 (jscl-guard-ex)) (jscl-deopt)) 64)
+                                    (add
+                                        (jscl-bit (eq (jscl-action (jscl-row (jsbp-good-add1) 1 120 1 0 0 1 (jrf-guard)) 1 1 0 1 (jscl-guard-ex)) (jscl-melt)) 128)
+                                        (add
+                                            (jscl-bit (eq (jscl-action (jscl-source-miss) 1 1 0 1 (jscl-guard-ex)) (jscl-reject)) 256)
+                                            (add
+                                                (jscl-bit (eq (jscl-action (jscl-row (jsbp-good-add1) 1 5 20 1 0 0 (jrf-guard)) 0 1 0 1 (jscl-guard-ex)) (jscl-reject)) 512)
+                                                (add
+                                                    (jscl-bit (eq (jscl-action (jscl-row (jsbp-cold) 0 0 0 0 0 1 (jrf-guard)) 1 1 0 1 (jscl-guard-ex)) (jscl-reject)) 1024)
+                                                    (add
+                                                        (jscl-bit (eq (jscl-action (jscl-row (jsbp-good-add1) 2 5 20 0 0 1 (jrf-guard)) 1 1 0 1 (jscl-guard-ex)) (jscl-rewalk)) 2048)
+                                                        (add
+                                                            (jscl-bit (eq (jscl-action (jscl-row (jsbp-good-add1) 1 5 20 0 0 1 (jrf-guard)) 1 0 0 1 (jscl-bad-ex)) (jscl-reject)) 4096)
+                                                            (add
+                                                                (jscl-bit (eq (jsbp-bytes-preserved? (jsbp-good-add1)) 1) 8192)
+                                                                (add
+                                                                    (jscl-bit (eq (jsbp-admit? (jsbp-good-add1)) 1) 16384)
+                                                                    (jscl-bit (eq (jrf-attributed? (jscl-guard-ex)) 1) 32768))))))))))))))))
+
+    0)
