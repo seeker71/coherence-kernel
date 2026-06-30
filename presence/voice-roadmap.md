@@ -50,8 +50,10 @@ the Form-side guide, and `presence/macos-speech-roundtrip-carrier.fk` now owns t
 `say`, `ffmpeg`, and `whisper.cpp-large-v3-turbo` through Form `host-exec` on Apple Metal for three Coherence
 Network `en<->de` prompt pairs. The native nearest-prototype model moved from 0% pretrain success to 83%
 post-training success, with A->B at 66% and B->A at 100%; the live Form verdict was 511. Wav byte extraction is
-in Form (`read_file` + `str_byte_at`), and the carrier passes wav paths rather than feature arrays. This is not
-open ASR: it is oracle-valid prototype learning over a closed prompt corpus.
+in Form (`read_file` + `str_byte_at`), and the carrier passes wav paths rather than feature arrays. The carrier
+now consumes each wav before constructing the next path, so direct-source mutable path strings cannot leak between
+samples; the rewitnessed combined code is `511121010836700`. This is not open ASR: it is oracle-valid prototype
+learning over a closed prompt corpus.
 
 Pair selection should stay diverse and grounded in our own corpus first: `coherence-network-self-corpus` 8191
 observes the translated Coherence Network web/CLI message bundles (`en`, `de`, `es`, `fr`, `id`, `pt-br`) as
@@ -62,7 +64,9 @@ bundles exist; Indigenous rows are specific (`nv`, `chr`) and stay pending until
 The model choice is now executable rather than conversational: `sanskrit-locale-baseline` 2047 provides a small
 romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, `la`, `zh`, and `ar`; `multilocale-nl-audio-pipeline`
 8191 proves closed-set NL->neutral Form->NL and audio-feature->neutral Form->audio-target loops over reciprocal
-`en<->de`, `en<->es`, `zh<->ar`, `fr<->id`, and `sa<->la`. `speech-model-auto-selection` 4095 selects today's native arms:
+`en<->de`, `en<->es`, `zh<->ar`, `fr<->id`, and `sa<->la`. `multilocale-route-shift-ledger` 4095 now records
+each pair's before/after NL rate, audio rate, route, and shifted flag, so the aggregate native route has per-pair
+witness rows. `speech-model-auto-selection` 4095 selects today's native arms:
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, and the deterministic
 formant vocoder for TTS/audio target rendering. The transformer path is trainable but not live-selected for speech
 yet; diffusion/codec speech is a named candidate only, pending a Form-native executable kernel and receipt.

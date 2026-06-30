@@ -204,7 +204,9 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       it moved native success from `0%` pretrain to `83%` post-training (`A->B 66%`, `B->A 100%`, live verdict
       `511`, metric code `121010836700`).
       Wav byte extraction is now Form-owned through `read_file` and `str_byte_at`; the carrier passes wav paths
-      and the Form body extracts the integer audio features before routing.
+      and the Form body extracts the integer audio features before routing. The carrier now also consumes each
+      generated wav before constructing the next path, avoiding retained mutable path strings in the direct-source
+      surface; the live combined witness returned `511121010836700`.
 - [x] **Coherence Network self-corpus added.** `learn/coherence-network-self-corpus.fk` records the translated
       Coherence Network web/CLI message bundles as consentful training material: `en`, `de`, `es`, `fr`, `id`,
       and `pt-br` are ready; `zh`, `ar`, and `la` are backfill targets until translated bundles land. Observed
@@ -221,6 +223,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `audio(A) features -> neutral Form meaning -> audio(B) target` over reciprocal `en<->de`, `en<->es`,
       `zh<->ar`, `fr<->id`, and `sa<->la` loops. The baseline band returns `2047`; the pipeline band returns `8191`.
       This is closed-set Form learning, not open ASR/translation.
+- [x] **Per-pair route-shift ledger added.** `learn/multilocale-route-shift-ledger.fk` makes the aggregate
+      multilocale shift observable per reciprocal pair: before/after NL rate, before/after audio rate,
+      before/after route, and a shifted flag. The band returns `4095`, proves five pairs shift from
+      `oracle-guide` to `native`, keeps one-way evidence guided, and still records native neural Metal as pending.
 - [x] **Speech model AutoML selector added.** `learn/speech-model-auto-selection.fk` makes the current model
       choice executable: ASR selects `prototype-asr` (`nearest-l1-wav-feature-prototype`), TTS selects
       `formant-vocoder` (`source-filter-formant-frames`), NL2NL selects `closed-set-locale-form`, and audio2audio
