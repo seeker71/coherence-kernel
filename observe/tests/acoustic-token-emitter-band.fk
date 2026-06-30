@@ -1,0 +1,107 @@
+; preludes:
+;   observe/wav-sense.fk
+;   observe/stt-wer.fk
+;   learn/speech-loopback-promotion.fk
+;   form/form-stdlib/observed-auto-learning.fk
+;   learn/open-dictation-transcript-learning.fk
+;   observe/speech-token-stream.fk
+;   observe/open-asr-ctc.fk
+;   observe/acoustic-token-emitter.fk
+;
+; acoustic-token-emitter-band -- supervised acoustic features emit CTC frames.
+;
+; Verdict 32767:
+;   1     prototype rows are native acoustic-token cells
+;   2     nearest integer-L1 token match selects "open"
+;   4     best distance and earned confidence are measured
+;   8     confident feature rows emit nonblank CTC frames
+;   16    silence-like rows emit CTC blank frames
+;   32    duplicate token frames collapse through CTC
+;   64    frame-token stream emits the open transcript
+;   128   confidence lowers from prototype prior by distance
+;   256   acoustic rows lower into open-dictation native success
+;   512   a clean acoustic window routes native
+;   1024  low-confidence features are cut to blank by the confidence gate
+;   2048  too-distant features are cut to blank by the distance gate
+;   4096  oracle-aligned learning admits a new token prototype
+;   8192  receipt carries audio metadata and control action
+;   16384 voice-side metadata survives through the speech token stream
+
+(do
+    (defn ate-band-truth () "Open speech flows.")
+
+    (defn ate-band-base-prototypes ()
+        (list
+            (ate-prototype "open" (list 9 7 3 2) 96)
+            (ate-prototype "speech" (list 4 8 7 3) 94)
+            (ate-prototype "" (list 0 0 0 0) 100)))
+
+    (defn ate-band-prototypes ()
+        (ate-learn
+            (ate-learn (ate-band-base-prototypes) "flows" (list 3 4 9 8) 91)
+            "soft" (list 6 6 6 6) 70))
+
+    (defn ate-band-feature-stream ()
+        (list
+            (list 8 7 3 2)
+            (list 0 0 0 0)
+            (list 4 8 6 3)
+            (list 4 8 6 3)
+            (list 0 1 0 0)
+            (list 3 5 9 8)))
+
+    (defn ate-band-low-confidence () (list 6 6 6 6))
+    (defn ate-band-distant () (list 9 9 9 9))
+
+    (defn ate-band-score (cond bit) (if cond bit 0))
+
+    (defn acoustic-token-emitter-band ()
+        (do
+            (let prototypes (ate-band-prototypes))
+            (let base (ate-band-base-prototypes))
+            (let features (ate-band-feature-stream))
+            (let open-feature (head features))
+            (let silence-feature (nth features 1))
+            (let frames (ate-frames features prototypes 2 80))
+            (let stream-meta (oact-meta frames 81 72 9 64 87))
+            (let stream (oact-stream 9201 "native-acoustic-token-emitter" "audio" frames stream-meta))
+            (let row (ate-open-row-with-meta 9201 "en" (ate-band-truth) (ate-band-truth)
+                                             features prototypes 2 80 838201 22
+                                             81 72 9 64 87))
+            (let summary (oact-route (list row row row row)))
+            (let receipt (ate-receipt 9201 "en" features prototypes 2 80 frames row))
+            (let low-frame (ate-frame (ate-band-low-confidence) prototypes 2 80))
+            (let distant-frame (ate-frame (ate-band-distant) prototypes 2 80))
+            (let learned-flow (ate-nearest (list 3 5 9 8) prototypes))
+            (let missing-flow (ate-nearest (list 3 5 9 8) base))
+            (let c0 (ate-band-score (str_eq (ate-proto-kind (head prototypes)) "acoustic-token-prototype") 1))
+            (let c1 (ate-band-score (str_eq (ate-token (ate-nearest open-feature prototypes)) "open") 2))
+            (let c2 (ate-band-score (and (eq (ate-best-distance open-feature prototypes) 1)
+                                         (ge (ate-confidence open-feature prototypes) 95)) 4))
+            (let c3 (ate-band-score (str_eq (oact-token (ate-frame open-feature prototypes 2 80)) "open") 8))
+            (let c4 (ate-band-score (str_eq (oact-token (ate-frame silence-feature prototypes 2 80)) "") 16))
+            (let c5 (ate-band-score (eq (len (oact-tokens frames)) 3) 32))
+            (let c6 (ate-band-score (str_eq (oact-transcript frames) "open speech flows") 64))
+            (let c7 (ate-band-score (eq (oact-min-conf frames) 90) 128))
+            (let c8 (ate-band-score (eq (odtl-native-success? row 25 80 2000) 1) 256))
+            (let c9 (ate-band-score (str_eq (odtl-summary-route summary) "native") 512))
+            (let c10 (ate-band-score (and (str_eq (oact-token low-frame) "")
+                                          (lt (ate-confidence (ate-band-low-confidence) prototypes) 80)) 1024))
+            (let c11 (ate-band-score (and (str_eq (oact-token distant-frame) "")
+                                          (gt (ate-best-distance (ate-band-distant) prototypes) 2)) 2048))
+            (let c12 (ate-band-score (and (str_eq (ate-token learned-flow) "flows")
+                                          (not (str_eq (ate-token missing-flow) "flows"))) 4096))
+            (let c13 (ate-band-score (and (eq (ate-receipt-audio-hash receipt) 838201)
+                                          (str_eq (ate-receipt-action receipt) "continue")) 8192))
+            (let c14 (ate-band-score (and (str_eq (sts-transcript stream) "open speech flows")
+                                          (and (eq (sts-attunement stream-meta) 87)
+                                               (eq (sts-count-tag stream (sts-receipt-tag)) 1))) 16384))
+            (add
+                (add
+                    (add (add c0 c1) (add c2 c3))
+                    (add (add c4 c5) (add c6 c7)))
+                (add
+                    (add (add c8 c9) (add c10 c11))
+                    (add (add c12 c13) c14)))))
+
+    (acoustic-token-emitter-band))
