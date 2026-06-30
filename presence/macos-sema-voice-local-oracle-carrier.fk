@@ -1,0 +1,188 @@
+; macos-sema-voice-local-oracle-carrier.fk -- live Sema formant STT probe.
+;
+; This carrier starts from Sema's Form-native voice target, renders a local
+; target-derived waveform through the host audio membrane, asks local Whisper on
+; Apple Metal what it heard, and submits the measured transcript to
+; sema-voice-local-oracle-receipt.fk. The target/formant law stays in Form; the
+; host effect is only the local wav render plus local oracle.
+;
+; This is intentionally a probe, not a claim that the current formant carrier is
+; already intelligible speech. If Whisper hears punctuation/no words, the receipt
+; routes oracle-guide and the field code records the miss.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   presence/formant-vocoder.fk
+;   learn/sema-voice-sample-loop.fk
+;   learn/sema-voice-local-oracle-receipt.fk
+
+(do
+    (defn msvlc-model () "/Users/ursmuff/.cache/whisper.cpp/ggml-large-v3-turbo.bin")
+    (defn msvlc-device () "macos-arm64-m4-max")
+    (defn msvlc-oracle () "whisper.cpp-large-v3-turbo")
+    (defn msvlc-locale () "en")
+    (defn msvlc-text () "Open speech flows.")
+    (defn msvlc-out-dir () (str_concat (temp_dir) "/sema-voice-local-oracle-form"))
+    (defn msvlc-wav-path () (str_concat (msvlc-out-dir) "/sema-formant-target.wav"))
+    (defn msvlc-max-wer () 25)
+    (defn msvlc-margin () 20)
+
+    (defn msvlc-cat3 (a b c) (str_concat a (str_concat b c)))
+    (defn msvlc-cat4 (a b c d) (str_concat a (str_concat b (str_concat c d))))
+    (defn msvlc-q (s) (msvlc-cat3 "'" s "'"))
+    (defn msvlc-digit (n) (substring "0123456789" n (add n 1)))
+    (defn msvlc-int-str (n)
+        (if (lt n 10) (msvlc-digit n)
+            (str_concat (msvlc-int-str (div n 10)) (msvlc-digit (mod n 10)))))
+
+    (defn msvlc-aeval-expr (p)
+        (str_concat
+            "aevalsrc=0.18*(sin(2*PI*"
+            (str_concat
+                (msvlc-int-str (svsl-f0 p))
+                (str_concat
+                    "*t)+0.35*sin(2*PI*"
+                    (str_concat
+                        (msvlc-int-str (svsl-f1 p))
+                        (str_concat
+                            "*t)+0.22*sin(2*PI*"
+                            (str_concat
+                                (msvlc-int-str (svsl-f2 p))
+                                (str_concat
+                                    "*t)+0.12*sin(2*PI*"
+                                    (str_concat
+                                        (msvlc-int-str (svsl-f3 p))
+                                        "*t)):s=16000:d=1.8")))))))))
+
+    (defn msvlc-render-command (p wav)
+        (str_concat
+            "ffmpeg -hide_banner -loglevel error -y -f lavfi -i "
+            (str_concat
+                (msvlc-q (msvlc-aeval-expr p))
+                (str_concat " -ac 1 -ar 16000 -c:a pcm_s16le " (msvlc-q wav)))))
+
+    (defn msvlc-whisper-command (model wav locale)
+        (str_concat
+            (str_concat "whisper-cli -m " (msvlc-q model))
+            (str_concat
+                (str_concat " -f " (msvlc-q wav))
+                (str_concat " " (msvlc-cat3 "-l " locale " -nt -np")))))
+
+    (defn msvlc-render ()
+        (do
+            (let _mk (fs_mkdir (msvlc-out-dir)))
+            (let _rm (fs_remove (msvlc-wav-path)))
+            (let _ff (host-exec (msvlc-render-command (svsl-target) (msvlc-wav-path)) ""))
+            (msvlc-wav-path)))
+
+    (defn msvlc-transcript (wav)
+        (host-exec (msvlc-whisper-command (msvlc-model) wav (msvlc-locale)) ""))
+
+    (defn msvlc-byte-hash-loop (bs i n acc)
+        (if (ge i n) acc
+            (msvlc-byte-hash-loop bs (add i 257) n
+                                  (mod (add (mul acc 31) (str_byte_at bs i)) 1000000007))))
+    (defn msvlc-audio-hash (path)
+        (do
+            (let bs (read_file path))
+            (msvlc-byte-hash-loop bs 0 (str_len bs) 1)))
+
+    (defn msvlc-text-wer (hyp)
+        (if (str_eq hyp (msvlc-text)) 0
+            (if (str_eq hyp "") 100
+                (sw-wer (sw-tokens hyp) (sw-tokens (msvlc-text))))))
+
+    (defn msvlc-rough-profile ()
+        (svsl-profile "rough"
+                      145 620 1250 2850 130
+                      55 82 48 42 44 2))
+    (defn msvlc-incumbent ()
+        (svsl-sample (msvlc-rough-profile) 56 70 22 160 1 981001 0 0 0))
+
+    (defn msvlc-sample (audio-hash transcript fail timeout undo)
+        (svsl-sample (svsl-target) 0 0 (msvlc-text-wer transcript) 0 1 audio-hash fail timeout undo))
+
+    (defn msvlc-row-from (audio-hash transcript fail timeout undo)
+        (svlor-row 981002
+                   (msvlc-locale)
+                   (msvlc-text)
+                   transcript
+                   (msvlc-oracle)
+                   (msvlc-device)
+                   (msvlc-sample audio-hash transcript fail timeout undo)
+                   (svlor-audio audio-hash 16000 1)
+                   1
+                   1
+                   (svlor-controls fail timeout undo)))
+
+    (defn msvlc-row (wav transcript)
+        (msvlc-row-from (msvlc-audio-hash wav) transcript 0 0 0))
+
+    (defn msvlc-receipt (row)
+        (svlor-receipt (msvlc-incumbent) row (svsl-target) (msvlc-max-wer) (msvlc-margin)))
+
+    (defn msvlc-honest-route? (rec)
+        (if (eq (svlor-rec-oracle-ok rec) 1)
+            (if (str_eq (svlor-rec-route rec) "native-sema-voice") 1 0)
+            (if (str_eq (svlor-rec-route rec) "oracle-guide") 1 0)))
+
+    (defn msvlc-route-code (rec)
+        (if (str_eq (svlor-rec-route rec) "native-sema-voice") 1 2))
+
+    (defn msvlc-verdict (row rec)
+        (add
+            (add
+                (add (if (str_eq (svlor-kind row) "sema-voice-local-oracle-row") 1 0)
+                     (if (eq (svlor-audio-present? row) 1) 2 0))
+                (add (if (eq (svlor-audio-consistent? row) 1) 4 0)
+                     (if (ge (svlor-oracle-wer row) 0) 8 0)))
+            (add
+                (add (if (eq (svlor-valid? row) 1) 16 0)
+                     (if (eq (svlor-rec-oracle-ok rec) 1) 32 0))
+                (add (if (eq (msvlc-honest-route? rec) 1) 64 0)
+                     (add (if (and (str_eq (svlor-rec-oracle rec) (msvlc-oracle))
+                                   (str_eq (svlor-rec-device rec) (msvlc-device))) 128 0)
+                          (if (and (eq (svlor-rec-native-form rec) 1)
+                                   (eq (svlor-rec-neural-vocoder rec) 0)) 256 0))))))
+
+    (defn msvlc-field-code (row rec)
+        (add
+            (add (mul (svlor-audio-present? row) 100000000)
+                 (mul (svlor-valid? row) 10000000))
+            (add
+                (add (mul (svlor-rec-oracle-ok rec) 1000000)
+                     (mul (svlor-oracle-wer row) 1000))
+                (msvlc-route-code rec))))
+
+    (defn msvlc-host-tools-ready? ()
+        (if (str_eq (host-exec "command -v ffmpeg >/dev/null && command -v whisper-cli >/dev/null && printf 1 || printf 0" "") "1") 1 0))
+    (defn msvlc-ready? ()
+        (if (and (eq (fs_exists (msvlc-model)) 1) (eq (msvlc-host-tools-ready?) 1)) 1 0))
+
+    (defn msvlc-run ()
+        (if (eq (msvlc-ready?) 1)
+            (do
+                (let wav (msvlc-render))
+                (let transcript (msvlc-transcript wav))
+                (let row (msvlc-row wav transcript))
+                (msvlc-verdict row (msvlc-receipt row)))
+            0))
+
+    (defn msvlc-run-field-code ()
+        (if (eq (msvlc-ready?) 1)
+            (do
+                (let wav (msvlc-render))
+                (let transcript (msvlc-transcript wav))
+                (let row (msvlc-row wav transcript))
+                (msvlc-field-code row (msvlc-receipt row)))
+            0))
+
+    (defn msvlc-run-oracle-wer ()
+        (if (eq (msvlc-ready?) 1)
+            (do
+                (let wav (msvlc-render))
+                (let transcript (msvlc-transcript wav))
+                (svlor-oracle-wer (msvlc-row wav transcript)))
+            999))
+
+    0)
