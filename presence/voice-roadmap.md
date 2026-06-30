@@ -45,8 +45,8 @@ Cross-locale learning should grow reciprocal trust: `bidirectional-locale-roundt
 A->A, and B->B to improve before route trust expands. If one direction leads, it routes `oracle-guide` and asks
 for the return path instead of pretending the missing side failed.
 
-Mac metal now has six reciprocal audio-locale training anchors: `en<->de`, `en<->es`, `en<->id`, `en<->fr`,
-`en<->it`, and `en<->zh`.
+Mac metal now has seven reciprocal audio-locale training anchors: `en<->de`, `en<->es`, `en<->id`, `en<->fr`,
+`en<->it`, `en<->zh`, and `en<->ar`.
 `audio-locale-native-training` 8191 defines the Form-side guide, and `presence/macos-speech-roundtrip-carrier.fk`
 owns the macOS loop. It invokes local `say`, `ffmpeg`, and `whisper.cpp-large-v3-turbo` through Form `host-exec`
 on Apple Metal for closed Coherence prompt pairs. The first `en<->de` anchor moved from 0% pretrain success to 83%
@@ -54,12 +54,12 @@ post-training success, with A->B at 66% and B->A at 100%; the `en<->es` and `en<
 12/12 oracle-ok, 12/12 native, and 100% reciprocal directions; the `en<->fr` variant returned 10/12 oracle-ok,
 10/12 native, 83% total, A->B at 100%, and B->A at 66%; the `en<->it` variant returned 12/12 oracle-ok,
 12/12 native, and 100% reciprocal directions; the `en<->zh` variant returned 10/12 oracle-ok, 10/12 native,
-83% total, A->B at 66%, and B->A at 100% through live Chinese prompt audio. Wav byte extraction is in Form (`read_file` + `str_byte_at`), and
+83% total, A->B at 66%, and B->A at 100% through live Chinese prompt audio; the `en<->ar` variant returned
+12/12 oracle-ok, 12/12 native, and 100% reciprocal directions through live Arabic prompt audio. Wav byte extraction is in Form (`read_file` + `str_byte_at`), and
 the carrier passes wav paths rather than feature arrays. The Indonesian side uses the same
 Damayanti local voice for train/eval on this device because that is the installed macOS voice boundary. The
-French and Italian prompt text was witnessed as ASCII; Chinese is now the first live Unicode-script audio anchor,
-while Arabic remains pending on this Mac until a local voice or native carrier is present. This is not open ASR:
-it is oracle-valid prototype learning over a closed prompt corpus.
+French and Italian prompt text was witnessed as ASCII; Chinese and Arabic are now live Unicode-script audio
+anchors. This is not open ASR: it is oracle-valid prototype learning over a closed prompt corpus.
 
 Pair selection should stay diverse and grounded in our own corpus first: `coherence-network-self-corpus` 8191
 observes the translated Coherence Network web/CLI message bundles (`en`, `de`, `es`, `fr`, `id`, `pt-br`) as
@@ -80,8 +80,8 @@ challenger, and neural Metal/diffusion remain pending. `speech-model-auto-select
 prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, and the deterministic
 formant vocoder for TTS/audio target rendering. The transformer path is trainable but not live-selected for speech
 yet; diffusion/codec speech is a named candidate only, pending a Form-native executable kernel and receipt. The
-live Metal anchor set now stands at 6/6, so `full-metal-native` is an honest route for the closed-prompt carrier.
-Live Arabic-script speech anchoring, open dictation, and native neural ASR/TTS remain the next named climbs.
+live Metal anchor set now stands at 7/7, so `full-metal-native` is an honest route for the closed-prompt carrier.
+Open dictation and native neural ASR/TTS remain the next named climbs.
 
 ## What the siblings caught — missing first-class layers (the roadmap)
 
