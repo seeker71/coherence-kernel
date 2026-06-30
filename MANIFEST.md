@@ -131,6 +131,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       choice, exceptions, async) as thin expressions over ONE mechanism (`oac-kind` + `oac-offer`), derived from
       axiom-5. Four-way-proven in the origin (1023); re-proof here pends the Form-native eval lane (the C `--src`
       seed does not carry `oac-offer`'s indirect call by design). See `receipts/2026-06-29-offer-ack-control-core.md`.
+- [x] **Pattern matching / destructuring (stone S10)** — `control/pattern-match.fk`: `pm-match(cell, clauses)`
+      returns the first clause whose pattern-SHAPE (ctor-tag + arity — axiom-3 structural match) fits the cell,
+      its holes bound to the cell's children (axiom-2 destructure); no clause fits → the canonical first-class
+      nothing (axiom-1). Clauses are DATA (the holographic discipline, no hardcoded branches). Band verdict
+      **511 FOUR-WAY** (Go/Rust/TS/fkwu `--src`) over the pure-list cell surface; the canonical-nothing arm is
+      fkwu-native (the walkers carry the cell surface, not the nothing op). See `receipts/2026-06-29-stone-10-pattern-match.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
