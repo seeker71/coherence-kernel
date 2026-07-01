@@ -6,12 +6,12 @@ Form-native seeded windows into neural training.
 Current neural pair coverage:
 
 ```text
-trained unordered neural pairs: 11
-trained directed neural pair routes: 22
-neural training epochs: 11
-native neural parameters: 11
+trained unordered neural pairs: 12
+trained directed neural pair routes: 24
+neural training epochs: 12
+native neural parameters: 12
 broad ready pair space: 55 unordered / 110 directed
-neural coverage: 2000 basis points
+neural coverage: 2181 basis points
 ```
 
 Current Form-native seeded reciprocal coverage:
@@ -38,8 +38,8 @@ audio NL2NL bridge routes: 12 oracle-guided routes, not native vocoder and not n
 Trained neural micro-pair:
 
 ```text
-pairs: en<->fr, en<->pt-br, en<->id, en<->zh, en<->ar, en<->la, en<->de, en<->es, en<->sa, zh<->ar, sa<->la
-files: learn/speech-native-neural-pair-window-0001.fk, learn/speech-native-neural-pair-window-0002.fk, learn/speech-native-neural-pair-window-0003.fk, learn/speech-native-neural-pair-window-0004.fk, learn/speech-native-neural-pair-window-0005.fk, learn/speech-native-neural-pair-window-0006.fk, learn/speech-native-neural-pair-window-0007.fk, learn/speech-native-neural-pair-window-0008.fk, learn/speech-native-neural-pair-window-0009.fk, learn/speech-native-neural-pair-window-0010.fk, learn/speech-native-neural-pair-window-0011.fk
+pairs: en<->fr, en<->pt-br, en<->id, en<->zh, en<->ar, en<->la, en<->de, en<->es, en<->sa, zh<->ar, sa<->la, zh<->sa
+files: learn/speech-native-neural-pair-window-0001.fk, learn/speech-native-neural-pair-window-0002.fk, learn/speech-native-neural-pair-window-0003.fk, learn/speech-native-neural-pair-window-0004.fk, learn/speech-native-neural-pair-window-0005.fk, learn/speech-native-neural-pair-window-0006.fk, learn/speech-native-neural-pair-window-0007.fk, learn/speech-native-neural-pair-window-0008.fk, learn/speech-native-neural-pair-window-0009.fk, learn/speech-native-neural-pair-window-0010.fk, learn/speech-native-neural-pair-window-0011.fk, learn/speech-native-neural-pair-window-0012.fk
 boundary: non-zero trained pair coverage, not full open ASR/TTS authority
 ```
 
