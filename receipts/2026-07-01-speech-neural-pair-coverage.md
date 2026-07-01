@@ -6,33 +6,41 @@ Form-native seeded windows into neural training.
 Current neural pair coverage:
 
 ```text
-trained unordered neural pairs: 0
-trained directed neural pair routes: 0
-neural training epochs: 0
-native neural parameters: 0
+trained unordered neural pairs: 1
+trained directed neural pair routes: 2
+neural training epochs: 1
+native neural parameters: 1
 broad ready pair space: 55 unordered / 110 directed
-neural coverage: 0 basis points
+neural coverage: 181 basis points
 ```
 
 Current Form-native seeded reciprocal coverage:
 
 ```text
-seeded reciprocal pair windows: 7
-directed cross-locale directions: 14
-roundtrip lanes: 28 A->B, B->A, A->A, and B->B lanes across NL and audio windows
+seeded reciprocal pair windows: 8
+directed cross-locale directions: 16
+roundtrip lanes: 32 A->B, B->A, A->A, and B->B lanes across NL and audio windows
 ready rate: 100
-broad ready coverage: 1272 basis points
+broad ready coverage: 1454 basis points
 Sanskrit-baseline pair space: 45 unordered / 90 directed
-Sanskrit-baseline coverage: 1555 basis points
+Sanskrit-baseline coverage: 1777 basis points
 ```
 
 Observed Form-native/prototype pairs:
 
 ```text
-Form windows: zh<->ar, en<->id, sa<->la, fr<->id, pt-br<->zh, en<->de, en<->es
+Form windows: zh<->ar, en<->id, sa<->la, fr<->id, pt-br<->zh, en<->de, en<->es, en<->fr
 segmented source-ASR prototypes: sa<->la, en<->zh, ar<->en
 live Metal anchors: en<->de, en<->es, en<->id, en<->fr, en<->it, en<->zh, en<->ar
 audio NL2NL bridge routes: 12 oracle-guided routes, not native vocoder and not neural
+```
+
+Trained neural micro-pair:
+
+```text
+pair: en<->fr
+file: learn/speech-native-neural-pair-window-0001.fk
+boundary: non-zero trained pair coverage, not full open ASR/TTS authority
 ```
 
 Witness:
@@ -47,6 +55,7 @@ cat learn/speech-neural-pair-coverage.fk \
 32767
 ```
 
-Meaning: locale `A => neural => B` and `B => neural => A` coverage is still
-zero. The current movement is real but it is Form-native/prototype and
-closed-set, guided by local oracles and the Sanskrit/multi-locale baseline.
+Meaning: locale `A => neural => B` and `B => neural => A` coverage is now
+non-zero. The current movement is a trained Form-native neural micro-pair,
+guided by local oracles and the Sanskrit/multi-locale baseline; full open
+ASR/TTS authority remains the target, not the current claim.
