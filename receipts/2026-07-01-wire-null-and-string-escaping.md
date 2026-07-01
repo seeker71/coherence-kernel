@@ -65,6 +65,8 @@ Full regression, fresh build, clean /tmp/come-in-band-dir:
   gap while checking this one (`node_value` of a trivial bool doesn't behave the way
   `cser-emit-leaf` would need to treat it as JSON `true`/`false`) — not touched, since it wasn't
   part of what was asked and fixing it well needs its own investigation, not a rushed add-on.
-- `json.fk` itself remains unfixed (root cause #3 from `2026-07-01-json-fk-src-scoping-fix.md`).
+- ~~`json.fk` itself remains unfixed (root cause #3 from `2026-07-01-json-fk-src-scoping-fix.md`).~~
+  **Corrected later the same day:** genuinely fixed now, root cause #3 was a misdiagnosis — see
+  `2026-07-01-json-fk-actually-fixed.md`.
 - CDR's IEEE754 `double`, GIOP framing, IIOP transport — unchanged scope limits from the
   previous receipt.

@@ -1,3 +1,15 @@
+> **Correction, same day:** everything below through root causes #1 and #2 stands — both are real,
+> both fixes shipped and hold. But **"root cause #3" (below) was a misdiagnosis, not a fourth
+> interpreter bug.** `json.fk` genuinely IS fixed now — see
+> [`2026-07-01-json-fk-actually-fixed.md`](2026-07-01-json-fk-actually-fixed.md) for the full,
+> corrected account: `json-next-token` itself forward-referenced its own tokenizer helpers (root
+> cause #2, not yet fixed at the time this receipt was written), and the "self-recursion in an
+> unreached branch corrupts a taken one" repro below was — once retested with a properly
+> structurally-verified rewrite, not a paren-count-only check — actually a construction mistake in
+> that rewrite (a missing closing paren left `json-parse`'s `if (eq mode 0)` with no else-branch,
+> silently orphaning modes 1–4 as dead top-level junk). Left standing below, uncorrected in place,
+> so the record shows what was actually claimed and when.
+
 # Receipt — two real `fkwu --src` evaluator constraints found and fixed, one found and not (2026-07-01)
 
 **What actually shipped:** `cell-serialize.fk`'s content-addressed values+types+identity JSON
