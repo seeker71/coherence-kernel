@@ -6,6 +6,11 @@ keeps two scopes separate:
 - Global live authority: what can run as the broad live route today.
 - Scoped trial windows: what has passed in bounded, receipt-backed trials.
 
+Update on 2026-07-01: `receipts/2026-07-01-sema-voice-oracle-nonzero.md`
+supersedes the Sema voice oracle numerator in this ledger. The local teacher
+oracle row is now admitted as Sema voice oracle evidence; native Sema voice
+authority remains held.
+
 Witness:
 
 ```sh
@@ -17,6 +22,7 @@ cat learn/speech-model-metrics-report.fk \
     learn/speech-open-asr-trial-window-0003.fk \
     learn/sema-voice-trial-window.fk \
     learn/sema-voice-trial-window-0002.fk \
+    learn/sema-voice-authority-floor.fk \
     learn/speech-current-status-ledger.fk \
     learn/tests/speech-current-status-ledger-band.fk > /tmp/speech-current-status-ledger.fk
 ./fkwu --src /tmp/speech-current-status-ledger.fk
@@ -25,9 +31,9 @@ cat learn/speech-model-metrics-report.fk \
 
 Current model size and composition:
 
-- Native neural weight parameters admitted: `20`.
+- Native neural weight parameters admitted: `21`.
 - Selected arms: `4`.
-- Major Form components plus scoped trial windows: `23`.
+- Major Form components plus scoped trial windows: `24`.
 - Native Sema voice organs/components: `6`.
 - Scoped native trial windows: `5`.
 - C seed growth: `0`.
@@ -35,8 +41,8 @@ Current model size and composition:
 Global live authority remains guarded:
 
 - Open dictation: local oracle `4/4`, native `0/4`.
-- Sema live voice: local oracle `0/1`, native `0/1`, WER `100`.
-- Combined global live rows: oracle `4/5 = 80%`, native `0/5 = 0%`.
+- Sema live voice: local oracle `1/1`, native `0/1`, native WER `100`.
+- Combined global live rows: oracle `5/5 = 100%`, native `0/5 = 0%`.
 
 Scoped trial windows have moved:
 
