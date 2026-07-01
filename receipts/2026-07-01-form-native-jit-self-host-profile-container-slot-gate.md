@@ -26,7 +26,7 @@ Date: 2026-07-01
 
 ```text
 33554431
-16777215
+33554431
 16777215
 536870911
 ```
@@ -40,7 +40,9 @@ completion total moves from 16777215 to 33554431 and rejects stale or missing
 profile-derived container live-slot evidence before native-witness admission.
 
 Downstream receipt consumers were updated to expect the stronger self-host
-completion total while keeping their own witness totals stable:
+completion total. A later native-witness hardening also raised the native
+witness sweep total to `33554431` by rejecting the stale self-host completion
+receipt:
 
 - `observe/jit-native-witness-sweep.fk`
 - `observe/jit-live-runtime-integration.fk`

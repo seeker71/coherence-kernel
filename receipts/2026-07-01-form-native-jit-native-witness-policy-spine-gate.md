@@ -8,7 +8,7 @@ Date: 2026-07-01
 ( cat observe/jit-native-witness-sweep.fk \
       observe/tests/jit-native-witness-sweep-band.fk ) > /tmp/jnws.fk
 ./fkwu --src /tmp/jnws.fk
-# 16777215
+# 33554431
 ```
 
 ## Receipt
@@ -25,6 +25,9 @@ analysis, stack/frame, representation, register, runtime-fault, and deopt/cache
 policy families coexist under the current source-runner envelope. The native
 witness already required the leaf receipts; this gate makes the composed policy
 spine itself part of the higher native-readiness chain.
+
+A later self-host completion hardening raised this same witness to `33554431`
+by rejecting the stale `self-host-completion-sweep = 16777215` receipt.
 
 Updated direct consumers of the native witness total:
 
