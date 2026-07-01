@@ -8,7 +8,7 @@ Date: 2026-06-30
 ( cat observe/jit-source-replacement-runtime.fk \
       observe/tests/jit-source-replacement-runtime-band.fk ) > /tmp/jsrr.fk
 ./fkwu --src /tmp/jsrr.fk
-# 67108863
+# 134217727
 ```
 
 ## What Landed
@@ -18,12 +18,16 @@ replacement runtime handoff. It proves the source recipe must carry static
 analysis, profile/category/tier, inline/frame/access/register facts, lower
 through Form IR/backend bytes, and enter a replacement runtime with source
 attribution, checked exceptions, deopt, melt, and parity.
+It now also requires the source-to-dylib runtime executor receipt before the
+source replacement contract can pass.
 
 ## Proved
 
 - native-witness, replacement-runtime, static-analyzer, source-byte,
   backend-bytes, runtime-stack, source-runtime orchestrator, and source
   live-native executor receipts compose;
+- source-to-dylib runtime executor receipts compose into the source replacement
+  contract before the source runtime can feed the final native gates;
 - a hot source recipe requires source attribution, static clean status,
   profile receipt, numeric category collapse, tiering, inline/frame/access
   facts, register facts, and positive generation;
@@ -39,7 +43,8 @@ attribution, checked exceptions, deopt, melt, and parity.
 - missing source attribution, bad static state, missing category collapse,
   missing backend, bad byte count, foreign lowering owner, missing stack,
   missing exception maps, bad source-runtime orchestrator/executor receipts,
-  and bad replacement-runtime receipts reject readiness.
+  missing source-dylib executor receipts, and bad replacement-runtime receipts
+  reject readiness.
 
 ## Honest Boundary
 
