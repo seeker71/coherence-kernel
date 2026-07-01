@@ -793,6 +793,17 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       the mid-sweep dip is reported as a real, unresolved artifact, not smoothed over. See
       `receipts/2026-07-01-nl-meaning-net.md` (original) and
       `receipts/2026-07-01-nl-meaning-net-corrected.md` (the diagnosis and fix).
+- [x] **Fixed: a nested `defn` silently erased its enclosing `do`'s `let` bindings.** `runtime/fkwu-uni.c`'s
+      two defn-parsing sites reset the shared parse-time binding stack (`fk_bd_top = 0`) so a function's own
+      body can't read its caller's locals — correct, but `fk_bd_push` writes into fixed global arrays at that
+      index, so the reset **overwrote** the enclosing `do`'s earlier `let` data rather than just hiding it,
+      and was never restored. Every name the enclosing `do` had bound silently degraded to the unbound-name
+      default (`0`) for the rest of its own parsing. New `fk_bd_save()`/`fk_bd_restore()` save/restore the
+      actual array slice, not just the counter (a counter-only first attempt did not fix the repro). When the
+      enclosing scope's stack was already empty — true for every leading top-level `defn`, the convention
+      this whole codebase already follows — the fix is a provable no-op, not just an empirically-checked one.
+      Verified against every band this session touched (9 bands, all unchanged) plus a grammar spot-check
+      identical on the old and new binary. See `receipts/2026-07-01-defn-scope-corruption-fix.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
