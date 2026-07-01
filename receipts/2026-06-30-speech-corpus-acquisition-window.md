@@ -21,7 +21,7 @@ voices per locale: 1
 planned wavs: 12000
 planned held-out rows: 1200
 floor: 12000 wavs, 6 locales, 1200 held-out rows
-captured: 30 rows in batches 0001 and 0002; full 12000-row window not captured
+captured: 64 admitted rows in batches 0001 through 0003; full 12000-row window not captured
 trained: false
 status: corpus-scale-window-open-not-trained
 ```
