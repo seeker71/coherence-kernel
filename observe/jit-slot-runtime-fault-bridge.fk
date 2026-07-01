@@ -1,0 +1,207 @@
+; jit-slot-runtime-fault-bridge.fk - source-attributed fault routing for live slots.
+;
+; A dylib slot can only be treated as a live native replacement when its
+; runtime failures still return through the Form exception/deopt/melt contract.
+; This bridge ties dylib/profile/container slot receipts to the full-stack
+; source attribution receipts, so a slot hit may route native only after
+; bounds/null/div-zero/type failures have an attributed exception path.
+;
+; preludes:
+;   observe/jit-runtime-fault.fk
+;   observe/jit-runtime-stack-attribution.fk
+
+(do
+    (defn jsrf-native () 1)
+    (defn jsrf-deopt () 2)
+    (defn jsrf-exception () 3)
+    (defn jsrf-rewalk () 4)
+    (defn jsrf-melt () 5)
+    (defn jsrf-reject () 6)
+
+    (defn jsrf-dylib () 11)
+    (defn jsrf-profile-dylib () 12)
+    (defn jsrf-container () 13)
+
+    (defn jsrf-ok () 21)
+    (defn jsrf-unavailable () 22)
+    (defn jsrf-fault () 23)
+    (defn jsrf-mismatch () 24)
+    (defn jsrf-stale () 25)
+    (defn jsrf-invalidated () 26)
+
+    ; receipt = ("slot-runtime-fault-receipt" name total expected source maps)
+    (defn jsrf-receipt (name total expected source maps)
+        (list "slot-runtime-fault-receipt" name total expected source maps))
+    (defn jsrf-receipt? (r) (if (eq (len r) 6) (str_eq (nth r 0) "slot-runtime-fault-receipt") 0))
+    (defn jsrf-total (r) (nth r 2))
+    (defn jsrf-expected (r) (nth r 3))
+    (defn jsrf-source (r) (nth r 4))
+    (defn jsrf-maps (r) (nth r 5))
+
+    (defn jsrf-receipt-ok? (r)
+        (if (eq (jsrf-receipt? r) 1)
+            (if (eq (jsrf-total r) (jsrf-expected r))
+                (if (eq (jsrf-source r) 1)
+                    (if (eq (jsrf-maps r) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jsrf-runtime-fault () (jsrf-receipt "runtime-fault" 255 255 1 1))
+    (defn jsrf-runtime-stack () (jsrf-receipt "runtime-stack-attribution" 1023 1023 1 1))
+    (defn jsrf-host-exception () (jsrf-receipt "host-exception-bridge" 524287 524287 1 1))
+    (defn jsrf-dylib-slot-runtime () (jsrf-receipt "dylib-slot-runtime" 262143 262143 1 1))
+    (defn jsrf-profile-slot-runtime () (jsrf-receipt "profile-dylib-slot-runtime" 524287 524287 1 1))
+    (defn jsrf-container-slot-runtime () (jsrf-receipt "container-live-slot-runtime" 1048575 1048575 1 1))
+    (defn jsrf-bad-runtime-fault () (jsrf-receipt "runtime-fault" 254 255 1 1))
+
+    (defn jsrf-receipts-ok? ()
+        (if (eq (jsrf-receipt-ok? (jsrf-runtime-fault)) 1)
+            (if (eq (jsrf-receipt-ok? (jsrf-runtime-stack)) 1)
+                (if (eq (jsrf-receipt-ok? (jsrf-host-exception)) 1)
+                    (if (eq (jsrf-receipt-ok? (jsrf-dylib-slot-runtime)) 1)
+                        (if (eq (jsrf-receipt-ok? (jsrf-profile-slot-runtime)) 1)
+                            (if (eq (jsrf-receipt-ok? (jsrf-container-slot-runtime)) 1) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jsrf-family-known? (family)
+        (if (eq family (jsrf-dylib)) 1
+            (if (eq family (jsrf-profile-dylib)) 1
+                (if (eq family (jsrf-container)) 1 0))))
+
+    (defn jsrf-status-known? (status)
+        (if (eq status (jsrf-ok)) 1
+            (if (eq status (jsrf-unavailable)) 1
+                (if (eq status (jsrf-fault)) 1
+                    (if (eq status (jsrf-mismatch)) 1
+                        (if (eq status (jsrf-stale)) 1
+                            (if (eq status (jsrf-invalidated)) 1 0)))))))
+
+    ; bridge = ("slot-runtime-fault-bridge" family status source stack exception deopt melt parity generation)
+    (defn jsrf-bridge (family status source stack exception deopt melt parity generation)
+        (list "slot-runtime-fault-bridge" family status source stack exception deopt melt parity generation))
+    (defn jsrf-bridge? (b) (if (eq (len b) 10) (str_eq (nth b 0) "slot-runtime-fault-bridge") 0))
+    (defn jsrf-family (b) (nth b 1))
+    (defn jsrf-status (b) (nth b 2))
+    (defn jsrf-bridge-source (b) (nth b 3))
+    (defn jsrf-stack (b) (nth b 4))
+    (defn jsrf-ex (b) (nth b 5))
+    (defn jsrf-deopt-proof (b) (nth b 6))
+    (defn jsrf-melt-proof (b) (nth b 7))
+    (defn jsrf-parity-proof (b) (nth b 8))
+    (defn jsrf-generation (b) (nth b 9))
+
+    (defn jsrf-contract-ready? (b)
+        (if (eq (jsrf-bridge? b) 1)
+            (if (eq (jsrf-receipts-ok?) 1)
+                (if (eq (jsrf-family-known? (jsrf-family b)) 1)
+                    (if (eq (jsrf-status-known? (jsrf-status b)) 1)
+                        (if (eq (jrf-source-complete? (jsrf-bridge-source b)) 1)
+                            (if (eq (jrsa-all-frames-attributed? (jsrf-stack b)) 1)
+                                (if (gt (len (jsrf-stack b)) 0)
+                                    (if (eq (jrsa-exception-complete? (jsrf-ex b)) 1)
+                                        (if (eq (jsrf-deopt-proof b) 1)
+                                            (if (eq (jsrf-melt-proof b) 1)
+                                                (if (eq (jsrf-parity-proof b) 1)
+                                                    (if (gt (jsrf-generation b) 0) 1 0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jsrf-action (b guard-ok runtime-ok parity-ok)
+        (if (eq (jsrf-contract-ready? b) 1)
+            (if (eq (jsrf-status b) (jsrf-mismatch))
+                (jsrf-reject)
+                (if (eq (jsrf-status b) (jsrf-stale))
+                    (jsrf-melt)
+                    (if (eq (jsrf-status b) (jsrf-invalidated))
+                        (jsrf-rewalk)
+                        (if (eq (jsrf-status b) (jsrf-unavailable))
+                            (jsrf-deopt)
+                            (if (eq (jsrf-status b) (jsrf-fault))
+                                (jsrf-exception)
+                                (if (eq guard-ok 1)
+                                    (if (eq runtime-ok 1)
+                                        (if (eq parity-ok 1) (jsrf-native) (jsrf-deopt))
+                                        (jsrf-exception))
+                                    (jsrf-deopt)))))))
+            (jsrf-reject)))
+
+    (defn jsrf-dylib-ok ()
+        (jsrf-bridge (jsrf-dylib) (jsrf-ok) (jrsa-source-top) (jrsa-stack-good) (jrsa-bounds-ex) 1 1 1 1))
+    (defn jsrf-profile-ok ()
+        (jsrf-bridge (jsrf-profile-dylib) (jsrf-ok) (jrsa-source-top) (jrsa-stack-good) (jrsa-div-ex) 1 1 1 2))
+    (defn jsrf-container-ok ()
+        (jsrf-bridge (jsrf-container) (jsrf-ok) (jrsa-source-top) (jrsa-stack-good) (jrsa-bounds-ex) 1 1 1 3))
+    (defn jsrf-unavailable-slot ()
+        (jsrf-bridge (jsrf-dylib) (jsrf-unavailable) (jrsa-source-top) (jrsa-stack-good) (jrsa-bounds-ex) 1 1 1 4))
+    (defn jsrf-fault-slot ()
+        (jsrf-bridge (jsrf-profile-dylib) (jsrf-fault) (jrsa-source-top) (jrsa-stack-good) (jrsa-div-ex) 1 1 1 5))
+    (defn jsrf-mismatch-slot ()
+        (jsrf-bridge (jsrf-container) (jsrf-mismatch) (jrsa-source-top) (jrsa-stack-good) (jrsa-bounds-ex) 1 1 1 6))
+    (defn jsrf-stale-slot ()
+        (jsrf-bridge (jsrf-dylib) (jsrf-stale) (jrsa-source-top) (jrsa-stack-good) (jrsa-bounds-ex) 1 1 1 7))
+    (defn jsrf-invalidated-slot ()
+        (jsrf-bridge (jsrf-profile-dylib) (jsrf-invalidated) (jrsa-source-top) (jrsa-stack-good) (jrsa-div-ex) 1 1 1 8))
+    (defn jsrf-missing-stack ()
+        (jsrf-bridge (jsrf-dylib) (jsrf-ok) (jrsa-source-top) (empty) (jrsa-bounds-ex) 1 1 1 9))
+    (defn jsrf-zero-generation ()
+        (jsrf-bridge (jsrf-dylib) (jsrf-ok) (jrsa-source-top) (jrsa-stack-good) (jrsa-bounds-ex) 1 1 1 0))
+    (defn jsrf-unknown-family ()
+        (jsrf-bridge 99 (jsrf-ok) (jrsa-source-top) (jrsa-stack-good) (jrsa-bounds-ex) 1 1 1 10))
+
+    (defn jsrf-bit (cond bit) (if cond bit 0))
+    (defn jit-slot-runtime-fault-bridge-check ()
+        (add
+            (jsrf-bit (eq (jsrf-receipts-ok?) 1) 1)
+            (add
+                (jsrf-bit (eq (jsrf-contract-ready? (jsrf-dylib-ok)) 1) 2)
+                (add
+                    (jsrf-bit (eq (jsrf-contract-ready? (jsrf-profile-ok)) 1) 4)
+                    (add
+                        (jsrf-bit (eq (jsrf-contract-ready? (jsrf-container-ok)) 1) 8)
+                        (add
+                            (jsrf-bit (eq (jrsa-exception-complete? (jrsa-bounds-ex)) 1) 16)
+                            (add
+                                (jsrf-bit (eq (jrsa-exception-complete? (jrsa-div-ex)) 1) 32)
+                                (add
+                                    (jsrf-bit (eq (jrsa-exception-parity? (jrsa-bounds-ex) (jrsa-bounds-ex)) 1) 64)
+                                    (add
+                                        (jsrf-bit (eq (jsrf-action (jsrf-mismatch-slot) 1 1 1) (jsrf-reject)) 128)
+                                        (add
+                                            (jsrf-bit (eq (jsrf-action (jsrf-dylib-ok) 1 1 1) (jsrf-native)) 256)
+                                            (add
+                                                (jsrf-bit (eq (jsrf-action (jsrf-dylib-ok) 0 1 1) (jsrf-deopt)) 512)
+                                                (add
+                                                    (jsrf-bit (eq (jsrf-action (jsrf-dylib-ok) 1 0 1) (jsrf-exception)) 1024)
+                                                    (add
+                                                        (jsrf-bit (eq (jsrf-action (jsrf-invalidated-slot) 1 1 1) (jsrf-rewalk)) 2048)
+                                                        (add
+                                                            (jsrf-bit (eq (jsrf-action (jsrf-stale-slot) 1 1 1) (jsrf-melt)) 4096)
+                                                            (add
+                                                                (jsrf-bit (eq (jsrf-action (jsrf-dylib-ok) 1 1 0) (jsrf-deopt)) 8192)
+                                                                (add
+                                                                    (jsrf-bit (eq (jsrf-action (jsrf-unavailable-slot) 1 1 1) (jsrf-deopt)) 16384)
+                                                                    (add
+                                                                        (jsrf-bit (eq (jsrf-action (jsrf-fault-slot) 1 1 1) (jsrf-exception)) 32768)
+                                                                        (add
+                                                                            (jsrf-bit (eq (jsrf-action (jsrf-missing-stack) 1 1 1) (jsrf-reject)) 65536)
+                                                                            (add
+                                                                                (jsrf-bit (eq (jsrf-receipt-ok? (jsrf-bad-runtime-fault)) 0) 131072)
+                                                                                (add
+                                                                                    (jsrf-bit (eq (jsrf-action (jsrf-zero-generation) 1 1 1) (jsrf-reject)) 262144)
+                                                                                    (jsrf-bit (eq (jsrf-action (jsrf-unknown-family) 1 1 1) (jsrf-reject)) 524288))))))))))))))))))))
+
+    0)
