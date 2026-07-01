@@ -1,0 +1,165 @@
+; jit-container-profile-runtime.fk - derive container runtime plans from receipts.
+;
+; Prelude:
+;   observe/jit-profile-receipt.fk
+;   model/jit-container-lowering.fk
+;   model/jit-container-backend.fk
+;   model/jit-container-byteplan.fk
+;   observe/jit-loader-contract.fk
+;   model/jit-container-loader.fk
+;
+; This cell starts from real profile/category receipts and compact static/inline
+; admission tickets, derives the container op/target/tier facts, then enters the
+; existing Form container compiler/backend/byteplan/loader path. It stays inside
+; the current direct-source envelope and does not install/call host machine code.
+
+(do
+    (defn jcpr-native () 1)
+    (defn jcpr-deopt () 2)
+    (defn jcpr-exception () 3)
+    (defn jcpr-rewalk () 4)
+    (defn jcpr-melt () 5)
+    (defn jcpr-reject () 6)
+
+    (defn jcpr-dict-profile ()
+        (list 13 8 610 9 1 (jpr-call-mono) (jpr-int) (jpr-dict) 2301 (jpr-string) 0 (jpr-index-none) (jpr-stack-tail) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) 28))
+    (defn jcpr-hash-profile () (jpr-hash-sample))
+    (defn jcpr-tree-profile ()
+        (list 14 9 620 9 1 (jpr-call-poly) (jpr-int) (jpr-rbtree) 0 (jpr-orderable) 0 (jpr-index-none) (jpr-stack-normal) (jpr-cpu-none) (jpr-gpu-warp) (jpr-deopt-none) 33))
+    (defn jcpr-array-profile () (jpr-array-sample 700 12))
+    (defn jcpr-warm-profile ()
+        (list 30 1 701 3 1 (jpr-call-poly) (jpr-int) (jpr-hashmap) 0 (jpr-string) 0 (jpr-index-none) (jpr-stack-normal) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) 12))
+
+    ; static = ("static" allow source maps)
+    ; inline = ("inline" guard fallback source-sig)
+    (defn jcpr-static (allow source maps) (list "static" allow source maps))
+    (defn jcpr-static-allow (s) (nth s 1))
+    (defn jcpr-static-source (s) (nth s 2))
+    (defn jcpr-static-maps (s) (nth s 3))
+    (defn jcpr-inline-ticket (guard fallback source-sig) (list "inline" guard fallback source-sig))
+    (defn jcpr-inline-guard (i) (nth i 1))
+    (defn jcpr-inline-fallback (i) (nth i 2))
+    (defn jcpr-inline-source (i) (nth i 3))
+    (defn jcpr-good-static () (jcpr-static 1 1 1))
+    (defn jcpr-bad-static-ticket () (jcpr-static 0 1 1))
+    (defn jcpr-inline-for (p) (jcpr-inline-ticket 1 1 (jpr-signature p)))
+    (defn jcpr-no-guard-inline (p) (jcpr-inline-ticket 0 1 (jpr-signature p)))
+
+    ; plan = ("jcpr" profile static inline generation installed invalidated stale parity)
+    (defn jcpr-plan (profile static inline generation installed invalidated stale parity)
+        (list "jcpr" profile static inline generation installed invalidated stale parity))
+    (defn jcpr-plan? (p) (if (eq (len p) 9) (str_eq (nth p 0) "jcpr") 0))
+    (defn jcpr-profile (p) (nth p 1))
+    (defn jcpr-static-ticket (p) (nth p 2))
+    (defn jcpr-inline (p) (nth p 3))
+    (defn jcpr-generation (p) (nth p 4))
+    (defn jcpr-installed (p) (nth p 5))
+    (defn jcpr-invalidated (p) (nth p 6))
+    (defn jcpr-stale (p) (nth p 7))
+    (defn jcpr-parity (p) (nth p 8))
+
+    (defn jcpr-op-for (r)
+        (if (eq (jpr-container r) (jpr-dict))
+            (jcb-dict)
+            (if (eq (jpr-container r) (jpr-hashmap))
+                (jcb-hash)
+                (if (eq (jpr-container r) (jpr-rbtree)) (jcb-tree) 0))))
+    (defn jcpr-target-for (r)
+        (if (eq (jpr-gpu-reg? r) 1) (jcb-gpu) (jcb-cpu)))
+    (defn jcpr-container-direct? (r)
+        (if (eq (jpr-hash-direct? r) 1) 1 (jpr-tree-direct? r)))
+    (defn jcpr-tier? (r)
+        (if (eq (jpr-deopt r) (jpr-deopt-none))
+            (if (eq (jpr-hot-pure? r) 1)
+                (if (gt (jpr-opt-mask r) 1) 1 0)
+                0)
+            0))
+    (defn jcpr-inline? (i r)
+        (if (eq (jcpr-inline-guard i) 1)
+            (if (eq (jcpr-inline-fallback i) 1)
+                (if (eq (jcpr-inline-source i) (jpr-signature r))
+                    (if (eq (jpr-target r) (jpr-call-mono)) 1
+                        (if (eq (jpr-target r) (jpr-call-poly)) 1 0))
+                    0)
+                0)
+            0))
+    (defn jcpr-regs? (r)
+        (if (eq (jpr-cpu-reg? r) 1) 1 (jpr-gpu-reg? r)))
+
+    (defn jcpr-safe? (p)
+        (if (eq (jcpr-plan? p) 1)
+            (if (eq (jcb-op-ok? (jcpr-op-for (jcpr-profile p))) 1)
+                (if (eq (jcpr-static-allow (jcpr-static-ticket p)) 1)
+                    (if (eq (jcpr-container-direct? (jcpr-profile p)) 1)
+                        (if (eq (jcpr-tier? (jcpr-profile p)) 1)
+                            (if (eq (jcpr-inline? (jcpr-inline p) (jcpr-profile p)) 1)
+                                (if (eq (jcpr-regs? (jcpr-profile p)) 1)
+                                    (if (eq (jcpr-static-source (jcpr-static-ticket p)) 1)
+                                        (if (eq (jcpr-static-maps (jcpr-static-ticket p)) 1)
+                                            (if (gt (jcpr-generation p) 0) 1 0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jcpr-byteplan (p)
+        (if (eq (jcpr-safe? p) 1)
+            (jcp-emit (jcb-emit (jcpr-target-for (jcpr-profile p)) (jcpr-op-for (jcpr-profile p))))
+            (empty)))
+    (defn jcpr-loaded? (p) (jcld-loaded-safe? (jcpr-byteplan p)))
+
+    (defn jcpr-map-action (a)
+        (if (eq a (jlc-native)) (jcpr-native)
+            (if (eq a (jlc-deopt)) (jcpr-deopt)
+                (if (eq a (jlc-exception)) (jcpr-exception)
+                    (if (eq a (jlc-rewalk)) (jcpr-rewalk) (jcpr-reject))))))
+    (defn jcpr-action (p guard-ok runtime-ok)
+        (if (eq (jcpr-safe? p) 1)
+            (if (eq (jcpr-invalidated p) 1)
+                (jcpr-rewalk)
+                (if (eq (jcpr-stale p) 1)
+                    (jcpr-melt)
+                    (jcpr-map-action (jcld-action (jcpr-byteplan p) guard-ok runtime-ok 0 (jcpr-parity p)))))
+            (jcpr-reject)))
+
+    (defn jcpr-good-dict () (jcpr-plan (jcpr-dict-profile) (jcpr-good-static) (jcpr-inline-for (jcpr-dict-profile)) 1 0 0 0 1))
+    (defn jcpr-good-hash () (jcpr-plan (jcpr-hash-profile) (jcpr-good-static) (jcpr-inline-for (jcpr-hash-profile)) 1 0 0 0 1))
+    (defn jcpr-good-tree () (jcpr-plan (jcpr-tree-profile) (jcpr-good-static) (jcpr-inline-for (jcpr-tree-profile)) 1 0 0 0 1))
+
+    (defn jit-container-profile-runtime-check ()
+        (add
+            (if (eq (jcpr-loaded? (jcpr-good-dict)) 1) 1 0)
+            (add
+                (if (eq (jcpr-loaded? (jcpr-good-hash)) 1) 2 0)
+                (add
+                    (if (eq (jcpr-loaded? (jcpr-good-tree)) 1) 4 0)
+                    (add
+                        (if (eq (jcp-code-size (jcpr-byteplan (jcpr-good-tree))) 112) 8 0)
+                        (add
+                            (if (eq (jcpr-action (jcpr-good-hash) 1 1) (jcpr-native)) 16 0)
+                            (add
+                                (if (eq (jcpr-action (jcpr-good-hash) 0 1) (jcpr-deopt)) 32 0)
+                                (add
+                                    (if (eq (jcpr-action (jcpr-good-hash) 1 0) (jcpr-exception)) 64 0)
+                                    (add
+                                        (if (eq (jcpr-action (jcpr-plan (jcpr-hash-profile) (jcpr-good-static) (jcpr-inline-for (jcpr-hash-profile)) 1 1 1 0 1) 1 1) (jcpr-rewalk)) 128 0)
+                                        (add
+                                            (if (eq (jcpr-action (jcpr-plan (jcpr-hash-profile) (jcpr-good-static) (jcpr-inline-for (jcpr-hash-profile)) 1 1 0 1 1) 1 1) (jcpr-melt)) 256 0)
+                                            (add
+                                                (if (eq (jcpr-action (jcpr-plan (jcpr-hash-profile) (jcpr-good-static) (jcpr-inline-for (jcpr-hash-profile)) 1 1 0 0 0) 1 1) (jcpr-deopt)) 512 0)
+                                                (add
+                                                    (if (eq (jcpr-action (jcpr-plan (jcpr-hash-profile) (jcpr-bad-static-ticket) (jcpr-inline-for (jcpr-hash-profile)) 1 0 0 0 1) 1 1) (jcpr-reject)) 1024 0)
+                                                    (add
+                                                        (if (eq (jcpr-action (jcpr-plan (jcpr-array-profile) (jcpr-good-static) (jcpr-inline-for (jcpr-array-profile)) 1 0 0 0 1) 1 1) (jcpr-reject)) 2048 0)
+                                                        (add
+                                                            (if (eq (jcpr-action (jcpr-plan (jcpr-warm-profile) (jcpr-good-static) (jcpr-inline-for (jcpr-warm-profile)) 1 0 0 0 1) 1 1) (jcpr-reject)) 4096 0)
+                                                            (add
+                                                                (if (eq (jcpr-action (jcpr-plan (jcpr-hash-profile) (jcpr-good-static) (jcpr-no-guard-inline (jcpr-hash-profile)) 1 0 0 0 1) 1 1) (jcpr-reject)) 8192 0)
+                                                                (if (eq (jcpr-action (jcpr-plan (jcpr-hash-profile) (jcpr-good-static) (jcpr-inline-for (jcpr-hash-profile)) 0 0 0 0 1) 1 1) (jcpr-reject)) 16384 0))))))))))))))))
+
+    0)
