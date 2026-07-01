@@ -30,7 +30,7 @@ Date: 2026-07-01
 
 ```text
 33554431
-134217727
+268435455
 4194303
 16777215
 536870911
@@ -42,6 +42,10 @@ Date: 2026-07-01
 `self-host-completion-sweep = 16777215` receipt after self-host completion moved
 to `33554431`. The native witness total moves to `33554431`, so downstream
 runtime gates cannot continue to rely on the older self-host completion ledger.
+
+A later replacement-runtime hardening raises
+`observe/jit-replacement-runtime-integration.fk` to `268435455` by rejecting the
+stale `native-witness-sweep = 16777215` receipt.
 
 Direct native-witness consumers were updated to require the stronger total:
 
