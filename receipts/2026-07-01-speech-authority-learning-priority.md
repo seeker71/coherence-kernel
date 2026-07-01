@@ -13,7 +13,7 @@ native neural parameters: 20
 background pair window: 0021 es<->id
 open ASR gap: 100
 Sema voice gap: 100
-Sema voice native/oracle: 0/1 / 0/1
+Sema voice native/oracle: 0/1 / 1/1
 ```
 
 Selected authority action:
