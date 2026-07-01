@@ -21,9 +21,9 @@ voices per locale: 1
 planned wavs: 300
 planned held-out rows: 30
 floor: 300 wavs, 5 locales, 30 held-out rows
-captured: 6 rows in batch-0001; full window not captured
+captured: 30 rows in batches 0001 and 0002; full window not captured
 trained: false
-status: acquisition-window-ready-not-captured
+status: acquisition-window-partially-captured-not-trained
 ```
 
 Witness:
@@ -41,7 +41,7 @@ cat learn/coherence-network-self-corpus.fk \
 32767
 ```
 
-Meaning: the self-corpus can fill the minimum floor, but only the first six
+Meaning: the self-corpus can fill the minimum floor, but only the first thirty
 rows have been captured so far. The next real step is expanding the live
 acquisition runner until the full window is rendered and witnessed locally
 before any training promotion.
