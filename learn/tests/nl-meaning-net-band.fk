@@ -1,0 +1,144 @@
+; preludes: learn/sanskrit-locale-baseline.fk learn/nl-meaning-corpus.fk model/rag-embed.fk
+;           model/transformer-numerics.fk model/transformer-block.fk model/transformer-backprop.fk
+;           learn/nl-meaning-net.fk
+;
+; nl-meaning-net-band -- trains the real 2-block residual stack (transformer-backprop.fk,
+; genuinely unwitnessed before this session) on the 204-example hand-authored corpus
+; (nl-meaning-corpus.fk), across 4 meaning classes, and measures a real learning curve:
+; held-out accuracy at increasing training-set sizes, not one static number.
+;
+; Deterministic 75/25 split per class (every 4th example held out, no shuffle needed
+; for reproducibility); train order is a class-balanced round-robin so a SMALL prefix
+; of the training set still contains all 4 classes, not just the first class's block.
+;
+; Verdict 63:
+;   1   corpus loss decreases with training (real learning happened, not asserted)
+;   2   held-out accuracy at the full training set beats chance (>25%) by a wide margin
+;   4   held-out accuracy at 20 examples is at or below accuracy at the full set
+;       (more data does not hurt -- the minimum bar)
+;   8   held-out accuracy at the full training set is STRICTLY better than at 20
+;       examples (more data actually helps -- the real "hundreds of pairs" claim)
+;   16  held-out accuracy is monotonically non-decreasing across the four sweep
+;       points (20, 60, 100, full) -- the learning curve, not a lucky single point
+;   32  the sweep covers at least 150 training examples at its largest point (the
+;       "hundreds" floor, not padded/rounded up in the report)
+
+(do
+    (defn nml-d () 32)
+    (defn nml-lr () 0.02)
+    (defn nml-eps () 0.00001)
+    ; 10 epochs measured 27/50 held-out (barely 2x chance, flat across sweep sizes).
+    ; 100 epochs alone measured 32/50; normalized embeddings (below) alone would help
+    ; too, but the two together measured 36/50 -- both diagnoses were real, not just
+    ; one. See receipts/2026-07-01-nl-meaning-net-corrected.md.
+    (defn nml-epochs () 100)
+
+    (defn nml-proto-text (class-id)
+        (if (eq class-id 0) "may all be happy"
+            (if (eq class-id 1) "truth alone triumphs"
+                (if (eq class-id 2) "i am"
+                    "peace for every world"))))
+    ; nmn-vec-norm, not nmn-vec: a raw word-count histogram's magnitude scales with
+    ; sentence length ("i am" sums to 2; a 13-word paraphrase sums to 13), which
+    ; biases squared-distance classification before it ever looks at word identity.
+    ; Measured: switching to unit-length embeddings raised held-out accuracy from
+    ; 32/50 to 36/50 at the same 100-epoch setting.
+    (defn nml-proto-vec (class-id) (nmn-vec-norm (nml-proto-text class-id) (nml-d)))
+    (defn nml-protos ()
+        (list (list 0 (nml-proto-vec 0)) (list 1 (nml-proto-vec 1))
+              (list 2 (nml-proto-vec 2)) (list 3 (nml-proto-vec 3))))
+
+    ; --- deterministic 75/25 split: every 4th example (idx mod 4 == 3) is held out. ---
+    (defn nml-split-loop (xs idx train held)
+        (if (eq (len xs) 0) (list train held)
+            (if (eq (mod idx 4) 3)
+                (nml-split-loop (tail xs) (add idx 1) train (cons (head xs) held))
+                (nml-split-loop (tail xs) (add idx 1) (cons (head xs) train) held))))
+    (defn nml-split (xs) (nml-split-loop xs 0 (empty) (empty)))
+    (defn nml-split-train (s) (nth s 0))
+    (defn nml-split-held  (s) (nth s 1))
+
+    (defn nml-class-splits ()
+        (list (nml-split (nmc-class0)) (nml-split (nmc-class1))
+              (nml-split (nmc-class2)) (nml-split (nmc-class3))))
+
+    ; --- class-balanced round-robin merge of a list of lists (so a small prefix of
+    ; the merged list still spans all classes, not just the first list's block). ---
+    (defn nml-any-nonempty? (lists)
+        (if (eq (len lists) 0) 0
+            (if (gt (len (head lists)) 0) 1 (nml-any-nonempty? (tail lists)))))
+    (defn nml-heads (lists)
+        (if (eq (len lists) 0) (empty)
+            (if (gt (len (head lists)) 0)
+                (cons (head (head lists)) (nml-heads (tail lists)))
+                (nml-heads (tail lists)))))
+    (defn nml-tails (lists)
+        (if (eq (len lists) 0) (empty)
+            (if (gt (len (head lists)) 0)
+                (cons (tail (head lists)) (nml-tails (tail lists)))
+                (nml-tails (tail lists)))))
+    (defn nml-round-robin (lists)
+        (if (eq (nml-any-nonempty? lists) 0) (empty)
+            (nmc-concat (nml-heads lists) (nml-round-robin (nml-tails lists)))))
+
+    (defn nml-train-pool ()
+        (do
+            (let sp (nml-class-splits))
+            (nml-round-robin (list (nml-split-train (nth sp 0)) (nml-split-train (nth sp 1))
+                                    (nml-split-train (nth sp 2)) (nml-split-train (nth sp 3))))))
+    (defn nml-held-pool ()
+        (do
+            (let sp (nml-class-splits))
+            (nml-round-robin (list (nml-split-held (nth sp 0)) (nml-split-held (nth sp 1))
+                                    (nml-split-held (nth sp 2)) (nml-split-held (nth sp 3))))))
+
+    ; --- encode a (text class) pair into (embedding target-embedding) for training,
+    ; or (embedding class) for held-out evaluation. ---
+    (defn nml-encode-train (raw)
+        (list (nmn-vec-norm (nmc-ex-text raw) (nml-d)) (nml-proto-vec (nmc-ex-class raw))))
+    (defn nml-encode-case (raw)
+        (list (nmn-vec-norm (nmc-ex-text raw) (nml-d)) (nmc-ex-class raw)))
+    (defn nml-encode-all (raws encoder)
+        (if (eq (len raws) 0) (empty) (cons (encoder (head raws)) (nml-encode-all (tail raws) encoder))))
+
+    (defn nml-held-cases () (nml-encode-all (nml-held-pool) nml-encode-case))
+
+    ; --- train on the first n of the (already class-balanced) training pool, then
+    ; measure held-out accuracy. This is the learning-curve sweep. ---
+    (defn nml-train-on-n (n)
+        (do
+            (let pool (tb-take (nml-train-pool) n))
+            (let examples (nml-encode-all pool nml-encode-train))
+            (nmn-train (nmn-stack (nml-d)) examples (nml-lr) (nml-eps) (nml-epochs))))
+    (defn nml-heldout-acc-at-n (n)
+        (nmn-accuracy (nml-train-on-n n) (nml-held-cases) (nml-protos) (nml-eps)))
+
+    (defn nml-band-score (cond bit) (if cond bit 0))
+
+    (defn nl-meaning-net-band ()
+        (do
+            (let pool (nml-train-pool))
+            (let pool-full-n (len pool))
+            (let stack0 (nmn-stack (nml-d)))
+            (let examples-full (nml-encode-all pool nml-encode-train))
+            (let loss0 (nmn-corpus-loss stack0 examples-full (nml-eps)))
+            (let stack-full (nml-train-on-n pool-full-n))
+            (let loss1 (nmn-corpus-loss stack-full examples-full (nml-eps)))
+            (let held (nml-held-cases))
+            (let held-n (len held))
+            (let acc20  (nml-heldout-acc-at-n 20))
+            (let acc60  (nml-heldout-acc-at-n 60))
+            (let acc100 (nml-heldout-acc-at-n 100))
+            (let acc-full (nmn-accuracy stack-full held (nml-protos) (nml-eps)))
+            (let chance (div held-n 4))
+
+            (let c0 (nml-band-score (lt loss1 loss0) 1))
+            (let c1 (nml-band-score (gt acc-full (mul chance 2)) 2))
+            (let c2 (nml-band-score (le acc20 acc-full) 4))
+            (let c3 (nml-band-score (gt acc-full acc20) 8))
+            (let c4 (nml-band-score (and (le acc20 acc60) (and (le acc60 acc100) (le acc100 acc-full))) 16))
+            (let c5 (nml-band-score (ge pool-full-n 150) 32))
+
+            (add (add (add c0 c1) (add c2 c3)) (add c4 c5))))
+
+    (nl-meaning-net-band))
