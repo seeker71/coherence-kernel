@@ -189,6 +189,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       trains, `teacher-984712.wav` evaluates with `volume=0.98`, local Metal oracle and native Form both return
       WER `0`, confidence `96`, live verdict `65535`, effective epochs `1`, native neural parameters `0`. This
       proves a scoped held-out repeat across distinct wav bytes, not cross-phrase or cross-voice authority.
+- [x] **Speech learning data sufficiency gate added.** `learn/speech-learning-data-sufficiency.fk` makes the tiny
+      data boundary executable (`32767`): current speech rows are `5` wavs, `3` live teacher locales, `1`
+      held-out repeat, `0` cross-phrase rows, and `0` cross-voice rows against a floor of `300` wavs, `5`
+      locales, `30` held-out rows, `20` cross-phrase rows, and `10` cross-voice rows. Status is explicitly
+      `plumbing-smoke-not-data-sufficient-training`.
 - [x] **macOS Arabic teacher acoustic learning added.** `learn/macos-arabic-teacher-acoustic-learning.fk` extends
       the same live path to Arabic: `Majed -> ffmpeg -> whisper.cpp/Metal -l ar`, Form wav sensing, four Arabic
       acoustic token prototypes, native CTC decode, live verdict `16383`, live WER `0`, minimum confidence `96`,
@@ -224,7 +229,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       native neural weight parameters admitted are `0` while native Sema voice organs are present; live open
       dictation is oracle `4/4` and native `0/4`; Sema live voice live-native pass is `0/1`, WER `100`, oracle-guide.
       The same executable report now carries the live learning counters and fails its band if the stated samples,
-      bytes, prototype rows, epochs, or held-out boundary drift.
+      bytes, prototype rows, epochs, held-out boundary, or data-sufficiency status drift.
 - [x] **Speech model metrics trend added.** `learn/speech-model-metrics-trend.fk` records before/after movement
       (`32767`): Mac Metal reciprocal audio moved native `0->83`; multiseed NL/audio moved `0->100`; live open
       dictation remains local-oracle `100` / native `0`; Sema live voice remains native `0`, WER `100`. The trend
