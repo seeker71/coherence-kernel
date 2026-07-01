@@ -39,11 +39,7 @@ The aggregate metrics report now derives `rows-used-for-training` from intake
 `0003`:
 
 ```sh
-cat learn/speech-oracle-native-backlog.fk \
-    learn/speech-next-trial-scheduler.fk \
-    learn/sema-voice-trial-window.fk \
-    learn/sema-voice-authority-floor.fk \
-    learn/speech-corpus-training-intake-0001.fk \
+cat learn/speech-corpus-training-intake-0001.fk \
     learn/speech-corpus-training-intake-0002.fk \
     learn/speech-corpus-training-intake-0003.fk \
     learn/speech-model-metrics-report.fk \

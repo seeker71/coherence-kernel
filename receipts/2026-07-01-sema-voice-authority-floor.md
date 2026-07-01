@@ -8,10 +8,10 @@ native/oracle `0/0`.
 The cell keeps two lanes separate:
 
 - Live authority: local oracle `0/1`, native `0/1`, WER `100`, route `oracle-guide`.
-- Scoped training floor: the TCAV trial row contributes local oracle `1/1` and native
-  `1/1`, WER `0`, but only inside the trial window.
+- Scoped training floor: the TCAV trial rows contribute local oracle `2/2` and native
+  `2/2`, WER `0`, but only inside the trial window.
 
-The combined floor is therefore local oracle `1/2 = 50%` and native `1/2 = 50%`, while
+The combined floor is therefore local oracle `2/3 = 66%` and native `2/3 = 66%`, while
 global live authority remains held. A zero-denominator row now resolves to
 `block-zero-denominator-voice-gate`.
 
@@ -21,6 +21,7 @@ global live authority remains held. A zero-denominator row now resolves to
 cat learn/speech-oracle-native-backlog.fk \
     learn/speech-next-trial-scheduler.fk \
     learn/sema-voice-trial-window.fk \
+    learn/sema-voice-trial-window-0002.fk \
     learn/sema-voice-authority-floor.fk \
     learn/tests/sema-voice-authority-floor-band.fk > /tmp/sema-voice-authority-floor.fk
 ./fkwu --src /tmp/sema-voice-authority-floor.fk
