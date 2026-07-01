@@ -830,6 +830,20 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       deterministic stride-permutation of each class's list before splitting) is named but not implemented,
       to avoid another expensive multi-minute re-verification pass in the same sitting. See
       `receipts/2026-07-01-n60-dip-diagnosed.md`.
+- [x] **satsang-oracle.fk's first live (non-synthetic) voice.** `learn/tests/satsang-oracle-live-band.fk`
+      feeds `sao-witness-council` two parses of a new sentence ("Truth alone triumphs over every lie."),
+      both produced fresh in this session rather than scripted in advance — differing on a genuine
+      linguistic question (is "triumphs over" one phrasal-verb unit or two words?), not a manufactured
+      disagreement. Verdict `7`: the root correctly does NOT survive (the two parses differ in arity —
+      7 vs 6 leaves — so `sao-shape-eq?`'s ctor-tag+arity match calls them different shapes before their
+      substantial shared word-level content is ever examined), its candidate tag stays named rather than
+      dropped, and the exact `(1 affirm, 1 dissent)` tie correctly does not crystallize. Honest finding: this
+      surfaces a real, named limitation — the fold only recurses into children when the parent's shape
+      already matches, so two parses that agree on most words but differ in one segmentation choice get
+      zero credit for that agreement. Not a bug, a real property of the current algorithm; closing it needs
+      an alignment step before the node-by-node fold, not built here. Still one voice, not a council, and no
+      network call — wiring a genuinely distinct second model stays separate, real, credential-gated work.
+      See `receipts/2026-07-01-satsang-oracle-live.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
