@@ -1,0 +1,158 @@
+; jit-dylib-slot-runtime.fk - Form-owned slot table over the dylib carrier ABI.
+;
+; Prelude:
+;   model/form-asm-x64.fk
+;   observe/jit-install-call-attempt.fk
+;   observe/jit-dylib-carrier-abi.fk
+;
+; This is the runtime-side bridge between concrete Form install/call attempts
+; and the dylib carrier contract. It models the slot table the host carrier
+; must back: install bytes into a generation, bind a signature to a sealed
+; executable slot, validate tagged calls against that slot, and route status
+; through native/deopt/exception/rewalk/melt without moving compiler meaning
+; into C/Rust.
+
+(do
+    (defn jdsl-native () 1)
+    (defn jdsl-deopt () 2)
+    (defn jdsl-exception () 3)
+    (defn jdsl-rewalk () 4)
+    (defn jdsl-melt () 5)
+    (defn jdsl-reject () 6)
+    (defn jdsl-pending () 7)
+
+    ; slot = ("dylib-slot" id signature attempt install generation valid callable source maps)
+    (defn jdsl-slot (id signature attempt install generation valid callable source maps)
+        (list "dylib-slot" id signature attempt install generation valid callable source maps))
+    (defn jdsl-slot? (s) (if (eq (len s) 10) (str_eq (nth s 0) "dylib-slot") 0))
+    (defn jdsl-slot-id (s) (nth s 1))
+    (defn jdsl-signature (s) (nth s 2))
+    (defn jdsl-attempt (s) (nth s 3))
+    (defn jdsl-install (s) (nth s 4))
+    (defn jdsl-generation (s) (nth s 5))
+    (defn jdsl-valid (s) (nth s 6))
+    (defn jdsl-callable (s) (nth s 7))
+    (defn jdsl-source (s) (nth s 8))
+    (defn jdsl-maps (s) (nth s 9))
+
+    ; cache = ("dylib-slot-cache" signature slot)
+    (defn jdsl-cache (signature slot)
+        (list "dylib-slot-cache" signature slot))
+    (defn jdsl-cache? (c) (if (eq (len c) 3) (str_eq (nth c 0) "dylib-slot-cache") 0))
+    (defn jdsl-cache-signature (c) (nth c 1))
+    (defn jdsl-cache-slot (c) (nth c 2))
+
+    (defn jdsl-install-from-attempt (a)
+        (jdca-install (jica-bytes a) (jica-byte-count a) (jica-abi a)
+            (jica-wx a) (jica-sealed a) 1 0
+            (jica-source-proof a) (jica-exception-proof a) (jica-deopt-proof a)))
+
+    (defn jdsl-call-from-attempt (a status)
+        (jdca-call (jica-slot a) (jica-args a) (len (jica-args a))
+            (jica-callable a) (jica-source-proof a) status))
+
+    (defn jdsl-signature-for (a)
+        (add (mul (jica-slot a) 1000) (jica-generation a)))
+
+    (defn jdsl-open-slot (a status)
+        (jdsl-slot (jica-slot a) (jdsl-signature-for a) a
+            (jdsl-install-from-attempt a) (jica-generation a)
+            1 (jica-callable a) (jica-source-proof a) (jica-deopt-proof a)))
+
+    (defn jdsl-slot-safe? (s carrier status)
+        (if (eq (jdsl-slot? s) 1)
+            (if (eq (jdca-carrier-safe? carrier) 1)
+                (if (eq (jica-contract-ready? (jdsl-attempt s)) 1)
+                    (if (eq (jdca-install-safe? (jdsl-install s)) 1)
+                        (if (eq (jdca-call-safe? (jdsl-call-from-attempt (jdsl-attempt s) status)) 1)
+                            (if (gt (jdsl-slot-id s) 0)
+                                (if (eq (jdsl-valid s) 1)
+                                    (if (eq (jdsl-callable s) 1)
+                                        (if (eq (jdsl-source s) 1)
+                                            (if (eq (jdsl-maps s) 1)
+                                                (if (gt (jdsl-generation s) 0) 1 0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jdsl-lookup (cache signature)
+        (if (eq (jdsl-cache? cache) 1)
+            (if (eq (jdsl-cache-signature cache) signature) (jdsl-cache-slot cache) (empty))
+            (empty)))
+
+    (defn jdsl-cache-hit? (cache signature carrier status)
+        (if (eq (jdsl-slot-safe? (jdsl-lookup cache signature) carrier status) 1) 1 0))
+
+    (defn jdsl-route (cache signature carrier status guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (jdsl-cache-hit? cache signature carrier status) 1)
+            (if (eq invalidated 1)
+                (jdsl-rewalk)
+                (if (eq stale 1)
+                    (jdsl-melt)
+                    (jdca-route carrier
+                        (jdsl-install (jdsl-lookup cache signature))
+                        (jdsl-call-from-attempt (jdsl-attempt (jdsl-lookup cache signature)) status)
+                        guard-ok runtime-ok invalidated parity-ok stale)))
+            (jdsl-pending)))
+
+    (defn jdsl-field-slot () (jdsl-open-slot (jica-field) (jdca-ok)))
+    (defn jdsl-array-slot () (jdsl-open-slot (jica-array) (jdca-ok)))
+    (defn jdsl-array-cache () (jdsl-cache (jdsl-signature-for (jica-array)) (jdsl-array-slot)))
+    (defn jdsl-field-cache () (jdsl-cache (jdsl-signature-for (jica-field)) (jdsl-field-slot)))
+    (defn jdsl-invalid-cache () (jdsl-cache (jdsl-signature-for (jica-array))
+        (jdsl-slot (jica-slot (jica-array)) (jdsl-signature-for (jica-array))
+            (jica-array) (jdsl-install-from-attempt (jica-array))
+            (jica-generation (jica-array)) 0 1 1 1)))
+    (defn jdsl-no-call-cache () (jdsl-cache (jdsl-signature-for (jica-array))
+        (jdsl-slot (jica-slot (jica-array)) (jdsl-signature-for (jica-array))
+            (jica-no-call) (jdsl-install-from-attempt (jica-no-call))
+            (jica-generation (jica-no-call)) 1 0 1 1)))
+    (defn jdsl-wrong-owner-carrier ()
+        (jdca-carrier "libform_jit_carrier.dylib" 1 "fk_jit_install" "fk_jit_call" "fk_jit_drop" "fk_jit_flush_icache" "fk_jit_status_v1" "c-lowering" 1 1))
+
+    (defn jdsl-bit (cond bit) (if cond bit 0))
+    (defn jit-dylib-slot-runtime-check ()
+        (add
+            (jdsl-bit (eq (jdsl-slot-safe? (jdsl-array-slot) (jdca-good-carrier) (jdca-ok)) 1) 1)
+            (add
+                (jdsl-bit (eq (jdsl-slot-safe? (jdsl-field-slot) (jdca-good-carrier) (jdca-ok)) 1) 2)
+                (add
+                    (jdsl-bit (eq (jdsl-cache-hit? (jdsl-array-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-ok)) 1) 4)
+                    (add
+                        (jdsl-bit (eq (jdsl-cache-hit? (jdsl-array-cache) 9999 (jdca-good-carrier) (jdca-ok)) 0) 8)
+                        (add
+                            (jdsl-bit (eq (jdsl-cache-hit? (jdsl-invalid-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-ok)) 0) 16)
+                            (add
+                                (jdsl-bit (eq (jdsl-cache-hit? (jdsl-no-call-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-ok)) 0) 32)
+                                (add
+                                    (jdsl-bit (eq (jdsl-slot-safe? (jdsl-array-slot) (jdsl-wrong-owner-carrier) (jdca-ok)) 0) 64)
+                                    (add
+                                        (jdsl-bit (eq (jdsl-route (jdsl-array-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-ok) 1 1 0 1 0) (jdsl-native)) 128)
+                                        (add
+                                            (jdsl-bit (eq (jdsl-route (jdsl-array-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-ok) 0 1 0 1 0) (jdsl-deopt)) 256)
+                                            (add
+                                                (jdsl-bit (eq (jdsl-route (jdsl-array-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-ok) 1 0 0 1 0) (jdsl-exception)) 512)
+                                                (add
+                                                    (jdsl-bit (eq (jdsl-route (jdsl-array-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-ok) 1 1 1 1 0) (jdsl-rewalk)) 1024)
+                                                    (add
+                                                        (jdsl-bit (eq (jdsl-route (jdsl-array-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-ok) 1 1 0 0 0) (jdsl-deopt)) 2048)
+                                                        (add
+                                                            (jdsl-bit (eq (jdsl-route (jdsl-array-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-ok) 1 1 0 1 1) (jdsl-melt)) 4096)
+                                                            (add
+                                                                (jdsl-bit (eq (jdsl-route (jdsl-array-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-unavailable) 1 1 0 1 0) (jdsl-deopt)) 8192)
+                                                                (add
+                                                                    (jdsl-bit (eq (jdsl-route (jdsl-array-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-fault) 1 1 0 1 0) (jdsl-exception)) 16384)
+                                                                    (add
+                                                                        (jdsl-bit (eq (jdsl-route (jdsl-array-cache) (jdsl-signature-for (jica-array)) (jdca-good-carrier) (jdca-mismatch) 1 1 0 1 0) (jdsl-reject)) 32768)
+                                                                        (add
+                                                                            (jdsl-bit (eq (jdsl-route (jdsl-array-cache) 9999 (jdca-good-carrier) (jdca-ok) 1 1 0 1 0) (jdsl-pending)) 65536)
+                                                                            (jdsl-bit (eq (jdca-install-safe? (jdsl-install-from-attempt (jica-array))) 1) 131072))))))))))))))))))
+
+    0)
