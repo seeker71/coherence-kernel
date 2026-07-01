@@ -452,6 +452,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       windows cover `5` reciprocal pair windows (`10` directed cross-locale directions, `20` A/B plus self
       roundtrip lanes), which is `909` basis points of the broad ready pair space and `1111` basis points of the
       Sanskrit-baseline pair space. This keeps prototype/Form receipts from being misreported as neural training.
+- [x] **Speech pair training next action added.** `learn/speech-pair-training-next-action.fk` turns zero neural
+      pair coverage into the next executable movement (`32767`): choose `next-form-pair-window-0006` over
+      `en<->de`, route `expand-form-native-pair-window-before-neural`, move Form-native pair windows `5 -> 6`,
+      keep neural pair windows `0 -> 0`, and carry the corpus floor gap `211/12000`. The point is to run another
+      observable reciprocal Form window and capture more consentful audio before any neural claim.
 - [x] **Seven live Metal pair anchors stand — `7/7`, `full-metal-native` for the closed-prompt carrier.**
       The Form-owned macOS carrier runs `en<->de`, `en<->es`, `en<->id`, `en<->fr`, `en<->it`, `en<->zh`, and `en<->ar` on live Apple
       Metal (one `presence/macos-*-speech-roundtrip-variant.fk` per pair; carrier verdict `511` each).
