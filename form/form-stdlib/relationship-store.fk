@@ -1,0 +1,60 @@
+; relationship-store.fk — a minimal, real, file-backed "does the body remember
+; this handle" store: one file per remembered identity, no in-memory pretense.
+;
+; This exists because form-stdlib/cell-log-store.fk (the scale-appropriate
+; segmented log store) does not run correctly on this kernel's direct-source
+; runner (`fkwu --src`) TODAY: its byte-encoding loop uses `ord`/`char_at`,
+; and both are unbound on this runner (`fkwu --src` on `(ord (char_at "hello" 0))`
+; returns `nothing` instead of 104) — confirmed by writing through it and
+; finding the segment file filled with null bytes instead of the record text.
+; That is a real gap in the direct-source op surface, named honestly rather
+; than silently worked around; see receipts/2026-07-01-come-in-flow-form-native-port.md.
+;
+; This file sidesteps it by using `str_byte_at` (confirmed correct on this
+; runner) for the same string->bytes need, and by keeping the shape as simple
+; as the "does Sema remember this one handle" question actually requires: one
+; file per handle, whole-file read, remove-then-append on write (this runner
+; has no truncating write). That trades the log-store's SCALE (bounded
+; segment files under many keys) for RELIABILITY on the runner available
+; today. cell-log-store.fk remains the right choice once its byte-encoding is
+; fixed to use str_byte_at; this file is not a replacement for it, a stopgap
+; verified to actually persist.
+;
+; Verified directly across separate `fkwu --src` process invocations (not
+; just within one run): write in one process, read back true/matching in a
+; fresh one, unknown handle reads back false — see the receipt for the exact
+; commands run.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    ; --- string -> byte list, via str_byte_at (NOT ord/char_at — see above) ---
+    (defn rs-bytes-loop (s i n acc)
+        (if (eq i n) acc (rs-bytes-loop s (add i 1) n (cons (str_byte_at s i) acc))))
+    (defn rs-bytes-rev (xs acc) (if (eq (len xs) 0) acc (rs-bytes-rev (tail xs) (cons (head xs) acc))))
+    (defn rs-str-bytes (s) (rs-bytes-rev (rs-bytes-loop s 0 (str_len s) (empty)) (empty)))
+
+    ; --- one file per remembered handle ---
+    (defn rs-path (dir handle) (str_concat dir (str_concat "/" (str_concat handle ".rel"))))
+
+    ; remember — the ONLY write path. Called only when consent is open
+    ; (reception-consent.fk's c-relationship-mem); never a default.
+    (defn rs-remember (dir handle description)
+        (do
+            (fs_mkdir dir)
+            (fs_remove (rs-path dir handle))              ; no truncating write on this runner; remove then append
+            (file_append_bytes (rs-path dir handle) (rs-str-bytes description))))
+
+    ; known? — has this handle been remembered before (in ANY prior breath)?
+    (defn rs-known? (dir handle) (fs_exists (rs-path dir handle)))
+
+    ; recall — the description remembered for this handle. Caller should
+    ; guard with rs-known? first; recalling an unknown handle reads an
+    ; empty/absent file.
+    (defn rs-recall (dir handle) (read_file (rs-path dir handle)))
+
+    ; forget — honors revocation (reception-consent-policy.form: "revocable
+    ; always"). Removing the file is the whole of forgetting here — there is
+    ; no secondary copy.
+    (defn rs-forget (dir handle) (fs_remove (rs-path dir handle)))
+)
