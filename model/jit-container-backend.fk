@@ -1,0 +1,159 @@
+; jit-container-backend.fk - backend schedules for Form JIT container lookup streams.
+;
+; Prelude: model/jit-container-lowering.fk
+;
+; Container lowering emits compact native operation streams for dict, hashmap,
+; and red-black-tree lookups. This backend stage assigns those streams to CPU
+; and GPU schedule rows with register classes and runtime metadata. It remains
+; Form-only: no C/Rust, no host install/call.
+
+(do
+    (defn jcb-cpu () 1)
+    (defn jcb-gpu () 2)
+    (defn jcb-dict () 6)
+    (defn jcb-hash () 7)
+    (defn jcb-tree () 8)
+
+    ; schedule = ("jcb" target op stream regs lanes guard fault deopt source maps generation)
+    (defn jcb-schedule (target op stream regs lanes guard fault deopt source maps generation)
+        (list "jcb" target op stream regs lanes guard fault deopt source maps generation))
+    (defn jcb-schedule? (s) (if (eq (len s) 12) (str_eq (nth s 0) "jcb") 0))
+    (defn jcb-target (s) (nth s 1))
+    (defn jcb-op (s) (nth s 2))
+    (defn jcb-stream (s) (nth s 3))
+    (defn jcb-regs (s) (nth s 4))
+    (defn jcb-lanes (s) (nth s 5))
+    (defn jcb-guard (s) (nth s 6))
+    (defn jcb-fault (s) (nth s 7))
+    (defn jcb-deopt (s) (nth s 8))
+    (defn jcb-source (s) (nth s 9))
+    (defn jcb-maps (s) (nth s 10))
+    (defn jcb-generation (s) (nth s 11))
+
+    (defn jcb-target-ok? (target)
+        (if (eq target (jcb-cpu)) 1 (if (eq target (jcb-gpu)) 1 0)))
+    (defn jcb-op-ok? (op)
+        (if (eq op (jcb-dict)) 1 (if (eq op (jcb-hash)) 1 (if (eq op (jcb-tree)) 1 0))))
+
+    (defn jcb-stream-for (op)
+        (jcl-compile (jcl-plan 1 1 op 1 1 1) 6 1))
+
+    (defn jcb-regs-for (target op)
+        (if (eq target (jcb-cpu))
+            (if (eq op (jcb-dict)) 4 (if (eq op (jcb-hash)) 5 6))
+            (if (eq op (jcb-dict)) 8 (if (eq op (jcb-hash)) 16 32))))
+    (defn jcb-lanes-for (target op)
+        (if (eq target (jcb-cpu))
+            1
+            (if (eq op (jcb-tree)) 2 4)))
+
+    (defn jcb-emit (target op)
+        (if (eq (jcb-target-ok? target) 1)
+            (if (eq (jcb-op-ok? op) 1)
+                (jcb-schedule target op (jcb-stream-for op)
+                    (jcb-regs-for target op) (jcb-lanes-for target op)
+                    1 1 1 1 1 1)
+                (empty))
+            (empty)))
+
+    (defn jcb-safe? (s)
+        (if (eq (jcb-schedule? s) 1)
+            (if (eq (jcb-target-ok? (jcb-target s)) 1)
+                (if (eq (jcb-op-ok? (jcb-op s)) 1)
+                    (if (gt (len (jcb-stream s)) 0)
+                        (if (gt (jcb-regs s) 0)
+                            (if (gt (jcb-lanes s) 0)
+                                (if (eq (jcb-guard s) 1)
+                                    (if (eq (jcb-fault s) 1)
+                                        (if (eq (jcb-deopt s) 1)
+                                            (if (eq (jcb-source s) 1)
+                                                (if (eq (jcb-maps s) 1)
+                                                    (if (gt (jcb-generation s) 0) 1 0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jcb-probe? (s target op regs lanes first last)
+        (if (eq (jcb-safe? s) 1)
+            (if (eq (jcb-target s) target)
+                (if (eq (jcb-op s) op)
+                    (if (eq (jcb-regs s) regs)
+                        (if (eq (jcb-lanes s) lanes)
+                            (if (eq (nth (jcb-stream s) 0) first)
+                                (if (eq (nth (jcb-stream s) (sub (len (jcb-stream s)) 1)) last) 1 0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jcb-self-schedule (s)
+        (jcb-emit (jcb-target s) (jcb-op s)))
+    (defn jcb-same-probe? (a b)
+        (if (eq (jcb-safe? a) 1)
+            (if (eq (jcb-safe? b) 1)
+                (if (eq (jcb-target a) (jcb-target b))
+                    (if (eq (jcb-op a) (jcb-op b))
+                        (if (eq (jcb-regs a) (jcb-regs b))
+                            (if (eq (jcb-lanes a) (jcb-lanes b))
+                                (if (eq (len (jcb-stream a)) (len (jcb-stream b)))
+                                    (if (eq (nth (jcb-stream a) 0) (nth (jcb-stream b) 0))
+                                        (if (eq (nth (jcb-stream a) (sub (len (jcb-stream a)) 1))
+                                                (nth (jcb-stream b) (sub (len (jcb-stream b)) 1))) 1 0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jcb-bad-no-deopt ()
+        (jcb-schedule (jcb-cpu) (jcb-hash) (jcb-stream-for (jcb-hash)) 5 1 1 1 0 1 1 1))
+    (defn jcb-bad-zero-gen ()
+        (jcb-schedule (jcb-cpu) (jcb-hash) (jcb-stream-for (jcb-hash)) 5 1 1 1 1 1 1 0))
+    (defn jcb-bad-empty ()
+        (jcb-schedule (jcb-cpu) (jcb-hash) (empty) 5 1 1 1 1 1 1 1))
+
+    (defn jit-container-backend-check ()
+        (do
+            (let cd (jcb-emit (jcb-cpu) (jcb-dict)))
+            (let ch (jcb-emit (jcb-cpu) (jcb-hash)))
+            (let ct (jcb-emit (jcb-cpu) (jcb-tree)))
+            (let gh (jcb-emit (jcb-gpu) (jcb-hash)))
+            (let gt (jcb-emit (jcb-gpu) (jcb-tree)))
+            (add
+                (if (eq (jcb-probe? cd (jcb-cpu) (jcb-dict) 4 1 601 690) 1) 1 0)
+                (add
+                    (if (eq (jcb-probe? ch (jcb-cpu) (jcb-hash) 5 1 701 790) 1) 2 0)
+                    (add
+                        (if (eq (jcb-probe? ct (jcb-cpu) (jcb-tree) 6 1 801 890) 1) 4 0)
+                        (add
+                            (if (eq (jcb-probe? gh (jcb-gpu) (jcb-hash) 16 4 701 790) 1) 8 0)
+                            (add
+                                (if (eq (jcb-probe? gt (jcb-gpu) (jcb-tree) 32 2 801 890) 1) 16 0)
+                                (add
+                                    (if (eq (len (jcb-emit 9 (jcb-hash))) 0) 32 0)
+                                    (add
+                                        (if (eq (len (jcb-emit (jcb-cpu) 99)) 0) 64 0)
+                                        (add
+                                            (if (eq (jcb-safe? (jcb-bad-no-deopt)) 0) 128 0)
+                                            (add
+                                                (if (eq (jcb-safe? (jcb-bad-zero-gen)) 0) 256 0)
+                                                (add
+                                                    (if (eq (jcb-safe? (jcb-bad-empty)) 0) 512 0)
+                                                    (add
+                                                        (if (eq (jcb-same-probe? ch (jcb-self-schedule ch)) 1) 1024 0)
+                                                        (if (eq (jcb-same-probe? gt (jcb-self-schedule gt)) 1) 2048 0))))))))))))))
+
+    0)
