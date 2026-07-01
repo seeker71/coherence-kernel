@@ -1,0 +1,175 @@
+; jit-container-live-slot-runtime.fk - compact live slots for container replacements.
+;
+; This cell avoids the current source-runner late-definition limit in the full
+; container stack by modeling the live slot contract directly as Form data. It
+; covers dict, hashmap, and red-black tree replacement payloads with CPU/GPU
+; target facts, byte lengths, source/maps, install/call evidence, and
+; native/deopt/exception/rewalk/melt routing. No C/Rust lowering and no host
+; machine-code call.
+
+(do
+    (defn jclsr-native () 1)
+    (defn jclsr-deopt () 2)
+    (defn jclsr-exception () 3)
+    (defn jclsr-rewalk () 4)
+    (defn jclsr-melt () 5)
+    (defn jclsr-reject () 6)
+    (defn jclsr-pending () 7)
+
+    (defn jclsr-dict () 1)
+    (defn jclsr-hash () 2)
+    (defn jclsr-tree () 3)
+    (defn jclsr-cpu () 1)
+    (defn jclsr-gpu () 2)
+
+    ; slot = ("container-live-slot" op target bytes byte-count signature source maps carrier install call exception deopt melt parity generation)
+    (defn jclsr-slot (op target bytes byte-count signature source maps carrier install call exception deopt melt parity generation)
+        (list "container-live-slot" op target bytes byte-count signature source maps carrier install call exception deopt melt parity generation))
+    (defn jclsr-slot? (s) (if (eq (len s) 16) (str_eq (nth s 0) "container-live-slot") 0))
+    (defn jclsr-op (s) (nth s 1))
+    (defn jclsr-target (s) (nth s 2))
+    (defn jclsr-bytes (s) (nth s 3))
+    (defn jclsr-byte-count (s) (nth s 4))
+    (defn jclsr-signature (s) (nth s 5))
+    (defn jclsr-source (s) (nth s 6))
+    (defn jclsr-maps (s) (nth s 7))
+    (defn jclsr-carrier (s) (nth s 8))
+    (defn jclsr-install (s) (nth s 9))
+    (defn jclsr-call (s) (nth s 10))
+    (defn jclsr-exception-proof (s) (nth s 11))
+    (defn jclsr-deopt-proof (s) (nth s 12))
+    (defn jclsr-melt-proof (s) (nth s 13))
+    (defn jclsr-parity (s) (nth s 14))
+    (defn jclsr-generation (s) (nth s 15))
+
+    (defn jclsr-op-ok? (op)
+        (if (eq op (jclsr-dict)) 1 (if (eq op (jclsr-hash)) 1 (if (eq op (jclsr-tree)) 1 0))))
+    (defn jclsr-target-ok? (target)
+        (if (eq target (jclsr-cpu)) 1 (if (eq target (jclsr-gpu)) 1 0)))
+    (defn jclsr-byte? (b) (if (ge b 0) (if (lt b 256) 1 0) 0))
+    (defn jclsr-byte-list? (xs)
+        (if (eq (len xs) 0)
+            1
+            (if (eq (jclsr-byte? (head xs)) 1) (jclsr-byte-list? (tail xs)) 0)))
+    (defn jclsr-byte-count-ok? (s)
+        (if (eq (jclsr-byte-count s) (len (jclsr-bytes s))) 1 0))
+    (defn jclsr-op-bytes-ok? (s)
+        (if (eq (jclsr-op s) (jclsr-dict))
+            (if (eq (jclsr-byte-count s) 4) 1 0)
+            (if (eq (jclsr-op s) (jclsr-hash))
+                (if (eq (jclsr-byte-count s) 6) 1 0)
+                (if (eq (jclsr-op s) (jclsr-tree))
+                    (if (eq (jclsr-byte-count s) 8) 1 0)
+                    0))))
+
+    (defn jclsr-contract-ready? (s)
+        (if (eq (jclsr-slot? s) 1)
+            (if (eq (jclsr-op-ok? (jclsr-op s)) 1)
+                (if (eq (jclsr-target-ok? (jclsr-target s)) 1)
+                    (if (gt (jclsr-signature s) 0)
+                        (if (gt (jclsr-byte-count s) 0)
+                            (if (eq (jclsr-byte-count-ok? s) 1)
+                                (if (eq (jclsr-byte-list? (jclsr-bytes s)) 1)
+                                    (if (eq (jclsr-op-bytes-ok? s) 1)
+                                        (if (eq (jclsr-source s) 1)
+                                            (if (eq (jclsr-maps s) 1)
+                                                (if (gt (jclsr-generation s) 0) 1 0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jclsr-live-complete? (s)
+        (if (eq (jclsr-contract-ready? s) 1)
+            (if (eq (jclsr-carrier s) 1)
+                (if (eq (jclsr-install s) 1)
+                    (if (eq (jclsr-call s) 1)
+                        (if (eq (jclsr-exception-proof s) 1)
+                            (if (eq (jclsr-deopt-proof s) 1)
+                                (if (eq (jclsr-melt-proof s) 1)
+                                    (if (eq (jclsr-parity s) 1) 1 0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jclsr-action (s guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (jclsr-contract-ready? s) 1)
+            (if (eq (jclsr-live-complete? s) 1)
+                (if (eq stale 1)
+                    (jclsr-melt)
+                    (if (eq invalidated 1)
+                        (jclsr-rewalk)
+                        (if (eq guard-ok 1)
+                            (if (eq runtime-ok 1)
+                                (if (eq parity-ok 1) (jclsr-native) (jclsr-deopt))
+                                (jclsr-exception))
+                            (jclsr-deopt))))
+                (jclsr-pending))
+            (jclsr-reject)))
+
+    (defn jclsr-dict-slot () (jclsr-slot (jclsr-dict) (jclsr-cpu) (list 72 139 7 195) 4 1308 1 1 1 1 1 1 1 1 1 1))
+    (defn jclsr-hash-slot () (jclsr-slot (jclsr-hash) (jclsr-cpu) (list 72 139 7 72 49 195) 6 1408 1 1 1 1 1 1 1 1 1 1))
+    (defn jclsr-tree-slot () (jclsr-slot (jclsr-tree) (jclsr-gpu) (list 201 202 203 204 205 206 207 195) 8 1509 1 1 1 1 1 1 1 1 1 1))
+    (defn jclsr-current () (jclsr-slot (jclsr-hash) (jclsr-cpu) (list 72 139 7 72 49 195) 6 1408 1 1 0 0 0 1 1 1 1 1))
+    (defn jclsr-bad-count () (jclsr-slot (jclsr-hash) (jclsr-cpu) (list 72 139 7 72 49 195) 5 1408 1 1 1 1 1 1 1 1 1 1))
+    (defn jclsr-bad-byte () (jclsr-slot (jclsr-hash) (jclsr-cpu) (list 72 139 300 195) 4 1408 1 1 1 1 1 1 1 1 1 1))
+    (defn jclsr-array-like () (jclsr-slot 4 (jclsr-cpu) (list 1 2 3 195) 4 1700 1 1 1 1 1 1 1 1 1 1))
+    (defn jclsr-no-source () (jclsr-slot (jclsr-hash) (jclsr-cpu) (list 72 139 7 72 49 195) 6 1408 0 1 1 1 1 1 1 1 1 1))
+    (defn jclsr-zero-generation () (jclsr-slot (jclsr-hash) (jclsr-cpu) (list 72 139 7 72 49 195) 6 1408 1 1 1 1 1 1 1 1 1 0))
+    (defn jclsr-no-carrier () (jclsr-slot (jclsr-hash) (jclsr-cpu) (list 72 139 7 72 49 195) 6 1408 1 1 0 1 1 1 1 1 1 1))
+    (defn jclsr-no-install () (jclsr-slot (jclsr-hash) (jclsr-cpu) (list 72 139 7 72 49 195) 6 1408 1 1 1 0 1 1 1 1 1 1))
+    (defn jclsr-no-call () (jclsr-slot (jclsr-hash) (jclsr-cpu) (list 72 139 7 72 49 195) 6 1408 1 1 1 1 0 1 1 1 1 1))
+
+    (defn jclsr-bit (cond bit) (if cond bit 0))
+    (defn jit-container-live-slot-runtime-check ()
+        (add
+            (jclsr-bit (eq (jclsr-contract-ready? (jclsr-dict-slot)) 1) 1)
+            (add
+                (jclsr-bit (eq (jclsr-contract-ready? (jclsr-hash-slot)) 1) 2)
+                (add
+                    (jclsr-bit (eq (jclsr-contract-ready? (jclsr-tree-slot)) 1) 4)
+                    (add
+                        (jclsr-bit (eq (jclsr-live-complete? (jclsr-current)) 0) 8)
+                        (add
+                            (jclsr-bit (eq (jclsr-action (jclsr-current) 1 1 0 1 0) (jclsr-pending)) 16)
+                            (add
+                                (jclsr-bit (eq (jclsr-live-complete? (jclsr-hash-slot)) 1) 32)
+                                (add
+                                    (jclsr-bit (eq (jclsr-action (jclsr-hash-slot) 1 1 0 1 0) (jclsr-native)) 64)
+                                    (add
+                                        (jclsr-bit (eq (jclsr-action (jclsr-hash-slot) 0 1 0 1 0) (jclsr-deopt)) 128)
+                                        (add
+                                            (jclsr-bit (eq (jclsr-action (jclsr-hash-slot) 1 0 0 1 0) (jclsr-exception)) 256)
+                                            (add
+                                                (jclsr-bit (eq (jclsr-action (jclsr-hash-slot) 1 1 1 1 0) (jclsr-rewalk)) 512)
+                                                (add
+                                                    (jclsr-bit (eq (jclsr-action (jclsr-hash-slot) 1 1 0 0 0) (jclsr-deopt)) 1024)
+                                                    (add
+                                                        (jclsr-bit (eq (jclsr-action (jclsr-hash-slot) 1 1 0 1 1) (jclsr-melt)) 2048)
+                                                        (add
+                                                            (jclsr-bit (eq (jclsr-contract-ready? (jclsr-bad-count)) 0) 4096)
+                                                            (add
+                                                                (jclsr-bit (eq (jclsr-contract-ready? (jclsr-bad-byte)) 0) 8192)
+                                                                (add
+                                                                    (jclsr-bit (eq (jclsr-contract-ready? (jclsr-array-like)) 0) 16384)
+                                                                    (add
+                                                                        (jclsr-bit (eq (jclsr-contract-ready? (jclsr-no-source)) 0) 32768)
+                                                                        (add
+                                                                            (jclsr-bit (eq (jclsr-contract-ready? (jclsr-zero-generation)) 0) 65536)
+                                                                            (add
+                                                                                (jclsr-bit (eq (jclsr-live-complete? (jclsr-no-carrier)) 0) 131072)
+                                                                                (add
+                                                                                    (jclsr-bit (eq (jclsr-live-complete? (jclsr-no-install)) 0) 262144)
+                                                                                    (jclsr-bit (eq (jclsr-live-complete? (jclsr-no-call)) 0) 524288)))))))))))))))))))
+
+    0)
