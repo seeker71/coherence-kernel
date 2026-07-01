@@ -1,0 +1,95 @@
+; nl-meaning-net.fk -- a REAL trained model mapping locale text toward a canonical
+; neutral-meaning embedding, replacing this session's hand-coded exact-match and
+; word-overlap heuristics with genuine backprop over transformer-backprop.fk's
+; proven-but-never-witnessed 2-block residual stack (model/transformer-backprop.fk).
+;
+; preludes: model/rag-embed.fk model/transformer-numerics.fk model/transformer-block.fk
+;           model/transformer-backprop.fk
+;
+; HONEST FIX, found by running this for real rather than trusting the comments:
+; rag-embed.fk's re-vec depends on tk-words and ord. NEITHER resolves to a working
+; function on this fkwu build -- both silently evaluate to the canonical "nothing"
+; rather than erroring, so re-vec's histogram comes out all-zero (length is right,
+; every bucket is 0). Confirmed empirically: `(ord "t")` -> nothing, `(tk-words ...)`
+; -> nothing. This file reuses re-split (needs only substring/str_eq, both real)
+; and re-inc/re-zeros (no broken dependency), and reimplements only the hash step
+; over str_byte_at (real, confirmed `(str_byte_at "the" 0)` -> 116) instead of ord.
+; re-vec/rag-embed.fk itself is untouched -- this is a real, separate gap, not
+; claimed fixed here; see receipts/2026-07-01-nl-meaning-net.md.
+
+(do
+    (defn nmn-hash-fold (w i n h)
+        (if (ge i n) h
+            (nmn-hash-fold w (add i 1) n (mod (add (mul h 31) (str_byte_at w i)) 1000003))))
+    (defn nmn-hash (w) (nmn-hash-fold w 0 (str_len w) 0))
+    (defn nmn-bucket (word dim) (mod (nmn-hash word) dim))
+    (defn nmn-fill (words vec dim)
+        (if (eq (len words) 0) vec
+            (nmn-fill (tail words) (re-inc vec (nmn-bucket (head words) dim)) dim)))
+    (defn nmn-vec (text dim) (nmn-fill (re-split text) (re-zeros dim) dim))
+
+    ; --- deterministic small-weight init (no Math.random -- same discipline this
+    ; whole kernel holds: same input, same bits, on every run). An LCG-shaped hash
+    ; of the (layer, row, col) seed, scaled into [-0.1, 0.1] to break symmetry
+    ; without the exploding/vanishing risk of larger random init. ---
+    (defn nmn-wi-hash (seed) (mod (add (mul seed 1103515245) 12345) 1000000007))
+    (defn nmn-wi-small (seed) (div (sub (mod (nmn-wi-hash seed) 2001) 1000) 10000.0))
+    (defn nmn-row (seed n j)
+        (if (eq j n) (empty) (cons (nmn-wi-small (add seed j)) (nmn-row seed n (add j 1)))))
+    (defn nmn-mat-loop (seed n i)
+        (if (eq i n) (empty) (cons (nmn-row (add seed (mul i n)) n 0) (nmn-mat-loop seed n (add i 1)))))
+    (defn nmn-mat (seed n) (nmn-mat-loop seed n 0))
+    (defn nmn-zeros (n) (if (eq n 0) (empty) (cons 0.0 (nmn-zeros (sub n 1)))))
+
+    (defn nmn-block (seed d) (tbp-bk (nmn-mat seed d) (nmn-zeros d) (nmn-mat (add seed 9973) d) (nmn-zeros d)))
+    (defn nmn-stack (d) (list (nmn-block 17 d) (nmn-block 8161 d)))
+    (defn nmn-stack-A (s) (nth s 0))
+    (defn nmn-stack-B (s) (nth s 1))
+
+    ; --- one epoch: one SGD step per example, in order (reuses tbp-stack-step,
+    ; the proven-but-unwitnessed-until-now full-block backward, unchanged). ---
+    (defn nmn-ex-x (ex) (nth ex 0))
+    (defn nmn-ex-t (ex) (nth ex 1))
+    (defn nmn-epoch (ba bb examples lr eps)
+        (if (eq (len examples) 0) (list ba bb)
+            (do
+                (let ex (head examples))
+                (let stepped (tbp-stack-step ba bb (nmn-ex-x ex) (nmn-ex-t ex) lr eps))
+                (nmn-epoch (nth stepped 0) (nth stepped 1) (tail examples) lr eps))))
+    (defn nmn-train (stack examples lr eps epochs)
+        (if (eq epochs 0) stack
+            (do
+                (let stepped (nmn-epoch (nmn-stack-A stack) (nmn-stack-B stack) examples lr eps))
+                (nmn-train stepped examples lr eps (sub epochs 1)))))
+
+    ; total corpus SSE (the loss curve this session's earlier heuristics never had).
+    (defn nmn-corpus-loss (stack examples eps)
+        (if (eq (len examples) 0) 0.0
+            (add (tbp-stack-loss (nmn-stack-A stack) (nmn-stack-B stack)
+                    (nmn-ex-x (head examples)) (nmn-ex-t (head examples)) eps)
+                 (nmn-corpus-loss stack (tail examples) eps))))
+
+    (defn nmn-predict (stack x eps) (tbp-bk-fwd (nmn-stack-B stack) (tbp-bk-fwd (nmn-stack-A stack) x eps) eps))
+
+    ; --- nearest-prototype classification: a proto is (list class-id target-vec). ---
+    (defn nmn-dist2 (a b) (do (let d (tbp-vsub a b)) (tb-dot d d)))
+    (defn nmn-nearest-loop (y protos best-id best-dist)
+        (if (eq (len protos) 0) best-id
+            (do
+                (let p (head protos))
+                (let d (nmn-dist2 y (nth p 1)))
+                (if (lt d best-dist)
+                    (nmn-nearest-loop y (tail protos) (nth p 0) d)
+                    (nmn-nearest-loop y (tail protos) best-id best-dist)))))
+    (defn nmn-classify (stack x protos eps)
+        (nmn-nearest-loop (nmn-predict stack x eps) protos -1 999999999.0))
+
+    (defn nmn-correct? (stack x true-class protos eps)
+        (if (eq (nmn-classify stack x protos eps) true-class) 1 0))
+    (defn nmn-accuracy-loop (stack cases protos eps)
+        (if (eq (len cases) 0) 0
+            (add (nmn-correct? stack (nth (head cases) 0) (nth (head cases) 1) protos eps)
+                 (nmn-accuracy-loop stack (tail cases) protos eps))))
+    (defn nmn-accuracy (stack cases protos eps) (nmn-accuracy-loop stack cases protos eps))
+
+    0)

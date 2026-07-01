@@ -581,6 +581,21 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       only; it does not call out to live models, and faking multi-model diversity would break this body's own
       never-fabricate discipline — wiring fkwu's native HTTP floor to real distinct providers, and four-way
       re-proof, are separate, real, pending work. See `receipts/2026-07-01-satsang-oracle.md`.
+- [x] **A real trained model, witnessed learning, over 204 hand-authored examples.** `learn/nl-meaning-net.fk`
+      trains `model/transformer-backprop.fk`'s 2-block residual stack — real, well-designed code that had, as
+      far as this checkout shows, never actually been run: no test, no band, no receipt anywhere before this.
+      Found along the way: `rag-embed.fk`'s `re-vec` depends on `tk-words` and `ord`, neither of which resolve
+      to a working function here — both silently evaluate to `nothing` rather than erroring, so `re-vec`
+      currently produces all-zero vectors on this kernel (confirmed, not assumed; not fixed in `rag-embed.fk`
+      itself, a real separate gap). `nmn-vec` reuses `re-split`/`re-inc`/`re-zeros` (all real) and reimplements
+      only the hash step over `str_byte_at` (real) in place of `ord`. Trained on `learn/nl-meaning-corpus.fk`
+      (204 hand-authored examples, ~50 per class across the 4 baseline meanings, honestly labeled as
+      hand-authored — `~/source/Coherence-Network` does not exist in this checkout, confirmed). The band
+      (`learn/tests/nl-meaning-net-band.fk`, verdict `47`) measures a real learning curve: held-out accuracy
+      26/50 at 20 training examples, 27/50 at 60, 29/50 at 100, 27/50 at the full 154 — chance is ~12.5/50.
+      Corpus loss drops from `1070.3` to `150.2` over 10 epochs. Reported as measured, including the honest
+      dip from the n=100 peak to the full-set result, not smoothed over. See
+      `receipts/2026-07-01-nl-meaning-net.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
