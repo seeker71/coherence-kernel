@@ -215,6 +215,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `6/6`, train/eval hashes differ, observed wav bytes `302968`, neural parameters `0`. Aggregate speech rows
       are now `47` wavs and `1368250` observed bytes; held-out repeat rows rise to `7`, while cross-phrase and
       cross-voice remain `0`.
+- [x] **Speech audio NL2NL bridge added.** `learn/speech-audio-nl2nl-bridge.fk` witnesses six reciprocal
+      oracle-guided routes (`4095`): source audio -> local Whisper -> Form neutral key `common.no` -> target text
+      -> target audio -> local Whisper. Source oracle, target oracle, and native neutral routing all pass `6/6`;
+      observed bridge wav bytes are `243348`. Aggregate speech rows are now `59` wavs and `1611598` observed
+      bytes. Boundary: host TTS and local Whisper remain carrier/oracle; this is not native vocoder authority.
 - [x] **macOS Arabic teacher acoustic learning added.** `learn/macos-arabic-teacher-acoustic-learning.fk` extends
       the same live path to Arabic: `Majed -> ffmpeg -> whisper.cpp/Metal -l ar`, Form wav sensing, four Arabic
       acoustic token prototypes, native CTC decode, live verdict `16383`, live WER `0`, minimum confidence `96`,

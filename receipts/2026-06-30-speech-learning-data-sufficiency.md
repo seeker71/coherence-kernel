@@ -8,8 +8,8 @@ enough data for real model training.
 Current data:
 
 ```text
-live wav rows: 47
-observed wav bytes: 1368250
+live wav rows: 59
+observed wav bytes: 1611598
 live locales: 6
 held-out repeat rows: 7
 cross-phrase held-out rows: 0
@@ -42,5 +42,5 @@ cat learn/speech-model-metrics-report.fk \
 
 Meaning: the band passes by proving the current corpus is under the floor and
 the training status is `plumbing-smoke-not-data-sufficient-training`. The next
-movement is corpus/audio expansion toward the 300-row floor, not treating 47
+movement is corpus/audio expansion toward the 300-row floor, not treating 59
 wavs as training sufficiency.
