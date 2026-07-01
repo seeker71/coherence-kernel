@@ -6,8 +6,8 @@ This receipt turns that fact into the next executable movement.
 Current state:
 
 ```text
-neural pair windows: 0
-Form-native seeded pair windows: 7
+neural pair windows: 1
+Form-native seeded pair windows: 8
 captured live wavs: 211
 required live wav floor: 12000
 native Form: true
@@ -17,12 +17,12 @@ neural ready: false
 Chosen next action:
 
 ```text
-id: next-form-pair-window-0008
-pair: en<->fr
-route: expand-form-native-pair-window-before-neural
-reason: neural-pairs-zero-and-corpus-under-floor
-Form pair windows: 7 -> 8
-neural pair windows: 0 -> 0
+id: next-native-neural-pair-window-0002
+pair: en<->pt-br
+route: train-native-neural-pair-window
+reason: neural-micro-pair-training-enabled
+Form pair windows: 8 -> 8
+neural pair windows: 1 -> 2
 capture state: 211/12000
 ```
 
@@ -39,6 +39,6 @@ cat learn/speech-neural-pair-coverage.fk \
 32767
 ```
 
-Meaning: the next honest move is to run another Form-native reciprocal pair
-window and keep capturing consentful audio. It is not time to claim
-`A=>neural=>B`; the planned neural count remains `0 -> 0`.
+Meaning: the next honest move is to run the second native neural micro-pair
+window and keep capturing consentful audio. The planned neural count moves
+`1 -> 2`; full open ASR/TTS authority still waits for open receipts.
