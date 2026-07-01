@@ -448,15 +448,15 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       keep controls clean, promote by A/B evidence, and preserve the local oracle/device while neural Metal and
       diffusion remain pending. The band returns `32767`.
 - [x] **Speech neural pair coverage added.** `learn/speech-neural-pair-coverage.fk` makes the pair-training
-      boundary executable (`32767`): locale `A=>neural=>B` coverage is now `13/55` broad ready pairs and `26/110`
-      directed routes, with `13` neural epochs and `13` native neural parameters. The separate Form-native seeded
+      boundary executable (`32767`): locale `A=>neural=>B` coverage is now `14/55` broad ready pairs and `28/110`
+      directed routes, with `14` neural epochs and `14` native neural parameters. The separate Form-native seeded
       windows cover `8` reciprocal pair windows (`16` directed cross-locale directions, `32` A/B plus self
       roundtrip lanes), which is `1454` basis points of the broad ready pair space and `1777` basis points of the
       Sanskrit-baseline pair space. This keeps prototype/Form receipts from being misreported while making neural
       pair coverage non-zero.
 - [x] **Speech pair training next action added.** `learn/speech-pair-training-next-action.fk` now chooses the next
-      executable neural movement (`32767`): choose `next-native-neural-pair-window-0014` over `zh<->la`, route
-      `train-native-neural-pair-window`, keep Form-native pair windows `8 -> 8`, move neural pair windows `13 -> 14`,
+      executable neural movement (`32767`): choose `next-native-neural-pair-window-0015` over `ar<->la`, route
+      `train-native-neural-pair-window`, keep Form-native pair windows `8 -> 8`, move neural pair windows `14 -> 15`,
       and carry the corpus floor gap `211/12000`. The point is to keep training toward full open ASR/TTS, not stop
       at the first micro-pair.
 - [x] **Speech Form pair window 0006 added.** `learn/speech-form-pair-window-0006.fk` executes the selected
@@ -525,6 +525,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       the thirteenth native neural micro-pair over `ar<->sa` (`32767`): neural pair coverage moves to `13`
       unordered pairs and `26` directed routes, with `13` native neural parameters, `13` epochs, and neural rate
       `0 -> 100`. The next selected movement is `next-native-neural-pair-window-0014` over `zh<->la`.
+- [x] **Speech native neural pair window 0014 added.** `learn/speech-native-neural-pair-window-0014.fk` trains
+      the fourteenth native neural micro-pair over `zh<->la` (`32767`): neural pair coverage moves to `14`
+      unordered pairs and `28` directed routes, with `14` native neural parameters, `14` epochs, and neural rate
+      `0 -> 100`. The next selected movement is `next-native-neural-pair-window-0015` over `ar<->la`.
 - [x] **Speech open ASR/TTS target model added.** `learn/speech-open-asr-tts-target-model.fk` makes the goal
       executable (`32767`): native open ASR and Sema TTS should reach or beat the local oracle. Current native
       authority remains below target, but the route is enabled and no longer zeroed out.
