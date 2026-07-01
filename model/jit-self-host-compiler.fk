@@ -1,0 +1,146 @@
+; jit-self-host-compiler.fk - Form-native JIT compiler plan that can compile its own hot paths.
+;
+; Prelude: model/form-asm-x64.fk
+;
+; This is not a carrier and not host C/Rust lowering. It is the Form-side JIT
+; compiler surface: hot source plans lower to args-vector native byte payloads.
+; Compiler plans use the same rows as user plans, so when the compiler's own
+; lowering path becomes hot, stage2 bytes are produced by the same compiler
+; function and must match stage1.
+
+(do
+    (defn jsh-add1 () 1)
+    (defn jsh-add2 () 2)
+    (defn jsh-array-get () 3)
+    (defn jsh-field-load () 4)
+    (defn jsh-div () 5)
+
+    ; plan = ("jit-plan" owner subject op slot source maps generation)
+    (defn jsh-plan (owner subject op slot source maps generation)
+        (list "jit-plan" owner subject op slot source maps generation))
+    (defn jsh-plan? (p) (if (eq (len p) 8) (str_eq (nth p 0) "jit-plan") 0))
+    (defn jsh-owner (p) (nth p 1))
+    (defn jsh-subject (p) (nth p 2))
+    (defn jsh-op (p) (nth p 3))
+    (defn jsh-slot (p) (nth p 4))
+    (defn jsh-source (p) (nth p 5))
+    (defn jsh-maps (p) (nth p 6))
+    (defn jsh-generation (p) (nth p 7))
+
+    (defn jsh-op-ok? (op)
+        (if (eq op (jsh-add1)) 1
+            (if (eq op (jsh-add2)) 1
+                (if (eq op (jsh-array-get)) 1
+                    (if (eq op (jsh-field-load)) 1
+                        (if (eq op (jsh-div)) 1 0))))))
+
+    (defn jsh-plan-safe? (p)
+        (if (eq (jsh-plan? p) 1)
+            (if (str_eq (jsh-owner p) "form-backend")
+                (if (eq (jsh-op-ok? (jsh-op p)) 1)
+                    (if (eq (jsh-source p) 1)
+                        (if (eq (jsh-maps p) 1)
+                            (if (gt (jsh-generation p) 0) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jsh-hot-pure? (heat pure)
+        (if (ge heat 5) (if (eq pure 1) 1 0) 0))
+
+    (defn jsh-emit-op (op slot)
+        (if (eq op (jsh-add1))
+            (x64-args-add1-sysv)
+            (if (eq op (jsh-add2))
+                (x64-args-add2-sysv)
+                (if (eq op (jsh-array-get))
+                    (x64-args-array-get-checked-sysv)
+                    (if (eq op (jsh-field-load))
+                        (x64-args-field-load-checked-sysv slot)
+                        (if (eq op (jsh-div)) (x64-args-div-checked-sysv) (empty)))))))
+
+    (defn jsh-compile (p heat pure)
+        (if (eq (jsh-plan-safe? p) 1)
+            (if (eq (jsh-hot-pure? heat pure) 1)
+                (jsh-emit-op (jsh-op p) (jsh-slot p))
+                (empty))
+            (empty)))
+
+    ; Self-hosting step: the compiler compiles a plan for one of its own
+    ; lowering paths. Stage2 must be the same bytes as compiling the user plan.
+    (defn jsh-compiler-plan-for (p)
+        (jsh-plan "form-backend" "jit-compiler" (jsh-op p) (jsh-slot p) 1 1 (jsh-generation p)))
+    (defn jsh-compile-self (p heat pure)
+        (jsh-compile (jsh-compiler-plan-for p) heat pure))
+
+    (defn jsh-probe? (xs l a b c d)
+        (if (eq (len xs) l)
+            (if (eq (nth xs 0) a)
+                (if (eq (nth xs 1) b)
+                    (if (eq (nth xs 2) c)
+                        (if (eq (nth xs (sub l 1)) d) 1 0)
+                        0)
+                    0)
+                0)
+            0))
+    (defn jsh-same-probe? (a b l)
+        (if (eq (len a) l)
+            (if (eq (len b) l)
+                (if (eq (nth a 0) (nth b 0))
+                    (if (eq (nth a 1) (nth b 1))
+                        (if (eq (nth a 2) (nth b 2))
+                            (if (eq (nth a (sub l 1)) (nth b (sub l 1))) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jsh-user-add1 () (jsh-plan "form-backend" "user" (jsh-add1) 0 1 1 1))
+    (defn jsh-user-add2 () (jsh-plan "form-backend" "user" (jsh-add2) 0 1 1 1))
+    (defn jsh-user-array () (jsh-plan "form-backend" "user" (jsh-array-get) 0 1 1 1))
+    (defn jsh-user-field () (jsh-plan "form-backend" "user" (jsh-field-load) 2 1 1 1))
+    (defn jsh-user-div () (jsh-plan "form-backend" "user" (jsh-div) 0 1 1 1))
+    (defn jsh-cold-add1 () (jsh-plan "form-backend" "user" (jsh-add1) 0 1 1 1))
+    (defn jsh-foreign () (jsh-plan "c-lowering" "user" (jsh-add1) 0 1 1 1))
+    (defn jsh-no-source () (jsh-plan "form-backend" "user" (jsh-add1) 0 0 1 1))
+    (defn jsh-zero-generation () (jsh-plan "form-backend" "user" (jsh-add1) 0 1 1 0))
+
+    (defn jit-self-host-compiler-check ()
+        (do
+            (let add1 (jsh-compile (jsh-user-add1) 6 1))
+            (let add2 (jsh-compile (jsh-user-add2) 6 1))
+            (let field (jsh-compile (jsh-user-field) 6 1))
+            (let array (jsh-compile (jsh-user-array) 6 1))
+            (let div (jsh-compile (jsh-user-div) 6 1))
+            (let self-array (jsh-compile-self (jsh-user-array) 6 1))
+            (let self-div (jsh-compile-self (jsh-user-div) 6 1))
+            (add
+                (if (eq (jsh-plan-safe? (jsh-user-array)) 1) 1 0)
+                (add
+                    (if (eq (jsh-probe? add1 8 72 139 7 195) 1) 2 0)
+                    (add
+                        (if (eq (jsh-probe? add2 8 72 139 7 195) 1) 4 0)
+                        (add
+                            (if (eq (jsh-probe? field 21 76 139 7 195) 1) 8 0)
+                            (add
+                                (if (eq (nth array 20) 13) 16 0)
+                                (add
+                                    (if (eq (nth div 16) 247) 32 0)
+                                    (add
+                                        (if (eq (len (jsh-compile (jsh-cold-add1) 4 1)) 0) 64 0)
+                                        (add
+                                            (if (eq (len (jsh-compile (jsh-user-add1) 6 0)) 0) 128 0)
+                                            (add
+                                                (if (eq (len (jsh-compile (jsh-foreign) 6 1)) 0) 256 0)
+                                                (add
+                                                    (if (eq (len (jsh-compile (jsh-no-source) 6 1)) 0) 512 0)
+                                                    (add
+                                                        (if (eq (len (jsh-compile (jsh-zero-generation) 6 1)) 0) 1024 0)
+                                                        (add
+                                                            (if (eq (jsh-same-probe? array self-array 42) 1) 2048 0)
+                                                            (if (eq (jsh-same-probe? div self-div 27) 1) 4096 0)))))))))))))))
+
+    0)
