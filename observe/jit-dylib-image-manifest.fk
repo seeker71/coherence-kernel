@@ -1,0 +1,359 @@
+; jit-dylib-image-manifest.fk - Form-owned manifest for a dylib carrier image.
+;
+; The dylib path is useful only if the loadable artifact stays a carrier for
+; Form-emitted meaning. This cell makes that artifact explicit: exported carrier
+; symbols, byte image, ABI, imports, relocations, segment permissions, maps,
+; owner, no-C-growth, and generation are all checked before an image can feed
+; install/call or slot runtime evidence.
+;
+; preludes:
+;   model/form-asm-x64.fk
+;   observe/jit-dylib-carrier-abi.fk
+
+(do
+    (defn jdimg-native () 1)
+    (defn jdimg-deopt () 2)
+    (defn jdimg-exception () 3)
+    (defn jdimg-rewalk () 4)
+    (defn jdimg-melt () 5)
+    (defn jdimg-reject () 6)
+
+    (defn jdimg-ok () 1)
+    (defn jdimg-unavailable () 2)
+    (defn jdimg-mismatch () 3)
+    (defn jdimg-fault () 4)
+
+    (defn jdimg-eq-list (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0)
+                1
+                (if (eq (head a) (head b)) (jdimg-eq-list (tail a) (tail b)) 0))
+            0))
+
+    ; fk_jit_call receives a pointer to tagged args on SysV; add1 adds 2 to a tagged integer.
+    (defn jdimg-sysv-add1-bytes () (list 72 139 7 72 131 192 2 195))
+
+    ; receipt = ("dylib-image-receipt" name total expected source maps)
+    (defn jdimg-receipt (name total expected source maps)
+        (list "dylib-image-receipt" name total expected source maps))
+    (defn jdimg-receipt? (r) (if (eq (len r) 6) (str_eq (nth r 0) "dylib-image-receipt") 0))
+    (defn jdimg-total (r) (nth r 2))
+    (defn jdimg-expected (r) (nth r 3))
+    (defn jdimg-source (r) (nth r 4))
+    (defn jdimg-maps (r) (nth r 5))
+
+    (defn jdimg-receipt-ok? (r)
+        (if (eq (jdimg-receipt? r) 1)
+            (if (eq (jdimg-total r) (jdimg-expected r))
+                (if (eq (jdimg-source r) 1)
+                    (if (eq (jdimg-maps r) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jdimg-dylib-carrier () (jdimg-receipt "dylib-carrier-abi" 2097151 2097151 1 1))
+    (defn jdimg-install-call () (jdimg-receipt "install-call-attempt" 16777215 16777215 1 1))
+    (defn jdimg-dylib-slot () (jdimg-receipt "dylib-slot-runtime" 262143 262143 1 1))
+    (defn jdimg-slot-fault () (jdimg-receipt "slot-runtime-fault-bridge" 1048575 1048575 1 1))
+    (defn jdimg-bad-slot-fault () (jdimg-receipt "slot-runtime-fault-bridge" 1048574 1048575 1 1))
+
+    (defn jdimg-receipts-ok? ()
+        (if (eq (jdimg-receipt-ok? (jdimg-dylib-carrier)) 1)
+            (if (eq (jdimg-receipt-ok? (jdimg-install-call)) 1)
+                (if (eq (jdimg-receipt-ok? (jdimg-dylib-slot)) 1)
+                    (if (eq (jdimg-receipt-ok? (jdimg-slot-fault)) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    ; export = ("export" symbol arity abi slot)
+    (defn jdimg-export (symbol arity abi slot)
+        (list "export" symbol arity abi slot))
+    (defn jdimg-export? (e) (if (eq (len e) 5) (str_eq (nth e 0) "export") 0))
+    (defn jdimg-export-symbol (e) (nth e 1))
+    (defn jdimg-export-arity (e) (nth e 2))
+    (defn jdimg-export-abi (e) (nth e 3))
+    (defn jdimg-export-slot (e) (nth e 4))
+
+    (defn jdimg-export-safe? (e)
+        (if (eq (jdimg-export? e) 1)
+            (if (eq (jdimg-export-arity e) 1)
+                (if (str_eq (jdimg-export-abi e) "sysv")
+                    (if (gt (jdimg-export-slot e) 0) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jdimg-exports-safe? (exports)
+        (if (eq (len exports) 0)
+            1
+            (if (eq (jdimg-export-safe? (head exports)) 1) (jdimg-exports-safe? (tail exports)) 0)))
+
+    (defn jdimg-has-export? (exports symbol)
+        (if (eq (len exports) 0)
+            0
+            (if (str_eq (jdimg-export-symbol (head exports)) symbol)
+                1
+                (jdimg-has-export? (tail exports) symbol))))
+
+    (defn jdimg-required-exports? (exports)
+        (if (eq (jdimg-has-export? exports "fk_jit_install") 1)
+            (if (eq (jdimg-has-export? exports "fk_jit_call") 1)
+                (if (eq (jdimg-has-export? exports "fk_jit_drop") 1)
+                    (if (eq (jdimg-has-export? exports "fk_jit_flush_icache") 1)
+                        (if (eq (jdimg-has-export? exports "fk_jit_status_v1") 1) 1 0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jdimg-import-safe? (name)
+        (if (str_eq name "mmap")
+            1
+            (if (str_eq name "mprotect")
+                1
+                (if (str_eq name "sys_icache_invalidate") 1 0))))
+
+    (defn jdimg-imports-safe? (imports)
+        (if (eq (len imports) 0)
+            1
+            (if (eq (jdimg-import-safe? (head imports)) 1) (jdimg-imports-safe? (tail imports)) 0)))
+
+    ; reloc = ("reloc" offset symbol)
+    (defn jdimg-reloc (offset symbol)
+        (list "reloc" offset symbol))
+    (defn jdimg-reloc? (r) (if (eq (len r) 3) (str_eq (nth r 0) "reloc") 0))
+    (defn jdimg-reloc-offset (r) (nth r 1))
+    (defn jdimg-reloc-symbol (r) (nth r 2))
+
+    (defn jdimg-reloc-symbol-safe? (symbol)
+        (if (str_eq symbol "fk_jit_status_v1")
+            1
+            (if (str_eq symbol "fk_jit_call")
+                1
+                (if (eq (jdimg-import-safe? symbol) 1) 1 0))))
+
+    (defn jdimg-reloc-safe? (r byte-count)
+        (if (eq (jdimg-reloc? r) 1)
+            (if (ge (jdimg-reloc-offset r) 0)
+                (if (lt (jdimg-reloc-offset r) byte-count)
+                    (jdimg-reloc-symbol-safe? (jdimg-reloc-symbol r))
+                    0)
+                0)
+            0))
+
+    (defn jdimg-relocs-safe? (relocs byte-count)
+        (if (eq (len relocs) 0)
+            1
+            (if (eq (jdimg-reloc-safe? (head relocs) byte-count) 1) (jdimg-relocs-safe? (tail relocs) byte-count) 0)))
+
+    ; image = ("dylib-image" path bytes byte-count abi exports imports relocs text-exec text-writable sealed source fault deopt owner no-c-growth generation)
+    (defn jdimg-image (path bytes byte-count abi exports imports relocs text-exec text-writable sealed source fault deopt owner no-c-growth generation)
+        (list "dylib-image" path bytes byte-count abi exports imports relocs text-exec text-writable sealed source fault deopt owner no-c-growth generation))
+    (defn jdimg-image? (i) (if (eq (len i) 17) (str_eq (nth i 0) "dylib-image") 0))
+    (defn jdimg-path (i) (nth i 1))
+    (defn jdimg-bytes (i) (nth i 2))
+    (defn jdimg-byte-count (i) (nth i 3))
+    (defn jdimg-abi (i) (nth i 4))
+    (defn jdimg-exports (i) (nth i 5))
+    (defn jdimg-imports (i) (nth i 6))
+    (defn jdimg-relocs (i) (nth i 7))
+    (defn jdimg-text-exec (i) (nth i 8))
+    (defn jdimg-text-writable (i) (nth i 9))
+    (defn jdimg-sealed (i) (nth i 10))
+    (defn jdimg-source-map (i) (nth i 11))
+    (defn jdimg-fault-map (i) (nth i 12))
+    (defn jdimg-deopt-map (i) (nth i 13))
+    (defn jdimg-owner (i) (nth i 14))
+    (defn jdimg-no-c-growth (i) (nth i 15))
+    (defn jdimg-generation (i) (nth i 16))
+
+    (defn jdimg-known-byte-image? (i)
+        (if (jdimg-eq-list (jdimg-bytes i) (jdimg-sysv-add1-bytes))
+            1
+            (if (jdimg-eq-list (jdimg-bytes i) (x64-args-field-load-checked-sysv 2))
+                1
+                (if (jdimg-eq-list (jdimg-bytes i) (x64-args-array-get-checked-sysv)) 1 0))))
+
+    (defn jdimg-install (i)
+        (jdca-install (jdimg-bytes i) (jdimg-byte-count i) (jdimg-abi i)
+            1 (jdimg-sealed i) (jdimg-text-exec i) (jdimg-text-writable i)
+            (jdimg-source-map i) (jdimg-fault-map i) (jdimg-deopt-map i)))
+
+    (defn jdimg-call (slot args status)
+        (jdca-call slot args (len args) 1 1 status))
+
+    (defn jdimg-image-safe? (i)
+        (if (eq (jdimg-image? i) 1)
+            (if (eq (jdimg-receipts-ok?) 1)
+                (if (str_eq (jdimg-path i) "libform_jit_carrier.dylib")
+                    (if (str_eq (jdimg-owner i) "form-backend")
+                        (if (eq (jdimg-byte-count i) (len (jdimg-bytes i)))
+                            (if (eq (jdca-byte-list? (jdimg-bytes i)) 1)
+                                (if (eq (jdimg-known-byte-image? i) 1)
+                                    (if (str_eq (jdimg-abi i) "sysv")
+                                        (if (eq (jdimg-exports-safe? (jdimg-exports i)) 1)
+                                            (if (eq (jdimg-required-exports? (jdimg-exports i)) 1)
+                                                (if (eq (jdimg-imports-safe? (jdimg-imports i)) 1)
+                                                    (if (eq (jdimg-relocs-safe? (jdimg-relocs i) (jdimg-byte-count i)) 1)
+                                                        (if (eq (jdimg-text-exec i) 1)
+                                                            (if (eq (jdimg-text-writable i) 0)
+                                                                (if (eq (jdimg-sealed i) 1)
+                                                                    (if (eq (jdimg-source-map i) 1)
+                                                                        (if (eq (jdimg-fault-map i) 1)
+                                                                            (if (eq (jdimg-deopt-map i) 1)
+                                                                                (if (eq (jdimg-no-c-growth i) 1)
+                                                                                    (if (gt (jdimg-generation i) 0)
+                                                                                        (jdca-install-safe? (jdimg-install i))
+                                                                                        0)
+                                                                                    0)
+                                                                                0)
+                                                                            0)
+                                                                        0)
+                                                                    0)
+                                                                0)
+                                                            0)
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jdimg-route (i slot args status guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (jdimg-image-safe? i) 1)
+            (if (eq status (jdimg-mismatch))
+                (jdimg-reject)
+                (if (eq status (jdimg-unavailable))
+                    (jdimg-deopt)
+                    (if (eq status (jdimg-fault))
+                        (jdimg-exception)
+                        (if (eq stale 1)
+                            (jdimg-melt)
+                            (if (eq invalidated 1)
+                                (jdimg-rewalk)
+                                (jdca-route (jdca-good-carrier) (jdimg-install i) (jdimg-call slot args status)
+                                    guard-ok runtime-ok invalidated parity-ok stale))))))
+            (jdimg-reject)))
+
+    (defn jdimg-exports-good ()
+        (list
+            (jdimg-export "fk_jit_install" 1 "sysv" 1)
+            (jdimg-export "fk_jit_call" 1 "sysv" 2)
+            (jdimg-export "fk_jit_drop" 1 "sysv" 3)
+            (jdimg-export "fk_jit_flush_icache" 1 "sysv" 4)
+            (jdimg-export "fk_jit_status_v1" 1 "sysv" 5)))
+    (defn jdimg-exports-missing-call ()
+        (list
+            (jdimg-export "fk_jit_install" 1 "sysv" 1)
+            (jdimg-export "fk_jit_drop" 1 "sysv" 3)
+            (jdimg-export "fk_jit_flush_icache" 1 "sysv" 4)
+            (jdimg-export "fk_jit_status_v1" 1 "sysv" 5)))
+    (defn jdimg-imports-good () (list "mmap" "mprotect" "sys_icache_invalidate"))
+    (defn jdimg-imports-bad () (list "mmap" "system"))
+    (defn jdimg-relocs-good () (list (jdimg-reloc 2 "fk_jit_status_v1") (jdimg-reloc 4 "mprotect")))
+    (defn jdimg-relocs-bad () (list (jdimg-reloc 999 "fk_jit_status_v1")))
+
+    (defn jdimg-add1-image ()
+        (jdimg-image "libform_jit_carrier.dylib" (jdimg-sysv-add1-bytes) 8 "sysv"
+            (jdimg-exports-good) (jdimg-imports-good) (jdimg-relocs-good)
+            1 0 1 1 1 1 "form-backend" 1 1))
+    (defn jdimg-field-image ()
+        (jdimg-image "libform_jit_carrier.dylib" (x64-args-field-load-checked-sysv 2) 21 "sysv"
+            (jdimg-exports-good) (jdimg-imports-good) (jdimg-relocs-good)
+            1 0 1 1 1 1 "form-backend" 1 2))
+    (defn jdimg-array-image ()
+        (jdimg-image "libform_jit_carrier.dylib" (x64-args-array-get-checked-sysv) 42 "sysv"
+            (jdimg-exports-good) (jdimg-imports-good) (jdimg-relocs-good)
+            1 0 1 1 1 1 "form-backend" 1 3))
+    (defn jdimg-c-owner-image ()
+        (jdimg-image "libform_jit_carrier.dylib" (jdimg-sysv-add1-bytes) 8 "sysv"
+            (jdimg-exports-good) (jdimg-imports-good) (jdimg-relocs-good)
+            1 0 1 1 1 1 "c-lowering" 1 1))
+    (defn jdimg-no-source-image ()
+        (jdimg-image "libform_jit_carrier.dylib" (jdimg-sysv-add1-bytes) 8 "sysv"
+            (jdimg-exports-good) (jdimg-imports-good) (jdimg-relocs-good)
+            1 0 1 0 1 1 "form-backend" 1 1))
+    (defn jdimg-writable-text-image ()
+        (jdimg-image "libform_jit_carrier.dylib" (jdimg-sysv-add1-bytes) 8 "sysv"
+            (jdimg-exports-good) (jdimg-imports-good) (jdimg-relocs-good)
+            1 1 1 1 1 1 "form-backend" 1 1))
+    (defn jdimg-zero-generation-image ()
+        (jdimg-image "libform_jit_carrier.dylib" (jdimg-sysv-add1-bytes) 8 "sysv"
+            (jdimg-exports-good) (jdimg-imports-good) (jdimg-relocs-good)
+            1 0 1 1 1 1 "form-backend" 1 0))
+    (defn jdimg-bad-import-image ()
+        (jdimg-image "libform_jit_carrier.dylib" (jdimg-sysv-add1-bytes) 8 "sysv"
+            (jdimg-exports-good) (jdimg-imports-bad) (jdimg-relocs-good)
+            1 0 1 1 1 1 "form-backend" 1 1))
+    (defn jdimg-bad-reloc-image ()
+        (jdimg-image "libform_jit_carrier.dylib" (jdimg-sysv-add1-bytes) 8 "sysv"
+            (jdimg-exports-good) (jdimg-imports-good) (jdimg-relocs-bad)
+            1 0 1 1 1 1 "form-backend" 1 1))
+    (defn jdimg-missing-export-image ()
+        (jdimg-image "libform_jit_carrier.dylib" (jdimg-sysv-add1-bytes) 8 "sysv"
+            (jdimg-exports-missing-call) (jdimg-imports-good) (jdimg-relocs-good)
+            1 0 1 1 1 1 "form-backend" 1 1))
+
+    (defn jdimg-bit (cond bit) (if cond bit 0))
+    (defn jdimg-front-bits ()
+        (add
+            (jdimg-bit (eq (jdimg-receipts-ok?) 1) 1)
+            (add
+                (jdimg-bit (eq (jdimg-known-byte-image? (jdimg-add1-image)) 1) 2)
+                (add
+                    (jdimg-bit (eq (jdimg-image-safe? (jdimg-field-image)) 1) 4)
+                    (add
+                        (jdimg-bit (eq (jdimg-image-safe? (jdimg-array-image)) 1) 8)
+                        (add
+                            (jdimg-bit (eq (jdimg-exports-safe? (jdimg-exports-good)) 1) 16)
+                            (add
+                                (jdimg-bit (eq (jdimg-imports-safe? (jdimg-imports-good)) 1) 32)
+                                (add
+                                    (jdimg-bit (eq (jdimg-relocs-safe? (jdimg-relocs-good) 8) 1) 64)
+                                    (jdimg-bit (eq (jdca-install-safe? (jdimg-install (jdimg-array-image))) 1) 128)))))))))
+
+    (defn jdimg-route-bits ()
+        (add
+            (jdimg-bit (eq (jdimg-route (jdimg-array-image) 3 (list 82 2 10) (jdimg-ok) 1 1 0 1 0) (jdimg-native)) 256)
+            (add
+                (jdimg-bit (eq (jdimg-route (jdimg-array-image) 3 (list 82 2 10) (jdimg-ok) 0 1 0 1 0) (jdimg-deopt)) 512)
+                (add
+                    (jdimg-bit (eq (jdimg-route (jdimg-array-image) 3 (list 82 2 10) (jdimg-ok) 1 0 0 1 0) (jdimg-exception)) 1024)
+                    (add
+                        (jdimg-bit (eq (jdimg-route (jdimg-array-image) 3 (list 82 2 10) (jdimg-ok) 1 1 1 1 0) (jdimg-rewalk)) 2048)
+                        (add
+                            (jdimg-bit (eq (jdimg-route (jdimg-array-image) 3 (list 82 2 10) (jdimg-ok) 1 1 0 1 1) (jdimg-melt)) 4096)
+                            (add
+                                (jdimg-bit (eq (jdimg-route (jdimg-array-image) 3 (list 82 2 10) (jdimg-ok) 1 1 0 0 0) (jdimg-deopt)) 8192)
+                                (add
+                                    (jdimg-bit (eq (jdimg-route (jdimg-array-image) 3 (list 82 2 10) (jdimg-unavailable) 1 1 0 1 0) (jdimg-deopt)) 16384)
+                                    (jdimg-bit (eq (jdimg-route (jdimg-array-image) 3 (list 82 2 10) (jdimg-fault) 1 1 0 1 0) (jdimg-exception)) 32768)))))))))
+
+    (defn jdimg-reject-bits ()
+        (add
+            (jdimg-bit (eq (jdimg-image-safe? (jdimg-c-owner-image)) 0) 65536)
+            (add
+                (jdimg-bit (eq (jdimg-image-safe? (jdimg-no-source-image)) 0) 131072)
+                (add
+                    (jdimg-bit (eq (jdimg-image-safe? (jdimg-writable-text-image)) 0) 262144)
+                    (add
+                        (jdimg-bit (eq (jdimg-image-safe? (jdimg-zero-generation-image)) 0) 524288)
+                        (add
+                            (jdimg-bit (eq (jdimg-image-safe? (jdimg-bad-import-image)) 0) 1048576)
+                            (add
+                                (jdimg-bit (eq (jdimg-image-safe? (jdimg-bad-reloc-image)) 0) 2097152)
+                                (add
+                                    (jdimg-bit (eq (jdimg-image-safe? (jdimg-missing-export-image)) 0) 4194304)
+                                    (jdimg-bit (eq (jdimg-receipt-ok? (jdimg-bad-slot-fault)) 0) 8388608)))))))))
+
+    (defn jit-dylib-image-manifest-check ()
+        (add (jdimg-front-bits) (add (jdimg-route-bits) (jdimg-reject-bits))))
+
+    0)
