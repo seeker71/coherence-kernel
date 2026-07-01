@@ -6,12 +6,12 @@ Form-native seeded windows into neural training.
 Current neural pair coverage:
 
 ```text
-trained unordered neural pairs: 1
-trained directed neural pair routes: 2
-neural training epochs: 1
-native neural parameters: 1
+trained unordered neural pairs: 2
+trained directed neural pair routes: 4
+neural training epochs: 2
+native neural parameters: 2
 broad ready pair space: 55 unordered / 110 directed
-neural coverage: 181 basis points
+neural coverage: 363 basis points
 ```
 
 Current Form-native seeded reciprocal coverage:
@@ -38,8 +38,8 @@ audio NL2NL bridge routes: 12 oracle-guided routes, not native vocoder and not n
 Trained neural micro-pair:
 
 ```text
-pair: en<->fr
-file: learn/speech-native-neural-pair-window-0001.fk
+pairs: en<->fr, en<->pt-br
+files: learn/speech-native-neural-pair-window-0001.fk, learn/speech-native-neural-pair-window-0002.fk
 boundary: non-zero trained pair coverage, not full open ASR/TTS authority
 ```
 
@@ -56,6 +56,6 @@ cat learn/speech-neural-pair-coverage.fk \
 ```
 
 Meaning: locale `A => neural => B` and `B => neural => A` coverage is now
-non-zero. The current movement is a trained Form-native neural micro-pair,
+non-zero. The current movement is trained Form-native neural micro-pairs,
 guided by local oracles and the Sanskrit/multi-locale baseline; full open
 ASR/TTS authority remains the target, not the current claim.
