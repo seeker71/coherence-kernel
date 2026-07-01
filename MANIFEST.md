@@ -246,6 +246,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       accepted `24/24`, training-admitted `24/24`, max WER `0`, six locales, observed source wav bytes `580710`.
       Aggregate captured corpus rows used for training are now `30`, while data sufficiency remains false against
       the `12000` wav-row floor and global ASR/TTS authority remains false.
+- [x] **Speech corpus training intake 0003 added.** `learn/speech-corpus-training-intake-0003.fk` admits the
+      thirty-four screened clean batch-`0003` phrase rows into the native prototype-training floor (`32767`):
+      local-oracle accepted `34/34`, training-admitted `34/34`, max WER `25`, six locales, observed source wav
+      bytes `1272388`. Aggregate captured corpus rows used for training are now `64`, while data sufficiency
+      remains false against the `12000` wav-row floor and global ASR/TTS/Sema voice authority remains false.
 - [x] **Speech corpus held-out repeat learning added.** `learn/speech-corpus-heldout-repeat-learning.fk` trains six
       Form-native full-envelope prototypes from consentful corpus phrases and evaluates six separately rendered,
       volume-shifted held-out wavs (`16383`): local oracle accepts `6/6`, native prototype classification accepts
@@ -340,8 +345,8 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech current status ledger added.** `learn/speech-current-status-ledger.fk` composes the metrics report,
       backlog, scheduler, open-ASR trial, and Sema voice trial into one executable status row (`32767`): global live
       authority remains oracle-held (`4/5` oracle, `0/5` native), scoped trial windows are native (`3/3` oracle and
-      `3/3` native), native neural weights remain `0`, native Sema voice organs remain `6`, and C seed growth remains
-      `0`.
+      `3/3` native), native neural weights now report `17`, native Sema voice organs remain `6`, and C seed growth
+      remains `0`.
 - [x] **Speech global promotion readiness added.** `learn/speech-global-promotion-readiness.fk` turns scoped trial
       wins into an executable global-authority gate (`32767`): open dictation has scoped native `2/2` and Sema live
       voice has scoped native `1/1`, but both still need `3` real live native receipts with WER `<=25` and clean
