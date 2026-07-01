@@ -60,8 +60,8 @@ received as a parameter (`(defn ap (f x) (f x)) (ap dbl 21)`). Re-running that e
 returns `42` — the current `runtime/fkwu-uni.c` carries the indirect call. Good news, named so it is not
 re-litigated.
 
-**Newly found: `oac-kind`'s blueprint discrimination does not reproduce reliably once enough interning
-accumulates in one run.** Isolated, minimal recipes confirm every new primitive is correct:
+**Newly found: `oac-kind`'s blueprint discrimination does not reproduce reliably once more than one
+node-with-children is interned in a scope.** Isolated, minimal recipes confirm every new primitive is correct:
 
 ```
 (oac-cut-with-receipt (list cell-silent cell-five) (list))   ; -> nothing ack, pruned 1   (verified live)
@@ -72,20 +72,20 @@ accumulates in one run.** Isolated, minimal recipes confirm every new primitive 
 ```
 
 But loading the full `control/offer-ack-core.fk` + `control/choice-lane-core.fk` together and exercising
-several claims in one run, `oac-kind` starts misclassifying acks — traced to the root:
-
-```
-(oac-kind (oac-one (intern_trivial_int 5)))
-```
-
-returns `1` (`oac-tag-zero`) instead of `2` (`oac-tag-one`) once the full file is loaded, even though
-`(node_eq (bp "OAC-ZERO") (bp "OAC-ONE"))` correctly reads `0` (distinct) in a smaller, fresh run. This is a
-`bp` blueprint-table capacity/collision floor in the temporary C-bootstrap seed, not a divergence in the
-recipe: the same symptom appears in the pre-existing, **unmodified** `control/tests/offer-ack-core-band.fk`,
-which no longer reproduces its proven `1023` on this exact build either. `control/tests/choice-lane-core-band.fk`
-is written the same honest way `offer-ack-core-band.fk` already was: it is the correct witness of the intended
-behavior (every primitive individually verified live, in isolation, above), not a claim that today's C seed
-runs the full band clean.
+several claims in one run, `oac-kind` starts misclassifying acks. First guess was a `bp` blueprint-table
+collision; live investigation (gdb on `fk_sintern`'s string interning, `FK_OBSERVE=1` tracing `fk_offer_ack`'s
+native call classification, and ruling the JIT in/out via `FK_JIT`/`FK_JIT_HOT`/`FK_JIT_WITNESS`) ruled that
+out step by step and found the real, much more precise mechanism: **a node's children are only reliably
+readable while it is the most-recently-interned node with children; interning a second one can silently empty
+the first's.** `OAC-ZERO` and `OAC-ONE` are correctly assigned, genuinely distinct blueprint coordinates — the
+break is in reading a node's children afterward, not in blueprint identity. Given its own full write-up and
+minimal (no-prelude) repro in `receipts/2026-07-01-node-children-last-writer-wins.md`, since it is a runtime
+floor any recipe interning more than one node-with-children in a scope will hit, not something specific to
+this file. The same symptom appears in the pre-existing, **unmodified** `control/tests/offer-ack-core-band.fk`,
+which no longer reproduces its proven `1023` on this exact build either — this is not a regression from this
+pass's recipes. `control/tests/choice-lane-core-band.fk` is written the same honest way `offer-ack-core-band.fk`
+already was: it is the correct witness of the intended behavior (every primitive individually verified live,
+in isolation, above), not a claim that today's C seed runs the full band clean.
 
 This is also why `grammars/control-invite-grammar.fk` is built on `bmf-core.fk`'s smaller single-rule engine
 rather than the larger multi-rule `bmf-grammar.fk`: loading `bmf-grammar.fk` alone (as committed, unmodified,
