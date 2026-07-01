@@ -1,0 +1,113 @@
+; jit-access-profile-runtime.fk - derive checked access payloads from receipts.
+;
+; Prelude:
+;   observe/jit-profile-receipt.fk
+;   model/form-asm-x64.fk
+;   observe/jit-runtime-fault.fk
+;   observe/jit-loader-contract.fk
+;   observe/jit-checked-access-payload.fk
+;
+; Compact field/list/array peer of the container profile runtime. It starts from
+; profile/category receipts plus explicit static/inline facts, admits only hot
+; direct CPU access profiles, and enters the checked-access payload + loader
+; contract. No C/Rust lowering and no host function call.
+
+(do
+    (defn japr-field-profile ()
+        (list 15 10 630 9 1 (jpr-call-mono) (jpr-int) (jpr-none) 5001 (jpr-none) 2 (jpr-index-none) (jpr-stack-tail) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) 20))
+    (defn japr-list-profile ()
+        (list 16 11 631 8 1 (jpr-call-mono) (jpr-int) (jpr-list) 0 (jpr-none) 0 (jpr-index-head) (jpr-stack-tail) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) 21))
+    (defn japr-warm-array ()
+        (list 17 12 633 3 1 (jpr-call-mono) (jpr-int) (jpr-array) 1201 (jpr-none) 3 (jpr-index-const) (jpr-stack-tail) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) 23))
+
+    (defn japr-access-for (r)
+        (if (eq (jpr-field-direct? r) 1)
+            (jcap-field)
+            (if (eq (jpr-list-direct? r) 1)
+                (jcap-array)
+                (if (eq (jpr-array-direct? r) 1) (jcap-array) 0))))
+    (defn japr-direct? (r)
+        (if (eq (jpr-field-direct? r) 1) 1
+            (if (eq (jpr-list-direct? r) 1) 1 (jpr-array-direct? r))))
+    (defn japr-tier? (r)
+        (if (eq (jpr-deopt r) (jpr-deopt-none))
+            (if (eq (jpr-hot-pure? r) 1)
+                (if (gt (jpr-opt-mask r) 1) 1 0)
+                0)
+            0))
+    (defn japr-inline? (guard fallback source-sig r)
+        (if (eq guard 1)
+            (if (eq fallback 1)
+                (if (eq source-sig (jpr-signature r))
+                    (if (eq (jpr-target r) (jpr-call-mono)) 1 0)
+                    0)
+                0)
+            0))
+
+    ; static/source/maps + inline guard/fallback/source-sig are explicit compact
+    ; admission facts so this cell stays inside the direct-source envelope.
+    (defn japr-safe? (r static source maps guard fallback source-sig generation)
+        (if (eq (jcap-access-ok? (japr-access-for r)) 1)
+            (if (eq static 1)
+                (if (eq (japr-direct? r) 1)
+                    (if (eq (japr-tier? r) 1)
+                        (if (eq (japr-inline? guard fallback source-sig r) 1)
+                            (if (eq (jpr-cpu-reg? r) 1)
+                                (if (eq source 1)
+                                    (if (eq maps 1)
+                                        (if (gt generation 0) 1 0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+    (defn japr-request (r static source maps guard fallback source-sig generation)
+        (if (eq (japr-safe? r static source maps guard fallback source-sig generation) 1)
+            (jcap-request "form-backend" (japr-access-for r) 1 1 1 1 1 1 1 1)
+            (empty)))
+    (defn japr-ready? (r static source maps guard fallback source-sig generation installed)
+        (if (eq (jlc-loaded-safe? (jcap-load (japr-request r static source maps guard fallback source-sig generation) generation)) 1)
+            (if (eq installed 1) 1 0)
+            0))
+    (defn japr-route (base invalidated stale)
+        (if (eq invalidated 1)
+            (jlc-rewalk)
+            (if (eq stale 1) 5 base)))
+
+    (defn jit-access-profile-runtime-check ()
+        (add
+            (if (eq (japr-ready? (japr-field-profile) 1 1 1 1 1 (jpr-signature (japr-field-profile)) 1 1) 1) 1 0)
+            (add
+                (if (eq (japr-ready? (japr-list-profile) 1 1 1 1 1 (jpr-signature (japr-list-profile)) 1 1) 1) 2 0)
+                (add
+                    (if (eq (japr-ready? (jpr-array-sample 632 22) 1 1 1 1 1 (jpr-signature (jpr-array-sample 632 22)) 1 1) 1) 4 0)
+                    (add
+                        (if (eq (jcap-eq-list (jcap-bytes (japr-request (japr-field-profile) 1 1 1 1 1 (jpr-signature (japr-field-profile)) 1)) (x64-field-load-checked 16)) 1) 8 0)
+                        (add
+                            (if (eq (jcap-eq-list (jcap-bytes (japr-request (japr-list-profile) 1 1 1 1 1 (jpr-signature (japr-list-profile)) 1)) (x64-array-get-checked)) 1) 16 0)
+                            (add
+                                (if (eq (japr-route (jcap-action (japr-request (jpr-array-sample 632 22) 1 1 1 1 1 (jpr-signature (jpr-array-sample 632 22)) 1) 1 1 1 0 1) 0 0) (jlc-native)) 32 0)
+                                (add
+                                    (if (eq (japr-route (jcap-action (japr-request (jpr-array-sample 632 22) 1 1 1 1 1 (jpr-signature (jpr-array-sample 632 22)) 1) 1 0 1 0 1) 0 0) (jlc-deopt)) 64 0)
+                                    (add
+                                        (if (eq (japr-route (jcap-action (japr-request (jpr-array-sample 632 22) 1 1 1 1 1 (jpr-signature (jpr-array-sample 632 22)) 1) 1 1 0 0 1) 0 0) (jlc-exception)) 128 0)
+                                        (add
+                                            (if (eq (japr-route (jcap-action (japr-request (jpr-array-sample 632 22) 1 1 1 1 1 (jpr-signature (jpr-array-sample 632 22)) 1) 1 1 1 0 1) 1 0) (jlc-rewalk)) 256 0)
+                                            (add
+                                                (if (eq (japr-route (jcap-action (japr-request (jpr-array-sample 632 22) 1 1 1 1 1 (jpr-signature (jpr-array-sample 632 22)) 1) 1 1 1 0 1) 0 1) 5) 512 0)
+                                                (add
+                                                    (if (eq (japr-route (jcap-action (japr-request (jpr-array-sample 632 22) 1 1 1 1 1 (jpr-signature (jpr-array-sample 632 22)) 1) 1 1 1 0 0) 0 0) (jlc-deopt)) 1024 0)
+                                                    (add
+                                                        (if (eq (japr-ready? (japr-warm-array) 1 1 1 1 1 (jpr-signature (japr-warm-array)) 1 1) 0) 2048 0)
+                                                        (add
+                                                            (if (eq (japr-ready? (jpr-hash-sample) 1 1 1 1 1 (jpr-signature (jpr-hash-sample)) 1 1) 0) 4096 0)
+                                                            (add
+                                                                (if (eq (japr-ready? (jpr-array-sample 632 22) 0 1 1 1 1 (jpr-signature (jpr-array-sample 632 22)) 1 1) 0) 8192 0)
+                                                                (add
+                                                                    (if (eq (japr-ready? (jpr-array-sample 632 22) 1 1 1 1 1 (jpr-signature (jpr-array-sample 632 22)) 0 1) 0) 16384 0)
+                                                                    (if (eq (japr-ready? (jpr-array-sample 632 22) 1 1 1 0 1 (jpr-signature (jpr-array-sample 632 22)) 1 1) 0) 32768 0)))))))))))))))))
+
+    0)
