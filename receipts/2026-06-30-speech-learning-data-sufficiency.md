@@ -8,8 +8,8 @@ enough data for real model training.
 Current data:
 
 ```text
-live wav rows: 59
-observed wav bytes: 1611598
+live wav rows: 71
+observed wav bytes: 1916782
 live locales: 6
 held-out repeat rows: 7
 cross-phrase held-out rows: 0
@@ -20,11 +20,11 @@ native neural parameters: 0
 Training floor before calling the speech learner data-sufficient:
 
 ```text
-live teacher wavs: 300
-live teacher locales: 5
-held-out rows: 30
-cross-phrase held-out rows: 20
-cross-voice held-out rows: 10
+live teacher wavs: 12000
+live teacher locales: 6
+held-out rows: 1200
+cross-phrase held-out rows: 1000
+cross-voice held-out rows: 300
 ```
 
 Witness:
@@ -41,6 +41,6 @@ cat learn/speech-model-metrics-report.fk \
 ```
 
 Meaning: the band passes by proving the current corpus is under the floor and
-the training status is `plumbing-smoke-not-data-sufficient-training`. The next
-movement is corpus/audio expansion toward the 300-row floor, not treating 59
-wavs as training sufficiency.
+the training status is `tiny-corpus-not-data-sufficient-training`. The next
+movement is consentful corpus/audio expansion toward the 12000-row floor, not
+treating 71 wavs as training sufficiency.

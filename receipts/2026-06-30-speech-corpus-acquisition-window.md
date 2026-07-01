@@ -16,14 +16,14 @@ selected locales: en, de, es, fr, id, pt-br
 Window:
 
 ```text
-selected keypaths: 50
+selected keypaths: 2000
 voices per locale: 1
-planned wavs: 300
-planned held-out rows: 30
-floor: 300 wavs, 5 locales, 30 held-out rows
-captured: 30 rows in batches 0001 and 0002; full window not captured
+planned wavs: 12000
+planned held-out rows: 1200
+floor: 12000 wavs, 6 locales, 1200 held-out rows
+captured: 30 rows in batches 0001 and 0002; full 12000-row window not captured
 trained: false
-status: acquisition-window-partially-captured-not-trained
+status: corpus-scale-window-open-not-trained
 ```
 
 Witness:
@@ -41,7 +41,7 @@ cat learn/coherence-network-self-corpus.fk \
 32767
 ```
 
-Meaning: the self-corpus can fill the minimum floor, but only the first thirty
-rows have been captured so far. The next real step is expanding the live
-acquisition runner until the full window is rendered and witnessed locally
+Meaning: the self-corpus can fill the first corpus-scale wav floor, but only the
+first thirty rows have been captured so far. The next real step is expanding the
+live acquisition runner until the full window is rendered and witnessed locally
 before any training promotion.
