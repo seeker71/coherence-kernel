@@ -194,6 +194,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       held-out repeat, `0` cross-phrase rows, and `0` cross-voice rows against a floor of `300` wavs, `5`
       locales, `30` held-out rows, `20` cross-phrase rows, and `10` cross-voice rows. Status is explicitly
       `plumbing-smoke-not-data-sufficient-training`.
+- [x] **Speech corpus acquisition window added.** `learn/speech-corpus-acquisition-window.fk` uses the consentful
+      Coherence Network self-corpus to plan a floor-covering audio acquisition window (`32767`): `50` keypaths
+      across `6` ready locales with `1` voice each yields `300` planned wav rows and `30` planned held-out rows.
+      The status remains `acquisition-window-ready-not-captured`; no training promotion occurs until live rows are
+      rendered and witnessed.
 - [x] **macOS Arabic teacher acoustic learning added.** `learn/macos-arabic-teacher-acoustic-learning.fk` extends
       the same live path to Arabic: `Majed -> ffmpeg -> whisper.cpp/Metal -l ar`, Form wav sensing, four Arabic
       acoustic token prototypes, native CTC decode, live verdict `16383`, live WER `0`, minimum confidence `96`,
