@@ -190,20 +190,25 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       WER `0`, confidence `96`, live verdict `65535`, effective epochs `1`, native neural parameters `0`. This
       proves a scoped held-out repeat across distinct wav bytes, not cross-phrase or cross-voice authority.
 - [x] **Speech learning data sufficiency gate added.** `learn/speech-learning-data-sufficiency.fk` makes the tiny
-      data boundary executable (`32767`): current speech rows are `11` wavs, `6` live teacher locales, `1`
+      data boundary executable (`32767`): current speech rows are `35` wavs, `6` live teacher locales, `1`
       held-out repeat, `0` cross-phrase rows, and `0` cross-voice rows against a floor of `300` wavs, `5`
       locales, `30` held-out rows, `20` cross-phrase rows, and `10` cross-voice rows. Status is explicitly
       `plumbing-smoke-not-data-sufficient-training`.
 - [x] **Speech corpus acquisition window added.** `learn/speech-corpus-acquisition-window.fk` uses the consentful
       Coherence Network self-corpus to plan a floor-covering audio acquisition window (`32767`): `50` keypaths
       across `6` ready locales with `1` voice each yields `300` planned wav rows and `30` planned held-out rows.
-      The status remains `acquisition-window-ready-not-captured`; no training promotion occurs until live rows are
-      rendered and witnessed.
+      The status is now `acquisition-window-partially-captured-not-trained`; no training promotion occurs until
+      enough live rows are rendered and witnessed.
 - [x] **Speech corpus capture batch 0001 added.** `learn/speech-corpus-capture-batch-0001.fk` renders six
       consentful Coherence Network corpus rows on local macOS voices and checks them with whisper.cpp/Metal
       (`4095`): `6/6` rows pass the local-oracle WER floor, max WER `0`, observed batch wav bytes `212524`, across
       `6` locales. The status is `captured-corpus-audio-not-training-sufficient`; rows are captured, not promoted
       as trained model authority.
+- [x] **Speech corpus capture batch 0002 added.** `learn/speech-corpus-capture-batch-0002.fk` renders twenty-four
+      more consentful Coherence Network corpus rows, four per ready locale, and checks them with whisper.cpp/Metal
+      (`8191`): `24/24` rows pass the local-oracle WER floor, max WER `0`, observed batch wav bytes `580710`.
+      Aggregate speech rows are now `35` wavs and `1065282` observed bytes; status remains
+      `captured-corpus-audio-not-training-sufficient` with `0` corpus rows used for training.
 - [x] **macOS Arabic teacher acoustic learning added.** `learn/macos-arabic-teacher-acoustic-learning.fk` extends
       the same live path to Arabic: `Majed -> ffmpeg -> whisper.cpp/Metal -l ar`, Form wav sensing, four Arabic
       acoustic token prototypes, native CTC decode, live verdict `16383`, live WER `0`, minimum confidence `96`,
