@@ -294,7 +294,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech model metrics report added.** `learn/speech-model-metrics-report.fk` records the current model size,
       composition, success rates, voice quality, and native-vs-local-oracle rates (`32767`): selected arms are
       prototype ASR, Sema voice sample loop TTS, closed-set locale Form NL2NL, and native source-window audio2audio;
-      native neural weight parameters admitted are now `2` while native Sema voice organs are present; live open
+      native neural weight parameters admitted are now `3` while native Sema voice organs are present; live open
       dictation is oracle `4/4` and native `0/4`; Sema live voice live-native pass is `0/1`, WER `100`, oracle-guide.
       The same executable report now carries the live learning counters and fails its band if the stated samples,
       bytes, prototype rows, epochs, held-out boundary, or data-sufficiency status drift.
@@ -448,15 +448,15 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       keep controls clean, promote by A/B evidence, and preserve the local oracle/device while neural Metal and
       diffusion remain pending. The band returns `32767`.
 - [x] **Speech neural pair coverage added.** `learn/speech-neural-pair-coverage.fk` makes the pair-training
-      boundary executable (`32767`): locale `A=>neural=>B` coverage is now `2/55` broad ready pairs and `4/110`
-      directed routes, with `2` neural epochs and `2` native neural parameters. The separate Form-native seeded
+      boundary executable (`32767`): locale `A=>neural=>B` coverage is now `3/55` broad ready pairs and `6/110`
+      directed routes, with `3` neural epochs and `3` native neural parameters. The separate Form-native seeded
       windows cover `8` reciprocal pair windows (`16` directed cross-locale directions, `32` A/B plus self
       roundtrip lanes), which is `1454` basis points of the broad ready pair space and `1777` basis points of the
       Sanskrit-baseline pair space. This keeps prototype/Form receipts from being misreported while making neural
       pair coverage non-zero.
 - [x] **Speech pair training next action added.** `learn/speech-pair-training-next-action.fk` now chooses the next
-      executable neural movement (`32767`): choose `next-native-neural-pair-window-0003` over `en<->id`, route
-      `train-native-neural-pair-window`, keep Form-native pair windows `8 -> 8`, move neural pair windows `2 -> 3`,
+      executable neural movement (`32767`): choose `next-native-neural-pair-window-0004` over `en<->zh`, route
+      `train-native-neural-pair-window`, keep Form-native pair windows `8 -> 8`, move neural pair windows `3 -> 4`,
       and carry the corpus floor gap `211/12000`. The point is to keep training toward full open ASR/TTS, not stop
       at the first micro-pair.
 - [x] **Speech Form pair window 0006 added.** `learn/speech-form-pair-window-0006.fk` executes the selected
@@ -481,6 +481,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       the second native neural micro-pair over `en<->pt-br` (`32767`): neural pair coverage moves to `2` unordered
       pairs and `4` directed routes, with `2` native neural parameters, `2` epochs, and neural rate `0 -> 100`.
       Full open ASR/TTS remains the target and the current authority boundary.
+- [x] **Speech native neural pair window 0003 added.** `learn/speech-native-neural-pair-window-0003.fk` trains
+      the third native neural micro-pair over `en<->id` (`32767`): neural pair coverage moves to `3` unordered
+      pairs and `6` directed routes, with `3` native neural parameters, `3` epochs, and neural rate `0 -> 100`.
+      The next selected movement is `next-native-neural-pair-window-0004` over `en<->zh`.
 - [x] **Speech open ASR/TTS target model added.** `learn/speech-open-asr-tts-target-model.fk` makes the goal
       executable (`32767`): native open ASR and Sema TTS should reach or beat the local oracle. Current native
       authority remains below target, but the route is enabled and no longer zeroed out.
