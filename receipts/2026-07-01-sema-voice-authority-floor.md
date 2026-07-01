@@ -7,11 +7,11 @@ native/oracle `0/0`.
 
 The cell keeps two lanes separate:
 
-- Live authority: local oracle `0/1`, native `0/1`, WER `100`, route `oracle-guide`.
+- Live authority: local oracle `1/1`, native `0/1`, native WER `100`, route `oracle-guide`.
 - Scoped training floor: the TCAV trial rows contribute local oracle `2/2` and native
   `2/2`, WER `0`, but only inside the trial window.
 
-The combined floor is therefore local oracle `2/3 = 66%` and native `2/3 = 66%`, while
+The combined floor is therefore local oracle `3/3 = 100%` and native `2/3 = 66%`, while
 global live authority remains held. A zero-denominator row now resolves to
 `block-zero-denominator-voice-gate`.
 
