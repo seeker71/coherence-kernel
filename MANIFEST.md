@@ -514,10 +514,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `let`'s storage slot is meant to be permanent for its scope, but the evaluator's own local-reservation
       opcode treats the same storage as ephemeral scratch, so a later computation can silently overwrite an
       earlier binding before its scope ends. See `receipts/2026-07-01-node-children-last-writer-wins.md` for
-      the exact watchpoint trace and a minimal (no-prelude) repro. So
-      `control/tests/choice-lane-core-band.fk` and the pre-existing, unmodified
-      `control/tests/offer-ack-core-band.fk` both currently miss their intended verdict on this exact build; each
-      primitive was instead verified correct in small live isolation. See
+      the exact watchpoint trace, a minimal (no-prelude) repro, and a verified mitigation: a `defn` body's
+      locals get properly reserved on the value stack, a bare top-level `do`'s never do, so
+      `control/tests/choice-lane-core-band.fk` now wraps its body in one `defn` the same way every other
+      passing band already does — live result **`1021`/`1023`, 9 of 10 claims correct**, up from garbage. The
+      one remaining miss is the same mechanism at smaller scale, not a new one. See
       `receipts/2026-07-01-choice-lane-control-invites.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
