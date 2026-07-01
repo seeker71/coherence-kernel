@@ -1,0 +1,210 @@
+; speech-audio-nl2nl-bridge.fk -- audio A -> neutral key -> text/audio B.
+;
+; Six reciprocal locale directions use the consentful common.no corpus row.
+; The local oracle hears source audio, Form maps the source transcript to a
+; neutral key and target text, then the host carrier renders target audio and
+; the local oracle checks it. Native ownership here is the neutral routing and
+; text selection; audio rendering and open listening remain oracle/host-carrier
+; until a native ASR/vocoder wins.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/wav-sense.fk
+;   learn/macos-sema-teacher-acoustic-learning.fk
+;   learn/speech-model-metrics-report.fk
+;   learn/speech-learning-data-sufficiency.fk
+
+(do
+    (defn sanb-kind () "speech-audio-nl2nl-bridge")
+    (defn sanb-out-dir () (str_concat (temp_dir) "/speech-audio-nl2nl-bridge"))
+    (defn sanb-key () "common.no")
+    (defn sanb-meaning () 404)
+    (defn sanb-max-wer () 25)
+
+    (defn sanb-route (id src dst src-text dst-text src-voice dst-voice src-lang dst-lang)
+        (list "speech-audio-nl2nl-route" id src dst src-text dst-text src-voice dst-voice src-lang dst-lang))
+    (defn sanb-route-id        (r) (nth r 1))
+    (defn sanb-route-src       (r) (nth r 2))
+    (defn sanb-route-dst       (r) (nth r 3))
+    (defn sanb-route-src-text  (r) (nth r 4))
+    (defn sanb-route-dst-text  (r) (nth r 5))
+    (defn sanb-route-src-voice (r) (nth r 6))
+    (defn sanb-route-dst-voice (r) (nth r 7))
+    (defn sanb-route-src-lang  (r) (nth r 8))
+    (defn sanb-route-dst-lang  (r) (nth r 9))
+
+    (defn sanb-routes ()
+        (list
+            (sanb-route 1 "en" "de" "No" "Nein" "Flo (English (US))" "Flo (German (Germany))" "en" "de")
+            (sanb-route 2 "de" "en" "Nein" "No" "Flo (German (Germany))" "Flo (English (US))" "de" "en")
+            (sanb-route 3 "es" "pt-br" "No" "Não" "Flo (Spanish (Spain))" "Flo (Portuguese (Brazil))" "es" "pt")
+            (sanb-route 4 "pt-br" "es" "Não" "No" "Flo (Portuguese (Brazil))" "Flo (Spanish (Spain))" "pt" "es")
+            (sanb-route 5 "fr" "id" "Non" "Tidak" "Amélie" "Damayanti" "fr" "id")
+            (sanb-route 6 "id" "fr" "Tidak" "Non" "Damayanti" "Amélie" "id" "fr")))
+
+    (defn sanb-path-stem (route side)
+        (mstal-cat4 (sanb-out-dir) "/row-" (mstal-int-str (sanb-route-id route)) side))
+    (defn sanb-aiff-path (route side) (str_concat (sanb-path-stem route side) ".aiff"))
+    (defn sanb-wav-path (route side) (str_concat (sanb-path-stem route side) ".wav"))
+
+    (defn sanb-say-command (voice aiff text)
+        (str_concat
+            (str_concat "say -v " (mstal-q voice))
+            (str_concat
+                (str_concat " -o " (mstal-q aiff))
+                (str_concat " " (mstal-q text)))))
+
+    (defn sanb-ffmpeg-command (aiff wav)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (mstal-q aiff))
+            (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le " (mstal-q wav))))
+
+    (defn sanb-whisper-command (wav lang)
+        (str_concat
+            (str_concat "whisper-cli -m " (mstal-q (mstal-model)))
+            (str_concat
+                (str_concat " -f " (mstal-q wav))
+                (str_concat " -l " (str_concat lang " -nt -np")))))
+
+    (defn sanb-render (route side voice text)
+        (do
+            (let _mk (fs_mkdir (sanb-out-dir)))
+            (let aiff (sanb-aiff-path route side))
+            (let wav (sanb-wav-path route side))
+            (let _say (host-exec (sanb-say-command voice aiff text) ""))
+            (let _ff (host-exec (sanb-ffmpeg-command aiff wav) ""))
+            wav))
+
+    (defn sanb-src-wav (route)
+        (sanb-render route "-src" (sanb-route-src-voice route) (sanb-route-src-text route)))
+    (defn sanb-dst-wav (route)
+        (sanb-render route "-dst" (sanb-route-dst-voice route) (sanb-route-dst-text route)))
+
+    (defn sanb-text-member? (tokens text)
+        (if (eq (sw-accept? tokens (sw-tokens text) (sanb-max-wer)) 1) 1 0))
+
+    (defn sanb-native-meaning (tokens locale)
+        (if (str_eq locale "en")
+            (if (eq (sanb-text-member? tokens "No") 1) (sanb-meaning) 0)
+            (if (str_eq locale "de")
+                (if (eq (sanb-text-member? tokens "Nein") 1) (sanb-meaning) 0)
+                (if (str_eq locale "es")
+                    (if (eq (sanb-text-member? tokens "No") 1) (sanb-meaning) 0)
+                    (if (str_eq locale "pt-br")
+                        (if (or (eq (sanb-text-member? tokens "Não") 1)
+                                (eq (sanb-text-member? tokens "Nao") 1)) (sanb-meaning) 0)
+                        (if (str_eq locale "fr")
+                            (if (eq (sanb-text-member? tokens "Non") 1) (sanb-meaning) 0)
+                            (if (str_eq locale "id")
+                                (if (eq (sanb-text-member? tokens "Tidak") 1) (sanb-meaning) 0)
+                                0)))))))
+
+    (defn sanb-target-text (meaning dst)
+        (if (eq meaning (sanb-meaning))
+            (if (str_eq dst "en") "No"
+                (if (str_eq dst "de") "Nein"
+                    (if (str_eq dst "es") "No"
+                        (if (str_eq dst "pt-br") "Não"
+                            (if (str_eq dst "fr") "Non"
+                                (if (str_eq dst "id") "Tidak" ""))))))
+            ""))
+
+    (defn sanb-row-receipt (route)
+        (do
+            (let src-wav (sanb-src-wav route))
+            (let src-oracle (host-exec (sanb-whisper-command src-wav (sanb-route-src-lang route)) ""))
+            (let meaning (sanb-native-meaning (sw-tokens src-oracle) (sanb-route-src route)))
+            (let target (sanb-target-text meaning (sanb-route-dst route)))
+            (let dst-wav (sanb-dst-wav route))
+            (let dst-oracle (host-exec (sanb-whisper-command dst-wav (sanb-route-dst-lang route)) ""))
+            (let src-wer (sw-wer (sw-tokens src-oracle) (sw-tokens (sanb-route-src-text route))))
+            (let dst-wer (sw-wer (sw-tokens dst-oracle) (sw-tokens (sanb-route-dst-text route))))
+            (list "speech-audio-nl2nl-row"
+                  (sanb-route-id route)
+                  (sanb-route-src route)
+                  (sanb-route-dst route)
+                  src-oracle
+                  meaning
+                  target
+                  dst-oracle
+                  src-wer
+                  dst-wer
+                  (if (le src-wer (sanb-max-wer)) 1 0)
+                  (if (le dst-wer (sanb-max-wer)) 1 0)
+                  (if (and (eq meaning (sanb-meaning))
+                           (str_eq target (sanb-route-dst-text route))) 1 0)
+                  (add (file_size src-wav) (file_size dst-wav)))))
+
+    (defn sanb-run-loop (routes)
+        (if (eq (len routes) 0) (empty)
+            (cons (sanb-row-receipt (head routes))
+                  (sanb-run-loop (tail routes)))))
+
+    (defn sanb-row-src-ok    (r) (nth r 10))
+    (defn sanb-row-dst-ok    (r) (nth r 11))
+    (defn sanb-row-native-ok (r) (nth r 12))
+    (defn sanb-row-bytes     (r) (nth r 13))
+
+    (defn sanb-count-src (rows)
+        (if (eq (len rows) 0) 0 (add (sanb-row-src-ok (head rows)) (sanb-count-src (tail rows)))))
+    (defn sanb-count-dst (rows)
+        (if (eq (len rows) 0) 0 (add (sanb-row-dst-ok (head rows)) (sanb-count-dst (tail rows)))))
+    (defn sanb-count-native (rows)
+        (if (eq (len rows) 0) 0 (add (sanb-row-native-ok (head rows)) (sanb-count-native (tail rows)))))
+    (defn sanb-total-bytes (rows)
+        (if (eq (len rows) 0) 0 (add (sanb-row-bytes (head rows)) (sanb-total-bytes (tail rows)))))
+
+    (defn sanb-receipt-from (rows)
+        (list (sanb-kind)
+              rows
+              (len rows)
+              (sanb-count-src rows)
+              (sanb-count-dst rows)
+              (sanb-count-native rows)
+              (sanb-total-bytes rows)
+              "oracle-guided-audio-nl2nl-audio-bridge-not-native-vocoder"
+              1
+              1
+              0
+              0))
+
+    (defn sanb-run-receipt ()
+        (if (eq (mstal-ready?) 1)
+            (sanb-receipt-from (sanb-run-loop (sanb-routes)))
+            (list (sanb-kind) (empty) 0 0 0 0 0 "missing-host-tools" 1 1 0 0)))
+
+    (defn sanb-rec-kind      (r) (nth r 0))
+    (defn sanb-rec-count     (r) (nth r 2))
+    (defn sanb-rec-src-ok    (r) (nth r 3))
+    (defn sanb-rec-dst-ok    (r) (nth r 4))
+    (defn sanb-rec-native-ok (r) (nth r 5))
+    (defn sanb-rec-bytes     (r) (nth r 6))
+    (defn sanb-rec-status    (r) (nth r 7))
+    (defn sanb-rec-native    (r) (nth r 8))
+    (defn sanb-rec-oracle    (r) (nth r 9))
+    (defn sanb-rec-vocoder   (r) (nth r 10))
+    (defn sanb-rec-neural    (r) (nth r 11))
+
+    (defn sanb-run-verdict ()
+        (do
+            (let r (sanb-run-receipt))
+            (add
+                (add
+                    (add (if (str_eq (sanb-rec-kind r) (sanb-kind)) 1 0)
+                         (if (eq (sanb-rec-count r) 6) 2 0))
+                    (add (if (eq (sanb-rec-src-ok r) 6) 4 0)
+                         (if (eq (sanb-rec-dst-ok r) 6) 8 0)))
+                (add
+                    (add (if (eq (sanb-rec-native-ok r) 6) 16 0)
+                         (if (ge (sanb-rec-bytes r) 200000) 32 0))
+                    (add
+                        (add (if (str_eq (sanb-rec-status r)
+                                         "oracle-guided-audio-nl2nl-audio-bridge-not-native-vocoder") 64 0)
+                             (if (eq (sanb-rec-native r) 1) 128 0))
+                        (add
+                            (add (if (eq (sanb-rec-oracle r) 1) 256 0)
+                                 (if (eq (sanb-rec-vocoder r) 0) 512 0))
+                            (add (if (eq (sanb-rec-neural r) 0) 1024 0)
+                                 (if (eq (slds-sufficient (slds-current)) 0) 2048 0))))))))
+
+    0)
