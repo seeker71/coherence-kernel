@@ -8,23 +8,35 @@ enough data for real model training.
 Current data:
 
 ```text
-live wav rows: 11
-observed wav bytes: 484572
+live wav rows: 211
+observed wav bytes: 7152402
 live locales: 6
-held-out repeat rows: 1
-cross-phrase held-out rows: 0
-cross-voice held-out rows: 0
+held-out repeat rows: 7
+cross-phrase held-out rows: 6
+cross-voice held-out rows: 6
 native neural parameters: 0
 ```
 
 Training floor before calling the speech learner data-sufficient:
 
 ```text
-live teacher wavs: 300
-live teacher locales: 5
-held-out rows: 30
-cross-phrase held-out rows: 20
-cross-voice held-out rows: 10
+live teacher wavs: 12000
+live teacher locales: 6
+held-out rows: 1200
+cross-phrase held-out rows: 1000
+cross-voice held-out rows: 300
+```
+
+Scale gap:
+
+```text
+wav deficit: 11789
+wav floor coverage: 175 basis points
+held-out deficit: 1193
+cross-phrase deficit: 994
+cross-voice deficit: 294
+promotion: false
+meaning: repaired instrumentation corpus, still not model learning
 ```
 
 Witness:
@@ -37,9 +49,11 @@ cat learn/speech-model-metrics-report.fk \
 ```
 
 ```text
-32767
+65535
 ```
 
 Meaning: the band passes by proving the current corpus is under the floor and
-the training status is `plumbing-smoke-not-data-sufficient-training`. The next
-movement is corpus/audio expansion, not more celebration of five wavs.
+the training status is `tiny-corpus-not-data-sufficient-training`. At 159 basis
+points of the wav floor, this is too small to train a real native speech model.
+The next movement is consentful corpus/audio expansion toward the 12000-row
+floor and cross-voice diversity, not treating 211 wavs as training sufficiency.

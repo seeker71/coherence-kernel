@@ -16,14 +16,24 @@ selected locales: en, de, es, fr, id, pt-br
 Window:
 
 ```text
-selected keypaths: 50
+selected keypaths: 2000
 voices per locale: 1
-planned wavs: 300
-planned held-out rows: 30
-floor: 300 wavs, 5 locales, 30 held-out rows
-captured: 6 rows in batch-0001; full window not captured
+planned wavs: 12000
+planned held-out rows: 1200
+floor: 12000 wavs, 6 locales, 1200 held-out rows
+captured: 119 admitted rows in batches 0001 through 0005; full 12000-row window not captured
 trained: false
-status: acquisition-window-ready-not-captured
+status: corpus-scale-window-open-not-trained
+```
+
+Cross-voice window:
+
+```text
+ready cross-voice locales on this Mac: 5
+voices per cross-voice locale: 2
+planned cross-voice wavs: 20000
+planned cross-voice held-out rows: 2000
+boundary: Indonesian has one host voice here, so it is not counted in the two-voice host-ready lane
 ```
 
 Witness:
@@ -38,10 +48,10 @@ cat learn/coherence-network-self-corpus.fk \
 ```
 
 ```text
-32767
+65535
 ```
 
-Meaning: the self-corpus can fill the minimum floor, but only the first six
-rows have been captured so far. The next real step is expanding the live
-acquisition runner until the full window is rendered and witnessed locally
-before any training promotion.
+Meaning: the self-corpus can fill the first corpus-scale wav floor, but only the
+first 119 rows have been captured so far. The next real step is expanding the
+live acquisition runner until the full raw and cross-voice windows are rendered
+and witnessed locally before any training promotion.

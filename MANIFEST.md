@@ -190,20 +190,78 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       WER `0`, confidence `96`, live verdict `65535`, effective epochs `1`, native neural parameters `0`. This
       proves a scoped held-out repeat across distinct wav bytes, not cross-phrase or cross-voice authority.
 - [x] **Speech learning data sufficiency gate added.** `learn/speech-learning-data-sufficiency.fk` makes the tiny
-      data boundary executable (`32767`): current speech rows are `11` wavs, `6` live teacher locales, `1`
-      held-out repeat, `0` cross-phrase rows, and `0` cross-voice rows against a floor of `300` wavs, `5`
-      locales, `30` held-out rows, `20` cross-phrase rows, and `10` cross-voice rows. Status is explicitly
-      `plumbing-smoke-not-data-sufficient-training`.
+      data boundary executable (`65535`): current speech rows are `191` wavs, `6` live teacher locales, `7`
+      held-out repeat rows, `6` cross-phrase rows, and `6` cross-voice rows against a corpus-scale floor of
+      `12000` wavs, `6` locales, `1200` held-out rows, `1000` cross-phrase rows, and `300` cross-voice rows.
+      Status is explicitly `tiny-corpus-not-data-sufficient-training`; `191` wavs are only `159` basis points of
+      the wav floor, so this is a larger instrumentation corpus, not real model learning.
 - [x] **Speech corpus acquisition window added.** `learn/speech-corpus-acquisition-window.fk` uses the consentful
-      Coherence Network self-corpus to plan a floor-covering audio acquisition window (`32767`): `50` keypaths
-      across `6` ready locales with `1` voice each yields `300` planned wav rows and `30` planned held-out rows.
-      The status remains `acquisition-window-ready-not-captured`; no training promotion occurs until live rows are
-      rendered and witnessed.
+      Coherence Network self-corpus to plan a corpus-scale audio acquisition window (`65535`): `2000` keypaths
+      across `6` ready locales with `1` voice each yields `12000` planned wav rows and `1200` planned held-out
+      rows; the separate host-ready cross-voice lane is `5` locales with `2` voices each, yielding `20000`
+      planned cross-voice wav rows and `2000` held-out rows. The status is now
+      `corpus-scale-window-open-not-trained`; no training promotion occurs until enough live rows are rendered and
+      witnessed.
 - [x] **Speech corpus capture batch 0001 added.** `learn/speech-corpus-capture-batch-0001.fk` renders six
       consentful Coherence Network corpus rows on local macOS voices and checks them with whisper.cpp/Metal
       (`4095`): `6/6` rows pass the local-oracle WER floor, max WER `0`, observed batch wav bytes `212524`, across
       `6` locales. The status is `captured-corpus-audio-not-training-sufficient`; rows are captured, not promoted
       as trained model authority.
+- [x] **Speech corpus capture batch 0002 added.** `learn/speech-corpus-capture-batch-0002.fk` renders twenty-four
+      more consentful Coherence Network corpus rows, four per ready locale, and checks them with whisper.cpp/Metal
+      (`8191`): `24/24` rows pass the local-oracle WER floor, max WER `0`, observed batch wav bytes `580710`.
+      Aggregate speech rows are now `35` wavs and `1065282` observed bytes; status remains
+      `captured-corpus-audio-not-training-sufficient` with `0` corpus rows used for training.
+- [x] **Speech corpus capture batch 0003 added.** `learn/speech-corpus-capture-batch-0003.fk` screens sixty
+      translated self-corpus phrase rows and admits only the local-oracle-clean rows (`8191`): `34/34` admitted
+      rows pass, max admitted WER `25`, observed admitted wav bytes `1272388`, while `26` unstable candidate rows
+      are rejected. Aggregate speech rows are now `105` wavs and `3189170` observed bytes; captured corpus rows are
+      `64`; data sufficiency remains false against the `12000`-wav floor.
+- [x] **Speech corpus cross-voice capture batch 0004 added.**
+      `learn/speech-corpus-crossvoice-capture-batch-0004.fk` renders a screened two-voice acquisition shard over
+      five host-ready locales and five consentful self-corpus keys (`8191`): `50` candidate wavs are rendered,
+      `35` pass the local Whisper/Metal WER floor and are admitted, `15` remain screened controls, max candidate
+      WER is `250`, and observed wav bytes are `2150026`. Aggregate speech rows are now `191` wavs and `6806882`
+      observed bytes; captured corpus rows are `99`; data sufficiency remains false and rows used for training
+      remain `0`.
+- [x] **Speech corpus adaptive acquisition added.** `learn/speech-corpus-adaptive-acquisition.fk` turns batch
+      0004's observed uneven shard results into the next capture recipe (`32767`): `en` and `pt-br` expand,
+      `es` retries under A/B, `de` and `fr` repair, and the next lane is `fr` with
+      `repair-voice-family-and-shorten-phrases`. This changes the acquisition algorithm from fixed capture to
+      observation-conditioned capture planning while keeping native neural parameters `0` and data sufficiency
+      false.
+- [x] **Speech corpus French repair batch 0005 added.** `learn/speech-corpus-french-repair-batch-0005.fk`
+      executes the first adaptive repair lane on local Apple Metal (`8191`): `20` French repair-alias wavs are
+      rendered through `say`, normalized with `ffmpeg`, checked by `whisper.cpp/Metal`, and admitted `20/20` with
+      max WER `0` and observed wav bytes `345520`. Aggregate speech rows are now `211` wavs and `7152402`
+      observed bytes; captured corpus rows are `119`; data sufficiency remains false, rows used for training
+      remain `0`, and source translations are kept separate from spoken aliases.
+- [x] **Speech corpus held-out repeat learning added.** `learn/speech-corpus-heldout-repeat-learning.fk` trains six
+      Form-native full-envelope prototypes from consentful corpus phrases and evaluates six separately rendered,
+      volume-shifted held-out wavs (`16383`): local oracle accepts `6/6`, native prototype classification accepts
+      `6/6`, train/eval hashes differ, observed wav bytes `302968`, neural parameters `0`. Aggregate speech rows
+      are now `47` wavs and `1368250` observed bytes; held-out repeat rows rise to `7`, while cross-phrase and
+      cross-voice remain `0`.
+- [x] **Speech corpus cross-phrase learning added.** `learn/speech-corpus-crossphrase-learning.fk` moves beyond
+      held-out repeat with controlled same-locale different-phrase evaluation (`65535`): local oracle accepts `6/6`,
+      native Form distances pass `6/6` against explicit different-locale controls, and observed train/eval/control
+      wav bytes are `712626`. Aggregate speech rows are now `123` wavs and `3901796` observed bytes; cross-phrase
+      rows rise to `6`, still below the `1000` floor, with cross-voice still `0`.
+- [x] **Speech corpus cross-voice learning added.** `learn/speech-corpus-crossvoice-learning.fk` moves beyond
+      same-voice evidence with controlled same-text different-voice evaluation (`65535`): local oracle accepts `6/6`,
+      native Form distances pass `6/6` against explicit different-text controls in the eval voice, and observed
+      train/eval/control wav bytes are `755060`. Aggregate speech rows are now `141` wavs and `4656856` observed
+      bytes; cross-voice rows rise to `6`, still below the `300` floor.
+- [x] **Speech audio NL2NL bridge added.** `learn/speech-audio-nl2nl-bridge.fk` witnesses six reciprocal
+      oracle-guided routes (`4095`): source audio -> local Whisper -> Form neutral key `common.no` -> target text
+      -> target audio -> local Whisper. Source oracle, target oracle, and native neutral routing all pass `6/6`;
+      observed bridge wav bytes are `243348`. Aggregate speech rows are now `59` wavs and `1611598` observed
+      bytes. Boundary: host TTS and local Whisper remain carrier/oracle; this is not native vocoder authority.
+- [x] **Speech audio NL2NL multi-key bridge added.** `learn/speech-audio-nl2nl-multikey-bridge.fk` expands the
+      reciprocal bridge beyond `common.no` to `nav.search` and `nav.vision` (`8191`): source oracle, target oracle,
+      and native neutral routing pass `6/6` across `de<->es`, `en<->fr`, and `id<->pt-br`; observed bridge wav
+      bytes are `305184`. Aggregate speech rows are now `71` wavs and `1916782` observed bytes. Boundary remains
+      oracle-guided audio carrier, not native vocoder authority.
 - [x] **macOS Arabic teacher acoustic learning added.** `learn/macos-arabic-teacher-acoustic-learning.fk` extends
       the same live path to Arabic: `Majed -> ffmpeg -> whisper.cpp/Metal -l ar`, Form wav sensing, four Arabic
       acoustic token prototypes, native CTC decode, live verdict `16383`, live WER `0`, minimum confidence `96`,
@@ -388,6 +446,17 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `fr<->id`, and `pt-br<->zh` all retain reciprocal A->B/B->A/A->A/B->B lanes, start guided, end native,
       keep controls clean, promote by A/B evidence, and preserve the local oracle/device while neural Metal and
       diffusion remain pending. The band returns `32767`.
+- [x] **Speech neural pair coverage added.** `learn/speech-neural-pair-coverage.fk` makes the pair-training
+      boundary executable (`32767`): locale `A=>neural=>B` coverage is `0/55` broad ready pairs and `0/110`
+      directed routes, with `0` neural epochs and `0` native neural parameters. The separate Form-native seeded
+      windows cover `5` reciprocal pair windows (`10` directed cross-locale directions, `20` A/B plus self
+      roundtrip lanes), which is `909` basis points of the broad ready pair space and `1111` basis points of the
+      Sanskrit-baseline pair space. This keeps prototype/Form receipts from being misreported as neural training.
+- [x] **Speech pair training next action added.** `learn/speech-pair-training-next-action.fk` turns zero neural
+      pair coverage into the next executable movement (`32767`): choose `next-form-pair-window-0006` over
+      `en<->de`, route `expand-form-native-pair-window-before-neural`, move Form-native pair windows `5 -> 6`,
+      keep neural pair windows `0 -> 0`, and carry the corpus floor gap `211/12000`. The point is to run another
+      observable reciprocal Form window and capture more consentful audio before any neural claim.
 - [x] **Seven live Metal pair anchors stand — `7/7`, `full-metal-native` for the closed-prompt carrier.**
       The Form-owned macOS carrier runs `en<->de`, `en<->es`, `en<->id`, `en<->fr`, `en<->it`, `en<->zh`, and `en<->ar` on live Apple
       Metal (one `presence/macos-*-speech-roundtrip-variant.fk` per pair; carrier verdict `511` each).
@@ -526,6 +595,17 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `receipts/2026-07-01-node-children-last-writer-wins.md` for the trace and fix,
       `receipts/2026-07-01-choice-lane-control-invites.md` for the primitives, and
       `receipts/2026-07-01-invite-dispatch.md` for the dispatcher's honest current state.
+- [x] **Locale-neutral meaning locate added.** `learn/sanskrit-locale-baseline.fk` gains `slb-meaning-for-tokens`
+      (locale-specific surface tokens -> the neutral meaning id they belong to — the reverse of `slb-tokens`,
+      which every existing multilocale sample built FROM a meaning id but never walked back TO one) and
+      `slb-locate-cross-locale?` (do two locales' own tokens independently locate the SAME meaning). Composed
+      into `learn/multilocale-nl-audio-pipeline.fk` as `mlap-nl-meaning-located?`/`mlap-nl-all-located?`, an
+      honest two-sided check that the pipeline's own asserted `meaning` fields are actually derivable from raw
+      tokens, not merely taken on faith. The band (`learn/tests/locale-neutral-locate-band.fk`) returns `255`:
+      cross-locale exact matches hold for the four baseline phrases across all ten ready locales, a genuine
+      cross-locale mismatch is correctly rejected, and out-of-baseline tokens honestly locate to `0` rather than
+      a false positive — the honest floor stays that this covers only the small Sanskrit-baseline vocabulary,
+      not open text. See `receipts/2026-07-01-locale-neutral-locate.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
