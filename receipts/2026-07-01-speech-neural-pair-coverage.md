@@ -6,12 +6,12 @@ Form-native seeded windows into neural training.
 Current neural pair coverage:
 
 ```text
-trained unordered neural pairs: 5
-trained directed neural pair routes: 10
-neural training epochs: 5
-native neural parameters: 5
+trained unordered neural pairs: 6
+trained directed neural pair routes: 12
+neural training epochs: 6
+native neural parameters: 6
 broad ready pair space: 55 unordered / 110 directed
-neural coverage: 909 basis points
+neural coverage: 1090 basis points
 ```
 
 Current Form-native seeded reciprocal coverage:
@@ -38,8 +38,8 @@ audio NL2NL bridge routes: 12 oracle-guided routes, not native vocoder and not n
 Trained neural micro-pair:
 
 ```text
-pairs: en<->fr, en<->pt-br, en<->id, en<->zh, en<->ar
-files: learn/speech-native-neural-pair-window-0001.fk, learn/speech-native-neural-pair-window-0002.fk, learn/speech-native-neural-pair-window-0003.fk, learn/speech-native-neural-pair-window-0004.fk, learn/speech-native-neural-pair-window-0005.fk
+pairs: en<->fr, en<->pt-br, en<->id, en<->zh, en<->ar, en<->la
+files: learn/speech-native-neural-pair-window-0001.fk, learn/speech-native-neural-pair-window-0002.fk, learn/speech-native-neural-pair-window-0003.fk, learn/speech-native-neural-pair-window-0004.fk, learn/speech-native-neural-pair-window-0005.fk, learn/speech-native-neural-pair-window-0006.fk
 boundary: non-zero trained pair coverage, not full open ASR/TTS authority
 ```
 
