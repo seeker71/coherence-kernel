@@ -15,7 +15,7 @@ Commands:
 
 ( cat observe/jit-self-host-completion-sweep.fk observe/tests/jit-self-host-completion-sweep-band.fk ) > /tmp/jshcs.fk
 ./fkwu --src /tmp/jshcs.fk
-# 16777215
+# 33554431
 ```
 
 The self-host live-evidence band now validates receipt tuples for:
@@ -25,5 +25,7 @@ The self-host live-evidence band now validates receipt tuples for:
 - stale carrier evidence rejection
 
 The self-host completion sweep now requires `self-host-live-evidence = 1048575`
-and rejects the stale `262143` live-evidence receipt before downstream native
-witness, live-runtime, and rung-20 readiness receipts can pass.
+and, after the later profile container slot gate, also requires
+`container-profile-live-slot-runtime = 1048575`. It rejects the stale `262143`
+live-evidence receipt before downstream native witness, live-runtime, and
+rung-20 readiness receipts can pass.
