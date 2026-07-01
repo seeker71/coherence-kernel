@@ -412,6 +412,34 @@ export class Kernel {
     this.registerNative("str_eq", catCompareEq(), (_k, args) =>
       boolInt(argStr(args, 0) === argStr(args, 1)),
     );
+    // str_len / str_byte_at / byte_to_str — the minimal string "narrow
+    // waist": measure, decompose (one raw byte, 0-255), construct (the exact
+    // dual). Everything else string-shaped is Form-native on top of these
+    // three plus str_concat; see receipts/2026-07-01-narrow-waist-string-cleanup.md.
+    //
+    // Byte scope, named honestly: implemented via latin1 (each JS UTF-16
+    // code unit 0-255 IS the raw byte, losslessly, both directions —
+    // verified round-tripping byte 233 through byte_to_str then
+    // str_byte_at). Source string literals are read as proper UTF-8
+    // (readFileSync(p, "utf8")), so any literal outside the Latin-1 range
+    // (a real multi-byte character, not just an accented one) will NOT
+    // byte-count identically to fkwu's raw-byte view here — a real, bounded
+    // gap, not silently papered over. Every test this walker actually needs
+    // to pass today is plain ASCII, where this is exact.
+    this.registerNative("str_len", catAccess(), (_k, args) => ({
+      kind: "int",
+      int: Buffer.from(argStr(args, 0), "latin1").length,
+    }));
+    this.registerNative("str_byte_at", catAccess(), (_k, args) => {
+      const buf = Buffer.from(argStr(args, 0), "latin1");
+      const i = argInt(args, 1);
+      const v = i < 0 || i >= buf.length ? -1 : buf[i]; // -1 OOB: matches fkwu exactly (verified)
+      return { kind: "int", int: v };
+    });
+    this.registerNative("byte_to_str", catMethod(), (_k, args) => ({
+      kind: "str",
+      str: Buffer.from([argInt(args, 0) & 0xff]).toString("latin1"),
+    }));
     // List ops
     this.registerNative("list", catListNat(), (_k, args) => ({
       kind: "list",

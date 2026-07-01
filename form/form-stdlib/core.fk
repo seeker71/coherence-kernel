@@ -12,19 +12,44 @@
 (do
     (defn identity (x) x)
 
-    ; char_at / ord — NOT native ops on fkwu's direct-source runner (`fkwu
-    ; --src`): neither appears in runtime/fkwu-optable.h. `fkwu --feval`
-    ; already injects exactly this shim as a hardcoded prelude string before
-    ; running (runtime/fkwu-uni.c, the `helpers` literal in fk_run_feval);
-    ; `--src` did not carry it, so any recipe calling `char_at`/`ord` without
-    ; this prelude got a silently wrong answer instead of an error — see
-    ; receipts/2026-07-01-come-in-flow-relationship-store.md and
-    ; receipts/2026-07-01-tier0-ord-char-at-shim.md. Defining them here once,
-    ; over the confirmed-working `substring`/`str_byte_at`, makes every file
-    ; that preludes core.fk get the same shim `--feval` already gives, no
-    ; matter which entrypoint runs it.
+    ; The string "narrow waist" — str_len / str_byte_at / byte_to_str (plus
+    ; str_concat) are the ONLY string primitives any kernel needs to carry
+    ; natively: measure, decompose (one raw byte, 0-255), construct (the
+    ; exact dual), join. Confirmed present, byte-identical, on fkwu, Go,
+    ; Rust, and TS (receipts/2026-07-01-narrow-waist-string-cleanup.md).
+    ; Everything below is Form composition over that floor — substring,
+    ; char_at, ord, int_to_str — written ONCE, portable everywhere. On fkwu
+    ; specifically, a same-named native op (substring, int_to_str) shadows
+    ; the defn below and keeps running (confirmed: a native always wins over
+    ; a same-named Form defn there) — unaffected, no regression risk. Go's
+    ; own former native substring/char_at/int_to_str/str_find were removed
+    ; once this covered them, so there is exactly one definition, not two
+    ; that can silently drift apart.
+
+    (defn fstr-substring-loop (s i end acc)
+        (if (ge i end) acc
+            (fstr-substring-loop s (add i 1) end (str_concat acc (byte_to_str (str_byte_at s i))))))
+    (defn substring (s start end) (fstr-substring-loop s start end ""))
+
     (defn char_at (s i) (substring s i (add i 1)))
     (defn ord (c) (str_byte_at c 0))
+
+    ; int_to_str — decimal rendering, built from byte_to_str + arithmetic
+    ; (ASCII '0' is byte 48), not a digit-lookup string. Handles 0 and
+    ; negative numbers explicitly; every existing caller in this codebase
+    ; (HTTP status/content-length, JSON encoding, counts — grep int_to_str
+    ; under form/form-stdlib/) passes an integer, never a bool/null/string,
+    ; so this covers the load-bearing surface; the native's bool/null/string
+    ; pass-through fallback is not reproduced here.
+    (defn fstr-digit-char (d) (byte_to_str (add d 48)))
+    (defn fstr-int-to-str-pos (n)
+        (if (lt n 10)
+            (fstr-digit-char n)
+            (str_concat (fstr-int-to-str-pos (div n 10)) (fstr-digit-char (mod n 10)))))
+    (defn int_to_str (n)
+        (if (eq n 0) "0"
+            (if (lt n 0) (str_concat "-" (fstr-int-to-str-pos (sub 0 n)))
+                (fstr-int-to-str-pos n))))
 
     ; Num<T> public vocabulary.
     (defn even? (n) (eq (mod n 2) 0))

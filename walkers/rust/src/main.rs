@@ -18,7 +18,16 @@
 //   literals: integer, float (incl. scientific notation), string, true/false, ()
 //   build-verbs: do seq let if defn params  add sub mul div mod
 //                eq ne lt le gt ge  and or not
-//   natives:    head tail cons empty list nth len  str_concat str_eq
+//   natives:    head tail cons empty list nth len  str_concat str_eq str_len
+//               str_byte_at byte_to_str
+//
+// str_len/str_byte_at/byte_to_str are the deliberately minimal string "narrow
+// waist": str_len measures, str_byte_at decomposes (one raw byte, 0-255),
+// byte_to_str constructs (the exact dual — one raw byte back to a length-1
+// string). Everything else string-shaped (substring, char_at, ord, int_to_str,
+// any encoding en/decode) is Form-native, composed from these three plus
+// str_concat — never a walker native again. See
+// receipts/2026-07-01-narrow-waist-string-cleanup.md.
 //
 // CLI parity with the full kernel's default source path: `form-walker-rust
 // a.fk b.fk ...` concatenates the files with '\n', evaluates, and prints the
@@ -814,6 +823,45 @@ fn call_native(name: &str, arg_nodes: &[Rc<Node>], env: &Env) -> Option<Value> {
             Some(Value::Str(Rc::from(s.as_str())))
         }
         "str_eq" => Some(bool_int(str_of(&args[0]) == str_of(&args[1]))),
+        // str_len: byte count, not codepoint count — `str::len()` in Rust
+        // already IS byte length, matching fkwu's raw-byte semantics exactly.
+        "str_len" => Some(Value::Int(str_of(&args[0]).len() as i64)),
+        // str_byte_at: the decompose half of the narrow waist. Reads the raw
+        // byte (0-255) at position i via `.as_bytes()`, never `.chars()` — a
+        // multi-byte UTF-8 codepoint is several byte positions, matching
+        // fkwu's own byte-indexed (not codepoint-indexed) view of a string.
+        // Out-of-bounds returns -1, matching fkwu exactly (confirmed
+        // directly: `(str_byte_at "hi" 9)` -> -1 on fkwu --src) — NOT this
+        // file's own Null convention for nth/head/tail, which fkwu does not
+        // share for this op.
+        "str_byte_at" => {
+            let s = str_of(&args[0]);
+            let i = args[1].as_int();
+            let bytes = s.as_bytes();
+            if i < 0 || (i as usize) >= bytes.len() {
+                Some(Value::Int(-1))
+            } else {
+                Some(Value::Int(bytes[i as usize] as i64))
+            }
+        }
+        // byte_to_str: the construct half — the exact dual of str_byte_at.
+        // fkwu's own C strings hold raw bytes with no UTF-8 validity
+        // requirement (confirmed: `(str_byte_at (byte_to_str 233) 0)` -> 233
+        // round-trips there for the full 0-255 range). Rust's `str` type
+        // enforces valid UTF-8 at the type level, so a single byte in
+        // 128-255 (a UTF-8 continuation/lead byte on its own) cannot be a
+        // valid `str` without bypassing that check. `from_utf8_unchecked` on
+        // a one-byte buffer is the standard, narrowly-scoped way to hold a
+        // raw byte in a `str` container for byte-level round-tripping; the
+        // only operations ever done on the result are str_byte_at (raw
+        // `.as_bytes()` read) and str_concat (raw byte concatenation) —
+        // never anything that assumes codepoint validity (`.chars()` etc).
+        "byte_to_str" => {
+            let b = args[0].as_int();
+            let byte = (b & 0xFF) as u8;
+            let s = unsafe { String::from_utf8_unchecked(vec![byte]) };
+            Some(Value::Str(Rc::from(s.as_str())))
+        }
         // nth / len — pure list accessors in the cons/head/tail family. Faithful
         // to the full kernel's natives. They sit just past the named surface but
         // are the same pure list shape and are what a real manifest band
