@@ -749,6 +749,50 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       cross-locale mismatch is correctly rejected, and out-of-baseline tokens honestly locate to `0` rather than
       a false positive — the honest floor stays that this covers only the small Sanskrit-baseline vocabulary,
       not open text. See `receipts/2026-07-01-locale-neutral-locate.md`.
+- [x] **Paraphrase generalization measured, not asserted.** `learn/tests/paraphrase-generalization-band.fk` runs
+      20 hand-written English paraphrases (5 per baseline meaning, none copied from `slb-lines()`) through both
+      locate functions above. Exact-match generalizes `0/20` (expected — it is a lookup table). The pre-existing
+      overlap scorer `mlap-text-meaning` generalizes `18/20`, but the 2 failures are diagnosed, not noise: one is
+      a false-positive collision on an incidental shared word ("for"), the other is a true zero-overlap
+      paraphrase that silently defaults to the first-listed meaning instead of abstaining — this scorer has no
+      "I don't know." The honest reference point for what real generalization costs stays
+      `form-cli-predict.fk`'s measured result (939 turns, 84.8% held-out over 8 labels), not this toy count. See
+      `receipts/2026-07-01-paraphrase-generalization-measured.md`.
+- [x] **satsang-oracle.fk built — the keystone `docs/coherence-substrate/nl-to-form-satsang.form` names.**
+      `learn/satsang-oracle.fk` turns `satsang.fk` toward a council of N models: each model's proposed recipe
+      tree is folded node-by-node into (affirmed/dissented/silent) via `sat-witness`/`sat-survives?`,
+      unchanged — composed, not duplicated. A node crystallizes solid the moment affirm > dissent even with a
+      dissent present (kept visible, never hidden); a node that doesn't survive stays a named open question
+      (candidate tag retained) and its children aren't walked further. Witnessed
+      (`learn/tests/satsang-oracle-band.fk`, verdict `511`) against three committed EXAMPLE proposals for "the
+      choice point becomes visible." — real unanimous agreement, real majority-survives-with-visible-dissent,
+      and a real non-surviving open question, all in one tree. Honest seam: this is the folding algorithm
+      only; it does not call out to live models, and faking multi-model diversity would break this body's own
+      never-fabricate discipline — wiring fkwu's native HTTP floor to real distinct providers, and four-way
+      re-proof, are separate, real, pending work. See `receipts/2026-07-01-satsang-oracle.md`.
+- [x] **A real trained model, witnessed learning, over 204 hand-authored examples.** `learn/nl-meaning-net.fk`
+      trains `model/transformer-backprop.fk`'s 2-block residual stack — real, well-designed code that had, as
+      far as this checkout shows, never actually been run: no test, no band, no receipt anywhere before this.
+      Found along the way: `rag-embed.fk`'s `re-vec` depends on `tk-words` and `ord`, neither of which resolve
+      to a working function here — both silently evaluate to `nothing` rather than erroring, so `re-vec`
+      currently produces all-zero vectors on this kernel (confirmed, not assumed; not fixed in `rag-embed.fk`
+      itself, a real separate gap). `nmn-vec` reuses `re-split`/`re-inc`/`re-zeros` (all real) and reimplements
+      only the hash step over `str_byte_at` (real) in place of `ord`. Trained on `learn/nl-meaning-corpus.fk`
+      (204 hand-authored examples, ~50 per class across the 4 baseline meanings, honestly labeled as
+      hand-authored — `~/source/Coherence-Network` does not exist in this checkout, confirmed).
+      First measurement (10 epochs, raw word-count embeddings) was correctly called out as barely above
+      chance and flat: held-out accuracy 26→27→29→27 out of 50 across sizes 20/60/100/154. Two real causes
+      found and fixed: 10 epochs was not enough SGD to fit 154 examples onto 4 fixed targets (100 epochs alone
+      raised it to 32/50); raw word-count histograms scale with sentence length, not meaning ("i am" sums to
+      `2`, a 13-word paraphrase sums to `13`, measured directly), biasing distance-based classification before
+      it looks at word identity (L2-normalizing on top of the epoch fix raised it to 36/50). Corrected sweep,
+      each point run as its own process (the combined 4-point sweep in one process was OOM-killed — a real
+      finding, not hidden): held-out accuracy 34/50 (20 examples) → 26/50 (60, a real unresolved dip) → 32/50
+      (100) → 36/50 (full 154) — chance is ~12.5/50. Corpus loss on the full set: `180.3` before training,
+      `2.1` after. The endpoint claim now holds cleanly (72% at full vs 68% at n=20, both far above chance);
+      the mid-sweep dip is reported as a real, unresolved artifact, not smoothed over. See
+      `receipts/2026-07-01-nl-meaning-net.md` (original) and
+      `receipts/2026-07-01-nl-meaning-net-corrected.md` (the diagnosis and fix).
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
