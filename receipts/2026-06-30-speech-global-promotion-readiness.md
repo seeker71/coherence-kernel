@@ -13,6 +13,7 @@ cat learn/speech-model-metrics-report.fk \
     learn/speech-open-asr-trial-window-0002.fk \
     learn/speech-open-asr-trial-window-0003.fk \
     learn/sema-voice-trial-window.fk \
+    learn/sema-voice-trial-window-0002.fk \
     learn/speech-current-status-ledger.fk \
     learn/speech-global-promotion-readiness.fk \
     learn/tests/speech-global-promotion-readiness-band.fk > /tmp/speech-global-promotion-readiness.fk
@@ -30,7 +31,7 @@ Promotion rule:
 Current readiness:
 
 - Open dictation: scoped native `6/6`, real live native `0/3`, missing `3`, global route `oracle-guide`.
-- Sema live voice: scoped native `1/1`, real live native `0/3`, missing `3`, global route `oracle-guide`.
+- Sema live voice: scoped native `2/2`, real live native `0/3`, missing `3`, global route `oracle-guide`.
 - Aggregate: `0` global-native-ready lanes, `2` oracle-guided lanes, `6` missing real live receipts.
 
 This keeps trust precise: the native challengers are winning bounded trials, but
