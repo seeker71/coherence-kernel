@@ -309,7 +309,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech model metrics report added.** `learn/speech-model-metrics-report.fk` records the current model size,
       composition, success rates, voice quality, and native-vs-local-oracle rates (`32767`): selected arms are
       prototype ASR, Sema voice sample loop TTS, closed-set locale Form NL2NL, and native source-window audio2audio;
-      native neural weight parameters admitted are now `20` while native Sema voice organs are present; live open
+      native neural weight parameters admitted are now `21` while native Sema voice organs are present; live open
       dictation is oracle `4/4` and native `0/4`; Sema live voice live-native pass is `0/1`, WER `100`, oracle-guide;
       scoped Sema voice is `2/3` and the teacher-oracle voice side is now `1/1` while native authority stays `0/1`.
       The same executable report now carries the live learning counters and fails its band if the stated samples,
@@ -358,7 +358,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech current status ledger added.** `learn/speech-current-status-ledger.fk` composes the metrics report,
       backlog, scheduler, open-ASR trial, and Sema voice trial into one executable status row (`32767`): global live
       authority remains oracle-held (`4/5` oracle, `0/5` native), scoped trial windows are native (`8/8` oracle and
-      `8/8` native), native neural weights now report `20`, native Sema voice organs remain `6`, and C seed growth
+      `8/8` native), native neural weights now report `21`, native Sema voice organs remain `6`, and C seed growth
       remains `0`.
 - [x] **Speech global promotion readiness added.** `learn/speech-global-promotion-readiness.fk` turns scoped trial
       wins into an executable global-authority gate (`32767`): open dictation has scoped native `6/6` and Sema live
@@ -476,20 +476,20 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       keep controls clean, promote by A/B evidence, and preserve the local oracle/device while neural Metal and
       diffusion remain pending. The band returns `32767`.
 - [x] **Speech neural pair coverage added.** `learn/speech-neural-pair-coverage.fk` makes the pair-training
-      boundary executable (`32767`): locale `A=>neural=>B` coverage is now `20/55` broad ready pairs and `40/110`
-      directed routes, with `20` neural epochs and `20` native neural parameters. The separate Form-native seeded
+      boundary executable (`32767`): locale `A=>neural=>B` coverage is now `21/55` broad ready pairs and `42/110`
+      directed routes, with `21` neural epochs and `21` native neural parameters. The separate Form-native seeded
       windows cover `8` reciprocal pair windows (`16` directed cross-locale directions, `32` A/B plus self
       roundtrip lanes), which is `1454` basis points of the broad ready pair space and `1777` basis points of the
       Sanskrit-baseline pair space. This keeps prototype/Form receipts from being misreported while making neural
       pair coverage non-zero.
 - [x] **Speech pair training next action added.** `learn/speech-pair-training-next-action.fk` now chooses the next
-      executable neural movement (`32767`): choose `next-native-neural-pair-window-0021` over `es<->id`, route
-      `train-native-neural-pair-window`, keep Form-native pair windows `8 -> 8`, move neural pair windows `20 -> 21`,
-      and carry the corpus floor gap `211/12000`. The point is to keep training toward full open ASR/TTS, not stop
+      executable neural movement (`32767`): choose `next-native-neural-pair-window-0022` over `de<->pt-br`, route
+      `train-native-neural-pair-window`, keep Form-native pair windows `8 -> 8`, move neural pair windows `21 -> 22`,
+      and carry the corpus floor gap `213/12000`. The point is to keep training toward full open ASR/TTS, not stop
       at the first micro-pair.
 - [x] **Speech authority learning priority added.** `learn/speech-authority-learning-priority.fk` makes the
-      authority gap executable (`32767`): trained pair coverage is `20/55`, and `next-native-neural-pair-window-0021`
-      over `es<->id` stays available as the background coverage lane, but the measured open ASR gap `100` and
+      authority gap executable (`32767`): trained pair coverage is `21/55`, and `next-native-neural-pair-window-0022`
+      over `de<->pt-br` stays available as the background coverage lane, but the measured open ASR gap `100` and
       Sema voice gap `100` force the selected learning action back to `train-live-segmented-open-asr-source`
       with `choice/cut/fail/undo/timeout` controls. This prevents pair-window growth from being mistaken for
       open ASR/TTS authority.
@@ -587,6 +587,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       the twentieth native neural micro-pair over `es<->fr` (`32767`): neural pair coverage moves to `20`
       unordered pairs and `40` directed routes, with `20` native neural parameters, `20` epochs, and neural rate
       `0 -> 100`. The next selected movement is `next-native-neural-pair-window-0021` over `es<->id`.
+- [x] **Speech native neural pair window 0021 added.** `learn/speech-native-neural-pair-window-0021.fk` trains
+      the twenty-first native neural micro-pair over `es<->id` (`32767`): neural pair coverage moves to `21`
+      unordered pairs and `42` directed routes, with `21` native neural parameters, `21` epochs, and neural rate
+      `0 -> 100`. The window carries a real Mac Metal local-oracle probe over Spanish and Indonesian baseline
+      audio (`2/2`, WER `25/0`, observed wav bytes `108418`). The next selected movement is
+      `next-native-neural-pair-window-0022` over `de<->pt-br`.
 - [x] **Speech open ASR/TTS target model added.** `learn/speech-open-asr-tts-target-model.fk` makes the goal
       executable (`32767`): native open ASR and Sema TTS should reach or beat the local oracle. Current native
       authority remains below target, but the route is enabled and no longer zeroed out.
