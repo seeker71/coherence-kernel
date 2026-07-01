@@ -7,7 +7,7 @@ next executable movement.
 Current state:
 
 ```text
-neural pair windows: 9
+neural pair windows: 10
 Form-native seeded pair windows: 8
 captured live wavs: 211
 required live wav floor: 12000
@@ -18,12 +18,12 @@ neural ready: true
 Chosen next action:
 
 ```text
-id: next-native-neural-pair-window-0010
-pair: zh<->ar
+id: next-native-neural-pair-window-0011
+pair: sa<->la
 route: train-native-neural-pair-window
 reason: neural-micro-pair-training-enabled
 Form pair windows: 8 -> 8
-neural pair windows: 9 -> 10
+neural pair windows: 10 -> 11
 capture state: 211/12000
 ```
 
@@ -40,6 +40,6 @@ cat learn/speech-neural-pair-coverage.fk \
 32767
 ```
 
-Meaning: the next honest move is to run the tenth native neural micro-pair
+Meaning: the next honest move is to run the eleventh native neural micro-pair
 window and keep capturing consentful audio. The planned neural count moves
-`9 -> 10`; full open ASR/TTS authority still waits for open receipts.
+`10 -> 11`; full open ASR/TTS authority still waits for open receipts.
