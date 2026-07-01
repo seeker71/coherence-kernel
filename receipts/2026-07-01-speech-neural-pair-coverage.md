@@ -17,19 +17,19 @@ neural coverage: 0 basis points
 Current Form-native seeded reciprocal coverage:
 
 ```text
-seeded reciprocal pair windows: 5
-directed cross-locale directions: 10
-roundtrip lanes: 20 A->B, B->A, A->A, and B->B lanes across NL and audio windows
+seeded reciprocal pair windows: 6
+directed cross-locale directions: 12
+roundtrip lanes: 24 A->B, B->A, A->A, and B->B lanes across NL and audio windows
 ready rate: 100
-broad ready coverage: 909 basis points
+broad ready coverage: 1090 basis points
 Sanskrit-baseline pair space: 45 unordered / 90 directed
-Sanskrit-baseline coverage: 1111 basis points
+Sanskrit-baseline coverage: 1333 basis points
 ```
 
 Observed Form-native/prototype pairs:
 
 ```text
-multiseed windows: zh<->ar, en<->id, sa<->la, fr<->id, pt-br<->zh
+Form windows: zh<->ar, en<->id, sa<->la, fr<->id, pt-br<->zh, en<->de
 segmented source-ASR prototypes: sa<->la, en<->zh, ar<->en
 live Metal anchors: en<->de, en<->es, en<->id, en<->fr, en<->it, en<->zh, en<->ar
 audio NL2NL bridge routes: 12 oracle-guided routes, not native vocoder and not neural
