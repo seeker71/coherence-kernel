@@ -91,6 +91,27 @@ its scope ends. Any recipe with two or more `let`-bound values alive at once, wh
 does enough nested work to trigger tag 111's reserve/restore cycle, is exposed to this — not just `oac-kind`,
 and not limited to node-with-children values specifically.
 
+## A real, working mitigation — not a fix, but a large, verified improvement
+
+The parser comment says a `defn` body's locals get explicitly reserved on the value stack (tag 111); a bare
+top-level `do` never gets that reservation at all, even though its `let`s are still handed slot numbers as
+if they will. Testing that distinction directly: the exact minimal repro above, wrapped in a `defn` and
+called once, returns the **correct** `1` — the bare top-level version returns `0`. Applying the same shape to
+`control/tests/choice-lane-core-band.fk` (wrap the whole band body in one `defn`, call it once — the same
+convention every *other* passing band in this repo, e.g. `observe/tests/speech-token-stream-band.fk`, already
+uses) moves it live from garbage to **`1021`/`1023` — 9 of 10 claims correct**, deterministically, across
+repeated runs. Applying the identical wrap (test only, not committed — that file is not this pass's to edit)
+to the pre-existing `control/tests/offer-ack-core-band.fk` moves it from `-8999999999999999619` (the raw
+`nothing` sentinel leaking out as the final printed value) to `197`/`1023` — a smaller fraction, but the same
+direction of improvement.
+
+So: **a bare top-level script is where this bug is most exposed; a `defn`-wrapped function body is far less
+exposed, but not immune.** `control/tests/choice-lane-core-band.fk`'s one remaining live miss is claim 2 —
+reading a payload (`node_value`/`node_children`) immediately off the ack `oac-cut-with-receipt` returns,
+where claim 1 (checking `oac-nothing?` on a similarly-shaped result two lines earlier) passes. That residual
+confirms the mechanism above is still real even inside a properly reserved frame: it is reduced by scale
+(fewer nested calls competing for slots early in a function body), not eliminated by structure.
+
 ## What this pass did and did not do about it
 
 - **Did**: isolate the minimal repro above (no prelude), confirm it is order-dependent and content-independent
@@ -113,10 +134,11 @@ and not limited to node-with-children values specifically.
   repair, and `AGENTS.md` is explicit that growing/reworking the C seed should be exactly that kind of narrow,
   named, receipted move or nothing. Naming the mechanism precisely here is what makes that fix possible for
   whoever picks it up next, scoped correctly, rather than attempted blind.
-- **Did not** fabricate a passing band to route around it. `control/tests/choice-lane-core-band.fk` and the
-  pre-existing `control/tests/offer-ack-core-band.fk` both still report their true (currently non-1023) result
-  on this build; each primitive they exercise was instead verified correct in isolated, single-node live runs
-  (see the choice-lane receipt) — none of which alone triggers this slot-reuse pattern.
+- **Did** restructure `control/tests/choice-lane-core-band.fk` to wrap its body in a `defn`, called once,
+  instead of bare top-level `let`s — the correct, already-established convention, not a workaround invented to
+  dodge this bug. It now live-reports its true, current result honestly: `1021`/`1023`, not a fabricated
+  `1023`. The pre-existing `control/tests/offer-ack-core-band.fk` was left unmodified (out of this pass's
+  scope) but tested the same way to confirm the pattern generalizes (see above).
 
 ## Build (reproduce this receipt directly)
 

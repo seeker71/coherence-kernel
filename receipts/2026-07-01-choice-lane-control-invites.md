@@ -82,14 +82,18 @@ nested call returns. A `let`-bound name's slot and a later, unrelated computatio
 same integer — so the later computation silently overwrites the earlier binding before its scope ends.
 `OAC-ZERO` and `OAC-ONE` are correctly assigned, genuinely distinct blueprint coordinates — the break is that
 the name holding one of them can lose its storage, not that the two are confused with each other. Full
-write-up, the exact watchpoint trace, and a minimal (no-prelude) repro live in their own receipt,
-`receipts/2026-07-01-node-children-last-writer-wins.md`, since this is a runtime floor any recipe with two or
-more `let`-bound values alive at once can hit, not something specific to this file. The same symptom appears
-in the pre-existing, **unmodified** `control/tests/offer-ack-core-band.fk`,
-which no longer reproduces its proven `1023` on this exact build either — this is not a regression from this
-pass's recipes. `control/tests/choice-lane-core-band.fk` is written the same honest way `offer-ack-core-band.fk`
-already was: it is the correct witness of the intended behavior (every primitive individually verified live,
-in isolation, above), not a claim that today's C seed runs the full band clean.
+write-up, the exact watchpoint trace, a minimal (no-prelude) repro, and a real, verified mitigation live in
+their own receipt, `receipts/2026-07-01-node-children-last-writer-wins.md`, since this is a runtime floor any
+recipe with two or more `let`-bound values alive at once can hit, not something specific to this file.
+
+That receipt found the mitigation and it is applied here: `control/tests/choice-lane-core-band.fk` now wraps
+its body in one `defn`, called once, instead of bare top-level `let`s — a `defn` body's locals get properly
+reserved on the value stack; a bare top-level `do`'s never do. Live result moved from garbage to
+**`1021`/`1023` — 9 of 10 claims correct**, deterministic across repeated runs; the one remaining miss (claim
+2, reading a payload immediately off an indirect-call result) is the same underlying mechanism surviving at
+smaller scale, not a new one. The pre-existing, **unmodified** `control/tests/offer-ack-core-band.fk` was left
+as-is (out of this pass's scope) but tested the same way to confirm the fix generalizes: from
+`-8999999999999999619` (the raw `nothing` sentinel leaking out as the final value) to `197`/`1023`.
 
 This is also why `grammars/control-invite-grammar.fk` is built on `bmf-core.fk`'s smaller single-rule engine
 rather than the larger multi-rule `bmf-grammar.fk`: loading `bmf-grammar.fk` alone (as committed, unmodified,
