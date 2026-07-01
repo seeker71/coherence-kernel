@@ -7,7 +7,7 @@ Current state:
 
 ```text
 neural pair windows: 0
-Form-native seeded pair windows: 6
+Form-native seeded pair windows: 7
 captured live wavs: 211
 required live wav floor: 12000
 native Form: true
@@ -17,11 +17,11 @@ neural ready: false
 Chosen next action:
 
 ```text
-id: next-form-pair-window-0007
-pair: en<->es
+id: next-form-pair-window-0008
+pair: en<->fr
 route: expand-form-native-pair-window-before-neural
 reason: neural-pairs-zero-and-corpus-under-floor
-Form pair windows: 6 -> 7
+Form pair windows: 7 -> 8
 neural pair windows: 0 -> 0
 capture state: 211/12000
 ```
