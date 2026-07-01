@@ -9,7 +9,7 @@ target open TTS: true
 beat local oracle: true
 target rate: 100
 current open ASR native/oracle: 0/100
-current Sema voice native/oracle eval: 0/1 / 0/1
+current Sema voice native/oracle eval: 0/1 / 1/1
 trained neural pairs enabled: 20
 native neural parameters enabled: 20
 route enabled: true
