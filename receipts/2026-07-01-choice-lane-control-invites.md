@@ -74,14 +74,18 @@ node-with-children is interned in a scope.** Isolated, minimal recipes confirm e
 But loading the full `control/offer-ack-core.fk` + `control/choice-lane-core.fk` together and exercising
 several claims in one run, `oac-kind` starts misclassifying acks. First guess was a `bp` blueprint-table
 collision; live investigation (gdb on `fk_sintern`'s string interning, `FK_OBSERVE=1` tracing `fk_offer_ack`'s
-native call classification, and ruling the JIT in/out via `FK_JIT`/`FK_JIT_HOT`/`FK_JIT_WITNESS`) ruled that
-out step by step and found the real, much more precise mechanism: **a node's children are only reliably
-readable while it is the most-recently-interned node with children; interning a second one can silently empty
-the first's.** `OAC-ZERO` and `OAC-ONE` are correctly assigned, genuinely distinct blueprint coordinates — the
-break is in reading a node's children afterward, not in blueprint identity. Given its own full write-up and
-minimal (no-prelude) repro in `receipts/2026-07-01-node-children-last-writer-wins.md`, since it is a runtime
-floor any recipe interning more than one node-with-children in a scope will hit, not something specific to
-this file. The same symptom appears in the pre-existing, **unmodified** `control/tests/offer-ack-core-band.fk`,
+native call classification, ruling the JIT in/out via `FK_JIT`/`FK_JIT_HOT`/`FK_JIT_WITNESS`, and finally a
+gdb hardware watchpoint on the actual `fk_vs` storage cells) ruled that out step by step and found the real
+mechanism: `let` hands out a storage slot meant to be permanent for the rest of its scope, but the evaluator's
+own opcode for reserving locals treats that same storage as ephemeral scratch space, freed the moment a
+nested call returns. A `let`-bound name's slot and a later, unrelated computation's scratch slot can be the
+same integer — so the later computation silently overwrites the earlier binding before its scope ends.
+`OAC-ZERO` and `OAC-ONE` are correctly assigned, genuinely distinct blueprint coordinates — the break is that
+the name holding one of them can lose its storage, not that the two are confused with each other. Full
+write-up, the exact watchpoint trace, and a minimal (no-prelude) repro live in their own receipt,
+`receipts/2026-07-01-node-children-last-writer-wins.md`, since this is a runtime floor any recipe with two or
+more `let`-bound values alive at once can hit, not something specific to this file. The same symptom appears
+in the pre-existing, **unmodified** `control/tests/offer-ack-core-band.fk`,
 which no longer reproduces its proven `1023` on this exact build either — this is not a regression from this
 pass's recipes. `control/tests/choice-lane-core-band.fk` is written the same honest way `offer-ack-core-band.fk`
 already was: it is the correct witness of the intended behavior (every primitive individually verified live,
