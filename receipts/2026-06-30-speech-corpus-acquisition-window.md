@@ -26,6 +26,16 @@ trained: false
 status: corpus-scale-window-open-not-trained
 ```
 
+Cross-voice window:
+
+```text
+ready cross-voice locales on this Mac: 5
+voices per cross-voice locale: 2
+planned cross-voice wavs: 20000
+planned cross-voice held-out rows: 2000
+boundary: Indonesian has one host voice here, so it is not counted in the two-voice host-ready lane
+```
+
 Witness:
 
 ```sh
@@ -38,10 +48,10 @@ cat learn/coherence-network-self-corpus.fk \
 ```
 
 ```text
-32767
+65535
 ```
 
 Meaning: the self-corpus can fill the first corpus-scale wav floor, but only the
-first thirty rows have been captured so far. The next real step is expanding the
-live acquisition runner until the full window is rendered and witnessed locally
-before any training promotion.
+first 64 rows have been captured so far. The next real step is expanding the
+live acquisition runner until the full raw and cross-voice windows are rendered
+and witnessed locally before any training promotion.
