@@ -18,32 +18,27 @@
 ; intern_node_at so cell-trace can walk a JSON-derived cell back
 ; to the line/col where its structure was authored.
 ;
-; Two structural constraints this whole file is now built around, both
-; found and verified directly (receipts/2026-07-01-json-fk-src-scoping-
-; fix.md and the correction in receipts/2026-07-01-json-fk-actually-
-; fixed.md — the earlier "root cause #3" claim in the first receipt was
-; itself a misdiagnosis, corrected there):
+; One real structural constraint this file is built around, verified
+; against a FRESH build of runtime/fkwu-uni.c (not just a local binary —
+; that distinction turned out to matter, see below):
 ;
 ; 1. Top-level `let`, unlike top-level `defn`, is NOT visible inside a
 ;    `defn` body on `fkwu --src`. So the four JSON category NodeIDs below
 ;    are zero-arg `defn`s, called as `(JSON-OBJECT)` etc, never bare
-;    identifiers.
+;    identifiers. Real, current, re-confirmed on a fresh build.
 ;
-; 2. `fkwu --src` resolves a `defn` body's callee references at
-;    *definition* time against what's already registered, with one
-;    exception for the function's own name (why the self-recursive
-;    `-loop` idiom works). Two top-level `defn`s that call each other, OR
-;    a `defn` that calls another `defn` defined LATER in the file (even a
-;    non-recursive one-way forward reference), do not resolve — confirmed
-;    directly: `json-next-token` (this file, originally) forward-
-;    referenced `json-scan-string`/`json-scan-number`/`json-scan-literal`,
-;    all defined later, and silently returned an empty token for every
-;    input, not an error. This file is now ordered bottom-up (every
-;    function defined after everything it calls) wherever the call graph
-;    is a DAG, and the two genuinely cyclic clusters (recursive-descent
-;    parse, recursive emit) are each collapsed into ONE self-recursive
-;    function keyed on a `mode` argument — the shape `cell-serialize.fk`
-;    and `wire-xml.fk` already use for the identical reason.
+; A second constraint this file was ALSO restructured around — "forward
+; references and mutual recursion between top-level `defn`s never resolve"
+; — turned out to be an artifact of a stale local ./fkwu binary predating
+; the current runtime source (whose two-pass defn prescan handles forward
+; and mutual references fine; confirmed by direct repro against a fresh
+; build). See receipts/2026-07-01-stale-binary-root-cause.md. The
+; bottom-up ordering and the two mode-keyed self-recursive functions
+; (`json-parse`, `json-emit-m`, replacing five- and four-function
+; mutual-recursion rings) are KEPT: they run correctly on both binary
+; generations, and one function per recursion with an explicit mode tag
+; is a legitimate shape on its own merits — but they are a choice now,
+; not a requirement, and this header no longer claims otherwise.
 
 ;; --- universal data category NodeIDs ------------------------------
 (defn JSON-OBJECT () (bp "JSON-OBJECT"))   ; map: list of (key, value) pairs
@@ -519,17 +514,16 @@
         (let ty (node_type node))
         (if (eq ty 1) (int_to_str (node_value node))
         (if (eq ty 2) (json-quote-string (node_value node))
-        ; ty 3 is a trivial bool. A real, separate, pre-existing gap, found
-        ; while fixing this file's structural bugs (not caused by them),
-        ; named rather than silently routed through int_to_str as before:
-        ; confirmed directly that `(intern_trivial_bool true)` and
-        ; `(intern_trivial_bool false)` construct the SAME node — `eq` on
-        ; them returns true — so there is currently no way in Form to
-        ; recover which boolean a trivial-bool node actually holds. This
-        ; needs its own native-level investigation (a kernel bug, not a
-        ; json.fk one); until then, both emit "false" — a known-wrong but
-        ; at least valid-JSON placeholder, not a crash.
-        (if (eq ty 3) "false"
+        ; ty 3 is a trivial bool, distinguished by NODE IDENTITY (axiom-3:
+        ; same construction, same node — `(intern_trivial_bool true)` is one
+        ; well-known node, `...false` another), not by node_value: the value
+        ; slot holds a raw internal sentinel that is truthy for BOTH bools
+        ; (confirmed directly), so an `(if (node_value node) ...)` dispatch
+        ; would silently emit "true" for false. An earlier note here claimed
+        ; true and false construct the SAME node — that was a stale local
+        ; ./fkwu binary predating the current runtime source, not a kernel
+        ; bug; see receipts/2026-07-01-stale-binary-root-cause.md.
+        (if (eq ty 3) (if (eq node (intern_trivial_bool true)) "true" "false")
         (if (eq ty 4) "null"
         ; ty 7 is a trivial float (confirmed: `(node_type (intern_trivial_float
         ; "3.14"))` -> 7) — routes to float_to_str, not int_to_str. Before
