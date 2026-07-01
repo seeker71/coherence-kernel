@@ -449,18 +449,23 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech neural pair coverage added.** `learn/speech-neural-pair-coverage.fk` makes the pair-training
       boundary executable (`32767`): locale `A=>neural=>B` coverage is `0/55` broad ready pairs and `0/110`
       directed routes, with `0` neural epochs and `0` native neural parameters. The separate Form-native seeded
-      windows cover `6` reciprocal pair windows (`12` directed cross-locale directions, `24` A/B plus self
-      roundtrip lanes), which is `1090` basis points of the broad ready pair space and `1333` basis points of the
+      windows cover `7` reciprocal pair windows (`14` directed cross-locale directions, `28` A/B plus self
+      roundtrip lanes), which is `1272` basis points of the broad ready pair space and `1555` basis points of the
       Sanskrit-baseline pair space. This keeps prototype/Form receipts from being misreported as neural training.
 - [x] **Speech pair training next action added.** `learn/speech-pair-training-next-action.fk` turns zero neural
-      pair coverage into the next executable movement (`32767`): choose `next-form-pair-window-0007` over
-      `en<->es`, route `expand-form-native-pair-window-before-neural`, move Form-native pair windows `6 -> 7`,
+      pair coverage into the next executable movement (`32767`): choose `next-form-pair-window-0008` over
+      `en<->fr`, route `expand-form-native-pair-window-before-neural`, move Form-native pair windows `7 -> 8`,
       keep neural pair windows `0 -> 0`, and carry the corpus floor gap `211/12000`. The point is to run another
       observable reciprocal Form window and capture more consentful audio before any neural claim.
 - [x] **Speech Form pair window 0006 added.** `learn/speech-form-pair-window-0006.fk` executes the selected
       `en<->de` reciprocal Form-native window (`32767`): NL moves `0 -> 100`, audio moves `0 -> 100`, route shifts
       `oracle-guide -> native`, and neural/diffusion/trained-neural remain `0`. Form pair coverage is now `6`
       reciprocal windows, `12` directed cross-locale directions, and `24` A/B plus self roundtrip lanes; neural
+      pair coverage remains `0`.
+- [x] **Speech Form pair window 0007 added.** `learn/speech-form-pair-window-0007.fk` executes the selected
+      `en<->es` reciprocal Form-native window (`32767`): NL moves `0 -> 100`, audio moves `0 -> 100`, route shifts
+      `oracle-guide -> native`, and neural/diffusion/trained-neural remain `0`. Form pair coverage is now `7`
+      reciprocal windows, `14` directed cross-locale directions, and `28` A/B plus self roundtrip lanes; neural
       pair coverage remains `0`.
 - [x] **Seven live Metal pair anchors stand — `7/7`, `full-metal-native` for the closed-prompt carrier.**
       The Form-owned macOS carrier runs `en<->de`, `en<->es`, `en<->id`, `en<->fr`, `en<->it`, `en<->zh`, and `en<->ar` on live Apple
