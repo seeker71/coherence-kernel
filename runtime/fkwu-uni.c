@@ -839,6 +839,27 @@ static long long fk_bd_s[128], fk_bd_n[128], fk_bd_off[128], fk_bd_top, fk_maxsl
 static long long fk_bd_lookup(long long s, long long n) { long long i = fk_bd_top; while (i > 0) { i = i - 1; if (fk_sym_eq2(s, n, fk_bd_s[i], fk_bd_n[i])) { return fk_bd_off[i]; } } return -1; }
 static void fk_bd_push(long long s, long long n, long long off) { if (fk_bd_top < 128) { fk_bd_s[fk_bd_top] = s; fk_bd_n[fk_bd_top] = n; fk_bd_off[fk_bd_top] = off; fk_bd_top = fk_bd_top + 1; } }
 static void fk_bd_pop(void) { if (fk_bd_top > 0) { fk_bd_top = fk_bd_top - 1; } }
+/* A nested (defn ...) resets fk_bd_top to 0 so its own body can't accidentally
+   resolve a caller-frame slot (a function has no access to its caller's locals).
+   That reset is a WRITE-CURSOR reset into shared fixed arrays, not a true stack
+   push/pop -- so the nested defn's own fk_bd_push calls physically overwrite
+   fk_bd_s/fk_bd_n/fk_bd_off at indices 0.. with its own bindings. Restoring just
+   fk_bd_top afterward brought the COUNT back but not the DATA already clobbered
+   at those indices -- every name the enclosing do had bound became silently
+   unlookupable (degrading to the unbound-name default, 0) for the rest of that
+   do's own parsing. These two helpers save/restore the actual slice, not just
+   the pointer. */
+static long long fk_bd_save_s[128], fk_bd_save_n[128], fk_bd_save_off[128];
+static long long fk_bd_save(void) {
+ long long top = fk_bd_top; long long i = 0;
+ while (i < top) { fk_bd_save_s[i] = fk_bd_s[i]; fk_bd_save_n[i] = fk_bd_n[i]; fk_bd_save_off[i] = fk_bd_off[i]; i = i + 1; }
+ return top;
+}
+static void fk_bd_restore(long long top) {
+ long long i = 0;
+ while (i < top) { fk_bd_s[i] = fk_bd_save_s[i]; fk_bd_n[i] = fk_bd_save_n[i]; fk_bd_off[i] = fk_bd_save_off[i]; i = i + 1; }
+ fk_bd_top = top;
+}
 static long long fk_parse_do(void);
 /* stone 4: a function table. Each top-level (defn name ...) gets its own fn-index (>=1); a call to a
    registered name lowers to tag 12 (call-by-index, single-arg). A non-defn top form is the root (fn[0]). */
@@ -858,10 +879,20 @@ static long long fk_sparse(void) {
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 40) { fk_spos = fk_spos + 1; }
    fk_sskip(); long long as2 = fk_spos; fk_spos = fk_sym_end(fk_spos); long long alen = fk_spos - as2;
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
+   /* SCOPE FIX: a defn reached here is nested inside an enclosing (do ...) that may
+      already have its own (let ...) bindings live on the SAME global fk_bd_top/
+      fk_maxslot stack. The reset below is correct for the defn's OWN frame (a
+      function must not silently read its caller's locals), but was previously never
+      restored — so every subsequent form in the enclosing do permanently lost
+      lookup access to its own earlier lets (a name reference degraded to the
+      unbound-name default, 0, with no error). Save/restore around the defn's own
+      parse keeps the callee's frame isolated without corrupting the caller's. */
+   long long fk_bd_saved_top = fk_bd_save(); long long fk_bd_saved_maxslot = fk_maxslot;
    fk_bd_top = 0; fk_maxslot = 0; fk_bd_push(as2, alen, 0);
    long long body = fk_sparse();
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
    if (fk_maxslot > 0) { body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0); }
+   fk_bd_restore(fk_bd_saved_top); fk_maxslot = fk_bd_saved_maxslot;
    return body;
   }
   if (fk_sym_eq(s, hn, "do")) { return fk_parse_do(); }
@@ -1176,6 +1207,13 @@ static void fk_parse_top(void) {
    if (idx < 0) { idx = fk_defn_next; fk_defn_next = fk_defn_next + 1; if (fk_fntop < 256) { fk_fnsym_s[fk_fntop] = ns2; fk_fnsym_n[fk_fntop] = nlen2; fk_fnidx[fk_fntop] = idx; fk_fntop = fk_fntop + 1; } }
    fk_fname_s = ns2; fk_fname_n = nlen2;
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 40) { fk_spos = fk_spos + 1; }
+   /* SCOPE FIX (same as the fk_sparse defn fast-path above): this defn may be
+      reached while an enclosing (do ...) still has its own (let ...) bindings live
+      on the shared fk_bd_top/fk_maxslot stack (e.g. a leading-defn prescan followed
+      by lets, then a second defn later in the same do). Save/restore keeps the
+      callee's own frame isolated without permanently erasing the caller's bindings
+      for everything parsed after this defn returns. */
+   long long fk_bd_saved_top = fk_bd_save(); long long fk_bd_saved_maxslot = fk_maxslot;
    fk_bd_top = 0; fk_maxslot = 0; long long na = 0;
    while (1) { fk_sskip(); if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) { break; } long long as = fk_spos; fk_spos = fk_sym_end(fk_spos); fk_bd_push(as, fk_spos - as, na); if (na > fk_maxslot) { fk_maxslot = na; } na = na + 1; }
    if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
@@ -1184,6 +1222,7 @@ static void fk_parse_top(void) {
    fk_sskip(); if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) { fk_spos = fk_spos + 1; }
    if (fk_maxslot > 0) { body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0); }
    if (idx >= 0 && idx < 4096) { fk_fn[idx] = body; }
+   fk_bd_restore(fk_bd_saved_top); fk_maxslot = fk_bd_saved_maxslot;
    return;
   }
  }

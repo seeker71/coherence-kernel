@@ -793,6 +793,66 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       the mid-sweep dip is reported as a real, unresolved artifact, not smoothed over. See
       `receipts/2026-07-01-nl-meaning-net.md` (original) and
       `receipts/2026-07-01-nl-meaning-net-corrected.md` (the diagnosis and fix).
+- [x] **Fixed: a nested `defn` silently erased its enclosing `do`'s `let` bindings.** `runtime/fkwu-uni.c`'s
+      two defn-parsing sites reset the shared parse-time binding stack (`fk_bd_top = 0`) so a function's own
+      body can't read its caller's locals — correct, but `fk_bd_push` writes into fixed global arrays at that
+      index, so the reset **overwrote** the enclosing `do`'s earlier `let` data rather than just hiding it,
+      and was never restored. Every name the enclosing `do` had bound silently degraded to the unbound-name
+      default (`0`) for the rest of its own parsing. New `fk_bd_save()`/`fk_bd_restore()` save/restore the
+      actual array slice, not just the counter (a counter-only first attempt did not fix the repro). When the
+      enclosing scope's stack was already empty — true for every leading top-level `defn`, the convention
+      this whole codebase already follows — the fix is a provable no-op, not just an empirically-checked one.
+      Verified against every band this session touched (9 bands, all unchanged) plus a grammar spot-check
+      identical on the old and new binary. See `receipts/2026-07-01-defn-scope-corruption-fix.md`.
+- [x] **Fixed: `rag-embed.fk`'s `re-vec` was silently producing all-zero vectors.** Not a missing primitive —
+      `runtime/fkwu-uni.c` already defines the exact right `ord`/`char_at` (line ~1968), but only injects them
+      in `--feval` mode, never `--src` (what every band test and receipt here actually uses); `tk-words` never
+      existed at all — `rag-embed.fk` names `form-stdlib/text-tokenize.fk` as its own prelude, but that file
+      was never created. New `form/form-stdlib/text-tokenize.fk` promotes the C helper's `ord`/`char_at` into
+      real `.fk` source and adds a genuine `tk-words` (lowercase, punctuation/whitespace -> word separators,
+      via `str_byte_at`/`byte_to_str`, both real). `re-vec`/`rag-embed.fk` themselves untouched — only the
+      missing prelude was supplied. New `form/form-stdlib/tests/rag-embed-band.fk` (verdict `31`) proves it:
+      `"The Choice Point Becomes Visible."` and `"the   choice, point... becomes VISIBLE"` now embed to
+      byte-identical vectors, while genuinely different words embed differently. `model/rag-embed.fk` and
+      `cognition/rag-embed.fk` are byte-identical, so one fix covers both. **Scope corrected via PR review**:
+      `rag-embed.fk`'s own pre-existing header claimed "four-way provable (Go = Rust = TS = fkwu)" — checked
+      directly against each walker's native table (`walkers/go/main.go`, `walkers/rust/src/main.rs`,
+      `walkers/ts/main.ts`), `str_byte_at`/`byte_to_str` are registered in none of the three, and `str_len` is
+      missing from Rust's and TS's. Deeper than this fix alone: `re-split`'s own pre-existing `substring`/
+      `str_len` usage already exceeded the walkers' shared string surface (only `str_concat`/`str_eq`) before
+      `text-tokenize.fk` ever existed — the four-way claim was already unachievable, this fix just made the
+      gap checkable for the first time. Fixed by correcting the claim in both `rag-embed.fk` copies plus
+      `text-tokenize.fk`/`rag-embed-band.fk`, not by adding string-indexing primitives to three more
+      runtimes — that would cut against this repo's own "minimal walkers, never feature-bearers"
+      architecture. See `receipts/2026-07-01-rag-embed-tokenize-fix.md`.
+- [x] **The n=60 dip in the learning-curve sweep diagnosed, not left as an open question.** Per-class
+      held-out breakdown: class 1 ("truth triumphs") drops from 9/13 correct at n=20 to 4/13 at n=60, while
+      every other class moves by only the noise-level `-1`. The entire dip is one class collapsing, not a
+      diffuse regression. Cause: the class-balanced round-robin trains on roughly the first 15 of each
+      class's ~40 examples at n=60 — class 1's hand-authored list puts short-simple paraphrases first, a
+      long "victory/falsehood/lies" vocabulary run in the middle, and the multi-locale + second-batch
+      renderings only near the end (well past position 15), while the held-out set (every 4th item) draws
+      from the whole list. At n=60 the model has overfit to the narrow early vocabulary slice, which
+      generalizes worse to the later, differently-worded held-out examples than either less exposure (n=20)
+      or eventually seeing most of the class's diversity (n=100/154) — the standard non-monotonic-curve
+      pattern for ordered, non-shuffled training data under a fixed epoch budget. A concrete fix (a
+      deterministic stride-permutation of each class's list before splitting) is named but not implemented,
+      to avoid another expensive multi-minute re-verification pass in the same sitting. See
+      `receipts/2026-07-01-n60-dip-diagnosed.md`.
+- [x] **satsang-oracle.fk's first live (non-synthetic) voice.** `learn/tests/satsang-oracle-live-band.fk`
+      feeds `sao-witness-council` two parses of a new sentence ("Truth alone triumphs over every lie."),
+      both produced fresh in this session rather than scripted in advance — differing on a genuine
+      linguistic question (is "triumphs over" one phrasal-verb unit or two words?), not a manufactured
+      disagreement. Verdict `7`: the root correctly does NOT survive (the two parses differ in arity —
+      7 vs 6 leaves — so `sao-shape-eq?`'s ctor-tag+arity match calls them different shapes before their
+      substantial shared word-level content is ever examined), its candidate tag stays named rather than
+      dropped, and the exact `(1 affirm, 1 dissent)` tie correctly does not crystallize. Honest finding: this
+      surfaces a real, named limitation — the fold only recurses into children when the parent's shape
+      already matches, so two parses that agree on most words but differ in one segmentation choice get
+      zero credit for that agreement. Not a bug, a real property of the current algorithm; closing it needs
+      an alignment step before the node-by-node fold, not built here. Still one voice, not a council, and no
+      network call — wiring a genuinely distinct second model stays separate, real, credential-gated work.
+      See `receipts/2026-07-01-satsang-oracle-live.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
