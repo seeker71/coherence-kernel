@@ -569,6 +569,18 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       "I don't know." The honest reference point for what real generalization costs stays
       `form-cli-predict.fk`'s measured result (939 turns, 84.8% held-out over 8 labels), not this toy count. See
       `receipts/2026-07-01-paraphrase-generalization-measured.md`.
+- [x] **satsang-oracle.fk built — the keystone `docs/coherence-substrate/nl-to-form-satsang.form` names.**
+      `learn/satsang-oracle.fk` turns `satsang.fk` toward a council of N models: each model's proposed recipe
+      tree is folded node-by-node into (affirmed/dissented/silent) via `sat-witness`/`sat-survives?`,
+      unchanged — composed, not duplicated. A node crystallizes solid the moment affirm > dissent even with a
+      dissent present (kept visible, never hidden); a node that doesn't survive stays a named open question
+      (candidate tag retained) and its children aren't walked further. Witnessed
+      (`learn/tests/satsang-oracle-band.fk`, verdict `511`) against three committed EXAMPLE proposals for "the
+      choice point becomes visible." — real unanimous agreement, real majority-survives-with-visible-dissent,
+      and a real non-surviving open question, all in one tree. Honest seam: this is the folding algorithm
+      only; it does not call out to live models, and faking multi-model diversity would break this body's own
+      never-fabricate discipline — wiring fkwu's native HTTP floor to real distinct providers, and four-way
+      re-proof, are separate, real, pending work. See `receipts/2026-07-01-satsang-oracle.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
