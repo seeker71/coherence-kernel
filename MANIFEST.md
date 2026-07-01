@@ -550,6 +550,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech open ASR/TTS target model added.** `learn/speech-open-asr-tts-target-model.fk` makes the goal
       executable (`32767`): native open ASR and Sema TTS should reach or beat the local oracle. Current native
       authority remains below target, but the route is enabled and no longer zeroed out.
+- [x] **Sema voice authority floor added.** `learn/sema-voice-authority-floor.fk` prevents the Sema voice lane
+      from collapsing to a `0/0` reading (`32767`): live authority remains local-oracle `0/1`, native `0/1`,
+      WER `100`, but the scoped TCAV training row contributes oracle `1/1` and native `1/1`, giving a combined
+      nonzero training floor of `1/2` and `1/2` while keeping global live authority held.
 - [x] **Seven live Metal pair anchors stand — `7/7`, `full-metal-native` for the closed-prompt carrier.**
       The Form-owned macOS carrier runs `en<->de`, `en<->es`, `en<->id`, `en<->fr`, `en<->it`, `en<->zh`, and `en<->ar` on live Apple
       Metal (one `presence/macos-*-speech-roundtrip-variant.fk` per pair; carrier verdict `511` each).
