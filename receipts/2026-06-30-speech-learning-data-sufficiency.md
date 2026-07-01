@@ -8,8 +8,8 @@ enough data for real model training.
 Current data:
 
 ```text
-live wav rows: 191
-observed wav bytes: 6806882
+live wav rows: 211
+observed wav bytes: 7152402
 live locales: 6
 held-out repeat rows: 7
 cross-phrase held-out rows: 6
@@ -30,13 +30,13 @@ cross-voice held-out rows: 300
 Scale gap:
 
 ```text
-wav deficit: 11809
-wav floor coverage: 159 basis points
+wav deficit: 11789
+wav floor coverage: 175 basis points
 held-out deficit: 1193
 cross-phrase deficit: 994
 cross-voice deficit: 294
 promotion: false
-meaning: larger instrumentation corpus, still not model learning
+meaning: repaired instrumentation corpus, still not model learning
 ```
 
 Witness:
@@ -56,4 +56,4 @@ Meaning: the band passes by proving the current corpus is under the floor and
 the training status is `tiny-corpus-not-data-sufficient-training`. At 159 basis
 points of the wav floor, this is too small to train a real native speech model.
 The next movement is consentful corpus/audio expansion toward the 12000-row
-floor and cross-voice diversity, not treating 191 wavs as training sufficiency.
+floor and cross-voice diversity, not treating 211 wavs as training sufficiency.
