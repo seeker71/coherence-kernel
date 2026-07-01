@@ -350,14 +350,18 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       (`32767`): the live Sema voice backlog remains local-oracle `0/1`, native `0/1`, WER `100`, while the scoped
       `tcav-warm-mid-cadence-v1-window` candidate passes the local oracle `1/1`, native scoped trial `1/1`, WER `0`,
       and cuts the challenger for that trial window without claiming global live Sema voice authority.
+- [x] **Sema voice trial window 0002 added.** `learn/sema-voice-trial-window-0002.fk` extends the scoped TCAV
+      voice learner with `Truth alone triumphs.` (`32767`): cumulative scoped Sema voice evidence is now
+      local-oracle `2/2`, native `2/2`, WER `0`, with F0 `165`, warmth `82`, cadence `64`, breath `18`, while
+      global live Sema voice authority remains oracle-held at native `0/1`.
 - [x] **Speech current status ledger added.** `learn/speech-current-status-ledger.fk` composes the metrics report,
       backlog, scheduler, open-ASR trial, and Sema voice trial into one executable status row (`32767`): global live
-      authority remains oracle-held (`4/5` oracle, `0/5` native), scoped trial windows are native (`7/7` oracle and
-      `7/7` native), native neural weights now report `20`, native Sema voice organs remain `6`, and C seed growth
+      authority remains oracle-held (`4/5` oracle, `0/5` native), scoped trial windows are native (`8/8` oracle and
+      `8/8` native), native neural weights now report `20`, native Sema voice organs remain `6`, and C seed growth
       remains `0`.
 - [x] **Speech global promotion readiness added.** `learn/speech-global-promotion-readiness.fk` turns scoped trial
       wins into an executable global-authority gate (`32767`): open dictation has scoped native `6/6` and Sema live
-      voice has scoped native `1/1`, but both still need `3` real live native receipts with WER `<=25` and clean
+      voice has scoped native `2/2`, but both still need `3` real live native receipts with WER `<=25` and clean
       controls before global authority can move. Today `0` lanes are global-native-ready, `2` remain oracle-guided,
       and `6` real live receipts are missing.
 - [x] **Speech live receipt intake added.** `learn/speech-live-receipt-intake.fk` defines the real-live receipt row
@@ -587,8 +591,8 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       authority remains below target, but the route is enabled and no longer zeroed out.
 - [x] **Sema voice authority floor added.** `learn/sema-voice-authority-floor.fk` prevents the Sema voice lane
       from collapsing to a `0/0` reading (`32767`): live authority remains local-oracle `0/1`, native `0/1`,
-      WER `100`, but the scoped TCAV training row contributes oracle `1/1` and native `1/1`, giving a combined
-      nonzero training floor of `1/2` and `1/2` while keeping global live authority held.
+      WER `100`, but the scoped TCAV training rows contribute oracle `2/2` and native `2/2`, giving a combined
+      nonzero training floor of `2/3` and `2/3` while keeping global live authority held.
 - [x] **Seven live Metal pair anchors stand — `7/7`, `full-metal-native` for the closed-prompt carrier.**
       The Form-owned macOS carrier runs `en<->de`, `en<->es`, `en<->id`, `en<->fr`, `en<->it`, `en<->zh`, and `en<->ar` on live Apple
       Metal (one `presence/macos-*-speech-roundtrip-variant.fk` per pair; carrier verdict `511` each).
