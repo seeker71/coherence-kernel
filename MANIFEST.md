@@ -220,6 +220,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `6/6`, train/eval hashes differ, observed wav bytes `302968`, neural parameters `0`. Aggregate speech rows
       are now `47` wavs and `1368250` observed bytes; held-out repeat rows rise to `7`, while cross-phrase and
       cross-voice remain `0`.
+- [x] **Speech corpus cross-phrase learning added.** `learn/speech-corpus-crossphrase-learning.fk` moves beyond
+      held-out repeat with controlled same-locale different-phrase evaluation (`65535`): local oracle accepts `6/6`,
+      native Form distances pass `6/6` against explicit different-locale controls, and observed train/eval/control
+      wav bytes are `712626`. Aggregate speech rows are now `123` wavs and `3901796` observed bytes; cross-phrase
+      rows rise to `6`, still below the `1000` floor, with cross-voice still `0`.
 - [x] **Speech audio NL2NL bridge added.** `learn/speech-audio-nl2nl-bridge.fk` witnesses six reciprocal
       oracle-guided routes (`4095`): source audio -> local Whisper -> Form neutral key `common.no` -> target text
       -> target audio -> local Whisper. Source oracle, target oracle, and native neutral routing all pass `6/6`;

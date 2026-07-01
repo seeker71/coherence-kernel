@@ -1,0 +1,241 @@
+; speech-corpus-crossphrase-learning.fk -- controlled cross-phrase transfer.
+;
+; This trains a same-locale prototype from one captured corpus phrase, evaluates
+; a different phrase from the same locale/voice, and compares that eval phrase
+; against an explicit different-locale control. Native Form passes only when the
+; eval phrase is closer to the same-locale prototype than to the control while
+; the local Whisper/Metal oracle accepts the transcript. This is cross-phrase
+; evidence, not open ASR, not cross-voice, not native TTS, and not global
+; authority.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/wav-sense.fk
+;   learn/macos-sema-teacher-acoustic-learning.fk
+;   learn/speech-model-metrics-report.fk
+;   learn/speech-learning-data-sufficiency.fk
+
+(do
+    (defn sccp-kind () "speech-corpus-crossphrase-learning")
+    (defn sccp-out-dir () (str_concat (temp_dir) "/speech-corpus-crossphrase-learning"))
+    (defn sccp-max-wer () 25)
+
+    (defn sccp-row (locale key text voice lang)
+        (list "speech-corpus-crossphrase-row" locale key text voice lang))
+    (defn sccp-row-locale (r) (nth r 1))
+    (defn sccp-row-key    (r) (nth r 2))
+    (defn sccp-row-text   (r) (nth r 3))
+    (defn sccp-row-voice  (r) (nth r 4))
+    (defn sccp-row-lang   (r) (nth r 5))
+
+    (defn sccp-pair (id eval train control)
+        (list "speech-corpus-crossphrase-pair" id eval train control))
+    (defn sccp-pair-id      (p) (nth p 1))
+    (defn sccp-pair-eval    (p) (nth p 2))
+    (defn sccp-pair-train   (p) (nth p 3))
+    (defn sccp-pair-control (p) (nth p 4))
+
+    (defn sccp-pairs ()
+        (list
+            (sccp-pair 1
+                (sccp-row "de" "hatiSuci.add.detailPlaceholder" "Was brauchst du?" "Flo (German (Germany))" "de")
+                (sccp-row "de" "hatiSuci.board.heading" "Die Tafel" "Flo (German (Germany))" "de")
+                (sccp-row "en" "hatiSuci.reg.enter" "Enter the house" "Flo (English (US))" "en"))
+            (sccp-pair 2
+                (sccp-row "de" "hatiSuci.add.button" "An die Tafel senden" "Flo (German (Germany))" "de")
+                (sccp-row "de" "hatiSuci.add.detailPlaceholder" "Was brauchst du?" "Flo (German (Germany))" "de")
+                (sccp-row "fr" "hatiSuci.reg.enter" "Entrer dans la maison" "Amélie" "fr"))
+            (sccp-pair 3
+                (sccp-row "fr" "hatiSuci.reg.enter" "Entrer dans la maison" "Amélie" "fr")
+                (sccp-row "fr" "hatiSuci.add.detailPlaceholder" "De quoi avez-vous besoin ?" "Amélie" "fr")
+                (sccp-row "de" "hatiSuci.board.heading" "Die Tafel" "Flo (German (Germany))" "de"))
+            (sccp-pair 4
+                (sccp-row "fr" "hatiSuci.add.detailPlaceholder" "De quoi avez-vous besoin ?" "Amélie" "fr")
+                (sccp-row "fr" "hatiSuci.reg.enter" "Entrer dans la maison" "Amélie" "fr")
+                (sccp-row "pt-br" "hatiSuci.reg.enter" "Entrar na casa" "Flo (Portuguese (Brazil))" "pt"))
+            (sccp-pair 5
+                (sccp-row "id" "hatiSuci.join.watch" "Lihat papan" "Damayanti" "id")
+                (sccp-row "id" "hatiSuci.invite.heading" "Undang seseorang" "Damayanti" "id")
+                (sccp-row "fr" "hatiSuci.add.heading" "Demandez au champ" "Amélie" "fr"))
+            (sccp-pair 6
+                (sccp-row "pt-br" "hatiSuci.add.detailPlaceholder" "O que você precisa?" "Flo (Portuguese (Brazil))" "pt")
+                (sccp-row "pt-br" "hatiSuci.reg.enter" "Entrar na casa" "Flo (Portuguese (Brazil))" "pt")
+                (sccp-row "id" "hatiSuci.reg.enter" "Masuk ke rumah" "Damayanti" "id"))))
+
+    (defn sccp-path-stem (pair side)
+        (mstal-cat4 (sccp-out-dir) "/row-" (mstal-int-str (sccp-pair-id pair)) side))
+    (defn sccp-aiff-path (pair side) (str_concat (sccp-path-stem pair side) ".aiff"))
+    (defn sccp-wav-path (pair side) (str_concat (sccp-path-stem pair side) ".wav"))
+
+    (defn sccp-say-command (pair side row)
+        (str_concat
+            (str_concat "say -v " (mstal-q (sccp-row-voice row)))
+            (str_concat
+                (str_concat " -o " (mstal-q (sccp-aiff-path pair side)))
+                (str_concat " " (mstal-q (sccp-row-text row))))))
+
+    (defn sccp-ffmpeg-command (pair side)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (mstal-q (sccp-aiff-path pair side)))
+            (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le " (mstal-q (sccp-wav-path pair side)))))
+
+    (defn sccp-whisper-command (row wav)
+        (str_concat
+            (str_concat "whisper-cli -m " (mstal-q (mstal-model)))
+            (str_concat
+                (str_concat " -f " (mstal-q wav))
+                (str_concat " -l " (str_concat (sccp-row-lang row) " -nt -np")))))
+
+    (defn sccp-render (pair side row)
+        (do
+            (let _mk (fs_mkdir (sccp-out-dir)))
+            (let _say (host-exec (sccp-say-command pair side row) ""))
+            (let _ff (host-exec (sccp-ffmpeg-command pair side) ""))
+            (sccp-wav-path pair side)))
+
+    (defn sccp-l1 (a b)
+        (if (eq (len a) 0) 0
+            (add (abs (sub (head a) (head b)))
+                 (sccp-l1 (tail a) (tail b)))))
+
+    (defn sccp-eval-pair (pair)
+        (do
+            (let eval-row (sccp-pair-eval pair))
+            (let train-row (sccp-pair-train pair))
+            (let control-row (sccp-pair-control pair))
+            (let train-wav (sccp-render pair "-train" train-row))
+            (let eval-wav (sccp-render pair "-eval" eval-row))
+            (let control-wav (sccp-render pair "-control" control-row))
+            (let transcript (host-exec (sccp-whisper-command eval-row eval-wav) ""))
+            (let oracle-wer (sw-wer (sw-tokens transcript) (sw-tokens (sccp-row-text eval-row))))
+            (let same-distance (sccp-l1 (mstal-env eval-wav) (mstal-env train-wav)))
+            (let control-distance (sccp-l1 (mstal-env eval-wav) (mstal-env control-wav)))
+            (let native-ok (if (lt same-distance control-distance) 1 0))
+            (list "speech-corpus-crossphrase-eval-row"
+                  (sccp-pair-id pair)
+                  (sccp-row-locale eval-row)
+                  (sccp-row-key train-row)
+                  (sccp-row-key eval-row)
+                  (sccp-row-key control-row)
+                  (sccp-row-text eval-row)
+                  transcript
+                  oracle-wer
+                  (if (le oracle-wer (sccp-max-wer)) 1 0)
+                  same-distance
+                  control-distance
+                  native-ok
+                  (mstal-audio-hash train-wav)
+                  (mstal-audio-hash eval-wav)
+                  (if (eq (mstal-audio-hash train-wav) (mstal-audio-hash eval-wav)) 0 1)
+                  (add (add (file_size train-wav) (file_size eval-wav)) (file_size control-wav)))))
+
+    (defn sccp-eval-loop (pairs)
+        (if (eq (len pairs) 0) (empty)
+            (cons (sccp-eval-pair (head pairs))
+                  (sccp-eval-loop (tail pairs)))))
+
+    (defn sccp-er-oracle-w (r) (nth r 8))
+    (defn sccp-er-oracle   (r) (nth r 9))
+    (defn sccp-er-same-d   (r) (nth r 10))
+    (defn sccp-er-ctrl-d   (r) (nth r 11))
+    (defn sccp-er-native   (r) (nth r 12))
+    (defn sccp-er-diff     (r) (nth r 15))
+    (defn sccp-er-bytes    (r) (nth r 16))
+
+    (defn sccp-count-oracle (rows)
+        (if (eq (len rows) 0) 0
+            (add (sccp-er-oracle (head rows)) (sccp-count-oracle (tail rows)))))
+    (defn sccp-count-native (rows)
+        (if (eq (len rows) 0) 0
+            (add (sccp-er-native (head rows)) (sccp-count-native (tail rows)))))
+    (defn sccp-count-diff (rows)
+        (if (eq (len rows) 0) 0
+            (add (sccp-er-diff (head rows)) (sccp-count-diff (tail rows)))))
+    (defn sccp-min-margin (rows)
+        (if (eq (len rows) 0) 0
+            (do
+                (let margin (sub (sccp-er-ctrl-d (head rows)) (sccp-er-same-d (head rows))))
+                (if (eq (len (tail rows)) 0) margin
+                    (do
+                        (let rest (sccp-min-margin (tail rows)))
+                        (if (lt margin rest) margin rest))))))
+    (defn sccp-max-wer-loop (rows)
+        (if (eq (len rows) 0) 0
+            (do
+                (let rest (sccp-max-wer-loop (tail rows)))
+                (if (gt (sccp-er-oracle-w (head rows)) rest)
+                    (sccp-er-oracle-w (head rows))
+                    rest))))
+    (defn sccp-total-bytes (rows)
+        (if (eq (len rows) 0) 0
+            (add (sccp-er-bytes (head rows)) (sccp-total-bytes (tail rows)))))
+
+    (defn sccp-receipt-from (evals)
+        (list (sccp-kind)
+              evals
+              6
+              (len evals)
+              (sccp-count-oracle evals)
+              (sccp-count-native evals)
+              (sccp-count-diff evals)
+              (sccp-max-wer-loop evals)
+              (sccp-min-margin evals)
+              (sccp-total-bytes evals)
+              "controlled-crossphrase-ab-not-global-authority"
+              1
+              1
+              1
+              0
+              0))
+
+    (defn sccp-run-receipt ()
+        (if (eq (mstal-ready?) 1)
+            (sccp-receipt-from (sccp-eval-loop (sccp-pairs)))
+            (list (sccp-kind) (empty) 6 0 0 0 0 100 0 0
+                  "missing-host-tools" 1 1 1 0 0)))
+
+    (defn sccp-rec-kind       (r) (nth r 0))
+    (defn sccp-rec-candidates (r) (nth r 2))
+    (defn sccp-rec-evals      (r) (nth r 3))
+    (defn sccp-rec-oracle-ok  (r) (nth r 4))
+    (defn sccp-rec-native-ok  (r) (nth r 5))
+    (defn sccp-rec-diff       (r) (nth r 6))
+    (defn sccp-rec-max-wer    (r) (nth r 7))
+    (defn sccp-rec-margin     (r) (nth r 8))
+    (defn sccp-rec-bytes      (r) (nth r 9))
+    (defn sccp-rec-status     (r) (nth r 10))
+    (defn sccp-rec-native     (r) (nth r 11))
+    (defn sccp-rec-heldout    (r) (nth r 12))
+    (defn sccp-rec-cross      (r) (nth r 13))
+    (defn sccp-rec-global     (r) (nth r 14))
+    (defn sccp-rec-neural     (r) (nth r 15))
+
+    (defn sccp-run-verdict ()
+        (do
+            (let r (sccp-run-receipt))
+            (add
+                (add
+                    (add (if (str_eq (sccp-rec-kind r) (sccp-kind)) 1 0)
+                         (if (eq (sccp-rec-candidates r) 6) 2 0))
+                    (add (if (eq (sccp-rec-evals r) 6) 4 0)
+                         (if (eq (sccp-rec-oracle-ok r) 6) 8 0)))
+                (add
+                    (add (if (eq (sccp-rec-native-ok r) 6) 16 0)
+                         (if (eq (sccp-rec-diff r) 6) 32 0))
+                    (add
+                        (add (if (le (sccp-rec-max-wer r) (sccp-max-wer)) 64 0)
+                             (if (gt (sccp-rec-margin r) 0) 128 0))
+                        (add
+                            (add (if (gt (sccp-rec-bytes r) 200000) 256 0)
+                                 (if (str_eq (sccp-rec-status r)
+                                             "controlled-crossphrase-ab-not-global-authority") 512 0))
+                            (add
+                                (add (if (eq (sccp-rec-native r) 1) 1024 0)
+                                     (if (eq (sccp-rec-heldout r) 1) 2048 0))
+                                (add
+                                    (add (if (eq (sccp-rec-cross r) 1) 4096 0)
+                                         (if (eq (sccp-rec-global r) 0) 8192 0))
+                                    (add (if (eq (sccp-rec-neural r) 0) 16384 0)
+                                         (if (eq (slds-sufficient (slds-current)) 0) 32768 0))))))))))
+
+    0)
