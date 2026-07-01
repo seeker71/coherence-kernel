@@ -459,6 +459,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `train-native-neural-pair-window`, keep Form-native pair windows `8 -> 8`, move neural pair windows `17 -> 18`,
       and carry the corpus floor gap `211/12000`. The point is to keep training toward full open ASR/TTS, not stop
       at the first micro-pair.
+- [x] **Speech authority learning priority added.** `learn/speech-authority-learning-priority.fk` makes the
+      authority gap executable (`32767`): trained pair coverage remains `17/55`, and `next-native-neural-pair-window-0018`
+      over `de<->id` stays available as the background coverage lane, but the measured open ASR gap `100` and
+      Sema voice gap `100` force the selected learning action back to `train-live-segmented-open-asr-source`
+      with `choice/cut/fail/undo/timeout` controls. This prevents pair-window growth from being mistaken for
+      open ASR/TTS authority.
 - [x] **Speech Form pair window 0006 added.** `learn/speech-form-pair-window-0006.fk` executes the selected
       `en<->de` reciprocal Form-native window (`32767`): NL moves `0 -> 100`, audio moves `0 -> 100`, route shifts
       `oracle-guide -> native`, and neural/diffusion/trained-neural remain `0`. Form pair coverage is now `6`
