@@ -211,7 +211,8 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       more consentful Coherence Network corpus rows, four per ready locale, and checks them with whisper.cpp/Metal
       (`8191`): `24/24` rows pass the local-oracle WER floor, max WER `0`, observed batch wav bytes `580710`.
       Aggregate speech rows are now `35` wavs and `1065282` observed bytes; status remains
-      `captured-corpus-audio-not-training-sufficient` until the later training-intake floor admits batch `0001`.
+      `captured-corpus-audio-not-training-sufficient` until the later training-intake floor admits batches `0001`
+      and `0002`.
 - [x] **Speech corpus capture batch 0003 added.** `learn/speech-corpus-capture-batch-0003.fk` screens sixty
       translated self-corpus phrase rows and admits only the local-oracle-clean rows (`8191`): `34/34` admitted
       rows pass, max admitted WER `25`, observed admitted wav bytes `1272388`, while `26` unstable candidate rows
@@ -238,7 +239,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech corpus training intake 0001 added.** `learn/speech-corpus-training-intake-0001.fk` admits the
       six clean batch-`0001` capture rows into the native prototype-training floor (`32767`): local-oracle
       accepted `6/6`, training-admitted `6/6`, max WER `0`, six locales, observed source wav bytes `212524`.
-      Aggregate captured corpus rows used for training are now `6`, while data sufficiency remains false against
+      Aggregate captured corpus rows used for training become `6`, while data sufficiency remains false against
+      the `12000` wav-row floor and global ASR/TTS authority remains false.
+- [x] **Speech corpus training intake 0002 added.** `learn/speech-corpus-training-intake-0002.fk` admits the
+      twenty-four clean batch-`0002` capture rows into the native prototype-training floor (`32767`): local-oracle
+      accepted `24/24`, training-admitted `24/24`, max WER `0`, six locales, observed source wav bytes `580710`.
+      Aggregate captured corpus rows used for training are now `30`, while data sufficiency remains false against
       the `12000` wav-row floor and global ASR/TTS authority remains false.
 - [x] **Speech corpus held-out repeat learning added.** `learn/speech-corpus-heldout-repeat-learning.fk` trains six
       Form-native full-envelope prototypes from consentful corpus phrases and evaluates six separately rendered,
