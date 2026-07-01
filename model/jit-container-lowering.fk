@@ -1,0 +1,109 @@
+; jit-container-lowering.fk - compact Form JIT lowering for dict/hash/tree access.
+;
+; This cell keeps container lookup specialization in the Form compiler layer
+; without touching C/Rust or the larger x64 byte prelude. It emits stable native
+; operation streams for the later backend byte lanes: dict lookup, hashmap
+; bucket lookup, and red-black-tree path lookup. The same compiler function is
+; used for user plans and compiler-subject plans.
+
+(do
+    ; plan = ("jc" owner subject op source maps generation)
+    ; owner: 1 form-backend, other values reject.
+    ; subject: 1 user code, 2 compiler code.
+    ; op: 6 dict, 7 hashmap, 8 red-black tree.
+    (defn jcl-plan (owner subject op source maps generation)
+        (list "jc" owner subject op source maps generation))
+    (defn jcl-plan? (p) (if (eq (len p) 7) (str_eq (nth p 0) "jc") 0))
+    (defn jcl-owner (p) (nth p 1))
+    (defn jcl-op (p) (nth p 3))
+    (defn jcl-source (p) (nth p 4))
+    (defn jcl-maps (p) (nth p 5))
+    (defn jcl-generation (p) (nth p 6))
+
+    (defn jcl-op-ok? (op)
+        (if (eq op 6) 1 (if (eq op 7) 1 (if (eq op 8) 1 0))))
+
+    (defn jcl-safe? (p)
+        (if (eq (jcl-plan? p) 1)
+            (if (eq (jcl-owner p) 1)
+                (if (eq (jcl-op-ok? (jcl-op p)) 1)
+                    (if (eq (jcl-source p) 1)
+                        (if (eq (jcl-maps p) 1)
+                            (if (gt (jcl-generation p) 0) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jcl-hot? (heat pure) (if (gt heat 4) (if (eq pure 1) 1 0) 0))
+
+    (defn jcl-emit (op)
+        (if (eq op 6)
+            (list 601 610 611 612 690)
+            (if (eq op 7)
+                (list 701 710 711 712 713 790)
+                (if (eq op 8) (list 801 810 811 812 813 814 890) (empty)))))
+
+    (defn jcl-compile (p heat pure)
+        (if (eq (jcl-safe? p) 1)
+            (if (eq (jcl-hot? heat pure) 1) (jcl-emit (jcl-op p)) (empty))
+            (empty)))
+
+    (defn jcl-self-plan (p)
+        (jcl-plan 1 2 (jcl-op p) (jcl-source p) (jcl-maps p) (jcl-generation p)))
+    (defn jcl-compile-self (p heat pure)
+        (jcl-compile (jcl-self-plan p) heat pure))
+
+    (defn jcl-probe? (xs l first last)
+        (if (eq (len xs) l)
+            (if (eq (nth xs 0) first)
+                (if (eq (nth xs (sub l 1)) last) 1 0)
+                0)
+            0))
+    (defn jcl-same-probe? (a b l)
+        (if (eq (len a) l)
+            (if (eq (len b) l)
+                (if (eq (nth a 0) (nth b 0))
+                    (if (eq (nth a (sub l 1)) (nth b (sub l 1))) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jcl-dict () (jcl-plan 1 1 6 1 1 1))
+    (defn jcl-hash () (jcl-plan 1 1 7 1 1 1))
+    (defn jcl-tree () (jcl-plan 1 1 8 1 1 1))
+    (defn jcl-foreign () (jcl-plan 0 1 7 1 1 1))
+    (defn jcl-no-source () (jcl-plan 1 1 7 0 1 1))
+    (defn jcl-zero-generation () (jcl-plan 1 1 7 1 1 0))
+
+    (defn jit-container-lowering-check ()
+        (do
+            (let d (jcl-compile (jcl-dict) 6 1))
+            (let h (jcl-compile (jcl-hash) 6 1))
+            (let t (jcl-compile (jcl-tree) 6 1))
+            (let sh (jcl-compile-self (jcl-hash) 6 1))
+            (let st (jcl-compile-self (jcl-tree) 6 1))
+            (add
+                (if (eq (jcl-safe? (jcl-hash)) 1) 1 0)
+                (add
+                    (if (eq (jcl-probe? d 5 601 690) 1) 2 0)
+                    (add
+                        (if (eq (jcl-probe? h 6 701 790) 1) 4 0)
+                        (add
+                            (if (eq (jcl-probe? t 7 801 890) 1) 8 0)
+                            (add
+                                (if (eq (len (jcl-compile (jcl-dict) 4 1)) 0) 16 0)
+                                (add
+                                    (if (eq (len (jcl-compile (jcl-dict) 6 0)) 0) 32 0)
+                                    (add
+                                        (if (eq (len (jcl-compile (jcl-foreign) 6 1)) 0) 64 0)
+                                        (add
+                                            (if (eq (len (jcl-compile (jcl-no-source) 6 1)) 0) 128 0)
+                                            (add
+                                                (if (eq (len (jcl-compile (jcl-zero-generation) 6 1)) 0) 256 0)
+                                                (add
+                                                    (if (eq (jcl-same-probe? h sh 6) 1) 512 0)
+                                                    (if (eq (jcl-same-probe? t st 7) 1) 1024 0)))))))))))))
+
+    0)
