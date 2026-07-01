@@ -1,0 +1,77 @@
+; control-invite-grammar.fk — the native LLM token invites, as a BMF grammar.
+;
+; observe/speech-token-stream.fk names the eight control tokens a reasoning
+; or speech stream can carry: <CHOICE> <CUT> <FAIL> <STOP> <UNDO> <STORE>
+; <RESTORE> <TIMEOUT>. Naming them as string tags is not yet a grammar — a
+; grammar is what RECOGNIZES them inside free text and TRANSMUTES the match
+; into a node the rest of the kernel can read (bmf-core.fk's own arc:
+; surface -> cursor -> match(pattern) -> build(template) -> NodeID). This
+; file is that grammar: eight RULES (one literal alternative per invite),
+; one TEMPLATE (emit a CONTROL-INVITE node carrying the matched tag), and a
+; scan loop that walks a whole stream collecting every invite it finds —
+; the free text around them is not parsed, only skipped, exactly like a
+; tokenizer picking known tokens out of a longer utterance.
+;
+; This grammar is built on bmf-core.fk's cursor + single-rule matcher
+; (match-pat: lit/cls/run/seq/alt/opt/cap; build-tpl: emit/splice/const),
+; not the fuller multi-rule bmf-grammar.fk engine — no recursion is needed
+; to recognize eight flat literal tokens, and bmf-core's small, direct
+; engine is the one this file could witness live end-to-end (see the band's
+; header for what that live run needs and what it does not).
+;
+; preludes: form/form-stdlib/core.fk grammars/line-grammar.fk grammars/bmf-core.fk
+;
+; Proof: grammars/tests/control-invite-grammar-band.fk.
+
+(do
+    ;; the CONTROL-INVITE node's op name — the ONE blueprint this grammar
+    ;; mints; every invite shares it, the matched tag text is the child
+    ;; (universal-vocabulary discipline: new meaning is a node's DATA, not
+    ;; a new blueprint per token).
+    (defn cig-op () "CONTROL-INVITE")
+
+    ;; the eight tags, in the SAME order observe/speech-token-stream.fk's
+    ;; sts-*-tag functions name them -- this list is the single place the
+    ;; grammar's vocabulary is spelled, so growing it never touches the
+    ;; matcher or the scan loop below.
+    (defn cig-tags ()
+        (list "<CHOICE>" "<CUT>" "<FAIL>" "<STOP>" "<UNDO>" "<STORE>" "<RESTORE>" "<TIMEOUT>"))
+
+    ;; tags -> the alt pattern trying each literal in order (a rule's
+    ;; pattern-side is DATA; growing the vocabulary is adding a string).
+    (defn cig-alt-of (tags)
+        (if (nil? tags) (empty)
+            (cons (list "lit" (head tags)) (cig-alt-of (tail tags)))))
+
+    ;; the ONE rule: capture whichever tag matched, emit it as the sole
+    ;; child of a CONTROL-INVITE node (transmutation: matched text -> node).
+    (defn cig-invite-rule ()
+        (rule-of
+            (list "cap" "tag" (cons "alt" (cig-alt-of (cig-tags))))
+            (list "emit" (cig-op) (list (list "splice" "tag")))))
+
+    ;; a CONTROL-INVITE node's carried tag (the matched literal string).
+    (defn cig-invite-tag (node) (node_value (head (node_children node))))
+
+    ;; ── the scan: walk a whole stream, collecting every invite found ─────
+    ;; Free text between invites is not parsed, only skipped one codepoint
+    ;; at a time -- the same shape a BPE/keyword scanner uses over the one
+    ;; cursor (grammars/tokenize-grammar.fk). Order is preserved.
+    (defn cig-scan (c acc)
+        (if (cur-eof? c) (reverse-acc acc)
+            (do (let res (run-rule (cig-invite-rule) c))
+                (if (run-ok? res)
+                    (cig-scan (run-cur res) (cons (cig-invite-tag (run-node res)) acc))
+                    (cig-scan (cur-advance c 1) acc)))))
+
+    ;; the public entry: a source string -> the ordered list of invite tags
+    ;; it carries (e.g. "explore <CHOICE> a lane" -> ("<CHOICE>")).
+    (defn cig-invites (src) (cig-scan (cursor-str src) (empty)))
+
+    (defn cig-count (src tag) (cig-count-loop (cig-invites src) tag))
+    (defn cig-count-loop (tags tag)
+        (if (nil? tags) 0
+            (add (if (str_eq (head tags) tag) 1 0) (cig-count-loop (tail tags) tag))))
+
+    0
+)

@@ -491,6 +491,29 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       nothing (axiom-1). Clauses are DATA (the holographic discipline, no hardcoded branches). Band verdict
       **511 FOUR-WAY** (Go/Rust/TS/fkwu `--src`) over the pure-list cell surface; the canonical-nothing arm is
       fkwu-native (the walkers carry the cell surface, not the nothing op). See `receipts/2026-06-29-stone-10-pattern-match.md`.
+- [x] **The eight native control-invite primitives + their BMF grammar added.** `control/choice-lane-core.fk`
+      completes the family `control/offer-ack-core.fk` started (choice, fail, stop) with the remaining five as
+      thin expressions over the SAME `oac-kind`/`oac-offer` core: cut (commit to the first ack of ANY kind,
+      pruning every alternative after it — the classic Prolog cut), lanes (walk every alternative and COLLECT
+      each one's ack — the different query lanes a choice invites reasoning to walk, and the nodes/memory it
+      gathers along the way, before any picking happens), store/restore (a checkpoint is the memory value
+      itself — axiom-3, nothing mutated), undo (fall back to the last checkpoint automatically when the current
+      ack failed), and timeout (bound a lane walk by a step budget, distinguishing a real timeout — alternatives
+      left untried — from honest all-round decline). `observe/speech-token-stream.fk` now carries the matching
+      `<STOP>`, `<STORE>`, `<RESTORE>` tokens alongside the existing `<CHOICE>`, `<CUT>`, `<FAIL>`, `<UNDO>`,
+      `<TIMEOUT>` — the same eight verbs as native LLM/speech-stream token invites. Band `65535`
+      (`observe/tests/speech-token-stream-band.fk`), live on `fkwu --src`. `grammars/control-invite-grammar.fk`
+      is the BMF grammar that recognizes these eight tokens inside free text and TRANSMUTES each match into a
+      `CONTROL-INVITE` node — `bmf-core.fk`'s own cursor → match(pattern) → build(template) arc, deliberately
+      the smaller single-rule engine rather than the larger multi-rule `bmf-grammar.fk`. Band `1023`, live on
+      `fkwu --src` (`grammars/tests/control-invite-grammar-band.fk`). Honest floor, precisely named: this pass
+      also found that the C-bootstrap `fkwu`'s indirect call (named as a gap in the 2026-06-29 offer-ack-core
+      receipt) now works, but `oac-kind`'s blueprint discrimination does not reproduce reliably once enough
+      interning accumulates in one run — traced live to `bp` misreading a fresh `OAC-ONE` ack as `OAC-ZERO` —
+      so `control/tests/choice-lane-core-band.fk` and the pre-existing, unmodified
+      `control/tests/offer-ack-core-band.fk` both currently miss their intended verdict on this exact build; each
+      primitive was instead verified correct in small live isolation. See
+      `receipts/2026-07-01-choice-lane-control-invites.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
