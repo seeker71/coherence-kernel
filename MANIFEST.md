@@ -590,12 +590,20 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       itself, a real separate gap). `nmn-vec` reuses `re-split`/`re-inc`/`re-zeros` (all real) and reimplements
       only the hash step over `str_byte_at` (real) in place of `ord`. Trained on `learn/nl-meaning-corpus.fk`
       (204 hand-authored examples, ~50 per class across the 4 baseline meanings, honestly labeled as
-      hand-authored — `~/source/Coherence-Network` does not exist in this checkout, confirmed). The band
-      (`learn/tests/nl-meaning-net-band.fk`, verdict `47`) measures a real learning curve: held-out accuracy
-      26/50 at 20 training examples, 27/50 at 60, 29/50 at 100, 27/50 at the full 154 — chance is ~12.5/50.
-      Corpus loss drops from `1070.3` to `150.2` over 10 epochs. Reported as measured, including the honest
-      dip from the n=100 peak to the full-set result, not smoothed over. See
-      `receipts/2026-07-01-nl-meaning-net.md`.
+      hand-authored — `~/source/Coherence-Network` does not exist in this checkout, confirmed).
+      First measurement (10 epochs, raw word-count embeddings) was correctly called out as barely above
+      chance and flat: held-out accuracy 26→27→29→27 out of 50 across sizes 20/60/100/154. Two real causes
+      found and fixed: 10 epochs was not enough SGD to fit 154 examples onto 4 fixed targets (100 epochs alone
+      raised it to 32/50); raw word-count histograms scale with sentence length, not meaning ("i am" sums to
+      `2`, a 13-word paraphrase sums to `13`, measured directly), biasing distance-based classification before
+      it looks at word identity (L2-normalizing on top of the epoch fix raised it to 36/50). Corrected sweep,
+      each point run as its own process (the combined 4-point sweep in one process was OOM-killed — a real
+      finding, not hidden): held-out accuracy 34/50 (20 examples) → 26/50 (60, a real unresolved dip) → 32/50
+      (100) → 36/50 (full 154) — chance is ~12.5/50. Corpus loss on the full set: `180.3` before training,
+      `2.1` after. The endpoint claim now holds cleanly (72% at full vs 68% at n=20, both far above chance);
+      the mid-sweep dip is reported as a real, unresolved artifact, not smoothed over. See
+      `receipts/2026-07-01-nl-meaning-net.md` (original) and
+      `receipts/2026-07-01-nl-meaning-net-corrected.md` (the diagnosis and fix).
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 

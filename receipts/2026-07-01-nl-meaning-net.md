@@ -1,5 +1,10 @@
 # 2026-07-01 -- a real trained model, seen learning, on hundreds of pairs
 
+**SUPERSEDED IN PART**: the 10-epoch, raw-count-histogram numbers below were correctly called out (by the
+user) as barely above chance and not climbing with more data. Two real causes were found and fixed --
+see `receipts/2026-07-01-nl-meaning-net-corrected.md` for the diagnosis and the corrected sweep. This receipt
+is kept as the honest record of the first, weaker measurement, not rewritten to hide it.
+
 ## Ground
 
 ```sh
