@@ -240,10 +240,6 @@ pub enum JitOp {
         index_arg: usize,
         len_arg: usize,
     },
-    CheckedFieldLoad {
-        ptr_arg: usize,
-        slot: usize,
-    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -299,20 +295,6 @@ pub fn checked_array_get_hot_function() -> HotFunction {
     }
 }
 
-pub fn checked_field_load_hot_function(slot: usize) -> HotFunction {
-    HotFunction {
-        arity: 1,
-        source: SourceFrame {
-            file: "observe/jit-rust-carrier-checked-field.fk",
-            line: 1,
-            col: 1,
-            span: 19,
-            function: "form-checked-field-load",
-        },
-        ops: vec![JitOp::CheckedFieldLoad { ptr_arg: 0, slot }],
-    }
-}
-
 pub fn compile_hot_function(function: &HotFunction) -> Result<Payload, &'static str> {
     validate_hot_function(function)?;
     let bytes = compile_ops(&function.ops)?;
@@ -342,15 +324,6 @@ pub fn execute_checked_array_get(values: &[i64], index: i64) -> CarrierOutcome {
 pub fn execute_null_array_get(index: i64, len: i64) -> CarrierOutcome {
     let args = [0, index, len];
     execute_hot_function(&checked_array_get_hot_function(), &args)
-}
-
-pub fn execute_checked_field_load(fields: &[i64], slot: usize) -> CarrierOutcome {
-    let args = [fields.as_ptr() as isize as i64];
-    execute_hot_function(&checked_field_load_hot_function(slot), &args)
-}
-
-pub fn execute_null_field_load(slot: usize) -> CarrierOutcome {
-    execute_hot_function(&checked_field_load_hot_function(slot), &[0])
 }
 
 pub fn execute_payload(payload: &Payload, args: &[i64], route: RouteInputs) -> CarrierOutcome {
@@ -428,11 +401,6 @@ fn validate_hot_function(function: &HotFunction) -> Result<(), &'static str> {
                     return Err("arg-out-of-range");
                 }
             }
-            JitOp::CheckedFieldLoad { ptr_arg, slot: _ } => {
-                if *ptr_arg >= function.arity {
-                    return Err("arg-out-of-range");
-                }
-            }
             JitOp::AddImm(_) => {}
         }
     }
@@ -494,16 +462,6 @@ fn compile_ops(ops: &[JitOp]) -> Result<Vec<u8>, &'static str> {
                 });
                 push_u32_le(&mut out, a64_bcond(2, 0)?);
                 push_u32_le(&mut out, a64_ldr_indexed_x0_x11_x10());
-            }
-            JitOp::CheckedFieldLoad { ptr_arg, slot } => {
-                push_u32_le(&mut out, a64_ldr(11, 9, ptr_arg)?);
-                fault_patches.push(Patch {
-                    position: out.len(),
-                    code: 102,
-                    branch: Branch::Cbz(11),
-                });
-                push_u32_le(&mut out, a64_cbz(11, 0)?);
-                push_u32_le(&mut out, a64_ldr(0, 11, slot)?);
             }
         }
     }
@@ -652,16 +610,6 @@ fn compile_ops(ops: &[JitOp]) -> Result<Vec<u8>, &'static str> {
                 out.push(0);
                 out.extend_from_slice(&[73, 139, 4, 200]);
             }
-            JitOp::CheckedFieldLoad { ptr_arg, slot } => {
-                x64_load_arg_r8(&mut out, ptr_arg)?;
-                out.extend_from_slice(&[77, 133, 192, 116]);
-                fault_patches.push(Patch {
-                    position: out.len(),
-                    code: 102,
-                });
-                out.push(0);
-                x64_load_field_rax(&mut out, slot)?;
-            }
         }
     }
     out.push(195);
@@ -739,22 +687,6 @@ fn x64_load_arg_r8(out: &mut Vec<u8>, index: usize) -> Result<(), &'static str> 
     }
     let offset = checked_disp8(index)?;
     out.extend_from_slice(&[76, 139, 71, offset]);
-    Ok(())
-}
-
-#[cfg(target_arch = "x86_64")]
-fn x64_load_field_rax(out: &mut Vec<u8>, slot: usize) -> Result<(), &'static str> {
-    let offset = slot.checked_mul(8).ok_or("field-offset-too-large")?;
-    if offset == 0 {
-        out.extend_from_slice(&[73, 139, 0]);
-    } else if offset <= 127 {
-        out.extend_from_slice(&[73, 139, 64, offset as u8]);
-    } else if offset <= i32::MAX as usize {
-        out.extend_from_slice(&[73, 139, 128]);
-        out.extend_from_slice(&(offset as i32).to_le_bytes());
-    } else {
-        return Err("field-offset-too-large");
-    }
     Ok(())
 }
 
@@ -1059,34 +991,6 @@ mod tests {
             }
             other => panic!("expected null-ref exception, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn compiles_and_executes_checked_field_load() {
-        let fields = [101_i64, 202, 303];
-        assert_eq!(
-            execute_checked_field_load(&fields, 2),
-            CarrierOutcome::Native(303)
-        );
-    }
-
-    #[test]
-    fn compiled_field_load_maps_null_to_source_exception() {
-        match execute_null_field_load(1) {
-            CarrierOutcome::Exception(ex) => {
-                assert_eq!(ex.kind, "null-ref");
-                assert_eq!(ex.stack.len(), 1);
-                assert_eq!(ex.stack[0].function, "form-checked-field-load");
-            }
-            other => panic!("expected null-ref exception, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn compiler_rejects_impossible_field_offset() {
-        let err = compile_hot_function(&checked_field_load_hot_function(usize::MAX))
-            .expect_err("oversized field slot must reject");
-        assert!(err == "arg-offset-too-large" || err == "field-offset-too-large");
     }
 
     #[test]
