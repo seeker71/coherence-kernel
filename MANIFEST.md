@@ -190,15 +190,18 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       WER `0`, confidence `96`, live verdict `65535`, effective epochs `1`, native neural parameters `0`. This
       proves a scoped held-out repeat across distinct wav bytes, not cross-phrase or cross-voice authority.
 - [x] **Speech learning data sufficiency gate added.** `learn/speech-learning-data-sufficiency.fk` makes the tiny
-      data boundary executable (`32767`): current speech rows are `71` wavs, `6` live teacher locales, `7`
-      held-out repeat rows, `0` cross-phrase rows, and `0` cross-voice rows against a corpus-scale floor of
+      data boundary executable (`65535`): current speech rows are `141` wavs, `6` live teacher locales, `7`
+      held-out repeat rows, `6` cross-phrase rows, and `6` cross-voice rows against a corpus-scale floor of
       `12000` wavs, `6` locales, `1200` held-out rows, `1000` cross-phrase rows, and `300` cross-voice rows.
-      Status is explicitly `tiny-corpus-not-data-sufficient-training`.
+      Status is explicitly `tiny-corpus-not-data-sufficient-training`; 141 wavs are only 117 basis points of the
+      wav floor, so this is instrumentation smoke, not real model learning.
 - [x] **Speech corpus acquisition window added.** `learn/speech-corpus-acquisition-window.fk` uses the consentful
-      Coherence Network self-corpus to plan a corpus-scale audio acquisition window (`32767`): `2000` keypaths
+      Coherence Network self-corpus to plan a corpus-scale audio acquisition window (`65535`): `2000` keypaths
       across `6` ready locales with `1` voice each yields `12000` planned wav rows and `1200` planned held-out
-      rows. The status is now `corpus-scale-window-open-not-trained`; no training promotion occurs until enough
-      live rows are rendered and witnessed.
+      rows; the separate host-ready cross-voice lane is `5` locales with `2` voices each, yielding `20000`
+      planned cross-voice wav rows and `2000` held-out rows. The status is now
+      `corpus-scale-window-open-not-trained`; no training promotion occurs until enough live rows are rendered and
+      witnessed.
 - [x] **Speech corpus capture batch 0001 added.** `learn/speech-corpus-capture-batch-0001.fk` renders six
       consentful Coherence Network corpus rows on local macOS voices and checks them with whisper.cpp/Metal
       (`4095`): `6/6` rows pass the local-oracle WER floor, max WER `0`, observed batch wav bytes `212524`, across
@@ -225,6 +228,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       native Form distances pass `6/6` against explicit different-locale controls, and observed train/eval/control
       wav bytes are `712626`. Aggregate speech rows are now `123` wavs and `3901796` observed bytes; cross-phrase
       rows rise to `6`, still below the `1000` floor, with cross-voice still `0`.
+- [x] **Speech corpus cross-voice learning added.** `learn/speech-corpus-crossvoice-learning.fk` moves beyond
+      same-voice evidence with controlled same-text different-voice evaluation (`65535`): local oracle accepts `6/6`,
+      native Form distances pass `6/6` against explicit different-text controls in the eval voice, and observed
+      train/eval/control wav bytes are `755060`. Aggregate speech rows are now `141` wavs and `4656856` observed
+      bytes; cross-voice rows rise to `6`, still below the `300` floor.
 - [x] **Speech audio NL2NL bridge added.** `learn/speech-audio-nl2nl-bridge.fk` witnesses six reciprocal
       oracle-guided routes (`4095`): source audio -> local Whisper -> Form neutral key `common.no` -> target text
       -> target audio -> local Whisper. Source oracle, target oracle, and native neutral routing all pass `6/6`;
