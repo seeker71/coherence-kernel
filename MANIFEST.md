@@ -565,6 +565,41 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       nothing (axiom-1). Clauses are DATA (the holographic discipline, no hardcoded branches). Band verdict
       **511 FOUR-WAY** (Go/Rust/TS/fkwu `--src`) over the pure-list cell surface; the canonical-nothing arm is
       fkwu-native (the walkers carry the cell surface, not the nothing op). See `receipts/2026-06-29-stone-10-pattern-match.md`.
+- [x] **The eight native control-invite primitives + their BMF grammar added.** `control/choice-lane-core.fk`
+      completes the family `control/offer-ack-core.fk` started (choice, fail, stop) with the remaining five as
+      thin expressions over the SAME `oac-kind`/`oac-offer` core: cut (commit to the first ack of ANY kind,
+      pruning every alternative after it — the classic Prolog cut), lanes (walk every alternative and COLLECT
+      each one's ack — the different query lanes a choice invites reasoning to walk, and the nodes/memory it
+      gathers along the way, before any picking happens), store/restore (a checkpoint is the memory value
+      itself — axiom-3, nothing mutated), undo (fall back to the last checkpoint automatically when the current
+      ack failed), and timeout (bound a lane walk by a step budget, distinguishing a real timeout — alternatives
+      left untried — from honest all-round decline). `observe/speech-token-stream.fk` now carries the matching
+      `<STOP>`, `<STORE>`, `<RESTORE>` tokens alongside the existing `<CHOICE>`, `<CUT>`, `<FAIL>`, `<UNDO>`,
+      `<TIMEOUT>` — the same eight verbs as native LLM/speech-stream token invites. Band `65535`
+      (`observe/tests/speech-token-stream-band.fk`), live on `fkwu --src`. `grammars/control-invite-grammar.fk`
+      is the BMF grammar that recognizes these eight tokens inside free text and TRANSMUTES each match into a
+      `CONTROL-INVITE` node — `bmf-core.fk`'s own cursor → match(pattern) → build(template) arc, deliberately
+      the smaller single-rule engine rather than the larger multi-rule `bmf-grammar.fk`. Band `1023`, live on
+      `fkwu --src` (`grammars/tests/control-invite-grammar-band.fk`). Honest floor, precisely named and then
+      partly closed: this pass found that the C-bootstrap `fkwu`'s indirect call (named as a gap in the
+      2026-06-29 offer-ack-core receipt) now works, but `oac-kind`'s blueprint discrimination does not
+      reproduce reliably once more than one `let`-bound value is alive in a scope — traced live (gdb,
+      `FK_OBSERVE`, ruling the JIT in/out, and a hardware watchpoint on the actual storage cells) to a runtime
+      bug distinct from blueprint identity: a `let`'s storage slot is meant to be permanent for its scope, but
+      the evaluator's own local-reservation opcode treats the same storage as ephemeral scratch, so a later
+      computation can silently overwrite an earlier binding before its scope ends. `control/offer-ack-core.fk`
+      itself carried an instance of this — its own `OAC-ZERO`/`OAC-ONE`/`OAC-NODE` foundational tags were bare
+      top-level `let`s — **fixed** by naming each as a zero-argument function that calls `bp` fresh instead of
+      caching it. Combined with wrapping `control/tests/choice-lane-core-band.fk`'s body in one `defn`
+      (matching every other passing band), live result moved from garbage to the full **`1023`**. The fix is
+      Form-level only, no C-seed change. `control/invite-dispatch.fk` (new: closes the loop, walking a BMF-
+      recognized invite stream and driving the matching primitive, threading memory/checkpoints through) needs
+      a larger combined prelude to run at all, and the same defect class resurfaces there through a different
+      combination (adding `form/form-stdlib/core.fk` alone, 74 pure-`defn` functions, is enough) — a real,
+      verified fix to one instance, inside a defect class that is now well-characterized but not closed. See
+      `receipts/2026-07-01-node-children-last-writer-wins.md` for the trace and fix,
+      `receipts/2026-07-01-choice-lane-control-invites.md` for the primitives, and
+      `receipts/2026-07-01-invite-dispatch.md` for the dispatcher's honest current state.
 - [x] **Locale-neutral meaning locate added.** `learn/sanskrit-locale-baseline.fk` gains `slb-meaning-for-tokens`
       (locale-specific surface tokens -> the neutral meaning id they belong to — the reverse of `slb-tokens`,
       which every existing multilocale sample built FROM a meaning id but never walked back TO one) and
