@@ -11,10 +11,14 @@
 
 ## What changed
 
-`observe/jit-native-witness-sweep.fk` now requires the current
+`observe/jit-native-witness-sweep.fk` now requires the then-current
 `full-track-sweep = 67108863` receipt before the hot-recipe native witness can
 compose. It also rejects the stale pre-current-dylib `full-track-sweep = 524287`
 receipt, raising the native witness from `33554431` to `67108863`.
+
+Later source-to-dylib executor hardening raised the current full-track receipt
+again; the native witness now treats `67108863` as stale against
+`full-track-sweep = 134217727`.
 
 Direct native-witness consumers were regrounded to the stronger receipt:
 
