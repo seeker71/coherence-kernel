@@ -1,0 +1,275 @@
+; jit-source-dylib-runtime-executor.fk - source runtime through dylib dispatch.
+;
+; Prelude:
+;   model/form-asm-x64.fk
+;   model/jit-self-host-compiler.fk
+;
+; This cell is the Form-native bridge from hot source compiler output into the
+; dylib carrier lifecycle. It does not load or call host machine code; it proves
+; that source-selected Form-emitted bytes, profile dylib slots, dispatch, result,
+; and invoke/return receipts agree before a dylib runtime proof may count them.
+
+(do
+    (defn jsdre-native () 1)
+    (defn jsdre-deopt () 2)
+    (defn jsdre-exception () 3)
+    (defn jsdre-rewalk () 4)
+    (defn jsdre-melt () 5)
+    (defn jsdre-reject () 6)
+    (defn jsdre-pending () 7)
+
+    (defn jsdre-ok () 1)
+    (defn jsdre-unavailable () 2)
+    (defn jsdre-mismatch () 3)
+    (defn jsdre-fault () 4)
+    (defn jsdre-trap () 5)
+
+    (defn jsdre-array-kind () 1)
+    (defn jsdre-field-kind () 2)
+    (defn jsdre-div-kind () 3)
+
+    ; receipt = ("source-dylib-runtime-executor-receipt" name total expected source maps)
+    (defn jsdre-receipt (name total expected source maps)
+        (list "source-dylib-runtime-executor-receipt" name total expected source maps))
+    (defn jsdre-receipt? (r) (if (eq (len r) 6) (str_eq (nth r 0) "source-dylib-runtime-executor-receipt") 0))
+    (defn jsdre-total (r) (nth r 2))
+    (defn jsdre-expected (r) (nth r 3))
+    (defn jsdre-source (r) (nth r 4))
+    (defn jsdre-maps (r) (nth r 5))
+    (defn jsdre-receipt-ok? (r)
+        (if (eq (jsdre-receipt? r) 1)
+            (if (eq (jsdre-total r) (jsdre-expected r))
+                (if (eq (jsdre-source r) 1)
+                    (if (eq (jsdre-maps r) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jsdre-source-live () (jsdre-receipt "source-live-native-executor" 2097151 2097151 1 1))
+    (defn jsdre-profile-slot () (jsdre-receipt "profile-dylib-slot-runtime" 524287 524287 1 1))
+    (defn jsdre-install-call () (jsdre-receipt "install-call-attempt" 33554431 33554431 1 1))
+    (defn jsdre-form-carrier () (jsdre-receipt "form-emitted-carrier-probe" 1048575 1048575 1 1))
+    (defn jsdre-dispatch () (jsdre-receipt "dylib-call-dispatch-evidence" 134217727 134217727 1 1))
+    (defn jsdre-result () (jsdre-receipt "dylib-call-result-evidence" 134217727 134217727 1 1))
+    (defn jsdre-invoke-return () (jsdre-receipt "dylib-invoke-return-evidence" 268435455 268435455 1 1))
+    (defn jsdre-bad-source-live () (jsdre-receipt "source-live-native-executor" 2097150 2097151 1 1))
+
+    (defn jsdre-front-receipts-ok? ()
+        (if (eq (jsdre-receipt-ok? (jsdre-source-live)) 1)
+            (if (eq (jsdre-receipt-ok? (jsdre-profile-slot)) 1)
+                (if (eq (jsdre-receipt-ok? (jsdre-install-call)) 1)
+                    (if (eq (jsdre-receipt-ok? (jsdre-form-carrier)) 1) 1 0)
+                    0)
+                0)
+            0))
+    (defn jsdre-dylib-receipts-ok? ()
+        (if (eq (jsdre-receipt-ok? (jsdre-dispatch)) 1)
+            (if (eq (jsdre-receipt-ok? (jsdre-result)) 1)
+                (if (eq (jsdre-receipt-ok? (jsdre-invoke-return)) 1) 1 0)
+                0)
+            0))
+    (defn jsdre-receipts-ok? ()
+        (if (eq (jsdre-front-receipts-ok?) 1)
+            (if (eq (jsdre-dylib-receipts-ok?) 1) 1 0)
+            0))
+
+    (defn jsdre-eq-list (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0)
+                1
+                (if (eq (head a) (head b)) (jsdre-eq-list (tail a) (tail b)) 0))
+            0))
+    (defn jsdre-byte? (b) (if (ge b 0) (if (lt b 256) 1 0) 0))
+    (defn jsdre-byte-list? (xs)
+        (if (eq (len xs) 0)
+            1
+            (if (eq (jsdre-byte? (head xs)) 1) (jsdre-byte-list? (tail xs)) 0)))
+    (defn jsdre-status-known? (s)
+        (if (eq s (jsdre-ok)) 1
+            (if (eq s (jsdre-unavailable)) 1
+                (if (eq s (jsdre-mismatch)) 1
+                    (if (eq s (jsdre-fault)) 1
+                        (if (eq s (jsdre-trap)) 1 0))))))
+    (defn jsdre-exception-status? (s)
+        (if (eq s (jsdre-fault)) 1
+            (if (eq s (jsdre-trap)) 1 0)))
+
+    (defn jsdre-expected-bytes (kind)
+        (if (eq kind (jsdre-array-kind))
+            (jsh-compile (jsh-user-array) 6 1)
+            (if (eq kind (jsdre-field-kind))
+                (jsh-compile (jsh-user-field) 6 1)
+                (if (eq kind (jsdre-div-kind)) (jsh-compile (jsh-user-div) 6 1) (empty)))))
+    (defn jsdre-byte-image-ok? (bytes kind)
+        (if (eq (jsdre-byte-list? bytes) 1)
+            (if (gt (len bytes) 0)
+                (jsdre-eq-list bytes (jsdre-expected-bytes kind))
+                0)
+            0))
+
+    ; exec = ("source-dylib-exec" source live installed callable dispatch result invoked returned status bytes byte-count kind stack fault exception deopt melt parity source-maps maps no-c-growth generation)
+    (defn jsdre-exec (source live installed callable dispatch result invoked returned status bytes byte-count kind stack fault exception deopt melt parity source-maps maps no-c-growth generation)
+        (list "source-dylib-exec" source live installed callable dispatch result invoked returned status bytes byte-count kind stack fault exception deopt melt parity source-maps maps no-c-growth generation))
+    (defn jsdre-exec? (e) (if (eq (len e) 23) (str_eq (nth e 0) "source-dylib-exec") 0))
+    (defn jsdre-exec-source (e) (nth e 1))
+    (defn jsdre-exec-live (e) (nth e 2))
+    (defn jsdre-installed (e) (nth e 3))
+    (defn jsdre-callable (e) (nth e 4))
+    (defn jsdre-dispatch-ready (e) (nth e 5))
+    (defn jsdre-result-ready (e) (nth e 6))
+    (defn jsdre-invoked (e) (nth e 7))
+    (defn jsdre-returned (e) (nth e 8))
+    (defn jsdre-status (e) (nth e 9))
+    (defn jsdre-bytes (e) (nth e 10))
+    (defn jsdre-byte-count (e) (nth e 11))
+    (defn jsdre-kind (e) (nth e 12))
+    (defn jsdre-stack (e) (nth e 13))
+    (defn jsdre-fault-proof (e) (nth e 14))
+    (defn jsdre-exception-proof (e) (nth e 15))
+    (defn jsdre-deopt-proof (e) (nth e 16))
+    (defn jsdre-melt-proof (e) (nth e 17))
+    (defn jsdre-parity (e) (nth e 18))
+    (defn jsdre-source-maps (e) (nth e 19))
+    (defn jsdre-maps-proof (e) (nth e 20))
+    (defn jsdre-no-c-growth (e) (nth e 21))
+    (defn jsdre-generation (e) (nth e 22))
+
+    (defn jsdre-ready? (e)
+        (if (eq (jsdre-exec? e) 1)
+            (if (eq (jsdre-receipts-ok?) 1)
+                (if (eq (jsdre-exec-source e) 1)
+                    (if (eq (jsdre-exec-live e) 1)
+                        (if (eq (jsdre-dispatch-ready e) 1)
+                            (if (eq (jsdre-result-ready e) 1)
+                                (if (eq (jsdre-status-known? (jsdre-status e)) 1)
+                                    (if (eq (jsdre-byte-count e) (len (jsdre-bytes e)))
+                                        (if (eq (jsdre-byte-image-ok? (jsdre-bytes e) (jsdre-kind e)) 1)
+                                            (if (eq (jsdre-stack e) 1)
+                                                (if (eq (jsdre-fault-proof e) 1)
+                                                    (if (eq (jsdre-exception-proof e) 1)
+                                                        (if (eq (jsdre-deopt-proof e) 1)
+                                                            (if (eq (jsdre-melt-proof e) 1)
+                                                                (if (eq (jsdre-parity e) 1)
+                                                                    (if (eq (jsdre-source-maps e) 1)
+                                                                        (if (eq (jsdre-maps-proof e) 1)
+                                                                            (if (eq (jsdre-no-c-growth e) 1)
+                                                                                (if (gt (jsdre-generation e) 0) 1 0)
+                                                                                0)
+                                                                            0)
+                                                                        0)
+                                                                    0)
+                                                                0)
+                                                            0)
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jsdre-complete? (e)
+        (if (eq (jsdre-ready? e) 1)
+            (if (eq (jsdre-installed e) 1)
+                (if (eq (jsdre-callable e) 1)
+                    (if (eq (jsdre-invoked e) 1)
+                        (if (eq (jsdre-returned e) 1)
+                            (if (eq (jsdre-status e) (jsdre-ok)) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jsdre-action (e guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (jsdre-ready? e) 1)
+            (if (eq (jsdre-status e) (jsdre-mismatch))
+                (jsdre-reject)
+                (if (eq (jsdre-status e) (jsdre-unavailable))
+                    (jsdre-deopt)
+                    (if (eq (jsdre-exception-status? (jsdre-status e)) 1)
+                        (jsdre-exception)
+                        (if (eq (jsdre-complete? e) 1)
+                            (if (eq stale 1)
+                                (jsdre-melt)
+                                (if (eq invalidated 1)
+                                    (jsdre-rewalk)
+                                    (if (eq guard-ok 1)
+                                        (if (eq runtime-ok 1)
+                                            (if (eq parity-ok 1) (jsdre-native) (jsdre-deopt))
+                                            (jsdre-exception))
+                                        (jsdre-deopt))))
+                            (jsdre-pending)))))
+            (jsdre-reject)))
+
+    (defn jsdre-current () (jsdre-exec 1 1 0 0 1 1 0 0 (jsdre-ok) (jsh-compile (jsh-user-array) 6 1) 42 (jsdre-array-kind) 1 1 1 1 1 1 1 1 1 1))
+    (defn jsdre-live () (jsdre-exec 1 1 1 1 1 1 1 1 (jsdre-ok) (jsh-compile (jsh-user-array) 6 1) 42 (jsdre-array-kind) 1 1 1 1 1 1 1 1 1 1))
+    (defn jsdre-field-live () (jsdre-exec 1 1 1 1 1 1 1 1 (jsdre-ok) (jsh-compile (jsh-user-field) 6 1) 21 (jsdre-field-kind) 1 1 1 1 1 1 1 1 1 2))
+    (defn jsdre-div-live () (jsdre-exec 1 1 1 1 1 1 1 1 (jsdre-ok) (jsh-compile (jsh-user-div) 6 1) 27 (jsdre-div-kind) 1 1 1 1 1 1 1 1 1 3))
+    (defn jsdre-unavailable-exec () (jsdre-exec 1 1 0 0 1 1 0 0 (jsdre-unavailable) (jsh-compile (jsh-user-array) 6 1) 42 (jsdre-array-kind) 1 1 1 1 1 1 1 1 1 4))
+    (defn jsdre-mismatch-exec () (jsdre-exec 1 1 0 0 1 1 0 0 (jsdre-mismatch) (jsh-compile (jsh-user-array) 6 1) 42 (jsdre-array-kind) 1 1 1 1 1 1 1 1 1 5))
+    (defn jsdre-fault-exec () (jsdre-exec 1 1 0 0 1 1 0 0 (jsdre-fault) (jsh-compile (jsh-user-array) 6 1) 42 (jsdre-array-kind) 1 1 1 1 1 1 1 1 1 6))
+    (defn jsdre-trap-exec () (jsdre-exec 1 1 0 0 1 1 0 0 (jsdre-trap) (jsh-compile (jsh-user-div) 6 1) 27 (jsdre-div-kind) 1 1 1 1 1 1 1 1 1 7))
+    (defn jsdre-no-source () (jsdre-exec 0 1 1 1 1 1 1 1 (jsdre-ok) (jsh-compile (jsh-user-array) 6 1) 42 (jsdre-array-kind) 1 1 1 1 1 1 1 1 1 8))
+    (defn jsdre-no-bytes () (jsdre-exec 1 1 1 1 1 1 1 1 (jsdre-ok) (empty) 0 (jsdre-array-kind) 1 1 1 1 1 1 1 1 1 9))
+    (defn jsdre-bad-count () (jsdre-exec 1 1 1 1 1 1 1 1 (jsdre-ok) (jsh-compile (jsh-user-array) 6 1) 41 (jsdre-array-kind) 1 1 1 1 1 1 1 1 1 10))
+    (defn jsdre-uninstalled () (jsdre-exec 1 1 0 1 1 1 1 1 (jsdre-ok) (jsh-compile (jsh-user-array) 6 1) 42 (jsdre-array-kind) 1 1 1 1 1 1 1 1 1 11))
+    (defn jsdre-no-stack () (jsdre-exec 1 1 1 1 1 1 1 1 (jsdre-ok) (jsh-compile (jsh-user-array) 6 1) 42 (jsdre-array-kind) 0 1 1 1 1 1 1 1 1 12))
+    (defn jsdre-c-growth () (jsdre-exec 1 1 1 1 1 1 1 1 (jsdre-ok) (jsh-compile (jsh-user-array) 6 1) 42 (jsdre-array-kind) 1 1 1 1 1 1 1 1 0 13))
+
+    (defn jsdre-bit (cond bit) (if cond bit 0))
+    (defn jit-source-dylib-runtime-executor-check ()
+        (add
+            (jsdre-bit (eq (jsdre-receipts-ok?) 1) 1)
+            (add
+                (jsdre-bit (eq (jsdre-ready? (jsdre-current)) 1) 2)
+                (add
+                    (jsdre-bit (eq (jsdre-complete? (jsdre-current)) 0) 4)
+                    (add
+                        (jsdre-bit (eq (jsdre-action (jsdre-current) 1 1 0 1 0) (jsdre-pending)) 8)
+                        (add
+                            (jsdre-bit (eq (jsdre-complete? (jsdre-live)) 1) 16)
+                            (add
+                                (jsdre-bit (eq (jsdre-action (jsdre-live) 1 1 0 1 0) (jsdre-native)) 32)
+                                (add
+                                    (jsdre-bit (eq (jsdre-action (jsdre-live) 0 1 0 1 0) (jsdre-deopt)) 64)
+                                    (add
+                                        (jsdre-bit (eq (jsdre-action (jsdre-live) 1 0 0 1 0) (jsdre-exception)) 128)
+                                        (add
+                                            (jsdre-bit (eq (jsdre-action (jsdre-live) 1 1 1 1 0) (jsdre-rewalk)) 256)
+                                            (add
+                                                (jsdre-bit (eq (jsdre-action (jsdre-live) 1 1 0 0 0) (jsdre-deopt)) 512)
+                                                (add
+                                                    (jsdre-bit (eq (jsdre-action (jsdre-live) 1 1 0 1 1) (jsdre-melt)) 1024)
+                                                    (add
+                                                        (jsdre-bit (eq (jsdre-action (jsdre-unavailable-exec) 1 1 0 1 0) (jsdre-deopt)) 2048)
+                                                        (add
+                                                            (jsdre-bit (eq (jsdre-action (jsdre-mismatch-exec) 1 1 0 1 0) (jsdre-reject)) 4096)
+                                                            (add
+                                                                (jsdre-bit (eq (jsdre-action (jsdre-fault-exec) 1 1 0 1 0) (jsdre-exception)) 8192)
+                                                                (add
+                                                                    (jsdre-bit (eq (jsdre-action (jsdre-trap-exec) 1 1 0 1 0) (jsdre-exception)) 16384)
+                                                                    (add
+                                                                        (jsdre-bit (eq (jsdre-ready? (jsdre-no-source)) 0) 32768)
+                                                                        (add
+                                                                            (jsdre-bit (eq (jsdre-ready? (jsdre-no-bytes)) 0) 65536)
+                                                                            (add
+                                                                                (jsdre-bit (eq (jsdre-ready? (jsdre-bad-count)) 0) 131072)
+                                                                                (add
+                                                                                    (jsdre-bit (eq (jsdre-complete? (jsdre-uninstalled)) 0) 262144)
+                                                                                    (add
+                                                                                        (jsdre-bit (eq (jsdre-ready? (jsdre-no-stack)) 0) 524288)
+                                                                                        (add
+                                                                                            (jsdre-bit (eq (jsdre-ready? (jsdre-c-growth)) 0) 1048576)
+                                                                                            (add
+                                                                                                (jsdre-bit (eq (jsdre-receipt-ok? (jsdre-bad-source-live)) 0) 2097152)
+                                                                                                (add
+                                                                                                    (jsdre-bit (eq (jsdre-ready? (jsdre-field-live)) 1) 4194304)
+                                                                                                    (jsdre-bit (eq (jsdre-ready? (jsdre-div-live)) 1) 8388608))))))))))))))))))))))))
+
+    0)
