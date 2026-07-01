@@ -1,0 +1,90 @@
+; preludes: control/offer-ack-core.fk, control/choice-lane-core.fk
+;
+; choice-lane-core-band — the five ADDED control primitives (cut, undo,
+; store, restore, timeout) plus lanes, each witnessed as a thin expression
+; over the SAME offer/ack core control/offer-ack-core.fk already proves for
+; choice/fail/stop. Every claim routes through oac-kind and oac-offer; none
+; carries its own dispatch chain.
+;
+; The offered cells are the same shape offer-ack-core-band.fk uses: 1-arg
+; recipes (axiom-5), acking one of {nothing, 0, 1, node} through oac-offer's
+; indirect call.
+;
+; Verdict 1023 when every claim lands:
+;   1     cut commits to the FIRST ack even when it declines — cut over
+;         (silent, five) acks nothing (never reaches five), pruned = 1
+;   2     cut commits to the first ack when it succeeds — cut over
+;         (five, nine) acks five (never reaches nine), pruned = 1
+;   4     lanes walk EVERY alternative, none pruned — (silent, five,
+;         silent, nine) collects all four acks, in order
+;   8     lanes-winners keeps only the non-nothing acks — count 2
+;   16    lanes preserve offer order — the first winner's payload is 5
+;         (from position 2), not 9 (position 4)
+;   32    store/restore round-trip an arbitrary memory value unchanged
+;   64    undo falls back to the last checkpoint when the current ack
+;         failed (acked nothing)
+;   128   undo keeps the current memory when the current ack succeeded
+;   256   timeout is REAL when the budget runs out before every
+;         alternative is tried — declined, with alternatives left untried
+;   512   timeout is NOT claimed when every alternative was genuinely
+;         tried and every one declined (honest exhaustion, not a timeout)
+(do
+    ;; --- offered cells: 1-arg recipes, args is the single args-list ----
+    (defn cell-silent (args) (oac-nothing))
+    (defn cell-five (args) (oac-one (intern_trivial_int 5)))
+    (defn cell-nine (args) (oac-one (intern_trivial_int 9)))
+
+    ;; the payload-int an ONE ack carries, read through the core accessor.
+    (defn ack-int (ack) (node_value (oac-payload ack)))
+
+    ;; (1) CUT over (silent, five) commits to the FIRST ack — nothing —
+    ;; and never reaches five. One alternative was pruned.
+    (let cut1 (oac-cut-with-receipt (list cell-silent cell-five) (list)))
+    (let c1 (if (and (eq (oac-nothing? (oac-cut-receipt-ack cut1)) 1)
+                     (eq (oac-cut-receipt-pruned cut1) 1))
+                1 0))
+
+    ;; (2) CUT over (five, nine) commits to five, pruning nine.
+    (let cut2 (oac-cut-with-receipt (list cell-five cell-nine) (list)))
+    (let c2 (if (and (eq (oac-one? (oac-cut-receipt-ack cut2)) 1)
+                     (and (eq (ack-int (oac-cut-receipt-ack cut2)) 5)
+                          (eq (oac-cut-receipt-pruned cut2) 1)))
+                2 0))
+
+    ;; (3) LANES walk every alternative — nothing pruned.
+    (let memory (oac-lanes (list cell-silent cell-five cell-silent cell-nine) (list)))
+    (let c3 (if (eq (len memory) 4) 4 0))
+
+    ;; (4) LANES-WINNERS keeps only the non-nothing acks.
+    (let winners (oac-lanes-winners memory))
+    (let c4 (if (eq (oac-lanes-winner-count memory) 2) 8 0))
+
+    ;; (5) LANES preserve order — the first winner is 5 (position 2), not 9.
+    (let c5 (if (eq (ack-int (head winners)) 5) 16 0))
+
+    ;; (6) STORE/RESTORE round-trip an arbitrary memory value unchanged.
+    (let checkpoint (oac-store 42))
+    (let c6 (if (eq (oac-restore checkpoint) 42) 32 0))
+
+    ;; (7) UNDO falls back to the checkpoint when the current ack failed.
+    (let undone (oac-undo (oac-nothing) checkpoint 99))
+    (let c7 (if (eq undone 42) 64 0))
+
+    ;; (8) UNDO keeps the current memory when the current ack succeeded.
+    (let kept (oac-undo (cell-five (list)) checkpoint 99))
+    (let c8 (if (eq kept 99) 128 0))
+
+    ;; (9) TIMEOUT is real: budget 2 over (silent, silent, five) exhausts
+    ;; the budget before reaching five — declined, one alternative left.
+    (let w1 (oac-timeout-walk (list cell-silent cell-silent cell-five) (list) 2))
+    (let c9 (if (eq (oac-timed-out? w1) 1) 256 0))
+
+    ;; (10) TIMEOUT is NOT claimed when budget 5 over (silent, silent)
+    ;; outlasts the alternatives — both were genuinely tried and declined.
+    (let w2 (oac-timeout-walk (list cell-silent cell-silent) (list) 5))
+    (let c10 (if (and (eq (oac-nothing? (oac-timeout-ack w2)) 1)
+                      (eq (oac-timed-out? w2) 0))
+                 512 0))
+
+    (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8 (add c9 c10)))))))))
+)
