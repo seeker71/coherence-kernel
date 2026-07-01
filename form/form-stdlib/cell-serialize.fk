@@ -11,11 +11,15 @@
 ; This file is JSON's dialect codec ONLY — the registry (how a Blueprint name
 ; is looked up / recovered, since `bp` is one-way) and the shared list helper
 ; live in wire-registry.fk, preluded below, and are shared verbatim by every
-; other dialect (wire-xml.fk, wire-corba-cdr.fk). See wire-registry.fk's own
-; header for why a registry is necessary at all. What's dialect-specific here:
-; leaves (node_level = 1 -- trivial int/string/float/null) encode as their
-; natural JSON literal; composites (node_level = 0, built via intern_node)
-; encode as a JSON object carrying the Blueprint name and children explicitly:
+; other dialect (wire-xml.fk, wire-corba-cdr.fk) — including `WIRE-NULL`,
+; the universal null value (see wire-registry.fk's header for why that's
+; there rather than a trivial leaf: no native op ever produces a trivial
+; value with a "null" node_type). See wire-registry.fk's own header for why
+; a registry is necessary at all. What's dialect-specific here: leaves
+; (node_level = 1 -- trivial int/string/float) encode as their natural
+; JSON literal; `null` is its own case (see `cser-emit`/`cser-parse`);
+; composites (node_level = 0, built via intern_node) encode as a JSON
+; object carrying the Blueprint name and children explicitly:
 ; {"bp":"<name>","c":[...]}.
 ;
 ; The text layer here is self-contained, NOT built on form-stdlib/json.fk,
@@ -58,6 +62,85 @@
 ; preludes: form-stdlib/core.fk form-stdlib/wire-registry.fk
 
 (do
+    ; --- string escaping (JSON mandates escaping '"' and '\\'; control
+    ; chars get the standard short forms or \u00XX) ----------------------
+    (defn cser-hex-digit (n) (if (lt n 10) (byte_to_str (add 48 n)) (byte_to_str (add 87 n))))
+    (defn cser-u00 (cp) (str_concat "\\u00" (str_concat (cser-hex-digit (div cp 16)) (cser-hex-digit (mod cp 16)))))
+    (defn cser-escape-char (cp)
+        (if (eq cp 34) "\\\""
+        (if (eq cp 92) "\\\\"
+        (if (eq cp 8)  "\\b"
+        (if (eq cp 9)  "\\t"
+        (if (eq cp 10) "\\n"
+        (if (eq cp 12) "\\f"
+        (if (eq cp 13) "\\r"
+        (if (lt cp 32) (cser-u00 cp)
+            (byte_to_str cp))))))))))
+    (defn cser-escape-loop (s i acc)
+        (if (ge i (str_len s)) acc
+            (cser-escape-loop s (add i 1) (str_concat acc (cser-escape-char (str_byte_at s i))))))
+    (defn cser-escape (s) (cser-escape-loop s 0 ""))
+
+    ; --- string unescaping (mirrors json.fk's pure codepoint helpers —
+    ; those are NOT part of json.fk's broken mutual-recursion parser/
+    ; emitter, they're plain non-cyclic functions, safe to reuse directly).
+    ; Full \uXXXX support including surrogate pairs, not just the \u00XX
+    ; control-char range `cser-escape` itself ever emits — a real external
+    ; JSON string this reader consumes can carry any \uXXXX escape. ------
+    (defn cser-hex-value-cp (cp)
+        (if (and (ge cp 48) (le cp 57)) (sub cp 48)
+        (if (and (ge cp 65) (le cp 70)) (add 10 (sub cp 65))
+        (if (and (ge cp 97) (le cp 102)) (add 10 (sub cp 97))
+            0))))
+    (defn cser-hex4 (s i)
+        (add (mul (cser-hex-value-cp (str_byte_at s i)) 4096)
+            (add (mul (cser-hex-value-cp (str_byte_at s (add i 1))) 256)
+                (add (mul (cser-hex-value-cp (str_byte_at s (add i 2))) 16)
+                    (cser-hex-value-cp (str_byte_at s (add i 3)))))))
+    (defn cser-high-surrogate? (cp) (and (ge cp 55296) (le cp 56319)))
+    (defn cser-low-surrogate? (cp) (and (ge cp 56320) (le cp 57343)))
+    (defn cser-surrogate-pair-cp (hi lo) (add 65536 (add (mul (sub hi 55296) 1024) (sub lo 56320))))
+    (defn cser-codepoint-to-utf8 (cp)
+        (if (lt cp 128) (byte_to_str cp)
+        (if (lt cp 2048)
+            (str_concat (byte_to_str (add 192 (div cp 64))) (byte_to_str (add 128 (mod cp 64))))
+        (if (lt cp 65536)
+            (str_concat (byte_to_str (add 224 (div cp 4096)))
+                (str_concat (byte_to_str (add 128 (mod (div cp 64) 64))) (byte_to_str (add 128 (mod cp 64)))))
+            (str_concat (byte_to_str (add 240 (div cp 262144)))
+                (str_concat (byte_to_str (add 128 (mod (div cp 4096) 64)))
+                    (str_concat (byte_to_str (add 128 (mod (div cp 64) 64))) (byte_to_str (add 128 (mod cp 64))))))))))
+    (defn cser-unescape-basic-cp (cp)
+        (if (eq cp 34) "\""
+        (if (eq cp 47) "/"
+        (if (eq cp 92) "\\"
+        (if (eq cp 98) (byte_to_str 8)
+        (if (eq cp 102) (byte_to_str 12)
+        (if (eq cp 110) (byte_to_str 10)
+        (if (eq cp 114) (byte_to_str 13)
+        (if (eq cp 116) (byte_to_str 9)
+            (byte_to_str cp))))))))))
+    (defn cser-unescape-loop (s i n acc)
+        (if (ge i n) acc
+            (if (eq (str_byte_at s i) 92)
+                (do
+                    (let esc-cp (str_byte_at s (add i 1)))
+                    (if (and (eq esc-cp 117) (le (add i 5) n))
+                        (do
+                            (let cp (cser-hex4 s (add i 2)))
+                            (if (and (cser-high-surrogate? cp)
+                                    (and (le (add i 11) n)
+                                        (and (eq (str_byte_at s (add i 6)) 92) (eq (str_byte_at s (add i 7)) 117))))
+                                (do
+                                    (let lo (cser-hex4 s (add i 8)))
+                                    (if (cser-low-surrogate? lo)
+                                        (cser-unescape-loop s (add i 12) n (str_concat acc (cser-codepoint-to-utf8 (cser-surrogate-pair-cp cp lo))))
+                                        (cser-unescape-loop s (add i 6) n (str_concat acc (cser-codepoint-to-utf8 cp)))))
+                                (cser-unescape-loop s (add i 6) n (str_concat acc (cser-codepoint-to-utf8 cp)))))
+                        (cser-unescape-loop s (add i 2) n (str_concat acc (cser-unescape-basic-cp esc-cp)))))
+                (cser-unescape-loop s (add i 1) n (str_concat acc (byte_to_str (str_byte_at s i)))))))
+    (defn cser-unescape (s) (cser-unescape-loop s 0 (str_len s) ""))
+
     ; --- encode: cell node -> JSON text, directly (no intermediate tree) ---
     (defn cser-emit-str (s) (str_concat "\"" (str_concat s "\"")))
 
@@ -65,10 +148,9 @@
         (do
             (let ty (node_type node))
             (if (eq ty 1) (int_to_str (node_value node))
-            (if (eq ty 2) (cser-emit-str (node_value node))
-            (if (eq ty 4) "null"
+            (if (eq ty 2) (cser-emit-str (cser-escape (node_value node)))
             (if (eq ty 7) (float_to_str (node_value node))
-                "null"))))))   ; an unrecognized leaf type: null rather than a silently wrong guess
+                "null")))))   ; an unrecognized leaf type: null rather than a silently wrong guess
 
     ; mode 0: x is a single cell node. mode 1: x is a list of sibling nodes
     ; (a "," -joined run) still needing emission — the only two states the
@@ -76,12 +158,13 @@
     ; self-recursive function instead of two mutually-recursive ones.
     (defn cser-emit (mode x registry)
         (if (eq mode 0)
+            (if (wr-null? x) "null"
             (if (eq (node_level x) 1)
                 (cser-emit-leaf x)
                 (str_concat "{\"bp\":"
                     (str_concat (cser-emit-str (head (wr-find-name (node_category x) registry)))
                         (str_concat ",\"c\":["
-                            (str_concat (cser-emit 1 (node_children x) registry) "]}")))))
+                            (str_concat (cser-emit 1 (node_children x) registry) "]}"))))))
             (if (eq (len x) 0) ""
                 (if (eq (len (tail x)) 0)
                     (cser-emit 0 (head x) registry)
@@ -95,8 +178,9 @@
     ; --- decode: JSON text -> the original cell node, identity intact ---
     ; A narrow, self-contained reader for exactly what cser-emit-node writes
     ; (int/string/float/null leaves; nested {"bp":"...","c":[...]} objects) —
-    ; not a general JSON parser. No escape-sequence handling in strings
-    ; (a real, named scope limit, not silently assumed away).
+    ; not a general JSON parser. String escaping (quotes, backslashes,
+    ; control chars, \uXXXX including surrogate pairs) IS handled — see
+    ; cser-escape/cser-unescape above.
 
     (defn cser-ws? (c) (or (eq c 32) (or (eq c 10) (eq c 9))))
     (defn cser-skip-ws (s i)
@@ -113,7 +197,8 @@
             (if (eq (str_byte_at s i) 46) true (cser-has-dot? s (add i 1) end))))
 
     (defn cser-scan-str-end (s i)
-        (if (eq (str_byte_at s i) 34) i (cser-scan-str-end s (add i 1))))
+        (if (eq (str_byte_at s i) 34) i
+            (if (eq (str_byte_at s i) 92) (cser-scan-str-end s (add i 2)) (cser-scan-str-end s (add i 1)))))
 
     ; parse-node / parse-array-elements return (list value next-index) — a
     ; plain 2-element list, not json.fk's pair shape (this file no longer
@@ -149,9 +234,9 @@
                 (if (eq c 34)   ; '"' -- a plain string leaf
                     (do
                         (let str-end (cser-scan-str-end s (add i2 1)))
-                        (list (intern_trivial_string (substring s (add i2 1) str-end)) (add str-end 1)))
+                        (list (intern_trivial_string (cser-unescape (substring s (add i2 1) str-end))) (add str-end 1)))
                 (if (eq c 110)  ; 'n' -- null
-                    (list (intern_trivial_int 0) (add i2 4))   ; a real gap: decodes as int 0, not a distinct null value — no node_type tag 4 constructor available in Form (json.fk builds it via intern_node_at with source attribution this file deliberately doesn't carry); named, not silently assumed correct
+                    (list (wr-make-null) (add i2 4))   ; a real, distinct value (wire-registry.fk's WIRE-NULL), not int 0 — see its header for why
                 (do   ; a number: int or float, decided by the presence of '.'
                     (let num-end (cser-scan-num-end s i2))
                     (let text (substring s i2 num-end))
