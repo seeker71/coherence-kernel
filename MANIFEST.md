@@ -560,6 +560,15 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       cross-locale mismatch is correctly rejected, and out-of-baseline tokens honestly locate to `0` rather than
       a false positive — the honest floor stays that this covers only the small Sanskrit-baseline vocabulary,
       not open text. See `receipts/2026-07-01-locale-neutral-locate.md`.
+- [x] **Paraphrase generalization measured, not asserted.** `learn/tests/paraphrase-generalization-band.fk` runs
+      20 hand-written English paraphrases (5 per baseline meaning, none copied from `slb-lines()`) through both
+      locate functions above. Exact-match generalizes `0/20` (expected — it is a lookup table). The pre-existing
+      overlap scorer `mlap-text-meaning` generalizes `18/20`, but the 2 failures are diagnosed, not noise: one is
+      a false-positive collision on an incidental shared word ("for"), the other is a true zero-overlap
+      paraphrase that silently defaults to the first-listed meaning instead of abstaining — this scorer has no
+      "I don't know." The honest reference point for what real generalization costs stays
+      `form-cli-predict.fk`'s measured result (939 turns, 84.8% held-out over 8 labels), not this toy count. See
+      `receipts/2026-07-01-paraphrase-generalization-measured.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
