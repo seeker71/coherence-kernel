@@ -1,0 +1,134 @@
+; http-negotiate.fk — REST content-negotiation: parse an Accept header,
+; pick the best available representation.
+;
+; Closes the named gap: "no Accept/Content-Type-aware dispatch exists" —
+; `http-adapter.fk` hardcodes `Content-Type: application/json` on every
+; response, with nothing reading the request's `Accept` header at all.
+;
+; Deliberately self-contained and testable via bare `fkwu --src`, unlike
+; `kernel-http.fk`/`http-adapter.fk` — confirmed directly this session (not
+; assumed): those files are BML-authored (`section [form.bml] { def ... }`)
+; and this checkout has no working BML flatten/lowering pipeline at all
+; (`flatten/SEED-DROP.md` names it blocked; `receipts/2026-06-30-http-
+; stdlib-import.md` already says the whole kernel-http/http-* BML stack was
+; "imported with their old proven evidence... not re-proven here through
+; the direct fkwu --src runner"). Concatenating any http-*-band.fk test
+; with its BML preludes and running `fkwu --src` gives 0, not the
+; documented verdict — confirmed on http-adapter-band.fk AND http-serve-
+; band.fk both, so this is a checkout-wide gap, not specific to this file.
+;
+; Given that, this file's actual negotiation ALGORITHM is built and fully
+; verified here, independently — the genuine, risky part. Wiring it into
+; `http-adapter.fk` is a thin, mechanical addition in that file's own BML
+; style (see the note there) that inherits its existing "not re-proven
+; here" status rather than falsely claiming this checkout can verify it.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    ; --- small string helpers (self-contained; not the wire-*.fk lane) ---
+    (defn hn-reverse-onto (xs acc) (if (eq (len xs) 0) acc (hn-reverse-onto (tail xs) (cons (head xs) acc))))
+    (defn hn-reverse (xs) (hn-reverse-onto xs (empty)))
+
+    (defn hn-ws? (c) (or (eq c 32) (or (eq c 9) (or (eq c 10) (eq c 13)))))
+
+    (defn hn-trim-left (s i) (if (ge i (str_len s)) i (if (hn-ws? (str_byte_at s i)) (hn-trim-left s (add i 1)) i)))
+    (defn hn-trim-right (s i) (if (le i 0) i (if (hn-ws? (str_byte_at s (sub i 1))) (hn-trim-right s (sub i 1)) i)))
+    (defn hn-trim (s)
+        (do
+            (let a (hn-trim-left s 0))
+            (let b (hn-trim-right s (str_len s)))
+            (if (ge a b) "" (substring s a b))))
+
+    ; split s on every occurrence of the byte `sep`, trimming each piece.
+    (defn hn-split-loop (s i start sep acc)
+        (if (ge i (str_len s))
+            (hn-reverse (cons (hn-trim (substring s start i)) acc))
+            (if (eq (str_byte_at s i) sep)
+                (hn-split-loop s (add i 1) (add i 1) sep (cons (hn-trim (substring s start i)) acc))
+                (hn-split-loop s (add i 1) start sep acc))))
+    (defn hn-split (s sep) (hn-split-loop s 0 0 sep (empty)))
+
+    ; --- one Accept entry: "media/type" or "media/type;q=0.8" -----------
+    (defn hn-entry (media q) (list media q))
+    (defn hn-entry-media (e) (head e))
+    (defn hn-entry-q (e) (head (tail e)))
+
+    ; "q=0.8" -> 0.8 as a float; anything unparseable defaults to 1.0,
+    ; matching HTTP's own default-q-is-1 rule (a malformed q-param is a
+    ; real-world occurrence worth tolerating, not a reason to crash a
+    ; negotiation step over).
+    (defn hn-parse-q (param)
+        (do
+            (let eq-pos (str_find param "=" 0))
+            (if (lt eq-pos 0) 1.0
+                (do
+                    (let text (hn-trim (substring param (add eq-pos 1) (str_len param))))
+                    (if (eq (str_len text) 0) 1.0 (str_to_float text))))))
+
+    (defn hn-parse-entry (entry)
+        (do
+            (let semi (str_find entry ";" 0))
+            (if (lt semi 0)
+                (hn-entry (hn-trim entry) 1.0)
+                (do
+                    (let media (hn-trim (substring entry 0 semi)))
+                    (let rest (substring entry (add semi 1) (str_len entry)))
+                    (let q-pos (str_find rest "q=" 0))
+                    (hn-entry media (if (lt q-pos 0) 1.0 (hn-parse-q (substring rest q-pos (str_len rest)))))))))
+
+    (defn hn-parse-accept-loop (entries acc)
+        (if (eq (len entries) 0) (hn-reverse acc)
+            (hn-parse-accept-loop (tail entries) (cons (hn-parse-entry (head entries)) acc))))
+
+    ; "" (no Accept header) parses to an empty list — negotiation then
+    ; falls back to the first available representation, matching HTTP's
+    ; own rule that a missing Accept header means "anything is acceptable".
+    (defn hn-parse-accept (header)
+        (if (eq (str_len (hn-trim header)) 0) (empty)
+            (hn-parse-accept-loop (hn-split header 44) (empty))))   ; 44 = ','
+
+    ; --- match one available type against the parsed Accept entries -----
+    ; Exact match, then "type/*" prefix match, then "*/*", each at that
+    ; entry's own q; no match against any entry -> q 0 (excluded).
+    (defn hn-media-prefix (media)
+        (do
+            (let slash (str_find media "/" 0))
+            (if (lt slash 0) media (substring media 0 (add slash 1)))))
+
+    (defn hn-q-for (media entries)
+        (if (eq (len entries) 0) 0.0
+            (do
+                (let e (head entries))
+                (let em (hn-entry-media e))
+                (if (str_eq em media) (hn-entry-q e)
+                (if (str_eq em "*/*") (hn-entry-q e)
+                (if (str_eq em (hn-media-prefix media)) (hn-entry-q e)
+                    (hn-q-for media (tail entries))))))))
+
+    ; --- pick the best of the available types, in caller-given preference
+    ; order (ties broken by that order, matching a server's own priority,
+    ; not the client's — the same rule real content negotiation uses when
+    ; a client expresses no preference among equally-acceptable types) ---
+    (defn hn-best-loop (available entries best best-q)
+        (if (eq (len available) 0) best
+            (do
+                (let media (head available))
+                (let q (hn-q-for media entries))
+                (if (gt q best-q)
+                    (hn-best-loop (tail available) entries media q)
+                    (hn-best-loop (tail available) entries best best-q)))))
+
+    ; accept-header: the raw "Accept" header value (or "" if absent).
+    ; available: a list of media types, in server preference order — the
+    ; first one is the default when the header is absent or names nothing
+    ; available (an empty/no-match Accept list must still produce SOME
+    ; representation, not silently no-op).
+    (defn hn-negotiate (accept-header available)
+        (do
+            (let entries (hn-parse-accept accept-header))
+            (if (eq (len entries) 0) (head available)
+                (do
+                    (let best (hn-best-loop available entries "" 0.0))
+                    (if (str_eq best "") (head available) best)))))
+)
