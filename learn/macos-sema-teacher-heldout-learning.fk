@@ -1,0 +1,157 @@
+; macos-sema-teacher-heldout-learning.fk -- held-out repeat over teacher wav.
+;
+; This cell trains Form-native acoustic token prototypes on one local teacher
+; render and decodes a separately rendered same-text teacher wav. The held-out
+; sample is still narrow: same voice, same text, separate audio file. It proves
+; the learner is no longer only decoding the exact wav it trained on.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/wav-sense.fk
+;   learn/macos-sema-teacher-acoustic-learning.fk
+
+(do
+    (defn msth-kind () "macos-sema-teacher-heldout-learning")
+    (defn msth-train-id () 984711)
+    (defn msth-eval-id () 984712)
+    (defn msth-max-distance () 2)
+    (defn msth-min-confidence () 80)
+    (defn msth-volume () "0.98")
+
+    (defn msth-ffmpeg-eval-command (aiff wav)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (mstal-q aiff))
+            (str_concat
+                (str_concat " -ar 16000 -ac 1 -af volume=" (msth-volume))
+                (str_concat " -c:a pcm_s16le " (mstal-q wav)))))
+
+    (defn msth-render-eval (id)
+        (do
+            (let _mk (fs_mkdir (mstal-out-dir)))
+            (let aiff (mstal-aiff-path id))
+            (let wav (mstal-wav-path id))
+            (let _say (host-exec (mstal-say-command (mstal-voice) aiff (mstal-text)) ""))
+            (let _ff (host-exec (msth-ffmpeg-eval-command aiff wav) ""))
+            wav))
+
+    (defn msth-hash-different? (train-hash eval-hash)
+        (if (eq train-hash eval-hash) 0 1))
+
+    (defn msth-native-from-features (train-features eval-features)
+        (do
+            (let trained (mstal-trained train-features))
+            (let frames (mstal-frames
+                          (mstal-frame-features eval-features)
+                          trained
+                          (msth-max-distance)
+                          (msth-min-confidence)))
+            (mstal-decoded-text frames)))
+
+    (defn msth-confidence-from-features (train-features eval-features)
+        (do
+            (let trained (mstal-trained train-features))
+            (let frames (mstal-frames
+                          (mstal-frame-features eval-features)
+                          trained
+                          (msth-max-distance)
+                          (msth-min-confidence)))
+            (mstal-min-conf frames)))
+
+    (defn msth-receipt-from-features (train-hash eval-hash train-features eval-features transcript)
+        (do
+            (let trained (mstal-trained train-features))
+            (let native (msth-native-from-features train-features eval-features))
+            (let wer (sw-wer (sw-tokens native) (sw-tokens (mstal-text))))
+            (let ok (if (and (eq (msth-hash-different? train-hash eval-hash) 1)
+                             (and (sw-accept? (sw-tokens transcript)
+                                              (sw-tokens (mstal-text))
+                                              (mstal-max-wer))
+                                  (sw-accept? (sw-tokens native)
+                                              (sw-tokens (mstal-text))
+                                              (mstal-max-wer)))) 1 0))
+            (list (msth-kind)
+                  train-hash
+                  eval-hash
+                  (msth-hash-different? train-hash eval-hash)
+                  (len train-features)
+                  (len eval-features)
+                  (len trained)
+                  transcript
+                  native
+                  ok
+                  wer
+                  (msth-confidence-from-features train-features eval-features)
+                  (mstal-device)
+                  (mstal-oracle)
+                  1
+                  1
+                  1
+                  0)))
+
+    (defn msth-receipt-from-wavs (train-wav eval-wav transcript)
+        (msth-receipt-from-features
+            (mstal-audio-hash train-wav)
+            (mstal-audio-hash eval-wav)
+            (mstal-token-features train-wav)
+            (mstal-token-features eval-wav)
+            transcript))
+
+    (defn msth-rec-kind        (r) (nth r 0))
+    (defn msth-rec-train-hash  (r) (nth r 1))
+    (defn msth-rec-eval-hash   (r) (nth r 2))
+    (defn msth-rec-different   (r) (nth r 3))
+    (defn msth-rec-train-feats (r) (nth r 4))
+    (defn msth-rec-eval-feats  (r) (nth r 5))
+    (defn msth-rec-prototypes  (r) (nth r 6))
+    (defn msth-rec-oracle      (r) (nth r 7))
+    (defn msth-rec-native      (r) (nth r 8))
+    (defn msth-rec-ok          (r) (nth r 9))
+    (defn msth-rec-wer         (r) (nth r 10))
+    (defn msth-rec-confidence  (r) (nth r 11))
+    (defn msth-rec-device      (r) (nth r 12))
+    (defn msth-rec-oracle-name (r) (nth r 13))
+    (defn msth-rec-native-form (r) (nth r 14))
+    (defn msth-rec-heldout     (r) (nth r 15))
+    (defn msth-rec-epochs      (r) (nth r 16))
+    (defn msth-rec-neural      (r) (nth r 17))
+
+    (defn msth-run-receipt ()
+        (if (eq (mstal-ready?) 1)
+            (do
+                (let train-wav (mstal-render (msth-train-id)))
+                (let eval-wav (msth-render-eval (msth-eval-id)))
+                (let transcript (mstal-transcript eval-wav))
+                (msth-receipt-from-wavs train-wav eval-wav transcript))
+            (list (msth-kind) 0 0 0 0 0 0 "" "" 0 100 0
+                  (mstal-device) (mstal-oracle) 1 1 1 0)))
+
+    (defn msth-run-verdict ()
+        (do
+            (let r (msth-run-receipt))
+            (add
+                (add
+                    (add (if (str_eq (msth-rec-kind r) (msth-kind)) 1 0)
+                         (if (gt (msth-rec-train-hash r) 0) 2 0))
+                    (add (if (gt (msth-rec-eval-hash r) 0) 4 0)
+                         (if (eq (msth-rec-different r) 1) 8 0)))
+                (add
+                    (add (if (eq (msth-rec-train-feats r) 3) 16 0)
+                         (if (eq (msth-rec-eval-feats r) 3) 32 0))
+                    (add
+                        (add (if (gt (msth-rec-prototypes r) 3) 64 0)
+                             (if (eq (sw-wer (sw-tokens (msth-rec-oracle r))
+                                             (sw-tokens (mstal-text))) 0) 128 0))
+                        (add
+                            (add (if (eq (sw-wer (sw-tokens (msth-rec-native r))
+                                                 (sw-tokens (mstal-text))) 0) 256 0)
+                                 (if (eq (msth-rec-ok r) 1) 512 0))
+                            (add
+                                (add (if (eq (msth-rec-wer r) 0) 1024 0)
+                                     (if (ge (msth-rec-confidence r) 80) 2048 0))
+                                (add
+                                    (add (if (eq (msth-rec-native-form r) 1) 4096 0)
+                                         (if (eq (msth-rec-heldout r) 1) 8192 0))
+                                    (add (if (eq (msth-rec-epochs r) 1) 16384 0)
+                                         (if (eq (msth-rec-neural r) 0) 32768 0))))))))))
+
+    0)
