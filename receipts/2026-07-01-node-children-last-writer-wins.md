@@ -136,9 +136,48 @@ confirms the mechanism above is still real even inside a properly reserved frame
   whoever picks it up next, scoped correctly, rather than attempted blind.
 - **Did** restructure `control/tests/choice-lane-core-band.fk` to wrap its body in a `defn`, called once,
   instead of bare top-level `let`s — the correct, already-established convention, not a workaround invented to
-  dodge this bug. It now live-reports its true, current result honestly: `1021`/`1023`, not a fabricated
-  `1023`. The pre-existing `control/tests/offer-ack-core-band.fk` was left unmodified (out of this pass's
-  scope) but tested the same way to confirm the pattern generalizes (see above).
+  dodge this bug — and **did** fix the specific instance of the bug living in `control/offer-ack-core.fk`
+  itself (its `OAC-ZERO`/`OAC-ONE`/`OAC-NODE` bindings), verified live: the band now runs clean at `1023`, not
+  a fabricated one. The pre-existing `control/tests/offer-ack-core-band.fk` was left unmodified (out of this
+  pass's scope, still bare top-level) but tested the same way at each step to confirm the pattern generalizes.
+
+## A real fix, applied and verified — not just a mitigation
+
+Pushing further: `control/offer-ack-core.fk` names its own three foundational blueprint tags —
+`OAC-ZERO`, `OAC-ONE`, `OAC-NODE` — as bare top-level `(let ...)` bindings, the exact exposed pattern above.
+Checked directly: `(node_eq OAC-ZERO OAC-ONE)`, read through those library-level bindings, returns `1`
+(wrongly equal) — while the identical comparison built from two fresh, local `(bp ...)` calls in the same
+file, with no other prelude, correctly returns `0`. The library's own foundation was the thing losing its
+storage.
+
+**The fix:** name each arm as a zero-argument function that calls `bp` fresh every time, instead of a
+top-level `let` caching one stored coordinate:
+
+```form
+(defn OAC-ZERO () (bp "OAC-ZERO"))
+(defn OAC-ONE  () (bp "OAC-ONE"))
+(defn OAC-NODE () (bp "OAC-NODE"))
+```
+
+`bp` is a cheap, content-addressed lookup — the same name always resolves to the same coordinate — so nothing
+is lost by not caching it, and a function's return value is never subject to the storage-slot lifetime bug a
+`let` binding is. This is a Form-level fix (three lines, plus updating their call sites from bare names to
+`(OAC-ZERO)`/`(OAC-ONE)`/`(OAC-NODE)`), not a change to `runtime/fkwu-uni.c` — no C-seed risk at all.
+
+**Verified, deterministically, across repeated runs:** `control/tests/choice-lane-core-band.fk`, which was at
+`1021`/`1023` under the mitigation alone (see below), now runs live at the full **`1023`** with this fix
+applied — the one remaining claim (reading a payload immediately off an indirect-call result) is resolved,
+not just reduced.
+
+**Honest limit of this fix:** it closes the *specific* instance it targets. It does not close the general
+class. Adding `form/form-stdlib/core.fk` to the same prelude — a 74-function file with no top-level `let`s
+at all, pure `defn`s throughout — reintroduces the identical symptom (`oac-choice` misclassified by
+`oac-one?`) in a *different* combination, at larger accumulated program size. `control/invite-dispatch.fk`
+(a new feature added in this same pass, wiring the BMF grammar's recognized tokens to these primitives) needs
+that larger prelude (the grammar plus its own dependencies) to run at all, and its band
+(`control/tests/invite-dispatch-band.fk`) cannot currently be live-witnessed clean as a result — see
+`receipts/2026-07-01-invite-dispatch.md` for that honest accounting. So: one concrete, verified win, inside a
+defect class that is now well-characterized but not closed.
 
 ## Build (reproduce this receipt directly)
 

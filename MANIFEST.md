@@ -506,20 +506,26 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       is the BMF grammar that recognizes these eight tokens inside free text and TRANSMUTES each match into a
       `CONTROL-INVITE` node — `bmf-core.fk`'s own cursor → match(pattern) → build(template) arc, deliberately
       the smaller single-rule engine rather than the larger multi-rule `bmf-grammar.fk`. Band `1023`, live on
-      `fkwu --src` (`grammars/tests/control-invite-grammar-band.fk`). Honest floor, precisely named: this pass
-      also found that the C-bootstrap `fkwu`'s indirect call (named as a gap in the 2026-06-29 offer-ack-core
-      receipt) now works, but `oac-kind`'s blueprint discrimination does not reproduce reliably once more than
-      one `let`-bound value is alive in a scope — traced live (gdb, `FK_OBSERVE`, ruling the JIT in/out, and a
-      hardware watchpoint on the actual storage cells) to a runtime bug distinct from blueprint identity: a
-      `let`'s storage slot is meant to be permanent for its scope, but the evaluator's own local-reservation
-      opcode treats the same storage as ephemeral scratch, so a later computation can silently overwrite an
-      earlier binding before its scope ends. See `receipts/2026-07-01-node-children-last-writer-wins.md` for
-      the exact watchpoint trace, a minimal (no-prelude) repro, and a verified mitigation: a `defn` body's
-      locals get properly reserved on the value stack, a bare top-level `do`'s never do, so
-      `control/tests/choice-lane-core-band.fk` now wraps its body in one `defn` the same way every other
-      passing band already does — live result **`1021`/`1023`, 9 of 10 claims correct**, up from garbage. The
-      one remaining miss is the same mechanism at smaller scale, not a new one. See
-      `receipts/2026-07-01-choice-lane-control-invites.md`.
+      `fkwu --src` (`grammars/tests/control-invite-grammar-band.fk`). Honest floor, precisely named and then
+      partly closed: this pass found that the C-bootstrap `fkwu`'s indirect call (named as a gap in the
+      2026-06-29 offer-ack-core receipt) now works, but `oac-kind`'s blueprint discrimination does not
+      reproduce reliably once more than one `let`-bound value is alive in a scope — traced live (gdb,
+      `FK_OBSERVE`, ruling the JIT in/out, and a hardware watchpoint on the actual storage cells) to a runtime
+      bug distinct from blueprint identity: a `let`'s storage slot is meant to be permanent for its scope, but
+      the evaluator's own local-reservation opcode treats the same storage as ephemeral scratch, so a later
+      computation can silently overwrite an earlier binding before its scope ends. `control/offer-ack-core.fk`
+      itself carried an instance of this — its own `OAC-ZERO`/`OAC-ONE`/`OAC-NODE` foundational tags were bare
+      top-level `let`s — **fixed** by naming each as a zero-argument function that calls `bp` fresh instead of
+      caching it. Combined with wrapping `control/tests/choice-lane-core-band.fk`'s body in one `defn`
+      (matching every other passing band), live result moved from garbage to the full **`1023`**. The fix is
+      Form-level only, no C-seed change. `control/invite-dispatch.fk` (new: closes the loop, walking a BMF-
+      recognized invite stream and driving the matching primitive, threading memory/checkpoints through) needs
+      a larger combined prelude to run at all, and the same defect class resurfaces there through a different
+      combination (adding `form/form-stdlib/core.fk` alone, 74 pure-`defn` functions, is enough) — a real,
+      verified fix to one instance, inside a defect class that is now well-characterized but not closed. See
+      `receipts/2026-07-01-node-children-last-writer-wins.md` for the trace and fix,
+      `receipts/2026-07-01-choice-lane-control-invites.md` for the primitives, and
+      `receipts/2026-07-01-invite-dispatch.md` for the dispatcher's honest current state.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
