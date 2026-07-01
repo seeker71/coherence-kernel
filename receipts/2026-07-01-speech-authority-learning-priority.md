@@ -7,10 +7,10 @@ still have measured authority gaps.
 Current state:
 
 ```text
-trained neural pairs: 19/55
-directed neural routes: 38/110
-native neural parameters: 19
-background pair window: 0020 es<->fr
+trained neural pairs: 20/55
+directed neural routes: 40/110
+native neural parameters: 20
+background pair window: 0021 es<->id
 open ASR gap: 100
 Sema voice gap: 100
 Sema voice native/oracle: 0/1 / 0/1
