@@ -190,11 +190,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       WER `0`, confidence `96`, live verdict `65535`, effective epochs `1`, native neural parameters `0`. This
       proves a scoped held-out repeat across distinct wav bytes, not cross-phrase or cross-voice authority.
 - [x] **Speech learning data sufficiency gate added.** `learn/speech-learning-data-sufficiency.fk` makes the tiny
-      data boundary executable (`65535`): current speech rows are `141` wavs, `6` live teacher locales, `7`
+      data boundary executable (`65535`): current speech rows are `191` wavs, `6` live teacher locales, `7`
       held-out repeat rows, `6` cross-phrase rows, and `6` cross-voice rows against a corpus-scale floor of
       `12000` wavs, `6` locales, `1200` held-out rows, `1000` cross-phrase rows, and `300` cross-voice rows.
-      Status is explicitly `tiny-corpus-not-data-sufficient-training`; 141 wavs are only 117 basis points of the
-      wav floor, so this is instrumentation smoke, not real model learning.
+      Status is explicitly `tiny-corpus-not-data-sufficient-training`; `191` wavs are only `159` basis points of
+      the wav floor, so this is a larger instrumentation corpus, not real model learning.
 - [x] **Speech corpus acquisition window added.** `learn/speech-corpus-acquisition-window.fk` uses the consentful
       Coherence Network self-corpus to plan a corpus-scale audio acquisition window (`65535`): `2000` keypaths
       across `6` ready locales with `1` voice each yields `12000` planned wav rows and `1200` planned held-out
@@ -217,6 +217,13 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       rows pass, max admitted WER `25`, observed admitted wav bytes `1272388`, while `26` unstable candidate rows
       are rejected. Aggregate speech rows are now `105` wavs and `3189170` observed bytes; captured corpus rows are
       `64`; data sufficiency remains false against the `12000`-wav floor.
+- [x] **Speech corpus cross-voice capture batch 0004 added.**
+      `learn/speech-corpus-crossvoice-capture-batch-0004.fk` renders a screened two-voice acquisition shard over
+      five host-ready locales and five consentful self-corpus keys (`8191`): `50` candidate wavs are rendered,
+      `35` pass the local Whisper/Metal WER floor and are admitted, `15` remain screened controls, max candidate
+      WER is `250`, and observed wav bytes are `2150026`. Aggregate speech rows are now `191` wavs and `6806882`
+      observed bytes; captured corpus rows are `99`; data sufficiency remains false and rows used for training
+      remain `0`.
 - [x] **Speech corpus held-out repeat learning added.** `learn/speech-corpus-heldout-repeat-learning.fk` trains six
       Form-native full-envelope prototypes from consentful corpus phrases and evaluates six separately rendered,
       volume-shifted held-out wavs (`16383`): local oracle accepts `6/6`, native prototype classification accepts
