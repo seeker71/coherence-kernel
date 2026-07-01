@@ -309,8 +309,9 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech model metrics report added.** `learn/speech-model-metrics-report.fk` records the current model size,
       composition, success rates, voice quality, and native-vs-local-oracle rates (`32767`): selected arms are
       prototype ASR, Sema voice sample loop TTS, closed-set locale Form NL2NL, and native source-window audio2audio;
-      native neural weight parameters admitted are now `3` while native Sema voice organs are present; live open
-      dictation is oracle `4/4` and native `0/4`; Sema live voice live-native pass is `0/1`, WER `100`, oracle-guide.
+      native neural weight parameters admitted are now `20` while native Sema voice organs are present; live open
+      dictation is oracle `4/4` and native `0/4`; Sema live voice live-native pass is `0/1`, WER `100`, oracle-guide;
+      scoped Sema voice is `2/3` and the teacher-oracle voice side is now `1/1` while native authority stays `0/1`.
       The same executable report now carries the live learning counters and fails its band if the stated samples,
       bytes, prototype rows, epochs, held-out boundary, or data-sufficiency status drift.
 - [x] **Speech model metrics trend added.** `learn/speech-model-metrics-trend.fk` records before/after movement
