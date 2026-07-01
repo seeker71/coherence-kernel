@@ -13,6 +13,7 @@ cat learn/speech-model-metrics-report.fk \
     learn/speech-oracle-native-backlog.fk \
     learn/speech-next-trial-scheduler.fk \
     learn/speech-open-asr-trial-window.fk \
+    learn/speech-open-asr-trial-window-0002.fk \
     learn/sema-voice-trial-window.fk \
     learn/speech-current-status-ledger.fk \
     learn/tests/speech-current-status-ledger-band.fk > /tmp/speech-current-status-ledger.fk
@@ -22,11 +23,11 @@ cat learn/speech-model-metrics-report.fk \
 
 Current model size and composition:
 
-- Native neural weight parameters admitted: `0`.
+- Native neural weight parameters admitted: `20`.
 - Selected arms: `4`.
-- Major Form components plus scoped trial windows: `16`.
+- Major Form components plus scoped trial windows: `21`.
 - Native Sema voice organs/components: `6`.
-- Scoped native trial windows: `2`.
+- Scoped native trial windows: `3`.
 - C seed growth: `0`.
 
 Global live authority remains guarded:
@@ -37,9 +38,9 @@ Global live authority remains guarded:
 
 Scoped trial windows have moved:
 
-- Open-ASR trial: oracle `2/2`, native `2/2`, native rate `100`.
+- Open-ASR trial: oracle `4/4`, native `4/4`, native rate `100`.
 - Sema voice TCAV trial: oracle `1/1`, native `1/1`, WER `0`.
-- Combined scoped trials: oracle `3/3 = 100%`, native `3/3 = 100%`.
+- Combined scoped trials: oracle `5/5 = 100%`, native `5/5 = 100%`.
 
 Voice quality target and scoped TCAV window agree on F0 `165`, warmth `82`,
 cadence `64`, and breath `18`.
