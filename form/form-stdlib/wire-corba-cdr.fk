@@ -1,0 +1,194 @@
+; wire-corba-cdr.fk — the CORBA CDR dialect of the wire-serialization lane.
+;
+; Same north star and same registry mechanism as cell-serialize.fk (JSON) and
+; wire-xml.fk (XML) — see wire-registry.fk's header for why a registry is
+; necessary at all (`bp` is one-way). This file supplies the CDR-specific
+; part: a binary octet encoding, not text.
+;
+; Honest scope, named up front, not discovered later: this is CDR's real
+; PRIMITIVE encoding rules — octet, unsigned long / long (4-byte aligned,
+; big-endian / "byte order flag 0"), and CDR string (length-prefixed,
+; NUL-terminated) — applied to a SELF-DESCRIBING structure, because this
+; kernel has no IDL compiler to generate static struct layouts or
+; TypeCodes from. What's real CDR: alignment, byte order, the string
+; encoding. What's a pragmatic substitute, not a full ORB: no TypeCode
+; octets, no GIOP request/reply framing, no IIOP transport — a composite
+; node is tagged with its Blueprint NAME (a CDR string) as a stand-in for
+; a repository ID, the same shape the JSON and XML dialects already use.
+; Also named: CDR's binary "double" is IEEE754 bit layout, which this file
+; does NOT implement (real scope, not attempted) — floats are carried as a
+; CDR string of their decimal text (`float_to_str`), tagged distinctly
+; (tag 4) from a real string (tag 2), so decode still knows to route it
+; back through `intern_trivial_float`, not `intern_trivial_string`.
+;
+; Node shape on the wire: one tag octet, then its payload.
+;   tag 0 = composite:  name (CDR string) + child count (CDR ulong) + children
+;   tag 1 = int leaf:    value (CDR long, 32-bit two's complement)
+;   tag 2 = string leaf: value (CDR string)
+;   tag 3 = null leaf:   no payload
+;   tag 4 = float leaf:  decimal text (CDR string) — see the note above
+;
+; "Raw bytes as a Form string" is the same narrow-waist model this whole
+; codebase already uses for byte-level string ops (`str_byte_at`/
+; `byte_to_str`) — a CDR buffer here is just a Form string where each
+; character is one octet, not necessarily valid UTF-8 text.
+;
+; Alignment is tracked by THREADING the growing buffer through every
+; encode call and padding relative to its OWN current length before
+; writing an aligned primitive — not returned as independent chunks a
+; caller concatenates, the way JSON/XML text does. Binary alignment is
+; inherently position-dependent in a way text concatenation isn't, so
+; encode here is written in the same tail-recursive-with-accumulator shape
+; decode already needs (mode 1 folds an accumulator `buf`, not mode 0
+; alone) — see the `cdr-emit` comment below for why that shape, not just
+; wx-emit's simpler style, was used throughout.
+;
+; Every recursive function here is ONE self-recursive function keyed on a
+; `mode` argument, never two `defn`s calling each other — see
+; wire-registry.fk's header and receipts/2026-07-01-json-fk-src-scoping-fix.md
+; for why that's a hard runtime constraint here, not a style choice.
+;
+; preludes: form-stdlib/core.fk form-stdlib/wire-registry.fk
+
+(do
+    ; --- low-level octet buffer helpers ---------------------------------
+
+    (defn cdr-zeros (k) (if (eq k 0) "" (str_concat (byte_to_str 0) (cdr-zeros (sub k 1)))))
+
+    (defn cdr-pad (buf n)
+        (do
+            (let rem (mod (str_len buf) n))
+            (if (eq rem 0) buf (str_concat buf (cdr-zeros (sub n rem))))))
+
+    (defn cdr-put-octet (buf v) (str_concat buf (byte_to_str v)))
+
+    ; unsigned 32-bit, big-endian ("byte order flag 0" — CORBA's network
+    ; byte order convention, the same one GIOP defaults to).
+    (defn cdr-put-ulong (buf v)
+        (do
+            (let b (cdr-pad buf 4))
+            (str_concat b
+                (str_concat (byte_to_str (mod (div v 16777216) 256))
+                    (str_concat (byte_to_str (mod (div v 65536) 256))
+                        (str_concat (byte_to_str (mod (div v 256) 256))
+                            (byte_to_str (mod v 256))))))))
+
+    ; signed 32-bit: two's complement of the unsigned encoding above.
+    (defn cdr-put-long (buf v) (cdr-put-ulong buf (if (lt v 0) (add v 4294967296) v)))
+
+    ; CDR string: ulong length (INCLUDES the NUL terminator) + octets + NUL.
+    (defn cdr-put-string (buf s)
+        (do
+            (let b (cdr-put-ulong buf (add (str_len s) 1)))
+            (str_concat b (str_concat s (byte_to_str 0)))))
+
+    ; --- encode: cell node -> CDR octet buffer --------------------------
+
+    ; mode 0: x is a single cell node, folded onto `buf`. mode 1: x is a
+    ; list of sibling nodes, folded onto `buf` in order. Both thread `buf`
+    ; through as an explicit accumulator and every recursive call is a
+    ; TAIL call — required here (not just a style choice copied from
+    ; cser-parse/wx-parse): the composite branch's own child count must be
+    ; known before its children are written, and each child's alignment
+    ; depends on the exact byte length everything before it produced, so
+    ; there's no safe way to compute a child "in isolation" and combine it
+    ; with a sibling's result afterward the way wx-emit's plain string
+    ; concatenation could — this needs the same tail-recursive-with-
+    ; accumulator shape wx-parse's mode 1/2 required for the identical
+    ; underlying reason (see its own header comment for the full story).
+    (defn cdr-emit (mode x registry buf)
+        (if (eq mode 0)
+            (if (eq (node_level x) 1)
+                (do
+                    (let ty (node_type x))
+                    (if (eq ty 1) (cdr-put-long (cdr-put-octet buf 1) (node_value x))
+                    (if (eq ty 2) (cdr-put-string (cdr-put-octet buf 2) (node_value x))
+                    (if (eq ty 4) (cdr-put-octet buf 3)
+                    (if (eq ty 7) (cdr-put-string (cdr-put-octet buf 4) (float_to_str (node_value x)))
+                        (cdr-put-octet buf 3))))))   ; an unrecognized leaf type: null rather than a silently wrong guess
+                (do
+                    (let name (head (wr-find-name (node_category x) registry)))
+                    (let b1 (cdr-put-string (cdr-put-octet buf 0) name))
+                    (let b2 (cdr-put-ulong b1 (len (node_children x))))
+                    (cdr-emit 1 (node_children x) registry b2)))
+            (if (eq (len x) 0) buf
+                (cdr-emit 1 (tail x) registry (cdr-emit 0 (head x) registry buf)))))
+
+    (defn cdr-emit-node (node registry) (cdr-emit 0 node registry ""))
+
+    (defn cell-to-cdr (node registry) (cdr-emit-node node registry))
+
+    ; --- decode: CDR octet buffer -> the original cell node -------------
+
+    (defn cdr-align (i n) (mul (div (add i (sub n 1)) n) n))
+
+    (defn cdr-get-octet (buf i) (list (str_byte_at buf i) (add i 1)))
+
+    (defn cdr-get-ulong (buf i)
+        (do
+            (let i2 (cdr-align i 4))
+            (let v (add (mul (str_byte_at buf i2) 16777216)
+                    (add (mul (str_byte_at buf (add i2 1)) 65536)
+                        (add (mul (str_byte_at buf (add i2 2)) 256)
+                            (str_byte_at buf (add i2 3))))))
+            (list v (add i2 4))))
+
+    (defn cdr-get-long (buf i)
+        (do
+            (let r (cdr-get-ulong buf i))
+            (let v (head r))
+            (list (if (ge v 2147483648) (sub v 4294967296) v) (head (tail r)))))
+
+    (defn cdr-get-string (buf i)
+        (do
+            (let r (cdr-get-ulong buf i))
+            (let n (head r))              ; includes the NUL terminator
+            (let content-start (head (tail r)))
+            (list (substring buf content-start (add content-start (sub n 1)))
+                (add content-start n))))
+
+    (defn cdr-pv (p) (head p))
+    (defn cdr-pi (p) (head (tail p)))
+
+    ; mode 0: parse one node at position i. mode 1: parse `count` sibling
+    ; nodes starting at i, tail-recursive over an accumulator (count-bounded,
+    ; not delimiter-bounded the way JSON/XML's close-bracket detection is —
+    ; CDR carries an explicit child count instead of a textual terminator).
+    ; Same "one self-recursive function, never two mutually-recursive
+    ; `defn`s" constraint as every other dialect.
+    (defn cdr-parse (mode buf i registry count acc)
+        (if (eq mode 0)
+            (do
+                (let tag-r (cdr-get-octet buf i))
+                (let tag (cdr-pv tag-r))
+                (let after-tag (cdr-pi tag-r))
+                (if (eq tag 0)
+                    (do
+                        (let name-r (cdr-get-string buf after-tag))
+                        (let count-r (cdr-get-ulong buf (cdr-pi name-r)))
+                        (let kids (cdr-parse 1 buf (cdr-pi count-r) registry (cdr-pv count-r) (empty)))
+                        (list (intern_node (head (wr-find-bp (cdr-pv name-r) registry)) (cdr-pv kids)) (cdr-pi kids)))
+                (if (eq tag 1)
+                    (do
+                        (let v (cdr-get-long buf after-tag))
+                        (list (intern_trivial_int (cdr-pv v)) (cdr-pi v)))
+                (if (eq tag 2)
+                    (do
+                        (let v (cdr-get-string buf after-tag))
+                        (list (intern_trivial_string (cdr-pv v)) (cdr-pi v)))
+                (if (eq tag 4)
+                    (do
+                        (let v (cdr-get-string buf after-tag))
+                        (list (intern_trivial_float (cdr-pv v)) (cdr-pi v)))
+                    (list (intern_trivial_int 0) after-tag))))))   ; tag 3 (null): decodes as int 0 -- same named gap as every other dialect's reader here
+        ; mode 1
+        (if (eq count 0)
+            (list (wr-reverse acc) i)
+            (do
+                (let nxt (cdr-parse 0 buf i registry 0 (empty)))
+                (cdr-parse 1 buf (cdr-pi nxt) registry (sub count 1) (cons (cdr-pv nxt) acc))))))
+
+    (defn cdr-parse-node (buf i registry) (cdr-parse 0 buf i registry 0 (empty)))
+
+    (defn cdr-to-cell (buf registry) (cdr-pv (cdr-parse-node buf 0 registry)))
+)

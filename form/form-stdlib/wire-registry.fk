@@ -1,0 +1,63 @@
+; wire-registry.fk — the dialect-agnostic core of the wire-serialization lane.
+;
+; A cell's identity is content-addressed (axiom-3): same Blueprint + same
+; children -> same NodeID, always, for free. Every wire dialect (JSON, XML,
+; CORBA CDR, whatever comes next) rides on exactly that fact and needs
+; nothing dialect-specific to do it. What every dialect *does* need, and
+; what lives here so it's written once:
+;
+; - A REGISTRY. `bp` is one-way — `(bp "FOO")` is deterministic (same name
+;   always yields the same value) but no native op recovers the string
+;   "FOO" back from that value. So no dialect can discover a cell's
+;   Blueprint name by introspecting an arbitrary node; the caller supplies
+;   a registry — the list of (name, blueprint) pairs it built the structure
+;   from — and encoding does a linear `node_eq` scan to find which
+;   registered name matches a node's `node_category`. Decoding reverses the
+;   lookup by name to get back the same blueprint, then calls the same
+;   `intern_node` the original construction used — same name, same
+;   children, same NodeID, by axiom-3, not by anything a dialect does
+;   specially.
+; - List-accumulation helpers (`wr-reverse`) that every dialect's
+;   self-recursive "collect the children into a list" step needs.
+;
+; What's deliberately NOT here: any notion of "how does a leaf/composite
+; look as text or bytes" — that's 100% dialect-specific and lives in each
+; dialect's own file (cell-serialize.fk for JSON, wire-xml.fk for XML,
+; wire-corba-cdr.fk for CORBA CDR).
+;
+; Every recursive function in every dialect built on this file is a SINGLE
+; self-recursive function keyed on a `mode` argument, never two `defn`s
+; calling each other — that's a hard, verified constraint of this runtime,
+; not a style choice. See receipts/2026-07-01-json-fk-src-scoping-fix.md:
+; two top-level `defn`s that call each other (mutual recursion) never
+; resolve on `fkwu --src`, only a function calling itself does.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    ; --- the registry: a list of (name-string blueprint) pairs ---
+    (defn wr-entry (name blueprint) (list name blueprint))
+    (defn wr-entry-name (e) (head e))
+    (defn wr-entry-bp   (e) (head (tail e)))
+
+    (defn wr-find-name (cat registry)
+        (if (eq (len registry) 0) (empty)
+            (if (node_eq cat (wr-entry-bp (head registry)))
+                (list (wr-entry-name (head registry)))
+                (wr-find-name cat (tail registry)))))
+
+    (defn wr-find-bp (name registry)
+        (if (eq (len registry) 0) (empty)
+            (if (str_eq name (wr-entry-name (head registry)))
+                (list (wr-entry-bp (head registry)))
+                (wr-find-bp name (tail registry)))))
+
+    ; `head` directly on the lookup result (no `if`/`len` gate first): still
+    ; fails loudly on an unregistered Blueprint, via this codebase's own
+    ; established crash convention (core.fk's `assert`, `(head (empty))`) —
+    ; a `len`-check-then-`head` would say the same thing in more code.
+
+    ; --- shared list-accumulation helper --------------------------------
+    (defn wr-reverse-onto (xs acc) (if (eq (len xs) 0) acc (wr-reverse-onto (tail xs) (cons (head xs) acc))))
+    (defn wr-reverse (xs) (wr-reverse-onto xs (empty)))
+)

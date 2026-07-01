@@ -1,0 +1,178 @@
+; wire-xml.fk — the XML dialect of the wire-serialization lane.
+;
+; Same north star and same registry mechanism as cell-serialize.fk (the JSON
+; dialect) — see wire-registry.fk's header for why a registry is necessary at
+; all (`bp` is one-way). This file supplies only what's dialect-specific:
+; how a leaf/composite cell looks as XML text.
+;
+; The mapping leans on XML's own idiom rather than imitating JSON's
+; {"bp":"...","c":[...]} shape: a composite's Blueprint NAME becomes its
+; element's tag name directly — `(intern_node (bp "OUTER") kids)` emits as
+; `<OUTER>...</OUTER>`, not `<c bp="OUTER">...</c>`. Leaves get one of four
+; reserved single-letter tags, since XML text content alone can't
+; distinguish "42" the int from "42" the string: `<i>`/`<s>`/`<f>` wrap
+; int/string/float leaves, `<n/>` (self-closing, no content) is null.
+;
+; Escaping is scoped to exactly what's needed: no attributes are ever
+; written, so only element TEXT CONTENT needs escaping — `&`, `<`, `>`.
+; Quote escaping (`&quot;`/`&apos;`) is an attribute-value concern this
+; design doesn't have, not an oversight.
+;
+; Every recursive function here is ONE self-recursive function keyed on a
+; `mode` argument, never two `defn`s calling each other — see
+; wire-registry.fk's header and receipts/2026-07-01-json-fk-src-scoping-fix.md
+; for why that's a hard runtime constraint here, not a style choice.
+;
+; preludes: form-stdlib/core.fk form-stdlib/wire-registry.fk
+
+(do
+    ; --- encode: cell node -> XML text ----------------------------------
+
+    (defn wx-escape-loop (s i acc)
+        (if (ge i (str_len s)) acc
+            (do
+                (let cp (str_byte_at s i))
+                (if (eq cp 38)  (wx-escape-loop s (add i 1) (str_concat acc "&amp;"))   ; '&'
+                (if (eq cp 60)  (wx-escape-loop s (add i 1) (str_concat acc "&lt;"))    ; '<'
+                (if (eq cp 62)  (wx-escape-loop s (add i 1) (str_concat acc "&gt;"))    ; '>'
+                    (wx-escape-loop s (add i 1) (str_concat acc (byte_to_str cp)))))))))
+
+    (defn wx-escape (s) (wx-escape-loop s 0 ""))
+
+    (defn wx-emit-leaf (node)
+        (do
+            (let ty (node_type node))
+            (if (eq ty 1) (str_concat "<i>" (str_concat (int_to_str (node_value node)) "</i>"))
+            (if (eq ty 2) (str_concat "<s>" (str_concat (wx-escape (node_value node)) "</s>"))
+            (if (eq ty 4) "<n/>"
+            (if (eq ty 7) (str_concat "<f>" (str_concat (float_to_str (node_value node)) "</f>"))
+                "<n/>"))))))   ; an unrecognized leaf type: null rather than a silently wrong guess
+
+    ; mode 0: x is a single cell node. mode 1: x is a list of sibling
+    ; nodes, concatenated with no separator (XML needs none between
+    ; sibling elements) — the only two states an emit-node/emit-children
+    ; pair would need, collapsed into one self-recursive function so every
+    ; recursive call site is this function calling itself. See
+    ; cell-serialize.fk's `cser-emit` for the identical shape and the full
+    ; story of why two mutually-recursive `defn`s don't work here.
+    (defn wx-emit (mode x registry)
+        (if (eq mode 0)
+            (if (eq (node_level x) 1)
+                (wx-emit-leaf x)
+                (do
+                    (let name (head (wr-find-name (node_category x) registry)))
+                    (str_concat "<" (str_concat name
+                        (str_concat ">" (str_concat (wx-emit 1 (node_children x) registry)
+                            (str_concat "</" (str_concat name ">"))))))))
+            (if (eq (len x) 0) ""
+                (str_concat (wx-emit 0 (head x) registry) (wx-emit 1 (tail x) registry)))))
+
+    (defn wx-emit-node (node registry) (wx-emit 0 node registry))
+
+    (defn cell-to-xml (node registry) (wx-emit-node node registry))
+
+    ; --- decode: XML text -> the original cell node, identity intact ----
+    ; A narrow, self-contained reader for exactly what wx-emit-node writes
+    ; (<i>/<s>/<f>/<n/> leaves; nested <NAME>...</NAME> composites) — not a
+    ; general XML parser (no attributes, no namespaces, no CDATA, no
+    ; comments, no processing instructions; a real, named scope limit, not
+    ; silently assumed away).
+
+    (defn wx-ws? (c) (or (eq c 32) (or (eq c 10) (or (eq c 9) (eq c 13)))))
+    (defn wx-skip-ws (s i)
+        (if (ge i (str_len s)) i
+            (if (wx-ws? (str_byte_at s i)) (wx-skip-ws s (add i 1)) i)))
+
+    ; A tag name ends at '>' or '/' — this reader never sees a space inside
+    ; a tag since no dialect it emits ever writes attributes.
+    (defn wx-tagname-end (s i)
+        (do
+            (let c (str_byte_at s i))
+            (if (or (eq c 62) (eq c 47)) i (wx-tagname-end s (add i 1)))))
+
+    ; Leaf content never contains a raw '<' (numbers can't; strings are
+    ; escaped), so the next '<' after a leaf's opening '>' always starts
+    ; its closing tag.
+    (defn wx-leaf-content-end (s i)
+        (if (eq (str_byte_at s i) 60) i (wx-leaf-content-end s (add i 1))))
+
+    (defn wx-unescape-loop (s i acc)
+        (if (ge i (str_len s)) acc
+            (if (eq (str_byte_at s i) 38)   ; '&'
+                (if (str_eq (substring s i (add i 5)) "&amp;")
+                    (wx-unescape-loop s (add i 5) (str_concat acc "&"))
+                (if (str_eq (substring s i (add i 4)) "&lt;")
+                    (wx-unescape-loop s (add i 4) (str_concat acc "<"))
+                (if (str_eq (substring s i (add i 4)) "&gt;")
+                    (wx-unescape-loop s (add i 4) (str_concat acc ">"))
+                    (wx-unescape-loop s (add i 1) (str_concat acc "&")))))
+                (wx-unescape-loop s (add i 1) (str_concat acc (byte_to_str (str_byte_at s i)))))))
+
+    (defn wx-unescape (s) (wx-unescape-loop s 0 ""))
+
+    ; parse-node / parse-children return (list value next-index) — a plain
+    ; 2-element list, matching cell-serialize.fk's cser-parse shape.
+    (defn wx-pv (p) (head p))
+    (defn wx-pi (p) (head (tail p)))
+
+    ; mode 0: parse one element at position i. mode 1: start of a sibling
+    ; run — the first child, or close immediately on an empty element (was
+    ; a two-defn split before this fix). mode 2: continuing a sibling run,
+    ; self-recursive over an accumulator, closing on the next close tag
+    ; ("</"). One self-recursive function, same reason as wx-emit and
+    ; cser-parse — but mode 1/2 specifically MUST be tail-recursive with
+    ; an accumulator, not "recurse, then cons the result": an earlier
+    ; version computed the first child, recursed for the rest, and combined
+    ; the two afterward — self-recursion here is only safe as a true tail
+    ; call (this reads as a loop under the hood, not stack-based function
+    ; recursion); holding a node result live across a further self-call
+    ; corrupted it. `cser-parse` in cell-serialize.fk was already shaped
+    ; this way — this file just hadn't matched it consistently everywhere.
+    (defn wx-parse (mode s i registry acc)
+        (if (eq mode 0)
+            (do
+                (let i2 (wx-skip-ws s i))
+                (let name-start (add i2 1))   ; skip '<'
+                (let name-end (wx-tagname-end s name-start))
+                (let name (substring s name-start name-end))
+                (if (eq (str_byte_at s name-end) 47)   ; '/' -- self-closing, only <n/> uses this
+                    (list (intern_trivial_int 0) (add name-end 2))   ; skip "/>" ; null decodes as int 0 -- the same named gap as cell-serialize.fk's json reader, no distinct null node available in Form
+                (do
+                    (let content-start (add name-end 1))   ; skip '>'
+                    (if (str_eq name "i")
+                        (do
+                            (let end (wx-leaf-content-end s content-start))
+                            (list (intern_trivial_int (str_to_int (substring s content-start end))) (add end (add 3 (str_len name)))))
+                    (if (str_eq name "s")
+                        (do
+                            (let end (wx-leaf-content-end s content-start))
+                            (list (intern_trivial_string (wx-unescape (substring s content-start end))) (add end (add 3 (str_len name)))))
+                    (if (str_eq name "f")
+                        (do
+                            (let end (wx-leaf-content-end s content-start))
+                            (list (intern_trivial_float (substring s content-start end)) (add end (add 3 (str_len name)))))
+                        (do   ; a composite: children up to its own close tag, then skip "</NAME>"
+                            (let kids (wx-parse 1 s content-start registry (empty)))
+                            (list (intern_node (head (wr-find-bp name registry)) (wx-pv kids))
+                                (add (wx-pi kids) (add 3 (str_len name)))))))))))
+        (if (eq mode 1)
+            (do
+                (let i2 (wx-skip-ws s i))
+                (if (str_eq (substring s i2 (add i2 2)) "</")
+                    (list (empty) i2)
+                    (do
+                        (let first (wx-parse 0 s i2 registry (empty)))
+                        (wx-parse 2 s (wx-pi first) registry (list (wx-pv first))))))
+            ; mode 2
+            (do
+                (let i2 (wx-skip-ws s i))
+                (if (str_eq (substring s i2 (add i2 2)) "</")
+                    (list (wr-reverse acc) i2)
+                    (do
+                        (let nxt (wx-parse 0 s i2 registry (empty)))
+                        (wx-parse 2 s (wx-pi nxt) registry (cons (wx-pv nxt) acc))))))))
+
+    (defn wx-parse-node (s i registry) (wx-parse 0 s i registry (empty)))
+
+    (defn xml-to-cell (text registry) (wx-pv (wx-parse-node text 0 registry)))
+)

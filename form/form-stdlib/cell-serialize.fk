@@ -1,4 +1,4 @@
-; cell-serialize.fk — cell <=> JSON text, identity-preserving.
+; cell-serialize.fk — the JSON dialect of the wire-serialization lane.
 ;
 ; North star: values + structural type (Blueprint) + content-addressed identity
 ; round-trip through JSON, not just values. The mechanism is exactly axiom-3
@@ -8,92 +8,56 @@
 ; JSON text, and decoding calls the SAME (bp name) + intern_node the original
 ; construction used. Same name, same children -> same NodeID, for free.
 ;
-; The real constraint this design is built around, verified directly before
-; writing any of this: `bp` is one-way. `(bp "FOO")` is deterministic (same
-; name always yields the same value — verified: `(eq (bp "FOO") (bp "FOO"))`
-; -> true) but there is no native op that recovers the string "FOO" back from
-; that value. So a generic serializer cannot discover a cell's Blueprint name
-; by introspecting an arbitrary node; the caller supplies a REGISTRY — the
-; list of (name, blueprint) pairs it used to build the structure being
-; serialized — and encoding does a linear `node_eq` scan to find which
-; registered name matches a given node's `node_category`. This is the
-; same shape json.fk's own json-emit already uses (compare `node_category`
-; against known blueprints via `node_eq`), generalized to caller-supplied
-; blueprints instead of json.fk's own fixed JSON-OBJECT/JSON-ARRAY/JSON-PAIR/
-; JSON-NULL set.
-;
-; Leaves (node_level = 1 -- trivial int/string/float/null) encode as their
-; natural JSON literal, no registry entry needed. Composites (node_level = 0,
-; built via intern_node) need a registry lookup, encoded as a JSON object
-; carrying the Blueprint name and children explicitly: {"bp":"<name>","c":[...]}.
+; This file is JSON's dialect codec ONLY — the registry (how a Blueprint name
+; is looked up / recovered, since `bp` is one-way) and the shared list helper
+; live in wire-registry.fk, preluded below, and are shared verbatim by every
+; other dialect (wire-xml.fk, wire-corba-cdr.fk). See wire-registry.fk's own
+; header for why a registry is necessary at all. What's dialect-specific here:
+; leaves (node_level = 1 -- trivial int/string/float/null) encode as their
+; natural JSON literal; composites (node_level = 0, built via intern_node)
+; encode as a JSON object carrying the Blueprint name and children explicitly:
+; {"bp":"<name>","c":[...]}.
 ;
 ; The text layer here is self-contained, NOT built on form-stdlib/json.fk,
 ; despite the obvious overlap (JSON text in, JSON text out). Found directly
 ; while building this, not assumed: json.fk's own json-parse-value AND
 ; json-emit are BOTH broken on this kernel's direct-source runner (`fkwu
-; --src`) today — confirmed on the simplest possible input, `{"a":1}`,
-; independent of anything in this file. json.fk was evidently proven through
-; a different execution lane (the flatten/BML path, or the walkers via
-; validate.sh) and never actually verified against bare `--src`. That is a
-; real, separate, pre-existing bug worth its own investigation — not
-; attempted here; debugging a 537-line file already proven through other
-; lanes is a materially bigger undertaking than this receipt's scope. This
-; file's own minimal reader/writer covers exactly the shape it needs
-; (int/string/float/null leaves, nested {"bp":...,"c":[...]} objects) and is
-; verified directly against fkwu --src, not inherited from an unverified
-; dependency.
+; --src`) — see receipts/2026-07-01-json-fk-src-scoping-fix.md for the full
+; investigation (two real evaluator bugs found and fixed via this file, a
+; third found in json.fk specifically and left unfixed pending a C-level
+; investigation). This file's own minimal reader/writer covers exactly the
+; shape it needs (int/string/float/null leaves, nested {"bp":...,"c":[...]}
+; objects) and is verified directly against fkwu --src, not inherited from
+; an unverified dependency.
 ;
-; preludes: form-stdlib/core.fk
+; A methodology note earned the hard way while building this, worth keeping:
+; an early debugging pass here chased what looked like a severe recursive-
+; evaluator corruption bug for a long time. It wasn't one — two mundane
+; mistakes in throwaway probe scripts (uninterned list literals; a dropped
+; core.fk prelude) explained everything that early pass found. BUT a second
+; pass, done properly (defn-wrapped, correctly preluded, run directly
+; against this file's own band test rather than a re-derivation), found
+; this file's original `cser-emit-node` / `cser-emit-children` /
+; `cser-emit-node`-again recursion WAS genuinely broken — the
+; originally-claimed "verdict 63, eq(original, reconstructed) true" was
+; wrong when it was written and shipped in this file's earlier receipt. The
+; real root cause, confirmed by minimal repro (`is-even`/`is-odd` calling
+; each other): `fkwu --src` resolves a `defn` body's callee references at
+; *definition* time against what's already registered, with one deliberate
+; exception for the function's own name (that's why plain self-recursive
+; loops — the `-loop` idiom used everywhere in this codebase — work). Two
+; *different* top-level `defn`s that call each other (A calls B, B calls A),
+; in EITHER definition order, do not resolve. `cser-emit-children` calling
+; `cser-emit-node`, which calls `cser-emit-children` back, is exactly that
+; shape. The fix below merges the cycle into one function, keyed on a `mode`
+; tag, that only ever calls itself — real self-recursion, not simulated
+; mutual recursion, so it's inside the verified-working case. Every other
+; wire dialect in this codebase follows the identical shape for the
+; identical reason.
+;
+; preludes: form-stdlib/core.fk form-stdlib/wire-registry.fk
 
 (do
-    ; --- the registry: a list of (name-string blueprint) pairs ---
-    (defn cser-entry (name blueprint) (list name blueprint))
-    (defn cser-entry-name (e) (head e))
-    (defn cser-entry-bp   (e) (head (tail e)))
-
-    (defn cser-find-name (cat registry)
-        (if (eq (len registry) 0) (empty)
-            (if (node_eq cat (cser-entry-bp (head registry)))
-                (list (cser-entry-name (head registry)))
-                (cser-find-name cat (tail registry)))))
-
-    (defn cser-find-bp (name registry)
-        (if (eq (len registry) 0) (empty)
-            (if (str_eq name (cser-entry-name (head registry)))
-                (list (cser-entry-bp (head registry)))
-                (cser-find-bp name (tail registry)))))
-
-    ; `head` directly on the lookup result (no `if`/`len` gate first): still
-    ; fails loudly on an unregistered Blueprint, via this codebase's own
-    ; established crash convention (core.fk's `assert`, `(head (empty))`) —
-    ; a `len`-check-then-`head` would say the same thing in more code.
-    ;
-    ; A methodology note earned the hard way while building this, worth
-    ; keeping: an early debugging pass here chased what looked like a severe
-    ; recursive-evaluator corruption bug for a long time. It wasn't one — two
-    ; mundane mistakes in throwaway probe scripts (uninterned list literals;
-    ; a dropped core.fk prelude) explained everything that early pass found.
-    ; BUT a second pass, done properly (defn-wrapped, correctly preluded,
-    ; run directly against this file's own band test rather than a
-    ; re-derivation), found this file's original `cser-emit-node` /
-    ; `cser-emit-children` / `cser-emit-node`-again recursion WAS genuinely
-    ; broken — the originally-claimed "verdict 63, eq(original,
-    ; reconstructed) true" was wrong when it was written and shipped in this
-    ; receipt's earlier draft. The real root cause, confirmed by minimal
-    ; repro (`is-even`/`is-odd` calling each other): `fkwu --src` resolves a
-    ; `defn` body's callee references at *definition* time against what's
-    ; already registered, with one deliberate exception for the function's
-    ; own name (that's why plain self-recursive loops — the `-loop` idiom
-    ; used everywhere in this codebase — work). Two *different* top-level
-    ; `defn`s that call each other (A calls B, B calls A), in EITHER
-    ; definition order, do not resolve. `cser-emit-children` calling
-    ; `cser-emit-node`, which calls `cser-emit-children` back, is exactly
-    ; that shape. See receipts/2026-07-01-json-fk-src-scoping-fix.md for the
-    ; full repro and the same bug's independent discovery in json.fk. The
-    ; fix below merges the cycle into one function, keyed on a `mode` tag,
-    ; that only ever calls itself — real self-recursion, not simulated
-    ; mutual recursion, so it's inside the verified-working case.
-
     ; --- encode: cell node -> JSON text, directly (no intermediate tree) ---
     (defn cser-emit-str (s) (str_concat "\"" (str_concat s "\"")))
 
@@ -115,7 +79,7 @@
             (if (eq (node_level x) 1)
                 (cser-emit-leaf x)
                 (str_concat "{\"bp\":"
-                    (str_concat (cser-emit-str (head (cser-find-name (node_category x) registry)))
+                    (str_concat (cser-emit-str (head (wr-find-name (node_category x) registry)))
                         (str_concat ",\"c\":["
                             (str_concat (cser-emit 1 (node_children x) registry) "]}")))))
             (if (eq (len x) 0) ""
@@ -157,9 +121,6 @@
     (defn cser-pv (p) (head p))
     (defn cser-pi (p) (head (tail p)))
 
-    (defn cser-reverse-onto (xs acc) (if (eq (len xs) 0) acc (cser-reverse-onto (tail xs) (cons (head xs) acc))))
-    (defn cser-reverse (xs) (cser-reverse-onto xs (empty)))
-
     ; A single self-recursive function over three modes, not three
     ; mutually-recursive `defn`s — same reason and same fix shape as
     ; `cser-emit` above. mode 0: parse one value at position i. mode 1:
@@ -184,7 +145,7 @@
                         (let after-ckey (add after-comma 5))      ; skip `"c":[`
                         (let kids (cser-parse 1 s after-ckey registry (empty)))
                         (let after-close (add (cser-pi kids) 1))  ; skip the object's own closing '}'
-                        (list (intern_node (head (cser-find-bp name registry)) (cser-pv kids)) after-close))
+                        (list (intern_node (head (wr-find-bp name registry)) (cser-pv kids)) after-close))
                 (if (eq c 34)   ; '"' -- a plain string leaf
                     (do
                         (let str-end (cser-scan-str-end s (add i2 1)))
@@ -209,7 +170,7 @@
             (do
                 (let i2 (cser-skip-ws s i))
                 (if (eq (str_byte_at s i2) 93)   ; ']'
-                    (list (cser-reverse acc) (add i2 1))
+                    (list (wr-reverse acc) (add i2 1))
                     (do
                         (let i3 (add i2 1))   ; skip ','
                         (let nxt (cser-parse 0 s (cser-skip-ws s i3) registry (empty)))
