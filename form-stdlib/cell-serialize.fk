@@ -70,20 +70,29 @@
     ;
     ; A methodology note earned the hard way while building this, worth
     ; keeping: an early debugging pass here chased what looked like a severe
-    ; recursive-evaluator corruption bug for a long time. It wasn't one.
-    ; Two mundane mistakes in the throwaway probe scripts, not this file or
-    ; the runtime: (1) list children built from bare integer literals
-    ; (`(list 1 2)`) instead of `(intern_trivial_int 1)` — `node_level` on a
-    ; raw literal returns `0` (it isn't an interned node at all), not `1`,
-    ; so "is this a leaf" silently took the wrong branch; (2) later probes
-    ; dropped the `form-stdlib/core.fk` prelude, so `int_to_str` (Form-native
-    ; since this morning, not native) resolved to `nothing`, and `str_len
-    ; nothing` = `0` read as "produced garbage." A THIRD, genuinely real
-    ; quirk surfaced while sorting this out: a bare top-level `(do (let ...)
-    ; ...)` probe and the identical logic wrapped in a named `defn` and
-    ; explicitly called can disagree on this runner — every actual check in
-    ; this file's own band wraps in a `defn`, matching every other band
-    ; today, and that form is the one verified correct throughout.
+    ; recursive-evaluator corruption bug for a long time. It wasn't one — two
+    ; mundane mistakes in throwaway probe scripts (uninterned list literals;
+    ; a dropped core.fk prelude) explained everything that early pass found.
+    ; BUT a second pass, done properly (defn-wrapped, correctly preluded,
+    ; run directly against this file's own band test rather than a
+    ; re-derivation), found this file's original `cser-emit-node` /
+    ; `cser-emit-children` / `cser-emit-node`-again recursion WAS genuinely
+    ; broken — the originally-claimed "verdict 63, eq(original,
+    ; reconstructed) true" was wrong when it was written and shipped in this
+    ; receipt's earlier draft. The real root cause, confirmed by minimal
+    ; repro (`is-even`/`is-odd` calling each other): `fkwu --src` resolves a
+    ; `defn` body's callee references at *definition* time against what's
+    ; already registered, with one deliberate exception for the function's
+    ; own name (that's why plain self-recursive loops — the `-loop` idiom
+    ; used everywhere in this codebase — work). Two *different* top-level
+    ; `defn`s that call each other (A calls B, B calls A), in EITHER
+    ; definition order, do not resolve. `cser-emit-children` calling
+    ; `cser-emit-node`, which calls `cser-emit-children` back, is exactly
+    ; that shape. See receipts/2026-07-01-json-fk-src-scoping-fix.md for the
+    ; full repro and the same bug's independent discovery in json.fk. The
+    ; fix below merges the cycle into one function, keyed on a `mode` tag,
+    ; that only ever calls itself — real self-recursion, not simulated
+    ; mutual recursion, so it's inside the verified-working case.
 
     ; --- encode: cell node -> JSON text, directly (no intermediate tree) ---
     (defn cser-emit-str (s) (str_concat "\"" (str_concat s "\"")))
@@ -97,20 +106,25 @@
             (if (eq ty 7) (float_to_str (node_value node))
                 "null"))))))   ; an unrecognized leaf type: null rather than a silently wrong guess
 
-    (defn cser-emit-children (children registry)
-        (if (eq (len children) 0) ""
-            (if (eq (len (tail children)) 0)
-                (cser-emit-node (head children) registry)
-                (str_concat (cser-emit-node (head children) registry)
-                    (str_concat "," (cser-emit-children (tail children) registry))))))
+    ; mode 0: x is a single cell node. mode 1: x is a list of sibling nodes
+    ; (a "," -joined run) still needing emission — the only two states the
+    ; old cser-emit-node/cser-emit-children pair ever needed, now one
+    ; self-recursive function instead of two mutually-recursive ones.
+    (defn cser-emit (mode x registry)
+        (if (eq mode 0)
+            (if (eq (node_level x) 1)
+                (cser-emit-leaf x)
+                (str_concat "{\"bp\":"
+                    (str_concat (cser-emit-str (head (cser-find-name (node_category x) registry)))
+                        (str_concat ",\"c\":["
+                            (str_concat (cser-emit 1 (node_children x) registry) "]}")))))
+            (if (eq (len x) 0) ""
+                (if (eq (len (tail x)) 0)
+                    (cser-emit 0 (head x) registry)
+                    (str_concat (cser-emit 0 (head x) registry)
+                        (str_concat "," (cser-emit 1 (tail x) registry)))))))
 
-    (defn cser-emit-node (node registry)
-        (if (eq (node_level node) 1)
-            (cser-emit-leaf node)
-            (str_concat "{\"bp\":"
-                (str_concat (cser-emit-str (head (cser-find-name (node_category node) registry)))
-                    (str_concat ",\"c\":["
-                        (str_concat (cser-emit-children (node_children node) registry) "]}"))))))
+    (defn cser-emit-node (node registry) (cser-emit 0 node registry))
 
     (defn cell-to-json (node registry) (cser-emit-node node registry))
 
@@ -143,56 +157,65 @@
     (defn cser-pv (p) (head p))
     (defn cser-pi (p) (head (tail p)))
 
-    (defn cser-parse-array-elements (s i registry)
-        (do
-            (let i2 (cser-skip-ws s i))
-            (if (eq (str_byte_at s i2) 93)   ; ']'
-                (list (empty) (add i2 1))
-                (do
-                    (let first (cser-parse-node s i2 registry))
-                    (cser-parse-array-more s (cser-pi first) registry (list (cser-pv first)))))))
-
-    (defn cser-parse-array-more (s i registry acc)
-        (do
-            (let i2 (cser-skip-ws s i))
-            (if (eq (str_byte_at s i2) 93)   ; ']'
-                (list (cser-reverse acc) (add i2 1))
-                (do
-                    (let i3 (add i2 1))   ; skip ','
-                    (let nxt (cser-parse-node s (cser-skip-ws s i3) registry))
-                    (cser-parse-array-more s (cser-pi nxt) registry (cons (cser-pv nxt) acc))))))
-
     (defn cser-reverse-onto (xs acc) (if (eq (len xs) 0) acc (cser-reverse-onto (tail xs) (cons (head xs) acc))))
     (defn cser-reverse (xs) (cser-reverse-onto xs (empty)))
 
-    (defn cser-parse-node (s i registry)
-        (do
-            (let i2 (cser-skip-ws s i))
-            (let c (str_byte_at s i2))
-            (if (eq c 123)   ; '{' -- the only object shape this reader knows: {"bp":"...","c":[...]}
-                (do
-                    (let after-brace (add i2 1))
-                    (let after-bpkey (add after-brace 6))    ; skip `"bp":"`
-                    (let name-end (cser-scan-str-end s after-bpkey))
-                    (let name (substring s after-bpkey name-end))
-                    (let after-name (add name-end 1))         ; skip closing quote of name
-                    (let after-comma (add after-name 1))      ; skip ','
-                    (let after-ckey (add after-comma 5))      ; skip `"c":[`
-                    (let kids (cser-parse-array-elements s after-ckey registry))
-                    (let after-close (add (cser-pi kids) 1))  ; skip the object's own closing '}'
-                    (list (intern_node (head (cser-find-bp name registry)) (cser-pv kids)) after-close))
-            (if (eq c 34)   ; '"' -- a plain string leaf
-                (do
-                    (let str-end (cser-scan-str-end s (add i2 1)))
-                    (list (intern_trivial_string (substring s (add i2 1) str-end)) (add str-end 1)))
-            (if (eq c 110)  ; 'n' -- null
-                (list (intern_trivial_int 0) (add i2 4))   ; a real gap: decodes as int 0, not a distinct null value — no node_type tag 4 constructor available in Form (json.fk builds it via intern_node_at with source attribution this file deliberately doesn't carry); named, not silently assumed correct
-            (do   ; a number: int or float, decided by the presence of '.'
-                (let num-end (cser-scan-num-end s i2))
-                (let text (substring s i2 num-end))
-                (if (cser-has-dot? s i2 num-end)
-                    (list (intern_trivial_float text) num-end)
-                    (list (intern_trivial_int (str_to_int text)) num-end))))))))
+    ; A single self-recursive function over three modes, not three
+    ; mutually-recursive `defn`s — same reason and same fix shape as
+    ; `cser-emit` above. mode 0: parse one value at position i. mode 1:
+    ; parse the first array element (or close on an empty array). mode 2:
+    ; parse the next array element given `acc` collected so far (or close).
+    ; Every recursive call site below is `(cser-parse ...)` — this function
+    ; calling itself — never a call out to a sibling `defn`, which is the
+    ; part `fkwu --src` actually supports.
+    (defn cser-parse (mode s i registry acc)
+        (if (eq mode 0)
+            (do
+                (let i2 (cser-skip-ws s i))
+                (let c (str_byte_at s i2))
+                (if (eq c 123)   ; '{' -- the only object shape this reader knows: {"bp":"...","c":[...]}
+                    (do
+                        (let after-brace (add i2 1))
+                        (let after-bpkey (add after-brace 6))    ; skip `"bp":"`
+                        (let name-end (cser-scan-str-end s after-bpkey))
+                        (let name (substring s after-bpkey name-end))
+                        (let after-name (add name-end 1))         ; skip closing quote of name
+                        (let after-comma (add after-name 1))      ; skip ','
+                        (let after-ckey (add after-comma 5))      ; skip `"c":[`
+                        (let kids (cser-parse 1 s after-ckey registry (empty)))
+                        (let after-close (add (cser-pi kids) 1))  ; skip the object's own closing '}'
+                        (list (intern_node (head (cser-find-bp name registry)) (cser-pv kids)) after-close))
+                (if (eq c 34)   ; '"' -- a plain string leaf
+                    (do
+                        (let str-end (cser-scan-str-end s (add i2 1)))
+                        (list (intern_trivial_string (substring s (add i2 1) str-end)) (add str-end 1)))
+                (if (eq c 110)  ; 'n' -- null
+                    (list (intern_trivial_int 0) (add i2 4))   ; a real gap: decodes as int 0, not a distinct null value — no node_type tag 4 constructor available in Form (json.fk builds it via intern_node_at with source attribution this file deliberately doesn't carry); named, not silently assumed correct
+                (do   ; a number: int or float, decided by the presence of '.'
+                    (let num-end (cser-scan-num-end s i2))
+                    (let text (substring s i2 num-end))
+                    (if (cser-has-dot? s i2 num-end)
+                        (list (intern_trivial_float text) num-end)
+                        (list (intern_trivial_int (str_to_int text)) num-end)))))))
+        (if (eq mode 1)
+            (do
+                (let i2 (cser-skip-ws s i))
+                (if (eq (str_byte_at s i2) 93)   ; ']'
+                    (list (empty) (add i2 1))
+                    (do
+                        (let first (cser-parse 0 s i2 registry (empty)))
+                        (cser-parse 2 s (cser-pi first) registry (list (cser-pv first))))))
+            ; mode 2
+            (do
+                (let i2 (cser-skip-ws s i))
+                (if (eq (str_byte_at s i2) 93)   ; ']'
+                    (list (cser-reverse acc) (add i2 1))
+                    (do
+                        (let i3 (add i2 1))   ; skip ','
+                        (let nxt (cser-parse 0 s (cser-skip-ws s i3) registry (empty)))
+                        (cser-parse 2 s (cser-pi nxt) registry (cons (cser-pv nxt) acc))))))))
+
+    (defn cser-parse-node (s i registry) (cser-parse 0 s i registry (empty)))
 
     (defn json-to-cell (text registry) (cser-pv (cser-parse-node text 0 registry)))
 )
