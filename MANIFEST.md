@@ -804,6 +804,18 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       this whole codebase already follows — the fix is a provable no-op, not just an empirically-checked one.
       Verified against every band this session touched (9 bands, all unchanged) plus a grammar spot-check
       identical on the old and new binary. See `receipts/2026-07-01-defn-scope-corruption-fix.md`.
+- [x] **Fixed: `rag-embed.fk`'s `re-vec` was silently producing all-zero vectors.** Not a missing primitive —
+      `runtime/fkwu-uni.c` already defines the exact right `ord`/`char_at` (line ~1968), but only injects them
+      in `--feval` mode, never `--src` (what every band test and receipt here actually uses); `tk-words` never
+      existed at all — `rag-embed.fk` names `form-stdlib/text-tokenize.fk` as its own prelude, but that file
+      was never created. New `form/form-stdlib/text-tokenize.fk` promotes the C helper's `ord`/`char_at` into
+      real `.fk` source and adds a genuine `tk-words` (lowercase, punctuation/whitespace -> word separators,
+      via `str_byte_at`/`byte_to_str`, both real). `re-vec`/`rag-embed.fk` themselves untouched — only the
+      missing prelude was supplied. New `form/form-stdlib/tests/rag-embed-band.fk` (verdict `31`) proves it:
+      `"The Choice Point Becomes Visible."` and `"the   choice, point... becomes VISIBLE"` now embed to
+      byte-identical vectors, while genuinely different words embed differently. `model/rag-embed.fk` and
+      `cognition/rag-embed.fk` are byte-identical, so one fix covers both. See
+      `receipts/2026-07-01-rag-embed-tokenize-fix.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
