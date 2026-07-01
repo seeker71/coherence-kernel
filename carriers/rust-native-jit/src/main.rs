@@ -1,13 +1,13 @@
 use form_rust_native_jit_carrier::{
     add1_hot_function, checked_div_hot_function, execute_add1, execute_checked_array_get,
-    execute_checked_div, execute_hot_function, execute_null_array_get, execute_payload,
-    host_add1_payload, RouteInputs,
+    execute_checked_div, execute_checked_field_load, execute_hot_function, execute_null_array_get,
+    execute_null_field_load, execute_payload, host_add1_payload, RouteInputs,
 };
 
 fn main() {
     let mut args = std::env::args().skip(1);
     let Some(cmd) = args.next() else {
-        eprintln!("usage: form-rust-native-jit-carrier add1 <tagged-int> | div <num> <den> | jit-add1 <tagged-int> | jit-div <num> <den> | jit-array <index>|null|bounds | route <pass|guard|runtime|invalidated|parity|stale> <tagged-int>");
+        eprintln!("usage: form-rust-native-jit-carrier add1 <tagged-int> | div <num> <den> | jit-add1 <tagged-int> | jit-div <num> <den> | jit-array <index>|null|bounds | jit-field <slot>|null | route <pass|guard|runtime|invalidated|parity|stale> <tagged-int>");
         std::process::exit(2);
     };
 
@@ -39,6 +39,17 @@ fn main() {
                 _ => {
                     let index = parse_arg(Some(mode));
                     execute_checked_array_get(&values, index)
+                }
+            }
+        }
+        "jit-field" => {
+            let mode = args.next().unwrap_or_else(|| "1".to_string());
+            let fields = [101_i64, 202, 303];
+            match mode.as_str() {
+                "null" => execute_null_field_load(1),
+                _ => {
+                    let slot = parse_slot(Some(mode));
+                    execute_checked_field_load(&fields, slot)
                 }
             }
         }
@@ -90,4 +101,13 @@ fn parse_arg(raw: Option<String>) -> i64 {
             eprintln!("argument must be a tagged integer");
             std::process::exit(2);
         })
+}
+
+fn parse_slot(raw: Option<String>) -> usize {
+    let value = parse_arg(raw);
+    if value < 0 {
+        eprintln!("field slot must be non-negative");
+        std::process::exit(2);
+    }
+    value as usize
 }
