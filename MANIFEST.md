@@ -816,6 +816,20 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       byte-identical vectors, while genuinely different words embed differently. `model/rag-embed.fk` and
       `cognition/rag-embed.fk` are byte-identical, so one fix covers both. See
       `receipts/2026-07-01-rag-embed-tokenize-fix.md`.
+- [x] **The n=60 dip in the learning-curve sweep diagnosed, not left as an open question.** Per-class
+      held-out breakdown: class 1 ("truth triumphs") drops from 9/13 correct at n=20 to 4/13 at n=60, while
+      every other class moves by only the noise-level `-1`. The entire dip is one class collapsing, not a
+      diffuse regression. Cause: the class-balanced round-robin trains on roughly the first 15 of each
+      class's ~40 examples at n=60 — class 1's hand-authored list puts short-simple paraphrases first, a
+      long "victory/falsehood/lies" vocabulary run in the middle, and the multi-locale + second-batch
+      renderings only near the end (well past position 15), while the held-out set (every 4th item) draws
+      from the whole list. At n=60 the model has overfit to the narrow early vocabulary slice, which
+      generalizes worse to the later, differently-worded held-out examples than either less exposure (n=20)
+      or eventually seeing most of the class's diversity (n=100/154) — the standard non-monotonic-curve
+      pattern for ordered, non-shuffled training data under a fixed epoch budget. A concrete fix (a
+      deterministic stride-permutation of each class's list before splitting) is named but not implemented,
+      to avoid another expensive multi-minute re-verification pass in the same sitting. See
+      `receipts/2026-07-01-n60-dip-diagnosed.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
