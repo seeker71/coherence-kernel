@@ -17,12 +17,39 @@
 ; Source attribution: each composite Recipe is interned via
 ; intern_node_at so cell-trace can walk a JSON-derived cell back
 ; to the line/col where its structure was authored.
+;
+; Two structural constraints this whole file is now built around, both
+; found and verified directly (receipts/2026-07-01-json-fk-src-scoping-
+; fix.md and the correction in receipts/2026-07-01-json-fk-actually-
+; fixed.md — the earlier "root cause #3" claim in the first receipt was
+; itself a misdiagnosis, corrected there):
+;
+; 1. Top-level `let`, unlike top-level `defn`, is NOT visible inside a
+;    `defn` body on `fkwu --src`. So the four JSON category NodeIDs below
+;    are zero-arg `defn`s, called as `(JSON-OBJECT)` etc, never bare
+;    identifiers.
+;
+; 2. `fkwu --src` resolves a `defn` body's callee references at
+;    *definition* time against what's already registered, with one
+;    exception for the function's own name (why the self-recursive
+;    `-loop` idiom works). Two top-level `defn`s that call each other, OR
+;    a `defn` that calls another `defn` defined LATER in the file (even a
+;    non-recursive one-way forward reference), do not resolve — confirmed
+;    directly: `json-next-token` (this file, originally) forward-
+;    referenced `json-scan-string`/`json-scan-number`/`json-scan-literal`,
+;    all defined later, and silently returned an empty token for every
+;    input, not an error. This file is now ordered bottom-up (every
+;    function defined after everything it calls) wherever the call graph
+;    is a DAG, and the two genuinely cyclic clusters (recursive-descent
+;    parse, recursive emit) are each collapsed into ONE self-recursive
+;    function keyed on a `mode` argument — the shape `cell-serialize.fk`
+;    and `wire-xml.fk` already use for the identical reason.
 
 ;; --- universal data category NodeIDs ------------------------------
-(let JSON-OBJECT (bp "JSON-OBJECT"))   ; map: list of (key, value) pairs
-(let JSON-ARRAY  (bp "JSON-ARRAY"))   ; sequence of values
-(let JSON-PAIR   (bp "JSON-PAIR"))   ; (key-string, value)
-(let JSON-NULL   (bp "JSON-NULL"))   ; null literal
+(defn JSON-OBJECT () (bp "JSON-OBJECT"))   ; map: list of (key, value) pairs
+(defn JSON-ARRAY  () (bp "JSON-ARRAY"))   ; sequence of values
+(defn JSON-PAIR   () (bp "JSON-PAIR"))   ; (key-string, value)
+(defn JSON-NULL   () (bp "JSON-NULL"))   ; null literal
 
 ;; --- text helpers --------------------------------------------------
 
@@ -165,6 +192,61 @@
 
 (defn json-mk-tok (k v i) (list k v i))
 
+;; Walks a JSON string body to its closing quote, honouring `\X` as an
+;; escape - the backslash and the following byte are skipped so an
+;; embedded `\"` doesn't end the string. The token value is decoded
+;; JSON text, including common escapes and UTF-8 for \uXXXX values.
+;; scan_run class 4 = non-quote-non-escape. Fast-forward to the next
+;; '"' or '\\' in one native call; only fall back to per-char walk for
+;; escape sequences (rare in our data files). Was per-char recursion.
+(defn json-scan-string-loop (s j start)
+    (do
+        (let k (scan_run s j 4))
+        (if (eq k (str_len s))
+            (json-mk-tok "STRING" (json-unescape-string (json-substr s (add start 1) k)) start)
+            (if (eq (ord (char_at s k)) 92)        ; backslash - skip 2
+                (json-scan-string-loop s (add k 2) start)
+                (json-mk-tok "STRING" (json-unescape-string (json-substr s (add start 1) k)) start)))))
+
+(defn json-scan-string (s i)
+    (json-scan-string-loop s (add i 1) i))
+
+;; scan_run class 4 = non-quote-non-escape. See json-scan-string-loop.
+(defn json-scan-string-end-loop (s j)
+    (do
+        (let k (scan_run s j 4))
+        (if (eq k (str_len s)) k
+            (if (eq (ord (char_at s k)) 92)
+                (json-scan-string-end-loop s (add k 2))
+                (add k 1)))))
+
+(defn json-scan-string-end-pos (s i)
+    (json-scan-string-end-loop s (add i 1)))
+
+(defn json-scan-number-end (s i)
+    (if (eq i (str_len s)) i
+        (do
+            (let cp (ord (char_at s i)))
+            (if (json-is-number-cp cp)
+                (json-scan-number-end s (add i 1))
+                i))))
+
+(defn json-scan-number (s i)
+    (json-mk-tok "NUMBER" (json-substr s i (json-scan-number-end s i)) i))
+
+(defn json-number-float? (text)
+    (or (ge (str_find text "." 0) 0)
+        (or (ge (str_find text "e" 0) 0)
+            (ge (str_find text "E" 0) 0))))
+
+(defn json-number-node (text)
+    (if (json-number-float? text)
+        (intern_trivial_float text)
+        (intern_trivial_int (str_to_int text))))
+
+(defn json-scan-literal (s i word kind)
+    (json-mk-tok kind word i))
+
 (defn json-next-token (s i)
     (do
         (let i (json-skip-ws s i))
@@ -185,61 +267,6 @@
                 (if (eq cp 102) (json-scan-literal s i "false" "FALSE")
                 (if (eq cp 110) (json-scan-literal s i "null" "NULL")
                     (json-mk-tok "ERROR" c i))))))))))))))))
-
-(defn json-scan-string (s i)
-    (json-scan-string-loop s (add i 1) i))
-
-;; Walks a JSON string body to its closing quote, honouring `\X` as an
-;; escape - the backslash and the following byte are skipped so an
-;; embedded `\"` doesn't end the string. The token value is decoded
-;; JSON text, including common escapes and UTF-8 for \uXXXX values.
-;; scan_run class 4 = non-quote-non-escape. Fast-forward to the next
-;; '"' or '\\' in one native call; only fall back to per-char walk for
-;; escape sequences (rare in our data files). Was per-char recursion.
-(defn json-scan-string-loop (s j start)
-    (do
-        (let k (scan_run s j 4))
-        (if (eq k (str_len s))
-            (json-mk-tok "STRING" (json-unescape-string (json-substr s (add start 1) k)) start)
-            (if (eq (ord (char_at s k)) 92)        ; backslash - skip 2
-                (json-scan-string-loop s (add k 2) start)
-                (json-mk-tok "STRING" (json-unescape-string (json-substr s (add start 1) k)) start)))))
-
-(defn json-scan-string-end-pos (s i)
-    (json-scan-string-end-loop s (add i 1)))
-
-;; scan_run class 4 = non-quote-non-escape. See json-scan-string-loop.
-(defn json-scan-string-end-loop (s j)
-    (do
-        (let k (scan_run s j 4))
-        (if (eq k (str_len s)) k
-            (if (eq (ord (char_at s k)) 92)
-                (json-scan-string-end-loop s (add k 2))
-                (add k 1)))))
-
-(defn json-scan-number (s i)
-    (json-mk-tok "NUMBER" (json-substr s i (json-scan-number-end s i)) i))
-
-(defn json-scan-number-end (s i)
-    (if (eq i (str_len s)) i
-        (do
-            (let cp (ord (char_at s i)))
-            (if (json-is-number-cp cp)
-                (json-scan-number-end s (add i 1))
-                i))))
-
-(defn json-number-float? (text)
-    (or (ge (str_find text "." 0) 0)
-        (or (ge (str_find text "e" 0) 0)
-            (ge (str_find text "E" 0) 0))))
-
-(defn json-number-node (text)
-    (if (json-number-float? text)
-        (intern_trivial_float text)
-        (intern_trivial_int (str_to_int text))))
-
-(defn json-scan-literal (s i word kind)
-    (json-mk-tok kind word i))
 
 (defn json-token-end (s tok)
     (do
@@ -266,80 +293,75 @@
 
 (defn json-reverse-acc (xs) (json-reverse-acc-loop xs (empty)))
 
-(defn json-parse-value (s i source-path)
-    (do
-        (let tok (json-next-token s i))
-        (let kind (json-tok-kind tok))
-        (if (str_eq kind "STRING")
-            (json-mk-pair-r (intern_trivial_string (json-tok-val tok)) (json-token-end s tok))
-        (if (str_eq kind "NUMBER")
-            (json-mk-pair-r (json-number-node (json-tok-val tok)) (json-token-end s tok))
-        (if (str_eq kind "TRUE")
-            (json-mk-pair-r (intern_trivial_bool true) (json-token-end s tok))
-        (if (str_eq kind "FALSE")
-            (json-mk-pair-r (intern_trivial_bool false) (json-token-end s tok))
-        (if (str_eq kind "NULL")
-            (json-mk-pair-r (intern_node_at JSON-NULL (empty) source-path
-                                        1 1)
-                        (json-token-end s tok))
-        (if (str_eq kind "LBRACE")
-            (json-parse-object s (json-token-end s tok) source-path (json-tok-start tok))
-        (if (str_eq kind "LBRACK")
-            (json-parse-array s (json-token-end s tok) source-path (json-tok-start tok))
-            (json-mk-pair-r (intern_trivial_int 0) (add i 1)))))))))))
-
-(defn json-parse-array (s i source-path start-pos)
-    (do
-        (let line-no 1)
-        (let tok (json-next-token s i))
-        (if (str_eq (json-tok-kind tok) "RBRACK")
-            (json-mk-pair-r (intern_node_at JSON-ARRAY (empty) source-path line-no 1)
-                       (json-token-end s tok))
-            (json-parse-array-elements s i source-path line-no (empty)))))
-
-(defn json-parse-array-elements (s i source-path line-no acc)
-    (do
-        (let pr (json-parse-value s i source-path))
-        (let acc2 (cons (json-pair-r pr) acc))
-        (let after (json-pair-pos pr))
-        (let tok (json-next-token s after))
-        (if (str_eq (json-tok-kind tok) "COMMA")
-            (json-parse-array-elements s (json-token-end s tok) source-path line-no acc2)
+;; ONE self-recursive function, not five mutually-recursive ones (see the
+;; file header). mode 0: parse one value at position i (was
+;; json-parse-value). mode 1: array, just after '[' — check for immediate
+;; ']' or delegate to mode 2 (was json-parse-array). mode 2: array
+;; elements, self-recursive over ',' (was json-parse-array-elements). mode
+;; 3: object, just after '{' (was json-parse-object). mode 4: object
+;; pairs, self-recursive over ',' (was json-parse-object-pairs). `acc` is
+;; unused in modes 0/1/3 (passed as `(empty)` at those call sites).
+(defn json-parse (mode s i source-path acc)
+    (if (eq mode 0)
+        (do
+            (let tok (json-next-token s i))
+            (let kind (json-tok-kind tok))
+            (if (str_eq kind "STRING")
+                (json-mk-pair-r (intern_trivial_string (json-tok-val tok)) (json-token-end s tok))
+            (if (str_eq kind "NUMBER")
+                (json-mk-pair-r (json-number-node (json-tok-val tok)) (json-token-end s tok))
+            (if (str_eq kind "TRUE")
+                (json-mk-pair-r (intern_trivial_bool true) (json-token-end s tok))
+            (if (str_eq kind "FALSE")
+                (json-mk-pair-r (intern_trivial_bool false) (json-token-end s tok))
+            (if (str_eq kind "NULL")
+                (json-mk-pair-r (intern_node_at (JSON-NULL) (empty) source-path 1 1) (json-token-end s tok))
+            (if (str_eq kind "LBRACE")
+                (json-parse 3 s (json-token-end s tok) source-path (empty))
+            (if (str_eq kind "LBRACK")
+                (json-parse 1 s (json-token-end s tok) source-path (empty))
+                (json-mk-pair-r (intern_trivial_int 0) (add i 1))))))))))
+    (if (eq mode 1)
+        (do
+            (let tok (json-next-token s i))
             (if (str_eq (json-tok-kind tok) "RBRACK")
-                (json-mk-pair-r (intern_node_at JSON-ARRAY (json-reverse-acc acc2)
-                                            source-path line-no 1)
-                            (json-token-end s tok))
-                (json-mk-pair-r (intern_node_at JSON-ARRAY (json-reverse-acc acc2)
-                                            source-path line-no 1)
-                            after)))))
+                (json-mk-pair-r (intern_node_at (JSON-ARRAY) (empty) source-path 1 1) (json-token-end s tok))
+                (json-parse 2 s i source-path (empty))))
+    (if (eq mode 2)
+        (do
+            (let pr (json-parse 0 s i source-path (empty)))
+            (let acc2 (cons (json-pair-r pr) acc))
+            (let after (json-pair-pos pr))
+            (let tok (json-next-token s after))
+            (if (str_eq (json-tok-kind tok) "COMMA")
+                (json-parse 2 s (json-token-end s tok) source-path acc2)
+                (if (str_eq (json-tok-kind tok) "RBRACK")
+                    (json-mk-pair-r (intern_node_at (JSON-ARRAY) (json-reverse-acc acc2) source-path 1 1) (json-token-end s tok))
+                    (json-mk-pair-r (intern_node_at (JSON-ARRAY) (json-reverse-acc acc2) source-path 1 1) after))))
+    (if (eq mode 3)
+        (do
+            (let tok (json-next-token s i))
+            (if (str_eq (json-tok-kind tok) "RBRACE")
+                (json-mk-pair-r (intern_node_at (JSON-OBJECT) (empty) source-path 1 1) (json-token-end s tok))
+                (json-parse 4 s i source-path (empty))))
+        ; mode 4
+        (do
+            (let key-tok (json-next-token s i))
+            (let key (intern_trivial_string (json-tok-val key-tok)))
+            (let after-key (json-token-end s key-tok))
+            (let colon (json-next-token s after-key))
+            (let after-colon (json-token-end s colon))
+            (let val-pr (json-parse 0 s after-colon source-path (empty)))
+            (let val (json-pair-r val-pr))
+            (let after-val (json-pair-pos val-pr))
+            (let pair (intern_node_at (JSON-PAIR) (list key val) source-path 1 1))
+            (let acc2 (cons pair acc))
+            (let next-tok (json-next-token s after-val))
+            (if (str_eq (json-tok-kind next-tok) "COMMA")
+                (json-parse 4 s (json-token-end s next-tok) source-path acc2)
+                (json-mk-pair-r (intern_node_at (JSON-OBJECT) (json-reverse-acc acc2) source-path 1 1) (json-token-end s next-tok)))))))))
 
-(defn json-parse-object (s i source-path start-pos)
-    (do
-        (let line-no 1)
-        (let tok (json-next-token s i))
-        (if (str_eq (json-tok-kind tok) "RBRACE")
-            (json-mk-pair-r (intern_node_at JSON-OBJECT (empty) source-path line-no 1)
-                       (json-token-end s tok))
-            (json-parse-object-pairs s i source-path line-no (empty)))))
-
-(defn json-parse-object-pairs (s i source-path line-no acc)
-    (do
-        (let key-tok (json-next-token s i))
-        (let key (intern_trivial_string (json-tok-val key-tok)))
-        (let after-key (json-token-end s key-tok))
-        (let colon (json-next-token s after-key))
-        (let after-colon (json-token-end s colon))
-        (let val-pr (json-parse-value s after-colon source-path))
-        (let val (json-pair-r val-pr))
-        (let after-val (json-pair-pos val-pr))
-        (let pair (intern_node_at JSON-PAIR (list key val) source-path 1 1))
-        (let acc2 (cons pair acc))
-        (let next-tok (json-next-token s after-val))
-        (if (str_eq (json-tok-kind next-tok) "COMMA")
-            (json-parse-object-pairs s (json-token-end s next-tok) source-path line-no acc2)
-            (json-mk-pair-r (intern_node_at JSON-OBJECT (json-reverse-acc acc2)
-                                        source-path line-no 1)
-                        (json-token-end s next-tok)))))
+(defn json-parse-value (s i source-path) (json-parse 0 s i source-path (empty)))
 
 ;; --- top-level entry ---------------------------------------------
 
@@ -420,6 +442,11 @@
 
 (defn json-node-null-value? (value) (str_eq (value_kind value) "null"))
 
+;; json-node-null moved before its callers below (json-node-string etc) —
+;; the original had it last in this section, a forward reference from
+;; every other json-node-* constructor.
+(defn json-node-null () (intern_node_at (JSON-NULL) (empty) "form-stdlib/json.fk" 1 1))
+
 (defn json-node-string (s)
     (if (json-node-null-value? s)
         (json-node-null)
@@ -442,11 +469,10 @@
     (if (json-node-null-value? b)
         (json-node-null)
         (intern_trivial_bool b)))
-(defn json-node-null () (intern_node_at JSON-NULL (empty) "form-stdlib/json.fk" 1 1))
-(defn json-node-array (items) (intern_node_at JSON-ARRAY items "form-stdlib/json.fk" 1 1))
+(defn json-node-array (items) (intern_node_at (JSON-ARRAY) items "form-stdlib/json.fk" 1 1))
 (defn json-node-pair (key value)
-    (intern_node_at JSON-PAIR (list (intern_trivial_string key) value) "form-stdlib/json.fk" 1 1))
-(defn json-node-object (pairs) (intern_node_at JSON-OBJECT pairs "form-stdlib/json.fk" 1 1))
+    (intern_node_at (JSON-PAIR) (list (intern_trivial_string key) value) "form-stdlib/json.fk" 1 1))
+(defn json-node-object (pairs) (intern_node_at (JSON-OBJECT) pairs "form-stdlib/json.fk" 1 1))
 
 (defn json-hex-digit (n)
     (if (lt n 10)
@@ -488,33 +514,22 @@
 (defn json-quote-string (s)
     (str_concat "\"" (str_concat (json-escape-loop s 0 "") "\"")))
 
-(defn json-emit-pair-node (pair-node)
-    (str_concat
-        (json-quote-string (json-pair-key pair-node))
-        (str_concat ":" (json-emit (json-pair-value pair-node)))))
-
-(defn json-emit-pair-list (pairs)
-    (if (eq (len pairs) 0) ""
-        (if (eq (len (tail pairs)) 0)
-            (json-emit-pair-node (head pairs))
-            (str_concat
-                (json-emit-pair-node (head pairs))
-                (str_concat "," (json-emit-pair-list (tail pairs)))))))
-
-(defn json-emit-array-items (items)
-    (if (eq (len items) 0) ""
-        (if (eq (len (tail items)) 0)
-            (json-emit (head items))
-            (str_concat
-                (json-emit (head items))
-                (str_concat "," (json-emit-array-items (tail items)))))))
-
 (defn json-emit-leaf (node)
     (do
         (let ty (node_type node))
         (if (eq ty 1) (int_to_str (node_value node))
         (if (eq ty 2) (json-quote-string (node_value node))
-        (if (eq ty 3) (int_to_str (node_value node))
+        ; ty 3 is a trivial bool. A real, separate, pre-existing gap, found
+        ; while fixing this file's structural bugs (not caused by them),
+        ; named rather than silently routed through int_to_str as before:
+        ; confirmed directly that `(intern_trivial_bool true)` and
+        ; `(intern_trivial_bool false)` construct the SAME node — `eq` on
+        ; them returns true — so there is currently no way in Form to
+        ; recover which boolean a trivial-bool node actually holds. This
+        ; needs its own native-level investigation (a kernel bug, not a
+        ; json.fk one); until then, both emit "false" — a known-wrong but
+        ; at least valid-JSON placeholder, not a crash.
+        (if (eq ty 3) "false"
         (if (eq ty 4) "null"
         ; ty 7 is a trivial float (confirmed: `(node_type (intern_trivial_float
         ; "3.14"))` -> 7) — routes to float_to_str, not int_to_str. Before
@@ -528,19 +543,44 @@
         (if (eq ty 6) (int_to_str (node_value node))
             (head (empty))))))))))
 
-(defn json-emit (node)
-    (do
-        (let cat (node_category node))
-        (if (node_eq cat JSON-OBJECT)
-            (str_concat "{" (str_concat (json-emit-pair-list (node_children node)) "}"))
-        (if (node_eq cat JSON-ARRAY)
-            (str_concat "[" (str_concat (json-emit-array-items (node_children node)) "]"))
-        (if (node_eq cat JSON-PAIR)
-            (json-emit-pair-node node)
-        (if (node_eq cat JSON-NULL)
-            "null"
-        (if (eq (node_level node) 1)
-            (json-emit-leaf node)
-            (head (empty)))))))))
+;; ONE self-recursive function, not four mutually-recursive ones (see the
+;; file header). mode 0: emit a single cell node (was json-emit). mode 1:
+;; emit a ","-joined run of JSON-PAIR siblings (was json-emit-pair-list).
+;; mode 2: emit a ","-joined run of array-item siblings (was
+;; json-emit-array-items). mode 3: emit one JSON-PAIR node as `"key":value`
+;; (was json-emit-pair-node). Non-tail self-recursion (mode 1/2 combine two
+;; further self-calls via str_concat, not a tail call) is safe here — unlike
+;; the node-returning parse side, this only ever builds/returns STRINGS,
+;; confirmed not to hit the "self-recursion must be a strict tail call"
+;; constraint (see wire-xml.fk's `wx-emit`, the identical shape, proven).
+(defn json-emit-m (mode x)
+    (if (eq mode 0)
+        (do
+            (let cat (node_category x))
+            (if (node_eq cat (JSON-OBJECT))
+                (str_concat "{" (str_concat (json-emit-m 1 (node_children x)) "}"))
+            (if (node_eq cat (JSON-ARRAY))
+                (str_concat "[" (str_concat (json-emit-m 2 (node_children x)) "]"))
+            (if (node_eq cat (JSON-PAIR))
+                (json-emit-m 3 x)
+            (if (node_eq cat (JSON-NULL))
+                "null"
+            (if (eq (node_level x) 1)
+                (json-emit-leaf x)
+                (head (empty))))))))
+    (if (eq mode 1)
+        (if (eq (len x) 0) ""
+            (if (eq (len (tail x)) 0)
+                (json-emit-m 3 (head x))
+                (str_concat (json-emit-m 3 (head x)) (str_concat "," (json-emit-m 1 (tail x))))))
+    (if (eq mode 2)
+        (if (eq (len x) 0) ""
+            (if (eq (len (tail x)) 0)
+                (json-emit-m 0 (head x))
+                (str_concat (json-emit-m 0 (head x)) (str_concat "," (json-emit-m 2 (tail x))))))
+        ; mode 3: x is a single JSON-PAIR node
+        (str_concat (json-quote-string (json-pair-key x)) (str_concat ":" (json-emit-m 0 (json-pair-value x))))))))
+
+(defn json-emit (node) (json-emit-m 0 node))
 
 0

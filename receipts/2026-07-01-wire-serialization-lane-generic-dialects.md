@@ -82,6 +82,9 @@ worked around:
 
 ## Not attempted here (named, not silently assumed complete)
 
+- ~~`json.fk` itself remains unfixed — root cause #3 from~~ **Corrected later the same day:**
+  `json.fk` is genuinely fixed now, and "root cause #3" was a misdiagnosis, not a real fourth
+  bug — see `2026-07-01-json-fk-actually-fixed.md`. Original text left below unedited.
 - `json.fk` itself remains unfixed — root cause #3 from
   `2026-07-01-json-fk-src-scoping-fix.md` (self-recursion in one `if`-branch corrupting sibling
   branches that never take it) is a DIFFERENT, deeper bug than either evaluator issue found and

@@ -91,4 +91,7 @@ Full regression, fresh build, clean /tmp/come-in-band-dir:
 - The actual BML wiring in `http-adapter.fk` (`kh-ok-negotiated`) is unverifiable in this
   checkout — fixing the BML flatten pipeline itself is real, separate, sizeable infrastructure
   work, out of scope here and not attempted.
-- `json.fk`'s root cause #3, CDR's GIOP/IIOP/TypeCode scope — unchanged from prior receipts.
+- ~~`json.fk`'s root cause #3~~ — **corrected later the same day**: `json.fk` is genuinely fixed
+  now, root cause #3 was a misdiagnosis, see `2026-07-01-json-fk-actually-fixed.md`. CDR's
+  GIOP/IIOP/TypeCode scope is unchanged from prior receipts (a real, deliberate scope boundary,
+  not a bug).
