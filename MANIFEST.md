@@ -491,6 +491,17 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       nothing (axiom-1). Clauses are DATA (the holographic discipline, no hardcoded branches). Band verdict
       **511 FOUR-WAY** (Go/Rust/TS/fkwu `--src`) over the pure-list cell surface; the canonical-nothing arm is
       fkwu-native (the walkers carry the cell surface, not the nothing op). See `receipts/2026-06-29-stone-10-pattern-match.md`.
+- [x] **Locale-neutral meaning locate added.** `learn/sanskrit-locale-baseline.fk` gains `slb-meaning-for-tokens`
+      (locale-specific surface tokens -> the neutral meaning id they belong to — the reverse of `slb-tokens`,
+      which every existing multilocale sample built FROM a meaning id but never walked back TO one) and
+      `slb-locate-cross-locale?` (do two locales' own tokens independently locate the SAME meaning). Composed
+      into `learn/multilocale-nl-audio-pipeline.fk` as `mlap-nl-meaning-located?`/`mlap-nl-all-located?`, an
+      honest two-sided check that the pipeline's own asserted `meaning` fields are actually derivable from raw
+      tokens, not merely taken on faith. The band (`learn/tests/locale-neutral-locate-band.fk`) returns `255`:
+      cross-locale exact matches hold for the four baseline phrases across all ten ready locales, a genuine
+      cross-locale mismatch is correctly rejected, and out-of-baseline tokens honestly locate to `0` rather than
+      a false positive — the honest floor stays that this covers only the small Sanskrit-baseline vocabulary,
+      not open text. See `receipts/2026-07-01-locale-neutral-locate.md`.
 - [ ] `form-cli` standing as an interactive loop (the single-file source-runner stands; the loop is polish).
 - [ ] Origin repo consumes this kernel (one-home). The heavy-chain form-cli *build* still leans on a Go-made-once seed.
 
