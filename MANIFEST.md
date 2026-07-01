@@ -509,10 +509,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `fkwu --src` (`grammars/tests/control-invite-grammar-band.fk`). Honest floor, precisely named: this pass
       also found that the C-bootstrap `fkwu`'s indirect call (named as a gap in the 2026-06-29 offer-ack-core
       receipt) now works, but `oac-kind`'s blueprint discrimination does not reproduce reliably once more than
-      one node-with-children is interned in a scope — traced live (gdb, `FK_OBSERVE`, ruling the JIT in/out) to
-      a runtime bug distinct from blueprint identity: a node's children are only reliably readable while it is
-      the most-recently-interned node with children; a second one can silently empty the first's. See
-      `receipts/2026-07-01-node-children-last-writer-wins.md` for the minimal (no-prelude) repro. So
+      one `let`-bound value is alive in a scope — traced live (gdb, `FK_OBSERVE`, ruling the JIT in/out, and a
+      hardware watchpoint on the actual storage cells) to a runtime bug distinct from blueprint identity: a
+      `let`'s storage slot is meant to be permanent for its scope, but the evaluator's own local-reservation
+      opcode treats the same storage as ephemeral scratch, so a later computation can silently overwrite an
+      earlier binding before its scope ends. See `receipts/2026-07-01-node-children-last-writer-wins.md` for
+      the exact watchpoint trace and a minimal (no-prelude) repro. So
       `control/tests/choice-lane-core-band.fk` and the pre-existing, unmodified
       `control/tests/offer-ack-core-band.fk` both currently miss their intended verdict on this exact build; each
       primitive was instead verified correct in small live isolation. See
