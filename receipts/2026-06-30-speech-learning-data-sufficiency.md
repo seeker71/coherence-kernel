@@ -8,9 +8,9 @@ enough data for real model training.
 Current data:
 
 ```text
-live teacher wavs: 5
-observed wav bytes: 272048
-live teacher locales: 3
+live wav rows: 11
+observed wav bytes: 484572
+live locales: 6
 held-out repeat rows: 1
 cross-phrase held-out rows: 0
 cross-voice held-out rows: 0
