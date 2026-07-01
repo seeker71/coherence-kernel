@@ -230,6 +230,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `repair-voice-family-and-shorten-phrases`. This changes the acquisition algorithm from fixed capture to
       observation-conditioned capture planning while keeping native neural parameters `0` and data sufficiency
       false.
+- [x] **Speech corpus French repair batch 0005 added.** `learn/speech-corpus-french-repair-batch-0005.fk`
+      executes the first adaptive repair lane on local Apple Metal (`8191`): `20` French repair-alias wavs are
+      rendered through `say`, normalized with `ffmpeg`, checked by `whisper.cpp/Metal`, and admitted `20/20` with
+      max WER `0` and observed wav bytes `345520`. Aggregate speech rows are now `211` wavs and `7152402`
+      observed bytes; captured corpus rows are `119`; data sufficiency remains false, rows used for training
+      remain `0`, and source translations are kept separate from spoken aliases.
 - [x] **Speech corpus held-out repeat learning added.** `learn/speech-corpus-heldout-repeat-learning.fk` trains six
       Form-native full-envelope prototypes from consentful corpus phrases and evaluates six separately rendered,
       volume-shifted held-out wavs (`16383`): local oracle accepts `6/6`, native prototype classification accepts
