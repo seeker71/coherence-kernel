@@ -1,0 +1,236 @@
+; jit-dylib-carrier-abi.fk - concrete Form contract for a dylib JIT carrier.
+;
+; Prelude:
+;   model/form-asm-x64.fk
+;
+; This is the exact host-door shape for making Form-emitted byte lists live
+; without moving compiler meaning into C/Rust. A dylib may own OS calls
+; (mmap/mprotect or equivalent, icache flush, function pointer call), but the
+; bytes, arg vectors, source/fault/deopt maps, and routing stay Form-owned.
+
+(do
+    (defn jdca-native () 1)
+    (defn jdca-deopt () 2)
+    (defn jdca-exception () 3)
+    (defn jdca-rewalk () 4)
+    (defn jdca-melt () 5)
+    (defn jdca-reject () 6)
+    (defn jdca-pending () 7)
+
+    (defn jdca-ok () 1)
+    (defn jdca-unavailable () 2)
+    (defn jdca-mismatch () 3)
+    (defn jdca-fault () 4)
+
+    (defn jdca-byte? (b) (if (ge b 0) (if (lt b 256) 1 0) 0))
+    (defn jdca-byte-list? (xs)
+        (if (eq (len xs) 0)
+            1
+            (if (eq (jdca-byte? (head xs)) 1) (jdca-byte-list? (tail xs)) 0)))
+    (defn jdca-tagged? (v) (if (ge v 0) (if (eq (mod v 2) 0) 1 0) 0))
+    (defn jdca-tagged-list? (xs)
+        (if (eq (len xs) 0)
+            1
+            (if (eq (jdca-tagged? (head xs)) 1) (jdca-tagged-list? (tail xs)) 0)))
+    (defn jdca-eq-list (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0)
+                1
+                (if (eq (head a) (head b)) (jdca-eq-list (tail a) (tail b)) 0))
+            0))
+
+    ; carrier = ("dylib-carrier" path version install call drop flush status owner no-c-growth generation)
+    (defn jdca-carrier (path version install call drop flush status owner no-c-growth generation)
+        (list "dylib-carrier" path version install call drop flush status owner no-c-growth generation))
+    (defn jdca-carrier? (c) (if (eq (len c) 11) (str_eq (nth c 0) "dylib-carrier") 0))
+    (defn jdca-path (c) (nth c 1))
+    (defn jdca-version (c) (nth c 2))
+    (defn jdca-install-symbol (c) (nth c 3))
+    (defn jdca-call-symbol (c) (nth c 4))
+    (defn jdca-drop-symbol (c) (nth c 5))
+    (defn jdca-flush-symbol (c) (nth c 6))
+    (defn jdca-status-symbol (c) (nth c 7))
+    (defn jdca-owner (c) (nth c 8))
+    (defn jdca-no-c-growth (c) (nth c 9))
+    (defn jdca-generation (c) (nth c 10))
+
+    (defn jdca-carrier-safe? (c)
+        (if (eq (jdca-carrier? c) 1)
+            (if (str_eq (jdca-path c) "libform_jit_carrier.dylib")
+                (if (eq (jdca-version c) 1)
+                    (if (str_eq (jdca-install-symbol c) "fk_jit_install")
+                        (if (str_eq (jdca-call-symbol c) "fk_jit_call")
+                            (if (str_eq (jdca-drop-symbol c) "fk_jit_drop")
+                                (if (str_eq (jdca-flush-symbol c) "fk_jit_flush_icache")
+                                    (if (str_eq (jdca-status-symbol c) "fk_jit_status_v1")
+                                        (if (str_eq (jdca-owner c) "form-backend")
+                                            (if (eq (jdca-no-c-growth c) 1)
+                                                (if (gt (jdca-generation c) 0) 1 0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    ; install = ("dylib-install" bytes byte-count abi wx sealed executable writable source fault deopt)
+    (defn jdca-install (bytes byte-count abi wx sealed executable writable source fault deopt)
+        (list "dylib-install" bytes byte-count abi wx sealed executable writable source fault deopt))
+    (defn jdca-install? (i) (if (eq (len i) 11) (str_eq (nth i 0) "dylib-install") 0))
+    (defn jdca-bytes (i) (nth i 1))
+    (defn jdca-byte-count (i) (nth i 2))
+    (defn jdca-abi (i) (nth i 3))
+    (defn jdca-wx (i) (nth i 4))
+    (defn jdca-sealed (i) (nth i 5))
+    (defn jdca-executable (i) (nth i 6))
+    (defn jdca-writable (i) (nth i 7))
+    (defn jdca-source-map (i) (nth i 8))
+    (defn jdca-fault-map (i) (nth i 9))
+    (defn jdca-deopt-map (i) (nth i 10))
+
+    (defn jdca-abi-ok? (abi) (if (str_eq abi "sysv") 1 (if (str_eq abi "win64") 1 0)))
+    (defn jdca-known-bytes? (i)
+        (if (jdca-eq-list (jdca-bytes i) (x64-args-field-load-checked-sysv 2))
+            1
+            (if (jdca-eq-list (jdca-bytes i) (x64-args-array-get-checked-sysv)) 1 0)))
+    (defn jdca-install-safe? (i)
+        (if (eq (jdca-install? i) 1)
+            (if (gt (len (jdca-bytes i)) 0)
+                (if (eq (jdca-byte-count i) (len (jdca-bytes i)))
+                    (if (eq (jdca-byte-list? (jdca-bytes i)) 1)
+                        (if (eq (jdca-known-bytes? i) 1)
+                            (if (eq (jdca-abi-ok? (jdca-abi i)) 1)
+                                (if (eq (jdca-wx i) 1)
+                                    (if (eq (jdca-sealed i) 1)
+                                        (if (eq (jdca-executable i) 1)
+                                            (if (eq (jdca-writable i) 0)
+                                                (if (eq (jdca-source-map i) 1)
+                                                    (if (eq (jdca-fault-map i) 1)
+                                                        (if (eq (jdca-deopt-map i) 1) 1 0)
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    ; call = ("dylib-call" slot args arg-count callable source-stack status)
+    (defn jdca-call (slot args arg-count callable source-stack status)
+        (list "dylib-call" slot args arg-count callable source-stack status))
+    (defn jdca-call? (c) (if (eq (len c) 7) (str_eq (nth c 0) "dylib-call") 0))
+    (defn jdca-slot (c) (nth c 1))
+    (defn jdca-args (c) (nth c 2))
+    (defn jdca-arg-count (c) (nth c 3))
+    (defn jdca-callable (c) (nth c 4))
+    (defn jdca-source-stack (c) (nth c 5))
+    (defn jdca-status (c) (nth c 6))
+
+    (defn jdca-call-safe? (c)
+        (if (eq (jdca-call? c) 1)
+            (if (gt (jdca-slot c) 0)
+                (if (eq (jdca-arg-count c) (len (jdca-args c)))
+                    (if (eq (jdca-tagged-list? (jdca-args c)) 1)
+                        (if (eq (jdca-callable c) 1)
+                            (if (eq (jdca-source-stack c) 1) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jdca-route (carrier install call guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (jdca-carrier-safe? carrier) 1)
+            (if (eq (jdca-install-safe? install) 1)
+                (if (eq (jdca-call-safe? call) 1)
+                    (if (eq (jdca-status call) (jdca-mismatch))
+                        (jdca-reject)
+                        (if (eq (jdca-status call) (jdca-unavailable))
+                            (jdca-deopt)
+                            (if (eq (jdca-status call) (jdca-fault))
+                                (jdca-exception)
+                                (if (eq stale 1)
+                                    (jdca-melt)
+                                    (if (eq invalidated 1)
+                                        (jdca-rewalk)
+                                        (if (eq guard-ok 1)
+                                            (if (eq runtime-ok 1)
+                                                (if (eq parity-ok 1) (jdca-native) (jdca-deopt))
+                                                (jdca-exception))
+                                            (jdca-deopt)))))))
+                    (jdca-pending))
+                (jdca-pending))
+            (jdca-reject)))
+
+    (defn jdca-good-carrier () (jdca-carrier "libform_jit_carrier.dylib" 1 "fk_jit_install" "fk_jit_call" "fk_jit_drop" "fk_jit_flush_icache" "fk_jit_status_v1" "form-backend" 1 1))
+    (defn jdca-c-carrier () (jdca-carrier "libform_jit_carrier.dylib" 1 "fk_jit_install" "fk_jit_call" "fk_jit_drop" "fk_jit_flush_icache" "fk_jit_status_v1" "c-lowering" 1 1))
+    (defn jdca-bad-symbol-carrier () (jdca-carrier "libform_jit_carrier.dylib" 1 "install" "fk_jit_call" "fk_jit_drop" "fk_jit_flush_icache" "fk_jit_status_v1" "form-backend" 1 1))
+    (defn jdca-zero-generation-carrier () (jdca-carrier "libform_jit_carrier.dylib" 1 "fk_jit_install" "fk_jit_call" "fk_jit_drop" "fk_jit_flush_icache" "fk_jit_status_v1" "form-backend" 1 0))
+
+    (defn jdca-field-install () (jdca-install (x64-args-field-load-checked-sysv 2) 21 "sysv" 1 1 1 0 1 1 1))
+    (defn jdca-array-install () (jdca-install (x64-args-array-get-checked-sysv) 42 "sysv" 1 1 1 0 1 1 1))
+    (defn jdca-bad-count-install () (jdca-install (x64-args-field-load-checked-sysv 2) 20 "sysv" 1 1 1 0 1 1 1))
+    (defn jdca-writable-install () (jdca-install (x64-args-field-load-checked-sysv 2) 21 "sysv" 1 1 1 1 1 1 1))
+    (defn jdca-no-source-install () (jdca-install (x64-args-field-load-checked-sysv 2) 21 "sysv" 1 1 1 0 0 1 1))
+
+    (defn jdca-good-call () (jdca-call 2 (list 82 2 10) 3 1 1 (jdca-ok)))
+    (defn jdca-unavailable-call () (jdca-call 2 (list 82 2 10) 3 1 1 (jdca-unavailable)))
+    (defn jdca-fault-call () (jdca-call 2 (list 82 2 10) 3 1 1 (jdca-fault)))
+    (defn jdca-mismatch-call () (jdca-call 2 (list 82 2 10) 3 1 1 (jdca-mismatch)))
+    (defn jdca-untagged-call () (jdca-call 2 (list 82 1 10) 3 1 1 (jdca-ok)))
+    (defn jdca-bad-count-call () (jdca-call 2 (list 82 2 10) 2 1 1 (jdca-ok)))
+
+    (defn jdca-bit (cond bit) (if cond bit 0))
+    (defn jit-dylib-carrier-abi-check ()
+        (add
+            (jdca-bit (eq (jdca-carrier-safe? (jdca-good-carrier)) 1) 1)
+            (add
+                (jdca-bit (eq (jdca-carrier-safe? (jdca-c-carrier)) 0) 2)
+                (add
+                    (jdca-bit (eq (jdca-carrier-safe? (jdca-bad-symbol-carrier)) 0) 4)
+                    (add
+                        (jdca-bit (eq (jdca-carrier-safe? (jdca-zero-generation-carrier)) 0) 8)
+                        (add
+                            (jdca-bit (eq (jdca-install-safe? (jdca-field-install)) 1) 16)
+                            (add
+                                (jdca-bit (eq (jdca-install-safe? (jdca-array-install)) 1) 32)
+                                (add
+                                    (jdca-bit (eq (jdca-install-safe? (jdca-bad-count-install)) 0) 64)
+                                    (add
+                                        (jdca-bit (eq (jdca-install-safe? (jdca-writable-install)) 0) 128)
+                                        (add
+                                            (jdca-bit (eq (jdca-install-safe? (jdca-no-source-install)) 0) 256)
+                                            (add
+                                                (jdca-bit (eq (jdca-call-safe? (jdca-good-call)) 1) 512)
+                                                (add
+                                                    (jdca-bit (eq (jdca-call-safe? (jdca-untagged-call)) 0) 1024)
+                                                    (add
+                                                        (jdca-bit (eq (jdca-call-safe? (jdca-bad-count-call)) 0) 2048)
+                                                        (add
+                                                            (jdca-bit (eq (jdca-route (jdca-good-carrier) (jdca-array-install) (jdca-good-call) 1 1 0 1 0) (jdca-native)) 4096)
+                                                            (add
+                                                                (jdca-bit (eq (jdca-route (jdca-good-carrier) (jdca-array-install) (jdca-good-call) 0 1 0 1 0) (jdca-deopt)) 8192)
+                                                                (add
+                                                                    (jdca-bit (eq (jdca-route (jdca-good-carrier) (jdca-array-install) (jdca-good-call) 1 0 0 1 0) (jdca-exception)) 16384)
+                                                                    (add
+                                                                        (jdca-bit (eq (jdca-route (jdca-good-carrier) (jdca-array-install) (jdca-good-call) 1 1 1 1 0) (jdca-rewalk)) 32768)
+                                                                        (add
+                                                                            (jdca-bit (eq (jdca-route (jdca-good-carrier) (jdca-array-install) (jdca-good-call) 1 1 0 0 0) (jdca-deopt)) 65536)
+                                                                            (add
+                                                                                (jdca-bit (eq (jdca-route (jdca-good-carrier) (jdca-array-install) (jdca-good-call) 1 1 0 1 1) (jdca-melt)) 131072)
+                                                                                (add
+                                                                                    (jdca-bit (eq (jdca-route (jdca-good-carrier) (jdca-array-install) (jdca-unavailable-call) 1 1 0 1 0) (jdca-deopt)) 262144)
+                                                                                    (add
+                                                                                        (jdca-bit (eq (jdca-route (jdca-good-carrier) (jdca-array-install) (jdca-fault-call) 1 1 0 1 0) (jdca-exception)) 524288)
+                                                                                        (jdca-bit (eq (jdca-route (jdca-good-carrier) (jdca-array-install) (jdca-mismatch-call) 1 1 0 1 0) (jdca-reject)) 1048576))))))))))))))))))))))
+
+    0)
