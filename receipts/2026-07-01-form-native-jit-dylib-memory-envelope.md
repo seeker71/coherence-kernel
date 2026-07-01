@@ -13,7 +13,7 @@ Date: 2026-07-01
 ( cat observe/jit-carrier-install-call-evidence.fk \
       observe/tests/jit-carrier-install-call-evidence-band.fk ) > /tmp/jcice.fk
 ./fkwu --src /tmp/jcice.fk
-# 2147483647
+# 4294967295
 ```
 
 ## Receipt
@@ -31,7 +31,9 @@ contract for the dylib JIT carrier. The envelope requires:
 - positive generation.
 
 `observe/jit-carrier-install-call-evidence.fk` now requires the memory-envelope
-receipt before carrier/install/call evidence can pass.
+receipt before carrier/install/call evidence can pass. A later cache-lifecycle
+gate raised this carrier total again; the command above records the current
+carrier ledger total.
 
 ## Proved
 
