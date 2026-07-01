@@ -22,8 +22,10 @@ planned wavs: 12000
 planned held-out rows: 1200
 floor: 12000 wavs, 6 locales, 1200 held-out rows
 captured: 119 admitted rows in batches 0001 through 0005; full 12000-row window not captured
-trained: false
-status: corpus-scale-window-open-not-trained
+training intake: 6 batch-0001 rows admitted to native prototype-training intake
+data sufficient: false
+global authority: false
+status: corpus-scale-window-open-training-intake-started
 ```
 
 Cross-voice window:
@@ -52,6 +54,7 @@ cat learn/coherence-network-self-corpus.fk \
 ```
 
 Meaning: the self-corpus can fill the first corpus-scale wav floor, but only the
-first 119 rows have been captured so far. The next real step is expanding the
-live acquisition runner until the full raw and cross-voice windows are rendered
-and witnessed locally before any training promotion.
+first 119 rows have been captured so far and only six captured rows have entered
+the training intake. The next real step is expanding the live acquisition runner
+until the full raw and cross-voice windows are rendered and witnessed locally
+before any global promotion.
