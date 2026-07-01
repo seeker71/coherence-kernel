@@ -1,0 +1,100 @@
+; control/invite-dispatch.fk — closes the loop: a BMF-recognized token
+; invite drives the matching control primitive, in the order a stream
+; carries them, threading memory/checkpoints through.
+;
+; grammars/control-invite-grammar.fk recognizes the eight tokens
+; (<CHOICE> <CUT> <FAIL> <STOP> <UNDO> <STORE> <RESTORE> <TIMEOUT>) inside
+; free text. control/offer-ack-core.fk and control/choice-lane-core.fk
+; implement what each one DOES. Neither half alone is the feature: this
+; file is the missing middle — walk the stream's invites in order and
+; dispatch each to its primitive, carrying a running SESSION (the current
+; ack, the collected memory, the last checkpoint) from one invite to the
+; next. This is "choice invites internal thinking, going down different
+; query lanes, collecting nodes along the way" made executable end to end.
+;
+; preludes: control/offer-ack-core.fk, control/choice-lane-core.fk,
+;           form/form-stdlib/core.fk, grammars/line-grammar.fk,
+;           grammars/bmf-core.fk, grammars/control-invite-grammar.fk
+;
+; Proof: control/tests/invite-dispatch-band.fk.
+
+(do
+    ;; ── SESSION — the running state a stream of invites threads through ──
+    ;; ack: the most recent acknowledgement (of any kind).
+    ;; memory: every CHOICE/CUT/TIMEOUT ack, oldest first — the nodes a
+    ;;   choice invited reasoning to gather along the way.
+    ;; checkpoint: the memory as of the last <STORE>, for <RESTORE>/<UNDO>.
+    (defn cid-session (ack memory checkpoint) (list ack memory checkpoint))
+    (defn cid-ack        (s) (nth s 0))
+    (defn cid-memory     (s) (nth s 1))
+    (defn cid-checkpoint (s) (nth s 2))
+    (defn cid-init ()        (cid-session (oac-nothing) (list) (list)))
+
+    ;; ── the eight tags, read straight from the grammar's own vocabulary ──
+    (defn cid-choice-tag?  (tag) (str_eq tag "<CHOICE>"))
+    (defn cid-cut-tag?     (tag) (str_eq tag "<CUT>"))
+    (defn cid-fail-tag?    (tag) (str_eq tag "<FAIL>"))
+    (defn cid-stop-tag?    (tag) (str_eq tag "<STOP>"))
+    (defn cid-undo-tag?    (tag) (str_eq tag "<UNDO>"))
+    (defn cid-store-tag?   (tag) (str_eq tag "<STORE>"))
+    (defn cid-restore-tag? (tag) (str_eq tag "<RESTORE>"))
+    (defn cid-timeout-tag? (tag) (str_eq tag "<TIMEOUT>"))
+
+    ;; only choice/cut/timeout need alternatives from the reasoning context
+    ;; — the text alone never carries them; fail/stop/undo/store/restore
+    ;; act on the session alone.
+    (defn cid-needs-alts? (tag)
+        (if (cid-choice-tag? tag) 1
+            (if (cid-cut-tag? tag) 1
+                (if (cid-timeout-tag? tag) 1 0))))
+
+    ;; the step budget a <TIMEOUT> invite bounds its lane walk by.
+    (defn cid-timeout-budget () 8)
+
+    ;; ── STEP — the ONE dispatcher every tag routes through ───────────────
+    (defn cid-step (session tag alts args)
+        (if (cid-choice-tag? tag)
+            (do (let ack (oac-choice alts args))
+                (cid-session ack (cons ack (cid-memory session)) (cid-checkpoint session)))
+        (if (cid-cut-tag? tag)
+            (do (let ack (oac-cut alts args))
+                (cid-session ack (cons ack (cid-memory session)) (cid-checkpoint session)))
+        (if (cid-timeout-tag? tag)
+            (do (let w (oac-timeout-walk alts args (cid-timeout-budget)))
+                (let ack (oac-timeout-ack w))
+                (cid-session ack (cons ack (cid-memory session)) (cid-checkpoint session)))
+        (if (cid-fail-tag? tag)
+            (cid-session (oac-fail) (cid-memory session) (cid-checkpoint session))
+        (if (cid-stop-tag? tag)
+            (cid-session (oac-stop) (cid-memory session) (cid-checkpoint session))
+        (if (cid-store-tag? tag)
+            (cid-session (cid-ack session) (cid-memory session) (oac-store (cid-memory session)))
+        (if (cid-restore-tag? tag)
+            (cid-session (cid-ack session) (oac-restore (cid-checkpoint session)) (cid-checkpoint session))
+        (if (cid-undo-tag? tag)
+            (cid-session (cid-ack session)
+                         (oac-undo (cid-ack session) (cid-checkpoint session) (cid-memory session))
+                         (cid-checkpoint session))
+            session))))))))) ;; an unrecognized tag leaves the session untouched
+
+    ;; ── RUN — walk the tags in order; <STOP> halts, nothing after it runs ─
+    ;; alt-lists is a PARALLEL list of alternative-cell lists, ONE per
+    ;; choice/cut/timeout tag the stream carries, in the order they occur;
+    ;; tags that need no alternatives consume none.
+    (defn cid-run (tags alt-lists args session)
+        (if (eq (len tags) 0) session
+            (if (cid-stop-tag? (head tags))
+                (cid-step session (head tags) (list) args)
+                (if (eq (cid-needs-alts? (head tags)) 1)
+                    (cid-run (tail tags) (tail alt-lists) args
+                             (cid-step session (head tags) (head alt-lists) args))
+                    (cid-run (tail tags) alt-lists args
+                             (cid-step session (head tags) (list) args))))))
+
+    ;; the public entry: a raw stream of text -> the final session, having
+    ;; walked every invite the BMF grammar found in it.
+    (defn cid-run-stream (stream-text alt-lists args)
+        (cid-run (cig-invites stream-text) alt-lists args (cid-init)))
+
+    0
+)

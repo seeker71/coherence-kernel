@@ -1,0 +1,93 @@
+; preludes: form/form-stdlib/core.fk, grammars/line-grammar.fk,
+;           grammars/bmf-core.fk, grammars/control-invite-grammar.fk,
+;           control/offer-ack-core.fk, control/choice-lane-core.fk,
+;           control/invite-dispatch.fk
+;
+; invite-dispatch-band — the end-to-end loop: BMF-recognized text tokens
+; drive the matching control primitive, in order, threading a session
+; (ack, memory, checkpoint) through the whole stream. The whole band body
+; is wrapped in ONE defn, called once, not bare top-level lets — a defn's
+; locals are reserved on the value stack by the evaluator; a bare
+; top-level do's are not (receipts/2026-07-01-node-children-last-writer-wins.md).
+;
+; Verdict 1023 when every claim lands:
+;   1    a lone <CHOICE> picks the first live alternative — memory gains
+;        exactly that one ack
+;   2    <STORE> checkpoints the memory as of that point
+;   4    a SECOND <CHOICE> that finds nothing declining leaves the session
+;        acking nothing, with that decline recorded in memory too
+;   8    <UNDO> after the declined choice falls back to the stored
+;        checkpoint — memory reverts to just the first choice's pick
+;   16   <STOP> halts the walk — an invite AFTER <STOP> in the stream
+;        never runs (memory does not grow past the stop point)
+;   32   <CUT> commits to the first alternative of ANY kind (a decline),
+;        never reaching the alternative after it
+;   64   <FAIL> acks nothing without needing any alternatives at all
+;   128  <RESTORE> returns to an explicit checkpoint on request
+;   256  <TIMEOUT> is honest: budget 1 over two declining alternatives
+;        reports a real timeout (alternatives were left untried)
+;   512  a stream with no recognized invites at all runs to an
+;        untouched, still-initial session
+(do
+    (defn cell-silent (args) (oac-nothing))
+    (defn cell-five (args) (oac-one (intern_trivial_int 5)))
+    (defn cell-nine (args) (oac-one (intern_trivial_int 9)))
+    (defn ack-int (ack) (node_value (oac-payload ack)))
+
+    (defn idb-score (cond bit) (if cond bit 0))
+
+    (defn invite-dispatch-band ()
+        (do
+            ;; (1)+(2): "<CHOICE>" picks five; "<STORE>" checkpoints it.
+            (let s1 (cid-run-stream "explore <CHOICE> then <STORE>"
+                        (list (list cell-silent cell-five)) (list)))
+            (let c1 (idb-score (and (eq (oac-one? (cid-ack s1)) 1)
+                                     (eq (ack-int (cid-ack s1)) 5)) 1))
+            (let c2 (idb-score (eq (len (cid-checkpoint s1)) 1) 2))
+
+            ;; (3)+(4): a second stream continues past a decline, then undoes.
+            (let s2 (cid-run-stream "explore <CHOICE> then <STORE> then <CHOICE> again then <UNDO>"
+                        (list (list cell-silent cell-five) (list cell-silent cell-silent)) (list)))
+            (let c3 (idb-score (eq (len (cid-memory s2)) 2) 4))
+            (let c4 (idb-score (eq (len (cid-memory s2)) 1) 8))
+
+            ;; (5): <STOP> halts — a trailing <CHOICE> after it never runs.
+            (let s5 (cid-run-stream "start <CHOICE> then <STOP> then <CHOICE> unreachable"
+                        (list (list cell-silent cell-five) (list cell-nine)) (list)))
+            (let c5 (idb-score (and (eq (oac-stopped? (cid-ack s5)) 1)
+                                     (eq (len (cid-memory s5)) 1)) 16))
+
+            ;; (6): <CUT> commits to the FIRST alt of any kind (a decline).
+            (let s6 (cid-run-stream "narrow it down <CUT> now"
+                        (list (list cell-silent cell-five)) (list)))
+            (let c6 (idb-score (eq (oac-nothing? (cid-ack s6)) 1) 32))
+
+            ;; (7): <FAIL> needs no alternatives.
+            (let s7 (cid-run-stream "give up <FAIL> here" (list) (list)))
+            (let c7 (idb-score (eq (oac-nothing? (cid-ack s7)) 1) 64))
+
+            ;; (8): <RESTORE> returns to an explicit checkpoint ON REQUEST,
+            ;; unconditionally — unlike <UNDO>, it does not wait for a
+            ;; decline. Two successful choices grow memory to length 2;
+            ;; restore reverts it to the length-1 checkpoint taken after
+            ;; the first, discarding the second's addition.
+            (let s8 (cid-run-stream "explore <CHOICE> then <STORE> then <CHOICE> again then <RESTORE>"
+                        (list (list cell-five) (list cell-nine)) (list)))
+            (let c8 (idb-score (and (eq (len (cid-memory s8)) 1)
+                                      (eq (ack-int (head (cid-memory s8))) 5)) 128))
+
+            ;; (9): <TIMEOUT> with a budget too small to try every alt is a
+            ;; REAL timeout, not honest exhaustion.
+            (let s9 (cid-run-stream "bounded search <TIMEOUT> now"
+                        (list (list cell-silent cell-silent cell-five)) (list)))
+            (let c9 (idb-score (eq (oac-nothing? (cid-ack s9)) 1) 256))
+
+            ;; (10): no invites at all -> the untouched initial session.
+            (let s10 (cid-run-stream "just an ordinary sentence" (list) (list)))
+            (let c10 (idb-score (and (eq (oac-nothing? (cid-ack s10)) 1)
+                                      (eq (len (cid-memory s10)) 0)) 512))
+
+            (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8 (add c9 c10)))))))))))
+
+    (invite-dispatch-band)
+)
