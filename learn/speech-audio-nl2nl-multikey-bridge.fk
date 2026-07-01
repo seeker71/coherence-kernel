@@ -1,0 +1,220 @@
+; speech-audio-nl2nl-multikey-bridge.fk -- audio A -> neutral keys -> audio B.
+;
+; This extends the first audio NL2NL bridge beyond one neutral key. Six
+; reciprocal routes cover nav.search and nav.vision across six ready locales.
+; Native Form owns the neutral-key route and target text. Host TTS and local
+; Whisper remain the audio carrier/oracle; this is not native vocoder authority.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/wav-sense.fk
+;   learn/macos-sema-teacher-acoustic-learning.fk
+;   learn/speech-model-metrics-report.fk
+;   learn/speech-learning-data-sufficiency.fk
+
+(do
+    (defn sanm-kind () "speech-audio-nl2nl-multikey-bridge")
+    (defn sanm-out-dir () (str_concat (temp_dir) "/speech-audio-nl2nl-multikey-bridge"))
+    (defn sanm-max-wer () 25)
+
+    (defn sanm-route (id key meaning src dst src-text dst-text src-voice dst-voice src-lang dst-lang)
+        (list "speech-audio-nl2nl-multikey-route" id key meaning src dst src-text dst-text
+              src-voice dst-voice src-lang dst-lang))
+    (defn sanm-route-id        (r) (nth r 1))
+    (defn sanm-route-key       (r) (nth r 2))
+    (defn sanm-route-meaning   (r) (nth r 3))
+    (defn sanm-route-src       (r) (nth r 4))
+    (defn sanm-route-dst       (r) (nth r 5))
+    (defn sanm-route-src-text  (r) (nth r 6))
+    (defn sanm-route-dst-text  (r) (nth r 7))
+    (defn sanm-route-src-voice (r) (nth r 8))
+    (defn sanm-route-dst-voice (r) (nth r 9))
+    (defn sanm-route-src-lang  (r) (nth r 10))
+    (defn sanm-route-dst-lang  (r) (nth r 11))
+
+    (defn sanm-routes ()
+        (list
+            (sanm-route 1 "nav.search" 501 "de" "es" "Suche" "Buscar"
+                        "Flo (German (Germany))" "Flo (Spanish (Spain))" "de" "es")
+            (sanm-route 2 "nav.search" 501 "es" "de" "Buscar" "Suche"
+                        "Flo (Spanish (Spain))" "Flo (German (Germany))" "es" "de")
+            (sanm-route 3 "nav.vision" 502 "en" "fr" "Vision" "Vision"
+                        "Flo (English (US))" "Amélie" "en" "fr")
+            (sanm-route 4 "nav.vision" 502 "fr" "en" "Vision" "Vision"
+                        "Amélie" "Flo (English (US))" "fr" "en")
+            (sanm-route 5 "nav.vision" 502 "id" "pt-br" "Visi" "Visão"
+                        "Damayanti" "Flo (Portuguese (Brazil))" "id" "pt")
+            (sanm-route 6 "nav.vision" 502 "pt-br" "id" "Visão" "Visi"
+                        "Flo (Portuguese (Brazil))" "Damayanti" "pt" "id")))
+
+    (defn sanm-path-stem (route side)
+        (mstal-cat4 (sanm-out-dir) "/row-" (mstal-int-str (sanm-route-id route)) side))
+    (defn sanm-aiff-path (route side) (str_concat (sanm-path-stem route side) ".aiff"))
+    (defn sanm-wav-path (route side) (str_concat (sanm-path-stem route side) ".wav"))
+
+    (defn sanm-say-command (voice aiff text)
+        (str_concat
+            (str_concat "say -v " (mstal-q voice))
+            (str_concat
+                (str_concat " -o " (mstal-q aiff))
+                (str_concat " " (mstal-q text)))))
+
+    (defn sanm-ffmpeg-command (aiff wav)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (mstal-q aiff))
+            (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le " (mstal-q wav))))
+
+    (defn sanm-whisper-command (wav lang)
+        (str_concat
+            (str_concat "whisper-cli -m " (mstal-q (mstal-model)))
+            (str_concat
+                (str_concat " -f " (mstal-q wav))
+                (str_concat " -l " (str_concat lang " -nt -np")))))
+
+    (defn sanm-render (route side voice text)
+        (do
+            (let _mk (fs_mkdir (sanm-out-dir)))
+            (let aiff (sanm-aiff-path route side))
+            (let wav (sanm-wav-path route side))
+            (let _say (host-exec (sanm-say-command voice aiff text) ""))
+            (let _ff (host-exec (sanm-ffmpeg-command aiff wav) ""))
+            wav))
+
+    (defn sanm-text-accept? (tokens text)
+        (sw-accept? tokens (sw-tokens text) (sanm-max-wer)))
+
+    (defn sanm-native-meaning (tokens locale key)
+        (if (str_eq key "nav.search")
+            (if (str_eq locale "de")
+                (if (eq (sanm-text-accept? tokens "Suche") 1) 501 0)
+                (if (str_eq locale "es")
+                    (if (eq (sanm-text-accept? tokens "Buscar") 1) 501 0)
+                    0))
+            (if (str_eq key "nav.vision")
+                (if (str_eq locale "en")
+                    (if (eq (sanm-text-accept? tokens "Vision") 1) 502 0)
+                    (if (str_eq locale "fr")
+                        (if (eq (sanm-text-accept? tokens "Vision") 1) 502 0)
+                        (if (str_eq locale "id")
+                            (if (eq (sanm-text-accept? tokens "Visi") 1) 502 0)
+                            (if (str_eq locale "pt-br")
+                                (if (or (eq (sanm-text-accept? tokens "Visão") 1)
+                                        (eq (sanm-text-accept? tokens "Visao") 1)) 502 0)
+                                0))))
+                0)))
+
+    (defn sanm-target-text (meaning dst)
+        (if (eq meaning 501)
+            (if (str_eq dst "de") "Suche"
+                (if (str_eq dst "es") "Buscar" ""))
+            (if (eq meaning 502)
+                (if (str_eq dst "en") "Vision"
+                    (if (str_eq dst "fr") "Vision"
+                        (if (str_eq dst "id") "Visi"
+                            (if (str_eq dst "pt-br") "Visão" ""))))
+                "")))
+
+    (defn sanm-row-receipt (route)
+        (do
+            (let src-wav (sanm-render route "-src" (sanm-route-src-voice route) (sanm-route-src-text route)))
+            (let src-oracle (host-exec (sanm-whisper-command src-wav (sanm-route-src-lang route)) ""))
+            (let meaning (sanm-native-meaning (sw-tokens src-oracle) (sanm-route-src route) (sanm-route-key route)))
+            (let target (sanm-target-text meaning (sanm-route-dst route)))
+            (let dst-wav (sanm-render route "-dst" (sanm-route-dst-voice route) target))
+            (let dst-oracle (host-exec (sanm-whisper-command dst-wav (sanm-route-dst-lang route)) ""))
+            (let src-wer (sw-wer (sw-tokens src-oracle) (sw-tokens (sanm-route-src-text route))))
+            (let dst-wer (sw-wer (sw-tokens dst-oracle) (sw-tokens (sanm-route-dst-text route))))
+            (list "speech-audio-nl2nl-multikey-row"
+                  (sanm-route-id route)
+                  (sanm-route-key route)
+                  (sanm-route-src route)
+                  (sanm-route-dst route)
+                  src-oracle
+                  meaning
+                  target
+                  dst-oracle
+                  src-wer
+                  dst-wer
+                  (if (le src-wer (sanm-max-wer)) 1 0)
+                  (if (le dst-wer (sanm-max-wer)) 1 0)
+                  (if (and (eq meaning (sanm-route-meaning route))
+                           (str_eq target (sanm-route-dst-text route))) 1 0)
+                  (add (file_size src-wav) (file_size dst-wav)))))
+
+    (defn sanm-run-loop (routes)
+        (if (eq (len routes) 0) (empty)
+            (cons (sanm-row-receipt (head routes))
+                  (sanm-run-loop (tail routes)))))
+
+    (defn sanm-row-src-ok    (r) (nth r 11))
+    (defn sanm-row-dst-ok    (r) (nth r 12))
+    (defn sanm-row-native-ok (r) (nth r 13))
+    (defn sanm-row-bytes     (r) (nth r 14))
+
+    (defn sanm-count-src (rows)
+        (if (eq (len rows) 0) 0 (add (sanm-row-src-ok (head rows)) (sanm-count-src (tail rows)))))
+    (defn sanm-count-dst (rows)
+        (if (eq (len rows) 0) 0 (add (sanm-row-dst-ok (head rows)) (sanm-count-dst (tail rows)))))
+    (defn sanm-count-native (rows)
+        (if (eq (len rows) 0) 0 (add (sanm-row-native-ok (head rows)) (sanm-count-native (tail rows)))))
+    (defn sanm-total-bytes (rows)
+        (if (eq (len rows) 0) 0 (add (sanm-row-bytes (head rows)) (sanm-total-bytes (tail rows)))))
+
+    (defn sanm-receipt-from (rows)
+        (list (sanm-kind)
+              rows
+              (len rows)
+              (sanm-count-src rows)
+              (sanm-count-dst rows)
+              (sanm-count-native rows)
+              (sanm-total-bytes rows)
+              "oracle-guided-multikey-audio-nl2nl-audio-bridge-not-native-vocoder"
+              2
+              1
+              1
+              0
+              0))
+
+    (defn sanm-run-receipt ()
+        (if (eq (mstal-ready?) 1)
+            (sanm-receipt-from (sanm-run-loop (sanm-routes)))
+            (list (sanm-kind) (empty) 0 0 0 0 0 "missing-host-tools" 2 1 1 0 0)))
+
+    (defn sanm-rec-kind      (r) (nth r 0))
+    (defn sanm-rec-count     (r) (nth r 2))
+    (defn sanm-rec-src-ok    (r) (nth r 3))
+    (defn sanm-rec-dst-ok    (r) (nth r 4))
+    (defn sanm-rec-native-ok (r) (nth r 5))
+    (defn sanm-rec-bytes     (r) (nth r 6))
+    (defn sanm-rec-status    (r) (nth r 7))
+    (defn sanm-rec-keys      (r) (nth r 8))
+    (defn sanm-rec-native    (r) (nth r 9))
+    (defn sanm-rec-oracle    (r) (nth r 10))
+    (defn sanm-rec-vocoder   (r) (nth r 11))
+    (defn sanm-rec-neural    (r) (nth r 12))
+
+    (defn sanm-run-verdict ()
+        (do
+            (let r (sanm-run-receipt))
+            (add
+                (add
+                    (add (if (str_eq (sanm-rec-kind r) (sanm-kind)) 1 0)
+                         (if (eq (sanm-rec-count r) 6) 2 0))
+                    (add (if (eq (sanm-rec-src-ok r) 6) 4 0)
+                         (if (eq (sanm-rec-dst-ok r) 6) 8 0)))
+                (add
+                    (add (if (eq (sanm-rec-native-ok r) 6) 16 0)
+                         (if (ge (sanm-rec-bytes r) 300000) 32 0))
+                    (add
+                        (add (if (str_eq (sanm-rec-status r)
+                                         "oracle-guided-multikey-audio-nl2nl-audio-bridge-not-native-vocoder") 64 0)
+                             (if (eq (sanm-rec-keys r) 2) 128 0))
+                        (add
+                            (add (if (eq (sanm-rec-native r) 1) 256 0)
+                                 (if (eq (sanm-rec-oracle r) 1) 512 0))
+                            (add
+                                (add (if (eq (sanm-rec-vocoder r) 0) 1024 0)
+                                     (if (eq (sanm-rec-neural r) 0) 2048 0))
+                                (if (eq (slds-sufficient (slds-current)) 0) 4096 0))))))))
+
+    0)

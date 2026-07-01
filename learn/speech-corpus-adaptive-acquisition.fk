@@ -1,0 +1,120 @@
+; speech-corpus-adaptive-acquisition.fk -- let observed corpus misses change the next capture recipe.
+;
+; Batch 0004 proved that larger cross-voice capture is useful but uneven:
+; English and Portuguese were high-yield, Spanish was retry-worthy, and German
+; plus French need repair recipes. This cell makes that observation executable
+; so the next acquisition batch is chosen from evidence, not from a fixed seed.
+
+(do
+    (defn scaa-row (locale ok total max-wer bytes)
+        (list "speech-corpus-adaptive-row" locale ok total max-wer bytes))
+    (defn scaa-locale (r) (nth r 1))
+    (defn scaa-ok     (r) (nth r 2))
+    (defn scaa-total  (r) (nth r 3))
+    (defn scaa-maxwer (r) (nth r 4))
+    (defn scaa-bytes  (r) (nth r 5))
+
+    (defn scaa-rate (r)
+        (if (eq (scaa-total r) 0) 0 (div (mul (scaa-ok r) 100) (scaa-total r))))
+
+    (defn scaa-observed-rows ()
+        (list
+            (scaa-row "en" 10 10 25 451904)
+            (scaa-row "de" 5 10 250 468296)
+            (scaa-row "es" 7 10 166 404394)
+            (scaa-row "fr" 4 10 133 350394)
+            (scaa-row "pt-br" 9 10 33 475038)))
+
+    (defn scaa-action (r)
+        (if (ge (scaa-rate r) 80) "expand"
+            (if (ge (scaa-rate r) 60) "retry-ab" "repair")))
+
+    (defn scaa-recipe (r)
+        (if (str_eq (scaa-action r) "expand")
+            "expand-two-voice-key-window"
+            (if (str_eq (scaa-action r) "retry-ab")
+                "retry-punctuation-and-voice-balance"
+                "repair-voice-family-and-shorten-phrases")))
+
+    (defn scaa-priority (r)
+        (if (str_eq (scaa-action r) "repair") 1
+            (if (str_eq (scaa-action r) "retry-ab") 2 3)))
+
+    (defn scaa-decision (r)
+        (list "speech-corpus-adaptive-decision"
+              (scaa-locale r)
+              (scaa-ok r)
+              (scaa-total r)
+              (scaa-rate r)
+              (scaa-maxwer r)
+              (scaa-action r)
+              (scaa-recipe r)
+              (scaa-priority r)
+              "choice-cut-fail-undo-timeout-clean"))
+
+    (defn scaa-dec-locale (d) (nth d 1))
+    (defn scaa-dec-ok     (d) (nth d 2))
+    (defn scaa-dec-total  (d) (nth d 3))
+    (defn scaa-dec-rate   (d) (nth d 4))
+    (defn scaa-dec-maxwer (d) (nth d 5))
+    (defn scaa-dec-action (d) (nth d 6))
+    (defn scaa-dec-recipe (d) (nth d 7))
+    (defn scaa-dec-prio   (d) (nth d 8))
+    (defn scaa-dec-ctl    (d) (nth d 9))
+
+    (defn scaa-decisions-loop (rows)
+        (if (eq (len rows) 0) (empty)
+            (cons (scaa-decision (head rows)) (scaa-decisions-loop (tail rows)))))
+    (defn scaa-decisions () (scaa-decisions-loop (scaa-observed-rows)))
+
+    (defn scaa-sum-ok (rows)
+        (if (eq (len rows) 0) 0
+            (add (scaa-ok (head rows)) (scaa-sum-ok (tail rows)))))
+    (defn scaa-sum-total (rows)
+        (if (eq (len rows) 0) 0
+            (add (scaa-total (head rows)) (scaa-sum-total (tail rows)))))
+    (defn scaa-sum-bytes (rows)
+        (if (eq (len rows) 0) 0
+            (add (scaa-bytes (head rows)) (scaa-sum-bytes (tail rows)))))
+
+    (defn scaa-count-action (decisions action)
+        (if (eq (len decisions) 0) 0
+            (add (if (str_eq (scaa-dec-action (head decisions)) action) 1 0)
+                 (scaa-count-action (tail decisions) action))))
+
+    (defn scaa-better? (a b)
+        (if (lt (scaa-dec-prio a) (scaa-dec-prio b)) 1
+            (if (and (eq (scaa-dec-prio a) (scaa-dec-prio b))
+                     (lt (scaa-dec-rate a) (scaa-dec-rate b))) 1 0)))
+
+    (defn scaa-next-loop (best rest)
+        (if (eq (len rest) 0) best
+            (if (eq (scaa-better? (head rest) best) 1)
+                (scaa-next-loop (head rest) (tail rest))
+                (scaa-next-loop best (tail rest)))))
+
+    (defn scaa-next-decision (decisions)
+        (if (eq (len decisions) 0)
+            (scaa-decision (scaa-row "none" 0 0 100 0))
+            (scaa-next-loop (head decisions) (tail decisions))))
+
+    (defn scaa-report ()
+        (do
+            (let rows (scaa-observed-rows))
+            (let decisions (scaa-decisions))
+            (let next (scaa-next-decision decisions))
+            (list "speech-corpus-adaptive-acquisition"
+                  rows
+                  decisions
+                  next
+                  (scaa-sum-ok rows)
+                  (scaa-sum-total rows)
+                  (scaa-sum-bytes rows)
+                  (scaa-count-action decisions "expand")
+                  (scaa-count-action decisions "retry-ab")
+                  (scaa-count-action decisions "repair")
+                  "observed-batch-0004-changes-next-capture-recipe"
+                  1
+                  0)))
+
+    0)
