@@ -8,11 +8,11 @@ enough data for real model training.
 Current data:
 
 ```text
-live wav rows: 105
-observed wav bytes: 3189170
+live wav rows: 123
+observed wav bytes: 3901796
 live locales: 6
 held-out repeat rows: 7
-cross-phrase held-out rows: 0
+cross-phrase held-out rows: 6
 cross-voice held-out rows: 0
 native neural parameters: 0
 ```
@@ -43,4 +43,4 @@ cat learn/speech-model-metrics-report.fk \
 Meaning: the band passes by proving the current corpus is under the floor and
 the training status is `tiny-corpus-not-data-sufficient-training`. The next
 movement is consentful corpus/audio expansion toward the 12000-row floor, not
-treating 105 wavs as training sufficiency.
+treating 123 wavs as training sufficiency.
