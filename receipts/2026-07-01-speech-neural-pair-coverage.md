@@ -6,12 +6,12 @@ Form-native seeded windows into neural training.
 Current neural pair coverage:
 
 ```text
-trained unordered neural pairs: 19
-trained directed neural pair routes: 38
-neural training epochs: 19
-native neural parameters: 19
+trained unordered neural pairs: 20
+trained directed neural pair routes: 40
+neural training epochs: 20
+native neural parameters: 20
 broad ready pair space: 55 unordered / 110 directed
-neural coverage: 3454 basis points
+neural coverage: 3636 basis points
 ```
 
 Current Form-native seeded reciprocal coverage:
@@ -38,8 +38,8 @@ audio NL2NL bridge routes: 12 oracle-guided routes, not native vocoder and not n
 Trained neural micro-pair:
 
 ```text
-pairs: en<->fr, en<->pt-br, en<->id, en<->zh, en<->ar, en<->la, en<->de, en<->es, en<->sa, zh<->ar, sa<->la, zh<->sa, ar<->sa, zh<->la, ar<->la, de<->es, de<->fr, de<->id, de<->pt-br
-files: learn/speech-native-neural-pair-window-0001.fk, learn/speech-native-neural-pair-window-0002.fk, learn/speech-native-neural-pair-window-0003.fk, learn/speech-native-neural-pair-window-0004.fk, learn/speech-native-neural-pair-window-0005.fk, learn/speech-native-neural-pair-window-0006.fk, learn/speech-native-neural-pair-window-0007.fk, learn/speech-native-neural-pair-window-0008.fk, learn/speech-native-neural-pair-window-0009.fk, learn/speech-native-neural-pair-window-0010.fk, learn/speech-native-neural-pair-window-0011.fk, learn/speech-native-neural-pair-window-0012.fk, learn/speech-native-neural-pair-window-0013.fk, learn/speech-native-neural-pair-window-0014.fk, learn/speech-native-neural-pair-window-0015.fk, learn/speech-native-neural-pair-window-0016.fk, learn/speech-native-neural-pair-window-0017.fk, learn/speech-native-neural-pair-window-0018.fk, learn/speech-native-neural-pair-window-0019.fk
+pairs: en<->fr, en<->pt-br, en<->id, en<->zh, en<->ar, en<->la, en<->de, en<->es, en<->sa, zh<->ar, sa<->la, zh<->sa, ar<->sa, zh<->la, ar<->la, de<->es, de<->fr, de<->id, de<->pt-br, es<->fr
+files: learn/speech-native-neural-pair-window-0001.fk, learn/speech-native-neural-pair-window-0002.fk, learn/speech-native-neural-pair-window-0003.fk, learn/speech-native-neural-pair-window-0004.fk, learn/speech-native-neural-pair-window-0005.fk, learn/speech-native-neural-pair-window-0006.fk, learn/speech-native-neural-pair-window-0007.fk, learn/speech-native-neural-pair-window-0008.fk, learn/speech-native-neural-pair-window-0009.fk, learn/speech-native-neural-pair-window-0010.fk, learn/speech-native-neural-pair-window-0011.fk, learn/speech-native-neural-pair-window-0012.fk, learn/speech-native-neural-pair-window-0013.fk, learn/speech-native-neural-pair-window-0014.fk, learn/speech-native-neural-pair-window-0015.fk, learn/speech-native-neural-pair-window-0016.fk, learn/speech-native-neural-pair-window-0017.fk, learn/speech-native-neural-pair-window-0018.fk, learn/speech-native-neural-pair-window-0019.fk, learn/speech-native-neural-pair-window-0020.fk
 boundary: non-zero trained pair coverage, not full open ASR/TTS authority
 ```
 
