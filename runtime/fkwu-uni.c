@@ -93,6 +93,43 @@ static void fk_die(const char *msg) {
  * rather than reading as two unrelated bare numbers. */
 #define FK_FNVAL_BAND_WIDTH 8192
 #define FK_FNVAL_MAX_INDEX 4096
+/* ASCII byte constants for the text-processing code (the parser's own character
+ * classification, and the OS-layer's path/URL splitting) -- NOT used in the
+ * evaluator's `if (t == N)` opcode-tag dispatch, which is a completely
+ * different numbering space (generated from fkwu-optable.h) that happens to
+ * share small integer values with ASCII codes in the 0-127 range. Conflating
+ * the two would be the same class of mistake as merging FK_NODE_CAP and
+ * FK_AST_NODE_CAP; kept strictly to genuine byte/character comparisons. */
+#define FK_CH_TAB 9
+#define FK_CH_LF 10
+#define FK_CH_CR 13
+#define FK_CH_SPACE 32
+#define FK_CH_DQUOTE 34
+#define FK_CH_PLUS 43
+#define FK_CH_COMMA 44
+#define FK_CH_DASH 45
+#define FK_CH_DOT 46
+#define FK_CH_SLASH 47
+#define FK_CH_DIGIT0 48
+#define FK_CH_DIGIT9 57
+#define FK_CH_COLON 58
+#define FK_CH_SEMI 59
+#define FK_CH_LPAREN 40
+#define FK_CH_RPAREN 41
+#define FK_CH_UPPER_E 69
+#define FK_CH_LOWER_E 101
+#define FK_CH_BACKSLASH 92
+#define FK_CH_UPPER_A 65
+#define FK_CH_UPPER_Z 90
+#define FK_CH_LOWER_A 97
+#define FK_CH_LOWER_Z 122
+#define FK_CH_UNDERSCORE 95
+#define FK_CH_DEL 127
+#define FK_CH_NUL 0
+#define FK_CH_LOWER_N 110 /* the 'n' in a \n escape specifier */
+#define FK_CH_LOWER_T 116 /* the 't' in a \t escape specifier */
+#define FK_CH_LOWER_R 114 /* the 'r' in a \r escape specifier */
+#define FK_CH_LOWER_F 102 /* the 'f' in the --feval CLI flag */
 static const unsigned char *fk_gen = 0;
 static long long fk_gen_len = 0;
 static double *fk_fv;
@@ -1345,7 +1382,7 @@ static long long fk_tempdir() {
         d[3] = 112;
         n = 4;
     }
-    while (n > 1 && d[n - 1] == 47) {
+    while (n > 1 && d[n - 1] == FK_CH_SLASH) {
         n = n - 1;
     }
     d[n] = 0;
@@ -1387,26 +1424,28 @@ static long long fk_file_mtime(long long pv) {
 }
 static int fk_scan_match(unsigned char c, long long cls) {
     if (cls == 0) {
-        return c == 32 || c == 9 || c == 10 || c == 13;
+        return c == FK_CH_SPACE || c == FK_CH_TAB || c == FK_CH_LF || c == FK_CH_CR;
     }
     if (cls == 1) {
-        return c >= 48 && c <= 57;
+        return c >= FK_CH_DIGIT0 && c <= FK_CH_DIGIT9;
     }
     if (cls == 2) {
-        return (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+        return (c >= FK_CH_UPPER_A && c <= FK_CH_UPPER_Z) ||
+               (c >= FK_CH_LOWER_A && c <= FK_CH_LOWER_Z);
     }
     if (cls == 3) {
-        return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 95 ||
-               c == 45;
+        return (c >= FK_CH_UPPER_A && c <= FK_CH_UPPER_Z) ||
+               (c >= FK_CH_LOWER_A && c <= FK_CH_LOWER_Z) ||
+               (c >= FK_CH_DIGIT0 && c <= FK_CH_DIGIT9) || c == FK_CH_UNDERSCORE || c == FK_CH_DASH;
     }
     if (cls == 4) {
-        return c != 34 && c != 92;
+        return c != FK_CH_DQUOTE && c != FK_CH_BACKSLASH;
     }
     if (cls == 5) {
-        return c != 10;
+        return c != FK_CH_LF;
     }
     if (cls == 6) {
-        return c >= 32 && c != 34 && c != 92;
+        return c >= FK_CH_SPACE && c != FK_CH_DQUOTE && c != FK_CH_BACKSLASH;
     }
     return 0;
 }
@@ -1580,8 +1619,8 @@ static long long fk_fs_list_path(const char *p) {
     if (d) {
         struct dirent *e;
         while ((e = readdir(d)) != 0) {
-            if (e->d_name[0] == 46 &&
-                (e->d_name[1] == 0 || (e->d_name[1] == 46 && e->d_name[2] == 0))) {
+            if (e->d_name[0] == FK_CH_DOT &&
+                (e->d_name[1] == 0 || (e->d_name[1] == FK_CH_DOT && e->d_name[2] == 0))) {
                 continue;
             }
             long long nl = 0;
@@ -1654,8 +1693,8 @@ static void fk_rmtree(char *p) {
             struct dirent *e;
             char child[4096];
             while ((e = readdir(d)) != 0) {
-                if (e->d_name[0] == 46 &&
-                    (e->d_name[1] == 0 || (e->d_name[1] == 46 && e->d_name[2] == 0))) {
+                if (e->d_name[0] == FK_CH_DOT &&
+                    (e->d_name[1] == 0 || (e->d_name[1] == FK_CH_DOT && e->d_name[2] == 0))) {
                     continue;
                 }
                 fk_path_join(child, 4096, p, e->d_name);
@@ -1684,8 +1723,8 @@ static void fk_inv_walk(const char *root, const char *dir, const char *suf, long
     struct dirent *e;
     char path[4096];
     while ((e = readdir(d)) != 0) {
-        if (e->d_name[0] == 46 &&
-            (e->d_name[1] == 0 || (e->d_name[1] == 46 && e->d_name[2] == 0))) {
+        if (e->d_name[0] == FK_CH_DOT &&
+            (e->d_name[1] == 0 || (e->d_name[1] == FK_CH_DOT && e->d_name[2] == 0))) {
             continue;
         }
         if (fk_skip_entry(skipv, e->d_name)) {
@@ -1703,7 +1742,7 @@ static void fk_inv_walk(const char *root, const char *dir, const char *suf, long
                 rn = rn + 1;
             }
             const char *relstart = path + rn;
-            if (relstart[0] == 47) {
+            if (relstart[0] == FK_CH_SLASH) {
                 relstart = relstart + 1;
             }
             long long rlen = 0;
@@ -2067,9 +2106,9 @@ static long long fk_sense_publish(long long port) {
         int part = 0;
         while (rl[k] != 0) {
             char ch = rl[k];
-            if (ch >= 48 && ch <= 57) {
-                *cur = (*cur) * 10 + (unsigned int)(ch - 48);
-            } else if (ch == 46 && part < 3) {
+            if (ch >= FK_CH_DIGIT0 && ch <= FK_CH_DIGIT9) {
+                *cur = (*cur) * 10 + (unsigned int)(ch - FK_CH_DIGIT0);
+            } else if (ch == FK_CH_DOT && part < 3) {
                 part = part + 1;
                 cur = (part == 1) ? &o1 : (part == 2) ? &o2 : &o3;
             }
@@ -2670,15 +2709,15 @@ static int fk_starts(const char *s, const char *p) {
 }
 static long long fk_http_status(const char *buf, long long n) {
     long long i = 0;
-    while (i < n && buf[i] != 32) {
+    while (i < n && buf[i] != FK_CH_SPACE) {
         i = i + 1;
     }
-    while (i < n && buf[i] == 32) {
+    while (i < n && buf[i] == FK_CH_SPACE) {
         i = i + 1;
     }
     long long v = 0;
-    while (i < n && buf[i] >= 48 && buf[i] <= 57) {
-        v = v * 10 + (buf[i] - 48);
+    while (i < n && buf[i] >= FK_CH_DIGIT0 && buf[i] <= FK_CH_DIGIT9) {
+        v = v * 10 + (buf[i] - FK_CH_DIGIT0);
         i = i + 1;
     }
     return v;
@@ -2686,14 +2725,15 @@ static long long fk_http_status(const char *buf, long long n) {
 static long long fk_http_body_offset(const char *buf, long long n) {
     long long i = 0;
     while (i + 3 < n) {
-        if (buf[i] == 13 && buf[i + 1] == 10 && buf[i + 2] == 13 && buf[i + 3] == 10) {
+        if (buf[i] == FK_CH_CR && buf[i + 1] == FK_CH_LF && buf[i + 2] == FK_CH_CR &&
+            buf[i + 3] == FK_CH_LF) {
             return i + 4;
         }
         i = i + 1;
     }
     i = 0;
     while (i + 1 < n) {
-        if (buf[i] == 10 && buf[i + 1] == 10) {
+        if (buf[i] == FK_CH_LF && buf[i + 1] == FK_CH_LF) {
             return i + 2;
         }
         i = i + 1;
@@ -2717,7 +2757,7 @@ static long long fk_http_get_plain(long long urlv, long long headersv, long long
     }
     long long p = 7;
     long long h = 0;
-    while (url[p] != 0 && url[p] != 47 && url[p] != 58 && h < 511) {
+    while (url[p] != 0 && url[p] != FK_CH_SLASH && url[p] != FK_CH_COLON && h < 511) {
         host[h] = url[p];
         h = h + 1;
         p = p + 1;
@@ -2726,10 +2766,10 @@ static long long fk_http_get_plain(long long urlv, long long headersv, long long
     port[0] = 56;
     port[1] = 48;
     port[2] = 0;
-    if (url[p] == 58) {
+    if (url[p] == FK_CH_COLON) {
         p = p + 1;
         long long pi = 0;
-        while (url[p] >= 48 && url[p] <= 57 && pi < 15) {
+        while (url[p] >= FK_CH_DIGIT0 && url[p] <= FK_CH_DIGIT9 && pi < 15) {
             port[pi] = url[p];
             pi = pi + 1;
             p = p + 1;
@@ -2737,7 +2777,7 @@ static long long fk_http_get_plain(long long urlv, long long headersv, long long
         port[pi] = 0;
     }
     long long q = 0;
-    if (url[p] == 47) {
+    if (url[p] == FK_CH_SLASH) {
         while (url[p] != 0 && q < 1535) {
             path[q] = url[p];
             q = q + 1;
@@ -2823,11 +2863,11 @@ static int fk_http_lit_eq_ci(const char *buf, long long n, const char *lit) {
     while (i < n && lit[i] != 0) {
         char a = buf[i];
         char b = lit[i];
-        if (a >= 65 && a <= 90) {
-            a = a + 32;
+        if (a >= FK_CH_UPPER_A && a <= FK_CH_UPPER_Z) {
+            a = a + (FK_CH_LOWER_A - FK_CH_UPPER_A);
         }
-        if (b >= 65 && b <= 90) {
-            b = b + 32;
+        if (b >= FK_CH_UPPER_A && b <= FK_CH_UPPER_Z) {
+            b = b + (FK_CH_LOWER_A - FK_CH_UPPER_A);
         }
         if (a != b) {
             return 0;
@@ -2843,7 +2883,9 @@ static int fk_http_header_name_ok(const char *buf, long long n) {
     long long i = 0;
     while (i < n) {
         unsigned char c = (unsigned char)buf[i];
-        if (!((c >= 65 && c <= 90) || (c >= 97 && c <= 122) || (c >= 48 && c <= 57) || c == 45)) {
+        if (!((c >= FK_CH_UPPER_A && c <= FK_CH_UPPER_Z) ||
+              (c >= FK_CH_LOWER_A && c <= FK_CH_LOWER_Z) ||
+              (c >= FK_CH_DIGIT0 && c <= FK_CH_DIGIT9) || c == FK_CH_DASH)) {
             return 0;
         }
         i = i + 1;
@@ -2865,10 +2907,10 @@ static int fk_http_header_value_ok(const char *buf, long long n) {
     long long i = 0;
     while (i < n) {
         unsigned char c = (unsigned char)buf[i];
-        if (c == 0 || c == 10 || c == 13 || c == 127) {
+        if (c == FK_CH_NUL || c == FK_CH_LF || c == FK_CH_CR || c == FK_CH_DEL) {
             return 0;
         }
-        if (c < 32 && c != 9) {
+        if (c < FK_CH_SPACE && c != FK_CH_TAB) {
             return 0;
         }
         i = i + 1;
@@ -2940,44 +2982,44 @@ static long long fk_http_headers(const char *buf, long long n, long long bo) {
         end = n;
     }
     long long i = 0;
-    while (i < end && buf[i] != 10) {
+    while (i < end && buf[i] != FK_CH_LF) {
         i = i + 1;
     }
-    if (i < end && buf[i] == 10) {
+    if (i < end && buf[i] == FK_CH_LF) {
         i = i + 1;
     }
     long long count = 0;
     while (i < end && count < 128) {
-        if (buf[i] == 13 || buf[i] == 10) {
+        if (buf[i] == FK_CH_CR || buf[i] == FK_CH_LF) {
             break;
         }
         long long ls = i;
-        while (i < end && buf[i] != 10) {
+        while (i < end && buf[i] != FK_CH_LF) {
             i = i + 1;
         }
         long long le = i;
-        if (le > ls && buf[le - 1] == 10) {
+        if (le > ls && buf[le - 1] == FK_CH_LF) {
             le = le - 1;
         }
-        if (le > ls && buf[le - 1] == 13) {
+        if (le > ls && buf[le - 1] == FK_CH_CR) {
             le = le - 1;
         }
         long long colon = ls;
-        while (colon < le && buf[colon] != 58) {
+        while (colon < le && buf[colon] != FK_CH_COLON) {
             colon = colon + 1;
         }
         if (colon < le && colon > ls) {
             long long ns = ls;
             long long ne = colon;
-            while (ne > ns && (buf[ne - 1] == 32 || buf[ne - 1] == 9)) {
+            while (ne > ns && (buf[ne - 1] == FK_CH_SPACE || buf[ne - 1] == FK_CH_TAB)) {
                 ne = ne - 1;
             }
             long long vs = colon + 1;
-            while (vs < le && (buf[vs] == 32 || buf[vs] == 9)) {
+            while (vs < le && (buf[vs] == FK_CH_SPACE || buf[vs] == FK_CH_TAB)) {
                 vs = vs + 1;
             }
             long long ve = le;
-            while (ve > vs && (buf[ve - 1] == 32 || buf[ve - 1] == 9)) {
+            while (ve > vs && (buf[ve - 1] == FK_CH_SPACE || buf[ve - 1] == FK_CH_TAB)) {
                 ve = ve - 1;
             }
             if (ne > ns) {
@@ -2985,7 +3027,7 @@ static long long fk_http_headers(const char *buf, long long n, long long bo) {
                 count = count + 1;
             }
         }
-        if (i < end && buf[i] == 10) {
+        if (i < end && buf[i] == FK_CH_LF) {
             i = i + 1;
         }
     }
@@ -3173,7 +3215,7 @@ static long long fk_parse_url(const char *url, const char *scheme, long long sta
     }
     long long p = start;
     long long h = 0;
-    while (url[p] != 0 && url[p] != 47 && url[p] != 58 && h < 511) {
+    while (url[p] != 0 && url[p] != FK_CH_SLASH && url[p] != FK_CH_COLON && h < 511) {
         host[h] = url[p];
         h = h + 1;
         p = p + 1;
@@ -3185,10 +3227,10 @@ static long long fk_parse_url(const char *url, const char *scheme, long long sta
         pi = pi + 1;
     }
     port[pi] = 0;
-    if (url[p] == 58) {
+    if (url[p] == FK_CH_COLON) {
         p = p + 1;
         pi = 0;
-        while (url[p] >= 48 && url[p] <= 57 && pi < 15) {
+        while (url[p] >= FK_CH_DIGIT0 && url[p] <= FK_CH_DIGIT9 && pi < 15) {
             port[pi] = url[p];
             pi = pi + 1;
             p = p + 1;
@@ -3196,7 +3238,7 @@ static long long fk_parse_url(const char *url, const char *scheme, long long sta
         port[pi] = 0;
     }
     long long q = 0;
-    if (url[p] == 47) {
+    if (url[p] == FK_CH_SLASH) {
         while (url[p] != 0 && q < 1535) {
             path[q] = url[p];
             q = q + 1;
@@ -3712,21 +3754,22 @@ extern long long read(int, void *, unsigned long);
 static long long fk_next() {
     long long sg = 1;
     while (fk_buf[fk_pos] != 0) {
-        if (fk_buf[fk_pos] == 45 && fk_buf[fk_pos + 1] >= 48 && fk_buf[fk_pos + 1] <= 57) {
+        if (fk_buf[fk_pos] == FK_CH_DASH && fk_buf[fk_pos + 1] >= FK_CH_DIGIT0 &&
+            fk_buf[fk_pos + 1] <= FK_CH_DIGIT9) {
             sg = 0 - 1;
             fk_pos = fk_pos + 1;
             break;
         }
-        if (fk_buf[fk_pos] >= 48) {
-            if (fk_buf[fk_pos] <= 57) {
+        if (fk_buf[fk_pos] >= FK_CH_DIGIT0) {
+            if (fk_buf[fk_pos] <= FK_CH_DIGIT9) {
                 break;
             }
         }
         fk_pos = fk_pos + 1;
     }
     long long v = 0;
-    while (fk_buf[fk_pos] >= 48 && fk_buf[fk_pos] <= 57) {
-        v = v * 10 + (fk_buf[fk_pos] - 48);
+    while (fk_buf[fk_pos] >= FK_CH_DIGIT0 && fk_buf[fk_pos] <= FK_CH_DIGIT9) {
+        v = v * 10 + (fk_buf[fk_pos] - FK_CH_DIGIT0);
         fk_pos = fk_pos + 1;
     }
     return sg * v;
@@ -3790,6 +3833,7 @@ static fk_natfn fk_nat_install(const unsigned char *code, long long n);
 #define FK_JIT_CODE_BUF_CAP 16384 /* fk_jb: the x86-64 JIT's native-code output buffer, per lowered function */
 static unsigned char fk_jb[FK_JIT_CODE_BUF_CAP];
 static long long fk_jbp;
+/* frame slots fn needs (args + let-locals); set by fk_jit_lower */
 static long long fk_jit_frame;
 static const unsigned char *fk_src_nat[FK_FN_CAP];
 static long long fk_src_nat_len[FK_FN_CAP];
@@ -4636,21 +4680,21 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long n = fk_sl[sa];
         long long sign = 1;
         long long j4 = 0;
-        while (j4 < n && (fk_sb[off + j4] == 32 || fk_sb[off + j4] == 9 || fk_sb[off + j4] == 10 ||
-                          fk_sb[off + j4] == 13)) {
+        while (j4 < n && (fk_sb[off + j4] == FK_CH_SPACE || fk_sb[off + j4] == FK_CH_TAB || fk_sb[off + j4] == FK_CH_LF ||
+                          fk_sb[off + j4] == FK_CH_CR)) {
             j4 = j4 + 1;
         }
-        if (j4 < n && fk_sb[off + j4] == 45) {
+        if (j4 < n && fk_sb[off + j4] == FK_CH_DASH) {
             sign = 0 - 1;
             j4 = j4 + 1;
         }
         long long v = 0;
         while (j4 < n) {
             char c = fk_sb[off + j4];
-            if (c < 48 || c > 57) {
+            if (c < FK_CH_DIGIT0 || c > FK_CH_DIGIT9) {
                 break;
             }
-            v = v * 10 + (c - 48);
+            v = v * 10 + (c - FK_CH_DIGIT0);
             j4 = j4 + 1;
         }
         return (sign * v) << 1;
@@ -5368,10 +5412,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 break;
             }
             char *fkl_nm = fkl_de->d_name;
-            if (fkl_nm[0] == 46 && fkl_nm[1] == 0) {
+            if (fkl_nm[0] == FK_CH_DOT && fkl_nm[1] == 0) {
                 continue;
             }
-            if (fkl_nm[0] == 46 && fkl_nm[1] == 46 && fkl_nm[2] == 0) {
+            if (fkl_nm[0] == FK_CH_DOT && fkl_nm[1] == FK_CH_DOT && fkl_nm[2] == 0) {
                 continue;
             }
             long long fkl_L = 0;
@@ -5815,7 +5859,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 }
                 break;
             }
-            if (rc == 10) {
+            if (rc == FK_CH_LF) {
                 break;
             }
             rbuf[rn] = rc;
@@ -5894,15 +5938,15 @@ static char fk_srctext[FK_SOURCE_TEXT_CAP];
 static long long fk_spos;
 static long long fk_slen;
 static int fk_sws(char c) {
-    return c == 32 || c == 9 || c == 10 || c == 13;
+    return c == FK_CH_SPACE || c == FK_CH_TAB || c == FK_CH_LF || c == FK_CH_CR;
 }
 static void fk_sskip(void) {
     while (fk_spos < fk_slen) {
         char c = fk_srctext[fk_spos];
         if (fk_sws(c)) {
             fk_spos = fk_spos + 1;
-        } else if (c == 59) {
-            while (fk_spos < fk_slen && fk_srctext[fk_spos] != 10) {
+        } else if (c == FK_CH_SEMI) {
+            while (fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_LF) {
                 fk_spos = fk_spos + 1;
             }
         } else {
@@ -5938,7 +5982,7 @@ static int fk_sym_eq2(long long s1, long long n1, long long s2, long long n2) {
 static long long fk_sym_end(long long s) {
     while (s < fk_slen) {
         char d = fk_srctext[s];
-        if (fk_sws(d) || d == 40 || d == 41) {
+        if (fk_sws(d) || d == FK_CH_LPAREN || d == FK_CH_RPAREN) {
             break;
         }
         s = s + 1;
@@ -6060,24 +6104,24 @@ static long long fk_smkstr(void) {
     /* skip opening quote */
     fk_sinit();
     long long start = fk_sbp;
-    while (fk_spos < fk_slen && fk_srctext[fk_spos] != 34) {
+    while (fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_DQUOTE) {
         char ch = fk_srctext[fk_spos];
-        if (ch == 92 && fk_spos + 1 < fk_slen) {
+        if (ch == FK_CH_BACKSLASH && fk_spos + 1 < fk_slen) {
             char e = fk_srctext[fk_spos + 1];
-            if (e == 110) {
-                ch = 10;
+            if (e == FK_CH_LOWER_N) {
+                ch = FK_CH_LF;
                 fk_spos = fk_spos + 1;
-            } else if (e == 116) {
-                ch = 9;
+            } else if (e == FK_CH_LOWER_T) {
+                ch = FK_CH_TAB;
                 fk_spos = fk_spos + 1;
-            } else if (e == 114) {
-                ch = 13;
+            } else if (e == FK_CH_LOWER_R) {
+                ch = FK_CH_CR;
                 fk_spos = fk_spos + 1;
-            } else if (e == 34) {
-                ch = 34;
+            } else if (e == FK_CH_DQUOTE) {
+                ch = FK_CH_DQUOTE;
                 fk_spos = fk_spos + 1;
-            } else if (e == 92) {
-                ch = 92;
+            } else if (e == FK_CH_BACKSLASH) {
+                ch = FK_CH_BACKSLASH;
                 fk_spos = fk_spos + 1;
             }
         }
@@ -6090,7 +6134,7 @@ static long long fk_smkstr(void) {
         fk_sbp = fk_sbp + 1;
         fk_spos = fk_spos + 1;
     }
-    if (fk_spos < fk_slen && fk_srctext[fk_spos] == 34) {
+    if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_DQUOTE) {
         fk_spos = fk_spos + 1;
     }
     /* skip closing quote */
@@ -6155,7 +6199,7 @@ static long long fk_sparse(void) {
         return 0;
     }
     char c = fk_srctext[fk_spos];
-    if (c == 40) {
+    if (c == FK_CH_LPAREN) {
         fk_spos = fk_spos + 1;
         fk_sskip();
         long long s = fk_spos;
@@ -6171,7 +6215,7 @@ static long long fk_sparse(void) {
             fk_fname_s = ns2;
             fk_fname_n = fk_spos - ns2;
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 40) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_LPAREN) {
                 fk_spos = fk_spos + 1;
             }
             fk_sskip();
@@ -6179,7 +6223,7 @@ static long long fk_sparse(void) {
             fk_spos = fk_sym_end(fk_spos);
             long long alen = fk_spos - as2;
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             fk_bd_top = 0;
@@ -6187,7 +6231,7 @@ static long long fk_sparse(void) {
             fk_bd_push(as2, alen, 0);
             long long body = fk_sparse();
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             if (fk_maxslot > 0) {
@@ -6221,7 +6265,7 @@ static long long fk_sparse(void) {
             long long body = fk_sparse();
             fk_bd_pop();
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             return fk_smknode(109, fk_smklit(slot), val, body);
@@ -6235,7 +6279,7 @@ static long long fk_sparse(void) {
             long long c2 = fk_sparse();
             long long c3 = fk_sparse();
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             return fk_smknode(6, c1, c2, c3);
@@ -6254,7 +6298,7 @@ static long long fk_sparse(void) {
                 ai = ai + 1;
             }
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             return fk_rw_build(rw, args);
@@ -6284,7 +6328,7 @@ static long long fk_sparse(void) {
                 c3 = fk_sparse();
             }
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             return fk_smknode(tag, c1, c2, c3);
@@ -6312,7 +6356,7 @@ static long long fk_sparse(void) {
                 ai = ai + 1;
             }
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             long long chain = -1;
@@ -6340,14 +6384,14 @@ static long long fk_sparse(void) {
             long long iai = 0;
             while (iai < 256) {
                 fk_sskip();
-                if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) {
+                if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
                     break;
                 }
                 iargn[iai] = fk_sparse();
                 iai = iai + 1;
             }
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             long long ichain = -1;
@@ -6378,9 +6422,9 @@ static long long fk_sparse(void) {
             long long depth = 1;
             while (fk_spos < fk_slen && depth > 0) {
                 char cc = fk_srctext[fk_spos];
-                if (cc == 34) {
+                if (cc == FK_CH_DQUOTE) {
                     fk_spos = fk_spos + 1;
-                    while (fk_spos < fk_slen && fk_srctext[fk_spos] != 34) {
+                    while (fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_DQUOTE) {
                         fk_spos = fk_spos + 1;
                     }
                     if (fk_spos < fk_slen) {
@@ -6388,9 +6432,9 @@ static long long fk_sparse(void) {
                     }
                     continue;
                 }
-                if (cc == 40) {
+                if (cc == FK_CH_LPAREN) {
                     depth = depth + 1;
-                } else if (cc == 41) {
+                } else if (cc == FK_CH_RPAREN) {
                     depth = depth - 1;
                 }
                 fk_spos = fk_spos + 1;
@@ -6400,40 +6444,43 @@ static long long fk_sparse(void) {
     }
 
     /* stone 4: a bare "..." string literal. */
-    if (c == 34) {
+    if (c == FK_CH_DQUOTE) {
         return fk_smkstr();
     }
-    if ((c >= 48 && c <= 57) || (c == 45 && fk_spos + 1 < fk_slen &&
-                                 fk_srctext[fk_spos + 1] >= 48 && fk_srctext[fk_spos + 1] <= 57)) {
+    if ((c >= FK_CH_DIGIT0 && c <= FK_CH_DIGIT9) ||
+        (c == FK_CH_DASH && fk_spos + 1 < fk_slen && fk_srctext[fk_spos + 1] >= FK_CH_DIGIT0 &&
+         fk_srctext[fk_spos + 1] <= FK_CH_DIGIT9)) {
         /* number leaf: integer OR float. A '.' or a valid 'e'/'E' exponent makes it a FLOAT —
          * intern the whole literal text (incl "1.5e-05") and wrap it in str_to_float (tag 53 =
          * strtod), the same float value the flattener's flt-float-lit produces. Else an integer
          * literal (tag 1). */
         long long start = fk_spos;
-        if (c == 45) {
+        if (c == FK_CH_DASH) {
             fk_spos = fk_spos + 1;
         }
-        while (fk_spos < fk_slen && fk_srctext[fk_spos] >= 48 && fk_srctext[fk_spos] <= 57) {
+        while (fk_spos < fk_slen && fk_srctext[fk_spos] >= FK_CH_DIGIT0 &&
+               fk_srctext[fk_spos] <= FK_CH_DIGIT9) {
             fk_spos = fk_spos + 1;
         }
         int isf = 0;
-        if (fk_spos < fk_slen && fk_srctext[fk_spos] == 46) {
+        if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_DOT) {
             isf = 1;
             fk_spos = fk_spos + 1;
-            while (fk_spos < fk_slen && fk_srctext[fk_spos] >= 48 && fk_srctext[fk_spos] <= 57) {
+            while (fk_spos < fk_slen && fk_srctext[fk_spos] >= FK_CH_DIGIT0 &&
+                   fk_srctext[fk_spos] <= FK_CH_DIGIT9) {
                 fk_spos = fk_spos + 1;
             }
         }
-        if (fk_spos < fk_slen && (fk_srctext[fk_spos] == 101 || fk_srctext[fk_spos] == 69)) {
+        if (fk_spos < fk_slen && (fk_srctext[fk_spos] == FK_CH_LOWER_E || fk_srctext[fk_spos] == FK_CH_UPPER_E)) {
             long long pe = fk_spos + 1;
-            if (pe < fk_slen && (fk_srctext[pe] == 43 || fk_srctext[pe] == 45)) {
+            if (pe < fk_slen && (fk_srctext[pe] == FK_CH_PLUS || fk_srctext[pe] == FK_CH_DASH)) {
                 pe = pe + 1;
             }
-            if (pe < fk_slen && fk_srctext[pe] >= 48 && fk_srctext[pe] <= 57) {
+            if (pe < fk_slen && fk_srctext[pe] >= FK_CH_DIGIT0 && fk_srctext[pe] <= FK_CH_DIGIT9) {
                 isf = 1;
                 fk_spos = pe + 1;
-                while (fk_spos < fk_slen && fk_srctext[fk_spos] >= 48 &&
-                       fk_srctext[fk_spos] <= 57) {
+                while (fk_spos < fk_slen && fk_srctext[fk_spos] >= FK_CH_DIGIT0 &&
+                       fk_srctext[fk_spos] <= FK_CH_DIGIT9) {
                     fk_spos = fk_spos + 1;
                 }
             }
@@ -6458,12 +6505,12 @@ static long long fk_sparse(void) {
         long long v = 0;
         long long j = start;
         int neg = 0;
-        if (fk_srctext[j] == 45) {
+        if (fk_srctext[j] == FK_CH_DASH) {
             neg = 1;
             j = j + 1;
         }
         while (j < fk_spos) {
-            v = v * 10 + (fk_srctext[j] - 48);
+            v = v * 10 + (fk_srctext[j] - FK_CH_DIGIT0);
             j = j + 1;
         }
         if (neg) {
@@ -6498,13 +6545,13 @@ static long long fk_sparse(void) {
  * binds `name` to the next slot for the REST of the do (the common bind-the-rest pattern). */
 static long long fk_parse_do(void) {
     fk_sskip();
-    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) {
+    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
         if (fk_spos < fk_slen) {
             fk_spos = fk_spos + 1;
         }
         return fk_smklit(0);
     }
-    if (fk_srctext[fk_spos] == 40) {
+    if (fk_srctext[fk_spos] == FK_CH_LPAREN) {
         long long p = fk_spos + 1;
         while (p < fk_slen && fk_sws(fk_srctext[p])) {
             p = p + 1;
@@ -6518,7 +6565,7 @@ static long long fk_parse_do(void) {
             long long nlen = fk_spos - ns;
             long long val = fk_sparse();
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             long long slot = fk_maxslot + 1;
@@ -6531,7 +6578,7 @@ static long long fk_parse_do(void) {
     }
     long long node = fk_sparse();
     fk_sskip();
-    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) {
+    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
         if (fk_spos < fk_slen) {
             fk_spos = fk_spos + 1;
         }
@@ -6547,7 +6594,7 @@ static long long fk_parse_do(void) {
  * structural form is another (name -1 tag) manifest row, never a C edit. */
 static long long fk_parse_variadic(long long tag) {
     fk_sskip();
-    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) {
+    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
         if (fk_spos < fk_slen) {
             fk_spos = fk_spos + 1;
         }
@@ -6574,8 +6621,8 @@ static void fk_sskip_at(long long *pp) {
         char c = fk_srctext[p];
         if (fk_sws(c)) {
             p = p + 1;
-        } else if (c == 59) {
-            while (p < fk_slen && fk_srctext[p] != 10) {
+        } else if (c == FK_CH_SEMI) {
+            while (p < fk_slen && fk_srctext[p] != FK_CH_LF) {
                 p = p + 1;
             }
         } else {
@@ -6591,20 +6638,20 @@ static long long fk_skip_balanced(long long p) {
     if (p >= fk_slen) {
         return p;
     }
-    if (fk_srctext[p] == 40) {
+    if (fk_srctext[p] == FK_CH_LPAREN) {
         long long depth = 1;
         p = p + 1;
         while (p < fk_slen && depth > 0) {
             char c = fk_srctext[p];
-            if (c == 59) {
-                while (p < fk_slen && fk_srctext[p] != 10) {
+            if (c == FK_CH_SEMI) {
+                while (p < fk_slen && fk_srctext[p] != FK_CH_LF) {
                     p = p + 1;
                 }
                 continue;
             }
-            if (c == 40) {
+            if (c == FK_CH_LPAREN) {
                 depth = depth + 1;
-            } else if (c == 41) {
+            } else if (c == FK_CH_RPAREN) {
                 depth = depth - 1;
             }
             p = p + 1;
@@ -6617,7 +6664,7 @@ static void fk_prescan_seq(long long *pp);
 static void fk_prescan_form(long long *pp) {
     long long p = *pp;
     fk_sskip_at(&p);
-    if (p >= fk_slen || fk_srctext[p] != 40) {
+    if (p >= fk_slen || fk_srctext[p] != FK_CH_LPAREN) {
         *pp = fk_skip_balanced(p);
         return;
     }
@@ -6656,11 +6703,11 @@ static void fk_prescan_form(long long *pp) {
         long long a = ne;
         fk_sskip_at(&a);
         long long na = 0;
-        if (a < fk_slen && fk_srctext[a] == 40) {
+        if (a < fk_slen && fk_srctext[a] == FK_CH_LPAREN) {
             a = a + 1;
             while (1) {
                 fk_sskip_at(&a);
-                if (a >= fk_slen || fk_srctext[a] == 41) {
+                if (a >= fk_slen || fk_srctext[a] == FK_CH_RPAREN) {
                     break;
                 }
                 a = fk_sym_end(a);
@@ -6684,7 +6731,7 @@ static void fk_prescan_seq(long long *pp) {
             *pp = p;
             return;
         }
-        if (fk_srctext[p] == 41) {
+        if (fk_srctext[p] == FK_CH_RPAREN) {
             *pp = p + 1;
             return;
         }
@@ -6710,7 +6757,7 @@ static void fk_parse_top(void) {
     if (fk_spos >= fk_slen) {
         return;
     }
-    if (fk_srctext[fk_spos] == 40) {
+    if (fk_srctext[fk_spos] == FK_CH_LPAREN) {
         long long p = fk_spos + 1;
         while (p < fk_slen && fk_sws(fk_srctext[p])) {
             p = p + 1;
@@ -6733,13 +6780,13 @@ static void fk_parse_top(void) {
             fk_spos = he;
             while (1) {
                 fk_sskip();
-                if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) {
+                if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
                     if (fk_spos < fk_slen) {
                         fk_spos = fk_spos + 1;
                     }
                     return;
                 }
-                if (fk_srctext[fk_spos] == 40) {
+                if (fk_srctext[fk_spos] == FK_CH_LPAREN) {
                     long long q = fk_spos + 1;
                     while (q < fk_slen && fk_sws(fk_srctext[q])) {
                         q = q + 1;
@@ -6783,7 +6830,7 @@ static void fk_parse_top(void) {
             fk_fname_s = ns2;
             fk_fname_n = nlen2;
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 40) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_LPAREN) {
                 fk_spos = fk_spos + 1;
             }
             fk_bd_top = 0;
@@ -6791,7 +6838,7 @@ static void fk_parse_top(void) {
             long long na = 0;
             while (1) {
                 fk_sskip();
-                if (fk_spos >= fk_slen || fk_srctext[fk_spos] == 41) {
+                if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
                     break;
                 }
                 long long as = fk_spos;
@@ -6802,7 +6849,7 @@ static void fk_parse_top(void) {
                 }
                 na = na + 1;
             }
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             if (idx >= 0 && idx < FK_FN_CAP) {
@@ -6811,7 +6858,7 @@ static void fk_parse_top(void) {
             /* arity known before body -> self-recursive calls read it */
             long long body = fk_sparse();
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == 41) {
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             if (fk_maxslot > 0) {
@@ -7275,19 +7322,14 @@ static long long fk_jcall(long long callee, long long argc, const long long *arg
     fk_vsp = fp;
     return r;
 }
-/* Re-declares the same-named/same-sized fk_jb/fk_jbp already declared earlier in
- * the file (near fk_jtramp) -- see the identical NOTE above the fk_src_nat
- * re-declaration; left in place rather than restructured for the same reason. */
-static unsigned char fk_jb[FK_JIT_CODE_BUF_CAP];
-static long long fk_jbp;
+/* fk_jb, fk_jbp, and fk_jit_frame are already declared earlier in the file,
+ * near fk_jtramp -- this used to re-declare all three here too. */
 static long long fk_jit_self;
 /* fn index being lowered: self-calls must target it */
 static int fk_jit_ok;
 /* cleared to 0 by emit on any unsupported shape */
 static long long fk_jit_entry;
 /* byte offset of the post-prologue entry (TCO jmp target) */
-static long long fk_jit_frame;
-/* frame slots fn needs (args + let-locals); set by fk_jit_lower */
 static void fk_jb1(unsigned char x) {
     /* fk_jbp counts past capacity even when the write itself is dropped, so the
      * "did this function's code fit" check downstream (fk_jbp > FK_JIT_CODE_BUF_CAP)
@@ -8231,15 +8273,11 @@ static fk_natfn fk_nat_install(const unsigned char *code, long long n) {
     return (fk_natfn)mem;
 #endif
 }
-/* installed native body + length per fn, for --src crystallization. NOTE: this
- * re-declares the same-named/same-sized fk_src_nat/fk_src_nat_len already
- * declared earlier in the file (near fk_nat_exec) -- a pre-existing harmless
- * duplicate (C tentative-definition rules merge them), left in place rather than
- * restructured, since removing a top-level declaration is outside this pass's
- * scope (magic numbers, correctness, bounds, perf) and carries more risk than
- * benefit here. */
-static const unsigned char *fk_src_nat[FK_FN_CAP];
-static long long fk_src_nat_len[FK_FN_CAP];
+/* installed native body + length per fn, for --src crystallization. fk_src_nat
+ * and fk_src_nat_len are already declared earlier in the file, near
+ * fk_nat_exec -- this used to re-declare both here too (a harmless duplicate
+ * under C's tentative-definition rules, but redundant); root-caused rather than
+ * left, since the earlier declaration already covers this use. */
 static int fk_run_src(const char *path, long long arg) {
 #if defined(_WIN32)
     int fd = open(path, 0x8000);
@@ -8525,19 +8563,19 @@ static int fk_run_feval(const char *path) {
         if (w + 2 >= cap) {
             return 4;
         }
-        if (c == 92) {
-            fk_srctext[w] = 92;
-            fk_srctext[w + 1] = 92;
+        if (c == FK_CH_BACKSLASH) {
+            fk_srctext[w] = FK_CH_BACKSLASH;
+            fk_srctext[w + 1] = FK_CH_BACKSLASH;
             w = w + 2;
-        } else if (c == 34) {
-            fk_srctext[w] = 92;
-            fk_srctext[w + 1] = 34;
+        } else if (c == FK_CH_DQUOTE) {
+            fk_srctext[w] = FK_CH_BACKSLASH;
+            fk_srctext[w + 1] = FK_CH_DQUOTE;
             w = w + 2;
-        } else if (c == 10) {
-            fk_srctext[w] = 92;
-            fk_srctext[w + 1] = 110;
+        } else if (c == FK_CH_LF) {
+            fk_srctext[w] = FK_CH_BACKSLASH;
+            fk_srctext[w + 1] = FK_CH_LOWER_N;
             w = w + 2;
-        } else if (c == 13) {
+        } else if (c == FK_CH_CR) {
             /* drop CR */
         } else {
             fk_srctext[w] = c;
@@ -8616,11 +8654,11 @@ static int fk_run(int argc, char **argv) {
     if (argc < 2) {
         return 1;
     }
-    if (argc >= 3 && argv[1][0] == 45 && argv[1][1] == 45 && argv[1][2] == 102 &&
-        argv[1][3] == 101) {
+    if (argc >= 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH &&
+        argv[1][2] == FK_CH_LOWER_F && argv[1][3] == FK_CH_LOWER_E) {
         return fk_run_feval(argv[2]);
     }
-    if (argc >= 3 && argv[1][0] == 45 && argv[1][1] == 45) {
+    if (argc >= 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH) {
         return fk_run_src(argv[2], argc > 3 ? atoi(argv[3]) : 0);
     }
     int fd = open(argv[1], 0);
