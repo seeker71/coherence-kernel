@@ -342,17 +342,21 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       challenger with Spanish and French source rows (`32767`): cumulative scoped open-ASR evidence is now
       local-oracle `4/4`, native `4/4`, native rate `100` over the `50` floor, while global live open-ASR authority
       remains oracle-held at native `0/4`.
+- [x] **Speech open-ASR trial window 0003 added.** `learn/speech-open-asr-trial-window-0003.fk` extends the scoped
+      challenger with Arabic and Chinese transliterated source rows (`32767`): cumulative scoped open-ASR evidence
+      is now local-oracle `6/6`, native `6/6`, native rate `100` over the `50` floor, while global live open-ASR
+      authority remains oracle-held at native `0/4`.
 - [x] **Sema voice trial window added.** `learn/sema-voice-trial-window.fk` executes the queued TCAV voice trial
       (`32767`): the live Sema voice backlog remains local-oracle `0/1`, native `0/1`, WER `100`, while the scoped
       `tcav-warm-mid-cadence-v1-window` candidate passes the local oracle `1/1`, native scoped trial `1/1`, WER `0`,
       and cuts the challenger for that trial window without claiming global live Sema voice authority.
 - [x] **Speech current status ledger added.** `learn/speech-current-status-ledger.fk` composes the metrics report,
       backlog, scheduler, open-ASR trial, and Sema voice trial into one executable status row (`32767`): global live
-      authority remains oracle-held (`4/5` oracle, `0/5` native), scoped trial windows are native (`5/5` oracle and
-      `5/5` native), native neural weights now report `20`, native Sema voice organs remain `6`, and C seed growth
+      authority remains oracle-held (`4/5` oracle, `0/5` native), scoped trial windows are native (`7/7` oracle and
+      `7/7` native), native neural weights now report `20`, native Sema voice organs remain `6`, and C seed growth
       remains `0`.
 - [x] **Speech global promotion readiness added.** `learn/speech-global-promotion-readiness.fk` turns scoped trial
-      wins into an executable global-authority gate (`32767`): open dictation has scoped native `4/4` and Sema live
+      wins into an executable global-authority gate (`32767`): open dictation has scoped native `6/6` and Sema live
       voice has scoped native `1/1`, but both still need `3` real live native receipts with WER `<=25` and clean
       controls before global authority can move. Today `0` lanes are global-native-ready, `2` remain oracle-guided,
       and `6` real live receipts are missing.
