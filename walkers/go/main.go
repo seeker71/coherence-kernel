@@ -20,9 +20,16 @@
 // Pure-op surface covered: integer + int64 + float + string + bool literals;
 // add sub mul div mod; eq ne lt le gt ge; if let do seq; defn + user calls
 // (tail-call optimized, like the origin); and/or/not; head tail cons list nth
-// empty; str_concat str_eq str_len str_find substring char_at int_to_str;
-// value_eq; match (switch). The BMF s-expression parse (the lexer), the
+// empty; str_concat str_eq str_len str_byte_at byte_to_str; value_eq;
+// match (switch). The BMF s-expression parse (the lexer), the
 // content-addressed intern, and the blueprint/op dispatch.
+//
+// str_len/str_byte_at/byte_to_str/str_concat are the deliberately minimal
+// string floor (measure/decompose/construct/join); substring, char_at,
+// int_to_str, and str_find are NOT natives here anymore — they're Form
+// composition in form-stdlib/core.fk over this floor, so there's one
+// definition, not a walker-native copy that can drift from it. See
+// receipts/2026-07-01-narrow-waist-string-cleanup.md.
 //
 // Usage: walker file.fk [more.fk ...]   — prints the evaluated root value.
 package main
@@ -34,7 +41,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 )
 
 // ---------------------------------------------------------------------------
@@ -1190,25 +1196,6 @@ func readRootFromSource(k *Kernel, src string) NodeID {
 // dropped — they only fed the trace, which this walker omits).
 // ---------------------------------------------------------------------------
 
-func floorCharBoundary(s string, i int) int {
-	if i > len(s) {
-		i = len(s)
-	}
-	for i > 0 && i < len(s) && !utf8.RuneStart(s[i]) {
-		i--
-	}
-	return i
-}
-
-func ceilCharBoundary(s string, i int) int {
-	if i >= len(s) {
-		return len(s)
-	}
-	for i < len(s) && !utf8.RuneStart(s[i]) {
-		i++
-	}
-	return i
-}
 
 func (k *Kernel) registerNative(name string, fn NativeFn) {
 	id := k.internName(name)
@@ -1273,58 +1260,31 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("str_len", func(_ *Kernel, args []Value) Value {
 		return Value{Kind: VInt, Int: int64(len(args[0].Str))}
 	})
-	k.registerNative("str_find", func(_ *Kernel, args []Value) Value {
-		s := args[0].Str
-		needle := args[1].Str
-		from := int(args[2].AsInt())
-		if from < 0 {
-			from = 0
-		}
-		if from > len(s) {
-			return Value{Kind: VInt, Int: -1}
-		}
-		from = ceilCharBoundary(s, from)
-		idx := strings.Index(s[from:], needle)
-		if idx < 0 {
-			return Value{Kind: VInt, Int: -1}
-		}
-		return Value{Kind: VInt, Int: int64(from + idx)}
-	})
-	k.registerNative("substring", func(_ *Kernel, args []Value) Value {
-		s := args[0].Str
-		a := args[1].AsInt()
-		b := args[2].AsInt()
-		if a < 0 || b < a || b > int64(len(s)) {
-			panic(fmt.Sprintf("substring: bounds out of range start=%d end=%d len=%d", a, b, len(s)))
-		}
-		return Value{Kind: VStr, Str: s[floorCharBoundary(s, int(a)):floorCharBoundary(s, int(b))]}
-	})
-	k.registerNative("char_at", func(_ *Kernel, args []Value) Value {
+	// str_byte_at / byte_to_str — the decompose/construct dual completing
+	// the string narrow waist (str_len/str_concat above are the other half).
+	// Raw byte access via direct indexing/single-byte string, not
+	// utf8.DecodeRuneInString — matches fkwu's byte-indexed (not
+	// codepoint-indexed) view exactly, confirmed including the full 0-255
+	// range and the -1 out-of-bounds convention.
+	//
+	// substring / char_at / int_to_str / str_find (formerly native here,
+	// Unicode-rune-aware and panic-on-OOB — different semantics from fkwu's
+	// byte-indexed, -1-on-OOB convention they were never actually verified
+	// against) are RETIRED as Go natives: form-stdlib/core.fk now defines
+	// all four as Form composition over this floor, so there is exactly one
+	// definition, not two that can silently drift apart. See
+	// receipts/2026-07-01-narrow-waist-string-cleanup.md.
+	k.registerNative("str_byte_at", func(_ *Kernel, args []Value) Value {
 		s := args[0].Str
 		i := args[1].AsInt()
 		if i < 0 || i >= int64(len(s)) {
-			panic(fmt.Sprintf("char_at: bounds out of range index=%d len=%d", i, len(s)))
+			return Value{Kind: VInt, Int: -1}
 		}
-		if !utf8.RuneStart(s[i]) {
-			return Value{Kind: VStr, Str: ""}
-		}
-		r, _ := utf8.DecodeRuneInString(s[i:])
-		return Value{Kind: VStr, Str: string(r)}
+		return Value{Kind: VInt, Int: int64(s[i])}
 	})
-	k.registerNative("int_to_str", func(_ *Kernel, args []Value) Value {
-		v := args[0]
-		switch v.Kind {
-		case VStr:
-			return Value{Kind: VStr, Str: v.Str}
-		case VBool:
-			if v.Bool {
-				return Value{Kind: VStr, Str: "true"}
-			}
-			return Value{Kind: VStr, Str: "false"}
-		case VNull:
-			return Value{Kind: VStr, Str: "null"}
-		}
-		return Value{Kind: VStr, Str: v.String()}
+	k.registerNative("byte_to_str", func(_ *Kernel, args []Value) Value {
+		b := byte(args[0].AsInt() & 0xFF)
+		return Value{Kind: VStr, Str: string([]byte{b})}
 	})
 
 	// value_eq — structural value equality across kinds.
