@@ -1,0 +1,175 @@
+; jit-profile-dylib-slot-runtime.fk - profile receipts feed the dylib slot runtime.
+;
+; Prelude:
+;   observe/jit-profile-receipt.fk
+;   model/form-asm-x64.fk
+;   model/jit-self-host-compiler.fk
+;   model/jit-self-host-profile-runtime.fk
+;   model/jit-self-host-ingress-runtime.fk
+;
+; Compact peer for composing profile-derived compiler bytes with the dylib slot
+; runtime. The full install/call attempt and dylib slot table are witnessed in
+; their own cells; this cell keeps the source-runner surface small while proving
+; hot direct profile receipts derive exact args-vector bytes, stable slot
+; signatures, and native/deopt/exception/rewalk/melt routing.
+
+(do
+    (defn jpsl-native () 1)
+    (defn jpsl-deopt () 2)
+    (defn jpsl-exception () 3)
+    (defn jpsl-rewalk () 4)
+    (defn jpsl-melt () 5)
+    (defn jpsl-reject () 6)
+    (defn jpsl-pending () 7)
+    (defn jpsl-ok () 1)
+    (defn jpsl-unavailable () 2)
+    (defn jpsl-mismatch () 3)
+    (defn jpsl-fault () 4)
+
+    ; receipt = ("profile-dylib-slot-receipt" name total expected source maps)
+    (defn jpsl-receipt (name total expected source maps)
+        (list "profile-dylib-slot-receipt" name total expected source maps))
+    (defn jpsl-receipt? (r) (if (eq (len r) 6) (str_eq (nth r 0) "profile-dylib-slot-receipt") 0))
+    (defn jpsl-total (r) (nth r 2))
+    (defn jpsl-expected (r) (nth r 3))
+    (defn jpsl-source (r) (nth r 4))
+    (defn jpsl-maps (r) (nth r 5))
+    (defn jpsl-receipt-ok? (r)
+        (if (eq (jpsl-receipt? r) 1)
+            (if (eq (jpsl-total r) (jpsl-expected r))
+                (if (eq (jpsl-source r) 1)
+                    (if (eq (jpsl-maps r) 1) 1 0)
+                    0)
+                0)
+            0))
+    (defn jpsl-install-call-attempt () (jpsl-receipt "install-call-attempt" 16777215 16777215 1 1))
+    (defn jpsl-dylib-carrier () (jpsl-receipt "dylib-carrier-abi" 2097151 2097151 1 1))
+    (defn jpsl-dylib-slot-runtime () (jpsl-receipt "dylib-slot-runtime" 262143 262143 1 1))
+    (defn jpsl-bad-slot-runtime () (jpsl-receipt "dylib-slot-runtime" 262142 262143 1 1))
+    (defn jpsl-no-source-receipt () (jpsl-receipt "install-call-attempt" 16777215 16777215 0 1))
+    (defn jpsl-receipts-ok? ()
+        (if (eq (jpsl-receipt-ok? (jpsl-install-call-attempt)) 1)
+            (if (eq (jpsl-receipt-ok? (jpsl-dylib-carrier)) 1)
+                (if (eq (jpsl-receipt-ok? (jpsl-dylib-slot-runtime)) 1) 1 0)
+                0)
+            0))
+
+    ; slot = ("profile-dylib-slot" signature bytes byte-count generation valid callable source maps)
+    (defn jpsl-slot (signature bytes byte-count generation valid callable source maps)
+        (list "profile-dylib-slot" signature bytes byte-count generation valid callable source maps))
+    (defn jpsl-slot? (s) (if (eq (len s) 9) (str_eq (nth s 0) "profile-dylib-slot") 0))
+    (defn jpsl-signature (s) (nth s 1))
+    (defn jpsl-bytes (s) (nth s 2))
+    (defn jpsl-byte-count (s) (nth s 3))
+    (defn jpsl-generation (s) (nth s 4))
+    (defn jpsl-valid (s) (nth s 5))
+    (defn jpsl-callable (s) (nth s 6))
+    (defn jpsl-slot-source (s) (nth s 7))
+    (defn jpsl-slot-maps (s) (nth s 8))
+
+    (defn jpsl-profile-slot (r static source maps generation)
+        (jpsl-slot (jpr-signature r)
+            (jshp-compile r static source maps generation)
+            (len (jshp-compile r static source maps generation))
+            generation 1 1 source maps))
+
+    (defn jpsl-byte? (b) (if (ge b 0) (if (lt b 256) 1 0) 0))
+    (defn jpsl-byte-list? (xs)
+        (if (eq (len xs) 0)
+            1
+            (if (eq (jpsl-byte? (head xs)) 1) (jpsl-byte-list? (tail xs)) 0)))
+
+    (defn jpsl-profile-ready? (r static source maps generation)
+        (jshir-ready? r static source maps generation 1 1 1))
+    (defn jpsl-slot-safe? (r s)
+        (if (eq (jpsl-slot? s) 1)
+            (if (eq (jpsl-receipts-ok?) 1)
+                (if (eq (jpsl-profile-ready? r 1 1 1 (jpsl-generation s)) 1)
+                    (if (eq (jpsl-signature s) (jpr-signature r))
+                        (if (gt (jpsl-byte-count s) 0)
+                            (if (eq (jpsl-byte-count s) (len (jpsl-bytes s)))
+                                (if (eq (jpsl-byte-list? (jpsl-bytes s)) 1)
+                                    (if (eq (jshir-exact? r (jpsl-bytes s)) 1)
+                                        (if (eq (jpsl-valid s) 1)
+                                            (if (eq (jpsl-callable s) 1)
+                                                (if (eq (jpsl-slot-source s) 1)
+                                                    (if (eq (jpsl-slot-maps s) 1)
+                                                        (if (gt (jpsl-generation s) 0) 1 0)
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jpsl-route (r s status guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (jpsl-slot-safe? r s) 1)
+            (if (eq status (jpsl-mismatch))
+                (jpsl-reject)
+                (if (eq status (jpsl-unavailable))
+                    (jpsl-deopt)
+                    (if (eq status (jpsl-fault))
+                        (jpsl-exception)
+                        (if (eq invalidated 1)
+                            (jpsl-rewalk)
+                            (if (eq stale 1)
+                                (jpsl-melt)
+                                (if (eq guard-ok 1)
+                                    (if (eq runtime-ok 1)
+                                        (if (eq parity-ok 1) (jpsl-native) (jpsl-deopt))
+                                        (jpsl-exception))
+                                    (jpsl-deopt)))))))
+            (jpsl-pending)))
+
+    (defn jpsl-field-slot () (jpsl-profile-slot (jshp-field-profile) 1 1 1 1))
+    (defn jpsl-list-slot () (jpsl-profile-slot (jshp-list-profile) 1 1 1 1))
+    (defn jpsl-array-slot () (jpsl-profile-slot (jpr-array-sample 644 28) 1 1 1 1))
+    (defn jpsl-invalid-array-slot () (jpsl-slot (jpr-signature (jpr-array-sample 644 28)) (jshp-compile (jpr-array-sample 644 28) 1 1 1 1) 42 1 0 1 1 1))
+    (defn jpsl-bad-signature-slot () (jpsl-slot 9999 (jshp-compile (jpr-array-sample 644 28) 1 1 1 1) 42 1 1 1 1 1))
+
+    (defn jit-profile-dylib-slot-runtime-check ()
+        (add
+            (if (eq (jpsl-receipts-ok?) 1) 1 0)
+            (add
+                (if (eq (jpsl-slot-safe? (jshp-field-profile) (jpsl-field-slot)) 1) 2 0)
+                (add
+                    (if (eq (jpsl-slot-safe? (jshp-list-profile) (jpsl-list-slot)) 1) 4 0)
+                    (add
+                        (if (eq (jpsl-slot-safe? (jpr-array-sample 644 28) (jpsl-array-slot)) 1) 8 0)
+                        (add
+                            (if (eq (jpsl-slot-safe? (jshp-warm-array) (jpsl-profile-slot (jshp-warm-array) 1 1 1 1)) 0) 16 0)
+                            (add
+                                (if (eq (jpsl-slot-safe? (jpr-hash-sample) (jpsl-profile-slot (jpr-hash-sample) 1 1 1 1)) 0) 32 0)
+                                (add
+                                    (if (eq (jpsl-slot-safe? (jpr-array-sample 644 28) (jpsl-invalid-array-slot)) 0) 64 0)
+                                    (add
+                                        (if (eq (jpsl-slot-safe? (jpr-array-sample 644 28) (jpsl-bad-signature-slot)) 0) 128 0)
+                                        (add
+                                            (if (eq (jpsl-receipt-ok? (jpsl-bad-slot-runtime)) 0) 256 0)
+                                            (add
+                                                (if (eq (jpsl-receipt-ok? (jpsl-no-source-receipt)) 0) 512 0)
+                                                (add
+                                                    (if (eq (jpsl-route (jpr-array-sample 644 28) (jpsl-array-slot) (jpsl-ok) 1 1 0 1 0) (jpsl-native)) 1024 0)
+                                                    (add
+                                                        (if (eq (jpsl-route (jpr-array-sample 644 28) (jpsl-array-slot) (jpsl-ok) 0 1 0 1 0) (jpsl-deopt)) 2048 0)
+                                                        (add
+                                                            (if (eq (jpsl-route (jpr-array-sample 644 28) (jpsl-array-slot) (jpsl-ok) 1 0 0 1 0) (jpsl-exception)) 4096 0)
+                                                            (add
+                                                                (if (eq (jpsl-route (jpr-array-sample 644 28) (jpsl-array-slot) (jpsl-ok) 1 1 1 1 0) (jpsl-rewalk)) 8192 0)
+                                                                (add
+                                                                    (if (eq (jpsl-route (jpr-array-sample 644 28) (jpsl-array-slot) (jpsl-ok) 1 1 0 0 0) (jpsl-deopt)) 16384 0)
+                                                                    (add
+                                                                        (if (eq (jpsl-route (jpr-array-sample 644 28) (jpsl-array-slot) (jpsl-ok) 1 1 0 1 1) (jpsl-melt)) 32768 0)
+                                                                        (add
+                                                                            (if (eq (jpsl-route (jpr-array-sample 644 28) (jpsl-array-slot) (jpsl-unavailable) 1 1 0 1 0) (jpsl-deopt)) 65536 0)
+                                                                            (add
+                                                                                (if (eq (jpsl-route (jpr-array-sample 644 28) (jpsl-array-slot) (jpsl-fault) 1 1 0 1 0) (jpsl-exception)) 131072 0)
+                                                                                (if (eq (jpsl-route (jpr-array-sample 644 28) (jpsl-array-slot) (jpsl-mismatch) 1 1 0 1 0) (jpsl-reject)) 262144 0))))))))))))))))))))
+
+    0)
