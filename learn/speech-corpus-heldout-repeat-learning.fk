@@ -1,0 +1,253 @@
+; speech-corpus-heldout-repeat-learning.fk -- scoped corpus held-out repeats.
+;
+; This cell trains six full-envelope acoustic prototypes from consentful
+; Coherence Network corpus phrases, then evaluates separately rendered,
+; volume-shifted wavs of the same phrases against all six prototypes. It is real
+; local observation and Form-native prototype learning, but still only held-out
+; repeat evidence: not cross-phrase, not cross-voice, not global ASR/TTS.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/wav-sense.fk
+;   learn/macos-sema-teacher-acoustic-learning.fk
+;   learn/speech-model-metrics-report.fk
+;   learn/speech-learning-data-sufficiency.fk
+
+(do
+    (defn schr-kind () "speech-corpus-heldout-repeat-learning")
+    (defn schr-out-dir () (str_concat (temp_dir) "/speech-corpus-heldout-repeat-learning"))
+    (defn schr-volume () "0.98")
+    (defn schr-max-wer () 25)
+
+    (defn schr-row (id locale key text voice lang)
+        (list "speech-corpus-heldout-row" id locale key text voice lang))
+    (defn schr-row-id     (r) (nth r 1))
+    (defn schr-row-locale (r) (nth r 2))
+    (defn schr-row-key    (r) (nth r 3))
+    (defn schr-row-text   (r) (nth r 4))
+    (defn schr-row-voice  (r) (nth r 5))
+    (defn schr-row-lang   (r) (nth r 6))
+
+    (defn schr-rows ()
+        (list
+            (schr-row 1 "en" "common.close" "Close" "Flo (English (US))" "en")
+            (schr-row 2 "de" "common.close" "Schließen" "Flo (German (Germany))" "de")
+            (schr-row 3 "es" "common.save" "Guardar" "Flo (Spanish (Spain))" "es")
+            (schr-row 4 "fr" "common.yes" "Oui" "Amélie" "fr")
+            (schr-row 5 "id" "common.close" "Tutup" "Damayanti" "id")
+            (schr-row 6 "pt-br" "common.back" "Voltar" "Flo (Portuguese (Brazil))" "pt")))
+
+    (defn schr-path-stem (row variant)
+        (mstal-cat4 (schr-out-dir) "/row-" (mstal-int-str (schr-row-id row)) variant))
+    (defn schr-aiff-path (row variant) (str_concat (schr-path-stem row variant) ".aiff"))
+    (defn schr-wav-path (row variant) (str_concat (schr-path-stem row variant) ".wav"))
+
+    (defn schr-say-command (row variant)
+        (str_concat
+            (str_concat "say -v " (mstal-q (schr-row-voice row)))
+            (str_concat
+                (str_concat " -o " (mstal-q (schr-aiff-path row variant)))
+                (str_concat " " (mstal-q (schr-row-text row))))))
+
+    (defn schr-ffmpeg-train-command (row)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (mstal-q (schr-aiff-path row "-train")))
+            (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le " (mstal-q (schr-wav-path row "-train")))))
+
+    (defn schr-ffmpeg-eval-command (row)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (mstal-q (schr-aiff-path row "-eval")))
+            (str_concat
+                (str_concat " -ar 16000 -ac 1 -af volume=" (schr-volume))
+                (str_concat " -c:a pcm_s16le " (mstal-q (schr-wav-path row "-eval"))))))
+
+    (defn schr-whisper-command (row wav)
+        (str_concat
+            (str_concat "whisper-cli -m " (mstal-q (mstal-model)))
+            (str_concat
+                (str_concat " -f " (mstal-q wav))
+                (str_concat " -l " (str_concat (schr-row-lang row) " -nt -np")))))
+
+    (defn schr-render-train (row)
+        (do
+            (let _mk (fs_mkdir (schr-out-dir)))
+            (let _say (host-exec (schr-say-command row "-train") ""))
+            (let _ff (host-exec (schr-ffmpeg-train-command row) ""))
+            (schr-wav-path row "-train")))
+
+    (defn schr-render-eval (row)
+        (do
+            (let _mk (fs_mkdir (schr-out-dir)))
+            (let _say (host-exec (schr-say-command row "-eval") ""))
+            (let _ff (host-exec (schr-ffmpeg-eval-command row) ""))
+            (schr-wav-path row "-eval")))
+
+    (defn schr-prototype (id locale key text feature)
+        (list "speech-corpus-heldout-prototype" id locale key text feature))
+    (defn schr-proto-id      (p) (nth p 1))
+    (defn schr-proto-locale  (p) (nth p 2))
+    (defn schr-proto-key     (p) (nth p 3))
+    (defn schr-proto-text    (p) (nth p 4))
+    (defn schr-proto-feature (p) (nth p 5))
+
+    (defn schr-prototype-from-row (row wav)
+        (schr-prototype
+            (schr-row-id row)
+            (schr-row-locale row)
+            (schr-row-key row)
+            (schr-row-text row)
+            (mstal-env wav)))
+
+    (defn schr-l1 (a b)
+        (if (eq (len a) 0) 0
+            (add (abs (sub (head a) (head b)))
+                 (schr-l1 (tail a) (tail b)))))
+
+    (defn schr-nearest-loop (feature prototypes best bestdist)
+        (if (eq (len prototypes) 0) best
+            (do
+                (let p (head prototypes))
+                (let d (schr-l1 feature (schr-proto-feature p)))
+                (if (lt d bestdist)
+                    (schr-nearest-loop feature (tail prototypes) p d)
+                    (schr-nearest-loop feature (tail prototypes) best bestdist)))))
+
+    (defn schr-nearest (feature prototypes)
+        (schr-nearest-loop feature (tail prototypes) (head prototypes)
+                           (schr-l1 feature (schr-proto-feature (head prototypes)))))
+
+    (defn schr-train-loop (rows)
+        (if (eq (len rows) 0) (empty)
+            (do
+                (let row (head rows))
+                (let wav (schr-render-train row))
+                (cons (schr-prototype-from-row row wav)
+                      (schr-train-loop (tail rows))))))
+
+    (defn schr-eval-row (row prototypes)
+        (do
+            (let train-wav (schr-wav-path row "-train"))
+            (let eval-wav (schr-render-eval row))
+            (let transcript (host-exec (schr-whisper-command row eval-wav) ""))
+            (let predicted (schr-nearest (mstal-env eval-wav) prototypes))
+            (let oracle-wer (sw-wer (sw-tokens transcript) (sw-tokens (schr-row-text row))))
+            (let native-ok (if (and (eq (schr-proto-id predicted) (schr-row-id row))
+                                    (str_eq (schr-proto-text predicted) (schr-row-text row))) 1 0))
+            (list "speech-corpus-heldout-eval-row"
+                  (schr-row-id row)
+                  (schr-row-locale row)
+                  (schr-row-key row)
+                  (schr-row-text row)
+                  transcript
+                  oracle-wer
+                  (if (le oracle-wer (schr-max-wer)) 1 0)
+                  (schr-proto-text predicted)
+                  native-ok
+                  (mstal-audio-hash train-wav)
+                  (mstal-audio-hash eval-wav)
+                  (if (eq (mstal-audio-hash train-wav) (mstal-audio-hash eval-wav)) 0 1)
+                  (file_size eval-wav))))
+
+    (defn schr-eval-loop (rows prototypes)
+        (if (eq (len rows) 0) (empty)
+            (cons (schr-eval-row (head rows) prototypes)
+                  (schr-eval-loop (tail rows) prototypes))))
+
+    (defn schr-er-id       (r) (nth r 1))
+    (defn schr-er-oracle-w (r) (nth r 6))
+    (defn schr-er-oracle   (r) (nth r 7))
+    (defn schr-er-native   (r) (nth r 9))
+    (defn schr-er-train-h  (r) (nth r 10))
+    (defn schr-er-eval-h   (r) (nth r 11))
+    (defn schr-er-diff     (r) (nth r 12))
+    (defn schr-er-bytes    (r) (nth r 13))
+
+    (defn schr-count-oracle (rows)
+        (if (eq (len rows) 0) 0
+            (add (schr-er-oracle (head rows)) (schr-count-oracle (tail rows)))))
+
+    (defn schr-count-native (rows)
+        (if (eq (len rows) 0) 0
+            (add (schr-er-native (head rows)) (schr-count-native (tail rows)))))
+
+    (defn schr-count-diff (rows)
+        (if (eq (len rows) 0) 0
+            (add (schr-er-diff (head rows)) (schr-count-diff (tail rows)))))
+
+    (defn schr-max-wer-loop (rows)
+        (if (eq (len rows) 0) 0
+            (do
+                (let rest (schr-max-wer-loop (tail rows)))
+                (if (gt (schr-er-oracle-w (head rows)) rest)
+                    (schr-er-oracle-w (head rows))
+                    rest))))
+
+    (defn schr-total-bytes (rows)
+        (if (eq (len rows) 0) 0
+            (add (schr-er-bytes (head rows)) (schr-total-bytes (tail rows)))))
+
+    (defn schr-receipt-from (prototypes evals)
+        (list (schr-kind)
+              prototypes
+              evals
+              (len prototypes)
+              (len evals)
+              (schr-count-oracle evals)
+              (schr-count-native evals)
+              (schr-count-diff evals)
+              (schr-max-wer-loop evals)
+              (schr-total-bytes evals)
+              "scoped-heldout-repeat-not-global-authority"
+              1
+              1
+              0
+              0))
+
+    (defn schr-run-receipt ()
+        (if (eq (mstal-ready?) 1)
+            (do
+                (let prototypes (schr-train-loop (schr-rows)))
+                (schr-receipt-from prototypes (schr-eval-loop (schr-rows) prototypes)))
+            (list (schr-kind) (empty) (empty) 0 0 0 0 0 100 0
+                  "missing-host-tools" 1 1 0 0)))
+
+    (defn schr-rec-kind       (r) (nth r 0))
+    (defn schr-rec-protos     (r) (nth r 3))
+    (defn schr-rec-evals      (r) (nth r 4))
+    (defn schr-rec-oracle-ok  (r) (nth r 5))
+    (defn schr-rec-native-ok  (r) (nth r 6))
+    (defn schr-rec-diff       (r) (nth r 7))
+    (defn schr-rec-max-wer    (r) (nth r 8))
+    (defn schr-rec-bytes      (r) (nth r 9))
+    (defn schr-rec-status     (r) (nth r 10))
+    (defn schr-rec-native     (r) (nth r 11))
+    (defn schr-rec-heldout    (r) (nth r 12))
+    (defn schr-rec-global     (r) (nth r 13))
+    (defn schr-rec-neural     (r) (nth r 14))
+
+    (defn schr-run-verdict ()
+        (do
+            (let r (schr-run-receipt))
+            (add
+                (add
+                    (add (if (str_eq (schr-rec-kind r) (schr-kind)) 1 0)
+                         (if (eq (schr-rec-protos r) 6) 2 0))
+                    (add (if (eq (schr-rec-evals r) 6) 4 0)
+                         (if (eq (schr-rec-oracle-ok r) 6) 8 0)))
+                (add
+                    (add (if (eq (schr-rec-native-ok r) 6) 16 0)
+                         (if (eq (schr-rec-diff r) 6) 32 0))
+                    (add
+                        (add (if (le (schr-rec-max-wer r) (schr-max-wer)) 64 0)
+                             (if (gt (schr-rec-bytes r) 100000) 128 0))
+                        (add
+                            (add (if (str_eq (schr-rec-status r)
+                                             "scoped-heldout-repeat-not-global-authority") 256 0)
+                                 (if (eq (schr-rec-native r) 1) 512 0))
+                            (add
+                                (add (if (eq (schr-rec-heldout r) 1) 1024 0)
+                                     (if (eq (schr-rec-global r) 0) 2048 0))
+                                (add (if (eq (schr-rec-neural r) 0) 4096 0)
+                                     (if (eq (slds-sufficient (slds-current)) 0) 8192 0)))))))))
+
+    0)

@@ -209,6 +209,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       (`8191`): `24/24` rows pass the local-oracle WER floor, max WER `0`, observed batch wav bytes `580710`.
       Aggregate speech rows are now `35` wavs and `1065282` observed bytes; status remains
       `captured-corpus-audio-not-training-sufficient` with `0` corpus rows used for training.
+- [x] **Speech corpus held-out repeat learning added.** `learn/speech-corpus-heldout-repeat-learning.fk` trains six
+      Form-native full-envelope prototypes from consentful corpus phrases and evaluates six separately rendered,
+      volume-shifted held-out wavs (`16383`): local oracle accepts `6/6`, native prototype classification accepts
+      `6/6`, train/eval hashes differ, observed wav bytes `302968`, neural parameters `0`. Aggregate speech rows
+      are now `47` wavs and `1368250` observed bytes; held-out repeat rows rise to `7`, while cross-phrase and
+      cross-voice remain `0`.
 - [x] **macOS Arabic teacher acoustic learning added.** `learn/macos-arabic-teacher-acoustic-learning.fk` extends
       the same live path to Arabic: `Majed -> ffmpeg -> whisper.cpp/Metal -l ar`, Form wav sensing, four Arabic
       acoustic token prototypes, native CTC decode, live verdict `16383`, live WER `0`, minimum confidence `96`,
