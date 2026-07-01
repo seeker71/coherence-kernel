@@ -1,0 +1,327 @@
+; jit-dylib-load-bind-runtime.fk - load/bind tickets for the dylib JIT carrier.
+;
+; The image manifest proves the loadable artifact shape. This cell proves the
+; next runtime state in Form: the dylib image is opened, required carrier
+; symbols are bound, W^X/source/maps/no-C-growth are preserved, and install/call
+; tickets are produced before a carrier proof may claim live native dispatch.
+;
+; This is a compact runtime bridge. It depends on the dylib image manifest by
+; receipt instead of loading the full manifest stack, so it can compose under the
+; current source-runner envelope.
+
+(do
+    (defn jdlb-native () 1)
+    (defn jdlb-deopt () 2)
+    (defn jdlb-exception () 3)
+    (defn jdlb-rewalk () 4)
+    (defn jdlb-melt () 5)
+    (defn jdlb-reject () 6)
+    (defn jdlb-pending () 7)
+
+    (defn jdlb-open () 1)
+    (defn jdlb-unavailable () 2)
+    (defn jdlb-mismatch () 3)
+    (defn jdlb-fault () 4)
+
+    (defn jdlb-array-image () 101)
+    (defn jdlb-field-image () 102)
+    (defn jdlb-add1-probe-image () 103)
+    (defn jdlb-c-owner-image () 201)
+    (defn jdlb-bad-image () 202)
+
+    (defn jdlb-image-ok? (image)
+        (if (eq image (jdlb-array-image))
+            1
+            (if (eq image (jdlb-field-image))
+                1
+                (if (eq image (jdlb-add1-probe-image)) 1 0))))
+
+    ; receipt = ("dylib-load-bind-receipt" name total expected source maps)
+    (defn jdlb-receipt (name total expected source maps)
+        (list "dylib-load-bind-receipt" name total expected source maps))
+    (defn jdlb-receipt? (r) (if (eq (len r) 6) (str_eq (nth r 0) "dylib-load-bind-receipt") 0))
+    (defn jdlb-total (r) (nth r 2))
+    (defn jdlb-expected (r) (nth r 3))
+    (defn jdlb-source (r) (nth r 4))
+    (defn jdlb-maps (r) (nth r 5))
+
+    (defn jdlb-receipt-ok? (r)
+        (if (eq (jdlb-receipt? r) 1)
+            (if (eq (jdlb-total r) (jdlb-expected r))
+                (if (eq (jdlb-source r) 1)
+                    (if (eq (jdlb-maps r) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jdlb-image-manifest () (jdlb-receipt "dylib-image-manifest" 16777215 16777215 1 1))
+    (defn jdlb-carrier-abi () (jdlb-receipt "dylib-carrier-abi" 2097151 2097151 1 1))
+    (defn jdlb-host-wx () (jdlb-receipt "host-wx-audit" 1048575 1048575 1 1))
+    (defn jdlb-host-membrane () (jdlb-receipt "host-membrane-readiness" 524287 524287 1 1))
+    (defn jdlb-native-call () (jdlb-receipt "native-call-plan" 2097151 2097151 1 1))
+    (defn jdlb-slot-fault () (jdlb-receipt "slot-runtime-fault-bridge" 1048575 1048575 1 1))
+    (defn jdlb-bad-image-manifest () (jdlb-receipt "dylib-image-manifest" 16777214 16777215 1 1))
+
+    (defn jdlb-receipts-ok? ()
+        (if (eq (jdlb-receipt-ok? (jdlb-image-manifest)) 1)
+            (if (eq (jdlb-receipt-ok? (jdlb-carrier-abi)) 1)
+                (if (eq (jdlb-receipt-ok? (jdlb-host-wx)) 1)
+                    (if (eq (jdlb-receipt-ok? (jdlb-host-membrane)) 1)
+                        (if (eq (jdlb-receipt-ok? (jdlb-native-call)) 1)
+                            (if (eq (jdlb-receipt-ok? (jdlb-slot-fault)) 1) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    ; binding = ("binding" symbol address abi source)
+    (defn jdlb-binding (symbol address abi source)
+        (list "binding" symbol address abi source))
+    (defn jdlb-binding? (b) (if (eq (len b) 5) (str_eq (nth b 0) "binding") 0))
+    (defn jdlb-symbol (b) (nth b 1))
+    (defn jdlb-address (b) (nth b 2))
+    (defn jdlb-abi (b) (nth b 3))
+    (defn jdlb-binding-source (b) (nth b 4))
+
+    (defn jdlb-binding-safe? (b)
+        (if (eq (jdlb-binding? b) 1)
+            (if (gt (jdlb-address b) 0)
+                (if (str_eq (jdlb-abi b) "sysv")
+                    (if (eq (jdlb-binding-source b) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jdlb-bindings-safe? (bindings)
+        (if (eq (len bindings) 0)
+            1
+            (if (eq (jdlb-binding-safe? (head bindings)) 1) (jdlb-bindings-safe? (tail bindings)) 0)))
+
+    (defn jdlb-has-symbol? (bindings symbol)
+        (if (eq (len bindings) 0)
+            0
+            (if (str_eq (jdlb-symbol (head bindings)) symbol)
+                1
+                (jdlb-has-symbol? (tail bindings) symbol))))
+
+    (defn jdlb-required-bound? (bindings)
+        (if (eq (jdlb-has-symbol? bindings "fk_jit_install") 1)
+            (if (eq (jdlb-has-symbol? bindings "fk_jit_call") 1)
+                (if (eq (jdlb-has-symbol? bindings "fk_jit_drop") 1)
+                    (if (eq (jdlb-has-symbol? bindings "fk_jit_flush_icache") 1)
+                        (if (eq (jdlb-has-symbol? bindings "fk_jit_status_v1") 1) 1 0)
+                        0)
+                    0)
+                0)
+            0))
+
+    ; load = ("dylib-load" image handle status bindings wx sealed source maps no-c-growth generation)
+    (defn jdlb-load (image handle status bindings wx sealed source maps no-c-growth generation)
+        (list "dylib-load" image handle status bindings wx sealed source maps no-c-growth generation))
+    (defn jdlb-load? (l) (if (eq (len l) 11) (str_eq (nth l 0) "dylib-load") 0))
+    (defn jdlb-image (l) (nth l 1))
+    (defn jdlb-handle (l) (nth l 2))
+    (defn jdlb-status (l) (nth l 3))
+    (defn jdlb-bindings (l) (nth l 4))
+    (defn jdlb-wx (l) (nth l 5))
+    (defn jdlb-sealed (l) (nth l 6))
+    (defn jdlb-source-proof (l) (nth l 7))
+    (defn jdlb-maps-proof (l) (nth l 8))
+    (defn jdlb-no-c-growth (l) (nth l 9))
+    (defn jdlb-generation (l) (nth l 10))
+
+    (defn jdlb-load-ready? (l)
+        (if (eq (jdlb-load? l) 1)
+            (if (eq (jdlb-receipts-ok?) 1)
+                (if (eq (jdlb-image-ok? (jdlb-image l)) 1)
+                    (if (gt (jdlb-handle l) 0)
+                        (if (eq (jdlb-status l) (jdlb-open))
+                            (if (eq (jdlb-bindings-safe? (jdlb-bindings l)) 1)
+                                (if (eq (jdlb-required-bound? (jdlb-bindings l)) 1)
+                                    (if (eq (jdlb-wx l) 1)
+                                        (if (eq (jdlb-sealed l) 1)
+                                            (if (eq (jdlb-source-proof l) 1)
+                                                (if (eq (jdlb-maps-proof l) 1)
+                                                    (if (eq (jdlb-no-c-growth l) 1)
+                                                        (if (gt (jdlb-generation l) 0) 1 0)
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    ; ticket = ("dylib-ticket" load install call exception deopt melt parity generation)
+    (defn jdlb-ticket (load install call exception deopt melt parity generation)
+        (list "dylib-ticket" load install call exception deopt melt parity generation))
+    (defn jdlb-ticket? (t) (if (eq (len t) 9) (str_eq (nth t 0) "dylib-ticket") 0))
+    (defn jdlb-ticket-load (t) (nth t 1))
+    (defn jdlb-install (t) (nth t 2))
+    (defn jdlb-call (t) (nth t 3))
+    (defn jdlb-exception-proof (t) (nth t 4))
+    (defn jdlb-deopt-proof (t) (nth t 5))
+    (defn jdlb-melt-proof (t) (nth t 6))
+    (defn jdlb-parity (t) (nth t 7))
+    (defn jdlb-ticket-generation (t) (nth t 8))
+
+    (defn jdlb-ticket-ready? (t)
+        (if (eq (jdlb-ticket? t) 1)
+            (if (eq (jdlb-load-ready? (jdlb-ticket-load t)) 1)
+                (if (eq (jdlb-exception-proof t) 1)
+                    (if (eq (jdlb-deopt-proof t) 1)
+                        (if (eq (jdlb-melt-proof t) 1)
+                            (if (eq (jdlb-parity t) 1)
+                                (if (gt (jdlb-ticket-generation t) 0) 1 0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jdlb-ticket-complete? (t)
+        (if (eq (jdlb-ticket-ready? t) 1)
+            (if (eq (jdlb-install t) 1)
+                (if (eq (jdlb-call t) 1) 1 0)
+                0)
+            0))
+
+    (defn jdlb-action (t guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (jdlb-ticket-ready? t) 1)
+            (if (eq (jdlb-ticket-complete? t) 1)
+                (if (eq stale 1)
+                    (jdlb-melt)
+                    (if (eq invalidated 1)
+                        (jdlb-rewalk)
+                        (if (eq guard-ok 1)
+                            (if (eq runtime-ok 1)
+                                (if (eq parity-ok 1) (jdlb-native) (jdlb-deopt))
+                                (jdlb-exception))
+                            (jdlb-deopt))))
+                (jdlb-pending))
+            (if (eq (jdlb-status (jdlb-ticket-load t)) (jdlb-unavailable))
+                (jdlb-deopt)
+                (if (eq (jdlb-status (jdlb-ticket-load t)) (jdlb-mismatch))
+                    (jdlb-reject)
+                    (if (eq (jdlb-status (jdlb-ticket-load t)) (jdlb-fault)) (jdlb-exception) (jdlb-reject))))))
+
+    (defn jdlb-bindings-good ()
+        (list
+            (jdlb-binding "fk_jit_install" 101 "sysv" 1)
+            (jdlb-binding "fk_jit_call" 102 "sysv" 1)
+            (jdlb-binding "fk_jit_drop" 103 "sysv" 1)
+            (jdlb-binding "fk_jit_flush_icache" 104 "sysv" 1)
+            (jdlb-binding "fk_jit_status_v1" 105 "sysv" 1)))
+    (defn jdlb-bindings-missing-call ()
+        (list
+            (jdlb-binding "fk_jit_install" 101 "sysv" 1)
+            (jdlb-binding "fk_jit_drop" 103 "sysv" 1)
+            (jdlb-binding "fk_jit_flush_icache" 104 "sysv" 1)
+            (jdlb-binding "fk_jit_status_v1" 105 "sysv" 1)))
+    (defn jdlb-bindings-bad-address ()
+        (list
+            (jdlb-binding "fk_jit_install" 0 "sysv" 1)
+            (jdlb-binding "fk_jit_call" 102 "sysv" 1)
+            (jdlb-binding "fk_jit_drop" 103 "sysv" 1)
+            (jdlb-binding "fk_jit_flush_icache" 104 "sysv" 1)
+            (jdlb-binding "fk_jit_status_v1" 105 "sysv" 1)))
+
+    (defn jdlb-array-load ()
+        (jdlb-load (jdlb-array-image) 11 (jdlb-open) (jdlb-bindings-good) 1 1 1 1 1 1))
+    (defn jdlb-field-load ()
+        (jdlb-load (jdlb-field-image) 12 (jdlb-open) (jdlb-bindings-good) 1 1 1 1 1 2))
+    (defn jdlb-add1-probe-load ()
+        (jdlb-load (jdlb-add1-probe-image) 13 (jdlb-open) (jdlb-bindings-good) 1 1 1 1 1 3))
+    (defn jdlb-unavailable-load ()
+        (jdlb-load (jdlb-array-image) 0 (jdlb-unavailable) (jdlb-bindings-good) 1 1 1 1 1 4))
+    (defn jdlb-mismatch-load ()
+        (jdlb-load (jdlb-array-image) 11 (jdlb-mismatch) (jdlb-bindings-good) 1 1 1 1 1 5))
+    (defn jdlb-fault-load ()
+        (jdlb-load (jdlb-array-image) 11 (jdlb-fault) (jdlb-bindings-good) 1 1 1 1 1 6))
+    (defn jdlb-missing-symbol-load ()
+        (jdlb-load (jdlb-array-image) 11 (jdlb-open) (jdlb-bindings-missing-call) 1 1 1 1 1 7))
+    (defn jdlb-bad-address-load ()
+        (jdlb-load (jdlb-array-image) 11 (jdlb-open) (jdlb-bindings-bad-address) 1 1 1 1 1 8))
+    (defn jdlb-c-owner-load ()
+        (jdlb-load (jdlb-c-owner-image) 11 (jdlb-open) (jdlb-bindings-good) 1 1 1 1 1 9))
+    (defn jdlb-zero-generation-load ()
+        (jdlb-load (jdlb-array-image) 11 (jdlb-open) (jdlb-bindings-good) 1 1 1 1 1 0))
+
+    (defn jdlb-current-ticket () (jdlb-ticket (jdlb-array-load) 0 0 1 1 1 1 1))
+    (defn jdlb-live-ticket () (jdlb-ticket (jdlb-array-load) 1 1 1 1 1 1 1))
+    (defn jdlb-no-install-ticket () (jdlb-ticket (jdlb-array-load) 0 1 1 1 1 1 1))
+    (defn jdlb-no-call-ticket () (jdlb-ticket (jdlb-array-load) 1 0 1 1 1 1 1))
+    (defn jdlb-no-parity-ticket () (jdlb-ticket (jdlb-array-load) 1 1 1 1 1 0 1))
+    (defn jdlb-zero-ticket () (jdlb-ticket (jdlb-array-load) 1 1 1 1 1 1 0))
+
+    (defn jdlb-bit (cond bit) (if cond bit 0))
+    (defn jdlb-front-bits ()
+        (add
+            (jdlb-bit (eq (jdlb-receipts-ok?) 1) 1)
+            (add
+                (jdlb-bit (eq (jdlb-load-ready? (jdlb-array-load)) 1) 2)
+                (add
+                    (jdlb-bit (eq (jdlb-load-ready? (jdlb-field-load)) 1) 4)
+                    (add
+                        (jdlb-bit (eq (jdlb-load-ready? (jdlb-add1-probe-load)) 1) 8)
+                        (add
+                            (jdlb-bit (eq (jdlb-bindings-safe? (jdlb-bindings-good)) 1) 16)
+                            (add
+                                (jdlb-bit (eq (jdlb-required-bound? (jdlb-bindings-good)) 1) 32)
+                                (add
+                                    (jdlb-bit (eq (jdlb-ticket-ready? (jdlb-current-ticket)) 1) 64)
+                                    (add
+                                        (jdlb-bit (eq (jdlb-ticket-complete? (jdlb-current-ticket)) 0) 128)
+                                        (jdlb-bit (eq (jdlb-ticket-complete? (jdlb-live-ticket)) 1) 256))))))))))
+
+    (defn jdlb-route-bits ()
+        (add
+            (jdlb-bit (eq (jdlb-action (jdlb-current-ticket) 1 1 0 1 0) (jdlb-pending)) 512)
+            (add
+                (jdlb-bit (eq (jdlb-action (jdlb-live-ticket) 1 1 0 1 0) (jdlb-native)) 1024)
+                (add
+                    (jdlb-bit (eq (jdlb-action (jdlb-live-ticket) 0 1 0 1 0) (jdlb-deopt)) 2048)
+                    (add
+                        (jdlb-bit (eq (jdlb-action (jdlb-live-ticket) 1 0 0 1 0) (jdlb-exception)) 4096)
+                        (add
+                            (jdlb-bit (eq (jdlb-action (jdlb-live-ticket) 1 1 1 1 0) (jdlb-rewalk)) 8192)
+                            (add
+                                (jdlb-bit (eq (jdlb-action (jdlb-live-ticket) 1 1 0 0 0) (jdlb-deopt)) 16384)
+                                (add
+                                    (jdlb-bit (eq (jdlb-action (jdlb-live-ticket) 1 1 0 1 1) (jdlb-melt)) 32768)
+                                    (add
+                                        (jdlb-bit (eq (jdlb-action (jdlb-ticket (jdlb-unavailable-load) 0 0 1 1 1 1 1) 1 1 0 1 0) (jdlb-deopt)) 65536)
+                                        (add
+                                            (jdlb-bit (eq (jdlb-action (jdlb-ticket (jdlb-mismatch-load) 0 0 1 1 1 1 1) 1 1 0 1 0) (jdlb-reject)) 131072)
+                                            (jdlb-bit (eq (jdlb-action (jdlb-ticket (jdlb-fault-load) 0 0 1 1 1 1 1) 1 1 0 1 0) (jdlb-exception)) 262144)))))))))))
+
+    (defn jdlb-reject-bits ()
+        (add
+            (jdlb-bit (eq (jdlb-load-ready? (jdlb-missing-symbol-load)) 0) 524288)
+            (add
+                (jdlb-bit (eq (jdlb-load-ready? (jdlb-bad-address-load)) 0) 1048576)
+                (add
+                    (jdlb-bit (eq (jdlb-load-ready? (jdlb-c-owner-load)) 0) 2097152)
+                    (add
+                        (jdlb-bit (eq (jdlb-load-ready? (jdlb-zero-generation-load)) 0) 4194304)
+                        (add
+                            (jdlb-bit (eq (jdlb-ticket-complete? (jdlb-no-install-ticket)) 0) 8388608)
+                            (add
+                                (jdlb-bit (eq (jdlb-ticket-complete? (jdlb-no-call-ticket)) 0) 16777216)
+                                (add
+                                    (jdlb-bit (eq (jdlb-ticket-ready? (jdlb-no-parity-ticket)) 0) 33554432)
+                                    (add
+                                        (jdlb-bit (eq (jdlb-ticket-ready? (jdlb-zero-ticket)) 0) 67108864)
+                                        (jdlb-bit (eq (jdlb-receipt-ok? (jdlb-bad-image-manifest)) 0) 134217728))))))))))
+
+    (defn jit-dylib-load-bind-runtime-check ()
+        (add (jdlb-front-bits) (add (jdlb-route-bits) (jdlb-reject-bits))))
+
+    0)
