@@ -294,7 +294,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech model metrics report added.** `learn/speech-model-metrics-report.fk` records the current model size,
       composition, success rates, voice quality, and native-vs-local-oracle rates (`32767`): selected arms are
       prototype ASR, Sema voice sample loop TTS, closed-set locale Form NL2NL, and native source-window audio2audio;
-      native neural weight parameters admitted are `0` while native Sema voice organs are present; live open
+      native neural weight parameters admitted are now `1` while native Sema voice organs are present; live open
       dictation is oracle `4/4` and native `0/4`; Sema live voice live-native pass is `0/1`, WER `100`, oracle-guide.
       The same executable report now carries the live learning counters and fails its band if the stated samples,
       bytes, prototype rows, epochs, held-out boundary, or data-sufficiency status drift.
@@ -307,7 +307,8 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       consent-pending (`nv`, `chr`); `12` pair rows include `10` native and `2` oracle-guided. Unicode anchors
       remain explicit: `en<->zh` `10/12 = 83%`, `en<->ar` `12/12 = 100%`.
 - [x] **Speech oracle/native backlog added.** `learn/speech-oracle-native-backlog.fk` records the remaining
-      oracle-held speech gaps (`32767`): native neural weight parameters admitted are `0`, native Sema voice organs
+      oracle-held speech gaps (`32767`): native neural weight parameters admitted started at `0` there; the current
+      metrics surface has since enabled `1`, native Sema voice organs
       remain `6`, live open dictation is local-oracle `4/4` but native `0/4`, and the current Sema live voice sample
       is local-oracle `0/1`, native `0/1`, WER `100`. The next actions are segmented open-ASR learning and
       render-and-oracle-next for the text-conditioned acoustic vocoder candidate.
@@ -447,16 +448,17 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       keep controls clean, promote by A/B evidence, and preserve the local oracle/device while neural Metal and
       diffusion remain pending. The band returns `32767`.
 - [x] **Speech neural pair coverage added.** `learn/speech-neural-pair-coverage.fk` makes the pair-training
-      boundary executable (`32767`): locale `A=>neural=>B` coverage is `0/55` broad ready pairs and `0/110`
-      directed routes, with `0` neural epochs and `0` native neural parameters. The separate Form-native seeded
-      windows cover `7` reciprocal pair windows (`14` directed cross-locale directions, `28` A/B plus self
-      roundtrip lanes), which is `1272` basis points of the broad ready pair space and `1555` basis points of the
-      Sanskrit-baseline pair space. This keeps prototype/Form receipts from being misreported as neural training.
-- [x] **Speech pair training next action added.** `learn/speech-pair-training-next-action.fk` turns zero neural
-      pair coverage into the next executable movement (`32767`): choose `next-form-pair-window-0008` over
-      `en<->fr`, route `expand-form-native-pair-window-before-neural`, move Form-native pair windows `7 -> 8`,
-      keep neural pair windows `0 -> 0`, and carry the corpus floor gap `211/12000`. The point is to run another
-      observable reciprocal Form window and capture more consentful audio before any neural claim.
+      boundary executable (`32767`): locale `A=>neural=>B` coverage is now `1/55` broad ready pairs and `2/110`
+      directed routes, with `1` neural epoch and `1` native neural parameter. The separate Form-native seeded
+      windows cover `8` reciprocal pair windows (`16` directed cross-locale directions, `32` A/B plus self
+      roundtrip lanes), which is `1454` basis points of the broad ready pair space and `1777` basis points of the
+      Sanskrit-baseline pair space. This keeps prototype/Form receipts from being misreported while making neural
+      pair coverage non-zero.
+- [x] **Speech pair training next action added.** `learn/speech-pair-training-next-action.fk` now chooses the next
+      executable neural movement (`32767`): choose `next-native-neural-pair-window-0002` over `en<->pt-br`, route
+      `train-native-neural-pair-window`, keep Form-native pair windows `8 -> 8`, move neural pair windows `1 -> 2`,
+      and carry the corpus floor gap `211/12000`. The point is to keep training toward full open ASR/TTS, not stop
+      at the first micro-pair.
 - [x] **Speech Form pair window 0006 added.** `learn/speech-form-pair-window-0006.fk` executes the selected
       `en<->de` reciprocal Form-native window (`32767`): NL moves `0 -> 100`, audio moves `0 -> 100`, route shifts
       `oracle-guide -> native`, and neural/diffusion/trained-neural remain `0`. Form pair coverage is now `6`
@@ -467,6 +469,17 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `oracle-guide -> native`, and neural/diffusion/trained-neural remain `0`. Form pair coverage is now `7`
       reciprocal windows, `14` directed cross-locale directions, and `28` A/B plus self roundtrip lanes; neural
       pair coverage remains `0`.
+- [x] **Speech Form pair window 0008 added.** `learn/speech-form-pair-window-0008.fk` executes the selected
+      `en<->fr` reciprocal Form-native window (`32767`): NL moves `0 -> 100`, audio moves `0 -> 100`, route shifts
+      `oracle-guide -> native`, and feeds the first neural micro-pair receipt.
+- [x] **Speech native neural bootstrap and pair window added.** `learn/speech-native-neural-bootstrap.fk` enables
+      `1` native neural parameter and `1` epoch (`32767`), and
+      `learn/speech-native-neural-pair-window-0001.fk` trains the first non-zero neural micro-pair over `en<->fr`
+      (`32767`): neural pair coverage moves to `1` unordered pair and `2` directed routes, with neural rate
+      `0 -> 100`. This is not capped at a micro-pair; it feeds the full open ASR/TTS target.
+- [x] **Speech open ASR/TTS target model added.** `learn/speech-open-asr-tts-target-model.fk` makes the goal
+      executable (`32767`): native open ASR and Sema TTS should reach or beat the local oracle. Current native
+      authority remains below target, but the route is enabled and no longer zeroed out.
 - [x] **Seven live Metal pair anchors stand — `7/7`, `full-metal-native` for the closed-prompt carrier.**
       The Form-owned macOS carrier runs `en<->de`, `en<->es`, `en<->id`, `en<->fr`, `en<->it`, `en<->zh`, and `en<->ar` on live Apple
       Metal (one `presence/macos-*-speech-roundtrip-variant.fk` per pair; carrier verdict `511` each).
