@@ -15,18 +15,25 @@
 ; octets, no GIOP request/reply framing, no IIOP transport — a composite
 ; node is tagged with its Blueprint NAME (a CDR string) as a stand-in for
 ; a repository ID, the same shape the JSON and XML dialects already use.
-; Also named: CDR's binary "double" is IEEE754 bit layout, which this file
-; does NOT implement (real scope, not attempted) — floats are carried as a
-; CDR string of their decimal text (`float_to_str`), tagged distinctly
-; (tag 4) from a real string (tag 2), so decode still knows to route it
-; back through `intern_trivial_float`, not `intern_trivial_string`.
+; CDR's binary "double" IS implemented (`cdr-put-double`/`cdr-get-double`
+; below) — real IEEE754 bit layout (1 sign bit, 11-bit biased exponent,
+; 52-bit mantissa, 8-byte aligned big-endian), not a decimal-text
+; substitute. Built from plain Form arithmetic (`div`/`mod`/`mul` on
+; 64-bit-range ints, `float_to_int`, float comparison) since no native op
+; reinterprets a float's raw bits directly — normalizing into [1,2) and
+; packing the exponent/mantissa by hand, the same thing hardware does in
+; silicon. Named scope limit, not silently assumed away: no NaN, no
+; +/-Infinity, no denormals, no negative zero — this handles the finite,
+; normal doubles this kernel's `intern_trivial_float`/`float_to_str`
+; already round-trip through decimal text; the exotic IEEE754 special
+; values would each need their own real investigation.
 ;
 ; Node shape on the wire: one tag octet, then its payload.
 ;   tag 0 = composite:  name (CDR string) + child count (CDR ulong) + children
 ;   tag 1 = int leaf:    value (CDR long, 32-bit two's complement)
 ;   tag 2 = string leaf: value (CDR string)
 ;   tag 3 = null leaf:   no payload
-;   tag 4 = float leaf:  decimal text (CDR string) — see the note above
+;   tag 4 = float leaf:  value (CDR double, real IEEE754 bits)
 ;
 ; "Raw bytes as a Form string" is the same narrow-waist model this whole
 ; codebase already uses for byte-level string ops (`str_byte_at`/
@@ -82,6 +89,74 @@
             (let b (cdr-put-ulong buf (add (str_len s) 1)))
             (str_concat b (str_concat s (byte_to_str 0)))))
 
+    ; --- IEEE754 double: decompose/reassemble sign+exponent+mantissa ----
+
+    ; Normalize af (already known positive) into [1,2), tracking the power
+    ; of 2 that took it there — self-recursive only, converges in a
+    ; handful of steps for any realistic double.
+    (defn cdr-f64-normalize (af exp)
+        (if (ge af 2.0) (cdr-f64-normalize (div af 2.0) (add exp 1))
+            (if (lt af 1.0) (cdr-f64-normalize (mul af 2.0) (sub exp 1))
+                (list af exp))))
+
+    ; v * 2^exp (exp can be negative) — self-recursive only.
+    (defn cdr-f64-scale (v exp)
+        (if (eq exp 0) v
+            (if (gt exp 0) (cdr-f64-scale (mul v 2.0) (sub exp 1))
+                (cdr-f64-scale (div v 2.0) (add exp 1)))))
+
+    ; f -> (list sign biased-exponent mantissa), the three IEEE754 double
+    ; fields still as plain ints, not yet packed into 8 bytes.
+    (defn cdr-f64-decompose (f)
+        (if (eq f 0.0) (list 0 0 0)
+            (do
+                (let sign (if (lt f 0.0) 1 0))
+                (let af (if (lt f 0.0) (sub 0.0 f) f))
+                (let norm (cdr-f64-normalize af 0))
+                (let naf (head norm))
+                (let exp (head (tail norm)))
+                (let frac (sub naf 1.0))
+                (let mantissa (float_to_int (mul frac 4503599627370496.0)))   ; frac * 2^52
+                (list sign (add exp 1023) mantissa))))
+
+    ; (sign biased-exponent mantissa) -> f, the reverse of decompose.
+    (defn cdr-f64-recompose (sign biased-exp mantissa)
+        (if (and (eq biased-exp 0) (eq mantissa 0)) 0.0
+            (do
+                (let frac (div mantissa 4503599627370496.0))
+                (let significand (add 1.0 frac))
+                (let magnitude (cdr-f64-scale significand (sub biased-exp 1023)))
+                (if (eq sign 1) (sub 0.0 magnitude) magnitude))))
+
+    ; sign(1) + biased-exponent(11) + mantissa(52) = 64 bits, packed as 8
+    ; big-endian bytes: byte0 = sign(1) + exponent-high(7); byte1 =
+    ; exponent-low(4) + mantissa-high(4); bytes 2-7 = mantissa's remaining
+    ; 48 bits, 6 bytes' worth, plain big-endian.
+    (defn cdr-put-double (buf f)
+        (do
+            (let b (cdr-pad buf 8))
+            (let parts (cdr-f64-decompose f))
+            (let sign (nth parts 0))
+            (let biased-exp (nth parts 1))
+            (let mantissa (nth parts 2))
+            (let byte0 (add (mul sign 128) (div biased-exp 16)))
+            (let byte1 (add (mul (mod biased-exp 16) 16) (div mantissa 281474976710656)))
+            (let rest48 (mod mantissa 281474976710656))
+            (str_concat b
+                (str_concat (byte_to_str byte0)
+                    (str_concat (byte_to_str byte1)
+                        (str_concat (byte_to_str (mod (div rest48 1099511627776) 256))
+                            (str_concat (byte_to_str (mod (div rest48 4294967296) 256))
+                                (str_concat (byte_to_str (mod (div rest48 16777216) 256))
+                                    (str_concat (byte_to_str (mod (div rest48 65536) 256))
+                                        (str_concat (byte_to_str (mod (div rest48 256) 256))
+                                            (byte_to_str (mod rest48 256))))))))))))
+
+    ; NOTE: cdr-get-double's own body lives further down, right after
+    ; cdr-align/cdr-get-string — it needs cdr-align, which isn't defined
+    ; until the decode section (see the comment there for why a forward
+    ; reference here is a real, hard-fails bug, not a style nit).
+
     ; --- encode: cell node -> CDR octet buffer --------------------------
 
     ; mode 0: x is a single cell node, folded onto `buf`. mode 1: x is a
@@ -108,7 +183,7 @@
                     ; caught the real null case (a WIRE-NULL composite).
                     (if (eq ty 1) (cdr-put-long (cdr-put-octet buf 1) (node_value x))
                     (if (eq ty 2) (cdr-put-string (cdr-put-octet buf 2) (node_value x))
-                    (if (eq ty 7) (cdr-put-string (cdr-put-octet buf 4) (float_to_str (node_value x)))
+                    (if (eq ty 7) (cdr-put-double (cdr-put-octet buf 4) (node_value x))
                         (cdr-put-octet buf 3)))))   ; an unrecognized leaf type: null rather than a silently wrong guess
                 (do
                     (let name (head (wr-find-name (node_category x) registry)))
@@ -151,6 +226,28 @@
             (list (substring buf content-start (add content-start (sub n 1)))
                 (add content-start n))))
 
+    (defn cdr-get-double (buf i)
+        (do
+            (let i2 (cdr-align i 8))
+            (let b0 (str_byte_at buf i2))
+            (let b1 (str_byte_at buf (add i2 1)))
+            (let b2 (str_byte_at buf (add i2 2)))
+            (let b3 (str_byte_at buf (add i2 3)))
+            (let b4 (str_byte_at buf (add i2 4)))
+            (let b5 (str_byte_at buf (add i2 5)))
+            (let b6 (str_byte_at buf (add i2 6)))
+            (let b7 (str_byte_at buf (add i2 7)))
+            (let sign (div b0 128))
+            (let biased-exp (add (mul (mod b0 128) 16) (div b1 16)))
+            (let rest48
+                (add (mul b2 1099511627776)
+                    (add (mul b3 4294967296)
+                        (add (mul b4 16777216)
+                            (add (mul b5 65536)
+                                (add (mul b6 256) b7))))))
+            (let mantissa (add (mul (mod b1 16) 281474976710656) rest48))
+            (list (cdr-f64-recompose sign biased-exp mantissa) (add i2 8))))
+
     (defn cdr-pv (p) (head p))
     (defn cdr-pi (p) (head (tail p)))
 
@@ -182,8 +279,15 @@
                         (list (intern_trivial_string (cdr-pv v)) (cdr-pi v)))
                 (if (eq tag 4)
                     (do
-                        (let v (cdr-get-string buf after-tag))
-                        (list (intern_trivial_float (cdr-pv v)) (cdr-pi v)))
+                        (let v (cdr-get-double buf after-tag))
+                        ; `intern_trivial_float` only accepts decimal text
+                        ; (confirmed directly: it silently produces a wrong
+                        ; value given a raw float) — the wire bytes are real
+                        ; IEEE754, but reconstructing a Form value from them
+                        ; still goes through the same text-based native
+                        ; every other float construction in this codebase
+                        ; does.
+                        (list (intern_trivial_float (float_to_str (cdr-pv v))) (cdr-pi v)))
                     (list (wr-make-null) after-tag))))))   ; tag 3 (null): a real, distinct value (wire-registry.fk's WIRE-NULL), not int 0
         ; mode 1
         (if (eq count 0)

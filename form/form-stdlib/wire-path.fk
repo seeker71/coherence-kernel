@@ -1,0 +1,89 @@
+; wire-path.fk — a minimal, honestly-scoped path query over cell graphs.
+;
+; Closes the "XPath-like query" and "xmlpath/xpath shell-applet" gaps named
+; for `tool-channel.fk`'s `xpath`/`xmlpath` tools — both currently plan-only
+; entries projected through `shell-applet` (an external process), which is
+; both slow and against this repo's zero-bash constraint. This gives them a
+; real native path off that: a cell tree already has structure (children,
+; content-addressed identity) and a registry already knows how to name a
+; node's Blueprint (`wire-registry.fk`) — a path query is just walking that
+; structure by name, segment by segment.
+;
+; Scope, named up front, not discovered later: `A/B/C` selects every
+; Blueprint-"C" child of every Blueprint-"B" child of every Blueprint-"A"
+; child of the root — real breadth (siblings with the same name all match,
+; the same way real XPath's `/A/B` does), but NOT a full XPath grammar.
+; No wildcards (`*`), no predicates (`[...]`), no attribute selectors
+; (`@attr`), no `//` descendant-or-self, no absolute-vs-relative distinction
+; beyond "the root you pass in". A leaf value (node_level 1) never matches a
+; segment — path segments name Blueprints, and only a registered composite
+; has one.
+;
+; `xmlpath` = "parse this XML text, then path-select over the result" —
+; the parse half is `wire-xml.fk`'s `xml-to-cell`, already real and native;
+; this file supplies the select half both `xpath` (already-parsed cell
+; trees) and `xmlpath` (XML text) share.
+;
+; Every recursive function here is ONE self-recursive function, matching
+; every other file in the wire-serialization lane — see wire-registry.fk's
+; header and receipts/2026-07-01-json-fk-src-scoping-fix.md for why that's
+; a hard runtime constraint here, not a style choice.
+;
+; preludes: form-stdlib/core.fk form-stdlib/wire-registry.fk form-stdlib/wire-xml.fk
+;
+; wire-xml.fk is only needed for `wp-select-xml` (the xmlpath half, via
+; `xml-to-cell`) — `wp-select` itself, the xpath half, needs only
+; wire-registry.fk. Preluding both unconditionally keeps this one file
+; simple to load; nothing here depends on wire-xml.fk beyond that one call.
+
+(do
+    ; --- path text -> segments ("A/B/C" -> ("A" "B" "C")) ---------------
+    (defn wp-split-loop (s i start acc)
+        (if (ge i (str_len s))
+            (wr-reverse (cons (substring s start i) acc))
+            (if (eq (str_byte_at s i) 47)   ; '/'
+                (wp-split-loop s (add i 1) (add i 1) (cons (substring s start i) acc))
+                (wp-split-loop s (add i 1) start acc))))
+    (defn wp-split (s) (wp-split-loop s 0 0 (empty)))
+
+    ; --- does this child's Blueprint name match a path segment? ---------
+    ; A leaf (node_level 1) or an unregistered composite never matches —
+    ; `wr-find-name` on an unregistered Blueprint would crash (this
+    ; codebase's own established convention), so the emptiness is checked
+    ; first rather than relying on that crash as a "no match" signal.
+    (defn wp-name-matches? (child name registry)
+        (if (eq (node_level child) 0)
+            (do
+                (let matches (wr-find-name (node_category child) registry))
+                (if (eq (len matches) 0) false (str_eq (head matches) name)))
+            false))
+
+    (defn wp-filter-named (children name registry acc)
+        (if (eq (len children) 0) (wr-reverse acc)
+            (if (wp-name-matches? (head children) name registry)
+                (wp-filter-named (tail children) name registry (cons (head children) acc))
+                (wp-filter-named (tail children) name registry acc))))
+
+    ; mode 0: every name-matching child of ONE node. mode 1: the same,
+    ; folded (in order) across a LIST of current nodes — this is the step
+    ; that advances a whole segment of the path across every match the
+    ; previous segment produced, the way real XPath's breadth works. `acc`
+    ; is unused in mode 0 (`(empty)` at that call site).
+    (defn wp-step (mode x name registry acc)
+        (if (eq mode 0)
+            (wp-filter-named (node_children x) name registry (empty))
+            (if (eq (len x) 0) acc
+                (do
+                    (let matched (wp-step 0 (head x) name registry (empty)))
+                    (wp-step 1 (tail x) name registry (append acc matched))))))
+
+    ; --- select: walk every path segment in order -----------------------
+    (defn wp-select-segments (nodes segments registry)
+        (if (eq (len segments) 0) nodes
+            (wp-select-segments (wp-step 1 nodes (head segments) registry (empty)) (tail segments) registry)))
+
+    (defn wp-select (root path registry) (wp-select-segments (list root) (wp-split path) registry))
+
+    ; xmlpath: parse XML text first (wire-xml.fk), then the same select.
+    (defn wp-select-xml (text path registry) (wp-select (xml-to-cell text registry) path registry))
+)
