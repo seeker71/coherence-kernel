@@ -24,7 +24,14 @@ Verify the direct source bootstrap first:
 ```sh
 ./fkwu --src bootstrap/ground.fk                 # -> 42
 ./fkwu --src bootstrap/ground-recursive.fk 10    # -> 55
+./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk   # -> 15 (anything else: REBUILD fkwu first)
 ```
+
+The third line matters more than it looks: `fkwu` is gitignored (a local build artifact), and a
+stale binary from before an upstream merge **still passes ground.fk** while silently lacking newer
+evaluator capabilities — a real day was once lost "discovering" evaluator constraints that were
+only ever the stale binary (receipts/2026-07-01-stale-binary-root-cause.md). If the freshness band
+does not return 15, rebuild before believing anything else you observe.
 
 Then verify it runs the body — a **real cell**, native, with no Go, no flatten, no T_flat:
 

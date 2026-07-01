@@ -1,4 +1,14 @@
-> **Correction, same day:** everything below through root causes #1 and #2 stands — both are real,
+> **Second correction, same day (supersedes the first banner where they conflict):** only root
+> cause **#1** (top-level `let` invisible inside `defn` bodies) survives — re-confirmed against a
+> FRESH build of the runtime. Root cause **#2** ("mutual recursion / forward references between
+> `defn`s never resolve") was an artifact of a **stale local `./fkwu` binary** predating the
+> current runtime source; a fresh build resolves both fine, and the `is-even`/`is-odd` repro below
+> passes on it. "Root cause #3" remains what the first banner said: a paren-placement mistake in a
+> rewrite, not an interpreter bug. See
+> [`2026-07-01-stale-binary-root-cause.md`](2026-07-01-stale-binary-root-cause.md) for the full
+> story and the freshness canary that now guards against this class.
+>
+> **First correction, same day:** everything below through root causes #1 and #2 stands — both are real,
 > both fixes shipped and hold. But **"root cause #3" (below) was a misdiagnosis, not a fourth
 > interpreter bug.** `json.fk` genuinely IS fixed now — see
 > [`2026-07-01-json-fk-actually-fixed.md`](2026-07-01-json-fk-actually-fixed.md) for the full,

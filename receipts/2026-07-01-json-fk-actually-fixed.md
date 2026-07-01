@@ -1,3 +1,13 @@
+> **Correction, same day:** json.fk IS fixed and everything this receipt says about the
+> paren-placement misdiagnosis stands. But the diagnosis below of what was *still broken* —
+> "root cause #2 (forward references between top-level `defn`s never resolve) applying more
+> pervasively than first understood" — was itself an artifact of a **stale local `./fkwu`
+> binary**: a fresh build of the current runtime resolves forward and mutual references fine,
+> and the original json.fk's tokenizer works on it. The one constraint that survives on current
+> source is root cause #1 (top-level `let` invisible in `defn` bodies) — which the original
+> json.fk genuinely violated, so a fix was genuinely needed, just a smaller one than built. See
+> [`2026-07-01-stale-binary-root-cause.md`](2026-07-01-stale-binary-root-cause.md).
+
 # Receipt — json.fk genuinely fixed; "root cause #3" was a misdiagnosis, corrected (2026-07-01)
 
 **json.fk works on bare `fkwu --src` now.** `json-band.fk`, 255/255 — numbers (the original
