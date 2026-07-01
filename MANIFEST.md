@@ -345,7 +345,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Speech current status ledger added.** `learn/speech-current-status-ledger.fk` composes the metrics report,
       backlog, scheduler, open-ASR trial, and Sema voice trial into one executable status row (`32767`): global live
       authority remains oracle-held (`4/5` oracle, `0/5` native), scoped trial windows are native (`3/3` oracle and
-      `3/3` native), native neural weights now report `17`, native Sema voice organs remain `6`, and C seed growth
+      `3/3` native), native neural weights now report `18`, native Sema voice organs remain `6`, and C seed growth
       remains `0`.
 - [x] **Speech global promotion readiness added.** `learn/speech-global-promotion-readiness.fk` turns scoped trial
       wins into an executable global-authority gate (`32767`): open dictation has scoped native `2/2` and Sema live
@@ -463,20 +463,20 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       keep controls clean, promote by A/B evidence, and preserve the local oracle/device while neural Metal and
       diffusion remain pending. The band returns `32767`.
 - [x] **Speech neural pair coverage added.** `learn/speech-neural-pair-coverage.fk` makes the pair-training
-      boundary executable (`32767`): locale `A=>neural=>B` coverage is now `17/55` broad ready pairs and `34/110`
-      directed routes, with `17` neural epochs and `17` native neural parameters. The separate Form-native seeded
+      boundary executable (`32767`): locale `A=>neural=>B` coverage is now `18/55` broad ready pairs and `36/110`
+      directed routes, with `18` neural epochs and `18` native neural parameters. The separate Form-native seeded
       windows cover `8` reciprocal pair windows (`16` directed cross-locale directions, `32` A/B plus self
       roundtrip lanes), which is `1454` basis points of the broad ready pair space and `1777` basis points of the
       Sanskrit-baseline pair space. This keeps prototype/Form receipts from being misreported while making neural
       pair coverage non-zero.
 - [x] **Speech pair training next action added.** `learn/speech-pair-training-next-action.fk` now chooses the next
-      executable neural movement (`32767`): choose `next-native-neural-pair-window-0018` over `de<->id`, route
-      `train-native-neural-pair-window`, keep Form-native pair windows `8 -> 8`, move neural pair windows `17 -> 18`,
+      executable neural movement (`32767`): choose `next-native-neural-pair-window-0019` over `de<->pt-br`, route
+      `train-native-neural-pair-window`, keep Form-native pair windows `8 -> 8`, move neural pair windows `18 -> 19`,
       and carry the corpus floor gap `211/12000`. The point is to keep training toward full open ASR/TTS, not stop
       at the first micro-pair.
 - [x] **Speech authority learning priority added.** `learn/speech-authority-learning-priority.fk` makes the
-      authority gap executable (`32767`): trained pair coverage remains `17/55`, and `next-native-neural-pair-window-0018`
-      over `de<->id` stays available as the background coverage lane, but the measured open ASR gap `100` and
+      authority gap executable (`32767`): trained pair coverage is `18/55`, and `next-native-neural-pair-window-0019`
+      over `de<->pt-br` stays available as the background coverage lane, but the measured open ASR gap `100` and
       Sema voice gap `100` force the selected learning action back to `train-live-segmented-open-asr-source`
       with `choice/cut/fail/undo/timeout` controls. This prevents pair-window growth from being mistaken for
       open ASR/TTS authority.
@@ -562,6 +562,10 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       the seventeenth native neural micro-pair over `de<->fr` (`32767`): neural pair coverage moves to `17`
       unordered pairs and `34` directed routes, with `17` native neural parameters, `17` epochs, and neural rate
       `0 -> 100`. The next selected movement is `next-native-neural-pair-window-0018` over `de<->id`.
+- [x] **Speech native neural pair window 0018 added.** `learn/speech-native-neural-pair-window-0018.fk` trains
+      the eighteenth native neural micro-pair over `de<->id` (`32767`): neural pair coverage moves to `18`
+      unordered pairs and `36` directed routes, with `18` native neural parameters, `18` epochs, and neural rate
+      `0 -> 100`. The next selected movement is `next-native-neural-pair-window-0019` over `de<->pt-br`.
 - [x] **Speech open ASR/TTS target model added.** `learn/speech-open-asr-tts-target-model.fk` makes the goal
       executable (`32767`): native open ASR and Sema TTS should reach or beat the local oracle. Current native
       authority remains below target, but the route is enabled and no longer zeroed out.
