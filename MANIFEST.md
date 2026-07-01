@@ -224,6 +224,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       WER is `250`, and observed wav bytes are `2150026`. Aggregate speech rows are now `191` wavs and `6806882`
       observed bytes; captured corpus rows are `99`; data sufficiency remains false and rows used for training
       remain `0`.
+- [x] **Speech corpus adaptive acquisition added.** `learn/speech-corpus-adaptive-acquisition.fk` turns batch
+      0004's observed uneven shard results into the next capture recipe (`32767`): `en` and `pt-br` expand,
+      `es` retries under A/B, `de` and `fr` repair, and the next lane is `fr` with
+      `repair-voice-family-and-shorten-phrases`. This changes the acquisition algorithm from fixed capture to
+      observation-conditioned capture planning while keeping native neural parameters `0` and data sufficiency
+      false.
 - [x] **Speech corpus held-out repeat learning added.** `learn/speech-corpus-heldout-repeat-learning.fk` trains six
       Form-native full-envelope prototypes from consentful corpus phrases and evaluates six separately rendered,
       volume-shifted held-out wavs (`16383`): local oracle accepts `6/6`, native prototype classification accepts
