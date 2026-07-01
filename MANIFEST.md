@@ -209,6 +209,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       (`8191`): `24/24` rows pass the local-oracle WER floor, max WER `0`, observed batch wav bytes `580710`.
       Aggregate speech rows are now `35` wavs and `1065282` observed bytes; status remains
       `captured-corpus-audio-not-training-sufficient` with `0` corpus rows used for training.
+- [x] **Speech corpus capture batch 0003 added.** `learn/speech-corpus-capture-batch-0003.fk` screens sixty
+      translated self-corpus phrase rows and admits only the local-oracle-clean rows (`8191`): `34/34` admitted
+      rows pass, max admitted WER `25`, observed admitted wav bytes `1272388`, while `26` unstable candidate rows
+      are rejected. Aggregate speech rows are now `105` wavs and `3189170` observed bytes; captured corpus rows are
+      `64`; data sufficiency remains false against the `12000`-wav floor.
 - [x] **Speech corpus held-out repeat learning added.** `learn/speech-corpus-heldout-repeat-learning.fk` trains six
       Form-native full-envelope prototypes from consentful corpus phrases and evaluates six separately rendered,
       volume-shifted held-out wavs (`16383`): local oracle accepts `6/6`, native prototype classification accepts
