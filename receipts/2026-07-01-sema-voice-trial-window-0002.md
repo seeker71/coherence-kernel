@@ -3,9 +3,9 @@
 This receipt adds a second scoped Sema voice TCAV candidate on top of
 `learn/sema-voice-trial-window.fk`.
 
-The global live Sema voice row is unchanged: local oracle `0/1`, native `0/1`,
-WER `100`, route `oracle-guide`. The new row expands only the scoped TTS
-training floor.
+The global live Sema voice row is held, not empty: local oracle `1/1`, native
+`0/1`, native WER `100`, route `oracle-guide`. The new row expands only the
+scoped TTS training floor.
 
 Measured trial-window result:
 
@@ -30,6 +30,6 @@ cat learn/speech-oracle-native-backlog.fk \
 
 Result: `32767`.
 
-The Sema voice authority floor is now live `0/1` plus scoped `2/2`, giving a
-combined nonzero training floor of oracle/native `2/3 = 66%` while global live
-authority remains held.
+The Sema voice authority floor is now live oracle `1/1`, live native `0/1`,
+plus scoped `2/2`, giving a combined nonzero training floor of oracle `3/3 =
+100%` and native `2/3 = 66%` while global live authority remains held.
