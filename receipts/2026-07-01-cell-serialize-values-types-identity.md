@@ -1,3 +1,11 @@
+> **Correction, same day:** the "verdict 63, `eq(original, reconstructed)` confirmed" claim below
+> was wrong when it was written — rerunning this exact band file, unchanged, later the same day
+> gave 32, not 63. The real root cause (mutual recursion between two `defn`s never resolves on
+> `fkwu --src`) and the actual fix are in
+> [`2026-07-01-json-fk-src-scoping-fix.md`](2026-07-01-json-fk-src-scoping-fix.md). Left standing
+> below, uncorrected in place, so the record shows what was actually claimed and when — not
+> quietly edited away.
+
 # Receipt — cell serialization: values + types + identity through JSON, for real (2026-07-01)
 
 **The north star, confirmed working, not just attempted:** a nested cell built via `intern_node`/
