@@ -1,0 +1,170 @@
+; speech-corpus-capture-batch-0001.fk -- first live self-corpus audio rows.
+;
+; This batch renders six consentful Coherence Network self-corpus text rows with
+; local macOS voices, normalizes them to wav, transcribes them with local
+; whisper.cpp on Metal, and records the oracle WER. These are captured corpus
+; rows, not data-sufficient training and not native ASR/TTS authority.
+;
+; preludes:
+;   observe/stt-wer.fk
+;   observe/wav-sense.fk
+;   learn/macos-sema-teacher-acoustic-learning.fk
+;   learn/coherence-network-self-corpus.fk
+;   learn/speech-model-metrics-report.fk
+;   learn/speech-learning-data-sufficiency.fk
+;   learn/speech-corpus-acquisition-window.fk
+
+(do
+    (defn sccb-kind () "speech-corpus-capture-batch-0001")
+    (defn sccb-out-dir () (str_concat (temp_dir) "/speech-corpus-capture-batch-0001"))
+
+    (defn sccb-row (id locale key text voice whisper-lang)
+        (list "speech-corpus-capture-row" id locale key text voice whisper-lang))
+    (defn sccb-row-id      (r) (nth r 1))
+    (defn sccb-row-locale  (r) (nth r 2))
+    (defn sccb-row-key     (r) (nth r 3))
+    (defn sccb-row-text    (r) (nth r 4))
+    (defn sccb-row-voice   (r) (nth r 5))
+    (defn sccb-row-lang    (r) (nth r 6))
+
+    (defn sccb-rows ()
+        (list
+            (sccb-row 1 "en" "common.tryAgain" "Try again" "Flo (English (US))" "en")
+            (sccb-row 2 "de" "common.tryAgain" "Erneut versuchen" "Flo (German (Germany))" "de")
+            (sccb-row 3 "es" "nav.search" "Buscar" "Flo (Spanish (Spain))" "es")
+            (sccb-row 4 "fr" "nav.vision" "Vision" "Amélie" "fr")
+            (sccb-row 5 "id" "common.tryAgain" "Coba lagi" "Damayanti" "id")
+            (sccb-row 6 "pt-br" "common.tryAgain" "Tentar novamente" "Flo (Portuguese (Brazil))" "pt")))
+
+    (defn sccb-path-stem (row)
+        (mstal-cat4 (sccb-out-dir) "/row-" (mstal-int-str (sccb-row-id row)) ""))
+    (defn sccb-aiff-path (row) (str_concat (sccb-path-stem row) ".aiff"))
+    (defn sccb-wav-path (row) (str_concat (sccb-path-stem row) ".wav"))
+
+    (defn sccb-say-command (row)
+        (str_concat
+            (str_concat "say -v " (mstal-q (sccb-row-voice row)))
+            (str_concat
+                (str_concat " -o " (mstal-q (sccb-aiff-path row)))
+                (str_concat " " (mstal-q (sccb-row-text row))))))
+
+    (defn sccb-ffmpeg-command (row)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (mstal-q (sccb-aiff-path row)))
+            (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le " (mstal-q (sccb-wav-path row)))))
+
+    (defn sccb-whisper-command (row)
+        (str_concat
+            (str_concat "whisper-cli -m " (mstal-q (mstal-model)))
+            (str_concat
+                (str_concat " -f " (mstal-q (sccb-wav-path row)))
+                (str_concat " -l " (str_concat (sccb-row-lang row) " -nt -np")))))
+
+    (defn sccb-render-row (row)
+        (do
+            (let _mk (fs_mkdir (sccb-out-dir)))
+            (let _say (host-exec (sccb-say-command row) ""))
+            (let _ff (host-exec (sccb-ffmpeg-command row) ""))
+            (sccb-wav-path row)))
+
+    (defn sccb-capture-row (row)
+        (do
+            (let wav (sccb-render-row row))
+            (let transcript (host-exec (sccb-whisper-command row) ""))
+            (let wer (sw-wer (sw-tokens transcript) (sw-tokens (sccb-row-text row))))
+            (list "speech-corpus-capture-receipt-row"
+                  (sccb-row-id row)
+                  (sccb-row-locale row)
+                  (sccb-row-key row)
+                  (sccb-row-text row)
+                  transcript
+                  wer
+                  (if (le wer 25) 1 0)
+                  (mstal-audio-hash wav)
+                  (len (mstal-env wav))
+                  1
+                  0)))
+
+    (defn sccb-rec-row-id       (r) (nth r 1))
+    (defn sccb-rec-row-locale   (r) (nth r 2))
+    (defn sccb-rec-row-key      (r) (nth r 3))
+    (defn sccb-rec-row-text     (r) (nth r 4))
+    (defn sccb-rec-row-oracle   (r) (nth r 5))
+    (defn sccb-rec-row-wer      (r) (nth r 6))
+    (defn sccb-rec-row-ok       (r) (nth r 7))
+    (defn sccb-rec-row-hash     (r) (nth r 8))
+    (defn sccb-rec-row-windows  (r) (nth r 9))
+    (defn sccb-rec-row-native   (r) (nth r 10))
+    (defn sccb-rec-row-neural   (r) (nth r 11))
+
+    (defn sccb-capture-loop (rows)
+        (if (eq (len rows) 0) (empty)
+            (cons (sccb-capture-row (head rows))
+                  (sccb-capture-loop (tail rows)))))
+
+    (defn sccb-count-ok (rows)
+        (if (eq (len rows) 0) 0
+            (add (sccb-rec-row-ok (head rows)) (sccb-count-ok (tail rows)))))
+
+    (defn sccb-count-hash (rows)
+        (if (eq (len rows) 0) 0
+            (add (if (gt (sccb-rec-row-hash (head rows)) 0) 1 0)
+                 (sccb-count-hash (tail rows)))))
+
+    (defn sccb-max-wer (rows)
+        (if (eq (len rows) 0) 0
+            (do
+                (let rest (sccb-max-wer (tail rows)))
+                (if (gt (sccb-rec-row-wer (head rows)) rest)
+                    (sccb-rec-row-wer (head rows))
+                    rest))))
+
+    (defn sccb-receipt-from (rows)
+        (list (sccb-kind)
+              rows
+              (len rows)
+              (sccb-count-ok rows)
+              (sccb-count-hash rows)
+              (sccb-max-wer rows)
+              "captured-corpus-audio-not-training-sufficient"
+              1
+              0))
+
+    (defn sccb-run-receipt ()
+        (if (eq (mstal-ready?) 1)
+            (sccb-receipt-from (sccb-capture-loop (sccb-rows)))
+            (list (sccb-kind) (empty) 0 0 0 100 "missing-host-tools" 1 0)))
+
+    (defn sccb-rec-kind        (r) (nth r 0))
+    (defn sccb-rec-rows        (r) (nth r 1))
+    (defn sccb-rec-count       (r) (nth r 2))
+    (defn sccb-rec-ok          (r) (nth r 3))
+    (defn sccb-rec-hash-count  (r) (nth r 4))
+    (defn sccb-rec-max-wer     (r) (nth r 5))
+    (defn sccb-rec-status      (r) (nth r 6))
+    (defn sccb-rec-native-form (r) (nth r 7))
+    (defn sccb-rec-neural      (r) (nth r 8))
+
+    (defn sccb-run-verdict ()
+        (do
+            (let r (sccb-run-receipt))
+            (add
+                (add
+                    (add (if (str_eq (sccb-rec-kind r) (sccb-kind)) 1 0)
+                         (if (eq (sccb-rec-count r) 6) 2 0))
+                    (add (if (eq (sccb-rec-ok r) 6) 4 0)
+                         (if (eq (sccb-rec-hash-count r) 6) 8 0)))
+                (add
+                    (add (if (le (sccb-rec-max-wer r) 25) 16 0)
+                         (if (str_eq (sccb-rec-status r)
+                                     "captured-corpus-audio-not-training-sufficient") 32 0))
+                    (add
+                        (add (if (eq (sccb-rec-native-form r) 1) 64 0)
+                             (if (eq (sccb-rec-neural r) 0) 128 0))
+                        (add
+                            (add (if (eq (cnsc-self-corpus-ready?) 1) 256 0)
+                                 (if (eq (scaw-plan-meets-wav-floor?) 1) 512 0))
+                            (add (if (eq (slds-sufficient (slds-current)) 0) 1024 0)
+                                 (if (eq (scaw-rec-captured (scaw-receipt)) 0) 2048 0))))))))
+
+    0)
