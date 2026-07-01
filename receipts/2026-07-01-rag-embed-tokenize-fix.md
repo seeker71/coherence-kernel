@@ -85,3 +85,24 @@ Regression, unchanged: `bootstrap/ground.fk` (42), `ground-recursive.fk 10` (55)
 covers both. `learn/nl-meaning-net.fk`'s own `nmn-vec` (written before this fix, as a workaround) is
 independent and untouched -- it could now be migrated to the real `re-vec`, but that's a separate, optional
 follow-up, not done here.
+
+## Addendum -- four-way scope corrected (found via PR review)
+
+A PR reviewer (Codex) checked whether `rag-embed-band.fk` -- now that it actually exists and runs -- would
+survive being run through the Go/Rust/TS proof walkers as `rag-embed.fk`'s own header claims ("four-way
+provable... Proven by: ...(four-way at validate.sh)"). It would not: verified directly against each walker's
+own native-registration table (`walkers/go/main.go`, `walkers/rust/src/main.rs`, `walkers/ts/main.ts`),
+`str_byte_at`/`byte_to_str` are registered in NONE of the three, and `str_len` is registered in Go's but not
+Rust's or TS's.
+
+This is deeper than this fix alone: `re-split`'s own pre-existing use of `substring`/`str_len` already exceeds
+what Rust and TS register -- the shared string surface across all three walkers today is only
+`str_concat`/`str_eq`. `rag-embed.fk`'s four-way claim was already unachievable before `text-tokenize.fk`
+existed; this fix inherits that gap rather than introducing a new one, but it does make the gap checkable for
+the first time (the band didn't exist before to check it against).
+
+Fixed by correcting the claim, not by adding string-indexing primitives to three more runtimes -- this repo's
+own architecture explicitly keeps the walkers minimal ("never feature-bearers," MANIFEST.md), so expanding
+their native surface to chase parity here would cut against that design. `model/rag-embed.fk`,
+`cognition/rag-embed.fk`, `form/form-stdlib/text-tokenize.fk`, and `form/form-stdlib/tests/rag-embed-band.fk`
+now all say plainly: fkwu `--src` only, and name exactly which primitives are missing from which walker.

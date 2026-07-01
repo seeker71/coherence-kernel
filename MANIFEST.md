@@ -814,8 +814,17 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       missing prelude was supplied. New `form/form-stdlib/tests/rag-embed-band.fk` (verdict `31`) proves it:
       `"The Choice Point Becomes Visible."` and `"the   choice, point... becomes VISIBLE"` now embed to
       byte-identical vectors, while genuinely different words embed differently. `model/rag-embed.fk` and
-      `cognition/rag-embed.fk` are byte-identical, so one fix covers both. See
-      `receipts/2026-07-01-rag-embed-tokenize-fix.md`.
+      `cognition/rag-embed.fk` are byte-identical, so one fix covers both. **Scope corrected via PR review**:
+      `rag-embed.fk`'s own pre-existing header claimed "four-way provable (Go = Rust = TS = fkwu)" — checked
+      directly against each walker's native table (`walkers/go/main.go`, `walkers/rust/src/main.rs`,
+      `walkers/ts/main.ts`), `str_byte_at`/`byte_to_str` are registered in none of the three, and `str_len` is
+      missing from Rust's and TS's. Deeper than this fix alone: `re-split`'s own pre-existing `substring`/
+      `str_len` usage already exceeded the walkers' shared string surface (only `str_concat`/`str_eq`) before
+      `text-tokenize.fk` ever existed — the four-way claim was already unachievable, this fix just made the
+      gap checkable for the first time. Fixed by correcting the claim in both `rag-embed.fk` copies plus
+      `text-tokenize.fk`/`rag-embed-band.fk`, not by adding string-indexing primitives to three more
+      runtimes — that would cut against this repo's own "minimal walkers, never feature-bearers"
+      architecture. See `receipts/2026-07-01-rag-embed-tokenize-fix.md`.
 - [x] **The n=60 dip in the learning-curve sweep diagnosed, not left as an open question.** Per-class
       held-out breakdown: class 1 ("truth triumphs") drops from 9/13 correct at n=20 to 4/13 at n=60, while
       every other class moves by only the noise-level `-1`. The entire dip is one class collapsing, not a
