@@ -184,6 +184,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       envelope, trains four acoustic token prototypes, decodes the learned frames, and returns live verdict `4095`,
       live WER `0`, minimum confidence `96`, native neural parameters `0`. This is executable native prototype
       learning from audio, not a global ASR/TTS authority promotion.
+- [x] **macOS teacher held-out acoustic learning added.** `learn/macos-sema-teacher-heldout-learning.fk` now trains
+      on one real local teacher wav and decodes a separately written transformed eval wav: `teacher-984711.wav`
+      trains, `teacher-984712.wav` evaluates with `volume=0.98`, local Metal oracle and native Form both return
+      WER `0`, confidence `96`, live verdict `65535`, effective epochs `1`, native neural parameters `0`. This
+      proves a scoped held-out repeat across distinct wav bytes, not cross-phrase or cross-voice authority.
 - [x] **macOS Arabic teacher acoustic learning added.** `learn/macos-arabic-teacher-acoustic-learning.fk` extends
       the same live path to Arabic: `Majed -> ffmpeg -> whisper.cpp/Metal -l ar`, Form wav sensing, four Arabic
       acoustic token prototypes, native CTC decode, live verdict `16383`, live WER `0`, minimum confidence `96`,
@@ -195,11 +200,11 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
 - [x] **Live Chinese source-target bridge added.** `learn/live-chinese-source-target-bridge.fk` connects the live
       Chinese ASR receipt to the Sanskrit baseline and target acoustic data: source `zh` WER `0`, meaning `303`,
       target `en`, two target tokens, two compact target acoustic frames, live verdict `8191`, confidence `96`,
-      neural parameters `0`. The upstream learning set is now named honestly: `3` live teacher utterances, `163440`
-      observed wav bytes on this Mac, `9` feature rows, `8` nonblank learned prototypes, `11` scoped prototype rows
-      including blanks, `1` effective prototype epoch per sample, `0` neural epochs, in-sample teacher accuracy
-      `3/3 = 100%`, and held-out live samples `0`. This is scoped source-audio -> target-acoustic movement, not
-      global audio2audio authority.
+      neural parameters `0`. The upstream learning set is now named honestly: `5` live teacher wavs, `272048`
+      observed wav bytes on this Mac, `15` feature rows, `11` nonblank learned prototypes, `15` scoped prototype
+      rows including blanks, `1` effective prototype epoch per sample, `0` neural epochs, in-sample teacher
+      accuracy `3/3 = 100%`, and held-out repeat accuracy `1/1 = 100%`. This is scoped source-audio ->
+      target-acoustic movement, not global audio2audio authority.
 - [x] **Sema voice oracle miss learning added.** `learn/sema-voice-oracle-miss-learning.fk` makes the live WER-100
       miss change the algorithm (`32767`): authority stays `oracle-guide`, and AutoML now names
       `text-conditioned-acoustic-vocoder` as the next trainable candidate with g2p, phoneme timing, prosody,
