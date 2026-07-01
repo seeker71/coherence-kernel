@@ -1,0 +1,217 @@
+; jit-dylib-memory-envelope.fk - memory limits for the dylib JIT carrier.
+;
+; A live JIT carrier must not only install callable bytes. It must keep those
+; bytes inside a bounded, source-mapped, W^X memory envelope: page quota,
+; sealed executable state, guard pages, rooted args, exception/deopt maps,
+; no C-bootstrap growth, and a positive generation.
+
+(do
+    (defn jdme-native () 1)
+    (defn jdme-deopt () 2)
+    (defn jdme-exception () 3)
+    (defn jdme-rewalk () 4)
+    (defn jdme-melt () 5)
+    (defn jdme-reject () 6)
+    (defn jdme-pending () 7)
+
+    ; receipt = ("dylib-memory-envelope-receipt" name total expected source maps)
+    (defn jdme-receipt (name total expected source maps)
+        (list "dylib-memory-envelope-receipt" name total expected source maps))
+    (defn jdme-receipt? (r) (if (eq (len r) 6) (str_eq (nth r 0) "dylib-memory-envelope-receipt") 0))
+    (defn jdme-total (r) (nth r 2))
+    (defn jdme-expected (r) (nth r 3))
+    (defn jdme-source (r) (nth r 4))
+    (defn jdme-maps (r) (nth r 5))
+
+    (defn jdme-receipt-ok? (r)
+        (if (eq (jdme-receipt? r) 1)
+            (if (eq (jdme-total r) (jdme-expected r))
+                (if (eq (jdme-source r) 1)
+                    (if (eq (jdme-maps r) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jdme-byte-ingress () (jdme-receipt "byte-ingress-args" 2097151 2097151 1 1))
+    (defn jdme-host-wx () (jdme-receipt "host-wx-audit" 1048575 1048575 1 1))
+    (defn jdme-dylib-image () (jdme-receipt "dylib-image-manifest" 16777215 16777215 1 1))
+    (defn jdme-dylib-slot () (jdme-receipt "dylib-slot-runtime" 262143 262143 1 1))
+    (defn jdme-bad-host-wx () (jdme-receipt "host-wx-audit" 1048574 1048575 1 1))
+
+    (defn jdme-receipts-ok? ()
+        (if (eq (jdme-receipt-ok? (jdme-byte-ingress)) 1)
+            (if (eq (jdme-receipt-ok? (jdme-host-wx)) 1)
+                (if (eq (jdme-receipt-ok? (jdme-dylib-image)) 1)
+                    (if (eq (jdme-receipt-ok? (jdme-dylib-slot)) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jdme-lte? (a b) (if (lt a b) 1 (if (eq a b) 1 0)))
+    (defn jdme-page-aligned? (bytes page)
+        (if (gt page 0)
+            (if (eq (mod bytes page) 0) 1 0)
+            0))
+
+    ; envelope = ("dylib-memory-envelope" page max-pages slot-bytes reserved-bytes writable executable sealed guard-before guard-after rooted-args source maps exception-map deopt-map no-c-growth generation)
+    (defn jdme-envelope (page max-pages slot-bytes reserved-bytes writable executable sealed guard-before guard-after rooted-args source maps exception-map deopt-map no-c-growth generation)
+        (list "dylib-memory-envelope" page max-pages slot-bytes reserved-bytes writable executable sealed guard-before guard-after rooted-args source maps exception-map deopt-map no-c-growth generation))
+    (defn jdme-envelope? (e) (if (eq (len e) 17) (str_eq (nth e 0) "dylib-memory-envelope") 0))
+    (defn jdme-page (e) (nth e 1))
+    (defn jdme-max-pages (e) (nth e 2))
+    (defn jdme-slot-bytes (e) (nth e 3))
+    (defn jdme-reserved-bytes (e) (nth e 4))
+    (defn jdme-writable (e) (nth e 5))
+    (defn jdme-executable (e) (nth e 6))
+    (defn jdme-sealed (e) (nth e 7))
+    (defn jdme-guard-before (e) (nth e 8))
+    (defn jdme-guard-after (e) (nth e 9))
+    (defn jdme-rooted-args (e) (nth e 10))
+    (defn jdme-source-proof (e) (nth e 11))
+    (defn jdme-maps-proof (e) (nth e 12))
+    (defn jdme-exception-map (e) (nth e 13))
+    (defn jdme-deopt-map (e) (nth e 14))
+    (defn jdme-no-c-growth (e) (nth e 15))
+    (defn jdme-generation (e) (nth e 16))
+
+    (defn jdme-byte-quota-ok? (e)
+        (if (gt (jdme-page e) 0)
+            (if (gt (jdme-max-pages e) 0)
+                (if (gt (jdme-slot-bytes e) 0)
+                    (if (gt (jdme-reserved-bytes e) 0)
+                        (if (eq (jdme-page-aligned? (jdme-reserved-bytes e) (jdme-page e)) 1)
+                            (if (eq (jdme-lte? (jdme-slot-bytes e) (jdme-reserved-bytes e)) 1)
+                                (if (eq (jdme-lte? (jdme-reserved-bytes e) (mul (jdme-page e) (jdme-max-pages e))) 1) 1 0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jdme-envelope-safe? (e)
+        (if (eq (jdme-envelope? e) 1)
+            (if (eq (jdme-receipts-ok?) 1)
+                (if (eq (jdme-byte-quota-ok? e) 1)
+                    (if (eq (jdme-writable e) 0)
+                        (if (eq (jdme-executable e) 1)
+                            (if (eq (jdme-sealed e) 1)
+                                (if (eq (jdme-guard-before e) 1)
+                                    (if (eq (jdme-guard-after e) 1)
+                                        (if (eq (jdme-rooted-args e) 1)
+                                            (if (eq (jdme-source-proof e) 1)
+                                                (if (eq (jdme-maps-proof e) 1)
+                                                    (if (eq (jdme-exception-map e) 1)
+                                                        (if (eq (jdme-deopt-map e) 1)
+                                                            (if (eq (jdme-no-c-growth e) 1)
+                                                                (if (gt (jdme-generation e) 0) 1 0)
+                                                                0)
+                                                            0)
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    ; state = ("dylib-memory-state" envelope carrier install call)
+    (defn jdme-state (envelope carrier install call)
+        (list "dylib-memory-state" envelope carrier install call))
+    (defn jdme-state? (s) (if (eq (len s) 5) (str_eq (nth s 0) "dylib-memory-state") 0))
+    (defn jdme-state-envelope (s) (nth s 1))
+    (defn jdme-carrier (s) (nth s 2))
+    (defn jdme-install (s) (nth s 3))
+    (defn jdme-call (s) (nth s 4))
+
+    (defn jdme-ready? (s)
+        (if (eq (jdme-state? s) 1)
+            (if (eq (jdme-envelope-safe? (jdme-state-envelope s)) 1) 1 0)
+            0))
+
+    (defn jdme-complete? (s)
+        (if (eq (jdme-ready? s) 1)
+            (if (eq (jdme-carrier s) 1)
+                (if (eq (jdme-install s) 1)
+                    (if (eq (jdme-call s) 1) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jdme-action (s guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (jdme-ready? s) 1)
+            (if (eq (jdme-complete? s) 1)
+                (if (eq stale 1)
+                    (jdme-melt)
+                    (if (eq invalidated 1)
+                        (jdme-rewalk)
+                        (if (eq guard-ok 1)
+                            (if (eq runtime-ok 1)
+                                (if (eq parity-ok 1) (jdme-native) (jdme-deopt))
+                                (jdme-exception))
+                            (jdme-deopt))))
+                (jdme-pending))
+            (jdme-reject)))
+
+    (defn jdme-good-envelope () (jdme-envelope 4096 4 96 4096 0 1 1 1 1 1 1 1 1 1 1 1))
+    (defn jdme-over-budget () (jdme-envelope 4096 4 96 20480 0 1 1 1 1 1 1 1 1 1 1 1))
+    (defn jdme-rwx () (jdme-envelope 4096 4 96 4096 1 1 0 1 1 1 1 1 1 1 1 1))
+    (defn jdme-unsealed () (jdme-envelope 4096 4 96 4096 0 1 0 1 1 1 1 1 1 1 1 1))
+    (defn jdme-no-guards () (jdme-envelope 4096 4 96 4096 0 1 1 0 0 1 1 1 1 1 1 1))
+    (defn jdme-unrooted () (jdme-envelope 4096 4 96 4096 0 1 1 1 1 0 1 1 1 1 1 1))
+    (defn jdme-no-source () (jdme-envelope 4096 4 96 4096 0 1 1 1 1 1 0 1 1 1 1 1))
+    (defn jdme-no-maps () (jdme-envelope 4096 4 96 4096 0 1 1 1 1 1 1 0 1 1 1 1))
+    (defn jdme-no-exception () (jdme-envelope 4096 4 96 4096 0 1 1 1 1 1 1 1 0 1 1 1))
+    (defn jdme-no-deopt () (jdme-envelope 4096 4 96 4096 0 1 1 1 1 1 1 1 1 0 1 1))
+
+    (defn jdme-current () (jdme-state (jdme-good-envelope) 1 0 0))
+    (defn jdme-live () (jdme-state (jdme-good-envelope) 1 1 1))
+
+    (defn jdme-bit (cond bit) (if cond bit 0))
+    (defn jit-dylib-memory-envelope-check ()
+        (add
+            (jdme-bit (eq (jdme-receipts-ok?) 1) 1)
+            (add
+                (jdme-bit (eq (jdme-envelope-safe? (jdme-good-envelope)) 1) 2)
+                (add
+                    (jdme-bit (eq (jdme-action (jdme-current) 1 1 0 1 0) (jdme-pending)) 4)
+                    (add
+                        (jdme-bit (eq (jdme-complete? (jdme-live)) 1) 8)
+                        (add
+                            (jdme-bit (eq (jdme-action (jdme-live) 1 1 0 1 0) (jdme-native)) 16)
+                            (add
+                                (jdme-bit (eq (jdme-action (jdme-live) 0 1 0 1 0) (jdme-deopt)) 32)
+                                (add
+                                    (jdme-bit (eq (jdme-action (jdme-live) 1 0 0 1 0) (jdme-exception)) 64)
+                                    (add
+                                        (jdme-bit (eq (jdme-action (jdme-live) 1 1 1 1 0) (jdme-rewalk)) 128)
+                                        (add
+                                            (jdme-bit (eq (jdme-action (jdme-live) 1 1 0 0 0) (jdme-deopt)) 256)
+                                            (add
+                                                (jdme-bit (eq (jdme-action (jdme-live) 1 1 0 1 1) (jdme-melt)) 512)
+                                                (add
+                                                    (jdme-bit (eq (jdme-envelope-safe? (jdme-over-budget)) 0) 1024)
+                                                    (add
+                                                        (jdme-bit (eq (jdme-envelope-safe? (jdme-rwx)) 0) 2048)
+                                                        (add
+                                                            (jdme-bit (eq (jdme-envelope-safe? (jdme-unsealed)) 0) 4096)
+                                                            (add
+                                                                (jdme-bit (eq (jdme-envelope-safe? (jdme-no-guards)) 0) 8192)
+                                                                (add
+                                                                    (jdme-bit (eq (jdme-envelope-safe? (jdme-unrooted)) 0) 16384)
+                                                                    (add
+                                                                        (jdme-bit (eq (jdme-envelope-safe? (jdme-no-source)) 0) 32768)
+                                                                        (add
+                                                                            (jdme-bit (eq (jdme-envelope-safe? (jdme-no-maps)) 0) 65536)
+                                                                            (add
+                                                                                (jdme-bit (eq (jdme-envelope-safe? (jdme-no-exception)) 0) 131072)
+                                                                                (add
+                                                                                    (jdme-bit (eq (jdme-envelope-safe? (jdme-no-deopt)) 0) 262144)
+                                                                                    (jdme-bit (eq (jdme-receipt-ok? (jdme-bad-host-wx)) 0) 524288)))))))))))))))))))))
+
+    0)
