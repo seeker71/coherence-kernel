@@ -200,8 +200,8 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       across `6` ready locales with `1` voice each yields `12000` planned wav rows and `1200` planned held-out
       rows; the separate host-ready cross-voice lane is `5` locales with `2` voices each, yielding `20000`
       planned cross-voice wav rows and `2000` held-out rows. The status is now
-      `corpus-scale-window-open-not-trained`; no training promotion occurs until enough live rows are rendered and
-      witnessed.
+      `corpus-scale-window-open-training-intake-started`; global promotion still waits until enough live rows are
+      rendered and witnessed.
 - [x] **Speech corpus capture batch 0001 added.** `learn/speech-corpus-capture-batch-0001.fk` renders six
       consentful Coherence Network corpus rows on local macOS voices and checks them with whisper.cpp/Metal
       (`4095`): `6/6` rows pass the local-oracle WER floor, max WER `0`, observed batch wav bytes `212524`, across
@@ -211,7 +211,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       more consentful Coherence Network corpus rows, four per ready locale, and checks them with whisper.cpp/Metal
       (`8191`): `24/24` rows pass the local-oracle WER floor, max WER `0`, observed batch wav bytes `580710`.
       Aggregate speech rows are now `35` wavs and `1065282` observed bytes; status remains
-      `captured-corpus-audio-not-training-sufficient` with `0` corpus rows used for training.
+      `captured-corpus-audio-not-training-sufficient` until the later training-intake floor admits batch `0001`.
 - [x] **Speech corpus capture batch 0003 added.** `learn/speech-corpus-capture-batch-0003.fk` screens sixty
       translated self-corpus phrase rows and admits only the local-oracle-clean rows (`8191`): `34/34` admitted
       rows pass, max admitted WER `25`, observed admitted wav bytes `1272388`, while `26` unstable candidate rows
@@ -222,8 +222,7 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       five host-ready locales and five consentful self-corpus keys (`8191`): `50` candidate wavs are rendered,
       `35` pass the local Whisper/Metal WER floor and are admitted, `15` remain screened controls, max candidate
       WER is `250`, and observed wav bytes are `2150026`. Aggregate speech rows are now `191` wavs and `6806882`
-      observed bytes; captured corpus rows are `99`; data sufficiency remains false and rows used for training
-      remain `0`.
+      observed bytes; captured corpus rows are `99`; data sufficiency remains false.
 - [x] **Speech corpus adaptive acquisition added.** `learn/speech-corpus-adaptive-acquisition.fk` turns batch
       0004's observed uneven shard results into the next capture recipe (`32767`): `en` and `pt-br` expand,
       `es` retries under A/B, `de` and `fr` repair, and the next lane is `fr` with
@@ -234,8 +233,13 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       executes the first adaptive repair lane on local Apple Metal (`8191`): `20` French repair-alias wavs are
       rendered through `say`, normalized with `ffmpeg`, checked by `whisper.cpp/Metal`, and admitted `20/20` with
       max WER `0` and observed wav bytes `345520`. Aggregate speech rows are now `211` wavs and `7152402`
-      observed bytes; captured corpus rows are `119`; data sufficiency remains false, rows used for training
-      remain `0`, and source translations are kept separate from spoken aliases.
+      observed bytes; captured corpus rows are `119`; data sufficiency remains false, and source translations are
+      kept separate from spoken aliases.
+- [x] **Speech corpus training intake 0001 added.** `learn/speech-corpus-training-intake-0001.fk` admits the
+      six clean batch-`0001` capture rows into the native prototype-training floor (`32767`): local-oracle
+      accepted `6/6`, training-admitted `6/6`, max WER `0`, six locales, observed source wav bytes `212524`.
+      Aggregate captured corpus rows used for training are now `6`, while data sufficiency remains false against
+      the `12000` wav-row floor and global ASR/TTS authority remains false.
 - [x] **Speech corpus held-out repeat learning added.** `learn/speech-corpus-heldout-repeat-learning.fk` trains six
       Form-native full-envelope prototypes from consentful corpus phrases and evaluates six separately rendered,
       volume-shifted held-out wavs (`16383`): local oracle accepts `6/6`, native prototype classification accepts
