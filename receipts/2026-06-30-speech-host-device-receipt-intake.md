@@ -41,6 +41,7 @@ Current global counts remain honest:
 - Live open dictation: `0/3`.
 - Sema live voice: `0/3`.
 - Global speech-native ASR/TTS authority: `0/2`.
+- Current observed global rows: open dictation `1`, Sema live voice `1`; both have `0` passing receipts, so this is not a `0/0` witness.
 - Native neural parameters admitted: `0`.
 
 The demo clean mixed Mac/Android rows prove the path without weakening it:
