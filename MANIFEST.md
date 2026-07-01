@@ -446,6 +446,12 @@ the gate is itself an `.fsh` check; until then it is a one-line `find` run by ha
       `fr<->id`, and `pt-br<->zh` all retain reciprocal A->B/B->A/A->A/B->B lanes, start guided, end native,
       keep controls clean, promote by A/B evidence, and preserve the local oracle/device while neural Metal and
       diffusion remain pending. The band returns `32767`.
+- [x] **Speech neural pair coverage added.** `learn/speech-neural-pair-coverage.fk` makes the pair-training
+      boundary executable (`32767`): locale `A=>neural=>B` coverage is `0/55` broad ready pairs and `0/110`
+      directed routes, with `0` neural epochs and `0` native neural parameters. The separate Form-native seeded
+      windows cover `5` reciprocal pair windows (`10` directed cross-locale directions, `20` A/B plus self
+      roundtrip lanes), which is `909` basis points of the broad ready pair space and `1111` basis points of the
+      Sanskrit-baseline pair space. This keeps prototype/Form receipts from being misreported as neural training.
 - [x] **Seven live Metal pair anchors stand — `7/7`, `full-metal-native` for the closed-prompt carrier.**
       The Form-owned macOS carrier runs `en<->de`, `en<->es`, `en<->id`, `en<->fr`, `en<->it`, `en<->zh`, and `en<->ar` on live Apple
       Metal (one `presence/macos-*-speech-roundtrip-variant.fk` per pair; carrier verdict `511` each).
