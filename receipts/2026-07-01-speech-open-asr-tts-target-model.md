@@ -10,8 +10,8 @@ beat local oracle: true
 target rate: 100
 current open ASR native/oracle: 0/100
 current Sema voice native/oracle: 0/0
-trained neural pairs enabled: 1
-native neural parameters enabled: 1
+trained neural pairs enabled: 2
+native neural parameters enabled: 2
 route enabled: true
 ```
 
