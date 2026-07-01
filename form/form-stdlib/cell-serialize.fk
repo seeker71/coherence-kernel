@@ -1,0 +1,198 @@
+; cell-serialize.fk — cell <=> JSON text, identity-preserving.
+;
+; North star: values + structural type (Blueprint) + content-addressed identity
+; round-trip through JSON, not just values. The mechanism is exactly axiom-3
+; ("a cell's identity is computed from its present composition; same
+; composition is the same cell") — nothing here manufactures or looks up an
+; identity; encoding faithfully carries the Blueprint NAME + children through
+; JSON text, and decoding calls the SAME (bp name) + intern_node the original
+; construction used. Same name, same children -> same NodeID, for free.
+;
+; The real constraint this design is built around, verified directly before
+; writing any of this: `bp` is one-way. `(bp "FOO")` is deterministic (same
+; name always yields the same value — verified: `(eq (bp "FOO") (bp "FOO"))`
+; -> true) but there is no native op that recovers the string "FOO" back from
+; that value. So a generic serializer cannot discover a cell's Blueprint name
+; by introspecting an arbitrary node; the caller supplies a REGISTRY — the
+; list of (name, blueprint) pairs it used to build the structure being
+; serialized — and encoding does a linear `node_eq` scan to find which
+; registered name matches a given node's `node_category`. This is the
+; same shape json.fk's own json-emit already uses (compare `node_category`
+; against known blueprints via `node_eq`), generalized to caller-supplied
+; blueprints instead of json.fk's own fixed JSON-OBJECT/JSON-ARRAY/JSON-PAIR/
+; JSON-NULL set.
+;
+; Leaves (node_level = 1 -- trivial int/string/float/null) encode as their
+; natural JSON literal, no registry entry needed. Composites (node_level = 0,
+; built via intern_node) need a registry lookup, encoded as a JSON object
+; carrying the Blueprint name and children explicitly: {"bp":"<name>","c":[...]}.
+;
+; The text layer here is self-contained, NOT built on form-stdlib/json.fk,
+; despite the obvious overlap (JSON text in, JSON text out). Found directly
+; while building this, not assumed: json.fk's own json-parse-value AND
+; json-emit are BOTH broken on this kernel's direct-source runner (`fkwu
+; --src`) today — confirmed on the simplest possible input, `{"a":1}`,
+; independent of anything in this file. json.fk was evidently proven through
+; a different execution lane (the flatten/BML path, or the walkers via
+; validate.sh) and never actually verified against bare `--src`. That is a
+; real, separate, pre-existing bug worth its own investigation — not
+; attempted here; debugging a 537-line file already proven through other
+; lanes is a materially bigger undertaking than this receipt's scope. This
+; file's own minimal reader/writer covers exactly the shape it needs
+; (int/string/float/null leaves, nested {"bp":...,"c":[...]} objects) and is
+; verified directly against fkwu --src, not inherited from an unverified
+; dependency.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    ; --- the registry: a list of (name-string blueprint) pairs ---
+    (defn cser-entry (name blueprint) (list name blueprint))
+    (defn cser-entry-name (e) (head e))
+    (defn cser-entry-bp   (e) (head (tail e)))
+
+    (defn cser-find-name (cat registry)
+        (if (eq (len registry) 0) (empty)
+            (if (node_eq cat (cser-entry-bp (head registry)))
+                (list (cser-entry-name (head registry)))
+                (cser-find-name cat (tail registry)))))
+
+    (defn cser-find-bp (name registry)
+        (if (eq (len registry) 0) (empty)
+            (if (str_eq name (cser-entry-name (head registry)))
+                (list (cser-entry-bp (head registry)))
+                (cser-find-bp name (tail registry)))))
+
+    ; `head` directly on the lookup result (no `if`/`len` gate first): still
+    ; fails loudly on an unregistered Blueprint, via this codebase's own
+    ; established crash convention (core.fk's `assert`, `(head (empty))`) —
+    ; a `len`-check-then-`head` would say the same thing in more code.
+    ;
+    ; A methodology note earned the hard way while building this, worth
+    ; keeping: an early debugging pass here chased what looked like a severe
+    ; recursive-evaluator corruption bug for a long time. It wasn't one.
+    ; Two mundane mistakes in the throwaway probe scripts, not this file or
+    ; the runtime: (1) list children built from bare integer literals
+    ; (`(list 1 2)`) instead of `(intern_trivial_int 1)` — `node_level` on a
+    ; raw literal returns `0` (it isn't an interned node at all), not `1`,
+    ; so "is this a leaf" silently took the wrong branch; (2) later probes
+    ; dropped the `form-stdlib/core.fk` prelude, so `int_to_str` (Form-native
+    ; since this morning, not native) resolved to `nothing`, and `str_len
+    ; nothing` = `0` read as "produced garbage." A THIRD, genuinely real
+    ; quirk surfaced while sorting this out: a bare top-level `(do (let ...)
+    ; ...)` probe and the identical logic wrapped in a named `defn` and
+    ; explicitly called can disagree on this runner — every actual check in
+    ; this file's own band wraps in a `defn`, matching every other band
+    ; today, and that form is the one verified correct throughout.
+
+    ; --- encode: cell node -> JSON text, directly (no intermediate tree) ---
+    (defn cser-emit-str (s) (str_concat "\"" (str_concat s "\"")))
+
+    (defn cser-emit-leaf (node)
+        (do
+            (let ty (node_type node))
+            (if (eq ty 1) (int_to_str (node_value node))
+            (if (eq ty 2) (cser-emit-str (node_value node))
+            (if (eq ty 4) "null"
+            (if (eq ty 7) (float_to_str (node_value node))
+                "null"))))))   ; an unrecognized leaf type: null rather than a silently wrong guess
+
+    (defn cser-emit-children (children registry)
+        (if (eq (len children) 0) ""
+            (if (eq (len (tail children)) 0)
+                (cser-emit-node (head children) registry)
+                (str_concat (cser-emit-node (head children) registry)
+                    (str_concat "," (cser-emit-children (tail children) registry))))))
+
+    (defn cser-emit-node (node registry)
+        (if (eq (node_level node) 1)
+            (cser-emit-leaf node)
+            (str_concat "{\"bp\":"
+                (str_concat (cser-emit-str (head (cser-find-name (node_category node) registry)))
+                    (str_concat ",\"c\":["
+                        (str_concat (cser-emit-children (node_children node) registry) "]}"))))))
+
+    (defn cell-to-json (node registry) (cser-emit-node node registry))
+
+    ; --- decode: JSON text -> the original cell node, identity intact ---
+    ; A narrow, self-contained reader for exactly what cser-emit-node writes
+    ; (int/string/float/null leaves; nested {"bp":"...","c":[...]} objects) —
+    ; not a general JSON parser. No escape-sequence handling in strings
+    ; (a real, named scope limit, not silently assumed away).
+
+    (defn cser-ws? (c) (or (eq c 32) (or (eq c 10) (eq c 9))))
+    (defn cser-skip-ws (s i)
+        (if (ge i (str_len s)) i
+            (if (cser-ws? (str_byte_at s i)) (cser-skip-ws s (add i 1)) i)))
+
+    (defn cser-digit? (c) (and (ge c 48) (le c 57)))
+    (defn cser-numchar? (c) (or (cser-digit? c) (or (eq c 45) (eq c 46))))
+    (defn cser-scan-num-end (s i)
+        (if (ge i (str_len s)) i
+            (if (cser-numchar? (str_byte_at s i)) (cser-scan-num-end s (add i 1)) i)))
+    (defn cser-has-dot? (s i end)
+        (if (ge i end) false
+            (if (eq (str_byte_at s i) 46) true (cser-has-dot? s (add i 1) end))))
+
+    (defn cser-scan-str-end (s i)
+        (if (eq (str_byte_at s i) 34) i (cser-scan-str-end s (add i 1))))
+
+    ; parse-node / parse-array-elements return (list value next-index) — a
+    ; plain 2-element list, not json.fk's pair shape (this file no longer
+    ; depends on json.fk at all).
+    (defn cser-pv (p) (head p))
+    (defn cser-pi (p) (head (tail p)))
+
+    (defn cser-parse-array-elements (s i registry)
+        (do
+            (let i2 (cser-skip-ws s i))
+            (if (eq (str_byte_at s i2) 93)   ; ']'
+                (list (empty) (add i2 1))
+                (do
+                    (let first (cser-parse-node s i2 registry))
+                    (cser-parse-array-more s (cser-pi first) registry (list (cser-pv first)))))))
+
+    (defn cser-parse-array-more (s i registry acc)
+        (do
+            (let i2 (cser-skip-ws s i))
+            (if (eq (str_byte_at s i2) 93)   ; ']'
+                (list (cser-reverse acc) (add i2 1))
+                (do
+                    (let i3 (add i2 1))   ; skip ','
+                    (let nxt (cser-parse-node s (cser-skip-ws s i3) registry))
+                    (cser-parse-array-more s (cser-pi nxt) registry (cons (cser-pv nxt) acc))))))
+
+    (defn cser-reverse-onto (xs acc) (if (eq (len xs) 0) acc (cser-reverse-onto (tail xs) (cons (head xs) acc))))
+    (defn cser-reverse (xs) (cser-reverse-onto xs (empty)))
+
+    (defn cser-parse-node (s i registry)
+        (do
+            (let i2 (cser-skip-ws s i))
+            (let c (str_byte_at s i2))
+            (if (eq c 123)   ; '{' -- the only object shape this reader knows: {"bp":"...","c":[...]}
+                (do
+                    (let after-brace (add i2 1))
+                    (let after-bpkey (add after-brace 6))    ; skip `"bp":"`
+                    (let name-end (cser-scan-str-end s after-bpkey))
+                    (let name (substring s after-bpkey name-end))
+                    (let after-name (add name-end 1))         ; skip closing quote of name
+                    (let after-comma (add after-name 1))      ; skip ','
+                    (let after-ckey (add after-comma 5))      ; skip `"c":[`
+                    (let kids (cser-parse-array-elements s after-ckey registry))
+                    (let after-close (add (cser-pi kids) 1))  ; skip the object's own closing '}'
+                    (list (intern_node (head (cser-find-bp name registry)) (cser-pv kids)) after-close))
+            (if (eq c 34)   ; '"' -- a plain string leaf
+                (do
+                    (let str-end (cser-scan-str-end s (add i2 1)))
+                    (list (intern_trivial_string (substring s (add i2 1) str-end)) (add str-end 1)))
+            (if (eq c 110)  ; 'n' -- null
+                (list (intern_trivial_int 0) (add i2 4))   ; a real gap: decodes as int 0, not a distinct null value — no node_type tag 4 constructor available in Form (json.fk builds it via intern_node_at with source attribution this file deliberately doesn't carry); named, not silently assumed correct
+            (do   ; a number: int or float, decided by the presence of '.'
+                (let num-end (cser-scan-num-end s i2))
+                (let text (substring s i2 num-end))
+                (if (cser-has-dot? s i2 num-end)
+                    (list (intern_trivial_float text) num-end)
+                    (list (intern_trivial_int (str_to_int text)) num-end))))))))
+
+    (defn json-to-cell (text registry) (cser-pv (cser-parse-node text 0 registry)))
+)
