@@ -8,7 +8,7 @@ Date: 2026-06-30
 ( cat observe/jit-native-witness-sweep.fk \
       observe/tests/jit-native-witness-sweep-band.fk ) > /tmp/jnws.fk
 ./fkwu --src /tmp/jnws.fk
-# 4194303
+# 16777215
 ```
 
 ## What Landed
@@ -23,6 +23,8 @@ bytes without growing the C bootstrap.
 
 - policy receipts compose: profile/numeric category collapse, tiering,
   inlining, static analysis, and stack/frame collapse;
+- grouped policy-front, policy-access, and policy-cache sweep receipts compose
+  before the native witness can pass;
 - access receipts compose: field, list, array, dict, hashmap, ordered tree,
   checked-access payloads, register lowering, and deopt cache;
 - emission receipts compose: Form IR, host dispatch packets, backend byte
@@ -35,8 +37,9 @@ bytes without growing the C bootstrap.
 - a future live replacement carrier routes native, guard deopt, runtime
   exception, invalidation rewalk, parity deopt, and stale-cache melt;
 - C-bootstrap growth rejects;
-- missing category collapse, dict access, GPU lane, runtime checks, positive
-  generation, source maps, or metadata maps rejects readiness.
+- missing category collapse, grouped policy spine, dict access, GPU lane,
+  runtime checks, positive generation, source maps, or metadata maps rejects
+  readiness.
 
 ## Honest Boundary
 

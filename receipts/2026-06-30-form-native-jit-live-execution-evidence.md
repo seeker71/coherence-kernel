@@ -8,7 +8,7 @@ Date: 2026-06-30
 ( cat observe/jit-live-execution-evidence.fk \
       observe/tests/jit-live-execution-evidence-band.fk ) > /tmp/jlee.fk
 ./fkwu --src /tmp/jlee.fk
-# 8388607
+# 16777215
 ```
 
 ## What Landed
@@ -21,16 +21,16 @@ source/no-C-growth, and positive generation.
 
 ## Proved
 
-- final-native-gate, source-replacement-runtime, and replacement-runtime
-  receipts compose;
+- final-native-gate, source-replacement-runtime, replacement-runtime,
+  carrier/install/call evidence, and dylib live-proof-suite receipts compose;
 - current evidence is contract-ready but still pending because live carrier,
   install, call, exception, deopt, and melt proofs are absent;
 - a complete live proof suite routes native, guard deopt, runtime exception,
   invalidation rewalk, parity deopt, and stale melt;
 - missing carrier, install, call, exception, deopt, melt, or parity proof is not
   live completion;
-- C growth, zero generation, bad final-gate receipts, missing source maps, and
-  missing metadata maps reject readiness.
+- C growth, zero generation, bad final-gate/carrier/dylib receipts, missing
+  source maps, and missing metadata maps reject readiness.
 
 ## Honest Boundary
 
