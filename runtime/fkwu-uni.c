@@ -456,10 +456,20 @@ extern int stat(const char *, void *);
 #endif
 #endif
 #ifndef FK_HAVE_FCNTL_HEADER
+#if defined(_WIN32)
+/* ucrt flag values; _O_BINARY folded into O_WRONLY so writes keep bytes as given (the read
+ * path already opens 0x8000). The BSD values below silently dropped _O_CREAT here, so the
+ * write/append doors failed on absent files and append truncated on present ones. */
+#define O_WRONLY 0x8001
+#define O_CREAT 0x100
+#define O_TRUNC 0x200
+#define O_APPEND 8
+#else
 #define O_WRONLY 1
 #define O_CREAT 0x200
 #define O_TRUNC 0x400
 #define O_APPEND 8
+#endif
 #endif
 extern int open(const char *, int, ...);
 extern long long read(int, void *, unsigned long);
