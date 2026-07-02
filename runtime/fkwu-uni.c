@@ -2335,7 +2335,7 @@ static int fk_suffix_match(const char *name, const char *suf) {
 }
 static long long fk_list_push(long long acc, long long sv) {
     if (fk_hp + 1 >= fk_cap) {
-        return acc;
+        fk_die("fk_list_push: heap exhausted building list -- returning the accumulator unchanged would silently drop this element, a partial list accepted as whole.");
     }
     fk_hp = fk_hp + 1;
     fk_hh[fk_hp] = sv;
@@ -3618,7 +3618,7 @@ static long long fk_cons_val(long long h, long long t) {
         fk_arena();
     }
     if (fk_hp + 1 >= fk_cap) {
-        return 1;
+        fk_die("fk_cons_val: heap exhausted -- cannot melt here (live C-local intermediates are not on the value stack for the collector to trace). Returning nil would be a partial structure accepted as whole.");
     }
     fk_hp = fk_hp + 1;
     fk_hh[fk_hp] = h;
@@ -6126,7 +6126,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long xs64 = fk_walk(fk_node[i][1], fp);
         fk_rp = fk_rp + 1;
         if (fk_rp >= FK_RECORD_CAP) {
-            fk_rp = FK_RECORD_CAP - 1;
+            fk_die("fk_walk tag 64: FK_RECORD_CAP live records exceeded -- clamping fk_rp to the last slot would silently ALIAS two distinct records onto one, a whole quietly swapped for another. Raise FK_RECORD_CAP if a real program needs this many live records.");
         }
         fk_rcnt[fk_rp] = 0;
         fk_rbp[fk_rp] = 0;
@@ -6147,6 +6147,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                     fk_rkey[fk_rp][fk_rcnt[fk_rp]] = k64;
                     fk_rval[fk_rp][fk_rcnt[fk_rp]] = v64;
                     fk_rcnt[fk_rp] = fk_rcnt[fk_rp] + 1;
+                } else {
+                    fk_die("fk_walk tag 64: FK_RECORD_MAX_KEYS exceeded -- silently dropping a key past the cap would be a partial record accepted as whole. Raise FK_RECORD_MAX_KEYS if a real record needs this many keys.");
                 }
             }
             q64 = fk_ht[q64] >> 1;
@@ -6736,12 +6738,13 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long fe_i = fk_fbn;
         while (fe_i > 0) {
             fe_i = fe_i - 1;
-            if (fk_hp + 1 < fk_cap) {
-                fk_hp = fk_hp + 1;
-                fk_hh[fk_hp] = fk_fbroots[fe_i];
-                fk_ht[fk_hp] = fe_r;
-                fe_r = (fk_hp << 1) | 1;
+            if (fk_hp + 1 >= fk_cap) {
+                fk_die("fk_walk tag 129: heap exhausted draining fbroots after melt -- silently skipping a root would return a truncated root list, live roots dropped without witness.");
             }
+            fk_hp = fk_hp + 1;
+            fk_hh[fk_hp] = fk_fbroots[fe_i];
+            fk_ht[fk_hp] = fe_r;
+            fe_r = (fk_hp << 1) | 1;
         }
         return fe_r;
     }
@@ -7079,7 +7082,8 @@ static long long fk_smkstr(void) {
  * slot). A bare bound name lowers to tag 110 (read fk_vs[fp+slot]); a let lowers to tag 109 (store
  * then body); a function reserves fk_maxslot slots (tag 111). Over-reserve is safe (form-flatten
  * over-reserves too). */
-static long long fk_bd_s[128], fk_bd_n[128], fk_bd_off[128], fk_bd_top, fk_maxslot;
+#define FK_BD_STACK_CAP 1024 /* fk_bd_*: max bindings simultaneously in scope during parse. Raised 128->1024 (2026-07-02): a single scope with many sequential lets (generated classifier programs) can exceed 128, and a silently dropped binding miscompiles variable references. Same raisable-constant class as FK_NODE_CAP; overflow now dies loudly instead of dropping a binding. */
+static long long fk_bd_s[FK_BD_STACK_CAP], fk_bd_n[FK_BD_STACK_CAP], fk_bd_off[FK_BD_STACK_CAP], fk_bd_top, fk_maxslot;
 static long long fk_bd_lookup(long long s, long long n) {
     long long i = fk_bd_top;
     while (i > 0) {
@@ -7091,12 +7095,13 @@ static long long fk_bd_lookup(long long s, long long n) {
     return -1;
 }
 static void fk_bd_push(long long s, long long n, long long off) {
-    if (fk_bd_top < 128) {
-        fk_bd_s[fk_bd_top] = s;
-        fk_bd_n[fk_bd_top] = n;
-        fk_bd_off[fk_bd_top] = off;
-        fk_bd_top = fk_bd_top + 1;
+    if (fk_bd_top >= FK_BD_STACK_CAP) {
+        fk_die("fk_bd_push: parser binding-scope stack exhausted -- a silently dropped binding would miscompile variable references (wrong slot / unresolved name) with no witness. Raise FK_BD_STACK_CAP if a real program nests this deep.");
     }
+    fk_bd_s[fk_bd_top] = s;
+    fk_bd_n[fk_bd_top] = n;
+    fk_bd_off[fk_bd_top] = off;
+    fk_bd_top = fk_bd_top + 1;
 }
 static void fk_bd_pop(void) {
     if (fk_bd_top > 0) {
@@ -7325,6 +7330,9 @@ static long long fk_sparse(void) {
              * args — same mechanism, any N. ar==0 parses no args (chain -1, inert); ar==1/2/8 are
              * the same code. */
             long long ar = (fidx >= 0 && fidx < FK_FN_CAP) ? fk_fnar[fidx] : 1;
+            if (ar > 256) {
+                fk_die("fk_parse: direct call declared arity exceeds 256 -- collecting only 256 args would silently truncate the call and desync the parser.");
+            }
             long long argn[256];
             long long ai = 0;
             while (ai < ar && ai < 256) {
@@ -7367,6 +7375,9 @@ static long long fk_sparse(void) {
                 iai = iai + 1;
             }
             fk_sskip();
+            if (iai >= 256 && fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_RPAREN) {
+                fk_die("fk_parse: indirect call arity exceeds 256 -- further args would be silently dropped and the parser desynced.");
+            }
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
