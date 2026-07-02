@@ -41,7 +41,7 @@ dispatch chain — grep-verified. One core, five expressions.
 ## Honest floor — where it is proven, and the bootstrap-seed edge here
 
 **Four-way proven in the origin body** (`Coherence-Network`,
-`form/form-stdlib/offer-ack-core.fk` + band, registered in
+`control/offer-ack-core.fk` (path corrected 2026-07-01; this receipt originally wrote `form/form-stdlib/`) + band, registered in
 `form/fourth-arm-bands.txt`): **1023, FOUR-WAY (Go/Rust/TS/fkwu)** through the
 flattener path, which carries the indirect-call op family (tag 44, the
 `higher-order-fn-arg` band).
