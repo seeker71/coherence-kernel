@@ -1,0 +1,161 @@
+; form-asm-x64.fk — x86-64 instruction byte encoders as a Form recipe (no clang).
+;
+; The x64 twin of form-asm.fk (arm64). x64 is variable-length (REX/opcode/ModRM/
+; imm) rather than fixed 32-bit words, so each instruction emits its byte list
+; directly. Calling convention: the i64 argument is banked in RCX for Win64 or
+; RDI for SysV; the single accumulator is RAX (the return register); RDX is the
+; one-deep spill temp. Every value emitted is < 256 — host-integer-width
+; independent, the same discipline form-asm.fk holds.
+;
+; Verified against the clang/LLVM oracle per instruction; proven by EXECUTION
+; (the lowered recipe runs through the bootstrap host and returns its value,
+; zero clang in the code path).
+
+(do
+    (defn x64-app (a b) (if (eq (len a) 0) b (cons (head a) (x64-app (tail a) b))))
+    (defn x64-cat (xss) (if (eq (len xss) 1) (head xss) (x64-app (head xss) (x64-cat (tail xss)))))
+
+    ; a 32-bit immediate as 4 little-endian bytes (two's complement for negatives)
+    (defn x64-wrap32 (n) (if (lt n 0) (add n 4294967296) n))
+    (defn x64-imm32 (n) (x64-imm32b (x64-wrap32 n)))
+    (defn x64-imm32b (n)
+        (list (mod n 256) (mod (div n 256) 256)
+              (mod (div n 65536) 256) (mod (div n 16777216) 256)))
+
+    ; --- the affine/arithmetic instruction set (REX.W = 0x48 = 72) ---
+    ; mov rax, rcx        48 89 C8    — ARG into the accumulator
+    (defn x64-mov-rax-rcx () (list 72 137 200))
+    ; mov rax, rdi        48 89 F8    — SysV ARG into the accumulator
+    (defn x64-mov-rax-rdi () (list 72 137 248))
+    ; mov rax, imm32      48 C7 C0 imm32   — a LIT into the accumulator
+    (defn x64-mov-rax-imm (n) (x64-app (list 72 199 192) (x64-imm32 n)))
+    ; add rax, imm32      48 05 imm32
+    (defn x64-add-rax-imm (n) (x64-app (list 72 5) (x64-imm32 n)))
+    ; add rax, imm8       48 83 C0 imm8
+    (defn x64-add-rax-imm8 (n) (list 72 131 192 n))
+    ; sub rax, imm32      48 2D imm32
+    (defn x64-sub-rax-imm (n) (x64-app (list 72 45) (x64-imm32 n)))
+    ; imul rax, rax, imm32  48 69 C0 imm32
+    (defn x64-imul-rax-imm (n) (x64-app (list 72 105 192) (x64-imm32 n)))
+    ; add  rax, rcx       48 01 C8     ; sub rax, rcx 48 29 C8 ; imul rax,rcx 48 0F AF C1
+    (defn x64-add-rax-rcx () (list 72 1 200))
+    (defn x64-sub-rax-rcx () (list 72 41 200))
+    (defn x64-imul-rax-rcx () (list 72 15 175 193))
+    ; re-entrant spill via the system stack (nests correctly, unlike a fixed reg):
+    ; push rax  50 ; pop rdx  5A  (64-bit operand size is the default, no REX)
+    (defn x64-push-rax () (list 80))
+    (defn x64-pop-rdx () (list 90))
+    ; RDX-combining forms for a spilled left operand
+    (defn x64-mov-rax-rdx () (list 72 137 208))
+    (defn x64-add-rax-rdx () (list 72 1 208))
+    (defn x64-sub-rdx-rax () (list 72 41 194))      ; rdx := rdx - rax  (non-commutative SUB)
+    (defn x64-imul-rax-rdx () (list 72 15 175 194))
+    ; ret  C3
+    (defn x64-ret () (list 195))
+    ; direct-access check/load fragments for JIT payload receipts:
+    ;   test rdi,rdi       48 85 FF          ; null receiver/container guard
+    ;   cmp  rsi,rdx       48 39 D6          ; index against length
+    ;   cmp  rcx,imm8      48 83 F9 imm8     ; denominator/shape guard
+    ;   je/jae rel8        74/73 rel8        ; fault exits
+    ;   mov rax,[rdi+rsi*8] 48 8B 04 F7      ; indexed slot load
+    ;   mov rax,[rdi+disp8] 48 8B 47 disp8   ; field-slot load
+    ;   cqo; idiv rcx      48 99 / 48 F7 F9  ; checked signed division
+    (defn x64-test-rdi-rdi () (list 72 133 255))
+    (defn x64-cmp-rsi-rdx () (list 72 57 214))
+    (defn x64-cmp-rcx-imm8 (n) (list 72 131 249 n))
+    (defn x64-je-imm8 (n) (list 116 n))
+    (defn x64-jae-imm8 (n) (list 115 n))
+    (defn x64-mov-rax-mem-rdi-rsi8 () (list 72 139 4 247))
+    (defn x64-mov-rax-mem-rdi-disp8 (d) (list 72 139 71 d))
+    (defn x64-cqo () (list 72 153))
+    (defn x64-idiv-rcx () (list 72 247 249))
+    (defn x64-fault-return (kind) (x64-app (x64-mov-rax-imm kind) (x64-ret)))
+    (defn x64-array-get-checked ()
+        (x64-cat (list
+            (x64-test-rdi-rdi)
+            (x64-je-imm8 8)
+            (x64-cmp-rsi-rdx)
+            (x64-jae-imm8 11)
+            (x64-mov-rax-mem-rdi-rsi8)
+            (x64-ret)
+            (x64-fault-return 102)
+            (x64-fault-return 101))))
+    (defn x64-field-load-checked (slot)
+        (x64-cat (list
+            (x64-test-rdi-rdi)
+            (x64-je-imm8 5)
+            (x64-mov-rax-mem-rdi-disp8 slot)
+            (x64-ret)
+            (x64-fault-return 102))))
+    (defn x64-div-checked ()
+        (x64-cat (list
+            (x64-cmp-rcx-imm8 0)
+            (x64-je-imm8 6)
+            (x64-cqo)
+            (x64-idiv-rcx)
+            (x64-ret)
+            (x64-fault-return 103))))
+
+    ; Args-vector ABI payloads: fk_native_call_args-style entry receives a
+    ; pointer to tagged i64 arguments. These are Form-emitted bytes for checked
+    ; direct access under that ABI, not register-argument demo payloads.
+    (defn x64-mov-rax-arg-sysv (slot)
+        (if (eq slot 0) (list 72 139 7) (list 72 139 71 (mul slot 8))))
+    (defn x64-mov-rcx-arg-sysv (slot)
+        (if (eq slot 0) (list 72 139 15) (list 72 139 79 (mul slot 8))))
+    (defn x64-mov-rdx-arg-sysv (slot)
+        (if (eq slot 0) (list 72 139 23) (list 72 139 87 (mul slot 8))))
+    (defn x64-mov-r8-arg-sysv (slot)
+        (if (eq slot 0) (list 76 139 7) (list 76 139 71 (mul slot 8))))
+    (defn x64-add-rax-arg-sysv (slot)
+        (if (eq slot 0) (list 72 3 7) (list 72 3 71 (mul slot 8))))
+    (defn x64-test-r8-r8 () (list 77 133 192))
+    (defn x64-cmp-rcx-rdx () (list 72 57 209))
+    (defn x64-mov-rax-mem-r8-rcx8 () (list 73 139 4 200))
+    (defn x64-mov-rax-mem-r8-disp8 (d)
+        (if (eq d 0) (list 73 139 0) (list 73 139 64 d)))
+    (defn x64-args-add1-sysv ()
+        (x64-cat (list (x64-mov-rax-arg-sysv 0) (x64-add-rax-imm8 2) (x64-ret))))
+    (defn x64-args-add2-sysv ()
+        (x64-cat (list (x64-mov-rax-arg-sysv 0) (x64-add-rax-arg-sysv 1) (x64-ret))))
+    (defn x64-args-div-checked-sysv ()
+        (x64-cat (list
+            (x64-mov-rax-arg-sysv 0)
+            (x64-mov-rcx-arg-sysv 1)
+            (x64-cmp-rcx-imm8 0)
+            (x64-je-imm8 6)
+            (x64-cqo)
+            (x64-idiv-rcx)
+            (x64-ret)
+            (x64-fault-return 103))))
+    (defn x64-args-field-load-checked-sysv (slot)
+        (if (eq slot 0)
+            (x64-cat (list
+                (x64-mov-r8-arg-sysv 0)
+                (x64-test-r8-r8)
+                (x64-je-imm8 4)
+                (x64-mov-rax-mem-r8-disp8 0)
+                (x64-ret)
+                (x64-fault-return 102)))
+            (x64-cat (list
+                (x64-mov-r8-arg-sysv 0)
+                (x64-test-r8-r8)
+                (x64-je-imm8 5)
+                (x64-mov-rax-mem-r8-disp8 (mul slot 8))
+                (x64-ret)
+                (x64-fault-return 102)))))
+    (defn x64-args-array-get-checked-sysv ()
+        (x64-cat (list
+            (x64-mov-r8-arg-sysv 0)
+            (x64-test-r8-r8)
+            (x64-je-imm8 18)
+            (x64-mov-rcx-arg-sysv 1)
+            (x64-mov-rdx-arg-sysv 2)
+            (x64-cmp-rcx-rdx)
+            (x64-jae-imm8 13)
+            (x64-mov-rax-mem-r8-rcx8)
+            (x64-ret)
+            (x64-fault-return 102)
+            (x64-fault-return 101))))
+
+    0)
