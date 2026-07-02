@@ -519,7 +519,7 @@ static void fk_cstr(long long sv, char *out, long long cap) {
     if (sa >= 0 && sa < fk_sp) {
         n = fk_sl[sa];
         if (n > cap - 1) {
-            n = cap - 1;
+            fk_die("fk_cstr: string longer than the destination buffer -- silently truncating would corrupt the path / hostname / port / URL / command / device-name the caller is about to use (every fk_cstr caller is one of these). Raise the caller's buffer if this length is legitimate.");
         }
         long long j = 0;
         while (j < n) {
@@ -4606,8 +4606,7 @@ static void fk_melt(void) {
     long long hp0 = fk_hp;
     fk_fw = calloc(fk_hp + 1, 8);
     if (fk_fw == 0) {
-        dprintf(2, "[melt] ABORTED: fw calloc failed (hp=%lld) -- heap not compacted\n", fk_hp);
-        return;
+        fk_die("fk_melt: fw calloc failed -- heap cannot be compacted, and returning here would let the program continue on a full heap as if space were reclaimed. Out of memory is out of memory (same as fk_fbox/fk_sintern).");
     }
     long long nlive = 0;
     long long k = 0;
@@ -4637,8 +4636,7 @@ static void fk_melt(void) {
         free(fk_nh);
         free(fk_nt);
         free(fk_fw);
-        dprintf(2, "[melt] ABORTED: arena malloc failed (ncap=%lld) -- heap not compacted\n", ncap);
-        return;
+        fk_die("fk_melt: arena malloc failed -- heap cannot be compacted, and returning here would let the program continue on a full heap as if space were reclaimed. Out of memory is out of memory (same as fk_fbox/fk_sintern).");
     }
     fk_nhp = 0;
     fk_nh[0] = 1;
@@ -7427,6 +7425,13 @@ static long long fk_sparse(void) {
                 fk_spos = fk_spos + 1;
             }
         }
+        /* Compile-time unresolved head. It CAN recover -- axiom-5: an offer a cell can't answer
+         * acks nothing (tag 137), so the parse continues. Per "die only if it cannot recover," we
+         * do NOT die here; we RECOVER. But we no longer do it SILENTLY: this witness is the compile
+         * diagnostic that was missing (the ftanh-class bug). Go/Rust/TS hard-error on an unbound
+         * head; fkwu recovers and says so, on every occurrence, unconditionally (no env gate). A
+         * correct program with its preludes present never reaches here. */
+        dprintf(2, "[unresolved-call] '%.*s' matched no op/rewrite/fn/binding -- typo or missing prelude? Recovered to nothing (axiom-5); parse continues.\n", (int)hn, fk_srctext + s);
         return fk_smknode(137, 0, 0, 0);
     }
 
