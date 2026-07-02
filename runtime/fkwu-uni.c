@@ -1188,6 +1188,7 @@ extern unsigned int waveOutPrepareHeader(void *, struct fk_wavehdr *, unsigned i
 extern unsigned int waveOutUnprepareHeader(void *, struct fk_wavehdr *, unsigned int);
 extern unsigned int waveOutWrite(void *, struct fk_wavehdr *, unsigned int);
 extern unsigned int waveOutReset(void *);
+extern unsigned int waveOutSetVolume(void *, unsigned int);
 static long long fk_audio_loopback(long long ms) {
     if (ms < 500) {
         ms = 500;
@@ -1392,6 +1393,8 @@ static long long fk_wav_loopback(const char *inpath, const char *outpath) {
         free(cap);
         return 1;
     }
+    /* pin THIS SESSION's playback to full scale (never touches the user's master volume) */
+    waveOutSetVolume(hout, 0xFFFFFFFFu);
     struct fk_wavehdr hc;
     hc.lpData = (char *)cap;
     hc.dwBufferLength = (unsigned int)(ncap * 2);
@@ -1440,6 +1443,27 @@ static long long fk_wav_loopback(const char *inpath, const char *outpath) {
         sumabs = sumabs + a;
     }
     long long meanabs = got > 0 ? sumabs / got : 0;
+    /* auto-gain for the oracle: a quiet mic (low input slider) yields peaks far below full
+     * scale; scale the capture so its peak sits near -3dB (26000), capped at 64x. The content
+     * is untouched — only the level; peak/mean above report the RAW capture honestly. */
+    if (peak > 0 && peak < 26000) {
+        long long gain = 26000 / peak;
+        if (gain > 64) {
+            gain = 64;
+        }
+        if (gain > 1) {
+            for (i = 0; i < got; i = i + 1) {
+                long long s = (long long)cap[i] * gain;
+                if (s > 32767) {
+                    s = 32767;
+                }
+                if (s < -32768) {
+                    s = -32768;
+                }
+                cap[i] = (short)s;
+            }
+        }
+    }
     /* write the capture for the oracle: canonical 44-byte header + data */
     int wfd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (wfd < 0) {
