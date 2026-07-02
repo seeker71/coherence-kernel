@@ -103,6 +103,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "mesh_registry", 1, 230 },
   { "mesh_roster", 0, 231 },
   { "cuda_matvec", 0, 232 },
+  { "cuda_matvec_f32", 2, 233 },
   { "file_open", 1, 133 },
   { "file_read", 2, 134 },
   { "file_close", 1, 135 },
