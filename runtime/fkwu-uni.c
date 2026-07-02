@@ -1311,6 +1311,210 @@ static long long fk_audio_loopback(long long ms) {
     r = fk_cons_val(got << 1, r);
     return r;
 }
+/* ── wav AIR-LOOPBACK (waveOut plays a 16kHz mono PCM wav while waveIn captures): the
+ * composed speech leg — spoken truth through the speakers, heard by the mic. The capture IS
+ * written (out-path, canonical 44-byte header) because the local STT oracle must transcribe
+ * it; the calling recipe consumes the file after measuring (fs_remove) — transient teacher
+ * material, the macOS carrier's own pattern, never silent retention. Returns
+ * (played captured peak mean-abs); nil on refusal. */
+static long long fk_wav_loopback(const char *inpath, const char *outpath) {
+    int fd = open(inpath, O_RDBIN);
+    if (fd < 0) {
+        printf("sense: air-loopback input wav missing\n");
+        return 1;
+    }
+    long long incap = 4000000;
+    char *inbuf = malloc((unsigned long)incap);
+    if (inbuf == 0) {
+        close(fd);
+        return 1;
+    }
+    long long inlen = 0;
+    long long g;
+    while (inlen < incap && (g = read(fd, inbuf + inlen, 65536)) > 0) {
+        inlen = inlen + g;
+    }
+    close(fd);
+    /* find the data chunk (SAPI writes RIFF/WAVE with fmt then data) */
+    long long doff = -1;
+    long long i;
+    for (i = 12; i + 8 < inlen; i = i + 1) {
+        if (inbuf[i] == 'd' && inbuf[i + 1] == 'a' && inbuf[i + 2] == 't' &&
+            inbuf[i + 3] == 'a') {
+            doff = i + 8;
+            break;
+        }
+    }
+    if (doff < 0) {
+        printf("sense: air-loopback input wav has no data chunk\n");
+        free(inbuf);
+        return 1;
+    }
+    long long dlen = (long long)(unsigned char)inbuf[doff - 4] |
+                     ((long long)(unsigned char)inbuf[doff - 3] << 8) |
+                     ((long long)(unsigned char)inbuf[doff - 2] << 16) |
+                     ((long long)(unsigned char)inbuf[doff - 1] << 24);
+    if (dlen <= 0 || doff + dlen > inlen) {
+        dlen = inlen - doff;
+    }
+    long long nplay = dlen / 2;
+    if (nplay < 1600 || nplay > 160000) {
+        printf("sense: air-loopback wav length out of range (%lld samples)\n", nplay);
+        free(inbuf);
+        return 1;
+    }
+    long long ncap = nplay + 8000; /* half-second tail */
+    short *cap = malloc((unsigned long)(ncap * 2));
+    if (cap == 0) {
+        free(inbuf);
+        return 1;
+    }
+    struct fk_waveformatex fmt;
+    fmt.wFormatTag = 1;
+    fmt.nChannels = 1;
+    fmt.nSamplesPerSec = 16000;
+    fmt.nAvgBytesPerSec = 32000;
+    fmt.nBlockAlign = 2;
+    fmt.wBitsPerSample = 16;
+    fmt.cbSize = 0;
+    void *hin = 0;
+    if (waveInOpen(&hin, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: air-loopback mic open refused\n");
+        free(inbuf);
+        free(cap);
+        return 1;
+    }
+    void *hout = 0;
+    if (waveOutOpen(&hout, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: air-loopback speaker open refused\n");
+        waveInClose(hin);
+        free(inbuf);
+        free(cap);
+        return 1;
+    }
+    struct fk_wavehdr hc;
+    hc.lpData = (char *)cap;
+    hc.dwBufferLength = (unsigned int)(ncap * 2);
+    hc.dwBytesRecorded = 0;
+    hc.dwUser = 0;
+    hc.dwFlags = 0;
+    hc.dwLoops = 0;
+    hc.lpNext = 0;
+    hc.reserved = 0;
+    struct fk_wavehdr hp;
+    hp.lpData = inbuf + doff;
+    hp.dwBufferLength = (unsigned int)(nplay * 2);
+    hp.dwBytesRecorded = 0;
+    hp.dwUser = 0;
+    hp.dwFlags = 0;
+    hp.dwLoops = 0;
+    hp.lpNext = 0;
+    hp.reserved = 0;
+    waveInPrepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInAddBuffer(hin, &hc, (unsigned int)sizeof hc);
+    waveInStart(hin);
+    waveOutPrepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutWrite(hout, &hp, (unsigned int)sizeof hp);
+    long long ms = ncap / 16;
+    long long waited = 0;
+    while ((hc.dwFlags & 1) == 0 && waited < ms + 3000) {
+        Sleep(50);
+        waited = waited + 50;
+    }
+    waveOutReset(hout);
+    waveOutUnprepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutClose(hout);
+    waveInReset(hin);
+    waveInUnprepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInClose(hin);
+    free(inbuf);
+    long long got = (long long)hc.dwBytesRecorded / 2;
+    long long peak = 0;
+    long long sumabs = 0;
+    for (i = 0; i < got; i = i + 1) {
+        long long s = (long long)cap[i];
+        long long a = s < 0 ? 0 - s : s;
+        if (a > peak) {
+            peak = a;
+        }
+        sumabs = sumabs + a;
+    }
+    long long meanabs = got > 0 ? sumabs / got : 0;
+    /* write the capture for the oracle: canonical 44-byte header + data */
+    int wfd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (wfd < 0) {
+        printf("sense: air-loopback capture write refused\n");
+        free(cap);
+        return 1;
+    }
+    unsigned char hdr[44];
+    long long db = got * 2;
+    long long riff = 36 + db;
+    hdr[0] = 'R';
+    hdr[1] = 'I';
+    hdr[2] = 'F';
+    hdr[3] = 'F';
+    hdr[4] = (unsigned char)(riff & 255);
+    hdr[5] = (unsigned char)((riff >> 8) & 255);
+    hdr[6] = (unsigned char)((riff >> 16) & 255);
+    hdr[7] = (unsigned char)((riff >> 24) & 255);
+    hdr[8] = 'W';
+    hdr[9] = 'A';
+    hdr[10] = 'V';
+    hdr[11] = 'E';
+    hdr[12] = 'f';
+    hdr[13] = 'm';
+    hdr[14] = 't';
+    hdr[15] = ' ';
+    hdr[16] = 16;
+    hdr[17] = 0;
+    hdr[18] = 0;
+    hdr[19] = 0;
+    hdr[20] = 1;
+    hdr[21] = 0;
+    hdr[22] = 1;
+    hdr[23] = 0;
+    hdr[24] = (unsigned char)(16000 & 255);
+    hdr[25] = (unsigned char)((16000 >> 8) & 255);
+    hdr[26] = 0;
+    hdr[27] = 0;
+    hdr[28] = (unsigned char)(32000 & 255);
+    hdr[29] = (unsigned char)((32000 >> 8) & 255);
+    hdr[30] = 0;
+    hdr[31] = 0;
+    hdr[32] = 2;
+    hdr[33] = 0;
+    hdr[34] = 16;
+    hdr[35] = 0;
+    hdr[36] = 'd';
+    hdr[37] = 'a';
+    hdr[38] = 't';
+    hdr[39] = 'a';
+    hdr[40] = (unsigned char)(db & 255);
+    hdr[41] = (unsigned char)((db >> 8) & 255);
+    hdr[42] = (unsigned char)((db >> 16) & 255);
+    hdr[43] = (unsigned char)((db >> 24) & 255);
+    write(wfd, hdr, 44);
+    long long wr = 0;
+    while (wr < db) {
+        long long k = write(wfd, (char *)cap + wr, db - wr);
+        if (k <= 0) {
+            break;
+        }
+        wr = wr + k;
+    }
+    close(wfd);
+    free(cap);
+    printf("sense: air-loopback played %lld samples, captured %lld — peak=%lld mean-abs=%lld "
+           "(capture written for the oracle; the recipe consumes it)\n",
+           nplay, got, peak, meanabs);
+    long long r = 1;
+    r = fk_cons_val(meanabs << 1, r);
+    r = fk_cons_val(peak << 1, r);
+    r = fk_cons_val(got << 1, r);
+    r = fk_cons_val(nplay << 1, r);
+    return r;
+}
 #else
 static long long fk_mic_count(void) {
     return 0;
@@ -1349,6 +1553,11 @@ static long long fk_cam_luma(long long timeout_ms) {
 }
 static long long fk_audio_loopback(long long ms) {
     (void)ms;
+    return 1;
+}
+static long long fk_wav_loopback(const char *inpath, const char *outpath) {
+    (void)inpath;
+    (void)outpath;
     return 1;
 }
 #endif
@@ -6274,6 +6483,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 236) {
         return fk_audio_loopback(fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 237) {
+        static char p237a[4096];
+        static char p237b[4096];
+        long long a237 = fk_walk(fk_node[i][1], fp);
+        fk_vp(a237);
+        long long b237 = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        fk_cstr(fk_vs[fk_vsp], p237a, 4096);
+        fk_cstr(b237, p237b, 4096);
+        return fk_wav_loopback(p237a, p237b);
     }
     if (t == 200) {
         static char p200[4096];
