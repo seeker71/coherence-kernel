@@ -72,3 +72,27 @@ bridge, named as one (`api/.../substrate.py`).
 
 **Pending is honest.** The wedge is dissolved in the native primitive (witnessed).
 The full native store on `--src` is pending on three named gaps — not faked green.
+
+## Addendum — persist natively to Postgres (2026-07-02)
+
+**Q (Urs): can we persist it in Postgres [natively]?** Yes in principle, not built.
+
+- **Floor is native and live:** fkwu's own TCP sockets run on `--src` —
+  `form/form-stdlib/tests/fkwu-src-socket-loopback-band.fk` → **111111111** on
+  this metal. `socket_connect`/`socket_send`/`socket_recv` are the exact floor
+  the Postgres frontend/backend wire protocol rides on. `socket_send(conn, s)`
+  takes a string; `socket_recv(conn, max)` returns bytes.
+- **Missing:** a native pg-wire client. No pg/sql client in the kernel (the
+  `wire-*.fk` are CORBA/CDR/RPC/XML). Building it: `StartupMessage` (int32
+  framing), auth (scram-sha-256 = HMAC-SHA256 + base64, or `trust`), simple
+  `Query`, and `RowDescription`/`DataRow`/`CommandComplete` parsing — byte work
+  over the string socket doors, subject to the `--src` string-buffer limits
+  above. Real build; local `psql`/`postgres` are installed as the witness target.
+- **The wedge does not return in Postgres.** A native writer would
+  `INSERT ... ON CONFLICT DO NOTHING` the content-addressed row — no
+  `UPDATE ... SET count`, no counter, no long lock. The wedge was a Python
+  choice, not a Postgres property.
+- **Framing:** native-Postgres is a *bridge* (native writer → same production
+  store the Python app reads → incremental cutover, parity guaranteed by
+  content-addressing). The native *destination* carrier is form-fs (witnessed
+  →3). Both legitimate; naming which is which is the honest guidance.
