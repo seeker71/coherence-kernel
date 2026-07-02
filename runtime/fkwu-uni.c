@@ -471,6 +471,13 @@ extern int stat(const char *, void *);
 #define O_APPEND 8
 #endif
 #endif
+#if defined(_WIN32)
+/* _O_BINARY for the Form-facing byte-read doors (read_file / read_file_slice): text mode
+ * would translate CRLF and stop at a 0x1A byte — a binary checkpoint could not pass. */
+#define O_RDBIN 0x8000
+#else
+#define O_RDBIN 0
+#endif
 extern int open(const char *, int, ...);
 extern long long read(int, void *, unsigned long);
 extern int close(int);
@@ -734,20 +741,58 @@ static long long fk_cam_name(long long i) {
     }
     return fk_sbuf(nm, fk_cstrlen(nm));
 }
+/* the VfW driver connect can block forever behind modern camera stacks (witnessed on this
+ * cell: the "Microsoft WDM Image Capture" shim hangs on a MIPI camera — receipts/
+ * 2026-07-01-windows-camera-carrier-probe.md). Probe on a worker thread and refuse
+ * honestly after 3s; on timeout the probe struct and stuck thread are deliberately
+ * abandoned (the named cost of a hung driver — never freed under its feet). */
+extern void *CreateThread(void *, unsigned long long, unsigned int (*)(void *), void *,
+                          unsigned int, unsigned int *);
+extern unsigned int WaitForSingleObject(void *, unsigned int);
+extern int CloseHandle(void *);
+struct fk_cam_probe {
+    long long idx;
+    long long ok;
+};
+static unsigned int fk_cam_probe_run(void *arg) {
+    struct fk_cam_probe *p = (struct fk_cam_probe *)arg;
+    void *hwnd = capCreateCaptureWindowA("fkwu-cam", 0x80000000u, 0, 0, 0, 0, (void *)0, 0);
+    if (hwnd != 0) {
+        long long ok = SendMessageA(hwnd, 0x0400 + 10, (unsigned long long)p->idx, 0);
+        if (ok) {
+            SendMessageA(hwnd, 0x0400 + 11, 0, 0);
+        }
+        DestroyWindow(hwnd);
+        p->ok = ok ? 1 : 0;
+    }
+    return 0;
+}
 static long long fk_cam_health(long long i) {
     char nm[256];
     char ver[256];
     if (i < 0 || !capGetDriverDescriptionA((unsigned int)i, nm, 256, ver, 256)) {
         return 0;
     }
-    void *hwnd = capCreateCaptureWindowA("fkwu-cam", 0x80000000u, 0, 0, 0, 0, (void *)0, 0);
-    if (hwnd == 0) {
+    struct fk_cam_probe *p = malloc(sizeof(struct fk_cam_probe));
+    if (p == 0) {
         return 0;
     }
-    long long ok = SendMessageA(hwnd, 0x0400 + 10, (unsigned long long)i, 0);
-    SendMessageA(hwnd, 0x0400 + 11, 0, 0);
-    DestroyWindow(hwnd);
-    return ok ? 1 : 0;
+    p->idx = i;
+    p->ok = 0;
+    void *th = CreateThread((void *)0, 0, fk_cam_probe_run, p, 0, (unsigned int *)0);
+    if (th == 0) {
+        free(p);
+        return 0;
+    }
+    if (WaitForSingleObject(th, 3000) == 0) {
+        long long ok = p->ok;
+        CloseHandle(th);
+        free(p);
+        return ok;
+    }
+    CloseHandle(th);
+    printf("sense: camera %lld connect timed out (legacy VfW shim) — health 0, honestly\n", i);
+    return 0;
 }
 static long long fk_cam_grab(long long i, const char *path) {
     char nm[256];
@@ -4244,7 +4289,21 @@ static long long fk_walk_body(long long i, long long fp) {
     }
 }
 static long long fk_walk_cold(long long t, long long i, long long fp);
+/* the honest eval-depth wall: measure REAL stack use and die SAYING SO before the host
+ * stack dies silently (witnessed 2026-07-01: exit 127, no output, three recipes in one
+ * day — the Windows main lacked the POSIX main's FORM_KERNEL_STACK_MB big-stack thread,
+ * now mirrored below). The mains raise the wall to reserve minus 2MB; the recipe-side
+ * home for deep recursion stays the same: make it tail or balanced. */
+static char *fk_stack_base = 0;
+static long long fk_stack_wall = 6 * 1024 * 1024;
 static long long fk_walk(long long i, long long fp) {
+    char fk_sp_probe;
+    if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
+        printf("fkwu: eval too deep — %lld bytes of walker stack (wall %lld). The recursion "
+               "needs to be tail or balanced; the wall is honest, the silent crash was not.\n",
+               (long long)(fk_stack_base - &fk_sp_probe), fk_stack_wall);
+        fk_die("eval-depth wall");
+    }
     long long t = fk_node[i][0];
     if (t < 0 || t >= FK_OPCODE_ARM_CAP) {
         fk_die("fk_walk: corrupt node tag");
@@ -5257,7 +5316,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (len <= 0) {
             return fk_sbuf("", 0);
         }
-        int fd = open(p, 0);
+        int fd = open(p, O_RDBIN);
         if (fd < 0) {
             return fk_sbuf("", 0);
         }
@@ -5278,7 +5337,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 63) {
         static char p[4096];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
-        int fd = open(p, 0);
+        int fd = open(p, O_RDBIN);
         if (fd < 0) {
             return fk_sbuf("", 0);
         }
@@ -8812,6 +8871,8 @@ static int fk_run_feval(const char *path) {
     return 0;
 }
 static int fk_run(int argc, char **argv) {
+    char fk_stack_here;
+    fk_stack_base = &fk_stack_here;
     if (argc < 2) {
         return 1;
     }
@@ -8936,8 +8997,41 @@ static int fk_run(int argc, char **argv) {
     return 0;
 }
 #if defined(_WIN32)
+/* the same law as the POSIX main below: the walker runs on a big explicit thread stack
+ * (FORM_KERNEL_STACK_MB, default 256MB). The bare `return fk_run(...)` ran on the OS
+ * default 1MB and died silently (exit 127, no output) at ~120 recursion levels — the
+ * platform seam the 2026-07-01 depth-wall repairs were patching around, healed at its
+ * root. 0x00010000 = STACK_SIZE_PARAM_IS_A_RESERVATION. */
+extern int atoi(const char *);
+static int fk_run_argc_w;
+static char **fk_run_argv_w;
+static int fk_run_ret_w;
+static unsigned int fk_run_thunk_w(void *p) {
+    (void)p;
+    fk_run_ret_w = fk_run(fk_run_argc_w, fk_run_argv_w);
+    return 0;
+}
 int main(int argc, char **argv) {
-    return fk_run(argc, argv);
+    fk_run_argc_w = argc;
+    fk_run_argv_w = argv;
+    unsigned long long mb = 256;
+    char *e = getenv("FORM_KERNEL_STACK_MB");
+    if (e) {
+        int v = atoi(e);
+        if (v > 0) {
+            mb = (unsigned long long)v;
+        }
+    }
+    fk_stack_wall = (long long)mb * 1024 * 1024 - 2 * 1024 * 1024;
+    void *th = CreateThread((void *)0, mb * 1024ULL * 1024ULL, fk_run_thunk_w, (void *)0,
+                            0x00010000u, (unsigned int *)0);
+    if (th == 0) {
+        fk_stack_wall = 6 * 1024 * 1024;
+        return fk_run(argc, argv);
+    }
+    WaitForSingleObject(th, 0xFFFFFFFFu);
+    CloseHandle(th);
+    return fk_run_ret_w;
 }
 #else
 extern char *getenv(const char *);
@@ -8969,6 +9063,7 @@ int main(int argc, char **argv) {
             mb = (unsigned long)v;
         }
     }
+    fk_stack_wall = (long long)mb * 1024 * 1024 - 2 * 1024 * 1024;
     fk_pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setstacksize(&at, mb * 1024UL * 1024UL);

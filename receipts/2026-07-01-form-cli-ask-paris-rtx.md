@@ -86,8 +86,14 @@ tag-233 door 8/8 across six asks.
 
 ```
 gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp
-{ cat model/rag-embed.fk observe/thought-framebuffer.fk cognition/capitals-knowledge.fk \
-      cognition/ask-grounded-rtx.fk form-cli/form-cli-ask.fk form-cli/form-cli.fk; \
+{ cat form/form-stdlib/core.fk model/rag-embed.fk observe/thought-framebuffer.fk \
+      cognition/capitals-knowledge.fk cognition/ask-grounded-rtx.fk \
+      form-cli/form-cli-ask.fk form-cli/form-cli.fk; \
   echo '(print_str (fc-respond "ask What is the capital of France?"))'; } > ask.fk
 ./fkwu.exe --src ask.fk     # -> GPU receipt line, then: Paris / grounded:paris / bit-exact 8/8 / thought-frame
 ```
+
+**Update 2026-07-02:** after the first C-seed shrink (`7aa5ab5` — `substring`/`str_find`/`int_to_str`/
+`str_to_int` retired from the seed into Form), the concat must lead with `form/form-stdlib/core.fk`,
+which now carries those recipes on the `str_byte_at` floor. Re-witnessed post-shrink on the same cell:
+Paris, bit-exact 8/8, margin 7; the meaning-of-life refusal unchanged.
