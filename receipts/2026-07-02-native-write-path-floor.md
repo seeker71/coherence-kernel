@@ -1,5 +1,19 @@
 # Receipt — the substrate write path without Python: what's native, and the honest floor
 
+> **CORRECTION 2026-07-02 (banner in place, per the repo's own discipline —
+> not a silent edit).** This receipt's Postgres addendum below claimed a native
+> pg-wire client is "not built." **That is false.** It was already built and
+> proven in the origin repo: `Coherence-Network/form/form-stdlib/pg-wire.fk`
+> speaks the Postgres v3 wire protocol in pure Form over fkwu's own sockets
+> (`socket_connect/send/recv/close`), with witness
+> `Coherence-Network/scripts/pg_wire_fkwu_witness.sh` — "the 4th kernel reads
+> live Postgres in pure Form, no Rust libpq, no Go." Same trust-auth-only floor
+> named there (SCRAM is the next wall). The error was mine: I searched only the
+> coherence-kernel worktree and mistook "not here" for "not built." Urs caught
+> it. The original claims are left standing below, marked, so the record shows
+> what was wrongly asserted and when. Pending-is-honest requires actually
+> looking; here I did not look in the origin repo first.
+
 **Date:** 2026-07-02. **Question (Urs):** can we do the substrate write/query
 endpoint without Python — specifically, without the `count`-column wedge?
 
@@ -76,6 +90,11 @@ The full native store on `--src` is pending on three named gaps — not faked gr
 ## Addendum — persist natively to Postgres (2026-07-02)
 
 **Q (Urs): can we persist it in Postgres [natively]?** Yes in principle, not built.
+> **[CORRECTED — see banner at top.] "Not built" is FALSE.** It is built and
+> proven: `Coherence-Network/form/form-stdlib/pg-wire.fk` +
+> `scripts/pg_wire_fkwu_witness.sh`. The bullets below (written before I looked
+> in the origin repo) are left standing, wrong, so the record is honest about
+> what I asserted.
 
 - **Floor is native and live:** fkwu's own TCP sockets run on `--src` —
   `form/form-stdlib/tests/fkwu-src-socket-loopback-band.fk` → **111111111** on
