@@ -42,3 +42,10 @@ chosen from GPU-dispatched logits (RTX, 512/512 bit-exact) and watched in the fr
 (`receipts/2026-07-02-first-native-token.md`, Windows RTX cell). This is the smallest real 3a movement,
 not the zh-capable base this receipt asks for; rungs 3a-full, 3b, 4, 5, 6 stand exactly as written.
 Named next: RoPE trig for pos>0 (sin/cos as Form Taylor or asm), then the multi-token native loop.
+
+**Update 2026-07-02 (cont.):** both of those "named next" items are now witnessed —
+`cognition/native-generate.fk` generates a native token *sequence* with Form-Taylor sin/cos RoPE at
+real positions and causal multi-key softmax attention, each token's LM head bit-exact on the RTX:
+`native-generated:[ Once upon a time, there was]`, token-for-token identical to the projection-runner
+oracle (`receipts/2026-07-02-native-generate-rope.md`). Ceiling is 7 tokens on the walker's unreclaimed
+float pool — the x64 f64 asm/KV-cache lane is the named lift. Rungs 3a-full, 3b, 4, 5, 6 unchanged.
