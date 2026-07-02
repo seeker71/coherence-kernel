@@ -1176,6 +1176,141 @@ static long long fk_cam_luma(long long timeout_ms) {
     free(c);
     return r;
 }
+/* ── audio LOOPBACK (waveOut render + waveIn capture): the body speaks a known tone through
+ * the speakers and hears itself through the mic — the render+capture legs of the speech
+ * loopback carrier contract, on this cell's own metal. Layout: silence quarter, 440Hz square
+ * burst half, silence quarter. Sixteen per-window energies + burst/silence means + score
+ * cross into Form as integers; no waveform is retained. Muted speakers score low, honestly. */
+extern unsigned int waveOutOpen(void **, unsigned int, const struct fk_waveformatex *,
+                                unsigned long long, unsigned long long, unsigned long long);
+extern unsigned int waveOutClose(void *);
+extern unsigned int waveOutPrepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveOutUnprepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveOutWrite(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveOutReset(void *);
+static long long fk_audio_loopback(long long ms) {
+    if (ms < 500) {
+        ms = 500;
+    }
+    if (ms > 5000) {
+        ms = 5000;
+    }
+    struct fk_waveformatex fmt;
+    fmt.wFormatTag = 1;
+    fmt.nChannels = 1;
+    fmt.nSamplesPerSec = 16000;
+    fmt.wBitsPerSample = 16;
+    fmt.nBlockAlign = 2;
+    fmt.nAvgBytesPerSec = 32000;
+    fmt.cbSize = 0;
+    long long nsamp = ms * 16;
+    short *play = malloc((unsigned long)(nsamp * 2));
+    short *cap = malloc((unsigned long)(nsamp * 2));
+    if (play == 0 || cap == 0) {
+        free(play);
+        free(cap);
+        return 1;
+    }
+    long long q = nsamp / 4;
+    long long i;
+    for (i = 0; i < nsamp; i = i + 1) {
+        if (i >= q && i < q * 3) {
+            /* 440Hz square at 16kHz: half-period ~18 samples */
+            play[i] = ((i / 18) & 1) ? (short)6000 : (short)-6000;
+        } else {
+            play[i] = 0;
+        }
+        cap[i] = 0;
+    }
+    void *hin = 0;
+    if (waveInOpen(&hin, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: loopback mic open refused\n");
+        free(play);
+        free(cap);
+        return 1;
+    }
+    void *hout = 0;
+    if (waveOutOpen(&hout, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: loopback speaker open refused\n");
+        waveInClose(hin);
+        free(play);
+        free(cap);
+        return 1;
+    }
+    struct fk_wavehdr hc;
+    hc.lpData = (char *)cap;
+    hc.dwBufferLength = (unsigned int)(nsamp * 2);
+    hc.dwBytesRecorded = 0;
+    hc.dwUser = 0;
+    hc.dwFlags = 0;
+    hc.dwLoops = 0;
+    hc.lpNext = 0;
+    hc.reserved = 0;
+    struct fk_wavehdr hp;
+    hp.lpData = (char *)play;
+    hp.dwBufferLength = (unsigned int)(nsamp * 2);
+    hp.dwBytesRecorded = 0;
+    hp.dwUser = 0;
+    hp.dwFlags = 0;
+    hp.dwLoops = 0;
+    hp.lpNext = 0;
+    hp.reserved = 0;
+    waveInPrepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInAddBuffer(hin, &hc, (unsigned int)sizeof hc);
+    waveInStart(hin);
+    waveOutPrepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutWrite(hout, &hp, (unsigned int)sizeof hp);
+    long long waited = 0;
+    while ((hc.dwFlags & 1) == 0 && waited < ms + 3000) {
+        Sleep(50);
+        waited = waited + 50;
+    }
+    waveOutReset(hout);
+    waveOutUnprepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutClose(hout);
+    waveInReset(hin);
+    waveInUnprepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInClose(hin);
+    long long got = (long long)hc.dwBytesRecorded / 2;
+    long long wen[16];
+    long long w;
+    for (w = 0; w < 16; w = w + 1) {
+        long long lo = got * w / 16;
+        long long hi = got * (w + 1) / 16;
+        long long sum = 0;
+        for (i = lo; i < hi; i = i + 1) {
+            long long s = (long long)cap[i];
+            sum = sum + (s < 0 ? 0 - s : s);
+        }
+        wen[w] = (hi > lo) ? sum / (hi - lo) : 0;
+    }
+    free(play);
+    free(cap);
+    long long burst = 0;
+    long long silen = 0;
+    for (w = 0; w < 16; w = w + 1) {
+        if (w >= 4 && w < 12) {
+            burst = burst + wen[w];
+        } else {
+            silen = silen + wen[w];
+        }
+    }
+    burst = burst / 8;
+    silen = silen / 8;
+    long long score = burst * 100 / (silen + 1);
+    printf("sense: loopback rendered %lld ms, captured %lld samples — burst-energy=%lld "
+           "silence-energy=%lld score=%lld — measured, not retained\n",
+           ms, got, burst, silen, score);
+    long long r = 1;
+    for (w = 16; w > 0; w = w - 1) {
+        r = fk_cons_val(wen[w - 1] << 1, r);
+    }
+    r = fk_cons_val(score << 1, r);
+    r = fk_cons_val(burst << 1, r);
+    r = fk_cons_val(silen << 1, r);
+    r = fk_cons_val(got << 1, r);
+    return r;
+}
 #else
 static long long fk_mic_count(void) {
     return 0;
@@ -1210,6 +1345,10 @@ static long long fk_mic_capture(long long ms) {
 }
 static long long fk_cam_luma(long long timeout_ms) {
     (void)timeout_ms;
+    return 1;
+}
+static long long fk_audio_loopback(long long ms) {
+    (void)ms;
     return 1;
 }
 #endif
@@ -6132,6 +6271,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 235) {
         return fk_cam_luma(fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 236) {
+        return fk_audio_loopback(fk_walk(fk_node[i][1], fp) >> 1);
     }
     if (t == 200) {
         static char p200[4096];
