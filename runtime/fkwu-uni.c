@@ -6128,12 +6128,16 @@ static long long fk_parse_do(void);
 /* stone 4: a function table. Each top-level (defn name ...) gets its own fn-index (>=1); a call to
  * a registered name lowers to tag 12 (call-by-index, single-arg). A non-defn top form is the root
  * (fn[0]). */
-/* FK_TOP_FN_SYM_CAP is deliberately smaller than FK_FN_CAP: it bounds only the
- * name->index LOOKUP table for top-level (defn ...) forms, not the function
- * count itself -- fk_fn_lookup degrades to "unregistered, allocate fresh" past
- * this cap (see fk_sparse's `if (idx < 0)` fallback), it does not reject the
- * program. */
-#define FK_TOP_FN_SYM_CAP 256
+/* FK_TOP_FN_SYM_CAP now matches FK_FN_CAP. It was 256 ("deliberately smaller",
+ * degrading to "unregistered, allocate fresh" past the cap) — but for any
+ * cross-calling program the degradation is SILENT breakage, not grace: defn
+ * number 257's name never registers, every call to it allocates a fresh
+ * body-less index, and the call returns nothing with no diagnostic. Witnessed
+ * 2026-07-02: a 258-defn direct-source learning chain returned garbage at
+ * exactly this boundary (253 defns ran; +5 more crossed 256 and broke) — the
+ * "direct-source function-table ceiling" several receipts had to duck under
+ * was this constant. Three arrays x 4096 x 8B = 96KB, a trivial price. */
+#define FK_TOP_FN_SYM_CAP FK_FN_CAP
 static long long fk_fnsym_s[FK_TOP_FN_SYM_CAP], fk_fnsym_n[FK_TOP_FN_SYM_CAP],
     fk_fnidx[FK_TOP_FN_SYM_CAP], fk_fntop, fk_defn_next, fk_root, fk_fnar[FK_FN_CAP];
 static long long fk_fn_lookup(long long s, long long n) {
@@ -8296,6 +8300,15 @@ static int fk_run_src(const char *path, long long arg) {
         fk_fn[0] = fk_smklit(0);
     }
     fk_fn_count = fk_defn_next;
+    /* ROOT SCOPE FIX (same as fk_run_feval's below): the bare top-level root
+     * never got the tag-111 reserve every defn body gets, so its lets' slots
+     * sat below fk_vsp and the first nested call's frame overwrote them
+     * (receipts/2026-07-01-node-children-last-writer-wins.md). fk_maxslot
+     * survives defn parsing since tonight's f99d3232 port and holds the
+     * root scope's own slot count here. */
+    if (fk_maxslot > 0) {
+        fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
+    }
     fk_vs[0] = arg << 1;
     fk_vsp = 1;
 
@@ -8591,6 +8604,19 @@ static int fk_run_feval(const char *path) {
         fk_fn[0] = fk_smklit(0);
     }
     fk_fn_count = fk_defn_next;
+    /* ROOT SCOPE FIX: a defn body's lets are protected by a tag-111 reserve
+     * (fk_maxslot slots raised above fk_vsp before the body runs), but the
+     * bare top-level root never got one — its lets were handed slots in
+     * fk_vs[fp+1..] while fk_vsp stayed at fp+1, so the FIRST nested call's
+     * frame (pushed at fk_vsp) landed on top of the live top-level bindings
+     * and silently overwrote them (receipts/2026-07-01-node-children-last-
+     * writer-wins.md: the bare-top-level exposure). Thanks to the parse-time
+     * save/restore ported tonight (f99d3232), fk_maxslot at this point holds
+     * exactly the ROOT scope's own slot count — so give the root the same
+     * reservation every defn body already gets. */
+    if (fk_maxslot > 0) {
+        fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
+    }
     {
         char *je = getenv("FK_JIT");
         fk_feval_jit_on = (je && je[0] && je[0] != 48) ? 1 : 0;
