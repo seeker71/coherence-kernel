@@ -820,6 +820,362 @@ static long long fk_cam_grab(long long i, const char *path) {
     DestroyWindow(hwnd);
     return saved ? 1 : 0;
 }
+/* ── mic CAPTURE (winmm waveIn, completing the carrier named above): ms of PCM16 mono 16kHz,
+ * measured and released — the Android receipt pattern: samples / nonzero / mean-abs / peak
+ * cross into Form as integers; no raw audio is retained. */
+struct fk_wavehdr {
+    char *lpData;
+    unsigned int dwBufferLength;
+    unsigned int dwBytesRecorded;
+    unsigned long long dwUser;
+    unsigned int dwFlags;
+    unsigned int dwLoops;
+    struct fk_wavehdr *lpNext;
+    unsigned long long reserved;
+};
+extern unsigned int waveInPrepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveInUnprepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveInAddBuffer(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveInStart(void *);
+extern unsigned int waveInReset(void *);
+static long long fk_cons_val(long long h, long long t);
+static long long fk_mic_capture(long long ms) {
+    if (ms < 100) {
+        ms = 100;
+    }
+    if (ms > 10000) {
+        ms = 10000;
+    }
+    struct fk_waveformatex fmt;
+    fmt.wFormatTag = 1;
+    fmt.nChannels = 1;
+    fmt.nSamplesPerSec = 16000;
+    fmt.wBitsPerSample = 16;
+    fmt.nBlockAlign = 2;
+    fmt.nAvgBytesPerSec = 32000;
+    fmt.cbSize = 0;
+    void *h = 0;
+    if (waveInOpen(&h, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: mic open refused\n");
+        return 1;
+    }
+    long long bytes = ms * 32;
+    char *buf = malloc((unsigned long)bytes);
+    if (buf == 0) {
+        waveInClose(h);
+        return 1;
+    }
+    struct fk_wavehdr hd;
+    hd.lpData = buf;
+    hd.dwBufferLength = (unsigned int)bytes;
+    hd.dwBytesRecorded = 0;
+    hd.dwUser = 0;
+    hd.dwFlags = 0;
+    hd.dwLoops = 0;
+    hd.lpNext = 0;
+    hd.reserved = 0;
+    waveInPrepareHeader(h, &hd, (unsigned int)sizeof hd);
+    waveInAddBuffer(h, &hd, (unsigned int)sizeof hd);
+    waveInStart(h);
+    long long waited = 0;
+    while ((hd.dwFlags & 1) == 0 && waited < ms + 2000) {
+        Sleep(50);
+        waited = waited + 50;
+    }
+    waveInReset(h);
+    waveInUnprepareHeader(h, &hd, (unsigned int)sizeof hd);
+    waveInClose(h);
+    long long nsamp = hd.dwBytesRecorded / 2;
+    long long nonzero = 0;
+    long long peak = 0;
+    long long sumabs = 0;
+    long long i;
+    for (i = 0; i < nsamp; i = i + 1) {
+        long long s = (long long)*(short *)(buf + i * 2);
+        long long a = s < 0 ? 0 - s : s;
+        if (a > 0) {
+            nonzero = nonzero + 1;
+        }
+        if (a > peak) {
+            peak = a;
+        }
+        sumabs = sumabs + a;
+    }
+    free(buf);
+    long long meanabs = nsamp > 0 ? sumabs / nsamp : 0;
+    printf("sense: mic captured %lld samples (%lld ms) nonzero=%lld mean-abs=%lld peak=%lld — "
+           "measured, not retained\n",
+           nsamp, ms, nonzero, meanabs, peak);
+    long long r = 1;
+    r = fk_cons_val(peak << 1, r);
+    r = fk_cons_val(meanabs << 1, r);
+    r = fk_cons_val(nonzero << 1, r);
+    r = fk_cons_val(nsamp << 1, r);
+    return r;
+}
+/* ── camera CAPTURE (Media Foundation — the carrier the hanging VfW shim demanded, now built
+ * as its own deliberate movement): LoadLibrary-only (ole32/mfplat/mf/mfreadwrite), COM vtables
+ * called by slot in plain C — no new link libraries, the same door discipline as nvcuda.
+ * One frame is asked for as NV12 (Y plane first), its LUMA measured (w/h/mean/nonzero) and the
+ * frame released: the eye opens, measures, retains nothing. Bounded worker thread; a Windows
+ * camera-privacy denial is an honest refusal, printed. */
+struct fk_guid {
+    unsigned int a;
+    unsigned short b;
+    unsigned short c;
+    unsigned char d[8];
+};
+static const struct fk_guid fk_g_devsrc_type = {
+    0xc60ac5fe, 0x252a, 0x478f, {0xa0, 0xef, 0xbc, 0x8f, 0xa5, 0xf7, 0xca, 0xd3}};
+static const struct fk_guid fk_g_devsrc_vidcap = {
+    0x8ac3587a, 0x4ae7, 0x42d8, {0x99, 0xe0, 0x0a, 0x60, 0x13, 0xee, 0xf9, 0x0f}};
+static const struct fk_guid fk_g_iid_mediasource = {
+    0x279a808d, 0xaec7, 0x40c8, {0x9c, 0x6b, 0xa6, 0xb4, 0x92, 0xc7, 0x8a, 0x66}};
+static const struct fk_guid fk_g_mt_major = {
+    0x48eba18e, 0xf8c9, 0x4687, {0xbf, 0x11, 0x0a, 0x74, 0xc9, 0xf9, 0x6a, 0x8f}};
+static const struct fk_guid fk_g_mt_subtype = {
+    0xf7e34c9a, 0x42e8, 0x4714, {0xb7, 0x4b, 0xcb, 0x29, 0xd7, 0x2c, 0x35, 0xe5}};
+static const struct fk_guid fk_g_mt_framesize = {
+    0x1652c33d, 0xd6b2, 0x4012, {0xb8, 0x34, 0x72, 0x03, 0x08, 0x49, 0xa3, 0x7d}};
+static const struct fk_guid fk_g_video_major = {
+    0x73646976, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+static const struct fk_guid fk_g_fmt_nv12 = {
+    0x3231564e, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+static const struct fk_guid fk_g_reader_processing = {
+    0xfb394f3d, 0xccf1, 0x42ee, {0xbb, 0xb3, 0xf9, 0xb8, 0x45, 0xd5, 0x68, 0x1d}};
+typedef int (*fk_vt_guid2)(void *, const struct fk_guid *, const struct fk_guid *);
+typedef int (*fk_vt_u32set)(void *, const struct fk_guid *, unsigned int);
+typedef int (*fk_vt_act)(void *, const struct fk_guid *, void **);
+typedef int (*fk_vt_pp)(void *, void **);
+typedef int (*fk_vt_mtset)(void *, unsigned int, void *, void *);
+typedef int (*fk_vt_mtget)(void *, unsigned int, void **);
+typedef int (*fk_vt_u64get)(void *, const struct fk_guid *, unsigned long long *);
+typedef int (*fk_vt_readsample)(void *, unsigned int, unsigned int, unsigned int *,
+                                unsigned int *, long long *, void **);
+typedef int (*fk_vt_lockbuf)(void *, unsigned char **, unsigned int *, unsigned int *);
+typedef int (*fk_vt_none)(void *);
+static void **fk_vt(void *o) {
+    return ((void ***)o)[0];
+}
+static void fk_com_release(void *o) {
+    if (o != 0) {
+        ((fk_vt_none)fk_vt(o)[2])(o);
+    }
+}
+struct fk_camluma {
+    long long w;
+    long long h;
+    long long luma;
+    long long nonzero;
+    long long rc;
+    long long hr;
+};
+static unsigned int fk_cam_luma_run(void *arg) {
+    struct fk_camluma *out = (struct fk_camluma *)arg;
+    void *ole = LoadLibraryA("ole32.dll");
+    void *mfp = LoadLibraryA("mfplat.dll");
+    void *mfl = LoadLibraryA("mf.dll");
+    void *mfr = LoadLibraryA("mfreadwrite.dll");
+    if (ole == 0 || mfp == 0 || mfl == 0 || mfr == 0) {
+        out->rc = -2;
+        return 0;
+    }
+    typedef int (*FCoInit)(void *, unsigned int);
+    typedef void (*FCoUninit)(void);
+    typedef void (*FCoFree)(void *);
+    typedef int (*FMfStart)(unsigned int, unsigned int);
+    typedef int (*FMfStop)(void);
+    typedef int (*FMfAttrs)(void **, unsigned int);
+    typedef int (*FMfEnum)(void *, void ***, unsigned int *);
+    typedef int (*FMfReader)(void *, void *, void **);
+    typedef int (*FMfMkType)(void **);
+    FCoInit fCoInit = (FCoInit)GetProcAddress(ole, "CoInitializeEx");
+    FCoUninit fCoUninit = (FCoUninit)GetProcAddress(ole, "CoUninitialize");
+    FCoFree fCoFree = (FCoFree)GetProcAddress(ole, "CoTaskMemFree");
+    FMfStart fMfStart = (FMfStart)GetProcAddress(mfp, "MFStartup");
+    FMfStop fMfStop = (FMfStop)GetProcAddress(mfp, "MFShutdown");
+    FMfAttrs fMfAttrs = (FMfAttrs)GetProcAddress(mfp, "MFCreateAttributes");
+    FMfMkType fMfMkType = (FMfMkType)GetProcAddress(mfp, "MFCreateMediaType");
+    FMfEnum fMfEnum = (FMfEnum)GetProcAddress(mfl, "MFEnumDeviceSources");
+    FMfReader fMfReader = (FMfReader)GetProcAddress(mfr, "MFCreateSourceReaderFromMediaSource");
+    if (fCoInit == 0 || fMfStart == 0 || fMfAttrs == 0 || fMfEnum == 0 || fMfReader == 0 ||
+        fMfMkType == 0) {
+        out->rc = -2;
+        return 0;
+    }
+    fCoInit(0, 0);
+    fMfStart(0x20070, 0);
+    void *attr = 0;
+    fMfAttrs(&attr, 1);
+    if (attr == 0) {
+        out->rc = -2;
+        fMfStop();
+        fCoUninit();
+        return 0;
+    }
+    ((fk_vt_guid2)fk_vt(attr)[24])(attr, &fk_g_devsrc_type, &fk_g_devsrc_vidcap);
+    void **acts = 0;
+    unsigned int nact = 0;
+    fMfEnum(attr, &acts, &nact);
+    if (nact == 0 || acts == 0) {
+        out->rc = -3;
+        fk_com_release(attr);
+        fMfStop();
+        fCoUninit();
+        return 0;
+    }
+    void *src = 0;
+    out->hr = ((fk_vt_act)fk_vt(acts[0])[33])(acts[0], &fk_g_iid_mediasource, &src);
+    if (src == 0) {
+        out->rc = -4;
+    }
+    void *reader = 0;
+    if (src != 0) {
+        void *rattr = 0;
+        fMfAttrs(&rattr, 1);
+        if (rattr != 0) {
+            ((fk_vt_u32set)fk_vt(rattr)[21])(rattr, &fk_g_reader_processing, 1);
+        }
+        out->hr = fMfReader(src, rattr, &reader);
+        fk_com_release(rattr);
+        if (reader == 0) {
+            out->rc = -5;
+        }
+    }
+    if (reader != 0) {
+        void *mt = 0;
+        fMfMkType(&mt);
+        if (mt != 0) {
+            ((fk_vt_guid2)fk_vt(mt)[24])(mt, &fk_g_mt_major, &fk_g_video_major);
+            ((fk_vt_guid2)fk_vt(mt)[24])(mt, &fk_g_mt_subtype, &fk_g_fmt_nv12);
+            ((fk_vt_mtset)fk_vt(reader)[7])(reader, 0xFFFFFFFCu, 0, mt);
+            fk_com_release(mt);
+        }
+        void *cur = 0;
+        ((fk_vt_mtget)fk_vt(reader)[6])(reader, 0xFFFFFFFCu, &cur);
+        unsigned long long fs = 0;
+        if (cur != 0) {
+            ((fk_vt_u64get)fk_vt(cur)[8])(cur, &fk_g_mt_framesize, &fs);
+            fk_com_release(cur);
+        }
+        long long w = (long long)(fs >> 32);
+        long long hh = (long long)(fs & 0xFFFFFFFFu);
+        void *sample = 0;
+        int tries = 0;
+        while (tries < 30 && sample == 0) {
+            unsigned int si = 0;
+            unsigned int fl = 0;
+            long long ts = 0;
+            void *s2 = 0;
+            out->hr = ((fk_vt_readsample)fk_vt(reader)[9])(reader, 0xFFFFFFFCu, 0, &si, &fl,
+                                                           &ts, &s2);
+            if (out->hr != 0) {
+                break;
+            }
+            sample = s2;
+            tries = tries + 1;
+        }
+        if (sample != 0) {
+            void *mbuf = 0;
+            ((fk_vt_pp)fk_vt(sample)[41])(sample, &mbuf);
+            if (mbuf != 0) {
+                unsigned char *p = 0;
+                unsigned int maxl = 0;
+                unsigned int curl = 0;
+                ((fk_vt_lockbuf)fk_vt(mbuf)[3])(mbuf, &p, &maxl, &curl);
+                if (p != 0) {
+                    long long ylen = w * hh;
+                    if (ylen <= 0 || ylen > (long long)curl) {
+                        ylen = (long long)curl;
+                    }
+                    long long sum = 0;
+                    long long nz = 0;
+                    long long j;
+                    for (j = 0; j < ylen; j = j + 1) {
+                        sum = sum + p[j];
+                        if (p[j] != 0) {
+                            nz = nz + 1;
+                        }
+                    }
+                    out->w = w;
+                    out->h = hh;
+                    out->luma = ylen > 0 ? sum / ylen : 0;
+                    out->nonzero = nz;
+                    out->rc = 0;
+                    ((fk_vt_none)fk_vt(mbuf)[4])(mbuf);
+                }
+                fk_com_release(mbuf);
+            }
+            fk_com_release(sample);
+        } else if (out->rc == -1) {
+            out->rc = -6;
+        }
+        fk_com_release(reader);
+    }
+    if (src != 0) {
+        ((fk_vt_none)fk_vt(src)[12])(src);
+        fk_com_release(src);
+    }
+    unsigned int ai;
+    for (ai = 0; ai < nact; ai = ai + 1) {
+        fk_com_release(acts[ai]);
+    }
+    if (fCoFree != 0) {
+        fCoFree(acts);
+    }
+    fk_com_release(attr);
+    fMfStop();
+    fCoUninit();
+    return 0;
+}
+static long long fk_cam_luma(long long timeout_ms) {
+    if (timeout_ms < 1000) {
+        timeout_ms = 1000;
+    }
+    if (timeout_ms > 30000) {
+        timeout_ms = 30000;
+    }
+    struct fk_camluma *c = malloc(sizeof(struct fk_camluma));
+    if (c == 0) {
+        return 1;
+    }
+    c->w = 0;
+    c->h = 0;
+    c->luma = 0;
+    c->nonzero = 0;
+    c->rc = -1;
+    c->hr = 0;
+    void *th = CreateThread((void *)0, 0, fk_cam_luma_run, c, 0, (unsigned int *)0);
+    if (th == 0) {
+        free(c);
+        return 1;
+    }
+    if (WaitForSingleObject(th, (unsigned int)timeout_ms) != 0) {
+        CloseHandle(th);
+        printf("sense: camera luma timed out after %lld ms — refusing honestly\n", timeout_ms);
+        return 1;
+    }
+    CloseHandle(th);
+    if (c->rc != 0) {
+        printf("sense: camera luma refused at step %lld (hr=0x%08x)%s\n", c->rc,
+               (unsigned int)c->hr,
+               (unsigned int)c->hr == 0x80070005u
+                   ? " — Windows camera privacy settings deny access"
+                   : "");
+        long long rc2 = c->rc;
+        free(c);
+        return rc2 == 0 ? 1 : 1;
+    }
+    printf("sense: camera frame %lldx%lld mean-luma=%lld nonzero=%lld — measured, not retained\n",
+           c->w, c->h, c->luma, c->nonzero);
+    long long r = 1;
+    r = fk_cons_val(c->nonzero << 1, r);
+    r = fk_cons_val(c->luma << 1, r);
+    r = fk_cons_val(c->h << 1, r);
+    r = fk_cons_val(c->w << 1, r);
+    free(c);
+    return r;
+}
 #else
 static long long fk_mic_count(void) {
     return 0;
@@ -847,6 +1203,14 @@ static long long fk_cam_grab(long long i, const char *path) {
     (void)i;
     (void)path;
     return -1;
+}
+static long long fk_mic_capture(long long ms) {
+    (void)ms;
+    return 1;
+}
+static long long fk_cam_luma(long long timeout_ms) {
+    (void)timeout_ms;
+    return 1;
 }
 #endif
 static long long fk_sense_report(void) {
@@ -5762,6 +6126,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long x233 = fk_walk(fk_node[i][2], fp);
         fk_vsp = fk_vsp - 1;
         return fk_cuda_matvec_f32(fk_vs[fk_vsp], x233);
+    }
+    if (t == 234) {
+        return fk_mic_capture(fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 235) {
+        return fk_cam_luma(fk_walk(fk_node[i][1], fp) >> 1);
     }
     if (t == 200) {
         static char p200[4096];
