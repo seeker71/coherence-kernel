@@ -38,6 +38,7 @@ int dlclose(void *h) {
 #endif
 extern int putchar(int);
 extern int printf(const char *, ...);
+extern int dprintf(int, const char *, ...);
 extern void *malloc(unsigned long);
 extern void *realloc(void *, unsigned long);
 extern long long read(int, void *, unsigned long);
@@ -83,7 +84,7 @@ static void fk_die(const char *msg) {
  * lists). FK_AST_NODE_CAP (defined near fk_node[][4] itself, further down) is the
  * PARSED PROGRAM's syntax tree, filled once per expression during parsing via
  * fk_smknode. */
-#define FK_NODE_CAP 65536               /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots */
+#define FK_NODE_CAP 262144              /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots. Raised 65536->262144 (2026-07-02): a 1,200-clip --src program filled the value-node table mid-run and every guard silently returned handle 0 -- a deterministic all-zero result with no error. Same raisable-constant class as FK_AST_NODE_CAP; overflow now dies loudly instead of returning 0. 262144*104B ~= 27MB. */
 #define FK_RECORD_CAP 256               /* fk_rkey/rval/rcnt/rbp: max live mutable records (fk_rp bound) */
 #define FK_RECORD_MAX_KEYS 128          /* fk_rkey/rval second dimension: max keys per record */
 /* fn-value reserved band (see stone 2c below): the band WIDTH (8192, in raw
@@ -4600,9 +4601,12 @@ static long long fk_mcopy(long long b) {
     fk_fw[p] = fk_nhp;
     return (fk_nhp << 1) | 1;
 }
+static long long fk_nmelt;
 static void fk_melt(void) {
+    long long hp0 = fk_hp;
     fk_fw = calloc(fk_hp + 1, 8);
     if (fk_fw == 0) {
+        dprintf(2, "[melt] ABORTED: fw calloc failed (hp=%lld) -- heap not compacted\n", fk_hp);
         return;
     }
     long long nlive = 0;
@@ -4633,6 +4637,7 @@ static void fk_melt(void) {
         free(fk_nh);
         free(fk_nt);
         free(fk_fw);
+        dprintf(2, "[melt] ABORTED: arena malloc failed (ncap=%lld) -- heap not compacted\n", ncap);
         return;
     }
     fk_nhp = 0;
@@ -4662,6 +4667,11 @@ static void fk_melt(void) {
     fk_ht = fk_nt;
     fk_hp = fk_nhp;
     fk_cap = ncap;
+    fk_nmelt = fk_nmelt + 1;
+    if (getenv("FK_MELT_WITNESS")) {
+        dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, fp=%lld, sp=%lld\n",
+                fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_fp, fk_sp);
+    }
 }
 static void fk_vp(long long v) {
     if (fk_vsp >= FK_VALUE_STACK_CAP) {
@@ -5190,6 +5200,7 @@ static long long fk_walk(long long i, long long fp) {
             fk_melt();
         }
         if (fk_hp + 1 >= fk_cap) {
+            dprintf(2, "[cons] heap full after melt (hp=%lld cap=%lld) -- returning nil, list is CORRUPT\n", fk_hp, fk_cap);
             fk_vsp = fk_vsp - 2;
             return 1;
         }
@@ -5691,7 +5702,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             ix43 = ix43 + 1;
         }
         if (fk_np + 1 >= FK_NODE_CAP) {
-            return 0;
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -5714,8 +5725,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
             ix46 = ix46 + 1;
         }
-        if (sa46 < 0 || sa46 >= fk_sp || fk_np + 1 >= FK_NODE_CAP) {
+        if (sa46 < 0 || sa46 >= fk_sp) {
             return 0;
+        }
+        if (fk_np + 1 >= FK_NODE_CAP) {
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -5740,7 +5754,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             ix47 = ix47 + 1;
         }
         if (fk_np + 1 >= FK_NODE_CAP) {
-            return 0;
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 2;
@@ -5783,7 +5797,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             in91 = fk_hh[q91] >> 1;
         }
         if (fk_np + 1 >= FK_NODE_CAP) {
-            return 0;
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 3;
@@ -5807,7 +5821,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             ix112 = ix112 + 1;
         }
         if (fk_np + 1 >= FK_NODE_CAP) {
-            return 0;
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -5839,7 +5853,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         long long fb113 = fk_fbox(fd113);
         if (fk_np + 1 >= FK_NODE_CAP) {
-            return 0;
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -6072,9 +6086,18 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 63) {
         static char p[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
+        static long long fk_nreads;
+        long long pv63 = fk_walk(fk_node[i][1], fp);
+        fk_cstr(pv63, p, 4096);
+        fk_nreads = fk_nreads + 1;
         int fd = open(p, O_RDBIN);
         if (fd < 0) {
+            if (getenv("FK_READ_WITNESS")) {
+                long long sa63 = pv63 >> 1;
+                dprintf(2, "[read_file] OPEN FAILED at read #%lld: '%s' (handle=%lld sa=%lld sl=%lld so=%lld sp=%lld)\n",
+                        fk_nreads, p, pv63, sa63, (sa63 >= 0 && sa63 < fk_sp) ? fk_sl[sa63] : -1,
+                        (sa63 >= 0 && sa63 < fk_sp) ? fk_so[sa63] : -1, fk_sp);
+            }
             return fk_sbuf("", 0);
         }
         fk_sinit();
@@ -6083,8 +6106,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         for (;;) {
             while (base + total + 65536 > fk_scap_b) {
                 fk_scap_b = fk_scap_b * 2;
+                void *sb0 = fk_sb;
                 fk_sb = realloc(fk_sb, fk_scap_b);
                 fk_sb_check();
+                if (getenv("FK_READ_WITNESS")) {
+                    dprintf(2, "[read_file] pool grow -> %lld bytes, %p -> %p (sbp=%lld sp=%lld)\n", fk_scap_b, sb0, (void *)fk_sb, fk_sbp, fk_sp);
+                }
             }
             long long got = read(fd, fk_sb + base + total, 65536);
             if (got <= 0) {
@@ -6690,10 +6717,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_nsline[fr_ni] = fr_pk >> 16;
             fk_nscol[fr_ni] = fr_pk & 65535;
             fk_nsattr[fr_ni] = 1;
-            if (fk_fbn < FK_NODE_CAP) {
-                fk_fbroots[fk_fbn] = fr_nv;
-                fk_fbn = fk_fbn + 1;
+            if (fk_fbn >= FK_NODE_CAP) {
+                fk_die("fk fbroots table full (FK_NODE_CAP): GC root registration would be silently dropped");
             }
+            fk_fbroots[fk_fbn] = fr_nv;
+            fk_fbn = fk_fbn + 1;
         }
         return fr_nv;
     }
@@ -6839,7 +6867,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
  * control forms defn/do/let/if keep hand-written shape here — their eval semantics are special.
  * Every VALUE form is data: arity-0 ((empty)->18), arity-1/2/3 primitives, and the arity -1
  * VARIADIC sentinel ((list ..)->cons/19). */
-#define FK_SOURCE_TEXT_CAP 262144 /* fk_srctext: the parsed program's own source text (distinct from fk_src, the staged input buffer) */
+#define FK_SOURCE_TEXT_CAP 8388608 /* fk_srctext: the parsed program's own source text (distinct from fk_src, the staged input buffer). Raised 262144->8388608 (2026-07-02): a 267KB generated --src program (1,200 audio-clip paths) was SILENTLY truncated at 262,143 bytes by fk_run_src's single bounded read; the permissive reader auto-closed the amputated program and ran it, yielding a deterministic wrong answer with no error -- the "N=100 cliff". fk_run_src now reads to EOF and dies loudly if the program exceeds this cap. */
 static char fk_srctext[FK_SOURCE_TEXT_CAP];
 static long long fk_spos;
 static long long fk_slen;
@@ -8025,6 +8053,7 @@ static long long fk_jlist2(long long tag, long long a, long long b) {
             fk_melt();
         }
         if (fk_hp + 1 >= fk_cap) {
+            dprintf(2, "[cons] heap full after melt (hp=%lld cap=%lld) -- returning nil, list is CORRUPT\n", fk_hp, fk_cap);
             fk_vsp = fk_vsp - 2;
             return 1;
         }
@@ -9241,11 +9270,26 @@ static int fk_run_src(const char *path, long long arg) {
     if (fd < 0) {
         return 2;
     }
-    long long g = read(fd, fk_srctext, 262143);
-    close(fd);
-    if (g < 0) {
-        return 3;
+    long long g = 0;
+    for (;;) {
+        long long got = read(fd, fk_srctext + g, FK_SOURCE_TEXT_CAP - 1 - g);
+        if (got < 0) {
+            close(fd);
+            return 3;
+        }
+        if (got == 0) {
+            break;
+        }
+        g = g + got;
+        if (g >= FK_SOURCE_TEXT_CAP - 1) {
+            char probe1;
+            if (read(fd, &probe1, 1) > 0) {
+                fk_die("fk_run_src: program exceeds FK_SOURCE_TEXT_CAP -- refusing to run a truncated source");
+            }
+            break;
+        }
     }
+    close(fd);
     fk_slen = g;
     fk_spos = 0;
     fk_srctext[g] = 0;
