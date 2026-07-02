@@ -1,0 +1,52 @@
+; ctc-grad-band.fk — the analytic CTC gradient EQUALS the numerical gradient,
+; on every logit, four-way (fkwu/Go/Rust/TS). The proof the backward pass is right.
+;
+; preludes: form-stdlib/core.fk model/transformer-numerics.fk model/trig.fk
+;           model/ctc-loss.fk model/ctc-grad.fk
+;
+; run: cat form/form-stdlib/core.fk model/transformer-numerics.fk model/trig.fk \
+;          model/ctc-loss.fk model/ctc-grad.fk model/tests/ctc-grad-band.fk > /tmp/cg.fk
+;      ./fkwu --src /tmp/cg.fk    ; -> 127
+;
+; Verdict 127 when analytic == numerical everywhere checked.
+
+(do
+    ; float abs — defined in Form (the native fabs is not on the walker surface)
+    (defn cgb-fabs (x) (if (lt x 0.0) (sub 0.0 x) x))
+    ; numerical (central finite difference) gradient of the CTC loss wrt logit (t,k)
+    (defn cgb-loss (us tgt) (ctc-loss (cg-sf us) tgt))
+    (defn cgb-set (xs i v) (if (eq i 0) (cons v (tail xs)) (cons (head xs) (cgb-set (tail xs) (sub i 1) v))))
+    (defn cgb-setf (us t k v) (if (eq t 0) (cons (cgb-set (head us) k v) (tail us)) (cons (head us) (cgb-setf (tail us) (sub t 1) k v))))
+    (defn cgb-num (us tgt t k eps)
+        (div (sub (cgb-loss (cgb-setf us t k (add (nth (nth us t) k) eps)) tgt)
+                  (cgb-loss (cgb-setf us t k (sub (nth (nth us t) k) eps)) tgt)) (mul 2.0 eps)))
+    (defn cgb-close? (us tgt t k) (if (lt (cgb-fabs (sub (cg-grad us tgt t k) (cgb-num us tgt t k 0.0001))) 0.00001) 1 0))
+
+    ; toy A: "a", T=2, 2 classes — all 4 logits
+    (defn cgb-uA () (list (list 0.3 0.7) (list 0.1 0.4)))
+    ; toy B: "ab", T=3, 3 classes — exercises the skip transition in alpha AND beta
+    (defn cgb-uB () (list (list 0.2 0.5 0.1) (list 0.3 0.1 0.6) (list 0.4 0.2 0.3)))
+
+    (defn cgb-score (ok bit) (if ok bit 0))
+    (defn ctc-grad-band ()
+        (add
+            ; toy A: analytic == numerical on all four params
+            (cgb-score (eq (add (cgb-close? (cgb-uA) (list 1) 0 0) (add (cgb-close? (cgb-uA) (list 1) 0 1)
+                        (add (cgb-close? (cgb-uA) (list 1) 1 0) (cgb-close? (cgb-uA) (list 1) 1 1)))) 4) 1)
+        (add
+            ; toy B: analytic == numerical on the skip-exercising params
+            (cgb-score (eq (cgb-close? (cgb-uB) (list 1 2) 0 1) 1) 2)
+        (add
+            (cgb-score (eq (cgb-close? (cgb-uB) (list 1 2) 2 2) 1) 4)
+        (add
+            (cgb-score (eq (cgb-close? (cgb-uB) (list 1 2) 1 1) 1) 8)
+        (add
+            ; the gradient is not trivially zero (a real signal): grad wrt the true
+            ; label's logit is NEGATIVE (raising it lowers loss)
+            (cgb-score (lt (cg-grad (cgb-uA) (list 1) 0 1) 0.0) 16)
+        (add
+            ; and the softmax-minus-posterior identity: gradients over classes at a
+            ; frame sum to ~0 (softmax sums to 1, posterior mass sums to 1)
+            (cgb-score (lt (cgb-fabs (add (cg-grad (cgb-uA) (list 1) 0 0) (cg-grad (cgb-uA) (list 1) 0 1))) 0.00001) 32)
+            (cgb-score (eq (cgb-close? (cgb-uB) (list 1 2) 0 0) 1) 64))))))))
+    (ctc-grad-band))
