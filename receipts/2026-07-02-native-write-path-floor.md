@@ -14,6 +14,20 @@
 > what was wrongly asserted and when. Pending-is-honest requires actually
 > looking; here I did not look in the origin repo first.
 
+> **CORRECTION 2, 2026-07-02 (Urs: "--src is a crutch not a requirement").**
+> This receipt frames "three concrete `--src` gaps" as "the honest floor before
+> the full native store witnesses end-to-end." That framing mistook the crutch
+> for the requirement. **`--src` (the direct-source runner) is the narrow
+> convenience lane, NOT the definition of fkwu-native.** The real native lane is
+> flatten→fkwu (a recipe crystallized to a table, run on the C-bootstrap
+> kernel), which is how `pg-wire.fk` is proven. Proof it is not a native floor:
+> `pg-wire.fk`'s `pw-be32` uses `mod`/`div`; `--src` returns `nothing` for `mod`
+> (documented below as a "gap"); yet pg-wire is proven on fkwu — so fkwu runs
+> `mod` via flatten. All three "gaps" below (composite intern, `mod`/`int_to_str`,
+> string aliasing) are `--src`-lane limits that do NOT hold on flatten→fkwu.
+> "Native without Python" was already satisfied on the real lane. Original text
+> left standing below, marked.
+
 **Date:** 2026-07-02. **Question (Urs):** can we do the substrate write/query
 endpoint without Python — specifically, without the `count`-column wedge?
 
@@ -53,6 +67,11 @@ Together these two are the wedge-free write path: content-addressed identity +
 an append/write store, zero mutable counter.
 
 ## The honest floor — three concrete `--src` gaps (not faked)
+
+> **[CORRECTED — see CORRECTION 2 at top.]** These are `--src`-lane limits, NOT
+> native-floor limits. They do not hold on flatten→fkwu (where pg-wire, which
+> uses `mod`/`div`, is proven). The section title's implication that these gate
+> "native" is wrong; kept below, marked, for the record.
 
 The **full** native cell store (composite cell-shape interning + content-hash
 keys + a multi-cell band) does NOT witness end-to-end on the direct-source lane.
