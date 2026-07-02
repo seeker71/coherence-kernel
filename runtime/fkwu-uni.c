@@ -2494,10 +2494,14 @@ static long long fk_mesh_detect(void) {
  * thread per row, and compare BIT-EXACT to the CPU f32 downward right-fold (volatile blocks the CPU
  * FMA so both sides are two roundings). The driver's built-in PTX JIT is intrinsic to the GPU. */
 #if defined(_WIN32)
-static long long fk_cuda_matvec(void) {
+/* one dispatch, shared by the fixture witness (tag 232) and the general data door (tag 233):
+ * load the driver, JIT the Form-emitted PTX at -O0 (unfused), y = W.x one thread per row, then
+ * TEAR DOWN (mem/module/context — the fixture used to leak these per call). Returns 0 and fills
+ * y/gname on success; the negative step code of the first refusal otherwise. */
+static long long fk_cuda_go(const float *W, const float *x, float *y, unsigned rows, unsigned cols,
+                            char *gname, long long gcap) {
     void *h = LoadLibraryA("nvcuda.dll");
     if (h == 0) {
-        printf("cuda: nvcuda.dll not found\n");
         return -1;
     }
     typedef int (*F1)(unsigned);
@@ -2512,6 +2516,8 @@ static long long fk_cuda_matvec(void) {
     typedef int (*F10)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
                        void *, void **, void **);
     typedef int (*F11)(void);
+    typedef int (*F12)(unsigned long long);
+    typedef int (*F13)(void *);
     F1 cuInit = (F1)GetProcAddress(h, "cuInit");
     F2 cuDeviceGet = (F2)GetProcAddress(h, "cuDeviceGet");
     F3 cuDeviceGetName = (F3)GetProcAddress(h, "cuDeviceGetName");
@@ -2523,80 +2529,130 @@ static long long fk_cuda_matvec(void) {
     F9 cuMemcpyDtoH = (F9)GetProcAddress(h, "cuMemcpyDtoH_v2");
     F10 cuLaunchKernel = (F10)GetProcAddress(h, "cuLaunchKernel");
     F11 cuCtxSynchronize = (F11)GetProcAddress(h, "cuCtxSynchronize");
+    F12 cuMemFree = (F12)GetProcAddress(h, "cuMemFree_v2");
+    F13 cuModuleUnload = (F13)GetProcAddress(h, "cuModuleUnload");
+    F13 cuCtxDestroy = (F13)GetProcAddress(h, "cuCtxDestroy_v2");
     if (!cuInit || !cuCtxCreate || !cuModuleLoadDataEx || !cuLaunchKernel) {
-        printf("cuda: missing entry points\n");
         return -2;
     }
     if (cuInit(0) != 0) {
-        printf("cuda: cuInit failed\n");
         return -3;
     }
     int dev = 0;
     if (cuDeviceGet(&dev, 0) != 0) {
         return -4;
     }
-    char gname[256];
-    gname[0] = 0;
-    cuDeviceGetName(gname, 256, dev);
+    if (gname != 0 && gcap > 0) {
+        gname[0] = 0;
+        cuDeviceGetName(gname, (int)gcap, dev);
+    }
     void *ctx = 0;
     if (cuCtxCreate(&ctx, 0, dev) != 0) {
-        printf("cuda: ctx create failed\n");
         return -5;
     }
+    long long rc = 0;
+    void *mod = 0;
+    unsigned long long dW = 0, dX = 0, dY = 0;
     int fd = open("gpu/fptx-matvec.ptx", 0x8000);
     if (fd < 0) {
-        printf("cuda: gpu/fptx-matvec.ptx not found\n");
-        return -6;
-    }
-    static char ptx[131072];
-    long long pn = 0, g;
-    while ((g = read(fd, ptx + pn, 8192)) > 0) {
-        pn = pn + g;
-        if (pn > 120000) {
-            break;
+        rc = -6;
+    } else {
+        static char ptx[131072];
+        long long pn = 0, g;
+        while ((g = read(fd, ptx + pn, 8192)) > 0) {
+            pn = pn + g;
+            if (pn > 120000) {
+                break;
+            }
+        }
+        close(fd);
+        ptx[pn] = 0;
+        int jopt[1];
+        void *jval[1];
+        jopt[0] = 7;
+        jval[0] = (void *)0;
+        /* CU_JIT_OPTIMIZATION_LEVEL = 0 */
+        if (cuModuleLoadDataEx(&mod, ptx, 1, jopt, jval) != 0) {
+            rc = -7;
+            mod = 0;
         }
     }
-    close(fd);
-    ptx[pn] = 0;
-    int jopt[1];
-    void *jval[1];
-    jopt[0] = 7;
-    jval[0] = (void *)0;
-    /* CU_JIT_OPTIMIZATION_LEVEL = 0 */
-    void *mod = 0;
-    if (cuModuleLoadDataEx(&mod, ptx, 1, jopt, jval) != 0) {
-        printf("cuda: PTX JIT failed\n");
-        return -7;
-    }
     void *fn = 0;
-    if (cuModuleGetFunction(&fn, mod, "form_matvec_f32") != 0) {
-        printf("cuda: no form_matvec_f32\n");
-        return -8;
+    if (rc == 0 && cuModuleGetFunction(&fn, mod, "form_matvec_f32") != 0) {
+        rc = -8;
     }
+    if (rc == 0) {
+        cuMemAlloc(&dW, (unsigned long long)rows * cols * 4);
+        cuMemcpyHtoD(dW, W, (unsigned long long)rows * cols * 4);
+        cuMemAlloc(&dX, (unsigned long long)cols * 4);
+        cuMemcpyHtoD(dX, x, (unsigned long long)cols * 4);
+        cuMemAlloc(&dY, (unsigned long long)rows * 4);
+        cuMemcpyHtoD(dY, y, (unsigned long long)rows * 4);
+        void *args[5];
+        args[0] = &dW;
+        args[1] = &dX;
+        args[2] = &dY;
+        args[3] = &rows;
+        args[4] = &cols;
+        unsigned blocks = (rows + 255) / 256;
+        if (cuLaunchKernel(fn, blocks, 1, 1, 256, 1, 1, 0, 0, args, 0) != 0) {
+            rc = -9;
+        } else {
+            cuCtxSynchronize();
+            cuMemcpyDtoH(y, dY, (unsigned long long)rows * 4);
+        }
+    }
+    if (cuMemFree != 0) {
+        if (dW != 0) {
+            cuMemFree(dW);
+        }
+        if (dX != 0) {
+            cuMemFree(dX);
+        }
+        if (dY != 0) {
+            cuMemFree(dY);
+        }
+    }
+    if (mod != 0 && cuModuleUnload != 0) {
+        cuModuleUnload(mod);
+    }
+    if (cuCtxDestroy != 0) {
+        cuCtxDestroy(ctx);
+    }
+    return rc;
+}
+static void fk_cuda_say(long long rc) {
+    if (rc == -1) {
+        printf("cuda: nvcuda.dll not found\n");
+    } else if (rc == -2) {
+        printf("cuda: missing entry points\n");
+    } else if (rc == -3) {
+        printf("cuda: cuInit failed\n");
+    } else if (rc == -5) {
+        printf("cuda: ctx create failed\n");
+    } else if (rc == -6) {
+        printf("cuda: gpu/fptx-matvec.ptx not found\n");
+    } else if (rc == -7) {
+        printf("cuda: PTX JIT failed\n");
+    } else if (rc == -8) {
+        printf("cuda: no form_matvec_f32\n");
+    } else if (rc == -9) {
+        printf("cuda: launch failed\n");
+    }
+}
+/* the fixture witness (tag 232): fixed 3x4 W and 4-vec x, bit-exact vs the CPU two-rounding fold. */
+static long long fk_cuda_matvec(void) {
     unsigned rows = 3, cols = 4;
     float W[12] = {0.1f,  0.2f,  0.3f, 0.7f, 0.11f,     0.13f,
                    0.17f, 0.19f, 0.9f, 0.8f, 0.123456f, 0.654321f};
     float X[4] = {0.5f, 0.25f, 0.125f, 0.333333f};
     float Y[3] = {0.0f, 0.0f, 0.0f};
-    unsigned long long dW = 0, dX = 0, dY = 0;
-    cuMemAlloc(&dW, 48);
-    cuMemcpyHtoD(dW, W, 48);
-    cuMemAlloc(&dX, 16);
-    cuMemcpyHtoD(dX, X, 16);
-    cuMemAlloc(&dY, 12);
-    cuMemcpyHtoD(dY, Y, 12);
-    void *args[5];
-    args[0] = &dW;
-    args[1] = &dX;
-    args[2] = &dY;
-    args[3] = &rows;
-    args[4] = &cols;
-    if (cuLaunchKernel(fn, 1, 1, 1, rows, 1, 1, 0, 0, args, 0) != 0) {
-        printf("cuda: launch failed\n");
-        return -9;
+    char gname[256];
+    long long rc = fk_cuda_go(W, X, Y, rows, cols, gname, 256);
+    if (rc < 0) {
+        fk_cuda_say(rc);
+        return rc;
     }
-    cuCtxSynchronize();
-    cuMemcpyDtoH(Y, dY, 12);
     printf("GPU: %s  CUDA driver-API PTX-JIT -O0 (nvcuda.dll; no python, no nvcc, no nvrtc)\n",
            gname);
     printf(
@@ -2629,9 +2685,104 @@ static long long fk_cuda_matvec(void) {
            (agree == (long long)rows) ? "true" : "false");
     return agree;
 }
+/* the GENERAL data door (tag 233) the RTX receipts named as the missing rung:
+ * (cuda_matvec_f32 W x) — W a flat Form list of rows*cols numbers, x a list of cols numbers.
+ * Dispatches y = W.x on the GPU through the same Form-emitted PTX, recomputes the same downward
+ * two-rounding f32 fold on the CPU (volatile blocks FMA), and returns (agree y0 .. y_rows-1):
+ * the metal receipt rides IN the returned value, not beside it. nil (empty list) on refusal. */
+static long long fk_cons_val(long long h, long long t);
+static long long fk_list_len_c(long long v) {
+    long long p = v >> 1;
+    long long n = 0;
+    while (p >= 1 && p <= fk_hp) {
+        n = n + 1;
+        p = fk_ht[p] >> 1;
+    }
+    return n;
+}
+static long long fk_list_to_f32(long long v, float *out, long long cap) {
+    long long p = v >> 1;
+    long long n = 0;
+    while (p >= 1 && p <= fk_hp && n < cap) {
+        out[n] = (float)fk_num(fk_hh[p]);
+        n = n + 1;
+        p = fk_ht[p] >> 1;
+    }
+    return n;
+}
+static long long fk_cuda_matvec_f32(long long wv, long long xv) {
+    long long wn = fk_list_len_c(wv);
+    long long xn = fk_list_len_c(xv);
+    if (xn < 1 || wn < xn || (wn % xn) != 0 || wn > 4194304) {
+        return 1;
+    }
+    unsigned cols = (unsigned)xn;
+    unsigned rows = (unsigned)(wn / xn);
+    float *W = malloc((unsigned long)(wn * 4));
+    float *x = malloc((unsigned long)(xn * 4));
+    float *y = malloc((unsigned long)(rows * 4));
+    if (W == 0 || x == 0 || y == 0) {
+        free(W);
+        free(x);
+        free(y);
+        return 1;
+    }
+    fk_list_to_f32(wv, W, wn);
+    fk_list_to_f32(xv, x, xn);
+    long long i;
+    for (i = 0; i < (long long)rows; i = i + 1) {
+        y[i] = 0.0f;
+    }
+    char gname[256];
+    long long rc = fk_cuda_go(W, x, y, rows, cols, gname, 256);
+    if (rc < 0) {
+        fk_cuda_say(rc);
+        free(W);
+        free(x);
+        free(y);
+        return 1;
+    }
+    long long agree = 0;
+    for (i = 0; i < (long long)rows; i = i + 1) {
+        volatile float acc = 0.0f;
+        long long j;
+        for (j = (long long)cols - 1; j >= 0; j = j - 1) {
+            volatile float prod = W[i * (long long)cols + j] * x[j];
+            acc = prod + acc;
+        }
+        float cpu = acc;
+        union {
+            float f;
+            unsigned u;
+        } cg, cc;
+        cg.f = y[i];
+        cc.f = cpu;
+        if (cg.u == cc.u) {
+            agree = agree + 1;
+        }
+    }
+    printf("GPU: %s  cuda_matvec_f32 rows=%u cols=%u  BIT-EXACT %lld/%u\n", gname, rows, cols,
+           agree, rows);
+    long long lst = 1;
+    i = rows;
+    while (i > 0) {
+        i = i - 1;
+        lst = fk_cons_val(fk_fbox((double)y[i]), lst);
+    }
+    lst = fk_cons_val(agree << 1, lst);
+    free(W);
+    free(x);
+    free(y);
+    return lst;
+}
 #else
 static long long fk_cuda_matvec(void) {
     return -1;
+}
+static long long fk_cuda_matvec_f32(long long wv, long long xv) {
+    (void)wv;
+    (void)xv;
+    return 1;
 }
 #endif
 static int fk_sock_getaddrinfo(const char *h, const char *p, const struct addrinfo *i,
@@ -5545,6 +5696,13 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 232) {
         return fk_cuda_matvec() << 1;
+    }
+    if (t == 233) {
+        long long w233 = fk_walk(fk_node[i][1], fp);
+        fk_vp(w233);
+        long long x233 = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_cuda_matvec_f32(fk_vs[fk_vsp], x233);
     }
     if (t == 200) {
         static char p200[4096];
