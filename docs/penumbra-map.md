@@ -43,7 +43,9 @@ source_inventory str_to_float tls_request vector_cosine
 - **`node_type` and `node_level` are still dim** — and this session tripped over `node_type`
   semantics twice (the phantom "null/6" types; the bool sentinel). The next bug of the bool
   bug's kind most plausibly lives under one of these two. A `node-introspection-band` is the
-  highest-value single lamp this map names.
+  highest-value single lamp this map names. *(Lit 2026-07-02:
+  `observe/tests/node-introspection-band.fk`, verdict 4095 — node_type/node_level/node_value/
+  node_category/node_children moved from dim to lit, raw-literal trap pinned.)*
 - **`scan_run` is dim but load-bearing** — `json.fk`'s tokenizer rides it everywhere (witnessed
   only through `json-band`). `float_to_int` similarly rides under `float_to_str`. Indirect
   witness is real witness, but it localizes failures poorly: when the caller's band breaks, the
