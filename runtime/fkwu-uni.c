@@ -456,10 +456,27 @@ extern int stat(const char *, void *);
 #endif
 #endif
 #ifndef FK_HAVE_FCNTL_HEADER
+#if defined(_WIN32)
+/* ucrt flag values; _O_BINARY folded into O_WRONLY so writes keep bytes as given (the read
+ * path already opens 0x8000). The BSD values below silently dropped _O_CREAT here, so the
+ * write/append doors failed on absent files and append truncated on present ones. */
+#define O_WRONLY 0x8001
+#define O_CREAT 0x100
+#define O_TRUNC 0x200
+#define O_APPEND 8
+#else
 #define O_WRONLY 1
 #define O_CREAT 0x200
 #define O_TRUNC 0x400
 #define O_APPEND 8
+#endif
+#endif
+#if defined(_WIN32)
+/* _O_BINARY for the Form-facing byte-read doors (read_file / read_file_slice): text mode
+ * would translate CRLF and stop at a 0x1A byte — a binary checkpoint could not pass. */
+#define O_RDBIN 0x8000
+#else
+#define O_RDBIN 0
 #endif
 extern int open(const char *, int, ...);
 extern long long read(int, void *, unsigned long);
@@ -724,20 +741,58 @@ static long long fk_cam_name(long long i) {
     }
     return fk_sbuf(nm, fk_cstrlen(nm));
 }
+/* the VfW driver connect can block forever behind modern camera stacks (witnessed on this
+ * cell: the "Microsoft WDM Image Capture" shim hangs on a MIPI camera — receipts/
+ * 2026-07-01-windows-camera-carrier-probe.md). Probe on a worker thread and refuse
+ * honestly after 3s; on timeout the probe struct and stuck thread are deliberately
+ * abandoned (the named cost of a hung driver — never freed under its feet). */
+extern void *CreateThread(void *, unsigned long long, unsigned int (*)(void *), void *,
+                          unsigned int, unsigned int *);
+extern unsigned int WaitForSingleObject(void *, unsigned int);
+extern int CloseHandle(void *);
+struct fk_cam_probe {
+    long long idx;
+    long long ok;
+};
+static unsigned int fk_cam_probe_run(void *arg) {
+    struct fk_cam_probe *p = (struct fk_cam_probe *)arg;
+    void *hwnd = capCreateCaptureWindowA("fkwu-cam", 0x80000000u, 0, 0, 0, 0, (void *)0, 0);
+    if (hwnd != 0) {
+        long long ok = SendMessageA(hwnd, 0x0400 + 10, (unsigned long long)p->idx, 0);
+        if (ok) {
+            SendMessageA(hwnd, 0x0400 + 11, 0, 0);
+        }
+        DestroyWindow(hwnd);
+        p->ok = ok ? 1 : 0;
+    }
+    return 0;
+}
 static long long fk_cam_health(long long i) {
     char nm[256];
     char ver[256];
     if (i < 0 || !capGetDriverDescriptionA((unsigned int)i, nm, 256, ver, 256)) {
         return 0;
     }
-    void *hwnd = capCreateCaptureWindowA("fkwu-cam", 0x80000000u, 0, 0, 0, 0, (void *)0, 0);
-    if (hwnd == 0) {
+    struct fk_cam_probe *p = malloc(sizeof(struct fk_cam_probe));
+    if (p == 0) {
         return 0;
     }
-    long long ok = SendMessageA(hwnd, 0x0400 + 10, (unsigned long long)i, 0);
-    SendMessageA(hwnd, 0x0400 + 11, 0, 0);
-    DestroyWindow(hwnd);
-    return ok ? 1 : 0;
+    p->idx = i;
+    p->ok = 0;
+    void *th = CreateThread((void *)0, 0, fk_cam_probe_run, p, 0, (unsigned int *)0);
+    if (th == 0) {
+        free(p);
+        return 0;
+    }
+    if (WaitForSingleObject(th, 3000) == 0) {
+        long long ok = p->ok;
+        CloseHandle(th);
+        free(p);
+        return ok;
+    }
+    CloseHandle(th);
+    printf("sense: camera %lld connect timed out (legacy VfW shim) — health 0, honestly\n", i);
+    return 0;
 }
 static long long fk_cam_grab(long long i, const char *path) {
     char nm[256];
@@ -764,6 +819,725 @@ static long long fk_cam_grab(long long i, const char *path) {
     SendMessageA(hwnd, 0x0400 + 11, 0, 0);
     DestroyWindow(hwnd);
     return saved ? 1 : 0;
+}
+/* ── mic CAPTURE (winmm waveIn, completing the carrier named above): ms of PCM16 mono 16kHz,
+ * measured and released — the Android receipt pattern: samples / nonzero / mean-abs / peak
+ * cross into Form as integers; no raw audio is retained. */
+struct fk_wavehdr {
+    char *lpData;
+    unsigned int dwBufferLength;
+    unsigned int dwBytesRecorded;
+    unsigned long long dwUser;
+    unsigned int dwFlags;
+    unsigned int dwLoops;
+    struct fk_wavehdr *lpNext;
+    unsigned long long reserved;
+};
+extern unsigned int waveInPrepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveInUnprepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveInAddBuffer(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveInStart(void *);
+extern unsigned int waveInReset(void *);
+static long long fk_cons_val(long long h, long long t);
+static long long fk_mic_capture(long long ms) {
+    if (ms < 100) {
+        ms = 100;
+    }
+    if (ms > 10000) {
+        ms = 10000;
+    }
+    struct fk_waveformatex fmt;
+    fmt.wFormatTag = 1;
+    fmt.nChannels = 1;
+    fmt.nSamplesPerSec = 16000;
+    fmt.wBitsPerSample = 16;
+    fmt.nBlockAlign = 2;
+    fmt.nAvgBytesPerSec = 32000;
+    fmt.cbSize = 0;
+    void *h = 0;
+    if (waveInOpen(&h, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: mic open refused\n");
+        return 1;
+    }
+    long long bytes = ms * 32;
+    char *buf = malloc((unsigned long)bytes);
+    if (buf == 0) {
+        waveInClose(h);
+        return 1;
+    }
+    struct fk_wavehdr hd;
+    hd.lpData = buf;
+    hd.dwBufferLength = (unsigned int)bytes;
+    hd.dwBytesRecorded = 0;
+    hd.dwUser = 0;
+    hd.dwFlags = 0;
+    hd.dwLoops = 0;
+    hd.lpNext = 0;
+    hd.reserved = 0;
+    waveInPrepareHeader(h, &hd, (unsigned int)sizeof hd);
+    waveInAddBuffer(h, &hd, (unsigned int)sizeof hd);
+    waveInStart(h);
+    long long waited = 0;
+    while ((hd.dwFlags & 1) == 0 && waited < ms + 2000) {
+        Sleep(50);
+        waited = waited + 50;
+    }
+    waveInReset(h);
+    waveInUnprepareHeader(h, &hd, (unsigned int)sizeof hd);
+    waveInClose(h);
+    long long nsamp = hd.dwBytesRecorded / 2;
+    long long nonzero = 0;
+    long long peak = 0;
+    long long sumabs = 0;
+    long long i;
+    for (i = 0; i < nsamp; i = i + 1) {
+        long long s = (long long)*(short *)(buf + i * 2);
+        long long a = s < 0 ? 0 - s : s;
+        if (a > 0) {
+            nonzero = nonzero + 1;
+        }
+        if (a > peak) {
+            peak = a;
+        }
+        sumabs = sumabs + a;
+    }
+    free(buf);
+    long long meanabs = nsamp > 0 ? sumabs / nsamp : 0;
+    printf("sense: mic captured %lld samples (%lld ms) nonzero=%lld mean-abs=%lld peak=%lld — "
+           "measured, not retained\n",
+           nsamp, ms, nonzero, meanabs, peak);
+    long long r = 1;
+    r = fk_cons_val(peak << 1, r);
+    r = fk_cons_val(meanabs << 1, r);
+    r = fk_cons_val(nonzero << 1, r);
+    r = fk_cons_val(nsamp << 1, r);
+    return r;
+}
+/* ── camera CAPTURE (Media Foundation — the carrier the hanging VfW shim demanded, now built
+ * as its own deliberate movement): LoadLibrary-only (ole32/mfplat/mf/mfreadwrite), COM vtables
+ * called by slot in plain C — no new link libraries, the same door discipline as nvcuda.
+ * One frame is asked for as NV12 (Y plane first), its LUMA measured (w/h/mean/nonzero) and the
+ * frame released: the eye opens, measures, retains nothing. Bounded worker thread; a Windows
+ * camera-privacy denial is an honest refusal, printed. */
+struct fk_guid {
+    unsigned int a;
+    unsigned short b;
+    unsigned short c;
+    unsigned char d[8];
+};
+static const struct fk_guid fk_g_devsrc_type = {
+    0xc60ac5fe, 0x252a, 0x478f, {0xa0, 0xef, 0xbc, 0x8f, 0xa5, 0xf7, 0xca, 0xd3}};
+static const struct fk_guid fk_g_devsrc_vidcap = {
+    0x8ac3587a, 0x4ae7, 0x42d8, {0x99, 0xe0, 0x0a, 0x60, 0x13, 0xee, 0xf9, 0x0f}};
+static const struct fk_guid fk_g_iid_mediasource = {
+    0x279a808d, 0xaec7, 0x40c8, {0x9c, 0x6b, 0xa6, 0xb4, 0x92, 0xc7, 0x8a, 0x66}};
+static const struct fk_guid fk_g_mt_major = {
+    0x48eba18e, 0xf8c9, 0x4687, {0xbf, 0x11, 0x0a, 0x74, 0xc9, 0xf9, 0x6a, 0x8f}};
+static const struct fk_guid fk_g_mt_subtype = {
+    0xf7e34c9a, 0x42e8, 0x4714, {0xb7, 0x4b, 0xcb, 0x29, 0xd7, 0x2c, 0x35, 0xe5}};
+static const struct fk_guid fk_g_mt_framesize = {
+    0x1652c33d, 0xd6b2, 0x4012, {0xb8, 0x34, 0x72, 0x03, 0x08, 0x49, 0xa3, 0x7d}};
+static const struct fk_guid fk_g_video_major = {
+    0x73646976, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+static const struct fk_guid fk_g_fmt_nv12 = {
+    0x3231564e, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+static const struct fk_guid fk_g_reader_processing = {
+    0xfb394f3d, 0xccf1, 0x42ee, {0xbb, 0xb3, 0xf9, 0xb8, 0x45, 0xd5, 0x68, 0x1d}};
+typedef int (*fk_vt_guid2)(void *, const struct fk_guid *, const struct fk_guid *);
+typedef int (*fk_vt_u32set)(void *, const struct fk_guid *, unsigned int);
+typedef int (*fk_vt_act)(void *, const struct fk_guid *, void **);
+typedef int (*fk_vt_pp)(void *, void **);
+typedef int (*fk_vt_mtset)(void *, unsigned int, void *, void *);
+typedef int (*fk_vt_mtget)(void *, unsigned int, void **);
+typedef int (*fk_vt_u64get)(void *, const struct fk_guid *, unsigned long long *);
+typedef int (*fk_vt_readsample)(void *, unsigned int, unsigned int, unsigned int *,
+                                unsigned int *, long long *, void **);
+typedef int (*fk_vt_lockbuf)(void *, unsigned char **, unsigned int *, unsigned int *);
+typedef int (*fk_vt_none)(void *);
+static void **fk_vt(void *o) {
+    return ((void ***)o)[0];
+}
+static void fk_com_release(void *o) {
+    if (o != 0) {
+        ((fk_vt_none)fk_vt(o)[2])(o);
+    }
+}
+struct fk_camluma {
+    long long w;
+    long long h;
+    long long luma;
+    long long nonzero;
+    long long rc;
+    long long hr;
+};
+static unsigned int fk_cam_luma_run(void *arg) {
+    struct fk_camluma *out = (struct fk_camluma *)arg;
+    void *ole = LoadLibraryA("ole32.dll");
+    void *mfp = LoadLibraryA("mfplat.dll");
+    void *mfl = LoadLibraryA("mf.dll");
+    void *mfr = LoadLibraryA("mfreadwrite.dll");
+    if (ole == 0 || mfp == 0 || mfl == 0 || mfr == 0) {
+        out->rc = -2;
+        return 0;
+    }
+    typedef int (*FCoInit)(void *, unsigned int);
+    typedef void (*FCoUninit)(void);
+    typedef void (*FCoFree)(void *);
+    typedef int (*FMfStart)(unsigned int, unsigned int);
+    typedef int (*FMfStop)(void);
+    typedef int (*FMfAttrs)(void **, unsigned int);
+    typedef int (*FMfEnum)(void *, void ***, unsigned int *);
+    typedef int (*FMfReader)(void *, void *, void **);
+    typedef int (*FMfMkType)(void **);
+    FCoInit fCoInit = (FCoInit)GetProcAddress(ole, "CoInitializeEx");
+    FCoUninit fCoUninit = (FCoUninit)GetProcAddress(ole, "CoUninitialize");
+    FCoFree fCoFree = (FCoFree)GetProcAddress(ole, "CoTaskMemFree");
+    FMfStart fMfStart = (FMfStart)GetProcAddress(mfp, "MFStartup");
+    FMfStop fMfStop = (FMfStop)GetProcAddress(mfp, "MFShutdown");
+    FMfAttrs fMfAttrs = (FMfAttrs)GetProcAddress(mfp, "MFCreateAttributes");
+    FMfMkType fMfMkType = (FMfMkType)GetProcAddress(mfp, "MFCreateMediaType");
+    FMfEnum fMfEnum = (FMfEnum)GetProcAddress(mfl, "MFEnumDeviceSources");
+    FMfReader fMfReader = (FMfReader)GetProcAddress(mfr, "MFCreateSourceReaderFromMediaSource");
+    if (fCoInit == 0 || fMfStart == 0 || fMfAttrs == 0 || fMfEnum == 0 || fMfReader == 0 ||
+        fMfMkType == 0) {
+        out->rc = -2;
+        return 0;
+    }
+    fCoInit(0, 0);
+    fMfStart(0x20070, 0);
+    void *attr = 0;
+    fMfAttrs(&attr, 1);
+    if (attr == 0) {
+        out->rc = -2;
+        fMfStop();
+        fCoUninit();
+        return 0;
+    }
+    ((fk_vt_guid2)fk_vt(attr)[24])(attr, &fk_g_devsrc_type, &fk_g_devsrc_vidcap);
+    void **acts = 0;
+    unsigned int nact = 0;
+    fMfEnum(attr, &acts, &nact);
+    if (nact == 0 || acts == 0) {
+        out->rc = -3;
+        fk_com_release(attr);
+        fMfStop();
+        fCoUninit();
+        return 0;
+    }
+    void *src = 0;
+    out->hr = ((fk_vt_act)fk_vt(acts[0])[33])(acts[0], &fk_g_iid_mediasource, &src);
+    if (src == 0) {
+        out->rc = -4;
+    }
+    void *reader = 0;
+    if (src != 0) {
+        void *rattr = 0;
+        fMfAttrs(&rattr, 1);
+        if (rattr != 0) {
+            ((fk_vt_u32set)fk_vt(rattr)[21])(rattr, &fk_g_reader_processing, 1);
+        }
+        out->hr = fMfReader(src, rattr, &reader);
+        fk_com_release(rattr);
+        if (reader == 0) {
+            out->rc = -5;
+        }
+    }
+    if (reader != 0) {
+        void *mt = 0;
+        fMfMkType(&mt);
+        if (mt != 0) {
+            ((fk_vt_guid2)fk_vt(mt)[24])(mt, &fk_g_mt_major, &fk_g_video_major);
+            ((fk_vt_guid2)fk_vt(mt)[24])(mt, &fk_g_mt_subtype, &fk_g_fmt_nv12);
+            ((fk_vt_mtset)fk_vt(reader)[7])(reader, 0xFFFFFFFCu, 0, mt);
+            fk_com_release(mt);
+        }
+        void *cur = 0;
+        ((fk_vt_mtget)fk_vt(reader)[6])(reader, 0xFFFFFFFCu, &cur);
+        unsigned long long fs = 0;
+        if (cur != 0) {
+            ((fk_vt_u64get)fk_vt(cur)[8])(cur, &fk_g_mt_framesize, &fs);
+            fk_com_release(cur);
+        }
+        long long w = (long long)(fs >> 32);
+        long long hh = (long long)(fs & 0xFFFFFFFFu);
+        void *sample = 0;
+        int tries = 0;
+        while (tries < 30 && sample == 0) {
+            unsigned int si = 0;
+            unsigned int fl = 0;
+            long long ts = 0;
+            void *s2 = 0;
+            out->hr = ((fk_vt_readsample)fk_vt(reader)[9])(reader, 0xFFFFFFFCu, 0, &si, &fl,
+                                                           &ts, &s2);
+            if (out->hr != 0) {
+                break;
+            }
+            sample = s2;
+            tries = tries + 1;
+        }
+        if (sample != 0) {
+            void *mbuf = 0;
+            ((fk_vt_pp)fk_vt(sample)[41])(sample, &mbuf);
+            if (mbuf != 0) {
+                unsigned char *p = 0;
+                unsigned int maxl = 0;
+                unsigned int curl = 0;
+                ((fk_vt_lockbuf)fk_vt(mbuf)[3])(mbuf, &p, &maxl, &curl);
+                if (p != 0) {
+                    long long ylen = w * hh;
+                    if (ylen <= 0 || ylen > (long long)curl) {
+                        ylen = (long long)curl;
+                    }
+                    long long sum = 0;
+                    long long nz = 0;
+                    long long j;
+                    for (j = 0; j < ylen; j = j + 1) {
+                        sum = sum + p[j];
+                        if (p[j] != 0) {
+                            nz = nz + 1;
+                        }
+                    }
+                    out->w = w;
+                    out->h = hh;
+                    out->luma = ylen > 0 ? sum / ylen : 0;
+                    out->nonzero = nz;
+                    out->rc = 0;
+                    ((fk_vt_none)fk_vt(mbuf)[4])(mbuf);
+                }
+                fk_com_release(mbuf);
+            }
+            fk_com_release(sample);
+        } else if (out->rc == -1) {
+            out->rc = -6;
+        }
+        fk_com_release(reader);
+    }
+    if (src != 0) {
+        ((fk_vt_none)fk_vt(src)[12])(src);
+        fk_com_release(src);
+    }
+    unsigned int ai;
+    for (ai = 0; ai < nact; ai = ai + 1) {
+        fk_com_release(acts[ai]);
+    }
+    if (fCoFree != 0) {
+        fCoFree(acts);
+    }
+    fk_com_release(attr);
+    fMfStop();
+    fCoUninit();
+    return 0;
+}
+static long long fk_cam_luma(long long timeout_ms) {
+    if (timeout_ms < 1000) {
+        timeout_ms = 1000;
+    }
+    if (timeout_ms > 30000) {
+        timeout_ms = 30000;
+    }
+    struct fk_camluma *c = malloc(sizeof(struct fk_camluma));
+    if (c == 0) {
+        return 1;
+    }
+    c->w = 0;
+    c->h = 0;
+    c->luma = 0;
+    c->nonzero = 0;
+    c->rc = -1;
+    c->hr = 0;
+    void *th = CreateThread((void *)0, 0, fk_cam_luma_run, c, 0, (unsigned int *)0);
+    if (th == 0) {
+        free(c);
+        return 1;
+    }
+    if (WaitForSingleObject(th, (unsigned int)timeout_ms) != 0) {
+        CloseHandle(th);
+        printf("sense: camera luma timed out after %lld ms — refusing honestly\n", timeout_ms);
+        return 1;
+    }
+    CloseHandle(th);
+    if (c->rc != 0) {
+        printf("sense: camera luma refused at step %lld (hr=0x%08x)%s\n", c->rc,
+               (unsigned int)c->hr,
+               (unsigned int)c->hr == 0x80070005u
+                   ? " — Windows camera privacy settings deny access"
+                   : "");
+        long long rc2 = c->rc;
+        free(c);
+        return rc2 == 0 ? 1 : 1;
+    }
+    printf("sense: camera frame %lldx%lld mean-luma=%lld nonzero=%lld — measured, not retained\n",
+           c->w, c->h, c->luma, c->nonzero);
+    long long r = 1;
+    r = fk_cons_val(c->nonzero << 1, r);
+    r = fk_cons_val(c->luma << 1, r);
+    r = fk_cons_val(c->h << 1, r);
+    r = fk_cons_val(c->w << 1, r);
+    free(c);
+    return r;
+}
+/* ── audio LOOPBACK (waveOut render + waveIn capture): the body speaks a known tone through
+ * the speakers and hears itself through the mic — the render+capture legs of the speech
+ * loopback carrier contract, on this cell's own metal. Layout: silence quarter, 440Hz square
+ * burst half, silence quarter. Sixteen per-window energies + burst/silence means + score
+ * cross into Form as integers; no waveform is retained. Muted speakers score low, honestly. */
+extern unsigned int waveOutOpen(void **, unsigned int, const struct fk_waveformatex *,
+                                unsigned long long, unsigned long long, unsigned long long);
+extern unsigned int waveOutClose(void *);
+extern unsigned int waveOutPrepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveOutUnprepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveOutWrite(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveOutReset(void *);
+extern unsigned int waveOutSetVolume(void *, unsigned int);
+static long long fk_audio_loopback(long long ms) {
+    if (ms < 500) {
+        ms = 500;
+    }
+    if (ms > 5000) {
+        ms = 5000;
+    }
+    struct fk_waveformatex fmt;
+    fmt.wFormatTag = 1;
+    fmt.nChannels = 1;
+    fmt.nSamplesPerSec = 16000;
+    fmt.wBitsPerSample = 16;
+    fmt.nBlockAlign = 2;
+    fmt.nAvgBytesPerSec = 32000;
+    fmt.cbSize = 0;
+    long long nsamp = ms * 16;
+    short *play = malloc((unsigned long)(nsamp * 2));
+    short *cap = malloc((unsigned long)(nsamp * 2));
+    if (play == 0 || cap == 0) {
+        free(play);
+        free(cap);
+        return 1;
+    }
+    long long q = nsamp / 4;
+    long long i;
+    for (i = 0; i < nsamp; i = i + 1) {
+        if (i >= q && i < q * 3) {
+            /* 440Hz square at 16kHz: half-period ~18 samples */
+            play[i] = ((i / 18) & 1) ? (short)6000 : (short)-6000;
+        } else {
+            play[i] = 0;
+        }
+        cap[i] = 0;
+    }
+    void *hin = 0;
+    if (waveInOpen(&hin, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: loopback mic open refused\n");
+        free(play);
+        free(cap);
+        return 1;
+    }
+    void *hout = 0;
+    if (waveOutOpen(&hout, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: loopback speaker open refused\n");
+        waveInClose(hin);
+        free(play);
+        free(cap);
+        return 1;
+    }
+    struct fk_wavehdr hc;
+    hc.lpData = (char *)cap;
+    hc.dwBufferLength = (unsigned int)(nsamp * 2);
+    hc.dwBytesRecorded = 0;
+    hc.dwUser = 0;
+    hc.dwFlags = 0;
+    hc.dwLoops = 0;
+    hc.lpNext = 0;
+    hc.reserved = 0;
+    struct fk_wavehdr hp;
+    hp.lpData = (char *)play;
+    hp.dwBufferLength = (unsigned int)(nsamp * 2);
+    hp.dwBytesRecorded = 0;
+    hp.dwUser = 0;
+    hp.dwFlags = 0;
+    hp.dwLoops = 0;
+    hp.lpNext = 0;
+    hp.reserved = 0;
+    waveInPrepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInAddBuffer(hin, &hc, (unsigned int)sizeof hc);
+    waveInStart(hin);
+    waveOutPrepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutWrite(hout, &hp, (unsigned int)sizeof hp);
+    long long waited = 0;
+    while ((hc.dwFlags & 1) == 0 && waited < ms + 3000) {
+        Sleep(50);
+        waited = waited + 50;
+    }
+    waveOutReset(hout);
+    waveOutUnprepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutClose(hout);
+    waveInReset(hin);
+    waveInUnprepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInClose(hin);
+    long long got = (long long)hc.dwBytesRecorded / 2;
+    long long wen[16];
+    long long w;
+    for (w = 0; w < 16; w = w + 1) {
+        long long lo = got * w / 16;
+        long long hi = got * (w + 1) / 16;
+        long long sum = 0;
+        for (i = lo; i < hi; i = i + 1) {
+            long long s = (long long)cap[i];
+            sum = sum + (s < 0 ? 0 - s : s);
+        }
+        wen[w] = (hi > lo) ? sum / (hi - lo) : 0;
+    }
+    free(play);
+    free(cap);
+    long long burst = 0;
+    long long silen = 0;
+    for (w = 0; w < 16; w = w + 1) {
+        if (w >= 4 && w < 12) {
+            burst = burst + wen[w];
+        } else {
+            silen = silen + wen[w];
+        }
+    }
+    burst = burst / 8;
+    silen = silen / 8;
+    long long score = burst * 100 / (silen + 1);
+    printf("sense: loopback rendered %lld ms, captured %lld samples — burst-energy=%lld "
+           "silence-energy=%lld score=%lld — measured, not retained\n",
+           ms, got, burst, silen, score);
+    long long r = 1;
+    for (w = 16; w > 0; w = w - 1) {
+        r = fk_cons_val(wen[w - 1] << 1, r);
+    }
+    r = fk_cons_val(score << 1, r);
+    r = fk_cons_val(burst << 1, r);
+    r = fk_cons_val(silen << 1, r);
+    r = fk_cons_val(got << 1, r);
+    return r;
+}
+/* ── wav AIR-LOOPBACK (waveOut plays a 16kHz mono PCM wav while waveIn captures): the
+ * composed speech leg — spoken truth through the speakers, heard by the mic. The capture IS
+ * written (out-path, canonical 44-byte header) because the local STT oracle must transcribe
+ * it; the calling recipe consumes the file after measuring (fs_remove) — transient teacher
+ * material, the macOS carrier's own pattern, never silent retention. Returns
+ * (played captured peak mean-abs); nil on refusal. */
+static long long fk_wav_loopback(const char *inpath, const char *outpath) {
+    int fd = open(inpath, O_RDBIN);
+    if (fd < 0) {
+        printf("sense: air-loopback input wav missing\n");
+        return 1;
+    }
+    long long incap = 4000000;
+    char *inbuf = malloc((unsigned long)incap);
+    if (inbuf == 0) {
+        close(fd);
+        return 1;
+    }
+    long long inlen = 0;
+    long long g;
+    while (inlen < incap && (g = read(fd, inbuf + inlen, 65536)) > 0) {
+        inlen = inlen + g;
+    }
+    close(fd);
+    /* find the data chunk (SAPI writes RIFF/WAVE with fmt then data) */
+    long long doff = -1;
+    long long i;
+    for (i = 12; i + 8 < inlen; i = i + 1) {
+        if (inbuf[i] == 'd' && inbuf[i + 1] == 'a' && inbuf[i + 2] == 't' &&
+            inbuf[i + 3] == 'a') {
+            doff = i + 8;
+            break;
+        }
+    }
+    if (doff < 0) {
+        printf("sense: air-loopback input wav has no data chunk\n");
+        free(inbuf);
+        return 1;
+    }
+    long long dlen = (long long)(unsigned char)inbuf[doff - 4] |
+                     ((long long)(unsigned char)inbuf[doff - 3] << 8) |
+                     ((long long)(unsigned char)inbuf[doff - 2] << 16) |
+                     ((long long)(unsigned char)inbuf[doff - 1] << 24);
+    if (dlen <= 0 || doff + dlen > inlen) {
+        dlen = inlen - doff;
+    }
+    long long nplay = dlen / 2;
+    if (nplay < 1600 || nplay > 160000) {
+        printf("sense: air-loopback wav length out of range (%lld samples)\n", nplay);
+        free(inbuf);
+        return 1;
+    }
+    long long ncap = nplay + 8000; /* half-second tail */
+    short *cap = malloc((unsigned long)(ncap * 2));
+    if (cap == 0) {
+        free(inbuf);
+        return 1;
+    }
+    struct fk_waveformatex fmt;
+    fmt.wFormatTag = 1;
+    fmt.nChannels = 1;
+    fmt.nSamplesPerSec = 16000;
+    fmt.nAvgBytesPerSec = 32000;
+    fmt.nBlockAlign = 2;
+    fmt.wBitsPerSample = 16;
+    fmt.cbSize = 0;
+    void *hin = 0;
+    if (waveInOpen(&hin, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: air-loopback mic open refused\n");
+        free(inbuf);
+        free(cap);
+        return 1;
+    }
+    void *hout = 0;
+    if (waveOutOpen(&hout, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: air-loopback speaker open refused\n");
+        waveInClose(hin);
+        free(inbuf);
+        free(cap);
+        return 1;
+    }
+    /* pin THIS SESSION's playback to full scale (never touches the user's master volume) */
+    waveOutSetVolume(hout, 0xFFFFFFFFu);
+    struct fk_wavehdr hc;
+    hc.lpData = (char *)cap;
+    hc.dwBufferLength = (unsigned int)(ncap * 2);
+    hc.dwBytesRecorded = 0;
+    hc.dwUser = 0;
+    hc.dwFlags = 0;
+    hc.dwLoops = 0;
+    hc.lpNext = 0;
+    hc.reserved = 0;
+    struct fk_wavehdr hp;
+    hp.lpData = inbuf + doff;
+    hp.dwBufferLength = (unsigned int)(nplay * 2);
+    hp.dwBytesRecorded = 0;
+    hp.dwUser = 0;
+    hp.dwFlags = 0;
+    hp.dwLoops = 0;
+    hp.lpNext = 0;
+    hp.reserved = 0;
+    waveInPrepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInAddBuffer(hin, &hc, (unsigned int)sizeof hc);
+    waveInStart(hin);
+    waveOutPrepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutWrite(hout, &hp, (unsigned int)sizeof hp);
+    long long ms = ncap / 16;
+    long long waited = 0;
+    while ((hc.dwFlags & 1) == 0 && waited < ms + 3000) {
+        Sleep(50);
+        waited = waited + 50;
+    }
+    waveOutReset(hout);
+    waveOutUnprepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutClose(hout);
+    waveInReset(hin);
+    waveInUnprepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInClose(hin);
+    free(inbuf);
+    long long got = (long long)hc.dwBytesRecorded / 2;
+    long long peak = 0;
+    long long sumabs = 0;
+    for (i = 0; i < got; i = i + 1) {
+        long long s = (long long)cap[i];
+        long long a = s < 0 ? 0 - s : s;
+        if (a > peak) {
+            peak = a;
+        }
+        sumabs = sumabs + a;
+    }
+    long long meanabs = got > 0 ? sumabs / got : 0;
+    /* auto-gain for the oracle: a quiet mic (low input slider) yields peaks far below full
+     * scale; scale the capture so its peak sits near -3dB (26000), capped at 64x. The content
+     * is untouched — only the level; peak/mean above report the RAW capture honestly. */
+    if (peak > 0 && peak < 26000) {
+        long long gain = 26000 / peak;
+        if (gain > 64) {
+            gain = 64;
+        }
+        if (gain > 1) {
+            for (i = 0; i < got; i = i + 1) {
+                long long s = (long long)cap[i] * gain;
+                if (s > 32767) {
+                    s = 32767;
+                }
+                if (s < -32768) {
+                    s = -32768;
+                }
+                cap[i] = (short)s;
+            }
+        }
+    }
+    /* write the capture for the oracle: canonical 44-byte header + data */
+    int wfd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (wfd < 0) {
+        printf("sense: air-loopback capture write refused\n");
+        free(cap);
+        return 1;
+    }
+    unsigned char hdr[44];
+    long long db = got * 2;
+    long long riff = 36 + db;
+    hdr[0] = 'R';
+    hdr[1] = 'I';
+    hdr[2] = 'F';
+    hdr[3] = 'F';
+    hdr[4] = (unsigned char)(riff & 255);
+    hdr[5] = (unsigned char)((riff >> 8) & 255);
+    hdr[6] = (unsigned char)((riff >> 16) & 255);
+    hdr[7] = (unsigned char)((riff >> 24) & 255);
+    hdr[8] = 'W';
+    hdr[9] = 'A';
+    hdr[10] = 'V';
+    hdr[11] = 'E';
+    hdr[12] = 'f';
+    hdr[13] = 'm';
+    hdr[14] = 't';
+    hdr[15] = ' ';
+    hdr[16] = 16;
+    hdr[17] = 0;
+    hdr[18] = 0;
+    hdr[19] = 0;
+    hdr[20] = 1;
+    hdr[21] = 0;
+    hdr[22] = 1;
+    hdr[23] = 0;
+    hdr[24] = (unsigned char)(16000 & 255);
+    hdr[25] = (unsigned char)((16000 >> 8) & 255);
+    hdr[26] = 0;
+    hdr[27] = 0;
+    hdr[28] = (unsigned char)(32000 & 255);
+    hdr[29] = (unsigned char)((32000 >> 8) & 255);
+    hdr[30] = 0;
+    hdr[31] = 0;
+    hdr[32] = 2;
+    hdr[33] = 0;
+    hdr[34] = 16;
+    hdr[35] = 0;
+    hdr[36] = 'd';
+    hdr[37] = 'a';
+    hdr[38] = 't';
+    hdr[39] = 'a';
+    hdr[40] = (unsigned char)(db & 255);
+    hdr[41] = (unsigned char)((db >> 8) & 255);
+    hdr[42] = (unsigned char)((db >> 16) & 255);
+    hdr[43] = (unsigned char)((db >> 24) & 255);
+    write(wfd, hdr, 44);
+    long long wr = 0;
+    while (wr < db) {
+        long long k = write(wfd, (char *)cap + wr, db - wr);
+        if (k <= 0) {
+            break;
+        }
+        wr = wr + k;
+    }
+    close(wfd);
+    free(cap);
+    printf("sense: air-loopback played %lld samples, captured %lld — peak=%lld mean-abs=%lld "
+           "(capture written for the oracle; the recipe consumes it)\n",
+           nplay, got, peak, meanabs);
+    long long r = 1;
+    r = fk_cons_val(meanabs << 1, r);
+    r = fk_cons_val(peak << 1, r);
+    r = fk_cons_val(got << 1, r);
+    r = fk_cons_val(nplay << 1, r);
+    return r;
 }
 #else
 static long long fk_mic_count(void) {
@@ -792,6 +1566,23 @@ static long long fk_cam_grab(long long i, const char *path) {
     (void)i;
     (void)path;
     return -1;
+}
+static long long fk_mic_capture(long long ms) {
+    (void)ms;
+    return 1;
+}
+static long long fk_cam_luma(long long timeout_ms) {
+    (void)timeout_ms;
+    return 1;
+}
+static long long fk_audio_loopback(long long ms) {
+    (void)ms;
+    return 1;
+}
+static long long fk_wav_loopback(const char *inpath, const char *outpath) {
+    (void)inpath;
+    (void)outpath;
+    return 1;
 }
 #endif
 static long long fk_sense_report(void) {
@@ -2484,10 +3275,14 @@ static long long fk_mesh_detect(void) {
  * thread per row, and compare BIT-EXACT to the CPU f32 downward right-fold (volatile blocks the CPU
  * FMA so both sides are two roundings). The driver's built-in PTX JIT is intrinsic to the GPU. */
 #if defined(_WIN32)
-static long long fk_cuda_matvec(void) {
+/* one dispatch, shared by the fixture witness (tag 232) and the general data door (tag 233):
+ * load the driver, JIT the Form-emitted PTX at -O0 (unfused), y = W.x one thread per row, then
+ * TEAR DOWN (mem/module/context — the fixture used to leak these per call). Returns 0 and fills
+ * y/gname on success; the negative step code of the first refusal otherwise. */
+static long long fk_cuda_go(const float *W, const float *x, float *y, unsigned rows, unsigned cols,
+                            char *gname, long long gcap) {
     void *h = LoadLibraryA("nvcuda.dll");
     if (h == 0) {
-        printf("cuda: nvcuda.dll not found\n");
         return -1;
     }
     typedef int (*F1)(unsigned);
@@ -2502,6 +3297,8 @@ static long long fk_cuda_matvec(void) {
     typedef int (*F10)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
                        void *, void **, void **);
     typedef int (*F11)(void);
+    typedef int (*F12)(unsigned long long);
+    typedef int (*F13)(void *);
     F1 cuInit = (F1)GetProcAddress(h, "cuInit");
     F2 cuDeviceGet = (F2)GetProcAddress(h, "cuDeviceGet");
     F3 cuDeviceGetName = (F3)GetProcAddress(h, "cuDeviceGetName");
@@ -2513,80 +3310,130 @@ static long long fk_cuda_matvec(void) {
     F9 cuMemcpyDtoH = (F9)GetProcAddress(h, "cuMemcpyDtoH_v2");
     F10 cuLaunchKernel = (F10)GetProcAddress(h, "cuLaunchKernel");
     F11 cuCtxSynchronize = (F11)GetProcAddress(h, "cuCtxSynchronize");
+    F12 cuMemFree = (F12)GetProcAddress(h, "cuMemFree_v2");
+    F13 cuModuleUnload = (F13)GetProcAddress(h, "cuModuleUnload");
+    F13 cuCtxDestroy = (F13)GetProcAddress(h, "cuCtxDestroy_v2");
     if (!cuInit || !cuCtxCreate || !cuModuleLoadDataEx || !cuLaunchKernel) {
-        printf("cuda: missing entry points\n");
         return -2;
     }
     if (cuInit(0) != 0) {
-        printf("cuda: cuInit failed\n");
         return -3;
     }
     int dev = 0;
     if (cuDeviceGet(&dev, 0) != 0) {
         return -4;
     }
-    char gname[256];
-    gname[0] = 0;
-    cuDeviceGetName(gname, 256, dev);
+    if (gname != 0 && gcap > 0) {
+        gname[0] = 0;
+        cuDeviceGetName(gname, (int)gcap, dev);
+    }
     void *ctx = 0;
     if (cuCtxCreate(&ctx, 0, dev) != 0) {
-        printf("cuda: ctx create failed\n");
         return -5;
     }
+    long long rc = 0;
+    void *mod = 0;
+    unsigned long long dW = 0, dX = 0, dY = 0;
     int fd = open("gpu/fptx-matvec.ptx", 0x8000);
     if (fd < 0) {
-        printf("cuda: gpu/fptx-matvec.ptx not found\n");
-        return -6;
-    }
-    static char ptx[131072];
-    long long pn = 0, g;
-    while ((g = read(fd, ptx + pn, 8192)) > 0) {
-        pn = pn + g;
-        if (pn > 120000) {
-            break;
+        rc = -6;
+    } else {
+        static char ptx[131072];
+        long long pn = 0, g;
+        while ((g = read(fd, ptx + pn, 8192)) > 0) {
+            pn = pn + g;
+            if (pn > 120000) {
+                break;
+            }
+        }
+        close(fd);
+        ptx[pn] = 0;
+        int jopt[1];
+        void *jval[1];
+        jopt[0] = 7;
+        jval[0] = (void *)0;
+        /* CU_JIT_OPTIMIZATION_LEVEL = 0 */
+        if (cuModuleLoadDataEx(&mod, ptx, 1, jopt, jval) != 0) {
+            rc = -7;
+            mod = 0;
         }
     }
-    close(fd);
-    ptx[pn] = 0;
-    int jopt[1];
-    void *jval[1];
-    jopt[0] = 7;
-    jval[0] = (void *)0;
-    /* CU_JIT_OPTIMIZATION_LEVEL = 0 */
-    void *mod = 0;
-    if (cuModuleLoadDataEx(&mod, ptx, 1, jopt, jval) != 0) {
-        printf("cuda: PTX JIT failed\n");
-        return -7;
-    }
     void *fn = 0;
-    if (cuModuleGetFunction(&fn, mod, "form_matvec_f32") != 0) {
-        printf("cuda: no form_matvec_f32\n");
-        return -8;
+    if (rc == 0 && cuModuleGetFunction(&fn, mod, "form_matvec_f32") != 0) {
+        rc = -8;
     }
+    if (rc == 0) {
+        cuMemAlloc(&dW, (unsigned long long)rows * cols * 4);
+        cuMemcpyHtoD(dW, W, (unsigned long long)rows * cols * 4);
+        cuMemAlloc(&dX, (unsigned long long)cols * 4);
+        cuMemcpyHtoD(dX, x, (unsigned long long)cols * 4);
+        cuMemAlloc(&dY, (unsigned long long)rows * 4);
+        cuMemcpyHtoD(dY, y, (unsigned long long)rows * 4);
+        void *args[5];
+        args[0] = &dW;
+        args[1] = &dX;
+        args[2] = &dY;
+        args[3] = &rows;
+        args[4] = &cols;
+        unsigned blocks = (rows + 255) / 256;
+        if (cuLaunchKernel(fn, blocks, 1, 1, 256, 1, 1, 0, 0, args, 0) != 0) {
+            rc = -9;
+        } else {
+            cuCtxSynchronize();
+            cuMemcpyDtoH(y, dY, (unsigned long long)rows * 4);
+        }
+    }
+    if (cuMemFree != 0) {
+        if (dW != 0) {
+            cuMemFree(dW);
+        }
+        if (dX != 0) {
+            cuMemFree(dX);
+        }
+        if (dY != 0) {
+            cuMemFree(dY);
+        }
+    }
+    if (mod != 0 && cuModuleUnload != 0) {
+        cuModuleUnload(mod);
+    }
+    if (cuCtxDestroy != 0) {
+        cuCtxDestroy(ctx);
+    }
+    return rc;
+}
+static void fk_cuda_say(long long rc) {
+    if (rc == -1) {
+        printf("cuda: nvcuda.dll not found\n");
+    } else if (rc == -2) {
+        printf("cuda: missing entry points\n");
+    } else if (rc == -3) {
+        printf("cuda: cuInit failed\n");
+    } else if (rc == -5) {
+        printf("cuda: ctx create failed\n");
+    } else if (rc == -6) {
+        printf("cuda: gpu/fptx-matvec.ptx not found\n");
+    } else if (rc == -7) {
+        printf("cuda: PTX JIT failed\n");
+    } else if (rc == -8) {
+        printf("cuda: no form_matvec_f32\n");
+    } else if (rc == -9) {
+        printf("cuda: launch failed\n");
+    }
+}
+/* the fixture witness (tag 232): fixed 3x4 W and 4-vec x, bit-exact vs the CPU two-rounding fold. */
+static long long fk_cuda_matvec(void) {
     unsigned rows = 3, cols = 4;
     float W[12] = {0.1f,  0.2f,  0.3f, 0.7f, 0.11f,     0.13f,
                    0.17f, 0.19f, 0.9f, 0.8f, 0.123456f, 0.654321f};
     float X[4] = {0.5f, 0.25f, 0.125f, 0.333333f};
     float Y[3] = {0.0f, 0.0f, 0.0f};
-    unsigned long long dW = 0, dX = 0, dY = 0;
-    cuMemAlloc(&dW, 48);
-    cuMemcpyHtoD(dW, W, 48);
-    cuMemAlloc(&dX, 16);
-    cuMemcpyHtoD(dX, X, 16);
-    cuMemAlloc(&dY, 12);
-    cuMemcpyHtoD(dY, Y, 12);
-    void *args[5];
-    args[0] = &dW;
-    args[1] = &dX;
-    args[2] = &dY;
-    args[3] = &rows;
-    args[4] = &cols;
-    if (cuLaunchKernel(fn, 1, 1, 1, rows, 1, 1, 0, 0, args, 0) != 0) {
-        printf("cuda: launch failed\n");
-        return -9;
+    char gname[256];
+    long long rc = fk_cuda_go(W, X, Y, rows, cols, gname, 256);
+    if (rc < 0) {
+        fk_cuda_say(rc);
+        return rc;
     }
-    cuCtxSynchronize();
-    cuMemcpyDtoH(Y, dY, 12);
     printf("GPU: %s  CUDA driver-API PTX-JIT -O0 (nvcuda.dll; no python, no nvcc, no nvrtc)\n",
            gname);
     printf(
@@ -2619,9 +3466,104 @@ static long long fk_cuda_matvec(void) {
            (agree == (long long)rows) ? "true" : "false");
     return agree;
 }
+/* the GENERAL data door (tag 233) the RTX receipts named as the missing rung:
+ * (cuda_matvec_f32 W x) — W a flat Form list of rows*cols numbers, x a list of cols numbers.
+ * Dispatches y = W.x on the GPU through the same Form-emitted PTX, recomputes the same downward
+ * two-rounding f32 fold on the CPU (volatile blocks FMA), and returns (agree y0 .. y_rows-1):
+ * the metal receipt rides IN the returned value, not beside it. nil (empty list) on refusal. */
+static long long fk_cons_val(long long h, long long t);
+static long long fk_list_len_c(long long v) {
+    long long p = v >> 1;
+    long long n = 0;
+    while (p >= 1 && p <= fk_hp) {
+        n = n + 1;
+        p = fk_ht[p] >> 1;
+    }
+    return n;
+}
+static long long fk_list_to_f32(long long v, float *out, long long cap) {
+    long long p = v >> 1;
+    long long n = 0;
+    while (p >= 1 && p <= fk_hp && n < cap) {
+        out[n] = (float)fk_num(fk_hh[p]);
+        n = n + 1;
+        p = fk_ht[p] >> 1;
+    }
+    return n;
+}
+static long long fk_cuda_matvec_f32(long long wv, long long xv) {
+    long long wn = fk_list_len_c(wv);
+    long long xn = fk_list_len_c(xv);
+    if (xn < 1 || wn < xn || (wn % xn) != 0 || wn > 4194304) {
+        return 1;
+    }
+    unsigned cols = (unsigned)xn;
+    unsigned rows = (unsigned)(wn / xn);
+    float *W = malloc((unsigned long)(wn * 4));
+    float *x = malloc((unsigned long)(xn * 4));
+    float *y = malloc((unsigned long)(rows * 4));
+    if (W == 0 || x == 0 || y == 0) {
+        free(W);
+        free(x);
+        free(y);
+        return 1;
+    }
+    fk_list_to_f32(wv, W, wn);
+    fk_list_to_f32(xv, x, xn);
+    long long i;
+    for (i = 0; i < (long long)rows; i = i + 1) {
+        y[i] = 0.0f;
+    }
+    char gname[256];
+    long long rc = fk_cuda_go(W, x, y, rows, cols, gname, 256);
+    if (rc < 0) {
+        fk_cuda_say(rc);
+        free(W);
+        free(x);
+        free(y);
+        return 1;
+    }
+    long long agree = 0;
+    for (i = 0; i < (long long)rows; i = i + 1) {
+        volatile float acc = 0.0f;
+        long long j;
+        for (j = (long long)cols - 1; j >= 0; j = j - 1) {
+            volatile float prod = W[i * (long long)cols + j] * x[j];
+            acc = prod + acc;
+        }
+        float cpu = acc;
+        union {
+            float f;
+            unsigned u;
+        } cg, cc;
+        cg.f = y[i];
+        cc.f = cpu;
+        if (cg.u == cc.u) {
+            agree = agree + 1;
+        }
+    }
+    printf("GPU: %s  cuda_matvec_f32 rows=%u cols=%u  BIT-EXACT %lld/%u\n", gname, rows, cols,
+           agree, rows);
+    long long lst = 1;
+    i = rows;
+    while (i > 0) {
+        i = i - 1;
+        lst = fk_cons_val(fk_fbox((double)y[i]), lst);
+    }
+    lst = fk_cons_val(agree << 1, lst);
+    free(W);
+    free(x);
+    free(y);
+    return lst;
+}
 #else
 static long long fk_cuda_matvec(void) {
     return -1;
+}
+static long long fk_cuda_matvec_f32(long long wv, long long xv) {
+    (void)wv;
+    (void)xv;
+    return 1;
 }
 #endif
 static int fk_sock_getaddrinfo(const char *h, const char *p, const struct addrinfo *i,
@@ -4083,7 +5025,21 @@ static long long fk_walk_body(long long i, long long fp) {
     }
 }
 static long long fk_walk_cold(long long t, long long i, long long fp);
+/* the honest eval-depth wall: measure REAL stack use and die SAYING SO before the host
+ * stack dies silently (witnessed 2026-07-01: exit 127, no output, three recipes in one
+ * day — the Windows main lacked the POSIX main's FORM_KERNEL_STACK_MB big-stack thread,
+ * now mirrored below). The mains raise the wall to reserve minus 2MB; the recipe-side
+ * home for deep recursion stays the same: make it tail or balanced. */
+static char *fk_stack_base = 0;
+static long long fk_stack_wall = 6 * 1024 * 1024;
 static long long fk_walk(long long i, long long fp) {
+    char fk_sp_probe;
+    if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
+        printf("fkwu: eval too deep — %lld bytes of walker stack (wall %lld). The recursion "
+               "needs to be tail or balanced; the wall is honest, the silent crash was not.\n",
+               (long long)(fk_stack_base - &fk_sp_probe), fk_stack_wall);
+        fk_die("eval-depth wall");
+    }
     long long t = fk_node[i][0];
     if (t < 0 || t >= FK_OPCODE_ARM_CAP) {
         fk_die("fk_walk: corrupt node tag");
@@ -5096,7 +6052,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (len <= 0) {
             return fk_sbuf("", 0);
         }
-        int fd = open(p, 0);
+        int fd = open(p, O_RDBIN);
         if (fd < 0) {
             return fk_sbuf("", 0);
         }
@@ -5117,7 +6073,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 63) {
         static char p[4096];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
-        int fd = open(p, 0);
+        int fd = open(p, O_RDBIN);
         if (fd < 0) {
             return fk_sbuf("", 0);
         }
@@ -5535,6 +6491,33 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 232) {
         return fk_cuda_matvec() << 1;
+    }
+    if (t == 233) {
+        long long w233 = fk_walk(fk_node[i][1], fp);
+        fk_vp(w233);
+        long long x233 = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_cuda_matvec_f32(fk_vs[fk_vsp], x233);
+    }
+    if (t == 234) {
+        return fk_mic_capture(fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 235) {
+        return fk_cam_luma(fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 236) {
+        return fk_audio_loopback(fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 237) {
+        static char p237a[4096];
+        static char p237b[4096];
+        long long a237 = fk_walk(fk_node[i][1], fp);
+        fk_vp(a237);
+        long long b237 = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        fk_cstr(fk_vs[fk_vsp], p237a, 4096);
+        fk_cstr(b237, p237b, 4096);
+        return fk_wav_loopback(p237a, p237b);
     }
     if (t == 200) {
         static char p200[4096];
@@ -8644,6 +9627,8 @@ static int fk_run_feval(const char *path) {
     return 0;
 }
 static int fk_run(int argc, char **argv) {
+    char fk_stack_here;
+    fk_stack_base = &fk_stack_here;
     if (argc < 2) {
         return 1;
     }
@@ -8768,8 +9753,41 @@ static int fk_run(int argc, char **argv) {
     return 0;
 }
 #if defined(_WIN32)
+/* the same law as the POSIX main below: the walker runs on a big explicit thread stack
+ * (FORM_KERNEL_STACK_MB, default 256MB). The bare `return fk_run(...)` ran on the OS
+ * default 1MB and died silently (exit 127, no output) at ~120 recursion levels — the
+ * platform seam the 2026-07-01 depth-wall repairs were patching around, healed at its
+ * root. 0x00010000 = STACK_SIZE_PARAM_IS_A_RESERVATION. */
+extern int atoi(const char *);
+static int fk_run_argc_w;
+static char **fk_run_argv_w;
+static int fk_run_ret_w;
+static unsigned int fk_run_thunk_w(void *p) {
+    (void)p;
+    fk_run_ret_w = fk_run(fk_run_argc_w, fk_run_argv_w);
+    return 0;
+}
 int main(int argc, char **argv) {
-    return fk_run(argc, argv);
+    fk_run_argc_w = argc;
+    fk_run_argv_w = argv;
+    unsigned long long mb = 256;
+    char *e = getenv("FORM_KERNEL_STACK_MB");
+    if (e) {
+        int v = atoi(e);
+        if (v > 0) {
+            mb = (unsigned long long)v;
+        }
+    }
+    fk_stack_wall = (long long)mb * 1024 * 1024 - 2 * 1024 * 1024;
+    void *th = CreateThread((void *)0, mb * 1024ULL * 1024ULL, fk_run_thunk_w, (void *)0,
+                            0x00010000u, (unsigned int *)0);
+    if (th == 0) {
+        fk_stack_wall = 6 * 1024 * 1024;
+        return fk_run(argc, argv);
+    }
+    WaitForSingleObject(th, 0xFFFFFFFFu);
+    CloseHandle(th);
+    return fk_run_ret_w;
 }
 #else
 extern char *getenv(const char *);
@@ -8801,6 +9819,7 @@ int main(int argc, char **argv) {
             mb = (unsigned long)v;
         }
     }
+    fk_stack_wall = (long long)mb * 1024 * 1024 - 2 * 1024 * 1024;
     fk_pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setstacksize(&at, mb * 1024UL * 1024UL);
