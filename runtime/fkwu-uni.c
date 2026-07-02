@@ -4379,6 +4379,14 @@ static long long fk_walk(long long i, long long fp) {
             return 0;
         }
         if (fk_nkind[ni49] == 1) {
+            /* a trivial bool (node_type 3) stores an interning sentinel in
+               fk_nval so true/false are distinct interned nodes; node_value
+               must return the BOOLEAN, not the sentinel. nid[3] holds 1/0;
+               return it tagged (v<<1) to equal the true/false literals
+               (which lower to fk_smklit(1)/fk_smklit(0) -> 2/0). */
+            if (fk_nid[ni49][2] == 3) {
+                return fk_nid[ni49][3] << 1;
+            }
             return fk_nval[ni49];
         }
         return 0;
