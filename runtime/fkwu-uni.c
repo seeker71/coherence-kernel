@@ -6092,6 +6092,38 @@ static void fk_bd_pop(void) {
         fk_bd_top = fk_bd_top - 1;
     }
 }
+/* A nested (defn ...) resets fk_bd_top to 0 so its own body can't accidentally
+ * resolve a caller-frame slot (a function has no access to its caller's locals).
+ * That reset is a WRITE-CURSOR reset into shared fixed arrays, not a true stack
+ * push/pop -- so the nested defn's own fk_bd_push calls physically overwrite
+ * fk_bd_s/fk_bd_n/fk_bd_off at indices 0.. with its own bindings. Restoring just
+ * fk_bd_top afterward brought the COUNT back but not the DATA already clobbered
+ * at those indices -- every name the enclosing do had bound became silently
+ * unlookupable (degrading to the unbound-name default, 0) for the rest of that
+ * do's own parsing. These two helpers save/restore the actual slice, not just
+ * the pointer. (Ported from sibling branch commit f99d3232.) */
+static long long fk_bd_save_s[128], fk_bd_save_n[128], fk_bd_save_off[128];
+static long long fk_bd_save(void) {
+    long long top = fk_bd_top;
+    long long i = 0;
+    while (i < top) {
+        fk_bd_save_s[i] = fk_bd_s[i];
+        fk_bd_save_n[i] = fk_bd_n[i];
+        fk_bd_save_off[i] = fk_bd_off[i];
+        i = i + 1;
+    }
+    return top;
+}
+static void fk_bd_restore(long long top) {
+    long long i = 0;
+    while (i < top) {
+        fk_bd_s[i] = fk_bd_save_s[i];
+        fk_bd_n[i] = fk_bd_save_n[i];
+        fk_bd_off[i] = fk_bd_save_off[i];
+        i = i + 1;
+    }
+    fk_bd_top = top;
+}
 static long long fk_parse_do(void);
 /* stone 4: a function table. Each top-level (defn name ...) gets its own fn-index (>=1); a call to
  * a registered name lowers to tag 12 (call-by-index, single-arg). A non-defn top form is the root
@@ -6149,6 +6181,10 @@ static long long fk_sparse(void) {
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
+            /* SCOPE FIX: save/restore the enclosing do's live let-bindings around
+             * this nested defn's own frame (see fk_bd_save above; sibling f99d3232). */
+            long long fk_bd_saved_top = fk_bd_save();
+            long long fk_bd_saved_maxslot = fk_maxslot;
             fk_bd_top = 0;
             fk_maxslot = 0;
             fk_bd_push(as2, alen, 0);
@@ -6160,6 +6196,8 @@ static long long fk_sparse(void) {
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
+            fk_bd_restore(fk_bd_saved_top);
+            fk_maxslot = fk_bd_saved_maxslot;
             return body;
         }
         if (fk_sym_eq(s, hn, "do")) {
@@ -6756,6 +6794,10 @@ static void fk_parse_top(void) {
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_LPAREN) {
                 fk_spos = fk_spos + 1;
             }
+            /* SCOPE FIX (same as fk_sparse's defn arm above): save/restore the
+             * enclosing scope's live bindings around this defn's frame (f99d3232). */
+            long long fk_bd_saved_top = fk_bd_save();
+            long long fk_bd_saved_maxslot = fk_maxslot;
             fk_bd_top = 0;
             fk_maxslot = 0;
             long long na = 0;
@@ -6790,6 +6832,8 @@ static void fk_parse_top(void) {
             if (idx >= 0 && idx < FK_FN_CAP) {
                 fk_fn[idx] = body;
             }
+            fk_bd_restore(fk_bd_saved_top);
+            fk_maxslot = fk_bd_saved_maxslot;
             return;
         }
     }

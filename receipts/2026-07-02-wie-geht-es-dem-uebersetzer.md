@@ -1,5 +1,15 @@
 # 2026-07-02 — wie es dem Übersetzer geht: live gemessen, einarmig bezeugt
 
+> **KORREKTUR (gleiche Nacht, ~02:30):** Der Walker-Parserbruch war KEIN Mehrschrift-Problem.
+> Ein Workflow-Agent hat ihn wurzelbehandelt: eine ASCII-isierte Kopie der Baseline brach die
+> Walker GENAUSO — die wahre Wunde war EINE fehlende schliessende Klammer
+> (`learn/sanskrit-locale-baseline.fk:157`, 10 statt 11). Die drei "gebrochenen" Walker waren
+> die ehrlichen Zeugen, die eine missgeformte Datei ablehnten; fkwu schloss sie still am
+> Dateiende auto-zu — dieselbe Nachsicht, die diese Fehldiagnose in diese Quittung fliessen
+> liess. Klammer geheilt: der Übersetzer ist jetzt VIERFACH bezeugt (`302301001` auf
+> fkwu/Go/Rust/TS). Die str_len-Divergenz (3/3/3/1 auf `愿`) bleibt real und offen.
+> Siehe receipts/2026-07-02-deixis-strata-numbers-and-the-buried-wound.md.
+
 ## Boden
 
 ```sh
