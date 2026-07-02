@@ -107,6 +107,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "sense_mic_capture", 1, 234 },
   { "sense_cam_luma", 1, 235 },
   { "sense_audio_loopback", 1, 236 },
+  { "sense_wav_loopback", 2, 237 },
   { "file_open", 1, 133 },
   { "file_read", 2, 134 },
   { "file_close", 1, 135 },
