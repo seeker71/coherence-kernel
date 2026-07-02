@@ -35,3 +35,10 @@ witnessed in the framebuffer) → rung 6 (a benchmark with the rented model's ou
 receipt-alternatives). Each rung earns the next; no rung may be skipped by faking the destination.
 
 **The day this receipt reads `observed` is the day the mind has come home.** Until then: pending, and proud of it.
+
+**Update 2026-07-02:** rung 3a's **pattern** is witnessed — real trained generative weights (stories260K)
+loaded as recipe-data by the Form body, one full llama step walked natively at position 0, the token
+chosen from GPU-dispatched logits (RTX, 512/512 bit-exact) and watched in the framebuffer: `" Once"`
+(`receipts/2026-07-02-first-native-token.md`, Windows RTX cell). This is the smallest real 3a movement,
+not the zh-capable base this receipt asks for; rungs 3a-full, 3b, 4, 5, 6 stand exactly as written.
+Named next: RoPE trig for pos>0 (sin/cos as Form Taylor or asm), then the multi-token native loop.
