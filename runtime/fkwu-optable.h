@@ -106,6 +106,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "cuda_matvec_f32", 2, 233 },
   { "sense_mic_capture", 1, 234 },
   { "sense_cam_luma", 1, 235 },
+  { "sense_audio_loopback", 1, 236 },
   { "file_open", 1, 133 },
   { "file_read", 2, 134 },
   { "file_close", 1, 135 },
