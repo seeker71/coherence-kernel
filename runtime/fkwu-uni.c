@@ -9422,48 +9422,9 @@ static long long fk_jit_lower(long long f) {
     }
     return fk_jbp;
 }
-/* install fk_jb[0..n) executable and call it with an args array (tagged values). */
-static long long fk_native_call_args(const unsigned char *code, long long n, long long *args) {
-#if defined(_WIN32)
-    void *mem = VirtualAlloc(0, (unsigned long long)n, 0x3000, 0x04);
-    if (mem == 0) {
-        return fk_nothing;
-    }
-    long long k = 0;
-    while (k < n) {
-        ((unsigned char *)mem)[k] = code[k];
-        k = k + 1;
-    }
-    unsigned int old = 0;
-    VirtualProtect(mem, (unsigned long long)n, 0x20, &old);
-#else
-#if defined(__x86_64__) || defined(__amd64__)
-    void *mem = mmap(0, (unsigned long)n, 0x3, 0x1002, -1, 0);
-    if (mem == (void *)-1) {
-        return fk_nothing;
-    }
-    long long k = 0;
-    while (k < n) {
-        ((unsigned char *)mem)[k] = code[k];
-        k = k + 1;
-    }
-    if (mprotect(mem, (unsigned long)n, 0x5) != 0) {
-        return fk_nothing;
-    }
-    long long (*fn)(long long *) = (long long (*)(long long *))mem;
-    return fn(args);
-#else
-    (void)code;
-    (void)n;
-    (void)args;
-    return fk_nothing;
-#endif
-#endif
-#if defined(_WIN32)
-    long long (*fn)(long long *) = (long long (*)(long long *))mem;
-    return fn(args);
-#endif
-}
+/* (fk_native_call_args -- the one-shot install-and-call native carrier -- was removed 2026-07-02:
+ * its only caller was the --src JIT gate's install-failure `else`, and that branch is gone now that
+ * install-failure bails to the walker. On non-x86 it only ever returned the fk_nothing sentinel.) */
 /* install a crystallized image to an executable page ONCE; the caller caches the returned pointer
  * (no per-call VirtualAlloc). Returns 0 on failure. fk_natfn typedef'd earlier. */
 static fk_natfn fk_nat_install(const unsigned char *code, long long n) {
@@ -9712,12 +9673,6 @@ static int fk_run_src(const char *path, long long arg) {
                     fk_src_nat_frame[callee] = fk_jit_frame;
                     fk_nat_tried[callee] = 1;
                     /* already crystallized; ensure_native must not re-lower */
-                    fk_njit = fk_njit + 1;
-                    if (fk_conf("FK_JIT_WITNESS")) {
-                        printf(
-                            "[jit] fn%lld crystallized in-process: %lld bytes, njit=%lld (native dispatch)\n",
-                            callee, n, fk_njit);
-                    }
 
                     /* install the root native ONCE and cache its exec ptr, so a sub-call that comes
                      * BACK to this fn (mutual recursion: ev->od->ev) reaches it by DIRECT native
@@ -9727,6 +9682,15 @@ static int fk_run_src(const char *path, long long arg) {
                      * fk_jtramp raising fk_vsp, so melt relocates any cons. */
                     fk_nat_exec[callee] = fk_nat_install(img, n);
                     if (fk_nat_exec[callee] != 0) {
+                        /* count + announce only a REAL native dispatch: on a non-x86 host the install
+                         * fails and we bail to the walker below, so njit must not tick and the
+                         * witness must not claim a "native dispatch" that never happened. */
+                        fk_njit = fk_njit + 1;
+                        if (fk_conf("FK_JIT_WITNESS")) {
+                            printf(
+                                "[jit] fn%lld crystallized + installed native: %lld bytes, njit=%lld\n",
+                                callee, n, fk_njit);
+                        }
                         long long rv;
                         if (ac == fk_fnar[callee]) {
                             long long ai = 0;
