@@ -488,6 +488,65 @@ extern int unlink(const char *);
 extern int rename(const char *, const char *);
 extern int sprintf(char *, const char *, ...);
 extern char *getenv(const char *);
+/* ── config file (fkwu.conf in cwd), read ONCE and lazily. Replaces the FK_* / FORM_* / MESH_*
+ * env-var toggles: a config file is a durable, reviewable surface where scattered env vars are not.
+ * Absent file -> empty config -> every toggle at its default (recover, never die). Standard OS env
+ * vars we do not own (TMPDIR) stay on getenv. Line form: "KEY value" or "KEY=value"; bare "KEY"
+ * means on ("1"); "KEY 0" means off; '#' begins a comment. */
+#define FK_CONF_MAX 64
+static char fk_conf_k[FK_CONF_MAX][64];
+static char fk_conf_v[FK_CONF_MAX][256];
+static int fk_conf_n = 0;
+static int fk_conf_loaded = 0;
+static void fk_conf_load(void) {
+    if (fk_conf_loaded) { return; }
+    fk_conf_loaded = 1;
+    int fd = open("fkwu.conf", 0);
+    if (fd < 0) { return; }
+    static char cb[8192];
+    long long n = read(fd, cb, 8191);
+    close(fd);
+    if (n <= 0) { return; }
+    cb[n] = 0;
+    long long i = 0;
+    while (i < n && fk_conf_n < FK_CONF_MAX) {
+        while (i < n && (cb[i] == ' ' || cb[i] == '\t' || cb[i] == '\n' || cb[i] == '\r')) { i = i + 1; }
+        if (i >= n) { break; }
+        if (cb[i] == '#') { while (i < n && cb[i] != '\n') { i = i + 1; } continue; }
+        int kj = 0;
+        while (i < n && cb[i] != ' ' && cb[i] != '\t' && cb[i] != '=' && cb[i] != '\n' && cb[i] != '\r' && kj < 63) {
+            fk_conf_k[fk_conf_n][kj] = cb[i]; kj = kj + 1; i = i + 1;
+        }
+        fk_conf_k[fk_conf_n][kj] = 0;
+        while (i < n && (cb[i] == ' ' || cb[i] == '\t' || cb[i] == '=')) { i = i + 1; }
+        int vj = 0;
+        while (i < n && cb[i] != '\n' && cb[i] != '\r' && vj < 255) {
+            fk_conf_v[fk_conf_n][vj] = cb[i]; vj = vj + 1; i = i + 1;
+        }
+        while (vj > 0 && (fk_conf_v[fk_conf_n][vj - 1] == ' ' || fk_conf_v[fk_conf_n][vj - 1] == '\t')) { vj = vj - 1; }
+        fk_conf_v[fk_conf_n][vj] = 0;
+        if (vj == 0) { fk_conf_v[fk_conf_n][0] = '1'; fk_conf_v[fk_conf_n][1] = 0; }
+        if (kj > 0) { fk_conf_n = fk_conf_n + 1; }
+    }
+}
+/* fk_conf: config-file replacement for getenv on OUR toggles. Returns the value string, or 0 when
+ * the key is absent OR set to "0"/"" -- so `if (fk_conf("X"))` is on iff X is present and non-zero,
+ * matching the old env-presence semantics, and the FK_JIT `v[0] != '0'` check still holds. */
+static char *fk_conf(const char *key) {
+    fk_conf_load();
+    int i = 0;
+    while (i < fk_conf_n) {
+        int j = 0;
+        while (key[j] != 0 && fk_conf_k[i][j] != 0 && key[j] == fk_conf_k[i][j]) { j = j + 1; }
+        if (key[j] == 0 && fk_conf_k[i][j] == 0) {
+            char *v = fk_conf_v[i];
+            if (v[0] == 0 || (v[0] == '0' && v[1] == 0)) { return 0; }
+            return v;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
 static long long fk_rkey[FK_RECORD_CAP][FK_RECORD_MAX_KEYS];
 static long long fk_rval[FK_RECORD_CAP][FK_RECORD_MAX_KEYS];
 static long long fk_rcnt[FK_RECORD_CAP];
@@ -1882,7 +1941,7 @@ static long long fk_observe = -1;
 /* -1 = unread; 0 = off; 1 = on */
 static long long fk_observe_on(void) {
     if (fk_observe < 0) {
-        char *e = getenv("FK_OBSERVE");
+        char *e = fk_conf("FK_OBSERVE");
         fk_observe = (e && e[0] && e[0] != 48) ? 1 : 0;
     }
     return fk_observe;
@@ -2890,7 +2949,7 @@ static long long fk_sense_publish(long long port) {
     /* relay host: env MESH_RELAY=a.b.c.d (the Mac's field-relay), default 127.0.0.1 — cross-device.
      */
     unsigned int addr = 0x0100007f;
-    char *rl = getenv("MESH_RELAY");
+    char *rl = fk_conf("MESH_RELAY");
     if (rl != 0) {
         unsigned int o0 = 0, o1 = 0, o2 = 0, o3 = 0;
         long long k = 0;
@@ -4666,7 +4725,7 @@ static void fk_melt(void) {
     fk_hp = fk_nhp;
     fk_cap = ncap;
     fk_nmelt = fk_nmelt + 1;
-    if (getenv("FK_MELT_WITNESS")) {
+    if (fk_conf("FK_MELT_WITNESS")) {
         dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, fp=%lld, sp=%lld\n",
                 fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_fp, fk_sp);
     }
@@ -6090,7 +6149,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_nreads = fk_nreads + 1;
         int fd = open(p, O_RDBIN);
         if (fd < 0) {
-            if (getenv("FK_READ_WITNESS")) {
+            if (fk_conf("FK_READ_WITNESS")) {
                 long long sa63 = pv63 >> 1;
                 dprintf(2, "[read_file] OPEN FAILED at read #%lld: '%s' (handle=%lld sa=%lld sl=%lld so=%lld sp=%lld)\n",
                         fk_nreads, p, pv63, sa63, (sa63 >= 0 && sa63 < fk_sp) ? fk_sl[sa63] : -1,
@@ -6107,7 +6166,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 void *sb0 = fk_sb;
                 fk_sb = realloc(fk_sb, fk_scap_b);
                 fk_sb_check();
-                if (getenv("FK_READ_WITNESS")) {
+                if (fk_conf("FK_READ_WITNESS")) {
                     dprintf(2, "[read_file] pool grow -> %lld bytes, %p -> %p (sbp=%lld sp=%lld)\n", fk_scap_b, sb0, (void *)fk_sb, fk_sbp, fk_sp);
                 }
             }
@@ -8174,7 +8233,7 @@ static fk_natfn fk_ensure_native_ex(long long callee, long long *frame, int eage
         fk_src_nat_len[callee] = n;
         fk_src_nat_frame[callee] = fr;
         fk_njit = fk_njit + 1;
-        if (getenv("FK_JIT_WITNESS")) {
+        if (fk_conf("FK_JIT_WITNESS")) {
             printf("[jit] fn%lld crystallized: %lld bytes, njit=%lld (direct dispatch ready)\n",
                    callee, n, fk_njit);
         }
@@ -8897,7 +8956,7 @@ static void fk_jemit(long long i, int tail) {
                 cell = fk_node[cell][2];
             }
             if (cnt > 6) {
-                if (getenv("FK_JIT_WITNESS")) {
+                if (fk_conf("FK_JIT_WITNESS")) {
                     printf("[jit-bail] call arity %lld > 6 at node %lld\n", cnt, i);
                 }
                 fk_jit_ok = 0;
@@ -9015,7 +9074,7 @@ static void fk_jemit(long long i, int tail) {
 
         /* ── SELF-recursion (callee == self): native call/jmp, as in the #59 POC. Arity 1..3. */
         if (argc < 1) {
-            if (getenv("FK_JIT_WITNESS")) {
+            if (fk_conf("FK_JIT_WITNESS")) {
                 printf("[jit-bail] 0-arg self-recursion at node %lld\n", i);
             }
             fk_jit_ok = 0;
@@ -9124,7 +9183,7 @@ static void fk_jemit(long long i, int tail) {
         }
         return;
     }
-    if (getenv("FK_JIT_WITNESS")) {
+    if (fk_conf("FK_JIT_WITNESS")) {
         printf("[jit-bail] unsupported tag %lld at node %lld\n", t, i);
     }
     fk_jit_ok = 0;
@@ -9359,7 +9418,7 @@ static int fk_run_src(const char *path, long long arg) {
      * every top-level defn and report crystallize-vs-bail per fn. This is the payoff readout — how
      * much of a multi-fn bundle (e.g. form-eval) lowers whole, and which tags still bail. It
      * installs nothing and changes no result; it only measures fk_jit_lower over each body. */
-    if (getenv("FK_JIT_SCAN")) {
+    if (fk_conf("FK_JIT_SCAN")) {
         long long fi = 1;
         long long ok = 0;
         long long bail = 0;
@@ -9367,12 +9426,12 @@ static int fk_run_src(const char *path, long long arg) {
             long long n = fk_jit_lower(fi);
             if (n > 0) {
                 ok = ok + 1;
-                if (getenv("FK_JIT_SCAN_V")) {
+                if (fk_conf("FK_JIT_SCAN_V")) {
                     printf("[scan] fn%lld LOWERS (%lld bytes)\n", fi, n);
                 }
             } else {
                 bail = bail + 1;
-                if (getenv("FK_JIT_SCAN_V")) {
+                if (fk_conf("FK_JIT_SCAN_V")) {
                     printf("[scan] fn%lld BAILS\n", fi);
                 }
             }
@@ -9389,7 +9448,7 @@ static int fk_run_src(const char *path, long long arg) {
      * bit-identical to the walk. Any non-lowerable shape installs nothing and falls straight
      * through to fk_walk. */
     {
-        char *je = getenv("FK_JIT");
+        char *je = fk_conf("FK_JIT");
         long long want = (je && je[0] && je[0] != 48) ? 1 : 0;
         /* FK_JIT set and not "0" */
         if (want) {
@@ -9456,7 +9515,7 @@ static int fk_run_src(const char *path, long long arg) {
                     fk_nat_tried[callee] = 1;
                     /* already crystallized; ensure_native must not re-lower */
                     fk_njit = fk_njit + 1;
-                    if (getenv("FK_JIT_WITNESS")) {
+                    if (fk_conf("FK_JIT_WITNESS")) {
                         printf(
                             "[jit] fn%lld crystallized in-process: %lld bytes, njit=%lld (native dispatch)\n",
                             callee, n, fk_njit);
@@ -9661,9 +9720,9 @@ static int fk_run_feval(const char *path) {
         fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
     }
     {
-        char *je = getenv("FK_JIT");
+        char *je = fk_conf("FK_JIT");
         fk_feval_jit_on = (je && je[0] && je[0] != 48) ? 1 : 0;
-        char *jh = getenv("FK_JIT_HOT");
+        char *jh = fk_conf("FK_JIT_HOT");
         if (jh && jh[0]) {
             long long h = atoi(jh);
             if (h > 0) {
@@ -9831,7 +9890,7 @@ int main(int argc, char **argv) {
     fk_run_argc_w = argc;
     fk_run_argv_w = argv;
     unsigned long long mb = 256;
-    char *e = getenv("FORM_KERNEL_STACK_MB");
+    char *e = fk_conf("FORM_KERNEL_STACK_MB");
     if (e) {
         int v = atoi(e);
         if (v > 0) {
@@ -9872,7 +9931,7 @@ int main(int argc, char **argv) {
     fk_run_argc = argc;
     fk_run_argv = argv;
     unsigned long mb = 256;
-    char *e = getenv("FORM_KERNEL_STACK_MB");
+    char *e = fk_conf("FORM_KERNEL_STACK_MB");
     if (e) {
         int v = atoi(e);
         if (v > 0) {
