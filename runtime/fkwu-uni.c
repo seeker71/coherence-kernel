@@ -9726,39 +9726,46 @@ static int fk_run_src(const char *path, long long arg) {
                      * native↔native in constant stack — and the args frame fk_vs[0..) is rooted by
                      * fk_jtramp raising fk_vsp, so melt relocates any cons. */
                     fk_nat_exec[callee] = fk_nat_install(img, n);
-                    long long rv;
-                    if (fk_nat_exec[callee] != 0 && ac == fk_fnar[callee]) {
-                        long long ai = 0;
-                        while (ai < ac) {
-                            if (ai < FK_VALUE_STACK_CAP) {
-                                fk_vs[ai] = aargs[ai];
+                    if (fk_nat_exec[callee] != 0) {
+                        long long rv;
+                        if (ac == fk_fnar[callee]) {
+                            long long ai = 0;
+                            while (ai < ac) {
+                                if (ai < FK_VALUE_STACK_CAP) {
+                                    fk_vs[ai] = aargs[ai];
+                                }
+                                ai = ai + 1;
                             }
-                            ai = ai + 1;
-                        }
-                        rv = fk_jtramp(callee, 0, ac);
-                    } else if (fk_nat_exec[callee] != 0) {
-                        long long fr = fk_jit_frame;
-                        if (fr < ac) {
-                            fr = ac;
-                        }
-                        long long ai = 0;
-                        while (ai < fr) {
-                            if (ai < FK_VALUE_STACK_CAP) {
-                                fk_vs[ai] = (ai < ac) ? aargs[ai] : 0;
+                            rv = fk_jtramp(callee, 0, ac);
+                        } else {
+                            long long fr = fk_jit_frame;
+                            if (fr < ac) {
+                                fr = ac;
                             }
-                            ai = ai + 1;
+                            long long ai = 0;
+                            while (ai < fr) {
+                                if (ai < FK_VALUE_STACK_CAP) {
+                                    fk_vs[ai] = (ai < ac) ? aargs[ai] : 0;
+                                }
+                                ai = ai + 1;
+                            }
+                            long long save_vsp = fk_vsp;
+                            if (fr > fk_vsp && fr < FK_VALUE_STACK_CAP) {
+                                fk_vsp = fr;
+                            }
+                            rv = fk_nat_exec[callee](&fk_vs[0]);
+                            fk_vsp = save_vsp;
                         }
-                        long long save_vsp = fk_vsp;
-                        if (fr > fk_vsp && fr < FK_VALUE_STACK_CAP) {
-                            fk_vsp = fr;
-                        }
-                        rv = fk_nat_exec[callee](&fk_vs[0]);
-                        fk_vsp = save_vsp;
-                    } else {
-                        rv = fk_native_call_args(img, n, aargs);
+                        fk_pv(rv);
+                        return fk_nerr > 0 ? 1 : 0;
                     }
-                    fk_pv(rv);
-                    return fk_nerr > 0 ? 1 : 0;
+                    /* install failed: the crystallized x86 image cannot run on THIS host (non-x86 --
+                     * e.g. Apple Silicon arm64 -- or an exec page the OS denied under W^X). The old
+                     * `else` returned fk_native_call_args's fk_nothing SENTINEL as the program's
+                     * result -- a silent wrong answer on every non-x86 machine. Instead: fall
+                     * through to the walker below (fk_walk), byte-identical on every platform.
+                     * Crystallize is speed; correctness never needs it, and deopt to the walk is
+                     * always safe (the heat path fk_ensure_native_ex already bails this exact way). */
                 }
             }
         }
