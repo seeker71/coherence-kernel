@@ -6580,6 +6580,25 @@ static long long fk_skip_balanced(long long p) {
                 }
                 continue;
             }
+            /* string literals are opaque to the balance: a ( or ) inside
+               "..." is content, not structure. Without this guard a paren
+               inside any string desynchronized the prescan and hung the
+               parse (found 2026-07-02 recording a human's verbatim answer
+               containing ":)"). Mirrors the string guard the unknown-head
+               skip loop always had; \" stays inside the string. */
+            if (c == FK_CH_DQUOTE) {
+                p = p + 1;
+                while (p < fk_slen && fk_srctext[p] != FK_CH_DQUOTE) {
+                    if (fk_srctext[p] == FK_CH_BACKSLASH && p + 1 < fk_slen) {
+                        p = p + 1;
+                    }
+                    p = p + 1;
+                }
+                if (p < fk_slen) {
+                    p = p + 1;
+                }
+                continue;
+            }
             if (c == FK_CH_LPAREN) {
                 depth = depth + 1;
             } else if (c == FK_CH_RPAREN) {
