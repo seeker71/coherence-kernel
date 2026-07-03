@@ -4761,6 +4761,7 @@ static void fk_vp(long long v) {
 #define FK_PARSE_BUF_CAP 1048576 /* fk_buf: scratch buffer for deserializing the flattened .tbl format */
 static long long fk_fn_count;
 static long long fk_node_count;
+static long long fk_ast_full; /* set once when the AST node table overflows; halts the parse (fk_spos:=fk_slen) so the collect-and-continue recovery cannot spin re-minting sentinels forever. Reset per run. */
 static long long fk_fn[FK_FN_CAP];
 static long long fk_node[FK_AST_NODE_CAP][4];
 static char fk_buf[FK_PARSE_BUF_CAP];
@@ -7004,16 +7005,22 @@ static long long fk_smknode(long long t0, long long c1, long long c2, long long 
     fk_node_count = fk_node_count + 1;
     if (fk_node_count > FK_AST_NODE_CAP) {
         /* COMPILE-PHASE (parser allocator): program too large, not corruption.
-         * Diagnose, DON'T mint a new node -- clamp the count back to the cap and
-         * reuse the last valid slot so the current form yields SOMETHING and the
-         * top parse loop advances. Degrades to one repeated diagnostic only if
-         * literally every subsequent node also overflows -- still finite. The
-         * sentinel is a valid index (never OOB), so this is safe if fk_smknode is
-         * ever reached at runtime too. */
+         * DON'T mint a new node; clamp the count back and reuse the last valid slot
+         * (a valid index, never OOB, so this is safe at runtime too). Diagnose ONCE
+         * and HALT the parse by forcing EOF. Without the halt, a program whose parser
+         * mints unbounded nodes re-hits this forever now that collect-and-continue
+         * replaced the old fk_die -- MEASURED at 677,766 diagnostics in 6s on
+         * resource-port.fk, a CPU-spin, not an OOM. Forcing fk_spos=fk_slen terminates
+         * every parse loop (they all gate on fk_spos<fk_slen); the accumulated error
+         * then refuses the run. This restores the old fk_die's BOUND as a clean stop. */
         fk_node_count = FK_AST_NODE_CAP;
-        fk_diag(FK_DIAG_ERR, fk_spos,
-                "AST node table full at node %lld; program too large (raise FK_AST_NODE_CAP)",
-                (long long)FK_AST_NODE_CAP);
+        if (fk_ast_full == 0) {
+            fk_diag(FK_DIAG_ERR, fk_spos,
+                    "AST node table full at node %lld; program too large (raise FK_AST_NODE_CAP) -- halting parse",
+                    (long long)FK_AST_NODE_CAP);
+            fk_ast_full = 1;
+        }
+        fk_spos = fk_slen;
         return FK_AST_NODE_CAP - 1;
     }
     fk_node[k][0] = t0;
@@ -7347,6 +7354,40 @@ static long long fk_sparse(void) {
             long long tag = fk_optab[oi].tag;
             if (ar < 0) {
                 return fk_parse_variadic(tag);
+            }
+            if (ar > 3) {
+                /* arity-4+ ops (today only make_nodeid, tag 91) build a LIST-shaped node
+                 * (child [1] = a cons list of the args, per flt-nodeid4 + the tag-91
+                 * evaluator) that the generic 3-child parse path below CANNOT form -- the
+                 * --src parser has no lowering for them; they are flatten-only. Without
+                 * this case the 4th arg blocks the ')' check, fk_spos never advances, and
+                 * the parse spins to the AST cap (MEASURED: 677k diagnostics/6s on
+                 * resource-port.fk / shell-lower.fk). Diagnose PRECISELY, drain the balanced
+                 * form so the parser stays synced, and decline to nothing. */
+                fk_diag(FK_DIAG_ERR, s,
+                        "op '%.*s' (arity %lld) is flatten-only; the --src parser cannot lower a 4+-arg op -- flatten this source to a .tbl instead",
+                        (int)hn, fk_srctext + s, ar);
+                long long depth = 1;
+                while (fk_spos < fk_slen && depth > 0) {
+                    char cc = fk_srctext[fk_spos];
+                    if (cc == FK_CH_DQUOTE) {
+                        fk_spos = fk_spos + 1;
+                        while (fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_DQUOTE) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        if (fk_spos < fk_slen) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        continue;
+                    }
+                    if (cc == FK_CH_LPAREN) {
+                        depth = depth + 1;
+                    } else if (cc == FK_CH_RPAREN) {
+                        depth = depth - 1;
+                    }
+                    fk_spos = fk_spos + 1;
+                }
+                return fk_smknode(137, 0, 0, 0);
             }
             long long c1 = 0, c2 = 0, c3 = 0;
             if (ar >= 1) {
@@ -8050,6 +8091,7 @@ static int fk_run_src(const char *path, long long arg) {
     fk_arg_n = 0;
     fk_fname_n = 0;
     fk_node_count = 0;
+    fk_ast_full = 0;
     fk_bd_top = 0;
     fk_maxslot = 0;
     fk_nerr = 0;
@@ -8224,6 +8266,7 @@ static int fk_run_feval(const char *path) {
     fk_arg_n = 0;
     fk_fname_n = 0;
     fk_node_count = 0;
+    fk_ast_full = 0;
     fk_bd_top = 0;
     fk_maxslot = 0;
     fk_nerr = 0;
