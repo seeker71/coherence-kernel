@@ -1,0 +1,77 @@
+; native-edit.fk — the body's own file editor. Find/replace over strings, and a
+; SAFE unique-match file edit (read_file -> replace -> write_file_text), built
+; from the seed's string primitives. The native counterpart to the rented edit
+; tool: the body tends its own files rather than asking an outside hand.
+;
+; Two layers:
+;   - string layer (ne-index-of / ne-count / ne-replace-first / ne-replace-all)
+;     is pure Form data + arithmetic -> FOUR-WAY (the walkers run it on synthetic
+;     strings; proof in form-stdlib/tests/native-edit-band.fk).
+;   - file layer (ne-edit-unique / ne-edit-all) is fkwu-carrier (host I/O, like
+;     read_file/write_file_text) -> proven live by receipt, not four-way.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    ; ── string layer (four-way) ─────────────────────────────────────────────
+    ; ne-index-of: first index >= `from` at which `needle` occurs in `hay`; -1 if none.
+    (defn ne-idx-loop (hay needle from hlen nlen)
+        (if (le (add from nlen) hlen)
+            (if (str_eq (substring hay from (add from nlen)) needle)
+                from
+                (ne-idx-loop hay needle (add from 1) hlen nlen))
+            -1))
+    (defn ne-index-of (hay needle from)
+        (ne-idx-loop hay needle from (str_len hay) (str_len needle)))
+
+    ; ne-count: non-overlapping occurrences of `needle` in `hay` (0 for empty needle).
+    (defn ne-count-loop (hay needle from hlen nlen acc)
+        (do
+            (let i (ne-idx-loop hay needle from hlen nlen))
+            (if (eq i -1) acc
+                (ne-count-loop hay needle (add i nlen) hlen nlen (add acc 1)))))
+    (defn ne-count (hay needle)
+        (if (eq (str_len needle) 0) 0
+            (ne-count-loop hay needle 0 (str_len hay) (str_len needle) 0)))
+
+    ; ne-replace-first / ne-replace-all: left-to-right, non-overlapping; the inserted
+    ; `new` is never rescanned, so `new` containing `old` cannot loop.
+    (defn ne-replace-first (hay old new)
+        (do
+            (let i (ne-index-of hay old 0))
+            (if (eq i -1) hay
+                (str_concat (substring hay 0 i)
+                    (str_concat new (substring hay (add i (str_len old)) (str_len hay)))))))
+    (defn ne-replace-all (hay old new)
+        (do
+            (let i (ne-index-of hay old 0))
+            (if (eq i -1) hay
+                (str_concat (substring hay 0 i)
+                    (str_concat new
+                        (ne-replace-all (substring hay (add i (str_len old)) (str_len hay)) old new))))))
+
+    ; ── file layer (fkwu-carrier) ──────────────────────────────────────────
+    ; ne-edit-unique: replace `old` with `new` in the file at `path` ONLY when `old`
+    ; occurs EXACTLY once (the rented edit tool's exact-unique-match safety).
+    ;    1 = replaced;  -1 = not found (0 matches);  -2 = ambiguous (>1 match);
+    ;   -3 = write failed.  (A missing file reads as "" -> 0 matches -> -1.)
+    (defn ne-edit-unique (path old new)
+        (do
+            (let content (read_file path))
+            (let c (ne-count content old))
+            (if (eq c 0) -1
+                (if (lt 1 c) -2
+                    (do
+                        (let wrote (write_file_text path (ne-replace-first content old new)))
+                        (if (lt wrote 0) -3 1))))))
+
+    ; ne-edit-all: replace EVERY occurrence in the file (no uniqueness gate).
+    ;   count replaced (>=0);  -3 = write failed.
+    (defn ne-edit-all (path old new)
+        (do
+            (let content (read_file path))
+            (let c (ne-count content old))
+            (if (eq c 0) 0
+                (do
+                    (let wrote (write_file_text path (ne-replace-all content old new)))
+                    (if (lt wrote 0) -3 c))))))
