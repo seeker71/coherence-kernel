@@ -5899,6 +5899,21 @@ impl Kernel {
             k.source_attr.insert(nid, (file_id, line, col));
             Value::Nid(nid)
         });
+        // fb_record — native provenance primitive (tag 128). core.fk's Form
+        // intern_node_at lowers to (fb_record (intern_node cat kids) file
+        // (line<<16|col)); fkwu (fourth-shim) and TS carry it natively, Go/Rust
+        // previously did not. Records attribution for an already-interned node
+        // and returns it. Args: (nid, file_string, packed_line_col).
+        self.register_native("fb_record", cat_witness(), |k, _, args| {
+            let nid = args[0].as_nid();
+            let file_nid = k.intern_string(args[1].as_str());
+            let file_id = file_nid.inst;
+            let packed = args[2].as_int();
+            let line = (packed >> 16) as u32;
+            let col = (packed & 0xFFFF) as u32;
+            k.source_attr.insert(nid, (file_id, line, col));
+            Value::Nid(nid)
+        });
         // node_source — read back a Recipe's source attribution.
         // Returns (list file_string line col) or empty list if none recorded.
         self.register_native("node_source", cat_witness(), |k, _, args| {

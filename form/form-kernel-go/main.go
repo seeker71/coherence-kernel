@@ -2389,6 +2389,35 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VList, List: args[0].List[1:]}
 	})
+	// sum — total a list; promote to float if any element is a float (matches
+	// Rust/TS sum + Python). Go previously lacked this native while Rust/TS/fkwu
+	// carried it, so recipes calling (sum xs) diverged go-only. Parity fix.
+	k.registerNative("sum", catMethod(), func(_ *Kernel, args []Value) Value {
+		xs := args[0].List
+		anyFloat := false
+		for _, v := range xs {
+			if v.Kind == VFloat {
+				anyFloat = true
+				break
+			}
+		}
+		if anyFloat {
+			total := 0.0
+			for _, v := range xs {
+				if v.Kind == VFloat {
+					total += v.Float
+				} else {
+					total += float64(v.Int)
+				}
+			}
+			return Value{Kind: VFloat, Float: total}
+		}
+		var total int64
+		for _, v := range xs {
+			total += v.Int
+		}
+		return Value{Kind: VInt, Int: total}
+	})
 	k.registerNative("len", catAccess(), func(_ *Kernel, args []Value) Value {
 		switch args[0].Kind {
 		case VList:
@@ -3794,6 +3823,25 @@ func (k *Kernel) registerNatives() {
 		fileID := NameID(fileNid.Inst)
 		line := uint32(args[3].AsInt())
 		col := uint32(args[4].AsInt())
+		k.sourceAttr[nid] = sourceLoc{FileID: fileID, Line: line, Col: col}
+		k.activeRoots = append(k.activeRoots, nid)
+		k.framebufferRoots = append(k.framebufferRoots, nid)
+		return Value{Kind: VNodeID, Nid: nid}
+	})
+	// fb_record — native provenance primitive (tag 128). core.fk's Form
+	// intern_node_at lowers to (fb_record (intern_node cat kids) file
+	// (line<<16|col)); fkwu (fourth-shim) and TS carry it natively, Go/Rust
+	// previously did not, so any recipe interning composites under core.fk's
+	// definition hit "unbound fb_record". Records attribution for an
+	// already-interned node and returns it — parity with the other arms.
+	// Args: (nid, file_string, packed_line_col=line<<16|col)
+	k.registerNative("fb_record", catWitness(), func(k *Kernel, args []Value) Value {
+		nid := args[0].AsNid()
+		fileNid := k.internString(args[1].Str)
+		fileID := NameID(fileNid.Inst)
+		packed := args[2].AsInt()
+		line := uint32(packed >> 16)
+		col := uint32(packed & 0xFFFF)
 		k.sourceAttr[nid] = sourceLoc{FileID: fileID, Line: line, Col: col}
 		k.activeRoots = append(k.activeRoots, nid)
 		k.framebufferRoots = append(k.framebufferRoots, nid)
