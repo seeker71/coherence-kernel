@@ -70,6 +70,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "read_file", 1, 63 },
   { "temp_dir", 0, 101 },
   { "write_file_text", 2, 104 },
+  { "write_file", 2, 104 },
   { "fs_list", 1, 132 },
   { "fs_is_dir", 1, 200 },
   { "source_inventory", 3, 202 },
