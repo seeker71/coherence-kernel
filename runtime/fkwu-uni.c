@@ -39,6 +39,7 @@ int dlclose(void *h) {
 extern int putchar(int);
 extern int printf(const char *, ...);
 extern int dprintf(int, const char *, ...);
+extern int vdprintf(int, const char *, __builtin_va_list);
 extern void *malloc(unsigned long);
 extern void *realloc(void *, unsigned long);
 extern long long read(int, void *, unsigned long);
@@ -63,6 +64,35 @@ static void fk_die(const char *msg) {
     write(2, "\n", 1);
     exit(1);
 }
+/* ── COMPILE-PHASE DIAGNOSTIC COLLECTOR ──────────────────────────────────────
+ * Two-phase law (2026-07-02): RUNTIME dies only when it truly cannot recover
+ * (OOM, corruption); COMPILE-TIME collects EVERY warning/error and CONTINUES,
+ * gcc/clang-style ("N error(s), M warning(s)"). fk_die stays the hard-stop for
+ * OOM/corruption; the parse-time capacity/arity dies below are MIS-PHASED and
+ * become fk_diag + best-effort recovery so the rest of the source is still
+ * checked and every defect surfaces in ONE pass (collect-and-continue), instead
+ * of halting on the first problem.
+ *
+ * fk_diag streams each diagnostic to fd 2 IMMEDIATELY in clang form
+ * ("fkwu:line:col: error|warning: msg"), computing line/col from a byte offset
+ * into fk_srctext (O(n) newline count -- no line counter is maintained during
+ * parse, and error paths are rare, so this is fine), then bumps the global
+ * error/warning counters. It is VARIADIC on purpose: the offender's name lives
+ * at every call site as a non-NUL-terminated (start,length) slice of fk_srctext
+ * (see the pre-existing unresolved-call witness that prints "'%.*s'",
+ * (int)hn, fk_srctext+s), never as a C string -- a fixed const char* signature
+ * would force a snprintf-into-scratch dance at every site. A negative off means
+ * "no source coordinate" (e.g. the .tbl loader reads fk_buf, not fk_srctext),
+ * so the line:col prefix is suppressed.  sev: 0 = warning, 1 = error. */
+#define FK_DIAG_WARN 0
+#define FK_DIAG_ERR  1
+static long long fk_nerr;        /* errors diagnosed this run   */
+static long long fk_nwarn;       /* warnings diagnosed this run */
+static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_TEXT_CAP */
+/* fk_diag / fk_diag_flush are DEFINED further down (right after fk_srctext /
+ * fk_spos / fk_slen are declared), where they can read the source buffer. */
+static void fk_diag(int sev, long long off, const char *fmt, ...);
+static void fk_diag_flush(void);
 /* Named capacities for the seed's fixed-size tables. Several numerically coincide
  * (many independent tables happen to be sized 65536) but are named SEPARATELY on
  * purpose: they are different index spaces (the node/AST table, the value stack,
@@ -6931,6 +6961,46 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
 static char fk_srctext[FK_SOURCE_TEXT_CAP];
 static long long fk_spos;
 static long long fk_slen;
+/* clang-style "fkwu:line:col: sev: msg". `off` is a byte offset into fk_srctext;
+ * a negative off suppresses the coordinate (for artifact-load diagnostics that
+ * read fk_buf, not source text). The variadic body delegates to vdprintf so
+ * callers pass "%.*s" slices of fk_srctext inline. */
+static void fk_diag(int sev, long long off, const char *fmt, ...) {
+    if (sev == FK_DIAG_ERR) {
+        fk_nerr = fk_nerr + 1;
+    } else {
+        fk_nwarn = fk_nwarn + 1;
+    }
+    if (off < 0) {
+        dprintf(2, "fkwu: %s: ", sev == FK_DIAG_ERR ? "error" : "warning");
+    } else {
+        long long line = 1, i = 0, lastnl = -1;
+        if (off > fk_slen) {
+            off = fk_slen;
+        }
+        while (i < off) {
+            if (fk_srctext[i] == FK_CH_LF) {
+                line = line + 1;
+                lastnl = i;
+            }
+            i = i + 1;
+        }
+        long long col = off - lastnl; /* lastnl=-1 on line 1 => col = off+1 */
+        dprintf(2, "fkwu:%lld:%lld: %s: ", line, col, sev == FK_DIAG_ERR ? "error" : "warning");
+    }
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    vdprintf(2, fmt, ap);
+    __builtin_va_end(ap);
+    dprintf(2, "\n");
+}
+/* Called ONCE, after parse completes and before execution begins: gcc-style
+ * tally. Silent when clean, so the default happy path prints nothing new. */
+static void fk_diag_flush(void) {
+    if (fk_nerr > 0 || fk_nwarn > 0) {
+        dprintf(2, "fkwu: %lld error(s), %lld warning(s)\n", fk_nerr, fk_nwarn);
+    }
+}
 static int fk_sws(char c) {
     return c == FK_CH_SPACE || c == FK_CH_TAB || c == FK_CH_LF || c == FK_CH_CR;
 }
@@ -7031,7 +7101,18 @@ static long long fk_smknode(long long t0, long long c1, long long c2, long long 
     long long k = fk_node_count;
     fk_node_count = fk_node_count + 1;
     if (fk_node_count > FK_AST_NODE_CAP) {
-        fk_die("fk_smknode: program too large for the AST node table");
+        /* COMPILE-PHASE (parser allocator): program too large, not corruption.
+         * Diagnose, DON'T mint a new node -- clamp the count back to the cap and
+         * reuse the last valid slot so the current form yields SOMETHING and the
+         * top parse loop advances. Degrades to one repeated diagnostic only if
+         * literally every subsequent node also overflows -- still finite. The
+         * sentinel is a valid index (never OOB), so this is safe if fk_smknode is
+         * ever reached at runtime too. */
+        fk_node_count = FK_AST_NODE_CAP;
+        fk_diag(FK_DIAG_ERR, fk_spos,
+                "AST node table full at node %lld; program too large (raise FK_AST_NODE_CAP)",
+                (long long)FK_AST_NODE_CAP);
+        return FK_AST_NODE_CAP - 1;
     }
     fk_node[k][0] = t0;
     fk_node[k][1] = c1;
@@ -7153,7 +7234,17 @@ static long long fk_bd_lookup(long long s, long long n) {
 }
 static void fk_bd_push(long long s, long long n, long long off) {
     if (fk_bd_top >= FK_BD_STACK_CAP) {
-        fk_die("fk_bd_push: parser binding-scope stack exhausted -- a silently dropped binding would miscompile variable references (wrong slot / unresolved name) with no witness. Raise FK_BD_STACK_CAP if a real program nests this deep.");
+        /* COMPILE-PHASE: too many bindings live in one scope. The old fear was a
+         * SILENT drop miscompiling references; answer it by dropping LOUDLY, not
+         * by halting. DECLINE the push (leave fk_bd_top at cap); this name then
+         * misses fk_bd_lookup and lowers to the unbound default 0 / unresolved-
+         * call witness -- axiom-5's existing recovery. The rest of the source is
+         * still fully checked. */
+        fk_diag(FK_DIAG_ERR, fk_spos,
+                "[scope-overflow] binding '%.*s' dropped: more than %d bindings in scope "
+                "(raise FK_BD_STACK_CAP); this name resolves to the unbound default",
+                (int)n, fk_srctext + s, (int)FK_BD_STACK_CAP);
+        return;
     }
     fk_bd_s[fk_bd_top] = s;
     fk_bd_n[fk_bd_top] = n;
@@ -7387,8 +7478,20 @@ static long long fk_sparse(void) {
              * args — same mechanism, any N. ar==0 parses no args (chain -1, inert); ar==1/2/8 are
              * the same code. */
             long long ar = (fidx >= 0 && fidx < FK_FN_CAP) ? fk_fnar[fidx] : 1;
+            long long over = 0;
             if (ar > 256) {
-                fk_die("fk_parse: direct call declared arity exceeds 256 -- collecting only 256 args would silently truncate the call and desync the parser.");
+                /* COMPILE-PHASE: over-arity is a diagnosable source error, not
+                 * corruption. Parse the first 256, then DRAIN the rest to the
+                 * matching ')' (the same balanced-paren skip the unresolved-head
+                 * arm below uses) so the parser stays synced and later forms are
+                 * still checked. The die's own fear -- truncate + desync -- is
+                 * answered by the drain, not by exit(1). */
+                fk_diag(FK_DIAG_ERR, fk_spos,
+                        "[arity-cap] direct call to '%.*s' declares %lld args (>256); "
+                        "parsing first 256, form truncated",
+                        (int)hn, fk_srctext + s, ar);
+                ar = 256;
+                over = 1;
             }
             long long argn[256];
             long long ai = 0;
@@ -7396,9 +7499,33 @@ static long long fk_sparse(void) {
                 argn[ai] = fk_sparse();
                 ai = ai + 1;
             }
-            fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
-                fk_spos = fk_spos + 1;
+            if (over) {
+                /* drain remaining operands to the matching close paren */
+                long long depth = 1;
+                while (fk_spos < fk_slen && depth > 0) {
+                    char cc = fk_srctext[fk_spos];
+                    if (cc == FK_CH_DQUOTE) {
+                        fk_spos = fk_spos + 1;
+                        while (fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_DQUOTE) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        if (fk_spos < fk_slen) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        continue;
+                    }
+                    if (cc == FK_CH_LPAREN) {
+                        depth = depth + 1;
+                    } else if (cc == FK_CH_RPAREN) {
+                        depth = depth - 1;
+                    }
+                    fk_spos = fk_spos + 1;
+                }
+            } else {
+                fk_sskip();
+                if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                    fk_spos = fk_spos + 1;
+                }
             }
             long long chain = -1;
             long long k = ai;
@@ -7433,9 +7560,32 @@ static long long fk_sparse(void) {
             }
             fk_sskip();
             if (iai >= 256 && fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_RPAREN) {
-                fk_die("fk_parse: indirect call arity exceeds 256 -- further args would be silently dropped and the parser desynced.");
-            }
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                /* COMPILE-PHASE: kept 256, DRAIN the rest to the matching ')'
+                 * (balanced skip) so fk_spos realigns and parsing continues --
+                 * same shape as the direct-call arm above. */
+                fk_diag(FK_DIAG_ERR, fk_spos,
+                        "[arity-cap] indirect call declares >256 args; kept 256, rest dropped");
+                long long depth = 1;
+                while (fk_spos < fk_slen && depth > 0) {
+                    char cc = fk_srctext[fk_spos];
+                    if (cc == FK_CH_DQUOTE) {
+                        fk_spos = fk_spos + 1;
+                        while (fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_DQUOTE) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        if (fk_spos < fk_slen) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        continue;
+                    }
+                    if (cc == FK_CH_LPAREN) {
+                        depth = depth + 1;
+                    } else if (cc == FK_CH_RPAREN) {
+                        depth = depth - 1;
+                    }
+                    fk_spos = fk_spos + 1;
+                }
+            } else if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             long long ichain = -1;
@@ -7490,7 +7640,15 @@ static long long fk_sparse(void) {
          * diagnostic that was missing (the ftanh-class bug). Go/Rust/TS hard-error on an unbound
          * head; fkwu recovers and says so, on every occurrence, unconditionally (no env gate). A
          * correct program with its preludes present never reaches here. */
-        dprintf(2, "[unresolved-call] '%.*s' matched no op/rewrite/fn/binding -- typo or missing prelude? Recovered to nothing (axiom-5); parse continues.\n", (int)hn, fk_srctext + s);
+        /* Route the pre-existing unresolved-call witness through the collector as
+         * an ERROR so it joins the gcc-style count -- but it STILL RECOVERS to
+         * tag-137 nothing (axiom-5: an offer a cell can't answer acks nothing).
+         * It is defeasible, so it does NOT die; the program still runs its
+         * recovered output, and the nonzero exit comes from the error count. */
+        fk_diag(FK_DIAG_ERR, s,
+                "[unresolved-call] '%.*s' matched no op/rewrite/fn/binding -- typo or "
+                "missing prelude? Recovered to nothing (axiom-5); parse continues",
+                (int)hn, fk_srctext + s);
         return fk_smknode(137, 0, 0, 0);
     }
 
@@ -7741,7 +7899,15 @@ static void fk_prescan_form(long long *pp) {
         long long idx = fk_defn_next;
         fk_defn_next = fk_defn_next + 1;
         if (fk_defn_next > FK_FN_CAP) {
-            fk_die("fk_prescan_defns: too many functions defined (fk_fn capacity exceeded)");
+            /* COMPILE-PHASE prescan: program-size limit, not corruption. Diagnose
+             * and STOP registering (the fk_fntop<CAP guard below already skips the
+             * write, and the idx<FK_FN_CAP guard skips the fk_fnar[idx] write);
+             * keep scanning so EVERY over-cap defn is reported, not just the first.
+             * Calls to unregistered names fall through to the unresolved-call
+             * witness -- already a recovery path. */
+            fk_diag(FK_DIAG_ERR, ns,
+                    "[fn-cap] defn '%.*s' at #%lld exceeds FK_FN_CAP (%d); not registered",
+                    (int)nlen, fk_srctext + ns, idx, (int)FK_FN_CAP);
         }
         if (fk_fntop < FK_TOP_FN_SYM_CAP) {
             fk_fnsym_s[fk_fntop] = ns;
@@ -7869,7 +8035,14 @@ static void fk_parse_top(void) {
                 idx = fk_defn_next;
                 fk_defn_next = fk_defn_next + 1;
                 if (fk_defn_next > FK_FN_CAP) {
-                    fk_die("fk_sparse: too many functions defined (fk_fn capacity exceeded)");
+                    /* COMPILE-PHASE: same capacity class as the prescan site.
+                     * Diagnose, skip storing this body (the idx<FK_FN_CAP guards
+                     * at fk_fnar[idx]/fk_fn[idx] below already decline the write),
+                     * but keep consuming the whole defn form so the parse loop
+                     * reaches the next top-level form. Every offender reported. */
+                    fk_diag(FK_DIAG_ERR, ns2,
+                            "[fn-cap] defn '%.*s' over FK_FN_CAP (%d); body not stored",
+                            (int)nlen2, fk_srctext + ns2, (int)FK_FN_CAP);
                 }
                 if (fk_fntop < FK_TOP_FN_SYM_CAP) {
                     fk_fnsym_s[fk_fntop] = ns2;
@@ -9346,6 +9519,7 @@ static int fk_run_src(const char *path, long long arg) {
         return 2;
     }
     long long g = 0;
+    fk_src_truncated = 0;
     for (;;) {
         long long got = read(fd, fk_srctext + g, FK_SOURCE_TEXT_CAP - 1 - g);
         if (got < 0) {
@@ -9359,7 +9533,17 @@ static int fk_run_src(const char *path, long long arg) {
         if (g >= FK_SOURCE_TEXT_CAP - 1) {
             char probe1;
             if (read(fd, &probe1, 1) > 0) {
-                fk_die("fk_run_src: program exceeds FK_SOURCE_TEXT_CAP -- refusing to run a truncated source");
+                /* COMPILE-PHASE input intake: the prefix that DID fit is a valid
+                 * NUL-terminated program (fk_srctext[g]=0 below), so CHECK it for
+                 * errors instead of a first-byte abort. But NEVER run the amputated
+                 * program (the N=100 cliff this die was added to kill): mark it
+                 * truncated so the parse-done boundary refuses to execute and
+                 * returns nonzero. Recovery here means "check more," not "run." */
+                fk_diag(FK_DIAG_ERR, (long long)(FK_SOURCE_TEXT_CAP - 1),
+                        "source exceeds FK_SOURCE_TEXT_CAP (%d bytes); checking only the first "
+                        "%d bytes and refusing to run the truncated program",
+                        (int)FK_SOURCE_TEXT_CAP, (int)(FK_SOURCE_TEXT_CAP - 1));
+                fk_src_truncated = 1;
             }
             break;
         }
@@ -9373,6 +9557,11 @@ static int fk_run_src(const char *path, long long arg) {
     fk_node_count = 0;
     fk_bd_top = 0;
     fk_maxslot = 0;
+    fk_nerr = 0;
+    fk_nwarn = 0;
+    /* NOTE: fk_src_truncated is set during the read loop ABOVE (already reset to 0
+     * before that loop), so it must NOT be cleared here or the truncation flag
+     * would be lost before the parse-done boundary reads it. */
     fk_sinit();
     /* stone 4: size the string pool (fk_scap_b>0) before any string op — the table path does this
      * when loading strings; the source path must too, else int_to_str/byte_to_str/str_concat spin
@@ -9413,6 +9602,15 @@ static int fk_run_src(const char *path, long long arg) {
     }
     fk_vs[0] = arg << 1;
     fk_vsp = 1;
+    /* ── PARSE DONE, EXECUTION BEGINS ── gcc-style tally, then the two-phase gate:
+     * an amputated source is a hard error -- surface the prefix's diagnostics but
+     * REFUSE to run (nonzero), never silently execute the truncated program. Any
+     * OTHER compile error still recovers INTO a runnable (if degraded) program and
+     * runs, carrying a nonzero EXIT via fk_nerr at the final return. */
+    fk_diag_flush();
+    if (fk_src_truncated) {
+        return 1;
+    }
 
     /* ── FK_JIT_SCAN (opt-in measurement, prints nothing on the default path): attempt to LOWER
      * every top-level defn and report crystallize-vs-bail per fn. This is the payoff readout — how
@@ -9502,7 +9700,7 @@ static int fk_run_src(const char *path, long long arg) {
                     unsigned char *img = malloc(n);
                     if (img == 0) {
                         fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
-                        return 0;
+                        return fk_nerr > 0 ? 1 : 0;
                     }
                     long long ci = 0;
                     while (ci < n) {
@@ -9560,13 +9758,13 @@ static int fk_run_src(const char *path, long long arg) {
                         rv = fk_native_call_args(img, n, aargs);
                     }
                     fk_pv(rv);
-                    return 0;
+                    return fk_nerr > 0 ? 1 : 0;
                 }
             }
         }
     }
     fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
-    return 0;
+    return fk_nerr > 0 ? 1 : 0;
 }
 /* --feval: run a recipe THROUGH form-eval (Form), not fk_walk directly. The C seed bootstraps the
  * form-eval meta-evaluator (read live from grammars/form-eval.fk); form-eval reads the recipe as a
@@ -9685,6 +9883,9 @@ static int fk_run_feval(const char *path) {
     fk_node_count = 0;
     fk_bd_top = 0;
     fk_maxslot = 0;
+    fk_nerr = 0;
+    fk_nwarn = 0;
+    fk_src_truncated = 0;
     fk_sinit();
     fk_fntop = 0;
     fk_defn_next = 1;
@@ -9740,10 +9941,12 @@ static int fk_run_feval(const char *path) {
     }
     fk_vs[0] = 0;
     fk_vsp = 1;
+    /* ── PARSE DONE, EXECUTION BEGINS ── gcc-style tally (twin of fk_run_src). */
+    fk_diag_flush();
     long long rv = fk_walk(fk_fn[0], 0);
     fk_pv(rv);
     /* print the meta-eval result by value-kind (int / float / nothing) */
-    return 0;
+    return fk_nerr > 0 ? 1 : 0;
 }
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
@@ -9767,9 +9970,18 @@ static int fk_run(int argc, char **argv) {
         return 3;
     }
     fk_buf[got] = 0;
+    fk_nerr = 0;
+    fk_nwarn = 0;
     long long nf = fk_next();
     if (nf < 0 || nf > FK_FN_CAP) {
-        fk_die("fk_run: table function count exceeds fk_fn capacity");
+        /* .tbl LOAD (artifact ingest): a diagnosable structural defect, not OOM.
+         * Diagnose and CLAMP so the rest of the header/tables still get validated
+         * and every defect is reported at once (gcc-style), then refuse to run.
+         * off<0: the loader reads fk_buf, not fk_srctext, so there is no coord. */
+        fk_diag(FK_DIAG_ERR, -1,
+                "malformed .tbl: function count %lld out of range [0,%d]; clamped",
+                nf, (int)FK_FN_CAP);
+        nf = (nf < 0) ? 0 : (long long)FK_FN_CAP;
     }
     fk_fn_count = nf;
     long long k = 0;
@@ -9779,7 +9991,12 @@ static int fk_run(int argc, char **argv) {
     }
     long long nr = fk_next();
     if (nr < 0 || nr > FK_AST_NODE_CAP) {
-        fk_die("fk_run: table node count exceeds fk_node capacity");
+        /* .tbl LOAD: same class as the fn-count site. Diagnose and clamp so the
+         * string-table section is still validated, then refuse to run. */
+        fk_diag(FK_DIAG_ERR, -1,
+                "malformed .tbl: node count %lld out of range [0,%d]; clamped",
+                nr, (int)FK_AST_NODE_CAP);
+        nr = (nr < 0) ? 0 : (long long)FK_AST_NODE_CAP;
     }
     fk_node_count = nr;
     long long r = 0;
@@ -9847,6 +10064,13 @@ static int fk_run(int argc, char **argv) {
     }
     fk_vs[0] = a;
     fk_vsp = 1;
+    /* ── .tbl VALIDATED, EXECUTION BEGINS ── every header/table defect above was
+     * diagnosed and reported at once (gcc-style). A malformed artifact must NOT
+     * run: surface the tally and refuse (nonzero), never execute a clamped table. */
+    fk_diag_flush();
+    if (fk_nerr > 0) {
+        return 1;
+    }
     if (argc > 4) {
         fk_hot = atoi(argv[4]);
     }
