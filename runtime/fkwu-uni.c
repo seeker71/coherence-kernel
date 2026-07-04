@@ -38,6 +38,8 @@ int dlclose(void *h) {
 #endif
 extern int putchar(int);
 extern int printf(const char *, ...);
+extern int dprintf(int, const char *, ...);
+extern int vdprintf(int, const char *, __builtin_va_list);
 extern void *malloc(unsigned long);
 extern void *realloc(void *, unsigned long);
 extern long long read(int, void *, unsigned long);
@@ -62,6 +64,35 @@ static void fk_die(const char *msg) {
     write(2, "\n", 1);
     exit(1);
 }
+/* ── COMPILE-PHASE DIAGNOSTIC COLLECTOR ──────────────────────────────────────
+ * Two-phase law (2026-07-02): RUNTIME dies only when it truly cannot recover
+ * (OOM, corruption); COMPILE-TIME collects EVERY warning/error and CONTINUES,
+ * gcc/clang-style ("N error(s), M warning(s)"). fk_die stays the hard-stop for
+ * OOM/corruption; the parse-time capacity/arity dies below are MIS-PHASED and
+ * become fk_diag + best-effort recovery so the rest of the source is still
+ * checked and every defect surfaces in ONE pass (collect-and-continue), instead
+ * of halting on the first problem.
+ *
+ * fk_diag streams each diagnostic to fd 2 IMMEDIATELY in clang form
+ * ("fkwu:line:col: error|warning: msg"), computing line/col from a byte offset
+ * into fk_srctext (O(n) newline count -- no line counter is maintained during
+ * parse, and error paths are rare, so this is fine), then bumps the global
+ * error/warning counters. It is VARIADIC on purpose: the offender's name lives
+ * at every call site as a non-NUL-terminated (start,length) slice of fk_srctext
+ * (see the pre-existing unresolved-call witness that prints "'%.*s'",
+ * (int)hn, fk_srctext+s), never as a C string -- a fixed const char* signature
+ * would force a snprintf-into-scratch dance at every site. A negative off means
+ * "no source coordinate" (e.g. the .tbl loader reads fk_buf, not fk_srctext),
+ * so the line:col prefix is suppressed.  sev: 0 = warning, 1 = error. */
+#define FK_DIAG_WARN 0
+#define FK_DIAG_ERR  1
+static long long fk_nerr;        /* errors diagnosed this run   */
+static long long fk_nwarn;       /* warnings diagnosed this run */
+static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_TEXT_CAP */
+/* fk_diag / fk_diag_flush are DEFINED further down (right after fk_srctext /
+ * fk_spos / fk_slen are declared), where they can read the source buffer. */
+static void fk_diag(int sev, long long off, const char *fmt, ...);
+static void fk_diag_flush(void);
 /* Named capacities for the seed's fixed-size tables. Several numerically coincide
  * (many independent tables happen to be sized 65536) but are named SEPARATELY on
  * purpose: they are different index spaces (the node/AST table, the value stack,
@@ -83,7 +114,7 @@ static void fk_die(const char *msg) {
  * lists). FK_AST_NODE_CAP (defined near fk_node[][4] itself, further down) is the
  * PARSED PROGRAM's syntax tree, filled once per expression during parsing via
  * fk_smknode. */
-#define FK_NODE_CAP 65536               /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots */
+#define FK_NODE_CAP 262144              /* fk_nkind, ncat, nkids, nval, nid, nsfile, nsline, nscol, nsattr, fbroots. Raised 65536->262144 (2026-07-02): a 1,200-clip --src program filled the value-node table mid-run and every guard silently returned handle 0 -- a deterministic all-zero result with no error. Same raisable-constant class as FK_AST_NODE_CAP; overflow now dies loudly instead of returning 0. 262144*104B ~= 27MB. */
 #define FK_RECORD_CAP 256               /* fk_rkey/rval/rcnt/rbp: max live mutable records (fk_rp bound) */
 #define FK_RECORD_MAX_KEYS 128          /* fk_rkey/rval second dimension: max keys per record */
 /* fn-value reserved band (see stone 2c below): the band WIDTH (8192, in raw
@@ -456,10 +487,27 @@ extern int stat(const char *, void *);
 #endif
 #endif
 #ifndef FK_HAVE_FCNTL_HEADER
+#if defined(_WIN32)
+/* ucrt flag values; _O_BINARY folded into O_WRONLY so writes keep bytes as given (the read
+ * path already opens 0x8000). The BSD values below silently dropped _O_CREAT here, so the
+ * write/append doors failed on absent files and append truncated on present ones. */
+#define O_WRONLY 0x8001
+#define O_CREAT 0x100
+#define O_TRUNC 0x200
+#define O_APPEND 8
+#else
 #define O_WRONLY 1
 #define O_CREAT 0x200
 #define O_TRUNC 0x400
 #define O_APPEND 8
+#endif
+#endif
+#if defined(_WIN32)
+/* _O_BINARY for the Form-facing byte-read doors (read_file / read_file_slice): text mode
+ * would translate CRLF and stop at a 0x1A byte — a binary checkpoint could not pass. */
+#define O_RDBIN 0x8000
+#else
+#define O_RDBIN 0
 #endif
 extern int open(const char *, int, ...);
 extern long long read(int, void *, unsigned long);
@@ -470,6 +518,65 @@ extern int unlink(const char *);
 extern int rename(const char *, const char *);
 extern int sprintf(char *, const char *, ...);
 extern char *getenv(const char *);
+/* ── config file (fkwu.conf in cwd), read ONCE and lazily. Replaces the FK_* / FORM_* / MESH_*
+ * env-var toggles: a config file is a durable, reviewable surface where scattered env vars are not.
+ * Absent file -> empty config -> every toggle at its default (recover, never die). Standard OS env
+ * vars we do not own (TMPDIR) stay on getenv. Line form: "KEY value" or "KEY=value"; bare "KEY"
+ * means on ("1"); "KEY 0" means off; '#' begins a comment. */
+#define FK_CONF_MAX 64
+static char fk_conf_k[FK_CONF_MAX][64];
+static char fk_conf_v[FK_CONF_MAX][256];
+static int fk_conf_n = 0;
+static int fk_conf_loaded = 0;
+static void fk_conf_load(void) {
+    if (fk_conf_loaded) { return; }
+    fk_conf_loaded = 1;
+    int fd = open("fkwu.conf", 0);
+    if (fd < 0) { return; }
+    static char cb[8192];
+    long long n = read(fd, cb, 8191);
+    close(fd);
+    if (n <= 0) { return; }
+    cb[n] = 0;
+    long long i = 0;
+    while (i < n && fk_conf_n < FK_CONF_MAX) {
+        while (i < n && (cb[i] == ' ' || cb[i] == '\t' || cb[i] == '\n' || cb[i] == '\r')) { i = i + 1; }
+        if (i >= n) { break; }
+        if (cb[i] == '#') { while (i < n && cb[i] != '\n') { i = i + 1; } continue; }
+        int kj = 0;
+        while (i < n && cb[i] != ' ' && cb[i] != '\t' && cb[i] != '=' && cb[i] != '\n' && cb[i] != '\r' && kj < 63) {
+            fk_conf_k[fk_conf_n][kj] = cb[i]; kj = kj + 1; i = i + 1;
+        }
+        fk_conf_k[fk_conf_n][kj] = 0;
+        while (i < n && (cb[i] == ' ' || cb[i] == '\t' || cb[i] == '=')) { i = i + 1; }
+        int vj = 0;
+        while (i < n && cb[i] != '\n' && cb[i] != '\r' && vj < 255) {
+            fk_conf_v[fk_conf_n][vj] = cb[i]; vj = vj + 1; i = i + 1;
+        }
+        while (vj > 0 && (fk_conf_v[fk_conf_n][vj - 1] == ' ' || fk_conf_v[fk_conf_n][vj - 1] == '\t')) { vj = vj - 1; }
+        fk_conf_v[fk_conf_n][vj] = 0;
+        if (vj == 0) { fk_conf_v[fk_conf_n][0] = '1'; fk_conf_v[fk_conf_n][1] = 0; }
+        if (kj > 0) { fk_conf_n = fk_conf_n + 1; }
+    }
+}
+/* fk_conf: config-file replacement for getenv on OUR toggles. Returns the value string, or 0 when
+ * the key is absent OR set to "0"/"" -- so `if (fk_conf("X"))` is on iff X is present and non-zero,
+ * matching the old env-presence semantics, and the FK_JIT `v[0] != '0'` check still holds. */
+static char *fk_conf(const char *key) {
+    fk_conf_load();
+    int i = 0;
+    while (i < fk_conf_n) {
+        int j = 0;
+        while (key[j] != 0 && fk_conf_k[i][j] != 0 && key[j] == fk_conf_k[i][j]) { j = j + 1; }
+        if (key[j] == 0 && fk_conf_k[i][j] == 0) {
+            char *v = fk_conf_v[i];
+            if (v[0] == 0 || (v[0] == '0' && v[1] == 0)) { return 0; }
+            return v;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
 static long long fk_rkey[FK_RECORD_CAP][FK_RECORD_MAX_KEYS];
 static long long fk_rval[FK_RECORD_CAP][FK_RECORD_MAX_KEYS];
 static long long fk_rcnt[FK_RECORD_CAP];
@@ -501,7 +608,7 @@ static void fk_cstr(long long sv, char *out, long long cap) {
     if (sa >= 0 && sa < fk_sp) {
         n = fk_sl[sa];
         if (n > cap - 1) {
-            n = cap - 1;
+            fk_die("fk_cstr: string longer than the destination buffer -- silently truncating would corrupt the path / hostname / port / URL / command / device-name the caller is about to use (every fk_cstr caller is one of these). Raise the caller's buffer if this length is legitimate.");
         }
         long long j = 0;
         while (j < n) {
@@ -724,20 +831,58 @@ static long long fk_cam_name(long long i) {
     }
     return fk_sbuf(nm, fk_cstrlen(nm));
 }
+/* the VfW driver connect can block forever behind modern camera stacks (witnessed on this
+ * cell: the "Microsoft WDM Image Capture" shim hangs on a MIPI camera — receipts/
+ * 2026-07-01-windows-camera-carrier-probe.md). Probe on a worker thread and refuse
+ * honestly after 3s; on timeout the probe struct and stuck thread are deliberately
+ * abandoned (the named cost of a hung driver — never freed under its feet). */
+extern void *CreateThread(void *, unsigned long long, unsigned int (*)(void *), void *,
+                          unsigned int, unsigned int *);
+extern unsigned int WaitForSingleObject(void *, unsigned int);
+extern int CloseHandle(void *);
+struct fk_cam_probe {
+    long long idx;
+    long long ok;
+};
+static unsigned int fk_cam_probe_run(void *arg) {
+    struct fk_cam_probe *p = (struct fk_cam_probe *)arg;
+    void *hwnd = capCreateCaptureWindowA("fkwu-cam", 0x80000000u, 0, 0, 0, 0, (void *)0, 0);
+    if (hwnd != 0) {
+        long long ok = SendMessageA(hwnd, 0x0400 + 10, (unsigned long long)p->idx, 0);
+        if (ok) {
+            SendMessageA(hwnd, 0x0400 + 11, 0, 0);
+        }
+        DestroyWindow(hwnd);
+        p->ok = ok ? 1 : 0;
+    }
+    return 0;
+}
 static long long fk_cam_health(long long i) {
     char nm[256];
     char ver[256];
     if (i < 0 || !capGetDriverDescriptionA((unsigned int)i, nm, 256, ver, 256)) {
         return 0;
     }
-    void *hwnd = capCreateCaptureWindowA("fkwu-cam", 0x80000000u, 0, 0, 0, 0, (void *)0, 0);
-    if (hwnd == 0) {
+    struct fk_cam_probe *p = malloc(sizeof(struct fk_cam_probe));
+    if (p == 0) {
         return 0;
     }
-    long long ok = SendMessageA(hwnd, 0x0400 + 10, (unsigned long long)i, 0);
-    SendMessageA(hwnd, 0x0400 + 11, 0, 0);
-    DestroyWindow(hwnd);
-    return ok ? 1 : 0;
+    p->idx = i;
+    p->ok = 0;
+    void *th = CreateThread((void *)0, 0, fk_cam_probe_run, p, 0, (unsigned int *)0);
+    if (th == 0) {
+        free(p);
+        return 0;
+    }
+    if (WaitForSingleObject(th, 3000) == 0) {
+        long long ok = p->ok;
+        CloseHandle(th);
+        free(p);
+        return ok;
+    }
+    CloseHandle(th);
+    printf("sense: camera %lld connect timed out (legacy VfW shim) — health 0, honestly\n", i);
+    return 0;
 }
 static long long fk_cam_grab(long long i, const char *path) {
     char nm[256];
@@ -764,6 +909,725 @@ static long long fk_cam_grab(long long i, const char *path) {
     SendMessageA(hwnd, 0x0400 + 11, 0, 0);
     DestroyWindow(hwnd);
     return saved ? 1 : 0;
+}
+/* ── mic CAPTURE (winmm waveIn, completing the carrier named above): ms of PCM16 mono 16kHz,
+ * measured and released — the Android receipt pattern: samples / nonzero / mean-abs / peak
+ * cross into Form as integers; no raw audio is retained. */
+struct fk_wavehdr {
+    char *lpData;
+    unsigned int dwBufferLength;
+    unsigned int dwBytesRecorded;
+    unsigned long long dwUser;
+    unsigned int dwFlags;
+    unsigned int dwLoops;
+    struct fk_wavehdr *lpNext;
+    unsigned long long reserved;
+};
+extern unsigned int waveInPrepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveInUnprepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveInAddBuffer(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveInStart(void *);
+extern unsigned int waveInReset(void *);
+static long long fk_cons_val(long long h, long long t);
+static long long fk_mic_capture(long long ms) {
+    if (ms < 100) {
+        ms = 100;
+    }
+    if (ms > 10000) {
+        ms = 10000;
+    }
+    struct fk_waveformatex fmt;
+    fmt.wFormatTag = 1;
+    fmt.nChannels = 1;
+    fmt.nSamplesPerSec = 16000;
+    fmt.wBitsPerSample = 16;
+    fmt.nBlockAlign = 2;
+    fmt.nAvgBytesPerSec = 32000;
+    fmt.cbSize = 0;
+    void *h = 0;
+    if (waveInOpen(&h, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: mic open refused\n");
+        return 1;
+    }
+    long long bytes = ms * 32;
+    char *buf = malloc((unsigned long)bytes);
+    if (buf == 0) {
+        waveInClose(h);
+        return 1;
+    }
+    struct fk_wavehdr hd;
+    hd.lpData = buf;
+    hd.dwBufferLength = (unsigned int)bytes;
+    hd.dwBytesRecorded = 0;
+    hd.dwUser = 0;
+    hd.dwFlags = 0;
+    hd.dwLoops = 0;
+    hd.lpNext = 0;
+    hd.reserved = 0;
+    waveInPrepareHeader(h, &hd, (unsigned int)sizeof hd);
+    waveInAddBuffer(h, &hd, (unsigned int)sizeof hd);
+    waveInStart(h);
+    long long waited = 0;
+    while ((hd.dwFlags & 1) == 0 && waited < ms + 2000) {
+        Sleep(50);
+        waited = waited + 50;
+    }
+    waveInReset(h);
+    waveInUnprepareHeader(h, &hd, (unsigned int)sizeof hd);
+    waveInClose(h);
+    long long nsamp = hd.dwBytesRecorded / 2;
+    long long nonzero = 0;
+    long long peak = 0;
+    long long sumabs = 0;
+    long long i;
+    for (i = 0; i < nsamp; i = i + 1) {
+        long long s = (long long)*(short *)(buf + i * 2);
+        long long a = s < 0 ? 0 - s : s;
+        if (a > 0) {
+            nonzero = nonzero + 1;
+        }
+        if (a > peak) {
+            peak = a;
+        }
+        sumabs = sumabs + a;
+    }
+    free(buf);
+    long long meanabs = nsamp > 0 ? sumabs / nsamp : 0;
+    printf("sense: mic captured %lld samples (%lld ms) nonzero=%lld mean-abs=%lld peak=%lld — "
+           "measured, not retained\n",
+           nsamp, ms, nonzero, meanabs, peak);
+    long long r = 1;
+    r = fk_cons_val(peak << 1, r);
+    r = fk_cons_val(meanabs << 1, r);
+    r = fk_cons_val(nonzero << 1, r);
+    r = fk_cons_val(nsamp << 1, r);
+    return r;
+}
+/* ── camera CAPTURE (Media Foundation — the carrier the hanging VfW shim demanded, now built
+ * as its own deliberate movement): LoadLibrary-only (ole32/mfplat/mf/mfreadwrite), COM vtables
+ * called by slot in plain C — no new link libraries, the same door discipline as nvcuda.
+ * One frame is asked for as NV12 (Y plane first), its LUMA measured (w/h/mean/nonzero) and the
+ * frame released: the eye opens, measures, retains nothing. Bounded worker thread; a Windows
+ * camera-privacy denial is an honest refusal, printed. */
+struct fk_guid {
+    unsigned int a;
+    unsigned short b;
+    unsigned short c;
+    unsigned char d[8];
+};
+static const struct fk_guid fk_g_devsrc_type = {
+    0xc60ac5fe, 0x252a, 0x478f, {0xa0, 0xef, 0xbc, 0x8f, 0xa5, 0xf7, 0xca, 0xd3}};
+static const struct fk_guid fk_g_devsrc_vidcap = {
+    0x8ac3587a, 0x4ae7, 0x42d8, {0x99, 0xe0, 0x0a, 0x60, 0x13, 0xee, 0xf9, 0x0f}};
+static const struct fk_guid fk_g_iid_mediasource = {
+    0x279a808d, 0xaec7, 0x40c8, {0x9c, 0x6b, 0xa6, 0xb4, 0x92, 0xc7, 0x8a, 0x66}};
+static const struct fk_guid fk_g_mt_major = {
+    0x48eba18e, 0xf8c9, 0x4687, {0xbf, 0x11, 0x0a, 0x74, 0xc9, 0xf9, 0x6a, 0x8f}};
+static const struct fk_guid fk_g_mt_subtype = {
+    0xf7e34c9a, 0x42e8, 0x4714, {0xb7, 0x4b, 0xcb, 0x29, 0xd7, 0x2c, 0x35, 0xe5}};
+static const struct fk_guid fk_g_mt_framesize = {
+    0x1652c33d, 0xd6b2, 0x4012, {0xb8, 0x34, 0x72, 0x03, 0x08, 0x49, 0xa3, 0x7d}};
+static const struct fk_guid fk_g_video_major = {
+    0x73646976, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+static const struct fk_guid fk_g_fmt_nv12 = {
+    0x3231564e, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
+static const struct fk_guid fk_g_reader_processing = {
+    0xfb394f3d, 0xccf1, 0x42ee, {0xbb, 0xb3, 0xf9, 0xb8, 0x45, 0xd5, 0x68, 0x1d}};
+typedef int (*fk_vt_guid2)(void *, const struct fk_guid *, const struct fk_guid *);
+typedef int (*fk_vt_u32set)(void *, const struct fk_guid *, unsigned int);
+typedef int (*fk_vt_act)(void *, const struct fk_guid *, void **);
+typedef int (*fk_vt_pp)(void *, void **);
+typedef int (*fk_vt_mtset)(void *, unsigned int, void *, void *);
+typedef int (*fk_vt_mtget)(void *, unsigned int, void **);
+typedef int (*fk_vt_u64get)(void *, const struct fk_guid *, unsigned long long *);
+typedef int (*fk_vt_readsample)(void *, unsigned int, unsigned int, unsigned int *,
+                                unsigned int *, long long *, void **);
+typedef int (*fk_vt_lockbuf)(void *, unsigned char **, unsigned int *, unsigned int *);
+typedef int (*fk_vt_none)(void *);
+static void **fk_vt(void *o) {
+    return ((void ***)o)[0];
+}
+static void fk_com_release(void *o) {
+    if (o != 0) {
+        ((fk_vt_none)fk_vt(o)[2])(o);
+    }
+}
+struct fk_camluma {
+    long long w;
+    long long h;
+    long long luma;
+    long long nonzero;
+    long long rc;
+    long long hr;
+};
+static unsigned int fk_cam_luma_run(void *arg) {
+    struct fk_camluma *out = (struct fk_camluma *)arg;
+    void *ole = LoadLibraryA("ole32.dll");
+    void *mfp = LoadLibraryA("mfplat.dll");
+    void *mfl = LoadLibraryA("mf.dll");
+    void *mfr = LoadLibraryA("mfreadwrite.dll");
+    if (ole == 0 || mfp == 0 || mfl == 0 || mfr == 0) {
+        out->rc = -2;
+        return 0;
+    }
+    typedef int (*FCoInit)(void *, unsigned int);
+    typedef void (*FCoUninit)(void);
+    typedef void (*FCoFree)(void *);
+    typedef int (*FMfStart)(unsigned int, unsigned int);
+    typedef int (*FMfStop)(void);
+    typedef int (*FMfAttrs)(void **, unsigned int);
+    typedef int (*FMfEnum)(void *, void ***, unsigned int *);
+    typedef int (*FMfReader)(void *, void *, void **);
+    typedef int (*FMfMkType)(void **);
+    FCoInit fCoInit = (FCoInit)GetProcAddress(ole, "CoInitializeEx");
+    FCoUninit fCoUninit = (FCoUninit)GetProcAddress(ole, "CoUninitialize");
+    FCoFree fCoFree = (FCoFree)GetProcAddress(ole, "CoTaskMemFree");
+    FMfStart fMfStart = (FMfStart)GetProcAddress(mfp, "MFStartup");
+    FMfStop fMfStop = (FMfStop)GetProcAddress(mfp, "MFShutdown");
+    FMfAttrs fMfAttrs = (FMfAttrs)GetProcAddress(mfp, "MFCreateAttributes");
+    FMfMkType fMfMkType = (FMfMkType)GetProcAddress(mfp, "MFCreateMediaType");
+    FMfEnum fMfEnum = (FMfEnum)GetProcAddress(mfl, "MFEnumDeviceSources");
+    FMfReader fMfReader = (FMfReader)GetProcAddress(mfr, "MFCreateSourceReaderFromMediaSource");
+    if (fCoInit == 0 || fMfStart == 0 || fMfAttrs == 0 || fMfEnum == 0 || fMfReader == 0 ||
+        fMfMkType == 0) {
+        out->rc = -2;
+        return 0;
+    }
+    fCoInit(0, 0);
+    fMfStart(0x20070, 0);
+    void *attr = 0;
+    fMfAttrs(&attr, 1);
+    if (attr == 0) {
+        out->rc = -2;
+        fMfStop();
+        fCoUninit();
+        return 0;
+    }
+    ((fk_vt_guid2)fk_vt(attr)[24])(attr, &fk_g_devsrc_type, &fk_g_devsrc_vidcap);
+    void **acts = 0;
+    unsigned int nact = 0;
+    fMfEnum(attr, &acts, &nact);
+    if (nact == 0 || acts == 0) {
+        out->rc = -3;
+        fk_com_release(attr);
+        fMfStop();
+        fCoUninit();
+        return 0;
+    }
+    void *src = 0;
+    out->hr = ((fk_vt_act)fk_vt(acts[0])[33])(acts[0], &fk_g_iid_mediasource, &src);
+    if (src == 0) {
+        out->rc = -4;
+    }
+    void *reader = 0;
+    if (src != 0) {
+        void *rattr = 0;
+        fMfAttrs(&rattr, 1);
+        if (rattr != 0) {
+            ((fk_vt_u32set)fk_vt(rattr)[21])(rattr, &fk_g_reader_processing, 1);
+        }
+        out->hr = fMfReader(src, rattr, &reader);
+        fk_com_release(rattr);
+        if (reader == 0) {
+            out->rc = -5;
+        }
+    }
+    if (reader != 0) {
+        void *mt = 0;
+        fMfMkType(&mt);
+        if (mt != 0) {
+            ((fk_vt_guid2)fk_vt(mt)[24])(mt, &fk_g_mt_major, &fk_g_video_major);
+            ((fk_vt_guid2)fk_vt(mt)[24])(mt, &fk_g_mt_subtype, &fk_g_fmt_nv12);
+            ((fk_vt_mtset)fk_vt(reader)[7])(reader, 0xFFFFFFFCu, 0, mt);
+            fk_com_release(mt);
+        }
+        void *cur = 0;
+        ((fk_vt_mtget)fk_vt(reader)[6])(reader, 0xFFFFFFFCu, &cur);
+        unsigned long long fs = 0;
+        if (cur != 0) {
+            ((fk_vt_u64get)fk_vt(cur)[8])(cur, &fk_g_mt_framesize, &fs);
+            fk_com_release(cur);
+        }
+        long long w = (long long)(fs >> 32);
+        long long hh = (long long)(fs & 0xFFFFFFFFu);
+        void *sample = 0;
+        int tries = 0;
+        while (tries < 30 && sample == 0) {
+            unsigned int si = 0;
+            unsigned int fl = 0;
+            long long ts = 0;
+            void *s2 = 0;
+            out->hr = ((fk_vt_readsample)fk_vt(reader)[9])(reader, 0xFFFFFFFCu, 0, &si, &fl,
+                                                           &ts, &s2);
+            if (out->hr != 0) {
+                break;
+            }
+            sample = s2;
+            tries = tries + 1;
+        }
+        if (sample != 0) {
+            void *mbuf = 0;
+            ((fk_vt_pp)fk_vt(sample)[41])(sample, &mbuf);
+            if (mbuf != 0) {
+                unsigned char *p = 0;
+                unsigned int maxl = 0;
+                unsigned int curl = 0;
+                ((fk_vt_lockbuf)fk_vt(mbuf)[3])(mbuf, &p, &maxl, &curl);
+                if (p != 0) {
+                    long long ylen = w * hh;
+                    if (ylen <= 0 || ylen > (long long)curl) {
+                        ylen = (long long)curl;
+                    }
+                    long long sum = 0;
+                    long long nz = 0;
+                    long long j;
+                    for (j = 0; j < ylen; j = j + 1) {
+                        sum = sum + p[j];
+                        if (p[j] != 0) {
+                            nz = nz + 1;
+                        }
+                    }
+                    out->w = w;
+                    out->h = hh;
+                    out->luma = ylen > 0 ? sum / ylen : 0;
+                    out->nonzero = nz;
+                    out->rc = 0;
+                    ((fk_vt_none)fk_vt(mbuf)[4])(mbuf);
+                }
+                fk_com_release(mbuf);
+            }
+            fk_com_release(sample);
+        } else if (out->rc == -1) {
+            out->rc = -6;
+        }
+        fk_com_release(reader);
+    }
+    if (src != 0) {
+        ((fk_vt_none)fk_vt(src)[12])(src);
+        fk_com_release(src);
+    }
+    unsigned int ai;
+    for (ai = 0; ai < nact; ai = ai + 1) {
+        fk_com_release(acts[ai]);
+    }
+    if (fCoFree != 0) {
+        fCoFree(acts);
+    }
+    fk_com_release(attr);
+    fMfStop();
+    fCoUninit();
+    return 0;
+}
+static long long fk_cam_luma(long long timeout_ms) {
+    if (timeout_ms < 1000) {
+        timeout_ms = 1000;
+    }
+    if (timeout_ms > 30000) {
+        timeout_ms = 30000;
+    }
+    struct fk_camluma *c = malloc(sizeof(struct fk_camluma));
+    if (c == 0) {
+        return 1;
+    }
+    c->w = 0;
+    c->h = 0;
+    c->luma = 0;
+    c->nonzero = 0;
+    c->rc = -1;
+    c->hr = 0;
+    void *th = CreateThread((void *)0, 0, fk_cam_luma_run, c, 0, (unsigned int *)0);
+    if (th == 0) {
+        free(c);
+        return 1;
+    }
+    if (WaitForSingleObject(th, (unsigned int)timeout_ms) != 0) {
+        CloseHandle(th);
+        printf("sense: camera luma timed out after %lld ms — refusing honestly\n", timeout_ms);
+        return 1;
+    }
+    CloseHandle(th);
+    if (c->rc != 0) {
+        printf("sense: camera luma refused at step %lld (hr=0x%08x)%s\n", c->rc,
+               (unsigned int)c->hr,
+               (unsigned int)c->hr == 0x80070005u
+                   ? " — Windows camera privacy settings deny access"
+                   : "");
+        long long rc2 = c->rc;
+        free(c);
+        return rc2 == 0 ? 1 : 1;
+    }
+    printf("sense: camera frame %lldx%lld mean-luma=%lld nonzero=%lld — measured, not retained\n",
+           c->w, c->h, c->luma, c->nonzero);
+    long long r = 1;
+    r = fk_cons_val(c->nonzero << 1, r);
+    r = fk_cons_val(c->luma << 1, r);
+    r = fk_cons_val(c->h << 1, r);
+    r = fk_cons_val(c->w << 1, r);
+    free(c);
+    return r;
+}
+/* ── audio LOOPBACK (waveOut render + waveIn capture): the body speaks a known tone through
+ * the speakers and hears itself through the mic — the render+capture legs of the speech
+ * loopback carrier contract, on this cell's own metal. Layout: silence quarter, 440Hz square
+ * burst half, silence quarter. Sixteen per-window energies + burst/silence means + score
+ * cross into Form as integers; no waveform is retained. Muted speakers score low, honestly. */
+extern unsigned int waveOutOpen(void **, unsigned int, const struct fk_waveformatex *,
+                                unsigned long long, unsigned long long, unsigned long long);
+extern unsigned int waveOutClose(void *);
+extern unsigned int waveOutPrepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveOutUnprepareHeader(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveOutWrite(void *, struct fk_wavehdr *, unsigned int);
+extern unsigned int waveOutReset(void *);
+extern unsigned int waveOutSetVolume(void *, unsigned int);
+static long long fk_audio_loopback(long long ms) {
+    if (ms < 500) {
+        ms = 500;
+    }
+    if (ms > 5000) {
+        ms = 5000;
+    }
+    struct fk_waveformatex fmt;
+    fmt.wFormatTag = 1;
+    fmt.nChannels = 1;
+    fmt.nSamplesPerSec = 16000;
+    fmt.wBitsPerSample = 16;
+    fmt.nBlockAlign = 2;
+    fmt.nAvgBytesPerSec = 32000;
+    fmt.cbSize = 0;
+    long long nsamp = ms * 16;
+    short *play = malloc((unsigned long)(nsamp * 2));
+    short *cap = malloc((unsigned long)(nsamp * 2));
+    if (play == 0 || cap == 0) {
+        free(play);
+        free(cap);
+        return 1;
+    }
+    long long q = nsamp / 4;
+    long long i;
+    for (i = 0; i < nsamp; i = i + 1) {
+        if (i >= q && i < q * 3) {
+            /* 440Hz square at 16kHz: half-period ~18 samples */
+            play[i] = ((i / 18) & 1) ? (short)6000 : (short)-6000;
+        } else {
+            play[i] = 0;
+        }
+        cap[i] = 0;
+    }
+    void *hin = 0;
+    if (waveInOpen(&hin, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: loopback mic open refused\n");
+        free(play);
+        free(cap);
+        return 1;
+    }
+    void *hout = 0;
+    if (waveOutOpen(&hout, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: loopback speaker open refused\n");
+        waveInClose(hin);
+        free(play);
+        free(cap);
+        return 1;
+    }
+    struct fk_wavehdr hc;
+    hc.lpData = (char *)cap;
+    hc.dwBufferLength = (unsigned int)(nsamp * 2);
+    hc.dwBytesRecorded = 0;
+    hc.dwUser = 0;
+    hc.dwFlags = 0;
+    hc.dwLoops = 0;
+    hc.lpNext = 0;
+    hc.reserved = 0;
+    struct fk_wavehdr hp;
+    hp.lpData = (char *)play;
+    hp.dwBufferLength = (unsigned int)(nsamp * 2);
+    hp.dwBytesRecorded = 0;
+    hp.dwUser = 0;
+    hp.dwFlags = 0;
+    hp.dwLoops = 0;
+    hp.lpNext = 0;
+    hp.reserved = 0;
+    waveInPrepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInAddBuffer(hin, &hc, (unsigned int)sizeof hc);
+    waveInStart(hin);
+    waveOutPrepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutWrite(hout, &hp, (unsigned int)sizeof hp);
+    long long waited = 0;
+    while ((hc.dwFlags & 1) == 0 && waited < ms + 3000) {
+        Sleep(50);
+        waited = waited + 50;
+    }
+    waveOutReset(hout);
+    waveOutUnprepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutClose(hout);
+    waveInReset(hin);
+    waveInUnprepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInClose(hin);
+    long long got = (long long)hc.dwBytesRecorded / 2;
+    long long wen[16];
+    long long w;
+    for (w = 0; w < 16; w = w + 1) {
+        long long lo = got * w / 16;
+        long long hi = got * (w + 1) / 16;
+        long long sum = 0;
+        for (i = lo; i < hi; i = i + 1) {
+            long long s = (long long)cap[i];
+            sum = sum + (s < 0 ? 0 - s : s);
+        }
+        wen[w] = (hi > lo) ? sum / (hi - lo) : 0;
+    }
+    free(play);
+    free(cap);
+    long long burst = 0;
+    long long silen = 0;
+    for (w = 0; w < 16; w = w + 1) {
+        if (w >= 4 && w < 12) {
+            burst = burst + wen[w];
+        } else {
+            silen = silen + wen[w];
+        }
+    }
+    burst = burst / 8;
+    silen = silen / 8;
+    long long score = burst * 100 / (silen + 1);
+    printf("sense: loopback rendered %lld ms, captured %lld samples — burst-energy=%lld "
+           "silence-energy=%lld score=%lld — measured, not retained\n",
+           ms, got, burst, silen, score);
+    long long r = 1;
+    for (w = 16; w > 0; w = w - 1) {
+        r = fk_cons_val(wen[w - 1] << 1, r);
+    }
+    r = fk_cons_val(score << 1, r);
+    r = fk_cons_val(burst << 1, r);
+    r = fk_cons_val(silen << 1, r);
+    r = fk_cons_val(got << 1, r);
+    return r;
+}
+/* ── wav AIR-LOOPBACK (waveOut plays a 16kHz mono PCM wav while waveIn captures): the
+ * composed speech leg — spoken truth through the speakers, heard by the mic. The capture IS
+ * written (out-path, canonical 44-byte header) because the local STT oracle must transcribe
+ * it; the calling recipe consumes the file after measuring (fs_remove) — transient teacher
+ * material, the macOS carrier's own pattern, never silent retention. Returns
+ * (played captured peak mean-abs); nil on refusal. */
+static long long fk_wav_loopback(const char *inpath, const char *outpath) {
+    int fd = open(inpath, O_RDBIN);
+    if (fd < 0) {
+        printf("sense: air-loopback input wav missing\n");
+        return 1;
+    }
+    long long incap = 4000000;
+    char *inbuf = malloc((unsigned long)incap);
+    if (inbuf == 0) {
+        close(fd);
+        return 1;
+    }
+    long long inlen = 0;
+    long long g;
+    while (inlen < incap && (g = read(fd, inbuf + inlen, 65536)) > 0) {
+        inlen = inlen + g;
+    }
+    close(fd);
+    /* find the data chunk (SAPI writes RIFF/WAVE with fmt then data) */
+    long long doff = -1;
+    long long i;
+    for (i = 12; i + 8 < inlen; i = i + 1) {
+        if (inbuf[i] == 'd' && inbuf[i + 1] == 'a' && inbuf[i + 2] == 't' &&
+            inbuf[i + 3] == 'a') {
+            doff = i + 8;
+            break;
+        }
+    }
+    if (doff < 0) {
+        printf("sense: air-loopback input wav has no data chunk\n");
+        free(inbuf);
+        return 1;
+    }
+    long long dlen = (long long)(unsigned char)inbuf[doff - 4] |
+                     ((long long)(unsigned char)inbuf[doff - 3] << 8) |
+                     ((long long)(unsigned char)inbuf[doff - 2] << 16) |
+                     ((long long)(unsigned char)inbuf[doff - 1] << 24);
+    if (dlen <= 0 || doff + dlen > inlen) {
+        dlen = inlen - doff;
+    }
+    long long nplay = dlen / 2;
+    if (nplay < 1600 || nplay > 160000) {
+        printf("sense: air-loopback wav length out of range (%lld samples)\n", nplay);
+        free(inbuf);
+        return 1;
+    }
+    long long ncap = nplay + 8000; /* half-second tail */
+    short *cap = malloc((unsigned long)(ncap * 2));
+    if (cap == 0) {
+        free(inbuf);
+        return 1;
+    }
+    struct fk_waveformatex fmt;
+    fmt.wFormatTag = 1;
+    fmt.nChannels = 1;
+    fmt.nSamplesPerSec = 16000;
+    fmt.nAvgBytesPerSec = 32000;
+    fmt.nBlockAlign = 2;
+    fmt.wBitsPerSample = 16;
+    fmt.cbSize = 0;
+    void *hin = 0;
+    if (waveInOpen(&hin, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: air-loopback mic open refused\n");
+        free(inbuf);
+        free(cap);
+        return 1;
+    }
+    void *hout = 0;
+    if (waveOutOpen(&hout, 0xFFFFFFFFu, &fmt, 0, 0, 0) != 0) {
+        printf("sense: air-loopback speaker open refused\n");
+        waveInClose(hin);
+        free(inbuf);
+        free(cap);
+        return 1;
+    }
+    /* pin THIS SESSION's playback to full scale (never touches the user's master volume) */
+    waveOutSetVolume(hout, 0xFFFFFFFFu);
+    struct fk_wavehdr hc;
+    hc.lpData = (char *)cap;
+    hc.dwBufferLength = (unsigned int)(ncap * 2);
+    hc.dwBytesRecorded = 0;
+    hc.dwUser = 0;
+    hc.dwFlags = 0;
+    hc.dwLoops = 0;
+    hc.lpNext = 0;
+    hc.reserved = 0;
+    struct fk_wavehdr hp;
+    hp.lpData = inbuf + doff;
+    hp.dwBufferLength = (unsigned int)(nplay * 2);
+    hp.dwBytesRecorded = 0;
+    hp.dwUser = 0;
+    hp.dwFlags = 0;
+    hp.dwLoops = 0;
+    hp.lpNext = 0;
+    hp.reserved = 0;
+    waveInPrepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInAddBuffer(hin, &hc, (unsigned int)sizeof hc);
+    waveInStart(hin);
+    waveOutPrepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutWrite(hout, &hp, (unsigned int)sizeof hp);
+    long long ms = ncap / 16;
+    long long waited = 0;
+    while ((hc.dwFlags & 1) == 0 && waited < ms + 3000) {
+        Sleep(50);
+        waited = waited + 50;
+    }
+    waveOutReset(hout);
+    waveOutUnprepareHeader(hout, &hp, (unsigned int)sizeof hp);
+    waveOutClose(hout);
+    waveInReset(hin);
+    waveInUnprepareHeader(hin, &hc, (unsigned int)sizeof hc);
+    waveInClose(hin);
+    free(inbuf);
+    long long got = (long long)hc.dwBytesRecorded / 2;
+    long long peak = 0;
+    long long sumabs = 0;
+    for (i = 0; i < got; i = i + 1) {
+        long long s = (long long)cap[i];
+        long long a = s < 0 ? 0 - s : s;
+        if (a > peak) {
+            peak = a;
+        }
+        sumabs = sumabs + a;
+    }
+    long long meanabs = got > 0 ? sumabs / got : 0;
+    /* auto-gain for the oracle: a quiet mic (low input slider) yields peaks far below full
+     * scale; scale the capture so its peak sits near -3dB (26000), capped at 64x. The content
+     * is untouched — only the level; peak/mean above report the RAW capture honestly. */
+    if (peak > 0 && peak < 26000) {
+        long long gain = 26000 / peak;
+        if (gain > 64) {
+            gain = 64;
+        }
+        if (gain > 1) {
+            for (i = 0; i < got; i = i + 1) {
+                long long s = (long long)cap[i] * gain;
+                if (s > 32767) {
+                    s = 32767;
+                }
+                if (s < -32768) {
+                    s = -32768;
+                }
+                cap[i] = (short)s;
+            }
+        }
+    }
+    /* write the capture for the oracle: canonical 44-byte header + data */
+    int wfd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    if (wfd < 0) {
+        printf("sense: air-loopback capture write refused\n");
+        free(cap);
+        return 1;
+    }
+    unsigned char hdr[44];
+    long long db = got * 2;
+    long long riff = 36 + db;
+    hdr[0] = 'R';
+    hdr[1] = 'I';
+    hdr[2] = 'F';
+    hdr[3] = 'F';
+    hdr[4] = (unsigned char)(riff & 255);
+    hdr[5] = (unsigned char)((riff >> 8) & 255);
+    hdr[6] = (unsigned char)((riff >> 16) & 255);
+    hdr[7] = (unsigned char)((riff >> 24) & 255);
+    hdr[8] = 'W';
+    hdr[9] = 'A';
+    hdr[10] = 'V';
+    hdr[11] = 'E';
+    hdr[12] = 'f';
+    hdr[13] = 'm';
+    hdr[14] = 't';
+    hdr[15] = ' ';
+    hdr[16] = 16;
+    hdr[17] = 0;
+    hdr[18] = 0;
+    hdr[19] = 0;
+    hdr[20] = 1;
+    hdr[21] = 0;
+    hdr[22] = 1;
+    hdr[23] = 0;
+    hdr[24] = (unsigned char)(16000 & 255);
+    hdr[25] = (unsigned char)((16000 >> 8) & 255);
+    hdr[26] = 0;
+    hdr[27] = 0;
+    hdr[28] = (unsigned char)(32000 & 255);
+    hdr[29] = (unsigned char)((32000 >> 8) & 255);
+    hdr[30] = 0;
+    hdr[31] = 0;
+    hdr[32] = 2;
+    hdr[33] = 0;
+    hdr[34] = 16;
+    hdr[35] = 0;
+    hdr[36] = 'd';
+    hdr[37] = 'a';
+    hdr[38] = 't';
+    hdr[39] = 'a';
+    hdr[40] = (unsigned char)(db & 255);
+    hdr[41] = (unsigned char)((db >> 8) & 255);
+    hdr[42] = (unsigned char)((db >> 16) & 255);
+    hdr[43] = (unsigned char)((db >> 24) & 255);
+    write(wfd, hdr, 44);
+    long long wr = 0;
+    while (wr < db) {
+        long long k = write(wfd, (char *)cap + wr, db - wr);
+        if (k <= 0) {
+            break;
+        }
+        wr = wr + k;
+    }
+    close(wfd);
+    free(cap);
+    printf("sense: air-loopback played %lld samples, captured %lld — peak=%lld mean-abs=%lld "
+           "(capture written for the oracle; the recipe consumes it)\n",
+           nplay, got, peak, meanabs);
+    long long r = 1;
+    r = fk_cons_val(meanabs << 1, r);
+    r = fk_cons_val(peak << 1, r);
+    r = fk_cons_val(got << 1, r);
+    r = fk_cons_val(nplay << 1, r);
+    return r;
 }
 #else
 static long long fk_mic_count(void) {
@@ -792,6 +1656,23 @@ static long long fk_cam_grab(long long i, const char *path) {
     (void)i;
     (void)path;
     return -1;
+}
+static long long fk_mic_capture(long long ms) {
+    (void)ms;
+    return 1;
+}
+static long long fk_cam_luma(long long timeout_ms) {
+    (void)timeout_ms;
+    return 1;
+}
+static long long fk_audio_loopback(long long ms) {
+    (void)ms;
+    return 1;
+}
+static long long fk_wav_loopback(const char *inpath, const char *outpath) {
+    (void)inpath;
+    (void)outpath;
+    return 1;
 }
 #endif
 static long long fk_sense_report(void) {
@@ -1065,18 +1946,6 @@ static long long fk_native_call_test(long long arg) {
 #endif
     return fk_native_call(code, (long long)sizeof code, arg);
 }
-/* ── the JIT dispatch WIRE: a hot, crystallized fn dispatches to its native via fk_native_call
- * instead of tree-walking. Heat per fn; threshold fk_hot (argv[4], 0 = never); fk_njit counts the
- * flips. The DECISION (when) stays Form (observe/jit-decision.fk: hot AND pure -> heat>=5,
- * hysteresis); this is only the dispatch hook the kernel owes it, plus the install carrier it
- * dispatches through. The native BYTES come from form-asm (Form). For the live witness, fn[0]'s
- * native (the increment form-asm would emit) is registered when argv[5] starts 'j', so the
- * cold->hot flip is observable on Windows; production registers from form-asm output. */
-static long long fk_heat[256];
-static long long fk_njit;
-static const unsigned char *fk_nat_code[256];
-static long long fk_nat_len[256];
-static long long fk_hot;
 /* ── stone 3 (OBSERVE): the offer/ack observe hook ────────────────────────── Every reducer CALL is
  * an OFFER (axiom-5): a callee + its args, acknowledged by EXACTLY ONE of {nothing, 0, 1, node}.
  * This hook makes that offer/ack witnessable as a trace the observe organ reads — the live feed
@@ -1090,7 +1959,7 @@ static long long fk_observe = -1;
 /* -1 = unread; 0 = off; 1 = on */
 static long long fk_observe_on(void) {
     if (fk_observe < 0) {
-        char *e = getenv("FK_OBSERVE");
+        char *e = fk_conf("FK_OBSERVE");
         fk_observe = (e && e[0] && e[0] != 48) ? 1 : 0;
     }
     return fk_observe;
@@ -1131,17 +2000,6 @@ static long long fk_offer_ack(long long callee, long long argn, long long v) {
     }
     return v;
 }
-static const unsigned char fk_demo_inc[] = {
-#if defined(_WIN32)
-    0x48, 0x89, 0xC8, 0x48, 0x83,
-    0xC0, 0x01, 0xC3
-/* mov rax,rcx; add rax,1; ret (arg in RCX) */
-#else
-    0x48, 0x89, 0xF8, 0x48, 0x83,
-    0xC0, 0x01, 0xC3
-/* mov rax,rdi; add rax,1; ret (arg in RDI) */
-#endif
-};
 /* ── host world-sensors (host-kernel.form: world-sensors port VIA-HOST, allowed) ── WiFi
  * SSID/signal (wlanapi), Bluetooth radio + paired count (bthprops), battery + memory load
  * (kernel32). Afferent reads, plain C, same pattern as the camera/mic carriers; each degrades to an
@@ -1543,7 +2401,7 @@ static int fk_suffix_match(const char *name, const char *suf) {
 }
 static long long fk_list_push(long long acc, long long sv) {
     if (fk_hp + 1 >= fk_cap) {
-        return acc;
+        fk_die("fk_list_push: heap exhausted building list -- returning the accumulator unchanged would silently drop this element, a partial list accepted as whole.");
     }
     fk_hp = fk_hp + 1;
     fk_hh[fk_hp] = sv;
@@ -2098,7 +2956,7 @@ static long long fk_sense_publish(long long port) {
     /* relay host: env MESH_RELAY=a.b.c.d (the Mac's field-relay), default 127.0.0.1 — cross-device.
      */
     unsigned int addr = 0x0100007f;
-    char *rl = getenv("MESH_RELAY");
+    char *rl = fk_conf("MESH_RELAY");
     if (rl != 0) {
         unsigned int o0 = 0, o1 = 0, o2 = 0, o3 = 0;
         long long k = 0;
@@ -2484,10 +3342,14 @@ static long long fk_mesh_detect(void) {
  * thread per row, and compare BIT-EXACT to the CPU f32 downward right-fold (volatile blocks the CPU
  * FMA so both sides are two roundings). The driver's built-in PTX JIT is intrinsic to the GPU. */
 #if defined(_WIN32)
-static long long fk_cuda_matvec(void) {
+/* one dispatch, shared by the fixture witness (tag 232) and the general data door (tag 233):
+ * load the driver, JIT the Form-emitted PTX at -O0 (unfused), y = W.x one thread per row, then
+ * TEAR DOWN (mem/module/context — the fixture used to leak these per call). Returns 0 and fills
+ * y/gname on success; the negative step code of the first refusal otherwise. */
+static long long fk_cuda_go(const float *W, const float *x, float *y, unsigned rows, unsigned cols,
+                            char *gname, long long gcap) {
     void *h = LoadLibraryA("nvcuda.dll");
     if (h == 0) {
-        printf("cuda: nvcuda.dll not found\n");
         return -1;
     }
     typedef int (*F1)(unsigned);
@@ -2502,6 +3364,8 @@ static long long fk_cuda_matvec(void) {
     typedef int (*F10)(void *, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned,
                        void *, void **, void **);
     typedef int (*F11)(void);
+    typedef int (*F12)(unsigned long long);
+    typedef int (*F13)(void *);
     F1 cuInit = (F1)GetProcAddress(h, "cuInit");
     F2 cuDeviceGet = (F2)GetProcAddress(h, "cuDeviceGet");
     F3 cuDeviceGetName = (F3)GetProcAddress(h, "cuDeviceGetName");
@@ -2513,80 +3377,130 @@ static long long fk_cuda_matvec(void) {
     F9 cuMemcpyDtoH = (F9)GetProcAddress(h, "cuMemcpyDtoH_v2");
     F10 cuLaunchKernel = (F10)GetProcAddress(h, "cuLaunchKernel");
     F11 cuCtxSynchronize = (F11)GetProcAddress(h, "cuCtxSynchronize");
+    F12 cuMemFree = (F12)GetProcAddress(h, "cuMemFree_v2");
+    F13 cuModuleUnload = (F13)GetProcAddress(h, "cuModuleUnload");
+    F13 cuCtxDestroy = (F13)GetProcAddress(h, "cuCtxDestroy_v2");
     if (!cuInit || !cuCtxCreate || !cuModuleLoadDataEx || !cuLaunchKernel) {
-        printf("cuda: missing entry points\n");
         return -2;
     }
     if (cuInit(0) != 0) {
-        printf("cuda: cuInit failed\n");
         return -3;
     }
     int dev = 0;
     if (cuDeviceGet(&dev, 0) != 0) {
         return -4;
     }
-    char gname[256];
-    gname[0] = 0;
-    cuDeviceGetName(gname, 256, dev);
+    if (gname != 0 && gcap > 0) {
+        gname[0] = 0;
+        cuDeviceGetName(gname, (int)gcap, dev);
+    }
     void *ctx = 0;
     if (cuCtxCreate(&ctx, 0, dev) != 0) {
-        printf("cuda: ctx create failed\n");
         return -5;
     }
+    long long rc = 0;
+    void *mod = 0;
+    unsigned long long dW = 0, dX = 0, dY = 0;
     int fd = open("gpu/fptx-matvec.ptx", 0x8000);
     if (fd < 0) {
-        printf("cuda: gpu/fptx-matvec.ptx not found\n");
-        return -6;
-    }
-    static char ptx[131072];
-    long long pn = 0, g;
-    while ((g = read(fd, ptx + pn, 8192)) > 0) {
-        pn = pn + g;
-        if (pn > 120000) {
-            break;
+        rc = -6;
+    } else {
+        static char ptx[131072];
+        long long pn = 0, g;
+        while ((g = read(fd, ptx + pn, 8192)) > 0) {
+            pn = pn + g;
+            if (pn > 120000) {
+                break;
+            }
+        }
+        close(fd);
+        ptx[pn] = 0;
+        int jopt[1];
+        void *jval[1];
+        jopt[0] = 7;
+        jval[0] = (void *)0;
+        /* CU_JIT_OPTIMIZATION_LEVEL = 0 */
+        if (cuModuleLoadDataEx(&mod, ptx, 1, jopt, jval) != 0) {
+            rc = -7;
+            mod = 0;
         }
     }
-    close(fd);
-    ptx[pn] = 0;
-    int jopt[1];
-    void *jval[1];
-    jopt[0] = 7;
-    jval[0] = (void *)0;
-    /* CU_JIT_OPTIMIZATION_LEVEL = 0 */
-    void *mod = 0;
-    if (cuModuleLoadDataEx(&mod, ptx, 1, jopt, jval) != 0) {
-        printf("cuda: PTX JIT failed\n");
-        return -7;
-    }
     void *fn = 0;
-    if (cuModuleGetFunction(&fn, mod, "form_matvec_f32") != 0) {
-        printf("cuda: no form_matvec_f32\n");
-        return -8;
+    if (rc == 0 && cuModuleGetFunction(&fn, mod, "form_matvec_f32") != 0) {
+        rc = -8;
     }
+    if (rc == 0) {
+        cuMemAlloc(&dW, (unsigned long long)rows * cols * 4);
+        cuMemcpyHtoD(dW, W, (unsigned long long)rows * cols * 4);
+        cuMemAlloc(&dX, (unsigned long long)cols * 4);
+        cuMemcpyHtoD(dX, x, (unsigned long long)cols * 4);
+        cuMemAlloc(&dY, (unsigned long long)rows * 4);
+        cuMemcpyHtoD(dY, y, (unsigned long long)rows * 4);
+        void *args[5];
+        args[0] = &dW;
+        args[1] = &dX;
+        args[2] = &dY;
+        args[3] = &rows;
+        args[4] = &cols;
+        unsigned blocks = (rows + 255) / 256;
+        if (cuLaunchKernel(fn, blocks, 1, 1, 256, 1, 1, 0, 0, args, 0) != 0) {
+            rc = -9;
+        } else {
+            cuCtxSynchronize();
+            cuMemcpyDtoH(y, dY, (unsigned long long)rows * 4);
+        }
+    }
+    if (cuMemFree != 0) {
+        if (dW != 0) {
+            cuMemFree(dW);
+        }
+        if (dX != 0) {
+            cuMemFree(dX);
+        }
+        if (dY != 0) {
+            cuMemFree(dY);
+        }
+    }
+    if (mod != 0 && cuModuleUnload != 0) {
+        cuModuleUnload(mod);
+    }
+    if (cuCtxDestroy != 0) {
+        cuCtxDestroy(ctx);
+    }
+    return rc;
+}
+static void fk_cuda_say(long long rc) {
+    if (rc == -1) {
+        printf("cuda: nvcuda.dll not found\n");
+    } else if (rc == -2) {
+        printf("cuda: missing entry points\n");
+    } else if (rc == -3) {
+        printf("cuda: cuInit failed\n");
+    } else if (rc == -5) {
+        printf("cuda: ctx create failed\n");
+    } else if (rc == -6) {
+        printf("cuda: gpu/fptx-matvec.ptx not found\n");
+    } else if (rc == -7) {
+        printf("cuda: PTX JIT failed\n");
+    } else if (rc == -8) {
+        printf("cuda: no form_matvec_f32\n");
+    } else if (rc == -9) {
+        printf("cuda: launch failed\n");
+    }
+}
+/* the fixture witness (tag 232): fixed 3x4 W and 4-vec x, bit-exact vs the CPU two-rounding fold. */
+static long long fk_cuda_matvec(void) {
     unsigned rows = 3, cols = 4;
     float W[12] = {0.1f,  0.2f,  0.3f, 0.7f, 0.11f,     0.13f,
                    0.17f, 0.19f, 0.9f, 0.8f, 0.123456f, 0.654321f};
     float X[4] = {0.5f, 0.25f, 0.125f, 0.333333f};
     float Y[3] = {0.0f, 0.0f, 0.0f};
-    unsigned long long dW = 0, dX = 0, dY = 0;
-    cuMemAlloc(&dW, 48);
-    cuMemcpyHtoD(dW, W, 48);
-    cuMemAlloc(&dX, 16);
-    cuMemcpyHtoD(dX, X, 16);
-    cuMemAlloc(&dY, 12);
-    cuMemcpyHtoD(dY, Y, 12);
-    void *args[5];
-    args[0] = &dW;
-    args[1] = &dX;
-    args[2] = &dY;
-    args[3] = &rows;
-    args[4] = &cols;
-    if (cuLaunchKernel(fn, 1, 1, 1, rows, 1, 1, 0, 0, args, 0) != 0) {
-        printf("cuda: launch failed\n");
-        return -9;
+    char gname[256];
+    long long rc = fk_cuda_go(W, X, Y, rows, cols, gname, 256);
+    if (rc < 0) {
+        fk_cuda_say(rc);
+        return rc;
     }
-    cuCtxSynchronize();
-    cuMemcpyDtoH(Y, dY, 12);
     printf("GPU: %s  CUDA driver-API PTX-JIT -O0 (nvcuda.dll; no python, no nvcc, no nvrtc)\n",
            gname);
     printf(
@@ -2619,9 +3533,104 @@ static long long fk_cuda_matvec(void) {
            (agree == (long long)rows) ? "true" : "false");
     return agree;
 }
+/* the GENERAL data door (tag 233) the RTX receipts named as the missing rung:
+ * (cuda_matvec_f32 W x) — W a flat Form list of rows*cols numbers, x a list of cols numbers.
+ * Dispatches y = W.x on the GPU through the same Form-emitted PTX, recomputes the same downward
+ * two-rounding f32 fold on the CPU (volatile blocks FMA), and returns (agree y0 .. y_rows-1):
+ * the metal receipt rides IN the returned value, not beside it. nil (empty list) on refusal. */
+static long long fk_cons_val(long long h, long long t);
+static long long fk_list_len_c(long long v) {
+    long long p = v >> 1;
+    long long n = 0;
+    while (p >= 1 && p <= fk_hp) {
+        n = n + 1;
+        p = fk_ht[p] >> 1;
+    }
+    return n;
+}
+static long long fk_list_to_f32(long long v, float *out, long long cap) {
+    long long p = v >> 1;
+    long long n = 0;
+    while (p >= 1 && p <= fk_hp && n < cap) {
+        out[n] = (float)fk_num(fk_hh[p]);
+        n = n + 1;
+        p = fk_ht[p] >> 1;
+    }
+    return n;
+}
+static long long fk_cuda_matvec_f32(long long wv, long long xv) {
+    long long wn = fk_list_len_c(wv);
+    long long xn = fk_list_len_c(xv);
+    if (xn < 1 || wn < xn || (wn % xn) != 0 || wn > 4194304) {
+        return 1;
+    }
+    unsigned cols = (unsigned)xn;
+    unsigned rows = (unsigned)(wn / xn);
+    float *W = malloc((unsigned long)(wn * 4));
+    float *x = malloc((unsigned long)(xn * 4));
+    float *y = malloc((unsigned long)(rows * 4));
+    if (W == 0 || x == 0 || y == 0) {
+        free(W);
+        free(x);
+        free(y);
+        return 1;
+    }
+    fk_list_to_f32(wv, W, wn);
+    fk_list_to_f32(xv, x, xn);
+    long long i;
+    for (i = 0; i < (long long)rows; i = i + 1) {
+        y[i] = 0.0f;
+    }
+    char gname[256];
+    long long rc = fk_cuda_go(W, x, y, rows, cols, gname, 256);
+    if (rc < 0) {
+        fk_cuda_say(rc);
+        free(W);
+        free(x);
+        free(y);
+        return 1;
+    }
+    long long agree = 0;
+    for (i = 0; i < (long long)rows; i = i + 1) {
+        volatile float acc = 0.0f;
+        long long j;
+        for (j = (long long)cols - 1; j >= 0; j = j - 1) {
+            volatile float prod = W[i * (long long)cols + j] * x[j];
+            acc = prod + acc;
+        }
+        float cpu = acc;
+        union {
+            float f;
+            unsigned u;
+        } cg, cc;
+        cg.f = y[i];
+        cc.f = cpu;
+        if (cg.u == cc.u) {
+            agree = agree + 1;
+        }
+    }
+    printf("GPU: %s  cuda_matvec_f32 rows=%u cols=%u  BIT-EXACT %lld/%u\n", gname, rows, cols,
+           agree, rows);
+    long long lst = 1;
+    i = rows;
+    while (i > 0) {
+        i = i - 1;
+        lst = fk_cons_val(fk_fbox((double)y[i]), lst);
+    }
+    lst = fk_cons_val(agree << 1, lst);
+    free(W);
+    free(x);
+    free(y);
+    return lst;
+}
 #else
 static long long fk_cuda_matvec(void) {
     return -1;
+}
+static long long fk_cuda_matvec_f32(long long wv, long long xv) {
+    (void)wv;
+    (void)xv;
+    return 1;
 }
 #endif
 static int fk_sock_getaddrinfo(const char *h, const char *p, const struct addrinfo *i,
@@ -2675,7 +3684,7 @@ static long long fk_cons_val(long long h, long long t) {
         fk_arena();
     }
     if (fk_hp + 1 >= fk_cap) {
-        return 1;
+        fk_die("fk_cons_val: heap exhausted -- cannot melt here (live C-local intermediates are not on the value stack for the collector to trace). Returning nil would be a partial structure accepted as whole.");
     }
     fk_hp = fk_hp + 1;
     fk_hh[fk_hp] = h;
@@ -3658,10 +4667,12 @@ static long long fk_mcopy(long long b) {
     fk_fw[p] = fk_nhp;
     return (fk_nhp << 1) | 1;
 }
+static long long fk_nmelt;
 static void fk_melt(void) {
+    long long hp0 = fk_hp;
     fk_fw = calloc(fk_hp + 1, 8);
     if (fk_fw == 0) {
-        return;
+        fk_die("fk_melt: fw calloc failed -- heap cannot be compacted, and returning here would let the program continue on a full heap as if space were reclaimed. Out of memory is out of memory (same as fk_fbox/fk_sintern).");
     }
     long long nlive = 0;
     long long k = 0;
@@ -3691,7 +4702,7 @@ static void fk_melt(void) {
         free(fk_nh);
         free(fk_nt);
         free(fk_fw);
-        return;
+        fk_die("fk_melt: arena malloc failed -- heap cannot be compacted, and returning here would let the program continue on a full heap as if space were reclaimed. Out of memory is out of memory (same as fk_fbox/fk_sintern).");
     }
     fk_nhp = 0;
     fk_nh[0] = 1;
@@ -3720,6 +4731,11 @@ static void fk_melt(void) {
     fk_ht = fk_nt;
     fk_hp = fk_nhp;
     fk_cap = ncap;
+    fk_nmelt = fk_nmelt + 1;
+    if (fk_conf("FK_MELT_WITNESS")) {
+        dprintf(2, "[melt %lld] hp %lld -> %lld, nlive=%lld, cap=%lld, vsp=%lld, np=%lld, fp=%lld, sp=%lld\n",
+                fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_fp, fk_sp);
+    }
 }
 static void fk_vp(long long v) {
     if (fk_vsp >= FK_VALUE_STACK_CAP) {
@@ -3728,11 +4744,11 @@ static void fk_vp(long long v) {
     fk_vs[fk_vsp] = v;
     fk_vsp = fk_vsp + 1;
 }
-/* FK_FN_CAP: every function-index-shaped table in the seed (fk_fnar, fk_nat_exec,
+/* FK_FN_CAP: every function-index-shaped table in the seed (fk_fnar,
  * the fn-value sentinel band's FK_FNVAL_MAX_INDEX) is consistently sized/bounded
  * at 4096 -- except fk_fn[] itself, which was declared at half that (2048) while
  * every check gating access to it (`idx < 4096`, scattered across the parser,
- * evaluator, and JIT) used the LARGER bound. A program defining more than 2048
+ * evaluator) used the LARGER bound. A program defining more than 2048
  * (but fewer than 4096) functions could pass every existing bounds check and
  * still write fk_fn[idx] past the end of its actual array -- a real, reachable
  * overflow. Widening fk_fn[] to match its siblings (rather than tightening every
@@ -3741,10 +4757,11 @@ static void fk_vp(long long v) {
  * the previously-silent corruption case into correct behavior instead of a new
  * failure mode. */
 #define FK_FN_CAP 4096
-#define FK_AST_NODE_CAP 65536 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP) */
+#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144*4*8 = 8MB. */
 #define FK_PARSE_BUF_CAP 1048576 /* fk_buf: scratch buffer for deserializing the flattened .tbl format */
 static long long fk_fn_count;
 static long long fk_node_count;
+static long long fk_ast_full; /* set once when the AST node table overflows; halts the parse (fk_spos:=fk_slen) so the collect-and-continue recovery cannot spin re-minting sentinels forever. Reset per run. */
 static long long fk_fn[FK_FN_CAP];
 static long long fk_node[FK_AST_NODE_CAP][4];
 static char fk_buf[FK_PARSE_BUF_CAP];
@@ -3827,63 +4844,6 @@ static void fk_pv_root(long long root, long long v) {
     }
 }
 static long long fk_walk(long long i, long long fp);
-static long long fk_jit_lower(long long f);
-typedef long long (*fk_natfn)(long long *);
-static fk_natfn fk_nat_install(const unsigned char *code, long long n);
-#define FK_JIT_CODE_BUF_CAP 16384 /* fk_jb: the x86-64 JIT's native-code output buffer, per lowered function */
-static unsigned char fk_jb[FK_JIT_CODE_BUF_CAP];
-static long long fk_jbp;
-/* frame slots fn needs (args + let-locals); set by fk_jit_lower */
-static long long fk_jit_frame;
-static const unsigned char *fk_src_nat[FK_FN_CAP];
-static long long fk_src_nat_len[FK_FN_CAP];
-static long long fk_feval_jit_on = 0;
-static long long fk_feval_hot = 5;
-static long long fk_fheat[FK_FN_CAP];
-static long long fk_nat_tried[FK_FN_CAP];
-static fk_natfn fk_nat_exec[FK_FN_CAP];
-static fk_natfn fk_ensure_native(long long callee, long long *frame);
-static long long fk_jtramp(long long callee, long long fp, long long argc);
-static long long fk_feval_try_native(long long callee, long long fp, long long argc,
-                                     long long *out) {
-    if (fk_feval_jit_on == 0) {
-        return 0;
-    }
-    if (callee < 0 || callee >= FK_FN_CAP) {
-        return 0;
-    }
-    long long frame = 0;
-    fk_natfn nf = fk_ensure_native(callee, &frame);
-    if (nf == 0) {
-        return 0;
-    }
-    /* #75 wire: dispatch the native DIRECTLY (no native tail-chaining; fk_lower_tail_tramp is OFF
-     * on this path so no sentinel is emitted, and inter-fn calls inside the native bounce to the
-     * walker via fk_jcall). The native frame fk_vs[fp..fp+frame) is rooted: zero the let-locals
-     * beyond the args and raise fk_vsp over the whole frame so a compacting melt relocates the cons
-     * the native stores there. */
-    {
-        long long fr = frame;
-        if (fr < argc) {
-            fr = argc;
-        }
-        long long z = argc;
-        while (z < fr) {
-            if (fp + z < FK_VALUE_STACK_CAP) {
-                fk_vs[fp + z] = 0;
-            }
-            z = z + 1;
-        }
-        long long save_vsp = fk_vsp;
-        long long need = fp + fr;
-        if (need > fk_vsp && need < FK_VALUE_STACK_CAP) {
-            fk_vsp = need;
-        }
-        *out = nf(&fk_vs[fp]);
-        fk_vsp = save_vsp;
-    }
-    return 1;
-}
 static long long fk_walk_body(long long i, long long fp) {
     for (;;) {
         long long t = fk_node[i][0];
@@ -3935,12 +4895,6 @@ static long long fk_walk_body(long long i, long long fp) {
             }
             fk_vs[fp] = v12;
             fk_vsp = fp + 1;
-            {
-                long long _nr;
-                if (fk_feval_try_native(c12, fp, 1, &_nr)) {
-                    return _nr;
-                }
-            }
             i = fk_fn[c12];
             continue;
         }
@@ -3955,12 +4909,6 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_vs[fp] = a0;
             fk_vs[fp + 1] = a1;
             fk_vsp = fp + 2;
-            {
-                long long _nr;
-                if (fk_feval_try_native(c240, fp, 2, &_nr)) {
-                    return _nr;
-                }
-            }
             i = fk_fn[c240];
             continue;
         }
@@ -3983,12 +4931,6 @@ static long long fk_walk_body(long long i, long long fp) {
                 m241 = m241 + 1;
             }
             fk_vsp = fp + n241;
-            {
-                long long _nr;
-                if (fk_feval_try_native(c241, fp, n241, &_nr)) {
-                    return _nr;
-                }
-            }
             i = fk_fn[c241];
             continue;
         }
@@ -4083,7 +5025,21 @@ static long long fk_walk_body(long long i, long long fp) {
     }
 }
 static long long fk_walk_cold(long long t, long long i, long long fp);
+/* the honest eval-depth wall: measure REAL stack use and die SAYING SO before the host
+ * stack dies silently (witnessed 2026-07-01: exit 127, no output, three recipes in one
+ * day — the Windows main lacked the POSIX main's FORM_KERNEL_STACK_MB big-stack thread,
+ * now mirrored below). The mains raise the wall to reserve minus 2MB; the recipe-side
+ * home for deep recursion stays the same: make it tail or balanced. */
+static char *fk_stack_base = 0;
+static long long fk_stack_wall = 6 * 1024 * 1024;
 static long long fk_walk(long long i, long long fp) {
+    char fk_sp_probe;
+    if (fk_stack_base != 0 && (long long)(fk_stack_base - &fk_sp_probe) > fk_stack_wall) {
+        printf("fkwu: eval too deep — %lld bytes of walker stack (wall %lld). The recursion "
+               "needs to be tail or balanced; the wall is honest, the silent crash was not.\n",
+               (long long)(fk_stack_base - &fk_sp_probe), fk_stack_wall);
+        fk_die("eval-depth wall");
+    }
     long long t = fk_node[i][0];
     if (t < 0 || t >= FK_OPCODE_ARM_CAP) {
         fk_die("fk_walk: corrupt node tag");
@@ -4234,6 +5190,7 @@ static long long fk_walk(long long i, long long fp) {
             fk_melt();
         }
         if (fk_hp + 1 >= fk_cap) {
+            dprintf(2, "[cons] heap full after melt (hp=%lld cap=%lld) -- returning nil, list is CORRUPT\n", fk_hp, fk_cap);
             fk_vsp = fk_vsp - 2;
             return 1;
         }
@@ -4743,7 +5700,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             ix43 = ix43 + 1;
         }
         if (fk_np + 1 >= FK_NODE_CAP) {
-            return 0;
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -4766,8 +5723,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
             ix46 = ix46 + 1;
         }
-        if (sa46 < 0 || sa46 >= fk_sp || fk_np + 1 >= FK_NODE_CAP) {
+        if (sa46 < 0 || sa46 >= fk_sp) {
             return 0;
+        }
+        if (fk_np + 1 >= FK_NODE_CAP) {
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -4792,7 +5752,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             ix47 = ix47 + 1;
         }
         if (fk_np + 1 >= FK_NODE_CAP) {
-            return 0;
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 2;
@@ -4835,7 +5795,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             in91 = fk_hh[q91] >> 1;
         }
         if (fk_np + 1 >= FK_NODE_CAP) {
-            return 0;
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 3;
@@ -4859,7 +5819,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             ix112 = ix112 + 1;
         }
         if (fk_np + 1 >= FK_NODE_CAP) {
-            return 0;
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -4891,7 +5851,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         long long fb113 = fk_fbox(fd113);
         if (fk_np + 1 >= FK_NODE_CAP) {
-            return 0;
+            fk_die("fk value-node table full (FK_NODE_CAP)");
         }
         fk_np = fk_np + 1;
         fk_nkind[fk_np] = 1;
@@ -5104,7 +6064,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (len <= 0) {
             return fk_sbuf("", 0);
         }
-        int fd = open(p, 0);
+        int fd = open(p, O_RDBIN);
         if (fd < 0) {
             return fk_sbuf("", 0);
         }
@@ -5124,9 +6084,18 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 63) {
         static char p[4096];
-        fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
-        int fd = open(p, 0);
+        static long long fk_nreads;
+        long long pv63 = fk_walk(fk_node[i][1], fp);
+        fk_cstr(pv63, p, 4096);
+        fk_nreads = fk_nreads + 1;
+        int fd = open(p, O_RDBIN);
         if (fd < 0) {
+            if (fk_conf("FK_READ_WITNESS")) {
+                long long sa63 = pv63 >> 1;
+                dprintf(2, "[read_file] OPEN FAILED at read #%lld: '%s' (handle=%lld sa=%lld sl=%lld so=%lld sp=%lld)\n",
+                        fk_nreads, p, pv63, sa63, (sa63 >= 0 && sa63 < fk_sp) ? fk_sl[sa63] : -1,
+                        (sa63 >= 0 && sa63 < fk_sp) ? fk_so[sa63] : -1, fk_sp);
+            }
             return fk_sbuf("", 0);
         }
         fk_sinit();
@@ -5135,8 +6104,12 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         for (;;) {
             while (base + total + 65536 > fk_scap_b) {
                 fk_scap_b = fk_scap_b * 2;
+                void *sb0 = fk_sb;
                 fk_sb = realloc(fk_sb, fk_scap_b);
                 fk_sb_check();
+                if (fk_conf("FK_READ_WITNESS")) {
+                    dprintf(2, "[read_file] pool grow -> %lld bytes, %p -> %p (sbp=%lld sp=%lld)\n", fk_scap_b, sb0, (void *)fk_sb, fk_sbp, fk_sp);
+                }
             }
             long long got = read(fd, fk_sb + base + total, 65536);
             if (got <= 0) {
@@ -5151,7 +6124,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long xs64 = fk_walk(fk_node[i][1], fp);
         fk_rp = fk_rp + 1;
         if (fk_rp >= FK_RECORD_CAP) {
-            fk_rp = FK_RECORD_CAP - 1;
+            fk_die("fk_walk tag 64: FK_RECORD_CAP live records exceeded -- clamping fk_rp to the last slot would silently ALIAS two distinct records onto one, a whole quietly swapped for another. Raise FK_RECORD_CAP if a real program needs this many live records.");
         }
         fk_rcnt[fk_rp] = 0;
         fk_rbp[fk_rp] = 0;
@@ -5172,6 +6145,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                     fk_rkey[fk_rp][fk_rcnt[fk_rp]] = k64;
                     fk_rval[fk_rp][fk_rcnt[fk_rp]] = v64;
                     fk_rcnt[fk_rp] = fk_rcnt[fk_rp] + 1;
+                } else {
+                    fk_die("fk_walk tag 64: FK_RECORD_MAX_KEYS exceeded -- silently dropping a key past the cap would be a partial record accepted as whole. Raise FK_RECORD_MAX_KEYS if a real record needs this many keys.");
                 }
             }
             q64 = fk_ht[q64] >> 1;
@@ -5544,6 +6519,33 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 232) {
         return fk_cuda_matvec() << 1;
     }
+    if (t == 233) {
+        long long w233 = fk_walk(fk_node[i][1], fp);
+        fk_vp(w233);
+        long long x233 = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_cuda_matvec_f32(fk_vs[fk_vsp], x233);
+    }
+    if (t == 234) {
+        return fk_mic_capture(fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 235) {
+        return fk_cam_luma(fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 236) {
+        return fk_audio_loopback(fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 237) {
+        static char p237a[4096];
+        static char p237b[4096];
+        long long a237 = fk_walk(fk_node[i][1], fp);
+        fk_vp(a237);
+        long long b237 = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        fk_cstr(fk_vs[fk_vsp], p237a, 4096);
+        fk_cstr(b237, p237b, 4096);
+        return fk_wav_loopback(p237a, p237b);
+    }
     if (t == 200) {
         static char p200[4096];
         fk_cstr(fk_walk(fk_node[i][1], fp), p200, 4096);
@@ -5715,10 +6717,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_nsline[fr_ni] = fr_pk >> 16;
             fk_nscol[fr_ni] = fr_pk & 65535;
             fk_nsattr[fr_ni] = 1;
-            if (fk_fbn < FK_NODE_CAP) {
-                fk_fbroots[fk_fbn] = fr_nv;
-                fk_fbn = fk_fbn + 1;
+            if (fk_fbn >= FK_NODE_CAP) {
+                fk_die("fk fbroots table full (FK_NODE_CAP): GC root registration would be silently dropped");
             }
+            fk_fbroots[fk_fbn] = fr_nv;
+            fk_fbn = fk_fbn + 1;
         }
         return fr_nv;
     }
@@ -5733,12 +6736,13 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long fe_i = fk_fbn;
         while (fe_i > 0) {
             fe_i = fe_i - 1;
-            if (fk_hp + 1 < fk_cap) {
-                fk_hp = fk_hp + 1;
-                fk_hh[fk_hp] = fk_fbroots[fe_i];
-                fk_ht[fk_hp] = fe_r;
-                fe_r = (fk_hp << 1) | 1;
+            if (fk_hp + 1 >= fk_cap) {
+                fk_die("fk_walk tag 129: heap exhausted draining fbroots after melt -- silently skipping a root would return a truncated root list, live roots dropped without witness.");
             }
+            fk_hp = fk_hp + 1;
+            fk_hh[fk_hp] = fk_fbroots[fe_i];
+            fk_ht[fk_hp] = fe_r;
+            fe_r = (fk_hp << 1) | 1;
         }
         return fe_r;
     }
@@ -5864,10 +6868,50 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
  * control forms defn/do/let/if keep hand-written shape here — their eval semantics are special.
  * Every VALUE form is data: arity-0 ((empty)->18), arity-1/2/3 primitives, and the arity -1
  * VARIADIC sentinel ((list ..)->cons/19). */
-#define FK_SOURCE_TEXT_CAP 262144 /* fk_srctext: the parsed program's own source text (distinct from fk_src, the staged input buffer) */
+#define FK_SOURCE_TEXT_CAP 8388608 /* fk_srctext: the parsed program's own source text (distinct from fk_src, the staged input buffer). Raised 262144->8388608 (2026-07-02): a 267KB generated --src program (1,200 audio-clip paths) was SILENTLY truncated at 262,143 bytes by fk_run_src's single bounded read; the permissive reader auto-closed the amputated program and ran it, yielding a deterministic wrong answer with no error -- the "N=100 cliff". fk_run_src now reads to EOF and dies loudly if the program exceeds this cap. */
 static char fk_srctext[FK_SOURCE_TEXT_CAP];
 static long long fk_spos;
 static long long fk_slen;
+/* clang-style "fkwu:line:col: sev: msg". `off` is a byte offset into fk_srctext;
+ * a negative off suppresses the coordinate (for artifact-load diagnostics that
+ * read fk_buf, not source text). The variadic body delegates to vdprintf so
+ * callers pass "%.*s" slices of fk_srctext inline. */
+static void fk_diag(int sev, long long off, const char *fmt, ...) {
+    if (sev == FK_DIAG_ERR) {
+        fk_nerr = fk_nerr + 1;
+    } else {
+        fk_nwarn = fk_nwarn + 1;
+    }
+    if (off < 0) {
+        dprintf(2, "fkwu: %s: ", sev == FK_DIAG_ERR ? "error" : "warning");
+    } else {
+        long long line = 1, i = 0, lastnl = -1;
+        if (off > fk_slen) {
+            off = fk_slen;
+        }
+        while (i < off) {
+            if (fk_srctext[i] == FK_CH_LF) {
+                line = line + 1;
+                lastnl = i;
+            }
+            i = i + 1;
+        }
+        long long col = off - lastnl; /* lastnl=-1 on line 1 => col = off+1 */
+        dprintf(2, "fkwu:%lld:%lld: %s: ", line, col, sev == FK_DIAG_ERR ? "error" : "warning");
+    }
+    __builtin_va_list ap;
+    __builtin_va_start(ap, fmt);
+    vdprintf(2, fmt, ap);
+    __builtin_va_end(ap);
+    dprintf(2, "\n");
+}
+/* Called ONCE, after parse completes and before execution begins: gcc-style
+ * tally. Silent when clean, so the default happy path prints nothing new. */
+static void fk_diag_flush(void) {
+    if (fk_nerr > 0 || fk_nwarn > 0) {
+        dprintf(2, "fkwu: %lld error(s), %lld warning(s)\n", fk_nerr, fk_nwarn);
+    }
+}
 static int fk_sws(char c) {
     return c == FK_CH_SPACE || c == FK_CH_TAB || c == FK_CH_LF || c == FK_CH_CR;
 }
@@ -5968,7 +7012,24 @@ static long long fk_smknode(long long t0, long long c1, long long c2, long long 
     long long k = fk_node_count;
     fk_node_count = fk_node_count + 1;
     if (fk_node_count > FK_AST_NODE_CAP) {
-        fk_die("fk_smknode: program too large for the AST node table");
+        /* COMPILE-PHASE (parser allocator): program too large, not corruption.
+         * DON'T mint a new node; clamp the count back and reuse the last valid slot
+         * (a valid index, never OOB, so this is safe at runtime too). Diagnose ONCE
+         * and HALT the parse by forcing EOF. Without the halt, a program whose parser
+         * mints unbounded nodes re-hits this forever now that collect-and-continue
+         * replaced the old fk_die -- MEASURED at 677,766 diagnostics in 6s on
+         * resource-port.fk, a CPU-spin, not an OOM. Forcing fk_spos=fk_slen terminates
+         * every parse loop (they all gate on fk_spos<fk_slen); the accumulated error
+         * then refuses the run. This restores the old fk_die's BOUND as a clean stop. */
+        fk_node_count = FK_AST_NODE_CAP;
+        if (fk_ast_full == 0) {
+            fk_diag(FK_DIAG_ERR, fk_spos,
+                    "AST node table full at node %lld; program too large (raise FK_AST_NODE_CAP) -- halting parse",
+                    (long long)FK_AST_NODE_CAP);
+            fk_ast_full = 1;
+        }
+        fk_spos = fk_slen;
+        return FK_AST_NODE_CAP - 1;
     }
     fk_node[k][0] = t0;
     fk_node[k][1] = c1;
@@ -6076,7 +7137,8 @@ static long long fk_smkstr(void) {
  * slot). A bare bound name lowers to tag 110 (read fk_vs[fp+slot]); a let lowers to tag 109 (store
  * then body); a function reserves fk_maxslot slots (tag 111). Over-reserve is safe (form-flatten
  * over-reserves too). */
-static long long fk_bd_s[128], fk_bd_n[128], fk_bd_off[128], fk_bd_top, fk_maxslot;
+#define FK_BD_STACK_CAP 1024 /* fk_bd_*: max bindings simultaneously in scope during parse. Raised 128->1024 (2026-07-02): a single scope with many sequential lets (generated classifier programs) can exceed 128, and a silently dropped binding miscompiles variable references. Same raisable-constant class as FK_NODE_CAP; overflow now dies loudly instead of dropping a binding. */
+static long long fk_bd_s[FK_BD_STACK_CAP], fk_bd_n[FK_BD_STACK_CAP], fk_bd_off[FK_BD_STACK_CAP], fk_bd_top, fk_maxslot;
 static long long fk_bd_lookup(long long s, long long n) {
     long long i = fk_bd_top;
     while (i > 0) {
@@ -6088,28 +7150,75 @@ static long long fk_bd_lookup(long long s, long long n) {
     return -1;
 }
 static void fk_bd_push(long long s, long long n, long long off) {
-    if (fk_bd_top < 128) {
-        fk_bd_s[fk_bd_top] = s;
-        fk_bd_n[fk_bd_top] = n;
-        fk_bd_off[fk_bd_top] = off;
-        fk_bd_top = fk_bd_top + 1;
+    if (fk_bd_top >= FK_BD_STACK_CAP) {
+        /* COMPILE-PHASE: too many bindings live in one scope. The old fear was a
+         * SILENT drop miscompiling references; answer it by dropping LOUDLY, not
+         * by halting. DECLINE the push (leave fk_bd_top at cap); this name then
+         * misses fk_bd_lookup and lowers to the unbound default 0 / unresolved-
+         * call witness -- axiom-5's existing recovery. The rest of the source is
+         * still fully checked. */
+        fk_diag(FK_DIAG_ERR, fk_spos,
+                "[scope-overflow] binding '%.*s' dropped: more than %d bindings in scope "
+                "(raise FK_BD_STACK_CAP); this name resolves to the unbound default",
+                (int)n, fk_srctext + s, (int)FK_BD_STACK_CAP);
+        return;
     }
+    fk_bd_s[fk_bd_top] = s;
+    fk_bd_n[fk_bd_top] = n;
+    fk_bd_off[fk_bd_top] = off;
+    fk_bd_top = fk_bd_top + 1;
 }
 static void fk_bd_pop(void) {
     if (fk_bd_top > 0) {
         fk_bd_top = fk_bd_top - 1;
     }
 }
+/* A nested (defn ...) resets fk_bd_top to 0 so its own body can't accidentally
+ * resolve a caller-frame slot (a function has no access to its caller's locals).
+ * That reset is a WRITE-CURSOR reset into shared fixed arrays, not a true stack
+ * push/pop -- so the nested defn's own fk_bd_push calls physically overwrite
+ * fk_bd_s/fk_bd_n/fk_bd_off at indices 0.. with its own bindings. Restoring just
+ * fk_bd_top afterward brought the COUNT back but not the DATA already clobbered
+ * at those indices -- every name the enclosing do had bound became silently
+ * unlookupable (degrading to the unbound-name default, 0) for the rest of that
+ * do's own parsing. These two helpers save/restore the actual slice, not just
+ * the pointer. (Ported from sibling branch commit f99d3232.) */
+static long long fk_bd_save_s[128], fk_bd_save_n[128], fk_bd_save_off[128];
+static long long fk_bd_save(void) {
+    long long top = fk_bd_top;
+    long long i = 0;
+    while (i < top) {
+        fk_bd_save_s[i] = fk_bd_s[i];
+        fk_bd_save_n[i] = fk_bd_n[i];
+        fk_bd_save_off[i] = fk_bd_off[i];
+        i = i + 1;
+    }
+    return top;
+}
+static void fk_bd_restore(long long top) {
+    long long i = 0;
+    while (i < top) {
+        fk_bd_s[i] = fk_bd_save_s[i];
+        fk_bd_n[i] = fk_bd_save_n[i];
+        fk_bd_off[i] = fk_bd_save_off[i];
+        i = i + 1;
+    }
+    fk_bd_top = top;
+}
 static long long fk_parse_do(void);
 /* stone 4: a function table. Each top-level (defn name ...) gets its own fn-index (>=1); a call to
  * a registered name lowers to tag 12 (call-by-index, single-arg). A non-defn top form is the root
  * (fn[0]). */
-/* FK_TOP_FN_SYM_CAP is deliberately smaller than FK_FN_CAP: it bounds only the
- * name->index LOOKUP table for top-level (defn ...) forms, not the function
- * count itself -- fk_fn_lookup degrades to "unregistered, allocate fresh" past
- * this cap (see fk_sparse's `if (idx < 0)` fallback), it does not reject the
- * program. */
-#define FK_TOP_FN_SYM_CAP 256
+/* FK_TOP_FN_SYM_CAP now matches FK_FN_CAP. It was 256 ("deliberately smaller",
+ * degrading to "unregistered, allocate fresh" past the cap) — but for any
+ * cross-calling program the degradation is SILENT breakage, not grace: defn
+ * number 257's name never registers, every call to it allocates a fresh
+ * body-less index, and the call returns nothing with no diagnostic. Witnessed
+ * 2026-07-02: a 258-defn direct-source learning chain returned garbage at
+ * exactly this boundary (253 defns ran; +5 more crossed 256 and broke) — the
+ * "direct-source function-table ceiling" several receipts had to duck under
+ * was this constant. Three arrays x 4096 x 8B = 96KB, a trivial price. */
+#define FK_TOP_FN_SYM_CAP FK_FN_CAP
 static long long fk_fnsym_s[FK_TOP_FN_SYM_CAP], fk_fnsym_n[FK_TOP_FN_SYM_CAP],
     fk_fnidx[FK_TOP_FN_SYM_CAP], fk_fntop, fk_defn_next, fk_root, fk_fnar[FK_FN_CAP];
 static long long fk_fn_lookup(long long s, long long n) {
@@ -6157,6 +7266,10 @@ static long long fk_sparse(void) {
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
+            /* SCOPE FIX: save/restore the enclosing do's live let-bindings around
+             * this nested defn's own frame (see fk_bd_save above; sibling f99d3232). */
+            long long fk_bd_saved_top = fk_bd_save();
+            long long fk_bd_saved_maxslot = fk_maxslot;
             fk_bd_top = 0;
             fk_maxslot = 0;
             fk_bd_push(as2, alen, 0);
@@ -6168,6 +7281,8 @@ static long long fk_sparse(void) {
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
+            fk_bd_restore(fk_bd_saved_top);
+            fk_maxslot = fk_bd_saved_maxslot;
             return body;
         }
         if (fk_sym_eq(s, hn, "do")) {
@@ -6248,6 +7363,40 @@ static long long fk_sparse(void) {
             if (ar < 0) {
                 return fk_parse_variadic(tag);
             }
+            if (ar > 3) {
+                /* arity-4+ ops (today only make_nodeid, tag 91) build a LIST-shaped node
+                 * (child [1] = a cons list of the args, per flt-nodeid4 + the tag-91
+                 * evaluator) that the generic 3-child parse path below CANNOT form -- the
+                 * --src parser has no lowering for them; they are flatten-only. Without
+                 * this case the 4th arg blocks the ')' check, fk_spos never advances, and
+                 * the parse spins to the AST cap (MEASURED: 677k diagnostics/6s on
+                 * resource-port.fk / shell-lower.fk). Diagnose PRECISELY, drain the balanced
+                 * form so the parser stays synced, and decline to nothing. */
+                fk_diag(FK_DIAG_ERR, s,
+                        "op '%.*s' (arity %lld) is flatten-only; the --src parser cannot lower a 4+-arg op -- flatten this source to a .tbl instead",
+                        (int)hn, fk_srctext + s, ar);
+                long long depth = 1;
+                while (fk_spos < fk_slen && depth > 0) {
+                    char cc = fk_srctext[fk_spos];
+                    if (cc == FK_CH_DQUOTE) {
+                        fk_spos = fk_spos + 1;
+                        while (fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_DQUOTE) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        if (fk_spos < fk_slen) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        continue;
+                    }
+                    if (cc == FK_CH_LPAREN) {
+                        depth = depth + 1;
+                    } else if (cc == FK_CH_RPAREN) {
+                        depth = depth - 1;
+                    }
+                    fk_spos = fk_spos + 1;
+                }
+                return fk_smknode(137, 0, 0, 0);
+            }
             long long c1 = 0, c2 = 0, c3 = 0;
             if (ar >= 1) {
                 c1 = fk_sparse();
@@ -6280,15 +7429,54 @@ static long long fk_sparse(void) {
              * args — same mechanism, any N. ar==0 parses no args (chain -1, inert); ar==1/2/8 are
              * the same code. */
             long long ar = (fidx >= 0 && fidx < FK_FN_CAP) ? fk_fnar[fidx] : 1;
+            long long over = 0;
+            if (ar > 256) {
+                /* COMPILE-PHASE: over-arity is a diagnosable source error, not
+                 * corruption. Parse the first 256, then DRAIN the rest to the
+                 * matching ')' (the same balanced-paren skip the unresolved-head
+                 * arm below uses) so the parser stays synced and later forms are
+                 * still checked. The die's own fear -- truncate + desync -- is
+                 * answered by the drain, not by exit(1). */
+                fk_diag(FK_DIAG_ERR, fk_spos,
+                        "[arity-cap] direct call to '%.*s' declares %lld args (>256); "
+                        "parsing first 256, form truncated",
+                        (int)hn, fk_srctext + s, ar);
+                ar = 256;
+                over = 1;
+            }
             long long argn[256];
             long long ai = 0;
             while (ai < ar && ai < 256) {
                 argn[ai] = fk_sparse();
                 ai = ai + 1;
             }
-            fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
-                fk_spos = fk_spos + 1;
+            if (over) {
+                /* drain remaining operands to the matching close paren */
+                long long depth = 1;
+                while (fk_spos < fk_slen && depth > 0) {
+                    char cc = fk_srctext[fk_spos];
+                    if (cc == FK_CH_DQUOTE) {
+                        fk_spos = fk_spos + 1;
+                        while (fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_DQUOTE) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        if (fk_spos < fk_slen) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        continue;
+                    }
+                    if (cc == FK_CH_LPAREN) {
+                        depth = depth + 1;
+                    } else if (cc == FK_CH_RPAREN) {
+                        depth = depth - 1;
+                    }
+                    fk_spos = fk_spos + 1;
+                }
+            } else {
+                fk_sskip();
+                if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                    fk_spos = fk_spos + 1;
+                }
             }
             long long chain = -1;
             long long k = ai;
@@ -6322,7 +7510,33 @@ static long long fk_sparse(void) {
                 iai = iai + 1;
             }
             fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+            if (iai >= 256 && fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_RPAREN) {
+                /* COMPILE-PHASE: kept 256, DRAIN the rest to the matching ')'
+                 * (balanced skip) so fk_spos realigns and parsing continues --
+                 * same shape as the direct-call arm above. */
+                fk_diag(FK_DIAG_ERR, fk_spos,
+                        "[arity-cap] indirect call declares >256 args; kept 256, rest dropped");
+                long long depth = 1;
+                while (fk_spos < fk_slen && depth > 0) {
+                    char cc = fk_srctext[fk_spos];
+                    if (cc == FK_CH_DQUOTE) {
+                        fk_spos = fk_spos + 1;
+                        while (fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_DQUOTE) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        if (fk_spos < fk_slen) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        continue;
+                    }
+                    if (cc == FK_CH_LPAREN) {
+                        depth = depth + 1;
+                    } else if (cc == FK_CH_RPAREN) {
+                        depth = depth - 1;
+                    }
+                    fk_spos = fk_spos + 1;
+                }
+            } else if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
                 fk_spos = fk_spos + 1;
             }
             long long ichain = -1;
@@ -6371,6 +7585,21 @@ static long long fk_sparse(void) {
                 fk_spos = fk_spos + 1;
             }
         }
+        /* Compile-time unresolved head. It CAN recover -- axiom-5: an offer a cell can't answer
+         * acks nothing (tag 137), so the parse continues. Per "die only if it cannot recover," we
+         * do NOT die here; we RECOVER. But we no longer do it SILENTLY: this witness is the compile
+         * diagnostic that was missing (the ftanh-class bug). Go/Rust/TS hard-error on an unbound
+         * head; fkwu recovers and says so, on every occurrence, unconditionally (no env gate). A
+         * correct program with its preludes present never reaches here. */
+        /* Route the pre-existing unresolved-call witness through the collector as
+         * an ERROR so it joins the gcc-style count -- but it STILL RECOVERS to
+         * tag-137 nothing (axiom-5: an offer a cell can't answer acks nothing).
+         * It is defeasible, so it does NOT die; the program still runs its
+         * recovered output, and the nonzero exit comes from the error count. */
+        fk_diag(FK_DIAG_ERR, s,
+                "[unresolved-call] '%.*s' matched no op/rewrite/fn/binding -- typo or "
+                "missing prelude? Recovered to nothing (axiom-5); parse continues",
+                (int)hn, fk_srctext + s);
         return fk_smknode(137, 0, 0, 0);
     }
 
@@ -6640,7 +7869,15 @@ static void fk_prescan_form(long long *pp) {
         long long idx = fk_defn_next;
         fk_defn_next = fk_defn_next + 1;
         if (fk_defn_next > FK_FN_CAP) {
-            fk_die("fk_prescan_defns: too many functions defined (fk_fn capacity exceeded)");
+            /* COMPILE-PHASE prescan: program-size limit, not corruption. Diagnose
+             * and STOP registering (the fk_fntop<CAP guard below already skips the
+             * write, and the idx<FK_FN_CAP guard skips the fk_fnar[idx] write);
+             * keep scanning so EVERY over-cap defn is reported, not just the first.
+             * Calls to unregistered names fall through to the unresolved-call
+             * witness -- already a recovery path. */
+            fk_diag(FK_DIAG_ERR, ns,
+                    "[fn-cap] defn '%.*s' at #%lld exceeds FK_FN_CAP (%d); not registered",
+                    (int)nlen, fk_srctext + ns, idx, (int)FK_FN_CAP);
         }
         if (fk_fntop < FK_TOP_FN_SYM_CAP) {
             fk_fnsym_s[fk_fntop] = ns;
@@ -6768,7 +8005,14 @@ static void fk_parse_top(void) {
                 idx = fk_defn_next;
                 fk_defn_next = fk_defn_next + 1;
                 if (fk_defn_next > FK_FN_CAP) {
-                    fk_die("fk_sparse: too many functions defined (fk_fn capacity exceeded)");
+                    /* COMPILE-PHASE: same capacity class as the prescan site.
+                     * Diagnose, skip storing this body (the idx<FK_FN_CAP guards
+                     * at fk_fnar[idx]/fk_fn[idx] below already decline the write),
+                     * but keep consuming the whole defn form so the parse loop
+                     * reaches the next top-level form. Every offender reported. */
+                    fk_diag(FK_DIAG_ERR, ns2,
+                            "[fn-cap] defn '%.*s' over FK_FN_CAP (%d); body not stored",
+                            (int)nlen2, fk_srctext + ns2, (int)FK_FN_CAP);
                 }
                 if (fk_fntop < FK_TOP_FN_SYM_CAP) {
                     fk_fnsym_s[fk_fntop] = ns2;
@@ -6783,6 +8027,10 @@ static void fk_parse_top(void) {
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_LPAREN) {
                 fk_spos = fk_spos + 1;
             }
+            /* SCOPE FIX (same as fk_sparse's defn arm above): save/restore the
+             * enclosing scope's live bindings around this defn's frame (f99d3232). */
+            long long fk_bd_saved_top = fk_bd_save();
+            long long fk_bd_saved_maxslot = fk_maxslot;
             fk_bd_top = 0;
             fk_maxslot = 0;
             long long na = 0;
@@ -6817,1417 +8065,13 @@ static void fk_parse_top(void) {
             if (idx >= 0 && idx < FK_FN_CAP) {
                 fk_fn[idx] = body;
             }
+            fk_bd_restore(fk_bd_saved_top);
+            fk_maxslot = fk_bd_saved_maxslot;
             return;
         }
     }
     fk_root = fk_sparse();
 }
-/* ══ IN-PROCESS SELF-JIT (proof-of-concept, integer-arithmetic + self-recursion) ══ When a --src
- * function is hot AND its whole body is in the lowerable family (literal / arg-slot / add / sub /
- * mul / le / eq / if / PURE-SELF-recursion), the running kernel lowers ITS node tree to x86-64
- * BYTES here, installs them executable via the existing fk_native_call HAL door, and dispatches the
- * call natively — the recursion runs entirely in native code (its own asm `call`), so the whole
- * recursive computation crystallizes, bit-identical and ~order-of-magnitude faster than the walk.
- * HONEST SCOPE: this C lowerer is a PROOF-OF-CONCEPT of the in-process fusion (Lane A's install
- * door + a real tree->bytes lowerer in one running process). The DESTINATION is Lane B's Form
- * emitter (model/form-asm-x64.fk / fkc-nat-expr) run in-process — the same recipe that proves
- * four-way lowering to asm bytes — NOT this C twin. This proves the wire end-to-end for one
- * op-family; it deliberately does NOT cover form-eval's hot string/list/cons ops, and it bails
- * (installs nothing) on any tag outside the family, so a non-lowerable function always falls back
- * to the tree-walker, byte-identical. ABI we emit: long long fn(long long *args) — args ptr in RCX
- * (Win64) / RDI (SysV); args[k] = tagged value of slot k; result tagged in RAX. RBP holds the args
- * ptr through the body. Recursion builds a fresh args array on the native stack and `call rel32`s
- * to fn's own entry (offset 0), so each frame is independent — runs on fkwu's 256MB thread stack
- * (FORM_KERNEL_STACK_MB), the same stack the walker recurses on. */
-/* ── GENERAL primitive + inter-fn CARRIERS (the JIT calls these, not per-op asm) ── The reframe:
- * "string/float/list ops" are NOT special JIT features — they are RECIPES over primitives. The JIT
- * only needs (1) any-kind literals (handled by emitting the interned tagged word) and (2) the
- * ability to emit a CALL to a kind-correct carrier. Then ALL recipes lower as recipes; the
- * value-correctness lives in ONE place (the same computation fk_walk runs), so a lowered float add
- * can NEVER drift from the walker. fk_jprim2(tag,a,b) / fk_jprim1(tag,a) take ALREADY-EVALUATED
- * tagged words and return the tagged result — bit-identical to fk_walk's tag case. CORRECTNESS
- * NOTE: add/sub/mul/ le/eq are float-aware here (via fk_num/fk_fbox), so lowering them as carrier
- * calls is correct for float operands (the #59 int-inline was WRONG for floats — fchk would return
- * an integer-add answer). The int-inline survives only behind a provably-int fast path. */
-static long long fk_isf(long long v);
-static double fk_num(long long v);
-static long long fk_fbox(double d);
-static long long fk_walk_body(long long i, long long fp);
-static long long fk_keyeq(long long a, long long b);
-static long long fk_jprim2(long long tag, long long a, long long b) {
-    if (tag == 3) {
-        if (fk_isf(a) || fk_isf(b)) {
-            return fk_fbox(fk_num(a) + fk_num(b));
-        }
-        return a + b;
-    }
-    if (tag == 4) {
-        if (fk_isf(a) || fk_isf(b)) {
-            return fk_fbox(fk_num(a) - fk_num(b));
-        }
-        return a - b;
-    }
-    if (tag == 42) {
-        if (fk_isf(a) || fk_isf(b)) {
-            return fk_fbox(fk_num(a) * fk_num(b));
-        }
-        return ((a >> 1) * (b >> 1)) << 1;
-    }
-    if (tag == 5) {
-        return (fk_num(a) <= fk_num(b)) ? 2 : 0;
-    }
-    if (tag == 102) {
-        return (fk_num(a) == fk_num(b)) ? 2 : 0;
-    }
-    if (tag == 103) {
-        return (fk_num(a) < fk_num(b)) ? 2 : 0;
-    }
-    /* lt — mirrors fk_walk tag-103 */
-    if (tag == 10) {
-        if (fk_isf(a) || fk_isf(b)) {
-            return fk_fbox(fk_num(a) / fk_num(b));
-        }
-        return ((a >> 1) / (b >> 1)) << 1;
-    }
-    /* div — mirrors fk_walk tag-10 (float-aware) */
-    if (tag == 11) {
-        if (fk_isf(a) || fk_isf(b)) {
-            double x = fk_num(a);
-            double y = fk_num(b);
-            return fk_fbox(x - y * (double)((long long)(x / y)));
-        }
-        return ((a >> 1) % (b >> 1)) << 1;
-    }
-    /* mod — mirrors fk_walk tag-11 (float-aware) */
-    if (tag == 27) {
-        /* str_concat — mirrors fk_walk's tag-27 exactly */
-        long long sa = a >> 1;
-        long long sb = b >> 1;
-        if (sa < 0 || sa >= fk_sp || sb < 0 || sb >= fk_sp) {
-            return 0 - 2;
-        }
-        long long ln = fk_sl[sa] + fk_sl[sb];
-        while (fk_sbp + ln > fk_scap_b) {
-            fk_scap_b = fk_scap_b * 2;
-            fk_sb = realloc(fk_sb, fk_scap_b);
-            fk_sb_check();
-        }
-        long long off = fk_sbp;
-        long long k = 0;
-        while (k < fk_sl[sa]) {
-            fk_sb[off + k] = fk_sb[fk_so[sa] + k];
-            k = k + 1;
-        }
-        long long m = 0;
-        while (m < fk_sl[sb]) {
-            fk_sb[off + fk_sl[sa] + m] = fk_sb[fk_so[sb] + m];
-            m = m + 1;
-        }
-        return fk_sintern(off, ln) << 1;
-    }
-    if (tag == 26) {
-        return fk_keyeq(a >> 1, b >> 1) ? 2 : 0;
-    }
-    /* str_eq — mirrors fk_walk tag-26 */
-    if (tag == 28) {
-        /* str_byte_at — mirrors fk_walk tag-28 */
-        long long sa = a >> 1;
-        long long k = b >> 1;
-        if (sa < 0 || sa >= fk_sp || k < 0 || k >= fk_sl[sa]) {
-            return 0 - 2;
-        }
-        return ((long long)(unsigned char)fk_sb[fk_so[sa] + k]) << 1;
-    }
-    return fk_nothing;
-}
-static long long fk_jprim3(long long tag, long long a, long long b, long long c) {
-    if (tag == 29) {
-        /* substring — mirrors fk_walk tag-29 */
-        long long sa = a >> 1;
-        long long lo = b >> 1;
-        long long hi = c >> 1;
-        if (sa < 0 || sa >= fk_sp || lo < 0 || hi < lo || hi > fk_sl[sa]) {
-            return 0 - 2;
-        }
-        long long ln = hi - lo;
-        while (fk_sbp + ln > fk_scap_b) {
-            fk_scap_b = fk_scap_b * 2;
-            fk_sb = realloc(fk_sb, fk_scap_b);
-            fk_sb_check();
-        }
-        long long j = 0;
-        while (j < ln) {
-            fk_sb[fk_sbp + j] = fk_sb[fk_so[sa] + lo + j];
-            j = j + 1;
-        }
-        return fk_sintern(fk_sbp, ln) << 1;
-    }
-    return fk_nothing;
-}
-static long long fk_jprim1(long long tag, long long a) {
-    if (tag == 25) {
-        long long sa = a >> 1;
-        if (sa < 0 || sa >= fk_sp) {
-            return 0;
-        }
-        return fk_sl[sa] << 1;
-    }
-    /* str_len */
-    if (tag == 54) {
-        return ((long long)fk_num(a)) << 1;
-    }
-    /* float_to_int */
-    if (tag == 53) {
-        /* str_to_float — mirrors fk_walk's tag-53 exactly */
-        long long sa = a >> 1;
-        if (sa < 0 || sa >= fk_sp) {
-            return fk_fbox(0.0);
-        }
-        char tmp[128];
-        long long n = fk_sl[sa];
-        if (n > 126) {
-            n = 126;
-        }
-        long long j = 0;
-        while (j < n) {
-            tmp[j] = fk_sb[fk_so[sa] + j];
-            j = j + 1;
-        }
-        tmp[n] = 0;
-        return fk_fbox(strtod(tmp, 0));
-    }
-    return fk_nothing;
-}
-/* ── LIST/CONS carriers (tags 18-23) — pure value ops over the pair arena, taking ALREADY-EVALUATED
- * tagged words and returning the tagged result. Each mirrors fk_walk's tag case EXACTLY (same arena
- * guards, same melt-on-cons, same chain walk) so a lowered cons/head/tail/len/nth can NEVER drift
- * from the walker. cons (19) is the one that can allocate: it pushes h,t onto fk_vs (as the walker
- * does via fk_vp) BEFORE the melt check so the GC sees them as roots and relocates them, then reads
- * the relocated words back — bit-identical to the walker's tag-19 path. The JIT itself holds no
- * live pairs across this call (its intermediates are in registers/machine-stack), so fk_vs is the
- * correct, only root set, exactly as in the walker. */
-static void fk_arena(void);
-static void fk_melt(void);
-static void fk_vp(long long v);
-static long long fk_jlist2(long long tag, long long a, long long b) {
-    if (tag == 19) {
-        /* cons h t — mirrors fk_walk tag-19 exactly (fk_vp roots + melt + grow guard) */
-        fk_vp(a);
-        fk_vp(b);
-        if (fk_cap == 0) {
-            fk_arena();
-        }
-        if (fk_hp * 100 >= fk_cap * 90) {
-            fk_melt();
-        }
-        if (fk_hp + 1 >= fk_cap) {
-            fk_vsp = fk_vsp - 2;
-            return 1;
-        }
-        fk_hp = fk_hp + 1;
-        fk_hh[fk_hp] = fk_vs[fk_vsp - 2];
-        fk_ht[fk_hp] = fk_vs[fk_vsp - 1];
-        fk_vsp = fk_vsp - 2;
-        return (fk_hp << 1) | 1;
-    }
-    if (tag == 23) {
-        /* nth x k — mirrors fk_walk tag-23 (x evaluated, k evaluated) */
-        long long p = a >> 1;
-        long long k23 = b >> 1;
-        while (p >= 1 && p <= fk_hp && k23 > 0) {
-            p = fk_ht[p] >> 1;
-            k23 = k23 - 1;
-        }
-        if (p < 1 || p > fk_hp) {
-            return 1;
-        }
-        return fk_hh[p];
-    }
-    return fk_nothing;
-}
-static long long fk_jlist1(long long tag, long long a) {
-    if (tag == 20) {
-        long long p = a >> 1;
-        if (p < 1 || p > fk_hp) {
-            return 1;
-        }
-        return fk_hh[p];
-    }
-    /* head */
-    if (tag == 21) {
-        long long p = a >> 1;
-        if (p < 1 || p > fk_hp) {
-            return 1;
-        }
-        return fk_ht[p];
-    }
-    /* tail */
-    if (tag == 22) {
-        long long p = a >> 1;
-        long long n = 0;
-        while (p >= 1 && p <= fk_hp) {
-            n = n + 1;
-            p = fk_ht[p] >> 1;
-        }
-        return n << 1;
-    }
-    /* len */
-    return fk_nothing;
-}
-/* ── ensure `callee` has an installed native; return its frame-slot count via *frame, or 0 if it
- * cannot crystallize. Heat-gated and tried-once so a non-lowering callee is marked and never
- * re-lowered (falls through to the walker). Shared by fk_jcall (the --src inter-fn site) and
- * fk_feval_try_native (the --feval trampoline) — one lower+install path, one cache (fk_src_nat /
- * fk_nat_exec / fk_nat_tried / fk_fheat). Lowering also sets fk_jit_frame as a side-effect; we
- * capture and stash it per-callee in fk_src_nat_frame so the direct-dispatch caller knows the frame
- * size without re-lowering. */
-static long long fk_src_nat_frame[FK_FN_CAP];
-/* eager=1 (the --src inter-fn site): being CALLED from JITed code is itself the heat signal —
- * crystallize on first request so a mutual-recursion pair flips native↔native immediately and does
- * not stay in the walker after one deopt. eager=0 (the --feval trampoline): heat-gate as before so
- * cold fns don't pay lowering cost. */
-static fk_natfn fk_ensure_native_ex(long long callee, long long *frame, int eager) {
-    if (callee < 0 || callee >= FK_FN_CAP) {
-        return 0;
-    }
-    if (fk_nat_exec[callee] != 0) {
-        if (frame) {
-            *frame = fk_src_nat_frame[callee];
-        }
-        return fk_nat_exec[callee];
-    }
-    if (fk_src_nat[callee] == 0) {
-        if (fk_nat_tried[callee]) {
-            return 0;
-        }
-        if (!eager) {
-            fk_fheat[callee] = fk_fheat[callee] + 1;
-            if (fk_fheat[callee] < fk_feval_hot) {
-                return 0;
-            }
-        }
-        fk_nat_tried[callee] = 1;
-        long long n = fk_jit_lower(callee);
-        if (n <= 0) {
-            return 0;
-        }
-        long long fr = fk_jit_frame;
-        unsigned char *img = malloc(n);
-        if (img == 0) {
-            return 0;
-        }
-        long long ci = 0;
-        while (ci < n) {
-            img[ci] = fk_jb[ci];
-            ci = ci + 1;
-        }
-        fk_src_nat[callee] = img;
-        fk_src_nat_len[callee] = n;
-        fk_src_nat_frame[callee] = fr;
-        fk_njit = fk_njit + 1;
-        if (getenv("FK_JIT_WITNESS")) {
-            printf("[jit] fn%lld crystallized: %lld bytes, njit=%lld (direct dispatch ready)\n",
-                   callee, n, fk_njit);
-        }
-    }
-    if (fk_nat_exec[callee] == 0) {
-        fk_nat_exec[callee] = fk_nat_install(fk_src_nat[callee], fk_src_nat_len[callee]);
-        if (fk_nat_exec[callee] == 0) {
-            return 0;
-        }
-    }
-    if (frame) {
-        *frame = fk_src_nat_frame[callee];
-    }
-    return fk_nat_exec[callee];
-}
-static fk_natfn fk_ensure_native(long long callee, long long *frame) {
-    return fk_ensure_native_ex(callee, frame, 0);
-}
-/* inter-fn CALL carrier: dispatch fn `callee` with `argc` args. The lowered call to another fn
- * routes here, so a JITed fn can call ANY other fn correctly. DIRECT NATIVE→NATIVE dispatch (the
- * speed lever): if the callee already has an installed native AND the call arity matches the arity
- * that native was lowered for, set up the rooted args frame at fk_vs[fp..] and JUMP STRAIGHT to the
- * native entry — no fk_walk_body bounce. The args (live tagged values, possibly cons) are spilled
- * into fk_vs[fp..fp+argc) and fk_vsp is raised over the WHOLE frame (args + let-locals), so a
- * compacting fk_melt triggered inside the callee scans these slots as roots and RELOCATES the cons
- * pointers the native stores there (GC-correct, exactly as fk_feval_try_native does). On arity
- * mismatch or no-native → fall through to fk_walk_body (the walker stays source of truth; deopt is
- * always safe). */
-/* ── NATIVE TAIL-CALL TRAMPOLINE ────────────────────────────────────────────────────────── A
- * direct native→native CALL recurses on the C machine stack: fine for TREE recursion (fib depth =
- * tree height, small) and bounded LINEAR recursion, but a deep TAIL chain (ev/od 20M deep) would
- * blow the 256 MB stack. The walker solves this with a trampoline (constant stack); the native path
- * needs its own. The lowerer emits a TAIL-position inter-fn call NOT as a call but as: write the
- * new args into the current rbp frame IN PLACE, record the next callee in fk_tail_callee, and
- * RETURN the fk_tailcall sentinel. The C driver fk_jtramp loops on that sentinel — dispatching the
- * next native over the SAME fp frame — so a mutual-recursion chain runs native↔native end-to-end in
- * CONSTANT stack, no walker bounce. fk_tailcall is a reserved ODD-NEGATIVE sentinel in a band no
- * tagged value occupies: ints are even (v<<1); floats are <= fk_fbase-2 (~-9e18); nodes/records are
- * small-magnitude negatives; cons are positive-odd; fnvals sit in the -8e18±16384 band; nothing is
- * -8.999e18. -7.5e18-1 is odd, far above the float floor, far below node magnitudes, and outside
- * the fnval band — so it can never collide with a real result. */
-static const long long fk_tailcall = -7500000000000000001LL;
-static long long fk_tail_callee = -1;
-/* gate: emit the tail-trampoline sentinel form for tail inter-fn calls. ON for the --src JIT path
- * (where native↔native tail-chaining is proven correct + bounded under melt). OFF for the --feval
- * interpreter path, which keeps the #75 wire (tail inter-fn calls lower as non-tail fk_jcall →
- * walker bounce): correct + bounded for the meta-evaluator's heavy env-consing, which the native
- * chain does not yet root register-resident cons across. (Honest scope: the register-spill rung
- * named in the #75 receipt is what would let --feval chain natively too.) */
-static long long fk_lower_tail_tramp = 0;
-/* recorded by the native tail site just before it returns the sentinel; read by the trampoline. */
-static void fk_jtail_set(long long callee) {
-    fk_tail_callee = callee;
-}
-/* drive a native call at frame `fp` (args already in fk_vs[fp..fp+argc)); loop while the native
- * returns the tail sentinel, dispatching the recorded next callee over the SAME frame. argc is the
- * fixed chain arity; a tail target whose declared arity differs, or that can't crystallize, deopts
- * to the walker (which itself trampolines) and ends the native chain — always correct. */
-static long long fk_jtramp(long long callee, long long fp, long long argc) {
-    long long save_vsp = fk_vsp;
-    for (;;) {
-        /* out-of-range callee is a hard "no such function" -- checked and returned BEFORE the
-         * arity check below, which itself reads fk_fnar[callee] and would be its own out-of-bounds
-         * access on an invalid callee. A prior version folded both into one `||` chain whose
-         * fallback path (deopt to fk_walk_body(fk_fn[callee], fp)) relied on callee being in range
-         * even when it wasn't -- this keeps the mismatched-arity deopt (callee valid, wrong arity)
-         * but no longer falls through to fk_fn[callee] on a callee that was never valid. */
-        if (callee < 0 || callee >= FK_FN_CAP) {
-            fk_vsp = save_vsp;
-            return fk_nothing;
-        }
-        if (fk_fnar[callee] != argc) {
-            long long r = fk_walk_body(fk_fn[callee], fp);
-            fk_vsp = save_vsp;
-            return r;
-        }
-        long long frame = 0;
-        fk_natfn nf = fk_ensure_native_ex(callee, &frame, 1);
-        /* eager: a call FROM jit IS the heat */
-        if (nf == 0) {
-            long long r = fk_walk_body(fk_fn[callee], fp);
-            fk_vsp = save_vsp;
-            return r;
-        }
-        long long fr = frame;
-        if (fr < argc) {
-            fr = argc;
-        }
-
-        /* HEADROOM: this native may end in a TAIL inter-fn call that writes up-to-6 args into
-         * [rbp+0..6) (= fk_vs[fp..fp+6)) BEFORE the next iteration recomputes the frame. If this
-         * fn's own frame is smaller than the tail target's arity, those writes would land above the
-         * rooted region. Reserve at least the max lowered arity so every in-place tail rewrite
-         * stays inside the melt-scanned, non-overlapping frame. (Generous reserve is always safe:
-         * sub-calls take fp2=fk_vsp above it; melt scans it; cost is a few vsp slots per chain.) */
-        if (fr < 6) {
-            fr = 6;
-        }
-        long long z = argc;
-        while (z < fr) {
-            if (fp + z < FK_VALUE_STACK_CAP) {
-                fk_vs[fp + z] = 0;
-            }
-            z = z + 1;
-        }
-        long long need = fp + fr;
-        if (need > fk_vsp && need < FK_VALUE_STACK_CAP) {
-            fk_vsp = need;
-        }
-        fk_tail_callee = -1;
-        long long r = nf(&fk_vs[fp]);
-        if (r == fk_tailcall) {
-            callee = fk_tail_callee;
-            continue;
-        }
-        /* args already rewritten into fk_vs[fp..] */
-        fk_vsp = save_vsp;
-        return r;
-    }
-}
-/* inter-fn CALL carrier (NON-tail call site). Runs its own nested trampoline so a tail-call
- * sentinel raised inside the callee's chain is absorbed here and never escapes past this frame. The
- * args (live tagged values, possibly cons) are spilled into fk_vs[fp..fp+argc); fk_jtramp raises
- * fk_vsp over the whole frame so a compacting fk_melt scans these slots as roots and RELOCATES the
- * cons pointers the native stores there (GC-correct, as fk_feval_try_native). */
-static long long fk_jcall(long long callee, long long argc, const long long *args) {
-    if (callee < 0 || callee >= FK_FN_CAP) {
-        return fk_nothing;
-    }
-    long long fp = fk_vsp;
-    long long k = 0;
-    while (k < argc) {
-        fk_vs[fk_vsp] = args[k];
-        fk_vsp = fk_vsp + 1;
-        k = k + 1;
-    }
-
-    /* Direct native↔native dispatch (via the trampoline) is engaged only on the --src JIT path
-     * (fk_lower_tail_tramp). On the --feval path the inter-fn wire stays the #75 walker bounce —
-     * correct + bounded for the meta-evaluator's env-consing, which the native chain does not yet
-     * root register-resident cons across. */
-    long long r =
-        fk_lower_tail_tramp ? fk_jtramp(callee, fp, argc) : fk_walk_body(fk_fn[callee], fp);
-    fk_vsp = fp;
-    return r;
-}
-/* fk_jb, fk_jbp, and fk_jit_frame are already declared earlier in the file,
- * near fk_jtramp -- this used to re-declare all three here too. */
-static long long fk_jit_self;
-/* fn index being lowered: self-calls must target it */
-static int fk_jit_ok;
-/* cleared to 0 by emit on any unsupported shape */
-static long long fk_jit_entry;
-/* byte offset of the post-prologue entry (TCO jmp target) */
-static void fk_jb1(unsigned char x) {
-    /* fk_jbp counts past capacity even when the write itself is dropped, so the
-     * "did this function's code fit" check downstream (fk_jbp > FK_JIT_CODE_BUF_CAP)
-     * still sees the true logical size and can fall back to non-JIT execution. */
-    if (fk_jbp < FK_JIT_CODE_BUF_CAP) {
-        fk_jb[fk_jbp] = x;
-    }
-    fk_jbp = fk_jbp + 1;
-}
-static void fk_jb4(int x) {
-    fk_jb1(x & 0xff);
-    fk_jb1((x >> 8) & 0xff);
-    fk_jb1((x >> 16) & 0xff);
-    fk_jb1((x >> 24) & 0xff);
-}
-static void fk_jb8(long long x) {
-    int k = 0;
-    while (k < 8) {
-        fk_jb1((x >> (8 * k)) & 0xff);
-        k = k + 1;
-    }
-}
-static void fk_jpatch4(long long at, int v) {
-    fk_jb[at] = v & 0xff;
-    fk_jb[at + 1] = (v >> 8) & 0xff;
-    fk_jb[at + 2] = (v >> 16) & 0xff;
-    fk_jb[at + 3] = (v >> 24) & 0xff;
-}
-static void fk_jemit(long long i, int tail);
-static void fk_jbin(long long i) {
-    fk_jemit(fk_node[i][1], 0);
-    fk_jb1(0x50);
-    /* eval left -> rax ; push rax */
-    fk_jemit(fk_node[i][2], 0);
-    fk_jb1(0x48);
-    fk_jb1(0x89);
-    fk_jb1(0xC1);
-    /* eval right -> rax ; mov rcx,rax */
-    fk_jb1(0x58);
-    /* pop rax (left) -> rax=left, rcx=right */
-}
-/* ── emit a CALL to a C carrier at absolute address `fn`, with `nargs` (0..3) args already pushed
- * on the machine stack (last-pushed = argN-1, so they pop in order). Robust stack realignment
- * (works at any incoming alignment): save rsp, align to 16, pad + shadow, pop the staged args into
- * the ABI arg registers, call, restore rsp. Result (tagged word) is left in rax. Win64 ABI: args in
- * rcx,rdx,r8 (+32B shadow); SysV: rdi,rsi,rdx (no shadow). The carrier preserves rbp
- * (callee-saved), so the args pointer survives the call. */
-static void fk_jcarrier(void *fn, int nargs) {
-/* operands are on the stack: caller pushed arg_{n-1} first ... arg0 last, so arg0 = [rsp+0], arg1 =
- * [rsp+8], ... Read them into the ABI arg registers, then realign + call, then restore rsp to ABOVE
- * the consumed args (rsp + nargs*8). */
-#if defined(_WIN32)
-    if (nargs >= 1) {
-        fk_jb1(0x48);
-        fk_jb1(0x8B);
-        fk_jb1(0x0C);
-        fk_jb1(0x24);
-    }
-    /* mov rcx,[rsp] */
-    if (nargs >= 2) {
-        fk_jb1(0x48);
-        fk_jb1(0x8B);
-        fk_jb1(0x54);
-        fk_jb1(0x24);
-        fk_jb1(8);
-    }
-    /* mov rdx,[rsp+8] */
-    if (nargs >= 3) {
-        fk_jb1(0x4C);
-        fk_jb1(0x8B);
-        fk_jb1(0x44);
-        fk_jb1(0x24);
-        fk_jb1(16);
-    }
-    /* mov r8,[rsp+16] */
-    if (nargs >= 4) {
-        fk_jb1(0x4C);
-        fk_jb1(0x8B);
-        fk_jb1(0x4C);
-        fk_jb1(0x24);
-        fk_jb1(24);
-    }
-/* mov r9,[rsp+24] */
-#else
-    if (nargs >= 1) {
-        fk_jb1(0x48);
-        fk_jb1(0x8B);
-        fk_jb1(0x3C);
-        fk_jb1(0x24);
-    }
-    /* mov rdi,[rsp] */
-    if (nargs >= 2) {
-        fk_jb1(0x48);
-        fk_jb1(0x8B);
-        fk_jb1(0x74);
-        fk_jb1(0x24);
-        fk_jb1(8);
-    }
-    /* mov rsi,[rsp+8] */
-    if (nargs >= 3) {
-        fk_jb1(0x48);
-        fk_jb1(0x8B);
-        fk_jb1(0x54);
-        fk_jb1(0x24);
-        fk_jb1(16);
-    }
-    /* mov rdx,[rsp+16] */
-    if (nargs >= 4) {
-        fk_jb1(0x48);
-        fk_jb1(0x8B);
-        fk_jb1(0x4C);
-        fk_jb1(0x24);
-        fk_jb1(24);
-    }
-/* mov rcx,[rsp+24] */
-#endif
-
-    /* compute the post-consume rsp into r11 (caller-saved, but we use it only here): */
-    fk_jb1(0x4C);
-    fk_jb1(0x8D);
-    fk_jb1(0x5C);
-    fk_jb1(0x24);
-    fk_jb1((unsigned char)(nargs * 8));
-    /* lea r11,[rsp+nargs*8] */
-    fk_jb1(0x48);
-    fk_jb1(0x83);
-    fk_jb1(0xE4);
-    fk_jb1(0xF0);
-    /* and rsp,-16 (align down) */
-    fk_jb1(0x41);
-    fk_jb1(0x53);
-    /* push r11 (save restore-target) */
-    fk_jb1(0x41);
-    fk_jb1(0x53);
-/* push r11 (pad -> rsp 16-aligned) */
-#if defined(_WIN32)
-    fk_jb1(0x48);
-    fk_jb1(0x83);
-    fk_jb1(0xEC);
-    fk_jb1(32);
-/* sub rsp,32 (Win64 shadow; keeps 16-align) */
-#endif
-    fk_jb1(0x48);
-    fk_jb1(0xB8);
-    fk_jb8((long long)(unsigned long long)fn);
-    /* mov rax,&fn */
-    fk_jb1(0xFF);
-    fk_jb1(0xD0);
-/* call rax (result -> rax) */
-#if defined(_WIN32)
-    fk_jb1(0x48);
-    fk_jb1(0x83);
-    fk_jb1(0xC4);
-    fk_jb1(32);
-/* add rsp,32 */
-#endif
-    fk_jb1(0x48);
-    fk_jb1(0x83);
-    fk_jb1(0xC4);
-    fk_jb1(8);
-    /* add rsp,8 (discard pad) */
-    fk_jb1(0x5C);
-    /* pop rsp (rsp <- saved restore-target) */
-}
-static long long fk_jprim2(long long tag, long long a, long long b);
-static long long fk_jprim1(long long tag, long long a);
-static long long fk_jprim3(long long tag, long long a, long long b, long long c);
-static long long fk_jlist2(long long tag, long long a, long long b);
-static long long fk_jlist1(long long tag, long long a);
-static long long fk_jcall(long long callee, long long argc, const long long *args);
-/* tail self-call (sum-shaped): compute all new args into temporaries (machine stack), write them
- * into the rbp args array IN PLACE, then jmp to the post-prologue entry. Constant stack — the
- * native twin of fk_walk_body's trampoline. */
-static void fk_jemit(long long i, int tail) {
-    long long t = fk_node[i][0];
-    if (t == 111) {
-        fk_jemit(fk_node[i][2], tail);
-        return;
-    }
-    /* reserve: pass tail through to the body */
-    if (t == 1) {
-        fk_jb1(0x48);
-        fk_jb1(0xB8);
-        fk_jb8(fk_node[i][1] << 1);
-        return;
-    }
-    /* int lit -> mov rax,imm64(tagged) */
-    if (t == 24) {
-        fk_jb1(0x48);
-        fk_jb1(0xB8);
-        fk_jb8(fk_node[i][1] << 1);
-        return;
-    }
-    /* STRING lit: tagged word = poolidx<<1 (known at lower-time, interned at parse) */
-    if (t == 2) {
-        fk_jb1(0x48);
-        fk_jb1(0x8B);
-        fk_jb1(0x85);
-        fk_jb4(0);
-        return;
-    }
-    /* slot 0 -> mov rax,[rbp+0] */
-    if (t == 110) {
-        long long li = fk_node[i][1];
-        if (fk_node[li][0] != 1) {
-            fk_jit_ok = 0;
-            return;
-        }
-        /* slot index must be a literal */
-        long long slot = fk_node[li][1];
-        fk_jb1(0x48);
-        fk_jb1(0x8B);
-        fk_jb1(0x85);
-        fk_jb4((int)(slot * 8));
-        return;
-        /* mov rax,[rbp+slot*8] */
-    }
-    if (t == 3 || t == 4 || t == 42 || t == 5 || t == 102) {
-        /* float-aware arith/cmp. The #59 int-inline is WRONG for float operands, so we GUARD at
-         * runtime: if EITHER operand is a boxed float (tagged word <= fk_fbase-2, a huge negative),
-         * call the kind-correct carrier fk_jprim2 (bit-identical to fk_walk); else run the fast
-         * int-inline. This keeps fac/sum/fib native-fast (provably int at runtime) AND makes
-         * 0.5+0.25 correct — the float-correctness gate. */
-        fk_jbin(i);
-        /* rax=left, rcx=right */
-
-        /* threshold = fk_fbase - 2 (the float-band ceiling) */
-        fk_jb1(0x49);
-        fk_jb1(0xB9);
-        fk_jb8(-9000000000000000000LL - 2);
-        /* mov r9,fk_fbase-2 */
-        fk_jb1(0x4C);
-        fk_jb1(0x39);
-        fk_jb1(0xC8);
-        /* cmp rax,r9 */
-        fk_jb1(0x0F);
-        fk_jb1(0x8E);
-        long long jf1 = fk_jbp;
-        fk_jb4(0);
-        /* jle FLOAT (left is float) */
-        fk_jb1(0x4C);
-        fk_jb1(0x39);
-        fk_jb1(0xC9);
-        /* cmp rcx,r9 */
-        fk_jb1(0x0F);
-        fk_jb1(0x8E);
-        long long jf2 = fk_jbp;
-        fk_jb4(0);
-        /* jle FLOAT (right is float) */
-
-        /* ── INT fast path (rax=left, rcx=right) ── */
-        if (t == 3) {
-            fk_jb1(0x48);
-            fk_jb1(0x01);
-            fk_jb1(0xC8);
-        }
-        /* add rax,rcx */
-        else if (t == 4) {
-            fk_jb1(0x48);
-            fk_jb1(0x29);
-            fk_jb1(0xC8);
-        }
-        /* sub rax,rcx */
-        else if (t == 42) {
-            fk_jb1(0x48);
-            fk_jb1(0xD1);
-            fk_jb1(0xF8);
-            fk_jb1(0x48);
-            fk_jb1(0xD1);
-            fk_jb1(0xF9);
-            fk_jb1(0x48);
-            fk_jb1(0x0F);
-            fk_jb1(0xAF);
-            fk_jb1(0xC1);
-            fk_jb1(0x48);
-            fk_jb1(0xD1);
-            fk_jb1(0xE0);
-        }
-        /* mul */
-        else {
-            /* le (5) / eq (102) */
-            fk_jb1(0x48);
-            fk_jb1(0xC7);
-            fk_jb1(0xC2);
-            fk_jb4(2);
-            fk_jb1(0x49);
-            fk_jb1(0xC7);
-            fk_jb1(0xC0);
-            fk_jb4(0);
-            fk_jb1(0x48);
-            fk_jb1(0x39);
-            fk_jb1(0xC8);
-            if (t == 5) {
-                fk_jb1(0x4C);
-                fk_jb1(0x0F);
-                fk_jb1(0x4E);
-                fk_jb1(0xC2);
-            } else {
-                fk_jb1(0x4C);
-                fk_jb1(0x0F);
-                fk_jb1(0x44);
-                fk_jb1(0xC2);
-            }
-            fk_jb1(0x4C);
-            fk_jb1(0x89);
-            fk_jb1(0xC0);
-        }
-        fk_jb1(0xE9);
-        long long jdone = fk_jbp;
-        fk_jb4(0);
-        /* jmp DONE */
-
-        /* ── FLOAT path: call fk_jprim2(tag, left, right) ── */
-        long long fp_lbl = fk_jbp;
-        fk_jpatch4(jf1, (int)(fp_lbl - (jf1 + 4)));
-        fk_jpatch4(jf2, (int)(fp_lbl - (jf2 + 4)));
-        fk_jb1(0x51);
-        /* push rcx (arg2=right) */
-        fk_jb1(0x50);
-        /* push rax (arg1=left) */
-        fk_jb1(0x48);
-        fk_jb1(0xC7);
-        fk_jb1(0xC0);
-        fk_jb4((int)t);
-        /* mov rax,tag */
-        fk_jb1(0x50);
-        /* push rax (arg0=tag) */
-        fk_jcarrier((void *)fk_jprim2, 3);
-        /* result in rax */
-        fk_jpatch4(jdone, (int)(fk_jbp - (jdone + 4)));
-        /* DONE */
-        return;
-    }
-    if (t == 10 || t == 11 || t == 103) {
-        /* div / mod / lt: 2-arg carrier fk_jprim2(tag,a,b), float-aware (mirrors fk_walk) */
-        fk_jemit(fk_node[i][1], 0);
-        fk_jb1(0x50);
-        /* a -> push */
-        fk_jemit(fk_node[i][2], 0);
-        fk_jb1(0x50);
-        /* b -> push (top) */
-
-        /* stack top->down: b,a. fk_jprim2 args: arg0=tag, arg1=a, arg2=b. Re-stage. */
-        fk_jb1(0x59);
-        /* pop rcx (b) */
-        fk_jb1(0x58);
-        /* pop rax (a) */
-        fk_jb1(0x51);
-        /* push rcx (arg2=b) */
-        fk_jb1(0x50);
-        /* push rax (arg1=a) */
-        fk_jb1(0x48);
-        fk_jb1(0xC7);
-        fk_jb1(0xC0);
-        fk_jb4((int)t);
-        /* mov rax,tag */
-        fk_jb1(0x50);
-        /* push rax (arg0=tag) */
-        fk_jcarrier((void *)fk_jprim2, 3);
-        return;
-    }
-    if (t == 25 || t == 54 || t == 53) {
-        /* str_len / float_to_int / str_to_float: 1-arg carrier */
-        fk_jemit(fk_node[i][1], 0);
-        /* arg -> rax */
-        fk_jb1(0x50);
-        /* push rax (arg1=val) */
-        fk_jb1(0x48);
-        fk_jb1(0xC7);
-        fk_jb1(0xC0);
-        fk_jb4((int)t);
-        /* mov rax,tag */
-        fk_jb1(0x50);
-        /* push rax (arg0=tag) */
-        fk_jcarrier((void *)fk_jprim1, 2);
-        /* result in rax */
-        return;
-    }
-    if (t == 27 || t == 26 || t == 28) {
-        /* str_concat / str_eq / str_byte_at: 2-arg carrier */
-        fk_jemit(fk_node[i][1], 0);
-        fk_jb1(0x50);
-        /* left -> push */
-        fk_jemit(fk_node[i][2], 0);
-        fk_jb1(0x50);
-        /* right -> push (top) */
-
-        /* fk_jprim2(tag,a,b): arg0=tag@[rsp], arg1=a@[rsp+8], arg2=b@[rsp+16]. Stack top->down is
-         * now right,left. Re-stage to tag,left,right. */
-        fk_jb1(0x59);
-        /* pop rcx (right) */
-        fk_jb1(0x58);
-        /* pop rax (left) */
-        fk_jb1(0x51);
-        /* push rcx (arg2=right=b) */
-        fk_jb1(0x50);
-        /* push rax (arg1=left=a) */
-        fk_jb1(0x48);
-        fk_jb1(0xC7);
-        fk_jb1(0xC0);
-        fk_jb4((int)t);
-        /* mov rax,tag */
-        fk_jb1(0x50);
-        /* push rax (arg0=tag) */
-        fk_jcarrier((void *)fk_jprim2, 3);
-        return;
-    }
-    if (t == 29) {
-        /* substring: 3-arg carrier fk_jprim3(tag,a,b,c) */
-        fk_jemit(fk_node[i][1], 0);
-        fk_jb1(0x50);
-        /* a -> push */
-        fk_jemit(fk_node[i][2], 0);
-        fk_jb1(0x50);
-        /* b -> push */
-        fk_jemit(fk_node[i][3], 0);
-        fk_jb1(0x50);
-        /* c -> push (top) */
-
-        /* stack top->down: c,b,a. fk_jprim3 args: arg0=tag, arg1=a, arg2=b, arg3=c. Re-stage. */
-        fk_jb1(0x41);
-        fk_jb1(0x5A);
-        /* pop r10 (c) */
-        fk_jb1(0x59);
-        /* pop rcx (b) */
-        fk_jb1(0x58);
-        /* pop rax (a) */
-        fk_jb1(0x41);
-        fk_jb1(0x52);
-        /* push r10 (arg3=c) */
-        fk_jb1(0x51);
-        /* push rcx (arg2=b) */
-        fk_jb1(0x50);
-        /* push rax (arg1=a) */
-        fk_jb1(0x48);
-        fk_jb1(0xC7);
-        fk_jb1(0xC0);
-        fk_jb4(29);
-        /* mov rax,29 */
-        fk_jb1(0x50);
-        /* push rax (arg0=tag) */
-        fk_jcarrier((void *)fk_jprim3, 4);
-        return;
-    }
-    if (t == 18) {
-        /* empty: nil value = 1 (no carrier needed) */
-        fk_jb1(0x48);
-        fk_jb1(0xC7);
-        fk_jb1(0xC0);
-        fk_jb4(1);
-        /* mov rax,1 */
-        return;
-    }
-    if (t == 20 || t == 21 || t == 22) {
-        /* head/tail/len: 1-arg list carrier fk_jlist1(tag,a) */
-        fk_jemit(fk_node[i][1], 0);
-        /* arg -> rax */
-        fk_jb1(0x50);
-        /* push rax (arg1=val) */
-        fk_jb1(0x48);
-        fk_jb1(0xC7);
-        fk_jb1(0xC0);
-        fk_jb4((int)t);
-        /* mov rax,tag */
-        fk_jb1(0x50);
-        /* push rax (arg0=tag) */
-        fk_jcarrier((void *)fk_jlist1, 2);
-        return;
-    }
-    if (t == 19 || t == 23) {
-        /* cons/nth: 2-arg list carrier fk_jlist2(tag,a,b) */
-        fk_jemit(fk_node[i][1], 0);
-        fk_jb1(0x50);
-        /* a -> push */
-        fk_jemit(fk_node[i][2], 0);
-        fk_jb1(0x50);
-        /* b -> push (top) */
-
-        /* stack top->down: b,a. fk_jlist2 args: arg0=tag, arg1=a, arg2=b. Re-stage. */
-        fk_jb1(0x59);
-        /* pop rcx (b) */
-        fk_jb1(0x58);
-        /* pop rax (a) */
-        fk_jb1(0x51);
-        /* push rcx (arg2=b) */
-        fk_jb1(0x50);
-        /* push rax (arg1=a) */
-        fk_jb1(0x48);
-        fk_jb1(0xC7);
-        fk_jb1(0xC0);
-        fk_jb4((int)t);
-        /* mov rax,tag */
-        fk_jb1(0x50);
-        /* push rax (arg0=tag) */
-        fk_jcarrier((void *)fk_jlist2, 3);
-        return;
-    }
-    if (t == 109) {
-        /* let slot val body: store val into rbp[slot], eval body */
-        long long li = fk_node[i][1];
-        if (fk_node[li][0] != 1) {
-            fk_jit_ok = 0;
-            return;
-        }
-        /* slot index must be a literal (it always is) */
-        long long slot = fk_node[li][1];
-        fk_jemit(fk_node[i][2], 0);
-        /* val -> rax (never tail) */
-        fk_jb1(0x48);
-        fk_jb1(0x89);
-        fk_jb1(0x85);
-        fk_jb4((int)(slot * 8));
-        /* mov [rbp+slot*8],rax */
-        fk_jemit(fk_node[i][3], tail);
-        /* body — tail position preserved */
-        return;
-    }
-    if (t == 6) {
-        /* if test then else */
-        fk_jemit(fk_node[i][1], 0);
-        /* test (never tail) */
-        fk_jb1(0x48);
-        fk_jb1(0x85);
-        fk_jb1(0xC0);
-        /* test rax,rax */
-        fk_jb1(0x0F);
-        fk_jb1(0x84);
-        long long jz = fk_jbp;
-        fk_jb4(0);
-        /* jz else (patch) */
-        fk_jemit(fk_node[i][2], tail);
-        /* then — tail position preserved */
-        fk_jb1(0xE9);
-        long long je = fk_jbp;
-        fk_jb4(0);
-        /* jmp end (skip else). harmless dead code if then ended in a tail-jmp. */
-        long long elsep = fk_jbp;
-        fk_jpatch4(jz, (int)(elsep - (jz + 4)));
-        fk_jemit(fk_node[i][3], tail);
-        /* else — tail position preserved */
-        fk_jpatch4(je, (int)(fk_jbp - (je + 4)));
-        /* end = here (the pop rbp; ret follows) */
-        return;
-    }
-    if (t == 7 || t == 12 || t == 240 || t == 241) {
-        /* fn call: SELF-recursion native; OTHER-fn via carrier */
-        long long callee = (t == 7) ? fk_jit_self : fk_node[i][1];
-        long long argc;
-        long long an[6];
-        {
-            long long zi = 0;
-            while (zi < 6) {
-                an[zi] = -1;
-                zi = zi + 1;
-            }
-        }
-        if (t == 241) {
-            /* variadic call: args in a 242-cons chain */
-            long long cell = fk_node[i][2];
-            long long cnt = 0;
-            while (cell >= 0 && fk_node[cell][0] == 242) {
-                if (cnt < 6) {
-                    an[cnt] = fk_node[cell][1];
-                }
-                cnt = cnt + 1;
-                cell = fk_node[cell][2];
-            }
-            if (cnt > 6) {
-                if (getenv("FK_JIT_WITNESS")) {
-                    printf("[jit-bail] call arity %lld > 6 at node %lld\n", cnt, i);
-                }
-                fk_jit_ok = 0;
-                return;
-            }
-            /* lowers arity 0..6 */
-            argc = cnt;
-        } else {
-            argc = (t == 240) ? 2 : 1;
-            an[0] = (t == 7) ? fk_node[i][1] : fk_node[i][2];
-            an[1] = (t == 240) ? fk_node[i][3] : -1;
-        }
-        if (callee != fk_jit_self) {
-            if (tail && argc <= 6 && fk_lower_tail_tramp) {
-                /* ── TAIL inter-fn call → native trampoline form (the deep-mutual-recursion lever).
-                 * Instead of a recursive fk_jcall (which grows the C stack), rewrite the new args
-                 * INTO the current rbp frame IN PLACE (exactly like the tail SELF-call), record the
-                 * next callee via fk_jtail_set, and RETURN the fk_tailcall sentinel. The enclosing
-                 * fk_jtramp loops on that sentinel over the SAME frame → constant stack,
-                 * native↔native end-to-end. */
-                {
-                    long long k = 0;
-                    while (k < argc) {
-                        fk_jemit(an[k], 0);
-                        fk_jb1(0x50);
-                        k = k + 1;
-                    }
-                }
-                /* push arg0..argN-1 (top=argN-1) */
-                {
-                    long long k = argc;
-                    while (k > 0) {
-                        k = k - 1;
-                        fk_jb1(0x58);
-                        /* pop rax (arg k) */
-                        fk_jb1(0x48);
-                        fk_jb1(0x89);
-                        fk_jb1(0x45);
-                        fk_jb1((unsigned char)(k * 8));
-                    }
-                }
-                /* mov [rbp+k*8],rax */
-                fk_jb1(0x48);
-                fk_jb1(0xC7);
-                fk_jb1(0xC0);
-                fk_jb4((int)callee);
-                fk_jb1(0x50);
-                /* mov rax,callee ; push (arg0 to carrier) */
-                fk_jcarrier((void *)fk_jtail_set, 1);
-                /* fk_jtail_set(callee); clobbers rax */
-                fk_jb1(0x48);
-                fk_jb1(0xB8);
-                fk_jb8(fk_tailcall);
-                /* mov rax,fk_tailcall sentinel (the body's tail value) */
-                return;
-            }
-
-            /* ── NON-TAIL inter-function call: emit a call to fk_jcall(callee, argc, argsptr). The
-             * carrier dispatches the callee (native via its own trampoline, or walker on deopt), so
-             * a JITed fn can call ANY other fn correctly — for ANY arity 0..6. We build the
-             * evaluated-args array on the machine stack (arg0 at the lowest address) and pass its
-             * pointer; fk_jcarrier's `and rsp,-16` only moves rsp DOWN, leaving this array intact
-             * above it. */
-            long long k = argc;
-            while (k > 0) {
-                k = k - 1;
-                fk_jemit(an[k], 0);
-                fk_jb1(0x50);
-            }
-            /* push argN-1 ... arg0 (arg0 ends on top = lowest addr) */
-
-            /* args array now at [rsp .. rsp+argc*8); arg0=[rsp]. Capture ptr, then stage carrier
-             * args. */
-            if (argc == 0) {
-                fk_jb1(0x48);
-                fk_jb1(0x89);
-                fk_jb1(0xE0);
-            }
-            /* mov rax,rsp (ptr; empty array, unread) */
-            else {
-                fk_jb1(0x48);
-                fk_jb1(0x89);
-                fk_jb1(0xE0);
-            }
-            /* mov rax,rsp (argsptr) */
-            fk_jb1(0x50);
-            /* push rax (arg2=argsptr, staged last carrier-arg slot) */
-            fk_jb1(0x48);
-            fk_jb1(0xC7);
-            fk_jb1(0xC0);
-            fk_jb4((int)argc);
-            fk_jb1(0x50);
-            /* mov rax,argc; push (arg1) */
-            fk_jb1(0x48);
-            fk_jb1(0xC7);
-            fk_jb1(0xC0);
-            fk_jb4((int)callee);
-            fk_jb1(0x50);
-            /* mov rax,callee; push (arg0) */
-
-            /* stack top->down: callee, argc, argsptr, [arg0..argN-1]. fk_jcarrier reads 3 carrier
-             * args from [rsp],[rsp+8],[rsp+16] and restores rsp to rsp+3*8 — exactly past the 3
-             * staged carrier args, leaving the argc*8 args region to be cleaned below. */
-            fk_jcarrier((void *)fk_jcall, 3);
-            /* result in rax */
-            if (argc > 0) {
-                fk_jb1(0x48);
-                fk_jb1(0x83);
-                fk_jb1(0xC4);
-                fk_jb1((unsigned char)(argc * 8));
-            }
-            /* add rsp,argc*8 (drop args array) */
-            return;
-        }
-
-        /* ── SELF-recursion (callee == self): native call/jmp, as in the #59 POC. Arity 1..3. */
-        if (argc < 1) {
-            if (getenv("FK_JIT_WITNESS")) {
-                printf("[jit-bail] 0-arg self-recursion at node %lld\n", i);
-            }
-            fk_jit_ok = 0;
-            return;
-        }
-        /* 0-arg self-recursion not handled here */
-
-        /* evaluate new args into temporaries (machine stack), pushed arg0 first ... argN-1 last */
-        {
-            long long k = 0;
-            while (k < argc) {
-                fk_jemit(an[k], 0);
-                fk_jb1(0x50);
-                k = k + 1;
-            }
-        }
-        if (tail) {
-            /* TAIL self-call: write new args into the rbp array IN PLACE, jmp entry. Constant stack
-             * — the native twin of the walker's trampoline; sum(1000000) runs flat. Stack top =
-             * argN-1. */
-            long long k = argc;
-            while (k > 0) {
-                k = k - 1;
-                fk_jb1(0x58);
-                /* pop rax (arg k) */
-                fk_jb1(0x48);
-                fk_jb1(0x89);
-                fk_jb1(0x45);
-                fk_jb1((unsigned char)(k * 8));
-                /* mov [rbp+k*8],rax */
-            }
-            fk_jb1(0xE9);
-            long long js = fk_jbp;
-            fk_jb4(0);
-            /* jmp entry */
-            fk_jpatch4(js, (int)(fk_jit_entry - (js + 4)));
-            return;
-        }
-
-        /* NON-tail self-call (e.g. fac's (mul n (fac …))): real native recursion. The temporaries
-         * (pushed arg0 first ... argN-1 last) are in REVERSE array order on the stack (top=argN-1,
-         * deepest=arg0). Reserve a FRAME*8 args region BELOW them (frame = args + let-locals, so
-         * the callee's let stores have room), copy each temp into its args[k] slot (let-slots stay
-         * scratch), pass rcx = args ptr, native call to offset 0. */
-        {
-            long long fr = fk_jit_frame;
-            if (fr < argc) {
-                fr = argc;
-            }
-            fk_jb1(0x48);
-            fk_jb1(0x81);
-            fk_jb1(0xEC);
-            fk_jb4((int)(fr * 8));
-            /* sub rsp,frame*8 (args[] region below the temps) */
-
-            /* temps now sit above the region: temp(argN-1) at [rsp+fr*8+0], ... arg0 at
-             * [rsp+fr*8+(argc-1)*8]. Copy temp -> args[k]. */
-            {
-                long long k = 0;
-                while (k < argc) {
-                    long long src = fr * 8 + ((argc - 1 - k) * 8);
-                    /* temp holding arg k */
-                    fk_jb1(0x48);
-                    fk_jb1(0x8B);
-                    fk_jb1(0x84);
-                    fk_jb1(0x24);
-                    fk_jb4((int)src);
-                    /* mov rax,[rsp+src] */
-                    fk_jb1(0x48);
-                    fk_jb1(0x89);
-                    fk_jb1(0x84);
-                    fk_jb1(0x24);
-                    fk_jb4((int)(k * 8));
-                    /* mov [rsp+k*8],rax */
-                    k = k + 1;
-                }
-            }
-            fk_jb1(0x48);
-            fk_jb1(0x89);
-            fk_jb1(0xE1);
-/* mov rcx,rsp (args ptr) */
-#if defined(_WIN32)
-            fk_jb1(0x48);
-            fk_jb1(0x83);
-            fk_jb1(0xEC);
-            fk_jb1(32);
-/* sub rsp,32 (Win64 shadow) */
-#endif
-            fk_jb1(0xE8);
-            long long cs = fk_jbp;
-            fk_jb4(0);
-            /* call rel32 -> offset 0 (full prologue sets rbp) */
-            fk_jpatch4(cs, (int)(0 - (cs + 4)));
-#if defined(_WIN32)
-            fk_jb1(0x48);
-            fk_jb1(0x83);
-            fk_jb1(0xC4);
-            fk_jb1(32);
-/* add rsp,32 (undo shadow) */
-#endif
-            fk_jb1(0x48);
-            fk_jb1(0x81);
-            fk_jb1(0xC4);
-            fk_jb4((int)(fr * 8 + argc * 8));
-            /* add rsp,frame*8+temps (drop both) */
-        }
-        return;
-    }
-    if (getenv("FK_JIT_WITNESS")) {
-        printf("[jit-bail] unsupported tag %lld at node %lld\n", t, i);
-    }
-    fk_jit_ok = 0;
-    /* any other tag: not in the lowerable family — bail */
-}
-/* fk_jit_frame (declared above): number of frame slots fn f needs (args + let-locals). The args
- * array the ENTRY and every native self-call build must be this many longs, else a let store (mov
- * [rbp+slot*8]) or a slot read writes/reads past the array. Captured from the body's reserve
- * wrapper (tag 111, slot-count literal) when present; else = arity. */
-/* lower fn f's body into fk_jb; returns length if the whole tree is in-family, else 0. */
-static long long fk_jit_lower(long long f) {
-    /* every current call site already validates f before calling in, but fk_fn[f]
-     * below was read unconditionally while the fk_fnar[f] read two lines down was
-     * already guarded -- check once, up front, so both reads share one invariant. */
-    if (f < 0 || f >= FK_FN_CAP) {
-        return 0;
-    }
-    fk_jbp = 0;
-    fk_jit_ok = 1;
-    fk_jit_self = f;
-
-    /* frame size = max(arity, maxslot+1). maxslot lives in the reserve wrapper (tag 111). */
-    {
-        long long body = fk_fn[f];
-        long long fr = fk_fnar[f];
-        if (body >= 0 && fk_node[body][0] == 111) {
-            long long li = fk_node[body][1];
-            if (li >= 0 && fk_node[li][0] == 1) {
-                long long ms = fk_node[li][1] + 1;
-                if (ms > fr) {
-                    fr = ms;
-                }
-            }
-        }
-        if (fr < 1) {
-            fr = 1;
-        }
-        fk_jit_frame = fr;
-    }
-    fk_jb1(0x55);
-/* push rbp */
-#if defined(_WIN32)
-    fk_jb1(0x48);
-    fk_jb1(0x89);
-    fk_jb1(0xCD);
-/* mov rbp,rcx (args ptr) */
-#else
-    fk_jb1(0x48);
-    fk_jb1(0x89);
-    fk_jb1(0xFD);
-/* mov rbp,rdi (args ptr) */
-#endif
-    fk_jit_entry = fk_jbp;
-    /* TCO jmp target: rbp already = args ptr */
-    fk_jemit(fk_fn[f], 1);
-    /* body in TAIL position -> rax */
-    fk_jb1(0x5D);
-    /* pop rbp */
-    fk_jb1(0xC3);
-    /* ret */
-    if (fk_jit_ok == 0 || fk_jbp > FK_JIT_CODE_BUF_CAP) {
-        return 0;
-    }
-    return fk_jbp;
-}
-/* install fk_jb[0..n) executable and call it with an args array (tagged values). */
-static long long fk_native_call_args(const unsigned char *code, long long n, long long *args) {
-#if defined(_WIN32)
-    void *mem = VirtualAlloc(0, (unsigned long long)n, 0x3000, 0x04);
-    if (mem == 0) {
-        return fk_nothing;
-    }
-    long long k = 0;
-    while (k < n) {
-        ((unsigned char *)mem)[k] = code[k];
-        k = k + 1;
-    }
-    unsigned int old = 0;
-    VirtualProtect(mem, (unsigned long long)n, 0x20, &old);
-#else
-#if defined(__x86_64__) || defined(__amd64__)
-    void *mem = mmap(0, (unsigned long)n, 0x3, 0x1002, -1, 0);
-    if (mem == (void *)-1) {
-        return fk_nothing;
-    }
-    long long k = 0;
-    while (k < n) {
-        ((unsigned char *)mem)[k] = code[k];
-        k = k + 1;
-    }
-    if (mprotect(mem, (unsigned long)n, 0x5) != 0) {
-        return fk_nothing;
-    }
-    long long (*fn)(long long *) = (long long (*)(long long *))mem;
-    return fn(args);
-#else
-    (void)code;
-    (void)n;
-    (void)args;
-    return fk_nothing;
-#endif
-#endif
-#if defined(_WIN32)
-    long long (*fn)(long long *) = (long long (*)(long long *))mem;
-    return fn(args);
-#endif
-}
-/* install a crystallized image to an executable page ONCE; the caller caches the returned pointer
- * (no per-call VirtualAlloc). Returns 0 on failure. fk_natfn typedef'd earlier. */
-static fk_natfn fk_nat_install(const unsigned char *code, long long n) {
-#if defined(_WIN32)
-    void *mem = VirtualAlloc(0, (unsigned long long)n, 0x3000, 0x04);
-    if (mem == 0) {
-        return 0;
-    }
-    long long k = 0;
-    while (k < n) {
-        ((unsigned char *)mem)[k] = code[k];
-        k = k + 1;
-    }
-    unsigned int old = 0;
-    VirtualProtect(mem, (unsigned long long)n, 0x20, &old);
-#else
-#if defined(__x86_64__) || defined(__amd64__)
-    void *mem = mmap(0, (unsigned long)n, 0x3, 0x1002, -1, 0);
-    if (mem == (void *)-1) {
-        return 0;
-    }
-    long long k = 0;
-    while (k < n) {
-        ((unsigned char *)mem)[k] = code[k];
-        k = k + 1;
-    }
-    if (mprotect(mem, (unsigned long)n, 0x5) != 0) {
-        return 0;
-    }
-    return (fk_natfn)mem;
-#else
-    (void)code;
-    (void)n;
-    return 0;
-#endif
-#endif
-#if defined(_WIN32)
-    return (fk_natfn)mem;
-#endif
-}
-/* installed native body + length per fn, for --src crystallization. fk_src_nat
- * and fk_src_nat_len are already declared earlier in the file, near
- * fk_nat_exec -- this used to re-declare both here too (a harmless duplicate
- * under C's tentative-definition rules, but redundant); root-caused rather than
- * left, since the earlier declaration already covers this use. */
 static int fk_run_src(const char *path, long long arg) {
 #if defined(_WIN32)
     int fd = open(path, 0x8000);
@@ -8237,19 +8081,51 @@ static int fk_run_src(const char *path, long long arg) {
     if (fd < 0) {
         return 2;
     }
-    long long g = read(fd, fk_srctext, 262143);
-    close(fd);
-    if (g < 0) {
-        return 3;
+    long long g = 0;
+    fk_src_truncated = 0;
+    for (;;) {
+        long long got = read(fd, fk_srctext + g, FK_SOURCE_TEXT_CAP - 1 - g);
+        if (got < 0) {
+            close(fd);
+            return 3;
+        }
+        if (got == 0) {
+            break;
+        }
+        g = g + got;
+        if (g >= FK_SOURCE_TEXT_CAP - 1) {
+            char probe1;
+            if (read(fd, &probe1, 1) > 0) {
+                /* COMPILE-PHASE input intake: the prefix that DID fit is a valid
+                 * NUL-terminated program (fk_srctext[g]=0 below), so CHECK it for
+                 * errors instead of a first-byte abort. But NEVER run the amputated
+                 * program (the N=100 cliff this die was added to kill): mark it
+                 * truncated so the parse-done boundary refuses to execute and
+                 * returns nonzero. Recovery here means "check more," not "run." */
+                fk_diag(FK_DIAG_ERR, (long long)(FK_SOURCE_TEXT_CAP - 1),
+                        "source exceeds FK_SOURCE_TEXT_CAP (%d bytes); checking only the first "
+                        "%d bytes and refusing to run the truncated program",
+                        (int)FK_SOURCE_TEXT_CAP, (int)(FK_SOURCE_TEXT_CAP - 1));
+                fk_src_truncated = 1;
+            }
+            break;
+        }
     }
+    close(fd);
     fk_slen = g;
     fk_spos = 0;
     fk_srctext[g] = 0;
     fk_arg_n = 0;
     fk_fname_n = 0;
     fk_node_count = 0;
+    fk_ast_full = 0;
     fk_bd_top = 0;
     fk_maxslot = 0;
+    fk_nerr = 0;
+    fk_nwarn = 0;
+    /* NOTE: fk_src_truncated is set during the read loop ABOVE (already reset to 0
+     * before that loop), so it must NOT be cleared here or the truncation flag
+     * would be lost before the parse-done boundary reads it. */
     fk_sinit();
     /* stone 4: size the string pool (fk_scap_b>0) before any string op — the table path does this
      * when loading strings; the source path must too, else int_to_str/byte_to_str/str_concat spin
@@ -8279,162 +8155,28 @@ static int fk_run_src(const char *path, long long arg) {
         fk_fn[0] = fk_smklit(0);
     }
     fk_fn_count = fk_defn_next;
+    /* ROOT SCOPE FIX (same as fk_run_feval's below): the bare top-level root
+     * never got the tag-111 reserve every defn body gets, so its lets' slots
+     * sat below fk_vsp and the first nested call's frame overwrote them
+     * (receipts/2026-07-01-node-children-last-writer-wins.md). fk_maxslot
+     * survives defn parsing since tonight's f99d3232 port and holds the
+     * root scope's own slot count here. */
+    if (fk_maxslot > 0) {
+        fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
+    }
     fk_vs[0] = arg << 1;
     fk_vsp = 1;
-
-    /* ── FK_JIT_SCAN (opt-in measurement, prints nothing on the default path): attempt to LOWER
-     * every top-level defn and report crystallize-vs-bail per fn. This is the payoff readout — how
-     * much of a multi-fn bundle (e.g. form-eval) lowers whole, and which tags still bail. It
-     * installs nothing and changes no result; it only measures fk_jit_lower over each body. */
-    if (getenv("FK_JIT_SCAN")) {
-        long long fi = 1;
-        long long ok = 0;
-        long long bail = 0;
-        while (fi < fk_defn_next) {
-            long long n = fk_jit_lower(fi);
-            if (n > 0) {
-                ok = ok + 1;
-                if (getenv("FK_JIT_SCAN_V")) {
-                    printf("[scan] fn%lld LOWERS (%lld bytes)\n", fi, n);
-                }
-            } else {
-                bail = bail + 1;
-                if (getenv("FK_JIT_SCAN_V")) {
-                    printf("[scan] fn%lld BAILS\n", fi);
-                }
-            }
-            fi = fi + 1;
-        }
-        printf("[scan] lowered=%lld bailed=%lld total=%lld\n", ok, bail, ok + bail);
-    }
-
-    /* ── IN-PROCESS SELF-JIT gate (opt-in via env FK_JIT; default path byte-identical) ── When the
-     * root form is a direct call (callee arg…) to a function whose body lowers in the
-     * integer-arithmetic + pure-self-recursion family, crystallize that function's node tree to
-     * native bytes HERE, in this running process, install it executable via the fk_native_call HAL
-     * door, and run the whole (self-recursive) call natively. njit++ marks the flip; result is
-     * bit-identical to the walk. Any non-lowerable shape installs nothing and falls straight
-     * through to fk_walk. */
-    {
-        char *je = getenv("FK_JIT");
-        long long want = (je && je[0] && je[0] != 48) ? 1 : 0;
-        /* FK_JIT set and not "0" */
-        if (want) {
-            fk_lower_tail_tramp = 1;
-        }
-        /* --src JIT: tail inter-fn calls lower to the native trampoline */
-        long long root = fk_fn[0];
-        long long rt = fk_node[root][0];
-        if (want && (rt == 12 || rt == 240 || rt == 241)) {
-            long long callee = fk_node[root][1];
-            if (callee >= 0 && callee < FK_FN_CAP) {
-                /* collect the root call's outer args (evaluated once on the walker). The array is
-                 * sized generously (4096 slots) and zero-initialized so the callee's let-local
-                 * slots (beyond the args) start clean and a let-using root fn lowers with a
-                 * correctly-sized frame. */
-                long long aargs[4096];
-                {
-                    long long zi = 0;
-                    while (zi < 4096) {
-                        aargs[zi] = 0;
-                        zi = zi + 1;
-                    }
-                }
-                long long ac = 0;
-                int aok = 1;
-                if (rt == 12) {
-                    ac = 1;
-                    aargs[0] = fk_walk(fk_node[root][2], 0);
-                } else if (rt == 240) {
-                    ac = 2;
-                    aargs[0] = fk_walk(fk_node[root][2], 0);
-                    aargs[1] = fk_walk(fk_node[root][3], 0);
-                } else {
-                    /* 241 variadic: walk the 242-cons chain (ac may be 0 for a nullary recipe like
-                     * (slen)) */
-                    long long cell = fk_node[root][2];
-                    while (cell >= 0 && fk_node[cell][0] == 242) {
-                        if (ac < 6) {
-                            aargs[ac] = fk_walk(fk_node[cell][1], 0);
-                        }
-                        ac = ac + 1;
-                        cell = fk_node[cell][2];
-                    }
-                    if (ac > 6) {
-                        aok = 0;
-                    }
-                    /* 0..6 args all lower; >6 out of scope */
-                }
-                long long n = aok ? fk_jit_lower(callee) : 0;
-                if (n > 0) {
-                    unsigned char *img = malloc(n);
-                    if (img == 0) {
-                        fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
-                        return 0;
-                    }
-                    long long ci = 0;
-                    while (ci < n) {
-                        img[ci] = fk_jb[ci];
-                        ci = ci + 1;
-                    }
-                    fk_src_nat[callee] = img;
-                    fk_src_nat_len[callee] = n;
-                    fk_src_nat_frame[callee] = fk_jit_frame;
-                    fk_nat_tried[callee] = 1;
-                    /* already crystallized; ensure_native must not re-lower */
-                    fk_njit = fk_njit + 1;
-                    if (getenv("FK_JIT_WITNESS")) {
-                        printf(
-                            "[jit] fn%lld crystallized in-process: %lld bytes, njit=%lld (native dispatch)\n",
-                            callee, n, fk_njit);
-                    }
-
-                    /* install the root native ONCE and cache its exec ptr, so a sub-call that comes
-                     * BACK to this fn (mutual recursion: ev->od->ev) reaches it by DIRECT native
-                     * dispatch through fk_jcall, not the walker. The root call runs through the
-                     * native TRAMPOLINE (fk_jtramp) so a top-level tail chain (ev/od) loops
-                     * native↔native in constant stack — and the args frame fk_vs[0..) is rooted by
-                     * fk_jtramp raising fk_vsp, so melt relocates any cons. */
-                    fk_nat_exec[callee] = fk_nat_install(img, n);
-                    long long rv;
-                    if (fk_nat_exec[callee] != 0 && ac == fk_fnar[callee]) {
-                        long long ai = 0;
-                        while (ai < ac) {
-                            if (ai < FK_VALUE_STACK_CAP) {
-                                fk_vs[ai] = aargs[ai];
-                            }
-                            ai = ai + 1;
-                        }
-                        rv = fk_jtramp(callee, 0, ac);
-                    } else if (fk_nat_exec[callee] != 0) {
-                        long long fr = fk_jit_frame;
-                        if (fr < ac) {
-                            fr = ac;
-                        }
-                        long long ai = 0;
-                        while (ai < fr) {
-                            if (ai < FK_VALUE_STACK_CAP) {
-                                fk_vs[ai] = (ai < ac) ? aargs[ai] : 0;
-                            }
-                            ai = ai + 1;
-                        }
-                        long long save_vsp = fk_vsp;
-                        if (fr > fk_vsp && fr < FK_VALUE_STACK_CAP) {
-                            fk_vsp = fr;
-                        }
-                        rv = fk_nat_exec[callee](&fk_vs[0]);
-                        fk_vsp = save_vsp;
-                    } else {
-                        rv = fk_native_call_args(img, n, aargs);
-                    }
-                    fk_pv(rv);
-                    return 0;
-                }
-            }
-        }
+    /* ── PARSE DONE, EXECUTION BEGINS ── gcc-style tally, then the two-phase gate:
+     * an amputated source is a hard error -- surface the prefix's diagnostics but
+     * REFUSE to run (nonzero), never silently execute the truncated program. Any
+     * OTHER compile error still recovers INTO a runnable (if degraded) program and
+     * runs, carrying a nonzero EXIT via fk_nerr at the final return. */
+    fk_diag_flush();
+    if (fk_src_truncated) {
+        return 1;
     }
     fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
-    return 0;
+    return fk_nerr > 0 ? 1 : 0;
 }
 /* --feval: run a recipe THROUGH form-eval (Form), not fk_walk directly. The C seed bootstraps the
  * form-eval meta-evaluator (read live from grammars/form-eval.fk); form-eval reads the recipe as a
@@ -8551,8 +8293,12 @@ static int fk_run_feval(const char *path) {
     fk_arg_n = 0;
     fk_fname_n = 0;
     fk_node_count = 0;
+    fk_ast_full = 0;
     fk_bd_top = 0;
     fk_maxslot = 0;
+    fk_nerr = 0;
+    fk_nwarn = 0;
+    fk_src_truncated = 0;
     fk_sinit();
     fk_fntop = 0;
     fk_defn_next = 1;
@@ -8574,33 +8320,31 @@ static int fk_run_feval(const char *path) {
         fk_fn[0] = fk_smklit(0);
     }
     fk_fn_count = fk_defn_next;
-    {
-        char *je = getenv("FK_JIT");
-        fk_feval_jit_on = (je && je[0] && je[0] != 48) ? 1 : 0;
-        char *jh = getenv("FK_JIT_HOT");
-        if (jh && jh[0]) {
-            long long h = atoi(jh);
-            if (h > 0) {
-                fk_feval_hot = h;
-            }
-        }
-        long long zi = 0;
-        while (zi < FK_FN_CAP) {
-            fk_fheat[zi] = 0;
-            fk_nat_tried[zi] = 0;
-            fk_nat_exec[zi] = 0;
-            fk_src_nat[zi] = 0;
-            zi = zi + 1;
-        }
+    /* ROOT SCOPE FIX: a defn body's lets are protected by a tag-111 reserve
+     * (fk_maxslot slots raised above fk_vsp before the body runs), but the
+     * bare top-level root never got one — its lets were handed slots in
+     * fk_vs[fp+1..] while fk_vsp stayed at fp+1, so the FIRST nested call's
+     * frame (pushed at fk_vsp) landed on top of the live top-level bindings
+     * and silently overwrote them (receipts/2026-07-01-node-children-last-
+     * writer-wins.md: the bare-top-level exposure). Thanks to the parse-time
+     * save/restore ported tonight (f99d3232), fk_maxslot at this point holds
+     * exactly the ROOT scope's own slot count — so give the root the same
+     * reservation every defn body already gets. */
+    if (fk_maxslot > 0) {
+        fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
     }
     fk_vs[0] = 0;
     fk_vsp = 1;
+    /* ── PARSE DONE, EXECUTION BEGINS ── gcc-style tally (twin of fk_run_src). */
+    fk_diag_flush();
     long long rv = fk_walk(fk_fn[0], 0);
     fk_pv(rv);
     /* print the meta-eval result by value-kind (int / float / nothing) */
-    return 0;
+    return fk_nerr > 0 ? 1 : 0;
 }
 static int fk_run(int argc, char **argv) {
+    char fk_stack_here;
+    fk_stack_base = &fk_stack_here;
     if (argc < 2) {
         return 1;
     }
@@ -8620,9 +8364,18 @@ static int fk_run(int argc, char **argv) {
         return 3;
     }
     fk_buf[got] = 0;
+    fk_nerr = 0;
+    fk_nwarn = 0;
     long long nf = fk_next();
     if (nf < 0 || nf > FK_FN_CAP) {
-        fk_die("fk_run: table function count exceeds fk_fn capacity");
+        /* .tbl LOAD (artifact ingest): a diagnosable structural defect, not OOM.
+         * Diagnose and CLAMP so the rest of the header/tables still get validated
+         * and every defect is reported at once (gcc-style), then refuse to run.
+         * off<0: the loader reads fk_buf, not fk_srctext, so there is no coord. */
+        fk_diag(FK_DIAG_ERR, -1,
+                "malformed .tbl: function count %lld out of range [0,%d]; clamped",
+                nf, (int)FK_FN_CAP);
+        nf = (nf < 0) ? 0 : (long long)FK_FN_CAP;
     }
     fk_fn_count = nf;
     long long k = 0;
@@ -8632,7 +8385,12 @@ static int fk_run(int argc, char **argv) {
     }
     long long nr = fk_next();
     if (nr < 0 || nr > FK_AST_NODE_CAP) {
-        fk_die("fk_run: table node count exceeds fk_node capacity");
+        /* .tbl LOAD: same class as the fn-count site. Diagnose and clamp so the
+         * string-table section is still validated, then refuse to run. */
+        fk_diag(FK_DIAG_ERR, -1,
+                "malformed .tbl: node count %lld out of range [0,%d]; clamped",
+                nr, (int)FK_AST_NODE_CAP);
+        nr = (nr < 0) ? 0 : (long long)FK_AST_NODE_CAP;
     }
     fk_node_count = nr;
     long long r = 0;
@@ -8700,33 +8458,58 @@ static int fk_run(int argc, char **argv) {
     }
     fk_vs[0] = a;
     fk_vsp = 1;
-    if (argc > 4) {
-        fk_hot = atoi(argv[4]);
+    /* ── .tbl VALIDATED, EXECUTION BEGINS ── every header/table defect above was
+     * diagnosed and reported at once (gcc-style). A malformed artifact must NOT
+     * run: surface the tally and refuse (nonzero), never execute a clamped table. */
+    fk_diag_flush();
+    if (fk_nerr > 0) {
+        return 1;
     }
-    if (argc > 5 && argv[5][0] == 106) {
-        fk_nat_code[0] = fk_demo_inc;
-        fk_nat_len[0] = 8;
-    }
-    long long rootv;
-    fk_heat[0] = fk_heat[0] + 1;
-    if (fk_hot > 0 && fk_heat[0] >= fk_hot && fk_nat_code[0] != 0) {
-        fk_njit = fk_njit + 1;
-        rootv = fk_native_call(fk_nat_code[0], fk_nat_len[0], fk_vs[0] >> 1) << 1;
-    } else {
-        rootv = fk_walk(fk_fn[0], 0);
-    }
+    long long rootv = fk_walk(fk_fn[0], 0);
     fk_pv_root(fk_fn[0], rootv);
     long long t = 1;
     while (t <= 255) {
         fk_pr(fk_arms[t]);
         t = t + 1;
     }
-    fk_pr(fk_njit);
     return 0;
 }
 #if defined(_WIN32)
+/* the same law as the POSIX main below: the walker runs on a big explicit thread stack
+ * (FORM_KERNEL_STACK_MB, default 256MB). The bare `return fk_run(...)` ran on the OS
+ * default 1MB and died silently (exit 127, no output) at ~120 recursion levels — the
+ * platform seam the 2026-07-01 depth-wall repairs were patching around, healed at its
+ * root. 0x00010000 = STACK_SIZE_PARAM_IS_A_RESERVATION. */
+extern int atoi(const char *);
+static int fk_run_argc_w;
+static char **fk_run_argv_w;
+static int fk_run_ret_w;
+static unsigned int fk_run_thunk_w(void *p) {
+    (void)p;
+    fk_run_ret_w = fk_run(fk_run_argc_w, fk_run_argv_w);
+    return 0;
+}
 int main(int argc, char **argv) {
-    return fk_run(argc, argv);
+    fk_run_argc_w = argc;
+    fk_run_argv_w = argv;
+    unsigned long long mb = 256;
+    char *e = fk_conf("FORM_KERNEL_STACK_MB");
+    if (e) {
+        int v = atoi(e);
+        if (v > 0) {
+            mb = (unsigned long long)v;
+        }
+    }
+    fk_stack_wall = (long long)mb * 1024 * 1024 - 2 * 1024 * 1024;
+    void *th = CreateThread((void *)0, mb * 1024ULL * 1024ULL, fk_run_thunk_w, (void *)0,
+                            0x00010000u, (unsigned int *)0);
+    if (th == 0) {
+        fk_stack_wall = 6 * 1024 * 1024;
+        return fk_run(argc, argv);
+    }
+    WaitForSingleObject(th, 0xFFFFFFFFu);
+    CloseHandle(th);
+    return fk_run_ret_w;
 }
 #else
 extern char *getenv(const char *);
@@ -8751,13 +8534,14 @@ int main(int argc, char **argv) {
     fk_run_argc = argc;
     fk_run_argv = argv;
     unsigned long mb = 256;
-    char *e = getenv("FORM_KERNEL_STACK_MB");
+    char *e = fk_conf("FORM_KERNEL_STACK_MB");
     if (e) {
         int v = atoi(e);
         if (v > 0) {
             mb = (unsigned long)v;
         }
     }
+    fk_stack_wall = (long long)mb * 1024 * 1024 - 2 * 1024 * 1024;
     fk_pthread_attr_t at;
     pthread_attr_init(&at);
     pthread_attr_setstacksize(&at, mb * 1024UL * 1024UL);

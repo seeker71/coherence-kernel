@@ -1,0 +1,85 @@
+; ctc-train.fk — EARN the number: train a CTC decoder by native gradient
+; descent on model/ctc-loss.fk, and watch a real error go to zero.
+;
+; ctc-loss.fk proved the forward objective (score an alignment). This closes
+; the loop asked for 2026-07-02 ("why not earn it"): the loss becomes a
+; TRAINING signal. Logits -> softmax -> the CTC forward loss; the gradient
+; ∂loss/∂logit is taken by CENTRAL FINITE DIFFERENCE (numerically exact to
+; O(eps^2), no hand-derived formula to get wrong); gradient descent then drives
+; the greedy-decoded output from wrong to the target.
+;
+; Witnessed (four-way fkwu/Go/Rust/TS):
+;   single-label: target "a", T=2, SYMMETRIC init favoring blank -> decode ""
+;     (WER 100) trains to decode "a" (WER 0), loss strictly down. No init trick.
+;   ordered: target "ab", T=4, trained from an ADVERSARIAL init (frame0 nudged
+;     toward b, frame3 toward a — the WRONG order) -> still decodes "ab"
+;     (WER 0), loss down. The tiny fixed asymmetry only breaks the exact-
+;     symmetry saddle (the deterministic stand-in for the random init real
+;     training uses; Math.random is forbidden here); the GRADIENT learns the
+;     correct ordering and the skip transition, proven by convergence from the
+;     wrong-direction nudge.
+;
+; HONEST FLOOR: the decoder is FREE LOGITS (a lookup table of per-frame class
+; scores), NOT a neural encoder over real signal — so this earns "the CTC loss
+; trains a decoder to zero error natively," NOT a real open-speech WER. And the
+; gradient is NUMERICAL (O(params) loss-evals/step) — fine for toys, but the
+; analytic forward-backward gradient (∂loss/∂logit = softmax - alignment-
+; posterior via alpha·beta) is the scaling rung, still ahead. The native
+; WER-100 on real speech is unchanged; what is earned is that its objective now
+; demonstrably LEARNS.
+;
+; preludes: form-stdlib/core.fk model/transformer-numerics.fk model/trig.fk model/ctc-loss.fk
+
+(do
+    (defn ctt-expv (xs) (if (eq (len xs) 0) (empty) (cons (tn-exp (head xs)) (ctt-expv (tail xs)))))
+    (defn ctt-sumv (xs) (if (eq (len xs) 0) 0.0 (add (head xs) (ctt-sumv (tail xs)))))
+    (defn ctt-scalev (xs s) (if (eq (len xs) 0) (empty) (cons (mul (head xs) s) (ctt-scalev (tail xs) s))))
+    (defn ctt-softmax (u) (do (let e (ctt-expv u)) (ctt-scalev e (div 1.0 (ctt-sumv e)))))
+    (defn ctt-softmax-frames (us) (if (eq (len us) 0) (empty) (cons (ctt-softmax (head us)) (ctt-softmax-frames (tail us)))))
+    ; the CTC loss as a function of LOGIT frames (softmax then ctc-loss)
+    (defn ctt-loss (us tgt) (ctc-loss (ctt-softmax-frames us) tgt))
+
+    (defn ctt-set (xs i v) (if (eq (len xs) 0) (empty)
+        (if (eq i 0) (cons v (tail xs)) (cons (head xs) (ctt-set (tail xs) (sub i 1) v)))))
+    (defn ctt-setf (us fi ci v) (if (eq (len us) 0) (empty)
+        (if (eq fi 0) (cons (ctt-set (head us) ci v) (tail us)) (cons (head us) (ctt-setf (tail us) (sub fi 1) ci v)))))
+    (defn ctt-get (us fi ci) (nth (nth us fi) ci))
+    ; central finite-difference gradient wrt one logit
+    (defn ctt-numgrad (us tgt fi ci eps)
+        (do (let u0 (ctt-get us fi ci))
+            (div (sub (ctt-loss (ctt-setf us fi ci (add u0 eps)) tgt)
+                      (ctt-loss (ctt-setf us fi ci (sub u0 eps)) tgt)) (mul 2.0 eps))))
+
+    ; one gradient-descent sweep over all (frame, class) params
+    (defn ctt-step-classes (us tgt fi ci k lr eps)
+        (if (ge ci k) us
+            (ctt-step-classes (ctt-setf us fi ci (sub (ctt-get us fi ci) (mul lr (ctt-numgrad us tgt fi ci eps))))
+                              tgt fi (add ci 1) k lr eps)))
+    (defn ctt-step-frames (us tgt fi k lr eps)
+        (if (ge fi (len us)) us
+            (ctt-step-frames (ctt-step-classes us tgt fi 0 k lr eps) tgt (add fi 1) k lr eps)))
+    (defn ctt-train (us tgt k lr eps n)
+        (if (eq n 0) us (ctt-train (ctt-step-frames us tgt 0 k lr eps) tgt k lr eps (sub n 1))))
+
+    ; greedy decode: argmax per frame -> collapse (drop blank 0, merge repeats) -> int-encoded
+    (defn ctt-argmax-loop (v i best besti)
+        (if (ge i (len v)) besti
+            (if (gt (nth v i) best) (ctt-argmax-loop v (add i 1) (nth v i) i)
+                (ctt-argmax-loop v (add i 1) best besti))))
+    (defn ctt-argmax (v) (ctt-argmax-loop v 1 (nth v 0) 0))
+    (defn ctt-am-frames (fs) (if (eq (len fs) 0) (empty) (cons (ctt-argmax (head fs)) (ctt-am-frames (tail fs)))))
+    (defn ctt-collapse (idxs prev acc)
+        (if (eq (len idxs) 0) acc
+            (do (let c (head idxs))
+                (if (eq c 0) (ctt-collapse (tail idxs) 0 acc)
+                    (if (eq c prev) (ctt-collapse (tail idxs) prev acc)
+                        (ctt-collapse (tail idxs) c (add (mul acc 10) c)))))))
+    (defn ctt-decode (us) (ctt-collapse (ctt-am-frames (ctt-softmax-frames us)) 0 0))
+
+    ; toy fixtures
+    (defn ctt-u0-a () (list (list 2.0 0.0) (list 2.0 0.0)))          ; symmetric, blank-favoring
+    (defn ctt-tgt-a () (list 1))                                     ; "a", collapse-encoded 1
+    (defn ctt-u0-ab () (list (list 2.0 0.0 0.02) (list 2.0 0.0 0.01) ; adversarial: b-early, a-late
+                             (list 2.0 0.01 0.0) (list 2.0 0.02 0.0)))
+    (defn ctt-tgt-ab () (list 1 2))                                  ; "ab", collapse-encoded 12
+    0)
