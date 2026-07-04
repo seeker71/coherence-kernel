@@ -1,32 +1,52 @@
-; jit-container-lowering.fk - compact Form JIT lowering for dict/hash/tree access.
+; jit-container-lowering.fk - compact Form JIT lowering for container access.
 ;
-; This cell keeps container lookup specialization in the Form compiler layer
-; without touching C/Rust or the larger x64 byte prelude. It emits stable native
-; operation streams for the later backend byte lanes: dict lookup, hashmap
-; bucket lookup, and red-black-tree path lookup. The same compiler function is
-; used for user plans and compiler-subject plans.
+; This cell keeps container specialization in the Form compiler layer without
+; touching C/Rust or the larger x64 byte prelude. It emits stable native
+; operation streams for the later backend byte lanes: list head/tail, array
+; index, dict lookup, hashmap bucket lookup, and red-black-tree path lookup.
+; The same compiler function is used for user plans and compiler-subject plans.
 
 (do
+    (defn jcl-repr-complete-total () 1023)
+    (defn jcl-op-list () 4)
+    (defn jcl-op-array () 5)
+    (defn jcl-op-dict () 6)
+    (defn jcl-op-hashmap () 7)
+    (defn jcl-op-rbtree () 8)
+
     ; plan = ("jc" owner subject op source maps generation repr-total repr-expected fault fallback keycat collision order)
-    ; owner: 1 form-backend, other values reject.
-    ; subject: 1 user code, 2 compiler code.
-    ; op: 6 dict, 7 hashmap, 8 red-black tree.
-    ; keycat: 1 string, 2 orderable.
+    ; owner: 1 Form backend, other values reject.
+    ; subject: 1 user plan, 2 compiler-subject plan.
+    ; op: 4 list, 5 array, 6 dict, 7 hashmap, 8 red-black tree.
+    ; keycat: none/string/orderable as required by the op.
     (defn jcl-plan (owner subject op source maps generation repr-total repr-expected fault fallback keycat collision order)
         (list "jc" owner subject op source maps generation repr-total repr-expected fault fallback keycat collision order))
     (defn jcl-plan? (p) (if (eq (len p) 14) (str_eq (nth p 0) "jc") 0))
     (defn jcl-op (p) (nth p 3))
 
+    (defn jcl-ready-plan (op keycat collision order)
+        (jcl-plan 1 1 op 1 1 1
+            (jcl-repr-complete-total) (jcl-repr-complete-total) 1 1
+            keycat collision order))
+
     (defn jcl-op-ok? (op)
-        (if (eq op 6) 1 (if (eq op 7) 1 (if (eq op 8) 1 0))))
+        (if (eq op (jcl-op-list)) 1
+            (if (eq op (jcl-op-array)) 1
+                (if (eq op (jcl-op-dict)) 1
+                    (if (eq op (jcl-op-hashmap)) 1
+                        (if (eq op (jcl-op-rbtree)) 1 0))))))
     (defn jcl-op-proof-ok? (p)
-        (if (eq (jcl-op p) 6)
-            (if (eq (nth p 11) 1) (if (eq (nth p 12) 0) 1 0) 0)
-            (if (eq (jcl-op p) 7)
-                (if (eq (nth p 11) 1) (if (eq (nth p 12) 0) 1 0) 0)
-                (if (eq (jcl-op p) 8)
-                    (if (eq (nth p 11) 2) (if (eq (nth p 13) 1) 1 0) 0)
-                    0))))
+        (if (eq (jcl-op p) (jcl-op-list))
+            (if (eq (nth p 11) 0) (if (eq (nth p 12) 0) (if (eq (nth p 13) 0) 1 0) 0) 0)
+            (if (eq (jcl-op p) (jcl-op-array))
+                (if (eq (nth p 11) 0) (if (eq (nth p 12) 0) (if (eq (nth p 13) 0) 1 0) 0) 0)
+                (if (eq (jcl-op p) (jcl-op-dict))
+                    (if (eq (nth p 11) 1) (if (eq (nth p 12) 0) 1 0) 0)
+                    (if (eq (jcl-op p) (jcl-op-hashmap))
+                        (if (eq (nth p 11) 1) (if (eq (nth p 12) 0) 1 0) 0)
+                        (if (eq (jcl-op p) (jcl-op-rbtree))
+                            (if (eq (nth p 11) 2) (if (eq (nth p 13) 1) 1 0) 0)
+                            0))))))
 
     (defn jcl-safe? (p)
         (if (eq (jcl-plan? p) 1)
@@ -36,7 +56,7 @@
                         (if (eq (nth p 5) 1)
                             (if (gt (nth p 6) 0)
                                 (if (eq (nth p 7) (nth p 8))
-                                    (if (eq (nth p 8) 1023)
+                                    (if (eq (nth p 8) (jcl-repr-complete-total))
                                         (if (eq (nth p 9) 1)
                                             (if (eq (nth p 10) 1)
                                                 (jcl-op-proof-ok? p)
@@ -47,18 +67,19 @@
                                 0)
                             0)
                         0)
-                    0)
-                0)
-            0))
-
+                    0))))
     (defn jcl-hot? (heat pure) (if (gt heat 4) (if (eq pure 1) 1 0) 0))
 
     (defn jcl-emit (op)
-        (if (eq op 6)
-            (list 601 610 611 612 690)
-            (if (eq op 7)
-                (list 701 710 711 712 713 790)
-                (if (eq op 8) (list 801 810 811 812 813 814 890) (empty)))))
+        (if (eq op (jcl-op-list))
+            (list 401 410 411 490)
+            (if (eq op (jcl-op-array))
+                (list 501 510 511 512 590)
+                (if (eq op (jcl-op-dict))
+                    (list 601 610 611 612 690)
+                    (if (eq op (jcl-op-hashmap))
+                        (list 701 710 711 712 713 790)
+                        (if (eq op (jcl-op-rbtree)) (list 801 810 811 812 813 814 890) (empty)))))))
 
     (defn jcl-compile (p heat pure)
         (if (eq (jcl-safe? p) 1)
@@ -87,39 +108,48 @@
                 0)
             0))
 
-    (defn jcl-dict () (jcl-plan 1 1 6 1 1 1 1023 1023 1 1 1 0 0))
-    (defn jcl-hash () (jcl-plan 1 1 7 1 1 1 1023 1023 1 1 1 0 0))
-    (defn jcl-tree () (jcl-plan 1 1 8 1 1 1 1023 1023 1 1 2 0 1))
-    (defn jcl-foreign () (jcl-plan 0 1 7 1 1 1 1023 1023 1 1 1 0 0))
-    (defn jcl-no-source () (jcl-plan 1 1 7 0 1 1 1023 1023 1 1 1 0 0))
-    (defn jcl-zero-generation () (jcl-plan 1 1 7 1 1 0 1023 1023 1 1 1 0 0))
+    (defn jcl-dict () (jcl-ready-plan (jcl-op-dict) 1 0 0))
+    (defn jcl-hash () (jcl-ready-plan (jcl-op-hashmap) 1 0 0))
+    (defn jcl-tree () (jcl-ready-plan (jcl-op-rbtree) 2 0 1))
+    (defn jcl-foreign () (jcl-plan 0 1 (jcl-op-hashmap) 1 1 1 (jcl-repr-complete-total) (jcl-repr-complete-total) 1 1 1 0 0))
+    (defn jcl-no-source () (jcl-plan 1 1 (jcl-op-hashmap) 0 1 1 (jcl-repr-complete-total) (jcl-repr-complete-total) 1 1 1 0 0))
+    (defn jcl-zero-generation () (jcl-plan 1 1 (jcl-op-hashmap) 1 1 0 (jcl-repr-complete-total) (jcl-repr-complete-total) 1 1 1 0 0))
     (defn jit-container-lowering-check ()
         (do
+            (let l (jcl-compile (jcl-ready-plan (jcl-op-list) 0 0 0) 6 1))
+            (let a (jcl-compile (jcl-ready-plan (jcl-op-array) 0 0 0) 6 1))
             (let d (jcl-compile (jcl-dict) 6 1))
             (let h (jcl-compile (jcl-hash) 6 1))
             (let t (jcl-compile (jcl-tree) 6 1))
+            (let sa (jcl-compile-self (jcl-ready-plan (jcl-op-array) 0 0 0) 6 1))
             (let sh (jcl-compile-self (jcl-hash) 6 1))
             (let st (jcl-compile-self (jcl-tree) 6 1))
             (add
                 (if (eq (jcl-safe? (jcl-hash)) 1) 1 0)
                 (add
-                    (if (eq (jcl-probe? d 5 601 690) 1) 2 0)
+                    (if (eq (jcl-probe? l 4 401 490) 1) 2 0)
                     (add
-                        (if (eq (jcl-probe? h 6 701 790) 1) 4 0)
+                        (if (eq (jcl-probe? a 5 501 590) 1) 4 0)
                         (add
-                            (if (eq (jcl-probe? t 7 801 890) 1) 8 0)
+                            (if (eq (jcl-probe? d 5 601 690) 1) 8 0)
                             (add
-                                (if (eq (len (jcl-compile (jcl-dict) 4 1)) 0) 16 0)
+                                (if (eq (jcl-probe? h 6 701 790) 1) 16 0)
                                 (add
-                                    (if (eq (len (jcl-compile (jcl-dict) 6 0)) 0) 32 0)
+                                    (if (eq (jcl-probe? t 7 801 890) 1) 32 0)
                                     (add
-                                        (if (eq (len (jcl-compile (jcl-foreign) 6 1)) 0) 64 0)
+                                        (if (eq (len (jcl-compile (jcl-dict) 4 1)) 0) 64 0)
                                         (add
-                                            (if (eq (len (jcl-compile (jcl-no-source) 6 1)) 0) 128 0)
+                                            (if (eq (len (jcl-compile (jcl-dict) 6 0)) 0) 128 0)
                                             (add
-                                                (if (eq (len (jcl-compile (jcl-zero-generation) 6 1)) 0) 256 0)
+                                                (if (eq (len (jcl-compile (jcl-foreign) 6 1)) 0) 256 0)
                                                 (add
-                                                    (if (eq (jcl-same-probe? h sh 6) 1) 512 0)
-                                                    (if (eq (jcl-same-probe? t st 7) 1) 1024 0)))))))))))))
+                                                    (if (eq (len (jcl-compile (jcl-no-source) 6 1)) 0) 512 0)
+                                                    (add
+                                                        (if (eq (len (jcl-compile (jcl-zero-generation) 6 1)) 0) 1024 0)
+                                                        (add
+                                                            (if (eq (jcl-same-probe? a sa 5) 1) 2048 0)
+                                                            (add
+                                                                (if (eq (jcl-same-probe? h sh 6) 1) 4096 0)
+                                                                (if (eq (jcl-same-probe? t st 7) 1) 8192 0)))))))))))))))
 
     0)

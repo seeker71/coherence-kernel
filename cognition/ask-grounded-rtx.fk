@@ -1,0 +1,126 @@
+; ask-grounded-rtx.fk — one form-cli ask, answered grounded, scored on RTX metal.
+;
+; preludes (cat before this cell): model/rag-embed.fk (repaired: str_byte_at hash,
+; native re-norm, tail-safe re-zeros/re-inc), observe/thought-framebuffer.fk,
+; cognition/capitals-knowledge.fk.
+;
+; The pipeline, each step observable:
+;   1. embed the question    — re-vec-dim at dim 256 (collision headroom; the prelude's
+;      64 default is untouched). Sovereign lexical histogram, integers.
+;   2. weigh the knowledge   — IDF derived from the corpus itself: bucket weight =
+;      (rows + 1 - document-frequency), so ubiquitous words ("the", "is", "of") weigh 1
+;      and discriminating words ("france") weigh rows. Data-derived, no stop-list,
+;      no language assumption. Raw dot over unweighted rows provably ties (witnessed:
+;      5,4,4,4,5,4,4,5 for the France ask at dim 64 — duplicate "the" + one collision).
+;   3. score on the GPU      — (cuda_matvec_f32 W q): the general CUDA door (tag 233)
+;      dispatches y = W.q on real RTX silicon through the Form-emitted PTX and returns
+;      (agree s0 .. s_{n-1}), agree counting rows bit-identical to the CPU f32 fold.
+;      All entries are small integers, so f32 agreement is exact by construction.
+;      The metal receipt rides IN the value: agree < rows -> the ask REFUSES.
+;   4. decide                — argmax over the GPU scores; margin = top1 - top2.
+;   5. watch the thought     — the decision becomes an fb-frame (thought-framebuffer):
+;      step, chosen row, win margin — the forming of the answer, readable.
+;   6. answer                — the winning row's answer word, attributed to its ground.
+;      No winner, zero margin, or GPU/CPU disagreement -> an honest refusal string.
+;
+; Honest floor: retrieval-grounded relay over a small knowledge cell — lexical
+; similarity, not neural semantics, and not generative voice (that seam stays named
+; in receipts/2026-06-29-native-zh-summary-PENDING.md).
+(do
+    (defn agr-dim () 256)
+
+    ; tail-safe list plumbing (one walker frame per STEP, not per element)
+    (defn agr-rev-into (acc rest)
+        (if (eq (len acc) 0) rest
+            (agr-rev-into (tail acc) (cons (head acc) rest))))
+    (defn agr-rev (xs) (agr-rev-into xs (empty)))
+    (defn agr-cat (a b) (agr-rev-into (agr-rev a) b))
+
+    ; elementwise: presence (min count 1), zip-add, zip-mul — all tail + reverse
+    (defn agr-pres-scan (v acc)
+        (if (eq (len v) 0) (agr-rev acc)
+            (agr-pres-scan (tail v) (cons (if (gt (head v) 0) 1 0) acc))))
+    (defn agr-zip-add-scan (a b acc)
+        (if (eq (len a) 0) (agr-rev acc)
+            (agr-zip-add-scan (tail a) (tail b) (cons (add (head a) (head b)) acc))))
+    (defn agr-zip-mul-scan (a b acc)
+        (if (eq (len a) 0) (agr-rev acc)
+            (agr-zip-mul-scan (tail a) (tail b) (cons (mul (head a) (head b)) acc))))
+
+    ; corpus embeddings (row order preserved; depth = row count, small)
+    (defn agr-vecs (rows)
+        (if (eq (len rows) 0) (empty)
+            (cons (re-vec-dim (ck-text (head rows)) (agr-dim))
+                  (agr-vecs (tail rows)))))
+
+    ; document frequency per bucket: sum of presence vectors over all rows
+    (defn agr-df-loop (vecs acc)
+        (if (eq (len vecs) 0) acc
+            (agr-df-loop (tail vecs)
+                (agr-zip-add-scan (agr-pres-scan (head vecs) (empty)) acc (empty)))))
+    (defn agr-df (vecs) (agr-df-loop vecs (re-zeros (agr-dim))))
+
+    ; bucket weights: rows + 1 - df  (df=all -> 1, df=1 -> rows; integer, exact in f32)
+    (defn agr-weights-scan (df n acc)
+        (if (eq (len df) 0) (agr-rev acc)
+            (agr-weights-scan (tail df) n (cons (sub (add n 1) (head df)) acc))))
+
+    ; the weighted knowledge matrix, flattened row-major into one list
+    (defn agr-w-loop (vecs w acc)
+        (if (eq (len vecs) 0) acc
+            (agr-w-loop (tail vecs) w
+                (agr-cat acc (agr-zip-mul-scan (head vecs) w (empty))))))
+    (defn agr-w (vecs w) (agr-w-loop vecs w (empty)))
+
+    ; argmax index over a score list (ties keep the first — same law as rag-nearest)
+    (defn agr-best-loop (xs i bi bv)
+        (if (eq (len xs) 0) bi
+            (if (gt (head xs) bv)
+                (agr-best-loop (tail xs) (add i 1) i (head xs))
+                (agr-best-loop (tail xs) (add i 1) bi bv))))
+    (defn agr-best-i (xs) (agr-best-loop (tail xs) 1 0 (head xs)))
+
+    ; best value excluding index `skip` (the runner-up, for the decision margin)
+    (defn agr-best2-loop (xs skip i bv)
+        (if (eq (len xs) 0) bv
+            (if (eq i skip)
+                (agr-best2-loop (tail xs) skip (add i 1) bv)
+                (if (gt (head xs) bv)
+                    (agr-best2-loop (tail xs) skip (add i 1) (head xs))
+                    (agr-best2-loop (tail xs) skip (add i 1) bv)))))
+    (defn agr-best2 (xs skip) (agr-best2-loop xs skip 0 (sub 0 1)))
+
+    ; the ask: question in, grounded answer + receipt + thought-frame out (one string)
+    (defn agr-ask (q)
+        (do
+            (let rows (ck-rows))
+            (let vecs (agr-vecs rows))
+            (let w (agr-weights-scan (agr-df vecs) (len rows) (empty)))
+            (let r (cuda_matvec_f32 (agr-w vecs w) (re-vec-dim q (agr-dim))))
+            (if (eq (len r) 0)
+                "[ask: gpu door refused — no RTX receipt, no answer]"
+                (do
+                    (let n (len rows))
+                    (let agree (head r))
+                    (let scores (tail r))
+                    (let bi (agr-best-i scores))
+                    (let margin (float_to_int (sub (nth scores bi) (agr-best2 scores bi))))
+                    (let f (fb-frame 0 bi margin))
+                    (if (lt agree n)
+                        "[ask: gpu/cpu disagree — refusing an ungrounded answer]"
+                    ; the grounded floor: a discriminating (df=1) bucket weighs n, while
+                    ; common-word noise (duplicate "the" etc) contributes <= 2 at weight 1.
+                    ; n/2 sits between them and scales with the corpus. Witnessed: "What is
+                    ; the meaning of life?" scored london ahead by margin 1 (pure noise) —
+                    ; the margin-zero gate alone would have answered it. It must refuse.
+                    (if (lt margin (div n 2))
+                        "[ask: margin below the grounded floor — nothing here knows this, refusing to guess]"
+                        (str_concat (ck-answer (nth rows bi))
+                        (str_concat "\ngrounded:" (str_concat (ck-id (nth rows bi))
+                        (str_concat "\nrtx-receipt:bit-exact " (str_concat (int_to_str agree)
+                        (str_concat "/" (str_concat (int_to_str n)
+                        (str_concat "\nthought-frame:step=" (str_concat (int_to_str (fb-step f))
+                        (str_concat " chose=" (str_concat (ck-id (nth rows bi))
+                        (str_concat " margin=" (str_concat (int_to_str (fb-margin f))
+                            "\nlocal-lane:fkwu-rag-grounded-rtx")))))))))))))))))))
+    0)
