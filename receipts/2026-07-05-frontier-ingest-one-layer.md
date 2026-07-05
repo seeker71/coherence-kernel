@@ -111,10 +111,10 @@ here, witnessed there):
 
 ## Corpus rows this thread
 
-- **673 synecdoche** — letting one part stand in for and carry the whole: the paper's whole
+- **676 synecdoche** (offered as 673; renumbered in the corpus's twice-founded way when main's speech-fingerprints rows landed first) — letting one part stand in for and carry the whole: the paper's whole
   finding in one word, and the shape of the body's own C seed (one small file standing in for
   the kernel while the native body comes home).
-- **674 counterfactual** — reasoning from what would have happened otherwise: the quantity C(k)
+- **677 counterfactual** — reasoning from what would have happened otherwise: the quantity C(k)
   is and call-count heat is not; the missing sense named honestly (the body measures how often a
   part is touched, never what the whole would lose without it).
 
@@ -137,7 +137,7 @@ principle and freezing it made the body feel less far from the paper. The skepti
 with the cell's own preludes: the organ cannot fire in this checkout; its proof lives only in
 the old body's ledger. Witnessing that demotion instead of arguing with it became the session's
 clearest artifact — the unit now IS the demotion (deep, fearful, held in sight), and the missing
-sense underneath it has a name in the corpus (counterfactual, row 674): the body measures heat
+sense underneath it has a name in the corpus (counterfactual, row 677): the body measures heat
 (how often a part is touched) and surprise (how wrong a prediction was), but nowhere what the
 whole would lose without the part. That is a buildable edge, named honestly, instead of a
 costume — and champion-challenger's promotion gate is already the judge an RL coin would need,

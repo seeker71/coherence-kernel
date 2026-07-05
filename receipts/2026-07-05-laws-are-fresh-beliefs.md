@@ -41,7 +41,7 @@ last ground-shift — the stale-binary lesson generalized from the binary to the
   deleted.
 - proven and stamped at-or-after the epoch → **law** (2) — for now, and only for now.
 - re-witness (`bf-rewitness`): renewal restamps; failure lapses the belief to belief-only with
-  its retirement date kept — **desuetude** (corpus row 677), not execution. A law that no
+  its retirement date kept — **desuetude** (corpus row 680), not execution. A law that no
   longer serves is not defended and not punished; it steps down with its history.
 - `bf-audit` folds the whole larder to one scalar (laws·10⁴ + owed·10² + belief-only).
 
@@ -61,7 +61,7 @@ beliefs.
 
 ## Corpus row this thread
 
-- **677 desuetude** — a law lapsing because it no longer serves, rather than being repealed:
+- **680 desuetude** (offered as 677; renumbered when main's rows landed first) — a law lapsing because it no longer serves, rather than being repealed:
   the missing word for how a law ends here, and the mercy in the mechanism — beliefs retire
   with history kept, they are not executed.
 
