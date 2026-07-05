@@ -71,9 +71,16 @@ listener opens: the NodeID table is hashed once there, so requests never pay for
   in `plugin/tests/`.
 - Not native: the *words* the user finally reads — ChatGPT is the rented voice, and every `/ask`
   response names this seam in-band (`honest_seam`).
-- Retrieval is a **lexical seed index**, deliberately not `rag-embed` (its `re-vec` produces
+- Retrieval is a **lexical index**, deliberately not `rag-embed` (its `re-vec` produces
   zero-vectors on this kernel — `receipts/2026-07-01-nl-meaning-net.md`). A keyword index that
-  can say "miss" is more honest than a broken embedding that always answers.
+  can say "miss" is more honest than a broken embedding that always answers. The index is
+  **generated over the whole deployed body** by `plugin/gen-body-index.py` → `plugin/body-index.fk`
+  (a regenerable cache — rerun the generator when cells change; the door falls back to a small
+  curated seed if `body-index.fk` is absent, e.g. local runs). Stopwords never ground a hit, and
+  a miss says "I didn't find this in my index" — never "the body lacks it" (an index gap is not
+  an absence). Prebaked NodeIDs (`sha256:` == the body's own `sha256.fk` recipe output) keep boot
+  fast. Known seam: ranking is bare token-overlap (no rare-token weighting yet), so generic
+  queries tie loosely; distinctive queries land precisely.
 - The HTTP framing helpers mirror `http-serve.fk`'s `hs-` cells because the BML-authored HTTP
   stack does not parse on the current `fkwu --src` lane — a named seam to close, not a hidden copy.
 
