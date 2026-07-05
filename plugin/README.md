@@ -18,20 +18,26 @@ three things, in this order, and never invention:
 ## Run it (from the repo root)
 
 ```sh
-( cat form/form-stdlib/core.fk cognition/text-frequency.fk plugin/chatgpt-plugin.fk; \
+( cat form/form-stdlib/core.fk form/form-stdlib/sha256.fk cognition/text-frequency.fk \
+    plugin/chatgpt-plugin.fk; \
   echo '(plugin-serve 8787 9999)' ) > /tmp/sema-plugin.fk
 ./fkwu --src /tmp/sema-plugin.fk
 ```
 
 Then:
 
-- `GET /ask?q=can+I+trust+this+body` — grounded + attuned + traced answer material
+- `GET /ask?q=can+I+trust+this+body` — grounded + attuned + traced answer material, including
+  the **enquiry** block: which index ran (lexical-seed-v1, honestly not-RAG), which cells matched
+  on which tokens with scores, each grounded cell's **NodeID** (sha256 content address, hashed at
+  boot by the body's own recipe), and the honest naming that no local or remote oracle and no
+  model run inside the door — the rented mind reading the response is the only mind in the loop.
 - `GET /trace?path=ingest/judged-trust.fk` — any cell's change graph and attribution
 - `GET /.well-known/ai-plugin.json` — the plugin manifest
 - `GET /openapi.json` — the OpenAPI spec
 
 The second `plugin-serve` argument is the number of connections to serve before the listener
-closes — the bound is named, never silent. Pass what you mean.
+closes — the bound is named, never silent. Pass what you mean. Boot pauses ~15s before the
+listener opens: the NodeID table is hashed once there, so requests never pay for it.
 
 ## Connecting a rented mind — the honest state of the doors
 
