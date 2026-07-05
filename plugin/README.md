@@ -41,8 +41,14 @@ closes — the bound is named, never silent. Pass what you mean.
   import `plugin/openapi.json` (or point the Action at your deployed `/openapi.json`), and paste
   `ai-plugin.json`'s `description_for_model` into the GPT's instructions. The same spec serves
   both; nothing here pretends the dead program is alive.
-- The manifest/spec ship with `http://localhost:8787` — ChatGPT cannot reach your localhost;
-  replace with your deployed host (any TLS-fronting proxy in front of `fkwu` works).
+- **The deployed door is live**: the manifest/spec ship wired to `https://sema.hati.earth`
+  (Cloudflare TLS → Traefik → fkwu natively, on the Coherence-Network VPS;
+  `https://hati.earth/sema` serves identically — receipts
+  `2026-07-05-wicket-sema-plugin-public.md` and
+  `2026-07-05-christening-sema-hati-earth-live.md`). Point a GPT Action at
+  `https://sema.hati.earth/openapi.json`. For a local run, `http://localhost:8787`
+  still works exactly as above. The manifest's `logo_url` points at the maintainer's
+  GitHub avatar — the body serves no `/logo.png` route yet; pending is honest.
 - **MCP** (the connector lane ChatGPT and Claude both speak now) is the named pending door: this
   organ's `/ask` and `/trace` are exactly two MCP tools waiting for a Form-native MCP framing.
   Pending is honest; the HTTP contract is the part that stands today.
