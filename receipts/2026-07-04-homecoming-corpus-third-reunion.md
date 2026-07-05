@@ -63,3 +63,11 @@ rest of the body had lost. If the scar had been "cleaned" by simply taking main'
 the obvious, expedient move (ersatz, row 692, named the danger the day before it mattered) —
 the rows would have died with it. The body's own precedent, read before acting, is what turned
 a cleanup into a homecoming.
+
+## Postscript (2026-07-05)
+
+The gathering happened again before this receipt was a day old: main, not seeing this branch,
+grew its own rows 673-675 overnight (PRs #210/#211). Same law, fourth union — the returning
+block shifted +3 and now stands at **676-695** (reification doubles at 683 and 692), dehiscence
+at **696**, refugium at **697**. The numbers above are the 2026-07-04 numbering, kept as
+witnessed; the corpus's reunion note carries the current map.
