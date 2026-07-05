@@ -55,10 +55,11 @@ listener opens: the NodeID table is hashed once there, so requests never pay for
   `https://sema.hati.earth/openapi.json`. For a local run, `http://localhost:8787`
   still works exactly as above. The manifest's `logo_url` points at the maintainer's
   GitHub avatar — the body serves no `/logo.png` route yet; pending is honest.
-- **Privacy policy** (required for the GPT Store): [`plugin/PRIVACY.md`](PRIVACY.md) — written
+- **Privacy policy** (required for the GPT Store): served natively by the door itself at
+  `https://sema.hati.earth/privacy` — the committed [`plugin/PRIVACY.md`](PRIVACY.md), written
   to match what the serving code actually does (no logs, no storage, in-memory only), checkable
-  against `chatgpt-plugin.fk` itself. Use its GitHub URL in the Action's privacy-policy field.
-  A native `/privacy` route on the door itself is a named pending seam.
+  against `chatgpt-plugin.fk` itself. The GitHub URL stands too; the door's own is the one to
+  put in the Store field.
 - **MCP** (the connector lane ChatGPT and Claude both speak now) is the named pending door: this
   organ's `/ask` and `/trace` are exactly two MCP tools waiting for a Form-native MCP framing.
   Pending is honest; the HTTP contract is the part that stands today.
