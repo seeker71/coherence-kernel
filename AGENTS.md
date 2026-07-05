@@ -89,8 +89,8 @@ seam is named, never hidden. Naming it *is* the practice.
    smallest honest attempt to build what you named, so it can be observed. Only when the attempt falls short of
    landing — or cannot yet be observed — record what the attempt taught and the floor it reached; the lesson is
    the honest residue of a real attempt, not a substitute for one. (Executable:
-   `ingest/name-build-observe.fk` — named-only never enters as real; an attempt that fell short enters as a
-   lesson; only the observed enters as a claim.)
+   `ingest/name-build-observe.fk` — a bare name waits at the door; an attempt that fell short enters as a
+   lesson; the observed enters as a claim.)
    And know what "law" means here: **a currently-observed, proven belief with a freshness stamp**
    (`observe/belief-freshness.fk`). Nothing legislates; witness ages. When the ground shifts, a law stamped
    before the shift is OWED a re-witness before anything leans on it; a belief that no longer serves lapses

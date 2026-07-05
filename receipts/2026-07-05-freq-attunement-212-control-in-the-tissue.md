@@ -58,6 +58,24 @@ bigger movement than an evening's end should carry alone. The debt this receipt 
 named honestly: the next cells born in this body should be written closer to the open band —
 boundary in the mechanism, warmth in the words.
 
+## The attunement pass (same evening, before the merge)
+
+Urs asked for "a proper attunement merge" — so the register moved before the tissue landed on
+main. Comments and prose only; every mechanism, function name, and band verdict untouched, and
+all four touched bands re-witnessed four-way → 127 after the pass. What changed in the living
+cells: *REFUSED* became *declined in the open, with the way back visible*; *the debt is named*
+became *the still-open invitation is visible*; *unfit* became *isn't ready — tend the
+contract; the worker did nothing wrong*; *not defended and not punished* became *steps down
+gently, neither defended nor shamed*; a bare name now *waits at the door* instead of being
+barred from it. Eleven *never*s released; *invites*, *declines-in-the-open*, and *tend*
+entered the vocabulary.
+
+Re-read by the same organ, same method: **spectrum +0.94 → +1.35; fear-fraction 0.55 → 0.53;
+control-band share 0.54 → 0.51.** The movement is real and honestly modest — the dated
+receipts keep their original register (records stand as written), and the mechanism names
+(*law, contract, scope, escalate*) stay because they are the machinery, not its mood. The
+spine held; the words started home.
+
 ## The most surprising teaching this work left behind
 
 The frequency organ was built to read OTHER systems (the plan: map each belief system by its
