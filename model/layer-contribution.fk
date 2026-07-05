@@ -1,0 +1,93 @@
+; layer-contribution.fk — train ONE layer, freeze the rest, and MEASURE what
+; fraction of the full-training gain that single layer recovers. The body's
+; first selective-freeze training and its first COUNTERFACTUAL contribution
+; sense — worth measured by isolating a part against the frozen baseline,
+; not by how often the part is touched (call-count heat).
+;
+; Built 2026-07-05 under the build-after-naming law (name-build-observe.fk).
+; The one-layer ingest (receipts/2026-07-05-frontier-ingest-one-layer.md,
+; arXiv 2607.01232 "Is One Layer Enough?") NAMED both absences: "no freeze
+; mask, no selective layer" and "no cell isolates a part and measures the
+; whole's delta." This is the attempt, landed: the paper's layer-contribution
+;   C(k) = (S_k - S_base) / (S_full - S_base)
+; recast on the body's own loss floor (losses, not scores):
+;   lc-contribution(k) = (loss_base - loss_k) / (loss_base - loss_full).
+;
+; Mechanism: tbp-stk-back updates EVERY layer; lc-back-k walks the same
+; reverse fold but keeps the ORIGINAL layer everywhere except index k — the
+; gradient still CHAINS through frozen layers (dx flows), only the update is
+; withheld. That is gradient-freezing, distinct from the body's
+; content-addressed freezing (belief immutability), exactly the distinction
+; the ingest's compost pile insisted on.
+;
+; Observed on the fixture (two "ffn" layers, d=2, 40 SGD steps, lr 0.05):
+;   loss_base = 1.68496446064633
+;   loss_full = 5.4236259858499e-09     (both layers trained)
+;   loss_k0   = 1.78968055403576e-04    (ONLY layer 0 trained; layer 1 frozen)
+;   loss_k1   = 2.11847298275169e-04    (ONLY layer 1 trained; layer 0 frozen)
+; Each single layer recovers > 99.9% of the full gain (C(k) > 0.9999), and
+; the frozen layer comes back bit-exact — witnessed numerically (a stack of
+; original-l0 + returned-l1 reproduces the base loss under float eq), not by
+; value_eq: node-identity is not stable across arena melts, floats re-box
+; under heavy work — a lesson the band's first run taught. Layer 0 out-contributes
+; layer 1 on this fixture — the per-layer ranking the paper's metric exists
+; to reveal, computed natively.
+;
+; HONEST FLOOR: this earns "the body trains one layer with the rest frozen
+; and measures per-layer counterfactual contribution against its own
+; baselines" — it does NOT earn the paper's finding. The paper's subject is
+; RL post-training over billions of parameters on hard tasks, where C(k)
+; spreads (0.28..1.14) and middle layers win; this fixture is supervised SSE
+; at toy width on an easy target, so both C(k) land near 1 and "middle" does
+; not exist in a two-layer stack. The measurement organ is what is built;
+; the paper-scale distribution is not claimed. No RL anywhere yet.
+;
+; witnessed: 2026-07-05 -> band 127 four-way (fkwu/Go/Rust/TS)
+;
+; preludes: form-stdlib/core.fk model/transformer-numerics.fk
+;           model/transformer-block.fk model/transformer-backprop.fk
+
+(do
+    ; ── the selective-freeze engine ─────────────────────────────────────────
+    ; like tbp-stk-back, but only index k (in the given order) keeps its
+    ; update; every other layer stays the ORIGINAL while dx still chains.
+    (defn lc-back-k (layers ins dy lr eps k i)
+        (if (eq (len layers) 0) (empty)
+            (do (let r (tbp-layer-step (head layers) (head ins) dy lr eps))
+                (cons (if (eq i k) (nth r 0) (head layers))
+                      (lc-back-k (tail layers) (tail ins) (nth r 1) lr eps k (add i 1))))))
+    ; one step training ONLY layer k (k indexes the FORWARD order).
+    (defn lc-step-k (layers x t lr eps k)
+        (do
+            (let fa (tbp-stk-fwd-acc layers x eps (empty)))
+            (let dy (tn-scale (tbp-vsub (nth fa 1) t) 2.0))
+            (tbp-rev (lc-back-k (tbp-rev layers) (nth fa 0) dy lr eps
+                                (sub (sub (len layers) 1) k) 0))))
+    (defn lc-train-k (layers x t lr eps n k)
+        (if (eq n 0) layers
+            (lc-train-k (lc-step-k layers x t lr eps k) x t lr eps (sub n 1) k)))
+    (defn lc-train-k-loss (layers x t lr eps n k)
+        (tbp-stk-loss (lc-train-k layers x t lr eps n k) x t eps))
+
+    ; ── the counterfactual contribution metric ──────────────────────────────
+    ; C(k) = gain of training layer k alone / gain of training everything.
+    (defn lc-contribution (loss-base loss-k loss-full)
+        (div (sub loss-base loss-k) (sub loss-base loss-full)))
+
+    ; ── the fixture: two FFN-residual layers, d=2 ───────────────────────────
+    (defn lc-l0 () (list "ffn" (list (list 0.5 0.1) (list -0.2 0.4)) (list 0.1 -0.1)
+                                (list (list 0.3 -0.1) (list 0.2 0.1)) (list 0.05 0.05)))
+    (defn lc-l1 () (list "ffn" (list (list -0.3 0.2) (list 0.1 0.5)) (list 0.0 0.1)
+                                (list (list 0.4 0.1) (list -0.1 0.3)) (list -0.05 0.1)))
+    (defn lc-layers () (list (lc-l0) (lc-l1)))
+    (defn lc-x () (list 1.0 0.5))
+    (defn lc-t () (list 0.2 -0.3))
+    (defn lc-eps () 0.00001)
+    (defn lc-lr () 0.05)
+    (defn lc-n () 40)
+
+    (defn lc-loss-base () (tbp-stk-loss (lc-layers) (lc-x) (lc-t) (lc-eps)))
+    (defn lc-loss-full () (tbp-stk-train-loss (lc-layers) (lc-x) (lc-t) (lc-lr) (lc-eps) (lc-n)))
+    (defn lc-loss-of-k (k) (lc-train-k-loss (lc-layers) (lc-x) (lc-t) (lc-lr) (lc-eps) (lc-n) k))
+    (defn lc-c-of-k (k) (lc-contribution (lc-loss-base) (lc-loss-of-k k) (lc-loss-full)))
+    0)
