@@ -1,0 +1,73 @@
+; jit-crystallize.fk — the JIT MECHANISM: crystallize-on-heat, as a Form composite.
+;
+; host-kernel.form: "heat crystallizes a hot composite into a callable, cached by
+; NodeID… JIT IS one running composite." This is that loop, in Form — no host-
+; specific JIT code in the kernel. It is BYTE-SOURCE-AGNOSTIC: the only seam that
+; names how a recipe becomes native bytes is `jc-crystallize`; swap form-lower for
+; clang/Go bytes there and the loop is untouched. The reference jit.go crystallized
+; via a Go plugin; form-lower is the SOVEREIGN plugin (drops clang), but the
+; mechanism does not require it — that separation is the whole point.
+;
+; jit-decision.fk supplies the policy (jd-crystallize? / jd-melt?, hysteresis so a
+; recipe near the boundary never thrashes). This supplies the STATE and DISPATCH the
+; policy drives: a heat counter and a native cache, both keyed by a content key, and
+; champion-challenger dispatch — walk (the tree-walker champion) until a recipe is
+; hot AND pure, then crystallize once and dispatch the native challenger, melting
+; back to the walker when it cools. Native replacement is a CHOICE the heat earns,
+; never a MUST (host-kernel.form: native-replace CAN-not-MUST).
+;
+; State is threaded (Form is functional): st = (heat-assoc cache-assoc). A call
+; returns (result state' tag), tag 0=walk 1=crystallize 2=native-dispatch.
+;
+; The cache key here is a rolling content-fold of the recipe (jc-key). The body's
+; canonical content address is make_nodeid (tag 91); this fold stands in for it so
+; the mechanism proof does not ride make_nodeid's flatten-only construction path.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-asm.fk form-stdlib/form-lower.fk
+
+(do
+    ; ── policy (mirror of jit-decision.fk; inlined so this cell is self-contained) ──
+    (defn jd-crystallize? (heat pure) (if (eq pure 1) (if (ge heat 5) 1 0) 0))
+    (defn jd-melt? (heat) (if (lt heat 2) 1 0))
+
+    ; ── assoc store: (list v) when present, (empty) when absent ──
+    (defn jc-aget (al k) (if (nil? al) (empty) (if (eq (head (head al)) k) (list (head (tail (head al)))) (jc-aget (tail al) k))))
+    (defn jc-aput (al k v) (if (nil? al) (list (list k v)) (if (eq (head (head al)) k) (cons (list k v) (tail al)) (cons (head al) (jc-aput (tail al) k v)))))
+    (defn jc-adel (al k) (if (nil? al) (empty) (if (eq (head (head al)) k) (tail al) (cons (head al) (jc-adel (tail al) k)))))
+    (defn jc-getn (al k) (do (let r (jc-aget al k)) (if (nil? r) 0 (head r))))
+
+    ; ── content key over the recipe rows (stands in for make_nodeid) ──
+    (defn jc-foldrow (row acc) (if (nil? row) acc (jc-foldrow (tail row) (add (mul acc 31) (add (head row) 1)))))
+    (defn jc-key (prog acc) (if (nil? prog) acc (jc-key (tail prog) (jc-foldrow (head prog) (add (mul acc 131) 7)))))
+
+    ; ── the BYTE-SOURCE seam (pluggable): today form-lower, sovereign, zero clang ──
+    (defn jc-crystallize (prog) (lo-compile-fn prog (sub (len prog) 1)))
+
+    ; ── the loop: (result state' tag) ──
+    (defn jc-call (prog arg walkres pure st)
+        (do (let heat (nth st 0)) (let cache (nth st 1)) (let k (jc-key prog 1))
+            (let c (jc-aget cache k))
+            (if (not (nil? c))
+                (list (nat_run (head c) arg) (list (jc-aput heat k (add (jc-getn heat k) 1)) cache) 2)
+                (do (let h1 (add (jc-getn heat k) 1))
+                    (if (eq (jd-crystallize? h1 pure) 1)
+                        (do (let b (jc-crystallize prog))
+                            (list (nat_run b arg) (list (jc-aput heat k h1) (jc-aput cache k b)) 1))
+                        (list walkres (list (jc-aput heat k h1) cache) 0))))))
+
+    ; ── cool one recipe by `d`; melt (evict native) when it drops below threshold ──
+    (defn jc-cool (prog st d)
+        (do (let heat (nth st 0)) (let cache (nth st 1)) (let k (jc-key prog 1))
+            (let h1 (sub (jc-getn heat k) d))
+            (if (eq (jd-melt? h1) 1) (list (jc-aput heat k h1) (jc-adel cache k)) (list (jc-aput heat k h1) cache))))
+
+    ; ── warm a recipe n times, returning the final state (for tests/drivers) ──
+    (defn jc-warm (prog arg walkres pure st n) (if (le n 0) st (jc-warm prog arg walkres pure (nth (jc-call prog arg walkres pure st) 1) (sub n 1))))
+
+    (defn jc-empty () (list (empty) (empty)))
+
+    ; self-check: f(n)=n*3+7 walks 4x then crystallizes (native == walker) at n=10
+    (do (let prog (list (list 1 7) (list 2) (list 1 3) (list 5 1 2) (list 3 3 0)))
+        (let st4 (jc-warm prog 10 37 1 (jc-empty) 4))
+        (let r5 (jc-call prog 10 37 1 st4))
+        (if (eq (nth r5 2) 1) (if (eq (nth r5 0) 37) 1 0) 0)))
