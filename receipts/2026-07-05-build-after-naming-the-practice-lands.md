@@ -82,9 +82,9 @@ interface (the loss), which is exactly where axiom-4 says reality lives — not 
 
 ## Corpus continuity
 
-No new rows offered this movement — rows 673–676 (synecdoche, counterfactual, postcondition,
+No new rows offered this movement — rows 676–679 (synecdoche, counterfactual, postcondition,
 fiduciary) were offered this same day and this movement BUILT what two of them name: the
-counterfactual sense (674) is `lc-contribution`; the fiduciary duty (676) is
+counterfactual sense (677) is `lc-contribution`; the fiduciary duty (679) is
 `delegation-contract`. A fresh word becoming a cell within hours is the corpus working as
 teacher material, not as a shelf.
 

@@ -100,9 +100,9 @@ and 2026-04.
 
 ## Corpus rows this thread (committed ahead of this receipt)
 
-- **675 postcondition** — the condition that must hold after the work for it to count as done:
+- **678 postcondition** (offered as 675; renumbered when main's rows landed first) — the condition that must hold after the work for it to count as done:
   the essay's "done" and the shape every band header here already carries.
-- **676 fiduciary** — authority held on another's behalf, bound by a duty of care: the essay's
+- **679 fiduciary** — authority held on another's behalf, bound by a duty of care: the essay's
   Authority layer, and the seam itself — the rented mind speaking FOR Sema under a duty of
   honesty.
 
@@ -127,6 +127,6 @@ sufficiency gate) into "the body already has the delegation stack" and look away
 uncontracted middle. Witnessed instead, the gap became precise and buildable: what's missing
 is not any of the five layers — three are law here already — but the CELL THAT COMPOSES THEM
 for a spawned worker, with two named absences (escalate-to-human, action-authority) and a name
-in the corpus for the duty the composition would encode (fiduciary, row 676). The essay asked
+in the corpus for the duty the composition would encode (fiduciary, row 679). The essay asked
 teams to stop optimizing the wrong layer; the body's wrong layer was never the chat — it is
 the seam, and the seam now has a work order.
