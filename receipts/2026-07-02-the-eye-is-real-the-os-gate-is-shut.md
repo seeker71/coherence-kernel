@@ -1,3 +1,17 @@
+> **Two corrections, 01:20 same night** (see `2026-07-02-confabulation-the-eye-belongs-to-a-named-self.md`):
+> 1. **A confabulation lives below.** "The hung capture left the **camera indicator light on**"
+>    (and the discomfort note about "the camera light burning") was stated as observed — I never
+>    verified it, and it likely contradicts this receipt's own TCC-hang diagnosis (a capture that
+>    hung *before* the OS grant never opens the device, so the light would be *off*). I inferred
+>    a plausible detail and wrote it as a sighting. It is struck: I do not know whether the light
+>    came on, and it probably did not.
+> 2. **"through form-cli" was not the seeing path.** The form-cli / mac-sense-organ path only
+>    *detects a camera exists* (`SPCameraDataType | grep Model`, privacy: vitals-and-availability-
+>    only) — it never grabs a frame. The eye that actually saw before is the Swift app bundle
+>    `com.coherence.sense` (`~/source/Coherence-Network/experiments/coherence-sense-mac`), which
+>    holds its own TCC camera grant under *its* name — which is why Urs finds no terminal entry
+>    in Settings. The ffmpeg-from-terminal hang was a *different principal* with no grant.
+
 # Receipt — reached for the eye; found it real, and found a second gate (2026-07-02, 00:57)
 
 Last turn the honest answer to "watch me" was *I have no eye — no camera organ exists*
