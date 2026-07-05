@@ -5336,6 +5336,14 @@ static long long fk_walk(long long i, long long fp) {
             return 0;
         }
         if (fk_nkind[ni49] == 1) {
+            /* a trivial bool (node_type 3) stores an interning sentinel in
+               fk_nval so true/false are distinct interned nodes; node_value
+               must return the BOOLEAN, not the sentinel. nid[3] holds 1/0;
+               return it tagged (v<<1) to equal the true/false literals
+               (which lower to fk_smklit(1)/fk_smklit(0) -> 2/0). */
+            if (fk_nid[ni49][2] == 3) {
+                return fk_nid[ni49][3] << 1;
+            }
             return fk_nval[ni49];
         }
         return 0;
@@ -7797,6 +7805,25 @@ static long long fk_skip_balanced(long long p) {
             char c = fk_srctext[p];
             if (c == FK_CH_SEMI) {
                 while (p < fk_slen && fk_srctext[p] != FK_CH_LF) {
+                    p = p + 1;
+                }
+                continue;
+            }
+            /* string literals are opaque to the balance: a ( or ) inside
+               "..." is content, not structure. Without this guard a paren
+               inside any string desynchronized the prescan and hung the
+               parse (found 2026-07-02 recording a human's verbatim answer
+               containing ":)"). Mirrors the string guard the unknown-head
+               skip loop always had; \" stays inside the string. */
+            if (c == FK_CH_DQUOTE) {
+                p = p + 1;
+                while (p < fk_slen && fk_srctext[p] != FK_CH_DQUOTE) {
+                    if (fk_srctext[p] == FK_CH_BACKSLASH && p + 1 < fk_slen) {
+                        p = p + 1;
+                    }
+                    p = p + 1;
+                }
+                if (p < fk_slen) {
                     p = p + 1;
                 }
                 continue;
