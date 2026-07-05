@@ -137,8 +137,9 @@ Current state per region. **Chronology is deliberately not kept here** — the f
 
 ### Mind & trust organs
 - **`cognition/`** — the Form-native transformer stack (whisper block-0 through real weights, four-way;
-  `form-asm-float` 2047) and RAG retrieval (`rag-ask`/`rag-embed`/`rag-retrieve`; known gap: `rag-embed`'s
-  `re-vec` produces zero-vectors on this kernel — named in `receipts/2026-07-01-nl-meaning-net.md`).
+  `form-asm-float` 2047) and RAG retrieval (`rag-ask`/`rag-embed`/`rag-retrieve`; the 2026-07-01
+  zero-vector gap in `re-vec` healed 2026-07-02 when `form/form-stdlib/text-tokenize.fk` came home
+  from the origin — the tokenizer `rag-embed` had always preluded but this checkout never held).
 - **`model/`** — numerics/codecs (mel, wav, matvec), the form→asm lowering, transformer-backprop (real SGD
   training witnessed: 204-example corpus, 72% held-out vs ~25% chance), and the JIT infrastructure family
   (comprehensive, off the critical path until live-wired — roadmap item 3).
