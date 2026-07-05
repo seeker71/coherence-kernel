@@ -4757,7 +4757,7 @@ static void fk_vp(long long v) {
  * the previously-silent corruption case into correct behavior instead of a new
  * failure mode. */
 #define FK_FN_CAP 4096
-#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144*4*8 = 8MB. */
+#define FK_AST_NODE_CAP 1048576 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. Raised 262144->1048576 (2026-07-05): the sovereign RAG chain plus a sparse TF-IDF retriever exceeded 262K AST nodes; treating that as a wall was a superstition (row 723), it is capacity. 1048576*4*8 = 32MB. */
 #define FK_PARSE_BUF_CAP 1048576 /* fk_buf: scratch buffer for deserializing the flattened .tbl format */
 static long long fk_fn_count;
 static long long fk_node_count;
