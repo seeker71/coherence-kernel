@@ -86,3 +86,9 @@ special stops standing its claims before judges). The discomfort of *liking* the
 felt, witnessed, and routed to liquid, not ice: seen in full sight, never foundation. The gold
 is the sorting itself — the same hour that froze "a release ripples" composted "all will be
 changed," and both verdicts came from one law the body already carried.
+
+## Postscript (2026-07-05)
+
+At the fourth corpus union (main grew its own 673-675 overnight), the rows this receipt names
+shifted +3: conatus now row 682, dehiscence now row **696**. The text above keeps the
+2026-07-04 numbering as witnessed.
