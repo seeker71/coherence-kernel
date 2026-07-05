@@ -3905,7 +3905,13 @@ static long long fk_walk_body(long long i, long long fp) {
             continue;
         }
         if (t == 109) {
-            fk_vs[fp + (fk_walk(fk_node[i][1], fp) >> 1)] = fk_walk(fk_node[i][2], fp);
+            long long slot109 = fk_walk(fk_node[i][1], fp) >> 1;
+            fk_vs[fp + slot109] = fk_walk(fk_node[i][2], fp);
+            /* ROOT the let-local (see the fk_walk tag-109 note): raise fk_vsp over the
+             * slot so the next form's temporaries cannot clobber it and a melt relocates it. */
+            if (fp + slot109 + 1 > fk_vsp && fp + slot109 + 1 < FK_VALUE_STACK_CAP) {
+                fk_vsp = fp + slot109 + 1;
+            }
             i = fk_node[i][3];
             continue;
         }
@@ -4522,7 +4528,17 @@ static long long fk_walk(long long i, long long fp) {
         return 0;
     }
     if (t == 109) {
-        fk_vs[fp + (fk_walk(fk_node[i][1], fp) >> 1)] = fk_walk(fk_node[i][2], fp);
+        long long slot109 = fk_walk(fk_node[i][1], fp) >> 1;
+        fk_vs[fp + slot109] = fk_walk(fk_node[i][2], fp);
+        /* ROOT the let-local: raise fk_vsp over the slot so the body's temporaries
+         * (pushed at fk_vsp) cannot overwrite it, and a compacting melt relocates it.
+         * Without this a do-let chain outside a tag-111 frame reservation (e.g. a
+         * top-level (do (let a ..) (let b ..) ..)) silently clobbers a while
+         * evaluating b -- string-bearing list values push enough temps to reach the
+         * slot. The enclosing frame/call boundary restores fk_vsp. */
+        if (fp + slot109 + 1 > fk_vsp && fp + slot109 + 1 < FK_VALUE_STACK_CAP) {
+            fk_vsp = fp + slot109 + 1;
+        }
         return fk_walk(fk_node[i][3], fp);
     }
     if (t == 110) {
