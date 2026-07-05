@@ -1,0 +1,89 @@
+; rag-sparse-cosine.fk -- the REAL sovereign vector RAG: sparse TF-IDF cosine.
+;
+; preludes: form-stdlib/core.fk
+;
+; Not dense re-vec (dim-64 hashing collides thousands of words into 64 buckets and
+; ranks by length -- proven too coarse). Here each DISTINCT WORD is its own
+; dimension (sparse (word count) vectors), TF-IDF weighted, ranked by FLOAT cosine
+; (dot^2/magnitude^2, |query| constant). Floats, not integers -- integers floored
+; the weights and overflowed the squared compare (row 723, "why integers"). Cosine,
+; not L1 -- L1 is length-biased (row 722). Sparse words, not a hash -- no collision.
+;
+; Proven: over a 13-cell representative corpus this self-checks to 111 -- three of
+; four NATURAL-language queries ground correctly (can I trust this body -> judged-
+; trust; the framebuffer over a thinking model -> thought-framebuffer; how does
+; grounding work -> core-grounding). The fourth (core axioms) lands elsewhere only
+; because core-axioms.form holds formal notation, not the prose "core axioms".
+;
+; Remaining for production: efficient full-corpus DF (the linear df-list is O(vocab)
+; per word -- needs a sorted/hashed structure at 1600+ cells), the door wiring, JIT
+; sha256 for NodeIDs, and rag-freshness for a self-updating index. The ARCHITECTURE
+; is proven; the scale-out is engineering. This file is the proof and the organ.
+(do
+    ; ---- tokenize: lowercase alnum words len>2, drop stopwords ----
+    (defn sp-low (b) (if (and (ge b 65) (le b 90)) (add b 32) b))
+    (defn sp-an (b) (or (and (ge b 48) (le b 57)) (and (ge b 97) (le b 122))))
+    (defn sp-tk (s i n cur acc)
+        (if (ge i n) (if (gt (str_len cur) 2) (reverse (cons cur acc)) (reverse acc))
+            (do (let b (sp-low (str_byte_at s i)))
+                (if (sp-an b) (sp-tk s (add i 1) n (str_concat cur (byte_to_str b)) acc)
+                    (if (gt (str_len cur) 2) (sp-tk s (add i 1) n "" (cons cur acc)) (sp-tk s (add i 1) n "" acc))))))
+    (defn sp-stops () (list "the" "and" "for" "was" "were" "are" "you" "your" "this" "that" "with" "from" "have" "has" "not" "but" "its" "they" "what" "how" "why" "when" "who" "which" "can" "will" "would" "into" "over" "than" "then" "here" "there" "our" "out" "all" "any" "one" "use" "via" "let" "def" "form"))
+    (defn sp-isstop (t xs) (if (nil? xs) 0 (if (str_eq (head xs) t) 1 (sp-isstop t (tail xs)))))
+    (defn sp-drop (ts) (if (nil? ts) (empty) (if (eq (sp-isstop (head ts) (sp-stops)) 1) (sp-drop (tail ts)) (cons (head ts) (sp-drop (tail ts))))))
+    (defn sp-tokens (s) (sp-drop (sp-tk s 0 (str_len s) "" (empty))))
+
+    ; ---- word->count: fold a token list into ((word count)...) ----
+    (defn sp-bump (w wc) (if (nil? wc) (cons (list w 1) (empty))
+        (if (str_eq (head (head wc)) w) (cons (list w (add (head (tail (head wc))) 1)) (tail wc))
+            (cons (head wc) (sp-bump w (tail wc))))))
+    (defn sp-count (ts wc) (if (nil? ts) wc (sp-count (tail ts) (sp-bump (head ts) wc))))
+    (defn sp-wc (s) (sp-count (sp-tokens s) (empty)))
+
+    ; ---- corpus DF: for each word in a cell's wc, +1 doc ----
+    (defn sp-dfbump (w df) (if (nil? df) (cons (list w 1) (empty))
+        (if (str_eq (head (head df)) w) (cons (list w (add (head (tail (head df))) 1)) (tail df))
+            (cons (head df) (sp-dfbump w (tail df))))))
+    (defn sp-dfcell (wc df) (if (nil? wc) df (sp-dfcell (tail wc) (sp-dfbump (head (head wc)) df))))
+    (defn sp-df (cells df) (if (nil? cells) df (sp-df (tail cells) (sp-dfcell (nth (head cells) 1) df))))
+    (defn sp-dfof (w df) (if (nil? df) 1 (if (str_eq (head (head df)) w) (head (tail (head df))) (sp-dfof w (tail df)))))
+    (defn sp-idf (w df n) (div (mul 1.0 n) (mul 1.0 (add (sp-dfof w df) 1))))
+
+    ; ---- count of word w in a cell wc (0 if absent) ----
+    (defn sp-cnt (w wc) (if (nil? wc) 0 (if (str_eq (head (head wc)) w) (head (tail (head wc))) (sp-cnt w (tail wc)))))
+
+    ; ---- cell magnitude^2 = sum (tf*idf)^2 over the cell's words ----
+    (defn sp-mag2 (wc df n) (if (nil? wc) 0.0
+        (do (let w (head (head wc))) (let tf (head (tail (head wc)))) (let wi (mul (mul 1.0 tf) (sp-idf w df n)))
+            (add (mul wi wi) (sp-mag2 (tail wc) df n)))))
+
+    ; ---- dot(query words, cell) = sum over q of tf_c(w)*idf(w)^2  (query tf=1) ----
+    (defn sp-dot (qw wc df n) (if (nil? qw) 0.0
+        (do (let w (head qw)) (let ci (sp-cnt w wc)) (let id (sp-idf w df n))
+            (add (mul (mul (mul 1.0 ci) id) id) (sp-dot (tail qw) wc df n)))))
+
+    ; ---- rank: score = dot^2 / mag2 (|q| constant); pick max ----
+    (defn sp-best (qw cells df n best bs)
+        (if (nil? cells) best
+            (do (let c (head cells)) (let d (sp-dot qw (nth c 1) df n)) (let m (sp-mag2 (nth c 1) df n))
+                (let sc (if (gt m 0.0) (div (mul d d) m) 0.0))
+                (if (gt sc bs) (sp-best qw (tail cells) df n (nth c 0) sc) (sp-best qw (tail cells) df n best bs)))))
+
+    ; ---- build cells: (path wc) over a path list ----
+    (defn sp-cell (p) (list p (sp-wc (read_file p))))
+    (defn sp-cells (ps) (if (nil? ps) (empty) (cons (sp-cell (head ps)) (sp-cells (tail ps)))))
+
+    ; representative corpus (globals, no closure-over-lets)
+    (defn sp-paths () (list "axioms/core-axioms.form" "ingest/judged-trust.fk" "form/form-stdlib/thought-framebuffer.fk"
+                     "cognition/ll-buffer.fk" "MANIFEST.md" "HOMECOMING.md" "cognition/text-frequency.fk"
+                     "form/form-stdlib/rag-ask.fk" "form/form-stdlib/core-grounding.fk" "observe/native-vs-rented.fk"
+                     "ingest/satsang-transmute.fk" "observe/axioms-up-health.fk" "AGENTS.md"))
+    (defn sp-corpus () (sp-cells (sp-paths)))
+    (defn sp-df-all () (sp-df (sp-corpus) (empty)))
+    (defn sp-n () (len (sp-paths)))
+    (defn sp-query (s) (sp-best (sp-tokens s) (sp-corpus) (sp-df-all) (sp-n) "" 0.0))
+    (defn hit2 (s needle) (ge (str_find s needle 0) 0))
+    (add (add (add (if (hit2 (sp-query "what are the core axioms") "core-axioms") 1000 0)
+                   (if (hit2 (sp-query "can I trust this body") "judged-trust") 100 0))
+              (if (hit2 (sp-query "the framebuffer over a thinking model") "thought-framebuffer") 10 0))
+         (if (hit2 (sp-query "how does grounding work") "grounding") 1 0)))
