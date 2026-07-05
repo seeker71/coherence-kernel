@@ -1,0 +1,114 @@
+; gen-body-index.fk — the NATIVE (fkwu, zero-Python) body indexer.
+;
+; Replaces plugin/gen-body-index.py. Walks the body's knowledge dirs with the
+; native fs_list, tokenizes each cell, drops stopwords, keeps its distinctive
+; content words, and emits plugin/body-index.fk: (cp-index) over the whole body
+; plus (cp-nid-table) of fast content-keys. The door's cp-best keyword-overlap
+; retrieval (which DISCRIMINATES -- unlike re-vec's dim-64 histogram, which
+; collides thousands of words into 64 buckets and ranks by length) runs over it.
+;
+; Content address: a fast polynomial content hash, NOT sha256 -- the sha256
+; recipe costs ~3.4s/cell (25+ min over the body) and no host-native sha256 is
+; registered, so a fast key keeps the build sovereign AND quick. Honest label:
+; "ckey:" not "sha256:".
+;
+; preludes: form-stdlib/core.fk
+; run (from repo root): ./fkwu --src <(cat form/form-stdlib/core.fk plugin/gen-body-index.fk)
+
+(do
+    ; ---- tokenizer: lowercase alnum words, len>2 ----
+    (defn gi-lower (b) (if (and (ge b 65) (le b 90)) (add b 32) b))
+    (defn gi-alnum (b) (or (and (ge b 48) (le b 57)) (and (ge b 97) (le b 122))))
+    (defn gi-tok (s i n cur acc)
+        (if (ge i n)
+            (if (gt (str_len cur) 2) (reverse (cons cur acc)) (reverse acc))
+            (do (let b (gi-lower (str_byte_at s i)))
+                (if (gi-alnum b)
+                    (gi-tok s (add i 1) n (str_concat cur (byte_to_str b)) acc)
+                    (if (gt (str_len cur) 2) (gi-tok s (add i 1) n "" (cons cur acc))
+                        (gi-tok s (add i 1) n "" acc))))))
+    (defn gi-tokens (s) (gi-tok s 0 (str_len s) "" (empty)))
+
+    ; ---- stopwords ----
+    (defn gi-stops () (list
+        "the" "and" "for" "was" "were" "are" "you" "your" "this" "that" "these"
+        "those" "with" "from" "have" "has" "had" "not" "but" "its" "they" "them"
+        "their" "what" "how" "why" "when" "who" "which" "can" "will" "would"
+        "should" "could" "may" "might" "must" "into" "over" "than" "then" "there"
+        "here" "our" "out" "all" "any" "one" "two" "use" "via" "per" "let" "def"))
+    (defn gi-stop (t xs) (if (nil? xs) 0 (if (str_eq (head xs) t) 1 (gi-stop t (tail xs)))))
+    (defn gi-drop (ts) (if (nil? ts) (empty)
+        (if (eq (gi-stop (head ts) (gi-stops)) 1) (gi-drop (tail ts))
+            (cons (head ts) (gi-drop (tail ts))))))
+
+    ; ---- dedup, keep first N ----
+    (defn gi-seen (t xs) (if (nil? xs) 0 (if (str_eq (head xs) t) 1 (gi-seen t (tail xs)))))
+    (defn gi-uniq (ts acc) (if (nil? ts) (reverse acc)
+        (if (eq (gi-seen (head ts) acc) 1) (gi-uniq (tail ts) acc)
+            (gi-uniq (tail ts) (cons (head ts) acc)))))
+    (defn gi-take (ts n) (if (or (nil? ts) (le n 0)) (empty)
+        (cons (head ts) (gi-take (tail ts) (sub n 1)))))
+    (defn gi-keys (txt) (gi-take (gi-uniq (gi-drop (gi-tokens txt)) (empty)) 40))
+
+    ; ---- fast content key: polynomial hash -> hex ----
+    (defn gi-hfold (s i n h) (if (ge i n) h (gi-hfold s (add i 1) n (mod (add (mul h 131) (str_byte_at s i)) 1000000007))))
+    (defn gi-hex1 (v) (if (lt v 10) (byte_to_str (add v 48)) (byte_to_str (add v 87))))
+    (defn gi-hex (v) (if (eq v 0) "" (str_concat (gi-hex (div v 16)) (gi-hex1 (mod v 16)))))
+    (defn gi-ckey (txt) (str_concat "ckey:" (gi-hex (gi-hfold txt 0 (str_len txt) 0))))
+
+    ; ---- header summary: first ; comment or # heading, trimmed ----
+    (defn gi-firstline (s i n) (do (let nl (str_find s "\n" i)) (if (lt nl 0) (substring s i (str_len s)) (substring s i nl))))
+    (defn gi-summary (txt)
+        (do (let l0 (gi-firstline txt 0 (str_len txt)))
+            (substring l0 0 (if (lt (str_len l0) 150) (str_len l0) 150))))
+
+    ; ---- escape a string for a Form string literal ----
+    (defn gi-esc-b (b) (if (eq b 34) "'" (if (eq b 92) "/" (if (or (eq b 10) (eq b 13)) " " (byte_to_str b)))))
+    (defn gi-esc (s i n a) (if (ge i n) a (gi-esc s (add i 1) n (str_concat a (gi-esc-b (str_byte_at s i))))))
+    (defn gi-e (s) (gi-esc s 0 (str_len s) ""))
+
+    ; ---- emit one cp-entry + its nid pair ----
+    (defn gi-keys-fk (ks) (if (nil? ks) "" (str_concat "\"" (str_concat (gi-e (head ks)) (str_concat "\" " (gi-keys-fk (tail ks)))))))
+    (defn gi-entry (path)
+        (do (let txt (read_file path))
+            (str_concat "        (cp-entry \"" (str_concat (gi-e path)
+            (str_concat "\" \"" (str_concat (gi-e path)
+            (str_concat "\" \"" (str_concat (gi-e (gi-summary txt))
+            (str_concat "\" (list " (str_concat (gi-keys-fk (gi-keys txt)) "))\n"))))))))))
+    (defn gi-nid (path)
+        (do (let txt (read_file path))
+            (str_concat "        (list \"" (str_concat (gi-e path) (str_concat "\" \"" (str_concat (gi-ckey txt) "\")\n"))))))
+
+    ; ---- walk a dir for a suffix ----
+    (defn gi-ends (s suf) (if (lt (str_len s) (str_len suf)) 0 (str_eq (substring s (sub (str_len s) (str_len suf)) (str_len s)) suf)))
+    (defn gi-join (d n) (str_concat d (str_concat "/" n)))
+    (defn gi-dir (dir names suf) (if (nil? names) (empty)
+        (if (gi-ends (head names) suf) (cons (gi-join dir (head names)) (gi-dir dir (tail names) suf))
+            (gi-dir dir (tail names) suf))))
+    (defn gi-paths-1 (dir suf) (gi-dir dir (fs_list dir) suf))
+
+    ; the knowledge corpus: dirs x suffixes
+    (defn gi-corpus ()
+        (append (gi-paths-1 "form/form-stdlib" ".fk")
+        (append (gi-paths-1 "cognition" ".fk")
+        (append (gi-paths-1 "observe" ".fk")
+        (append (gi-paths-1 "ingest" ".fk")
+        (append (gi-paths-1 "learn" ".fk")
+        (append (gi-paths-1 "surface" ".fk")
+        (append (gi-paths-1 "axioms" ".form")
+        (append (gi-paths-1 "receipts" ".md")
+                (gi-paths-1 "." ".md"))))))))))
+
+    (defn gi-entries (ps) (if (nil? ps) "" (str_concat (gi-entry (head ps)) (gi-entries (tail ps)))))
+    (defn gi-nids (ps) (if (nil? ps) "" (str_concat (gi-nid (head ps)) (gi-nids (tail ps)))))
+
+    (defn gi-write ()
+        (do (let ps (gi-corpus))
+            (write_file "plugin/body-index.fk"
+                (str_concat "; body-index.fk -- GENERATED by plugin/gen-body-index.fk (native fkwu, zero Python).\n; A keyword index over the body's knowledge cells; the door's cp-best overlap\n; retrieval runs over it. Content-keys are a fast polynomial hash (ckey:), not\n; sha256. Regenerate: fkwu --src (core.fk + gen-body-index.fk). Overrides cp-index\n; and cp-nid-table (later defn wins). preludes: form-stdlib/core.fk plugin/chatgpt-plugin.fk\n(do\n    (defn cp-index () (list\n"
+                (str_concat (gi-entries ps)
+                (str_concat "        ))\n    (defn cp-nid-table () (list\n"
+                (str_concat (gi-nids ps)
+                            "        ))\n    0)\n")))))
+            (str_len (read_file "plugin/body-index.fk"))))
+    (gi-write))
