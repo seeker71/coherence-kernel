@@ -34,6 +34,22 @@ recipe42 42, homecoming 127, rag-retrieve-band 31, native-vs-rented 11111. Also 
 a `defn` that closes over `let`-bound values blew the parser — use globals (`defn`) for
 shared corpus state.
 
+> **RETRACTED 2026-07-05 (~15:40) — the cap raise was iatrogenic (corpus row 726).**
+> "The RAG exceeded 262K AST nodes → raise the cap" was wrong twice over. The overflow was
+> a **parser bug**, not capacity: a `(let …)` followed by a `(defn …)` of arity ≥ 2 sent
+> `fk_sparse`'s defn arm — which read only ONE param, then desynced on the 2nd, and never
+> stored `fk_fn[idx]` — into the collect-and-continue error recovery, which spun minting
+> sentinel nodes straight to whatever cap was set. Raising the cap only moved the ceiling
+> the spin ran into; it buried the bug and spent 24MB doing it. The "use globals" workaround
+> above was dodging the same bug, not a law. **Fix** (`runtime/fkwu-uni.c`): the defn arm now
+> reads ALL params and stores `fk_fn[idx]`, mirroring `fk_parse_top`. With that, the sparse
+> RAG parses to **2,832 nodes**, the `map`/`multiarg` form-lower bands pass **31 / 127**
+> (they never lacked list/multi-arg lowering — the JIT had both all along), and the cap is
+> reverted to **262144** (~12× the largest committed program). New grounding tool:
+> `FK_NODES=1` prints the true parse node_count, so "capacity vs. parser spin" is a fact you
+> read, not a guess. `native-vs-rented` above shows 11111 in that run but 0 under a plain
+> `--src` invocation — a harness/arg difference, noted for honesty, orthogonal to this fix.
+
 ## Remaining (engineering, architecture de-risked)
 
 1. **Efficient full-corpus DF** — the linear `df`-list is O(vocab) per word; at 1600+

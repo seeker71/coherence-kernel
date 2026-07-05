@@ -4757,7 +4757,8 @@ static void fk_vp(long long v) {
  * the previously-silent corruption case into correct behavior instead of a new
  * failure mode. */
 #define FK_FN_CAP 4096
-#define FK_AST_NODE_CAP 1048576 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. Raised 262144->1048576 (2026-07-05): the sovereign RAG chain plus a sparse TF-IDF retriever exceeded 262K AST nodes; treating that as a wall was a superstition (row 723), it is capacity. 1048576*4*8 = 32MB. */
+#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144*4*8 = 8MB — ~12x the largest committed program (bml.fk, ~20.5K nodes).
+   RETRACTED 2026-07-05: a same-day raise 262144->1048576 blamed "the sovereign RAG chain exceeded 262K AST nodes ... it is capacity (corpus row 723)." That was WRONG, and the retraction is the whole lesson. The overflow was a PARSER BUG, not capacity: a (let ...) in a do FOLLOWED BY a (defn ...) of arity>=2 drove fk_sparse's defn arm — which read only ONE param, then desynced on the 2nd — into the collect-and-continue error recovery, which spun minting sentinel nodes until it hit this very cap. A 58-line form-lower band (map/multiarg) reproduced it at >1,048,576 nodes. Fix: fk_sparse's defn arm now reads ALL params AND stores fk_fn[idx] (mirroring fk_parse_top); the whole sparse-TF-IDF RAG then parses to 2,832 nodes and the bands to ~8-9K. Set FK_NODES=1 to print the true node_count at parse-done and tell a real capacity need from a parser spin BEFORE raising this. Burying a parse spin under a bigger cap is the superstition; the node-count grep is the tell. */
 #define FK_PARSE_BUF_CAP 1048576 /* fk_buf: scratch buffer for deserializing the flattened .tbl format */
 static long long fk_fn_count;
 static long long fk_node_count;
@@ -7270,25 +7271,50 @@ static long long fk_sparse(void) {
             fk_spos = fk_sym_end(fk_spos);
             fk_fname_s = ns2;
             fk_fname_n = fk_spos - ns2;
+            /* REGISTER: capture the prescan-assigned fn index NOW, before the body parse
+             * (which may reset fk_fname_* for nested defns). The old arm parsed the body but
+             * never stored it into fk_fn[idx] — so a mid-do defn (reached whenever the do does
+             * NOT open with defns, e.g. after a let, which routes the whole do through
+             * fk_parse_do) registered its NAME via the prescan yet lost its BODY. Calls then hit
+             * an empty fk_fn[idx] and returned the caller's arg (the "mid-do defn after let
+             * returns the let value" bug). Storing it below mirrors fk_parse_top's defn arm. */
+            long long fk_defn_idx = fk_fn_lookup(ns2, fk_fname_n);
             fk_sskip();
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_LPAREN) {
                 fk_spos = fk_spos + 1;
             }
             fk_sskip();
-            long long as2 = fk_spos;
-            fk_spos = fk_sym_end(fk_spos);
-            long long alen = fk_spos - as2;
-            fk_sskip();
-            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
-                fk_spos = fk_spos + 1;
-            }
             /* SCOPE FIX: save/restore the enclosing do's live let-bindings around
              * this nested defn's own frame (see fk_bd_save above; sibling f99d3232). */
             long long fk_bd_saved_top = fk_bd_save();
             long long fk_bd_saved_maxslot = fk_maxslot;
             fk_bd_top = 0;
             fk_maxslot = 0;
-            fk_bd_push(as2, alen, 0);
+            /* MULTI-ARG: read EVERY param name into slots 0..k-1 (mirrors fk_parse_top's
+             * defn arm below). The old single-param read consumed one name then expected the
+             * closing ')', so any arity>=2 defn in value/mid-do position left fk_spos parked on
+             * the 2nd param — desyncing the paren + binding-stack accounting. With a preceding
+             * let already on the binding stack, that desync drove the collect-and-continue
+             * error recovery into a sentinel-minting spin that only halted at FK_AST_NODE_CAP
+             * (the "map/multiarg band" 1,048,576-node overflow). Reading all params keeps the
+             * parser aligned; no cap raise needed — the compiler itself is only ~7.5K nodes. */
+            long long na = 0;
+            while (1) {
+                fk_sskip();
+                if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                    break;
+                }
+                long long as = fk_spos;
+                fk_spos = fk_sym_end(fk_spos);
+                fk_bd_push(as, fk_spos - as, na);
+                if (na > fk_maxslot) {
+                    fk_maxslot = na;
+                }
+                na = na + 1;
+            }
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                fk_spos = fk_spos + 1;
+            }
             long long body = fk_sparse();
             fk_sskip();
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
@@ -7297,9 +7323,17 @@ static long long fk_sparse(void) {
             if (fk_maxslot > 0) {
                 body = fk_smknode(111, fk_smklit(fk_maxslot), body, 0);
             }
+            if (fk_defn_idx >= 0 && fk_defn_idx < FK_FN_CAP) {
+                fk_fnar[fk_defn_idx] = na;
+                fk_fn[fk_defn_idx] = body;
+            }
             fk_bd_restore(fk_bd_saved_top);
             fk_maxslot = fk_bd_saved_maxslot;
-            return body;
+            /* a defn is a DECLARATION, not a value: its body now lives in fk_fn[idx], so it
+             * contributes nil to the enclosing do sequence. (The old inline-body return was
+             * never reachable by a call and, being tag-111 wrapped, only risked disturbing
+             * fk_vsp if evaluated in the enclosing frame.) */
+            return fk_smklit(0);
         }
         if (fk_sym_eq(s, hn, "do")) {
             return fk_parse_do();
@@ -8182,6 +8216,7 @@ static int fk_run_src(const char *path, long long arg) {
     }
     fk_vs[0] = arg << 1;
     fk_vsp = 1;
+    if (getenv("FK_NODES")) { write(2, "FK_NODES=", 9); fk_mw(fk_node_count); write(2, "\n", 1); }
     /* ── PARSE DONE, EXECUTION BEGINS ── gcc-style tally, then the two-phase gate:
      * an amputated source is a hard error -- surface the prefix's diagnostics but
      * REFUSE to run (nonzero), never silently execute the truncated program. Any
