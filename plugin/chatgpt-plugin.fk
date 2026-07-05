@@ -214,6 +214,91 @@
     (defn cp-jstr (s) (str_concat "\"" (str_concat (cp-jesc-loop s 0 (str_len s) "") "\"")))
     (defn cp-jkv (k v) (str_concat (cp-jstr k) (str_concat ":" v)))
 
+    ;; ===============================================================
+    ;; the enquiry lane — the door's own workings, carried in-band.
+    ;; Every /ask answer names HOW it was assembled: which index, which
+    ;; cells matched on which tokens, each cell's content NodeID, and —
+    ;; honestly — that no oracle and no model run inside this door.
+    ;; NodeIDs are sha256 content addresses computed by the body's OWN
+    ;; recipe (form/form-stdlib/sha256.fk, FIPS-vector-proven), hashed
+    ;; ONCE at boot: the recipe costs seconds per cell, and request-time
+    ;; hashing would starve the single-threaded serve loop.
+    ;; ===============================================================
+
+    (defn cp-bytes-loop (s i n acc)
+        (if (ge i n) (reverse acc) (cp-bytes-loop s (add i 1) n (cons (str_byte_at s i) acc))))
+    (defn cp-bytes (s) (cp-bytes-loop s 0 (str_len s) (empty)))
+    (defn cp-hexd (v) (if (lt v 10) (byte_to_str (add v 48)) (byte_to_str (add v 87))))
+    (defn cp-hex-loop (bs acc)
+        (if (nil? bs) acc
+            (cp-hex-loop (tail bs)
+                (str_concat acc (str_concat (cp-hexd (div (head bs) 16)) (cp-hexd (mod (head bs) 16)))))))
+    (defn cp-nodeid-of (path)
+        (do
+            (let raw (read_file path))
+            (if (eq (str_len raw) 0)
+                "unhashed -- directory or missing at serve time"
+                (str_concat "sha256:" (cp-hex-loop (sha256 (cp-bytes raw)) "")))))
+    (defn cp-nid-build (idx)
+        (if (nil? idx) (empty)
+            (cons (list (cp-e-id (head idx)) (cp-nodeid-of (cp-e-path (head idx))))
+                  (cp-nid-build (tail idx)))))
+    (defn cp-nid-table () (cp-nid-build (cp-index)))
+    (defn cp-nid-for (table id)
+        (if (nil? table) "pending -- served without a boot table (witness lane)"
+            (if (str_eq (head (head table)) id)
+                (head (tail (head table)))
+                (cp-nid-for (tail table) id))))
+
+    (defn cp-matched (tokens keys)
+        (if (nil? tokens) (empty)
+            (if (eq (cp-in? (head tokens) keys) 1)
+                (cons (head tokens) (cp-matched (tail tokens) keys))
+                (cp-matched (tail tokens) keys))))
+    (defn cp-strlist-json (xs)
+        (if (nil? xs) ""
+            (if (nil? (tail xs)) (cp-jstr (head xs))
+                (str_concat (cp-jstr (head xs)) (str_concat "," (cp-strlist-json (tail xs)))))))
+
+    (defn cp-enquiry-hit-json (e tokens table)
+        (str_concat "{"
+        (str_concat (cp-jkv "id" (cp-jstr (cp-e-id e)))
+        (str_concat ","
+        (str_concat (cp-jkv "path" (cp-jstr (cp-e-path e)))
+        (str_concat ","
+        (str_concat (cp-jkv "nodeid" (cp-jstr (cp-nid-for table (cp-e-id e))))
+        (str_concat ","
+        (str_concat (cp-jkv "score" (int_to_str (cp-score-entry e tokens)))
+        (str_concat ","
+        (str_concat (cp-jkv "matched_tokens"
+            (str_concat "[" (str_concat (cp-strlist-json (cp-matched tokens (cp-e-keys e))) "]")))
+        "}")))))))))))
+    (defn cp-enquiry-hits-json (hits tokens table)
+        (if (nil? hits) ""
+            (if (nil? (tail hits))
+                (cp-enquiry-hit-json (head hits) tokens table)
+                (str_concat (cp-enquiry-hit-json (head hits) tokens table)
+                            (str_concat "," (cp-enquiry-hits-json (tail hits) tokens table))))))
+
+    (defn cp-enquiry-json (hits tokens band table)
+        (str_concat "{"
+        (str_concat (cp-jkv "index" (cp-jstr "lexical-seed-v1 -- keyword seeds over the committed cell index; deliberately NOT rag-embed, whose re-vec produces zero-vectors on this kernel (receipts/2026-07-01-nl-meaning-net.md). An index that can say miss is more honest than a broken embedding that always answers."))
+        (str_concat ","
+        (str_concat (cp-jkv "cells_considered" (int_to_str (len (cp-index))))
+        (str_concat ","
+        (str_concat (cp-jkv "selection" (str_concat "[" (str_concat (cp-enquiry-hits-json hits tokens table) "]")))
+        (str_concat ","
+        (str_concat (cp-jkv "oracle_local" (cp-jstr "none -- no LLM runs inside this door; grounding, frequency, and assembly are deterministic Form recipes on the c-bootstrapped fkwu kernel"))
+        (str_concat ","
+        (str_concat (cp-jkv "oracle_remote" (cp-jstr "none called -- the rented mind reading this response IS the remote oracle; the seam is named in honest_seam"))
+        (str_concat ","
+        (str_concat (cp-jkv "model" (cp-jstr "none -- plugin/chatgpt-plugin.fk served by fkwu --src; no weights, no sampling, no temperature"))
+        (str_concat ","
+        (str_concat (cp-jkv "assembly" (cp-jstr "tokenize -> charge against the seed lexicon -> band (fear|love|mixed|unread) -> attune rule for that band -> score all index cells on token overlap -> best + up to 2 others -> emit JSON by concatenation"))
+        (str_concat ","
+        (str_concat (cp-jkv "attunement_band" (cp-jstr band))
+        "}")))))))))))))))))
+
     ;; a grounded hit as JSON: the cell, its summary, and the three trace links.
     (defn cp-hit-json (e)
         (str_concat "{"
@@ -355,7 +440,7 @@
         (str_concat (cp-jkv "attune" (cp-jstr (cp-attune band)))
         "}")))))))))
 
-    (defn cp-ask-body (question hits grounded-status charged band)
+    (defn cp-ask-body (question hits grounded-status charged band tokens table)
         (str_concat "{"
         (str_concat (cp-jkv "question" (cp-jstr question))
         (str_concat ","
@@ -365,14 +450,16 @@
         (str_concat ","
         (str_concat (cp-jkv "grounded_status" (cp-jstr grounded-status))
         (str_concat ","
+        (str_concat (cp-jkv "enquiry" (cp-enquiry-json hits tokens band table))
+        (str_concat ","
         (str_concat (cp-jkv "stance" (cp-stance-json))
         (str_concat ","
         (str_concat (cp-jkv "trace" (cp-trace-json))
         (str_concat ","
         (str_concat (cp-jkv "honest_seam" (cp-jstr (cp-seam)))
-        "}")))))))))))))))
+        "}")))))))))))))))))
 
-    (defn cp-ask (q)
+    (defn cp-ask (q table)
         (do
             (let question (cp-url-decode (cp-q-param q "q")))
             (if (eq (str_len question) 0)
@@ -387,12 +474,12 @@
                     (if (eq bestscore 0)
                         (list 200 (cp-ask-body question (empty)
                             "grounded:miss -- nothing in the seed index matched. Do not invent an answer; say the body does not hold this yet, and offer the map (MANIFEST.md) and the ledger (receipts/) as the honest doors."
-                            charged band))
+                            charged band tokens table))
                         (do
                             (let hits (cons best (take 2 (cp-others tokens (cp-index) (cp-e-id best)))))
                             (list 200 (cp-ask-body question hits
                                 "grounded:hit -- speak ONLY from these cells and name them by path; a claim without a cell is a guess, and a guess must be named as one."
-                                charged band))))))))
+                                charged band tokens table))))))))
 
     (defn cp-trace (q)
         (do
@@ -452,20 +539,20 @@
     ;; dispatch + the pure entry: raw request string -> wire response
     ;; ===============================================================
 
-    (defn cp-dispatch (path q)
-        (if (str_eq path "/ask") (cp-ask q)
+    (defn cp-dispatch (path q table)
+        (if (str_eq path "/ask") (cp-ask q table)
             (if (str_eq path "/trace") (cp-trace q)
                 (if (str_eq path "/.well-known/ai-plugin.json") (cp-manifest)
                     (if (str_eq path "/openapi.json") (cp-openapi)
                         (if (str_eq path "/") (cp-welcome)
                             (cp-not-found path)))))))
 
-    (defn plugin-handle (raw)
+    (defn plugin-handle (raw table)
         (do
             (let target (cp-req-target raw))
             (let path (cp-path-only target))
             (let q (cp-parse-query (cp-query-of target)))
-            (let r (cp-dispatch path q))
+            (let r (cp-dispatch path q table))
             (cp-response (head r) (head (tail r)))))
 
     ;; ===============================================================
@@ -483,24 +570,28 @@
         (if (ge from (str_len s)) 0
             (cp-send-all conn s (add from (socket_send conn (substring s from (str_len s)))))))
 
-    (defn cp-serve-conn (conn)
+    (defn cp-serve-conn (conn table)
         (do
             (let raw (cp-recv-req conn ""))
-            (let resp (plugin-handle raw))
+            (let resp (plugin-handle raw table))
             (let sent (cp-send-all conn resp 0))
             (let closed (socket_close conn))
             resp))
 
-    (defn plugin-serve-loop (srv count)
+    (defn plugin-serve-loop (srv count table)
         (if (le count 0) (socket_close srv)
             (do
-                (let served (cp-serve-conn (socket_accept srv)))
-                (plugin-serve-loop srv (sub count 1)))))
+                (let served (cp-serve-conn (socket_accept srv) table))
+                (plugin-serve-loop srv (sub count 1) table))))
 
     ;; serve `count` connections on `port`, then close the listener. A witness passes the exact number
     ;; it will send (deterministic stop); a live door passes a large count. The recursion advances on
-    ;; count -- the bound is named, never silent.
+    ;; count -- the bound is named, never silent. The NodeID table is hashed ONCE here, before the
+    ;; listener opens (~seconds per indexed cell via the body's own sha256 recipe); every request
+    ;; then serves content addresses from memory.
     (defn plugin-serve (port count)
-        (plugin-serve-loop (socket_listen port) count))
+        (do
+            (let table (cp-nid-table))
+            (plugin-serve-loop (socket_listen port) count table)))
 
     0)
