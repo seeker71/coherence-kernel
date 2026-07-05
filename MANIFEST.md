@@ -163,6 +163,10 @@ Current state per region. **Chronology is deliberately not kept here** — the f
 - **`routers/`** — request dispatch (`mesh-sensings-route.fk` consumes `json.fk`'s parser live).
 - **`gate/`, `io/`, `ingest/`, `gpu/`, `agent/`** — thresholds/welcome, io/format roadmaps, ingest, GPU probe,
   agent shell — small, live, referenced.
+- **`plugin/`** — the rented-mind door: the body offered to ChatGPT (plugin manifest / GPT Action) over
+  fkwu-native HTTP — grounded `/ask` with the fear↔love frequency read and attunement, `/trace` handing over
+  any cell's change graph and line attribution (trust as something checkable). Band 111111111 + a live TCP
+  witness; the voice stays rented and says so in-band (`receipts/2026-07-05-chatgpt-plugin-offer.md`).
 - **`teachings/`** — the scoped core teachings (one-engine, name-resolution-as-recipe, structural-composition,
   form-first-reasoning, prose-as-recipe).
 
