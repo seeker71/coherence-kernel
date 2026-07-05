@@ -86,6 +86,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "sense_frame_read", 0, 213 },
   { "sense_stream", 1, 214 },
   { "native_call_test", 1, 215 },
+  { "nat_run", 2, 245 },
   { "sense_wifi_ssid", 0, 216 },
   { "sense_wifi_signal", 0, 217 },
   { "sense_bt_present", 0, 218 },

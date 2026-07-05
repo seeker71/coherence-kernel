@@ -1909,6 +1909,13 @@ static long long fk_native_call(const unsigned char *code, long long n, long lon
 #else
 extern void *mmap(void *, unsigned long, int, int, int, long);
 extern int mprotect(void *, unsigned long, int);
+#if defined(__APPLE__) && (defined(__aarch64__) || defined(__arm64__))
+/* Apple Silicon JIT carriers (libSystem): toggle a MAP_JIT page W<->X, and flush the
+ * I-cache so the core executes freshly-written code, not stale cache lines. Declared
+ * extern (the seed avoids <pthread.h>/<libkern/OSCacheControl.h>). */
+extern void pthread_jit_write_protect_np(int);
+extern void sys_icache_invalidate(void *, unsigned long);
+#endif
 static long long fk_native_call(const unsigned char *code, long long n, long long arg) {
 #if defined(__x86_64__) || defined(__amd64__)
     void *mem = mmap(0, (unsigned long)n, 0x3, 0x1002, -1, 0);
@@ -1927,6 +1934,47 @@ static long long fk_native_call(const unsigned char *code, long long n, long lon
     /* RX */
     long long (*fn)(long long) = (long long (*)(long long))mem;
     return fn(arg);
+#elif defined(__aarch64__) || defined(__arm64__)
+#if defined(__APPLE__)
+    /* Apple Silicon enforces W^X: a page is writable XOR executable, never both. MAP_JIT
+     * grants a region that toggles between the two per-thread via pthread_jit_write_protect_np;
+     * sys_icache_invalidate then flushes the I-cache so the core runs the bytes just written,
+     * not stale cache lines. This is the arm64 twin of the x86-64 mmap+mprotect door above —
+     * the same install+call door, in Apple's W^X form. (Before this the arm64 branch was a
+     * `return -1` stub, so form-lower's arm64 output — the whole per-recipe JIT — had no way
+     * to run on this hardware; native_call_test returned -1 here.) */
+    void *mem = mmap(0, (unsigned long)n, 0x7, 0x1802, -1, 0); /* RWX, MAP_PRIVATE|ANON|JIT */
+    if (mem == (void *)-1) {
+        return -1;
+    }
+    pthread_jit_write_protect_np(0); /* -> writable */
+    long long i = 0;
+    while (i < n) {
+        ((unsigned char *)mem)[i] = code[i];
+        i = i + 1;
+    }
+    pthread_jit_write_protect_np(1); /* -> executable */
+    sys_icache_invalidate(mem, (unsigned long)n);
+    long long (*fn)(long long) = (long long (*)(long long))mem;
+    return fn(arg);
+#else
+    /* Linux/other arm64: no MAP_JIT — map RW, copy, mprotect RX, clear the I-cache. */
+    void *mem = mmap(0, (unsigned long)n, 0x3, 0x22, -1, 0); /* RW, MAP_PRIVATE|ANON(linux) */
+    if (mem == (void *)-1) {
+        return -1;
+    }
+    long long i = 0;
+    while (i < n) {
+        ((unsigned char *)mem)[i] = code[i];
+        i = i + 1;
+    }
+    if (mprotect(mem, (unsigned long)n, 0x5) != 0) {
+        return -1;
+    }
+    __builtin___clear_cache((char *)mem, (char *)mem + n);
+    long long (*fn)(long long) = (long long (*)(long long))mem;
+    return fn(arg);
+#endif
 #else
     (void)code;
     (void)n;
@@ -1940,6 +1988,9 @@ static long long fk_native_call_test(long long arg) {
 #if defined(_WIN32)
     static const unsigned char code[] = {0x48, 0x89, 0xC8, 0x48, 0x83, 0xC0, 0x01, 0xC3};
 /* mov rax,rcx; add rax,1; ret */
+#elif defined(__aarch64__) || defined(__arm64__)
+    static const unsigned char code[] = {0x00, 0x04, 0x00, 0x91, 0xC0, 0x03, 0x5F, 0xD6};
+/* add x0, x0, #1 ; ret   (arg in x0, result in x0 — the arm64 the form-lower door emits) */
 #else
     static const unsigned char code[] = {0x48, 0x89, 0xF8, 0x48, 0x83, 0xC0, 0x01, 0xC3};
 /* mov rax,rdi; add rax,1; ret */
@@ -6484,6 +6535,26 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 215) {
         return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1;
+    }
+    if (t == 245) {
+        /* (nat_run BYTES ARG): the general native door — run form-lower's OWN output.
+         * BYTES is a Form list of 0..255 ints (a lowered recipe image); ARG is the i64 input.
+         * Materialize the byte-list into a buffer (same cons-walk as the write carrier, tag 61),
+         * hand it to fk_native_call (install → make executable → jump), return the i64 result.
+         * This is the keystone that joins the two proven halves: form-lower emits correct bytes
+         * (byte-identity + fsim), fk_native_call runs bytes (native_call_test); nat_run makes fkwu
+         * run a recipe IT JUST COMPILED, on hardware, no clang/ld/dlopen/Go in the loop. */
+        long long xs245 = fk_walk(fk_node[i][1], fp);
+        long long arg245 = fk_walk(fk_node[i][2], fp) >> 1;
+        static unsigned char code245[65536];
+        long long n245 = 0;
+        long long q245 = xs245 >> 1;
+        while (q245 >= 1 && q245 <= fk_hp && n245 < 65536) {
+            code245[n245] = (unsigned char)(fk_hh[q245] >> 1);
+            n245 = n245 + 1;
+            q245 = fk_ht[q245] >> 1;
+        }
+        return fk_native_call(code245, n245, arg245) << 1;
     }
     if (t == 216) {
         return fk_wifi_ssid();
