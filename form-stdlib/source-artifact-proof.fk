@@ -1,0 +1,243 @@
+; source-artifact-proof.fk -- Layer 8f proof receipt admission.
+;
+; This layer validates proof receipts over already vouched and sealed native
+; dylib identity. A successful receipt may set only the native `proof` bit in
+; an 8c observation. It does not prove dlopen/dlsym/call, does not set
+; callable, does not execute native bytes, and does not own runtime selection.
+;
+; `proof=1` here means: a structural proof receipt was admitted for this
+; sealed identity. It is not native execution proof, not callable admission,
+; not source-map/deopt proof, not binary byte hashing, and not a compiler or
+; cache-write lane.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/str-byte-at.fk
+;           form-stdlib/sha256.fk
+;           form-stdlib/hex.fk
+;           form-stdlib/hmac-sha256.fk
+;           form-stdlib/form-fs.fk
+;           form-stdlib/source-artifact-cache.fk
+;           form-stdlib/source-artifact-descriptor.fk
+;           form-stdlib/runtime-artifact-plan.fk
+;           form-stdlib/source-artifact-probe.fk
+;           form-stdlib/source-artifact-identity.fk
+;           form-stdlib/source-artifact-seal.fk
+
+(do
+    (defn sapr-feature (name status) (list "source-artifact-proof-feature" name status))
+    (defn sapr-feature-name (f) (nth f 1))
+    (defn sapr-feature-status (f) (nth f 2))
+    (defn source-artifact-proof-manifest ()
+        (list
+            (sapr-feature "proof-receipt-validation" 1)
+            (sapr-feature "proof-is-receipt-not-native-exec" 1)
+            (sapr-feature "consumes-sai-vouch-status" 1)
+            (sapr-feature "consumes-sas-seal-status" 1)
+            (sapr-feature "native-dylib-proof-only" 1)
+            (sapr-feature "proof-receipt-validated-sets-proof" 1)
+            (sapr-feature "callable-left-untouched" 1)
+            (sapr-feature "lowerable-left-untouched" 1)
+            (sapr-feature "length-prefixed-proof-message-v1" 1)
+            (sapr-feature "structural-not-signature" 1)
+            (sapr-feature "no-native-execution" 1)
+            (sapr-feature "no-callable-admission" 1)
+            (sapr-feature "no-binary-file-hash" 1)
+            (sapr-feature "read-file-bytes-not-checkout-witness" 1)
+            (sapr-feature "no-artifact-load" 1)
+            (sapr-feature "no-runtime-selector" 1)
+            (sapr-feature "no-compiler-emission" 1)
+            (sapr-feature "no-cache-write" 1)
+            (sapr-feature "no-sac-route-fork" 1)
+            (sapr-feature "no-source-runner-admission-change" 1)
+            (sapr-feature "no-c-seed-growth" 1)))
+    (defn source-artifact-proof-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (sapr-feature-name (head fs)) name)
+                     (eq (sapr-feature-status (head fs)) 1))
+                1
+                (source-artifact-proof-manifest-has? name (tail fs)))))
+
+    (defn sapr-message-version () "sapr-v1")
+    (defn sapr-status-match () "match")
+    (defn sapr-status-mismatch () "mismatch")
+    (defn sapr-status-malformed () "malformed")
+    (defn sapr-status-unvouched () "unvouched")
+    (defn sapr-status-unsealed () "unsealed")
+    (defn sapr-status-insufficient-witness () "insufficient-witness")
+    (defn sapr-status-role-refused () "role-refused")
+
+    (defn sapr-field (s)
+        (str_concat (int_to_str (str_len s)) (str_concat ":" s)))
+    (defn sapr-cat-fields (fields)
+        (if (nil? fields)
+            ""
+            (str_concat (sapr-field (head fields)) (sapr-cat-fields (tail fields)))))
+    (defn sapr-proof-message-v1 (kind version path source-hash content-hash seal-value artifact-bit proof-kind witness-kind expected-result actual-result min-witnesses witness-count)
+        (sapr-cat-fields (list
+            (sapr-message-version)
+            kind
+            version
+            path
+            source-hash
+            content-hash
+            seal-value
+            (int_to_str artifact-bit)
+            proof-kind
+            witness-kind
+            expected-result
+            actual-result
+            (int_to_str min-witnesses)
+            (int_to_str witness-count))))
+
+    ; receipt = ("source-artifact-proof-receipt" kind version path source-hash
+    ;            content-hash seal-value artifact-bit proof-kind witness-kind
+    ;            expected-result actual-result min-witnesses witness-count)
+    (defn sapr-proof-receipt (kind version path source-hash content-hash seal-value artifact-bit proof-kind witness-kind expected-result actual-result min-witnesses witness-count)
+        (list "source-artifact-proof-receipt" kind version path source-hash
+              content-hash seal-value artifact-bit proof-kind witness-kind
+              expected-result actual-result min-witnesses witness-count))
+    (defn sapr-proof-receipt? (r) (str_eq (nth r 0) "source-artifact-proof-receipt"))
+    (defn sapr-receipt-kind (r) (nth r 1))
+    (defn sapr-receipt-version (r) (nth r 2))
+    (defn sapr-receipt-path (r) (nth r 3))
+    (defn sapr-receipt-source-hash (r) (nth r 4))
+    (defn sapr-receipt-content-hash (r) (nth r 5))
+    (defn sapr-receipt-seal-value (r) (nth r 6))
+    (defn sapr-receipt-artifact-bit (r) (nth r 7))
+    (defn sapr-receipt-proof-kind (r) (nth r 8))
+    (defn sapr-receipt-witness-kind (r) (nth r 9))
+    (defn sapr-receipt-expected-result (r) (nth r 10))
+    (defn sapr-receipt-actual-result (r) (nth r 11))
+    (defn sapr-receipt-min-witnesses (r) (nth r 12))
+    (defn sapr-receipt-witness-count (r) (nth r 13))
+    (defn sapr-nonempty? (s) (gt (str_len s) 0))
+    (defn sapr-bit? (n)
+        (if (eq n 0) 1 (if (eq n 1) 1 0)))
+    (defn sapr-native-dylib-receipt? (r)
+        (if (sapr-proof-receipt? r)
+            (if (str_eq (sapr-receipt-kind r) (sad-kind-native-dylib)) 1 0)
+            0))
+    (defn sapr-receipt-shape-valid? (r)
+        (if (sapr-native-dylib-receipt? r)
+            (if (str_eq (sapr-receipt-version r) (sad-version-native-dylib))
+                (if (sapr-nonempty? (sapr-receipt-path r))
+                    (if (sai-canonical-sha256? (sapr-receipt-source-hash r))
+                        (if (sai-canonical-sha256? (sapr-receipt-content-hash r))
+                            (if (sas-canonical-seal? (sapr-receipt-seal-value r))
+                                (if (eq (sapr-bit? (sapr-receipt-artifact-bit r)) 1)
+                                    (if (sapr-nonempty? (sapr-receipt-proof-kind r))
+                                        (if (sapr-nonempty? (sapr-receipt-witness-kind r))
+                                            (if (sapr-nonempty? (sapr-receipt-expected-result r))
+                                                (if (sapr-nonempty? (sapr-receipt-actual-result r))
+                                                    (if (gt (sapr-receipt-min-witnesses r) 0)
+                                                        (if (ge (sapr-receipt-witness-count r) 0) 1 0)
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+    (defn sapr-receipt-message (r)
+        (sapr-proof-message-v1 (sapr-receipt-kind r)
+                               (sapr-receipt-version r)
+                               (sapr-receipt-path r)
+                               (sapr-receipt-source-hash r)
+                               (sapr-receipt-content-hash r)
+                               (sapr-receipt-seal-value r)
+                               (sapr-receipt-artifact-bit r)
+                               (sapr-receipt-proof-kind r)
+                               (sapr-receipt-witness-kind r)
+                               (sapr-receipt-expected-result r)
+                               (sapr-receipt-actual-result r)
+                               (sapr-receipt-min-witnesses r)
+                               (sapr-receipt-witness-count r)))
+
+    ; proof = ("source-artifact-proof" kind version path status message)
+    (defn sapr-proof-row (kind version path status message)
+        (list "source-artifact-proof" kind version path status message))
+    (defn sapr-proof-row? (p) (str_eq (nth p 0) "source-artifact-proof"))
+    (defn sapr-proof-kind (p) (nth p 1))
+    (defn sapr-proof-version (p) (nth p 2))
+    (defn sapr-proof-path (p) (nth p 3))
+    (defn sapr-proof-status (p) (nth p 4))
+    (defn sapr-proof-message (p) (nth p 5))
+    (defn sapr-proof-match? (p)
+        (if (sapr-proof-row? p)
+            (if (str_eq (sapr-proof-status p) (sapr-status-match)) 1 0)
+            0))
+    (defn sapr-proof-ok-bit (p) (if (sapr-proof-match? p) 1 0))
+
+    (defn sapr-seal-row-ok? (seal-row)
+        (if (sas-seal-row? seal-row)
+            (sas-seal-match? seal-row)
+            0))
+    (defn sapr-vouches-ok? (source-vouch content-vouch)
+        (if (sas-source-vouch-ok? source-vouch)
+            (sas-content-vouch-ok? content-vouch)
+            0))
+    (defn sapr-receipt-bound-to-chain? (receipt source-vouch content-vouch seal-row)
+        (if (sapr-receipt-shape-valid? receipt)
+            (if (str_eq (sapr-receipt-path receipt) (sas-seal-path seal-row))
+                (if (str_eq (sapr-receipt-source-hash receipt) (sai-vouch-actual-hash source-vouch))
+                    (if (str_eq (sapr-receipt-content-hash receipt) (sai-vouch-actual-hash content-vouch))
+                        (if (str_eq (sapr-receipt-source-hash receipt) (sas-seal-source-hash seal-row))
+                            (if (str_eq (sapr-receipt-content-hash receipt) (sas-seal-content-hash seal-row))
+                                (if (str_eq (sapr-receipt-seal-value receipt) (sas-seal-actual seal-row))
+                                    (if (eq (sapr-receipt-artifact-bit receipt) (sas-seal-artifact-bit seal-row)) 1 0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+    (defn sapr-admit-proof (receipt source-vouch content-vouch seal-row)
+        (if (sapr-native-dylib-receipt? receipt)
+            (if (eq (sapr-vouches-ok? source-vouch content-vouch) 1)
+                (if (eq (sapr-seal-row-ok? seal-row) 1)
+                    (if (eq (sapr-receipt-shape-valid? receipt) 1)
+                        (if (ge (sapr-receipt-witness-count receipt) (sapr-receipt-min-witnesses receipt))
+                            (if (eq (sapr-receipt-bound-to-chain? receipt source-vouch content-vouch seal-row) 1)
+                                (if (str_eq (sapr-receipt-expected-result receipt) (sapr-receipt-actual-result receipt))
+                                    (sapr-proof-row (sapr-receipt-kind receipt) (sapr-receipt-version receipt)
+                                                    (sapr-receipt-path receipt) (sapr-status-match)
+                                                    (sapr-receipt-message receipt))
+                                    (sapr-proof-row (sapr-receipt-kind receipt) (sapr-receipt-version receipt)
+                                                    (sapr-receipt-path receipt) (sapr-status-mismatch)
+                                                    (sapr-receipt-message receipt)))
+                                (sapr-proof-row (sapr-receipt-kind receipt) (sapr-receipt-version receipt)
+                                                (sapr-receipt-path receipt) (sapr-status-mismatch)
+                                                (sapr-receipt-message receipt)))
+                            (sapr-proof-row (sapr-receipt-kind receipt) (sapr-receipt-version receipt)
+                                            (sapr-receipt-path receipt) (sapr-status-insufficient-witness)
+                                            (sapr-receipt-message receipt)))
+                        (sapr-proof-row (if (sapr-proof-receipt? receipt) (sapr-receipt-kind receipt) "")
+                                        (if (sapr-proof-receipt? receipt) (sapr-receipt-version receipt) "")
+                                        (if (sapr-proof-receipt? receipt) (sapr-receipt-path receipt) "")
+                                        (sapr-status-malformed)
+                                        ""))
+                    (sapr-proof-row (sapr-receipt-kind receipt) (sapr-receipt-version receipt)
+                                    (sapr-receipt-path receipt) (sapr-status-unsealed) ""))
+                (sapr-proof-row (sapr-receipt-kind receipt) (sapr-receipt-version receipt)
+                                (sapr-receipt-path receipt) (sapr-status-unvouched) ""))
+            (sapr-proof-row (if (sapr-proof-receipt? receipt) (sapr-receipt-kind receipt) "")
+                            (if (sapr-proof-receipt? receipt) (sapr-receipt-version receipt) "")
+                            (if (sapr-proof-receipt? receipt) (sapr-receipt-path receipt) "")
+                            (sapr-status-role-refused) "")))
+
+    (defn sapr-native-dylib-observation-from-proof (path exists size mtime source-vouch content-vouch seal-row proof-row callable lowerable)
+        (sap-native-dylib-observation path exists size mtime
+                                      (sas-source-hash-if-match source-vouch)
+                                      (sas-content-hash-if-match content-vouch)
+                                      (sas-seal-ok-bit seal-row)
+                                      (sapr-proof-ok-bit proof-row)
+                                      callable
+                                      lowerable))
+)

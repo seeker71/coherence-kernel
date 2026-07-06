@@ -1,0 +1,276 @@
+; source-runner-admission.fk -- direct `--src` admission policy.
+;
+; The C-backed direct source runner is a checkout witness and temporary compiler
+; front door, not the permanent runtime shape. This layer answers one narrow
+; question: may a given source/prelude snapshot trust direct `--src` right now,
+; or must it route to the source artifact lane or to investigation?
+;
+; This cell is pure policy over observation rows. It does not read files, count
+; AST nodes, write caches, load `.fkb`, load `.dylib`, or grow the C seed. The
+; source-artifact-cache layer handles artifact policy after this layer routes a
+; source away from direct `--src`.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn sra-route-admit-direct () 1)
+    (defn sra-route-artifact-lane () 2)
+    (defn sra-route-investigate () 3)
+
+    (defn sra-status-green () 1)
+    (defn sra-status-red () 0)
+    (defn sra-status-unknown () -1)
+
+    (defn sra-feature (name status) (list "source-runner-admission-feature" name status))
+    (defn sra-feature-name (f) (nth f 1))
+    (defn sra-feature-status (f) (nth f 2))
+    (defn source-runner-admission-manifest ()
+        (list
+            (sra-feature "runner-health-first" 1)
+            (sra-feature "parity-noncircular" 1)
+            (sra-feature "capacity-routes-artifact" 1)
+            (sra-feature "silent-wrong-investigates" 1)
+            (sra-feature "oom-kill-investigates" 1)
+            (sra-feature "missing-observation-denies" 1)
+            (sra-feature "no-c-growth-remediation-constraint" 1)
+            (sra-feature "layer8-handles-artifacts" 1)
+            (sra-feature "source-identity-required" 1)))
+    (defn sra-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (str_eq (sra-feature-name (head fs)) name)
+                (if (eq (sra-feature-status (head fs)) 1)
+                    1
+                    (sra-manifest-has? name (tail fs)))
+                (sra-manifest-has? name (tail fs)))))
+
+    ; gate = ("source-runner-gate" id class scope status mode source expected actual)
+    ;
+    ; class: "health", "parity", "capacity", "composition", or "remediation"
+    ; status: green/red/unknown
+    ; mode: "ok", "loud-error", "silent-wrong", "oom-killed",
+    ;       "stale-binary", "native-body-fail", "semantic-divergence",
+    ;       "c-growth-request", or "missing"
+    (defn sra-gate (id class scope status mode source expected actual)
+        (list "source-runner-gate" id class scope status mode source expected actual))
+    (defn sra-gate-id (g) (nth g 1))
+    (defn sra-gate-class (g) (nth g 2))
+    (defn sra-gate-scope (g) (nth g 3))
+    (defn sra-gate-status (g) (nth g 4))
+    (defn sra-gate-mode (g) (nth g 5))
+    (defn sra-gate-source (g) (nth g 6))
+    (defn sra-gate-expected (g) (nth g 7))
+    (defn sra-gate-actual (g) (nth g 8))
+
+    (defn sra-gate-green? (g)
+        (eq (sra-gate-status g) (sra-status-green)))
+    (defn sra-gate-red? (g)
+        (eq (sra-gate-status g) (sra-status-red)))
+    (defn sra-gate-unknown? (g)
+        (eq (sra-gate-status g) (sra-status-unknown)))
+    (defn sra-gate-mode? (g mode)
+        (str_eq (sra-gate-mode g) mode))
+    (defn sra-gate-class? (g class)
+        (str_eq (sra-gate-class g) class))
+    (defn sra-gate-has-source? (g)
+        (if (gt (str_len (sra-gate-source g)) 0) 1 0))
+
+    (defn sra-hard-mode? (g)
+        (if (sra-gate-mode? g "silent-wrong") 1
+            (if (sra-gate-mode? g "oom-killed") 1
+                (if (sra-gate-mode? g "stale-binary") 1
+                    (if (sra-gate-mode? g "native-body-fail") 1
+                        (if (sra-gate-mode? g "semantic-divergence") 1
+                            (if (sra-gate-mode? g "c-growth-request") 1
+                                (if (sra-gate-mode? g "missing") 1 0))))))))
+
+    (defn sra-hard-gate? (g)
+        (if (eq (sra-gate-has-source? g) 0)
+            1
+            (if (eq (sra-gate-status g) (sra-status-green))
+                0
+                (if (eq (sra-gate-status g) (sra-status-unknown))
+                    1
+                    (if (eq (sra-hard-mode? g) 1)
+                        1
+                        (if (sra-gate-class? g "health")
+                            1
+                            (if (sra-gate-class? g "parity")
+                                1
+                                (if (sra-gate-class? g "remediation")
+                                    1
+                                    0))))))))
+
+    (defn sra-soft-artifact-gate? (g)
+        (if (sra-hard-gate? g)
+            0
+            (if (sra-gate-red? g)
+                (if (sra-gate-mode? g "loud-error")
+                    1
+                    0)
+                0)))
+
+    (defn sra-all-green? (gs)
+        (if (nil? gs)
+            1
+            (if (sra-gate-green? (head gs))
+                (sra-all-green? (tail gs))
+                0)))
+
+    (defn sra-any-hard? (gs)
+        (if (nil? gs)
+            0
+            (if (sra-hard-gate? (head gs))
+                1
+                (sra-any-hard? (tail gs)))))
+
+    (defn sra-any-soft-artifact? (gs)
+        (if (nil? gs)
+            0
+            (if (sra-soft-artifact-gate? (head gs))
+                1
+                (sra-any-soft-artifact? (tail gs)))))
+
+    (defn sra-all-have-source? (gs)
+        (if (nil? gs)
+            1
+            (if (sra-gate-has-source? (head gs))
+                (sra-all-have-source? (tail gs))
+                0)))
+
+    (defn sra-route (gs)
+        (if (sra-any-hard? gs)
+            (sra-route-investigate)
+            (if (sra-all-green? gs)
+                (sra-route-admit-direct)
+                (sra-route-artifact-lane))))
+
+    (defn sra-direct-admissible? (gs)
+        (if (eq (sra-route gs) (sra-route-admit-direct)) 1 0))
+    (defn sra-requires-receipt? (gs)
+        (if (or (sra-any-hard? gs) (sra-any-soft-artifact? gs)) 1 0))
+
+    ; Current observation snapshot, maintained by receipts and bands. It records
+    ; the 2026-07-03 probes without pretending this policy ran those probes.
+    (defn sra-current-freshness-gate ()
+        (sra-gate "binary-freshness-band" "health" "kernel" (sra-status-green) "ok"
+            "form/form-stdlib/tests/binary-freshness-band.fk" "15" "15"))
+    (defn sra-current-native-gate ()
+        (sra-gate "native-vs-rented" "health" "kernel" (sra-status-green) "ok"
+            "observe/native-vs-rented.fk" "11111" "11111"))
+    (defn sra-current-let-parity-gate ()
+        (sra-gate "minimal-let-parity" "parity" "program" (sra-status-green) "ok"
+            "(do (let x 40) (add x 2))" "42" "42"))
+    (defn sra-current-defdata-constant-gate ()
+        (sra-gate "defdata-module-constant" "parity" "program" (sra-status-green) "ok"
+            "(let rows (list 1 2 3)) + (defn rows-f () rows)" "3" "3"))
+    (defn sra-current-defdata-language-gate ()
+        (sra-gate "defdata-language-band" "parity" "prelude+program" (sra-status-green) "ok"
+            "core.fk + bmf-core.fk + bmf-grammar.fk + defdata.fk + defdata-language.fk + defdata-language-band.fk" "8191" "8191"))
+    (defn sra-current-defdata-recipe-language-gate ()
+        (sra-gate "defdata-recipe-language-band" "parity" "prelude+program" (sra-status-green) "ok"
+            "core.fk + bmf-core.fk + bmf-grammar.fk + defdata.fk + defdata-language.fk + defdata-recipe-language.fk + defdata-recipe-language-band.fk" "134217727" "134217727"))
+    (defn sra-current-form-definition-language-gate ()
+        (sra-gate "form-definition-language-band" "parity" "prelude+program" (sra-status-green) "ok"
+            "core.fk + bmf-core.fk + bmf-grammar.fk + defdata.fk + form-definition-language.fk + form-definition-language-band.fk" "65535" "65535"))
+    (defn sra-current-source-compiler-grammar-bridge-gate ()
+        (sra-gate "source-compiler-grammar-bridge-band" "composition" "prelude+program" (sra-status-green) "ok"
+            "core.fk + bmf-core.fk + bmf-grammar.fk + defdata.fk + form-definition-language.fk + source-compiler-emission.fk + source-compiler-grammar-bridge.fk + source-compiler-grammar-bridge-band.fk" "32767" "32767"))
+    (defn sra-current-form-definition-floor-gate ()
+        (sra-gate "form-definition-language-floor-band" "parity" "program" (sra-status-green) "ok"
+            "form/form-stdlib/tests/form-definition-language-floor-band.fk" "10" "10"))
+    (defn sra-current-domain-grammar-core-gate ()
+        (sra-gate "domain-grammar-core-band" "parity" "prelude+program" (sra-status-green) "ok"
+            "core.fk + bmf-core.fk + bmf-grammar.fk + grammar-loader.fk + domain-grammar-core.fk + domain-grammar-core-band.fk" "268435455" "268435455"))
+    (defn sra-current-grammar-authoring-language-gate ()
+        (sra-gate "grammar-authoring-language-band" "parity" "prelude+program" (sra-status-green) "ok"
+            "core.fk + bmf-core.fk + bmf-grammar.fk + grammar-loader.fk + domain-grammar-core.fk + grammar-authoring-language.fk + grammar-authoring-language-band.fk" "134217727" "134217727"))
+    (defn sra-current-sibling-ref-authoring-language-gate ()
+        (sra-gate "sibling-ref-authoring-language-band" "parity" "prelude+program" (sra-status-green) "ok"
+            "core.fk + bmf-core.fk + bmf-grammar.fk + grammar-loader.fk + domain-grammar-core.fk + grammar-authoring-language.fk + sibling-ref-authoring-language.fk + sibling-ref-authoring-language-band.fk" "2147483647" "2147483647"))
+    (defn sra-current-domain-semantic-bridge-gate ()
+        (sra-gate "domain-semantic-bridge-band" "parity" "prelude+program" (sra-status-green) "ok"
+            "core.fk + bmf-core.fk + bmf-grammar.fk + grammar-loader.fk + domain-grammar-core.fk + semantic-stdlib.fk + domain-semantic-bridge.fk + domain-semantic-bridge-band.fk" "268435455" "268435455"))
+    (defn sra-current-source-artifact-descriptor-gate ()
+        (sra-gate "source-artifact-descriptor-band" "composition" "prelude+program" (sra-status-green) "ok"
+            "core.fk + source-artifact-cache.fk + source-artifact-descriptor.fk + source-artifact-descriptor-band.fk" "2147483647" "2147483647"))
+    (defn sra-current-runtime-artifact-plan-gate ()
+        (sra-gate "runtime-artifact-plan-band" "composition" "prelude+program" (sra-status-green) "ok"
+            "core.fk + source-artifact-cache.fk + source-artifact-descriptor.fk + runtime-artifact-plan.fk + runtime-artifact-plan-band.fk" "67108863" "67108863"))
+    (defn sra-current-source-artifact-probe-gate ()
+        (sra-gate "source-artifact-probe-band" "composition" "prelude+program" (sra-status-green) "ok"
+            "core.fk + form-fs.fk + source-artifact-cache.fk + source-artifact-descriptor.fk + runtime-artifact-plan.fk + source-artifact-probe.fk + source-artifact-probe-band.fk" "536870911" "536870911"))
+    (defn sra-current-top-do-defn-gate ()
+        (sra-gate "source-runner-do-defn-band" "parity" "program" (sra-status-green) "ok"
+            "form/form-stdlib/tests/source-runner-do-defn-band.fk" "127" "127"))
+    (defn sra-current-root-do-gate ()
+        (sra-gate "source-runner-root-do-band" "parity" "prelude+program" (sra-status-green) "ok"
+            "core.fk + json.fk + bmf-core.fk + source-runner-root-do-band.fk" "31" "31"))
+    (defn sra-current-ontology-gate ()
+        (sra-gate "form-ontology-loader-bp" "parity" "program" (sra-status-green) "ok"
+            "form/form-stdlib/form-ontology-loader.fk + bp(add) probe" "13" "13"))
+    (defn sra-current-ontology-ast-gate ()
+        (sra-current-ontology-gate))
+    (defn sra-current-bmf-integration-gate ()
+        (sra-gate "bmf-core-band" "composition" "prelude+program" (sra-status-green) "ok"
+            "core.fk + json.fk + cache.fk + form-ontology-loader.fk + line-grammar.fk + bmf-core.fk + bmf-core-band.fk" "600" "600"))
+    (defn sra-current-homecoming-prelude-gate ()
+        (sra-gate "homecoming-core-prelude" "composition" "prelude+program" (sra-status-green) "ok"
+            "form/form-stdlib/core.fk + learn/homecoming-distillation-corpus.fk" "band 511" "band 511"))
+    (defn sra-current-oom-gate ()
+        (sra-gate "oom-killed" "health" "kernel" (sra-status-green) "ok"
+            "current layer probes" "no OOM/killed" "no OOM/killed"))
+    (defn sra-current-c-growth-gate ()
+        (sra-gate "c-seed-growth" "remediation" "runtime/fkwu-uni.c" (sra-status-green) "ok"
+            "runtime/fkwu-uni.c" "no AST-cap growth" "source-runner repairs receipted"))
+
+    (defn sra-current-gates ()
+        (list
+            (sra-gate "binary-freshness-band" "health" "kernel" (sra-status-green) "ok"
+                "form/form-stdlib/tests/binary-freshness-band.fk" "15" "15")
+            (sra-gate "native-vs-rented" "health" "kernel" (sra-status-green) "ok"
+                "observe/native-vs-rented.fk" "11111" "11111")
+            (sra-gate "minimal-let-parity" "parity" "program" (sra-status-green) "ok"
+                "(do (let x 40) (add x 2))" "42" "42")
+            (sra-gate "defdata-module-constant" "parity" "program" (sra-status-green) "ok"
+                "(let rows (list 1 2 3)) + (defn rows-f () rows)" "3" "3")
+            (sra-gate "defdata-language-band" "parity" "prelude+program" (sra-status-green) "ok"
+                "core.fk + bmf-core.fk + bmf-grammar.fk + defdata.fk + defdata-language.fk + defdata-language-band.fk" "8191" "8191")
+            (sra-gate "defdata-recipe-language-band" "parity" "prelude+program" (sra-status-green) "ok"
+                "core.fk + bmf-core.fk + bmf-grammar.fk + defdata.fk + defdata-language.fk + defdata-recipe-language.fk + defdata-recipe-language-band.fk" "134217727" "134217727")
+            (sra-gate "form-definition-language-band" "parity" "prelude+program" (sra-status-green) "ok"
+                "core.fk + bmf-core.fk + bmf-grammar.fk + defdata.fk + form-definition-language.fk + form-definition-language-band.fk" "65535" "65535")
+            (sra-gate "source-compiler-grammar-bridge-band" "composition" "prelude+program" (sra-status-green) "ok"
+                "core.fk + bmf-core.fk + bmf-grammar.fk + defdata.fk + form-definition-language.fk + source-compiler-emission.fk + source-compiler-grammar-bridge.fk + source-compiler-grammar-bridge-band.fk" "32767" "32767")
+            (sra-gate "form-definition-language-floor-band" "parity" "program" (sra-status-green) "ok"
+                "form/form-stdlib/tests/form-definition-language-floor-band.fk" "10" "10")
+            (sra-gate "domain-grammar-core-band" "parity" "prelude+program" (sra-status-green) "ok"
+                "core.fk + bmf-core.fk + bmf-grammar.fk + grammar-loader.fk + domain-grammar-core.fk + domain-grammar-core-band.fk" "268435455" "268435455")
+            (sra-gate "grammar-authoring-language-band" "parity" "prelude+program" (sra-status-green) "ok"
+                "core.fk + bmf-core.fk + bmf-grammar.fk + grammar-loader.fk + domain-grammar-core.fk + grammar-authoring-language.fk + grammar-authoring-language-band.fk" "134217727" "134217727")
+            (sra-gate "sibling-ref-authoring-language-band" "parity" "prelude+program" (sra-status-green) "ok"
+                "core.fk + bmf-core.fk + bmf-grammar.fk + grammar-loader.fk + domain-grammar-core.fk + grammar-authoring-language.fk + sibling-ref-authoring-language.fk + sibling-ref-authoring-language-band.fk" "2147483647" "2147483647")
+            (sra-gate "domain-semantic-bridge-band" "parity" "prelude+program" (sra-status-green) "ok"
+                "core.fk + bmf-core.fk + bmf-grammar.fk + grammar-loader.fk + domain-grammar-core.fk + semantic-stdlib.fk + domain-semantic-bridge.fk + domain-semantic-bridge-band.fk" "268435455" "268435455")
+            (sra-gate "source-artifact-descriptor-band" "composition" "prelude+program" (sra-status-green) "ok"
+                "core.fk + source-artifact-cache.fk + source-artifact-descriptor.fk + source-artifact-descriptor-band.fk" "2147483647" "2147483647")
+            (sra-gate "runtime-artifact-plan-band" "composition" "prelude+program" (sra-status-green) "ok"
+                "core.fk + source-artifact-cache.fk + source-artifact-descriptor.fk + runtime-artifact-plan.fk + runtime-artifact-plan-band.fk" "67108863" "67108863")
+            (sra-gate "source-artifact-probe-band" "composition" "prelude+program" (sra-status-green) "ok"
+                "core.fk + form-fs.fk + source-artifact-cache.fk + source-artifact-descriptor.fk + runtime-artifact-plan.fk + source-artifact-probe.fk + source-artifact-probe-band.fk" "536870911" "536870911")
+            (sra-gate "source-runner-do-defn-band" "parity" "program" (sra-status-green) "ok"
+                "form/form-stdlib/tests/source-runner-do-defn-band.fk" "127" "127")
+            (sra-gate "source-runner-root-do-band" "parity" "prelude+program" (sra-status-green) "ok"
+                "core.fk + json.fk + bmf-core.fk + source-runner-root-do-band.fk" "31" "31")
+            (sra-gate "form-ontology-loader-bp" "parity" "program" (sra-status-green) "ok"
+                "form/form-stdlib/form-ontology-loader.fk + bp(add) probe" "13" "13")
+            (sra-gate "bmf-core-band" "composition" "prelude+program" (sra-status-green) "ok"
+                "core.fk + json.fk + cache.fk + form-ontology-loader.fk + line-grammar.fk + bmf-core.fk + bmf-core-band.fk" "600" "600")
+            (sra-gate "homecoming-core-prelude" "composition" "prelude+program" (sra-status-green) "ok"
+                "form/form-stdlib/core.fk + learn/homecoming-distillation-corpus.fk" "band 511" "band 511")
+            (sra-gate "oom-killed" "health" "kernel" (sra-status-green) "ok"
+                "current layer probes" "no OOM/killed" "no OOM/killed")
+            (sra-gate "c-seed-growth" "remediation" "runtime/fkwu-uni.c" (sra-status-green) "ok"
+                "runtime/fkwu-uni.c" "no AST-cap growth" "source-runner repairs receipted")))
+
+    0)

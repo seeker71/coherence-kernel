@@ -1,0 +1,231 @@
+; source-artifact-descriptor.fk -- Layer 8b execution-artifact descriptors.
+;
+; This layer makes the source artifact contract concrete without claiming the
+; runtime selector exists. It describes canonical `.fk` source, a target
+; program-image `.fkb`, and an optional native `.dylib`, then derives the
+; existing `source-artifact-cache.fk` `sac-state` row.
+;
+; Descriptor rows are synthetic metadata supplied by a future host/compiler
+; probe. This cell does not read files, hash bytes, verify cryptographic
+; signatures, write `.fkb`, load `.dylib`, choose a runtime artifact, or grow
+; the C seed. The `seal-ok` field is a declared integrity status, named after
+; the pack-manifest convention: honest as a keyed/integrity status, not proof
+; that this layer verified bytes.
+;
+; Mtime remains the freshness gate. Source-hash mismatch and seal failure only
+; invalidate an artifact; they never revalidate an older mtime.
+;
+; preludes: form-stdlib/core.fk form-stdlib/source-artifact-cache.fk
+
+(do
+    (defn sad-feature (name status) (list "source-artifact-descriptor-feature" name status))
+    (defn sad-feature-name (f) (nth f 1))
+    (defn sad-feature-status (f) (nth f 2))
+    (defn source-artifact-descriptor-manifest ()
+        (list
+            (sad-feature "source-identity-required" 1)
+            (sad-feature "program-image-fkb-kind" 1)
+            (sad-feature "optional-native-dylib-kind" 1)
+            (sad-feature "artifact-identity-fields" 1)
+            (sad-feature "seal-is-declared-not-verified" 1)
+            (sad-feature "proof-status-for-dylib" 1)
+            (sad-feature "derives-sac-state" 1)
+            (sad-feature "no-disk-io" 1)
+            (sad-feature "not-parsed-data-fkb" 1)
+            (sad-feature "no-runtime-selector" 1)
+            (sad-feature "routing-owned-by-sac" 1)
+            (sad-feature "no-c-seed-growth" 1)))
+    (defn source-artifact-descriptor-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (sad-feature-name (head fs)) name)
+                     (eq (sad-feature-status (head fs)) 1))
+                1
+                (source-artifact-descriptor-manifest-has? name (tail fs)))))
+
+    (defn sad-kind-program-image-fkb () "program-image-fkb")
+    (defn sad-kind-native-dylib () "native-dylib")
+    (defn sad-kind-parsed-data-fkb () "parsed-data-fkb")
+    (defn sad-version-program-image-fkb () "program-image-v1")
+    (defn sad-version-native-dylib () "native-dylib-v1")
+    (defn sad-route-invalid () 0)
+
+    (defn sad-nonempty? (s) (gt (str_len s) 0))
+    (defn sad-bit? (x) (if (eq x 0) 1 (if (eq x 1) 1 0)))
+
+    ; source = ("source-artifact-source" path source-hash mtime)
+    (defn sad-source (path source-hash mtime)
+        (list "source-artifact-source" path source-hash mtime))
+    (defn sad-source? (s) (str_eq (nth s 0) "source-artifact-source"))
+    (defn sad-source-path (s) (nth s 1))
+    (defn sad-source-hash (s) (nth s 2))
+    (defn sad-source-mtime (s) (nth s 3))
+    (defn sad-source-valid? (s)
+        (if (sad-source? s)
+            (if (sad-nonempty? (sad-source-path s))
+                (if (sad-nonempty? (sad-source-hash s))
+                    (if (gt (sad-source-mtime s) 0) 1 0)
+                    0)
+                0)
+            0))
+
+    ; artifact = ("source-artifact-descriptor" kind version path source-hash
+    ;             content-hash mtime seal-ok proof callable lowerable includes-tbl)
+    (defn sad-artifact (kind version path source-hash content-hash mtime seal-ok proof callable lowerable includes-tbl)
+        (list "source-artifact-descriptor" kind version path source-hash
+              content-hash mtime seal-ok proof callable lowerable includes-tbl))
+    (defn sad-no-artifact () (list "source-artifact-none"))
+    (defn sad-no-artifact? (a) (str_eq (nth a 0) "source-artifact-none"))
+    (defn sad-artifact? (a) (str_eq (nth a 0) "source-artifact-descriptor"))
+    (defn sad-artifact-kind (a) (nth a 1))
+    (defn sad-artifact-version (a) (nth a 2))
+    (defn sad-artifact-path (a) (nth a 3))
+    (defn sad-artifact-source-hash (a) (nth a 4))
+    (defn sad-artifact-content-hash (a) (nth a 5))
+    (defn sad-artifact-mtime (a) (nth a 6))
+    (defn sad-artifact-seal-ok (a) (nth a 7))
+    (defn sad-artifact-proof (a) (nth a 8))
+    (defn sad-artifact-callable (a) (nth a 9))
+    (defn sad-artifact-lowerable (a) (nth a 10))
+    (defn sad-artifact-includes-tbl (a) (nth a 11))
+
+    (defn sad-program-image-fkb (version path source-hash content-hash mtime seal-ok includes-tbl)
+        (sad-artifact (sad-kind-program-image-fkb) version path source-hash content-hash
+                      mtime seal-ok 0 0 0 includes-tbl))
+    (defn sad-native-dylib (version path source-hash content-hash mtime seal-ok proof callable lowerable)
+        (sad-artifact (sad-kind-native-dylib) version path source-hash content-hash
+                      mtime seal-ok proof callable lowerable 0))
+
+    (defn sad-known-kind? (kind)
+        (if (str_eq kind (sad-kind-program-image-fkb))
+            1
+            (if (str_eq kind (sad-kind-native-dylib)) 1 0)))
+    (defn sad-parsed-data-kind? (kind)
+        (str_eq kind (sad-kind-parsed-data-fkb)))
+    (defn sad-artifact-option-valid? (a)
+        (if (sad-no-artifact? a)
+            1
+            (if (sad-artifact? a)
+                (if (sad-known-kind? (sad-artifact-kind a))
+                    (if (sad-nonempty? (sad-artifact-version a))
+                        (if (sad-nonempty? (sad-artifact-path a))
+                            (if (sad-nonempty? (sad-artifact-source-hash a))
+                                (if (sad-nonempty? (sad-artifact-content-hash a))
+                                    (if (gt (sad-artifact-mtime a) 0)
+                                        (if (sad-bit? (sad-artifact-seal-ok a))
+                                            (if (sad-bit? (sad-artifact-proof a))
+                                                (if (sad-bit? (sad-artifact-callable a))
+                                                    (if (sad-bit? (sad-artifact-lowerable a))
+                                                        (sad-bit? (sad-artifact-includes-tbl a))
+                                                        0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)))
+
+    (defn sad-artifact-source-match? (source artifact)
+        (if (sad-source-valid? source)
+            (if (sad-artifact-option-valid? artifact)
+                (if (sad-no-artifact? artifact)
+                    1
+                    (if (str_eq (sad-source-hash source) (sad-artifact-source-hash artifact)) 1 0))
+                0)
+            0))
+    (defn sad-artifact-current-version? (artifact)
+        (if (sad-artifact-option-valid? artifact)
+            (if (sad-no-artifact? artifact)
+                1
+                (if (str_eq (sad-artifact-kind artifact) (sad-kind-program-image-fkb))
+                    (if (str_eq (sad-artifact-version artifact) (sad-version-program-image-fkb)) 1 0)
+                    (if (str_eq (sad-artifact-kind artifact) (sad-kind-native-dylib))
+                        (if (str_eq (sad-artifact-version artifact) (sad-version-native-dylib)) 1 0)
+                        0)))
+            0))
+    (defn sad-artifact-integrity-ok? (source artifact)
+        (if (sad-artifact-option-valid? artifact)
+            (if (sad-no-artifact? artifact)
+                1
+                (if (sad-artifact-source-match? source artifact)
+                    (if (eq (sad-artifact-seal-ok artifact) 1) 1 0)
+                    0))
+            0))
+
+    (defn sad-valid? (source fkb dylib)
+        (if (sad-source-valid? source)
+            (if (sad-artifact-option-valid? fkb)
+                (sad-artifact-option-valid? dylib)
+                0)
+            0))
+    (defn sad-program-image-fkb-current? (source fkb)
+        (if (sad-artifact-option-valid? fkb)
+            (if (sad-no-artifact? fkb)
+                0
+                (if (str_eq (sad-artifact-kind fkb) (sad-kind-program-image-fkb))
+                    (if (sad-artifact-current-version? fkb)
+                        (if (sad-artifact-integrity-ok? source fkb)
+                            (if (eq (sad-artifact-includes-tbl fkb) 1) 1 0)
+                            0)
+                        0)
+                    0))
+            0))
+    (defn sad-native-dylib-current? (source dylib)
+        (if (sad-artifact-option-valid? dylib)
+            (if (sad-no-artifact? dylib)
+                0
+                (if (str_eq (sad-artifact-kind dylib) (sad-kind-native-dylib))
+                    (if (sad-artifact-current-version? dylib)
+                        (sad-artifact-integrity-ok? source dylib)
+                        0)
+                    0))
+            0))
+
+    (defn sad-artifact-mtime-or-missing (artifact)
+        (if (sad-artifact-option-valid? artifact)
+            (if (sad-no-artifact? artifact) -1 (sad-artifact-mtime artifact))
+            -1))
+    (defn sad-dylib-proof-or-zero (dylib)
+        (if (and (sad-artifact-option-valid? dylib)
+                 (not (sad-no-artifact? dylib)))
+            (sad-artifact-proof dylib)
+            0))
+    (defn sad-dylib-callable-or-zero (dylib)
+        (if (and (sad-artifact-option-valid? dylib)
+                 (not (sad-no-artifact? dylib)))
+            (sad-artifact-callable dylib)
+            0))
+    (defn sad-dylib-lowerable-or-zero (dylib)
+        (if (and (sad-artifact-option-valid? dylib)
+                 (not (sad-no-artifact? dylib)))
+            (sad-artifact-lowerable dylib)
+            0))
+    (defn sad-bundle-integrity-ok? (source fkb dylib)
+        (if (sad-artifact-integrity-ok? source fkb)
+            (sad-artifact-integrity-ok? source dylib)
+            0))
+
+    (defn sad-derived-state (source fkb dylib)
+        (sac-state
+            (if (sad-source-valid? source) (sad-source-mtime source) 0)
+            (sad-artifact-mtime-or-missing fkb)
+            (sad-artifact-mtime-or-missing dylib)
+            (sad-program-image-fkb-current? source fkb)
+            (sad-native-dylib-current? source dylib)
+            (sad-dylib-callable-or-zero dylib)
+            (sad-dylib-proof-or-zero dylib)
+            (sad-dylib-lowerable-or-zero dylib)
+            (sad-bundle-integrity-ok? source fkb dylib)))
+    (defn sad-route (source fkb dylib)
+        (if (sad-valid? source fkb dylib)
+            (sac-route (sad-derived-state source fkb dylib))
+            (sad-route-invalid)))
+    (defn sad-compile-output-from-dylib (dylib)
+        (sac-compile-output
+            (sad-dylib-lowerable-or-zero dylib)
+            (sad-dylib-proof-or-zero dylib)))
+)
