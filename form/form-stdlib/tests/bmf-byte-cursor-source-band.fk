@@ -1,36 +1,164 @@
-; bmf-byte-cursor-source-band.fk - BMF byte cursor over a file source.
+; bmf-byte-cursor-source-band.fk -- BMF byte cursor over fbw file windows.
 ;
-; Infinite-capable scanners do not recurse over a materialized byte list.
-; The host layer provides generic file I/O. Form/BMF owns the cursor cell:
-; path, offset, line, column. Advancing creates the next cursor state.
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/form-fs.fk form-stdlib/file-byte-window.fk form-stdlib/bmf-byte-cursor.fk
 ;
-; preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/cache.fk form-stdlib/form-ontology-loader.fk form-stdlib/source-compiler.fk
+; Expected: 4194303
 
-section [form.action] {
-    def bmf-cursor(path, offset, line, col) = list(path, offset, line, col);
-    def bmf-cursor-path(cursor) = nth(cursor, 0);
-    def bmf-cursor-offset(cursor) = nth(cursor, 1);
-    def bmf-cursor-line(cursor) = nth(cursor, 2);
-    def bmf-cursor-col(cursor) = nth(cursor, 3);
-    def bmf-cursor-byte(cursor) = file_byte_at(bmf-cursor-path(cursor), bmf-cursor-offset(cursor));
-    def bmf-cursor-advance(cursor) {
-        let b = bmf-cursor-byte(cursor);
-        if lt(b, 0) then cursor else
-        if eq(b, 10) then bmf-cursor(bmf-cursor-path(cursor), add(bmf-cursor-offset(cursor), 1), add(bmf-cursor-line(cursor), 1), 0) else
-        bmf-cursor(bmf-cursor-path(cursor), add(bmf-cursor-offset(cursor), 1), bmf-cursor-line(cursor), add(bmf-cursor-col(cursor), 1));
-    }
-    def bmf-cursor-range(start, end) = fsc-repo-text-line(bmf-cursor-offset(start), sub(bmf-cursor-offset(end), bmf-cursor-offset(start)), bmf-cursor-line(start), bmf-cursor-col(start), bmf-cursor-line(end), bmf-cursor-col(end));
-    def score_eq(value, want, score) = if eq(value, want) then score else 0;
-    def score_gt(value, threshold, score) = if gt(value, threshold) then score else 0;
+(do
+    (defn bbcb-score (ok bit) (if ok bit 0))
+    (defn bbcb-manifest-has (name)
+        (bmf-byte-cursor-manifest-has? name (bmf-byte-cursor-manifest)))
+    (defn bbcb-root ()
+        (fs-path-join (fs-temp-dir) "bmf-byte-cursor-band"))
+    (defn bbcb-path ()
+        (fs-path-join (bbcb-root) "fixture.bin"))
+    (defn bbcb-setup ()
+        (do
+            (let root (bbcb-root))
+            (let _pre_file (fs-remove-file (bbcb-path)))
+            (let _pre (fs-remove-tree root))
+            (let _mk (fs-mkdir root))
+            (let _clear_file (fs-remove-file (bbcb-path)))
+            ; bytes: A, CR, LF, B, NUL, DEL, Z
+            (let _w (fs-append-bytes (bbcb-path) (list 65 13 10 66 0 127 90)))
+            0))
+    (defn bbcb-cleanup ()
+        (do
+            (let _file (fs-remove-file (bbcb-path)))
+            (fs-remove-tree (bbcb-root))))
 
-    let path = "form-kernel-ts/src/kernel.ts";
-    let size = file_size(path);
-    let c0 = bmf-cursor(path, 0, 1, 0);
-    let c1 = bmf-cursor-advance(c0);
-    let c2 = bmf-cursor-advance(c1);
-    let c3 = bmf-cursor-advance(c2);
-    let first_range = bmf-cursor-range(c0, c3);
-    let last_byte = if gt(size, 0) then file_byte_at(path, sub(size, 1)) else -1;
+    (defn bbcb-bit-manifest-1 ()
+        (sum (list
+            (bbcb-score (eq (bbcb-manifest-has "scannerless-file-cursor") 1) 1)
+            (bbcb-score (eq (bbcb-manifest-has "fbw-window-backed") 1) 2)
+            (bbcb-score (eq (bbcb-manifest-has "immutable-advance") 1) 4)
+            (bbcb-score (eq (bbcb-manifest-has "configurable-window-size") 1) 8)
+            (bbcb-score (eq (bbcb-manifest-has "window-size-clamped") 1) 16)
+            (bbcb-score (eq (bbcb-manifest-has "refresh-on-boundary") 1) 32)
+            (bbcb-score (eq (bbcb-manifest-has "eof-idempotent") 1) 64)
+            (bbcb-score (eq (bbcb-manifest-has "line-col-byte10") 1) 128)
+            (bbcb-score (eq (bbcb-manifest-has "cr-is-column-byte") 1) 256)
+            (bbcb-score (eq (bbcb-manifest-has "nul-ascii-window-byte-indexed") 1) 512))))
+    (defn bbcb-bit-manifest-2 ()
+        (sum (list
+            (bbcb-score (eq (bbcb-manifest-has "no-raw-byte-at") 1) 1024)
+            (bbcb-score (eq (bbcb-manifest-has "no-whole-file-read") 1) 2048)
+            (bbcb-score (eq (bbcb-manifest-has "no-compiler-range-dependency") 1) 4096)
+            (bbcb-score (eq (bbcb-manifest-has "no-c-seed-growth") 1) 8192)
+            (bbcb-score (eq (bbcb-manifest-has "no-line-grammar") 1) 16384)
+            (bbcb-score (eq (bbcb-manifest-has "no-token-stream") 1) 32768))))
+    (defn bbcb-bit-constructor-first-byte ()
+        (do
+            (let c (bbc-cursor-with-window (bbcb-path) 2))
+            (bbcb-score
+                (and (bbc-cursor? c)
+                     (and (eq (bbc-byte c) 65)
+                     (and (eq (bbc-offset c) 0)
+                     (and (eq (bbc-line c) 1)
+                     (and (eq (bbc-col c) 0)
+                          (eq (bbc-window-size c) 2))))))
+                65536)))
+    (defn bbcb-bit-advance-immutable ()
+        (do
+            (let c0 (bbc-cursor-with-window (bbcb-path) 2))
+            (let c1 (bbc-advance c0))
+            (bbcb-score
+                (and (eq (bbc-byte c1) 13)
+                     (and (eq (bbc-offset c0) 0)
+                     (and (eq (bbc-col c0) 0)
+                     (and (eq (bbc-offset c1) 1)
+                          (eq (bbc-col c1) 1)))))
+                131072)))
+    (defn bbcb-bit-line-col ()
+        (do
+            (let c0 (bbc-cursor-with-window (bbcb-path) 2))
+            (let c1 (bbc-advance c0))
+            (let c2 (bbc-advance c1))
+            (let c3 (bbc-advance c2))
+            (let c4 (bbc-advance c3))
+            (bbcb-score
+                (and (eq (bbc-byte c1) 13)
+                (and (eq (bbc-line c1) 1)
+                (and (eq (bbc-col c1) 1)
+                (and (eq (bbc-byte c2) 10)
+                (and (eq (bbc-line c2) 1)
+                (and (eq (bbc-col c2) 2)
+                (and (eq (bbc-byte c3) 66)
+                (and (eq (bbc-line c3) 2)
+                (and (eq (bbc-col c3) 0)
+                     (eq (bbc-col c4) 1))))))))))
+                262144)))
+    (defn bbcb-bit-window-refresh ()
+        (do
+            (let c0 (bbc-cursor-with-window (bbcb-path) 2))
+            (let c1 (bbc-advance c0))
+            (let c2 (bbc-advance c1))
+            (bbcb-score
+                (and (eq (bbc-byte c2) 10)
+                     (and (eq (bbc-window-start c0) 0)
+                     (and (eq (bbc-window-start c1) 0)
+                          (eq (bbc-window-start c2) 2))))
+                524288)))
+    (defn bbcb-bit-nul-ascii-eof-scan ()
+        (do
+            (let c0 (bbc-cursor-with-window (bbcb-path) 2))
+            (let c1 (bbc-advance c0))
+            (let c2 (bbc-advance c1))
+            (let c3 (bbc-advance c2))
+            (let c4 (bbc-advance c3))
+            (let c5 (bbc-advance c4))
+            (let c6 (bbc-advance c5))
+            (let c7 (bbc-advance c6))
+            (let c8 (bbc-advance c7))
+            (let r (bbc-range c0 c7))
+            (bbcb-score
+                (and (eq (bbc-byte c4) 0)
+                (and (eq (bbc-byte c5) 127)
+                (and (eq (bbc-byte c6) 90)
+                (and (eq (bbc-byte c7) (sub 0 1))
+                (and (eq (bbc-eof? c7) 1)
+                (and (eq (bbc-offset c8) (bbc-offset c7))
+                (and (eq (bbc-eof? c8) 1)
+                (and (bbc-range? r)
+                (and (eq (bbc-range-len r) 7)
+                     (eq (bbc-range-end-line r) 2))))))))))
+                1048576)))
+    (defn bbcb-text-has? (text needle)
+        (ge (str_find text needle 0) 0))
+    (defn bbcb-module-text ()
+        (if (ge (file_size "form/form-stdlib/bmf-byte-cursor.fk") 0)
+            (read_file "form/form-stdlib/bmf-byte-cursor.fk")
+            (if (ge (file_size "form-stdlib/bmf-byte-cursor.fk") 0)
+                (read_file "form-stdlib/bmf-byte-cursor.fk")
+                "")))
+    (defn bbcb-bit-module-scan ()
+        (do
+            (let text (bbcb-module-text))
+            (bbcb-score
+                (and (gt (str_len text) 0)
+                (and (bbcb-text-has? text "fbw-read-window")
+                (and (not (bbcb-text-has? text "file_byte_at"))
+                (and (not (bbcb-text-has? text "read_file_bytes"))
+                (and (not (bbcb-text-has? text "write_file_bytes"))
+                (and (not (bbcb-text-has? text "read_file"))
+                (and (not (bbcb-text-has? text "file_size"))
+                (and (not (bbcb-text-has? text "source-compiler"))
+                     (not (bbcb-text-has? text "form-stdlib/line-grammar"))))))))))
+                2097152)))
 
-    sum(list(score_gt(size, 70000, 100), score_eq(bmf-cursor-byte(c0), 47, 200), score_eq(bmf-cursor-byte(c1), 47, 300), score_eq(bmf-cursor-byte(c2), 32, 400), score_eq(bmf-cursor-offset(c3), 3, 500), score_eq(fsc-repo-text-line-length(first_range), 3, 600), score_gt(last_byte, 0, 700)));
-}
+    (defn bmf-byte-cursor-source-band ()
+        (do
+            (let _setup (bbcb-setup))
+            (let score (sum (list
+                (bbcb-bit-manifest-1)
+                (bbcb-bit-manifest-2)
+                (bbcb-bit-constructor-first-byte)
+                (bbcb-bit-advance-immutable)
+                (bbcb-bit-line-col)
+                (bbcb-bit-window-refresh)
+                (bbcb-bit-nul-ascii-eof-scan)
+                (bbcb-bit-module-scan))))
+            (let _cleanup (bbcb-cleanup))
+            score))
+
+    (bmf-byte-cursor-source-band))

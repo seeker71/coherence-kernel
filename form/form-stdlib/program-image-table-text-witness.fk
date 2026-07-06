@@ -1,0 +1,119 @@
+; program-image-table-text-witness.fk -- file-backed witness for .tbl text.
+;
+; This layer packages the Layer 8i table-text write/readback result as an
+; observable witness carrier. It emits the exact table-text witness row shape
+; consumed by the current 9h0 table-text attempt adapter, but it does not
+; import or call 9h0. The shared row tag is data; the band owns the handshake
+; proof that the producer and consumer still agree.
+;
+; `write-readback-failed` deliberately collapses write failure and readback
+; mismatch because `pite-write-table-text` currently returns only 1/0. A future
+; 8i return-value enrichment can split that seam.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/form-fs.fk
+;           form-stdlib/source-artifact-cache.fk
+;           form-stdlib/source-artifact-descriptor.fk
+;           form-stdlib/program-image-fkb.fk
+;           form-stdlib/program-image-tbl-emit.fk
+
+(do
+    (defn pitw-version () "program-image-table-text-witness-v1")
+
+    (defn pitw-feature (name status) (list "program-image-table-text-witness-feature" name status))
+    (defn pitw-feature-name (f) (nth f 1))
+    (defn pitw-feature-status (f) (nth f 2))
+    (defn program-image-table-text-witness-manifest ()
+        (list
+            (pitw-feature "table-text-file-witness-carrier" 1)
+            (pitw-feature "uses-pite-write-table-text" 1)
+            (pitw-feature "readback-text-becomes-witness" 1)
+            (pitw-feature "witness-row-compatible-with-9h0" 1)
+            (pitw-feature "no-witness-sentinel" 1)
+            (pitw-feature "invalid-pif-nondestructive" 1)
+            (pitw-feature "write-readback-failure-observable" 1)
+            (pitw-feature "no-9h0-code-dependency" 1)
+            (pitw-feature "no-binary-artifact-io" 1)
+            (pitw-feature "no-program-image-load" 1)
+            (pitw-feature "no-table-execution" 1)
+            (pitw-feature "no-9f-attempt" 1)
+            (pitw-feature "no-9c-observation" 1)
+            (pitw-feature "no-selector-install" 1)
+            (pitw-feature "no-c-seed-growth" 1)))
+    (defn program-image-table-text-witness-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (pitw-feature-name (head fs)) name)
+                     (eq (pitw-feature-status (head fs)) 1))
+                1
+                (program-image-table-text-witness-manifest-has? name (tail fs)))))
+
+    (defn pitw-status-witness-ready () "witness-ready")
+    (defn pitw-status-investigate () "investigate")
+    (defn pitw-status-refused () "refused")
+
+    (defn pitw-reason-table-text-file-witness-ready () "table-text-file-witness-ready")
+    (defn pitw-reason-malformed-pif-envelope () "malformed-pif-envelope")
+    (defn pitw-reason-invalid-pif-envelope () "invalid-pif-envelope")
+    (defn pitw-reason-empty-table-text () "empty-table-text")
+    (defn pitw-reason-write-readback-failed () "write-readback-failed")
+
+    (defn pitw-no-witness () (list "program-image-table-text-no-witness"))
+    (defn pitw-no-witness? (w)
+        (if (eq (len w) 1)
+            (str_eq (nth w 0) "program-image-table-text-no-witness")
+            0))
+
+    ; This is intentionally the same data shape consumed by 9h0.
+    (defn pitw-table-text-witness (table-path table-text)
+        (list "runtime-table-text-witness" table-path table-text))
+    (defn pitw-table-text-witness? (w)
+        (if (eq (len w) 3)
+            (str_eq (nth w 0) "runtime-table-text-witness")
+            0))
+    (defn pitw-witness-path (w) (nth w 1))
+    (defn pitw-witness-text (w) (nth w 2))
+
+    ; witness = ("program-image-table-text-file-witness" path pif-envelope
+    ;            rendered-table-text wrote witness status reason)
+    (defn pitw-row (path pif-envelope table-text wrote witness status reason)
+        (list "program-image-table-text-file-witness"
+              path pif-envelope table-text wrote witness status reason))
+    (defn pitw-row? (r)
+        (if (eq (len r) 8)
+            (str_eq (nth r 0) "program-image-table-text-file-witness")
+            0))
+    (defn pitw-row-path (r) (nth r 1))
+    (defn pitw-row-pif-envelope (r) (nth r 2))
+    (defn pitw-row-table-text (r) (nth r 3))
+    (defn pitw-row-wrote (r) (nth r 4))
+    (defn pitw-row-witness (r) (nth r 5))
+    (defn pitw-row-status (r) (nth r 6))
+    (defn pitw-row-reason (r) (nth r 7))
+
+    (defn pitw-ready-row (path pif-envelope rendered readback)
+        (pitw-row path
+                  pif-envelope
+                  rendered
+                  1
+                  (pitw-table-text-witness path readback)
+                  (pitw-status-witness-ready)
+                  (pitw-reason-table-text-file-witness-ready)))
+    (defn pitw-not-ready-row (path pif-envelope table-text wrote status reason)
+        (pitw-row path pif-envelope table-text wrote (pitw-no-witness) status reason))
+
+    (defn pitw-file-witness-from-envelope (path pif-envelope)
+        (if (not (pif-envelope? pif-envelope))
+            (pitw-not-ready-row path pif-envelope "" 0 (pitw-status-refused) (pitw-reason-malformed-pif-envelope))
+            (if (not (pif-envelope-valid? pif-envelope))
+                (pitw-not-ready-row path pif-envelope "" 0 (pitw-status-refused) (pitw-reason-invalid-pif-envelope))
+                (do
+                    (let rendered (pite-table-text-from-envelope pif-envelope))
+                    (if (eq (str_len rendered) 0)
+                        (pitw-not-ready-row path pif-envelope rendered 0 (pitw-status-refused) (pitw-reason-empty-table-text))
+                        (do
+                            (let wrote (pite-write-table-text path pif-envelope))
+                            (if (eq wrote 1)
+                                (pitw-ready-row path pif-envelope rendered (fs-read-text path))
+                                (pitw-not-ready-row path pif-envelope rendered 0 (pitw-status-investigate) (pitw-reason-write-readback-failed)))))))))
+)

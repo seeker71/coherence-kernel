@@ -1,0 +1,251 @@
+; source-artifact-seal.fk -- Layer 8e keyed seal verification for artifacts.
+;
+; This layer verifies a short, canonical source-artifact identity message with
+; HMAC-SHA256. It consumes Layer 8d `sai-*` vouch rows directly, not collapsed
+; observation hash fields, and sets only artifact `seal-ok` when both source
+; and content vouches match and the keyed MAC matches.
+;
+; The seal is a shared-key integrity/authenticity tag, not an ed25519
+; signature: anyone who can verify with the key can also mint a seal. Key
+; storage, trust roots, secret retrieval, public-key signatures, Mach-O
+; codesign, proof/callable admission, binary file hashing, cache writes,
+; compiler emission, artifact load/call, route algebra, runtime selectors, and
+; C seed growth remain outside this layer. HMAC cost is recipe-shaped, so the
+; message is short identity metadata only, never artifact bytes.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/str-byte-at.fk
+;           form-stdlib/sha256.fk
+;           form-stdlib/hex.fk
+;           form-stdlib/hmac-sha256.fk
+;           form-stdlib/form-fs.fk
+;           form-stdlib/source-artifact-cache.fk
+;           form-stdlib/source-artifact-descriptor.fk
+;           form-stdlib/runtime-artifact-plan.fk
+;           form-stdlib/source-artifact-probe.fk
+;           form-stdlib/source-artifact-identity.fk
+
+(do
+    (defn sas-feature (name status) (list "source-artifact-seal-feature" name status))
+    (defn sas-feature-name (f) (nth f 1))
+    (defn sas-feature-status (f) (nth f 2))
+    (defn source-artifact-seal-manifest ()
+        (list
+            (sas-feature "hmac-sha256-seal-hex" 1)
+            (sas-feature "seal-is-keyed-mac-not-signature" 1)
+            (sas-feature "short-identity-message-only" 1)
+            (sas-feature "length-prefixed-message-v1" 1)
+            (sas-feature "consumes-sai-vouch-status" 1)
+            (sas-feature "artifact-roles-only" 1)
+            (sas-feature "seal-verified-sets-seal-ok" 1)
+            (sas-feature "identity-match-alone-not-seal-ok" 1)
+            (sas-feature "no-proof-callable-native-admission" 1)
+            (sas-feature "no-binary-file-hash" 1)
+            (sas-feature "read-file-bytes-not-checkout-witness" 1)
+            (sas-feature "no-key-storage-or-secret-retrieval" 1)
+            (sas-feature "no-ed25519-or-codesign" 1)
+            (sas-feature "no-artifact-load" 1)
+            (sas-feature "no-runtime-selector" 1)
+            (sas-feature "no-compiler-emission" 1)
+            (sas-feature "no-cache-write" 1)
+            (sas-feature "no-sac-route-fork" 1)
+            (sas-feature "no-c-seed-growth" 1)
+            (sas-feature "read-only-no-disk-write" 1)
+            (sas-feature "no-sai-import-cycle" 1)))
+    (defn source-artifact-seal-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (sas-feature-name (head fs)) name)
+                     (eq (sas-feature-status (head fs)) 1))
+                1
+                (source-artifact-seal-manifest-has? name (tail fs)))))
+
+    (defn sas-seal-prefix () "hmac-sha256:")
+    (defn sas-message-version () "sas-v1")
+    (defn sas-key-evidence-supplied-bytes () "supplied-seal-key-bytes")
+    (defn sas-status-match () "match")
+    (defn sas-status-mismatch () "mismatch")
+    (defn sas-status-undeclared () "undeclared")
+    (defn sas-status-malformed () "malformed")
+    (defn sas-status-unvouched () "unvouched")
+    (defn sas-status-role-refused () "role-refused")
+
+    (defn sas-field (s)
+        (str_concat (int_to_str (str_len s)) (str_concat ":" s)))
+    (defn sas-field-int (n)
+        (sas-field (int_to_str n)))
+    (defn sas-cat-fields (fields)
+        (if (nil? fields)
+            ""
+            (str_concat (sas-field (head fields)) (sas-cat-fields (tail fields)))))
+    (defn sas-seal-message-v1 (kind version path source-hash content-hash artifact-bit)
+        (sas-cat-fields (list
+            (sas-message-version)
+            kind
+            version
+            path
+            source-hash
+            content-hash
+            (int_to_str artifact-bit))))
+    (defn sas-program-image-fkb-message (path source-hash content-hash includes-tbl)
+        (sas-seal-message-v1 (sad-kind-program-image-fkb)
+                             (sad-version-program-image-fkb)
+                             path
+                             source-hash
+                             content-hash
+                             includes-tbl))
+    (defn sas-native-dylib-message (path source-hash content-hash lowerable)
+        (sas-seal-message-v1 (sad-kind-native-dylib)
+                             (sad-version-native-dylib)
+                             path
+                             source-hash
+                             content-hash
+                             lowerable))
+
+    (defn sas-hmac-seal (key-bytes message)
+        (str_concat (sas-seal-prefix)
+                    (hex-encode (hmac-sha256 key-bytes (sai-string-bytes message)))))
+    (defn sas-lower-hex-byte? (c)
+        (if (and (ge c 48) (le c 57))
+            1
+            (if (and (ge c 97) (le c 102)) 1 0)))
+    (defn sas-lower-hex-loop (s i end)
+        (if (ge i end)
+            1
+            (if (eq (sas-lower-hex-byte? (str-byte-at s i)) 1)
+                (sas-lower-hex-loop s (add i 1) end)
+                0)))
+    (defn sas-canonical-seal? (seal)
+        (if (eq (str_len seal) 76)
+            (if (str_eq (substring seal 0 12) (sas-seal-prefix))
+                (sas-lower-hex-loop seal 12 76)
+                0)
+            0))
+    (defn sas-source-vouch-ok? (v)
+        (if (sai-vouch-match? v)
+            (if (str_eq (sai-vouch-target v) (sai-target-source-hash)) 1 0)
+            0))
+    (defn sas-content-vouch-ok? (v)
+        (if (sai-vouch-match? v)
+            (if (str_eq (sai-vouch-target v) (sai-target-content-hash)) 1 0)
+            0))
+    (defn sas-vouches-ok? (source-vouch content-vouch)
+        (if (sas-source-vouch-ok? source-vouch)
+            (sas-content-vouch-ok? content-vouch)
+            0))
+    (defn sas-artifact-kind? (kind)
+        (if (str_eq kind (sad-kind-program-image-fkb))
+            1
+            (if (str_eq kind (sad-kind-native-dylib)) 1 0)))
+    (defn sas-status-for (expected actual source-vouch content-vouch)
+        (if (eq (sas-vouches-ok? source-vouch content-vouch) 0)
+            (sas-status-unvouched)
+            (if (str_eq expected "")
+                (sas-status-undeclared)
+                (if (eq (sas-canonical-seal? expected) 0)
+                    (sas-status-malformed)
+                    (if (str_eq expected actual)
+                        (sas-status-match)
+                        (sas-status-mismatch))))))
+
+    ; seal = ("source-artifact-seal" kind version path key-evidence-kind
+    ;         source-vouch-status content-vouch-status source-hash content-hash
+    ;         expected actual status artifact-bit)
+    (defn sas-seal-row (kind version path key-evidence-kind source-vouch-status content-vouch-status source-hash content-hash expected actual status artifact-bit)
+        (list "source-artifact-seal" kind version path key-evidence-kind
+              source-vouch-status content-vouch-status source-hash content-hash
+              expected actual status artifact-bit))
+    (defn sas-seal-row? (r) (str_eq (nth r 0) "source-artifact-seal"))
+    (defn sas-seal-kind (r) (nth r 1))
+    (defn sas-seal-version (r) (nth r 2))
+    (defn sas-seal-path (r) (nth r 3))
+    (defn sas-seal-key-evidence-kind (r) (nth r 4))
+    (defn sas-seal-source-vouch-status (r) (nth r 5))
+    (defn sas-seal-content-vouch-status (r) (nth r 6))
+    (defn sas-seal-source-hash (r) (nth r 7))
+    (defn sas-seal-content-hash (r) (nth r 8))
+    (defn sas-seal-expected (r) (nth r 9))
+    (defn sas-seal-actual (r) (nth r 10))
+    (defn sas-seal-status (r) (nth r 11))
+    (defn sas-seal-artifact-bit (r) (nth r 12))
+    (defn sas-seal-match? (r)
+        (if (sas-seal-row? r)
+            (if (str_eq (sas-seal-status r) (sas-status-match)) 1 0)
+            0))
+    (defn sas-seal-ok-bit (r)
+        (if (sas-seal-match? r) 1 0))
+    (defn sas-bound-source-hash (source-vouch)
+        (if (sas-source-vouch-ok? source-vouch) (sai-vouch-actual-hash source-vouch) ""))
+    (defn sas-bound-content-hash (content-vouch)
+        (if (sas-content-vouch-ok? content-vouch) (sai-vouch-actual-hash content-vouch) ""))
+
+    (defn sas-artifact-seal (kind version path source-vouch content-vouch artifact-bit key-bytes expected-seal)
+        (do
+            (let source-status (if (sai-vouch? source-vouch) (sai-vouch-status source-vouch) (sas-status-unvouched)))
+            (let content-status (if (sai-vouch? content-vouch) (sai-vouch-status content-vouch) (sas-status-unvouched)))
+            (let source-hash (sas-bound-source-hash source-vouch))
+            (let content-hash (sas-bound-content-hash content-vouch))
+            (if (eq (sas-artifact-kind? kind) 0)
+                (sas-seal-row kind version path (sas-key-evidence-supplied-bytes)
+                              source-status content-status source-hash content-hash
+                              expected-seal ""
+                              (sas-status-role-refused)
+                              artifact-bit)
+                (if (eq (sas-vouches-ok? source-vouch content-vouch) 1)
+                    (do
+                        (let message (sas-seal-message-v1 kind version path
+                                                           source-hash
+                                                           content-hash
+                                                           artifact-bit))
+                        (let actual (sas-hmac-seal key-bytes message))
+                        (sas-seal-row kind version path (sas-key-evidence-supplied-bytes)
+                                      source-status content-status source-hash content-hash
+                                      expected-seal actual
+                                      (sas-status-for expected-seal actual source-vouch content-vouch)
+                                      artifact-bit))
+                    (sas-seal-row kind version path (sas-key-evidence-supplied-bytes)
+                                  source-status content-status source-hash content-hash
+                                  expected-seal ""
+                                  (sas-status-for expected-seal "" source-vouch content-vouch)
+                                  artifact-bit)))))
+    (defn sas-program-image-fkb-seal (path source-vouch content-vouch includes-tbl key-bytes expected-seal)
+        (sas-artifact-seal (sad-kind-program-image-fkb)
+                           (sad-version-program-image-fkb)
+                           path
+                           source-vouch
+                           content-vouch
+                           includes-tbl
+                           key-bytes
+                           expected-seal))
+    (defn sas-native-dylib-seal (path source-vouch content-vouch lowerable key-bytes expected-seal)
+        (sas-artifact-seal (sad-kind-native-dylib)
+                           (sad-version-native-dylib)
+                           path
+                           source-vouch
+                           content-vouch
+                           lowerable
+                           key-bytes
+                           expected-seal))
+    (defn sas-source-role-refusal (path expected-seal)
+        (sas-seal-row (sap-role-source) "" path (sas-key-evidence-supplied-bytes)
+                      "" "" "" "" expected-seal "" (sas-status-role-refused) 0))
+
+    (defn sas-source-hash-if-match (v)
+        (if (sas-source-vouch-ok? v) (sai-vouch-actual-hash v) ""))
+    (defn sas-content-hash-if-match (v)
+        (if (sas-content-vouch-ok? v) (sai-vouch-actual-hash v) ""))
+    (defn sas-program-image-fkb-observation-from-seal (path exists size mtime source-vouch content-vouch seal-row includes-tbl)
+        (sap-program-image-fkb-observation path exists size mtime
+                                           (sas-source-hash-if-match source-vouch)
+                                           (sas-content-hash-if-match content-vouch)
+                                           (sas-seal-ok-bit seal-row)
+                                           includes-tbl))
+    (defn sas-native-dylib-observation-from-seal (path exists size mtime source-vouch content-vouch seal-row proof callable lowerable)
+        (sap-native-dylib-observation path exists size mtime
+                                      (sas-source-hash-if-match source-vouch)
+                                      (sas-content-hash-if-match content-vouch)
+                                      (sas-seal-ok-bit seal-row)
+                                      proof
+                                      callable
+                                      lowerable))
+)

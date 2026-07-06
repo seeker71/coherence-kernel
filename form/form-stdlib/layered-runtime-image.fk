@@ -1,0 +1,89 @@
+; layered-runtime-image.fk -- load runtime layers from .fkb recipe images.
+;
+; This is the small executable path that replaces the giant source-driver habit:
+; a layer is already a recipe object, persisted as .fkb, with a .sym sidecar for
+; locale/domain names. Runtime checks freshness, loads the recipe image, and
+; returns its recipe image for an explicit walk_recipe_here splice at the load
+; site. That splice is deliberately not hidden in a normal Form helper: env
+; natives bind into their caller's frame, so wrapping walk_recipe_here would bind
+; into the helper's frame instead of the layer consumer's frame.
+;
+; It does not parse source, concatenate modules, build fourth-arm table drivers,
+; emit C, load dylibs, or grow the C seed.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn lri-version () "layered-runtime-image-v1")
+
+    (defn lri-feature (name status) (list "layered-runtime-image-feature" name status))
+    (defn lri-feature-name (f) (nth f 1))
+    (defn lri-feature-status (f) (nth f 2))
+    (defn layered-runtime-image-manifest ()
+        (list
+            (lri-feature "fkb-runtime-layer" 1)
+            (lri-feature "sym-sidecar-required" 1)
+            (lri-feature "source-fkb-sym-freshness" 1)
+            (lri-feature "read-form-binary-load" 1)
+            (lri-feature "walk-recipe-here-splice" 1)
+            (lri-feature "no-source-concatenation" 1)
+            (lri-feature "no-table-driver" 1)
+            (lri-feature "no-c-seed-growth" 1)))
+    (defn layered-runtime-image-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (lri-feature-name (head fs)) name)
+                     (eq (lri-feature-status (head fs)) 1))
+                1
+                (layered-runtime-image-manifest-has? name (tail fs)))))
+
+    (defn lri-sym-line (key value)
+        (str_concat key (str_concat " " (str_concat value "\n"))))
+    (defn lri-sym-text (source locale domain export)
+        (str_concat "form-layer-sym-v1\n"
+        (str_concat (lri-sym-line "source" source)
+        (str_concat (lri-sym-line "locale" locale)
+        (str_concat (lri-sym-line "domain" domain)
+                    (lri-sym-line "export" export))))))
+
+    (defn lri-sym-valid? (text)
+        (if (str_eq (value_kind text) "string")
+            (if (eq (str_find text "form-layer-sym-v1\n" 0) 0)
+                (if (ge (str_find text "\nsource " 0) 0)
+                    (if (ge (str_find text "\nlocale " 0) 0)
+                        (if (ge (str_find text "\ndomain " 0) 0)
+                            (if (ge (str_find text "\nexport " 0) 0) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn lri-write-sym (path source locale domain export)
+        (write_file_text path (lri-sym-text source locale domain export)))
+
+    (defn lri-file-present? (path)
+        (if (gt (file_size path) 0) 1 0))
+
+    (defn lri-fresh? (source-path fkb-path sym-path)
+        (if (lri-file-present? source-path)
+            (if (lri-file-present? fkb-path)
+                (if (lri-file-present? sym-path)
+                    (if (ge (file_mtime fkb-path) (file_mtime source-path))
+                        (if (ge (file_mtime sym-path) (file_mtime fkb-path))
+                            (lri-sym-valid? (read_file sym-path))
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn lri-install-layer (source-path fkb-path sym-path recipe export)
+        (do
+            (write_form_binary fkb-path recipe)
+            (lri-write-sym sym-path source-path "en-US" "form" export)
+            (lri-fresh? source-path fkb-path sym-path)))
+
+    (defn lri-read-layer (fkb-path)
+        (read_form_binary fkb-path))
+)

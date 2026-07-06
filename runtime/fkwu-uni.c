@@ -129,7 +129,9 @@ static void fk_die(const char *msg) {
 #define FK_CH_LOWER_N 110 /* the 'n' in a \n escape specifier */
 #define FK_CH_LOWER_T 116 /* the 't' in a \t escape specifier */
 #define FK_CH_LOWER_R 114 /* the 'r' in a \r escape specifier */
+#define FK_CH_LOWER_B 98  /* the 'b' in .fkb */
 #define FK_CH_LOWER_F 102 /* the 'f' in the --feval CLI flag */
+#define FK_CH_LOWER_K 107 /* the 'k' in .fk/.fkb */
 static const unsigned char *fk_gen = 0;
 static long long fk_gen_len = 0;
 static double *fk_fv;
@@ -455,6 +457,17 @@ extern int stat(const char *, void *);
 #define FK_HAVE_DIRENT_HEADER 1
 #endif
 #endif
+#if defined(__has_include) && !defined(_WIN32)
+#if __has_include(<errno.h>)
+#include <errno.h>
+#endif
+#endif
+#ifndef EINTR
+#define EINTR 4
+#endif
+#ifndef errno
+extern int errno;
+#endif
 #ifndef FK_HAVE_FCNTL_HEADER
 #define O_WRONLY 1
 #define O_CREAT 0x200
@@ -470,6 +483,34 @@ extern int unlink(const char *);
 extern int rename(const char *, const char *);
 extern int sprintf(char *, const char *, ...);
 extern char *getenv(const char *);
+static long long fk_read_all_bounded(int fd, char *buf, long long cap) {
+    long long total = 0;
+    while (total < cap) {
+        long long got = read(fd, buf + total, (unsigned long)(cap - total));
+        if (got > 0) {
+            total = total + got;
+        } else if (got == 0) {
+            return total;
+        } else if (errno == EINTR) {
+            /* retry */
+        } else {
+            return -1;
+        }
+    }
+    while (1) {
+        char extra;
+        long long got = read(fd, &extra, 1);
+        if (got > 0) {
+            return -2;
+        }
+        if (got == 0) {
+            return total;
+        }
+        if (errno != EINTR) {
+            return -1;
+        }
+    }
+}
 static long long fk_rkey[FK_RECORD_CAP][FK_RECORD_MAX_KEYS];
 static long long fk_rval[FK_RECORD_CAP][FK_RECORD_MAX_KEYS];
 static long long fk_rcnt[FK_RECORD_CAP];
@@ -3742,7 +3783,7 @@ static void fk_vp(long long v) {
  * failure mode. */
 #define FK_FN_CAP 4096
 #define FK_AST_NODE_CAP 65536 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP) */
-#define FK_PARSE_BUF_CAP 1048576 /* fk_buf: scratch buffer for deserializing the flattened .tbl format */
+#define FK_PARSE_BUF_CAP 1048576 /* fk_buf: scratch buffer for program-image .fkb reads */
 static long long fk_fn_count;
 static long long fk_node_count;
 static long long fk_fn[FK_FN_CAP];
@@ -3935,12 +3976,6 @@ static long long fk_walk_body(long long i, long long fp) {
             }
             fk_vs[fp] = v12;
             fk_vsp = fp + 1;
-            {
-                long long _nr;
-                if (fk_feval_try_native(c12, fp, 1, &_nr)) {
-                    return _nr;
-                }
-            }
             i = fk_fn[c12];
             continue;
         }
@@ -3955,12 +3990,6 @@ static long long fk_walk_body(long long i, long long fp) {
             fk_vs[fp] = a0;
             fk_vs[fp + 1] = a1;
             fk_vsp = fp + 2;
-            {
-                long long _nr;
-                if (fk_feval_try_native(c240, fp, 2, &_nr)) {
-                    return _nr;
-                }
-            }
             i = fk_fn[c240];
             continue;
         }
@@ -3983,12 +4012,6 @@ static long long fk_walk_body(long long i, long long fp) {
                 m241 = m241 + 1;
             }
             fk_vsp = fp + n241;
-            {
-                long long _nr;
-                if (fk_feval_try_native(c241, fp, n241, &_nr)) {
-                    return _nr;
-                }
-            }
             i = fk_fn[c241];
             continue;
         }
@@ -6101,17 +6124,20 @@ static void fk_bd_pop(void) {
     }
 }
 static long long fk_parse_do(void);
+static long long fk_parse_top_do_value(void);
+static void fk_parse_top(void);
 /* stone 4: a function table. Each top-level (defn name ...) gets its own fn-index (>=1); a call to
  * a registered name lowers to tag 12 (call-by-index, single-arg). A non-defn top form is the root
  * (fn[0]). */
-/* FK_TOP_FN_SYM_CAP is deliberately smaller than FK_FN_CAP: it bounds only the
- * name->index LOOKUP table for top-level (defn ...) forms, not the function
- * count itself -- fk_fn_lookup degrades to "unregistered, allocate fresh" past
- * this cap (see fk_sparse's `if (idx < 0)` fallback), it does not reject the
- * program. */
-#define FK_TOP_FN_SYM_CAP 256
+/* Function names must remain addressable after fat preludes. A smaller lookup
+ * table made later top-level defns silently uncallable even though fk_fn[]
+ * still had room for their bodies. */
+#define FK_TOP_FN_SYM_CAP FK_FN_CAP
 static long long fk_fnsym_s[FK_TOP_FN_SYM_CAP], fk_fnsym_n[FK_TOP_FN_SYM_CAP],
     fk_fnidx[FK_TOP_FN_SYM_CAP], fk_fntop, fk_defn_next, fk_root, fk_fnar[FK_FN_CAP];
+#define FK_TOP_CONST_CAP 512
+static long long fk_const_s[FK_TOP_CONST_CAP], fk_const_n[FK_TOP_CONST_CAP],
+    fk_const_node[FK_TOP_CONST_CAP], fk_const_top;
 static long long fk_fn_lookup(long long s, long long n) {
     long long i = 0;
     while (i < fk_fntop) {
@@ -6122,7 +6148,36 @@ static long long fk_fn_lookup(long long s, long long n) {
     }
     return -1;
 }
+static long long fk_const_lookup(long long s, long long n) {
+    long long i = fk_const_top;
+    while (i > 0) {
+        i = i - 1;
+        if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i])) {
+            return fk_const_node[i];
+        }
+    }
+    return -1;
+}
+static void fk_const_set(long long s, long long n, long long node) {
+    long long i = 0;
+    while (i < fk_const_top) {
+        if (fk_sym_eq2(s, n, fk_const_s[i], fk_const_n[i])) {
+            fk_const_node[i] = node;
+            return;
+        }
+        i = i + 1;
+    }
+    if (fk_const_top < FK_TOP_CONST_CAP) {
+        fk_const_s[fk_const_top] = s;
+        fk_const_n[fk_const_top] = n;
+        fk_const_node[fk_const_top] = node;
+        fk_const_top = fk_const_top + 1;
+        return;
+    }
+    fk_die("fk_const_set: top-level constant table full");
+}
 static long long fk_parse_variadic(long long tag);
+static long long fk_parse_fixed_list(long long n);
 /* arity -1: parse-until-close, fold right via tag -> nil(18) */
 static long long fk_sparse(void) {
     fk_sskip();
@@ -6247,6 +6302,14 @@ static long long fk_sparse(void) {
             long long tag = fk_optab[oi].tag;
             if (ar < 0) {
                 return fk_parse_variadic(tag);
+            }
+            if (tag == 91 && ar == 4) {
+                long long xs = fk_parse_fixed_list(4);
+                fk_sskip();
+                if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                    fk_spos = fk_spos + 1;
+                }
+                return fk_smknode(tag, xs, 0, 0);
             }
             long long c1 = 0, c2 = 0, c3 = 0;
             if (ar >= 1) {
@@ -6466,6 +6529,10 @@ static long long fk_sparse(void) {
     if (fk_sym_eq(s, fk_spos - s, "false")) {
         return fk_smklit(0);
     }
+    long long cn = fk_const_lookup(s, fk_spos - s);
+    if (cn >= 0) {
+        return cn;
+    }
     long long vfidx = fk_fn_lookup(s, fk_spos - s);
     if (vfidx >= 0) {
         return fk_smknode(243, vfidx, 0, 0);
@@ -6517,6 +6584,88 @@ static long long fk_parse_do(void) {
     }
     long long rest = fk_parse_do();
     return fk_smknode(69, node, rest, 0);
+}
+/* Top-level (do ...) has one extra responsibility over ordinary value-position
+ * do: a defn remains a top-level definition even if it appears after a
+ * value-bearing let. The ordinary fk_parse_do path must not grow that behavior;
+ * nested do in function bodies stays value-level. */
+static long long fk_parse_top_do_value(void) {
+    fk_sskip();
+    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
+        if (fk_spos < fk_slen) {
+            fk_spos = fk_spos + 1;
+        }
+        return fk_smklit(0);
+    }
+    if (fk_srctext[fk_spos] == FK_CH_LPAREN) {
+        long long p = fk_spos + 1;
+        while (p < fk_slen && fk_sws(fk_srctext[p])) {
+            p = p + 1;
+        }
+        long long he = fk_sym_end(p);
+        if (fk_sym_eq(p, he - p, "defn")) {
+            long long save_bd_top = fk_bd_top;
+            long long save_maxslot = fk_maxslot;
+            long long save_s[128], save_n[128], save_off[128];
+            long long si = 0;
+            while (si < save_bd_top && si < 128) {
+                save_s[si] = fk_bd_s[si];
+                save_n[si] = fk_bd_n[si];
+                save_off[si] = fk_bd_off[si];
+                si = si + 1;
+            }
+            fk_parse_top();
+            si = 0;
+            while (si < save_bd_top && si < 128) {
+                fk_bd_s[si] = save_s[si];
+                fk_bd_n[si] = save_n[si];
+                fk_bd_off[si] = save_off[si];
+                si = si + 1;
+            }
+            fk_bd_top = save_bd_top;
+            fk_maxslot = save_maxslot;
+            return fk_parse_top_do_value();
+        }
+        if (fk_sym_eq(p, he - p, "let")) {
+            fk_spos = he;
+            fk_sskip();
+            long long ns = fk_spos;
+            fk_spos = fk_sym_end(fk_spos);
+            long long nlen = fk_spos - ns;
+            long long val = fk_sparse();
+            fk_sskip();
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                fk_spos = fk_spos + 1;
+            }
+            long long slot = fk_maxslot + 1;
+            fk_maxslot = slot;
+            fk_bd_push(ns, nlen, slot);
+            long long rest = fk_parse_top_do_value();
+            fk_bd_pop();
+            return fk_smknode(109, fk_smklit(slot), val, rest);
+        }
+    }
+    long long node = fk_sparse();
+    fk_sskip();
+    if (fk_spos >= fk_slen || fk_srctext[fk_spos] == FK_CH_RPAREN) {
+        if (fk_spos < fk_slen) {
+            fk_spos = fk_spos + 1;
+        }
+        return node;
+    }
+    long long rest = fk_parse_top_do_value();
+    return fk_smknode(69, node, rest, 0);
+}
+/* Fixed operand carrier for primitives whose evaluator expects one list-valued
+ * child instead of flat AST child slots. Tag 91 (make_nodeid) reads child 1 as
+ * pkg, level, type, inst through the runtime cons-list carrier. */
+static long long fk_parse_fixed_list(long long n) {
+    if (n <= 0) {
+        return fk_smknode(18, 0, 0, 0);
+    }
+    long long h = fk_sparse();
+    long long t = fk_parse_fixed_list(n - 1);
+    return fk_smknode(19, h, t, 0);
 }
 /* GENERIC VARIADIC FOLD (arity -1 in fk_optab). Parse operands until the close paren and fold them
  * right into a chain via `tag` ending in nil (tag 18). For (list a b ..) tag is cons/19, yielding
@@ -6720,13 +6869,13 @@ static void fk_parse_top(void) {
              * becomes the root, exactly as the old loop did (the optable generator wraps its defns
              * in one such nested do). Both keep going through fk_parse_top, which carries defn
              * registration. The FIRST value-bearing inner form (a let or an expression) begins the
-             * root value-sequence, parsed by fk_parse_do so a do-let binds for the REST of the do
-             * (tag 109) and forms sequence (tag 69). The old loop sent that value part through
-             * fk_parse_top too; fk_parse_top has no let-binding and overwrote fk_root each
-             * iteration, so `(do (let p V) BODY)` lost the binding and BODY read an unbound name
-             * (-> 0). Routing only the value part through fk_parse_do is the whole fix; defn and
-             * nested-do handling are unchanged. fk_parse_do consumes this do's closing ) itself; a
-             * do of only defns leaves fk_root unset so the last defn becomes the root. */
+             * root value-sequence, parsed by the top-level-do value parser so
+             * a do-let binds for the REST of the do (tag 109), later defns
+             * still fill their prescanned function bodies, and ordinary forms
+             * sequence (tag 69). The ordinary fk_parse_do path remains for
+             * value-level nested do. The parser consumes this do's closing )
+             * itself; a do of only defns leaves fk_root unset so the last defn
+             * becomes the root. */
             fk_spos = he;
             while (1) {
                 fk_sskip();
@@ -6747,7 +6896,12 @@ static void fk_parse_top(void) {
                         continue;
                     }
                 }
-                fk_root = fk_parse_do();
+                fk_bd_top = 0;
+                fk_maxslot = 0;
+                fk_root = fk_parse_top_do_value();
+                if (fk_maxslot > 0) {
+                    fk_root = fk_smknode(111, fk_smklit(fk_maxslot), fk_root, 0);
+                }
                 return;
             }
         }
@@ -6817,6 +6971,30 @@ static void fk_parse_top(void) {
             if (idx >= 0 && idx < FK_FN_CAP) {
                 fk_fn[idx] = body;
             }
+            return;
+        }
+        if (fk_sym_eq(p, he - p, "let")) {
+            fk_spos = he;
+            fk_sskip();
+            long long ns3 = fk_spos;
+            fk_spos = fk_sym_end(fk_spos);
+            long long nlen3 = fk_spos - ns3;
+            long long save_bd_top = fk_bd_top;
+            long long save_maxslot = fk_maxslot;
+            fk_bd_top = 0;
+            fk_maxslot = 0;
+            long long val3 = fk_sparse();
+            if (fk_maxslot > 0) {
+                val3 = fk_smknode(111, fk_smklit(fk_maxslot), val3, 0);
+            }
+            fk_bd_top = save_bd_top;
+            fk_maxslot = save_maxslot;
+            fk_sskip();
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                fk_spos = fk_spos + 1;
+            }
+            fk_const_set(ns3, nlen3, val3);
+            fk_root = val3;
             return;
         }
     }
@@ -8223,40 +8401,1440 @@ static fk_natfn fk_nat_install(const unsigned char *code, long long n) {
     return (fk_natfn)mem;
 #endif
 }
-/* installed native body + length per fn, for --src crystallization. fk_src_nat
- * and fk_src_nat_len are already declared earlier in the file, near
- * fk_nat_exec -- this used to re-declare both here too (a harmless duplicate
- * under C's tentative-definition rules, but redundant); root-caused rather than
- * left, since the earlier declaration already covers this use. */
-static int fk_run_src(const char *path, long long arg) {
+static long long fk_path_len(const char *p) {
+    long long n = 0;
+    while (p[n] != 0) {
+        n = n + 1;
+    }
+    return n;
+}
+static int fk_path_has_suffix(const char *src, const char *suffix) {
+    long long n = fk_path_len(src);
+    long long sn = fk_path_len(suffix);
+    if (sn > n) {
+        return 0;
+    }
+    long long i = 0;
+    while (i < sn) {
+        if (src[n - sn + i] != suffix[i]) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+static int fk_path_replace_ext(const char *src, const char *ext, char *out, long long cap) {
+    long long n = fk_path_len(src);
+    long long en = fk_path_len(ext);
+    long long base = n;
+    if (n >= 3 && src[n - 3] == FK_CH_DOT && src[n - 2] == FK_CH_LOWER_F &&
+        src[n - 1] == FK_CH_LOWER_K) {
+        base = n - 3;
+    }
+    if (base + en + 1 > cap) {
+        return 0;
+    }
+    long long i = 0;
+    while (i < base) {
+        out[i] = src[i];
+        i = i + 1;
+    }
+    long long j = 0;
+    while (j < en) {
+        out[i + j] = ext[j];
+        j = j + 1;
+    }
+    out[i + j] = 0;
+    return 1;
+}
+static long long fk_path_mtime_raw(const char *p) {
+#ifdef FK_HAVE_STAT_HEADER
+    struct stat st;
+    if (stat(p, &st) != 0) {
+        return -1;
+    }
+    return (long long)st.st_mtime;
+#else
+    (void)p;
+    return -1;
+#endif
+}
+static long long fk_path_size_raw(const char *p) {
+#ifdef FK_HAVE_STAT_HEADER
+    struct stat st;
+    if (stat(p, &st) != 0) {
+        return -1;
+    }
+    return (long long)st.st_size;
+#else
+    int fd = open(p, 0);
+    if (fd < 0) {
+        return -1;
+    }
+    long n = lseek(fd, 0, 2);
+    close(fd);
+    return (long long)n;
+#endif
+}
+static int fk_write_all_raw(int fd, const void *buf, unsigned long n) {
+    unsigned long done = 0;
+    const char *p = (const char *)buf;
+    while (done < n) {
+        long long w = write(fd, p + done, n - done);
+        if (w <= 0) {
+            return 0;
+        }
+        done = done + (unsigned long)w;
+    }
+    return 1;
+}
+static void fk_diag(const char *level, const char *path, const char *msg) {
+    fk_write_all_raw(2, "fkwu: ", 6);
+    fk_write_all_raw(2, level, (unsigned long)fk_path_len(level));
+    fk_write_all_raw(2, ": ", 2);
+    if (path != 0 && path[0] != 0) {
+        fk_write_all_raw(2, path, (unsigned long)fk_path_len(path));
+        fk_write_all_raw(2, ": ", 2);
+    }
+    fk_write_all_raw(2, msg, (unsigned long)fk_path_len(msg));
+    fk_write_all_raw(2, "\n", 1);
+}
+#define FK_SRC_DEP_CAP 128
+#define FK_SRC_HASH_CAP 16384
+static char fk_src_dep_path[FK_SRC_DEP_CAP][4096];
+static long long fk_src_dep_mtime[FK_SRC_DEP_CAP];
+static long long fk_src_dep_size[FK_SRC_DEP_CAP];
+static long long fk_src_dep_parent[FK_SRC_DEP_CAP];
+static long long fk_src_dep_end[FK_SRC_DEP_CAP];
+static long long fk_src_dep_count;
+static char fk_src_root_path[4096];
+static char fk_src_root_text[FK_SOURCE_TEXT_CAP];
+static long long fk_src_root_len;
+
+static void fk_cstr_copy(char *dst, const char *src, long long cap) {
+    long long i = 0;
+    if (cap <= 0) {
+        return;
+    }
+    while (i + 1 < cap && src[i] != 0) {
+        dst[i] = src[i];
+        i = i + 1;
+    }
+    dst[i] = 0;
+}
+static int fk_cstr_eq(const char *a, const char *b) {
+    long long i = 0;
+    while (a[i] != 0 && b[i] != 0) {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return a[i] == b[i];
+}
+static int fk_src_dep_index(const char *path) {
+    long long i = 0;
+    while (i < fk_src_dep_count) {
+        if (fk_cstr_eq(fk_src_dep_path[i], path)) {
+            return (int)i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+static int fk_path_is_abs(const char *path) {
+    if (path[0] == FK_CH_SLASH) {
+        return 1;
+    }
+    if (((path[0] >= FK_CH_UPPER_A && path[0] <= FK_CH_UPPER_Z) ||
+         (path[0] >= FK_CH_LOWER_A && path[0] <= FK_CH_LOWER_Z)) &&
+        path[1] == FK_CH_COLON) {
+        return 1;
+    }
+    return 0;
+}
+static long long fk_path_dir_len(const char *path) {
+    long long i = 0;
+    long long last = -1;
+    while (path[i] != 0) {
+        if (path[i] == FK_CH_SLASH) {
+            last = i;
+        }
+        i = i + 1;
+    }
+    return last >= 0 ? last + 1 : 0;
+}
+static int fk_path_resolve_fk_dep(const char *owner_path, const char *token, long long token_n,
+                                  char *out, long long cap) {
+    if (token_n <= 0 || cap <= token_n) {
+        return 0;
+    }
+    if (token[0] == FK_CH_SLASH ||
+        (token_n > 1 && ((token[0] >= FK_CH_UPPER_A && token[0] <= FK_CH_UPPER_Z) ||
+                         (token[0] >= FK_CH_LOWER_A && token[0] <= FK_CH_LOWER_Z)) &&
+         token[1] == FK_CH_COLON)) {
+        long long i = 0;
+        while (i < token_n) {
+            out[i] = token[i];
+            i = i + 1;
+        }
+        out[token_n] = 0;
+        return 1;
+    }
+    long long dir_n = fk_path_dir_len(owner_path);
+    if (dir_n + token_n + 1 > cap) {
+        return 0;
+    }
+    long long i = 0;
+    while (i < dir_n) {
+        out[i] = owner_path[i];
+        i = i + 1;
+    }
+    long long j = 0;
+    while (j < token_n) {
+        out[i + j] = token[j];
+        j = j + 1;
+    }
+    out[i + j] = 0;
+    if (fk_path_size_raw(out) >= 0) {
+        return 1;
+    }
+    long long root_n = 0;
+    if (owner_path[0] == 'f' && owner_path[1] == 'o' && owner_path[2] == 'r' &&
+        owner_path[3] == 'm' && owner_path[4] == FK_CH_SLASH) {
+        root_n = 5;
+    } else {
+        long long s = 0;
+        while (owner_path[s] != 0) {
+            if (owner_path[s] == FK_CH_SLASH && owner_path[s + 1] == 'f' &&
+                owner_path[s + 2] == 'o' && owner_path[s + 3] == 'r' &&
+                owner_path[s + 4] == 'm' && owner_path[s + 5] == FK_CH_SLASH) {
+                root_n = s + 6;
+            }
+            s = s + 1;
+        }
+    }
+    if (root_n > 0 && root_n + token_n + 1 <= cap) {
+        i = 0;
+        while (i < root_n) {
+            out[i] = owner_path[i];
+            i = i + 1;
+        }
+        j = 0;
+        while (j < token_n) {
+            out[i + j] = token[j];
+            j = j + 1;
+        }
+        out[i + j] = 0;
+        if (fk_path_size_raw(out) >= 0) {
+            return 1;
+        }
+    }
+    if (token_n + 6 <= cap) {
+        const char *form_prefix = "form/";
+        i = 0;
+        while (form_prefix[i] != 0) {
+            out[i] = form_prefix[i];
+            i = i + 1;
+        }
+        j = 0;
+        while (j < token_n) {
+            out[i + j] = token[j];
+            j = j + 1;
+        }
+        out[i + j] = 0;
+        if (fk_path_size_raw(out) >= 0) {
+            return 1;
+        }
+    }
+    if (token_n + 1 <= cap) {
+        i = 0;
+        while (i < token_n) {
+            out[i] = token[i];
+            i = i + 1;
+        }
+        out[i] = 0;
+        if (fk_path_size_raw(out) >= 0) {
+            return 1;
+        }
+    }
+    if (dir_n + token_n + 1 > cap) {
+        return 0;
+    }
+    i = 0;
+    while (i < dir_n) {
+        out[i] = owner_path[i];
+        i = i + 1;
+    }
+    j = 0;
+    while (j < token_n) {
+        out[i + j] = token[j];
+        j = j + 1;
+    }
+    out[i + j] = 0;
+    return 1;
+}
+static int fk_source_hash_append(char *out, long long cap, long long *pos, const char *s) {
+    long long i = 0;
+    while (s[i] != 0) {
+        if (*pos + 1 >= cap) {
+            return 0;
+        }
+        out[*pos] = s[i];
+        *pos = *pos + 1;
+        i = i + 1;
+    }
+    out[*pos] = 0;
+    return 1;
+}
+static int fk_source_hash_append_ll(char *out, long long cap, long long *pos, long long v) {
+    char buf[64];
+    sprintf(buf, "%lld", v);
+    return fk_source_hash_append(out, cap, pos, buf);
+}
+static long long fk_src_unit_mtime_range(long long start, long long end) {
+    long long m = 1;
+    long long i = start;
+    while (i < end && i < fk_src_dep_count) {
+        if (fk_src_dep_mtime[i] > m) {
+            m = fk_src_dep_mtime[i];
+        }
+        i = i + 1;
+    }
+    return m;
+}
+static long long fk_src_unit_mtime(void) {
+    return fk_src_unit_mtime_range(0, fk_src_dep_count);
+}
+static int fk_src_unit_hash_range(long long start, long long end, char *out, long long cap) {
+    long long pos = 0;
+    long long i = start;
+    if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v1")) {
+        return 0;
+    }
+    while (i < end && i < fk_src_dep_count) {
+        if (!fk_source_hash_append(out, cap, &pos, "|") ||
+            !fk_source_hash_append(out, cap, &pos, fk_src_dep_path[i]) ||
+            !fk_source_hash_append(out, cap, &pos, "@") ||
+            !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_mtime[i]) ||
+            !fk_source_hash_append(out, cap, &pos, ":") ||
+            !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_size[i])) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return 1;
+}
+static int fk_src_unit_hash(char *out, long long cap) {
+    return fk_src_unit_hash_range(0, fk_src_dep_count, out, cap);
+}
+static int fk_src_line_is_bare_import_fk(const char *text, long long line_start, long long line_end);
+static int fk_src_append_text(const char *path, const char *text, long long n) {
+    long long line_start = 0;
+    if (fk_slen + n + 2 >= FK_SOURCE_TEXT_CAP) {
+        fk_diag("error", path, "combined .fk dependency unit exceeds FK_SOURCE_TEXT_CAP");
+        return 0;
+    }
+    while (line_start < n) {
+        long long line_end = line_start;
+        while (line_end < n && text[line_end] != FK_CH_LF && text[line_end] != FK_CH_CR) {
+            line_end = line_end + 1;
+        }
+        if (!fk_src_line_is_bare_import_fk(text, line_start, line_end)) {
+            long long i = line_start;
+            while (i < line_end) {
+                fk_srctext[fk_slen] = text[i];
+                fk_slen = fk_slen + 1;
+                i = i + 1;
+            }
+            while (i < n && (text[i] == FK_CH_LF || text[i] == FK_CH_CR)) {
+                fk_srctext[fk_slen] = text[i];
+                fk_slen = fk_slen + 1;
+                i = i + 1;
+            }
+        }
+        line_start = line_end;
+        while (line_start < n && (text[line_start] == FK_CH_LF || text[line_start] == FK_CH_CR)) {
+            line_start = line_start + 1;
+        }
+    }
+    fk_srctext[fk_slen] = FK_CH_LF;
+    fk_slen = fk_slen + 1;
+    fk_srctext[fk_slen] = 0;
+    return 1;
+}
+static int fk_src_collect_file(const char *path, long long parent_idx);
+static char fk_ascii_lower_char(char c) {
+    if (c >= FK_CH_UPPER_A && c <= FK_CH_UPPER_Z) {
+        return (char)(c + (FK_CH_LOWER_A - FK_CH_UPPER_A));
+    }
+    return c;
+}
+static int fk_slice_eq_word_ci(const char *text, long long start, long long n, const char *word) {
+    long long i = 0;
+    while (i < n && word[i] != 0) {
+        if (fk_ascii_lower_char(text[start + i]) != fk_ascii_lower_char(word[i])) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return i == n && word[i] == 0;
+}
+static int fk_src_prelude_none_token(const char *text, long long start, long long n) {
+    if (fk_slice_eq_word_ci(text, start, n, "none")) {
+        return 1;
+    }
+    if (n == 6 && text[start] == FK_CH_LPAREN && text[start + 5] == FK_CH_RPAREN &&
+        fk_slice_eq_word_ci(text, start + 1, 4, "none")) {
+        return 1;
+    }
+    return 0;
+}
+static int fk_src_prelude_backslash_token(const char *text, long long start, long long n) {
+    return n == 1 && text[start] == FK_CH_BACKSLASH;
+}
+static int fk_src_prelude_fk_token(const char *text, long long start, long long n) {
+    return n >= 3 && text[start + n - 3] == FK_CH_DOT && text[start + n - 2] == FK_CH_LOWER_F &&
+           text[start + n - 1] == FK_CH_LOWER_K;
+}
+static long long fk_src_trim_import_token(const char *text, long long start, long long *n) {
+    long long s = start;
+    long long e = start + *n;
+    while (s < e && (text[s] == FK_CH_SPACE || text[s] == FK_CH_TAB || text[s] == FK_CH_COMMA ||
+                     text[s] == FK_CH_SEMI)) {
+        s = s + 1;
+    }
+    while (e > s && (text[e - 1] == FK_CH_SPACE || text[e - 1] == FK_CH_TAB ||
+                     text[e - 1] == FK_CH_COMMA || text[e - 1] == FK_CH_SEMI)) {
+        e = e - 1;
+    }
+    *n = e - s;
+    return s;
+}
+static int fk_src_collect_import_token(const char *owner_path, long long owner_idx, const char *text,
+                                       long long start, long long n) {
+    start = fk_src_trim_import_token(text, start, &n);
+    if (n <= 0 || fk_src_prelude_none_token(text, start, n)) {
+        return 1;
+    }
+    if (!fk_src_prelude_fk_token(text, start, n)) {
+        return 1;
+    }
+    char dep_path[4096];
+    if (!fk_path_resolve_fk_dep(owner_path, text + start, n, dep_path, 4096)) {
+        fk_diag("error", owner_path, "import path exceeds buffer");
+        return 0;
+    }
+    return fk_src_collect_file(dep_path, owner_idx);
+}
+static int fk_src_word_at_ci(const char *text, long long p, long long end, const char *word) {
+    long long i = 0;
+    while (word[i] != 0) {
+        if (p + i >= end || fk_ascii_lower_char(text[p + i]) != fk_ascii_lower_char(word[i])) {
+            return 0;
+        }
+        i = i + 1;
+    }
+    return p + i == end || text[p + i] == FK_CH_SPACE || text[p + i] == FK_CH_TAB ||
+           text[p + i] == FK_CH_COLON || text[p + i] == FK_CH_DQUOTE;
+}
+static int fk_src_collect_import_statement(const char *owner_path, long long owner_idx, const char *text,
+                                           long long p, long long line_end) {
+    if (!fk_src_word_at_ci(text, p, line_end, "import")) {
+        return 1;
+    }
+    p = p + 6;
+    while (p < line_end && (text[p] == FK_CH_SPACE || text[p] == FK_CH_TAB ||
+                            text[p] == FK_CH_COLON)) {
+        p = p + 1;
+    }
+    if (p >= line_end) {
+        return 1;
+    }
+    long long start = p;
+    long long n = 0;
+    if (text[p] == FK_CH_DQUOTE) {
+        p = p + 1;
+        start = p;
+        while (p < line_end && text[p] != FK_CH_DQUOTE) {
+            p = p + 1;
+        }
+        n = p - start;
+    } else {
+        while (p < line_end && text[p] != FK_CH_SPACE && text[p] != FK_CH_TAB &&
+               text[p] != FK_CH_COMMA && text[p] != FK_CH_SEMI) {
+            p = p + 1;
+        }
+        n = p - start;
+    }
+    return fk_src_collect_import_token(owner_path, owner_idx, text, start, n);
+}
+static int fk_src_line_is_bare_import_fk(const char *text, long long line_start, long long line_end) {
+    long long p = line_start;
+    while (p < line_end && (text[p] == FK_CH_SPACE || text[p] == FK_CH_TAB)) {
+        p = p + 1;
+    }
+    if (!fk_src_word_at_ci(text, p, line_end, "import")) {
+        return 0;
+    }
+    p = p + 6;
+    while (p < line_end && (text[p] == FK_CH_SPACE || text[p] == FK_CH_TAB ||
+                            text[p] == FK_CH_COLON)) {
+        p = p + 1;
+    }
+    if (p >= line_end) {
+        return 0;
+    }
+    long long start = p;
+    long long n = 0;
+    if (text[p] == FK_CH_DQUOTE) {
+        p = p + 1;
+        start = p;
+        while (p < line_end && text[p] != FK_CH_DQUOTE) {
+            p = p + 1;
+        }
+        n = p - start;
+    } else {
+        while (p < line_end && text[p] != FK_CH_SPACE && text[p] != FK_CH_TAB &&
+               text[p] != FK_CH_COMMA && text[p] != FK_CH_SEMI) {
+            p = p + 1;
+        }
+        n = p - start;
+    }
+    start = fk_src_trim_import_token(text, start, &n);
+    return fk_src_prelude_fk_token(text, start, n);
+}
+static int fk_src_collect_preludes(const char *owner_path, const char *text, long long n,
+                                   long long owner_idx) {
+    const char *needle = "preludes:";
+    long long needle_n = 9;
+    long long i = 0;
+    while (i < n) {
+        long long line_start = i;
+        long long line_end = i;
+        while (line_end < n && text[line_end] != FK_CH_LF && text[line_end] != FK_CH_CR) {
+            line_end = line_end + 1;
+        }
+        long long comment = -1;
+        long long scan = line_start;
+        while (scan < line_end) {
+            if (text[scan] == FK_CH_SEMI) {
+                comment = scan + 1;
+                break;
+            }
+            scan = scan + 1;
+        }
+        if (comment >= 0) {
+            scan = comment;
+            while (scan < line_end && (text[scan] == FK_CH_SPACE || text[scan] == FK_CH_TAB)) {
+                scan = scan + 1;
+            }
+            if (!fk_src_collect_import_statement(owner_path, owner_idx, text, scan, line_end)) {
+                return 0;
+            }
+            scan = comment;
+            while (scan + needle_n <= line_end) {
+                long long j = 0;
+                while (j < needle_n && text[scan + j] == needle[j]) {
+                    j = j + 1;
+                }
+                if (j != needle_n) {
+                    scan = scan + 1;
+                    continue;
+                }
+                long long p = scan + needle_n;
+                while (p < n) {
+                    while (p < n && (text[p] == FK_CH_SPACE || text[p] == FK_CH_TAB ||
+                                     text[p] == FK_CH_COMMA)) {
+                        p = p + 1;
+                    }
+                    if (p >= n || text[p] == FK_CH_LF || text[p] == FK_CH_CR) {
+                        break;
+                    }
+                    long long start = p;
+                    while (p < n && text[p] != FK_CH_SPACE && text[p] != FK_CH_TAB &&
+                           text[p] != FK_CH_COMMA && text[p] != FK_CH_LF &&
+                           text[p] != FK_CH_CR) {
+                        p = p + 1;
+                    }
+                    if (p > start) {
+                        long long tn = p - start;
+                        start = fk_src_trim_import_token(text, start, &tn);
+                        if (fk_src_prelude_none_token(text, start, tn)) {
+                            while (p < n && text[p] != FK_CH_LF && text[p] != FK_CH_CR) {
+                                p = p + 1;
+                            }
+                            break;
+                        }
+                        if (fk_src_prelude_backslash_token(text, start, tn)) {
+                            while (p < n && text[p] != FK_CH_LF && text[p] != FK_CH_CR) {
+                                p = p + 1;
+                            }
+                            while (p < n && (text[p] == FK_CH_LF || text[p] == FK_CH_CR)) {
+                                p = p + 1;
+                            }
+                            while (p < n && (text[p] == FK_CH_SPACE || text[p] == FK_CH_TAB)) {
+                                p = p + 1;
+                            }
+                            if (p < n && text[p] == FK_CH_SEMI) {
+                                p = p + 1;
+                            }
+                            continue;
+                        }
+                        if (!fk_src_prelude_fk_token(text, start, tn)) {
+                            break;
+                        }
+                        char dep_path[4096];
+                        if (!fk_path_resolve_fk_dep(owner_path, text + start, tn, dep_path, 4096)) {
+                            fk_diag("error", owner_path, "prelude path exceeds buffer");
+                            return 0;
+                        }
+                        if (!fk_src_collect_file(dep_path, owner_idx)) {
+                            return 0;
+                        }
+                    }
+                }
+                scan = p;
+            }
+        }
+        scan = line_start;
+        while (scan < line_end && (text[scan] == FK_CH_SPACE || text[scan] == FK_CH_TAB)) {
+            scan = scan + 1;
+        }
+        if (comment < 0 && !fk_src_collect_import_statement(owner_path, owner_idx, text, scan, line_end)) {
+            return 0;
+        }
+        i = line_end;
+        while (i < n && (text[i] == FK_CH_LF || text[i] == FK_CH_CR)) {
+            i = i + 1;
+        }
+    }
+    return 1;
+}
+static int fk_src_collect_file(const char *path, long long parent_idx) {
+    if (fk_src_dep_index(path) >= 0) {
+        return 1;
+    }
+    long long mtime = fk_path_mtime_raw(path);
+    long long size = fk_path_size_raw(path);
+    if (mtime <= 0 || size < 0) {
+        fk_diag("error", path, "dependency source is missing or not stat-readable");
+        return 0;
+    }
 #if defined(_WIN32)
     int fd = open(path, 0x8000);
 #else
     int fd = open(path, 0);
 #endif
     if (fd < 0) {
-        return 2;
+        fk_diag("error", path, "dependency source could not be opened");
+        return 0;
     }
-    long long g = read(fd, fk_srctext, 262143);
+    long long got = fk_read_all_bounded(fd, fk_buf, FK_PARSE_BUF_CAP - 1);
     close(fd);
-    if (g < 0) {
+    if (got < 0) {
+        if (got == -2) {
+            fk_diag("error", path, "dependency source exceeds FK_PARSE_BUF_CAP");
+        } else {
+            fk_diag("error", path, "dependency source could not be read");
+        }
+        return 0;
+    }
+    char *owned = malloc((unsigned long)got + 1);
+    if (owned == 0) {
+        fk_die("fk_run_src: out of memory reading dependency source");
+    }
+    long long i = 0;
+    while (i < got) {
+        owned[i] = fk_buf[i];
+        i = i + 1;
+    }
+    owned[got] = 0;
+    if (fk_src_dep_count >= FK_SRC_DEP_CAP) {
+        free(owned);
+        fk_diag("error", path, "too many .fk dependencies");
+        return 0;
+    }
+    long long idx = fk_src_dep_count;
+    fk_cstr_copy(fk_src_dep_path[fk_src_dep_count], path, 4096);
+    fk_src_dep_mtime[fk_src_dep_count] = mtime;
+    fk_src_dep_size[fk_src_dep_count] = size;
+    fk_src_dep_parent[fk_src_dep_count] = parent_idx;
+    fk_src_dep_end[fk_src_dep_count] = fk_src_dep_count + 1;
+    fk_src_dep_count = fk_src_dep_count + 1;
+    if (fk_cstr_eq(path, fk_src_root_path)) {
+        if (got + 1 > FK_SOURCE_TEXT_CAP) {
+            free(owned);
+            fk_diag("error", path, "root source exceeds FK_SOURCE_TEXT_CAP");
+            return 0;
+        }
+        i = 0;
+        while (i < got) {
+            fk_src_root_text[i] = owned[i];
+            i = i + 1;
+        }
+        fk_src_root_text[got] = 0;
+        fk_src_root_len = got;
+    }
+    if (!fk_src_collect_preludes(path, owned, got, idx)) {
+        free(owned);
+        return 0;
+    }
+    fk_src_dep_end[idx] = fk_src_dep_count;
+    if (!fk_src_append_text(path, owned, got)) {
+        free(owned);
+        return 0;
+    }
+    free(owned);
+    return 1;
+}
+static int fk_src_load_unit(const char *root_path, char *source_hash, long long hash_cap,
+                            long long *unit_mtime) {
+    fk_slen = 0;
+    fk_srctext[0] = 0;
+    fk_src_dep_count = 0;
+    fk_src_root_len = 0;
+    fk_src_root_text[0] = 0;
+    fk_cstr_copy(fk_src_root_path, root_path, 4096);
+    if (!fk_src_collect_file(root_path, -1)) {
+        return 0;
+    }
+    if (!fk_src_unit_hash(source_hash, hash_cap)) {
+        fk_diag("error", root_path, "dependency identity exceeds hash buffer");
+        return 0;
+    }
+    *unit_mtime = fk_src_unit_mtime();
+    fk_spos = 0;
+    fk_srctext[fk_slen] = 0;
+    return 1;
+}
+static int fk_fkb_write_u8(int fd, long long v) {
+    unsigned char b = (unsigned char)(v & 255);
+    return fk_write_all_raw(fd, &b, 1);
+}
+static int fk_fkb_write_u32(int fd, long long v) {
+    unsigned char b[4];
+    if (v < 0 || v > 2147483647LL) {
+        return 0;
+    }
+    b[0] = (unsigned char)((v >> 24) & 255);
+    b[1] = (unsigned char)((v >> 16) & 255);
+    b[2] = (unsigned char)((v >> 8) & 255);
+    b[3] = (unsigned char)(v & 255);
+    return fk_write_all_raw(fd, b, 4);
+}
+static int fk_fkb_write_signed(int fd, long long v) {
+    long long mag = v < 0 ? -v : v;
+    if (mag > 2147483647LL) {
+        return 0;
+    }
+    return fk_fkb_write_u8(fd, v < 0 ? 1 : 0) && fk_fkb_write_u32(fd, mag);
+}
+static int fk_fkb_write_cstr(int fd, const char *s) {
+    long long n = fk_path_len(s);
+    return fk_fkb_write_u32(fd, n) && fk_write_all_raw(fd, s, (unsigned long)n);
+}
+static int fk_fkb_write_bytes(int fd, const char *s, long long n) {
+    return fk_fkb_write_u32(fd, n) && fk_write_all_raw(fd, s, (unsigned long)n);
+}
+static int fk_fkb_write_srctext_slice(int fd, long long start, long long n) {
+    if (start < 0 || n < 0 || start + n > fk_slen) {
+        return 0;
+    }
+    return fk_fkb_write_bytes(fd, fk_srctext + start, n);
+}
+static long long fk_src_symbol_id_for_fn(long long fnidx) {
+    long long i = 0;
+    while (i < fk_fntop) {
+        if (fk_fnidx[i] == fnidx) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+static long long fk_src_symbol_id_for_node(long long node) {
+    long long i = 0;
+    while (i < fk_fntop) {
+        long long fi = fk_fnidx[i];
+        if (fi >= 0 && fi < FK_FN_CAP && fk_fn[fi] == node) {
+            return i;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+static long long fk_src_direct_call_fn(long long node) {
+    if (node < 0 || node >= fk_node_count) {
+        return -1;
+    }
+    long long t = fk_node[node][0];
+    if (t == 12 || t == 240 || t == 241) {
+        return fk_node[node][1];
+    }
+    return -1;
+}
+static int fk_src_write_sym_text(const char *sym_path, const char *src_path, const char *fkb_path,
+                                 const char *source_hash) {
+#if defined(_WIN32)
+    int fd = open(sym_path, O_WRONLY | O_CREAT | O_TRUNC | 0x8000, 0666);
+#else
+    int fd = open(sym_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+#endif
+    if (fd < 0) {
+        return 0;
+    }
+    char line[512];
+    if (!fk_write_all_raw(fd, "program-image-sym-lens-v1\nsource ", 33) ||
+        !fk_write_all_raw(fd, src_path, (unsigned long)fk_path_len(src_path)) ||
+        !fk_write_all_raw(fd, "\nfkb ", 5) ||
+        !fk_write_all_raw(fd, fkb_path, (unsigned long)fk_path_len(fkb_path)) ||
+        !fk_write_all_raw(fd, "\nsource-hash ", 13) ||
+        !fk_write_all_raw(fd, source_hash, (unsigned long)fk_path_len(source_hash)) ||
+        !fk_write_all_raw(fd, "\n", 1)) {
+        close(fd);
+        return 0;
+    }
+    long long dep_i = 0;
+    while (dep_i < fk_src_dep_count) {
+        int n = sprintf(line, "dependency %lld mtime %lld size %lld path ", dep_i,
+                        fk_src_dep_mtime[dep_i], fk_src_dep_size[dep_i]);
+        if (!fk_write_all_raw(fd, line, (unsigned long)n) ||
+            !fk_write_all_raw(fd, fk_src_dep_path[dep_i],
+                              (unsigned long)fk_path_len(fk_src_dep_path[dep_i])) ||
+            !fk_write_all_raw(fd, "\n", 1)) {
+            close(fd);
+            return 0;
+        }
+        dep_i = dep_i + 1;
+    }
+    long long i = 0;
+    while (i < fk_fntop) {
+        long long name_s = fk_fnsym_s[i];
+        long long name_n = fk_fnsym_n[i];
+        int n = sprintf(line, "symbol %lld ", i);
+        if (!fk_write_all_raw(fd, line, (unsigned long)n) ||
+            !fk_write_all_raw(fd, fk_srctext + name_s, (unsigned long)name_n) ||
+            !fk_write_all_raw(fd, "\n", 1)) {
+            close(fd);
+            return 0;
+        }
+        i = i + 1;
+    }
+    long long node = 0;
+    while (node < fk_node_count) {
+        long long defined = fk_src_symbol_id_for_node(node);
+        long long dep_fn = fk_src_direct_call_fn(node);
+        long long dep_sym = fk_src_symbol_id_for_fn(dep_fn);
+        if (defined >= 0 || dep_sym >= 0) {
+            long long target = (dep_fn >= 0 && dep_fn < FK_FN_CAP) ? fk_fn[dep_fn] : -1;
+            int n = sprintf(line, "node %lld defines %lld depends %lld target %lld\n", node,
+                            defined, dep_sym, target);
+            if (!fk_write_all_raw(fd, line, (unsigned long)n)) {
+                close(fd);
+                return 0;
+            }
+        }
+        node = node + 1;
+    }
+    close(fd);
+    return 1;
+}
+static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
+                            long long source_mtime, const char *source_hash) {
+#if defined(_WIN32)
+    int fd = open(fkb_path, O_WRONLY | O_CREAT | O_TRUNC | 0x8000, 0666);
+#else
+    int fd = open(fkb_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+#endif
+    if (fd < 0) {
+        return 0;
+    }
+    int ok = 1;
+    ok = ok && fk_write_all_raw(fd, "FKPIFB1", 7);
+    ok = ok && fk_fkb_write_u8(fd, 0);
+    ok = ok && fk_fkb_write_u32(fd, 3);
+    ok = ok && fk_fkb_write_cstr(fd, src_path);
+    ok = ok && fk_fkb_write_cstr(fd, source_hash);
+    ok = ok && fk_fkb_write_signed(fd, source_mtime > 0 ? source_mtime : 1);
+    ok = ok && fk_fkb_write_cstr(fd, fkb_path);
+    ok = ok && fk_fkb_write_signed(fd, 1);
+    ok = ok && fk_fkb_write_signed(fd, fk_fn_count);
+    long long i = 0;
+    while (ok && i < fk_fn_count) {
+        ok = fk_fkb_write_signed(fd, fk_fn[i]);
+        i = i + 1;
+    }
+    ok = ok && fk_fkb_write_signed(fd, fk_node_count);
+    i = 0;
+    while (ok && i < fk_node_count) {
+        ok = fk_fkb_write_signed(fd, fk_node[i][0]) && fk_fkb_write_signed(fd, fk_node[i][1]) &&
+             fk_fkb_write_signed(fd, fk_node[i][2]) && fk_fkb_write_signed(fd, fk_node[i][3]);
+        i = i + 1;
+    }
+    ok = ok && fk_fkb_write_signed(fd, fk_sp);
+    i = 0;
+    while (ok && i < fk_sp) {
+        ok = fk_fkb_write_bytes(fd, fk_sb + fk_so[i], fk_sl[i]);
+        i = i + 1;
+    }
+    ok = ok && fk_fkb_write_signed(fd, fk_fntop);
+    i = 0;
+    while (ok && i < fk_fntop) {
+        long long fnidx = fk_fnidx[i];
+        long long arity = (fnidx >= 0 && fnidx < FK_FN_CAP) ? fk_fnar[fnidx] : 0;
+        ok = fk_fkb_write_signed(fd, i) && fk_fkb_write_signed(fd, fnidx) &&
+             fk_fkb_write_signed(fd, arity) &&
+             fk_fkb_write_srctext_slice(fd, fk_fnsym_s[i], fk_fnsym_n[i]);
+        i = i + 1;
+    }
+    ok = ok && fk_fkb_write_signed(fd, fk_node_count);
+    i = 0;
+    while (ok && i < fk_node_count) {
+        long long defined = fk_src_symbol_id_for_node(i);
+        long long dep_fn = fk_src_direct_call_fn(i);
+        long long dep_sym = fk_src_symbol_id_for_fn(dep_fn);
+        long long dep_count = dep_sym >= 0 ? 1 : 0;
+        ok = fk_fkb_write_signed(fd, i) && fk_fkb_write_signed(fd, defined) &&
+             fk_fkb_write_signed(fd, dep_count);
+        if (ok && dep_count == 1) {
+            long long target = (dep_fn >= 0 && dep_fn < FK_FN_CAP) ? fk_fn[dep_fn] : -1;
+            ok = fk_fkb_write_signed(fd, dep_sym) && fk_fkb_write_signed(fd, target);
+        }
+        i = i + 1;
+    }
+    close(fd);
+    if (!ok) {
+        return 0;
+    }
+    return fk_src_write_sym_text(sym_path, src_path, fkb_path, source_hash);
+}
+static long long fk_fkb_pos;
+static long long fk_fkb_len;
+static long long fk_fkb_read_u8(void) {
+    if (fk_fkb_pos >= fk_fkb_len) {
+        fk_die("fk_fkb: truncated artifact");
+    }
+    return (long long)(unsigned char)fk_buf[fk_fkb_pos++];
+}
+static long long fk_fkb_read_u32(void) {
+    long long a = fk_fkb_read_u8();
+    long long b = fk_fkb_read_u8();
+    long long c = fk_fkb_read_u8();
+    long long d = fk_fkb_read_u8();
+    return (a << 24) | (b << 16) | (c << 8) | d;
+}
+static long long fk_fkb_read_signed(void) {
+    long long sign = fk_fkb_read_u8();
+    long long mag = fk_fkb_read_u32();
+    if (sign == 0) {
+        return mag;
+    }
+    if (sign == 1) {
+        return -mag;
+    }
+    fk_die("fk_fkb: malformed signed integer");
+    return 0;
+}
+static void fk_fkb_skip_string(void) {
+    long long n = fk_fkb_read_u32();
+    if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
+        fk_die("fk_fkb: truncated string");
+    }
+    fk_fkb_pos = fk_fkb_pos + n;
+}
+static int fk_fkb_read_string_matches_cstr(const char *s) {
+    long long n = fk_fkb_read_u32();
+    long long sn = fk_path_len(s);
+    if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
+        fk_die("fk_fkb: truncated string");
+    }
+    int ok = n == sn;
+    long long i = 0;
+    while (i < n) {
+        if (ok && fk_buf[fk_fkb_pos + i] != s[i]) {
+            ok = 0;
+        }
+        i = i + 1;
+    }
+    fk_fkb_pos = fk_fkb_pos + n;
+    return ok;
+}
+static void fk_string_table_reset(void) {
+    fk_sinit();
+    fk_sp = 0;
+    fk_sbp = 0;
+    long long k = 0;
+    while (k < FK_STRING_HASH_BUCKETS) {
+        fk_shash[k] = -1;
+        k = k + 1;
+    }
+}
+static void fk_fkb_read_table_string(void) {
+    long long n = fk_fkb_read_u32();
+    if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
+        fk_die("fk_fkb: truncated table string");
+    }
+    if (fk_sp >= fk_scap_s) {
+        fk_scap_s = fk_scap_s * 2;
+        fk_so = realloc(fk_so, fk_scap_s * 8);
+        fk_sl = realloc(fk_sl, fk_scap_s * 8);
+        fk_snext = realloc(fk_snext, fk_scap_s * 8);
+        if (fk_so == 0 || fk_sl == 0 || fk_snext == 0) {
+            fk_die("fk_fkb: out of memory growing string table");
+        }
+    }
+    while (fk_sbp + n > fk_scap_b) {
+        fk_scap_b = fk_scap_b * 2;
+        fk_sb = realloc(fk_sb, fk_scap_b);
+        fk_sb_check();
+    }
+    long long start = fk_sbp;
+    long long j = 0;
+    while (j < n) {
+        fk_sb[fk_sbp++] = fk_buf[fk_fkb_pos++];
+        j = j + 1;
+    }
+    fk_so[fk_sp] = start;
+    fk_sl[fk_sp] = n;
+    long long bucket = fk_str_hash(start, n);
+    fk_snext[fk_sp] = fk_shash[bucket];
+    fk_shash[bucket] = fk_sp;
+    fk_sp = fk_sp + 1;
+}
+static long long fk_fkb_remap_fn(long long old_fn, long long fn_base) {
+    if (old_fn <= 0) {
+        return old_fn;
+    }
+    return fn_base + old_fn - 1;
+}
+static long long fk_fkb_node_arity_for_tag(long long tag) {
+    if (tag == 1 || tag == 18 || tag == 24 || tag == 50 || tag == 73 || tag == 137 ||
+        tag == 243) {
+        return 0;
+    }
+    if (tag == 6 || tag == 79 || tag == 109) {
         return 3;
     }
-    fk_slen = g;
-    fk_spos = 0;
-    fk_srctext[g] = 0;
+    if (tag == 7 || tag == 14 || tag == 45 || tag == 72 || tag == 74 || tag == 75 ||
+        tag == 76 || tag == 78 || tag == 110 || tag == 138) {
+        return 1;
+    }
+    if (tag == 8 || tag == 13 || tag == 19 || tag == 44 || tag == 69 || tag == 70 ||
+        tag == 71 || tag == 102 || tag == 103 || tag == 111 || tag == 242 ||
+        tag == 244) {
+        return 2;
+    }
+    if (tag == 77) {
+        return -2;
+    }
+    if (tag == 91) {
+        return 1;
+    }
+    long long i = 0;
+    while (i < fk_optab_n) {
+        if (fk_optab[i].tag == tag) {
+            if (fk_optab[i].arity < 0) {
+                return 2;
+            }
+            if (fk_optab[i].arity > 3) {
+                return 3;
+            }
+            return fk_optab[i].arity;
+        }
+        i = i + 1;
+    }
+    return 0;
+}
+static long long fk_fkb_remap_field(long long tag, long long field, long long value,
+                                    long long node_base, long long fn_base,
+                                    long long str_base) {
+    if (value < 0) {
+        return value;
+    }
+    if ((tag == 24 || tag == 50) && field == 1) {
+        return value + str_base;
+    }
+    if ((tag == 12 || tag == 240 || tag == 241 || tag == 243) && field == 1) {
+        return fk_fkb_remap_fn(value, fn_base);
+    }
+    if (tag == 12 && field == 2) {
+        return value + node_base;
+    }
+    if ((tag == 240 || tag == 241) && field >= 2) {
+        return value + node_base;
+    }
+    if (tag == 77) {
+        return field == 2 ? value + node_base : value;
+    }
+    long long ar = fk_fkb_node_arity_for_tag(tag);
+    if (field <= ar) {
+        return value + node_base;
+    }
+    return value;
+}
+static int fk_fkb_read_symbol_to_srctext(long long *start, long long *len) {
+    long long n = fk_fkb_read_u32();
+    if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
+        fk_die("fk_fkb: truncated symbol string");
+    }
+    if (fk_slen + n + 4 >= FK_SOURCE_TEXT_CAP) {
+        return 0;
+    }
+    fk_srctext[fk_slen] = FK_CH_SEMI;
+    fk_slen = fk_slen + 1;
+    fk_srctext[fk_slen] = FK_CH_SPACE;
+    fk_slen = fk_slen + 1;
+    *start = fk_slen;
+    *len = n;
+    long long i = 0;
+    while (i < n) {
+        fk_srctext[fk_slen] = fk_buf[fk_fkb_pos + i];
+        fk_slen = fk_slen + 1;
+        i = i + 1;
+    }
+    fk_fkb_pos = fk_fkb_pos + n;
+    fk_srctext[fk_slen] = FK_CH_LF;
+    fk_slen = fk_slen + 1;
+    fk_srctext[fk_slen] = 0;
+    return 1;
+}
+static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_src_path,
+                                   const char *expected_source_hash,
+                                   long long expected_source_mtime) {
+#if defined(_WIN32)
+    int fd = open(fkb_path, 0x8000);
+#else
+    int fd = open(fkb_path, 0);
+#endif
+    if (fd < 0) {
+        return 0;
+    }
+    long long got = fk_read_all_bounded(fd, fk_buf, FK_PARSE_BUF_CAP);
+    close(fd);
+    if (got < 0) {
+        return 0;
+    }
+    fk_fkb_pos = 0;
+    fk_fkb_len = got;
+    const char magic[8] = {'F', 'K', 'P', 'I', 'F', 'B', '1', 0};
+    long long mi = 0;
+    while (mi < 8) {
+        if (fk_fkb_read_u8() != (long long)(unsigned char)magic[mi]) {
+            return 0;
+        }
+        mi = mi + 1;
+    }
+    long long version = fk_fkb_read_u32();
+    if (version < 3) {
+        return 0;
+    }
+    int source_identity_ok = 1;
+    source_identity_ok = source_identity_ok && fk_fkb_read_string_matches_cstr(expected_src_path);
+    source_identity_ok = source_identity_ok && fk_fkb_read_string_matches_cstr(expected_source_hash);
+    long long stored_source_mtime = fk_fkb_read_signed();
+    if (stored_source_mtime != expected_source_mtime) {
+        source_identity_ok = 0;
+    }
+    fk_fkb_skip_string();
+    if (fk_fkb_read_signed() != 1 || !source_identity_ok) {
+        return 0;
+    }
+    long long nf = fk_fkb_read_signed();
+    if (nf < 1 || fk_defn_next + nf - 1 > FK_FN_CAP) {
+        return 0;
+    }
+    long long *fn_roots = malloc((unsigned long)nf * 8);
+    if (fn_roots == 0) {
+        fk_die("fk_import_fkb: out of memory reading function roots");
+    }
+    long long fn_base = fk_defn_next;
+    long long node_base = fk_node_count;
+    long long str_base = fk_sp;
+    long long i = 0;
+    while (i < nf) {
+        fn_roots[i] = fk_fkb_read_signed();
+        i = i + 1;
+    }
+    long long nr = fk_fkb_read_signed();
+    if (nr < 0 || fk_node_count + nr > FK_AST_NODE_CAP) {
+        free(fn_roots);
+        return 0;
+    }
+    i = 0;
+    while (i < nr) {
+        long long tag = fk_fkb_read_signed();
+        long long c1 = fk_fkb_read_signed();
+        long long c2 = fk_fkb_read_signed();
+        long long c3 = fk_fkb_read_signed();
+        fk_node[node_base + i][0] = tag;
+        fk_node[node_base + i][1] = fk_fkb_remap_field(tag, 1, c1, node_base, fn_base, str_base);
+        fk_node[node_base + i][2] = fk_fkb_remap_field(tag, 2, c2, node_base, fn_base, str_base);
+        fk_node[node_base + i][3] = fk_fkb_remap_field(tag, 3, c3, node_base, fn_base, str_base);
+        i = i + 1;
+    }
+    fk_node_count = fk_node_count + nr;
+    long long ns = fk_fkb_read_signed();
+    if (ns < 0) {
+        free(fn_roots);
+        return 0;
+    }
+    i = 0;
+    while (i < ns) {
+        fk_fkb_read_table_string();
+        i = i + 1;
+    }
+    i = 1;
+    while (i < nf) {
+        fk_fn[fn_base + i - 1] = fn_roots[i] < 0 ? fn_roots[i] : fn_roots[i] + node_base;
+        i = i + 1;
+    }
+    fk_defn_next = fn_base + nf - 1;
+    if (fk_fn_count < fk_defn_next) {
+        fk_fn_count = fk_defn_next;
+    }
+    free(fn_roots);
+    long long symbol_count = fk_fkb_read_signed();
+    i = 0;
+    while (i < symbol_count) {
+        (void)fk_fkb_read_signed();
+        long long old_fnidx = fk_fkb_read_signed();
+        long long arity = fk_fkb_read_signed();
+        long long name_s = 0;
+        long long name_n = 0;
+        if (!fk_fkb_read_symbol_to_srctext(&name_s, &name_n)) {
+            return 0;
+        }
+        if (old_fnidx > 0 && fk_fntop < FK_TOP_FN_SYM_CAP) {
+            long long new_fnidx = fk_fkb_remap_fn(old_fnidx, fn_base);
+            fk_fnsym_s[fk_fntop] = name_s;
+            fk_fnsym_n[fk_fntop] = name_n;
+            fk_fnidx[fk_fntop] = new_fnidx;
+            if (new_fnidx >= 0 && new_fnidx < FK_FN_CAP) {
+                fk_fnar[new_fnidx] = arity;
+            }
+            fk_fntop = fk_fntop + 1;
+        }
+        i = i + 1;
+    }
+    long long node_symbol_count = fk_fkb_read_signed();
+    i = 0;
+    while (i < node_symbol_count) {
+        (void)fk_fkb_read_signed();
+        (void)fk_fkb_read_signed();
+        long long dep_count = fk_fkb_read_signed();
+        long long d = 0;
+        while (d < dep_count) {
+            (void)fk_fkb_read_signed();
+            (void)fk_fkb_read_signed();
+            d = d + 1;
+        }
+        i = i + 1;
+    }
+    return fk_fkb_pos == fk_fkb_len;
+}
+static void fk_fkb_skip_symbol_image(long long version) {
+    long long symbol_count = fk_fkb_read_signed();
+    long long i = 0;
+    while (i < symbol_count) {
+        (void)fk_fkb_read_signed();
+        if (version >= 3) {
+            (void)fk_fkb_read_signed();
+            (void)fk_fkb_read_signed();
+        }
+        fk_fkb_skip_string();
+        i = i + 1;
+    }
+    long long node_symbol_count = fk_fkb_read_signed();
+    i = 0;
+    while (i < node_symbol_count) {
+        (void)fk_fkb_read_signed();
+        (void)fk_fkb_read_signed();
+        long long dep_count = fk_fkb_read_signed();
+        long long d = 0;
+        while (d < dep_count) {
+            (void)fk_fkb_read_signed();
+            (void)fk_fkb_read_signed();
+            d = d + 1;
+        }
+        i = i + 1;
+    }
+}
+static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_src_path,
+                                   const char *expected_source_hash,
+                                   long long expected_source_mtime) {
+#if defined(_WIN32)
+    int fd = open(fkb_path, 0x8000);
+#else
+    int fd = open(fkb_path, 0);
+#endif
+    if (fd < 0) {
+        return 0;
+    }
+    long long got = fk_read_all_bounded(fd, fk_buf, FK_PARSE_BUF_CAP);
+    close(fd);
+    if (got < 0) {
+        fk_die("fk_fkb: artifact exceeds FK_PARSE_BUF_CAP");
+    }
+    fk_fkb_pos = 0;
+    fk_fkb_len = got;
+    const char magic[8] = {'F', 'K', 'P', 'I', 'F', 'B', '1', 0};
+    long long mi = 0;
+    while (mi < 8) {
+        if (fk_fkb_read_u8() != (long long)(unsigned char)magic[mi]) {
+            fk_die("fk_fkb: bad magic");
+        }
+        mi = mi + 1;
+    }
+    long long version = fk_fkb_read_u32();
+    if (version != 2 && version != 3) {
+        fk_die("fk_fkb: bad version");
+    }
+    int source_identity_ok = 1;
+    if (expected_src_path != 0) {
+        source_identity_ok = source_identity_ok && fk_fkb_read_string_matches_cstr(expected_src_path);
+    } else {
+        fk_fkb_skip_string();
+    }
+    if (expected_source_hash != 0) {
+        source_identity_ok =
+            source_identity_ok && fk_fkb_read_string_matches_cstr(expected_source_hash);
+    } else {
+        fk_fkb_skip_string();
+    }
+    long long stored_source_mtime = fk_fkb_read_signed();
+    if (expected_source_mtime > 0 && stored_source_mtime != expected_source_mtime) {
+        source_identity_ok = 0;
+    }
+    fk_fkb_skip_string();
+    if (fk_fkb_read_signed() != 1) {
+        fk_die("fk_fkb: unsealed artifact");
+    }
+    if (!source_identity_ok) {
+        return 0;
+    }
+    long long nf = fk_fkb_read_signed();
+    if (nf < 0 || nf > FK_FN_CAP) {
+        fk_die("fk_fkb: function count exceeds capacity");
+    }
+    fk_fn_count = nf;
+    long long i = 0;
+    while (i < nf) {
+        fk_fn[i] = fk_fkb_read_signed();
+        i = i + 1;
+    }
+    long long nr = fk_fkb_read_signed();
+    if (nr < 0 || nr > FK_AST_NODE_CAP) {
+        fk_die("fk_fkb: node count exceeds capacity");
+    }
+    fk_node_count = nr;
+    i = 0;
+    while (i < nr) {
+        fk_node[i][0] = fk_fkb_read_signed();
+        fk_node[i][1] = fk_fkb_read_signed();
+        fk_node[i][2] = fk_fkb_read_signed();
+        fk_node[i][3] = fk_fkb_read_signed();
+        i = i + 1;
+    }
+    long long ns = fk_fkb_read_signed();
+    if (ns < 0) {
+        fk_die("fk_fkb: negative string count");
+    }
+    fk_string_table_reset();
+    i = 0;
+    while (i < ns) {
+        fk_fkb_read_table_string();
+        i = i + 1;
+    }
+    fk_fkb_skip_symbol_image(version);
+    if (fk_fkb_pos != fk_fkb_len) {
+        fk_die("fk_fkb: trailing bytes");
+    }
+    fk_defn_next = fk_fn_count;
+    fk_fntop = 0;
+    fk_const_top = 0;
+    fk_root = fk_fn_count > 0 ? fk_fn[0] : -1;
+    return 1;
+}
+static int fk_src_load_fkb(const char *fkb_path) {
+    return fk_src_load_fkb_checked(fkb_path, 0, 0, 0);
+}
+static int fk_run_loaded_program_image(long long arg) {
+    if (fk_fn_count <= 0 || fk_fn[0] < 0) {
+        fk_die("fk_fkb: no executable root");
+    }
+    fk_vs[0] = arg << 1;
+    fk_vsp = 1;
+    fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
+    return 0;
+}
+typedef long long (*fk_dylib_main_v1_fn)(long long);
+static int fk_run_dylib_artifact(const char *dylib_path, long long arg, int hard_error) {
+    void *h = dlopen(dylib_path, 2);
+    if (h == 0) {
+        if (hard_error) {
+            fk_diag("error", dylib_path, "could not open .dylib artifact");
+        } else {
+            fk_diag("warning", dylib_path, "fresh .dylib could not be opened; falling back");
+        }
+        return 0;
+    }
+    fk_dylib_main_v1_fn fn = (fk_dylib_main_v1_fn)dlsym(h, "fkwu_main_v1");
+    if (fn == 0) {
+        if (hard_error) {
+            fk_diag("error", dylib_path, "missing required fkwu_main_v1 ABI symbol");
+        } else {
+            fk_diag("warning", dylib_path, "missing fkwu_main_v1 ABI symbol; falling back");
+        }
+        return 0;
+    }
+    fk_pv(fn(arg << 1));
+    return 1;
+}
+static long long fk_src_fkb_version_raw(const char *fkb_path) {
+#if defined(_WIN32)
+    int fd = open(fkb_path, 0x8000);
+#else
+    int fd = open(fkb_path, 0);
+#endif
+    if (fd < 0) {
+        return -1;
+    }
+    unsigned char b[12];
+    long long got = read(fd, b, 12);
+    close(fd);
+    if (got != 12) {
+        return -1;
+    }
+    const unsigned char magic[8] = {'F', 'K', 'P', 'I', 'F', 'B', '1', 0};
+    long long i = 0;
+    while (i < 8) {
+        if (b[i] != magic[i]) {
+            return -1;
+        }
+        i = i + 1;
+    }
+    return ((long long)b[8] << 24) | ((long long)b[9] << 16) | ((long long)b[10] << 8) |
+           (long long)b[11];
+}
+static void fk_src_reset_compile_state(void) {
     fk_arg_n = 0;
     fk_fname_n = 0;
+    fk_fn_count = 1;
     fk_node_count = 0;
     fk_bd_top = 0;
     fk_maxslot = 0;
-    fk_sinit();
-    /* stone 4: size the string pool (fk_scap_b>0) before any string op — the table path does this
-     * when loading strings; the source path must too, else int_to_str/byte_to_str/str_concat spin
-     * forever on the `while (fk_sbp+n > fk_scap_b) fk_scap_b *= 2` grow loop (0*2==0). */
+    fk_string_table_reset();
     fk_fntop = 0;
+    fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;
+}
+static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
+                                        const char *sym_path, long long unit_mtime,
+                                        const char *source_hash) {
+    fk_spos = 0;
+    fk_srctext[fk_slen] = 0;
     /* stone 4+5: multi-function root logic, preserved */
     fk_prescan_defns();
     /* two-pass: register every top-level defn name+index+arity BEFORE bodies, so forward + mutual
@@ -8279,6 +9857,193 @@ static int fk_run_src(const char *path, long long arg) {
         fk_fn[0] = fk_smklit(0);
     }
     fk_fn_count = fk_defn_next;
+    if (!fk_src_write_fkb(path, fkb_path, sym_path, unit_mtime, source_hash)) {
+        fk_die("fk_run_src: failed to write .fkb/.sym artifacts");
+    }
+}
+static int fk_src_compile_artifact_only(const char *path) {
+    char compile_path[4096];
+    fk_cstr_copy(compile_path, path, 4096);
+    long long saved_dep_count = fk_src_dep_count;
+    char saved_root_path[4096];
+    long long saved_root_len = fk_src_root_len;
+    char *saved_root_text = malloc(FK_SOURCE_TEXT_CAP);
+    char *saved_srctext = malloc(FK_SOURCE_TEXT_CAP);
+    char (*saved_dep_path)[4096] = malloc(sizeof(fk_src_dep_path));
+    long long *saved_dep_mtime = malloc(sizeof(fk_src_dep_mtime));
+    long long *saved_dep_size = malloc(sizeof(fk_src_dep_size));
+    long long *saved_dep_parent = malloc(sizeof(fk_src_dep_parent));
+    long long *saved_dep_end = malloc(sizeof(fk_src_dep_end));
+    if (saved_root_text == 0 || saved_srctext == 0 || saved_dep_path == 0 ||
+        saved_dep_mtime == 0 || saved_dep_size == 0 || saved_dep_parent == 0 ||
+        saved_dep_end == 0) {
+        fk_die("fk_import_compile: out of memory saving source unit");
+    }
+    fk_cstr_copy(saved_root_path, fk_src_root_path, 4096);
+    long long saved_slen = fk_slen;
+    long long i = 0;
+    while (i < FK_SOURCE_TEXT_CAP) {
+        saved_root_text[i] = fk_src_root_text[i];
+        saved_srctext[i] = fk_srctext[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < FK_SRC_DEP_CAP) {
+        fk_cstr_copy(saved_dep_path[i], fk_src_dep_path[i], 4096);
+        saved_dep_mtime[i] = fk_src_dep_mtime[i];
+        saved_dep_size[i] = fk_src_dep_size[i];
+        saved_dep_parent[i] = fk_src_dep_parent[i];
+        saved_dep_end[i] = fk_src_dep_end[i];
+        i = i + 1;
+    }
+    char source_hash[FK_SRC_HASH_CAP];
+    char fkb_path[4096];
+    char sym_path[4096];
+    long long unit_mtime = 0;
+    int ok = 0;
+    if (fk_path_replace_ext(compile_path, ".fkb", fkb_path, 4096) &&
+        fk_path_replace_ext(compile_path, ".sym", sym_path, 4096) &&
+        fk_src_load_unit(compile_path, source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
+        fk_src_reset_compile_state();
+        fk_src_compile_current_unit(compile_path, fkb_path, sym_path, unit_mtime, source_hash);
+        ok = 1;
+    }
+    fk_src_dep_count = saved_dep_count;
+    fk_cstr_copy(fk_src_root_path, saved_root_path, 4096);
+    fk_src_root_len = saved_root_len;
+    fk_slen = saved_slen;
+    i = 0;
+    while (i < FK_SOURCE_TEXT_CAP) {
+        fk_src_root_text[i] = saved_root_text[i];
+        fk_srctext[i] = saved_srctext[i];
+        i = i + 1;
+    }
+    i = 0;
+    while (i < FK_SRC_DEP_CAP) {
+        fk_cstr_copy(fk_src_dep_path[i], saved_dep_path[i], 4096);
+        fk_src_dep_mtime[i] = saved_dep_mtime[i];
+        fk_src_dep_size[i] = saved_dep_size[i];
+        fk_src_dep_parent[i] = saved_dep_parent[i];
+        fk_src_dep_end[i] = saved_dep_end[i];
+        i = i + 1;
+    }
+    free(saved_root_text);
+    free(saved_srctext);
+    free(saved_dep_path);
+    free(saved_dep_mtime);
+    free(saved_dep_size);
+    free(saved_dep_parent);
+    free(saved_dep_end);
+    return ok;
+}
+static int fk_src_try_import_fkb_images(const char *root_path) {
+    long long direct_count = 0;
+    long long i = 1;
+    while (i < fk_src_dep_count) {
+        if (fk_src_dep_parent[i] == 0) {
+            direct_count = direct_count + 1;
+        }
+        i = i + 1;
+    }
+    if (direct_count == 0) {
+        return 0;
+    }
+    i = 1;
+    while (i < fk_src_dep_count) {
+        if (fk_src_dep_parent[i] == 0) {
+            char dep_fkb_path[4096];
+            long long dep_end = fk_src_dep_end[i];
+            long long dep_mtime = fk_src_unit_mtime_range(i, dep_end);
+            if (!fk_path_replace_ext(fk_src_dep_path[i], ".fkb", dep_fkb_path, 4096)) {
+                return 0;
+            }
+            if (fk_path_mtime_raw(dep_fkb_path) < dep_mtime ||
+                fk_src_fkb_version_raw(dep_fkb_path) < 3) {
+                if (!fk_src_compile_artifact_only(fk_src_dep_path[i])) {
+                    return 0;
+                }
+            }
+        }
+        i = i + 1;
+    }
+    fk_src_reset_compile_state();
+    fk_slen = 0;
+    fk_srctext[0] = 0;
+    i = 1;
+    while (i < fk_src_dep_count) {
+        if (fk_src_dep_parent[i] == 0) {
+            char dep_fkb_path[4096];
+            char dep_hash[FK_SRC_HASH_CAP];
+            long long dep_end = fk_src_dep_end[i];
+            long long dep_mtime = fk_src_unit_mtime_range(i, dep_end);
+            if (!fk_path_replace_ext(fk_src_dep_path[i], ".fkb", dep_fkb_path, 4096)) {
+                return 0;
+            }
+            if (!fk_src_unit_hash_range(i, dep_end, dep_hash, FK_SRC_HASH_CAP)) {
+                return 0;
+            }
+            if (!fk_src_import_fkb_image(dep_fkb_path, fk_src_dep_path[i], dep_hash, dep_mtime)) {
+                return 0;
+            }
+            if (getenv("FK_IMPORT_TRACE")) {
+                fk_diag("trace", dep_fkb_path, "loaded import .fkb");
+            }
+        }
+        i = i + 1;
+    }
+    if (!fk_src_append_text(root_path, fk_src_root_text, fk_src_root_len)) {
+        return 0;
+    }
+    return 1;
+}
+/* installed native body + length per fn, for --src crystallization. fk_src_nat
+ * and fk_src_nat_len are already declared earlier in the file, near
+ * fk_nat_exec -- this used to re-declare both here too (a harmless duplicate
+ * under C's tentative-definition rules, but redundant); root-caused rather than
+ * left, since the earlier declaration already covers this use. */
+static int fk_run_src(const char *path, long long arg) {
+    char fkb_path[4096];
+    char sym_path[4096];
+    char dylib_path[4096];
+    char expected_source_hash[FK_SRC_HASH_CAP];
+    long long unit_mtime = 0;
+    if (!fk_path_replace_ext(path, ".fkb", fkb_path, 4096) ||
+        !fk_path_replace_ext(path, ".sym", sym_path, 4096) ||
+        !fk_path_replace_ext(path, ".dylib", dylib_path, 4096)) {
+        fk_die("fk_run_src: artifact path exceeds buffer");
+    }
+    if (!fk_src_load_unit(path, expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
+        return 2;
+    }
+    long long fkb_mtime = fk_path_mtime_raw(fkb_path);
+    long long dylib_mtime = fk_path_mtime_raw(dylib_path);
+    if (dylib_mtime >= unit_mtime) {
+        if (fk_run_dylib_artifact(dylib_path, arg, 0)) {
+            return 0;
+        }
+    } else if (dylib_mtime > 0) {
+        fk_diag("warning", dylib_path, "stale .dylib ignored");
+    }
+    if (fkb_mtime >= unit_mtime) {
+        if (fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
+            return fk_run_loaded_program_image(arg);
+        }
+        fk_diag("warning", fkb_path, "fresh-looking .fkb failed source identity check; rebuilding");
+    } else if (fkb_mtime > 0) {
+        fk_diag("warning", fkb_path, "stale .fkb ignored");
+    }
+    int import_images_loaded = fk_src_try_import_fkb_images(path);
+    if (!import_images_loaded) {
+        if (!fk_src_load_unit(path, expected_source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
+            return 2;
+        }
+        fk_src_reset_compile_state();
+    }
+    fk_src_compile_current_unit(path, fkb_path, sym_path, unit_mtime, expected_source_hash);
+    if (fk_path_mtime_raw(dylib_path) < unit_mtime) {
+        fk_diag("warning", dylib_path,
+                "native .dylib emission is not installed in this checkout; emitted .fkb/.sym");
+    }
     fk_vs[0] = arg << 1;
     fk_vsp = 1;
 
@@ -8454,9 +10219,12 @@ static int fk_run_feval(const char *path) {
         return 2;
     }
     char rbuf[131072];
-    long long rg = read(fd, rbuf, 131071);
+    long long rg = fk_read_all_bounded(fd, rbuf, 131071);
     close(fd);
     if (rg < 0) {
+        if (rg == -2) {
+            fk_die("fk_run_feval: recipe source exceeds buffer");
+        }
         return 3;
     }
     rbuf[rg] = 0;
@@ -8487,9 +10255,12 @@ static int fk_run_feval(const char *path) {
         return 5;
     }
     /* run --feval from the repo root (grammars/form-eval.fk must be reachable) */
-    long long eg = read(efd, fk_srctext + w, cap - w - 1);
+    long long eg = fk_read_all_bounded(efd, fk_srctext + w, cap - w - 1);
     close(efd);
     if (eg < 0) {
+        if (eg == -2) {
+            fk_die("fk_run_feval: form-eval source exceeds FK_SOURCE_TEXT_CAP");
+        }
         return 5;
     }
     w = w + eg;
@@ -8555,6 +10326,7 @@ static int fk_run_feval(const char *path) {
     fk_maxslot = 0;
     fk_sinit();
     fk_fntop = 0;
+    fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;
     fk_prescan_defns();
@@ -8611,118 +10383,25 @@ static int fk_run(int argc, char **argv) {
     if (argc >= 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH) {
         return fk_run_src(argv[2], argc > 3 ? atoi(argv[3]) : 0);
     }
-    int fd = open(argv[1], 0);
-    if (fd < 0) {
+    if (fk_path_has_suffix(argv[1], ".fk")) {
+        return fk_run_src(argv[1], argc > 2 ? atoi(argv[2]) : 0);
+    }
+    if (fk_path_has_suffix(argv[1], ".fkb")) {
+        if (!fk_src_load_fkb(argv[1])) {
+            fk_diag("error", argv[1], "could not load .fkb program image");
+            return 2;
+        }
+        return fk_run_loaded_program_image(argc > 2 ? atoi(argv[2]) : 0);
+    }
+    if (fk_path_has_suffix(argv[1], ".dylib")) {
+        return fk_run_dylib_artifact(argv[1], argc > 2 ? atoi(argv[2]) : 0, 1) ? 0 : 2;
+    }
+    if (fk_path_has_suffix(argv[1], ".tbl")) {
+        fk_diag("error", argv[1], ".tbl execution has been retired; use .fk, .fkb, or .dylib");
         return 2;
     }
-    long long got = read(fd, fk_buf, 1048575);
-    if (got < 0) {
-        return 3;
-    }
-    fk_buf[got] = 0;
-    long long nf = fk_next();
-    if (nf < 0 || nf > FK_FN_CAP) {
-        fk_die("fk_run: table function count exceeds fk_fn capacity");
-    }
-    fk_fn_count = nf;
-    long long k = 0;
-    while (k < nf) {
-        fk_fn[k] = fk_next();
-        k = k + 1;
-    }
-    long long nr = fk_next();
-    if (nr < 0 || nr > FK_AST_NODE_CAP) {
-        fk_die("fk_run: table node count exceeds fk_node capacity");
-    }
-    fk_node_count = nr;
-    long long r = 0;
-    while (r < nr) {
-        fk_node[r][0] = fk_next();
-        fk_node[r][1] = fk_next();
-        fk_node[r][2] = fk_next();
-        fk_node[r][3] = fk_next();
-        r = r + 1;
-    }
-    long long ns = fk_next();
-    fk_sinit();
-    long long si = 0;
-    while (si < ns) {
-        long long sl = fk_next();
-        if (fk_sp >= fk_scap_s) {
-            fk_scap_s = fk_scap_s * 2;
-            fk_so = realloc(fk_so, fk_scap_s * 8);
-            fk_sl = realloc(fk_sl, fk_scap_s * 8);
-            fk_snext = realloc(fk_snext, fk_scap_s * 8);
-            if (fk_so == 0 || fk_sl == 0 || fk_snext == 0) {
-                fk_die("fk_run: out of memory growing string table");
-            }
-        }
-        while (fk_sbp + sl > fk_scap_b) {
-            fk_scap_b = fk_scap_b * 2;
-            fk_sb = realloc(fk_sb, fk_scap_b);
-            fk_sb_check();
-        }
-        fk_so[fk_sp] = fk_sbp;
-        fk_sl[fk_sp] = sl;
-        long long bj = 0;
-        while (bj < sl) {
-            fk_sb[fk_sbp] = (char)fk_next();
-            fk_sbp = fk_sbp + 1;
-            bj = bj + 1;
-        }
-        /* this table's strings are written directly into fk_so/fk_sl rather than
-         * through fk_sintern (they come pre-deduplicated from the flatten step),
-         * so register each one into the same hash chains fk_sintern uses -- else
-         * a later fk_sintern() call for identical content would miss this entry
-         * (a false miss, not a correctness bug per se, but a real behavior
-         * difference from the pre-hash-index linear scan, which found ANY
-         * matching entry regardless of how it got inserted). */
-        long long bucket = fk_str_hash(fk_so[fk_sp], sl);
-        fk_snext[fk_sp] = fk_shash[bucket];
-        fk_shash[bucket] = fk_sp;
-        fk_sp = fk_sp + 1;
-        si = si + 1;
-    }
-    long long a = 0;
-    if (argc > 2) {
-        a = atoi(argv[2]) << 1;
-    }
-    fk_src_len = 0;
-    if (argc > 3) {
-        int sfd = open(argv[3], 0);
-        if (sfd >= 0) {
-            long long sg = read(sfd, fk_src, 262143);
-            if (sg >= 0) {
-                fk_src_len = sg;
-                fk_src[sg] = 0;
-            }
-        }
-    }
-    fk_vs[0] = a;
-    fk_vsp = 1;
-    if (argc > 4) {
-        fk_hot = atoi(argv[4]);
-    }
-    if (argc > 5 && argv[5][0] == 106) {
-        fk_nat_code[0] = fk_demo_inc;
-        fk_nat_len[0] = 8;
-    }
-    long long rootv;
-    fk_heat[0] = fk_heat[0] + 1;
-    if (fk_hot > 0 && fk_heat[0] >= fk_hot && fk_nat_code[0] != 0) {
-        fk_njit = fk_njit + 1;
-        rootv = fk_native_call(fk_nat_code[0], fk_nat_len[0], fk_vs[0] >> 1) << 1;
-    } else {
-        rootv = fk_walk(fk_fn[0], 0);
-    }
-    fk_pv_root(fk_fn[0], rootv);
-    long long t = 1;
-    while (t <= 255) {
-        fk_pr(fk_arms[t]);
-        t = t + 1;
-    }
-    fk_pr(fk_njit);
-    return 0;
+    fk_diag("error", argv[1], "unsupported file extension; supported: .fk .fkb .dylib");
+    return 2;
 }
 #if defined(_WIN32)
 int main(int argc, char **argv) {

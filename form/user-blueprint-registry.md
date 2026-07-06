@@ -4,9 +4,11 @@
 
 ## Source of truth
 
-The machine-readable registry is [`form-stdlib/blueprint-registry.json`](form-stdlib/blueprint-registry.json) — one row per type-99 shape: canonical name, meaning, aliases, defining files. It is **code-derived and scanner-verified**, so it cannot quietly drift from reality the way a hand-kept table does. (This document used to claim `1870 = ARRIVAL`; the code says `1870 = UUID`. That drift is exactly what a generated, verified registry prevents.) This markdown holds the *why* — allocation rationale, composition reviews, the living narrative below. The JSON holds the *what*.
+The machine-readable registry is [`form-stdlib/blueprint-registry.json`](form-stdlib/blueprint-registry.json) — one row per type-99 shape: canonical name, meaning, aliases, defining files. It is **code-derived and scanner-verified**, so it cannot quietly drift from reality the way a hand-kept table does. (This document used to claim `1870 = ARRIVAL`; the code says `1870 = UUID`. That drift is exactly what a generated, verified registry prevents.) This markdown holds the *why* — allocation rationale, composition reviews, the living narrative below. The JSON holds the current authoring/generator registry.
 
-**How a Form file uses a Blueprint:** load `form-stdlib/form-ontology-loader.fk` as a prelude and ask by name — `(bp "JSON-OBJECT")`, `(bp "add")`, `(bp "UUID")`. The loader reads the registry (and the kernel-aligned categories/primitives in `form-ontology.json`) and resolves the name to its NodeID. The raw `(make_nodeid 1 2 99 N)` literal never appears in feature code. **An unregistered name now fails loud** — the kernels (Go/Rust/TS) raise rather than resolve, because the old silent fallback to `(1 2 0 0)` collapsed *every* unknown name onto one NodeID, so distinct blueprints collided invisibly (the bug that bit the Shamballa channel twice). Identity is bounded by what is registered; an unknown name is a missing registration, not a valid shape. The scanner catches it before runtime; the kernel catches it at runtime.
+**Current honest split (2026-07-04):** `form-stdlib/form-ontology-loader.fk` does not runtime-parse the full `blueprint-registry.json` in the direct-source Form path. It carries a reviewed bootstrap subset for the current `bp` floor and returns absence for names outside that subset. The generated Go/Rust/TS `bp_table` files are proof-sibling projections from the registry and ontology, not runtime authority. The target executable symbol/dependency truth belongs in program-image `.fkb`; `.sym` remains a locale/domain presentation lens over stable symbols, not the holder of executable dependency truth.
+
+**How a Form file uses a Blueprint today:** for reviewed bootstrap names, load `form-stdlib/form-ontology-loader.fk` as a prelude and ask by name, for example `(bp "add")` or `(bp "PROGRAM-IMAGE-RECIPE-TABLE")`. Names outside the bootstrap set are still registry-authored but not yet available as Form-owned runtime data in this loader. The raw `(make_nodeid 1 2 99 N)` literal should not appear in feature code. Unknown names must be treated as missing registration/runtime-admission work, never silently mapped to a fake NodeID such as `(1 2 0 0)`.
 
 **Where Blueprint-name strings belong:** keep `(bp "NAME")` calls in a
 dedicated symbol section instead of executable stdlib logic. In seedbank, that
@@ -24,7 +26,7 @@ python3 scripts/scan_form_blueprints.py unregister MY-SHAPE            # remove 
 ```
 `--level` / `--type` / `--meaning` / `--defined-in` tune the row. (The older `--emit-registry` still harvests every `(let NAME (make_nodeid …))` literal at once, preserving curated rows.) Then reference it via `(bp "MY-SHAPE")`. The scanner's `--check` (run in `make wellness`) fails if any type-99 number — *or any `(bp "NAME")` reference* — has no registry row.
 
-**Why the file *and* the substrate:** the Form kernels (Go/Rust/TS) are standalone offline engines with no DB access, so the authored source of truth must be a file `(bp ...)` can read at load time. The substrate is the body's *query* surface — `substrate_named_cells(name, domain, blueprint_node_id)` is exactly a Blueprint-registry row. So this follows the same two-layer pattern as the KB: author in the file, **project into the DB** via `python3 scripts/sync_blueprints_to_substrate.py` (domain `form-blueprint`; wired into `substrate_post_merge_hook.sh`). After the sync, `lookup_cell(session, "form-blueprint", "JSON-OBJECT")` → `1.2.99.10`, and a Blueprint name can surface alongside the cells that share its shape. The file stays authoritative; the DB is the reflection, not a second place to author.
+**Why the file *and* the substrate:** the Form kernels (Go/Rust/TS) are standalone offline engines with no DB access, so the authored registry must remain a file that can generate proof-sibling projections and, later, a Form-owned runtime registry image. The current direct-source loader still admits only reviewed bootstrap rows. The substrate is the body's *query* surface — `substrate_named_cells(name, domain, blueprint_node_id)` is exactly a Blueprint-registry row. So this follows the same two-layer pattern as the KB: author in the file, **project into the DB** via `python3 scripts/sync_blueprints_to_substrate.py` (domain `form-blueprint`; wired into `substrate_post_merge_hook.sh`). After the sync, `lookup_cell(session, "form-blueprint", "JSON-OBJECT")` → `1.2.99.10`, and a Blueprint name can surface alongside the cells that share its shape. The file stays authoritative for authoring; the DB is the reflection, not a second place to author.
 
 **The scanner — `scripts/scan_form_blueprints.py`:**
 - no args → full report: every `make_nodeid` literal, how many shapes are registered, which numbers wear many local names (synonyms to collapse), which names point at more than one number (drift to heal), and any `(bp "NAME")` reference with no registry row.
@@ -105,7 +107,7 @@ This document is part of the body's self-awareness practice around its own subst
 
 ## Composition Review: THIA Blueprints (1800–1806)
 
-**Date**: 2026-05-29  
+**Date**: 2026-05-29
 **Context**: These numbers were introduced during work on Transparent Human Identity Attribution while the broader magic number problem was still unconscious.
 
 **Review**:
@@ -123,7 +125,7 @@ This healing work runs in true parallel with THIA development. Movement on both 
 
 **Cross-stream update**: As concrete logic was added to `walk-observations-to-signals` and `sense-resonance` (and `to-transparent-presence` was made to actually consume the collection), the value of generalizing certain patterns became more obvious. The act of building the thing is surfacing where the magic numbers are costly. This feedback loop is part of the point.
 
-**Next concrete step on this healing stream (self-directed, executing now)**: 
+**Next concrete step on this healing stream (self-directed, executing now)**:
 
 After analysis of 1700-1799 cluster:
 - AUDIT-ENTRY (1770) structure is extremely close to what THIA-PROVENANCE needs.

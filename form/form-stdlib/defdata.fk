@@ -1,0 +1,88 @@
+; defdata.fk -- static data as realized value, not a zero-arg runtime thunk.
+;
+; This is the first embodiment of the data-literal story. It does NOT add a
+; kernel primitive. It names the authoring discipline and the carrier policy:
+; small stable data can be realized inline; compact generative data can be
+; realized by a micro-recipe once at load when the recipe is smaller than the
+; realized constants; large stable data can live as .fkb; data that is both
+; large/stable and compactly generative can use a hybrid.
+;
+; The current lowering target is a top-level module constant: source can lower
+; `defdata NAME VALUE` to `(let NAME VALUE)`, and later functions can read NAME
+; as a realized value. A future `defdata` keyword is still authoring sugar and
+; artifact policy; it should lower here rather than add a kernel primitive.
+;
+; preludes: form-stdlib/core.fk
+
+(let DD-SAMPLE-ROWS (list 8 13 21))
+
+(do
+    (defn dd-inline () 1)
+    (defn dd-micro-recipe () 2)
+    (defn dd-fkb () 3)
+    (defn dd-hybrid () 4)
+
+    ; const-size and recipe-size are authoring estimates: row count, byte band,
+    ; token band, or another stable scalar. The micro-recipe route is earned by
+    ; being smaller than the realized constants, not by being generative alone.
+    ; stable/generative are 1/0 flags.
+    (defn dd-recipe-smaller? (const-size recipe-size)
+        (if (lt recipe-size const-size) 1 0))
+
+    (defn dd-policy (const-size recipe-size stable generative)
+        (if (eq stable 1)
+            (if (eq generative 1)
+                (if (eq (dd-recipe-smaller? const-size recipe-size) 1)
+                    (if (ge const-size 64) (dd-hybrid) (dd-micro-recipe))
+                    (if (ge const-size 64) (dd-fkb) (dd-inline)))
+                (if (ge const-size 64) (dd-fkb) (dd-inline)))
+            (if (eq generative 1)
+                (if (eq (dd-recipe-smaller? const-size recipe-size) 1)
+                    (dd-micro-recipe)
+                    (if (ge const-size 64) (dd-fkb) (dd-inline)))
+                (if (ge const-size 64) (dd-fkb) (dd-inline)))))
+
+    (defn dd-spec (name const-size recipe-size stable generative carrier value)
+        (list "defdata" name const-size recipe-size stable generative carrier value))
+    (defn dd-name (d) (nth d 1))
+    (defn dd-const-size (d) (nth d 2))
+    (defn dd-recipe-size (d) (nth d 3))
+    (defn dd-size (d) (dd-const-size d))
+    (defn dd-stable (d) (nth d 4))
+    (defn dd-generative (d) (nth d 5))
+    (defn dd-carrier (d) (nth d 6))
+    (defn dd-value (d) (nth d 7))
+
+    ; The value side of the contract: consumers read a value cell, not a thunk.
+    (defn dd-value-count (d) (len (dd-value d)))
+    (defn dd-value-head (d) (head (dd-value d)))
+
+    ; The compiler/language gap is now syntax and artifact policy, not value
+    ; export. The repaired source runner can bind a top-level data value once
+    ; and let later functions read that realized value.
+    (defn dd-needs-loader-binding? () 0)
+    (defn dd-can-lower-to-module-constant? () 1)
+    (defn dd-lowered-sample-value () DD-SAMPLE-ROWS)
+    (defn dd-lowered-sample-count () (len DD-SAMPLE-ROWS))
+    (defn dd-lowered-sample-head () (head DD-SAMPLE-ROWS))
+
+    (defn ddk (ok bit) (if ok bit 0))
+    (defn dd-sum (xs)
+        (if (eq (len xs) 0) 0 (add (head xs) (dd-sum (tail xs)))))
+    (defn defdata-check ()
+        (do
+            (let sample (dd-spec "sample" 3 0 1 0 (dd-policy 3 0 1 0) (list 8 13 21)))
+            (dd-sum (list
+                (ddk (eq (dd-policy 3 0 1 0) (dd-inline)) 1)
+                (ddk (eq (dd-policy 80 0 1 0) (dd-fkb)) 2)
+                (ddk (eq (dd-policy 20 5 0 1) (dd-micro-recipe)) 4)
+                (ddk (eq (dd-policy 80 12 1 1) (dd-hybrid)) 8)
+                (ddk (eq (dd-policy 8 40 1 1) (dd-inline)) 16)
+                (ddk (eq (dd-policy 8 8 1 1) (dd-inline)) 32)
+                (ddk (eq (dd-value-head sample) 8) 64)
+                (ddk (eq (dd-value-count sample) 3) 128)
+                (ddk (eq (dd-can-lower-to-module-constant?) 1) 256)
+                (ddk (eq (dd-lowered-sample-count) 3) 512)
+                (ddk (eq (dd-lowered-sample-head) 8) 1024)))))
+
+    0)
