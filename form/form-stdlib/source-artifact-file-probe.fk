@@ -1,0 +1,222 @@
+; source-artifact-file-probe.fk -- file-backed source artifact probe builder.
+;
+; This layer is the bridge from Layer 1b file-byte-digest evidence into Layer 8c
+; source-artifact-probe bundles. It observes file existence/size/mtime directly,
+; hashes source/artifact bytes only through fbd windowed vouches, and degrades
+; hash fields to empty whenever the stat pass and digest pass do not co-testify.
+;
+; It does not verify seals, proofs, callability, table payloads, cache writes,
+; artifact loading, runtime selection, or C-seed growth. Seal/proof/callable and
+; includes-tbl remain supplied policy bits for later layers to judge.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/form-fs.fk
+;           form-stdlib/str-byte-at.fk
+;           form-stdlib/sha256.fk
+;           form-stdlib/hex.fk
+;           form-stdlib/file-byte-window.fk
+;           form-stdlib/source-artifact-cache.fk
+;           form-stdlib/source-artifact-descriptor.fk
+;           form-stdlib/runtime-artifact-plan.fk
+;           form-stdlib/source-artifact-probe.fk
+;           form-stdlib/source-artifact-identity.fk
+;           form-stdlib/file-byte-digest.fk
+
+(do
+    (defn safp-version () "source-artifact-file-probe-v1")
+    (defn safp-status-ready () "ready")
+    (defn safp-status-stat-drift () "stat-drift")
+
+    (defn safp-feature (name status) (list "source-artifact-file-probe-feature" name status))
+    (defn safp-feature-name (f) (nth f 1))
+    (defn safp-feature-status (f) (nth f 2))
+    (defn source-artifact-file-probe-manifest ()
+        (list
+            (safp-feature "file-backed-sap-bundle" 1)
+            (safp-feature "uses-file-byte-digest" 1)
+            (safp-feature "direct-stat-fields-only" 1)
+            (safp-feature "no-supplied-hash-in-stat-pass" 1)
+            (safp-feature "stat-vouch-size-cross-check" 1)
+            (safp-feature "stat-drift-degrades-hash" 1)
+            (safp-feature "vouch-status-observable" 1)
+            (safp-feature "source-hash-from-vouch-only" 1)
+            (safp-feature "content-hash-from-vouch-only" 1)
+            (safp-feature "missing-artifact-stays-absent" 1)
+            (safp-feature "cap-bound-by-file-byte-digest" 1)
+            (safp-feature "seal-proof-callable-supplied" 1)
+            (safp-feature "no-seal-proof-verification" 1)
+            (safp-feature "no-whole-file-text-materialization" 1)
+            (safp-feature "no-form-binary-io" 1)
+            (safp-feature "no-disk-write" 1)
+            (safp-feature "no-artifact-load-walk-call" 1)
+            (safp-feature "no-runtime-selector" 1)
+            (safp-feature "no-route-derivation" 1)
+            (safp-feature "no-compiler-emission-import" 1)
+            (safp-feature "no-persistence-attestation" 1)
+            (safp-feature "no-c-seed-growth" 1)))
+    (defn source-artifact-file-probe-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (safp-feature-name (head fs)) name)
+                     (eq (safp-feature-status (head fs)) 1))
+                1
+                (source-artifact-file-probe-manifest-has? name (tail fs)))))
+
+    (defn safp-empty-vouch (target path status)
+        (sai-vouch target path (fbd-evidence-kind) "" "" status -1 0))
+    (defn safp-empty-source-vouch (path)
+        (safp-empty-vouch (sai-target-source-hash) path (sai-status-unobserved)))
+    (defn safp-empty-content-vouch (path)
+        (safp-empty-vouch (sai-target-content-hash) path (sai-status-unobserved)))
+
+    (defn safp-stat-drift? (exists size vouch)
+        (if (eq exists 1)
+            (if (ge (sai-vouch-observed-size vouch) 0)
+                (if (eq size (sai-vouch-observed-size vouch)) 0 1)
+                0)
+            0))
+    (defn safp-drift-vouch (vouch observed-size)
+        (sai-vouch (sai-vouch-target vouch)
+                   (sai-vouch-path vouch)
+                   (sai-vouch-evidence-kind vouch)
+                   (sai-vouch-expected-hash vouch)
+                   ""
+                   (safp-status-stat-drift)
+                   observed-size
+                   (sai-vouch-material-size vouch)))
+    (defn safp-effective-vouch (exists size vouch)
+        (if (eq (safp-stat-drift? exists size vouch) 1)
+            (safp-drift-vouch vouch size)
+            vouch))
+
+    ; source-probe = ("source-artifact-file-source-probe" observation vouch status)
+    (defn safp-source-probe-row (observation vouch status)
+        (list "source-artifact-file-source-probe" observation vouch status))
+    (defn safp-source-probe? (p)
+        (if (eq (len p) 4) (str_eq (nth p 0) "source-artifact-file-source-probe") 0))
+    (defn safp-source-probe-observation (p) (nth p 1))
+    (defn safp-source-probe-vouch (p) (nth p 2))
+    (defn safp-source-probe-status (p) (nth p 3))
+
+    ; artifact-probe = ("source-artifact-file-artifact-probe" role observation
+    ;                   source-vouch content-vouch status)
+    (defn safp-artifact-probe-row (role observation source-vouch content-vouch status)
+        (list "source-artifact-file-artifact-probe" role observation source-vouch content-vouch status))
+    (defn safp-artifact-probe? (p)
+        (if (eq (len p) 6) (str_eq (nth p 0) "source-artifact-file-artifact-probe") 0))
+    (defn safp-artifact-probe-role (p) (nth p 1))
+    (defn safp-artifact-probe-observation (p) (nth p 2))
+    (defn safp-artifact-probe-source-vouch (p) (nth p 3))
+    (defn safp-artifact-probe-content-vouch (p) (nth p 4))
+    (defn safp-artifact-probe-status (p) (nth p 5))
+
+    ; probe-bundle = ("source-artifact-file-probe-bundle" source-probe fkb-probe
+    ;                 dylib-probe sap-bundle status)
+    (defn safp-probe-bundle-row (source-probe fkb-probe dylib-probe bundle status)
+        (list "source-artifact-file-probe-bundle" source-probe fkb-probe dylib-probe bundle status))
+    (defn safp-probe-bundle? (p)
+        (if (eq (len p) 6) (str_eq (nth p 0) "source-artifact-file-probe-bundle") 0))
+    (defn safp-probe-bundle-source-probe (p) (nth p 1))
+    (defn safp-probe-bundle-fkb-probe (p) (nth p 2))
+    (defn safp-probe-bundle-dylib-probe (p) (nth p 3))
+    (defn safp-probe-bundle-sap (p) (nth p 4))
+    (defn safp-probe-bundle-status (p) (nth p 5))
+
+    (defn safp-source-probe-from-stat-vouch (path exists size mtime raw-vouch)
+        (do
+            (let vouch (safp-effective-vouch exists size raw-vouch))
+            (let observation (sai-source-observation-from-vouch path exists size mtime vouch))
+            (safp-source-probe-row observation vouch (sai-vouch-status vouch))))
+    (defn safp-source-file-probe (path expected-source-hash max-bytes)
+        (do
+            (let exists (fs-exists? path))
+            (let size (fs-stat-size path))
+            (let mtime (fs-stat-mtime path))
+            (let raw-vouch (fbd-vouch-source-file-capped path expected-source-hash max-bytes))
+            (safp-source-probe-from-stat-vouch path exists size mtime raw-vouch)))
+    (defn safp-source-observation (path expected-source-hash max-bytes)
+        (safp-source-probe-observation
+            (safp-source-file-probe path expected-source-hash max-bytes)))
+    (defn safp-source-vouch (path expected-source-hash max-bytes)
+        (safp-source-probe-vouch
+            (safp-source-file-probe path expected-source-hash max-bytes)))
+
+    (defn safp-program-image-fkb-file-probe (path source-vouch expected-content-hash seal-ok includes-tbl max-bytes)
+        (do
+            (let exists (fs-exists? path))
+            (let size (fs-stat-size path))
+            (let mtime (fs-stat-mtime path))
+            (let raw-content-vouch (fbd-vouch-content-file-capped path expected-content-hash max-bytes))
+            (let content-vouch (safp-effective-vouch exists size raw-content-vouch))
+            (let observation
+                (if (eq exists 0)
+                    (sap-program-image-fkb-observation path 0 -1 -1 "" "" 0 0)
+                    (sai-program-image-fkb-observation-from-vouches
+                        path exists size mtime source-vouch content-vouch seal-ok includes-tbl)))
+            (safp-artifact-probe-row (sap-role-program-image-fkb)
+                                     observation
+                                     source-vouch
+                                     content-vouch
+                                     (sai-vouch-status content-vouch))))
+    (defn safp-program-image-fkb-observation (path source-vouch expected-content-hash seal-ok includes-tbl max-bytes)
+        (safp-artifact-probe-observation
+            (safp-program-image-fkb-file-probe path source-vouch expected-content-hash seal-ok includes-tbl max-bytes)))
+
+    (defn safp-native-dylib-file-probe (path source-vouch expected-content-hash seal-ok proof callable lowerable max-bytes)
+        (do
+            (let exists (fs-exists? path))
+            (let size (fs-stat-size path))
+            (let mtime (fs-stat-mtime path))
+            (let raw-content-vouch (fbd-vouch-content-file-capped path expected-content-hash max-bytes))
+            (let content-vouch (safp-effective-vouch exists size raw-content-vouch))
+            (let observation
+                (if (eq exists 0)
+                    (sap-native-dylib-observation path 0 -1 -1 "" "" 0 0 0 0)
+                    (sai-native-dylib-observation-from-vouches
+                        path exists size mtime source-vouch content-vouch seal-ok proof callable lowerable)))
+            (safp-artifact-probe-row (sap-role-native-dylib)
+                                     observation
+                                     source-vouch
+                                     content-vouch
+                                     (sai-vouch-status content-vouch))))
+    (defn safp-native-dylib-observation (path source-vouch expected-content-hash seal-ok proof callable lowerable max-bytes)
+        (safp-artifact-probe-observation
+            (safp-native-dylib-file-probe path source-vouch expected-content-hash seal-ok proof callable lowerable max-bytes)))
+    (defn safp-missing-native-dylib-observation (path)
+        (sap-native-dylib-observation path 0 -1 -1 "" "" 0 0 0 0))
+    (defn safp-missing-native-dylib-probe (path)
+        (safp-artifact-probe-row (sap-role-native-dylib)
+                                 (safp-missing-native-dylib-observation path)
+                                 (safp-empty-source-vouch path)
+                                 (safp-empty-content-vouch path)
+                                 (sai-status-unobserved)))
+
+    (defn safp-bundle-status-from (source-probe fkb-probe)
+        (if (str_eq (safp-source-probe-status source-probe) (sai-status-match))
+            (if (str_eq (safp-artifact-probe-status fkb-probe) (sai-status-match))
+                (safp-status-ready)
+                (safp-artifact-probe-status fkb-probe))
+            (safp-source-probe-status source-probe)))
+    (defn safp-source-fkb-probe (source-path fkb-path expected-source-hash expected-fkb-hash seal-ok includes-tbl max-bytes)
+        (do
+            (let source-probe (safp-source-file-probe source-path expected-source-hash max-bytes))
+            (let fkb-probe (safp-program-image-fkb-file-probe
+                                fkb-path
+                                (safp-source-probe-vouch source-probe)
+                                expected-fkb-hash
+                                seal-ok
+                                includes-tbl
+                                max-bytes))
+            (let dylib-probe (safp-missing-native-dylib-probe ""))
+            (let bundle (sap-bundle (safp-source-probe-observation source-probe)
+                                    (safp-artifact-probe-observation fkb-probe)
+                                    (safp-artifact-probe-observation dylib-probe)))
+            (safp-probe-bundle-row source-probe
+                                   fkb-probe
+                                   dylib-probe
+                                   bundle
+                                   (safp-bundle-status-from source-probe fkb-probe))))
+    (defn safp-source-fkb-bundle (source-path fkb-path expected-source-hash expected-fkb-hash seal-ok includes-tbl max-bytes)
+        (safp-probe-bundle-sap
+            (safp-source-fkb-probe source-path fkb-path expected-source-hash expected-fkb-hash seal-ok includes-tbl max-bytes)))
+)

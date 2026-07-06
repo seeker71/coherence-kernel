@@ -1,0 +1,459 @@
+; runtime-trace-ingest-band.fk -- Layer 10b runtime trace ingest proof.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/form-fs.fk form-stdlib/file-byte-window.fk form-stdlib/source-artifact-cache.fk form-stdlib/source-artifact-descriptor.fk form-stdlib/runtime-artifact-plan.fk form-stdlib/source-artifact-probe.fk form-stdlib/source-artifact-identity.fk form-stdlib/runtime-artifact-selector.fk form-stdlib/runtime-artifact-outcome.fk form-stdlib/runtime-artifact-retry.fk form-stdlib/runtime-artifact-load-envelope.fk form-stdlib/runtime-artifact-attempt-receipt.fk form-stdlib/runtime-artifact-executor-capability.fk form-stdlib/program-image-fkb.fk form-stdlib/program-image-fkb-byte-container.fk form-stdlib/program-image-fkb-byte-file-witness.fk form-stdlib/program-image-fkb-byte-decode.fk form-stdlib/runtime-program-image-fkb-attempt.fk form-stdlib/runtime-program-image-fkb-capability-bound.fk form-stdlib/runtime-program-image-fkb-walker-trace.fk form-stdlib/runtime-program-image-fkb-traced-capability-bound.fk form-stdlib/reason-coverage.fk form-stdlib/runtime-trace-ingest.fk
+;
+; Expected: 8388607
+
+(do
+    (defn rtib-score (ok bit) (if ok bit 0))
+    (defn rtib-manifest-has (name)
+        (runtime-trace-ingest-manifest-has? name (runtime-trace-ingest-manifest)))
+    (defn rtib-has? (text needle)
+        (if (str_eq (value_kind text) "string")
+            (ge (str_find text needle 0) 0)
+            0))
+    (defn rtib-read-file-any (primary fallback)
+        (do
+            (let first (read_file primary))
+            (if (str_eq (value_kind first) "string")
+                first
+                (read_file fallback))))
+
+    (defn rtib-ready-path () "cache/min42.fkb")
+    (defn rtib-source-hash () "sha:src-42")
+    (defn rtib-content-hash () "sha:content-42")
+
+    (defn rtib-table ()
+        (pif-table-image 1
+                         (list 0)
+                         1
+                         (list (pif-node-row 1 42 0 0))
+                         0
+                         (empty)))
+    (defn rtib-pif ()
+        (pif-envelope "src/min42.fk" (rtib-source-hash) 100
+                      (rtib-ready-path) (rtib-content-hash) 101
+                      1
+                      (rtib-table)))
+    (defn rtib-source-for-pif (pif) (pif-source-from-envelope pif))
+    (defn rtib-fkb-for-pif (pif) (pif-descriptor-from-envelope pif))
+    (defn rtib-envelope ()
+        (do
+            (let pif (rtib-pif))
+            (let src (rtib-source-for-pif pif))
+            (let fkb (rtib-fkb-for-pif pif))
+            (rale-envelope-from-selection
+                src fkb (sad-no-artifact)
+                (ras-selection-from-plan
+                    (rap-plan-from-descriptors src fkb (sad-no-artifact))))))
+    (defn rtib-payload ()
+        (do
+            (let pif (rtib-pif))
+            (pifbd-payload (pif-envelope-source-path pif)
+                           (pif-envelope-source-hash pif)
+                           (pif-envelope-source-mtime pif)
+                           (pif-envelope-artifact-path pif)
+                           (pif-envelope-seal-ok pif)
+                           (pif-envelope-table pif)
+                           (pif-envelope-symbol-image pif))))
+    (defn rtib-decode () (pifbd-decoded-row (rtib-payload) 123))
+    (defn rtib-admission ()
+        (pifbd-admission (list "runtime-trace-ingest-synthetic-admission")
+                         (rtib-decode)
+                         (rtib-pif)
+                         (pifbd-status-admitted)
+                         (pifbd-reason-admitted)))
+
+    (defn rtib-cap-for-envelope (e availability evidence authority freshness detail)
+        (raec-capability (raec-cap-program-image-walker)
+                         (rale-envelope-action e)
+                         (rale-envelope-route e)
+                         (rale-envelope-artifact-kind e)
+                         availability evidence authority freshness detail))
+    (defn rtib-ready-cap ()
+        (rtib-cap-for-envelope (rtib-envelope)
+                               (raec-availability-available)
+                               (raec-evidence-supplied-current)
+                               (raec-authority-attempt-supplier)
+                               (raec-freshness-current)
+                               "supplied-current-program-image-walker"))
+    (defn rtib-readiness ()
+        (raec-readiness-from-envelope-capability (rtib-envelope) (rtib-ready-cap)))
+    (defn rtib-no-capability-readiness ()
+        (raec-readiness-from-envelope-no-capability (rtib-envelope)))
+
+    (defn rtib-trace-with (status outputs first code stop detail)
+        (rpiwt-trace (rtib-ready-path)
+                     (rtib-source-hash)
+                     (rtib-content-hash)
+                     (rpiwt-entry-kind-function-root)
+                     0
+                     0
+                     1000
+                     12
+                     outputs
+                     first
+                     code
+                     status
+                     stop
+                     detail))
+    (defn rtib-trace (status outputs first code stop)
+        (rtib-trace-with status outputs first code stop "synthetic-runtime-trace-ingest"))
+    (defn rtib-ok-trace () (rtib-trace (rao-obs-ok) 1 42 0 (rpiwt-stop-completed)))
+    (defn rtib-invalid-trace ()
+        (rpiwt-trace (rtib-ready-path)
+                     (rtib-source-hash)
+                     (rtib-content-hash)
+                     (rpiwt-entry-kind-function-root)
+                     0
+                     0
+                     10
+                     11
+                     1
+                     42
+                     1
+                     (rao-obs-timeout)
+                     (rpiwt-stop-timeout)
+                     "over-budget"))
+    (defn rtib-ok-stop-drift-trace ()
+        (rtib-trace-with (rao-obs-ok) 1 42 0 (rpiwt-stop-timeout) "ok-stop-drift"))
+
+    (defn rtib-join-from (readiness trace)
+        (rpiftc-join-from-trace (rtib-envelope) readiness (rtib-admission) trace))
+    (defn rtib-join (status outputs first code stop)
+        (rtib-join-from (rtib-readiness) (rtib-trace status outputs first code stop)))
+    (defn rtib-ok-join () (rtib-join-from (rtib-readiness) (rtib-ok-trace)))
+    (defn rtib-nonbound-ok-join () (rtib-join-from (rtib-no-capability-readiness) (rtib-ok-trace)))
+    (defn rtib-record-from (readiness trace)
+        (rti-record-from-join (rtib-join-from readiness trace)))
+    (defn rtib-record (status outputs first code stop)
+        (rti-record-from-join (rtib-join status outputs first code stop)))
+    (defn rtib-ok-record () (rti-record-from-join (rtib-ok-join)))
+    (defn rtib-nonbound-ok-record () (rti-record-from-join (rtib-nonbound-ok-join)))
+    (defn rtib-malformed-join-record () (rti-record-from-join (list "not-a-join")))
+    (defn rtib-malformed-trace-record ()
+        (do
+            (let ok (rtib-ok-join))
+            (rti-record-from-join
+                (rpiftc-join-row (rtib-envelope)
+                                  (rtib-readiness)
+                                  (rtib-admission)
+                                  (list "bad-trace")
+                                  (rpiftc-join-trace-bridge ok)
+                                  (rpiftc-join-capability-join ok)
+                                  (rpiftc-join-attempt ok)
+                                  (rpiftc-status-bound)
+                                  (rpiftc-reason-bound)))))
+    (defn rtib-malformed-bridge-record ()
+        (do
+            (let ok (rtib-ok-join))
+            (rti-record-from-join
+                (rpiftc-join-row (rtib-envelope)
+                                  (rtib-readiness)
+                                  (rtib-admission)
+                                  (rtib-ok-trace)
+                                  (list "bad-bridge")
+                                  (rpiftc-join-capability-join ok)
+                                  (rpiftc-join-attempt ok)
+                                  (rpiftc-status-bound)
+                                  (rpiftc-reason-bound)))))
+    (defn rtib-ok-stop-drift-record ()
+        (do
+            (let ok (rtib-ok-join))
+            (rti-record-from-join
+                (rpiftc-join-row (rtib-envelope)
+                                  (rtib-readiness)
+                                  (rtib-admission)
+                                  (rtib-ok-stop-drift-trace)
+                                  (rpiftc-join-trace-bridge ok)
+                                  (rpiftc-join-capability-join ok)
+                                  (rpiftc-join-attempt ok)
+                                  (rpiftc-status-bound)
+                                  (rpiftc-reason-bound)))))
+
+    (defn rtib-bit-manifest-1 ()
+        (rtib-score
+            (and (eq (rtib-manifest-has "layer-10b-learning-ingest-not-runtime") 1)
+            (and (eq (rtib-manifest-has "consumes-9h4-evidence-only") 1)
+            (and (eq (rtib-manifest-has "carried-trace-fields-preserved") 1)
+            (and (eq (rtib-manifest-has "9h4-provenance-preserved") 1)
+            (and (eq (rtib-manifest-has "memory-lane-separate-from-action") 1)
+                 (eq (rtib-manifest-has "body-freeze-eligible-only-when-capability-bound") 1))))))
+            1))
+    (defn rtib-bit-manifest-2 ()
+        (rtib-score
+            (and (eq (rtib-manifest-has "non-bound-rows-stay-liquid-witnessed") 1)
+            (and (eq (rtib-manifest-has "hard-statuses-become-high-priority-investigations") 1)
+            (and (eq (rtib-manifest-has "soft-statuses-become-repair-prompts") 1)
+            (and (eq (rtib-manifest-has "unknown-status-quarantines") 1)
+            (and (eq (rtib-manifest-has "malformed-evidence-refused") 1)
+            (and (eq (rtib-manifest-has "no-storage-mutation") 1)
+            (and (eq (rtib-manifest-has "no-artifact-load") 1)
+            (and (eq (rtib-manifest-has "no-native-call") 1)
+            (and (eq (rtib-manifest-has "no-selector-install") 1)
+                 (eq (rtib-manifest-has "no-c-seed-growth") 1))))))))))
+            2))
+    (defn rtib-bit-version-record ()
+        (do
+            (let r (rtib-ok-record))
+            (rtib-score
+                (and (str_eq (rti-version) "runtime-trace-ingest-v1")
+                     (rti-record? r))
+                4)))
+    (defn rtib-bit-bound-ok-body ()
+        (do
+            (let r (rtib-ok-record))
+            (rtib-score
+                (and (str_eq (rti-record-memory-lane r) (rti-memory-body))
+                (and (str_eq (rti-record-action r) (rti-action-witness))
+                (and (str_eq (rti-record-prompt-class r) (rti-prompt-body-freeze))
+                (and (eq (rti-record-freeze-eligible r) 1)
+                     (str_eq (rti-record-reason r) (rti-reason-body-freeze-eligible))))))
+                8)))
+    (defn rtib-bit-nonbound-liquid ()
+        (do
+            (let r (rtib-nonbound-ok-record))
+            (rtib-score
+                (and (str_eq (rti-record-memory-lane r) (rti-memory-liquid))
+                (and (str_eq (rti-record-action r) (rti-action-witness))
+                (and (eq (rti-record-freeze-eligible r) 0)
+                (and (eq (rti-record-top-attempt-present r) 0)
+                     (str_eq (rti-record-reason r) (rti-reason-non-bound-witnessed))))))
+                16)))
+    (defn rtib-bit-oom-investigate ()
+        (do
+            (let r (rtib-record (rao-obs-oom-killed) 0 0 137 (rpiwt-stop-oom-killed)))
+            (rtib-score
+                (and (str_eq (rti-record-memory-lane r) (rti-memory-liquid))
+                (and (str_eq (rti-record-action r) (rti-action-investigate))
+                (and (str_eq (rti-record-prompt-class r) (rti-prompt-oom))
+                (and (eq (rti-record-priority r) 100)
+                     (str_eq (rti-record-reason r) (rti-reason-hard-runtime-investigate))))))
+                32)))
+    (defn rtib-bit-hard-statuses ()
+        (do
+            (let killed (rtib-record (rao-obs-killed) 0 0 137 (rpiwt-stop-killed)))
+            (let stalled (rtib-record (rao-obs-stalled) 0 0 137 (rpiwt-stop-stalled)))
+            (let timeout (rtib-record (rao-obs-timeout) 0 0 137 (rpiwt-stop-timeout)))
+            (let wrong (rtib-record (rao-obs-wrong-value) 1 41 0 (rpiwt-stop-wrong-value)))
+            (rtib-score
+                (and (str_eq (rti-record-prompt-class killed) (rti-prompt-killed))
+                (and (str_eq (rti-record-prompt-class stalled) (rti-prompt-stalled))
+                (and (str_eq (rti-record-prompt-class timeout) (rti-prompt-timeout))
+                (and (str_eq (rti-record-prompt-class wrong) (rti-prompt-wrong-value))
+                     (eq (rti-record-priority wrong) 100)))))
+                64)))
+    (defn rtib-bit-soft-repair ()
+        (do
+            (let loader (rtib-record (rao-obs-loader-missing) 0 0 1 (rpiwt-stop-loader-missing)))
+            (let err (rtib-record (rao-obs-error) 0 0 2 (rpiwt-stop-error)))
+            (rtib-score
+                (and (str_eq (rti-record-action loader) (rti-action-investigate))
+                (and (str_eq (rti-record-prompt-class loader) (rti-prompt-loader-repair))
+                (and (eq (rti-record-priority loader) 60)
+                (and (str_eq (rti-record-prompt-class err) (rti-prompt-error-repair))
+                     (str_eq (rti-record-reason err) (rti-reason-repair-runtime-investigate))))))
+                128)))
+    (defn rtib-bit-unknown-quarantine ()
+        (do
+            (let r (rtib-record "surprise-status" 0 0 1 (rpiwt-stop-unknown)))
+            (rtib-score
+                (and (str_eq (rti-record-memory-lane r) (rti-memory-none))
+                (and (str_eq (rti-record-action r) (rti-action-quarantine))
+                (and (str_eq (rti-record-prompt-class r) (rti-prompt-unknown))
+                     (str_eq (rti-record-reason r) (rti-reason-unknown-runtime-quarantine)))))
+                256)))
+    (defn rtib-bit-invalid-trace-refused ()
+        (do
+            (let r (rti-record-from-join (rtib-join-from (rtib-readiness) (rtib-invalid-trace))))
+            (rtib-score
+                (and (str_eq (rti-record-action r) (rti-action-refused))
+                (and (eq (rti-record-freeze-eligible r) 0)
+                (and (str_eq (rti-record-reason r) (rti-reason-trace-not-ready))
+                     (str_eq (rti-record-trace-bridge-status r) (rpiwt-status-refused)))))
+                512)))
+    (defn rtib-bit-malformed-join ()
+        (do
+            (let r (rtib-malformed-join-record))
+            (rtib-score
+                (and (str_eq (rti-record-action r) (rti-action-refused))
+                (and (str_eq (rti-record-memory-lane r) (rti-memory-none))
+                     (str_eq (rti-record-reason r) (rti-reason-malformed-join))))
+                1024)))
+    (defn rtib-bit-malformed-trace ()
+        (do
+            (let r (rtib-malformed-trace-record))
+            (rtib-score
+                (and (str_eq (rti-record-action r) (rti-action-refused))
+                     (str_eq (rti-record-reason r) (rti-reason-malformed-trace)))
+                2048)))
+    (defn rtib-bit-malformed-bridge ()
+        (do
+            (let r (rtib-malformed-bridge-record))
+            (rtib-score
+                (and (str_eq (rti-record-action r) (rti-action-refused))
+                (and (str_eq (rti-record-reason r) (rti-reason-malformed-trace-bridge))
+                     (str_eq (rti-record-artifact-path r) (rtib-ready-path))))
+                4096)))
+    (defn rtib-bit-provenance ()
+        (do
+            (let r (rtib-ok-record))
+            (rtib-score
+                (and (str_eq (rti-record-join-status r) (rpiftc-status-bound))
+                (and (str_eq (rti-record-join-reason r) (rpiftc-reason-bound))
+                (and (str_eq (rti-record-trace-bridge-status r) (rpiwt-status-trace-ready))
+                (and (str_eq (rti-record-trace-bridge-reason r) (rpiwt-reason-trace-lowered))
+                (and (str_eq (rti-record-capability-status r) (rpifc-status-bound))
+                     (str_eq (rti-record-capability-reason r) (rpifc-reason-capability-bound)))))))
+                8192)))
+    (defn rtib-bit-identity-fields ()
+        (do
+            (let r (rtib-ok-record))
+            (rtib-score
+                (and (str_eq (rti-record-artifact-path r) (rtib-ready-path))
+                (and (str_eq (rti-record-source-hash r) (rtib-source-hash))
+                (and (str_eq (rti-record-content-hash r) (rtib-content-hash))
+                (and (str_eq (rti-record-entry-kind r) (rpiwt-entry-kind-function-root))
+                (and (eq (rti-record-entry-index r) 0)
+                (and (eq (rti-record-root-node r) 0)
+                (and (eq (rti-record-step-budget r) 1000)
+                (and (eq (rti-record-steps-used r) 12)
+                (and (eq (rti-record-output-count r) 1)
+                (and (eq (rti-record-first-value r) 42)
+                (and (eq (rti-record-exit-code r) 0)
+                     (str_eq (rti-record-detail r) "synthetic-runtime-trace-ingest"))))))))))))
+                16384)))
+    (defn rtib-bit-ok-stop-drift ()
+        (do
+            (let r (rtib-ok-stop-drift-record))
+            (rtib-score
+                (and (str_eq (rti-record-action r) (rti-action-quarantine))
+                (and (eq (rti-record-freeze-eligible r) 0)
+                     (str_eq (rti-record-reason r) (rti-reason-ok-stop-not-completed))))
+                32768)))
+    (defn rtib-observed-reasons ()
+        (list
+            (rti-record-reason (rtib-ok-record))
+            (rti-record-reason (rtib-nonbound-ok-record))
+            (rti-record-reason (rtib-record (rao-obs-oom-killed) 0 0 137 (rpiwt-stop-oom-killed)))
+            (rti-record-reason (rtib-record (rao-obs-loader-missing) 0 0 1 (rpiwt-stop-loader-missing)))
+            (rti-record-reason (rtib-record "surprise-status" 0 0 1 (rpiwt-stop-unknown)))
+            (rti-record-reason (rtib-ok-stop-drift-record))
+            (rti-record-reason (rtib-malformed-join-record))
+            (rti-record-reason (rtib-malformed-trace-record))
+            (rti-record-reason (rtib-malformed-bridge-record))
+            (rti-record-reason (rti-record-from-join (rtib-join-from (rtib-readiness) (rtib-invalid-trace))))))
+    (defn rtib-bit-reason-coverage ()
+        (do
+            (let coverage (rcov-coverage (rti-reason-manifest) (rtib-observed-reasons)))
+            (rtib-score (rcov-covered? coverage) 65536)))
+    (defn rtib-none-of? (text needles)
+        (if (nil? needles)
+            1
+            (if (rtib-has? text (head needles))
+                0
+                (rtib-none-of? text (tail needles)))))
+    (defn rtib-forbidden-needles ()
+        (list "read_file" "read_file_slice" "fs-" ".tbl" "table-text"
+              "rtta-" "program-image-tbl-emit" "write_form_binary"
+              "read_form_binary" "recipe_to_bytes" "bytes_to_recipe"
+              "form-eval" "fk_run" "dlopen" "bp_table" "bpTable"
+              "BP_TABLE" "rpiftc-join-from-trace"
+              "rpiftc-join-from-bridges" "rpiwt-bridge-from-trace"
+              "rpifc-join-from-run" "rpifa-supplied-run"
+              "rpifa-bridge-from-run" "raar-supplied-attempt"
+              "raar-receipt-from-envelope-attempt" "raec-capability"
+              "raec-readiness" "raec-readiness-from-"))
+    (defn rtib-bit-static-mirror ()
+        (do
+            (let text (rtib-read-file-any "form/form-stdlib/runtime-trace-ingest.fk"
+                                          "../form/form-stdlib/runtime-trace-ingest.fk"))
+            (let grammar (rtib-read-file-any "grammars/runtime-trace-ingest.fk"
+                                             "../grammars/runtime-trace-ingest.fk"))
+            (rtib-score
+                (and (str_eq text grammar)
+                     (eq (rtib-none-of? text (rtib-forbidden-needles)) 1))
+                131072)))
+    (defn rtib-bit-architecture-receipt ()
+        (do
+            (let arch (rtib-read-file-any "../receipts/2026-07-03-core-layer-architecture-map.md"
+                                          "receipts/2026-07-03-core-layer-architecture-map.md"))
+            (let receipt (rtib-read-file-any "../receipts/2026-07-04-runtime-trace-ingest-layer-review.md"
+                                             "receipts/2026-07-04-runtime-trace-ingest-layer-review.md"))
+            (rtib-score
+                (and (rtib-has? arch "10b. Runtime trace ingest")
+                (and (rtib-has? receipt "Layer 10b")
+                (and (rtib-has? receipt "not runtime progress")
+                (and (rtib-has? receipt "consumes 9h4 evidence")
+                (and (rtib-has? receipt "does not execute")
+                (and (rtib-has? receipt "body-freeze eligible only when capability-bound")
+                     (rtib-has? receipt "non-bound rows stay liquid/witnessed")))))))
+                262144)))
+    (defn rtib-bit-priority-order ()
+        (do
+            (let hard (rtib-record (rao-obs-timeout) 0 0 137 (rpiwt-stop-timeout)))
+            (let soft (rtib-record (rao-obs-error) 0 0 2 (rpiwt-stop-error)))
+            (let unknown (rtib-record "surprise-status" 0 0 1 (rpiwt-stop-unknown)))
+            (let ok (rtib-ok-record))
+            (rtib-score
+                (and (gt (rti-record-priority hard) (rti-record-priority soft))
+                (and (gt (rti-record-priority soft) (rti-record-priority unknown))
+                     (gt (rti-record-priority unknown) (rti-record-priority ok))))
+                524288)))
+    (defn rtib-bit-memory-action-separate ()
+        (do
+            (let hard (rtib-record (rao-obs-timeout) 0 0 137 (rpiwt-stop-timeout)))
+            (let body (rtib-ok-record))
+            (rtib-score
+                (and (str_eq (rti-record-memory-lane hard) (rti-memory-liquid))
+                (and (str_eq (rti-record-action hard) (rti-action-investigate))
+                (and (str_eq (rti-record-memory-lane body) (rti-memory-body))
+                     (str_eq (rti-record-action body) (rti-action-witness)))))
+                1048576)))
+    (defn rtib-bit-nonready-keeps-trace ()
+        (do
+            (let r (rtib-nonbound-ok-record))
+            (rtib-score
+                (and (str_eq (rti-record-artifact-path r) (rtib-ready-path))
+                (and (str_eq (rti-record-trace-status r) (rao-obs-ok))
+                (and (str_eq (rti-record-join-status r) (rpiftc-status-unavailable))
+                     (str_eq (rti-record-capability-status r) (rpifc-status-unavailable)))))
+                2097152)))
+    (defn rtib-bit-top-attempt-gate ()
+        (do
+            (let body (rtib-ok-record))
+            (let liquid (rtib-nonbound-ok-record))
+            (rtib-score
+                (and (eq (rti-record-top-attempt-present body) 1)
+                (and (eq (rti-record-top-attempt-present liquid) 0)
+                (and (eq (rti-record-freeze-eligible body) 1)
+                     (eq (rti-record-freeze-eligible liquid) 0))))
+                4194304)))
+
+    (defn runtime-trace-ingest-band ()
+        (sum (list
+            (rtib-bit-manifest-1)
+            (rtib-bit-manifest-2)
+            (rtib-bit-version-record)
+            (rtib-bit-bound-ok-body)
+            (rtib-bit-nonbound-liquid)
+            (rtib-bit-oom-investigate)
+            (rtib-bit-hard-statuses)
+            (rtib-bit-soft-repair)
+            (rtib-bit-unknown-quarantine)
+            (rtib-bit-invalid-trace-refused)
+            (rtib-bit-malformed-join)
+            (rtib-bit-malformed-trace)
+            (rtib-bit-malformed-bridge)
+            (rtib-bit-provenance)
+            (rtib-bit-identity-fields)
+            (rtib-bit-ok-stop-drift)
+            (rtib-bit-reason-coverage)
+            (rtib-bit-static-mirror)
+            (rtib-bit-architecture-receipt)
+            (rtib-bit-priority-order)
+            (rtib-bit-memory-action-separate)
+            (rtib-bit-nonready-keeps-trace)
+            (rtib-bit-top-attempt-gate))))
+
+    (runtime-trace-ingest-band))

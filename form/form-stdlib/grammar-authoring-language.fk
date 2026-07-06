@@ -1,0 +1,140 @@
+; grammar-authoring-language.fk -- scannerless authoring surface for one domain grammar.
+;
+; This is a small authoring rung above domain-grammar-core. It lets a domain
+; grammar descriptor and one rule be written as a surface form instead of as a
+; hand-built `(grammar ... rule3 ... p-lit ... t-emit ...)` Form cell:
+;
+;   domain programming family programming-language semantic semantic-stdlib
+;     evidence compiler-proof residue syntax-semantic-residue lower form-recipe
+;     { return value digit -> prog-return }
+;
+; The declaration lowers structurally to `dgcore-domain` plus a BMF grammar
+; value. It does not lower to Form source text, does not call semantic-stdlib,
+; and does not load ontology or source-compiler cells.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bmf-core.fk
+;           form-stdlib/bmf-grammar.fk form-stdlib/grammar-loader.fk
+;           form-stdlib/domain-grammar-core.fk
+
+(do
+    (defn gal-feature (name status) (list "grammar-authoring-language-feature" name status))
+    (defn gal-feature-name (f) (nth f 1))
+    (defn gal-feature-status (f) (nth f 2))
+    (defn grammar-authoring-language-manifest ()
+        (list
+            (gal-feature "scannerless" 1)
+            (gal-feature "bmf-cursor-grammar" 1)
+            (gal-feature "no-line-grammar" 1)
+            (gal-feature "not-s-expression-surface" 1)
+            (gal-feature "not-form-cell-authoring" 1)
+            (gal-feature "single-domain-decl" 1)
+            (gal-feature "single-rule-body" 1)
+            (gal-feature "metadata-only-lanes" 1)
+            (gal-feature "grammar-value-lowering" 1)))
+    (defn grammar-authoring-language-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (gal-feature-name (head fs)) name)
+                     (eq (gal-feature-status (head fs)) 1))
+                1
+                (grammar-authoring-language-manifest-has? name (tail fs)))))
+
+    (defn grammar-authoring-language-grammar ()
+        (grammar "decl" (list
+            (rule3 "decl"
+                (list "seq"
+                    (p-lit "domain")
+                    (p-cap "name" (p-ref "token"))
+                    (p-lit "family")
+                    (p-cap "family" (p-ref "token"))
+                    (p-lit "semantic")
+                    (p-cap "semantic" (p-ref "token"))
+                    (p-lit "evidence")
+                    (p-cap "evidence" (p-ref "token"))
+                    (p-lit "residue")
+                    (p-cap "residue" (p-ref "token"))
+                    (p-lit "lower")
+                    (p-cap "lower" (p-ref "token"))
+                    (p-lit "{")
+                    (p-cap "literal" (p-ref "simple"))
+                    (p-cap "capture" (p-ref "simple"))
+                    (p-cap "class" (p-ref "simple"))
+                    (p-lit "->")
+                    (p-cap "emit" (p-ref "token"))
+                    (p-lit "}"))
+                (t-emit "fncall"
+                    (list (t-const "__gal_decl__")
+                          (t-splice "name")
+                          (t-splice "family")
+                          (t-splice "semantic")
+                          (t-splice "evidence")
+                          (t-splice "residue")
+                          (t-splice "lower")
+                          (t-splice "literal")
+                          (t-splice "capture")
+                          (t-splice "class")
+                          (t-splice "emit"))))
+            (rule3 "token"
+                (p-cap "v" (p-run "alnum"))
+                (t-splice "v"))
+            (rule3 "simple"
+                (p-cap "v" (p-run "alpha"))
+                (t-splice "v")))))
+
+    (defn gal-parse-fail () (intern_trivial_string "PARSE-FAIL"))
+    (defn gal-ok? (node) (not (node_eq node (gal-parse-fail))))
+
+    (defn gal-parse (src)
+        (do
+            (let rr (g-match-rule (grammar-authoring-language-grammar) "decl" (cursor-str src)))
+            (if (and (rok? rr) (cur-eof? (skip-ws (rok-cur rr))))
+                (rok-node rr)
+                (gal-parse-fail))))
+
+    (defn gal-child-text (decl i)
+        (node_value (nth (node_children decl) i)))
+    (defn gal-domain-name (decl) (gal-child-text decl 1))
+    (defn gal-family (decl) (gal-child-text decl 2))
+    (defn gal-semantic-lane (decl) (gal-child-text decl 3))
+    (defn gal-evidence-lane (decl) (gal-child-text decl 4))
+    (defn gal-residue-policy (decl) (gal-child-text decl 5))
+    (defn gal-lower-target (decl) (gal-child-text decl 6))
+    (defn gal-rule-literal (decl) (gal-child-text decl 7))
+    (defn gal-rule-capture (decl) (gal-child-text decl 8))
+    (defn gal-rule-class (decl) (gal-child-text decl 9))
+    (defn gal-emit-slug (decl) (gal-child-text decl 10))
+
+    (defn gal-slug-to-underscores-loop (slug i)
+        (if (ge i (str_len slug))
+            ""
+            (do
+                (let ch (substring slug i (add i 1)))
+                (str_concat
+                    (if (str_eq ch "-") "_" ch)
+                    (gal-slug-to-underscores-loop slug (add i 1))))))
+    (defn gal-emit-tag (slug)
+        (str_concat "__" (str_concat (gal-slug-to-underscores-loop slug 0) "__")))
+
+    (defn gal-lower-grammar (decl)
+        (grammar (gal-rule-literal decl) (list
+            (rule3 (gal-rule-literal decl)
+                (list "seq"
+                    (p-lit (gal-rule-literal decl))
+                    (p-cap (gal-rule-capture decl) (p-run (gal-rule-class decl))))
+                (t-emit "fncall"
+                    (list (t-const (gal-emit-tag (gal-emit-slug decl)))
+                          (t-splice (gal-rule-capture decl))))))))
+
+    (defn gal-lower-domain (decl)
+        (dgcore-domain
+            (gal-domain-name decl)
+            (gal-family decl)
+            (gal-lower-grammar decl)
+            (gal-semantic-lane decl)
+            (gal-evidence-lane decl)
+            (gal-residue-policy decl)
+            (gal-lower-target decl)))
+
+    (defn gal-register-lowered (decl)
+        (dgcore-register-domain (gl-empty) (gal-lower-domain decl)))
+)

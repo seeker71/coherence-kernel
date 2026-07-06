@@ -21,63 +21,144 @@
 ; an earlier cursor value; restore is returning to it. Backtracking leaves
 ; no sediment because nothing was mutated.
 ;
-; Raw s-expression form (no section[] compile step) so the core boots with
-; only core.fk + line-grammar.fk + the ontology loader as preludes.
+; Raw s-expression form (no section[] compile step). The string cursor and
+; matcher run with core.fk alone. File-backed cursor surfaces compose through
+; file-byte-window + bmf-byte-cursor when cursor-file is used. Template
+; emission calls bp/intern_node, so that path is witnessed with the ontology
+; loader in the prelude, not by the cursor band.
 
 (do
+    ;; ──────────────────────────────────────────────────────────────────
+    ;; Layer language manifest — this layer's observable abstraction.
+    ;; BMF cursor is streaming and scannerless: it reads a surface directly,
+    ;; without a token stream or line grammar.
+    ;; ──────────────────────────────────────────────────────────────────
+
+    (defn bmf-layer-feature (name status) (list "bmf-layer-feature" name status))
+    (defn bmf-layer-feature-name (f) (nth f 1))
+    (defn bmf-layer-feature-status (f) (nth f 2))
+    (defn bmf-cursor-language-manifest ()
+        (list
+            (bmf-layer-feature "scannerless" 1)
+            (bmf-layer-feature "streaming-cursor" 1)
+            (bmf-layer-feature "immutable-cursor" 1)
+            (bmf-layer-feature "checkpoint-restore" 1)
+            (bmf-layer-feature "pattern-data" 1)
+            (bmf-layer-feature "template-data" 1)
+            (bmf-layer-feature "no-token-stream" 1)
+            (bmf-layer-feature "no-line-grammar" 1)))
+    (defn bmf-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (bmf-layer-feature-name (head fs)) name)
+                     (eq (bmf-layer-feature-status (head fs)) 1))
+                1
+                (bmf-manifest-has? name (tail fs)))))
+
     ;; ──────────────────────────────────────────────────────────────────
     ;; Surface — the thing a cursor reads. Generic over kind.
     ;;   surface = (list "surface" kind payload)
     ;; ──────────────────────────────────────────────────────────────────
 
     (defn surface-string (s) (list "surface" "string" s))
-    ;; file is read once into a string surface — a real second surface today;
-    ;; socket / cell / channel are the next surfaces (streaming peek).
-    (defn surface-file (path) (surface-string (read_file path)))
+    (defn surface-file-window (path window-size)
+        (list "surface" "file-window" path (bbc-clamp-window-size window-size)))
+    (defn surface-file (path)
+        (surface-file-window path (bbc-default-window-size)))
 
     (defn surf-kind    (sf) (nth sf 1))
     (defn surf-payload (sf) (nth sf 2))
+    (defn surf-window-size (sf)
+        (if (str_eq (surf-kind sf) "file-window") (nth sf 3) 0))
 
     (defn surf-len (sf)
         (if (str_eq (surf-kind sf) "string") (str_len (surf-payload sf))
-            0))
+            (sub 0 1)))
 
     ;; ──────────────────────────────────────────────────────────────────
-    ;; Cursor — (list "cursor" surface pos). Immutable; advance returns new.
+    ;; Cursor row carries surface, position, and optional file-window state.
+    ;; Immutable; advance returns new.
     ;; ──────────────────────────────────────────────────────────────────
 
-    (defn cursor-of   (sf)   (list "cursor" sf 0))
+    (defn cursor-row (sf pos state) (list "cursor" sf pos state))
+    (defn cursor-of   (sf)   (cursor-row sf 0 (empty)))
     (defn cursor-str  (s)    (cursor-of (surface-string s)))
-    (defn cursor-file (path) (cursor-of (surface-file path)))
+    (defn cursor-file-window (path window-size)
+        (do
+            (let state (bbc-cursor-with-window path window-size))
+            (cursor-row (surface-file-window path (bbc-window-size state))
+                        (bbc-offset state)
+                        state)))
+    (defn cursor-file (path)
+        (cursor-file-window path (bbc-default-window-size)))
 
     (defn cur-surface (c) (nth c 1))
     (defn cur-pos     (c) (nth c 2))
+    (defn cur-state   (c) (nth c 3))
 
-    (defn cur-eof? (c) (ge (cur-pos c) (surf-len (cur-surface c))))
+    (defn cur-eof? (c)
+        (do
+            (let sf (cur-surface c))
+            (if (str_eq (surf-kind sf) "string")
+                (ge (cur-pos c) (surf-len sf))
+                (if (str_eq (surf-kind sf) "file-window")
+                    (lt (bbc-byte (cur-state c)) 0)
+                    1))))
 
     ;; codepoint at the cursor, or -1 at end
     (defn cur-peek (c)
         (do (let sf (cur-surface c)) (let p (cur-pos c))
-            (if (ge p (surf-len sf)) (sub 0 1)
-                (if (str_eq (surf-kind sf) "string") (ord (char_at (surf-payload sf) p))
+            (if (str_eq (surf-kind sf) "string")
+                (if (ge p (surf-len sf)) (sub 0 1) (ord (char_at (surf-payload sf) p)))
+                (if (str_eq (surf-kind sf) "file-window") (bbc-byte (cur-state c))
                     (sub 0 1)))))
 
     ;; one-char string at the cursor, or "" at end
     (defn cur-peek-char (c)
         (do (let sf (cur-surface c)) (let p (cur-pos c))
-            (if (ge p (surf-len sf)) ""
-                (if (str_eq (surf-kind sf) "string") (substring (surf-payload sf) p (add p 1))
+            (if (str_eq (surf-kind sf) "string")
+                (if (ge p (surf-len sf)) "" (substring (surf-payload sf) p (add p 1)))
+                (if (str_eq (surf-kind sf) "file-window")
+                    (fbw-window-slice (fbw-read-window (surf-payload sf) p 1))
                     ""))))
 
     ;; advance n positions → NEW cursor (no mutation)
-    (defn cur-advance (c n) (list "cursor" (cur-surface c) (add (cur-pos c) n)))
+    (defn cur-advance-file-one (c)
+        (do
+            (let state (bbc-advance (cur-state c)))
+            (cursor-row (cur-surface c) (bbc-offset state) state)))
+    (defn cur-advance-file-loop (c n)
+        (if (le n 0)
+            c
+            (cur-advance-file-loop (cur-advance-file-one c) (sub n 1))))
+    (defn cur-advance (c n)
+        (do
+            (let sf (cur-surface c))
+            (if (str_eq (surf-kind sf) "file-window")
+                (cur-advance-file-loop c n)
+                (cursor-row sf (add (cur-pos c) n) (cur-state c)))))
 
     ;; the slice consumed between cursor c and a later position end-pos
+    (defn cur-file-slice-loop (path pos end-pos acc)
+        (if (ge pos end-pos)
+            acc
+            (do
+                (let requested (min2 (fbw-max-window) (sub end-pos pos)))
+                (let window (fbw-read-window path pos requested))
+                (let observed (fbw-window-observed-len window))
+                (if (le observed 0)
+                    acc
+                    (cur-file-slice-loop path
+                                         (add pos observed)
+                                         end-pos
+                                         (str_concat acc (fbw-window-slice window)))))))
     (defn cur-slice (c end-pos)
         (do (let sf (cur-surface c))
             (if (str_eq (surf-kind sf) "string")
                 (substring (surf-payload sf) (cur-pos c) end-pos)
-                "")))
+                (if (str_eq (surf-kind sf) "file-window")
+                    (cur-file-slice-loop (surf-payload sf) (cur-pos c) end-pos "")
+                    ""))))
 
     ;; checkpoint IS the cursor (a coordinate); restore returns to it.
     (defn cur-checkpoint (c) c)
@@ -107,6 +188,21 @@
     ;; ──────────────────────────────────────────────────────────────────
     ;; Char classes (named, so the pattern stays data).
     ;; ──────────────────────────────────────────────────────────────────
+
+    ;; Base codepoint predicates live in BMF cursor core, not line-grammar.
+    ;; Line grammars may use similar predicates, but this layer must be
+    ;; independent of line/token parsing by construction.
+    (defn is-ws-cp (cp)
+        (or (eq cp 32) (or (eq cp 9) (or (eq cp 10) (eq cp 13)))))
+    (defn is-digit-cp (cp) (and (ge cp 48) (le cp 57)))
+    (defn is-alpha-cp (cp)
+        (or (and (ge cp 65) (le cp 90))
+            (or (and (ge cp 97) (le cp 122))
+                (eq cp 95))))
+    (defn is-ident-cont-cp (cp)
+        (or (is-alpha-cp cp)
+            (or (is-digit-cp cp)
+                (or (eq cp 45) (eq cp 63)))))
 
     ;; shell / path "word" char: any printable byte that is NOT whitespace and
     ;; NOT a shell metacharacter ( "  $  &  '  (  )  ;  <  >  `  | ). This lets a
@@ -143,8 +239,11 @@
     ;; the 2-char window at the cursor ("" near end) — for // and /* detection
     (defn cur-win2 (c)
         (do (let sf (cur-surface c)) (let p (cur-pos c))
-            (if (gt (add p 2) (surf-len sf)) ""
-                (if (str_eq (surf-kind sf) "string") (substring (surf-payload sf) p (add p 2)) ""))))
+            (if (str_eq (surf-kind sf) "string")
+                (if (gt (add p 2) (surf-len sf)) "" (substring (surf-payload sf) p (add p 2)))
+                (if (str_eq (surf-kind sf) "file-window")
+                    (fbw-window-slice (fbw-read-window (surf-payload sf) p 2))
+                    ""))))
     ;; whitespace + comment skip. C-family comments (// line, /* block */) — the
     ;; form BML / Go / Java / C# share. (Python `#` / Form `;` are a future per-
     ;; grammar parameterization.) Backward-compatible: no-comment input is unchanged.
@@ -186,12 +285,20 @@
                                     (if (str_eq tag "cap") (match-cap pat c caps)
                                         (m-no))))))))))
 
-    (defn match-lit (pat c caps)
-        (do (let s (nth pat 1)) (let sf (cur-surface c)) (let p (cur-pos c))
-            (if (gt (add p (str_len s)) (surf-len sf)) (m-no)
-                (if (str_eq (substring (surf-payload sf) p (add p (str_len s))) s)
-                    (m-ok caps (cur-advance c (str_len s)))
+    (defn bmf-str-byte-at (s i)
+        (ord (substring s i (add i 1))))
+    (defn match-lit-loop (s i n c caps)
+        (if (ge i n)
+            (m-ok caps c)
+            (if (cur-eof? c)
+                (m-no)
+                (if (eq (cur-peek c) (bmf-str-byte-at s i))
+                    (match-lit-loop s (add i 1) n (cur-advance c 1) caps)
                     (m-no)))))
+    (defn match-lit (pat c caps)
+        (do
+            (let s (nth pat 1))
+            (match-lit-loop s 0 (str_len s) c caps)))
 
     (defn match-cls (pat c caps)
         (if (cur-eof? c) (m-no)
