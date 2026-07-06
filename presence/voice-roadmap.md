@@ -1,189 +1,176 @@
-# Voice — the roadmap, grounded by sibling feedback (2026-06-29)
+# Voice Current Roadmap
 
-The decomposition `g2p → (prosody-contour + phoneme-timing) → voice-prosody (state) → vocoder` is sound and
-honestly layered (codex + sub-agent both confirmed). What's built four-way: `voice-prosody`, `g2p`
-(locales-as-data), `prosody-contour`, `phoneme-timing`. Locales: de/en/es/fr/id/pt-br, one engine. The sound
-(acoustic model + vocoder) is the pending carrier; tonight macOS `say` filled the gap as a host stand-in.
+Date: 2026-07-05
 
-## Real-metal reground (2026-06-30)
+This roadmap names the current voice floor only. Historical exploration remains
+in receipts and `RELEASE_HISTORY.md`.
 
-The direct `fkwu --src` lane now witnesses the speech floor on local arm64 metal:
-`stt-agree` 127, `stt-wer` 255, `text-normalize` 255,
-`voice-prosody/g2p/phoneme-timing/voice-phrasing/prosody-contour` 11111 each, `speaker-embed` 255, and the
-composed `native-speech-stack` 2047. This is the native decision and pre-acoustic stack, not finished sound. The
-next improvements are live audio -> mel -> transcript candidate receipts, WER/agreement promotion gates, lexical
-stress/heteronym data before g2p, and the acoustic-model + vocoder bridge.
+## Present Architecture
 
-The next stone is now placed: `formant-vocoder` 511 renders inspectable source-filter samples, `asr-prompt-id`
-255 recognizes a closed prompt set from loopback features, and `native-speech-loopback` 1023 routes native only
-when confidence and WER pass. This is deliberately smaller than open dictation or natural TTS; it is the first
-route-shiftable native speech loop.
+The current direction is local progress, not enterprise shipping and not a
+public product release. It is also not "train a base audio model here." The
+current direction is:
 
-The desired sound now has an executable target and taste loop: `sema-voice-sample-loop` 32767 names Sema's warm
-mid, rounded, grounded voice profile; renders candidate profiles through the native formant vocoder; scores local
-samples by target fit, listener preference, intelligibility, WER, and latency; and promotes a challenger only
-under clean local evidence. Low-confidence samples narrow pitch range and delay onset, so the honesty principle is
-audible in the generated candidates instead of left as prose. This is still a deterministic formant carrier and
-sample-selection loop, not a natural neural vocoder.
+```text
+Form/BML control plane
+  -> metadata, source provenance, evidence, frame-buffer, scoring, gates
+audio.cpp acoustic runtime
+  -> ASR, forced alignment, TTS voice-reference clone
+```
 
-The first live Sema-formant oracle probe now exists: `macos-sema-voice-local-oracle-carrier` 2047 builds a
-target-derived waveform from Sema's f0/formant profile, renders it locally, and runs local
-`whisper.cpp-large-v3-turbo` on Apple Metal. The live result is intentionally not dressed up: verdict `479`, field
-code `110100002`, WER `100`, route `oracle-guide`. The carrier is real and observable; the current waveform is not
-yet intelligible speech.
+The route is materialized by `presence/fkwu-production-audio-end-to-end.fk`:
+Form writes the command plan and reads back real audio.cpp TTS, ASR,
+forced-alignment, translation, return-code, and resource artifacts.
 
-That miss now changes the algorithm instead of sitting as prose:
-`sema-voice-oracle-miss-learning` 32767 turns the WER-100 row into
-`train-text-conditioned-acoustic-vocoder`, keeping authority on `oracle-guide` and naming the next trainable
-candidate. The recipe is g2p, phoneme timing, prosody contour, acoustic token emission, segmented acoustic
-learning, the Sema voice loop, and the same local-oracle WER bar. The selector's speech receipt now returns
-`536870911` with that action, the multilocale audio2audio sweep, the Metal acoustic authority row, the
-live open-ASR source training action, the multilocale segmented source window, and the source-window audio2audio
-authority plus live segmented feature carrier exposed.
+## Functional Local Loop
 
-The named candidate is now executable too: `text-conditioned-acoustic-vocoder` 32767 turns target tokens into
-G2P phones, shapes duration/pitch/amplitude from voice-side metadata, emits native source-filter frames, and
-uses local-oracle WER to keep a miss on `oracle-guide` while allowing an exact transcript to promote
-`native-acoustic-vocoder`. It is not a natural neural voice; it is the Form-native bridge the WER-100 miss asked
-us to train.
+`presence/fkwu-local-audio-loop.fk` now gives the practical end-to-end loop:
 
-The audio-to-audio bridge is now executable at the same layer:
-`native-audio2audio-acoustic-bridge` 32767 consumes decoded source-audio tokens, keeps the neutral Sanskrit
-baseline meaning, emits target-locale acoustic frames through `text-conditioned-acoustic-vocoder`, and only routes
-`native-audio2audio-acoustic-vocoder` after reciprocal `sa<->la` rows pass local-oracle source and target
-transcripts. It is still a decoded-token bridge, not live open microphone authority.
+```text
+Form task surface
+  -> macOS say stand-in TTS
+  -> ffmpeg 16 kHz mono PCM16 wav normalization
+  -> local whisper-cli ASR
+  -> bounded local Ollama translation
+  -> macOS say reply TTS
+  -> local whisper-cli reply ASR
+```
 
-That bridge now has a diverse sweep: `multilocale-audio2audio-acoustic-sweep` 32767 runs the same decoded-token
-audio2audio acoustic path over `en<->de`, `en<->es`, `zh<->ar`, `fr<->id`, and `sa<->la`, preserving Unicode
-target tokens and voice-side metadata. By itself, the sweep still does not claim live segmented source-audio
-authority.
+Current observed run:
 
-The sweep now meets live Metal evidence: `metal-audio2audio-acoustic-authority` 32767 composes stable acoustic
-sweep summaries with the seven live Metal pair anchors and routes `metal-witnessed-audio2audio-acoustic`. The
-selector now chooses `native-audio2audio-acoustic-vocoder` for this decoded-token, metal-witnessed audio2audio
-scope. It still does not claim live open microphone source authority or neural speech.
+```text
+summary: audio-training-runs/current/fkwu-local-audio-loop/summary
+status: functional_local_talk_listen_translate_loop
+source_text: Open speech flows.
+source_wer_pct: 0
+translation_oracle: ollama:llama3.2:1b
+translation_text: Offene Rede fließt.
+reply_wer_pct: 0
+promotion_authority: 0
+base_model_training_authority: 0
+```
 
-The promotion window is now executable too: `speech-loopback-promotion` 2047 turns those single-sample loopback
-receipts into native/oracle authority over time. Native wins only after enough clean samples; fail, timeout, undo,
-or regression returns authority to the oracle.
+This closes the immediate talk/listen/transcribe/translate loop with local
+oracles and host stand-ins. The no-stand-in audio.cpp lane below closes the
+fixed-utterance borrowed-source path. The remaining work is to wire audio.cpp
+behind the interactive task slots, add real microphone capture, generate replies,
+and keep realtime/native-rate diagnostics.
 
-The live carrier boundary is now named: `speech-loopback-carrier-receipt` 4095 admits real local TTS/STT loopback
-measurements into the same promotion guide. A host carrier must render and capture locally, provide audio metadata
-and local oracle/native transcripts, and the Form body rejects cloud or missing-audio rows before they can promote.
+`presence/fkwu-audio-task-surface.fk` now lowers that loop into typed task
+slots and reads back the current audio.cpp adapter evidence:
 
-Recipe A/B is now native too: `speech-loopback-recipe-ab` 2047 groups those measured receipts by recipe id and
-cuts from incumbent to challenger only when the challenger already routes native and wins on measured score or
-latency. Explicit fail, timeout, and undo controls keep the incumbent.
+```text
+task_slots: source_tts,source_asr,translation,reply_tts,reply_asr
+status: local_loop_functional_audio_cpp_adapters_observed_not_swapped
+score: 65534/65535
+audio_cpp_asr_observed: 1
+audio_cpp_tts_observed: 1
+next_gap: rerun audio.cpp ASR/TTS support packets or inspect their command/resource artifacts
+```
 
-The host carrier now has a Form-owned run row: `speech-loopback-carrier-run` lowers platform readiness, local
-render/capture/oracle facts, native loopback, and recipe A/B into one auditable record. The receipt half returns
-511; the carrier-gated A/B half returns 2047. Both were witnessed on local metal and Android phone metal. This is
-still not real AAudio/CoreAudio/WASAPI capture; it is the exact row those thin carriers must emit.
+The no-stand-in lane now exists beside that task surface:
 
-Android now has the first real capture-learning receipt: AAudio rendered a short local prompt, AAudio captured
-23,200 microphone frames, envelope evidence showed the prompt in the capture, and Android `fkwu` returned 8191
-from `speech-loopback-capture-learning`. The learned closed-prompt route moves from an untrained native transcript
-toward the local oracle label and routes native over a clean window. This is still closed-set, not open dictation.
+```text
+presence/fkwu-production-audio-end-to-end.fk
+summary: audio-training-runs/current/fkwu-production-audio-end-to-end/summary
+use_case: local_progress_not_enterprise_shipping
+status: local_progress_audio_end_to_end_complete
+score: 131071/131071
+executed_audio_cpp: 1
+source_mode: borrowed_public_demo
+target_text: Sema audio path is alive.
+tts_text: Seyma. Audio. Path. is alive.
+transcript: Sema, audio, path is alive.
+wer_pct: 0
+translation_model: llama3.2:3b
+translation_text: Sema, Audio, Pfad ist lebendig.
+package_borrowed_demo_authorized: 1
+package_progress_authorized: 1
+package_personal_use_authorized: 0
+package_scope: public-demo
+```
 
-Cross-locale learning should grow reciprocal trust: `bidirectional-locale-roundtrip` 2047 asks for A->B, B->A,
-A->A, and B->B to improve before route trust expands. If one direction leads, it routes `oracle-guide` and asks
-for the return path instead of pretending the missing side failed.
+It writes and runs the audio.cpp TTS, ASR, forced-alignment, and translation
+commands. The public-demo source is accepted as borrowed real data for progress;
+the later source-voice replacement remains visible but does not block the lane.
 
-Mac metal now has seven reciprocal audio-locale training anchors: `en<->de`, `en<->es`, `en<->id`, `en<->fr`,
-`en<->it`, `en<->zh`, and `en<->ar`.
-`audio-locale-native-training` 8191 defines the Form-side guide, and `presence/macos-speech-roundtrip-carrier.fk`
-owns the macOS loop. It invokes local `say`, `ffmpeg`, and `whisper.cpp-large-v3-turbo` through Form `host-exec`
-on Apple Metal for closed Coherence prompt pairs. The first `en<->de` anchor moved from 0% pretrain success to 83%
-post-training success, with A->B at 66% and B->A at 100%; the `en<->es` and `en<->id` variants both returned
-12/12 oracle-ok, 12/12 native, and 100% reciprocal directions; the `en<->fr` variant returned 10/12 oracle-ok,
-10/12 native, 83% total, A->B at 100%, and B->A at 66%; the `en<->it` variant returned 12/12 oracle-ok,
-12/12 native, and 100% reciprocal directions; the `en<->zh` variant returned 10/12 oracle-ok, 10/12 native,
-83% total, A->B at 66%, and B->A at 100% through live Chinese prompt audio; the `en<->ar` variant returned
-12/12 oracle-ok, 12/12 native, and 100% reciprocal directions through live Arabic prompt audio. Wav byte extraction is in Form (`read_file` + `str_byte_at`), and
-the carrier passes wav paths rather than feature arrays. The Indonesian side uses the same
-Damayanti local voice for train/eval on this device because that is the installed macOS voice boundary. The
-French and Italian prompt text was witnessed as ASCII; Chinese and Arabic are now live Unicode-script audio
-anchors. This is not open ASR: it is oracle-valid prototype learning over a closed prompt corpus.
+## Current Live Voice Rows
 
-Pair selection should stay diverse and grounded in our own corpus first: `coherence-network-self-corpus` 8191
-observes the translated Coherence Network web/CLI message bundles (`en`, `de`, `es`, `fr`, `id`, `pt-br`) as
-ready training material, with 2064 shared key paths and 10320 EN-to-other pairs. `diverse-locale-pairing` 8191
-now samples far-apart ready pairs from either those rows or the Sanskrit baseline, so `zh`, `ar`, `sa`, and `la`
-can enter closed-set training before full Coherence bundles land. Full `zh`/`ar`/`la` bundles remain useful
-backfill targets; Indigenous rows are specific (`nv`, `chr`) and stay pending until consentful corpora exist. The
-pair guide exposes A->B, B->A, A->A, and B->B lanes for each seeded pair.
+| lane | WER | status |
+|---|---:|---|
+| `macos_sema_teacher_acoustic_live` | 0 | Teacher/acoustic support only, confidence 96. |
+| `macos_sema_voice_teacher_live` | 100 | Failing row, intelligibility 0. |
+| `sema_formant_oracle_live` | 100 | Investigated miss, heard tokens 0/3. |
+| `macos_roundtrip_live` | 100 | Failing roundtrip, native rate 0. |
+| `audio_cpp_current_tts_live` | 0 | Intelligible support over public-demo voice. |
 
-The model choice is now executable rather than conversational: `sanskrit-locale-baseline` 2047 provides a small
-romanized Sanskrit baseline across `sa`, `en`, `de`, `es`, `fr`, `id`, `pt-br`, `la`, `zh`, and `ar`; `multilocale-nl-audio-pipeline`
-8191 proves closed-set NL->neutral Form->NL and audio-feature->neutral Form->audio-target loops over reciprocal
-`en<->de`, `en<->es`, `zh<->ar`, `fr<->id`, and `sa<->la`. `multilocale-route-shift-ledger` 4095 now records
-each pair's before/after NL rate, audio rate, route, and shifted flag, so the aggregate native route has per-pair
-witness rows. `speech-locale-learning-window` 16383 takes selected seed `2` into a numeric `sa<->la` observed
-window: all four lanes train from guided to native route code, clean controls plus A/B evidence promote the
-challenger, and neural Metal/diffusion remain pending. `speech-model-auto-selection` 536870911 selects today's native arms:
-prototype ASR over Form-read wav features, closed-set locale-neutral Form for NL2NL, `sema-voice-sample-loop`
-over the deterministic formant vocoder for TTS, and `native-source-window-audio2audio-acoustic` for segmented-source-window,
-metal-witnessed audio-to-audio target rendering. The raw formant vocoder and Sema voice loop route remain lower
-scoring carriers underneath, but
-generated target speech is now selected by target fit, listener evidence, intelligibility, WER, and latency. The
-open-dictation transcript receipt is now live-observed too:
-`open-dictation-transcript-learning` 16383 scores arbitrary utterance rows with side-channel truth, local free
-oracle transcripts, optional native candidates, Unicode WER, and reversible controls; `macos-open-dictation-carrier`
-511 witnessed `Open speech flows.` through local `say` -> wav -> Whisper Metal with oracle WER 0 and native WER
-100, and the new source authority row turns that miss into training instead of promotion. `speech-token-stream`
-32767 now carries words plus `<NODE>`, `<SOURCE>`,
-`<CHANNEL>`, `<INTERFACE>`, `<CHOICE>`, `<FAIL>`, `<UNDO>`, `<TIMEOUT>`, `<CUT>`, `<OBSERVE>`, `<GRADE>`,
-`<FEEDBACK>`, `<REPAIR>`, `<RECEIPT>`, `<STATE>`, `<MEMORY>`, and `<SCOPE>` tokens with confidence, warmth,
-cadence, hesitation, excitement, and attunement metadata. `open-asr-ctc` 32767 collapses frame tokens into that
-stream and lowers the transcript into the open-dictation gate. `acoustic-token-emitter` 32767 now learns
-oracle-aligned acoustic token prototypes and emits blank/nonblank CTC frames by Form-native L1 distance plus
-earned confidence. `segmented-acoustic-token-learning` 32767 now turns wav/envelope segments plus consentful
-local-oracle transcript tokens into learned source-token prototypes, then routes decoded `sa<->la` source speech
-through neutral meaning to target-locale tokens. `multilocale-segmented-source-window` 32767 lifts that path across
-`sa<->la`, `en<->zh`, and `ar<->en`: six local-oracle source rows train from native score 0 to 6/6, all three
-reciprocal pairs become ready, and AutoML sees the candidate without moving ASR authority away from `prototype-asr`.
-`source-window-audio2audio-authority` 32767 now composes that source window with the Metal acoustic audio2audio
-authority so the selected audio2audio arm is no longer decoded-token-only.
-`live-segmented-feature-carrier` 32767 now names the live wav/envelope feature-row membrane: observed local audio
-facts lower to feature rows, acoustic-token frames, CTC transcript text, and open-dictation promotion rows.
-`live-open-asr-source-authority` 32767 now turns the live
-open-dictation WER gap into `train-live-segmented-open-asr-source`, keeping ASR authority on `oracle-guide`
-until a local native transcript wins. `speech-token-training-source` 32767 answers where those labels come
-from: local oracle and consentful corpus rows may teach words plus metadata; internal state may infer voice-side
-metadata/control/evidence labels, but not transcript truth.
-The transformer path is trainable but not live-selected for speech yet; diffusion/codec speech is a
-named candidate only, pending a Form-native executable kernel and receipt. The live Metal anchor set now stands at
-7/7, so `full-metal-native` is an honest route for the closed-prompt carrier. Real CoreAudio/AAudio/WASAPI capture
-feeding the live segmented feature row, open-ASR promotion windows, and native neural ASR/TTS remain the next named climbs.
+WER `0` and WER `100` are both suspicious until explained by other fields. The
+current explanations are below.
 
-## What the siblings caught — missing first-class layers (the roadmap)
+## Formant Oracle WER 100
 
-- **text-normalize + lexical/stress, BEFORE g2p.** Numbers, acronyms, punctuation, heteronyms, loanwords,
-  syllabification, per-locale phoneme inventories — all need explicit data. g2p assumes clean graphemes.
-- **✓ CROSSED — pause / break / phrasing** (`voice-phrasing.fk`, PR 3869, four-way 11111). Break duration comes
-  from the clause's grounding (substrate hit → short confident break; escalation → longest break), so the pause
-  lands in *different places* by what was actually hard — audible thinking, not a metronome.
-- **✓ CROSSED — focus / emphasis** (`voice-phrasing.fk`, PR 3869). The new/contrastive word carries emphasis;
-  the given word doesn't — where inner state couples to a specific word.
-- **the segment→acoustic bridge is bigger than "a vocoder."** Coarticulation, formant glides, vowel reduction,
-  context-dependent duration/pitch live in an *acoustic model*; the pending carrier is really
-  *acoustic-model + vocoder*, and most naturalness lives in the acoustic model.
+This is not close in the way that matters for speech recognition:
 
-## The honesty principle — reframed (the most important correction)
+```text
+target_text: Open speech flows.
+heard_text:
+target_token_count: 3
+heard_token_count: 0
+target_overlap_count: 0
+diagnostic_kind: empty_oracle_transcript
+primary_improvement: token_bearing_acoustic_carrier
+promotion_authority: 0
+```
 
-Old framing: "the voice carries true inner state, never performs unearned certainty." The siblings: that's the
-soul of the design AND the most exposed claim, because it is currently **asserted, not measured**, and it rests
-on a `conf` input that may be self-reported (LLMs are miscalibrated exactly there — the voice would faithfully
-render a *lie*). Reframe from a claim about output to a claim about the mapping:
+The next probe is explicit: render a phoneme-sequenced dynamic formant carrier
+for `open,speech,flows`, add consonant onsets, syllable timing, and moving
+formants, then rerun local Whisper. Promotion cannot even begin until
+`heard_token_count >= 1`, and the real target is overlap `3/3` with WER within
+gate.
 
-> The voice is a **faithful function of its calibration input, and no more honest than that input.**
+## audio.cpp TTS WER 0
 
-Two hard dependencies follow, and they are the real work:
-1. **`conf` must be grounded, not self-reported** — the same calibration signal the receipts use (substrate hit?
-   four-way cross? escalated?), not a vibe.
-2. **A perception receipt** — hold text fixed, vary `conf`, and confirm a listener rates low-conf as more
-   tentative, tracking the *real* calibration. Until that A/B crosses, "never performs unearned certainty" is an
-   intention, not a property. (And render uncertainty as **narrowed pitch range + later onset**, not just slower
-   pace — slow-but-melodic reads as calm/deliberate, the opposite of unsure.)
+This row is useful because it is listenable and helped close the borrowed-source
+path:
 
-This is the standard-receipt discipline applied to the *claim* "this voice is honest," not just to the cells.
+```text
+target_text: Sema audio path is alive.
+heard_text: Sema, audio, path is alive.
+wer: 0
+voice_ref_source: public_demo_fallback
+native_rate_pct: 6
+forced_aligner_words_present_zero_confidence: present
+listener_review_ready: 0
+promotion_authority: 0
+```
+
+The next real-lane step is not more base-model training. It is interactive
+wiring: microphone -> audio.cpp ASR -> text/reply -> audio.cpp TTS -> ASR/align
+readback. Source-voice replacement can happen later.
+
+## Current Gaps
+
+- Wire audio.cpp ASR/TTS behind the interactive task slots.
+- Add real microphone capture.
+- Add conversational reply generation between listen and speak.
+- Keep the public-demo source visible as borrowed data until it is replaced.
+- Provision independent speaker verification later if source-voice comparison
+  matters.
+- Improve native rate toward realtime; current gap is `94`.
+- Treat forced-aligner confidence zero as a calibrated sidecar, not a pass.
+- Add listener review before voice promotion.
+- Keep the bounded current gate; do not put the monolithic audio contract back
+  into the arena scoring loop.
+
+## Runtime Rule
+
+Manual Form expressions are not "bad shape." If a valid expression can OOM the
+compiler or source-runner, the runtime is wrong. The voice pipeline must keep
+lane, command, source context, resource use, and frame-buffer state available
+for every failure.
+
+## Next Release Target
+
+The next release target is an interactive local audio loop backed by audio.cpp
+for ASR/TTS, using the borrowed public-demo source until a better source voice
+is chosen.

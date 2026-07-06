@@ -1,0 +1,288 @@
+; fkwu-local-audio-loop.fk -- practical local talk/listen/translate loop.
+;
+; Form owns the task contract, prompts, command lowering, bounded oracle calls,
+; WER scoring, and summary shape. Host tools remain effects behind host-exec:
+; macOS say for temporary TTS, ffmpeg for wav normalization, whisper-cli for ASR,
+; and the local Ollama HTTP API for translation.
+;
+; import "observe/stt-wer.fk"
+
+(do
+    (defn flal-kind () "fkwu-local-audio-loop")
+    (defn flal-out-dir () "audio-training-runs/current/fkwu-local-audio-loop")
+    (defn flal-model () "/Users/ursmuff/.cache/whisper.cpp/ggml-large-v3-turbo.bin")
+    (defn flal-source-text () "Open speech flows.")
+    (defn flal-source-lang () "en")
+    (defn flal-target-lang () "de")
+    (defn flal-source-voice () "Samantha")
+    (defn flal-target-voice () "Anna")
+    (defn flal-translation-model () "llama3.2:1b")
+    (defn flal-translation-oracle () "ollama:llama3.2:1b")
+    (defn flal-source-max-wer () 25)
+    (defn flal-reply-max-wer () 50)
+    (defn flal-translation-byte-cap () 200)
+
+    (defn flal-cat3 (a b c) (str_concat a (str_concat b c)))
+    (defn flal-cat4 (a b c d) (str_concat a (str_concat b (str_concat c d))))
+    (defn flal-cat5 (a b c d e) (str_concat a (str_concat b (str_concat c (str_concat d e)))))
+    (defn flal-q (s) (flal-cat3 "'" s "'"))
+    (defn flal-path (name) (flal-cat3 (flal-out-dir) "/" name))
+    (defn flal-line (name value) (flal-cat4 name ": `" value "`\n"))
+    (defn flal-digit (n) (byte_to_str (add 48 n)))
+    (defn flal-int-str (n)
+        (if (lt n 0)
+            (str_concat "-" (flal-int-str (sub 0 n)))
+            (if (lt n 10) (flal-digit n)
+                (str_concat (flal-int-str (div n 10)) (flal-digit (mod n 10))))))
+    (defn flal-int-line (name value) (flal-line name (flal-int-str value)))
+    (defn flal-join-lines (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (head xs) (flal-join-lines (tail xs)))))
+    (defn flal-ws-byte? (b)
+        (if (or (eq b 32)
+                (or (eq b 9)
+                    (or (eq b 10) (eq b 13)))) 1 0))
+    (defn flal-slice-loop (s i end acc)
+        (if (ge i end) acc
+            (flal-slice-loop s (add i 1) end
+                             (str_concat acc (byte_to_str (str_byte_at s i))))))
+    (defn flal-left-index (s i n)
+        (if (ge i n) n
+            (if (eq (flal-ws-byte? (str_byte_at s i)) 1)
+                (flal-left-index s (add i 1) n)
+                i)))
+    (defn flal-right-index (s end)
+        (if (le end 0) 0
+            (if (eq (flal-ws-byte? (str_byte_at s (sub end 1))) 1)
+                (flal-right-index s (sub end 1))
+                end)))
+    (defn flal-trim (s)
+        (do
+            (let n (str_len s))
+            (let start (flal-left-index s 0 n))
+            (let end (flal-right-index s n))
+            (if (ge start end) "" (flal-slice-loop s start end ""))))
+
+    (defn flal-source-text-path () (flal-path "source.txt"))
+    (defn flal-source-aiff-path () (flal-path "source.aiff"))
+    (defn flal-source-wav-path () (flal-path "source.wav"))
+    (defn flal-translation-request-path () (flal-path "translation-request.json"))
+    (defn flal-translation-text-path () (flal-path "translation.txt"))
+    (defn flal-reply-aiff-path () (flal-path "reply.aiff"))
+    (defn flal-reply-wav-path () (flal-path "reply.wav"))
+    (defn flal-summary-path () (flal-path "summary"))
+    (defn flal-write-field (name value) (write_file_text (flal-path name) value))
+    (defn flal-write-int-field (name value) (flal-write-field name (flal-int-str value)))
+
+    (defn flal-json-escape-loop (s i)
+        (if (ge i (str_len s)) ""
+            (do
+                (let b (str_byte_at s i))
+                (let rest (flal-json-escape-loop s (add i 1)))
+                (if (eq b 92)
+                    (str_concat "\\\\" rest)
+                    (if (eq b 34)
+                        (str_concat "\\\"" rest)
+                        (if (eq b 10)
+                            (str_concat "\\n" rest)
+                            (if (eq b 13)
+                                (str_concat "\\r" rest)
+                                (if (eq b 9)
+                                    (str_concat "\\t" rest)
+                                    (str_concat (byte_to_str b) rest)))))))))
+    (defn flal-json-string (s)
+        (str_concat "\"" (str_concat (flal-json-escape-loop s 0) "\"")))
+    (defn flal-translation-prompt (text)
+        (str_concat
+            "Translate this exact text from English to German. Output only the German translation, no commentary. Text: "
+            text))
+    (defn flal-translation-request-json (text)
+        (flal-cat5
+            "{\"model\":"
+            (flal-json-string (flal-translation-model))
+            ",\"prompt\":"
+            (flal-json-string (flal-translation-prompt text))
+            ",\"stream\":false,\"options\":{\"num_predict\":16,\"temperature\":0,\"top_p\":0.1}}"))
+
+    (defn flal-say-file-command (voice text-file aiff)
+        (str_concat
+            (str_concat "say -v " (flal-q voice))
+            (str_concat
+                (str_concat " -o " (flal-q aiff))
+                (str_concat " -f " (flal-q text-file)))))
+    (defn flal-ffmpeg-command (aiff wav)
+        (str_concat
+            (str_concat "ffmpeg -hide_banner -loglevel error -y -i " (flal-q aiff))
+            (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le " (flal-q wav))))
+    (defn flal-whisper-command (model wav locale)
+        (str_concat
+            (str_concat "whisper-cli -m " (flal-q model))
+                (str_concat
+                    (str_concat " -f " (flal-q wav))
+                    (flal-cat3 " -l " locale " -nt -np 2>/dev/null | tr '\\n' ' ' | head -c 500"))))
+    (defn flal-translation-command (request-json)
+        (str_concat
+            "curl --max-time 20 -s -X POST http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' --data-binary @"
+            (str_concat
+                (flal-q request-json)
+                (str_concat " | jq -r '.response // \"\"' | tr -d '\\r' | head -c "
+                            (flal-int-str (flal-translation-byte-cap))))))
+
+    (defn flal-host-tools-ready? ()
+        (if (str_eq
+                (host-exec "command -v say >/dev/null && command -v ffmpeg >/dev/null && command -v whisper-cli >/dev/null && command -v curl >/dev/null && command -v jq >/dev/null && printf 1 || printf 0" "")
+                "1") 1 0))
+    (defn flal-translation-model-ready? ()
+        (if (str_eq
+                (host-exec "curl --max-time 5 -s http://127.0.0.1:11434/api/tags | jq -e '.models[]? | select(.name==\"llama3.2:1b\")' >/dev/null && printf 1 || printf 0" "")
+                "1") 1 0))
+    (defn flal-ready? ()
+        (if (and (eq (fs_exists (flal-model)) 1)
+                 (and (eq (flal-host-tools-ready?) 1)
+                      (eq (flal-translation-model-ready?) 1))) 1 0))
+
+    (defn flal-file-size (p)
+        (if (eq (fs_exists p) 1) (str_len (read_file p)) 0))
+    (defn flal-audio-present? (p)
+        (if (gt (flal-file-size p) 44) 1 0))
+    (defn flal-wer (heard truth)
+        (if (str_eq heard "") 999
+            (sw-wer-bounded (sw-tokens heard) (sw-tokens truth))))
+    (defn flal-status (ready source-wer translation reply-wer)
+        (if (eq ready 0) "blocked_missing_local_audio_or_translation_oracle"
+            (if (gt source-wer (flal-source-max-wer)) "blocked_source_asr_wer"
+                (if (str_eq translation "") "blocked_translation_oracle_empty"
+                    (if (gt reply-wer (flal-reply-max-wer)) "blocked_reply_asr_wer"
+                        "functional_local_talk_listen_translate_loop")))))
+    (defn flal-failing-gate (ready source-wer translation reply-wer)
+        (if (eq ready 0) "local_tools_or_models_ready"
+            (if (gt source-wer (flal-source-max-wer)) "source_asr_wer"
+                (if (str_eq translation "") "translation_oracle_output"
+                    (if (gt reply-wer (flal-reply-max-wer)) "reply_asr_wer"
+                        "none")))))
+    (defn flal-bit (ok bit) (if ok bit 0))
+    (defn flal-score-from (ready model-present translation-model-present source-audio source-transcript source-wer translation reply-audio reply-transcript reply-wer summary-present)
+        (add
+            (add
+                (add
+                    (flal-bit (eq ready 1) 1)
+                    (flal-bit (eq model-present 1) 2))
+                (add
+                    (flal-bit (eq translation-model-present 1) 4)
+                    (flal-bit (eq source-audio 1) 8)))
+            (add
+                (add
+                    (flal-bit (gt (str_len source-transcript) 0) 16)
+                    (flal-bit (le source-wer (flal-source-max-wer)) 32))
+                (add
+                    (add
+                        (flal-bit (gt (str_len translation) 0) 64)
+                        (flal-bit (le (str_len translation) (flal-translation-byte-cap)) 128))
+                    (add
+                        (add
+                            (flal-bit (eq reply-audio 1) 256)
+                            (flal-bit (gt (str_len reply-transcript) 0) 512))
+                        (add
+                            (flal-bit (le reply-wer (flal-reply-max-wer)) 1024)
+                            (add
+                                (flal-bit (eq summary-present 1) 2048)
+                                (add
+                                    (flal-bit (str_eq (flal-translation-oracle) "ollama:llama3.2:1b") 4096)
+                                    (flal-bit (str_eq (flal-kind) "fkwu-local-audio-loop") 8192)))))))))
+
+    (defn flal-summary-text (ready source-transcript source-wer translation reply-transcript reply-wer score)
+        (flal-join-lines
+            (list
+                (flal-line "kind" (flal-kind))
+                (flal-line "status" (flal-status ready source-wer translation reply-wer))
+                (flal-line "failing_gate" (flal-failing-gate ready source-wer translation reply-wer))
+                (flal-line "source_text" (flal-source-text))
+                (flal-line "source_language" (flal-source-lang))
+                (flal-line "source_voice" (flal-source-voice))
+                (flal-line "source_transcript" source-transcript)
+                (flal-int-line "source_wer_pct" source-wer)
+                (flal-line "translation_oracle" (flal-translation-oracle))
+                (flal-line "translation_text" translation)
+                (flal-line "target_language" (flal-target-lang))
+                (flal-line "target_voice" (flal-target-voice))
+                (flal-line "reply_transcript" reply-transcript)
+                (flal-int-line "reply_wer_pct" reply-wer)
+                (flal-line "tts_runtime" "macos_say_local_stand_in")
+                (flal-line "asr_runtime" "whisper.cpp_large_v3_turbo_local")
+                (flal-line "translator_runtime" "ollama_local_http_bounded")
+                (flal-int-line "translation_byte_cap" (flal-translation-byte-cap))
+                (flal-int-line "promotion_authority" 0)
+                (flal-int-line "base_model_training_authority" 0)
+                (flal-int-line "score" score)
+                (flal-int-line "expected_score" 16383)
+                (flal-line "source_wav_path" (flal-source-wav-path))
+                (flal-line "reply_wav_path" (flal-reply-wav-path)))))
+
+    (defn flal-write-sidecars (ready source-transcript source-wer translation reply-transcript reply-wer score)
+        (do
+            (let _status (flal-write-field "status" (flal-status ready source-wer translation reply-wer)))
+            (let _failing (flal-write-field "failing_gate" (flal-failing-gate ready source-wer translation reply-wer)))
+            (let _source-text (flal-write-field "source_text" (flal-source-text)))
+            (let _source-lang (flal-write-field "source_language" (flal-source-lang)))
+            (let _source-voice (flal-write-field "source_voice" (flal-source-voice)))
+            (let _source-transcript (flal-write-field "source_transcript" source-transcript))
+            (let _source-wer (flal-write-int-field "source_wer_pct" source-wer))
+            (let _translation-oracle (flal-write-field "translation_oracle" (flal-translation-oracle)))
+            (let _translation (flal-write-field "translation_text" translation))
+            (let _target-lang (flal-write-field "target_language" (flal-target-lang)))
+            (let _target-voice (flal-write-field "target_voice" (flal-target-voice)))
+            (let _reply-transcript (flal-write-field "reply_transcript" reply-transcript))
+            (let _reply-wer (flal-write-int-field "reply_wer_pct" reply-wer))
+            (let _tts-runtime (flal-write-field "tts_runtime" "macos_say_local_stand_in"))
+            (let _asr-runtime (flal-write-field "asr_runtime" "whisper.cpp_large_v3_turbo_local"))
+            (let _translator-runtime (flal-write-field "translator_runtime" "ollama_local_http_bounded"))
+            (let _promotion (flal-write-int-field "promotion_authority" 0))
+            (let _training (flal-write-int-field "base_model_training_authority" 0))
+            (let _score (flal-write-int-field "score" score))
+            (let _expected (flal-write-int-field "expected_score" 16383))
+            score))
+
+    (defn flal-run-current ()
+        (if (eq (flal-ready?) 1)
+            (do
+                (let _mk-a (fs_mkdir "audio-training-runs"))
+                (let _mk-b (fs_mkdir "audio-training-runs/current"))
+                (let _mk-c (fs_mkdir (flal-out-dir)))
+                (let _source-text (write_file_text (flal-source-text-path) (flal-source-text)))
+                (let _source-say (host-exec (flal-say-file-command (flal-source-voice) (flal-source-text-path) (flal-source-aiff-path)) ""))
+                (let _source-wav (host-exec (flal-ffmpeg-command (flal-source-aiff-path) (flal-source-wav-path)) ""))
+                (let source-transcript (flal-trim (host-exec (flal-whisper-command (flal-model) (flal-source-wav-path) (flal-source-lang)) "")))
+                (let source-wer (flal-wer source-transcript (flal-source-text)))
+                (let _request (write_file_text (flal-translation-request-path) (flal-translation-request-json (flal-source-text))))
+                (let translation (flal-trim (host-exec (flal-translation-command (flal-translation-request-path)) "")))
+                (let _translation-text (write_file_text (flal-translation-text-path) translation))
+                (let _reply-say (host-exec (flal-say-file-command (flal-target-voice) (flal-translation-text-path) (flal-reply-aiff-path)) ""))
+                (let _reply-wav (host-exec (flal-ffmpeg-command (flal-reply-aiff-path) (flal-reply-wav-path)) ""))
+                (let reply-transcript (flal-trim (host-exec (flal-whisper-command (flal-model) (flal-reply-wav-path) (flal-target-lang)) "")))
+                (let reply-wer (flal-wer reply-transcript translation))
+                (let score (flal-score-from
+                                1
+                                (fs_exists (flal-model))
+                                1
+                                (flal-audio-present? (flal-source-wav-path))
+                                source-transcript
+                                source-wer
+                                translation
+                                (flal-audio-present? (flal-reply-wav-path))
+                                reply-transcript
+                                reply-wer
+                                1))
+                (let _summary (write_file_text (flal-summary-path)
+                                (flal-summary-text 1 source-transcript source-wer translation reply-transcript reply-wer score)))
+                (let _sidecars (flal-write-sidecars 1 source-transcript source-wer translation reply-transcript reply-wer score))
+                score)
+            (do
+                (let _mk-a (fs_mkdir "audio-training-runs"))
+                (let _mk-b (fs_mkdir "audio-training-runs/current"))
+                (let _mk-c (fs_mkdir (flal-out-dir)))
+                (let _summary (write_file_text (flal-summary-path)
+                                (flal-summary-text 0 "" 999 "" "" 999 0)))
+                (let _sidecars (flal-write-sidecars 0 "" 999 "" "" 999 0))
+                0)))
+
+    0)
