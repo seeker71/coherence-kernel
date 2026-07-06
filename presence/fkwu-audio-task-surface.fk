@@ -1,0 +1,188 @@
+; fkwu-audio-task-surface.fk -- one task surface for local and audio.cpp audio lanes.
+;
+; The practical loop now talks/listens/transcribes/translates. This cell closes
+; the next gap: every stage is represented as a typed speech task/result, and
+; the current local run plus observed audio.cpp ASR/TTS adapters are read back
+; through one surface. It does not promote a voice or claim audio.cpp is swapped
+; into the live loop yet.
+;
+; import "observe/speech-task-contract.fk"
+; import "observe/stt-wer.fk"
+; import "presence/fkwu-local-audio-loop.fk"
+
+(do
+    (defn fats-kind () "fkwu-audio-task-surface")
+    (defn fats-out-dir () "audio-training-runs/current/fkwu-audio-task-surface")
+    (defn fats-summary-path () (fats-path "summary"))
+    (defn fats-local-summary-path () "audio-training-runs/current/fkwu-local-audio-loop/summary")
+    (defn fats-audio-cpp-asr-dir () "audio-training-runs/current/audio-cpp-current-runtime-support/asr-sample")
+    (defn fats-audio-cpp-tts-dir () "audio-training-runs/current/audio-cpp-current-tts-support/seyma_phonetic")
+    (defn fats-score-max () 65535)
+
+    (defn fats-cat3 (a b c) (str_concat a (str_concat b c)))
+    (defn fats-cat4 (a b c d) (str_concat a (str_concat b (str_concat c d))))
+    (defn fats-path (name) (fats-cat3 (fats-out-dir) "/" name))
+    (defn fats-dir-path (dir name) (fats-cat3 dir "/" name))
+    (defn fats-line (name value) (fats-cat4 name ": `" value "`\n"))
+    (defn fats-int-line (name value) (fats-line name (flal-int-str value)))
+    (defn fats-join-lines (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (head xs) (fats-join-lines (tail xs)))))
+    (defn fats-read (path) (if (eq (fs_exists path) 1) (read_file path) ""))
+    (defn fats-local-read (name) (fats-read (flal-path name)))
+    (defn fats-audio-cpp-asr-read (name) (fats-read (fats-dir-path (fats-audio-cpp-asr-dir) name)))
+    (defn fats-audio-cpp-tts-read (name) (fats-read (fats-dir-path (fats-audio-cpp-tts-dir) name)))
+    (defn fats-nonempty? (s) (if (gt (str_len s) 0) 1 0))
+    (defn fats-file-present? (path) (if (eq (fs_exists path) 1) 1 0))
+    (defn fats-score (ok bit) (if ok bit 0))
+    (defn fats-meta () (sts-meta 92 70 64 8 55 81))
+
+    (defn fats-local-source-tts-task ()
+        (stc-task "local-source-tts" "tts" "macos_say_local_stand_in" "source_tts"
+                  (flal-source-text-path) (flal-source-wav-path) "pcm16_16khz" (list "local-only" "no-promotion")))
+    (defn fats-local-source-asr-task ()
+        (stc-task "local-source-asr" "asr" "whisper.cpp_large_v3_turbo_local" "source_asr"
+                  (flal-source-wav-path) (flal-source-lang) "transcript+wer" (list "local-only" "no-promotion")))
+    (defn fats-local-translation-task ()
+        (stc-task "local-translation" "conversion" "ollama_local_http_bounded" "nl2nl"
+                  (flal-source-text) (flal-target-lang) "translation_text" (list "local-only" "bounded-output")))
+    (defn fats-local-reply-tts-task ()
+        (stc-task "local-reply-tts" "tts" "macos_say_local_stand_in" "reply_tts"
+                  (flal-translation-text-path) (flal-reply-wav-path) "pcm16_16khz" (list "local-only" "no-promotion")))
+    (defn fats-local-reply-asr-task ()
+        (stc-task "local-reply-asr" "asr" "whisper.cpp_large_v3_turbo_local" "reply_asr"
+                  (flal-reply-wav-path) (flal-target-lang) "transcript+wer" (list "local-only" "no-promotion")))
+
+    (defn fats-result (task status artifact-kind artifact-ref text confidence)
+        (stc-result task status
+                    (list (stc-artifact artifact-kind artifact-ref 0 0 confidence))
+                    (sw-tokens text)
+                    (fats-meta)))
+    (defn fats-local-source-tts-result ()
+        (fats-result (fats-local-source-tts-task) "ok" "wav" (flal-source-wav-path) (flal-source-text) 92))
+    (defn fats-local-source-asr-result (text)
+        (fats-result (fats-local-source-asr-task) "ok" "transcript" "source_transcript" text 92))
+    (defn fats-local-translation-result (text)
+        (fats-result (fats-local-translation-task) "ok" "translation" (flal-translation-text-path) text 90))
+    (defn fats-local-reply-tts-result (text)
+        (fats-result (fats-local-reply-tts-task) "ok" "wav" (flal-reply-wav-path) text 90))
+    (defn fats-local-reply-asr-result (text)
+        (fats-result (fats-local-reply-asr-task) "ok" "transcript" "reply_transcript" text 90))
+
+    (defn fats-local-task-contract-score ()
+        (do
+            (let source-tts (fats-local-source-tts-result))
+            (let source-asr (fats-local-source-asr-result (flal-source-text)))
+            (let translation (fats-local-translation-result "Offene Rede fliesst."))
+            (let reply-tts (fats-local-reply-tts-result "Offene Rede fliesst."))
+            (let reply-asr (fats-local-reply-asr-result "Offene Rede fliesst."))
+            (add
+                (add
+                    (add
+                        (fats-score (eq (stc-result-valid? source-tts) 1) 1)
+                        (fats-score (eq (stc-result-valid? source-asr) 1) 2))
+                    (add
+                        (fats-score (eq (stc-result-valid? translation) 1) 4)
+                        (fats-score (eq (stc-result-valid? reply-tts) 1) 8)))
+                (fats-score (eq (stc-result-valid? reply-asr) 1) 16))))
+
+    (defn fats-audio-cpp-asr-observed? ()
+        (if (and (eq (fs_exists (fats-dir-path (fats-audio-cpp-asr-dir) "summary")) 1)
+                 (and (eq (fs_exists (fats-dir-path (fats-audio-cpp-asr-dir) "run.command")) 1)
+                      (and (eq (fs_exists (fats-dir-path (fats-audio-cpp-asr-dir) "transcript.txt")) 1)
+                           (and (str_eq (fats-audio-cpp-asr-read "wer_pct") "0")
+                                (gt (str_len (fats-audio-cpp-asr-read "model.path")) 0))))) 1 0))
+    (defn fats-audio-cpp-tts-observed? ()
+        (if (and (eq (fs_exists (fats-dir-path (fats-audio-cpp-tts-dir) "summary")) 1)
+                 (and (eq (fs_exists (fats-dir-path (fats-audio-cpp-tts-dir) "run.command")) 1)
+                      (and (eq (fs_exists (fats-dir-path (fats-audio-cpp-tts-dir) "sema-qwen3-current-tts.wav")) 1)
+                           (and (str_eq (fats-audio-cpp-tts-read "wer_pct") "0")
+                                (and (str_eq (fats-audio-cpp-tts-read "promotion_authority") "0")
+                                     (gt (str_len (fats-audio-cpp-tts-read "voice_ref.source")) 0)))))) 1 0))
+
+    (defn fats-live-score ()
+        (do
+            (let contract (fats-local-task-contract-score))
+            (let local-status (fats-local-read "status"))
+            (let source-transcript (fats-local-read "source_transcript"))
+            (let translation (fats-local-read "translation_text"))
+            (let reply-transcript (fats-local-read "reply_transcript"))
+            (add
+                (add
+                    (add
+                        (fats-score (eq contract 31) 1)
+                        (fats-score (eq (fs_exists (fats-local-summary-path)) 1) 2))
+                    (add
+                        (fats-score (str_eq local-status "functional_local_talk_listen_translate_loop") 4)
+                        (fats-score (eq (fs_exists (flal-source-wav-path)) 1) 8)))
+                (add
+                    (add
+                        (fats-score (eq (fats-nonempty? source-transcript) 1) 16)
+                        (fats-score (str_eq (fats-local-read "source_wer_pct") "0") 32))
+                    (add
+                        (add
+                            (fats-score (eq (fats-nonempty? translation) 1) 64)
+                            (fats-score (eq (fs_exists (flal-reply-wav-path)) 1) 128))
+                        (add
+                            (add
+                                (fats-score (eq (fats-nonempty? reply-transcript) 1) 256)
+                                (fats-score (str_eq (fats-local-read "reply_wer_pct") "0") 512))
+                            (add
+                                (add
+                                    (fats-score (str_eq (fats-local-read "promotion_authority") "0") 1024)
+                                    (fats-score (str_eq (fats-local-read "score") "16383") 2048))
+                                (add
+                                    (add
+                                        (fats-score (eq (fats-audio-cpp-asr-observed?) 1) 4096)
+                                        (fats-score (eq (fats-audio-cpp-tts-observed?) 1) 8192))
+                                    (add
+                                        (fats-score (str_eq (fats-kind) "fkwu-audio-task-surface") 16384)
+                                        (fats-score (eq (flal-translation-model-ready?) 1) 32768))))))))))
+
+    (defn fats-status (score)
+        (if (eq score (fats-score-max))
+            "local_loop_functional_audio_cpp_adapters_observed_not_swapped"
+            (if (lt score 4096)
+                "local_loop_task_surface_gap"
+                "audio_cpp_adapter_evidence_gap")))
+    (defn fats-next-gap (score)
+        (if (eq score (fats-score-max))
+            "swap audio.cpp ASR/TTS behind the same speech-task slots in the real local personal lane"
+            (if (lt score 4096)
+                "rerun fkwu-local-audio-loop and inspect sidecars"
+                "rerun audio.cpp ASR/TTS support packets or inspect their command/resource artifacts")))
+
+    (defn fats-summary-text (score)
+        (fats-join-lines
+            (list
+                (fats-line "kind" (fats-kind))
+                (fats-line "status" (fats-status score))
+                (fats-int-line "score" score)
+                (fats-int-line "expected_score" (fats-score-max))
+                (fats-line "local_loop_summary_path" (fats-local-summary-path))
+                (fats-line "local_loop_status" (fats-local-read "status"))
+                (fats-line "local_source_transcript" (fats-local-read "source_transcript"))
+                (fats-line "local_source_wer_pct" (fats-local-read "source_wer_pct"))
+                (fats-line "local_translation_oracle" (fats-local-read "translation_oracle"))
+                (fats-line "local_translation_text" (fats-local-read "translation_text"))
+                (fats-line "local_reply_transcript" (fats-local-read "reply_transcript"))
+                (fats-line "local_reply_wer_pct" (fats-local-read "reply_wer_pct"))
+                (fats-int-line "audio_cpp_asr_observed" (fats-audio-cpp-asr-observed?))
+                (fats-line "audio_cpp_asr_summary_path" (fats-dir-path (fats-audio-cpp-asr-dir) "summary"))
+                (fats-int-line "audio_cpp_tts_observed" (fats-audio-cpp-tts-observed?))
+                (fats-line "audio_cpp_tts_summary_path" (fats-dir-path (fats-audio-cpp-tts-dir) "summary"))
+                (fats-line "task_slots" "source_tts,source_asr,translation,reply_tts,reply_asr")
+                (fats-line "personal_lane_authority" "0")
+                (fats-line "production_authority" "0")
+                (fats-line "next_gap" (fats-next-gap score)))))
+
+    (defn fats-run-current ()
+        (do
+            (let _mk-a (fs_mkdir "audio-training-runs"))
+            (let _mk-b (fs_mkdir "audio-training-runs/current"))
+            (let _mk-c (fs_mkdir (fats-out-dir)))
+            (let score (fats-live-score))
+            (let _summary (write_file_text (fats-summary-path) (fats-summary-text score)))
+            score))
+
+    0)

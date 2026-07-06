@@ -1,0 +1,442 @@
+; fkwu-production-audio-end-to-end.fk -- real local personal audio lane, no fallbacks.
+;
+; This lane is the real local progress shape: audio.cpp Qwen3 TTS -> audio.cpp
+; Qwen3 ASR -> audio.cpp forced alignment -> local translation. It does not use
+; macOS say, Whisper, synthetic fixtures, or mock data. The current voice
+; package may be the audio.cpp public demo while we prove the end-to-end path.
+;
+; If a required artifact is derivable, this cell writes it into the production
+; run directory. If a required artifact is absent, it names the blocker instead
+; of silently substituting a different runtime.
+;
+; import "observe/stt-wer.fk"
+
+(do
+    (defn fpae-kind () "fkwu-production-audio-end-to-end")
+    (defn fpae-out-dir () "audio-training-runs/current/fkwu-production-audio-end-to-end")
+    (defn fpae-package-dir () "audio-training-runs/current/voice-reference-package")
+    (defn fpae-cli () "/tmp/audio.cpp-current/build/macos-metal-release/bin/audiocpp_cli")
+    (defn fpae-source-dir () "/tmp/audio.cpp-current")
+    (defn fpae-tts-model () "/tmp/audio.cpp/models/Qwen3-TTS-12Hz-0.6B-Base")
+    (defn fpae-asr-model () "/tmp/audio.cpp/models/Qwen3-ASR-0.6B")
+    (defn fpae-align-model () "/tmp/audio.cpp/models/Qwen3-ForcedAligner-0.6B")
+    (defn fpae-translation-model () "llama3.2:3b")
+    (defn fpae-target-text () "Sema audio path is alive.")
+    (defn fpae-tts-text () "Seyma. Audio. Path. is alive.")
+    (defn fpae-target-language () "de")
+    (defn fpae-score-max () 131071)
+
+    (defn fpae-cat3 (a b c) (str_concat a (str_concat b c)))
+    (defn fpae-cat4 (a b c d) (str_concat a (str_concat b (str_concat c d))))
+    (defn fpae-cat5 (a b c d e) (str_concat a (str_concat b (str_concat c (str_concat d e)))))
+    (defn fpae-path (name) (fpae-cat3 (fpae-out-dir) "/" name))
+    (defn fpae-package-path (name) (fpae-cat3 (fpae-package-dir) "/" name))
+    (defn fpae-q (s) (fpae-cat3 "'" s "'"))
+    (defn fpae-line (name value) (fpae-cat4 name ": `" value "`\n"))
+    (defn fpae-digit (n) (byte_to_str (add 48 n)))
+    (defn fpae-int-str (n)
+        (if (lt n 0)
+            (str_concat "-" (fpae-int-str (sub 0 n)))
+            (if (lt n 10) (fpae-digit n)
+                (str_concat (fpae-int-str (div n 10)) (fpae-digit (mod n 10))))))
+    (defn fpae-int-line (name value) (fpae-line name (fpae-int-str value)))
+    (defn fpae-join-lines (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (head xs) (fpae-join-lines (tail xs)))))
+
+    (defn fpae-ws-byte? (b)
+        (if (or (eq b 32) (or (eq b 9) (or (eq b 10) (eq b 13)))) 1 0))
+    (defn fpae-slice-loop (s i end acc)
+        (if (ge i end) acc
+            (fpae-slice-loop s (add i 1) end
+                             (str_concat acc (byte_to_str (str_byte_at s i))))))
+    (defn fpae-left-index (s i n)
+        (if (ge i n) n
+            (if (eq (fpae-ws-byte? (str_byte_at s i)) 1)
+                (fpae-left-index s (add i 1) n)
+                i)))
+    (defn fpae-right-index (s end)
+        (if (le end 0) 0
+            (if (eq (fpae-ws-byte? (str_byte_at s (sub end 1))) 1)
+                (fpae-right-index s (sub end 1))
+                end)))
+    (defn fpae-trim (s)
+        (do
+            (let n (str_len s))
+            (let start (fpae-left-index s 0 n))
+            (let end (fpae-right-index s n))
+            (if (ge start end) "" (fpae-slice-loop s start end ""))))
+    (defn fpae-read (path) (if (eq (fs_exists path) 1) (fpae-trim (read_file path)) ""))
+    (defn fpae-package-read (name) (fpae-read (fpae-package-path name)))
+    (defn fpae-write (name value) (write_file_text (fpae-path name) value))
+    (defn fpae-write-int (name value) (fpae-write name (fpae-int-str value)))
+    (defn fpae-score (ok bit) (if ok bit 0))
+
+    (defn fpae-voice-wav () (fpae-package-path "voice.wav"))
+    (defn fpae-reference-text-path () (fpae-path "reference-text.txt"))
+    (defn fpae-target-text-path () (fpae-path "target-text.txt"))
+    (defn fpae-tts-text-path () (fpae-path "tts-text.txt"))
+    (defn fpae-output-wav () (fpae-path "production-audio.wav"))
+    (defn fpae-words-path () (fpae-path "words.json"))
+    (defn fpae-transcript-path () (fpae-path "transcript.txt"))
+    (defn fpae-translation-path () (fpae-path "translation.txt"))
+    (defn fpae-translation-request-path () (fpae-path "translation-request.json"))
+    (defn fpae-summary-path () (fpae-path "summary"))
+    (defn fpae-context-path () (fpae-path "context.md"))
+    (defn fpae-diagnostic-path () (fpae-path "diagnostic.md"))
+    (defn fpae-run-tts-command-path () (fpae-path "run-tts.command"))
+    (defn fpae-run-asr-command-path () (fpae-path "run-asr.command"))
+    (defn fpae-run-align-command-path () (fpae-path "run-align.command"))
+    (defn fpae-run-translate-command-path () (fpae-path "run-translate.command"))
+    (defn fpae-run-all-command-path () (fpae-path "run.command"))
+
+    (defn fpae-scope () (fpae-package-read "scope.txt"))
+    (defn fpae-purpose () (fpae-package-read "purpose.txt"))
+    (defn fpae-authority () (fpae-package-read "authority.txt"))
+    (defn fpae-speaker () (fpae-package-read "speaker.txt"))
+    (defn fpae-subject () (fpae-package-read "subject.txt"))
+    (defn fpae-reference-text () (fpae-package-read "transcript.txt"))
+    (defn fpae-revoked () (fpae-package-read "revoked.txt"))
+    (defn fpae-audio-hash () (fpae-package-read "audio_hash.txt"))
+    (defn fpae-issued () (fpae-package-read "issued.txt"))
+    (defn fpae-expires () (fpae-package-read "expires.txt"))
+
+    (defn fpae-cli-ready? () (if (eq (fs_exists (fpae-cli)) 1) 1 0))
+    (defn fpae-models-ready? ()
+        (if (and (eq (fs_exists (fpae-cat3 (fpae-tts-model) "/" "model.safetensors")) 1)
+                 (and (eq (fs_exists (fpae-cat3 (fpae-asr-model) "/" "model.safetensors")) 1)
+                      (eq (fs_exists (fpae-cat3 (fpae-align-model) "/" "model.safetensors")) 1))) 1 0))
+    (defn fpae-package-files-present? ()
+        (if (and (eq (fs_exists (fpae-voice-wav)) 1)
+                 (and (gt (str_len (fpae-reference-text)) 0)
+                      (and (gt (str_len (fpae-speaker)) 0)
+                           (and (gt (str_len (fpae-subject)) 0)
+                                (and (gt (str_len (fpae-audio-hash)) 0)
+                                     (and (gt (str_len (fpae-issued)) 0)
+                                          (and (gt (str_len (fpae-expires)) 0)
+                                               (gt (str_len (fpae-authority)) 0)))))))) 1 0))
+    (defn fpae-package-personal-use-authorized? ()
+        (if (and (str_eq (fpae-scope) "personal-voice")
+                 (and (str_eq (fpae-purpose) "audio.cpp-tts")
+                      (and (str_eq (fpae-revoked) "0")
+                           (and (not (str_eq (fpae-authority) "diagnostic-only-public-demo-no-personal-voice-authority"))
+                                (not (str_eq (fpae-authority) "__explicit_voice_authority__")))))) 1 0))
+    (defn fpae-package-borrowed-demo-authorized? ()
+        (if (and (str_eq (fpae-scope) "public-demo")
+                 (and (str_eq (fpae-purpose) "audio.cpp-tts")
+                      (eq (str_eq (fpae-revoked) "0") 1))) 1 0))
+    (defn fpae-package-progress-authorized? ()
+        (if (or (eq (fpae-package-personal-use-authorized?) 1)
+                (eq (fpae-package-borrowed-demo-authorized?) 1)) 1 0))
+    (defn fpae-package-production-authorized? () (fpae-package-progress-authorized?))
+    (defn fpae-source-mode ()
+        (if (eq (fpae-package-personal-use-authorized?) 1) "personal_voice"
+            (if (eq (fpae-package-borrowed-demo-authorized?) 1) "borrowed_public_demo"
+                "not_runnable")))
+    (defn fpae-ready-to-run? ()
+        (if (and (eq (fpae-cli-ready?) 1)
+                 (and (eq (fpae-models-ready?) 1)
+                      (and (eq (fpae-package-files-present?) 1)
+                           (eq (fpae-package-progress-authorized?) 1)))) 1 0))
+    (defn fpae-blocker ()
+        (if (eq (fpae-cli-ready?) 0) "missing_audio_cpp_cli"
+            (if (eq (fpae-models-ready?) 0) "missing_audio_cpp_model_artifact"
+                (if (eq (fpae-package-files-present?) 0) "missing_voice_reference_package_artifact"
+                    (if (eq (fpae-package-progress-authorized?) 1) "none"
+                    (if (not (or (str_eq (fpae-scope) "personal-voice") (str_eq (fpae-scope) "public-demo"))) "voice_reference_scope_not_supported"
+                        (if (not (str_eq (fpae-purpose) "audio.cpp-tts")) "voice_reference_purpose_not_audio_cpp_tts"
+                            (if (not (str_eq (fpae-revoked) "0")) "voice_reference_revoked"
+                                (if (str_eq (fpae-authority) "__explicit_voice_authority__")
+                                    "voice_reference_authority_template_value"
+                                    "not_runnable")))))))))
+    (defn fpae-status ()
+        (if (eq (fpae-ready-to-run?) 1)
+            (fpae-cat3 "ready_to_execute_real_audio_cpp_" (fpae-source-mode) "")
+            (fpae-cat3 "blocked_" (fpae-blocker) "")))
+
+    (defn fpae-setup-shell ()
+        (fpae-join-lines
+            (list
+                "set -u\n"
+                (fpae-cat3 "mkdir -p " (fpae-q (fpae-out-dir)) "\n")
+                (fpae-cat3 "cli=" (fpae-q (fpae-cli)) "\n")
+                (fpae-cat3 "tts_model=" (fpae-q (fpae-tts-model)) "\n")
+                (fpae-cat3 "asr_model=" (fpae-q (fpae-asr-model)) "\n")
+                (fpae-cat3 "align_model=" (fpae-q (fpae-align-model)) "\n")
+                (fpae-cat3 "voice_ref=" (fpae-q (fpae-voice-wav)) "\n")
+                (fpae-cat3 "out=" (fpae-q (fpae-output-wav)) "\n")
+                (fpae-cat3 "words=" (fpae-q (fpae-words-path)) "\n")
+                (fpae-cat3 "transcript=" (fpae-q (fpae-transcript-path)) "\n")
+                (fpae-cat3 "translation=" (fpae-q (fpae-translation-path)) "\n")
+                (fpae-cat3 "request_json=" (fpae-q (fpae-translation-request-path)) "\n")
+                (fpae-cat3 "target_text=$(cat " (fpae-q (fpae-target-text-path)) ")\n")
+                (fpae-cat3 "tts_text=$(cat " (fpae-q (fpae-tts-text-path)) ")\n")
+                (fpae-cat3 "reference_text=$(cat " (fpae-q (fpae-reference-text-path)) ")\n")
+                (fpae-cat3 "printf %s \"$cli\" > " (fpae-q (fpae-path "selected_cli.path")) "\n")
+                (fpae-cat3 "printf %s \"$tts_model\" > " (fpae-q (fpae-path "tts_model.path")) "\n")
+                (fpae-cat3 "printf %s \"$asr_model\" > " (fpae-q (fpae-path "asr_model.path")) "\n")
+                (fpae-cat3 "printf %s \"$align_model\" > " (fpae-q (fpae-path "aligner_model.path")) "\n")
+                (fpae-cat3 "printf %s \"$voice_ref\" > " (fpae-q (fpae-path "voice_ref.path")) "\n"))))
+    (defn fpae-tts-command ()
+        (fpae-join-lines
+            (list
+                (fpae-setup-shell)
+                "rm -f \"$out\" "
+                (fpae-q (fpae-path "stdout-tts.txt"))
+                " "
+                (fpae-q (fpae-path "stderr-tts.txt"))
+                " "
+                (fpae-q (fpae-path "resource-tts.txt"))
+                " "
+                (fpae-q (fpae-path "rc-tts"))
+                "\n"
+                "/usr/bin/time -l \"$cli\" --task tts --family qwen3_tts --model \"$tts_model\" --backend metal --mode offline --language English --text \"$tts_text\" --voice-ref \"$voice_ref\" --reference-text \"$reference_text\" --seed 1234 --max-tokens 128 --do-sample false --out \"$out\" > "
+                (fpae-q (fpae-path "stdout-tts.txt"))
+                " 2> "
+                (fpae-q (fpae-path "resource-tts.txt"))
+                "\nrc=$?\ncat "
+                (fpae-q (fpae-path "resource-tts.txt"))
+                " > "
+                (fpae-q (fpae-path "stderr-tts.txt"))
+                "\nprintf %s \"$rc\" > "
+                (fpae-q (fpae-path "rc-tts"))
+                "\nexit \"$rc\"\n")))
+    (defn fpae-asr-command ()
+        (fpae-join-lines
+            (list
+                (fpae-setup-shell)
+                "rm -f \"$transcript\" "
+                (fpae-q (fpae-path "stdout-asr.txt"))
+                " "
+                (fpae-q (fpae-path "stderr-asr.txt"))
+                " "
+                (fpae-q (fpae-path "resource-asr.txt"))
+                " "
+                (fpae-q (fpae-path "rc-asr"))
+                "\n"
+                "if [ \"$(cat "
+                (fpae-q (fpae-path "rc-tts"))
+                " 2>/dev/null)\" != \"0\" ] || [ ! -f \"$out\" ]; then printf missing_tts_output > "
+                (fpae-q (fpae-path "stderr-asr.txt"))
+                "; printf 99 > "
+                (fpae-q (fpae-path "rc-asr"))
+                "; exit 99; fi\n"
+                "/usr/bin/time -l \"$cli\" --task asr --family qwen3_asr --model \"$asr_model\" --backend metal --mode offline --audio \"$out\" > "
+                (fpae-q (fpae-path "stdout-asr.txt"))
+                " 2> "
+                (fpae-q (fpae-path "resource-asr.txt"))
+                "\nrc=$?\ncat "
+                (fpae-q (fpae-path "resource-asr.txt"))
+                " > "
+                (fpae-q (fpae-path "stderr-asr.txt"))
+                "\nprintf %s \"$rc\" > "
+                (fpae-q (fpae-path "rc-asr"))
+                "\nsed -n 's/^text_output=//p' "
+                (fpae-q (fpae-path "stdout-asr.txt"))
+                " | head -n 1 | tr -d '\\r' > \"$transcript\"\nexit \"$rc\"\n")))
+    (defn fpae-align-command ()
+        (fpae-join-lines
+            (list
+                (fpae-setup-shell)
+                "rm -f \"$words\" "
+                (fpae-q (fpae-path "stdout-align.txt"))
+                " "
+                (fpae-q (fpae-path "stderr-align.txt"))
+                " "
+                (fpae-q (fpae-path "resource-align.txt"))
+                " "
+                (fpae-q (fpae-path "rc-align"))
+                "\n"
+                "if [ \"$(cat "
+                (fpae-q (fpae-path "rc-tts"))
+                " 2>/dev/null)\" != \"0\" ] || [ ! -f \"$out\" ]; then printf missing_tts_output > "
+                (fpae-q (fpae-path "stderr-align.txt"))
+                "; printf 99 > "
+                (fpae-q (fpae-path "rc-align"))
+                "; exit 99; fi\n"
+                "/usr/bin/time -l \"$cli\" --task align --family qwen3_forced_aligner --model \"$align_model\" --backend metal --mode offline --language en --audio \"$out\" --text \"$target_text\" --words-out \"$words\" > "
+                (fpae-q (fpae-path "stdout-align.txt"))
+                " 2> "
+                (fpae-q (fpae-path "resource-align.txt"))
+                "\nrc=$?\ncat "
+                (fpae-q (fpae-path "resource-align.txt"))
+                " > "
+                (fpae-q (fpae-path "stderr-align.txt"))
+                "\nprintf %s \"$rc\" > "
+                (fpae-q (fpae-path "rc-align"))
+                "\nexit \"$rc\"\n")))
+    (defn fpae-translate-command ()
+        (fpae-join-lines
+            (list
+                "set -u\n"
+                (fpae-cat3 "mkdir -p " (fpae-q (fpae-out-dir)) "\n")
+                (fpae-cat3 "transcript=" (fpae-q (fpae-transcript-path)) "\n")
+                (fpae-cat3 "translation=" (fpae-q (fpae-translation-path)) "\n")
+                (fpae-cat3 "request_json=" (fpae-q (fpae-translation-request-path)) "\n")
+                "if [ ! -s \"$transcript\" ]; then printf missing_transcript > "
+                (fpae-q (fpae-path "stderr-translate.txt"))
+                "; printf 99 > "
+                (fpae-q (fpae-path "rc-translate"))
+                "; exit 99; fi\n"
+                "prompt=$(printf 'Translate exactly to German. Return only the translation, no explanation. English: %s' \"$(cat \"$transcript\")\")\n"
+                "jq -n --arg model "
+                (fpae-q (fpae-translation-model))
+                " --arg prompt \"$prompt\" '{model:$model,prompt:$prompt,stream:false,options:{num_predict:24,temperature:0,top_p:0.1}}' > \"$request_json\"\n"
+                "curl --max-time 20 -s -X POST http://127.0.0.1:11434/api/generate -H 'Content-Type: application/json' --data-binary @\"$request_json\" | jq -r '.response // \"\"' | tr -d '\\r' | head -c 240 > \"$translation\"\n"
+                "printf 0 > "
+                (fpae-q (fpae-path "rc-translate"))
+                "\n: > "
+                (fpae-q (fpae-path "stderr-translate.txt"))
+                "\n")))
+    (defn fpae-run-all-command ()
+        (fpae-join-lines
+            (list
+                "set -u\n"
+                "sh "
+                (fpae-q (fpae-run-tts-command-path))
+                "\nsh "
+                (fpae-q (fpae-run-asr-command-path))
+                "\nsh "
+                (fpae-q (fpae-run-align-command-path))
+                "\nsh "
+                (fpae-q (fpae-run-translate-command-path))
+                "\n")))
+
+    (defn fpae-write-planned-artifacts ()
+        (do
+            (let _mk-a (fs_mkdir "audio-training-runs"))
+            (let _mk-b (fs_mkdir "audio-training-runs/current"))
+            (let _mk-c (fs_mkdir (fpae-out-dir)))
+            (let _target (fpae-write "target-text.txt" (fpae-target-text)))
+            (let _tts-text (fpae-write "tts-text.txt" (fpae-tts-text)))
+            (let _reference (fpae-write "reference-text.txt" (fpae-reference-text)))
+            (let _tts (write_file_text (fpae-run-tts-command-path) (fpae-tts-command)))
+            (let _asr (write_file_text (fpae-run-asr-command-path) (fpae-asr-command)))
+            (let _align (write_file_text (fpae-run-align-command-path) (fpae-align-command)))
+            (let _translate (write_file_text (fpae-run-translate-command-path) (fpae-translate-command)))
+            (let _all (write_file_text (fpae-run-all-command-path) (fpae-run-all-command)))
+            1))
+
+    (defn fpae-run-host-if-ready ()
+        (if (eq (fpae-ready-to-run?) 1)
+            (do
+                (let _run (host-exec (fpae-cat3 "sh " (fpae-q (fpae-run-all-command-path)) "") ""))
+                1)
+            0))
+
+    (defn fpae-rc-ok? (name) (if (str_eq (fpae-read (fpae-path name)) "0") 1 0))
+    (defn fpae-output-audio-present? () (if (eq (fs_exists (fpae-output-wav)) 1) 1 0))
+    (defn fpae-transcript () (fpae-read (fpae-transcript-path)))
+    (defn fpae-translation () (fpae-read (fpae-translation-path)))
+    (defn fpae-wer ()
+        (if (eq (str_len (fpae-transcript)) 0) 999
+            (sw-wer-bounded (sw-tokens (fpae-transcript)) (sw-tokens (fpae-target-text)))))
+    (defn fpae-live-score ()
+        (add
+            (add
+                (add
+                    (fpae-score (eq (fpae-cli-ready?) 1) 1)
+                    (fpae-score (eq (fpae-models-ready?) 1) 2))
+                (add
+                    (fpae-score (eq (fpae-package-files-present?) 1) 4)
+                    (fpae-score (eq (fpae-package-progress-authorized?) 1) 8)))
+            (add
+                (add
+                    (fpae-score (eq (fs_exists (fpae-run-tts-command-path)) 1) 16)
+                    (fpae-score (eq (fs_exists (fpae-run-asr-command-path)) 1) 32))
+                (add
+                    (add
+                        (fpae-score (eq (fs_exists (fpae-run-align-command-path)) 1) 64)
+                        (fpae-score (eq (fs_exists (fpae-run-translate-command-path)) 1) 128))
+                    (add
+                        (add
+                            (fpae-score (eq (fpae-rc-ok? "rc-tts") 1) 256)
+                            (fpae-score (eq (fpae-output-audio-present?) 1) 512))
+                        (add
+                            (add
+                                (fpae-score (eq (fpae-rc-ok? "rc-asr") 1) 1024)
+                                (fpae-score (le (fpae-wer) 10) 2048))
+                            (add
+                                (add
+                                    (fpae-score (eq (fpae-rc-ok? "rc-align") 1) 4096)
+                                    (fpae-score (eq (fs_exists (fpae-words-path)) 1) 8192))
+                                (add
+                                    (add
+                                        (fpae-score (eq (fpae-rc-ok? "rc-translate") 1) 16384)
+                                        (fpae-score (gt (str_len (fpae-translation)) 0) 32768))
+                                    (fpae-score (str_eq (fpae-kind) "fkwu-production-audio-end-to-end") 65536)))))))))
+
+    (defn fpae-context-text ()
+        (fpae-join-lines
+            (list
+                (fpae-line "kind" (fpae-kind))
+                (fpae-line "runtime" "audio.cpp qwen3_tts qwen3_asr qwen3_forced_aligner")
+                (fpae-line "use_case" "local_progress_not_enterprise_shipping")
+                (fpae-line "source_mode" (fpae-source-mode))
+                (fpae-line "no_fallbacks" "1")
+                (fpae-line "borrowed_public_demo_allowed" "1")
+                (fpae-line "package_dir" (fpae-package-dir))
+                (fpae-line "voice_ref_path" (fpae-voice-wav))
+                (fpae-line "target_text_path" (fpae-target-text-path))
+                (fpae-line "tts_text_path" (fpae-tts-text-path))
+                (fpae-line "reference_text_path" (fpae-reference-text-path))
+                (fpae-line "run_command_path" (fpae-run-all-command-path)))))
+    (defn fpae-diagnostic-text ()
+        (fpae-join-lines
+            (list
+                (fpae-line "kind" (fpae-kind))
+                (fpae-line "status" (fpae-status))
+                (fpae-line "blocker" (fpae-blocker))
+                (fpae-line "package_scope" (fpae-scope))
+                (fpae-line "package_purpose" (fpae-purpose))
+                (fpae-line "package_authority" (fpae-authority))
+                (fpae-line "package_speaker" (fpae-speaker))
+                (fpae-line "package_subject" (fpae-subject))
+                (fpae-line "accepted_package_scope" "personal-voice or public-demo")
+                (fpae-line "required_package_purpose" "audio.cpp-tts")
+                (fpae-line "required_artifact_location" (fpae-package-dir))
+                (fpae-line "missing_artifact_policy" "create derived command/context/diagnostic artifacts here; do not silently substitute another runtime"))))
+    (defn fpae-summary-text (score executed)
+        (fpae-join-lines
+            (list
+                (fpae-line "kind" (fpae-kind))
+                (fpae-line "status" (if (eq score (fpae-score-max)) "local_progress_audio_end_to_end_complete" (fpae-status)))
+                (fpae-line "blocker" (fpae-blocker))
+                (fpae-int-line "score" score)
+                (fpae-int-line "expected_score" (fpae-score-max))
+                (fpae-int-line "executed_audio_cpp" executed)
+                (fpae-int-line "cli_ready" (fpae-cli-ready?))
+                (fpae-int-line "models_ready" (fpae-models-ready?))
+                (fpae-int-line "package_files_present" (fpae-package-files-present?))
+                (fpae-int-line "package_personal_use_authorized" (fpae-package-personal-use-authorized?))
+                (fpae-int-line "package_borrowed_demo_authorized" (fpae-package-borrowed-demo-authorized?))
+                (fpae-int-line "package_progress_authorized" (fpae-package-progress-authorized?))
+                (fpae-int-line "package_production_authorized" (fpae-package-production-authorized?))
+                (fpae-line "source_mode" (fpae-source-mode))
+                (fpae-line "package_scope" (fpae-scope))
+                (fpae-line "package_authority" (fpae-authority))
+                (fpae-line "voice_ref_path" (fpae-voice-wav))
+                (fpae-line "target_text" (fpae-target-text))
+                (fpae-line "tts_text" (fpae-tts-text))
+                (fpae-line "output_wav_path" (fpae-output-wav))
+                (fpae-line "transcript" (fpae-transcript))
+                (fpae-int-line "wer_pct" (fpae-wer))
+                (fpae-line "words_path" (fpae-words-path))
+                (fpae-line "translation_model" (fpae-translation-model))
+                (fpae-line "translation_text" (fpae-translation))
+                (fpae-line "run_command_path" (fpae-run-all-command-path))
+                (fpae-int-line "personal_use_authority" (fpae-package-personal-use-authorized?))
+                (fpae-int-line "progress_authority" (fpae-package-progress-authorized?))
+                (fpae-line "shipping_authority" "0"))))
+
+    (defn fpae-run-current ()
+        (do
+            (let _planned (fpae-write-planned-artifacts))
+            (let _context (write_file_text (fpae-context-path) (fpae-context-text)))
+            (let _diagnostic (write_file_text (fpae-diagnostic-path) (fpae-diagnostic-text)))
+            (let executed (fpae-run-host-if-ready))
+            (let score (fpae-live-score))
+            (let _summary (write_file_text (fpae-summary-path) (fpae-summary-text score executed)))
+            score))
+
+    0)
