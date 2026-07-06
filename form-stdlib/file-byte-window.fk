@@ -1,0 +1,123 @@
+; file-byte-window.fk -- bounded file byte windows from the current fkwu floor.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/str-byte-at.fk
+;           form-stdlib/form-fs.fk
+;
+; This cell gives Form a trusted bounded byte-window abstraction without
+; growing the C seed. Host IO is only the existing slice reader; byte decoding
+; is the Form-native str-byte-at recipe. It is not artifact policy, hashing,
+; sealing, loading, runtime selection, compiler emission, or whole-file byte
+; materialization.
+
+(do
+    (defn fbw-max-window () 4096)
+    (defn fbw-evidence-route () "read_file_slice+str-byte-at")
+
+    (defn fbw-feature (name status) (list "file-byte-window-feature" name status))
+    (defn fbw-feature-name (f) (nth f 1))
+    (defn fbw-feature-status (f) (nth f 2))
+    (defn file-byte-window-manifest ()
+        (list
+            (fbw-feature "bounded-read-file-slice" 1)
+            (fbw-feature "form-str-byte-at-decode" 1)
+            (fbw-feature "nul-ascii-slice-byte-indexed" 1)
+            (fbw-feature "max-window-4096" 1)
+            (fbw-feature "byte-at-one-byte-window" 1)
+            (fbw-feature "window-byte-at-for-cursors" 1)
+            (fbw-feature "status-vocabulary" 1)
+            (fbw-feature "too-large-refusal" 1)
+            (fbw-feature "no-file-byte-at" 1)
+            (fbw-feature "no-read-file-bytes" 1)
+            (fbw-feature "no-write-file-bytes" 1)
+            (fbw-feature "no-whole-file-materialization" 1)
+            (fbw-feature "no-hash-seal-load-selector" 1)
+            (fbw-feature "no-c-seed-growth" 1)
+            (fbw-feature "no-policy-gate" 1)))
+    (defn file-byte-window-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (fbw-feature-name (head fs)) name)
+                     (eq (fbw-feature-status (head fs)) 1))
+                1
+                (file-byte-window-manifest-has? name (tail fs)))))
+
+    (defn fbw-status-ready () "ready")
+    (defn fbw-status-empty () "empty")
+    (defn fbw-status-short () "short")
+    (defn fbw-status-missing () "missing")
+    (defn fbw-status-out-of-range () "out-of-range")
+    (defn fbw-status-too-large () "too-large")
+    (defn fbw-status-malformed () "malformed")
+
+    (defn fbw-status-known? (status)
+        (if (str_eq status (fbw-status-ready)) 1
+        (if (str_eq status (fbw-status-empty)) 1
+        (if (str_eq status (fbw-status-short)) 1
+        (if (str_eq status (fbw-status-missing)) 1
+        (if (str_eq status (fbw-status-out-of-range)) 1
+        (if (str_eq status (fbw-status-too-large)) 1
+        (if (str_eq status (fbw-status-malformed)) 1 0))))))))
+
+    ; window = ("file-byte-window" path offset requested-len observed-len
+    ;           status slice evidence-route)
+    (defn fbw-window (path offset requested-len observed-len status slice evidence-route)
+        (list "file-byte-window" path offset requested-len observed-len
+              status slice evidence-route))
+    (defn fbw-window? (w) (str_eq (nth w 0) "file-byte-window"))
+    (defn fbw-window-path (w) (nth w 1))
+    (defn fbw-window-offset (w) (nth w 2))
+    (defn fbw-window-requested-len (w) (nth w 3))
+    (defn fbw-window-observed-len (w) (nth w 4))
+    (defn fbw-window-status (w) (nth w 5))
+    (defn fbw-window-slice (w) (nth w 6))
+    (defn fbw-window-evidence-route (w) (nth w 7))
+
+    (defn fbw-status-from-slice (requested-len observed-len)
+        (if (eq requested-len 0)
+            (fbw-status-empty)
+            (if (gt observed-len requested-len)
+                (fbw-status-malformed)
+                (if (eq observed-len requested-len)
+                    (fbw-status-ready)
+                    (if (eq observed-len 0)
+                        (fbw-status-out-of-range)
+                        (fbw-status-short))))))
+
+    (defn fbw-malformed-request? (offset requested-len)
+        (if (lt offset 0) 1
+        (if (lt requested-len 0) 1
+        (if (lt (add offset requested-len) offset) 1 0))))
+
+    (defn fbw-read-window (path offset requested-len)
+        (if (eq (fbw-malformed-request? offset requested-len) 1)
+            (fbw-window path offset requested-len 0 (fbw-status-malformed) "" (fbw-evidence-route))
+            (if (gt requested-len (fbw-max-window))
+                (fbw-window path offset requested-len 0 (fbw-status-too-large) "" (fbw-evidence-route))
+                (if (eq (fs-exists? path) 0)
+                    (fbw-window path offset requested-len 0 (fbw-status-missing) "" (fbw-evidence-route))
+                    (do
+                        (let slice (if (eq requested-len 0) "" (fs-read-slice path offset requested-len)))
+                        (let observed-len (str_len slice))
+                        (fbw-window path offset requested-len observed-len
+                                    (fbw-status-from-slice requested-len observed-len)
+                                    slice
+                                    (fbw-evidence-route)))))))
+
+    (defn fbw-window-byte-at (window local-offset)
+        (if (lt local-offset 0)
+            (sub 0 1)
+            (if (lt local-offset (fbw-window-observed-len window))
+                (str-byte-at (fbw-window-slice window) local-offset)
+                (sub 0 1))))
+
+    (defn fbw-window-bytes-loop (slice i n acc)
+        (if (ge i n)
+            (reverse acc)
+            (fbw-window-bytes-loop slice (add i 1) n (cons (str-byte-at slice i) acc))))
+    (defn fbw-window-bytes (window)
+        (fbw-window-bytes-loop (fbw-window-slice window) 0 (fbw-window-observed-len window) (list)))
+
+    (defn fbw-byte-at (path offset)
+        (fbw-window-byte-at (fbw-read-window path offset 1) 0))
+)

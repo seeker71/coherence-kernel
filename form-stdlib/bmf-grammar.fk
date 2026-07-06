@@ -1,37 +1,46 @@
-; bmf-grammar.fk — the recursive grammar engine.
+; bmf-grammar.fk -- recursive grammar waist over the BMF cursor.
 ;
-; bmf-core.fk gave the cursor + leaf matching. This adds what full grammars need:
-;   - a GRAMMAR: a named set of rules + a start rule.
-;   - `ref` + recursion: a rule calls another rule by name; the call returns the
-;     callee's EMITTED node, so rules compose their children from sub-rule output.
-;   - `rep` / `sep`: zero-or-more and separator-lists, capturing a LIST of nodes.
-;   - node-captures: a capture holds the value its sub-pattern produced (a node, a
-;     leaf, or a node-list), not just text — so templates splice real sub-trees.
-;   - templates with `splice` (one node) and `splice*` (flatten a node-list).
+; Layer 3 is the grammar-as-data fixpoint: named rules, recursive ref, rep/sep,
+; captures, templates, and cursor-native grammar sugar. `g-match-rule` remains a
+; prefix matcher for composition; `g-parse-full` is the trusted whole-source door.
 ;
-; This is the `Match` engine of bmf-architecture.form. Grammars (BML, Java, Go…)
-; are pure data over it; the kernel never learns a language.
-;
-; Reuses bmf-core.fk's whitespace-aware cursor (cursor-str, cur-*, skip-ws,
-; cp-in-class?, surf-*). Emits universal Form nodes via (bp op).
-;
-; preludes: form-stdlib/core.fk form-stdlib/form-ontology-loader.fk form-stdlib/line-grammar.fk form-stdlib/bmf-core.fk
+; preludes: form-stdlib/core.fk form-stdlib/bmf-core.fk
 
 (do
-    ;; ── match result: (ok val caps cur) | (no) ───────────────────────────
+    (defn bg-feature (name status) (list "bmf-grammar-layer-feature" name status))
+    (defn bg-feature-name (f) (nth f 1))
+    (defn bg-feature-status (f) (nth f 2))
+    (defn bmf-grammar-language-manifest ()
+        (list
+            (bg-feature "grammar-value" 1)
+            (bg-feature "multi-rule" 1)
+            (bg-feature "ref-recursion" 1)
+            (bg-feature "rep-sep" 1)
+            (bg-feature "capture-values" 1)
+            (bg-feature "template-emit" 1)
+            (bg-feature "template-splice" 1)
+            (bg-feature "literal-sugar" 1)
+            (bg-feature "expression-sugar" 1)
+            (bg-feature "full-parse" 1)
+            (bg-feature "no-line-grammar" 1)))
+    (defn bmf-grammar-manifest-has? (name fs)
+        (if (nil? fs) 0
+            (if (and (str_eq (bg-feature-name (head fs)) name)
+                     (eq (bg-feature-status (head fs)) 1))
+                1
+                (bmf-grammar-manifest-has? name (tail fs)))))
+
     (defn g-ok (v caps c) (list "ok" v caps c))
     (defn g-no () (list "no"))
     (defn g-ok? (m) (str_eq (head m) "ok"))
-    (defn g-val  (m) (nth m 1))
+    (defn g-val (m) (nth m 1))
     (defn g-caps (m) (nth m 2))
-    (defn g-cur  (m) (nth m 3))
+    (defn g-cur (m) (nth m 3))
 
-    ;; ── pattern values: a node, OR a node-list, OR unit (no value) ────────
     (defn unit () (list "U"))
     (defn nlist (xs) (cons "L" xs))
     (defn nlist-items (v) (tail v))
 
-    ;; ── captures: alist name -> value ────────────────────────────────────
     (defn gc-empty () (empty))
     (defn gc-put (caps name v) (cons (list name v) caps))
     (defn gc-get (caps name)
@@ -39,7 +48,6 @@
             (if (str_eq (head (head caps)) name) (head (tail (head caps)))
                 (gc-get (tail caps) name))))
 
-    ;; ── grammar: (G start rules); rule: (name pattern template) ───────────
     (defn grammar (start rules) (list "G" start rules))
     (defn g-start (g) (nth g 1))
     (defn g-rules (g) (nth g 2))
@@ -52,24 +60,21 @@
             (if (str_eq (head (head rs)) name) (head rs)
                 (g-rule-find (tail rs) name))))
 
-    ;; ── match a named rule -> (rok node cur) | (rno) ──────────────────────
     (defn g-match-rule (g name c)
         (do (let r (g-rule g name))
             (if (nil? r) (list "rno")
                 (do (let m (g-match g (r3-pat r) c (gc-empty)))
                     (if (g-ok? m)
-                        (list "rok" (g-build g (r3-tpl r) (g-caps m) (cur-pos (g-cur m))) (g-cur m))
+                        (list "rok" (g-build (r3-tpl r) (g-caps m)) (g-cur m))
                         (list "rno"))))))
     (defn rok? (rr) (str_eq (head rr) "rok"))
     (defn rok-node (rr) (nth rr 1))
     (defn rok-cur (rr) (nth rr 2))
 
-    ;; ── match a pattern -> (ok val caps cur) | (no) ───────────────────────
     (defn g-match (g pat c caps)
         (do (let tag (head pat))
-            (if (str_eq tag "lit") (gm-lit pat c caps)
-            (if (str_eq tag "cls") (gm-cls pat c caps)
-            (if (str_eq tag "run") (gm-run pat c caps)
+            (if (str_eq tag "lit") (gm-core pat c caps 0)
+            (if (str_eq tag "run") (gm-core pat c caps 1)
             (if (str_eq tag "ref") (gm-ref g pat c caps)
             (if (str_eq tag "seq") (gm-seq g (tail pat) c caps)
             (if (str_eq tag "alt") (gm-alt g (tail pat) c caps)
@@ -83,18 +88,18 @@
             (if (str_eq tag "infix") (gm-infix g pat c caps)
             (if (str_eq tag "chain") (gm-chain g pat c caps)
             (if (str_eq tag "ternary") (gm-ternary g pat c caps)
-                (g-no)))))))))))))))))))
+                (g-no))))))))))))
+                ))))))
 
-    (defn gm-lit (pat c caps)
-        (do (let cc (skip-ws c)) (let s (nth pat 1)) (let sf (cur-surface cc)) (let p (cur-pos cc))
-            (if (gt (add p (str_len s)) (surf-len sf)) (g-no)
-                (if (str_eq (substring (surf-payload sf) p (add p (str_len s))) s)
-                    (g-ok (unit) caps (cur-advance cc (str_len s)))
-                    (g-no)))))
+    (defn gm-core (pat c caps valued)
+        (do (let cc (skip-ws c))
+            (let m (match-pat pat cc (caps-empty)))
+            (if (m-ok? m)
+                (if (eq valued 1)
+                    (g-ok (intern_trivial_string (cur-slice cc (cur-pos (m-cur m)))) caps (m-cur m))
+                    (g-ok (unit) caps (m-cur m)))
+                (g-no))))
 
-    ;; ── character literals (string / char / number) — matched over the cursor,
-    ;; scannerless (no lexer, no token stream); siblings of lit/cls/run. value = leaf ──
-    ;; codepoints: 34=" 39=' 92=\ 46=.
     (defn bmf-unescape-str-loop (s i acc)
         (if (ge i (str_len s)) acc
             (do
@@ -111,70 +116,45 @@
                                 nx))))))
                         (bmf-unescape-str-loop s (add i 2) (str_concat acc lit)))
                     (bmf-unescape-str-loop s (add i 1) (str_concat acc ch))))))
-
     (defn bmf-unescape-str (s) (bmf-unescape-str-loop s 0 ""))
 
-    (defn gm-str (pat c caps)
-        (do (let cc (skip-ws c))
-            (if (cur-eof? cc) (g-no)
-                (if (eq (cur-peek cc) 34)
-                    (do (let start (cur-advance cc 1)) (let endc (gm-q-scan start 34))
-                        (if (eq (cur-peek endc) 34)
-                            (g-ok (intern_trivial_string (bmf-unescape-str (cur-slice start (cur-pos endc)))) caps (cur-advance endc 1))
-                            (g-no)))
-                    (g-no)))))
-    (defn gm-char (pat c caps)
-        (do (let cc (skip-ws c))
-            (if (cur-eof? cc) (g-no)
-                (if (eq (cur-peek cc) 39)
-                    (do (let start (cur-advance cc 1)) (let endc (gm-q-scan start 39))
-                        (if (eq (cur-peek endc) 39)
-                            (g-ok (intern_trivial_string (cur-slice start (cur-pos endc))) caps (cur-advance endc 1))
-                            (g-no)))
-                    (g-no)))))
     (defn gm-q-scan (c q)
         (if (cur-eof? c) c
             (if (eq (cur-peek c) q) c
                 (if (eq (cur-peek c) 92) (gm-q-scan (cur-advance c 2) q)
                     (gm-q-scan (cur-advance c 1) q)))))
+    (defn gm-str (pat c caps)
+        (do (let cc (skip-ws c))
+            (if (eq (cur-peek cc) 34)
+                (do (let start (cur-advance cc 1))
+                    (let endc (gm-q-scan start 34))
+                    (if (eq (cur-peek endc) 34)
+                        (g-ok (intern_trivial_string (bmf-unescape-str (cur-slice start (cur-pos endc)))) caps (cur-advance endc 1))
+                        (g-no)))
+                (g-no))))
+    (defn gm-char (pat c caps)
+        (do (let cc (skip-ws c))
+            (if (eq (cur-peek cc) 39)
+                (do (let start (cur-advance cc 1))
+                    (let endc (gm-q-scan start 39))
+                    (if (eq (cur-peek endc) 39)
+                        (g-ok (intern_trivial_string (cur-slice start (cur-pos endc))) caps (cur-advance endc 1))
+                        (g-no)))
+                (g-no))))
     (defn gm-num (pat c caps)
         (do (let cc (skip-ws c))
-            (if (cur-eof? cc) (g-no)
-                (if (is-digit-cp (cur-peek cc))
-                    (do (let c2 (gm-num-int (cur-advance cc 1))) (let c3 (gm-num-frac c2))
-                        (g-ok (intern_trivial_string (cur-slice cc (cur-pos c3))) caps c3))
-                    (g-no)))))
+            (if (is-digit-cp (cur-peek cc))
+                (do (let c2 (gm-num-int (cur-advance cc 1)))
+                    (let c3 (gm-num-frac c2))
+                    (g-ok (intern_trivial_string (cur-slice cc (cur-pos c3))) caps c3))
+                (g-no))))
     (defn gm-num-int (c)
-        (if (cur-eof? c) c (if (is-digit-cp (cur-peek c)) (gm-num-int (cur-advance c 1)) c)))
+        (if (is-digit-cp (cur-peek c)) (gm-num-int (cur-advance c 1)) c))
     (defn gm-num-frac (c)
         (if (eq (cur-peek c) 46)
             (if (is-digit-cp (cur-peek (cur-advance c 1))) (gm-num-int (cur-advance c 2)) c)
             c))
 
-    (defn gm-cls (pat c caps)
-        (do (let cc (skip-ws c))
-            (if (cur-eof? cc) (g-no)
-                (if (cp-in-class? (cur-peek cc) (nth pat 1))
-                    (g-ok (intern_trivial_string (cur-slice cc (add (cur-pos cc) 1))) caps (cur-advance cc 1))
-                    (g-no)))))
-
-    (defn gm-run (pat c caps)
-        (do (let cc (skip-ws c))
-            (if (cur-eof? cc) (g-no)
-                (if (cp-in-class? (cur-peek cc) (nth pat 1))
-                    (do (let c2 (gm-run-loop pat (cur-advance cc 1)))
-                        (g-ok (intern_trivial_string (cur-slice cc (cur-pos c2))) caps c2))
-                    (g-no)))))
-    (defn gm-run-loop (pat c)
-        (if (cur-eof? c) c
-            (if (cp-in-class? (cur-peek c) (nth pat 1)) (gm-run-loop pat (cur-advance c 1)) c)))
-
-    ;; ── infix: precedence-climbing binary operators, data-driven ──────────
-    ;; pat = (infix operand-pat optable) ; optable entries = (op-str bp prec).
-    ;; ONE engine matcher folds every language's binary ladder — operators are
-    ;; DATA, never 12 hand-written re-parsing rules per grammar. Each operand is
-    ;; parsed once; recursion depth is bounded by precedence levels, not by the
-    ;; expression's length. Left-associative (rhs climbs at prec+1).
     (defn gm-infix (g pat c caps) (gm-infix-climb g (nth pat 1) (nth pat 2) c caps 0))
     (defn gm-infix-climb (g operand table c caps minp)
         (do (let m (g-match g operand c caps))
@@ -187,18 +167,13 @@
                         (if (g-ok? rhs)
                             (gm-infix-loop g operand table (intern_node (bp (head opm)) (list lhs (g-val rhs))) (g-caps rhs) (g-cur rhs) minp)
                             (g-ok lhs caps c)))))))
-    ;; try each table op as a literal at the cursor (longest first via table order);
-    ;; on match return (bp prec cursor-after-op), else (empty).
     (defn infix-peek-op (g table c caps)
         (if (nil? table) (empty)
-            (do (let e (head table)) (let m (g-match g (p-lit (head e)) c caps))
-                (if (g-ok? m) (list (nth e 1) (nth e 2) (g-cur m)) (infix-peek-op g (tail table) c caps)))))
+            (do (let e (head table))
+                (let m (g-match g (p-lit (head e)) c caps))
+                (if (g-ok? m) (list (nth e 1) (nth e 2) (g-cur m))
+                    (infix-peek-op g (tail table) c caps)))))
 
-    ;; ── chain: postfix-suffix fold — member / call / index / generic call / ++/-- ──
-    ;; pat = (chain base-pat expr-pat). One construct folds every field chain, call
-    ;; chain, index, template call, and post-inc/dec into universal nodes, left-assoc:
-    ;;   a.b → UE-ACCESS-MEMBER ; a.b(x) / a(x) → fncall ; a[i] → UE-ACCESS-INDEX ;
-    ;;   a<T>(x) → fncall (type list scanned + erased) ; a++ → UE-MATH-INC ; a-- → UE-MATH-DEC.
     (defn gm-chain (g pat c caps)
         (do (let m (g-match g (nth pat 1) c caps))
             (if (g-ok? m) (gm-chain-loop g (nth pat 2) (g-val m) (g-caps m) (g-cur m)) (g-no))))
@@ -228,10 +203,8 @@
             (do (let call (gm-call-suffix g exprp cc caps))
                 (if (nil? call) (g-ok acc caps c)
                     (gm-chain-loop g exprp (intern_node (bp "fncall") (cons acc (head call))) caps (nth call 1)))))))))))
-    ;; ++/-- only when two of the SAME char follow (so a+b / a-b stay binary)
     (defn chain-incdec? (cc ch)
         (if (eq (cur-peek cc) ch) (eq (cur-peek (cur-advance cc 1)) ch) (eq 1 0)))
-    ;; call suffix: optional <typelist> then a required ( args ) → (argnodes cur) | (empty)
     (defn gm-call-suffix (g exprp c caps)
         (do (let cc (skip-ws c))
             (if (eq (cur-peek cc) 60)
@@ -242,7 +215,6 @@
             (if (eq (cur-peek cc) 40)
                 (gm-args g exprp (cur-advance cc 1) caps)
                 (empty)))))
-    ;; balanced <...> scan for a generic type list; bail on ( ) ; { } → not a generic
     (defn gen-scan (c depth)
         (if (cur-eof? c) (empty)
             (do (let cp (cur-peek c))
@@ -254,7 +226,6 @@
                 (if (eq cp 123) (empty)
                 (if (eq cp 125) (empty)
                     (gen-scan (cur-advance c 1) depth)))))))))))
-    ;; args: expr (, expr)* ) — returns (argnode-list cur-after-rparen)
     (defn gm-args (g exprp c caps)
         (do (let cc (skip-ws c))
             (if (eq (cur-peek cc) 41) (list (empty) (cur-advance cc 1))
@@ -262,15 +233,13 @@
     (defn gm-args-loop (g exprp c caps acc)
         (do (let m (g-match g exprp c caps))
             (if (g-ok? m)
-                (do (let cc (skip-ws (g-cur m))) (let acc2 (append acc (list (g-val m))))
+                (do (let cc (skip-ws (g-cur m)))
+                    (let acc2 (append acc (list (g-val m))))
                     (if (eq (cur-peek cc) 44) (gm-args-loop g exprp (cur-advance cc 1) caps acc2)
                     (if (eq (cur-peek cc) 41) (list acc2 (cur-advance cc 1))
                         (list acc2 (g-cur m)))))
                 (list (empty) c))))
 
-    ;; ── ternary: cond ? then : else (branches parsed by the same expr rule) ──
-    ;; pat = (ternary cond-pat branch-pat). Operand parsed once — no exponential
-    ;; retry. Emits UE-COND-TERNARY[cond,then,else]; bare cond when there's no `?`.
     (defn gm-ternary (g pat c caps)
         (do (let m (g-match g (nth pat 1) c caps))
             (if (g-ok? m)
@@ -289,7 +258,6 @@
                         (g-ok (g-val m) caps (g-cur m))))
                 (g-no))))
 
-    ;; ref's value IS the callee rule's emitted node — this is composition.
     (defn gm-ref (g pat c caps)
         (do (let rr (g-match-rule g (nth pat 1) c))
             (if (rok? rr) (g-ok (rok-node rr) caps (rok-cur rr)) (g-no))))
@@ -299,7 +267,6 @@
             (do (let m (g-match g (head parts) c caps))
                 (if (g-ok? m) (gm-seq g (tail parts) (g-cur m) (g-caps m)) (g-no)))))
 
-    ;; alt tries each from the SAME cursor — no-sediment backtracking.
     (defn gm-alt (g alts c caps)
         (if (nil? alts) (g-no)
             (do (let m (g-match g (head alts) c caps))
@@ -309,74 +276,61 @@
         (do (let m (g-match g (nth pat 1) c caps))
             (if (g-ok? m) m (g-ok (unit) caps c))))
 
-    ;; cap stores the value the inner pattern produced (node / list / unit).
     (defn gm-cap (g pat c caps)
-        (do (let name (nth pat 1)) (let inner (nth pat 2))
-            (let m (g-match g inner c caps))
-            (if (g-ok? m)
-                (g-ok (unit) (gc-put (g-caps m) name (g-val m)) (g-cur m))
-                (g-no))))
+        (do (let m (g-match g (nth pat 2) c caps))
+            (if (g-ok? m) (g-ok (unit) (gc-put (g-caps m) (nth pat 1) (g-val m)) (g-cur m)) (g-no))))
 
-    ;; rep: zero+ of inner; value is the node-list of inner results.
-    (defn gm-rep (g pat c caps)
-        (gm-rep-loop g (nth pat 1) c caps (empty)))
+    (defn gm-rep (g pat c caps) (gm-rep-loop g (nth pat 1) c caps (empty)))
     (defn gm-rep-loop (g inner c caps acc)
         (do (let m (g-match g inner c caps))
             (if (g-ok? m)
-                ;; zero-width guard: a rep whose inner matched WITHOUT advancing the
-                ;; cursor can never make progress — repeating it is an infinite loop.
-                ;; Stop and keep what we have. Standard PEG behaviour for `*`/`+`
-                ;; over a nullable inner expression.
                 (if (gt (cur-pos (g-cur m)) (cur-pos c))
-                    (gm-rep-loop g inner (g-cur m) (g-caps m) (cons (g-val m) acc))
-                    (g-ok (nlist (reverse-acc acc)) caps c))
-                (g-ok (nlist (reverse-acc acc)) caps c))))
+                    (gm-rep-loop g inner (g-cur m) (g-caps m) (append acc (list (g-val m))))
+                    (g-ok (nlist acc) caps c))
+                (g-ok (nlist acc) caps c))))
 
-    ;; sep: inner (sepp inner)* ; value is the node-list of inner results.
     (defn gm-sep (g pat c caps)
-        (do (let inner (nth pat 1)) (let sepp (nth pat 2))
-            (let m (g-match g inner c caps))
+        (do (let m (g-match g (nth pat 1) c caps))
             (if (g-ok? m)
-                (gm-sep-loop g inner sepp (g-cur m) (g-caps m) (cons (g-val m) (empty)))
+                (gm-sep-loop g (nth pat 1) (nth pat 2) (g-cur m) (g-caps m) (list (g-val m)))
                 (g-ok (nlist (empty)) caps c))))
     (defn gm-sep-loop (g inner sepp c caps acc)
         (do (let ms (g-match g sepp c caps))
             (if (g-ok? ms)
                 (do (let mi (g-match g inner (g-cur ms) (g-caps ms)))
                     (if (g-ok? mi)
-                        (gm-sep-loop g inner sepp (g-cur mi) (g-caps mi) (cons (g-val mi) acc))
-                        (g-ok (nlist (reverse-acc acc)) caps c)))
-                (g-ok (nlist (reverse-acc acc)) caps c))))
+                        (gm-sep-loop g inner sepp (g-cur mi) (g-caps mi) (append acc (list (g-val mi))))
+                        (g-ok (nlist acc) caps c)))
+                (g-ok (nlist acc) caps c))))
 
-    ;; ── templates -> node ────────────────────────────────────────────────
-    ;; g-build emits the rule's node via intern_node_at, attributing it to the
-    ;; source cursor position `pos` — so the framebuffer (source_attr side-map)
-    ;; SEES every node the parse creates and where in the source it came from.
-    ;; The framebuffer is the observation that lets us trust+release: a recipe
-    ;; run is witnessed by the cells it authored, keyed back to the bytes.
-    (defn g-build (g tpl caps pos)
+    (defn g-build (tpl caps)
         (do (let tag (head tpl))
-            (if (str_eq tag "emit")   (intern_node_at (bp (nth tpl 1)) (g-kids g (nth tpl 2) caps pos) "bml" pos 0)
+            (if (str_eq tag "emit") (intern_node (bp (nth tpl 1)) (g-kids (nth tpl 2) caps))
             (if (str_eq tag "splice") (gc-get caps (nth tpl 1))
             (if (str_eq tag "splice-int") (intern_trivial_int (str_to_int (node_value (gc-get caps (nth tpl 1)))))
-            (if (str_eq tag "const")  (intern_trivial_string (nth tpl 1))
+            (if (str_eq tag "const") (intern_trivial_string (nth tpl 1))
             (if (str_eq tag "const-int") (intern_trivial_int (nth tpl 1))
             (if (str_eq tag "const-bool") (make_nodeid 1 1 3 (nth tpl 1))
                 (intern_trivial_string "?")))))))))
-    ;; kids: a `splice*` kid flattens a captured node-list into the children.
-    (defn g-kids (g kids caps pos)
+    (defn g-kids (kids caps)
         (if (nil? kids) (empty)
             (do (let k (head kids))
                 (if (str_eq (head k) "splice*")
-                    (append (nlist-items (gc-get caps (nth k 1))) (g-kids g (tail kids) caps pos))
-                    (cons (g-build g k caps pos) (g-kids g (tail kids) caps pos))))))
+                    (append (nlist-items (gc-get caps (nth k 1))) (g-kids (tail kids) caps))
+                    (cons (g-build k caps) (g-kids (tail kids) caps))))))
 
-    ;; ── top: parse a string from the grammar's start rule -> node ─────────
     (defn g-parse (g src)
         (do (let rr (g-match-rule g (g-start g) (cursor-str src)))
             (if (rok? rr) (rok-node rr) (intern_trivial_string "PARSE-FAIL"))))
+    (defn g-complete? (rr)
+        (if (rok? rr) (cur-eof? (skip-ws (rok-cur rr))) 0))
+    (defn g-match-full-rule (g name c)
+        (do (let rr (g-match-rule g name c))
+            (if (g-complete? rr) rr (list "rno"))))
+    (defn g-parse-full (g src)
+        (do (let rr (g-match-rule g (g-start g) (cursor-str src)))
+            (if (g-complete? rr) (rok-node rr) (intern_trivial_string "PARSE-FAIL"))))
 
-    ;; pattern-builder shorthands (keep grammars readable as data)
     (defn p-lit (s) (list "lit" s))
     (defn p-ref (n) (list "ref" n))
     (defn p-run (cls) (list "run" cls))

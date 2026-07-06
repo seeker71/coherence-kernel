@@ -7083,6 +7083,19 @@ pub(crate) fn walk(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Va
     r
 }
 
+fn native_bypasses_form_binding(k: &Kernel, name: NameID) -> bool {
+    matches!(
+        k.name_str(name),
+        "str_len"
+            | "str_byte_at"
+            | "byte_to_str"
+            | "substring"
+            | "char_at"
+            | "str_find"
+            | "scan_run"
+    )
+}
+
 fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
     // TCO: a tail-position call — a closure body, a cond branch, or a do/seq
     // block's last expr — reassigns n/env and loops here instead of recursing,
@@ -7282,11 +7295,15 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                         return (ne.func)(k, a, env, &args);
                     }
                 }
-                // Native takes priority unless user shadowed. Copy the entry
-                // out so the natives-map borrow releases before we call &mut k.
+                // Most user bindings still shadow same-named natives. The
+                // exception is the byte-string/cursor waist: source compilers
+                // and BMF cursors depend on those names staying byte-indexed
+                // when portable fallback definitions from core.fk are loaded.
+                // Copy the entry out so the natives-map borrow releases before
+                // we call &mut k.
                 let ne_opt = k.natives.get(&name).copied();
                 if let Some(ne) = ne_opt {
-                    if a.lookup(env, name).is_none() {
+                    if a.lookup(env, name).is_none() || native_bypasses_form_binding(k, name) {
                         let mut args = Vec::with_capacity(kids.len() - 1);
                         for arg in &kids[1..] {
                             args.push(walk(k, a, *arg, env));

@@ -1,0 +1,156 @@
+; defdata-recipe-language.fk -- scannerless micro-recipe data authoring rung.
+;
+; This is the second Layer 7 authoring grammar above defdata.fk's policy. It
+; admits one fixed range-recipe surface:
+;
+;     data evens = range 0 count 6 step 2 cost 4
+;
+; The carrier policy may be micro-recipe, inline, fkb, or hybrid, but the v1
+; checkout lowering still emits a realized module constant:
+;
+;     (let evens (list 0 2 4 6 8 10))
+;
+; That is an intentional carrier gap: the policy verdict is carried as data,
+; while the emitted source remains the current module-constant floor. This file
+; does not add a source compiler keyword, load hook, runtime JIT, artifact
+; selector, `.fkb`, `.dylib`, or C primitive.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bmf-core.fk
+;           form-stdlib/bmf-grammar.fk form-stdlib/defdata.fk
+
+(do
+    (defn ddrl-feature (name status) (list "defdata-recipe-language-feature" name status))
+    (defn ddrl-feature-name (f) (nth f 1))
+    (defn ddrl-feature-status (f) (nth f 2))
+    (defn defdata-recipe-language-manifest ()
+        (list
+            (ddrl-feature "scannerless" 1)
+            (ddrl-feature "bmf-cursor-grammar" 1)
+            (ddrl-feature "no-line-grammar" 1)
+            (ddrl-feature "range-recipe-v1-only" 1)
+            (ddrl-feature "consumes-dd-policy" 1)
+            (ddrl-feature "author-declared-cost" 1)
+            (ddrl-feature "realizes-at-lowering" 1)
+            (ddrl-feature "not-load-time-recipe" 1)
+            (ddrl-feature "module-constant-lowering" 1)
+            (ddrl-feature "not-runtime-primitive" 1)
+            (ddrl-feature "carrier-policy-separate-from-lowering" 1)
+            (ddrl-feature "degenerate-range-realized" 1)))
+    (defn defdata-recipe-language-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (ddrl-feature-name (head fs)) name)
+                     (eq (ddrl-feature-status (head fs)) 1))
+                1
+                (defdata-recipe-language-manifest-has? name (tail fs)))))
+
+    (defn defdata-recipe-language-grammar ()
+        (grammar "decl" (list
+            (rule3 "decl"
+                (list "seq"
+                    (p-lit "data")
+                    (p-cap "name" (p-ref "name"))
+                    (p-lit "=")
+                    (p-lit "range")
+                    (p-cap "start" (p-ref "int"))
+                    (p-lit "count")
+                    (p-cap "count" (p-ref "int"))
+                    (p-lit "step")
+                    (p-cap "step" (p-ref "int"))
+                    (p-lit "cost")
+                    (p-cap "cost" (p-ref "int")))
+                (t-emit "fncall"
+                    (list (t-const "__ddrl_decl__")
+                          (t-splice "name")
+                          (t-splice "start")
+                          (t-splice "count")
+                          (t-splice "step")
+                          (t-splice "cost"))))
+            (rule3 "name"
+                (p-cap "v" (p-run "alpha"))
+                (t-splice "v"))
+            (rule3 "int"
+                (p-cap "v" (p-run "digit"))
+                (t-splice "v")))))
+
+    (defn ddrl-parse-fail () (intern_trivial_string "PARSE-FAIL"))
+    (defn ddrl-ok? (node) (not (node_eq node (ddrl-parse-fail))))
+
+    (defn ddrl-parse (src)
+        (do
+            (let rr (g-match-rule (defdata-recipe-language-grammar) "decl" (cursor-str src)))
+            (if (and (rok? rr) (cur-eof? (skip-ws (rok-cur rr))))
+                (rok-node rr)
+                (ddrl-parse-fail))))
+
+    (defn ddrl-child-text (decl i)
+        (node_value (nth (node_children decl) i)))
+    (defn ddrl-name (decl) (ddrl-child-text decl 1))
+    (defn ddrl-start (decl) (str_to_int (ddrl-child-text decl 2)))
+    (defn ddrl-count (decl) (str_to_int (ddrl-child-text decl 3)))
+    (defn ddrl-step (decl) (str_to_int (ddrl-child-text decl 4)))
+    (defn ddrl-cost (decl) (str_to_int (ddrl-child-text decl 5)))
+    (defn ddrl-const-size (decl) (ddrl-count decl))
+    (defn ddrl-recipe-size (decl) (ddrl-cost decl))
+    (defn ddrl-stable (decl) 1)
+    (defn ddrl-generative (decl) 1)
+    (defn ddrl-carrier (decl)
+        (dd-policy
+            (ddrl-const-size decl)
+            (ddrl-recipe-size decl)
+            (ddrl-stable decl)
+            (ddrl-generative decl)))
+
+    (defn ddrl-range-values-loop (current remaining step)
+        (if (eq remaining 0)
+            (empty)
+            (cons current
+                  (ddrl-range-values-loop (add current step) (sub remaining 1) step))))
+    (defn ddrl-values (decl)
+        (ddrl-range-values-loop (ddrl-start decl) (ddrl-count decl) (ddrl-step decl)))
+    (defn ddrl-value-count (decl) (len (ddrl-values decl)))
+    (defn ddrl-value-head (decl) (head (ddrl-values decl)))
+
+    (defn ddrl-values-source-loop (values)
+        (if (nil? values)
+            ""
+            (if (nil? (tail values))
+                (int_to_str (head values))
+                (str_concat (int_to_str (head values))
+                    (str_concat " " (ddrl-values-source-loop (tail values)))))))
+    (defn ddrl-list-source (values)
+        (if (nil? values)
+            "(list)"
+            (str_concat "(list " (str_concat (ddrl-values-source-loop values) ")"))))
+    (defn ddrl-module-let-source (decl)
+        (str_concat "(let "
+            (str_concat (ddrl-name decl)
+                (str_concat " " (str_concat (ddrl-list-source (ddrl-values decl)) ")")))))
+
+    (defn ddrl-lowering (decl)
+        (list "defdata-recipe-lowering"
+              "module-constant"
+              (ddrl-name decl)
+              "range"
+              (ddrl-start decl)
+              (ddrl-count decl)
+              (ddrl-step decl)
+              (ddrl-cost decl)
+              (ddrl-carrier decl)
+              (ddrl-values decl)
+              (ddrl-module-let-source decl)
+              "realized-at-lowering"
+              "not-load-time-recipe"))
+    (defn ddrl-lowering-kind (l) (nth l 1))
+    (defn ddrl-lowering-name (l) (nth l 2))
+    (defn ddrl-lowering-recipe-kind (l) (nth l 3))
+    (defn ddrl-lowering-start (l) (nth l 4))
+    (defn ddrl-lowering-count (l) (nth l 5))
+    (defn ddrl-lowering-step (l) (nth l 6))
+    (defn ddrl-lowering-cost (l) (nth l 7))
+    (defn ddrl-lowering-carrier (l) (nth l 8))
+    (defn ddrl-lowering-values (l) (nth l 9))
+    (defn ddrl-lowering-source (l) (nth l 10))
+    (defn ddrl-lowering-realization (l) (nth l 11))
+    (defn ddrl-lowering-runtime-kind (l) (nth l 12))
+)
