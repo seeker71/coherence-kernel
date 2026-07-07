@@ -2446,13 +2446,15 @@ export class Kernel {
       str: "<typing>",
     }));
     // File I/O
-    this.registerNative("read_file", catCall(), (_k, args) => {
+    const readFileTextNative = (_k: Kernel, args: Value[]): Value => {
       try {
         return { kind: "str", str: readFileSync(argStr(args, 0), "utf8") };
       } catch {
         return { kind: "null" };
       }
-    });
+    };
+    this.registerNative("host_file_read_text", catCall(), readFileTextNative);
+    this.registerNative("read_file", catCall(), readFileTextNative);
     // Byte-level host file read — returns a list of ints (0-255), one per byte.
     this.registerNative("read_file_bytes", catCall(), (_k, args) => {
       try {
@@ -2774,23 +2776,27 @@ export class Kernel {
         return { kind: "int", int: -1 };
       }
     });
-    this.registerNative("file_size", catCall(), (_k, args) => {
+    const fileSizeNative = (_k: Kernel, args: Value[]): Value => {
       try {
         return { kind: "int", int: statSync(argStr(args, 0)).size };
       } catch {
         return { kind: "int", int: -1 };
       }
-    });
+    };
+    this.registerNative("host_file_size", catCall(), fileSizeNative);
+    this.registerNative("file_size", catCall(), fileSizeNative);
     // file_mtime — modification time in unix seconds; -1 if missing.
     // Sibling parity with Go + Rust file_mtime; powers Form-side cache
     // layers that regenerate .fkb projections when source files drift.
-    this.registerNative("file_mtime", catCall(), (_k, args) => {
+    const fileMtimeNative = (_k: Kernel, args: Value[]): Value => {
       try {
         return { kind: "int", int: Math.floor(statSync(argStr(args, 0)).mtimeMs / 1000) };
       } catch {
         return { kind: "int", int: -1 };
       }
-    });
+    };
+    this.registerNative("host_file_mtime", catCall(), fileMtimeNative);
+    this.registerNative("file_mtime", catCall(), fileMtimeNative);
     this.registerNative("file_byte_at", catCall(), (_k, args) => {
       const offset = argInt(args, 1);
       if (offset < 0) return { kind: "int", int: -1 };
@@ -2806,7 +2812,7 @@ export class Kernel {
         if (fd !== undefined) closeSync(fd);
       }
     });
-    this.registerNative("read_file_slice", catCall(), (_k, args) => {
+    const readFileSliceNative = (_k: Kernel, args: Value[]): Value => {
       const offset = argInt(args, 1);
       const length = argInt(args, 2);
       if (offset < 0 || length <= 0) return { kind: "str", str: "" };
@@ -2821,36 +2827,44 @@ export class Kernel {
       } finally {
         if (fd !== undefined) closeSync(fd);
       }
-    });
+    };
+    this.registerNative("host_file_read_slice", catCall(), readFileSliceNative);
+    this.registerNative("read_file_slice", catCall(), readFileSliceNative);
 
     // --- Filesystem CRUD natives — real directories + files ----------
     // Sibling parity across Go/Rust/TS. Predicates return 1/0; mutations
     // return 0 on success, -1 on error; fs_list returns a name-string list
     // (sorted for cross-kernel parity) or null on error.
-    this.registerNative("fs_exists", catCall(), (_k, args) => {
+    const fsExistsNative = (_k: Kernel, args: Value[]): Value => {
       try {
         statSync(argStr(args, 0));
         return { kind: "int", int: 1 };
       } catch {
         return { kind: "int", int: 0 };
       }
-    });
-    this.registerNative("fs_is_dir", catCall(), (_k, args) => {
+    };
+    this.registerNative("host_path_exists", catCall(), fsExistsNative);
+    this.registerNative("fs_exists", catCall(), fsExistsNative);
+    const fsIsDirNative = (_k: Kernel, args: Value[]): Value => {
       try {
         return { kind: "int", int: statSync(argStr(args, 0)).isDirectory() ? 1 : 0 };
       } catch {
         return { kind: "int", int: 0 };
       }
-    });
-    this.registerNative("fs_mkdir", catCall(), (_k, args) => {
+    };
+    this.registerNative("host_path_is_dir", catCall(), fsIsDirNative);
+    this.registerNative("fs_is_dir", catCall(), fsIsDirNative);
+    const fsMkdirNative = (_k: Kernel, args: Value[]): Value => {
       try {
         mkdirSync(argStr(args, 0), { recursive: true });
         return { kind: "int", int: 0 };
       } catch {
         return { kind: "int", int: -1 };
       }
-    });
-    this.registerNative("fs_rmdir", catCall(), (_k, args) => {
+    };
+    this.registerNative("host_dir_mkdir", catCall(), fsMkdirNative);
+    this.registerNative("fs_mkdir", catCall(), fsMkdirNative);
+    const fsRmdirNative = (_k: Kernel, args: Value[]): Value => {
       try {
         if (!statSync(argStr(args, 0)).isDirectory()) return { kind: "int", int: -1 };
         rmSync(argStr(args, 0), { recursive: true, force: true });
@@ -2858,8 +2872,10 @@ export class Kernel {
       } catch {
         return { kind: "int", int: -1 };
       }
-    });
-    this.registerNative("fs_remove", catCall(), (_k, args) => {
+    };
+    this.registerNative("host_dir_rmdir", catCall(), fsRmdirNative);
+    this.registerNative("fs_rmdir", catCall(), fsRmdirNative);
+    const fsRemoveNative = (_k: Kernel, args: Value[]): Value => {
       try {
         if (statSync(argStr(args, 0)).isDirectory()) return { kind: "int", int: -1 };
         unlinkSync(argStr(args, 0));
@@ -2867,16 +2883,20 @@ export class Kernel {
       } catch {
         return { kind: "int", int: -1 };
       }
-    });
-    this.registerNative("fs_rename", catCall(), (_k, args) => {
+    };
+    this.registerNative("host_path_remove", catCall(), fsRemoveNative);
+    this.registerNative("fs_remove", catCall(), fsRemoveNative);
+    const fsRenameNative = (_k: Kernel, args: Value[]): Value => {
       try {
         renameSync(argStr(args, 0), argStr(args, 1));
         return { kind: "int", int: 0 };
       } catch {
         return { kind: "int", int: -1 };
       }
-    });
-    this.registerNative("fs_list", catCall(), (_k, args) => {
+    };
+    this.registerNative("host_path_rename", catCall(), fsRenameNative);
+    this.registerNative("fs_rename", catCall(), fsRenameNative);
+    const fsListNative = (_k: Kernel, args: Value[]): Value => {
       try {
         // sort by name for cross-kernel parity (Go's os.ReadDir is
         // name-sorted; Rust/Node are OS-arbitrary).
@@ -2885,7 +2905,9 @@ export class Kernel {
       } catch {
         return { kind: "null" };
       }
-    });
+    };
+    this.registerNative("host_dir_list", catCall(), fsListNative);
+    this.registerNative("fs_list", catCall(), fsListNative);
 
     // write_file_bytes — sibling of read_file_bytes; writes a byte list.
     // Sibling-parity with form-kernel-go + form-kernel-rust. Values out of
@@ -2908,7 +2930,7 @@ export class Kernel {
     // (O_APPEND) — the missing primitive for a log-structured store. Unlike
     // write_file_bytes (truncates), this appends at end-of-file and returns
     // the new total size. Creates the file if absent.
-    this.registerNative("file_append_bytes", catCall(), (_k, args) => {
+    const fileAppendBytesNative = (_k: Kernel, args: Value[]): Value => {
       try {
         const path = argStr(args, 0);
         const list = argList(args, 1);
@@ -2921,10 +2943,12 @@ export class Kernel {
       } catch {
         return { kind: "int", int: -1 };
       }
-    });
+    };
+    this.registerNative("host_file_append_bytes", catCall(), fileAppendBytesNative);
+    this.registerNative("file_append_bytes", catCall(), fileAppendBytesNative);
     // Host text output. Byte codecs still use write_file_bytes in kernels
     // that expose it; text compilers do not need to materialize byte lists.
-    this.registerNative("write_file_text", catCall(), (_k, args) => {
+    const writeFileTextNative = (_k: Kernel, args: Value[]): Value => {
       try {
         const text = argStr(args, 1);
         writeFileSync(argStr(args, 0), text, "utf8");
@@ -2932,7 +2956,10 @@ export class Kernel {
       } catch {
         return { kind: "int", int: -1 };
       }
-    });
+    };
+    this.registerNative("host_file_write_text", catCall(), writeFileTextNative);
+    this.registerNative("write_file", catCall(), writeFileTextNative);
+    this.registerNative("write_file_text", catCall(), writeFileTextNative);
 
     // --- Socket natives — L1 physical layer for inter-cell IO ---------
     // Sibling parity with form-kernel-go + form-kernel-rust: REAL TCP. The
@@ -3511,10 +3538,12 @@ export class Kernel {
     // TMPDIR, so concurrent legs never share a scratch path. Sibling
     // parity holds on shape, NOT on value — each leg's dir differs by
     // design; bands fold the path into effects, never into the verdict.
-    this.registerNative("temp_dir", catCall(), (_k, _args) => ({
+    const tempDirNative = (_k: Kernel, _args: Value[]): Value => ({
       kind: "str",
       str: (process.env["TMPDIR"] ?? "/tmp").replace(/\/+$/, "") || "/tmp",
-    }));
+    });
+    this.registerNative("host_temp_dir", catCall(), tempDirNative);
+    this.registerNative("temp_dir", catCall(), tempDirNative);
 
     // `unix_ms_to_iso_utc` — render a millisecond instant as the
     // second-resolution ISO UTC string the Go carrier emits.
