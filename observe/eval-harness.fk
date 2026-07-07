@@ -1,0 +1,127 @@
+; eval-harness.fk -- standardized recognizer evaluation for native speech work.
+;
+; Reuses sw-wer / sw-distance from observe/stt-wer.fk (witnessed, sequence-aligned
+; Levenshtein WER). This cell does NOT reinvent WER; it wraps it so every future
+; recognizer is measured the same way: per-pair WER, average WER, exact word
+; accuracy, and a closed-set confusion summary.
+;
+; A "prediction pair" is (list hyp-tokens truth-tokens), where each side is a
+; word-list (list of strings) -- exactly the shape sw-wer already consumes and
+; the shape sw-tokens already produces.
+;
+; preludes: form-stdlib/core.fk, observe/stt-wer.fk
+
+(do
+    ; ---- pair accessors ------------------------------------------------------
+    (defn eh-hyp (pair) (nth pair 0))
+    (defn eh-truth (pair) (nth pair 1))
+
+    ; ---- exact word-list equality -------------------------------------------
+    ; Two token lists are equal iff same length and each token str_eq in order.
+    ; For closed-set single-word tasks this is a single-token compare; for
+    ; multi-token it is the full sequence compare.
+    (defn eh-tokens-eq? (a b)
+        (if (eq (len a) 0)
+            (eq (len b) 0)
+            (if (eq (len b) 0)
+                0
+                (if (str_eq (head a) (head b))
+                    (eh-tokens-eq? (tail a) (tail b))
+                    0))))
+    (defn eh-exact? (pair)
+        (eh-tokens-eq? (eh-hyp pair) (eh-truth pair)))
+
+    ; ---- per-pair WER (delegated to sw-wer) ---------------------------------
+    (defn eh-pair-wer (pair)
+        (sw-wer (eh-hyp pair) (eh-truth pair)))
+
+    ; List of per-pair WERs, in input order.
+    (defn eh-wer-list (pairs) (map eh-pair-wer pairs))
+
+    ; ---- aggregate WER -------------------------------------------------------
+    ; Average WER = mean of per-pair WERs (integer, rounded down), matching
+    ; sw-wer's integer-percent convention. Empty input -> 0 (honest zero, no
+    ; division by zero).
+    (defn eh-avg-wer (pairs)
+        (if (eq (len pairs) 0)
+            0
+            (div (sum (eh-wer-list pairs)) (len pairs))))
+
+    ; ---- exact word accuracy -------------------------------------------------
+    ; Fraction of pairs decoded exactly right, as integer percent (0..100).
+    ; For closed-set single-word tasks this equals (100 - avg-wer); for
+    ; multi-token they legitimately differ, and both are reported.
+    (defn eh-exact-count (pairs)
+        (len (filter eh-exact? pairs)))
+    (defn eh-accuracy (pairs)
+        (if (eq (len pairs) 0)
+            0
+            (div (mul (eh-exact-count pairs) 100) (len pairs))))
+
+    ; ---- closed-set confusion summary ---------------------------------------
+    ; For a closed single-word set we key on the truth's first token (the true
+    ; class) and, per class, count how many pairs were correct vs wrong.
+    ; Result shape: (list class-entry ...) where
+    ;   class-entry = (list class-name correct-count wrong-count total-count)
+    ;
+    ; class-of takes the true class label for a pair (first truth token, or ""
+    ; for an empty truth -- degenerate but honest).
+    (defn eh-class-of (pair)
+        (if (eq (len (eh-truth pair)) 0) "" (head (eh-truth pair))))
+
+    ; Does entry e already name class c?
+    (defn eh-entry-is? (c e) (str_eq (nth e 0) c))
+
+    ; Look for class c in an accumulator of entries; 0 if absent.
+    (defn eh-find-entry (c entries)
+        (if (eq (len entries) 0)
+            0
+            (if (eh-entry-is? c (head entries))
+                (head entries)
+                (eh-find-entry c (tail entries)))))
+
+    ; Rebuild entry list, bumping the matching class's correct/wrong tally.
+    ; correct-inc / wrong-inc are 1/0 or 0/1.
+    (defn eh-bump (entries c correct-inc wrong-inc)
+        (if (eq (len entries) 0)
+            ; class not seen yet: append a fresh entry
+            (list (list c correct-inc wrong-inc (add correct-inc wrong-inc)))
+            (if (eh-entry-is? c (head entries))
+                (do
+                    (let e (head entries))
+                    (cons (list c
+                                (add (nth e 1) correct-inc)
+                                (add (nth e 2) wrong-inc)
+                                (add (nth e 3) (add correct-inc wrong-inc)))
+                          (tail entries)))
+                (cons (head entries)
+                      (eh-bump (tail entries) c correct-inc wrong-inc)))))
+
+    (defn eh-confusion-loop (pairs entries)
+        (if (eq (len pairs) 0)
+            entries
+            (do
+                (let p (head pairs))
+                (let c (eh-class-of p))
+                (let ok (eh-exact? p))
+                (eh-confusion-loop (tail pairs)
+                                   (eh-bump entries c ok (sub 1 ok))))))
+    (defn eh-confusion (pairs) (eh-confusion-loop pairs (empty)))
+
+    ; ---- report assembly -----------------------------------------------------
+    ; A single value bundling the standard metrics, so callers grab one thing.
+    ; Shape: (list "eval-report" n-pairs avg-wer accuracy exact-count confusion)
+    (defn eh-report (pairs)
+        (list "eval-report"
+              (len pairs)
+              (eh-avg-wer pairs)
+              (eh-accuracy pairs)
+              (eh-exact-count pairs)
+              (eh-confusion pairs)))
+    (defn eh-report-n (r) (nth r 1))
+    (defn eh-report-avg-wer (r) (nth r 2))
+    (defn eh-report-accuracy (r) (nth r 3))
+    (defn eh-report-exact (r) (nth r 4))
+    (defn eh-report-confusion (r) (nth r 5))
+
+    0)

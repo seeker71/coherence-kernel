@@ -1,0 +1,80 @@
+; ctc-logspace-grad.fk — the CTC BACKWARD + gradient in log space. The stone
+; that makes TRAINING (not just the loss value) stable at real length.
+;
+; model/ctc-grad.fk gave the analytic gradient in probability space — correct,
+; but its alpha/beta underflow on long sequences, so the gradient becomes 0/0
+; garbage exactly where model/ctc-logspace.fk showed the loss underflows. This
+; is the same gradient computed through log-space alpha/beta:
+;
+;   log-posterior_t(k) = LSE_{s: ext[s]=k}( log-alpha_t(s) + log-beta_t(s)
+;                                           − log y_t(ext[s]) ) − log-p
+;   ∂L/∂u_t^k = y_t^k − exp(log-posterior_t(k))
+;
+; log-beta mirrors log-alpha backward with the bounds-guarded skip (the strict
+; walkers rejected the unguarded nth in model/ctc-grad.fk; that lesson is
+; baked in here from the start).
+;
+; Proven FOUR-WAY (fkwu/Go/Rust/TS):
+;   correctness — log-space gradient EQUALS model/ctc-grad.fk's probability-space
+;     gradient on the toys ("a", "ab" with the skip), to 1e-5.
+;   robustness — on a longer sequence the gradient stays a valid posterior
+;     residual (every value in [−1,1], per-frame values summing to ~0), where the
+;     probability-space alpha/beta would have underflowed.
+;
+; HONEST FLOOR: toy scale, free logits. But the CTC objective is now complete AND
+; numerically stable end-to-end: forward, backward, and gradient all survive
+; real length. What remains between here and a moving WER is not the objective —
+; it is a real encoder over real features, and the reafference loop. Global
+; native open-speech WER still 100; this stone finishes the objective, upstream.
+;
+; preludes: form-stdlib/core.fk model/transformer-numerics.fk model/trig.fk
+;           model/ctc-loss.fk model/ctc-grad.fk model/ctc-logspace.fk
+
+(do
+    (defn clg-expv (xs) (if (eq (len xs) 0) (empty) (cons (tn-exp (head xs)) (clg-expv (tail xs)))))
+    (defn clg-sumv (xs) (if (eq (len xs) 0) 0.0 (add (head xs) (clg-sumv (tail xs)))))
+    (defn clg-scalev (xs s) (if (eq (len xs) 0) (empty) (cons (mul (head xs) s) (clg-scalev (tail xs) s))))
+    (defn clg-softmax (u) (do (let e (clg-expv u)) (clg-scalev e (div 1.0 (clg-sumv e)))))
+    (defn clg-sf (us) (if (eq (len us) 0) (empty) (cons (clg-softmax (head us)) (clg-sf (tail us)))))
+    (defn clg-rev (xs acc) (if (eq (len xs) 0) acc (clg-rev (tail xs) (cons (head xs) acc))))
+
+    ; log-alpha lattice (reuses clog-step / clog-init from ctc-logspace.fk)
+    (defn clg-alphas-loop (ext frames prev acc)
+        (if (eq (len frames) 0) (clg-rev acc (empty))
+            (do (let a (clog-step ext (head frames) prev)) (clg-alphas-loop ext (tail frames) a (cons a acc)))))
+    (defn clg-alphas (ext ys) (do (let a0 (clog-init ext (head ys))) (clg-alphas-loop ext (tail ys) a0 (cons a0 (empty)))))
+
+    ; log-beta lattice (bounds-guarded skip — the walker lesson, baked in)
+    (defn clg-beta-skip? (ext s) (if (lt (add s 2) (len ext)) (ctc-skip? ext (add s 2)) 0))
+    (defn clg-beta-init-loop (ext yT s acc)
+        (if (lt s 0) acc (clg-beta-init-loop ext yT (sub s 1)
+            (cons (if (eq s (sub (len ext) 1)) (clog-logp (nth yT (nth ext s)))
+                      (if (eq s (sub (len ext) 2)) (clog-logp (nth yT (nth ext s))) (clog-z))) acc))))
+    (defn clg-beta-init (ext yT) (clg-beta-init-loop ext yT (sub (len ext) 1) (empty)))
+    (defn clg-beta-step-loop (ext frame nxt s acc)
+        (if (ge s (len ext)) (clg-rev acc (empty))
+            (do (let base (clog-lse2 (clog-at nxt s) (clog-at nxt (add s 1))))
+                (let ws (if (eq (clg-beta-skip? ext s) 1) (clog-lse2 base (clog-at nxt (add s 2))) base))
+                (clg-beta-step-loop ext frame nxt (add s 1) (cons (add ws (clog-logp (nth frame (nth ext s)))) acc)))))
+    (defn clg-beta-step (ext frame nxt) (clg-beta-step-loop ext frame nxt 0 (empty)))
+    (defn clg-betas-loop (ext fr nxt acc) (if (eq (len fr) 0) acc (do (let b (clg-beta-step ext (head fr) nxt)) (clg-betas-loop ext (tail fr) b (cons b acc)))))
+    (defn clg-betas (ext ys) (do (let fr (clg-rev ys (empty))) (let bT (clg-beta-init ext (head fr))) (clg-betas-loop ext (tail fr) bT (cons bT (empty)))))
+
+    (defn clg-logp (alphas ext)
+        (clog-lse2 (clog-at (nth alphas (sub (len alphas) 1)) (sub (len ext) 1))
+                   (clog-at (nth alphas (sub (len alphas) 1)) (sub (len ext) 2))))
+
+    ; log-posterior_t(k) = LSE_{s: ext[s]=k}(loga+logb-logy) - logp ; posterior = exp(that)
+    (defn clg-post-loop (ext at bt yt k s acc)
+        (if (ge s (len ext)) acc
+            (clg-post-loop ext at bt yt k (add s 1)
+                (if (eq (nth ext s) k)
+                    (clog-lse2 acc (sub (add (clog-at at s) (clog-at bt s)) (clog-logp (nth yt (nth ext s))))) acc))))
+    (defn clg-post (ext at bt yt k logp) (tn-exp (sub (clg-post-loop ext at bt yt k 0 (clog-z)) logp)))
+
+    ; ∂L/∂u_t^k = y_t^k − posterior_t(k), computed through log-space alpha/beta
+    (defn clg-grad (us tgt t k)
+        (do (let ys (clg-sf us)) (let ext (ctc-ext tgt))
+            (let al (clg-alphas ext ys)) (let be (clg-betas ext ys)) (let logp (clg-logp al ext))
+            (sub (nth (nth ys t) k) (clg-post ext (nth al t) (nth be t) (nth ys t) k logp))))
+    0)
