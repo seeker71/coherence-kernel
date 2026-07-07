@@ -1,36 +1,51 @@
 ; preludes: form-stdlib/core.fk form-stdlib/form-asm.fk form-stdlib/form-lower.fk
 ;
-; jit-native-run-band — the keystone join. form-lower's OWN emitted bytes, for a
-; recipe built as a Form-native object, executed on real hardware via (nat_run),
-; reproduce the walker. This closes the per-recipe JIT slice END TO END inside
-; fkwu — code flows into a Form recipe, the JIT lowers ONE recipe to ASM, the
-; native door runs it — with no clang / ld / dlopen / Go anywhere in the loop.
+; jit-native-run-band — the two-JIT integration's Stage 3, fkwu-witnessed on arm64.
+; form-lower.fk lowers a RECURSIVE integer function (fib) to arm64 native BYTES on the
+; walker; the `nat_run` op installs those bytes through the kernel's arm64 MAP_JIT HAL
+; door (the SAME door native_call_test uses) and dispatches NATIVE; the native result is
+; EXTENSIONALLY EQUAL to the tree-walker (same answer, any working asm — health is
+; extensional, never byte-identity to clang). This is the destination main's own comment
+; names: "the DESTINATION is Lane B's Form emitter (model/form-asm-x64.fk) ... NOT this C
+; twin" — form-lower is that Form emitter, arm64, run as the byte-source.
 ;
-; Two halves were each proven before, never joined: form-lower emits correct
-; bytes (byte-identity to clang + fsim semantic parity), and fk_native_call runs
-; bytes (native_call_test). (nat_run BYTES ARG) is the join — it hands a lowered
-; recipe image straight to fk_native_call. Requires the arm64 MAP_JIT door live
-; (Apple Silicon); on x86-64 the same door runs form-lower-x64's bytes.
+; fib(n) = if n <= 1 then 1 else fib(n-1) + fib(n-2). The prog is the rec-band shape
+; (CALL = tag 7); lo-rec-fn compiles it to a self-recursive 68-byte arm64 image with a
+; real stack frame and bl calls. nat_run's ABI matches form-lower's: raw arg in x0, raw
+; result in x0 (the op untags/retags at the boundary).
 ;
-; recipe tags (lo-compile-fn): 1 LIT · 2 ARG · 3 ADD · 4 SUB · 5 MUL — operands
-; are indices into the flat prog; the second list field is the LIT value.
+; This band is fkwu-witnessed (nat_run is an fkwu-only native, like content-addressing /
+; host-io / floats) — named as such, never claimed four-way.
 ;
-; Verdict 15 when native == walker for every recipe and arg:
-;   1  f(n) = n*3 + 7   at n = 0, 10, 100
-;   2  f(n) = n - 1     at n = 1, 50
-;   4  f(n) = n + n     at n = 7, 21
-;   8  the door itself: native_call_test n == n + 1
+; Verdict 15 when every claim lands (native == walker at four args):
+;   1   nfib(1)  == wfib(1)   (leaf, the base case n<=1 -> 1)
+;   2   nfib(5)  == wfib(5)   (= 8)
+;   4   nfib(8)  == wfib(8)   (= 34)
+;   8   nfib(10) == wfib(10)  (= 89 — deep recursion runs entirely in native asm)
 (do
-    (defn nr-f1 (n) (nat_run (lo-compile-fn (list (list 1 7) (list 2) (list 1 3) (list 5 1 2) (list 3 3 0)) 4) n))
-    (defn wk-f1 (n) (add (mul n 3) 7))
-    (defn nr-f2 (n) (nat_run (lo-compile-fn (list (list 2) (list 1 1) (list 4 0 1)) 2) n))
-    (defn wk-f2 (n) (sub n 1))
-    (defn nr-f3 (n) (nat_run (lo-compile-fn (list (list 2) (list 3 0 0)) 1) n))
-    (defn wk-f3 (n) (add n n))
-
-    (let c0 (if (and (eq (nr-f1 0) (wk-f1 0)) (and (eq (nr-f1 10) (wk-f1 10)) (eq (nr-f1 100) (wk-f1 100)))) 1 0))
-    (let c1 (if (and (eq (nr-f2 1) (wk-f2 1)) (eq (nr-f2 50) (wk-f2 50))) 2 0))
-    (let c2 (if (and (eq (nr-f3 7) (wk-f3 7)) (eq (nr-f3 21) (wk-f3 21))) 4 0))
-    (let c3 (if (eq (native_call_test 5) 6) 8 0))
-
-    (add c0 (add c1 (add c2 c3))))
+    ; the fib prog — form-lower op-tagged cells (rec-band shape)
+    (defn jnr-prog () (list
+        (list 1 1 0 0)     ; 0 LIT 1
+        (list 2 0 0 0)     ; 1 ARG (n)
+        (list 5 1 0 0)     ; 2 LE(n, 1)
+        (list 4 1 0 0)     ; 3 SUB(n, 1)
+        (list 7 3 0 0)     ; 4 CALL fib(n-1)
+        (list 1 2 0 0)     ; 5 LIT 2
+        (list 4 1 5 0)     ; 6 SUB(n, 2)
+        (list 7 6 0 0)     ; 7 CALL fib(n-2)
+        (list 3 4 7 0)     ; 8 ADD(call, call)
+        (list 6 2 0 8)))   ; 9 COND = root
+    ; form-lower produces the arm64 byte image ON THE WALKER
+    (defn jnr-img () (lo-rec-fn (jnr-prog) 9))
+    ; native dispatch of the crystallized image through the kernel's own arm64 door
+    (defn nfib (n) (nat_run (jnr-img) n))
+    ; the tree-walker fib — the extensional-equality oracle
+    (defn wfib (n) (if (le n 1) 1 (add (wfib (sub n 1)) (wfib (sub n 2)))))
+    ; each match contributes a bit; 15 = all four agree native-vs-walker
+    (defn jnr-check ()
+        (do (let c0 (if (eq (nfib 1)  (wfib 1))  1 0))
+            (let c1 (if (eq (nfib 5)  (wfib 5))  2 0))
+            (let c2 (if (eq (nfib 8)  (wfib 8))  4 0))
+            (let c3 (if (eq (nfib 10) (wfib 10)) 8 0))
+            (add c0 (add c1 (add c2 c3)))))
+    (jnr-check))
