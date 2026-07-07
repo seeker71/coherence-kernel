@@ -1,0 +1,46 @@
+; mlp-band.fk — the MLP's hidden-layer gradient equals finite differences, and
+; one SGD step reduces the loss. Four-way (fkwu/Go/Rust/TS).
+;
+; preludes: form-stdlib/core.fk model/trig.fk model/transformer-numerics.fk model/mlp.fk
+;
+; run: cat form/form-stdlib/core.fk model/trig.fk model/transformer-numerics.fk \
+;          model/mlp.fk model/tests/mlp-band.fk > /tmp/mlp.fk
+;      ./fkwu --src /tmp/mlp.fk    ; -> 31
+;
+; Verdict 31 when backprop is correct and it learns.
+
+(do
+    (defn mb-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn mb-close? (a b) (if (lt (mb-abs (sub a b)) 0.00001) 1 0))
+    ; toy net: indim 3, hidden 3, out 2
+    (defn mb-P () (list (list (list 0.1 0.2 -0.1) (list -0.2 0.1 0.3) (list 0.05 -0.15 0.2))
+                        (list 0.0 0.1 -0.1)
+                        (list (list 0.3 -0.1 0.2) (list -0.2 0.15 0.1))
+                        (list 0.0 0.05)))
+    (defn mb-x () (list 0.5 -0.3 0.8))
+    ; numerical ∂loss/∂W1[i][j]
+    (defn mb-setr (r j v) (if (eq j 0) (cons v (tail r)) (cons (head r) (mb-setr (tail r) (sub j 1) v))))
+    (defn mb-setW1 (P i j v) (list (if (eq i 0) (cons (mb-setr (nth (nth P 0) 0) j v) (tail (nth P 0)))
+                                       (cons (nth (nth P 0) 0) (mb-setW1-t (tail (nth P 0)) (sub i 1) j v)))
+                                   (nth P 1) (nth P 2) (nth P 3)))
+    (defn mb-setW1-t (rows i j v) (if (eq i 0) (cons (mb-setr (head rows) j v) (tail rows)) (cons (head rows) (mb-setW1-t (tail rows) (sub i 1) j v))))
+    (defn mb-ng (P c i j e)
+        (div (sub (mlp-ce (mb-setW1 P i j (add (nth (nth (nth P 0) i) j) e)) (mb-x) c)
+                  (mlp-ce (mb-setW1 P i j (sub (nth (nth (nth P 0) i) j) e)) (mb-x) c)) (mul 2.0 e)))
+
+    (defn mb-score (ok bit) (if ok bit 0))
+    (defn mlp-band ()
+        (do
+    ; analytic == numerical for three W1 entries
+    (let c0 (mb-score (eq (mb-close? (mlp-gW1 (mb-P) (mb-x) 1 0 0) (mb-ng (mb-P) 1 0 0 0.0001)) 1) 1))
+    (let c1 (mb-score (eq (mb-close? (mlp-gW1 (mb-P) (mb-x) 1 1 2) (mb-ng (mb-P) 1 1 2 0.0001)) 1) 2))
+    (let c2 (mb-score (eq (mb-close? (mlp-gW1 (mb-P) (mb-x) 0 2 1) (mb-ng (mb-P) 0 2 1 0.0001)) 1) 4))
+    ; one SGD step strictly reduces the loss (target class 1)
+    (let before (mlp-ce (mb-P) (mb-x) 1))
+    (let after  (mlp-ce (mlp-step (mb-P) (mb-x) 1 2 0.5) (mb-x) 1))
+    (let c3 (mb-score (lt after before) 8))
+    ; the gradient is a real signal, not trivially zero
+    (let c4 (mb-score (gt (mb-abs (mlp-gW1 (mb-P) (mb-x) 1 0 0)) 0.000001) 16))
+    (add c0 (add c1 (add c2 (add c3 c4)))))
+    )
+    (mlp-band))

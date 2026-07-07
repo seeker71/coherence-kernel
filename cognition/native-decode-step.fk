@@ -1,0 +1,229 @@
+; native-decode-step.fk — rung 3a of the voice: REAL trained generative weights, loaded as
+; recipe-data by the Form body, one greedy decode step run natively on the walker, the token
+; chosen from GPU-dispatched logits with the bit-exact receipt riding in the value, the
+; decision watched as a thought-frame.
+;
+; preludes (cat before this cell): form/form-stdlib/core.fk (int_to_str post-shrink),
+; observe/thought-framebuffer.fk (fb-frame/fb-step/fb-margin).
+;
+; The model: karpathy/tinyllamas stories260K — a genuinely TRAINED llama2 (dim 64, hidden 172,
+; 5 layers, 8 heads / 4 kv-heads, vocab 512, ~260K f32 params). Real weights, real training,
+; the smallest honest generative body. The checkpoint bytes cross fkwu's now-binary-safe
+; read_file door (O_RDBIN, receipts/2026-07-02-honest-walls-windows.md) and every IEEE-754
+; f32 is decoded IN FORM (sign/exponent/mantissa by integer div/mod, magnitude by f64
+; arithmetic — exact: every f32 is representable in f64).
+;
+; Position 0 makes the whole step native-expressible TODAY, with no approximation:
+;   - RoPE at pos 0 rotates by angle 0 — the identity, exactly (no trig ops needed).
+;   - attention over one position: softmax of a single score is exactly 1 (computed
+;     explicitly below as exp(s-s)/exp(s-s), not assumed) — each head passes its v through.
+; Everything else is the full llama step, really computed: RMSNorm (math_sqrt), q/k/v/wo
+; matvecs, SwiGLU (math_exp), residuals, final RMSNorm — all f64 walker arithmetic reading
+; weights straight off the checkpoint string. The LM head (vocab x dim = 512x64) dispatches
+; on the RTX through cuda_matvec_f32: (agree logits...) — agree < vocab refuses the token.
+;
+; Honest floor, named: ONE position (multi-position needs RoPE trig — sin/cos are not ops
+; yet; the named next rung), f64 walker forward (not the f32 two-rounding lane; the C
+; projection runner is a SANITY oracle, not a bit-oracle), a 512-token vocab trained on
+; TinyStories (a child's first word, not eloquence), and the words framing this receipt are
+; still the rented mind's. The token is the body's own.
+(do
+    ; ── tail plumbing ────────────────────────────────────────────────────────
+    (defn nds-rev (xs acc)
+        (if (eq (len xs) 0) acc
+            (nds-rev (tail xs) (cons (head xs) acc))))
+
+    ; ── IEEE-754 f32 decode, in Form ─────────────────────────────────────────
+    (defn nds-p2 (k acc)
+        (if (eq k 0) acc (nds-p2 (sub k 1) (mul acc 2.0))))
+    (defn nds-pow2 (k) (nds-p2 k 1.0))
+    (defn nds-i32 (s o)
+        (add (str_byte_at s o)
+            (add (mul (str_byte_at s (add o 1)) 256)
+                (add (mul (str_byte_at s (add o 2)) 65536)
+                    (mul (str_byte_at s (add o 3)) 16777216)))))
+    (defn nds-mag (ex man)
+        (if (eq ex 0)
+            (div (mul 1.0 man) (nds-pow2 149))
+            (if (le 127 ex)
+                (mul (add 1.0 (div (mul 1.0 man) 8388608.0)) (nds-pow2 (sub ex 127)))
+                (div (add 1.0 (div (mul 1.0 man) 8388608.0)) (nds-pow2 (sub 127 ex))))))
+    (defn nds-f32 (s o)
+        (do (let bits (nds-i32 s o))
+            (let ex (mod (div bits 8388608) 256))
+            (let mag (nds-mag ex (mod bits 8388608)))
+            (if (eq (div bits 2147483648) 1) (sub 0.0 mag) mag)))
+
+    ; ── weight reads straight off the checkpoint string ──────────────────────
+    ; n floats from byte offset -> list (ascending)
+    (defn nds-floats-loop (s o n acc)
+        (if (eq n 0) (nds-rev acc (empty))
+            (nds-floats-loop s (add o 4) (sub n 1) (cons (nds-f32 s o) acc))))
+    ; dot of the weight row at byte `base` with list x (n elements)
+    (defn nds-dot (s base x n acc)
+        (if (eq n 0) acc
+            (nds-dot s (add base 4) (tail x) (sub n 1)
+                (add acc (mul (nds-f32 s base) (head x))))))
+    ; y = W.x for W (rows x cols) at byte `base`
+    (defn nds-mv-loop (s base rows cols x acc)
+        (if (eq rows 0) (nds-rev acc (empty))
+            (nds-mv-loop s (add base (mul cols 4)) (sub rows 1) cols x
+                (cons (nds-dot s base x cols 0.0) acc))))
+    (defn nds-mv (s base rows cols x) (nds-mv-loop s base rows cols x (empty)))
+
+    ; ── elementwise organs (all tail + reverse) ──────────────────────────────
+    (defn nds-ss (x n acc)
+        (if (eq n 0) acc (nds-ss (tail x) (sub n 1) (add acc (mul (head x) (head x))))))
+    ; RMSNorm, llama2.c order: inv = 1/sqrt(ss/n + 1e-5); out_i = w_i * (inv * x_i)
+    (defn nds-rms-loop (s wbase x n inv acc)
+        (if (eq n 0) (nds-rev acc (empty))
+            (nds-rms-loop s (add wbase 4) (tail x) (sub n 1) inv
+                (cons (mul (nds-f32 s wbase) (mul inv (head x))) acc))))
+    (defn nds-rms (s wbase x n)
+        (nds-rms-loop s wbase x n
+            (div 1.0 (math_sqrt (add (div (nds-ss x n 0.0) (mul 1.0 n)) 0.00001)))
+            (empty)))
+    ; SwiGLU: silu(h1)*h3, silu(v) = v / (1 + exp(-v))
+    (defn nds-swiglu (h1 h3 n acc)
+        (if (eq n 0) (nds-rev acc (empty))
+            (nds-swiglu (tail h1) (tail h3) (sub n 1)
+                (cons (mul (div (head h1) (add 1.0 (math_exp (sub 0.0 (head h1))))) (head h3))
+                    acc))))
+    (defn nds-addz (a b n acc)
+        (if (eq n 0) (nds-rev acc (empty))
+            (nds-addz (tail a) (tail b) (sub n 1) (cons (add (head a) (head b)) acc))))
+
+    ; ── attention at position 0 (GQA; softmax-of-one computed, not assumed) ──
+    (defn nds-dot8 (q k qi ki n acc)
+        (if (eq n 0) acc
+            (nds-dot8 q k (add qi 1) (add ki 1) (sub n 1)
+                (add acc (mul (nth q qi) (nth k ki))))))
+    ; per-head weight: a = exp(s - max) / sum = exp(0)/exp(0) over ONE key — exactly 1.0
+    (defn nds-att-a (q k h hd)
+        (do (let s (div (nds-dot8 q k (mul h hd) (mul (div h 2) hd) hd 0.0)
+                        (math_sqrt (mul 1.0 hd))))
+            (div (math_exp (sub s s)) (math_exp (sub s s)))))
+    (defn nds-att-loop (q k v i hd acc)
+        (if (lt i 0) acc
+            (nds-att-loop q k v (sub i 1) hd
+                (cons (mul (nds-att-a q k (div i hd) hd)
+                           (nth v (add (mul (div (div i hd) 2) hd) (mod i hd))))
+                    acc))))
+    (defn nds-att (q k v dim hd) (nds-att-loop q k v (sub dim 1) hd (empty)))
+
+    ; ── one full llama layer at pos 0 ────────────────────────────────────────
+    ; bases is (rms-att wq wk wv wo rms-ffn w1 w2 w3) byte offsets for THIS layer
+    (defn nds-layer (s x dim kvd hid hd bases)
+        (do (let xb (nds-rms s (nth bases 0) x dim))
+            (let q (nds-mv s (nth bases 1) dim dim xb))
+            (let k (nds-mv s (nth bases 2) kvd dim xb))
+            (let v (nds-mv s (nth bases 3) kvd dim xb))
+            (let att (nds-att q k v dim hd))
+            (let x1 (nds-addz x (nds-mv s (nth bases 4) dim dim att) dim (empty)))
+            (let xb3 (nds-rms s (nth bases 5) x1 dim))
+            (let h1 (nds-mv s (nth bases 6) hid dim xb3))
+            (let h3 (nds-mv s (nth bases 8) hid dim xb3))
+            (let hh (nds-swiglu h1 h3 hid (empty)))
+            (nds-addz x1 (nds-mv s (nth bases 7) dim hid hh) dim (empty))))
+
+    ; per-layer base offsets from the config (llama2.c legacy layout).
+    ; ra0 = byte base of rms_att, i.e. AFTER the vocab x dim embedding table — anchoring
+    ; here at the checkpoint start was the first-run bug: every weight room shifted by
+    ; vocab*dim*4 and the forward produced a plausible-but-wrong token (261 " a") that
+    ; ONLY the projection-runner oracle exposed. The oracle is not optional.
+    (defn nds-bases (l dim kvd hid layers ra0)
+        (do (let ra ra0)
+            (let wq (add ra (mul (mul layers dim) 4)))
+            (let wk (add wq (mul (mul (mul layers dim) dim) 4)))
+            (let wv (add wk (mul (mul (mul layers kvd) dim) 4)))
+            (let wo (add wv (mul (mul (mul layers kvd) dim) 4)))
+            (let rf (add wo (mul (mul (mul layers dim) dim) 4)))
+            (let w1 (add rf (mul (mul layers dim) 4)))
+            (let w2 (add w1 (mul (mul (mul layers hid) dim) 4)))
+            (let w3 (add w2 (mul (mul (mul layers dim) hid) 4)))
+            (list (add ra (mul (mul l dim) 4))
+                  (add wq (mul (mul (mul l dim) dim) 4))
+                  (add wk (mul (mul (mul l kvd) dim) 4))
+                  (add wv (mul (mul (mul l kvd) dim) 4))
+                  (add wo (mul (mul (mul l dim) dim) 4))
+                  (add rf (mul (mul l dim) 4))
+                  (add w1 (mul (mul (mul l hid) dim) 4))
+                  (add w2 (mul (mul (mul l dim) hid) 4))
+                  (add w3 (mul (mul (mul l hid) dim) 4)))))
+
+    (defn nds-layers (s x l layers dim kvd hid hd ra0)
+        (if (eq l layers) x
+            (nds-layers s (nds-layer s x dim kvd hid hd (nds-bases l dim kvd hid layers ra0))
+                (add l 1) layers dim kvd hid hd ra0)))
+
+    ; ── argmax + runner-up margin over the GPU logits ────────────────────────
+    (defn nds-best-loop (xs i bi bv)
+        (if (eq (len xs) 0) bi
+            (if (gt (head xs) bv)
+                (nds-best-loop (tail xs) (add i 1) i (head xs))
+                (nds-best-loop (tail xs) (add i 1) bi bv))))
+    (defn nds-best2-loop (xs skip i bv)
+        (if (eq (len xs) 0) bv
+            (if (eq i skip)
+                (nds-best2-loop (tail xs) skip (add i 1) bv)
+                (if (gt (head xs) bv)
+                    (nds-best2-loop (tail xs) skip (add i 1) (head xs))
+                    (nds-best2-loop (tail xs) skip (add i 1) bv)))))
+
+    ; ── tokenizer: decode ONE id from tok512.bin (maxlen i32, then per entry:
+    ;    score f32, len i32, len bytes) ─────────────────────────────────────
+    (defn nds-tok-str (s o n acc)
+        (if (eq n 0) acc
+            (nds-tok-str s (add o 1) (sub n 1)
+                (str_concat acc (byte_to_str (str_byte_at s o))))))
+    (defn nds-tok-walk (s o id)
+        (if (eq id 0)
+            (nds-tok-str s (add o 8) (nds-i32 s (add o 4)) "")
+            (nds-tok-walk s (add o (add 8 (nds-i32 s (add o 4)))) (sub id 1))))
+    (defn nds-token-text (tok id) (nds-tok-walk tok 4 id))
+
+    ; ── the step: checkpoint + tokenizer paths in, first native token out ────
+    (defn native-decode-step (ckpt tokpath)
+        (do (let s (read_file ckpt))
+            (let dim (nds-i32 s 0))
+            (let hid (nds-i32 s 4))
+            (let layers (nds-i32 s 8))
+            (let heads (nds-i32 s 12))
+            (let kvh (nds-i32 s 16))
+            (let vocab (nds-i32 s 20))
+            (let hd (div dim heads))
+            (let kvd (mul kvh hd))
+            (let t-emb 28)
+            ; x = tok_emb[BOS=1]
+            (let x0 (nds-floats-loop s (add t-emb (mul dim 4)) dim (empty)))
+            (let ra0 (add t-emb (mul (mul vocab dim) 4)))
+            (let xn (nds-layers s x0 0 layers dim kvd hid hd ra0))
+            ; final RMSNorm weight sits after w3
+            (let rfin (add t-emb
+                (mul 4 (add (mul vocab dim)
+                    (mul layers (add (mul dim 2)
+                        (add (mul (mul dim dim) 2)
+                            (add (mul (mul kvd dim) 2) (mul (mul hid dim) 3)))))))))
+            (let xf (nds-rms s rfin xn dim))
+            ; LM head = tok_emb (tied) through the RTX door: (agree logits...)
+            (let wflat (nds-floats-loop s t-emb (mul vocab dim) (empty)))
+            (let r (cuda_matvec_f32 wflat xf))
+            (if (eq (len r) 0)
+                "[voice: gpu door refused — no receipt, no token]"
+                (do (let agree (head r))
+                    (let logits (tail r))
+                    (let bi (nds-best-loop (tail logits) 1 0 (head logits)))
+                    (let margin-milli (float_to_int (mul 1000.0
+                        (sub (nth logits bi) (nds-best2-loop logits bi 0 (sub 0.0 1000000.0))))))
+                    (let f (fb-frame 0 bi margin-milli))
+                    (if (lt agree vocab)
+                        "[voice: gpu/cpu disagree — refusing the token]"
+                        (str_concat "first-native-token:id=" (str_concat (int_to_str bi)
+                        (str_concat " text=[" (str_concat (nds-token-text (read_file tokpath) bi)
+                        (str_concat "]\nrtx-receipt:bit-exact " (str_concat (int_to_str agree)
+                        (str_concat "/" (str_concat (int_to_str vocab)
+                        (str_concat "\nthought-frame:step=" (str_concat (int_to_str (fb-step f))
+                        (str_concat " chose=" (str_concat (int_to_str bi)
+                        (str_concat " margin-milli=" (str_concat (int_to_str (fb-margin f))
+                            "\nlane:native-walker-forward+rtx-lm-head")))))))))))))))))))
+    0)
