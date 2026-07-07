@@ -95,6 +95,16 @@ executes the program image directly. Focused temp proofs returned `first=42`,
 `42 -> 43` after dependency edit, proper import declarations `42`, and native
 ABI selection `777`.
 
+The 2026-07-08 R0 measurement path now has an executable Form witness:
+`form-stdlib/tests/source-runtime-release-metrics-band.fk -> 131071`. The cell
+uses the host `source_inventory` native to observe the current stdlib source
+inventory, samples the compiler/runtime artifact release cluster with bounded
+file windows, counts visible `(defn` / `(let` pressure, observes BMF section
+presence, and roundtrips a release metric row through
+`grammars/source-runtime-release-metrics.bmf`. This is a guide metric, not a
+release gate; the full-family baseline table above remains the larger pressure
+snapshot until the BMF cursor census replaces bounded windows.
+
 ## Progress Over Time
 
 This table tracks non-test stdlib pressure. Historical rows are tracked commits;
@@ -145,7 +155,7 @@ code, or when a missing cluster blocks an active release gate.
 
 | Gate | Exit condition | Current status |
 | --- | --- | --- |
-| R0 measurement | repeatable counts for `(defn`, `(let`, sections, grammar rules, artifact tests | baseline recorded here; needs Form-native metric cell |
+| R0 measurement | repeatable counts for `(defn`, `(let`, sections, grammar rules, artifact tests | baseline recorded here; Form-native release-path sample metric installed and green; whole-family streaming census still pending |
 | R1 source compiler health | cursor is the scanner, no large string builder hot path, health and persistence bands pass | healthy in current worktree |
 | R2 artifact authority | `.fk` compile emits fresh `.fkb` plus `.sym`, and eventually `.dylib`; `.fkb` embeds table payload and symbol deps | installed for `.fkb/.sym`; version-3 `.fkb` carries exported function index + arity for import loading; `.sym` records source-unit dependency closure; `.dylib` selection installed for prebuilt ABI artifacts; `.dylib` emission still pending |
 | R3 runtime selector | loader chooses fresh `.dylib`, then fresh `.fkb`, then source compile only on stale/missing artifacts | installed for `.fk`, `.fkb`, and `.dylib` executable inputs; `.fk` freshness includes imported `.fk` dependencies |
