@@ -93,8 +93,7 @@ func TestFkwuFormCli(t *testing.T) {
 	clang := requireClang(t)
 	stdlib := filepath.Join("..", "form-stdlib")
 	minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit := emitChain(t, stdlib)
-	formParse := filepath.Join(stdlib, "form-parse.fk")
-	formFlatten := filepath.Join(stdlib, "form-flatten.fk")
+	flattenCore, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten := flattenChain(t, stdlib)
 	mainCli := filepath.Join(stdlib, "form-cli-main.fk")
 
 	dir := t.TempDir()
@@ -107,7 +106,7 @@ func TestFkwuFormCli(t *testing.T) {
 	flattenExpr := "(fks-table-file " +
 		"(flt-band-sources-fns " + mods + " " + band + ") " +
 		"(flt-band-sources-pool " + mods + " " + band + "))"
-	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit, formParse, formFlatten)+"\n"+flattenExpr+"\n")
+	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit, flattenCore, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten)+"\n"+flattenExpr+"\n")
 	if len(strings.TrimSpace(table)) < 100 {
 		t.Fatalf("form-cli flatten produced suspiciously small table (%d bytes)", len(table))
 	}
@@ -165,8 +164,7 @@ func TestFkwuFormCliRepl(t *testing.T) {
 	clang := requireClang(t)
 	stdlib := filepath.Join("..", "form-stdlib")
 	minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit := emitChain(t, stdlib)
-	formParse := filepath.Join(stdlib, "form-parse.fk")
-	formFlatten := filepath.Join(stdlib, "form-flatten.fk")
+	core, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten := flattenChain(t, stdlib)
 	repl := filepath.Join(stdlib, "form-cli-repl.fk")
 
 	dir := t.TempDir()
@@ -188,7 +186,7 @@ func TestFkwuFormCliRepl(t *testing.T) {
 	flattenExpr := "(fks-table-file " +
 		"(flt-band-sources-fns " + mods + " " + band + ") " +
 		"(flt-band-sources-pool " + mods + " " + band + "))"
-	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit, formParse, formFlatten)+"\n"+flattenExpr+"\n")
+	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit, core, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten)+"\n"+flattenExpr+"\n")
 	if len(strings.TrimSpace(table)) < 100 {
 		t.Fatalf("repl flatten produced suspiciously small table (%d bytes)", len(table))
 	}
@@ -258,8 +256,7 @@ func TestFkwuFormCliCombined(t *testing.T) {
 	clang := requireClang(t)
 	stdlib := filepath.Join("..", "form-stdlib")
 	minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit := emitChain(t, stdlib)
-	formParse := filepath.Join(stdlib, "form-parse.fk")
-	formFlatten := filepath.Join(stdlib, "form-flatten.fk")
+	core, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten := flattenChain(t, stdlib)
 	repl := filepath.Join(stdlib, "form-cli-repl.fk")
 
 	dir := t.TempDir()
@@ -268,7 +265,7 @@ func TestFkwuFormCliCombined(t *testing.T) {
 	mods := formCliModsExpr(t, stdlib, dir)
 	band := `(read_file "` + repl + `")`
 	flattenExpr := "(fks-table-file (flt-band-sources-fns " + mods + " " + band + ") (flt-band-sources-pool " + mods + " " + band + "))"
-	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit, formParse, formFlatten)+"\n"+flattenExpr+"\n")
+	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit, core, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten)+"\n"+flattenExpr+"\n")
 	table = strings.TrimSpace(table)
 	if len(table) < 100 {
 		t.Fatalf("flatten produced suspiciously small table (%d bytes)", len(table))
@@ -351,8 +348,7 @@ func TestFkwuLocaleUtf8(t *testing.T) {
 	clang := requireClang(t)
 	stdlib := filepath.Join("..", "form-stdlib")
 	minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit := emitChain(t, stdlib)
-	formParse := filepath.Join(stdlib, "form-parse.fk")
-	formFlatten := filepath.Join(stdlib, "form-flatten.fk")
+	flattenCore, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten := flattenChain(t, stdlib)
 	shim := filepath.Join(stdlib, "fourth-shim.fk")
 	core := filepath.Join(stdlib, "core.fk")
 
@@ -372,7 +368,7 @@ func TestFkwuLocaleUtf8(t *testing.T) {
 	mods := `(list (read_file "` + shim + `") (read_file "` + core + `"))`
 	band := `(read_file "` + bandPath + `")`
 	flattenExpr := "(fks-table-file (flt-band-sources-fns " + mods + " " + band + ") (flt-band-sources-pool " + mods + " " + band + "))"
-	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit, formParse, formFlatten)+"\n"+flattenExpr+"\n")
+	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit, flattenCore, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten)+"\n"+flattenExpr+"\n")
 	tablePath := filepath.Join(dir, "locale-table.txt")
 	if err := os.WriteFile(tablePath, []byte(table), 0o644); err != nil {
 		t.Fatalf("write table: %v", err)

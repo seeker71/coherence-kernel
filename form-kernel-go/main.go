@@ -569,8 +569,8 @@ type Kernel struct {
 	// `f64Idx` is keyed by the IEEE bit pattern after canonicalization
 	// (NaN → qNaN, -0.0 → +0.0) so the same value parsed twice yields the
 	// same NodeID. Mirrors Rust + TS sibling kernels.
-	f64s       []float64
-	f64Idx     map[uint64]uint32
+	f64s   []float64
+	f64Idx map[uint64]uint32
 	// Int64 overflow table — the sibling of `f64s` for integers wider than the
 	// 32-bit inst slot. `i64Idx` is keyed by the value itself (integers are
 	// already canonical) so the same literal interns to the same NodeID.
@@ -605,7 +605,7 @@ type Kernel struct {
 	// non-empty, readSexpr attributes every parenthesized form so fatal
 	// diagnostics can name the Form source line.
 	readingFiles []readingPart
-	importSeq  uint32
+	importSeq    uint32
 	// walkCache — JIT-vector memoization for pure recipes. Keyed by
 	// recipe NodeID. Real JIT replaces this with compiled native code;
 	// the architectural slot is the same: same NodeID = same result.
@@ -679,29 +679,29 @@ type sourceLoc struct {
 
 func NewKernel() *Kernel {
 	k := &Kernel{
-		byHash:          make(map[uint64]NodeID),
-		byID:            make(map[NodeID]Recipe),
-		strIdx:          make(map[string]NameID),
-		sourceAttr:      make(map[NodeID]sourceLoc),
-		importSeq:       1,
-		walkCache:       make(map[NodeID]Value),
-		next:            1,
-		f64Idx:          make(map[uint64]uint32),
-		i64Idx:          make(map[int64]uint32),
-		natives:         make(map[NameID]NativeEntry),
-		envNatives:      make(map[NameID]EnvAwareNativeEntry),
-		methods:         make(map[methodKey]*Closure),
-		jitAliases:      make(map[NameID]NameID),
-		jitCompiledGo:   make(map[string]*GoJITCompiled),
-		jitCompiledGoV:  make(map[string]jitValueFn),
-		jitHits:         make(map[NodeID]uint32),
-		jitFailed:       make(map[NodeID]bool),
-		jitFailedReason: make(map[NodeID]string),
-		jitDispatchHits: make(map[NodeID]uint32),
+		byHash:           make(map[uint64]NodeID),
+		byID:             make(map[NodeID]Recipe),
+		strIdx:           make(map[string]NameID),
+		sourceAttr:       make(map[NodeID]sourceLoc),
+		importSeq:        1,
+		walkCache:        make(map[NodeID]Value),
+		next:             1,
+		f64Idx:           make(map[uint64]uint32),
+		i64Idx:           make(map[int64]uint32),
+		natives:          make(map[NameID]NativeEntry),
+		envNatives:       make(map[NameID]EnvAwareNativeEntry),
+		methods:          make(map[methodKey]*Closure),
+		jitAliases:       make(map[NameID]NameID),
+		jitCompiledGo:    make(map[string]*GoJITCompiled),
+		jitCompiledGoV:   make(map[string]jitValueFn),
+		jitHits:          make(map[NodeID]uint32),
+		jitFailed:        make(map[NodeID]bool),
+		jitFailedReason:  make(map[NodeID]string),
+		jitDispatchHits:  make(map[NodeID]uint32),
 		jitAsyncBuilding: make(map[string]bool),
 		jitAsyncLanded:   make(map[string]*jitAsyncResult),
-		installedLeaves: make(map[NameID]NodeID),
-		switchTables:    make(map[NodeID]*switchTable),
+		installedLeaves:  make(map[NameID]NodeID),
+		switchTables:     make(map[NodeID]*switchTable),
 	}
 	k.registerNatives()
 	return k
@@ -2789,13 +2789,15 @@ func (k *Kernel) registerNatives() {
 	})
 
 	// File I/O
-	k.registerNative("read_file", catCall(), func(_ *Kernel, args []Value) Value {
+	readFileTextNative := func(_ *Kernel, args []Value) Value {
 		b, err := os.ReadFile(resolveKernelHostPath(args[0].Str))
 		if err != nil {
 			return Value{Kind: VNull}
 		}
 		return Value{Kind: VStr, Str: string(b)}
-	})
+	}
+	k.registerNative("host_file_read_text", catCall(), readFileTextNative)
+	k.registerNative("read_file", catCall(), readFileTextNative)
 	// Byte-level host file read — returns a list of ints (0-255), one per byte.
 	k.registerNative("read_file_bytes", catCall(), func(_ *Kernel, args []Value) Value {
 		b, err := os.ReadFile(resolveKernelHostPath(args[0].Str))
@@ -3232,24 +3234,28 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VNodeID, Nid: root}
 	})
-	k.registerNative("file_size", catCall(), func(_ *Kernel, args []Value) Value {
+	fileSizeNative := func(_ *Kernel, args []Value) Value {
 		info, err := os.Stat(resolveKernelHostPath(args[0].Str))
 		if err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: info.Size()}
-	})
+	}
+	k.registerNative("host_file_size", catCall(), fileSizeNative)
+	k.registerNative("file_size", catCall(), fileSizeNative)
 	// file_mtime — modification time in unix seconds; -1 if file missing.
 	// Used by Form-side cache layers (form-stdlib/cache.fk) to decide
 	// when a .fkb projection of a source file is stale. Generic: any
 	// "regenerate cache when source newer" pattern can compose this.
-	k.registerNative("file_mtime", catCall(), func(_ *Kernel, args []Value) Value {
+	fileMtimeNative := func(_ *Kernel, args []Value) Value {
 		info, err := os.Stat(resolveKernelHostPath(args[0].Str))
 		if err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: info.ModTime().Unix()}
-	})
+	}
+	k.registerNative("host_file_mtime", catCall(), fileMtimeNative)
+	k.registerNative("file_mtime", catCall(), fileMtimeNative)
 	k.registerNative("file_byte_at", catCall(), func(_ *Kernel, args []Value) Value {
 		if args[1].AsInt() < 0 {
 			return Value{Kind: VInt, Int: -1}
@@ -3266,7 +3272,7 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VInt, Int: int64(buf[0])}
 	})
-	k.registerNative("read_file_slice", catCall(), func(_ *Kernel, args []Value) Value {
+	readFileSliceNative := func(_ *Kernel, args []Value) Value {
 		offset := args[1].AsInt()
 		length := args[2].AsInt()
 		if offset < 0 || length <= 0 {
@@ -3280,7 +3286,9 @@ func (k *Kernel) registerNatives() {
 		buf := make([]byte, length)
 		n, _ := f.ReadAt(buf, offset)
 		return Value{Kind: VStr, Str: string(buf[:n])}
-	})
+	}
+	k.registerNative("host_file_read_slice", catCall(), readFileSliceNative)
+	k.registerNative("read_file_slice", catCall(), readFileSliceNative)
 
 	// --- Filesystem CRUD natives — real directories + files ------------
 	// Sibling parity across Go/Rust/TS. Paths are strings. Convention:
@@ -3296,26 +3304,32 @@ func (k *Kernel) registerNatives() {
 	// (fs_remove path)        → 0 | -1   (remove a single file)
 	// (fs_rename old new)     → 0 | -1
 	// (fs_list path)          → VList of entry-name strings | VNull
-	k.registerNative("fs_exists", catCall(), func(_ *Kernel, args []Value) Value {
+	fsExistsNative := func(_ *Kernel, args []Value) Value {
 		if _, err := os.Stat(args[0].Str); err != nil {
 			return Value{Kind: VInt, Int: 0}
 		}
 		return Value{Kind: VInt, Int: 1}
-	})
-	k.registerNative("fs_is_dir", catCall(), func(_ *Kernel, args []Value) Value {
+	}
+	k.registerNative("host_path_exists", catCall(), fsExistsNative)
+	k.registerNative("fs_exists", catCall(), fsExistsNative)
+	fsIsDirNative := func(_ *Kernel, args []Value) Value {
 		info, err := os.Stat(args[0].Str)
 		if err != nil || !info.IsDir() {
 			return Value{Kind: VInt, Int: 0}
 		}
 		return Value{Kind: VInt, Int: 1}
-	})
-	k.registerNative("fs_mkdir", catCall(), func(_ *Kernel, args []Value) Value {
+	}
+	k.registerNative("host_path_is_dir", catCall(), fsIsDirNative)
+	k.registerNative("fs_is_dir", catCall(), fsIsDirNative)
+	fsMkdirNative := func(_ *Kernel, args []Value) Value {
 		if err := os.MkdirAll(args[0].Str, 0755); err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: 0}
-	})
-	k.registerNative("fs_rmdir", catCall(), func(_ *Kernel, args []Value) Value {
+	}
+	k.registerNative("host_dir_mkdir", catCall(), fsMkdirNative)
+	k.registerNative("fs_mkdir", catCall(), fsMkdirNative)
+	fsRmdirNative := func(_ *Kernel, args []Value) Value {
 		info, err := os.Stat(args[0].Str)
 		if err != nil || !info.IsDir() {
 			return Value{Kind: VInt, Int: -1}
@@ -3324,8 +3338,10 @@ func (k *Kernel) registerNatives() {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: 0}
-	})
-	k.registerNative("fs_remove", catCall(), func(_ *Kernel, args []Value) Value {
+	}
+	k.registerNative("host_dir_rmdir", catCall(), fsRmdirNative)
+	k.registerNative("fs_rmdir", catCall(), fsRmdirNative)
+	fsRemoveNative := func(_ *Kernel, args []Value) Value {
 		info, err := os.Stat(args[0].Str)
 		if err != nil || info.IsDir() {
 			return Value{Kind: VInt, Int: -1}
@@ -3334,14 +3350,18 @@ func (k *Kernel) registerNatives() {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: 0}
-	})
-	k.registerNative("fs_rename", catCall(), func(_ *Kernel, args []Value) Value {
+	}
+	k.registerNative("host_path_remove", catCall(), fsRemoveNative)
+	k.registerNative("fs_remove", catCall(), fsRemoveNative)
+	fsRenameNative := func(_ *Kernel, args []Value) Value {
 		if err := os.Rename(args[0].Str, args[1].Str); err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: 0}
-	})
-	k.registerNative("fs_list", catCall(), func(_ *Kernel, args []Value) Value {
+	}
+	k.registerNative("host_path_rename", catCall(), fsRenameNative)
+	k.registerNative("fs_rename", catCall(), fsRenameNative)
+	fsListNative := func(_ *Kernel, args []Value) Value {
 		entries, err := os.ReadDir(args[0].Str)
 		if err != nil {
 			return Value{Kind: VNull}
@@ -3351,7 +3371,9 @@ func (k *Kernel) registerNatives() {
 			out[i] = Value{Kind: VStr, Str: e.Name()}
 		}
 		return Value{Kind: VList, List: out}
-	})
+	}
+	k.registerNative("host_dir_list", catCall(), fsListNative)
+	k.registerNative("fs_list", catCall(), fsListNative)
 
 	// --- Socket natives — L1 physical layer for inter-cell IO ----------
 	// Sibling parity across Go/Rust/TS. Handle = int (≥ 0 success, -1
@@ -3979,7 +4001,7 @@ func (k *Kernel) registerNatives() {
 	// the new total file size. Creates the file if absent. Foundation for
 	// cell-log-store.fk (the Bitcask-shape store) — see
 	// docs/coherence-substrate/cell-store-architecture.md.
-	k.registerNative("file_append_bytes", catCall(), func(_ *Kernel, args []Value) Value {
+	fileAppendBytesNative := func(_ *Kernel, args []Value) Value {
 		bytes := make([]byte, len(args[1].List))
 		for i, v := range args[1].List {
 			bytes[i] = byte(v.Int)
@@ -3997,17 +4019,22 @@ func (k *Kernel) registerNatives() {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: info.Size()}
-	})
+	}
+	k.registerNative("host_file_append_bytes", catCall(), fileAppendBytesNative)
+	k.registerNative("file_append_bytes", catCall(), fileAppendBytesNative)
 	// write_file_text — host text output. Keeps text compilers from
 	// materializing byte lists while byte codecs still use write_file_bytes.
-	k.registerNative("write_file_text", catCall(), func(_ *Kernel, args []Value) Value {
+	writeFileTextNative := func(_ *Kernel, args []Value) Value {
 		bytes := []byte(args[1].Str)
 		err := os.WriteFile(args[0].Str, bytes, 0644)
 		if err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: int64(len(bytes))}
-	})
+	}
+	k.registerNative("host_file_write_text", catCall(), writeFileTextNative)
+	k.registerNative("write_file", catCall(), writeFileTextNative)
+	k.registerNative("write_file_text", catCall(), writeFileTextNative)
 	// walk-cached — JIT-vector memoization. Caller asserts purity.
 	k.registerNative("walk-cached", catWitness(), func(k *Kernel, args []Value) Value {
 		if v, ok := k.walkCache[args[0].AsNid()]; ok {
@@ -4241,13 +4268,15 @@ func (k *Kernel) registerNatives() {
 	// TMPDIR, so concurrent legs never share a scratch path. Sibling
 	// parity holds on shape, NOT on value — each leg's dir differs by
 	// design; bands fold the path into effects, never into the verdict.
-	k.registerNative("temp_dir", catCall(), func(_ *Kernel, _ []Value) Value {
+	tempDirNative := func(_ *Kernel, _ []Value) Value {
 		dir := os.Getenv("TMPDIR")
 		if dir == "" {
 			dir = "/tmp"
 		}
 		return Value{Kind: VStr, Str: strings.TrimRight(dir, "/")}
-	})
+	}
+	k.registerNative("host_temp_dir", catCall(), tempDirNative)
+	k.registerNative("temp_dir", catCall(), tempDirNative)
 }
 
 // Category constructors for native attribution live further down alongside
@@ -5217,16 +5246,30 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 }
 
 // Category constructors
-func catMath(inst uint32) NodeID    { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMath, Inst: inst} }
-func catCompare(inst uint32) NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCompare, Inst: inst} }
-func catLogic(inst uint32) NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicLogic, Inst: inst} }
-func catCond(inst uint32) NodeID    { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCond, Inst: inst} }
-func catBlock(inst uint32) NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicBlock, Inst: inst} }
-func catMatch(inst uint32) NodeID   { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMatch, Inst: inst} }
-func catChoice(inst uint32) NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicChoice, Inst: inst} }
-func catIdent() NodeID              { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicIdent, Inst: 1} }
-func catFnDef() NodeID              { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicFnDef, Inst: 1} }
-func catFnCall() NodeID             { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicFnCall, Inst: 1} }
+func catMath(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMath, Inst: inst}
+}
+func catCompare(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCompare, Inst: inst}
+}
+func catLogic(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicLogic, Inst: inst}
+}
+func catCond(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicCond, Inst: inst}
+}
+func catBlock(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicBlock, Inst: inst}
+}
+func catMatch(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicMatch, Inst: inst}
+}
+func catChoice(inst uint32) NodeID {
+	return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicChoice, Inst: inst}
+}
+func catIdent() NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicIdent, Inst: 1} }
+func catFnDef() NodeID  { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicFnDef, Inst: 1} }
+func catFnCall() NodeID { return NodeID{Pkg: 1, Level: LevelBasic, Type: RBasicFnCall, Inst: 1} }
 
 // Native-attribution category constructors. Each names the Form-shape a
 // native expresses; the walker records them in the trace when the native

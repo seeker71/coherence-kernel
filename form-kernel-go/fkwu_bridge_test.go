@@ -66,6 +66,22 @@ func emitChain(t *testing.T, stdlib string) (minimal, hatiKernel, hostIOFs, fkcS
 		mustExist(filepath.Join(stdlib, "hati-os-kernel-emit.fk"))
 }
 
+func flattenChain(t *testing.T, stdlib string) (core, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten string) {
+	t.Helper()
+	mustExist := func(p string) string {
+		if _, err := os.Stat(p); err != nil {
+			t.Skipf("missing source %s: %v", p, err)
+		}
+		return p
+	}
+	return mustExist(filepath.Join(stdlib, "core.fk")),
+		mustExist(filepath.Join(stdlib, "form-parse.fk")),
+		mustExist(filepath.Join(stdlib, "bmf-core.fk")),
+		mustExist(filepath.Join(stdlib, "bmf-grammar.fk")),
+		mustExist(filepath.Join(stdlib, "host-effect-grammar.fk")),
+		mustExist(filepath.Join(stdlib, "form-flatten.fk"))
+}
+
 // buildFkwu emits the universal fkwu C source in-process and compiles it,
 // returning the binary path. Requires clang.
 func buildFkwu(t *testing.T, clang, dir, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit string) string {
@@ -98,8 +114,7 @@ func TestFkwuOffloadBridge(t *testing.T) {
 	clang := requireClang(t)
 	stdlib := filepath.Join("..", "form-stdlib")
 	minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit := emitChain(t, stdlib)
-	formParse := filepath.Join(stdlib, "form-parse.fk")
-	formFlatten := filepath.Join(stdlib, "form-flatten.fk")
+	core, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten := flattenChain(t, stdlib)
 	shim := filepath.Join(stdlib, "fourth-shim.fk")
 	band := filepath.Join(stdlib, "tests", "content-address-band.fk")
 
@@ -110,7 +125,7 @@ func TestFkwuOffloadBridge(t *testing.T) {
 	flattenExpr := "(fks-table-file " +
 		"(flt-band-sources-fns (list (read_file \"" + shim + "\")) (read_file \"" + band + "\")) " +
 		"(flt-band-sources-pool (list (read_file \"" + shim + "\")) (read_file \"" + band + "\")))"
-	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit, formParse, formFlatten)+"\n"+flattenExpr+"\n")
+	_, table := runFormSource(t, readFiles(t, minimal, hatiKernel, hostIOFs, fkcSerialize, hatiEmit, core, formParse, bmfCore, bmfGrammar, hostEffect, formFlatten)+"\n"+flattenExpr+"\n")
 	if len(strings.TrimSpace(table)) < 100 {
 		t.Fatalf("flatten produced suspiciously small table (%d bytes)", len(table))
 	}
