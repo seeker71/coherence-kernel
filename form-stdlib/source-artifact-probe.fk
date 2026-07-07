@@ -1,0 +1,250 @@
+; source-artifact-probe.fk -- Layer 8c source artifact observation adapter.
+;
+; This layer supplies the descriptor rows that Layer 8b said would arrive from a
+; future host/compiler probe. It is a thin observation-to-descriptor adapter:
+; probe rows carry source/program-image/native paths, observed exists/size/mtime,
+; and declared identity/integrity fields. The adapter constructs `sad-*`
+; descriptors and delegates route/plan decisions to `sad-route` and
+; `rap-plan-from-descriptors`.
+;
+; Probe outcomes are deliberately three-state:
+;   absent artifact              -> sad-no-artifact, safe source compile
+;   present but unvouched        -> sad-no-artifact, safe source compile
+;   contradictory/unidentifiable -> invalid descriptors, investigate
+;
+; The layer does not hash bytes, verify seals, parse source, sniff path
+; extensions, write artifacts, load `.fkb`, call `.dylib`, install a selector,
+; decide direct `--src` admission, or grow the C seed. The optional live
+; observation helpers read only stat facts through `form-fs` doors; hashes,
+; seal/proof/callable/lowerable, and includes-tbl remain declarations supplied
+; by the caller.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/form-fs.fk
+;           form-stdlib/source-artifact-cache.fk
+;           form-stdlib/source-artifact-descriptor.fk
+;           form-stdlib/runtime-artifact-plan.fk
+
+(do
+    (defn sap-feature (name status) (list "source-artifact-probe-feature" name status))
+    (defn sap-feature-name (f) (nth f 1))
+    (defn sap-feature-status (f) (nth f 2))
+    (defn source-artifact-probe-manifest ()
+        (list
+            (sap-feature "constructs-sad-descriptors" 1)
+            (sap-feature "delegates-routing-to-sac" 1)
+            (sap-feature "delegates-validation-to-sad" 1)
+            (sap-feature "delegates-plan-to-rap" 1)
+            (sap-feature "observed-fields-are-declarations" 1)
+            (sap-feature "present-unvouched-degrades-to-missing" 1)
+            (sap-feature "absent-artifact-is-cache-miss" 1)
+            (sap-feature "contradictory-observation-investigates" 1)
+            (sap-feature "no-seal-verification" 1)
+            (sap-feature "no-artifact-load" 1)
+            (sap-feature "no-runtime-selector" 1)
+            (sap-feature "read-only-no-disk-write" 1)
+            (sap-feature "form-fs-doors-only" 1)
+            (sap-feature "no-kind-from-extension" 1)
+            (sap-feature "no-byte-hash" 1)
+            (sap-feature "no-c-seed-growth" 1)))
+    (defn source-artifact-probe-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (sap-feature-name (head fs)) name)
+                     (eq (sap-feature-status (head fs)) 1))
+                1
+                (source-artifact-probe-manifest-has? name (tail fs)))))
+
+    (defn sap-role-source () "source")
+    (defn sap-role-program-image-fkb () "program-image-fkb")
+    (defn sap-role-native-dylib () "native-dylib")
+
+    (defn sap-nonempty? (s) (gt (str_len s) 0))
+    (defn sap-bit? (x) (if (eq x 0) 1 (if (eq x 1) 1 0)))
+
+    ; observation = ("source-artifact-probe-observation" role path exists size
+    ;                mtime source-hash content-hash seal-ok proof callable
+    ;                lowerable includes-tbl)
+    (defn sap-observation (role path exists size mtime source-hash content-hash seal-ok proof callable lowerable includes-tbl)
+        (list "source-artifact-probe-observation" role path exists size mtime
+              source-hash content-hash seal-ok proof callable lowerable includes-tbl))
+    (defn sap-observation? (o) (str_eq (nth o 0) "source-artifact-probe-observation"))
+    (defn sap-observation-role (o) (nth o 1))
+    (defn sap-observation-path (o) (nth o 2))
+    (defn sap-observation-exists (o) (nth o 3))
+    (defn sap-observation-size (o) (nth o 4))
+    (defn sap-observation-mtime (o) (nth o 5))
+    (defn sap-observation-source-hash (o) (nth o 6))
+    (defn sap-observation-content-hash (o) (nth o 7))
+    (defn sap-observation-seal-ok (o) (nth o 8))
+    (defn sap-observation-proof (o) (nth o 9))
+    (defn sap-observation-callable (o) (nth o 10))
+    (defn sap-observation-lowerable (o) (nth o 11))
+    (defn sap-observation-includes-tbl (o) (nth o 12))
+
+    ; Source rows reuse the generic observation shape. The seal/proof fields
+    ; below are shape fillers only and never reach a source descriptor.
+    (defn sap-source-observation (path exists size mtime source-hash)
+        (sap-observation (sap-role-source) path exists size mtime source-hash "" 1 0 0 0 0))
+    (defn sap-program-image-fkb-observation (path exists size mtime source-hash content-hash seal-ok includes-tbl)
+        (sap-observation (sap-role-program-image-fkb) path exists size mtime source-hash content-hash seal-ok 0 0 0 includes-tbl))
+    (defn sap-native-dylib-observation (path exists size mtime source-hash content-hash seal-ok proof callable lowerable)
+        (sap-observation (sap-role-native-dylib) path exists size mtime source-hash content-hash seal-ok proof callable lowerable 0))
+
+    (defn sap-bundle (source fkb dylib)
+        (list "source-artifact-probe-bundle" source fkb dylib))
+    (defn sap-bundle? (b) (str_eq (nth b 0) "source-artifact-probe-bundle"))
+    (defn sap-bundle-source (b) (nth b 1))
+    (defn sap-bundle-fkb (b) (nth b 2))
+    (defn sap-bundle-dylib (b) (nth b 3))
+
+    (defn sap-role? (o role)
+        (str_eq (sap-observation-role o) role))
+    (defn sap-observation-shape-valid? (o)
+        (if (sap-observation? o)
+            (if (sap-bit? (sap-observation-exists o))
+                (if (sap-bit? (sap-observation-seal-ok o))
+                    (if (sap-bit? (sap-observation-proof o))
+                        (if (sap-bit? (sap-observation-callable o))
+                            (if (sap-bit? (sap-observation-lowerable o))
+                                (sap-bit? (sap-observation-includes-tbl o))
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+    (defn sap-observation-contradictory? (o)
+        (if (sap-observation-shape-valid? o)
+            (if (eq (sap-observation-exists o) 0)
+                (if (gt (sap-observation-mtime o) 0)
+                    1
+                    (if (ge (sap-observation-size o) 0) 1 0))
+                (if (sap-nonempty? (sap-observation-path o))
+                    (if (ge (sap-observation-size o) 0)
+                        (if (gt (sap-observation-mtime o) 0) 0 1)
+                        1)
+                    1))
+            1))
+    (defn sap-observation-consistent? (o)
+        (if (sap-observation-shape-valid? o)
+            (if (eq (sap-observation-contradictory? o) 0) 1 0)
+            0))
+    (defn sap-observation-present? (o)
+        (if (sap-observation-consistent? o)
+            (if (eq (sap-observation-exists o) 1) 1 0)
+            0))
+    (defn sap-observation-absent? (o)
+        (if (sap-observation-consistent? o)
+            (if (eq (sap-observation-exists o) 0) 1 0)
+            0))
+
+    (defn sap-source-identifiable? (o)
+        (if (sap-role? o (sap-role-source))
+            (if (sap-observation-present? o)
+                (if (sap-nonempty? (sap-observation-source-hash o)) 1 0)
+                0)
+            0))
+    (defn sap-artifact-vouched? (o role)
+        (if (sap-role? o role)
+            (if (sap-observation-present? o)
+                (if (sap-nonempty? (sap-observation-source-hash o))
+                    (if (sap-nonempty? (sap-observation-content-hash o)) 1 0)
+                    0)
+                0)
+            0))
+    (defn sap-artifact-compatible? (o role)
+        (if (sap-role? o role)
+            (sap-observation-consistent? o)
+            0))
+    (defn sap-artifact-unvouched? (o role)
+        (if (sap-artifact-compatible? o role)
+            (if (sap-observation-present? o)
+                (if (eq (sap-artifact-vouched? o role) 0) 1 0)
+                0)
+            0))
+
+    (defn sap-invalid-source () (sad-source "" "" 0))
+    (defn sap-source-descriptor (o)
+        (if (sap-source-identifiable? o)
+            (sad-source (sap-observation-path o)
+                        (sap-observation-source-hash o)
+                        (sap-observation-mtime o))
+            (sap-invalid-source)))
+    (defn sap-fkb-descriptor (o)
+        (if (sap-artifact-vouched? o (sap-role-program-image-fkb))
+            (sad-program-image-fkb (sad-version-program-image-fkb)
+                                   (sap-observation-path o)
+                                   (sap-observation-source-hash o)
+                                   (sap-observation-content-hash o)
+                                   (sap-observation-mtime o)
+                                   (sap-observation-seal-ok o)
+                                   (sap-observation-includes-tbl o))
+            (sad-no-artifact)))
+    (defn sap-dylib-descriptor (o)
+        (if (sap-artifact-vouched? o (sap-role-native-dylib))
+            (sad-native-dylib (sad-version-native-dylib)
+                              (sap-observation-path o)
+                              (sap-observation-source-hash o)
+                              (sap-observation-content-hash o)
+                              (sap-observation-mtime o)
+                              (sap-observation-seal-ok o)
+                              (sap-observation-proof o)
+                              (sap-observation-callable o)
+                              (sap-observation-lowerable o))
+            (sad-no-artifact)))
+
+    (defn sap-probe-valid? (b)
+        (if (sap-bundle? b)
+            (if (sap-source-identifiable? (sap-bundle-source b))
+                (if (sap-artifact-compatible? (sap-bundle-fkb b) (sap-role-program-image-fkb))
+                    (sap-artifact-compatible? (sap-bundle-dylib b) (sap-role-native-dylib))
+                    0)
+                0)
+            0))
+    (defn sap-descriptor-triple (b)
+        (if (sap-probe-valid? b)
+            (list
+                (sap-source-descriptor (sap-bundle-source b))
+                (sap-fkb-descriptor (sap-bundle-fkb b))
+                (sap-dylib-descriptor (sap-bundle-dylib b)))
+            (list (sap-invalid-source) (sad-no-artifact) (sad-no-artifact))))
+    (defn sap-triple-source (t) (nth t 0))
+    (defn sap-triple-fkb (t) (nth t 1))
+    (defn sap-triple-dylib (t) (nth t 2))
+    (defn sap-delegated-route (b)
+        (do
+            (let t (sap-descriptor-triple b))
+            (sad-route (sap-triple-source t) (sap-triple-fkb t) (sap-triple-dylib t))))
+    (defn sap-plan-from-probe (b)
+        (do
+            (let t (sap-descriptor-triple b))
+            (rap-plan-from-descriptors (sap-triple-source t) (sap-triple-fkb t) (sap-triple-dylib t))))
+
+    (defn sap-observe-source (path source-hash)
+        (sap-source-observation path
+                                (fs-exists? path)
+                                (fs-stat-size path)
+                                (fs-stat-mtime path)
+                                source-hash))
+    (defn sap-observe-program-image-fkb (path source-hash content-hash seal-ok includes-tbl)
+        (sap-program-image-fkb-observation path
+                                           (fs-exists? path)
+                                           (fs-stat-size path)
+                                           (fs-stat-mtime path)
+                                           source-hash
+                                           content-hash
+                                           seal-ok
+                                           includes-tbl))
+    (defn sap-observe-native-dylib (path source-hash content-hash seal-ok proof callable lowerable)
+        (sap-native-dylib-observation path
+                                      (fs-exists? path)
+                                      (fs-stat-size path)
+                                      (fs-stat-mtime path)
+                                      source-hash
+                                      content-hash
+                                      seal-ok
+                                      proof
+                                      callable
+                                      lowerable))
+)

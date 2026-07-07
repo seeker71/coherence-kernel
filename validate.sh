@@ -139,6 +139,105 @@ cleanup() {
 }
 trap cleanup EXIT
 
+fk_declared_deps() {
+    local file="$1"
+    awk '
+        function emit(tok) {
+            gsub(/^[ \t,;"]+|[ \t,;"]+$/, "", tok)
+            if (tok ~ /\.fk$/) print tok
+        }
+        /^;[ \t]*import([ \t:]|")/ {
+            s = $0
+            sub(/^;[ \t]*import[ \t:]*/, "", s)
+            if (match(s, /"[^"]+\.fk"/)) {
+                emit(substr(s, RSTART + 1, RLENGTH - 2))
+            } else {
+                n = split(s, a, /[ \t,;]+/)
+                if (n >= 1) emit(a[1])
+            }
+        }
+        /^;[ \t]*preludes:/ {
+            s = $0
+            sub(/^;[ \t]*preludes:[ \t]*/, "", s)
+            gsub(/,/, " ", s)
+            n = split(s, a, /[ \t]+/)
+            for (i = 1; i <= n; i++) {
+                low = tolower(a[i])
+                if (a[i] == "\\" || low == "none" || low == "(none)") continue
+                emit(a[i])
+            }
+        }
+    ' "$file" 2>/dev/null || true
+}
+
+fk_resolve_dep_path() {
+    local owner="$1"
+    local token="$2"
+    local dir cand
+    case "$token" in
+        /*|[A-Za-z]:*) printf "%s\n" "$token"; return ;;
+    esac
+    dir="$(dirname "$owner")"
+    cand="$dir/$token"
+    if [[ -f "$cand" ]]; then
+        printf "%s\n" "$cand"
+    elif [[ -f "$token" ]]; then
+        printf "%s\n" "$token"
+    else
+        printf "%s\n" "$cand"
+    fi
+}
+
+fk_expand_seen=()
+fk_expand_added=()
+fk_import_expanded=()
+
+fk_seen_contains() {
+    local needle="$1" x
+    [[ ${#fk_expand_seen[@]} -eq 0 ]] && return 1
+    for x in "${fk_expand_seen[@]}"; do
+        [[ "$x" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+fk_added_contains() {
+    local needle="$1" x
+    [[ ${#fk_expand_added[@]} -eq 0 ]] && return 1
+    for x in "${fk_expand_added[@]}"; do
+        [[ "$x" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+fk_add_expanded_dep() {
+    local dep="$1"
+    if ! fk_added_contains "$dep"; then
+        fk_import_expanded+=("$dep")
+        fk_expand_added+=("$dep")
+    fi
+}
+
+fk_expand_file_deps() {
+    local file="$1" token dep
+    fk_seen_contains "$file" && return
+    fk_expand_seen+=("$file")
+    [[ -f "$file" ]] || return
+    while IFS= read -r token; do
+        [[ -n "$token" ]] || continue
+        dep="$(fk_resolve_dep_path "$file" "$token")"
+        fk_expand_file_deps "$dep"
+        fk_add_expanded_dep "$dep"
+    done < <(fk_declared_deps "$file")
+}
+
+fk_expand_declared_deps() {
+    fk_expand_seen=()
+    fk_expand_added=()
+    fk_import_expanded=()
+    fk_expand_file_deps "$1"
+}
+
 # Source-compiled preludes are cached by CONTENT (file + compiler chain): the
 # same unchanged core.fk compiles once, not once per band. Without this cache
 # every validate invocation re-ran the full BML source-compiler (~12s) on
@@ -317,13 +416,12 @@ fourth_ok=0
 # --- explicit mode: validate one file list as one workload --------------
 if [[ $# -gt 0 ]]; then
     explicit_args=("$@")
-    # Single band file: honor `; preludes:` like the full stdlib/tests sweep.
+    # Single band file: honor declared imports like the full stdlib/tests sweep.
     if [[ $# -eq 1 ]]; then
         f="$1"
-        preludes=$(grep -E '^; preludes:' "$f" 2>/dev/null | head -1 | sed 's/^; preludes://' || true)
-        if [[ -n "$preludes" ]]; then
-            # shellcheck disable=SC2206
-            explicit_args=(form-stdlib/core.fk $preludes "$f")
+        fk_expand_declared_deps "$f"
+        if [[ ${#fk_import_expanded[@]} -gt 0 ]]; then
+            explicit_args=(form-stdlib/core.fk "${fk_import_expanded[@]}" "$f")
         fi
     fi
     # A missing input file is not a kernel divergence. Without this guard the
@@ -396,15 +494,15 @@ else
             base="$(basename "$f")"
             base="${base%.*}"
             module="form-stdlib/${base}.fk"
-            # A test file may declare extra preludes via a header line:
-            #   ; preludes: form-stdlib/engine.fk form-stdlib/grammar-bnf.fk
+            # A test file may declare extra imports via header lines:
+            #   ; import "form-stdlib/engine.fk"
+            # Legacy `; preludes:` headers are still expanded by the same path.
             # When present, those modules load between core.fk and the test
             # (in the order declared). The same-name convention still works
             # — modules referenced by the header replace the auto-prepend.
-            preludes=$(grep -E '^; preludes:' "$f" 2>/dev/null | head -1 | sed 's/^; preludes://' || true)
-            if [[ -n "$preludes" ]]; then
-                # shellcheck disable=SC2086
-                add_workload "stdlib/$(basename "$f")" "form-stdlib/core.fk" $preludes "$f"
+            fk_expand_declared_deps "$f"
+            if [[ ${#fk_import_expanded[@]} -gt 0 ]]; then
+                add_workload "stdlib/$(basename "$f")" "form-stdlib/core.fk" "${fk_import_expanded[@]}" "$f"
             elif [[ -f "$module" && "$module" != "$f" ]]; then
                 add_workload "stdlib/$(basename "$f")" "form-stdlib/core.fk" "$module" "$f"
             else

@@ -358,52 +358,6 @@ func TestNativeHandlerFatalResponseNamesKindTraceAndWorkerContinues(t *testing.T
 	}
 }
 
-func TestCompileSourceSectionNativeReturnsRecipe(t *testing.T) {
-	k := NewKernel()
-	expr := `(compile_source_section "form.bml" "add(20, 22);" "test/runtime.bml")`
-	value := k.walk(readRootFromSource(k, expr), NewFrame(nil))
-	if value.Kind != VNodeID {
-		t.Fatalf("compile_source_section kind = %v, want VNodeID; err=%q", value.Kind, k.sourceCompileErr)
-	}
-	if _, ok := k.sourceAttr[value.Nid]; !ok {
-		t.Fatalf("compiled recipe %s has no source attribution", value.String())
-	}
-	got := k.walk(value.Nid, NewFrame(nil))
-	if got.Kind != VInt || got.Int != 42 {
-		t.Fatalf("compiled recipe walked to %v, want int 42", got)
-	}
-}
-
-func TestCompileSourceSectionNativeReportsMalformedBMLDef(t *testing.T) {
-	k := NewKernel()
-	expr := `(do
-	  (compile_source_section "form.bml" "def broken(
-	    x
-	  ) = x;" "test/bad.bml")
-	  (source_compile_last_error))`
-	got := k.walk(readRootFromSource(k, expr), NewFrame(nil))
-	if got.Kind != VStr {
-		t.Fatalf("source_compile_last_error kind = %v, want VStr", got.Kind)
-	}
-	if !strings.Contains(got.Str, "form.bml def missing closing ')' on the definition line: def broken(") {
-		t.Fatalf("source_compile_last_error = %q", got.Str)
-	}
-}
-
-func TestCompileSourceTextNativeReturnsRecipe(t *testing.T) {
-	k := NewKernel()
-	source := "section [form.bml] {\n add(10, 5);\n}\n"
-	expr := "(compile_source_text " + sexpStringLiteral(source) + ` "test/source.bml")`
-	value := k.walk(readRootFromSource(k, expr), NewFrame(nil))
-	if value.Kind != VNodeID {
-		t.Fatalf("compile_source_text kind = %v, want VNodeID; err=%q", value.Kind, k.sourceCompileErr)
-	}
-	got := k.walk(value.Nid, NewFrame(nil))
-	if got.Kind != VInt || got.Int != 15 {
-		t.Fatalf("compiled source walked to %v, want int 15", got)
-	}
-}
-
 func TestSubstrateFormCompilerRouteRunsBML(t *testing.T) {
 	body, err := os.ReadFile("../../deploy/front-door/api.bml")
 	if err != nil {

@@ -1,0 +1,289 @@
+; runtime-artifact-attempt-receipt.fk -- Layer 9f envelope-bound attempt receipt.
+;
+; This layer binds a supplied host/runner attempt observation to a Layer 9e
+; request-ready envelope. It is not the loader/executor. It does not produce
+; the observation by reading, loading, walking, calling, or executing an
+; artifact; it only refuses or investigates observations that are not bound to
+; the envelope identity, and derives the plain Layer 9c `rao-run-observation`
+; row once that binding is explicit.
+;
+; The trust tuple is exactly the 9e envelope's emitted identity fields:
+; action, route, artifact kind, artifact path, source hash, and content hash.
+; A mismatch is a loud investigate receipt with no derived observation. Hard
+; attempt statuses such as OOM, killed, stalled, timeout, and wrong-value remain
+; observed and are forwarded to 9c, where they normalize to investigation.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/source-artifact-cache.fk
+;           form-stdlib/source-artifact-descriptor.fk
+;           form-stdlib/runtime-artifact-plan.fk
+;           form-stdlib/runtime-artifact-selector.fk
+;           form-stdlib/runtime-artifact-outcome.fk
+;           form-stdlib/runtime-artifact-retry.fk
+;           form-stdlib/runtime-artifact-load-envelope.fk
+
+(do
+    (defn raar-feature (name status) (list "runtime-artifact-attempt-receipt-feature" name status))
+    (defn raar-feature-name (f) (nth f 1))
+    (defn raar-feature-status (f) (nth f 2))
+    (defn runtime-artifact-attempt-receipt-manifest ()
+        (list
+            (raar-feature "attempt-receipt-not-execution" 1)
+            (raar-feature "supplied-host-attempt-only" 1)
+            (raar-feature "binds-to-rale-envelope" 1)
+            (raar-feature "identity-tuple-field-match" 1)
+            (raar-feature "derived-rao-observation-only-after-match" 1)
+            (raar-feature "mismatch-investigates-without-derived-observation" 1)
+            (raar-feature "pending-can-age-to-investigate" 1)
+            (raar-feature "hard-statuses-preserved-for-9c" 1)
+            (raar-feature "no-outcome-algebra-or-retry-policy" 1)
+            (raar-feature "no-disk-io" 1)
+            (raar-feature "no-byte-hashing" 1)
+            (raar-feature "no-seal-proof-callable-reverify" 1)
+            (raar-feature "no-fkb-walk-or-dylib-call" 1)
+            (raar-feature "no-native-or-source-execution" 1)
+            (raar-feature "no-admission-policy-or-selector-install" 1)
+            (raar-feature "no-c-seed-growth" 1)))
+    (defn runtime-artifact-attempt-receipt-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (raar-feature-name (head fs)) name)
+                     (eq (raar-feature-status (head fs)) 1))
+                1
+                (runtime-artifact-attempt-receipt-manifest-has? name (tail fs)))))
+
+    (defn raar-status-observed () "observed")
+    (defn raar-status-pending-observation () "pending-observation")
+    (defn raar-status-investigate () "investigate")
+    (defn raar-status-refused () "refused")
+
+    (defn raar-severity-ok () "ok")
+    (defn raar-severity-soft () "soft")
+    (defn raar-severity-hard () "hard")
+    (defn raar-severity-unknown () "unknown")
+    (defn raar-severity-none () "none")
+
+    (defn raar-reason-observed-ok () "observed-ok")
+    (defn raar-reason-observed-soft () "observed-soft")
+    (defn raar-reason-observed-hard-investigates () "observed-hard-investigates")
+    (defn raar-reason-observed-unknown-investigates () "observed-unknown-investigates")
+    (defn raar-reason-pending-observation () "pending-observation")
+    (defn raar-reason-pending-observation-stalled () "pending-observation-stalled")
+    (defn raar-reason-envelope-investigates () "envelope-investigates")
+    (defn raar-reason-envelope-refused () "envelope-refused")
+    (defn raar-reason-non-ready-envelope () "non-ready-envelope")
+    (defn raar-reason-malformed-envelope () "malformed-envelope")
+    (defn raar-reason-malformed-attempt () "malformed-attempt")
+    (defn raar-reason-action-mismatch () "action-mismatch")
+    (defn raar-reason-route-mismatch () "route-mismatch")
+    (defn raar-reason-kind-mismatch () "artifact-kind-mismatch")
+    (defn raar-reason-path-mismatch () "artifact-path-mismatch")
+    (defn raar-reason-source-hash-mismatch () "source-hash-mismatch")
+    (defn raar-reason-content-hash-mismatch () "content-hash-mismatch")
+
+    (defn raar-no-attempt () (list "runtime-artifact-attempt-receipt-no-attempt"))
+    (defn raar-no-attempt? (a)
+        (if (eq (len a) 1)
+            (str_eq (nth a 0) "runtime-artifact-attempt-receipt-no-attempt")
+            0))
+    (defn raar-no-derived-observation () (list "runtime-artifact-attempt-receipt-no-derived-observation"))
+    (defn raar-no-derived-observation? (o)
+        (if (eq (len o) 1)
+            (str_eq (nth o 0) "runtime-artifact-attempt-receipt-no-derived-observation")
+            0))
+
+    ; attempt = ("runtime-artifact-supplied-attempt" action route artifact-kind
+    ;            artifact-path source-hash content-hash status detail code)
+    (defn raar-supplied-attempt (action route artifact-kind artifact-path source-hash content-hash status detail code)
+        (list "runtime-artifact-supplied-attempt" action route artifact-kind
+              artifact-path source-hash content-hash status detail code))
+    (defn raar-supplied-attempt? (a)
+        (if (eq (len a) 10)
+            (str_eq (nth a 0) "runtime-artifact-supplied-attempt")
+            0))
+    (defn raar-attempt-action (a) (nth a 1))
+    (defn raar-attempt-route (a) (nth a 2))
+    (defn raar-attempt-artifact-kind (a) (nth a 3))
+    (defn raar-attempt-artifact-path (a) (nth a 4))
+    (defn raar-attempt-source-hash (a) (nth a 5))
+    (defn raar-attempt-content-hash (a) (nth a 6))
+    (defn raar-attempt-status (a) (nth a 7))
+    (defn raar-attempt-detail (a) (nth a 8))
+    (defn raar-attempt-code (a) (nth a 9))
+
+    ; receipt = ("runtime-artifact-attempt-receipt" envelope attempt
+    ;            derived-observation action route artifact-kind artifact-path
+    ;            source-hash content-hash attempt-status receipt-status
+    ;            severity reason detail code)
+    (defn raar-receipt (envelope attempt derived-observation action route artifact-kind artifact-path source-hash content-hash attempt-status status severity reason detail code)
+        (list "runtime-artifact-attempt-receipt" envelope attempt
+              derived-observation action route artifact-kind artifact-path
+              source-hash content-hash attempt-status status severity reason
+              detail code))
+    (defn raar-receipt? (r)
+        (if (eq (len r) 16)
+            (str_eq (nth r 0) "runtime-artifact-attempt-receipt")
+            0))
+    (defn raar-receipt-envelope (r) (nth r 1))
+    (defn raar-receipt-attempt (r) (nth r 2))
+    (defn raar-receipt-derived-observation (r) (nth r 3))
+    (defn raar-receipt-action (r) (nth r 4))
+    (defn raar-receipt-route (r) (nth r 5))
+    (defn raar-receipt-artifact-kind (r) (nth r 6))
+    (defn raar-receipt-artifact-path (r) (nth r 7))
+    (defn raar-receipt-source-hash (r) (nth r 8))
+    (defn raar-receipt-content-hash (r) (nth r 9))
+    (defn raar-receipt-attempt-status (r) (nth r 10))
+    (defn raar-receipt-status (r) (nth r 11))
+    (defn raar-receipt-severity (r) (nth r 12))
+    (defn raar-receipt-reason (r) (nth r 13))
+    (defn raar-receipt-detail (r) (nth r 14))
+    (defn raar-receipt-code (r) (nth r 15))
+    (defn raar-receipt-selection (r)
+        (rale-envelope-selection (raar-receipt-envelope r)))
+
+    (defn raar-empty-receipt (envelope attempt status reason)
+        (raar-receipt envelope
+                      attempt
+                      (raar-no-derived-observation)
+                      (rap-act-none)
+                      (sad-route-invalid)
+                      (rale-kind-none)
+                      ""
+                      ""
+                      ""
+                      (rao-obs-none)
+                      status
+                      (raar-severity-none)
+                      reason
+                      (rao-detail-none)
+                      (rao-code-none)))
+    (defn raar-envelope-receipt (envelope status reason)
+        (raar-receipt envelope
+                      (raar-no-attempt)
+                      (raar-no-derived-observation)
+                      (if (rale-envelope? envelope) (rale-envelope-action envelope) (rap-act-none))
+                      (if (rale-envelope? envelope) (rale-envelope-route envelope) (sad-route-invalid))
+                      (if (rale-envelope? envelope) (rale-envelope-artifact-kind envelope) (rale-kind-none))
+                      (if (rale-envelope? envelope) (rale-envelope-artifact-path envelope) "")
+                      (if (rale-envelope? envelope) (rale-envelope-source-hash envelope) "")
+                      (if (rale-envelope? envelope) (rale-envelope-content-hash envelope) "")
+                      (rao-obs-none)
+                      status
+                      (raar-severity-none)
+                      reason
+                      (rao-detail-none)
+                      (rao-code-none)))
+    (defn raar-mismatch-receipt (envelope attempt reason)
+        (raar-receipt envelope
+                      attempt
+                      (raar-no-derived-observation)
+                      (rale-envelope-action envelope)
+                      (rale-envelope-route envelope)
+                      (rale-envelope-artifact-kind envelope)
+                      (rale-envelope-artifact-path envelope)
+                      (rale-envelope-source-hash envelope)
+                      (rale-envelope-content-hash envelope)
+                      (if (raar-supplied-attempt? attempt) (raar-attempt-status attempt) (rao-obs-none))
+                      (raar-status-investigate)
+                      (raar-severity-none)
+                      reason
+                      (if (raar-supplied-attempt? attempt) (raar-attempt-detail attempt) (rao-detail-none))
+                      (if (raar-supplied-attempt? attempt) (raar-attempt-code attempt) (rao-code-none))))
+
+    (defn raar-envelope-request-ready? (envelope)
+        (if (rale-envelope? envelope)
+            (str_eq (rale-envelope-status envelope) (rale-status-request-ready))
+            0))
+    (defn raar-terminal-envelope-receipt (envelope)
+        (if (rale-envelope? envelope)
+            (if (str_eq (rale-envelope-status envelope) (rale-status-investigate))
+                (raar-envelope-receipt envelope (raar-status-investigate) (raar-reason-envelope-investigates))
+                (if (str_eq (rale-envelope-status envelope) (rale-status-refused))
+                    (raar-envelope-receipt envelope (raar-status-refused) (raar-reason-envelope-refused))
+                    (raar-envelope-receipt envelope (raar-status-investigate) (raar-reason-non-ready-envelope))))
+            (raar-empty-receipt envelope (raar-no-attempt) (raar-status-refused) (raar-reason-malformed-envelope))))
+
+    (defn raar-observed-severity (status)
+        (if (str_eq status (rao-obs-ok))
+            (raar-severity-ok)
+            (if (eq (rao-hard-status? status) 1)
+                (raar-severity-hard)
+                (if (eq (rao-soft-status? status) 1)
+                    (raar-severity-soft)
+                    (raar-severity-unknown)))))
+    (defn raar-observed-reason (status)
+        (if (str_eq status (rao-obs-ok))
+            (raar-reason-observed-ok)
+            (if (eq (rao-hard-status? status) 1)
+                (raar-reason-observed-hard-investigates)
+                (if (eq (rao-soft-status? status) 1)
+                    (raar-reason-observed-soft)
+                    (raar-reason-observed-unknown-investigates)))))
+    (defn raar-derived-observation-from (envelope attempt)
+        (rao-run-observation
+            (rale-envelope-action envelope)
+            (raar-attempt-status attempt)
+            (raar-attempt-detail attempt)
+            (raar-attempt-code attempt)))
+    (defn raar-observed-receipt (envelope attempt)
+        (raar-receipt envelope
+                      attempt
+                      (raar-derived-observation-from envelope attempt)
+                      (rale-envelope-action envelope)
+                      (rale-envelope-route envelope)
+                      (rale-envelope-artifact-kind envelope)
+                      (rale-envelope-artifact-path envelope)
+                      (rale-envelope-source-hash envelope)
+                      (rale-envelope-content-hash envelope)
+                      (raar-attempt-status attempt)
+                      (raar-status-observed)
+                      (raar-observed-severity (raar-attempt-status attempt))
+                      (raar-observed-reason (raar-attempt-status attempt))
+                      (raar-attempt-detail attempt)
+                      (raar-attempt-code attempt)))
+
+    (defn raar-attempt-matches-envelope? (envelope attempt)
+        (if (str_eq (raar-attempt-action attempt) (rale-envelope-action envelope))
+            (if (eq (raar-attempt-route attempt) (rale-envelope-route envelope))
+                (if (str_eq (raar-attempt-artifact-kind attempt) (rale-envelope-artifact-kind envelope))
+                    (if (str_eq (raar-attempt-artifact-path attempt) (rale-envelope-artifact-path envelope))
+                        (if (str_eq (raar-attempt-source-hash attempt) (rale-envelope-source-hash envelope))
+                            (str_eq (raar-attempt-content-hash attempt) (rale-envelope-content-hash envelope))
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+    (defn raar-mismatch-reason (envelope attempt)
+        (if (not (str_eq (raar-attempt-action attempt) (rale-envelope-action envelope)))
+            (raar-reason-action-mismatch)
+            (if (not (eq (raar-attempt-route attempt) (rale-envelope-route envelope)))
+                (raar-reason-route-mismatch)
+                (if (not (str_eq (raar-attempt-artifact-kind attempt) (rale-envelope-artifact-kind envelope)))
+                    (raar-reason-kind-mismatch)
+                    (if (not (str_eq (raar-attempt-artifact-path attempt) (rale-envelope-artifact-path envelope)))
+                        (raar-reason-path-mismatch)
+                        (if (not (str_eq (raar-attempt-source-hash attempt) (rale-envelope-source-hash envelope)))
+                            (raar-reason-source-hash-mismatch)
+                            (raar-reason-content-hash-mismatch)))))))
+
+    (defn raar-receipt-from-envelope (envelope)
+        (if (eq (raar-envelope-request-ready? envelope) 1)
+            (raar-envelope-receipt envelope (raar-status-pending-observation) (raar-reason-pending-observation))
+            (raar-terminal-envelope-receipt envelope)))
+    (defn raar-receipt-from-envelope-age (envelope age deadline)
+        (if (eq (raar-envelope-request-ready? envelope) 1)
+            (if (gt age deadline)
+                (raar-envelope-receipt envelope (raar-status-investigate) (raar-reason-pending-observation-stalled))
+                (raar-envelope-receipt envelope (raar-status-pending-observation) (raar-reason-pending-observation)))
+            (raar-terminal-envelope-receipt envelope)))
+    (defn raar-receipt-from-envelope-attempt (envelope attempt)
+        (if (eq (raar-envelope-request-ready? envelope) 1)
+            (if (eq (raar-supplied-attempt? attempt) 1)
+                (if (eq (raar-attempt-matches-envelope? envelope attempt) 1)
+                    (raar-observed-receipt envelope attempt)
+                    (raar-mismatch-receipt envelope attempt (raar-mismatch-reason envelope attempt)))
+                (raar-empty-receipt envelope attempt (raar-status-refused) (raar-reason-malformed-attempt)))
+            (raar-terminal-envelope-receipt envelope)))
+)

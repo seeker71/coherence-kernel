@@ -1,0 +1,200 @@
+; runtime-artifact-retry.fk -- Layer 9d fallback re-selection face.
+;
+; This layer consumes Layer 9c `runtime-artifact-outcome` rows and emits retry
+; rows. It may request a new synthetic `ras-selection` for the two reviewed
+; fallback pairings, but it does not execute that fallback, generate runtime
+; observations, load or walk `.fkb`, load or call `.dylib`, bind symbols,
+; decide source-runner admission, reverify proof/callable receipts, or grow the
+; C seed.
+;
+; Retry matrix:
+;   fallback-available, run-native -> run-program-image  -> retry-ready
+;   fallback-available, run-program-image -> compile-source -> retry-ready
+;   complete                                      -> terminal-complete
+;   pending-observation                           -> waiting-observation
+;   investigate                                   -> terminal-investigate
+;   refused                                       -> terminal-refused
+;   hard observation status                       -> investigate
+;   unknown fallback pairing                      -> investigate
+;   malformed outcome                             -> refused
+;
+; The retry row carries the full source outcome as provenance. The nested
+; selection is a next-request row, not proof that the fallback ran or succeeded.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/source-artifact-cache.fk
+;           form-stdlib/source-artifact-descriptor.fk
+;           form-stdlib/runtime-artifact-plan.fk
+;           form-stdlib/runtime-artifact-selector.fk
+;           form-stdlib/runtime-artifact-outcome.fk
+
+(do
+    (defn rar-feature (name status) (list "runtime-artifact-retry-feature" name status))
+    (defn rar-feature-name (f) (nth f 1))
+    (defn rar-feature-status (f) (nth f 2))
+    (defn runtime-artifact-retry-manifest ()
+        (list
+            (rar-feature "retry-face-not-execution" 1)
+            (rar-feature "consumes-rao-outcome-only" 1)
+            (rar-feature "total-retry-row" 1)
+            (rar-feature "fallback-available-only-retries" 1)
+            (rar-feature "hard-outcomes-do-not-retry" 1)
+            (rar-feature "synthetic-fallback-selection-not-from-plan" 1)
+            (rar-feature "known-pairing-table-only" 1)
+            (rar-feature "retry-row-carries-source-outcome" 1)
+            (rar-feature "no-descriptor-consumption" 1)
+            (rar-feature "no-rap-plan-consumption" 1)
+            (rar-feature "no-observation-generation" 1)
+            (rar-feature "no-runtime-load-walk-call-exec" 1)
+            (rar-feature "no-fallback-execution-or-retry-loop" 1)
+            (rar-feature "no-admission-policy" 1)
+            (rar-feature "no-seal-proof-callable-reverify" 1)
+            (rar-feature "no-c-seed-growth-or-selector-install" 1)))
+    (defn runtime-artifact-retry-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (rar-feature-name (head fs)) name)
+                     (eq (rar-feature-status (head fs)) 1))
+                1
+                (runtime-artifact-retry-manifest-has? name (tail fs)))))
+
+    (defn rar-status-retry-ready () "retry-ready")
+    (defn rar-status-terminal-complete () "terminal-complete")
+    (defn rar-status-waiting-observation () "waiting-observation")
+    (defn rar-status-terminal-investigate () "terminal-investigate")
+    (defn rar-status-terminal-refused () "terminal-refused")
+    (defn rar-status-investigate () "investigate")
+    (defn rar-status-refused () "refused")
+
+    (defn rar-reason-fallback-reselected-program-image () "fallback-reselected-program-image")
+    (defn rar-reason-fallback-reselected-compile-source () "fallback-reselected-compile-source")
+    (defn rar-reason-terminal-complete () "terminal-complete")
+    (defn rar-reason-waiting-observation () "waiting-observation")
+    (defn rar-reason-outcome-investigates () "outcome-investigates")
+    (defn rar-reason-outcome-refused () "outcome-refused")
+    (defn rar-reason-hard-outcome-no-retry () "hard-outcome-no-retry")
+    (defn rar-reason-corrupt-fallback-available () "corrupt-fallback-available")
+    (defn rar-reason-unknown-fallback-pairing () "unknown-fallback-pairing")
+    (defn rar-reason-unknown-outcome-status () "unknown-outcome-status")
+    (defn rar-reason-malformed-outcome () "malformed-outcome")
+
+    (defn rar-no-selection () (list "runtime-artifact-no-retry-selection"))
+    (defn rar-no-selection? (s)
+        (if (eq (len s) 1)
+            (str_eq (nth s 0) "runtime-artifact-no-retry-selection")
+            0))
+
+    ; retry = ("runtime-artifact-retry" source-outcome prior-route
+    ;          prior-attempted fallback next-selection status reason
+    ;          prior-outcome-status prior-outcome-reason)
+    (defn rar-retry (source-outcome prior-route prior-attempted fallback next-selection status reason prior-status prior-reason)
+        (list "runtime-artifact-retry" source-outcome prior-route
+              prior-attempted fallback next-selection status reason
+              prior-status prior-reason))
+    (defn rar-retry? (r)
+        (if (eq (len r) 10)
+            (str_eq (nth r 0) "runtime-artifact-retry")
+            0))
+    (defn rar-retry-source-outcome (r) (nth r 1))
+    (defn rar-retry-prior-route (r) (nth r 2))
+    (defn rar-retry-prior-attempted (r) (nth r 3))
+    (defn rar-retry-fallback (r) (nth r 4))
+    (defn rar-retry-next-selection (r) (nth r 5))
+    (defn rar-retry-status (r) (nth r 6))
+    (defn rar-retry-reason (r) (nth r 7))
+    (defn rar-retry-prior-status (r) (nth r 8))
+    (defn rar-retry-prior-reason (r) (nth r 9))
+
+    (defn rar-next-program-image-selection ()
+        (ras-selection (sac-run-fkb)
+                       (rap-act-run-program-image)
+                       (rap-act-compile-source)
+                       (ras-status-selected)
+                       1
+                       0
+                       (ras-reason-selected-program-image)))
+    (defn rar-next-compile-source-selection ()
+        (ras-selection (sac-run-source-compile)
+                       (rap-act-compile-source)
+                       (rap-act-none)
+                       (ras-status-selected)
+                       0
+                       0
+                       (ras-reason-selected-compile-source)))
+
+    (defn rar-known-native-fallback? (o)
+        (if (str_eq (rao-outcome-attempted o) (rap-act-run-native))
+            (str_eq (rao-outcome-fallback o) (rap-act-run-program-image))
+            0))
+    (defn rar-known-fkb-fallback? (o)
+        (if (str_eq (rao-outcome-attempted o) (rap-act-run-program-image))
+            (str_eq (rao-outcome-fallback o) (rap-act-compile-source))
+            0))
+    (defn rar-fallback-present? (o)
+        (if (str_eq (rao-outcome-fallback o) (rap-act-none)) 0 1))
+    (defn rar-source-selected? (o)
+        (str_eq (rao-outcome-selection-status o) (ras-status-selected)))
+    (defn rar-soft-observation? (o)
+        (rao-soft-status? (rao-outcome-observation-status o)))
+    (defn rar-hard-observation? (o)
+        (rao-hard-status? (rao-outcome-observation-status o)))
+
+    (defn rar-row-from-outcome (o next-selection status reason)
+        (rar-retry o
+                   (rao-outcome-route o)
+                   (rao-outcome-attempted o)
+                   (rao-outcome-fallback o)
+                   next-selection
+                   status
+                   reason
+                   (rao-outcome-status o)
+                   (rao-outcome-reason o)))
+    (defn rar-refused-row ()
+        (rar-retry (list "runtime-artifact-malformed-outcome")
+                   (rao-route-unknown)
+                   (rao-action-none)
+                   (rao-action-none)
+                   (rar-no-selection)
+                   (rar-status-refused)
+                   (rar-reason-malformed-outcome)
+                   (rar-status-refused)
+                   (rar-reason-malformed-outcome)))
+    (defn rar-no-selection-row (o status reason)
+        (rar-row-from-outcome o (rar-no-selection) status reason))
+
+    (defn rar-retry-from-fallback-available (o)
+        (if (eq (rar-source-selected? o) 1)
+            (if (eq (rar-fallback-present? o) 1)
+                (if (eq (rar-hard-observation? o) 1)
+                    (rar-no-selection-row o (rar-status-investigate) (rar-reason-hard-outcome-no-retry))
+                    (if (eq (rar-soft-observation? o) 1)
+                        (if (eq (rar-known-native-fallback? o) 1)
+                            (rar-row-from-outcome o
+                                                  (rar-next-program-image-selection)
+                                                  (rar-status-retry-ready)
+                                                  (rar-reason-fallback-reselected-program-image))
+                            (if (eq (rar-known-fkb-fallback? o) 1)
+                                (rar-row-from-outcome o
+                                                      (rar-next-compile-source-selection)
+                                                      (rar-status-retry-ready)
+                                                      (rar-reason-fallback-reselected-compile-source))
+                                (rar-no-selection-row o (rar-status-investigate) (rar-reason-unknown-fallback-pairing))))
+                        (rar-no-selection-row o (rar-status-investigate) (rar-reason-corrupt-fallback-available))))
+                (rar-no-selection-row o (rar-status-refused) (rar-reason-corrupt-fallback-available)))
+            (rar-no-selection-row o (rar-status-investigate) (rar-reason-corrupt-fallback-available))))
+
+    (defn rar-retry-from-outcome (o)
+        (if (eq (rao-outcome? o) 1)
+            (if (str_eq (rao-outcome-status o) (rao-status-fallback-available))
+                (rar-retry-from-fallback-available o)
+                (if (str_eq (rao-outcome-status o) (rao-status-complete))
+                    (rar-no-selection-row o (rar-status-terminal-complete) (rar-reason-terminal-complete))
+                    (if (str_eq (rao-outcome-status o) (rao-status-pending-observation))
+                        (rar-no-selection-row o (rar-status-waiting-observation) (rar-reason-waiting-observation))
+                        (if (str_eq (rao-outcome-status o) (rao-status-investigate))
+                            (rar-no-selection-row o (rar-status-terminal-investigate) (rar-reason-outcome-investigates))
+                            (if (str_eq (rao-outcome-status o) (rao-status-refused))
+                                (rar-no-selection-row o (rar-status-terminal-refused) (rar-reason-outcome-refused))
+                                (rar-no-selection-row o (rar-status-investigate) (rar-reason-unknown-outcome-status)))))))
+            (rar-refused-row)))
+)
