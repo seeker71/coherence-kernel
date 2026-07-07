@@ -5,12 +5,12 @@
 ; The RAG memory embeds text through a neural model (nomic-embed-text over ollama)
 ; — a local model-door crossing, higher semantic quality, but not Form and not
 ; sovereign. This is the floor beneath that bridge: a deterministic LEXICAL
-; embedding written entirely in Form. tk-words lowercases the text to space-joined
-; letter-words; re-split lifts that to a word list; each word folds to a bounded
-; non-negative polynomial hash (h = h*31 + ord, mod a prime); the bucket is that
-; hash mod dim; re-vec-dim counts buckets into a fixed-width histogram. Same text =>
-; same vector on every kernel — a content-addressed substrate cell, four-way
-; provable (Go = Rust = TS = fkwu), needing no model, no network, no host-io.
+; embedding written entirely in Form. re-norm lowercases the text to space-joined
+; letter/digit-words (pure Form, no tokenize prelude); re-split lifts that to a
+; word list; each word folds to a bounded non-negative polynomial hash (h = h*31 +
+; byte, mod a prime, via str_byte_at); the bucket is that hash mod dim; re-vec-dim
+; counts buckets into a fixed-width histogram. Same text => same vector on every
+; kernel — a content-addressed substrate cell, needing no model, no network, no host-io.
 ;
 ; Honest floor: this is LEXICAL similarity (token overlap), not neural semantics —
 ; "cat" and "feline" land in unrelated buckets. It is sovereign and proven; the
@@ -37,36 +37,62 @@
                 (re-split-scan s (add i 1) n (str_concat cur c) out)))))
     (defn re-split (s) (re-split-scan s 0 (str_len s) "" (empty)))
 
-    ; --- polynomial hash of a word: h = h*31 + ord(char), mod prime each step so ---
-    ; it stays bounded and non-negative on every kernel (only add/mul/mod/ord/substring).
+    ; --- polynomial hash of a word: h = h*31 + byte, mod prime each step so it stays ---
+    ; bounded and non-negative on every kernel. str_byte_at is the working byte read on
+    ; this fkwu (ord evaluates to nothing here — the same repair nl-meaning-net names).
     (defn re-prime () 1000003)
     (defn re-hash-fold (w i n h)
         (if (ge i n) h
             (re-hash-fold w (add i 1) n
-                (mod (add (mul h 31) (ord (substring w i (add i 1)))) (re-prime)))))
+                (mod (add (mul h 31) (str_byte_at w i)) (re-prime)))))
     (defn re-hash (w) (re-hash-fold w 0 (str_len w) 0))
 
     ; --- which dim-bucket a word lands in. ---
     (defn re-bucket (word dim) (mod (re-hash word) dim))
 
-    ; --- a zero list of length n (the empty histogram). ---
-    (defn re-zeros (n)
-        (if (eq n 0) (empty)
-            (cons 0 (re-zeros (sub n 1)))))
+    ; --- reverse acc onto rest (the shared tail-recursive spine of the list rebuilds). ---
+    (defn re-rev-into (acc rest)
+        (if (eq (len acc) 0) rest
+            (re-rev-into (tail acc) (cons (head acc) rest))))
 
-    ; --- increment the count at index i in a list (rebuild; no mutation). ---
-    (defn re-inc (xs i)
-        (if (eq i 0) (cons (add (head xs) 1) (tail xs))
-            (cons (head xs) (re-inc (tail xs) (sub i 1)))))
+    ; --- a zero list of length n (the empty histogram). Tail-recursive: the old ---
+    ; structural recursion used one walker C-frame per element, which overflows small
+    ; host stacks (Windows ~120 frames) at dim >= 128. Same repair family as tk-join.
+    (defn re-zeros-scan (n acc)
+        (if (eq n 0) acc
+            (re-zeros-scan (sub n 1) (cons 0 acc))))
+    (defn re-zeros (n) (re-zeros-scan n (empty)))
+
+    ; --- increment the count at index i in a list (rebuild; no mutation; tail). ---
+    (defn re-inc-scan (xs i acc)
+        (if (eq i 0)
+            (re-rev-into acc (cons (add (head xs) 1) (tail xs)))
+            (re-inc-scan (tail xs) (sub i 1) (cons (head xs) acc))))
+    (defn re-inc (xs i) (re-inc-scan xs i (empty)))
 
     ; --- fold a word list into a histogram: +1 at each word's bucket. ---
     (defn re-fill (words vec dim)
         (if (eq (len words) 0) vec
             (re-fill (tail words) (re-inc vec (re-bucket (head words) dim)) dim)))
 
+    ; --- normalize text to space-joined lowercase letter/digit words, in pure Form. ---
+    ; This replaces the tk-words prelude (form-stdlib/text-tokenize.fk), which is not in
+    ; this repo: A-Z fold to a-z, digits pass, every other byte becomes a space (re-split
+    ; already skips blank runs). "France?" and "france" now land in the same bucket.
+    (defn re-norm-scan (s i n out)
+        (if (ge i n) out
+            (do (let b (str_byte_at s i))
+            (re-norm-scan s (add i 1) n
+                (str_concat out
+                    (if (and (ge b 65) (le b 90)) (byte_to_str (add b 32))
+                    (if (and (ge b 97) (le b 122)) (byte_to_str b)
+                    (if (and (ge b 48) (le b 57)) (byte_to_str b)
+                        " "))))))))
+    (defn re-norm (s) (re-norm-scan s 0 (str_len s) ""))
+
     ; --- the embedding: token-hash histogram of width dim. ---
     (defn re-vec-dim (text dim)
-        (re-fill (re-split (tk-words text 1)) (re-zeros dim) dim))
+        (re-fill (re-split (re-norm text)) (re-zeros dim) dim))
 
     ; --- 64 is the default embedding dim. ---
     (defn re-default-dim () 64)
