@@ -1058,58 +1058,6 @@ func importSourceAttribution(dst, src *Kernel, srcNid, dstNid NodeID) {
 	dst.framebufferRoots = append(dst.framebufferRoots, dstNid)
 }
 
-func pinRuntimeCompiledRoot(k *Kernel, root NodeID, label string) {
-	if label == "" {
-		label = "runtime:string"
-	}
-	if _, ok := k.sourceAttr[root]; !ok {
-		fileNid := k.internString(label)
-		k.sourceAttr[root] = sourceLoc{FileID: NameID(fileNid.Inst), Line: 1, Col: 1}
-		k.framebufferRoots = append(k.framebufferRoots, root)
-	}
-	k.activeRoots = append(k.activeRoots, root)
-}
-
-func compileSourceSectionIntoKernel(dst *Kernel, dialectName, body, label string) (NodeID, error) {
-	stdlibAbs, err := defaultFormStdlibDir()
-	if err != nil {
-		return NodeID{}, err
-	}
-	sourceCompileMu.Lock()
-	defer sourceCompileMu.Unlock()
-	sectionKernel, sectionRoot, err := compileSourceSectionToRecipeNode(dialectName, body, stdlibAbs)
-	if err != nil {
-		return NodeID{}, err
-	}
-	imported := importRecipeFrom(dst, sectionKernel, sectionRoot)
-	pinRuntimeCompiledRoot(dst, imported, label)
-	return imported, nil
-}
-
-func compileSourceTextIntoKernel(dst *Kernel, sourceLabel, src string) (NodeID, error) {
-	stdlibAbs, err := defaultFormStdlibDir()
-	if err != nil {
-		return NodeID{}, err
-	}
-	sourceCompileMu.Lock()
-	defer sourceCompileMu.Unlock()
-	sectionKernel := NewKernel()
-	roots := []NodeID{}
-	if err := compileRouteSourceIntoRecipe(sectionKernel, &roots, sourceLabel, src, stdlibAbs); err != nil {
-		return NodeID{}, err
-	}
-	if len(roots) == 0 {
-		return NodeID{}, errors.New("source compiler produced no recipe roots")
-	}
-	root := roots[0]
-	if len(roots) > 1 {
-		root = sectionKernel.intern(catBlock(RBlockDo), roots)
-	}
-	imported := importRecipeFrom(dst, sectionKernel, root)
-	pinRuntimeCompiledRoot(dst, imported, sourceLabel)
-	return imported, nil
-}
-
 func sourceLineNext(src string, i int) int {
 	if off := strings.IndexByte(src[i:], '\n'); off >= 0 {
 		return i + off + 1

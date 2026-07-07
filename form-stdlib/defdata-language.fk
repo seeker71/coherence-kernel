@@ -1,0 +1,116 @@
+; defdata-language.fk -- scannerless data-literal authoring surface.
+;
+; This is the first source-language rung above defdata.fk's policy and lowered
+; module-constant target. It does not add a kernel primitive and does not extend
+; the line/block source compiler. It uses the BMF cursor grammar waist to parse
+; a small non-s-expression surface:
+;
+;     data rows = [8,13,21]
+;
+; The parsed declaration lowers to the current checkout-witness target:
+;
+;     (let rows (list 8 13 21))
+;
+; preludes: form-stdlib/core.fk form-stdlib/bmf-core.fk
+;           form-stdlib/bmf-grammar.fk form-stdlib/defdata.fk
+
+(do
+    (defn ddl-feature (name status) (list "defdata-language-feature" name status))
+    (defn ddl-feature-name (f) (nth f 1))
+    (defn ddl-feature-status (f) (nth f 2))
+    (defn defdata-language-manifest ()
+        (list
+            (ddl-feature "scannerless" 1)
+            (ddl-feature "bmf-cursor-grammar" 1)
+            (ddl-feature "no-line-grammar" 1)
+            (ddl-feature "literal-int-list" 1)
+            (ddl-feature "module-constant-lowering" 1)
+            (ddl-feature "not-runtime-primitive" 1)))
+    (defn defdata-language-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (ddl-feature-name (head fs)) name)
+                     (eq (ddl-feature-status (head fs)) 1))
+                1
+                (defdata-language-manifest-has? name (tail fs)))))
+
+    (defn defdata-language-grammar ()
+        (grammar "decl" (list
+            (rule3 "decl"
+                (list "seq"
+                    (p-lit "data")
+                    (p-cap "name" (p-ref "name"))
+                    (p-lit "=")
+                    (p-lit "[")
+                    (p-cap "values" (p-sep (p-ref "int") (p-lit ",")))
+                    (p-lit "]"))
+                (t-emit "fncall"
+                    (list (t-const "__ddl_data__")
+                          (t-splice "name")
+                          (t-splices "values"))))
+            (rule3 "name"
+                (p-cap "v" (p-run "alpha"))
+                (t-splice "v"))
+            (rule3 "int"
+                (p-cap "v" (p-run "digit"))
+                (t-splice "v")))))
+
+    (defn ddl-parse-fail () (intern_trivial_string "PARSE-FAIL"))
+    (defn ddl-ok? (node) (not (node_eq node (ddl-parse-fail))))
+
+    ; Full-source parse: unlike raw g-parse, this rejects trailing sediment.
+    (defn ddl-parse (src)
+        (do
+            (let rr (g-match-rule (defdata-language-grammar) "decl" (cursor-str src)))
+            (if (and (rok? rr) (cur-eof? (skip-ws (rok-cur rr))))
+                (rok-node rr)
+                (ddl-parse-fail))))
+
+    (defn ddl-name (decl)
+        (node_value (nth (node_children decl) 1)))
+    (defn ddl-value-nodes (decl)
+        (tail (tail (node_children decl))))
+    (defn ddl-values-loop (nodes)
+        (if (nil? nodes)
+            (empty)
+            (cons (str_to_int (node_value (head nodes)))
+                  (ddl-values-loop (tail nodes)))))
+    (defn ddl-values (decl)
+        (ddl-values-loop (ddl-value-nodes decl)))
+    (defn ddl-value-count (decl)
+        (len (ddl-values decl)))
+    (defn ddl-value-head (decl)
+        (head (ddl-values decl)))
+
+    (defn ddl-policy (decl)
+        (dd-policy (ddl-value-count decl) 0 1 0))
+
+    (defn ddl-values-source-loop (values)
+        (if (nil? values)
+            ""
+            (if (nil? (tail values))
+                (int_to_str (head values))
+                (str_concat (int_to_str (head values))
+                    (str_concat " " (ddl-values-source-loop (tail values)))))))
+    (defn ddl-list-source (values)
+        (if (nil? values)
+            "(list)"
+            (str_concat "(list " (str_concat (ddl-values-source-loop values) ")"))))
+    (defn ddl-module-let-source (decl)
+        (str_concat "(let "
+            (str_concat (ddl-name decl)
+                (str_concat " " (str_concat (ddl-list-source (ddl-values decl)) ")")))))
+
+    (defn ddl-lowering (decl)
+        (list "defdata-lowering"
+              "module-constant"
+              (ddl-name decl)
+              (ddl-values decl)
+              (ddl-policy decl)
+              (ddl-module-let-source decl)))
+    (defn ddl-lowering-kind (l) (nth l 1))
+    (defn ddl-lowering-name (l) (nth l 2))
+    (defn ddl-lowering-values (l) (nth l 3))
+    (defn ddl-lowering-policy (l) (nth l 4))
+    (defn ddl-lowering-source (l) (nth l 5))
+)

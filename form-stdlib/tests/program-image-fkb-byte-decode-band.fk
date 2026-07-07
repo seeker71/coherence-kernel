@@ -1,0 +1,412 @@
+; program-image-fkb-byte-decode-band.fk -- 8h6 canonical byte decode and witness admission.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/form-fs.fk form-stdlib/file-byte-window.fk form-stdlib/source-artifact-cache.fk form-stdlib/source-artifact-descriptor.fk form-stdlib/runtime-artifact-plan.fk form-stdlib/source-artifact-probe.fk form-stdlib/source-artifact-identity.fk form-stdlib/program-image-fkb.fk form-stdlib/program-image-fkb-byte-container.fk form-stdlib/program-image-fkb-byte-file-witness.fk form-stdlib/program-image-fkb-byte-decode.fk
+;
+; Expected: 536870911
+
+(do
+    (defn pifbdb-score (ok bit) (if ok bit 0))
+    (defn pifbdb-manifest-has (name)
+        (program-image-fkb-byte-decode-manifest-has? name (program-image-fkb-byte-decode-manifest)))
+    (defn pifbdb-bytes-eq? (a b)
+        (if (eq (len a) (len b))
+            (if (nil? a)
+                1
+                (if (eq (head a) (head b))
+                    (pifbdb-bytes-eq? (tail a) (tail b))
+                    0))
+            0))
+    (defn pifbdb-take (xs n)
+        (if (or (le n 0) (nil? xs))
+            (empty)
+            (cons (head xs) (pifbdb-take (tail xs) (sub n 1)))))
+    (defn pifbdb-replace-nth (xs i v)
+        (if (nil? xs)
+            (empty)
+            (if (eq i 0)
+                (cons v (tail xs))
+                (cons (head xs) (pifbdb-replace-nth (tail xs) (sub i 1) v)))))
+
+    (defn pifbdb-temp-root ()
+        (fs-path-join (fs-temp-dir) "program-image-fkb-byte-decode-band"))
+    (defn pifbdb-path (name)
+        (fs-path-join (pifbdb-temp-root) name))
+    (defn pifbdb-ready-path () (pifbdb-path "ready.fkb"))
+    (defn pifbdb-nonready-path () (pifbdb-path "nonready.fkb"))
+    (defn pifbdb-forged-path () (pifbdb-path "forged.fkb"))
+    (defn pifbdb-setup ()
+        (do
+            (let _pre (fs-remove-tree (pifbdb-temp-root)))
+            (fs-mkdir (pifbdb-temp-root))))
+    (defn pifbdb-cleanup ()
+        (fs-remove-tree (pifbdb-temp-root)))
+
+    (defn pifbdb-zero-hash ()
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000")
+    (defn pifbdb-table ()
+        (pif-table-image 1
+                         (list 0)
+                         2
+                         (list (pif-node-row 1 42 0 0)
+                               (pif-node-row 12 (sub 0 3) 0 0))
+                         1
+                         (list (list 65 66))))
+    (defn pifbdb-symbol-image ()
+        (pif-symbol-image 2
+                          (list (pif-symbol-row 0 "core/main")
+                                (pif-symbol-row 1 "core/add"))
+                          2
+                          (list (pif-node-symbol-row 0 0 (list (pif-symbol-dependency-target 1 1)))
+                                (pif-node-symbol-row 1 1 (empty)))))
+    (defn pifbdb-symbol-image-alt ()
+        (pif-symbol-image 2
+                          (list (pif-symbol-row 0 "core/main")
+                                (pif-symbol-row 1 "core/add"))
+                          2
+                          (list (pif-node-symbol-row 0 0 (list (pif-symbol-dependency-target 1 0)))
+                                (pif-node-symbol-row 1 1 (empty)))))
+    (defn pifbdb-empty-envelope-with (path content-hash)
+        (pif-envelope "s.fk" "sha256:src" 100 path content-hash 101 1 (pifbdb-table)))
+    (defn pifbdb-symbol-envelope-with (path content-hash)
+        (pif-envelope-with-symbols "s.fk" "sha256:src" 100 path content-hash 101 1
+                                   (pifbdb-table)
+                                   (pifbdb-symbol-image)))
+    (defn pifbdb-empty-actual-hash-for (path)
+        (sai-sha256-hex (pifbc-payload-bytes (pifbdb-empty-envelope-with path (pifbdb-zero-hash)))))
+    (defn pifbdb-symbol-actual-hash-for (path)
+        (sai-sha256-hex (pifbc-payload-bytes (pifbdb-symbol-envelope-with path (pifbdb-zero-hash)))))
+    (defn pifbdb-empty-envelope (path)
+        (pifbdb-empty-envelope-with path (pifbdb-empty-actual-hash-for path)))
+    (defn pifbdb-symbol-envelope (path)
+        (pifbdb-symbol-envelope-with path (pifbdb-symbol-actual-hash-for path)))
+    (defn pifbdb-empty-bytes ()
+        (pifbc-payload-bytes (pifbdb-empty-envelope "s.fkb")))
+    (defn pifbdb-symbol-bytes ()
+        (pifbc-payload-bytes (pifbdb-symbol-envelope "s.fkb")))
+    (defn pifbdb-ready-container ()
+        (pifbc-container-from-envelope (pifbdb-symbol-envelope (pifbdb-ready-path))))
+    (defn pifbdb-nonready-container ()
+        (pifbc-container-from-envelope (pifbdb-symbol-envelope-with (pifbdb-nonready-path) (pifbdb-zero-hash))))
+
+    (defn pifbdb-ready-witness ()
+        (pifbf-file-witness-from-container (pifbdb-ready-container)))
+    (defn pifbdb-ready-window ()
+        (pifbf-witness-window (pifbdb-ready-witness)))
+    (defn pifbdb-ready-bytes ()
+        (pifbc-container-bytes (pifbdb-ready-container)))
+    (defn pifbdb-ready-len ()
+        (len (pifbdb-ready-bytes)))
+    (defn pifbdb-forged-window-status ()
+        (fbw-window (pifbdb-ready-path)
+                    0
+                    (pifbdb-ready-len)
+                    (pifbdb-ready-len)
+                    (fbw-status-missing)
+                    (fbw-window-slice (pifbdb-ready-window))
+                    (fbw-window-evidence-route (pifbdb-ready-window))))
+    (defn pifbdb-forged-origin-window ()
+        (fbw-window (pifbdb-forged-path)
+                    1
+                    (pifbdb-ready-len)
+                    (pifbdb-ready-len)
+                    (fbw-status-ready)
+                    (fbw-window-slice (pifbdb-ready-window))
+                    (fbw-window-evidence-route (pifbdb-ready-window))))
+    (defn pifbdb-forged-size-witness ()
+        (pifbf-witness (pifbdb-ready-container)
+                       (pifbdb-ready-path)
+                       0
+                       (pifbdb-ready-len)
+                       (pifbdb-ready-window)
+                       (pifbf-witness-readback-vouch (pifbdb-ready-witness))
+                       (pifbf-status-ready)
+                       (pifbf-reason-ready)))
+    (defn pifbdb-forged-vouch-witness ()
+        (pifbf-witness (pifbdb-ready-container)
+                       (pifbdb-ready-path)
+                       (pifbdb-ready-len)
+                       (pifbdb-ready-len)
+                       (pifbdb-ready-window)
+                       (pifbc-empty-vouch)
+                       (pifbf-status-ready)
+                       (pifbf-reason-ready)))
+    (defn pifbdb-forged-window-witness ()
+        (pifbf-witness (pifbdb-ready-container)
+                       (pifbdb-ready-path)
+                       (pifbdb-ready-len)
+                       (pifbdb-ready-len)
+                       (pifbdb-forged-window-status)
+                       (pifbf-witness-readback-vouch (pifbdb-ready-witness))
+                       (pifbf-status-ready)
+                       (pifbf-reason-ready)))
+    (defn pifbdb-forged-origin-witness ()
+        (pifbf-witness (pifbdb-ready-container)
+                       (pifbdb-forged-path)
+                       (pifbdb-ready-len)
+                       (pifbdb-ready-len)
+                       (pifbdb-forged-origin-window)
+                       (pifbf-witness-readback-vouch (pifbdb-ready-witness))
+                       (pifbf-status-ready)
+                       (pifbf-reason-ready)))
+    (defn pifbdb-forged-source-container ()
+        (do
+            (let c (pifbdb-ready-container))
+            (let pif (pif-envelope-with-symbols "other.fk"
+                                                "sha256:src"
+                                                100
+                                                (pifbdb-ready-path)
+                                                (pif-envelope-content-hash (pifbc-container-pif c))
+                                                101
+                                                1
+                                                (pifbdb-table)
+                                                (pifbdb-symbol-image)))
+            (pifbc-container pif
+                             (pifbc-container-bytes c)
+                             (pifbc-container-vouch c)
+                             (pifbc-status-ready)
+                             (pifbc-reason-ready))))
+    (defn pifbdb-forged-symbol-container ()
+        (do
+            (let c (pifbdb-ready-container))
+            (let pif (pif-envelope-with-symbols "s.fk"
+                                                "sha256:src"
+                                                100
+                                                (pifbdb-ready-path)
+                                                (pif-envelope-content-hash (pifbc-container-pif c))
+                                                101
+                                                1
+                                                (pifbdb-table)
+                                                (pifbdb-symbol-image-alt)))
+            (pifbc-container pif
+                             (pifbc-container-bytes c)
+                             (pifbc-container-vouch c)
+                             (pifbc-status-ready)
+                             (pifbc-reason-ready))))
+    (defn pifbdb-forged-source-witness ()
+        (pifbf-witness (pifbdb-forged-source-container)
+                       (pifbdb-ready-path)
+                       (pifbdb-ready-len)
+                       (pifbdb-ready-len)
+                       (pifbdb-ready-window)
+                       (pifbf-witness-readback-vouch (pifbdb-ready-witness))
+                       (pifbf-status-ready)
+                       (pifbf-reason-ready)))
+    (defn pifbdb-forged-symbol-witness ()
+        (pifbf-witness (pifbdb-forged-symbol-container)
+                       (pifbdb-ready-path)
+                       (pifbdb-ready-len)
+                       (pifbdb-ready-len)
+                       (pifbdb-ready-window)
+                       (pifbf-witness-readback-vouch (pifbdb-ready-witness))
+                       (pifbf-status-ready)
+                       (pifbf-reason-ready)))
+    (defn pifbdb-malformed-container-witness ()
+        (pifbf-witness (list "not-container")
+                       ""
+                       0
+                       0
+                       (pifbf-empty-window "")
+                       (pifbf-empty-vouch "")
+                       (pifbf-status-ready)
+                       (pifbf-reason-ready)))
+
+    (defn pifbdb-bit-manifest-1 ()
+        (sum (list
+            (pifbdb-score (eq (pifbdb-manifest-has "byte-decoder-not-loader") 1) 1)
+            (pifbdb-score (eq (pifbdb-manifest-has "pure-bytes-to-payload-decode") 1) 2)
+            (pifbdb-score (eq (pifbdb-manifest-has "witness-admission-separate") 1) 4)
+            (pifbdb-score (eq (pifbdb-manifest-has "uses-8h5-readback-window-bytes") 1) 8)
+            (pifbdb-score (eq (pifbdb-manifest-has "cursor-exhaustion-required") 1) 16)
+            (pifbdb-score (and (eq (pifbdb-manifest-has "canonical-reencode-required") 1)
+                           (and (eq (pifbdb-manifest-has "symbol-dependency-section-decoded") 1)
+                                (eq (pifbdb-manifest-has "symbol-dependency-targets-decoded") 1))) 32)
+            (pifbdb-score (eq (pifbdb-manifest-has "content-hash-external-metadata") 1) 64))))
+    (defn pifbdb-bit-manifest-2 ()
+        (sum (list
+            (pifbdb-score (eq (pifbdb-manifest-has "artifact-mtime-external-metadata") 1) 128)
+            (pifbdb-score (eq (pifbdb-manifest-has "table-counts-validated") 1) 256)
+            (pifbdb-score (eq (pifbdb-manifest-has "explicit-reason-manifest") 1) 512)
+            (pifbdb-score (and (eq (pifbdb-manifest-has "no-table-text-bridge") 1)
+                           (and (eq (pifbdb-manifest-has "no-form-binary-io") 1)
+                           (and (eq (pifbdb-manifest-has "no-runtime-execution") 1)
+                           (and (eq (pifbdb-manifest-has "no-selector-install") 1)
+                                (eq (pifbdb-manifest-has "no-c-seed-growth") 1))))) 1024))))
+
+    (defn pifbdb-bit-empty-decode ()
+        (do
+            (let d (pifbd-decode-bytes (pifbdb-empty-bytes)))
+            (pifbdb-score
+                (and (pifbd-decoded? d)
+                (and (eq (pifbd-decode-next d) (len (pifbdb-empty-bytes)))
+                     (eq (pif-symbol-image-count (pifbd-payload-symbol-image (pifbd-decode-payload d))) 0)))
+                2048)))
+    (defn pifbdb-bit-symbol-decode ()
+        (do
+            (let d (pifbd-decode-bytes (pifbdb-symbol-bytes)))
+            (let img (pifbd-payload-symbol-image (pifbd-decode-payload d)))
+            (let target (head (pif-node-symbol-row-dependency-targets (head (pif-symbol-image-node-rows img)))))
+            (pifbdb-score
+                (and (pifbd-decoded? d)
+                (and (eq (len (pifbdb-symbol-bytes)) 204)
+                (and (eq (pif-symbol-image-count img) 2)
+                (and (eq (len (pif-node-symbol-row-dependency-targets (head (pif-symbol-image-node-rows img)))) 1)
+                (and (eq (pif-symbol-dependency-target-symbol target) 1)
+                     (eq (pif-symbol-dependency-target-node target) 1))))))
+                4096)))
+    (defn pifbdb-bit-tail-garbage ()
+        (do
+            (let d (pifbd-decode-bytes (append-list (pifbdb-empty-bytes) (list 9))))
+            (pifbdb-score (str_eq (pifbd-decode-reason d) (pifbd-reason-tail-garbage)) 8192)))
+    (defn pifbdb-bit-bad-magic ()
+        (do
+            (let d (pifbd-decode-bytes (pifbdb-replace-nth (pifbdb-empty-bytes) 0 99)))
+            (pifbdb-score (str_eq (pifbd-decode-reason d) (pifbd-reason-bad-magic)) 16384)))
+    (defn pifbdb-bit-bad-version ()
+        (do
+            (let d (pifbd-decode-bytes (pifbdb-replace-nth (pifbdb-empty-bytes) 11 1)))
+            (pifbdb-score (str_eq (pifbd-decode-reason d) (pifbd-reason-bad-version)) 32768)))
+    (defn pifbdb-bit-truncated-magic ()
+        (do
+            (let d (pifbd-decode-bytes (pifbdb-take (pifbdb-empty-bytes) 4)))
+            (pifbdb-score (str_eq (pifbd-decode-reason d) (pifbd-reason-truncated-magic)) 65536)))
+    (defn pifbdb-bit-truncated-length ()
+        (do
+            (let d (pifbd-decode-bytes (pifbdb-take (pifbdb-empty-bytes) 14)))
+            (pifbdb-score (str_eq (pifbd-decode-reason d) (pifbd-reason-truncated-length)) 131072)))
+    (defn pifbdb-bit-reason-manifest ()
+        (pifbdb-score
+            (and (ge (len (pifbd-reason-manifest)) 33)
+            (and (str_eq (nth (pifbd-reason-manifest) 15) (pifbd-reason-invalid-table))
+                 (str_eq (nth (pifbd-reason-manifest) 16) (pifbd-reason-invalid-symbol-image))))
+            262144))
+
+    (defn pifbdb-bit-ready-admits ()
+        (do
+            (let a (pifbd-admit-witness (pifbdb-ready-witness)))
+            (pifbdb-score
+                (and (pifbd-admitted? a)
+                (and (pifbd-decoded? (pifbd-admission-decode a))
+                     (eq (pif-symbol-image-count (pif-envelope-symbol-image (pifbd-admission-pif a))) 2)))
+                524288)))
+    (defn pifbdb-bit-nonready-witness ()
+        (do
+            (let a (pifbd-admit-witness (pifbf-file-witness-from-container (pifbdb-nonready-container))))
+            (pifbdb-score
+                (and (str_eq (pifbd-admission-status a) (pifbd-status-investigate))
+                     (str_eq (pifbd-admission-reason a) (pifbd-reason-non-ready-witness)))
+                1048576)))
+    (defn pifbdb-bit-malformed-witness ()
+        (do
+            (let a (pifbd-admit-witness (list "not-witness")))
+            (pifbdb-score
+                (and (str_eq (pifbd-admission-status a) (pifbd-status-refused))
+                     (str_eq (pifbd-admission-reason a) (pifbd-reason-malformed-witness)))
+                2097152)))
+    (defn pifbdb-bit-malformed-container ()
+        (do
+            (let a (pifbd-admit-witness (pifbdb-malformed-container-witness)))
+            (pifbdb-score
+                (and (str_eq (pifbd-admission-status a) (pifbd-status-investigate))
+                     (str_eq (pifbd-admission-reason a) (pifbd-reason-malformed-container)))
+                4194304)))
+    (defn pifbdb-bit-window-not-ready ()
+        (do
+            (let a (pifbd-admit-witness (pifbdb-forged-window-witness)))
+            (let b (pifbd-admit-witness (pifbdb-forged-origin-witness)))
+            (pifbdb-score
+                (and (str_eq (pifbd-admission-status a) (pifbd-status-investigate))
+                (and (str_eq (pifbd-admission-reason a) (pifbd-reason-readback-window-not-ready))
+                (and (str_eq (pifbd-admission-status b) (pifbd-status-investigate))
+                     (str_eq (pifbd-admission-reason b) (pifbd-reason-readback-origin-mismatch)))))
+                8388608)))
+    (defn pifbdb-bit-size-mismatch ()
+        (do
+            (let a (pifbd-admit-witness (pifbdb-forged-size-witness)))
+            (pifbdb-score
+                (and (str_eq (pifbd-admission-status a) (pifbd-status-investigate))
+                     (str_eq (pifbd-admission-reason a) (pifbd-reason-readback-size-mismatch)))
+                16777216)))
+    (defn pifbdb-bit-vouch-mismatch ()
+        (do
+            (let a (pifbd-admit-witness (pifbdb-forged-vouch-witness)))
+            (pifbdb-score
+                (and (str_eq (pifbd-admission-status a) (pifbd-status-investigate))
+                     (str_eq (pifbd-admission-reason a) (pifbd-reason-readback-vouch-mismatch)))
+                33554432)))
+    (defn pifbdb-bit-source-mismatch ()
+        (do
+            (let a (pifbd-admit-witness (pifbdb-forged-source-witness)))
+            (let b (pifbd-admit-witness (pifbdb-forged-symbol-witness)))
+            (pifbdb-score
+                (and (str_eq (pifbd-admission-status a) (pifbd-status-investigate))
+                (and (str_eq (pifbd-admission-reason a) (pifbd-reason-decoded-source-mismatch))
+                (and (str_eq (pifbd-admission-status b) (pifbd-status-investigate))
+                     (str_eq (pifbd-admission-reason b) (pifbd-reason-decoded-symbol-mismatch)))))
+                67108864)))
+    (defn pifbdb-bit-malformed-target-bytes ()
+        (do
+            (let d (pifbd-decode-bytes (pifbdb-replace-nth (pifbdb-symbol-bytes) 188 2)))
+            (pifbdb-score
+                (and (not (pifbd-decoded? d))
+                     (str_eq (pifbd-decode-reason d) (pifbd-reason-invalid-symbol-image)))
+                268435456)))
+
+    (defn pifbdb-has? (text needle)
+        (ge (str_find text needle 0) 0))
+    (defn pifbdb-read-file-any (primary fallback)
+        (if (ge (file_size primary) 0)
+            (read_file primary)
+            (read_file fallback)))
+    (defn pifbdb-bit-static-and-mirror ()
+        (do
+            (let text (pifbdb-read-file-any "form/form-stdlib/program-image-fkb-byte-decode.fk"
+                                            "../form/form-stdlib/program-image-fkb-byte-decode.fk"))
+            (let grammar (pifbdb-read-file-any "grammars/program-image-fkb-byte-decode.fk"
+                                               "../grammars/program-image-fkb-byte-decode.fk"))
+            (pifbdb-score
+                (and (not (pifbdb-has? text "write_form_binary"))
+                (and (not (pifbdb-has? text "read_form_binary"))
+                (and (not (pifbdb-has? text "recipe_to_bytes"))
+                (and (not (pifbdb-has? text "bytes_to_recipe"))
+                (and (not (pifbdb-has? text "read_file_bytes"))
+                (and (not (pifbdb-has? text "write_file_bytes"))
+                (and (not (pifbdb-has? text "file_append_bytes"))
+                (and (not (pifbdb-has? text "pif-table-numeric-stream"))
+                (and (not (pifbdb-has? text "pite-table-text"))
+                (and (not (pifbdb-has? text "runtime-table-text"))
+                (and (not (pifbdb-has? text "rtta-"))
+                (and (not (pifbdb-has? text "raar-"))
+                (and (not (pifbdb-has? text "rao-"))
+                (and (not (pifbdb-has? text "fk_run"))
+                     (str_eq text grammar)))))))))))))))
+                134217728)))
+
+    (defn program-image-fkb-byte-decode-band ()
+        (do
+            (let _setup (pifbdb-setup))
+            (let total
+                (sum (list
+                    (pifbdb-bit-manifest-1)
+                    (pifbdb-bit-manifest-2)
+                    (pifbdb-bit-empty-decode)
+                    (pifbdb-bit-symbol-decode)
+                    (pifbdb-bit-tail-garbage)
+                    (pifbdb-bit-bad-magic)
+                    (pifbdb-bit-bad-version)
+                    (pifbdb-bit-truncated-magic)
+                    (pifbdb-bit-truncated-length)
+                    (pifbdb-bit-reason-manifest)
+                    (pifbdb-bit-ready-admits)
+                    (pifbdb-bit-nonready-witness)
+                    (pifbdb-bit-malformed-witness)
+                    (pifbdb-bit-malformed-container)
+                    (pifbdb-bit-window-not-ready)
+                    (pifbdb-bit-size-mismatch)
+                    (pifbdb-bit-vouch-mismatch)
+                    (pifbdb-bit-source-mismatch)
+                    (pifbdb-bit-malformed-target-bytes)
+                    (pifbdb-bit-static-and-mirror))))
+            (let _cleanup (pifbdb-cleanup))
+            total))
+
+    (program-image-fkb-byte-decode-band))

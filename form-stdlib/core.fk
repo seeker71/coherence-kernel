@@ -13,18 +13,18 @@
     (defn identity (x) x)
 
     ; The string "narrow waist" — str_len / str_byte_at / byte_to_str (plus
-    ; str_concat) are the ONLY string primitives any kernel needs to carry
-    ; natively: measure, decompose (one raw byte, 0-255), construct (the
-    ; exact dual), join. Confirmed present, byte-identical, on fkwu, Go,
+    ; str_concat) are the native composition floor for string behavior built in
+    ; Form: measure, decompose (one raw byte, 0-255), construct (the exact
+    ; dual), join. str_eq remains an orthogonal compare primitive. Confirmed
+    ; present, byte-identical, on fkwu, Go,
     ; Rust, and TS (receipts/2026-07-01-narrow-waist-string-cleanup.md).
     ; Everything below is Form composition over that floor — substring,
-    ; char_at, ord, int_to_str — written ONCE, portable everywhere. On fkwu
-    ; specifically, a same-named native op (substring, int_to_str) shadows
-    ; the defn below and keeps running (confirmed: a native always wins over
-    ; a same-named Form defn there) — unaffected, no regression risk. Go's
-    ; own former native substring/char_at/int_to_str/str_find were removed
-    ; once this covered them, so there is exactly one definition, not two
-    ; that can silently drift apart.
+    ; char_at, ord, int_to_str — kept as the portable fallback shape. The
+    ; kernel dispatch override is intentionally narrow: byte-string/cursor
+    ; waist names stay native when same-named fallback definitions are loaded,
+    ; so source compilers and cursors keep byte indexing instead of accidentally
+    ; routing through slower fallback string reconstruction. Other same-named
+    ; Form bindings remain ordinary user definitions.
 
     (defn fstr-substring-loop (s i end acc)
         (if (ge i end) acc
@@ -32,7 +32,7 @@
     (defn substring (s start end) (fstr-substring-loop s start end ""))
 
     (defn char_at (s i) (substring s i (add i 1)))
-    (defn ord (c) (str_byte_at c 0))
+    (defn ord (c) (if (eq (str_len c) 0) -1 (str_byte_at c 0)))
 
     ; int_to_str — decimal rendering, built from byte_to_str + arithmetic
     ; (ASCII '0' is byte 48), not a digit-lookup string. Handles 0 and
@@ -258,6 +258,36 @@
     ; failure path when it does not. msg remains human source context.
     (defn assert (pred msg)
         (if pred 0 (head (empty))))
+
+    ; Queryable trust boundary for the core string composition waist. These are
+    ; the native string operations higher string behavior is built from in Form;
+    ; this is not a scan of every string-related native a host may expose. It is
+    ; not a grammar surface. It is the core layer naming its dependency boundary
+    ; as data.
+    (defn core-waist-op (name role)
+        (list "waist-op" name role))
+    (defn core-waist-op-name (o) (nth o 1))
+    (defn core-waist-op-role (o) (nth o 2))
+    (defn core-native-string-waist ()
+        (list
+            (core-waist-op "str_len" "measure")
+            (core-waist-op "str_byte_at" "decompose-byte")
+            (core-waist-op "byte_to_str" "construct-byte")
+            (core-waist-op "str_concat" "join")))
+    (defn core-composed-string-ops ()
+        (list "substring" "char_at" "ord" "int_to_str" "str_find" "str_to_int" "float_to_str"))
+    (defn core-waist-has? (name ops)
+        (if (nil? ops)
+            0
+            (if (str_eq (core-waist-op-name (head ops)) name)
+                1
+                (core-waist-has? name (tail ops)))))
+    (defn core-name-in? (name names)
+        (if (nil? names)
+            0
+            (if (str_eq (head names) name)
+                1
+                (core-name-in? name (tail names)))))
 
     ; Queryable semantic model for analyzers, high-grammar lifters, and JIT
     ; policy code that needs class/method shape without depending on BML syntax.
