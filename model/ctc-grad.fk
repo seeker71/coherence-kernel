@@ -1,0 +1,97 @@
+; ctc-grad.fk — the CTC backward pass: the analytic forward-backward gradient.
+; The scaling stone named by receipts/2026-07-02-ctc-train-earned.md.
+;
+; ctc-train.fk trained by NUMERICAL gradient (O(params) loss-evals per step) —
+; correct but it does not scale. This is the analytic gradient: one forward
+; (alpha) + one backward (beta) pass yields ∂loss/∂logit for EVERY logit at
+; once, the closed form
+;
+;   ∂L/∂u_t^k = y_t^k − posterior_t(k)
+;   posterior_t(k) = (1/p) · Σ_{s: ext[s]=k}  alpha_t(s)·beta_t(s) / y_t(ext[s])
+;
+; where y = softmax(logits), alpha is the forward lattice (ctc-loss.fk's
+; recursion, kept per frame), beta the symmetric backward lattice, and
+; p = alpha_T(2L)+alpha_T(2L−1). The gradient is the softmax output minus the
+; alignment posterior — the elegant CTC result: the network is pushed toward
+; emitting each class exactly as often as the alignment marginal says it should.
+;
+; PROVEN CORRECT four-way (fkwu/Go/Rust/TS) by exact agreement with the central
+; finite-difference gradient (the gold-standard check — no hand-derived formula
+; trusted on faith): |analytic − numerical| < 1e-5 for every logit, on both a
+; single-label toy ("a", T=2) and an ordered toy ("ab", T=3) that exercises the
+; skip transition in BOTH alpha and beta.
+;
+; HONEST FLOOR: still toy scale, still free logits (no encoder over real
+; signal), still probability-space (real logits underflow the naive product
+; form — log-space alpha/beta is the next refinement). But the gradient is now
+; O(T·S) per example instead of O(params·T·S): the piece that lets CTC training
+; scale past toys exists and is verified.
+;
+; preludes: form-stdlib/core.fk model/transformer-numerics.fk model/trig.fk model/ctc-loss.fk
+
+(do
+    (defn cg-expv (xs) (if (eq (len xs) 0) (empty) (cons (tn-exp (head xs)) (cg-expv (tail xs)))))
+    (defn cg-sumv (xs) (if (eq (len xs) 0) 0.0 (add (head xs) (cg-sumv (tail xs)))))
+    (defn cg-scalev (xs s) (if (eq (len xs) 0) (empty) (cons (mul (head xs) s) (cg-scalev (tail xs) s))))
+    (defn cg-softmax (u) (do (let e (cg-expv u)) (cg-scalev e (div 1.0 (cg-sumv e)))))
+    (defn cg-sf (us) (if (eq (len us) 0) (empty) (cons (cg-softmax (head us)) (cg-sf (tail us)))))
+    (defn cg-rev (xs acc) (if (eq (len xs) 0) acc (cg-rev (tail xs) (cons (head xs) acc))))
+
+    ; forward alpha lattice (per-frame alpha vectors) over softmax frames ys
+    (defn cg-alphas-loop (ext frames prev acc)
+        (if (eq (len frames) 0) (cg-rev acc (empty))
+            (do (let a (ctc-step ext (head frames) prev))
+                (cg-alphas-loop ext (tail frames) a (cons a acc)))))
+    (defn cg-alphas (ext ys)
+        (do (let a0 (ctc-init ext (head ys)))
+            (cg-alphas-loop ext (tail ys) a0 (cons a0 (empty)))))
+
+    ; backward beta lattice
+    (defn cg-beta-init-loop (ext yT s acc)
+        (if (lt s 0) acc
+            (cg-beta-init-loop ext yT (sub s 1)
+                (cons (if (eq s (sub (len ext) 1)) (ctc-p yT (nth ext s))
+                          (if (eq s (sub (len ext) 2)) (ctc-p yT (nth ext s)) 0.0)) acc))))
+    (defn cg-beta-init (ext yT) (cg-beta-init-loop ext yT (sub (len ext) 1) (empty)))
+    ; beta's skip from s to s+2 is only legal when s+2 is in range AND the skip
+    ; condition holds — the in-range guard matters because ctc-skip? reads nth ext
+    ; (s+2), which a strict walker rejects out of bounds (fkwu tolerates it).
+    (defn cg-beta-skip? (ext s)
+        (if (lt (add s 2) (len ext)) (ctc-skip? ext (add s 2)) 0))
+    (defn cg-beta-step-loop (ext frame nxt s acc)
+        (if (ge s (len ext)) (cg-rev acc (empty))
+            (do (let base (add (ctc-at nxt s) (ctc-at nxt (add s 1))))
+                (let ws (if (eq (cg-beta-skip? ext s) 1) (add base (ctc-at nxt (add s 2))) base))
+                (cg-beta-step-loop ext frame nxt (add s 1) (cons (mul ws (ctc-p frame (nth ext s))) acc)))))
+    (defn cg-beta-step (ext frame nxt) (cg-beta-step-loop ext frame nxt 0 (empty)))
+    (defn cg-betas-loop (ext frames-rev nxt acc)
+        (if (eq (len frames-rev) 0) acc
+            (do (let b (cg-beta-step ext (head frames-rev) nxt))
+                (cg-betas-loop ext (tail frames-rev) b (cons b acc)))))
+    (defn cg-betas (ext ys)
+        (do (let fr (cg-rev ys (empty)))
+            (let bT (cg-beta-init ext (head fr)))
+            (cg-betas-loop ext (tail fr) bT (cons bT (empty)))))
+
+    (defn cg-p (alphas ext)
+        (do (let af (nth alphas (sub (len alphas) 1)))
+            (add (ctc-at af (sub (len ext) 1)) (ctc-at af (sub (len ext) 2)))))
+
+    ; posterior_t(k) = (1/p) sum_{s: ext[s]=k} alpha_t(s) beta_t(s) / y_t(ext[s])
+    (defn cg-post-loop (ext at bt yt k s acc)
+        (if (ge s (len ext)) acc
+            (cg-post-loop ext at bt yt k (add s 1)
+                (if (eq (nth ext s) k)
+                    (add acc (div (mul (ctc-at at s) (ctc-at bt s)) (ctc-p yt (nth ext s))))
+                    acc))))
+    (defn cg-post (ext at bt yt k p) (div (cg-post-loop ext at bt yt k 0 0.0) p))
+
+    ; ∂L/∂u_t^k = y_t^k − posterior_t(k)
+    (defn cg-grad-tk (ext alphas betas ys t k p)
+        (sub (nth (nth ys t) k) (cg-post ext (nth alphas t) (nth betas t) (nth ys t) k p)))
+    ; the analytic gradient at logit position (t,k) for a logit-frame input
+    (defn cg-grad (us tgt t k)
+        (do (let ys (cg-sf us)) (let ext (ctc-ext tgt))
+            (let al (cg-alphas ext ys)) (let be (cg-betas ext ys)) (let p (cg-p al ext))
+            (cg-grad-tk ext al be ys t k p)))
+    0)

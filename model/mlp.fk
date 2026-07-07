@@ -1,0 +1,73 @@
+; mlp.fk — a 2-layer perceptron with BACKPROP: the first learned nonlinear
+; representation in this recognition line. The step toward end-to-end learning.
+;
+; The recognizer had been a LINEAR classifier over hand-designed features — it
+; learned only the output map. This learns a HIDDEN LAYER too: the representation
+; itself is shaped by the gradient, not fixed. Forward:
+;   h = tanh(W1·x + b1)          ; learned nonlinear features
+;   p = softmax(W2·h + b2)
+;   loss = -log p[c]             ; cross-entropy
+; Backward (standard, verified below against finite differences):
+;   d2 = p − onehot(c)
+;   dW2 = d2 ⊗ h ,  db2 = d2
+;   d1 = (W2ᵀ·d2) ⊙ (1 − h²)     ; tanh' = 1 − h²
+;   dW1 = d1 ⊗ x ,  db1 = d1
+;
+; Proven FOUR-WAY (fkwu/Go/Rust/TS): the analytic hidden-layer gradient
+; ∂loss/∂W1[i][j] EQUALS the central finite-difference gradient to 1e-5 (the
+; gold-standard check — no hand-derived formula trusted on faith), and one SGD
+; step strictly reduces the loss on a toy example.
+;
+; HONEST FLOOR (measured on real audio, receipt 2026-07-02-end-to-end-mlp-*):
+; wired to the 12-word × 12-voice spectral features, this MLP trains to 100% and
+; generalizes at 83% cross-voice — MATCHING the linear baseline, not beating it.
+; With 96 training examples the added capacity is a surfeit: it fits train
+; perfectly without improving held-out, because the data, not the capacity, is
+; now the binding constraint. End-to-end learning is proven and correct here;
+; its ADVANTAGE waits on corpus-scale data. Also: real-audio input is host I/O
+; (fkwu-carrier); this cell's proof is on synthetic vectors, four-way.
+;
+; preludes: form-stdlib/core.fk model/trig.fk model/transformer-numerics.fk
+
+(do
+    (defn mv-dot (a b) (if (eq (len a) 0) 0.0 (add (mul (head a) (head b)) (mv-dot (tail a) (tail b)))))
+    (defn mv-mat (W x) (if (eq (len W) 0) (empty) (cons (mv-dot (head W) x) (mv-mat (tail W) x))))
+    (defn mv-add (a b) (if (eq (len a) 0) (empty) (cons (add (head a) (head b)) (mv-add (tail a) (tail b)))))
+    (defn mv-sub (a b) (if (eq (len a) 0) (empty) (cons (sub (head a) (head b)) (mv-sub (tail a) (tail b)))))
+    (defn mv-tanh (xs) (if (eq (len xs) 0) (empty) (cons (tn-tanh (head xs)) (mv-tanh (tail xs)))))
+    (defn mv-dtanh (h) (if (eq (len h) 0) (empty) (cons (sub 1.0 (mul (head h) (head h))) (mv-dtanh (tail h)))))
+    (defn mv-had (a b) (if (eq (len a) 0) (empty) (cons (mul (head a) (head b)) (mv-had (tail a) (tail b)))))
+    (defn mv-expv (xs) (if (eq (len xs) 0) (empty) (cons (tn-exp (head xs)) (mv-expv (tail xs)))))
+    (defn mv-sum (xs) (if (eq (len xs) 0) 0.0 (add (head xs) (mv-sum (tail xs)))))
+    (defn mv-sc (xs s) (if (eq (len xs) 0) (empty) (cons (mul (head xs) s) (mv-sc (tail xs) s))))
+    (defn mv-soft (u) (do (let e (mv-expv u)) (mv-sc e (div 1.0 (mv-sum e)))))
+    (defn mv-outer (d x) (if (eq (len d) 0) (empty) (cons (mv-sc x (head d)) (mv-outer (tail d) x))))
+    (defn mv-col (W j) (if (eq (len W) 0) (empty) (cons (nth (head W) j) (mv-col (tail W) j))))
+    (defn mv-rev (xs a) (if (eq (len xs) 0) a (mv-rev (tail xs) (cons (head xs) a))))
+    (defn mv-WtD-l (W d n j acc) (if (ge j n) (mv-rev acc (empty)) (mv-WtD-l W d n (add j 1) (cons (mv-dot (mv-col W j) d) acc))))
+    (defn mv-WtD (W d indim) (mv-WtD-l W d indim 0 (empty)))
+    (defn mv-oh (c n i) (if (ge i n) (empty) (cons (if (eq i c) 1.0 0.0) (mv-oh c n (add i 1)))))
+    (defn mv-msub (A B) (if (eq (len A) 0) (empty) (cons (mv-sub (head A) (head B)) (mv-msub (tail A) (tail B)))))
+    (defn mv-mscale (A s) (if (eq (len A) 0) (empty) (cons (mv-sc (head A) s) (mv-mscale (tail A) s))))
+
+    ; ── forward ──
+    (defn mlp-h (W1 b1 x) (mv-tanh (mv-add (mv-mat W1 x) b1)))
+    (defn mlp-p (P x) (mv-soft (mv-add (mv-mat (nth P 2) (mlp-h (nth P 0) (nth P 1) x)) (nth P 3))))
+    (defn mlp-ce (P x c) (sub 0.0 (fln (nth (mlp-p P x) c))))
+
+    ; ── backward: one full SGD step over P = (W1 b1 W2 b2) ──
+    (defn mlp-step (P x c nclass lr)
+        (do (let h (mlp-h (nth P 0) (nth P 1) x))
+            (let p (mv-soft (mv-add (mv-mat (nth P 2) h) (nth P 3))))
+            (let d2 (mv-sub p (mv-oh c nclass 0)))
+            (let d1 (mv-had (mv-WtD (nth P 2) d2 (len h)) (mv-dtanh h)))
+            (list (mv-msub (nth P 0) (mv-mscale (mv-outer d1 x) lr))
+                  (mv-sub  (nth P 1) (mv-sc d1 lr))
+                  (mv-msub (nth P 2) (mv-mscale (mv-outer d2 h) lr))
+                  (mv-sub  (nth P 3) (mv-sc d2 lr)))))
+
+    ; analytic ∂loss/∂W1[i][j] (exposed for the finite-difference proof)
+    (defn mlp-gW1 (P x c i j)
+        (do (let h (mlp-h (nth P 0) (nth P 1) x)) (let p (mlp-p P x)) (let d2 (mv-sub p (mv-oh c (len p) 0)))
+            (mul (nth (mv-had (mv-WtD (nth P 2) d2 (len h)) (mv-dtanh h)) i) (nth x j))))
+    0)
