@@ -1,0 +1,91 @@
+; ctc-loss.fk — the CTC training objective: the forward (alignment-sum) recipe
+; and the loss -ln(p_total). The organ the body LACKED.
+;
+; The 2026-07-02 Brain2Qwerty ingest adversarial pass named this precisely as
+; the body's #1 overclaim: observe/open-asr-ctc.fk does CTC *decode* (blank/
+; repeat collapse), but the body had NO CTC training *objective* — no forward-
+; backward, no loss, no gradient signal that shapes an encoder. That absence is
+; the root of the native WER-100 floor (receipts/2026-07-02, "what is your wer
+; number"): a decoder cannot be TRAINED without a differentiable sequence loss
+; that sums over all valid alignments. This cell is that loss's forward half.
+;
+; CTC forward: given per-frame class probabilities and a target label sequence,
+; sum the probability of EVERY frame->label alignment that collapses to the
+; target (blank between/around labels, repeats merged). The classic alpha
+; dynamic program over the blank-extended target:
+;   ext(target) = (0 l1 0 l2 0 ... ln 0)     ; 0 = blank, length 2n+1
+;   alpha_t[s] = (alpha_{t-1}[s] + alpha_{t-1}[s-1]
+;                 + [skip] alpha_{t-1}[s-2]) * P(frame_t, ext[s])
+;   skip allowed iff ext[s] != blank AND ext[s] != ext[s-2]
+;   p_total = alpha_{T-1}[2n] + alpha_{T-1}[2n-1]
+;   loss    = -ln(p_total)
+;
+; Proven bit-exact FOUR-WAY (fkwu/Go/Rust/TS) on exact-fraction toys, the same
+; discipline model/transformer-block.fk's forward used before real weights:
+;   target "a",  T=2, uniform 0.5  -> p_total = 0.75  (brute force: 3/4 alignments)
+;   target "ab", T=2               -> p_total = 0.25  (only alignment (a,b); proves skip)
+; loss(0.75) = 0.287682072451781 (via model/trig.fk fln).
+;
+; HONEST FLOOR: this is the forward objective at TOY scale over hand-authored
+; probabilities — NOT the backward pass (gradient d loss / d logits, the next
+; rung), NOT log-space stabilization, NOT real neural logits or real signal.
+; It closes "no CTC training objective" from a witnessed gap to a proven
+; forward; training an actual encoder with it remains the climb.
+;
+; preludes: form-stdlib/core.fk model/trig.fk
+
+(do
+    (defn ctc-at (xs i)
+        (if (lt i 0) 0.0 (if (ge i (len xs)) 0.0 (nth xs i))))
+    (defn ctc-at-int (xs i)
+        (if (lt i 0) (sub 0 1) (if (ge i (len xs)) (sub 0 1) (nth xs i))))
+    (defn ctc-reverse (xs acc)
+        (if (eq (len xs) 0) acc (ctc-reverse (tail xs) (cons (head xs) acc))))
+
+    ; blank-extended target: (0 l1 0 l2 0 ... ln 0)
+    (defn ctc-ext-loop (tgt acc)
+        (if (eq (len tgt) 0) (cons 0 acc)
+            (ctc-ext-loop (tail tgt) (cons (head tgt) (cons 0 acc)))))
+    (defn ctc-ext (tgt) (ctc-reverse (ctc-ext-loop tgt (empty)) (empty)))
+
+    (defn ctc-p (frame cls) (nth frame cls))
+
+    ; alpha at frame 0: only ext[0] (blank) and ext[1] (first label) reachable
+    (defn ctc-init-loop (ext frame0 s acc)
+        (if (ge s (len ext)) (ctc-reverse acc (empty))
+            (ctc-init-loop ext frame0 (add s 1)
+                (cons (if (eq s 0) (ctc-p frame0 (nth ext 0))
+                          (if (eq s 1) (ctc-p frame0 (nth ext 1)) 0.0))
+                      acc))))
+    (defn ctc-init (ext frame0) (ctc-init-loop ext frame0 0 (empty)))
+
+    ; skip-transition legality: ext[s] is a real label distinct from ext[s-2]
+    (defn ctc-skip? (ext s)
+        (if (eq (nth ext s) 0) 0
+            (if (eq (nth ext s) (ctc-at-int ext (sub s 2))) 0 1)))
+
+    (defn ctc-step-loop (ext frame prev s acc)
+        (if (ge s (len ext)) (ctc-reverse acc (empty))
+            (do
+                (let base (add (ctc-at prev s) (ctc-at prev (sub s 1))))
+                (let withskip (if (eq (ctc-skip? ext s) 1)
+                                  (add base (ctc-at prev (sub s 2))) base))
+                (ctc-step-loop ext frame prev (add s 1)
+                    (cons (mul withskip (ctc-p frame (nth ext s))) acc)))))
+    (defn ctc-step (ext frame prev) (ctc-step-loop ext frame prev 0 (empty)))
+
+    (defn ctc-fold (ext frames alpha)
+        (if (eq (len frames) 0) alpha
+            (ctc-fold ext (tail frames) (ctc-step ext (head frames) alpha))))
+
+    ; p_total = sum over all alignments collapsing to target
+    (defn ctc-forward (frames tgt)
+        (do
+            (let ext (ctc-ext tgt))
+            (let a0 (ctc-init ext (head frames)))
+            (let af (ctc-fold ext (tail frames) a0))
+            (add (ctc-at af (sub (len ext) 1)) (ctc-at af (sub (len ext) 2)))))
+
+    ; the CTC loss: negative log-likelihood of the target under the alignment sum
+    (defn ctc-loss (frames tgt) (sub 0.0 (fln (ctc-forward frames tgt))))
+    0)

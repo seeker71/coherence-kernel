@@ -1,0 +1,67 @@
+; ctc-logspace.fk — the CTC forward in LOG space: the stabilization stone.
+;
+; model/ctc-loss.fk's product-form alpha underflows on real-length sequences —
+; a probability that is a product of hundreds of per-frame terms rounds to 0 in
+; double precision, and the whole objective becomes useless (log 0 = -inf,
+; gradient 0). This is why every real CTC implementation runs in log space. The
+; recursion becomes, with log-sum-exp in place of add and + in place of *:
+;
+;   log-alpha_t(s) = LSE( log-alpha_{t-1}(s), log-alpha_{t-1}(s-1),
+;                         [skip] log-alpha_{t-1}(s-2) ) + log y_t(ext[s])
+;   log-p = LSE( log-alpha_T(2L), log-alpha_T(2L-1) )
+;
+; LSE(a,b) = m + log(exp(a-m) + exp(b-m)), m = max(a,b) — the numerically stable
+; form (the largest term is factored out so no exp overflows). log(0) is carried
+; as a large-negative sentinel (clogz), and LSE of two sentinels stays a sentinel.
+;
+; Proven FOUR-WAY (fkwu/Go/Rust/TS):
+;   correctness — exp(log-p) equals model/ctc-loss.fk's probability-space p on
+;     the toys ("a" -> 0.75, "ab" -> 0.25), to 1e-6.
+;   the point — a 10-frame sequence of per-frame probability 1e-40 gives
+;     probability-space p = (1e-40)^10 = 1e-400 = EXACTLY 0.0 (underflowed),
+;     while log-space gives a finite ~-921 (= 10 * ln(1e-40)). Same computation,
+;     usable answer.
+;
+; HONEST FLOOR: this is the FORWARD in log space. The backward (beta) and the
+; gradient (model/ctc-grad.fk) in log space — needed so training itself is
+; stable at length — is the next refinement. Still toy scale, still free logits.
+; But the underflow wall that blocked real-length CTC is down.
+;
+; preludes: form-stdlib/core.fk model/transformer-numerics.fk model/trig.fk model/ctc-loss.fk
+
+(do
+    (defn clog-z () -1.0e18)                       ; log(0) sentinel
+    (defn clog-max (a b) (if (gt a b) a b))
+    (defn clog-lse2 (a b)
+        (if (le (clog-max a b) -1.0e17) (clog-z)
+            (do (let m (clog-max a b))
+                (add m (fln (add (tn-exp (sub a m)) (tn-exp (sub b m))))))))
+    (defn clog-logp (y) (if (le y 0.0) (clog-z) (fln y)))
+    (defn clog-at (xs i) (if (lt i 0) (clog-z) (if (ge i (len xs)) (clog-z) (nth xs i))))
+    (defn clog-rev (xs acc) (if (eq (len xs) 0) acc (clog-rev (tail xs) (cons (head xs) acc))))
+
+    (defn clog-init-loop (ext y0 s acc)
+        (if (ge s (len ext)) (clog-rev acc (empty))
+            (clog-init-loop ext y0 (add s 1)
+                (cons (if (eq s 0) (clog-logp (nth y0 (nth ext 0)))
+                          (if (eq s 1) (clog-logp (nth y0 (nth ext 1))) (clog-z))) acc))))
+    (defn clog-init (ext y0) (clog-init-loop ext y0 0 (empty)))
+
+    (defn clog-step-loop (ext frame prev s acc)
+        (if (ge s (len ext)) (clog-rev acc (empty))
+            (do (let base (clog-lse2 (clog-at prev s) (clog-at prev (sub s 1))))
+                (let ws (if (eq (ctc-skip? ext s) 1) (clog-lse2 base (clog-at prev (sub s 2))) base))
+                (clog-step-loop ext frame prev (add s 1)
+                    (cons (add ws (clog-logp (nth frame (nth ext s)))) acc)))))
+    (defn clog-step (ext frame prev) (clog-step-loop ext frame prev 0 (empty)))
+    (defn clog-fold (ext frames a) (if (eq (len frames) 0) a (clog-fold ext (tail frames) (clog-step ext (head frames) a))))
+
+    ; log p_total over per-frame probability frames and a target label sequence
+    (defn clog-forward (frames tgt)
+        (do (let ext (ctc-ext tgt))
+            (let a0 (clog-init ext (head frames)))
+            (let af (clog-fold ext (tail frames) a0))
+            (clog-lse2 (clog-at af (sub (len ext) 1)) (clog-at af (sub (len ext) 2)))))
+    ; the log-space CTC loss is just -log-p (already the negative log-likelihood)
+    (defn clog-loss (frames tgt) (sub 0.0 (clog-forward frames tgt)))
+    0)

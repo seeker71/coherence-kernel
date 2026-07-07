@@ -4552,14 +4552,13 @@ impl Kernel {
         self.register_native("typing_opaque", cat_method(), |_, _, _args| {
             Value::Str("<typing>".to_string().into())
         });
-        self.register_native(
-            "read_file",
-            cat_call(),
+        let read_file_text_native: NativeFn =
             |_, _, args| match fs::read_to_string(args[0].as_str()) {
                 Ok(s) => Value::Str(s.into()),
                 Err(_) => Value::Null,
-            },
-        );
+            };
+        self.register_native("host_file_read_text", cat_call(), read_file_text_native);
+        self.register_native("read_file", cat_call(), read_file_text_native);
         // Byte-level host file read — returns a list of ints (0-255), one per byte.
         self.register_native("read_file_bytes", cat_call(), |_, _, args| {
             match fs::read(args[0].as_str()) {
@@ -5099,27 +5098,27 @@ impl Kernel {
                 Err(_) => Value::Int(-1),
             }
         });
-        self.register_native("file_size", cat_call(), |_, _, args| {
-            match fs::metadata(args[0].as_str()) {
-                Ok(meta) => Value::Int(meta.len() as i64),
-                Err(_) => Value::Int(-1),
-            }
-        });
+        let file_size_native: NativeFn = |_, _, args| match fs::metadata(args[0].as_str()) {
+            Ok(meta) => Value::Int(meta.len() as i64),
+            Err(_) => Value::Int(-1),
+        };
+        self.register_native("host_file_size", cat_call(), file_size_native);
+        self.register_native("file_size", cat_call(), file_size_native);
         // file_mtime — modification time in unix seconds; -1 if missing.
         // Sibling parity with Go + TS file_mtime; powers Form-side cache
         // layers that regenerate .fkb projections when source files drift.
-        self.register_native("file_mtime", cat_call(), |_, _, args| {
-            match fs::metadata(args[0].as_str()) {
-                Ok(meta) => match meta.modified() {
-                    Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
-                        Ok(d) => Value::Int(d.as_secs() as i64),
-                        Err(_) => Value::Int(-1),
-                    },
+        let file_mtime_native: NativeFn = |_, _, args| match fs::metadata(args[0].as_str()) {
+            Ok(meta) => match meta.modified() {
+                Ok(t) => match t.duration_since(std::time::UNIX_EPOCH) {
+                    Ok(d) => Value::Int(d.as_secs() as i64),
                     Err(_) => Value::Int(-1),
                 },
                 Err(_) => Value::Int(-1),
-            }
-        });
+            },
+            Err(_) => Value::Int(-1),
+        };
+        self.register_native("host_file_mtime", cat_call(), file_mtime_native);
+        self.register_native("file_mtime", cat_call(), file_mtime_native);
         self.register_native("file_byte_at", cat_call(), |_, _, args| {
             let offset = args[1].as_int();
             if offset < 0 {
@@ -5138,7 +5137,7 @@ impl Kernel {
                 _ => Value::Int(-1),
             }
         });
-        self.register_native("read_file_slice", cat_call(), |_, _, args| {
+        let read_file_slice_native: NativeFn = |_, _, args| {
             let offset = args[1].as_int();
             let length = args[2].as_int();
             if offset < 0 || length <= 0 {
@@ -5156,58 +5155,61 @@ impl Kernel {
                 Ok(n) => Value::Str(String::from_utf8_lossy(&buf[..n]).to_string().into()),
                 Err(_) => Value::Str(String::new().into()),
             }
-        });
+        };
+        self.register_native("host_file_read_slice", cat_call(), read_file_slice_native);
+        self.register_native("read_file_slice", cat_call(), read_file_slice_native);
 
         // --- Filesystem CRUD natives — real directories + files --------
         // Sibling parity across Go/Rust/TS. Predicates return 1/0;
         // mutations return 0 on success, -1 on error; fs_list returns a
         // List of name-strings or Null on error.
-        self.register_native("fs_exists", cat_call(), |_, _, args| {
+        let fs_exists_native: NativeFn = |_, _, args| {
             if fs::metadata(args[0].as_str()).is_ok() {
                 Value::Int(1)
             } else {
                 Value::Int(0)
             }
-        });
-        self.register_native("fs_is_dir", cat_call(), |_, _, args| {
-            match fs::metadata(args[0].as_str()) {
-                Ok(meta) if meta.is_dir() => Value::Int(1),
-                _ => Value::Int(0),
-            }
-        });
-        self.register_native(
-            "fs_mkdir",
-            cat_call(),
-            |_, _, args| match fs::create_dir_all(args[0].as_str()) {
+        };
+        self.register_native("host_path_exists", cat_call(), fs_exists_native);
+        self.register_native("fs_exists", cat_call(), fs_exists_native);
+        let fs_is_dir_native: NativeFn = |_, _, args| match fs::metadata(args[0].as_str()) {
+            Ok(meta) if meta.is_dir() => Value::Int(1),
+            _ => Value::Int(0),
+        };
+        self.register_native("host_path_is_dir", cat_call(), fs_is_dir_native);
+        self.register_native("fs_is_dir", cat_call(), fs_is_dir_native);
+        let fs_mkdir_native: NativeFn = |_, _, args| match fs::create_dir_all(args[0].as_str()) {
+            Ok(_) => Value::Int(0),
+            Err(_) => Value::Int(-1),
+        };
+        self.register_native("host_dir_mkdir", cat_call(), fs_mkdir_native);
+        self.register_native("fs_mkdir", cat_call(), fs_mkdir_native);
+        let fs_rmdir_native: NativeFn = |_, _, args| match fs::metadata(args[0].as_str()) {
+            Ok(meta) if meta.is_dir() => match fs::remove_dir_all(args[0].as_str()) {
                 Ok(_) => Value::Int(0),
                 Err(_) => Value::Int(-1),
             },
-        );
-        self.register_native("fs_rmdir", cat_call(), |_, _, args| {
-            match fs::metadata(args[0].as_str()) {
-                Ok(meta) if meta.is_dir() => match fs::remove_dir_all(args[0].as_str()) {
-                    Ok(_) => Value::Int(0),
-                    Err(_) => Value::Int(-1),
-                },
-                _ => Value::Int(-1),
-            }
-        });
-        self.register_native("fs_remove", cat_call(), |_, _, args| {
-            match fs::metadata(args[0].as_str()) {
-                Ok(meta) if !meta.is_dir() => match fs::remove_file(args[0].as_str()) {
-                    Ok(_) => Value::Int(0),
-                    Err(_) => Value::Int(-1),
-                },
-                _ => Value::Int(-1),
-            }
-        });
-        self.register_native("fs_rename", cat_call(), |_, _, args| {
-            match fs::rename(args[0].as_str(), args[1].as_str()) {
+            _ => Value::Int(-1),
+        };
+        self.register_native("host_dir_rmdir", cat_call(), fs_rmdir_native);
+        self.register_native("fs_rmdir", cat_call(), fs_rmdir_native);
+        let fs_remove_native: NativeFn = |_, _, args| match fs::metadata(args[0].as_str()) {
+            Ok(meta) if !meta.is_dir() => match fs::remove_file(args[0].as_str()) {
                 Ok(_) => Value::Int(0),
                 Err(_) => Value::Int(-1),
-            }
-        });
-        self.register_native("fs_list", cat_call(), |_, _, args| {
+            },
+            _ => Value::Int(-1),
+        };
+        self.register_native("host_path_remove", cat_call(), fs_remove_native);
+        self.register_native("fs_remove", cat_call(), fs_remove_native);
+        let fs_rename_native: NativeFn =
+            |_, _, args| match fs::rename(args[0].as_str(), args[1].as_str()) {
+                Ok(_) => Value::Int(0),
+                Err(_) => Value::Int(-1),
+            };
+        self.register_native("host_path_rename", cat_call(), fs_rename_native);
+        self.register_native("fs_rename", cat_call(), fs_rename_native);
+        let fs_list_native: NativeFn = |_, _, args| {
             match fs::read_dir(args[0].as_str()) {
                 Ok(rd) => {
                     // sort by name for cross-kernel parity (Go's os.ReadDir
@@ -5223,7 +5225,9 @@ impl Kernel {
                 }
                 Err(_) => Value::Null,
             }
-        });
+        };
+        self.register_native("host_dir_list", cat_call(), fs_list_native);
+        self.register_native("fs_list", cat_call(), fs_list_native);
 
         // --- Socket natives — L1 physical layer for inter-cell IO ------
         // Sibling parity across Go/Rust/TS. Handle = int (≥ 0 success,
@@ -5994,7 +5998,7 @@ impl Kernel {
         // O_APPEND write — the missing primitive for a log-structured store.
         // Unlike write_file_bytes (which truncates), this appends at end-of-
         // file and returns the new total size. Creates the file if absent.
-        self.register_native("file_append_bytes", cat_call(), |_, _, args| {
+        let file_append_bytes_native: NativeFn = |_, _, args| {
             let path = args[0].as_str().to_string();
             let bytes: Vec<u8> = match &args[1] {
                 Value::List(xs) => xs.iter().map(|v| v.as_int() as u8).collect(),
@@ -6011,17 +6015,26 @@ impl Kernel {
                 Ok(meta) => Value::Int(meta.len() as i64),
                 Err(_) => Value::Int(-1),
             }
-        });
+        };
+        self.register_native(
+            "host_file_append_bytes",
+            cat_call(),
+            file_append_bytes_native,
+        );
+        self.register_native("file_append_bytes", cat_call(), file_append_bytes_native);
         // write_file_text — host text output. Keeps text compilers from
         // materializing byte lists while byte codecs still use write_file_bytes.
-        self.register_native("write_file_text", cat_call(), |_, _, args| {
+        let write_file_text_native: NativeFn = |_, _, args| {
             let path = args[0].as_str().to_string();
             let text = args[1].as_str().to_string();
             match fs::write(&path, text.as_bytes()) {
                 Ok(_) => Value::Int(text.len() as i64),
                 Err(_) => Value::Int(-1),
             }
-        });
+        };
+        self.register_native("host_file_write_text", cat_call(), write_file_text_native);
+        self.register_native("write_file", cat_call(), write_file_text_native);
+        self.register_native("write_file_text", cat_call(), write_file_text_native);
         // walk_recipe — evaluate a NodeID in a fresh root frame. Returns
         // the value the recipe produces. Use case: Form code builds a
         // recipe via intern_node, then walks it to get the runtime result.
@@ -6140,7 +6153,7 @@ impl Kernel {
         // Sibling parity holds on shape, NOT on value — each leg's dir
         // differs by design; bands fold the path into effects, never into
         // the verdict.
-        self.register_native("temp_dir", cat_call(), |_, _, _| {
+        let temp_dir_native: NativeFn = |_, _, _| {
             let dir = std::env::var("TMPDIR").unwrap_or_default();
             let dir = if dir.is_empty() {
                 "/tmp".to_string()
@@ -6148,7 +6161,9 @@ impl Kernel {
                 dir
             };
             Value::Str(dir.trim_end_matches('/').to_string().into())
-        });
+        };
+        self.register_native("host_temp_dir", cat_call(), temp_dir_native);
+        self.register_native("temp_dir", cat_call(), temp_dir_native);
 
         // No Form category claimed — `trace` is a debug surface, honest
         // about being outside the structural vocabulary.

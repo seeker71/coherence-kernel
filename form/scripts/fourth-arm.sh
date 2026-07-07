@@ -27,7 +27,11 @@ FOURTH_CHAIN=(
     form-stdlib/host-io-fs-fkwu-emit.fk
     form-stdlib/fkc-table-serialize.fk
     form-stdlib/hati-os-kernel-emit.fk
+    form-stdlib/core.fk
     form-stdlib/form-parse.fk
+    form-stdlib/bmf-core.fk
+    form-stdlib/bmf-grammar.fk
+    form-stdlib/host-effect-grammar.fk
     form-stdlib/form-flatten.fk
     form-stdlib/fourth-shim.fk
 )
@@ -39,7 +43,11 @@ FOURTH_FLATTEN_CHAIN=(
     form-stdlib/minimal-surface.fk
     form-stdlib/hati-os-kernel.fk
     form-stdlib/fkc-table-serialize.fk
+    form-stdlib/core.fk
     form-stdlib/form-parse.fk
+    form-stdlib/bmf-core.fk
+    form-stdlib/bmf-grammar.fk
+    form-stdlib/host-effect-grammar.fk
     form-stdlib/form-flatten.fk
     form-stdlib/fourth-shim.fk
 )
