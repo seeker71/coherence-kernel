@@ -1,0 +1,86 @@
+; native-edit.fk — the body's own file editor + grep, built on the body's ONE
+; string engine: find-from / split-on (grammars/line-grammar.fk), the same
+; primitives sh-bi-grep uses. No duplicate substring search — there is a single
+; find-from; native-edit and sh-bi-grep are two surfaces over it.
+;
+; Two layers:
+;   - string layer (ne-count / ne-replace-* / ne-grep*) is pure Form data +
+;     arithmetic over find-from/split-on -> FOUR-WAY (walkers run it on synthetic
+;     strings; proof in form-stdlib/tests/native-edit-band.fk).
+;   - file layer (ne-edit-unique / ne-edit-all / ne-grep-file) is fkwu-carrier
+;     (host I/O, like read_file/write_file) -> proven live by receipt, not four-way.
+;
+; preludes: form-stdlib/core.fk grammars/line-grammar.fk
+
+(do
+    ; ── string layer (four-way), on the shared engine ──────────────────────
+    ; ne-count: non-overlapping occurrences of `needle` in `hay` (0 for empty needle).
+    (defn ne-count-loop (hay needle from n)
+        (do
+            (let i (find-from hay needle from))
+            (if (lt i 0) n
+                (ne-count-loop hay needle (add i (str_len needle)) (add n 1)))))
+    (defn ne-count (hay needle)
+        (if (eq (str_len needle) 0) 0
+            (ne-count-loop hay needle 0 0)))
+
+    ; ne-replace-first / ne-replace-all: left-to-right, non-overlapping; the inserted
+    ; `new` is never rescanned, so `new` containing `old` cannot loop.
+    (defn ne-replace-first (hay old new)
+        (do
+            (let i (find-from hay old 0))
+            (if (lt i 0) hay
+                (str_concat (substring hay 0 i)
+                    (str_concat new (substring hay (add i (str_len old)) (str_len hay)))))))
+    (defn ne-replace-all (hay old new)
+        (do
+            (let i (find-from hay old 0))
+            (if (lt i 0) hay
+                (str_concat (substring hay 0 i)
+                    (str_concat new
+                        (ne-replace-all (substring hay (add i (str_len old)) (str_len hay)) old new))))))
+
+    ; ── grep layer (four-way), on split-on + find-from ─────────────────────
+    ; ne-grep: newline-joined lines of `text` that CONTAIN `needle` (fixed substring),
+    ; the same line-filter shape as sh-grep-filter, over the same find-from.
+    (defn ne-grep-filter (lines needle)
+        (if (nil? lines) ""
+            (do
+                (let rest (ne-grep-filter (tail lines) needle))
+                (if (ge (find-from (head lines) needle 0) 0)
+                    (str_concat (head lines) (str_concat "\n" rest))
+                    rest))))
+    (defn ne-grep (needle text)
+        (ne-grep-filter (split-on text "\n") needle))
+    (defn ne-grep-count (needle text)
+        (ne-count (ne-grep needle text) "\n"))
+
+    ; ── file layer (fkwu-carrier) ──────────────────────────────────────────
+    ; ne-edit-unique: replace `old` with `new` in the file at `path` ONLY when `old`
+    ; occurs EXACTLY once (the rented edit tool's exact-unique-match safety).
+    ;    1 = replaced;  -1 = not found (0 matches);  -2 = ambiguous (>1 match);
+    ;   -3 = write failed.  (A missing file reads as "" -> 0 matches -> -1.)
+    (defn ne-edit-unique (path old new)
+        (do
+            (let content (read_file path))
+            (let c (ne-count content old))
+            (if (eq c 0) -1
+                (if (lt 1 c) -2
+                    (do
+                        (let wrote (write_file path (ne-replace-first content old new)))
+                        (if (lt wrote 0) -3 1))))))
+
+    ; ne-edit-all: replace EVERY occurrence in the file (no uniqueness gate).
+    ;   count replaced (>=0);  -3 = write failed.
+    (defn ne-edit-all (path old new)
+        (do
+            (let content (read_file path))
+            (let c (ne-count content old))
+            (if (eq c 0) 0
+                (do
+                    (let wrote (write_file path (ne-replace-all content old new)))
+                    (if (lt wrote 0) -3 c)))))
+
+    ; ne-grep-file: grep a file by path (fkwu-carrier host read).
+    (defn ne-grep-file (needle path)
+        (ne-grep needle (read_file path))))
