@@ -13,6 +13,7 @@ flowchart TD
     Cursor["BMF cursor<br/>streaming scannerless source motion"]
     GrammarWaist["BMF grammar waist<br/>rules, refs, captures, templates"]
     DomainGrammar["layer-specific grammar<br/>not one universal record grammar"]
+    Metadata["domain metadata carrier<br/>attributes, decorators, annotations, evidence"]
     Semantic["semantic/lowering cells<br/>shared operations plus residue"]
     DataLiterals["const/data literal policy<br/>inline, micro-recipe, .fkb, hybrid"]
     CompilerBridge["source-compiler-grammar-bridge<br/>grammar-admitted compiler lane"]
@@ -26,7 +27,8 @@ flowchart TD
     Imports --> Cursor
     Cursor --> GrammarWaist
     GrammarWaist --> DomainGrammar
-    DomainGrammar --> Semantic
+    DomainGrammar --> Metadata
+    Metadata --> Semantic
     Semantic --> DataLiterals
     DataLiterals --> CompilerBridge
     DomainGrammar --> CompilerBridge
@@ -60,10 +62,21 @@ flowchart TD
 - The grammar waist is load-bearing. `bmf-core` and `bmf-grammar` own the
   scannerless cursor and reusable grammar mechanics; domain layers own their
   own vocabulary and lowering.
+- Metadata is not a hidden side channel. Languages that spell meta information
+  as attributes, decorators, annotations, pragmas, tags, or BML class/method
+  marks lower into the same domain metadata carrier:
+  `carrier + scope + key + value`. Examples include
+  `@ bml class capability host:file`,
+  `@ python function decorator lru_cache`, and
+  `@ rust item derive Debug`. The carrier can attach to domains, grammar
+  rules, captures, emitted nodes, and runtime artifacts; a downstream semantic
+  lane may consume it, but parsing does not mutate meaning just because
+  metadata exists.
 - The current authoring grammars include `defdata-language`,
   `defdata-recipe-language`, `domain-grammar-core`,
-  `grammar-authoring-language`, `form-definition-language`,
-  `domain-semantic-bridge`, and `sibling-ref-authoring-language`.
+  `grammar-authoring-language`, `domain-metadata-carrier`,
+  `form-definition-language`, `domain-semantic-bridge`, and
+  `sibling-ref-authoring-language`.
 - `source-compiler-grammar-bridge` now makes `form-definition-language` feed
   the source compiler lane. The compiler path is no longer allowed to look like
   only caller-supplied low-level artifact rows.
@@ -172,6 +185,7 @@ form-stdlib/tests/defdata-language-band.fk -> 8191
 form-stdlib/tests/defdata-recipe-language-band.fk -> 134217727
 form-stdlib/tests/domain-grammar-core-band.fk -> 268435455
 form-stdlib/tests/grammar-authoring-language-band.fk -> 134217727
+form-stdlib/tests/domain-metadata-carrier-band.fk -> 32767
 form-stdlib/tests/form-definition-language-band.fk -> 65535
 form-stdlib/tests/domain-semantic-bridge-band.fk -> 268435455
 form-stdlib/tests/sibling-ref-authoring-language-band.fk -> 2147483647

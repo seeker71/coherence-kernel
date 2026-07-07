@@ -89,6 +89,7 @@ Each file should be reviewed by section class before any uplift:
 | feature manifest | capability facts | manifest row list | feature manifest language |
 | row shape/accessors | data shape and field access | Form constructors/accessors | record shape language |
 | grammar/parser | source admission | BMF grammar | domain-specific grammar language |
+| metadata/attribute carrier | language-specific meta information | `domain-metadata-carrier` | per-language attribute surface adapters |
 | semantic lowering | meaning-preserving translation | `domain-semantic-bridge` | semantic translation language |
 | policy/selector | route or choice policy | policy rows | policy decision language |
 | artifact carrier | cache/runtime artifact truth | program-image/source-artifact rows | artifact lifecycle language |
@@ -158,6 +159,7 @@ is:
 | `domain-law-evidence-language` | BMF source v1 | biology, astronomy, field law, evidence claims |
 | `proof-manifest-language` | BMF source v1 | band coverage, stale proof headers, expected values |
 | `section-grammar-pressure-language` | BMF source and use v1 | capped-window `defn`/`let` pressure and next grammar per section |
+| `domain-metadata-carrier` | built and used v1 | attributes/decorators/annotations lower to carrier/scope/key/value rows |
 
 ## Migration Rule
 
