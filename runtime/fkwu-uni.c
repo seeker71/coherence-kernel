@@ -4799,7 +4799,7 @@ static void fk_vp(long long v) {
  * failure mode. */
 #define FK_FN_CAP 4096
 #define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144*4*8 = 8MB. */
-#define FK_PARSE_BUF_CAP 1048576 /* fk_buf: scratch buffer for program-image .fkb reads */
+#define FK_PARSE_BUF_CAP 1048576 /* fk_buf: scratch buffer for source artifact reads */
 static long long fk_fn_count;
 static long long fk_node_count;
 static long long fk_ast_full; /* set once when the AST node table overflows; halts the parse (fk_spos:=fk_slen) so the collect-and-continue recovery cannot spin re-minting sentinels forever. Reset per run. */
@@ -7476,6 +7476,40 @@ static long long fk_sparse(void) {
                     fk_spos = fk_spos + 1;
                 }
                 return fk_smknode(tag, xs, 0, 0);
+            }
+            if (ar > 3) {
+                /* arity-4+ ops (today only make_nodeid, tag 91) build a LIST-shaped node
+                 * (child [1] = a cons list of the args, per flt-nodeid4 + the tag-91
+                 * evaluator) that the generic 3-child parse path below CANNOT form -- the
+                 * --src parser has no lowering for them; they are flatten-only. Without
+                 * this case the 4th arg blocks the ')' check, fk_spos never advances, and
+                 * the parse spins to the AST cap (MEASURED: 677k diagnostics/6s on
+                 * resource-port.fk / shell-lower.fk). Diagnose PRECISELY, drain the balanced
+                 * form so the parser stays synced, and decline to nothing. */
+                fk_diag(FK_DIAG_ERR, s,
+                        "op '%.*s' (arity %lld) is flatten-only; the --src parser cannot lower a 4+-arg op -- flatten this source to a .tbl instead",
+                        (int)hn, fk_srctext + s, ar);
+                long long depth = 1;
+                while (fk_spos < fk_slen && depth > 0) {
+                    char cc = fk_srctext[fk_spos];
+                    if (cc == FK_CH_DQUOTE) {
+                        fk_spos = fk_spos + 1;
+                        while (fk_spos < fk_slen && fk_srctext[fk_spos] != FK_CH_DQUOTE) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        if (fk_spos < fk_slen) {
+                            fk_spos = fk_spos + 1;
+                        }
+                        continue;
+                    }
+                    if (cc == FK_CH_LPAREN) {
+                        depth = depth + 1;
+                    } else if (cc == FK_CH_RPAREN) {
+                        depth = depth - 1;
+                    }
+                    fk_spos = fk_spos + 1;
+                }
+                return fk_smknode(137, 0, 0, 0);
             }
             long long c1 = 0, c2 = 0, c3 = 0;
             if (ar >= 1) {
