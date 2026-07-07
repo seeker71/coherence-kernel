@@ -1,0 +1,111 @@
+; source-artifact-cache.fk -- target route for source-owned execution artifacts.
+;
+; The direct `--src` path should become a compiler front door, not the permanent
+; runtime path for every invocation. A `.fk` source is canonical. In the target
+; route, a fresh program-image `.fkb` is the parsed image cache (including the
+; `.tbl`-shaped node/function/string table), and a fresh verified `.dylib` is the
+; native execution cache. The eventual runtime selector chooses the strongest
+; current artifact:
+;
+;   fresh verified .dylib -> run native
+;   fresh .fkb            -> run parsed image
+;   stale/missing cache   -> compile .fk, then write .fkb and maybe .dylib
+;
+; This cell is the policy contract over synthetic state rows. It does not read
+; disk artifacts, run a program-image `.fkb`, or load a `.dylib`. The
+; host/compiler implementation remains a later layer: it must satisfy this route
+; without growing the temporary C seed.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn sac-run-source-compile () 1)
+    (defn sac-run-fkb () 2)
+    (defn sac-run-dylib () 3)
+
+    (defn sac-feature (name status) (list "source-artifact-cache-feature" name status))
+    (defn sac-feature-name (f) (nth f 1))
+    (defn sac-feature-status (f) (nth f 2))
+    (defn source-artifact-cache-manifest ()
+        (list
+            (sac-feature "source-authority" 1)
+            (sac-feature "program-image-fkb-cache" 1)
+            (sac-feature "program-image-includes-tbl" 1)
+            (sac-feature "dylib-native-cache" 1)
+            (sac-feature "mtime-signature-freshness" 1)
+            (sac-feature "compile-on-stale" 1)
+            (sac-feature "no-c-seed-growth" 1)))
+    (defn sac-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (sac-feature-name (head fs)) name)
+                     (eq (sac-feature-status (head fs)) 1))
+                1
+                (sac-manifest-has? name (tail fs)))))
+
+    ; state = ("source-artifact-state" source-mtime fkb-mtime dylib-mtime
+    ;          fkb-ok dylib-ok dylib-callable native-proof lowerable sig-ok)
+    (defn sac-state (source-mtime fkb-mtime dylib-mtime fkb-ok dylib-ok dylib-callable native-proof lowerable sig-ok)
+        (list "source-artifact-state" source-mtime fkb-mtime dylib-mtime
+              fkb-ok dylib-ok dylib-callable native-proof lowerable sig-ok))
+    (defn sac-source-mtime (s) (nth s 1))
+    (defn sac-fkb-mtime (s) (nth s 2))
+    (defn sac-dylib-mtime (s) (nth s 3))
+    (defn sac-fkb-ok (s) (nth s 4))
+    (defn sac-dylib-ok (s) (nth s 5))
+    (defn sac-dylib-callable (s) (nth s 6))
+    (defn sac-native-proof (s) (nth s 7))
+    (defn sac-lowerable (s) (nth s 8))
+    (defn sac-sig-ok (s) (nth s 9))
+
+    (defn sac-fresh? (source-mtime artifact-mtime sig-ok)
+        (if (gt source-mtime 0)
+            (if (ge artifact-mtime source-mtime)
+                (if (eq sig-ok 1) 1 0)
+                0)
+            0))
+
+    (defn sac-fkb-ready? (s)
+        (if (eq (sac-fkb-ok s) 1)
+            (sac-fresh? (sac-source-mtime s) (sac-fkb-mtime s) (sac-sig-ok s))
+            0))
+
+    ; A native artifact must not strand the runtime without a current parsed
+    ; image fallback. The target selector can check dylib first, but policy
+    ; readiness still requires the program-image fkb to be current too.
+    (defn sac-dylib-ready? (s)
+        (if (eq (sac-fkb-ready? s) 1)
+            (if (eq (sac-dylib-ok s) 1)
+                (if (eq (sac-dylib-callable s) 1)
+                    (if (eq (sac-native-proof s) 1)
+                        (sac-fresh? (sac-source-mtime s) (sac-dylib-mtime s) (sac-sig-ok s))
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn sac-route (s)
+        (if (eq (sac-dylib-ready? s) 1)
+            (sac-run-dylib)
+            (if (eq (sac-fkb-ready? s) 1)
+                (sac-run-fkb)
+                (sac-run-source-compile))))
+
+    (defn sac-skips-parse? (s)
+        (if (eq (sac-route s) (sac-run-source-compile)) 0 1))
+
+    (defn sac-skips-recompute? (s)
+        (if (eq (sac-route s) (sac-run-dylib)) 1 0))
+
+    ; compile-output = ("source-compile-output" writes-fkb writes-dylib includes-tbl no-c-growth)
+    (defn sac-compile-output (lowerable native-proof)
+        (list "source-compile-output"
+              1
+              (if (eq lowerable 1) (if (eq native-proof 1) 1 0) 0)
+              1
+              1))
+    (defn sac-output-writes-fkb (o) (nth o 1))
+    (defn sac-output-writes-dylib (o) (nth o 2))
+    (defn sac-output-includes-tbl (o) (nth o 3))
+    (defn sac-output-no-c-growth (o) (nth o 4))
+)

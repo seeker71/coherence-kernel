@@ -31,7 +31,6 @@ static const struct fk_optab_row fk_optab[] = {
   { "intern_trivial_bool", 1, 112 },
   { "intern_trivial_float", 1, 113 },
   { "make_nodeid", 4, 91 },
-  { "bp", 1, 45 },
   { "intern_trivial_string", 1, 46 },
   { "intern_node", 2, 47 },
   { "node_children", 1, 48 },

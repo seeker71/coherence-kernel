@@ -1,0 +1,790 @@
+; program-image-fkb-byte-decode.fk -- decode canonical program-image .fkb bytes.
+;
+; Layer 8h6 is an artifact-format decoder and witness-admission layer. It
+; decodes the 8h4 byte grammar back into the encoded program-image payload and
+; admits an 8h5 readback witness only when the readback bytes decode
+; canonically and match the external witness/container metadata.
+;
+; It is not a runtime loader. It does not execute, produce attempts or
+; observations, emit table text, install selectors, or grow the C seed.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/str-byte-at.fk
+;           form-stdlib/sha256.fk
+;           form-stdlib/hex.fk
+;           form-stdlib/form-fs.fk
+;           form-stdlib/file-byte-window.fk
+;           form-stdlib/source-artifact-cache.fk
+;           form-stdlib/source-artifact-descriptor.fk
+;           form-stdlib/runtime-artifact-plan.fk
+;           form-stdlib/source-artifact-probe.fk
+;           form-stdlib/source-artifact-identity.fk
+;           form-stdlib/program-image-fkb.fk
+;           form-stdlib/program-image-fkb-byte-container.fk
+;           form-stdlib/program-image-fkb-byte-file-witness.fk
+
+(do
+    (defn pifbd-version () "program-image-fkb-byte-decode-v2")
+
+    (defn pifbd-feature (name status) (list "program-image-fkb-byte-decode-feature" name status))
+    (defn pifbd-feature-name (f) (nth f 1))
+    (defn pifbd-feature-status (f) (nth f 2))
+    (defn program-image-fkb-byte-decode-manifest ()
+        (list
+            (pifbd-feature "byte-decoder-not-loader" 1)
+            (pifbd-feature "pure-bytes-to-payload-decode" 1)
+            (pifbd-feature "witness-admission-separate" 1)
+            (pifbd-feature "uses-8h5-readback-window-bytes" 1)
+            (pifbd-feature "magic-version-pinned" 1)
+            (pifbd-feature "cursor-exhaustion-required" 1)
+            (pifbd-feature "canonical-reencode-required" 1)
+            (pifbd-feature "symbol-dependency-section-decoded" 1)
+            (pifbd-feature "symbol-dependency-targets-decoded" 1)
+            (pifbd-feature "content-hash-external-metadata" 1)
+            (pifbd-feature "artifact-mtime-external-metadata" 1)
+            (pifbd-feature "table-counts-validated" 1)
+            (pifbd-feature "explicit-reason-manifest" 1)
+            (pifbd-feature "no-table-text-bridge" 1)
+            (pifbd-feature "no-form-binary-io" 1)
+            (pifbd-feature "no-runtime-execution" 1)
+            (pifbd-feature "no-attempt-observation" 1)
+            (pifbd-feature "no-selector-install" 1)
+            (pifbd-feature "no-c-seed-growth" 1)))
+    (defn program-image-fkb-byte-decode-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (pifbd-feature-name (head fs)) name)
+                     (eq (pifbd-feature-status (head fs)) 1))
+                1
+                (program-image-fkb-byte-decode-manifest-has? name (tail fs)))))
+
+    (defn pifbd-status-decoded () "decoded")
+    (defn pifbd-status-admitted () "admitted")
+    (defn pifbd-status-investigate () "investigate")
+    (defn pifbd-status-refused () "refused")
+    (defn pifbd-step-status-ok () "ok")
+
+    (defn pifbd-reason-decoded () "decoded")
+    (defn pifbd-reason-admitted () "admitted")
+    (defn pifbd-reason-truncated-magic () "truncated-magic")
+    (defn pifbd-reason-bad-magic () "bad-magic")
+    (defn pifbd-reason-truncated-version () "truncated-version")
+    (defn pifbd-reason-bad-version () "bad-version")
+    (defn pifbd-reason-truncated-length () "truncated-length")
+    (defn pifbd-reason-truncated-string () "truncated-string")
+    (defn pifbd-reason-truncated-int () "truncated-int")
+    (defn pifbd-reason-invalid-byte () "invalid-byte")
+    (defn pifbd-reason-malformed-sign () "malformed-sign")
+    (defn pifbd-reason-noncanonical-signed-zero () "noncanonical-signed-zero")
+    (defn pifbd-reason-out-of-range-int () "out-of-range-int")
+    (defn pifbd-reason-negative-count () "negative-count")
+    (defn pifbd-reason-impossible-count () "impossible-count")
+    (defn pifbd-reason-invalid-table () "invalid-table")
+    (defn pifbd-reason-invalid-symbol-image () "invalid-symbol-image")
+    (defn pifbd-reason-tail-garbage () "tail-garbage")
+    (defn pifbd-reason-noncanonical-bytes () "noncanonical-bytes")
+    (defn pifbd-reason-malformed-witness () "malformed-witness")
+    (defn pifbd-reason-non-ready-witness () "non-ready-witness")
+    (defn pifbd-reason-malformed-container () "malformed-container")
+    (defn pifbd-reason-readback-window-not-ready () "readback-window-not-ready")
+    (defn pifbd-reason-readback-origin-mismatch () "readback-origin-mismatch")
+    (defn pifbd-reason-readback-size-mismatch () "readback-size-mismatch")
+    (defn pifbd-reason-decode-failed () "decode-failed")
+    (defn pifbd-reason-decoded-source-mismatch () "decoded-source-mismatch")
+    (defn pifbd-reason-decoded-artifact-path-mismatch () "decoded-artifact-path-mismatch")
+    (defn pifbd-reason-decoded-seal-mismatch () "decoded-seal-mismatch")
+    (defn pifbd-reason-decoded-table-mismatch () "decoded-table-mismatch")
+    (defn pifbd-reason-decoded-symbol-mismatch () "decoded-symbol-mismatch")
+    (defn pifbd-reason-readback-bytes-mismatch () "readback-bytes-mismatch")
+    (defn pifbd-reason-readback-vouch-mismatch () "readback-vouch-mismatch")
+    (defn pifbd-reason-container-drift () "container-drift")
+
+    (defn pifbd-reason-manifest ()
+        (list
+            (pifbd-reason-decoded)
+            (pifbd-reason-admitted)
+            (pifbd-reason-truncated-magic)
+            (pifbd-reason-bad-magic)
+            (pifbd-reason-truncated-version)
+            (pifbd-reason-bad-version)
+            (pifbd-reason-truncated-length)
+            (pifbd-reason-truncated-string)
+            (pifbd-reason-truncated-int)
+            (pifbd-reason-invalid-byte)
+            (pifbd-reason-malformed-sign)
+            (pifbd-reason-noncanonical-signed-zero)
+            (pifbd-reason-out-of-range-int)
+            (pifbd-reason-negative-count)
+            (pifbd-reason-impossible-count)
+            (pifbd-reason-invalid-table)
+            (pifbd-reason-invalid-symbol-image)
+            (pifbd-reason-tail-garbage)
+            (pifbd-reason-noncanonical-bytes)
+            (pifbd-reason-malformed-witness)
+            (pifbd-reason-non-ready-witness)
+            (pifbd-reason-malformed-container)
+            (pifbd-reason-readback-window-not-ready)
+            (pifbd-reason-readback-origin-mismatch)
+            (pifbd-reason-readback-size-mismatch)
+            (pifbd-reason-decode-failed)
+            (pifbd-reason-decoded-source-mismatch)
+            (pifbd-reason-decoded-artifact-path-mismatch)
+            (pifbd-reason-decoded-seal-mismatch)
+            (pifbd-reason-decoded-table-mismatch)
+            (pifbd-reason-decoded-symbol-mismatch)
+            (pifbd-reason-readback-bytes-mismatch)
+            (pifbd-reason-readback-vouch-mismatch)
+            (pifbd-reason-container-drift)))
+
+    (defn pifbd-byte? (b)
+        (if (ge b 0) (le b 255) 0))
+    (defn pifbd-count-ok? (n)
+        (if (ge n 0) (le n (pifbc-max-signed)) 0))
+    (defn pifbd-room (bytes pos) (sub (len bytes) pos))
+    (defn pifbd-bytes-eq? (a b)
+        (if (eq (len a) (len b))
+            (if (nil? a)
+                1
+                (if (eq (head a) (head b))
+                    (pifbd-bytes-eq? (tail a) (tail b))
+                    0))
+            0))
+    (defn pifbd-prefix-eq? (bytes expected pos)
+        (if (nil? expected)
+            1
+            (if (ge pos (len bytes))
+                0
+                (if (eq (nth bytes pos) (head expected))
+                    (pifbd-prefix-eq? bytes (tail expected) (add pos 1))
+                    0))))
+    (defn pifbd-bytes-to-string (bs)
+        (if (nil? bs)
+            ""
+            (str_concat (byte_to_str (head bs)) (pifbd-bytes-to-string (tail bs)))))
+
+    (defn pifbd-step (value next status reason)
+        (list "program-image-fkb-decode-step" value next status reason))
+    (defn pifbd-step-ok (value next)
+        (pifbd-step value next (pifbd-step-status-ok) (pifbd-step-status-ok)))
+    (defn pifbd-step-fail (pos reason)
+        (pifbd-step 0 pos (pifbd-status-refused) reason))
+    (defn pifbd-step? (r)
+        (if (eq (len r) 5)
+            (str_eq (nth r 0) "program-image-fkb-decode-step")
+            0))
+    (defn pifbd-step-value (r) (nth r 1))
+    (defn pifbd-step-next (r) (nth r 2))
+    (defn pifbd-step-status (r) (nth r 3))
+    (defn pifbd-step-reason (r) (nth r 4))
+    (defn pifbd-step-ok? (r)
+        (if (pifbd-step? r)
+            (str_eq (pifbd-step-status r) (pifbd-step-status-ok))
+            0))
+
+    (defn pifbd-u32-at (bytes pos)
+        (add (mul (nth bytes pos) 16777216)
+        (add (mul (nth bytes (add pos 1)) 65536)
+        (add (mul (nth bytes (add pos 2)) 256)
+             (nth bytes (add pos 3))))))
+    (defn pifbd-four-bytes-ok? (bytes pos)
+        (and (pifbd-byte? (nth bytes pos))
+        (and (pifbd-byte? (nth bytes (add pos 1)))
+        (and (pifbd-byte? (nth bytes (add pos 2)))
+             (pifbd-byte? (nth bytes (add pos 3)))))))
+    (defn pifbd-read-u32 (bytes pos trunc-reason)
+        (if (gt (add pos 4) (len bytes))
+            (pifbd-step-fail pos trunc-reason)
+            (if (pifbd-four-bytes-ok? bytes pos)
+                (pifbd-step-ok (pifbd-u32-at bytes pos) (add pos 4))
+                (pifbd-step-fail pos (pifbd-reason-invalid-byte)))))
+
+    (defn pifbd-read-raw-bytes-loop (bytes pos n acc)
+        (if (eq n 0)
+            (pifbd-step-ok (reverse acc) pos)
+            (if (ge pos (len bytes))
+                (pifbd-step-fail pos (pifbd-reason-truncated-string))
+                (if (pifbd-byte? (nth bytes pos))
+                    (pifbd-read-raw-bytes-loop bytes (add pos 1) (sub n 1) (cons (nth bytes pos) acc))
+                    (pifbd-step-fail pos (pifbd-reason-invalid-byte))))))
+    (defn pifbd-read-raw-bytes (bytes pos n)
+        (pifbd-read-raw-bytes-loop bytes pos n (empty)))
+
+    (defn pifbd-read-string (bytes pos)
+        (do
+            (let lr (pifbd-read-u32 bytes pos (pifbd-reason-truncated-length)))
+            (if (not (pifbd-step-ok? lr))
+                lr
+                (do
+                    (let n (pifbd-step-value lr))
+                    (let next (pifbd-step-next lr))
+                    (if (not (pifbd-count-ok? n))
+                        (pifbd-step-fail next (pifbd-reason-impossible-count))
+                        (if (gt n (pifbd-room bytes next))
+                            (pifbd-step-fail next (pifbd-reason-truncated-string))
+                            (do
+                                (let br (pifbd-read-raw-bytes bytes next n))
+                                (if (not (pifbd-step-ok? br))
+                                    br
+                                    (pifbd-step-ok (pifbd-bytes-to-string (pifbd-step-value br))
+                                                   (pifbd-step-next br))))))))))
+
+    (defn pifbd-read-signed (bytes pos)
+        (if (ge pos (len bytes))
+            (pifbd-step-fail pos (pifbd-reason-truncated-int))
+            (do
+                (let sign (nth bytes pos))
+                (if (not (pifbd-byte? sign))
+                    (pifbd-step-fail pos (pifbd-reason-invalid-byte))
+                    (if (not (or (eq sign 0) (eq sign 1)))
+                        (pifbd-step-fail pos (pifbd-reason-malformed-sign))
+                        (do
+                            (let mr (pifbd-read-u32 bytes (add pos 1) (pifbd-reason-truncated-int)))
+                            (if (not (pifbd-step-ok? mr))
+                                mr
+                                (do
+                                    (let mag (pifbd-step-value mr))
+                                    (if (gt mag (pifbc-max-signed))
+                                        (pifbd-step-fail pos (pifbd-reason-out-of-range-int))
+                                        (if (and (eq sign 1) (eq mag 0))
+                                            (pifbd-step-fail pos (pifbd-reason-noncanonical-signed-zero))
+                                            (if (eq sign 1)
+                                                (pifbd-step-ok (sub 0 mag) (pifbd-step-next mr))
+                                                (pifbd-step-ok mag (pifbd-step-next mr)))))))))))))
+
+    (defn pifbd-read-int-list-loop (bytes pos n acc)
+        (if (eq n 0)
+            (pifbd-step-ok (reverse acc) pos)
+            (do
+                (let r (pifbd-read-signed bytes pos))
+                (if (not (pifbd-step-ok? r))
+                    r
+                    (pifbd-read-int-list-loop bytes (pifbd-step-next r) (sub n 1) (cons (pifbd-step-value r) acc))))))
+    (defn pifbd-read-int-list (bytes pos n)
+        (if (not (pifbd-count-ok? n))
+            (pifbd-step-fail pos (if (lt n 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+            (if (gt (mul n 5) (pifbd-room bytes pos))
+                (pifbd-step-fail pos (pifbd-reason-impossible-count))
+                (pifbd-read-int-list-loop bytes pos n (empty)))))
+
+    (defn pifbd-read-node-row (bytes pos)
+        (do
+            (let a (pifbd-read-signed bytes pos))
+            (if (not (pifbd-step-ok? a))
+                a
+                (do
+                    (let b (pifbd-read-signed bytes (pifbd-step-next a)))
+                    (if (not (pifbd-step-ok? b))
+                        b
+                        (do
+                            (let c (pifbd-read-signed bytes (pifbd-step-next b)))
+                            (if (not (pifbd-step-ok? c))
+                                c
+                                (do
+                                    (let d (pifbd-read-signed bytes (pifbd-step-next c)))
+                                    (if (not (pifbd-step-ok? d))
+                                        d
+                                        (pifbd-step-ok
+                                            (pif-node-row (pifbd-step-value a)
+                                                          (pifbd-step-value b)
+                                                          (pifbd-step-value c)
+                                                          (pifbd-step-value d))
+                                            (pifbd-step-next d)))))))))))
+    (defn pifbd-read-node-rows-loop (bytes pos n acc)
+        (if (eq n 0)
+            (pifbd-step-ok (reverse acc) pos)
+            (do
+                (let r (pifbd-read-node-row bytes pos))
+                (if (not (pifbd-step-ok? r))
+                    r
+                    (pifbd-read-node-rows-loop bytes (pifbd-step-next r) (sub n 1) (cons (pifbd-step-value r) acc))))))
+    (defn pifbd-read-node-rows (bytes pos n)
+        (if (not (pifbd-count-ok? n))
+            (pifbd-step-fail pos (if (lt n 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+            (if (gt (mul n 20) (pifbd-room bytes pos))
+                (pifbd-step-fail pos (pifbd-reason-impossible-count))
+                (pifbd-read-node-rows-loop bytes pos n (empty)))))
+
+    (defn pifbd-read-string-row (bytes pos)
+        (do
+            (let lr (pifbd-read-u32 bytes pos (pifbd-reason-truncated-length)))
+            (if (not (pifbd-step-ok? lr))
+                lr
+                (do
+                    (let n (pifbd-step-value lr))
+                    (let next (pifbd-step-next lr))
+                    (if (not (pifbd-count-ok? n))
+                        (pifbd-step-fail next (pifbd-reason-impossible-count))
+                        (if (gt n (pifbd-room bytes next))
+                            (pifbd-step-fail next (pifbd-reason-truncated-string))
+                            (pifbd-read-raw-bytes bytes next n)))))))
+    (defn pifbd-read-string-rows-loop (bytes pos n acc)
+        (if (eq n 0)
+            (pifbd-step-ok (reverse acc) pos)
+            (do
+                (let r (pifbd-read-string-row bytes pos))
+                (if (not (pifbd-step-ok? r))
+                    r
+                    (pifbd-read-string-rows-loop bytes (pifbd-step-next r) (sub n 1) (cons (pifbd-step-value r) acc))))))
+    (defn pifbd-read-string-rows (bytes pos n)
+        (if (not (pifbd-count-ok? n))
+            (pifbd-step-fail pos (if (lt n 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+            (if (gt (mul n 4) (pifbd-room bytes pos))
+                (pifbd-step-fail pos (pifbd-reason-impossible-count))
+                (pifbd-read-string-rows-loop bytes pos n (empty)))))
+
+    (defn pifbd-read-symbol-row (bytes pos)
+        (do
+            (let sr (pifbd-read-signed bytes pos))
+            (if (not (pifbd-step-ok? sr))
+                sr
+                (do
+                    (let kr (pifbd-read-string bytes (pifbd-step-next sr)))
+                    (if (not (pifbd-step-ok? kr))
+                        kr
+                        (pifbd-step-ok (pif-symbol-row (pifbd-step-value sr)
+                                                        (pifbd-step-value kr))
+                                       (pifbd-step-next kr)))))))
+    (defn pifbd-read-symbol-rows-loop (bytes pos n acc)
+        (if (eq n 0)
+            (pifbd-step-ok (reverse acc) pos)
+            (do
+                (let r (pifbd-read-symbol-row bytes pos))
+                (if (not (pifbd-step-ok? r))
+                    r
+                    (pifbd-read-symbol-rows-loop bytes (pifbd-step-next r) (sub n 1) (cons (pifbd-step-value r) acc))))))
+    (defn pifbd-read-symbol-rows (bytes pos n)
+        (if (not (pifbd-count-ok? n))
+            (pifbd-step-fail pos (if (lt n 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+            (pifbd-read-symbol-rows-loop bytes pos n (empty))))
+
+    (defn pifbd-read-symbol-dependency-target (bytes pos)
+        (do
+            (let sr (pifbd-read-signed bytes pos))
+            (if (not (pifbd-step-ok? sr))
+                sr
+                (do
+                    (let nr (pifbd-read-signed bytes (pifbd-step-next sr)))
+                    (if (not (pifbd-step-ok? nr))
+                        nr
+                        (pifbd-step-ok
+                            (pif-symbol-dependency-target (pifbd-step-value sr)
+                                                          (pifbd-step-value nr))
+                            (pifbd-step-next nr)))))))
+    (defn pifbd-read-symbol-dependency-targets-loop (bytes pos n acc)
+        (if (eq n 0)
+            (pifbd-step-ok (reverse acc) pos)
+            (do
+                (let r (pifbd-read-symbol-dependency-target bytes pos))
+                (if (not (pifbd-step-ok? r))
+                    r
+                    (pifbd-read-symbol-dependency-targets-loop bytes (pifbd-step-next r) (sub n 1) (cons (pifbd-step-value r) acc))))))
+    (defn pifbd-read-symbol-dependency-targets (bytes pos n)
+        (if (not (pifbd-count-ok? n))
+            (pifbd-step-fail pos (if (lt n 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+            (if (gt (mul n 10) (pifbd-room bytes pos))
+                (pifbd-step-fail pos (pifbd-reason-impossible-count))
+                (pifbd-read-symbol-dependency-targets-loop bytes pos n (empty)))))
+
+    (defn pifbd-read-node-symbol-row (bytes pos)
+        (do
+            (let nr (pifbd-read-signed bytes pos))
+            (if (not (pifbd-step-ok? nr))
+                nr
+                (do
+                    (let dr (pifbd-read-signed bytes (pifbd-step-next nr)))
+                    (if (not (pifbd-step-ok? dr))
+                        dr
+                        (do
+                            (let cr (pifbd-read-signed bytes (pifbd-step-next dr)))
+                            (if (not (pifbd-step-ok? cr))
+                                cr
+                                (do
+                                    (let count (pifbd-step-value cr))
+                                    (if (not (pifbd-count-ok? count))
+                                        (pifbd-step-fail (pifbd-step-next cr)
+                                                         (if (lt count 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+                                        (do
+                                            (let targetsr (pifbd-read-symbol-dependency-targets bytes (pifbd-step-next cr) count))
+                                            (if (not (pifbd-step-ok? targetsr))
+                                                targetsr
+                                                (pifbd-step-ok
+                                                    (pif-node-symbol-row (pifbd-step-value nr)
+                                                                         (pifbd-step-value dr)
+                                                                         (pifbd-step-value targetsr))
+                                                    (pifbd-step-next targetsr)))))))))))))
+    (defn pifbd-read-node-symbol-rows-loop (bytes pos n acc)
+        (if (eq n 0)
+            (pifbd-step-ok (reverse acc) pos)
+            (do
+                (let r (pifbd-read-node-symbol-row bytes pos))
+                (if (not (pifbd-step-ok? r))
+                    r
+                    (pifbd-read-node-symbol-rows-loop bytes (pifbd-step-next r) (sub n 1) (cons (pifbd-step-value r) acc))))))
+    (defn pifbd-read-node-symbol-rows (bytes pos n)
+        (if (not (pifbd-count-ok? n))
+            (pifbd-step-fail pos (if (lt n 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+            (pifbd-read-node-symbol-rows-loop bytes pos n (empty))))
+
+    ; payload = encoded fields only. content-hash and artifact-mtime are external.
+    (defn pifbd-payload (source-path source-hash source-mtime artifact-path seal-ok table symbol-image)
+        (list "program-image-fkb-decoded-payload" source-path source-hash source-mtime artifact-path seal-ok table symbol-image))
+    (defn pifbd-no-payload () (list "program-image-fkb-no-decoded-payload"))
+    (defn pifbd-payload? (p)
+        (if (eq (len p) 8)
+            (str_eq (nth p 0) "program-image-fkb-decoded-payload")
+            0))
+    (defn pifbd-payload-source-path (p) (nth p 1))
+    (defn pifbd-payload-source-hash (p) (nth p 2))
+    (defn pifbd-payload-source-mtime (p) (nth p 3))
+    (defn pifbd-payload-artifact-path (p) (nth p 4))
+    (defn pifbd-payload-seal-ok (p) (nth p 5))
+    (defn pifbd-payload-table (p) (nth p 6))
+    (defn pifbd-payload-symbol-image (p) (nth p 7))
+    (defn pifbd-payload-to-pif (payload content-hash artifact-mtime)
+        (if (pifbd-payload? payload)
+            (pif-envelope-with-symbols (pifbd-payload-source-path payload)
+                                       (pifbd-payload-source-hash payload)
+                                       (pifbd-payload-source-mtime payload)
+                                       (pifbd-payload-artifact-path payload)
+                                       content-hash
+                                       artifact-mtime
+                                       (pifbd-payload-seal-ok payload)
+                                       (pifbd-payload-table payload)
+                                       (pifbd-payload-symbol-image payload))
+            (pif-envelope "" "" 0 "" "" 0 0 (pif-table-image 0 (empty) 0 (empty) 0 (empty)))))
+    (defn pifbd-payload-bytes (payload)
+        (pifbc-payload-bytes (pifbd-payload-to-pif payload "external-content-hash" 1)))
+
+    (defn pifbd-decode-row (payload next status reason)
+        (list "program-image-fkb-byte-decode" payload next status reason))
+    (defn pifbd-decode? (d)
+        (if (eq (len d) 5)
+            (str_eq (nth d 0) "program-image-fkb-byte-decode")
+            0))
+    (defn pifbd-decode-payload (d) (nth d 1))
+    (defn pifbd-decode-next (d) (nth d 2))
+    (defn pifbd-decode-status (d) (nth d 3))
+    (defn pifbd-decode-reason (d) (nth d 4))
+    (defn pifbd-decoded? (d)
+        (if (pifbd-decode? d)
+            (str_eq (pifbd-decode-status d) (pifbd-status-decoded))
+            0))
+    (defn pifbd-decoded-row (payload next)
+        (pifbd-decode-row payload next (pifbd-status-decoded) (pifbd-reason-decoded)))
+    (defn pifbd-refused-decode (pos reason)
+        (pifbd-decode-row (pifbd-no-payload) pos (pifbd-status-refused) reason))
+    (defn pifbd-refused-from-step (step)
+        (pifbd-refused-decode (pifbd-step-next step) (pifbd-step-reason step)))
+
+    (defn pifbd-decode-after-symbols (bytes source-path source-hash source-mtime artifact-path seal-ok nf roots nr nodes ns strings symbol-count symbol-rows node-symbol-count node-symbol-rows pos)
+        (do
+            (let table (pif-table-image nf roots nr nodes ns strings))
+            (let symbol-image (pif-symbol-image symbol-count symbol-rows node-symbol-count node-symbol-rows))
+            (let payload (pifbd-payload source-path source-hash source-mtime artifact-path seal-ok table symbol-image))
+            (if (not (pif-table-valid? table))
+                (pifbd-refused-decode pos (pifbd-reason-invalid-table))
+                (if (not (pif-symbol-image-valid-for-table? symbol-image table))
+                    (pifbd-refused-decode pos (pifbd-reason-invalid-symbol-image))
+                    (if (not (eq pos (len bytes)))
+                        (pifbd-refused-decode pos (pifbd-reason-tail-garbage))
+                        (if (not (pifbd-bytes-eq? (pifbd-payload-bytes payload) bytes))
+                            (pifbd-refused-decode pos (pifbd-reason-noncanonical-bytes))
+                            (pifbd-decoded-row payload pos)))))))
+
+    (defn pifbd-decode-after-strings (bytes source-path source-hash source-mtime artifact-path seal-ok nf roots nr nodes ns strings pos)
+        (do
+            (let scr (pifbd-read-signed bytes pos))
+            (if (not (pifbd-step-ok? scr))
+                (pifbd-refused-from-step scr)
+                (do
+                    (let symbol-count (pifbd-step-value scr))
+                    (if (not (pifbd-count-ok? symbol-count))
+                        (pifbd-refused-decode (pifbd-step-next scr) (if (lt symbol-count 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+                        (do
+                            (let srowsr (pifbd-read-symbol-rows bytes (pifbd-step-next scr) symbol-count))
+                            (if (not (pifbd-step-ok? srowsr))
+                                (pifbd-refused-from-step srowsr)
+                                (do
+                                    (let nscr (pifbd-read-signed bytes (pifbd-step-next srowsr)))
+                                    (if (not (pifbd-step-ok? nscr))
+                                        (pifbd-refused-from-step nscr)
+                                        (do
+                                            (let node-symbol-count (pifbd-step-value nscr))
+                                            (if (not (pifbd-count-ok? node-symbol-count))
+                                                (pifbd-refused-decode (pifbd-step-next nscr) (if (lt node-symbol-count 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+                                                (do
+                                                    (let nsrowsr (pifbd-read-node-symbol-rows bytes (pifbd-step-next nscr) node-symbol-count))
+                                                    (if (not (pifbd-step-ok? nsrowsr))
+                                                        (pifbd-refused-from-step nsrowsr)
+                                                        (pifbd-decode-after-symbols bytes
+                                                                                    source-path
+                                                                                    source-hash
+                                                                                    source-mtime
+                                                                                    artifact-path
+                                                                                    seal-ok
+                                                                                    nf
+                                                                                    roots
+                                                                                    nr
+                                                                                    nodes
+                                                                                    ns
+                                                                                    strings
+                                                                                    symbol-count
+                                                                                    (pifbd-step-value srowsr)
+                                                                                    node-symbol-count
+                                                                                    (pifbd-step-value nsrowsr)
+                                                                                    (pifbd-step-next nsrowsr)))))))))))))))
+
+    (defn pifbd-decode-after-nodes (bytes source-path source-hash source-mtime artifact-path seal-ok nf roots nr nodes pos)
+        (do
+            (let nsr (pifbd-read-signed bytes pos))
+            (if (not (pifbd-step-ok? nsr))
+                (pifbd-refused-from-step nsr)
+                (do
+                    (let ns (pifbd-step-value nsr))
+                    (if (not (pifbd-count-ok? ns))
+                        (pifbd-refused-decode (pifbd-step-next nsr) (if (lt ns 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+                        (do
+                            (let stringr (pifbd-read-string-rows bytes (pifbd-step-next nsr) ns))
+                            (if (not (pifbd-step-ok? stringr))
+                                (pifbd-refused-from-step stringr)
+                                (pifbd-decode-after-strings bytes
+                                                            source-path
+                                                            source-hash
+                                                            source-mtime
+                                                            artifact-path
+                                                            seal-ok
+                                                            nf
+                                                            roots
+                                                            nr
+                                                            nodes
+                                                            ns
+                                                            (pifbd-step-value stringr)
+                                                            (pifbd-step-next stringr)))))))))
+
+    (defn pifbd-decode-after-roots (bytes source-path source-hash source-mtime artifact-path seal-ok nf roots pos)
+        (do
+            (let nrr (pifbd-read-signed bytes pos))
+            (if (not (pifbd-step-ok? nrr))
+                (pifbd-refused-from-step nrr)
+                (do
+                    (let nr (pifbd-step-value nrr))
+                    (if (not (pifbd-count-ok? nr))
+                        (pifbd-refused-decode (pifbd-step-next nrr) (if (lt nr 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+                        (do
+                            (let nodesr (pifbd-read-node-rows bytes (pifbd-step-next nrr) nr))
+                            (if (not (pifbd-step-ok? nodesr))
+                                (pifbd-refused-from-step nodesr)
+                                (pifbd-decode-after-nodes bytes
+                                                          source-path
+                                                          source-hash
+                                                          source-mtime
+                                                          artifact-path
+                                                          seal-ok
+                                                          nf
+                                                          roots
+                                                          nr
+                                                          (pifbd-step-value nodesr)
+                                                          (pifbd-step-next nodesr)))))))))
+
+    (defn pifbd-decode-after-seal (bytes source-path source-hash source-mtime artifact-path seal-ok pos)
+        (do
+            (let nfr (pifbd-read-signed bytes pos))
+            (if (not (pifbd-step-ok? nfr))
+                (pifbd-refused-from-step nfr)
+                (do
+                    (let nf (pifbd-step-value nfr))
+                    (if (not (pifbd-count-ok? nf))
+                        (pifbd-refused-decode (pifbd-step-next nfr) (if (lt nf 0) (pifbd-reason-negative-count) (pifbd-reason-impossible-count)))
+                        (do
+                            (let rootsr (pifbd-read-int-list bytes (pifbd-step-next nfr) nf))
+                            (if (not (pifbd-step-ok? rootsr))
+                                (pifbd-refused-from-step rootsr)
+                                (pifbd-decode-after-roots bytes
+                                                          source-path
+                                                          source-hash
+                                                          source-mtime
+                                                          artifact-path
+                                                          seal-ok
+                                                          nf
+                                                          (pifbd-step-value rootsr)
+                                                          (pifbd-step-next rootsr)))))))))
+
+    (defn pifbd-decode-after-artifact-path (bytes source-path source-hash source-mtime artifact-path pos)
+        (do
+            (let sr (pifbd-read-signed bytes pos))
+            (if (not (pifbd-step-ok? sr))
+                (pifbd-refused-from-step sr)
+                (pifbd-decode-after-seal bytes
+                                         source-path
+                                         source-hash
+                                         source-mtime
+                                         artifact-path
+                                         (pifbd-step-value sr)
+                                         (pifbd-step-next sr)))))
+
+    (defn pifbd-decode-after-source-mtime (bytes source-path source-hash source-mtime pos)
+        (do
+            (let apr (pifbd-read-string bytes pos))
+            (if (not (pifbd-step-ok? apr))
+                (pifbd-refused-from-step apr)
+                (pifbd-decode-after-artifact-path bytes
+                                                  source-path
+                                                  source-hash
+                                                  source-mtime
+                                                  (pifbd-step-value apr)
+                                                  (pifbd-step-next apr)))))
+
+    (defn pifbd-decode-after-source-hash (bytes source-path source-hash pos)
+        (do
+            (let smr (pifbd-read-signed bytes pos))
+            (if (not (pifbd-step-ok? smr))
+                (pifbd-refused-from-step smr)
+                (pifbd-decode-after-source-mtime bytes
+                                                 source-path
+                                                 source-hash
+                                                 (pifbd-step-value smr)
+                                                 (pifbd-step-next smr)))))
+
+    (defn pifbd-decode-after-source-path (bytes source-path pos)
+        (do
+            (let shr (pifbd-read-string bytes pos))
+            (if (not (pifbd-step-ok? shr))
+                (pifbd-refused-from-step shr)
+                (pifbd-decode-after-source-hash bytes
+                                                source-path
+                                                (pifbd-step-value shr)
+                                                (pifbd-step-next shr)))))
+
+    (defn pifbd-decode-after-version (bytes pos)
+        (do
+            (let spr (pifbd-read-string bytes pos))
+            (if (not (pifbd-step-ok? spr))
+                (pifbd-refused-from-step spr)
+                (pifbd-decode-after-source-path bytes
+                                                (pifbd-step-value spr)
+                                                (pifbd-step-next spr)))))
+
+    (defn pifbd-decode-bytes (bytes)
+        (if (lt (len bytes) 8)
+            (pifbd-refused-decode 0 (pifbd-reason-truncated-magic))
+            (if (not (pifbd-prefix-eq? bytes (pifbc-magic) 0))
+                (pifbd-refused-decode 0 (pifbd-reason-bad-magic))
+                (do
+                    (let vr (pifbd-read-u32 bytes 8 (pifbd-reason-truncated-version)))
+                    (if (not (pifbd-step-ok? vr))
+                        (pifbd-refused-from-step vr)
+                        (if (not (eq (pifbd-step-value vr) (pifbc-byte-version)))
+                            (pifbd-refused-decode (pifbd-step-next vr) (pifbd-reason-bad-version))
+                            (pifbd-decode-after-version bytes (pifbd-step-next vr))))))))
+
+    (defn pifbd-payload-source-matches-pif? (payload pif)
+        (and (str_eq (pifbd-payload-source-path payload) (pif-envelope-source-path pif))
+        (and (str_eq (pifbd-payload-source-hash payload) (pif-envelope-source-hash pif))
+             (eq (pifbd-payload-source-mtime payload) (pif-envelope-source-mtime pif)))))
+    (defn pifbd-payload-artifact-path-matches-pif? (payload pif)
+        (str_eq (pifbd-payload-artifact-path payload) (pif-envelope-artifact-path pif)))
+    (defn pifbd-payload-seal-matches-pif? (payload pif)
+        (eq (pifbd-payload-seal-ok payload) (pif-envelope-seal-ok pif)))
+    (defn pifbd-payload-table-matches-pif? (payload pif)
+        (pifbd-bytes-eq? (pifbc-table-bytes (pifbd-payload-table payload))
+                         (pifbc-table-bytes (pif-envelope-table pif))))
+    (defn pifbd-payload-symbol-matches-pif? (payload pif)
+        (pifbd-bytes-eq? (pifbc-symbol-image-bytes (pifbd-payload-symbol-image payload))
+                         (pifbc-symbol-image-bytes (pif-envelope-symbol-image pif))))
+
+    (defn pifbd-admission (witness decode pif status reason)
+        (list "program-image-fkb-byte-admission" witness decode pif status reason))
+    (defn pifbd-admission? (a)
+        (if (eq (len a) 6)
+            (str_eq (nth a 0) "program-image-fkb-byte-admission")
+            0))
+    (defn pifbd-admission-witness (a) (nth a 1))
+    (defn pifbd-admission-decode (a) (nth a 2))
+    (defn pifbd-admission-pif (a) (nth a 3))
+    (defn pifbd-admission-status (a) (nth a 4))
+    (defn pifbd-admission-reason (a) (nth a 5))
+    (defn pifbd-admitted? (a)
+        (if (pifbd-admission? a)
+            (str_eq (pifbd-admission-status a) (pifbd-status-admitted))
+            0))
+    (defn pifbd-admitted-row (w d pif)
+        (pifbd-admission w d pif (pifbd-status-admitted) (pifbd-reason-admitted)))
+    (defn pifbd-investigate-row (w d pif reason)
+        (pifbd-admission w d pif (pifbd-status-investigate) reason))
+    (defn pifbd-refused-row (w reason)
+        (pifbd-admission w (pifbd-decode-row (pifbd-no-payload) 0 (pifbd-status-refused) reason)
+                         (pif-envelope "" "" 0 "" "" 0 0 (pif-table-image 0 (empty) 0 (empty) 0 (empty)))
+                         (pifbd-status-refused) reason))
+
+    (defn pifbd-window-ready? (w)
+        (if (pifbf-witness? w)
+            (str_eq (fbw-window-status (pifbf-witness-window w)) (fbw-status-ready))
+            0))
+    (defn pifbd-witness-origin-ok? (w pif)
+        (and (str_eq (pifbf-witness-path w) (pif-envelope-artifact-path pif))
+        (and (str_eq (fbw-window-path (pifbf-witness-window w)) (pif-envelope-artifact-path pif))
+             (eq (fbw-window-offset (pifbf-witness-window w)) 0))))
+    (defn pifbd-witness-sizes-ok? (w bytes)
+        (and (eq (pifbf-witness-wrote w) (len bytes))
+        (and (eq (pifbf-witness-observed-size w) (len bytes))
+        (and (eq (fbw-window-requested-len (pifbf-witness-window w)) (len bytes))
+             (eq (fbw-window-observed-len (pifbf-witness-window w)) (len bytes))))))
+    (defn pifbd-readback-vouch-ok? (w pif bytes)
+        (pifbf-vouch-replay-ok? pif bytes (pifbf-witness-readback-vouch w)))
+
+    (defn pifbd-admit-decoded (w c pif bytes d)
+        (if (not (pifbd-decoded? d))
+            (pifbd-investigate-row w d pif (pifbd-reason-decode-failed))
+            (do
+                (let payload (pifbd-decode-payload d))
+                (if (not (pifbd-payload-source-matches-pif? payload pif))
+                    (pifbd-investigate-row w d pif (pifbd-reason-decoded-source-mismatch))
+                    (if (not (pifbd-payload-artifact-path-matches-pif? payload pif))
+                        (pifbd-investigate-row w d pif (pifbd-reason-decoded-artifact-path-mismatch))
+                        (if (not (pifbd-payload-seal-matches-pif? payload pif))
+                            (pifbd-investigate-row w d pif (pifbd-reason-decoded-seal-mismatch))
+                            (if (not (pifbd-payload-table-matches-pif? payload pif))
+                                (pifbd-investigate-row w d pif (pifbd-reason-decoded-table-mismatch))
+                                (if (not (pifbd-payload-symbol-matches-pif? payload pif))
+                                    (pifbd-investigate-row w d pif (pifbd-reason-decoded-symbol-mismatch))
+                                    (if (not (pifbd-bytes-eq? bytes (pifbc-container-bytes c)))
+                                        (pifbd-investigate-row w d pif (pifbd-reason-readback-bytes-mismatch))
+                                        (if (not (pifbd-readback-vouch-ok? w pif bytes))
+                                            (pifbd-investigate-row w d pif (pifbd-reason-readback-vouch-mismatch))
+                                            (if (not (pifbf-container-replay-ok? c))
+                                                (pifbd-investigate-row w d pif (pifbd-reason-container-drift))
+                                                (pifbd-admitted-row w d (pifbd-payload-to-pif payload
+                                                    (pif-envelope-content-hash pif)
+                                                    (pif-envelope-artifact-mtime pif))))))))))))))
+
+    (defn pifbd-admit-witness (w)
+        (if (not (pifbf-witness? w))
+            (pifbd-refused-row w (pifbd-reason-malformed-witness))
+            (if (not (str_eq (pifbf-witness-status w) (pifbf-status-ready)))
+                (pifbd-investigate-row w (pifbd-decode-row (pifbd-no-payload) 0 (pifbd-status-refused) (pifbd-reason-non-ready-witness))
+                                     (pif-envelope "" "" 0 "" "" 0 0 (pif-table-image 0 (empty) 0 (empty) 0 (empty)))
+                                     (pifbd-reason-non-ready-witness))
+                (do
+                    (let c (pifbf-witness-container w))
+                    (if (not (pifbc-container? c))
+                        (pifbd-investigate-row w (pifbd-decode-row (pifbd-no-payload) 0 (pifbd-status-refused) (pifbd-reason-malformed-container))
+                                             (pif-envelope "" "" 0 "" "" 0 0 (pif-table-image 0 (empty) 0 (empty) 0 (empty)))
+                                             (pifbd-reason-malformed-container))
+                        (do
+                            (let pif (pifbc-container-pif c))
+                            (if (not (pifbd-window-ready? w))
+                                (pifbd-investigate-row w (pifbd-decode-row (pifbd-no-payload) 0 (pifbd-status-refused) (pifbd-reason-readback-window-not-ready))
+                                                     pif
+                                                     (pifbd-reason-readback-window-not-ready))
+                                (if (not (pifbd-witness-origin-ok? w pif))
+                                    (pifbd-investigate-row w (pifbd-decode-row (pifbd-no-payload) 0 (pifbd-status-refused) (pifbd-reason-readback-origin-mismatch))
+                                                         pif
+                                                         (pifbd-reason-readback-origin-mismatch))
+                                    (do
+                                        (let bytes (fbw-window-bytes (pifbf-witness-window w)))
+                                        (if (not (pifbd-witness-sizes-ok? w bytes))
+                                            (pifbd-investigate-row w (pifbd-decode-row (pifbd-no-payload) 0 (pifbd-status-refused) (pifbd-reason-readback-size-mismatch))
+                                                                 pif
+                                                                 (pifbd-reason-readback-size-mismatch))
+                                            (pifbd-admit-decoded w c pif bytes (pifbd-decode-bytes bytes))))))))))))
+)

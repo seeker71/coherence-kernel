@@ -616,7 +616,6 @@ type Kernel struct {
 	framebufferRoots []NodeID
 	observeRuntime   bool
 	observeSeq       uint32
-	sourceCompileErr string
 	// Optional tracing — nil for hot-path runs, set for trace subcommand.
 	// Per lc-native-kernel-binary's "tracing and observation pattern."
 	Trace *Trace
@@ -2975,20 +2974,6 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VNodeID, Nid: root}
 	})
-	// form_compile source-string → recipe NodeID. Parses Form source into a
-	//   content-addressed recipe in RAM and returns its root NodeID — the
-	//   shareable handle. The "generate into RAM" leg of the gen conductor.
-	//   (Plain Form recipe surface; section/class source rides the compile
-	//   chain, the named follow-on.)
-	k.registerNative("form_compile", catWitness(), func(k *Kernel, args []Value) Value {
-		return Value{Kind: VNodeID, Nid: readRootFromSource(k, args[0].Str)}
-	})
-	// form_walk recipe-NodeID → value. Executes a recipe in RAM on a fresh
-	//   frame — the "run" leg. Pairs with form_compile (run what you generated)
-	//   and bytes_to_recipe (run what a peer shared over a byte channel).
-	k.registerNative("form_walk", catWitness(), func(k *Kernel, args []Value) Value {
-		return k.walk(args[0].AsNid(), NewFrame(nil))
-	})
 	// jit_compile form-name-str → 1 if a host-JIT compile succeeded,
 	//   0 if the compile fell back (toolchain missing, body uses ops the
 	//   emitter can't lower, plugin.Open failed), -1 if the name isn't
@@ -3687,10 +3672,22 @@ func (k *Kernel) registerNatives() {
 	})
 
 	k.registerNative("intern_node", catWitness(), func(k *Kernel, args []Value) Value {
-		cat := args[0].AsNid()
+		if len(args) != 2 {
+			panic(fmt.Sprintf("intern_node: expected 2 args, got %d", len(args)))
+		}
+		if args[0].Kind != VNodeID {
+			panic(fmt.Sprintf("intern_node: category must be NodeID, got %s; stack: %s", args[0].String(), k.formStackDisplay(32)))
+		}
+		if args[1].Kind != VList {
+			panic(fmt.Sprintf("intern_node: children must be list, got %s; stack: %s", args[1].String(), k.formStackDisplay(32)))
+		}
+		cat := args[0].Nid
 		kids := make([]NodeID, len(args[1].List))
 		for i, c := range args[1].List {
-			kids[i] = c.AsNid()
+			if c.Kind != VNodeID {
+				panic(fmt.Sprintf("intern_node: child %d must be NodeID, got %s; stack: %s", i, c.String(), k.formStackDisplay(32)))
+			}
+			kids[i] = c.Nid
 		}
 		return Value{Kind: VNodeID, Nid: k.intern(cat, kids)}
 	})
@@ -4039,54 +4036,6 @@ func (k *Kernel) registerNatives() {
 			{Kind: VInt, Int: int64(len(k.walkCache))},
 		}}
 	})
-	compileFormSource := func(k *Kernel, args []Value) Value {
-		k.sourceCompileErr = ""
-		label := "runtime:string/form"
-		if len(args) > 1 && args[1].Kind == VStr && args[1].Str != "" {
-			label = args[1].Str
-		}
-		root := readRootFromSource(k, args[0].Str)
-		pinRuntimeCompiledRoot(k, root, label)
-		return Value{Kind: VNodeID, Nid: root}
-	}
-	k.registerNative("compile_form_source", catWitness(), compileFormSource)
-	k.registerNative("compile-form-source", catWitness(), compileFormSource)
-	compileSourceSection := func(k *Kernel, args []Value) Value {
-		k.sourceCompileErr = ""
-		label := "runtime:string/source-section"
-		if len(args) > 2 && args[2].Kind == VStr && args[2].Str != "" {
-			label = args[2].Str
-		}
-		root, err := compileSourceSectionIntoKernel(k, args[0].Str, args[1].Str, label)
-		if err != nil {
-			k.sourceCompileErr = err.Error()
-			return Value{Kind: VNull}
-		}
-		return Value{Kind: VNodeID, Nid: root}
-	}
-	k.registerNative("compile_source_section", catWitness(), compileSourceSection)
-	k.registerNative("compile-source-section", catWitness(), compileSourceSection)
-	compileSourceText := func(k *Kernel, args []Value) Value {
-		k.sourceCompileErr = ""
-		label := "runtime:string/source"
-		if len(args) > 1 && args[1].Kind == VStr && args[1].Str != "" {
-			label = args[1].Str
-		}
-		root, err := compileSourceTextIntoKernel(k, label, args[0].Str)
-		if err != nil {
-			k.sourceCompileErr = err.Error()
-			return Value{Kind: VNull}
-		}
-		return Value{Kind: VNodeID, Nid: root}
-	}
-	k.registerNative("compile_source_text", catWitness(), compileSourceText)
-	k.registerNative("compile-source-text", catWitness(), compileSourceText)
-	k.registerNative("source_compile_last_error", catWitness(), func(k *Kernel, _ []Value) Value {
-		return Value{Kind: VStr, Str: k.sourceCompileErr}
-	})
-	k.registerNative("source-compile-last-error", catWitness(), func(k *Kernel, _ []Value) Value {
-		return Value{Kind: VStr, Str: k.sourceCompileErr}
-	})
 	k.registerNative("walk_recipe", catWitness(), func(k *Kernel, args []Value) Value {
 		env := NewFrame(nil)
 		return k.walk(args[0].AsNid(), env)
@@ -4310,6 +4259,15 @@ func (k *Kernel) registerNatives() {
 // ---------------------------------------------------------------------------
 // Walker — full RBasic dispatch
 // ---------------------------------------------------------------------------
+
+func (k *Kernel) nativeBypassesFormBinding(name NameID) bool {
+	switch k.nameStr(name) {
+	case "str_len", "str_byte_at", "byte_to_str", "substring", "char_at", "str_find", "scan_run":
+		return true
+	default:
+		return false
+	}
+}
 
 func (k *Kernel) walk(n NodeID, env *Frame) Value {
 	// One Form-stack slot per host walk invocation (see walkInner's closure
@@ -4573,9 +4531,12 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 					return v
 				}
 			}
-			// Native takes priority unless user shadowed with a closure.
+			// Most user bindings still shadow same-named natives. The exception
+			// is the byte-string/cursor waist: source compilers and BMF cursors
+			// depend on those names staying byte-indexed when portable fallback
+			// definitions from core.fk are loaded.
 			if ne, ok := k.natives[name]; ok {
-				if _, hasUserBinding := env.Lookup(name); !hasUserBinding {
+				if _, hasUserBinding := env.Lookup(name); !hasUserBinding || k.nativeBypassesFormBinding(name) {
 					args := make([]Value, len(kids)-1)
 					for i := 1; i < len(kids); i++ {
 						args[i-1] = k.walk(kids[i], env)

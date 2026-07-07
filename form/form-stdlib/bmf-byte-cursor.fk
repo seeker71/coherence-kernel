@@ -1,0 +1,160 @@
+; bmf-byte-cursor.fk -- file-backed BMF cursor over bounded byte windows.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/str-byte-at.fk
+;           form-stdlib/form-fs.fk
+;           form-stdlib/file-byte-window.fk
+;
+; Initial coordinates are line 1, column 0. Byte 10 advances to the next line
+; and resets column to 0. Byte 13 is an ordinary column-advancing byte.
+; The cursor is immutable: advance and refresh return new rows.
+
+(do
+    (defn bbc-default-window-size () 256)
+
+    (defn bbc-feature (name status) (list "bmf-byte-cursor-feature" name status))
+    (defn bbc-feature-name (f) (nth f 1))
+    (defn bbc-feature-status (f) (nth f 2))
+    (defn bmf-byte-cursor-manifest ()
+        (list
+            (bbc-feature "scannerless-file-cursor" 1)
+            (bbc-feature "fbw-window-backed" 1)
+            (bbc-feature "immutable-advance" 1)
+            (bbc-feature "configurable-window-size" 1)
+            (bbc-feature "window-size-clamped" 1)
+            (bbc-feature "refresh-on-boundary" 1)
+            (bbc-feature "eof-idempotent" 1)
+            (bbc-feature "line-col-byte10" 1)
+            (bbc-feature "cr-is-column-byte" 1)
+            (bbc-feature "nul-ascii-window-byte-indexed" 1)
+            (bbc-feature "no-raw-byte-at" 1)
+            (bbc-feature "no-whole-file-read" 1)
+            (bbc-feature "no-compiler-range-dependency" 1)
+            (bbc-feature "no-c-seed-growth" 1)
+            (bbc-feature "no-line-grammar" 1)
+            (bbc-feature "no-token-stream" 1)))
+    (defn bmf-byte-cursor-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (bbc-feature-name (head fs)) name)
+                     (eq (bbc-feature-status (head fs)) 1))
+                1
+                (bmf-byte-cursor-manifest-has? name (tail fs)))))
+
+    (defn bbc-clamp-window-size (size)
+        (if (lt size 1)
+            1
+            (if (gt size (fbw-max-window))
+                (fbw-max-window)
+                size)))
+
+    ; cursor = ("bmf-byte-cursor" path offset line col window-start
+    ;           window-size window eof)
+    (defn bbc-cursor-row (path offset line col window-start window-size window eof)
+        (list "bmf-byte-cursor" path offset line col window-start window-size window eof))
+    (defn bbc-cursor? (c) (str_eq (nth c 0) "bmf-byte-cursor"))
+    (defn bbc-path (c) (nth c 1))
+    (defn bbc-offset (c) (nth c 2))
+    (defn bbc-line (c) (nth c 3))
+    (defn bbc-col (c) (nth c 4))
+    (defn bbc-window-start (c) (nth c 5))
+    (defn bbc-window-size (c) (nth c 6))
+    (defn bbc-window (c) (nth c 7))
+    (defn bbc-eof? (c) (nth c 8))
+
+    (defn bbc-local-offset (c)
+        (sub (bbc-offset c) (bbc-window-start c)))
+    (defn bbc-in-window? (c)
+        (if (eq (bbc-eof? c) 1)
+            0
+            (if (ge (bbc-local-offset c) 0)
+                (if (lt (bbc-local-offset c) (fbw-window-observed-len (bbc-window c))) 1 0)
+                0)))
+    (defn bbc-eof-from-window? (offset window-start window)
+        (do
+            (let local (sub offset window-start))
+            (if (ge local 0)
+                (if (lt local (fbw-window-observed-len window)) 0 1)
+                1)))
+
+    (defn bbc-refresh (cursor)
+        (do
+            (let size (bbc-clamp-window-size (bbc-window-size cursor)))
+            (let offset (bbc-offset cursor))
+            (let window (fbw-read-window (bbc-path cursor) offset size))
+            (bbc-cursor-row (bbc-path cursor)
+                            offset
+                            (bbc-line cursor)
+                            (bbc-col cursor)
+                            offset
+                            size
+                            window
+                            (bbc-eof-from-window? offset offset window))))
+    (defn bbc-refresh-if-needed (cursor)
+        (if (eq (bbc-eof? cursor) 1)
+            cursor
+            (if (eq (bbc-in-window? cursor) 1)
+                cursor
+                (bbc-refresh cursor))))
+
+    (defn bbc-cursor-at (path offset line col window-size)
+        (bbc-refresh
+            (bbc-cursor-row path
+                            offset
+                            line
+                            col
+                            offset
+                            (bbc-clamp-window-size window-size)
+                            (fbw-window path offset 0 0 (fbw-status-empty) "" (fbw-evidence-route))
+                            0)))
+    (defn bbc-cursor (path)
+        (bbc-cursor-at path 0 1 0 (bbc-default-window-size)))
+    (defn bbc-cursor-with-window (path window-size)
+        (bbc-cursor-at path 0 1 0 window-size))
+
+    ; Pure read from the carried window. This function never reloads.
+    (defn bbc-byte (cursor)
+        (if (eq (bbc-in-window? cursor) 1)
+            (fbw-window-byte-at (bbc-window cursor) (bbc-local-offset cursor))
+            (sub 0 1)))
+
+    (defn bbc-next-line (cursor byte)
+        (if (eq byte 10) (add (bbc-line cursor) 1) (bbc-line cursor)))
+    (defn bbc-next-col (cursor byte)
+        (if (eq byte 10) 0 (add (bbc-col cursor) 1)))
+
+    (defn bbc-advance (cursor)
+        (do
+            (let current (bbc-refresh-if-needed cursor))
+            (let byte (bbc-byte current))
+            (if (lt byte 0)
+                current
+                (bbc-refresh-if-needed
+                    (bbc-cursor-row (bbc-path current)
+                                    (add (bbc-offset current) 1)
+                                    (bbc-next-line current byte)
+                                    (bbc-next-col current byte)
+                                    (bbc-window-start current)
+                                    (bbc-window-size current)
+                                    (bbc-window current)
+                                    0)))))
+
+    ; range = ("bmf-byte-range" path offset len start-line start-col end-line end-col)
+    (defn bbc-range (start end)
+        (list "bmf-byte-range"
+              (bbc-path start)
+              (bbc-offset start)
+              (sub (bbc-offset end) (bbc-offset start))
+              (bbc-line start)
+              (bbc-col start)
+              (bbc-line end)
+              (bbc-col end)))
+    (defn bbc-range? (r) (str_eq (nth r 0) "bmf-byte-range"))
+    (defn bbc-range-path (r) (nth r 1))
+    (defn bbc-range-offset (r) (nth r 2))
+    (defn bbc-range-len (r) (nth r 3))
+    (defn bbc-range-start-line (r) (nth r 4))
+    (defn bbc-range-start-col (r) (nth r 5))
+    (defn bbc-range-end-line (r) (nth r 6))
+    (defn bbc-range-end-col (r) (nth r 7))
+)

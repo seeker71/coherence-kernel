@@ -1,0 +1,196 @@
+; source-artifact-identity.fk -- Layer 8d source artifact digest/vouch rows.
+;
+; This layer owns digest identity over supplied material. It can compute
+; SHA-256 over caller-supplied byte lists, and it can hash text source only
+; after the caller supplies an observed file size that matches the read string
+; byte length. It does not hash arbitrary binary files from disk because the
+; current fkwu checkout witness does not expose a working read_file_bytes door.
+;
+; Digest identity is not a seal, proof, native callable status, cache write,
+; artifact load, runtime selector, compiler emission, or route algebra. When
+; this layer enriches `sap-*` observations, it carries only honestly matched
+; source/content hashes and leaves seal/proof/callable fields to their own
+; later evidence.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/str-byte-at.fk
+;           form-stdlib/sha256.fk
+;           form-stdlib/hex.fk
+;           form-stdlib/form-fs.fk
+;           form-stdlib/source-artifact-cache.fk
+;           form-stdlib/source-artifact-descriptor.fk
+;           form-stdlib/runtime-artifact-plan.fk
+;           form-stdlib/source-artifact-probe.fk
+
+(do
+    (defn sai-feature (name status) (list "source-artifact-identity-feature" name status))
+    (defn sai-feature-name (f) (nth f 1))
+    (defn sai-feature-status (f) (nth f 2))
+    (defn source-artifact-identity-manifest ()
+        (list
+            (sai-feature "byte-list-sha256-hex" 1)
+            (sai-feature "declared-content-hash-verify" 1)
+            (sai-feature "declared-source-hash-verify" 1)
+            (sai-feature "evidence-kind-carried" 1)
+            (sai-feature "supplied-byte-list-evidence" 1)
+            (sai-feature "text-source-helper-scoped" 1)
+            (sai-feature "text-size-must-match-observed" 1)
+            (sai-feature "emits-observations-for-sap" 1)
+            (sai-feature "identity-match-does-not-set-seal-ok" 1)
+            (sai-feature "no-seal-verification" 1)
+            (sai-feature "no-proof-callable-native-admission" 1)
+            (sai-feature "no-artifact-load" 1)
+            (sai-feature "no-runtime-selector" 1)
+            (sai-feature "no-compiler-emission" 1)
+            (sai-feature "no-cache-write" 1)
+            (sai-feature "no-c-seed-growth" 1)
+            (sai-feature "no-binary-file-hash" 1)
+            (sai-feature "read-file-bytes-not-checkout-witness" 1)
+            (sai-feature "does-not-derive-sac-state-or-route" 1)
+            (sai-feature "read-only-no-disk-write" 1)
+            (sai-feature "no-sap-import-cycle" 1)))
+    (defn source-artifact-identity-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (sai-feature-name (head fs)) name)
+                     (eq (sai-feature-status (head fs)) 1))
+                1
+                (source-artifact-identity-manifest-has? name (tail fs)))))
+
+    (defn sai-hash-prefix () "sha256:")
+    (defn sai-target-source-hash () "source-hash")
+    (defn sai-target-content-hash () "content-hash")
+    (defn sai-evidence-supplied-bytes () "supplied-byte-list")
+    (defn sai-evidence-text-source () "text-source-size-checked")
+    (defn sai-status-match () "match")
+    (defn sai-status-mismatch () "mismatch")
+    (defn sai-status-undeclared () "undeclared")
+    (defn sai-status-malformed () "malformed")
+    (defn sai-status-size-mismatch () "size-mismatch")
+    (defn sai-status-unobserved () "unobserved")
+
+    (defn sai-string-bytes-loop (s i n acc)
+        (if (ge i n)
+            (reverse acc)
+            (sai-string-bytes-loop s (add i 1) n (cons (str-byte-at s i) acc))))
+    (defn sai-string-bytes (s)
+        (sai-string-bytes-loop s 0 (str_len s) (list)))
+    (defn sai-sha256-hex (bytes)
+        (str_concat (sai-hash-prefix) (hex-encode (sha256 bytes))))
+    (defn sai-sha256-string (s)
+        (sai-sha256-hex (sai-string-bytes s)))
+
+    (defn sai-lower-hex-byte? (c)
+        (if (and (ge c 48) (le c 57))
+            1
+            (if (and (ge c 97) (le c 102)) 1 0)))
+    (defn sai-lower-hex-loop (s i end)
+        (if (ge i end)
+            1
+            (if (eq (sai-lower-hex-byte? (str-byte-at s i)) 1)
+                (sai-lower-hex-loop s (add i 1) end)
+                0)))
+    (defn sai-canonical-sha256? (h)
+        (if (eq (str_len h) 71)
+            (if (str_eq (substring h 0 7) (sai-hash-prefix))
+                (sai-lower-hex-loop h 7 71)
+                0)
+            0))
+    (defn sai-status-for (expected actual)
+        (if (str_eq expected "")
+            (sai-status-undeclared)
+            (if (eq (sai-canonical-sha256? expected) 0)
+                (sai-status-malformed)
+                (if (str_eq expected actual)
+                    (sai-status-match)
+                    (sai-status-mismatch)))))
+
+    ; vouch = ("source-artifact-identity-vouch" target path evidence-kind
+    ;          expected-hash actual-hash status observed-size material-size)
+    (defn sai-vouch (target path evidence-kind expected-hash actual-hash status observed-size material-size)
+        (list "source-artifact-identity-vouch" target path evidence-kind
+              expected-hash actual-hash status observed-size material-size))
+    (defn sai-vouch? (v) (str_eq (nth v 0) "source-artifact-identity-vouch"))
+    (defn sai-vouch-target (v) (nth v 1))
+    (defn sai-vouch-path (v) (nth v 2))
+    (defn sai-vouch-evidence-kind (v) (nth v 3))
+    (defn sai-vouch-expected-hash (v) (nth v 4))
+    (defn sai-vouch-actual-hash (v) (nth v 5))
+    (defn sai-vouch-status (v) (nth v 6))
+    (defn sai-vouch-observed-size (v) (nth v 7))
+    (defn sai-vouch-material-size (v) (nth v 8))
+    (defn sai-vouch-match? (v)
+        (if (sai-vouch? v)
+            (if (str_eq (sai-vouch-status v) (sai-status-match)) 1 0)
+            0))
+    (defn sai-vouch-hash-if-match (v)
+        (if (sai-vouch-match? v) (sai-vouch-actual-hash v) ""))
+
+    (defn sai-vouch-bytes (target path expected-hash bytes)
+        (do
+            (let actual (sai-sha256-hex bytes))
+            (sai-vouch target path (sai-evidence-supplied-bytes)
+                       expected-hash actual (sai-status-for expected-hash actual)
+                       (len bytes) (len bytes))))
+    (defn sai-vouch-source-bytes (path expected-hash bytes)
+        (sai-vouch-bytes (sai-target-source-hash) path expected-hash bytes))
+    (defn sai-vouch-content-bytes (path expected-hash bytes)
+        (sai-vouch-bytes (sai-target-content-hash) path expected-hash bytes))
+
+    (defn sai-vouch-text-source (path observed-size expected-hash text)
+        (do
+            (let material-size (str_len text))
+            (if (eq observed-size material-size)
+                (do
+                    (let actual (sai-sha256-string text))
+                    (sai-vouch (sai-target-source-hash) path (sai-evidence-text-source)
+                               expected-hash actual (sai-status-for expected-hash actual)
+                               observed-size material-size))
+                (sai-vouch (sai-target-source-hash) path (sai-evidence-text-source)
+                           expected-hash "" (sai-status-size-mismatch)
+                           observed-size material-size))))
+    (defn sai-vouch-text-source-observation (source-observation expected-hash)
+        (if (and (sap-observation? source-observation)
+                 (sap-role? source-observation (sap-role-source)))
+            (if (eq (sap-observation-present? source-observation) 1)
+                (sai-vouch-text-source
+                    (sap-observation-path source-observation)
+                    (sap-observation-size source-observation)
+                    expected-hash
+                    (read_file (sap-observation-path source-observation)))
+                (sai-vouch (sai-target-source-hash)
+                           (sap-observation-path source-observation)
+                           (sai-evidence-text-source)
+                           expected-hash "" (sai-status-unobserved)
+                           (sap-observation-size source-observation) 0))
+            (sai-vouch (sai-target-source-hash) "" (sai-evidence-text-source)
+                       expected-hash "" (sai-status-unobserved) -1 0)))
+
+    (defn sai-source-observation-from-vouch (path exists size mtime source-vouch)
+        (sap-source-observation path exists size mtime
+                                (if (str_eq (sai-vouch-target source-vouch) (sai-target-source-hash))
+                                    (sai-vouch-hash-if-match source-vouch)
+                                    "")))
+    (defn sai-program-image-fkb-observation-from-vouches (path exists size mtime source-vouch content-vouch seal-ok includes-tbl)
+        (sap-program-image-fkb-observation path exists size mtime
+                                           (if (str_eq (sai-vouch-target source-vouch) (sai-target-source-hash))
+                                               (sai-vouch-hash-if-match source-vouch)
+                                               "")
+                                           (if (str_eq (sai-vouch-target content-vouch) (sai-target-content-hash))
+                                               (sai-vouch-hash-if-match content-vouch)
+                                               "")
+                                           seal-ok
+                                           includes-tbl))
+    (defn sai-native-dylib-observation-from-vouches (path exists size mtime source-vouch content-vouch seal-ok proof callable lowerable)
+        (sap-native-dylib-observation path exists size mtime
+                                      (if (str_eq (sai-vouch-target source-vouch) (sai-target-source-hash))
+                                          (sai-vouch-hash-if-match source-vouch)
+                                          "")
+                                      (if (str_eq (sai-vouch-target content-vouch) (sai-target-content-hash))
+                                          (sai-vouch-hash-if-match content-vouch)
+                                          "")
+                                      seal-ok
+                                      proof
+                                      callable
+                                      lowerable))
+)
