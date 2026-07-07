@@ -1,0 +1,237 @@
+; file-byte-digest.fk -- cap-bound file SHA-256 through byte windows.
+;
+; Layer 1b: this cell turns the proven Layer 1a byte-window floor into
+; observed file-content digest evidence. It reads only bounded windows through
+; fbw-read-window, compresses full SHA-256 blocks, and materializes only the
+; final padded tail. It does not write caches, seal/prove artifacts, derive
+; routes, load program images, install selectors, or grow the C seed.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/str-byte-at.fk
+;           form-stdlib/sha256.fk
+;           form-stdlib/hex.fk
+;           form-stdlib/form-fs.fk
+;           form-stdlib/file-byte-window.fk
+;           form-stdlib/source-artifact-cache.fk
+;           form-stdlib/source-artifact-descriptor.fk
+;           form-stdlib/runtime-artifact-plan.fk
+;           form-stdlib/source-artifact-probe.fk
+;           form-stdlib/source-artifact-identity.fk
+
+(do
+    (defn fbd-version () "file-byte-digest-v1")
+    (defn fbd-default-max-bytes () 65536)
+    (defn fbd-window-size () (fbw-max-window))
+    (defn fbd-evidence-kind () "file-byte-window-sha256")
+
+    (defn fbd-feature (name status) (list "file-byte-digest-feature" name status))
+    (defn fbd-feature-name (f) (nth f 1))
+    (defn fbd-feature-status (f) (nth f 2))
+    (defn file-byte-digest-manifest ()
+        (list
+            (fbd-feature "windowed-sha256" 1)
+            (fbd-feature "uses-file-byte-window" 1)
+            (fbd-feature "total-file-cap-65536" 1)
+            (fbd-feature "window-size-4096" 1)
+            (fbd-feature "window-size-multiple-of-64" 1)
+            (fbd-feature "cap-multiple-of-64-required" 1)
+            (fbd-feature "total-length-tail-pad" 1)
+            (fbd-feature "processes-full-blocks-only" 1)
+            (fbd-feature "size-cross-check" 1)
+            (fbd-feature "post-stream-restat-check" 1)
+            (fbd-feature "sai-compatible-vouch" 1)
+            (fbd-feature "nul-ascii-window-transparent" 1)
+            (fbd-feature "cap-overflow-refuses" 1)
+            (fbd-feature "no-read-file-bytes" 1)
+            (fbd-feature "no-write-file-bytes" 1)
+            (fbd-feature "no-file-byte-at" 1)
+            (fbd-feature "no-whole-file-materialization" 1)
+            (fbd-feature "no-cache-write" 1)
+            (fbd-feature "no-seal-proof-callable" 1)
+            (fbd-feature "no-route-derivation" 1)
+            (fbd-feature "no-artifact-load" 1)
+            (fbd-feature "no-attempt-observation" 1)
+            (fbd-feature "no-selector-install" 1)
+            (fbd-feature "no-c-seed-growth" 1)))
+    (defn file-byte-digest-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (fbd-feature-name (head fs)) name)
+                     (eq (fbd-feature-status (head fs)) 1))
+                1
+                (file-byte-digest-manifest-has? name (tail fs)))))
+
+    (defn fbd-status-too-large () "too-large")
+    (defn fbd-status-read-error () "read-error")
+
+    (defn fbd-nonempty? (s) (gt (str_len s) 0))
+    (defn fbd-cap-valid? (max-bytes)
+        (if (ge max-bytes 64)
+            (if (le max-bytes (fbd-default-max-bytes))
+                (eq (mod max-bytes 64) 0)
+                0)
+            0))
+    (defn fbd-window-size-valid? (window-size)
+        (if (ge window-size 64)
+            (if (le window-size (fbw-max-window))
+                (eq (mod window-size 64) 0)
+                0)
+            0))
+    (defn fbd-min (a b) (if (lt a b) a b))
+
+    (defn fbd-state-digest-bytes (state)
+        (append-list (u32-to-bytes (nth-rec state 0))
+          (append-list (u32-to-bytes (nth-rec state 1))
+            (append-list (u32-to-bytes (nth-rec state 2))
+              (append-list (u32-to-bytes (nth-rec state 3))
+                (append-list (u32-to-bytes (nth-rec state 4))
+                  (append-list (u32-to-bytes (nth-rec state 5))
+                    (append-list (u32-to-bytes (nth-rec state 6))
+                                 (u32-to-bytes (nth-rec state 7))))))))))
+
+    (defn fbd-zero-pad-to-56 (xs)
+        (if (eq (mod (len xs) 64) 56)
+            xs
+            (fbd-zero-pad-to-56 (append-1 xs 0))))
+    (defn fbd-tail-pad (tail total-len)
+        (do
+            (let bits-lo (mul total-len 8))
+            (let with-bit (append-1 tail 128))
+            (let padded (fbd-zero-pad-to-56 with-bit))
+            (append-list padded
+                (list 0 0 0 0
+                      (band (shr_u32 bits-lo 24) 255)
+                      (band (shr_u32 bits-lo 16) 255)
+                      (band (shr_u32 bits-lo 8) 255)
+                      (band bits-lo 255)))))
+    (defn fbd-final-hex (state tail total-len)
+        (str_concat (sai-hash-prefix)
+            (hex-encode
+                (fbd-state-digest-bytes
+                    (process-all-blocks state (fbd-tail-pad tail total-len))))))
+
+    ; processed = ("file-byte-digest-processed" state tail)
+    (defn fbd-processed (state tail)
+        (list "file-byte-digest-processed" state tail))
+    (defn fbd-processed-state (p) (nth p 1))
+    (defn fbd-processed-tail (p) (nth p 2))
+    (defn fbd-process-window-bytes (state bytes)
+        (if (ge (len bytes) 64)
+            (fbd-process-window-bytes
+                (process-block state (take-rec bytes 64 (list)))
+                (drop-rec bytes 64))
+            (fbd-processed state bytes)))
+
+    ; stream = ("file-byte-digest-stream" state tail material-size status)
+    (defn fbd-stream (state tail material-size status)
+        (list "file-byte-digest-stream" state tail material-size status))
+    (defn fbd-stream-state (s) (nth s 1))
+    (defn fbd-stream-tail (s) (nth s 2))
+    (defn fbd-stream-material-size (s) (nth s 3))
+    (defn fbd-stream-status (s) (nth s 4))
+    (defn fbd-stream-ok? (s)
+        (str_eq (fbd-stream-status s) (sai-status-match)))
+
+    (defn fbd-stream-loop (path state offset total-size window-size)
+        (if (ge offset total-size)
+            (fbd-stream state (list) offset (sai-status-match))
+            (do
+                (let remaining (sub total-size offset))
+                (let requested (fbd-min window-size remaining))
+                (let window (fbw-read-window path offset requested))
+                (if (not (str_eq (fbw-window-status window) (fbw-status-ready)))
+                    (fbd-stream state (list) offset (fbd-status-read-error))
+                    (if (not (eq (fbw-window-observed-len window) requested))
+                        (fbd-stream state (list) offset (sai-status-size-mismatch))
+                        (do
+                            (let processed (fbd-process-window-bytes state (fbw-window-bytes window)))
+                            (let next-offset (add offset requested))
+                            (if (lt next-offset total-size)
+                                (if (eq (len (fbd-processed-tail processed)) 0)
+                                    (fbd-stream-loop path (fbd-processed-state processed) next-offset total-size window-size)
+                                    (fbd-stream (fbd-processed-state processed)
+                                                (fbd-processed-tail processed)
+                                                next-offset
+                                                (fbd-status-read-error)))
+                                (fbd-stream (fbd-processed-state processed)
+                                            (fbd-processed-tail processed)
+                                            next-offset
+                                            (sai-status-match)))))))))
+
+    ; digest = ("file-byte-digest" version target path evidence-kind expected-hash
+    ;           actual-hash status observed-size material-size max-bytes window-size)
+    (defn fbd-digest (target path expected-hash actual-hash status observed-size material-size max-bytes window-size)
+        (list "file-byte-digest" (fbd-version) target path (fbd-evidence-kind)
+              expected-hash actual-hash status observed-size material-size
+              max-bytes window-size))
+    (defn fbd-digest? (d) (str_eq (nth d 0) "file-byte-digest"))
+    (defn fbd-digest-target (d) (nth d 2))
+    (defn fbd-digest-path (d) (nth d 3))
+    (defn fbd-digest-evidence-kind (d) (nth d 4))
+    (defn fbd-digest-expected-hash (d) (nth d 5))
+    (defn fbd-digest-actual-hash (d) (nth d 6))
+    (defn fbd-digest-status (d) (nth d 7))
+    (defn fbd-digest-observed-size (d) (nth d 8))
+    (defn fbd-digest-material-size (d) (nth d 9))
+    (defn fbd-digest-max-bytes (d) (nth d 10))
+    (defn fbd-digest-window-size (d) (nth d 11))
+
+    (defn fbd-digest-file-capped-window (target path expected-hash max-bytes window-size)
+        (if (not (fbd-nonempty? path))
+            (fbd-digest target path expected-hash "" (sai-status-malformed) -1 0 max-bytes window-size)
+            (if (not (fbd-cap-valid? max-bytes))
+                (fbd-digest target path expected-hash "" (sai-status-malformed) -1 0 max-bytes window-size)
+                (if (not (fbd-window-size-valid? window-size))
+                    (fbd-digest target path expected-hash "" (sai-status-malformed) -1 0 max-bytes window-size)
+                    (if (eq (fs-exists? path) 0)
+                        (fbd-digest target path expected-hash "" (sai-status-unobserved) -1 0 max-bytes window-size)
+                        (do
+                            (let size0 (fs-stat-size path))
+                            (if (lt size0 0)
+                                (fbd-digest target path expected-hash "" (sai-status-unobserved) size0 0 max-bytes window-size)
+                                (if (gt size0 max-bytes)
+                                    (fbd-digest target path expected-hash "" (fbd-status-too-large) size0 0 max-bytes window-size)
+                                    (do
+                                        (let stream (fbd-stream-loop path (sha256-h-init) 0 size0 window-size))
+                                        (let size1 (fs-stat-size path))
+                                        (if (not (str_eq (fbd-stream-status stream) (sai-status-match)))
+                                            (fbd-digest target path expected-hash "" (fbd-stream-status stream) size0 (fbd-stream-material-size stream) max-bytes window-size)
+                                            (if (not (eq size1 size0))
+                                                (fbd-digest target path expected-hash "" (sai-status-size-mismatch) size0 (fbd-stream-material-size stream) max-bytes window-size)
+                                                (if (not (eq (fbd-stream-material-size stream) size0))
+                                                    (fbd-digest target path expected-hash "" (sai-status-size-mismatch) size0 (fbd-stream-material-size stream) max-bytes window-size)
+                                                    (do
+                                                        (let actual (fbd-final-hex (fbd-stream-state stream)
+                                                                                   (fbd-stream-tail stream)
+                                                                                   size0))
+                                                        (fbd-digest target path expected-hash actual
+                                                                    (sai-status-for expected-hash actual)
+                                                                    size0
+                                                                    (fbd-stream-material-size stream)
+                                                                    max-bytes
+                                                                    window-size))))))))))))))
+    (defn fbd-digest-file-capped (target path expected-hash max-bytes)
+        (fbd-digest-file-capped-window target path expected-hash max-bytes (fbd-window-size)))
+
+    (defn fbd-vouch-from-digest (digest)
+        (sai-vouch (fbd-digest-target digest)
+                   (fbd-digest-path digest)
+                   (fbd-digest-evidence-kind digest)
+                   (fbd-digest-expected-hash digest)
+                   (fbd-digest-actual-hash digest)
+                   (fbd-digest-status digest)
+                   (fbd-digest-observed-size digest)
+                   (fbd-digest-material-size digest)))
+    (defn fbd-vouch-file-capped (target path expected-hash max-bytes)
+        (fbd-vouch-from-digest (fbd-digest-file-capped target path expected-hash max-bytes)))
+    (defn fbd-vouch-file-capped-window (target path expected-hash max-bytes window-size)
+        (fbd-vouch-from-digest (fbd-digest-file-capped-window target path expected-hash max-bytes window-size)))
+    (defn fbd-vouch-source-file-capped (path expected-hash max-bytes)
+        (fbd-vouch-file-capped (sai-target-source-hash) path expected-hash max-bytes))
+    (defn fbd-vouch-content-file-capped (path expected-hash max-bytes)
+        (fbd-vouch-file-capped (sai-target-content-hash) path expected-hash max-bytes))
+    (defn fbd-vouch-source-file (path expected-hash)
+        (fbd-vouch-source-file-capped path expected-hash (fbd-default-max-bytes)))
+    (defn fbd-vouch-content-file (path expected-hash)
+        (fbd-vouch-content-file-capped path expected-hash (fbd-default-max-bytes)))
+)

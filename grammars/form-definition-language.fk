@@ -1,0 +1,266 @@
+; form-definition-language.fk -- scannerless module/definition authoring surface.
+;
+; This layer answers the current low-level authoring problem without pretending
+; the executable floor has changed. Authors can write a small module language:
+;
+;     module calc {
+;       data rows = [8,13,21];
+;       fn bump(x) = add(x,1);
+;       fn first() = head(rows);
+;     }
+;
+; The BMF cursor grammar parses that surface and lowers it to today's proven
+; top-level Form source floor:
+;
+;     (let rows (list 8 13 21))
+;     (defn bump (x) (add x 1))
+;     (defn first () (head rows))
+;
+; It is not a source-compiler integration yet, not a line grammar, not a
+; tokenizer, not an s-expression surface, and not a C runtime primitive.
+;
+; preludes: form-stdlib/core.fk form-stdlib/bmf-core.fk
+;           form-stdlib/bmf-grammar.fk form-stdlib/defdata.fk
+
+(do
+    (defn fdl-feature (name status) (list "form-definition-language-feature" name status))
+    (defn fdl-feature-name (f) (nth f 1))
+    (defn fdl-feature-status (f) (nth f 2))
+    (defn form-definition-language-manifest ()
+        (list
+            (fdl-feature "scannerless" 1)
+            (fdl-feature "bmf-cursor-grammar" 1)
+            (fdl-feature "no-line-grammar" 1)
+            (fdl-feature "not-s-expression-surface" 1)
+            (fdl-feature "module-authoring" 1)
+            (fdl-feature "definition-authoring" 1)
+            (fdl-feature "data-authoring" 1)
+            (fdl-feature "defdata-policy-reused" 1)
+            (fdl-feature "lowers-to-form-floor" 1)
+            (fdl-feature "not-main-source-compiler" 1)
+            (fdl-feature "not-runtime-primitive" 1)))
+    (defn form-definition-language-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (fdl-feature-name (head fs)) name)
+                     (eq (fdl-feature-status (head fs)) 1))
+                1
+                (form-definition-language-manifest-has? name (tail fs)))))
+
+    (defn form-definition-language-grammar ()
+        (grammar "module" (list
+            (rule3 "module"
+                (list "seq"
+                    (p-lit "module")
+                    (p-cap "name" (p-ref "name"))
+                    (p-lit "{")
+                    (p-cap "decls" (p-rep (p-ref "decl")))
+                    (p-lit "}"))
+                (t-emit "fncall"
+                    (list (t-const "__fdl_module__")
+                          (t-splice "name")
+                          (t-splices "decls"))))
+            (rule3 "decl"
+                (p-cap "v" (list "alt" (p-ref "data-decl") (p-ref "fn-decl")))
+                (t-splice "v"))
+            (rule3 "data-decl"
+                (list "seq"
+                    (p-lit "data")
+                    (p-cap "name" (p-ref "name"))
+                    (p-lit "=")
+                    (p-cap "values" (p-ref "int-list"))
+                    (p-lit ";"))
+                (t-emit "fncall"
+                    (list (t-const "__fdl_data__")
+                          (t-splice "name")
+                          (t-splice "values"))))
+            (rule3 "fn-decl"
+                (list "seq"
+                    (p-lit "fn")
+                    (p-cap "name" (p-ref "name"))
+                    (p-lit "(")
+                    (p-cap "params" (p-ref "params"))
+                    (p-lit ")")
+                    (p-lit "=")
+                    (p-cap "body" (p-ref "expr"))
+                    (p-lit ";"))
+                (t-emit "fncall"
+                    (list (t-const "__fdl_fn__")
+                          (t-splice "name")
+                          (t-splice "params")
+                          (t-splice "body"))))
+            (rule3 "params"
+                (p-cap "ps" (p-sep (p-ref "name") (p-lit ",")))
+                (t-emit "fncall"
+                    (list (t-const "__fdl_params__")
+                          (t-splices "ps"))))
+            (rule3 "int-list"
+                (list "seq"
+                    (p-lit "[")
+                    (p-cap "values" (p-sep (p-ref "int-leaf") (p-lit ",")))
+                    (p-lit "]"))
+                (t-emit "fncall"
+                    (list (t-const "__fdl_int_list__")
+                          (t-splices "values"))))
+            (rule3 "args"
+                (p-cap "as" (p-sep (p-ref "expr") (p-lit ",")))
+                (t-emit "fncall"
+                    (list (t-const "__fdl_args__")
+                          (t-splices "as"))))
+            (rule3 "expr"
+                (p-cap "v" (list "alt" (p-ref "call-expr") (p-ref "int-expr") (p-ref "name-expr")))
+                (t-splice "v"))
+            (rule3 "call-expr"
+                (list "seq"
+                    (p-cap "name" (p-ref "name"))
+                    (p-lit "(")
+                    (p-cap "args" (p-ref "args"))
+                    (p-lit ")"))
+                (t-emit "fncall"
+                    (list (t-const "__fdl_call__")
+                          (t-splice "name")
+                          (t-splice "args"))))
+            (rule3 "int-expr"
+                (p-cap "v" (p-ref "int-leaf"))
+                (t-emit "fncall"
+                    (list (t-const "__fdl_int__")
+                          (t-splice "v"))))
+            (rule3 "name-expr"
+                (p-cap "v" (p-ref "name"))
+                (t-emit "fncall"
+                    (list (t-const "__fdl_name__")
+                          (t-splice "v"))))
+            (rule3 "name"
+                (p-cap "v" (p-run "alpha"))
+                (t-splice "v"))
+            (rule3 "int-leaf"
+                (p-cap "v" (p-run "digit"))
+                (t-splice "v")))))
+
+    (defn fdl-parse-fail () (intern_trivial_string "PARSE-FAIL"))
+    (defn fdl-ok? (node) (not (node_eq node (fdl-parse-fail))))
+
+    ; Full-source parse: reject trailing sediment after whitespace/comments.
+    (defn fdl-parse (src)
+        (do
+            (let rr (g-match-rule (form-definition-language-grammar) "module" (cursor-str src)))
+            (if (and (rok? rr) (cur-eof? (skip-ws (rok-cur rr))))
+                (rok-node rr)
+                (fdl-parse-fail))))
+
+    (defn fdl-tag (node)
+        (node_value (head (node_children node))))
+    (defn fdl-module-name (module)
+        (node_value (nth (node_children module) 1)))
+    (defn fdl-module-decls (module)
+        (tail (tail (node_children module))))
+    (defn fdl-decl-count (module)
+        (len (fdl-module-decls module)))
+
+    (defn fdl-data-name (decl)
+        (node_value (nth (node_children decl) 1)))
+    (defn fdl-data-values-node (decl)
+        (nth (node_children decl) 2))
+    (defn fdl-data-value-nodes (decl)
+        (tail (node_children (fdl-data-values-node decl))))
+    (defn fdl-data-value-count (decl)
+        (len (fdl-data-value-nodes decl)))
+    (defn fdl-data-value-head (decl)
+        (str_to_int (node_value (head (fdl-data-value-nodes decl)))))
+    (defn fdl-data-policy (decl)
+        (dd-policy (fdl-data-value-count decl) 0 1 0))
+
+    (defn fdl-fn-name (decl)
+        (node_value (nth (node_children decl) 1)))
+    (defn fdl-fn-params-node (decl)
+        (nth (node_children decl) 2))
+    (defn fdl-fn-param-nodes (decl)
+        (tail (node_children (fdl-fn-params-node decl))))
+    (defn fdl-fn-param-count (decl)
+        (len (fdl-fn-param-nodes decl)))
+    (defn fdl-fn-body (decl)
+        (nth (node_children decl) 3))
+
+    (defn fdl-space-leaf-source (nodes)
+        (if (nil? nodes)
+            ""
+            (if (nil? (tail nodes))
+                (node_value (head nodes))
+                (str_concat (node_value (head nodes))
+                    (str_concat " " (fdl-space-leaf-source (tail nodes)))))))
+    (defn fdl-list-source (nodes)
+        (if (nil? nodes)
+            "(list)"
+            (str_concat "(list " (str_concat (fdl-space-leaf-source nodes) ")"))))
+
+    (defn fdl-params-source (param-nodes)
+        (str_concat "(" (str_concat (fdl-space-leaf-source param-nodes) ")")))
+
+    (defn fdl-arg-source (args)
+        (if (nil? args)
+            ""
+            (if (nil? (tail args))
+                (fdl-expr-source (head args))
+                (str_concat (fdl-expr-source (head args))
+                    (str_concat " " (fdl-arg-source (tail args)))))))
+    (defn fdl-call-source (expr)
+        (do
+            (let kids (node_children expr))
+            (let name (node_value (nth kids 1)))
+            (let args (tail (node_children (nth kids 2))))
+            (if (nil? args)
+                (str_concat "(" (str_concat name ")"))
+                (str_concat "("
+                    (str_concat name
+                        (str_concat " " (str_concat (fdl-arg-source args) ")")))))))
+    (defn fdl-expr-source (expr)
+        (do
+            (let tag (fdl-tag expr))
+            (if (str_eq tag "__fdl_int__")
+                (node_value (nth (node_children expr) 1))
+            (if (str_eq tag "__fdl_name__")
+                (node_value (nth (node_children expr) 1))
+            (if (str_eq tag "__fdl_call__")
+                (fdl-call-source expr)
+                "?")))))
+
+    (defn fdl-data-source (decl)
+        (str_concat "(let "
+            (str_concat (fdl-data-name decl)
+                (str_concat " "
+                    (str_concat (fdl-list-source (fdl-data-value-nodes decl)) ")")))))
+    (defn fdl-fn-source (decl)
+        (str_concat "(defn "
+            (str_concat (fdl-fn-name decl)
+                (str_concat " "
+                    (str_concat (fdl-params-source (fdl-fn-param-nodes decl))
+                        (str_concat " " (str_concat (fdl-expr-source (fdl-fn-body decl)) ")")))))))
+    (defn fdl-decl-source (decl)
+        (do
+            (let tag (fdl-tag decl))
+            (if (str_eq tag "__fdl_data__")
+                (fdl-data-source decl)
+            (if (str_eq tag "__fdl_fn__")
+                (fdl-fn-source decl)
+                "?"))))
+    (defn fdl-decls-source (decls)
+        (if (nil? decls)
+            ""
+            (if (nil? (tail decls))
+                (fdl-decl-source (head decls))
+                (str_concat (fdl-decl-source (head decls))
+                    (str_concat "\n" (fdl-decls-source (tail decls)))))))
+    (defn fdl-module-source (module)
+        (fdl-decls-source (fdl-module-decls module)))
+
+    (defn fdl-lowering (module)
+        (list "form-definition-lowering"
+              "form-top-level-source-floor"
+              (fdl-module-name module)
+              (fdl-decl-count module)
+              (fdl-module-source module)))
+    (defn fdl-lowering-kind (l) (nth l 1))
+    (defn fdl-lowering-name (l) (nth l 2))
+    (defn fdl-lowering-decl-count (l) (nth l 3))
+    (defn fdl-lowering-source (l) (nth l 4))
+)

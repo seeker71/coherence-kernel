@@ -1508,36 +1508,40 @@ export class Kernel {
     // String ops
     this.registerNative("str_len", catAccess(), (_k, args) => ({
       kind: "int",
-      int: argStr(args, 0).length,
+      int: Buffer.byteLength(argStr(args, 0), "utf8"),
     }));
     this.registerNative("substring", catAccess(), (_k, args) => {
       const s = argStr(args, 0);
+      const bytes = Buffer.from(s, "utf8");
       const start = argInt(args, 1);
       const end = argInt(args, 2);
-      if (start < 0 || end < start || end > s.length) {
+      if (start < 0 || end < start || end > bytes.length) {
         throw new Error(
-          `substring: bounds out of range start=${start} end=${end} len=${s.length}`,
+          `substring: bounds out of range start=${start} end=${end} len=${bytes.length}`,
         );
       }
+      const a = floorUtf8Boundary(bytes, start);
+      const b = floorUtf8Boundary(bytes, end);
       return {
         kind: "str",
-        str: s.slice(floorCharBoundary(s, start), floorCharBoundary(s, end)),
+        str: bytes.subarray(a, b).toString("utf8"),
       };
     });
     this.registerNative("char_at", catAccess(), (_k, args) => {
       const s = argStr(args, 0);
+      const bytes = Buffer.from(s, "utf8");
       const i = argInt(args, 1);
-      if (i < 0 || i >= s.length) {
-        throw new Error(`char_at: bounds out of range index=${i} len=${s.length}`);
+      if (i < 0 || i >= bytes.length) {
+        throw new Error(`char_at: bounds out of range index=${i} len=${bytes.length}`);
       }
-      // At a char start: the whole char (both surrogate halves). Inside a
-      // char: nothing — a unitwise loop concatenating char_at over
-      // 0..str_len reconstructs the string exactly, once per char.
-      if (insideSurrogatePair(s, i)) {
+      // At a UTF-8 char start: the whole char. Inside a multibyte char:
+      // nothing. A bytewise loop over 0..str_len reconstructs the string
+      // exactly once per char, matching Go/Rust/fkwu.
+      if (isUtf8Continuation(bytes[i]!)) {
         return { kind: "str", str: "" };
       }
-      const cp = s.codePointAt(i);
-      return { kind: "str", str: cp === undefined ? "" : String.fromCodePoint(cp) };
+      const end = ceilUtf8Boundary(bytes, i + 1);
+      return { kind: "str", str: bytes.subarray(i, end).toString("utf8") };
     });
     this.registerNative("str_concat", catMethod(), (_k, args) => ({
       kind: "str",
@@ -1695,8 +1699,10 @@ export class Kernel {
     this.registerNative("str_find", catAccess(), (_k, args) => {
       const s = argStr(args, 0);
       const needle = argStr(args, 1);
-      const from = ceilCharBoundary(s, Math.max(0, argInt(args, 2)));
-      const idx = s.indexOf(needle, from);
+      const bytes = Buffer.from(s, "utf8");
+      const needleBytes = Buffer.from(needle, "utf8");
+      const from = ceilUtf8Boundary(bytes, Math.max(0, argInt(args, 2)));
+      const idx = bytes.indexOf(needleBytes, from);
       // `kind: "int"` carries a JS Number — using BigInt here would
       // poison downstream arithmetic with "Cannot mix BigInt and other
       // types" when callers do plain int math on the result.
@@ -1710,15 +1716,15 @@ export class Kernel {
     //              4=non-quote-non-escape, 5=non-newline,
     //              6=json-string-safe (code unit >= 0x20, not quote/backslash).
     this.registerNative("scan_run", catAccess(), (_k, args) => {
-      const s = argStr(args, 0);
+      const bytes = Buffer.from(argStr(args, 0), "utf8");
       const from = Math.max(0, argInt(args, 1));
       const cls = argInt(args, 2);
-      const n = s.length;
+      const n = bytes.length;
       let end = Math.min(from, n);
       switch (cls) {
         case 0: { // whitespace
           while (end < n) {
-            const c = s.charCodeAt(end);
+            const c = bytes[end]!;
             if (c !== 32 && c !== 9 && c !== 10 && c !== 13) break;
             end++;
           }
@@ -1726,7 +1732,7 @@ export class Kernel {
         }
         case 1: { // ascii digit
           while (end < n) {
-            const c = s.charCodeAt(end);
+            const c = bytes[end]!;
             if (c < 48 || c > 57) break;
             end++;
           }
@@ -1734,7 +1740,7 @@ export class Kernel {
         }
         case 2: { // ascii alpha
           while (end < n) {
-            const c = s.charCodeAt(end);
+            const c = bytes[end]!;
             if (!((c >= 97 && c <= 122) || (c >= 65 && c <= 90))) break;
             end++;
           }
@@ -1742,7 +1748,7 @@ export class Kernel {
         }
         case 3: { // identifier char
           while (end < n) {
-            const c = s.charCodeAt(end);
+            const c = bytes[end]!;
             const isAlnum = (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57);
             if (!(isAlnum || c === 95 || c === 45)) break;
             end++;
@@ -1751,7 +1757,7 @@ export class Kernel {
         }
         case 4: { // non-quote-non-escape
           while (end < n) {
-            const c = s.charCodeAt(end);
+            const c = bytes[end]!;
             if (c === 34 || c === 92) break;
             end++;
           }
@@ -1759,14 +1765,14 @@ export class Kernel {
         }
         case 5: { // non-newline
           while (end < n) {
-            if (s.charCodeAt(end) === 10) break;
+            if (bytes[end]! === 10) break;
             end++;
           }
           break;
         }
         case 6: { // json-string-safe
           while (end < n) {
-            const c = s.charCodeAt(end);
+            const c = bytes[end]!;
             if (c < 0x20 || c === 34 || c === 92) break;
             end++;
           }
@@ -3808,29 +3814,20 @@ function argBigInt(args: Value[], i: number): bigint {
     return BigInt(v.int);
   throw new Error(`arg ${i}: expected integer, got ${v.kind}`);
 }
-// A unit index is "inside a char" when it points at the low half of a
-// surrogate pair — the UTF-16 analog of a UTF-8 continuation byte. The
-// addressing natives snap such indices to a boundary (floor for windows,
-// ceil for search starts) so bytewise-stepping recipes read whole chars,
-// never throw, and the adjacency law substring(s,a,m)+substring(s,m,b) ==
-// substring(s,a,b) holds for any m. Same snap algebra as the Go and Rust
-// kernels over their UTF-8 byte units; unit alignment across encodings is
-// the named open gap (TS counts UTF-16 units, siblings count bytes).
-function insideSurrogatePair(s: string, i: number): boolean {
-  if (i <= 0 || i >= s.length) return false;
-  return (
-    (s.charCodeAt(i) & 0xfc00) === 0xdc00 && (s.charCodeAt(i - 1) & 0xfc00) === 0xd800
-  );
+function isUtf8Continuation(b: number): boolean {
+  return (b & 0xc0) === 0x80;
 }
 
-function floorCharBoundary(s: string, i: number): number {
-  if (i > s.length) i = s.length;
-  return insideSurrogatePair(s, i) ? i - 1 : i;
+function floorUtf8Boundary(bytes: Buffer, i: number): number {
+  if (i > bytes.length) i = bytes.length;
+  while (i > 0 && i < bytes.length && isUtf8Continuation(bytes[i]!)) i--;
+  return i;
 }
 
-function ceilCharBoundary(s: string, i: number): number {
-  if (i >= s.length) return s.length;
-  return insideSurrogatePair(s, i) ? i + 1 : i;
+function ceilUtf8Boundary(bytes: Buffer, i: number): number {
+  if (i >= bytes.length) return bytes.length;
+  while (i < bytes.length && isUtf8Continuation(bytes[i]!)) i++;
+  return i;
 }
 
 function argStr(args: Value[], i: number): string {

@@ -29,8 +29,9 @@ The authored source shall be the closest expression of intent:
 | JSON codec | (stale row — `json-codec.fk` never came across from the origin; `json.fk` itself now carries the proven parser/emitter, see `form/form-stdlib/tests/json-band.fk`) `json.fk` now names JSON cell categories, accessors, and constructors only. Compiler/bootstrap, i18n, channel-query, and normal tests enter through the BML `JsonCodec`; `parse-json` remains only in seedbank compost paths. | `json-codec.fk` declares JSON as a structured codec; parse/emit enter through `JsonCodec`, and lower Form is generated or generic runtime execution. | Add the seedbank migration ledger entry for the old parser/emitter pair, then promote, generate, or release those artifacts explicitly. |
 | HTTP stack | `http-parse.fk`, `http-render.fk`, `http-serve.fk`, `http-server.fk`, `http-socket.fk`, `http-adapter.fk`, and `kernel-http.fk` split protocol, routing, rendering, and serving across hand-authored functions. | HTTP is a protocol grammar plus route graph: request grammar, response grammar, route classes, observation cells, and socket/listener lifecycle as one front door. | Declare HTTP/1.1 parse/render as a protocol codec, then route serving consumes request/response cells only. |
 | Route catalog | `router-routes.fk`, `kernel-http.fk`, and route tests still describe routes with low-level constructors. | Routes are high-grammar `RouteCell<Request, Response>` declarations with choice/fail/dispatch observation attached. | Convert the highest-traffic API routes into route classes that return codec-backed response cells. |
-| Source compiler | `source-compiler.fk`, `compiler.fk`, `engine.fk`, `bmf-core.fk`, `bmf-grammar.fk`, `grammar-chars.fk`, and `runtime-grammar.fk` overlap as compiler, grammar, runtime, emitter, and registry layers. | One grammar-of-grammars pipeline: source declaration -> grammar cells -> lowering cells -> executable recipes -> reversible source/trace. | Name one canonical compiler pipeline and mark overlapping engines as candidates to merge, generate, or release. |
+| Source compiler | `source-compiler.fk`, `compiler.fk`, `engine.fk`, `bmf-core.fk`, `bmf-grammar.fk`, `grammar-chars.fk`, and `runtime-grammar.fk` overlap as compiler, grammar, runtime, emitter, and registry layers. `source-compiler-grammar-bridge.fk` is now the current guide: `form-definition-language` must parse and lower before entering `source-compiler-emission`. | One grammar-of-grammars pipeline: source declaration -> grammar cells -> lowering cells -> executable recipes -> reversible source/trace. | Fold more compiler entrypoints behind the grammar-admitted path, then make the bridge produce `.fkb` directly instead of accepting supplied image envelopes. |
 | BML grammar | `grammars/bml.fk` is large and highly capable, but much of the desired language surface is still encoded as handwritten lowering and tests. | BML declares its own grammar, semantics, lowering, reverse, proofs, and capability gaps as cells. | Lift repeated BML lowering patterns into reusable grammar/lowering declarations rather than adding more special cases. |
+| Metadata carriers | Metadata exists as source hashes, evidence lanes, BML source facts, decorators/annotations in imported languages, and ad hoc rows. | Metadata is a first-class carrier row over language carrier, scope, key, and value; BML attributes, Python decorators, Rust attributes, Java/C# annotations, and domain evidence marks all lower to the same observable shape. | Use `domain-metadata-carrier` on touched grammar/BML sections, then add per-language surface adapters where syntax differs. |
 | Python bridge | `python-bmf-lift.fk`, `python-bmf-eval.fk`, `grammars/python-bmf.fk`, and `emits/python-native*` are major bridge tissue. | Python is one optional grammar among many; no special runtime status, no privileged fallback. | Classify every Python bridge entry as: release now, compile through BML/BMF, or temporary call-out with a named compost gate. |
 | Emitters | `emit-engine.fk`, `seedbank/emits/*`, `emits/python-native*`, and self-witness emitters overlap. | Emitters are codec/target declarations over cell shapes with one reusable engine and target-specific declarations. | Promote the useful seedbank emit templates into codec declarations or compost them. |
 | Query/path languages | `xpath.fk`, `doc-xpath.fk`, and `concept-xpath.fk` hand-parse path strings and walk trees. | Query is a graph/path grammar with typed selectors, predicates, and substrate coordinates. | Replace split-loop path parsing with a reusable query grammar and lens registry. |
@@ -56,17 +57,22 @@ For each stdlib file touched on a hot path:
 
 ## First Rewrite Sequence
 
-1. Finish JSON as the pattern: `JsonCodec` is the only route-facing and corpus
+1. Keep the knowledge hierarchy current:
+   [`stdlib-knowledge-hierarchy-index.md`](stdlib-knowledge-hierarchy-index.md)
+   groups files into semantic clusters, section classes, and missing grammars
+   before any per-file freshness-header sweep.
+2. Finish JSON as the pattern: `JsonCodec` is the only route-facing and corpus
    JSON surface; seedbank parser/emitter tissue is explicitly promoted,
    generated, or released.
-2. Keep the compiler/bootstrap ontology path free of `parse-json`: ontology
+3. Keep the compiler/bootstrap ontology path free of `parse-json`: ontology
    coordinates live in kernel-native `bp` tables and the loader materializes
    Form bindings from those coordinates.
-3. Lift HTTP parse/render into a protocol codec, then make native route classes
+4. Lift HTTP parse/render into a protocol codec, then make native route classes
    consume only request and response cells.
-4. Consolidate compiler/grammar engines by naming one source-to-recipe pipeline
-   and moving special-case lowerers into declarations.
-5. Audit Python bridge files as temporary grammar ports, not privileged runtime
+5. Consolidate compiler/grammar engines around the current source path:
+   BMF cursor -> layer grammar -> semantic/data lowering ->
+   `source-compiler-grammar-bridge` -> artifact emission.
+6. Audit Python bridge files as temporary grammar ports, not privileged runtime
    dependencies.
 
 This audit is a work queue, not a museum. When a rewrite lands, update the row:

@@ -1,0 +1,244 @@
+; program-image-fkb-byte-file-witness.fk -- bounded file witness for 8h4 bytes.
+;
+; Layer 8h5 proves one narrow thing: a ready 8h4 program-image byte container
+; can be placed at its own artifact path and read back byte-identically through
+; the current bounded file-window floor.
+;
+; This is immediate file witness evidence, not atomic durable persistence, not
+; cache freshness admission, not source-compiler persistence, and not runtime
+; selection or loading. The layer replays the embedded PIF and content vouch
+; before any mutation, writes only through form-fs append after removing the old
+; file, and reads back only through file-byte-window.
+;
+; preludes: form-stdlib/core.fk
+;           form-stdlib/str-byte-at.fk
+;           form-stdlib/sha256.fk
+;           form-stdlib/hex.fk
+;           form-stdlib/form-fs.fk
+;           form-stdlib/file-byte-window.fk
+;           form-stdlib/source-artifact-cache.fk
+;           form-stdlib/source-artifact-descriptor.fk
+;           form-stdlib/runtime-artifact-plan.fk
+;           form-stdlib/source-artifact-probe.fk
+;           form-stdlib/source-artifact-identity.fk
+;           form-stdlib/program-image-fkb.fk
+;           form-stdlib/program-image-fkb-byte-container.fk
+
+(do
+    (defn pifbf-version () "program-image-fkb-byte-file-witness-v1")
+    (defn pifbf-max-bytes () (fbw-max-window))
+
+    (defn pifbf-feature (name status) (list "program-image-fkb-byte-file-witness-feature" name status))
+    (defn pifbf-feature-name (f) (nth f 1))
+    (defn pifbf-feature-status (f) (nth f 2))
+    (defn program-image-fkb-byte-file-witness-manifest ()
+        (list
+            (pifbf-feature "file-witness-for-ready-byte-container" 1)
+            (pifbf-feature "replays-embedded-pif-before-write" 1)
+            (pifbf-feature "rechecks-content-vouch-before-write" 1)
+            (pifbf-feature "artifact-path-owned-by-pif" 1)
+            (pifbf-feature "rejects-empty-target-path" 1)
+            (pifbf-feature "rejects-directory-target" 1)
+            (pifbf-feature "rejects-empty-payload-bytes" 1)
+            (pifbf-feature "one-window-readback-cap" 1)
+            (pifbf-feature "too-large-refused-before-write" 1)
+            (pifbf-feature "remove-before-append" 1)
+            (pifbf-feature "post-remove-absence-check" 1)
+            (pifbf-feature "write-count-checked" 1)
+            (pifbf-feature "observed-size-carried" 1)
+            (pifbf-feature "file-window-readback" 1)
+            (pifbf-feature "readback-byte-equality" 1)
+            (pifbf-feature "readback-content-vouch" 1)
+            (pifbf-feature "no-form-binary-io" 1)
+            (pifbf-feature "no-whole-file-byte-io" 1)
+            (pifbf-feature "no-table-text-bridge" 1)
+            (pifbf-feature "no-source-compiler-persistence" 1)
+            (pifbf-feature "no-program-image-load" 1)
+            (pifbf-feature "no-attempt-observation" 1)
+            (pifbf-feature "no-selector-install" 1)
+            (pifbf-feature "no-c-seed-growth" 1)))
+    (defn program-image-fkb-byte-file-witness-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (pifbf-feature-name (head fs)) name)
+                     (eq (pifbf-feature-status (head fs)) 1))
+                1
+                (program-image-fkb-byte-file-witness-manifest-has? name (tail fs)))))
+
+    (defn pifbf-status-ready () "file-witness-ready")
+    (defn pifbf-status-investigate () "investigate")
+    (defn pifbf-status-refused () "refused")
+
+    (defn pifbf-reason-ready () "file-witness-ready")
+    (defn pifbf-reason-malformed-container () "malformed-container")
+    (defn pifbf-reason-non-ready-container () "non-ready-container")
+    (defn pifbf-reason-container-drift () "container-drift")
+    (defn pifbf-reason-empty-target-path () "empty-target-path")
+    (defn pifbf-reason-target-is-directory () "target-is-directory")
+    (defn pifbf-reason-empty-payload () "empty-payload-bytes")
+    (defn pifbf-reason-too-large () "too-large-for-one-window")
+    (defn pifbf-reason-remove-failed () "remove-failed")
+    (defn pifbf-reason-append-failed () "append-failed")
+    (defn pifbf-reason-size-mismatch () "size-mismatch")
+    (defn pifbf-reason-readback-window-failed () "readback-window-failed")
+    (defn pifbf-reason-readback-bytes-mismatch () "readback-bytes-mismatch")
+    (defn pifbf-reason-readback-hash-mismatch () "readback-hash-mismatch")
+
+    (defn pifbf-bytes-eq? (a b)
+        (if (eq (len a) (len b))
+            (if (nil? a)
+                1
+                (if (eq (head a) (head b))
+                    (pifbf-bytes-eq? (tail a) (tail b))
+                    0))
+            0))
+
+    (defn pifbf-empty-window (path)
+        (fbw-window path 0 0 0 (fbw-status-missing) "" (fbw-evidence-route)))
+    (defn pifbf-empty-vouch (path)
+        (sai-vouch (sai-target-content-hash) path (sai-evidence-supplied-bytes)
+                   "" "" (sai-status-unobserved) 0 0))
+
+    (defn pifbf-container-path (container)
+        (if (pifbc-container? container)
+            (if (pif-envelope? (pifbc-container-pif container))
+                (pif-envelope-artifact-path (pifbc-container-pif container))
+                "")
+            ""))
+
+    (defn pifbf-vouch-replay-ok? (pif bytes vouch)
+        (do
+            (let expected (sai-vouch-content-bytes
+                            (pif-envelope-artifact-path pif)
+                            (pif-envelope-content-hash pif)
+                            bytes))
+            (and (sai-vouch-match? vouch)
+            (and (sai-vouch-match? expected)
+            (and (str_eq (sai-vouch-target vouch) (sai-vouch-target expected))
+            (and (str_eq (sai-vouch-path vouch) (sai-vouch-path expected))
+            (and (str_eq (sai-vouch-evidence-kind vouch) (sai-vouch-evidence-kind expected))
+            (and (str_eq (sai-vouch-expected-hash vouch) (sai-vouch-expected-hash expected))
+            (and (str_eq (sai-vouch-actual-hash vouch) (sai-vouch-actual-hash expected))
+            (and (str_eq (sai-vouch-status vouch) (sai-vouch-status expected))
+            (and (eq (sai-vouch-observed-size vouch) (len bytes))
+            (and (eq (sai-vouch-material-size vouch) (len bytes))
+            (and (eq (sai-vouch-observed-size expected) (len bytes))
+                 (eq (sai-vouch-material-size expected) (len bytes)))))))))))))))
+
+    (defn pifbf-container-replay-ok? (container)
+        (if (pifbc-container? container)
+            (do
+                (let pif (pifbc-container-pif container))
+                (let bytes (pifbc-container-bytes container))
+                (let vouch (pifbc-container-vouch container))
+                (let fresh (pifbc-container-from-envelope pif))
+                (if (pif-envelope-valid? pif)
+                    (if (pifbc-ready? fresh)
+                        (if (gt (len bytes) 0)
+                            (if (pifbf-bytes-eq? bytes (pifbc-container-bytes fresh))
+                                (pifbf-vouch-replay-ok? pif bytes vouch)
+                                0)
+                            0)
+                        0)
+                    0))
+            0))
+
+    ; row = ("program-image-fkb-byte-file-witness" container path wrote
+    ;        observed-size window readback-vouch status reason)
+    (defn pifbf-witness (container path wrote observed-size window readback-vouch status reason)
+        (list "program-image-fkb-byte-file-witness"
+              container path wrote observed-size window readback-vouch status reason))
+    (defn pifbf-witness? (w)
+        (if (eq (len w) 9)
+            (str_eq (nth w 0) "program-image-fkb-byte-file-witness")
+            0))
+    (defn pifbf-witness-container (w) (nth w 1))
+    (defn pifbf-witness-path (w) (nth w 2))
+    (defn pifbf-witness-wrote (w) (nth w 3))
+    (defn pifbf-witness-observed-size (w) (nth w 4))
+    (defn pifbf-witness-window (w) (nth w 5))
+    (defn pifbf-witness-readback-vouch (w) (nth w 6))
+    (defn pifbf-witness-status (w) (nth w 7))
+    (defn pifbf-witness-reason (w) (nth w 8))
+
+    (defn pifbf-row (container wrote observed-size window vouch status reason)
+        (pifbf-witness container
+                       (pifbf-container-path container)
+                       wrote
+                       observed-size
+                       window
+                       vouch
+                       status
+                       reason))
+    (defn pifbf-refused-row (container reason)
+        (pifbf-row container 0 -1 (pifbf-empty-window (pifbf-container-path container))
+                   (pifbf-empty-vouch (pifbf-container-path container))
+                   (pifbf-status-refused) reason))
+    (defn pifbf-investigate-row (container wrote observed-size window vouch reason)
+        (pifbf-row container wrote observed-size window vouch (pifbf-status-investigate) reason))
+    (defn pifbf-ready-row (container wrote observed-size window vouch)
+        (pifbf-row container wrote observed-size window vouch (pifbf-status-ready) (pifbf-reason-ready)))
+
+    (defn pifbf-file-witness-from-container (container)
+        (if (not (pifbc-container? container))
+            (pifbf-refused-row container (pifbf-reason-malformed-container))
+            (if (not (pifbc-ready? container))
+                (pifbf-refused-row container (pifbf-reason-non-ready-container))
+                (do
+                    (let pif (pifbc-container-pif container))
+                    (let bytes (pifbc-container-bytes container))
+                    (let path (pifbf-container-path container))
+                    (let byte-count (len bytes))
+                    (if (eq (str_len path) 0)
+                        (pifbf-refused-row container (pifbf-reason-empty-target-path))
+                        (if (eq (fs-is-dir? path) 1)
+                            (pifbf-refused-row container (pifbf-reason-target-is-directory))
+                            (if (gt byte-count (pifbf-max-bytes))
+                                (pifbf-refused-row container (pifbf-reason-too-large))
+                                (if (eq byte-count 0)
+                                    (pifbf-refused-row container (pifbf-reason-empty-payload))
+                                    (if (not (pifbf-container-replay-ok? container))
+                                        (pifbf-investigate-row container 0 (fs-stat-size path)
+                                                               (pifbf-empty-window path)
+                                                               (pifbf-empty-vouch path)
+                                                               (pifbf-reason-container-drift))
+                                        (do
+                                            (let _rm (fs-remove-file path))
+                                            (if (eq (fs-exists? path) 1)
+                                                (pifbf-investigate-row container 0 (fs-stat-size path)
+                                                                       (pifbf-empty-window path)
+                                                                       (pifbf-empty-vouch path)
+                                                                       (pifbf-reason-remove-failed))
+                                                (do
+                                                    (let wrote (fs-append-bytes path bytes))
+                                                    (let observed (fs-stat-size path))
+                                                    (if (not (eq wrote byte-count))
+                                                        (pifbf-investigate-row container wrote observed
+                                                                               (pifbf-empty-window path)
+                                                                               (pifbf-empty-vouch path)
+                                                                               (pifbf-reason-append-failed))
+                                                        (if (not (eq observed byte-count))
+                                                            (pifbf-investigate-row container wrote observed
+                                                                                   (pifbf-empty-window path)
+                                                                                   (pifbf-empty-vouch path)
+                                                                                   (pifbf-reason-size-mismatch))
+                                                            (do
+                                                                (let window (fbw-read-window path 0 byte-count))
+                                                                (if (not (str_eq (fbw-window-status window) (fbw-status-ready)))
+                                                                    (pifbf-investigate-row container wrote observed window
+                                                                                           (pifbf-empty-vouch path)
+                                                                                           (pifbf-reason-readback-window-failed))
+                                                                    (do
+                                                                        (let readback (fbw-window-bytes window))
+                                                                        (let read-vouch (sai-vouch-content-bytes
+                                                                                            path
+                                                                                            (pif-envelope-content-hash pif)
+                                                                                            readback))
+                                                                        (if (not (pifbf-bytes-eq? readback bytes))
+                                                                            (pifbf-investigate-row container wrote observed window read-vouch
+                                                                                                   (pifbf-reason-readback-bytes-mismatch))
+                                                                            (if (not (sai-vouch-match? read-vouch))
+                                                                                (pifbf-investigate-row container wrote observed window read-vouch
+                                                                                                       (pifbf-reason-readback-hash-mismatch))
+                                                                                (pifbf-ready-row container wrote observed window read-vouch))))))))))))))))))))
+)

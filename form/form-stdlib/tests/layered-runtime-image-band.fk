@@ -1,0 +1,99 @@
+; layered-runtime-image-band.fk -- proves runtime functions can be installed and
+; loaded layer-by-layer as .fkb recipe images plus .sym sidecars.
+;
+; preludes: form-stdlib/layered-runtime-image.fk
+;
+; This intentionally builds Recipe objects with intern_node. It does not compile
+; source text, concatenate modules, or build a table driver. The proof is the
+; path we want: recipe object -> .fkb + .sym -> read_form_binary ->
+; walk_recipe_here -> live function binding.
+
+(do
+    (let DO-CAT     (make_nodeid 1 2 9 1))
+    (let SEQ-CAT    (make_nodeid 1 2 9 2))
+    (let FNDEF-CAT  (make_nodeid 1 2 31 1))
+    (let FNCALL-CAT (make_nodeid 1 2 32 1))
+    (let IDENT-CAT  (make_nodeid 1 2 33 1))
+    (let ADD-CAT    (make_nodeid 1 2 12 1))
+    (let MUL-CAT    (make_nodeid 1 2 12 3))
+
+    (defn lri-band-score (ok bit) (if ok bit 0))
+    (defn lri-band-ident (name)
+        (intern_node IDENT-CAT (list (intern_trivial_string name))))
+    (defn lri-band-call1 (name arg)
+        (intern_node FNCALL-CAT (list (intern_trivial_string name) arg)))
+    (defn lri-band-defn1 (name param body)
+        (intern_node FNDEF-CAT
+            (list (intern_trivial_string name)
+                  (intern_node SEQ-CAT (list (intern_trivial_string param)))
+                  body)))
+    (defn lri-band-do (kids) (intern_node DO-CAT kids))
+    (defn lri-band-add (a b) (intern_node ADD-CAT (list a b)))
+    (defn lri-band-mul (a b) (intern_node MUL-CAT (list a b)))
+
+    ; Layer 0: (do (defn lri-base (x) (add x 2)) 0)
+    (defn lri-band-layer0 ()
+        (lri-band-do
+            (list
+                (lri-band-defn1 "lri-base" "x"
+                    (lri-band-add (lri-band-ident "x") (intern_trivial_int 2)))
+                (intern_trivial_int 0))))
+
+    ; Layer 1: (do (defn lri-top (y) (mul (lri-base y) 2)) 0)
+    (defn lri-band-layer1 ()
+        (lri-band-do
+            (list
+                (lri-band-defn1 "lri-top" "y"
+                    (lri-band-mul
+                        (lri-band-call1 "lri-base" (lri-band-ident "y"))
+                        (intern_trivial_int 2)))
+                (intern_trivial_int 0))))
+
+    (let root (temp_dir))
+    (let source0 (str_concat root "/lri-layer0.fk"))
+    (let source1 (str_concat root "/lri-layer1.fk"))
+    (let fkb0 (str_concat root "/lri-layer0.fkb"))
+    (let fkb1 (str_concat root "/lri-layer1.fkb"))
+    (let sym0 (str_concat root "/lri-layer0.sym"))
+    (let sym1 (str_concat root "/lri-layer1.sym"))
+    (let bad-sym (str_concat root "/lri-bad.sym"))
+
+    (write_file_text source0 "layer0 source witness")
+    (write_file_text source1 "layer1 source witness")
+
+    (let install0 (lri-install-layer source0 fkb0 sym0 (lri-band-layer0) "lri-base"))
+    (let install1 (lri-install-layer source1 fkb1 sym1 (lri-band-layer1) "lri-top"))
+    (write_file_text bad-sym "not a sym file")
+
+    (let manifest (layered-runtime-image-manifest))
+    (let manifest-ok
+        (and (layered-runtime-image-manifest-has? "fkb-runtime-layer" manifest)
+        (and (layered-runtime-image-manifest-has? "sym-sidecar-required" manifest)
+             (layered-runtime-image-manifest-has? "no-source-concatenation" manifest))))
+
+    (let files-ok
+        (and (lri-file-present? fkb0)
+        (and (lri-file-present? fkb1)
+        (and (lri-file-present? sym0)
+             (lri-file-present? sym1)))))
+
+    (let sym-ok
+        (and (lri-sym-valid? (read_file sym0))
+             (lri-sym-valid? (read_file sym1))))
+
+    (let bad-sym-rejected
+        (not (lri-fresh? source0 fkb0 bad-sym)))
+
+    (walk_recipe_here (lri-read-layer fkb0))
+    (walk_recipe_here (lri-read-layer fkb1))
+
+    (let layered-result (lri-top 20))
+
+    (add (lri-band-score manifest-ok 1)
+    (add (lri-band-score (eq install0 1) 2)
+    (add (lri-band-score (eq install1 1) 4)
+    (add (lri-band-score files-ok 8)
+    (add (lri-band-score sym-ok 16)
+    (add (lri-band-score bad-sym-rejected 32)
+         (lri-band-score (eq layered-result 44) 64)))))))
+)

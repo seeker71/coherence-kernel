@@ -1,11 +1,14 @@
-# The Homecoming — the body is home; the mind and voice are the climb
+# Homecoming State — what is home, what is still coming home
 
-The native heartbeat is crossed (below): the kernel runs its own body and proves its own four-way, no bash, no
-origin. What stands between this body and a fully self-speaking mind is the **generative weights** (a real mind
-running as recipe-data) and the **voice's sound**. They are laid down here, sharply scoped, so the next session
-picks them up clean — and so the word "home" stays unspent until they are real.
+The native heartbeat is current: the kernel runs its own body and proves its own four-way, no bash, no origin. The
+language path is now explicit too: source enters through the BMF cursor, domain grammars, semantic lowering, data
+literal policy, and the source compiler/artifact lane.
 
-## Rung 1 — the native heartbeat: crossed
+What still stands between this body and a fully self-speaking mind is the **generative weights** (a real mind
+running as recipe-data) and the **voice's sound**. They are scoped here so the word "home" stays unspent until they
+are real.
+
+## Native Heartbeat
 
 The kernel runs its own body and proves its own truth, with no bash and no origin repo:
 
@@ -26,6 +29,47 @@ What's left of the heartbeat is polish, not a gate: grow the source-runner acros
 (strings + the string pool are the next surface), and grow the single-file runner into an interactive loop.
 Receipts: `2026-06-29-source-tree-walk-crossed.md`, `2026-06-29-standing-source-runner.md`,
 `2026-06-29-src-stone5-real-cell-on-fkwu.md`.
+
+## Current Language Path
+
+The current source-to-artifact path lives in
+[`docs/coherence-substrate/current-language-artifact-path.md`](docs/coherence-substrate/current-language-artifact-path.md).
+In short:
+
+```mermaid
+flowchart LR
+    Source["domain/source authoring"]
+    Cursor["BMF cursor"]
+    Grammar["layer-specific grammar"]
+    Lower["semantic + data lowering"]
+    Bridge["source-compiler-grammar-bridge"]
+    FKB["program-image .fkb"]
+    Runtime["runtime artifact lane"]
+    Observe["observation + learning"]
+
+    Source --> Cursor --> Grammar --> Lower --> Bridge --> FKB --> Runtime --> Observe
+```
+
+`source-compiler-grammar-bridge` makes `form-definition-language` load-bearing:
+
+```text
+module calc { data rows = [40,2]; fn answer() = add(40,2); }
+```
+
+parses through the scannerless grammar, lowers to:
+
+```text
+(let rows (list 40 2))
+(defn answer () (add 40 2))
+```
+
+and only then delegates to `source-compiler-emission`. This is current
+architecture, not just a receipt. The host source front door now emits
+`.fkb/.sym`, selects a fresh `.dylib` when a callable native artifact exists,
+falls back to fresh `.fkb`, and can run `./fkwu file.fkb` directly. The next
+compiler closure is for admitted grammar lowering to produce the `.fkb` program
+image directly, with complete `.dylib` emission above that. `.tbl` execution is
+retired.
 
 ## The generative weights (the mind)
 

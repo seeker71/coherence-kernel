@@ -361,9 +361,10 @@ fourth_flatten_expr() {
 }
 
 # fourth_table — cached flattened node-table for one band (path on stdout).
-# Flattens on fkwu (the committed T_flat) on a cache miss, or through the Go
-# executor when the self-host table is absent; empty output means the band runs
-# three-kernel only this time.
+# Flattens only through fkwu walking the committed T_flat. The old Go fallback
+# concatenated the whole fourth chain plus the workload into a giant driver; that
+# is the wrong arm now that the actual path is layered image/fkb loading.
+# Empty output means the band runs three-kernel only this time.
 fourth_table() {
     local stem="$1" kind key out d f srcs=()
     kind="$(awk -v b="$stem" '$1==b{print $2; exit}' "$FOURTH_MANIFEST")"
@@ -381,38 +382,24 @@ fourth_table() {
                 | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
             [[ -s "$out.tmp" ]] && mv -f "$out.tmp" "$out" || rm -f "$out.tmp"
         fi
-        if [[ ! -s "$out" ]]; then
-            d="$(mktemp -d "${TMPDIR:-/tmp}/form-fourth-t.XXXXXX")"
-            cat "${FOURTH_CHAIN[@]}" > "$d/driver.fk"
-            fourth_flatten_expr "$kind" "${srcs[@]}" >> "$d/driver.fk"
-            "$GO_BIN" "$d/driver.fk" 2>/dev/null > "$out.tmp" && mv -f "$out.tmp" "$out" || rm -f "$out.tmp"
-            rm -rf "$d"
-        fi
     fi
     [[ -s "$out" ]] && printf '%s\n' "$out"
+    return 0
 }
 
 # fourth_flatten_sources — flatten an ad-hoc prelude list + band (outside the manifest).
-# Prefers fkwu walking T_flat when fourth_selfhost; falls back to bin-go.
+# Only fkwu walking T_flat is allowed here. The former bin-go monolithic fallback
+# built giant source drivers and belongs to the retired witness path.
 fourth_flatten_sources() {
     local stem="$1" kind="$2" out="$3"
     shift 3
-    local srcs=("$@") d
+    local srcs=("$@")
     [[ "${#srcs[@]}" -ge 1 ]] || return 1
     if fourth_selfhost; then
         { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
             | "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 2>/dev/null \
             | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
         [[ -s "$out.tmp" ]] && mv -f "$out.tmp" "$out" || rm -f "$out.tmp"
-    fi
-    if [[ ! -s "$out" ]]; then
-        d="$(mktemp -d "${TMPDIR:-/tmp}/form-fourth-adhoc.XXXXXX")"
-        cat "${FOURTH_CHAIN[@]}" > "$d/driver.fk"
-        fourth_flatten_expr "$kind" "${srcs[@]}" >> "$d/driver.fk"
-        if [[ -n "${GO_BIN:-}" && -x "${GO_BIN:-}" ]]; then
-            "$GO_BIN" "$d/driver.fk" 2>/dev/null > "$out.tmp" && mv -f "$out.tmp" "$out" || rm -f "$out.tmp"
-        fi
-        rm -rf "$d"
     fi
     [[ -s "$out" ]]
 }
@@ -483,6 +470,10 @@ fourth_prepare_all() {
     local workdir stem kind key out missing=0 f srcs driver plan cidx=0 ccount=0
     local batch_max="${FOURTH_PREPARE_ALL_BATCH_MAX:-48}"
     local selfhost=0; fourth_selfhost && selfhost=1
+    if [[ "$selfhost" -ne 1 ]]; then
+        echo "  fourth arm: T_flat self-host unavailable — skipping monolithic Go table fallback" >&2
+        return 0
+    fi
     workdir="$(mktemp -d "${TMPDIR:-/tmp}/form-fourth-all.XXXXXX")"
     while read -r stem kind _; do
         [[ -z "$stem" || "$stem" == \#* ]] && continue
@@ -495,15 +486,10 @@ fourth_prepare_all() {
         missing=$((missing + 1))
         if [[ "$ccount" -eq 0 ]]; then        # open a fresh chunk driver + plan
             driver="$workdir/driver-$cidx.fk"; plan="$workdir/plan-$cidx.tsv"
-            if [[ "$selfhost" -eq 1 ]]; then : > "$driver"; else cat "${FOURTH_CHAIN[@]}" > "$driver"; fi
+            : > "$driver"
             : > "$plan"
         fi
-        if [[ "$selfhost" -eq 1 ]]; then
-            fourth_band_request "$stem" "$kind" "${srcs[@]}" >> "$driver"
-        else
-            printf '(print "==T-%s==")\n' "$stem" >> "$driver"
-            fourth_flatten_expr "$kind" "${srcs[@]}" >> "$driver"
-        fi
+        fourth_band_request "$stem" "$kind" "${srcs[@]}" >> "$driver"
         printf '%s\t%s\n' "$stem" "$out" >> "$plan"
         ccount=$((ccount + 1))
         if [[ "$ccount" -ge "$batch_max" ]]; then   # seal a full chunk

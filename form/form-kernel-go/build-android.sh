@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
 # build-android.sh — cross-compile the Form Go kernel for Android ARM64.
 #
-# Why: the gen conductor (form-stdlib/form-gen.fk — "form-cli that can generate
-# → RAM / disk / content-addressed store → execute → share") lives where the
-# compiler lives. Its one essential primitive, form_compile, is a Go-kernel
-# native — so to run the conductor on a phone, the GO kernel must build for
-# Android. The Rust kernel already cross-compiles (build-android.sh, sibling);
-# the fkwu C arm cross-compiles too but cannot compile (no form_compile). This
-# is the missing Go arm.
+# Why: this is only a proof-sibling portability check for the Go walker. Runtime
+# authority belongs to the fkwu surface; Go-only compiler conductors are not
+# carried here.
 #
 # Two targets, best-first:
 #   BIONIC  (NDK present)  GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC=<ndk clang>
@@ -25,7 +21,6 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 OUT="bin-go-android"
-FORMGEN="../form-stdlib/form-gen.fk"
 
 # Resolve the NDK the way the Rust sibling does: env first, then the brew Cask,
 # then the SDK ndk dir. Find an aarch64 android clang inside it (prebuilt host
@@ -55,44 +50,44 @@ case "$(file "$OUT")" in
   *) echo "✗ not an ARM aarch64 ELF — investigate"; exit 1 ;;
 esac
 
-# The gen conductor must be IN the binary — the whole point of the android arm.
+# Check only a small common execution surface. This script must not require old
+# Go-only compiler/conductor primitives.
 echo
-echo "→ verifying the gen conductor's primitives ride along:"
+echo "→ verifying common primitive names ride along:"
 # Dump the symbol strings ONCE to a file and grep the file — piping
 # `strings | grep -q` trips SIGPIPE under `set -o pipefail` (grep -q exits early,
 # strings dies 141, the pipeline reads as failure even on a match).
 syms="$(mktemp)"; strings "$OUT" > "$syms"
 miss=0
-for n in form_compile form_walk recipe_to_bytes bytes_to_recipe write_file_bytes read_file_bytes; do
+for n in add mul str_len read_file write_file_text; do
   if grep -qF "$n" "$syms"; then echo "  ✓ $n"; else echo "  ✗ $n MISSING"; miss=1; fi
 done
 rm -f "$syms"
-[ "$miss" = 0 ] || { echo "✗ a conductor primitive is missing — investigate"; exit 1; }
+[ "$miss" = 0 ] || { echo "✗ a common primitive is missing — investigate"; exit 1; }
 
 # Execution. Best is a real device over adb (works for the bionic binary). Else
 # a static binary under qemu-aarch64 (Linux CI ships it; a macOS host does not).
-# Else the ELF type + carries-conductor IS the proof here (the bar the Rust
-# android build is proven at), and on-device is one adb push away.
+# Else the ELF type + common primitive check is the proof here, and on-device is
+# one adb push away.
 echo
 DEV="$(command -v adb >/dev/null 2>&1 && adb get-state 2>/dev/null || true)"
-printf '(fg-dispatch "gen (add (mul 6 7) 1)")\n' > /tmp/gen-android-cmd.fk
+printf '(add (mul 6 7) 1)\n' > /tmp/go-android-probe.fk
 if [ "$DEV" = "device" ]; then
-  echo "→ device attached — running the gen conductor on Android via adb:"
+  echo "→ device attached — running the common probe on Android via adb:"
   adb push "$OUT" /data/local/tmp/bin-go-android >/dev/null
-  adb push ../form-stdlib /data/local/tmp/ >/dev/null
-  adb push /tmp/gen-android-cmd.fk /data/local/tmp/ >/dev/null
-  val="$(adb shell 'cd /data/local/tmp && ./bin-go-android form-stdlib/form-gen.fk gen-android-cmd.fk' 2>&1 | tail -1)"
-  echo "  gen \"(add (mul 6 7) 1)\" -> $val"
-  case "$val" in *43*) echo "✓ the gen conductor EXECUTES ON ANDROID (device)";; *) echo "✗ unexpected — investigate"; exit 1;; esac
+  adb push /tmp/go-android-probe.fk /data/local/tmp/ >/dev/null
+  val="$(adb shell 'cd /data/local/tmp && ./bin-go-android go-android-probe.fk' 2>&1 | tail -1)"
+  echo "  (add (mul 6 7) 1) -> $val"
+  case "$val" in 43) echo "✓ the Go proof sibling executes on Android (device)";; *) echo "✗ unexpected — investigate"; exit 1;; esac
 elif [ "$VARIANT" = "static (Termux/qemu)" ] && command -v qemu-aarch64 >/dev/null 2>&1; then
   echo "→ qemu-aarch64 present — running the static binary (emulated ARM64):"
-  val="$(qemu-aarch64 "$OUT" "$FORMGEN" /tmp/gen-android-cmd.fk 2>&1 | tail -1)"
-  echo "  gen \"(add (mul 6 7) 1)\" -> $val"
-  case "$val" in *43*) echo "✓ the gen conductor EXECUTES on ARM64 (emulated)";; *) echo "✗ unexpected — investigate"; exit 1;; esac
+  val="$(qemu-aarch64 "$OUT" /tmp/go-android-probe.fk 2>&1 | tail -1)"
+  echo "  (add (mul 6 7) 1) -> $val"
+  case "$val" in 43) echo "✓ the Go proof sibling executes on ARM64 (emulated)";; *) echo "✗ unexpected — investigate"; exit 1;; esac
 else
-  echo "  no device/qemu on this host — ELF + carries-conductor is the proof here."
-  echo "  on a device:  adb push $OUT /data/local/tmp/  &&  adb push ../form-stdlib /data/local/tmp/"
-  echo "                adb shell /data/local/tmp/$OUT form-stdlib/form-gen.fk cmd.fk   (or Termux)"
+  echo "  no device/qemu on this host — ELF + common primitive check is the proof here."
+  echo "  on a device:  adb push $OUT /data/local/tmp/"
+  echo "                adb shell /data/local/tmp/$OUT probe.fk   (or Termux)"
 fi
 
 echo
