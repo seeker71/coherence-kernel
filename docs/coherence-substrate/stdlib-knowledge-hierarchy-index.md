@@ -125,6 +125,15 @@ and
 This is a guide metric: capped file-window counts make the pressure visible
 without recreating the recursive whole-file scan stall.
 
+The release path also has a Form-native sample metric now:
+[`grammars/source-runtime-release-metrics.bmf`](../../grammars/source-runtime-release-metrics.bmf)
+and
+[`form/form-stdlib/source-runtime-release-metrics.fk`](../../form/form-stdlib/source-runtime-release-metrics.fk)
+observe the current stdlib source inventory, sample the compiler/runtime
+artifact cluster, count bounded `defn` / `let` pressure, and prove the release
+metric row as bidirectional BMF data in
+[`form/form-stdlib/tests/source-runtime-release-metrics-band.fk`](../../form/form-stdlib/tests/source-runtime-release-metrics-band.fk).
+
 The current whole-family pressure baseline is recorded in
 [`source-runtime-release-map.md`](source-runtime-release-map.md). As of
 2026-07-05, non-test stdlib contains 21,889 `(defn`, 6,413 `(let`, and 28,302
@@ -159,6 +168,7 @@ is:
 | `domain-law-evidence-language` | BMF source v1 | biology, astronomy, field law, evidence claims |
 | `proof-manifest-language` | BMF source v1 | band coverage, stale proof headers, expected values |
 | `section-grammar-pressure-language` | BMF source and use v1 | capped-window `defn`/`let` pressure and next grammar per section |
+| `source-runtime-release-metrics` | BMF source and use v1 | current source inventory plus bounded release-cluster pressure sample |
 | `domain-metadata-carrier` | built and used v1 | attributes/decorators/annotations lower to carrier/scope/key/value rows |
 
 ## Migration Rule

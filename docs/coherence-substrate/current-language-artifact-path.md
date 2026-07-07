@@ -192,4 +192,5 @@ form-stdlib/tests/sibling-ref-authoring-language-band.fk -> 2147483647
 form-stdlib/tests/source-compiler-grammar-bridge-band.fk -> 32767
 form-stdlib/tests/source-runner-admission-band.fk -> 2097151
 form-stdlib/tests/import-statement-runtime-band.fk -> 42
+form-stdlib/tests/source-runtime-release-metrics-band.fk -> 131071
 ```

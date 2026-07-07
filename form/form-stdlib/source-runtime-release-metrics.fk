@@ -1,0 +1,223 @@
+; source-runtime-release-metrics.fk -- observe the source-runtime release path.
+;
+; The BMF source is `grammars/source-runtime-release-metrics.bmf`. This cell
+; keeps the north-star release path visible as executable data: current source
+; inventory, sampled compiler/runtime artifact pressure, BMF section presence,
+; and a bidirectional metric row. It is intentionally bounded until the full
+; streaming BMF cursor census replaces windowed string observations.
+;
+; preludes: form-stdlib/core.fk form-stdlib/engine.fk
+
+(do
+    (defn srrm-feature (name status) (list "source-runtime-release-metrics-feature" name status))
+    (defn srrm-feature-name (f) (nth f 1))
+    (defn srrm-feature-status (f) (nth f 2))
+    (defn source-runtime-release-metrics-manifest ()
+        (list
+            (srrm-feature "source-inventory-native" 1)
+            (srrm-feature "release-path-sample" 1)
+            (srrm-feature "bounded-window-pressure" 1)
+            (srrm-feature "defn-let-visible" 1)
+            (srrm-feature "bmf-section-visible" 1)
+            (srrm-feature "bmf-source-observed" 1)
+            (srrm-feature "bidir-metric-row" 1)
+            (srrm-feature "guide-not-gate" 1)))
+    (defn source-runtime-release-metrics-manifest-has? (name fs)
+        (if (nil? fs)
+            0
+            (if (and (str_eq (srrm-feature-name (head fs)) name)
+                     (eq (srrm-feature-status (head fs)) 1))
+                1
+                (source-runtime-release-metrics-manifest-has? name (tail fs)))))
+
+    (defn srrm-source-path () "../grammars/source-runtime-release-metrics.bmf")
+    (defn srrm-source-root-path () "grammars/source-runtime-release-metrics.bmf")
+    (defn srrm-source-text ()
+        (do
+            (let primary (read_file (srrm-source-path)))
+            (if (gt (str_len primary) 0)
+                primary
+                (read_file (srrm-source-root-path)))))
+    (defn srrm-has? (text needle)
+        (ge (str_find text needle 0) 0))
+    (defn srrm-source-has-metric-section? ()
+        (srrm-has? (srrm-source-text) "section [source-runtime-release-metrics.bmf] {"))
+    (defn srrm-source-has-metric-rule? ()
+        (srrm-has? (srrm-source-text) "metric ::= "))
+    (defn srrm-source-has-metric-reverse? ()
+        (srrm-has? (srrm-source-text) "<= srrm-reverse-metric;"))
+
+    (defn srrm-stdlib-inventory ()
+        (do
+            (let primary (source_inventory "form-stdlib" ".fk" (list)))
+            (if (gt (len primary) 0)
+                primary
+                (source_inventory "form/form-stdlib" ".fk" (list)))))
+    (defn srrm-stdlib-file-count ()
+        (len (srrm-stdlib-inventory)))
+
+    (defn srrm-read-stdlib-slice (path n)
+        (do
+            (let primary (read_file_slice (str_concat "form-stdlib/" path) 0 n))
+            (if (gt (str_len primary) 0)
+                primary
+                (read_file_slice (str_concat "form/form-stdlib/" path) 0 n))))
+    (defn srrm-count-window-size () 4096)
+    (defn srrm-section-window-size () 8192)
+    (defn srrm-count-cap () 32)
+    (defn srrm-count-from-limit (text needle from remaining)
+        (if (le remaining 0)
+            0
+            (do
+                (let pos (str_find text needle from))
+                (if (lt pos 0)
+                    0
+                    (add 1 (srrm-count-from-limit
+                                text
+                                needle
+                                (add pos (str_len needle))
+                                (sub remaining 1)))))))
+    (defn srrm-count (text needle)
+        (srrm-count-from-limit text needle 0 (srrm-count-cap)))
+
+    (defn srrm-sample-files ()
+        (list
+            "source-compiler.fk"
+            "source-compiler-health.fk"
+            "source-artifact-file-probe.fk"
+            "runtime-artifact-selector.fk"
+            "program-image-fkb.fk"
+            "program-image-fkb-byte-decode.fk"
+            "stdlib-section-pressure.fk"
+            "domain-metadata-carrier.fk"))
+    (defn srrm-file-defn-count (file)
+        (srrm-count
+            (srrm-read-stdlib-slice file (srrm-count-window-size))
+            (str_concat "(" "defn ")))
+    (defn srrm-file-let-count (file)
+        (srrm-count
+            (srrm-read-stdlib-slice file (srrm-count-window-size))
+            (str_concat "(" "let ")))
+    (defn srrm-file-section-count (file)
+        (if (srrm-has?
+                (srrm-read-stdlib-slice file (srrm-section-window-size))
+                "section [")
+            1
+            0))
+    (defn srrm-total-defn (files)
+        (if (nil? files)
+            0
+            (add (srrm-file-defn-count (head files))
+                 (srrm-total-defn (tail files)))))
+    (defn srrm-total-let (files)
+        (if (nil? files)
+            0
+            (add (srrm-file-let-count (head files))
+                 (srrm-total-let (tail files)))))
+    (defn srrm-total-sections (files)
+        (if (nil? files)
+            0
+            (add (srrm-file-section-count (head files))
+                 (srrm-total-sections (tail files)))))
+
+    (defn srrm-metric (scope files defn-count let-count sections status)
+        (list "source-runtime-release-metric"
+              scope
+              files
+              defn-count
+              let-count
+              sections
+              status))
+    (defn srrm-metric-scope (m) (nth m 1))
+    (defn srrm-metric-files (m) (nth m 2))
+    (defn srrm-metric-defn (m) (nth m 3))
+    (defn srrm-metric-let (m) (nth m 4))
+    (defn srrm-metric-sections (m) (nth m 5))
+    (defn srrm-metric-status (m) (nth m 6))
+    (defn srrm-release-path-metric ()
+        (do
+            (let files (srrm-sample-files))
+            (srrm-metric
+                "release-path-sample"
+                (len files)
+                (srrm-total-defn files)
+                (srrm-total-let files)
+                (srrm-total-sections files)
+                "guide-not-gate")))
+    (defn srrm-inventory-metric ()
+        (srrm-metric
+            "stdlib-inventory"
+            (srrm-stdlib-file-count)
+            0
+            0
+            0
+            "source-inventory-native"))
+
+    (defn srrm-kw (v) (bmf-atom "kw" v))
+    (defn srrm-str (v) (bmf-atom "str" v))
+    (defn srrm-kwp (v) (object-lit "kw" v))
+    (defn srrm-capp (name) (list "capture" name (object-lit "str" "")))
+    (defn source-runtime-release-metrics-kw (value) (srrm-kwp value))
+    (defn source-runtime-release-metrics-op (value) (srrm-kwp value))
+    (defn source-runtime-release-metrics-string-lit (capture-name) (srrm-capp capture-name))
+    (defn source-runtime-release-metrics-name (capture-name) (srrm-capp capture-name))
+
+    (defn srrm-strings-to-nodes (values)
+        (if (nil? values)
+            (empty)
+            (cons (intern_trivial_string (head values))
+                  (srrm-strings-to-nodes (tail values)))))
+    (defn srrm-node (kind values)
+        (intern_node (bp "fncall")
+            (cons (intern_trivial_string kind)
+                  (srrm-strings-to-nodes values))))
+    (defn srrm-child-text (node i)
+        (node_value (nth (node_children node) i)))
+    (defn srrm-node-field (node i)
+        (srrm-child-text node (add i 1)))
+    (defn srrm-cap (caps name)
+        (bmf-collection-value caps name))
+
+    (defn srrm-emit-metric (caps)
+        (srrm-node "source-runtime-release-metric"
+            (list (srrm-cap caps "scope")
+                  (srrm-cap caps "files")
+                  (srrm-cap caps "defn")
+                  (srrm-cap caps "let")
+                  (srrm-cap caps "sections")
+                  (srrm-cap caps "status"))))
+    (defn srrm-reverse-metric (obj)
+        (do
+            (let n (bmf-object-value obj))
+            (list (srrm-kw "metric")
+                  (srrm-kw "scope") (srrm-str (srrm-node-field n 0))
+                  (srrm-kw "files") (srrm-str (srrm-node-field n 1))
+                  (srrm-kw "defn") (srrm-str (srrm-node-field n 2))
+                  (srrm-kw "let") (srrm-str (srrm-node-field n 3))
+                  (srrm-kw "sections") (srrm-str (srrm-node-field n 4))
+                  (srrm-kw "status") (srrm-str (srrm-node-field n 5)))))
+    (defn srrm-metric-rule ()
+        (list "metric"
+              (list "sequence" (srrm-kwp "metric")
+                    (srrm-kwp "scope") (srrm-capp "scope")
+                    (srrm-kwp "files") (srrm-capp "files")
+                    (srrm-kwp "defn") (srrm-capp "defn")
+                    (srrm-kwp "let") (srrm-capp "let")
+                    (srrm-kwp "sections") (srrm-capp "sections")
+                    (srrm-kwp "status") (srrm-capp "status"))
+              srrm-emit-metric
+              bmf-identity-inverse
+              srrm-reverse-metric))
+    (defn srrm-metric-source (metric)
+        (list (srrm-kw "metric")
+              (srrm-kw "scope") (srrm-str (srrm-metric-scope metric))
+              (srrm-kw "files") (srrm-str (int_to_str (srrm-metric-files metric)))
+              (srrm-kw "defn") (srrm-str (int_to_str (srrm-metric-defn metric)))
+              (srrm-kw "let") (srrm-str (int_to_str (srrm-metric-let metric)))
+              (srrm-kw "sections") (srrm-str (int_to_str (srrm-metric-sections metric)))
+              (srrm-kw "status") (srrm-str (srrm-metric-status metric))))
+    (defn srrm-roundtrip-metric (metric)
+        (bmf-roundtrip (srrm-metric-rule) (srrm-metric-source metric)))
+    (defn srrm-roundtrip-metric-ok? (metric)
+        (bmf-roundtrip-node-eq? (srrm-roundtrip-metric metric)))
+)
