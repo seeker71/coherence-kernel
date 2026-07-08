@@ -6633,6 +6633,9 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_path_is_dir(p200) ? 2 : 0;
     }
     if (t == 202) {
+        if (fk_cap == 0) {
+            fk_arena();
+        }
         static char r202[4096];
         static char s202[256];
         fk_cstr(fk_walk(fk_node[i][1], fp), r202, 4096);

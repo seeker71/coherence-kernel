@@ -62,24 +62,24 @@ every imported `.fk` file, so changing a dependency stales the root artifact.
 
 ## Current Baseline
 
-Measured on the 2026-07-05 worktree.
+Measured on the 2026-07-08 worktree.
 
 | Measure | Value |
 | --- | ---: |
-| repo visible `.fk` files | 3,220 |
-| repo legacy anchored `; preludes:` declarations | 2,418 |
-| `form/form-stdlib` `.fk` files | 2,286 |
-| non-test stdlib `.fk` files | 1,023 |
-| test `.fk` files | 1,263 |
-| all stdlib `(defn` | 26,246 |
-| all stdlib `(let` | 24,138 |
-| all stdlib low-level total | 50,384 |
-| non-test `(defn` | 21,963 |
-| non-test `(let` | 7,145 |
-| non-test low-level total | 29,108 |
-| BMF source files in `grammars/` | 3 |
-| executable BMF rule lines | 14 |
-| `section [` declarations in stdlib + grammars | 145 |
+| repo visible `.fk` files | 3,345 |
+| repo legacy anchored `; preludes:` declarations | 2,563 |
+| `form/form-stdlib` `.fk` files | 2,297 |
+| non-test stdlib `.fk` files | 974 |
+| test `.fk` files | 1,269 |
+| all stdlib `(defn` | 26,505 |
+| all stdlib `(let` | 24,346 |
+| all stdlib low-level total | 50,851 |
+| non-test `(defn` | 22,120 |
+| non-test `(let` | 6,436 |
+| non-test low-level total | 28,556 |
+| BMF source files in `grammars/` | 5 |
+| executable BMF rule lines | 21 |
+| `section [` declarations in stdlib + grammars | 164 |
 
 The checkout witness is green: `ground.fk` returned `42`,
 `ground-recursive.fk 10` returned `55`, the binary freshness band returned
@@ -96,14 +96,21 @@ executes the program image directly. Focused temp proofs returned `first=42`,
 ABI selection `777`.
 
 The 2026-07-08 R0 measurement path now has an executable Form witness:
-`form-stdlib/tests/source-runtime-release-metrics-band.fk -> 131071`. The cell
-uses the host `source_inventory` native to observe the current stdlib source
-inventory, samples the compiler/runtime artifact release cluster with bounded
+`form-stdlib/tests/source-runtime-release-metrics-band.fk -> 8388607`. The cell
+uses the host `source_inventory` native as a bounded family census: root `.fk`
+files with known stdlib families skipped, then `tests`, `seedbank`, `grammars`,
+`emits`, `integration`, `queries`, `skills`, `lenses`, `drafts`, `bml`, and
+`bootstrap` as separate source families. That reports `2,297` stdlib `.fk`
+files today, samples the compiler/runtime artifact release cluster with bounded
 file windows, counts visible `(defn` / `(let` pressure, observes BMF section
-presence, and roundtrips a release metric row through
-`grammars/source-runtime-release-metrics.bmf`. This is a guide metric, not a
-release gate; the full-family baseline table above remains the larger pressure
-snapshot until the BMF cursor census replaces bounded windows.
+presence, and roundtrips release metric and family census rows through
+`grammars/source-runtime-release-metrics.bmf`.
+
+The single monolithic recursive `source_inventory "form/form-stdlib"` traversal
+is explicitly not used for R0: after the heap-init repair, bounded family
+inventory is healthy, while the all-at-once traversal still overfills the
+current fkwu list heap. The next R0 lift is a streaming or paged
+`source_inventory` cursor, not a larger one-shot list.
 
 ## Progress Over Time
 
@@ -125,6 +132,7 @@ the worktree row includes current untracked work.
 | `2ab224ec` | 2026-07-03 | 18,367 | 6,827 | 25,194 | 113 |
 | `355fa336` | 2026-07-03 | 18,384 | 6,827 | 25,211 | 113 |
 | worktree | 2026-07-05 | 21,963 | 7,145 | 29,108 | 145 |
+| worktree | 2026-07-08 | 22,120 | 6,436 | 28,556 | 164 |
 
 The big jumps are import/consolidation events, not semantic uplift wins or
 losses by themselves. From this point onward, the useful signal is whether the
@@ -155,7 +163,7 @@ code, or when a missing cluster blocks an active release gate.
 
 | Gate | Exit condition | Current status |
 | --- | --- | --- |
-| R0 measurement | repeatable counts for `(defn`, `(let`, sections, grammar rules, artifact tests | baseline recorded here; Form-native release-path sample metric installed and green; whole-family streaming census still pending |
+| R0 measurement | repeatable counts for `(defn`, `(let`, sections, grammar rules, artifact tests | baseline recorded here; Form-native bounded family census installed and green; full streaming/paged source inventory still pending |
 | R1 source compiler health | cursor is the scanner, no large string builder hot path, health and persistence bands pass | healthy in current worktree |
 | R2 artifact authority | `.fk` compile emits fresh `.fkb` plus `.sym`, and eventually `.dylib`; `.fkb` embeds table payload and symbol deps | installed for `.fkb/.sym`; version-3 `.fkb` carries exported function index + arity for import loading; `.sym` records source-unit dependency closure; `.dylib` selection installed for prebuilt ABI artifacts; `.dylib` emission still pending |
 | R3 runtime selector | loader chooses fresh `.dylib`, then fresh `.fkb`, then source compile only on stale/missing artifacts | installed for `.fk`, `.fkb`, and `.dylib` executable inputs; `.fk` freshness includes imported `.fk` dependencies |
