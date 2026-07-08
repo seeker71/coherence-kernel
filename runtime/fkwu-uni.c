@@ -2615,11 +2615,53 @@ static void fk_rmtree(char *p) {
     unlink(p);
 }
 static long long fk_inv_rows = 1;
+static long long fk_inv_page_offset = 0;
+static long long fk_inv_page_limit = 0;
+static long long fk_inv_page_seen = 0;
+static long long fk_inv_page_taken = 0;
 static void fk_inv_reset(void) {
     fk_inv_rows = 1;
 }
+static void fk_inv_page_reset(long long offset, long long limit) {
+    fk_inv_rows = 1;
+    fk_inv_page_offset = offset;
+    fk_inv_page_limit = limit;
+    fk_inv_page_seen = 0;
+    fk_inv_page_taken = 0;
+}
 static void fk_inv_push(long long row) {
     fk_inv_rows = fk_list_push(fk_inv_rows, row);
+}
+static int fk_inv_page_done(void) {
+    return fk_inv_page_limit > 0 && fk_inv_page_taken >= fk_inv_page_limit;
+}
+static void fk_inv_page_push(long long row) {
+    if (fk_inv_page_seen >= fk_inv_page_offset && !fk_inv_page_done()) {
+        fk_inv_push(row);
+        fk_inv_page_taken = fk_inv_page_taken + 1;
+    }
+    fk_inv_page_seen = fk_inv_page_seen + 1;
+}
+static void fk_parse_page_spec(const char *spec, long long *offset, long long *limit) {
+    long long i = 0;
+    long long off = 0;
+    long long lim = 0;
+    while (spec[i] >= '0' && spec[i] <= '9') {
+        off = off * 10 + (spec[i] - '0');
+        i = i + 1;
+    }
+    if (spec[i] == ':' || spec[i] == ',') {
+        i = i + 1;
+    }
+    while (spec[i] >= '0' && spec[i] <= '9') {
+        lim = lim * 10 + (spec[i] - '0');
+        i = i + 1;
+    }
+    if (lim <= 0 || lim > 512) {
+        fk_die("source_inventory_page: page spec limit must be 1..512");
+    }
+    *offset = off;
+    *limit = lim;
 }
 static void fk_inv_walk(const char *root, const char *dir, const char *suf, long long skipv) {
     DIR *d = opendir(dir);
@@ -2660,6 +2702,52 @@ static void fk_inv_walk(const char *root, const char *dir, const char *suf, long
     }
     closedir(d);
 }
+static void fk_inv_page_walk(const char *root, const char *dir, const char *suf) {
+    if (fk_inv_page_done()) {
+        return;
+    }
+    DIR *d = opendir(dir);
+    if (!d) {
+        return;
+    }
+    struct dirent *e;
+    char path[4096];
+    while ((e = readdir(d)) != 0) {
+        if (fk_inv_page_done()) {
+            break;
+        }
+        if (e->d_name[0] == FK_CH_DOT &&
+            (e->d_name[1] == 0 || (e->d_name[1] == FK_CH_DOT && e->d_name[2] == 0))) {
+            continue;
+        }
+        fk_path_join(path, 4096, dir, e->d_name);
+        if (fk_path_is_dir(path)) {
+            fk_inv_page_walk(root, path, suf);
+        } else {
+            if (suf[0] != 0 && !fk_suffix_match(e->d_name, suf)) {
+                continue;
+            }
+            if (fk_inv_page_seen >= fk_inv_page_offset && !fk_inv_page_done()) {
+                long long rn = 0;
+                while (root[rn] != 0) {
+                    rn = rn + 1;
+                }
+                const char *relstart = path + rn;
+                if (relstart[0] == FK_CH_SLASH) {
+                    relstart = relstart + 1;
+                }
+                long long rlen = 0;
+                while (relstart[rlen] != 0) {
+                    rlen = rlen + 1;
+                }
+                fk_inv_push(fk_row_pair(fk_sbuf(relstart, rlen), fk_count_lines_file(path)));
+                fk_inv_page_taken = fk_inv_page_taken + 1;
+            }
+            fk_inv_page_seen = fk_inv_page_seen + 1;
+        }
+    }
+    closedir(d);
+}
 #else
 static long long fk_fs_list_path(const char *p) {
     (void)p;
@@ -2669,17 +2757,36 @@ static void fk_rmtree(char *p) {
     (void)p;
 }
 static long long fk_inv_rows = 1;
+static long long fk_inv_page_offset = 0;
+static long long fk_inv_page_limit = 0;
+static long long fk_inv_page_seen = 0;
+static long long fk_inv_page_taken = 0;
 static void fk_inv_reset(void) {
+    fk_inv_rows = 1;
+}
+static void fk_inv_page_reset(long long offset, long long limit) {
+    (void)offset;
+    (void)limit;
     fk_inv_rows = 1;
 }
 static void fk_inv_push(long long row) {
     fk_inv_rows = fk_list_push(fk_inv_rows, row);
+}
+static void fk_parse_page_spec(const char *spec, long long *offset, long long *limit) {
+    (void)spec;
+    *offset = 0;
+    *limit = 1;
 }
 static void fk_inv_walk(const char *root, const char *dir, const char *suf, long long skipv) {
     (void)root;
     (void)dir;
     (void)suf;
     (void)skipv;
+}
+static void fk_inv_page_walk(const char *root, const char *dir, const char *suf) {
+    (void)root;
+    (void)dir;
+    (void)suf;
 }
 #endif
 
@@ -6644,10 +6751,30 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fk_inv_walk(r202, r202, s202, fk_walk(fk_node[i][3], fp));
         return fk_inv_rows;
     }
+    if (t == 238) {
+        if (fk_cap == 0) {
+            fk_arena();
+        }
+        static char r238[4096];
+        static char s238[256];
+        static char p238[64];
+        long long off238 = 0;
+        long long lim238 = 0;
+        fk_cstr(fk_walk(fk_node[i][1], fp), r238, 4096);
+        fk_cstr(fk_walk(fk_node[i][2], fp), s238, 256);
+        fk_cstr(fk_walk(fk_node[i][3], fp), p238, 64);
+        fk_parse_page_spec(p238, &off238, &lim238);
+        fk_inv_page_reset(off238, lim238);
+        fk_inv_page_walk(r238, r238, s238);
+        return fk_inv_rows;
+    }
     if (t == 200) {
         return 0;
     }
     if (t == 202) {
+        return 1;
+    }
+    if (t == 238) {
         return 1;
     }
     if (t == 120) {

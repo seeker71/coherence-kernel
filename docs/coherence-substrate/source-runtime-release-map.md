@@ -97,20 +97,24 @@ ABI selection `777`.
 
 The 2026-07-08 R0 measurement path now has an executable Form witness:
 `form-stdlib/tests/source-runtime-release-metrics-band.fk -> 8388607`. The cell
-uses the host `source_inventory` native as a bounded family census: root `.fk`
+uses `fs-walk-count`, backed by the host membrane's paged
+`host_source_inventory_page`, for the full stdlib `.fk` count. That reports
+`2,297` stdlib `.fk` files today without building one giant inventory list. It
+still keeps the bounded family census as row-shaped observation: root `.fk`
 files with known stdlib families skipped, then `tests`, `seedbank`, `grammars`,
 `emits`, `integration`, `queries`, `skills`, `lenses`, `drafts`, `bml`, and
-`bootstrap` as separate source families. That reports `2,297` stdlib `.fk`
-files today, samples the compiler/runtime artifact release cluster with bounded
-file windows, counts visible `(defn` / `(let` pressure, observes BMF section
-presence, and roundtrips release metric and family census rows through
+`bootstrap` as separate source families. The same cell samples the
+compiler/runtime artifact release cluster with bounded file windows, counts
+visible `(defn` / `(let` pressure, observes BMF section presence, and roundtrips
+release metric and family census rows through
 `grammars/source-runtime-release-metrics.bmf`.
 
 The single monolithic recursive `source_inventory "form/form-stdlib"` traversal
-is explicitly not used for R0: after the heap-init repair, bounded family
-inventory is healthy, while the all-at-once traversal still overfills the
-current fkwu list heap. The next R0 lift is a streaming or paged
-`source_inventory` cursor, not a larger one-shot list.
+is explicitly not used for R0: after the heap-init repair it could still
+overfill the current fkwu list heap. The closed lesson is that full inventory
+must move as pages or a cursor stream through the host membrane, not as a larger
+one-shot list. Paged inventory is installed now; cursor-native streaming remains
+the next lift if a consumer needs rows incrementally instead of counts.
 
 ## Progress Over Time
 
@@ -163,7 +167,7 @@ code, or when a missing cluster blocks an active release gate.
 
 | Gate | Exit condition | Current status |
 | --- | --- | --- |
-| R0 measurement | repeatable counts for `(defn`, `(let`, sections, grammar rules, artifact tests | baseline recorded here; Form-native bounded family census installed and green; full streaming/paged source inventory still pending |
+| R0 measurement | repeatable counts for `(defn`, `(let`, sections, grammar rules, artifact tests | full paged stdlib inventory installed and green; bounded family census remains row observation; cursor-native streaming still optional future lift |
 | R1 source compiler health | cursor is the scanner, no large string builder hot path, health and persistence bands pass | healthy in current worktree |
 | R2 artifact authority | `.fk` compile emits fresh `.fkb` plus `.sym`, and eventually `.dylib`; `.fkb` embeds table payload and symbol deps | installed for `.fkb/.sym`; version-3 `.fkb` carries exported function index + arity for import loading; `.sym` records source-unit dependency closure; `.dylib` selection installed for prebuilt ABI artifacts; `.dylib` emission still pending |
 | R3 runtime selector | loader chooses fresh `.dylib`, then fresh `.fkb`, then source compile only on stale/missing artifacts | installed for `.fk`, `.fkb`, and `.dylib` executable inputs; `.fk` freshness includes imported `.fk` dependencies |

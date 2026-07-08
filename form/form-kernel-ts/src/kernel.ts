@@ -271,6 +271,16 @@ function sourceInventoryRow(relPath: string, loc: number): Value {
   };
 }
 
+function parseSourceInventoryPageSpec(spec: string): [number, number] | null {
+  const parts = spec.split(/[:,]/);
+  if (parts.length !== 2) return null;
+  const offset = Number(parts[0]);
+  const limit = Number(parts[1]);
+  if (!Number.isInteger(offset) || offset < 0) return null;
+  if (!Number.isInteger(limit) || limit <= 0 || limit > 512) return null;
+  return [offset, limit];
+}
+
 function sourceInventoryWalk(
   rootAbs: string,
   dir: string,
@@ -290,6 +300,34 @@ function sourceInventoryWalk(
       if (suffix !== "" && !entry.name.endsWith(suffix)) continue;
       const relPath = relative(rootAbs, path).split(/[\\/]+/).join("/");
       rows.push(sourceInventoryRow(relPath, countTextLines(path)));
+    }
+  }
+}
+
+function sourceInventoryPageWalk(
+  rootAbs: string,
+  dir: string,
+  suffix: string,
+  offset: number,
+  limit: number,
+  state: { seen: number; rows: Value[] },
+): void {
+  if (state.rows.length >= limit) return;
+  const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
+    a.name.localeCompare(b.name),
+  );
+  for (const entry of entries) {
+    if (state.rows.length >= limit) break;
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      sourceInventoryPageWalk(rootAbs, path, suffix, offset, limit, state);
+    } else if (entry.isFile()) {
+      if (suffix !== "" && !entry.name.endsWith(suffix)) continue;
+      if (state.seen >= offset && state.rows.length < limit) {
+        const relPath = relative(rootAbs, path).split(/[\\/]+/).join("/");
+        state.rows.push(sourceInventoryRow(relPath, countTextLines(path)));
+      }
+      state.seen += 1;
     }
   }
 }
@@ -2472,7 +2510,7 @@ export class Kernel {
     // inventory primitive. Returns rows of [relative-path, line-count].
     // Form owns classification and aggregation; the kernel only exposes
     // filesystem walking and text line counts as primitive observation.
-    this.registerNative("source_inventory", catCall(), (_k, args) => {
+    const sourceInventoryNative = (_k: Kernel, args: Value[]): Value => {
       try {
         const rootAbs = resolve(argStr(args, 0));
         const suffix = argStr(args, 1);
@@ -2483,7 +2521,25 @@ export class Kernel {
       } catch {
         return { kind: "null" };
       }
-    });
+    };
+    this.registerNative("host_source_inventory", catCall(), sourceInventoryNative);
+    this.registerNative("source_inventory", catCall(), sourceInventoryNative);
+    const sourceInventoryPageNative = (_k: Kernel, args: Value[]): Value => {
+      try {
+        const rootAbs = resolve(argStr(args, 0));
+        const suffix = argStr(args, 1);
+        const page = parseSourceInventoryPageSpec(argStr(args, 2));
+        if (page === null) return { kind: "null" };
+        const [offset, limit] = page;
+        const state: { seen: number; rows: Value[] } = { seen: 0, rows: [] };
+        sourceInventoryPageWalk(rootAbs, rootAbs, suffix, offset, limit, state);
+        return { kind: "list", list: state.rows };
+      } catch {
+        return { kind: "null" };
+      }
+    };
+    this.registerNative("host_source_inventory_page", catCall(), sourceInventoryPageNative);
+    this.registerNative("source_inventory_page", catCall(), sourceInventoryPageNative);
     // random_bytes(n) — open the doorway. Reads n bytes from
     // /dev/urandom every call. Different per invocation, per kernel
     // process. lc-divergence-is-the-doorway: this native intentionally

@@ -803,6 +803,16 @@ fn source_inventory_row(rel: String, loc: i64) -> Value {
     Value::List(vec![Value::Str(rel.into()), Value::Int(loc)].into())
 }
 
+fn parse_source_inventory_page_spec(spec: &str) -> Option<(usize, usize)> {
+    let mut parts = spec.split(|c| c == ':' || c == ',');
+    let offset = parts.next()?.parse::<usize>().ok()?;
+    let limit = parts.next()?.parse::<usize>().ok()?;
+    if parts.next().is_some() || limit == 0 || limit > 512 {
+        return None;
+    }
+    Some((offset, limit))
+}
+
 fn source_inventory_walk(
     root_abs: &std::path::Path,
     dir: &std::path::Path,
@@ -831,6 +841,47 @@ fn source_inventory_walk(
                 .to_string_lossy()
                 .replace('\\', "/");
             rows.push(source_inventory_row(rel, count_text_lines(&path)));
+        }
+    }
+    Ok(())
+}
+
+fn source_inventory_page_walk(
+    root_abs: &std::path::Path,
+    dir: &std::path::Path,
+    suffix: &str,
+    offset: usize,
+    limit: usize,
+    seen: &mut usize,
+    rows: &mut Vec<Value>,
+) -> Result<(), std::io::Error> {
+    if rows.len() >= limit {
+        return Ok(());
+    }
+    let mut entries = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        if rows.len() >= limit {
+            break;
+        }
+        let path = entry.path();
+        let name = entry.file_name().to_string_lossy().to_string();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            source_inventory_page_walk(root_abs, &path, suffix, offset, limit, seen, rows)?;
+        } else if file_type.is_file() {
+            if !suffix.is_empty() && !name.ends_with(suffix) {
+                continue;
+            }
+            if *seen >= offset && rows.len() < limit {
+                let rel = path
+                    .strip_prefix(root_abs)
+                    .unwrap_or(path.as_path())
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                rows.push(source_inventory_row(rel, count_text_lines(&path)));
+            }
+            *seen += 1;
         }
     }
     Ok(())
@@ -4572,7 +4623,7 @@ impl Kernel {
         // inventory primitive. Returns rows of [relative-path, line-count].
         // Form owns classification and aggregation; the kernel only exposes
         // filesystem walking and text line counts as primitive observation.
-        self.register_native("source_inventory", cat_call(), |_, _, args| {
+        let source_inventory_native: NativeFn = |_, _, args| {
             let root = std::path::PathBuf::from(args[0].as_str());
             let suffix = args[1].as_str().to_string();
             let skip = source_inventory_skip_set(&args[2]);
@@ -4589,7 +4640,33 @@ impl Kernel {
                 Ok(_) => Value::List(rows.into()),
                 Err(_) => Value::Null,
             }
-        });
+        };
+        self.register_native("host_source_inventory", cat_call(), source_inventory_native);
+        self.register_native("source_inventory", cat_call(), source_inventory_native);
+        let source_inventory_page_native: NativeFn = |_, _, args| {
+            let root = std::path::PathBuf::from(args[0].as_str());
+            let suffix = args[1].as_str().to_string();
+            let (offset, limit) = match parse_source_inventory_page_spec(args[2].as_str()) {
+                Some(v) => v,
+                None => return Value::Null,
+            };
+            let root_abs = if root.is_absolute() {
+                root
+            } else {
+                match env::current_dir() {
+                    Ok(cwd) => cwd.join(root),
+                    Err(_) => return Value::Null,
+                }
+            };
+            let mut rows = Vec::new();
+            let mut seen = 0usize;
+            match source_inventory_page_walk(&root_abs, &root_abs, &suffix, offset, limit, &mut seen, &mut rows) {
+                Ok(_) => Value::List(rows.into()),
+                Err(_) => Value::Null,
+            }
+        };
+        self.register_native("host_source_inventory_page", cat_call(), source_inventory_page_native);
+        self.register_native("source_inventory_page", cat_call(), source_inventory_page_native);
         // random_bytes(n) — open the doorway. Reads n bytes from
         // /dev/urandom every call. Different per invocation, per kernel
         // process. lc-divergence-is-the-doorway: this native intentionally
