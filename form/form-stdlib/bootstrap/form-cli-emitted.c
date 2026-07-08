@@ -51,6 +51,7 @@ static long long fk_srange(long long sv, const char **ptr, long long *len) { lon
  
 #if defined(_WIN32)
 typedef unsigned long long fk_os_socket_t;
+typedef int fk_socklen_t;
 struct fk_wsadata { unsigned short wVersion; unsigned short wHighVersion; char szDescription[257]; char szSystemStatus[129]; unsigned short iMaxSockets; unsigned short iMaxUdpDg; char *lpVendorInfo; };
 extern int WSAStartup(unsigned short, struct fk_wsadata *);
 extern fk_os_socket_t socket(int,int,int);
@@ -58,7 +59,7 @@ extern int bind(fk_os_socket_t,const void*,int);
 extern int listen(fk_os_socket_t,int);
 extern fk_os_socket_t accept(fk_os_socket_t,void*,void*);
 extern int connect(fk_os_socket_t,const void*,int);
-extern int getsockname(fk_os_socket_t,void*,int*);
+extern int getsockname(fk_os_socket_t,void*,fk_socklen_t*);
 extern int setsockopt(fk_os_socket_t,int,int,const char*,int);
 extern int closesocket(fk_os_socket_t);
 extern int recv(fk_os_socket_t,char*,int,int);
@@ -74,12 +75,13 @@ static long long fk_os_send_socket(fk_os_socket_t s, const void *buf, unsigned l
 static int fk_os_setsockopt_reuse(fk_os_socket_t s, int *yes) { return setsockopt(s, FK_SOL_SOCKET_NATIVE, FK_SO_REUSEADDR_NATIVE, (const char *)yes, 4); }
 #else
 typedef int fk_os_socket_t;
+typedef unsigned int fk_socklen_t;
 extern int socket(int,int,int);
 extern int bind(int,const void*,unsigned int);
 extern int listen(int,int);
 extern long accept(int,void*,void*);
 extern int connect(int,const void*,unsigned int);
-extern int getsockname(int,void*,unsigned int*);
+extern int getsockname(int,void*,fk_socklen_t*);
 extern int setsockopt(int,int,int,const void*,unsigned int);
 extern long long recv(int,void*,unsigned long,int);
 extern long long send(int,const void*,unsigned long,int);
@@ -126,7 +128,7 @@ static fk_os_socket_t fk_sock_raw[1024]; static int fk_sock_kind[1024];
 static long long fk_sock_alloc(fk_os_socket_t s, int kind) { long long h = 1; while (h < 1024) { if (fk_sock_kind[h] == 0) { fk_sock_raw[h] = s; fk_sock_kind[h] = kind; return h; } h = h + 1; } fk_os_close_socket(s); return -1; }
 static fk_os_socket_t fk_sock_lookup(long long h, int kind) { if (h < 1 || h >= 1024 || fk_sock_kind[h] == 0) { return FK_INVALID_SOCKET; } if (kind != 0 && fk_sock_kind[h] != kind) { return FK_INVALID_SOCKET; } return fk_sock_raw[h]; }
 static long long fk_socket_listen_native(long long port) { fk_sock_boot(); fk_os_socket_t s = socket(2, 1, 0); if (!fk_os_socket_ok(s)) { return -1; } int yes = 1; fk_os_setsockopt_reuse(s, &yes); struct fk_sockaddr4 a; fk_sockaddr4_set(&a, port, 0); if (bind(s, &a, 16) < 0) { fk_os_close_socket(s); return -1; } if (listen(s, 16) < 0) { fk_os_close_socket(s); return -1; } return fk_sock_alloc(s, 1); }
-static long long fk_socket_port_native(long long h) { fk_os_socket_t s = fk_sock_lookup(h, 1); if (!fk_os_socket_ok(s)) { return -1; } struct fk_sockaddr4 a; int n = 16; if (getsockname(s, &a, &n) < 0) { return -1; } return (((long long)a.p[0]) << 8) + (long long)a.p[1]; }
+static long long fk_socket_port_native(long long h) { fk_os_socket_t s = fk_sock_lookup(h, 1); if (!fk_os_socket_ok(s)) { return -1; } struct fk_sockaddr4 a; fk_socklen_t n = 16; if (getsockname(s, &a, &n) < 0) { return -1; } return (((long long)a.p[0]) << 8) + (long long)a.p[1]; }
 static long long fk_socket_accept_native(long long h) { fk_os_socket_t s = fk_sock_lookup(h, 1); if (!fk_os_socket_ok(s)) { return -1; } fk_sock_boot(); fk_os_socket_t c = (fk_os_socket_t)accept(s, 0, 0); if (!fk_os_socket_ok(c)) { return -1; } return fk_sock_alloc(c, 2); }
 static long long fk_socket_connect_native(long long hostv, long long portv) { fk_sock_boot(); char host[512]; char port[32]; fk_cstr(hostv, host, 512); sprintf(port, "%lld", portv); struct addrinfo hints; hints.ai_flags = 0; hints.ai_family = 0; hints.ai_socktype = 1; hints.ai_protocol = 0; hints.ai_addrlen = 0; hints.ai_canonname = 0; hints.ai_addr = 0; hints.ai_next = 0; struct addrinfo *res = 0; if (getaddrinfo(host, port, &hints, &res) != 0 || res == 0) { return -1; } fk_os_socket_t s = FK_INVALID_SOCKET; struct addrinfo *rp = res; while (rp != 0) { s = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol); if (fk_os_socket_ok(s)) { if (connect(s, rp->ai_addr, (unsigned int)rp->ai_addrlen) == 0) { break; } fk_os_close_socket(s); s = FK_INVALID_SOCKET; } rp = rp->ai_next; } freeaddrinfo(res); if (!fk_os_socket_ok(s)) { return -1; } return fk_sock_alloc(s, 2); }
 static long long fk_socket_send_native(long long h, long long sv) { fk_os_socket_t s = fk_sock_lookup(h, 2); long long sa = sv >> 1; if (!fk_os_socket_ok(s) || sa < 0 || sa >= fk_sp) { return -1; } return fk_os_send_socket(s, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]); }
