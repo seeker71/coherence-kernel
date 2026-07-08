@@ -756,6 +756,22 @@ func sourceInventoryRow(rel string, loc int64) Value {
 	}}
 }
 
+func parseSourceInventoryPageSpec(spec string) (int, int, bool) {
+	parts := strings.FieldsFunc(spec, func(r rune) bool { return r == ':' || r == ',' })
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	offset, err := strconv.Atoi(parts[0])
+	if err != nil || offset < 0 {
+		return 0, 0, false
+	}
+	limit, err := strconv.Atoi(parts[1])
+	if err != nil || limit <= 0 || limit > 512 {
+		return 0, 0, false
+	}
+	return offset, limit, true
+}
+
 func (k *Kernel) nextImportScope() uint32 {
 	scope := k.importSeq
 	k.importSeq++
@@ -2814,7 +2830,7 @@ func (k *Kernel) registerNatives() {
 	// inventory primitive. Returns rows of [relative-path, line-count].
 	// Form owns classification and aggregation; the kernel only exposes
 	// filesystem walking and text line counts as primitive observation.
-	k.registerNative("source_inventory", catCall(), func(_ *Kernel, args []Value) Value {
+	sourceInventoryNative := func(_ *Kernel, args []Value) Value {
 		root := resolveKernelHostPath(args[0].Str)
 		suffix := args[1].Str
 		skip := sourceInventorySkipSet(args[2])
@@ -2848,7 +2864,52 @@ func (k *Kernel) registerNatives() {
 			return Value{Kind: VNull}
 		}
 		return Value{Kind: VList, List: rows}
-	})
+	}
+	k.registerNative("host_source_inventory", catCall(), sourceInventoryNative)
+	k.registerNative("source_inventory", catCall(), sourceInventoryNative)
+	sourceInventoryPageNative := func(_ *Kernel, args []Value) Value {
+		root := resolveKernelHostPath(args[0].Str)
+		suffix := args[1].Str
+		offset, limit, ok := parseSourceInventoryPageSpec(args[2].Str)
+		if !ok {
+			return Value{Kind: VNull}
+		}
+		rootAbs, err := filepath.Abs(root)
+		if err != nil {
+			return Value{Kind: VNull}
+		}
+		rows := []Value{}
+		seen := 0
+		err = filepath.WalkDir(rootAbs, func(path string, d os.DirEntry, walkErr error) error {
+			if walkErr != nil {
+				return walkErr
+			}
+			if d.IsDir() {
+				return nil
+			}
+			if suffix != "" && !strings.HasSuffix(d.Name(), suffix) {
+				return nil
+			}
+			if seen >= offset && len(rows) < limit {
+				rel, err := filepath.Rel(rootAbs, path)
+				if err != nil {
+					return err
+				}
+				rows = append(rows, sourceInventoryRow(filepath.ToSlash(rel), countTextLines(path)))
+			}
+			seen++
+			if len(rows) >= limit {
+				return filepath.SkipAll
+			}
+			return nil
+		})
+		if err != nil {
+			return Value{Kind: VNull}
+		}
+		return Value{Kind: VList, List: rows}
+	}
+	k.registerNative("host_source_inventory_page", catCall(), sourceInventoryPageNative)
+	k.registerNative("source_inventory_page", catCall(), sourceInventoryPageNative)
 	// random_bytes(n) — open the doorway. Reads n bytes from
 	// /dev/urandom every call. Different per invocation, per kernel
 	// process. lc-divergence-is-the-doorway: this native intentionally

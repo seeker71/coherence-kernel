@@ -131,15 +131,17 @@ The release path also has a Form-native sample metric now:
 [`grammars/source-runtime-release-metrics.bmf`](../../grammars/source-runtime-release-metrics.bmf)
 and
 [`form/form-stdlib/source-runtime-release-metrics.fk`](../../form/form-stdlib/source-runtime-release-metrics.fk)
-observe the current stdlib source inventory, sample the compiler/runtime
-artifact cluster, count bounded `defn` / `let` pressure, and prove the release
-metric row as bidirectional BMF data in
+observe the current stdlib source inventory through paged host-membrane walks,
+sample the compiler/runtime artifact cluster, count bounded `defn` / `let`
+pressure, and prove the release metric row as bidirectional BMF data in
 [`form/form-stdlib/tests/source-runtime-release-metrics-band.fk`](../../form/form-stdlib/tests/source-runtime-release-metrics-band.fk).
 The current witness returns `8388607` and reports `2,297` stdlib `.fk` files
-through a bounded family census. Both the aggregate release metric row and the
-family census row roundtrip through `source-runtime-release-metrics.bmf`. The
-full recursive all-at-once stdlib inventory remains pending until
-`source_inventory` can stream or page rows instead of building one large list.
+through `fs-walk-count`, backed by `host_source_inventory_page`. The bounded
+family census remains as row-shaped cluster observation, and both the aggregate
+release metric row and the family census row roundtrip through
+`source-runtime-release-metrics.bmf`. The failed all-at-once inventory path is
+not hidden: it was replaced by pages because building one large list is the
+wrong primitive for this body.
 
 The current whole-family pressure baseline is recorded in
 [`source-runtime-release-map.md`](source-runtime-release-map.md). As of
@@ -175,7 +177,7 @@ is:
 | `domain-law-evidence-language` | BMF source v1 | biology, astronomy, field law, evidence claims |
 | `proof-manifest-language` | BMF source v1 | band coverage, stale proof headers, expected values |
 | `section-grammar-pressure-language` | BMF source and use v1 | capped-window `defn`/`let` pressure and next grammar per section |
-| `source-runtime-release-metrics` | BMF source and use v1 | current source inventory plus bounded release-cluster pressure sample |
+| `source-runtime-release-metrics` | BMF source and use v1 | paged current source inventory plus bounded release-cluster pressure sample |
 | `domain-metadata-carrier` | built and used v1 | attributes/decorators/annotations lower to carrier/scope/key/value rows |
 
 ## Migration Rule
