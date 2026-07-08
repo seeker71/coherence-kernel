@@ -10,17 +10,19 @@ Current `form/form-stdlib` inventory:
 
 | Area | `.fk` files |
 | --- | ---: |
-| total | 2283 |
-| root | 850 |
-| tests | 1262 |
-| seedbank | 73 |
-| grammars | 59 |
+| total | 2297 |
+| root | 857 |
+| tests | 1269 |
+| seedbank | 117 |
+| grammars | 30 |
 | queries | 9 |
 | integration | 8 |
-| emits | 19 |
+| emits | 4 |
 | skills | 1 |
 | lenses | 1 |
 | drafts | 1 |
+| bml | 0 |
+| bootstrap | 0 |
 
 The root files have a first-pass filename cluster index in
 `form/form-stdlib/stdlib-knowledge-hierarchy.fk`. The counts are heuristic
@@ -133,11 +135,16 @@ observe the current stdlib source inventory, sample the compiler/runtime
 artifact cluster, count bounded `defn` / `let` pressure, and prove the release
 metric row as bidirectional BMF data in
 [`form/form-stdlib/tests/source-runtime-release-metrics-band.fk`](../../form/form-stdlib/tests/source-runtime-release-metrics-band.fk).
+The current witness returns `8388607` and reports `2,297` stdlib `.fk` files
+through a bounded family census. Both the aggregate release metric row and the
+family census row roundtrip through `source-runtime-release-metrics.bmf`. The
+full recursive all-at-once stdlib inventory remains pending until
+`source_inventory` can stream or page rows instead of building one large list.
 
 The current whole-family pressure baseline is recorded in
 [`source-runtime-release-map.md`](source-runtime-release-map.md). As of
-2026-07-05, non-test stdlib contains 21,889 `(defn`, 6,413 `(let`, and 28,302
-total low-level forms across 967 files. The first-pass feature-family pressure
+2026-07-08, non-test stdlib contains 22,120 `(defn`, 6,436 `(let`, and 28,556
+total low-level forms across 974 files. The first-pass feature-family pressure
 is:
 
 | Family | Files | `(defn` | `(let` | Total |

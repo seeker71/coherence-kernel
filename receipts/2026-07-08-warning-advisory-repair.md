@@ -35,7 +35,7 @@ cc -O2 -o fkwu runtime/fkwu-uni.c
 cd form && ./validate.sh form-stdlib/tests/source-runtime-release-metrics-band.fk
 # validate_fkwu_native_surface: OK (... aliases=19, warnings=0)
 # no stale bootstrap uni.c advisory
-# source-runtime-release-metrics-band -> 131071
+# source-runtime-release-metrics-band -> 8388607
 
 cc -O2 -c -o /tmp/form-cli-warning-check.o form/form-stdlib/bootstrap/form-cli-emitted.c
 # no warnings
