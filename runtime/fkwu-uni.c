@@ -298,7 +298,14 @@ extern long long write(long long, const void *, unsigned long);
 extern double strtod(const char *, char **);
 extern void *popen(const char *, const char *);
 extern int pclose(void *);
+#if defined(__APPLE__) && (defined(__GNUC__) || defined(__clang__))
+extern unsigned long fk_c_fread(void *, unsigned long, unsigned long, void *) __asm__("_fread");
+#elif defined(__GNUC__) || defined(__clang__)
+extern unsigned long fk_c_fread(void *, unsigned long, unsigned long, void *) __asm__("fread");
+#else
 extern unsigned long fread(void *, unsigned long, unsigned long, void *);
+#define fk_c_fread fread
+#endif
 static char *fk_sb;
 static long long *fk_so;
 static long long *fk_sl;
@@ -2678,6 +2685,7 @@ static void fk_inv_walk(const char *root, const char *dir, const char *suf, long
 
 #if defined(_WIN32)
 typedef unsigned long long fk_os_socket_t;
+typedef int fk_socklen_t;
 struct fk_wsadata {
     unsigned short wVersion;
     unsigned short wHighVersion;
@@ -2693,7 +2701,7 @@ extern int bind(fk_os_socket_t, const void *, int);
 extern int listen(fk_os_socket_t, int);
 extern fk_os_socket_t accept(fk_os_socket_t, void *, void *);
 extern int connect(fk_os_socket_t, const void *, int);
-extern int getsockname(fk_os_socket_t, void *, int *);
+extern int getsockname(fk_os_socket_t, void *, fk_socklen_t *);
 extern int setsockopt(fk_os_socket_t, int, int, const char *, int);
 extern int closesocket(fk_os_socket_t);
 extern int recv(fk_os_socket_t, char *, int, int);
@@ -2733,12 +2741,13 @@ static int fk_os_setsockopt_reuse(fk_os_socket_t s, int *yes) {
 }
 #else
 typedef int fk_os_socket_t;
+typedef unsigned int fk_socklen_t;
 extern int socket(int, int, int);
 extern int bind(int, const void *, unsigned int);
 extern int listen(int, int);
 extern long accept(int, void *, void *);
 extern int connect(int, const void *, unsigned int);
-extern int getsockname(int, void *, unsigned int *);
+extern int getsockname(int, void *, fk_socklen_t *);
 extern int setsockopt(int, int, int, const void *, unsigned int);
 extern long long recv(int, void *, unsigned long, int);
 extern long long send(int, const void *, unsigned long, int);
@@ -2880,7 +2889,7 @@ static long long fk_socket_port_native(long long h) {
         return -1;
     }
     struct fk_sockaddr4 a;
-    int n = 16;
+    fk_socklen_t n = 16;
     if (getsockname(s, &a, &n) < 0) {
         return -1;
     }
@@ -4110,7 +4119,7 @@ static long long fk_host_exec(long long cmdv, long long inputv) {
     static char hbuf[262144];
     long long total = 0;
     while (total < 262143) {
-        unsigned long got = fread(hbuf + total, 1, (unsigned long)(262143 - total), fp);
+        unsigned long got = fk_c_fread(hbuf + total, 1, (unsigned long)(262143 - total), fp);
         if (got == 0) {
             break;
         }
@@ -11348,8 +11357,8 @@ static int fk_run_src(const char *path, long long arg) {
         fk_src_reset_compile_state();
     }
     fk_src_compile_current_unit(path, fkb_path, sym_path, unit_mtime, expected_source_hash);
-    if (fk_path_mtime_raw(dylib_path) < unit_mtime) {
-        fk_diag_path("warning", dylib_path,
+    if (fk_path_mtime_raw(dylib_path) < unit_mtime && fk_conf("FK_ARTIFACT_TRACE")) {
+        fk_diag_path("note", dylib_path,
                 "native .dylib emission is not installed in this checkout; emitted .fkb/.sym");
     }
     fk_vs[0] = arg << 1;
