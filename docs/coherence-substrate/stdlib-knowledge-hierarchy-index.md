@@ -169,7 +169,7 @@ is:
 | `protocol-codec-language` | BMF source v1 | HTTP, JSON, XML, CDR, DNS, path/query grammars |
 | `route-service-language` | BMF source v1 | HTTP services and CLI route surfaces |
 | `capability-carrier-protocol-language` | BMF source v1 | storage, resource, tool, and channel carriers |
-| `artifact-lifecycle-language` | BMF source v1 | `.fk`, `.fkb`, `.sym`, `.tbl`, `.dylib` lifecycle |
+| `artifact-lifecycle-language` | BMF source and use v1 | `.fk`, `.fkb` embedded table payload, `.sym`, `.dylib`; standalone `.tbl` retired |
 | `tensor-graph-model-language` | BMF source v1 | model blocks, tensor layouts, tokenizer experiments |
 | `learning-experiment-language` | BMF source v1 | choice receipts, evaluation, feedback loops |
 | `corpus-locale-query-language` | BMF source v1 | RAG corpora, i18n, speech, concept queries |
