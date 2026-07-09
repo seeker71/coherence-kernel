@@ -1,9 +1,8 @@
 # Source Runtime Release Map
 
 This is the current release map for making `.fk/.fkb/.dylib` the runtime
-artifact surface and retiring `.tbl`. Receipts keep the past. This file names
-the present floor, the target shape, and the measured pressure that tells us
-whether we are moving.
+artifact surface and retiring `.tbl`. This file names the present floor, the
+target shape, and the measured pressure that tells us whether we are moving.
 
 ## Target Shape
 
@@ -116,13 +115,12 @@ must move as pages or a cursor stream through the host membrane, not as a larger
 one-shot list. Paged inventory is installed now; cursor-native streaming remains
 the next lift if a consumer needs rows incrementally instead of counts.
 
-The R2 artifact-language lift now names the `.fkb` embedded parsed data as a
-`table-payload`, not a standalone `.tbl`. `artifact-lifecycle-language.bmf`,
-`source-artifact-cache`, `source-artifact-descriptor`, and
-`source-compiler-emission` all observe this vocabulary. Old `includes-tbl` and
-`table-text` accessors remain only as compatibility aliases over the same field;
-the next local target is the lower `program-image-tbl-emit` helper, whose
-implementation still carries the retired name.
+The R2 artifact-language surface names the `.fkb` embedded parsed data as a
+`table-payload`. `artifact-lifecycle-language.bmf`, `source-artifact-cache`,
+`source-artifact-descriptor`, `source-compiler-emission`,
+`program-image-table-payload-emit`, `program-image-table-payload-witness`, and
+`runtime-table-payload-attempt` all use that vocabulary directly. The retired
+artifact names have no active aliases.
 
 ## Progress Over Time
 
@@ -177,7 +175,7 @@ code, or when a missing cluster blocks an active release gate.
 | --- | --- | --- |
 | R0 measurement | repeatable counts for `(defn`, `(let`, sections, grammar rules, artifact tests | full paged stdlib inventory installed and green; bounded family census remains row observation; cursor-native streaming still optional future lift |
 | R1 source compiler health | cursor is the scanner, no large string builder hot path, health and persistence bands pass | healthy in current worktree |
-| R2 artifact authority | `.fk` compile emits fresh `.fkb` plus `.sym`, and eventually `.dylib`; `.fkb` embeds table payload and symbol deps | installed for `.fkb/.sym`; version-3 `.fkb` carries exported function index + arity for import loading; `.sym` records source-unit dependency closure; `.dylib` selection installed for prebuilt ABI artifacts; artifact lifecycle/emission language now says embedded `table-payload`; `.dylib` emission and legacy `program-image-tbl-emit` naming remain pending |
+| R2 artifact authority | `.fk` compile emits fresh `.fkb` plus `.sym`, and eventually `.dylib`; `.fkb` embeds table payload and symbol deps | installed for `.fkb/.sym`; version-3 `.fkb` carries exported function index + arity for import loading; `.sym` records source-unit dependency closure; `.dylib` selection installed for prebuilt ABI artifacts; artifact lifecycle/emission/payload-witness language uses embedded `table-payload`; `.dylib` emission remains pending |
 | R3 runtime selector | loader chooses fresh `.dylib`, then fresh `.fkb`, then source compile only on stale/missing artifacts | installed for `.fk`, `.fkb`, and `.dylib` executable inputs; `.fk` freshness includes imported `.fk` dependencies |
 | R3a import declaration migration | `.fk` files use import declarations; `preludes:` remains only compatibility | runtime supports bare `import "path.fk"` and comment-safe `; import "path.fk"`; validator expands comment-safe imports recursively; 2,418 anchored legacy `; preludes:` declarations remain to migrate |
 | R4 `.tbl` release | `.tbl` is not a supported runtime input | closed: `fkwu file.tbl` reports retired `.tbl` execution |
