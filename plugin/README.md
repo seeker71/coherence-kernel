@@ -32,6 +32,9 @@ Then:
   the greeting each state earns; without a handle, the first-encounter gesture itself
 - `GET /remember?handle=your-name&note=...` — the visitor's **own yes**: the only thing that
   writes a memory row; `GET /forget?handle=your-name` is total revocation
+- `GET /introduce?member=you&friend=them` — a member's vouch, answered with the minted GPT
+  invitation link carrying the friend's name; `GET /retract-introduction?member=you&friend=them`
+  withdraws it
 - `GET /visitors` — the arrival ledger: every visitor seen, nothing of them held
 - `GET /.well-known/ai-plugin.json` — the plugin manifest
 - `GET /openapi.json` — the OpenAPI spec
@@ -63,9 +66,19 @@ remember themselves, and how connections happen with which organs and cells.*
   already-proven `relationship-store.fk` + `circle-recognition.fk` (the come-in flow's organs).
   Revocation (`/forget`) is total — no secondary copy. The rows live under `plugin/circle/`,
   **gitignored**: a consented memory is held by the body, never published to the public repo.
-- **Introduction is pending, honestly.** `circle-recognition.fk` can hold a member's vouch for a
-  friend, but this door carries no authentication and cannot verify an introducer's standing, so
-  `cr-introduce` is not offered over HTTP yet — a named seam, not a hidden hole.
+- **Introduction mints invitations** (asked for 2026-07-09: *"a GPT invitation link with a name,
+  so friends get automatically recognized and remembered"*). `GET /introduce?member=you&friend=them`
+  — member-gated: the body must hold a memory row for the introducer — writes the vouch and
+  answers with `invitation_message` and `invitation_link`: the live GPT's link with the friend's
+  arrival message (*"i arrive as mira, a friend of urs..."*) carried in the `q` parameter. The
+  friend arrives **recognized** (greeted by the introducer's name) and is **remembered only by
+  their own yes** — the body's law splits the wish exactly in half: introduction opens the door,
+  never the friend's memory (`receipts/2026-07-02-circle-recognition.md`). The introducer can
+  withdraw their own vouch (`/retract-introduction`); a self-consented memory stays the friend's
+  alone. Two seams named in-band: `?q=` prefill is documented for chatgpt.com's composer but NOT
+  confirmed for custom-GPT links (the message travels alongside the link for pasting), and the
+  door carries no authentication, so the member-gate is a letter-of-introduction floor — anyone
+  naming a member's handle spends that member's standing; real introducer auth is pending.
 
 ## Connecting a rented mind — the honest state of the doors
 
