@@ -101,16 +101,16 @@ Current state per region. **Chronology is deliberately not kept here** — the f
 - **`axioms/`** — the five core axioms and derivations (`.form`). The reasoning ground for everything else.
 - **`surface/`** — the minimal host surface (`minimal-surface.fk`), the flatten-lane standing prelude
   (`fourth-shim.fk`), the BML high-grammar core reference (`core.fk`), sense channels.
-- **`runtime/`** — `fkwu-uni.c` (the one C seed, a shrink target — string ops `substring`/`int_to_str` already
-  retired to Form; `str_find`/`str_to_int` parser-surface-retired, C dispatch kept for `.tbl` compatibility) and
+- **`runtime/`** — `fkwu-uni.c` (the one C seed, a shrink target; string ops `substring`/`int_to_str`
+  are Form-owned, and `str_find`/`str_to_int` remain only where the current runtime door still needs them) and
   `fkwu-optable.h` (GENERATED from `flt-ops` in `flatten/form-flatten.fk` — the hand-maintained single source of
   truth for op rows — via `flatten/gen-source-walker.fk`).
 - **`bootstrap/`** — the grounding cells (`ground.fk` → 42, `ground-recursive.fk` → 55).
 - **`proof/`** — the kernel's own four-way proof driver (`four-way-run` + `four-way-verdict`, verdict 0 = all agree).
 - **`walkers/`** — minimal Go/Rust/TS proof oracles (~1.4k/0.9k/1.5k lines), string floor down to the narrow
   waist (`str_len`/`str_byte_at`/`byte_to_str`/`str_concat`); everything above it is shared Form.
-- **`flatten/`** — the optional-speed lane: `form-flatten.fk` (owns `flt-ops`), the optable generators, and the
-  regenerable `.tbl` caches.
+- **`flatten/`** — the optional-speed lane: `form-flatten.fk` (owns `flt-ops`), the optable generators, and
+  regenerable program-image payload caches.
 
 ### Standard library & agent surface
 - **`form/form-stdlib/`** — the living stdlib (~56 recipes + ~58 band tests). Core vocabulary (`core.fk`:

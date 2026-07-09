@@ -8,9 +8,10 @@ The clean kernel no longer borrows the origin's `validate.sh`. It crosses its ow
   investigate the native) / WALKER-SUSPECT (one walker odd — common, a proof-note). Encodes that the native
   walker is rarely the wrong one.
 
-Run it: `fkwu proof/four-way-run.tbl` (the flattened proof driver). `host-exec` is a host PORT
-(`runtime/fkwu-uni.c` optag 136, the VIA-HOST family) and `str_to_int` is optag 31; `fwv-verdict`
-computes 0=FOUR-WAY / 1=FKWU-SUSPECT / 2=WALKER-SUSPECT.
+Run the proof through the current `.fk/.fkb` runtime path. `host-exec` is a host
+PORT (`runtime/fkwu-uni.c` optag 136, the VIA-HOST family) and `str_to_int` is
+optag 31; `fwv-verdict` computes 0=FOUR-WAY / 1=FKWU-SUSPECT /
+2=WALKER-SUSPECT.
 
 Perturbation-verified 2026-06-29 (the verdict is COMPUTED, not parse-to-zero): the three walkers each
 return 42 on `recipe42.fk` → verdict **0** (FOUR-WAY); force ts→99 → **2** (WALKER-SUSPECT); tell the
