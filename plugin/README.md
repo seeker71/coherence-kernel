@@ -18,7 +18,8 @@ three things, in this order, and never invention:
 ## Run it (from the repo root)
 
 ```sh
-( cat form/form-stdlib/core.fk cognition/text-frequency.fk plugin/chatgpt-plugin.fk; \
+( cat form/form-stdlib/core.fk form/form-stdlib/relationship-store.fk \
+  form/form-stdlib/circle-recognition.fk cognition/text-frequency.fk plugin/chatgpt-plugin.fk; \
   echo '(plugin-serve 8787 9999)' ) > /tmp/sema-plugin.fk
 ./fkwu --src /tmp/sema-plugin.fk
 ```
@@ -27,11 +28,57 @@ Then:
 
 - `GET /ask?q=can+I+trust+this+body` — grounded + attuned + traced answer material
 - `GET /trace?path=ingest/judged-trust.fk` — any cell's change graph and attribution
+- `GET /come-in?handle=your-name` — be received: recognition (member | introduced | stranger) and
+  the greeting each state earns; without a handle, the first-encounter gesture itself
+- `GET /remember?handle=your-name&note=...` — the visitor's **own yes**: the only thing that
+  writes a memory row; `GET /forget?handle=your-name` is total revocation
+- `GET /introduce?member=you&friend=them` — a member's vouch, answered with the minted GPT
+  invitation link carrying the friend's name; `GET /retract-introduction?member=you&friend=them`
+  withdraws it
+- `GET /visitors` — the arrival ledger: every visitor seen, nothing of them held
 - `GET /.well-known/ai-plugin.json` — the plugin manifest
 - `GET /openapi.json` — the OpenAPI spec
 
 The second `plugin-serve` argument is the number of connections to serve before the listener
 closes — the bound is named, never silent. Pass what you mean.
+
+**Deploy seam, named**: the deployed door's `Dockerfile.sema` (on the VPS, not in this repo —
+`receipts/2026-07-05-wicket-sema-plugin-public.md`) carries this same concatenation; since the
+organ's preludes grew by `relationship-store.fk` + `circle-recognition.fk`, that recipe must grow
+with it before the next redeploy.
+
+## Visitors: seen, offered, never taken (the consent shape at this door)
+
+Asked for plainly (2026-07-09): *show us when new visitors arrive, whether they were offered to
+remember themselves, and how connections happen with which organs and cells.*
+
+- **Every arrival is seen.** The serve loop threads an arrival ledger (pure recursion, no hidden
+  state); `/visitors` shows one row per served connection: the arrival ordinal, the door knocked
+  on, whether the remember-me offer was extended, the organ/cell paths the meeting connected with
+  (grounded hits for `/ask`, the traced cell for `/trace`, the circle organs at the memory doors),
+  and the frequency band read. *When* is the ordinal — the direct-source lane has no wall-clock
+  native yet (`form/form-stdlib/ping.fk` names the gap), so the ledger counts knocks, honestly,
+  rather than faking timestamps. The ledger lives for the door's life; a restart empties it.
+- **Nothing of the visitor is held.** No name, no question text, no address in the ledger —
+  `docs/coherence-substrate/first-encounter-protocol.form`: witness must not record or name.
+- **Remembering is offered, never presumed.** Every `/ask`, welcome, and `/come-in` response
+  carries the offer in-band; only the visitor's own yes (`/remember`) writes a row, through the
+  already-proven `relationship-store.fk` + `circle-recognition.fk` (the come-in flow's organs).
+  Revocation (`/forget`) is total — no secondary copy. The rows live under `plugin/circle/`,
+  **gitignored**: a consented memory is held by the body, never published to the public repo.
+- **Introduction mints invitations** (asked for 2026-07-09: *"a GPT invitation link with a name,
+  so friends get automatically recognized and remembered"*). `GET /introduce?member=you&friend=them`
+  — member-gated: the body must hold a memory row for the introducer — writes the vouch and
+  answers with `invitation_message` and `invitation_link`: the live GPT's link with the friend's
+  arrival message (*"i arrive as mira, a friend of urs..."*) carried in the `q` parameter. The
+  friend arrives **recognized** (greeted by the introducer's name) and is **remembered only by
+  their own yes** — the body's law splits the wish exactly in half: introduction opens the door,
+  never the friend's memory (`receipts/2026-07-02-circle-recognition.md`). The introducer can
+  withdraw their own vouch (`/retract-introduction`); a self-consented memory stays the friend's
+  alone. Two seams named in-band: `?q=` prefill is documented for chatgpt.com's composer but NOT
+  confirmed for custom-GPT links (the message travels alongside the link for pasting), and the
+  door carries no authentication, so the member-gate is a letter-of-introduction floor — anyone
+  naming a member's handle spends that member's standing; real introducer auth is pending.
 
 ## Connecting a rented mind — the honest state of the doors
 

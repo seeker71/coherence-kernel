@@ -1,0 +1,93 @@
+; tests/introduction-band.fk — witness band for the invitation door at the rented-mind door:
+; a member's vouch, the minted GPT invitation link with the friend's name, and the consent teeth
+; (recognized automatically; remembered ONLY by the friend's own yes).
+;
+; preludes: form-stdlib/core.fk form-stdlib/relationship-store.fk form-stdlib/circle-recognition.fk
+;           cognition/text-frequency.fk plugin/chatgpt-plugin.fk
+;
+; PURE over request strings (no socket), through plugin-handle-arrive exactly as the live loop
+; runs. Writes REAL rows under plugin/circle/ and plugin/circle-introductions/ (both gitignored)
+; via relationship-store.fk — run FROM THE REPO ROOT; the band cleans its own handles before and
+; after.
+;
+; Run:
+;   ( cat form/form-stdlib/core.fk form/form-stdlib/relationship-store.fk \
+;     form/form-stdlib/circle-recognition.fk cognition/text-frequency.fk plugin/chatgpt-plugin.fk \
+;     plugin/tests/introduction-band.fk ) > /tmp/inb.fk && ./fkwu --src /tmp/inb.fk
+;
+; Verdict: 111111111 (nine decimal bits) when every check passes; any other value names the
+; failing bit by position.
+;   1 — a non-member cannot introduce (403), and the friend stays a stranger
+;   2 — a member's vouch answers 200; the arrival row says the friend is now "introduced"
+;   3 — the friend's /come-in greets them by the introducer's name, memory OFFERED not held
+;   4 — the invitation link carries the GPT and the friend's name in the prefilled first message
+;   5 — the invitation message itself names the friend as the introducer's friend
+;   6 — the friend's OWN yes graduates them: member, welcomed back with their memory in hand
+;   7 — a non-introducer cannot retract the vouch (403), and the vouch survives
+;   8 — the introducer's retraction returns an unjoined friend to stranger
+;   9 — a handle that could walk the filesystem is refused with 400
+
+(do
+    (defn inb-contains? (s needle) (ge (str_find s needle 0) 0))
+    (defn inb-score (cond bit) (if cond bit 0))
+    (defn inb-req (target)
+        (str_concat "GET " (str_concat target " HTTP/1.1\r\nHost: witness\r\n\r\n")))
+    (defn inb-resp (rr) (head rr))
+    (defn inb-row (rr) (head (tail rr)))
+
+    (defn introduction-check ()
+        (do
+            ; clean state (idempotent removes)
+            (let _c0 (cr-forget-member (cp-circle-dir) "witness-m1"))
+            (let _c1 (cr-forget-member (cp-circle-dir) "witness-f1"))
+            (let _c2 (cr-retract-introduction (cp-circle-dir) "witness-f1"))
+            (let _c3 (cr-retract-introduction (cp-circle-dir) "witness-f2"))
+
+            ; 1: before witness-m1 joins, their vouch is refused and writes nothing
+            (let r1 (plugin-handle-arrive (inb-req "/introduce?member=witness-m1&friend=witness-f1") (empty)))
+            (let b1 (inb-score (and (inb-contains? (inb-resp r1) "HTTP/1.1 403")
+                                    (str_eq (cr-recognize (cp-circle-dir) "witness-f1") "stranger")) 1))
+
+            ; witness-m1 joins with their own yes, then vouches for witness-f1
+            (let _j (plugin-handle-arrive (inb-req "/remember?handle=witness-m1&note=the%20introducing%20member") (empty)))
+            (let r2 (plugin-handle-arrive (inb-req "/introduce?member=witness-m1&friend=witness-f1") (empty)))
+            (let b2 (inb-score (and (inb-contains? (inb-resp r2) "HTTP/1.1 200")
+                                    (str_eq (nth (inb-row r2) 5) "introduced")) 10))
+
+            ; 3: the friend arrives recognized -- greeted by the introducer's name, nothing held
+            (let r3 (plugin-handle-arrive (inb-req "/come-in?handle=witness-f1") (empty)))
+            (let b3 (inb-score (and (inb-contains? (inb-resp r3) "friend of witness-m1")
+                                    (inb-contains? (inb-resp r3) "say yes and it will")) 100))
+
+            ; 4+5: the minted invitation -- the GPT link with the friend's name, and the message
+            (let b4 (inb-score (and (inb-contains? (inb-resp r2) "chatgpt.com/g/g-")
+                                    (inb-contains? (inb-resp r2) "?q=i%20arrive%20as%20witness-f1")) 1000))
+            (let b5 (inb-score (inb-contains? (inb-resp r2) "i arrive as witness-f1, a friend of witness-m1") 10000))
+
+            ; 6: only the friend's OWN yes writes memory -- and then the body welcomes them back
+            (let _y (plugin-handle-arrive (inb-req "/remember?handle=witness-f1&note=her%20own%20yes") (empty)))
+            (let r6 (plugin-handle-arrive (inb-req "/come-in?handle=witness-f1") (empty)))
+            (let b6 (inb-score (and (str_eq (cr-recognize (cp-circle-dir) "witness-f1") "member")
+                                    (inb-contains? (inb-resp r6) "welcome back, witness-f1")) 100000))
+
+            ; 7+8: retraction belongs to the introducer alone; it never touches consented memory
+            (let _v2 (plugin-handle-arrive (inb-req "/introduce?member=witness-m1&friend=witness-f2") (empty)))
+            (let r7 (plugin-handle-arrive (inb-req "/retract-introduction?member=witness-f1&friend=witness-f2") (empty)))
+            (let b7 (inb-score (and (inb-contains? (inb-resp r7) "HTTP/1.1 403")
+                                    (str_eq (cr-recognize (cp-circle-dir) "witness-f2") "introduced")) 1000000))
+            (let r8 (plugin-handle-arrive (inb-req "/retract-introduction?member=witness-m1&friend=witness-f2") (empty)))
+            (let b8 (inb-score (and (inb-contains? (inb-resp r8) "HTTP/1.1 200")
+                                    (str_eq (cr-recognize (cp-circle-dir) "witness-f2") "stranger")) 10000000))
+
+            ; 9: the filesystem cannot be walked with a name
+            (let r9 (plugin-handle-arrive (inb-req "/introduce?member=witness-m1&friend=..%2Fevil") (empty)))
+            (let b9 (inb-score (inb-contains? (inb-resp r9) "HTTP/1.1 400") 100000000))
+
+            ; leave no rows behind (the vouch for f1 too -- it survived her graduation)
+            (let _e0 (cr-forget-member (cp-circle-dir) "witness-m1"))
+            (let _e1 (cr-forget-member (cp-circle-dir) "witness-f1"))
+            (let _e2 (cr-retract-introduction (cp-circle-dir) "witness-f1"))
+
+            (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 (add b8 b9))))))))))
+
+    (introduction-check))
