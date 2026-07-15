@@ -35,6 +35,10 @@ collapsing it to a single cell — reading makes it *denser with meaning, not he
 
 ## Come in
 
+**Not technical?** [`WELCOME.md`](WELCOME.md) is the plain-words door — ways in that need no code,
+and the dialogue covenant (service over engagement, no flattery, honest misses, questions that
+lift) in human words.
+
 Clone this repo, open Claude Code or Codex inside it, and say hello. Ask:
 
 > What is alive here? What is grounded? What wants to be released? What small thing can I return?

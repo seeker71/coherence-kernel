@@ -47,6 +47,17 @@ closes — the bound is named, never silent. Pass what you mean.
 organ's preludes grew by `relationship-store.fk` + `circle-recognition.fk`, that recipe must grow
 with it before the next redeploy.
 
+**Deployed state as observed 2026-07-15** (`receipts/2026-07-15-door-verified-live.md`): the
+live door at `hati.earth/sema` serves `/ask` + `/trace` + a `/privacy` page (the privacy route
+is deploy-side / branch-side, not in this tree's serve code), with a newer `native-keyword-v2`
+retrieval index over ~1650 cells carried on a not-yet-merged lane. The **memory doors**
+(`/come-in`, `/remember`, `/forget`, `/introduce`, `/retract-introduction`, `/visitors`) work in
+this tree and are witnessed by the bands below, but are **not deployed** — the live Action's
+spec exposes only ask + trace, so the running voice must not offer remembering (the manifest's
+guidance now says exactly that). For the flagship trust question the deployed index surfaces
+different cells than this tree's seed index (which grounds it in `ingest/judged-trust.fk`);
+worth a retrieval-quality check at the next redeploy.
+
 ## Visitors: seen, offered, never taken (the consent shape at this door)
 
 Asked for plainly (2026-07-09): *show us when new visitors arrive, whether they were offered to
