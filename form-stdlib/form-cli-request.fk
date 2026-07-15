@@ -206,6 +206,40 @@
                                     (and (eq (hex-valid? id-hex) 1)
                                          (eq (hex-valid? text-hex) 1)))))) 1 0)))
 
+    ; The semantic-v2 tokenizer intentionally recognizes ASCII letters and
+    ; digits only. Decode the staged text hex directly into that projection so
+    ; an emitted carrier never materializes arbitrary UTF-8 byte strings merely
+    ; to discard their bytes as delimiters. This preserves the exact re-words
+    ; meaning while avoiding the host string-release wedge exposed by long
+    ; ornament runs in real Markdown/Form sources.
+    (defn fcr-embed-ascii-byte? (b)
+        (if (or (and (ge b 65) (le b 90))
+                (or (and (ge b 97) (le b 122))
+                    (and (ge b 48) (le b 57)))) 1 0))
+    (defn fcr-embed-lower-byte (b)
+        (if (and (ge b 65) (le b 90)) (add b 32) b))
+    (defn fcr-embed-words-from-hex-loop (s i n cur rev-words)
+        (if (ge i n)
+            (re-rev-into
+                (if (str_eq cur "") rev-words (cons cur rev-words))
+                (empty))
+            (do
+                (let hi (hex-digit-value (hex-byte-at s i)))
+                (let lo (hex-digit-value (hex-byte-at s (add i 1))))
+                (let b (add (mul hi 16) lo))
+                (if (eq (fcr-embed-ascii-byte? b) 1)
+                    (fcr-embed-words-from-hex-loop s (add i 2) n
+                        (str_concat cur (byte_to_str (fcr-embed-lower-byte b)))
+                        rev-words)
+                    (fcr-embed-words-from-hex-loop s (add i 2) n ""
+                        (if (str_eq cur "") rev-words
+                            (cons cur rev-words)))))))
+    (defn fcr-embed-words-from-hex (s)
+        (fcr-embed-words-from-hex-loop s 0 (str_len s) "" (empty)))
+    (defn fcr-embed-semantic-vec-from-hex (s)
+        (re-semantic-codes
+            (re-semantic-words (fcr-embed-words-from-hex s))))
+
     (defn fcr-embed-effective-end (raw)
         (do
             (let n (str_len raw))
@@ -238,11 +272,12 @@
     (defn fcr-embed-json-row (line)
         (do
             (let id-hex (fcr-embed-id-hex line))
-            (let text (ra-answer-from-hex (fcr-embed-text-hex line)))
             (str_concat "{\"id_hex\":\""
             (str_concat id-hex
             (str_concat "\",\"embedding_kind\":\"form-semantic-v2\",\"vec\":"
-            (str_concat (ric-emit-vec (re-semantic-vec text)) "}"))))))
+            (str_concat (ric-emit-vec
+                (fcr-embed-semantic-vec-from-hex (fcr-embed-text-hex line)))
+                "}"))))))
 
     (defn fcr-embed-output-loop (raw pos raw-len first)
         (if (ge pos raw-len) ""
