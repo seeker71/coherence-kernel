@@ -91,4 +91,4 @@ else
 fi
 
 echo
-echo "✓ the gen conductor cross-compiles to a genuine Android ARM64 binary [$VARIANT]."
+echo "✓ the Go proof sibling cross-compiles to a genuine Android ARM64 binary [$VARIANT]."
