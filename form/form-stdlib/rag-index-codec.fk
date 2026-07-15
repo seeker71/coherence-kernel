@@ -1,21 +1,28 @@
-; rag-index-codec.fk — jsonl codec for the form-cli RAG memory index, as a PURE FORM recipe.
+; rag-index-codec.fk — typed JSONL codec for NodeID-grounded RAG memory.
 ;
-; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/hex.fk
 ;
-; The RAG index is one JSON object per line (jsonl). Each line carries a recipe's
-; address and its retrieval payload:
-;   {"id":"form/form-stdlib/shell-grammar.fk","kind":"recipe","key":"152961502","snippet":"text","vec":[12,34,56]}
-; Field order may vary; id/kind/key/snippet are strings, vec is a list of ints.
+; A grounded row keeps identity and location separate. `id` / `node_id` are the
+; resolvable substrate coordinate; `source_path` is only the source lens:
+;   {"id":"@8.3.4.9","node_id":"@8.3.4.9","content_node_id":"@8.4.4.2",
+;    "source_path":"docs/a.form",
+;    "schema":"nodeid-rag-v2","embedding_kind":"form-semantic-v2",
+;    "kind":"cell","key":"152961502","persisted_source_sha256":"152961502",
+;    "answer_key":"982d...",
+;    "answer_hex":"74657874",
+;    "snippet":"text","vec":[12,34,56]}
 ;
-; This codec parses and emits those lines with no host code — only the string and
-; list builtins (str_find / substring / str_len / str_concat / ord) over Form
-; recursion — so it crosses Go/Rust/TS/fkwu. The field extractor mirrors the proven
-; "key":"value" reader fnr-jf in form-native-run.fk.
+; Legacy path-id rows still parse for migration, but ric-grounding-ready? refuses
+; them. A source path can therefore never become grounding merely by occupying
+; the old `id` field. NodeID syntax, schema, embedding kind, source lens, and a
+; non-empty vector must all land before the ask lane may admit the row.
 ;
 ; Proven by: form-stdlib/tests/rag-index-codec-band.fk
 
 (do
-    ; ── field extractor: "key":"value" -> value ("" if absent). Mirror of fnr-jf. ──
+    ; ── field extractor: "key":"value" -> value ("" if absent). ──
+    ; Field spacing and order may vary. String fields used for identity/path do
+    ; not carry quotes; snippet escaping remains the JSON carrier's concern.
     (defn ric-field (line key)
         (do
             (let patt (str_concat "\"" (str_concat key "\"")))
@@ -26,23 +33,92 @@
                     (let colon (str_find line ":" (add ki (str_len patt))))
                     (let q1 (str_find line "\"" (add colon 1)))
                     (let q2 (str_find line "\"" (add q1 1)))
-                    (if (lt q2 0) "" (substring line (add q1 1) q2))))))
+                    (if (or (lt q1 0) (lt q2 0)) ""
+                        (substring line (add q1 1) q2))))))
 
     ; ── named string fields ──
-    (defn ric-id      (line) (ric-field line "id"))
-    (defn ric-kind    (line) (ric-field line "kind"))
-    (defn ric-key     (line) (ric-field line "key"))
-    (defn ric-snippet (line) (ric-field line "snippet"))
+    (defn ric-id             (line) (ric-field line "id"))
+    (defn ric-raw-node-id    (line) (ric-field line "node_id"))
+    (defn ric-content-node-id (line) (ric-field line "content_node_id"))
+    (defn ric-raw-source-path (line) (ric-field line "source_path"))
+    (defn ric-schema         (line) (ric-field line "schema"))
+    (defn ric-embedding-kind (line) (ric-field line "embedding_kind"))
+    (defn ric-kind           (line) (ric-field line "kind"))
+    (defn ric-key            (line) (ric-field line "key"))
+    (defn ric-persisted-source-sha256 (line) (ric-field line "persisted_source_sha256"))
+    (defn ric-answer-key     (line) (ric-field line "answer_key"))
+    (defn ric-answer-hex     (line) (ric-field line "answer_hex"))
+    (defn ric-snippet        (line) (ric-field line "snippet"))
 
-    ; ── str -> int: fold ASCII digits (ord '0' = 48) left-to-right ──
-    (defn ric-s2i-go (s i acc)
-        (if (ge i (str_len s))
-            acc
-            (ric-s2i-go s (add i 1)
-                (add (mul acc 10) (sub (ord (substring s i (add i 1))) 48)))))
-    (defn ric-s2i (s) (ric-s2i-go s 0 0))
+    ; ── strict @p.l.t.i syntax. Four non-empty unsigned decimal coordinates. ──
+    (defn ric-digit? (s i)
+        (do (let b (str_byte_at s i))
+            (if (and (ge b 48) (le b 57)) 1 0)))
+    (defn ric-digits? (s i end)
+        (if (ge i end) 1
+            (if (eq (ric-digit? s i) 1)
+                (ric-digits? s (add i 1) end)
+                0)))
+    (defn ric-node-id-valid? (node-id)
+        (do
+            (let n (str_len node-id))
+            (if (or (lt n 8) (not (str_eq (substring node-id 0 1) "@")))
+                0
+                (do
+                    (let d1 (str_find node-id "." 1))
+                    (let d2 (if (lt d1 0) -1 (str_find node-id "." (add d1 1))))
+                    (let d3 (if (lt d2 0) -1 (str_find node-id "." (add d2 1))))
+                    (let d4 (if (lt d3 0) -1 (str_find node-id "." (add d3 1))))
+                    (if (or (or (lt d1 2) (lt d2 (add d1 2)))
+                            (or (lt d3 (add d2 2)) (not (lt d3 (sub n 1)))))
+                        0
+                        (if (not (lt d4 0)) 0
+                            (if (and
+                                    (and (eq (ric-digits? node-id 1 d1) 1)
+                                         (eq (ric-digits? node-id (add d1 1) d2) 1))
+                                    (and (eq (ric-digits? node-id (add d2 1) d3) 1)
+                                         (eq (ric-digits? node-id (add d3 1) n) 1)))
+                                1 0)))))))
 
-    ; ── split a comma-joined int substring ("12,34,56") into a list of ints ──
+    ; node_id is authoritative; `id` is accepted only when it is itself a NodeID.
+    (defn ric-node-id (line)
+        (do (let explicit (ric-raw-node-id line))
+            (if (eq (ric-node-id-valid? explicit) 1) explicit
+                (if (eq (ric-node-id-valid? (ric-id line)) 1) (ric-id line) ""))))
+
+    ; source_path is a lens, never identity. Legacy path-id rows retain their
+    ; source lens for migration while remaining ungrounded.
+    (defn ric-source-path (line)
+        (do (let explicit (ric-raw-source-path line))
+            (if (gt (str_len explicit) 0) explicit
+                (if (eq (ric-node-id-valid? (ric-id line)) 1) "" (ric-id line)))))
+
+    ; ── whitespace-tolerant signed decimal parse for JSON vectors. ──
+    (defn ric-space? (s i)
+        (do (let b (str_byte_at s i))
+            (if (or (eq b 32) (or (eq b 9) (or (eq b 10) (eq b 13)))) 1 0)))
+    (defn ric-left (s i n)
+        (if (ge i n) n
+            (if (eq (ric-space? s i) 1) (ric-left s (add i 1) n) i)))
+    (defn ric-right (s i)
+        (if (le i 0) 0
+            (if (eq (ric-space? s (sub i 1)) 1) (ric-right s (sub i 1)) i)))
+    (defn ric-s2i-go (s i end acc)
+        (if (ge i end) acc
+            (ric-s2i-go s (add i 1) end
+                (add (mul acc 10) (sub (str_byte_at s i) 48)))))
+    (defn ric-s2i (s)
+        (do
+            (let start (ric-left s 0 (str_len s)))
+            (let end (ric-right s (str_len s)))
+            (if (or (ge start end) (not (eq (ric-digits? s
+                    (if (str_eq (substring s start (add start 1)) "-") (add start 1) start)
+                    end) 1)))
+                0
+                (if (str_eq (substring s start (add start 1)) "-")
+                    (sub 0 (ric-s2i-go s (add start 1) end 0))
+                    (ric-s2i-go s start end 0)))))
+
     (defn ric-split-ints (s)
         (if (eq (str_len s) 0)
             (empty)
@@ -53,19 +129,81 @@
                     (cons (ric-s2i (substring s 0 ci))
                           (ric-split-ints (substring s (add ci 1) (str_len s))))))))
 
-    ; ── parse the "vec":[a,b,c] field into a list of ints ([] if absent) ──
+    ; Accept both compact Form JSON (`"vec":[`) and ordinary spaced JSON
+    ; (`"vec": [`). Locate the array structurally from the field name.
     (defn ric-vec (line)
         (do
-            (let patt "\"vec\":[")
-            (let vi (str_find line patt 0))
+            (let vi (str_find line "\"vec\"" 0))
             (if (lt vi 0)
                 (empty)
                 (do
-                    (let start (add vi (str_len patt)))
-                    (let close (str_find line "]" start))
-                    (ric-split-ints (substring line start close))))))
+                    (let colon (str_find line ":" (add vi 5)))
+                    (let open (str_find line "[" (add colon 1)))
+                    (let close (if (lt open 0) -1 (str_find line "]" (add open 1))))
+                    (if (or (lt open 0) (lt close 0)) (empty)
+                        (ric-split-ints (substring line (add open 1) close)))))))
 
-    ; ── emit a list of ints as "[a,b,c]" ──
+    ; form-semantic-v2 is a sequence of adjacent dual-hash feature pairs.
+    ; First and second hashes occupy disjoint domains; malformed/odd vectors and
+    ; duplicate pairs cannot enter grounding even if the surrounding JSON claims v2.
+    (defn ric-first-code? (code)
+        (if (and (ge code 0) (lt code 1000003)) 1 0))
+    (defn ric-second-code? (code)
+        (if (and (ge code 1000003) (lt code 2000036)) 1 0))
+    (defn ric-pair-in? (first-code second-code pairs)
+        (if (lt (len pairs) 2) 0
+            (if (and (eq first-code (head pairs))
+                     (eq second-code (head (tail pairs)))) 1
+                (ric-pair-in? first-code second-code (tail (tail pairs))))))
+    (defn ric-semantic-pairs-valid? (pairs)
+        (if (eq (len pairs) 0) 1
+            (if (lt (len pairs) 2) 0
+                (do
+                    (let first-code (head pairs))
+                    (let second-code (head (tail pairs)))
+                    (let rest (tail (tail pairs)))
+                    (if (and
+                            (and (eq (ric-first-code? first-code) 1)
+                                 (eq (ric-second-code? second-code) 1))
+                            (eq (ric-pair-in? first-code second-code rest) 0))
+                        (ric-semantic-pairs-valid? rest)
+                        0)))))
+    (defn ric-semantic-vec-valid? (vec)
+        (if (and (gt (len vec) 0)
+                 (eq (ric-semantic-pairs-valid? vec) 1)) 1 0))
+
+    ; A row is eligible for grounding only under the typed schema. This is a
+    ; format admission gate; the substrate carrier remains responsible for
+    ; proving that the admitted coordinate resolves before writing the row.
+    (defn ric-grounding-ready? (line)
+        (do
+            (let identity-ready
+                (and (eq (ric-node-id-valid? (ric-raw-node-id line)) 1)
+                     (and (str_eq (ric-id line) (ric-raw-node-id line))
+                          (eq (ric-node-id-valid? (ric-content-node-id line)) 1))))
+            (let source-ready
+                (and (gt (str_len (ric-source-path line)) 0)
+                     (gt (str_len (ric-key line)) 0)))
+            (let answer-ready
+                (and (gt (str_len (ric-answer-key line)) 0)
+                     (gt (str_len (ric-answer-hex line)) 0)))
+            (let persisted (ric-persisted-source-sha256 line))
+            (let persisted-ready
+                (and (eq (str_len persisted) 64)
+                     (and (eq (hex-valid? persisted) 1)
+                          (str_eq (ric-key line) persisted))))
+            (let schema-ready
+                (and (str_eq (ric-schema line) "nodeid-rag-v2")
+                     (str_eq (ric-embedding-kind line) "form-semantic-v2")))
+            (let vector-ready (eq (ric-semantic-vec-valid? (ric-vec line)) 1))
+            (if (and identity-ready
+                     (and source-ready
+                          (and answer-ready
+                               (and persisted-ready
+                                    (and schema-ready vector-ready)))))
+                1 0)))
+
+    ; ── emitters ──
     (defn ric-join-ints (vec)
         (if (eq (len vec) 0)
             ""
@@ -75,18 +213,37 @@
                     (str_concat "," (ric-join-ints (tail vec)))))))
     (defn ric-emit-vec (vec)
         (str_concat "[" (str_concat (ric-join-ints vec) "]")))
+    (defn ric-pair (key value)
+        (str_concat "\"" (str_concat key (str_concat "\":\"" (str_concat value "\"")))))
+    (defn ric-cat (parts)
+        (if (eq (len parts) 0) ""
+            (str_concat (head parts) (ric-cat (tail parts)))))
 
-    ; ── emit a full jsonl line (emit then parse round-trips) ──
+    ; Legacy migration emitter. It deliberately does NOT claim nodeid-rag-v2.
     (defn ric-emit (id kind key snippet vec)
-        (str_concat "{\"id\":\""
-        (str_concat id
-        (str_concat "\",\"kind\":\""
-        (str_concat kind
-        (str_concat "\",\"key\":\""
-        (str_concat key
-        (str_concat "\",\"snippet\":\""
-        (str_concat snippet
-        (str_concat "\",\"vec\":"
-        (str_concat (ric-emit-vec vec) "}")))))))))))
+        (ric-cat (list
+            "{" (ric-pair "id" id)
+            "," (ric-pair "kind" kind)
+            "," (ric-pair "key" key)
+            "," (ric-pair "snippet" snippet)
+            ",\"vec\":" (ric-emit-vec vec) "}")))
+
+    ; Canonical grounded emitter. id duplicates node_id for readers that still
+    ; select the historical field, but both values are the same NodeID.
+    (defn ric-emit-grounded (node-id content-node-id source-path kind key answer-key answer-hex snippet vec)
+        (ric-cat (list
+            "{" (ric-pair "id" node-id)
+            "," (ric-pair "node_id" node-id)
+            "," (ric-pair "content_node_id" content-node-id)
+            "," (ric-pair "source_path" source-path)
+            "," (ric-pair "persisted_source_sha256" key)
+            "," (ric-pair "schema" "nodeid-rag-v2")
+            "," (ric-pair "embedding_kind" "form-semantic-v2")
+            "," (ric-pair "kind" kind)
+            "," (ric-pair "key" key)
+            "," (ric-pair "answer_key" answer-key)
+            "," (ric-pair "answer_hex" answer-hex)
+            "," (ric-pair "snippet" snippet)
+            ",\"vec\":" (ric-emit-vec vec) "}")))
 
     0)

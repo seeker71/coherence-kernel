@@ -12,9 +12,8 @@ checking: when a match scrutinee is a constructor of a known INDUCTIVE
 type, the walker verifies every constructor of that type is covered by a
 match arm, and panics with the missing names if not.
 
-This Go port mirrors:
-- `form/form-kernel-ts/src/inductive.ts` (TS reference)
-- `api/app/services/substrate/inductive.py` (Python port)
+This Go sibling mirrors `form/form-kernel-ts/src/inductive.ts`; both are
+checked against the same category and conformance contracts in this module.
 
 ## Recipe shapes
 

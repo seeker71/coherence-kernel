@@ -7,12 +7,11 @@
 #
 #   Form recipe (source text inside python-native-roundtrip-driver.fk)
 #     └─ pn-emit-string (in python-native.fk)
-#        └─ writes kernels/python_bmf/_emitted_roundtrip.py
+#        └─ writes form/.cache/emit_native_python/python_bmf/_emitted_roundtrip.py
 #           └─ python3 imports it, calls add(2,3), factorial(5), factorial(10)
 #              └─ values match form-kernel-go evaluating the same recipes
 #
-# See kernels/UNIVERSAL_TRANSLATOR_ROUNDTRIP.md for the wider gap-map from
-# "one recipe" to "the BMF compiler-compiler itself".
+# See form/python_bmf/CONTRACT.md for the boundary and proof contract.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -30,7 +29,7 @@ CORE_DRIVER="$WORK_DIR/core-driver.fk"
 
 # Step 0: ensure core is source-compiled (same shape emit_native_python.sh uses).
 if [[ ! -f "$CORE_COMPILED" ]]; then
-    mkdir -p "$WORK_DIR" kernels/python_bmf
+    mkdir -p "$WORK_DIR/python_bmf"
     printf '(do (form-source-compile-file "%s" "%s"))\n' \
         "$REPO_ROOT/form/form-stdlib/core.fk" "$CORE_COMPILED" > "$CORE_DRIVER"
     (cd "$REPO_ROOT/form" && "$GO_BIN" \
@@ -47,7 +46,7 @@ DRIVER="$REPO_ROOT/form/form-stdlib/emits/python-native-roundtrip-driver.fk"
 echo "Step 1: walk Form recipe → idiomatic Python via pn-emit-string..." >&2
 (cd "$REPO_ROOT" && "$GO_BIN" "$CORE_COMPILED" "$EMITTER" "$DRIVER")
 
-EMITTED="$REPO_ROOT/kernels/python_bmf/_emitted_roundtrip.py"
+EMITTED="$WORK_DIR/python_bmf/_emitted_roundtrip.py"
 echo "" >&2
 echo "Emitted:" >&2
 cat "$EMITTED"
@@ -55,12 +54,6 @@ echo "" >&2
 
 echo "Step 2: run the emitted Python under CPython..." >&2
 PY_OUT=$(python3 -c "
-import sys, types
-sdk = types.ModuleType('kernels.python_bmf.sdk')
-sys.modules['kernels'] = types.ModuleType('kernels')
-sys.modules['kernels.python_bmf'] = types.ModuleType('kernels.python_bmf')
-sys.modules['kernels.python_bmf'].sdk = sdk
-sys.modules['kernels.python_bmf.sdk'] = sdk
 import importlib.util
 spec = importlib.util.spec_from_file_location('emitted', '$EMITTED')
 mod = importlib.util.module_from_spec(spec)

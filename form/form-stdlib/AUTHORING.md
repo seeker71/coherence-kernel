@@ -78,7 +78,7 @@ plus `defn · let · do`. (Read `form/form-stdlib/core.fk` — it is the whole v
 - This is the **curated band-verdict subset, not the kernel's limit.** `mul`/`sub`/`div` and full IEEE
   floats all work and **compute deterministically across the Go/Rust/TS floor** (proven: integer `mul`, `0.1+0.2`, and a
   float matvec all → 0 divergent). The kernel is a full numeric engine reading
-  `docs/coherence-substrate/numeric-formats.canonical.json` (19 formats incl. bf16/fp8/nf4/int8/bitnet-158).
+  `form/contracts/numeric-formats.canonical.json` (19 formats incl. bf16/fp8/nf4/int8/bitnet-158).
   These are kept out of *bands* only because verdicts stay integer for clean `eq`-parity. For numeric/ML
   recipes use the full engine, and reduce a float result to an integer verdict with `round`/`floor`/`ceil`/`trunc`.
 

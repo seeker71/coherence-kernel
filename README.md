@@ -73,8 +73,8 @@ the runtime touches no Go, Rust, Python, or TypeScript. The same fresh-checkout 
 | `runtime/` | the c-bootstrap `fkwu` — one C seed → native |
 | `surface/` | the minimal host-OS / resource surface |
 | `grammars/` | the BMF cursor + grammars-as-data — the body's tongue (incl. `form-eval`: source runs straight off the cursor) |
-| `form/form-stdlib/` | the portable Form stdlib body: HTTP stack, wire-serialization lane (JSON/XML/CDR/path/RPC), ports, tool channels, satsang, and focused bands |
-| `form-cli/` · `model/` | the agent surface and the form-native model execution |
+| `form/form-stdlib/` | the portable Form stdlib body and sole agent surface: canonical `form-cli-*.fk`, HTTP, serialization, ports, tools, satsang, and focused bands |
+| `model/` | the form-native model execution body |
 | `observe/` · `learn/` · `ingest/` · `presence/` | the organs of a self-aware mind |
 | `docs/coherence-substrate/current-language-artifact-path.md` | the present grammar -> compiler -> artifact path |
 | `docs/coherence-substrate/` | substrate contracts: HTTP service/layers, resource ports, tool channels, current path, and grounding docs |

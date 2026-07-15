@@ -19,14 +19,10 @@ OUT="${1:-form-cli}"
 CC_BIN="${CC:-clang}"
 CLI_BOOTSTRAP_C="$S/bootstrap/form-cli-emitted.c"
 CLI_BOOTSTRAP_STAMP="$S/bootstrap/form-cli.stamp"
+CLI_BOOTSTRAP_SOURCE_SHA256="$S/bootstrap/form-cli.source.sha256"
 FORM_CLI_FORCE_LINK="${FORM_CLI_FORCE_LINK:-0}"
 FORM_CLI_EXTRA_SRC="${FORM_CLI_EXTRA_SRC:-}"
 FORM_CLI_EXTRA_LDFLAGS="${FORM_CLI_EXTRA_LDFLAGS:-}"
-
-if [[ "${FORM_STANDARD_LANE:-0}" == 1 && -x "$OUT" ]]; then
-    echo "standard lane: $OUT present (no build)" >&2
-    exit 0
-fi
 
 is_windows_host() {
     [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]
@@ -56,13 +52,13 @@ EMIT_CHAIN="$S/minimal-surface.fk $S/hati-os-kernel.fk $S/host-io-fs-fkwu-emit.f
 FLAT_CHAIN="$EMIT_CHAIN $S/core.fk $S/form-parse.fk $S/bmf-core.fk $S/bmf-grammar.fk $S/host-effect-grammar.fk $S/form-flatten.fk"
 # Keep the ask support modules before the dispatcher; default ask receipts stay
 # local through fkwu RAG while http-client remains available to legacy carriers.
-MODS="(list (read_file \"$S/fourth-shim.fk\") (read_file \"$S/core.fk\") (read_file \"$S/resource-port.fk\") (read_file \"$S/bml-native-interface-package-import.fk\") (read_file \"$S/hati-os-targets.fk\") (read_file \"$S/form-native-resource-interfaces.fk\") (read_file \"$S/form-fs.fk\") (read_file \"$S/storage-port.fk\") (read_file \"$S/host-kernel-carrier.fk\") (read_file \"$S/fnri-standin.fk\") (read_file \"$S/fnri-receipt.fk\") (read_file \"$S/http-client.fk\") (read_file \"$S/line-grammar.fk\") (read_file \"$S/str-byte-at.fk\") (read_file \"$S/sha256.fk\") (read_file \"$S/hex.fk\") (read_file \"$S/format-arith.fk\") (read_file \"$S/f16-decode.fk\") (read_file \"$S/q6k-dequant.fk\") (read_file \"$S/q4k-dequant.fk\") (read_file \"$S/weight-load.fk\") (read_file \"$S/voice-traits.fk\") (read_file \"$S/nearest-shape.fk\") (read_file \"$S/co-learning.fk\") (read_file \"$S/co-learning-stream.fk\") (read_file \"$S/mesh-dispatch.fk\") (read_file \"$S/surprise-salience.fk\") (read_file \"$S/host-sense-organ.fk\") (read_file \"$S/speech-organ.fk\") (read_file \"$S/native-host-instance.fk\") (read_file \"$S/text-tokenize.fk\") (read_file \"$S/rag-embed.fk\") (read_file \"$S/rag-index-codec.fk\") (read_file \"$S/rag-retrieve.fk\") (read_file \"$S/rag-ask.fk\") (read_file \"$S/form-cli-ask.fk\") (read_file \"$S/current-branch-landing.fk\") (read_file \"$S/form-cli.fk\") (read_file \"$S/form-cli-gguf-cell.fk\"))"
+MODS="(list (read_file \"$S/fourth-shim.fk\") (read_file \"$S/core.fk\") (read_file \"$S/resource-port.fk\") (read_file \"$S/bml-native-interface-package-import.fk\") (read_file \"$S/hati-os-targets.fk\") (read_file \"$S/form-native-resource-interfaces.fk\") (read_file \"$S/form-fs.fk\") (read_file \"$S/storage-port.fk\") (read_file \"$S/host-kernel-carrier.fk\") (read_file \"$S/fnri-standin.fk\") (read_file \"$S/fnri-receipt.fk\") (read_file \"$S/http-client.fk\") (read_file \"$S/line-grammar.fk\") (read_file \"$S/str-byte-at.fk\") (read_file \"$S/sha256.fk\") (read_file \"$S/hmac-sha256.fk\") (read_file \"$S/hex.fk\") (read_file \"$S/format-arith.fk\") (read_file \"$S/f16-decode.fk\") (read_file \"$S/q6k-dequant.fk\") (read_file \"$S/q4k-dequant.fk\") (read_file \"$S/weight-load.fk\") (read_file \"$S/voice-traits.fk\") (read_file \"$S/nearest-shape.fk\") (read_file \"$S/co-learning.fk\") (read_file \"$S/co-learning-stream.fk\") (read_file \"$S/mesh-dispatch.fk\") (read_file \"$S/surprise-salience.fk\") (read_file \"$S/host-sense-organ.fk\") (read_file \"$S/speech-organ.fk\") (read_file \"$S/native-host-instance.fk\") (read_file \"$S/text-tokenize.fk\") (read_file \"$S/rag-embed.fk\") (read_file \"$S/rag-index-codec.fk\") (read_file \"$S/rag-retrieve.fk\") (read_file \"$S/rag-ask.fk\") (read_file \"$S/form-cli-ask.fk\") (read_file \"$S/form-cli-router.fk\") (read_file \"$S/form-cli-judge.fk\") (read_file \"$S/form-cli-sufficiency.fk\") (read_file \"$S/form-freq-check.fk\") (read_file \"$S/trust-row.fk\") (read_file \"$S/form-cli-ask-gate.fk\") (read_file \"$S/form-cli-staged-trace.fk\") (read_file \"$S/form-cli-request.fk\") (read_file \"$S/form-cli-carrier.fk\") (read_file \"$S/form-cli-ask-plus.fk\") (read_file \"$S/current-branch-landing.fk\") (read_file \"$S/form-cli.fk\") (read_file \"$S/form-cli-gguf-cell.fk\"))"
 BAND="(read_file \"$S/form-cli-repl.fk\")"
 
 # Prefer fkwu self-host flatten (no Go) when T_flat + cached fkwu are warm.
 FORM_CLI_SRCS=(
     "$S/fourth-shim.fk" "$S/core.fk" "$S/line-grammar.fk"
-    "$S/str-byte-at.fk" "$S/sha256.fk" "$S/hex.fk"
+    "$S/str-byte-at.fk" "$S/sha256.fk" "$S/hmac-sha256.fk" "$S/hex.fk"
     "$S/resource-port.fk" "$S/bml-native-interface-package-import.fk" "$S/hati-os-targets.fk"
     "$S/form-native-resource-interfaces.fk" "$S/form-fs.fk" "$S/storage-port.fk"
     "$S/host-kernel-carrier.fk" "$S/fnri-standin.fk" "$S/fnri-receipt.fk"
@@ -74,6 +70,9 @@ FORM_CLI_SRCS=(
     "$S/speech-organ.fk" "$S/native-host-instance.fk"
     "$S/text-tokenize.fk" "$S/rag-embed.fk" "$S/rag-index-codec.fk" "$S/rag-retrieve.fk" "$S/rag-ask.fk"
     "$S/form-cli-ask.fk"
+    "$S/form-cli-router.fk" "$S/form-cli-judge.fk" "$S/form-cli-sufficiency.fk"
+    "$S/form-freq-check.fk" "$S/trust-row.fk" "$S/form-cli-ask-gate.fk"
+    "$S/form-cli-staged-trace.fk" "$S/form-cli-request.fk" "$S/form-cli-carrier.fk" "$S/form-cli-ask-plus.fk"
     "$S/current-branch-landing.fk"
     "$S/form-cli.fk"
     "$S/form-cli-gguf-cell.fk"
@@ -81,6 +80,8 @@ FORM_CLI_SRCS=(
 )
 # shellcheck source=scripts/fourth-arm.sh
 source scripts/fourth-arm.sh
+# shellcheck source=scripts/form_cli_bootstrap_proof.sh
+source scripts/form_cli_bootstrap_proof.sh
 slug="$(fourth_platform_slug)"
 CLI_BOOTSTRAP_BIN="$S/bootstrap/form-cli-${slug}"
 CLI_BOOTSTRAP_BIN_STAMP="$S/bootstrap/form-cli-${slug}.stamp"
@@ -96,13 +97,22 @@ if [[ -z "${FKWU:-}" ]]; then
 fi
 
 want_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
+want_source_sha256="$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")"
+bootstrap_carrier_fresh=0
+if form_cli_verify_bootstrap \
+        "$S/bootstrap/form-cli-table.txt" "$CLI_BOOTSTRAP_C" \
+        "$CLI_BOOTSTRAP_STAMP" "$want_cli_stamp" \
+        && form_cli_verify_source_digest "$CLI_BOOTSTRAP_SOURCE_SHA256" "$want_source_sha256"; then
+    bootstrap_carrier_fresh=1
+fi
 
 # Standard lane: copy committed platform binary when stamp matches (no clang).
 if [[ "${FORM_STANDARD_LANE:-0}" == 1 ]]; then
     got_cli_boot="$(cat "$CLI_BOOTSTRAP_BIN_STAMP" 2>/dev/null || true)"
-    if [[ -x "$CLI_BOOTSTRAP_BIN" && "$got_cli_boot" == "$want_cli_stamp" ]]; then
+    if [[ "$bootstrap_carrier_fresh" == 1 && -x "$CLI_BOOTSTRAP_BIN" && "$got_cli_boot" == "$want_cli_stamp" ]]; then
         cp "$CLI_BOOTSTRAP_BIN" "$OUT"
         chmod +x "$OUT"
+        form_cli_verify_binary_identity "$OUT" "$want_source_sha256"
         echo "standard lane: $OUT from bootstrap/${slug} (no clang)" >&2
         exit 0
     fi
@@ -112,15 +122,16 @@ fi
 
 # Warm path: copy platform binary before invoking clang when available.
 got_cli_boot="$(cat "$CLI_BOOTSTRAP_BIN_STAMP" 2>/dev/null || true)"
-if [[ "$FORM_CLI_FORCE_LINK" != 1 && -z "$FORM_CLI_EXTRA_SRC" && -x "$CLI_BOOTSTRAP_BIN" && "$got_cli_boot" == "$want_cli_stamp" ]]; then
+if [[ "$bootstrap_carrier_fresh" == 1 && "$FORM_CLI_FORCE_LINK" != 1 && -z "$FORM_CLI_EXTRA_SRC" && -x "$CLI_BOOTSTRAP_BIN" && "$got_cli_boot" == "$want_cli_stamp" ]]; then
     cp "$CLI_BOOTSTRAP_BIN" "$OUT"
     chmod +x "$OUT"
+    form_cli_verify_binary_identity "$OUT" "$want_source_sha256"
     echo "  link: bootstrap form-cli-${slug} (no clang)" >&2
     exit 0
 fi
 
 # 1. flatten form-cli-repl into its program table (string pool rides behind it).
-if [[ -s "$S/bootstrap/form-cli-table.txt" && "$(cat "$CLI_BOOTSTRAP_STAMP" 2>/dev/null)" == "$want_cli_stamp" ]]; then
+if [[ "$bootstrap_carrier_fresh" == 1 ]]; then
     cp "$S/bootstrap/form-cli-table.txt" "$W/table.txt"
     echo "  flatten: bootstrap table (no Go)" >&2
 elif fourth_selfhost && fourth_flatten_sources form-cli-build fks "$W/table.txt" "${FORM_CLI_SRCS[@]}"; then
@@ -132,7 +143,7 @@ fi
 [[ -s "$W/table.txt" ]] || { echo "flatten produced no table"; exit 1; }
 
 # 2. emit the combined walker with the table baked in (fk_prog).
-if [[ -s "$CLI_BOOTSTRAP_C" && "$(cat "$CLI_BOOTSTRAP_STAMP" 2>/dev/null)" == "$want_cli_stamp" ]]; then
+if [[ "$bootstrap_carrier_fresh" == 1 ]]; then
     cp "$CLI_BOOTSTRAP_C" "$W/form-cli.c"
     echo "  emit: bootstrap (no Go)" >&2
 else
@@ -145,9 +156,10 @@ grep -q fk_prog "$W/form-cli.c" || { echo "emit missing baked program"; exit 1; 
 #    print it and you can rebuild from the binary alone. It's the file-marked
 #    concatenation of every recipe the build reads plus this script, appended as a
 #    byte array (escape-free) and read at runtime by self_source (walker tag 117).
-SOURCES="minimal-surface hati-os-kernel fkc-table-serialize hati-os-kernel-emit core form-parse bmf-core bmf-grammar host-effect-grammar form-flatten fourth-shim resource-port bml-native-interface-package-import hati-os-targets form-native-resource-interfaces form-fs storage-port host-kernel-carrier fnri-standin fnri-receipt line-grammar str-byte-at sha256 hex format-arith f16-decode q6k-dequant q4k-dequant weight-load voice-traits nearest-shape co-learning co-learning-stream mesh-dispatch surprise-salience host-sense-organ speech-organ native-host-instance text-tokenize rag-embed rag-index-codec rag-retrieve rag-ask form-cli-ask current-branch-landing form-cli form-cli-gguf-cell form-cli-main form-cli-repl"
+SOURCES="minimal-surface hati-os-kernel fkc-table-serialize hati-os-kernel-emit core form-parse bmf-core bmf-grammar host-effect-grammar form-flatten fourth-shim resource-port bml-native-interface-package-import hati-os-targets form-native-resource-interfaces form-fs storage-port host-kernel-carrier fnri-standin fnri-receipt line-grammar str-byte-at sha256 hmac-sha256 hex format-arith f16-decode q6k-dequant q4k-dequant weight-load voice-traits nearest-shape co-learning co-learning-stream mesh-dispatch surprise-salience host-sense-organ speech-organ native-host-instance text-tokenize rag-embed rag-index-codec rag-retrieve rag-ask form-cli-ask form-cli-router form-cli-judge form-cli-sufficiency form-freq-check trust-row form-cli-ask-gate form-cli-staged-trace form-cli-request form-cli-carrier form-cli-ask-plus current-branch-landing form-cli form-cli-gguf-cell form-cli-main form-cli-repl"
 {
   for f in $SOURCES; do printf ';;;; ==== FILE: %s/%s.fk ====\n' "$S" "$f"; cat "$S/$f.fk"; done
+  printf ';;;; ==== FILE: scripts/form_cli_bootstrap_proof.sh ====\n'; cat scripts/form_cli_bootstrap_proof.sh
   printf ';;;; ==== FILE: build-form-cli.sh ====\n'; cat "$(basename "$0")"
 } > "$W/genesis.txt"
 GEN_LEN=$(wc -c < "$W/genesis.txt" | tr -d ' ')
@@ -186,4 +198,5 @@ if is_windows_host; then
   clang_args+=(-lws2_32 -llegacy_stdio_definitions)
 fi
 "$CC_BIN" "${clang_args[@]}"
+form_cli_verify_binary_identity "$OUT" "$want_source_sha256"
 echo "built $OUT  ($(wc -c < "$OUT") bytes, self-contained — runs with no Go/clang/table; carries ${GEN_LEN}B of its own source)"
