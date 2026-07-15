@@ -70,6 +70,35 @@
         (if (eq (len acc) 0) rest
             (re-rev-into (tail acc) (cons (head acc) rest))))
 
+    ; --- linear UTF-8 byte tokenizer. ---
+    ; Keep the source string in the host pool and carry only the current word
+    ; plus a reverse word list through Form.  The former re-norm + re-split
+    ; path rebuilt the whole normalized prefix and then repeatedly snoc'd the
+    ; whole word list, making document embedding quadratic in source length.
+    (defn re-word-byte? (b)
+        (if (or (and (ge b 65) (le b 90))
+                (or (and (ge b 97) (le b 122))
+                    (and (ge b 48) (le b 57)))) 1 0))
+    (defn re-lower-byte (b)
+        (if (and (ge b 65) (le b 90)) (add b 32) b))
+    (defn re-word-fold-step (state b)
+        (do
+            (let cur (nth state 0))
+            (let rev-words (nth state 1))
+            (if (eq (re-word-byte? b) 1)
+                (list (str_concat cur (byte_to_str (re-lower-byte b))) rev-words)
+                (if (str_eq cur "") state
+                    (list "" (cons cur rev-words))))))
+    (defn re-words (text)
+        (do
+            (let folded
+                (string_byte_fold text (list "" (empty)) re-word-fold-step))
+            (let cur (nth folded 0))
+            (let rev-words (nth folded 1))
+            (re-rev-into
+                (if (str_eq cur "") rev-words (cons cur rev-words))
+                (empty))))
+
     ; --- a zero list of length n (the empty histogram). Tail-recursive: the old ---
     ; structural recursion used one walker C-frame per element, which overflows small
     ; host stacks (Windows ~120 frames) at dim >= 128. Same repair family as tk-join.
@@ -107,7 +136,7 @@
 
     ; --- the embedding: token-hash histogram of width dim. ---
     (defn re-vec-dim (text dim)
-        (re-fill (re-split (re-norm text)) (re-zeros dim) dim))
+        (re-fill (re-words text) (re-zeros dim) dim))
 
     ; --- 64 is the default embedding dim. ---
     (defn re-default-dim () 64)
@@ -157,8 +186,8 @@
                 (if (eq (re-word-in? word (nth row 1)) 1)
                     (nth row 0)
                     (re-concept-find word (tail rows))))))
-    (defn re-concept (word)
-        (re-concept-find word (list
+    (defn re-concept-rows ()
+        (list
             (re-concept-row "__concept_ground" (list "ground" "grounded" "grounding"))
             (re-concept-row "__concept_attribution" (list "attribution" "attributed"))
             (re-concept-row "__concept_coordinate" (list "coordinate" "coordinates"))
@@ -243,25 +272,54 @@
             (re-concept-row "__concept_response" (list "response" "responses"))
             (re-concept-row "__concept_output" (list "output" "outputs"))
             (re-concept-row "__concept_synthesis" (list "synthesis"))
-            (re-concept-row "__concept_generate" (list "generate" "generated" "generation")))))
+            (re-concept-row "__concept_generate" (list "generate" "generated" "generation"))))
 
-    (defn re-word-feature (word)
+    (defn re-concept (word)
+        (re-concept-find word (re-concept-rows)))
+
+    ; Compile the authored synonym rows once per document into the kernel's
+    ; generic record carrier.  `record_get` is a native lookup; the old path
+    ; walked all rows in Form once for every word.
+    (defn re-concept-record-words (rec concept words)
+        (if (eq (len words) 0) rec
+            (re-concept-record-words
+                (record_set rec (head words) concept)
+                concept
+                (tail words))))
+    (defn re-concept-record-rows (rec rows)
+        (if (eq (len rows) 0) rec
+            (do
+                (let row (head rows))
+                (re-concept-record-rows
+                    (re-concept-record-words rec (nth row 0) (nth row 1))
+                    (tail rows)))))
+    (defn re-concept-record ()
+        (re-concept-record-rows
+            (record_new (make_nodeid 1 2 99 2088))
+            (re-concept-rows)))
+
+    (defn re-word-feature-with (concept-record word)
         (if (eq (re-stop-word? word) 1) ""
-            (do (let concept (re-concept word))
-                (if (str_eq concept "") (re-stem word) concept))))
+            (if (record_has concept-record word)
+                (record_get concept-record word)
+                (re-stem word))))
+    (defn re-word-feature (word)
+        (re-word-feature-with (re-concept-record) word))
 
     (defn re-feature-add (feature features)
         (if (or (str_eq feature "") (eq (re-word-in? feature features) 1))
             features
             (re-snoc features feature)))
-    (defn re-semantic-words-loop (words features)
+    (defn re-semantic-words-loop (concept-record words features)
         (if (eq (len words) 0) features
-            (re-semantic-words-loop (tail words)
-                (re-feature-add (re-word-feature (head words)) features))))
+            (re-semantic-words-loop concept-record (tail words)
+                (re-feature-add
+                    (re-word-feature-with concept-record (head words))
+                    features))))
     (defn re-semantic-words (words)
-        (re-semantic-words-loop words (empty)))
+        (re-semantic-words-loop (re-concept-record) words (empty)))
     (defn re-semantic-features (text)
-        (re-semantic-words (re-split (re-norm text))))
+        (re-semantic-words (re-words text)))
 
     (defn re-feature-codes (feature)
         (list
