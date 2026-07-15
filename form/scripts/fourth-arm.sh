@@ -77,17 +77,30 @@ FOURTH_BOOTSTRAP_UNI_STAMP="form-stdlib/bootstrap/fkwu-uni.stamp"
 # ==T-END== falls outside every per-band marker range, so the split ignores it.
 FOURTH_FLATTEN_TABLE="form-stdlib/fourth-flatten-table.txt"
 
+# BML reaches the fourth-arm flattener through executable Form text.  The
+# primary source compiler emits a durable .fkb image + loader; the final module
+# in this dedicated chain is a late text lens for consumers that flatten source.
+FOURTH_SOURCE_TEXT_DIR="form-stdlib/.cache/fourth-source-text"
+FOURTH_SOURCE_COMPILER_CHAIN=(
+    form-stdlib/form-ontology-loader.fk
+    form-stdlib/line-grammar.fk
+    form-stdlib/bmf-core.fk
+    form-stdlib/bmf-grammar.fk
+    form-stdlib/bml.fk
+    form-stdlib/bml-source.fk
+    form-stdlib/source-compiler.fk
+    form-stdlib/grammars/form-bml.fk
+    form-stdlib/form-bml-lower.fk
+    form-stdlib/source-compiler-text-lens.fk
+)
+
 fourth_available() { [[ -n "$FKWU" && -x "$FKWU" ]]; }
 
 # fourth_selfhost — true when the committed flattener table is present, so the
-# fourth arm flattens its own band tables on fkwu. Absent (a partial tree), the
-# flatten falls back to the Go executor path so the suite degrades honestly.
-# Gated to POSIX: on Windows fkwu's read_file reads source through a text-mode
-# open() (CRLF-translated), so the self-flattened table diverges from the Go
-# binary's. mac/linux self-host is proven four-way; the Windows self-host (a
-# binary-mode read_file open) is a named follow-up — Windows keeps bin-go flatten.
+# fourth arm flattens its own band tables on fkwu.  The Windows build patch puts
+# stdin/stdout and every read-only file door in binary mode, so the same T_flat
+# and source bytes cross macOS, Linux, and Windows without CRLF translation.
 fourth_selfhost() {
-    [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]] && return 1
     [[ -s "$FOURTH_FLATTEN_TABLE" && -n "$FKWU" && -x "$FKWU" ]]
 }
 
@@ -116,19 +129,61 @@ fourth_hash16() {
     # working trees (Windows Git Bash autocrlf).
     _fourth_hash_stdin() {
         if command -v shasum >/dev/null 2>&1 && printf test | shasum >/dev/null 2>&1; then
-            tr -d '\r' | shasum | cut -c1-16
+            LC_ALL=C tr -d '\r' | shasum | cut -c1-16
         elif command -v sha1sum >/dev/null 2>&1 && printf test | sha1sum >/dev/null 2>&1; then
-            tr -d '\r' | sha1sum | cut -c1-16
+            LC_ALL=C tr -d '\r' | sha1sum | cut -c1-16
         elif command -v sha256sum >/dev/null 2>&1 && printf test | sha256sum >/dev/null 2>&1; then
-            tr -d '\r' | sha256sum | cut -c1-16
+            LC_ALL=C tr -d '\r' | sha256sum | cut -c1-16
         elif command -v cksum >/dev/null 2>&1 && printf test | cksum >/dev/null 2>&1; then
-            tr -d '\r' | cksum | cut -c1-16
+            LC_ALL=C tr -d '\r' | cksum | cut -c1-16
         else
             echo "fourth-arm.sh: need shasum, sha1sum, sha256sum, or cksum for cache keys" >&2
             return 1
         fi
     }
     cat "$@" 2>/dev/null | _fourth_hash_stdin
+}
+
+# Executables are byte artifacts, so their cache identity preserves every byte
+# (including 0x0d).  Text stamps above intentionally normalize checkout CRLF.
+fourth_raw_hash16() {
+    if command -v shasum >/dev/null 2>&1 && printf test | shasum >/dev/null 2>&1; then
+        cat "$@" 2>/dev/null | shasum | cut -c1-16
+    elif command -v sha1sum >/dev/null 2>&1 && printf test | sha1sum >/dev/null 2>&1; then
+        cat "$@" 2>/dev/null | sha1sum | cut -c1-16
+    elif command -v sha256sum >/dev/null 2>&1 && printf test | sha256sum >/dev/null 2>&1; then
+        cat "$@" 2>/dev/null | sha256sum | cut -c1-16
+    elif command -v cksum >/dev/null 2>&1 && printf test | cksum >/dev/null 2>&1; then
+        cat "$@" 2>/dev/null | cksum | cut -c1-16
+    else
+        echo "fourth-arm.sh: need shasum, sha1sum, sha256sum, or cksum for cache keys" >&2
+        return 1
+    fi
+}
+
+# fourth_prepare_source_text — compile one BML-bearing source through the
+# explicit source-text lens.  Content + compiler + proof-sibling bytes key the
+# cache, so a compiler or kernel change cannot reuse an older lowering.
+fourth_prepare_source_text() {
+    local src="$1" key cached out driver
+    [[ -n "${GO_BIN:-}" && -x "${GO_BIN:-}" ]] || return 0
+    mkdir -p "$FOURTH_SOURCE_TEXT_DIR"
+    key="$(fourth_hash16 "$src" "${FOURTH_SOURCE_COMPILER_CHAIN[@]}")-$(fourth_raw_hash16 "$GO_BIN")"
+    cached="$FOURTH_SOURCE_TEXT_DIR/$key.fk"
+    if [[ ! -s "$cached" ]]; then
+        out="$(mktemp "$FOURTH_SOURCE_TEXT_DIR/.${key}.out.XXXXXX")"
+        driver="$(mktemp "$FOURTH_SOURCE_TEXT_DIR/.${key}.driver.XXXXXX")"
+        printf '(do (form-source-compile-file "%s" "%s"))\n' "$src" "$out" > "$driver"
+        if "$GO_BIN" "${FOURTH_SOURCE_COMPILER_CHAIN[@]}" "$driver" >/dev/null 2>&1 \
+            && [[ -s "$out" ]]; then
+            mv -f "$out" "$cached"
+        else
+            rm -f "$out" "$driver"
+            return 0
+        fi
+        rm -f "$out" "$driver"
+    fi
+    [[ -s "$cached" ]] && printf '%s\n' "$cached"
 }
 
 # fourth_fkwu_cache_stamp — cache key for the standing fkwu binary (emitter chain + committed uni.c).
@@ -171,6 +226,10 @@ fourth_patch_windows_emitted_c() {
     sed -i 's|extern void \*dlopen(const char \*, int); extern void \*dlsym(void \*, const char \*);|static void *dlopen(const char *p, int f) { (void)p; (void)f; return 0; } static void *dlsym(void *h, const char *s) { (void)h; (void)s; return 0; }|' "$c_file"
     sed -i 's|getaddrinfo(host, port, \&hints, \&res)|fk_sock_getaddrinfo(host, port, \&hints, \&res)|g; s|fd = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol)|fd = fk_sock_socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol)|g; s|connect(fd, rp->ai_addr, rp->ai_addrlen)|fk_sock_connect(fd, rp->ai_addr, rp->ai_addrlen)|g' "$c_file"
     sed -i 's|read(fd, resp + total, 65535 - total)|fk_sock_read(fd, resp + total, 65535 - total)|g; s|write(fd, req + wr, rn - wr)|fk_sock_write(fd, req + wr, rn - wr)|g; s|write(fd, rptr + wr, rlen - wr)|fk_sock_write(fd, rptr + wr, rlen - wr)|g; s|close(fd);|fk_sock_close(fd);|g' "$c_file"
+    # UCRT defaults descriptors and open(path, 0) to text mode.  T_flat and
+    # source files are byte contracts: preserve CR/LF and 0x1a exactly.
+    sed -E -i 's/open\(([^,()]+),[[:space:]]*0\)/open(\1, 0x8000)/g' "$c_file"
+    sed -i 's|static int fk_run(int argc, char \*\*argv) {|extern int _setmode(int, int); static int fk_run(int argc, char **argv) { _setmode(0, 0x8000); _setmode(1, 0x8000); _setmode(2, 0x8000);|' "$c_file"
 }
 
 # build_fourth — the standing fkwu binary, cached by emitter content.
@@ -184,6 +243,9 @@ build_fourth() {
         is_windows=1
     fi
     stamp="$(fourth_fkwu_cache_stamp)"
+    # Revision suffix invalidates Windows binaries built before the binary-I/O
+    # patch without disturbing proven platform bootstrap stamps elsewhere.
+    [[ "$is_windows" -eq 1 ]] && stamp="${stamp}-winbin1"
     out="$FOURTH_DIR/fkwu-$stamp"
     [[ -x "$out" ]] && FKWU="$out" && return 0
     if [[ "${FORM_STANDARD_LANE:-0}" == 1 ]]; then
@@ -331,16 +393,18 @@ fourth_band_srcs() {
     printf '%s\n' $mods "$band"
 }
 
-# fourth_prep_srcs — prepared source paths for a stem, one per line: a
-# BML-dialect file rides validate.sh's prepare_sources (when in scope) so
-# the flattener always reads plain Form; empty when a source is missing.
+# fourth_prep_srcs — prepared source paths for a stem, one per line.  A
+# BML-dialect file rides the source compiler's explicit text lens so the
+# flattener reads executable Form rather than the primary .fkb load driver.
+# Empty output means the band degrades honestly to the three proof siblings.
 fourth_prep_srcs() {
-    local stem="$1" f
+    local stem="$1" f prepared
     while IFS= read -r f; do
         [[ -f "$f" ]] || return 0
-        if grep -Eq '^[[:space:]]*section \[' "$f" && declare -f prepare_sources >/dev/null; then
-            prepare_sources "$f"
-            printf '%s\n' "${prepared_args[0]}"
+        if grep -Eq '^[[:space:]]*section \[' "$f"; then
+            prepared="$(fourth_prepare_source_text "$f")"
+            [[ -n "$prepared" && -s "$prepared" ]] || return 0
+            printf '%s\n' "$prepared"
         else
             printf '%s\n' "$f"
         fi
