@@ -10,26 +10,74 @@
 //   • Native primitives  — strings, lists, file I/O, substrate-write surface
 //   • Binary loader      — Form artifact bytes → recipe tree
 //
-// Aligned with api/app/services/substrate/category.py and the Go/Rust
-// kernels. Cross-kernel NodeID agreement is the conformance contract.
+// Category/NodeID values come from form/category-contract.json; every host
+// projection consumes that machine-readable authority. Cross-kernel NodeID
+// agreement is the conformance contract.
 
-import {
-  appendFileSync,
-  closeSync,
-  mkdirSync,
-  openSync,
-  readdirSync,
-  readFileSync,
-  readSync,
-  renameSync,
-  rmSync,
-  statSync,
-  unlinkSync,
-  writeFileSync,
-} from "node:fs";
-import { join, relative, resolve } from "node:path";
-import { Worker } from "node:worker_threads";
 import { BP_TABLE } from "./bp_table";
+import CATEGORY_CONTRACT from "../../category-contract.json";
+import {
+  EMPTY_KERNEL_HOST,
+  type KernelHost,
+  type KernelHttpResult,
+  type KernelSocketOperation,
+} from "./host.ts";
+
+export type { KernelHost } from "./host.ts";
+
+const UTF8_ENCODER = new TextEncoder();
+const UTF8_DECODER = new TextDecoder();
+const UTF8_STRICT_DECODER = new TextDecoder("utf-8", { fatal: true });
+const KH_TAG_HEADER_TS = 43001;
+
+function utf8Encode(text: string): Uint8Array {
+  return UTF8_ENCODER.encode(text);
+}
+
+function utf8Decode(bytes: Uint8Array): string {
+  return UTF8_DECODER.decode(bytes);
+}
+
+function utf8DecodeStrict(bytes: Uint8Array): string {
+  try {
+    return UTF8_STRICT_DECODER.decode(bytes);
+  } catch {
+    throw new Error("form binary: invalid utf8");
+  }
+}
+
+function asciiBytes(text: string): Uint8Array {
+  const bytes = new Uint8Array(text.length);
+  for (let i = 0; i < text.length; i++) bytes[i] = text.charCodeAt(i) & 0x7f;
+  return bytes;
+}
+
+function byteSubarrayIndex(
+  haystack: Uint8Array,
+  needle: Uint8Array,
+  from: number,
+): number {
+  if (needle.length === 0) return Math.min(Math.max(from, 0), haystack.length);
+  const last = haystack.length - needle.length;
+  outer: for (let i = Math.max(from, 0); i <= last; i++) {
+    for (let j = 0; j < needle.length; j++) {
+      if (haystack[i + j] !== needle[j]) continue outer;
+    }
+    return i;
+  }
+  return -1;
+}
+
+function callSocket(host: KernelHost, operation: KernelSocketOperation): number | string {
+  const socketCall = host.socketCall;
+  if (socketCall === undefined) throw new Error(`${operation.op}: host carrier unavailable`);
+  return socketCall(operation);
+}
+
+function socketNumber(host: KernelHost, operation: KernelSocketOperation): number {
+  const result = callSocket(host, operation);
+  return typeof result === "number" ? result : -1;
+}
 
 // ---------------------------------------------------------------------------
 // Substrate — NodeID + Recipe + intern table
@@ -53,85 +101,19 @@ export interface NodeID {
   readonly inst: number;
 }
 
-export const Level = {
-  TRIVIAL: 1,
-  BASIC: 2,
-  COMPLEX_1: 3,
-  COMPLEX_2: 4,
-  COMPLEX_3: 5,
-  COMPLEX_4: 6,
-  COMPLEX_5: 7,
-  COMPLEX_6: 8,
-  COMPLEX_7: 9,
-} as const;
+export const Level = Object.freeze(CATEGORY_CONTRACT.level);
 
 // LevelValue — any concrete level constant. Used by universe-polymorphic
 // FNDEFs (#22) to bind level-parameters at specialization time.
 export type LevelValue = (typeof Level)[keyof typeof Level];
 
-// RBasic — aligned with api/app/services/substrate/category.py
+// RBasic — loaded from the canonical machine-readable category contract.
 //
 // Higher-math arms (slots 70+) — substrate cells govern their semantics:
 //   QUOTIENT (70): canonicalization under an equivalence relation —
 //     see ./quotient.ts. The category instance carries the equivalence
 //     family code; children are [carrier-recipe, equivalence-recipe].
-export const RBasic = {
-  UNDEFINED: 0,         // honest "no Form category settled yet"
-  WITNESS: 6,           // substrate self-attestation
-  BLOCK: 9,
-  CALL: 10,             // invoke external effect (I/O, tool)
-  COND: 11,
-  MATH: 12,
-  COMPARE: 13,
-  LOGIC: 14,
-  ACCESS: 15,           // read property / field
-  MATCH: 19,            // match/switch by substrate key
-  METHOD: 27,           // transform on a cell-like value
-  FNDEF: 31,
-  FNCALL: 32,
-  IDENT: 33,
-  LIST: 34,
-  CHOICE: 35,           // pattern-match arm (extended in #21 with totality)
-  QUOTIENT: 70,         // #19 — equivalence-class types
-  INDUCTIVE: 71,        // #21 — algebraic datatypes
-  CONSTRUCTOR: 72,      // #21 — constructor application / value-shape
-  PROOF: 73,            // #20 — propositions-as-types (Curry-Howard)
-  INFERENCE: 74,        // #20 — inference rules + applications
-  ALIAS: 75,            // #8  — compile-time bindings (substrate cells)
-  TRANSMUTE: 76,        // present value through Blueprint without changing identity
-                        //       (typed-numeric casts, generic→specific views,
-                        //        object-as-primitive narrowings). Distinct from
-                        //        PROJECT (spatial) and METHOD (cell-transform).
-  BLANKET: 80,          // #25 — Markov blanket (cell boundary recipe)
-  PROJECT: 81,          // #28 — holographic PROJECT operation
-  GENERATIVE: 82,       // #26 — generative model recipes (per-cell)
-  VECTOR: 83,           // #9  — vector format-recipe (parameterized over element + width)
-  TILE: 84,             // #9  — parallel pattern: tile loop by tile_size
-  PARALLELIZE: 85,      // #9  — parallel pattern: dispatch op across num_threads
-  VECTORIZE: 86,        // #9  — parallel pattern: lower op to simd_width-wide SIMD
-  OBSERVER: 87,         // #27 — observer context (active QUOTIENTs for an observer)
-  FIELD: 88,            // #30 — field state/value distributed over a carrier
-  CARRIER: 89,          // #30 — sequence / graph / mesh / attention carrier recipe
-  TOPOLOGY: 90,         // #30 — adjacency / boundary / neighborhood declaration
-  FIBER: 91,            // #30 — value shape carried at each field location
-  REGION: 92,           // #30 — named subset of a field carrier
-  BOUNDARY: 93,         // #30 — boundary / membrane / constraint surface
-  NEIGHBORHOOD: 94,     // #30 — local context relation for field matching
-  MATCH_FIELD: 95,      // #30 — region / subgraph / gradient field match
-  DELTA: 96,            // #30 — snapshot-relative candidate mutation
-  RESOLVE: 97,          // #30 — conflict algebra over candidate deltas
-  COMMIT: 98,           // #30 — atomic logical-time commit
-  STEP: 99,             // #30 — freeze/match/choose/delta/commit field step
-  LIFT: 100,            // #30 — linear/graph data -> field state
-  SAMPLE: 101,          // #30 — probe a point or region
-  OBSERVE: 102,         // #30 — field -> observer projection + receipt
-  INTERVENE: 103,       // #30 — consented external perturbation
-  RESIDUAL: 104,        // #30 — loss / uncertainty / budget remainder
-  RECEIPT: 105,         // #30 — transparent choice/execution record
-  COST: 106,            // #30 — attention/compute/disturbance/risk ledger
-  CONSENT: 107,         // #30 — permission surface for observation/intervention
-  EVIDENCE: 108,        // #30 — observed/inferred/simulated/validated status
-} as const;
+export const RBasic = Object.freeze(CATEGORY_CONTRACT.r_basic);
 
 // Triv — trivial RTypes.
 //
@@ -141,26 +123,7 @@ export const RBasic = {
 //
 // See docs/coherence-substrate/numeric-types-plan.md for the cross-kernel
 // migration plan.
-export const Triv = {
-  INT: 1, // ← INT32 (backward-compat alias)
-  STRING: 2,
-  BOOL: 3,
-  NULL: 4,
-  INT32: 1, // same slot as INT
-  INT64: 5, // overflow table
-  FLOAT32: 6, // inline (IEEE 754 bits reinterpret)
-  FLOAT64: 7, // overflow table
-  INT8: 8, // inline
-  INT16: 9, // inline
-  UINT8: 10, // inline
-  UINT16: 11, // inline
-  UINT32: 12, // inline
-  UINT64: 13, // overflow table
-  QUOTIENT_LEAF: 14, // canonical-form leaf produced by a QUOTIENT canonicalization;
-  //                     the inst indexes a (quotient-recipe, canonical-children-tuple)
-  //                     entry in the kernel's quotient cache. See ./quotient.ts.
-  CONSTRUCTOR_TAG: 15, // #21 — small-int tag used by walker for ctor values
-} as const;
+export const Triv = Object.freeze(CATEGORY_CONTRACT.triv);
 
 // MATH instance encoding — width-aware. The low nibble carries the op
 // (PLUS/MINUS/MUL/DIV/MOD); the high nibble carries the width marker so
@@ -172,20 +135,9 @@ export const Triv = {
 //                 4=u8  5=u16  6=u32  7=u64
 //                 8=f32  9=f64
 //   op_marker     1=PLUS 2=MINUS 3=MUL 4=DIV 5=MOD
-export const RMathWidth = {
-  I32: 0,
-  I8: 1,
-  I16: 2,
-  I64: 3,
-  U8: 4,
-  U16: 5,
-  U32: 6,
-  U64: 7,
-  F32: 8,
-  F64: 9,
-} as const;
+export const RMathWidth = Object.freeze(CATEGORY_CONTRACT.instances.math_width);
 
-export const RMath = { PLUS: 1, MINUS: 2, MUL: 3, DIV: 4, MOD: 5 } as const;
+export const RMath = Object.freeze(CATEGORY_CONTRACT.instances.math);
 
 export function mathInst(width: number, op: number): number {
   return ((width & 0xf) << 4) | (op & 0xf);
@@ -198,11 +150,11 @@ export function mathWidth(inst: number): number {
 export function mathOp(inst: number): number {
   return inst & 0xf;
 }
-export const RCmp = { EQ: 1, NE: 2, LT: 3, LE: 4, GT: 5, GE: 6 } as const;
-export const RLogic = { AND: 1, OR: 2, NOT: 3 } as const;
-export const RCond = { IF_THEN: 1, IF_THEN_ELSE: 2 } as const;
-export const RBlock = { DO: 1, SEQUENCE: 2, LET: 3 } as const;
-export const RMatch = { SWITCH: 1 } as const;
+export const RCmp = Object.freeze(CATEGORY_CONTRACT.instances.compare);
+export const RLogic = Object.freeze(CATEGORY_CONTRACT.instances.logic);
+export const RCond = Object.freeze(CATEGORY_CONTRACT.instances.cond);
+export const RBlock = Object.freeze(CATEGORY_CONTRACT.instances.block);
+export const RMatch = Object.freeze(CATEGORY_CONTRACT.instances.match);
 
 // NameID — interned identifier handle. The same number used to encode a
 // name trivial's NodeID instance is what every runtime name-lookup
@@ -246,21 +198,6 @@ function sourceInventorySkipSet(value: Value): Set<string> {
   return skip;
 }
 
-function countTextLines(path: string): number {
-  try {
-    const body = readFileSync(path);
-    if (body.length === 0) return 0;
-    let lines = 0;
-    for (const byte of body) {
-      if (byte === 10) lines += 1;
-    }
-    if (body[body.length - 1] !== 10) lines += 1;
-    return lines;
-  } catch {
-    return -1;
-  }
-}
-
 function sourceInventoryRow(relPath: string, loc: number): Value {
   return {
     kind: "list",
@@ -269,29 +206,6 @@ function sourceInventoryRow(relPath: string, loc: number): Value {
       { kind: "int", int: loc },
     ],
   };
-}
-
-function sourceInventoryWalk(
-  rootAbs: string,
-  dir: string,
-  suffix: string,
-  skip: Set<string>,
-  rows: Value[],
-): void {
-  const entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) =>
-    a.name.localeCompare(b.name),
-  );
-  for (const entry of entries) {
-    const path = join(dir, entry.name);
-    if (entry.isDirectory()) {
-      if (skip.has(entry.name)) continue;
-      sourceInventoryWalk(rootAbs, path, suffix, skip, rows);
-    } else if (entry.isFile()) {
-      if (suffix !== "" && !entry.name.endsWith(suffix)) continue;
-      const relPath = relative(rootAbs, path).split(/[\\/]+/).join("/");
-      rows.push(sourceInventoryRow(relPath, countTextLines(path)));
-    }
-  }
 }
 
 // Pack a NodeID into a single number for fast Map keys when pkg ≤ 255 and
@@ -396,6 +310,7 @@ export class Trace {
       case RBasic.COMPARE: return "COMPARE";
       case RBasic.LOGIC: return "LOGIC";
       case RBasic.MATCH: return "MATCH";
+      case RBasic.CHOICE_MATCH: return "CHOICE_MATCH";
       case RBasic.IDENT: return "IDENT";
       case RBasic.FNDEF: return "FNDEF";
       case RBasic.FNCALL: return "FNCALL";
@@ -414,7 +329,7 @@ export class Trace {
       case RBasic.NEIGHBORHOOD: return "NEIGHBORHOOD";
       case RBasic.MATCH_FIELD: return "MATCH_FIELD";
       case RBasic.DELTA: return "DELTA";
-      case RBasic.RESOLVE: return "RESOLVE";
+      case RBasic.FIELD_RESOLVE: return "FIELD_RESOLVE";
       case RBasic.COMMIT: return "COMMIT";
       case RBasic.STEP: return "STEP";
       case RBasic.LIFT: return "LIFT";
@@ -619,210 +534,8 @@ export function catUndefined(): NodeID {
   return { pkg: 1, level: Level.BASIC, type: RBasic.UNDEFINED, inst: 0 };
 }
 
-// --- Synchronous TCP shim — real sockets on the TS kernel ----------------
-// Node's event loop cannot do blocking accept/recv on the main thread. The
-// documented shim: a worker thread owns the sockets and does async net IO;
-// the main thread blocks on Atomics.wait against a SharedArrayBuffer until
-// the worker signals completion, then reads the result. This gives the TS
-// kernel the same synchronous (socket_listen/port/connect/accept/send/recv/
-// close) surface as Go/Rust — real loopback, sibling parity. The worker is
-// spawned lazily on first socket use, so non-socket programs never pay it.
-// Verified end-to-end under the real `tsx` runner before shipping.
-let _sockWorker: Worker | undefined;
-let _sockCtrl: Int32Array | undefined; // [0]=ready-flag, [1]=int result
-let _sockData: Buffer | undefined; // shared payload bytes for recv
-
-const SOCKET_WORKER_SRC = `
-import { parentPort, workerData } from "node:worker_threads";
-import net from "node:net";
-const ctrl = new Int32Array(workerData.ctrl);
-const dataBuf = Buffer.from(workerData.data);
-const handles = new Map(); let nextId = 1;
-function done(r){ Atomics.store(ctrl,1,r); Atomics.store(ctrl,0,1); Atomics.notify(ctrl,0); }
-parentPort.on("message", async (m) => { try {
-  if(m.op==="listen"){ const id=nextId++; const srv=net.createServer(); const rec={kind:"listener",obj:srv,backlog:[]};
-    srv.on("connection",s=>{s.pause();rec.backlog.push(s);});
-    await new Promise((res,rej)=>{srv.once("error",rej);srv.listen(m.port,"127.0.0.1",res);});
-    rec.port=srv.address().port; handles.set(id,rec); done(id);
-  } else if(m.op==="port"){ const r=handles.get(m.h); done(r&&r.kind==="listener"?r.port:-1);
-  } else if(m.op==="connect"){ const id=nextId++; const s=net.connect(m.port,m.host);
-    await new Promise((res,rej)=>{s.once("connect",res);s.once("error",rej);});
-    const rec={kind:"conn",obj:s,rbuf:Buffer.alloc(0),closed:false}; handles.set(id,rec);
-    s.on("data",d=>{rec.rbuf=Buffer.concat([rec.rbuf,d]);}); s.on("close",()=>{rec.closed=true;}); done(id);
-  } else if(m.op==="accept"){ const lr=handles.get(m.h); if(!lr||lr.kind!=="listener")return done(-1);
-    while(lr.backlog.length===0) await new Promise(r=>setTimeout(r,1));
-    const s=lr.backlog.shift(); const id=nextId++; const rec={kind:"conn",obj:s,rbuf:Buffer.alloc(0),closed:false};
-    handles.set(id,rec); s.on("data",d=>{rec.rbuf=Buffer.concat([rec.rbuf,d]);}); s.on("close",()=>{rec.closed=true;}); s.resume(); done(id);
-  } else if(m.op==="send"){ const r=handles.get(m.h); if(!r||r.kind!=="conn")return done(-1);
-    const b=Buffer.from(m.text,"utf8"); r.obj.write(b); done(b.length);
-  } else if(m.op==="recv"){ const r=handles.get(m.h); if(!r||r.kind!=="conn")return done(0);
-    while(r.rbuf.length===0&&!r.closed) await new Promise(res=>setTimeout(res,1));
-    const take=Math.min(m.max,r.rbuf.length); const out=r.rbuf.subarray(0,take); r.rbuf=r.rbuf.subarray(take);
-    out.copy(dataBuf,0); done(take);
-  } else if(m.op==="close"){ const r=handles.get(m.h); if(!r)return done(-1); try{r.obj.destroy();}catch{} handles.delete(m.h); done(0);
-  } else done(-1);
-} catch(e){ done(-1); } });
-`;
-
-function ensureSocketWorker(): void {
-  if (_sockWorker) return;
-  const ctrlSab = new SharedArrayBuffer(8);
-  const dataSab = new SharedArrayBuffer(65536);
-  _sockCtrl = new Int32Array(ctrlSab);
-  _sockData = Buffer.from(dataSab);
-  _sockWorker = new Worker(SOCKET_WORKER_SRC, {
-    eval: true,
-    workerData: { ctrl: ctrlSab, data: dataSab },
-  });
-  _sockWorker.unref(); // don't keep the process alive for the worker
-}
-
-// socketCall — post an op to the worker and block until it signals, returning
-// the worker's int result. recv payloads land in _sockData (read by caller).
-function socketCall(op: globalThis.Record<string, unknown>): number {
-  ensureSocketWorker();
-  const ctrl = _sockCtrl!;
-  Atomics.store(ctrl, 0, 0);
-  _sockWorker!.postMessage(op);
-  Atomics.wait(ctrl, 0, 0);
-  return Atomics.load(ctrl, 1);
-}
-
-// shutdownSocketWorker — terminate the socket worker so the process can exit.
-// The worker holds net handles that keep Node's event loop alive even when
-// unref'd; the host (main.ts) calls this after execution completes. No-op if
-// the worker was never spawned (non-socket programs).
-export function shutdownSocketWorker(): void {
-  if (_sockWorker) {
-    void _sockWorker.terminate();
-    _sockWorker = undefined;
-    _sockCtrl = undefined;
-    _sockData = undefined;
-  }
-}
-
-// --- Synchronous HTTP shim — Node-native client, no shell projection -------
-// The walker is synchronous, but Node's HTTP client is asynchronous. Mirror
-// the socket shim: a worker owns the HTTP request, writes one JSON result into
-// shared memory, and wakes the walker. The returned Form shape matches the
-// Go/Rust http_get carrier: __dict__ {status_code, body, error, duration_ms,
-// headers}. Host shell tools are not involved in the data lane.
-const KH_TAG_HEADER_TS = 43001;
-const HTTP_MAX_BODY_BYTES = 25 << 20;
-const HTTP_RESULT_BYTES = 64 << 20;
-let _httpWorker: Worker | undefined;
-let _httpCtrl: Int32Array | undefined; // [0]=ready-flag, [1]=json byte length or negative
-let _httpData: Buffer | undefined;
-
-const HTTP_WORKER_SRC = `
-import { parentPort, workerData } from "node:worker_threads";
-import http from "node:http";
-import https from "node:https";
-const ctrl = new Int32Array(workerData.ctrl);
-const dataBuf = Buffer.from(workerData.data);
-const MAX_BODY = workerData.maxBody;
-function doneLen(n){ Atomics.store(ctrl,1,n); Atomics.store(ctrl,0,1); Atomics.notify(ctrl,0); }
-function writeResult(result){
-  const encoded = Buffer.from(JSON.stringify(result), "utf8");
-  if(encoded.length > dataBuf.length){
-    const fallback = Buffer.from(JSON.stringify({
-      statusCode: result.statusCode || 0,
-      body: "",
-      error: "http_get: response result exceeded shared buffer",
-      durationMs: result.durationMs || 0,
-      headers: result.headers || []
-    }), "utf8");
-    fallback.copy(dataBuf, 0, 0, Math.min(fallback.length, dataBuf.length));
-    doneLen(Math.min(fallback.length, dataBuf.length));
-    return;
-  }
-  encoded.copy(dataBuf, 0);
-  doneLen(encoded.length);
-}
-function headerRows(headers){
-  const out = [];
-  for(const name of Object.keys(headers).sort()){
-    const raw = headers[name];
-    if(raw === undefined) continue;
-    const vals = Array.isArray(raw) ? raw.slice().sort() : [String(raw)];
-    for(const value of vals) out.push([43001, name, value]);
-  }
-  return out;
-}
-parentPort.on("message", (m) => {
-  const started = Date.now();
-  try {
-    const u = new URL(m.url);
-    const client = u.protocol === "https:" ? https : http;
-    const req = client.request(u, { method: "GET", headers: m.headers || {}, timeout: m.timeoutMs || 30000 }, (res) => {
-      const chunks = [];
-      let size = 0;
-      let tooLarge = false;
-      res.on("data", (chunk) => {
-        if (size < MAX_BODY) {
-          const remaining = MAX_BODY - size;
-          const take = chunk.length > remaining ? chunk.subarray(0, remaining) : chunk;
-          chunks.push(take);
-          size += take.length;
-        }
-        if (size >= MAX_BODY && chunk.length > 0) tooLarge = true;
-      });
-      res.on("end", () => {
-        writeResult({
-          statusCode: res.statusCode || 0,
-          body: Buffer.concat(chunks).toString("utf8"),
-          error: tooLarge ? "http_get: response body exceeded " + MAX_BODY + " bytes" : "",
-          durationMs: Date.now() - started,
-          headers: headerRows(res.headers)
-        });
-      });
-    });
-    req.on("timeout", () => req.destroy(new Error("http_get: timeout")));
-    req.on("error", (err) => {
-      writeResult({ statusCode: 0, body: "", error: String(err && err.message ? err.message : err), durationMs: Date.now() - started, headers: [] });
-    });
-    req.end();
-  } catch (err) {
-    writeResult({ statusCode: 0, body: "", error: String(err && err.message ? err.message : err), durationMs: Date.now() - started, headers: [] });
-  }
-});
-`;
-
-function ensureHTTPWorker(): void {
-  if (_httpWorker) return;
-  const ctrlSab = new SharedArrayBuffer(8);
-  const dataSab = new SharedArrayBuffer(HTTP_RESULT_BYTES);
-  _httpCtrl = new Int32Array(ctrlSab);
-  _httpData = Buffer.from(dataSab);
-  _httpWorker = new Worker(HTTP_WORKER_SRC, {
-    eval: true,
-    workerData: { ctrl: ctrlSab, data: dataSab, maxBody: HTTP_MAX_BODY_BYTES },
-  });
-  _httpWorker.unref();
-}
-
-function httpCall(op: globalThis.Record<string, unknown>): unknown {
-  ensureHTTPWorker();
-  const ctrl = _httpCtrl!;
-  Atomics.store(ctrl, 0, 0);
-  _httpWorker!.postMessage(op);
-  Atomics.wait(ctrl, 0, 0);
-  const n = Atomics.load(ctrl, 1);
-  if (n <= 0) {
-    return { statusCode: 0, body: "", error: "http_get: worker failed", durationMs: 0, headers: [] };
-  }
-  return JSON.parse(_httpData!.subarray(0, n).toString("utf8"));
-}
-
-export function shutdownHTTPWorker(): void {
-  if (_httpWorker) {
-    void _httpWorker.terminate();
-    _httpWorker = undefined;
-    _httpCtrl = undefined;
-    _httpData = undefined;
-  }
-}
-
+// Host effects are injected at construction. The Node worker-backed socket
+// and HTTP carriers live in node-host.ts and never enter the browser graph.
 export class Kernel {
   // Composite recipes — keyed by content (recipeKey) for intern dedup,
   // and by NodeID (nodeKey) for walker access.
@@ -967,8 +680,15 @@ export class Kernel {
   // Surfaces a language adapter's structural shape at its own altitude.
   ctorCounts?: Map<string, number>;
 
-  constructor() {
+  readonly host: KernelHost;
+
+  constructor(host: KernelHost = EMPTY_KERNEL_HOST) {
+    this.host = host;
     this.registerNatives();
+  }
+
+  shutdown(): void {
+    this.host.shutdown?.();
   }
 
   // intern — content-addressed insertion. Same shape ⇒ same NodeID.
@@ -1502,17 +1222,17 @@ export class Kernel {
 
     this.registerNative("print", catCall(), (_k, args) => {
       const parts = args.map((a) => this.renderForPrint(a));
-      process.stdout.write(parts.join(" ") + "\n");
+      this.host.writeStdout?.(parts.join(" ") + "\n");
       return { kind: "null" };
     });
     // String ops
     this.registerNative("str_len", catAccess(), (_k, args) => ({
       kind: "int",
-      int: Buffer.byteLength(argStr(args, 0), "utf8"),
+      int: utf8Encode(argStr(args, 0)).length,
     }));
     this.registerNative("substring", catAccess(), (_k, args) => {
       const s = argStr(args, 0);
-      const bytes = Buffer.from(s, "utf8");
+      const bytes = utf8Encode(s);
       const start = argInt(args, 1);
       const end = argInt(args, 2);
       if (start < 0 || end < start || end > bytes.length) {
@@ -1524,12 +1244,12 @@ export class Kernel {
       const b = floorUtf8Boundary(bytes, end);
       return {
         kind: "str",
-        str: bytes.subarray(a, b).toString("utf8"),
+        str: utf8Decode(bytes.subarray(a, b)),
       };
     });
     this.registerNative("char_at", catAccess(), (_k, args) => {
       const s = argStr(args, 0);
-      const bytes = Buffer.from(s, "utf8");
+      const bytes = utf8Encode(s);
       const i = argInt(args, 1);
       if (i < 0 || i >= bytes.length) {
         throw new Error(`char_at: bounds out of range index=${i} len=${bytes.length}`);
@@ -1541,7 +1261,7 @@ export class Kernel {
         return { kind: "str", str: "" };
       }
       const end = ceilUtf8Boundary(bytes, i + 1);
-      return { kind: "str", str: bytes.subarray(i, end).toString("utf8") };
+      return { kind: "str", str: utf8Decode(bytes.subarray(i, end)) };
     });
     this.registerNative("str_concat", catMethod(), (_k, args) => ({
       kind: "str",
@@ -1559,9 +1279,14 @@ export class Kernel {
     });
     this.registerNative("value_kind", catWitness(), valueKindNative);
     this.registerNative("value-kind", catWitness(), valueKindNative);
-    this.registerNative("source_scan_file", catCall(), (_k, args) =>
-      sourceNativeScanText(readFileSync(argStr(args, 0), "utf8"), sourceNativeLexiconFromValue(args[1]!)),
-    );
+    this.registerNative("source_scan_file", catCall(), (_k, args) => {
+      const read = this.host.readTextFile;
+      if (read === undefined) throw new Error("source_scan_file: host carrier unavailable");
+      return sourceNativeScanText(
+        read(argStr(args, 0)),
+        sourceNativeLexiconFromValue(args[1]!),
+      );
+    });
     // pow — integer exponentiation in native code (no Form recursion).
     // (pow base exp) → base**exp. Negative exponents return 0 (Python's
     // int**-n is a float; floats on this path are a later breath).
@@ -1699,10 +1424,10 @@ export class Kernel {
     this.registerNative("str_find", catAccess(), (_k, args) => {
       const s = argStr(args, 0);
       const needle = argStr(args, 1);
-      const bytes = Buffer.from(s, "utf8");
-      const needleBytes = Buffer.from(needle, "utf8");
+      const bytes = utf8Encode(s);
+      const needleBytes = utf8Encode(needle);
       const from = ceilUtf8Boundary(bytes, Math.max(0, argInt(args, 2)));
-      const idx = bytes.indexOf(needleBytes, from);
+      const idx = byteSubarrayIndex(bytes, needleBytes, from);
       // `kind: "int"` carries a JS Number — using BigInt here would
       // poison downstream arithmetic with "Cannot mix BigInt and other
       // types" when callers do plain int math on the result.
@@ -1716,7 +1441,7 @@ export class Kernel {
     //              4=non-quote-non-escape, 5=non-newline,
     //              6=json-string-safe (code unit >= 0x20, not quote/backslash).
     this.registerNative("scan_run", catAccess(), (_k, args) => {
-      const bytes = Buffer.from(argStr(args, 0), "utf8");
+      const bytes = utf8Encode(argStr(args, 0));
       const from = Math.max(0, argInt(args, 1));
       const cls = argInt(args, 2);
       const n = bytes.length;
@@ -1783,31 +1508,49 @@ export class Kernel {
       }
       return { kind: "int", int: end };
     });
-    // string_fold — JS-level streaming iteration over a string's chars.
-    // Signature: (string_fold s init step) where step is a closure of
-    // (acc, char) → acc. Whole iteration in this JS for-loop; no Form-
-    // level recursion. Lets the substrate process arbitrary-length input
-    // streams without piling kernel stack frames.
-    this.registerNative("string_fold", catCall(), (k, args) => {
-      const s = argStr(args, 0);
+    // string_byte_fold(text, init, step) streams raw UTF-8 bytes through a
+    // two-argument closure (acc, byte-int). Unlike string_bytes + a Form list
+    // recursion, the byte list never exists and host stack depth is constant.
+    // Embedded NUL and multibyte text are carried byte-for-byte.
+    this.registerNative("string_byte_fold", catCall(), (k, args) => {
+      const bytes = utf8Encode(argStr(args, 0));
       let acc = args[1]!;
       const fnVal = args[2]!;
       if (fnVal.kind !== "closure") {
-        throw new Error("string_fold: third arg must be a closure");
+        throw new Error("string_byte_fold: third arg must be a closure");
       }
-      const cl = fnVal.closure;
-      if (cl.params.length !== 2) {
+      const closure = fnVal.closure;
+      if (closure.params.length !== 2) {
         throw new Error(
-          `string_fold: step closure wants 2 params (acc char), got ${cl.params.length}`,
+          `string_byte_fold: step closure wants 2 params (acc byte), got ${closure.params.length}`,
         );
       }
-      for (let i = 0; i < s.length; i++) {
-        const callFrame = new Frame(cl.env);
-        callFrame.bind(cl.params[0]!, acc);
-        callFrame.bind(cl.params[1]!, { kind: "str", str: s[i]! });
-        acc = walk(k, cl.body, callFrame);
+      for (const byte of bytes) {
+        const callFrame = new Frame(closure.env);
+        callFrame.bind(closure.params[0]!, acc);
+        callFrame.bind(closure.params[1]!, { kind: "int", int: byte });
+        acc = walk(k, closure.body, callFrame);
       }
       return acc;
+    });
+    // Canonical universal-walker image serializer. Roots and rows are built by
+    // cons in reverse order; the host loop emits the exact flat integer image.
+    this.registerNative("form_table_text", catMethod(), (_k, args) => {
+      const roots = argList(args, 0);
+      const rows = argList(args, 1);
+      const fields: string[] = [String(roots.length)];
+      for (let i = roots.length - 1; i >= 0; i--) {
+        fields.push(String(listElemInt(roots[i]!, "form_table_text root")));
+      }
+      fields.push(String(rows.length));
+      for (let i = rows.length - 1; i >= 0; i--) {
+        const row = rows[i]!;
+        if (row.kind !== "list") throw new Error("form_table_text: every row must be a list");
+        for (const field of row.list) {
+          fields.push(String(listElemInt(field, "form_table_text field")));
+        }
+      }
+      return { kind: "str", str: fields.join(" ") };
     });
     this.registerNative("str_eq", catCompareEq(), (_k, args) =>
       boolInt(argStr(args, 0) === argStr(args, 1)),
@@ -1851,16 +1594,26 @@ export class Kernel {
     // str_byte_at: the i-th raw UTF-8 BYTE of the string (0-255), byte-exact —
     // the byte twin of char_at (which is unit-aware and answers "" inside a
     // surrogate pair). JS strings are UTF-16, so the bytes come through a UTF-8
-    // Buffer; this is the byte door the string-pool serializer (fks-lit-sp)
+    // byte array; this is the byte door the string-pool serializer (fks-lit-sp)
     // emits any locale's script through, matching Go/Rust's byte index.
     this.registerNative("str_byte_at", catAccess(), (_k, args) => {
-      const bytes = Buffer.from(argStr(args, 0), "utf8");
+      const bytes = utf8Encode(argStr(args, 0));
       const i = argInt(args, 1);
       if (i < 0 || i >= bytes.length) {
         throw new Error(`str_byte_at: bounds out of range index=${i} len=${bytes.length}`);
       }
       return { kind: "int", int: bytes[i]! };
     });
+    // string_bytes(text) → raw UTF-8 bytes as integer leaves. This is the
+    // whole-string twin of str_byte_at and preserves embedded NULs; it uses
+    // the platform-neutral TextEncoder shared by browser and Node kernels.
+    this.registerNative("string_bytes", catAccess(), (_k, args) => ({
+      kind: "list",
+      list: Array.from(utf8Encode(argStr(args, 0)), (byte): Value => ({
+        kind: "int",
+        int: byte,
+      })),
+    }));
     this.registerNative("byte_to_str", catAccess(), (_k, args) => {
       const b = argInt(args, 0);
       return { kind: "str", str: b >= 0 && b <= 255 ? String.fromCharCode(b) : "" };
@@ -2110,13 +1863,9 @@ export class Kernel {
         }
       }
       const timeoutMs = args[2] ? Math.min(Math.max(argInt(args, 2), 1), 60000) : 30000;
-      const result = httpCall({ url, headers, timeoutMs }) as {
-        statusCode?: unknown;
-        body?: unknown;
-        error?: unknown;
-        durationMs?: unknown;
-        headers?: unknown;
-      };
+      const httpGet = this.host.httpGet;
+      if (httpGet === undefined) throw new Error("http_get: host carrier unavailable");
+      const result: KernelHttpResult = httpGet({ url, headers, timeoutMs });
       const headerRows: Value[] = [];
       if (Array.isArray(result.headers)) {
         for (const row of result.headers) {
@@ -2448,7 +2197,9 @@ export class Kernel {
     // File I/O
     const readFileTextNative = (_k: Kernel, args: Value[]): Value => {
       try {
-        return { kind: "str", str: readFileSync(argStr(args, 0), "utf8") };
+        const read = this.host.readTextFile;
+        if (read === undefined) return { kind: "null" };
+        return { kind: "str", str: read(argStr(args, 0)) };
       } catch {
         return { kind: "null" };
       }
@@ -2458,7 +2209,9 @@ export class Kernel {
     // Byte-level host file read — returns a list of ints (0-255), one per byte.
     this.registerNative("read_file_bytes", catCall(), (_k, args) => {
       try {
-        const buf = readFileSync(argStr(args, 0));
+        const read = this.host.readBinaryFile;
+        if (read === undefined) return { kind: "null" };
+        const buf = read(argStr(args, 0));
         const out: Value[] = new Array(buf.length);
         for (let i = 0; i < buf.length; i++) {
           out[i] = { kind: "int", int: buf[i]! };
@@ -2474,11 +2227,14 @@ export class Kernel {
     // filesystem walking and text line counts as primitive observation.
     this.registerNative("source_inventory", catCall(), (_k, args) => {
       try {
-        const rootAbs = resolve(argStr(args, 0));
+        const inventory = this.host.sourceInventory;
+        if (inventory === undefined) return { kind: "null" };
+        const root = argStr(args, 0);
         const suffix = argStr(args, 1);
         const skip = sourceInventorySkipSet(args[2] ?? { kind: "null" });
-        const rows: Value[] = [];
-        sourceInventoryWalk(rootAbs, rootAbs, suffix, skip, rows);
+        const rows = inventory(root, suffix, skip).map((entry) =>
+          sourceInventoryRow(entry.path, entry.lines),
+        );
         return { kind: "list", list: rows };
       } catch {
         return { kind: "null" };
@@ -2486,23 +2242,17 @@ export class Kernel {
     });
     // random_bytes(n) — open the doorway. Reads n bytes from
     // /dev/urandom every call. Different per invocation, per kernel
-    // process. lc-divergence-is-the-doorway: this native intentionally
+    // invocation. lc-divergence-is-the-doorway: this native intentionally
     // violates sibling parity when invoked — the divergence is the
     // substrate's signal of live field-touch.
     this.registerNative("random_bytes", catCall(), (_k, args) => {
       const n = argInt(args, 0);
       if (n <= 0) return { kind: "list", list: [] };
       try {
-        const fd = openSync("/dev/urandom", "r");
-        const buf = Buffer.alloc(n);
-        let read = 0;
-        while (read < n) {
-          const got = readSync(fd, buf, read, n - read, null);
-          if (got <= 0) break;
-          read += got;
-        }
-        closeSync(fd);
-        if (read !== n) return { kind: "null" };
+        const randomBytes = this.host.randomBytes;
+        if (randomBytes === undefined) return { kind: "null" };
+        const buf = randomBytes(n);
+        if (buf.length !== n) return { kind: "null" };
         const out: Value[] = new Array(n);
         for (let i = 0; i < n; i++) {
           out[i] = { kind: "int", int: buf[i]! };
@@ -2748,7 +2498,9 @@ export class Kernel {
       const nid = argNodeID(args, 1);
       const bytes = serializeRecipeArtifact(k, nid);
       try {
-        writeFileSync(path, bytes);
+        const write = this.host.writeBinaryFile;
+        if (write === undefined) return { kind: "int", int: -1 };
+        write(path, bytes);
         // `kind: "int"` carries a JS Number — BigInt poisons downstream
         // arithmetic with "Cannot mix BigInt and other types" when
         // callers do plain int math on the byte count.
@@ -2759,9 +2511,11 @@ export class Kernel {
     });
     this.registerNative("read_form_binary", catCall(), (k, args) => {
       try {
+        const read = this.host.readBinaryFile;
+        if (read === undefined) return { kind: "null" };
         return {
           kind: "nodeid",
-          nodeid: deserializeRecipeArtifact(k, readFileSync(argStr(args, 0))),
+          nodeid: deserializeRecipeArtifact(k, read(argStr(args, 0))),
         };
       } catch {
         return { kind: "null" };
@@ -2769,8 +2523,10 @@ export class Kernel {
     });
     this.registerNative("write_form_binary", catCall(), (k, args) => {
       try {
+        const write = this.host.writeBinaryFile;
+        if (write === undefined) return { kind: "int", int: -1 };
         const bytes = serializeRecipeArtifact(k, argNodeID(args, 1));
-        writeFileSync(argStr(args, 0), bytes);
+        write(argStr(args, 0), bytes);
         return { kind: "int", int: bytes.length };
       } catch {
         return { kind: "int", int: -1 };
@@ -2778,7 +2534,8 @@ export class Kernel {
     });
     const fileSizeNative = (_k: Kernel, args: Value[]): Value => {
       try {
-        return { kind: "int", int: statSync(argStr(args, 0)).size };
+        const fileSize = this.host.fileSize;
+        return { kind: "int", int: fileSize?.(argStr(args, 0)) ?? -1 };
       } catch {
         return { kind: "int", int: -1 };
       }
@@ -2790,7 +2547,8 @@ export class Kernel {
     // layers that regenerate .fkb projections when source files drift.
     const fileMtimeNative = (_k: Kernel, args: Value[]): Value => {
       try {
-        return { kind: "int", int: Math.floor(statSync(argStr(args, 0)).mtimeMs / 1000) };
+        const fileMtime = this.host.fileMtimeSeconds;
+        return { kind: "int", int: fileMtime?.(argStr(args, 0)) ?? -1 };
       } catch {
         return { kind: "int", int: -1 };
       }
@@ -2800,32 +2558,28 @@ export class Kernel {
     this.registerNative("file_byte_at", catCall(), (_k, args) => {
       const offset = argInt(args, 1);
       if (offset < 0) return { kind: "int", int: -1 };
-      let fd: number | undefined;
       try {
-        fd = openSync(argStr(args, 0), "r");
-        const buf = Buffer.allocUnsafe(1);
-        const n = readSync(fd, buf, 0, 1, offset);
-        return { kind: "int", int: n === 1 ? buf[0]! : -1 };
+        const read = this.host.readBinarySlice;
+        if (read === undefined) return { kind: "int", int: -1 };
+        const bytes = read(argStr(args, 0), offset, 1);
+        return { kind: "int", int: bytes.length === 1 ? bytes[0]! : -1 };
       } catch {
         return { kind: "int", int: -1 };
-      } finally {
-        if (fd !== undefined) closeSync(fd);
       }
     });
     const readFileSliceNative = (_k: Kernel, args: Value[]): Value => {
       const offset = argInt(args, 1);
       const length = argInt(args, 2);
       if (offset < 0 || length <= 0) return { kind: "str", str: "" };
-      let fd: number | undefined;
       try {
-        fd = openSync(argStr(args, 0), "r");
-        const buf = Buffer.allocUnsafe(length);
-        const n = readSync(fd, buf, 0, length, offset);
-        return { kind: "str", str: buf.subarray(0, n).toString("utf8") };
+        const read = this.host.readBinarySlice;
+        if (read === undefined) return { kind: "str", str: "" };
+        return {
+          kind: "str",
+          str: utf8Decode(read(argStr(args, 0), offset, length)),
+        };
       } catch {
         return { kind: "str", str: "" };
-      } finally {
-        if (fd !== undefined) closeSync(fd);
       }
     };
     this.registerNative("host_file_read_slice", catCall(), readFileSliceNative);
@@ -2837,8 +2591,10 @@ export class Kernel {
     // (sorted for cross-kernel parity) or null on error.
     const fsExistsNative = (_k: Kernel, args: Value[]): Value => {
       try {
-        statSync(argStr(args, 0));
-        return { kind: "int", int: 1 };
+        return {
+          kind: "int",
+          int: this.host.pathExists?.(argStr(args, 0)) === true ? 1 : 0,
+        };
       } catch {
         return { kind: "int", int: 0 };
       }
@@ -2847,7 +2603,10 @@ export class Kernel {
     this.registerNative("fs_exists", catCall(), fsExistsNative);
     const fsIsDirNative = (_k: Kernel, args: Value[]): Value => {
       try {
-        return { kind: "int", int: statSync(argStr(args, 0)).isDirectory() ? 1 : 0 };
+        return {
+          kind: "int",
+          int: this.host.pathIsDirectory?.(argStr(args, 0)) === true ? 1 : 0,
+        };
       } catch {
         return { kind: "int", int: 0 };
       }
@@ -2856,7 +2615,9 @@ export class Kernel {
     this.registerNative("fs_is_dir", catCall(), fsIsDirNative);
     const fsMkdirNative = (_k: Kernel, args: Value[]): Value => {
       try {
-        mkdirSync(argStr(args, 0), { recursive: true });
+        const mkdir = this.host.makeDirectory;
+        if (mkdir === undefined) return { kind: "int", int: -1 };
+        mkdir(argStr(args, 0));
         return { kind: "int", int: 0 };
       } catch {
         return { kind: "int", int: -1 };
@@ -2866,8 +2627,12 @@ export class Kernel {
     this.registerNative("fs_mkdir", catCall(), fsMkdirNative);
     const fsRmdirNative = (_k: Kernel, args: Value[]): Value => {
       try {
-        if (!statSync(argStr(args, 0)).isDirectory()) return { kind: "int", int: -1 };
-        rmSync(argStr(args, 0), { recursive: true, force: true });
+        const path = argStr(args, 0);
+        const remove = this.host.removeDirectory;
+        if (remove === undefined || this.host.pathIsDirectory?.(path) !== true) {
+          return { kind: "int", int: -1 };
+        }
+        remove(path);
         return { kind: "int", int: 0 };
       } catch {
         return { kind: "int", int: -1 };
@@ -2877,8 +2642,12 @@ export class Kernel {
     this.registerNative("fs_rmdir", catCall(), fsRmdirNative);
     const fsRemoveNative = (_k: Kernel, args: Value[]): Value => {
       try {
-        if (statSync(argStr(args, 0)).isDirectory()) return { kind: "int", int: -1 };
-        unlinkSync(argStr(args, 0));
+        const path = argStr(args, 0);
+        const remove = this.host.removePath;
+        if (remove === undefined || this.host.pathIsDirectory?.(path) === true) {
+          return { kind: "int", int: -1 };
+        }
+        remove(path);
         return { kind: "int", int: 0 };
       } catch {
         return { kind: "int", int: -1 };
@@ -2888,7 +2657,9 @@ export class Kernel {
     this.registerNative("fs_remove", catCall(), fsRemoveNative);
     const fsRenameNative = (_k: Kernel, args: Value[]): Value => {
       try {
-        renameSync(argStr(args, 0), argStr(args, 1));
+        const rename = this.host.renamePath;
+        if (rename === undefined) return { kind: "int", int: -1 };
+        rename(argStr(args, 0), argStr(args, 1));
         return { kind: "int", int: 0 };
       } catch {
         return { kind: "int", int: -1 };
@@ -2900,7 +2671,9 @@ export class Kernel {
       try {
         // sort by name for cross-kernel parity (Go's os.ReadDir is
         // name-sorted; Rust/Node are OS-arbitrary).
-        const names = readdirSync(argStr(args, 0)).sort();
+        const list = this.host.listDirectory;
+        if (list === undefined) return { kind: "null" };
+        const names = [...list(argStr(args, 0))].sort();
         return { kind: "list", list: names.map((n) => ({ kind: "str", str: n }) as Value) };
       } catch {
         return { kind: "null" };
@@ -2916,11 +2689,13 @@ export class Kernel {
       try {
         const path = argStr(args, 0);
         const list = argList(args, 1);
-        const buf = Buffer.alloc(list.length);
+        const buf = new Uint8Array(list.length);
         for (let i = 0; i < list.length; i++) {
           buf[i] = argInt(list, i) & 0xff;
         }
-        writeFileSync(path, buf);
+        const write = this.host.writeBinaryFile;
+        if (write === undefined) return { kind: "int", int: -1 };
+        write(path, buf);
         return { kind: "int", int: buf.length };
       } catch {
         return { kind: "int", int: -1 };
@@ -2934,12 +2709,13 @@ export class Kernel {
       try {
         const path = argStr(args, 0);
         const list = argList(args, 1);
-        const buf = Buffer.alloc(list.length);
+        const buf = new Uint8Array(list.length);
         for (let i = 0; i < list.length; i++) {
           buf[i] = argInt(list, i) & 0xff;
         }
-        appendFileSync(path, buf);
-        return { kind: "int", int: statSync(path).size };
+        const append = this.host.appendBinaryFile;
+        if (append === undefined) return { kind: "int", int: -1 };
+        return { kind: "int", int: append(path, buf) };
       } catch {
         return { kind: "int", int: -1 };
       }
@@ -2951,8 +2727,10 @@ export class Kernel {
     const writeFileTextNative = (_k: Kernel, args: Value[]): Value => {
       try {
         const text = argStr(args, 1);
-        writeFileSync(argStr(args, 0), text, "utf8");
-        return { kind: "int", int: Buffer.byteLength(text, "utf8") };
+        const write = this.host.writeTextFile;
+        if (write === undefined) return { kind: "int", int: -1 };
+        write(argStr(args, 0), text);
+        return { kind: "int", int: utf8Encode(text).length };
       } catch {
         return { kind: "int", int: -1 };
       }
@@ -2971,38 +2749,49 @@ export class Kernel {
     // socket use, so non-socket programs pay nothing.
     this.registerNative("socket_listen", catCall(), (_k, args) => ({
       kind: "int",
-      int: socketCall({ op: "listen", port: argInt(args, 0) }),
+      int: socketNumber(this.host, { op: "listen", port: argInt(args, 0) }),
     }));
     // (socket_port listener-handle) → bound TCP port | -1 — sibling of the
     // Go/Rust native; reports an ephemeral (port 0) listener's OS-assigned
     // port for single-process loopback.
     this.registerNative("socket_port", catCall(), (_k, args) => ({
       kind: "int",
-      int: socketCall({ op: "port", h: argInt(args, 0) }),
+      int: socketNumber(this.host, { op: "port", h: argInt(args, 0) }),
     }));
     this.registerNative("socket_accept", catCall(), (_k, args) => ({
       kind: "int",
-      int: socketCall({ op: "accept", h: argInt(args, 0) }),
+      int: socketNumber(this.host, { op: "accept", h: argInt(args, 0) }),
     }));
     this.registerNative("socket_connect", catCall(), (_k, args) => ({
       kind: "int",
-      int: socketCall({ op: "connect", host: argStr(args, 0), port: argInt(args, 1) }),
+      int: socketNumber(this.host, {
+        op: "connect",
+        host: argStr(args, 0),
+        port: argInt(args, 1),
+      }),
     }));
     this.registerNative("socket_send", catCall(), (_k, args) => ({
       kind: "int",
-      int: socketCall({ op: "send", h: argInt(args, 0), text: argStr(args, 1) }),
+      int: socketNumber(this.host, {
+        op: "send",
+        h: argInt(args, 0),
+        text: argStr(args, 1),
+      }),
     }));
     this.registerNative("socket_recv", catCall(), (_k, args) => {
       const max = argInt(args, 1);
       if (max <= 0) return { kind: "str", str: "" };
-      const n = socketCall({ op: "recv", h: argInt(args, 0), max });
-      if (n <= 0) return { kind: "str", str: "" };
-      return { kind: "str", str: _sockData!.subarray(0, n).toString("utf8") };
+      const received = callSocket(this.host, {
+        op: "recv",
+        h: argInt(args, 0),
+        max,
+      });
+      return { kind: "str", str: typeof received === "string" ? received : "" };
     });
     this.registerNative("socket_close", catCall(), (_k, args) => {
       const h = argInt(args, 0);
       if (h < 0) return { kind: "int", int: -1 };
-      return { kind: "int", int: socketCall({ op: "close", h }) };
+      return { kind: "int", int: socketNumber(this.host, { op: "close", h }) };
     });
 
     // Substrate write surface — all attributed as WITNESS.
@@ -3102,7 +2891,7 @@ export class Kernel {
       ["field_neighborhood", RBasic.NEIGHBORHOOD, 1],
       ["field_match", RBasic.MATCH_FIELD, 1],
       ["field_delta", RBasic.DELTA, 1],
-      ["field_resolve", RBasic.RESOLVE, 1],
+      ["field_resolve", RBasic.FIELD_RESOLVE, 1],
       ["field_commit", RBasic.COMMIT, 1],
       ["field_step", RBasic.STEP, 1],
       ["field_lift", RBasic.LIFT, 1],
@@ -3318,11 +3107,22 @@ export class Kernel {
       };
     });
     this.registerNative("deserialize-recipe", catWitness(), (k, args) => {
-      const bytes = Uint8Array.from(argList(args, 0).map((v) => {
+      const raw = argList(args, 0);
+      if (raw.length > FORM_BINARY_MAX_BYTES) {
+        throw new Error("form binary: maximum artifact size exceeded");
+      }
+      const bytes = Uint8Array.from(raw.map((v) => {
         if (v.kind !== "int") throw new Error("deserialize-recipe: bytes must be ints");
         return v.int & 0xff;
       }));
-      const [root, end] = deserializeRawNode(k, bytes, 0, k.nextImportScope());
+      const [root, end] = deserializeRawNode(
+        k,
+        bytes,
+        0,
+        k.nextImportScope(),
+        { nodes: 0 },
+        0,
+      );
       if (end !== bytes.length) throw new Error("deserialize-recipe: trailing bytes");
       return { kind: "nodeid", nodeid: root };
     });
@@ -3540,7 +3340,7 @@ export class Kernel {
     // design; bands fold the path into effects, never into the verdict.
     const tempDirNative = (_k: Kernel, _args: Value[]): Value => ({
       kind: "str",
-      str: (process.env["TMPDIR"] ?? "/tmp").replace(/\/+$/, "") || "/tmp",
+      str: (this.host.tempDirectory?.() ?? "/tmp").replace(/\/+$/, "") || "/tmp",
     });
     this.registerNative("host_temp_dir", catCall(), tempDirNative);
     this.registerNative("temp_dir", catCall(), tempDirNative);
@@ -3612,13 +3412,13 @@ export class Kernel {
     this.registerNative("trace", catUndefined(), (_k, args) => {
       if (args.length >= 2) {
         const label = args[0]?.kind === "str" ? args[0].str : "trace";
-        process.stderr.write(
+        this.host.writeStderr?.(
           `[trace ${label}] ${this.renderForPrint(args[1] ?? { kind: "null" })}\n`,
         );
         return args[1] ?? { kind: "null" };
       }
       const v = args[0] ?? { kind: "null" };
-      process.stderr.write(`[trace] ${this.renderForPrint(v)}\n`);
+      this.host.writeStderr?.(`[trace] ${this.renderForPrint(v)}\n`);
       return v;
     });
   }
@@ -3847,13 +3647,13 @@ function isUtf8Continuation(b: number): boolean {
   return (b & 0xc0) === 0x80;
 }
 
-function floorUtf8Boundary(bytes: Buffer, i: number): number {
+function floorUtf8Boundary(bytes: Uint8Array, i: number): number {
   if (i > bytes.length) i = bytes.length;
   while (i > 0 && i < bytes.length && isUtf8Continuation(bytes[i]!)) i--;
   return i;
 }
 
-function ceilUtf8Boundary(bytes: Buffer, i: number): number {
+function ceilUtf8Boundary(bytes: Uint8Array, i: number): number {
   if (i >= bytes.length) return bytes.length;
   while (i < bytes.length && isUtf8Continuation(bytes[i]!)) i++;
   return i;
@@ -4349,7 +4149,7 @@ export function walk(k: Kernel, node: NodeID, frame: Frame): Value {
       return { kind: "nodeid", nodeid: node };
     case RBasic.CONSTRUCTOR:
       return walkConstructor(k, node, kids, frame);
-    case RBasic.CHOICE:
+    case RBasic.CHOICE_MATCH:
       return walkChoice(k, node, kids, frame);
     case RBasic.QUOTIENT:
       // QUOTIENT recipes — walking one yields its NodeID so structural
@@ -5230,8 +5030,8 @@ function nodeIDKey(nid: NodeID): string {
   return `${nid.pkg}.${nid.level}.${nid.type}.${nid.inst}`;
 }
 
-const FORM_BINARY_MAGIC_V1 = Buffer.from("FORMBIN1", "ascii");
-const FORM_BINARY_MAGIC = Buffer.from("FORMBIN2", "ascii");
+const FORM_BINARY_MAGIC_V1 = asciiBytes("FORMBIN1");
+const FORM_BINARY_MAGIC = asciiBytes("FORMBIN2");
 const FORM_BINARY_LEAF = 0;
 const FORM_BINARY_COMPOSITE = 1;
 // FLOAT64 carries its VALUE, not its index. A float64 trivial NodeID's `inst`
@@ -5247,6 +5047,26 @@ const FORM_BINARY_FLOAT64 = 2;
 // serializes as [FORM_BINARY_INT64][8 bytes signed little-endian] and each
 // kernel re-interns on read. Aligned three-way: tag = 3 across Rust/Go/TS.
 const FORM_BINARY_INT64 = 3;
+const FORM_BINARY_MAX_BYTES = 64 << 20;
+const FORM_BINARY_MAX_STRINGS = 262_144;
+const FORM_BINARY_MAX_STRING_BYTES = 32 << 20;
+const FORM_BINARY_MAX_CHILDREN = 262_144;
+const FORM_BINARY_MAX_NODES = 1_000_000;
+const FORM_BINARY_MAX_DEPTH = 256;
+
+interface FormBinaryDecodeBudget {
+  nodes: number;
+}
+
+function enterFormBinaryNode(budget: FormBinaryDecodeBudget, depth: number): void {
+  if (depth > FORM_BINARY_MAX_DEPTH) {
+    throw new Error("form binary: maximum node depth exceeded");
+  }
+  budget.nodes += 1;
+  if (budget.nodes > FORM_BINARY_MAX_NODES) {
+    throw new Error("form binary: maximum node count exceeded");
+  }
+}
 
 function pushU32(out: number[], v: number): void {
   const n = v >>> 0;
@@ -5371,7 +5191,15 @@ function serializeNodeWithStrings(k: Kernel, nid: NodeID, out: number[], table: 
   }
 }
 
-function deserializeRawNode(k: Kernel, bytes: Uint8Array, pos: number, scope: number): [NodeID, number] {
+function deserializeRawNode(
+  k: Kernel,
+  bytes: Uint8Array,
+  pos: number,
+  scope: number,
+  budget: FormBinaryDecodeBudget,
+  depth: number,
+): [NodeID, number] {
+  enterFormBinaryNode(budget, depth);
   let tag: number;
   [tag, pos] = readU32(bytes, pos);
   if (tag === FORM_BINARY_FLOAT64) {
@@ -5395,14 +5223,20 @@ function deserializeRawNode(k: Kernel, bytes: Uint8Array, pos: number, scope: nu
     [inst, pos] = readU32(bytes, pos);
     return [k.remapImportedLeaf(scope, { pkg, level, type, inst }), pos];
   }
+  if (tag !== FORM_BINARY_COMPOSITE) {
+    throw new Error(`form binary: unknown node tag ${tag}`);
+  }
   let category: NodeID;
-  [category, pos] = deserializeRawNode(k, bytes, pos, scope);
+  [category, pos] = deserializeRawNode(k, bytes, pos, scope, budget, depth + 1);
   let count: number;
   [count, pos] = readU32(bytes, pos);
+  if (count > FORM_BINARY_MAX_CHILDREN) {
+    throw new Error("form binary: maximum child count exceeded");
+  }
   const children: NodeID[] = [];
   for (let i = 0; i < count; i++) {
     let child: NodeID;
-    [child, pos] = deserializeRawNode(k, bytes, pos, scope);
+    [child, pos] = deserializeRawNode(k, bytes, pos, scope, budget, depth + 1);
     children.push(child);
   }
   return [k.intern(category, children), pos];
@@ -5414,7 +5248,10 @@ function deserializeNode(
   strings: readonly string[],
   pos: number,
   scope: number,
+  budget: FormBinaryDecodeBudget,
+  depth: number,
 ): [NodeID, number] {
+  enterFormBinaryNode(budget, depth);
   let tag: number;
   [tag, pos] = readU32(bytes, pos);
   if (tag === FORM_BINARY_FLOAT64) {
@@ -5443,14 +5280,20 @@ function deserializeNode(
     }
     return [k.remapImportedLeaf(scope, { pkg, level, type, inst }), pos];
   }
+  if (tag !== FORM_BINARY_COMPOSITE) {
+    throw new Error(`form binary: unknown node tag ${tag}`);
+  }
   let category: NodeID;
-  [category, pos] = deserializeNode(k, bytes, strings, pos, scope);
+  [category, pos] = deserializeNode(k, bytes, strings, pos, scope, budget, depth + 1);
   let count: number;
   [count, pos] = readU32(bytes, pos);
+  if (count > FORM_BINARY_MAX_CHILDREN) {
+    throw new Error("form binary: maximum child count exceeded");
+  }
   const children: NodeID[] = [];
   for (let i = 0; i < count; i++) {
     let child: NodeID;
-    [child, pos] = deserializeNode(k, bytes, strings, pos, scope);
+    [child, pos] = deserializeNode(k, bytes, strings, pos, scope, budget, depth + 1);
     children.push(child);
   }
   return [k.intern(category, children), pos];
@@ -5462,7 +5305,10 @@ function deserializeNodeV1(
   strings: readonly string[],
   pos: number,
   scope: number,
+  budget: FormBinaryDecodeBudget,
+  depth: number,
 ): [NodeID, number] {
+  enterFormBinaryNode(budget, depth);
   let pkg: number;
   let level: number;
   let type: number;
@@ -5473,6 +5319,9 @@ function deserializeNodeV1(
   [type, pos] = readU32(bytes, pos);
   [inst, pos] = readU32(bytes, pos);
   [count, pos] = readU32(bytes, pos);
+  if (count > FORM_BINARY_MAX_CHILDREN) {
+    throw new Error("form binary: maximum child count exceeded");
+  }
   if (count === 0) {
     if (level === Level.TRIVIAL && type === Triv.STRING) {
       const value = strings[inst];
@@ -5488,7 +5337,7 @@ function deserializeNodeV1(
   const children: NodeID[] = [];
   for (let i = 0; i < count; i++) {
     let child: NodeID;
-    [child, pos] = deserializeNodeV1(k, bytes, strings, pos, scope);
+    [child, pos] = deserializeNodeV1(k, bytes, strings, pos, scope, budget, depth + 1);
     children.push(child);
   }
   return [k.intern(category, children), pos];
@@ -5500,44 +5349,56 @@ function readBinaryString(strings: readonly string[], index: number): string {
   return value;
 }
 
-export function serializeRecipeArtifact(k: Kernel, root: NodeID): Buffer {
+export function serializeRecipeArtifact(k: Kernel, root: NodeID): Uint8Array {
   const table: FormBinaryStringTable = { strings: [], indexes: new Map() };
   collectArtifactStrings(k, root, table);
   const out: number[] = Array.from(FORM_BINARY_MAGIC);
   pushU32(out, table.strings.length);
   for (const s of table.strings) {
-    const encoded = Buffer.from(s, "utf8");
+    const encoded = utf8Encode(s);
     pushU32(out, encoded.length);
     for (const byte of encoded) out.push(byte);
   }
   serializeNodeWithStrings(k, root, out, table);
-  return Buffer.from(out);
+  return Uint8Array.from(out);
 }
 
 export function deserializeRecipeArtifact(k: Kernel, bytes: Uint8Array): NodeID {
+  if (bytes.length > FORM_BINARY_MAX_BYTES) {
+    throw new Error("form binary: maximum artifact size exceeded");
+  }
   const isV1 = hasMagic(bytes, FORM_BINARY_MAGIC_V1);
   const isV2 = hasMagic(bytes, FORM_BINARY_MAGIC);
   if (!isV1 && !isV2) throw new Error("form binary: bad magic");
   let pos = isV1 ? FORM_BINARY_MAGIC_V1.length : FORM_BINARY_MAGIC.length;
   let stringCount: number;
   [stringCount, pos] = readU32(bytes, pos);
+  if (stringCount > FORM_BINARY_MAX_STRINGS) {
+    throw new Error("form binary: maximum string count exceeded");
+  }
   const strings: string[] = [];
+  let totalStringBytes = 0;
   for (let i = 0; i < stringCount; i++) {
     let len: number;
     [len, pos] = readU32(bytes, pos);
-    if (pos + len > bytes.length) throw new Error("form binary: truncated string");
-    strings.push(Buffer.from(bytes.subarray(pos, pos + len)).toString("utf8"));
+    totalStringBytes += len;
+    if (totalStringBytes > FORM_BINARY_MAX_STRING_BYTES) {
+      throw new Error("form binary: maximum string bytes exceeded");
+    }
+    if (len > bytes.length - pos) throw new Error("form binary: truncated string");
+    strings.push(utf8DecodeStrict(bytes.subarray(pos, pos + len)));
     pos += len;
   }
   const scope = k.nextImportScope();
+  const budget: FormBinaryDecodeBudget = { nodes: 0 };
   const [root, end] = isV1
-    ? deserializeNodeV1(k, bytes, strings, pos, scope)
-    : deserializeNode(k, bytes, strings, pos, scope);
+    ? deserializeNodeV1(k, bytes, strings, pos, scope, budget, 0)
+    : deserializeNode(k, bytes, strings, pos, scope, budget, 0);
   if (end !== bytes.length) throw new Error("form binary: trailing bytes");
   return root;
 }
 
-function hasMagic(bytes: Uint8Array, magic: Buffer): boolean {
+function hasMagic(bytes: Uint8Array, magic: Uint8Array): boolean {
   if (bytes.length < magic.length) return false;
   for (let i = 0; i < magic.length; i++) {
     if (bytes[i] !== magic[i]) return false;

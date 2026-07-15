@@ -5,7 +5,8 @@
 > grammar (`form-stdlib/grammars/python-bmf.fk`, `typescript-bmf.fk`, etc.) —
 > not through hand-written TypeScript parsers that know what Python or
 > TypeScript look like. The teaching:
-> [`lc-the-kernel-knows-itself`](../../../docs/vision-kb/concepts/lc-the-kernel-knows-itself.md).
+> The kernel-knows-itself lineage is carried here as executable seed material,
+> without depending on a consumer repository's documentation tree.
 > The compost sequence:
 > [`kernels/BOOTSTRAP_COMPOST_MANIFEST.md`](../../../kernels/BOOTSTRAP_COMPOST_MANIFEST.md).
 

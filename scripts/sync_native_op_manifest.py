@@ -13,6 +13,19 @@ from pathlib import Path
 FORM = Path(__file__).resolve().parents[1]
 FLATTEN = FORM / "form-stdlib" / "form-flatten.fk"
 MANIFEST = FORM / "form-stdlib" / "native-op-manifest.fk"
+EMITTER = FORM / "form-stdlib" / "fkc-table-serialize.fk"
+GO_KERNEL = FORM / "form-kernel-go" / "main.go"
+RUST_KERNEL = FORM / "form-kernel-rust" / "src" / "main.rs"
+TS_KERNEL = FORM / "form-kernel-ts" / "src" / "kernel.ts"
+
+# These are security-bound carrier primitives, not optional convenience
+# aliases. Keep one assertion spanning manifest, lowering, emitted tags, and
+# every sibling registration so a stale name/tag cannot silently lower to 0.
+BYTE_CARRIER_OPS = {
+    "string_bytes": (1, 205),
+    "string_byte_fold": (3, 206),
+    "form_table_text": (2, 207),
+}
 
 
 def parse_ops_list(text: str, defn: str) -> list[tuple[str, int, int]]:
@@ -74,6 +87,28 @@ def main() -> int:
         errors.append(f"in flt-ops but not manifest ({len(only_flt)}): {only_flt[:5]}...")
     if only_nom:
         errors.append(f"in manifest but not flt-ops ({len(only_nom)}): {only_nom[:5]}...")
+
+    emitter_text = EMITTER.read_text(encoding="utf-8")
+    kernel_registrations = {
+        "Go": (GO_KERNEL.read_text(encoding="utf-8"), 'registerNative("{name}"'),
+        "Rust": (RUST_KERNEL.read_text(encoding="utf-8"), 'register_native("{name}"'),
+        "TypeScript": (TS_KERNEL.read_text(encoding="utf-8"), 'registerNative("{name}"'),
+    }
+    for name, expected in BYTE_CARRIER_OPS.items():
+        arity, tag = expected
+        if (name, arity, tag) not in nom_set:
+            errors.append(f"byte carrier manifest mismatch: expected {(name, arity, tag)}")
+        if (name, arity, tag) not in flt_set:
+            errors.append(f"byte carrier lowering mismatch: expected {(name, arity, tag)}")
+        if f"if (t == {tag})" not in emitter_text:
+            errors.append(f"byte carrier emitted arm missing: {name} tag {tag}")
+        for kernel, (text, pattern) in kernel_registrations.items():
+            if pattern.format(name=name) not in text:
+                errors.append(f"byte carrier sibling missing: {kernel} {name}")
+
+    for obsolete in ("string_fold",):
+        if any(name == obsolete for name, _, _ in manifest_rows + flatten_rows):
+            errors.append(f"obsolete byte carrier still lowerable: {obsolete}")
 
     if errors:
         for e in errors:
