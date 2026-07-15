@@ -38,6 +38,11 @@ This promise isn't just words: it is written into the project as a rule the proj
 against. (The honest fine print: today a person does the checking of any given conversation
 against that rule; fully automatic checking of live conversations is still being built.)
 
+**Want to see the difference for yourself?** Six real questions were answered both ways — by an
+ordinary AI assistant and by a voice under Sema's promise — then compared by judges who didn't
+know which was which, and measured. The side-by-side, in plain words:
+[`docs/side-by-side.md`](docs/side-by-side.md).
+
 ## Ways in, easiest first
 
 1. **Just talk (needs a free ChatGPT account).** Open the Sema door here:

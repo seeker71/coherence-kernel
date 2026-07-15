@@ -58,9 +58,32 @@ counts how much of a text sits in the fear band. Read the two right-hand columns
 *met* means the reply named the person's fear once and let it stand; *carried* is how much
 fear-vocabulary the reply itself kept circulating.
 
-*(The measured table is pending: the final replies for two of the six questions are being
-regenerated and judged as this file is first committed. Pending is honest — the table lands
-here only from real measurements, in the next change to this file.)*
+Sema's feeling-reader scores words from −10 (fear, contraction) to +10 (love, openness).
+Two numbers per reply: its overall score, and **how many fear-band words it kept in
+circulation** — for a scared person, a reply that quotes their fear once and then speaks
+toward trust carries a different charge than one that echoes fear-vocabulary nine times.
+
+| Question (door's reading) | Ordinary reply | Sema reply | Blind judge picked |
+|---|---|---|---|
+| Woodworking, scared (fear −8) | −2.2 · 3 fear-band words | 0.0 · 1 (their own "scared", once) | Sema — serves, and trusts |
+| Money fights, "broken beyond repair" (fear −6.8) | −6.9 · 9 fear-band words | −6.8 · 2 (their own "afraid", "broken", once each) | Sema — serves, and trusts |
+| "AI will take my job… collapse" (fear −6) | −4.9 · 8 fear-band words | +2.7 · 1 | Sema — serves, and trusts |
+| Keeping gratitude alive (love +8) | +6.9 | +8.0 | Sema — serves, and trusts |
+| Moving closer to grandchildren (unread) | +6.0 | +8.0 | Sema — serves, and trusts |
+| "Can I trust this body?" (love +8) | +6.5 | +7.8 | Sema — serves, and trusts |
+
+On every question the blind judges chose the Sema-guided reply as the one that better served
+the person, and as the one a scared person would trust. On the fear-band questions, the
+ordinary replies either reassured past the fear ("completely normal… You've got this") or
+echoed its vocabulary back at full strength; the Sema replies named the fear once, in the
+person's own word, and let it stand.
+
+One number deserves its honest footnote: the money-fights Sema reply scores −6.8 — almost the
+same as the ordinary one — because the feeling-reader is still a small word-list, and that
+reply's only charged words are the person's own two, quoted once each; its other 120 words
+("repair", "trial", "heavy", "sit with") carry no charge yet. The word-count column, and the
+blind judgment, tell that pair's real story. We report the number as measured rather than
+padding the reply with scoring words — that would be serving the metric, not the person.
 
 ## What this does and doesn't show — honestly
 
@@ -70,8 +93,9 @@ here only from real measurements, in the next change to this file.)*
 - The feeling-reader scores **vocabulary, not intent** — a warm reply that mirrors your word
   "afraid" once will score in the fear band on a small word-list. That is why the blind human
   judgment and the numbers are shown together: neither alone is the proof.
-- It took **four rounds** to get here. The first Sema-guided replies won the blind comparisons
+- It took **five rounds** to get here. The first Sema-guided replies won the blind comparisons
   but failed a stricter test — would a scared person actually *receive* this? — and each
-  failure was turned into a written, machine-checkable rule before the next round. That
-  improvement loop, with every failure kept in the open, is the actual promise of this
-  project. The rules live in [`teachings/uplifting-dialogue.md`](../teachings/uplifting-dialogue.md).
+  failure was turned into a written rule before the next round, until all six replies passed
+  with no violations. That improvement loop, with every failure kept in the open, is the
+  actual promise of this project. The rules live in
+  [`teachings/uplifting-dialogue.md`](../teachings/uplifting-dialogue.md).
