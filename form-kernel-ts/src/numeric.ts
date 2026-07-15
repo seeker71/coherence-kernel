@@ -11,7 +11,7 @@
 // trivials) remains as a fast-path alias for hot formats; nothing
 // here forces removing them.
 
-import { Kernel, Level, type NodeID } from "./kernel.ts";
+import { Kernel, Level, RBasic, type NodeID } from "./kernel.ts";
 import {
   applyArith,
   ArithHintCode,
@@ -25,7 +25,7 @@ import {
 // RBasic.NUMERIC — a new well-known RBasic category for format-recipe-
 // driven numeric leaves. Distinct from RBasic.MATH (operations); this
 // is for VALUES carrying a format identity.
-export const RBasicNumeric = 51;
+export const RBasicNumeric = RBasic.NUMERIC;
 
 // Format-handle assignment. The kernel keeps a sequential table of
 // format-recipes; each registered format gets an integer handle.

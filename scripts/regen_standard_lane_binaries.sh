@@ -34,7 +34,7 @@ printf 'regen: fkwu-%s (%s bytes) stamp=%s\n' \
 
 FORM_CLI_SRCS=(
     form-stdlib/fourth-shim.fk form-stdlib/core.fk form-stdlib/line-grammar.fk
-    form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
+    form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hmac-sha256.fk form-stdlib/hex.fk
     form-stdlib/resource-port.fk form-stdlib/bml-native-interface-package-import.fk form-stdlib/hati-os-targets.fk
     form-stdlib/form-native-resource-interfaces.fk form-stdlib/form-fs.fk
     form-stdlib/storage-port.fk form-stdlib/host-kernel-carrier.fk
@@ -48,12 +48,21 @@ FORM_CLI_SRCS=(
     form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
     form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk
     form-stdlib/rag-ask.fk form-stdlib/form-cli-ask.fk
+    form-stdlib/form-cli-router.fk form-stdlib/form-cli-judge.fk
+    form-stdlib/form-cli-sufficiency.fk form-stdlib/form-freq-check.fk
+    form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
+    form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
+    form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk
     form-stdlib/current-branch-landing.fk form-stdlib/form-cli.fk
     form-stdlib/form-cli-gguf-cell.fk form-stdlib/form-cli-repl.fk
 )
 form_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
 
-FORM_STANDARD_LANE=0 ./build-form-cli.sh
+# A maintainer regeneration must relink the carrier even when the Form program
+# stamp is unchanged: the binary's self-source genesis also includes the build
+# and behavioral-proof scripts, whose bytes are intentionally outside the
+# executable Form table hash.
+FORM_STANDARD_LANE=0 FORM_CLI_FORCE_LINK=1 ./build-form-cli.sh
 [[ -x form-cli ]] || {
     printf '%s\n' 'form-cli build failed' >&2
     exit 1
