@@ -43,7 +43,10 @@ def _camel_to_contract(name: str) -> str:
 
 
 def _source_texts(root: Path, suffix: str) -> list[tuple[Path, str]]:
-    return [(path, path.read_text()) for path in sorted(root.rglob(f"*{suffix}"))]
+    return [
+        (path, path.read_text(encoding="utf-8"))
+        for path in sorted(root.rglob(f"*{suffix}"))
+    ]
 
 
 def _collect_numeric(
@@ -83,7 +86,7 @@ def _compare(
 
 
 def main() -> int:
-    payload = json.loads(CONTRACT_PATH.read_text())
+    payload = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
     contract = payload.get("r_basic")
     if not isinstance(contract, dict) or not contract:
         print("FAIL category-contract.json has no non-empty r_basic map", file=sys.stderr)
@@ -115,7 +118,7 @@ def main() -> int:
 
     ts_root = FORM_DIR / "form-kernel-ts" / "src"
     ts_sources = _source_texts(ts_root, ".ts")
-    kernel_text = (ts_root / "kernel.ts").read_text()
+    kernel_text = (ts_root / "kernel.ts").read_text(encoding="utf-8")
     if 'import CATEGORY_CONTRACT from "../../category-contract.json";' not in kernel_text:
         errors.append("TypeScript: kernel.ts does not import the canonical category contract")
     if "Object.freeze(CATEGORY_CONTRACT.r_basic)" not in kernel_text:
