@@ -52,11 +52,39 @@
                                   (ra-answer-key-of-hex (ric-answer-hex line))))) 1 0))
             (ric-persisted-source-sha256 line)))
 
+    ; Streaming rank admission is structural and hex-safe. Hashing every answer
+    ; on every query made corpus ranking proportional to all answer bytes rather
+    ; than the sparse semantic vectors. The selected best/runner pair is checked
+    ; cryptographically below before any hit can be returned.
+    (defn ra-rank-entry-of-line (line)
+        (append-1 (rag-grounded-binding-entry
+            (ric-node-id line)
+            (ric-content-node-id line)
+            (ric-source-path line)
+            (ric-key line)
+            (ric-answer-key line)
+            (ric-answer-hex line)
+            (ric-vec line)
+            (if (and (eq (ric-grounding-ready? line) 1)
+                     (eq (hex-valid? (ric-answer-hex line)) 1)) 1 0))
+            (ric-persisted-source-sha256 line)))
+
+    (defn ra-entry-answer-valid? (entry)
+        (if (and (eq (rag-admitted? entry) 1)
+                 (and (eq (hex-valid? (rag-answer-hex entry)) 1)
+                      (str_eq (rag-answer-key entry)
+                              (ra-answer-key-of-hex
+                                  (rag-answer-hex entry))))) 1 0))
+
     (defn ra-line-ready? (line)
         (if (and (eq (ric-grounding-ready? line) 1)
                  (and (eq (hex-valid? (ric-answer-hex line)) 1)
                       (str_eq (ric-answer-key line)
                               (ra-answer-key-of-hex (ric-answer-hex line))))) 1 0))
+
+    (defn ra-line-rank-ready? (line)
+        (if (and (eq (ric-grounding-ready? line) 1)
+                 (eq (hex-valid? (ric-answer-hex line)) 1)) 1 0))
 
     ; Fail closed: only typed, dual-NodeID rows with source/key/vector admission
     ; enter ranking. Legacy path-id and malformed rows are absent, not low-ranked.
@@ -184,8 +212,8 @@
                 (if (ge split end)
                     (do
                         (let line (substring text start end))
-                        (if (eq (ra-line-ready? line) 0) (ra-empty-ranking)
-                            (list (ra-entry-of-line line) (empty))))
+                        (if (eq (ra-line-rank-ready? line) 0) (ra-empty-ranking)
+                            (list (ra-rank-entry-of-line line) (empty))))
                     (ra-ranking-merge qvec
                         (ra-stream-rank-range text start split qvec)
                         (ra-stream-rank-range text (add split 1) end qvec))))))
@@ -200,11 +228,13 @@
                         text 0 (ra-stream-effective-end text) qvec))
                     (let best (nth ranked 0))
                     (let runner-entry (nth ranked 1))
-                    (if (eq (len best) 0)
+                    (if (or (eq (len best) 0)
+                            (eq (ra-entry-answer-valid? best) 0))
                         (ra-miss)
                         (do
                             (let score (rag-overlap-score qvec best))
-                            (let runner-score (if (eq (len runner-entry) 0) 0
+                            (let runner-score (if (or (eq (len runner-entry) 0)
+                                    (eq (ra-entry-answer-valid? runner-entry) 0)) 0
                                 (rag-overlap-score qvec runner-entry)))
                             (let hit (ra-hit-row "hit" best score runner-score (len qvec)
                                 (ra-confidence score runner-score)))
