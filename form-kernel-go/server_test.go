@@ -15,6 +15,12 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestPGHandleTableSetErrKeepsDatabaseMessage(t *testing.T) {
 	table := &pgHandleTable{}
 	table.setErr(&pgconn.PgError{
@@ -242,12 +248,12 @@ func TestRouteDecisionHeadersShowWhereWhenWhoHow(t *testing.T) {
 }
 
 func TestHealthRouteNativeOperationalShape(t *testing.T) {
-	body, err := os.ReadFile("../../deploy/front-door/api.bml")
+	body, err := os.ReadFile("../apps/coherence-network/api.bml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	artifact, err := sourceCompileServeProgram(
-		[]sourcePart{{label: "deploy/front-door/api.bml", source: string(body)}},
+		[]sourcePart{{label: "apps/coherence-network/api.bml", source: string(body)}},
 		"../form-stdlib",
 	)
 	if err != nil {
@@ -359,12 +365,12 @@ func TestNativeHandlerFatalResponseNamesKindTraceAndWorkerContinues(t *testing.T
 }
 
 func TestSubstrateFormCompilerRouteRunsBML(t *testing.T) {
-	body, err := os.ReadFile("../../deploy/front-door/api.bml")
+	body, err := os.ReadFile("../apps/coherence-network/api.bml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	artifact, err := sourceCompileServeProgram(
-		[]sourcePart{{label: "deploy/front-door/api.bml", source: string(body)}},
+		[]sourcePart{{label: "apps/coherence-network/api.bml", source: string(body)}},
 		"../form-stdlib",
 	)
 	if err != nil {
@@ -429,15 +435,37 @@ func TestSubstrateFormCompilerRouteRunsBML(t *testing.T) {
 			t.Fatalf("compiler route body missing %s: %s", want, string(gotBody))
 		}
 	}
+
+	unsupportedReq := httptest.NewRequest(
+		http.MethodPost,
+		"http://native.example.test/api/substrate/form",
+		strings.NewReader(`{"expression":"add(20, 22);","mode":"run","compiler":"python"}`),
+	)
+	unsupportedReq.Header.Set("Content-Type", "application/json")
+	unsupportedReq.Header.Set("Accept", "application/json")
+	unsupportedRec := httptest.NewRecorder()
+	worker.serve(unsupportedRec, unsupportedReq)
+	unsupportedRes := unsupportedRec.Result()
+	defer unsupportedRes.Body.Close()
+	unsupportedBody, err := io.ReadAll(unsupportedRes.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unsupportedRes.StatusCode != http.StatusBadRequest {
+		t.Fatalf("unsupported compiler status = %d body=%s", unsupportedRes.StatusCode, string(unsupportedBody))
+	}
+	if want := "compiler must be form.bml, form.route, or form.action"; !strings.Contains(string(unsupportedBody), want) {
+		t.Fatalf("unsupported compiler body missing %q: %s", want, string(unsupportedBody))
+	}
 }
 
 func TestRuntimeEventsCreateRouteValidatesNatively(t *testing.T) {
-	body, err := os.ReadFile("../../deploy/front-door/api.bml")
+	body, err := os.ReadFile("../apps/coherence-network/api.bml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	artifact, err := sourceCompileServeProgram(
-		[]sourcePart{{label: "deploy/front-door/api.bml", source: string(body)}},
+		[]sourcePart{{label: "apps/coherence-network/api.bml", source: string(body)}},
 		"../form-stdlib",
 	)
 	if err != nil {
@@ -475,12 +503,12 @@ func TestRuntimeEventsCreateRouteValidatesNatively(t *testing.T) {
 }
 
 func TestKernelReadRoutePromotionsSelectNatively(t *testing.T) {
-	body, err := os.ReadFile("../../deploy/front-door/api.bml")
+	body, err := os.ReadFile("../apps/coherence-network/api.bml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	artifact, err := sourceCompileServeProgram(
-		[]sourcePart{{label: "deploy/front-door/api.bml", source: string(body)}},
+		[]sourcePart{{label: "apps/coherence-network/api.bml", source: string(body)}},
 		"../form-stdlib",
 	)
 	if err != nil {
@@ -523,12 +551,12 @@ func TestKernelReadRoutePromotionsSelectNatively(t *testing.T) {
 }
 
 func TestViewsPingRouteValidatesNatively(t *testing.T) {
-	body, err := os.ReadFile("../../deploy/front-door/api.bml")
+	body, err := os.ReadFile("../apps/coherence-network/api.bml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	artifact, err := sourceCompileServeProgram(
-		[]sourcePart{{label: "deploy/front-door/api.bml", source: string(body)}},
+		[]sourcePart{{label: "apps/coherence-network/api.bml", source: string(body)}},
 		"../form-stdlib",
 	)
 	if err != nil {
@@ -598,12 +626,12 @@ func TestGatesMainHeadRouteFetchesExternalHTTPInBML(t *testing.T) {
 		goVolatileCells.delete("github.branch_head_sha", "seeker71/Coherence-Network|main")
 	})
 
-	body, err := os.ReadFile("../../deploy/front-door/api.bml")
+	body, err := os.ReadFile("../apps/coherence-network/api.bml")
 	if err != nil {
 		t.Fatal(err)
 	}
 	artifact, err := sourceCompileServeProgram(
-		[]sourcePart{{label: "deploy/front-door/api.bml", source: string(body)}},
+		[]sourcePart{{label: "apps/coherence-network/api.bml", source: string(body)}},
 		"../form-stdlib",
 	)
 	if err != nil {
@@ -654,6 +682,89 @@ func TestGatesMainHeadRouteFetchesExternalHTTPInBML(t *testing.T) {
 		if !strings.Contains(string(gotBody), want) {
 			t.Fatalf("gates main-head body missing %s: %s", want, string(gotBody))
 		}
+	}
+}
+
+func TestExplicitKernelConfigIsStandaloneAndAuthoritative(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "kernel-only.json")
+	if err := os.WriteFile(configPath, []byte(`{"kernel_only":{"value":"explicit"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldConfigPath := goKernelConfigPath
+	goKernelConfigPath = configPath
+	t.Cleanup(func() { goKernelConfigPath = oldConfigPath })
+
+	config, err := loadKernelConfig()
+	if err != nil {
+		t.Fatalf("loadKernelConfig: %v", err)
+	}
+	if len(config) != 1 {
+		t.Fatalf("explicit config mixed discovery layers: %#v", config)
+	}
+	value, ok := lookupConfigPath(config, "kernel_only.value")
+	if !ok || value != "explicit" {
+		t.Fatalf("explicit kernel value = %#v, present=%v", value, ok)
+	}
+}
+
+func TestGatesMainHeadMissingConfigMakesZeroExternalHTTPCalls(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "empty-config.json")
+	if err := os.WriteFile(configPath, []byte(`{}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldConfigPath := goKernelConfigPath
+	oldHTTPClient := goExternalHTTPClient
+	goKernelConfigPath = configPath
+	externalCalls := 0
+	goExternalHTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		externalCalls++
+		return nil, errors.New("unexpected external HTTP call")
+	})}
+	goVolatileCells.delete("github.branch_head_sha", "seeker71/Coherence-Network|main")
+	t.Cleanup(func() {
+		goKernelConfigPath = oldConfigPath
+		goExternalHTTPClient = oldHTTPClient
+		goVolatileCells.delete("github.branch_head_sha", "seeker71/Coherence-Network|main")
+	})
+
+	body, err := os.ReadFile("../apps/coherence-network/api.bml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := sourceCompileServeProgram(
+		[]sourcePart{{label: "apps/coherence-network/api.bml", source: string(body)}},
+		"../form-stdlib",
+	)
+	if err != nil {
+		t.Fatalf("sourceCompileServeProgram: %v", err)
+	}
+	worker, err := buildGoServeWorker(&goServeProgram{artifact: artifact})
+	if err != nil {
+		t.Fatalf("buildGoServeWorker: %v", err)
+	}
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"http://native.example.test/api/gates/main-head?repo=seeker71/Coherence-Network&branch=main",
+		nil,
+	)
+	req.Header.Set("Accept", "application/json")
+	rec := httptest.NewRecorder()
+	worker.serve(rec, req)
+	res := rec.Result()
+	defer res.Body.Close()
+	gotBody, err := io.ReadAll(res.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("missing github.api_base status = %d body=%s", res.StatusCode, string(gotBody))
+	}
+	if externalCalls != 0 {
+		t.Fatalf("missing github.api_base made %d external HTTP calls", externalCalls)
+	}
+	if want := "github.api_base is not configured"; !strings.Contains(string(gotBody), want) {
+		t.Fatalf("missing-config body missing %q: %s", want, string(gotBody))
 	}
 }
 

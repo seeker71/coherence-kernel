@@ -26,6 +26,6 @@ This is **gesture not replacement** for Breath 8 of [`../kernel-roadmap.md`](../
 Sibling: [`../form-kernel-go/`](../form-kernel-go/). Comparison + runtime numbers: [`../kernel-comparison.md`](../kernel-comparison.md).
 
 Source upstream:
-- Floor scope named in [`docs/coherence-substrate/form-runtime-in-form.form`](../../docs/coherence-substrate/form-runtime-in-form.form).
-- Category numbering aligned with [`api/app/services/substrate/category.py`](../../api/app/services/substrate/category.py).
+- Runtime direction and retirement boundaries are named in [`../kernel-roadmap.md`](../kernel-roadmap.md).
+- Category numbering is governed by [`../category-contract.json`](../category-contract.json).
 - Sample `.fk` source files in [`../form-samples/`](../form-samples/).

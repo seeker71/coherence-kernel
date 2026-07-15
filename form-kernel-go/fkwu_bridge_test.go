@@ -17,6 +17,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"strings"
 	"testing"
 )
@@ -25,13 +27,29 @@ import (
 // result value's raw string (the .Str for a string value, else .String()).
 func runFormSource(t *testing.T, src string) (Value, string) {
 	t.Helper()
+	// The helper's stack may conservatively keep the completed kernel live until
+	// its owning test returns. A cleanup runs after that stack is gone and before
+	// the next test starts, which is the reliable process-like phase boundary.
+	t.Cleanup(func() {
+		runtime.GC()
+		debug.FreeOSMemory()
+	})
 	k := NewKernel()
 	root := readRootFromSource(k, src)
 	result := k.walk(root, NewFrame(nil))
+	text := result.String()
 	if result.Kind == VStr {
-		return result, result.Str
+		text = result.Str
 	}
-	return result, result.String()
+	// Each call models an independent source-to-artifact invocation. The
+	// returned Value owns its lists/strings/closures; no caller can address the
+	// completed kernel's intern table. Release that graph before the next fkwu
+	// proof begins, otherwise sequential full-form flatten proofs retain ~1.4
+	// GiB each and the suite dies despite every individual proof passing.
+	k = nil
+	runtime.GC()
+	debug.FreeOSMemory()
+	return result, text
 }
 
 func readFiles(t *testing.T, paths ...string) string {

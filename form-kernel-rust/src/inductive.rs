@@ -2,8 +2,7 @@
 // inductive.rs — INDUCTIVE / CONSTRUCTOR / CHOICE_MATCH RBasic arms.
 //
 // Algebraic datatypes as content-addressed substrate cells. Mirrors the
-// TS reference (`form/form-kernel-ts/src/inductive.ts`) and the
-// Python port (`api/app/services/substrate/inductive.py`). The shape:
+// canonical TS sibling (`form/form-kernel-ts/src/inductive.ts`). The shape:
 //
 //   INDUCTIVE
 //     children:

@@ -15,11 +15,10 @@ import {
   Frame,
   Kernel,
   serializeRecipeArtifact,
-  shutdownHTTPWorker,
-  shutdownSocketWorker,
   Trace,
   walk,
 } from "./kernel.ts";
+import { createNodeKernelHost } from "./node-host.ts";
 import { readAll, readForm } from "./reader.ts";
 import { runBench } from "./bench.ts";
 import { compileNode } from "./compiler.ts";
@@ -112,7 +111,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const k = new Kernel();
+  const k = new Kernel(createNodeKernelHost());
   crashKernel = k;
   // Install the Form→host-JS JIT hook so (jit_compile "name") from Form
   // code compiles the named closure's body through compiler.ts.
@@ -240,7 +239,8 @@ async function runTrace(args: string[]): Promise<void> {
   }
   setCrashTraceContext("trace", args, src);
 
-  const k = new Kernel();
+  const k = new Kernel(createNodeKernelHost());
+  crashKernel = k;
   // Install the Form→host-JS JIT hook so (jit_compile "name") from Form
   // code compiles the named closure's body through compiler.ts.
   k.jitCompileHook = compileNode;
@@ -266,8 +266,7 @@ main()
   .then(() => {
     // Terminate worker-backed native carriers so the process exits promptly;
     // socket net handles and HTTP worker state otherwise keep the loop alive.
-    shutdownHTTPWorker();
-    shutdownSocketWorker();
+    crashKernel?.shutdown();
   })
   .catch(async (err: unknown) => {
     const msg = err instanceof Error ? err.message : String(err);
@@ -282,7 +281,6 @@ main()
     if (tracePath !== null) {
       console.error(`form-kernel-ts: crash trace: ${tracePath}`);
     }
-    shutdownHTTPWorker();
-    shutdownSocketWorker();
+    crashKernel?.shutdown();
     process.exit(1);
   });

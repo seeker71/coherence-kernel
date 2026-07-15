@@ -573,7 +573,20 @@ fn set_rust_kernel_config_path(path: String) {
 }
 
 fn rust_kernel_config_path() -> Option<String> {
+    #[cfg(test)]
+    if let Some(path) = TEST_KERNEL_CONFIG_PATH.with(|slot| slot.borrow().clone()) {
+        return Some(path);
+    }
     rust_kernel_config_path_cell().lock().unwrap().clone()
+}
+
+#[cfg(test)]
+thread_local! {
+    // An explicit config belongs to the invocation. Unit tests execute many
+    // independent invocations in one process, so their override must not leak
+    // into a parallel route compiler. The production CLI still sets the
+    // process-global cell once during argument parsing.
+    static TEST_KERNEL_CONFIG_PATH: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 fn find_repo_root() -> Result<PathBuf, String> {
@@ -670,13 +683,26 @@ fn merge_kernel_keys(dst: &mut serde_json::Map<String, serde_json::Value>, path:
 }
 
 fn load_kernel_config() -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let root = find_repo_root()?;
     let mut merged = serde_json::Map::new();
-    merge_config_file(&mut merged, &root.join("api/config/api.json"))?;
     if let Some(overlay) = rust_kernel_config_path() {
-        let _ = merge_config_file(&mut merged, Path::new(&overlay));
-    } else if let Some(overlay) = home_config_path("config.json") {
-        let _ = merge_config_file(&mut merged, &overlay);
+        // An explicit --config is authoritative and standalone. It must load
+        // successfully and never depends on consumer-repository config.
+        merge_config_file(&mut merged, Path::new(&overlay))
+            .map_err(|e| format!("explicit kernel config {}: {}", overlay, e))?;
+        return Ok(merged);
+    }
+    // Repository and home layers are optional only when no explicit config
+    // was supplied. A malformed present file remains a hard error.
+    if let Ok(root) = find_repo_root() {
+        let base = root.join("api/config/api.json");
+        if base.exists() {
+            merge_config_file(&mut merged, &base)?;
+        }
+    }
+    if let Some(overlay) = home_config_path("config.json") {
+        if overlay.exists() {
+            merge_config_file(&mut merged, &overlay)?;
+        }
     }
     if let Some(keys) = home_config_path("keys.json") {
         merge_kernel_keys(&mut merged, &keys);
@@ -1097,6 +1123,8 @@ fn http_get_result(
 }
 
 fn external_http_get_value(url: &str, headers: Vec<(String, String)>, timeout: Duration) -> Value {
+    #[cfg(test)]
+    EXTERNAL_HTTP_GET_CALLS.with(|calls| *calls.borrow_mut() += 1);
     let started = Instant::now();
     let mut request = ureq::get(url).timeout(timeout);
     for (name, value) in headers {
@@ -1133,6 +1161,14 @@ fn external_http_get_value(url: &str, headers: Vec<(String, String)>, timeout: D
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    // Test observation belongs to the request's executing thread. A process-
+    // global counter lets unrelated parallel HTTP tests fabricate egress in a
+    // no-egress assertion even though this request never crossed the membrane.
+    static EXTERNAL_HTTP_GET_CALLS: RefCell<usize> = const { RefCell::new(0) };
+}
+
 // ---------------------------------------------------------------------------
 // Substrate — NodeID + Recipe + intern table
 // ---------------------------------------------------------------------------
@@ -1151,7 +1187,7 @@ pub(crate) struct NodeID {
 pub(crate) const LEVEL_TRIVIAL: u32 = 1;
 pub(crate) const LEVEL_BASIC: u32 = 2;
 
-// RBasic — aligned with api/app/services/substrate/category.py
+// RBasic — governed by form/category-contract.json.
 const RB_UNDEFINED: u32 = 0;
 const RB_WITNESS: u32 = 6; // substrate self-attestation
 const RB_BLOCK: u32 = 9;
@@ -3614,35 +3650,80 @@ impl Kernel {
             }
             Value::Int(end as i64)
         });
-        // string_fold — Rust-level streaming iteration over a string's bytes.
-        // Signature: (string_fold s init step) where step is a closure of
-        // (acc, char) → acc. Whole iteration in this Rust for-loop; no Form-
-        // level recursion. Lets the substrate process arbitrary-length input
-        // streams without piling kernel stack frames.
-        self.register_native("string_fold", cat_call(), |k, a, args| {
+        // string_bytes exposes the exact UTF-8 carrier bytes, including embedded
+        // NULs, as integer leaves. It is the whole-string twin of str_byte_at.
+        self.register_native("string_bytes", cat_access(), |_, _, args| {
+            Value::List(
+                args[0]
+                    .as_str()
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| Value::Int(i64::from(*byte)))
+                    .collect::<Vec<_>>()
+                    .into(),
+            )
+        });
+        // string_byte_fold keeps the input in the host string pool and invokes
+        // a Form step with each raw UTF-8 byte as an int. The host loop gives
+        // streaming SHA/HMAC a stack bound independent of message length.
+        self.register_native("string_byte_fold", cat_call(), |k, a, args| {
             let s = args[0].as_str().to_string();
             let mut acc = args[1].clone();
             let cl = match &args[2] {
                 Value::Closure(c) => c.clone(),
-                _ => panic!("string_fold: third arg must be a closure"),
+                _ => panic!("string_byte_fold: third arg must be a closure"),
             };
             if cl.params.len() != 2 {
                 panic!(
-                    "string_fold: step closure wants 2 params (acc char), got {}",
+                    "string_byte_fold: step closure wants 2 params (acc byte), got {}",
                     cl.params.len()
                 );
             }
             for byte in s.as_bytes().to_vec() {
+                // `walk` can only reclaim frames created *inside* the call; the
+                // argument frame below already exists at its entry mark. Keep
+                // the host loop stack-disciplined as well, otherwise a 100k
+                // byte hash retains 100k dead call frames. A newly-created
+                // closure is the sole value that can capture this frame, so in
+                // that case preserve it exactly as the walker does.
+                let frame_mark = a.frames.len();
+                let closure_mark = a.closures_created;
                 let call_frame = a.new_frame_with_capacity(Some(cl.env), cl.params.len());
                 a.bind(call_frame, cl.params[0], acc);
-                a.bind(
-                    call_frame,
-                    cl.params[1],
-                    Value::Str((byte as char).to_string().into()),
-                );
+                a.bind(call_frame, cl.params[1], Value::Int(i64::from(byte)));
                 acc = walk(k, a, cl.body, call_frame);
+                if a.closures_created == closure_mark {
+                    a.frames.truncate(frame_mark);
+                }
             }
             acc
+        });
+        // Canonical universal-walker image serializer. The compiler accumulates
+        // roots and rows by cons, so both outer lists are emitted in reverse.
+        self.register_native("form_table_text", cat_method(), |_, _, args| {
+            let roots = match &args[0] {
+                Value::List(values) => values,
+                _ => panic!("form_table_text: roots must be a list"),
+            };
+            let rows = match &args[1] {
+                Value::List(values) => values,
+                _ => panic!("form_table_text: rows must be a list"),
+            };
+            let mut fields = Vec::with_capacity(2 + roots.len() + rows.len() * 4);
+            fields.push(roots.len().to_string());
+            for root in roots.iter().rev() {
+                fields.push(root.as_int().to_string());
+            }
+            fields.push(rows.len().to_string());
+            for row in rows.iter().rev() {
+                let Value::List(values) = row else {
+                    panic!("form_table_text: every row must be a list");
+                };
+                for field in values.iter() {
+                    fields.push(field.as_int().to_string());
+                }
+            }
+            Value::Str(fields.join(" ").into())
         });
         self.register_native("str_eq", cat_compare(RCMP_EQ), |_, _, args| {
             bool_int(args[0].as_str() == args[1].as_str())
@@ -5977,9 +6058,15 @@ impl Kernel {
                 Value::List(xs) => xs.iter().map(|v| v.as_int() as u8).collect(),
                 _ => Vec::new(),
             };
+            if bytes.len() > FORM_BINARY_MAX_BYTES {
+                return Value::Null;
+            }
             let scope = k.next_import_scope();
-            let (nid, _pos) = deserialize_nid(k, &bytes, 0, scope);
-            Value::Nid(nid)
+            let mut budget = FormBinaryDecodeBudget::default();
+            match deserialize_nid(k, &bytes, 0, scope, &mut budget, 0) {
+                Ok((nid, end)) if end == bytes.len() => Value::Nid(nid),
+                _ => Value::Null,
+            }
         });
         // write_file_bytes — write a list of byte-values to a path.
         // Sibling of read_file_bytes (added with PNG binary parser).
@@ -7923,6 +8010,9 @@ fn build_verb(k: &mut Kernel, verb: &str, args: Vec<NodeID>) -> NodeID {
             k.intern(cat_fndef(), vec![name_trivial, params_block, args[2]])
         }
         "params" => k.intern(cat_block(RBLK_SEQ), args),
+        // Canonical list literal. Keep the source recipe identical to the
+        // Go/TypeScript readers instead of routing through a native FNCALL.
+        "list" => k.intern(cat_list_nat(), args),
         _ => {
             let name_str = k.intern_string(verb);
             let mut all = vec![name_str];
@@ -10012,12 +10102,18 @@ const SOURCE_COMPILE_PRELUDES: [&str; 7] = [
 // same Form Recipe object as the manifest in this order. That keeps the runtime
 // carrier explicit: source entry plus Form stdlib language model yields one
 // executable Recipe object whose walk binds KernelHTTPRoute cells.
-const SOURCE_ROUTE_LANGUAGE_PRELUDES: [&str; 9] = [
+const SOURCE_ROUTE_LANGUAGE_PRELUDES: [&str; 15] = [
+    "form-ontology-loader.fk",
+    "line-grammar.fk",
+    "bmf-core.fk",
+    "bmf-grammar.fk",
+    "bml.fk",
+    "bml-source.fk",
+    "source-compiler.fk",
     "json.fk",
     "core.fk",
     "sha256.fk",
     "choice-receipt.fk",
-    "bml-source.fk",
     "branch-choice-order.fk",
     "kernel-http.fk",
     "bml-route-choice-runtime.fk",
@@ -12284,6 +12380,33 @@ fn router_context_data(
 }
 
 #[cfg(test)]
+mod byte_fold_tests {
+    use super::*;
+
+    #[test]
+    fn string_byte_fold_keeps_the_arena_bounded_for_100k_bytes() {
+        let payload = "a".repeat(100_000);
+        let source = format!(
+            "(do (defn sum-byte (acc byte) (add acc byte)) (string_byte_fold \"{}\" 0 sum-byte))",
+            payload
+        );
+        let mut kernel = Kernel::new();
+        let root = read_root_from_source(&mut kernel, &source);
+        let mut arena = Arena::new();
+        let env = arena.new_frame(None);
+
+        let value = walk(&mut kernel, &mut arena, root, env);
+
+        assert_eq!(value.as_int(), 9_700_000);
+        assert!(
+            arena.frames.len() <= 2,
+            "100k-byte fold retained {} arena frames",
+            arena.frames.len()
+        );
+    }
+}
+
+#[cfg(test)]
 mod router_context_tests {
     use super::*;
 
@@ -12715,6 +12838,36 @@ mod router_context_tests {
 mod route_spec_tests {
     use super::*;
 
+    static CONFIG_ISOLATION_LOCK: Mutex<()> = Mutex::new(());
+
+    struct ExplicitConfigGuard {
+        old: Option<String>,
+        path: PathBuf,
+    }
+
+    impl ExplicitConfigGuard {
+        fn install(label: &str, body: &str) -> Self {
+            let path = env::temp_dir().join(format!(
+                "form-rust-{label}-{}-{}.json",
+                std::process::id(),
+                now_unix_ms_value()
+            ));
+            fs::write(&path, body).expect("write explicit kernel config");
+            let old = TEST_KERNEL_CONFIG_PATH.with(|slot| {
+                slot.borrow_mut()
+                    .replace(path.to_string_lossy().to_string())
+            });
+            Self { old, path }
+        }
+    }
+
+    impl Drop for ExplicitConfigGuard {
+        fn drop(&mut self) {
+            TEST_KERNEL_CONFIG_PATH.with(|slot| *slot.borrow_mut() = self.old.take());
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
     fn test_closure(inst: u32) -> Arc<Closure> {
         Arc::new(Closure {
             name: inst,
@@ -12756,6 +12909,82 @@ mod route_spec_tests {
     ) -> Result<(Kernel, Arena, RouteSpecs), String> {
         let program = RouteProgram::Source(Arc::new(src.to_string()));
         build_worker_kernel(&program, routes_path)
+    }
+
+    #[test]
+    fn explicit_kernel_config_is_standalone_and_authoritative() {
+        let _lock = CONFIG_ISOLATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _config = ExplicitConfigGuard::install(
+            "authoritative-config",
+            r#"{"kernel_only":{"value":"explicit"}}"#,
+        );
+
+        let loaded = load_kernel_config().expect("load explicit kernel config");
+        assert_eq!(loaded.len(), 1, "explicit config mixed discovery layers");
+        assert_eq!(
+            lookup_config_path(&loaded, "kernel_only.value").and_then(|v| v.as_str()),
+            Some("explicit")
+        );
+    }
+
+    #[test]
+    fn gates_main_head_missing_config_makes_zero_external_http_calls() {
+        let _lock = CONFIG_ISOLATION_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _config = ExplicitConfigGuard::install("empty-config", "{}");
+        let cache_key = volatile_coord("github.branch_head_sha", "seeker71/Coherence-Network|main");
+        volatile_table().lock().unwrap().cells.remove(&cache_key);
+
+        let manifest = fs::read_to_string("../apps/coherence-network/api.bml")
+            .expect("read BML front-door catalog");
+        let path = env::temp_dir().join(format!(
+            "form-rust-no-egress-catalog-{}.bml",
+            std::process::id()
+        ));
+        fs::write(&path, manifest).expect("write route manifest copy");
+        let path_str = path.to_string_lossy().to_string();
+        let compiled = source_compile_manifest_recipe_object(&path_str, "../form-stdlib")
+            .expect("source route manifest compiles");
+        let program = RouteProgram::RecipeObject(Arc::new(compiled));
+        let (mut kernel, mut arena, routes, _) =
+            build_worker_kernel_with_route_data(&program, &path_str, &RouteDataRegistry::default())
+                .expect("BML route catalog loads");
+
+        let headers = vec![("Accept".to_string(), "application/json".to_string())];
+        let query = vec![
+            ("repo".to_string(), "seeker71/Coherence-Network".to_string()),
+            ("branch".to_string(), "main".to_string()),
+        ];
+        let choice =
+            route_choice_for_request(&routes, "GET", "/api/gates/main-head", &headers, &query, "");
+        let selection = choice.selected.as_ref().expect("main-head route selected");
+        assert!(selection.route.typed_request);
+        let request = router_http_request_value_with_router_context(
+            &selection.candidate,
+            &RouterMetricsSnapshot::default(),
+        );
+        let closure = selection.route.handler.clone();
+        let frame = arena.new_frame_with_capacity(Some(closure.env), closure.params.len());
+        assert_eq!(closure.params.len(), 1);
+        arena.bind(frame, closure.params[0], request);
+
+        EXTERNAL_HTTP_GET_CALLS.with(|calls| *calls.borrow_mut() = 0);
+        let result = walk(&mut kernel, &mut arena, closure.body, frame);
+        let response = handler_native_response(&result).expect("typed native response");
+        let external_calls = EXTERNAL_HTTP_GET_CALLS.with(|calls| *calls.borrow());
+
+        assert_eq!(response.status_code, 503, "body={}", response.body);
+        assert!(response.body.contains("github.api_base is not configured"));
+        assert_eq!(
+            external_calls, 0,
+            "missing config crossed the HTTP membrane"
+        );
+
+        volatile_table().lock().unwrap().cells.remove(&cache_key);
+        let _ = fs::remove_file(path);
     }
 
     #[test]
@@ -13041,7 +13270,7 @@ mod route_spec_tests {
 
     #[test]
     fn source_bml_catalog_template_routes_select_natively_in_rust() {
-        let manifest = fs::read_to_string("../../deploy/front-door/api.bml")
+        let manifest = fs::read_to_string("../apps/coherence-network/api.bml")
             .expect("read BML front-door catalog");
         let path = env::temp_dir().join(format!(
             "form-rust-router-template-catalog-{}.bml",
@@ -14791,28 +15020,37 @@ fn push_u32(bytes: &mut Vec<u8>, v: u32) {
     bytes.push(v as u8);
 }
 
-fn read_u32(bytes: &[u8], pos: usize) -> (u32, usize) {
+fn read_u32(bytes: &[u8], pos: usize) -> Result<(u32, usize), String> {
+    if pos > bytes.len() || bytes.len() - pos < 4 {
+        return Err("form binary: truncated u32".to_string());
+    }
     let v = ((bytes[pos] as u32) << 24)
         | ((bytes[pos + 1] as u32) << 16)
         | ((bytes[pos + 2] as u32) << 8)
         | (bytes[pos + 3] as u32);
-    (v, pos + 4)
+    Ok((v, pos + 4))
 }
 
 // read_f64_le — 8-byte IEEE-754 little-endian f64, the payload of a
 // FORM_BINARY_FLOAT64 node. Sibling parity with Go/TS little-endian readers.
-fn read_f64_le(bytes: &[u8], pos: usize) -> (f64, usize) {
+fn read_f64_le(bytes: &[u8], pos: usize) -> Result<(f64, usize), String> {
+    if pos > bytes.len() || bytes.len() - pos < 8 {
+        return Err("form binary: truncated float64".to_string());
+    }
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&bytes[pos..pos + 8]);
-    (f64::from_le_bytes(buf), pos + 8)
+    Ok((f64::from_le_bytes(buf), pos + 8))
 }
 
 // read_i64_le — 8-byte signed int64 little-endian, the payload of a
 // FORM_BINARY_INT64 node. Sibling parity with Go/TS little-endian readers.
-fn read_i64_le(bytes: &[u8], pos: usize) -> (i64, usize) {
+fn read_i64_le(bytes: &[u8], pos: usize) -> Result<(i64, usize), String> {
+    if pos > bytes.len() || bytes.len() - pos < 8 {
+        return Err("form binary: truncated int64".to_string());
+    }
     let mut buf = [0u8; 8];
     buf.copy_from_slice(&bytes[pos..pos + 8]);
-    (i64::from_le_bytes(buf), pos + 8)
+    Ok((i64::from_le_bytes(buf), pos + 8))
 }
 
 const FORM_BINARY_LEAF: u32 = 0;
@@ -14830,6 +15068,30 @@ const FORM_BINARY_FLOAT64: u32 = 2;
 // node serializes as [FORM_BINARY_INT64][8 bytes signed little-endian] and
 // each kernel re-interns on read. Aligned three-way: tag = 3 across Rust/Go/TS.
 const FORM_BINARY_INT64: u32 = 3;
+const FORM_BINARY_MAX_BYTES: usize = 64 << 20;
+const FORM_BINARY_MAX_STRINGS: u32 = 262_144;
+const FORM_BINARY_MAX_STRING_BYTES: usize = 32 << 20;
+const FORM_BINARY_MAX_CHILDREN: u32 = 262_144;
+const FORM_BINARY_MAX_NODES: usize = 1_000_000;
+const FORM_BINARY_MAX_DEPTH: usize = 256;
+
+#[derive(Default)]
+struct FormBinaryDecodeBudget {
+    nodes: usize,
+}
+
+impl FormBinaryDecodeBudget {
+    fn enter(&mut self, depth: usize) -> Result<(), String> {
+        if depth > FORM_BINARY_MAX_DEPTH {
+            return Err("form binary: maximum node depth exceeded".to_string());
+        }
+        self.nodes += 1;
+        if self.nodes > FORM_BINARY_MAX_NODES {
+            return Err("form binary: maximum node count exceeded".to_string());
+        }
+        Ok(())
+    }
+}
 
 fn serialize_nid(k: &Kernel, nid: NodeID, bytes: &mut Vec<u8>) {
     if let Some(recipe) = k.by_id.get(&nid) {
@@ -14915,43 +15177,59 @@ fn serialize_nid_with_strings(
     }
 }
 
-fn deserialize_nid(k: &mut Kernel, bytes: &[u8], pos: usize, scope: u32) -> (NodeID, usize) {
-    let (tag, p) = read_u32(bytes, pos);
-    if tag == FORM_BINARY_FLOAT64 {
-        let (value, p) = read_f64_le(bytes, p);
-        return (k.intern_trivial_float64(value), p);
+fn deserialize_nid(
+    k: &mut Kernel,
+    bytes: &[u8],
+    pos: usize,
+    scope: u32,
+    budget: &mut FormBinaryDecodeBudget,
+    depth: usize,
+) -> Result<(NodeID, usize), String> {
+    budget.enter(depth)?;
+    let (tag, p) = read_u32(bytes, pos)?;
+    match tag {
+        FORM_BINARY_FLOAT64 => {
+            let (value, p) = read_f64_le(bytes, p)?;
+            Ok((k.intern_trivial_float64(value), p))
+        }
+        FORM_BINARY_INT64 => {
+            let (value, p) = read_i64_le(bytes, p)?;
+            Ok((k.intern_trivial_int(value), p))
+        }
+        FORM_BINARY_LEAF => {
+            let (pkg, p) = read_u32(bytes, p)?;
+            let (level, p) = read_u32(bytes, p)?;
+            let (ty, p) = read_u32(bytes, p)?;
+            let (inst, p) = read_u32(bytes, p)?;
+            Ok((
+                k.remap_imported_leaf(
+                    scope,
+                    NodeID {
+                        pkg,
+                        level,
+                        ty,
+                        inst,
+                    },
+                ),
+                p,
+            ))
+        }
+        FORM_BINARY_COMPOSITE => {
+            let (category, p) = deserialize_nid(k, bytes, p, scope, budget, depth + 1)?;
+            let (count, mut p) = read_u32(bytes, p)?;
+            if count > FORM_BINARY_MAX_CHILDREN {
+                return Err("form binary: maximum child count exceeded".to_string());
+            }
+            let mut children = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                let (c, np) = deserialize_nid(k, bytes, p, scope, budget, depth + 1)?;
+                children.push(c);
+                p = np;
+            }
+            Ok((k.intern(category, children), p))
+        }
+        _ => Err(format!("form binary: unknown node tag {}", tag)),
     }
-    if tag == FORM_BINARY_INT64 {
-        let (value, p) = read_i64_le(bytes, p);
-        return (k.intern_trivial_int(value), p);
-    }
-    if tag == FORM_BINARY_LEAF {
-        let (pkg, p) = read_u32(bytes, p);
-        let (level, p) = read_u32(bytes, p);
-        let (ty, p) = read_u32(bytes, p);
-        let (inst, p) = read_u32(bytes, p);
-        return (
-            k.remap_imported_leaf(
-                scope,
-                NodeID {
-                    pkg,
-                    level,
-                    ty,
-                    inst,
-                },
-            ),
-            p,
-        );
-    }
-    let (category, p) = deserialize_nid(k, bytes, p, scope);
-    let (count, mut p) = read_u32(bytes, p);
-    let mut children = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        let (c, np) = deserialize_nid(k, bytes, p, scope);
-        children.push(c);
-        p = np;
-    }
-    (k.intern(category, children), p)
 }
 
 const FORM_BINARY_MAGIC_V1: &[u8] = b"FORMBIN1";
@@ -14975,6 +15253,9 @@ fn serialize_artifact(k: &Kernel, root: NodeID) -> Vec<u8> {
 }
 
 fn deserialize_artifact(k: &mut Kernel, bytes: &[u8]) -> Result<NodeID, String> {
+    if bytes.len() > FORM_BINARY_MAX_BYTES {
+        return Err("form binary: maximum artifact size exceeded".to_string());
+    }
     let is_v1 = bytes.len() >= FORM_BINARY_MAGIC_V1.len()
         && &bytes[..FORM_BINARY_MAGIC_V1.len()] == FORM_BINARY_MAGIC_V1;
     let is_v2 = bytes.len() >= FORM_BINARY_MAGIC.len()
@@ -14987,16 +15268,26 @@ fn deserialize_artifact(k: &mut Kernel, bytes: &[u8]) -> Result<NodeID, String> 
     } else {
         FORM_BINARY_MAGIC.len()
     };
-    let (string_count, p) = read_u32(bytes, pos);
+    let (string_count, p) = read_u32(bytes, pos)?;
     pos = p;
+    if string_count > FORM_BINARY_MAX_STRINGS {
+        return Err("form binary: maximum string count exceeded".to_string());
+    }
     let mut strings = Vec::with_capacity(string_count as usize);
+    let mut total_string_bytes = 0usize;
     for _ in 0..string_count {
-        let (len, p) = read_u32(bytes, pos);
+        let (len, p) = read_u32(bytes, pos)?;
         pos = p;
-        let end = pos + len as usize;
-        if end > bytes.len() {
+        total_string_bytes = total_string_bytes
+            .checked_add(len as usize)
+            .ok_or_else(|| "form binary: maximum string bytes exceeded".to_string())?;
+        if total_string_bytes > FORM_BINARY_MAX_STRING_BYTES {
+            return Err("form binary: maximum string bytes exceeded".to_string());
+        }
+        if len as usize > bytes.len().saturating_sub(pos) {
             return Err("form binary: truncated string".to_string());
         }
+        let end = pos + len as usize;
         let value = std::str::from_utf8(&bytes[pos..end])
             .map_err(|e| format!("form binary: invalid utf8: {}", e))?
             .to_string();
@@ -15004,10 +15295,11 @@ fn deserialize_artifact(k: &mut Kernel, bytes: &[u8]) -> Result<NodeID, String> 
         pos = end;
     }
     let scope = k.next_import_scope();
+    let mut budget = FormBinaryDecodeBudget::default();
     let (root, end) = if is_v1 {
-        deserialize_nid_with_strings_v1(k, bytes, pos, &strings, scope)?
+        deserialize_nid_with_strings_v1(k, bytes, pos, &strings, scope, &mut budget, 0)?
     } else {
-        deserialize_nid_with_strings(k, bytes, pos, &strings, scope)?
+        deserialize_nid_with_strings(k, bytes, pos, &strings, scope, &mut budget, 0)?
     };
     if end != bytes.len() {
         return Err("form binary: trailing bytes".to_string());
@@ -15021,55 +15313,62 @@ fn deserialize_nid_with_strings(
     pos: usize,
     strings: &[String],
     scope: u32,
+    budget: &mut FormBinaryDecodeBudget,
+    depth: usize,
 ) -> Result<(NodeID, usize), String> {
-    let (tag, p) = read_u32(bytes, pos);
-    if tag == FORM_BINARY_FLOAT64 {
-        if p + 8 > bytes.len() {
-            return Err("form binary: truncated float64".to_string());
+    budget.enter(depth)?;
+    let (tag, p) = read_u32(bytes, pos)?;
+    match tag {
+        FORM_BINARY_FLOAT64 => {
+            let (value, p) = read_f64_le(bytes, p)?;
+            Ok((k.intern_trivial_float64(value), p))
         }
-        let (value, p) = read_f64_le(bytes, p);
-        return Ok((k.intern_trivial_float64(value), p));
-    }
-    if tag == FORM_BINARY_INT64 {
-        if p + 8 > bytes.len() {
-            return Err("form binary: truncated int64".to_string());
+        FORM_BINARY_INT64 => {
+            let (value, p) = read_i64_le(bytes, p)?;
+            Ok((k.intern_trivial_int(value), p))
         }
-        let (value, p) = read_i64_le(bytes, p);
-        return Ok((k.intern_trivial_int(value), p));
-    }
-    if tag == FORM_BINARY_LEAF {
-        let (pkg, p) = read_u32(bytes, p);
-        let (level, p) = read_u32(bytes, p);
-        let (ty, p) = read_u32(bytes, p);
-        let (inst, p) = read_u32(bytes, p);
-        if level == LEVEL_TRIVIAL && ty == TRIV_STRING {
-            let value = strings
-                .get(inst as usize)
-                .ok_or_else(|| format!("form binary: bad string index {}", inst))?;
-            return Ok((k.intern_string(value), p));
+        FORM_BINARY_LEAF => {
+            let (pkg, p) = read_u32(bytes, p)?;
+            let (level, p) = read_u32(bytes, p)?;
+            let (ty, p) = read_u32(bytes, p)?;
+            let (inst, p) = read_u32(bytes, p)?;
+            if level == LEVEL_TRIVIAL && ty == TRIV_STRING {
+                let value = strings
+                    .get(inst as usize)
+                    .ok_or_else(|| format!("form binary: bad string index {}", inst))?;
+                return Ok((k.intern_string(value), p));
+            }
+            Ok((
+                k.remap_imported_leaf(
+                    scope,
+                    NodeID {
+                        pkg,
+                        level,
+                        ty,
+                        inst,
+                    },
+                ),
+                p,
+            ))
         }
-        return Ok((
-            k.remap_imported_leaf(
-                scope,
-                NodeID {
-                    pkg,
-                    level,
-                    ty,
-                    inst,
-                },
-            ),
-            p,
-        ));
+        FORM_BINARY_COMPOSITE => {
+            let (category, p) =
+                deserialize_nid_with_strings(k, bytes, p, strings, scope, budget, depth + 1)?;
+            let (count, mut p) = read_u32(bytes, p)?;
+            if count > FORM_BINARY_MAX_CHILDREN {
+                return Err("form binary: maximum child count exceeded".to_string());
+            }
+            let mut children = Vec::with_capacity(count as usize);
+            for _ in 0..count {
+                let (c, np) =
+                    deserialize_nid_with_strings(k, bytes, p, strings, scope, budget, depth + 1)?;
+                children.push(c);
+                p = np;
+            }
+            Ok((k.intern(category, children), p))
+        }
+        _ => Err(format!("form binary: unknown node tag {}", tag)),
     }
-    let (category, p) = deserialize_nid_with_strings(k, bytes, p, strings, scope)?;
-    let (count, mut p) = read_u32(bytes, p);
-    let mut children = Vec::with_capacity(count as usize);
-    for _ in 0..count {
-        let (c, np) = deserialize_nid_with_strings(k, bytes, p, strings, scope)?;
-        children.push(c);
-        p = np;
-    }
-    Ok((k.intern(category, children), p))
 }
 
 fn deserialize_nid_with_strings_v1(
@@ -15078,12 +15377,18 @@ fn deserialize_nid_with_strings_v1(
     pos: usize,
     strings: &[String],
     scope: u32,
+    budget: &mut FormBinaryDecodeBudget,
+    depth: usize,
 ) -> Result<(NodeID, usize), String> {
-    let (pkg, p) = read_u32(bytes, pos);
-    let (level, p) = read_u32(bytes, p);
-    let (ty, p) = read_u32(bytes, p);
-    let (inst, p) = read_u32(bytes, p);
-    let (count, mut p) = read_u32(bytes, p);
+    budget.enter(depth)?;
+    let (pkg, p) = read_u32(bytes, pos)?;
+    let (level, p) = read_u32(bytes, p)?;
+    let (ty, p) = read_u32(bytes, p)?;
+    let (inst, p) = read_u32(bytes, p)?;
+    let (count, mut p) = read_u32(bytes, p)?;
+    if count > FORM_BINARY_MAX_CHILDREN {
+        return Err("form binary: maximum child count exceeded".to_string());
+    }
     if count == 0 {
         if level == LEVEL_TRIVIAL && ty == TRIV_STRING {
             let value = strings
@@ -15119,7 +15424,8 @@ fn deserialize_nid_with_strings_v1(
     };
     let mut children = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let (c, np) = deserialize_nid_with_strings_v1(k, bytes, p, strings, scope)?;
+        let (c, np) =
+            deserialize_nid_with_strings_v1(k, bytes, p, strings, scope, budget, depth + 1)?;
         children.push(c);
         p = np;
     }

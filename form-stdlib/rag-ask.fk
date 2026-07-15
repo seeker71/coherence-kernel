@@ -1,20 +1,29 @@
-; rag-ask.fk — sovereign grounded retrieval over the healed jsonl index (zero Python).
+; rag-ask.fk — NodeID-grounded semantic retrieval over the native JSONL index.
 ;
-; preludes: form-stdlib/core.fk form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
-;           form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
+; preludes: form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
+; preludes: form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk
 ;
-; Keeps the live one-shot path native: fkwu reads the staged query and healed
-; JSONL index, finds a grounded cell, and returns grounded:<id>. The vector cells
-; (re-vec, ric-*, rag-topk) remain four-way over literal/index values; the live
-; host-read JSONL path avoids passing host strings through helpers until that
-; carrier boundary is lifted.
+; The live fkwu path reads the staged question and typed nodeid-rag-v2 export,
+; rejects path IDs and incomplete bindings, embeds the query through the same
+; form-semantic-v2 sparse feature map as the corpus, ranks by query-feature overlap,
+; and returns only `grounded:@p.l.t.i`. Selected-row metadata stays available as
+; a structured hit for independent trust/sufficiency and host re-verification:
+; cell REF, current content CTOR, source path/key, coverage, runner margin.
+;
+; Exact substring is gone. A paraphrase can land because source and query share
+; authored semantic features; an unrelated query or an untyped/path-id row misses.
 
 (do
     (defn ra-default-index () ".coherence-network/rag-index/index.jsonl")
     (defn ra-staged-query () ".coherence-network/rag-query.txt")
-    (defn ra-id-key () "\"id\":\"")
-    (defn ra-id-key-spaced () "\"id\": \"")
+    (defn ra-grounded-prefix () "grounded:")
 
+    (defn ra-answer-key-of-hex (answer-hex)
+        (if (eq (hex-valid? answer-hex) 0) ""
+            (hex-encode (sha256 (hex-decode answer-hex)))))
+
+    ; ── JSONL -> typed retrieval entries ──
     (defn ra-lines (s)
         (if (eq (str_len s) 0)
             (empty)
@@ -29,63 +38,270 @@
                         (cons line (ra-lines rest)))))))
 
     (defn ra-entry-of-line (line)
-        (rag-entry (ric-id line) (ric-vec line)))
+        (append-1 (rag-grounded-binding-entry
+            (ric-node-id line)
+            (ric-content-node-id line)
+            (ric-source-path line)
+            (ric-key line)
+            (ric-answer-key line)
+            (ric-answer-hex line)
+            (ric-vec line)
+            (if (and (eq (ric-grounding-ready? line) 1)
+                     (and (eq (hex-valid? (ric-answer-hex line)) 1)
+                          (str_eq (ric-answer-key line)
+                                  (ra-answer-key-of-hex (ric-answer-hex line))))) 1 0))
+            (ric-persisted-source-sha256 line)))
 
+    (defn ra-line-ready? (line)
+        (if (and (eq (ric-grounding-ready? line) 1)
+                 (and (eq (hex-valid? (ric-answer-hex line)) 1)
+                      (str_eq (ric-answer-key line)
+                              (ra-answer-key-of-hex (ric-answer-hex line))))) 1 0))
+
+    ; Fail closed: only typed, dual-NodeID rows with source/key/vector admission
+    ; enter ranking. Legacy path-id and malformed rows are absent, not low-ranked.
     (defn ra-entries-of (lines)
         (if (eq (len lines) 0) (empty)
-            (if (eq (str_len (head lines)) 0) (ra-entries-of (tail lines))
+            (if (or (eq (str_len (head lines)) 0)
+                    (eq (ra-line-ready? (head lines)) 0))
+                (ra-entries-of (tail lines))
                 (cons (ra-entry-of-line (head lines))
                       (ra-entries-of (tail lines))))))
 
+    ; Interning the host-read string stabilizes it across the fkwu call frame
+    ; before recursive line parsing. The runtime remains zero-Python/zero-model.
     (defn ra-read-index (index-path)
         (do (let raw (read_file index-path))
-            (if (nil? raw) (empty)
+            (if (or (nil? raw) (eq (str_len raw) 0)) (empty)
                 (do (let text (node_value (intern_trivial_string raw)))
                     (ra-entries-of (ra-lines text))))))
 
+    (defn ra-query-text (query)
+        (do (let raw (if (eq (str_len query) 0) (read_file (ra-staged-query)) query))
+            (if (nil? raw) "" (node_value (intern_trivial_string raw)))))
+
+    ; Compatibility name now routes through semantic overlap, not L1/exact text.
     (defn ra-nearest-id-for (query entries)
-        (rag-nearest-id (re-vec query) entries))
+        (rag-best-overlap-id (re-semantic-vec query) entries))
 
-    (defn ra-last-id-before-loop (index-path from hit last-pos)
-        (do (let raw (read_file index-path))
-            (let tight (str_find raw (ra-id-key) from))
-            (let spaced (str_find raw (ra-id-key-spaced) from))
-            (let next (if (lt tight 0) spaced
-                (if (lt spaced 0) tight
-                    (if (lt tight spaced) tight spaced))))
-            (if (or (lt next 0) (gt next hit))
-                last-pos
-                (ra-last-id-before-loop index-path (add next 1) hit next))))
+    ; ── structured selected hit ──
+    ; (status entry score runner query-total confidence)
+    (defn ra-hit-row (status entry score runner query-total confidence)
+        (list status entry score runner query-total confidence))
+    (defn ra-empty-entry ()
+        (rag-grounded-binding-entry "" "" "" "" "" "" (empty) 0))
+    (defn ra-miss () (ra-hit-row "miss" (ra-empty-entry) 0 0 0 0))
+    (defn ra-hit? (hit) (if (str_eq (nth hit 0) "hit") 1 0))
+    (defn ra-hit-entry (hit) (nth hit 1))
+    (defn ra-hit-node-id (hit) (rag-id (ra-hit-entry hit)))
+    (defn ra-hit-content-node-id (hit) (rag-content-node-id (ra-hit-entry hit)))
+    (defn ra-hit-source-path (hit) (rag-source-path (ra-hit-entry hit)))
+    (defn ra-hit-key (hit) (rag-key (ra-hit-entry hit)))
+    (defn ra-hit-persisted-source-sha256 (hit) (rag-persisted-source-sha256 (ra-hit-entry hit)))
+    (defn ra-hit-answer-key (hit) (rag-answer-key (ra-hit-entry hit)))
+    (defn ra-hit-answer-hex (hit) (rag-answer-hex (ra-hit-entry hit)))
+    (defn ra-hit-admitted? (hit) (rag-admitted? (ra-hit-entry hit)))
+    ; "resolves" here means the row came from the typed substrate-resolved export.
+    ; Fresh query-time REF->CTOR/source/key resolution remains the host verifier's
+    ; independent signal; this function never pretends an offline cache is live DB.
+    (defn ra-hit-resolves? (hit)
+        (if (and (eq (ra-hit? hit) 1) (eq (ra-hit-admitted? hit) 1)) 1 0))
+    (defn ra-hit-score (hit) (nth hit 2))
+    (defn ra-hit-runner-score (hit) (nth hit 3))
+    (defn ra-hit-query-total (hit) (nth hit 4))
+    (defn ra-hit-confidence (hit) (nth hit 5))
+    (defn ra-hit-threshold (hit)
+        ; qtotal is two codes per deduplicated feature. Require whole pairs for
+        ; at least two-thirds of query features: 2 * ceil(qtotal / 3).
+        (if (le (ra-hit-query-total hit) 0) 0
+            (mul 2 (div (add (ra-hit-query-total hit) 2) 3))))
+    ; Content sufficiency is query coverage only. Ranking confidence and live
+    ; resolution are deliberately separate axes for the trust gate.
+    (defn ra-hit-sufficient? (hit)
+        (if (and (eq (ra-hit? hit) 1)
+                 (and (gt (ra-hit-score hit) 0)
+                      (ge (ra-hit-score hit) (ra-hit-threshold hit)))) 1 0))
 
-    ; top-1 grounded hit — the R6 retrieval lane before any rented oracle.
-    ; Native fkwu host-read strings currently must be parsed inside the read frame:
-    ; passing them through helpers loses content. The pure vector helpers above remain
-    ; four-way for literal/index cells; this path keeps live index lookup no-HTTP.
-    (defn ra-grounded-at (index-path query)
-        (do (let raw (read_file index-path))
-            (if (or (nil? raw) (eq (str_len raw) 0))
-                "grounded:miss"
+    (defn ra-confidence (best-score runner-score)
+        (if (eq best-score 0) 0
+            (div (mul (sub best-score runner-score) 100) best-score)))
+
+    (defn ra-select-hit (query entries)
+        (if (or (eq (str_len query) 0) (eq (len entries) 0))
+            (ra-miss)
+            (do
+                (let qvec (re-semantic-vec query))
+                (let qtotal (len qvec))
+                (let top (rag-topk-overlap qvec entries 2))
+                (if (or (eq qtotal 0) (eq (len top) 0))
+                    (ra-miss)
+                    (do
+                        (let best (nth top 0))
+                        (let score (rag-overlap-score qvec best))
+                        (let runner (if (lt (len top) 2) 0
+                            (rag-overlap-score qvec (nth top 1))))
+                        (let hit (ra-hit-row "hit" best score runner qtotal
+                            (ra-confidence score runner)))
+                        (if (eq (ra-hit-sufficient? hit) 1) hit (ra-miss)))))))
+
+    ; ── bounded-memory / bounded-depth JSONL ranking ──
+    ; The production index is several megabytes. Building ra-lines + ra-entries
+    ; retains the whole parsed corpus, while a linear recursive scanner retains
+    ; one emitted-walker frame per row. Balanced LF-aligned ranges keep call
+    ; depth logarithmic and merge only each half's deterministic best two.
+    (defn ra-empty-ranking () (list (empty) (empty)))
+    (defn ra-ranking-add (qvec ranked candidate)
+        (do
+            (let best (nth ranked 0))
+            (let runner (nth ranked 1))
+            (if (eq (len candidate) 0) ranked
+                (if (eq (len best) 0) (list candidate runner)
+                    (if (eq (rag-overlap-better? qvec candidate best) 1)
+                        (list candidate best)
+                        (if (str_eq (rag-id candidate) (rag-id best)) ranked
+                            (if (or (eq (len runner) 0)
+                                    (eq (rag-overlap-better? qvec candidate runner) 1))
+                                (list best candidate) ranked)))))))
+    (defn ra-ranking-merge (qvec left right)
+        (ra-ranking-add qvec
+            (ra-ranking-add qvec left (nth right 0))
+            (nth right 1)))
+    (defn ra-stream-effective-end (text)
+        (do
+            (let n (str_len text))
+            (if (and (gt n 0) (eq (str_byte_at text (sub n 1)) 10))
+                (sub n 1) n)))
+    (defn ra-stream-range-split (text start end)
+        (do
+            (let mid (div (add start end) 2))
+            (let after-mid (scan_run text mid 5))
+            (if (lt after-mid end) after-mid
+                (scan_run text start 5))))
+    (defn ra-stream-rank-range (text start end qvec)
+        (if (ge start end) (ra-empty-ranking)
+            (do
+                (let split (ra-stream-range-split text start end))
+                (if (ge split end)
+                    (do
+                        (let line (substring text start end))
+                        (if (eq (ra-line-ready? line) 0) (ra-empty-ranking)
+                            (list (ra-entry-of-line line) (empty))))
+                    (ra-ranking-merge qvec
+                        (ra-stream-rank-range text start split qvec)
+                        (ra-stream-rank-range text (add split 1) end qvec))))))
+
+    (defn ra-stream-hit (text query)
+        (do
+            (let qvec (re-semantic-vec query))
+            (if (or (eq (str_len text) 0) (eq (len qvec) 0))
+                (ra-miss)
                 (do
-                    (let staged (if (eq (str_len query) 0) (read_file (ra-staged-query)) query))
-                    (let q (if (nil? staged) "" staged))
-                    (let needle q)
-                    (let hit (str_find raw needle 0))
-                    (if (or (eq (str_len needle) 0) (lt hit 0))
-                        "grounded:miss"
+                    (let ranked (ra-stream-rank-range
+                        text 0 (ra-stream-effective-end text) qvec))
+                    (let best (nth ranked 0))
+                    (let runner-entry (nth ranked 1))
+                    (if (eq (len best) 0)
+                        (ra-miss)
                         (do
-	                            (let id-pos (ra-last-id-before-loop index-path 0 hit -1))
-	                            (if (lt id-pos 0)
-	                                "grounded:miss"
-	                                (do
-	                                    (let spaced-key (ra-id-key-spaced))
-	                                    (let tight-key (ra-id-key))
-	                                    (let key (if (eq (str_find raw spaced-key id-pos) id-pos) spaced-key tight-key))
-	                                    (let id-start (add id-pos (str_len key)))
-	                                    (let id-end (str_find raw "\"" id-start))
-                                    (if (lt id-end 0)
-                                        "grounded:miss"
-                                        (str_concat "grounded:" (substring raw id-start id-end)))))))))))
+                            (let score (rag-overlap-score qvec best))
+                            (let runner-score (if (eq (len runner-entry) 0) 0
+                                (rag-overlap-score qvec runner-entry)))
+                            (let hit (ra-hit-row "hit" best score runner-score (len qvec)
+                                (ra-confidence score runner-score)))
+                            (if (eq (ra-hit-sufficient? hit) 1) hit (ra-miss))))))))
 
+    (defn ra-grounded-hit-at (index-path query)
+        ; Keep the host-read values rooted in this live frame and feed those
+        ; exact string values to the streaming ranker.  `read_file` already
+        ; interns its byte buffer in the emitted walker. Projecting it through
+        ; intern_trivial_string -> node_value changes the value category on that
+        ; carrier and made valid standalone rows miss even though direct
+        ; ra-stream-hit over the same bytes succeeded.
+        (if (le (file_size index-path) 0)
+            (ra-miss)
+            (if (eq (str_len query) 0)
+                (if (le (file_size (ra-staged-query)) 0)
+                    (ra-miss)
+                    (do
+                        (let raw-index (read_file index-path))
+                        (let raw-query (read_file (ra-staged-query)))
+                        (ra-stream-hit raw-index raw-query)))
+                (do
+                    (let raw-index (read_file index-path))
+                    (ra-stream-hit raw-index query)))))
+    (defn ra-grounded-hit (query)
+        (ra-grounded-hit-at (ra-default-index) query))
+
+    ; ── exact answer decode, attributed output, and binding proofs ──
+    (defn ra-bytes-string-loop (bytes out)
+        (if (eq (len bytes) 0) out
+            (ra-bytes-string-loop (tail bytes)
+                (str_concat out (byte_to_str (head bytes))))))
+    (defn ra-answer-from-hex (answer-hex)
+        (if (eq (hex-valid? answer-hex) 0) ""
+            (ra-bytes-string-loop (hex-decode answer-hex) "")))
+    (defn ra-hit-answer (hit)
+        (ra-answer-from-hex (ra-hit-answer-hex hit)))
+
+    (defn ra-cat (parts)
+        (if (eq (len parts) 0) ""
+            (str_concat (head parts) (ra-cat (tail parts)))))
+
+    (defn ra-hit-binding-lines (hit)
+        (if (eq (ra-hit? hit) 0) ""
+            (ra-cat (list
+                "content-node:" (ra-hit-content-node-id hit)
+                "\nsource-path:" (ra-hit-source-path hit)
+                "\nsource-key:" (ra-hit-key hit)
+                "\nanswer-key:" (ra-hit-answer-key hit)))))
+
+    (defn ra-hit-score-lines (hit)
+        (ra-cat (list
+            "retrieval-score:" (int_to_str (ra-hit-score hit))
+            "\nretrieval-runner-score:" (int_to_str (ra-hit-runner-score hit))
+            "\nretrieval-query-total:" (int_to_str (ra-hit-query-total hit))
+            "\nretrieval-threshold:" (int_to_str (ra-hit-threshold hit))
+            "\nretrieval-confidence:" (int_to_str (ra-hit-confidence hit)))))
+
+    ; The answer is LAST, so arbitrary newlines in the exact decoded excerpt
+    ; cannot be confused with metadata. The whole payload is regenerated from the
+    ; selected hit for binding comparison; no wrapper concatenates answer text.
+    (defn ra-hit-output (hit)
+        (if (and (eq (ra-hit? hit) 1)
+                 (and (eq (ric-node-id-valid? (ra-hit-node-id hit)) 1)
+                      (eq (ric-node-id-valid? (ra-hit-content-node-id hit)) 1)))
+            (ra-cat (list
+                (ra-grounded-prefix) (ra-hit-node-id hit) "\n"
+                (ra-hit-binding-lines hit) "\n"
+                (ra-hit-score-lines hit)
+                "\nlocal-lane:fkwu-rag-grounded"
+                "\nsynthesis-lane:fkwu-rag-grounded"
+                "\nanswer-byte-length:" (int_to_str (str_len (ra-hit-answer hit)))
+                "\nanswer:" (ra-hit-answer hit)))
+            "grounded:miss"))
+
+    (defn ra-output-node-id (output)
+        (if (eq (str_find output (ra-grounded-prefix) 0) 0)
+            (do (let nl (str_find output (byte_to_str 10) 0))
+                (substring output (str_len (ra-grounded-prefix))
+                    (if (lt nl 0) (str_len output) nl)))
+            ""))
+    (defn ra-output-valid? (output)
+        (if (eq (ric-node-id-valid? (ra-output-node-id output)) 1) 1 0))
+    (defn ra-output-binds-hit? (output hit)
+        (if (and (eq (ra-output-valid? output) 1)
+                 (str_eq output (ra-hit-output hit))) 1 0))
+    (defn ra-output-answer (output)
+        (do (let marker "\nanswer:")
+            (let at (str_find output marker 0))
+            (if (lt at 0) ""
+                (substring output (add at (str_len marker)) (str_len output)))))
+    (defn ra-output-answer-binds-hit? (output hit)
+        (if (and (eq (ra-output-binds-hit? output hit) 1)
+                 (str_eq (ra-output-answer output) (ra-hit-answer hit))) 1 0))
+
+    (defn ra-grounded-at (index-path query)
+        (ra-hit-output (ra-grounded-hit-at index-path query)))
     (defn ra-grounded (query)
         (ra-grounded-at (ra-default-index) query))
 
