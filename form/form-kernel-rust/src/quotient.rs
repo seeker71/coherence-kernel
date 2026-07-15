@@ -39,13 +39,13 @@ use crate::{Kernel, NodeID, LEVEL_BASIC, LEVEL_TRIVIAL, TRIV_INT, TRIV_STRING};
 
 // ---------------------------------------------------------------------------
 // RBasic slot — QUOTIENT lives at type=70 across every kernel. The
-// equivalence-cell sibling category uses slot 71. These constants are
+// equivalence-cell sibling category uses slot 77. These constants are
 // part of the cross-kernel contract; do not renumber without updating
 // every kernel and the canonical JSON.
 // ---------------------------------------------------------------------------
 
 pub const RBASIC_QUOTIENT: u32 = 70;
-pub const RBASIC_EQUIVALENCE: u32 = 71;
+pub const RBASIC_EQUIVALENCE: u32 = 77;
 
 // ---------------------------------------------------------------------------
 // Decidability + canonicalization-strategy metadata

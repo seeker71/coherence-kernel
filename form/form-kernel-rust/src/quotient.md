@@ -1,10 +1,8 @@
 # QUOTIENT — Rust kernel arm
 
-Rust port of the QUOTIENT RBasic arm, fourth and final leg of the cross-kernel
-quartet (TS, Python, Go, Rust). Mirrors `form/form-kernel-ts/src/quotient.ts`
-and `api/app/services/substrate/quotient.py` field-for-field; handler names
-match exactly so a Form program ingested into any kernel canonicalizes
-identically.
+Rust sibling of the QUOTIENT RBasic arm. It mirrors
+`form/form-kernel-ts/src/quotient.ts` field-for-field; handler names match
+exactly so a Form program ingested into any sibling canonicalizes identically.
 
 ## Shape
 
@@ -113,7 +111,7 @@ Run: `cargo test --release`.
 
 Handler names (`integer-from-nat-pair`, `rational-from-int-pair`,
 `commutative-pair`, `associative-left-fold`), the RBasic slots (QUOTIENT=70,
-EQUIVALENCE=71), the equivalence-cell children layout
+EQUIVALENCE=77), the equivalence-cell children layout
 (`[name, decidability, strategy, handler_name]`), and the value inst markers
 (1=recipe, 2=canonical, 3=lazy-raw) all match TS / Python / Go. A Form
 program crossing kernels produces the same NodeIDs.

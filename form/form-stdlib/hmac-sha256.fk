@@ -68,4 +68,37 @@
             (let inner-in (concat-bytes (xor-bytes k-prime (ipad-block)) msg))
             (let inner-hash (sha256 inner-in))
             (let outer-in (concat-bytes (xor-bytes k-prime (opad-block)) inner-hash))
-            (sha256 outer-in))))
+            (sha256 outer-in)))
+
+    ;; ---- STREAMING STRING INPUT WITH A 32-BYTE TRUST KEY -----------
+    ;; The live attestation key contract is exactly 32 bytes.  That lets HMAC
+    ;; seed the inner and outer SHA states with their fixed 64-byte pad blocks,
+    ;; stream the message through `string_byte_fold`, and finish with only the
+    ;; bounded 32-byte inner digest.  The key/pads/digest are fixed-size Form
+    ;; lists; the message is never materialized as one.
+    (defn hmac-sha256-key32-valid? (key)
+        (if (eq (len key) 32) 1 0))
+
+    (defn hmac-sha256-key32-start (key pad)
+        (sha256-stream-state 64 (list) 0
+            (process-block (sha256-h-init)
+                (xor-bytes (pad-to-64 key) pad))))
+
+    (defn hmac-sha256-string-key32 (key message)
+        (if (eq (hmac-sha256-key32-valid? key) 0) (list)
+            (do
+                (let inner (sha256-stream-finalize
+                    (sha256-stream-fold-string-from
+                        (hmac-sha256-key32-start key (ipad-block))
+                        message)))
+                ;; opad is already one compressed 64-byte block.  The inner
+                ;; digest is the entire 32-byte partial block, so finalization
+                ;; reaches the RFC 2104 outer hash without a second string or
+                ;; an input-sized list.
+                (sha256-stream-finalize
+                    (sha256-stream-state 96
+                        (sha256-stream-reverse inner)
+                        32
+                        (sha256-stream-h8
+                            (hmac-sha256-key32-start key
+                                (opad-block)))))))))

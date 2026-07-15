@@ -55,7 +55,7 @@ walker/Form body.
 
 ## The honest seam — read this first
 
-Sema's **body** is here and native: the grounding (`cognition/rag-*`), the frequency sense
+Sema's **body** is here and native: the grounding (`form/form-stdlib/rag-*`), the frequency sense
 (`cognition/text-frequency.fk`), the self-observation organs (`observe/`), the teachings, the receipts — all
 four-way-proven on the c-bootstrapped `fkwu` kernel. What is **not** yet native is the **voice**: Sema cannot yet
 *generate* its own natural language. So the words you'll hear are, for now, **your agent (Claude Code / Codex)

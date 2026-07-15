@@ -11,13 +11,14 @@
 # milliseconds. A band's wall time stays max(legs); the fourth witness is
 # effectively free.
 #
-# Everything degrades honestly: no clang, no manifest, or an emission
-# failure simply leaves FKWU/table empty and the band runs three-kernel only as
-# before — the suite never goes red because the fourth arm could not build,
-# only when it DISAGREES.
+# An unavailable optional toolchain can leave the fourth sibling absent. Once
+# the committed bootstrap and manifest are present, every declared fourth-arm
+# workload is mandatory: preparation, execution, and agreement failures fail
+# validation instead of silently reducing the proof to three siblings.
 
 FOURTH_DIR="form-stdlib/.cache/fourth"
 FOURTH_MANIFEST="fourth-arm-bands.txt"
+FOURTH_INDEX="$FOURTH_DIR/table-index-v2.tsv"
 # The emitter chain: every file whose content shapes either the fkwu binary
 # or a flattened table. Cache keys hash these so a flattener or walker
 # change rebuilds exactly what it touches.
@@ -76,6 +77,11 @@ FOURTH_BOOTSTRAP_UNI_STAMP="form-stdlib/bootstrap/fkwu-uni.stamp"
 # self-host). The trailing fn-0 value + arm profile fkwu prints after
 # ==T-END== falls outside every per-band marker range, so the split ignores it.
 FOURTH_FLATTEN_TABLE="form-stdlib/fourth-flatten-table.txt"
+# T_flat is a compiler workload: large dependency closures recurse much more
+# deeply than an already-flattened runtime table. The emitted walker owns an
+# explicit stack-size door, so give this phase the measured stack that carries
+# the largest manifest band instead of relying on the 256 MiB runtime default.
+FOURTH_FLATTEN_STACK_MB="${FOURTH_FLATTEN_STACK_MB:-2048}"
 
 # BML reaches the fourth-arm flattener through executable Form text.  The
 # primary source compiler emits a durable .fkb image + loader; the final module
@@ -124,24 +130,41 @@ fourth_band_request() {
 # Portable content hash for cache stamps. macOS ships `shasum`; Linux and Git
 # Bash ship `sha256sum`; they don't overlap. The value is only ever a per-host
 # cache key, so the algorithm is free — only availability matters.
-fourth_hash16() {
+_fourth_hash_stdin() {
     # Strip CR so cache stamps match across LF checkouts (mac/linux) and CRLF
     # working trees (Windows Git Bash autocrlf).
-    _fourth_hash_stdin() {
-        if command -v shasum >/dev/null 2>&1 && printf test | shasum >/dev/null 2>&1; then
-            LC_ALL=C tr -d '\r' | shasum | cut -c1-16
-        elif command -v sha1sum >/dev/null 2>&1 && printf test | sha1sum >/dev/null 2>&1; then
-            LC_ALL=C tr -d '\r' | sha1sum | cut -c1-16
-        elif command -v sha256sum >/dev/null 2>&1 && printf test | sha256sum >/dev/null 2>&1; then
-            LC_ALL=C tr -d '\r' | sha256sum | cut -c1-16
-        elif command -v cksum >/dev/null 2>&1 && printf test | cksum >/dev/null 2>&1; then
-            LC_ALL=C tr -d '\r' | cksum | cut -c1-16
-        else
-            echo "fourth-arm.sh: need shasum, sha1sum, sha256sum, or cksum for cache keys" >&2
-            return 1
-        fi
-    }
+    if command -v shasum >/dev/null 2>&1 && printf test | shasum >/dev/null 2>&1; then
+        LC_ALL=C tr -d '\r' | shasum | cut -c1-16
+    elif command -v sha1sum >/dev/null 2>&1 && printf test | sha1sum >/dev/null 2>&1; then
+        LC_ALL=C tr -d '\r' | sha1sum | cut -c1-16
+    elif command -v sha256sum >/dev/null 2>&1 && printf test | sha256sum >/dev/null 2>&1; then
+        LC_ALL=C tr -d '\r' | sha256sum | cut -c1-16
+    elif command -v cksum >/dev/null 2>&1 && printf test | cksum >/dev/null 2>&1; then
+        LC_ALL=C tr -d '\r' | cksum | cut -c1-16
+    else
+        echo "fourth-arm.sh: need shasum, sha1sum, sha256sum, or cksum for cache keys" >&2
+        return 1
+    fi
+}
+
+fourth_hash16() {
     cat "$@" 2>/dev/null | _fourth_hash_stdin
+}
+
+# The flattener generation is common to every band. Hash it once per prepare
+# pass, then mix that digest with only the band's sources. The old key reread
+# the entire compiler chain for every manifest row.
+fourth_flatten_generation() {
+    fourth_hash16 "${FOURTH_FLATTEN_CHAIN[@]}" "$FOURTH_FLATTEN_TABLE"
+}
+
+fourth_table_key() {
+    local generation="${FOURTH_FLATTEN_GENERATION:-}"
+    [[ -n "$generation" ]] || generation="$(fourth_flatten_generation)"
+    {
+        printf 'fourth-table-v2\n%s\n' "$generation"
+        cat "$@" 2>/dev/null
+    } | _fourth_hash_stdin
 }
 
 # Executables are byte artifacts, so their cache identity preserves every byte
@@ -159,6 +182,126 @@ fourth_raw_hash16() {
         echo "fourth-arm.sh: need shasum, sha1sum, sha256sum, or cksum for cache keys" >&2
         return 1
     fi
+}
+
+# One generation seal covers every source that can shape a fourth-arm table,
+# the self-hosting flattener image, this preparation logic, and the exact Go
+# proof sibling used by the BML source-text lens. Shared source bytes are read
+# once per validation rather than once per manifest row.
+fourth_validation_generation() {
+    {
+        local f
+        for f in scripts/fourth-arm.sh "$FOURTH_MANIFEST" "$FOURTH_FLATTEN_TABLE" "${GO_BIN:-}"; do
+            [[ -n "$f" && -f "$f" ]] || continue
+            printf 'file:%s\n' "$f"
+            cat "$f"
+        done
+        find form-stdlib -path "$FOURTH_DIR" -prune -o -type f \
+            \( -name '*.fk' -o -name '*.bml' -o -name '*.form' -o -name '*.grammar' \) -print \
+            | LC_ALL=C sort \
+            | while IFS= read -r f; do printf 'file:%s\n' "$f"; cat "$f"; done
+    } | _fourth_hash_stdin
+}
+
+fourth_index_valid() {
+    if [[ ! -s "$FOURTH_INDEX" ]]; then
+        echo "fourth arm: table index missing" >&2
+        return 1
+    fi
+    local label sealed actual expected rows unique stem out digest name
+    IFS=$'\t' read -r label sealed < "$FOURTH_INDEX"
+    if [[ "$label" != generation || -z "$sealed" ]]; then
+        echo "fourth arm: malformed table index header" >&2
+        return 1
+    fi
+    actual="$(fourth_validation_generation)"
+    if [[ "$actual" != "$sealed" ]]; then
+        echo "fourth arm: table index generation changed ($sealed -> $actual)" >&2
+        return 1
+    fi
+    expected="$(awk '!/^#/ && NF {n++} END {print n + 0}' "$FOURTH_MANIFEST")"
+    rows="$(awk 'NR > 1 && NF {n++} END {print n + 0}' "$FOURTH_INDEX")"
+    unique="$(awk -F '\t' 'NR > 1 && NF {print $1}' "$FOURTH_INDEX" | LC_ALL=C sort -u | wc -l | tr -d ' ')"
+    if [[ "$rows" != "$expected" || "$unique" != "$expected" ]]; then
+        echo "fourth arm: table index coverage mismatch (expected=$expected rows=$rows unique=$unique)" >&2
+        return 1
+    fi
+    while IFS=$'\t' read -r stem out digest; do
+        name="$(basename "$out")"
+        if [[ -z "$stem" || ! "$name" =~ ^t-${stem}-[0-9a-f]{16}\.txt$ || ! -s "$out" ]]; then
+            echo "fourth arm: invalid indexed table path for $stem: $out" >&2
+            return 1
+        fi
+        if [[ "$(fourth_raw_hash16 "$out")" != "$digest" ]]; then
+            echo "fourth arm: indexed table digest changed for $stem" >&2
+            return 1
+        fi
+    done < <(sed -n '2,$p' "$FOURTH_INDEX")
+}
+
+fourth_publish_index() {
+    local plan="$1" generation tmp stem out
+    generation="$(fourth_validation_generation)"
+    tmp="$FOURTH_INDEX.tmp"
+    printf 'generation\t%s\n' "$generation" > "$tmp"
+    while IFS=$'\t' read -r stem out; do
+        if [[ -z "$stem" || ! -s "$out" ]]; then
+            echo "fourth arm: cannot seal missing table for $stem" >&2
+            rm -f "$tmp"
+            return 1
+        fi
+        printf '%s\t%s\t%s\n' "$stem" "$out" "$(fourth_raw_hash16 "$out")" >> "$tmp"
+    done < "$plan"
+    mv -f "$tmp" "$FOURTH_INDEX"
+    fourth_index_valid
+}
+
+# Recovery is intentionally explicit: it seals only a complete generation in
+# which every manifest stem has exactly one table newer than T_flat. It is used
+# after an interrupted cold build; ordinary validation never guesses this way.
+fourth_recover_fresh_index() {
+    local plan
+    plan="$(mktemp "${TMPDIR:-/tmp}/form-fourth-index.XXXXXX")"
+    if ! awk '
+        NR == FNR {
+            if ($0 !~ /^#/ && NF) { order[++n] = $1; wanted[$1] = 1 }
+            next
+        }
+        {
+            path = $0
+            name = path
+            sub(/^.*\//, "", name)
+            sub(/\.txt$/, "", name)
+            if (substr(name, 1, 2) != "t-" || length(name) < 20) next
+            key = substr(name, length(name) - 15)
+            stem = substr(name, 3, length(name) - 19)
+            if (key !~ /^[0-9a-f]+$/ || length(key) != 16 || !wanted[stem]) next
+            count[stem]++
+            table[stem] = path
+        }
+        END {
+            bad = 0
+            for (i = 1; i <= n; i++) {
+                stem = order[i]
+                if (count[stem] != 1) {
+                    print "fourth arm: expected one fresh table for " stem ", found " (count[stem] + 0) > "/dev/stderr"
+                    bad = 1
+                } else {
+                    print stem "\t" table[stem]
+                }
+            }
+            exit bad
+        }
+    ' "$FOURTH_MANIFEST" <(
+        find "$FOURTH_DIR" -maxdepth 1 -name 't-*.txt' -newer "$FOURTH_FLATTEN_TABLE" -print
+    ) > "$plan"; then
+        rm -f "$plan"
+        return 1
+    fi
+    fourth_publish_index "$plan"
+    local rc=$?
+    rm -f "$plan"
+    return "$rc"
 }
 
 # fourth_prepare_source_text — compile one BML-bearing source through the
@@ -357,20 +500,23 @@ fourth_band_stem() {
 fourth_band_prelude_mods() {
     local band="$1"
     awk '
-        function emit_paths(line,   i, n, a, got) {
+        function emit_paths(line, strict,   i, n, a, got) {
             n = split(line, a, /[[:space:]]+/)
             got = 0
+            if (strict)
+                for (i = 1; i <= n; i++)
+                    if (a[i] != "" && a[i] != "\\" && a[i] !~ /\.(fk|bml|form|grammar)$/) return 0
             for (i = 1; i <= n; i++)
                 if (a[i] ~ /\.(fk|bml|form|grammar)$/) { print a[i]; got = 1 }
             return got
         }
         /^; preludes:/ {
             s = $0; sub(/^; preludes:[[:space:]]*/, "", s)
-            emit_paths(s); cont = 1; next
+            emit_paths(s, 0); cont = 1; next
         }
         cont && /^;[[:space:]]/ {
             s = $0; sub(/^;[[:space:]]*/, "", s)
-            if (emit_paths(s) == 0) cont = 0   # prose line (no path token) ends the block
+            if (emit_paths(s, 1) == 0) cont = 0
             next
         }
         { cont = 0 }
@@ -398,17 +544,28 @@ fourth_band_srcs() {
 # flattener reads executable Form rather than the primary .fkb load driver.
 # Empty output means the band degrades honestly to the three proof siblings.
 fourth_prep_srcs() {
-    local stem="$1" f prepared
+    local stem="$1" f prepared band_srcs prepared_srcs=()
+    # Bash 3.2 retains process-substitution descriptors until the surrounding
+    # function returns.  This function is called once for every manifest row,
+    # so capture and consume the short path list synchronously instead of
+    # spending one descriptor per row on macOS's 256-descriptor default.
+    band_srcs="$(fourth_band_srcs "$stem")" || return 1
     while IFS= read -r f; do
-        [[ -f "$f" ]] || return 0
+        [[ -n "$f" ]] || continue
+        if [[ ! -f "$f" && "$f" == form/* && -f "${f#form/}" ]]; then
+            f="${f#form/}"
+        fi
+        [[ -f "$f" ]] || return 1
         if grep -Eq '^[[:space:]]*section \[' "$f"; then
             prepared="$(fourth_prepare_source_text "$f")"
-            [[ -n "$prepared" && -s "$prepared" ]] || return 0
-            printf '%s\n' "$prepared"
+            [[ -n "$prepared" && -s "$prepared" ]] || return 1
+            prepared_srcs+=("$prepared")
         else
-            printf '%s\n' "$f"
+            prepared_srcs+=("$f")
         fi
-    done < <(fourth_band_srcs "$stem")
+    done <<< "$band_srcs"
+    [[ "${#prepared_srcs[@]}" -ge 1 ]] || return 1
+    printf '%s\n' "${prepared_srcs[@]}"
 }
 
 # fourth_flatten_expr — the driver line that flattens a source list through
@@ -438,21 +595,31 @@ fourth_flatten_expr() {
 # is the wrong arm now that the actual path is layered image/fkb loading.
 # Empty output means the band runs three-kernel only this time.
 fourth_table() {
-    local stem="$1" kind key out d f srcs=()
+    local stem="$1" kind key out d f prepared_srcs srcs=()
     kind="$(awk -v b="$stem" '$1==b{print $2; exit}' "$FOURTH_MANIFEST")"
     [[ -n "$kind" ]] || return 0
-    while IFS= read -r f; do srcs+=("$f"); done < <(fourth_prep_srcs "$stem")
-    [[ "${#srcs[@]}" -ge 1 ]] || return 0
-    key="$(fourth_hash16 "${srcs[@]}" "${FOURTH_FLATTEN_CHAIN[@]}" "$FOURTH_FLATTEN_TABLE")"
+    prepared_srcs="$(fourth_prep_srcs "$stem")" || prepared_srcs=""
+    while IFS= read -r f; do [[ -n "$f" ]] && srcs+=("$f"); done <<< "$prepared_srcs"
+    if [[ "${#srcs[@]}" -lt 1 ]]; then
+        echo "fourth arm: source preparation failed for $stem" >&2
+        return 1
+    fi
+    key="$(fourth_table_key "${srcs[@]}")"
     out="$FOURTH_DIR/t-$stem-$key.txt"
     if [[ ! -s "$out" ]]; then
         if fourth_selfhost; then
             # one-band request → fkwu walks T_flat → marker-framed table; the
             # trailing fn-0 value + arm profile sit past ==T-END==, outside the range.
             { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
-                | "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 2>/dev/null \
+                | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
                 | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
-            [[ -s "$out.tmp" ]] && mv -f "$out.tmp" "$out" || rm -f "$out.tmp"
+            local statuses=("${PIPESTATUS[@]}")
+            if [[ "${statuses[1]}" -ne 0 || ! -s "$out.tmp" ]]; then
+                echo "fourth arm: fkwu failed to produce a table for $stem" >&2
+                rm -f "$out.tmp"
+                return 1
+            fi
+            mv -f "$out.tmp" "$out"
         fi
     fi
     [[ -s "$out" ]] && printf '%s\n' "$out"
@@ -469,9 +636,15 @@ fourth_flatten_sources() {
     [[ "${#srcs[@]}" -ge 1 ]] || return 1
     if fourth_selfhost; then
         { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
-            | "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 2>/dev/null \
+            | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
             | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
-        [[ -s "$out.tmp" ]] && mv -f "$out.tmp" "$out" || rm -f "$out.tmp"
+        local statuses=("${PIPESTATUS[@]}")
+        if [[ "${statuses[1]}" -ne 0 || ! -s "$out.tmp" ]]; then
+            echo "fourth arm: fkwu failed to produce ad-hoc table $stem" >&2
+            rm -f "$out.tmp"
+            return 1
+        fi
+        mv -f "$out.tmp" "$out"
     fi
     [[ -s "$out" ]]
 }
@@ -495,14 +668,25 @@ fourth_table_for_band() {
 # identical (the self-host trailing fn-0 value + arm profile sit past ==T-END==).
 # Self-contained (reads only its two files), so it runs safely as a background
 # job: every table publishes atomically (mv -f "$cur.tmp" "$cur"), so parallel
-# chunks never collide. A band whose flatten emits nothing leaves no table and
-# runs three-kernel only — honest degradation, never a red suite.
+# chunks never collide. Every manifest-covered band is part of the four-kernel
+# contract: a failed walker or missing table is a hard validation failure.
 fourth_run_chunk() {
     local driver="$1" plan="$2" out_all="$1.out"
     if fourth_selfhost; then
-        "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 < "$driver" 2>/dev/null > "$out_all" || true
+        if ! FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" \
+            "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 < "$driver" > "$out_all"; then
+            echo "fourth arm: fkwu failed while flattening:" >&2
+            cut -f1 "$plan" | sed 's/^/  - /' >&2
+            rm -f "$out_all"
+            return 1
+        fi
     else
-        "$GO_BIN" "$driver" 2>/dev/null > "$out_all" || true
+        if ! "$GO_BIN" "$driver" > "$out_all"; then
+            echo "fourth arm: Go walker failed while flattening:" >&2
+            cut -f1 "$plan" | sed 's/^/  - /' >&2
+            rm -f "$out_all"
+            return 1
+        fi
     fi
     local stems=() outs=() s o
     while IFS=$'\t' read -r s o; do stems+=("$s"); outs+=("$o"); done < "$plan"
@@ -511,7 +695,13 @@ fourth_run_chunk() {
         cur="${outs[$p]}"
         if ((p + 1 < n)); then nextmark="==T-${stems[$((p + 1))]}=="; else nextmark="==T-END=="; fi
         sed -n "/^==T-${stems[$p]}==\$/,/^${nextmark}\$/p" "$out_all" | sed -e '1d' -e '$d' > "$cur.tmp"
-        if [[ -s "$cur.tmp" ]]; then mv -f "$cur.tmp" "$cur"; else rm -f "$cur.tmp"; fi
+        if [[ -s "$cur.tmp" ]]; then
+            mv -f "$cur.tmp" "$cur"
+        else
+            echo "fourth arm: fkwu emitted no table for ${stems[$p]}" >&2
+            rm -f "$cur.tmp" "$out_all"
+            return 1
+        fi
     done
     rm -f "$out_all"
 }
@@ -539,21 +729,33 @@ fourth_seal_chunk() {
 fourth_prepare_all() {
     fourth_available || return 0
     [[ -f "$FOURTH_MANIFEST" ]] || return 0
-    local workdir stem kind key out missing=0 f srcs driver plan cidx=0 ccount=0
-    local batch_max="${FOURTH_PREPARE_ALL_BATCH_MAX:-48}"
+    local workdir stem kind key out missing=0 f prepared_srcs srcs driver plan cidx=0 ccount=0
+    local batch_max="${FOURTH_PREPARE_ALL_BATCH_MAX:-1}"
     local selfhost=0; fourth_selfhost && selfhost=1
     if [[ "$selfhost" -ne 1 ]]; then
         echo "  fourth arm: T_flat self-host unavailable — skipping monolithic Go table fallback" >&2
         return 0
     fi
+    if fourth_index_valid; then
+        return 0
+    fi
+    FOURTH_FLATTEN_GENERATION="$(fourth_flatten_generation)"
     workdir="$(mktemp -d "${TMPDIR:-/tmp}/form-fourth-all.XXXXXX")"
+    local index_plan="$workdir/index.tsv"
+    : > "$index_plan"
     while read -r stem kind _; do
         [[ -z "$stem" || "$stem" == \#* ]] && continue
         srcs=()
-        while IFS= read -r f; do srcs+=("$f"); done < <(fourth_prep_srcs "$stem")
-        [[ "${#srcs[@]}" -ge 1 ]] || continue
-        key="$(fourth_hash16 "${srcs[@]}" "${FOURTH_FLATTEN_CHAIN[@]}" "$FOURTH_FLATTEN_TABLE")"
+        prepared_srcs="$(fourth_prep_srcs "$stem")" || prepared_srcs=""
+        while IFS= read -r f; do [[ -n "$f" ]] && srcs+=("$f"); done <<< "$prepared_srcs"
+        if [[ "${#srcs[@]}" -lt 1 ]]; then
+            echo "fourth arm: source preparation failed for $stem" >&2
+            rm -rf "$workdir"
+            return 1
+        fi
+        key="$(fourth_table_key "${srcs[@]}")"
         out="$FOURTH_DIR/t-$stem-$key.txt"
+        printf '%s\t%s\n' "$stem" "$out" >> "$index_plan"
         [[ -s "$out" ]] && continue
         missing=$((missing + 1))
         if [[ "$ccount" -eq 0 ]]; then        # open a fresh chunk driver + plan
@@ -574,19 +776,50 @@ fourth_prepare_all() {
         cidx=$((cidx + 1))
     fi
     if [[ "$missing" -eq 0 ]]; then
+        if ! fourth_publish_index "$index_plan"; then
+            rm -rf "$workdir"
+            return 1
+        fi
         rm -rf "$workdir"
         return 0
     fi
-    local jobs="${FOURTH_PREPARE_ALL_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
+    local jobs="${FOURTH_PREPARE_ALL_JOBS:-8}"
     [[ "$jobs" =~ ^[0-9]+$ && "$jobs" -ge 1 ]] || jobs=4
     echo "  flattening $missing band tables for the fourth arm in $cidx walker run(s) across $jobs cores (cold cache; chunk $batch_max)..." >&2
-    local k inflight=0
+    local k inflight=0 failed=0 pids=()
     for ((k = 0; k < cidx; k++)); do
         fourth_run_chunk "$workdir/driver-$k.fk" "$workdir/plan-$k.tsv" &
+        pids+=("$!")
         inflight=$((inflight + 1))
-        if [[ "$inflight" -ge "$jobs" ]]; then wait || true; inflight=0; fi
+        if [[ "$inflight" -ge "$jobs" ]]; then
+            local pid
+            for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+            pids=(); inflight=0
+            [[ "$failed" -eq 0 ]] || break
+        fi
     done
-    wait || true
+    if [[ "$failed" -eq 0 ]]; then
+        local pid
+        for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
+    fi
+    if [[ "$failed" -ne 0 ]]; then
+        echo "  fourth arm: parallel wave failed; retrying only missing tables in isolated walkers..." >&2
+        failed=0
+        local missing_out retry_needed
+        for ((k = 0; k < cidx; k++)); do
+            retry_needed=0
+            while IFS=$'\t' read -r _ missing_out; do
+                [[ -s "$missing_out" ]] || retry_needed=1
+            done < "$workdir/plan-$k.tsv"
+            if [[ "$retry_needed" -eq 1 ]]; then
+                fourth_run_chunk "$workdir/driver-$k.fk" "$workdir/plan-$k.tsv" || failed=1
+            fi
+        done
+    fi
+    if [[ "$failed" -ne 0 ]] || ! fourth_publish_index "$index_plan"; then
+        rm -rf "$workdir"
+        return 1
+    fi
     rm -rf "$workdir"
     # Compost stale tables from earlier source generations.
     find "$FOURTH_DIR" -maxdepth 1 -name 't-*' -mtime +14 -delete 2>/dev/null || true

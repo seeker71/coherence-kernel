@@ -6,11 +6,11 @@
 //
 // This module is the Rust mirror of `form/form-kernel-ts/src/formats.ts`
 // and `numeric.ts`. The canonical contract lives at
-// `docs/coherence-substrate/numeric-formats.canonical.json`; every kernel reads
+// `form/contracts/numeric-formats.canonical.json`; every kernel reads
 // it on startup so content-addressing produces identical NodeIDs across
 // kernels for the same recipe structure.
 //
-// See docs/coherence-substrate/numeric-types-plan.md for the architecture.
+// See form/contracts/README.md for ownership and conformance.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -242,10 +242,9 @@ pub fn canonical_json_path() -> PathBuf {
     // CARGO_MANIFEST_DIR points at form/form-kernel-rust at build time.
     let manifest = env!("CARGO_MANIFEST_DIR");
     let mut p = PathBuf::from(manifest);
-    // …/form/form-kernel-rust → up twice → repo root → docs/...
+    // …/form/form-kernel-rust → form → contracts/...
     p.pop();
-    p.pop();
-    p.push("docs/coherence-substrate/numeric-formats.canonical.json");
+    p.push("contracts/numeric-formats.canonical.json");
     p
 }
 

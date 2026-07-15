@@ -133,11 +133,11 @@ console.log("[test] Option totality — missing arm raises");
   );
 }
 
-console.log("[test] CHOICE recipe — walker totality check");
+console.log("[test] CHOICE_MATCH recipe — walker totality check");
 {
   const k = new Kernel();
   const inds = install_builtin_inductives(k);
-  // Build a CHOICE recipe directly: match Option.some(5) covering only 'some'.
+  // Build a CHOICE_MATCH recipe directly: match Option.some(5) covering only 'some'.
   const some5 = make_constructor(k, inds.Option, "some", [
     k.internTrivialInt(5),
   ]);
@@ -149,13 +149,13 @@ console.log("[test] CHOICE recipe — walker totality check");
   const cat: { pkg: number; level: number; type: number; inst: number } = {
     pkg: 1,
     level: Level.BASIC,
-    type: RBasic.CHOICE,
+    type: RBasic.CHOICE_MATCH,
     inst: 1,
   };
   const choice = k.intern(cat, [some5, someArmName, ninetyNine]);
 
   raises(
-    "CHOICE walker rejects missing 'none' arm",
+    "CHOICE_MATCH walker rejects missing 'none' arm",
     () => {
       walk(k, choice, new Frame(null));
     },
@@ -173,7 +173,7 @@ console.log("[test] CHOICE recipe — walker totality check");
     zeroLit,
   ]);
   const v = walk(k, choiceTotal, new Frame(null));
-  eq("CHOICE returned 99 for 'some' arm", v, { kind: "int", int: 99 } as Value);
+  eq("CHOICE_MATCH returned 99 for 'some' arm", v, { kind: "int", int: 99 } as Value);
 }
 
 console.log("[test] Custom inductive — Color := red | green | blue");

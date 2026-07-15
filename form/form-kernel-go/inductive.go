@@ -1,8 +1,7 @@
 // inductive.go — INDUCTIVE / CONSTRUCTOR / CHOICE arms: algebraic datatypes
-// as substrate cells. Mirrors:
+// as substrate cells. Mirrors the canonical sibling implementation:
 //
 //   form/form-kernel-ts/src/inductive.ts   (TS reference)
-//   api/app/services/substrate/inductive.py       (Python port)
 //
 // An inductive type is a substrate recipe whose category is RBasicInductive
 // (slot 71). Its shape — defined here once, read everywhere by

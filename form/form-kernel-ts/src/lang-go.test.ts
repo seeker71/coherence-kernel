@@ -216,17 +216,21 @@ function valueInt(v: Value): number {
 }
 
 // ---------------------------------------------------------------------------
-// 9. Boolean / comparison.
+// 9. Boolean syntax / canonical truth acknowledgments.
+//
+// Language parsers lower comparisons and logic to the shared Form categories.
+// Those categories acknowledge truth with axiom-1's integer states (1/0), as
+// every sibling kernel does; source-language `bool` literals remain bool values.
 // ---------------------------------------------------------------------------
 
 {
   const k = new Kernel();
   createGoLanguage(k);
   const r1 = walk(k, parseGo(k, `1 < 2 && 3 == 3`), new Frame(null));
-  assertEq(r1.kind, "bool", "comparison result kind");
-  assertEq((r1 as { bool: boolean }).bool, true, "1 < 2 && 3 == 3");
+  assertEq(r1.kind, "int", "comparison result is the canonical truth state");
+  assertEq(valueInt(r1), 1, "1 < 2 && 3 == 3");
   const r2 = walk(k, parseGo(k, `!(1 == 2)`), new Frame(null));
-  assertEq((r2 as { bool: boolean }).bool, true, "!(1 == 2)");
+  assertEq(valueInt(r2), 1, "!(1 == 2)");
 }
 
 // ---------------------------------------------------------------------------
