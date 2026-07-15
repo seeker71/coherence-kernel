@@ -113,7 +113,9 @@ Current state per region. **Chronology is deliberately not kept here** — the f
   regenerable `.tbl` caches.
 
 ### Standard library & agent surface
-- **`form/form-stdlib/`** — the living stdlib (~56 recipes + ~58 band tests). Core vocabulary (`core.fk`:
+- **`form/form-stdlib/`** — the living stdlib and sole agent dispatch surface. Its canonical
+  `form-cli-*.fk`, `fsh-*.fk`, and focused bands build the self-contained `form/form-cli` binary; there
+  is no parallel top-level agent-source room. Core vocabulary (`core.fk`:
   narrow-waist string ops, `int_to_str`/`str_to_int`/`str_find`/`float_to_str`/`intern_node_at`, Num/List/Cell/Task);
   the **wire-serialization lane** — `wire-registry.fk` (registry + universal `WIRE-NULL`), `cell-serialize.fk`
   (JSON, values+types+identity round-trip by axiom-3), `wire-xml.fk`, `wire-corba-cdr.fk` (real IEEE754 doubles),
@@ -125,8 +127,6 @@ Current state per region. **Chronology is deliberately not kept here** — the f
   storage ports. Two `fkwu --src` truths every stdlib file honors: top-level `let` is invisible inside `defn`
   bodies (use zero-arg `defn`s for constants), and band tests wrap their checks in a named `defn` called
   explicitly (bare top-level `(do (let ...))` probes are unreliable).
-- **`form-cli/`** — the agent dispatch surface (~25 cells). Runs; ~30 declared prelude dependencies name a
-  future migration wave from the origin (an honest pending list, not broken code).
 
 ### Control & grammars
 - **`control/`** — the offer/ack control core (fail/stop/choice/exceptions/async over ONE mechanism, axiom-5),

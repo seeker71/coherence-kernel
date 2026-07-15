@@ -1,0 +1,351 @@
+; form-cli-staged-trace.fk — one selected hit, protected grounding/frequency
+; attestations, and one native trust/result row.
+;
+; preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/sha256.fk form-stdlib/hmac-sha256.fk form-stdlib/hex.fk
+; preludes: form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk
+; preludes: form-stdlib/rag-ask.fk form-stdlib/form-cli-router.fk
+; preludes: form-stdlib/form-cli-judge.fk form-stdlib/form-cli-sufficiency.fk
+; preludes: form-stdlib/form-freq-check.fk form-stdlib/trust-row.fk
+; preludes: form-stdlib/form-cli-ask-gate.fk
+;
+; A public SHA over caller-controlled fields proves only self-consistency. It is
+; not evidence that the database or WITNESS was observed. The live request lane
+; therefore reads a private 32-byte key and passes it here to verify two HMAC
+; attestations. The 18 pipe-delimited receipt fields are:
+;
+;   0 REF                 10 certificate REF
+;   1 content CTOR       11 certificate CTOR
+;   2 source key         12 certificate answer SHA-256
+;   3 source path        13 certificate evidence key
+;   4 answer SHA-256     14 certificate issued epoch
+;   5 persisted-content  15 certificate expiry epoch
+;     SHA-256            16 certificate result
+;   6 query SHA-256      17 certificate HMAC-SHA-256
+;   7 grounding issued
+;   8 grounding expiry
+;   9 grounding HMAC
+;
+; Both attestations bind the request id, current selected hit, and actual native wall clock.
+; They allow 30 seconds of clock skew and at most five minutes of life. Missing
+; key/MAC, future issuance, expiry, replay onto another query, or any one-field
+; mutation closes trust. Unkeyed SHA remains only the query content identifier.
+
+(do
+    (defn fcast-part (parts i fallback)
+        (if (gt (len parts) i) (nth parts i) fallback))
+    (defn fcast-arg (arg i fallback)
+        (fcast-part (split-on arg "|") i fallback))
+    (defn fcast-receipt-shape? (arg)
+        (if (and (eq (len (split-on arg "|")) 18)
+                 (and (lt (str_find arg (byte_to_str 10) 0) 0)
+                      (lt (str_find arg (byte_to_str 13) 0) 0))) 1 0))
+    (defn fcast-request-id-shape? (request-id)
+        (if (and (gt (str_len request-id) 0)
+                 (and (le (str_len request-id) 128)
+                      (and (lt (str_find request-id "|" 0) 0)
+                           (and (lt (str_find request-id (byte_to_str 10) 0) 0)
+                                (lt (str_find request-id (byte_to_str 13) 0) 0))))) 1 0))
+
+    (defn fcast-percent (n total)
+        (if (eq total 0) 0
+            (if (gt (div (mul n 100) total) 100) 100
+                (div (mul n 100) total))))
+
+    ; The canonical streaming SHA/HMAC recipes own the byte fold, bounded
+    ; partial block, padding, and compression.  This trust surface only names
+    ; their hex-shaped protocol adapters; it carries no second crypto engine.
+    (defn fcast-sha256-bytes (s)
+        (sha256-stream-string s))
+    (defn fcast-sha256-hex (s)
+        (hex-encode (fcast-sha256-bytes s)))
+    (defn fcast-query-key (query)
+        (fcast-sha256-hex query))
+
+    (defn fcast-cat (parts)
+        (if (eq (len parts) 0) ""
+            (str_concat (head parts) (fcast-cat (tail parts)))))
+
+    (defn fcast-key-valid? (key-hex)
+        (if (and (eq (str_len key-hex) 64)
+                 (eq (hex-valid? key-hex) 1)) 1 0))
+    (defn fcast-mac-valid-shape? (mac)
+        (if (and (eq (str_len mac) 64)
+                 (eq (hex-valid? mac) 1)) 1 0))
+    (defn fcast-hmac-sha256-string (key-bytes message)
+        (hmac-sha256-string-key32 key-bytes message))
+    (defn fcast-hmac-hex (key-hex message)
+        (if (eq (fcast-key-valid? key-hex) 0) ""
+            (hex-encode (fcast-hmac-sha256-string
+                (hex-decode key-hex) message))))
+
+    ; Compare every byte when lengths agree. This is the recipe-level timing
+    ; floor; no first-mismatch branch leaks which MAC prefix was correct.
+    (defn fcast-diff-loop (a b i diff)
+        (if (ge i (str_len a)) diff
+            (fcast-diff-loop a b (add i 1)
+                (add diff (if (eq (str_byte_at a i) (str_byte_at b i)) 0 1)))))
+    (defn fcast-secure-eq? (a b)
+        (if (not (eq (str_len a) (str_len b))) 0
+            (if (eq (fcast-diff-loop a b 0 0) 0) 1 0)))
+
+    (defn fcast-clock-skew-seconds () 30)
+    (defn fcast-max-attestation-seconds () 300)
+    (defn fcast-time-valid? (issued expires now)
+        (if (and (gt now 0)
+                 (and (gt issued 0)
+                      (and (ge expires issued)
+                           (and (le issued (add now (fcast-clock-skew-seconds)))
+                                (and (le now expires)
+                                     (le (sub expires issued)
+                                         (fcast-max-attestation-seconds))))))) 1 0))
+
+    (defn fcast-named-cell-ref? (node-id)
+        (if (and (eq (ric-node-id-valid? node-id) 1)
+                 (eq (str_find node-id "@1.1.9." 0) 0)) 1 0))
+
+    (defn fcast-answer-bound? (hit)
+        (ra-output-answer-binds-hit? (ra-hit-output hit) hit))
+
+    (defn fcast-grounding-canonical-for (request-id arg)
+        (fcast-cat (list
+            "grounding-attestation-v2\n"
+            request-id "\n"
+            (fcast-arg arg 0 "") "\n"
+            (fcast-arg arg 1 "") "\n"
+            (fcast-arg arg 2 "") "\n"
+            (fcast-arg arg 3 "") "\n"
+            (fcast-arg arg 4 "") "\n"
+            (fcast-arg arg 5 "") "\n"
+            (fcast-arg arg 6 "") "\n"
+            (fcast-arg arg 7 "") "\n"
+            (fcast-arg arg 8 ""))))
+    (defn fcast-grounding-canonical (arg)
+        (fcast-grounding-canonical-for "staged" arg))
+    (defn fcast-grounding-mac-for (key-hex request-id arg)
+        (fcast-hmac-hex key-hex (fcast-grounding-canonical-for request-id arg)))
+    (defn fcast-grounding-mac (key-hex arg)
+        (fcast-grounding-mac-for key-hex "staged" arg))
+
+    (defn fcast-grounding-bits-for-at (hit arg request-id query-key key-hex now)
+        (do
+            (let issued (str_to_int (fcast-arg arg 7 "0")))
+            (let expires (str_to_int (fcast-arg arg 8 "0")))
+            (let supplied-mac (fcast-arg arg 9 ""))
+            (let hit-ready
+                (and (eq (ra-hit? hit) 1) (eq (ra-hit-admitted? hit) 1)))
+            (let identity-bound
+                (and (str_eq (fcast-arg arg 0 "") (ra-hit-node-id hit))
+                     (str_eq (fcast-arg arg 1 "") (ra-hit-content-node-id hit))))
+            (let source-bound
+                (and (str_eq (fcast-arg arg 2 "") (ra-hit-key hit))
+                     (and (str_eq (fcast-arg arg 3 "") (ra-hit-source-path hit))
+                          (str_eq (fcast-arg arg 5 "")
+                                  (ra-hit-persisted-source-sha256 hit)))))
+            (let payload-bound
+                (and (str_eq (fcast-arg arg 4 "") (ra-hit-answer-key hit))
+                     (str_eq (fcast-arg arg 6 "") query-key)))
+            (let time-bound (eq (fcast-time-valid? issued expires now) 1))
+            (let mac-bound
+                (and (eq (fcast-mac-valid-shape? supplied-mac) 1)
+                     (eq (fcast-secure-eq? supplied-mac
+                           (fcast-grounding-mac-for key-hex request-id arg)) 1)))
+            (sum (list
+                (if (eq (fcast-receipt-shape? arg) 1) 1 0)
+                (if (eq (fcast-request-id-shape? request-id) 1) 2 0)
+                (if (eq (fcast-key-valid? key-hex) 1) 4 0)
+                (if hit-ready 8 0)
+                (if identity-bound 16 0)
+                (if source-bound 32 0)
+                (if payload-bound 64 0)
+                (if time-bound 128 0)
+                (if mac-bound 256 0)))))
+    (defn fcast-grounding-attested-for-at? (hit arg request-id query-key key-hex now)
+        (if (eq (fcast-grounding-bits-for-at
+                 hit arg request-id query-key key-hex now) 511) 1 0))
+    (defn fcast-grounding-attested-at? (hit arg query-key key-hex now)
+        (fcast-grounding-attested-for-at? hit arg "staged" query-key key-hex now))
+
+    ; Local diagnostic row for a failed protected receipt. It reveals which
+    ; binding axis failed without printing the private key or expected MAC.
+    (defn fcast-grounding-debug-for-at (hit arg request-id query-key key-hex now)
+        (str_concat "grounding-debug bits:"
+        (str_concat (int_to_str (fcast-grounding-bits-for-at
+                hit arg request-id query-key key-hex now))
+        (str_concat "\nquery-key:"
+        (str_concat query-key
+        (str_concat "\nreceipt-query-key:"
+        (str_concat (fcast-arg arg 6 "")
+        (str_concat "\nnow:"
+        (str_concat (int_to_str now)
+        (str_concat "\nissued:"
+        (str_concat (fcast-arg arg 7 "")
+        (str_concat "\nexpires:"
+                    (fcast-arg arg 8 "")))))))))))))
+
+    (defn fcast-frequency-canonical-for (request-id arg)
+        (fcast-cat (list
+            "frequency-attestation-v2\n"
+            request-id "\n"
+            (fcast-arg arg 10 "") "\n"
+            (fcast-arg arg 11 "") "\n"
+            (fcast-arg arg 12 "") "\n"
+            (fcast-arg arg 13 "") "\n"
+            (fcast-arg arg 14 "") "\n"
+            (fcast-arg arg 15 "") "\n"
+            (fcast-arg arg 16 ""))))
+    (defn fcast-frequency-canonical (arg)
+        (fcast-frequency-canonical-for "staged" arg))
+    (defn fcast-frequency-mac-for (key-hex request-id arg)
+        (fcast-hmac-hex key-hex (fcast-frequency-canonical-for request-id arg)))
+    (defn fcast-frequency-mac (key-hex arg)
+        (fcast-frequency-mac-for key-hex "staged" arg))
+
+    ; A frequency certificate is deterministic evidence about ordinary Form
+    ; content, independent of the short-lived query attestation carrying it.
+    ; Field 13 is therefore the SHA-256 key of these stable subject fields;
+    ; fields 14/15 remain the separate HMAC-bound query issuance window.
+    (defn fcast-frequency-certificate-canonical-for
+        (cert-ref subject-ctor answer-key result)
+        (fcast-cat (list
+            "frequency-cert-v1\n"
+            cert-ref "\n"
+            subject-ctor "\n"
+            answer-key "\n"
+            result)))
+    (defn fcast-frequency-certificate-key-for
+        (cert-ref subject-ctor answer-key result)
+        (fcast-sha256-hex
+            (fcast-frequency-certificate-canonical-for
+                cert-ref subject-ctor answer-key result)))
+    (defn fcast-frequency-certificate-key (arg)
+        (fcast-frequency-certificate-key-for
+            (fcast-arg arg 10 "")
+            (fcast-arg arg 11 "")
+            (fcast-arg arg 12 "")
+            (fcast-arg arg 16 "")))
+    (defn fcast-frequency-certificate-valid? (arg)
+        (do
+            (let cert-ref (fcast-arg arg 10 ""))
+            (let subject-ctor (fcast-arg arg 11 ""))
+            (let answer-key (fcast-arg arg 12 ""))
+            (let evidence-key (fcast-arg arg 13 ""))
+            (let result (fcast-arg arg 16 ""))
+            (if (and (eq (ric-node-id-valid? cert-ref) 1)
+                     (and (eq (ric-node-id-valid? subject-ctor) 1)
+                       (and (eq (fcast-mac-valid-shape? answer-key) 1)
+                         (and (eq (fcast-mac-valid-shape? evidence-key) 1)
+                           (and (str_eq result "success")
+                                (eq (fcast-secure-eq? evidence-key
+                                    (fcast-frequency-certificate-key-for
+                                        cert-ref subject-ctor answer-key result))
+                                    1)))))) 1 0)))
+
+    (defn fcast-frequency-attested-for-at? (hit arg request-id key-hex now)
+        (do
+            (let issued (str_to_int (fcast-arg arg 14 "0")))
+            (let expires (str_to_int (fcast-arg arg 15 "0")))
+            (let supplied-mac (fcast-arg arg 17 ""))
+            (let subject-bound
+                (and (str_eq (fcast-arg arg 10 "") (ra-hit-node-id hit))
+                     (and (str_eq (fcast-arg arg 11 "") (ra-hit-content-node-id hit))
+                          (str_eq (fcast-arg arg 12 "") (ra-hit-answer-key hit)))))
+            (let certificate-bound
+                (eq (fcast-frequency-certificate-valid? arg) 1))
+            (let time-bound (eq (fcast-time-valid? issued expires now) 1))
+            (let mac-bound
+                (and (eq (fcast-mac-valid-shape? supplied-mac) 1)
+                     (eq (fcast-secure-eq? supplied-mac
+                           (fcast-frequency-mac-for key-hex request-id arg)) 1)))
+            (if (and (eq (fcast-receipt-shape? arg) 1)
+                     (and (eq (fcast-request-id-shape? request-id) 1)
+                          (and (eq (ra-hit? hit) 1)
+                               (and subject-bound
+                                    (and certificate-bound
+                                         (and time-bound
+                                              (and mac-bound
+                                                   (eq (fcast-answer-bound? hit) 1))))))))
+                1 0)))
+    (defn fcast-frequency-attested-at? (hit arg key-hex now)
+        (fcast-frequency-attested-for-at? hit arg "staged" key-hex now))
+
+    (defn fcast-grounding-for-at (hit arg request-id query-key key-hex now)
+        (fca-grounding
+            (fcast-named-cell-ref? (ra-hit-node-id hit))
+            (ra-hit-resolves? hit)
+            (fcast-grounding-attested-for-at? hit arg request-id query-key key-hex now)
+            (fcast-answer-bound? hit)))
+    (defn fcast-grounding-at (hit arg query-key key-hex now)
+        (fcast-grounding-for-at hit arg "staged" query-key key-hex now))
+
+    (defn fcast-trust-score-for-at (hit arg request-id query-key key-hex now)
+        (if (and (eq (ra-hit-admitted? hit) 1)
+                 (and (eq (ra-hit-resolves? hit) 1)
+                      (and (eq (fcast-grounding-attested-for-at? hit arg request-id query-key key-hex now) 1)
+                           (eq (fcast-answer-bound? hit) 1)))) 100 0))
+    (defn fcast-trust-score-at (hit arg query-key key-hex now)
+        (fcast-trust-score-for-at hit arg "staged" query-key key-hex now))
+
+    (defn fcast-sufficiency-signals-for-at (hit arg request-id query-key key-hex now)
+        (fca-ask-signals
+            (ra-hit? hit)
+            (ra-output-valid? (ra-hit-output hit))
+            (fcast-percent (ra-hit-score hit) (ra-hit-query-total hit))
+            (ra-hit-confidence hit)
+            (fcast-trust-score-for-at hit arg request-id query-key key-hex now)
+            0))
+    (defn fcast-sufficiency-signals-at (hit arg query-key key-hex now)
+        (fcast-sufficiency-signals-for-at hit arg "staged" query-key key-hex now))
+
+    (defn fcast-frequency-reading-for-at (hit arg request-id key-hex now)
+        (if (eq (fcast-frequency-attested-for-at? hit arg request-id key-hex now) 1)
+            (fc-certified-form-reading 1 (fcast-answer-bound? hit))
+            (fc-unmeasured-reading)))
+    (defn fcast-frequency-reading-at (hit arg key-hex now)
+        (fcast-frequency-reading-for-at hit arg "staged" key-hex now))
+
+    ; Compute the expensive grounding HMAC once per trace. The earlier helper
+    ; composition verified it independently for grounding and trust, which is
+    ; pure but doubled the emitted walker's SHA/HMAC arena pressure on every
+    ; request.
+    (defn fcast-result-from-ground-bits-for-at
+        (hit arg request-id key-hex now grounding-bits)
+        (do
+            (let attested (if (eq grounding-bits 511) 1 0))
+            (let answer-bound (fcast-answer-bound? hit))
+            (let trust-score (if (and (eq (ra-hit-admitted? hit) 1)
+                    (and (eq (ra-hit-resolves? hit) 1)
+                         (and (eq attested 1) (eq answer-bound 1)))) 100 0))
+            (let signals (fca-ask-signals
+                (ra-hit? hit)
+                (ra-output-valid? (ra-hit-output hit))
+                (fcast-percent (ra-hit-score hit) (ra-hit-query-total hit))
+                (ra-hit-confidence hit)
+                trust-score
+                0))
+            (fca-ask-result
+                (ra-hit? hit)
+                (fca-grounding
+                    (fcast-named-cell-ref? (ra-hit-node-id hit))
+                    (ra-hit-resolves? hit)
+                    attested
+                    answer-bound)
+                (fcast-frequency-reading-for-at hit arg request-id key-hex now)
+                signals)))
+    (defn fcast-result-for-at (hit arg request-id query-key key-hex now)
+        (fcast-result-from-ground-bits-for-at
+            hit arg request-id key-hex now
+            (fcast-grounding-bits-for-at
+                hit arg request-id query-key key-hex now)))
+    (defn fcast-result-at (hit arg query-key key-hex now)
+        (fcast-result-for-at hit arg "staged" query-key key-hex now))
+
+    (defn fcast-trace-hit-for-at (hit arg request-id query-key key-hex now)
+        (str_concat
+            (fca-ask-trace-row
+                (fcast-result-for-at hit arg request-id query-key key-hex now))
+            (str_concat "\n" (ra-hit-output hit))))
+    (defn fcast-trace-hit-at (hit arg query-key key-hex now)
+        (fcast-trace-hit-for-at hit arg "staged" query-key key-hex now))
+
+    0)

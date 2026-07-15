@@ -159,7 +159,7 @@ export interface FormatRecipe {
 //
 // Aligned with the plan doc; cross-kernel agreement requires every
 // implementation to use the same category numbering.
-export const RBasicFormat = 50; // new well-known RBasic category
+export const RBasicFormat = RBasic.FORMAT;
 
 // NUMERIC trivial type — Tier 1 path. A numeric value's NodeID is
 //   (TRIVIAL, NUMERIC, inst=format-recipe-id × VALUES_PER_FORMAT + value-index)

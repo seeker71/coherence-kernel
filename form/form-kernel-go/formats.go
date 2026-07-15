@@ -6,7 +6,7 @@
 // per-(format, op) closures for monomorphized dispatch.
 //
 // The canonical bootstrap library is defined in
-// docs/coherence-substrate/numeric-formats.canonical.json and read at
+// form/contracts/numeric-formats.canonical.json and read at
 // runtime by BuildFormatLibrary. Drift between contract and Go source is
 // prevented by reading the JSON instead of hardcoding the list.
 //
@@ -26,7 +26,7 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// Canonical constants — must match docs/coherence-substrate/numeric-formats.canonical.json
+// Canonical constants — must match form/contracts/numeric-formats.canonical.json
 // ---------------------------------------------------------------------------
 
 // SemanticKind — small stable vocabulary for what a number MEANS.
@@ -64,17 +64,17 @@ const (
 // ArithHintCode — projected from arithmetic-hint string at format
 // creation time so the hot path switches on a u8, not a string.
 const (
-	ArithHintNativeFP             uint32 = 1
-	ArithHintNativeInt            uint32 = 2
-	ArithHintNativeIntNarrow      uint32 = 3
-	ArithHintBigint               uint32 = 4
-	ArithHintTableLookupViaFP32   uint32 = 5
+	ArithHintNativeFP              uint32 = 1
+	ArithHintNativeInt             uint32 = 2
+	ArithHintNativeIntNarrow       uint32 = 3
+	ArithHintBigint                uint32 = 4
+	ArithHintTableLookupViaFP32    uint32 = 5
 	ArithHintDequantFP32ThenNative uint32 = 6
-	ArithHintSoftwareFPViaFP32    uint32 = 7
-	ArithHintSoftwarePosit        uint32 = 8
-	ArithHintXorPopcount          uint32 = 9
-	ArithHintLogaddexpLogsubexp   uint32 = 10
-	ArithHintRationalBigint       uint32 = 11
+	ArithHintSoftwareFPViaFP32     uint32 = 7
+	ArithHintSoftwarePosit         uint32 = 8
+	ArithHintXorPopcount           uint32 = 9
+	ArithHintLogaddexpLogsubexp    uint32 = 10
+	ArithHintRationalBigint        uint32 = 11
 )
 
 // ArithOpCode — the five basic operators. Numeric so the inner switch
@@ -117,12 +117,12 @@ var encodingByName = map[string]uint32{
 var arithHintByName = map[string]uint32{
 	"native-fp": ArithHintNativeFP, "native-int": ArithHintNativeInt,
 	"native-int-narrow": ArithHintNativeIntNarrow, "bigint": ArithHintBigint,
-	"table-lookup-via-fp32": ArithHintTableLookupViaFP32,
+	"table-lookup-via-fp32":    ArithHintTableLookupViaFP32,
 	"dequant-fp32-then-native": ArithHintDequantFP32ThenNative,
-	"software-fp-via-fp32": ArithHintSoftwareFPViaFP32,
-	"software-posit": ArithHintSoftwarePosit, "xor-popcount": ArithHintXorPopcount,
+	"software-fp-via-fp32":     ArithHintSoftwareFPViaFP32,
+	"software-posit":           ArithHintSoftwarePosit, "xor-popcount": ArithHintXorPopcount,
 	"logaddexp-logsubexp": ArithHintLogaddexpLogsubexp,
-	"rational-bigint": ArithHintRationalBigint,
+	"rational-bigint":     ArithHintRationalBigint,
 }
 
 var arithOpByName = map[string]uint32{
@@ -184,18 +184,18 @@ type canonicalVector struct {
 }
 
 type canonicalCanonVector struct {
-	Format    string      `json:"format"`
-	ValueA    interface{} `json:"value_a"`
-	ValueB    interface{} `json:"value_b"`
-	SameNode  bool        `json:"same_nodeid"`
+	Format   string      `json:"format"`
+	ValueA   interface{} `json:"value_a"`
+	ValueB   interface{} `json:"value_b"`
+	SameNode bool        `json:"same_nodeid"`
 }
 
 type canonicalContract struct {
-	Version uint32             `json:"version"`
-	Formats []canonicalFormat  `json:"formats"`
+	Version uint32            `json:"version"`
+	Formats []canonicalFormat `json:"formats"`
 	Conform struct {
-		Vectors  []canonicalVector       `json:"vectors"`
-		CanonVec []canonicalCanonVector  `json:"canonicalization_vectors"`
+		Vectors  []canonicalVector      `json:"vectors"`
+		CanonVec []canonicalCanonVector `json:"canonicalization_vectors"`
 	} `json:"conformance_vectors"`
 }
 
@@ -204,9 +204,9 @@ type canonicalContract struct {
 // kernel directory and `--numeric-bench` from any cwd both succeed.
 func LocateCanonicalJSON() (string, error) {
 	candidates := []string{
-		"../../docs/coherence-substrate/numeric-formats.canonical.json",
-		"../docs/coherence-substrate/numeric-formats.canonical.json",
-		"docs/coherence-substrate/numeric-formats.canonical.json",
+		"../contracts/numeric-formats.canonical.json",
+		"contracts/numeric-formats.canonical.json",
+		"form/contracts/numeric-formats.canonical.json",
 	}
 	cwd, _ := os.Getwd()
 	for _, rel := range candidates {
@@ -215,12 +215,17 @@ func LocateCanonicalJSON() (string, error) {
 			return p, nil
 		}
 	}
-	// Walk up from cwd looking for docs/coherence-substrate/.
+	// Walk up from cwd looking for the Form-owned contract.
 	dir := cwd
 	for i := 0; i < 8; i++ {
-		p := filepath.Join(dir, "docs", "coherence-substrate", "numeric-formats.canonical.json")
-		if _, err := os.Stat(p); err == nil {
-			return p, nil
+		for _, rel := range []string{
+			filepath.Join("contracts", "numeric-formats.canonical.json"),
+			filepath.Join("form", "contracts", "numeric-formats.canonical.json"),
+		} {
+			p := filepath.Join(dir, rel)
+			if _, err := os.Stat(p); err == nil {
+				return p, nil
+			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
@@ -255,25 +260,25 @@ type FormatLibrary struct {
 	ByName  map[string]*FormatRecipe
 	ByOrder []*FormatRecipe
 	// Convenience accessors for hot formats — match the TS lib field names.
-	FP64        *FormatRecipe
-	FP32        *FormatRecipe
-	BF16        *FormatRecipe
-	FP8E4M3     *FormatRecipe
-	FP8E5M2     *FormatRecipe
-	FP4Uniform  *FormatRecipe
-	NF4         *FormatRecipe
-	INT8        *FormatRecipe
-	INT16       *FormatRecipe
-	INT32       *FormatRecipe
-	INT64       *FormatRecipe
-	UINT8       *FormatRecipe
-	UINT16      *FormatRecipe
-	UINT32      *FormatRecipe
-	UINT64      *FormatRecipe
-	INT4        *FormatRecipe
-	Bitnet158   *FormatRecipe
-	Bit1        *FormatRecipe
-	LogProb     *FormatRecipe
+	FP64       *FormatRecipe
+	FP32       *FormatRecipe
+	BF16       *FormatRecipe
+	FP8E4M3    *FormatRecipe
+	FP8E5M2    *FormatRecipe
+	FP4Uniform *FormatRecipe
+	NF4        *FormatRecipe
+	INT8       *FormatRecipe
+	INT16      *FormatRecipe
+	INT32      *FormatRecipe
+	INT64      *FormatRecipe
+	UINT8      *FormatRecipe
+	UINT16     *FormatRecipe
+	UINT32     *FormatRecipe
+	UINT64     *FormatRecipe
+	INT4       *FormatRecipe
+	Bitnet158  *FormatRecipe
+	Bit1       *FormatRecipe
+	LogProb    *FormatRecipe
 }
 
 // makeFormatRecipe — intern a format-recipe with children in the canonical
@@ -281,13 +286,16 @@ type FormatLibrary struct {
 // determines the content-addressed NodeID.
 //
 // Children laid out as (per $intern_order_comment in the JSON):
-//   [0] semanticKind  (trivial int)
-//   [1] encoding      (trivial int)
-//   [2] bits          (trivial int)
-//   [3] storageHint   (interned string)
-//   [4] arithmeticHint(interned string)
+//
+//	[0] semanticKind  (trivial int)
+//	[1] encoding      (trivial int)
+//	[2] bits          (trivial int)
+//	[3] storageHint   (interned string)
+//	[4] arithmeticHint(interned string)
+//
 // Then optional extras in this order (only those present):
-//   mantissaBits, exponentBits, exponentBias, positN, positEs, lookupValues
+//
+//	mantissaBits, exponentBits, exponentBias, positN, positEs, lookupValues
 //
 // Lookup values: each float64 contributes TWO i32 children — low 32 bits
 // of the IEEE 754 double, then high 32 bits, both as trivial-int with
