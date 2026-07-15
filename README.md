@@ -41,3 +41,21 @@ reverse emission, module bundling, locale/context lenses, and language/media
 support live above it in Form runtime modules. Low-level Form is the execution
 floor and verifier surface; each layer should expose the highest honest
 language surface it can carry.
+
+## Consumer Submodule
+
+Repositories that already address the runtime as `form/` consume a generated,
+path-preserving branch rather than mounting this repository root (which would
+introduce an extra `form/form/` level). The `form-submodule` branch is generated
+from `main` and contains this directory at its repository root:
+
+```sh
+git switch main
+git pull --ff-only
+git subtree split --prefix=form -b form-submodule
+git push --force-with-lease origin form-submodule
+```
+
+Consumers pin the resulting commit as their `form/` gitlink and initialize it
+with `git submodule update --init --recursive`. `main` remains the only source
+of authored kernel changes; the split branch is a distribution artifact.
