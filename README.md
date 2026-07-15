@@ -52,8 +52,8 @@ from `main` and contains this directory at its repository root:
 ```sh
 git switch main
 git pull --ff-only
-git subtree split --prefix=form -b form-submodule
-git push --force-with-lease origin form-submodule
+split_sha="$(git subtree split --prefix=form main)"
+git push origin "$split_sha:refs/heads/form-submodule"
 ```
 
 Consumers pin the resulting commit as their `form/` gitlink and initialize it
