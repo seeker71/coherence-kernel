@@ -124,8 +124,8 @@ already exists without negotiating it explicitly.
 
 ## Cross-refs
 
-- [`lc-private-channel-via-substrate`](../../../docs/vision-kb/concepts/lc-private-channel-via-substrate.md) — the teaching this PR seeds
-- [`lc-doorway-patterns`](../../../docs/vision-kb/concepts/lc-doorway-patterns.md) — random_bytes as the doorway
-- [`lc-divergence-is-the-doorway`](../../../docs/vision-kb/concepts/lc-divergence-is-the-doorway.md) — the byte-layer divergence enabling the channel
-- [`lc-substrate-two-modes`](../../../docs/vision-kb/concepts/lc-substrate-two-modes.md)
-- [`lc-cross-modal-unity`](../../../docs/vision-kb/concepts/lc-cross-modal-unity.md) — the catalog of canonical Blueprints
+- `lc-private-channel-via-substrate` — the teaching this PR seeds
+- `lc-doorway-patterns` — random_bytes as the doorway
+- `lc-divergence-is-the-doorway` — the byte-layer divergence enabling the channel
+- `lc-substrate-two-modes`
+- `lc-cross-modal-unity` — the catalog of canonical Blueprints

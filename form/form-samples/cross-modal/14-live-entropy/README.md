@@ -49,7 +49,7 @@ the honest pattern without breaking.
 
 ## Cross-refs
 
-- [`lc-divergence-is-the-doorway`](../../../docs/vision-kb/concepts/lc-divergence-is-the-doorway.md)
-- [`lc-doorway-patterns`](../../../docs/vision-kb/concepts/lc-doorway-patterns.md)
-- [`lc-randomness-as-doorway`](../../../docs/vision-kb/concepts/lc-randomness-as-doorway.md)
-- [`lc-field-substrate`](../../../docs/vision-kb/concepts/lc-field-substrate.md)
+- `lc-divergence-is-the-doorway`
+- `lc-doorway-patterns`
+- `lc-randomness-as-doorway`
+- `lc-field-substrate`

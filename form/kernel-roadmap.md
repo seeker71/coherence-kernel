@@ -112,7 +112,7 @@ The error-message change in this breath makes the suffering bearable while it la
 
 First half of Breath 2. Hand-written recursive-descent parser in Form for arithmetic expressions, built on the substrate-write natives. Reads text → tokens → recipes; sibling kernels produce identical NodeIDs via content-addressing.
 
-**Lives in:** [`form-stdlib/parser.fk`](form-stdlib/parser.fk).
+**Lives in:** [`form-stdlib/parser.fk`](form-stdlib/seedbank/parser.fk).
 
 **Grammar (this slice):**
 - `expr := term { '+' term }`
@@ -120,7 +120,7 @@ First half of Breath 2. Hand-written recursive-descent parser in Form for arithm
 - Precedence: `*` binds tighter than `+`
 - Left-associative for both levels
 
-**Test:** [`form-stdlib/tests/parser.fk`](form-stdlib/tests/parser.fk) parses 10 expressions including `"1 + 2 * 3"` (→ 7), `"5 * 5 + 5 * 5"` (→ 50), `"2 * 3 * 4"` (→ 24). Aggregate `216` on all sibling kernels.
+**Test:** [`form-stdlib/tests/parser.fk`](form-stdlib/seedbank/tests/parser.fk) parses 10 expressions including `"1 + 2 * 3"` (→ 7), `"5 * 5 + 5 * 5"` (→ 50), `"2 * 3 * 4"` (→ 24). Aggregate `216` on all sibling kernels.
 
 **What landed in the kernels alongside:**
 - All function bodies and `if`-branches in Form are *single expressions*. Multiple statements need `(do ...)` wrapping — the Form parser's first lesson. The parser file itself uses `do` blocks liberally as a result; the structural clarity is what the body wants.
@@ -133,7 +133,7 @@ First half of Breath 2. Hand-written recursive-descent parser in Form for arithm
 
 ### Breath 2b — Full arithmetic + parens + identifiers + function calls *(landed)*
 
-Second half of recursive-descent parsing. Extended [`form-stdlib/parser.fk`](form-stdlib/parser.fk) with:
+Second half of recursive-descent parsing. Extended [`form-stdlib/parser.fk`](form-stdlib/seedbank/parser.fk) with:
 
 - `-` and `/` operators (mechanical extension of `+`/`*`)
 - Parens for grouping — `(1 + 2) * 3` → `9`
@@ -149,7 +149,7 @@ factor := INT | IDENT | IDENT '(' [args] ')' | '(' expr ')'
 args   := expr { ',' expr }
 ```
 
-**Test** [`form-stdlib/tests/parser.fk`](form-stdlib/tests/parser.fk) — 12 expressions across precedence, parens, left-associativity, and function-call composition. Aggregate 149 on all sibling kernels. Critical cases verified individually:
+**Test** [`form-stdlib/tests/parser.fk`](form-stdlib/seedbank/tests/parser.fk) — 12 expressions across precedence, parens, left-associativity, and function-call composition. Aggregate 149 on all sibling kernels. Critical cases verified individually:
 
 | Expression | Result | Why it matters |
 |---|---|---|
@@ -201,7 +201,7 @@ bool    := 'true' | 'false'
 - `FNDEF` (RBasic 31)
 - Trivial `BOOL` (level=1, type=3) for `true`/`false` parsed identifiers
 
-**Test:** [`form-stdlib/tests/parser.fk`](form-stdlib/tests/parser.fk) — 20 expressions across the full surface, aggregate **1095** on all sibling kernels. Notable cases verified:
+**Test:** [`form-stdlib/tests/parser.fk`](form-stdlib/seedbank/tests/parser.fk) — 20 expressions across the full surface, aggregate **1095** on all sibling kernels. Notable cases verified:
 - `if 1 < 2 then 10 else 20` → 10 (cmp + if)
 - `if 5 == 5 then 1 else 0` → 1 (equality)
 - `defn double(x) = x * 2; double(5)` → 10 (defn + call)
@@ -219,7 +219,7 @@ bool    := 'true' | 'false'
 
 Final piece of the hand-coded surface syntax. `let name = value` parses to a `BLOCK.LET` recipe; the walker binds in the current scope; subsequent statements in the same DO-block see the binding.
 
-**Test cases (in [`form-stdlib/tests/parser.fk`](form-stdlib/tests/parser.fk)):**
+**Test cases (in [`form-stdlib/tests/parser.fk`](form-stdlib/seedbank/tests/parser.fk)):**
 - `let x = 5; x + 10` → 15 (basic binding + use)
 - `let x = 3; let y = 4; x * y` → 12 (sequential bindings)
 - `let x = 5; let y = x + 2; x * y` → 35 (binding references earlier binding)
@@ -274,7 +274,7 @@ Grammar selection by data: each binding is a substrate cell carrying (selector k
 
 ### Breath 2 — Grammar as data: template registry + two engines
 
-The body has been building toward this for breaths. The Python layer already has the template machinery alive — [`form_rules.py`](../api/app/services/substrate/form_rules.py) (pattern primitives) + [`form_builders.py`](../api/app/services/substrate/form_builders.py) (template primitives) + [`self_host.py`](../api/app/services/substrate/self_host.py) (9 keywords + 14 operators registered as data, the `prefer_registered=True` flag flips parsing between hardcoded and registry-driven). The body's stated long-term shape is **grammar as data, parsing as engine** — adding new syntax means adding a registry row, not editing parser code.
+The body has been building toward this for breaths. The Python layer already has the template machinery alive — `form_rules.py` (pattern primitives) + `form_builders.py` (template primitives) + `self_host.py` (9 keywords + 14 operators registered as data, the `prefer_registered=True` flag flips parsing between hardcoded and registry-driven). The body's stated long-term shape is **grammar as data, parsing as engine** — adding new syntax means adding a registry row, not editing parser code.
 
 This breath lifts that machinery into Form, fully, and adds two complementary engines that both consume the same registry.
 
@@ -347,7 +347,7 @@ The kernel's S-expression reader stays (for emergency use), but Form source file
 
 The kernel already persists the content-addressed lattice. `write_form_binary` / `read_form_binary` serialize a Recipe tree to a `.fkb` file and read it back so it re-collapses, by content-addressing, to the same NodeIDs across every sibling kernel. `channel.fk` proved this for message logs and `cell-registry.fk` for an addressing directory; a named-cell store is the same shape — a durable file whose entries are CELL Recipes. So the persistence bridge is a **Form module over the file primitives the kernel already carries**, not a new native against Postgres.
 
-The store is the contract; the backend is swappable beneath it. File-backed `.fkb` today; a socket to a daemon or a direct DB binding tomorrow — caller code (`cell-put`, `lookup-cell`) does not change when the backend does. This is the resolution of the three Phase D / Shape 2 candidates named in [`kernels/BOOTSTRAP_COMPOST_MANIFEST.md`](../kernels/BOOTSTRAP_COMPOST_MANIFEST.md): the *contract* is Form-side (candidate 3's spirit), the *first backend* is kernel-native serialization (candidate 1), and a DB binding (candidate 2) can slot in later behind the same store interface.
+The store is the contract; the backend is swappable beneath it. File-backed `.fkb` today; a socket to a daemon or a direct DB binding tomorrow — caller code (`cell-put`, `lookup-cell`) does not change when the backend does. This is the resolution of the three Phase D / Shape 2 candidates named in `kernels/BOOTSTRAP_COMPOST_MANIFEST.md`: the *contract* is Form-side (candidate 3's spirit), the *first backend* is kernel-native serialization (candidate 1), and a DB binding (candidate 2) can slot in later behind the same store interface.
 
 **Lives in:** [`form-stdlib/persistence.fk`](form-stdlib/persistence.fk) — `cell-put` / `lookup-cell` / `store-cells`, mirroring Python `make_cell` / `lookup_cell`. A CELL Recipe carries `(name, domain, blueprint, ctor)`, with identity `(domain, name)` — the same `UNIQUE(domain, name)` the Python `orm.py` enforces on `substrate_named_cells`. The CTOR is structure-first (frontmatter fields as `(key, value)` pairs), per the CLAUDE.md composition discipline.
 

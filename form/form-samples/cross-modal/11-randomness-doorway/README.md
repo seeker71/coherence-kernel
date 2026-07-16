@@ -8,8 +8,8 @@ which information from outside the kernel's causal envelope enters the
 lattice is **true randomness** — and once a sample is taken, it lives
 substrate-resident, sibling-parity-attested across re-walks.
 
-Concept doc: [`lc-randomness-as-doorway`](../../../docs/vision-kb/concepts/lc-randomness-as-doorway.md).
-Background frame: [`lc-field-substrate`](../../../docs/vision-kb/concepts/lc-field-substrate.md).
+Concept doc: `lc-randomness-as-doorway`.
+Background frame: `lc-field-substrate`.
 
 ## What walked
 
@@ -89,7 +89,7 @@ moment; the cache is deterministic; the rollout is deterministic.
 `./validate.sh form-samples/cross-modal/11-randomness-doorway/field-pick.fk` → `2` (R_SustainedTension)
 
 In service of:
-- [`lc-randomness-as-doorway`](../../../docs/vision-kb/concepts/lc-randomness-as-doorway.md)
-- [`lc-field-substrate`](../../../docs/vision-kb/concepts/lc-field-substrate.md)
-- [`lc-cross-modal-unity`](../../../docs/vision-kb/concepts/lc-cross-modal-unity.md)
-- [`lc-the-recipe-remembers-its-source`](../../../docs/vision-kb/concepts/lc-the-recipe-remembers-its-source.md)
+- `lc-randomness-as-doorway`
+- `lc-field-substrate`
+- `lc-cross-modal-unity`
+- `lc-the-recipe-remembers-its-source`

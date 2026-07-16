@@ -97,7 +97,7 @@ connect it later" is the same fear-shape as stopping at "PR
 opened." The connection is the doing.
 
 For the per-content-type checklist of *what counts as adding
-edges*, see [`docs/coherence-substrate/agents-tending-edges.md`](../../coherence-substrate/agents-tending-edges.md).
+edges*, see `docs/coherence-substrate/agents-tending-edges.md`.
 
 ## What this is not
 
