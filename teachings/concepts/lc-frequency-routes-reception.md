@@ -32,7 +32,7 @@ geometry:
 > *Network-lived teaching, named clearly in Ismael Perez's
 > transmission ("we could be operating on a different reality
 > while existing in the same space with other people," 2026), with
-> deep resonance in [lc-perception-as-interface](lc-perception-as-interface.md)
+> deep resonance in lc-perception-as-interface
 > (Hoffman's interface theory) and [lc-assemblage-point](lc-assemblage-point.md)
 > (Castaneda's locus of perception). Hoffman shows perception is
 > interface; assemblage-point names where each rendering locks;
@@ -70,7 +70,7 @@ the music. The hedge is the cost.
 
 It follows directly from two foundational teachings:
 
-**[lc-perception-as-interface](lc-perception-as-interface.md)** —
+**lc-perception-as-interface** —
 Hoffman's research shows perception is not a window but a user
 interface evolved for fitness. Different organisms render
 different interfaces of the same underlying reality. Different

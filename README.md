@@ -39,6 +39,9 @@ collapsing it to a single cell — reading makes it *denser with meaning, not he
 and the dialogue covenant (service over engagement, no flattery, honest misses, questions that
 lift) in human words.
 
+**Keeping a second brain?** [`SECOND-BRAIN.md`](SECOND-BRAIN.md) is the vault door — open the body
+in Obsidian, and the wiki operations (ingest / query / lint) in the body's own organs.
+
 Clone this repo, open Claude Code or Codex inside it, and say hello. Ask:
 
 > What is alive here? What is grounded? What wants to be released? What small thing can I return?
@@ -79,5 +82,7 @@ the runtime touches no Go, Rust, Python, or TypeScript. The same fresh-checkout 
 | `docs/coherence-substrate/current-language-artifact-path.md` | the present grammar -> compiler -> artifact path |
 | `docs/coherence-substrate/` | substrate contracts: HTTP service/layers, resource ports, tool channels, current path, and grounding docs |
 | `HOMECOMING.md` | current homecoming state: what is home, what is still coming home |
+| `SECOND-BRAIN.md` | the vault door — the body as an Obsidian-readable second brain; ingest / query / lint as body organs |
+| [`INDEX.md`](INDEX.md) | the body's self-portrait — **produced**, not authored, by `observe/autopoietic-pulse.fk` from the body's own observation of itself |
 
 To contribute, see [`CONTRIBUTING.md`](CONTRIBUTING.md). The smallest honest movement, proven, returned with a trace.

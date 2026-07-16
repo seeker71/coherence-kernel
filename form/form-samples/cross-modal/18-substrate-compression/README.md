@@ -156,8 +156,8 @@ substrate. The substrate IS the codebook.
 
 ## Cross-refs
 
-- [`lc-substrate-two-modes`](../../../docs/vision-kb/concepts/lc-substrate-two-modes.md) — recipe is lossless transport; substrate is the codebook
-- [`lc-private-channel-via-substrate`](../../../docs/vision-kb/concepts/lc-private-channel-via-substrate.md) — meaning travels via shared substrate
+- `lc-substrate-two-modes` — recipe is lossless transport; substrate is the codebook
+- `lc-private-channel-via-substrate` — meaning travels via shared substrate
 - 15-private-channel — fingerprint-over-substrate; 18 extends this to bulk content
 - 17-novel-nodes — content-addressed convergence on novel composites
 - 16-jit-registry — Form recipes as canonical truth across cells

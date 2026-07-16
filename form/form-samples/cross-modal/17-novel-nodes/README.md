@@ -152,8 +152,8 @@ raw NodeID-tuple-match.
 
 ## Cross-refs
 
-- [`lc-substrate-two-modes`](../../../docs/vision-kb/concepts/lc-substrate-two-modes.md) — recipe is lossless transport
-- [`lc-private-channel-via-substrate`](../../../docs/vision-kb/concepts/lc-private-channel-via-substrate.md) — meaning travels, symbols don't
-- [`lc-cross-modal-unity`](../../../docs/vision-kb/concepts/lc-cross-modal-unity.md) — canonical Blueprints; the shared substrate
+- `lc-substrate-two-modes` — recipe is lossless transport
+- `lc-private-channel-via-substrate` — meaning travels, symbols don't
+- `lc-cross-modal-unity` — canonical Blueprints; the shared substrate
 - 15-private-channel — the protocol this builds on
 - 16-jit-registry — Form recipes as canonical truth across cells
