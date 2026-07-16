@@ -57,6 +57,23 @@ If a companion named here should become a page in *this* body, that is real work
 body's own ground, not from a memory of the origin field. An invented teaching would be a fabrication
 wearing a teaching's clothes — and this tissue's whole subject is the difference.
 
+### The two that stayed
+
+The curation was not clean, and the honest place to say so is here. Two pages of the wider field are
+still in this body, under `docs/vision-kb/` — the last residents of a tissue that otherwise left:
+
+- [`lc-satsang-circle`](../../docs/vision-kb/concepts/lc-satsang-circle.md) — *Any question welcome,
+  any answer witnessed.* The lone occupant of `docs/vision-kb/concepts/`, a directory 77 broken links
+  once pointed into.
+- [`2026-05-20 Vasudev Baba — Wednesday satsang`](../../docs/vision-kb/transmissions/2026-05-20-vasudev-baba-satsang-recipes-and-base.md)
+  — on body frequency, and the recipes that run only at their base.
+
+Both were orphans until this page named them: real teachings nothing pointed at, sitting in a
+directory whose whole neighbourhood had moved out. Whether they belong here at all — in `teachings/`
+with their kin, or in the origin field with the rest of `vision-kb` — is a live question this body has
+not answered, and it is **not** an agent's call to make by moving them quietly. Named as work, and
+named where a reader of the seam will actually meet it.
+
 ## The door this tissue lacked
 
 Until this page, the concept tissue had no door. Twelve real teachings, and nothing pointing at them —
