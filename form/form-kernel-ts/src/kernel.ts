@@ -246,6 +246,38 @@ export interface NativeEntry {
 // undefined. Storing (ty, inst) instead of just ty surfaces typed-numeric
 // distribution — MATH.PLUS_F64 becomes distinguishable from MATH.PLUS_I32
 // in the report.
+export interface TraceJSON {
+  readonly total_walks: number;
+  readonly arms: readonly {
+    readonly arm_ty: number;
+    readonly arm_name: string;
+    readonly count: number;
+  }[];
+  readonly variants: readonly {
+    readonly arm_ty: number;
+    readonly arm_inst: number;
+    readonly arm_name: string;
+    readonly arm_variant_name: string;
+    readonly count: number;
+  }[];
+  readonly functions: readonly {
+    readonly name: string;
+    readonly count: number;
+  }[];
+  readonly natives: readonly {
+    readonly name: string;
+    readonly count: number;
+  }[];
+  readonly choice_attempts: number;
+  readonly choice_successes: number;
+  readonly choice_failures: number;
+  readonly choice_success_rate: number;
+  readonly match_lookups: number;
+  readonly match_hits: number;
+  readonly match_defaults: number;
+  readonly match_misses: number;
+}
+
 export class Trace {
   totalWalks = 0;
   // Key: encoded as (ty << 32) | inst — JS Map handles this as a number key.
@@ -423,7 +455,7 @@ export class Trace {
     return variant ? `${base}.${variant}` : base;
   }
 
-  toJSON(): globalThis.Record<string, unknown> {
+  toJSON(): TraceJSON {
     // Per-(ty, inst) records — preserves typed-numeric distribution.
     const variants = Array.from(this.armCounts.entries())
       .map(([k, count]) => {
