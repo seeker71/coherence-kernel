@@ -4620,6 +4620,155 @@ static double fk_log_d(double x) {
     }
     return 2.0 * acc + ((double)e) * ln2;
 }
+
+/* CPython-compatible round(x, ndigits) for finite binary64 values, ndigits >= 0.
+ *
+ * Scaling in binary (x * 10^n) changes which side of a decimal half-way point
+ * the stored value occupies.  The proof siblings exposed that defect in the
+ * old tag-52 implementation.  A binary64 has a terminating decimal expansion
+ * of at most 1074 fractional places, so the fixed 1074-place rendering is the
+ * exact value.  Round that digit string half-to-even, then let strtod choose the
+ * nearest binary64.  form/form-stdlib/tests/round-ndigits-band.fk is the owning
+ * semantic witness; this C membrane can shrink when the native walker owns the
+ * primitive directly.
+ */
+static double fk_round_ndigits_decimal(double x, long long nd) {
+    const double max_finite = 1.7976931348623157e308;
+    char exact[1536];
+    char digits[1536];
+    char decimal[1536];
+    long long exact_n;
+    long long point;
+    long long digits_n;
+    long long keep;
+    long long kept_n;
+    long long i;
+    long long j;
+    int neg;
+    int round_up = 0;
+    double ax;
+    double out;
+
+    if (x != x || x > max_finite || x < 0.0 - max_finite) {
+        return x;
+    }
+    neg = x < 0.0 || (x == 0.0 && (1.0 / x) < 0.0);
+    ax = neg ? 0.0 - x : x;
+    if (nd < 0) {
+        nd = 0;
+    }
+    if (nd >= 1074) {
+        return x;
+    }
+
+    exact_n = sprintf(exact, "%.1074f", ax);
+    point = 0;
+    while (point < exact_n && exact[point] != '.') {
+        point = point + 1;
+    }
+    digits_n = 0;
+    i = 0;
+    while (i < exact_n) {
+        if (exact[i] != '.') {
+            digits[digits_n] = exact[i];
+            digits_n = digits_n + 1;
+        }
+        i = i + 1;
+    }
+
+    keep = point + nd;
+    if (keep >= digits_n) {
+        return x;
+    }
+    if (digits[keep] > '5') {
+        round_up = 1;
+    } else if (digits[keep] == '5') {
+        i = keep + 1;
+        while (i < digits_n && digits[i] == '0') {
+            i = i + 1;
+        }
+        if (i < digits_n) {
+            round_up = 1;
+        } else if (keep > 0 && ((digits[keep - 1] - '0') & 1)) {
+            round_up = 1;
+        }
+    }
+
+    kept_n = keep;
+    if (round_up) {
+        if (kept_n == 0) {
+            digits[0] = '1';
+            kept_n = 1;
+        } else {
+            i = kept_n;
+            while (i > 0 && digits[i - 1] == '9') {
+                digits[i - 1] = '0';
+                i = i - 1;
+            }
+            if (i > 0) {
+                digits[i - 1] = digits[i - 1] + 1;
+            } else {
+                j = kept_n;
+                while (j > 0) {
+                    digits[j] = digits[j - 1];
+                    j = j - 1;
+                }
+                digits[0] = '1';
+                kept_n = kept_n + 1;
+            }
+        }
+    } else if (kept_n == 0) {
+        digits[0] = '0';
+        kept_n = 1;
+    }
+
+    j = 0;
+    if (neg) {
+        decimal[j] = '-';
+        j = j + 1;
+    }
+    if (nd == 0) {
+        i = 0;
+        while (i < kept_n) {
+            decimal[j] = digits[i];
+            j = j + 1;
+            i = i + 1;
+        }
+    } else if (kept_n <= nd) {
+        decimal[j] = '0';
+        decimal[j + 1] = '.';
+        j = j + 2;
+        i = nd - kept_n;
+        while (i > 0) {
+            decimal[j] = '0';
+            j = j + 1;
+            i = i - 1;
+        }
+        i = 0;
+        while (i < kept_n) {
+            decimal[j] = digits[i];
+            j = j + 1;
+            i = i + 1;
+        }
+    } else {
+        i = 0;
+        while (i < kept_n) {
+            if (i == kept_n - nd) {
+                decimal[j] = '.';
+                j = j + 1;
+            }
+            decimal[j] = digits[i];
+            j = j + 1;
+            i = i + 1;
+        }
+    }
+    decimal[j] = 0;
+    out = strtod(decimal, 0);
+    if (out == 0.0 && neg) {
+        return -0.0;
+    }
+    return out;
+}
 static double fk_dot_list(long long av, long long bv) {
     long long pa = av >> 1;
     long long pb = bv >> 1;
@@ -6018,23 +6167,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 52) {
         double x = fk_num(fk_walk(fk_node[i][1], fp));
         long long nd = fk_walk(fk_node[i][2], fp) >> 1;
-        double sc = 1.0;
-        while (nd > 0) {
-            sc = sc * 10.0;
-            nd = nd - 1;
-        }
-        double y = x * sc;
-        double ay = y < 0.0 ? 0.0 - y : y;
-        long long base = (long long)ay;
-        double frac = ay - (double)base;
-        long long qa = base;
-        if (frac > 0.5) {
-            qa = base + 1;
-        } else if (frac == 0.5 && (base & 1)) {
-            qa = base + 1;
-        }
-        long long q = y < 0.0 ? 0 - qa : qa;
-        return fk_fbox(((double)q) / sc);
+        return fk_fbox(fk_round_ndigits_decimal(x, nd));
     }
     if (t == 53) {
         long long sa = fk_walk(fk_node[i][1], fp) >> 1;
