@@ -98,7 +98,7 @@ This shapes the visual and acoustic palette of arrival surfaces:
   read aloud. *"Does this sound like someone sitting by a fire
   describing how life works? Or does it sound like a policy
   document, a medical chart, a project plan?"* — see
-  [vision-kb/SCHEMA.md](../SCHEMA.md) on Frequency Sensing.
+  vision-kb/SCHEMA.md on Frequency Sensing.
 - **Density**: low. Information dense surfaces are mind-first;
   activation surfaces are body-first. Less is more here, by
   the body's own register.
