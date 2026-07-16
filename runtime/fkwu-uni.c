@@ -4950,7 +4950,7 @@ static void fk_vp(long long v) {
  * failure mode. */
 #define FK_FN_CAP 4096
 #define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144*4*8 = 8MB. */
-#define FK_PARSE_BUF_CAP 1048576 /* fk_buf: scratch buffer for source artifact reads */
+#define FK_PARSE_BUF_CAP 16777216 /* fk_buf: scratch buffer for source artifact reads. Raised 1048576->16777216 (2026-07-16): the v4 .fkb signed lane is 9 bytes (was 5), and a measured band-chain artifact (program-image-fkb-byte-decode-band.fkb, 1,292,944 bytes) exceeded the old 1MiB cap, so fresh caches died on reload with "artifact exceeds FK_PARSE_BUF_CAP". Worst case bounded by FK_AST_NODE_CAP (262144) * 4 lanes * 9B = ~9.4MB plus strings/symbols, so 16MiB holds the format at current capacity constants. */
 static long long fk_fn_count;
 static long long fk_node_count;
 static long long fk_ast_full; /* set once when the AST node table overflows; halts the parse (fk_spos:=fk_slen) so the collect-and-continue recovery cannot spin re-minting sentinels forever. Reset per run. */
@@ -10601,7 +10601,7 @@ static int fk_fkb_write_u8(int fd, long long v) {
 }
 static int fk_fkb_write_u32(int fd, long long v) {
     unsigned char b[4];
-    if (v < 0 || v > 2147483647LL) {
+    if (v < 0 || v > 4294967295LL) {
         return 0;
     }
     b[0] = (unsigned char)((v >> 24) & 255);
@@ -10611,11 +10611,12 @@ static int fk_fkb_write_u32(int fd, long long v) {
     return fk_write_all_raw(fd, b, 4);
 }
 static int fk_fkb_write_signed(int fd, long long v) {
-    long long mag = v < 0 ? -v : v;
-    if (mag > 2147483647LL) {
-        return 0;
-    }
-    return fk_fkb_write_u8(fd, v < 0 ? 1 : 0) && fk_fkb_write_u32(fd, mag);
+    /* v4 lane: sign u8 + hi u32 + lo u32 -- the full long long range, so
+     * full-range u32 literals (e.g. cksum values) stay artifact-encodable */
+    unsigned long long mag = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
+    return fk_fkb_write_u8(fd, v < 0 ? 1 : 0) &&
+           fk_fkb_write_u32(fd, (long long)(mag >> 32)) &&
+           fk_fkb_write_u32(fd, (long long)(mag & 4294967295ULL));
 }
 static int fk_fkb_write_cstr(int fd, const char *s) {
     long long n = fk_path_len(s);
@@ -10740,7 +10741,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     int ok = 1;
     ok = ok && fk_write_all_raw(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
-    ok = ok && fk_fkb_write_u32(fd, 3);
+    ok = ok && fk_fkb_write_u32(fd, 4);
     ok = ok && fk_fkb_write_cstr(fd, src_path);
     ok = ok && fk_fkb_write_cstr(fd, source_hash);
     ok = ok && fk_fkb_write_signed(fd, source_mtime > 0 ? source_mtime : 1);
@@ -10813,7 +10814,13 @@ static long long fk_fkb_read_u32(void) {
 }
 static long long fk_fkb_read_signed(void) {
     long long sign = fk_fkb_read_u8();
-    long long mag = fk_fkb_read_u32();
+    long long hi = fk_fkb_read_u32();
+    long long lo = fk_fkb_read_u32();
+    if (hi > 2147483647LL) {
+        /* magnitude must stay below 2^63 so it round-trips through long long */
+        fk_die("fk_fkb: signed magnitude exceeds 63 bits");
+    }
+    long long mag = (hi << 32) | lo;
     if (sign == 0) {
         return mag;
     }
@@ -11013,7 +11020,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         mi = mi + 1;
     }
     long long version = fk_fkb_read_u32();
-    if (version < 3) {
+    if (version < 4) {
         return 0;
     }
     int source_identity_ok = 1;
@@ -11174,7 +11181,12 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         mi = mi + 1;
     }
     long long version = fk_fkb_read_u32();
-    if (version != 2 && version != 3) {
+    if (version == 2 || version == 3) {
+        /* pre-v4 lane width: superseded, not corrupt -- invalidate so the
+         * caller recompiles from source and overwrites with a v4 artifact */
+        return 0;
+    }
+    if (version != 4) {
         fk_die("fk_fkb: bad version");
     }
     int source_identity_ok = 1;
@@ -11452,7 +11464,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                 return 0;
             }
             if (fk_path_mtime_raw(dep_fkb_path) < dep_mtime ||
-                fk_src_fkb_version_raw(dep_fkb_path) < 3) {
+                fk_src_fkb_version_raw(dep_fkb_path) < 4) {
                 if (!fk_src_compile_artifact_only(fk_src_dep_path[i])) {
                     return 0;
                 }
