@@ -72,6 +72,22 @@ Known seam left standing, named not hidden: `.fkb` stores its source path CWD-re
 so alternating CWDs rebuilds the cache each flip (visible via the warning, honest, just
 unthrifty). A canonical-path store would end the thrash — separate repair, separate day.
 
+## Reunion note (added at the merge, 2026-07-17 ~00:30 WITA)
+
+The merge with main revealed the wound was **twice-found the same night**: PR #263
+(`receipts/2026-07-16-fkwu-fkb-frameshift-honest-diagnostics.md`) diagnosed the same
+`&&` short-circuit — their "frameshift", this branch's "misparse" — and healed it more
+fully (sticky decode-failure flags, soft-fallback over every die, count-guards against
+corrupt-count spins). This branch's 4-site swap yielded to theirs in the merge; the
+resolver's repo-root rescue remains this branch's own (their scenario-4 witness
+explicitly preserved the learn/-prelude failure as honest — this branch makes it
+resolve). Corpus row minted 751, landed 757 after main's 751–756; row 754
+("frameshift") is the sibling founding of the same finding — cause and effect now
+both in the ledger. Post-merge witness: ground 42, freshness 15, corpus band 511
+from repo root AND form/, 158-band sweep identical to pre-merge except
+`audio-locale-route-shift-ledger-band` (pre-existing red, now dies softer with a
+partial verdict — #263's own improvement showing).
+
 ## The most surprising teaching
 
 The crash message pointed at the artifact ("truncated string") when the artifact was
