@@ -195,7 +195,13 @@ if [[ -n "$FORM_CLI_EXTRA_LDFLAGS" ]]; then
 fi
 if is_windows_host; then
   patch_windows_emitted_c "$W/form-cli.c"
-  clang_args+=(-lws2_32 -llegacy_stdio_definitions)
+  # The emitted Form walker carries recursive recipe frames on the native
+  # thread stack. PE/COFF's 1 MiB default is below the observed production
+  # floor for a 600-byte semantic-v2 source excerpt and exits with
+  # STATUS_STACK_OVERFLOW (0xC00000FD). Keep the evidence width identical on
+  # every host and give the Windows carrier the same practical headroom used
+  # by the other proof siblings instead of truncating the grounded source.
+  clang_args+=(-Wl,--stack,16777216 -lws2_32 -llegacy_stdio_definitions)
 fi
 "$CC_BIN" "${clang_args[@]}"
 form_cli_verify_binary_identity "$OUT" "$want_source_sha256"
