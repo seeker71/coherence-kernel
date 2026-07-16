@@ -138,6 +138,8 @@ static void fk_diag_flush(void);
 #define FK_CH_DQUOTE 34
 #define FK_CH_PLUS 43
 #define FK_CH_COMMA 44
+#define FK_CH_LBRACKET 91
+#define FK_CH_RBRACKET 93
 #define FK_CH_DASH 45
 #define FK_CH_DOT 46
 #define FK_CH_SLASH 47
@@ -4877,8 +4879,59 @@ static void fk_psv(long long v) {
         fk_pv(v);
     }
 }
+/* The source runner is the production carrier, so its stdout boundary must
+ * preserve a numeric list as data instead of leaking the cons-heap handle.
+ * Lists are positive odd values (nil is 1); nodes/function values are negative,
+ * records are negative even, and scalar numbers retain their existing encoding.
+ * This is deliberately a transport printer, not new evaluator meaning: list
+ * construction and every numeric value were already produced by the Form body. */
+static int fk_is_output_list(long long v) {
+    if (v == 1) {
+        return 1;
+    }
+    if (v <= 1 || (v & 1) == 0) {
+        return 0;
+    }
+    long long p = v >> 1;
+    return p >= 1 && p <= fk_hp;
+}
+static void fk_pv_inline_number(long long v) {
+    if (fk_isf(v)) {
+        printf("%.17g", fk_num(v));
+    } else if ((v & 1) == 0) {
+        printf("%lld", v >> 1);
+    } else {
+        printf("%lld", v);
+    }
+}
+static void fk_pv_list(long long v, long long depth) {
+    if (depth > 1024) {
+        fk_die("fk_pv_list: nested output exceeds 1024 levels");
+    }
+    putchar(FK_CH_LBRACKET);
+    long long p = v >> 1;
+    int first = 1;
+    while (p >= 1 && p <= fk_hp) {
+        if (!first) {
+            putchar(FK_CH_COMMA);
+            putchar(FK_CH_SPACE);
+        }
+        long long item = fk_hh[p];
+        if (fk_is_output_list(item)) {
+            fk_pv_list(item, depth + 1);
+        } else {
+            fk_pv_inline_number(item);
+        }
+        first = 0;
+        p = fk_ht[p] >> 1;
+    }
+    putchar(FK_CH_RBRACKET);
+}
 static void fk_pv_root(long long root, long long v) {
-    if (fk_str_root_depth(root, 0)) {
+    if (fk_is_output_list(v)) {
+        fk_pv_list(v, 0);
+        putchar(FK_CH_LF);
+    } else if (fk_str_root_depth(root, 0)) {
         fk_psv(v);
     } else {
         fk_pv(v);
