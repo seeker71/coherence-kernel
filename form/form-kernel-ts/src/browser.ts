@@ -12,6 +12,7 @@ import {
   nodeKey,
   walk,
   type NodeID,
+  type TraceJSON,
 } from "./kernel.ts";
 import { readAll } from "./reader.ts";
 import type { KernelHost } from "./host.ts";
@@ -21,25 +22,7 @@ export * from "./kernel.ts";
 export * from "./reader.ts";
 export * from "./field.ts";
 
-export interface LocalFormTrace {
-  readonly total_walks: number;
-  readonly arms: readonly {
-    readonly arm_ty: number;
-    readonly arm_name: string;
-    readonly count: number;
-  }[];
-  readonly variants: readonly {
-    readonly arm_ty: number;
-    readonly arm_inst: number;
-    readonly arm_name: string;
-    readonly arm_variant_name: string;
-    readonly count: number;
-  }[];
-  readonly choice_attempts: number;
-  readonly choice_successes: number;
-  readonly choice_failures: number;
-  readonly choice_success_rate: number;
-}
+export type LocalFormTrace = TraceJSON;
 
 export interface LocalFormRun {
   readonly source: string;
@@ -86,6 +69,6 @@ export function runLocalFormBinary(
     stdout: stdout.join(""),
     stderr: stderr.join(""),
     elapsedMs,
-    trace: kernel.trace.toJSON() as unknown as LocalFormTrace,
+    trace: kernel.trace.toJSON(),
   };
 }
