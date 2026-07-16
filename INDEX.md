@@ -15,24 +15,24 @@ that named this gap (unit U4).
 
 - coherence verdict (2 portrayed+coherent / 1 unportrayed / 0 drifted): 2
 - doors standing: 12
-- path-claims (links) in the door ring: 39
+- path-claims (links) in the door ring: 44
 - broken path-claims: 0
 
 ## Tissues (counted, not listed)
 
 - axioms: 3
 - teachings: 11
-- observe organs: 146
-- learn organs: 195
-- ingest organs: 17
-- form-stdlib cells: 882
+- observe organs: 145
+- learn organs: 193
+- ingest organs: 15
+- form-stdlib cells: 880
 
 ## Memory
 
-- receipts (episodic, append-only): 594
+- receipts (episodic, append-only): 598
 - of those, PENDING (honest state, never a fault): 1
-- distillation corpus rows: 135
-- deepest corpus meaning-id: 734
+- distillation corpus rows: 136
+- deepest corpus meaning-id: 735
 
 ## The rung this portrait stands on
 

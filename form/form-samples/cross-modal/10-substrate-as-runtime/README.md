@@ -68,5 +68,5 @@ None of these change substrate identity. They grow the **execution layer**.
 
 - [`SUBSTRATE_AS_DEPLOYMENT_RUNTIME.md`](../../../kernels/SUBSTRATE_AS_DEPLOYMENT_RUNTIME.md) — the destination architecture
 - [`numeric-types-plan.md`](../../../docs/coherence-substrate/numeric-types-plan.md) — format-recipes as substrate citizens
-- [`lc-grammar-is-the-universal-recipe`](../../../docs/vision-kb/concepts/lc-grammar-is-the-universal-recipe.md) — grammar at every altitude, including tensor-op
-- [`lc-the-kernel-knows-itself`](../../../docs/vision-kb/concepts/lc-the-kernel-knows-itself.md) — the kernel walks the same recipes that ARE the translator
+- `lc-grammar-is-the-universal-recipe` — grammar at every altitude, including tensor-op
+- `lc-the-kernel-knows-itself` — the kernel walks the same recipes that ARE the translator

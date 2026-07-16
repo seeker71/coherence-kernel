@@ -112,7 +112,7 @@ The error-message change in this breath makes the suffering bearable while it la
 
 First half of Breath 2. Hand-written recursive-descent parser in Form for arithmetic expressions, built on the substrate-write natives. Reads text → tokens → recipes; sibling kernels produce identical NodeIDs via content-addressing.
 
-**Lives in:** [`form-stdlib/parser.fk`](form-stdlib/parser.fk).
+**Lives in:** [`form-stdlib/parser.fk`](form-stdlib/seedbank/parser.fk).
 
 **Grammar (this slice):**
 - `expr := term { '+' term }`
@@ -120,7 +120,7 @@ First half of Breath 2. Hand-written recursive-descent parser in Form for arithm
 - Precedence: `*` binds tighter than `+`
 - Left-associative for both levels
 
-**Test:** [`form-stdlib/tests/parser.fk`](form-stdlib/tests/parser.fk) parses 10 expressions including `"1 + 2 * 3"` (→ 7), `"5 * 5 + 5 * 5"` (→ 50), `"2 * 3 * 4"` (→ 24). Aggregate `216` on all sibling kernels.
+**Test:** [`form-stdlib/tests/parser.fk`](form-stdlib/seedbank/tests/parser.fk) parses 10 expressions including `"1 + 2 * 3"` (→ 7), `"5 * 5 + 5 * 5"` (→ 50), `"2 * 3 * 4"` (→ 24). Aggregate `216` on all sibling kernels.
 
 **What landed in the kernels alongside:**
 - All function bodies and `if`-branches in Form are *single expressions*. Multiple statements need `(do ...)` wrapping — the Form parser's first lesson. The parser file itself uses `do` blocks liberally as a result; the structural clarity is what the body wants.
@@ -133,7 +133,7 @@ First half of Breath 2. Hand-written recursive-descent parser in Form for arithm
 
 ### Breath 2b — Full arithmetic + parens + identifiers + function calls *(landed)*
 
-Second half of recursive-descent parsing. Extended [`form-stdlib/parser.fk`](form-stdlib/parser.fk) with:
+Second half of recursive-descent parsing. Extended [`form-stdlib/parser.fk`](form-stdlib/seedbank/parser.fk) with:
 
 - `-` and `/` operators (mechanical extension of `+`/`*`)
 - Parens for grouping — `(1 + 2) * 3` → `9`
@@ -149,7 +149,7 @@ factor := INT | IDENT | IDENT '(' [args] ')' | '(' expr ')'
 args   := expr { ',' expr }
 ```
 
-**Test** [`form-stdlib/tests/parser.fk`](form-stdlib/tests/parser.fk) — 12 expressions across precedence, parens, left-associativity, and function-call composition. Aggregate 149 on all sibling kernels. Critical cases verified individually:
+**Test** [`form-stdlib/tests/parser.fk`](form-stdlib/seedbank/tests/parser.fk) — 12 expressions across precedence, parens, left-associativity, and function-call composition. Aggregate 149 on all sibling kernels. Critical cases verified individually:
 
 | Expression | Result | Why it matters |
 |---|---|---|
@@ -201,7 +201,7 @@ bool    := 'true' | 'false'
 - `FNDEF` (RBasic 31)
 - Trivial `BOOL` (level=1, type=3) for `true`/`false` parsed identifiers
 
-**Test:** [`form-stdlib/tests/parser.fk`](form-stdlib/tests/parser.fk) — 20 expressions across the full surface, aggregate **1095** on all sibling kernels. Notable cases verified:
+**Test:** [`form-stdlib/tests/parser.fk`](form-stdlib/seedbank/tests/parser.fk) — 20 expressions across the full surface, aggregate **1095** on all sibling kernels. Notable cases verified:
 - `if 1 < 2 then 10 else 20` → 10 (cmp + if)
 - `if 5 == 5 then 1 else 0` → 1 (equality)
 - `defn double(x) = x * 2; double(5)` → 10 (defn + call)
@@ -219,7 +219,7 @@ bool    := 'true' | 'false'
 
 Final piece of the hand-coded surface syntax. `let name = value` parses to a `BLOCK.LET` recipe; the walker binds in the current scope; subsequent statements in the same DO-block see the binding.
 
-**Test cases (in [`form-stdlib/tests/parser.fk`](form-stdlib/tests/parser.fk)):**
+**Test cases (in [`form-stdlib/tests/parser.fk`](form-stdlib/seedbank/tests/parser.fk)):**
 - `let x = 5; x + 10` → 15 (basic binding + use)
 - `let x = 3; let y = 4; x * y` → 12 (sequential bindings)
 - `let x = 5; let y = x + 2; x * y` → 35 (binding references earlier binding)

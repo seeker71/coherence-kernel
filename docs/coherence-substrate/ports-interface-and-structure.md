@@ -67,7 +67,7 @@ Port = capability-contract (structure + interface)  ⟗  carrier (host realizati
   `runtime-dynamic-capability-registry`). A capability is *already* a
   first-class structural value describing an interface's semantics.
 - **The carrier half already exists for tools** —
-  [`lc-tools-as-form-cells`](../vision-kb/concepts/lc-tools-as-form-cells.md)
+  `lc-tools-as-form-cells`
   defines a tool as `(call_pattern, response_pattern, carrier)` with
   **`carrier ∈ {shell, http, in_process}`**. That IS the resource-binding
   model. It simply stops at tools and was never generalized to storage,
@@ -276,12 +276,12 @@ because much more is sensed, proven, and learned once it is Form.
   interface-as-detached-from-structure, BML lineage.
 - [`OBJECT_MODEL_BML_NUMS.md`](../../kernels/OBJECT_MODEL_BML_NUMS.md) — the
   single-pointer reference; `(object_id, interface_id, native_flag)`.
-- [`lc-tools-as-form-cells`](../vision-kb/concepts/lc-tools-as-form-cells.md) —
+- `lc-tools-as-form-cells` —
   the carrier model (`shell|http|in_process`), here generalized from tools to
   all resources.
 - [`engine.fk`](../../form/form-stdlib/engine.fk) §capability — the
   `form-capability-contract` structure (the contract half of a Port).
 - [`ORM_TO_FORM_NATIVE.md`](../../kernels/ORM_TO_FORM_NATIVE.md) — the storage
   port's concrete schema/migration engine and the open carrier leaves.
-- [`emits/sql.fk`](../../form/form-stdlib/emits/sql.fk) — SQL as one emit-target
+- [`emits/sql.fk`](../../form/form-stdlib/seedbank/emits/sql.fk) — SQL as one emit-target
   in the universal codec (the DML/interface half of the SQL carrier).
