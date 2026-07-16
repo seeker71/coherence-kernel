@@ -10617,9 +10617,14 @@ static int fk_fkb_write_u8(int fd, long long v) {
     unsigned char b = (unsigned char)(v & 255);
     return fk_write_all_raw(fd, &b, 1);
 }
+/* An out-of-range value is a WRITER refusal, not an I/O failure -- flagged so
+ * the artifact-write diagnostic can name the range instead of a generic
+ * "failed to write". On the v4 lane only LLONG_MIN's magnitude (2^63) trips it. */
+static int fk_fkb_write_overflow;
 static int fk_fkb_write_u32(int fd, long long v) {
     unsigned char b[4];
     if (v < 0 || v > 4294967295LL) {
+        fk_fkb_write_overflow = 1;
         return 0;
     }
     b[0] = (unsigned char)((v >> 24) & 255);
@@ -10635,6 +10640,7 @@ static int fk_fkb_write_signed(int fd, long long v) {
      * round-trip, so refuse it here rather than emit an unreadable image. */
     unsigned long long mag = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
     if (mag > 9223372036854775807ULL) {
+        fk_fkb_write_overflow = 1;
         return 0;
     }
     return fk_fkb_write_u8(fd, v < 0 ? 1 : 0) &&
@@ -10761,6 +10767,7 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     if (fd < 0) {
         return 0;
     }
+    fk_fkb_write_overflow = 0;
     int ok = 1;
     ok = ok && fk_write_all_raw(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
@@ -10830,9 +10837,30 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
 }
 static long long fk_fkb_pos;
 static long long fk_fkb_len;
+/* Sticky decode-failure flag: the .fkb readers RECORD corruption instead of
+ * dying, so both loaders can soft-return and the caller can rebuild from
+ * source with a diagnostic that names the artifact and the honest reason. A
+ * die here used to surface as a bare "truncated string" even when the real
+ * story was a stale/wrong-CWD artifact identity (witnessed 2026-07-16). */
+static int fk_fkb_bad;
+static const char *fk_fkb_bad_why;
+static void fk_fkb_begin(long long len) {
+    fk_fkb_pos = 0;
+    fk_fkb_len = len;
+    fk_fkb_bad = 0;
+    fk_fkb_bad_why = "";
+}
+static void fk_fkb_mark_bad(const char *why) {
+    if (!fk_fkb_bad) {
+        fk_fkb_bad = 1;
+        fk_fkb_bad_why = why;
+    }
+    fk_fkb_pos = fk_fkb_len; /* clamp: every further read yields 0 */
+}
 static long long fk_fkb_read_u8(void) {
     if (fk_fkb_pos >= fk_fkb_len) {
-        fk_die("fk_fkb: truncated artifact");
+        fk_fkb_mark_bad("truncated artifact");
+        return 0;
     }
     return (long long)(unsigned char)fk_buf[fk_fkb_pos++];
 }
@@ -10849,7 +10877,8 @@ static long long fk_fkb_read_signed(void) {
     long long lo = fk_fkb_read_u32();
     if (hi > 2147483647LL) {
         /* magnitude must stay below 2^63 so it round-trips through long long */
-        fk_die("fk_fkb: signed magnitude exceeds 63 bits");
+        fk_fkb_mark_bad("signed magnitude exceeds 63 bits");
+        return 0;
     }
     long long mag = (hi << 32) | lo;
     if (sign == 0) {
@@ -10858,13 +10887,14 @@ static long long fk_fkb_read_signed(void) {
     if (sign == 1) {
         return -mag;
     }
-    fk_die("fk_fkb: malformed signed integer");
+    fk_fkb_mark_bad("malformed signed integer");
     return 0;
 }
 static void fk_fkb_skip_string(void) {
     long long n = fk_fkb_read_u32();
     if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
-        fk_die("fk_fkb: truncated string");
+        fk_fkb_mark_bad("truncated string");
+        return;
     }
     fk_fkb_pos = fk_fkb_pos + n;
 }
@@ -10872,7 +10902,8 @@ static int fk_fkb_read_string_matches_cstr(const char *s) {
     long long n = fk_fkb_read_u32();
     long long sn = fk_path_len(s);
     if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
-        fk_die("fk_fkb: truncated string");
+        fk_fkb_mark_bad("truncated string");
+        return 0;
     }
     int ok = n == sn;
     long long i = 0;
@@ -10898,7 +10929,8 @@ static void fk_string_table_reset(void) {
 static void fk_fkb_read_table_string(void) {
     long long n = fk_fkb_read_u32();
     if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
-        fk_die("fk_fkb: truncated table string");
+        fk_fkb_mark_bad("truncated table string");
+        return;
     }
     if (fk_sp >= fk_scap_s) {
         fk_scap_s = fk_scap_s * 2;
@@ -11001,7 +11033,8 @@ static long long fk_fkb_remap_field(long long tag, long long field, long long va
 static int fk_fkb_read_symbol_to_srctext(long long *start, long long *len) {
     long long n = fk_fkb_read_u32();
     if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
-        fk_die("fk_fkb: truncated symbol string");
+        fk_fkb_mark_bad("truncated symbol string");
+        return 0;
     }
     if (fk_slen + n + 4 >= FK_SOURCE_TEXT_CAP) {
         return 0;
@@ -11040,8 +11073,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     if (got < 0) {
         return 0;
     }
-    fk_fkb_pos = 0;
-    fk_fkb_len = got;
+    fk_fkb_begin(got);
     const char magic[8] = {'F', 'K', 'P', 'I', 'F', 'B', '1', 0};
     long long mi = 0;
     while (mi < 8) {
@@ -11054,15 +11086,27 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     if (version < 4) {
         return 0;
     }
-    int source_identity_ok = 1;
-    source_identity_ok = source_identity_ok && fk_fkb_read_string_matches_cstr(expected_src_path);
-    source_identity_ok = source_identity_ok && fk_fkb_read_string_matches_cstr(expected_source_hash);
+    /* Every identity read must execute unconditionally: these advance the
+     * decode stream. A short-circuit here (the old `ok && read(...)` shape)
+     * skipped the hash read after a src-path mismatch and desynced every
+     * later read into "truncated string" -- the wrong-CWD reproduction. */
+    int src_path_matches = fk_fkb_read_string_matches_cstr(expected_src_path);
+    int source_hash_matches = fk_fkb_read_string_matches_cstr(expected_source_hash);
+    int source_identity_ok = src_path_matches && source_hash_matches;
     long long stored_source_mtime = fk_fkb_read_signed();
     if (stored_source_mtime != expected_source_mtime) {
         source_identity_ok = 0;
     }
     fk_fkb_skip_string();
-    if (fk_fkb_read_signed() != 1 || !source_identity_ok) {
+    long long sealed = fk_fkb_read_signed();
+    if (fk_fkb_bad) {
+        fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
+        return 0;
+    }
+    if (sealed != 1 || !source_identity_ok) {
+        fk_diag_path("warning", fkb_path,
+                     "stale .fkb (stored source identity does not match, e.g. written from a "
+                     "different working directory); rebuilding from source");
         return 0;
     }
     long long nf = fk_fkb_read_signed();
@@ -11077,7 +11121,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     long long node_base = fk_node_count;
     long long str_base = fk_sp;
     long long i = 0;
-    while (i < nf) {
+    while (!fk_fkb_bad && i < nf) {
         fn_roots[i] = fk_fkb_read_signed();
         i = i + 1;
     }
@@ -11087,7 +11131,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         return 0;
     }
     i = 0;
-    while (i < nr) {
+    while (!fk_fkb_bad && i < nr) {
         long long tag = fk_fkb_read_signed();
         long long c1 = fk_fkb_read_signed();
         long long c2 = fk_fkb_read_signed();
@@ -11105,7 +11149,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         return 0;
     }
     i = 0;
-    while (i < ns) {
+    while (!fk_fkb_bad && i < ns) {
         fk_fkb_read_table_string();
         i = i + 1;
     }
@@ -11121,13 +11165,16 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     free(fn_roots);
     long long symbol_count = fk_fkb_read_signed();
     i = 0;
-    while (i < symbol_count) {
+    while (!fk_fkb_bad && i < symbol_count) {
         (void)fk_fkb_read_signed();
         long long old_fnidx = fk_fkb_read_signed();
         long long arity = fk_fkb_read_signed();
         long long name_s = 0;
         long long name_n = 0;
         if (!fk_fkb_read_symbol_to_srctext(&name_s, &name_n)) {
+            if (fk_fkb_bad) {
+                fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
+            }
             return 0;
         }
         if (old_fnidx > 0 && fk_fntop < FK_TOP_FN_SYM_CAP) {
@@ -11144,24 +11191,28 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     }
     long long node_symbol_count = fk_fkb_read_signed();
     i = 0;
-    while (i < node_symbol_count) {
+    while (!fk_fkb_bad && i < node_symbol_count) {
         (void)fk_fkb_read_signed();
         (void)fk_fkb_read_signed();
         long long dep_count = fk_fkb_read_signed();
         long long d = 0;
-        while (d < dep_count) {
+        while (!fk_fkb_bad && d < dep_count) {
             (void)fk_fkb_read_signed();
             (void)fk_fkb_read_signed();
             d = d + 1;
         }
         i = i + 1;
     }
-    return fk_fkb_pos == fk_fkb_len;
+    if (fk_fkb_bad || fk_fkb_pos != fk_fkb_len) {
+        fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
+        return 0;
+    }
+    return 1;
 }
 static void fk_fkb_skip_symbol_image(long long version) {
     long long symbol_count = fk_fkb_read_signed();
     long long i = 0;
-    while (i < symbol_count) {
+    while (!fk_fkb_bad && i < symbol_count) {
         (void)fk_fkb_read_signed();
         if (version >= 3) {
             (void)fk_fkb_read_signed();
@@ -11172,12 +11223,12 @@ static void fk_fkb_skip_symbol_image(long long version) {
     }
     long long node_symbol_count = fk_fkb_read_signed();
     i = 0;
-    while (i < node_symbol_count) {
+    while (!fk_fkb_bad && i < node_symbol_count) {
         (void)fk_fkb_read_signed();
         (void)fk_fkb_read_signed();
         long long dep_count = fk_fkb_read_signed();
         long long d = 0;
-        while (d < dep_count) {
+        while (!fk_fkb_bad && d < dep_count) {
             (void)fk_fkb_read_signed();
             (void)fk_fkb_read_signed();
             d = d + 1;
@@ -11199,15 +11250,17 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     long long got = fk_read_all_bounded(fd, fk_buf, FK_PARSE_BUF_CAP);
     close(fd);
     if (got < 0) {
-        fk_die("fk_fkb: artifact exceeds FK_PARSE_BUF_CAP");
+        fk_fkb_begin(0);
+        fk_fkb_mark_bad("artifact exceeds FK_PARSE_BUF_CAP or is unreadable");
+        return 0;
     }
-    fk_fkb_pos = 0;
-    fk_fkb_len = got;
+    fk_fkb_begin(got);
     const char magic[8] = {'F', 'K', 'P', 'I', 'F', 'B', '1', 0};
     long long mi = 0;
     while (mi < 8) {
         if (fk_fkb_read_u8() != (long long)(unsigned char)magic[mi]) {
-            fk_die("fk_fkb: bad magic");
+            fk_fkb_mark_bad("bad magic");
+            return 0;
         }
         mi = mi + 1;
     }
@@ -11215,20 +11268,28 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     if (version == 2 || version == 3) {
         /* pre-v4 lane width: superseded, not corrupt -- invalidate so the
          * caller recompiles from source and overwrites with a v4 artifact */
+        fk_fkb_mark_bad("pre-v4 artifact lane; superseded");
         return 0;
     }
     if (version != 4) {
-        fk_die("fk_fkb: bad version");
+        fk_fkb_mark_bad("unsupported version");
+        return 0;
     }
+    /* Identity reads execute unconditionally -- they advance the decode
+     * stream; short-circuiting them desyncs every later read (see
+     * fk_src_import_fkb_image). Mismatch stays a soft "rebuild" verdict. */
     int source_identity_ok = 1;
     if (expected_src_path != 0) {
-        source_identity_ok = source_identity_ok && fk_fkb_read_string_matches_cstr(expected_src_path);
+        if (!fk_fkb_read_string_matches_cstr(expected_src_path)) {
+            source_identity_ok = 0;
+        }
     } else {
         fk_fkb_skip_string();
     }
     if (expected_source_hash != 0) {
-        source_identity_ok =
-            source_identity_ok && fk_fkb_read_string_matches_cstr(expected_source_hash);
+        if (!fk_fkb_read_string_matches_cstr(expected_source_hash)) {
+            source_identity_ok = 0;
+        }
     } else {
         fk_fkb_skip_string();
     }
@@ -11237,29 +11298,36 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         source_identity_ok = 0;
     }
     fk_fkb_skip_string();
-    if (fk_fkb_read_signed() != 1) {
-        fk_die("fk_fkb: unsealed artifact");
+    long long sealed = fk_fkb_read_signed();
+    if (fk_fkb_bad) {
+        return 0;
+    }
+    if (sealed != 1) {
+        fk_fkb_mark_bad("unsealed artifact");
+        return 0;
     }
     if (!source_identity_ok) {
         return 0;
     }
     long long nf = fk_fkb_read_signed();
     if (nf < 0 || nf > FK_FN_CAP) {
-        fk_die("fk_fkb: function count exceeds capacity");
+        fk_fkb_mark_bad("function count exceeds capacity");
+        return 0;
     }
     fk_fn_count = nf;
     long long i = 0;
-    while (i < nf) {
+    while (!fk_fkb_bad && i < nf) {
         fk_fn[i] = fk_fkb_read_signed();
         i = i + 1;
     }
     long long nr = fk_fkb_read_signed();
     if (nr < 0 || nr > FK_AST_NODE_CAP) {
-        fk_die("fk_fkb: node count exceeds capacity");
+        fk_fkb_mark_bad("node count exceeds capacity");
+        return 0;
     }
     fk_node_count = nr;
     i = 0;
-    while (i < nr) {
+    while (!fk_fkb_bad && i < nr) {
         fk_node[i][0] = fk_fkb_read_signed();
         fk_node[i][1] = fk_fkb_read_signed();
         fk_node[i][2] = fk_fkb_read_signed();
@@ -11268,17 +11336,22 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     }
     long long ns = fk_fkb_read_signed();
     if (ns < 0) {
-        fk_die("fk_fkb: negative string count");
+        fk_fkb_mark_bad("negative string count");
+        return 0;
     }
     fk_string_table_reset();
     i = 0;
-    while (i < ns) {
+    while (!fk_fkb_bad && i < ns) {
         fk_fkb_read_table_string();
         i = i + 1;
     }
     fk_fkb_skip_symbol_image(version);
+    if (fk_fkb_bad) {
+        return 0;
+    }
     if (fk_fkb_pos != fk_fkb_len) {
-        fk_die("fk_fkb: trailing bytes");
+        fk_fkb_mark_bad("trailing bytes");
+        return 0;
     }
     fk_defn_next = fk_fn_count;
     fk_fntop = 0;
@@ -11395,6 +11468,11 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
         fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
     }
     if (!fk_src_write_fkb(path, fkb_path, sym_path, unit_mtime, source_hash)) {
+        if (fk_fkb_write_overflow) {
+            fk_die("fk_run_src: failed to write .fkb/.sym artifacts -- a value in the "
+                   "program image is outside the .fkb v4 signed lane (magnitude 2^63, "
+                   "i.e. LLONG_MIN) or a length exceeds u32");
+        }
         fk_die("fk_run_src: failed to write .fkb/.sym artifacts");
     }
 }
@@ -11565,7 +11643,15 @@ static int fk_run_src(const char *path, long long arg) {
         if (fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
             return fk_run_loaded_program_image(arg);
         }
-        fk_diag_path("warning", fkb_path, "fresh-looking .fkb failed source identity check; rebuilding");
+        if (fk_fkb_bad) {
+            char whybuf[192];
+            sprintf(whybuf, "unusable .fkb artifact (%s); rebuilding", fk_fkb_bad_why);
+            fk_diag_path("warning", fkb_path, whybuf);
+        } else {
+            fk_diag_path("warning", fkb_path,
+                         "fresh-looking .fkb failed source identity check (source path, content, "
+                         "or mtime changed, e.g. invoked from a different directory); rebuilding");
+        }
     } else if (fkb_mtime > 0) {
         fk_diag_path("warning", fkb_path, "stale .fkb ignored");
     }
@@ -11925,7 +12011,10 @@ static int fk_run(int argc, char **argv) {
     }
     if (fk_path_has_suffix(argv[1], ".fkb")) {
         if (!fk_src_load_fkb(argv[1])) {
-            fk_diag_path("error", argv[1], "could not load .fkb program image");
+            char whybuf[192];
+            sprintf(whybuf, "could not load .fkb program image (%s)",
+                    fk_fkb_bad ? fk_fkb_bad_why : "unknown decode failure");
+            fk_diag_path("error", argv[1], whybuf);
             return 2;
         }
         return fk_run_loaded_program_image(argc > 2 ? atoi(argv[2]) : 0);
