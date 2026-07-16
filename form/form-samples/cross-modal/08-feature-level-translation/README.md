@@ -101,12 +101,12 @@ cd form && ./validate.sh form-samples/cross-modal/08-feature-level-translation/v
 ## Where this fits in the body's arc
 
 In service of:
-- [`lc-cross-modal-unity`](../../../docs/vision-kb/concepts/lc-cross-modal-unity.md)
+- `lc-cross-modal-unity`
   — twelve modality encoders attest thirteen canonical Blueprints; this
   demo extends that pattern to learned (rather than hand-authored)
   feature extraction
-- [`lc-grammar-is-the-universal-recipe`](../../../docs/vision-kb/concepts/lc-grammar-is-the-universal-recipe.md)
+- `lc-grammar-is-the-universal-recipe`
   — grammar at the feature altitude, not the syntactic altitude
-- [`lc-same-shape-different-articulation`](../../../docs/vision-kb/concepts/lc-same-shape-different-articulation.md)
+- `lc-same-shape-different-articulation`
   — Urs's articulation question; this demo walks the *same-shape-with-
   different-articulation* claim at the cross-modal altitude

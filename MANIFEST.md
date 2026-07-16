@@ -168,13 +168,22 @@ Current state per region. **Chronology is deliberately not kept here** — the f
   fkwu-native HTTP — grounded `/ask` with the fear↔love frequency read and attunement, `/trace` handing over
   any cell's change graph and line attribution (trust as something checkable). Band 111111111 + a live TCP
   witness; the voice stays rented and says so in-band (`receipts/2026-07-05-chatgpt-plugin-offer.md`).
-- **`teachings/`** — the scoped core teachings (one-engine, name-resolution-as-recipe, structural-composition,
-  form-first-reasoning, prose-as-recipe).
+- **`teachings/`** — the scoped core teachings ([one-engine](teachings/lc-one-engine.md),
+  [name-resolution-as-recipe](teachings/name-resolution-as-recipe.form),
+  [form-first-reasoning](teachings/form-first-reasoning.form),
+  [prose-as-recipe](teachings/prose-as-recipe.form)) and the **concept tissue** —
+  [`teachings/concepts/`](teachings/concepts/README.md), twelve network-lived teachings the kernel
+  reasons from, each carrying the frequency it speaks at. *structural-composition* is named here
+  as a core teaching but has no page in this body; it is named, not linked, per the tissue's own
+  rule (name a companion you cannot reach; never claim a path to it) and stands as work.
 
 ### Knowledge tree & witness ledger
-- **`docs/`** — the knowledge tree: `coherence-substrate/` (~140 `.form` teaching/spec docs mapping ~1:1 to live
-  recipes, incl. `tool-grammar.form` whose GAP-T1 executor now exists), strategic design narratives, and
-  `docs/inheritance/` (the homecoming ledgers + `proven-bodies-from-old-repo.txt`, the porting registry).
+- **`docs/`** — the knowledge tree: [`coherence-substrate/`](docs/coherence-substrate/README.md) (~140 `.form`
+  teaching/spec docs mapping ~1:1 to live recipes, incl. `tool-grammar.form` whose GAP-T1 executor now exists,
+  plus the prose specs and audits behind them — how Form reaches its environment, and what the surface last
+  read), strategic design narratives ([the penumbra map](docs/penumbra-map.md) — where the proof's light
+  actually falls, and where it does not), and [`docs/inheritance/`](docs/inheritance/INHERITANCE.md) (the
+  homecoming ledgers + `proven-bodies-from-old-repo.txt`, the porting registry).
 - **`receipts/`** — the dated witness ledger (~320 receipts). Every claim of "proven/observed" traces to one.
   Corrections are made **in place with banners**, never silently — the ledger records what was believed and when,
   including the wrong turns (`json-fk-src-scoping-fix` → `json-fk-actually-fixed` → `stale-binary-root-cause`

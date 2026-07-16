@@ -67,7 +67,7 @@ visibility.
 
 **Privacy survives.** A cell that doesn't register stays invisible.
 A subscriber doesn't get told about cells that didn't volunteer for
-the verb. The opt-in shape from [23-cell-registry-osi](../23-cell-registry-osi)
+the verb. The opt-in shape from [23-cell-registry-osi](../23-cell-registry-osi/README.md)
 extends naturally: not registering hides you from pub/sub too.
 
 ## What this is NOT yet
@@ -94,5 +94,5 @@ extends naturally: not registering hides you from pub/sub too.
 
 - [`form-stdlib/cell-registry.fk`](../../../form-stdlib/cell-registry.fk) — `register-cell`, `find-by-capability`
 - [`form-stdlib/channel.fk`](../../../form-stdlib/channel.fk) — the append-only substrate
-- [23-cell-registry-osi](../23-cell-registry-osi) — the registry's L3 walk; this demo is its periodized reader
+- [23-cell-registry-osi](../23-cell-registry-osi/README.md) — the registry's L3 walk; this demo is its periodized reader
 - [`form-stdlib/tests/pubsub-band.fk`](../../../form-stdlib/tests/pubsub-band.fk) — the sibling-parity band test

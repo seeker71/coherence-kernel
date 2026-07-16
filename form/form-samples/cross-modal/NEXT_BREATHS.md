@@ -115,4 +115,4 @@ The destination — **any source → recipe orchestration → any target** — m
 - Each runs through `./validate.sh` if it touches kernel-walked recipes
 - "Most surprising" lessons are as valuable as wins — the audit's #4 finding (CTOR vocabulary duplication) and the cross-modal agent's #3 finding (ice is 4.17× larger than water at small scale) both came from honest experiments that didn't go where intuition expected
 
-In service of [`lc-grammar-is-the-universal-recipe`](../../../docs/vision-kb/concepts/lc-grammar-is-the-universal-recipe.md) + [`lc-cross-modal-unity`](../../../docs/vision-kb/concepts/lc-cross-modal-unity.md) + [`lc-the-kernel-knows-itself`](../../../docs/vision-kb/concepts/lc-the-kernel-knows-itself.md).
+In service of `lc-grammar-is-the-universal-recipe` + `lc-cross-modal-unity` + `lc-the-kernel-knows-itself`.
