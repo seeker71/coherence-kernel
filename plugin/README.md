@@ -60,6 +60,11 @@ worth a retrieval-quality check at the next redeploy.
 
 ## The publish checklist (repeatable — 2026-07-15)
 
+**Automated lane**: [`plugin/PUBLISH-HANDOFF.md`](PUBLISH-HANDOFF.md) is the executable form
+of this checklist — a Claude session on the owner's machine (logged-in browser + VPS access)
+runs it end to end, gates included, and writes the receipt. The steps below are the same
+contract in prose.
+
 `plugin/ai-plugin.json`'s `description_for_model` on **main** is the single canonical guidance
 text: the deployed lane's person-first framing unified with the covenant landing rules earned
 by the five-round judged trial (`receipts/2026-07-15-frequency-difference-trial.md`), written
