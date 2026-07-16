@@ -9994,6 +9994,7 @@ static long long fk_src_dep_size[FK_SRC_DEP_CAP];
 static long long fk_src_dep_parent[FK_SRC_DEP_CAP];
 static long long fk_src_dep_end[FK_SRC_DEP_CAP];
 static long long fk_src_dep_count;
+static int fk_src_artifact_write_failed;
 static char fk_src_root_path[4096];
 static char fk_src_root_text[FK_SOURCE_TEXT_CAP];
 static long long fk_src_root_len;
@@ -10727,12 +10728,39 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
     close(fd);
     return 1;
 }
+static int fk_src_tmp_sibling(const char *path, char *out, long long cap) {
+    long long n = fk_path_len(path);
+    if (n + 5 > cap) {
+        return 0;
+    }
+    long long i = 0;
+    while (i < n) {
+        out[i] = path[i];
+        i = i + 1;
+    }
+    out[n] = FK_CH_DOT;
+    out[n + 1] = 't';
+    out[n + 2] = 'm';
+    out[n + 3] = 'p';
+    out[n + 4] = 0;
+    return 1;
+}
 static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
                             long long source_mtime, const char *source_hash) {
+    /* stage both artifacts as .tmp siblings and rename only after every byte
+     * lands: an aborted emission (a value the encoding cannot carry, full
+     * disk, a kill) must never leave a partial .fkb behind -- later runs
+     * would load it and die "truncated artifact" instead of recompiling. */
+    char fkb_tmp[4104];
+    char sym_tmp[4104];
+    if (!fk_src_tmp_sibling(fkb_path, fkb_tmp, 4104) ||
+        !fk_src_tmp_sibling(sym_path, sym_tmp, 4104)) {
+        return 0;
+    }
 #if defined(_WIN32)
-    int fd = open(fkb_path, O_WRONLY | O_CREAT | O_TRUNC | 0x8000, 0666);
+    int fd = open(fkb_tmp, O_WRONLY | O_CREAT | O_TRUNC | 0x8000, 0666);
 #else
-    int fd = open(fkb_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    int fd = open(fkb_tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 #endif
     if (fd < 0) {
         return 0;
@@ -10792,9 +10820,30 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     }
     close(fd);
     if (!ok) {
+        unlink(fkb_tmp);
         return 0;
     }
-    return fk_src_write_sym_text(sym_path, src_path, fkb_path, source_hash);
+    /* the .sym text cites the FINAL .fkb path; only the file lands at .tmp */
+    if (!fk_src_write_sym_text(sym_tmp, src_path, fkb_path, source_hash)) {
+        unlink(fkb_tmp);
+        unlink(sym_tmp);
+        return 0;
+    }
+#if defined(_WIN32)
+    unlink(fkb_path);
+    unlink(sym_path);
+#endif
+    if (rename(fkb_tmp, fkb_path) != 0) {
+        unlink(fkb_tmp);
+        unlink(sym_tmp);
+        return 0;
+    }
+    if (rename(sym_tmp, sym_path) != 0) {
+        unlink(sym_tmp);
+        unlink(fkb_path);
+        return 0;
+    }
+    return 1;
 }
 static long long fk_fkb_pos;
 static long long fk_fkb_len;
@@ -11315,6 +11364,7 @@ static void fk_src_reset_compile_state(void) {
     fk_nerr = 0;
     fk_nwarn = 0;
     fk_src_truncated = 0;
+    fk_src_artifact_write_failed = 0;
     fk_string_table_reset();
     fk_fntop = 0;
     fk_const_top = 0;
@@ -11352,7 +11402,14 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
         fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
     }
     if (!fk_src_write_fkb(path, fkb_path, sym_path, unit_mtime, source_hash)) {
-        fk_die("fk_run_src: failed to write .fkb/.sym artifacts");
+        /* the artifact is a cache, not the program: the compiled unit is
+         * already live in memory, so a value the artifact encoding cannot
+         * carry (u32-signed magnitude cap -- e.g. a full-range u32 cksum
+         * literal such as 3566916401) or an I/O failure downgrades to an
+         * uncached run instead of killing the work. The flag keeps the
+         * artifact-only compile path honest: it must still report failure. */
+        fk_src_artifact_write_failed = 1;
+        fk_diag_path("warning", path, "could not emit .fkb/.sym artifacts; running uncached");
     }
 }
 static int fk_src_compile_artifact_only(const char *path) {
@@ -11400,7 +11457,7 @@ static int fk_src_compile_artifact_only(const char *path) {
         fk_src_load_unit(compile_path, source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
         fk_src_reset_compile_state();
         fk_src_compile_current_unit(compile_path, fkb_path, sym_path, unit_mtime, source_hash);
-        ok = 1;
+        ok = fk_src_artifact_write_failed == 0;
     }
     fk_src_dep_count = saved_dep_count;
     fk_cstr_copy(fk_src_root_path, saved_root_path, 4096);
