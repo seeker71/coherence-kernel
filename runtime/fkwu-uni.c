@@ -531,6 +531,7 @@ extern long lseek(int, long, int);
 extern int rmdir(const char *);
 extern int unlink(const char *);
 extern int rename(const char *, const char *);
+extern int getpid(void);
 extern int sprintf(char *, const char *, ...);
 extern char *getenv(const char *);
 static long long fk_read_all_bounded(int fd, char *buf, long long cap) {
@@ -10791,10 +10792,22 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
 }
 static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
                             long long source_mtime, const char *source_hash) {
+    /* both artifacts go to pid-suffixed temp names and rename() into place:
+     * a reader under a concurrent runner must only ever see a whole image or
+     * the previous one, never a TRUNC-in-progress partial (the "truncated
+     * artifact" die class). The sym lens lands before the image so a fresh
+     * .fkb is never visible without its compile-error record. */
+    char fkb_tmp[4160];
+    char sym_tmp[4160];
+    if (fk_path_len(fkb_path) > 4096 || fk_path_len(sym_path) > 4096) {
+        return 0;
+    }
+    sprintf(fkb_tmp, "%s.w%d", fkb_path, getpid());
+    sprintf(sym_tmp, "%s.w%d", sym_path, getpid());
 #if defined(_WIN32)
-    int fd = open(fkb_path, O_WRONLY | O_CREAT | O_TRUNC | 0x8000, 0666);
+    int fd = open(fkb_tmp, O_WRONLY | O_CREAT | O_TRUNC | 0x8000, 0666);
 #else
-    int fd = open(fkb_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    int fd = open(fkb_tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 #endif
     if (fd < 0) {
         return 0;
@@ -10855,14 +10868,21 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     }
     close(fd);
     if (!ok) {
-        /* a partial image looks fresh by mtime and poisons the next run's
-         * load ("truncated artifact") -- leave no half-written artifact */
-        unlink(fkb_path);
+        unlink(fkb_tmp);
         return 0;
     }
-    if (!fk_src_write_sym_text(sym_path, src_path, fkb_path, source_hash)) {
-        unlink(fkb_path);
-        unlink(sym_path);
+    if (!fk_src_write_sym_text(sym_tmp, src_path, fkb_path, source_hash)) {
+        unlink(fkb_tmp);
+        unlink(sym_tmp);
+        return 0;
+    }
+    if (rename(sym_tmp, sym_path) != 0) {
+        unlink(fkb_tmp);
+        unlink(sym_tmp);
+        return 0;
+    }
+    if (rename(fkb_tmp, fkb_path) != 0) {
+        unlink(fkb_tmp);
         return 0;
     }
     return 1;
