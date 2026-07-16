@@ -37,7 +37,7 @@ that named this gap (unit U4).
 > numbers below are recomputed and cannot.
 
 - pages that can point (every .md): 774
-- resolved path-claims body-wide: 388
+- resolved path-claims body-wide: 389
 - BROKEN path-claims body-wide: 4
 - concept pages that can be orphaned: 33
 - ORPHANS (concept pages nothing points at): 0
@@ -59,8 +59,8 @@ population) and build artifacts are not counted here. See the cell's header.
 
 - receipts (episodic, append-only): 600
 - of those, PENDING (honest state, never a fault): 1
-- distillation corpus rows: 138
-- deepest corpus meaning-id: 737
+- distillation corpus rows: 139
+- deepest corpus meaning-id: 738
 
 ## The rung this portrait stands on
 
