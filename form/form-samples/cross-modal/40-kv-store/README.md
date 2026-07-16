@@ -149,8 +149,8 @@ empty" without inference. Compare with `SYMBOL-NOT-FOUND` in
 - [`form-stdlib/channel-query.fk`](../../../form-stdlib/channel-query.fk) — `cq-query`, `cq-response`, `cq-recipe-content`
 - [`form-stdlib/cell-registry.fk`](../../../form-stdlib/cell-registry.fk) — `register-cell`, `find-by-capability`
 - [`form-stdlib/channel.fk`](../../../form-stdlib/channel.fk) — `channel-create`, `channel-append`, `channel-read`
-- [21-cell-query-protocol](../21-cell-query-protocol) — the QUERY/RESPONSE shape this builds on
-- [23-cell-registry-osi](../23-cell-registry-osi) — the capability addressing K uses
-- [25-end-to-end-channel](../25-end-to-end-channel) — single-query walk through every OSI layer; this is its many-query habitable cousin
-- [31-verb-router](../31-verb-router) — how the verb-table dispatch scales beyond two verbs; ready for kv-list / kv-del when this walk grows them
+- [21-cell-query-protocol](../21-cell-query-protocol/README.md) — the QUERY/RESPONSE shape this builds on
+- [23-cell-registry-osi](../23-cell-registry-osi/README.md) — the capability addressing K uses
+- [25-end-to-end-channel](../25-end-to-end-channel/README.md) — single-query walk through every OSI layer; this is its many-query habitable cousin
+- [31-verb-router](../31-verb-router/verb-router.fk) — how the verb-table dispatch scales beyond two verbs; ready for kv-list / kv-del when this walk grows them
 - [`form-stdlib/tests/kv-store-band.fk`](../../../form-stdlib/tests/kv-store-band.fk) — sibling-parity band test

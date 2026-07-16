@@ -117,7 +117,7 @@ doorway via `random_bytes` from its own `/dev/urandom`). The
 
 `validate.sh` compares the printed protocol verdict; agreement is the
 conformance contract. This is the same shape as
-[`lc-divergence-is-the-doorway`](../../../docs/vision-kb/concepts/lc-divergence-is-the-doorway.md):
+`lc-divergence-is-the-doorway`:
 the bytes are private per observer; the meaning is public.
 
 ## Real-time across processes
@@ -169,8 +169,8 @@ default for **truly novel** state.
 
 ## Cross-refs
 
-- [`lc-divergence-is-the-doorway`](../../../docs/vision-kb/concepts/lc-divergence-is-the-doorway.md) — bytes diverge per observer; meaning converges
-- [`lc-private-channel-via-substrate`](../../../docs/vision-kb/concepts/lc-private-channel-via-substrate.md) — fingerprint over substrate
+- `lc-divergence-is-the-doorway` — bytes diverge per observer; meaning converges
+- `lc-private-channel-via-substrate` — fingerprint over substrate
 - 15-private-channel — fingerprint protocol shape this builds on
 - 16-jit-registry — the bind that makes megabyte-scale honest
 - 17-novel-nodes — sharing novel substrate identity (structural)
