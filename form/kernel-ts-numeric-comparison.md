@@ -2,7 +2,7 @@
 
 Companion to [`kernel-ts-comparison.md`](./kernel-ts-comparison.md)
 (the i32/walker/compiled arc) and
-[`docs/coherence-substrate/numeric-types-plan.md`](../docs/coherence-substrate/numeric-types-plan.md)
+`docs/coherence-substrate/numeric-types-plan.md`
 (the architecture).
 
 This doc walks the format-recipe path through two efficiency passes and
