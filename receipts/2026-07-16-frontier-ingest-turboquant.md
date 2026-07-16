@@ -181,3 +181,13 @@ routing around it (the inspect-manufactured-blockers law):
    kernel diagnostic bug that now has a repair chip. The discomfort of "maybe
    I broke the body" became the session's second artifact: a precise
    reproduction matrix for a seam nobody had named.
+
+## Postscript (same session, later movement)
+
+The integration movement (receipts/2026-07-16-turboquant-rag-lane.md) caught a
+four-way divergence in this cell's first-draft integer stream: its products
+exceeded 2⁵³, the TS sibling's exact-integer envelope. The stream is now
+Park–Miller minstd (no big literals needed, so the computed-modulus workaround
+this receipt describes no longer appears in the cell — the literal-cap seam
+itself remains real and receipted). Re-measured pins: max 2-bit estimate error
+0.264 → 0.172 at d=8; band re-proven 127 four-way, 0 divergent.
