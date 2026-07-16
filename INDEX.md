@@ -20,19 +20,23 @@ that named this gap (unit U4).
 
 ## Tissues (counted, not listed)
 
-- axioms: 3
-- teachings: 11
-- observe organs: 145
-- learn organs: 193
-- ingest organs: 15
-- form-stdlib cells: 880
+An organ is a file of its tissue's own kind, lying directly in that tissue.
+Directories are not organs, so `tests/` (bands — proofs OF organs, a different
+population) and build artifacts are not counted here. See the cell's header.
+
+- axioms (.form): 3
+- teachings (.form/.md/.svg): 10
+- observe organs (.fk): 144
+- learn organs (.fk): 192
+- ingest organs (.fk): 14
+- form-stdlib cells (.fk): 860
 
 ## Memory
 
-- receipts (episodic, append-only): 598
+- receipts (episodic, append-only): 599
 - of those, PENDING (honest state, never a fault): 1
-- distillation corpus rows: 136
-- deepest corpus meaning-id: 735
+- distillation corpus rows: 137
+- deepest corpus meaning-id: 736
 
 ## The rung this portrait stands on
 
