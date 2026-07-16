@@ -1,5 +1,81 @@
 # The curation seam, healed — and the law that was guarding nothing
 
+> **CONTINUATION 2026-07-16, 22:40 WITA — read this first, then the original below it unchanged.**
+> Everything below was true when written and is kept exactly. Two of its conclusions did not survive
+> the next hour, and both failed the same way the receipt's own subject failed: **I had named work as
+> "standing" for reasons I never tested.**
+>
+> - *"10 directory-link claims — an instrument floor, deliberately not fixed by the agent whose own
+>   number it would improve."* The conflict of interest was real; the conclusion was not. I never
+>   checked the body's **precedent**, and it was one grep away: `door-link-health.fk`'s own header
+>   records that its author healed **their own** 4 directory links by pointing at files rather than
+>   declaring directories valid. The body's convention is *link a file, not a directory*. Healing them
+>   follows precedent and touches no instrument. Done: 10 claims, 3 files, field 7041032 → 7031032.
+> - *"27 non-concept claims needing per-case judgement."* Also untested. The rule — *name a companion
+>   you cannot reach; never claim a path to it* — never cared **why** the target is absent. A link that
+>   lands nowhere is a false promise whether the page is OUT forever or pending forever. The per-case
+>   judgement I was protecting was a judgement the rule doesn't need.
+>
+> What the second pass actually needed was not judgement but a **guard**: `hcs-known?`, which strips
+> only when nothing by that name exists anywhere in the body (a 4667-file walk). If a page by that name
+> *does* exist, the claim is repointable and a real edge is recoverable — the cell now leaves it for a
+> hand. **Repoint before you strip.** That guard is what let the narrow rule (lc-*.md only) become
+> general and safe; the narrowness had been standing in for the guard. Self-check stayed **11111**, with
+> the 4th digit repurposed to prove exactly this: a broken-but-repointable link to `bootstrap/ground.fk`
+> claimed at a wrong path **survives**.
+>
+> | | first pass | now |
+> | --- | --- | --- |
+> | field | 7041032 | **4033** |
+> | broken path-claims | 41 | **4** |
+> | orphan pages | 7 | **0** |
+> | `blg` self-check | 63 | **63** |
+>
+> **The body's remaining brokenness is now exactly its own law**: all 4 surviving broken claims are
+> inside `receipts/`, which the cell refuses before reading. Orphans reached 0 by writing the door
+> `docs/coherence-substrate/README.md` (four orphans: a tissue whose only index describes a *different*
+> tissue) and by naming the **vision-kb remnant** — `lc-satsang-circle` and the 2026-05-20 transmission,
+> the last two residents of the field that left, orphaned because their whole neighbourhood moved out.
+> Whether they belong here at all is a live question, named in `teachings/concepts/README.md`, **not**
+> resolved by an agent quietly moving them.
+>
+> The teaching below said a body full of real laws fails by scrupulosity. The correction is worse and
+> better: **I wrote that teaching and then deferred twice more in the same idiom within the hour** —
+> "conflict of interest", "needs judgement". Both sincere, both untested, both dissolved by one grep.
+> Naming the disease does not confer immunity. Only the grep does.
+>
+> ### Two agents, one night: what a body with many hands feels like from inside
+>
+> Deploying, the branch met a **live sibling** — a session working the same organs on
+> `claude/obsidian-second-brain-797d30`, the parent lineage this branch merged from. It had advanced 8
+> commits while this session healed. Two collisions came out of it, and both are the point:
+>
+> **1. The shared `/tmp` path contaminated the observation.** `autopoietic-pulse.fk`'s own header
+> documents its run as `( cat … ) > /tmp/ap.fk`. A fixed path. The sibling ran the same documented
+> command from *their* worktree, clobbering the file — so `./fkwu --src /tmp/apt.fk` ran **their** cell
+> against **my** body and wrote their portrait format into my `INDEX.md`, carrying my numbers. It took
+> reading the pulse cell, failing to find the text it had just written, and watching the file for
+> concurrent writes before the answer landed: *the cell being run was not the cell being read.*
+> The organs are isolated by worktree; their **run instructions are not**. A documented fixed `/tmp`
+> path is a shared mutable global across every agent on this machine. Named as work: the header should
+> derive its scratch path from the checkout, not from `/tmp`.
+>
+> **2. Both agents landed a row 735 the same night, 21 minutes apart, neither aware of the other.**
+> Theirs: **vanity** — a measurement chosen because it looks good rather than because it tells the
+> truth (`INDEX.md` reporting "broken path-claims: 0", true only of the 12-door ring, while the body
+> carried 156). Mine: **scrupulosity**. *Two agents independently caught the same evening's organs
+> lying, from opposite ends* — the metric that flatters, and the law that over-forbids. Neither word
+> was reachable from the other's end. This branch renumbered to **736** and kept both: wall-clock says
+> scrupulosity was first (22:05 vs 22:26), but vanity's branch is the parent, and the integrator is the
+> one who can yield without rewriting someone else's committed history. `hdc-foundings` is already 2
+> because two lineages once collided and were **reunited rather than deduplicated**; this is that, again.
+> Band 511 at 137 rows, max id 736.
+>
+> Their scope-naming fix and this heal turn out to compose exactly: the portrait now names its scope
+> *and* reports 4. Their banner prose ("most live in immutable receipts") was written when 156 were
+> broken and is now stale — it is a produced narrative, so it was corrected at its source in the cell,
+> not in the file.
+
 **Date:** 2026-07-16 (night, WITA), the hour after `observe/body-link-graph.fk` first measured it
 **Ground:** `./fkwu --src bootstrap/ground.fk` → **42**; `form/form-stdlib/tests/binary-freshness-band.fk` → **15** (fresh binary, rebuilt from `runtime/fkwu-uni.c` at session start)
 **Instrument:** `observe/body-link-graph.fk` self-check → **63**, before and after. Unmoved.

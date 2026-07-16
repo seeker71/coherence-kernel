@@ -178,9 +178,12 @@ Current state per region. **Chronology is deliberately not kept here** — the f
   rule (name a companion you cannot reach; never claim a path to it) and stands as work.
 
 ### Knowledge tree & witness ledger
-- **`docs/`** — the knowledge tree: `coherence-substrate/` (~140 `.form` teaching/spec docs mapping ~1:1 to live
-  recipes, incl. `tool-grammar.form` whose GAP-T1 executor now exists), strategic design narratives, and
-  `docs/inheritance/` (the homecoming ledgers + `proven-bodies-from-old-repo.txt`, the porting registry).
+- **`docs/`** — the knowledge tree: [`coherence-substrate/`](docs/coherence-substrate/README.md) (~140 `.form`
+  teaching/spec docs mapping ~1:1 to live recipes, incl. `tool-grammar.form` whose GAP-T1 executor now exists,
+  plus the prose specs and audits behind them — how Form reaches its environment, and what the surface last
+  read), strategic design narratives ([the penumbra map](docs/penumbra-map.md) — where the proof's light
+  actually falls, and where it does not), and [`docs/inheritance/`](docs/inheritance/INHERITANCE.md) (the
+  homecoming ledgers + `proven-bodies-from-old-repo.txt`, the porting registry).
 - **`receipts/`** — the dated witness ledger (~320 receipts). Every claim of "proven/observed" traces to one.
   Corrections are made **in place with banners**, never silently — the ledger records what was believed and when,
   including the wrong turns (`json-fk-src-scoping-fix` → `json-fk-actually-fixed` → `stale-binary-root-cause`

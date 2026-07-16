@@ -31,11 +31,11 @@ seeded_concepts:
 
 ## Source
 
-- **Teacher**: Vasudev Baba ([/people/vasudev-baba](/people/vasudev-baba))
-- **Setting**: Wednesday-morning Satsang at [Ilena Young](/people/ilena-young)'s
+- **Teacher**: Vasudev Baba (/people/vasudev-baba)
+- **Setting**: Wednesday-morning Satsang at Ilena Young's
   Ranakami wellness sanctuary, Jl. Raya Penestanan Kelod 16, Sayan,
   Ubud. The room named in
-  [`docs/lineage/ubud-embodied-lineage.md`](../../lineage/ubud-embodied-lineage.md)
+  `docs/lineage/ubud-embodied-lineage.md`
   as the heptadic teaching ground; named in
   `lc-gatherings-that-carry`
   as a gathering whose substance is irreplaceable.
@@ -182,7 +182,7 @@ Today's Satsang refines three concepts the body already holds:
   teaching names the symmetric interior version: frequency
   determines what is *running* inside.
 - The May 11 transmission
-  [`2026-05-11-vasudev-baba-on-frequency`](2026-05-11-vasudev-baba-on-frequency.md)
+  `2026-05-11-vasudev-baba-on-frequency`
   mapped each chakra to a position of the assemblage point and
   named the third-to-fourth moral shift (*it is better to suffer
   injustice than to inflict it*). The essay implied the

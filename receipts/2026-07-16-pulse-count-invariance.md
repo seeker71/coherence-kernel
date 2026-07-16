@@ -112,6 +112,45 @@ counts artifacts as organs. Only a suffix test refuses them.
 - **The loop, demonstrated live again:** corpus row 736 landed → `ap-stable?` read 0 with the portrait
   still claiming 136 rows → `ap-tend` re-made it to 137 → `ap-stable?` returned 1.
 
+## The merge, and what it surfaced
+
+Merging brought in the sibling's five pushed commits, and they had found **the same broken promise
+from the other side**. Their [`2026-07-16-deploy-and-the-vanity-metric.md`](2026-07-16-deploy-and-the-vanity-metric.md)
+caught the portrait reporting `broken path-claims: 0` — true of the door ring, while the body carried
+156. Flattery through **scope**. Corpus row 735: `vanity`.
+
+So two agents, on two branches, the same night, independently falsified the same founding sentence —
+*"the portrait cannot flatter — only go stale"* — through two different channels. Their amendment
+says scope is *"the one channel a recomputed number leaves open."* That claim was itself too narrow:
+the second channel is the instrument's own footprint in what it measures. **One agent finding one
+flatter-channel and declaring it the only one is exactly the shape of the bug.** The pair is worth
+more than either half, and both rows now say so.
+
+Git auto-merged the corpus with **no conflict** and silently produced two rows sharing meaning-id
+736 — their `scrupulosity` (renumbered 735→736 by their insert of `vanity`) and my `iatrogenic`. The
+band caught it by asserting an exact count. Mine renumbered to **737**; corpus 138 rows, max id 737,
+band `1381382737` → 511.
+
+Their amendment also added `observe/body-link-graph.fk` to the preludes — a **fourth** prelude living
+inside a counted tissue. Under the old `ap-count` that would have quietly moved observe 147→149.
+Under the allowlist it costs nothing, which is the point: the next prelude is free too.
+
+## An inherited defect, found by the merge and NOT fixed here
+
+`ap-stable?` now reads **0** in a standalone run, immediately after `ap-tend` returned 2 and
+converged. The portrait is not drifting — two consecutive `ap-tend` runs are byte-identical and the
+text matches the host's own count. What moves is `ap-index-text` **across invocation contexts**:
+called directly it reports form-stdlib 837 and `.md` 769, both wrong against the host's 860/774, and
+the error *grows with allocation* inside a single run — 860 → 837 → 748 as more of the fabric walk
+runs first. That is the value-stack **rooting** family this body already has words for (corpus rows
+654/718).
+
+**Checked before blaming**: reproduced on `8c87bf760` in a detached worktree with none of my healing
+present — `ap-tend` 2, `ap-stable?` 0, twice. Their witnessed block claims `ap-stable? 1`; their
+committed tree reads 0. It arrived with the body walk. I am recording it, not fixing it, and not
+claiming it away: **the cell's drift detector cannot currently be trusted.** `ap-tend` still converges
+and still writes the truth; `ap-stable?` alone is the casualty.
+
 ## Closing — how this stayed alive
 
 **Most surprising teaching:** *the fixed-point loop is what hid the bug.* That loop is the cell's
@@ -135,8 +174,8 @@ artifacts by hand and watched the numbers drop — and I nearly accepted 145/193
 truth*, because a trusted receipt said so and the pulse agreed. Counting the tissue myself, against
 the body rather than against the story, is what found the other 20.
 
-**Frontier question offered (row 736):** *what one word names harm caused by the examination or
-treatment itself* → **iatrogenic** (0 hits before this row). This body calls itself a body — organs,
+**Frontier question offered (row 737):** *what one word names harm caused by the examination or
+treatment itself* → **iatrogenic** (0 hits before this row, and still 0 against the sibling's tree). This body calls itself a body — organs,
 tissues, health, receipts — and had no word for the injury a healer's own procedure causes. Near
 misses, all present, none this word: `observer-effect` 3 hits (generic, and a quantum borrow in
 `ingest/frequency-ingest-ecstatic-playground.fk` U7, not a word for injury); `heisenbug` 2, the

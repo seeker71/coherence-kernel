@@ -105,14 +105,14 @@ gives us everything we need.
   interrupted writer can truncate. For a multi-turn chat this is
   fine; for an audit log we'd want a real append-only structure.
 - **No real-time delivery.** A polls by re-reading its mailbox.
-  A daemon shape (see [37-pubsub](../37-pubsub)) would loop on
+  A daemon shape (see [37-pubsub](../37-pubsub/README.md)) would loop on
   `file_mtime` to wake up only when there's something new.
 - **No turn-taking semantics.** Either cell can append at any time;
   the sample orchestrates the back-and-forth manually. A real chat
   daemon would interleave reads and writes in its own event loop.
 - **No identity beyond the sender string.** "A" and "B" are just
   text. The next walk would key the channels off a registered
-  identity via [23-cell-registry-osi](../23-cell-registry-osi)'s
+  identity via [23-cell-registry-osi](../23-cell-registry-osi/README.md)'s
   `register-cell` and route by NodeID rather than path.
 
 ## Cross-refs
@@ -121,7 +121,7 @@ gives us everything we need.
   `CHANNEL-V0` / `CHANNEL-MSG` transport used by both cells.
 - [`form-stdlib/tests/chat-band.fk`](../../../form-stdlib/tests/chat-band.fk)
   — the sibling-parity band test (verdict: 5).
-- [25-end-to-end-channel](../25-end-to-end-channel) — full OSI walk
+- [25-end-to-end-channel](../25-end-to-end-channel/README.md) — full OSI walk
   with a registry, a query/response pair, and a typed item list.
-- [37-pubsub](../37-pubsub) — polling pattern that the next chat
+- [37-pubsub](../37-pubsub/README.md) — polling pattern that the next chat
   daemon would adopt.

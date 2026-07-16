@@ -11,12 +11,36 @@ see [`SECOND-BRAIN.md`](SECOND-BRAIN.md) for the mapping and
 [`ingest/frontier-ingest-llm-wiki.fk`](ingest/frontier-ingest-llm-wiki.fk) for the ingest
 that named this gap (unit U4).
 
-## Vital signs
+## Vital signs — the door ring
 
-- coherence verdict (2 portrayed+coherent / 1 unportrayed / 0 drifted): 2
+> Scoped to the 12 doors, and named so it cannot be read as the body. An
+> earlier portrait reported the `0` below as "broken path-claims" with no
+> scope on it, while the body carried 156 — a true number over a flattering
+> scope. The whole fabric is the section beneath this one.
+
+- door-ring coherence verdict (2 portrayed+coherent / 1 unportrayed / 0 drifted): 2
 - doors standing: 12
-- path-claims (links) in the door ring: 44
-- broken path-claims: 0
+- path-claims (links) in the door ring: 47
+- broken path-claims IN THE DOOR RING: 0
+
+## Vital signs — the whole link fabric
+
+> The body-wide truth, walked by `observe/body-link-graph.fk`. This section was
+> born reporting 156 broken claims — the seam of the curation that made this
+> repo public-able (`MANIFEST.md`'s IN/OUT scope): the excised pages stayed
+> out, their links stayed in. That seam was healed the same night by
+> `observe/heal-curation-seam.fk` (name a companion you cannot reach; never
+> claim a path to it), and what remains lives inside `receipts/`, which the
+> heal refuses to touch by construction — a witness record rewritten to green
+> a number would forge the body's own ontogeny. The body's remaining
+> brokenness is its own law. This banner is prose and can go stale; the
+> numbers below are recomputed and cannot.
+
+- pages that can point (every .md): 774
+- resolved path-claims body-wide: 388
+- BROKEN path-claims body-wide: 4
+- concept pages that can be orphaned: 33
+- ORPHANS (concept pages nothing points at): 0
 
 ## Tissues (counted, not listed)
 
@@ -33,10 +57,10 @@ population) and build artifacts are not counted here. See the cell's header.
 
 ## Memory
 
-- receipts (episodic, append-only): 599
+- receipts (episodic, append-only): 600
 - of those, PENDING (honest state, never a fault): 1
-- distillation corpus rows: 137
-- deepest corpus meaning-id: 736
+- distillation corpus rows: 138
+- deepest corpus meaning-id: 737
 
 ## The rung this portrait stands on
 
