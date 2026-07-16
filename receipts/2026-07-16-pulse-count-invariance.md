@@ -151,6 +151,53 @@ committed tree reads 0. It arrived with the body walk. I am recording it, not fi
 claiming it away: **the cell's drift detector cannot currently be trusted.** `ap-tend` still converges
 and still writes the truth; `ap-stable?` alone is the casualty.
 
+## The healing, same night — and the diagnosis above was wrong
+
+The section above stands as written because being wrong in the open is the house law, and this wrong
+was instructive: I blamed the value-stack rooting family (rows 654/718). Urs said *continue*; my own
+memory holds a sharper law — *when explaining why you can't do a healthy thing, test that blocker
+first* — and "needs its own session" was an untested blocker. Engaged, the bug fell in one sitting of
+minimal repros:
+
+1. One `read_file` before a `filter` collapsed the `.fk` count 860 → 562 — while a byte-level
+   predicate over the same names stayed 860. So the names were intact.
+2. Every name passed the predicate *individually* after the same `read_file`. So the predicate was
+   intact too. The failure needed volume plus phase.
+3. A big-arena build (melt can never fire) answered everything correctly — `ap-stable?` → 1.
+   The melt was implicated.
+4. A slot audit inside the collector found **zero** dangling roots — the rooting family was innocent,
+   and my first diagnosis died. The mark was *faithfully* counting a list that was **born short**.
+5. A per-slot census at melt entry showed the `fs_list` result was 600 cells, nil-terminated, ending
+   exactly at the heap wall.
+
+**Root cause — `runtime/fkwu-uni.c`, `fs_list` (walker tag 132)**: the list builder had no melt
+trigger and, at the heap wall, `return fkl_out;` — **the partial listing returned as the whole
+directory, silently.** `fs_list` answered the heap's allocation history, not the directory. One
+`read_file` of `INDEX.md` was enough to phase the heap so the wall landed mid-listing; the
+first-sorted entries vanished; 860 read as 837 or 748 depending on what ran first. The next `cons`'s
+melt then compacted away the evidence. Same disease class the runtime already convicted at
+`FK_NODE_CAP` ("every guard silently returned handle 0"), and the exact case `fk_list_push` refuses
+in its own die-message: *"a partial list accepted as whole."*
+
+The bitter, beautiful inversion: **`ap-stable?` was the only honest witness in the body — and it
+spent hours accused, because it was the only reading that refused to agree.** `ap-tend` converged
+byte-identically not because it was right but because its passes phased alike.
+
+**The healing**: `fs_list` (tag 132) and record-keys (tag 99, the identical idiom) now melt like
+tag-19 `cons` — accumulator rooted through `fk_vs` across the melt — then die **loudly** if the heap
+is genuinely full after compaction. Two more silent-at-the-wall sites are named for later, not fixed
+here: the closure-capture copy loops (~line 5249, no wall check at all) and `fk_jlist2`'s silent nil
+after melt.
+
+**Witnessed on the healed runtime**: ground 42, binary-freshness 15, corpus band 511; the
+degradation probe reads 860 fresh **and** 860 after the full fabric walk (was 748); recomputed
+portrait byte-identical to disk; self-check 31, ap-tend 2, **ap-stable? 1, twice**; falsifiability
+2 → 0 → 2; invariance-under-litter byte-identical. Regression:
+[`form/form-stdlib/tests/fs-list-heap-phase-band.fk`](../form/form-stdlib/tests/fs-list-heap-phase-band.fk)
+— property-shaped (listing equal across five heap phases, no absolute counts to go stale) — reads
+**31 on the healed runtime, 15 on the pre-healing one**: the band can fail, so its green means
+something.
+
 ## Closing — how this stayed alive
 
 **Most surprising teaching:** *the fixed-point loop is what hid the bug.* That loop is the cell's

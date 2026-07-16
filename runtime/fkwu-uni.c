@@ -6479,8 +6479,18 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long j = fk_rcnt[r];
         while (j > 0) {
             j = j - 1;
+            /* Same silent-partial-list idiom fs_list (tag 132) carried; healed the
+             * same day with the same shape: melt with the accumulator rooted, then
+             * a loud wall. Key ids are ints (even), immune to the melt; records
+             * live outside the cons heap, so r/fk_rkey are unaffected. */
+            if (fk_hp * 100 >= fk_cap * 90) {
+                fk_vp(out);
+                fk_melt();
+                out = fk_vs[fk_vsp - 1];
+                fk_vsp = fk_vsp - 1;
+            }
             if (fk_hp + 1 >= fk_cap) {
-                return out;
+                fk_die("record-keys: heap exhausted building key list even after melt -- a partial key list would be accepted as whole.");
             }
             fk_hp = fk_hp + 1;
             fk_hh[fk_hp] = fk_rkey[r][j] << 1;
@@ -6637,8 +6647,24 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fkl_m = fkl_m - 1;
             long long fkl_si = fkl_ix[fkl_m];
             long long fkl_sv = fk_sbuf(fkl_nb + fkl_no[fkl_si], fkl_nl[fkl_si]);
+            /* This guard used to `return fkl_out;` at the wall -- a PARTIAL listing
+             * returned as the whole directory, silently. That one line was the root
+             * of the 2026-07-16 autopoietic-pulse defect: with the heap phased near
+             * the wall by prior allocation (a read_file was enough), fs_list dropped
+             * the first-sorted entries and every count downstream was quietly wrong,
+             * while a later melt hid the evidence. Same disease class as the
+             * FK_NODE_CAP silent-zero (see its note). The cure is the composition
+             * the runtime already trusts: melt like tag-19 cons (fkl_out is a C
+             * local, so it is rooted through fk_vs across the melt; fkl_sv is a
+             * string handle, immune), then a LOUD wall like fk_list_push. */
+            if (fk_hp * 100 >= fk_cap * 90) {
+                fk_vp(fkl_out);
+                fk_melt();
+                fkl_out = fk_vs[fk_vsp - 1];
+                fk_vsp = fk_vsp - 1;
+            }
             if (fk_hp + 1 >= fk_cap) {
-                return fkl_out;
+                fk_die("fs_list: heap exhausted building directory listing even after melt -- returning a partial listing would be accepted as the whole directory.");
             }
             fk_hp = fk_hp + 1;
             fk_hh[fk_hp] = fkl_sv;
