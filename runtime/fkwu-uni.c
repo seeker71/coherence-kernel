@@ -10730,7 +10730,11 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
         return 0;
     }
     char line[512];
-    if (!fk_write_all_raw(fd, "program-image-sym-lens-v1\nsource ", 33) ||
+    /* compile-errors records fk_nerr at image-write time, placed right after
+     * the version line so readers find it in the first bytes; a cached run
+     * replays this count as its exit truth (absent line reads as 0) */
+    int hn = sprintf(line, "program-image-sym-lens-v1\ncompile-errors %lld\nsource ", fk_nerr);
+    if (!fk_write_all_raw(fd, line, (unsigned long)hn) ||
         !fk_write_all_raw(fd, src_path, (unsigned long)fk_path_len(src_path)) ||
         !fk_write_all_raw(fd, "\nfkb ", 5) ||
         !fk_write_all_raw(fd, fkb_path, (unsigned long)fk_path_len(fkb_path)) ||
@@ -11448,6 +11452,46 @@ static long long fk_src_fkb_version_raw(const char *fkb_path) {
     return ((long long)b[8] << 24) | ((long long)b[9] << 16) | ((long long)b[10] << 8) |
            (long long)b[11];
 }
+static long long fk_src_sym_recorded_errors(const char *sym_path) {
+    /* the .sym lens records fk_nerr at image-write time (second header line).
+     * Returns -1 when the file or the line is absent: an image without its
+     * error record is an incomplete cache, not a clean one -- otherwise
+     * deleting the lens would launder a degraded image back to exit 0 */
+#if defined(_WIN32)
+    int fd = open(sym_path, 0x8000);
+#else
+    int fd = open(sym_path, 0);
+#endif
+    if (fd < 0) {
+        return -1;
+    }
+    char buf[256];
+    long long got = read(fd, buf, 255);
+    close(fd);
+    if (got <= 0) {
+        return -1;
+    }
+    buf[got] = 0;
+    const char *needle = "\ncompile-errors ";
+    long long i = 0;
+    while (i < got) {
+        long long j = 0;
+        while (needle[j] != 0 && i + j < got && buf[i + j] == needle[j]) {
+            j = j + 1;
+        }
+        if (needle[j] == 0) {
+            long long v = 0;
+            long long p = i + j;
+            while (p < got && buf[p] >= '0' && buf[p] <= '9') {
+                v = v * 10 + (buf[p] - '0');
+                p = p + 1;
+            }
+            return v;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
 static void fk_src_reset_compile_state(void) {
     fk_arg_n = 0;
     fk_fname_n = 0;
@@ -11625,6 +11669,18 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
             if (!fk_src_unit_hash_range(i, dep_end, dep_hash, FK_SRC_HASH_CAP)) {
                 return 0;
             }
+            {
+                /* a dep image compiled with recovered errors is degraded truth;
+                 * importing it would bake the degradation invisibly into this
+                 * run -- refuse (unknown record counts as degraded), so the
+                 * caller falls back to the flat compile where the full chain
+                 * resolves */
+                char dep_sym_path[4096];
+                if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, 4096) ||
+                    fk_src_sym_recorded_errors(dep_sym_path) != 0) {
+                    return 0;
+                }
+            }
             if (!fk_src_import_fkb_image(dep_fkb_path, fk_src_dep_path[i], dep_hash, dep_mtime)) {
                 return 0;
             }
@@ -11667,9 +11723,22 @@ static int fk_run_src(const char *path, long long arg) {
     } else if (dylib_mtime > 0) {
         fk_diag_path("warning", dylib_path, "stale .dylib ignored");
     }
-    if (fkb_mtime >= unit_mtime) {
+    long long recorded = fk_src_sym_recorded_errors(sym_path);
+    if (fkb_mtime >= unit_mtime && recorded < 0) {
+        /* an image without its error record is an incomplete cache; rebuild
+         * rather than guess (older lenses, or a lens deleted out from under
+         * the image) */
+        fk_diag_path("warning", sym_path, "sym lens lacks a compile-error record; rebuilding");
+    } else if (fkb_mtime >= unit_mtime) {
         if (fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
-            return fk_run_loaded_program_image(arg);
+            /* the compile carried errors when this image was written; the
+             * cache must not launder them -- replay the tally as exit truth */
+            if (recorded > 0) {
+                fk_diag_path("warning", sym_path,
+                        "cached image was compiled with errors; fix source and rerun to clear");
+            }
+            int rc = fk_run_loaded_program_image(arg);
+            return recorded > 0 && rc == 0 ? 1 : rc;
         }
         if (fk_fkb_bad) {
             char whybuf[192];
@@ -12045,7 +12114,27 @@ static int fk_run(int argc, char **argv) {
             fk_diag_path("error", argv[1], whybuf);
             return 2;
         }
-        return fk_run_loaded_program_image(argc > 2 ? atoi(argv[2]) : 0);
+        long long recorded = 0;
+        char direct_sym_path[4096];
+        long long fkb_arg_len = fk_path_len(argv[1]);
+        /* fk_path_replace_ext only strips a trailing ".fk"; this argument ends
+         * in ".fkb" (checked above), so swap the suffix explicitly */
+        if (fkb_arg_len >= 4 && fkb_arg_len < 4090) {
+            sprintf(direct_sym_path, "%.*s.sym", (int)(fkb_arg_len - 4), argv[1]);
+            recorded = fk_src_sym_recorded_errors(direct_sym_path);
+            if (recorded > 0) {
+                fk_diag_path("warning", direct_sym_path,
+                        "image was compiled with errors; fix source and rerun --src to clear");
+            } else if (recorded < 0) {
+                /* direct execution has no source to rebuild from; run, but say
+                 * the record is missing rather than imply a clean compile */
+                fk_diag_path("warning", direct_sym_path,
+                        "image carries no compile-error record");
+                recorded = 0;
+            }
+        }
+        int fkb_rc = fk_run_loaded_program_image(argc > 2 ? atoi(argv[2]) : 0);
+        return recorded > 0 && fkb_rc == 0 ? 1 : fkb_rc;
     }
     if (fk_path_has_suffix(argv[1], ".dylib")) {
         return fk_run_dylib_artifact(argv[1], argc > 2 ? atoi(argv[2]) : 0, 1) ? 0 : 2;
