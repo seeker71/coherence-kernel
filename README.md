@@ -83,5 +83,6 @@ the runtime touches no Go, Rust, Python, or TypeScript. The same fresh-checkout 
 | `docs/coherence-substrate/` | substrate contracts: HTTP service/layers, resource ports, tool channels, current path, and grounding docs |
 | `HOMECOMING.md` | current homecoming state: what is home, what is still coming home |
 | `SECOND-BRAIN.md` | the vault door — the body as an Obsidian-readable second brain; ingest / query / lint as body organs |
+| [`INDEX.md`](INDEX.md) | the body's self-portrait — **produced**, not authored, by `observe/autopoietic-pulse.fk` from the body's own observation of itself |
 
 To contribute, see [`CONTRIBUTING.md`](CONTRIBUTING.md). The smallest honest movement, proven, returned with a trace.

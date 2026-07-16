@@ -93,16 +93,36 @@ a door makes, with the body's own string engine on its own kernel:
 ./fkwu --src /tmp/dlhf.fk     # -> doors*10^6 + links*10^3 + broken
 ```
 
-witnessed: 2026-07-16 → self-check `31`; door ring `12028000` (12 doors, 28 links, 0 broken).
+witnessed: 2026-07-16 → self-check `31`; door ring `12033000` (12 doors, 33 links, 0 broken).
 The *first* run returned `12031004` — four broken path-claims, every one of them this door's own
 directory links: the organ's first catch was its author. Healed (directories wear backticks, not
 links), re-witnessed clean.
 
+**Tend** — the body's fourth operation, and the one Karpathy's pattern doesn't name: the body
+observes itself with its own organs and **produces its own self-portrait**,
+[`INDEX.md`](INDEX.md) — this pattern's `index.md`, recomputed rather than authored. Every number
+comes from the tissue it names, so the portrait cannot flatter; it can only go stale, and
+re-running is what detects stale.
+
+```sh
+( cat form/form-stdlib/core.fk grammars/line-grammar.fk observe/door-link-health.fk \
+      learn/homecoming-distillation-corpus.fk observe/autopoietic-pulse.fk; \
+  echo '(ap-tend)' ) > /tmp/ap.fk
+./fkwu --src /tmp/ap.fk       # -> 2 (portrait produced, body coherent)
+```
+
+witnessed: 2026-07-16 → self-check `31`; `ap-tend` → `2`; field `2059303300`. Idempotent
+(re-running writes byte-identical text) and falsifiable (a planted broken path-claim drops the
+verdict to `0`; healing restores `2`). The pulse iterates to a fixed point because its first run
+proved it must — see [`observe/autopoietic-pulse.fk`](observe/autopoietic-pulse.fk).
+
 ## Honest seams (pending is honest)
 
-- **No compile loop yet.** The body has the ingest *law* and the corpus, but no op that takes one
-  raw source and revises many interlinked pages in a single pass, and no regenerated `index.md`.
-  The wiki layer here is grown, not compiled. This is the largest named gap
+- **No compile loop yet — though the index half closed the same day.** The pattern's `index.md`
+  now exists as [`INDEX.md`](INDEX.md), *produced* by [`observe/autopoietic-pulse.fk`](observe/autopoietic-pulse.fk)
+  from the body's own observation of itself (see **tend**, above). What remains unbuilt is the
+  other half: no op takes one raw source and revises many interlinked pages in a single pass. The
+  wiki layer is still grown, not compiled — the largest named gap
   (`frontier-ingest-llm-wiki.fk`, unit U4 — liquid).
 - **Obsidian is a rented window.** The graph-sight it gives is not yet the body's own rendering —
   the same seam-shape as the rented voice: native tissue, rented viewer (unit U5 — liquid).
