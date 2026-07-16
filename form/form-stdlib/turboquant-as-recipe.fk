@@ -1,0 +1,146 @@
+; turboquant-as-recipe.fk — the TurboQuant teaching, executable at last: data-oblivious
+; vector quantization (rotate to a known distribution, then one universal table).
+;
+; preludes: form-stdlib/core.fk form-stdlib/tensor-quant.fk
+;
+; Two organs have cited this cell by name since the CN import (feature-vector.fk,
+; recognition-router.fk) and kernel-http.fk carries its teaching in prose:
+; compression stays content-addressable only when the quantizer is UNIVERSAL —
+; never trained from the corpus it compresses. This cell is the mechanism behind
+; that teaching (TurboQuant: Zandieh, Daliri, Hadian, Mirrokni — arXiv 2504.19874):
+;
+;   1. strip the norm — one float kept aside; what remains is a unit direction.
+;   2. rotate by a seeded Kac walk of rational Givens rotations, (c,s) =
+;      ((u²−v²)/(u²+v²), 2uv/(u²+v²)) with u,v drawn from an LCG — exactly
+;      orthogonal in real arithmetic, no trig, no stored matrix, deterministic
+;      from the seed. Rotation spreads any direction's energy so every
+;      coordinate lands near the SAME known distribution (≈ N(0, 1/d)).
+;   3. quantize every coordinate with one fixed 2-bit Lloyd-Max table scaled by
+;      1/√d. The table is DATA in the nf4 pattern — tensor-quant's tq-nf4-code
+;      is the nearest-level walk, reused as-is — and it serves EVERY corpus,
+;      because after rotation every corpus looks the same. No k-means, no
+;      codebook fit, no indexing pass: the corpus is never studied.
+;
+; The seed is part of the index schema (the same law as re-semantic-kind):
+; writer and reader must share it or vectors silently disagree. Scoring is
+; asymmetric — the query stays full precision, rotates into the same frame, and
+; dots against decoded codes × the stored norm; the estimate approximates
+; ⟨q̂, x⟩, which orders candidates identically to the true inner product for a
+; fixed query.
+;
+; Kinship, now literal: tensor-quant scales by THIS row's absmax (per-datum,
+; training-free, but data-dependent); feature-vector bins by fixed thresholds
+; (the histogram instance of obliviousness); this cell adds the missing move —
+; the ROTATION that makes one universal table serve every direction alike
+; (isotropy). Floors named honestly: 2-bit table only (no 4-bit twin yet); the
+; paper's second QJL stage (unbiased inner products from a 1-bit residual) is a
+; named floor, not built; norms and dots are floats, so cross-kernel identity
+; rides the band's rounded pins, not raw float bits. The LCG modulus 2³¹ is
+; COMPUTED (mul 65536 32768): .fkb artifact emission refuses integer literals
+; above 2³¹−1 while computed 64-bit values pass — a kernel seam found while
+; building this cell.
+;
+; Proven by: form-stdlib/tests/turboquant-as-recipe-band.fk
+
+(do
+    ; ── seeded integer stream: LCG (a=1103515245, c=12345, m=2³¹ computed) ──
+    (defn tqr-lcg-m () (mul 65536 32768))
+    (defn tqr-lcg (x) (mod (add (mul x 1103515245) 12345) (tqr-lcg-m)))
+    ; a draw in [0,n) from the state's middle bits
+    (defn tqr-draw (state n) (mod (div state 65536) n))
+
+    ; ── float spine: dot, Newton sqrt, norm, scale, unit ──
+    (defn tqr-dot (a b)
+        (if (eq (len a) 0) 0.0
+            (add (mul (head a) (head b)) (tqr-dot (tail a) (tail b)))))
+    (defn tqr-sqrt-iter (x y k)
+        (if (eq k 0) y (tqr-sqrt-iter x (mul 0.5 (add y (div x y))) (sub k 1))))
+    (defn tqr-sqrt (x)
+        (if (le x 0.0) 0.0 (tqr-sqrt-iter x (add (mul 0.5 x) 0.5) 40)))
+    (defn tqr-norm (v) (tqr-sqrt (tqr-dot v v)))
+    (defn tqr-scale (v s)
+        (if (eq (len v) 0) (empty)
+            (cons (mul (head v) s) (tqr-scale (tail v) s))))
+    ; a zero vector has no direction; it stays zeros and its norm 0 rides the pack
+    (defn tqr-unit (v)
+        (do (let n (tqr-norm v))
+            (if (le n 0.0) v (tqr-scale v (div 1.0 n)))))
+
+    ; ── exactly-orthogonal rational Givens coefficients: c²+s² = 1 ──
+    (defn tqr-givens-c (u v)
+        (div (mul 1.0 (sub (mul u u) (mul v v)))
+             (mul 1.0 (add (mul u u) (mul v v)))))
+    (defn tqr-givens-s (u v)
+        (div (mul 2.0 (mul u v))
+             (mul 1.0 (add (mul u u) (mul v v)))))
+
+    ; rotate coordinates i,j by (c,s), rebuilding the list once
+    (defn tqr-rot-walk (v idx i j xi xj)
+        (if (eq (len v) 0) (empty)
+            (cons (if (eq idx i) xi (if (eq idx j) xj (head v)))
+                  (tqr-rot-walk (tail v) (add idx 1) i j xi xj))))
+    (defn tqr-rot-pair (v i j c s)
+        (do (let xi (nth v i))
+            (let xj (nth v j))
+            (tqr-rot-walk v 0 i j
+                (add (mul c xi) (mul s xj))
+                (sub (mul c xj) (mul s xi)))))
+
+    ; ── the Kac walk: k seeded Givens steps; the same seed replays the same walk ──
+    (defn tqr-kac (v state k)
+        (if (eq k 0) v
+            (do (let d (len v))
+                (let s1 (tqr-lcg state))
+                (let s2 (tqr-lcg s1))
+                (let s3 (tqr-lcg s2))
+                (let s4 (tqr-lcg s3))
+                (let i (tqr-draw s1 d))
+                (let j0 (tqr-draw s2 (sub d 1)))
+                (let j (if (ge j0 i) (add j0 1) j0))
+                (let u (add 1 (tqr-draw s3 97)))
+                (let w (add 1 (tqr-draw s4 97)))
+                (tqr-kac (tqr-rot-pair v i j (tqr-givens-c u w) (tqr-givens-s u w))
+                         s4 (sub k 1)))))
+    ; 5 sweeps of d steps each — enough mixing to spread a 1-hot direction
+    (defn tqr-rounds () 5)
+    (defn tqr-rotate (v seed) (tqr-kac v seed (mul (tqr-rounds) (len v))))
+
+    ; ── the universal table: 2-bit Lloyd-Max for N(0,1), scaled by σ = 1/√d ──
+    ; DATA in the nf4 pattern; no corpus ever trains it.
+    (defn tqr-table-2bit (d)
+        (do (let sigma (div 1.0 (tqr-sqrt (mul 1.0 d))))
+            (list (mul -1.5104 sigma) (mul -0.4528 sigma)
+                  (mul 0.4528 sigma) (mul 1.5104 sigma))))
+
+    ; ── encode: norm aside, rotate the unit direction, nearest level per
+    ; coordinate (tq-nf4-code IS the walk). pack = (norm codes).
+    (defn tqr-codes (v table)
+        (if (eq (len v) 0) (empty)
+            (cons (tq-nf4-code (head v) table) (tqr-codes (tail v) table))))
+    (defn tqr-pack (v seed)
+        (do (let n (tqr-norm v))
+            (let rot (tqr-rotate (tqr-unit v) seed))
+            (list n (tqr-codes rot (tqr-table-2bit (len v))))))
+    (defn tqr-pack-norm (p) (nth p 0))
+    (defn tqr-pack-codes (p) (nth p 1))
+
+    ; ── asymmetric scoring: full-precision query vs decoded codes × norm ──
+    (defn tqr-query-rot (q seed) (tqr-rotate (tqr-unit q) seed))
+    (defn tqr-score-rot (qrot pack table)
+        (mul (tqr-pack-norm pack)
+             (tqr-dot qrot (tq-nf4-decode (tqr-pack-codes pack) 1.0 table))))
+    (defn tqr-score (q pack seed)
+        (tqr-score-rot (tqr-query-rot q seed) pack (tqr-table-2bit (len q))))
+
+    ; ── top-1 over packs: highest estimated inner product; first wins ties ──
+    (defn tqr-top1-loop (qrot packs table idx best-idx best-score)
+        (if (eq (len packs) 0) best-idx
+            (do (let sc (tqr-score-rot qrot (head packs) table))
+                (if (gt sc best-score)
+                    (tqr-top1-loop qrot (tail packs) table (add idx 1) idx sc)
+                    (tqr-top1-loop qrot (tail packs) table (add idx 1) best-idx best-score)))))
+    (defn tqr-top1 (q packs seed)
+        (if (eq (len packs) 0) -1
+            (tqr-top1-loop (tqr-query-rot q seed) packs
+                           (tqr-table-2bit (len q)) 0 -1 -1000000000.0)))
+    0)
