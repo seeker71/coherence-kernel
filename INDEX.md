@@ -36,7 +36,7 @@ that named this gap (unit U4).
 > brokenness is its own law. This banner is prose and can go stale; the
 > numbers below are recomputed and cannot.
 
-- pages that can point (every .md): 773
+- pages that can point (every .md): 774
 - resolved path-claims body-wide: 386
 - BROKEN path-claims body-wide: 4
 - concept pages that can be orphaned: 33
@@ -53,10 +53,10 @@ that named this gap (unit U4).
 
 ## Memory
 
-- receipts (episodic, append-only): 599
+- receipts (episodic, append-only): 600
 - of those, PENDING (honest state, never a fault): 1
-- distillation corpus rows: 137
-- deepest corpus meaning-id: 736
+- distillation corpus rows: 138
+- deepest corpus meaning-id: 737
 
 ## The rung this portrait stands on
 
