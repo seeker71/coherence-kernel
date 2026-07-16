@@ -4860,6 +4860,12 @@ static long long fk_mcopy(long long b) {
     return (fk_nhp << 1) | 1;
 }
 static long long fk_nmelt;
+/* fk_melt_want: a caller about to build a large flat structure (one whose
+ * intermediates cannot be traced mid-build, e.g. the fs_list result) may
+ * request this many FREE pairs after compaction; growth doubles until the
+ * request is met. Zero keeps the original policy (double iff live*2 > cap).
+ * Always reset to 0 after the call. */
+static long long fk_melt_want = 0;
 static void fk_melt(void) {
     long long hp0 = fk_hp;
     fk_fw = calloc(fk_hp + 1, 8);
@@ -4887,6 +4893,9 @@ static void fk_melt(void) {
     long long ncap = fk_cap;
     if (nlive * 2 > fk_cap) {
         ncap = fk_cap * 2;
+    }
+    while (ncap - nlive < fk_melt_want) {
+        ncap = ncap * 2;
     }
     fk_nh = malloc(ncap * 8);
     fk_nt = malloc(ncap * 8);
@@ -6631,19 +6640,28 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fkl_ix[fkl_b + 1] = fkl_key;
             fkl_a = fkl_a + 1;
         }
+        /* Ensure the arena can hold one pair per entry BEFORE any result
+         * value exists: fk_melt here is safe (no arena-value C-locals are
+         * live yet; every root is on the traced stacks) and converges (a
+         * repeat melt with an unchanged live set cannot free or grow more).
+         * The old guard returned the partial list on exhaustion -- a
+         * directory read whose answer depended on how much arena earlier
+         * calls had spent (the same dir read 3946 entries in one program
+         * and 379 in another). fk_cons_val keeps the last resort honest:
+         * heap exhausted dies; a partial listing is never accepted as
+         * whole (same law as fk_cons_val's own message). */
+        long long fkl_need = fkl_nc + fkl_nc + 64;
+        if (fk_cap - fk_hp < fkl_need) {
+            fk_melt_want = fkl_need;
+            fk_melt();
+            fk_melt_want = 0;
+        }
         long long fkl_out = 1;
         long long fkl_m = fkl_nc;
         while (fkl_m > 0) {
             fkl_m = fkl_m - 1;
             long long fkl_si = fkl_ix[fkl_m];
-            long long fkl_sv = fk_sbuf(fkl_nb + fkl_no[fkl_si], fkl_nl[fkl_si]);
-            if (fk_hp + 1 >= fk_cap) {
-                return fkl_out;
-            }
-            fk_hp = fk_hp + 1;
-            fk_hh[fk_hp] = fkl_sv;
-            fk_ht[fk_hp] = fkl_out;
-            fkl_out = (fk_hp << 1) | 1;
+            fkl_out = fk_cons_val(fk_sbuf(fkl_nb + fkl_no[fkl_si], fkl_nl[fkl_si]), fkl_out);
         }
         return fkl_out;
 #else
