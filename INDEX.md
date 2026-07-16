@@ -11,21 +11,41 @@ see [`SECOND-BRAIN.md`](SECOND-BRAIN.md) for the mapping and
 [`ingest/frontier-ingest-llm-wiki.fk`](ingest/frontier-ingest-llm-wiki.fk) for the ingest
 that named this gap (unit U4).
 
-## Vital signs
+## Vital signs — the door ring
 
-- coherence verdict (2 portrayed+coherent / 1 unportrayed / 0 drifted): 2
+> Scoped to the 12 doors, and named so it cannot be read as the body. An
+> earlier portrait reported the `0` below as "broken path-claims" with no
+> scope on it, while the body carried 156 — a true number over a flattering
+> scope. The whole fabric is the section beneath this one.
+
+- door-ring coherence verdict (2 portrayed+coherent / 1 unportrayed / 0 drifted): 2
 - doors standing: 12
-- path-claims (links) in the door ring: 44
-- broken path-claims: 0
+- path-claims (links) in the door ring: 39
+- broken path-claims IN THE DOOR RING: 0
+
+## Vital signs — the whole link fabric
+
+> The body-wide truth, walked by `observe/body-link-graph.fk`. Broken claims
+> here are largely the seam of the curation that made this repo public-able
+> (`MANIFEST.md`'s IN/OUT scope): the excised pages stayed out, their links
+> stayed in. Healing is deliberate, consented work — most live in immutable
+> receipts, and rewriting a witness record to green a number would forge the
+> body's own ontogeny.
+
+- pages that can point (every .md): 770
+- resolved path-claims body-wide: 470
+- BROKEN path-claims body-wide: 156
+- concept pages that can be orphaned: 31
+- ORPHANS (concept pages nothing points at): 13
 
 ## Tissues (counted, not listed)
 
 - axioms: 3
 - teachings: 11
-- observe organs: 145
-- learn organs: 193
-- ingest organs: 15
-- form-stdlib cells: 880
+- observe organs: 148
+- learn organs: 195
+- ingest organs: 17
+- form-stdlib cells: 882
 
 ## Memory
 
