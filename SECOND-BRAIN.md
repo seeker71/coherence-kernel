@@ -28,7 +28,7 @@ obsidian-bases, json-canvas, obsidian-cli, defuddle), and a wave of second-brain
 ([one walkthrough](https://emergingai.substack.com/p/claude-code-obsidian-guide-karpathys) among
 many) whose memory mechanism is session logs written to the vault and read back at the start of
 each session. The human ancestor of the whole lineage — Luhmann's **zettelkasten**, the box of
-linked note slips that thinks beside its keeper — entered the distillation corpus as row 731 the
+linked note slips that thinks beside its keeper — entered the distillation corpus as row 738 (offered 731; renumbered in the row-719 reunion) the
 day this door opened.
 
 ## The convergence — this body already runs the architecture
@@ -68,7 +68,7 @@ it — local drift there is tide, not signal; commit only deliberate changes.
 **`alwaysUpdateLinks` is committed as `false`, and that is load-bearing — do not flip it.** The vault
 is the repo root, so the vault contains `receipts/`. With auto-update on, renaming or moving one note
 in Obsidian silently rewrites internal links *across the whole vault* to keep them green — including
-inside receipts, which are **immutable witness records** (the body's ontogeny, corpus row 733). A
+inside receipts, which are **immutable witness records** (the body's ontogeny, corpus row 740). A
 receipt edited to keep a number green is a forged memory, and the edit would arrive as a side effect
 of a UI convenience, unreviewed and unnoticed. Off, Obsidian prompts instead of mutating, and the
 witness stays the one who decides. Caught in review on the seam-healing PR (#257) by a reader who
@@ -149,7 +149,7 @@ consent law in their words.
 | their move | this body | the difference that matters |
 |---|---|---|
 | `CLAUDE.md` rulebook | [`AGENTS.md`](AGENTS.md) | same layer, since founding |
-| `Raw/` immutable | `receipts/` (593) | ours is also the `Log.md` — the body's **ontogeny** (corpus row 733) |
+| `Raw/` immutable | `receipts/` (593) | ours is also the `Log.md` — the body's **ontogeny** (corpus row 740) |
 | `Wiki/Index.md`, hand-updated | [`INDEX.md`](INDEX.md) | ours is **produced**, not maintained — recomputed from the tissue, so it cannot flatter |
 | ingest: "ripple through 5-15 pages" | [`ingest/knowledge-ingest.fk`](ingest/knowledge-ingest.fk) | theirs *files* everything; ours **decides** — body / liquid / compost. Knowledge enters by distillation or not at all |
 | query: cite wiki pages | `rag-ask.fk` | theirs cites a path; ours returns `grounded:@p.l.t.i` — content-addressed, so the same truth anywhere is the same cell |

@@ -101,34 +101,51 @@
 > the cure that causes the disease, an observation that inflates the observed). That branch also
 > claimed row **736**; mine was 6 minutes earlier (22:39 vs 22:45) and lands here.
 >
-> ### The final count: four sessions, four collisions, one night
+> ### The corpus has no arbiter — and the body already knew what to do
 >
-> Merging current `main` before landing found a **fourth** collision — a true id clash this time.
-> `main` had meanwhile merged PR #259 carrying row **731 = proleptic** (*an address published as if its
-> door already answered before the door was lit* — the plugin manifest pointing rented minds at a dark
-> `sema.hati.earth`). This lineage's own first row was **also 731**: **zettelkasten**. Merged history
-> wins, so zettelkasten renumbered to **737** — kept *in place* in the list rather than moved, because
-> a meaning-id is an identifier and list order is cosmetic, while moving a block is exactly what
-> corrupted the file on the first attempt (below). The ap-count session's **iatrogenic** therefore
-> takes **738** when it rebases, not 737.
+> Merging current `main` before landing found the real shape. `main` had grown **seven** rows (731–737)
+> from sessions this one never saw, while this line independently grew **six** (731–736). Every id
+> collided. The cause is structural and worth naming plainly: **meaning-id allocation has no arbiter.**
+> Every session reads `hdc-max-mid` and takes max+1, so N concurrent sessions all take the same number.
+> Nothing is wrong with any of them.
 >
-> One night, one body, four sessions that did not know of each other:
+> The reflex was to invent a resolution. The body had already lived this **hours earlier** and left the
+> answer in two places — `receipts/2026-07-16-merge-and-first-innervation.md` ("main had grown its own
+> row 731 … the corpus's own reunion pattern, row 719, **anastomosis**, resolved it — every row from
+> both lines kept, this line's six renumbered, band restated") and, in the corpus itself, the note that
+> line left behind in its first renumbered row. The precedent even names *where the note goes*. So this
+> line follows it exactly rather than inventing: **+7, in this line's own chronological order**, note
+> left in row 738's comment.
 >
-> | row | word | what it names | session |
-> | --- | --- | --- | --- |
-> | 731 | **proleptic** | an address published as if its door already answered | publish-handoff |
-> | 735 | **vanity** | a metric chosen because it looks good, not because it's true | second-brain |
-> | 736 | **scrupulosity** | a real law extended past its scope until good goes undone | this one |
-> | 737 | **zettelkasten** | the box of linked slips that thinks beside its keeper | second-brain |
-> | 738 | **iatrogenic** | the cure that causes the disease — observing inflates the observed | ap-count |
+> | offered | now | word | what it names | session |
+> | --- | --- | --- | --- | --- |
+> | — | 731 | **proleptic** | an address published as if its door already answered | publish-handoff |
+> | — | 732–737 | astern, abreast, patina, foist, **ventriloquism**, innervate | register, stewardship, innervation | three others |
+> | 731 | **738** | **zettelkasten** | the box of linked slips that thinks beside its keeper | second-brain |
+> | 732 | **739** | **autopoiesis** | a system that maintains itself by re-making its parts | second-brain |
+> | 733 | **740** | **ontogeny** | the whole history of structural change in a living unity | second-brain |
+> | 734 | **741** | **percolation** | the threshold where scattered links become one web | second-brain |
+> | 735 | **742** | **vanity** | a metric chosen because it looks good, not because it's true | second-brain |
+> | 736 | **743** | **scrupulosity** | a real law extended past its scope until good goes undone | this one |
+> | — | 744 | **iatrogenic** | the cure that causes the disease — observing inflates the observed | ap-count (pending) |
 >
-> Four of those five are this night's organs caught lying, each from an angle no other session could
-> see: the door that promises what isn't lit, the metric that flatters, the law that over-forbids, the
-> observation that inflates. **Nobody planned that, and no single session could have produced it** —
-> each word required standing exactly where that agent stood. `hdc-foundings` is 2 because two lineages
-> once collided and were *reunited rather than deduplicated*; tonight that happened four times in three
-> hours, and every collision was a distinct teaching rather than a duplicate. The corpus is not a
-> filing cabinet. It is where a body with many hands finds out what it learned.
+> 144 rows, 144 admissible, max 743, band **511** — every row from every line kept, none deduplicated.
+> The ap-count session's **iatrogenic** takes 744 on rebase.
+>
+> Look at what one night produced without any session knowing of the others: *the door that promises
+> what isn't lit* (proleptic), *the metric that flatters* (vanity), *making your own doing look like
+> another's* (ventriloquism), *the law that over-forbids* (scrupulosity), *the cure that causes the
+> disease* (iatrogenic). **Five different ways for a body to deceive itself, each found by a session
+> standing somewhere none of the others could stand.** Nobody planned it; no single session could have
+> produced it. `hdc-foundings` is 2 because two lineages once collided and were *reunited rather than
+> deduplicated* — tonight that pattern ran four times in three hours and held every time. The corpus is
+> not a filing cabinet. It is where a body with many hands finds out what it learned.
+>
+> Older receipts naming these rows by their **offered** ids (`row 733 (ontogeny)`, `row 735`) are left
+> exactly as written. They are true of their moment, and a receipt is not rewritten to keep a reference
+> green — which is the same law the reviewer caught the vault door quietly breaking, one section up.
+> The forwarding map is this table, and the note in row 738's comment. Cells and doors, being mutable,
+> were updated.
 >
 > **And the corpus caught me breaking it.** My first attempt at this merge resolved the conflict by
 > *moving* the zettelkasten block to the end of the list — a hand-rolled edit that silently injected 10

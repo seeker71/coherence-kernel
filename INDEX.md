@@ -36,7 +36,7 @@ that named this gap (unit U4).
 > brokenness is its own law. This banner is prose and can go stale; the
 > numbers below are recomputed and cannot.
 
-- pages that can point (every .md): 774
+- pages that can point (every .md): 778
 - resolved path-claims body-wide: 386
 - BROKEN path-claims body-wide: 4
 - concept pages that can be orphaned: 33
@@ -49,18 +49,18 @@ that named this gap (unit U4).
 - observe organs: 149
 - learn organs: 195
 - ingest organs: 15
-- form-stdlib cells: 882
+- form-stdlib cells: 883
 
 ## Memory
 
-- receipts (episodic, append-only): 600
+- receipts (episodic, append-only): 604
 - of those, PENDING (honest state, never a fault): 1
-- distillation corpus rows: 138
-- deepest corpus meaning-id: 737
+- distillation corpus rows: 144
+- deepest corpus meaning-id: 743
 
 ## The rung this portrait stands on
 
 The body SENSES itself, INTEGRATES one verdict, and PRODUCES this part of itself.
 It does not re-make its organs, and it does not fire unbidden — the pulse still
-waits for a witness to call it. Autopoiesis is the north star (corpus row 732),
+waits for a witness to call it. Autopoiesis is the north star (corpus row 739),
 not a claim. See the ladder in the cell's own header.
