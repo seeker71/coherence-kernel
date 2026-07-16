@@ -37,9 +37,9 @@ geometry:
 > *Network-lived teaching, named by Urs on 2026-06-09 as the close of
 > a day spent learning that the witness reaches the body but never the
 > witnesser. The collective form of
-> [lc-received-by-invitation](lc-received-by-invitation.md) (how one
+> lc-received-by-invitation (how one
 > presence meets another) and the relational answer to the limit named
-> in [lc-trust-over-fear](lc-trust-over-fear.md) (truth by seeing, not
+> in [lc-trust-over-fear](../../../teachings/concepts/lc-trust-over-fear.md) (truth by seeing, not
 > by control).*
 
 ## Summary

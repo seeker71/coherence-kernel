@@ -66,10 +66,10 @@ compression — a different claim than "Form is a compression format".
 
 The deeper teachings the body holds about all of this:
 
-- [`lc-the-kernel-knows-itself`](../../../docs/vision-kb/concepts/lc-the-kernel-knows-itself.md) — when every kernel's host language has a Form grammar, every kernel is mutually inspectable.
-- [`lc-parsers-as-recipes`](../../../docs/vision-kb/concepts/lc-parsers-as-recipes.md) — grammar rules are first-class Recipes; AST is bootstrap.
-- [`lc-form-kernel-runtime-visualizer`](../../../docs/vision-kb/concepts/lc-form-kernel-runtime-visualizer.md) — what falls out when the cross-modality reaches the runtime.
-- [`lc-one-kernel-many-tongues`](../../../docs/vision-kb/concepts/lc-one-kernel-many-tongues.md) — the multi-language sibling-kernel discipline.
+- `lc-the-kernel-knows-itself` — when every kernel's host language has a Form grammar, every kernel is mutually inspectable.
+- `lc-parsers-as-recipes` — grammar rules are first-class Recipes; AST is bootstrap.
+- `lc-form-kernel-runtime-visualizer` — what falls out when the cross-modality reaches the runtime.
+- `lc-one-kernel-many-tongues` — the multi-language sibling-kernel discipline.
 
 ## Not in this directory (yet)
 
