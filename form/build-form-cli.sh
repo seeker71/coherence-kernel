@@ -201,7 +201,13 @@ if is_windows_host; then
   # STATUS_STACK_OVERFLOW (0xC00000FD). Keep the evidence width identical on
   # every host and give the Windows carrier the same practical headroom used
   # by the other proof siblings instead of truncating the grounded source.
-  clang_args+=(-Wl,--stack,16777216 -lws2_32 -llegacy_stdio_definitions)
+  compiler_target="$("$CC_BIN" -dumpmachine 2>/dev/null || true)"
+  if [[ "$compiler_target" == *-windows-msvc ]]; then
+    clang_args+=(-Wl,/STACK:16777216)
+  else
+    clang_args+=(-Wl,--stack=16777216)
+  fi
+  clang_args+=(-lws2_32 -llegacy_stdio_definitions)
 fi
 "$CC_BIN" "${clang_args[@]}"
 form_cli_verify_binary_identity "$OUT" "$want_source_sha256"
