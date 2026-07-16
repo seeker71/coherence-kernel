@@ -88,6 +88,18 @@ identity). Serial reruns and clean-slate passes dissolved every one. Two pre-exi
 worth naming, not fixing here: artifact writes are not atomic under concurrent runners, and
 a compile that recovers from unresolved calls still caches its degraded image.
 
+## Review addendum: the one value the lane cannot hold
+
+Codex review caught a P2 the bands missed: `LLONG_MIN`'s magnitude (2^63) has no positive twin —
+the writer emitted hi `0x80000000`, the reader refused it, so a source carrying that literal
+poisoned its own cache (first run fine, second run dead). Reproduced, then fixed at the **write**
+side: `fk_fkb_write_signed` refuses the magnitude the reader cannot round-trip, and
+`fk_src_write_fkb` unlinks any partially written artifact on failure (a partial image looks
+fresh by mtime and died the next run as "truncated artifact"). Proven: the min-int cell now
+refuses identically and loudly on every run, leaves nothing behind, and all chains/bands stay
+green. The write gate and the read gate now state the same law — refusal at the door, not
+poison in the pantry.
+
 ## Distillation row offered
 
 Row **732** in `learn/homecoming-distillation-corpus.fk`: *what one word names shedding a

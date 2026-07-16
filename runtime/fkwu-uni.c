@@ -10630,8 +10630,13 @@ static int fk_fkb_write_u32(int fd, long long v) {
 }
 static int fk_fkb_write_signed(int fd, long long v) {
     /* v4 lane: sign u8 + hi u32 + lo u32 -- the full long long range, so
-     * full-range u32 literals (e.g. cksum values) stay artifact-encodable */
+     * full-range u32 literals (e.g. cksum values) stay artifact-encodable.
+     * LLONG_MIN's magnitude (2^63) has no positive twin the reader could
+     * round-trip, so refuse it here rather than emit an unreadable image. */
     unsigned long long mag = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
+    if (mag > 9223372036854775807ULL) {
+        return 0;
+    }
     return fk_fkb_write_u8(fd, v < 0 ? 1 : 0) &&
            fk_fkb_write_u32(fd, (long long)(mag >> 32)) &&
            fk_fkb_write_u32(fd, (long long)(mag & 4294967295ULL));
@@ -10811,9 +10816,17 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     }
     close(fd);
     if (!ok) {
+        /* a partial image looks fresh by mtime and poisons the next run's
+         * load ("truncated artifact") -- leave no half-written artifact */
+        unlink(fkb_path);
         return 0;
     }
-    return fk_src_write_sym_text(sym_path, src_path, fkb_path, source_hash);
+    if (!fk_src_write_sym_text(sym_path, src_path, fkb_path, source_hash)) {
+        unlink(fkb_path);
+        unlink(sym_path);
+        return 0;
+    }
+    return 1;
 }
 static long long fk_fkb_pos;
 static long long fk_fkb_len;
