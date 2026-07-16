@@ -7,9 +7,10 @@ commands should use this address directly.
 
 ## Contents
 
-- `form-kernel-go/` - Go sibling kernel.
-- `form-kernel-rust/` - Rust sibling kernel.
-- `form-kernel-ts/` - TypeScript sibling kernel.
+- `runtime/fkwu-uni.c` - the c-bootstrap source for the sole execution runtime.
+- `form-kernel-go/` - Go differential/reference kernel.
+- `form-kernel-rust/` - Rust differential/reference kernel.
+- `form-kernel-ts/` - TypeScript differential/reference kernel.
 - `form-stdlib/` - Form stdlib, BMF engine, source compiler, language/media/natural-language grammars, and tests.
 - `form-samples/` - small runnable Form workloads.
 - `validate.sh` - sibling-kernel source and binary parity runner.
@@ -30,11 +31,20 @@ The full present map is
 ## Proof
 
 ```sh
-cd form
+cc -O2 -o fkwu runtime/fkwu-uni.c
+./fkwu --src bootstrap/ground.fk
+./fkwu --src bootstrap/ground-recursive.fk 10
+./fkwu --src bootstrap/ground-numeric-list.fk
+
+# Reference-kernel cross-checks; these do not select a production runtime.
 ./validate.sh form-stdlib/core.fk form-stdlib/engine.fk form-stdlib/source-compiler.fk form-stdlib/tests/form-action-bmf-rulebook.fk
 ./validate.sh --binary form-stdlib/core.fk form-stdlib/engine.fk form-stdlib/source-compiler.fk form-stdlib/tests/form-action-bmf-rulebook.fk
 ./validate.sh form-stdlib/tests/source-compiler-grammar-bridge-band.fk
 ```
+
+`fkwu --src` is the execution authority. The Go, Rust, and TypeScript kernels
+cross-check basic primitives and native assumptions; none is a fallback or
+production runtime candidate.
 
 The kernel stays small: source sections, BMF rules, dialect migration,
 reverse emission, module bundling, locale/context lenses, and language/media
@@ -46,8 +56,10 @@ language surface it can carry.
 
 Repositories that already address the runtime as `form/` consume a generated,
 path-preserving branch rather than mounting this repository root (which would
-introduce an extra `form/form/` level). The `form-submodule` branch is generated
-from `main` and contains this directory at its repository root:
+introduce an extra `form/form/` level). The `form-submodule` distribution puts
+the authored `form/` tree at its repository root and also carries the exact
+`runtime/fkwu-uni.c`, `runtime/fkwu-optable.h`, and bootstrap witnesses required
+to build and prove the production runtime from the same pin.
 
 ```sh
 git switch main
