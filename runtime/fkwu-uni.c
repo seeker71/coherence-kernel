@@ -10163,6 +10163,34 @@ static int fk_path_resolve_fk_dep(const char *owner_path, const char *token, lon
             return 1;
         }
     }
+    long long pre_n = 0;
+    long long s2 = 0;
+    while (pre_n == 0 && owner_path[s2] != 0) {
+        if (owner_path[s2] == FK_CH_SLASH &&
+            ((owner_path[s2 + 1] == 'f' && owner_path[s2 + 2] == 'o' && owner_path[s2 + 3] == 'r' &&
+              owner_path[s2 + 4] == 'm' && owner_path[s2 + 5] == FK_CH_SLASH) ||
+             (owner_path[s2 + 1] == 'l' && owner_path[s2 + 2] == 'e' && owner_path[s2 + 3] == 'a' &&
+              owner_path[s2 + 4] == 'r' && owner_path[s2 + 5] == 'n' && owner_path[s2 + 6] == FK_CH_SLASH))) {
+            pre_n = s2 + 1;
+        }
+        s2 = s2 + 1;
+    }
+    if (pre_n > 0 && pre_n + token_n + 1 <= cap) {
+        i = 0;
+        while (i < pre_n) {
+            out[i] = owner_path[i];
+            i = i + 1;
+        }
+        j = 0;
+        while (j < token_n) {
+            out[i + j] = token[j];
+            j = j + 1;
+        }
+        out[i + j] = 0;
+        if (fk_path_size_raw(out) >= 0) {
+            return 1;
+        }
+    }
     if (dir_n + token_n + 1 > cap) {
         return 0;
     }
