@@ -88,7 +88,7 @@ The full enumeration now lives in [`form-stdlib/blueprint-registry.json`](form-s
 
 ## Tooling
 
-The scanner lives at [`scripts/scan_form_blueprints.py`](../../scripts/scan_form_blueprints.py). It walks every `.fk` file, cross-references the registry, and reports magic literals, synonyms, and name drift; `--check` is wired into `make wellness` (`sense_form_blueprints`) as the forward gate against new unregistered numbers. See the **Source of truth** section above for the full command surface.
+The scanner lives at `scripts/scan_form_blueprints.py`. It walks every `.fk` file, cross-references the registry, and reports magic literals, synonyms, and name drift; `--check` is wired into `make wellness` (`sense_form_blueprints`) as the forward gate against new unregistered numbers. See the **Source of truth** section above for the full command surface.
 
 ## Active Practice
 

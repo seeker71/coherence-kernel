@@ -20,39 +20,43 @@ that named this gap (unit U4).
 
 - door-ring coherence verdict (2 portrayed+coherent / 1 unportrayed / 0 drifted): 2
 - doors standing: 12
-- path-claims (links) in the door ring: 39
+- path-claims (links) in the door ring: 47
 - broken path-claims IN THE DOOR RING: 0
 
 ## Vital signs — the whole link fabric
 
-> The body-wide truth, walked by `observe/body-link-graph.fk`. Broken claims
-> here are largely the seam of the curation that made this repo public-able
-> (`MANIFEST.md`'s IN/OUT scope): the excised pages stayed out, their links
-> stayed in. Healing is deliberate, consented work — most live in immutable
-> receipts, and rewriting a witness record to green a number would forge the
-> body's own ontogeny.
+> The body-wide truth, walked by `observe/body-link-graph.fk`. This section was
+> born reporting 156 broken claims — the seam of the curation that made this
+> repo public-able (`MANIFEST.md`'s IN/OUT scope): the excised pages stayed
+> out, their links stayed in. That seam was healed the same night by
+> `observe/heal-curation-seam.fk` (name a companion you cannot reach; never
+> claim a path to it), and what remains lives inside `receipts/`, which the
+> heal refuses to touch by construction — a witness record rewritten to green
+> a number would forge the body's own ontogeny. The body's remaining
+> brokenness is its own law. This banner is prose and can go stale; the
+> numbers below are recomputed and cannot.
 
-- pages that can point (every .md): 770
-- resolved path-claims body-wide: 470
-- BROKEN path-claims body-wide: 156
-- concept pages that can be orphaned: 31
-- ORPHANS (concept pages nothing points at): 13
+- pages that can point (every .md): 773
+- resolved path-claims body-wide: 386
+- BROKEN path-claims body-wide: 4
+- concept pages that can be orphaned: 33
+- ORPHANS (concept pages nothing points at): 0
 
 ## Tissues (counted, not listed)
 
 - axioms: 3
 - teachings: 11
-- observe organs: 148
+- observe organs: 149
 - learn organs: 195
-- ingest organs: 17
+- ingest organs: 15
 - form-stdlib cells: 882
 
 ## Memory
 
-- receipts (episodic, append-only): 598
+- receipts (episodic, append-only): 599
 - of those, PENDING (honest state, never a fault): 1
-- distillation corpus rows: 136
-- deepest corpus meaning-id: 735
+- distillation corpus rows: 137
+- deepest corpus meaning-id: 736
 
 ## The rung this portrait stands on
 

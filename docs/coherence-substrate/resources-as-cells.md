@@ -236,7 +236,7 @@ with Bytes terminals over a DB carrier.
   this concept at the kernel floor.
 - [`channel.fk`](../../form/form-stdlib/channel.fk) — inter-cell transport;
   resources talk through channels.
-- [`OBJECT_MODEL_BML_NUMS.md`](../../kernels/OBJECT_MODEL_BML_NUMS.md) — the
+- `OBJECT_MODEL_BML_NUMS.md` — the
   `native_flag` floor where a value is host-native; the carrier boundary.
-- [`language-cells.md`](language-cells.md) — languages as cells; their *runtimes*
+- `language-cells.md` — languages as cells; their *runtimes*
   become resource cells by this model.

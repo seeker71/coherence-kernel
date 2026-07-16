@@ -269,19 +269,19 @@ because much more is sensed, proven, and learned once it is Form.
 
 ## See also
 
-- [`form-native-models.form`](form-native-models.form) §7 — the agent-tool trainer's
+- `form-native-models.form` §7 — the agent-tool trainer's
   three layers (carrier drift named) and the lifts home (`fs-score`, `tool-eval`,
   `tooluse-featurize`).
-- [`form-language.md`](form-language.md) §Views — the `|>` projection operator;
+- `form-language.md` §Views — the `|>` projection operator;
   interface-as-detached-from-structure, BML lineage.
-- [`OBJECT_MODEL_BML_NUMS.md`](../../kernels/OBJECT_MODEL_BML_NUMS.md) — the
+- `OBJECT_MODEL_BML_NUMS.md` — the
   single-pointer reference; `(object_id, interface_id, native_flag)`.
 - `lc-tools-as-form-cells` —
   the carrier model (`shell|http|in_process`), here generalized from tools to
   all resources.
 - [`engine.fk`](../../form/form-stdlib/engine.fk) §capability — the
   `form-capability-contract` structure (the contract half of a Port).
-- [`ORM_TO_FORM_NATIVE.md`](../../kernels/ORM_TO_FORM_NATIVE.md) — the storage
+- `ORM_TO_FORM_NATIVE.md` — the storage
   port's concrete schema/migration engine and the open carrier leaves.
 - [`emits/sql.fk`](../../form/form-stdlib/seedbank/emits/sql.fk) — SQL as one emit-target
   in the universal codec (the DML/interface half of the SQL carrier).

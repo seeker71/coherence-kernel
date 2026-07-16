@@ -160,7 +160,7 @@ that genuinely rises faster with each cell who joins.
 - **[`living-vision.form`](../living-vision.form)** — the
   full dateless gradient, the floor, the contributor-wind, and the
   money-as-side-effect lane, as a Form cell.
-- **[`living-axioms.form`](../../coherence-substrate/living-axioms.form)** — the
+- **`living-axioms.form`** — the
   five axioms read at the altitude of a life; the climb is the becoming-is-safe
   theorem run at the scale of the whole body.
 - **[`core-axioms.form`](../../axioms/core-axioms.form)** — the
@@ -183,7 +183,7 @@ that genuinely rises faster with each cell who joins.
   — the tiered climb as a runtime loop: the escalation ladder (substrate →
   Form-native model → host-local on-device model → rented frontier) the body
   walks on every query, with the rented rung last.
-- **[`native-reasoning-engine.form`](../../coherence-substrate/native-reasoning-engine.form)**
+- **`native-reasoning-engine.form`**
   — the champion/challenger flywheel whose oracle comes home: the loop that grows
   the native mind running on owned ground, the local model teaching the recipe
   that will retire it.
