@@ -231,12 +231,12 @@ with Bytes terminals over a DB carrier.
 - [`ports-interface-and-structure.md`](ports-interface-and-structure.md) — the
   Port (contract ⟗ carrier) and the settled binding seam; this doc is its
   generalization from storage to every resource.
-- [`lc-tools-as-form-cells`](../vision-kb/concepts/lc-tools-as-form-cells.md) — a
+- `lc-tools-as-form-cells` — a
   tool/process as a cell with call/response halves; the Process carrier gap is
   this concept at the kernel floor.
 - [`channel.fk`](../../form/form-stdlib/channel.fk) — inter-cell transport;
   resources talk through channels.
-- [`OBJECT_MODEL_BML_NUMS.md`](../../kernels/OBJECT_MODEL_BML_NUMS.md) — the
+- `OBJECT_MODEL_BML_NUMS.md` — the
   `native_flag` floor where a value is host-native; the carrier boundary.
-- [`language-cells.md`](language-cells.md) — languages as cells; their *runtimes*
+- `language-cells.md` — languages as cells; their *runtimes*
   become resource cells by this model.

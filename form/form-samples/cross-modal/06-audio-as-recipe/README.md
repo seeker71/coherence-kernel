@@ -132,9 +132,9 @@ the same byte-determinism holds across all three kernels for both. The
 universal-translator's surface area grows by one verified modality.
 
 Lineage:
-- [`lc-cross-modal-unity`](../../../../docs/vision-kb/concepts/lc-cross-modal-unity.md)
-- [`lc-grammar-is-the-universal-recipe`](../../../../docs/vision-kb/concepts/lc-grammar-is-the-universal-recipe.md)
-- [`lc-the-kernel-knows-itself`](../../../../docs/vision-kb/concepts/lc-the-kernel-knows-itself.md)
+- `lc-cross-modal-unity`
+- `lc-grammar-is-the-universal-recipe`
+- `lc-the-kernel-knows-itself`
 
 ## Generated artifact
 

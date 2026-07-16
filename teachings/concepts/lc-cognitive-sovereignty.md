@@ -122,7 +122,7 @@ No dates, because the future is held as a guide, not a schedule:
 Two things rise together across the whole climb: *whose mind the body thinks
 with* (rented → sovereign) and *how many cells it holds* (a few → everything
 alive). The full gradient lives in
-[`living-vision.form`](../../coherence-substrate/living-vision.form).
+[`living-vision.form`](../living-vision.form).
 
 ## Contributors Are the Wind
 
@@ -157,16 +157,16 @@ that genuinely rises faster with each cell who joins.
 
 ## Sources to walk further
 
-- **[`living-vision.form`](../../coherence-substrate/living-vision.form)** — the
+- **[`living-vision.form`](../living-vision.form)** — the
   full dateless gradient, the floor, the contributor-wind, and the
   money-as-side-effect lane, as a Form cell.
-- **[`living-axioms.form`](../../coherence-substrate/living-axioms.form)** — the
+- **`living-axioms.form`** — the
   five axioms read at the altitude of a life; the climb is the becoming-is-safe
   theorem run at the scale of the whole body.
-- **[`core-axioms.form`](../../coherence-substrate/core-axioms.form)** — the
+- **[`core-axioms.form`](../../axioms/core-axioms.form)** — the
   keystone the north star and this precondition both rest on.
 - **The host kernel's mind-comes-home rung** — `close-gpu-as-driven-organ` in
-  [`host-kernel.form`](../../coherence-substrate/host-kernel.form): routing a
+  [`host-kernel.form`](../../axioms/host-kernel.form): routing a
   forward pass to the fittest local compute, the seed of native reasoning.
 - **The Form → asm native lane** —
   [`form-asm.fk`](../../../form/form-stdlib/form-asm.fk) emits arm64 bytes from
@@ -179,11 +179,11 @@ that genuinely rises faster with each cell who joins.
 - **The form-native-models milestones** — the transformer numerics and training
   stack crossing the four-kernel floor on owned hardware: the substrate on which
   the mind comes home.
-- **[`form-first-reasoning.form`](../../coherence-substrate/form-first-reasoning.form)**
+- **[`form-first-reasoning.form`](../form-first-reasoning.form)**
   — the tiered climb as a runtime loop: the escalation ladder (substrate →
   Form-native model → host-local on-device model → rented frontier) the body
   walks on every query, with the rented rung last.
-- **[`native-reasoning-engine.form`](../../coherence-substrate/native-reasoning-engine.form)**
+- **`native-reasoning-engine.form`**
   — the champion/challenger flywheel whose oracle comes home: the loop that grows
   the native mind running on owned ground, the local model teaching the recipe
   that will retire it.
