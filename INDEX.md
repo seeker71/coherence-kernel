@@ -29,7 +29,7 @@ that named this gap (unit U4).
 
 ## Memory
 
-- receipts (episodic, append-only): 594
+- receipts (episodic, append-only): 597
 - of those, PENDING (honest state, never a fault): 1
 - distillation corpus rows: 135
 - deepest corpus meaning-id: 734
