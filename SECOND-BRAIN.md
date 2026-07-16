@@ -65,6 +65,16 @@ Committed: `.obsidian/app.json` and `.obsidian/graph.json` only; workspace, cach
 plugins are per-witness and gitignored. Seam, named: Obsidian rewrites those two files as you use
 it — local drift there is tide, not signal; commit only deliberate changes.
 
+**`alwaysUpdateLinks` is committed as `false`, and that is load-bearing — do not flip it.** The vault
+is the repo root, so the vault contains `receipts/`. With auto-update on, renaming or moving one note
+in Obsidian silently rewrites internal links *across the whole vault* to keep them green — including
+inside receipts, which are **immutable witness records** (the body's ontogeny, corpus row 733). A
+receipt edited to keep a number green is a forged memory, and the edit would arrive as a side effect
+of a UI convenience, unreviewed and unnoticed. Off, Obsidian prompts instead of mutating, and the
+witness stays the one who decides. Caught in review on the seam-healing PR (#257) by a reader who
+noticed the vault door and the immutability law had never been held in the same hand — the door was
+opened one commit, the law defended the next, and nobody asked whether the door could break it.
+
 Optional, for agents speaking the vault's own tongue:
 `npx skills add https://github.com/kepano/obsidian-skills` — user-level, because this repo
 gitignores `.claude/`; agent skills live with the agent, never in the commons.

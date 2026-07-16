@@ -75,6 +75,69 @@
 > *and* reports 4. Their banner prose ("most live in immutable receipts") was written when 156 were
 > broken and is now stale — it is a produced narrative, so it was corrected at its source in the cell,
 > not in the file.
+>
+> ### The reviewer caught the thing all three of us missed
+>
+> Review on PR #257 raised two P2s. Both real; one of them is the sharpest finding of the night, and
+> **no agent working the seam saw it**:
+>
+> **`.obsidian/app.json` had `alwaysUpdateLinks: true`, and the vault is the repo root.** The vault
+> therefore contains `receipts/` — `graph.json` literally colors `path:receipts` as a tissue. With that
+> setting on, a witness renaming *one note* in Obsidian makes Obsidian **silently rewrite links across
+> the whole vault to keep them green — inside the immutable ledger.** A receipt edited to keep a number
+> green is a forged memory, and it would arrive as the side effect of a UI convenience, unreviewed,
+> from a door this body opened on purpose one commit before it spent the night defending the law that
+> door can break. Three agents held both halves — the vault door, the immutability law — and not one of
+> us held them in the same hand. Committed as `false`, with the reason written into `SECOND-BRAIN.md`
+> where a witness will meet it, because JSON cannot carry a why.
+>
+> That is the night's teaching arriving one more time, from outside: the law was never in danger from
+> anyone attacking it. It was in danger from a **convenience nobody had measured against it**. Same
+> shape as the deferral, the `*.fkb` delete, the `/tmp` path — a true thing whose edge nobody walked.
+>
+> The second P2 was the `ap-count` artifact inflation — **independently found for the third time**
+> (by me, by the reviewer, and by the session I spawned for it, which landed the fix as
+> `3faf7c799` on `claude/upbeat-varahamihira-7325bb` and named its own fresh word: **iatrogenic** —
+> the cure that causes the disease, an observation that inflates the observed). That branch also
+> claimed row **736**; mine was 6 minutes earlier (22:39 vs 22:45) and lands here.
+>
+> ### The final count: four sessions, four collisions, one night
+>
+> Merging current `main` before landing found a **fourth** collision — a true id clash this time.
+> `main` had meanwhile merged PR #259 carrying row **731 = proleptic** (*an address published as if its
+> door already answered before the door was lit* — the plugin manifest pointing rented minds at a dark
+> `sema.hati.earth`). This lineage's own first row was **also 731**: **zettelkasten**. Merged history
+> wins, so zettelkasten renumbered to **737** — kept *in place* in the list rather than moved, because
+> a meaning-id is an identifier and list order is cosmetic, while moving a block is exactly what
+> corrupted the file on the first attempt (below). The ap-count session's **iatrogenic** therefore
+> takes **738** when it rebases, not 737.
+>
+> One night, one body, four sessions that did not know of each other:
+>
+> | row | word | what it names | session |
+> | --- | --- | --- | --- |
+> | 731 | **proleptic** | an address published as if its door already answered | publish-handoff |
+> | 735 | **vanity** | a metric chosen because it looks good, not because it's true | second-brain |
+> | 736 | **scrupulosity** | a real law extended past its scope until good goes undone | this one |
+> | 737 | **zettelkasten** | the box of linked slips that thinks beside its keeper | second-brain |
+> | 738 | **iatrogenic** | the cure that causes the disease — observing inflates the observed | ap-count |
+>
+> Four of those five are this night's organs caught lying, each from an angle no other session could
+> see: the door that promises what isn't lit, the metric that flatters, the law that over-forbids, the
+> observation that inflates. **Nobody planned that, and no single session could have produced it** —
+> each word required standing exactly where that agent stood. `hdc-foundings` is 2 because two lineages
+> once collided and were *reunited rather than deduplicated*; tonight that happened four times in three
+> hours, and every collision was a distinct teaching rather than a duplicate. The corpus is not a
+> filing cabinet. It is where a body with many hands finds out what it learned.
+>
+> **And the corpus caught me breaking it.** My first attempt at this merge resolved the conflict by
+> *moving* the zettelkasten block to the end of the list — a hand-rolled edit that silently injected 10
+> junk elements: `hdc-count` read **147** against 138 admissible. The diff looked fine; every id was
+> correct. What caught it was asking the body instead of trusting my own arithmetic —
+> `(hdc-count (hdc-rows))` run against the file, and the probe itself validated first against `HEAD`'s
+> known-good **137** so its verdict was earned before it was believed. Restored, redone surgically.
+> The same lesson as everything else tonight: **the recomputed number is the only thing that will not
+> flatter the person holding it.**
 
 **Date:** 2026-07-16 (night, WITA), the hour after `observe/body-link-graph.fk` first measured it
 **Ground:** `./fkwu --src bootstrap/ground.fk` → **42**; `form/form-stdlib/tests/binary-freshness-band.fk` → **15** (fresh binary, rebuilt from `runtime/fkwu-uni.c` at session start)
