@@ -80,7 +80,7 @@ where the header promised it.
 
 ## Corpus row this thread
 
-- **733 thrift** — keeping more by making each kept thing smaller: the
+- **754 thrift** — keeping more by making each kept thing smaller: the
   second-brain unlock is retention economics, not speed. (Walk: parsimon* 4
   hits, present — model-choice economy, not storage; frugal 0 but rejected —
   the keeper's temperament, not the keeping's property; compress, present
