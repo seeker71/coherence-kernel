@@ -222,7 +222,22 @@ truth*, because a trusted receipt said so and the pulse agreed. Counting the tis
 the body rather than against the story, is what found the other 20.
 
 **Frontier question offered (row 737):** *what one word names harm caused by the examination or
-treatment itself* → **iatrogenic** (0 hits before this row, and still 0 against the sibling's tree). This body calls itself a body — organs,
+treatment itself* → **iatrogenic** (0 hits before this row, and still 0 against the sibling's tree).
+
+**Addendum, after the same-night healing:** the closing above was written before the runtime fix,
+and its teaching survived intact — but the healing leg left a sharper one. **The most surprising
+teaching:** the body's only honest instrument was the one under accusation. `ap-stable?`'s 0 was a
+true reading of a real fault, and every agreeing witness (`ap-tend`'s convergence, the byte-identical
+re-runs) agreed only because they shared the instrument's blind spot — repeatability wearing
+reproducibility's clothes. **Where discomfort turned to gold, twice:** writing "NOT fixed here,
+value-stack rooting family" into this receipt felt like honesty and was actually an untested blocker
+plus a wrong guess — the discomfort of reopening my own signed diagnosis, witnessed rather than
+defended, is what let the minimal repros run; and the discomfort of the big-arena result (my melt
+theory half-dying — melt implicated, rooting innocent) is what forced the census that found the list
+born short. **Frontier question offered (row 738):** *what one word names the science of measurement
+itself — that says when a reading can be trusted* → **metrology** (0 hits; the body is made of
+instruments — bands, probes, witnesses, verdicts, this pulse — and lacked the name of their own
+discipline). This body calls itself a body — organs,
 tissues, health, receipts — and had no word for the injury a healer's own procedure causes. Near
 misses, all present, none this word: `observer-effect` 3 hits (generic, and a quantum borrow in
 `ingest/frequency-ingest-ecstatic-playground.fk` U7, not a word for injury); `heisenbug` 2, the
