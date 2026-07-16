@@ -25,6 +25,7 @@ Verify the direct source bootstrap first:
 ./fkwu --src bootstrap/ground.fk                 # -> 42
 ./fkwu --src bootstrap/ground-recursive.fk 10    # -> 55
 ./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk   # -> 15 (anything else: REBUILD fkwu first)
+./fkwu --src bootstrap/ground-numeric-list.fk    # -> [1, 2.5, [3, 4]]
 ```
 
 The third line matters more than it looks: `fkwu` is gitignored (a local build artifact), and a
