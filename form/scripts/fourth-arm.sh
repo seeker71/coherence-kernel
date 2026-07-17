@@ -814,7 +814,12 @@ fourth_prepare_all() {
             [[ "$failed" -eq 0 ]] || break
         fi
     done
-    if [[ "$failed" -eq 0 ]]; then
+    if [[ "$failed" -eq 0 && "${#pids[@]}" -gt 0 ]]; then
+        # ${#pids[@]} guard: when the chunk count is an exact multiple of
+        # $jobs, the last wave's reset leaves pids EMPTY here, and bash 3.2
+        # under `set -u` treats expanding an empty array as an unbound
+        # variable — the suite died at the finish line of an 856-table cold
+        # flatten (856 % 8 == 0) before this guard existed.
         local pid
         for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
     fi
