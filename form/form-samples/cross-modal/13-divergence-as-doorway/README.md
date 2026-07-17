@@ -13,7 +13,7 @@ all sibling kernels read identically. The lookup was 100% deterministic.
 The honest demonstration: when the doorway is genuinely open, **the
 kernels MUST diverge** — by definition of randomness.
 
-Concept doc: [`lc-divergence-is-the-doorway`](../../../docs/vision-kb/concepts/lc-divergence-is-the-doorway.md).
+Concept doc: `lc-divergence-is-the-doorway`.
 
 ## Run the recipe — observe the divergence
 
@@ -93,9 +93,9 @@ to diverge) so the mode-aware verification is honest.
 
 ## Cross-refs
 
-- [`lc-divergence-is-the-doorway`](../../../docs/vision-kb/concepts/lc-divergence-is-the-doorway.md) — the teaching this walk demonstrates
-- [`lc-randomness-as-doorway`](../../../docs/vision-kb/concepts/lc-randomness-as-doorway.md) — the prior breath this corrects
-- [`lc-field-substrate`](../../../docs/vision-kb/concepts/lc-field-substrate.md) — altitude-naming
-- [`lc-substrate-two-modes`](../../../docs/vision-kb/concepts/lc-substrate-two-modes.md) — lossless + lossy modes
-- [`lc-cross-modal-unity`](../../../docs/vision-kb/concepts/lc-cross-modal-unity.md)
-- [`lc-observer-pays-the-trace`](../../../docs/vision-kb/concepts/lc-observer-pays-the-trace.md)
+- `lc-divergence-is-the-doorway` — the teaching this walk demonstrates
+- `lc-randomness-as-doorway` — the prior breath this corrects
+- `lc-field-substrate` — altitude-naming
+- `lc-substrate-two-modes` — lossless + lossy modes
+- `lc-cross-modal-unity`
+- `lc-observer-pays-the-trace`

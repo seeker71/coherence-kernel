@@ -91,9 +91,9 @@ the bind happens at startup, calls naturally dispatch through it.
 
 ## Cross-refs
 
-- [`lc-substrate-two-modes`](../../../docs/vision-kb/concepts/lc-substrate-two-modes.md) — recipe is lossless transport; native is the host's specialization
-- [`lc-cross-modal-unity`](../../../docs/vision-kb/concepts/lc-cross-modal-unity.md) — Form-shape is sovereign across kernels
-- [`lc-native-kernel-binary`](../../../docs/vision-kb/concepts/lc-native-kernel-binary.md) — the three sibling kernels carry the same substrate
+- `lc-substrate-two-modes` — recipe is lossless transport; native is the host's specialization
+- `lc-cross-modal-unity` — Form-shape is sovereign across kernels
+- `lc-native-kernel-binary` — the three sibling kernels carry the same substrate
 
 ## Where this lands next
 

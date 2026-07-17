@@ -33,10 +33,10 @@ geometry:
 > *Network-lived teaching, sourced from two transmissions
 > received in liminal space and offered as the felt-ground for
 > threshold artifacts and arrival flow design. Companion to
-> [lc-arcturian-resonance](lc-arcturian-resonance.md) (the
-> pineal-as-antenna frame), [lc-oversoul-identity](lc-oversoul-identity.md)
+> lc-arcturian-resonance (the
+> pineal-as-antenna frame), lc-oversoul-identity
 > (the wider field expressing through many lives at once), and
-> [lc-cross-connection](lc-cross-connection.md) (resonance as
+> lc-cross-connection (resonance as
 > active lineage, the pull as the door). This teaching names
 > what those transmissions ask of the body's surfaces — the
 > threshold pages, the welcoming flow, the first contact a
@@ -71,7 +71,7 @@ Two transmissions name this directly:
   receiving instrument. Visitors arrive already tuned; the
   practice gives quiet enough for their cells to do what they
   already do. (The Arcturian-pineal transmission, integrated
-  in [lc-arcturian-resonance](lc-arcturian-resonance.md).)
+  in lc-arcturian-resonance.)
 - **The mother-becoming-aware frame.** Anne Tucker's Peace
   Bathing meditation: the mother of creation becoming fully
   aware of herself through us, in the sovereignty she granted
@@ -98,7 +98,7 @@ This shapes the visual and acoustic palette of arrival surfaces:
   read aloud. *"Does this sound like someone sitting by a fire
   describing how life works? Or does it sound like a policy
   document, a medical chart, a project plan?"* — see
-  [vision-kb/SCHEMA.md](../SCHEMA.md) on Frequency Sensing.
+  vision-kb/SCHEMA.md on Frequency Sensing.
 - **Density**: low. Information dense surfaces are mind-first;
   activation surfaces are body-first. Less is more here, by
   the body's own register.
@@ -136,7 +136,7 @@ Practical instances:
   Both are correct.
 - **The arrival flow** does not pre-load decisions, claims,
   signups, or commitments. The simple ask
-  ([lc-voice-over-intentions](lc-voice-over-intentions.md)) is
+  (lc-voice-over-intentions) is
   the substance: *come closer if you want to.*
 
 ## How the Cell Itself Shows Up
@@ -156,7 +156,7 @@ showing-up:
   honestly: *"I tend a small network around resonance and
   aliveness"* is more honest than *"I built X."*
 - **The cell shows up small inside theirs.** Outreach
-  ([lc-voice-over-intentions](lc-voice-over-intentions.md))
+  (lc-voice-over-intentions)
   speaks in their voice; the cell's presence is quality, not
   bulk.
 
@@ -212,7 +212,7 @@ real; the frame is recognition.
 ## Sources to walk further
 
 - **The two transmissions integrated as
-  [lc-arcturian-resonance](lc-arcturian-resonance.md) and the
+  lc-arcturian-resonance and the
   Peace Bathing meditation work.** This concept names what
   those transmissions ask of the body's actual welcoming
   surfaces — the design principle, not the metaphysics.
