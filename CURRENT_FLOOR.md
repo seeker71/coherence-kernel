@@ -243,21 +243,40 @@ remain investigation signals unless another measured field explains them.
 
 ## Real-World Gaps
 
-- The fourth arm cannot yet testify to failure: `form_error` and four kin ops
-  are unresolved in the fkwu image and axiom-5-lowered to silence. This is the
-  north star's "Fail" claim violated at the band-running door, and it is the
-  gap that let both the bp-table drift and the preludes drift stay invisible.
-- 150 band files still declare preludes in the multi-line style the one-line
-  reader ignores; each runs numb via `--src` and returns a wrong verdict
-  without complaint.
-- 56 of the ~95 ontology-loader manifest bands are DIVERGENT four-way (all
-  pre-existing, proven by stash-baseline sweep); most are the same wound:
-  bp names curated in `blueprint-registry.json` but never seated in the
-  Form-level table. The durable fix is generating that table from the
-  registry, sized to the names the body actually calls.
-- Three north-star organ bands (choice-receipt, channel-protocol-choice-floor,
-  sovereign-boundary-protocol) are BML-syntax and have no runnable door in
-  this checkout; `observe/sovereignty-guide.fk` has no band at all.
+(Re-trued the same day, evening reground on `4dc98a36d`, after the three
+door-voice lanes merged: PR #285 seated 353 registry rows, PR #286 ported the
+BML organ bands, PR #287 wired form_error end to end.)
+
+- `form_error` now speaks on the fourth arm (tag 238 through seed walker, JIT
+  prim + carrier, flatten coverage, emitted bootstrap kernel): a raise prints
+  its message and exits nonzero on fresh-parse and cached-flat paths alike.
+  Still numb, named plainly: `value_kind` (fkwu's tagged-word representation
+  cannot answer kinds honestly without boxing work), `read_form_binary`,
+  `write_form_binary`, `walk_recipe_here`.
+- New seam, measured not guessed: `bp` is a NATIVE fkwu op (tag 45, the old
+  identity stub) that intercepts call-position resolution before the loader's
+  Form-level `bp` ever runs — so the loader's own form_error guard still
+  cannot fire on the fourth arm. bp resolution parity (the call-position
+  shadowing defect) is the next voice gap. Sibling seam: the two flt-ops
+  tables (flatten/ hand lane vs native-op-manifest lane) have diverged tag
+  spaces at 205-208, and the walker's internal call opcodes live at 240-244
+  in the same numeric space.
+- The multi-line-preludes sweep (150 bands loading empty prelude lists) is in
+  flight on its own branch; until it lands, those bands still run numb via
+  `--src`.
+- Ontology-loader triage on today's main: 21 DIVERGENT resolved into families
+  — 11 bp-unreviewed (now seated from the registry; 4 went PASS-4WAY, 2
+  surfaced their real fourth-arm value mismatches from under the crash),
+  2 as_int:null, 4 value-mismatch, 4 other (each named in
+  receipts/2026-07-17-ontology-band-triage.md); 63 more are three-leg-green
+  with a silent fourth arm. Zero names needed new curation — the registry
+  already carried every coordinate.
+- The three BML-syntax organ bands came home to s-expr and answer four-way at
+  full bitmasks (choice-receipt 4294967295, channel-protocol-choice-floor
+  262143, sovereign-boundary-protocol 16383); `sovereignty-guide` was found
+  already rostered and passing at 11111 — the earlier "has no band" claim in
+  this floor was wrong and is corrected here. json-emitter carries a
+  pre-existing fourth-arm disagreement (6 vs 31), proven older than the ports.
 - The audio no-stand-in lane's substrate evaporated (volatile `/tmp` cli and
   models; untracked artifacts absent from fresh worktrees). Re-provisioning at
   durable paths — and declaring those paths as Form data rather than fixed
@@ -291,26 +310,30 @@ exception"; the floor shows three swallowing mouths. So:
 **Next step: give every proof door a voice — no verdict without the power to
 refuse.**
 
-Concretely, in order:
+Progress the same day (evening): step 1's core landed (form_error real on
+every fkwu path, PR #287 — value_kind and three kin still numb, named above);
+step 3 landed beyond its ask (353 registry rows seated, triage complete, zero
+new curation needed, PR #285) plus the organ bands came home (PR #286); step
+2 is in flight on its own branch. What remains of this step, in order:
 
-1. Wire real ops (or a loud missing-op fault) for `form_error`, `value_kind`,
-   `read_form_binary`, `write_form_binary`, `walk_recipe_here` in the fkwu
-   image, so a raised error ends a run visibly on the fourth arm exactly as it
-   does on go/rust. Acceptance: with the ontology loader's "property" row
-   removed on a scratch branch, `fkwu --src .../nl-reason-band.fk` fails
-   loudly; with it present, the 12-band PASS-4WAY set still passes.
-2. Sweep the 150 multi-line-preludes bands to the one-line form (mechanical
-   join, verified per band by a before/after verdict change or an explicit
-   already-correct receipt), so no band can load an empty prelude list
-   silently.
-3. Regenerate the Form-level bp table from `blueprint-registry.json` (subset:
-   names the body actually calls), then re-run the ontology-loader sweep;
-   expected motion: 56 DIVERGENT shrinks to only the non-bp divergences,
-   each of which then gets its own named cause.
+1. bp resolution parity: the native fkwu `bp` op (tag 45 identity stub)
+   intercepts call-position resolution ahead of the loader's Form-level `bp`,
+   so the loader's guard still cannot raise on the fourth arm. Acceptance:
+   with the loader's "property" row removed on a scratch branch,
+   `fkwu --src .../nl-reason-band.fk` dies with the RUNTIME form_error raise
+   (not merely compile diagnostics), matching go/rust.
+2. Land the multi-line-preludes sweep; then no band can load an empty
+   prelude list silently.
+3. Reunite the diverged flt-ops tag spaces (flatten/ hand lane vs
+   native-op-manifest lane, 205-208) and give value_kind an honest answer or
+   an honest refusal.
+4. The 63 three-leg-green bands: decide per band whether the fourth arm
+   should cross (manifest row) or the band should say `3-kernel only`
+   honestly, per the parent's proof-level rule.
 
-When these three land, a green band means what it says on all four arms, and
-every later claim — audio re-provisioning, oracle retirement lanes, the
-generative mind — inherits doors that cannot nod along silently.
+When these land, a green band means what it says on all four arms, and every
+later claim — audio re-provisioning, oracle retirement lanes, the generative
+mind — inherits doors that cannot nod along silently.
 
 ## Do Not Claim
 
