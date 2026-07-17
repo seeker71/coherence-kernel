@@ -195,5 +195,5 @@ today — the missing piece was the *learned extractor*, and an LLM (this
 session) walked it.
 
 The teaching this experiment names is in
-[`lc-feature-level-translation`](../../../docs/vision-kb/concepts/lc-feature-level-translation.md)
+`lc-feature-level-translation`
 (seed planted with this PR).

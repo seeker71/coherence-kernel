@@ -69,7 +69,7 @@ these alike?" and becomes "do they intern to the same NodeID?"
   Go-kernel process. The Python kernel (DB-backed) computes NodeIDs by the
   same serialization but assigns instance numbers based on its DB state.
   Production-grade cross-host NodeID equality lives in
-  [`lc-the-kernel-knows-itself`](../../../../docs/vision-kb/concepts/lc-the-kernel-knows-itself.md);
+  `lc-the-kernel-knows-itself`;
   this demo is the toy-altitude version of that claim.
 
 ## The teaching

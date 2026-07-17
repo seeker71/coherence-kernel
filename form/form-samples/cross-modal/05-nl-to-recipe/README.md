@@ -84,6 +84,6 @@ This is the same property
 proved between Python-shape and TypeScript-shape recursive trees, extended
 down to the source-text altitude for NL specifically.
 
-Lineage: [`lc-parsers-as-recipes`](../../../../docs/vision-kb/concepts/lc-parsers-as-recipes.md),
-[`lc-one-kernel-many-tongues`](../../../../docs/vision-kb/concepts/lc-one-kernel-many-tongues.md),
-[`lc-the-kernel-knows-itself`](../../../../docs/vision-kb/concepts/lc-the-kernel-knows-itself.md).
+Lineage: `lc-parsers-as-recipes`,
+`lc-one-kernel-many-tongues`,
+`lc-the-kernel-knows-itself`.
