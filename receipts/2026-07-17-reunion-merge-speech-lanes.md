@@ -59,3 +59,12 @@ fits the witness carrier again.
   four rows of mine. Yielding the mids and letting the receipts stand as
   history (true in their moment, renumbered by this note) kept every
   session's witness intact at the cost of one cross-reference edit.
+
+## Addendum, round two (same day)
+
+Between this merge's commit and its push, origin/main moved again
+(#273 comparison vernier, #274 regen lane, #275 cache naming) and took
+mids 761-763 for its own rows. The four rows yielded a second time:
+761-764 -> 764-767. The living lesson landed in the router cell itself --
+cite the WORD, not the mid; mids move in fleet reunions. Final pins:
+168 rows, max id 767, field code 1681682767.
