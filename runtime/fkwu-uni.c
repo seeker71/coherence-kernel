@@ -5344,10 +5344,20 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 5) {
         long long a5 = fk_walk(fk_node[i][1], fp);
         long long b5 = fk_walk(fk_node[i][2], fp);
-        if (fk_num(a5) <= fk_num(b5)) {
-            return 2;
+        /* Same width-promotion rule as math (tags 3/4/42): float on either side
+         * forces an IEEE comparison; pure int/int compares the tagged words
+         * directly (<<1 tagging is order-preserving, so word order IS int order).
+         * fk_num rounds through a double, whose 53-bit mantissa blurs distinct
+         * 63-bit ints into equality — (eq (sub -2^62 0) (sub -2^62 1)) answered
+         * true while sub of the same pair answered -1. Mirrors the Go/Rust
+         * kernels' compare law and the JIT's exact int fast path (le/eq inline
+         * cmp), which this walker previously DISAGREED with at the boundary.
+         * Applies to the whole family: le here, eq/lt on tags 102/103, and the
+         * JIT carrier fk_jprim2 — gt/ge/abs lower onto these via fk_rwtab. */
+        if (fk_isf(a5) || fk_isf(b5)) {
+            return (fk_num(a5) <= fk_num(b5)) ? 2 : 0;
         }
-        return 0;
+        return (a5 <= b5) ? 2 : 0;
     }
     if (t == 6) {
         if (fk_walk(fk_node[i][1], fp) == 0) {
@@ -5737,20 +5747,22 @@ static long long fk_walk(long long i, long long fp) {
         return fk_walk(fk_node[i][2], fp);
     }
     if (t == 102) {
+        /* int/int exact, float promotes — the tag-5 compare law. */
         long long ae = fk_walk(fk_node[i][1], fp);
         long long be = fk_walk(fk_node[i][2], fp);
-        if (fk_num(ae) == fk_num(be)) {
-            return 2;
+        if (fk_isf(ae) || fk_isf(be)) {
+            return (fk_num(ae) == fk_num(be)) ? 2 : 0;
         }
-        return 0;
+        return (ae == be) ? 2 : 0;
     }
     if (t == 103) {
+        /* int/int exact, float promotes — the tag-5 compare law. */
         long long al = fk_walk(fk_node[i][1], fp);
         long long bl = fk_walk(fk_node[i][2], fp);
-        if (fk_num(al) < fk_num(bl)) {
-            return 2;
+        if (fk_isf(al) || fk_isf(bl)) {
+            return (fk_num(al) < fk_num(bl)) ? 2 : 0;
         }
-        return 0;
+        return (al < bl) ? 2 : 0;
     }
     if (t == 109) {
         long long slot109 = fk_walk(fk_node[i][1], fp) >> 1;
@@ -8558,15 +8570,24 @@ static long long fk_jprim2(long long tag, long long a, long long b) {
         return ((a >> 1) * (b >> 1)) << 1;
     }
     if (tag == 5) {
-        return (fk_num(a) <= fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) <= fk_num(b)) ? 2 : 0;
+        }
+        return (a <= b) ? 2 : 0;
     }
     if (tag == 102) {
-        return (fk_num(a) == fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) == fk_num(b)) ? 2 : 0;
+        }
+        return (a == b) ? 2 : 0;
     }
     if (tag == 103) {
-        return (fk_num(a) < fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) < fk_num(b)) ? 2 : 0;
+        }
+        return (a < b) ? 2 : 0;
     }
-    /* lt — mirrors fk_walk tag-103 */
+    /* le/eq/lt — mirror fk_walk tags 5/102/103: int/int exact, float promotes */
     if (tag == 10) {
         if (fk_isf(a) || fk_isf(b)) {
             return fk_fbox(fk_num(a) / fk_num(b));
