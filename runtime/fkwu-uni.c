@@ -4986,7 +4986,7 @@ static void fk_vp(long long v) {
  * the previously-silent corruption case into correct behavior instead of a new
  * failure mode. */
 #define FK_FN_CAP 4096
-#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144*4*8 = 8MB. */
+#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144 STANDS (2026-07-18): a doubling probe disproved a capacity misread — the match-switch band's fill died at the SAME source position at 2x budget, exposing fk_sparse's stray-rparen zero-advance mint spin (fixed in the bare-symbol path), not honest growth; the source-compiler family's full ~514KB prelude closure parses well within 256K nodes. Measure (does the fill position move with the cap?) before raising. */
 #define FK_PARSE_BUF_CAP 16777216 /* fk_buf: scratch buffer for source artifact reads. Raised 1048576->16777216 (2026-07-16): the v4 .fkb signed lane is 9 bytes (was 5), and a measured band-chain artifact (program-image-fkb-byte-decode-band.fkb, 1,292,944 bytes) exceeded the old 1MiB cap, so fresh caches died on reload with "artifact exceeds FK_PARSE_BUF_CAP". Worst case bounded by FK_AST_NODE_CAP (262144) * 4 lanes * 9B = ~9.4MB plus strings/symbols, so 16MiB holds the format at current capacity constants. */
 static long long fk_fn_count;
 static long long fk_node_count;
@@ -7685,7 +7685,17 @@ static long long fk_sparse(void) {
             long long slot = fk_maxslot + 1;
             fk_maxslot = slot;
             fk_bd_push(ns, nlen, slot);
-            long long body = fk_sparse();
+            fk_sskip();
+            long long body;
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                /* bare 2-arg (let name val): no body follows. Emit the same lit-0
+                 * body the old fk_sparse-on-rparen call produced, WITHOUT sending
+                 * fk_sparse to the rparen -- that is now the loud stray-rparen
+                 * path below, and this legal shape must not trip it. */
+                body = fk_smklit(0);
+            } else {
+                body = fk_sparse();
+            }
             fk_bd_pop();
             fk_sskip();
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
@@ -8080,6 +8090,24 @@ static long long fk_sparse(void) {
      * name wins over a fn-name (lexical scope shadows). */
     long long s = fk_spos;
     fk_spos = fk_sym_end(fk_spos);
+    if (fk_spos == s) {
+        /* ZERO-WIDTH symbol: fk_sym_end stops with no progress only on a stray
+         * rparen (lparen took the branch above; whitespace/semicolons were
+         * skipped). Every statement/operand loop (fk_parse_do, fk_parse_top*,
+         * fk_parse_variadic) re-invokes fk_sparse here, so returning without
+         * consuming turns that caller into an AST-cap mint spin at one source
+         * position -- MEASURED 2026-07-18: 25 bytes of foreign-dialect source
+         * (`list(if 1 then 2 else 3);` in a BML section) minted the entire
+         * 262144-node table this way; doubling the cap died at the same spot.
+         * Diagnose loudly, consume the one character so the parse keeps moving,
+         * decline to honest 0. Well-formed Form never lands here: every op/do/
+         * variadic path consumes its own matching rparen, and the bare 2-arg
+         * value-position let guards its rparen before parsing a body. */
+        fk_diag(FK_DIAG_ERR, s,
+                "stray ')' in value position -- consumed to keep the parse advancing (foreign-dialect source?)");
+        fk_spos = fk_spos + 1;
+        return fk_smklit(0);
+    }
     long long off = fk_bd_lookup(s, fk_spos - s);
     if (off >= 0) {
         return fk_smknode(110, fk_smklit(off), 0, 0);
