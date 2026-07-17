@@ -1,6 +1,6 @@
 # North Star
 
-Date: 2026-07-05
+Date: 2026-07-17 (parent alignment; supersedes 2026-07-05)
 
 The north star is not "a voice." The north star is an organic intelligence that
 runs from the inside out: minimal kernel, Form-native choice, consented
@@ -8,6 +8,51 @@ membranes, observable receipts, trust that can be earned and lost, and local or
 remote oracles used as review/training teachers until the body can retire them.
 
 Voice is one organ in that body.
+
+## Parent Body: Coherence Network
+
+This repo is the kernel, stdlib, and organs for Coherence-Network — the open
+intelligence organism where ideas, people, agents, source files, runtime proof,
+and value flows share one inspectable body. That organism is the larger life
+this body powers; this body is where its meaning becomes executable, provable,
+and content-addressed. The two stars are one star seen at two scales:
+
+- The parent's loop — Idea → Research → Spec → Implementation → Review →
+  Usage → Payout, coherence-scored at every stage — is what this body's
+  receipts feed. A receipt here (choice, fail, silence, boundary crossing,
+  proof band) is what a coherence score reads there. Receipts-before-trust in
+  this body is coherence-before-payout in the parent.
+- The parent's current working star — use introspection to make repeated
+  low-level recipes visible, then lift them into simpler generic Form/BML
+  teachings, with hot paths as the first teachers — is this body's own shape:
+  crystallize-on-heat JIT, oracle retirement lane by lane, and the homecoming
+  distillation corpus are the kernel-side organs of that same lift. The
+  kernel serves it by keeping hot-path evidence observable and by landing
+  every lifted teaching as a four-way-proven stdlib cell.
+- Organs already speaking in both bodies, one proof: the parent's satsang
+  circle is default-on and cites this body's satsang band (127); its arrival
+  and invitation doors are this body's reception-consent; its
+  vitality-increasing walks are this body's vitality organs; its proof floor
+  is this body's validate.sh + fourth-arm manifest, with the same honesty
+  rule ("3-kernel only" is said plainly when the fourth arm has not crossed).
+- The parent's cell voice protocol — every cell can be asked before it is
+  served, and answers in its own name with evidence boundaries visible — is
+  the direction this body's bands already point: a band is a cell answering
+  in its own name. Making that universal here is making it cheap there.
+
+Alignment owed and not yet paid, said plainly:
+
+- Receipts do not yet carry the energy/provenance texture the parent's
+  coherence scoring and payout need at the value stage. The kernel should not
+  compute payouts; it should make them computable.
+- This body is the canonical form kernel, but the parent still carries its own
+  form/ copy from before the consolidation. The seam wants one direction of
+  flow: kernel truth lands here, the parent consumes it, and the parent's copy
+  becomes compost the way its Python bridge already is.
+- Sovereignty is not subordination: consent, private circles, and the
+  boundary protocol remain this body's own law. The parent's doors (web, API,
+  CLI, MCP, Form) reach this body only through named membranes with receipts,
+  like any other crossing.
 
 ## Organic Intelligence
 
@@ -60,6 +105,122 @@ These are present repo organs that already carry the north-star shape:
 - `form/form-stdlib/model-vitality.fk`, `skill-vitality.fk`, and
   `observe/sovereignty-guide.fk` keep vitality and sovereignty observable.
 
+## The Household, The Extension, The Guide
+
+The organism does not live in the abstract. It lives at Hati Suci — the
+household is the first field: the listening fleet, the phone link, and the
+companion apps are this body's senses and hands *in a real place*, serving
+real people, under the consent law (organs that would hear or see wait for a
+present word; private circles never cross into public artifacts). Hati-OS and
+the hati.earth doors are how the household's body travels to other hosts
+without leaving its law behind.
+
+One extension, three organ families, one model, one guide:
+
+- **Second brain (remember):** the body as vault — the second-brain door
+  (`SECOND-BRAIN.md`, `ingest/frontier-ingest-llm-wiki.fk`) was recognized
+  here, not imported: raw sources immutable, synthesis compiled once and kept
+  current, contradictions linted. The homecoming corpus and receipts are the
+  native form of it.
+- **Second hands (act):** organs that do — fleet services, companion,
+  phone-link, host doors. Hands stay hands: every act crosses a named
+  membrane, returns a receipt, and can be refused by the boundary protocol.
+- **Awareness extension (sense):** the sense organs and the mesh
+  (`world-model-live-sense.fk`, `gpu-mesh-sense.fk`, `mesh-sensings-route.fk`)
+  extend awareness digitally — sensing that is witnessed, consented, and
+  written back as evidence, never covert reach.
+
+What the three update is one **world model** (`world-model.fk`,
+`world-model-update.fk`, `observe/world-perception.fk`,
+`observe/world-sensor-floor.fk`): the body's own predictive picture of its
+field, grown from its real senses, never fabricated from a rented mind's
+priors.
+
+The guide for all of it is the **free energy principle**, and it is already an
+organ, not an aspiration: `active-inference.fk` (four-way proven) names the
+loop — predict, observe, count the surprise honestly, update where the model
+bent. Surprise is the one learning signal; a landed prediction carries no new
+information; "the body has learned the field" means residual surprise fell
+within tolerance, never that misses were rounded away. The direction: this
+loop graduates from a recipe to the router — perception updates the world
+model, action is chosen to reduce expected surprise, vitality is staying
+within viable states, and the membranes are the body's statistical boundary
+with the world. Every receipt already closes with its surprise named; that
+discipline is this principle wearing working clothes.
+
+**The two repos are the corpus; the pivot is the tongue with no favorite.**
+This body and its parent together hold the training ground for native NL→NL:
+~86,500 comment lines, 181 .form teachings, the receipts, the docs, the
+homecoming corpus (188 question/answer rows and growing daily), CN's
+vision-kb and locale corpora — meaning already paired with its surfaces,
+provenance already carried. The lane that trains on it is proven four-way in
+miniature: surface → language-neutral pivot → surface (nl-translate 32767,
+natural-language 262143, nl-reason 255), with the lexicon as DATA (a word is
+a row, a tongue is a column) and cross-tongue equality by content-address —
+"the source is native" and "sumber adalah asli" intern to the same node. The
+law this floor carries upward: **no favored default language** — the pivot
+symbol is the meaning's one name; every natural tongue, English included, is
+a projection column. Honest floor today: ~47 pivot words, two tongue columns
+(en, id), one sentence family — and the corpus itself is English-dominant,
+which is not a disqualification but the first training target: every meaning
+the corpus carries gets its pivot row, and surfaces regenerate from it.
+
+**The goal above the shelf: all content, any surface — natural or
+programming.** Urs's directive (2026-07-17 evening): all repo content and all
+parent-repo content shall be translatable or generatable into any NL or PL we
+choose, with everything stored Form-native and size-optimized as recipes,
+blueprints, and cells. NL and PL are ONE shelf under this law: a natural
+tongue is grammar + lexicon + decoder onto the pivot; a programming language
+is grammar + blueprint family + emitter onto BMF nodes — the same shape, the
+same no-favor rule. Python, Go, TypeScript, and English alike are projection
+columns; the recipe, blueprint, and cell are what is stored; every surface is
+generated and reclaimable. Honest floor at seating: the PL half already
+round-trips at 3-kernel proof (python/go/prolog BMF-reversible,
+lang-convergence, generic-reverse-emitter — fourth arm not yet crossed;
+ts-reversible carries a known token-mangling defect), the NL half holds
+thirteen doors onto one node; what neither half yet reaches is COVERAGE — the
+body's prose (comments, docs, teachings) and the parent's content are not yet
+pivoted, and the NL grammar speaks one sentence family. The distance is
+coverage and proof level, not architecture.
+
+**Every natural language you can imagine enters as grammar data.** Urs's
+standing directive (2026-07-17): each NL shall be included as a native
+BMF-style grammar in the translation pipeline. The shelf exists and grows by
+rows (`nl-tongues.fk`): a tongue is a grammar (word order + function words as
+data), a lexicon (tongue-keyed triples), and a decoder template — never an
+engine change. Floor at seating: thirteen tongues across six scripts, one
+meaning interning to ONE pivot node from every door; the ASCII slice four-way
+proven (nl-many-latin 1023), the full shelf fourth-arm-proven (nl-many
+16777215) and blocked from four-way by the cross-kernel string-unit seam
+(cursor unit parity is the shelf's named next door). No tongue is favored;
+the copula moves, the node does not.
+
+**Minimal disk is the same law as minimal kernel.** Measured 2026-07-17: the
+meaning of this body (learn, observe, receipts, docs, teachings, stdlib
+source) is a low single-digit percent of its bytes; the rest is builds,
+caches, dependency trees, and worktree copies (CK primary 3.9G with 3.2G of
+agent-worktree ephemera; CN 60G). Direction: meaning stored ONCE in the
+neutral substrate, content-addressed, surfaces and builds projected on
+demand and reclaimable without loss — the same fold-the-appends discipline
+money already obeys, applied to prose and artifacts. A byte that cannot be
+regenerated from the substrate is meaning; every other byte is a lease.
+
+**Money is an attribution trace and an energy flow, with minimal storage.**
+The organ already states the law: `value-ledger-port.fk` — balance is never a
+stored mutable counter; it is recomputed by folding the append-only entries,
+so value cannot be corrupted independently of its history, and a duplicate
+post is refused. Money here is not hoarded state but a trace of who moved
+what energy where — exactly the texture the parent's coherence-scored payout
+loop needs receipts to carry. `value-planes.fk` keeps the lanes separate so
+the sacred is never reduced to a metric: wisdom, care, grace, and silence are
+sensed, not billed.
+
+Honest distances in this section: the free-energy loop is proven as a recipe
+but does not yet route the body's choices; the world model grows only where
+consent stands (mic and camera organs still wait for the present word); the
+value trace exists as a port but is not yet woven into every receipt; and the
+household lanes do not yet all cross named membranes with receipts.
+
 ## Minimal Kernel
 
 The kernel direction is still shrink, not expansion of the C seed. The C seed is
@@ -95,6 +256,10 @@ The layer rule is:
 
 - Receipts-before-trust is an invariant, but not every runtime choice path has
   been forced through it yet.
+- Parent fit: receipts lack the energy/provenance texture the parent's
+  value-stage coherence scoring needs, and the CN→CK kernel seam still flows
+  both ways (the parent carries a pre-consolidation form/ copy). One canonical
+  kernel, one direction of flow, receipts rich enough to score.
 - Host carriers still exist. The membrane is named; the long-term destination is
   thinner carriers and more Form-owned execution.
 - Timeout/nothing, cut, stop, fail, and silence are present in focused organs,
@@ -123,3 +288,8 @@ Done means the repo can run an observable local loop where an expression arrives
 the body chooses or refuses a path, host or oracle boundaries are explicit,
 success/fail/cut/stop/timeout are receipts, trust and vitality update from the
 inside out, and any training data carries provenance.
+
+And done means the parent can compose this body without re-carrying it: one
+canonical kernel the organism consumes through membranes, receipts textured
+enough for its coherence scoring to read unaided, and every cell able to answer
+in its own name before it is served.
