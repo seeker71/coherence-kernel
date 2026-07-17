@@ -93,3 +93,19 @@ lineage-prelude abort and, behind it, the 102 divergences no one could hear. The
 "my own measurement lied to me" was the door to the session's largest finding. (Second, smaller
 gold: the 10-minute kill mid-flatten looked like a blocker; inspected, it was just iteration —
 the content-keyed cache banks every round.)
+
+## Reunion postscript (2026-07-18 00:37–01:00 WITA)
+
+Fourteen PRs (#301–#314) landed on main during this work. The reunion:
+
+- main had independently bumped the band pins the shallow way (199/167) for its new `_len`
+  native — still carrying the absorbed `form_table_text` 15-vs-13 false claim. Resolved by
+  re-probing the **merged** kernel and pinning from witnessed counts: **217 rows, 184 lane-1
+  (all verified, all attested), 33 lane-0**. Gate: `PASS primitive registry: 217 natives ==
+  217 rows`. Band: **63** bare and three-way on the merged tree.
+- main had independently opened a repo-root prelude door in validate.sh (`../$token`, the
+  runtime resolver's #270 door) — the same abort healed from the other side. Both heals kept.
+- corpus row 802 collided as foretold: main's own #313 records a *different* 802 renumbered
+  to 813, and rows 802–816 were all seated. This work's row re-seated as **817** (the fourth
+  same-day minting of 802 to be re-seated), corpus re-pinned 213 rows / max 817 / fold
+  2132132817, band **4095** on fkwu, merged tree.
