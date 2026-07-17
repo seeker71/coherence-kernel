@@ -87,9 +87,9 @@ kernels, 0 divergent.
 
 ## Corpus row this thread
 
-- **763 isometry** — a change of view that changes no distance: the property
+- **766 isometry** — a change of view that changes no distance: the property
   the lane's bands witness in the rotation (norms and dots preserved to 2e-6)
-  before the codes blur it. Distinct from isotropy (761): isotropy is the
+  before the codes blur it. Distinct from isotropy (764): isotropy is the
   sameness of the DISTRIBUTION the map leaves behind; isometry is the
   faithfulness of the MAP itself. (Walk: isotropy present since 732;
   rotation 25+ hits, present — one instance of the class, not the class;

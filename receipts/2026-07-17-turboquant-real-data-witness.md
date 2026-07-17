@@ -60,7 +60,7 @@ agreement (100 live queries vs a 1,000-print packed gallery) = **31.0%**,
 best-score mean absolute error **0.178**, whole-store compression **30.7×**
 (20,459,520 → 666,000 bytes).
 
-## The finding: agreement broke, truth held (veridical, row 764)
+## The finding: agreement broke, truth held (veridical, row 767)
 
 The librarian agreed 93%; the speaker book agreed 24% — yet named the right
 speaker 99.7% of the time. The difference is **gallery density**: 597 receipts
@@ -101,8 +101,8 @@ density is a property real fields carry and synthetic pins do not.
   (cache gitignored, rebuilt in ~32s).
 - `form/scripts/recognition_pack_e2e.py` — audio / face witnesses, READ-ONLY
   on the live stores, anonymizing before printing.
-- Corpus rows renumbered **761 isotropy, 762 thrift, 763 isometry** (main
-  reached 752 the same night) and **764 veridical** landed; corpus band
+- Corpus rows renumbered **764 isotropy, 765 thrift, 766 isometry** (main
+  reached 752 the same night) and **767 veridical** landed; corpus band
   re-pinned 135 rows / field code 1351352756, witnessed **511**.
 
 ## The most surprising teaching this work left behind
