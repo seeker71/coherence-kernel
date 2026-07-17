@@ -10,6 +10,7 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
+import { isMainThread, Worker, workerData } from "node:worker_threads";
 import {
   deserializeRecipeArtifact,
   Frame,
@@ -87,7 +88,7 @@ async function writeKernelCrashTrace(err: unknown): Promise<string | null> {
 }
 
 async function main(): Promise<void> {
-  const args = process.argv.slice(2);
+  const args = cliArgs();
   setCrashTraceContext("startup", args);
   if (args.length === 0) {
     console.error(
@@ -262,25 +263,106 @@ async function runTrace(args: string[]): Promise<void> {
   console.log(JSON.stringify(report, null, 2));
 }
 
-main()
-  .then(() => {
-    // Terminate worker-backed native carriers so the process exits promptly;
-    // socket net handles and HTTP worker state otherwise keep the loop alive.
-    crashKernel?.shutdown();
-  })
-  .catch(async (err: unknown) => {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`form-kernel-ts: ${msg}`);
-    // The Form-level call chain live at the crash, innermost first — the
-    // line that produced the fatal is the innermost attributed frame.
-    const formStack = crashKernel?.formStackDisplay(16) ?? "";
-    if (formStack !== "") {
-      console.error(`form-kernel-ts: form stack: ${formStack}`);
-    }
-    const tracePath = await writeKernelCrashTrace(err);
-    if (tracePath !== null) {
-      console.error(`form-kernel-ts: crash trace: ${tracePath}`);
-    }
-    crashKernel?.shutdown();
-    process.exit(1);
+function runKernelCli(): void {
+  main()
+    .then(() => {
+      // Terminate worker-backed native carriers so the process exits promptly;
+      // socket net handles and HTTP worker state otherwise keep the loop alive.
+      crashKernel?.shutdown();
+    })
+    .catch(async (err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`form-kernel-ts: ${msg}`);
+      // The Form-level call chain live at the crash, innermost first — the
+      // line that produced the fatal is the innermost attributed frame.
+      const formStack = crashKernel?.formStackDisplay(16) ?? "";
+      if (formStack !== "") {
+        console.error(`form-kernel-ts: form stack: ${formStack}`);
+      }
+      const tracePath = await writeKernelCrashTrace(err);
+      if (tracePath !== null) {
+        console.error(`form-kernel-ts: crash trace: ${tracePath}`);
+      }
+      crashKernel?.shutdown();
+      process.exit(1);
+    });
+}
+
+// The Form walk is plain recursion in walk()/walkFnCall — a source-length
+// call chain (flt-scan advances one token per nested cycle), far past any
+// main-thread stack the OS grants. A --stack-size flag cannot grow the real
+// stack: a V8 limit set ABOVE it disables V8's overflow check and turns
+// deep recursion into a SILENT SIGSEGV — zero output, and rc=139 masks to
+// rc=0 through a pipeline (the aphonia family,
+// receipts/2026-07-17-regen-lane-aphonic-carrier.md). The honest carrier
+// mirrors the emitted C walker's stack door: FORM_KERNEL_STACK_MB names the
+// stack, the CLI re-enters itself on a worker thread whose V8 limit MATCHES
+// its real stack (Node derives both from resourceLimits.stackSizeMb), and
+// overflow surfaces as a catchable RangeError -> loud rc=1 with the Form
+// stack attributed.
+const KERNEL_WORKER_MARKER = "form-kernel-ts:deep-stack-worker";
+
+type KernelWorkerData = { marker: string; argv: string[] };
+
+function isKernelWorker(): boolean {
+  return (
+    !isMainThread &&
+    (workerData as KernelWorkerData | undefined)?.marker === KERNEL_WORKER_MARKER
+  );
+}
+
+// CLI arguments: a deep-stack worker receives them via workerData —
+// process.argv does not carry the parent CLI's arguments across the
+// worker boundary.
+function cliArgs(): string[] {
+  if (isKernelWorker()) return (workerData as KernelWorkerData).argv;
+  return process.argv.slice(2);
+}
+
+function kernelStackMb(): number {
+  const raw = Number(process.env["FORM_KERNEL_STACK_MB"] ?? "");
+  return Number.isFinite(raw) && raw >= 1 ? Math.floor(raw) : 2048;
+}
+
+function runOnDeepStack(): void {
+  let online = false;
+  const worker = new Worker(new URL(import.meta.url), {
+    workerData: {
+      marker: KERNEL_WORKER_MARKER,
+      argv: process.argv.slice(2),
+    } satisfies KernelWorkerData,
+    resourceLimits: { stackSizeMb: kernelStackMb() },
+    // Inherited --stack-size flags would re-lift the worker's V8 limit away
+    // from its real stack and re-open the silent-SIGSEGV door; scrub them,
+    // keep everything else (loader registrations ride execArgv).
+    execArgv: process.execArgv.filter((a) => !/^--stack[-_]size/.test(a)),
   });
+  worker.on("online", () => {
+    online = true;
+  });
+  worker.on("error", (err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (!online) {
+      // The worker never came up (a host without worker-loader support) —
+      // fall back to the historical main-thread walk. V8's default limit
+      // sits far below the real main stack, so overflow stays a loud
+      // RangeError here, only capacity shrinks.
+      console.error(
+        `form-kernel-ts: deep-stack worker unavailable (${msg}); walking on the main thread`,
+      );
+      runKernelCli();
+      return;
+    }
+    console.error(`form-kernel-ts: worker: ${msg}`);
+    process.exitCode = 1;
+  });
+  worker.on("exit", (code) => {
+    if (code !== 0 && process.exitCode === undefined) process.exitCode = code;
+  });
+}
+
+if (isKernelWorker()) {
+  runKernelCli();
+} else {
+  runOnDeepStack();
+}
