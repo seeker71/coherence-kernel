@@ -93,6 +93,7 @@ static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_T
  * fk_spos / fk_slen are declared), where they can read the source buffer. */
 static void fk_diag(int sev, long long off, const char *fmt, ...);
 static void fk_diag_flush(void);
+static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
 /* Named capacities for the seed's fixed-size tables. Several numerically coincide
  * (many independent tables happen to be sized 65536) but are named SEPARATELY on
  * purpose: they are different index spaces (the node/AST table, the value stack,
@@ -174,7 +175,7 @@ static const long long fk_fbase = -9000000000000000000LL;
 /* stone 2a: the CANONICAL first-class nothing (axiom-1: nothing is first-class; timeout==nothing).
  * A single reserved sentinel, odd and one above fk_fbase, so it is DISTINCT from every value: not
  * an int (ints are v<<1, even), not 0, not the nil/empty value 1, not a boxed float (fk_isf needs
- * v<=fk_fbase-2; this is fk_fbase+1, so isf is false), not a node (fk_nidx maps it to ~4.5e18, far
+ * v<=fk_fbase-3; this is fk_fbase+1, so isf is false), not a node (fk_nidx maps it to ~4.5e18, far
  * past fk_np), not a record ((0-v) is even for records; here it is odd), not a string/list (those
  * are positive). The reducer RETURNS this from (nothing); recipes OBSERVE it via nothing? —
  * no-value is no longer conflated with 0 or host-null. */
@@ -188,7 +189,7 @@ static long long fk_is_nothing(long long v) {
  * and the float base (fk_fbase = -9e18, floats live at-or-below it), and BELOW every
  * node/record/cons/int (which are tiny-magnitude or positive). fk_fnval(f) = fk_fnbase - (f<<1) - 1
  * is therefore odd-negative in a narrow band (fn-indices are < 4096): not an int (ints v<<1, even),
- * not 0/1, not a float (fk_isf needs v<=fk_fbase-2 ~ -9e18; these are ~-8e18, ABOVE it), not a node
+ * not 0/1, not a float (fk_isf needs v<=fk_fbase-3 ~ -9e18; these are ~-8e18, ABOVE it), not a node
  * (fk_nidx maps ~8e18 far past fk_np), not a record ((0-v) is odd here, records even), not nothing
  * (distinct constant). A bare fn-name in value position evaluates to this (tag 243); an indirect
  * call offers the fn it names (tag 244). CLOSURE is the NAMED next gap: the fn-value carries only
@@ -213,12 +214,24 @@ static long long fk_is_fnval(long long v) {
     long long fi = fk_fnval_idx(v);
     return (fi >= 0 && fi < FK_FNVAL_MAX_INDEX) ? 1 : 0;
 }
+/* Float boxes are ODD words at/below fk_fbase-3: fk_fbase - (fp<<1) - 1. They were
+ * even (fk_fbase - (fp<<1)) until 2026-07-17, which let a deep-negative INT word
+ * (x<<1 for x < fk_fbase/2 ~ -4.5e18) alias float slot (fk_fbase - x*2)/2 at EVERY
+ * kind-dispatched door once the pool held that many floats — witnessed: after two
+ * 7.0s, (add -4500000000000000002 1) returned the float 8.0 and the int printed
+ * as 7. Ints are even (v<<1); with floats odd, every even word is an int across
+ * the full 63-bit range. The odd-negative neighbours stay disjoint by band:
+ * nothing = fk_fbase+1 (above the ceiling), fn-values ~ -8e18 (above fk_fbase),
+ * cons cells positive, node boxes tiny-negative — all excluded by magnitude. */
 static long long fk_fidx(long long v) {
-    return (fk_fbase - v) >> 1;
+    return (fk_fbase - v - 1) >> 1;
 }
 static long long fk_isf(long long v) {
+    if ((v & 1) == 0) {
+        return 0;
+    }
     long long fi = fk_fidx(v);
-    return v <= fk_fbase - 2 && fi > 0 && fi <= fk_fp;
+    return v <= fk_fbase - 3 && fi > 0 && fi <= fk_fp;
 }
 static double fk_num(long long v) {
     if (fk_isf(v)) {
@@ -243,7 +256,7 @@ static long long fk_fbox(double d) {
         }
     }
     fk_fv[fk_fp] = d;
-    return fk_fbase - (fk_fp << 1);
+    return fk_fbase - (fk_fp << 1) - 1;
 }
 static void fk_pr(long long v) {
     char b[32];
@@ -5841,6 +5854,21 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         return fk_sl[sa] << 1;
     }
+    if (t == 238) {
+        /* form_error — the voice of refusal. A program that raises it has
+         * declared its own cannot-recover, so per the two-phase law this is a
+         * legitimate runtime death: message to fd 2, exit nonzero, exactly as
+         * Go/Rust/TS panic on their native form_error. Before 2026-07-17 this
+         * op was absent here and axiom-5 lowered every raise to nothing — the
+         * bp "property" aphonia: bands sailed green past raised errors. */
+        long long sa = fk_walk(fk_node[i][1], fp) >> 1;
+        fk_write_all_raw(2, "fkwu: form_error: ", 18);
+        if (sa >= 0 && sa < fk_sp) {
+            fk_write_all_raw(2, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
+        }
+        fk_write_all_raw(2, "\n", 1);
+        exit(1);
+    }
     if (t == 26) {
         long long sa26 = fk_walk(fk_node[i][1], fp) >> 1;
         long long sb26 = fk_walk(fk_node[i][2], fp) >> 1;
@@ -8687,6 +8715,17 @@ static long long fk_jprim1(long long tag, long long a) {
         }
         return fk_sl[sa] << 1;
     }
+    if (tag == 238) {
+        /* form_error — mirrors fk_walk's tag-238 exactly: crystallized code
+         * must die as loudly as interpreted code. */
+        long long sa = a >> 1;
+        fk_write_all_raw(2, "fkwu: form_error: ", 18);
+        if (sa >= 0 && sa < fk_sp) {
+            fk_write_all_raw(2, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
+        }
+        fk_write_all_raw(2, "\n", 1);
+        exit(1);
+    }
     /* str_len */
     if (tag == 54) {
         return ((long long)fk_num(a)) << 1;
@@ -8878,7 +8917,7 @@ static fk_natfn fk_ensure_native(long long callee, long long *frame) {
  * RETURN the fk_tailcall sentinel. The C driver fk_jtramp loops on that sentinel — dispatching the
  * next native over the SAME fp frame — so a mutual-recursion chain runs native↔native end-to-end in
  * CONSTANT stack, no walker bounce. fk_tailcall is a reserved ODD-NEGATIVE sentinel in a band no
- * tagged value occupies: ints are even (v<<1); floats are <= fk_fbase-2 (~-9e18); nodes/records are
+ * tagged value occupies: ints are even (v<<1); floats are odd <= fk_fbase-3 (~-9e18); nodes/records are
  * small-magnitude negatives; cons are positive-odd; fnvals sit in the -8e18±16384 band; nothing is
  * -8.999e18. -7.5e18-1 is odd, far above the float floor, far below node magnitudes, and outside
  * the fnval band — so it can never collide with a real result. */
@@ -9214,14 +9253,17 @@ static void fk_jemit(long long i, int tail) {
     }
     if (t == 3 || t == 4 || t == 42 || t == 5 || t == 102) {
         /* float-aware arith/cmp. The #59 int-inline is WRONG for float operands, so we GUARD at
-         * runtime: if EITHER operand is a boxed float (tagged word <= fk_fbase-2, a huge negative),
-         * call the kind-correct carrier fk_jprim2 (bit-identical to fk_walk); else run the fast
-         * int-inline. This keeps fac/sum/fib native-fast (provably int at runtime) AND makes
-         * 0.5+0.25 correct — the float-correctness gate. */
+         * runtime: if EITHER operand's word is <= fk_fbase-2 (the float band and below), call the
+         * kind-correct carrier fk_jprim2 (bit-identical to fk_walk); else run the fast int-inline.
+         * The threshold is deliberately CONSERVATIVE, not exact: float boxes are odd <= fk_fbase-3,
+         * and deep-negative INTS (x < ~-4.5e18, words even <= fk_fbase-2) also route to the carrier,
+         * whose fk_isf re-classifies them correctly as ints — slower there, never wrong. This keeps
+         * fac/sum/fib native-fast (provably int at runtime) AND makes 0.5+0.25 correct — the
+         * float-correctness gate. */
         fk_jbin(i);
         /* rax=left, rcx=right */
 
-        /* threshold = fk_fbase - 2 (the float-band ceiling) */
+        /* threshold = fk_fbase - 2 (at/below: maybe-float, carrier decides) */
         fk_jb1(0x49);
         fk_jb1(0xB9);
         fk_jb8(-9000000000000000000LL - 2);
@@ -9356,8 +9398,8 @@ static void fk_jemit(long long i, int tail) {
         fk_jcarrier((void *)fk_jprim2, 3);
         return;
     }
-    if (t == 25 || t == 54 || t == 53) {
-        /* str_len / float_to_int / str_to_float: 1-arg carrier */
+    if (t == 25 || t == 54 || t == 53 || t == 238) {
+        /* str_len / float_to_int / str_to_float / form_error: 1-arg carrier */
         fk_jemit(fk_node[i][1], 0);
         /* arg -> rax */
         fk_jb1(0x50);

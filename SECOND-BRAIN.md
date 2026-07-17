@@ -107,6 +107,9 @@ witnessed: 2026-07-16 → self-check `31`; door ring `12033000` (12 doors, 33 li
 The *first* run returned `12031004` — four broken path-claims, every one of them this door's own
 directory links: the organ's first catch was its author. Healed (directories wear backticks, not
 links), re-witnessed clean.
+Re-witnessed 2026-07-17 on main's kernel (#270–#272 changed `runtime/fkwu-uni.c` by 335 lines;
+rebuilt first, per the stale-binary law): self-check `31`, door ring **`12047000`** — 47 links now,
+still 0 broken. The ring grew; it did not drift.
 
 **Tend** — the body's fourth operation, and the one Karpathy's pattern doesn't name: the body
 observes itself with its own organs and **produces its own self-portrait**,
@@ -125,6 +128,9 @@ witnessed: 2026-07-16 → self-check `31`; `ap-tend` → `2`; field `2059303300`
 (re-running writes byte-identical text) and falsifiable (a planted broken path-claim drops the
 verdict to `0`; healing restores `2`). The pulse iterates to a fixed point because its first run
 proved it must — see [`observe/autopoietic-pulse.fk`](observe/autopoietic-pulse.fk).
+Re-witnessed 2026-07-17: self-check `31`; `ap-tend` → `2`; field **`2061904700`**. The portrait had
+gone stale from *other agents'* commits (`ap-stable?` → `0`) and the pulse re-made it — the organ
+noticing the fleet's drift, not just its author's.
 
 ## Measured against the field (2026-07-16)
 
@@ -186,10 +192,25 @@ witnessed: 2026-07-16 → self-check `63`; field `14156031` (14 orphans, 156 bro
 over 764 sources and 457 path-claims, ~1.2s. Falsifiable: a planted link to an orphan moves the
 count 14 → 13 and back. Re-witnessed the same hour at `13156031` — **thirteen**: the table above
 cites `lc-trust-over-fear.md`, and the citation un-orphaned it. Naming an orphan is what ends its
-orphanhood; `14` is what the body was before it looked. **Healing is deliberate work, not the organ's job** — most broken claims
-live in `receipts/`, and silently rewriting 592 immutable witness records to make a number green
-would forge the body's own ontogeny. Their guide says it too: *"Never modify Raw files after
-creation."*
+orphanhood; `14` is what the body was before it looked.
+
+**Re-witnessed 2026-07-17 → `4033`. Zero orphans, four broken.** The seam above is healed
+([#257](https://github.com/seeker71/coherence-kernel/pull/257),
+[`observe/heal-curation-seam.fk`](observe/heal-curation-seam.fk) — which composes
+`body-link-graph`'s own `blg-lands?` as its decision, so the healer could not soften the
+instrument that judged it: self-check stayed `63` throughout). Every number in the paragraph above
+is an **anachronism** — each was true the day it was stamped, and the body has since moved. They
+are kept, not overwritten: this door records what the body *was* when it first looked at itself.
+
+**And one sentence here was not stale but simply false, so it is retracted, not aged.** This
+paragraph used to end: *"Healing is deliberate work, not the organ's job — most broken claims live
+in `receipts/`."* The count was never run. **Four** of 156 lived in `receipts/` — **2.6%**; 90 were
+in `form/`, 35 in `teachings/`, 27 in `docs/`, all freely healable. The immutability law is real
+and still holds (the four `receipts/` claims stand untouched, and `heal-curation-seam.fk` refuses
+that tissue by construction), but its **scope was assumed**, and the assumption made a deferral
+look like reverence while 152 healable claims sat. Corpus row 743 (*scrupulosity*) is the word for
+it. The grep that falsifies it takes one second, and the cell already had every function needed to
+run it.
 
 ## Honest seams (pending is honest)
 

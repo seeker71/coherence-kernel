@@ -1,0 +1,83 @@
+; rag-turboquant-lane-band.fk — proof of the packed third lane.
+;
+; preludes: form-stdlib/core.fk form-stdlib/tensor-quant.fk form-stdlib/turboquant-as-recipe.fk form-stdlib/rag-retrieve.fk form-stdlib/rag-turboquant-lane.fk
+;
+; verdict 127:
+;   1   packing is deterministic (same vector => the identical int pack)
+;   2   the stored micro-unit norm round-trips within 1e-6 of the float norm
+;   4   packs ride the rag entry shape: rag-id reads back, rag-remove shrinks
+;   8   packed top-1 equals the true float top-1 on the pinned synthetic set
+;   16  top-2 order is exact on the pinned set ("b" then "a")
+;   32  a zero vector packs safely (norm-microunits 0) and never outranks a
+;       positive match
+;   64  confidence is honest: pinned set lands in 25..50 (measured 36), empty
+;       index answers 0 and nearest-id ""
+;
+; The synthetic set reuses the turboquant band's pinned LCG seeds, so the
+; true top-1 ("b") is already a witnessed fact of those vectors.
+;
+; run: cat form/form-stdlib/core.fk form/form-stdlib/tensor-quant.fk \
+;          form/form-stdlib/turboquant-as-recipe.fk form/form-stdlib/rag-retrieve.fk \
+;          form/form-stdlib/rag-turboquant-lane.fk \
+;          form/form-stdlib/tests/rag-turboquant-lane-band.fk > /tmp/rtq.fk
+;      ./fkwu --src /tmp/rtq.fk    ; -> 127
+
+(do
+    (defn rtb-cell (state) (div (mul 1.0 (sub (tqr-draw state 2001) 1000)) 1000.0))
+    (defn rtb-vec-loop (state d acc)
+        (if (eq d 0) acc
+            (do (let s (tqr-lcg state))
+                (rtb-vec-loop s (sub d 1) (cons (rtb-cell s) acc)))))
+    (defn rtb-vec (seed d) (rtb-vec-loop seed d (empty)))
+    (defn rtb-argmax-loop (xs idx best-idx best)
+        (if (eq (len xs) 0) best-idx
+            (if (gt (head xs) best)
+                (rtb-argmax-loop (tail xs) (add idx 1) idx (head xs))
+                (rtb-argmax-loop (tail xs) (add idx 1) best-idx best))))
+    (defn rtb-argmax (xs) (rtb-argmax-loop xs 0 -1 -1000000000.0))
+    (defn rtb-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+
+    (let d 8)
+    (let va (rtb-vec 11 d))
+    (let vb (rtb-vec 22 d))
+    (let vc (rtb-vec 33 d))
+    (let ve (rtb-vec 44 d))
+    (let q  (rtb-vec 55 d))
+
+    (let deterministic (if (eq (tq-codes-eq (rtq-pack-vec va) (rtq-pack-vec va)) 1) 1 0))
+    (let norm-rt (if (lt (rtb-abs (sub (rtq-norm (rtq-pack-vec va)) (tqr-norm va)))
+                         0.000001) 1 0))
+
+    (let ea (rtq-entry "a" va))
+    (let eb (rtq-entry "b" vb))
+    (let ec (rtq-entry "c" vc))
+    (let ee (rtq-entry "e" ve))
+    (let entries (list ea eb ec ee))
+    (let rides (if (and (str_eq (rag-id ea) "a")
+                        (eq (len (rag-remove "c" entries)) 3)) 1 0))
+
+    (let qhat (tqr-unit q))
+    (let true-top (rtb-argmax (list (tqr-dot qhat va) (tqr-dot qhat vb)
+                                    (tqr-dot qhat vc) (tqr-dot qhat ve))))
+    (let true-top-id (nth (list "a" "b" "c" "e") true-top))
+    (let top1 (if (str_eq (rtq-nearest-id q entries) true-top-id) 1 0))
+
+    (let top2 (rtq-topk q entries 2))
+    (let order (if (and (str_eq (nth top2 0) "b") (str_eq (nth top2 1) "a")) 1 0))
+
+    (let ez (rtq-entry "z" (list 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0)))
+    (let zero-safe (if (and (eq (head (rag-vec ez)) 0)
+                            (str_eq (rtq-nearest-id q (list ez eb)) "b")) 1 0))
+
+    (let conf (rtq-confidence q entries))
+    (let conf-honest (if (and (and (ge conf 25) (le conf 50))
+                              (and (eq (rtq-confidence q (empty)) 0)
+                                   (str_eq (rtq-nearest-id q (empty)) ""))) 1 0))
+
+    (add (mul deterministic 1)
+    (add (mul norm-rt 2)
+    (add (mul rides 4)
+    (add (mul top1 8)
+    (add (mul order 16)
+    (add (mul zero-safe 32)
+         (mul conf-honest 64))))))))

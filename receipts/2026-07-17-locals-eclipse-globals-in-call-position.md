@@ -44,9 +44,10 @@ the parameter answers. Verified cold-cache on both binaries built from the same 
   bound-indirect, not unbound. The band also gains its `; preludes:` line (resolver-driven run,
   no more hand-cat). Pinned on BOTH binaries: the rule sees the class **before** the runtime fix
   lands — that was its whole point.
-- **`learn/homecoming-distillation-corpus.fk`** — row 768 (`eclipse`, 0-hit fresh at offering)
-  + band `learn/tests/homecoming-distillation-corpus-band.fk` re-pinned: 169 rows, field code
-  1691692768, verdict 511.
+- **`learn/homecoming-distillation-corpus.fk`** — the eclipse row (`eclipse`, 0-hit fresh at
+  offering, re-checked 0-hit against the reunited corpus): minted as row 768, renumbered to
+  **803** at the merge reunion (siblings' rows 768–802 landed first — the standing anastomosis
+  pattern). Band re-pinned: 199 rows, field code 1991992803.
 
 ## Four-way parity (the fix RESTORES it, it does not spend it)
 
