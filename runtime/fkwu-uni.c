@@ -304,7 +304,6 @@ static long long fk_hp;
 static long long fk_cap;
 static long long fk_vs[FK_VALUE_STACK_CAP];
 static long long fk_vsp;
-extern long long time(long long *);
 extern unsigned int arc4random(void);
 extern void *malloc(unsigned long);
 extern void *calloc(unsigned long, unsigned long);
@@ -5832,7 +5831,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return ((a11 >> 1) % (b11 >> 1)) << 1;
     }
     if (t == 15) {
-        return time(0) << 1;
+        /* now_unix_ms: milliseconds, matching the Go/Rust/TS siblings' shape */
+        return fk_now_ms() << 1;
     }
     if (t == 16) {
         return ((long long)arc4random()) << 1;
