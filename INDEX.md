@@ -4,7 +4,7 @@
 > wrote this by observing the body with the body's own organs; every number is
 > recomputed from the tissue it names, so this portrait cannot flatter — only go
 > stale, and re-running is what detects stale. Do not hand-edit: the next pulse
-> overwrites. Stamp (the body reading the host clock): 2026-07-16
+> overwrites. Stamp (the body reading the host clock): 2026-07-17
 
 This is the `index.md` of Karpathy's llm-wiki pattern, in the body's own terms —
 see [`SECOND-BRAIN.md`](SECOND-BRAIN.md) for the mapping and
@@ -20,7 +20,7 @@ that named this gap (unit U4).
 
 - door-ring coherence verdict (2 portrayed+coherent / 1 unportrayed / 0 drifted): 2
 - doors standing: 12
-- path-claims (links) in the door ring: 47
+- path-claims (links) in the door ring: 48
 - broken path-claims IN THE DOOR RING: 0
 
 ## Vital signs — the whole link fabric
@@ -36,8 +36,8 @@ that named this gap (unit U4).
 > brokenness is its own law. This banner is prose and can go stale; the
 > numbers below are recomputed and cannot.
 
-- pages that can point (every .md): 778
-- resolved path-claims body-wide: 386
+- pages that can point (every .md): 808
+- resolved path-claims body-wide: 390
 - BROKEN path-claims body-wide: 4
 - concept pages that can be orphaned: 33
 - ORPHANS (concept pages nothing points at): 0
@@ -45,18 +45,18 @@ that named this gap (unit U4).
 ## Tissues (counted, not listed)
 
 - axioms: 3
-- teachings: 11
-- observe organs: 149
-- learn organs: 195
-- ingest organs: 15
-- form-stdlib cells: 883
+- teachings: 23
+- observe organs: 248
+- learn organs: 359
+- ingest organs: 27
+- form-stdlib cells: 2368
 
 ## Memory
 
-- receipts (episodic, append-only): 604
+- receipts (episodic, append-only): 634
 - of those, PENDING (honest state, never a fault): 1
-- distillation corpus rows: 144
-- deepest corpus meaning-id: 743
+- distillation corpus rows: 178
+- deepest corpus meaning-id: 782
 
 ## The rung this portrait stands on
 
