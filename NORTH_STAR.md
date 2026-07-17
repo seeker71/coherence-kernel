@@ -1,6 +1,6 @@
 # North Star
 
-Date: 2026-07-05
+Date: 2026-07-17 (parent alignment; supersedes 2026-07-05)
 
 The north star is not "a voice." The north star is an organic intelligence that
 runs from the inside out: minimal kernel, Form-native choice, consented
@@ -8,6 +8,51 @@ membranes, observable receipts, trust that can be earned and lost, and local or
 remote oracles used as review/training teachers until the body can retire them.
 
 Voice is one organ in that body.
+
+## Parent Body: Coherence Network
+
+This repo is the kernel, stdlib, and organs for Coherence-Network — the open
+intelligence organism where ideas, people, agents, source files, runtime proof,
+and value flows share one inspectable body. That organism is the larger life
+this body powers; this body is where its meaning becomes executable, provable,
+and content-addressed. The two stars are one star seen at two scales:
+
+- The parent's loop — Idea → Research → Spec → Implementation → Review →
+  Usage → Payout, coherence-scored at every stage — is what this body's
+  receipts feed. A receipt here (choice, fail, silence, boundary crossing,
+  proof band) is what a coherence score reads there. Receipts-before-trust in
+  this body is coherence-before-payout in the parent.
+- The parent's current working star — use introspection to make repeated
+  low-level recipes visible, then lift them into simpler generic Form/BML
+  teachings, with hot paths as the first teachers — is this body's own shape:
+  crystallize-on-heat JIT, oracle retirement lane by lane, and the homecoming
+  distillation corpus are the kernel-side organs of that same lift. The
+  kernel serves it by keeping hot-path evidence observable and by landing
+  every lifted teaching as a four-way-proven stdlib cell.
+- Organs already speaking in both bodies, one proof: the parent's satsang
+  circle is default-on and cites this body's satsang band (127); its arrival
+  and invitation doors are this body's reception-consent; its
+  vitality-increasing walks are this body's vitality organs; its proof floor
+  is this body's validate.sh + fourth-arm manifest, with the same honesty
+  rule ("3-kernel only" is said plainly when the fourth arm has not crossed).
+- The parent's cell voice protocol — every cell can be asked before it is
+  served, and answers in its own name with evidence boundaries visible — is
+  the direction this body's bands already point: a band is a cell answering
+  in its own name. Making that universal here is making it cheap there.
+
+Alignment owed and not yet paid, said plainly:
+
+- Receipts do not yet carry the energy/provenance texture the parent's
+  coherence scoring and payout need at the value stage. The kernel should not
+  compute payouts; it should make them computable.
+- This body is the canonical form kernel, but the parent still carries its own
+  form/ copy from before the consolidation. The seam wants one direction of
+  flow: kernel truth lands here, the parent consumes it, and the parent's copy
+  becomes compost the way its Python bridge already is.
+- Sovereignty is not subordination: consent, private circles, and the
+  boundary protocol remain this body's own law. The parent's doors (web, API,
+  CLI, MCP, Form) reach this body only through named membranes with receipts,
+  like any other crossing.
 
 ## Organic Intelligence
 
@@ -95,6 +140,10 @@ The layer rule is:
 
 - Receipts-before-trust is an invariant, but not every runtime choice path has
   been forced through it yet.
+- Parent fit: receipts lack the energy/provenance texture the parent's
+  value-stage coherence scoring needs, and the CN→CK kernel seam still flows
+  both ways (the parent carries a pre-consolidation form/ copy). One canonical
+  kernel, one direction of flow, receipts rich enough to score.
 - Host carriers still exist. The membrane is named; the long-term destination is
   thinner carriers and more Form-owned execution.
 - Timeout/nothing, cut, stop, fail, and silence are present in focused organs,
@@ -123,3 +172,8 @@ Done means the repo can run an observable local loop where an expression arrives
 the body chooses or refuses a path, host or oracle boundaries are explicit,
 success/fail/cut/stop/timeout are receipts, trust and vitality update from the
 inside out, and any training data carries provenance.
+
+And done means the parent can compose this body without re-carrying it: one
+canonical kernel the organism consumes through membranes, receipts textured
+enough for its coherence scoring to read unaided, and every cell able to answer
+in its own name before it is served.
