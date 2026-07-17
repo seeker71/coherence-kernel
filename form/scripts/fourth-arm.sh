@@ -16,6 +16,15 @@
 # workload is mandatory: preparation, execution, and agreement failures fail
 # validation instead of silently reducing the proof to three siblings.
 
+# Bash-only: the array loops below index from 0. Sourced into zsh (arrays
+# 1-based) they SILENTLY malform every flatten expr — ${srcs[0]} reads empty
+# so a (read_file "") row rides the module list, and ${srcs[last]} grabs the
+# wrong band file. Die loudly instead of authoring a malformed carrier.
+if [[ -n "${ZSH_VERSION:-}" ]]; then
+    echo "fourth-arm.sh: bash-only (zsh arrays are 1-indexed; flatten exprs would be silently malformed) — source this under bash" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 FOURTH_DIR="form-stdlib/.cache/fourth"
 FOURTH_MANIFEST="fourth-arm-bands.txt"
 FOURTH_INDEX="$FOURTH_DIR/table-index-v2.tsv"
