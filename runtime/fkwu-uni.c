@@ -93,6 +93,7 @@ static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_T
  * fk_spos / fk_slen are declared), where they can read the source buffer. */
 static void fk_diag(int sev, long long off, const char *fmt, ...);
 static void fk_diag_flush(void);
+static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
 /* Named capacities for the seed's fixed-size tables. Several numerically coincide
  * (many independent tables happen to be sized 65536) but are named SEPARATELY on
  * purpose: they are different index spaces (the node/AST table, the value stack,
@@ -5853,6 +5854,21 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         }
         return fk_sl[sa] << 1;
     }
+    if (t == 238) {
+        /* form_error — the voice of refusal. A program that raises it has
+         * declared its own cannot-recover, so per the two-phase law this is a
+         * legitimate runtime death: message to fd 2, exit nonzero, exactly as
+         * Go/Rust/TS panic on their native form_error. Before 2026-07-17 this
+         * op was absent here and axiom-5 lowered every raise to nothing — the
+         * bp "property" aphonia: bands sailed green past raised errors. */
+        long long sa = fk_walk(fk_node[i][1], fp) >> 1;
+        fk_write_all_raw(2, "fkwu: form_error: ", 18);
+        if (sa >= 0 && sa < fk_sp) {
+            fk_write_all_raw(2, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
+        }
+        fk_write_all_raw(2, "\n", 1);
+        exit(1);
+    }
     if (t == 26) {
         long long sa26 = fk_walk(fk_node[i][1], fp) >> 1;
         long long sb26 = fk_walk(fk_node[i][2], fp) >> 1;
@@ -8689,6 +8705,17 @@ static long long fk_jprim1(long long tag, long long a) {
         }
         return fk_sl[sa] << 1;
     }
+    if (tag == 238) {
+        /* form_error — mirrors fk_walk's tag-238 exactly: crystallized code
+         * must die as loudly as interpreted code. */
+        long long sa = a >> 1;
+        fk_write_all_raw(2, "fkwu: form_error: ", 18);
+        if (sa >= 0 && sa < fk_sp) {
+            fk_write_all_raw(2, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
+        }
+        fk_write_all_raw(2, "\n", 1);
+        exit(1);
+    }
     /* str_len */
     if (tag == 54) {
         return ((long long)fk_num(a)) << 1;
@@ -9361,8 +9388,8 @@ static void fk_jemit(long long i, int tail) {
         fk_jcarrier((void *)fk_jprim2, 3);
         return;
     }
-    if (t == 25 || t == 54 || t == 53) {
-        /* str_len / float_to_int / str_to_float: 1-arg carrier */
+    if (t == 25 || t == 54 || t == 53 || t == 238) {
+        /* str_len / float_to_int / str_to_float / form_error: 1-arg carrier */
         fk_jemit(fk_node[i][1], 0);
         /* arg -> rax */
         fk_jb1(0x50);
