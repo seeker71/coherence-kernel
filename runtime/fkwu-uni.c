@@ -10893,6 +10893,103 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
     close(fd);
     return 1;
 }
+#if !defined(_WIN32)
+extern int kill(int, int);
+#ifndef ESRCH
+#define ESRCH 3
+#endif
+/* Orphan sweep for the pid-temp writer below: a writer killed between open()
+ * and rename() (SIGKILL from tools/ftimeout, a crash, a ^C) leaves its
+ * .w<pid> temp behind with no process left responsible for it -- a band
+ * sweep under ftimeout orphaned 793 of them in one afternoon (witnessed
+ * 2026-07-17), and `git add -A` swept 783 into a commit. Before staging its
+ * own temps, a writer clears its artifact's directory of every
+ * *.fkb.w<pid> / *.sym.w<pid> whose writer is DEAD (kill(pid,0) -> ESRCH).
+ * A live pid -- or one we may not signal (EPERM) -- is left alone, so the
+ * concurrent-runner guarantee of the pid-temp scheme is untouched; a
+ * recycled pid at worst delays one orphan's collection until the next
+ * compile in that directory. Windows keeps the leak: no kill() there, and
+ * that lane is the port shim, not the sweep path. */
+static void fk_src_sweep_dead_temps(const char *fkb_path) {
+    char dir[4160];
+    long long n = fk_path_len(fkb_path);
+    if (n > 4096) {
+        return;
+    }
+    long long cut = n;
+    while (cut > 0 && fkb_path[cut - 1] != FK_CH_SLASH) {
+        cut = cut - 1;
+    }
+    if (cut == 0) {
+        dir[0] = FK_CH_DOT;
+        dir[1] = 0;
+    } else if (cut == 1) {
+        dir[0] = FK_CH_SLASH;
+        dir[1] = 0;
+    } else {
+        long long k = 0;
+        while (k < cut - 1) {
+            dir[k] = fkb_path[k];
+            k = k + 1;
+        }
+        dir[k] = 0;
+    }
+    DIR *d = opendir(dir);
+    if (!d) {
+        return;
+    }
+    struct dirent *e;
+    long long self = getpid();
+    while ((e = readdir(d)) != 0) {
+        const char *name = e->d_name;
+        long long len = 0;
+        while (name[len] != 0) {
+            len = len + 1;
+        }
+        long long ds = len;
+        while (ds > 0 && name[ds - 1] >= FK_CH_DIGIT0 && name[ds - 1] <= FK_CH_DIGIT9) {
+            ds = ds - 1;
+        }
+        /* shape: <stem>.fkb.w<1..10 digits> or <stem>.sym.w<1..10 digits> */
+        if (ds == len || len - ds > 10 || ds < 6) {
+            continue;
+        }
+        const char *fkbw = ".fkb.w";
+        const char *symw = ".sym.w";
+        int m_fkb = 1;
+        int m_sym = 1;
+        long long k = 0;
+        while (k < 6) {
+            if (name[ds - 6 + k] != fkbw[k]) {
+                m_fkb = 0;
+            }
+            if (name[ds - 6 + k] != symw[k]) {
+                m_sym = 0;
+            }
+            k = k + 1;
+        }
+        if (!m_fkb && !m_sym) {
+            continue;
+        }
+        long long pid = 0;
+        k = ds;
+        while (k < len) {
+            pid = pid * 10 + (name[k] - FK_CH_DIGIT0);
+            k = k + 1;
+        }
+        if (pid <= 0 || pid == self) {
+            continue;
+        }
+        if (kill((int)pid, 0) == 0 || errno != ESRCH) {
+            continue;
+        }
+        char victim[4600];
+        fk_path_join(victim, 4600, dir, name);
+        unlink(victim);
+    }
+    closedir(d);
+}
+#endif
 static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
                             long long source_mtime, const char *source_hash) {
     /* both artifacts go to pid-suffixed temp names and rename() into place:
@@ -10905,6 +11002,9 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     if (fk_path_len(fkb_path) > 4096 || fk_path_len(sym_path) > 4096) {
         return 0;
     }
+#if !defined(_WIN32)
+    fk_src_sweep_dead_temps(fkb_path);
+#endif
     sprintf(fkb_tmp, "%s.w%d", fkb_path, getpid());
     sprintf(sym_tmp, "%s.w%d", sym_path, getpid());
 #if defined(_WIN32)
