@@ -165,6 +165,18 @@ a projection column. Honest floor today: ~47 pivot words, two tongue columns
 which is not a disqualification but the first training target: every meaning
 the corpus carries gets its pivot row, and surfaces regenerate from it.
 
+**Every natural language you can imagine enters as grammar data.** Urs's
+standing directive (2026-07-17): each NL shall be included as a native
+BMF-style grammar in the translation pipeline. The shelf exists and grows by
+rows (`nl-tongues.fk`): a tongue is a grammar (word order + function words as
+data), a lexicon (tongue-keyed triples), and a decoder template — never an
+engine change. Floor at seating: thirteen tongues across six scripts, one
+meaning interning to ONE pivot node from every door; the ASCII slice four-way
+proven (nl-many-latin 1023), the full shelf fourth-arm-proven (nl-many
+16777215) and blocked from four-way by the cross-kernel string-unit seam
+(cursor unit parity is the shelf's named next door). No tongue is favored;
+the copula moves, the node does not.
+
 **Minimal disk is the same law as minimal kernel.** Measured 2026-07-17: the
 meaning of this body (learn, observe, receipts, docs, teachings, stdlib
 source) is a low single-digit percent of its bytes; the rest is builds,
