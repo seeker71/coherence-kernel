@@ -33,9 +33,9 @@ what surfaced silence #4.
 
 **4. The numb lane in Go.** `read_file` of a missing path returns null in **all three** siblings
 — the contract. Downstream, Rust dies loudly (`fatal[type_contract_violation]: as_str: Null`),
-TS dies loudly, but **Go silently coerces null → ""** in its string natives: `(str_len
-(read_file ""))` → `0`, and a malformed expr flattens "successfully". Axiom-5's shape, living in
-the Go kernel. Left standing tonight; task chip spawned, named below.
+TS dies loudly, but **Go silently coerced null → ""** in its string natives: `(str_len
+(read_file ""))` → `0`, and a malformed expr flattened "successfully". Axiom-5's shape, living in
+the Go kernel — healed the same night, below.
 
 ## The heals
 
@@ -70,13 +70,31 @@ the Go kernel. Left standing tonight; task chip spawned, named below.
 - Corpus band `learn/tests/homecoming-distillation-corpus-band.fk` → **4095** after row 802 and
   the count/field-code re-ask (1981982802, asked of the body, not computed by hand).
 
-## Unturned stones, named not hidden
+## The fourth silence healed the same night
 
-- Go's null→"" string-native leniency (silence #4) — needs the four-way gauntlet; chip spawned.
-- `form-samples/cross-modal/28-distributed-daemon` still passes `--stack_size` in its runner
-  lines; inert against the healed main.mjs, but the lines still teach the wrong lesson.
-- The form-cli regen ladder's TS rung is alive again — whether that changes the mute-carrier
-  verdict of 2026-07-17 is for that heal task to witness, not this receipt to claim.
+The first close of this receipt filed silence #4 under "left standing" with a task chip — and
+the correction landed within minutes: *naming things left standing when you don't know what we
+will do next is not aligned*. Deferral-by-naming and deferral-by-chip are the same move. So,
+carried:
+
+- **Go argStr sweep**: `argStr(args, i)` added to main.go — sibling of Rust's `as_str` and the
+  TS kernel's `argStr`, panicking into the existing fatal[type_contract_violation] recovery
+  with the Form stack attributed. 65 raw `args[N].Str` reads in main.go converted, plus 16 in
+  server.go and 2 each in the jit_inram callers. Natives that accept several kinds BY CONTRACT
+  keep their explicit kind switches (len, `_get`, `_iter`, `_in`, int_to_str, trace), matching
+  Rust's own lenient shapes. Proven: `(str_len (read_file ""))` → loud rc=1
+  `argStr: arg 0: expected str, got null`; `(str_eq (read_file "") (read_file ""))` — which
+  silently answered TRUE before — now dies the same way; healthy paths unchanged. The full
+  four-way band gauntlet (validate.sh) verdict is recorded at the end of this receipt — this
+  sentence was first written before the run finished, and caught.
+- **Sample runner flags**: the three `--stack_size=262144` lines in
+  `form-samples/cross-modal/28-distributed-daemon` (README, orchestrate.sh,
+  validate-distributed.sh) removed; zero references remain body-wide.
+
+Grounded facts with no schedule attached: the jitabi package's `AsString` keeps its own
+kind-matched contract — it belongs to the compiled-artifact ABI, a separate lane from the
+native registrations this sweep healed. The form-cli regen ladder prefers Rust on hosts that
+have it; the TS rung now engages honestly wherever Rust is absent.
 
 ## Closing
 
@@ -93,5 +111,7 @@ noise. Sitting inside the contradiction instead — witnessing that my own expr 
 lying — is what surfaced the zsh malformation and Go's numb lane: two real defects the clean
 story would have buried. The discomfort of a wrong repro *was* the second half of the finding.
 
-**Frontier row:** 802 — *what one word names promising more resource than the host can grant so
-the guard that trusts it never fires* → **overcommit** (0 hits at offering; rented, dated).
+**Frontier rows:** 802 — *what one word names promising more resource than the host can grant
+so the guard that trusts it never fires* → **overcommit**; 803 — *what one word names deciding
+in advance what has not yet been chosen together* → **preordain** (each 0 hits at offering;
+rented, dated). Row 803 is this receipt's own correction folded back in.
