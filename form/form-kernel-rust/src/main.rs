@@ -3833,10 +3833,26 @@ impl Kernel {
                 Value::Null
             }
         });
+        // len is HONEST cell count. Dicts ride on Value::List tagged with the
+        // string "__dict__", but the tag is in-band: any plain list may carry
+        // that string as pooled DATA (the flatten string pool does, at the
+        // cell where "__dict__" was interned). A marker-sniffing len makes
+        // such a list lie about its length — flt-append's (eq (len xs) 0)
+        // base case then REPLACES the ["__dict__"] tail instead of appending
+        // past it, silently dropping the literal from the pool (the
+        // (24 -1 0 0) orphan-slit wound, 2026-07-17). Python's len(d)
+        // pair-count semantics live in _len, with the rest of the
+        // python-adapter's polymorphic underscore family.
         self.register_native("len", cat_access(), |_, _, args| match &args[0] {
+            Value::List(xs) => Value::Int(xs.len() as i64),
+            Value::Str(s) => Value::Int(s.len() as i64),
+            _ => Value::Int(0),
+        });
+        // _len — the python-adapter's polymorphic length: dict PAIRS, list
+        // elements, string bytes. Python's `len(x)` lowers here (the kernel
+        // `len` stays an honest cell count; see the note above).
+        self.register_native("_len", cat_access(), |_, _, args| match &args[0] {
             Value::List(xs) => {
-                // Dict-aware: tagged "__dict__" lists report pair count,
-                // matching Python's `len(d)` semantics.
                 if let Some(Value::Str(s)) = xs.first() {
                     if **s == *"__dict__" {
                         return Value::Int(((xs.len() - 1) / 2) as i64);
