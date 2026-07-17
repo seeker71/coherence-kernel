@@ -3710,17 +3710,17 @@ function ceilUtf8Boundary(bytes: Uint8Array, i: number): number {
 
 function argStr(args: Value[], i: number): string {
   const v = args[i];
-  if (v?.kind !== "str") throw new Error(`arg ${i}: expected str`);
+  if (v?.kind !== "str") throw new Error(`arg ${i}: expected str, got ${v?.kind ?? "absent"}`);
   return v.str;
 }
 function argList(args: Value[], i: number): Value[] {
   const v = args[i];
-  if (v?.kind !== "list") throw new Error(`arg ${i}: expected list`);
+  if (v?.kind !== "list") throw new Error(`arg ${i}: expected list, got ${v?.kind ?? "absent"}`);
   return v.list;
 }
 function argNodeID(args: Value[], i: number): NodeID {
   const v = args[i];
-  if (v?.kind !== "nodeid") throw new Error(`arg ${i}: expected nodeid`);
+  if (v?.kind !== "nodeid") throw new Error(`arg ${i}: expected nodeid, got ${v?.kind ?? "absent"}`);
   return v.nodeid;
 }
 

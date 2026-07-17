@@ -1349,6 +1349,26 @@ func dictKeyEq(a, b Value) bool {
 // are inline. Kept as a flat struct so the walker's hot path is allocation-
 // free for ints and bools.
 
+// argStr — the string lane's checked accessor, sibling to the Rust kernel's
+// as_str and the TS kernel's argStr. Value's zero-valued Str field let every
+// string native silently read null (and any other kind) as "" — the numb
+// lane that let a malformed (read_file "") expr flatten "successfully" on Go
+// alone while Rust and TS died loudly
+// (receipts/2026-07-18-ts-kernel-deep-stack-aphonia-healed.md). The panic is
+// recovered at the CLI boundary into fatal[type_contract_violation] with the
+// Form stack attributed. Natives that accept several kinds BY CONTRACT
+// (len, _get, _iter, _in, int_to_str) keep their explicit kind switches.
+func argStr(args []Value, i int) string {
+	if i >= len(args) || args[i].Kind != VStr {
+		got := "absent"
+		if i < len(args) {
+			got = valueKindName(args[i])
+		}
+		panic(fmt.Sprintf("argStr: arg %d: expected str, got %s", i, got))
+	}
+	return args[i].Str
+}
+
 func valueKindName(v Value) string {
 	switch v.Kind {
 	case VNull:
@@ -1934,10 +1954,10 @@ func (k *Kernel) registerNatives() {
 	})
 	// String ops
 	k.registerNative("str_len", catAccess(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VInt, Int: int64(len(args[0].Str))}
+		return Value{Kind: VInt, Int: int64(len(argStr(args, 0)))}
 	})
 	k.registerNative("substring", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := args[0].Str
+		s := argStr(args, 0)
 		a := args[1].AsInt()
 		b := args[2].AsInt()
 		if a < 0 || b < a || b > int64(len(s)) {
@@ -1954,7 +1974,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VStr, Str: s[floorCharBoundary(s, int(a)):floorCharBoundary(s, int(b))]}
 	})
 	k.registerNative("char_at", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := args[0].Str
+		s := argStr(args, 0)
 		i := args[1].AsInt()
 		if i < 0 || i >= int64(len(s)) {
 			panic(fmt.Sprintf("char_at: bounds out of range index=%d len=%d", i, len(s)))
@@ -1969,7 +1989,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VStr, Str: string(r)}
 	})
 	k.registerNative("str_concat", catMethod(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VStr, Str: args[0].Str + args[1].Str}
+		return Value{Kind: VStr, Str: argStr(args, 0) + argStr(args, 1)}
 	})
 	// host-io builtins: the kernel's host-driver layer (host-kernel.form). These give a
 	// Form recipe the host effects the agent runner needs — run a process, read/write a
@@ -1978,38 +1998,38 @@ func (k *Kernel) registerNatives() {
 	// not part of the four-way output-identity floor. The kernel already shells out (JIT
 	// go-build, plugin load), so this exposes an existing capability, not a new class.
 	k.registerNative("host-exec", catMethod(), func(_ *Kernel, args []Value) Value {
-		cmd := exec.Command("sh", "-c", args[0].Str)
+		cmd := exec.Command("sh", "-c", argStr(args, 0))
 		// Optional second arg = the process's stdin, piped in-memory: no temp file,
 		// no writable filesystem. The bytes go kernel -> subprocess directly, so a
 		// question never spills to disk and a host with no writable /tmp (Android)
 		// still escalates. One-arg callers are unchanged.
 		if len(args) > 1 {
-			cmd.Stdin = strings.NewReader(args[1].Str)
+			cmd.Stdin = strings.NewReader(argStr(args, 1))
 		}
 		out, _ := cmd.CombinedOutput()
 		return Value{Kind: VStr, Str: string(out)}
 	})
 	k.registerNative("host-read", catMethod(), func(_ *Kernel, args []Value) Value {
-		b, err := os.ReadFile(args[0].Str)
+		b, err := os.ReadFile(argStr(args, 0))
 		if err != nil {
 			return Value{Kind: VStr, Str: ""}
 		}
 		return Value{Kind: VStr, Str: string(b)}
 	})
 	k.registerNative("host-write", catMethod(), func(_ *Kernel, args []Value) Value {
-		if err := os.WriteFile(args[0].Str, []byte(args[1].Str), 0o644); err != nil {
+		if err := os.WriteFile(argStr(args, 0), []byte(argStr(args, 1)), 0o644); err != nil {
 			return Value{Kind: VStr, Str: "error"}
 		}
 		return Value{Kind: VStr, Str: "ok"}
 	})
 	k.registerNative("form_error", catWitness(), func(_ *Kernel, args []Value) Value {
-		panic(args[0].Str)
+		panic(argStr(args, 0))
 	})
 	k.registerNative("form-error", catWitness(), func(_ *Kernel, args []Value) Value {
-		panic(args[0].Str)
+		panic(argStr(args, 0))
 	})
 	k.registerNative("source_scan_file", catCall(), func(_ *Kernel, args []Value) Value {
-		body, err := os.ReadFile(args[0].Str)
+		body, err := os.ReadFile(argStr(args, 0))
 		if err != nil {
 			panic(fmt.Sprintf("source_scan_file: %v", err))
 		}
@@ -2047,18 +2067,18 @@ func (k *Kernel) registerNatives() {
 	})
 	// record_get — (record_get rec "field") → value, or null if absent.
 	k.registerNative("record_get", catAccess(), func(k *Kernel, args []Value) Value {
-		v, _ := args[0].Rec.Get(k.internName(args[1].Str))
+		v, _ := args[0].Rec.Get(k.internName(argStr(args, 1)))
 		return v
 	})
 	// record_set — (record_set rec "field" value) → the record (mutated in
 	// place; shared identity means all holders see it). BML's `self.x = v`.
 	k.registerNative("record_set", catMethod(), func(k *Kernel, args []Value) Value {
-		args[0].Rec.Set(k.internName(args[1].Str), args[2])
+		args[0].Rec.Set(k.internName(argStr(args, 1)), args[2])
 		return args[0]
 	})
 	// record_has — (record_has rec "field") → bool.
 	k.registerNative("record_has", catAccess(), func(k *Kernel, args []Value) Value {
-		_, ok := args[0].Rec.Get(k.internName(args[1].Str))
+		_, ok := args[0].Rec.Get(k.internName(argStr(args, 1)))
 		return Value{Kind: VBool, Bool: ok}
 	})
 	// record_blueprint — (record_blueprint rec) → the blueprint NodeID.
@@ -2089,7 +2109,7 @@ func (k *Kernel) registerNatives() {
 		if args[2].Kind != VClosure {
 			panic("method_define: third arg must be a closure")
 		}
-		k.methods[methodKey{args[0].AsNid(), k.internName(args[1].Str)}] = args[2].Cl
+		k.methods[methodKey{args[0].AsNid(), k.internName(argStr(args, 1))}] = args[2].Cl
 		return args[0]
 	})
 	// method_has — (method_has record-or-blueprint "name") → bool.
@@ -2103,7 +2123,7 @@ func (k *Kernel) registerNatives() {
 		default:
 			return Value{Kind: VBool, Bool: false}
 		}
-		_, ok := k.methods[methodKey{bp, k.internName(args[1].Str)}]
+		_, ok := k.methods[methodKey{bp, k.internName(argStr(args, 1))}]
 		return Value{Kind: VBool, Bool: ok}
 	})
 	// method_invoke — (method_invoke record "name" arg1 arg2 ...) → value.
@@ -2114,7 +2134,7 @@ func (k *Kernel) registerNatives() {
 			panic("method_invoke: first arg must be a record")
 		}
 		rec := args[0].Rec
-		key := methodKey{rec.Blueprint, k.internName(args[1].Str)}
+		key := methodKey{rec.Blueprint, k.internName(argStr(args, 1))}
 		cl, ok := k.methods[key]
 		if !ok {
 			panic(fmt.Sprintf("method_invoke: no method '%s' on blueprint @%d.%d.%d.%d",
@@ -2143,8 +2163,8 @@ func (k *Kernel) registerNatives() {
 	// `tokenizeSexp` does internally — exposed for Form scanners that
 	// would otherwise blow the walker stack with per-character recursion.
 	k.registerNative("str_find", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := args[0].Str
-		needle := args[1].Str
+		s := argStr(args, 0)
+		needle := argStr(args, 1)
 		from := int(args[2].AsInt())
 		if from < 0 {
 			from = 0
@@ -2160,7 +2180,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VInt, Int: int64(from + idx)}
 	})
 	k.registerNative("str_line_at", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := args[0].Str
+		s := argStr(args, 0)
 		idx := int(args[1].AsInt())
 		if idx < 0 || idx > len(s) {
 			return Value{Kind: VStr, Str: ""}
@@ -2179,7 +2199,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VStr, Str: s[start:end]}
 	})
 	k.registerNative("str_ascii_prefix", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := args[0].Str
+		s := argStr(args, 0)
 		end := 0
 		for end < len(s) && s[end] < utf8.RuneSelf {
 			end++
@@ -2203,7 +2223,7 @@ func (k *Kernel) registerNatives() {
 	// tokenizers, CSV scanners, future YAML/TOML parsers — not
 	// JSON-special. A new class adds one branch to a small switch.
 	k.registerNative("scan_run", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := args[0].Str
+		s := argStr(args, 0)
 		from := int(args[1].AsInt())
 		class := int(args[2].AsInt())
 		if from < 0 {
@@ -2261,7 +2281,7 @@ func (k *Kernel) registerNatives() {
 	// string_bytes exposes the exact UTF-8 carrier bytes, including embedded
 	// NULs, as integer leaves. It is the whole-string twin of str_byte_at.
 	k.registerNative("string_bytes", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := []byte(args[0].Str)
+		s := []byte(argStr(args, 0))
 		out := make([]Value, len(s))
 		for i, b := range s {
 			out[i] = Value{Kind: VInt, Int: int64(b)}
@@ -2272,7 +2292,7 @@ func (k *Kernel) registerNatives() {
 	// Form step with each raw UTF-8 byte as an int. The host loop gives streaming
 	// SHA/HMAC a stack bound independent of message length.
 	k.registerNative("string_byte_fold", catCall(), func(k *Kernel, args []Value) Value {
-		s := args[0].Str
+		s := argStr(args, 0)
 		acc := args[1]
 		fnVal := args[2]
 		if fnVal.Kind != VClosure {
@@ -2316,7 +2336,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VStr, Str: out.String()}
 	})
 	k.registerNative("str_eq", catCompare(RCompareEq), func(_ *Kernel, args []Value) Value {
-		return boolInt(args[0].Str == args[1].Str)
+		return boolInt(argStr(args, 0) == argStr(args, 1))
 	})
 	// int_to_str — value-to-string for trivial leaves. The historical
 	// name reflects its first use (line numbers in cell-trace.fk); its
@@ -2351,11 +2371,11 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VStr, Str: valueKindName(args[0])}
 	})
 	k.registerNative("str_to_int", catMethod(), func(_ *Kernel, args []Value) Value {
-		n, _ := strconv.ParseInt(args[0].Str, 10, 64)
+		n, _ := strconv.ParseInt(argStr(args, 0), 10, 64)
 		return Value{Kind: VInt, Int: n}
 	})
 	k.registerNative("str_to_float", catMethod(), func(_ *Kernel, args []Value) Value {
-		f, _ := strconv.ParseFloat(args[0].Str, 64)
+		f, _ := strconv.ParseFloat(argStr(args, 0), 64)
 		return Value{Kind: VFloat, Float: f}
 	})
 	// float_to_int — truncate a float toward zero, exactly Python's int() on a
@@ -2371,10 +2391,10 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VInt, Int: 0}
 	})
 	k.registerNative("ord", catAccess(), func(_ *Kernel, args []Value) Value {
-		if len(args[0].Str) == 0 {
+		if len(argStr(args, 0)) == 0 {
 			return Value{Kind: VInt, Int: -1}
 		}
-		return Value{Kind: VInt, Int: int64(args[0].Str[0])}
+		return Value{Kind: VInt, Int: int64(argStr(args, 0)[0])}
 	})
 	// str_byte_at: the i-th raw BYTE of the string (0-255), byte-exact. A string
 	// is a UTF-8 byte sequence; char_at is rune-aware (returns "" inside a
@@ -2383,7 +2403,7 @@ func (k *Kernel) registerNatives() {
 	// any locale's script, not just ASCII — this is that byte door, matching the
 	// walker's own byte-indexed char_at arm (tag 28).
 	k.registerNative("str_byte_at", catAccess(), func(_ *Kernel, args []Value) Value {
-		s := args[0].Str
+		s := argStr(args, 0)
 		i := args[1].AsInt()
 		if i < 0 || i >= int64(len(s)) {
 			panic(fmt.Sprintf("str_byte_at: bounds out of range index=%d len=%d", i, len(s)))
@@ -2843,7 +2863,7 @@ func (k *Kernel) registerNatives() {
 
 	// File I/O
 	readFileTextNative := func(_ *Kernel, args []Value) Value {
-		b, err := os.ReadFile(resolveKernelHostPath(args[0].Str))
+		b, err := os.ReadFile(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil {
 			return Value{Kind: VNull}
 		}
@@ -2853,7 +2873,7 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("read_file", catCall(), readFileTextNative)
 	// Byte-level host file read — returns a list of ints (0-255), one per byte.
 	k.registerNative("read_file_bytes", catCall(), func(_ *Kernel, args []Value) Value {
-		b, err := os.ReadFile(resolveKernelHostPath(args[0].Str))
+		b, err := os.ReadFile(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil {
 			return Value{Kind: VNull}
 		}
@@ -2868,8 +2888,8 @@ func (k *Kernel) registerNatives() {
 	// Form owns classification and aggregation; the kernel only exposes
 	// filesystem walking and text line counts as primitive observation.
 	k.registerNative("source_inventory", catCall(), func(_ *Kernel, args []Value) Value {
-		root := resolveKernelHostPath(args[0].Str)
-		suffix := args[1].Str
+		root := resolveKernelHostPath(argStr(args, 0))
+		suffix := argStr(args, 1)
 		skip := sourceInventorySkipSet(args[2])
 		rootAbs, err := filepath.Abs(root)
 		if err != nil {
@@ -2980,8 +3000,8 @@ func (k *Kernel) registerNatives() {
 	// register_jit is the opt-in that promotes a recipe to host-native
 	// execution. Removing the entry restores the Form walk.
 	k.registerNative("register_jit", catWitness(), func(k *Kernel, args []Value) Value {
-		formName := args[0].Str
-		nativeName := args[1].Str
+		formName := argStr(args, 0)
+		nativeName := argStr(args, 1)
 		nativeID := k.internName(nativeName)
 		_, hasN := k.natives[nativeID]
 		_, hasE := k.envNatives[nativeID]
@@ -2995,7 +3015,7 @@ func (k *Kernel) registerNatives() {
 	// unregister_jit form-name-str → 1 if removed, 0 if no alias was
 	// bound. Restores the Form-recipe walk path for that name.
 	k.registerNative("unregister_jit", catWitness(), func(k *Kernel, args []Value) Value {
-		formName := args[0].Str
+		formName := argStr(args, 0)
 		formID := k.internName(formName)
 		if _, ok := k.jitAliases[formID]; ok {
 			delete(k.jitAliases, formID)
@@ -3146,7 +3166,7 @@ func (k *Kernel) registerNatives() {
 	// installed_leaf? name-str → 1 if the name is a callable the surface
 	// grew at runtime via jit_install, else 0 (build-time natives answer 0).
 	k.registerNative("installed_leaf?", catCompare(RCompareEq), func(k *Kernel, args []Value) Value {
-		if _, ok := k.installedLeaves[k.internName(args[0].Str)]; ok {
+		if _, ok := k.installedLeaves[k.internName(argStr(args, 0))]; ok {
 			return Value{Kind: VInt, Int: 1}
 		}
 		return Value{Kind: VInt, Int: 0}
@@ -3154,7 +3174,7 @@ func (k *Kernel) registerNatives() {
 	// jit_aliased? form-name-str → 1 if a JIT alias is currently bound
 	// for this name, else 0. Lets Form code introspect dispatch routing.
 	k.registerNative("jit_aliased?", catCompare(RCompareEq), func(k *Kernel, args []Value) Value {
-		formName := args[0].Str
+		formName := argStr(args, 0)
 		formID := k.internName(formName)
 		if _, ok := k.jitAliases[formID]; ok {
 			return Value{Kind: VInt, Int: 1}
@@ -3268,7 +3288,7 @@ func (k *Kernel) registerNatives() {
 	// serialize-recipe alone drops string indices, which break under
 	// fresh string tables on load. This format embeds the strings.
 	k.registerNative("write_form_binary", catCall(), func(k *Kernel, args []Value) Value {
-		path := resolveKernelHostPath(args[0].Str)
+		path := resolveKernelHostPath(argStr(args, 0))
 		nid := args[1].AsNid()
 		bytes := serializeArtifact(k, nid)
 		if err := os.WriteFile(path, bytes, 0644); err != nil {
@@ -3277,7 +3297,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VInt, Int: int64(len(bytes))}
 	})
 	k.registerNative("read_form_binary", catCall(), func(k *Kernel, args []Value) Value {
-		b, err := os.ReadFile(resolveKernelHostPath(args[0].Str))
+		b, err := os.ReadFile(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil {
 			return Value{Kind: VNull}
 		}
@@ -3288,7 +3308,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VNodeID, Nid: root}
 	})
 	fileSizeNative := func(_ *Kernel, args []Value) Value {
-		info, err := os.Stat(resolveKernelHostPath(args[0].Str))
+		info, err := os.Stat(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
@@ -3301,7 +3321,7 @@ func (k *Kernel) registerNatives() {
 	// when a .fkb projection of a source file is stale. Generic: any
 	// "regenerate cache when source newer" pattern can compose this.
 	fileMtimeNative := func(_ *Kernel, args []Value) Value {
-		info, err := os.Stat(resolveKernelHostPath(args[0].Str))
+		info, err := os.Stat(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
@@ -3313,7 +3333,7 @@ func (k *Kernel) registerNatives() {
 		if args[1].AsInt() < 0 {
 			return Value{Kind: VInt, Int: -1}
 		}
-		f, err := os.Open(resolveKernelHostPath(args[0].Str))
+		f, err := os.Open(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
@@ -3331,7 +3351,7 @@ func (k *Kernel) registerNatives() {
 		if offset < 0 || length <= 0 {
 			return Value{Kind: VStr, Str: ""}
 		}
-		f, err := os.Open(resolveKernelHostPath(args[0].Str))
+		f, err := os.Open(resolveKernelHostPath(argStr(args, 0)))
 		if err != nil {
 			return Value{Kind: VStr, Str: ""}
 		}
@@ -3358,7 +3378,7 @@ func (k *Kernel) registerNatives() {
 	// (fs_rename old new)     → 0 | -1
 	// (fs_list path)          → VList of entry-name strings | VNull
 	fsExistsNative := func(_ *Kernel, args []Value) Value {
-		if _, err := os.Stat(args[0].Str); err != nil {
+		if _, err := os.Stat(argStr(args, 0)); err != nil {
 			return Value{Kind: VInt, Int: 0}
 		}
 		return Value{Kind: VInt, Int: 1}
@@ -3366,7 +3386,7 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("host_path_exists", catCall(), fsExistsNative)
 	k.registerNative("fs_exists", catCall(), fsExistsNative)
 	fsIsDirNative := func(_ *Kernel, args []Value) Value {
-		info, err := os.Stat(args[0].Str)
+		info, err := os.Stat(argStr(args, 0))
 		if err != nil || !info.IsDir() {
 			return Value{Kind: VInt, Int: 0}
 		}
@@ -3375,7 +3395,7 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("host_path_is_dir", catCall(), fsIsDirNative)
 	k.registerNative("fs_is_dir", catCall(), fsIsDirNative)
 	fsMkdirNative := func(_ *Kernel, args []Value) Value {
-		if err := os.MkdirAll(args[0].Str, 0755); err != nil {
+		if err := os.MkdirAll(argStr(args, 0), 0755); err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: 0}
@@ -3383,11 +3403,11 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("host_dir_mkdir", catCall(), fsMkdirNative)
 	k.registerNative("fs_mkdir", catCall(), fsMkdirNative)
 	fsRmdirNative := func(_ *Kernel, args []Value) Value {
-		info, err := os.Stat(args[0].Str)
+		info, err := os.Stat(argStr(args, 0))
 		if err != nil || !info.IsDir() {
 			return Value{Kind: VInt, Int: -1}
 		}
-		if err := os.RemoveAll(args[0].Str); err != nil {
+		if err := os.RemoveAll(argStr(args, 0)); err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: 0}
@@ -3395,11 +3415,11 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("host_dir_rmdir", catCall(), fsRmdirNative)
 	k.registerNative("fs_rmdir", catCall(), fsRmdirNative)
 	fsRemoveNative := func(_ *Kernel, args []Value) Value {
-		info, err := os.Stat(args[0].Str)
+		info, err := os.Stat(argStr(args, 0))
 		if err != nil || info.IsDir() {
 			return Value{Kind: VInt, Int: -1}
 		}
-		if err := os.Remove(args[0].Str); err != nil {
+		if err := os.Remove(argStr(args, 0)); err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: 0}
@@ -3407,7 +3427,7 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("host_path_remove", catCall(), fsRemoveNative)
 	k.registerNative("fs_remove", catCall(), fsRemoveNative)
 	fsRenameNative := func(_ *Kernel, args []Value) Value {
-		if err := os.Rename(args[0].Str, args[1].Str); err != nil {
+		if err := os.Rename(argStr(args, 0), argStr(args, 1)); err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
 		return Value{Kind: VInt, Int: 0}
@@ -3415,7 +3435,7 @@ func (k *Kernel) registerNatives() {
 	k.registerNative("host_path_rename", catCall(), fsRenameNative)
 	k.registerNative("fs_rename", catCall(), fsRenameNative)
 	fsListNative := func(_ *Kernel, args []Value) Value {
-		entries, err := os.ReadDir(args[0].Str)
+		entries, err := os.ReadDir(argStr(args, 0))
 		if err != nil {
 			return Value{Kind: VNull}
 		}
@@ -3473,7 +3493,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VInt, Int: socketRegister(c)}
 	})
 	k.registerNative("socket_connect", catCall(), func(_ *Kernel, args []Value) Value {
-		host := args[0].Str
+		host := argStr(args, 0)
 		port := args[1].AsInt()
 		c, err := net.Dial("tcp", net.JoinHostPort(host, strconv.FormatInt(port, 10)))
 		if err != nil {
@@ -3487,7 +3507,7 @@ func (k *Kernel) registerNatives() {
 		if !ok {
 			return Value{Kind: VInt, Int: -1}
 		}
-		n, err := c.Write([]byte(args[1].Str))
+		n, err := c.Write([]byte(argStr(args, 1)))
 		if err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
@@ -3543,7 +3563,7 @@ func (k *Kernel) registerNatives() {
 		}}
 	})
 	k.registerNative("bp", catWitness(), func(_ *Kernel, args []Value) Value {
-		if c, ok := bpTable[args[0].Str]; ok {
+		if c, ok := bpTable[argStr(args, 0)]; ok {
 			return Value{Kind: VNodeID, Nid: NodeID{Pkg: c[0], Level: c[1], Type: c[2], Inst: c[3]}}
 		}
 		// Fail loud — never invent a NodeID for an unknown name. The old silent
@@ -3560,7 +3580,7 @@ func (k *Kernel) registerNatives() {
 		return Value{Kind: VNodeID, Nid: k.internTrivialInt(args[0].AsInt())}
 	})
 	k.registerNative("intern_trivial_string", catWitness(), func(k *Kernel, args []Value) Value {
-		return Value{Kind: VNodeID, Nid: k.internString(args[0].Str)}
+		return Value{Kind: VNodeID, Nid: k.internString(argStr(args, 0))}
 	})
 	k.registerNative("intern_trivial_bool", catWitness(), func(_ *Kernel, args []Value) Value {
 		inst := uint32(0)
@@ -3576,7 +3596,7 @@ func (k *Kernel) registerNatives() {
 	// exposes the existing internTrivialFloat64 to Form code so the python-bmf
 	// float-literal lift can build a PY-BMF-FLOAT leaf.
 	k.registerNative("intern_trivial_float", catWitness(), func(k *Kernel, args []Value) Value {
-		f, _ := strconv.ParseFloat(args[0].Str, 64)
+		f, _ := strconv.ParseFloat(argStr(args, 0), 64)
 		return Value{Kind: VNodeID, Nid: k.internTrivialFloat64(f)}
 	})
 
@@ -3891,7 +3911,7 @@ func (k *Kernel) registerNatives() {
 			kids[i] = c.AsNid()
 		}
 		nid := k.intern(cat, kids)
-		fileNid := k.internString(args[2].Str)
+		fileNid := k.internString(argStr(args, 2))
 		fileID := NameID(fileNid.Inst)
 		line := uint32(args[3].AsInt())
 		col := uint32(args[4].AsInt())
@@ -3909,7 +3929,7 @@ func (k *Kernel) registerNatives() {
 	// Args: (nid, file_string, packed_line_col=line<<16|col)
 	k.registerNative("fb_record", catWitness(), func(k *Kernel, args []Value) Value {
 		nid := args[0].AsNid()
-		fileNid := k.internString(args[1].Str)
+		fileNid := k.internString(argStr(args, 1))
 		fileID := NameID(fileNid.Inst)
 		packed := args[2].AsInt()
 		line := uint32(packed >> 16)
@@ -4047,7 +4067,7 @@ func (k *Kernel) registerNatives() {
 		for i, v := range args[1].List {
 			bytes[i] = byte(v.Int)
 		}
-		err := os.WriteFile(args[0].Str, bytes, 0644)
+		err := os.WriteFile(argStr(args, 0), bytes, 0644)
 		if err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
@@ -4065,7 +4085,7 @@ func (k *Kernel) registerNatives() {
 		for i, v := range args[1].List {
 			bytes[i] = byte(v.Int)
 		}
-		f, err := os.OpenFile(args[0].Str, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+		f, err := os.OpenFile(argStr(args, 0), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 		if err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
@@ -4084,8 +4104,8 @@ func (k *Kernel) registerNatives() {
 	// write_file_text — host text output. Keeps text compilers from
 	// materializing byte lists while byte codecs still use write_file_bytes.
 	writeFileTextNative := func(_ *Kernel, args []Value) Value {
-		bytes := []byte(args[1].Str)
-		err := os.WriteFile(args[0].Str, bytes, 0644)
+		bytes := []byte(argStr(args, 1))
+		err := os.WriteFile(argStr(args, 0), bytes, 0644)
 		if err != nil {
 			return Value{Kind: VInt, Int: -1}
 		}
@@ -4287,7 +4307,7 @@ func (k *Kernel) registerNatives() {
 	// Returns the category NodeID (level=2, ty=RBasic, inst=instance) or
 	// VNull if the name isn't bound to a native.
 	k.registerNative("native_blueprint", catWitness(), func(k *Kernel, args []Value) Value {
-		idx, ok := k.strIdx[args[0].Str]
+		idx, ok := k.strIdx[argStr(args, 0)]
 		if !ok {
 			return Value{Kind: VNull}
 		}
