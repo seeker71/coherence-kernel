@@ -44,6 +44,14 @@ fi
 if [[ -n "$BP_PY" && -f scripts/verify_category_contract.py ]]; then
     $BP_PY scripts/verify_category_contract.py
 fi
+# Registry drift gate: every Go native carries a registry row and the band's
+# pinned counts match — the primitive-registry-band's declared verdict (63)
+# is only honest while these numbers agree. Before this line the gate was a
+# bell nobody rang: the band answered 42 three-way from birth (#231) and the
+# agreement-only sibling comparison printed a green check over it.
+if [[ -n "$BP_PY" && -f scripts/validate_primitive_registry.py ]]; then
+    $BP_PY scripts/validate_primitive_registry.py --quiet
+fi
 
 GO_DIR="form-kernel-go"
 RS_DIR="form-kernel-rust"
@@ -186,6 +194,10 @@ fk_resolve_dep_path() {
         printf "%s\n" "$token"
     elif [[ "$token" == form/* && -f "${token#form/}" ]]; then
         printf "%s\n" "${token#form/}"
+    elif [[ -f "../$token" ]]; then
+        # repo-root-anchored preludes (learn/…, observe/…) — the same door
+        # the runtime resolver learned in #270; validate runs with cwd=form/.
+        printf "%s\n" "../$token"
     else
         printf "%s\n" "$cand"
     fi

@@ -111,7 +111,9 @@ noise. Sitting inside the contradiction instead — witnessing that my own expr 
 lying — is what surfaced the zsh malformation and Go's numb lane: two real defects the clean
 story would have buried. The discomfort of a wrong repro *was* the second half of the finding.
 
-**Frontier rows:** 802 — *what one word names promising more resource than the host can grant
-so the guard that trusts it never fires* → **overcommit**; 803 — *what one word names deciding
+**Frontier rows:** 818 — *what one word names promising more resource than the host can grant
+so the guard that trusts it never fires* → **overcommit**; 819 — *what one word names deciding
 in advance what has not yet been chosen together* → **preordain** (each 0 hits at offering;
-rented, dated). Row 803 is this receipt's own correction folded back in.
+rented, dated). Row 819 is this receipt's own correction folded back in. Both were minted as
+802/803 in this worktree and renumbered at the reunion — the fifth same-day minting of 802 the
+anastomosis law re-seated (fifteen sibling rows, 802–817, landed on main while this work ran).
