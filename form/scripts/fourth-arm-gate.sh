@@ -6,12 +6,24 @@
 set -u
 cd "$(dirname "$0")/.."
 
+# fourth-arm.sh owns the honest preludes reader (fourth_band_prelude_mods_raw):
+# multi-line "; preludes:" headers and "; " continuation lines, core.fk kept in
+# declared position. A first-line-only grep truncates multi-line headers and the
+# reference kernels crash unbound — a false DIVERGENT (witnessed 2026-07-17).
+# shellcheck source=fourth-arm.sh
+. scripts/fourth-arm.sh
+
 gate_one() {
     local stem="$1" band="form-stdlib/tests/$stem-band.fk" pres out
-    pres="$(grep -E '^; preludes:' "$band" 2>/dev/null | head -1 | sed 's/^; preludes://')"
+    pres="$(fourth_band_prelude_mods_raw "$band")"
     if [[ -z "$pres" ]]; then
-        pres="form-stdlib/core.fk"
-        [[ -f "form-stdlib/$stem.fk" ]] && pres="$pres form-stdlib/$stem.fk"
+        [[ -f "form-stdlib/$stem.fk" ]] && pres="form-stdlib/$stem.fk"
+    fi
+    # The three reference kernels need core.fk even when the band's header omits
+    # it (only the fourth arm's shim mirrors core). Prepend it only when absent
+    # so a band that declares core.fk mid-list keeps its declared order.
+    if ! grep -qE '(^|/)core\.fk$' <<<"$pres"; then
+        pres="form-stdlib/core.fk${pres:+$'\n'$pres}"
     fi
     # shellcheck disable=SC2086
     out="$(./validate.sh $pres "$band" 2>&1)"
