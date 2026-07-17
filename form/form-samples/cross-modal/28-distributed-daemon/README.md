@@ -124,7 +124,7 @@ identical.
 # Through one kernel:
 ./orchestrate.sh ../../../form-kernel-go/bin-go
 ./orchestrate.sh ../../../form-kernel-rust/target/release/form-kernel-rust
-./orchestrate.sh node --stack_size=262144 \
+./orchestrate.sh node \
     --import ../../../form-kernel-ts/node_modules/tsx/dist/loader.mjs \
     ../../../form-kernel-ts/src/main.ts
 
