@@ -37,6 +37,8 @@ FORM_CLI_SRCS=(
     form-stdlib/native-host-instance.fk form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
     form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk form-stdlib/rag-ask.fk
     form-stdlib/form-cli-ask.fk form-stdlib/form-cli-router.fk form-stdlib/form-cli-judge.fk
+    form-stdlib/confidence-weighted-vote.fk form-stdlib/lineage-discounted-vote.fk
+    form-stdlib/form-cli-oracle-loop.fk
     form-stdlib/form-cli-sufficiency.fk form-stdlib/form-freq-check.fk
     form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
     form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
@@ -104,20 +106,52 @@ else
     build_fourth >/dev/null 2>&1 || true
 fi
 
+# Self-host flatten list — mirrors the $modules order below EXACTLY so every
+# arm flattens the same program. fourth_band_request prepends the shim itself,
+# so it is NOT listed here: the old list started from FORM_CLI_SRCS (stamp
+# order, shim first) and shipped a double-ridden shim (+77 duplicate fn rows)
+# in a different module order than the Rust/TS arm. The band
+# (form-cli-repl.fk) rides last.
+FORM_CLI_SELFHOST_ORDER=(
+    form-stdlib/core.fk form-stdlib/resource-port.fk
+    form-stdlib/bml-native-interface-package-import.fk form-stdlib/hati-os-targets.fk
+    form-stdlib/form-native-resource-interfaces.fk form-stdlib/form-fs.fk
+    form-stdlib/storage-port.fk form-stdlib/host-kernel-carrier.fk
+    form-stdlib/fnri-standin.fk form-stdlib/fnri-receipt.fk
+    form-stdlib/http-client.fk form-stdlib/line-grammar.fk form-stdlib/str-byte-at.fk
+    form-stdlib/sha256.fk form-stdlib/hmac-sha256.fk form-stdlib/hex.fk
+    form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk
+    form-stdlib/q4k-dequant.fk form-stdlib/weight-load.fk
+    form-stdlib/voice-traits.fk form-stdlib/nearest-shape.fk
+    form-stdlib/co-learning.fk form-stdlib/co-learning-stream.fk form-stdlib/mesh-dispatch.fk
+    form-stdlib/surprise-salience.fk form-stdlib/host-sense-organ.fk form-stdlib/speech-organ.fk
+    form-stdlib/native-host-instance.fk form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
+    form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk form-stdlib/rag-ask.fk
+    form-stdlib/form-cli-ask.fk form-stdlib/form-cli-router.fk form-stdlib/form-cli-judge.fk
+    form-stdlib/confidence-weighted-vote.fk form-stdlib/lineage-discounted-vote.fk
+    form-stdlib/form-cli-oracle-loop.fk
+    form-stdlib/form-cli-sufficiency.fk form-stdlib/form-freq-check.fk
+    form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
+    form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
+    form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk
+    form-stdlib/current-branch-landing.fk form-stdlib/form-cli.fk
+    form-stdlib/form-cli-gguf-cell.fk
+)
 FORM_CLI_FLATTEN_SRCS=()
-for src in "${FORM_CLI_SRCS[@]}"; do
+for src in "${FORM_CLI_SELFHOST_ORDER[@]}"; do
     if [[ "$src" == "form-stdlib/form-cli-carrier.fk" ]]; then
         FORM_CLI_FLATTEN_SRCS+=("$carrier_src")
     else
         FORM_CLI_FLATTEN_SRCS+=("$(compile_bml "$src")")
     fi
 done
+FORM_CLI_FLATTEN_SRCS+=(form-stdlib/form-cli-repl.fk)
 
 stdlib=form-stdlib
 core_src="$(compile_bml "$stdlib/core.fk")"
 http_client_src="$(compile_bml "$stdlib/http-client.fk")"
 form_cli_ask_src="$(compile_bml "$stdlib/form-cli-ask.fk")"
-modules="(list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/resource-port.fk\") (read_file \"$stdlib/bml-native-interface-package-import.fk\") (read_file \"$stdlib/hati-os-targets.fk\") (read_file \"$stdlib/form-native-resource-interfaces.fk\") (read_file \"$stdlib/form-fs.fk\") (read_file \"$stdlib/storage-port.fk\") (read_file \"$stdlib/host-kernel-carrier.fk\") (read_file \"$stdlib/fnri-standin.fk\") (read_file \"$stdlib/fnri-receipt.fk\") (read_file \"$http_client_src\") (read_file \"$stdlib/line-grammar.fk\") (read_file \"$stdlib/str-byte-at.fk\") (read_file \"$stdlib/sha256.fk\") (read_file \"$stdlib/hmac-sha256.fk\") (read_file \"$stdlib/hex.fk\") (read_file \"$stdlib/format-arith.fk\") (read_file \"$stdlib/f16-decode.fk\") (read_file \"$stdlib/q6k-dequant.fk\") (read_file \"$stdlib/q4k-dequant.fk\") (read_file \"$stdlib/weight-load.fk\") (read_file \"$stdlib/voice-traits.fk\") (read_file \"$stdlib/nearest-shape.fk\") (read_file \"$stdlib/co-learning.fk\") (read_file \"$stdlib/co-learning-stream.fk\") (read_file \"$stdlib/mesh-dispatch.fk\") (read_file \"$stdlib/surprise-salience.fk\") (read_file \"$stdlib/host-sense-organ.fk\") (read_file \"$stdlib/speech-organ.fk\") (read_file \"$stdlib/native-host-instance.fk\") (read_file \"$stdlib/text-tokenize.fk\") (read_file \"$stdlib/rag-embed.fk\") (read_file \"$stdlib/rag-index-codec.fk\") (read_file \"$stdlib/rag-retrieve.fk\") (read_file \"$stdlib/rag-ask.fk\") (read_file \"$form_cli_ask_src\") (read_file \"$stdlib/form-cli-router.fk\") (read_file \"$stdlib/form-cli-judge.fk\") (read_file \"$stdlib/form-cli-sufficiency.fk\") (read_file \"$stdlib/form-freq-check.fk\") (read_file \"$stdlib/trust-row.fk\") (read_file \"$stdlib/form-cli-ask-gate.fk\") (read_file \"$stdlib/form-cli-staged-trace.fk\") (read_file \"$stdlib/form-cli-request.fk\") (read_file \"$carrier_src\") (read_file \"$stdlib/form-cli-ask-plus.fk\") (read_file \"$stdlib/current-branch-landing.fk\") (read_file \"$stdlib/form-cli.fk\") (read_file \"$stdlib/form-cli-gguf-cell.fk\"))"
+modules="(list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/resource-port.fk\") (read_file \"$stdlib/bml-native-interface-package-import.fk\") (read_file \"$stdlib/hati-os-targets.fk\") (read_file \"$stdlib/form-native-resource-interfaces.fk\") (read_file \"$stdlib/form-fs.fk\") (read_file \"$stdlib/storage-port.fk\") (read_file \"$stdlib/host-kernel-carrier.fk\") (read_file \"$stdlib/fnri-standin.fk\") (read_file \"$stdlib/fnri-receipt.fk\") (read_file \"$http_client_src\") (read_file \"$stdlib/line-grammar.fk\") (read_file \"$stdlib/str-byte-at.fk\") (read_file \"$stdlib/sha256.fk\") (read_file \"$stdlib/hmac-sha256.fk\") (read_file \"$stdlib/hex.fk\") (read_file \"$stdlib/format-arith.fk\") (read_file \"$stdlib/f16-decode.fk\") (read_file \"$stdlib/q6k-dequant.fk\") (read_file \"$stdlib/q4k-dequant.fk\") (read_file \"$stdlib/weight-load.fk\") (read_file \"$stdlib/voice-traits.fk\") (read_file \"$stdlib/nearest-shape.fk\") (read_file \"$stdlib/co-learning.fk\") (read_file \"$stdlib/co-learning-stream.fk\") (read_file \"$stdlib/mesh-dispatch.fk\") (read_file \"$stdlib/surprise-salience.fk\") (read_file \"$stdlib/host-sense-organ.fk\") (read_file \"$stdlib/speech-organ.fk\") (read_file \"$stdlib/native-host-instance.fk\") (read_file \"$stdlib/text-tokenize.fk\") (read_file \"$stdlib/rag-embed.fk\") (read_file \"$stdlib/rag-index-codec.fk\") (read_file \"$stdlib/rag-retrieve.fk\") (read_file \"$stdlib/rag-ask.fk\") (read_file \"$form_cli_ask_src\") (read_file \"$stdlib/form-cli-router.fk\") (read_file \"$stdlib/form-cli-judge.fk\") (read_file \"$stdlib/confidence-weighted-vote.fk\") (read_file \"$stdlib/lineage-discounted-vote.fk\") (read_file \"$stdlib/form-cli-oracle-loop.fk\") (read_file \"$stdlib/form-cli-sufficiency.fk\") (read_file \"$stdlib/form-freq-check.fk\") (read_file \"$stdlib/trust-row.fk\") (read_file \"$stdlib/form-cli-ask-gate.fk\") (read_file \"$stdlib/form-cli-staged-trace.fk\") (read_file \"$stdlib/form-cli-request.fk\") (read_file \"$carrier_src\") (read_file \"$stdlib/form-cli-ask-plus.fk\") (read_file \"$stdlib/current-branch-landing.fk\") (read_file \"$stdlib/form-cli.fk\") (read_file \"$stdlib/form-cli-gguf-cell.fk\"))"
 band="(read_file \"$stdlib/form-cli-repl.fk\")"
 FLATTEN_CHAIN=(
     form-stdlib/minimal-surface.fk
@@ -167,6 +201,21 @@ fi
     exit 1
 }
 table_shape="$(form_cli_validate_table "$table_tmp")"
+
+# Voice canary — the carrier must ANSWER, not merely validate. Walk the
+# candidate table on the cached fkwu and expect pong: an aphonic table
+# (receipts/2026-07-17-regen-lane-aphonic-carrier.md) dies here instead of
+# shipping. Shape validation alone cannot catch a table that runs mute.
+if [[ -n "${FKWU:-}" && -x "${FKWU:-}" ]]; then
+    voice="$(printf 'ping\n' | "$FKWU" "$table_tmp" 0 2>/dev/null | sed -n '1p')"
+    if [[ "$voice" != "pong" ]]; then
+        printf "regen: voice canary failed — ping answered '%s', not pong (aphonic carrier)\n" "$voice" >&2
+        exit 1
+    fi
+    printf '%s\n' 'regen: voice canary — ping answers pong'
+else
+    printf '%s\n' 'regen: WARNING voice canary skipped (no cached fkwu on this host)' >&2
+fi
 stamp_tmp="$work_dir/form-cli.stamp"
 printf '%s\n' "$want_cli_stamp" > "$stamp_tmp"
 source_digest_tmp="$work_dir/form-cli.source.sha256"
