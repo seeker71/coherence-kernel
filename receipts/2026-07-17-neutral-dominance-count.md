@@ -87,3 +87,37 @@ its closing if the next moment chooses something new.
 The ledger's law, from the day's teaching: a snag parked with a reason and
 witnessed at rest is fallow ground, not neglect — and if no moment ever
 returns to it, the field was still honest.
+
+## Correction, same night — "the neutral form is still in English"
+
+Urs read the verdict above and said it plainly: the neutral form is still in
+English. Re-measured at the byte level across all 254,833 code lines
+(12,682,979 bytes), the claim above does not survive:
+
+| inside the "neutral" s-expr | bytes | share |
+|---|---:|---:|
+| identifier bytes — 834,807 tokens, 61,335 distinct names, essentially all English-rooted | 5,873,330 | 46.3% |
+| string literals (mostly English prose and keys) | 1,452,244 | 11.5% |
+| numeric literals | 389,117 | 3.1% |
+| structure (parentheses, whitespace) | 4,968,288 | 39.2% |
+| genuinely neutral n\<k\> symbol tokens | 123 tokens | **0.015%** |
+
+So the honest sentence is: **the s-expr corpus is a creole — its grammar is
+its own, but its lexifier is English.** Roughly 58% of its bytes are
+English-carried names and strings wrapped in 42% of truly neutral structure
+and number. The only layers with no favored tongue are the numeric NodeID
+substrate, the tags, and the ~47 pivot rows. The dominance table above
+measured SYNTAX neutrality and called it LANGUAGE neutrality; those are not
+the same thing, and English won the recount.
+
+What the correction does not undo: the architecture already names the road
+out. nl-translate.fk's own header: the symbol is "a door over the numeric
+NodeID (identity invariant under renaming)" with the self-authored
+symbol-space MDL loop refining it. The identifiers are lexicon rows that have
+not yet been seated: `defn head` is an English column entry whose meaning is
+a NodeID that could equally render as a Mandarin, Arabic, or minimal-symbol
+column. True neutrality is not achieved by renaming 61,335 identifiers by
+hand — it arrives when the name layer joins the pivot discipline and every
+name, like every sentence, is a projection. Until then, this receipt says
+what is: the body thinks in NodeIDs, proves in structure, and still speaks
+its own code in English.
