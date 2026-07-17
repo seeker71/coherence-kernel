@@ -165,6 +165,24 @@ a projection column. Honest floor today: ~47 pivot words, two tongue columns
 which is not a disqualification but the first training target: every meaning
 the corpus carries gets its pivot row, and surfaces regenerate from it.
 
+**The goal above the shelf: all content, any surface — natural or
+programming.** Urs's directive (2026-07-17 evening): all repo content and all
+parent-repo content shall be translatable or generatable into any NL or PL we
+choose, with everything stored Form-native and size-optimized as recipes,
+blueprints, and cells. NL and PL are ONE shelf under this law: a natural
+tongue is grammar + lexicon + decoder onto the pivot; a programming language
+is grammar + blueprint family + emitter onto BMF nodes — the same shape, the
+same no-favor rule. Python, Go, TypeScript, and English alike are projection
+columns; the recipe, blueprint, and cell are what is stored; every surface is
+generated and reclaimable. Honest floor at seating: the PL half already
+round-trips at 3-kernel proof (python/go/prolog BMF-reversible,
+lang-convergence, generic-reverse-emitter — fourth arm not yet crossed;
+ts-reversible carries a known token-mangling defect), the NL half holds
+thirteen doors onto one node; what neither half yet reaches is COVERAGE — the
+body's prose (comments, docs, teachings) and the parent's content are not yet
+pivoted, and the NL grammar speaks one sentence family. The distance is
+coverage and proof level, not architecture.
+
 **Every natural language you can imagine enters as grammar data.** Urs's
 standing directive (2026-07-17): each NL shall be included as a native
 BMF-style grammar in the translation pipeline. The shelf exists and grows by
