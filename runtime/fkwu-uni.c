@@ -5344,10 +5344,20 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 5) {
         long long a5 = fk_walk(fk_node[i][1], fp);
         long long b5 = fk_walk(fk_node[i][2], fp);
-        if (fk_num(a5) <= fk_num(b5)) {
-            return 2;
+        /* Same width-promotion rule as math (tags 3/4/42): float on either side
+         * forces an IEEE comparison; pure int/int compares the tagged words
+         * directly (<<1 tagging is order-preserving, so word order IS int order).
+         * fk_num rounds through a double, whose 53-bit mantissa blurs distinct
+         * 63-bit ints into equality — (eq (sub -2^62 0) (sub -2^62 1)) answered
+         * true while sub of the same pair answered -1. Mirrors the Go/Rust
+         * kernels' compare law and the JIT's exact int fast path (le/eq inline
+         * cmp), which this walker previously DISAGREED with at the boundary.
+         * Applies to the whole family: le here, eq/lt on tags 102/103, and the
+         * JIT carrier fk_jprim2 — gt/ge/abs lower onto these via fk_rwtab. */
+        if (fk_isf(a5) || fk_isf(b5)) {
+            return (fk_num(a5) <= fk_num(b5)) ? 2 : 0;
         }
-        return 0;
+        return (a5 <= b5) ? 2 : 0;
     }
     if (t == 6) {
         if (fk_walk(fk_node[i][1], fp) == 0) {
@@ -5737,20 +5747,22 @@ static long long fk_walk(long long i, long long fp) {
         return fk_walk(fk_node[i][2], fp);
     }
     if (t == 102) {
+        /* int/int exact, float promotes — the tag-5 compare law. */
         long long ae = fk_walk(fk_node[i][1], fp);
         long long be = fk_walk(fk_node[i][2], fp);
-        if (fk_num(ae) == fk_num(be)) {
-            return 2;
+        if (fk_isf(ae) || fk_isf(be)) {
+            return (fk_num(ae) == fk_num(be)) ? 2 : 0;
         }
-        return 0;
+        return (ae == be) ? 2 : 0;
     }
     if (t == 103) {
+        /* int/int exact, float promotes — the tag-5 compare law. */
         long long al = fk_walk(fk_node[i][1], fp);
         long long bl = fk_walk(fk_node[i][2], fp);
-        if (fk_num(al) < fk_num(bl)) {
-            return 2;
+        if (fk_isf(al) || fk_isf(bl)) {
+            return (fk_num(al) < fk_num(bl)) ? 2 : 0;
         }
-        return 0;
+        return (al < bl) ? 2 : 0;
     }
     if (t == 109) {
         long long slot109 = fk_walk(fk_node[i][1], fp) >> 1;
@@ -8558,15 +8570,24 @@ static long long fk_jprim2(long long tag, long long a, long long b) {
         return ((a >> 1) * (b >> 1)) << 1;
     }
     if (tag == 5) {
-        return (fk_num(a) <= fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) <= fk_num(b)) ? 2 : 0;
+        }
+        return (a <= b) ? 2 : 0;
     }
     if (tag == 102) {
-        return (fk_num(a) == fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) == fk_num(b)) ? 2 : 0;
+        }
+        return (a == b) ? 2 : 0;
     }
     if (tag == 103) {
-        return (fk_num(a) < fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) < fk_num(b)) ? 2 : 0;
+        }
+        return (a < b) ? 2 : 0;
     }
-    /* lt — mirrors fk_walk tag-103 */
+    /* le/eq/lt — mirror fk_walk tags 5/102/103: int/int exact, float promotes */
     if (tag == 10) {
         if (fk_isf(a) || fk_isf(b)) {
             return fk_fbox(fk_num(a) / fk_num(b));
@@ -10070,6 +10091,46 @@ static long long fk_path_dir_len(const char *path) {
     }
     return last >= 0 ? last + 1 : 0;
 }
+/* the lexical repo root: length of the prefix ending at the slash before the
+ * path's first form/ or learn/ component (0 when absent). Shared by the
+ * prelude resolver's repo-root rescue and the .fkb identity spelling. */
+static long long fk_path_repo_prefix_len(const char *path) {
+    long long s = 0;
+    while (path[s] != 0) {
+        if (path[s] == FK_CH_SLASH &&
+            ((path[s + 1] == 'f' && path[s + 2] == 'o' && path[s + 3] == 'r' &&
+              path[s + 4] == 'm' && path[s + 5] == FK_CH_SLASH) ||
+             (path[s + 1] == 'l' && path[s + 2] == 'e' && path[s + 3] == 'a' &&
+              path[s + 4] == 'r' && path[s + 5] == 'n' && path[s + 6] == FK_CH_SLASH))) {
+            return s + 1;
+        }
+        s = s + 1;
+    }
+    return 0;
+}
+#if defined(_WIN32)
+extern char *_fullpath(char *, const char *, unsigned long long);
+#else
+extern char *realpath(const char *, char *);
+#endif
+/* the .fkb identity spelling of a path: one absolute spelling regardless of
+ * invocation CWD, then anchored at the lexical repo root so the same file
+ * keeps one name across CWD flips and checkout moves. out must hold 4096
+ * bytes. Verbatim on resolve failure -- degrade to the old spelling (an
+ * honest rebuild), never fabricate an identity. */
+static const char *fk_path_canon_id(const char *path, char *out) {
+#if defined(_WIN32)
+    if (_fullpath(out, path, 4096) == 0) {
+        return path;
+    }
+#else
+    if (realpath(path, out) == 0) {
+        return path;
+    }
+#endif
+    long long pre_n = fk_path_repo_prefix_len(out);
+    return pre_n > 0 ? out + pre_n : out;
+}
 static int fk_path_resolve_fk_dep(const char *owner_path, const char *token, long long token_n,
                                   char *out, long long cap) {
     if (token_n <= 0 || cap <= token_n) {
@@ -10164,18 +10225,7 @@ static int fk_path_resolve_fk_dep(const char *owner_path, const char *token, lon
             return 1;
         }
     }
-    long long pre_n = 0;
-    long long s2 = 0;
-    while (pre_n == 0 && owner_path[s2] != 0) {
-        if (owner_path[s2] == FK_CH_SLASH &&
-            ((owner_path[s2 + 1] == 'f' && owner_path[s2 + 2] == 'o' && owner_path[s2 + 3] == 'r' &&
-              owner_path[s2 + 4] == 'm' && owner_path[s2 + 5] == FK_CH_SLASH) ||
-             (owner_path[s2 + 1] == 'l' && owner_path[s2 + 2] == 'e' && owner_path[s2 + 3] == 'a' &&
-              owner_path[s2 + 4] == 'r' && owner_path[s2 + 5] == 'n' && owner_path[s2 + 6] == FK_CH_SLASH))) {
-            pre_n = s2 + 1;
-        }
-        s2 = s2 + 1;
-    }
+    long long pre_n = fk_path_repo_prefix_len(owner_path);
     if (pre_n > 0 && pre_n + token_n + 1 <= cap) {
         i = 0;
         while (i < pre_n) {
@@ -10243,12 +10293,13 @@ static long long fk_src_unit_mtime(void) {
 static int fk_src_unit_hash_range(long long start, long long end, char *out, long long cap) {
     long long pos = 0;
     long long i = start;
+    char canon[4096];
     if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v1")) {
         return 0;
     }
     while (i < end && i < fk_src_dep_count) {
         if (!fk_source_hash_append(out, cap, &pos, "|") ||
-            !fk_source_hash_append(out, cap, &pos, fk_src_dep_path[i]) ||
+            !fk_source_hash_append(out, cap, &pos, fk_path_canon_id(fk_src_dep_path[i], canon)) ||
             !fk_source_hash_append(out, cap, &pos, "@") ||
             !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_mtime[i]) ||
             !fk_source_hash_append(out, cap, &pos, ":") ||
@@ -10814,10 +10865,11 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     }
     fk_fkb_write_overflow = 0;
     int ok = 1;
+    char canon[4096];
     ok = ok && fk_write_all_raw(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
     ok = ok && fk_fkb_write_u32(fd, 4);
-    ok = ok && fk_fkb_write_cstr(fd, src_path);
+    ok = ok && fk_fkb_write_cstr(fd, fk_path_canon_id(src_path, canon));
     ok = ok && fk_fkb_write_cstr(fd, source_hash);
     ok = ok && fk_fkb_write_signed(fd, source_mtime > 0 ? source_mtime : 1);
     ok = ok && fk_fkb_write_cstr(fd, fkb_path);
@@ -11142,7 +11194,9 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
      * decode stream. A short-circuit here (the old `ok && read(...)` shape)
      * skipped the hash read after a src-path mismatch and desynced every
      * later read into "truncated string" -- the wrong-CWD reproduction. */
-    int src_path_matches = fk_fkb_read_string_matches_cstr(expected_src_path);
+    char canon[4096];
+    int src_path_matches =
+        fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon));
     int source_hash_matches = fk_fkb_read_string_matches_cstr(expected_source_hash);
     int source_identity_ok = src_path_matches && source_hash_matches;
     long long stored_source_mtime = fk_fkb_read_signed();
@@ -11331,8 +11385,9 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
      * stream; short-circuiting them desyncs every later read (see
      * fk_src_import_fkb_image). Mismatch stays a soft "rebuild" verdict. */
     int source_identity_ok = 1;
+    char canon[4096];
     if (expected_src_path != 0) {
-        if (!fk_fkb_read_string_matches_cstr(expected_src_path)) {
+        if (!fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon))) {
             source_identity_ok = 0;
         }
     } else {
