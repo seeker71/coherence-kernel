@@ -49,6 +49,8 @@ FORM_CLI_SRCS=(
     form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk
     form-stdlib/rag-ask.fk form-stdlib/form-cli-ask.fk
     form-stdlib/form-cli-router.fk form-stdlib/form-cli-judge.fk
+    form-stdlib/confidence-weighted-vote.fk form-stdlib/lineage-discounted-vote.fk
+    form-stdlib/form-cli-oracle-loop.fk
     form-stdlib/form-cli-sufficiency.fk form-stdlib/form-freq-check.fk
     form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
     form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
