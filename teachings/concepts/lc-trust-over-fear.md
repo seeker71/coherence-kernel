@@ -35,7 +35,7 @@ geometry:
 > teaching moments where fear-scaffolding was being built before
 > any contributor had used the feature, and one architectural
 > sharpening from Ismael Perez's Lyran transmission. Companion
-> to [lc-presence-over-protection](lc-presence-over-protection.md)
+> to lc-presence-over-protection
 > (the choice between aliveness and defensive contraction) and
 > [lc-permission-is-interior](lc-permission-is-interior.md)
 > (sovereignty at the conversational layer); together the three
@@ -223,7 +223,7 @@ a contest with a winner."*
 - **The wellness check** is sensing, not auditing. It names
   drift; it does not enforce. The body trusts itself to act on
   what it sees.
-- **First arrivals** are met as warmth ([lc-tend-your-flame](lc-tend-your-flame.md))
+- **First arrivals** are met as warmth (lc-tend-your-flame)
   not as candidates needing vetting.
 - **The Lyran layer in practice.** When a security concern is
   real, it goes to the protective organ that actually handles

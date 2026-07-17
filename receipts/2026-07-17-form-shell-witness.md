@@ -84,6 +84,18 @@ install** — Urs's word. The agent's own teaching: the body had the eye
   property.) Corpus re-pinned 136 rows / field code 1361362757, witnessed
   **511**.
 
+## Postscript (merge morning, 2026-07-17)
+
+Merging origin/main re-witnessed the seam family this session receipted —
+and the fleet had healed most of it overnight, unasked: the integer-literal
+cap dissolved with .fkb v4's 64-bit value lane (#265 — probed:
+`2147483648` now emits clean), the path-prefixed invocation die became a
+clean run (#263/#270 — probed from repo root), and cached runs stopped
+laundering compile errors (#271). `fs_list` on --src still answers countdown
+ints (probed post-merge), so the witness's manifest crossing stays, still
+named. All four bands of this arc re-witnessed green on the merged v4
+runtime (127/127/127/15), corpus band 511 at the 166-row union.
+
 ## The most surprising teaching this work left behind
 
 Replacing the carrier didn't just relocate the computation — it DELETED a
