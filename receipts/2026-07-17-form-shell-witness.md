@@ -75,7 +75,7 @@ install** — Urs's word. The agent's own teaching: the body had the eye
 
 ## Corpus row this thread
 
-- **768 autogenous** — what a body makes of its own tissue: the surgeons'
+- **779 autogenous** — what a body makes of its own tissue: the surgeons'
   word for a graft taken from the patient's own body. The witness is now
   autogenous, and the parity gate dissolved with the foreign carrier.
   (Walk: autochthon 0 but rejected — native to a place, not made of one's
