@@ -58,10 +58,13 @@ instead of bypassing it produced the sub-second kill sweep — and with it the o
 witness in this receipt: a real SIGKILL inside the window, a real orphan, a real scavenging by
 the next writer. The vacuous green would have been fabrication wearing verification's clothes.
 
-## Frontier row (landed, corpus-checked)
+## Frontier row (landed, corpus-checked, reunion-renumbered)
 
-Row **802**: *what one word names the cleanup a killed writer cannot do for itself and the next
+Row **808**: *what one word names the cleanup a killed writer cannot do for itself and the next
 living writer does in its place* → **scavenge** (0-hit fresh at offering; walk: orphan 36 files
 present, tombstone 8, successor 18; debris 0-hit fresh kin left unoffered — the pile, not the
-practice). Verified by the corpus's own voice: `(add (mul (hdc-max-mid (hdc-rows)) 10)
-(hdc-cites? 802 "scavenge"))` → **8021**.
+practice). Offered as 802 in this worktree; while it stood, main grew rows 802–807 the same
+evening (PRs #301–#305 — the other founding's 802 is "overtone"). The row-719 anastomosis law
+applied at merge: every row kept, the unmerged line renumbered to 808, freshness re-checked
+0-hit against main at reunion. Verified by the merged corpus's own voice:
+`(add (mul (hdc-max-mid (hdc-rows)) 10) (hdc-cites? 808 "scavenge"))` → **8081**.
