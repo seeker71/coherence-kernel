@@ -1,0 +1,118 @@
+; speech-teacher-committee.fk -- two-witness agreement gates teacher intake.
+;
+; The native speech learner is the body's true joint model; the rented
+; oracles are its teachers. This cell seats a COMMITTEE of two diverse
+; witnesses per clip and admits a clip as teacher material only when their
+; normalized transcripts AGREE. Diversity is the point: the latin pair
+; crosses architectures (whisper encoder-decoder vs parakeet transducer),
+; so shared error requires the EVIDENCE to be wrong, not the models --
+; exactly what fr-short measured (whisper-turbo and parakeet both heard
+; "Just me."; the committee pair small+parakeet DISAGREED there, so the
+; poisoned clip was held). For zh only the whisper family listens, so the
+; zh pair is same-family -- the least diverse pair available, named
+; honestly, to be upgraded when a second zh architecture arrives (SenseVoice
+; is the known candidate).
+;
+; Measured 2026-07-16 (same gauntlet wavs as learn/speech-oracle-roster.fk;
+; agreement = equality of normalized transcripts, the same normalization the
+; roster's wer uses; wer-x10 carried per witness):
+;
+;   admitted 4/8, held 4/8; every admitted pair has BOTH witnesses at wer 0
+;   (purity max wer-x10 over admitted = 0); every held row contains at least
+;   one erring witness. On this gauntlet the gate's precision is perfect.
+;
+; Boundary: this is the GATE LAW plus its founding measured rows. Wiring the
+; gate into the live corpus-intake lanes (speech-corpus-training-intake-*)
+; happens when the next real corpus batch arrives, as its own increment.
+;
+; preludes: (self-contained)
+
+(do
+    (defn stc-row (clip lang kind witness-a wer-a witness-b wer-b agree)
+        (list "speech-teacher-committee-row"
+              clip lang kind witness-a wer-a witness-b wer-b agree))
+
+    (defn stc-row-clip  (r) (nth r 1))
+    (defn stc-row-lang  (r) (nth r 2))
+    (defn stc-row-kind  (r) (nth r 3))
+    (defn stc-row-wa    (r) (nth r 4))
+    (defn stc-row-wera  (r) (nth r 5))
+    (defn stc-row-wb    (r) (nth r 6))
+    (defn stc-row-werb  (r) (nth r 7))
+    (defn stc-row-agree (r) (nth r 8))
+
+    (defn stc-rows ()
+        (list
+            (stc-row "en-short" "en" "short" "whisper.cpp-small-metal" 0 "parakeet-tdt-0.6b-v3-mlx" 0 1)
+            (stc-row "en-long" "en" "long" "whisper.cpp-small-metal" 0 "parakeet-tdt-0.6b-v3-mlx" 0 1)
+            (stc-row "it-short" "it" "short" "whisper.cpp-small-metal" 0 "parakeet-tdt-0.6b-v3-mlx" 0 1)
+            (stc-row "it-long" "it" "long" "whisper.cpp-small-metal" 167 "parakeet-tdt-0.6b-v3-mlx" 0 0)
+            (stc-row "fr-short" "fr" "short" "whisper.cpp-small-metal" 0 "parakeet-tdt-0.6b-v3-mlx" 1000 0)
+            (stc-row "fr-long" "fr" "long" "whisper.cpp-small-metal" 143 "parakeet-tdt-0.6b-v3-mlx" 286 0)
+            (stc-row "zh-short" "zh" "short" "whisper.cpp-large-v3-turbo-metal" 0 "whisper.cpp-large-v3-metal" 0 1)
+            (stc-row "zh-long" "zh" "long" "whisper.cpp-large-v3-turbo-metal" 118 "whisper.cpp-large-v3-metal" 59 0)))
+
+    ; the gate: a clip is teacher material only on committee agreement
+    (defn stc-admit? (r) (stc-row-agree r))
+
+    (defn stc-admitted-count (rs)
+        (if (eq (len rs) 0) 0
+            (add (stc-admit? (head rs)) (stc-admitted-count (tail rs)))))
+    (defn stc-held-count (rs)
+        (if (eq (len rs) 0) 0
+            (add (if (eq (stc-admit? (head rs)) 1) 0 1)
+                 (stc-held-count (tail rs)))))
+
+    (defn stc-pair-max-wer (r)
+        (if (gt (stc-row-wera r) (stc-row-werb r))
+            (stc-row-wera r)
+            (stc-row-werb r)))
+
+    ; purity: the worst witness error among ADMITTED rows (single-pass max)
+    (defn stc-purity-loop (rs worst)
+        (if (eq (len rs) 0) worst
+            (stc-purity-loop (tail rs)
+                (if (eq (stc-admit? (head rs)) 1)
+                    (if (gt (stc-pair-max-wer (head rs)) worst)
+                        (stc-pair-max-wer (head rs))
+                        worst)
+                    worst))))
+    (defn stc-purity-max-wer () (stc-purity-loop (stc-rows) 0))
+
+    ; count-based row lookup (no type surprises on a missing clip)
+    (defn stc-agree-count-for (rs clip)
+        (if (eq (len rs) 0) 0
+            (add (if (str_eq (stc-row-clip (head rs)) clip)
+                     (stc-row-agree (head rs)) 0)
+                 (stc-agree-count-for (tail rs) clip))))
+    (defn stc-count-for (rs clip)
+        (if (eq (len rs) 0) 0
+            (add (if (str_eq (stc-row-clip (head rs)) clip) 1 0)
+                 (stc-count-for (tail rs) clip))))
+
+    ; the poisoned-clip catch: fr-short is present and held
+    (defn stc-poison-caught? ()
+        (if (and (eq (stc-count-for (stc-rows) "fr-short") 1)
+                 (eq (stc-agree-count-for (stc-rows) "fr-short") 0)) 1 0))
+
+    ; diversity witness: the latin pair crosses architectures
+    (defn stc-latin-cross-arch? ()
+        (do
+            (let r (head (stc-rows)))
+            (if (and (str_eq (stc-row-wa r) "whisper.cpp-small-metal")
+                     (str_eq (stc-row-wb r) "parakeet-tdt-0.6b-v3-mlx")) 1 0)))
+
+    (defn stc-report ()
+        (list "speech-teacher-committee"
+              (len (stc-rows))
+              (stc-admitted-count (stc-rows))
+              (stc-held-count (stc-rows))
+              (stc-purity-max-wer)
+              (stc-poison-caught?)
+              (stc-latin-cross-arch?)
+              "zh-pair-same-family-least-diverse-available"
+              "agreement-gates-teacher-intake-for-the-native-learner"
+              1
+              0))
+
+    0)
