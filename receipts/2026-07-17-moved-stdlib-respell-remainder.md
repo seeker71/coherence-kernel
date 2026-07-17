@@ -57,10 +57,15 @@ Liveness hangs on the exact pronunciation of one token.
 
 ## The corpus row
 
-Row 802 landed (`allomorph`, 0-hit fresh; `morpheme` 0-hit kin left
-unoffered). Counts asked of the body, never asserted at it: field code
-**1981982802** (198 rows, 198 admissible, 2 foundings, max id 802), band
-fresh-green at its documented **4095**.
+Row 811 landed (`allomorph`, 0-hit fresh; `morpheme` 0-hit kin left
+unoffered) — minted as 802, renumbered three times at same-day reunions
+behind the fleet's racing rows (spectrum-through-falsing at 802-807,
+hapax 808, misnomer 809, scavenge 810). Counts asked of the body at
+landing, never asserted at it: field code **2072072811** (207 rows, 207
+admissible, 2 foundings, max id 811), band fresh-green at its documented
+**4095**. (This paragraph re-grounded post-merge: it first cited the row
+by its minted id 802, which the reunions gave to another row — the exact
+by-id citation drift the corpus band's named-row guards exist for.)
 
 ## Most surprising teaching
 
