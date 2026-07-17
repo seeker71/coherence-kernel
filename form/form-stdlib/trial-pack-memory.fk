@@ -1,0 +1,94 @@
+; trial-pack-memory.fk — packed experiment memory for the learning lanes:
+; every trial kept, near-repeats known, the nearest past outcome recallable.
+;
+; preludes: form-stdlib/core.fk form-stdlib/tensor-quant.fk form-stdlib/turboquant-as-recipe.fk form-stdlib/rag-retrieve.fk form-stdlib/rag-turboquant-lane.fk
+;
+; The auto lanes forget almost everything they pay for. arch-search trains
+; EVERY candidate and keeps only the crown; pareto/autoresearch-loop dedup
+; only IDENTICAL candidates (content-address, node_eq) — a variant one epsilon
+; away is a full fitness evaluation spent again; a failed trial's lesson
+; evaporates with the generation that dropped it. This cell is the missing
+; memory, at pack thrift (row 776): a trial = (id, packed feature vector,
+; outcome int). Packs make keeping EVERY trial affordable, so negative
+; results become memory instead of waste.
+;
+; Three asks, all over the packed rows:
+;   tpm-nearest  — which past trial is closest to this candidate?
+;   tpm-known?   — have we already paid for (something within eps² of) this?
+;                  the near-dedup the loops lack; identical-dedup stays the
+;                  substrate's (node_eq on identical packs).
+;   tpm-predict  — the nearest past outcome as a cheap forecast before
+;                  spending a real evaluation (memory-as-forecaster; the
+;                  honest floor of surrogate-assisted search: recall, not a
+;                  fitted model).
+;
+; Distance is estimated from the pack: dist²(q,x) ≈ q·q + ‖x‖² − 2·‖q‖·score,
+; clamped at 0.0 — the estimator can overshoot into negative dist² (witnessed
+; −0.66 on the band's own pinned set before the clamp), and a distance below
+; zero is noise under the floor, not information. The memory inherits the
+; lane's named error bound and its isometry witness (the rotation moves
+; nothing across the distance structure; only the 2-bit codes blur it). The
+; blur at this floor is O(1) in dist² (measured self-distance up to ~1.04 at
+; d=8): differences finer than the blur are invisible, so any known?-eps²
+; must sit ABOVE the blur — the band pins one that does. An empty memory
+; answers novelty² = −1.0 and the caller's default — "no memory" is never
+; dressed as "far away", and the clamp keeps −1.0 out-of-band.
+;
+; Wiring floor, named honestly: this cell consumes float feature vectors +
+; int outcomes. Per-organ featurizers (arch layer-stacks → floats; pareto
+; candidates are already (cost, loss) ints) are the next tending, not built
+; here. One memory = one feature dimension d and one rtq-seed; mixing
+; dimensions across rows is the caller's error, not detected here (floor).
+;
+; Proven by: form-stdlib/tests/trial-pack-memory-band.fk
+
+(do
+    ; ── a remembered trial: (id, pack, outcome). Integer-pure at rest. ──
+    (defn tpm-trial (id features outcome)
+        (list id (rtq-pack-vec features) outcome))
+    (defn tpm-id (row) (nth row 0))
+    (defn tpm-pack (row) (nth row 1))
+    (defn tpm-outcome (row) (nth row 2))
+
+    ; ── estimated squared distance from a live query to a packed trial ──
+    ; clamped at 0.0: a negative estimate is blur below the floor, and the
+    ; clamp keeps the −1.0 empty-memory sentinel out-of-band.
+    (defn tpm-dist2-rot (qrot qq qn row table)
+        (do (let xn (rtq-norm (tpm-pack row)))
+            (let est-dot (mul qn (rtq-score-rot qrot (tpm-pack row) table)))
+            (let d2 (sub (add qq (mul xn xn)) (mul 2.0 est-dot)))
+            (if (lt d2 0.0) 0.0 d2)))
+    (defn tpm-dist2 (q row)
+        (tpm-dist2-rot (rtq-qrot q) (tqr-dot q q) (tqr-norm q)
+                       row (rtq-table q)))
+
+    ; ── NEAREST past trial: min estimated dist²; ties keep the FIRST row ──
+    (defn tpm-nearest-loop (qrot qq qn rows table best best-d)
+        (if (eq (len rows) 0) best
+            (do (let d2 (tpm-dist2-rot qrot qq qn (head rows) table))
+                (if (eq (len best) 0)
+                    (tpm-nearest-loop qrot qq qn (tail rows) table (head rows) d2)
+                    (if (lt d2 best-d)
+                        (tpm-nearest-loop qrot qq qn (tail rows) table (head rows) d2)
+                        (tpm-nearest-loop qrot qq qn (tail rows) table best best-d))))))
+    (defn tpm-nearest (q rows)
+        (tpm-nearest-loop (rtq-qrot q) (tqr-dot q q) (tqr-norm q)
+                          rows (rtq-table q) (empty) 0.0))
+    (defn tpm-nearest-id (q rows)
+        (if (eq (len rows) 0) "" (tpm-id (tpm-nearest q rows))))
+
+    ; ── novelty²: distance to the nearest memory; −1.0 when memory is empty ──
+    (defn tpm-novelty2 (q rows)
+        (if (eq (len rows) 0) -1.0
+            (tpm-dist2 q (tpm-nearest q rows))))
+
+    ; ── near-dedup: already paid for something within eps² of this? ──
+    (defn tpm-known? (q rows eps2)
+        (if (eq (len rows) 0) 0
+            (if (lt (tpm-novelty2 q rows) eps2) 1 0)))
+
+    ; ── memory as forecaster: the nearest past outcome, or the default ──
+    (defn tpm-predict (q rows dflt)
+        (if (eq (len rows) 0) dflt
+            (tpm-outcome (tpm-nearest q rows))))
+    0)
