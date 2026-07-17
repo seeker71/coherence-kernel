@@ -86,8 +86,23 @@ static void fk_die(const char *msg) {
  * so the line:col prefix is suppressed.  sev: 0 = warning, 1 = error. */
 #define FK_DIAG_WARN 0
 #define FK_DIAG_ERR  1
-static long long fk_nerr;        /* errors diagnosed this run   */
-static long long fk_nwarn;       /* warnings diagnosed this run */
+static long long fk_nerr;        /* errors diagnosed this compile (reset per compile pass) */
+static long long fk_nwarn;       /* warnings diagnosed this compile (reset per compile pass) */
+/* PRINTED-diagnostic tallies, monotone for the whole process — never reset.
+ * fk_nerr/fk_nwarn are per-compile working counters and ARE legitimately
+ * wiped by fk_src_reset_compile_state between the speculative per-dep image
+ * compile and the authoritative whole-program compile; before these existed,
+ * that wipe also erased already-printed "error:" lines from the exit code and
+ * the tally (8 errors on stderr, "0 errors" exit — the stamp+shape family).
+ * The exit truth and the gcc-style tally read THESE, so every diagnostic the
+ * user saw is carried, by construction, across any number of resets. */
+static long long fk_nerr_seen;
+static long long fk_nwarn_seen;
+static long long fk_diag_quiet;  /* nonzero: speculative compile — count into
+                                  * fk_nerr/fk_nwarn (the .sym record and the
+                                  * import gate need the truth) but print
+                                  * nothing; a candidate image's diagnostics
+                                  * are not the program's */
 static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_TEXT_CAP */
 /* fk_diag / fk_diag_flush are DEFINED further down (right after fk_srctext /
  * fk_spos / fk_slen are declared), where they can read the source buffer. */
@@ -7199,6 +7214,14 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
     } else {
         fk_nwarn = fk_nwarn + 1;
     }
+    if (fk_diag_quiet) {
+        return;
+    }
+    if (sev == FK_DIAG_ERR) {
+        fk_nerr_seen = fk_nerr_seen + 1;
+    } else {
+        fk_nwarn_seen = fk_nwarn_seen + 1;
+    }
     if (off < 0) {
         dprintf(2, "fkwu: %s: ", sev == FK_DIAG_ERR ? "error" : "warning");
     } else {
@@ -7223,10 +7246,13 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
     dprintf(2, "\n");
 }
 /* Called ONCE, after parse completes and before execution begins: gcc-style
- * tally. Silent when clean, so the default happy path prints nothing new. */
+ * tally. Silent when clean, so the default happy path prints nothing new.
+ * Tallies the PRINTED counters, not the per-compile ones: a compile-state
+ * reset between passes must never make the tally disagree with what stderr
+ * already shows. */
 static void fk_diag_flush(void) {
-    if (fk_nerr > 0 || fk_nwarn > 0) {
-        dprintf(2, "fkwu: %lld error(s), %lld warning(s)\n", fk_nerr, fk_nwarn);
+    if (fk_nerr_seen > 0 || fk_nwarn_seen > 0) {
+        dprintf(2, "fkwu: %lld error(s), %lld warning(s)\n", fk_nerr_seen, fk_nwarn_seen);
     }
 }
 static int fk_sws(char c) {
@@ -11818,8 +11844,19 @@ static int fk_src_compile_artifact_only(const char *path) {
     if (fk_path_replace_ext(compile_path, ".fkb", fkb_path, 4096) &&
         fk_path_replace_ext(compile_path, ".sym", sym_path, 4096) &&
         fk_src_load_unit(compile_path, source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
+        /* This compile is SPECULATIVE: it builds a candidate per-unit image
+         * for the import path. A unit that only resolves inside the root's
+         * flat prelude chain (e.g. it carries no "; preludes:" line of its
+         * own) diagnoses unresolved calls HERE that the authoritative flat
+         * compile then resolves — printing them as bare "error:" lines while
+         * the run exits 0 was the witnessed lie. Quiet mode: the counts still
+         * reach the .sym compile-errors record (the import gate reads it and
+         * refuses degraded images), but nothing prints; the import gate emits
+         * the one honest, counted warning instead. */
+        fk_diag_quiet = fk_diag_quiet + 1;
         fk_src_reset_compile_state();
         fk_src_compile_current_unit(compile_path, fkb_path, sym_path, unit_mtime, source_hash);
+        fk_diag_quiet = fk_diag_quiet - 1;
         ok = 1;
     }
     fk_src_dep_count = saved_dep_count;
@@ -11901,10 +11938,24 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                  * importing it would bake the degradation invisibly into this
                  * run -- refuse (unknown record counts as degraded), so the
                  * caller falls back to the flat compile where the full chain
-                 * resolves */
+                 * resolves. The refusal itself must not be silent: this is
+                 * where a unit that cannot stand alone costs the run its
+                 * imported-image path, on THIS run and every future one until
+                 * the unit's own prelude chain is healed — say so, once,
+                 * counted, so the tally and stderr agree. */
                 char dep_sym_path[4096];
-                if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, 4096) ||
-                    fk_src_sym_recorded_errors(dep_sym_path) != 0) {
+                if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, 4096)) {
+                    return 0;
+                }
+                long long dep_recorded = fk_src_sym_recorded_errors(dep_sym_path);
+                if (dep_recorded != 0) {
+                    if (dep_recorded > 0) {
+                        fk_diag(FK_DIAG_WARN, -1,
+                                "%s: unit is not importable standalone (%lld unresolved "
+                                "error(s) compiled alone; missing '; preludes:' line?) -- "
+                                "image rejected, falling back to the whole-program compile",
+                                fk_src_dep_path[i], dep_recorded);
+                    }
                     return 0;
                 }
             }
@@ -12069,7 +12120,7 @@ static int fk_run_src(const char *path, long long arg) {
                     unsigned char *img = malloc(n);
                     if (img == 0) {
                         fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
-                        return fk_nerr > 0 ? 1 : 0;
+                        return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
                     }
                     long long ci = 0;
                     while (ci < n) {
@@ -12125,7 +12176,7 @@ static int fk_run_src(const char *path, long long arg) {
         }
     }
     fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
-    return fk_nerr > 0 ? 1 : 0;
+    return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
 }
 /* --feval: run a recipe THROUGH form-eval (Form), not fk_walk directly. The C seed bootstraps the
  * form-eval meta-evaluator (read live from grammars/form-eval.fk); form-eval reads the recipe as a
@@ -12315,7 +12366,7 @@ static int fk_run_feval(const char *path) {
     long long rv = fk_walk(fk_fn[0], 0);
     fk_pv(rv);
     /* print the meta-eval result by value-kind (int / float / nothing) */
-    return fk_nerr > 0 ? 1 : 0;
+    return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
 }
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
