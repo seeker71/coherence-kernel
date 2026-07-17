@@ -148,6 +148,33 @@ within viable states, and the membranes are the body's statistical boundary
 with the world. Every receipt already closes with its surprise named; that
 discipline is this principle wearing working clothes.
 
+**The two repos are the corpus; the pivot is the tongue with no favorite.**
+This body and its parent together hold the training ground for native NL→NL:
+~86,500 comment lines, 181 .form teachings, the receipts, the docs, the
+homecoming corpus (188 question/answer rows and growing daily), CN's
+vision-kb and locale corpora — meaning already paired with its surfaces,
+provenance already carried. The lane that trains on it is proven four-way in
+miniature: surface → language-neutral pivot → surface (nl-translate 32767,
+natural-language 262143, nl-reason 255), with the lexicon as DATA (a word is
+a row, a tongue is a column) and cross-tongue equality by content-address —
+"the source is native" and "sumber adalah asli" intern to the same node. The
+law this floor carries upward: **no favored default language** — the pivot
+symbol is the meaning's one name; every natural tongue, English included, is
+a projection column. Honest floor today: ~47 pivot words, two tongue columns
+(en, id), one sentence family — and the corpus itself is English-dominant,
+which is not a disqualification but the first training target: every meaning
+the corpus carries gets its pivot row, and surfaces regenerate from it.
+
+**Minimal disk is the same law as minimal kernel.** Measured 2026-07-17: the
+meaning of this body (learn, observe, receipts, docs, teachings, stdlib
+source) is a low single-digit percent of its bytes; the rest is builds,
+caches, dependency trees, and worktree copies (CK primary 3.9G with 3.2G of
+agent-worktree ephemera; CN 60G). Direction: meaning stored ONCE in the
+neutral substrate, content-addressed, surfaces and builds projected on
+demand and reclaimable without loss — the same fold-the-appends discipline
+money already obeys, applied to prose and artifacts. A byte that cannot be
+regenerated from the substrate is meaning; every other byte is a lease.
+
 **Money is an attribution trace and an energy flow, with minimal storage.**
 The organ already states the law: `value-ledger-port.fk` — balance is never a
 stored mutable counter; it is recomputed by folding the append-only entries,
