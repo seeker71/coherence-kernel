@@ -7777,8 +7777,17 @@ static long long fk_sparse(void) {
          * body is parsed) -> tag 12 (call fk_fn[idx] with one arg). This replaces the old
          * fn[0]-only self-call (tag 7), which was wrong once there is more than one function. A
          * 0-arg call parses a dummy 0 off the immediate ) — the callee reads no slot, so it is
-         * inert. */
-        long long fidx = fk_fn_lookup(s, hn);
+         * inert.
+         *
+         * LOCALS SHADOW GLOBALS in call position: the local frame (fk_bd_lookup) is consulted
+         * BEFORE the defn table, matching value position (which already reads bd first) and the
+         * three siblings. Pre-heal the defn table won: (defn oac-offer (cell args) (cell args))
+         * under a loaded (defn cell ...) invoked the GLOBAL constructor instead of the parameter
+         * (receipts/2026-07-17-jacobian-lens-and-the-cell-shadowing-heal.md) — every higher-order
+         * param (map's f, filter's pred) was one same-named prelude defn away from silent
+         * capture. A shadowed head lowers through the indirect-call arm below (tag 244). */
+        long long hshadow = fk_bd_lookup(s, hn);
+        long long fidx = (hshadow >= 0) ? -1 : fk_fn_lookup(s, hn);
         if (fidx >= 0) {
             /* GENERAL ARITY (no per-arity case): parse the callee's `ar` declared arg expressions
              * and thread them into a forward-linked arg-chain of tag-242 cells (cell:
@@ -7853,9 +7862,10 @@ static long long fk_sparse(void) {
          * [1]=head-expr-node, [2]=arg-chain (242 cells, head-first), exactly the tag-241 shape but
          * with a computed head. Args are parsed until the close paren (the indirect callee's arity
          * is not a static name lookup); each is a forward-linked 242 cell so fk_walk threads them
-         * left-to-right like the direct path. A bare fn-NAME never reaches here (it resolves at
-         * fk_fn_lookup above into the direct tag-241 path). */
-        long long hoff = fk_bd_lookup(s, hn);
+         * left-to-right like the direct path. An unshadowed bare fn-NAME never reaches here (it
+         * resolves at fk_fn_lookup above into the direct tag-241 path); a BOUND name always
+         * lands here, even when a global defn shares its spelling (locals shadow globals). */
+        long long hoff = hshadow;
         if (hoff >= 0) {
             long long head244 = fk_smknode(110, fk_smklit(hoff), 0, 0);
             long long iargn[256];
