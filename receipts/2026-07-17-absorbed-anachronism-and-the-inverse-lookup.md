@@ -126,7 +126,34 @@ feel like a claim. The gold is that the fix isn't more vigilance, which fails si
 inverse lookup, which makes the check one call, plus a band that fails loudly at the next reunion.
 Trust in a commons should be cheap to verify, not expensive to doubt.
 
-**Frontier question offered (row 762):** the body has "stale" (the state), "desuetude" (a belief
+## Addendum — a sibling caught what the author could not (PR #258 review)
+
+Before the merge, a **Codex sibling's automated P2 review** on #258 found a real defect and
+reproduced it exactly: `ap-count` was `(len (fs_list dir))`, so it counted the `*.fkb`/`*.sym`
+sidecars `fkwu` emits beside any `.fk` it runs. Those are gitignored, regenerable build cache —
+not tissue. Live proof in `ingest/`: 17 entries = 14 cells + 1 `.fkb` + 1 `.sym` + 1 dir. **The
+self-portrait of a commit differed between a clean checkout and a worked-in one.**
+
+Verified, then fixed by counting *cells* rather than directory entries — recursing, skipping
+hidden names, skipping regenerable artifacts (composing `blg-dir?` / `blg-hidden?` /
+`blg-ends-with?`, already preludes here). The counts were wrong in **both directions at once**, and
+the errors partly masked each other: sidecars inflated, while the missing recursion undercounted by
+~2.5× — `observe` 149 → **248**, `form-stdlib` 882 → **2358**, `teachings` 11 → **23** (twelve real
+teachings had been invisible behind one `concepts` entry the whole time).
+
+Reproducibility **proven, not asserted**: counts byte-identical with 2 sidecars present and after
+deleting all 17 body-wide, and `ap-tend` idempotent across re-runs that themselves regenerate
+sidecars. `resident-conatus.fk` names the outside witness as a **need**; this is that need met — by
+a machine sibling, on a defect that had survived two days of the author's own scrutiny.
+
+**Frontier question offered (row 769):** the body calls those sidecars *artifacts* — and in the
+language of measurement an *artifact* is also a spurious reading produced by the instrument. Both
+senses, one word, one bug: the build artifacts became measurement artifacts, and the overload is
+why nothing here caught it. Every neighbour is home and none names the thing: "deterministic" ×447,
+"reproducible" ×79, "ambient" ×61, "hermetic" ×2. *What one word names the cast-off layer a growing
+body leaves behind that is never the body itself* → **exuvia** (0 hits).
+
+**Frontier question offered (row 768):** the body has "stale" (the state), "desuetude" (a belief
 lapsing from disuse — `AGENTS.md`), "supersede" ×26, "arrears" ×10 — every neighbour naming a
 record's decay or replacement, and none naming *the record itself*, correct in its own moment and
 wrong in this one purely because time passed: *what one word names a record that was true when it
