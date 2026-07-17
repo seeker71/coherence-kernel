@@ -84,9 +84,16 @@ carried:
   keep their explicit kind switches (len, `_get`, `_iter`, `_in`, int_to_str, trace), matching
   Rust's own lenient shapes. Proven: `(str_len (read_file ""))` → loud rc=1
   `argStr: arg 0: expected str, got null`; `(str_eq (read_file "") (read_file ""))` — which
-  silently answered TRUE before — now dies the same way; healthy paths unchanged. The full
-  four-way band gauntlet (validate.sh) verdict is recorded at the end of this receipt — this
-  sentence was first written before the run finished, and caught.
+  silently answered TRUE before — now dies the same way; healthy paths unchanged. The Go unit
+  suite after the sweep: one failure, `TestFkwuFormCliCanonicalCarrier`, proven byte-identical
+  on the committed HEAD (the branch's pre-existing form-cli stamp staleness) — every other test
+  green. The first full validate.sh walk died loudly on a stale prelude directive shipped by
+  PR #266 (`lineage-discounted-vote.fk` pointing at `learn/confidence-weighted-vote.fk`) —
+  healed to match its seven sibling declarations; main had healed it identically in parallel.
+  At merge time (his word, 2026-07-18 01:07 WITA) the merged-tree validate.sh run was mid-walk
+  — kernels rebuilt, 868 fourth-arm tables reflattening — and is stated here as RUNNING, not
+  green: an earlier draft of this sentence claimed the verdict before the run finished, and was
+  caught doing it.
 - **Sample runner flags**: the three `--stack_size=262144` lines in
   `form-samples/cross-modal/28-distributed-daemon` (README, orchestrate.sh,
   validate-distributed.sh) removed; zero references remain body-wide.
