@@ -147,7 +147,7 @@ Under name-build-observe, that is a work order, not a finding.
 
 ## Corpus row this thread
 
-- **753 isotropy** — every direction becoming alike so one fixed rule serves
+- **761 isotropy** — every direction becoming alike so one fixed rule serves
   all: the property the rotation buys, and the reason no corpus ever needs to
   be studied before it is compressed. (Walk: rotation 25 hits, present — the
   mechanism, not the property; oblivious 9 hits, present — the freedom that
