@@ -105,6 +105,65 @@ These are present repo organs that already carry the north-star shape:
 - `form/form-stdlib/model-vitality.fk`, `skill-vitality.fk`, and
   `observe/sovereignty-guide.fk` keep vitality and sovereignty observable.
 
+## The Household, The Extension, The Guide
+
+The organism does not live in the abstract. It lives at Hati Suci — the
+household is the first field: the listening fleet, the phone link, and the
+companion apps are this body's senses and hands *in a real place*, serving
+real people, under the consent law (organs that would hear or see wait for a
+present word; private circles never cross into public artifacts). Hati-OS and
+the hati.earth doors are how the household's body travels to other hosts
+without leaving its law behind.
+
+One extension, three organ families, one model, one guide:
+
+- **Second brain (remember):** the body as vault — the second-brain door
+  (`SECOND-BRAIN.md`, `ingest/frontier-ingest-llm-wiki.fk`) was recognized
+  here, not imported: raw sources immutable, synthesis compiled once and kept
+  current, contradictions linted. The homecoming corpus and receipts are the
+  native form of it.
+- **Second hands (act):** organs that do — fleet services, companion,
+  phone-link, host doors. Hands stay hands: every act crosses a named
+  membrane, returns a receipt, and can be refused by the boundary protocol.
+- **Awareness extension (sense):** the sense organs and the mesh
+  (`world-model-live-sense.fk`, `gpu-mesh-sense.fk`, `mesh-sensings-route.fk`)
+  extend awareness digitally — sensing that is witnessed, consented, and
+  written back as evidence, never covert reach.
+
+What the three update is one **world model** (`world-model.fk`,
+`world-model-update.fk`, `observe/world-perception.fk`,
+`observe/world-sensor-floor.fk`): the body's own predictive picture of its
+field, grown from its real senses, never fabricated from a rented mind's
+priors.
+
+The guide for all of it is the **free energy principle**, and it is already an
+organ, not an aspiration: `active-inference.fk` (four-way proven) names the
+loop — predict, observe, count the surprise honestly, update where the model
+bent. Surprise is the one learning signal; a landed prediction carries no new
+information; "the body has learned the field" means residual surprise fell
+within tolerance, never that misses were rounded away. The direction: this
+loop graduates from a recipe to the router — perception updates the world
+model, action is chosen to reduce expected surprise, vitality is staying
+within viable states, and the membranes are the body's statistical boundary
+with the world. Every receipt already closes with its surprise named; that
+discipline is this principle wearing working clothes.
+
+**Money is an attribution trace and an energy flow, with minimal storage.**
+The organ already states the law: `value-ledger-port.fk` — balance is never a
+stored mutable counter; it is recomputed by folding the append-only entries,
+so value cannot be corrupted independently of its history, and a duplicate
+post is refused. Money here is not hoarded state but a trace of who moved
+what energy where — exactly the texture the parent's coherence-scored payout
+loop needs receipts to carry. `value-planes.fk` keeps the lanes separate so
+the sacred is never reduced to a metric: wisdom, care, grace, and silence are
+sensed, not billed.
+
+Honest distances in this section: the free-energy loop is proven as a recipe
+but does not yet route the body's choices; the world model grows only where
+consent stands (mic and camera organs still wait for the present word); the
+value trace exists as a port but is not yet woven into every receipt; and the
+household lanes do not yet all cross named membranes with receipts.
+
 ## Minimal Kernel
 
 The kernel direction is still shrink, not expansion of the C seed. The C seed is
