@@ -291,6 +291,18 @@ BML organ bands, PR #287 wired form_error end to end.)
   bands this reground) is the bounded floor of that obligation, not its
   completion — desynced BML input should be routed or refused, not merely
   capped.
+- The body is diglossic (measured 2026-07-17 evening): ~254,600 s-expr code
+  lines (46,639 defns, 25% comment prose) against ~4,700 BML-authored lines
+  (9 authority cells + fixtures), ~1,300 BML-in-.fk, and ~14,200 .form
+  section-DSL — the high grammar is ~2.3% of what runs (~7.4% with .form).
+  The high-grammar DOOR is proven four-way (form-bml-cursor lane,
+  kernel-core-self-proof) and the authority pattern exists (form-fs.fk:
+  "High-grammar authority ... lowered executable backing"), but the body
+  writes its daily life in the low tongue — and this same day three BML
+  bands were ported DOWN to s-expr because BML-in-.fk fell between doors.
+  The rising direction (CN's introspection-and-lift star) wants the
+  opposite motion: route BML at the door, author new organs
+  authority-first, lift hot s-expr cells into teachings.
 - The repo-wide north-star organs are present in focused cells, but not every
   runtime choice, host crossing, arena lane, and training loop is forced
   through choice receipts, sovereign boundary receipts, trust/vitality policy,
