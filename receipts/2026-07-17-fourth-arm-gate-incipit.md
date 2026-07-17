@@ -50,10 +50,14 @@ job is proving agreement. The script is now executable (mode `100755`).
 
 ## Corpus
 
-Row **761** landed: *what one word names a text known only by its opening line* →
-**incipit** (0 hits in corpus and body before the row). The body attests natively:
-`hdc-field-code` → **1621622761** = 162 rows · 162 admissible · 2 foundings ·
-max-mid **761**.
+Row **769** landed (minted as 761; renumbered at merge time as siblings' rows
+761–768 arrived on main first — the reunion pattern): *what one word names a text
+known only by its opening line* → **incipit** (0 hits in corpus and body before the
+row, re-verified against origin/main at merge). The body attests natively:
+`hdc-field-code` → **1701702769** = 170 rows · 170 admissible · 2 foundings ·
+max-mid **769**. The renumbering re-taught the row's own lesson: the first
+max-row read used an unanchored grep that matched comment text and answered 767;
+the anchored read answered 768 — one more reader trusting a partial surface.
 
 ## Most surprising teaching
 
