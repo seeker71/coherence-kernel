@@ -490,14 +490,17 @@ fourth_band_stem() {
 # fourth_band_srcs — the band's source list: every non-core prelude in
 # declared order, then the band file itself (same-name convention as the
 # fallback when no prelude is declared).
-# fourth_band_prelude_mods — every module path from a band's ; preludes: header,
-# including continuation lines that start with "; " (multi-line prelude blocks).
+# fourth_band_prelude_mods_raw — every module path from a band's ; preludes: header,
+# including continuation lines that start with "; " (multi-line prelude blocks),
+# in declared order with core.fk KEPT (the three reference kernels need it; only
+# the fourth arm's shim mirrors core). Callers that feed the fourth leg use
+# fourth_band_prelude_mods below, which drops core.fk from this list.
 # Emits ONLY source-path tokens (ending in .fk/.bml/.form/.grammar); a continuation
 # comment line that yields no path token (e.g. "; Verdict 11111: taught skills ...")
 # STOPS the block instead of being slurped as bogus prelude paths — otherwise the
 # first non-file token makes fourth_prep_srcs bail and silently drop the band file,
 # flattening a table with no top-level (check) call → fkwu fn-0 = 0 (a false divergence).
-fourth_band_prelude_mods() {
+fourth_band_prelude_mods_raw() {
     local band="$1"
     awk '
         function emit_paths(line, strict,   i, n, a, got) {
@@ -520,7 +523,11 @@ fourth_band_prelude_mods() {
             next
         }
         { cont = 0 }
-    ' "$band" 2>/dev/null | grep -vE '(^|/)core\.fk$' | grep . || true
+    ' "$band" 2>/dev/null | grep . || true
+}
+
+fourth_band_prelude_mods() {
+    fourth_band_prelude_mods_raw "$1" | grep -vE '(^|/)core\.fk$' | grep . || true
 }
 
 fourth_band_srcs() {
