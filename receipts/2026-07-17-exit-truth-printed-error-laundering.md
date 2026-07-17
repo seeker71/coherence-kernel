@@ -92,3 +92,14 @@ the program's voice. Fresh word landed for the law: exit-truth (corpus row
   only `fk_diag` (compile diagnostics) feeds the tally. If a `fk_diag_path`
   "error" ever gates an exit, it does so through its own return path, not
   the tally.
+
+## Postscript (2026-07-18) -- the row learns its true name
+
+Row citations above say 802: true at witnessing, stale within the hour.
+The same evening five sibling lineages grew main's 802-811, and paraphasia
+took 812 while this branch's PR stood open -- the row-719 anastomosis law
+applied twice: exit-truth lives at **813** (802 -> 812 -> 813), and the
+reunion's own row, contamination, at **814**. The corpus fold at merge:
+210 rows, 210 admissible, max 814, field-code 2102102814 (asked of the
+body). This is the wrong-page trap row 813's inverse-lookup story warns
+about, corrected here the way #310 corrected allomorph's.
