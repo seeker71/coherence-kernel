@@ -174,6 +174,11 @@ def stdlib_band_circulation(names: list[str]) -> set[str]:
 
 
 def main() -> int:
+    # --quiet (the validate.sh phase-0 voice): one PASS line on success,
+    # the full report only when something drifted.
+    quiet = "--quiet" in sys.argv[1:]
+    report: list[str] = []
+
     go, go_dups = go_natives()
     rs = rust_names()
     ts = ts_names()
@@ -238,29 +243,39 @@ def main() -> int:
         re.findall(r'k\.registerNative\(\s*"', GO_SERVER.read_text())
     ) if GO_SERVER.is_file() else 0
 
-    print(f"natives: {len(go)} (go main.go surface)  registry: {len(entries)}")
-    print(f"lanes: {lane1} in-band verified  ·  {lane0} carrier-declared")
-    print("categories: " + "  ".join(
+    report.append(f"natives: {len(go)} (go main.go surface)  registry: {len(entries)}")
+    report.append(f"lanes: {lane1} in-band verified  ·  {lane0} carrier-declared")
+    report.append("categories: " + "  ".join(
         f"{k}:{v}" for k, v in sorted(cats.items(), key=lambda kv: -kv[1])
     ))
     if gaps:
-        print(f"sibling gaps ({len(gaps)}): " + " ".join(sorted(gaps)))
-    print(
+        report.append(f"sibling gaps ({len(gaps)}): " + " ".join(sorted(gaps)))
+    report.append(
         f"band circulation: {len(circulating)}/{len(entries)} names appear "
         f"in stdlib tests"
     )
     if declared_only:
-        print(
+        report.append(
             f"declared-only tail ({len(declared_only)}, verification recipes "
             f"awaiting a carrier): " + " ".join(declared_only)
         )
-    print(f"server.go host-IO surface (go-only, not in registry): {server_count}")
+    report.append(f"server.go host-IO surface (go-only, not in registry): {server_count}")
 
     if failures:
+        for line in report:
+            print(line)
         print()
         for f in failures:
             print(f"FAIL {f}")
         return 1
+    if quiet:
+        print(
+            f"PASS primitive registry: {len(go)} natives == {len(entries)} rows; "
+            f"lanes {lane1}+{lane0}; band pins aligned"
+        )
+    else:
+        for line in report:
+            print(line)
     return 0
 
 

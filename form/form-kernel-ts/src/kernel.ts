@@ -1668,11 +1668,28 @@ export class Kernel {
       kind: "list",
       list: argList(args, 0).slice(1),
     }));
+    // len is HONEST cell count. Dicts ride on list values tagged with the
+    // string "__dict__", but the tag is in-band: any plain list may carry
+    // that string as pooled DATA (the flatten string pool does, at the cell
+    // where "__dict__" was interned). A marker-sniffing len makes such a
+    // list lie about its length — flt-append's (eq (len xs) 0) base case
+    // then REPLACES the ["__dict__"] tail instead of appending past it,
+    // silently dropping the literal from the pool (the (24 -1 0 0)
+    // orphan-slit wound, 2026-07-17). Python's len(d) pair-count semantics
+    // live in _len, with the rest of the python-adapter's polymorphic
+    // underscore family.
     this.registerNative("len", catAccess(), (_k, args) => {
       const v = args[0];
+      if (v?.kind === "list") return { kind: "int", int: v.list.length };
+      if (v?.kind === "str") return { kind: "int", int: v.str.length };
+      return { kind: "int", int: 0 };
+    });
+    // _len — the python-adapter's polymorphic length: dict PAIRS, list
+    // elements, string bytes. Python's len(x) lowers here (the kernel len
+    // stays an honest cell count; see the note above).
+    this.registerNative("_len", catAccess(), (_k, args) => {
+      const v = args[0];
       if (v?.kind === "list") {
-        // Dict-aware: tagged "__dict__" lists report pair count,
-        // matching Python's len(d) semantics.
         if (
           v.list.length > 0 &&
           v.list[0]!.kind === "str" &&
@@ -3693,17 +3710,17 @@ function ceilUtf8Boundary(bytes: Uint8Array, i: number): number {
 
 function argStr(args: Value[], i: number): string {
   const v = args[i];
-  if (v?.kind !== "str") throw new Error(`arg ${i}: expected str`);
+  if (v?.kind !== "str") throw new Error(`arg ${i}: expected str, got ${v?.kind ?? "absent"}`);
   return v.str;
 }
 function argList(args: Value[], i: number): Value[] {
   const v = args[i];
-  if (v?.kind !== "list") throw new Error(`arg ${i}: expected list`);
+  if (v?.kind !== "list") throw new Error(`arg ${i}: expected list, got ${v?.kind ?? "absent"}`);
   return v.list;
 }
 function argNodeID(args: Value[], i: number): NodeID {
   const v = args[i];
-  if (v?.kind !== "nodeid") throw new Error(`arg ${i}: expected nodeid`);
+  if (v?.kind !== "nodeid") throw new Error(`arg ${i}: expected nodeid, got ${v?.kind ?? "absent"}`);
   return v.nodeid;
 }
 

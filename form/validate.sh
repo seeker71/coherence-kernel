@@ -44,13 +44,20 @@ fi
 if [[ -n "$BP_PY" && -f scripts/verify_category_contract.py ]]; then
     $BP_PY scripts/verify_category_contract.py
 fi
+# Registry drift gate: every Go native carries a registry row and the band's
+# pinned counts match — the primitive-registry-band's declared verdict (63)
+# is only honest while these numbers agree. Before this line the gate was a
+# bell nobody rang: the band answered 42 three-way from birth (#231) and the
+# agreement-only sibling comparison printed a green check over it.
+if [[ -n "$BP_PY" && -f scripts/validate_primitive_registry.py ]]; then
+    $BP_PY scripts/validate_primitive_registry.py --quiet
+fi
 
 GO_DIR="form-kernel-go"
 RS_DIR="form-kernel-rust"
 TS_DIR="form-kernel-ts"
 GO_BIN="$GO_DIR/bin-go"
 RS_BIN="$RS_DIR/target/release/form-kernel-rust"
-HOST_STACK_KB="262144"
 
 form_hash16() {
     if command -v shasum >/dev/null 2>&1 && printf test | shasum >/dev/null 2>&1; then
@@ -112,15 +119,21 @@ wait
 source scripts/fourth-arm.sh
 build_fourth
 
+# The TS kernel carries its deep Form recursion on a worker thread whose V8
+# limit MATCHES its real stack (main.ts deep-stack door; FORM_KERNEL_STACK_MB
+# passes through the environment, same name as the emitted C walker's door).
+# Never re-add a node --stack_size flag here: it cannot grow the fixed OS
+# main-thread stack, it only lifts V8's overflow check past it — turning deep
+# recursion into a SILENT SIGSEGV with zero output (the aphonia family).
 run_ts() {
     local bundle="$TS_DIR/dist/main.mjs"
     local loader="$PWD/$TS_DIR/node_modules/tsx/dist/loader.mjs"
     if [[ -f "$bundle" ]]; then
-        node --stack_size="$HOST_STACK_KB" "$bundle" "$@"
+        node "$bundle" "$@"
     elif [[ -x "$TS_DIR/node_modules/.bin/tsx" ]]; then
-        node --stack_size="$HOST_STACK_KB" --import "$loader" "$TS_DIR/src/main.ts" "$@"
+        node --import "$loader" "$TS_DIR/src/main.ts" "$@"
     else
-        npx --yes tsx --stack_size="$HOST_STACK_KB" "$TS_DIR/src/main.ts" "$@"
+        npx --yes tsx "$TS_DIR/src/main.ts" "$@"
     fi
 }
 
@@ -181,6 +194,10 @@ fk_resolve_dep_path() {
         printf "%s\n" "$token"
     elif [[ "$token" == form/* && -f "${token#form/}" ]]; then
         printf "%s\n" "${token#form/}"
+    elif [[ -f "../$token" ]]; then
+        # repo-root-anchored preludes (learn/…, observe/…) — the same door
+        # the runtime resolver learned in #270; validate runs with cwd=form/.
+        printf "%s\n" "../$token"
     else
         printf "%s\n" "$cand"
     fi
