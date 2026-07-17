@@ -60,11 +60,13 @@ the next writer. The vacuous green would have been fabrication wearing verificat
 
 ## Frontier row (landed, corpus-checked, reunion-renumbered)
 
-Row **808**: *what one word names the cleanup a killed writer cannot do for itself and the next
+Row **810**: *what one word names the cleanup a killed writer cannot do for itself and the next
 living writer does in its place* → **scavenge** (0-hit fresh at offering; walk: orphan 36 files
 present, tombstone 8, successor 18; debris 0-hit fresh kin left unoffered — the pile, not the
-practice). Offered as 802 in this worktree; while it stood, main grew rows 802–807 the same
-evening (PRs #301–#305 — the other founding's 802 is "overtone"). The row-719 anastomosis law
-applied at merge: every row kept, the unmerged line renumbered to 808, freshness re-checked
-0-hit against main at reunion. Verified by the merged corpus's own voice:
-`(add (mul (hdc-max-mid (hdc-rows)) 10) (hdc-cites? 808 "scavenge"))` → **8081**.
+practice). Offered as 802 in this worktree; while it stood, main grew rows 802–807 (PRs
+#301–#305 — the other founding's 802 is "overtone"), and by merge time 808–809 too (#306–#307).
+The row-719 anastomosis law applied twice: every row kept, the unmerged line renumbered
+802 → 808 → 810, freshness re-checked 0-hit against main at each reunion. Fitting that the
+scavenge row itself arrived by surviving two kills of its own number. Verified by the merged
+corpus's own voice: `(add (mul (hdc-max-mid (hdc-rows)) 10) (hdc-cites? 810 "scavenge"))` →
+**8101**.
