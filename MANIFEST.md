@@ -143,10 +143,13 @@ Current state per region. **Chronology is deliberately not kept here** — the f
 - **`model/`** — numerics/codecs (mel, wav, matvec), the form→asm lowering, transformer-backprop (real SGD
   training witnessed: 204-example corpus, 72% held-out vs ~25% chance), and the JIT infrastructure family
   (comprehensive, off the critical path until live-wired — roadmap item 3).
-- **`observe/`** — the trust stack: thought-framebuffer (watch a thought form), calibration
+- **`observe/`** — the trust stack: thought-framebuffer (watch a thought form), jacobian-lens (predict
+  WHERE an edit changes thinking: a choice flips where push > margin; the control vocabulary read as
+  sensitivity structure), heal-titration (the healing loop as one motion: surprise → etiology →
+  titrated push → localized verify — a safe heal's divergence set is exactly the wound), calibration
   (conviction-curve / correction-reflex / confidence-earned / self-watch — is confidence *earned*),
   `native-vs-rented.fk` (the grounding body cell, 11111), speech token stream + open-ASR CTC candidates,
-  capture-correction (canonical home), world models, ~87 band tests. Internally cross-referenced and
+  capture-correction (canonical home), world models, ~89 band tests. Internally cross-referenced and
   receipt-grounded throughout.
 - **`learn/`** — the learning witness ledger: serial dated trials (speech corpus batches, neural pair windows,
   trial windows, intakes) each with its own band verdict; summary ledgers (`speech-current-status-ledger`,
