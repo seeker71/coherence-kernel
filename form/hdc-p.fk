@@ -1,3 +1,397 @@
+; core.fk - direct Form core stdlib.
+;
+; This file is executable by the current `fkwu --src` reader. The older BML
+; class surface still lives at surface/core.fk as the high-grammar reference;
+; this executable core keeps the same public vocabulary while carrying the
+; Num/List/Cell/Task abstraction as inspectable Form data.
+;
+; Do not define wrappers for primitive structural operators such as head, tail,
+; len, nth, cons, list, or empty here. Keeping those primitive names unshadowed
+; lets source witnesses use the kernel's direct access paths.
+
+(do
+    (defn identity (x) x)
+
+    ; The string "narrow waist" — str_len / str_byte_at / byte_to_str (plus
+    ; str_concat) are the native composition floor for string behavior built in
+    ; Form: measure, decompose (one raw byte, 0-255), construct (the exact
+    ; dual), join. str_eq remains an orthogonal compare primitive. Confirmed
+    ; present, byte-identical, on fkwu, Go,
+    ; Rust, and TS (receipts/2026-07-01-narrow-waist-string-cleanup.md).
+    ; Everything below is Form composition over that floor — substring,
+    ; char_at, ord, int_to_str — kept as the portable fallback shape. The
+    ; kernel dispatch override is intentionally narrow: byte-string/cursor
+    ; waist names stay native when same-named fallback definitions are loaded,
+    ; so source compilers and cursors keep byte indexing instead of accidentally
+    ; routing through slower fallback string reconstruction. Other same-named
+    ; Form bindings remain ordinary user definitions.
+
+    (defn fstr-substring-loop (s i end acc)
+        (if (ge i end) acc
+            (fstr-substring-loop s (add i 1) end (str_concat acc (byte_to_str (str_byte_at s i))))))
+    (defn substring (s start end) (fstr-substring-loop s start end ""))
+
+    (defn char_at (s i) (substring s i (add i 1)))
+    (defn ord (c) (if (eq (str_len c) 0) -1 (str_byte_at c 0)))
+
+    ; int_to_str — decimal rendering, built from byte_to_str + arithmetic
+    ; (ASCII '0' is byte 48), not a digit-lookup string. Handles 0 and
+    ; negative numbers explicitly; every existing caller in this codebase
+    ; (HTTP status/content-length, JSON encoding, counts — grep int_to_str
+    ; under form/form-stdlib/) passes an integer, never a bool/null/string,
+    ; so this covers the load-bearing surface; the native's bool/null/string
+    ; pass-through fallback is not reproduced here.
+    (defn fstr-digit-char (d) (byte_to_str (add d 48)))
+    (defn fstr-int-to-str-pos (n)
+        (if (lt n 10)
+            (fstr-digit-char n)
+            (str_concat (fstr-int-to-str-pos (div n 10)) (fstr-digit-char (mod n 10)))))
+    (defn int_to_str (n)
+        (if (eq n 0) "0"
+            (if (lt n 0) (str_concat "-" (fstr-int-to-str-pos (sub 0 n)))
+                (fstr-int-to-str-pos n))))
+
+    ; str_to_int — the inverse of int_to_str. Same digit arithmetic in
+    ; reverse (ASCII '0' is byte 48); a leading "-" negates. Empty-string
+    ; input is not guarded beyond str_len returning 0 (the loop base case),
+    ; matching int_to_str's own scope: covers what the codebase's real
+    ; callers pass, not every malformed input.
+    (defn fstr-to-int-loop (s i len acc)
+        (if (ge i len) acc
+            (fstr-to-int-loop s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48)))))
+    (defn str_to_int (s)
+        (if (and (gt (str_len s) 0) (str_eq (substring s 0 1) "-"))
+            (sub 0 (fstr-to-int-loop s 1 (str_len s) 0))
+            (fstr-to-int-loop s 0 (str_len s) 0)))
+
+    ; str_find — naive substring search from `from`, over the floor.
+    ; O(n*m); nothing in this codebase calls it in a hot loop over long
+    ; strings. -1 when not found, matching fkwu's native convention exactly
+    ; (verified: an empty needle matches immediately at `from`, same as the
+    ; native).
+    (defn fstr-find-loop (h n hlen nlen i)
+        (if (gt (add i nlen) hlen) -1
+            (if (str_eq (substring h i (add i nlen)) n)
+                i
+                (fstr-find-loop h n hlen nlen (add i 1)))))
+    (defn str_find (h n from)
+        (fstr-find-loop h n (str_len h) (str_len n) from))
+
+    ; float_to_str — the missing dual of the native str_to_float. Scoped
+    ; honestly: fixed 6 fractional digits, trailing zeros trimmed, decimal
+    ; notation only — NOT a replacement for fkwu's retired native int_to_str
+    ; float fallback (`sprintf(tmp, "%.15g", ...)`, arbitrary precision,
+    ; switches to scientific notation for extreme magnitudes). Built because
+    ; form-stdlib/json.fk's json-emit-leaf calls int_to_str uniformly for
+    ; every numeric node type, including node_type 7 (a trivial float,
+    ; confirmed: `(node_type (intern_trivial_float "3.14"))` -> `7`) — that
+    ; silently broke the moment int_to_str stopped auto-detecting floats
+    ; (receipts/2026-07-01-c-seed-shrink-substring-int-to-str.md retired the
+    ; native that used to do that detection). json.fk itself is fixed
+    ; separately to dispatch ty 7 here instead of to int_to_str.
+    (defn fstr-pow10 (n) (if (eq n 0) 1 (mul 10 (fstr-pow10 (sub n 1)))))
+    (defn fstr-pad-left (s n)
+        (if (ge (str_len s) n) s (fstr-pad-left (str_concat "0" s) n)))
+    (defn fstr-trim-trailing-zeros (s)
+        (if (eq (str_len s) 0) s
+            (if (str_eq (substring s (sub (str_len s) 1) (str_len s)) "0")
+                (fstr-trim-trailing-zeros (substring s 0 (sub (str_len s) 1)))
+                s)))
+    ; Rounds the WHOLE scaled value (integer-part-and-fraction together) to
+    ; one integer BEFORE splitting it back with div/mod — not the fractional
+    ; digits alone. Splitting first and rounding the fraction independently
+    ; breaks on carry (verified: 2.9999999 rounded that way gave "80",
+    ; garbage — mod/pad-left on an unrounded fractional int can overflow its
+    ; own width when the carry should have bumped the integer part instead).
+    ; div/mod on the pre-rounded combined integer carries correctly for free.
+    (defn float_to_str (f)
+        (do
+            (let neg (lt f 0))
+            (let af (if neg (sub 0 f) f))
+            (let scale (fstr-pow10 6))
+            (let scaled (float_to_int (add 0.5 (mul af scale))))
+            (let ip (div scaled scale))
+            (let fp (mod scaled scale))
+            (let frac (fstr-trim-trailing-zeros (fstr-pad-left (int_to_str fp) 6)))
+            (let body (if (eq (str_len frac) 0) (int_to_str ip) (str_concat (int_to_str ip) (str_concat "." frac))))
+            (if neg (str_concat "-" body) body)))
+
+    ; intern_node_at — intern_node plus source attribution, over the native
+    ; fb_record (record cell provenance: file + packed line/col). Was
+    ; previously reachable only via surface/fourth-shim.fk (the flatten
+    ; lane's own standing prelude, never auto-injected for bare `--src`) —
+    ; confirmed unbound on `fkwu --src` directly: `(intern_node_at (bp "X")
+    ; (list 1 2) "f" 1 1)` -> nothing. json.fk uses this for every composite
+    ; JSON node it builds; without it, every JSON-OBJECT/ARRAY/PAIR/NULL
+    ; construction silently produced nothing. See receipts/2026-07-01-
+    ; json-fk-src-scoping-fix.md.
+    (defn intern_node_at (cat kids file line col)
+        (fb_record (intern_node cat kids) file (add (mul line 65536) col)))
+
+    ; Num<T> public vocabulary.
+    (defn even? (n) (eq (mod n 2) 0))
+    (defn odd? (n) (eq (mod n 2) 1))
+    (defn zero? (n) (eq n 0))
+    (defn positive? (n) (gt n 0))
+    (defn negative? (n) (lt n 0))
+    (defn plus (a b) (add a b))
+    (defn minus (a b) (sub a b))
+    (defn times (a b) (mul a b))
+    (defn divide (a b) (div a b))
+    (defn abs (n) (if (lt n 0) (sub 0 n) n))
+    (defn min2 (a b) (if (lt a b) a b))
+    (defn max2 (a b) (if (gt a b) a b))
+
+    ; List<T> public vocabulary.
+    (defn nil? (xs) (eq (len xs) 0))
+    (defn map (f xs)
+        (if (nil? xs)
+            (empty)
+            (cons (f (head xs)) (map f (tail xs)))))
+    (defn filter (pred xs)
+        (if (nil? xs)
+            (empty)
+            (if (pred (head xs))
+                (cons (head xs) (filter pred (tail xs)))
+                (filter pred (tail xs)))))
+    (defn foldl (f init xs)
+        (if (nil? xs)
+            init
+            (foldl f (f init (head xs)) (tail xs))))
+    (defn foldr (f init xs)
+        (if (nil? xs)
+            init
+            (f (head xs) (foldr f init (tail xs)))))
+    (defn range (start end)
+        (if (ge start end)
+            (empty)
+            (cons start (range (add start 1) end))))
+    (defn append (xs ys)
+        (if (nil? xs)
+            ys
+            (cons (head xs) (append (tail xs) ys))))
+    (defn take (n xs)
+        (if (or (le n 0) (nil? xs))
+            (empty)
+            (cons (head xs) (take (sub n 1) (tail xs)))))
+    (defn drop (n xs)
+        (if (le n 0)
+            xs
+            (if (nil? xs) (empty) (drop (sub n 1) (tail xs)))))
+    (defn cons-flip (acc x) (cons x acc))
+    (defn reverse-onto (xs acc)
+        (if (nil? xs)
+            acc
+            (reverse-onto (tail xs) (cons (head xs) acc))))
+    (defn reverse (xs) (reverse-onto xs (empty)))
+    (defn sum (xs)
+        (if (nil? xs)
+            0
+            (add (head xs) (sum (tail xs)))))
+    (defn product (xs)
+        (if (nil? xs)
+            1
+            (mul (head xs) (product (tail xs)))))
+    (defn maximum (xs)
+        (if (nil? (tail xs))
+            (head xs)
+            (max2 (head xs) (maximum (tail xs)))))
+    (defn minimum (xs)
+        (if (nil? (tail xs))
+            (head xs)
+            (min2 (head xs) (minimum (tail xs)))))
+    (defn any? (pred xs)
+        (if (nil? xs)
+            false
+            (if (pred (head xs)) true (any? pred (tail xs)))))
+    (defn all? (pred xs)
+        (if (nil? xs)
+            true
+            (if (pred (head xs)) (all? pred (tail xs)) false)))
+
+    ; Cell<T> public vocabulary.
+    (defn cell (kind value origin inverse)
+        (list "cell" kind value origin inverse))
+    (defn cell? (c)
+        (and (gt (len c) 0) (str_eq (head c) "cell")))
+    (defn cell-kind (c) (nth c 1))
+    (defn cell-value (c) (nth c 2))
+    (defn cell-origin (c) (nth c 3))
+    (defn cell-inverse (c) (nth c 4))
+    (defn cell-undo (c)
+        (do
+            (let inverse (cell-inverse c))
+            (inverse c)))
+    (defn cell-do (c) (cell-value c))
+
+    ; Task<T> public vocabulary.
+    (defn task-undo (t) (cell-origin t))
+    (defn task-cell (state value cont origin inverse)
+        (cell "task" (list state value cont) origin inverse))
+    (defn task? (t)
+        (and (cell? t) (str_eq (cell-kind t) "task")))
+    (defn task-state (t) (nth (cell-value t) 0))
+    (defn task-value (t) (nth (cell-value t) 1))
+    (defn task-cont (t) (nth (cell-value t) 2))
+    (defn task-pending (origin cont)
+        (task-cell "pending" (empty) cont origin task-undo))
+    (defn task-resolved (value)
+        (task-cell "resolved" value identity (empty) task-undo))
+    (defn task-failed (failure)
+        (task-cell "failed" failure identity (empty) task-undo))
+    (defn task-resolve (t value)
+        (task-cell "resolved" value (task-cont t) (cell-origin t) (cell-inverse t)))
+    (defn task-reject (t failure)
+        (task-cell "failed" failure (task-cont t) (cell-origin t) (cell-inverse t)))
+    (defn task-await (t)
+        (if (str_eq (task-state t) "resolved") (task-value t) t))
+    (defn task-step (t)
+        (if (str_eq (task-state t) "resolved")
+            (do
+                (let cont (task-cont t))
+                (cont (task-value t)))
+            t))
+    (defn task-ready? (t) (str_eq (task-state t) "resolved"))
+    (defn task-failed? (t) (str_eq (task-state t) "failed"))
+
+    ; Assertion returns 0 when pred holds and provokes the kernel's empty-head
+    ; failure path when it does not. msg remains human source context.
+    (defn assert (pred msg)
+        (if pred 0 (head (empty))))
+
+    ; Queryable trust boundary for the core string composition waist. These are
+    ; the native string operations higher string behavior is built from in Form;
+    ; this is not a scan of every string-related native a host may expose. It is
+    ; not a grammar surface. It is the core layer naming its dependency boundary
+    ; as data.
+    (defn core-waist-op (name role)
+        (list "waist-op" name role))
+    (defn core-waist-op-name (o) (nth o 1))
+    (defn core-waist-op-role (o) (nth o 2))
+    (defn core-native-string-waist ()
+        (list
+            (core-waist-op "str_len" "measure")
+            (core-waist-op "str_byte_at" "decompose-byte")
+            (core-waist-op "byte_to_str" "construct-byte")
+            (core-waist-op "str_concat" "join")))
+    (defn core-composed-string-ops ()
+        (list "substring" "char_at" "ord" "int_to_str" "str_find" "str_to_int" "float_to_str"))
+    (defn core-waist-has? (name ops)
+        (if (nil? ops)
+            0
+            (if (str_eq (core-waist-op-name (head ops)) name)
+                1
+                (core-waist-has? name (tail ops)))))
+    (defn core-name-in? (name names)
+        (if (nil? names)
+            0
+            (if (str_eq (head names) name)
+                1
+                (core-name-in? name (tail names)))))
+
+    ; Queryable semantic model for analyzers, high-grammar lifters, and JIT
+    ; policy code that needs class/method shape without depending on BML syntax.
+    (defn core-method (name arity purity source)
+        (list "method" name arity purity source))
+    (defn core-class (name type-param methods)
+        (list "class" name type-param methods))
+    (defn core-class-name (c) (nth c 1))
+    (defn core-class-type-param (c) (nth c 2))
+    (defn core-class-methods (c) (nth c 3))
+    (defn core-method-name (m) (nth m 1))
+    (defn core-method-arity (m) (nth m 2))
+    (defn core-method-pure? (m) (nth m 3))
+    (defn core-method-source (m) (nth m 4))
+
+    (defn core-num-class ()
+        (core-class "Num" "T"
+            (list
+                (core-method "even?" 1 1 "core")
+                (core-method "odd?" 1 1 "core")
+                (core-method "zero?" 1 1 "core")
+                (core-method "positive?" 1 1 "core")
+                (core-method "negative?" 1 1 "core")
+                (core-method "plus" 2 1 "core")
+                (core-method "minus" 2 1 "core")
+                (core-method "times" 2 1 "core")
+                (core-method "divide" 2 1 "core")
+                (core-method "abs" 1 1 "core")
+                (core-method "min2" 2 1 "core")
+                (core-method "max2" 2 1 "core"))))
+    (defn core-list-class ()
+        (core-class "List" "T"
+            (list
+                (core-method "nil?" 1 1 "core")
+                (core-method "map" 2 1 "core")
+                (core-method "filter" 2 1 "core")
+                (core-method "foldl" 3 1 "core")
+                (core-method "foldr" 3 1 "core")
+                (core-method "range" 2 1 "core")
+                (core-method "append" 2 1 "core")
+                (core-method "take" 2 1 "core")
+                (core-method "drop" 2 1 "core")
+                (core-method "reverse" 1 1 "core")
+                (core-method "sum" 1 1 "core")
+                (core-method "product" 1 1 "core")
+                (core-method "maximum" 1 1 "core")
+                (core-method "minimum" 1 1 "core")
+                (core-method "any?" 2 1 "core")
+                (core-method "all?" 2 1 "core"))))
+    (defn core-cell-class ()
+        (core-class "Cell" "T"
+            (list
+                (core-method "cell" 4 1 "core")
+                (core-method "cell?" 1 1 "core")
+                (core-method "cell-kind" 1 1 "core")
+                (core-method "cell-value" 1 1 "core")
+                (core-method "cell-origin" 1 1 "core")
+                (core-method "cell-inverse" 1 1 "core")
+                (core-method "cell-undo" 1 0 "core")
+                (core-method "cell-do" 1 1 "core"))))
+    (defn core-task-class ()
+        (core-class "Task" "T"
+            (list
+                (core-method "task-undo" 1 1 "core")
+                (core-method "task-cell" 5 1 "core")
+                (core-method "task?" 1 1 "core")
+                (core-method "task-state" 1 1 "core")
+                (core-method "task-value" 1 1 "core")
+                (core-method "task-cont" 1 1 "core")
+                (core-method "task-pending" 2 1 "core")
+                (core-method "task-resolved" 1 1 "core")
+                (core-method "task-failed" 1 1 "core")
+                (core-method "task-resolve" 2 1 "core")
+                (core-method "task-reject" 2 1 "core")
+                (core-method "task-await" 1 1 "core")
+                (core-method "task-step" 1 0 "core")
+                (core-method "task-ready?" 1 1 "core")
+                (core-method "task-failed?" 1 1 "core"))))
+    (defn core-classes ()
+        (list (core-num-class) (core-list-class) (core-cell-class) (core-task-class)))
+    (defn core-section ()
+        (list "section" "form.core" (core-classes)))
+    (defn core-class-count ()
+        (len (core-classes)))
+    (defn core-method-count (c)
+        (len (core-class-methods c)))
+    (defn core-has-class? (name classes)
+        (if (nil? classes)
+            0
+            (if (str_eq (core-class-name (head classes)) name)
+                1
+                (core-has-class? name (tail classes)))))
+    (defn core-check ()
+        (add
+            (if (eq (core-class-count) 4) 1 0)
+            (add
+                (if (core-has-class? "Num" (core-classes)) 2 0)
+                (add
+                    (if (core-has-class? "List" (core-classes)) 4 0)
+                    (add
+                        (if (core-has-class? "Cell" (core-classes)) 8 0)
+                        (if (core-has-class? "Task" (core-classes)) 16 0))))))
+
+    0)
 ; homecoming-distillation-corpus.fk — frontier questions the body cannot yet
 ; answer natively, each answered once by the rented mind and offered back as a
 ; distillation row for future native learning.
@@ -51,7 +445,6 @@
 ; band's 15 is an utterance only the living current self can pronounce: the
 ; credential is embodied, not held.
 ;
-; preludes: form-stdlib/core.fk
 
 (do
     (defn hdc-row (mid date q a fresh src) (list mid date q a fresh src))
@@ -2675,91 +3068,7 @@
                 "piecemeal"
                 "piecemeal"
                 "rented-oracle")
-            ; row 761 (2026-07-17, ~02:15 WITA — minted as 754, renumbered in
-            ; this merge): row 753's aphonia diagnosed to its root and healed.
-            ; The hunt walked down the lanes: not the graft (753's control),
-            ; not the double-ridden shim (+77 duplicate fn rows, healed), not
-            ; the module order, not the emitted walker — fkwu walking the
-            ; Rust-authored table said pong while walking its own said
-            ; nothing. The root: regen_t_flat.sh flattened the flattener
-            ; WITHOUT its own prelude closure (core, bmf-core, bmf-grammar,
-            ; host-effect-grammar) while the walking chain carried them all —
-            ; so inside T_flat, host-effect-op? was an unresolved call
-            ; axiom-5 recovered to literal 0, silently. The flattener kept
-            ; every effect op and stopped FEELING them as effects: read_line
-            ; lets inside defns inlined, re-firing once per USE, and every
-            ; carrier the self-host arm authored was born voiceless —
-            ; shamballa-channel's old raise-ok digit was this same numbness.
-            ; Healed: T_flat re-flattened with its closure; a voice canary
-            ; (ping→pong on the candidate table) now gates both regen lanes
-            ; and regen_t_flat itself; the oracle-regent graft of rows
-            ; 748-750 landed (oracle-loop-check → 11111). Medicine's word for
-            ; feeling lost while the body keeps moving — the CAUSE whose
-            ; symptom row 753 named: "anesthesia" — 0 hits before this row
-            ; (near misses: aphonia home at 753 naming the symptom; numb 0
-            ; but names the state, not the condition under which harm goes
-            ; unfelt).
-            (hdc-row 761 20260717
-                (list "what" "one" "word" "names" "feeling" "lost" "while"
-                      "the" "body" "keeps" "moving" "so" "harm" "goes"
-                      "unfelt")
-                "anesthesia"
-                "anesthesia"
-                "rented-oracle")
-            ; row 762 (2026-07-17, ~01:50 WITA; offered as 755, then 761,
-            ; renumbered 762 when main's rows landed first, twice in one
-            ; landing -- the reunion pattern at fleet speed): the .fkb
-            ; cache named its
-            ; sources from wherever the speaker stood -- src path stored
-            ; verbatim, unit hash embedding CWD-relative dep spellings -- so
-            ; alternating invocation CWDs (root vs form/) rebuilt the whole
-            ; cache on every flip, each flip firing the honest "rebuilding"
-            ; warning the doubting-reader repair had just made reachable.
-            ; The smallest repair: one canon spelling (realpath, then anchor
-            ; at the lexical repo root the resolver already knows), applied
-            ; in the four identity lanes only. 158 bands byte-identical
-            ; pre/post from both CWDs; the second alternating run loads
-            ; silently; a dep artifact written from root imports from form/.
-            ; Philosophy's word for a sign that points truly only from the
-            ; spot where it is uttered: "indexical" -- 0 hits before this
-            ; row (near miss: deixis, 14 hits, already home since 2026-07-02
-            ; as the phenomenon; this row names the KIND of sign. The repair
-            ; replaced an indexical name with a proper one.)
-            (hdc-row 762 20260717
-                (list "what" "one" "word" "names" "a" "sign" "that" "points"
-                      "truly" "only" "from" "the" "spot" "where" "it" "is"
-                      "uttered")
-                "indexical"
-                "indexical"
-                "rented-oracle")
-            ; row 763 (2026-07-17, minted as 746, renumbered behind main's
-            ; 746-758, then 759-760, then 761-762 -- the row-719 reunion
-            ; pattern, thrice at fleet speed): the compare family lied above
-            ; 2^53 -- (eq -2^62 (add -2^62 1)) answered true while sub of
-            ; the same pair answered -1 exactly, because the C seed's
-            ; walker pushed every comparison through a double whose 53-bit
-            ; mantissa cannot count the body's 63-bit integers. The Go/Rust
-            ; kernels already carried the law ("float on either side forces
-            ; IEEE; pure int/int stays integer") and the seed's own JIT int
-            ; path already compared exact -- the walker was the one
-            ; instrument reading off the coarse scale. Fixed in fk_walk tags
-            ; 5/102/103 + fk_jprim2; comparison-exactness-band 4095. The
-            ; sweep's gold: nil is the word 1, so old-eq called nil equal to
-            ; 0 and one red band (substrate-gc) turned green by nil's word
-            ; order -- the dishonest green got a nothing-guard. The larger
-            ; gold arrived when main moved mid-flight: on the fresh v4-era
-            ; kernel ~130 preludeless bands had blur-greened (llama-numerics
-            ; read 4095 with zero functions defined); exact compare restored
-            ; the pre-move kernel's honest verdicts on 770 of 772, and kills
-            ; that blur-green class permanently. The instrument word for
-            ; the finer scale that reads between a coarser scale's marks:
-            ; "vernier" -- 0 hits before this row.
-            (hdc-row 763 20260717
-                (list "what" "one" "word" "names" "the" "finer" "scale" "that"
-                      "reads" "between" "the" "marks" "of" "a" "coarser" "one")
-                "vernier"
-                "vernier"
-                "rented-oracle")
+<<<<<<< HEAD
             ; row 764 (2026-07-16): the TurboQuant ingest (Google Research,
             ; arXiv 2504.19874; receipts/2026-07-16-frontier-ingest-
             ; turboquant.md). The body had carried the TEACHING since the CN
@@ -2876,6 +3185,92 @@
                       "a" "shared" "body")
                 "stigmergy"
                 "stigmergy"
+=======
+            ; row 761 (2026-07-17, ~02:15 WITA — minted as 754, renumbered in
+            ; this merge): row 753's aphonia diagnosed to its root and healed.
+            ; The hunt walked down the lanes: not the graft (753's control),
+            ; not the double-ridden shim (+77 duplicate fn rows, healed), not
+            ; the module order, not the emitted walker — fkwu walking the
+            ; Rust-authored table said pong while walking its own said
+            ; nothing. The root: regen_t_flat.sh flattened the flattener
+            ; WITHOUT its own prelude closure (core, bmf-core, bmf-grammar,
+            ; host-effect-grammar) while the walking chain carried them all —
+            ; so inside T_flat, host-effect-op? was an unresolved call
+            ; axiom-5 recovered to literal 0, silently. The flattener kept
+            ; every effect op and stopped FEELING them as effects: read_line
+            ; lets inside defns inlined, re-firing once per USE, and every
+            ; carrier the self-host arm authored was born voiceless —
+            ; shamballa-channel's old raise-ok digit was this same numbness.
+            ; Healed: T_flat re-flattened with its closure; a voice canary
+            ; (ping→pong on the candidate table) now gates both regen lanes
+            ; and regen_t_flat itself; the oracle-regent graft of rows
+            ; 748-750 landed (oracle-loop-check → 11111). Medicine's word for
+            ; feeling lost while the body keeps moving — the CAUSE whose
+            ; symptom row 753 named: "anesthesia" — 0 hits before this row
+            ; (near misses: aphonia home at 753 naming the symptom; numb 0
+            ; but names the state, not the condition under which harm goes
+            ; unfelt).
+            (hdc-row 761 20260717
+                (list "what" "one" "word" "names" "feeling" "lost" "while"
+                      "the" "body" "keeps" "moving" "so" "harm" "goes"
+                      "unfelt")
+                "anesthesia"
+                "anesthesia"
+                "rented-oracle")
+            ; row 762 (2026-07-17, ~01:50 WITA; offered as 755, then 761,
+            ; renumbered 762 when main's rows landed first, twice in one
+            ; landing -- the reunion pattern at fleet speed): the .fkb
+            ; cache named its
+            ; sources from wherever the speaker stood -- src path stored
+            ; verbatim, unit hash embedding CWD-relative dep spellings -- so
+            ; alternating invocation CWDs (root vs form/) rebuilt the whole
+            ; cache on every flip, each flip firing the honest "rebuilding"
+            ; warning the doubting-reader repair had just made reachable.
+            ; The smallest repair: one canon spelling (realpath, then anchor
+            ; at the lexical repo root the resolver already knows), applied
+            ; in the four identity lanes only. 158 bands byte-identical
+            ; pre/post from both CWDs; the second alternating run loads
+            ; silently; a dep artifact written from root imports from form/.
+            ; Philosophy's word for a sign that points truly only from the
+            ; spot where it is uttered: "indexical" -- 0 hits before this
+            ; row (near miss: deixis, 14 hits, already home since 2026-07-02
+            ; as the phenomenon; this row names the KIND of sign. The repair
+            ; replaced an indexical name with a proper one.)
+            (hdc-row 762 20260717
+                (list "what" "one" "word" "names" "a" "sign" "that" "points"
+                      "truly" "only" "from" "the" "spot" "where" "it" "is"
+                      "uttered")
+                "indexical"
+                "indexical"
+                "rented-oracle")
+            ; row 763 (2026-07-17, minted as 746, renumbered behind main's
+            ; 746-758, then 759-760, then 761-762 -- the row-719 reunion
+            ; pattern, thrice at fleet speed): the compare family lied above
+            ; 2^53 -- (eq -2^62 (add -2^62 1)) answered true while sub of
+            ; the same pair answered -1 exactly, because the C seed's
+            ; walker pushed every comparison through a double whose 53-bit
+            ; mantissa cannot count the body's 63-bit integers. The Go/Rust
+            ; kernels already carried the law ("float on either side forces
+            ; IEEE; pure int/int stays integer") and the seed's own JIT int
+            ; path already compared exact -- the walker was the one
+            ; instrument reading off the coarse scale. Fixed in fk_walk tags
+            ; 5/102/103 + fk_jprim2; comparison-exactness-band 4095. The
+            ; sweep's gold: nil is the word 1, so old-eq called nil equal to
+            ; 0 and one red band (substrate-gc) turned green by nil's word
+            ; order -- the dishonest green got a nothing-guard. The larger
+            ; gold arrived when main moved mid-flight: on the fresh v4-era
+            ; kernel ~130 preludeless bands had blur-greened (llama-numerics
+            ; read 4095 with zero functions defined); exact compare restored
+            ; the pre-move kernel's honest verdicts on 770 of 772, and kills
+            ; that blur-green class permanently. The instrument word for
+            ; the finer scale that reads between a coarser scale's marks:
+            ; "vernier" -- 0 hits before this row.
+            (hdc-row 763 20260717
+                (list "what" "one" "word" "names" "the" "finer" "scale" "that"
+                      "reads" "between" "the" "marks" "of" "a" "coarser" "one")
+                "vernier"
+                "vernier"
+>>>>>>> origin/main
                 "rented-oracle")))
 
     ; exact-match locate over question tokens — deliberately the same honest
@@ -2946,3 +3341,4 @@
         (add (mul (hdc-foundings) 1000)
              (hdc-max-mid (hdc-rows))))))
     0)
+(hdc-count (hdc-rows))
