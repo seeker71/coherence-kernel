@@ -189,6 +189,10 @@ fk_resolve_dep_path() {
         printf "%s\n" "$token"
     elif [[ "$token" == form/* && -f "${token#form/}" ]]; then
         printf "%s\n" "${token#form/}"
+    elif [[ -f "../$token" ]]; then
+        # repo-root-anchored preludes (learn/…, observe/…) — the same door
+        # the runtime resolver learned in #270; validate runs with cwd=form/.
+        printf "%s\n" "../$token"
     else
         printf "%s\n" "$cand"
     fi

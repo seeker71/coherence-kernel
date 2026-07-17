@@ -110,6 +110,39 @@ substrate, the tags, and the ~47 pivot rows. The dominance table above
 measured SYNTAX neutrality and called it LANGUAGE neutrality; those are not
 the same thing, and English won the recount.
 
+## The census, same night — word counts by tongue, the gap map
+
+Urs asked for the honest English word counts against the other tongues and
+the neutral symbols, so the gaps show their true size. Counted at the word
+level (not lines), typography excluded from the NL columns:
+
+| tongue | tokens | where it lives |
+|---|---:|---|
+| **English** | **2,318,537** | comments 784,082 · docs 527,385 · strings 170,097 · identifiers 836,973 |
+| **All other NL scripts combined** | **1,513** | comments 407 · docs 518 · strings 588 — nearly all landed 2026-07-17 (tongue shelf, name-lexicon, corpus walks) |
+| **Neutral symbols (y\<k\> + n\<k\>)** | **243** | the pivot rows and the y-table itself |
+
+Ratios: **EN : other-NL = 1,532 : 1** · **EN : neutral = 9,541 : 1**.
+
+The gap map this illuminates, largest first:
+
+1. **Identifiers (836,973 EN tokens)** — the y-table can already re-spell 34%
+   of these occurrences, but only 243 neutral tokens are actually WRITTEN
+   anywhere: the nsym tongue exists and no cell is stored in it. Gap: store
+   surfaces neutral, render on read.
+2. **Comment prose (784,082 EN words vs 407)** — no pivot lane exists for
+   prose at all; the NL grammar speaks one sentence family. This is the
+   largest unpivoted mass in the body.
+3. **Docs (527,385 vs 518)** — same wound as comments, plus the .md files
+   are not projections (fallow ledger item 7).
+4. **Strings (170,097 vs 588)** — messages and keys, pivotable via the same
+   name-lexicon discipline once the corpus grows.
+
+The other tongues' 1,513 tokens are hapax-thin: present as seed lexicons,
+not yet as living text. Equal representation means these columns grow by
+five orders of magnitude or English's shrink to meet them — the loop's
+gauges now include this census.
+
 What the correction does not undo: the architecture already names the road
 out. nl-translate.fk's own header: the symbol is "a door over the numeric
 NodeID (identity invariant under renaming)" with the self-authored

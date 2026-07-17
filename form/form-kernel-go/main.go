@@ -2449,12 +2449,33 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VInt, Int: total}
 	})
+	// len is HONEST cell count. Dicts ride on VList tagged with the string
+	// "__dict__", but the tag is in-band: any plain list may carry that
+	// string as pooled DATA (the flatten string pool does, at the cell where
+	// "__dict__" was interned). A marker-sniffing len makes such a list lie
+	// about its length — flt-append's (eq (len xs) 0) base case then REPLACES
+	// the ["__dict__"] tail instead of appending past it, silently dropping
+	// the literal from the pool (the (24 -1 0 0) orphan-slit wound,
+	// 2026-07-17). Python's len(d) pair-count semantics live in _len, with
+	// the rest of the python-adapter's polymorphic underscore family.
 	k.registerNative("len", catAccess(), func(_ *Kernel, args []Value) Value {
 		switch args[0].Kind {
 		case VList:
-			if isDictValue(args[0]) {
-				return Value{Kind: VInt, Int: int64((len(args[0].List) - 1) / 2)}
-			}
+			return Value{Kind: VInt, Int: int64(len(args[0].List))}
+		case VStr:
+			return Value{Kind: VInt, Int: int64(len(args[0].Str))}
+		}
+		return Value{Kind: VInt, Int: 0}
+	})
+	// _len — the python-adapter's polymorphic length: dict PAIRS, list
+	// elements, string bytes. Python's `len(x)` lowers here (the kernel `len`
+	// stays an honest cell count; see the note above).
+	k.registerNative("_len", catAccess(), func(_ *Kernel, args []Value) Value {
+		if isDictValue(args[0]) {
+			return Value{Kind: VInt, Int: int64((len(args[0].List) - 1) / 2)}
+		}
+		switch args[0].Kind {
+		case VList:
 			return Value{Kind: VInt, Int: int64(len(args[0].List))}
 		case VStr:
 			return Value{Kind: VInt, Int: int64(len(args[0].Str))}

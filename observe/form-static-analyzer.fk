@@ -12,6 +12,10 @@
 ;   - literal list nth out-of-bounds is rejected before direct access
 ;   - head/tail over a statically empty list is rejected before direct access
 ;   - known-nothing direct array/field/dict/hash/tree receivers are rejected
+;   - a defn parameter that shares its name with a known fn is flagged (warn):
+;     the call-position capture class of
+;     receipts/2026-07-17-jacobian-lens-and-the-cell-shadowing-heal.md —
+;     pre-heal runtimes resolved the GLOBAL, silently capturing the parameter
 ;
 ; preludes: observe/jit-runtime-fault.fk
 
@@ -22,10 +26,14 @@
     (defn fsa-code-div-zero () 204)
     (defn fsa-code-bounds () 205)
     (defn fsa-code-null-ref () 206)
+    (defn fsa-code-param-shadow () 207)
 
     (defn fsa-severity-error () 3)
+    (defn fsa-severity-warn () 2)
     (defn fsa-issue (code source detail)
         (list "issue" code (fsa-severity-error) source detail))
+    (defn fsa-warn-issue (code source detail)
+        (list "issue" code (fsa-severity-warn) source detail))
     (defn fsa-issue-code (i) (nth i 1))
     (defn fsa-issue-severity (i) (nth i 2))
 
@@ -86,19 +94,27 @@
     ;   ("var" name source)
     ;   ("list" items source)
     ;   ("call" name args source)
+    ;   ("defn" name params body source)   params = list of name strings
     (defn fsa-int (value source) (list "int" value source))
     (defn fsa-nothing (source) (list "nothing" 0 source))
     (defn fsa-var (name source) (list "var" name source))
     (defn fsa-list-lit (items source) (list "list" items source))
     (defn fsa-call (name args source) (list "call" name args source))
+    (defn fsa-defn-row (name params body source) (list "defn" name params body source))
 
     (defn fsa-tag (expr) (nth expr 0))
-    (defn fsa-source (expr) (if (str_eq (fsa-tag expr) "call") (nth expr 3) (nth expr 2)))
+    (defn fsa-source (expr)
+        (if (str_eq (fsa-tag expr) "call")
+            (nth expr 3)
+            (if (str_eq (fsa-tag expr) "defn") (nth expr 4) (nth expr 2))))
     (defn fsa-int-value (expr) (nth expr 1))
     (defn fsa-var-name (expr) (nth expr 1))
     (defn fsa-list-items (expr) (nth expr 1))
     (defn fsa-call-name (expr) (nth expr 1))
     (defn fsa-call-args (expr) (nth expr 2))
+    (defn fsa-defn-name (expr) (nth expr 1))
+    (defn fsa-defn-params (expr) (nth expr 2))
+    (defn fsa-defn-body (expr) (nth expr 3))
     (defn fsa-int? (expr) (str_eq (fsa-tag expr) "int"))
     (defn fsa-list? (expr) (str_eq (fsa-tag expr) "list"))
 
@@ -115,8 +131,12 @@
             (empty)
             (list (fsa-issue (fsa-code-unbound) (fsa-source expr) (fsa-var-name expr)))))
 
+    ; a call head is bound if ANY binding carries the name: an fn bind is a
+    ; direct call; a var bind (parameter / let holding a fn-value) is a legal
+    ; INDIRECT call — locals shadow globals in call position, same order as
+    ; the runtime resolver and the four-way siblings.
     (defn fsa-call-unbound-issues (expr env)
-        (if (eq (fsa-fn-bound? env (fsa-call-name expr)) 1)
+        (if (eq (fsa-found? (fsa-env-find env (fsa-call-name expr))) 1)
             (empty)
             (list (fsa-issue (fsa-code-unbound) (fsa-source expr) (fsa-call-name expr)))))
 
@@ -194,6 +214,29 @@
             (list (fsa-issue (fsa-code-null-ref) (fsa-source expr) (fsa-call-name expr)))
             (empty)))
 
+    ; param-shadow (code 207, WARN): a defn parameter whose name equals a known
+    ; fn bind. In call position a pre-heal runtime resolved the GLOBAL (the
+    ; cell-capture of receipts/2026-07-17-jacobian-lens-and-the-cell-shadowing-
+    ; heal.md); healed runtimes shadow correctly, so the collision is legal but
+    ; worth a witness — warn, never block.
+    (defn fsa-param-shadow-issues-loop (params env source)
+        (if (eq (len params) 0)
+            (empty)
+            (fsa-append
+                (if (eq (fsa-fn-bound? env (head params)) 1)
+                    (list (fsa-warn-issue (fsa-code-param-shadow) source (head params)))
+                    (empty))
+                (fsa-param-shadow-issues-loop (tail params) env source))))
+    (defn fsa-param-shadow-issues (expr env)
+        (fsa-param-shadow-issues-loop (fsa-defn-params expr) env (fsa-source expr)))
+
+    ; params bind as vars over the body — consed on the front so they SHADOW
+    ; same-named fn binds during body analysis, mirroring the runtime.
+    (defn fsa-env-with-params (params env)
+        (if (eq (len params) 0)
+            env
+            (cons (fsa-var-bind (head params)) (fsa-env-with-params (tail params) env))))
+
     (defn fsa-analyze-args (args env)
         (if (eq (len args) 0)
             (empty)
@@ -217,7 +260,12 @@
                     (fsa-append (fsa-analyze-args (fsa-call-args expr) env) (fsa-call-static-issues expr env))
                     (if (str_eq (fsa-tag expr) "list")
                         (fsa-analyze-args (fsa-list-items expr) env)
-                        (empty))))))
+                        (if (str_eq (fsa-tag expr) "defn")
+                            (fsa-append
+                                (fsa-param-shadow-issues expr env)
+                                (fsa-analyze-expr (fsa-defn-body expr)
+                                    (fsa-env-with-params (fsa-defn-params expr) env)))
+                            (empty)))))))
 
     (defn fsa-count-code (issues code)
         (if (eq (len issues) 0)
@@ -248,6 +296,19 @@
     (defn fsa-head-empty-expr () (fsa-call "head" (list (fsa-list-lit (empty) (fsa-source-ok))) (fsa-source-call)))
     (defn fsa-missing-source-expr () (fsa-call "add" (list (fsa-int 1 (fsa-source-ok)) (fsa-int 2 (fsa-source-ok))) (fsa-source-bad)))
 
+    ; the cell-capture shape: (defn offer (cell args) (cell args)) under an env
+    ; where "cell" is a known fn — param shadows global, warn 207 fires once
+    (defn fsa-shadow-env () (cons (fsa-fn-bind "cell" 4 1) (fsa-default-env)))
+    (defn fsa-shadow-defn-expr ()
+        (fsa-defn-row "offer" (list "cell" "args")
+            (fsa-call "cell" (list (fsa-var "args" (fsa-source-ok))) (fsa-source-call))
+            (fsa-source-ok)))
+    ; the healed spelling: param renamed, no collision, indirect call still bound
+    (defn fsa-clean-defn-expr ()
+        (fsa-defn-row "offer" (list "recipe" "args")
+            (fsa-call "recipe" (list (fsa-var "args" (fsa-source-ok))) (fsa-source-call))
+            (fsa-source-ok)))
+
     (defn fsa-bit (cond bit) (if cond bit 0))
     (defn form-static-analyzer-check ()
         (add
@@ -268,6 +329,14 @@
                                         (fsa-bit (eq (fsa-count-code (fsa-analyze-expr (fsa-missing-source-expr) (fsa-default-env)) (fsa-code-missing-source)) 1) 128)
                                         (add
                                             (fsa-bit (eq (fsa-allow-execute? (fsa-divzero-expr) (fsa-default-env)) 0) 256)
-                                            (fsa-bit (eq (fsa-allow-jit? (fsa-nth-oob-expr) (fsa-default-env)) 0) 512))))))))))
+                                            (add
+                                                (fsa-bit (eq (fsa-allow-jit? (fsa-nth-oob-expr) (fsa-default-env)) 0) 512)
+                                                (add
+                                                    (fsa-bit (eq (fsa-count-code (fsa-analyze-expr (fsa-shadow-defn-expr) (fsa-shadow-env)) (fsa-code-param-shadow)) 1) 1024)
+                                                    (add
+                                                        (fsa-bit (eq (fsa-count-code (fsa-analyze-expr (fsa-clean-defn-expr) (fsa-shadow-env)) (fsa-code-param-shadow)) 0) 2048)
+                                                        (add
+                                                            (fsa-bit (eq (fsa-allow-execute? (fsa-shadow-defn-expr) (fsa-shadow-env)) 1) 4096)
+                                                            (fsa-bit (eq (fsa-count-code (fsa-analyze-expr (fsa-shadow-defn-expr) (fsa-shadow-env)) (fsa-code-unbound)) 0) 8192)))))))))))))
 
     0)
