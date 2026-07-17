@@ -148,6 +148,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "record?", 1, 68 },
   { "record_keys", 1, 99 },
   { "record_blueprint", 1, 100 },
+  { "now_unix_ms", 0, 15 },
   { "div", 2, 10 },
   { "mod", 2, 11 },
   { "band", 2, 34 },
