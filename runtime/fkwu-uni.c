@@ -93,6 +93,7 @@ static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_T
  * fk_spos / fk_slen are declared), where they can read the source buffer. */
 static void fk_diag(int sev, long long off, const char *fmt, ...);
 static void fk_diag_flush(void);
+static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
 /* Named capacities for the seed's fixed-size tables. Several numerically coincide
  * (many independent tables happen to be sized 65536) but are named SEPARATELY on
  * purpose: they are different index spaces (the node/AST table, the value stack,
@@ -174,7 +175,7 @@ static const long long fk_fbase = -9000000000000000000LL;
 /* stone 2a: the CANONICAL first-class nothing (axiom-1: nothing is first-class; timeout==nothing).
  * A single reserved sentinel, odd and one above fk_fbase, so it is DISTINCT from every value: not
  * an int (ints are v<<1, even), not 0, not the nil/empty value 1, not a boxed float (fk_isf needs
- * v<=fk_fbase-2; this is fk_fbase+1, so isf is false), not a node (fk_nidx maps it to ~4.5e18, far
+ * v<=fk_fbase-3; this is fk_fbase+1, so isf is false), not a node (fk_nidx maps it to ~4.5e18, far
  * past fk_np), not a record ((0-v) is even for records; here it is odd), not a string/list (those
  * are positive). The reducer RETURNS this from (nothing); recipes OBSERVE it via nothing? —
  * no-value is no longer conflated with 0 or host-null. */
@@ -188,7 +189,7 @@ static long long fk_is_nothing(long long v) {
  * and the float base (fk_fbase = -9e18, floats live at-or-below it), and BELOW every
  * node/record/cons/int (which are tiny-magnitude or positive). fk_fnval(f) = fk_fnbase - (f<<1) - 1
  * is therefore odd-negative in a narrow band (fn-indices are < 4096): not an int (ints v<<1, even),
- * not 0/1, not a float (fk_isf needs v<=fk_fbase-2 ~ -9e18; these are ~-8e18, ABOVE it), not a node
+ * not 0/1, not a float (fk_isf needs v<=fk_fbase-3 ~ -9e18; these are ~-8e18, ABOVE it), not a node
  * (fk_nidx maps ~8e18 far past fk_np), not a record ((0-v) is odd here, records even), not nothing
  * (distinct constant). A bare fn-name in value position evaluates to this (tag 243); an indirect
  * call offers the fn it names (tag 244). CLOSURE is the NAMED next gap: the fn-value carries only
@@ -213,12 +214,24 @@ static long long fk_is_fnval(long long v) {
     long long fi = fk_fnval_idx(v);
     return (fi >= 0 && fi < FK_FNVAL_MAX_INDEX) ? 1 : 0;
 }
+/* Float boxes are ODD words at/below fk_fbase-3: fk_fbase - (fp<<1) - 1. They were
+ * even (fk_fbase - (fp<<1)) until 2026-07-17, which let a deep-negative INT word
+ * (x<<1 for x < fk_fbase/2 ~ -4.5e18) alias float slot (fk_fbase - x*2)/2 at EVERY
+ * kind-dispatched door once the pool held that many floats — witnessed: after two
+ * 7.0s, (add -4500000000000000002 1) returned the float 8.0 and the int printed
+ * as 7. Ints are even (v<<1); with floats odd, every even word is an int across
+ * the full 63-bit range. The odd-negative neighbours stay disjoint by band:
+ * nothing = fk_fbase+1 (above the ceiling), fn-values ~ -8e18 (above fk_fbase),
+ * cons cells positive, node boxes tiny-negative — all excluded by magnitude. */
 static long long fk_fidx(long long v) {
-    return (fk_fbase - v) >> 1;
+    return (fk_fbase - v - 1) >> 1;
 }
 static long long fk_isf(long long v) {
+    if ((v & 1) == 0) {
+        return 0;
+    }
     long long fi = fk_fidx(v);
-    return v <= fk_fbase - 2 && fi > 0 && fi <= fk_fp;
+    return v <= fk_fbase - 3 && fi > 0 && fi <= fk_fp;
 }
 static double fk_num(long long v) {
     if (fk_isf(v)) {
@@ -243,7 +256,7 @@ static long long fk_fbox(double d) {
         }
     }
     fk_fv[fk_fp] = d;
-    return fk_fbase - (fk_fp << 1);
+    return fk_fbase - (fk_fp << 1) - 1;
 }
 static void fk_pr(long long v) {
     char b[32];
@@ -5344,10 +5357,20 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 5) {
         long long a5 = fk_walk(fk_node[i][1], fp);
         long long b5 = fk_walk(fk_node[i][2], fp);
-        if (fk_num(a5) <= fk_num(b5)) {
-            return 2;
+        /* Same width-promotion rule as math (tags 3/4/42): float on either side
+         * forces an IEEE comparison; pure int/int compares the tagged words
+         * directly (<<1 tagging is order-preserving, so word order IS int order).
+         * fk_num rounds through a double, whose 53-bit mantissa blurs distinct
+         * 63-bit ints into equality — (eq (sub -2^62 0) (sub -2^62 1)) answered
+         * true while sub of the same pair answered -1. Mirrors the Go/Rust
+         * kernels' compare law and the JIT's exact int fast path (le/eq inline
+         * cmp), which this walker previously DISAGREED with at the boundary.
+         * Applies to the whole family: le here, eq/lt on tags 102/103, and the
+         * JIT carrier fk_jprim2 — gt/ge/abs lower onto these via fk_rwtab. */
+        if (fk_isf(a5) || fk_isf(b5)) {
+            return (fk_num(a5) <= fk_num(b5)) ? 2 : 0;
         }
-        return 0;
+        return (a5 <= b5) ? 2 : 0;
     }
     if (t == 6) {
         if (fk_walk(fk_node[i][1], fp) == 0) {
@@ -5737,20 +5760,22 @@ static long long fk_walk(long long i, long long fp) {
         return fk_walk(fk_node[i][2], fp);
     }
     if (t == 102) {
+        /* int/int exact, float promotes — the tag-5 compare law. */
         long long ae = fk_walk(fk_node[i][1], fp);
         long long be = fk_walk(fk_node[i][2], fp);
-        if (fk_num(ae) == fk_num(be)) {
-            return 2;
+        if (fk_isf(ae) || fk_isf(be)) {
+            return (fk_num(ae) == fk_num(be)) ? 2 : 0;
         }
-        return 0;
+        return (ae == be) ? 2 : 0;
     }
     if (t == 103) {
+        /* int/int exact, float promotes — the tag-5 compare law. */
         long long al = fk_walk(fk_node[i][1], fp);
         long long bl = fk_walk(fk_node[i][2], fp);
-        if (fk_num(al) < fk_num(bl)) {
-            return 2;
+        if (fk_isf(al) || fk_isf(bl)) {
+            return (fk_num(al) < fk_num(bl)) ? 2 : 0;
         }
-        return 0;
+        return (al < bl) ? 2 : 0;
     }
     if (t == 109) {
         long long slot109 = fk_walk(fk_node[i][1], fp) >> 1;
@@ -5828,6 +5853,21 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return 0;
         }
         return fk_sl[sa] << 1;
+    }
+    if (t == 238) {
+        /* form_error — the voice of refusal. A program that raises it has
+         * declared its own cannot-recover, so per the two-phase law this is a
+         * legitimate runtime death: message to fd 2, exit nonzero, exactly as
+         * Go/Rust/TS panic on their native form_error. Before 2026-07-17 this
+         * op was absent here and axiom-5 lowered every raise to nothing — the
+         * bp "property" aphonia: bands sailed green past raised errors. */
+        long long sa = fk_walk(fk_node[i][1], fp) >> 1;
+        fk_write_all_raw(2, "fkwu: form_error: ", 18);
+        if (sa >= 0 && sa < fk_sp) {
+            fk_write_all_raw(2, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
+        }
+        fk_write_all_raw(2, "\n", 1);
+        exit(1);
     }
     if (t == 26) {
         long long sa26 = fk_walk(fk_node[i][1], fp) >> 1;
@@ -8558,15 +8598,24 @@ static long long fk_jprim2(long long tag, long long a, long long b) {
         return ((a >> 1) * (b >> 1)) << 1;
     }
     if (tag == 5) {
-        return (fk_num(a) <= fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) <= fk_num(b)) ? 2 : 0;
+        }
+        return (a <= b) ? 2 : 0;
     }
     if (tag == 102) {
-        return (fk_num(a) == fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) == fk_num(b)) ? 2 : 0;
+        }
+        return (a == b) ? 2 : 0;
     }
     if (tag == 103) {
-        return (fk_num(a) < fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) < fk_num(b)) ? 2 : 0;
+        }
+        return (a < b) ? 2 : 0;
     }
-    /* lt — mirrors fk_walk tag-103 */
+    /* le/eq/lt — mirror fk_walk tags 5/102/103: int/int exact, float promotes */
     if (tag == 10) {
         if (fk_isf(a) || fk_isf(b)) {
             return fk_fbox(fk_num(a) / fk_num(b));
@@ -8655,6 +8704,17 @@ static long long fk_jprim1(long long tag, long long a) {
             return 0;
         }
         return fk_sl[sa] << 1;
+    }
+    if (tag == 238) {
+        /* form_error — mirrors fk_walk's tag-238 exactly: crystallized code
+         * must die as loudly as interpreted code. */
+        long long sa = a >> 1;
+        fk_write_all_raw(2, "fkwu: form_error: ", 18);
+        if (sa >= 0 && sa < fk_sp) {
+            fk_write_all_raw(2, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
+        }
+        fk_write_all_raw(2, "\n", 1);
+        exit(1);
     }
     /* str_len */
     if (tag == 54) {
@@ -8847,7 +8907,7 @@ static fk_natfn fk_ensure_native(long long callee, long long *frame) {
  * RETURN the fk_tailcall sentinel. The C driver fk_jtramp loops on that sentinel — dispatching the
  * next native over the SAME fp frame — so a mutual-recursion chain runs native↔native end-to-end in
  * CONSTANT stack, no walker bounce. fk_tailcall is a reserved ODD-NEGATIVE sentinel in a band no
- * tagged value occupies: ints are even (v<<1); floats are <= fk_fbase-2 (~-9e18); nodes/records are
+ * tagged value occupies: ints are even (v<<1); floats are odd <= fk_fbase-3 (~-9e18); nodes/records are
  * small-magnitude negatives; cons are positive-odd; fnvals sit in the -8e18±16384 band; nothing is
  * -8.999e18. -7.5e18-1 is odd, far above the float floor, far below node magnitudes, and outside
  * the fnval band — so it can never collide with a real result. */
@@ -9183,14 +9243,17 @@ static void fk_jemit(long long i, int tail) {
     }
     if (t == 3 || t == 4 || t == 42 || t == 5 || t == 102) {
         /* float-aware arith/cmp. The #59 int-inline is WRONG for float operands, so we GUARD at
-         * runtime: if EITHER operand is a boxed float (tagged word <= fk_fbase-2, a huge negative),
-         * call the kind-correct carrier fk_jprim2 (bit-identical to fk_walk); else run the fast
-         * int-inline. This keeps fac/sum/fib native-fast (provably int at runtime) AND makes
-         * 0.5+0.25 correct — the float-correctness gate. */
+         * runtime: if EITHER operand's word is <= fk_fbase-2 (the float band and below), call the
+         * kind-correct carrier fk_jprim2 (bit-identical to fk_walk); else run the fast int-inline.
+         * The threshold is deliberately CONSERVATIVE, not exact: float boxes are odd <= fk_fbase-3,
+         * and deep-negative INTS (x < ~-4.5e18, words even <= fk_fbase-2) also route to the carrier,
+         * whose fk_isf re-classifies them correctly as ints — slower there, never wrong. This keeps
+         * fac/sum/fib native-fast (provably int at runtime) AND makes 0.5+0.25 correct — the
+         * float-correctness gate. */
         fk_jbin(i);
         /* rax=left, rcx=right */
 
-        /* threshold = fk_fbase - 2 (the float-band ceiling) */
+        /* threshold = fk_fbase - 2 (at/below: maybe-float, carrier decides) */
         fk_jb1(0x49);
         fk_jb1(0xB9);
         fk_jb8(-9000000000000000000LL - 2);
@@ -9325,8 +9388,8 @@ static void fk_jemit(long long i, int tail) {
         fk_jcarrier((void *)fk_jprim2, 3);
         return;
     }
-    if (t == 25 || t == 54 || t == 53) {
-        /* str_len / float_to_int / str_to_float: 1-arg carrier */
+    if (t == 25 || t == 54 || t == 53 || t == 238) {
+        /* str_len / float_to_int / str_to_float / form_error: 1-arg carrier */
         fk_jemit(fk_node[i][1], 0);
         /* arg -> rax */
         fk_jb1(0x50);
@@ -10070,6 +10133,46 @@ static long long fk_path_dir_len(const char *path) {
     }
     return last >= 0 ? last + 1 : 0;
 }
+/* the lexical repo root: length of the prefix ending at the slash before the
+ * path's first form/ or learn/ component (0 when absent). Shared by the
+ * prelude resolver's repo-root rescue and the .fkb identity spelling. */
+static long long fk_path_repo_prefix_len(const char *path) {
+    long long s = 0;
+    while (path[s] != 0) {
+        if (path[s] == FK_CH_SLASH &&
+            ((path[s + 1] == 'f' && path[s + 2] == 'o' && path[s + 3] == 'r' &&
+              path[s + 4] == 'm' && path[s + 5] == FK_CH_SLASH) ||
+             (path[s + 1] == 'l' && path[s + 2] == 'e' && path[s + 3] == 'a' &&
+              path[s + 4] == 'r' && path[s + 5] == 'n' && path[s + 6] == FK_CH_SLASH))) {
+            return s + 1;
+        }
+        s = s + 1;
+    }
+    return 0;
+}
+#if defined(_WIN32)
+extern char *_fullpath(char *, const char *, unsigned long long);
+#else
+extern char *realpath(const char *, char *);
+#endif
+/* the .fkb identity spelling of a path: one absolute spelling regardless of
+ * invocation CWD, then anchored at the lexical repo root so the same file
+ * keeps one name across CWD flips and checkout moves. out must hold 4096
+ * bytes. Verbatim on resolve failure -- degrade to the old spelling (an
+ * honest rebuild), never fabricate an identity. */
+static const char *fk_path_canon_id(const char *path, char *out) {
+#if defined(_WIN32)
+    if (_fullpath(out, path, 4096) == 0) {
+        return path;
+    }
+#else
+    if (realpath(path, out) == 0) {
+        return path;
+    }
+#endif
+    long long pre_n = fk_path_repo_prefix_len(out);
+    return pre_n > 0 ? out + pre_n : out;
+}
 static int fk_path_resolve_fk_dep(const char *owner_path, const char *token, long long token_n,
                                   char *out, long long cap) {
     if (token_n <= 0 || cap <= token_n) {
@@ -10164,18 +10267,7 @@ static int fk_path_resolve_fk_dep(const char *owner_path, const char *token, lon
             return 1;
         }
     }
-    long long pre_n = 0;
-    long long s2 = 0;
-    while (pre_n == 0 && owner_path[s2] != 0) {
-        if (owner_path[s2] == FK_CH_SLASH &&
-            ((owner_path[s2 + 1] == 'f' && owner_path[s2 + 2] == 'o' && owner_path[s2 + 3] == 'r' &&
-              owner_path[s2 + 4] == 'm' && owner_path[s2 + 5] == FK_CH_SLASH) ||
-             (owner_path[s2 + 1] == 'l' && owner_path[s2 + 2] == 'e' && owner_path[s2 + 3] == 'a' &&
-              owner_path[s2 + 4] == 'r' && owner_path[s2 + 5] == 'n' && owner_path[s2 + 6] == FK_CH_SLASH))) {
-            pre_n = s2 + 1;
-        }
-        s2 = s2 + 1;
-    }
+    long long pre_n = fk_path_repo_prefix_len(owner_path);
     if (pre_n > 0 && pre_n + token_n + 1 <= cap) {
         i = 0;
         while (i < pre_n) {
@@ -10243,12 +10335,13 @@ static long long fk_src_unit_mtime(void) {
 static int fk_src_unit_hash_range(long long start, long long end, char *out, long long cap) {
     long long pos = 0;
     long long i = start;
+    char canon[4096];
     if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v1")) {
         return 0;
     }
     while (i < end && i < fk_src_dep_count) {
         if (!fk_source_hash_append(out, cap, &pos, "|") ||
-            !fk_source_hash_append(out, cap, &pos, fk_src_dep_path[i]) ||
+            !fk_source_hash_append(out, cap, &pos, fk_path_canon_id(fk_src_dep_path[i], canon)) ||
             !fk_source_hash_append(out, cap, &pos, "@") ||
             !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_mtime[i]) ||
             !fk_source_hash_append(out, cap, &pos, ":") ||
@@ -10814,10 +10907,11 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     }
     fk_fkb_write_overflow = 0;
     int ok = 1;
+    char canon[4096];
     ok = ok && fk_write_all_raw(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
     ok = ok && fk_fkb_write_u32(fd, 4);
-    ok = ok && fk_fkb_write_cstr(fd, src_path);
+    ok = ok && fk_fkb_write_cstr(fd, fk_path_canon_id(src_path, canon));
     ok = ok && fk_fkb_write_cstr(fd, source_hash);
     ok = ok && fk_fkb_write_signed(fd, source_mtime > 0 ? source_mtime : 1);
     ok = ok && fk_fkb_write_cstr(fd, fkb_path);
@@ -11142,7 +11236,9 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
      * decode stream. A short-circuit here (the old `ok && read(...)` shape)
      * skipped the hash read after a src-path mismatch and desynced every
      * later read into "truncated string" -- the wrong-CWD reproduction. */
-    int src_path_matches = fk_fkb_read_string_matches_cstr(expected_src_path);
+    char canon[4096];
+    int src_path_matches =
+        fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon));
     int source_hash_matches = fk_fkb_read_string_matches_cstr(expected_source_hash);
     int source_identity_ok = src_path_matches && source_hash_matches;
     long long stored_source_mtime = fk_fkb_read_signed();
@@ -11331,8 +11427,9 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
      * stream; short-circuiting them desyncs every later read (see
      * fk_src_import_fkb_image). Mismatch stays a soft "rebuild" verdict. */
     int source_identity_ok = 1;
+    char canon[4096];
     if (expected_src_path != 0) {
-        if (!fk_fkb_read_string_matches_cstr(expected_src_path)) {
+        if (!fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon))) {
             source_identity_ok = 0;
         }
     } else {

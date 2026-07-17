@@ -82,8 +82,9 @@ ok (63.7s, JIT tests included); Rust 58/58 (one test first failed purely from ru
 concurrently with validate.sh rebuilding in the same checkout — it passes in isolation
 on both trees); TS `tsc --noEmit` clean.
 
-Corpus row **761** lands the word: **falsing** (0-hit fresh; near misses name the scene,
-not the phenomenon). Corpus band: **511** at 162 rows, field-code 1621622761.
+Corpus row **803** lands the word: **falsing** (0-hit fresh; near misses name the scene,
+not the phenomenon; minted as 761, renumbered at the reunion — main's same-day lineage
+had reached 802). Corpus band: **4095** at 199 rows, field-code 1991992803.
 
 One adjacent stone laid on the way: `validate.sh`'s bash dependency resolver never
 learned the repo root, so `form-stdlib/lineage-discounted-vote.fk`'s committed
