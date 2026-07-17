@@ -45,18 +45,18 @@ that named this gap (unit U4).
 ## Tissues (counted, not listed)
 
 - axioms: 3
-- teachings: 11
-- observe organs: 149
-- learn organs: 200
-- ingest organs: 17
-- form-stdlib cells: 887
+- teachings: 23
+- observe organs: 248
+- learn organs: 358
+- ingest organs: 27
+- form-stdlib cells: 2358
 
 ## Memory
 
 - receipts (episodic, append-only): 627
 - of those, PENDING (honest state, never a fault): 1
-- distillation corpus rows: 169
-- deepest corpus meaning-id: 768
+- distillation corpus rows: 170
+- deepest corpus meaning-id: 769
 
 ## The rung this portrait stands on
 
