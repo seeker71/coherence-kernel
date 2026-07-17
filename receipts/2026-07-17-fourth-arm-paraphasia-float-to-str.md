@@ -49,8 +49,12 @@ but a third clinical shape: not voiceless, not unfelt — **paraphasia**.
 - Neighbors re-proven post-re-key: float-ops, ieee-float-ops, json-codec-bml,
   json-meaning-ingestion, json-promoted-types, learning-trend, cooldown,
   alert-gate, value-execution, body-state, feature-vector — all PASS-4WAY.
-- Corpus band → **4095** with row 802 seated (field code 1981982802, asked of
-  the body, not asserted).
+- Corpus band → **4095** with the paraphasia row seated — offered as 802, then
+  renumbered **811** at the same evening's reunion (main had grown 802–810;
+  row-719 anastomosis law: keep every row, renumber the unmerged line). Field
+  code 2072072811, asked of the body, not asserted — the ask also caught main's
+  band one row behind its own corpus (205/809 asserted while scavenge at 810
+  was live) and reconciled it.
 
 ## Left open (named, not carried silently)
 
