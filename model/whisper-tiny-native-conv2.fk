@@ -1,0 +1,102 @@
+; whisper-tiny-native-conv2.fk — released Whisper-tiny acoustic stem in Form.
+;
+; This extends the real PCM -> Slaney log-mel -> released conv1 witness through
+; exact-erf GELU and every released conv2 parameter.  The witness evaluates an
+; interior stride-2 token from three adjacent conv1 tokens.  Six adjacent mel
+; columns share one local Whisper normalization peak; this is deliberately a
+; bounded live witness, not a claim that the full 30-second frontend exists.
+;
+; The complete learned stem covers 535,296 released parameters. Positional
+; embeddings, 4 encoder blocks, decoder, tokenizer, and search remain pending,
+; so this does not claim a native recognizer.
+; witnessed: 2026-07-18 -> complete released conv1+GELU+conv2+GELU on CC0 human speech
+; preludes: form/form-stdlib/core.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/form-fs.fk form/form-stdlib/file-byte-window.fk form/form-stdlib/crc32.fk model/lingbot-pytorch-checkpoint.fk form/form-stdlib/trig.fk form/form-stdlib/mel-frame.fk form/form-stdlib/mel-filterbank.fk form/form-stdlib/transformer-numerics.fk form/form-stdlib/transformer-block.fk form/form-stdlib/transformer-mh.fk form/form-stdlib/transformer-gelu-erf.fk model/whisper-tiny-native-conv1.fk
+
+(do
+  (defn wt2-weight-path () (str_concat (wtc-root) "encoder-conv2-weight.f32"))
+  (defn wt2-bias-path () (str_concat (wtc-root) "encoder-conv2-bias.f32"))
+  (defn wt2-weight-count () 442368)
+  (defn wt2-bias-count () 384)
+  (defn wt2-parameter-count () 442752)
+  (defn wt2-stem-parameter-count () (add (wtc-parameter-count) (wt2-parameter-count)))
+
+  ; pack = (conv1-pack conv2-weight-bytes conv2-bias-bytes validity).
+  (defn wt2-load-weights ()
+    (do
+      (let conv1 (wtc-load-weights))
+      (let weight (lbpt-read-span (wt2-weight-path) 0 1769472))
+      (let bias (lbpt-read-span (wt2-bias-path) 0 1536))
+      (list conv1 weight bias
+        (if (and (eq (wtc-weights-valid? conv1) 1)
+              (and (eq (str_len weight) 1769472)
+                (and (eq (lbpt-crc-string weight) 177484382)
+                  (and (eq (str_len bias) 1536)
+                       (eq (lbpt-crc-string bias) 1369859501))))) 1 0))))
+  (defn wt2-conv1-pack (pack) (nth pack 0))
+  (defn wt2-weight-bytes (pack) (nth pack 1))
+  (defn wt2-bias-bytes (pack) (nth pack 2))
+  (defn wt2-weights-valid? (pack) (nth pack 3))
+
+  (defn wt2-log-mel-cols-go (bytes data-offset col count out)
+    (if (eq col count) (reverse out)
+      (wt2-log-mel-cols-go bytes data-offset (add col 1) count
+        (cons (wtc-log-mel-col
+          (wtc-window bytes data-offset
+            (add (wtc-sample-start) (mul col (wtc-hop-size))))) out))))
+  (defn wt2-log-mel-cols (bytes data-offset)
+    (wt2-log-mel-cols-go bytes data-offset 0 6 (empty)))
+
+  (defn wt2-gelu-map-go (xs out)
+    (if (eq (len xs) 0) (reverse out)
+      (wt2-gelu-map-go (tail xs) (cons (tn-gelu-erf (head xs)) out))))
+  (defn wt2-gelu-map (xs) (wt2-gelu-map-go xs (empty)))
+
+  ; Four conv1 tokens are available. Conv2 output index 1 (stride=2,padding=1)
+  ; consumes token indices 1,2,3 and therefore has no padding contribution.
+  (defn wt2-conv1-tokens (conv1 normalized-cols)
+    (list
+      (wt2-gelu-map (wtc-token conv1 (list (nth normalized-cols 0) (nth normalized-cols 1) (nth normalized-cols 2))))
+      (wt2-gelu-map (wtc-token conv1 (list (nth normalized-cols 1) (nth normalized-cols 2) (nth normalized-cols 3))))
+      (wt2-gelu-map (wtc-token conv1 (list (nth normalized-cols 2) (nth normalized-cols 3) (nth normalized-cols 4))))
+      (wt2-gelu-map (wtc-token conv1 (list (nth normalized-cols 3) (nth normalized-cols 4) (nth normalized-cols 5))))))
+
+  ; Safetensors / PyTorch contiguous Conv1d layout: [out, in, time].
+  (defn wt2-channel-go (weight inputs out-channel i acc)
+    (if (eq i 1152) acc
+      (do
+        (let in-channel (div i 3))
+        (let time (mod i 3))
+        (let coefficient (lbpt-f32 weight (mul 4 (add (mul out-channel 1152) i))))
+        (let input (nth (nth inputs time) in-channel))
+        (wt2-channel-go weight inputs out-channel (add i 1)
+          (add acc (mul coefficient input))))))
+  (defn wt2-channel (weight bias inputs out-channel)
+    (tn-gelu-erf (wt2-channel-go weight inputs out-channel 0
+      (lbpt-f32 bias (mul out-channel 4)))))
+  (defn wt2-token-go (weight bias inputs out-channel out)
+    (if (eq out-channel 384) (reverse out)
+      (wt2-token-go weight bias inputs (add out-channel 1)
+        (cons (wt2-channel weight bias inputs out-channel) out))))
+  (defn wt2-token (pack conv1-tokens)
+    (wt2-token-go (wt2-weight-bytes pack) (wt2-bias-bytes pack)
+      (list (nth conv1-tokens 1) (nth conv1-tokens 2) (nth conv1-tokens 3)) 0 (empty)))
+
+  (defn wt2-fingerprint (token) (wtc-fingerprint token))
+
+  ; result = (source wav-bytes data-offset local-peak full-token fingerprint
+  ;           stem-parameters weights-valid learned-activity mel-columns conv1-tokens).
+  (defn wt2-infer-file (path)
+    (do
+      (let bytes (fs-read-slice path 0 (fs-stat-size path)))
+      (let data-offset (wtc-wav-data-offset bytes))
+      (let normalized (wtc-normalize-tile (wt2-log-mel-cols bytes data-offset)))
+      (let pack (wt2-load-weights))
+      (let conv1-tokens (if (eq (wt2-weights-valid? pack) 1)
+        (wt2-conv1-tokens (wt2-conv1-pack pack) (nth normalized 1)) (empty)))
+      (let token (if (eq (len conv1-tokens) 4) (wt2-token pack conv1-tokens) (empty)))
+      (let fingerprint (if (eq (len token) 384) (wt2-fingerprint token) (empty)))
+      (list path (str_len bytes) data-offset (nth normalized 0) token fingerprint
+        (wt2-stem-parameter-count) (wt2-weights-valid? pack)
+        (if (and (eq (len token) 384) (gt (nth fingerprint 9) 1.0)) 1 0)
+        6 conv1-tokens)))
+)
