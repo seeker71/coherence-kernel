@@ -14,6 +14,10 @@ const nlPath = `${base}/concept-nl-semantic-13-omw.tsv`;
 const sourcesPath = `${base}/concept-nl-semantic-13-sources.dat`;
 const primarySemanticPath = "model/concept-semantics-10000-index.dat";
 const overlaySemanticPath = "model/concept-semantics-10000-wiktionary-index.dat";
+const lexicalSemanticPath = "model/concept-semantics-10000-wiktionary-lexical-index.dat";
+const lexicalPayloadPath = "model/concept-semantics-10000-wiktionary-lexical-payload.dat";
+const repairSemanticPath = "model/concept-10000-substantive-repair-semantic-index.dat";
+const repairPayloadPath = "model/concept-10000-substantive-repair-semantic-payload.dat";
 const indexPath = `${base}/concept-text-roundtrip-10000-13-index.dat`;
 const candidatesPath = `${base}/concept-text-roundtrip-10000-13-candidates.dat`;
 const metadataPath = `${base}/concept-text-roundtrip-10000-13-metadata.fk`;
@@ -24,8 +28,12 @@ const hex = (value) => hash(value).toString("hex");
 
 const nlBytes = readFileSync(nlPath);
 const sources = readFileSync(sourcesPath);
-const primarySemantic = readFileSync(primarySemanticPath, "utf8");
-const overlaySemantic = readFileSync(overlaySemanticPath, "utf8");
+const primarySemantic = readFileSync(primarySemanticPath);
+const overlaySemantic = readFileSync(overlaySemanticPath);
+const lexicalSemantic = readFileSync(lexicalSemanticPath);
+const lexicalPayload = readFileSync(lexicalPayloadPath);
+const repairSemantic = readFileSync(repairSemanticPath);
+const repairPayload = readFileSync(repairPayloadPath);
 const nlLines = nlBytes.toString("utf8").trimEnd().split("\n");
 const header = nlLines.shift().split("\t");
 if (header.slice(1).join("\t") !== codes.join("\t")) throw new Error("unexpected NL header");
@@ -40,10 +48,30 @@ if (sources.length !== 130000) throw new Error(`expected 130000 source bytes, go
 if (primarySemantic.length !== 350000 || overlaySemantic.length !== 350000) {
   throw new Error("expected two 10,000 x 35-byte semantic indexes");
 }
+if (repairSemantic.length !== 150000) throw new Error("expected 10,000 x 15-byte repair semantic index");
+if (lexicalSemantic.length !== 150000) throw new Error("expected 10,000 x 15-byte lexical semantic index");
+function lexicalDefinitionCount(index, payload, id) {
+  const at = id * 15;
+  if (index[at] !== 49 && index[at] !== 50) return 0;
+  const numberAt = (data, start, end) => Number(data.subarray(start, end).toString("ascii"));
+  const offset = numberAt(index, at + 2, at + 10);
+  const length = numberAt(index, at + 10, at + 15);
+  if (!length) return 0;
+  let cursor = offset + 104;
+  for (let field = 0; field < 4; field++) {
+    const width = numberAt(payload, cursor, cursor + 2);
+    cursor += 2 + width;
+  }
+  const definitionWidth = numberAt(payload, cursor, cursor + 5);
+  cursor += 5 + definitionWidth;
+  return numberAt(payload, cursor, cursor + 3);
+}
 const senseCounts = Array.from({ length: 10000 }, (_, id) => {
+  if (repairSemantic[id * 15] === 49) return lexicalDefinitionCount(repairSemantic, repairPayload, id);
   const at = id * 35;
-  const chosen = primarySemantic[at] !== "0" ? primarySemantic : overlaySemantic;
-  return Number(chosen.slice(at + 23, at + 26));
+  if (primarySemantic[at] !== 48) return Number(primarySemantic.subarray(at + 23, at + 26).toString("ascii"));
+  if (overlaySemantic[at] !== 48) return Number(overlaySemantic.subarray(at + 23, at + 26).toString("ascii"));
+  return lexicalDefinitionCount(lexicalSemantic, lexicalPayload, id);
 });
 
 const groupsByLens = codes.map((_, lens) => {
@@ -143,15 +171,34 @@ const metadata = `; concept-text-roundtrip-10000-13-metadata.fk -- generated exh
 `  (defn ctr13-candidates-path () "${candidatesPath}")\n` +
 `  (defn ctr13-index-sha256 () "${hex(index)}")\n` +
 `  (defn ctr13-candidates-sha256 () "${hex(candidates)}")\n` +
+`  (defn ctr13-sha256-valid? (path expected)\n` +
+`    (if (str_eq (host-exec (str_concat "/usr/bin/shasum -a 256 "\n` +
+`      (str_concat path (str_concat " | /usr/bin/grep -q '^"\n` +
+`        (str_concat expected "  ' && printf 1")))) "") "1") 1 0))\n` +
+`  (defn ctr13-artifacts-valid? ()\n` +
+`    (and (eq (ctr13-sha256-valid? (ctr13-index-path) (ctr13-index-sha256)) 1)\n` +
+`      (and (eq (ctr13-sha256-valid? (ctr13-candidates-path) (ctr13-candidates-sha256)) 1)\n` +
+`        (and (eq (ctr13-sha256-valid? "${nlPath}" "${hex(nlBytes)}") 1)\n` +
+`          (and (eq (ctr13-sha256-valid? "${sourcesPath}" "${hex(sources)}") 1)\n` +
+`            (and (eq (ctr13-sha256-valid? "${primarySemanticPath}" "${hex(primarySemantic)}") 1)\n` +
+`              (and (eq (ctr13-sha256-valid? "${overlaySemanticPath}" "${hex(overlaySemantic)}") 1)\n` +
+`                (and (eq (ctr13-sha256-valid? "${lexicalSemanticPath}" "${hex(lexicalSemantic)}") 1)\n` +
+`                  (and (eq (ctr13-sha256-valid? "${lexicalPayloadPath}" "${hex(lexicalPayload)}") 1)\n` +
+`                    (and (eq (ctr13-sha256-valid? "${repairSemanticPath}" "${hex(repairSemantic)}") 1)\n` +
+`                         (eq (ctr13-sha256-valid? "${repairPayloadPath}" "${hex(repairPayload)}") 1)))))))))))\n` +
 `)\n`;
 writeFileSync(metadataPath, metadata);
 
-const manifest = `concept_text_roundtrip_10000_13_v3\n` +
+const manifest = `concept_text_roundtrip_10000_13_v4\n` +
 `builder cognition/concept-text-roundtrip-10000-13-build.mjs\n` +
 `input_nl_sha256 ${hex(nlBytes)}\n` +
 `input_sources_sha256 ${hex(sources)}\n` +
 `input_primary_semantic_index_sha256 ${hex(primarySemantic)}\n` +
 `input_wiktionary_overlay_index_sha256 ${hex(overlaySemantic)}\n` +
+`input_wiktionary_lexical_index_sha256 ${hex(lexicalSemantic)}\n` +
+`input_wiktionary_lexical_payload_sha256 ${hex(lexicalPayload)}\n` +
+`input_substantive_repair_index_sha256 ${hex(repairSemantic)}\n` +
+`input_substantive_repair_payload_sha256 ${hex(repairPayload)}\n` +
 `cells 130000\n` +
 `candidate_entries ${candidateIds.length}\n` +
 `collision_cells ${collisionCells}\n` +

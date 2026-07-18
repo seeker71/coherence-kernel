@@ -13,7 +13,7 @@ Every locale contributes exactly 100 rows. The deterministic selection retains
 45 named real-life concept strata where the locale contains them, up to four
 surface-collision observations, four zero-detection observations, and an open
 lexical fill chosen to increase contributor and detected-concept diversity.
-The 1,300 rows contain 12,357 complete detector hits over 3,097 distinct concept
+The 1,300 rows contain 11,676 complete detector hits over 3,072 distinct concept
 IDs and 710 distinct locale/contributor pairs.
 
 The snapshot state is `human-contributed-unreviewed`: the export proves a named

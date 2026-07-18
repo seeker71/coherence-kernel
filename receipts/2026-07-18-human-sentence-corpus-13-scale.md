@@ -6,35 +6,36 @@ Date: 2026-07-18
 
 The attributed Tatoeba carrier grew from 147 to **1,300 real contributed
 sentences**, exactly 100 in every declared NL lens. The committed snapshot is
-432,395 bytes; its Form byte-offset index, generated metadata, and 13-archive
-manifest bring the compact carrier to 451,855 bytes. Full upstream archives
+429,086 bytes; its Form byte-offset index, generated metadata, and 13-archive
+manifest bring the compact carrier to 448,543 bytes. Full upstream archives
 remain outside git and are reproducible from the hash-pinned 130 MB compressed
 source revision.
 
 Every selected row retains the Tatoeba sentence ID and page URL, contributor,
 source dates, CC BY 2.0 FR license, exact six-field source-row SHA-256, role,
 matched surface, and the complete concept-ID result of a 10,000-label scan.
-Selection is deterministic: up to 45 named daily-life strata, four honest
-zero-detection rows, up to four surface collisions, then an open lexical fill
-that favors new contributors and concepts. Stored results are expectations;
-Form independently replayed all 1,300 rows.
+The fixed source-row selection began with up to 45 named daily-life strata,
+four zero-detection rows, up to four surface collisions, then an open lexical
+fill favoring new contributors and concepts. Canonical reindexing may move a
+row between open/ambiguity/negative while never changing its source identity.
+Stored results are expectations; Form independently replayed all 1,300 rows.
 
 | lens | rows | contributors | detected concepts | detections | domain | open | ambiguity | negative |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| en | 100 | 72 | 382 | 762 | 45 | 51 | 0 | 4 |
-| id | 100 | 44 | 645 | 1,019 | 39 | 54 | 3 | 4 |
-| es | 100 | 60 | 404 | 847 | 44 | 48 | 4 | 4 |
-| fr | 100 | 63 | 554 | 1,056 | 45 | 47 | 4 | 4 |
-| pt-br | 100 | 45 | 467 | 951 | 45 | 47 | 4 | 4 |
-| sw | 100 | 41 | 737 | 1,170 | 42 | 52 | 2 | 4 |
-| de | 100 | 48 | 412 | 703 | 45 | 47 | 4 | 4 |
-| ru | 100 | 60 | 323 | 473 | 45 | 49 | 2 | 4 |
-| zh | 100 | 56 | 779 | 2,073 | 42 | 50 | 4 | 4 |
-| ja | 100 | 61 | 596 | 1,602 | 41 | 51 | 4 | 4 |
-| ar | 100 | 60 | 262 | 376 | 34 | 58 | 4 | 4 |
-| hi | 100 | 44 | 425 | 752 | 38 | 54 | 4 | 4 |
-| tr | 100 | 56 | 391 | 573 | 45 | 47 | 4 | 4 |
-| **union / total** | **1,300** | **710 locale/contributor pairs** | **3,097 union IDs** | **12,357** | **550** | **655** | **43** | **52** |
+| en | 100 | 72 | 379 | 759 | 45 | 51 | 0 | 4 |
+| id | 100 | 44 | 634 | 988 | 39 | 53 | 3 | 5 |
+| es | 100 | 60 | 398 | 794 | 44 | 48 | 4 | 4 |
+| fr | 100 | 63 | 548 | 997 | 45 | 47 | 4 | 4 |
+| pt-br | 100 | 45 | 449 | 865 | 45 | 47 | 4 | 4 |
+| sw | 100 | 41 | 731 | 1,125 | 42 | 52 | 2 | 4 |
+| de | 100 | 48 | 402 | 666 | 45 | 47 | 4 | 4 |
+| ru | 100 | 60 | 313 | 450 | 45 | 49 | 2 | 4 |
+| zh | 100 | 56 | 766 | 1,949 | 42 | 50 | 4 | 4 |
+| ja | 100 | 61 | 580 | 1,441 | 41 | 51 | 4 | 4 |
+| ar | 100 | 60 | 259 | 369 | 34 | 59 | 4 | 3 |
+| hi | 100 | 44 | 416 | 716 | 38 | 54 | 4 | 4 |
+| tr | 100 | 56 | 388 | 557 | 45 | 47 | 4 | 4 |
+| **union / total** | **1,300** | **710 locale/contributor pairs** | **3,072 union IDs** | **11,676** | **550** | **655** | **43** | **52** |
 
 There are 656 globally distinct contributor names. “Contributor” is an
 attribution fact, not a native-speaker, editorial-review, or correctness claim.
@@ -48,15 +49,15 @@ an opaque string handle. Examples observed through the live complete detector:
 ```text
 en | id=1292 | by=Ramses | detected=8 | attributed-domain-match | I don't know if I have the time.
 id | id=331310 | by=umarsaid | detected=10 | ambiguity-retained | Ibu sedang masak di dapur.
-es | id=2481 | by=Shishir | detected=4 | ambiguity-retained | ¡Intentemos algo!
+es | id=2481 | by=Shishir | detected=3 | ambiguity-retained | ¡Intentemos algo!
 fr | id=1115 | by=TRANG | detected=15 | ambiguity-retained | Lorsqu'il a demandé qui avait cassé la fenêtre, tous les garçons ont pris un air innocent.
 pt-br | id=146680 | by=Leonroz | detected=3 | ambiguity-retained | Uma menina chorando abriu a porta.
 sw | id=338673 | by=Sprachprofi | detected=0 | expected-zero-detection | Ninakupenda.
 de | id=77 | by=ludoviko | detected=5 | ambiguity-retained | Lass uns etwas versuchen!
-ru | id=243 | by=sugisaki | detected=12 | attributed-domain-match | Один раз в жизни я делаю хорошее дело... И оно бесполезно.
-zh | id=5 | by=Zifre | detected=23 | ambiguity-retained | 今天是６月１８号，也是Muiriel的生日！
-ja | id=1297 | by=xtofu80 | detected=18 | ambiguity-retained | きみにちょっとしたものをもってきたよ。
-ar | id=331919 | by=hashimi | detected=0 | expected-zero-detection | ويل للكافرين
+ru | id=243 | by=sugisaki | detected=11 | attributed-domain-match | Один раз в жизни я делаю хорошее дело... И оно бесполезно.
+zh | id=5 | by=Zifre | detected=21 | ambiguity-retained | 今天是６月１８号，也是Muiriel的生日！
+ja | id=1297 | by=xtofu80 | detected=16 | ambiguity-retained | きみにちょっとしたものをもってきたよ。
+ar | id=331919 | by=hashimi | detected=1 | attributed-open-match | ويل للكافرين
 hi | id=440811 | by=minshirui | detected=5 | ambiguity-retained | मैं मोहन के साथ गेंद खेलने जा रहा हूँ।
 tr | id=170564 | by=Adopter | detected=3 | ambiguity-retained | Devenin belini kıran son saman çöpüdür.
 ```
@@ -71,7 +72,7 @@ The complete 1,300 × 10,000 walk was divided into thirteen disjoint contiguous
 100-row shards using `hcnl13-runtime-scan-range`. This is operational
 partitioning only: every shard calls the same Form occurrence law over all
 10,000 locale labels, and stored candidates never enter detection. The observed
-sum was **1,300/1,300 valid, 0 mismatches, 12,357 detections**. The bounded shard
+sum was **1,300/1,300 valid, 0 mismatches, 11,676 detections**. The bounded shard
 gate returns `15`; all thirteen raw shard witnesses returned 100 valid rows.
 
 ```sh
@@ -84,11 +85,12 @@ HCNL13_START=1200 HCNL13_END=1300 \
 ```
 
 Snapshot SHA-256:
-`cd2a86fbdc2f585d367a7c21007c6f7f8a4068cccca8f476809647c8e2c2439e`.
+`2912908cd4c6efd67e546f6114862d9e53b32c20b58133d8c9f9d939b4fdd2f1`.
 Archive-manifest SHA-256:
 `85c9de11503654e88496adc3feb44182d3cf9ae146cf8d09ae1bac168fab296d`.
-The local 13-archive regeneration with `--verify` reproduced every committed
-byte without Python.
+The selected source rows remain archive-hash-bound. Their detector fields were
+deterministically reindexed without Python after the 111 canonical labels were
+materialized into the primary table.
 
 ## Human-audio floor, not inflated
 

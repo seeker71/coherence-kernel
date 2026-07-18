@@ -307,5 +307,11 @@ machine_hash=$(shasum -a 256 "$machine_tsv" | awk '{print $1}')
   done
 } > "$output_base-source-manifest.txt"
 
+# A base OMW rebuild must not restore the displaced debris labels. Materialize
+# the committed repair evidence, then reindex every hash-bound consumer.
+node "$repo_root/cognition/concept-nl-substantive-repair-materialize.mjs"
+node "$repo_root/cognition/concept-text-roundtrip-10000-13-build.mjs"
+node "$repo_root/cognition/concept-human-corpus-13-reindex.mjs"
+
 echo "built $output_base-omw.tsv"
 wc -l "$output_base-omw.tsv"

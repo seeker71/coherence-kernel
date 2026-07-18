@@ -7,6 +7,7 @@
 import { createHash } from "node:crypto";
 import { readFile, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 
 const root = resolve(new URL("..", import.meta.url).pathname);
 const sourceUrl = "https://raw.githubusercontent.com/hermitdave/FrequencyWords/525f9b560de45753a5ea01069454e72e9aa541c6/content/2018/en/en_50k.txt";
@@ -336,4 +337,12 @@ for (let i = 0; i < 111; i++) {
 await buildCarriers(evidence, current);
 await buildForms(evidence);
 await writeManifest(evidence);
+for (const script of [
+  "cognition/concept-nl-substantive-repair-materialize.mjs",
+  "cognition/concept-text-roundtrip-10000-13-build.mjs",
+  "cognition/concept-human-corpus-13-reindex.mjs",
+]) {
+  const result = spawnSync(process.execPath, [script], { cwd: root, stdio: "inherit" });
+  if (result.status !== 0) throw new Error(`downstream canonical rebuild failed: ${script}`);
+}
 process.stdout.write(`repaired 111 stable IDs; 111 aliases; 111 definitions; 1,443 attributed NL cells\n`);

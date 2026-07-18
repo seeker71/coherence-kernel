@@ -7,10 +7,14 @@
 
 `presence/concept-pl-real-life-workflows-live.fk` turns the six public algorithm
 families into named work contracts without replacing their sources with toy
-Form examples.  It rereads and analyzes every one of the 78 pinned Exercism
+Form examples.  It rereads and analyzes all 78 attributed local Exercism
 programs through the existing native scanner, balanced-group AST, and
 family-specific semantic IR.  One varied language is then exposed in full for
 each concrete workflow:
+
+Seventy-seven carriers are byte-identical to their pinned Git objects. The C#
+Luhn carrier has one explicitly recorded trailing POSIX newline normalization;
+its upstream and local hashes both remain named in the public-source receipt.
 
 | real work | public family / selected source | input contract | operational contract |
 |---|---|---|---|
@@ -32,7 +36,7 @@ The non-test door prints source byte count, token count, AST
 nodes/groups/depth, semantic-role count, admission, both negative witnesses,
 and world admission for every workflow.  The selected live rows were:
 
-| workflow | bytes | tokens | AST nodes/groups/depth | roles | admitted | meaning mutation rejected | malformed rejected |
+| workflow | bytes | tokens | AST nodes/groups/depth | roles | admitted | anchor-role mutation rejected | malformed rejected |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | checkout | 598 | 112 | 105/7/1 | 10/10 | 1 | 1 | 1 |
 | inventory | 638 | 162 | 144/18/6 | 8/8 | 1 | 1 | 1 |

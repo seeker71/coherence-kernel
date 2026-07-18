@@ -5,6 +5,7 @@
 
 import fs from "node:fs";
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 
 const root = "model/fixtures/whisper-tiny";
 const read = (name) => fs.readFileSync(`${root}/${name}`);
@@ -56,30 +57,36 @@ const cols = Array.from({length: 6}, (_, i) => column(4160 + i * 160));
 const peak = Math.max(...cols.flat());
 const normalized = cols.map((col) => col.map((x) => (Math.max(x, peak - 8) + 4) / 4));
 
-// Independent A&S erf. Math.exp is used here rather than Form's tn-exp.
-const erf = (x) => {
-  const sign = x < 0 ? -1 : 1, ax = Math.abs(x), t = 1 / (1 + 0.3275911 * ax);
-  const poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-  return sign * (1 - poly * Math.exp(-ax * ax));
+// Ruby's libm-backed Math.erf is intentionally independent from Form's A&S
+// approximation. Values cross the process boundary as little-endian f64.
+const geluLibm = (values) => {
+  const input = Buffer.alloc(values.length * 8);
+  values.forEach((x, i) => input.writeDoubleLE(x, i * 8));
+  const code = "STDOUT.write(STDIN.read.unpack('E*').map{|x| 0.5*x*(1.0+Math.erf(x/Math.sqrt(2.0)))}.pack('E*'))";
+  const run = spawnSync("ruby", ["-e", code], {input, maxBuffer: 1024 * 1024});
+  if (run.status !== 0 || run.stdout.length !== input.length)
+    throw new Error(`Ruby libm GELU failed: ${run.stderr.toString()}`);
+  return values.map((_, i) => run.stdout.readDoubleLE(i * 8));
 };
-const gelu = (x) => 0.5 * x * (1 + erf(x / Math.SQRT2));
-const conv1 = (start) => Array.from({length: 384}, (_, out) => {
+const conv1Raw = (start) => Array.from({length: 384}, (_, out) => {
   let value = b1.readFloatLE(out * 4);
   for (let input = 0; input < 80; input += 1) for (let time = 0; time < 3; time += 1)
     value += w1.readFloatLE(((out * 80 + input) * 3 + time) * 4) * normalized[start + time][input];
-  return gelu(value);
+  return value;
 });
-const conv1Tokens = Array.from({length: 4}, (_, i) => conv1(i));
-const token = Array.from({length: 384}, (_, out) => {
+const conv1Activated = geluLibm(Array.from({length: 4}, (_, i) => conv1Raw(i)).flat());
+const conv1Tokens = Array.from({length: 4}, (_, i) => conv1Activated.slice(i * 384, (i + 1) * 384));
+const conv2Raw = Array.from({length: 384}, (_, out) => {
   let value = b2.readFloatLE(out * 4);
   for (let input = 0; input < 384; input += 1) for (let time = 0; time < 3; time += 1)
     value += w2.readFloatLE(((out * 384 + input) * 3 + time) * 4) * conv1Tokens[time + 1][input];
-  return gelu(value);
+  return value;
 });
+const token = geluLibm(conv2Raw);
 const positions = [0, 1, 2, 3, 95, 191, 287, 383];
 const fingerprint = [...positions.map((i) => token[i]), token.reduce((a, x) => a + x, 0), token.reduce((a, x) => a + Math.abs(x), 0)];
 console.log(JSON.stringify({
-  implementation: "independent-node-direct-dft-slaney-released-whisper-stem",
+  implementation: "independent-node-direct-dft-slaney-convolutions+ruby-libm-erf-gelu",
   source: "Lingua-Libre-M92036254-human-book", dataOffset, melShape: [6, 80], peak,
   conv1WeightShape: [384, 80, 3], conv2WeightShape: [384, 384, 3],
   learnedParameters: 535296,
