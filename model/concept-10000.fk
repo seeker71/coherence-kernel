@@ -17,7 +17,7 @@
 ; Record: (id label rank frequency features)
 ; Features: (id label-byte-hash byte-length first-byte last-byte frequency-band)
 ;
-; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk model/concept-10000-data.fk
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk model/concept-10000-data.fk model/concept-10000-substantive-repair-data.fk
 (do
   (defn c10-count () 10000)
   (defn c10-record-width () 30)
@@ -71,7 +71,10 @@
     (if (c10-valid-id? id)
       (do (let label (c10-ranked-label-at corpus id))
           (let frequency (c10-ranked-frequency-at corpus id))
-          (c10-record id label (add id 1) frequency
+          ; Stable IDs do not pretend to be corpus ranks after the 111-slot
+          ; substantive repair. Repaired records expose their exact upstream
+          ; rank; every untouched record keeps the original arithmetic rank.
+          (c10-record id label (csr111-effective-rank id (add id 1)) frequency
             (c10-features id label frequency)))
       (c10-missing)))
   (defn c10-concept-at (id)
@@ -107,18 +110,35 @@
       (c10-detect-text-search corpus index text 0 count)))
   (defn c10-detect-text-in (corpus index text)
     (c10-detect-text-n-in corpus index text (c10-count)))
+  ; Compatibility migration: canonical lookup wins, then each displaced
+  ; surface can still resolve through the separate, attributable alias index.
+  ; Alias lookup returns the repaired canonical record at the same stable ID.
+  (defn c10-alias-count-in (aliases)
+    (if (eq (mod (str_len aliases) (c10-index-width)) 0)
+      (div (str_len aliases) (c10-index-width)) -1))
+  (defn c10-detect-text-with-alias-in (corpus index aliases text)
+    (do (let canonical (c10-detect-text-in corpus index text))
+        (if (not (c10-missing? canonical)) canonical
+          (c10-detect-text-n-in corpus aliases text
+            (c10-alias-count-in aliases)))))
   (defn c10-detect-text (text)
-    (c10-detect-text-in
+    (c10-detect-text-with-alias-in
       (read_file (c10-ranked-path))
-      (read_file (c10-lexical-index-path)) text))
+      (read_file (c10-lexical-index-path))
+      (read_file (csr111-alias-index-path)) text))
   (defn c10-detect-tokens-in (corpus index tokens)
     (if (eq (len tokens) 0) (empty)
       (cons (c10-detect-text-in corpus index (head tokens))
             (c10-detect-tokens-in corpus index (tail tokens)))))
   (defn c10-detect-tokens (tokens)
-    (c10-detect-tokens-in
-      (read_file (c10-ranked-path))
-      (read_file (c10-lexical-index-path)) tokens))
+    (do (let corpus (read_file (c10-ranked-path)))
+        (let index (read_file (c10-lexical-index-path)))
+        (let aliases (read_file (csr111-alias-index-path)))
+        (c10-detect-tokens-with-alias-in corpus index aliases tokens)))
+  (defn c10-detect-tokens-with-alias-in (corpus index aliases tokens)
+    (if (eq (len tokens) 0) (empty)
+      (cons (c10-detect-text-with-alias-in corpus index aliases (head tokens))
+            (c10-detect-tokens-with-alias-in corpus index aliases (tail tokens)))))
 
   ; Feature detection is indexed by feature[0]=id and then integrity-checked.
   ; A predicted/corrupted id cannot borrow another record's label signature.
