@@ -27,14 +27,18 @@ FlashInfer. No benchmark or throughput number was reproduced in this checkout.
 
 ## What entered
 
-`ingest/frontier-ingest-lingbot-map.fk` sorts seven findings through the unchanged
-knowledge-ingest law: **2 body, 3 liquid, 2 compost** (`20302`, band `127`).
+At first, `ingest/frontier-ingest-lingbot-map.fk` sorted seven findings through
+the unchanged knowledge-ingest law as **2 body, 3 liquid, 2 compost**. The
+same-day live build moved image/geometry reconstruction from liquid into body;
+the fresh classification is **3 body, 2 liquid, 2 compost** (`30202`, band
+`127`). The executable continuation and its exact live outputs are recorded in
+[`2026-07-18-lingbot-map-live-native-pipeline.md`](2026-07-18-lingbot-map-live-native-pipeline.md).
 
 - **Body:** selective hierarchical retention is a durable streaming principle;
   and honest range/reset caveats belong beside every long-context claim.
-- **Liquid:** LingBot-Map is a concrete future visual-world roadmap, but the body
-  has no loaded weights, image encoder, camera-pose/depth heads, point-cloud
-  reconstruction, or native single-GPU witness.
+- **Liquid:** full learned-checkpoint parity and the authors' CUDA/FlashInfer
+  throughput remain unwitnessed; an authentic released tensor and a native
+  visual-world path now execute without claiming either result.
 - **Compost:** “any scene,” “without falling apart,” and unqualified local use of
   the authors' FPS/benchmark claims.
 
@@ -57,8 +61,10 @@ This ingest grew three pure-Form organs, with no Python runtime in the body:
   anchor, recent, and selected trajectory observations while releasing obsolete
   intermediates: **127 four-way**.
 
-These implement geometry and state mechanics, not the learned DINO/VGGT-derived
-weights, FlashInfer kernels, or pose/depth heads. That remaining gap stays liquid.
+These were the first mechanics. The continuation receipt names the later image,
+ViT, attention, operational K/V, checkpoint-loader, pose/depth, point-cloud, and
+world-model build. Full learned DINO/VGGT graph parity and FlashInfer throughput
+remain liquid.
 
 ## Closing
 
