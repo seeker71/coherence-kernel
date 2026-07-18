@@ -363,14 +363,17 @@ if [ "${NATIVE_MODEL_SESSION_GROUNDING_PREFLIGHT_ONLY:-0}" -eq 1 ]; then
     exit 0
 fi
 
-band=$($NM_FKWU --src form/form-stdlib/tests/native-model-session-grounding-band.fk)
+# Use the native program-image selector for these canonical Form cells.  `--src`
+# deliberately bypasses the fresh .fkb cache and repeatedly reparses this large
+# replay closure; a plain .fk invocation emits/loads the same Form program image.
+band=$($NM_FKWU form/form-stdlib/tests/native-model-session-grounding-band.fk)
 if [ "$band" != 4095 ]; then
     printf 'session grounding band failed: expected 4095, observed %s\n' "$band" >&2
     exit 1
 fi
 
 replay_started=$(date +%s)
-$NM_FKWU --src form/form-stdlib/native-model-session-grounding-cli.fk \
+$NM_FKWU form/form-stdlib/native-model-session-grounding-cli.fk \
     < "$form_input" > "$raw_report" &
 cli_pid=$!
 (
