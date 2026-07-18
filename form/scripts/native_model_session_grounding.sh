@@ -161,9 +161,9 @@ done < "$sessions"
 labeled_pairs_observed=$(wc -l < "$pairs_all" | tr -d ' ')
 # The native walker replays this privacy-minimized diagnostic without a
 # promotion path.  Keep the default corpus deliberately small enough for a
-# daily witness: four recent labeled queries against eight admitted paths.
+# daily witness: one recent labeled query against four admitted paths.
 # Operators may raise either bound explicitly for a separately reviewed run.
-query_limit=${NATIVE_MODEL_SESSION_GROUNDING_QUERIES:-4}
+query_limit=${NATIVE_MODEL_SESSION_GROUNDING_QUERIES:-1}
 sort -k1,1 -u "$pairs_all" | tail -n "$query_limit" > "$pairs_raw"
 episode_count=$(wc -l < "$pairs_raw" | tr -d ' ')
 if [ "$episode_count" -lt 1 ]; then
@@ -194,7 +194,7 @@ done < "$pairs_raw"
 awk -F '\t' '{n=split($4,a,","); for (i=1; i<=n; i++) if (a[i] != "") print a[i]}' \
     "$pairs" | sort -u > "$label_ids"
 distinct_label_count=$(wc -l < "$label_ids" | tr -d ' ')
-admitted_limit=${NATIVE_MODEL_SESSION_GROUNDING_CANDIDATES:-8}
+admitted_limit=${NATIVE_MODEL_SESSION_GROUNDING_CANDIDATES:-4}
 case "$admitted_limit" in
     ''|*[!0-9]*) printf 'invalid admitted candidate limit: %s\n' "$admitted_limit" >&2; exit 1 ;;
 esac
