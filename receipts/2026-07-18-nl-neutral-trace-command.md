@@ -176,6 +176,33 @@ Sweep-aware behavior, kept truthful:
   tail carried one cons per row, appends through the native
   `file_append_bytes`, the vec computed once per row for both files.
 
+## Fifth pass: the trace is a live stream
+
+Every trace line is now EMITTED the moment its fact exists — nothing waits
+for the end of the run. Boot events land within milliseconds of the body's
+first evaluated expression; each locale seat's verdict streams as its
+10k-row scan completes (watchably, ~1.5 s apart); the neutral cell, the
+gloss, the parents, the dictionary verdict, the rag answer, the measured
+receipt, and the ledger row each arrive as they are computed; the pivot
+stage emits the interned pivot cell's REAL coordinates live
+(`node_pkg`/`node_level`/`node_type`/`node_inst` of the actual node).
+
+One runtime line made this true on every surface: `print_str` (op 115) now
+flushes after each emitted line (`fflush(0)` — no `FILE` type needed in the
+freestanding extern set), so the stream is live through a pipe exactly as on
+a tty. Both bootstrap witnesses (`42`, `55`) hold on the rebuilt seed. What
+the stream cannot cover is named in its own first line: the C seed's compile
+phase runs before the body can speak.
+
+The interruption drill also caught a truth hole: killing a sweep mid-run
+left the previous sweep's row meta claiming "swept" over a truncated file.
+The sweep now resets the meta FIRST, so an interrupted sweep always reads as
+interrupted.
+
+Witnessed arrival times (piped, timestamped per line): boot events at
++0.00–0.02 s after compile; seven seat verdicts streaming individually;
+full two-lane run complete in ~12 s; band verdict unchanged at **1048575**.
+
 ## Still open, in order
 
 1. Seat the remaining 10 tongues on the pivot (`nl-pivot-de.fk` is the worked

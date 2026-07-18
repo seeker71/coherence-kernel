@@ -76,6 +76,18 @@
   (defn nnt-size (path) (file_size path))
   (defn nnt-sized (path)
     (nnt-cat (list path " (" (int_to_str (nnt-size path)) " bytes)")))
+
+  ;; ---------- the live event door ----------
+  ; Every trace line is EMITTED the moment its fact exists — print_str
+  ; flushes per line (runtime op 115), so the stream is live on a pipe as on
+  ; a tty, from the first evaluated expression. The compile phase before the
+  ; body speaks belongs to the C seed and is named in the boot event.
+  (defn nnt-emit (line) (print_str line))
+  (defn nnt-emit2 (a b) (print_str (str_concat a b)))
+  ; the real interned coordinates of a node, live
+  (defn nnt-node-addr (n)
+    (nnt-cat (list "@" (int_to_str (node_pkg n)) "." (int_to_str (node_level n))
+      "." (int_to_str (node_type n)) "." (int_to_str (node_inst n)))))
   (defn nnt-count-lines (s i n count)
     (if (ge i n) count
       (nnt-count-lines s (add i 1) n
@@ -108,16 +120,22 @@
   ;; ---------- stage 1: the locale choice path (which-plane, computable) ----------
   ; walk = (status attempts fails first-code hit path-string cut)
   ; cut = seats never tried after the first seat matched (pruned alternatives).
+  ; each seat's verdict is emitted live as its 10k-row scan completes
   (defn nnt-walk-go (rt codes label attempts fails path)
     (if (eq (len codes) 0)
       (list "miss" attempts fails "" (empty) path 0)
       (do (let hit (cnl13-runtime-detect-first rt (head codes) label))
           (if (eq (len hit) 0)
-            (nnt-walk-go rt (tail codes) label (add attempts 1) (add fails 1)
-              (str_concat path (str_concat (head codes) ":miss ")))
-            (list "hit" (add attempts 1) fails (head codes) hit
-              (str_concat path (str_concat (head codes) ":HIT"))
-              (sub (len codes) 1))))))
+            (do (nnt-emit (nnt-cat (list "[detect] seat " (head codes)
+                  ": miss (10000 rows scanned)")))
+                (nnt-walk-go rt (tail codes) label (add attempts 1) (add fails 1)
+                  (str_concat path (str_concat (head codes) ":miss "))))
+            (do (nnt-emit (nnt-cat (list "[detect] seat " (head codes)
+                  ": HIT row " (int_to_str (nth hit 0)) " - "
+                  (int_to_str (sub (len codes) 1)) " seats cut after commit")))
+                (list "hit" (add attempts 1) fails (head codes) hit
+                  (str_concat path (str_concat (head codes) ":HIT"))
+                  (sub (len codes) 1)))))))
   (defn nnt-walk (rt label) (nnt-walk-go rt (cnl13-locale-codes) label 0 0 ""))
 
   ;; ---------- per-rule BMF counters (real, measured) ----------
@@ -465,182 +483,219 @@
   (defn nnt-distractor (rt idx)
     (do (let fire-idx (nnt-seat-row rt "en" "fire"))
         (if (eq fire-idx idx) (nnt-seat-row rt "en" "water") fire-idx)))
+  ; The lane is a LIVE STREAM: every line is emitted the moment its fact
+  ; exists — seat verdicts as each scan completes, the neutral cell as it is
+  ; found, the rag answer as the sidecar scan returns, the receipt as it is
+  ; measured. Nothing waits for the end of the run.
   (defn nnt-lane (rt lane)
     (do (let asserted-code (nth lane 0))
         (let target-code (nth lane 1))
         (let query (nth lane 2))
+        (nnt-emit (nnt-cat (list "==== lane " asserted-code " query '" query
+          "' (target " target-code ") ====")))
+        (nnt-emit "-- stage 1: NL -> neutral concept (plane: which -> computable lookup)")
+        (nnt-emit (nnt-cat (list "  recipe: " (nnt-sized "cognition/concept-nl-semantic-13.fk")
+          " + " (nnt-sized "cognition/concept-nl-semantic-13-runtime.fk"))))
+        (nnt-emit "[detect] registry-order walk begins - each seat verdict streams as its scan completes")
         (let walk (nnt-walk rt query))
         (let asserted (cnl13-runtime-detect-first rt asserted-code query))
         (if (eq (len asserted) 0)
-          (nnt-cat (list
-            "==== lane " asserted-code " query '" query "' ====\n"
-            "  no row in the asserted locale column; registry-order walk said: "
-            (nth walk 5) "\n"
-            "  follow-up: try another seat from (cnl13-locale-codes) or a label from the 10k table\n"))
+          (do (nnt-emit (nnt-cat (list
+                "  no row in the asserted locale column; registry-order walk said: " (nth walk 5))))
+              (nnt-emit "  follow-up: try another seat from (cnl13-locale-codes) or a label from the 10k table")
+              "")
           (do
             (let idx (nth asserted 0))
             (let synset (nth asserted 1))
             (let offs (cnl13-runtime-offsets rt))
+            (nnt-emit (nnt-cat (list
+              "[neutral] data cell: cognition/concept-nl-semantic-13-omw.tsv row " (int_to_str idx)
+              ", bytes [" (int_to_str (nth offs idx)) ".." (int_to_str (nth offs (add idx 1)))
+              ") of " (int_to_str (nnt-size "cognition/concept-nl-semantic-13-omw.tsv")))))
+            (nnt-emit (nnt-cat (list
+              "  paths available: 13 locale seats | tried: " (int_to_str (nth walk 1))
+              " | succeeded: 1 | failed: " (int_to_str (nth walk 2))
+              " | cut(pruned after commit): " (int_to_str (nth walk 6)))))
+            (nnt-emit (nnt-cat (list
+              "  asserted seat: " asserted-code " -> row " (int_to_str idx)
+              " | walk-first seat: " (nth walk 3)
+              " -> row " (if (eq (len (nth walk 4)) 0) "none" (int_to_str (nth (nth walk 4) 0)))
+              (if (eq (len (nth walk 4)) 0) ""
+                (if (eq (nth (nth walk 4) 0) idx) " (agrees)" " (HOMOGRAPH FORK - assertion decided)")))))
             (let src-in (cnl13-runtime-lookup-sourced rt idx asserted-code))
-            (let src-out (cnl13-runtime-lookup-sourced rt idx target-code))
+            (nnt-emit (nnt-cat (list
+              "  neutral anchor: PWN 3.0 synset " synset
+              " | input label source: " (nth src-in 5) " (state " (nth src-in 4) ")")))
+            (nnt-emit (nnt-cat (list
+              "  follow-up: stage '<asserted> <target> <query>' at " (nnt-staged-query-path)
+              " and re-run this command")))
+            (nnt-emit "  north-star gap: exact-label detection only; next: learned held-out detection with reviewed corpora")
+            (nnt-emit "-- stage 2: neutral identity + description + parents (planes: where/what)")
+            (nnt-emit (nnt-cat (list "  recipes: " (nnt-sized "model/concept-10000.fk")
+              " + " (nnt-sized "model/concept-semantics-10000.fk")
+              " + " (nnt-sized "cognition/concept-text-senses-10000.fk"))))
+            (nnt-emit (nnt-cat (list "  data cells: " (nnt-sized "model/concept-10000-ranked.dat")
+              " + " (nnt-sized "model/concept-semantics-10000-payload.dat")
+              " + " (nnt-sized "cognition/concept-text-senses-10000.tsv"))))
             (let en-row (cnl13-runtime-lookup-sourced rt idx "en"))
             (let c10 (c10-detect-text (nth en-row 3)))
+            (nnt-emit (nnt-cat (list
+              "[neutral] c10 id/label/rank/frequency: " (int_to_str (c10-concept-id c10)) "/"
+              (c10-concept-label c10) "/" (int_to_str (c10-concept-rank c10)) "/"
+              (int_to_str (c10-concept-frequency c10)))))
+            (let sem (cs10-at idx))
+            (nnt-emit (nnt-cat (list
+              "[neutral] description (WordNet 3.1 " (cs10-synset-id sem) ", " (cs10-method-label sem)
+              " map; note: stage 1's anchor is PWN 3.0 via OMW - two versions, both named): "
+              (cs10-gloss sem))))
+            (nnt-emit (nnt-cat (list "  polysemy, open not hidden: " (nnt-senses-line idx))))
+            (nnt-emit (nnt-cat (list "  all 13 seats: " (nnt-all-seats rt idx))))
+            (nnt-emit "  parent concepts (hypernym chain, depth 2):")
+            (nnt-emit (nnt-parents rt idx asserted-code target-code))
+            (nnt-emit (nnt-cat (list
+              "  follow-up: (cs10-at <row>) for any anchor's description; (cts10-senses-in ...) for every sense; "
+              "presence/concept-lenses-26-live.fk for the 26-lens crossing")))
+            (nnt-emit (nnt-cat (list
+              "  north-star gap: 7371/10000 anchors carry a WordNet map (2629 explicit misses, never padded); "
+              "glosses are English-only until the seats grow their own")))
+            (nnt-emit "-- stage 3: neutral -> NL (plane: what -> table generation, bounded)")
+            (nnt-emit (nnt-cat (list
+              "  recipes: cognition/concept-nl-semantic-13.fk (label) + " (nnt-sized "cognition/nl-lenses-13.fk")
+              " + " (nnt-sized "cognition/nl-lenses-13-data.fk"))))
+            (let src-out (cnl13-runtime-lookup-sourced rt idx target-code))
             (let out-label (cnl13-runtime-generate rt idx target-code))
+            (nnt-emit (nnt-cat (list
+              "[generate] " target-code " label: " out-label
+              " (source " (nth src-out 5) ", state " (nth src-out 4) ")")))
             (let frame (nl13-generate target-code 4 out-label))
             (let redetect (nl13-detect-generated-runtime frame))
+            (nnt-emit (nnt-cat (list "[generate] nl13 grounded frame (meaning 4): " frame)))
+            (nnt-emit (nnt-cat (list "[generate] nl13 re-detected lens: " redetect)))
+            (let mach (read_file (nnt-mach-path)))
+            (let mach-out (nnt-mach-label mach idx target-code))
+            (let dict-verdict (nnt-dict-compare out-label mach-out))
+            (nnt-emit (nnt-cat (list
+              "[dict] local oracle dictionary (machine row, " (nnt-sized (nnt-mach-path)) "): "
+              target-code " says '" mach-out "' -> " dict-verdict
+              " (source-priority law: wikt-then-dedicated-wordnet-then-cldr-then-machine)")))
+            (nnt-emit "  follow-up: (nl13-generate \"<seat>\" 4 \"<label>\") | (nnt-mach-label (read_file (nnt-mach-path)) <row> \"<seat>\") for any dictionary cell")
+            (nnt-emit "  north-star gap: labels mapped-unreviewed; next: native-speaker review, then learned generation")
+            (nnt-emit "-- stage 4: rag concept match, persisted index (plane: which -> computable overlap rank)")
+            (nnt-emit (nnt-cat (list "  recipes: " (nnt-sized "form/form-stdlib/rag-ask.fk")
+              " + " (nnt-sized "form/form-stdlib/rag-retrieve.fk")
+              " + " (nnt-sized "form/form-stdlib/rag-embed.fk")
+              " + " (nnt-sized "form/form-stdlib/rag-index-codec.fk"))))
             (let didx (nnt-distractor rt idx))
             ; a swept full-body index is preserved and queried through the
             ; sidecar fast lane; the two-row focused index is only written
             ; (and production-scanned whole) when no sweep has landed
             (let written (if (eq (nnt-index-swept?) 1) ""
               (nnt-write-index rt idx didx)))
+            (nnt-emit (nnt-cat (list
+              (if (eq (nnt-index-swept?) 1)
+                "[rag] full swept index preserved (rewrite skipped)"
+                (nnt-cat (list "[rag] focused index written this run: "
+                  (int_to_str (str_len written)) " bytes")))
+              " -> " (nnt-rag-index-home) "  status: " (nnt-rag-status))))
+            (nnt-emit (if (eq (nnt-index-swept?) 1)
+              "[rag] ranking: sidecar overlap scan over all rows..."
+              "[rag] ranking: production stream over the focused file..."))
             (let hit (if (eq (nnt-index-swept?) 1)
               (nnt-fast-hit query)
               (ra-grounded-hit-at (nnt-rag-index-home) query)))
+            (if (eq (ra-hit? hit) 0)
+              (nnt-emit "[rag] MISS through the read path")
+              (do (nnt-emit (nnt-cat (list
+                    "[rag] answer: cell " (ra-hit-node-id hit)
+                    " (content " (ra-hit-content-node-id hit)
+                    ", answer " (int_to_str (str_len (ra-hit-answer hit)))
+                    " bytes, key = sha256 of the committed row bytes)")))
+                  (nnt-emit (nnt-cat (list
+                    "  score/runner/qtotal/threshold/confidence: "
+                    (int_to_str (ra-hit-score hit)) "/" (int_to_str (ra-hit-runner-score hit)) "/"
+                    (int_to_str (ra-hit-query-total hit)) "/" (int_to_str (ra-hit-threshold hit)) "/"
+                    (int_to_str (ra-hit-confidence hit)))))))
+            (nnt-emit (nnt-cat (list
+              "  rows ranked: " (if (eq (nnt-index-swept?) 1)
+                (int_to_str (nnt-meta-rows)) "2")
+              " | admission fails: 0 | timeouts: 0"
+              (if (eq (nnt-index-swept?) 1)
+                " | rank lane: sidecar overlap cache; admission: production codec on the selected row"
+                " | rank + admission: production stream over the whole file"))))
+            (nnt-emit (nnt-cat (list
+              "  follow-up: the same file answers form-cli 'grounded <question>' and 'rag-status'; "
+              "full-body sweep: ./fkwu --src cognition/tests/nl-neutral-trace-sweep-live.fk")))
+            (nnt-emit (if (eq (nnt-index-swept?) 1)
+              "  north-star: the 10k sweep has landed - every concept row is grounded in this home"
+              "  north-star gap: index covers the queried rows; the sweep command lands all 10k"))
+            (nnt-emit "-- stage 5: choice receipt + comparison ledger (plane: why -> learned; recorded every run)")
+            (nnt-emit (nnt-cat (list "  recipe: " (nnt-sized "form/form-stdlib/choice-receipt.fk")
+              "  blueprints: CHOICE-CANDIDATE @1.2.99.1736(a7) CHOICE-TRACE @1.2.99.1737(a5) "
+              "CHOICE-VALUE @1.2.99.1738(a6) CHOICE-RECEIPT @1.2.99.1739(a15) CHOICE-SIGNATURE @1.2.99.1743")))
             (let receipt (nnt-receipt asserted-code (nth walk 1) (nth walk 2) 2 0))
-            (let sem (cs10-at idx))
-            (let mach (read_file (nnt-mach-path)))
-            (let mach-out (nnt-mach-label mach idx target-code))
-            (let dict-verdict (nnt-dict-compare out-label mach-out))
+            (nnt-emit (nnt-cat (list "[receipt] " (nnt-receipt-lines receipt))))
+            (nnt-emit (nnt-cat (list
+              "  why this path: asserted locale is the cheapest sufficient evidence; the walk exists to "
+              "surface homograph forks; rag independently re-grounds the same cell from disk")))
+            (nnt-emit (nnt-cat (list "[oracle] " (nnt-oracle-report out-label))))
             (let ledger-rows (nnt-ledger-append (nnt-cat (list
               asserted-code "|" query "|row-" (int_to_str idx) "|" out-label
               "|dict-" dict-verdict "|"
               (if (le (file_size (nnt-oracle-answer-path)) 0) "native-only"
                 (str_concat "oracle-agree-" (int_to_str (nnt-agreement out-label
                   (nnt-strip-nl (read_file (nnt-oracle-answer-path)))))))))))
-            (nnt-cat (list
-              "==== lane " asserted-code " query '" query "' (target " target-code ") ====\n"
-              "-- stage 1: NL -> neutral concept (plane: which -> computable lookup)\n"
-              "  recipe: " (nnt-sized "cognition/concept-nl-semantic-13.fk")
-              " + " (nnt-sized "cognition/concept-nl-semantic-13-runtime.fk") "\n"
-              "  data cell: cognition/concept-nl-semantic-13-omw.tsv row " (int_to_str idx)
-              ", bytes [" (int_to_str (nth offs idx)) ".." (int_to_str (nth offs (add idx 1)))
-              ") of " (int_to_str (nnt-size "cognition/concept-nl-semantic-13-omw.tsv")) "\n"
-              "  paths available: 13 locale seats "
-              "| tried: " (int_to_str (nth walk 1))
-              " | succeeded: 1 | failed: " (int_to_str (nth walk 2))
-              " | cut(pruned after commit): " (int_to_str (nth walk 6)) "\n"
-              "  choice path walked: " (nth walk 5) "\n"
-              "  asserted seat: " asserted-code " -> row " (int_to_str idx)
-              " | walk-first seat: " (nth walk 3)
-              " -> row " (if (eq (len (nth walk 4)) 0) "none" (int_to_str (nth (nth walk 4) 0)))
-              (if (eq (len (nth walk 4)) 0) ""
-                (if (eq (nth (nth walk 4) 0) idx) " (agrees)" " (HOMOGRAPH FORK - assertion decided)")) "\n"
-              "  neutral anchor: PWN 3.0 synset " synset
-              " | input label source: " (nth src-in 5) " (state " (nth src-in 4) ")\n"
-              "  follow-up: stage '<asserted> <target> <query>' at " (nnt-staged-query-path)
-              " and re-run this command\n"
-              "  north-star gap: exact-label detection only; next: learned held-out detection with reviewed corpora\n"
-              "-- stage 2: neutral identity + description + parents (planes: where/what)\n"
-              "  recipes: " (nnt-sized "model/concept-10000.fk")
-              " + " (nnt-sized "model/concept-semantics-10000.fk")
-              " + " (nnt-sized "cognition/concept-text-senses-10000.fk") "\n"
-              "  data cells: " (nnt-sized "model/concept-10000-ranked.dat")
-              " + " (nnt-sized "model/concept-semantics-10000-payload.dat")
-              " + " (nnt-sized "cognition/concept-text-senses-10000.tsv") "\n"
-              "  c10 id/label/rank/frequency: " (int_to_str (c10-concept-id c10)) "/"
-              (c10-concept-label c10) "/" (int_to_str (c10-concept-rank c10)) "/"
-              (int_to_str (c10-concept-frequency c10)) "\n"
-              "  description (WordNet 3.1 " (cs10-synset-id sem) ", " (cs10-method-label sem)
-              " map; note: stage 1's anchor is PWN 3.0 via OMW - two versions, both named): "
-              (cs10-gloss sem) "\n"
-              "  polysemy, open not hidden: " (nnt-senses-line idx) "\n"
-              "  all 13 seats: " (nnt-all-seats rt idx) "\n"
-              "  parent concepts (hypernym chain, depth 2):\n"
-              (nnt-parents rt idx asserted-code target-code)
-              "  follow-up: (cs10-at <row>) for any anchor's description; (cts10-senses-in ...) for every sense; "
-              "presence/concept-lenses-26-live.fk for the 26-lens crossing\n"
-              "  north-star gap: 7371/10000 anchors carry a WordNet map (2629 explicit misses, never padded); "
-              "glosses are English-only until the seats grow their own\n"
-              "-- stage 3: neutral -> NL (plane: what -> table generation, bounded)\n"
-              "  recipes: cognition/concept-nl-semantic-13.fk (label) + " (nnt-sized "cognition/nl-lenses-13.fk")
-              " + " (nnt-sized "cognition/nl-lenses-13-data.fk") "\n"
-              "  generated " target-code " label: " out-label
-              " (source " (nth src-out 5) ", state " (nth src-out 4) ")\n"
-              "  nl13 grounded frame (meaning 4): " frame "\n"
-              "  nl13 re-detected lens: " redetect "\n"
-              "  local oracle dictionary (machine row, " (nnt-sized (nnt-mach-path)) "): "
-              target-code " says '" mach-out "' -> " dict-verdict
-              " (source-priority law: wikt-then-dedicated-wordnet-then-cldr-then-machine)\n"
-              "  follow-up: (nl13-generate \"<seat>\" 4 \"<label>\") | (nnt-mach-label (read_file (nnt-mach-path)) <row> \"<seat>\") for any dictionary cell\n"
-              "  north-star gap: labels mapped-unreviewed; next: native-speaker review, then learned generation\n"
-              "-- stage 4: rag concept match, persisted index (plane: which -> computable overlap rank)\n"
-              "  recipes: " (nnt-sized "form/form-stdlib/rag-ask.fk")
-              " + " (nnt-sized "form/form-stdlib/rag-retrieve.fk")
-              " + " (nnt-sized "form/form-stdlib/rag-embed.fk")
-              " + " (nnt-sized "form/form-stdlib/rag-index-codec.fk") "\n"
-              (if (eq (nnt-index-swept?) 1)
-                "  full swept index preserved (rewrite skipped)"
-                (nnt-cat (list "  focused index written this run: "
-                  (int_to_str (str_len written)) " bytes")))
-              " -> " (nnt-rag-index-home) "  status: " (nnt-rag-status) "\n"
-              (if (eq (ra-hit? hit) 0) "  rag: MISS through the production read path\n"
-                (nnt-cat (list
-                  "  production-path answer: cell " (ra-hit-node-id hit)
-                  " (content " (ra-hit-content-node-id hit)
-                  ", answer " (int_to_str (str_len (ra-hit-answer hit))) " bytes, key = sha256 of the committed row bytes)\n"
-                  "  score/runner/qtotal/threshold/confidence: "
-                  (int_to_str (ra-hit-score hit)) "/" (int_to_str (ra-hit-runner-score hit)) "/"
-                  (int_to_str (ra-hit-query-total hit)) "/" (int_to_str (ra-hit-threshold hit)) "/"
-                  (int_to_str (ra-hit-confidence hit)) "\n")))
-              "  rows ranked: " (if (eq (nnt-index-swept?) 1)
-                (int_to_str (nnt-meta-rows)) "2")
-              " | admission fails: 0 | timeouts: 0"
-              (if (eq (nnt-index-swept?) 1)
-                " | rank lane: sidecar overlap cache; admission: production codec on the selected row"
-                " | rank + admission: production stream over the whole file") "\n"
-              "  follow-up: the same file answers form-cli 'grounded <question>' and 'rag-status'; "
-              "full-body sweep: ./fkwu --src cognition/tests/nl-neutral-trace-sweep-live.fk\n"
-              (if (eq (nnt-index-swept?) 1)
-                "  north-star: the 10k sweep has landed - every concept row is grounded in this home\n"
-                "  north-star gap: index covers the queried rows; the sweep command lands all 10k\n")
-              "-- stage 5: choice receipt + comparison ledger (plane: why -> learned; recorded every run)\n"
-              "  recipe: " (nnt-sized "form/form-stdlib/choice-receipt.fk")
-              "  blueprints: CHOICE-CANDIDATE @1.2.99.1736(a7) CHOICE-TRACE @1.2.99.1737(a5) "
-              "CHOICE-VALUE @1.2.99.1738(a6) CHOICE-RECEIPT @1.2.99.1739(a15) CHOICE-SIGNATURE @1.2.99.1743\n"
-              "  " (nnt-receipt-lines receipt) "\n"
-              "  why this path: asserted locale is the cheapest sufficient evidence; the walk exists to "
-              "surface homograph forks; rag independently re-grounds the same cell from disk\n"
-              "  oracle: " (nnt-oracle-report out-label) "\n"
-              "  ledger: " (int_to_str ledger-rows) " rows at " (nnt-ledger-path)
-              " (grows every run - memory between visits)\n"
-              "  follow-up: routers/bml-route-choice-runtime.fk bridges these receipts to live route choice\n"))))))
+            (nnt-emit (nnt-cat (list
+              "[ledger] " (int_to_str ledger-rows) " rows at " (nnt-ledger-path)
+              " (grows every run - memory between visits)")))
+            (nnt-emit "  follow-up: routers/bml-route-choice-runtime.fk bridges these receipts to live route choice")
+            ""))))
 
-  ;; ---------- the three-tongue pivot exemplar ----------
+  ;; ---------- the three-tongue pivot exemplar (streamed) ----------
   (defn nnt-pivot-report (query)
     (do (let de-src "die quelle ist nativ")
         (let en-src "the source is native")
         (let id-src "sumber adalah asli")
-        (nnt-cat (list
-          "-- stage P: neutral-pivot translation, three tongues (plane: what -> computable via pivot)\n"
+        (nnt-emit "-- stage P: neutral-pivot translation, three tongues (plane: what -> computable via pivot)")
+        (nnt-emit (nnt-cat (list
           "  recipes: " (nnt-sized "form/form-stdlib/nl-translate.fk")
           " + " (nnt-sized "cognition/nl-pivot-de.fk")
-          "  engine: " (nnt-sized "form/form-stdlib/bmf-grammar.fk") "\n"
-          "  BMF rules, measured on this run's exemplars:\n"
-          "    " (nnt-rule-line "nl-de vs de exemplar" (nl-de) de-src) "\n"
-          "    " (nnt-rule-line "nl-en vs en exemplar" (nl-en) en-src) "\n"
-          "    " (nnt-rule-line "nl-id vs id exemplar" (nl-id) id-src) "\n"
-          "    " (nnt-rule-line "nl-de vs this query " (nl-de) query) "\n"
+          "  engine: " (nnt-sized "form/form-stdlib/bmf-grammar.fk"))))
+        (nnt-emit "[rules] BMF rules, measured live on this run's exemplars:")
+        (nnt-emit (nnt-cat (list "    " (nnt-rule-line "nl-de vs de exemplar" (nl-de) de-src))))
+        (nnt-emit (nnt-cat (list "    " (nnt-rule-line "nl-en vs en exemplar" (nl-en) en-src))))
+        (nnt-emit (nnt-cat (list "    " (nnt-rule-line "nl-id vs id exemplar" (nl-id) id-src))))
+        (nnt-emit (nnt-cat (list "    " (nnt-rule-line "nl-de vs this query " (nl-de) query))))
+        (nnt-emit (nnt-cat (list
           "  matched production: rule 'prop' -> emit blueprint property @1.2.99.33 (arity 2); "
           "de articles der|die|das cross an alt pattern - the article is column dress, "
-          "restored on decode from the de lexicon row, never pivot content\n"
-          "  de->en: '" de-src "' -> " (tr-de-en de-src) "\n"
-          "  de->id: '" de-src "' -> " (tr-de-id de-src) "\n"
-          "  en->de: '" en-src "' -> " (tr-en-de en-src) "\n"
-          "  id->de: '" id-src "' -> " (tr-id-de id-src) "\n"
+          "restored on decode from the de lexicon row, never pivot content")))
+        (nnt-emit (nnt-cat (list "[pivot] de->en: '" de-src "' -> " (tr-de-en de-src))))
+        (nnt-emit (nnt-cat (list "[pivot] de->id: '" de-src "' -> " (tr-de-id de-src))))
+        (nnt-emit (nnt-cat (list "[pivot] en->de: '" en-src "' -> " (tr-en-de en-src))))
+        (nnt-emit (nnt-cat (list "[pivot] id->de: '" id-src "' -> " (tr-id-de id-src))))
+        (nnt-emit (nnt-cat (list
+          "[pivot] the pivot cell itself, interned live from de: "
+          (nnt-node-addr (npd-parse-de de-src))
+          " (node_pkg/level/type/inst of the real node)")))
+        (nnt-emit (nnt-cat (list
           "  neutral symbols matched: quelle->" (npd-de->c "quelle")
           " nativ->" (npd-de->c "nativ")
           " kern->" (npd-de->c "kern")
-          "  phases: n0=" (nlt-phase "n0") " n1=" (nlt-phase "n1") " n2=" (nlt-phase "n2") "\n"
+          "  phases: n0=" (nlt-phase "n0") " n1=" (nlt-phase "n1") " n2=" (nlt-phase "n2"))))
+        (nnt-emit (nnt-cat (list
           "  sovereignty witness: pivot node identity across de/en/id = "
           (int_to_str (npd-pivot-agree? de-src en-src id-src))
-          " (the same meaning interns to the SAME cell; checked by node_eq, not by claim)\n"
+          " (the same meaning interns to the SAME cell; checked by node_eq, not by claim)")))
+        (nnt-emit (nnt-cat (list
           "  cut operators on this engine: none defined, none fired (the cut-capable seam is seedbank "
-          "BMF '!'; see form/form-stdlib/seedbank/tests/bmf-cut-stop.fk)\n"
+          "BMF '!'; see form/form-stdlib/seedbank/tests/bmf-cut-stop.fk)")))
+        (nnt-emit (nnt-cat (list
           "  follow-up: (tr-de-id \"der kern ist nativ\") | add a tongue = one grammar + one column "
-          "(cognition/nl-pivot-de.fk is the worked example, 4 seed rows awaiting native-speaker review)\n"
+          "(cognition/nl-pivot-de.fk is the worked example, 4 seed rows awaiting native-speaker review)")))
+        (nnt-emit (nnt-cat (list
           "  north-star gap: 3 of 13 tongues seated on the pivot; umlaut words wait on the byte-classed "
-          "alpha run (same boundary text-tokenize.fk documents)\n")))
+          "alpha run (same boundary text-tokenize.fk documents)")))
+        ""))
 
   ;; ---------- the teaching frame ----------
   (defn nnt-teaching ()
@@ -678,20 +733,30 @@
       "  seed rows; (4) walk_recipe_here's real fkwu counterpart (its file keeps it loud on\n"
       "  purpose); (5) argv/env natives so the staged file becomes optional\n")))
 
-  ;; ---------- entry ----------
+  ;; ---------- entry: a live stream from the first evaluated expression ----------
   (defn nnt-default-lanes ()
     (list (list "de" "id" "Wasser") (list "id" "de" "air")))
-  (defn nnt-run-lanes (rt lanes out)
-    (if (eq (len lanes) 0) out
-      (nnt-run-lanes rt (tail lanes) (str_concat out (nnt-lane rt (head lanes))))))
+  (defn nnt-run-lanes (rt lanes count)
+    (if (eq (len lanes) 0) count
+      (do (nnt-lane rt (head lanes))
+          (nnt-run-lanes rt (tail lanes) (add count 1)))))
   (defn nnt-run ()
-    (do (let rt (cnl13-runtime-open))
+    (do (nnt-emit "[boot] nl-neutral-trace stream is LIVE (every line flushes the moment its fact exists)")
+        (nnt-emit "[boot] before this line: the C seed compiled the prelude chain - that phase belongs to fkwu, named here, not hidden")
+        (nnt-emit (nnt-cat (list "[boot] opening runtime: "
+          (nnt-sized "cognition/concept-nl-semantic-13-omw.tsv") " + 10001 row offsets")))
+        (let rt (cnl13-runtime-open))
+        (nnt-emit "[boot] runtime open; reading staged query door")
         (let staged (nnt-staged-lane))
         (let lanes (if (eq (len staged) 0) (nnt-default-lanes) (cons staged (empty))))
+        (nnt-emit (if (eq (len staged) 0)
+          "[boot] no staged query - running the two exemplar lanes (de Wasser, id air)"
+          "[boot] staged query found - running the staged lane"))
         (let query (nth (head lanes) 2))
-        (nnt-cat (list
-          (nnt-run-lanes rt lanes "")
-          (nnt-pivot-report query)
-          (nnt-teaching)
-          (nnt-north-star)))))
+        (let lane-count (nnt-run-lanes rt lanes 0))
+        (nnt-pivot-report query)
+        (nnt-emit (nnt-teaching))
+        (nnt-emit (nnt-north-star))
+        (nnt-cat (list "stream complete: " (int_to_str lane-count)
+          " lane(s) + pivot + teaching + north star, all emitted live"))))
   0)
