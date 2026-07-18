@@ -70,6 +70,32 @@ Observed: **9/9 targets in original raw content**, **9/9 after bottom-band
 occlusion**, **9/9 after center crop**, and **9/9 present in the complete Form
 10k scan**. Guitar stays absent in all three variants.
 
+## Native world-model join
+
+`presence/concept-video-open-label-world-live.fk` consumes the already-created
+observation sets, persists only positive targets actually present in the full
+10k scan, and leaves the guitar miss absent. Nine content-derived entities enter
+the ordinary `wm-model` path:
+
+```text
+airplane banana bridge cat coffee dog pizza flower train
+visual observations: 10
+accepted positive targets: 9
+native concept entities: 9
+guitar entity: absent
+acceptance: 255
+```
+
+Their positions are explicit collection observation slots, not fabricated 3-D
+coordinates. The four native-resolution LingBot trajectories remain the
+separate geometric witness. This join closes the storage seam without claiming
+that independent photographs carry camera trajectories.
+
+```sh
+./fkwu --src presence/tests/concept-video-open-label-world-live-band.fk
+# 255
+```
+
 ## Full accepted original observation sets
 
 These are every exact raw label at or above the 100,000 ppm floor that also has
