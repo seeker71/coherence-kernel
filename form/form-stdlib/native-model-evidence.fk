@@ -1,0 +1,279 @@
+; native-model-evidence.fk — deterministic evaluation evidence in Form.
+;
+; This is the compute that the retired host evaluator must not own: text
+; normalization, tokenization, exact/F1/order-sensitive scores, aggregate
+; evidence, semantic dataset identity, deterministic rotation, and overlap
+; checks.  All hashes are the body's sha256.fk recipe over explicit bytes.
+;
+; The normalization contract is deliberately byte-honest.  It lowercases
+; ASCII A-Z and collapses ASCII whitespace; UTF-8 bytes are retained exactly.
+; It does NOT claim Unicode NFC/casefold.  A promotion corpus that needs those
+; equivalences must arrive pre-normalized and record that fact in its seal.
+; This narrower contract refuses an unimplemented Unicode promise while still
+; scoring Portuguese and other UTF-8 text without discarding its bytes.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk
+
+(do
+    (defn nmfe-reverse-loop (xs acc)
+        (if (eq (len xs) 0) acc
+            (nmfe-reverse-loop (tail xs) (cons (head xs) acc))))
+    (defn nmfe-reverse (xs) (nmfe-reverse-loop xs (list)))
+
+    (defn nmfe-append (xs ys)
+        (if (eq (len xs) 0) ys
+            (cons (head xs) (nmfe-append (tail xs) ys))))
+
+    (defn nmfe-string-bytes-loop (s i acc)
+        (if (ge i (str_len s)) (nmfe-reverse acc)
+            (nmfe-string-bytes-loop s (add i 1)
+                (cons (str_byte_at s i) acc))))
+    (defn nmfe-string-bytes (s) (nmfe-string-bytes-loop s 0 (list)))
+
+    ; Encode locally instead of importing hex.fk's decode sentinel.  Evidence
+    ; needs only the canonical lowercase direction and therefore does not need
+    ; the unrelated `bp` constructor used by that module's error value.
+    (defn nmfe-hex-digit (n)
+        (substring "0123456789abcdef" n (add n 1)))
+    (defn nmfe-hex-bytes-loop (bytes acc)
+        (if (eq (len bytes) 0) acc
+            (do
+                (let b (head bytes))
+                (nmfe-hex-bytes-loop (tail bytes)
+                    (str_concat acc
+                        (str_concat (nmfe-hex-digit (div b 16))
+                                    (nmfe-hex-digit (mod b 16))))))))
+    (defn nmfe-hex-bytes (bytes) (nmfe-hex-bytes-loop bytes ""))
+    (defn nmfe-sha256 (s) (nmfe-hex-bytes (sha256 (nmfe-string-bytes s))))
+    (defn nmfe-lower-hex-byte? (b)
+        (if (or (and (ge b 48) (le b 57))
+                (and (ge b 97) (le b 102))) 1 0))
+    (defn nmfe-lower-hex-loop (s i)
+        (if (ge i 64) 1
+            (if (eq (nmfe-lower-hex-byte? (str_byte_at s i)) 1)
+                (nmfe-lower-hex-loop s (add i 1)) 0)))
+    (defn nmfe-sha256? (s)
+        (if (eq (str_len s) 64) (nmfe-lower-hex-loop s 0) 0))
+
+    ; Length-prefixing makes concatenated evidence injective without relying
+    ; on JSON object order or separator escaping.
+    (defn nmfe-field (s)
+        (str_concat (int_to_str (str_len s)) (str_concat ":" s)))
+    (defn nmfe-fields (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (nmfe-field (head xs)) (nmfe-fields (tail xs)))))
+
+    (defn nmfe-ascii-ws? (b)
+        (if (or (eq b 32) (or (eq b 9) (or (eq b 10) (eq b 13)))) 1 0))
+    (defn nmfe-ascii-upper? (b) (if (and (ge b 65) (le b 90)) 1 0))
+    (defn nmfe-ascii-lower-byte (b)
+        (if (eq (nmfe-ascii-upper? b) 1) (add b 32) b))
+
+    ; pending-space records a run of whitespace only after content has begun.
+    ; It is emitted immediately before the next non-space byte, which trims
+    ; leading and trailing whitespace while collapsing internal runs.
+    (defn nmfe-normalize-loop (s i started pending-space acc)
+        (if (ge i (str_len s)) acc
+            (do
+                (let b (str_byte_at s i))
+                (if (eq (nmfe-ascii-ws? b) 1)
+                    (nmfe-normalize-loop s (add i 1) started started acc)
+                    (nmfe-normalize-loop s (add i 1) 1 0
+                        (str_concat acc
+                            (str_concat
+                                (if (eq pending-space 1) " " "")
+                                (byte_to_str (nmfe-ascii-lower-byte b)))))))))
+    (defn nmfe-normalize (s) (nmfe-normalize-loop s 0 0 0 ""))
+
+    ; ASCII word bytes follow the common word-character intent. Bytes
+    ; >=128 remain part of the surrounding token, keeping UTF-8 words intact.
+    ; Non-word ASCII punctuation is a one-byte token.
+    (defn nmfe-word-byte? (b)
+        (if (or (and (ge b 48) (le b 57))
+                (or (and (ge b 65) (le b 90))
+                    (or (and (ge b 97) (le b 122))
+                        (or (eq b 95) (ge b 128))))) 1 0))
+    (defn nmfe-flush-token (cur acc)
+        (if (eq (str_len cur) 0) acc (cons cur acc)))
+    (defn nmfe-tokenize-loop (s i cur acc)
+        (if (ge i (str_len s))
+            (nmfe-reverse (nmfe-flush-token cur acc))
+            (do
+                (let b (str_byte_at s i))
+                (if (eq (nmfe-ascii-ws? b) 1)
+                    (nmfe-tokenize-loop s (add i 1) "" (nmfe-flush-token cur acc))
+                    (if (eq (nmfe-word-byte? b) 1)
+                        (nmfe-tokenize-loop s (add i 1)
+                            (str_concat cur (byte_to_str (nmfe-ascii-lower-byte b))) acc)
+                        (nmfe-tokenize-loop s (add i 1) ""
+                            (cons (byte_to_str b) (nmfe-flush-token cur acc))))))))
+    (defn nmfe-tokens (s) (nmfe-tokenize-loop (nmfe-normalize s) 0 "" (list)))
+
+    (defn nmfe-round-div (num den)
+        (if (le den 0) 0 (div (add num (div den 2)) den)))
+
+    ; result = (found-bit remaining-list).  Prefix is reversed while walking.
+    (defn nmfe-remove-first-loop (needle xs prefix)
+        (if (eq (len xs) 0) (list 0 (nmfe-reverse prefix))
+            (if (str_eq needle (head xs))
+                (list 1 (nmfe-append (nmfe-reverse prefix) (tail xs)))
+                (nmfe-remove-first-loop needle (tail xs) (cons (head xs) prefix)))))
+    (defn nmfe-remove-first (needle xs)
+        (nmfe-remove-first-loop needle xs (list)))
+    (defn nmfe-overlap-loop (want remaining-got count)
+        (if (eq (len want) 0) count
+            (do
+                (let removed (nmfe-remove-first (head want) remaining-got))
+                (nmfe-overlap-loop (tail want) (nth removed 1)
+                    (add count (nth removed 0))))))
+
+    ; 2*overlap/(|expected|+|actual|), exactly the multiset token-F1
+    ; identity without separate floating-point precision and recall paths.
+    (defn nmfe-token-f1-ppm (expected actual)
+        (do
+            (let want (nmfe-tokens expected))
+            (let got (nmfe-tokens actual))
+            (let total (add (len want) (len got)))
+            (if (eq total 0) 1000000
+                (nmfe-round-div
+                    (mul (nmfe-overlap-loop want got 0) 2000000)
+                    total))))
+
+    (defn nmfe-min2 (a b) (if (lt a b) a b))
+    (defn nmfe-min3 (a b c) (nmfe-min2 a (nmfe-min2 b c)))
+    (defn nmfe-iota (i n)
+        (if (gt i n) (list) (cons i (nmfe-iota (add i 1) n))))
+    (defn nmfe-last (xs)
+        (if (eq (len xs) 1) (head xs) (nmfe-last (tail xs))))
+    (defn nmfe-lev-row-loop (token reference prev-rest left acc)
+        (if (eq (len reference) 0) acc
+            (do
+                (let diag (head prev-rest))
+                (let up (head (tail prev-rest)))
+                (let cost (if (str_eq token (head reference)) 0 1))
+                (let cell (nmfe-min3 (add up 1) (add left 1) (add diag cost)))
+                (nmfe-lev-row-loop token (tail reference) (tail prev-rest)
+                    cell (cons cell acc)))))
+    (defn nmfe-lev-row (token reference i prev)
+        (nmfe-reverse
+            (nmfe-lev-row-loop token reference prev i (cons i (list)))))
+    (defn nmfe-lev-rows (hyp reference prev i)
+        (if (eq (len hyp) 0) prev
+            (nmfe-lev-rows (tail hyp) reference
+                (nmfe-lev-row (head hyp) reference i prev) (add i 1))))
+    (defn nmfe-token-distance (expected actual)
+        (do
+            (let want (nmfe-tokens expected))
+            (let got (nmfe-tokens actual))
+            (nmfe-last (nmfe-lev-rows want got (nmfe-iota 0 (len got)) 1))))
+    (defn nmfe-sequence-ppm (expected actual)
+        (do
+            (let want (nmfe-tokens expected))
+            (let got (nmfe-tokens actual))
+            (let longest (if (gt (len want) (len got)) (len want) (len got)))
+            (if (eq longest 0) 1000000
+                (sub 1000000
+                    (nmfe-round-div
+                        (mul (nmfe-token-distance expected actual) 1000000)
+                        longest)))))
+    (defn nmfe-exact-ppm (expected actual)
+        (if (str_eq (nmfe-normalize expected) (nmfe-normalize actual)) 1000000 0))
+    (defn nmfe-promotion-score (f1 sequence)
+        (if (lt f1 sequence) f1 sequence))
+
+    ; observation = (native-model-form-observation prompt-hash expected-hash
+    ;                actual-hash exact f1 sequence promotion latency error)
+    (defn nmfe-observation (prompt expected actual latency error)
+        (do
+            (let f1 (if (eq error 0) (nmfe-token-f1-ppm expected actual) 0))
+            (let sequence (if (eq error 0) (nmfe-sequence-ppm expected actual) 0))
+            (list "native-model-form-observation"
+                  (nmfe-sha256 prompt)
+                  (nmfe-sha256 expected)
+                  (nmfe-sha256 actual)
+                  (if (eq error 0) (nmfe-exact-ppm expected actual) 0)
+                  f1 sequence (nmfe-promotion-score f1 sequence)
+                  latency error)))
+    (defn nmfe-observation? (r)
+        (if (and (eq (len r) 10)
+                 (str_eq (nth r 0) "native-model-form-observation")) 1 0))
+    (defn nmfe-obs-exact (r) (nth r 4))
+    (defn nmfe-obs-f1 (r) (nth r 5))
+    (defn nmfe-obs-sequence (r) (nth r 6))
+    (defn nmfe-obs-promotion (r) (nth r 7))
+    (defn nmfe-obs-latency (r) (nth r 8))
+    (defn nmfe-obs-error (r) (nth r 9))
+    (defn nmfe-sum-field (rows index)
+        (if (eq (len rows) 0) 0
+            (add (nth (head rows) index) (nmfe-sum-field (tail rows) index))))
+    (defn nmfe-mean-field (rows index)
+        (if (eq (len rows) 0) 0
+            (nmfe-round-div (nmfe-sum-field rows index) (len rows))))
+    ; aggregate = (samples exact f1 sequence promotion latency errors)
+    (defn nmfe-aggregate (rows)
+        (list (len rows)
+              (nmfe-mean-field rows 4)
+              (nmfe-mean-field rows 5)
+              (nmfe-mean-field rows 6)
+              (nmfe-mean-field rows 7)
+              (nmfe-mean-field rows 8)
+              (nmfe-sum-field rows 9)))
+
+    ; A semantic row is (prompt-json expected).  File formatting and unrelated
+    ; metadata do not alter this identity.
+    (defn nmfe-pair-message (row)
+        (nmfe-fields (list "native-model-pair-v1" (nth row 0) (nth row 1))))
+    (defn nmfe-pair-sha256 (row) (nmfe-sha256 (nmfe-pair-message row)))
+    (defn nmfe-pair-sha256s (rows)
+        (if (eq (len rows) 0) (list)
+            (cons (nmfe-pair-sha256 (head rows))
+                  (nmfe-pair-sha256s (tail rows)))))
+    (defn nmfe-prompt-sha256s (rows)
+        (if (eq (len rows) 0) (list)
+            (cons (nmfe-sha256 (nth (head rows) 0))
+                  (nmfe-prompt-sha256s (tail rows)))))
+    (defn nmfe-dataset-message (rows)
+        (if (eq (len rows) 0) ""
+            (str_concat (nmfe-field (nmfe-pair-message (head rows)))
+                        (nmfe-dataset-message (tail rows)))))
+    (defn nmfe-dataset-sha256 (rows)
+        (nmfe-sha256
+            (nmfe-fields (list "native-model-dataset-v1" (nmfe-dataset-message rows)))))
+
+    (defn nmfe-string-in? (needle xs)
+        (if (eq (len xs) 0) 0
+            (if (str_eq needle (head xs)) 1 (nmfe-string-in? needle (tail xs)))))
+    (defn nmfe-overlap-count (left right)
+        (if (eq (len left) 0) 0
+            (add (nmfe-string-in? (head left) right)
+                 (nmfe-overlap-count (tail left) right))))
+    (defn nmfe-isolated? (heldout training)
+        (if (and
+                (eq (nmfe-overlap-count (nmfe-pair-sha256s heldout)
+                                        (nmfe-pair-sha256s training)) 0)
+                (eq (nmfe-overlap-count (nmfe-prompt-sha256s heldout)
+                                        (nmfe-prompt-sha256s training)) 0)) 1 0))
+
+    (defn nmfe-hex-value (b)
+        (if (and (ge b 48) (le b 57)) (sub b 48)
+            (if (and (ge b 97) (le b 102)) (add 10 (sub b 97)) 0)))
+    (defn nmfe-hex-mod-loop (hex i modulus acc)
+        (if (ge i (str_len hex)) acc
+            (nmfe-hex-mod-loop hex (add i 1) modulus
+                (mod (add (mul acc 16) (nmfe-hex-value (str_byte_at hex i))) modulus))))
+    (defn nmfe-rotation-start (seed population)
+        (if (le population 0) 0
+            (nmfe-hex-mod-loop (nmfe-sha256 seed) 0 population 0)))
+    (defn nmfe-rotating-loop (rows population at remaining acc)
+        (if (le remaining 0) (nmfe-reverse acc)
+            (nmfe-rotating-loop rows population (mod (add at 1) population)
+                (sub remaining 1) (cons (nth rows at) acc))))
+    (defn nmfe-rotating-slice (rows count seed)
+        (do
+            (let population (len rows))
+            (let n (if (lt count population) count population))
+            (if (eq population 0) (list)
+                (nmfe-rotating-loop rows population
+                    (nmfe-rotation-start seed population) n (list)))))
+
+    0)

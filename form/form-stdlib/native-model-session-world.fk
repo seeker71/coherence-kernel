@@ -1,0 +1,322 @@
+; native-model-session-world.fk -- streaming action-conditioned next-state
+; learning from real Codex tool sequences without retaining prompts or output.
+;
+; Each episode is (time, private session digest, previous-two tool names, next
+; tool name). Tool names are host metadata, not conversation content. Form maps
+; them to eight stable action classes and learns an order-2 count model from the
+; chronological training prefix. The model is a fixed 8x8x8 count cube plus
+; eight majority counts: input size changes runtime, not retained model shape.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/native-model-evidence.fk
+
+(do
+    (defn nmsw-episode (when session previous2 previous1 next)
+        (list "native-model-session-world-episode-v1"
+              when session previous2 previous1 next))
+    (defn nmsw-episode? (r)
+        (and (eq (len r) 6)
+             (str_eq (nth r 0) "native-model-session-world-episode-v1")))
+    (defn nmsw-when (r) (nth r 1))
+    (defn nmsw-session (r) (nth r 2))
+    (defn nmsw-previous2 (r) (nth r 3))
+    (defn nmsw-previous1 (r) (nth r 4))
+    (defn nmsw-next (r) (nth r 5))
+
+    (defn nmsw-string-in? (s xs)
+        (if (eq (len xs) 0) 0
+            (if (str_eq s (head xs)) 1
+                (nmsw-string-in? s (tail xs)))))
+
+    (defn nmsw-observe-actions ()
+        (list "exec" "exec_command" "view_image" "read_thread"
+              "read_thread_terminal" "codex_app__read_thread_terminal"
+              "codex_app__load_workspace_dependencies"))
+    (defn nmsw-mutate-actions () (list "apply_patch"))
+    (defn nmsw-continue-actions ()
+        (list "write_stdin" "send_input" "wait" "wait_agent"))
+    (defn nmsw-control-actions ()
+        (list "update_plan" "create_goal" "get_goal" "update_goal"))
+    (defn nmsw-delegate-actions ()
+        (list "spawn_agent" "send_message" "followup_task" "list_agents"
+              "close_agent" "resume_agent" "interrupt_agent"))
+    (defn nmsw-web-actions () (list "web__run"))
+    (defn nmsw-external-actions ()
+        (list "automation_update" "codex_app__automation_update"
+              "mcp__node_repl__js" "view_image"))
+
+    (defn nmsw-class (action)
+        (if (eq (nmsw-string-in? action (nmsw-observe-actions)) 1) "observe"
+        (if (eq (nmsw-string-in? action (nmsw-mutate-actions)) 1) "mutate"
+        (if (eq (nmsw-string-in? action (nmsw-continue-actions)) 1) "continue"
+        (if (eq (nmsw-string-in? action (nmsw-control-actions)) 1) "control"
+        (if (eq (nmsw-string-in? action (nmsw-delegate-actions)) 1) "delegate"
+        (if (eq (nmsw-string-in? action (nmsw-web-actions)) 1) "web"
+        (if (eq (nmsw-string-in? action (nmsw-external-actions)) 1) "external"
+            "other"))))))))
+    (defn nmsw-classes ()
+        (list "observe" "mutate" "continue" "control"
+              "delegate" "web" "external" "other"))
+    (defn nmsw-class-index (action)
+        (do
+            (let class (nmsw-class action))
+            (if (str_eq class "observe") 0
+            (if (str_eq class "mutate") 1
+            (if (str_eq class "continue") 2
+            (if (str_eq class "control") 3
+            (if (str_eq class "delegate") 4
+            (if (str_eq class "web") 5
+            (if (str_eq class "external") 6 7)))))))))
+
+    (defn nmsw-valid-episode? (r)
+        (if (nmsw-episode? r)
+            (if (and (gt (str_len (nmsw-when r)) 0)
+                     (gt (str_len (nmsw-session r)) 0))
+                (if (and (gt (str_len (nmsw-previous2 r)) 0)
+                         (and (gt (str_len (nmsw-previous1 r)) 0)
+                              (gt (str_len (nmsw-next r)) 0))) 1 0)
+                0)
+            0))
+
+    (defn nmsw-take (rows n)
+        (if (or (le n 0) (eq (len rows) 0)) (empty)
+            (cons (head rows) (nmsw-take (tail rows) (sub n 1)))))
+    (defn nmsw-drop (rows n)
+        (if (or (le n 0) (eq (len rows) 0)) rows
+            (nmsw-drop (tail rows) (sub n 1))))
+
+    ; Fixed-shape count state. No episode row is retained after observation.
+    (defn nmsw-zero-vector-loop (remaining acc)
+        (if (le remaining 0) acc
+            (nmsw-zero-vector-loop (sub remaining 1) (cons 0 acc))))
+    (defn nmsw-zero-vector () (nmsw-zero-vector-loop 8 (empty)))
+    (defn nmsw-zero-matrix-loop (remaining acc)
+        (if (le remaining 0) acc
+            (nmsw-zero-matrix-loop (sub remaining 1)
+                (cons (nmsw-zero-vector) acc))))
+    (defn nmsw-zero-matrix () (nmsw-zero-matrix-loop 8 (empty)))
+    (defn nmsw-zero-cube-loop (remaining acc)
+        (if (le remaining 0) acc
+            (nmsw-zero-cube-loop (sub remaining 1)
+                (cons (nmsw-zero-matrix) acc))))
+    (defn nmsw-zero-cube () (nmsw-zero-cube-loop 8 (empty)))
+
+    ; Dataset identity is streamed too. Two independent modular byte folds see
+    ; every byte of every length-prefixed episode message. Form then SHA-256
+    ; finalizes the small fingerprint once. This is explicitly a fingerprint,
+    ; not a claim that SHA-256 itself was incrementally applied to the carrier.
+    (defn nmsw-fingerprint (h1 h2 bytes rows)
+        (list "native-model-session-world-fingerprint-v2"
+              h1 h2 bytes rows))
+    (defn nmsw-empty-fingerprint () (nmsw-fingerprint 17 29 0 0))
+    (defn nmsw-fingerprint-string-loop (s index h1 h2 bytes)
+        (if (ge index (str_len s)) (list h1 h2 bytes)
+            (do
+                (let byte (str_byte_at s index))
+                (nmsw-fingerprint-string-loop s (add index 1)
+                    (mod (add (mul h1 257) (add byte 1)) 1000000007)
+                    (mod (add (mul h2 263) (add byte 1)) 1000000009)
+                    (add bytes 1)))))
+    (defn nmsw-fingerprint-observe (fingerprint message)
+        (do
+            (let folded
+                (nmsw-fingerprint-string-loop message 0
+                    (nth fingerprint 1) (nth fingerprint 2)
+                    (nth fingerprint 3)))
+            (nmsw-fingerprint (nth folded 0) (nth folded 1) (nth folded 2)
+                              (add (nth fingerprint 4) 1))))
+    (defn nmsw-fingerprint-sha256 (fingerprint)
+        (nmfe-sha256
+            (nmfe-fields
+                (list "native-model-session-world-stream-fingerprint-v2"
+                      (int_to_str (nth fingerprint 1))
+                      (int_to_str (nth fingerprint 2))
+                      (int_to_str (nth fingerprint 3))
+                      (int_to_str (nth fingerprint 4))))))
+
+    (defn nmsw-count-state (cube totals valid invalid fingerprint)
+        (list "native-model-session-world-count-state-v2"
+              cube totals valid invalid fingerprint))
+    (defn nmsw-empty-count-state ()
+        (nmsw-count-state (nmsw-zero-cube) (nmsw-zero-vector)
+                          0 0 (nmsw-empty-fingerprint)))
+    (defn nmsw-state-cube (state) (nth state 1))
+    (defn nmsw-state-totals (state) (nth state 2))
+    (defn nmsw-state-valid (state) (nth state 3))
+    (defn nmsw-state-invalid (state) (nth state 4))
+    (defn nmsw-state-fingerprint (state) (nth state 5))
+
+    (defn nmsw-replace-nth (xs index value)
+        (if (eq index 0) (cons value (tail xs))
+            (cons (head xs)
+                  (nmsw-replace-nth (tail xs) (sub index 1) value))))
+    (defn nmsw-inc-nth (xs index)
+        (if (eq index 0) (cons (add (head xs) 1) (tail xs))
+            (cons (head xs) (nmsw-inc-nth (tail xs) (sub index 1)))))
+    (defn nmsw-inc-cube (cube previous2 previous1 next)
+        (do
+            (let matrix (nth cube previous2))
+            (let counts (nth matrix previous1))
+            (let next-counts (nmsw-inc-nth counts next))
+            (let next-matrix
+                (nmsw-replace-nth matrix previous1 next-counts))
+            (nmsw-replace-nth cube previous2 next-matrix)))
+
+    (defn nmsw-episode-message (r)
+        (nmfe-fields
+            (list (nmsw-when r) (nmsw-session r)
+                  (nmsw-previous2 r) (nmsw-previous1 r) (nmsw-next r))))
+    (defn nmsw-fingerprint-row (fingerprint row)
+        (nmsw-fingerprint-observe fingerprint (nmsw-episode-message row)))
+    (defn nmsw-count-observe (state row)
+        (do
+            (let fingerprint
+                (nmsw-fingerprint-row (nmsw-state-fingerprint state) row))
+            (if (eq (nmsw-valid-episode? row) 0)
+                (nmsw-count-state
+                    (nmsw-state-cube state) (nmsw-state-totals state)
+                    (nmsw-state-valid state) (add (nmsw-state-invalid state) 1)
+                    fingerprint)
+                (do
+                    (let previous2 (nmsw-class-index (nmsw-previous2 row)))
+                    (let previous1 (nmsw-class-index (nmsw-previous1 row)))
+                    (let next (nmsw-class-index (nmsw-next row)))
+                    (nmsw-count-state
+                        (nmsw-inc-cube (nmsw-state-cube state)
+                                       previous2 previous1 next)
+                        (nmsw-inc-nth (nmsw-state-totals state) next)
+                        (add (nmsw-state-valid state) 1)
+                        (nmsw-state-invalid state) fingerprint)))))
+
+    ; prediction = class-index, winning-count, context-total. Index -1 means
+    ; honest abstention because the training count-state has never seen it.
+    (defn nmsw-best-loop (counts index best best-count total)
+        (if (eq (len counts) 0)
+            (if (eq total 0) (list -1 0 0)
+                (list best best-count total))
+            (do
+                (let count (head counts))
+                (nmsw-best-loop (tail counts) (add index 1)
+                    (if (gt count best-count) index best)
+                    (if (gt count best-count) count best-count)
+                    (add total count)))))
+    (defn nmsw-best (counts) (nmsw-best-loop counts 0 -1 0 0))
+    (defn nmsw-predict-index (state previous2 previous1)
+        (nmsw-best
+            (nth (nth (nmsw-state-cube state) previous2) previous1)))
+    (defn nmsw-majority-index (state)
+        (nth (nmsw-best (nmsw-state-totals state)) 0))
+
+    ; Heldout evaluation state: total, model-correct, baseline-correct, covered,
+    ; covered-correct, confidence numerator/denominator, invalid, fingerprint.
+    (defn nmsw-eval-state
+        (total correct baseline-correct covered covered-correct
+         confidence-num confidence-den invalid fingerprint)
+        (list "native-model-session-world-eval-state-v2"
+              total correct baseline-correct covered covered-correct
+              confidence-num confidence-den invalid fingerprint))
+    (defn nmsw-empty-eval-state (fingerprint)
+        (nmsw-eval-state 0 0 0 0 0 0 0 0 fingerprint))
+    (defn nmsw-eval-observe (model evaluation baseline row)
+        (do
+            (let fingerprint (nmsw-fingerprint-row (nth evaluation 9) row))
+            (if (eq (nmsw-valid-episode? row) 0)
+                (nmsw-eval-state
+                    (nth evaluation 1) (nth evaluation 2) (nth evaluation 3)
+                    (nth evaluation 4) (nth evaluation 5) (nth evaluation 6)
+                    (nth evaluation 7) (add (nth evaluation 8) 1) fingerprint)
+                (do
+                    (let previous2 (nmsw-class-index (nmsw-previous2 row)))
+                    (let previous1 (nmsw-class-index (nmsw-previous1 row)))
+                    (let actual (nmsw-class-index (nmsw-next row)))
+                    (let prediction
+                        (nmsw-predict-index model previous2 previous1))
+                    (let hit (if (eq (nth prediction 0) actual) 1 0))
+                    (let seen (if (gt (nth prediction 2) 0) 1 0))
+                    (nmsw-eval-state
+                        (add (nth evaluation 1) 1)
+                        (add (nth evaluation 2) hit)
+                        (add (nth evaluation 3) (if (eq baseline actual) 1 0))
+                        (add (nth evaluation 4) seen)
+                        (add (nth evaluation 5) (if (eq seen 1) hit 0))
+                        (add (nth evaluation 6) (nth prediction 1))
+                        (add (nth evaluation 7) (nth prediction 2))
+                        (nth evaluation 8) fingerprint)))))
+
+    (defn nmsw-ppm (n d)
+        (if (le d 0) -1 (div (mul n 1000000) d)))
+
+    (defn nmsw-vector-message (values)
+        (if (eq (len values) 0) ""
+            (str_concat (nmfe-field (int_to_str (head values)))
+                        (nmsw-vector-message (tail values)))))
+    (defn nmsw-matrix-message (rows)
+        (if (eq (len rows) 0) ""
+            (str_concat (nmfe-field (nmsw-vector-message (head rows)))
+                        (nmsw-matrix-message (tail rows)))))
+    (defn nmsw-cube-message (matrices)
+        (if (eq (len matrices) 0) ""
+            (str_concat (nmfe-field (nmsw-matrix-message (head matrices)))
+                        (nmsw-cube-message (tail matrices)))))
+    (defn nmsw-model-sha256 (state)
+        (nmfe-sha256
+            (nmfe-fields
+                (list "native-model-session-world-count-model-v2"
+                      (nmsw-cube-message (nmsw-state-cube state))
+                      (nmsw-vector-message (nmsw-state-totals state))
+                      (int_to_str (nmsw-state-valid state))))))
+
+    (defn nmsw-count-rows (rows state)
+        (if (eq (len rows) 0) state
+            (nmsw-count-rows (tail rows)
+                             (nmsw-count-observe state (head rows)))))
+    (defn nmsw-evaluate-rows (rows model evaluation baseline)
+        (if (eq (len rows) 0) evaluation
+            (nmsw-evaluate-rows
+                (tail rows) model
+                (nmsw-eval-observe model evaluation baseline (head rows))
+                baseline)))
+
+    (defn nmsw-stream-valid?
+        (model evaluation chronological train-count held-count
+         source-train-count source-held-count)
+        (if (and (eq chronological 1)
+                 (and (eq (nmsw-state-invalid model) 0)
+                 (and (eq (nth evaluation 8) 0)
+                 (and (eq (nmsw-state-valid model) train-count)
+                 (and (eq (nth evaluation 1) held-count)
+                 (and (eq train-count source-train-count)
+                      (eq held-count source-held-count))))))) 1 0))
+
+    ; Fixture/list adapter only. Production uses the streaming CLI and never
+    ; calls take/drop over the full corpus.
+    (defn nmsw-report-split (rows train-count chronological)
+        (do
+            (let train (nmsw-take rows train-count))
+            (let held (nmsw-drop rows train-count))
+            (let model (nmsw-count-rows train (nmsw-empty-count-state)))
+            (let evaluation
+                (nmsw-evaluate-rows held model
+                    (nmsw-empty-eval-state (nmsw-state-fingerprint model))
+                    (nmsw-majority-index model)))
+            (let valid
+                (if (and (ge (len rows) 10)
+                         (and (gt train-count 0)
+                         (and (gt (len held) 0)
+                              (eq (nmsw-stream-valid?
+                                    model evaluation chronological train-count
+                                    (len held) train-count (len held)) 1)))) 1 0))
+            (list "native-model-session-world-report-v2"
+                (nmsw-state-valid model) (nth evaluation 1)
+                (nth evaluation 2) (nth evaluation 3)
+                (nth evaluation 4) (nth evaluation 5)
+                (nmsw-ppm (nth evaluation 2) (nth evaluation 1))
+                (nmsw-ppm (nth evaluation 3) (nth evaluation 1))
+                (nmsw-ppm (nth evaluation 4) (nth evaluation 1))
+                (nmsw-ppm (nth evaluation 5) (nth evaluation 4))
+                (nmsw-ppm (nth evaluation 6) (nth evaluation 7))
+                (nmsw-fingerprint-sha256 (nth evaluation 9))
+                (nmsw-model-sha256 model) valid)))
+    (defn nmsw-report (rows chronological)
+        (nmsw-report-split rows (div (mul (len rows) 4) 5) chronological))
+
+    0)
