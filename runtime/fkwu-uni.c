@@ -37,6 +37,7 @@ int dlclose(void *h) {
 }
 #endif
 extern int putchar(int);
+extern int fflush(void *);
 extern int printf(const char *, ...);
 extern int dprintf(int, const char *, ...);
 extern int vdprintf(int, const char *, __builtin_va_list);
@@ -7155,6 +7156,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
         }
         putchar(10);
+        /* print_str is the live event door: a streamed trace line must reach
+         * the reader the moment it is spoken, on a pipe as on a tty. stdio
+         * block-buffers pipes, so flush every emitted line (fflush(0) needs
+         * no FILE type in this freestanding extern set). */
+        fflush((void *)0);
         return 0;
     }
     if (t == 116) {
