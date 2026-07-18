@@ -107,8 +107,8 @@ a causal effect; it is not receipt decoration.
 ./fkwu --src model/tests/whisper-tiny-native-conv1-band.fk
 1023
 
-./fkwu --src presence/tests/whisper-tiny-native-acoustic-live-band.fk \
-  # invoked with the neutral-path committed WAV
+./fkwu --src presence/tests/whisper-tiny-native-acoustic-live-band.fk
+# gate copies the hash-pinned committed WAV to an exact neutral /tmp path
 511
 
 node model/fixtures/whisper-tiny/verify-native-conv1-reference.mjs
