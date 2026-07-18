@@ -69,6 +69,29 @@ released f32 records and BMP pixels without the Form implementation and returns
 the same fingerprints and distances to displayed precision. The live Form gate
 hard-checks those independent values at `1e-12` tolerance.
 
+## The learned output enters attention and the native world
+
+The first layer is not left at a test boundary. `model/lingbot-learned-map-runtime.fk`
+decodes two consecutive original 518×294 loop frames, emits a 4×3 spatial grid
+of authentic learned four-channel patch tokens for each frame, and streams them
+through the existing operational GCA cache. It also retains the complete
+1,024-channel center token for each frame. The second full vector changes its
+sum from `0.3681681310` to `-5.2784386887`.
+
+The learned GCA output is
+`[0.0081609233,-0.1347291075,-0.0203584375,0.0518580872]`. A matched run with
+zero visual tokens returns `[0,0,0,0]`, for L1 effect `0.2151065555`. The exact
+cache contains 36 K/V rows — two dense `(12 learned + 6 context)` frames — and
+the mask is `[[0,anchor,visible,18],[1,window,visible,18]]`.
+
+That attended learned vector becomes the visual embedding consumed by
+`world-model-lingbot-map.fk`. The same live movement emits 64 relative depths,
+64 confidence-bearing cloud points, and **64 ordinary native world objects**.
+The geometric correspondence comparison improves `2,385,740 -> 284,311`.
+`presence/lingbot-learned-map-live.fk` is the non-test world door; its authentic
+acceptance gate returns **1023**. Released learned pixels now causally affect
+world state rather than ending as an isolated feature receipt.
+
 ## Proof and acceptance
 
 | Gate | fkwu | Go | Rust | TypeScript |
@@ -81,10 +104,11 @@ The authentic host-file/model execution returns **255**:
 ./fkwu --src model/tests/lingbot-learned-patch-live-band.fk -> 255
 node model/fixtures/lingbot-map/verify-learned-patch-reference.mjs
   -> 602112 learned coefficients, 1024 outputs, exact matching fingerprints
+./fkwu --src model/tests/lingbot-learned-map-live-band.fk -> 1023
 ```
 
-The non-test consumer is
-`presence/lingbot-learned-visual-real-life.fk`. No Python ran and
+The non-test consumers are `presence/lingbot-learned-visual-real-life.fk` and
+`presence/lingbot-learned-map-live.fk`. No Python ran and
 `runtime/fkwu-uni.c` did not change.
 
 ## Tooling correction: why `curl` once appeared missing
@@ -104,7 +128,8 @@ weights in Form. The strict requirements-level `native-visual-weights` row must
 therefore remain **0/1** until the full learned sensing path, not merely this
 first layer, owns its weights. What changed is concrete: the visual lane moved
 from authentic-token injection into a witness encoder to a full released
-602,112-coefficient image operation on four real places.
+602,112-coefficient image operation on four real places, with a learned spatial
+slice now driving persistent attention and 64 native world objects.
 
 ## Closing
 
