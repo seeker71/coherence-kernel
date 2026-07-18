@@ -2,6 +2,10 @@
 
 Date: 2026-07-18
 
+Historical floor: this receipt records the first 147-row landing. The current
+1,300-row, 100-per-locale corpus and its exhaustive replay are witnessed in
+`receipts/2026-07-18-human-sentence-corpus-13-scale.md`.
+
 ## What entered the body
 
 The text detector now has a bounded public-data consumer over real contributed
