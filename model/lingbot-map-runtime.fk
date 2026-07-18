@@ -1,0 +1,148 @@
+; lingbot-map-runtime.fk — one native streaming reconstruction movement.
+;
+; Real BMP frame bytes -> small ViT encoder -> released camera-token weight
+; injection -> persistent K/V Geometric Context Attention -> full relative pose
+; + dense depth -> point cloud -> the kernel's existing native world model.
+;
+; The released LingBot checkpoint carrier is read by
+; lingbot-pytorch-checkpoint.fk. The committed witness carries the authentic
+; aggregator.camera_token tensor; a user with the full .pt may pass its path to
+; the same loader. This small runtime does not claim learned LingBot parity: it
+; composes the released token with native witness-scale weights and classical
+; geometry, with the ablation difference exposed.
+;
+; witnessed: 2026-07-18 -> real upstream two-frame live entrypoint
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk
+; form/form-stdlib/str-byte-at.fk form/form-stdlib/file-byte-window.fk
+; form/form-stdlib/crc32.fk form/form-stdlib/transformer-numerics.fk
+; cognition/transformer-block.fk model/geometric-camera.fk
+; model/lingbot-pytorch-checkpoint.fk model/lingbot-vision-input.fk
+; model/lingbot-gca-runtime.fk model/lingbot-geometry-heads.fk
+; form/form-stdlib/world-model-lingbot-map.fk
+
+(do
+  (defn lmr-released-entry-path ()
+    "model/fixtures/lingbot-map/checkpoint-central-directory.bin")
+  (defn lmr-released-record-path ()
+    "model/fixtures/lingbot-map/checkpoint-data0-record.bin")
+
+  ; receipt = (entry tensor first-four-f32 valid-bit)
+  (defn lmr-load-released-camera-token ()
+    (do
+      (let directory (fs-read-slice (lmr-released-entry-path) 0 1024))
+      (let entry (lbpt-find-entry directory "checkpoint/data/0"))
+      (let tensor (lbpt-load-record-tensor (lmr-released-record-path) entry))
+      (list entry tensor (lbpt-f32-list tensor 0 4)
+            (if (lbpt-tensor-valid? tensor entry) 1 0))))
+
+  (defn lmr-weight-entry (receipt) (nth receipt 0))
+  (defn lmr-weight-bytes (receipt) (nth receipt 1))
+  (defn lmr-weight-token (receipt) (nth receipt 2))
+  (defn lmr-weight-valid? (receipt) (nth receipt 3))
+
+  (defn lmr-inject-camera-token (tokens released-token)
+    (cons (tb-vec-add (head tokens) released-token) (tail tokens)))
+
+  (defn lmr-luma-at (bytes x y)
+    (do
+      (let rgb (lvi-rgb-at bytes x y))
+      (div (add (mul 77 (nth rgb 0))
+            (add (mul 150 (nth rgb 1)) (mul 29 (nth rgb 2)))) 256)))
+  (defn lmr-sample-coordinate (extent n i)
+    (min2 (sub extent 1)
+      (div (mul (add (mul 2 i) 1) extent) (mul 2 n))))
+  (defn lmr-luma-grid-go (bytes n i out)
+    (if (eq i (mul n n))
+      (reverse out)
+      (do
+        (let x (lmr-sample-coordinate (lvi-width bytes) n (mod i n)))
+        (let y (lmr-sample-coordinate (lvi-height bytes) n (div i n)))
+        (lmr-luma-grid-go bytes n (add i 1)
+          (cons (lmr-luma-at bytes x y) out)))))
+  (defn lmr-luma-grid (bytes n) (lmr-luma-grid-go bytes n 0 (empty)))
+
+  (defn lmr-vector-l1-go (a b acc)
+    (if (eq (len a) 0) acc
+      (lmr-vector-l1-go (tail a) (tail b)
+        (add acc (abs (sub (head a) (head b)))))))
+  (defn lmr-vector-l1 (a b) (lmr-vector-l1-go a b 0.0))
+
+  ; run row = (tag source images weight vision attention geometry cloud world comparison)
+  (defn lmr-run-images (images path0 path1)
+    (do
+      (let image0 (nth images 0))
+      (let image1 (nth images 1))
+      (let bytes0 (lvi-image-bytes image0))
+      (let bytes1 (lvi-image-bytes image1))
+      (let weight (lmr-load-released-camera-token))
+      (let encoded (lvi-encode-video images 4))
+      (let tokens0 (lmr-inject-camera-token (nth encoded 0) (lmr-weight-token weight)))
+      (let tokens1 (lmr-inject-camera-token (nth encoded 1) (lmr-weight-token weight)))
+      (let bare0 (nth encoded 0))
+      (let bare1 (nth encoded 1))
+
+      (let weighted-step0 (lgr-step (lgr-cache-empty) 0 tokens0 1 2))
+      (let weighted-step1 (lgr-step (nth weighted-step0 1) 1 tokens1 1 2))
+      (let bare-step0 (lgr-step (lgr-cache-empty) 0 bare0 1 2))
+      (let bare-step1 (lgr-step (nth bare-step0 1) 1 bare1 1 2))
+      (let attended (nth weighted-step1 0))
+      (let bare-attended (nth bare-step1 0))
+      (let state (nth weighted-step1 1))
+
+      (let n 8)
+      (let focal 8.0)
+      (let frame0 (lmr-luma-grid bytes0 n))
+      (let frame1 (lmr-luma-grid bytes1 n))
+      (let geometry (lgh-predict frame0 frame1 n 2 focal))
+      (let pose (nth geometry 0))
+      (let depths (nth geometry 1))
+      (let matches (nth geometry 2))
+      (let cloud (lgh-point-cloud depths n (list focal focal 3.5 3.5) pose))
+      (let visual (head attended))
+      (let world (wmlm-world-from-cloud cloud visual))
+      (let comparison (lgh-output-comparison frame0 frame1 n matches))
+
+      (list
+        "lingbot-map-runtime"
+        (list path0 path1)
+        (list (nth image0 2) (nth image1 2))
+        (list
+          (lmr-weight-valid? weight)
+          (lbpt-entry-name (lmr-weight-entry weight))
+          (lbpt-entry-size (lmr-weight-entry weight))
+          (lbpt-entry-crc (lmr-weight-entry weight))
+          (lmr-weight-token weight))
+        (list (len encoded) (len (nth encoded 0)) (len (head (nth encoded 0))))
+        (list
+          (head attended)
+          (head bare-attended)
+          (lmr-vector-l1 (head attended) (head bare-attended))
+          (lgr-cache-token-count state)
+          (nth weighted-step1 2))
+        geometry
+        cloud
+        world
+        comparison)))
+
+  (defn lmr-run (path0 path1)
+    (lmr-run-images (lvi-load-video (list path0 path1)) path0 path1))
+
+  ; Operational video-file door: the host codec carrier emits two BMP frames,
+  ; then the exact same Form-owned image/ViT/GCA/geometry/world movement runs.
+  (defn lmr-run-video-file (video-path output-pattern decoded0 decoded1)
+    (lmr-run-images
+      (lvi-load-video-file video-path output-pattern (list decoded0 decoded1))
+      (str_concat video-path "#frame-0")
+      (str_concat video-path "#frame-1")))
+
+  (defn lmr-source (run) (nth run 1))
+  (defn lmr-images (run) (nth run 2))
+  (defn lmr-weight (run) (nth run 3))
+  (defn lmr-vision (run) (nth run 4))
+  (defn lmr-attention (run) (nth run 5))
+  (defn lmr-geometry (run) (nth run 6))
+  (defn lmr-cloud (run) (nth run 7))
+  (defn lmr-world (run) (nth run 8))
+  (defn lmr-comparison (run) (nth run 9))
+
+  0)
