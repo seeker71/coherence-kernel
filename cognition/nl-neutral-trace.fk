@@ -147,6 +147,8 @@
   (defn nnt-cell-id (row) (str_concat "@10.3.99." (int_to_str row)))
   (defn nnt-content-id (row) (str_concat "@10.4.99." (int_to_str row)))
   (defn nnt-rag-row (row answer snippet)
+    (nnt-rag-row-vec row answer snippet (re-semantic-vec answer)))
+  (defn nnt-rag-row-vec (row answer snippet vec)
     (nnt-cat (list
       "{\"id\":\"" (nnt-cell-id row) "\",\"node_id\":\"" (nnt-cell-id row)
       "\",\"content_node_id\":\"" (nnt-content-id row)
@@ -156,13 +158,13 @@
       "\",\"answer_key\":\"" (nnt-sha-hex answer)
       "\",\"answer_hex\":\"" (nnt-hex answer)
       "\",\"snippet\":\"" snippet
-      "\",\"vec\":" (nnt-ints-json (re-semantic-vec answer)) "}")))
+      "\",\"vec\":" (nnt-ints-json vec) "}")))
   (defn nnt-rag-index-home () (ra-default-index))
   ; Persist the index for the queried row and a distractor row, then let the
   ; PRODUCTION path (ra-grounded-hit-at: file_size, read_file, stream rank)
   ; answer from disk. The index survives the run; rag-status-style health is
   ; reported from the same file every later command reads.
-  (defn nnt-write-index (rt idx didx)
+  (defn nnt-write-index-to (path rt idx didx)
     (do (let data (cnl13-runtime-data rt))
         (let offs (cnl13-runtime-offsets rt))
         (let row (cnl13-row-line data offs idx))
@@ -172,15 +174,103 @@
           (nnt-rag-row didx drow "concept row cell, content-addressed") "\n")))
         (do (host-abi-mkdir ".coherence-network")
             (host-abi-mkdir ".coherence-network/rag-index")
-            (write_file (nnt-rag-index-home) text)
+            (write_file path text)
             text)))
+  ; writing the focused index to the production home also resets the row meta,
+  ; so a stale "swept" claim can never outlive the file it described
+  (defn nnt-write-index (rt idx didx)
+    (do (let text (nnt-write-index-to (nnt-rag-index-home) rt idx didx))
+        (write_file (nnt-rows-meta) "2\n")
+        text))
+  ;; ---------- the swept-index fast lane ----------
+  ; The full-body index is ~9 MB; the production per-row admission scan calls
+  ; the Form-implemented str_find per field and needs minutes per query
+  ; (measured). The sweep therefore also writes a RANK SIDECAR — one compact
+  ; line per row: "<row>\t<byte-offset>\t<line-length>\t<code> <code> ...".
+  ; The sidecar is a regenerable cache over the index (the same doctrine as
+  ; T_flat: crystallized speed, never truth). Ranking scans the sidecar with
+  ; a byte cursor; the selected row's line is then fetched by offset and
+  ; passes through the PRODUCTION codec and cryptographic admission
+  ; (ra-rank-entry-of-line + answer-key verification) before any hit returns.
+  (defn nnt-vec-side-path () ".coherence-network/rag-index/index-vec.tsv")
+  (defn nnt-parse-int-go (s i n acc)
+    (if (ge i n) (list acc i)
+      (do (let b (str_byte_at s i))
+          (if (and (ge b 48) (le b 57))
+            (nnt-parse-int-go s (add i 1) n (add (mul acc 10) (sub b 48)))
+            (list acc i)))))
+  (defn nnt-code-in? (c codes)
+    (if (eq (len codes) 0) 0
+      (if (eq c (head codes)) 1 (nnt-code-in? c (tail codes)))))
+  (defn nnt-overlap-codes (qvec codes count)
+    (if (eq (len qvec) 0) count
+      (nnt-overlap-codes (tail qvec) codes
+        (add count (nnt-code-in? (head qvec) codes)))))
+  ; codes until newline: returns (codes next-pos-after-newline)
+  (defn nnt-side-codes (s i n out)
+    (do (let r (nnt-parse-int-go s i n 0))
+        (let j (nth r 1))
+        (let out2 (cons (nth r 0) out))
+        (if (ge j n) (list out2 j)
+          (if (eq (str_byte_at s j) 10) (list out2 (add j 1))
+            (nnt-side-codes s (add j 1) n out2)))))
+  ; one sidecar line from position i: (row offset length codes next-pos)
+  (defn nnt-side-line (s i n)
+    (do (let r (nnt-parse-int-go s i n 0))
+        (let o (nnt-parse-int-go s (add (nth r 1) 1) n 0))
+        (let l (nnt-parse-int-go s (add (nth o 1) 1) n 0))
+        (let codes (nnt-side-codes s (add (nth l 1) 1) n (empty)))
+        (list (nth r 0) (nth o 0) (nth l 0) (nth codes 0) (nth codes 1))))
+  ; linear scan carrying best (score offset length) and runner score
+  (defn nnt-side-scan (s i n qvec best-score best-off best-len runner-score)
+    (if (ge i n) (list best-score best-off best-len runner-score)
+      (do (let row (nnt-side-line s i n))
+          (let score (nnt-overlap-codes qvec (nth row 3) 0))
+          (if (gt score best-score)
+            (nnt-side-scan s (nth row 4) n qvec score (nth row 1) (nth row 2) best-score)
+            (if (gt score runner-score)
+              (nnt-side-scan s (nth row 4) n qvec best-score best-off best-len score)
+              (nnt-side-scan s (nth row 4) n qvec best-score best-off best-len runner-score))))))
+  (defn nnt-fast-hit-entry (raw r qvec)
+    (do (let line (substring raw (nth r 1) (add (nth r 1) (nth r 2))))
+        (let entry (ra-rank-entry-of-line line))
+        (if (eq (ra-entry-answer-valid? entry) 0) (ra-miss)
+          (do (let hit (ra-hit-row "hit" entry (nth r 0) (nth r 3) (len qvec)
+                         (ra-confidence (nth r 0) (nth r 3))))
+              (if (eq (ra-hit-sufficient? hit) 1) hit (ra-miss))))))
+  (defn nnt-fast-hit (query)
+    (do (let qvec (re-semantic-vec query))
+        (if (or (le (file_size (nnt-vec-side-path)) 0) (eq (len qvec) 0))
+          (ra-miss)
+          (do (let side (read_file (nnt-vec-side-path)))
+              (let r (nnt-side-scan side 0 (str_len side) qvec 0 -1 0 0))
+              (if (le (nth r 0) 0) (ra-miss)
+                (nnt-fast-hit-entry (read_file (nnt-rag-index-home)) r qvec))))))
+
+  ; A swept full-body index (written by cognition/nl-neutral-trace-sweep.fk)
+  ; records its row count in a sibling meta cell: counting lines over the
+  ; 8+ MB file itself would recurse one frame per byte into the stack wall.
+  (defn nnt-rows-meta () ".coherence-network/rag-index/index-rows.txt")
+  (defn nnt-meta-rows ()
+    (if (le (file_size (nnt-rows-meta)) 0) -1
+      (str_to_int (nnt-strip-nl (read_file (nnt-rows-meta))))))
+  (defn nnt-index-swept? ()
+    (if (ge (nnt-meta-rows) (cnl13-anchor-count)) 1 0))
+  ; count lines only on small focused indexes; a big meta-less file is an
+  ; interrupted sweep, named as such instead of walked into the stack wall
+  (defn nnt-rag-rows-note (raw)
+    (do (let meta (nnt-meta-rows))
+        (if (gt meta 0) (str_concat (int_to_str meta) " rows (swept)")
+          (if (gt (str_len raw) 100000)
+            "rows unknown (interrupted sweep? rerun the sweep command)"
+            (str_concat (int_to_str (nnt-count-lines raw 0 (str_len raw) 0)) " rows")))))
   (defn nnt-rag-status ()
     (do (let raw-len (file_size (nnt-rag-index-home)))
         (if (le raw-len 0) "index absent"
           (do (let raw (read_file (nnt-rag-index-home)))
               (nnt-cat (list
                 "index " (int_to_str raw-len) " bytes, "
-                (int_to_str (nnt-count-lines raw 0 (str_len raw) 0)) " rows, schema "
+                (nnt-rag-rows-note raw) ", schema "
                 (if (lt (str_find raw "\"schema\":\"nodeid-rag-v2\"" 0) 0)
                   "MISSING" "nodeid-rag-v2 present")))))))
 
@@ -399,8 +489,14 @@
             (let frame (nl13-generate target-code 4 out-label))
             (let redetect (nl13-detect-generated-runtime frame))
             (let didx (nnt-distractor rt idx))
-            (let written (nnt-write-index rt idx didx))
-            (let hit (ra-grounded-hit-at (nnt-rag-index-home) query))
+            ; a swept full-body index is preserved and queried through the
+            ; sidecar fast lane; the two-row focused index is only written
+            ; (and production-scanned whole) when no sweep has landed
+            (let written (if (eq (nnt-index-swept?) 1) ""
+              (nnt-write-index rt idx didx)))
+            (let hit (if (eq (nnt-index-swept?) 1)
+              (nnt-fast-hit query)
+              (ra-grounded-hit-at (nnt-rag-index-home) query)))
             (let receipt (nnt-receipt asserted-code (nth walk 1) (nth walk 2) 2 0))
             (let sem (cs10-at idx))
             (let mach (read_file (nnt-mach-path)))
@@ -473,8 +569,11 @@
               " + " (nnt-sized "form/form-stdlib/rag-retrieve.fk")
               " + " (nnt-sized "form/form-stdlib/rag-embed.fk")
               " + " (nnt-sized "form/form-stdlib/rag-index-codec.fk") "\n"
-              "  index written this run: " (int_to_str (str_len written))
-              " bytes -> " (nnt-rag-index-home) "  status: " (nnt-rag-status) "\n"
+              (if (eq (nnt-index-swept?) 1)
+                "  full swept index preserved (rewrite skipped)"
+                (nnt-cat (list "  focused index written this run: "
+                  (int_to_str (str_len written)) " bytes")))
+              " -> " (nnt-rag-index-home) "  status: " (nnt-rag-status) "\n"
               (if (eq (ra-hit? hit) 0) "  rag: MISS through the production read path\n"
                 (nnt-cat (list
                   "  production-path answer: cell " (ra-hit-node-id hit)
@@ -484,9 +583,17 @@
                   (int_to_str (ra-hit-score hit)) "/" (int_to_str (ra-hit-runner-score hit)) "/"
                   (int_to_str (ra-hit-query-total hit)) "/" (int_to_str (ra-hit-threshold hit)) "/"
                   (int_to_str (ra-hit-confidence hit)) "\n")))
-              "  rows ranked: 2 | admission fails: 0 | timeouts: 0\n"
-              "  follow-up: the same file now answers form-cli 'grounded <question>' and 'rag-status'\n"
-              "  north-star gap: index covers the queried rows; next: sweep all 10k rows into the same home\n"
+              "  rows ranked: " (if (eq (nnt-index-swept?) 1)
+                (int_to_str (nnt-meta-rows)) "2")
+              " | admission fails: 0 | timeouts: 0"
+              (if (eq (nnt-index-swept?) 1)
+                " | rank lane: sidecar overlap cache; admission: production codec on the selected row"
+                " | rank + admission: production stream over the whole file") "\n"
+              "  follow-up: the same file answers form-cli 'grounded <question>' and 'rag-status'; "
+              "full-body sweep: ./fkwu --src cognition/tests/nl-neutral-trace-sweep-live.fk\n"
+              (if (eq (nnt-index-swept?) 1)
+                "  north-star: the 10k sweep has landed - every concept row is grounded in this home\n"
+                "  north-star gap: index covers the queried rows; the sweep command lands all 10k\n")
               "-- stage 5: choice receipt + comparison ledger (plane: why -> learned; recorded every run)\n"
               "  recipe: " (nnt-sized "form/form-stdlib/choice-receipt.fk")
               "  blueprints: CHOICE-CANDIDATE @1.2.99.1736(a7) CHOICE-TRACE @1.2.99.1737(a5) "

@@ -140,12 +140,49 @@ surface, every stage names its own gap and next step. Unique to this kernel:
 meaning lives at a content-addressed cell, tongues are columns over neutral
 symbols the body owns, and honesty is structural.
 
+## Fourth pass: the 10k sweep has landed
+
+```
+./fkwu --src cognition/tests/nl-neutral-trace-sweep-live.fk
+```
+
+sweeps ALL 10,000 concept rows into the persisted index (~9.3 MB, one
+content-addressed `nodeid-rag-v2` row per concept, key = sha256 of the exact
+committed TSV row bytes), printing progress every 500 rows through the native
+`print_str` door and recording the row count in a sibling meta cell.
+
+The first sweep exposed the next wall honestly: a single production-path
+query over the 9.3 MB file needs **more than four minutes** (measured, JIT
+made no difference) — the per-row admission scan calls the Form-implemented
+`str_find` once per field over ~900-byte lines. The answer follows the
+repo's own `T_flat` doctrine — *crystallized speed is a regenerable cache,
+never a foundation*: the sweep also writes a **rank sidecar**
+(`index-vec.tsv`, ~1 MB: row, byte interval, semantic codes). Queries scan
+the sidecar with a byte cursor and then run the PRODUCTION codec and
+cryptographic admission (`ra-rank-entry-of-line` + answer-key verification)
+on the selected row only. Rank is a cache; truth stays in the index bytes.
+
+Sweep-aware behavior, kept truthful:
+
+- The main trace command preserves a swept index (rewrite skipped, stated in
+  the report) and queries it through the fast lane; without a sweep it writes
+  and production-scans the two-row focused index as before.
+- Writing the focused index resets the row meta so a stale "swept" claim can
+  never outlive the file it described; the band writes to its own scratch
+  path so it can never clobber the swept home.
+- A big meta-less index is named "interrupted sweep" instead of being
+  line-counted into the stack wall (one frame per byte).
+- Shapes that keep the sweep linear are documented in the organ: the offset
+  tail carried one cons per row, appends through the native
+  `file_append_bytes`, the vec computed once per row for both files.
+
 ## Still open, in order
 
-1. Sweep all 10k rows into the persisted index (the home and codec are ready).
-2. Seat the remaining 10 tongues on the pivot (`nl-pivot-de.fk` is the worked
+1. Seat the remaining 10 tongues on the pivot (`nl-pivot-de.fk` is the worked
    example: one grammar + one column each).
-3. Native-speaker review of mapped labels and the de seed rows.
+2. Native-speaker review of mapped labels and the de seed rows.
+3. A native (or JIT-crystallized) `str_find` so the production stream can
+   scan the full index at sidecar speed and the rank cache becomes optional.
 4. `walk_recipe_here`'s real fkwu counterpart (its file keeps it loud on
    purpose until the walk can be real).
 5. argv/env natives so the staged files become optional.
