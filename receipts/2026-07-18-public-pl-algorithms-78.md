@@ -1,6 +1,6 @@
 # Public PL algorithms: 78 source programs observed
 
-; witnessed: 2026-07-18 -> 78/78 admitted; 78 semantic mutations rejected;
+; witnessed: 2026-07-18 -> 78/78 admitted; 78 anchor-role mutations rejected;
 ;                              78 malformed programs rejected
 
 ## What is now real
@@ -22,6 +22,11 @@ byte-exact Exercism reference/proof/example sources. Their upstream repository,
 pinned commit, original path, local path, MIT license, SHA-256, and byte count
 are recorded row by row in
 `presence/fixtures/concept-pl-public-algorithms-13/source-manifest.tsv`.
+
+Across the whole 78-program union, 77 files are byte-identical to their pinned
+Git objects. The pinned C# Luhn object has no final newline; its committed local
+carrier adds one POSIX newline and records the local-byte hash. This one-byte
+normalization is explicit and is not counted as byte-exact upstream identity.
 
 `build.mjs` does not generate substitutes. It rereads all 65 pinned upstream
 files, compares their bytes with the committed fixtures, recomputes hashes, and
@@ -59,7 +64,9 @@ Aggregate observed data: **78 programs, 76,789 source bytes, 15,734 tokens,
 13,714 AST nodes, 2,020 balanced groups, and 650/650 family-specific semantic
 roles**.
 
-The roles are meaning-bearing rather than marker strings. Examples include
+The role predicates are family-specific combinations of tokens and source
+substrings; they are materially broader than a single marker, but they are not
+a behavioral interpreter. Examples include
 ordered interval narrowing and midpoint selection; LIFO opener retention and
 matching; repeated exact factor extraction; adjacent-symbol grouping and
 decimal repeat expansion; and cardinal rotation plus grid translation. The
@@ -70,18 +77,24 @@ family analyzer rather than a general-purpose thirteen-language typechecker.
 
 ## Negative observations
 
-Every source has two independent negative witnesses:
+Every source has two negative witnesses with different scope:
 
-- a syntax-valid, family-specific meaning mutation (modulo 10→11, half-step
+- a syntax-valid, family-specific anchor mutation (modulo 10→11, half-step
   change, mismatch acceptance/pop change, divisibility change, singleton-count
-  change, or left-command change) still parses but loses semantic admission;
+  change, or left-command change) still parses but loses its anchor-dependent
+  role predicate and therefore admission;
 - an appended unmatched opener is rejected by the balanced-group parser.
 
-Totals: **78/78 semantic mutations parsed and were rejected; 78/78 malformed
+Totals: **78/78 anchor mutations parsed and were rejected; 78/78 malformed
 sources were rejected**. Matching-brackets loses fourteen roles because one
 pop→push mutation removes two linked LIFO obligations; other families lose one
 role per program. That measured difference is preserved rather than normalized
 away.
+
+The first negative is intentionally not promoted to independent semantic or
+behavioral causality: the mutated source anchor is also the evidence used by
+one role predicate. Executing original and mutant programs against upstream
+behavioral suites remains owed.
 
 ## Executable doors
 
