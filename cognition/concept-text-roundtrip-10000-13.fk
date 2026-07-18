@@ -1,0 +1,197 @@
+; concept-text-roundtrip-10000-13.fk -- complete indexed lexical detector.
+;
+; The generated index is an acceleration of exact full-table equality, not a
+; candidate ceiling: for each committed cell it stores every ID in that lens
+; whose surface is byte-identical.  An exhaustive Form walk invokes that range
+; for all 130,000 cells and independently checks the requested ID, provenance,
+; sense state, and collision state.  Sentence understanding stays
+; outside this self-round-trip contract.
+; witnessed: 2026-07-18 -> 130000 indexed detector calls / 0 missing expected ids
+; preludes: form/form-stdlib/core.fk model/concept-semantics-10000-data.fk model/concept-semantics-10000.fk cognition/concept-nl-semantic-13.fk cognition/concept-text-roundtrip-10000-13-metadata.fk
+
+(defn ctr13-lens-index (code)
+    (if (str_eq code "en") 0
+      (if (str_eq code "id") 1
+        (if (str_eq code "es") 2
+          (if (str_eq code "fr") 3
+            (if (str_eq code "pt-br") 4
+              (if (str_eq code "sw") 5
+                (if (str_eq code "de") 6
+                  (if (str_eq code "ru") 7
+                    (if (str_eq code "zh") 8
+                      (if (str_eq code "ja") 9
+                        (if (str_eq code "ar") 10
+                          (if (str_eq code "hi") 11
+                            (if (str_eq code "tr") 12 -1))))))))))))))
+  (defn ctr13-cell-index (id code)
+    (do (let lens (ctr13-lens-index code))
+        (if (or (lt id 0) (or (ge id 10000) (lt lens 0))) -1
+          (add (mul id 13) lens))))
+  (defn ctr13-u16le (data at)
+    (add (str_byte_at data at) (mul 256 (str_byte_at data (add at 1)))))
+  (defn ctr13-u32le (data at)
+    (add (str_byte_at data at)
+      (add (mul 256 (str_byte_at data (add at 1)))
+        (add (mul 65536 (str_byte_at data (add at 2)))
+             (mul 16777216 (str_byte_at data (add at 3)))))))
+  (defn ctr13-index-at (index cell)
+    (do (let at (mul cell 12))
+        (list (ctr13-u32le index at)
+          (ctr13-u16le index (add at 4))
+          (byte_to_str (str_byte_at index (add at 6)))
+          (str_byte_at index (add at 7))
+          (ctr13-u16le index (add at 8))
+          (str_byte_at index (add at 10))
+          (str_byte_at index (add at 11)))))
+  (defn ctr13-info-candidate-offset (info) (nth info 0))
+  (defn ctr13-info-candidate-count (info) (nth info 1))
+  (defn ctr13-info-source-code (info) (nth info 2))
+  (defn ctr13-info-sense-state-code (info) (nth info 3))
+  (defn ctr13-info-sense-count (info) (nth info 4))
+  (defn ctr13-info-expected-present (info) (nth info 5))
+  (defn ctr13-info-collision (info) (nth info 6))
+  (defn ctr13-sense-state (code)
+    (if (eq code 0) "semantic-unmapped"
+      (if (eq code 1) "sense-unique"
+        (if (eq code 2) "sense-ambiguous" "invalid"))))
+  (defn ctr13-combined-sense-count (primary-index overlay-index id)
+    (if (gt (cs10-method-at primary-index id) 0)
+      (cs10-senses-at primary-index id)
+      (cs10-senses-at overlay-index id)))
+
+  (defn ctr13-candidates-go (data entry count out)
+    (if (eq count 0) (reverse out)
+      (ctr13-candidates-go data (add entry 1) (sub count 1)
+        (cons (ctr13-u16le data (mul entry 2)) out))))
+  (defn ctr13-candidates-at (data info)
+    (ctr13-candidates-go data (ctr13-info-candidate-offset info)
+      (ctr13-info-candidate-count info) (empty)))
+  (defn ctr13-candidate-range-has-id? (data entry count wanted)
+    (if (eq count 0) 0
+      (if (eq (ctr13-u16le data (mul entry 2)) wanted) 1
+        (ctr13-candidate-range-has-id? data (add entry 1) (sub count 1) wanted))))
+  (defn ctr13-candidates-have-id? (data info wanted)
+    (ctr13-candidate-range-has-id? data
+      (ctr13-info-candidate-offset info) (ctr13-info-candidate-count info) wanted))
+  (defn ctr13-candidates-same-surface? (nl-data nl-offsets candidates code surface)
+    (if (eq (len candidates) 0) 1
+      (if (str_eq (cnl13-label-at nl-data nl-offsets (head candidates) code) surface)
+        (ctr13-candidates-same-surface? nl-data nl-offsets (tail candidates) code surface) 0)))
+
+  ; Cell result = tag, address, generated surface, provenance, sense state,
+  ; complete candidate group, expected presence, and collision.
+  (defn ctr13-detect-cell-in (nl-data nl-offsets index candidates id code)
+    (do (let cell (ctr13-cell-index id code))
+        (if (lt cell 0) (empty)
+          (do (let info (ctr13-index-at index cell))
+              (let surface (cnl13-label-at nl-data nl-offsets id code))
+              (let ids (ctr13-candidates-at candidates info))
+              (list "concept-text-roundtrip-cell"
+                (list "address" id code)
+                (list "generated-surface" surface)
+                (list "source" (ctr13-info-source-code info)
+                  (cnl13-sourced-state (ctr13-info-source-code info)))
+                (list "senses" (ctr13-sense-state (ctr13-info-sense-state-code info))
+                  (ctr13-info-sense-count info))
+                (list "complete-candidates" ids "count" (len ids))
+                (list "expected-present" (ctr13-candidates-have-id? candidates info id)
+                  "recorded" (ctr13-info-expected-present info))
+                (list "collision" (ctr13-info-collision info)))))))
+
+  (defn ctr13-verify-cell-in (nl-data nl-offsets sources primary-index overlay-index
+                              index candidates id code)
+    (do (let cell (ctr13-cell-index id code))
+        (if (lt cell 0) 0
+          (do (let info (ctr13-index-at index cell))
+              (let surface (cnl13-label-at nl-data nl-offsets id code))
+              (let ids (ctr13-candidates-at candidates info))
+              (let sense-count (ctr13-combined-sense-count primary-index overlay-index id))
+              (add
+                (if (gt (str_len surface) 0) 1 0)
+                (add (if (gt (len ids) 0) 2 0)
+                  (add (if (eq (ctr13-candidates-have-id? candidates info id) 1) 4 0)
+                    (add (if (eq (ctr13-info-expected-present info) 1) 8 0)
+                      (add (if (str_eq (ctr13-info-source-code info)
+                                  (cnl13-source-code-at sources id code)) 16 0)
+                        (add (if (eq (ctr13-info-sense-count info) sense-count) 32 0)
+                          (add (if (eq (ctr13-info-collision info)
+                                      (if (gt (len ids) 1) 1 0)) 64 0)
+                            (add (if (ctr13-candidates-same-surface?
+                                      nl-data nl-offsets ids code surface) 128 0)
+                              (if (eq (ctr13-info-sense-state-code info)
+                                    (ctr13-sense-state-code-for-count sense-count))
+                                256 0)))))))))))))
+
+  (defn ctr13-sense-state-code-for-count (count)
+    (if (eq count 0) 0 (if (eq count 1) 1 2)))
+  (defn ctr13-source-slot (code)
+    (if (str_eq code "F") 0
+      (if (str_eq code "W") 1
+        (if (str_eq code "D") 2
+          (if (str_eq code "C") 3
+            (if (str_eq code "G") 4 5))))))
+  (defn ctr13-inc-slot (counts slot)
+    (list
+      (add (nth counts 0) (if (eq slot 0) 1 0))
+      (add (nth counts 1) (if (eq slot 1) 1 0))
+      (add (nth counts 2) (if (eq slot 2) 1 0))
+      (add (nth counts 3) (if (eq slot 3) 1 0))
+      (add (nth counts 4) (if (eq slot 4) 1 0))
+      (add (nth counts 5) (if (eq slot 5) 1 0))))
+  (defn ctr13-inc-sense-slot (counts slot)
+    (list
+      (add (nth counts 0) (if (eq slot 0) 1 0))
+      (add (nth counts 1) (if (eq slot 1) 1 0))
+      (add (nth counts 2) (if (eq slot 2) 1 0))))
+
+  ; Sequential exhaustive walk. Candidate retrieval runs once per cell; the NL
+  ; table advances by row cursor and sense counts come from the combined indexes.
+  ; aggregate = total, expected-present, failures, collision-cells,
+  ; unique-cells, candidate-entries, source-counts, sense-state-counts,
+  ; nonempty-surfaces, source-matches, sense-matches, collision-matches.
+  (defn ctr13-exhaustive-row-go
+    (nl-data nl-tail sources primary-index overlay-index index candidates
+     id lens total present failures collision unique entries
+     source-counts sense-counts nonempty source-match sense-match collision-match)
+    (if (eq id 10000)
+      (list total present failures collision unique entries source-counts sense-counts
+        nonempty source-match sense-match collision-match
+        (str_len index) (str_len candidates))
+      (if (eq lens 13)
+        (ctr13-exhaustive-row-go nl-data (tail nl-tail) sources primary-index
+              overlay-index index candidates (add id 1) 0
+              total present failures collision unique entries source-counts sense-counts
+              nonempty source-match sense-match collision-match)
+        (do
+          (let cell (add (mul id 13) lens))
+          (let info (ctr13-index-at index cell))
+          (let surface (cnl13-field (cnl13-row-line-from-tail nl-data nl-tail) (add lens 1)))
+          (let source (byte_to_str (str_byte_at sources cell)))
+          (let sense-count (ctr13-combined-sense-count primary-index overlay-index id))
+          (let found (ctr13-candidates-have-id? candidates info id))
+          (let collision-bit (if (gt (ctr13-info-candidate-count info) 1) 1 0))
+          (let source-ok (if (str_eq source (ctr13-info-source-code info)) 1 0))
+          (let sense-ok (if (and (eq sense-count (ctr13-info-sense-count info))
+                              (eq (ctr13-sense-state-code-for-count sense-count)
+                                  (ctr13-info-sense-state-code info))) 1 0))
+          (let collision-ok (if (eq collision-bit (ctr13-info-collision info)) 1 0))
+          (ctr13-exhaustive-row-go nl-data nl-tail sources primary-index overlay-index
+            index candidates id (add lens 1)
+            (add total 1) (add present found)
+            (add failures (if (and (eq found 1)
+                                (and (eq (ctr13-info-expected-present info) 1)
+                                  (and (eq source-ok 1)
+                                    (and (eq sense-ok 1) (eq collision-ok 1))))) 0 1))
+            (add collision collision-bit) (add unique (if (eq collision-bit 0) 1 0))
+            (add entries (ctr13-info-candidate-count info))
+            (ctr13-inc-slot source-counts (ctr13-source-slot source))
+            (ctr13-inc-sense-slot sense-counts (ctr13-sense-state-code-for-count sense-count))
+            (add nonempty (if (gt (str_len surface) 0) 1 0))
+            (add source-match source-ok) (add sense-match sense-ok)
+            (add collision-match collision-ok))))))
+
+  (defn ctr13-exhaustive-in
+    (nl-data nl-offsets sources primary-index overlay-index index candidates)
+    (ctr13-exhaustive-row-go nl-data nl-offsets sources primary-index overlay-index
+      index candidates 0 0
+      0 0 0 0 0 0 (list 0 0 0 0 0 0) (list 0 0 0) 0 0 0 0))
