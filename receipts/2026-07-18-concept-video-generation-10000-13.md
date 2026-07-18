@@ -2,6 +2,12 @@
 
 Date: 2026-07-18
 
+Correction witnessed later the same day: real footage routing is now based on
+visible content rather than upstream folder names. `loop-24f.mkv` is an office
+walk and therefore routes to **office 493**, not lexical loop 6196.
+`courthouse-24f.mkv` routes to **courthouse 9066**, not court 751. The corrected
+matrix below supersedes the earlier route-name mapping.
+
 ## What became real
 
 `model/concept-video-generation-10000-13.fk` now exposes a lazy generation
@@ -48,29 +54,29 @@ content actually names the lexical concept:
 
 | concept | id | committed footage | sourced | machine-gap `G` | decoded exact | animated |
 |---|---:|---|---:|---:|---:|---:|
-| loop | 6196 | `loop-24f.mkv` | 13/13 | 6 | 13/13 | 13/13 |
+| office | 493 | `loop-24f.mkv` | 13/13 | 0 | 13/13 | 13/13 |
 | university | 1927 | `university-24f.mkv` | 13/13 | 8 | 13/13 | 13/13 |
-| court/courthouse | 751 | `courthouse-24f.mkv` | 13/13 | 0 | 13/13 | 13/13 |
+| courthouse | 9066 | `courthouse-24f.mkv` | 13/13 | 9 | 13/13 | 13/13 |
 
 Observed matrix: **39/39 decoded concept+lens identities** and **39/39
 first-to-last decoded pixel changes**. Lens rows were not sampled symbolically:
 all 39 six-frame videos were rendered and decoded. The aligned NL runtime
 supplied **39/39 sourced labels**. Their exact provenance mix was 3 frequency
-anchors (`F`), 15 WordNet/OMW labels (`W`), 7 dedicated-WordNet labels (`D`),
-and 14 machine-gap labels (`G`). Form counted the 14 `G` rows from the runtime
+anchors (`F`), 11 WordNet/OMW labels (`W`), 8 dedicated-WordNet labels (`D`),
+and 17 machine-gap labels (`G`). Form counted the 17 `G` rows from the runtime
 records; they were not inferred from whether a translation looked plausible.
 
 The actual footage surfaces now include:
 
 ```text
-loop:       loop | gelung | ojete | boucle | ilhó | kitanzi | Öse | петля | 金属圈 | アイレット | حلقة | पाश | döngü
+office:     office | biro | oficina | bureau | escritório | afisi | Büro | контора | 办公室 | 事務所 | مكتب | दफ़तर | ofis
 university: university | universitas | universidad | université | universidade | chuo kikuu | Universität | университет | 大学师生 | 大学 | جامِعَة | विश्वविद्यालय | üniversite
-court:      court | pengadilan | corte | cour | tribunal | korti | Gericht | суд | 法庭 | 裁判所 | محكمة | न्यायालय | mahkeme
+courthouse: courthouse | gedung pengadilan | palacio de justicia | palais de justice | tribunal | mahakama | Gerichtsgebäude | здание суда | 县政府大楼 | 裁判所 | قاعة المحكمة | न्यायालय | adliye
 ```
 
-For example, the decoded loop/French carrier visibly renders `boucle` over the
-committed office footage. Its runtime provenance is `G`, so the receipt calls it
-machine-translated and unreviewed even though it is visibly coherent.
+For example, the decoded office/French carrier visibly renders `bureau` over
+the committed office footage. Its runtime provenance is `W`; machine-generated
+rows in the university and courthouse matrices remain visibly marked `G`.
 
 ## All-13 sourced-label matrix
 
@@ -157,7 +163,7 @@ FFV1 carriers were not committed.
   `G` rows are machine-translated and unreviewed; `W`/`D`/`C` rows are also
   automatically mapped and unreviewed. Presence is not review.
 - WordNet misses retain an empty gloss; the renderer does not invent one.
-- Three concepts have semantically matched real footage. Other concepts receive
+- Three concepts have content-aligned real footage. Other concepts receive
   a deterministic semantic animation, not falsely labelled stock footage.
 - CoreText rasterization and ffmpeg encode/decode remain host carriers. Concept
   selection, semantic content, address construction, and decoded-pixel sensing
@@ -175,3 +181,5 @@ old independent NL sequence forced the renderer to wait for concept-ID-aligned
 evidence rather than quietly displaying unrelated translations. The final
 machine-gap layer added a second honest distinction: total presence became real
 only by keeping generated translations visibly separate from sourced lexicons.
+The later route-name correction added a third: a video directory name is
+provenance, not permission to assign its word to whatever its pixels show.
