@@ -1,8 +1,8 @@
 # Receipt — the 10,000 × 13 concept surface is called as one live runtime
 
 `presence/concept-10000-13-runtime.fk` is the non-test entrypoint joining the
-new lanes. One real address, concept ID 9066 (`courthouse`), loads the same ranked
-record and semantic row into:
+lanes. Its real primary address, concept ID 9066 (`courthouse`), loads the same
+ranked record and semantic row into:
 
 1. Indonesian sourced text (`gedung pengadilan`, generated from the exact
    courthouse anchor, `G`);
@@ -10,6 +10,23 @@ record and semantic row into:
 3. a semantic video plan selecting the committed courthouse footage;
 4. a generated Go program whose complete source is regenerated and recovered;
 5. the existing kernel world model, persisted at observed position 3.
+
+The 2026-07-18 semantic/text/PL expansion now runs in this same entrypoint. It
+opens the revision-pinned Wiktionary overlay and complete text candidate index,
+then admits method-3 anchor 2097 (`patients` → WordNet lemma `patient`) as a
+second operational entity. That companion is independently checked through its
+complete English candidate row, combined semantic gloss/mapping, generated and
+exactly recovered JavaScript, explicit PL task route, semantic video plan, and
+ordinary world-model persistence at position 4. The world now contains both
+concept entities; this is integration evidence, not a claim of two-concept
+multimodal parity.
+
+The program row also materializes the source-backed six-family public-data
+batch through `cptfg-generate`, exact `cptfg-recover`, and Form evaluation. Its
+runtime bit requires the recovered result list to equal direct evaluation of
+the six committed USGS, Treasury, NASA, and FDA-derived tasks. Thus the new PL
+families are consumed by the ordinary runtime rather than living only in their
+carrier test.
 
 Direct run:
 
@@ -32,7 +49,11 @@ sensed      concept 9066, lens 1, marker valid
 The `255/255` bits require nonempty attributed text, actual audio generation,
 exact PCM identity recovery, independent speech presence, shared video surface,
 real backdrop selection, exact PL source recovery, native world persistence,
-and shared semantic/concept identity.
+and shared semantic/concept identity. Its world bit additionally requires the
+method-3 companion to retain method `3`, a complete text candidate containing
+its expected ID, nonempty inherited WordNet gloss, mapping label
+`wiktionary-form+wordnet`, exact PL recovery, and persistence beside the primary
+entity. Removing the overlay or compact text index now makes this runtime fail.
 
 The separate semantic-content integration is executable at
 `presence/concept-audio-text-10000-live.fk`: held-out speech becomes a Whisper
