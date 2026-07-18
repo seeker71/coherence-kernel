@@ -1,0 +1,148 @@
+; stdin CLI for real session-query -> native grounding replay.
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/base64.fk form-stdlib/record-src-shim.fk form-stdlib/rag-embed.fk form-stdlib/rag-retrieve.fk form-stdlib/native-model-session-grounding.fk
+
+(do
+    (defn nmsgc-bytes-string-loop (bytes acc)
+        (if (eq (len bytes) 0) acc
+            (nmsgc-bytes-string-loop (tail bytes)
+                (str_concat acc (byte_to_str (head bytes))))))
+    (defn nmsgc-decode (s)
+        (nmsgc-bytes-string-loop (base64-decode s) ""))
+    (defn nmsgc-read-candidates (remaining acc)
+        (if (le remaining 0) (nmsg-reverse acc)
+            (nmsgc-read-candidates (sub remaining 1)
+                (cons (nmsg-candidate (read_line) (nmsgc-decode (read_line))) acc))))
+    (defn nmsgc-read-labels (remaining acc)
+        (if (le remaining 0) (nmsg-reverse acc)
+            (nmsgc-read-labels (sub remaining 1) (cons (read_line) acc))))
+    (defn nmsgc-read-episodes (remaining acc)
+        (if (le remaining 0) (nmsg-reverse acc)
+            (do
+                (let when (read_line))
+                (let query (nmsgc-decode (read_line)))
+                (let query-digest (read_line))
+                (let labels (nmsgc-read-labels (str_to_int (read_line)) (list)))
+                (nmsgc-read-episodes (sub remaining 1)
+                    (cons (nmsg-episode when query query-digest labels) acc)))))
+    (defn nmsgc-join (xs)
+        (if (eq (len xs) 0) ""
+            (if (eq (len xs) 1) (head xs)
+                (str_concat (head xs) (str_concat "," (nmsgc-join (tail xs)))))))
+    (defn nmsgc-kvi (key value)
+        (str_concat key (str_concat "=" (str_concat (int_to_str value) "\n"))))
+    (defn nmsgc-kvs (key value)
+        (str_concat key (str_concat "=" (str_concat value "\n"))))
+    (defn nmsgc-render-results (rows index)
+        (if (eq (len rows) 0) ""
+            (do
+                (let r (head rows))
+                (let prefix (str_concat "query_" (int_to_str index)))
+                (str_concat
+                    (nmsgc-kvs (str_concat prefix "_sha256") (nmsg-result-query r))
+                    (str_concat
+                        (nmsgc-kvs (str_concat prefix "_labels")
+                                   (nmsgc-join (nmsg-result-labels r)))
+                        (str_concat
+                            (nmsgc-kvs (str_concat prefix "_top5")
+                                       (nmsgc-join (nmsg-result-top r)))
+                            (str_concat
+                                (nmsgc-kvi (str_concat prefix "_first_hit_rank")
+                                           (nmsg-result-rank r))
+                                (nmsgc-render-results (tail rows) (add index 1)))))))))
+
+    ; The observation is forced once before its scalar report and result rows
+    ; enter this renderer.  Ranking therefore happens once per replayed query.
+    (defn nmsgc-render-observation
+        (observation evaluation-contract previous-hit5 previous-comparable
+         source-files root-files completed labeled-observed source-index-candidates)
+        (nmsgc-render-all
+            (nth observation 0) (nth observation 1)
+            evaluation-contract previous-hit5 previous-comparable
+            source-files root-files completed
+            labeled-observed source-index-candidates))
+    (defn nmsgc-render-all
+        (report results evaluation-contract previous-hit5 previous-comparable
+         source-files root-files completed labeled-observed source-index-candidates)
+        (do
+            (let hit5 (nth report 9))
+            (let replay-valid
+                (if (and (eq (nth report 13) 1)
+                         (eq (nmsg-digest? evaluation-contract) 1)) 1 0))
+            (str_concat
+                "schema=native-model-session-grounding-report-v1\nsource=real-root-codex-user-message-to-task-complete\n"
+                (str_concat
+                    (nmsgc-kvi "source_session_files" source-files)
+                    (str_concat
+                        (nmsgc-kvi "root_session_files" root-files)
+                        (str_concat
+                            (nmsgc-kvi "completed_pairs_scanned" completed)
+                            (str_concat
+                                (nmsgc-kvi "labeled_pairs_observed" labeled-observed)
+                                (str_concat
+                                    (nmsgc-kvi "source_index_candidates" source-index-candidates)
+                                    (str_concat
+                                        (nmsgc-kvi "admitted_candidates" (nth report 1))
+                                        (str_concat
+                                            (nmsgc-kvi "replayed_queries" (nth report 2))
+                                            (str_concat
+                                                (nmsgc-kvi "path_labels" (nth report 3))
+                                                (str_concat
+                                                    (nmsgc-kvi "top1_hits" (nth report 4))
+                                                    (str_concat
+                                                        (nmsgc-kvi "top3_hits" (nth report 5))
+                                                        (str_concat
+                                                            (nmsgc-kvi "top5_hits" (nth report 6))
+                                                            (str_concat
+                                                                (nmsgc-kvi "top1_ppm" (nth report 7))
+                                                                (str_concat
+                                                                    (nmsgc-kvi "top3_ppm" (nth report 8))
+                                                                    (str_concat
+                                                                        (nmsgc-kvi "top5_ppm" hit5)
+                                                                        (str_concat
+                                                                            (nmsgc-kvi "mrr5_ppm" (nth report 10))
+                                                                            (str_concat
+                                                                                (nmsgc-kvi "label_pool_coverage_ppm" (if (eq (nth report 13) 1) 1000000 0))
+                                                                                (str_concat
+                                                                                    (nmsgc-kvi "previous_top5_ppm" previous-hit5)
+                                                                                    (str_concat
+                                                                                        (nmsgc-kvi "previous_comparable" previous-comparable)
+                                                                                        (str_concat
+                                                                                            (nmsgc-kvi "top5_delta_ppm" (nmsg-delta hit5 previous-hit5))
+                                                                                            (str_concat
+                                                                                                (nmsgc-kvs "candidate_set_sha256" (nth report 11))
+                                                                                                (str_concat
+                                                                                                    (nmsgc-kvs "dataset_sha256" (nth report 12))
+                                                                                                    (str_concat
+                                                                                                        (nmsgc-kvs "evaluation_contract_sha256" evaluation-contract)
+                                                                                                        (str_concat
+                                                                                                            (nmsgc-render-results results 1)
+                                                                                                            (str_concat
+                                                                                                                "ranker=form-native-re-vec64-stable-one-pass-l1-top5\ndetail_rows=1\nraw_query_persisted=0\nscope=real-session-path-grounding-replay-not-language-generation\n"
+                                                                                                                (nmsgc-kvi "replay_valid" replay-valid))))))))))))))))))))))))))))))))))
+
+    (let pool-digest (read_line))
+    (let dataset-digest (read_line))
+    (let evaluation-contract (read_line))
+    (let previous-hit5 (str_to_int (read_line)))
+    (let previous-comparable (str_to_int (read_line)))
+    (let detailed-rows (str_to_int (read_line)))
+    (let source-files (str_to_int (read_line)))
+    (let root-files (str_to_int (read_line)))
+    (let completed (str_to_int (read_line)))
+    (let labeled-observed (str_to_int (read_line)))
+    (let source-index-candidates (str_to_int (read_line)))
+    (let candidates (nmsgc-read-candidates (str_to_int (read_line)) (list)))
+    (let episodes (nmsgc-read-episodes (str_to_int (read_line)) (list)))
+    (print_str
+        (if (eq detailed-rows 1)
+            (nmsgc-render-observation
+                (nmsg-observe candidates episodes pool-digest dataset-digest)
+                evaluation-contract previous-hit5 previous-comparable
+                source-files root-files completed labeled-observed
+                source-index-candidates)
+            (nmsg-daily-summary candidates episodes
+                (nmsg-daily-context
+                    pool-digest dataset-digest evaluation-contract
+                    previous-hit5 previous-comparable source-files root-files
+                    completed labeled-observed source-index-candidates))))
+    0)
