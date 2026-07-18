@@ -1,11 +1,12 @@
 # Receipt — the 10,000 × 13 concept surface is called as one live runtime
 
 `presence/concept-10000-13-runtime.fk` is the non-test entrypoint joining the
-new lanes. One real address, concept ID 751 (`court`), loads the same ranked
+new lanes. One real address, concept ID 9066 (`courthouse`), loads the same ranked
 record and semantic row into:
 
-1. Indonesian sourced text (`pengadilan`, OMW Wiktionary, `W`);
-2. a Damayanti-spoken PCM WAV with exact concept/lens envelope sensing;
+1. Indonesian sourced text (`gedung pengadilan`, generated from the exact
+   courthouse anchor, `G`);
+2. a Damayanti-spoken PCM WAV with exact concept/lens address sensing;
 3. a semantic video plan selecting the committed courthouse footage;
 4. a generated Go program whose complete source is regenerated and recovered;
 5. the existing kernel world model, persisted at observed position 3.
@@ -16,16 +17,16 @@ Direct run:
 ./fkwu --src presence/concept-10000-13-runtime.fk   # 255
 ```
 
-The live carrier emitted `/tmp/sema-concept-runtime-751-id.wav`:
+The live carrier emits `/tmp/sema-concept-runtime-9066-id.wav`. This runtime's
+tone envelope is address-integrity evidence; the separate speech-content lane
+uses speech-only PCM and Whisper-derived transcripts, so the two claims are no
+longer conflated.
 
 ```text
-sha256      665bc7521adfd980e7002178da79ccbd013cf0a7b5336151cf363a2a952046e1
 codec       pcm_s16le
 sample rate 16000
 channels    1
-duration    1.713812 s
-speech      11,421 samples; mean absolute level 4,845; present=1
-sensed      concept 751, lens 1, marker valid
+sensed      concept 9066, lens 1, marker valid
 ```
 
 The `255/255` bits require nonempty attributed text, actual audio generation,
@@ -33,23 +34,35 @@ exact PCM identity recovery, independent speech presence, shared video surface,
 real backdrop selection, exact PL source recovery, native world persistence,
 and shared semantic/concept identity.
 
+The separate semantic-content integration is executable at
+`presence/concept-audio-text-10000-live.fk`: held-out speech becomes a Whisper
+transcript and then enters the complete Form 10,000-concept detector. Its live
+acceptance is `63/63`; real input/output rows for every lane are collected in
+`receipts/2026-07-18-non-toy-concept-sensing.md`.
+
 The materialized organ runs were then repeated directly:
 
 ```text
 NL     130,000/130,000 present; live band 8191; pure 1023 four-way
-audio  30/30 spoken WAVs; pure 32767 four-way
-video  78/78 matrix videos exact and animated; 39 real-footage captions sourced;
+audio  30/30 addressable spoken WAVs; plus 20/20 speech-only semantic detections
+       across all 13 locales, three concepts, and seven held-out voices
+video  78/78 matrix videos exact and animated; 39 aligned real-footage captions;
        pure 8191 four-way
 PL     130,000/130,000 generated/nonempty/recovered; full audit 32767;
-       36/36 executions on 9 installed carriers; pure 65535 four-way
-world  3/3 pixel detections persisted in the ordinary wm-model
+       48/48 executions on 12 carriers; pure 65535 four-way
+world  3/3 content-derived detections persisted in the ordinary wm-model
 ```
 
-Real-footage video provenance across `loop`, `university`, and `court` in all
-13 NL lenses was `F=3, W=15, D=7, G=14`, totaling 39 with no absent caption.
+Real-footage video provenance across `office`, `university`, and `courthouse`
+in all 13 NL lenses was `F=3, W=11, D=8, G=17`, totaling 39 with no absent caption.
 All 39 decoded exact concept/lens identities and all 39 animated. The separate
 `good`, `life`, and `go` matrix was also 39/39 exact and animated, all lexical
 source-backed (`G=0`).
+
+The route filename `loop-24f.mkv` describes its upstream trajectory, not its
+visible meaning; it now maps to office 493. Likewise, courthouse footage maps
+to exact anchor 9066 rather than broad court 751. Both rejected lexical mappings
+return no backdrop.
 
 The programming audit returned:
 
@@ -63,13 +76,12 @@ surfaces, WordNet-mapped, explicit misses, relation-bearing concepts, behavior
 checksum, and source checksum.
 
 No Python and no C runtime change were used. The honest remaining floors are
-human review of the 68,370 machine-translated NL cells, discourse-level word
-sense selection, a native Swahili TTS voice on this host, and learned open-
-vocabulary video synthesis; the current video carrier is real footage for three
-matched concepts and visible semantic animation for all other addresses.
+human review of the 68,370 machine-translated NL cells, resolved rather than
+ranked-only discourse word senses, a native Swahili TTS voice on this host, and
+learned open-vocabulary video synthesis; the current content carrier recognizes
+three matched real scenes and abstains on Oxford.
 
-The surprising teaching was that the most useful integration example was not a
-new synthetic scene: `court` already crossed real footage, multilingual speech,
-generated code, and the native world map. The discomfort around attractive but
-misaligned labels became gold when every layer was forced to share ID 751 and
-recover it independently.
+The surprising teaching was that integration exposed a taxonomy error before a
+model error: `court` was too broad and `loop` named a route. The discomfort
+around those attractive labels became gold when the body corrected them to
+`courthouse` 9066 and `office` 493 and made the old claims return empty.
