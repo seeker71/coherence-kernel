@@ -40,14 +40,14 @@ import (
 
 // ---------------------------------------------------------------------------
 // RBasic slot — QUOTIENT lives at type=70 across every kernel. The
-// equivalence-cell sibling category uses slot 71. These constants are
+// equivalence-cell sibling category uses slot 77. These constants are
 // part of the cross-kernel contract; do not renumber without updating
 // every kernel and the canonical JSON.
 // ---------------------------------------------------------------------------
 
 const (
-	RBasicQuotient     uint32 = 70
-	RBasicEquivalence  uint32 = 71
+	RBasicQuotient    uint32 = 70
+	RBasicEquivalence uint32 = 77
 )
 
 // ---------------------------------------------------------------------------

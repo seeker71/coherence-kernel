@@ -20,14 +20,8 @@ A Form-native emitter:
 ## What "idiomatic native" means
 
 The output reads as code a native programmer would write. Form
-vocabulary does not leak into the emit, with one tiny exception: a
-single substrate-boundary SDK import:
-
-```python
-from kernels.python_bmf import sdk
-```
-
-Everything else is Python: `xs[0]` for `(head xs)`, `xs[1:]` for
+vocabulary and private-kernel SDKs do not leak into the emit. It is plain
+Python: `xs[0]` for `(head xs)`, `xs[1:]` for
 `(tail xs)`, `[x, *xs]` for `(cons x xs)`, `a + b` for `(add a b)` or
 `(str_concat a b)`, `a == b` for `(eq a b)` or `(str_eq a b)`,
 `(t if c else e)` for `(if c t e)`, `def f(a, b): return ...` for
@@ -40,7 +34,8 @@ Everything else is Python: `xs[0]` for `(head xs)`, `xs[1:]` for
   points: `pn-emit-string source-text → python-text` and
   `pn-emit-file in-fk-path out-py-path`.
 - **`python-native-driver.fk`** — runs `pn-emit-string` on a slice of
-  `engine.fk` and writes `kernels/python_bmf/native_demo.py`. The
+  `engine.fk` and writes a generated module under
+  `form/.cache/emit_native_python/python_bmf/`. The
   slice covers `cap-empty`, `cap-pair`, `cap-name`, `cap-value`,
   `cap-get`, `cap-set`, `cap-merge`, `mk-match`, `mk-fail`, `match?`,
   `fail?` — enough to exercise let / nested if / head / tail / nil? /
@@ -59,7 +54,7 @@ cd form && ./validate.sh form-stdlib/core.fk \
                          form-stdlib/emits/python-native-driver.fk
 
 # Verify the output compiles.
-python3 -m py_compile kernels/python_bmf/native_demo.py
+python3 -m py_compile form/.cache/emit_native_python/python_bmf/objects.py
 ```
 
 ## Kernel quirks the emitter respects

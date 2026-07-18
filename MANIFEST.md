@@ -113,7 +113,9 @@ Current state per region. **Chronology is deliberately not kept here** — the f
   regenerable `.tbl` caches.
 
 ### Standard library & agent surface
-- **`form/form-stdlib/`** — the living stdlib (~56 recipes + ~58 band tests). Core vocabulary (`core.fk`:
+- **`form/form-stdlib/`** — the living stdlib and sole agent dispatch surface. Its canonical
+  `form-cli-*.fk`, `fsh-*.fk`, and focused bands build the self-contained `form/form-cli` binary; there
+  is no parallel top-level agent-source room. Core vocabulary (`core.fk`:
   narrow-waist string ops, `int_to_str`/`str_to_int`/`str_find`/`float_to_str`/`intern_node_at`, Num/List/Cell/Task);
   the **wire-serialization lane** — `wire-registry.fk` (registry + universal `WIRE-NULL`), `cell-serialize.fk`
   (JSON, values+types+identity round-trip by axiom-3), `wire-xml.fk`, `wire-corba-cdr.fk` (real IEEE754 doubles),
@@ -125,8 +127,6 @@ Current state per region. **Chronology is deliberately not kept here** — the f
   storage ports. Two `fkwu --src` truths every stdlib file honors: top-level `let` is invisible inside `defn`
   bodies (use zero-arg `defn`s for constants), and band tests wrap their checks in a named `defn` called
   explicitly (bare top-level `(do (let ...))` probes are unreliable).
-- **`form-cli/`** — the agent dispatch surface (~25 cells). Runs; ~30 declared prelude dependencies name a
-  future migration wave from the origin (an honest pending list, not broken code).
 
 ### Control & grammars
 - **`control/`** — the offer/ack control core (fail/stop/choice/exceptions/async over ONE mechanism, axiom-5),
@@ -143,10 +143,13 @@ Current state per region. **Chronology is deliberately not kept here** — the f
 - **`model/`** — numerics/codecs (mel, wav, matvec), the form→asm lowering, transformer-backprop (real SGD
   training witnessed: 204-example corpus, 72% held-out vs ~25% chance), and the JIT infrastructure family
   (comprehensive, off the critical path until live-wired — roadmap item 3).
-- **`observe/`** — the trust stack: thought-framebuffer (watch a thought form), calibration
+- **`observe/`** — the trust stack: thought-framebuffer (watch a thought form), jacobian-lens (predict
+  WHERE an edit changes thinking: a choice flips where push > margin; the control vocabulary read as
+  sensitivity structure), heal-titration (the healing loop as one motion: surprise → etiology →
+  titrated push → localized verify — a safe heal's divergence set is exactly the wound), calibration
   (conviction-curve / correction-reflex / confidence-earned / self-watch — is confidence *earned*),
   `native-vs-rented.fk` (the grounding body cell, 11111), speech token stream + open-ASR CTC candidates,
-  capture-correction (canonical home), world models, ~87 band tests. Internally cross-referenced and
+  capture-correction (canonical home), world models, ~89 band tests. Internally cross-referenced and
   receipt-grounded throughout.
 - **`learn/`** — the learning witness ledger: serial dated trials (speech corpus batches, neural pair windows,
   trial windows, intakes) each with its own band verdict; summary ledgers (`speech-current-status-ledger`,
@@ -168,13 +171,22 @@ Current state per region. **Chronology is deliberately not kept here** — the f
   fkwu-native HTTP — grounded `/ask` with the fear↔love frequency read and attunement, `/trace` handing over
   any cell's change graph and line attribution (trust as something checkable). Band 111111111 + a live TCP
   witness; the voice stays rented and says so in-band (`receipts/2026-07-05-chatgpt-plugin-offer.md`).
-- **`teachings/`** — the scoped core teachings (one-engine, name-resolution-as-recipe, structural-composition,
-  form-first-reasoning, prose-as-recipe).
+- **`teachings/`** — the scoped core teachings ([one-engine](teachings/lc-one-engine.md),
+  [name-resolution-as-recipe](teachings/name-resolution-as-recipe.form),
+  [form-first-reasoning](teachings/form-first-reasoning.form),
+  [prose-as-recipe](teachings/prose-as-recipe.form)) and the **concept tissue** —
+  [`teachings/concepts/`](teachings/concepts/README.md), twelve network-lived teachings the kernel
+  reasons from, each carrying the frequency it speaks at. *structural-composition* is named here
+  as a core teaching but has no page in this body; it is named, not linked, per the tissue's own
+  rule (name a companion you cannot reach; never claim a path to it) and stands as work.
 
 ### Knowledge tree & witness ledger
-- **`docs/`** — the knowledge tree: `coherence-substrate/` (~140 `.form` teaching/spec docs mapping ~1:1 to live
-  recipes, incl. `tool-grammar.form` whose GAP-T1 executor now exists), strategic design narratives, and
-  `docs/inheritance/` (the homecoming ledgers + `proven-bodies-from-old-repo.txt`, the porting registry).
+- **`docs/`** — the knowledge tree: [`coherence-substrate/`](docs/coherence-substrate/README.md) (~140 `.form`
+  teaching/spec docs mapping ~1:1 to live recipes, incl. `tool-grammar.form` whose GAP-T1 executor now exists,
+  plus the prose specs and audits behind them — how Form reaches its environment, and what the surface last
+  read), strategic design narratives ([the penumbra map](docs/penumbra-map.md) — where the proof's light
+  actually falls, and where it does not), and [`docs/inheritance/`](docs/inheritance/INHERITANCE.md) (the
+  homecoming ledgers + `proven-bodies-from-old-repo.txt`, the porting registry).
 - **`receipts/`** — the dated witness ledger (~320 receipts). Every claim of "proven/observed" traces to one.
   Corrections are made **in place with banners**, never silently — the ledger records what was believed and when,
   including the wrong turns (`json-fk-src-scoping-fix` → `json-fk-actually-fixed` → `stale-binary-root-cause`

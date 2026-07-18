@@ -22,9 +22,6 @@ export NO_UPDATE_NOTIFIER=1
 export NPM_CONFIG_UPDATE_NOTIFIER=false
 export npm_config_update_notifier=false
 
-# Keep the kernel-resident bp lookup table in sync with the registry before the
-# staleness check decides whether to rebuild. Writes only on change, so a no-op
-# run leaves mtimes (and the rebuild decision) untouched.
 # Resolve a working Python 3: prefer `py -3` on Windows (a bare `python3` there
 # resolves to the App-Execution-Alias stub that prints "Python was not found"),
 # and verify the interpreter actually runs before using it.
@@ -34,10 +31,6 @@ if command -v py >/dev/null 2>&1 && py -3 --version >/dev/null 2>&1; then
 elif command -v python3 >/dev/null 2>&1 && python3 --version >/dev/null 2>&1; then
     BP_PY="python3"
 fi
-if [[ -n "$BP_PY" && -f ../scripts/gen_bp_table.py ]]; then
-    $BP_PY ../scripts/gen_bp_table.py >/dev/null 2>&1 || true
-fi
-
 # Phase 0 fkwu native surface gate (spec: fkwu-only-kernel-collapse.md).
 if [[ -n "$BP_PY" && -f scripts/validate_fkwu_native_surface.py ]]; then
     $BP_PY scripts/validate_fkwu_native_surface.py
@@ -47,6 +40,9 @@ if [[ -n "$BP_PY" && -f scripts/gen_flt_ops_from_manifest.py ]]; then
 fi
 if [[ -n "$BP_PY" && -f scripts/sync_native_op_manifest.py ]]; then
     $BP_PY scripts/sync_native_op_manifest.py
+fi
+if [[ -n "$BP_PY" && -f scripts/verify_category_contract.py ]]; then
+    $BP_PY scripts/verify_category_contract.py
 fi
 
 GO_DIR="form-kernel-go"
@@ -183,6 +179,8 @@ fk_resolve_dep_path() {
         printf "%s\n" "$cand"
     elif [[ -f "$token" ]]; then
         printf "%s\n" "$token"
+    elif [[ "$token" == form/* && -f "${token#form/}" ]]; then
+        printf "%s\n" "${token#form/}"
     else
         printf "%s\n" "$cand"
     fi
@@ -222,7 +220,10 @@ fk_expand_file_deps() {
     local file="$1" token dep
     fk_seen_contains "$file" && return
     fk_expand_seen+=("$file")
-    [[ -f "$file" ]] || return
+    if [[ ! -f "$file" ]]; then
+        echo "validate.sh: declared Form dependency not found: $file" >&2
+        return 1
+    fi
     while IFS= read -r token; do
         [[ -n "$token" ]] || continue
         dep="$(fk_resolve_dep_path "$file" "$token")"
@@ -349,7 +350,10 @@ run_siblings() {
     ( TMPDIR="$legs/tmp-rs" "$RS_BIN" "${rs_args[@]}" > "$legs/rs" 2>&1 || true ) &
     ( TMPDIR="$legs/tmp-ts" run_ts "${ts_args[@]}" > "$legs/ts" 2>&1 || true ) &
     if [[ -n "$fourth_tbl" ]]; then
-        ( TMPDIR="$legs/tmp-fk" "$FKWU" "$fourth_tbl" 0 2>/dev/null | head -1 > "$legs/fk" || true ) &
+        # Consume the complete arm-profile stream while retaining the verdict.
+        # `head -1` closed the pipe early and could SIGPIPE the emitted worker
+        # thread during process teardown, leaving macOS in an unkillable UE wait.
+        ( TMPDIR="$legs/tmp-fk" "$FKWU" "$fourth_tbl" 0 2>/dev/null | sed -n '1p' > "$legs/fk" || true ) &
     fi
     wait
     go_out=$(cat "$legs/go"); rs_out=$(cat "$legs/rs"); ts_out=$(cat "$legs/ts")

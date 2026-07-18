@@ -43,7 +43,7 @@ import type { FormatRecipe } from "./formats.ts";
 // Aligned with the canonical numbering plan: 50 = format, 51 = numeric,
 // 60 = language. Cross-kernel agreement requires every implementation to
 // use the same value.
-export const RBasicLanguage = 60;
+export const RBasicLanguage = RBasic.LANGUAGE;
 
 // Grammar production kinds — the small alphabet of parse-rule nodes.
 // Each kind is a category whose children carry the production's

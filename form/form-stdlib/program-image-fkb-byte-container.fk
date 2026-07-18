@@ -11,9 +11,13 @@
 ;
 ; Byte format:
 ;   magic:        46 4b 50 49 46 42 31 00  ; "FKPIFB1\0"
-;   version:      u32 big-endian, currently 2
+;   version:      u32 big-endian, currently 4
 ;   string:       u32 byte-length + raw bytes
-;   signed int:   sign byte 0/1 + u32 magnitude, range [-2147483647, 2147483647]
+;   signed int:   sign byte 0/1 + hi u32 + lo u32 big-endian magnitude.
+;                 The v4 wire lane carries magnitudes up to 2^63-1 so
+;                 full-range u32 literals (e.g. cksum values) are encodable;
+;                 this body encodes what its own native ints can round-trip:
+;                 [-4611686018427387903, 4611686018427387903] (2^62-1)
 ;   payload:      magic version
 ;                 source-path source-hash source-mtime
 ;                 artifact-path seal-ok
@@ -25,22 +29,13 @@
 ; `content-hash` and `artifact-mtime` are descriptor/probe metadata, not
 ; hash-covered payload fields.
 ;
-; preludes: form-stdlib/core.fk
-;           form-stdlib/str-byte-at.fk
-;           form-stdlib/sha256.fk
-;           form-stdlib/hex.fk
-;           form-stdlib/form-fs.fk
-;           form-stdlib/source-artifact-cache.fk
-;           form-stdlib/source-artifact-descriptor.fk
-;           form-stdlib/runtime-artifact-plan.fk
-;           form-stdlib/source-artifact-probe.fk
-;           form-stdlib/source-artifact-identity.fk
-;           form-stdlib/program-image-fkb.fk
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/form-fs.fk form-stdlib/source-artifact-cache.fk form-stdlib/source-artifact-descriptor.fk form-stdlib/runtime-artifact-plan.fk form-stdlib/source-artifact-probe.fk form-stdlib/source-artifact-identity.fk form-stdlib/program-image-fkb.fk
 
 (do
-    (defn pifbc-version () "program-image-fkb-byte-container-v2")
-    (defn pifbc-byte-version () 2)
-    (defn pifbc-max-signed () 2147483647)
+    (defn pifbc-version () "program-image-fkb-byte-container-v4")
+    (defn pifbc-byte-version () 4)
+    (defn pifbc-max-signed () 4611686018427387903)
+    (defn pifbc-u32-radix () 4294967296)
     (defn pifbc-magic () (list 70 75 80 73 70 66 49 0))
 
     (defn pifbc-feature (name status) (list "program-image-fkb-byte-container-feature" name status))
@@ -52,7 +47,7 @@
             (pifbc-feature "consumes-valid-pif-envelope" 1)
             (pifbc-feature "magic-version-pinned" 1)
             (pifbc-feature "length-prefixed-strings" 1)
-            (pifbc-feature "signed-int32ish-big-endian" 1)
+            (pifbc-feature "signed-int64ish-big-endian" 1)
             (pifbc-feature "table-section-order-pinned" 1)
             (pifbc-feature "symbol-section-order-pinned" 1)
             (pifbc-feature "symbol-dependencies-hash-covered" 1)
@@ -94,17 +89,24 @@
     (defn pifbc-byte? (b)
         (if (ge b 0) (if (le b 255) 1 0) 0))
     (defn pifbc-signed-ok? (n)
-        (if (ge n (sub 0 (pifbc-max-signed)))
-            (le n (pifbc-max-signed))
+        ; magnitude test via the abs sign: the one native value whose magnitude
+        ; overflows (min-int) wraps negative under abs and is refused here; a
+        ; direct (ge n (sub 0 max)) cannot see it -- comparisons of two huge
+        ; nearby ints round through doubles and report min-int equal to -max
+        (if (ge (pifbc-abs n) 0)
+            (le (pifbc-abs n) (pifbc-max-signed))
             0))
     (defn pifbc-unsigned-ok? (n)
         (if (ge n 0) (le n (pifbc-max-signed)) 0))
     (defn pifbc-abs (n)
         (if (lt n 0) (sub 0 n) n))
+    (defn pifbc-signed-magnitude-bytes (mag)
+        (append-list (u32-to-bytes (div mag (pifbc-u32-radix)))
+                     (u32-to-bytes (mod mag (pifbc-u32-radix)))))
     (defn pifbc-signed-bytes (n)
         (if (lt n 0)
-            (append-list (list 1) (u32-to-bytes (pifbc-abs n)))
-            (append-list (list 0) (u32-to-bytes n))))
+            (append-list (list 1) (pifbc-signed-magnitude-bytes (pifbc-abs n)))
+            (append-list (list 0) (pifbc-signed-magnitude-bytes n))))
     (defn pifbc-string-bytes (s)
         (append-list (u32-to-bytes (str_len s)) (sai-string-bytes s)))
 

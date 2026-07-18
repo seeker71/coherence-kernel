@@ -24,8 +24,8 @@ func TestRBasicQuotientIsSlot70(t *testing.T) {
 	if RBasicQuotient != 70 {
 		t.Fatalf("RBasicQuotient = %d, want 70", RBasicQuotient)
 	}
-	if RBasicEquivalence != 71 {
-		t.Fatalf("RBasicEquivalence = %d, want 71", RBasicEquivalence)
+	if RBasicEquivalence != 77 {
+		t.Fatalf("RBasicEquivalence = %d, want 77", RBasicEquivalence)
 	}
 }
 

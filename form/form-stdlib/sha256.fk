@@ -183,6 +183,94 @@
                 (process-block state (take-rec msg 64 (list)))
                 (drop-rec msg 64))))
 
+    ;; ---- STREAMING STRING INPUT ------------------------------------
+    ;; The ordinary `sha256` entry above accepts a byte-list, which is the
+    ;; right shape for bounded Form values.  Live request bodies already live
+    ;; in a kernel string pool.  Turning one of those strings into an N-cell
+    ;; list before hashing needlessly makes both stack and arena pressure grow
+    ;; with the request.  The streaming entry keeps exactly four values:
+    ;;
+    ;;   (total-byte-length reversed-partial partial-length h8)
+    ;;
+    ;; `reversed-partial` is never longer than 63 bytes.  The carrier's
+    ;; `string_byte_fold` loop supplies raw UTF-8 byte integers (including NUL)
+    ;; and calls this Form transition.  SHA padding and every compression round
+    ;; remain here; there is no host SHA or crypto shortcut.
+    (defn sha256-stream-state (total reversed-partial partial-length h8)
+        (list total reversed-partial partial-length h8))
+    (defn sha256-stream-total (state) (nth-rec state 0))
+    (defn sha256-stream-reversed-partial (state) (nth-rec state 1))
+    (defn sha256-stream-partial-length (state) (nth-rec state 2))
+    (defn sha256-stream-h8 (state) (nth-rec state 3))
+
+    (defn sha256-stream-initial ()
+        (sha256-stream-state 0 (list) 0 (sha256-h-init)))
+
+    ;; Local bounded reverse: unlike a general input walk this can recurse at
+    ;; most 64 times, because a full block is compressed immediately.
+    (defn sha256-stream-reverse-onto (xs acc)
+        (if (nil? xs) acc
+            (sha256-stream-reverse-onto (tail xs) (cons (head xs) acc))))
+    (defn sha256-stream-reverse (xs)
+        (sha256-stream-reverse-onto xs (list)))
+
+    (defn sha256-stream-byte-step (state byte)
+        (do
+            (let next-total (add (sha256-stream-total state) 1))
+            (let next-reversed
+                (cons byte (sha256-stream-reversed-partial state)))
+            (let next-length (add (sha256-stream-partial-length state) 1))
+            (if (eq next-length 64)
+                (sha256-stream-state next-total (list) 0
+                    (process-block (sha256-stream-h8 state)
+                        (sha256-stream-reverse next-reversed)))
+                (sha256-stream-state next-total next-reversed next-length
+                    (sha256-stream-h8 state)))))
+
+    (defn sha256-stream-fold-string-from (state message)
+        (string_byte_fold message state sha256-stream-byte-step))
+
+    ;; FIPS 180-4 appends the message length modulo 2^64.  Splitting the byte
+    ;; length before multiplying keeps the low word in range and represents the
+    ;; full 64-bit bit length as two big-endian u32 words.
+    (defn sha256-stream-bit-length-bytes (total)
+        (do
+            (let bits-hi (mod (div total 536870912) 4294967296))
+            (let bits-lo (mul (mod total 536870912) 8))
+            (append-list (u32-to-bytes bits-hi) (u32-to-bytes bits-lo))))
+
+    (defn sha256-stream-h8-bytes (h8)
+        (append-list (u32-to-bytes (nth-rec h8 0))
+          (append-list (u32-to-bytes (nth-rec h8 1))
+            (append-list (u32-to-bytes (nth-rec h8 2))
+              (append-list (u32-to-bytes (nth-rec h8 3))
+                (append-list (u32-to-bytes (nth-rec h8 4))
+                  (append-list (u32-to-bytes (nth-rec h8 5))
+                    (append-list (u32-to-bytes (nth-rec h8 6))
+                                 (u32-to-bytes (nth-rec h8 7))))))))))
+
+    ;; Only one or two bounded blocks exist here: partial is 0..63 bytes,
+    ;; followed by 0x80, zero padding, and the fixed eight-byte length.
+    (defn sha256-stream-finalize (state)
+        (do
+            (let partial
+                (sha256-stream-reverse
+                    (sha256-stream-reversed-partial state)))
+            (let with-bit (append-1 partial 128))
+            (let padded (zero-pad with-bit))
+            (let final-blocks (append-list padded
+                (sha256-stream-bit-length-bytes
+                    (sha256-stream-total state))))
+            (sha256-stream-h8-bytes
+                (process-all-blocks (sha256-stream-h8 state) final-blocks))))
+
+    ;; Raw UTF-8 string -> canonical 32-byte SHA-256 digest, without an
+    ;; input-sized Form list or input-sized Form recursion.
+    (defn sha256-stream-string (message)
+        (sha256-stream-finalize
+            (sha256-stream-fold-string-from
+                (sha256-stream-initial) message)))
+
     ;; ---- THE CANONICAL ENTRY POINT ---------------------------------
     ;; (sha256 bytes-list) → 32-byte digest as list of ints.
     (defn sha256 (bytes)

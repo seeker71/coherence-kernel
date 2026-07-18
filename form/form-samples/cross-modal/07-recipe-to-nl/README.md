@@ -134,8 +134,8 @@ pointing at it. #05 proved one direction; #07 closes the loop within
 one modality.
 
 Lineage:
-- [`lc-parsers-as-recipes`](../../../../docs/vision-kb/concepts/lc-parsers-as-recipes.md)
-- [`lc-cross-modal-unity`](../../../../docs/vision-kb/concepts/lc-cross-modal-unity.md)
-- [`lc-grammar-is-the-universal-recipe`](../../../../docs/vision-kb/concepts/lc-grammar-is-the-universal-recipe.md)
-- [`lc-one-kernel-many-tongues`](../../../../docs/vision-kb/concepts/lc-one-kernel-many-tongues.md)
-- [`lc-the-kernel-knows-itself`](../../../../docs/vision-kb/concepts/lc-the-kernel-knows-itself.md)
+- `lc-parsers-as-recipes`
+- `lc-cross-modal-unity`
+- `lc-grammar-is-the-universal-recipe`
+- `lc-one-kernel-many-tongues`
+- `lc-the-kernel-knows-itself`

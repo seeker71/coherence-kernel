@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,8 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
@@ -721,25 +724,28 @@ func uptimeHuman(seconds int64) string {
 }
 
 func loadKernelConfig() (map[string]any, error) {
-	root, err := findRepoRoot()
-	if err != nil {
-		return nil, err
-	}
 	merged := map[string]any{}
-	base := filepath.Join(root, "api", "config", "api.json")
-	if err := mergeConfigFile(merged, base); err != nil {
-		return nil, err
+	// An explicit --config is authoritative and standalone. Never require or
+	// silently mix a consumer repository's api/config/api.json into it.
+	if overlay := strings.TrimSpace(goKernelConfigPath); overlay != "" {
+		if err := mergeConfigFile(merged, overlay); err != nil {
+			return nil, fmt.Errorf("explicit kernel config %s: %w", overlay, err)
+		}
+		return merged, nil
 	}
-	overlay := goKernelConfigPath
-	if overlay == "" {
-		if home, err := os.UserHomeDir(); err == nil {
-			overlay = filepath.Join(home, ".coherence-network", "config.json")
+	// Without --config, repository and home files are optional discovery
+	// layers. Missing files yield an empty config; malformed present files fail.
+	if root, err := findRepoRoot(); err == nil {
+		base := filepath.Join(root, "api", "config", "api.json")
+		if err := mergeConfigFile(merged, base); err != nil && !os.IsNotExist(err) {
+			return nil, err
 		}
 	}
-	if overlay != "" {
-		_ = mergeConfigFile(merged, overlay)
-	}
 	if home, err := os.UserHomeDir(); err == nil {
+		overlay := filepath.Join(home, ".coherence-network", "config.json")
+		if err := mergeConfigFile(merged, overlay); err != nil && !os.IsNotExist(err) {
+			return nil, err
+		}
 		mergeKernelKeys(merged, filepath.Join(home, ".coherence-network", "keys.json"))
 	}
 	return merged, nil
@@ -851,6 +857,7 @@ type sourcePart struct {
 }
 
 var sourceCompileMu sync.Mutex
+var sourceCompileArtifactCache = map[[sha256.Size]byte][]byte{}
 
 var sourceCompilePreludes = []string{
 	"form-ontology-loader.fk",
@@ -863,10 +870,20 @@ var sourceCompilePreludes = []string{
 }
 
 var sourceRouteLanguagePreludes = []string{
+	"form-ontology-loader.fk",
+	"line-grammar.fk",
+	"bmf-core.fk",
+	"bmf-grammar.fk",
+	"bml.fk",
+	"bml-source.fk",
+	"source-compiler.fk",
 	"json.fk",
 	"core.fk",
 	"sha256.fk",
+	"choice-receipt.fk",
+	"branch-choice-order.fk",
 	"kernel-http.fk",
+	"bml-route-choice-runtime.fk",
 	"language-model.fk",
 }
 
@@ -917,6 +934,40 @@ func sourceCompileServeProgram(parts []sourcePart, stdlibDir string) ([]byte, er
 	if err != nil {
 		return nil, err
 	}
+	// Source compilation is content-addressed. The canonical application is
+	// intentionally loaded by multiple workers/tests; reparsing its complete
+	// compiler prelude each time retained multi-GB heaps before Go's collector
+	// could recover them. Hash exact prelude + application bytes and reuse only
+	// the immutable FORMBIN2 artifact. Any source-byte change is a cache miss.
+	type loadedSource struct {
+		label  string
+		source string
+	}
+	loaded := make([]loadedSource, 0, len(sourceRouteLanguagePreludes))
+	hasher := sha256.New()
+	writeHashPart := func(label, source string) {
+		_, _ = fmt.Fprintf(hasher, "%d:%s%d:", len(label), label, len(source))
+		_, _ = hasher.Write([]byte(source))
+	}
+	writeHashPart("stdlib", stdlibAbs)
+	for _, name := range sourceRouteLanguagePreludes {
+		path := filepath.Join(stdlibAbs, name)
+		source, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return nil, fmt.Errorf("route-language prelude %s: %w", path, readErr)
+		}
+		text := string(source)
+		loaded = append(loaded, loadedSource{label: path, source: text})
+		writeHashPart(path, text)
+	}
+	for _, part := range parts {
+		writeHashPart(part.label, part.source)
+	}
+	var cacheKey [sha256.Size]byte
+	copy(cacheKey[:], hasher.Sum(nil))
+	if artifact, ok := sourceCompileArtifactCache[cacheKey]; ok {
+		return bytes.Clone(artifact), nil
+	}
 	stdlibParent := filepath.Dir(stdlibAbs)
 	prevCwd, err := os.Getwd()
 	if err != nil {
@@ -929,13 +980,8 @@ func sourceCompileServeProgram(parts []sourcePart, stdlibDir string) ([]byte, er
 
 	k := NewKernel()
 	roots := []NodeID{}
-	for _, name := range sourceRouteLanguagePreludes {
-		path := filepath.Join(stdlibAbs, name)
-		source, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("route-language prelude %s: %w", path, err)
-		}
-		if err := compileRouteSourceIntoRecipe(k, &roots, path, string(source), stdlibAbs); err != nil {
+	for _, prelude := range loaded {
+		if err := compileRouteSourceIntoRecipe(k, &roots, prelude.label, prelude.source, stdlibAbs); err != nil {
 			return nil, err
 		}
 	}
@@ -951,7 +997,17 @@ func sourceCompileServeProgram(parts []sourcePart, stdlibDir string) ([]byte, er
 	if len(roots) > 1 {
 		root = k.intern(catBlock(RBlockDo), roots)
 	}
-	return serializeArtifact(k, root), nil
+	artifact := serializeArtifact(k, root)
+	sourceCompileArtifactCache[cacheKey] = bytes.Clone(artifact)
+	// The compiler graph is intentionally much larger than the portable
+	// artifact. It is dead at this boundary; return its pages to the host now so
+	// a long-lived router does not carry a ~1.5 GiB bootstrap heap after startup.
+	// Subsequent workers load the cached immutable artifact and never repay it.
+	k = nil
+	roots = nil
+	runtime.GC()
+	debug.FreeOSMemory()
+	return artifact, nil
 }
 
 func sourceCompileDriver(stdlibAbs, body string) (string, error) {

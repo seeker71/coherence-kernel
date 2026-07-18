@@ -93,6 +93,7 @@ static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_T
  * fk_spos / fk_slen are declared), where they can read the source buffer. */
 static void fk_diag(int sev, long long off, const char *fmt, ...);
 static void fk_diag_flush(void);
+static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
 /* Named capacities for the seed's fixed-size tables. Several numerically coincide
  * (many independent tables happen to be sized 65536) but are named SEPARATELY on
  * purpose: they are different index spaces (the node/AST table, the value stack,
@@ -138,6 +139,8 @@ static void fk_diag_flush(void);
 #define FK_CH_DQUOTE 34
 #define FK_CH_PLUS 43
 #define FK_CH_COMMA 44
+#define FK_CH_LBRACKET 91
+#define FK_CH_RBRACKET 93
 #define FK_CH_DASH 45
 #define FK_CH_DOT 46
 #define FK_CH_SLASH 47
@@ -172,7 +175,7 @@ static const long long fk_fbase = -9000000000000000000LL;
 /* stone 2a: the CANONICAL first-class nothing (axiom-1: nothing is first-class; timeout==nothing).
  * A single reserved sentinel, odd and one above fk_fbase, so it is DISTINCT from every value: not
  * an int (ints are v<<1, even), not 0, not the nil/empty value 1, not a boxed float (fk_isf needs
- * v<=fk_fbase-2; this is fk_fbase+1, so isf is false), not a node (fk_nidx maps it to ~4.5e18, far
+ * v<=fk_fbase-3; this is fk_fbase+1, so isf is false), not a node (fk_nidx maps it to ~4.5e18, far
  * past fk_np), not a record ((0-v) is even for records; here it is odd), not a string/list (those
  * are positive). The reducer RETURNS this from (nothing); recipes OBSERVE it via nothing? —
  * no-value is no longer conflated with 0 or host-null. */
@@ -186,7 +189,7 @@ static long long fk_is_nothing(long long v) {
  * and the float base (fk_fbase = -9e18, floats live at-or-below it), and BELOW every
  * node/record/cons/int (which are tiny-magnitude or positive). fk_fnval(f) = fk_fnbase - (f<<1) - 1
  * is therefore odd-negative in a narrow band (fn-indices are < 4096): not an int (ints v<<1, even),
- * not 0/1, not a float (fk_isf needs v<=fk_fbase-2 ~ -9e18; these are ~-8e18, ABOVE it), not a node
+ * not 0/1, not a float (fk_isf needs v<=fk_fbase-3 ~ -9e18; these are ~-8e18, ABOVE it), not a node
  * (fk_nidx maps ~8e18 far past fk_np), not a record ((0-v) is odd here, records even), not nothing
  * (distinct constant). A bare fn-name in value position evaluates to this (tag 243); an indirect
  * call offers the fn it names (tag 244). CLOSURE is the NAMED next gap: the fn-value carries only
@@ -211,12 +214,24 @@ static long long fk_is_fnval(long long v) {
     long long fi = fk_fnval_idx(v);
     return (fi >= 0 && fi < FK_FNVAL_MAX_INDEX) ? 1 : 0;
 }
+/* Float boxes are ODD words at/below fk_fbase-3: fk_fbase - (fp<<1) - 1. They were
+ * even (fk_fbase - (fp<<1)) until 2026-07-17, which let a deep-negative INT word
+ * (x<<1 for x < fk_fbase/2 ~ -4.5e18) alias float slot (fk_fbase - x*2)/2 at EVERY
+ * kind-dispatched door once the pool held that many floats — witnessed: after two
+ * 7.0s, (add -4500000000000000002 1) returned the float 8.0 and the int printed
+ * as 7. Ints are even (v<<1); with floats odd, every even word is an int across
+ * the full 63-bit range. The odd-negative neighbours stay disjoint by band:
+ * nothing = fk_fbase+1 (above the ceiling), fn-values ~ -8e18 (above fk_fbase),
+ * cons cells positive, node boxes tiny-negative — all excluded by magnitude. */
 static long long fk_fidx(long long v) {
-    return (fk_fbase - v) >> 1;
+    return (fk_fbase - v - 1) >> 1;
 }
 static long long fk_isf(long long v) {
+    if ((v & 1) == 0) {
+        return 0;
+    }
     long long fi = fk_fidx(v);
-    return v <= fk_fbase - 2 && fi > 0 && fi <= fk_fp;
+    return v <= fk_fbase - 3 && fi > 0 && fi <= fk_fp;
 }
 static double fk_num(long long v) {
     if (fk_isf(v)) {
@@ -241,7 +256,7 @@ static long long fk_fbox(double d) {
         }
     }
     fk_fv[fk_fp] = d;
-    return fk_fbase - (fk_fp << 1);
+    return fk_fbase - (fk_fp << 1) - 1;
 }
 static void fk_pr(long long v) {
     char b[32];
@@ -529,6 +544,7 @@ extern long lseek(int, long, int);
 extern int rmdir(const char *);
 extern int unlink(const char *);
 extern int rename(const char *, const char *);
+extern int getpid(void);
 extern int sprintf(char *, const char *, ...);
 extern char *getenv(const char *);
 static long long fk_read_all_bounded(int fd, char *buf, long long cap) {
@@ -4618,6 +4634,155 @@ static double fk_log_d(double x) {
     }
     return 2.0 * acc + ((double)e) * ln2;
 }
+
+/* CPython-compatible round(x, ndigits) for finite binary64 values, ndigits >= 0.
+ *
+ * Scaling in binary (x * 10^n) changes which side of a decimal half-way point
+ * the stored value occupies.  The proof siblings exposed that defect in the
+ * old tag-52 implementation.  A binary64 has a terminating decimal expansion
+ * of at most 1074 fractional places, so the fixed 1074-place rendering is the
+ * exact value.  Round that digit string half-to-even, then let strtod choose the
+ * nearest binary64.  form/form-stdlib/tests/round-ndigits-band.fk is the owning
+ * semantic witness; this C membrane can shrink when the native walker owns the
+ * primitive directly.
+ */
+static double fk_round_ndigits_decimal(double x, long long nd) {
+    const double max_finite = 1.7976931348623157e308;
+    char exact[1536];
+    char digits[1536];
+    char decimal[1536];
+    long long exact_n;
+    long long point;
+    long long digits_n;
+    long long keep;
+    long long kept_n;
+    long long i;
+    long long j;
+    int neg;
+    int round_up = 0;
+    double ax;
+    double out;
+
+    if (x != x || x > max_finite || x < 0.0 - max_finite) {
+        return x;
+    }
+    neg = x < 0.0 || (x == 0.0 && (1.0 / x) < 0.0);
+    ax = neg ? 0.0 - x : x;
+    if (nd < 0) {
+        nd = 0;
+    }
+    if (nd >= 1074) {
+        return x;
+    }
+
+    exact_n = sprintf(exact, "%.1074f", ax);
+    point = 0;
+    while (point < exact_n && exact[point] != '.') {
+        point = point + 1;
+    }
+    digits_n = 0;
+    i = 0;
+    while (i < exact_n) {
+        if (exact[i] != '.') {
+            digits[digits_n] = exact[i];
+            digits_n = digits_n + 1;
+        }
+        i = i + 1;
+    }
+
+    keep = point + nd;
+    if (keep >= digits_n) {
+        return x;
+    }
+    if (digits[keep] > '5') {
+        round_up = 1;
+    } else if (digits[keep] == '5') {
+        i = keep + 1;
+        while (i < digits_n && digits[i] == '0') {
+            i = i + 1;
+        }
+        if (i < digits_n) {
+            round_up = 1;
+        } else if (keep > 0 && ((digits[keep - 1] - '0') & 1)) {
+            round_up = 1;
+        }
+    }
+
+    kept_n = keep;
+    if (round_up) {
+        if (kept_n == 0) {
+            digits[0] = '1';
+            kept_n = 1;
+        } else {
+            i = kept_n;
+            while (i > 0 && digits[i - 1] == '9') {
+                digits[i - 1] = '0';
+                i = i - 1;
+            }
+            if (i > 0) {
+                digits[i - 1] = digits[i - 1] + 1;
+            } else {
+                j = kept_n;
+                while (j > 0) {
+                    digits[j] = digits[j - 1];
+                    j = j - 1;
+                }
+                digits[0] = '1';
+                kept_n = kept_n + 1;
+            }
+        }
+    } else if (kept_n == 0) {
+        digits[0] = '0';
+        kept_n = 1;
+    }
+
+    j = 0;
+    if (neg) {
+        decimal[j] = '-';
+        j = j + 1;
+    }
+    if (nd == 0) {
+        i = 0;
+        while (i < kept_n) {
+            decimal[j] = digits[i];
+            j = j + 1;
+            i = i + 1;
+        }
+    } else if (kept_n <= nd) {
+        decimal[j] = '0';
+        decimal[j + 1] = '.';
+        j = j + 2;
+        i = nd - kept_n;
+        while (i > 0) {
+            decimal[j] = '0';
+            j = j + 1;
+            i = i - 1;
+        }
+        i = 0;
+        while (i < kept_n) {
+            decimal[j] = digits[i];
+            j = j + 1;
+            i = i + 1;
+        }
+    } else {
+        i = 0;
+        while (i < kept_n) {
+            if (i == kept_n - nd) {
+                decimal[j] = '.';
+                j = j + 1;
+            }
+            decimal[j] = digits[i];
+            j = j + 1;
+            i = i + 1;
+        }
+    }
+    decimal[j] = 0;
+    out = strtod(decimal, 0);
+    if (out == 0.0 && neg) {
+        return -0.0;
+    }
+    return out;
+}
 static double fk_dot_list(long long av, long long bv) {
     long long pa = av >> 1;
     long long pb = bv >> 1;
@@ -4709,6 +4874,12 @@ static long long fk_mcopy(long long b) {
     return (fk_nhp << 1) | 1;
 }
 static long long fk_nmelt;
+/* fk_melt_want: a caller about to build a large flat structure (one whose
+ * intermediates cannot be traced mid-build, e.g. the fs_list result) may
+ * request this many FREE pairs after compaction; growth doubles until the
+ * request is met. Zero keeps the original policy (double iff live*2 > cap).
+ * Always reset to 0 after the call. */
+static long long fk_melt_want = 0;
 static void fk_melt(void) {
     long long hp0 = fk_hp;
     fk_fw = calloc(fk_hp + 1, 8);
@@ -4736,6 +4907,9 @@ static void fk_melt(void) {
     long long ncap = fk_cap;
     if (nlive * 2 > fk_cap) {
         ncap = fk_cap * 2;
+    }
+    while (ncap - nlive < fk_melt_want) {
+        ncap = ncap * 2;
     }
     fk_nh = malloc(ncap * 8);
     fk_nt = malloc(ncap * 8);
@@ -4799,7 +4973,7 @@ static void fk_vp(long long v) {
  * failure mode. */
 #define FK_FN_CAP 4096
 #define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144*4*8 = 8MB. */
-#define FK_PARSE_BUF_CAP 1048576 /* fk_buf: scratch buffer for source artifact reads */
+#define FK_PARSE_BUF_CAP 16777216 /* fk_buf: scratch buffer for source artifact reads. Raised 1048576->16777216 (2026-07-16): the v4 .fkb signed lane is 9 bytes (was 5), and a measured band-chain artifact (program-image-fkb-byte-decode-band.fkb, 1,292,944 bytes) exceeded the old 1MiB cap, so fresh caches died on reload with "artifact exceeds FK_PARSE_BUF_CAP". Worst case bounded by FK_AST_NODE_CAP (262144) * 4 lanes * 9B = ~9.4MB plus strings/symbols, so 16MiB holds the format at current capacity constants. */
 static long long fk_fn_count;
 static long long fk_node_count;
 static long long fk_ast_full; /* set once when the AST node table overflows; halts the parse (fk_spos:=fk_slen) so the collect-and-continue recovery cannot spin re-minting sentinels forever. Reset per run. */
@@ -4877,8 +5051,59 @@ static void fk_psv(long long v) {
         fk_pv(v);
     }
 }
+/* The source runner is the production carrier, so its stdout boundary must
+ * preserve a numeric list as data instead of leaking the cons-heap handle.
+ * Lists are positive odd values (nil is 1); nodes/function values are negative,
+ * records are negative even, and scalar numbers retain their existing encoding.
+ * This is deliberately a transport printer, not new evaluator meaning: list
+ * construction and every numeric value were already produced by the Form body. */
+static int fk_is_output_list(long long v) {
+    if (v == 1) {
+        return 1;
+    }
+    if (v <= 1 || (v & 1) == 0) {
+        return 0;
+    }
+    long long p = v >> 1;
+    return p >= 1 && p <= fk_hp;
+}
+static void fk_pv_inline_number(long long v) {
+    if (fk_isf(v)) {
+        printf("%.17g", fk_num(v));
+    } else if ((v & 1) == 0) {
+        printf("%lld", v >> 1);
+    } else {
+        printf("%lld", v);
+    }
+}
+static void fk_pv_list(long long v, long long depth) {
+    if (depth > 1024) {
+        fk_die("fk_pv_list: nested output exceeds 1024 levels");
+    }
+    putchar(FK_CH_LBRACKET);
+    long long p = v >> 1;
+    int first = 1;
+    while (p >= 1 && p <= fk_hp) {
+        if (!first) {
+            putchar(FK_CH_COMMA);
+            putchar(FK_CH_SPACE);
+        }
+        long long item = fk_hh[p];
+        if (fk_is_output_list(item)) {
+            fk_pv_list(item, depth + 1);
+        } else {
+            fk_pv_inline_number(item);
+        }
+        first = 0;
+        p = fk_ht[p] >> 1;
+    }
+    putchar(FK_CH_RBRACKET);
+}
 static void fk_pv_root(long long root, long long v) {
-    if (fk_str_root_depth(root, 0)) {
+    if (fk_is_output_list(v)) {
+        fk_pv_list(v, 0);
+        putchar(FK_CH_LF);
+    } else if (fk_str_root_depth(root, 0)) {
         fk_psv(v);
     } else {
         fk_pv(v);
@@ -5132,10 +5357,20 @@ static long long fk_walk(long long i, long long fp) {
     if (t == 5) {
         long long a5 = fk_walk(fk_node[i][1], fp);
         long long b5 = fk_walk(fk_node[i][2], fp);
-        if (fk_num(a5) <= fk_num(b5)) {
-            return 2;
+        /* Same width-promotion rule as math (tags 3/4/42): float on either side
+         * forces an IEEE comparison; pure int/int compares the tagged words
+         * directly (<<1 tagging is order-preserving, so word order IS int order).
+         * fk_num rounds through a double, whose 53-bit mantissa blurs distinct
+         * 63-bit ints into equality — (eq (sub -2^62 0) (sub -2^62 1)) answered
+         * true while sub of the same pair answered -1. Mirrors the Go/Rust
+         * kernels' compare law and the JIT's exact int fast path (le/eq inline
+         * cmp), which this walker previously DISAGREED with at the boundary.
+         * Applies to the whole family: le here, eq/lt on tags 102/103, and the
+         * JIT carrier fk_jprim2 — gt/ge/abs lower onto these via fk_rwtab. */
+        if (fk_isf(a5) || fk_isf(b5)) {
+            return (fk_num(a5) <= fk_num(b5)) ? 2 : 0;
         }
-        return 0;
+        return (a5 <= b5) ? 2 : 0;
     }
     if (t == 6) {
         if (fk_walk(fk_node[i][1], fp) == 0) {
@@ -5525,20 +5760,22 @@ static long long fk_walk(long long i, long long fp) {
         return fk_walk(fk_node[i][2], fp);
     }
     if (t == 102) {
+        /* int/int exact, float promotes — the tag-5 compare law. */
         long long ae = fk_walk(fk_node[i][1], fp);
         long long be = fk_walk(fk_node[i][2], fp);
-        if (fk_num(ae) == fk_num(be)) {
-            return 2;
+        if (fk_isf(ae) || fk_isf(be)) {
+            return (fk_num(ae) == fk_num(be)) ? 2 : 0;
         }
-        return 0;
+        return (ae == be) ? 2 : 0;
     }
     if (t == 103) {
+        /* int/int exact, float promotes — the tag-5 compare law. */
         long long al = fk_walk(fk_node[i][1], fp);
         long long bl = fk_walk(fk_node[i][2], fp);
-        if (fk_num(al) < fk_num(bl)) {
-            return 2;
+        if (fk_isf(al) || fk_isf(bl)) {
+            return (fk_num(al) < fk_num(bl)) ? 2 : 0;
         }
-        return 0;
+        return (al < bl) ? 2 : 0;
     }
     if (t == 109) {
         long long slot109 = fk_walk(fk_node[i][1], fp) >> 1;
@@ -5616,6 +5853,21 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             return 0;
         }
         return fk_sl[sa] << 1;
+    }
+    if (t == 238) {
+        /* form_error — the voice of refusal. A program that raises it has
+         * declared its own cannot-recover, so per the two-phase law this is a
+         * legitimate runtime death: message to fd 2, exit nonzero, exactly as
+         * Go/Rust/TS panic on their native form_error. Before 2026-07-17 this
+         * op was absent here and axiom-5 lowered every raise to nothing — the
+         * bp "property" aphonia: bands sailed green past raised errors. */
+        long long sa = fk_walk(fk_node[i][1], fp) >> 1;
+        fk_write_all_raw(2, "fkwu: form_error: ", 18);
+        if (sa >= 0 && sa < fk_sp) {
+            fk_write_all_raw(2, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
+        }
+        fk_write_all_raw(2, "\n", 1);
+        exit(1);
     }
     if (t == 26) {
         long long sa26 = fk_walk(fk_node[i][1], fp) >> 1;
@@ -5965,23 +6217,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 52) {
         double x = fk_num(fk_walk(fk_node[i][1], fp));
         long long nd = fk_walk(fk_node[i][2], fp) >> 1;
-        double sc = 1.0;
-        while (nd > 0) {
-            sc = sc * 10.0;
-            nd = nd - 1;
-        }
-        double y = x * sc;
-        double ay = y < 0.0 ? 0.0 - y : y;
-        long long base = (long long)ay;
-        double frac = ay - (double)base;
-        long long qa = base;
-        if (frac > 0.5) {
-            qa = base + 1;
-        } else if (frac == 0.5 && (base & 1)) {
-            qa = base + 1;
-        }
-        long long q = y < 0.0 ? 0 - qa : qa;
-        return fk_fbox(((double)q) / sc);
+        return fk_fbox(fk_round_ndigits_decimal(x, nd));
     }
     if (t == 53) {
         long long sa = fk_walk(fk_node[i][1], fp) >> 1;
@@ -6445,19 +6681,28 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fkl_ix[fkl_b + 1] = fkl_key;
             fkl_a = fkl_a + 1;
         }
+        /* Ensure the arena can hold one pair per entry BEFORE any result
+         * value exists: fk_melt here is safe (no arena-value C-locals are
+         * live yet; every root is on the traced stacks) and converges (a
+         * repeat melt with an unchanged live set cannot free or grow more).
+         * The old guard returned the partial list on exhaustion -- a
+         * directory read whose answer depended on how much arena earlier
+         * calls had spent (the same dir read 3946 entries in one program
+         * and 379 in another). fk_cons_val keeps the last resort honest:
+         * heap exhausted dies; a partial listing is never accepted as
+         * whole (same law as fk_cons_val's own message). */
+        long long fkl_need = fkl_nc + fkl_nc + 64;
+        if (fk_cap - fk_hp < fkl_need) {
+            fk_melt_want = fkl_need;
+            fk_melt();
+            fk_melt_want = 0;
+        }
         long long fkl_out = 1;
         long long fkl_m = fkl_nc;
         while (fkl_m > 0) {
             fkl_m = fkl_m - 1;
             long long fkl_si = fkl_ix[fkl_m];
-            long long fkl_sv = fk_sbuf(fkl_nb + fkl_no[fkl_si], fkl_nl[fkl_si]);
-            if (fk_hp + 1 >= fk_cap) {
-                return fkl_out;
-            }
-            fk_hp = fk_hp + 1;
-            fk_hh[fk_hp] = fkl_sv;
-            fk_ht[fk_hp] = fkl_out;
-            fkl_out = (fk_hp << 1) | 1;
+            fkl_out = fk_cons_val(fk_sbuf(fkl_nb + fkl_no[fkl_si], fkl_nl[fkl_si]), fkl_out);
         }
         return fkl_out;
 #else
@@ -7532,8 +7777,17 @@ static long long fk_sparse(void) {
          * body is parsed) -> tag 12 (call fk_fn[idx] with one arg). This replaces the old
          * fn[0]-only self-call (tag 7), which was wrong once there is more than one function. A
          * 0-arg call parses a dummy 0 off the immediate ) — the callee reads no slot, so it is
-         * inert. */
-        long long fidx = fk_fn_lookup(s, hn);
+         * inert.
+         *
+         * LOCALS SHADOW GLOBALS in call position: the local frame (fk_bd_lookup) is consulted
+         * BEFORE the defn table, matching value position (which already reads bd first) and the
+         * three siblings. Pre-heal the defn table won: (defn oac-offer (cell args) (cell args))
+         * under a loaded (defn cell ...) invoked the GLOBAL constructor instead of the parameter
+         * (receipts/2026-07-17-jacobian-lens-and-the-cell-shadowing-heal.md) — every higher-order
+         * param (map's f, filter's pred) was one same-named prelude defn away from silent
+         * capture. A shadowed head lowers through the indirect-call arm below (tag 244). */
+        long long hshadow = fk_bd_lookup(s, hn);
+        long long fidx = (hshadow >= 0) ? -1 : fk_fn_lookup(s, hn);
         if (fidx >= 0) {
             /* GENERAL ARITY (no per-arity case): parse the callee's `ar` declared arg expressions
              * and thread them into a forward-linked arg-chain of tag-242 cells (cell:
@@ -7608,9 +7862,10 @@ static long long fk_sparse(void) {
          * [1]=head-expr-node, [2]=arg-chain (242 cells, head-first), exactly the tag-241 shape but
          * with a computed head. Args are parsed until the close paren (the indirect callee's arity
          * is not a static name lookup); each is a forward-linked 242 cell so fk_walk threads them
-         * left-to-right like the direct path. A bare fn-NAME never reaches here (it resolves at
-         * fk_fn_lookup above into the direct tag-241 path). */
-        long long hoff = fk_bd_lookup(s, hn);
+         * left-to-right like the direct path. An unshadowed bare fn-NAME never reaches here (it
+         * resolves at fk_fn_lookup above into the direct tag-241 path); a BOUND name always
+         * lands here, even when a global defn shares its spelling (locals shadow globals). */
+        long long hoff = hshadow;
         if (hoff >= 0) {
             long long head244 = fk_smknode(110, fk_smklit(hoff), 0, 0);
             long long iargn[256];
@@ -8353,15 +8608,24 @@ static long long fk_jprim2(long long tag, long long a, long long b) {
         return ((a >> 1) * (b >> 1)) << 1;
     }
     if (tag == 5) {
-        return (fk_num(a) <= fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) <= fk_num(b)) ? 2 : 0;
+        }
+        return (a <= b) ? 2 : 0;
     }
     if (tag == 102) {
-        return (fk_num(a) == fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) == fk_num(b)) ? 2 : 0;
+        }
+        return (a == b) ? 2 : 0;
     }
     if (tag == 103) {
-        return (fk_num(a) < fk_num(b)) ? 2 : 0;
+        if (fk_isf(a) || fk_isf(b)) {
+            return (fk_num(a) < fk_num(b)) ? 2 : 0;
+        }
+        return (a < b) ? 2 : 0;
     }
-    /* lt — mirrors fk_walk tag-103 */
+    /* le/eq/lt — mirror fk_walk tags 5/102/103: int/int exact, float promotes */
     if (tag == 10) {
         if (fk_isf(a) || fk_isf(b)) {
             return fk_fbox(fk_num(a) / fk_num(b));
@@ -8450,6 +8714,17 @@ static long long fk_jprim1(long long tag, long long a) {
             return 0;
         }
         return fk_sl[sa] << 1;
+    }
+    if (tag == 238) {
+        /* form_error — mirrors fk_walk's tag-238 exactly: crystallized code
+         * must die as loudly as interpreted code. */
+        long long sa = a >> 1;
+        fk_write_all_raw(2, "fkwu: form_error: ", 18);
+        if (sa >= 0 && sa < fk_sp) {
+            fk_write_all_raw(2, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
+        }
+        fk_write_all_raw(2, "\n", 1);
+        exit(1);
     }
     /* str_len */
     if (tag == 54) {
@@ -8642,7 +8917,7 @@ static fk_natfn fk_ensure_native(long long callee, long long *frame) {
  * RETURN the fk_tailcall sentinel. The C driver fk_jtramp loops on that sentinel — dispatching the
  * next native over the SAME fp frame — so a mutual-recursion chain runs native↔native end-to-end in
  * CONSTANT stack, no walker bounce. fk_tailcall is a reserved ODD-NEGATIVE sentinel in a band no
- * tagged value occupies: ints are even (v<<1); floats are <= fk_fbase-2 (~-9e18); nodes/records are
+ * tagged value occupies: ints are even (v<<1); floats are odd <= fk_fbase-3 (~-9e18); nodes/records are
  * small-magnitude negatives; cons are positive-odd; fnvals sit in the -8e18±16384 band; nothing is
  * -8.999e18. -7.5e18-1 is odd, far above the float floor, far below node magnitudes, and outside
  * the fnval band — so it can never collide with a real result. */
@@ -8978,14 +9253,17 @@ static void fk_jemit(long long i, int tail) {
     }
     if (t == 3 || t == 4 || t == 42 || t == 5 || t == 102) {
         /* float-aware arith/cmp. The #59 int-inline is WRONG for float operands, so we GUARD at
-         * runtime: if EITHER operand is a boxed float (tagged word <= fk_fbase-2, a huge negative),
-         * call the kind-correct carrier fk_jprim2 (bit-identical to fk_walk); else run the fast
-         * int-inline. This keeps fac/sum/fib native-fast (provably int at runtime) AND makes
-         * 0.5+0.25 correct — the float-correctness gate. */
+         * runtime: if EITHER operand's word is <= fk_fbase-2 (the float band and below), call the
+         * kind-correct carrier fk_jprim2 (bit-identical to fk_walk); else run the fast int-inline.
+         * The threshold is deliberately CONSERVATIVE, not exact: float boxes are odd <= fk_fbase-3,
+         * and deep-negative INTS (x < ~-4.5e18, words even <= fk_fbase-2) also route to the carrier,
+         * whose fk_isf re-classifies them correctly as ints — slower there, never wrong. This keeps
+         * fac/sum/fib native-fast (provably int at runtime) AND makes 0.5+0.25 correct — the
+         * float-correctness gate. */
         fk_jbin(i);
         /* rax=left, rcx=right */
 
-        /* threshold = fk_fbase - 2 (the float-band ceiling) */
+        /* threshold = fk_fbase - 2 (at/below: maybe-float, carrier decides) */
         fk_jb1(0x49);
         fk_jb1(0xB9);
         fk_jb8(-9000000000000000000LL - 2);
@@ -9120,8 +9398,8 @@ static void fk_jemit(long long i, int tail) {
         fk_jcarrier((void *)fk_jprim2, 3);
         return;
     }
-    if (t == 25 || t == 54 || t == 53) {
-        /* str_len / float_to_int / str_to_float: 1-arg carrier */
+    if (t == 25 || t == 54 || t == 53 || t == 238) {
+        /* str_len / float_to_int / str_to_float / form_error: 1-arg carrier */
         fk_jemit(fk_node[i][1], 0);
         /* arg -> rax */
         fk_jb1(0x50);
@@ -9865,6 +10143,46 @@ static long long fk_path_dir_len(const char *path) {
     }
     return last >= 0 ? last + 1 : 0;
 }
+/* the lexical repo root: length of the prefix ending at the slash before the
+ * path's first form/ or learn/ component (0 when absent). Shared by the
+ * prelude resolver's repo-root rescue and the .fkb identity spelling. */
+static long long fk_path_repo_prefix_len(const char *path) {
+    long long s = 0;
+    while (path[s] != 0) {
+        if (path[s] == FK_CH_SLASH &&
+            ((path[s + 1] == 'f' && path[s + 2] == 'o' && path[s + 3] == 'r' &&
+              path[s + 4] == 'm' && path[s + 5] == FK_CH_SLASH) ||
+             (path[s + 1] == 'l' && path[s + 2] == 'e' && path[s + 3] == 'a' &&
+              path[s + 4] == 'r' && path[s + 5] == 'n' && path[s + 6] == FK_CH_SLASH))) {
+            return s + 1;
+        }
+        s = s + 1;
+    }
+    return 0;
+}
+#if defined(_WIN32)
+extern char *_fullpath(char *, const char *, unsigned long long);
+#else
+extern char *realpath(const char *, char *);
+#endif
+/* the .fkb identity spelling of a path: one absolute spelling regardless of
+ * invocation CWD, then anchored at the lexical repo root so the same file
+ * keeps one name across CWD flips and checkout moves. out must hold 4096
+ * bytes. Verbatim on resolve failure -- degrade to the old spelling (an
+ * honest rebuild), never fabricate an identity. */
+static const char *fk_path_canon_id(const char *path, char *out) {
+#if defined(_WIN32)
+    if (_fullpath(out, path, 4096) == 0) {
+        return path;
+    }
+#else
+    if (realpath(path, out) == 0) {
+        return path;
+    }
+#endif
+    long long pre_n = fk_path_repo_prefix_len(out);
+    return pre_n > 0 ? out + pre_n : out;
+}
 static int fk_path_resolve_fk_dep(const char *owner_path, const char *token, long long token_n,
                                   char *out, long long cap) {
     if (token_n <= 0 || cap <= token_n) {
@@ -9959,6 +10277,23 @@ static int fk_path_resolve_fk_dep(const char *owner_path, const char *token, lon
             return 1;
         }
     }
+    long long pre_n = fk_path_repo_prefix_len(owner_path);
+    if (pre_n > 0 && pre_n + token_n + 1 <= cap) {
+        i = 0;
+        while (i < pre_n) {
+            out[i] = owner_path[i];
+            i = i + 1;
+        }
+        j = 0;
+        while (j < token_n) {
+            out[i + j] = token[j];
+            j = j + 1;
+        }
+        out[i + j] = 0;
+        if (fk_path_size_raw(out) >= 0) {
+            return 1;
+        }
+    }
     if (dir_n + token_n + 1 > cap) {
         return 0;
     }
@@ -10010,12 +10345,13 @@ static long long fk_src_unit_mtime(void) {
 static int fk_src_unit_hash_range(long long start, long long end, char *out, long long cap) {
     long long pos = 0;
     long long i = start;
+    char canon[4096];
     if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v1")) {
         return 0;
     }
     while (i < end && i < fk_src_dep_count) {
         if (!fk_source_hash_append(out, cap, &pos, "|") ||
-            !fk_source_hash_append(out, cap, &pos, fk_src_dep_path[i]) ||
+            !fk_source_hash_append(out, cap, &pos, fk_path_canon_id(fk_src_dep_path[i], canon)) ||
             !fk_source_hash_append(out, cap, &pos, "@") ||
             !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_mtime[i]) ||
             !fk_source_hash_append(out, cap, &pos, ":") ||
@@ -10413,9 +10749,14 @@ static int fk_fkb_write_u8(int fd, long long v) {
     unsigned char b = (unsigned char)(v & 255);
     return fk_write_all_raw(fd, &b, 1);
 }
+/* An out-of-range value is a WRITER refusal, not an I/O failure -- flagged so
+ * the artifact-write diagnostic can name the range instead of a generic
+ * "failed to write". On the v4 lane only LLONG_MIN's magnitude (2^63) trips it. */
+static int fk_fkb_write_overflow;
 static int fk_fkb_write_u32(int fd, long long v) {
     unsigned char b[4];
-    if (v < 0 || v > 2147483647LL) {
+    if (v < 0 || v > 4294967295LL) {
+        fk_fkb_write_overflow = 1;
         return 0;
     }
     b[0] = (unsigned char)((v >> 24) & 255);
@@ -10425,11 +10766,18 @@ static int fk_fkb_write_u32(int fd, long long v) {
     return fk_write_all_raw(fd, b, 4);
 }
 static int fk_fkb_write_signed(int fd, long long v) {
-    long long mag = v < 0 ? -v : v;
-    if (mag > 2147483647LL) {
+    /* v4 lane: sign u8 + hi u32 + lo u32 -- the full long long range, so
+     * full-range u32 literals (e.g. cksum values) stay artifact-encodable.
+     * LLONG_MIN's magnitude (2^63) has no positive twin the reader could
+     * round-trip, so refuse it here rather than emit an unreadable image. */
+    unsigned long long mag = v < 0 ? 0ULL - (unsigned long long)v : (unsigned long long)v;
+    if (mag > 9223372036854775807ULL) {
+        fk_fkb_write_overflow = 1;
         return 0;
     }
-    return fk_fkb_write_u8(fd, v < 0 ? 1 : 0) && fk_fkb_write_u32(fd, mag);
+    return fk_fkb_write_u8(fd, v < 0 ? 1 : 0) &&
+           fk_fkb_write_u32(fd, (long long)(mag >> 32)) &&
+           fk_fkb_write_u32(fd, (long long)(mag & 4294967295ULL));
 }
 static int fk_fkb_write_cstr(int fd, const char *s) {
     long long n = fk_path_len(s);
@@ -10486,7 +10834,11 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
         return 0;
     }
     char line[512];
-    if (!fk_write_all_raw(fd, "program-image-sym-lens-v1\nsource ", 33) ||
+    /* compile-errors records fk_nerr at image-write time, placed right after
+     * the version line so readers find it in the first bytes; a cached run
+     * replays this count as its exit truth (absent line reads as 0) */
+    int hn = sprintf(line, "program-image-sym-lens-v1\ncompile-errors %lld\nsource ", fk_nerr);
+    if (!fk_write_all_raw(fd, line, (unsigned long)hn) ||
         !fk_write_all_raw(fd, src_path, (unsigned long)fk_path_len(src_path)) ||
         !fk_write_all_raw(fd, "\nfkb ", 5) ||
         !fk_write_all_raw(fd, fkb_path, (unsigned long)fk_path_len(fkb_path)) ||
@@ -10543,19 +10895,33 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
 }
 static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
                             long long source_mtime, const char *source_hash) {
+    /* both artifacts go to pid-suffixed temp names and rename() into place:
+     * a reader under a concurrent runner must only ever see a whole image or
+     * the previous one, never a TRUNC-in-progress partial (the "truncated
+     * artifact" die class). The sym lens lands before the image so a fresh
+     * .fkb is never visible without its compile-error record. */
+    char fkb_tmp[4160];
+    char sym_tmp[4160];
+    if (fk_path_len(fkb_path) > 4096 || fk_path_len(sym_path) > 4096) {
+        return 0;
+    }
+    sprintf(fkb_tmp, "%s.w%d", fkb_path, getpid());
+    sprintf(sym_tmp, "%s.w%d", sym_path, getpid());
 #if defined(_WIN32)
-    int fd = open(fkb_path, O_WRONLY | O_CREAT | O_TRUNC | 0x8000, 0666);
+    int fd = open(fkb_tmp, O_WRONLY | O_CREAT | O_TRUNC | 0x8000, 0666);
 #else
-    int fd = open(fkb_path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    int fd = open(fkb_tmp, O_WRONLY | O_CREAT | O_TRUNC, 0666);
 #endif
     if (fd < 0) {
         return 0;
     }
+    fk_fkb_write_overflow = 0;
     int ok = 1;
+    char canon[4096];
     ok = ok && fk_write_all_raw(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
-    ok = ok && fk_fkb_write_u32(fd, 3);
-    ok = ok && fk_fkb_write_cstr(fd, src_path);
+    ok = ok && fk_fkb_write_u32(fd, 4);
+    ok = ok && fk_fkb_write_cstr(fd, fk_path_canon_id(src_path, canon));
     ok = ok && fk_fkb_write_cstr(fd, source_hash);
     ok = ok && fk_fkb_write_signed(fd, source_mtime > 0 ? source_mtime : 1);
     ok = ok && fk_fkb_write_cstr(fd, fkb_path);
@@ -10606,15 +10972,51 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     }
     close(fd);
     if (!ok) {
+        unlink(fkb_tmp);
         return 0;
     }
-    return fk_src_write_sym_text(sym_path, src_path, fkb_path, source_hash);
+    if (!fk_src_write_sym_text(sym_tmp, src_path, fkb_path, source_hash)) {
+        unlink(fkb_tmp);
+        unlink(sym_tmp);
+        return 0;
+    }
+    if (rename(sym_tmp, sym_path) != 0) {
+        unlink(fkb_tmp);
+        unlink(sym_tmp);
+        return 0;
+    }
+    if (rename(fkb_tmp, fkb_path) != 0) {
+        unlink(fkb_tmp);
+        return 0;
+    }
+    return 1;
 }
 static long long fk_fkb_pos;
 static long long fk_fkb_len;
+/* Sticky decode-failure flag: the .fkb readers RECORD corruption instead of
+ * dying, so both loaders can soft-return and the caller can rebuild from
+ * source with a diagnostic that names the artifact and the honest reason. A
+ * die here used to surface as a bare "truncated string" even when the real
+ * story was a stale/wrong-CWD artifact identity (witnessed 2026-07-16). */
+static int fk_fkb_bad;
+static const char *fk_fkb_bad_why;
+static void fk_fkb_begin(long long len) {
+    fk_fkb_pos = 0;
+    fk_fkb_len = len;
+    fk_fkb_bad = 0;
+    fk_fkb_bad_why = "";
+}
+static void fk_fkb_mark_bad(const char *why) {
+    if (!fk_fkb_bad) {
+        fk_fkb_bad = 1;
+        fk_fkb_bad_why = why;
+    }
+    fk_fkb_pos = fk_fkb_len; /* clamp: every further read yields 0 */
+}
 static long long fk_fkb_read_u8(void) {
     if (fk_fkb_pos >= fk_fkb_len) {
-        fk_die("fk_fkb: truncated artifact");
+        fk_fkb_mark_bad("truncated artifact");
+        return 0;
     }
     return (long long)(unsigned char)fk_buf[fk_fkb_pos++];
 }
@@ -10627,20 +11029,28 @@ static long long fk_fkb_read_u32(void) {
 }
 static long long fk_fkb_read_signed(void) {
     long long sign = fk_fkb_read_u8();
-    long long mag = fk_fkb_read_u32();
+    long long hi = fk_fkb_read_u32();
+    long long lo = fk_fkb_read_u32();
+    if (hi > 2147483647LL) {
+        /* magnitude must stay below 2^63 so it round-trips through long long */
+        fk_fkb_mark_bad("signed magnitude exceeds 63 bits");
+        return 0;
+    }
+    long long mag = (hi << 32) | lo;
     if (sign == 0) {
         return mag;
     }
     if (sign == 1) {
         return -mag;
     }
-    fk_die("fk_fkb: malformed signed integer");
+    fk_fkb_mark_bad("malformed signed integer");
     return 0;
 }
 static void fk_fkb_skip_string(void) {
     long long n = fk_fkb_read_u32();
     if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
-        fk_die("fk_fkb: truncated string");
+        fk_fkb_mark_bad("truncated string");
+        return;
     }
     fk_fkb_pos = fk_fkb_pos + n;
 }
@@ -10648,7 +11058,8 @@ static int fk_fkb_read_string_matches_cstr(const char *s) {
     long long n = fk_fkb_read_u32();
     long long sn = fk_path_len(s);
     if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
-        fk_die("fk_fkb: truncated string");
+        fk_fkb_mark_bad("truncated string");
+        return 0;
     }
     int ok = n == sn;
     long long i = 0;
@@ -10674,7 +11085,8 @@ static void fk_string_table_reset(void) {
 static void fk_fkb_read_table_string(void) {
     long long n = fk_fkb_read_u32();
     if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
-        fk_die("fk_fkb: truncated table string");
+        fk_fkb_mark_bad("truncated table string");
+        return;
     }
     if (fk_sp >= fk_scap_s) {
         fk_scap_s = fk_scap_s * 2;
@@ -10777,7 +11189,8 @@ static long long fk_fkb_remap_field(long long tag, long long field, long long va
 static int fk_fkb_read_symbol_to_srctext(long long *start, long long *len) {
     long long n = fk_fkb_read_u32();
     if (n < 0 || fk_fkb_pos + n > fk_fkb_len) {
-        fk_die("fk_fkb: truncated symbol string");
+        fk_fkb_mark_bad("truncated symbol string");
+        return 0;
     }
     if (fk_slen + n + 4 >= FK_SOURCE_TEXT_CAP) {
         return 0;
@@ -10816,8 +11229,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     if (got < 0) {
         return 0;
     }
-    fk_fkb_pos = 0;
-    fk_fkb_len = got;
+    fk_fkb_begin(got);
     const char magic[8] = {'F', 'K', 'P', 'I', 'F', 'B', '1', 0};
     long long mi = 0;
     while (mi < 8) {
@@ -10827,18 +11239,32 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         mi = mi + 1;
     }
     long long version = fk_fkb_read_u32();
-    if (version < 3) {
+    if (version < 4) {
         return 0;
     }
-    int source_identity_ok = 1;
-    source_identity_ok = source_identity_ok && fk_fkb_read_string_matches_cstr(expected_src_path);
-    source_identity_ok = source_identity_ok && fk_fkb_read_string_matches_cstr(expected_source_hash);
+    /* Every identity read must execute unconditionally: these advance the
+     * decode stream. A short-circuit here (the old `ok && read(...)` shape)
+     * skipped the hash read after a src-path mismatch and desynced every
+     * later read into "truncated string" -- the wrong-CWD reproduction. */
+    char canon[4096];
+    int src_path_matches =
+        fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon));
+    int source_hash_matches = fk_fkb_read_string_matches_cstr(expected_source_hash);
+    int source_identity_ok = src_path_matches && source_hash_matches;
     long long stored_source_mtime = fk_fkb_read_signed();
     if (stored_source_mtime != expected_source_mtime) {
         source_identity_ok = 0;
     }
     fk_fkb_skip_string();
-    if (fk_fkb_read_signed() != 1 || !source_identity_ok) {
+    long long sealed = fk_fkb_read_signed();
+    if (fk_fkb_bad) {
+        fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
+        return 0;
+    }
+    if (sealed != 1 || !source_identity_ok) {
+        fk_diag_path("warning", fkb_path,
+                     "stale .fkb (stored source identity does not match, e.g. written from a "
+                     "different working directory); rebuilding from source");
         return 0;
     }
     long long nf = fk_fkb_read_signed();
@@ -10853,7 +11279,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     long long node_base = fk_node_count;
     long long str_base = fk_sp;
     long long i = 0;
-    while (i < nf) {
+    while (!fk_fkb_bad && i < nf) {
         fn_roots[i] = fk_fkb_read_signed();
         i = i + 1;
     }
@@ -10863,7 +11289,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         return 0;
     }
     i = 0;
-    while (i < nr) {
+    while (!fk_fkb_bad && i < nr) {
         long long tag = fk_fkb_read_signed();
         long long c1 = fk_fkb_read_signed();
         long long c2 = fk_fkb_read_signed();
@@ -10881,7 +11307,7 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         return 0;
     }
     i = 0;
-    while (i < ns) {
+    while (!fk_fkb_bad && i < ns) {
         fk_fkb_read_table_string();
         i = i + 1;
     }
@@ -10897,13 +11323,16 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     free(fn_roots);
     long long symbol_count = fk_fkb_read_signed();
     i = 0;
-    while (i < symbol_count) {
+    while (!fk_fkb_bad && i < symbol_count) {
         (void)fk_fkb_read_signed();
         long long old_fnidx = fk_fkb_read_signed();
         long long arity = fk_fkb_read_signed();
         long long name_s = 0;
         long long name_n = 0;
         if (!fk_fkb_read_symbol_to_srctext(&name_s, &name_n)) {
+            if (fk_fkb_bad) {
+                fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
+            }
             return 0;
         }
         if (old_fnidx > 0 && fk_fntop < FK_TOP_FN_SYM_CAP) {
@@ -10920,24 +11349,28 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     }
     long long node_symbol_count = fk_fkb_read_signed();
     i = 0;
-    while (i < node_symbol_count) {
+    while (!fk_fkb_bad && i < node_symbol_count) {
         (void)fk_fkb_read_signed();
         (void)fk_fkb_read_signed();
         long long dep_count = fk_fkb_read_signed();
         long long d = 0;
-        while (d < dep_count) {
+        while (!fk_fkb_bad && d < dep_count) {
             (void)fk_fkb_read_signed();
             (void)fk_fkb_read_signed();
             d = d + 1;
         }
         i = i + 1;
     }
-    return fk_fkb_pos == fk_fkb_len;
+    if (fk_fkb_bad || fk_fkb_pos != fk_fkb_len) {
+        fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
+        return 0;
+    }
+    return 1;
 }
 static void fk_fkb_skip_symbol_image(long long version) {
     long long symbol_count = fk_fkb_read_signed();
     long long i = 0;
-    while (i < symbol_count) {
+    while (!fk_fkb_bad && i < symbol_count) {
         (void)fk_fkb_read_signed();
         if (version >= 3) {
             (void)fk_fkb_read_signed();
@@ -10948,12 +11381,12 @@ static void fk_fkb_skip_symbol_image(long long version) {
     }
     long long node_symbol_count = fk_fkb_read_signed();
     i = 0;
-    while (i < node_symbol_count) {
+    while (!fk_fkb_bad && i < node_symbol_count) {
         (void)fk_fkb_read_signed();
         (void)fk_fkb_read_signed();
         long long dep_count = fk_fkb_read_signed();
         long long d = 0;
-        while (d < dep_count) {
+        while (!fk_fkb_bad && d < dep_count) {
             (void)fk_fkb_read_signed();
             (void)fk_fkb_read_signed();
             d = d + 1;
@@ -10975,31 +11408,47 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     long long got = fk_read_all_bounded(fd, fk_buf, FK_PARSE_BUF_CAP);
     close(fd);
     if (got < 0) {
-        fk_die("fk_fkb: artifact exceeds FK_PARSE_BUF_CAP");
+        fk_fkb_begin(0);
+        fk_fkb_mark_bad("artifact exceeds FK_PARSE_BUF_CAP or is unreadable");
+        return 0;
     }
-    fk_fkb_pos = 0;
-    fk_fkb_len = got;
+    fk_fkb_begin(got);
     const char magic[8] = {'F', 'K', 'P', 'I', 'F', 'B', '1', 0};
     long long mi = 0;
     while (mi < 8) {
         if (fk_fkb_read_u8() != (long long)(unsigned char)magic[mi]) {
-            fk_die("fk_fkb: bad magic");
+            fk_fkb_mark_bad("bad magic");
+            return 0;
         }
         mi = mi + 1;
     }
     long long version = fk_fkb_read_u32();
-    if (version != 2 && version != 3) {
-        fk_die("fk_fkb: bad version");
+    if (version == 2 || version == 3) {
+        /* pre-v4 lane width: superseded, not corrupt -- invalidate so the
+         * caller recompiles from source and overwrites with a v4 artifact */
+        fk_fkb_mark_bad("pre-v4 artifact lane; superseded");
+        return 0;
     }
+    if (version != 4) {
+        fk_fkb_mark_bad("unsupported version");
+        return 0;
+    }
+    /* Identity reads execute unconditionally -- they advance the decode
+     * stream; short-circuiting them desyncs every later read (see
+     * fk_src_import_fkb_image). Mismatch stays a soft "rebuild" verdict. */
     int source_identity_ok = 1;
+    char canon[4096];
     if (expected_src_path != 0) {
-        source_identity_ok = source_identity_ok && fk_fkb_read_string_matches_cstr(expected_src_path);
+        if (!fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon))) {
+            source_identity_ok = 0;
+        }
     } else {
         fk_fkb_skip_string();
     }
     if (expected_source_hash != 0) {
-        source_identity_ok =
-            source_identity_ok && fk_fkb_read_string_matches_cstr(expected_source_hash);
+        if (!fk_fkb_read_string_matches_cstr(expected_source_hash)) {
+            source_identity_ok = 0;
+        }
     } else {
         fk_fkb_skip_string();
     }
@@ -11008,29 +11457,36 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         source_identity_ok = 0;
     }
     fk_fkb_skip_string();
-    if (fk_fkb_read_signed() != 1) {
-        fk_die("fk_fkb: unsealed artifact");
+    long long sealed = fk_fkb_read_signed();
+    if (fk_fkb_bad) {
+        return 0;
+    }
+    if (sealed != 1) {
+        fk_fkb_mark_bad("unsealed artifact");
+        return 0;
     }
     if (!source_identity_ok) {
         return 0;
     }
     long long nf = fk_fkb_read_signed();
     if (nf < 0 || nf > FK_FN_CAP) {
-        fk_die("fk_fkb: function count exceeds capacity");
+        fk_fkb_mark_bad("function count exceeds capacity");
+        return 0;
     }
     fk_fn_count = nf;
     long long i = 0;
-    while (i < nf) {
+    while (!fk_fkb_bad && i < nf) {
         fk_fn[i] = fk_fkb_read_signed();
         i = i + 1;
     }
     long long nr = fk_fkb_read_signed();
     if (nr < 0 || nr > FK_AST_NODE_CAP) {
-        fk_die("fk_fkb: node count exceeds capacity");
+        fk_fkb_mark_bad("node count exceeds capacity");
+        return 0;
     }
     fk_node_count = nr;
     i = 0;
-    while (i < nr) {
+    while (!fk_fkb_bad && i < nr) {
         fk_node[i][0] = fk_fkb_read_signed();
         fk_node[i][1] = fk_fkb_read_signed();
         fk_node[i][2] = fk_fkb_read_signed();
@@ -11039,17 +11495,22 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     }
     long long ns = fk_fkb_read_signed();
     if (ns < 0) {
-        fk_die("fk_fkb: negative string count");
+        fk_fkb_mark_bad("negative string count");
+        return 0;
     }
     fk_string_table_reset();
     i = 0;
-    while (i < ns) {
+    while (!fk_fkb_bad && i < ns) {
         fk_fkb_read_table_string();
         i = i + 1;
     }
     fk_fkb_skip_symbol_image(version);
+    if (fk_fkb_bad) {
+        return 0;
+    }
     if (fk_fkb_pos != fk_fkb_len) {
-        fk_die("fk_fkb: trailing bytes");
+        fk_fkb_mark_bad("trailing bytes");
+        return 0;
     }
     fk_defn_next = fk_fn_count;
     fk_fntop = 0;
@@ -11118,6 +11579,46 @@ static long long fk_src_fkb_version_raw(const char *fkb_path) {
     return ((long long)b[8] << 24) | ((long long)b[9] << 16) | ((long long)b[10] << 8) |
            (long long)b[11];
 }
+static long long fk_src_sym_recorded_errors(const char *sym_path) {
+    /* the .sym lens records fk_nerr at image-write time (second header line).
+     * Returns -1 when the file or the line is absent: an image without its
+     * error record is an incomplete cache, not a clean one -- otherwise
+     * deleting the lens would launder a degraded image back to exit 0 */
+#if defined(_WIN32)
+    int fd = open(sym_path, 0x8000);
+#else
+    int fd = open(sym_path, 0);
+#endif
+    if (fd < 0) {
+        return -1;
+    }
+    char buf[256];
+    long long got = read(fd, buf, 255);
+    close(fd);
+    if (got <= 0) {
+        return -1;
+    }
+    buf[got] = 0;
+    const char *needle = "\ncompile-errors ";
+    long long i = 0;
+    while (i < got) {
+        long long j = 0;
+        while (needle[j] != 0 && i + j < got && buf[i + j] == needle[j]) {
+            j = j + 1;
+        }
+        if (needle[j] == 0) {
+            long long v = 0;
+            long long p = i + j;
+            while (p < got && buf[p] >= '0' && buf[p] <= '9') {
+                v = v * 10 + (buf[p] - '0');
+                p = p + 1;
+            }
+            return v;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
 static void fk_src_reset_compile_state(void) {
     fk_arg_n = 0;
     fk_fname_n = 0;
@@ -11166,6 +11667,11 @@ static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
         fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
     }
     if (!fk_src_write_fkb(path, fkb_path, sym_path, unit_mtime, source_hash)) {
+        if (fk_fkb_write_overflow) {
+            fk_die("fk_run_src: failed to write .fkb/.sym artifacts -- a value in the "
+                   "program image is outside the .fkb v4 signed lane (magnitude 2^63, "
+                   "i.e. LLONG_MIN) or a length exceeds u32");
+        }
         fk_die("fk_run_src: failed to write .fkb/.sym artifacts");
     }
 }
@@ -11266,7 +11772,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                 return 0;
             }
             if (fk_path_mtime_raw(dep_fkb_path) < dep_mtime ||
-                fk_src_fkb_version_raw(dep_fkb_path) < 3) {
+                fk_src_fkb_version_raw(dep_fkb_path) < 4) {
                 if (!fk_src_compile_artifact_only(fk_src_dep_path[i])) {
                     return 0;
                 }
@@ -11289,6 +11795,18 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
             }
             if (!fk_src_unit_hash_range(i, dep_end, dep_hash, FK_SRC_HASH_CAP)) {
                 return 0;
+            }
+            {
+                /* a dep image compiled with recovered errors is degraded truth;
+                 * importing it would bake the degradation invisibly into this
+                 * run -- refuse (unknown record counts as degraded), so the
+                 * caller falls back to the flat compile where the full chain
+                 * resolves */
+                char dep_sym_path[4096];
+                if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, 4096) ||
+                    fk_src_sym_recorded_errors(dep_sym_path) != 0) {
+                    return 0;
+                }
             }
             if (!fk_src_import_fkb_image(dep_fkb_path, fk_src_dep_path[i], dep_hash, dep_mtime)) {
                 return 0;
@@ -11332,11 +11850,32 @@ static int fk_run_src(const char *path, long long arg) {
     } else if (dylib_mtime > 0) {
         fk_diag_path("warning", dylib_path, "stale .dylib ignored");
     }
-    if (fkb_mtime >= unit_mtime) {
+    long long recorded = fk_src_sym_recorded_errors(sym_path);
+    if (fkb_mtime >= unit_mtime && recorded < 0) {
+        /* an image without its error record is an incomplete cache; rebuild
+         * rather than guess (older lenses, or a lens deleted out from under
+         * the image) */
+        fk_diag_path("warning", sym_path, "sym lens lacks a compile-error record; rebuilding");
+    } else if (fkb_mtime >= unit_mtime) {
         if (fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
-            return fk_run_loaded_program_image(arg);
+            /* the compile carried errors when this image was written; the
+             * cache must not launder them -- replay the tally as exit truth */
+            if (recorded > 0) {
+                fk_diag_path("warning", sym_path,
+                        "cached image was compiled with errors; fix source and rerun to clear");
+            }
+            int rc = fk_run_loaded_program_image(arg);
+            return recorded > 0 && rc == 0 ? 1 : rc;
         }
-        fk_diag_path("warning", fkb_path, "fresh-looking .fkb failed source identity check; rebuilding");
+        if (fk_fkb_bad) {
+            char whybuf[192];
+            sprintf(whybuf, "unusable .fkb artifact (%s); rebuilding", fk_fkb_bad_why);
+            fk_diag_path("warning", fkb_path, whybuf);
+        } else {
+            fk_diag_path("warning", fkb_path,
+                         "fresh-looking .fkb failed source identity check (source path, content, "
+                         "or mtime changed, e.g. invoked from a different directory); rebuilding");
+        }
     } else if (fkb_mtime > 0) {
         fk_diag_path("warning", fkb_path, "stale .fkb ignored");
     }
@@ -11696,10 +12235,33 @@ static int fk_run(int argc, char **argv) {
     }
     if (fk_path_has_suffix(argv[1], ".fkb")) {
         if (!fk_src_load_fkb(argv[1])) {
-            fk_diag_path("error", argv[1], "could not load .fkb program image");
+            char whybuf[192];
+            sprintf(whybuf, "could not load .fkb program image (%s)",
+                    fk_fkb_bad ? fk_fkb_bad_why : "unknown decode failure");
+            fk_diag_path("error", argv[1], whybuf);
             return 2;
         }
-        return fk_run_loaded_program_image(argc > 2 ? atoi(argv[2]) : 0);
+        long long recorded = 0;
+        char direct_sym_path[4096];
+        long long fkb_arg_len = fk_path_len(argv[1]);
+        /* fk_path_replace_ext only strips a trailing ".fk"; this argument ends
+         * in ".fkb" (checked above), so swap the suffix explicitly */
+        if (fkb_arg_len >= 4 && fkb_arg_len < 4090) {
+            sprintf(direct_sym_path, "%.*s.sym", (int)(fkb_arg_len - 4), argv[1]);
+            recorded = fk_src_sym_recorded_errors(direct_sym_path);
+            if (recorded > 0) {
+                fk_diag_path("warning", direct_sym_path,
+                        "image was compiled with errors; fix source and rerun --src to clear");
+            } else if (recorded < 0) {
+                /* direct execution has no source to rebuild from; run, but say
+                 * the record is missing rather than imply a clean compile */
+                fk_diag_path("warning", direct_sym_path,
+                        "image carries no compile-error record");
+                recorded = 0;
+            }
+        }
+        int fkb_rc = fk_run_loaded_program_image(argc > 2 ? atoi(argv[2]) : 0);
+        return recorded > 0 && fkb_rc == 0 ? 1 : fkb_rc;
     }
     if (fk_path_has_suffix(argv[1], ".dylib")) {
         return fk_run_dylib_artifact(argv[1], argc > 2 ? atoi(argv[2]) : 0, 1) ? 0 : 2;

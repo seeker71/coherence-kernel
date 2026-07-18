@@ -37,9 +37,9 @@ geometry:
 > the existing CLAUDE.md tending practice ("you are one cell in
 > this field") with the symmetric truth: each cell, looked into,
 > is a complete field. Companion to
-> [lc-w-cell](lc-w-cell.md) (the cell as smallest whole),
-> [lc-pulse](lc-pulse.md) (cell and field thrive as one movement),
-> and [lc-spec-breath](lc-spec-breath.md) (spec as inhale, test as
+> lc-w-cell (the cell as smallest whole),
+> lc-pulse (cell and field thrive as one movement),
+> and lc-spec-breath (spec as inhale, test as
 > exhale — one breath, complete).*
 
 ## What the Teaching Names
@@ -143,7 +143,7 @@ contains, not the quality of the assembly procedure.
   Blueprint NodeID are structurally complete in the same way —
   the lattice doesn't recognize partial cells. Wholeness at the
   cell scale is what content-addressing rewards. (See
-  [lc-perception-as-interface](lc-perception-as-interface.md):
+  lc-perception-as-interface:
   the substrate's interface treats every cell as its own complete
   rendering.)
 

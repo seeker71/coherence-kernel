@@ -117,6 +117,6 @@ encode the operators; the substrate identity-machinery works the same.
 **Pattern carries through, with measured tolerance.**
 
 In service of:
-- [`lc-cross-modal-unity`](../../../docs/vision-kb/concepts/lc-cross-modal-unity.md)
-- [`lc-same-shape-different-articulation`](../../../docs/vision-kb/concepts/lc-same-shape-different-articulation.md)
-- [`lc-grammar-is-the-universal-recipe`](../../../docs/vision-kb/concepts/lc-grammar-is-the-universal-recipe.md)
+- `lc-cross-modal-unity`
+- `lc-same-shape-different-articulation`
+- `lc-grammar-is-the-universal-recipe`

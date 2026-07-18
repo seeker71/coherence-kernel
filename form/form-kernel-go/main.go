@@ -141,7 +141,7 @@ const (
 	LevelTrivial uint32 = 1
 	LevelBasic   uint32 = 2
 
-	// RBasic — aligned with api/app/services/substrate/category.py
+	// RBasic — governed by form/category-contract.json.
 	RBasicUndefined uint32 = 0
 	RBasicWitness   uint32 = 6 // substrate self-attestation
 	RBasicBlock     uint32 = 9
@@ -2258,30 +2258,62 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VInt, Int: int64(end)}
 	})
-	// string_fold — Go-level streaming iteration over a string's bytes.
-	// Signature: (string_fold s init step) where step is a closure of
-	// (acc, char) → acc. Whole iteration in this Go for-loop; no Form-
-	// level recursion. Lets the substrate process arbitrary-length input
-	// streams without piling kernel stack frames — the universal-translator
-	// stream property the goal's first sentence demands.
-	k.registerNative("string_fold", catCall(), func(k *Kernel, args []Value) Value {
+	// string_bytes exposes the exact UTF-8 carrier bytes, including embedded
+	// NULs, as integer leaves. It is the whole-string twin of str_byte_at.
+	k.registerNative("string_bytes", catAccess(), func(_ *Kernel, args []Value) Value {
+		s := []byte(args[0].Str)
+		out := make([]Value, len(s))
+		for i, b := range s {
+			out[i] = Value{Kind: VInt, Int: int64(b)}
+		}
+		return Value{Kind: VList, List: out}
+	})
+	// string_byte_fold keeps the input in the host string pool and invokes a
+	// Form step with each raw UTF-8 byte as an int. The host loop gives streaming
+	// SHA/HMAC a stack bound independent of message length.
+	k.registerNative("string_byte_fold", catCall(), func(k *Kernel, args []Value) Value {
 		s := args[0].Str
 		acc := args[1]
 		fnVal := args[2]
 		if fnVal.Kind != VClosure {
-			panic("string_fold: third arg must be a closure")
+			panic("string_byte_fold: third arg must be a closure")
 		}
 		cl := fnVal.Cl
 		if len(cl.Params) != 2 {
-			panic(fmt.Sprintf("string_fold: step closure wants 2 params (acc char), got %d", len(cl.Params)))
+			panic(fmt.Sprintf("string_byte_fold: step closure wants 2 params (acc byte), got %d", len(cl.Params)))
 		}
 		for i := 0; i < len(s); i++ {
 			call := NewCallFrame(cl.Env, len(cl.Params))
 			call.Bind(cl.Params[0], acc)
-			call.Bind(cl.Params[1], Value{Kind: VStr, Str: string(s[i])})
+			call.Bind(cl.Params[1], Value{Kind: VInt, Int: int64(s[i])})
 			acc = k.walk(cl.Body, call)
 		}
 		return acc
+	})
+	// form_table_text serializes the compiler's reverse-built roots and rows in
+	// one linear host loop. It is the canonical universal-walker image format;
+	// keeping the loop here makes source/compiler depth independent of table size.
+	k.registerNative("form_table_text", catMethod(), func(_ *Kernel, args []Value) Value {
+		roots := args[0].List
+		rows := args[1].List
+		var out strings.Builder
+		writeInt := func(v int64) {
+			if out.Len() > 0 {
+				out.WriteByte(' ')
+			}
+			out.WriteString(strconv.FormatInt(v, 10))
+		}
+		writeInt(int64(len(roots)))
+		for i := len(roots) - 1; i >= 0; i-- {
+			writeInt(roots[i].Int)
+		}
+		writeInt(int64(len(rows)))
+		for i := len(rows) - 1; i >= 0; i-- {
+			for _, field := range rows[i].List {
+				writeInt(field.Int)
+			}
+		}
+		return Value{Kind: VStr, Str: out.String()}
 	})
 	k.registerNative("str_eq", catCompare(RCompareEq), func(_ *Kernel, args []Value) Value {
 		return boolInt(args[0].Str == args[1].Str)
@@ -3979,7 +4011,13 @@ func (k *Kernel) registerNatives() {
 		for i, v := range args[0].List {
 			bytes[i] = byte(v.Int)
 		}
-		nid, _ := deserializeNid(k, bytes, 0, k.nextImportScope())
+		if len(bytes) > formBinaryMaxBytes {
+			return Value{Kind: VNull}
+		}
+		nid, end, err := deserializeNid(k, bytes, 0, k.nextImportScope(), &formBinaryDecodeBudget{}, 0)
+		if err != nil || end != len(bytes) {
+			return Value{Kind: VNull}
+		}
 		return Value{Kind: VNodeID, Nid: nid}
 	})
 	// write_file_bytes — sibling of read_file_bytes; writes a byte list.
@@ -5237,6 +5275,10 @@ func (k *Kernel) buildVerb(verb string, args []NodeID) NodeID {
 	case "params":
 		// Special: a params-list literal, returns a SEQUENCE of idents
 		return k.intern(catBlock(RBlockSequence), args)
+	case "list":
+		// Canonical list literal. Keep the source recipe identical to the
+		// Rust/TypeScript readers instead of routing through a native FNCALL.
+		return k.intern(catListNat(), args)
 	default:
 		// Default: a function call to `verb` with these args
 		nameStr := k.internString(verb)
@@ -5842,18 +5884,47 @@ const (
 	// in another kernel, so an int64 node serializes as [formBinaryInt64][8
 	// bytes signed little-endian] and each kernel re-interns on read.
 	formBinaryInt64 uint32 = 3
+
+	// The binary door accepts bounded artifacts only. These limits are shared
+	// by the Go, Rust, TypeScript, and Python readers so a hostile count or
+	// recursive shape cannot turn one sibling into an allocator or stack-crash
+	// oracle while the others reject it.
+	formBinaryMaxBytes       = 64 << 20
+	formBinaryMaxStrings     = 262144
+	formBinaryMaxStringBytes = 32 << 20
+	formBinaryMaxChildren    = 262144
+	formBinaryMaxNodes       = 1000000
+	formBinaryMaxDepth       = 256
 )
+
+type formBinaryDecodeBudget struct {
+	nodes uint64
+}
+
+func (b *formBinaryDecodeBudget) enter(depth int) error {
+	if depth > formBinaryMaxDepth {
+		return fmt.Errorf("form binary: maximum node depth exceeded")
+	}
+	b.nodes++
+	if b.nodes > formBinaryMaxNodes {
+		return fmt.Errorf("form binary: maximum node count exceeded")
+	}
+	return nil
+}
 
 func pushU32(bytes []byte, v uint32) []byte {
 	return append(bytes, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
-func readU32(bytes []byte, pos int) (uint32, int) {
+func readU32(bytes []byte, pos int) (uint32, int, error) {
+	if pos < 0 || pos > len(bytes) || len(bytes)-pos < 4 {
+		return 0, pos, fmt.Errorf("form binary: truncated u32")
+	}
 	v := (uint32(bytes[pos]) << 24) |
 		(uint32(bytes[pos+1]) << 16) |
 		(uint32(bytes[pos+2]) << 8) |
 		uint32(bytes[pos+3])
-	return v, pos + 4
+	return v, pos + 4, nil
 }
 
 // pushF64LE — append an IEEE-754 f64 as 8 little-endian bytes (the payload of
@@ -5865,7 +5936,10 @@ func pushF64LE(bytes []byte, f float64) []byte {
 		byte(bits>>32), byte(bits>>40), byte(bits>>48), byte(bits>>56))
 }
 
-func readF64LE(bytes []byte, pos int) (float64, int) {
+func readF64LE(bytes []byte, pos int) (float64, int, error) {
+	if pos < 0 || pos > len(bytes) || len(bytes)-pos < 8 {
+		return 0, pos, fmt.Errorf("form binary: truncated float64")
+	}
 	bits := uint64(bytes[pos]) |
 		uint64(bytes[pos+1])<<8 |
 		uint64(bytes[pos+2])<<16 |
@@ -5874,7 +5948,7 @@ func readF64LE(bytes []byte, pos int) (float64, int) {
 		uint64(bytes[pos+5])<<40 |
 		uint64(bytes[pos+6])<<48 |
 		uint64(bytes[pos+7])<<56
-	return math.Float64frombits(bits), pos + 8
+	return math.Float64frombits(bits), pos + 8, nil
 }
 
 // pushI64LE / readI64LE — a signed int64 as 8 little-endian bytes (the payload
@@ -5886,7 +5960,10 @@ func pushI64LE(bytes []byte, n int64) []byte {
 		byte(u>>32), byte(u>>40), byte(u>>48), byte(u>>56))
 }
 
-func readI64LE(bytes []byte, pos int) (int64, int) {
+func readI64LE(bytes []byte, pos int) (int64, int, error) {
+	if pos < 0 || pos > len(bytes) || len(bytes)-pos < 8 {
+		return 0, pos, fmt.Errorf("form binary: truncated int64")
+	}
 	u := uint64(bytes[pos]) |
 		uint64(bytes[pos+1])<<8 |
 		uint64(bytes[pos+2])<<16 |
@@ -5895,7 +5972,7 @@ func readI64LE(bytes []byte, pos int) (int64, int) {
 		uint64(bytes[pos+5])<<40 |
 		uint64(bytes[pos+6])<<48 |
 		uint64(bytes[pos+7])<<56
-	return int64(u), pos + 8
+	return int64(u), pos + 8, nil
 }
 
 func serializeNid(k *Kernel, nid NodeID, bytes []byte) []byte {
@@ -5986,67 +6063,119 @@ func serializeNidWithStrings(k *Kernel, nid NodeID, bytes []byte, table *formBin
 	return bytes
 }
 
-func deserializeNid(k *Kernel, bytes []byte, pos int, scope uint32) (NodeID, int) {
-	tag, pos := readU32(bytes, pos)
-	if tag == formBinaryFloat64 {
-		var value float64
-		value, pos = readF64LE(bytes, pos)
-		return k.internTrivialFloat64(value), pos
+func deserializeNid(k *Kernel, bytes []byte, pos int, scope uint32, budget *formBinaryDecodeBudget, depth int) (NodeID, int, error) {
+	if err := budget.enter(depth); err != nil {
+		return NodeID{}, pos, err
 	}
-	if tag == formBinaryInt64 {
-		var value int64
-		value, pos = readI64LE(bytes, pos)
-		return k.internTrivialInt(value), pos
+	tag, pos, err := readU32(bytes, pos)
+	if err != nil {
+		return NodeID{}, pos, err
 	}
-	if tag == formBinaryLeaf {
+	switch tag {
+	case formBinaryFloat64:
+		value, next, err := readF64LE(bytes, pos)
+		if err != nil {
+			return NodeID{}, pos, err
+		}
+		return k.internTrivialFloat64(value), next, nil
+	case formBinaryInt64:
+		value, next, err := readI64LE(bytes, pos)
+		if err != nil {
+			return NodeID{}, pos, err
+		}
+		return k.internTrivialInt(value), next, nil
+	case formBinaryLeaf:
 		var pkg, level, ty, inst uint32
-		pkg, pos = readU32(bytes, pos)
-		level, pos = readU32(bytes, pos)
-		ty, pos = readU32(bytes, pos)
-		inst, pos = readU32(bytes, pos)
-		return k.remapImportedLeaf(scope, NodeID{Pkg: pkg, Level: level, Type: ty, Inst: inst}), pos
+		if pkg, pos, err = readU32(bytes, pos); err != nil {
+			return NodeID{}, pos, err
+		}
+		if level, pos, err = readU32(bytes, pos); err != nil {
+			return NodeID{}, pos, err
+		}
+		if ty, pos, err = readU32(bytes, pos); err != nil {
+			return NodeID{}, pos, err
+		}
+		if inst, pos, err = readU32(bytes, pos); err != nil {
+			return NodeID{}, pos, err
+		}
+		return k.remapImportedLeaf(scope, NodeID{Pkg: pkg, Level: level, Type: ty, Inst: inst}), pos, nil
+	case formBinaryComposite:
+		category, next, err := deserializeNid(k, bytes, pos, scope, budget, depth+1)
+		if err != nil {
+			return NodeID{}, pos, err
+		}
+		count, next, err := readU32(bytes, next)
+		if err != nil {
+			return NodeID{}, pos, err
+		}
+		if count > formBinaryMaxChildren {
+			return NodeID{}, pos, fmt.Errorf("form binary: maximum child count exceeded")
+		}
+		children := make([]NodeID, int(count))
+		for i := uint32(0); i < count; i++ {
+			var c NodeID
+			c, next, err = deserializeNid(k, bytes, next, scope, budget, depth+1)
+			if err != nil {
+				return NodeID{}, pos, err
+			}
+			children[i] = c
+		}
+		return k.intern(category, children), next, nil
+	default:
+		return NodeID{}, pos, fmt.Errorf("form binary: unknown node tag %d", tag)
 	}
-	category, pos := deserializeNid(k, bytes, pos, scope)
-	count, pos := readU32(bytes, pos)
-	children := make([]NodeID, count)
-	for i := uint32(0); i < count; i++ {
-		var c NodeID
-		c, pos = deserializeNid(k, bytes, pos, scope)
-		children[i] = c
-	}
-	return k.intern(category, children), pos
 }
 
-func deserializeNidWithStringsV1(k *Kernel, bytes []byte, pos int, stringsTable []string, scope uint32) (NodeID, int) {
+func deserializeNidWithStringsV1(k *Kernel, bytes []byte, pos int, stringsTable []string, scope uint32, budget *formBinaryDecodeBudget, depth int) (NodeID, int, error) {
+	if err := budget.enter(depth); err != nil {
+		return NodeID{}, pos, err
+	}
 	var pkg, level, ty, inst, count uint32
-	pkg, pos = readU32(bytes, pos)
-	level, pos = readU32(bytes, pos)
-	ty, pos = readU32(bytes, pos)
-	inst, pos = readU32(bytes, pos)
-	count, pos = readU32(bytes, pos)
+	var err error
+	if pkg, pos, err = readU32(bytes, pos); err != nil {
+		return NodeID{}, pos, err
+	}
+	if level, pos, err = readU32(bytes, pos); err != nil {
+		return NodeID{}, pos, err
+	}
+	if ty, pos, err = readU32(bytes, pos); err != nil {
+		return NodeID{}, pos, err
+	}
+	if inst, pos, err = readU32(bytes, pos); err != nil {
+		return NodeID{}, pos, err
+	}
+	if count, pos, err = readU32(bytes, pos); err != nil {
+		return NodeID{}, pos, err
+	}
+	if count > formBinaryMaxChildren {
+		return NodeID{}, pos, fmt.Errorf("form binary: maximum child count exceeded")
+	}
 	if count == 0 {
 		if level == LevelTrivial && ty == TrivString {
 			if int(inst) >= len(stringsTable) {
-				panic(fmt.Sprintf("form binary: bad string index %d", inst))
+				return NodeID{}, pos, fmt.Errorf("form binary: bad string index %d", inst)
 			}
-			return k.internString(stringsTable[inst]), pos
+			return k.internString(stringsTable[inst]), pos, nil
 		}
-		return k.remapImportedLeaf(scope, NodeID{Pkg: pkg, Level: level, Type: ty, Inst: inst}), pos
+		return k.remapImportedLeaf(scope, NodeID{Pkg: pkg, Level: level, Type: ty, Inst: inst}), pos, nil
 	}
 	category := NodeID{Pkg: pkg, Level: level, Type: ty, Inst: inst}
 	if level == LevelTrivial && ty == TrivString {
 		if int(inst) >= len(stringsTable) {
-			panic(fmt.Sprintf("form binary: bad string index %d", inst))
+			return NodeID{}, pos, fmt.Errorf("form binary: bad string index %d", inst)
 		}
 		category = k.internString(stringsTable[inst])
 	}
-	children := make([]NodeID, count)
+	children := make([]NodeID, int(count))
 	for i := uint32(0); i < count; i++ {
 		var c NodeID
-		c, pos = deserializeNidWithStringsV1(k, bytes, pos, stringsTable, scope)
+		c, pos, err = deserializeNidWithStringsV1(k, bytes, pos, stringsTable, scope, budget, depth+1)
+		if err != nil {
+			return NodeID{}, pos, err
+		}
 		children[i] = c
 	}
-	return k.intern(category, children), pos
+	return k.intern(category, children), pos, nil
 }
 
 var formBinaryMagicV1 = []byte("FORMBIN1")
@@ -6066,6 +6195,9 @@ func serializeArtifact(k *Kernel, root NodeID) []byte {
 }
 
 func deserializeArtifact(k *Kernel, bytes []byte) (NodeID, error) {
+	if len(bytes) > formBinaryMaxBytes {
+		return NodeID{}, fmt.Errorf("form binary: maximum artifact size exceeded")
+	}
 	v1 := len(bytes) >= len(formBinaryMagicV1) && string(bytes[:len(formBinaryMagicV1)]) == string(formBinaryMagicV1)
 	v2 := len(bytes) >= len(formBinaryMagic) && string(bytes[:len(formBinaryMagic)]) == string(formBinaryMagic)
 	if !v1 && !v2 {
@@ -6075,26 +6207,48 @@ func deserializeArtifact(k *Kernel, bytes []byte) (NodeID, error) {
 	if v1 {
 		pos = len(formBinaryMagicV1)
 	}
-	stringCount, pos := readU32(bytes, pos)
-	stringsTable := make([]string, stringCount)
+	stringCount, pos, err := readU32(bytes, pos)
+	if err != nil {
+		return NodeID{}, err
+	}
+	if stringCount > formBinaryMaxStrings {
+		return NodeID{}, fmt.Errorf("form binary: maximum string count exceeded")
+	}
+	stringsTable := make([]string, int(stringCount))
+	totalStringBytes := uint64(0)
 	for i := uint32(0); i < stringCount; i++ {
-		var n uint32
-		n, pos = readU32(bytes, pos)
-		end := pos + int(n)
-		if end > len(bytes) {
+		n, next, err := readU32(bytes, pos)
+		if err != nil {
+			return NodeID{}, err
+		}
+		pos = next
+		totalStringBytes += uint64(n)
+		if totalStringBytes > formBinaryMaxStringBytes {
+			return NodeID{}, fmt.Errorf("form binary: maximum string bytes exceeded")
+		}
+		if int(n) > len(bytes)-pos {
 			return NodeID{}, fmt.Errorf("form binary: truncated string")
 		}
-		stringsTable[i] = string(bytes[pos:end])
+		end := pos + int(n)
+		raw := bytes[pos:end]
+		if !utf8.Valid(raw) {
+			return NodeID{}, fmt.Errorf("form binary: invalid utf8")
+		}
+		stringsTable[i] = string(raw)
 		pos = end
 	}
 	var root NodeID
 	var end int
+	budget := &formBinaryDecodeBudget{}
 	if v1 {
 		scope := k.nextImportScope()
-		root, end = deserializeNidWithStringsV1(k, bytes, pos, stringsTable, scope)
+		root, end, err = deserializeNidWithStringsV1(k, bytes, pos, stringsTable, scope, budget, 0)
 	} else {
 		scope := k.nextImportScope()
-		root, end = deserializeNidWithStrings(k, bytes, pos, stringsTable, scope)
+		root, end, err = deserializeNidWithStrings(k, bytes, pos, stringsTable, scope, budget, 0)
+	}
+	if err != nil {
+		return NodeID{}, err
 	}
 	if end != len(bytes) {
 		return NodeID{}, fmt.Errorf("form binary: trailing bytes")
@@ -6102,45 +6256,71 @@ func deserializeArtifact(k *Kernel, bytes []byte) (NodeID, error) {
 	return root, nil
 }
 
-func deserializeNidWithStrings(k *Kernel, bytes []byte, pos int, stringsTable []string, scope uint32) (NodeID, int) {
-	tag, pos := readU32(bytes, pos)
-	if tag == formBinaryFloat64 {
-		if pos+8 > len(bytes) {
-			panic("form binary: truncated float64")
-		}
-		var value float64
-		value, pos = readF64LE(bytes, pos)
-		return k.internTrivialFloat64(value), pos
+func deserializeNidWithStrings(k *Kernel, bytes []byte, pos int, stringsTable []string, scope uint32, budget *formBinaryDecodeBudget, depth int) (NodeID, int, error) {
+	if err := budget.enter(depth); err != nil {
+		return NodeID{}, pos, err
 	}
-	if tag == formBinaryInt64 {
-		if pos+8 > len(bytes) {
-			panic("form binary: truncated int64")
-		}
-		var value int64
-		value, pos = readI64LE(bytes, pos)
-		return k.internTrivialInt(value), pos
+	tag, pos, err := readU32(bytes, pos)
+	if err != nil {
+		return NodeID{}, pos, err
 	}
-	if tag == formBinaryLeaf {
+	switch tag {
+	case formBinaryFloat64:
+		value, next, err := readF64LE(bytes, pos)
+		if err != nil {
+			return NodeID{}, pos, err
+		}
+		return k.internTrivialFloat64(value), next, nil
+	case formBinaryInt64:
+		value, next, err := readI64LE(bytes, pos)
+		if err != nil {
+			return NodeID{}, pos, err
+		}
+		return k.internTrivialInt(value), next, nil
+	case formBinaryLeaf:
 		var pkg, level, ty, inst uint32
-		pkg, pos = readU32(bytes, pos)
-		level, pos = readU32(bytes, pos)
-		ty, pos = readU32(bytes, pos)
-		inst, pos = readU32(bytes, pos)
+		if pkg, pos, err = readU32(bytes, pos); err != nil {
+			return NodeID{}, pos, err
+		}
+		if level, pos, err = readU32(bytes, pos); err != nil {
+			return NodeID{}, pos, err
+		}
+		if ty, pos, err = readU32(bytes, pos); err != nil {
+			return NodeID{}, pos, err
+		}
+		if inst, pos, err = readU32(bytes, pos); err != nil {
+			return NodeID{}, pos, err
+		}
 		if level == LevelTrivial && ty == TrivString {
 			if int(inst) >= len(stringsTable) {
-				panic(fmt.Sprintf("form binary: bad string index %d", inst))
+				return NodeID{}, pos, fmt.Errorf("form binary: bad string index %d", inst)
 			}
-			return k.internString(stringsTable[inst]), pos
+			return k.internString(stringsTable[inst]), pos, nil
 		}
-		return k.remapImportedLeaf(scope, NodeID{Pkg: pkg, Level: level, Type: ty, Inst: inst}), pos
+		return k.remapImportedLeaf(scope, NodeID{Pkg: pkg, Level: level, Type: ty, Inst: inst}), pos, nil
+	case formBinaryComposite:
+		category, next, err := deserializeNidWithStrings(k, bytes, pos, stringsTable, scope, budget, depth+1)
+		if err != nil {
+			return NodeID{}, pos, err
+		}
+		count, next, err := readU32(bytes, next)
+		if err != nil {
+			return NodeID{}, pos, err
+		}
+		if count > formBinaryMaxChildren {
+			return NodeID{}, pos, fmt.Errorf("form binary: maximum child count exceeded")
+		}
+		children := make([]NodeID, int(count))
+		for i := uint32(0); i < count; i++ {
+			var c NodeID
+			c, next, err = deserializeNidWithStrings(k, bytes, next, stringsTable, scope, budget, depth+1)
+			if err != nil {
+				return NodeID{}, pos, err
+			}
+			children[i] = c
+		}
+		return k.intern(category, children), next, nil
+	default:
+		return NodeID{}, pos, fmt.Errorf("form binary: unknown node tag %d", tag)
 	}
-	category, pos := deserializeNidWithStrings(k, bytes, pos, stringsTable, scope)
-	count, pos := readU32(bytes, pos)
-	children := make([]NodeID, count)
-	for i := uint32(0); i < count; i++ {
-		var c NodeID
-		c, pos = deserializeNidWithStrings(k, bytes, pos, stringsTable, scope)
-		children[i] = c
-	}
-	return k.intern(category, children), pos
 }

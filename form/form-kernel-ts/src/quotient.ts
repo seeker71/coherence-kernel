@@ -142,11 +142,9 @@ function strategyFor(d: DecidabilityCode): CanonStrategyCode {
 
 const EQUIV_CATEGORY_PKG = 1;
 const EQUIV_CATEGORY_LEVEL = Level.BASIC;
-// Reuse a high-slot RBasic-ish type for the equivalence-recipe itself;
-// the QUOTIENT-arm consumes these as substrate-resident metadata.
-// Aligned with kernel.ts QUOTIENT slot but the equivalence-recipe is a
-// SIBLING category, not the QUOTIENT recipe itself.
-const EQUIV_CATEGORY_TYPE = RBasic.QUOTIENT + 1; // 71
+// EQUIVALENCE is a sibling category, distinct from both QUOTIENT and
+// INDUCTIVE. Its injective slot comes from the shared category contract.
+export const RBasicEquivalence = RBasic.EQUIVALENCE;
 
 function makeEquivalenceCell(
   k: Kernel,
@@ -159,7 +157,7 @@ function makeEquivalenceCell(
     {
       pkg: EQUIV_CATEGORY_PKG,
       level: EQUIV_CATEGORY_LEVEL,
-      type: EQUIV_CATEGORY_TYPE,
+      type: RBasicEquivalence,
       inst: decidability,
     },
     [

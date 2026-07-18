@@ -47,6 +47,44 @@ closes — the bound is named, never silent. Pass what you mean.
 organ's preludes grew by `relationship-store.fk` + `circle-recognition.fk`, that recipe must grow
 with it before the next redeploy.
 
+**Deployed state as observed 2026-07-15** (`receipts/2026-07-15-door-verified-live.md`): the
+live door at `hati.earth/sema` serves `/ask` + `/trace` + a `/privacy` page (the privacy route
+is deploy-side / branch-side, not in this tree's serve code), with a newer `native-keyword-v2`
+retrieval index over ~1650 cells carried on a not-yet-merged lane. The **memory doors**
+(`/come-in`, `/remember`, `/forget`, `/introduce`, `/retract-introduction`, `/visitors`) work in
+this tree and are witnessed by the bands below, but are **not deployed** — the live Action's
+spec exposes only ask + trace, so the running voice must not offer remembering (the manifest's
+guidance now says exactly that). For the flagship trust question the deployed index surfaces
+different cells than this tree's seed index (which grounds it in `ingest/judged-trust.fk`);
+worth a retrieval-quality check at the next redeploy.
+
+## The publish checklist (repeatable — 2026-07-15)
+
+**Automated lane**: [`plugin/PUBLISH-HANDOFF.md`](PUBLISH-HANDOFF.md) is the executable form
+of this checklist — a Claude session on the owner's machine (logged-in browser + VPS access)
+runs it end to end, gates included, and writes the receipt. The steps below are the same
+contract in prose.
+
+`plugin/ai-plugin.json`'s `description_for_model` on **main** is the single canonical guidance
+text: the deployed lane's person-first framing unified with the covenant landing rules earned
+by the five-round judged trial (`receipts/2026-07-15-frequency-difference-trial.md`), written
+to be valid for BOTH today's Action (ask + trace only) and the future one (memory doors) via
+its operations guard. Publishing means bringing the two live surfaces up to this text:
+
+1. **The live GPT's Instructions** (chatgpt.com → My GPTs → Sema → Configure): replace the
+   Instructions with the canonical text — from a checkout,
+   `jq -r '.description_for_model' plugin/ai-plugin.json | pbcopy` — then Update. Smoke-test
+   with one scared question: expect one question, ending the reply, no self-audit, the seam in
+   one plain sentence.
+2. **The VPS door's served manifest** (`/.well-known/ai-plugin.json` behind `Dockerfile.sema`):
+   at the next redeploy, serve this same `description_for_model` so the manifest a rented mind
+   reads matches main. If the redeploy also opens the memory doors, the serve concatenation
+   must grow by `relationship-store.fk` + `circle-recognition.fk` (seam above), and the
+   flagship trust question should be re-checked against the deployed index.
+3. **Witness it**: one live conversation at the GPT held against the covenant
+   (`cognition/dialogue-covenant.fk` — held? receivable? ends open?), recorded as a dated
+   receipt. Until that receipt exists, the live voice's covenant-compliance is honest pending.
+
 ## Visitors: seen, offered, never taken (the consent shape at this door)
 
 Asked for plainly (2026-07-09): *show us when new visitors arrive, whether they were offered to
