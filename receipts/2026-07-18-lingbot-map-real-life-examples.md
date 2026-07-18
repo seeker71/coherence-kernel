@@ -76,6 +76,25 @@ on fkwu, Go, Rust, and TypeScript.
 - `presence/lingbot-map-real-life-courthouse.fk`
 - `presence/lingbot-map-real-life-examples.fk` — lightweight manifest
 
+Freshness correction on 2026-07-18: a later direct audit found that the
+checkpoint and real-life test files had wrapped their `; preludes:` declaration
+across ordinary comment lines. The proof siblings had been invoked with an
+explicit source list, but direct `fkwu --src` therefore reported unresolved
+calls. The declarations are now single-line and the checkout witness itself
+returns cleanly:
+
+```text
+model/tests/lingbot-pytorch-checkpoint-band.fk -> 127
+model/tests/lingbot-pytorch-live-witness.fk    -> valid 8,192-byte tensor,
+                                                  CRC 2,898,498,933,
+                                                  weights -0.0053501544 / -0.0173163358
+model/tests/lingbot-real-life-band.fk          -> 2047
+```
+
+The repaired direct gate changes no model arithmetic or C seed. It makes the
+receipt's native-witness claim true from the documented command rather than
+only from manually concatenated sources.
+
 One process retaining all four scenes' transient decoded-image and attention
 arenas crossed the current `fkwu` allocation window. The body does not costume
 that as a passing mega-run: each scene has its own process door, releases its
