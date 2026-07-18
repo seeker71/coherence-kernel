@@ -1,0 +1,343 @@
+; native-model-lineage-form.fk -- content-addressed local-model lineage.
+;
+; Host observation supplies byte counts and SHA-256 values.  Form validates
+; their shape, canonicalizes component/node/edge messages, hashes the DAG, and
+; keeps observed, fresh, reproduced, reviewed, and authorized distinct.
+; Transformation edges are not byte-equality claims.  Equality is reserved for
+; an explicit copy witness.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/native-model-evidence.fk
+
+(do
+    ; component = tag role bytes sha256
+    (defn nmli-component (role bytes digest)
+        (list "native-model-lineage-component-v1" role bytes digest))
+    (defn nmli-component? (r)
+        (and (eq (len r) 4)
+             (str_eq (nth r 0) "native-model-lineage-component-v1")))
+    (defn nmli-component-role (r) (nth r 1))
+    (defn nmli-component-bytes (r) (nth r 2))
+    (defn nmli-component-sha (r) (nth r 3))
+
+    ; A fixed role order makes package identity independent of host traversal.
+    (defn nmli-role-rank (role)
+        (if (str_eq role "adapter-config") 1
+        (if (str_eq role "adapter-weights") 2
+        (if (str_eq role "chat-template") 3
+        (if (str_eq role "config") 4
+        (if (str_eq role "manifest") 5
+        (if (str_eq role "model") 6
+        (if (str_eq role "model-index") 7
+        (if (str_eq role "model-shard-00001") 8
+        (if (str_eq role "model-shard-00002") 9
+        (if (str_eq role "ollama-config") 10
+        (if (str_eq role "params") 11
+        (if (str_eq role "show") 12
+        (if (str_eq role "show-details") 13
+        (if (str_eq role "show-model-info") 14
+        (if (str_eq role "show-parameters") 15
+        (if (str_eq role "show-system") 16
+        (if (str_eq role "show-template") 17
+        (if (str_eq role "special-tokens") 18
+        (if (str_eq role "system") 19
+        (if (str_eq role "tokenizer") 20
+        (if (str_eq role "tokenizer-config") 21 0)))))))))))))))))))))
+    (defn nmli-component-valid? (r)
+        (if (nmli-component? r)
+            (if (gt (nmli-role-rank (nmli-component-role r)) 0)
+                (if (and (ge (nmli-component-bytes r) 0)
+                         (nmfe-sha256? (nmli-component-sha r))) 1 0)
+                0)
+            0))
+    (defn nmli-components-valid-loop? (rows previous-rank)
+        (if (eq (len rows) 0) 1
+            (do
+                (let row (head rows))
+                (let rank (nmli-role-rank (nmli-component-role row)))
+                (if (and (eq (nmli-component-valid? row) 1)
+                         (gt rank previous-rank))
+                    (nmli-components-valid-loop? (tail rows) rank) 0))))
+    (defn nmli-components-valid? (rows)
+        (if (gt (len rows) 0) (nmli-components-valid-loop? rows 0) 0))
+    (defn nmli-component-message (r)
+        (nmfe-fields
+            (list (nmli-component-role r)
+                  (int_to_str (nmli-component-bytes r))
+                  (nmli-component-sha r))))
+    (defn nmli-components-message (rows)
+        (if (eq (len rows) 0) ""
+            (str_concat (nmli-component-message (head rows))
+                        (nmli-components-message (tail rows)))))
+    (defn nmli-component-sha-for-role (rows role)
+        (if (eq (len rows) 0) ""
+            (if (str_eq (nmli-component-role (head rows)) role)
+                (nmli-component-sha (head rows))
+                (nmli-component-sha-for-role (tail rows) role))))
+    (defn nmli-has-role? (rows role)
+        (if (nmfe-sha256? (nmli-component-sha-for-role rows role)) 1 0))
+
+    ; node = tag name kind format semantic-id components digest
+    (defn nmli-kind? (kind)
+        (if (str_eq kind "base") 1
+        (if (str_eq kind "adapter") 1
+        (if (str_eq kind "fused") 1
+        (if (str_eq kind "quantized") 1
+        (if (str_eq kind "served") 1 0))))))
+    (defn nmli-node-message (kind format semantic components)
+        (nmfe-fields
+            (list "native-model-lineage-node-v1" kind format semantic
+                  (nmli-components-message components))))
+    (defn nmli-node (name kind format semantic components)
+        (list "native-model-lineage-node-v1" name kind format semantic components
+              (nmfe-sha256 (nmli-node-message kind format semantic components))))
+    (defn nmli-node? (r)
+        (and (eq (len r) 7)
+             (str_eq (nth r 0) "native-model-lineage-node-v1")))
+    (defn nmli-node-name (r) (nth r 1))
+    (defn nmli-node-kind (r) (nth r 2))
+    (defn nmli-node-format (r) (nth r 3))
+    (defn nmli-node-semantic (r) (nth r 4))
+    (defn nmli-node-components (r) (nth r 5))
+    (defn nmli-node-sha (r) (nth r 6))
+    (defn nmli-kind-components? (kind rows)
+        (if (str_eq kind "base")
+            (if (and (eq (nmli-has-role? rows "config") 1)
+                     (and (eq (nmli-has-role? rows "model") 1)
+                          (and (eq (nmli-has-role? rows "model-index") 1)
+                               (and (eq (nmli-has-role? rows "tokenizer") 1)
+                                    (eq (nmli-has-role? rows "tokenizer-config") 1))))) 1 0)
+        (if (str_eq kind "adapter")
+            (if (and (eq (nmli-has-role? rows "adapter-config") 1)
+                     (eq (nmli-has-role? rows "adapter-weights") 1)) 1 0)
+        (if (str_eq kind "fused")
+            (if (and (eq (nmli-has-role? rows "config") 1)
+                     (and (eq (nmli-has-role? rows "model-index") 1)
+                          (and (eq (nmli-has-role? rows "model-shard-00001") 1)
+                               (and (eq (nmli-has-role? rows "model-shard-00002") 1)
+                                    (and (eq (nmli-has-role? rows "tokenizer") 1)
+                                         (eq (nmli-has-role? rows "tokenizer-config") 1)))))) 1 0)
+        (if (str_eq kind "quantized")
+            (if (and (eq (len rows) 1)
+                     (eq (nmli-has-role? rows "model") 1)) 1 0)
+        (if (str_eq kind "served")
+            (if (and (eq (nmli-has-role? rows "manifest") 1)
+                     (and (eq (nmli-has-role? rows "model") 1)
+                          (and (eq (nmli-has-role? rows "ollama-config") 1)
+                               (and (eq (nmli-has-role? rows "show") 1)
+                                    (eq (nmli-has-role? rows "show-model-info") 1))))) 1 0)
+            0))))))
+    (defn nmli-node-valid? (r)
+        (if (nmli-node? r)
+            (if (and (gt (str_len (nmli-node-name r)) 0)
+                     (and (eq (nmli-kind? (nmli-node-kind r)) 1)
+                          (and (gt (str_len (nmli-node-format r)) 0)
+                               (gt (str_len (nmli-node-semantic r)) 0))))
+                (if (and (eq (nmli-components-valid? (nmli-node-components r)) 1)
+                         (eq (nmli-kind-components?
+                                (nmli-node-kind r)
+                                (nmli-node-components r)) 1))
+                    (if (str_eq (nmli-node-sha r)
+                            (nmfe-sha256
+                                (nmli-node-message
+                                    (nmli-node-kind r) (nmli-node-format r)
+                                    (nmli-node-semantic r)
+                                    (nmli-node-components r)))) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn nmli-shas-message (rows)
+        (if (eq (len rows) 0) ""
+            (str_concat (nmfe-field (head rows))
+                        (nmli-shas-message (tail rows)))))
+    (defn nmli-shas-valid? (rows)
+        (if (eq (len rows) 0) 0
+            (if (nmfe-sha256? (head rows))
+                (if (eq (len (tail rows)) 0) 1
+                    (nmli-shas-valid? (tail rows))) 0)))
+    (defn nmli-bit? (n) (if (or (eq n 0) (eq n 1)) 1 0))
+    (defn nmli-edge-kind? (kind)
+        (if (str_eq kind "train") 1
+        (if (str_eq kind "fuse") 1
+        (if (str_eq kind "quantize") 1
+        (if (str_eq kind "serve") 1 0)))))
+    (defn nmli-optional-sha? (s)
+        (if (eq (str_len s) 0) 1 (nmfe-sha256? s)))
+    ; edge = tag name kind parents child tool invocation evidence day
+    ;        fresh reproduced reviewed authorized success digest
+    (defn nmli-edge-message
+        (name kind parents child tool invocation evidence day fresh reproduced
+         reviewed authorized success)
+        (nmfe-fields
+            (list "native-model-lineage-edge-v1" name kind
+                  (nmli-shas-message parents) child tool invocation evidence
+                  (int_to_str day) (int_to_str fresh) (int_to_str reproduced)
+                  (int_to_str reviewed) (int_to_str authorized)
+                  (int_to_str success))))
+    (defn nmli-edge
+        (name kind parents child tool invocation evidence day fresh reproduced
+         reviewed authorized success)
+        (list "native-model-lineage-edge-v1" name kind parents child tool
+              invocation evidence day fresh reproduced reviewed authorized success
+              (nmfe-sha256
+                  (nmli-edge-message name kind parents child tool invocation
+                      evidence day fresh reproduced reviewed authorized success))))
+    (defn nmli-edge? (r)
+        (and (eq (len r) 15)
+             (str_eq (nth r 0) "native-model-lineage-edge-v1")))
+    (defn nmli-edge-name (r) (nth r 1))
+    (defn nmli-edge-kind (r) (nth r 2))
+    (defn nmli-edge-parents (r) (nth r 3))
+    (defn nmli-edge-child (r) (nth r 4))
+    (defn nmli-edge-tool (r) (nth r 5))
+    (defn nmli-edge-invocation (r) (nth r 6))
+    (defn nmli-edge-evidence (r) (nth r 7))
+    (defn nmli-edge-day (r) (nth r 8))
+    (defn nmli-edge-fresh (r) (nth r 9))
+    (defn nmli-edge-reproduced (r) (nth r 10))
+    (defn nmli-edge-reviewed (r) (nth r 11))
+    (defn nmli-edge-authorized (r) (nth r 12))
+    (defn nmli-edge-success (r) (nth r 13))
+    (defn nmli-edge-sha (r) (nth r 14))
+    (defn nmli-edge-valid? (r)
+        (if (nmli-edge? r)
+            (if (and (gt (str_len (nmli-edge-name r)) 0)
+                     (eq (nmli-edge-kind? (nmli-edge-kind r)) 1))
+                (if (and (eq (nmli-shas-valid? (nmli-edge-parents r)) 1)
+                         (and (nmfe-sha256? (nmli-edge-child r))
+                              (and (nmli-optional-sha? (nmli-edge-tool r))
+                                   (and (nmfe-sha256? (nmli-edge-invocation r))
+                                        (nmfe-sha256? (nmli-edge-evidence r))))))
+                    (if (and (gt (nmli-edge-day r) 0)
+                             (and (eq (nmli-bit? (nmli-edge-fresh r)) 1)
+                                  (and (eq (nmli-bit? (nmli-edge-reproduced r)) 1)
+                                       (and (eq (nmli-bit? (nmli-edge-reviewed r)) 1)
+                                            (and (eq (nmli-bit? (nmli-edge-authorized r)) 1)
+                                                 (eq (nmli-bit? (nmli-edge-success r)) 1))))))
+                        (if (and
+                                (if (eq (nmli-edge-reviewed r) 1)
+                                    (nmfe-sha256? (nmli-edge-tool r)) 1)
+                                (if (eq (nmli-edge-authorized r) 1)
+                                    (nmli-edge-reviewed r) 1))
+                            (if (str_eq (nmli-edge-sha r)
+                                    (nmfe-sha256
+                                        (nmli-edge-message
+                                            (nmli-edge-name r)
+                                            (nmli-edge-kind r)
+                                            (nmli-edge-parents r)
+                                            (nmli-edge-child r)
+                                            (nmli-edge-tool r)
+                                            (nmli-edge-invocation r)
+                                            (nmli-edge-evidence r)
+                                            (nmli-edge-day r)
+                                            (nmli-edge-fresh r)
+                                            (nmli-edge-reproduced r)
+                                            (nmli-edge-reviewed r)
+                                            (nmli-edge-authorized r)
+                                            (nmli-edge-success r)))) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn nmli-node-sha-in? (digest nodes)
+        (if (eq (len nodes) 0) 0
+            (if (str_eq digest (nmli-node-sha (head nodes))) 1
+                (nmli-node-sha-in? digest (tail nodes)))))
+    (defn nmli-edge-parents-in? (parents nodes)
+        (if (eq (len parents) 0) 1
+            (if (eq (nmli-node-sha-in? (head parents) nodes) 1)
+                (nmli-edge-parents-in? (tail parents) nodes) 0)))
+    (defn nmli-nodes-valid? (nodes)
+        (if (eq (len nodes) 0) 1
+            (if (eq (nmli-node-valid? (head nodes)) 1)
+                (nmli-nodes-valid? (tail nodes)) 0)))
+    (defn nmli-edges-valid-for? (edges nodes)
+        (if (eq (len edges) 0) 1
+            (if (and (eq (nmli-edge-valid? (head edges)) 1)
+                     (and (eq (nmli-node-sha-in?
+                                (nmli-edge-child (head edges)) nodes) 1)
+                          (eq (nmli-edge-parents-in?
+                                (nmli-edge-parents (head edges)) nodes) 1)))
+                (nmli-edges-valid-for? (tail edges) nodes) 0)))
+    (defn nmli-edge-authority-ready? (edge)
+        (if (eq (nmli-edge-valid? edge) 1)
+            (if (and (eq (nmli-edge-fresh edge) 1)
+                     (and (eq (nmli-edge-reproduced edge) 1)
+                          (and (eq (nmli-edge-reviewed edge) 1)
+                               (and (eq (nmli-edge-authorized edge) 1)
+                                    (eq (nmli-edge-success edge) 1))))) 1 0)
+            0))
+    (defn nmli-edges-authority-ready? (edges)
+        (if (eq (len edges) 0) 1
+            (if (eq (nmli-edge-authority-ready? (head edges)) 1)
+                (nmli-edges-authority-ready? (tail edges)) 0)))
+    (defn nmli-authority-ready? (edges nodes expected-count)
+        (if (eq (len edges) expected-count)
+            (if (and (eq (nmli-nodes-valid? nodes) 1)
+                     (and (eq (nmli-edges-valid-for? edges nodes) 1)
+                          (eq (nmli-edges-authority-ready? edges) 1))) 1 0)
+            0))
+    (defn nmli-copy3? (a b c)
+        (if (and (nmfe-sha256? a)
+                 (and (str_eq a b) (str_eq b c))) 1 0))
+    (defn nmli-served-binds-quantized? (quantized served)
+        (if (and (str_eq (nmli-node-kind quantized) "quantized")
+                 (str_eq (nmli-node-kind served) "served"))
+            (if (str_eq
+                    (nmli-component-sha-for-role
+                        (nmli-node-components quantized) "model")
+                    (nmli-component-sha-for-role
+                        (nmli-node-components served) "model")) 1 0)
+            0))
+    (defn nmli-chain-valid?
+        (base adapter fused quantized served train-edge fuse-edge quantize-edge serve-edge)
+        (if (and (str_eq (nmli-node-kind base) "base")
+                 (and (str_eq (nmli-node-kind adapter) "adapter")
+                      (and (str_eq (nmli-node-kind fused) "fused")
+                           (and (str_eq (nmli-node-kind quantized) "quantized")
+                                (str_eq (nmli-node-kind served) "served")))))
+            (if (and
+                    (and (str_eq (nmli-edge-kind train-edge) "train")
+                         (and (str_eq (head (nmli-edge-parents train-edge))
+                                      (nmli-node-sha base))
+                              (str_eq (nmli-edge-child train-edge)
+                                      (nmli-node-sha adapter))))
+                    (and (str_eq (nmli-edge-kind fuse-edge) "fuse")
+                         (and (str_eq (head (nmli-edge-parents fuse-edge))
+                                      (nmli-node-sha base))
+                              (and (str_eq (nth (nmli-edge-parents fuse-edge) 1)
+                                           (nmli-node-sha adapter))
+                                   (str_eq (nmli-edge-child fuse-edge)
+                                           (nmli-node-sha fused))))))
+                (if (and
+                        (and (str_eq (nmli-edge-kind quantize-edge) "quantize")
+                             (and (str_eq (head (nmli-edge-parents quantize-edge))
+                                          (nmli-node-sha fused))
+                                  (str_eq (nmli-edge-child quantize-edge)
+                                          (nmli-node-sha quantized))))
+                        (and (str_eq (nmli-edge-kind serve-edge) "serve")
+                             (and (str_eq (head (nmli-edge-parents serve-edge))
+                                          (nmli-node-sha quantized))
+                                  (str_eq (nmli-edge-child serve-edge)
+                                          (nmli-node-sha served)))))
+                    (nmli-served-binds-quantized? quantized served) 0)
+                0)
+            0))
+    (defn nmli-count-edge-field (edges index)
+        (if (eq (len edges) 0) 0
+            (add (nth (head edges) index)
+                 (nmli-count-edge-field (tail edges) index))))
+    (defn nmli-node-drift-count (current previous)
+        (if (eq (len current) 0) 0
+            (add (if (str_eq (head current) (head previous)) 0 1)
+                 (nmli-node-drift-count (tail current) (tail previous)))))
+    (defn nmli-node-drift-ppm (current previous)
+        (if (eq (len current) 0) -1
+            (if (eq (len current) (len previous))
+                (div (mul (nmli-node-drift-count current previous) 1000000)
+                     (len current))
+                -1)))
+
+    0)

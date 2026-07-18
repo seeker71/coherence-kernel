@@ -1,0 +1,125 @@
+; native-model-session-world-cli.fk -- streaming stdin carrier for the real
+; chronological session action -> next-state learner.
+;
+; Train rows update only the fixed Form count-state. Heldout rows are then
+; scored once against that frozen state. No corpus-sized Form list is built.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/native-model-evidence.fk form-stdlib/native-model-session-world.fk
+
+(do
+    (defn nmswc-read-episode ()
+        (nmsw-episode (read_line) (read_line) (read_line)
+                      (read_line) (read_line)))
+    (defn nmswc-train-loop (remaining state)
+        (if (le remaining 0) state
+            (nmswc-train-loop
+                (sub remaining 1)
+                (nmsw-count-observe state (nmswc-read-episode)))))
+    (defn nmswc-eval-loop (remaining model evaluation baseline)
+        (if (le remaining 0) evaluation
+            (nmswc-eval-loop
+                (sub remaining 1) model
+                (nmsw-eval-observe model evaluation baseline
+                                   (nmswc-read-episode))
+                baseline)))
+    (defn nmswc-kv-int (key value)
+        (str_concat key (str_concat "=" (str_concat (int_to_str value) "\n"))))
+    (defn nmswc-kv-str (key value)
+        (str_concat key (str_concat "=" (str_concat value "\n"))))
+    (defn nmswc-render (lines)
+        (if (eq (len lines) 0) ""
+            (str_concat (head lines) (nmswc-render (tail lines)))))
+
+    (let previous-accuracy (str_to_int (read_line)))
+    (let recent-sessions-observed (str_to_int (read_line)))
+    (let recent-root-sessions-observed (str_to_int (read_line)))
+    (let actions-observed (str_to_int (read_line)))
+    (let source-train-episodes (str_to_int (read_line)))
+    (let source-heldout-episodes (str_to_int (read_line)))
+    (let chronological (str_to_int (read_line)))
+    (let train-count (str_to_int (read_line)))
+    (let heldout-count (str_to_int (read_line)))
+    (let model
+        (nmswc-train-loop train-count (nmsw-empty-count-state)))
+    (let evaluation
+        (nmswc-eval-loop heldout-count model
+            (nmsw-empty-eval-state (nmsw-state-fingerprint model))
+            (nmsw-majority-index model)))
+    (let accuracy (nmsw-ppm (nth evaluation 2) (nth evaluation 1)))
+    (let baseline (nmsw-ppm (nth evaluation 3) (nth evaluation 1)))
+    (let accuracy-gain (sub accuracy baseline))
+    (let promotion-min-accuracy-gain 10000)
+    (let full-pool
+        (if (and (eq train-count source-train-episodes)
+                 (eq heldout-count source-heldout-episodes)) 1 0))
+    (let valid
+        (if (and (ge train-count 32)
+                 (and (ge heldout-count 8)
+                      (eq (nmsw-stream-valid?
+                            model evaluation chronological train-count
+                            heldout-count source-train-episodes
+                            source-heldout-episodes) 1))) 1 0))
+    (let accepted
+        (if (and (eq valid 1)
+                 (ge accuracy-gain promotion-min-accuracy-gain)) 1 0))
+    (let decision (if (eq accepted 1) "accepted" "rejected"))
+    (let rejection-reason
+        (if (eq valid 0) "invalid-or-incomplete-evidence"
+            (if (le accuracy baseline) "did-not-beat-majority"
+                (if (lt accuracy-gain promotion-min-accuracy-gain)
+                    "accuracy-gain-below-materiality-floor" "none"))))
+    (print_str
+        (nmswc-render
+            (list
+                "schema=native-model-session-world-report-v2\n"
+                "source=real-codex-session-tool-metadata\n"
+                "privacy=prompt-and-output-text-not-retained\n"
+                "learning_owner=form-native-streaming-count-state\n"
+                "scoring_owner=form-native-streaming-heldout\n"
+                "model_shape=8x8x8-transition-counts-plus-8-majority-counts\n"
+                "episode_rows_retained_in_model=0\n"
+                "dataset_identity_method=form-dual-mod-stream-fingerprint-finalized-by-form-sha256\n"
+                (nmswc-kv-int "recent_sessions_observed"
+                    recent-sessions-observed)
+                (nmswc-kv-int "recent_root_sessions_observed"
+                    recent-root-sessions-observed)
+                (nmswc-kv-int "actions_observed" actions-observed)
+                (nmswc-kv-int "source_train_episodes" source-train-episodes)
+                (nmswc-kv-int "source_heldout_episodes" source-heldout-episodes)
+                (nmswc-kv-int "full_pool_evaluated" full-pool)
+                (nmswc-kv-int "episodes_total"
+                    (add train-count heldout-count))
+                (nmswc-kv-int "train_episodes" (nmsw-state-valid model))
+                (nmswc-kv-int "heldout_episodes" (nth evaluation 1))
+                (nmswc-kv-int "train_invalid_episodes"
+                    (nmsw-state-invalid model))
+                (nmswc-kv-int "heldout_invalid_episodes" (nth evaluation 8))
+                (nmswc-kv-int "model_correct" (nth evaluation 2))
+                (nmswc-kv-int "majority_correct" (nth evaluation 3))
+                (nmswc-kv-int "covered_episodes" (nth evaluation 4))
+                (nmswc-kv-int "covered_correct" (nth evaluation 5))
+                (nmswc-kv-int "model_accuracy_ppm" accuracy)
+                (nmswc-kv-int "majority_accuracy_ppm" baseline)
+                (nmswc-kv-int "model_accuracy_gain_ppm" accuracy-gain)
+                (nmswc-kv-int "promotion_min_accuracy_gain_ppm"
+                    promotion-min-accuracy-gain)
+                (nmswc-kv-int "coverage_ppm"
+                    (nmsw-ppm (nth evaluation 4) (nth evaluation 1)))
+                (nmswc-kv-int "covered_accuracy_ppm"
+                    (nmsw-ppm (nth evaluation 5) (nth evaluation 4)))
+                (nmswc-kv-int "context_weighted_confidence_ppm"
+                    (nmsw-ppm (nth evaluation 6) (nth evaluation 7)))
+                (nmswc-kv-int "beats_majority"
+                    (if (gt accuracy baseline) 1 0))
+                (nmswc-kv-str "candidate_decision" decision)
+                (nmswc-kv-str "rejection_reason" rejection-reason)
+                (nmswc-kv-int "previous_model_accuracy_ppm" previous-accuracy)
+                (nmswc-kv-int "model_accuracy_delta_ppm"
+                    (if (lt previous-accuracy 0) -1
+                        (sub accuracy previous-accuracy)))
+                (nmswc-kv-str "dataset_fingerprint_sha256"
+                    (nmsw-fingerprint-sha256 (nth evaluation 9)))
+                (nmswc-kv-str "model_sha256" (nmsw-model-sha256 model))
+                "split=frozen-lineage-safe-20260702-04-train-20260708-14-heldout\n"
+                "scope=real-session-action-conditioned-next-state\n"
+                (nmswc-kv-int "world_model_valid" valid)))))
