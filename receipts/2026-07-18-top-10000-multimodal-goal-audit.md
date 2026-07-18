@@ -1,5 +1,10 @@
 # Top-10,000 multimodal goal — strict current-state audit
 
+> Superseded for post-#330 counts by
+> `receipts/2026-07-18-non-toy-native-multimodal-expansion.md`. This file
+> remains the attributed audit of its earlier commit and must not be read as
+> the current completion snapshot.
+
 Date: 2026-07-18
 Audited commit: `33d54967c` (`origin/main`)
 Verdict: **not complete**
