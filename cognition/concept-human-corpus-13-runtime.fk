@@ -1,0 +1,117 @@
+; concept-human-corpus-13-runtime.fk -- live public-corpus consumer over the 10k detector.
+;
+; This is a non-test runtime: callers open it, send an unprompted corpus row
+; through the complete 10,000-label sentence detector, or retrieve an attributed
+; source quote for a witnessed locale/concept pair.  No fixture surface is passed
+; to detection and no stored candidate list bypasses the detector.
+; witnessed: 2026-07-18 -> 1023 exhaustive live gate; 15 world admission gate
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk cognition/concept-text-detection-13-runtime.fk cognition/concept-human-corpus-13.fk form/form-stdlib/speaker-embed.fk form/form-stdlib/champion-challenger.fk form/form-stdlib/identity-match.fk form/form-stdlib/face-embed.fk form/form-stdlib/spatial-fusion.fk form/form-stdlib/world-model.fk model/concept-world-model.fk
+(do
+  ; runtime = existing complete text detector + selected attributed sentence data.
+  (defn hcnl13-runtime-open ()
+    (list (ctd13-runtime-open) (read_file (hcnl13-data-path))))
+  (defn hcnl13-runtime-detector (r) (nth r 0))
+  (defn hcnl13-runtime-data (r) (nth r 1))
+  (defn hcnl13-runtime-row (r index)
+    (hcnl13-row-at-in (hcnl13-runtime-data r) (hcnl13-offsets) index))
+
+  ; detection = source row, complete ranked candidates, observed state.
+  (defn hcnl13-runtime-detect-index (r index)
+    (do (let row (hcnl13-runtime-row r index))
+        (let candidates (ctd13-runtime-detect-sentence
+          (hcnl13-runtime-detector r) (hcnl13-row-locale row)
+          (hcnl13-row-sentence row)))
+        (list row candidates (hcnl13-detection-state row candidates))))
+  (defn hcnl13-runtime-detect-index-ids (r index)
+    (do (let row (hcnl13-runtime-row r index))
+        (let nl (ctd13-runtime-nl (hcnl13-runtime-detector r)))
+        (hcnl13-detect-ids-in (cnl13-runtime-data nl)
+          (cnl13-runtime-offsets nl) (hcnl13-row-locale row)
+          (hcnl13-row-sentence row))))
+
+  (defn hcnl13-runtime-find-quote-go (r code concept index)
+    (if (ge index (hcnl13-row-count)) (empty)
+      (do (let row (hcnl13-runtime-row r index))
+          (if (and (str_eq (hcnl13-row-locale row) code)
+                   (and (str_eq (hcnl13-row-role row) "domain")
+                        (eq (hcnl13-row-expected-concept row) concept)))
+            (hcnl13-quote row)
+            (hcnl13-runtime-find-quote-go r code concept (add index 1))))))
+  (defn hcnl13-runtime-quote-for-concept (r code concept)
+    (hcnl13-runtime-find-quote-go r code concept 0))
+
+  (defn hcnl13-find-candidate-id (candidates id)
+    (if (eq (len candidates) 0) (empty)
+      (if (eq (ctd13-candidate-id (head candidates)) id) (head candidates)
+        (hcnl13-find-candidate-id (tail candidates) id))))
+
+  ; World admission happens strictly after independent content detection.  The
+  ; expected id selects from the returned candidates; it never enters the scan.
+  ; Persistence receives the id read back from that candidate, not the row.
+  (defn hcnl13-world-admit-detection (detection index)
+    (do (let row (nth detection 0))
+        (let candidates (nth detection 1))
+        (let candidate (hcnl13-find-candidate-id candidates
+                         (hcnl13-row-expected-concept row)))
+        (if (eq (len candidate) 0)
+          (list "admitted" 0 "reason"
+            "expected-id-absent-from-independent-content-scan"
+            "sentence-id" (hcnl13-row-sentence-id row)
+            "candidate-count" (len candidates) "expected-id-injected" 0)
+          (do (let detected-id (ctd13-candidate-id candidate))
+              (let known (list (cwm-cell detected-id
+                (str_concat "tatoeba-sentence-"
+                  (int_to_str (hcnl13-row-sentence-id row))))))
+              (let entity (cwm-persist detected-id index "tatoeba-human-text"
+                (add 180718 index) known))
+              (list "admitted" 1 "detected-id" detected-id
+                "sentence-id" (hcnl13-row-sentence-id row)
+                "entity" entity "world" (cwm-world (list entity))
+                "world-count" (cwm-concept-count (list entity))
+                "expected-id-injected" 0)))))
+  (defn hcnl13-runtime-world-admit-index (r index)
+    (hcnl13-world-admit-detection (hcnl13-runtime-detect-index r index) index))
+
+  (defn hcnl13-id-member? (id ids)
+    (if (eq (len ids) 0) 0
+      (if (eq id (head ids)) 1 (hcnl13-id-member? id (tail ids)))))
+  (defn hcnl13-add-candidate-ids (candidates ids)
+    (if (eq (len candidates) 0) ids
+      (do (let id (ctd13-candidate-id (head candidates)))
+          (hcnl13-add-candidate-ids (tail candidates)
+            (if (eq (hcnl13-id-member? id ids) 1) ids (cons id ids))))))
+  (defn hcnl13-add-ids (fresh ids)
+    (if (eq (len fresh) 0) ids
+      (hcnl13-add-ids (tail fresh)
+        (if (eq (hcnl13-id-member? (head fresh) ids) 1)
+          ids (cons (head fresh) ids)))))
+
+  ; scan = rows, valid, failures, raw detections, unique concepts,
+  ;        valid domain, valid ambiguity, valid negatives, attributed, reviewed.
+  (defn hcnl13-runtime-scan-go (r index valid detections ids domains ambiguities negatives)
+    (if (ge index (hcnl13-row-count))
+      (list index valid (sub index valid) detections (len ids)
+        domains ambiguities negatives (hcnl13-attributed-count)
+        (hcnl13-human-reviewed-count))
+      (do (let row (hcnl13-runtime-row r index))
+          (let detected-ids (hcnl13-runtime-detect-index-ids r index))
+          (let ok (hcnl13-ids-valid? row detected-ids))
+          (hcnl13-runtime-scan-go r (add index 1) (add valid ok)
+            (add detections (len detected-ids))
+            (hcnl13-add-ids detected-ids ids)
+            (add domains (if (and (eq ok 1) (str_eq (hcnl13-row-role row) "domain")) 1 0))
+            (add ambiguities (if (and (eq ok 1) (str_eq (hcnl13-row-role row) "ambiguity")) 1 0))
+            (add negatives (if (and (eq ok 1) (str_eq (hcnl13-row-role row) "negative")) 1 0))))))
+  (defn hcnl13-runtime-scan (r)
+    (hcnl13-runtime-scan-go r 0 0 0 (empty) 0 0 0))
+  (defn hcnl13-scan-rows (scan) (nth scan 0))
+  (defn hcnl13-scan-valid (scan) (nth scan 1))
+  (defn hcnl13-scan-failures (scan) (nth scan 2))
+  (defn hcnl13-scan-detections (scan) (nth scan 3))
+  (defn hcnl13-scan-unique-concepts (scan) (nth scan 4))
+  (defn hcnl13-scan-domains (scan) (nth scan 5))
+  (defn hcnl13-scan-ambiguities (scan) (nth scan 6))
+  (defn hcnl13-scan-negatives (scan) (nth scan 7))
+  (defn hcnl13-scan-attributed (scan) (nth scan 8))
+  (defn hcnl13-scan-reviewed (scan) (nth scan 9))
+)
