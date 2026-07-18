@@ -58,6 +58,8 @@
 ; preludes: form/form-stdlib/rag-ask.fk form/form-stdlib/choice-receipt.fk
 ; preludes: form/form-stdlib/form-fs.fk cognition/concept-nl-semantic-13-metadata.fk cognition/concept-nl-semantic-13-offsets.fk cognition/concept-nl-semantic-13.fk cognition/concept-nl-semantic-13-runtime.fk
 ; preludes: model/concept-10000-data.fk model/concept-10000.fk
+; preludes: model/concept-semantics-10000-data.fk model/concept-semantics-10000.fk
+; preludes: cognition/concept-text-senses-10000-metadata.fk cognition/concept-text-senses-10000-offsets.fk cognition/concept-text-senses-10000.fk
 ; preludes: cognition/nl-lenses-13-data.fk cognition/nl-lenses-13.fk
 (do
   ;; ---------- small helpers ----------
@@ -259,6 +261,112 @@
           (int_to_str (cr-trace-attempts t)) "/" (int_to_str (cr-trace-successes t)) "/"
           (int_to_str (cr-trace-failures t)) "/" (int_to_str (cr-trace-silences t))))))
 
+  ;; ---------- concept semantics: description, senses, parents ----------
+  ; The parent join stays INSIDE the WordNet 3.1 projection: a cs10 relation
+  ; target "n14913140" is matched against every index record's primary
+  ; type+offset (35-byte fixed rows, two substring compares each) — anchor ids
+  ; are shared across all the 10k tables, so a found record id IS the cnl13
+  ; row. Joining relation targets to the cnl13 anchor column would cross
+  ; WordNet versions (cs10 is 3.1, the OMW anchors are PWN 3.0) and silently
+  ; never match — a real seam, named here and in the report.
+  (defn nnt-synset-row-go (index kind off id)
+    (if (ge id (cs10-count)) -1
+      (if (and (str_eq (cs10-primary-type-at index id) kind)
+               (and (str_eq (cs10-primary-offset-at index id) off)
+                    (gt (cs10-method-at index id) 0)))
+        id
+        (nnt-synset-row-go index kind off (add id 1)))))
+  (defn nnt-row-by-synset (index target)
+    (if (lt (str_len target) 2) -1
+      (nnt-synset-row-go index (substring target 0 1)
+        (substring target 1 (str_len target)) 0)))
+  ; first hypernym ("@" or instance "@i") of a semantic record, or ""
+  (defn nnt-hypernym-target-go (rels)
+    (if (eq (len rels) 0) ""
+      (if (or (str_eq (cs10-relation-symbol (head rels)) "@")
+              (str_eq (cs10-relation-symbol (head rels)) "@i"))
+        (cs10-relation-target (head rels))
+        (nnt-hypernym-target-go (tail rels)))))
+  (defn nnt-hypernym-target (sem) (nnt-hypernym-target-go (cs10-relations sem)))
+  ; one parent line: labels in both seats + the parent's own gloss, or the
+  ; honest "not among the 10k anchors" when the projection holds no such row.
+  (defn nnt-parent-line (rt pidx target asserted-code target-code)
+    (if (lt pidx 0)
+      (nnt-cat (list "    parent synset " target
+        ": not among the 10k anchors (the join is honest, not padded)\n"))
+      (do (let psem (cs10-at pidx))
+          (nnt-cat (list
+            "    parent synset " target " -> row " (int_to_str pidx)
+            " (" (cs10-lemma psem) ")"
+            " | " asserted-code ": " (nnt-seat-label rt pidx asserted-code)
+            " | " target-code ": " (nnt-seat-label rt pidx target-code)
+            "\n      parent description: " (cs10-gloss psem) "\n")))))
+  (defn nnt-parents-go (rt index idx asserted-code target-code depth out)
+    (if (eq depth 0) out
+      (do (let sem (cs10-at idx))
+          (let target (nnt-hypernym-target sem))
+          (if (str_eq target "") out
+            (do (let pidx (nnt-row-by-synset index target))
+                (let line (nnt-parent-line rt pidx target asserted-code target-code))
+                (if (lt pidx 0) (str_concat out line)
+                  (nnt-parents-go rt index pidx asserted-code target-code
+                    (sub depth 1) (str_concat out line))))))))
+  (defn nnt-parents (rt idx asserted-code target-code)
+    (do (let out (nnt-parents-go rt (read_file (cs10-index-path))
+                   idx asserted-code target-code 2 ""))
+        (if (str_eq out "") "    no hypernym recorded for this anchor\n"
+          (str_concat out ""))))
+  ; bounded sense listing: count + up to two glosses beyond the primary
+  (defn nnt-sense-gloss (data offsets idx i)
+    (do (let s (cts10-sense-at-in data offsets idx i))
+        (if (eq (len s) 0) "" (cts10-sense-gloss s))))
+  (defn nnt-senses-line (idx)
+    (do (let data (read_file (cts10-data-path)))
+        (let offsets (cts10-offsets))
+        (let count (cts10-sense-count-in data offsets idx))
+        (nnt-cat (list
+          (int_to_str count) " attributed WordNet senses"
+          (if (le count 1) ""
+            (nnt-cat (list "; sense 2: " (nnt-sense-gloss data offsets idx 1))))
+          (if (le count 2) ""
+            (nnt-cat (list " | sense 3: " (nnt-sense-gloss data offsets idx 2))))
+          (if (le count 3) "" " | ...")))))
+  ; the full 13-seat label row — any language, one line. The branch that
+  ; returns the label launders through str_concat (carrier boundary 2 above).
+  (defn nnt-seat-label (rt idx code)
+    (do (let label (cnl13-runtime-generate rt idx code))
+        (if (str_eq label "") "-" (str_concat label ""))))
+  (defn nnt-seats-go (rt idx codes out)
+    (if (eq (len codes) 0) out
+      (nnt-seats-go rt idx (tail codes)
+        (nnt-cat (list out (head codes) ":" (nnt-seat-label rt idx (head codes)) " ")))))
+  (defn nnt-all-seats (rt idx) (nnt-seats-go rt idx (cnl13-locale-codes) ""))
+
+  ;; ---------- the local oracle dictionary (machine rows) ----------
+  ; concept-nl-semantic-13-machine.tsv: 10k rows x 12 machine-translated
+  ; seats (en is the anchor itself) — the local oracle dictionary. Row fetch
+  ; is a byte search for the concept id at a line start.
+  (defn nnt-mach-path () "cognition/concept-nl-semantic-13-machine.tsv")
+  (defn nnt-mach-col (code)
+    (if (str_eq code "id") 1 (if (str_eq code "es") 2 (if (str_eq code "fr") 3
+      (if (str_eq code "pt-br") 4 (if (str_eq code "sw") 5 (if (str_eq code "de") 6
+        (if (str_eq code "ru") 7 (if (str_eq code "zh") 8 (if (str_eq code "ja") 9
+          (if (str_eq code "ar") 10 (if (str_eq code "hi") 11
+            (if (str_eq code "tr") 12 -1)))))))))))))
+  (defn nnt-mach-line (mach idx)
+    (do (let key (str_concat (byte_to_str 10) (str_concat (int_to_str idx) (byte_to_str 9))))
+        (let at (str_find mach key 0))
+        (if (lt at 0) ""
+          (do (let start (add at 1))
+              (let end (str_find mach (byte_to_str 10) start))
+              (substring mach start (if (lt end 0) (str_len mach) end))))))
+  (defn nnt-mach-label (mach idx code)
+    (do (let col (nnt-mach-col code))
+        (if (lt col 1) "" (cnl13-field (nnt-mach-line mach idx) col))))
+  (defn nnt-dict-compare (body-label mach-label)
+    (if (str_eq mach-label "") "no-dictionary-row"
+      (if (str_eq body-label mach-label) "agrees-with-body" "DIFFERS-from-body")))
+
   ;; ---------- one language lane ----------
   ; the rag distractor must be a DIFFERENT concept than the matched row
   (defn nnt-seat-row (rt code label)
@@ -294,8 +402,13 @@
             (let written (nnt-write-index rt idx didx))
             (let hit (ra-grounded-hit-at (nnt-rag-index-home) query))
             (let receipt (nnt-receipt asserted-code (nth walk 1) (nth walk 2) 2 0))
+            (let sem (cs10-at idx))
+            (let mach (read_file (nnt-mach-path)))
+            (let mach-out (nnt-mach-label mach idx target-code))
+            (let dict-verdict (nnt-dict-compare out-label mach-out))
             (let ledger-rows (nnt-ledger-append (nnt-cat (list
-              asserted-code "|" query "|row-" (int_to_str idx) "|" out-label "|"
+              asserted-code "|" query "|row-" (int_to_str idx) "|" out-label
+              "|dict-" dict-verdict "|"
               (if (le (file_size (nnt-oracle-answer-path)) 0) "native-only"
                 (str_concat "oracle-agree-" (int_to_str (nnt-agreement out-label
                   (nnt-strip-nl (read_file (nnt-oracle-answer-path)))))))))))
@@ -322,15 +435,27 @@
               "  follow-up: stage '<asserted> <target> <query>' at " (nnt-staged-query-path)
               " and re-run this command\n"
               "  north-star gap: exact-label detection only; next: learned held-out detection with reviewed corpora\n"
-              "-- stage 2: neutral identity (plane: where -> computable NodeID/rank)\n"
-              "  recipe: " (nnt-sized "model/concept-10000.fk")
+              "-- stage 2: neutral identity + description + parents (planes: where/what)\n"
+              "  recipes: " (nnt-sized "model/concept-10000.fk")
+              " + " (nnt-sized "model/concept-semantics-10000.fk")
+              " + " (nnt-sized "cognition/concept-text-senses-10000.fk") "\n"
               "  data cells: " (nnt-sized "model/concept-10000-ranked.dat")
-              " + " (nnt-sized "model/concept-10000-lexical-index.dat") "\n"
+              " + " (nnt-sized "model/concept-semantics-10000-payload.dat")
+              " + " (nnt-sized "cognition/concept-text-senses-10000.tsv") "\n"
               "  c10 id/label/rank/frequency: " (int_to_str (c10-concept-id c10)) "/"
               (c10-concept-label c10) "/" (int_to_str (c10-concept-rank c10)) "/"
               (int_to_str (c10-concept-frequency c10)) "\n"
-              "  follow-up: presence/concept-lenses-26-live.fk carries this same anchor through 13 NL + 13 PL lenses\n"
-              "  north-star gap: one lexeme per record; polysemy/synonymy senses remain open\n"
+              "  description (WordNet 3.1 " (cs10-synset-id sem) ", " (cs10-method-label sem)
+              " map; note: stage 1's anchor is PWN 3.0 via OMW - two versions, both named): "
+              (cs10-gloss sem) "\n"
+              "  polysemy, open not hidden: " (nnt-senses-line idx) "\n"
+              "  all 13 seats: " (nnt-all-seats rt idx) "\n"
+              "  parent concepts (hypernym chain, depth 2):\n"
+              (nnt-parents rt idx asserted-code target-code)
+              "  follow-up: (cs10-at <row>) for any anchor's description; (cts10-senses-in ...) for every sense; "
+              "presence/concept-lenses-26-live.fk for the 26-lens crossing\n"
+              "  north-star gap: 7371/10000 anchors carry a WordNet map (2629 explicit misses, never padded); "
+              "glosses are English-only until the seats grow their own\n"
               "-- stage 3: neutral -> NL (plane: what -> table generation, bounded)\n"
               "  recipes: cognition/concept-nl-semantic-13.fk (label) + " (nnt-sized "cognition/nl-lenses-13.fk")
               " + " (nnt-sized "cognition/nl-lenses-13-data.fk") "\n"
@@ -338,7 +463,10 @@
               " (source " (nth src-out 5) ", state " (nth src-out 4) ")\n"
               "  nl13 grounded frame (meaning 4): " frame "\n"
               "  nl13 re-detected lens: " redetect "\n"
-              "  follow-up: (nl13-generate \"<seat>\" 4 \"<label>\") for any of the 13 seats\n"
+              "  local oracle dictionary (machine row, " (nnt-sized (nnt-mach-path)) "): "
+              target-code " says '" mach-out "' -> " dict-verdict
+              " (source-priority law: wikt-then-dedicated-wordnet-then-cldr-then-machine)\n"
+              "  follow-up: (nl13-generate \"<seat>\" 4 \"<label>\") | (nnt-mach-label (read_file (nnt-mach-path)) <row> \"<seat>\") for any dictionary cell\n"
               "  north-star gap: labels mapped-unreviewed; next: native-speaker review, then learned generation\n"
               "-- stage 4: rag concept match, persisted index (plane: which -> computable overlap rank)\n"
               "  recipes: " (nnt-sized "form/form-stdlib/rag-ask.fk")
@@ -429,6 +557,11 @@
   (defn nnt-north-star ()
     (nnt-cat (list
       "==== north star (NORTH_STAR.md) ====\n"
+      "  reachable from this one command: 10000 anchors x 13 seats = 130000 label cells, "
+      (int_to_str (cts10-total-senses)) " sense glosses ("
+      (int_to_str (cts10-mapped-anchors)) " mapped anchors), "
+      (int_to_str (cs10-relation-count)) " typed relations (parents included), and 120000 "
+      "machine dictionary cells - every one addressable by row + seat through the staged query\n"
       "  closed this visit: persisted production-path rag index (was: in-memory demo rows); the\n"
       "  German pivot tongue with node-identity witness (was: pending); real per-rule BMF counters\n"
       "  (was: uninstrumented); the comparison ledger + oracle scoring door (was: deferred hook);\n"

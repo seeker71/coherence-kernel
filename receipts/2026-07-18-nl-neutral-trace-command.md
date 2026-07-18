@@ -73,9 +73,48 @@ stdlib carry the `(nil? raw)`-then-branch shape on their staged-file lanes;
 they are proven on the sibling kernels, but the fkwu `--src` staged-query
 path deserves the same minimal probe before it is trusted blindly.
 
+## Third pass: the whole concept body behind every query
+
+The same command now serves, for ANY of the 10,000 anchors in any of the 13
+seats: the concept's WordNet 3.1 description; its full attributed sense set
+(34,244 senses, polysemy opened, never hidden — count plus further glosses);
+the complete 13-seat label row (all scripts, absent seats shown as `-`); the
+local oracle dictionary row (the 120,000-cell machine table), compared against
+the body's label and recorded in the ledger (`dict-agrees-with-body` /
+`dict-DIFFERS-from-body` / `dict-no-dictionary-row`); and the hypernym chain —
+parent concepts with their own labels in both seats and their own
+descriptions, joined INSIDE the WordNet 3.1 projection by primary-synset scan
+over the 35-byte index records.
+
+Two real seams surfaced and are named in the trace instead of papered over:
+
+- **The version seam.** cs10 relations are WordNet 3.1; the OMW anchor column
+  is PWN 3.0. Joining relation targets to the anchor column can never match —
+  the first parent join was written that way and hung on a Form-implemented
+  `str_find` scanning 1.4 MB for a synset that structurally is not there. The
+  correct join never leaves the 3.1 projection. Both versions are printed
+  where they appear.
+- **The specificity seam.** Direct hypernyms of frequency-ranked lexemes are
+  often fine-grained synsets that are not the primary sense of any top-10k
+  word: `water`'s parent (`n14643012`) is honestly "not among the 10k
+  anchors", while `why` → `n09201896` → row 483 `reason` (de `Ursache`, id
+  `alasan`) joins fully, parent description included. Offline analysis
+  (analysis only, nothing committed depends on it): 1,916 of the 7,371 mapped
+  anchors have an in-table direct parent.
+
+One performance law joined the carrier-boundary notes: `len` is a full list
+walk, so calling it per step of a 10k scan turns the scan into minutes —
+`nil?` on the tail is the shape (measured: the walk went from timeout to
+instant).
+
 ## Witnessed on 2026-07-18 (live fkwu, Linux x86-64 checkout)
 
-- Band `cognition/tests/nl-neutral-trace-band.fk` → **16383** (fourteen bits:
+- Band `cognition/tests/nl-neutral-trace-band.fk` → **1048575** (twenty bits;
+  the six new bits witness: the row-377 gloss at `n14869913`; its 10 attributed
+  senses; the machine dictionary agreeing on `Wasser`; the positive parent
+  join `why → reason/Ursache`; the honest parent miss for `water`; and the
+  13-seat row rendering `zh` and `ar`). The first fourteen bits remain (from
+  the earlier pass:
   both lanes on row 377; both generation directions; walk counters including
   cut = pruned seats; the en/id `air` homograph fork; the PERSISTED index
   answering both queries from disk at `@10.3.99.377`; a valid measured choice
