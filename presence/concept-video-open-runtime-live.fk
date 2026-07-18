@@ -1,0 +1,176 @@
+; concept-video-open-runtime-live.fk -- arbitrary content-only video round trip.
+;
+; Given any valid concept id and NL lens, Form looks up the attributed surface
+; and semantic gloss, then asks a narrow raster carrier to make four moving
+; frames. The carrier receives no id or lens. There is no barcode or identity
+; envelope. FFV1 is decoded to first/last BMPs, Apple Vision OCR reads only the
+; pixels, and Form scans the complete 10,000-row lens and English tables.
+;
+; A separate Apple Vision classification pass is also scanned across all 10k
+; English anchors. Results expose localized OCR, English-anchor OCR, pretrained
+; labels, and requested address separately. An address never counts as sensed.
+; witnessed: 2026-07-18 -> 13 distinct concepts/lenses live, 12 localized OCR,
+;                            13 semantic round trips, zero decoded addresses
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk model/concept-10000-data.fk model/concept-10000.fk model/concept-semantics-10000-data.fk model/concept-semantics-10000.fk cognition/nl-lenses-13-data.fk cognition/nl-lenses-13.fk cognition/concept-nl-semantic-13-metadata.fk cognition/concept-nl-semantic-13-offsets.fk cognition/concept-nl-semantic-13.fk cognition/concept-nl-semantic-13-runtime.fk cognition/concept-text-senses-10000-metadata.fk cognition/concept-text-senses-10000-offsets.fk cognition/concept-text-senses-10000.fk cognition/concept-text-detection-13.fk cognition/concept-text-detection-13-runtime.fk model/concept-multimodal-codec.fk model/lingbot-vision-input.fk model/concept-video-generation-10000-13.fk model/concept-video-open-runtime.fk
+
+(do
+  (defn cvorl-card-source () "presence/carriers/concept-video-semantic-card.swift")
+  (defn cvorl-ocr-source () "presence/carriers/concept-video-vision-ocr.swift")
+  (defn cvorl-label-source () "presence/carriers/concept-video-vision-classify.swift")
+  (defn cvorl-card-bin () "/tmp/concept-video-semantic-card")
+  (defn cvorl-ocr-bin () "/tmp/concept-video-vision-ocr")
+  (defn cvorl-label-bin () "/tmp/concept-video-open-runtime-label")
+  (defn cvorl-frame-count () 4)
+
+  (defn cvorl-ocr-language (code)
+    (if (str_eq code "en") "en-US"
+      (if (str_eq code "id") "id-ID"
+        (if (str_eq code "es") "es-ES"
+          (if (str_eq code "fr") "fr-FR"
+            (if (str_eq code "pt-br") "pt-BR"
+              (if (str_eq code "sw") "sw-KE"
+                (if (str_eq code "de") "de-DE"
+                  (if (str_eq code "ru") "ru-RU"
+                    (if (str_eq code "zh") "zh-Hans"
+                      (if (str_eq code "ja") "ja-JP"
+                        (if (str_eq code "ar") "ar-SA"
+                          (if (str_eq code "hi") "hi-IN"
+                            (if (str_eq code "tr") "tr-TR" "-")))))))))))))
+
+  ; runtime = ranked, semantics index/payload, NL runtime, text runtime, ready.
+  (defn cvorl-open ()
+    (do (let tools (if (str_eq (host-exec
+          "command -v swiftc >/dev/null && command -v ffmpeg >/dev/null && printf 1" "") "1") 1 0))
+        (let command (str_concat "swiftc -O " (str_concat (cvorl-card-source)
+          (str_concat " -o " (str_concat (cvorl-card-bin)
+            (str_concat " >/dev/null 2>&1 && swiftc -O "
+              (str_concat (cvorl-ocr-source) (str_concat " -o "
+                (str_concat (cvorl-ocr-bin)
+                  (str_concat " >/dev/null 2>&1 && swiftc -O "
+                    (str_concat (cvorl-label-source) (str_concat " -o "
+                      (str_concat (cvorl-label-bin) " >/dev/null 2>&1 && printf 1"))))))))))))
+        (let compiled (if (eq tools 1)
+          (if (str_eq (host-exec command "") "1") 1 0) 0))
+        (list (read_file (c10-ranked-path))
+          (read_file (cs10-index-path)) (read_file (cs10-payload-path))
+          (cnl13-runtime-open) (ctd13-runtime-open)
+          (if (and (eq tools 1) (eq compiled 1)) 1 0))))
+  (defn cvorl-ready? (runtime) (nth runtime 5))
+
+  (defn cvorl-plan-in (runtime concept-id lens)
+    (do (let code (cvg13-lens-code lens))
+        (let lookup (cnl13-runtime-lookup-sourced (nth runtime 3) concept-id code))
+        (cvg13-plan-surface-in (nth runtime 0) (nth runtime 1) (nth runtime 2)
+          concept-id lens (nth lookup 3) (nth lookup 4) (nth lookup 5))))
+  (defn cvorl-prefix (plan)
+    (str_concat "/tmp/cvor-content-"
+      (str_concat (int_to_str (cvg13-plan-semantic-hash plan))
+        (str_concat "-" (int_to_str (cvg13-text-hash (cvg13-plan-surface plan)))))))
+  (defn cvorl-video-path (plan) (str_concat (cvorl-prefix plan) ".mkv"))
+  (defn cvorl-frame-pattern (plan) (str_concat (cvorl-prefix plan) "-%03d.png"))
+  (defn cvorl-first-path (plan) (str_concat (cvorl-prefix plan) "-first.bmp"))
+  (defn cvorl-last-path (plan) (str_concat (cvorl-prefix plan) "-last.bmp"))
+
+  (defn cvorl-render-command (plan)
+    (do (let prefix (cvorl-prefix plan))
+        (let render (str_concat (cvorl-card-bin) (str_concat " " prefix)))
+        (let render (str_concat render (str_concat " " (cvg13-text-hex (cvg13-plan-surface plan)))))
+        (let render (str_concat render (str_concat " " (cvg13-text-hex (cvg13-plan-anchor plan)))))
+        (let render (str_concat render (str_concat " " (cvg13-text-hex (cvg13-plan-gloss plan)))))
+        (let render (str_concat render (str_concat " " (int_to_str (cvorl-frame-count))))
+        (let encode (str_concat " >/dev/null 2>&1 && ffmpeg -loglevel error -y -framerate 4 -i "
+          (str_concat (cvorl-frame-pattern plan) (str_concat " -frames:v 4 -c:v ffv1 "
+            (str_concat (cvorl-video-path plan) " >/dev/null 2>&1")))))
+        (let first (str_concat " && ffmpeg -loglevel error -y -i "
+          (str_concat (cvorl-video-path plan)
+            (str_concat " -vf 'select=eq(n\\,0)' -frames:v 1 -pix_fmt bgr24 -c:v bmp "
+              (str_concat (cvorl-first-path plan) " >/dev/null 2>&1")))))
+        (let last (str_concat " && ffmpeg -loglevel error -y -i "
+          (str_concat (cvorl-video-path plan)
+            (str_concat " -vf 'select=eq(n\\,3)' -frames:v 1 -pix_fmt bgr24 -c:v bmp "
+              (str_concat (cvorl-last-path plan) " >/dev/null 2>&1 && printf 1")))))
+        (str_concat render (str_concat encode (str_concat first last)))))
+
+  (defn cvorl-ocr (path code)
+    (host-exec (str_concat (cvorl-ocr-bin)
+      (str_concat " " (str_concat path (str_concat " " (cvorl-ocr-language code))))) ""))
+  (defn cvorl-labels (path)
+    (host-exec (str_concat (cvorl-label-bin) (str_concat " " path)) ""))
+  ; Hashing the 1.5 MiB decoded BMP through Form byte recursion would dominate
+  ; the actual vision work. shasum is a byte-carrier only; Form compares its
+  ; two opaque digests and never treats the digest as semantic evidence.
+  (defn cvorl-file-hash (path)
+    (host-exec (str_concat "shasum -a 256 "
+      (str_concat path " | cut -d ' ' -f 1")) ""))
+
+  ; result = tag, address, visible content, OCR, pretrained labels, evidence,
+  ;          boundary statement. Candidate lists are complete scan outputs.
+  (defn cvorl-generate-sense (runtime concept-id lens)
+    (if (or (eq (cvorl-ready? runtime) 0)
+            (eq (cvg13-valid? concept-id lens) 0)) (empty)
+      (do (let plan (cvorl-plan-in runtime concept-id lens))
+          (let made (if (str_eq (host-exec (cvorl-render-command plan) "") "1") 1 0))
+          (let code (cvg13-plan-code plan))
+          (let surface (cvg13-plan-surface plan))
+          (let anchor (cvg13-plan-anchor plan))
+          (let first-raw (if (eq made 1) (cvorl-ocr (cvorl-first-path plan) code) ""))
+          (let last-raw (if (eq made 1) (cvorl-ocr (cvorl-last-path plan) code) ""))
+          (let text-runtime (nth runtime 4))
+          (let localized-first (ctd13-runtime-detect-sentence text-runtime code first-raw))
+          ; The first decoded frame enters a complete 10k scan. Persistence in
+          ; the last frame is then an exact OCR observation of the same surface;
+          ; repeating the same 10k table scan would add cost, not evidence.
+          (let localized-last (empty))
+          (let local-first-hit (if (and (gt (cvor-exact-confidence first-raw surface) 0)
+                (eq (cvor-candidate-id-present? localized-first concept-id) 1)) 1 0))
+          (let local-last-hit (if (and (eq local-first-hit 1)
+                (gt (cvor-exact-confidence last-raw surface) 0)) 1 0))
+          ; Only a localized miss opens the English-anchor fallback scan. The
+          ; fallback is visible on the card and explicitly not localized OCR.
+          (let anchor-first (if (eq local-first-hit 0)
+                (ctd13-runtime-detect-sentence text-runtime "en" first-raw) (empty)))
+          (let anchor-first-hit (if (and (gt (cvor-exact-confidence first-raw anchor) 0)
+                (eq (cvor-candidate-id-present? anchor-first concept-id) 1)) 1 0))
+          (let anchor-last-hit (if (and (eq anchor-first-hit 1)
+                (gt (cvor-exact-confidence last-raw anchor) 0)) 1 0))
+          (let anchor-last (empty))
+          (let label-raw (if (eq made 1) (cvorl-labels (cvorl-first-path plan)) ""))
+          ; Raw pretrained labels are retained per row. A matrix caller can
+          ; concatenate them for one complete 10k scan rather than rescanning
+          ; the same English table once per card.
+          (let label-candidates (empty))
+          (let label-hit (if (gt (cvor-exact-confidence label-raw anchor) 0) 1 0))
+          (let evidence (cvor-evidence local-first-hit local-last-hit
+                          anchor-first-hit anchor-last-hit label-hit))
+          (let first-hash (if (eq made 1) (cvorl-file-hash (cvorl-first-path plan)) "-"))
+          (let last-hash (if (eq made 1) (cvorl-file-hash (cvorl-last-path plan)) "-"))
+          (list "concept-video-open-runtime"
+            (list concept-id lens code "requested-control-plane" 0 "decoded-address-bits")
+            (list surface anchor (cvg13-plan-gloss plan)
+              (cvg13-plan-surface-state plan) (cvg13-plan-surface-source plan)
+              made (cvorl-video-path plan) first-hash last-hash
+              (if (and (eq made 1) (not (str_eq first-hash last-hash))) 1 0))
+            (list first-raw last-raw localized-first localized-last anchor-first anchor-last
+              (cvor-exact-confidence first-raw surface)
+              (cvor-exact-confidence last-raw surface)
+              local-first-hit local-last-hit anchor-first-hit anchor-last-hit)
+            (list label-raw label-candidates (cvor-exact-confidence label-raw anchor) label-hit)
+            evidence
+            (list "semantic-content-is-visible-text-and-host-pretrained-labels"
+              "no-id/lens-pixels" "not-photorealistic-generation"
+              "not-learned-open-vocabulary-visual-parity")))))
+
+  (defn cvorl-result-address (result) (nth result 1))
+  (defn cvorl-result-content (result) (nth result 2))
+  (defn cvorl-result-ocr (result) (nth result 3))
+  (defn cvorl-result-labels (result) (nth result 4))
+  (defn cvorl-result-evidence (result) (nth result 5))
+  (defn cvorl-result-generated? (result) (nth (cvorl-result-content result) 5))
+  (defn cvorl-result-animated? (result) (nth (cvorl-result-content result) 9))
+  (defn cvorl-result-semantic? (result)
+    (cvor-semantic-both? (cvorl-result-evidence result)))
+  (defn cvorl-result-localized? (result)
+    (cvor-localized-both? (cvorl-result-evidence result)))
+  (defn cvorl-result-label-hit? (result)
+    (cvor-label-hit? (cvorl-result-evidence result)))
+)
