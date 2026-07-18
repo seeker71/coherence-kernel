@@ -39,8 +39,7 @@ pairs_all="$temp_dir/pairs-all.tsv"
 pairs_raw="$temp_dir/pairs-raw.tsv"
 pairs="$temp_dir/pairs.tsv"
 form_input="$temp_dir/form-input"
-band_source="$temp_dir/session-grounding-band.fk"
-cli_source="$temp_dir/session-grounding-cli.fk"
+contract_source="$temp_dir/session-grounding-contract.fk"
 raw_report="$temp_dir/report-raw"
 report="$temp_dir/report"
 timeout_marker="$temp_dir/cli-timeout"
@@ -239,6 +238,7 @@ build_source() {
         append_source "$destination" form/form-stdlib/str-byte-at.fk
         append_source "$destination" form/form-stdlib/base64.fk
     fi
+    append_source "$destination" form/form-stdlib/record-src-shim.fk
     for part in \
         form/form-stdlib/rag-embed.fk \
         form/form-stdlib/rag-retrieve.fk \
@@ -249,9 +249,13 @@ build_source() {
     done
 }
 
-build_source "$band_source" form/form-stdlib/tests/native-model-session-grounding-band.fk 0
-build_source "$cli_source" form/form-stdlib/native-model-session-grounding-cli.fk 1
-evaluation_contract_sha256=$(nm_sha256_file "$cli_source")
+# The source runner resolves this canonical entry's one-line prelude closure
+# through fresh .fkb dependencies.  Executing the old concatenated 66 KiB
+# bundle recompiled every dependency as one giant source unit and exhausted the
+# replay budget before a single Form evaluation could begin.  Retain that exact
+# closure only as a contract identity; never make it the runtime unit.
+build_source "$contract_source" form/form-stdlib/native-model-session-grounding-cli.fk 1
+evaluation_contract_sha256=$(nm_sha256_file "$contract_source")
 pool_digest=$( { printf '%s\n' "$salt"; cat "$admitted_candidates"; } |
     shasum -a 256 | awk '{print $1}')
 dataset_digest=$( { printf '%s\n' "$salt"; cat "$pairs"; } |
@@ -355,14 +359,15 @@ if [ "${NATIVE_MODEL_SESSION_GROUNDING_PREFLIGHT_ONLY:-0}" -eq 1 ]; then
     exit 0
 fi
 
-band=$($NM_FKWU --src "$band_source")
+band=$($NM_FKWU --src form/form-stdlib/tests/native-model-session-grounding-band.fk)
 if [ "$band" != 4095 ]; then
     printf 'session grounding band failed: expected 4095, observed %s\n' "$band" >&2
     exit 1
 fi
 
 replay_started=$(date +%s)
-$NM_FKWU --src "$cli_source" < "$form_input" > "$raw_report" &
+$NM_FKWU --src form/form-stdlib/native-model-session-grounding-cli.fk \
+    < "$form_input" > "$raw_report" &
 cli_pid=$!
 (
     sleep "$cli_budget"
