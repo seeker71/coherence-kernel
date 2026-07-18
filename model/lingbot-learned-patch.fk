@@ -1,0 +1,143 @@
+; lingbot-learned-patch.fk — authentic LingBot/DINOv2-L/14 patch projection.
+;
+; This is the first complete learned visual layer in the Form body. It loads
+; the released LingBot-Map checkpoint's exact Conv2d projection weight
+; [1024,3,14,14] and bias [1024], verifies the PyTorch ZIP records, applies the
+; upstream ImageNet normalization, and emits a full 1024-dimensional learned
+; token from every RGB pixel in a real 14x14 patch.
+;
+; It is deliberately not called DINO parity: the remaining special-token,
+; position, 24 transformer-block, camera, and DPT depth weights are not yet
+; executed here. This cell closes one entire released learned layer, not the
+; full graph.
+; witnessed: 2026-07-18 -> full 1024-channel projection over four upstream
+; real-life frames; exact checkpoint CRCs and scene-distinct numeric outputs
+; preludes: form/form-stdlib/core.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/form-fs.fk form/form-stdlib/file-byte-window.fk form/form-stdlib/crc32.fk model/lingbot-pytorch-checkpoint.fk model/lingbot-vision-input.fk
+
+(do
+  (defn llp-root () "model/fixtures/lingbot-map/")
+  (defn llp-directory-path ()
+    (str_concat (llp-root) "checkpoint-central-directory.bin"))
+  (defn llp-weight-record-path ()
+    (str_concat (llp-root) "checkpoint-data7-record.bin"))
+  (defn llp-bias-record-path ()
+    (str_concat (llp-root) "checkpoint-data8-record.bin"))
+
+  ; pack = (weight-entry weight-bytes bias-entry bias-bytes valid-bit).
+  (defn llp-load-weights ()
+    (do
+      (let directory
+        (fs-read-slice (llp-directory-path) 0 (fs-stat-size (llp-directory-path))))
+      (let weight-entry (lbpt-find-entry directory "checkpoint/data/7"))
+      (let bias-entry (lbpt-find-entry directory "checkpoint/data/8"))
+      (let weight
+        (lbpt-load-record-tensor (llp-weight-record-path) weight-entry))
+      (let bias
+        (lbpt-load-record-tensor (llp-bias-record-path) bias-entry))
+      (list weight-entry weight bias-entry bias
+        (if (and (lbpt-tensor-valid? weight weight-entry)
+                 (lbpt-tensor-valid? bias bias-entry)) 1 0))))
+
+  (defn llp-weight-entry (pack) (nth pack 0))
+  (defn llp-weight-bytes (pack) (nth pack 1))
+  (defn llp-bias-entry (pack) (nth pack 2))
+  (defn llp-bias-bytes (pack) (nth pack 3))
+  (defn llp-weights-valid? (pack) (nth pack 4))
+
+  (defn llp-patch-size () 14)
+  (defn llp-input-channels () 3)
+  (defn llp-output-channels () 1024)
+  (defn llp-channel-area () 196)
+  (defn llp-filter-size () 588)
+  (defn llp-weight-count () 602112)
+
+  (defn llp-mean (channel)
+    (if (eq channel 0) 0.485 (if (eq channel 1) 0.456 0.406)))
+  (defn llp-std (channel)
+    (if (eq channel 0) 0.229 (if (eq channel 1) 0.224 0.225)))
+  (defn llp-normalize-byte (byte channel)
+    (div (sub (div (mul byte 1.0) 255.0) (llp-mean channel))
+         (llp-std channel)))
+
+  ; PyTorch Conv2d contiguous layout: [out, in, y, x].
+  (defn llp-weight-index (out-channel in-channel y x)
+    (add (mul out-channel (llp-filter-size))
+      (add (mul in-channel (llp-channel-area))
+           (add (mul y (llp-patch-size)) x))))
+  (defn llp-weight-at (weight out-channel in-channel y x)
+    (lbpt-f32 weight
+      (mul 4 (llp-weight-index out-channel in-channel y x))))
+  (defn llp-bias-at (bias out-channel)
+    (lbpt-f32 bias (mul 4 out-channel)))
+
+  ; One output channel consumes every normalized RGB value in the 14x14 patch.
+  ; `i` walks the contiguous [in,y,x] filter order used by the checkpoint.
+  (defn llp-channel-go (bytes weight out-channel x0 y0 i acc)
+    (if (eq i (llp-filter-size)) acc
+      (do
+        (let in-channel (div i (llp-channel-area)))
+        (let pixel-offset (mod i (llp-channel-area)))
+        (let x (mod pixel-offset (llp-patch-size)))
+        (let y (div pixel-offset (llp-patch-size)))
+        (let rgb (lvi-rgb-at bytes (add x0 x) (add y0 y)))
+        (let input (llp-normalize-byte (nth rgb in-channel) in-channel))
+        (let coefficient (lbpt-f32 weight
+          (mul 4 (add (mul out-channel (llp-filter-size)) i))))
+        (llp-channel-go bytes weight out-channel x0 y0 (add i 1)
+          (add acc (mul coefficient input))))))
+  (defn llp-channel (bytes weight bias out-channel x0 y0)
+    (llp-channel-go bytes weight out-channel x0 y0 0
+      (llp-bias-at bias out-channel)))
+
+  (defn llp-token-go (bytes weight bias x0 y0 out-channel out-count acc)
+    (if (eq out-channel out-count) (reverse acc)
+      (llp-token-go bytes weight bias x0 y0 (add out-channel 1) out-count
+        (cons (llp-channel bytes weight bias out-channel x0 y0) acc))))
+  (defn llp-patch-token-count (image pack patch-x patch-y out-count)
+    (do
+      (let bytes (lvi-image-bytes image))
+      (let x0 (mul patch-x (llp-patch-size)))
+      (let y0 (mul patch-y (llp-patch-size)))
+      (if (and (le (add x0 (llp-patch-size)) (lvi-width bytes))
+               (le (add y0 (llp-patch-size)) (lvi-height bytes)))
+        (llp-token-go bytes (llp-weight-bytes pack) (llp-bias-bytes pack)
+          x0 y0 0 out-count (empty))
+        (empty))))
+  (defn llp-patch-token (image pack patch-x patch-y)
+    (llp-patch-token-count image pack patch-x patch-y (llp-output-channels)))
+
+  (defn llp-center-patch-x (image)
+    (div (div (lvi-width (lvi-image-bytes image)) (llp-patch-size)) 2))
+  (defn llp-center-patch-y (image)
+    (div (div (lvi-height (lvi-image-bytes image)) (llp-patch-size)) 2))
+  (defn llp-center-token (image pack)
+    (llp-patch-token image pack (llp-center-patch-x image) (llp-center-patch-y image)))
+
+  (defn llp-vector-sum-go (xs acc)
+    (if (eq (len xs) 0) acc
+      (llp-vector-sum-go (tail xs) (add acc (head xs)))))
+  (defn llp-vector-sum (xs) (llp-vector-sum-go xs 0.0))
+  (defn llp-vector-l1-go (a b acc)
+    (if (eq (len a) 0) acc
+      (llp-vector-l1-go (tail a) (tail b)
+        (add acc (abs (sub (head a) (head b)))))))
+  (defn llp-vector-l1 (a b) (llp-vector-l1-go a b 0.0))
+
+  ; A compact inspectable fingerprint of a full 1024-vector. It carries fixed
+  ; positions plus total sum; the complete token remains present in live rows.
+  (defn llp-token-fingerprint (token)
+    (list (nth token 0) (nth token 1) (nth token 2) (nth token 3)
+          (nth token 255) (nth token 511) (nth token 767) (nth token 1023)
+          (llp-vector-sum token)))
+
+  ; row = (source width height patch-x patch-y pixels-consumed full-token fingerprint).
+  (defn llp-infer-center (source image pack)
+    (do
+      (let px (llp-center-patch-x image))
+      (let py (llp-center-patch-y image))
+      (let token (llp-patch-token image pack px py))
+      (list source
+        (lvi-width (lvi-image-bytes image))
+        (lvi-height (lvi-image-bytes image))
+        px py (llp-channel-area) token (llp-token-fingerprint token))))
+)
