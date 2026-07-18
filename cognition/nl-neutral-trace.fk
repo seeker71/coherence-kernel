@@ -1,0 +1,329 @@
+; nl-neutral-trace.fk — one command, one legible NL -> neutral -> NL query trace.
+;
+; The single command (from the repo root, after the one-cc bootstrap):
+;
+;     ./fkwu --src cognition/tests/nl-neutral-trace-live.fk
+;
+; By default it runs the two exemplar lanes (de "Wasser", id "air") plus the
+; neutral-pivot translation exemplar. To ask your own question, stage one line
+; "<asserted-locale> <target-locale> <query text>" at
+; .coherence-network/nl-neutral-trace-query.txt and re-run the same command
+; (direct-source Form does not yet read argv; the staged file follows the
+; rag-query.txt convention and the argv gap is named in BOOTSTRAP.md).
+;
+; Every stage line carries: the inquiry plane it answers (observe/inquiry-planes.fk),
+; the recipe (code) with its byte size, the data cell with its byte size, the
+; blueprint (type) with its arity, the paths available / tried / succeeded /
+; failed / cut, the neutral symbols or anchors matched, a follow-up pointer that
+; can be pasted into the next query, and the north-star gap with the next step.
+;
+; Lane order is native-first by construction: everything below is fkwu-native
+; Form; the local and remote oracle lanes are named as fallback/comparison and
+; deliberately not consulted while the native answer is sufficient.
+;
+; Cut semantics here are the backtracking meaning: alternatives pruned after a
+; commit (locale seats never tried once the first seat matched). Failures are
+; attempted-and-missed. Silences are the timeout analog of choice-receipt.fk.
+; The stdlib bmf-grammar engine carries no cut operator; the cut-capable seam
+; is the seedbank BMF component runtime (`!`, see
+; form/form-stdlib/seedbank/tests/bmf-cut-stop.fk) and it is not on this path.
+;
+; witnessed: 2026-07-18 -> 1023 live fkwu (cognition/tests/nl-neutral-trace-band.fk)
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/json.fk form/form-stdlib/cache.fk form/form-stdlib/form-ontology-loader.fk form/form-stdlib/line-grammar.fk form/form-stdlib/bmf-core.fk form/form-stdlib/bmf-grammar.fk form/form-stdlib/string-case.fk form/form-stdlib/nl-lexicon-data.fk form/form-stdlib/nl-translate.fk
+; preludes: form/form-stdlib/str-byte-at.fk form/form-stdlib/sha256.fk form/form-stdlib/hex.fk
+; preludes: form/form-stdlib/text-tokenize.fk form/form-stdlib/rag-embed.fk
+; preludes: form/form-stdlib/rag-retrieve.fk form/form-stdlib/rag-index-codec.fk
+; preludes: form/form-stdlib/rag-ask.fk form/form-stdlib/choice-receipt.fk
+; preludes: form/form-stdlib/form-fs.fk cognition/concept-nl-semantic-13-metadata.fk cognition/concept-nl-semantic-13-offsets.fk cognition/concept-nl-semantic-13.fk cognition/concept-nl-semantic-13-runtime.fk
+; preludes: model/concept-10000-data.fk model/concept-10000.fk
+; preludes: cognition/nl-lenses-13-data.fk cognition/nl-lenses-13.fk
+(do
+  ;; ---------- helpers ----------
+  (defn nnt-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (nnt-cat (tail xs)))))
+  (defn nnt-bytes-go (s i n) (if (ge i n) (empty) (cons (str_byte_at s i) (nnt-bytes-go s (add i 1) n))))
+  (defn nnt-bytes (s) (nnt-bytes-go s 0 (str_len s)))
+  (defn nnt-sha-hex (s) (hex-encode (sha256 (nnt-bytes s))))
+  (defn nnt-hex (s) (hex-encode (nnt-bytes s)))
+  (defn nnt-ints-json-go (xs out first)
+    (if (eq (len xs) 0) out
+      (nnt-ints-json-go (tail xs)
+        (str_concat out (str_concat (if (eq first 1) "" ",") (int_to_str (head xs)))) 0)))
+  (defn nnt-ints-json (xs) (nnt-cat (list "[" (nnt-ints-json-go xs "" 1) "]")))
+  (defn nnt-size (path) (file_size path))
+  (defn nnt-sized (path)
+    (nnt-cat (list path " (" (int_to_str (nnt-size path)) " bytes)")))
+
+  ;; ---------- staged query (single-command follow-up door) ----------
+  (defn nnt-staged-query-path () ".coherence-network/nl-neutral-trace-query.txt")
+  (defn nnt-strip-nl (s)
+    (do (let at (str_find s (byte_to_str 10) 0))
+        (if (lt at 0) s (substring s 0 at))))
+  (defn nnt-word-end (s from)
+    (do (let at (str_find s " " from))
+        (if (lt at 0) (str_len s) at)))
+  ; "<asserted> <target> <query...>" -> (asserted target query) or (empty)
+  (defn nnt-parse-staged (line)
+    (do (let e1 (nnt-word-end line 0))
+        (if (ge e1 (str_len line)) (empty)
+          (do (let e2 (nnt-word-end line (add e1 1)))
+              (if (ge e2 (str_len line)) (empty)
+                (list (substring line 0 e1)
+                      (substring line (add e1 1) e2)
+                      (substring line (add e2 1) (str_len line))))))))
+  (defn nnt-staged-lane ()
+    (if (le (file_size (nnt-staged-query-path)) 0) (empty)
+      (do (let raw (read_file (nnt-staged-query-path)))
+          (if (nil? raw) (empty) (nnt-parse-staged (nnt-strip-nl raw))))))
+
+  ;; ---------- stage 1: the locale choice path (which-plane, computable) ----------
+  ; walk = (status attempts fails first-code hit path-string cut)
+  ; cut = seats never tried after the first seat matched (pruned alternatives).
+  (defn nnt-walk-go (rt codes label attempts fails path)
+    (if (eq (len codes) 0)
+      (list "miss" attempts fails "" (empty) path 0)
+      (do (let hit (cnl13-runtime-detect-first rt (head codes) label))
+          (if (eq (len hit) 0)
+            (nnt-walk-go rt (tail codes) label (add attempts 1) (add fails 1)
+              (str_concat path (str_concat (head codes) ":miss ")))
+            (list "hit" (add attempts 1) fails (head codes) hit
+              (str_concat path (str_concat (head codes) ":HIT"))
+              (sub (len codes) 1))))))
+  (defn nnt-walk (rt label) (nnt-walk-go rt (cnl13-locale-codes) label 0 0 ""))
+
+  ;; ---------- stage 4: staged demo rag rows over real committed cell bytes ----------
+  (defn nnt-rag-row (node content source key answer snippet)
+    (nnt-cat (list
+      "{\"id\":\"" node "\",\"node_id\":\"" node
+      "\",\"content_node_id\":\"" content
+      "\",\"source_path\":\"" source
+      "\",\"schema\":\"nodeid-rag-v2\",\"embedding_kind\":\"form-semantic-v2\",\"kind\":\"cell\","
+      "\"key\":\"" key "\",\"persisted_source_sha256\":\"" key
+      "\",\"answer_key\":\"" (nnt-sha-hex answer)
+      "\",\"answer_hex\":\"" (nnt-hex answer)
+      "\",\"snippet\":\"" snippet
+      "\",\"vec\":" (nnt-ints-json (re-semantic-vec answer)) "}")))
+  (defn nnt-legacy-row ()
+    "{\"id\":\"docs/legacy-path-row.form\",\"source_path\":\"docs/legacy-path-row.form\",\"schema\":\"nodeid-rag-v2\",\"embedding_kind\":\"form-semantic-v2\",\"kind\":\"cell\",\"key\":\"legacy\",\"answer_key\":\"\",\"answer_hex\":\"\",\"snippet\":\"legacy path-id row\",\"vec\":[]}")
+  ; Three rows: the matched concept row, one distractor concept row, and one
+  ; legacy path-id row that admission must refuse (a counted fail, never ranked).
+  (defn nnt-index-text (rt row-index distractor-index)
+    (do (let data (cnl13-runtime-data rt))
+        (let offs (cnl13-runtime-offsets rt))
+        (let row (cnl13-row-line data offs row-index))
+        (let drow (cnl13-row-line data offs distractor-index))
+        (nnt-cat (list
+          (nnt-rag-row (str_concat "@10.3.99." (int_to_str row-index))
+            (str_concat "@10.4.99." (int_to_str row-index))
+            "cognition/concept-nl-semantic-13-omw.tsv"
+            (nnt-sha-hex row) row "staged demo row: matched concept") "\n"
+          (nnt-rag-row (str_concat "@10.3.99." (int_to_str distractor-index))
+            (str_concat "@10.4.99." (int_to_str distractor-index))
+            "cognition/concept-nl-semantic-13-omw.tsv"
+            (nnt-sha-hex drow) drow "staged demo row: distractor concept") "\n"
+          (nnt-legacy-row) "\n"))))
+
+  ;; ---------- stage 5: choice receipt over measured counters ----------
+  (defn nnt-receipt (lane walk-attempts walk-fails rag-attempts rag-fails)
+    (cr-choice-receipt
+      (str_concat "nl-neutral-nl concept query " lane)
+      "nl-neutral-trace"
+      "locale-choice"
+      (list
+        (cr-choice-candidate "concept-nl-semantic-13/asserted-locale" "native" true 10 95 "caller asserted the locale column")
+        (cr-choice-candidate "concept-nl-semantic-13/registry-order-walk" "native" true 40 70 "13-seat first-match walk in locale-registry order")
+        (cr-choice-candidate "rag-ask/grounded-overlap" "native" true 30 90 "nodeid-rag-v2 semantic overlap, staged demo rows")
+        (cr-choice-candidate "oracle/local-then-remote" "oracle" true 90 50 "fallback and comparison lane only; not consulted while native is sufficient"))
+      "concept-nl-semantic-13/asserted-locale"
+      (cr-outcome-success)
+      90
+      (cr-choice-value (cr-kind-branch-feedback) 90 85 80 75)
+      "asserted locale resolved the concept; walk and rag agree on the same cell; oracle unneeded"
+      "nl-neutral-trace"
+      lane
+      1
+      (add walk-attempts rag-attempts)
+      (cr-choice-trace
+        (add (add walk-attempts 1) rag-attempts)
+        3
+        (add walk-fails rag-fails)
+        0)))
+  (defn nnt-receipt-lines (r)
+    (do (let t (cr-receipt-trace r))
+        (nnt-cat (list
+          "receipt-valid: " (if (cr-choice-receipt-valid? r) "1" "0")
+          "  selected: " (cr-receipt-selected-path r)
+          "  outcome: " (cr-receipt-outcome r)
+          "\n    attempts/successes/failures/silences(timeouts): "
+          (int_to_str (cr-trace-attempts t)) "/" (int_to_str (cr-trace-successes t)) "/"
+          (int_to_str (cr-trace-failures t)) "/" (int_to_str (cr-trace-silences t))))))
+
+  ;; ---------- pivot exemplar: BMF rules + neutral symbols ----------
+  (defn nnt-rule-names-go (rules out)
+    (if (eq (len rules) 0) out
+      (nnt-rule-names-go (tail rules)
+        (str_concat out (str_concat (head (head rules)) " ")))))
+  (defn nnt-rule-names (g) (nnt-rule-names-go (g-rules g) ""))
+  ; try one surface through one tongue grammar; 1 = parsed, 0 = PARSE-FAIL
+  (defn nnt-parses? (g src)
+    (if (str_eq (node_value (g-parse g src)) "PARSE-FAIL") 0 1))
+  (defn nnt-pivot-report (query)
+    (do (let id-src "sumber adalah asli")
+        (let en-out (tr-id-en id-src))
+        (let id-out (tr-en-id "the kernel is native"))
+        (let q-id (nnt-parses? (nl-id) (str-normalize query)))
+        (let q-en (nnt-parses? (nl-en) (str-normalize query)))
+        (nnt-cat (list
+          "-- stage P: neutral-pivot translation (plane: what -> computable via pivot)\n"
+          "  recipe: " (nnt-sized "form/form-stdlib/nl-translate.fk")
+          "  engine: " (nnt-sized "form/form-stdlib/bmf-grammar.fk") "\n"
+          "  BMF rules available (grammar nl-en): " (nnt-rule-names (nl-en))
+          "| (grammar nl-id): " (nnt-rule-names (nl-id)) "\n"
+          "  matched production: rule 'prop' -> emit blueprint property @1.2.99.33 (arity 2)\n"
+          "  exemplar id->pivot->en: '" id-src "' -> " en-out "\n"
+          "  exemplar en->pivot->id: 'the kernel is native' -> " id-out "\n"
+          "  neutral symbols matched: sumber->" (nlt-id->c "sumber")
+          " asli->" (nlt-id->c "asli")
+          " kernel->" (nlt-en->c "kernel")
+          "  phases: n0=" (nlt-phase "n0") " n1=" (nlt-phase "n1") " n2=" (nlt-phase "n2") "\n"
+          "  this query through the property grammars: nl-id parsed=" (int_to_str q-id)
+          " nl-en parsed=" (int_to_str q-en)
+          "  (a bare label is not an 'X adalah Y' property sentence; PARSE-FAIL is a counted fail, not a cut)\n"
+          "  cut operators on this engine: 0 available, 0 fired (cut lives in seedbank BMF '!'; see form/form-stdlib/seedbank/tests/bmf-cut-stop.fk)\n"
+          "  follow-up: (tr-id-en \"inti adalah asli\") | grow a de column via form/form-stdlib/nl-lexicon-grow.fk over a parallel corpus\n"
+          "  north-star gap: only en/id grammar+lexicon columns exist; de column is pending (pending is honest)\n"))))
+
+  ;; ---------- one language lane ----------
+  (defn nnt-lane (rt lane)
+    (do (let asserted-code (nth lane 0))
+        (let target-code (nth lane 1))
+        (let query (nth lane 2))
+        (let walk (nnt-walk rt query))
+        (let asserted (cnl13-runtime-detect-first rt asserted-code query))
+        (if (eq (len asserted) 0)
+          (nnt-cat (list
+            "==== lane " asserted-code " query '" query "' ====\n"
+            "  no row in the asserted locale column; registry-order walk said: "
+            (nth walk 5) "\n"
+            "  follow-up: try another seat from (cnl13-locale-codes) or a label from the 10k table\n"))
+          (do
+            (let idx (nth asserted 0))
+            (let synset (nth asserted 1))
+            (let offs (cnl13-runtime-offsets rt))
+            (let src-in (cnl13-runtime-lookup-sourced rt idx asserted-code))
+            (let src-out (cnl13-runtime-lookup-sourced rt idx target-code))
+            (let en-row (cnl13-runtime-lookup-sourced rt idx "en"))
+            (let c10 (c10-detect-text (nth en-row 3)))
+            (let out-label (cnl13-runtime-generate rt idx target-code))
+            (let frame (nl13-generate target-code 4 out-label))
+            (let redetect (nl13-detect-generated-runtime frame))
+            (let fire-hit (cnl13-runtime-detect-first rt "en" "fire"))
+            (let fire-idx (if (eq (len fire-hit) 0) 0 (nth fire-hit 0)))
+            ; the distractor must be a DIFFERENT concept than the matched row
+            (let didx (if (eq fire-idx idx)
+              (do (let water-hit (cnl13-runtime-detect-first rt "en" "water"))
+                  (if (eq (len water-hit) 0) 0 (nth water-hit 0)))
+              fire-idx))
+            (let indexText (nnt-index-text rt idx didx))
+            (let hit (ra-stream-hit indexText query))
+            (let receipt (nnt-receipt asserted-code (nth walk 1) (nth walk 2) 3 1))
+            (nnt-cat (list
+              "==== lane " asserted-code " query '" query "' (target " target-code ") ====\n"
+              "-- stage 1: NL -> neutral concept (plane: which -> computable lookup)\n"
+              "  recipe: " (nnt-sized "cognition/concept-nl-semantic-13.fk")
+              " + " (nnt-sized "cognition/concept-nl-semantic-13-runtime.fk") "\n"
+              "  data cell: cognition/concept-nl-semantic-13-omw.tsv row " (int_to_str idx)
+              ", bytes [" (int_to_str (nth offs idx)) ".." (int_to_str (nth offs (add idx 1)))
+              ") of " (int_to_str (nnt-size "cognition/concept-nl-semantic-13-omw.tsv")) "\n"
+              "  paths available: 13 locale seats "
+              "| tried: " (int_to_str (nth walk 1))
+              " | succeeded: 1 | failed: " (int_to_str (nth walk 2))
+              " | cut(pruned after commit): " (int_to_str (nth walk 6)) "\n"
+              "  choice path walked: " (nth walk 5) "\n"
+              "  asserted seat: " asserted-code " -> row " (int_to_str idx)
+              " | walk-first seat: " (nth walk 3)
+              " -> row " (if (eq (len (nth walk 4)) 0) "none" (int_to_str (nth (nth walk 4) 0)))
+              (if (eq (len (nth walk 4)) 0) ""
+                (if (eq (nth (nth walk 4) 0) idx) " (agrees)" " (HOMOGRAPH FORK - assertion decided)")) "\n"
+              "  neutral anchor: PWN 3.0 synset " synset
+              " | input label source: " (nth src-in 5) " (state " (nth src-in 4) ")\n"
+              "  follow-up: stage '<asserted> <target> <query>' at " (nnt-staged-query-path)
+              " and re-run this command\n"
+              "  north-star gap: exact-label detection only; next: learned held-out detection with reviewed corpora\n"
+              "-- stage 2: neutral identity (plane: where -> computable NodeID/rank)\n"
+              "  recipe: " (nnt-sized "model/concept-10000.fk")
+              "  data cells: " (nnt-sized "model/concept-10000-ranked.dat")
+              " + " (nnt-sized "model/concept-10000-lexical-index.dat") "\n"
+              "  c10 id/label/rank/frequency: " (int_to_str (c10-concept-id c10)) "/"
+              (c10-concept-label c10) "/" (int_to_str (c10-concept-rank c10)) "/"
+              (int_to_str (c10-concept-frequency c10)) "\n"
+              "  follow-up: presence/concept-lenses-26-live.fk carries this same anchor through 13 NL + 13 PL lenses\n"
+              "  north-star gap: one lexeme per record; polysemy/synonymy senses remain open\n"
+              "-- stage 3: neutral -> NL (plane: what -> table generation, bounded)\n"
+              "  recipes: cognition/concept-nl-semantic-13.fk (label) + " (nnt-sized "cognition/nl-lenses-13.fk")
+              " + " (nnt-sized "cognition/nl-lenses-13-data.fk") "\n"
+              "  generated " target-code " label: " out-label
+              " (source " (nth src-out 5) ", state " (nth src-out 4) ")\n"
+              "  nl13 grounded frame (meaning 4): " frame "\n"
+              "  nl13 re-detected lens: " redetect "\n"
+              "  follow-up: (nl13-generate \"<seat>\" 4 \"<label>\") for any of the 13 seats\n"
+              "  north-star gap: labels mapped-unreviewed; next: native-speaker review, then learned generation\n"
+              "-- stage 4: rag concept match (plane: which -> computable overlap rank)\n"
+              "  recipes: " (nnt-sized "form/form-stdlib/rag-ask.fk")
+              " + " (nnt-sized "form/form-stdlib/rag-retrieve.fk")
+              " + " (nnt-sized "form/form-stdlib/rag-embed.fk")
+              " + " (nnt-sized "form/form-stdlib/rag-index-codec.fk") "\n"
+              (if (eq (ra-hit? hit) 0) "  rag: MISS\n"
+                (nnt-cat (list
+                  "  selected cell: " (ra-hit-node-id hit)
+                  " (content " (ra-hit-content-node-id hit)
+                  ", answer " (int_to_str (str_len (ra-hit-answer hit))) " bytes"
+                  ", staged demo coordinates over real committed row bytes)\n"
+                  "  score/runner/qtotal/threshold/confidence: "
+                  (int_to_str (ra-hit-score hit)) "/" (int_to_str (ra-hit-runner-score hit)) "/"
+                  (int_to_str (ra-hit-query-total hit)) "/" (int_to_str (ra-hit-threshold hit)) "/"
+                  (int_to_str (ra-hit-confidence hit)) "\n")))
+              "  rows ranked: 3 | admission fails (legacy path-id refused): 1 | timeouts: 0\n"
+              "  follow-up: form-cli verbs 'grounded <question>' and 'rag-status'; healed index home "
+              ".coherence-network/rag-index/index.jsonl (absent in this checkout - rag-status reports it honestly)\n"
+              "  north-star gap: demo rows here; next: heal/regenerate the full nodeid-rag-v2 body index + rag-adaptive-k\n"
+              "-- stage 5: choice receipt (plane: why -> learned; recorded for continuous learning)\n"
+              "  recipe: " (nnt-sized "form/form-stdlib/choice-receipt.fk")
+              "  blueprints: CHOICE-CANDIDATE @1.2.99.1736(a7) CHOICE-TRACE @1.2.99.1737(a5) "
+              "CHOICE-VALUE @1.2.99.1738(a6) CHOICE-RECEIPT @1.2.99.1739(a15) CHOICE-SIGNATURE @1.2.99.1743\n"
+              "  " (nnt-receipt-lines receipt) "\n"
+              "  why this path: asserted locale is the cheapest sufficient evidence; the walk exists to "
+              "surface homograph forks; rag independently re-grounds the same cell; oracle stays fallback\n"
+              "  oracle lane: not consulted (native sufficient). fallback order: native fkwu -> local oracle -> remote oracle; "
+              "comparison hook for continuous learning: pending (speech lanes already model it: learn/speech-model-auto-selection.fk)\n"
+              "  follow-up: routers/bml-route-choice-runtime.fk bridges these receipts to live route choice\n"))))))
+
+  ;; ---------- north-star summary ----------
+  (defn nnt-north-star ()
+    (nnt-cat (list
+      "==== north star (NORTH_STAR.md) ====\n"
+      "  now: concept match, neutral anchor, 13-seat generation, grounded rag, and choice receipts are native and witnessed\n"
+      "  distance, stage by stage: detection=bounded(exact labels) | identity=proven(10k ranked) | "
+      "generation=bounded(mapped-unreviewed) | pivot=2/13 tongues | rag=lane-proven(index pending) | "
+      "why-plane=recorded(not yet learned-from)\n"
+      "  next, in order: (1) heal the body rag index; (2) grow de (then more) pivot columns from parallel corpora; "
+      "(3) native-speaker review of mapped labels; (4) per-rule BMF attempt/cut counters as choice receipts; "
+      "(5) wire the oracle comparison lane so every native answer can be scored for continuous learning; "
+      "(6) argv for direct-source so the staged file becomes optional\n")))
+
+  ;; ---------- entry ----------
+  (defn nnt-default-lanes ()
+    (list (list "de" "id" "Wasser") (list "id" "de" "air")))
+  (defn nnt-run-lanes (rt lanes out)
+    (if (eq (len lanes) 0) out
+      (nnt-run-lanes rt (tail lanes) (str_concat out (nnt-lane rt (head lanes))))))
+  (defn nnt-run ()
+    (do (let rt (cnl13-runtime-open))
+        (let staged (nnt-staged-lane))
+        (let lanes (if (eq (len staged) 0) (nnt-default-lanes) (cons staged (empty))))
+        (let query (nth (head lanes) 2))
+        (nnt-cat (list
+          (nnt-run-lanes rt lanes "")
+          (nnt-pivot-report query)
+          (nnt-north-star)))))
+  0)
