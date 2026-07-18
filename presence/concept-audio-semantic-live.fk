@@ -1,0 +1,63 @@
+; concept-audio-semantic-live.fk -- held-out spoken concept recognition.
+;
+; Samantha, Daniel, and Karen teach each word; Moira is held out. macOS `say`
+; and ffmpeg only produce canonical speech WAVs. All features and decisions are
+; recomputed by Form from PCM. Paths stay in /tmp; no voice asset is committed.
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/trig.fk observe/wav-sense.fk observe/spectrum.fk model/concept-multimodal-codec.fk model/concept-audio-semantic.fk
+
+(do
+  (defn casl-voices () (list "Samantha" "Daniel" "Karen" "Moira"))
+  (defn casl-words () (list "water" "world" "camera"))
+  (defn casl-concept-id (word)
+    (if (str_eq word "water") 377 (if (str_eq word "world") 227 959)))
+  (defn casl-stem (voice word)
+    (str_concat "/tmp/csa-" (str_concat voice (str_concat "-" word))))
+  (defn casl-aiff (voice word) (str_concat (casl-stem voice word) ".aiff"))
+  (defn casl-wav (voice word) (str_concat (casl-stem voice word) ".wav"))
+  (defn casl-generate-command (voice word)
+    (str_concat "say -v " (str_concat (cmm-q voice)
+      (str_concat " -r 150 -o " (str_concat (cmm-q (casl-aiff voice word))
+        (str_concat " " (str_concat (cmm-q word)
+          (str_concat " && ffmpeg -loglevel error -y -i "
+            (str_concat (cmm-q (casl-aiff voice word))
+              (str_concat " -af apad=pad_dur=1.5 -t 1.5 -ar 16000 -ac 1 -c:a pcm_s16le "
+                (str_concat (cmm-q (casl-wav voice word)) " && printf 1")))))))))))
+  (defn casl-generate-words (voice words passed)
+    (if (eq (len words) 0) passed
+      (if (str_eq (host-exec (casl-generate-command voice (head words)) "") "1")
+        (casl-generate-words voice (tail words) (add passed 1)) passed)))
+  (defn casl-generate-all (voices passed)
+    (if (eq (len voices) 0) passed
+      (casl-generate-all (tail voices)
+        (add passed (casl-generate-words (head voices) (casl-words) 0)))))
+  (defn casl-prototype (word)
+    (cas-prototype3 (casl-concept-id word) word
+      (casl-wav "Samantha" word) (casl-wav "Daniel" word) (casl-wav "Karen" word)))
+  (defn casl-prototypes ()
+    (list (casl-prototype "water") (casl-prototype "world") (casl-prototype "camera")))
+  (defn casl-test-go (words prototypes correct rows)
+    (if (eq (len words) 0) (list correct (reverse rows))
+      (do (let word (head words))
+          (let result (cas-detect-file (casl-wav "Moira" word) prototypes))
+          (casl-test-go (tail words) prototypes
+            (if (eq (nth result 0) (casl-concept-id word)) (add correct 1) correct)
+            (cons (list word (casl-concept-id word) result) rows)))))
+  (defn concept-audio-semantic-live-run ()
+    (do (let available
+          (if (str_eq (host-exec
+                "command -v say >/dev/null && command -v ffmpeg >/dev/null && printf 1" "") "1") 1 0))
+        (let generated (if (eq available 1) (casl-generate-all (casl-voices) 0) 0))
+        (let prototypes (if (eq generated 12) (casl-prototypes) (empty)))
+        (let tests (if (eq (len prototypes) 3)
+                     (casl-test-go (casl-words) prototypes 0 (empty))
+                     (list 0 (empty))))
+        (list "concept-audio-semantic-live"
+              (list "carrier" available generated "macos-say+ffmpeg")
+              (list "training" 3 "voices" 3 "concepts" 9 "wav")
+              (list "held-out" "Moira" (nth tests 0) 3 (nth tests 1))
+              (list "feature-width" (if (eq (len prototypes) 0) 0
+                                      (len (cas-prototype-features (head prototypes))))
+                    "native-dsp" 1 "open-asr-parity" 0))))
+
+  (concept-audio-semantic-live-run))
