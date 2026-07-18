@@ -5,9 +5,10 @@
 > grammar (`form-stdlib/grammars/python-bmf.fk`, `typescript-bmf.fk`, etc.) —
 > not through hand-written TypeScript parsers that know what Python or
 > TypeScript look like. The teaching:
-> [`lc-the-kernel-knows-itself`](../../../docs/vision-kb/concepts/lc-the-kernel-knows-itself.md).
+> The kernel-knows-itself lineage is carried here as executable seed material,
+> without depending on a consumer repository's documentation tree.
 > The compost sequence:
-> [`kernels/BOOTSTRAP_COMPOST_MANIFEST.md`](../../../kernels/BOOTSTRAP_COMPOST_MANIFEST.md).
+> `kernels/BOOTSTRAP_COMPOST_MANIFEST.md`.
 
 ## What lives here
 
@@ -35,12 +36,12 @@ These files **work**. The three-way parity gate is real. But every Python or TS 
 
 - **Grammars exist** as `.fk` files: `form/form-stdlib/grammars/python-bmf.fk` (3000 lines), `typescript-bmf.fk`, `rust-bmf.fk`, `go-bmf.fk`, etc.
 - **First Form-native parse landed** ([#2071](https://github.com/seeker71/Coherence-Network/pull/2071)) — four Python arithmetic shapes parse through `python-bmf.fk` driven by the kernel; same recipe NodeID across Rust, TS, Go sibling kernels.
-- **The remaining gap** is named in [`kernels/PYTHON_BMF_CONTRACT.md`](../../../kernels/PYTHON_BMF_CONTRACT.md) — five primitives (G1–G5) the kernel needs before `python-bmf.fk` can drive every Python feature this directory's adapter currently covers.
+- **The remaining gap** is named in `kernels/PYTHON_BMF_CONTRACT.md` — five primitives (G1–G5) the kernel needs before `python-bmf.fk` can drive every Python feature this directory's adapter currently covers.
 - **The Python parity gate is now Form-native only** (`python-adapter/scripts/parity_suite.sh`) — CPython reference, `kernel-bmf-compile` + Rust execution, and `kernel-bmf-run` all compare the same final value.
 
 ## When this directory composts
 
-Per [`BOOTSTRAP_COMPOST_MANIFEST.md`](../../../kernels/BOOTSTRAP_COMPOST_MANIFEST.md) Phase A:
+Per `BOOTSTRAP_COMPOST_MANIFEST.md` Phase A:
 
 1. Each parity-suite demo proves three-way agreement through the Form-native path
 2. The manifest row for each adapter moves `tissue → PROVEN → COMPOST READY → RELEASED`

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Run the Form-native emitter to produce kernels/python_bmf/objects.py.
+# Run the Form-native emitter to produce a cached native-Python module.
 #
-# Phase 1 pipeline (specs/form-binary-to-native-python-emitter.md):
+# Phase 1 pipeline (form/python_bmf/CONTRACT.md):
 #
 #   form-ontology.json
 #     └─ build_form_compiler_artifact.sh --categories
@@ -11,7 +11,7 @@
 #                 └─ read_form_binary inside python-native.fk
 #                    └─ pn-cat-table-from-artifact (lens)
 #                       └─ pn-emit-objects-module (emitter)
-#                          └─ write_file_text → kernels/python_bmf/objects.py
+#                          └─ write_file_text → form/.cache/emit_native_python/python_bmf/objects.py
 #
 # No Form literal of the category table lives in the emitter — the
 # lattice IS the source of truth, the .fkb is its serialized projection.
@@ -31,7 +31,8 @@ if [[ ! -x "$GO_BIN" ]]; then
 fi
 
 WORK_DIR="$REPO_ROOT/form/.cache/emit_native_python"
-mkdir -p "$WORK_DIR" kernels/python_bmf
+PYTHON_BMF_OUT="$WORK_DIR/python_bmf"
+mkdir -p "$PYTHON_BMF_OUT"
 
 # Step 0: source-compile core.fk (same shape validate.sh uses) so
 # the emitter has nil?/map/foldl/etc. available at walk time.
@@ -60,8 +61,8 @@ echo "Step 2: running Form-native emitter (kernel: form-kernel-go)..." >&2
 
 echo "" >&2
 echo "Emitted:" >&2
-ls -la kernels/python_bmf/objects.py 2>&1 | tail -1
+ls -la "$PYTHON_BMF_OUT/objects.py" 2>&1 | tail -1
 echo "" >&2
 echo "Step 3: py_compile sanity check..." >&2
-python3 -m py_compile kernels/python_bmf/objects.py
+python3 -m py_compile "$PYTHON_BMF_OUT/objects.py"
 echo "  ok — objects.py compiles" >&2

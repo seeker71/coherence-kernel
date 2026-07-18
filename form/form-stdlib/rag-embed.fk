@@ -12,9 +12,14 @@
 ; counts buckets into a fixed-width histogram. Same text => same vector on every
 ; kernel — a content-addressed substrate cell, needing no model, no network, no host-io.
 ;
-; Honest floor: this is LEXICAL similarity (token overlap), not neural semantics —
-; "cat" and "feline" land in unrelated buckets. It is sovereign and proven; the
-; neural embedder stays the optional higher-semantic-quality bridge above it.
+; The base re-vec remains a literal lexical fingerprint. re-semantic-vec is the
+; grounded-ask representation: a sparse list of exact dual-hash feature codes.
+; Stop words vanish; a known term maps ONLY to its canonical authored concept;
+; an unknown term maps to one conservative stem/word; repeated features dedupe.
+; Each feature emits two independently hashed codes in non-overlapping domains,
+; making a full semantic match require both hashes instead of a collision-prone
+; dense 64-bin bucket. This is still an authored semantic lexicon, not open-world
+; language understanding; unknown synonyms remain apart.
 ; (The polynomial hash is inline by design; adler32.fk could carry it as a future
 ; lift, but it is BML and would complicate this four-way prelude chain.)
 ;
@@ -47,6 +52,16 @@
                 (mod (add (mul h 31) (str_byte_at w i)) (re-prime)))))
     (defn re-hash (w) (re-hash-fold w 0 (str_len w) 0))
 
+    ; Independent second hash domain for semantic-v2. The offset is exactly the
+    ; size of the first domain, so no first-hash code can equal a second-hash code.
+    (defn re-prime-131 () 1000033)
+    (defn re-hash-131-fold (w i n h)
+        (if (ge i n) h
+            (re-hash-131-fold w (add i 1) n
+                (mod (add (mul h 131) (str_byte_at w i)) (re-prime-131)))))
+    (defn re-hash-131 (w) (re-hash-131-fold w 0 (str_len w) 0))
+    (defn re-second-domain-offset () (re-prime))
+
     ; --- which dim-bucket a word lands in. ---
     (defn re-bucket (word dim) (mod (re-hash word) dim))
 
@@ -54,6 +69,39 @@
     (defn re-rev-into (acc rest)
         (if (eq (len acc) 0) rest
             (re-rev-into (tail acc) (cons (head acc) rest))))
+
+    ; --- linear UTF-8 byte tokenizer. ---
+    ; Keep the source string in the host pool and carry only the current word
+    ; plus a reverse word list through Form.  The former re-norm + re-split
+    ; path rebuilt the whole normalized prefix and then repeatedly snoc'd the
+    ; whole word list, making document embedding quadratic in source length.
+    ; Scan with str_byte_at directly.  The generic string_byte_fold carrier can
+    ; retain a host byte-slice while a callback is active; a long run of UTF-8
+    ; delimiter bytes then wedges the emitted fkwu image during release.  This
+    ; Form-authored tail scan never constructs non-ASCII strings: every byte
+    ; outside [A-Za-z0-9] is a delimiter, exactly matching re-norm.
+    (defn re-word-byte? (b)
+        (if (or (and (ge b 65) (le b 90))
+                (or (and (ge b 97) (le b 122))
+                    (and (ge b 48) (le b 57)))) 1 0))
+    (defn re-lower-byte (b)
+        (if (and (ge b 65) (le b 90)) (add b 32) b))
+    (defn re-words-scan (text i n cur rev-words)
+        (if (ge i n)
+            (re-rev-into
+                (if (str_eq cur "") rev-words (cons cur rev-words))
+                (empty))
+            (do
+                (let b (str_byte_at text i))
+                (if (eq (re-word-byte? b) 1)
+                    (re-words-scan text (add i 1) n
+                        (str_concat cur (byte_to_str (re-lower-byte b)))
+                        rev-words)
+                    (re-words-scan text (add i 1) n ""
+                        (if (str_eq cur "") rev-words
+                            (cons cur rev-words)))))))
+    (defn re-words (text)
+        (re-words-scan text 0 (str_len text) "" (empty)))
 
     ; --- a zero list of length n (the empty histogram). Tail-recursive: the old ---
     ; structural recursion used one walker C-frame per element, which overflows small
@@ -92,10 +140,202 @@
 
     ; --- the embedding: token-hash histogram of width dim. ---
     (defn re-vec-dim (text dim)
-        (re-fill (re-split (re-norm text)) (re-zeros dim) dim))
+        (re-fill (re-words text) (re-zeros dim) dim))
 
     ; --- 64 is the default embedding dim. ---
     (defn re-default-dim () 64)
     (defn re-vec (text) (re-vec-dim text (re-default-dim)))
+
+    ; ── deterministic semantic feature layer ──────────────────────────────
+    ; The version is part of the index schema. Any mapping change must bump it
+    ; so source vectors and query vectors can never silently disagree.
+    (defn re-semantic-kind () "form-semantic-v2")
+
+    (defn re-word-in? (word words)
+        (if (eq (len words) 0) 0
+            (if (str_eq word (head words)) 1
+                (re-word-in? word (tail words)))))
+
+    (defn re-stop-word? (word)
+        (re-word-in? word (list
+            "a" "an" "and" "are" "as" "at" "be" "been" "but" "by"
+            "can" "did" "do" "does" "for" "from" "had" "has" "have"
+            "how" "i" "if" "in" "into" "is" "it" "its" "not" "of"
+            "on" "or" "our" "that" "the" "their" "then" "there" "this"
+            "to" "was" "we" "were" "what" "when" "where" "which" "who"
+            "why" "will" "with" "you" "your")))
+
+    (defn re-ends? (word suffix)
+        (do (let nw (str_len word)) (let ns (str_len suffix))
+            (if (lt nw ns) 0
+                (if (str_eq (substring word (sub nw ns) nw) suffix) 1 0))))
+
+    ; A conservative morphology choice for unknown terms. Only one of stem/word
+    ; is emitted, so one token always remains one atomic semantic feature.
+    (defn re-stem (word)
+        (do (let n (str_len word))
+            (if (and (gt n 5) (eq (re-ends? word "ing") 1)) (substring word 0 (sub n 3))
+            (if (and (gt n 4) (eq (re-ends? word "ed") 1)) (substring word 0 (sub n 2))
+            (if (and (gt n 4) (eq (re-ends? word "es") 1)) (substring word 0 (sub n 2))
+            (if (and (gt n 3) (eq (re-ends? word "s") 1)) (substring word 0 (sub n 1))
+                word))))))
+
+    ; Only true lemma/synonym classes collapse. Related roles, artifacts, states,
+    ; and opposites keep distinct features (for example kernel/runtime/submodule,
+    ; source/path/file, native/local/offline, fear/love, merge/duplicate).
+    (defn re-concept-row (concept words) (list concept words))
+    (defn re-concept-find (word rows)
+        (if (eq (len rows) 0) ""
+            (do (let row (head rows))
+                (if (eq (re-word-in? word (nth row 1)) 1)
+                    (nth row 0)
+                    (re-concept-find word (tail rows))))))
+    (defn re-concept-rows ()
+        (list
+            (re-concept-row "__concept_ground" (list "ground" "grounded" "grounding"))
+            (re-concept-row "__concept_attribution" (list "attribution" "attributed"))
+            (re-concept-row "__concept_coordinate" (list "coordinate" "coordinates"))
+            (re-concept-row "__concept_resolve" (list "resolve" "resolved" "resolvable"))
+            (re-concept-row "__concept_identity" (list "identity" "identities" "id" "ids" "nodeid" "nodeids"))
+            (re-concept-row "__concept_address" (list "address" "addresses"))
+            (re-concept-row "__concept_observe" (list "observe" "observed" "observing" "observation" "observations"))
+            (re-concept-row "__concept_measure" (list "measure" "measured" "measurement" "measurements"))
+            (re-concept-row "__concept_sense" (list "sense" "sensed" "sensing"))
+            (re-concept-row "__concept_evidence" (list "evidence" "proof" "proofs" "prove" "proven"))
+            (re-concept-row "__concept_verify" (list "verify" "verified" "verification"))
+            (re-concept-row "__concept_receipt" (list "receipt" "receipts"))
+            (re-concept-row "__concept_witness" (list "witness" "witnesses" "witnessed"))
+            (re-concept-row "__concept_trace" (list "trace" "traces"))
+            (re-concept-row "__concept_deploy" (list "deploy" "deployed" "deployment" "deployments"))
+            (re-concept-row "__concept_release" (list "release" "released" "releases"))
+            (re-concept-row "__concept_production" (list "production"))
+            (re-concept-row "__concept_live" (list "live"))
+            (re-concept-row "__concept_ship" (list "ship" "shipped" "shipping"))
+            (re-concept-row "__concept_rollout" (list "rollout" "rollouts"))
+            (re-concept-row "__concept_kernel" (list "kernel" "kernels"))
+            (re-concept-row "__concept_runtime" (list "runtime" "runtimes"))
+            (re-concept-row "__concept_engine" (list "engine" "engines"))
+            (re-concept-row "__concept_submodule" (list "submodule" "submodules"))
+            (re-concept-row "__concept_fkwu" (list "fkwu"))
+            (re-concept-row "__concept_retrieve" (list "retrieve" "retrieval"))
+            (re-concept-row "__concept_recall" (list "recall"))
+            (re-concept-row "__concept_search" (list "search" "searching"))
+            (re-concept-row "__concept_lookup" (list "lookup" "lookups"))
+            (re-concept-row "__concept_find" (list "find" "found"))
+            (re-concept-row "__concept_rag" (list "rag"))
+            (re-concept-row "__concept_index" (list "index" "indexing" "indexes"))
+            (re-concept-row "__concept_semantic" (list "semantic" "semantics"))
+            (re-concept-row "__concept_meaning" (list "meaning" "meanings"))
+            (re-concept-row "__concept_paraphrase" (list "paraphrase" "paraphrased" "paraphrases"))
+            (re-concept-row "__concept_synonym" (list "synonym" "synonyms"))
+            (re-concept-row "__concept_trust" (list "trust" "trusted" "trustworthy"))
+            (re-concept-row "__concept_integrity" (list "integrity"))
+            (re-concept-row "__concept_authentic" (list "authentic" "authenticity"))
+            (re-concept-row "__concept_sufficient" (list "sufficient" "sufficiency" "enough" "adequate"))
+            (re-concept-row "__concept_complete" (list "complete" "completeness" "full" "fully"))
+            (re-concept-row "__concept_fresh" (list "fresh" "freshness"))
+            (re-concept-row "__concept_current" (list "current" "latest"))
+            (re-concept-row "__concept_stale" (list "stale"))
+            (re-concept-row "__concept_expiry" (list "expiry" "expired" "expires"))
+            (re-concept-row "__concept_source" (list "source" "sources"))
+            (re-concept-row "__concept_path" (list "path" "paths"))
+            (re-concept-row "__concept_file" (list "file" "files"))
+            (re-concept-row "__concept_document" (list "document" "documents" "doc" "docs"))
+            (re-concept-row "__concept_fail" (list "fail" "failed" "failure" "failures"))
+            (re-concept-row "__concept_error" (list "error" "errors"))
+            (re-concept-row "__concept_broken" (list "broken"))
+            (re-concept-row "__concept_miss" (list "miss" "missed"))
+            (re-concept-row "__concept_missing" (list "missing"))
+            (re-concept-row "__concept_pass" (list "pass" "passed"))
+            (re-concept-row "__concept_success" (list "success" "succeeded" "successful"))
+            (re-concept-row "__concept_green" (list "green"))
+            (re-concept-row "__concept_healthy" (list "healthy"))
+            (re-concept-row "__concept_merge" (list "merge" "merged" "merging"))
+            (re-concept-row "__concept_integrate" (list "integrate" "integrated" "integration"))
+            (re-concept-row "__concept_consolidate" (list "consolidate" "consolidated" "consolidation"))
+            (re-concept-row "__concept_duplicate" (list "duplicate" "duplicated" "duplicates"))
+            (re-concept-row "__concept_replace" (list "replace" "replaced" "replacement"))
+            (re-concept-row "__concept_native" (list "native"))
+            (re-concept-row "__concept_sovereign" (list "sovereign" "sovereignty"))
+            (re-concept-row "__concept_local" (list "local"))
+            (re-concept-row "__concept_offline" (list "offline"))
+            (re-concept-row "__concept_body" (list "body"))
+            (re-concept-row "__concept_oracle" (list "oracle" "oracles"))
+            (re-concept-row "__concept_rented" (list "rented"))
+            (re-concept-row "__concept_remote" (list "remote"))
+            (re-concept-row "__concept_model" (list "model" "models"))
+            (re-concept-row "__concept_llm" (list "llm" "llms"))
+            (re-concept-row "__concept_frontier" (list "frontier"))
+            (re-concept-row "__concept_frequency" (list "frequency" "frequencies"))
+            (re-concept-row "__concept_attune" (list "attune" "attuned" "attunement"))
+            (re-concept-row "__concept_resonance" (list "resonance" "resonant"))
+            (re-concept-row "__concept_fear" (list "fear"))
+            (re-concept-row "__concept_love" (list "love"))
+            (re-concept-row "__concept_tone" (list "tone" "tones"))
+            (re-concept-row "__concept_answer" (list "answer" "answers"))
+            (re-concept-row "__concept_response" (list "response" "responses"))
+            (re-concept-row "__concept_output" (list "output" "outputs"))
+            (re-concept-row "__concept_synthesis" (list "synthesis"))
+            (re-concept-row "__concept_generate" (list "generate" "generated" "generation"))))
+
+    (defn re-concept (word)
+        (re-concept-find word (re-concept-rows)))
+
+    ; Compile the authored synonym rows once per document into the kernel's
+    ; generic record carrier.  `record_get` is a native lookup; the old path
+    ; walked all rows in Form once for every word.
+    (defn re-concept-record-words (rec concept words)
+        (if (eq (len words) 0) rec
+            (re-concept-record-words
+                (record_set rec (head words) concept)
+                concept
+                (tail words))))
+    (defn re-concept-record-rows (rec rows)
+        (if (eq (len rows) 0) rec
+            (do
+                (let row (head rows))
+                (re-concept-record-rows
+                    (re-concept-record-words rec (nth row 0) (nth row 1))
+                    (tail rows)))))
+    (defn re-concept-record ()
+        (re-concept-record-rows
+            (record_new (make_nodeid 1 2 99 2088))
+            (re-concept-rows)))
+
+    (defn re-word-feature-with (concept-record word)
+        (if (eq (re-stop-word? word) 1) ""
+            (if (record_has concept-record word)
+                (record_get concept-record word)
+                (re-stem word))))
+    (defn re-word-feature (word)
+        (re-word-feature-with (re-concept-record) word))
+
+    (defn re-feature-add (feature features)
+        (if (or (str_eq feature "") (eq (re-word-in? feature features) 1))
+            features
+            (re-snoc features feature)))
+    (defn re-semantic-words-loop (concept-record words features)
+        (if (eq (len words) 0) features
+            (re-semantic-words-loop concept-record (tail words)
+                (re-feature-add
+                    (re-word-feature-with concept-record (head words))
+                    features))))
+    (defn re-semantic-words (words)
+        (re-semantic-words-loop (re-concept-record) words (empty)))
+    (defn re-semantic-features (text)
+        (re-semantic-words (re-words text)))
+
+    (defn re-feature-codes (feature)
+        (list
+            (re-hash feature)
+            (add (re-second-domain-offset) (re-hash-131 feature))))
+    (defn re-semantic-codes (features)
+        (if (eq (len features) 0) (empty)
+            (do (let codes (re-feature-codes (head features)))
+                (cons (nth codes 0)
+                    (cons (nth codes 1)
+                        (re-semantic-codes (tail features)))))))
+    (defn re-semantic-vec (text)
+        (re-semantic-codes (re-semantic-features text)))
 
     0)

@@ -1,8 +1,7 @@
 // blanket.test.ts — contract for Markov blanket recipes.
 //
 // Runs under `tsx src/blanket.test.ts`. Self-contained: prints PASS/FAIL per
-// case and exits non-zero on any failure. No external test runner needed
-// (matches the conformance.ts pattern already in this package).
+// case and exits non-zero on any failure. No external test runner needed.
 
 import { Kernel, Level, RBasic, nodeKey, type NodeID } from "./kernel.ts";
 import {

@@ -1,0 +1,370 @@
+; form-cli-request.fk — invocation-owned ask/trace envelopes and canonical batch
+; semantic embedding for the standalone native CLI.
+;
+; preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/sha256.fk form-stdlib/hmac-sha256.fk form-stdlib/hex.fk
+; preludes: form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
+; preludes: form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk
+; preludes: form-stdlib/rag-ask.fk form-stdlib/form-cli-staged-trace.fk
+;
+; A validated request id maps only to relative paths under:
+;   .coherence-network/rag-requests/<id>.query
+;   .coherence-network/rag-requests/<id>.receipt
+;   .coherence-network/rag-requests/<id>.embed
+; This removes the shared rag-query association race and avoids receipt bytes in
+; argv. ask-request-trace reads the exact query once, binds its SHA-256 into the
+; protected attestation, selects one hit, and verifies against actual native time.
+;
+; embed-request is the sole semantic-v2 authoring door. Its input is one
+; `<id_hex>|<utf8_text_hex>` row per line. Its deterministic JSONL output reuses
+; re-semantic-vec directly, so consumers never mirror the lexicon/hash/stem/rank.
+
+(do
+    (defn fcr-request-root () ".coherence-network/rag-requests/")
+    (defn fcr-key-path () ".coherence-network/attestation/grounding-v1.key")
+    (defn fcr-max-id-bytes () 128)
+    ; Questions are UTF-8 text, not an unbounded file ingestion door. Receipts
+    ; contain eighteen bounded identifiers/digests plus one witness key. These
+    ; limits are part of the native request contract and are proven at exactly
+    ; max and max+1 by the standalone carrier gate.
+    (defn fcr-max-query-bytes () 8192)
+    (defn fcr-max-receipt-bytes () 16384)
+    ; Measured current corpus: 1,546 rows / 5,736,270 staged bytes. 16 MiB keeps
+    ; the whole deterministic batch failure-atomic with nearly 3x headroom while
+    ; retaining a hard allocation/DoS boundary.
+    (defn fcr-max-embed-bytes () 16777216)
+
+    (defn fcr-id-byte-valid? (b)
+        (if (or (and (ge b 48) (le b 57))
+                (or (and (ge b 65) (le b 90))
+                    (or (and (ge b 97) (le b 122))
+                        (or (eq b 45) (eq b 95))))) 1 0))
+    (defn fcr-id-valid-loop (id i)
+        (if (ge i (str_len id)) 1
+            (if (eq (fcr-id-byte-valid? (str_byte_at id i)) 1)
+                (fcr-id-valid-loop id (add i 1)) 0)))
+    (defn fcr-id-valid? (id)
+        (if (and (gt (str_len id) 0)
+                 (and (le (str_len id) (fcr-max-id-bytes))
+                      (eq (fcr-id-valid-loop id 0) 1))) 1 0))
+
+    (defn fcr-path (id suffix)
+        (str_concat (fcr-request-root) (str_concat id suffix)))
+    (defn fcr-query-path (id) (fcr-path id ".query"))
+    (defn fcr-receipt-path (id) (fcr-path id ".receipt"))
+    (defn fcr-consuming-receipt-path (id) (fcr-path id ".receipt.consuming"))
+    (defn fcr-embed-path (id) (fcr-path id ".embed"))
+    (defn fcr-embed-output-path (id) (fcr-path id ".embed.output"))
+
+    (defn fcr-strip-last-byte-if (s code)
+        (do
+            (let n (str_len s))
+            (if (and (gt n 0) (eq (str_byte_at s (sub n 1)) code))
+                (substring s 0 (sub n 1)) s)))
+    (defn fcr-strip-eol (s)
+        (fcr-strip-last-byte-if (fcr-strip-last-byte-if s 10) 13))
+    (defn fcr-text-has-nul? (s)
+        (if (ge (str_find s (byte_to_str 0) 0) 0) 1 0))
+    (defn fcr-now-seconds () (div (now_unix_ms) 1000))
+
+    (defn fcr-hit-for-query (query)
+        (ra-grounded-hit-at (ra-default-index) query))
+    (defn fcr-ask-request (id)
+        (if (eq (fcr-id-valid? id) 0)
+            "ask-request:error:invalid-id"
+            (do
+                (let query-path (fcr-query-path id))
+                (let query-size (file_size query-path))
+                (if (gt query-size (fcr-max-query-bytes))
+                    "ask-request:error:query-too-large"
+                    (do
+                        (let query (read_file query-path))
+                        (if (eq (str_len query) 0)
+                            "ask-request:error:missing-query"
+                            (if (eq (fcr-text-has-nul? query) 1)
+                                "ask-request:error:invalid-query"
+                                (do
+                                    (let hit (fcr-hit-for-query query))
+                                    (let output (ra-hit-output hit))
+                                    (if (str_eq output "grounded:miss")
+                                        "[ask: local fkwu RAG index has no grounded hit]"
+                                        output)))))))))
+
+    (defn fcr-trace-for-request-at (hit receipt request-id query key-hex now)
+        (fcast-trace-hit-for-at
+            hit receipt request-id (fcast-query-key query) key-hex now))
+    (defn fcr-trace-for-query-at (hit receipt query key-hex now)
+        (fcr-trace-for-request-at hit receipt "test-request" query key-hex now))
+    (defn fcr-query-trace-at (index-text query receipt key-hex now)
+        (do
+            (let hit (ra-stream-hit index-text query))
+            (fcr-trace-for-query-at hit receipt query key-hex now)))
+    (defn fcr-finish-consume (query-path consuming-path result)
+        (do
+            (let removed-receipt (fs_remove consuming-path))
+            (let removed-query (fs_remove query-path))
+            result))
+    (defn fcr-ask-request-trace (id)
+        (if (eq (fcr-id-valid? id) 0)
+            "ask-request-trace:error:invalid-id"
+            (do
+                (let receipt-path (fcr-receipt-path id))
+                (let consuming-path (fcr-consuming-receipt-path id))
+                (let moved (fs_rename receipt-path consuming-path))
+                (if (not (eq moved 0))
+                    "ask-request-trace:error:missing-receipt"
+                    (do
+                        (let query-path (fcr-query-path id))
+                        (let query-size (file_size query-path))
+                        (let receipt-size (file_size consuming-path))
+                        ; Permit at most one terminal CRLF beyond the logical
+                        ; receipt cap; the stripped payload is checked again below.
+                        (if (gt query-size (fcr-max-query-bytes))
+                            (fcr-finish-consume query-path consuming-path
+                                "ask-request-trace:error:query-too-large")
+                            (if (gt receipt-size (add (fcr-max-receipt-bytes) 2))
+                                (fcr-finish-consume query-path consuming-path
+                                    "ask-request-trace:error:receipt-too-large")
+                                (do
+                                    (let query (read_file query-path))
+                                    (if (eq (str_len query) 0)
+                                        (fcr-finish-consume query-path consuming-path
+                                            "ask-request-trace:error:missing-query")
+                                        (if (eq (fcr-text-has-nul? query) 1)
+                                            (fcr-finish-consume query-path consuming-path
+                                                "ask-request-trace:error:invalid-query")
+                                            (do
+                                                (let receipt (fcr-strip-eol
+                                                    (read_file consuming-path)))
+                                                (if (gt (str_len receipt)
+                                                        (fcr-max-receipt-bytes))
+                                                    (fcr-finish-consume query-path consuming-path
+                                                        "ask-request-trace:error:receipt-too-large")
+                                                    (if (eq (fcr-text-has-nul? receipt) 1)
+                                                        (fcr-finish-consume query-path consuming-path
+                                                            "ask-request-trace:error:invalid-receipt")
+                                                        (do
+                                                            ; Derive the query binding before
+                                                            ; any key/index host read.
+                                                            (let query-key (fcast-query-key query))
+                                                            (let hit (fcr-hit-for-query query))
+                                                            (let key-hex (fcr-strip-eol
+                                                                (read_file (fcr-key-path))))
+                                                            (fcr-finish-consume query-path consuming-path
+                                                                (fcast-trace-hit-for-at hit receipt id
+                                                                    query-key key-hex
+                                                                    (fcr-now-seconds)))))))))))))))))
+
+    (defn fcr-ask-request-debug (id)
+        (if (eq (fcr-id-valid? id) 0)
+            "ask-request-debug:error:invalid-id"
+            (do
+                (let query-path (fcr-query-path id))
+                (let receipt-path (fcr-receipt-path id))
+                (if (gt (file_size query-path) (fcr-max-query-bytes))
+                    "ask-request-debug:error:query-too-large"
+                    (if (gt (file_size receipt-path)
+                            (add (fcr-max-receipt-bytes) 2))
+                        "ask-request-debug:error:receipt-too-large"
+                        (do
+                            (let query (read_file query-path))
+                            (let receipt (fcr-strip-eol (read_file receipt-path)))
+                            (if (eq (str_len query) 0)
+                                "ask-request-debug:error:missing-query"
+                                (if (eq (fcr-text-has-nul? query) 1)
+                                    "ask-request-debug:error:invalid-query"
+                                    (if (gt (str_len receipt) (fcr-max-receipt-bytes))
+                                        "ask-request-debug:error:receipt-too-large"
+                                        (if (eq (fcr-text-has-nul? receipt) 1)
+                                            "ask-request-debug:error:invalid-receipt"
+                                            (do
+                                                (let query-key (fcast-query-key query))
+                                                (let hit (fcr-hit-for-query query))
+                                                (let key-hex (fcr-strip-eol
+                                                    (read_file (fcr-key-path))))
+                                                (fcast-grounding-debug-for-at hit receipt id
+                                                    query-key key-hex
+                                                    (fcr-now-seconds)))))))))))))
+
+    ; ── canonical batch semantic embedding ──
+    (defn fcr-embed-separator (line) (str_find line "|" 0))
+    (defn fcr-embed-id-hex (line)
+        (do (let at (fcr-embed-separator line))
+            (if (lt at 0) "" (substring line 0 at))))
+    (defn fcr-embed-text-hex (line)
+        (do (let at (fcr-embed-separator line))
+            (if (lt at 0) "" (substring line (add at 1) (str_len line)))))
+    (defn fcr-embed-line-valid? (line)
+        (do
+            (let at (fcr-embed-separator line))
+            (let id-hex (fcr-embed-id-hex line))
+            (let text-hex (fcr-embed-text-hex line))
+            (if (and (gt at 0)
+                     (and (lt (str_find line "|" (add at 1)) 0)
+                          (and (gt (str_len id-hex) 0)
+                               (and (gt (str_len text-hex) 0)
+                                    (and (eq (hex-valid? id-hex) 1)
+                                         (eq (hex-valid? text-hex) 1)))))) 1 0)))
+
+    ; The semantic-v2 tokenizer intentionally recognizes ASCII letters and
+    ; digits only. Decode the staged text hex directly into that projection so
+    ; an emitted carrier never materializes arbitrary UTF-8 byte strings merely
+    ; to discard their bytes as delimiters. This preserves the exact re-words
+    ; meaning while avoiding the host string-release wedge exposed by long
+    ; ornament runs in real Markdown/Form sources.
+    (defn fcr-embed-ascii-byte? (b)
+        (if (or (and (ge b 65) (le b 90))
+                (or (and (ge b 97) (le b 122))
+                    (and (ge b 48) (le b 57)))) 1 0))
+    (defn fcr-embed-lower-byte (b)
+        (if (and (ge b 65) (le b 90)) (add b 32) b))
+    (defn fcr-embed-words-from-hex-loop (s i n cur rev-words)
+        (if (ge i n)
+            (re-rev-into
+                (if (str_eq cur "") rev-words (cons cur rev-words))
+                (empty))
+            (do
+                (let hi (hex-digit-value (hex-byte-at s i)))
+                (let lo (hex-digit-value (hex-byte-at s (add i 1))))
+                (let b (add (mul hi 16) lo))
+                (if (eq (fcr-embed-ascii-byte? b) 1)
+                    (fcr-embed-words-from-hex-loop s (add i 2) n
+                        (str_concat cur (byte_to_str (fcr-embed-lower-byte b)))
+                        rev-words)
+                    (fcr-embed-words-from-hex-loop s (add i 2) n ""
+                        (if (str_eq cur "") rev-words
+                            (cons cur rev-words)))))))
+    (defn fcr-embed-words-from-hex (s)
+        (fcr-embed-words-from-hex-loop s 0 (str_len s) "" (empty)))
+    (defn fcr-embed-semantic-vec-from-hex (s)
+        (re-semantic-codes
+            (re-semantic-words (fcr-embed-words-from-hex s))))
+
+    (defn fcr-embed-effective-end (raw)
+        (do
+            (let n (str_len raw))
+            (if (and (gt n 0) (eq (str_byte_at raw (sub n 1)) 10))
+                (sub n 1) n)))
+    ; Split near the byte midpoint at a native-scanned LF. Balanced ranges keep
+    ; emitted-walker depth logarithmic for production JSONL instead of one Form
+    ; frame per corpus row. If the midpoint lands in the final large row, fall
+    ; back to the range's first LF; a no-LF range is exactly one logical row.
+    (defn fcr-embed-range-split (raw start end)
+        (do
+            (let mid (div (add start end) 2))
+            (let after-mid (scan_run raw mid 5))
+            (if (lt after-mid end) after-mid
+                (scan_run raw start 5))))
+    (defn fcr-embed-range-valid? (raw start end)
+        (if (ge start end) 0
+            (do
+                (let split (fcr-embed-range-split raw start end))
+                (if (ge split end)
+                    (fcr-embed-line-valid? (substring raw start end))
+                    (if (eq (fcr-embed-range-valid? raw start split) 0) 0
+                        (fcr-embed-range-valid? raw (add split 1) end))))))
+    (defn fcr-embed-input-valid? (raw)
+        (do
+            (let end (fcr-embed-effective-end raw))
+            (if (and (gt end 0)
+                     (eq (fcr-embed-range-valid? raw 0 end) 1)) 1 0)))
+
+    (defn fcr-embed-json-row (line)
+        (do
+            (let id-hex (fcr-embed-id-hex line))
+            (str_concat "{\"id_hex\":\""
+            (str_concat id-hex
+            (str_concat "\",\"embedding_kind\":\"form-semantic-v2\",\"vec\":"
+            (str_concat (ric-emit-vec
+                (fcr-embed-semantic-vec-from-hex (fcr-embed-text-hex line)))
+                "}"))))))
+
+    (defn fcr-embed-output-loop (raw pos raw-len first)
+        (if (ge pos raw-len) ""
+            (do
+                (let line-end (scan_run raw pos 5))
+                (let next-pos (if (lt line-end raw-len) (add line-end 1) raw-len))
+                (let line (substring raw pos line-end))
+                (if (eq (str_len line) 0)
+                    (fcr-embed-output-loop raw next-pos raw-len first)
+                    (str_concat (if (eq first 1) "" "\n")
+                    (str_concat (fcr-embed-json-row line)
+                        (fcr-embed-output-loop raw next-pos raw-len 0)))))))
+    (defn fcr-embed-output (raw)
+        (if (eq (fcr-embed-input-valid? raw) 0)
+            "embed-request:error:invalid-row"
+            (fcr-embed-output-loop raw 0 (str_len raw) 1)))
+
+    ; The pure fcr-embed-output above remains useful for small recipe values.
+    ; A production batch cannot build one output by nesting a str_concat around
+    ; every input row: the emitted walker would retain every recursive frame.
+    ; The live door validates the whole input first, then streams canonical rows
+    ; through a request-owned file in bounded byte chunks and reads the completed
+    ; response once. The final stdout contract is identical.
+    (defn fcr-string-byte-range (s i end)
+        (if (ge i end) (empty)
+            (cons (str_byte_at s i)
+                  (fcr-string-byte-range s (add i 1) end))))
+    (defn fcr-append-string-loop (path s pos n)
+        (if (ge pos n) 0
+            (do
+                (let end (if (gt (sub n pos) 512) (add pos 512) n))
+                (let wrote (file_append_bytes path
+                    (fcr-string-byte-range s pos end)))
+                (if (lt wrote 0) 1
+                    (fcr-append-string-loop path s end n)))))
+    (defn fcr-append-string (path s)
+        (fcr-append-string-loop path s 0 (str_len s)))
+    (defn fcr-embed-write-one (raw start end first output-path)
+        (do
+            (let row (fcr-embed-json-row (substring raw start end)))
+            (let prefix-status (if (eq first 1) 0
+                (fcr-append-string output-path "\n")))
+            (if (not (eq prefix-status 0)) 1
+                (fcr-append-string output-path row))))
+    (defn fcr-embed-write-range (raw start end first output-path)
+        (do
+            (let split (fcr-embed-range-split raw start end))
+            (if (ge split end)
+                (fcr-embed-write-one raw start end first output-path)
+                (do
+                    (let left-status
+                        (fcr-embed-write-range raw start split first output-path))
+                    (if (not (eq left-status 0)) 1
+                        (fcr-embed-write-range raw (add split 1) end 0 output-path))))))
+
+    (defn fcr-embed-file-output (id raw)
+        (do
+            (let output-path (fcr-embed-output-path id))
+            (let removed-stale (fs_remove output-path))
+            (let created (write_file output-path ""))
+            (if (lt created 0)
+                "embed-request:error:output-write"
+                (do
+                    (let status (fcr-embed-write-range
+                        raw 0 (fcr-embed-effective-end raw) 1 output-path))
+                    ; Return the host-read value as the terminal expression.
+                    ; Removing the backing path before the emitted walker had
+                    ; printed that value yielded an empty response. Retaining one
+                    ; request-owned materialization is bounded (the next call
+                    ; truncates it) and also leaves an inspectable recovery copy.
+                    (if (eq status 0) (read_file output-path)
+                        "embed-request:error:output-write")))))
+
+    (defn fcr-embed-request (id)
+        (if (eq (fcr-id-valid? id) 0)
+            "embed-request:error:invalid-id"
+            (do
+                (let path (fcr-embed-path id))
+                (let size (file_size path))
+                (if (le size 0)
+                    "embed-request:error:missing-input"
+                    (if (gt size (fcr-max-embed-bytes))
+                        "embed-request:error:input-too-large"
+                        (do
+                            (let raw (read_file path))
+                            (if (eq (fcr-embed-input-valid? raw) 0)
+                                "embed-request:error:invalid-row"
+                                (fcr-embed-file-output id raw))))))))
+
+    0)

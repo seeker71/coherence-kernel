@@ -57,3 +57,120 @@
 ; (the model that produced `signature` is the heavy part — see the header.)
 (defn fc-check (signature fear-centroid clear-centroid threshold)
     (fc-gate (fc-fear-score signature fear-centroid clear-centroid) threshold))
+
+; ── executable frequency reading contract ───────────────────────────────────
+; A boolean cannot represent the honest runtime state. The general semantic
+; model may read clear or fear, but it may also be unavailable / uncalibrated /
+; too close to its decision boundary. Keep that third state all the way to the
+; trust row: 0 fear, 1 clear, 2 unknown.
+(defn fc-state-fear    () 0)
+(defn fc-state-clear   () 1)
+(defn fc-state-unknown () 2)
+
+; Sources are intentionally distinct. Only semantic-model is the general
+; automatic sense. Human gold is a direct semantic reading. Certified Form is
+; limited to deterministic, content-bound excerpts; it must not be presented as
+; general sensing. Unmeasured means no frequency assertion was made.
+(defn fc-source-none       () 0)
+(defn fc-source-semantic   () 1)
+(defn fc-source-human-gold () 2)
+(defn fc-source-certified  () 3)
+
+; reading = (state source fear-score confidence valid)
+(defn fc-reading (state source fear-score confidence valid)
+    (list state source fear-score confidence valid))
+(defn fc-reading-state      (r) (nth r 0))
+(defn fc-reading-source     (r) (nth r 1))
+(defn fc-reading-fear-score (r) (nth r 2))
+(defn fc-reading-confidence (r) (nth r 3))
+(defn fc-reading-valid      (r) (nth r 4))
+
+(defn fc-source-name (source)
+    (if (eq source (fc-source-semantic)) "semantic-model"
+        (if (eq source (fc-source-human-gold)) "human-gold"
+            (if (eq source (fc-source-certified)) "certified-form" "unmeasured"))))
+(defn fc-reading-source-name (r) (fc-source-name (fc-reading-source r)))
+
+(defn fc-unmeasured-reading ()
+    (fc-reading (fc-state-unknown) (fc-source-none) 0 0 0))
+(defn fc-unknown-reading (source)
+    (fc-reading (fc-state-unknown) source 0 0 0))
+
+; A reading is measured only when its producer is named, validity is explicit,
+; and the state is an actual clear/fear decision. Unknown never passes by default.
+(defn fc-reading-measured? (r)
+    (if (and (eq (fc-reading-valid r) 1)
+             (and (gt (fc-reading-source r) (fc-source-none))
+                  (if (eq (fc-reading-state r) (fc-state-clear)) 1
+                      (if (eq (fc-reading-state r) (fc-state-fear)) 1 0)))) 1 0))
+
+; Trust signal consumed by trust-row: 0 no, 1 yes, 2 unknown.
+(defn fc-trust-signal (r)
+    (if (eq (fc-reading-measured? r) 0) (fc-state-unknown)
+        (if (eq (fc-reading-state r) (fc-state-clear)) 1 0)))
+
+; The semantic head abstains unless all vectors have the same non-zero shape,
+; the centroids are distinct, the model/centroid pair is certified calibrated,
+; and the signature is far enough from the boundary. Confidence is the normalized
+; distance margin: 100 on a centroid, 0 at an exact tie.
+(defn fc-abs (n) (if (lt n 0) (mul n -1) n))
+(defn fc-signature-shape? (signature fear-centroid clear-centroid)
+    (if (and (gt (len signature) 0)
+             (and (eq (len signature) (len fear-centroid))
+                  (eq (len signature) (len clear-centroid)))) 1 0))
+(defn fc-centroids-distinct? (fear-centroid clear-centroid)
+    (if (gt (fc-dist2 fear-centroid clear-centroid) 0) 1 0))
+(defn fc-separation-confidence (signature fear-centroid clear-centroid)
+    (if (eq (add (fc-dist2 signature fear-centroid)
+                 (fc-dist2 signature clear-centroid)) 0)
+        0
+        (div (mul (fc-abs (sub (fc-dist2 signature fear-centroid)
+                               (fc-dist2 signature clear-centroid))) 100)
+             (add (fc-dist2 signature fear-centroid)
+                  (fc-dist2 signature clear-centroid)))))
+
+; General automatic frequency sense. `calibrated` certifies the actual semantic
+; model + centroids, not merely that some vector was supplied. Low-margin outputs
+; abstain instead of being mislabeled clear.
+(defn fc-semantic-reading (signature fear-centroid clear-centroid threshold confidence-floor calibrated)
+    (if (and (eq calibrated 1)
+             (and (eq (fc-signature-shape? signature fear-centroid clear-centroid) 1)
+                  (and (eq (fc-centroids-distinct? fear-centroid clear-centroid) 1)
+                       (ge (fc-separation-confidence signature fear-centroid clear-centroid)
+                           confidence-floor))))
+        (fc-reading
+            (if (ge (fc-fear-score signature fear-centroid clear-centroid) threshold)
+                (fc-state-fear) (fc-state-clear))
+            (fc-source-semantic)
+            (fc-fear-score signature fear-centroid clear-centroid)
+            (fc-separation-confidence signature fear-centroid clear-centroid)
+            1)
+        (fc-unknown-reading (fc-source-semantic))))
+
+; Direct human reading. The carrier must validate the human-gold witness before
+; setting witnessed=1. verdict is 1 clear / 0 fear; any other value abstains.
+(defn fc-human-reading (verdict witnessed)
+    (if (and (eq witnessed 1)
+             (if (eq verdict (fc-state-clear)) 1
+                 (if (eq verdict (fc-state-fear)) 1 0)))
+        (fc-reading verdict (fc-source-human-gold)
+            (if (eq verdict (fc-state-clear)) 0 100) 100 1)
+        (fc-unknown-reading (fc-source-human-gold))))
+
+; Deterministic Form certification is deliberately narrow: it can clear a known,
+; content-bound excerpt only when both the certificate and exact answer binding
+; validate. It does not claim to understand arbitrary prose.
+(defn fc-certified-form-reading (certificate-valid answer-bound)
+    (if (and (eq certificate-valid 1) (eq answer-bound 1))
+        (fc-reading (fc-state-clear) (fc-source-certified) 0 100 1)
+        (fc-unknown-reading (fc-source-certified))))
+
+; One broad carrier across all currently honest sources. Human gold outranks the
+; learned model; the general model outranks deterministic certification. A lower
+; source is consulted only when every stronger source abstained.
+(defn fc-effective-reading (semantic human-gold certified)
+    (if (eq (fc-reading-measured? human-gold) 1) human-gold
+        (if (eq (fc-reading-measured? semantic) 1) semantic
+            (if (eq (fc-reading-measured? certified) 1) certified
+                (fc-unmeasured-reading)))))
+0

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# rag-heal.sh — sovereign RAG index heal on fkwu (rh-heal-merge-at), zero Python, zero go.
+# rag-heal.sh — native grounded-index mutation gate.
 #
 # Form shell: rag-heal.fsh + fsh-rag-heal-main.fk (`rag-heal <index> <repo-root>`).
 # Runtime: fkwu walks T_flat to flatten the heal gate, then runs the table.
@@ -13,6 +13,9 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 FORM="$ROOT/form"
 INDEX="${1:-$HOME/.coherence-network/rag-index/index.jsonl}"
 mkdir -p "$(dirname "$INDEX")"
+
+# shellcheck source=scripts/rag-heal-result-gate.sh
+source "$FORM/scripts/rag-heal-result-gate.sh"
 
 cd "$FORM"
 # shellcheck source=scripts/fourth-arm.sh
@@ -33,12 +36,12 @@ else
 fi
 
 if [[ -z "${FKWU:-}" ]]; then
-    echo "[rag] skip heal: no fkwu (run ensure_form_cli_native.sh first)" >&2
-    exit 0
+    echo "[rag] refused heal: no fkwu (run ensure_form_cli_native.sh first)" >&2
+    exit 74
 fi
 if ! fourth_selfhost; then
-    echo "[rag] skip heal: T_flat self-host unavailable (fourth-flatten-table.txt absent)" >&2
-    exit 0
+    echo "[rag] refused heal: T_flat self-host unavailable (fourth-flatten-table.txt absent)" >&2
+    exit 74
 fi
 
 RAG_MODS=(
@@ -56,7 +59,9 @@ d="$(mktemp -d "${TMPDIR:-/tmp}/fk-rag-heal.XXXXXX")"
 trap 'rm -rf "$d"' EXIT
 
 gate="$d/gate.fk"
-printf '(do (print (rh-shell-heal "%s" "%s")))\n' "$INDEX" "$ROOT" > "$gate"
+# Return the gate result as the program value. Wrapping it in `print` made the
+# walker return print's success value (0), masking resolver refusal 73.
+printf '(rh-shell-heal "%s" "%s")\n' "$INDEX" "$ROOT" > "$gate"
 
 stem="rag-heal-gate"
 flatten_out="$d/flatten.out"
@@ -68,10 +73,10 @@ flatten_out="$d/flatten.out"
 table="$d/table.txt"
 sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" "$flatten_out" | sed -e '1d' -e '$d' > "$table"
 if [[ ! -s "$table" ]]; then
-    echo "[rag] skip heal: fkwu self-flatten produced no table" >&2
+    echo "[rag] refused heal: fkwu self-flatten produced no table" >&2
     sed -n '1,8p' "$d/flatten.err" >&2 || true
-    exit 0
+    exit 74
 fi
 
 out="$("$FKWU" "$table" 0 2>/dev/null | sed '/^null$/d' | head -1)"
-echo "[rag] form-shell heal on fkwu -> ${out:-done} (index: $INDEX)"
+rag_heal_result_gate "$out"

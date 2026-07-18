@@ -165,7 +165,7 @@ noticing what is in the field.
   through approval gates.
 - **The witness trace.** Every visit to the live network is
   recorded; this is *the body keeping a record of its own
-  perception*. Pairs with [lc-perception-as-interface](lc-perception-as-interface.md):
+  perception*. Pairs with lc-perception-as-interface:
   what the body sees is interface, and the trace is the body's
   honest attestation of what it rendered.
 - **The fear-shape this catches.** Working without first looking

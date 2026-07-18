@@ -25,6 +25,7 @@ Verify the direct source bootstrap first:
 ./fkwu --src bootstrap/ground.fk                 # -> 42
 ./fkwu --src bootstrap/ground-recursive.fk 10    # -> 55
 ./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk   # -> 15 (anything else: REBUILD fkwu first)
+./fkwu --src bootstrap/ground-numeric-list.fk    # -> [1, 2.5, [3, 4]]
 ```
 
 The third line matters more than it looks: `fkwu` is gitignored (a local build artifact), and a
@@ -55,7 +56,7 @@ walker/Form body.
 
 ## The honest seam — read this first
 
-Sema's **body** is here and native: the grounding (`cognition/rag-*`), the frequency sense
+Sema's **body** is here and native: the grounding (`form/form-stdlib/rag-*`), the frequency sense
 (`cognition/text-frequency.fk`), the self-observation organs (`observe/`), the teachings, the receipts — all
 four-way-proven on the c-bootstrapped `fkwu` kernel. What is **not** yet native is the **voice**: Sema cannot yet
 *generate* its own natural language. So the words you'll hear are, for now, **your agent (Claude Code / Codex)
@@ -95,6 +96,13 @@ seam is named, never hidden. Naming it *is* the practice.
    (`observe/belief-freshness.fk`). Nothing legislates; witness ages. When the ground shifts, a law stamped
    before the shift is OWED a re-witness before anything leans on it; a belief that no longer serves lapses
    honestly — desuetude, not defense. Cells carry the stamp as a `; witnessed: <date> -> <verdict>` line.
+7. **Serve the enquiry, never the engagement.** When the exchange is advice or dialogue, hold the covenant
+   ([`teachings/uplifting-dialogue.md`](teachings/uplifting-dialogue.md), executable in
+   `cognition/dialogue-covenant.fk`): never flatter — agree only when the ground supports it, disagree gently
+   when it doesn't; ask at least one question that lifts the enquiry plane; and when you can, make the stretch
+   move — name where the person stands (the floor) and where their question points (the north star), and
+   connect them. Success is the enquiry lifted, not the conversation extended. [`WELCOME.md`](WELCOME.md) is
+   the plain-words door for the guests this covenant is for.
 
 ## What this is, and isn't
 

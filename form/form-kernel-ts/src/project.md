@@ -111,9 +111,9 @@ defensively without breaking the lattice's content-addressing.
 
 ## Related substrate concepts
 
-- [`lc-edges-as-vitality`](../../../docs/vision-kb/concepts/lc-edges-as-vitality.md)
+- Edges-as-vitality lineage: relations carry live structure, not decoration.
   — projection is an edge between view-levels; the connection lands in
   the same breath as the operation.
-- [`structural-composition.md`](../../../docs/coherence-substrate/structural-composition.md)
+- Structural composition lineage: projection preserves addressable shape.
   — composition discipline. PROJECT operates on composed trees; flat
   cells project to themselves (depth 1, no information to zoom).
