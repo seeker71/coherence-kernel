@@ -18,24 +18,36 @@ const metadataPath = resolve(root, "cognition/concept-human-corpus-13-metadata.f
 const labelPath = resolve(root, "cognition/concept-nl-semantic-13-omw.tsv");
 
 const locales = [
-  ["en", "eng", "86dfa17528230f4bacd5d51108d0126548ad56f984dab4ad11262d8327ba7e6f"],
-  ["id", "ind", "bb69c9bb7b93f5495b9340e29d4ebb3ba792e92a3da2f899afb67b7ff7c8cc71"],
-  ["es", "spa", "1c966d212089a20f826c0d4b87cd302627bb939e4946eca2f2e10c4ae6c72058"],
-  ["fr", "fra", "ddf85e6d1e2e0cc682779b4fad3260ea207f8c7976577eb595975df10e1300cd"],
-  ["pt-br", "por", "93215bf85dfb972d0a537734de84a1345406b6a73fa85b3ccfb0e469b74b1871"],
+  ["en", "eng", "cfed73b192687e58394630d769cc787e28c7640c68aa2d3d3abc108555d90eb7"],
+  ["id", "ind", "514d1b821d36e96b9e04c2b4b283c27081482e03e6a10c257a1c1e16d7f0e77c"],
+  ["es", "spa", "751c14000eaf62527b5a8530abebacd770880d2fb0afd7d0f61133efeb4b6f3b"],
+  ["fr", "fra", "1e68b07ea01f9989a2330a11101dff0182652b59f742566a67cae60e33e2c412"],
+  ["pt-br", "por", "327d317eb1dcb9ae84a2799e5d624d2342a388757cf87a9978414c140d524baf"],
   ["sw", "swh", "9625be94a36d430366a9f82705e75bed93d93d7cf141254eab3b951bad9331c2"],
-  ["de", "deu", "1fa6c77c9d695039710c2ff1efe01e46c1ae80cef4b135b6a119b48326e116f4"],
-  ["ru", "rus", "ed9ab4d96b80ba2955a449731de19f333e1f1558f2c8d37767adcf204a0a5b7b"],
-  ["zh", "cmn", "4b49d40facbb83e331575f9407ce38882fce491660c6ebf8949c525b114a6ae8"],
-  ["ja", "jpn", "30c7a77475b0af1c43f57950303cf200e06045931cb7dae915954c5581c19a50"],
-  ["ar", "ara", "d58e778f4cc0a30bbf8db4f92b98824e1bcf7f1bfb9bf5d9d48ef727e23c6a25"],
-  ["hi", "hin", "24088064bca54508cd886ec9694f645b40885cb35a0e2361f7bb2bce71d1af09"],
-  ["tr", "tur", "d062d36375c7da89b8a7d0656d072bb3ff1a2302bc7c40aadfa178f2ebb6437b"],
+  ["de", "deu", "67fa43ae8269f145342b4206b7cedcc226e5e5e9a24116f2a7eb07225dc7fe55"],
+  ["ru", "rus", "623413d0d61bfbce731f6a21791203178953745e452c8b3c1837bc90acfbaf4e"],
+  ["zh", "cmn", "b66b656fc8c1c8e7a7e9dd0cc910854a1ce03888246f5a9eeb6cb83841d5c8a2"],
+  ["ja", "jpn", "695821b54d26dbc339de6f7721d3810adde8410d2579ce0a3633768a0999de49"],
+  ["ar", "ara", "03173588adc369158756c8fe18804440a0a0e7a75358bbeae0f126c5d07a90d5"],
+  ["hi", "hin", "1a66416dcad9f2e222ada2c5d3e74e74881e59b788625960e329182b4833234f"],
+  ["tr", "tur", "b599da7d1848ecaa8b2624383fa23e8390cba0869258ac982aacc6bdef28b4fc"],
 ];
+const rowsPerLocale = 100;
+// Concepts were looked up by exact English anchor in the committed 10k table.
+// They are selection strata, never prompts passed to detection.
 const targets = [
-  [150, "work"], [185, "money"], [270, "family"], [327, "school"],
-  [370, "doctor"], [377, "water"], [532, "food"], [628, "hospital"],
-  [1102, "bus"], [1357, "rain"],
+  [79, "time"], [122, "love"], [150, "work"], [167, "home"],
+  [185, "money"], [212, "house"], [248, "car"], [259, "friend"],
+  [270, "family"], [327, "school"], [332, "phone"], [349, "police"],
+  [365, "music"], [370, "doctor"], [377, "water"], [454, "fire"],
+  [468, "child"], [487, "city"], [493, "office"], [532, "food"],
+  [537, "dog"], [571, "book"], [628, "hospital"], [683, "road"],
+  [724, "law"], [786, "train"], [893, "government"], [901, "sea"],
+  [1040, "cat"], [1045, "village"], [1063, "plane"], [1098, "computer"],
+  [1102, "bus"], [1123, "river"], [1338, "animal"], [1357, "rain"],
+  [1432, "restaurant"], [1501, "market"], [1595, "mountain"],
+  [1772, "weather"], [1992, "airport"], [2346, "internet"],
+  [3116, "electricity"], [3255, "sport"], [3710, "parent"],
 ];
 
 const digest = (value) => createHash("sha256").update(value).digest("hex");
@@ -125,8 +137,10 @@ async function selectLocale(locale, lang, labels) {
   const archive = resolve(archiveDir, `${lang}.tsv.bz2`);
   const matcher = buildMatcher(labels, locale === "zh" || locale === "ja");
   const chosenTargets = new Map();
-  let ambiguity = null;
-  let negative = null;
+  const ambiguityByAuthor = new Map();
+  const negativeByAuthor = new Map();
+  const openByConcept = new Map();
+  const openByAuthor = new Map();
   let scanned = 0;
   const used = new Set();
   const child = spawn("bzip2", ["-dc", archive], { stdio: ["ignore", "pipe", "inherit"] });
@@ -142,17 +156,15 @@ async function selectLocale(locale, lang, labels) {
     const found = matcher(sentence);
     const base = { locale, lang, sentenceId, author, added, modified, sentence,
       ids: found.ids, rowHash: digest(line) };
-    if (!negative && found.ids.length === 0) {
-      negative = { ...base, role: "negative", domain: "none", expected: -1, surface: "" };
-      used.add(sentenceId);
+    if (found.ids.length === 0 && !negativeByAuthor.has(author)) {
+      negativeByAuthor.set(author,
+        { ...base, role: "negative", domain: "none", expected: -1, surface: "" });
     }
-    if (!ambiguity) {
-      for (const [surface, ids] of found.surfaces) {
-        if (ids.length > 1) {
-          ambiguity = { ...base, role: "ambiguity", domain: "collision", expected: ids[0], surface };
-          used.add(sentenceId);
-          break;
-        }
+    for (const [surface, ids] of found.surfaces) {
+      if (ids.length > 1 && !ambiguityByAuthor.has(author)) {
+        ambiguityByAuthor.set(author,
+          { ...base, role: "ambiguity", domain: "collision", expected: ids[0], surface });
+        break;
       }
     }
     for (const [id, domain] of targets) {
@@ -161,14 +173,49 @@ async function selectLocale(locale, lang, labels) {
       chosenTargets.set(id, { ...base, role: "domain", domain, expected: id, surface });
       used.add(sentenceId);
     }
+    if (found.ids.length > 0) {
+      const expected = found.ids[0];
+      const surface = [...found.surfaces]
+        .find(([, ids]) => ids.includes(expected))?.[0] || "";
+      const candidate = { ...base, role: "open", domain: "open-lexical",
+        expected, surface };
+      if (!openByConcept.has(expected)) openByConcept.set(expected, candidate);
+      if (!openByAuthor.has(author)) openByAuthor.set(author, candidate);
+    }
   }
   const code = await new Promise((accept) => child.on("close", accept));
   if (code !== 0) throw new Error(`bzip2 failed for ${archive}: ${code}`);
   const rows = [...chosenTargets.values()];
-  if (ambiguity) rows.push(ambiguity);
-  if (negative) rows.push(negative);
+  const selectedAuthors = new Set(rows.map((row) => row.author));
+  const selectedConcepts = new Set(rows.flatMap((row) => row.ids));
+  const addUnique = (row) => {
+    if (!row || rows.length >= rowsPerLocale || used.has(row.sentenceId)) return false;
+    rows.push(row);
+    used.add(row.sentenceId);
+    selectedAuthors.add(row.author);
+    row.ids.forEach((id) => selectedConcepts.add(id));
+    return true;
+  };
+  [...negativeByAuthor.values()].slice(0, 4).forEach(addUnique);
+  [...ambiguityByAuthor.values()].slice(0, 4).forEach(addUnique);
+  const poolById = new Map();
+  [...openByAuthor.values(), ...openByConcept.values()].forEach((row) =>
+    poolById.set(row.sentenceId, row));
+  const pool = [...poolById.values()].sort((a, b) =>
+    a.rowHash.localeCompare(b.rowHash));
+  pool.filter((row) => !selectedAuthors.has(row.author) &&
+    row.ids.some((id) => !selectedConcepts.has(id))).forEach(addUnique);
+  pool.filter((row) => row.ids.some((id) => !selectedConcepts.has(id))).forEach(addUnique);
+  pool.forEach(addUnique);
+  if (rows.length !== rowsPerLocale) {
+    throw new Error(`${locale} selected ${rows.length}/${rowsPerLocale} rows`);
+  }
   rows.sort((a, b) => Number(a.sentenceId) - Number(b.sentenceId));
-  return { rows, scanned, targetCount: chosenTargets.size, hasAmbiguity: !!ambiguity, hasNegative: !!negative };
+  return { rows, scanned, targetCount: chosenTargets.size,
+    ambiguityCount: rows.filter((row) => row.role === "ambiguity").length,
+    negativeCount: rows.filter((row) => row.role === "negative").length,
+    openCount: rows.filter((row) => row.role === "open").length,
+    contributorCount: new Set(rows.map((row) => row.author)).size };
 }
 
 function rowText(row) {
@@ -188,11 +235,12 @@ for (const [locale, lang, expectedHash] of locales) {
   const observedHash = await shaFile(archive);
   if (observedHash !== expectedHash) throw new Error(`${lang} archive hash ${observedHash} != ${expectedHash}`);
   const url = `https://downloads.tatoeba.org/exports/per_language/${lang}/${lang}_sentences_detailed.tsv.bz2`;
-  manifest.push([locale, lang, "2026-07-18T06:52:00Z", expectedHash, url,
+  manifest.push([locale, lang, "2026-07-18T09:01:06Z", expectedHash, url,
     "CC-BY-2.0-FR", "https://creativecommons.org/licenses/by/2.0/fr/"].join("\t"));
   const report = await selectLocale(locale, lang, labels.get(locale));
   allRows.push(...report.rows);
-  reports.push({ locale, ...report });
+  const { rows: selectedRows, ...summary } = report;
+  reports.push({ locale, ...summary });
 }
 const header = "locale\ttatoeba_lang\tsentence_id\tauthor\tadded_utc\tmodified_utc\tlicense\tsentence_url\trole\tdomain\texpected_concept_id\tmatched_surface\tdetected_concept_count\tdetected_concept_ids\treview_state\tsource_row_sha256\tsentence";
 const snapshot = `${header}\n${allRows.map(rowText).join("\n")}\n`;
@@ -205,19 +253,27 @@ const countRole = (role) => allRows.filter((row) => row.role === role).length;
 const localeStats = locales.map(([locale]) => {
   const rows = allRows.filter((row) => row.locale === locale);
   return [locale, rows.length, rows.filter((row) => row.role === "domain").length,
+    rows.filter((row) => row.role === "open").length,
     rows.filter((row) => row.role === "ambiguity").length,
-    rows.filter((row) => row.role === "negative").length];
+    rows.filter((row) => row.role === "negative").length,
+    new Set(rows.map((row) => row.author)).size];
 });
 const metadataText = `; concept-human-corpus-13-metadata.fk -- exact bounded public-corpus evidence.\n; Source: Tatoeba detailed exports, retrieved 2026-07-18; CC BY 2.0 FR.\n; Human-contributed does not imply native-speaker or human-reviewed; reviewed count is zero.\n; witnessed: 2026-07-18 -> ${allRows.length} source rows, ${uniqueConcepts.size} detected concepts, 13/13 negative rows\n; preludes: form/form-stdlib/core.fk\n(do\n  (defn hcnl13-row-count () ${allRows.length})\n  (defn hcnl13-locale-count () 13)\n  (defn hcnl13-domain-count () ${countRole("domain")})\n  (defn hcnl13-ambiguity-count () ${countRole("ambiguity")})\n  (defn hcnl13-negative-count () ${countRole("negative")})\n  (defn hcnl13-detection-count () ${allRows.reduce((n, row) => n + row.ids.length, 0)})\n  (defn hcnl13-unique-concept-count () ${uniqueConcepts.size})\n  (defn hcnl13-attributed-count () ${allRows.length})\n  (defn hcnl13-human-reviewed-count () 0)\n  (defn hcnl13-data-path () "cognition/fixtures/human-corpus-13/tatoeba-human-sentences.tsv")\n  (defn hcnl13-manifest-path () "cognition/fixtures/human-corpus-13/ARCHIVES.tsv")\n  (defn hcnl13-data-sha256 () "${digest(snapshot)}")\n  (defn hcnl13-manifest-sha256 () "${digest(manifestText)}")\n  (defn hcnl13-locale-stats () (list\n${localeStats.map((row) => `    (list "${row[0]}" ${row.slice(1).join(" ")})`).join("\n")}))\n)\n`;
+const completedMetadataText = metadataText
+  .replace("13/13 negative rows", `${countRole("negative")} retained negative rows`)
+  .replace("  (defn hcnl13-ambiguity-count",
+    `  (defn hcnl13-open-count () ${countRole("open")})\n  (defn hcnl13-ambiguity-count`)
+  .replace("  (defn hcnl13-locale-stats",
+    `  (defn hcnl13-hash-valid? (path expected)\n    (if (str_eq (host-exec (str_concat "/usr/bin/shasum -a 256 "\n      (str_concat path (str_concat " | /usr/bin/grep -q '^"\n        (str_concat expected "  ' && printf 1")))) "") "1") 1 0))\n  (defn hcnl13-artifacts-valid? ()\n    (and (eq (hcnl13-hash-valid? (hcnl13-data-path)\n               (hcnl13-data-sha256)) 1)\n         (eq (hcnl13-hash-valid? (hcnl13-manifest-path)\n               (hcnl13-manifest-sha256)) 1)))\n  (defn hcnl13-locale-stats`);
 if (verifyOnly) {
   if (readFileSync(outputPath, "utf8") !== snapshot) throw new Error("selected sentence snapshot differs");
   if (readFileSync(manifestPath, "utf8") !== manifestText) throw new Error("archive manifest differs");
   if (readFileSync(offsetsPath, "utf8") !== offsetsText) throw new Error("Form offsets differ");
-  if (readFileSync(metadataPath, "utf8") !== metadataText) throw new Error("Form metadata differs");
+  if (readFileSync(metadataPath, "utf8") !== completedMetadataText) throw new Error("Form metadata differs");
 } else {
   writeFileSync(outputPath, snapshot);
   writeFileSync(manifestPath, manifestText);
   writeFileSync(offsetsPath, offsetsText);
-  writeFileSync(metadataPath, metadataText);
+  writeFileSync(metadataPath, completedMetadataText);
 }
 process.stdout.write(`${JSON.stringify({ snapshotSha256: digest(snapshot), rows: allRows.length, reports }, null, 2)}\n`);
