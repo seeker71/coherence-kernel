@@ -10,6 +10,7 @@ temp_dir=$(nm_new_temp_dir)
 fixture_root="$temp_dir/run"
 fixture="$fixture_root/.coherence-network/rag-index/index.jsonl"
 fixture_report="$temp_dir/fixture-report"
+missing_report="$temp_dir/missing-report"
 live_report="$temp_dir/live-report"
 
 cleanup() {
@@ -23,24 +24,32 @@ if [ ! -x "$form_cli" ]; then
     exit 1
 fi
 
-mkdir -p "$(dirname "$fixture")"
+fixture_source="$fixture_root/docs/grounding.form"
+mkdir -p "$(dirname "$fixture")" "$(dirname "$fixture_source")"
+printf '%s' 'grounding source fixture v2' > "$fixture_source"
+fixture_source_sha256=$(nm_sha256_file "$fixture_source")
+fixture_answer_sha256=$(printf '%s' 'A' | shasum -a 256 | awk '{print $1}')
 printf '%s\n' \
-    '{"id":"fixture/native-world-hit.fk","snippet":"rsi-fixture-needle","vec":[]}' \
+    "{\"id\":\"@1.1.9.41\",\"node_id\":\"@1.1.9.41\",\"content_node_id\":\"@8.4.4.12\",\"source_path\":\"docs/grounding.form\",\"kind\":\"cell\",\"key\":\"$fixture_source_sha256\",\"persisted_source_sha256\":\"$fixture_source_sha256\",\"schema\":\"nodeid-rag-v2\",\"embedding_kind\":\"form-semantic-v2\",\"snippet\":\"grounding\",\"answer_key\":\"$fixture_answer_sha256\",\"answer_hex\":\"41\",\"vec\":[753942,1030707]}" \
     > "$fixture"
 
 (
     cd "$fixture_root"
-    printf 'ask rsi-fixture-needle\ngrounded native-model-rag-definite-miss-7e4b\nquit\n' | "$form_cli"
+    printf 'grounded grounding\nquit\n' | "$form_cli"
 ) > "$fixture_report"
+(
+    cd "$fixture_root"
+    printf 'grounded native-model-rag-definite-miss-7e4b\nquit\n' | "$form_cli"
+) > "$missing_report"
 
 fixture_result=$(sed -n '1p' "$fixture_report")
-fixture_lane=$(sed -n '2p' "$fixture_report")
-fixture_synthesis=$(sed -n '3p' "$fixture_report")
-missing_result=$(sed -n '4p' "$fixture_report")
+fixture_lane=$(grep -Fx 'local-lane:fkwu-rag-grounded' "$fixture_report" | head -n 1 || true)
+fixture_synthesis=$(grep -Fx 'synthesis-lane:fkwu-rag-grounded' "$fixture_report" | head -n 1 || true)
+missing_result=$(sed -n '1p' "$missing_report")
 expected_match=0
 missing_match=0
 nonempty=0
-if [ "$fixture_result" = 'grounded:fixture/native-world-hit.fk' ] &&
+if [ "$fixture_result" = 'grounded:@1.1.9.41' ] &&
    [ "$fixture_lane" = 'local-lane:fkwu-rag-grounded' ] &&
    [ "$fixture_synthesis" = 'synthesis-lane:fkwu-rag-grounded' ]; then
     expected_match=1
