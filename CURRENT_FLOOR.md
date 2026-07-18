@@ -310,6 +310,25 @@ BML organ bands, PR #287 wired form_error end to end.)
 - Sema still does not have a native generative mind with real open weights
   loaded as recipe-data through the body.
 
+### 10,000-concept / 26-lens multimodal floor (2026-07-18)
+
+- Exactly 10,000 attributed OpenSubtitles2018 frequency-ranked English lexical
+  anchors are now addressable without allocating a 10,000-row Form list;
+  rank lookup is fixed-width arithmetic and exact text detection is a bounded
+  binary search. They are lexical anchors, not disambiguated senses.
+- Thirteen repository-ready natural-language phrase lenses and thirteen
+  programming-language bounded code lenses generate and detect four-way.
+  The joined live `water` witness re-detects all 26 generated surfaces.
+- Every concept ID and all thirteen lens slots have an independently exhausted
+  18-bit address membrane (130,000 valid concept/lens addresses). Actual PCM
+  audio and lossless FFV1 video generation recover the same address in Form.
+- Semantic completion remains zero: the audio is a tone code, the video is a
+  colour-bit code, NL generation is bounded phrase framing, PL generation is
+  bounded arithmetic-function emission, and the full 10,000 × 13 NL × 13 PL
+  semantic matrix has not been learned or executed.
+- Exact witness and work orders:
+  `receipts/2026-07-18-concept-10000-26-lens-multimodal.md`.
+
 ## Next Step Toward The North Star
 
 The star's sharpest present distance is not a missing organ — it is that the
