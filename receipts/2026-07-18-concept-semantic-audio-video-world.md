@@ -2,6 +2,14 @@
 
 Date: 2026-07-18
 
+Correction witnessed later the same day: the upstream route name `loop` had
+been mistaken for the lexical concept loop, and courthouse footage had been
+assigned to the broader `court` id. The executable cells now align the visible
+office route to **office 493**, keep **university 1927**, and align the civic
+building to **courthouse 9066**. The original ids 6196 and 751 are superseded
+by the corrected rows in this receipt and by
+`2026-07-18-video-content-sensing-alignment.md`.
+
 ## What moved
 
 The 10,000-concept address is no longer demonstrated only by exact synthetic
@@ -10,7 +18,7 @@ content:
 
 - speech: `water` (377), `world` (227), and `camera` (959), trained with the
   Samantha, Daniel, and Karen macOS voices and tested only with held-out Moira;
-- video: `loop` (6196), `university` (1927), and `courthouse` (751), learned
+- video: `office` (493), `university` (1927), and `courthouse` (9066), learned
   from committed 24-frame real-life trajectories and tested on disjoint frames.
 
 The carrier boundary is narrow. `say` and ffmpeg create/decode files. Form
@@ -62,9 +70,9 @@ frame as an exemplar.
 
 | scene | concept id | held-out correct |
 |---|---:|---:|
-| loop | 6196 | 4/4 |
+| office route | 493 | 4/4 |
 | university | 1927 | 4/4 |
-| courthouse | 751 | 4/4 |
+| courthouse | 9066 | 4/4 |
 
 Observed result: **12/12 held-out frames**. An opening-half centroid first
 scored 9/12 and exposed trajectory shift. Retaining four distributed views
@@ -91,9 +99,9 @@ Held-out frame 23 from all three videos was classified and persisted:
 
 | detected id | persistent cell | position | persistence |
 |---:|---|---:|---:|
-| 6196 | loop | 1 | 2 |
+| 493 | office | 1 | 2 |
 | 1927 | university | 2 | 2 |
-| 751 | courthouse | 3 | 2 |
+| 9066 | courthouse | 3 | 2 |
 
 Observed result: **3/3 concepts**, three ordinary `wm-model` rows, and
 `wm-orient-count world "concept"` = 3.
@@ -115,3 +123,8 @@ TS   127
   generative weights or native codecs.
 - Full semantic perceptual coverage remains much smaller than 10,000 concepts;
   this receipt establishes real data and an extensible native learning path.
+- The 12/12 score is specifically an interleaved split from the same three
+  trajectories. A harder early-to-late split and its reverse each score 10/18;
+  an independent Oxford walk scores 0/7 under this exemplar bank. Those misses
+  are preserved in the alignment receipt rather than inflated into general
+  scene recognition.
