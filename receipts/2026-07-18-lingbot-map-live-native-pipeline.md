@@ -1,5 +1,9 @@
 # 2026-07-18 — LingBot-Map becomes a live native visual-world pipeline
 
+Continuation: the two-frame 16×16 proving floor is expanded into four
+native-resolution 24-frame scenes in
+[`2026-07-18-lingbot-map-real-life-examples.md`](2026-07-18-lingbot-map-real-life-examples.md).
+
 ## Why this second receipt exists
 
 The first ingest receipt stopped at camera algebra and token accounting. Urs
