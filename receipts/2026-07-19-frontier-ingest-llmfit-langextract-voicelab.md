@@ -39,18 +39,18 @@ to the source sha256, and counts misses out loud. Witnessed exactly:
 Named next stones: multi-pass recall; seating the 13 locale columns behind
 an index so extraction becomes any-seat.
 
-## 3. voice_clone_lab → learn/voice-clone-consent-gate.fk (band 127)
+## 3. voice_clone_lab → learn/voice-clone-consent.fk (band 127)
 
 tetsuo-ai/voice_clone_lab (a Qwen3-TTS fine-tuning pipeline:
 extract→clean→chunk→transcribe→proofread→train) teaches three things, and
-this body keeps all three as executable gates BEFORE any cloning lane may
+this body keeps all three as doors a cloning lane walks through before it may
 exist here:
 
-- *Consent is a gate, not a footnote*: only `self` or
-  `written-permission` pass; anything else is refused with that sentence quoted
-  back — composing with the body's own reception-consent ethic.
+- *Consent comes first*: only `self` or
+  `written-permission` are admitted; anything else is not, with that sentence offered
+  back — composing with the body's reception-consent ethic.
 - *The proofread is the quality keystone* ("bad transcripts are the #1
-  cause of weird pronunciation"): one unproofread chunk refuses the whole
+  cause of weird pronunciation"): one unproofread chunk pauses the whole
   training run, counted and named, never averaged away.
 - *Hardware floors are stage-specific* (24 GB train / 8 GB infer), and the
   verdict is COMPUTED live through observe/model-fit.fk's measured floor —
@@ -78,7 +78,7 @@ organization: no such project grounds anywhere reachable. It stays pending
 ```text
 observe/tests/model-fit-band.fk               -> 255
 cognition/tests/nl-extract-band.fk            -> 255
-learn/tests/voice-clone-consent-gate-band.fk  -> 127
+learn/tests/voice-clone-consent-band.fk       -> 127
 ```
 
 These organs open host files, so they are fkwu-witnessed with their own
