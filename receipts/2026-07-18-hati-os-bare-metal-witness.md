@@ -17,8 +17,8 @@ process pretending, not a framework — a boot sector the firmware reads at
   IDT + remapped PICs + PIT at 100 Hz; a **preemptive round-robin
   scheduler**; a page-bitmap physical allocator (1 MB..8 MB); a ramfs; and
   a serial shell (`help ps mem ls cat write echo uptime spin halt`).
-- `linker.ld` — the image law. Build and run are README one-liners — no
-  build scripts, the same law as `BOOTSTRAP.md`.
+- `linker.ld` — the image layout. Build and run are README one-liners — no
+  build scripts, the same convention as `BOOTSTRAP.md`.
 
 ## The witness (committed: os/hati-os/witness/first-boot.txt)
 

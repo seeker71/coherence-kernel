@@ -102,7 +102,7 @@ Two real seams surfaced and are named in the trace instead of papered over:
   (analysis only, nothing committed depends on it): 1,916 of the 7,371 mapped
   anchors have an in-table direct parent.
 
-One performance law joined the carrier-boundary notes: `len` is a full list
+One performance lesson joined the carrier-boundary notes: `len` is a full list
 walk, so calling it per step of a 10k scan turns the scan into minutes —
 `nil?` on the tail is the shape (measured: the walk went from timeout to
 instant).

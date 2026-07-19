@@ -19,13 +19,13 @@ in `form/form-stdlib/hati-os-targets.fk`).
   `heart` tasks beat forever as living proof); a page-granular physical
   allocator (bitmap, 1 MB..8 MB); a ramfs (`name -> bytes`); and a serial
   shell: `help ps mem ls cat write echo uptime spin halt`.
-- **linker.ld** — the image layout law.
+- **linker.ld** — the image layout.
 
 Honest floors, named: single CPU, ring 0 only (no privilege split), no
 paging/virtual memory, no disk filesystem (ramfs only), CHS boot read of one
 track. Each is a floor with the next stone visible from it.
 
-## Build (one-liners, no scripts — the same law as BOOTSTRAP.md)
+## Build (one-liners, no scripts — the same convention as BOOTSTRAP.md)
 
 ```
 gcc -m32 -ffreestanding -fno-pic -fno-stack-protector -Os -Wall -Wextra -c kernel.c -o kernel.o

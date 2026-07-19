@@ -16,7 +16,7 @@ from active parameters (per-token compute and the offload floor).
 
 Landed natively: `mf-host-floor` reads /proc/meminfo through the host door
 and measures the real box; the full Q8_0..Q2_K ladder is walked with
-fixed-point bytes-per-parameter and a flat 10% overhead; the MoE law is
+fixed-point bytes-per-parameter and a flat 10% overhead; the MoE handling is
 executable (witnessed on this container: mixtral-8x7b's 46.7B total fits at
 no quant in ~15.4 GB, while its 12.9B active set carries a Q8_0 offload
 floor). Honest floors named: CPU/RAM only — no GPU door exists in this
@@ -33,7 +33,7 @@ more passes rather than looser matching.
 Landed natively over the body this kernel already owns: `nlx-extract`
 scans free text with a byte-offset word scanner, grounds every hit to the
 10k concept table through the binary-searched lexical index, binds the run
-to the source's sha256, and counts misses out loud. Witnessed law:
+to the source sha256, and counts misses out loud. Witnessed exactly:
 `"water fire time house xylophonez"` → water=377@[0..5), fire=454@[6..10),
 4 grounded, 1 honest miss; rows always equal hits (nothing floats free).
 Named next stones: multi-pass recall; seating the 13 locale columns behind
@@ -42,12 +42,12 @@ an index so extraction becomes any-seat.
 ## 3. voice_clone_lab → learn/voice-clone-consent-gate.fk (band 127)
 
 tetsuo-ai/voice_clone_lab (a Qwen3-TTS fine-tuning pipeline:
-extract→clean→chunk→transcribe→proofread→train) teaches three laws, and
+extract→clean→chunk→transcribe→proofread→train) teaches three things, and
 this body keeps all three as executable gates BEFORE any cloning lane may
 exist here:
 
 - *Consent is a gate, not a footnote*: only `self` or
-  `written-permission` pass; anything else is refused with the law quoted
+  `written-permission` pass; anything else is refused with that sentence quoted
   back — composing with the body's own reception-consent ethic.
 - *The proofread is the quality keystone* ("bad transcripts are the #1
   cause of weird pronunciation"): one unproofread chunk refuses the whole
