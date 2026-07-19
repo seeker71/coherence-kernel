@@ -203,10 +203,24 @@ Witnessed arrival times (piped, timestamped per line): boot events at
 +0.00–0.02 s after compile; seven seat verdicts streaming individually;
 full two-lane run complete in ~12 s; band verdict unchanged at **1048575**.
 
+## Sixth pass (2026-07-19): Spanish seated, the floor regrounded
+
+After #328 and #333 merged, the branch was regrounded on `7667fad`
+(bootstrap 42/55 re-measured) and the next stone walked: **Spanish on the
+one pivot** (`cognition/nl-pivot-es.fk`) — one grammar (el|la|los|las
+through an alt pattern), one column, pivot untouched. The first probe
+surfaced a real agreement wound (`el nucleo es nativa`); the fix keeps
+agreement in the column, never the pivot: the adjective row carries both
+gender forms and the decoder picks by the subject's own article
+(witnessed: `la fuente es nativa`, `el nucleo es nativo`). The sovereignty
+witness now spans FOUR tongues: es/de/en/id intern the SAME pivot cell
+(`node_eq`, band bit 2097152). Band: **4194303** (22 bits).
+`CURRENT_FLOOR.md` carries the new reground section.
+
 ## Still open, in order
 
-1. Seat the remaining 10 tongues on the pivot (`nl-pivot-de.fk` is the worked
-   example: one grammar + one column each).
+1. Seat the remaining 9 tongues on the pivot (`nl-pivot-de.fk` and
+   `nl-pivot-es.fk` are the worked examples: one grammar + one column each).
 2. Native-speaker review of mapped labels and the de seed rows.
 3. A native (or JIT-crystallized) `str_find` so the production stream can
    scan the full index at sidecar speed and the rank cache becomes optional.
