@@ -1,0 +1,102 @@
+; nl-extract.fk — byte-grounded concept extraction from free text.
+;
+; Frontier ingest, distilled from LangExtract (google/langextract): its
+; teaching is that an extraction is only trustworthy while it stays BOUND to
+; its source — every extracted entity carries the exact character interval it
+; came from, ungrounded results are marked and filterable (never silently
+; kept), the output schema is taught by example rows, and recall is grown by
+; further passes rather than by loosening the match.
+;
+; What is deliberately NOT taken: the Python body, the LLM dependency, the
+; cloud models. This kernel already owns a 10,000-anchor concept body with a
+; binary-searched lexical index (model/concept-10000.fk) — the teaching
+; lands as a native scanner that grounds every hit to source byte intervals
+; and binds the whole extraction set to the source's sha256.
+;
+; The extraction row IS the schema-by-example (LangExtract's law, in Form):
+;   (nlx-row concept-id label start end)   with source-sha over the run.
+; A word with no concept row is an honest miss — counted, never invented.
+;
+; Honest floors: single pass (multi-pass recall is a named next stone);
+; ASCII word scanning (the same byte-classed boundary text-tokenize.fk
+; documents); en-anchor lookup only (the 13-seat columns are scan-priced,
+; not index-priced — seating them behind an index is open work).
+;
+; witnessed: 2026-07-19 -> 255 live fkwu (cognition/tests/nl-extract-band.fk)
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/sha256.fk form/form-stdlib/hex.fk
+; preludes: form/form-stdlib/form-fs.fk model/concept-10000-data.fk model/concept-10000.fk
+(do
+  (defn nlx-cat (xs) (if (eq (len xs) 0) "" (nlx-cat2 (head xs) (nlx-cat (tail xs)))))
+  (defn nlx-cat2 (a b) (str_concat a b))
+  (defn nlx-bytes-go (s i n) (if (ge i n) (empty) (cons (str_byte_at s i) (nlx-bytes-go s (add i 1) n))))
+  (defn nlx-sha-hex (s) (hex-encode (sha256 (nlx-bytes-go s 0 (str_len s)))))
+
+  ;; ---- ASCII word scanner with byte offsets ----
+  (defn nlx-alpha? (b)
+    (if (or (and (ge b 97) (le b 122)) (and (ge b 65) (le b 90))) 1 0))
+  (defn nlx-lower-go (s i n out)
+    (if (ge i n) out
+      (do (let b (str_byte_at s i))
+          (nlx-lower-go s (add i 1) n
+            (str_concat out (byte_to_str (if (and (ge b 65) (le b 90)) (add b 32) b)))))))
+  (defn nlx-lower (s) (nlx-lower-go s 0 (str_len s) ""))
+  ; next word from position i: (start end) or (empty) at text end
+  (defn nlx-next-word (text i n)
+    (if (ge i n) (empty)
+      (if (eq (nlx-alpha? (str_byte_at text i)) 0)
+        (nlx-next-word text (add i 1) n)
+        (nlx-word-end text i (add i 1) n))))
+  (defn nlx-word-end (text start i n)
+    (if (or (ge i n) (eq (nlx-alpha? (str_byte_at text i)) 0))
+      (list start i)
+      (nlx-word-end text start (add i 1) n)))
+
+  ;; ---- one extraction row, grounded: (concept-id label start end) ----
+  (defn nlx-row (id label start end) (list id label start end))
+  (defn nlx-row-id (r) (nth r 0))
+  (defn nlx-row-label (r) (nth r 1))
+  (defn nlx-row-start (r) (nth r 2))
+  (defn nlx-row-end (r) (nth r 3))
+
+  ;; ---- the scan: every hit grounded, every miss counted ----
+  ; result = (rows grounded-count miss-count source-sha)
+  (defn nlx-scan-go (ranked lexical text i n rows hits misses)
+    (do (let w (nlx-next-word text i n))
+        (if (eq (len w) 0) (list (reverse rows) hits misses)
+          (do (let start (nth w 0))
+              (let end (nth w 1))
+              (let word (nlx-lower (substring text start end)))
+              (let c (c10-detect-text-in ranked lexical word))
+              (if (c10-missing? c)
+                (nlx-scan-go ranked lexical text end n rows hits (add misses 1))
+                (nlx-scan-go ranked lexical text end n
+                  (cons (nlx-row (c10-concept-id c) (c10-concept-label c) start end) rows)
+                  (add hits 1) misses))))))
+  (defn nlx-extract (text)
+    (do (let ranked (read_file (c10-ranked-path)))
+        (let lexical (read_file (c10-lexical-index-path)))
+        (let r (nlx-scan-go ranked lexical text 0 (str_len text) (empty) 0 0))
+        (list (nth r 0) (nth r 1) (nth r 2) (nlx-sha-hex text))))
+  (defn nlx-rows (x) (nth x 0))
+  (defn nlx-hits (x) (nth x 1))
+  (defn nlx-misses (x) (nth x 2))
+  (defn nlx-source-sha (x) (nth x 3))
+
+  ;; ---- render: every line carries its interval; nothing floats free ----
+  (defn nlx-render-rows (rows out)
+    (if (eq (len rows) 0) out
+      (nlx-render-rows (tail rows)
+        (str_concat out (nlx-cat (list
+          "  concept " (int_to_str (nlx-row-id (head rows)))
+          " '" (nlx-row-label (head rows))
+          "' @bytes [" (int_to_str (nlx-row-start (head rows)))
+          ".." (int_to_str (nlx-row-end (head rows))) ")\n"))))))
+  (defn nlx-report (text)
+    (do (let x (nlx-extract text))
+        (nlx-cat (list
+          "source sha256: " (nlx-source-sha x) "\n"
+          "grounded extractions: " (int_to_str (nlx-hits x))
+          " | honest misses (no concept row): " (int_to_str (nlx-misses x)) "\n"
+          (nlx-render-rows (nlx-rows x) "")))))
+  0)
