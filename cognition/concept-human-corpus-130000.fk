@@ -1,0 +1,170 @@
+; concept-human-corpus-130000.fk -- random access and exhaustive native audit.
+;
+; Pinned shard/index hashes remain transport provenance in SOURCE-MANIFEST.tsv.
+; Runtime integrity does not rent a shell: Form checks exact sizes and every
+; sequential index boundary, reconstructs every original six-field Tatoeba row
+; from the projection, recomputes its SHA-256, and verifies the retained
+; source-row hash. Counts or transport hashes alone cannot stand in for that
+; content-path witness.
+; witnessed: 2026-07-20 -> random access operational; exhaustive audit door
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk cognition/concept-human-corpus-130000-metadata.fk cognition/concept-human-corpus-130000-ingest.fk observe/framebuffer-runtime-observation.fk
+
+(do
+  (defn chc130-spec-locale (s) (nth s 0))
+  (defn chc130-spec-lang (s) (nth s 1))
+  (defn chc130-spec-rows (s) (nth s 2))
+  (defn chc130-spec-target (s) (nth s 3))
+  (defn chc130-spec-data-path (s) (nth s 4))
+  (defn chc130-spec-data-hash (s) (nth s 5))
+  (defn chc130-spec-data-bytes (s) (nth s 6))
+  (defn chc130-spec-index-path (s) (nth s 7))
+  (defn chc130-spec-index-hash (s) (nth s 8))
+  (defn chc130-spec-index-bytes (s) (nth s 9))
+  (defn chc130-spec-archive-hash (s) (nth s 10))
+  (defn chc130-spec-archive-bytes (s) (nth s 11))
+  (defn chc130-spec-archive-url (s) (nth s 12))
+  (defn chc130-spec-status (s) (nth s 13))
+
+  (defn chc130-spec-at-go (specs locale)
+    (if (eq (len specs) 0) (empty)
+      (if (str_eq (chc130-spec-locale (head specs)) locale) (head specs)
+        (chc130-spec-at-go (tail specs) locale))))
+  (defn chc130-spec-at (locale) (chc130-spec-at-go (chc130-specs) locale))
+
+  (defn chc130-u32-at (index-path index)
+    (do
+      (let b (fs-read-slice index-path (mul index 4) 4))
+      (if (not (eq (str_len b) 4)) -1
+        (add (str-byte-at b 0)
+          (add (mul (str-byte-at b 1) 256)
+            (add (mul (str-byte-at b 2) 65536)
+                 (mul (str-byte-at b 3) 16777216)))))))
+  (defn chc130-row-line (spec index)
+    (if (or (lt index 0) (ge index (chc130-spec-rows spec))) ""
+      (do
+        (let start (chc130-u32-at (chc130-spec-index-path spec) index))
+        (let end (chc130-u32-at (chc130-spec-index-path spec) (add index 1)))
+        (if (or (lt start 0) (le end start)) ""
+          (fs-read-slice (chc130-spec-data-path spec) start (sub (sub end start) 1))))))
+  (defn chc130-row-at (locale index)
+    (do (let spec (chc130-spec-at locale))
+        (if (eq (len spec) 0) "" (chc130-row-line spec index))))
+
+  (defn chc130-source-line (row)
+    (chc130-concat (list
+      (chc130-field row 2) "\t" (chc130-field row 1) "\t"
+      (chc130-field row 10) "\t" (chc130-field row 3) "\t"
+      (chc130-field row 4) "\t" (chc130-field row 5))))
+  (defn chc130-hex-byte? (b)
+    (or (and (ge b 48) (le b 57)) (and (ge b 97) (le b 102))))
+  (defn chc130-hex64-go (s i)
+    (if (eq i 64) 1
+      (if (eq (chc130-hex-byte? (str-byte-at s i)) 0) 0
+        (chc130-hex64-go s (add i 1)))))
+  (defn chc130-hex64? (s)
+    (and (eq (str_len s) 64) (eq (chc130-hex64-go s 0) 1)))
+  (defn chc130-source-hash-valid? (row)
+    (and (eq (chc130-hex64? (chc130-field row 9)) 1)
+      (str_eq (chc130-source-hash (chc130-source-line row))
+              (chc130-field row 9))))
+  (defn chc130-row-structure-valid? (spec row previous-id)
+    (do
+      (let sentence-id (str_to_int (chc130-field row 2)))
+      (and (eq (chc130-field-count row) 11)
+        (and (str_eq (chc130-field row 0) (chc130-spec-locale spec))
+          (and (str_eq (chc130-field row 1) (chc130-spec-lang spec))
+            (and (gt sentence-id previous-id)
+              (and (not (str_eq (chc130-field row 3) ""))
+                (and (not (str_eq (chc130-field row 10) ""))
+                  (and (str_eq (chc130-field row 6) "CC-BY-2.0-FR")
+                    (and (str_eq (chc130-field row 7)
+                      (chc130-page-url (chc130-field row 2)))
+                      (str_eq (chc130-field row 8)
+                        "human-contributed-unreviewed")))))))))))
+
+  ; audit = locale, rows, structurally valid, source hashes valid, failures,
+  ;         first id, last id, monotonic ids, index terminal, artifact hashes.
+  (defn chc130-audit-go
+    (spec index structural hashes previous-id first-id monotonic)
+    (if (ge index (chc130-spec-rows spec))
+      (do
+        (let terminal (chc130-u32-at (chc130-spec-index-path spec) index))
+        (list (chc130-spec-locale spec) index structural hashes
+          (sub index (if (lt structural hashes) structural hashes))
+          first-id previous-id monotonic terminal))
+      (do
+        (let row (chc130-row-line spec index))
+        (let sentence-id (str_to_int (chc130-field row 2)))
+        (let structure-ok (chc130-row-structure-valid? spec row previous-id))
+        (let hash-ok (chc130-source-hash-valid? row))
+        (chc130-audit-go spec (add index 1)
+          (add structural structure-ok) (add hashes hash-ok) sentence-id
+          (if (eq index 0) sentence-id first-id)
+          (and monotonic (if (eq index 0) 1 (gt sentence-id previous-id)))))))
+
+  (defn chc130-spec-artifacts-valid? (spec)
+    (and (eq (fs-stat-size (chc130-spec-data-path spec))
+             (chc130-spec-data-bytes spec))
+      (and (eq (fs-stat-size (chc130-spec-index-path spec))
+               (chc130-spec-index-bytes spec))
+        (and (eq (chc130-spec-index-bytes spec)
+                 (mul (add (chc130-spec-rows spec) 1) 4))
+          (and (eq (chc130-u32-at (chc130-spec-index-path spec) 0)
+                   (str_len (chc130-header)))
+               (eq (chc130-u32-at (chc130-spec-index-path spec)
+                     (chc130-spec-rows spec))
+                   (chc130-spec-data-bytes spec)))))))
+  (defn chc130-audit-spec (spec)
+    (do
+      (let audit (chc130-audit-go spec 0 0 0 -1 -1 1))
+      (list audit
+        (eq (nth audit 1) (chc130-spec-rows spec))
+        (eq (nth audit 2) (chc130-spec-rows spec))
+        (eq (nth audit 3) (chc130-spec-rows spec))
+        (eq (nth audit 7) 1)
+        (eq (nth audit 8) (chc130-spec-data-bytes spec))
+        (chc130-spec-artifacts-valid? spec))))
+  (defn chc130-audit-locale (locale)
+    (do (let spec (chc130-spec-at locale))
+        (if (eq (len spec) 0) (list "unknown-locale")
+          (chc130-audit-spec spec))))
+
+  ; The observation report is returned beside, and before interpretation of,
+  ; the audit.  Resource costs are measured, not apportioned by row count.
+  (defn chc130-audit-observed (locale)
+    (do
+      (let spec (chc130-spec-at locale))
+      (let window (fbro-open (str_concat "human-corpus-audit-" locale)
+        "Sema" "audits-attributed-human-sentences"
+        "verify-source-content-before-coverage-claim"
+        "user-requested-framebuffer-first"
+        (add (chc130-spec-data-bytes spec) (chc130-spec-index-bytes spec))
+        "cognition/concept-human-corpus-130000.fk" 148 7))
+      (let before (fbro-snapshot))
+      (let audit (chc130-audit-spec spec))
+      (let after (fbro-snapshot))
+      (let ok (and (nth audit 1) (and (nth audit 2)
+        (and (nth audit 3) (and (nth audit 4) (and (nth audit 5) (nth audit 6)))))))
+      (let outcome (if ok "complete-source-content-audit"
+        "audit-refuted-or-incomplete"))
+      (let stage (fbro-stage-observed
+        (str_concat "human-corpus-audit-" locale) "source-content-audit"
+        "trace-begin" "Sema" "audits-attributed-human-sentences"
+        "verify-source-content-before-coverage-claim"
+        "user-requested-framebuffer-first" before after
+        "rows" (chc130-spec-rows spec) outcome
+        "cognition/concept-human-corpus-130000.fk" 163 7))
+      (let report (fbro-close window outcome (chc130-spec-rows spec)
+        "cognition/concept-human-corpus-130000.fk" 166 7))
+      (list report audit)))
+
+  (defn chc130-quote (locale index)
+    (do
+      (let row (chc130-row-at locale index))
+      (if (str_eq row "") (empty)
+        (list "attributed-human-quote-not-novel-generation"
+          (chc130-field row 0) (str_to_int (chc130-field row 2))
+          (chc130-field row 3) (chc130-field row 6)
+          (chc130-field row 7) (chc130-field row 8)
+          (chc130-field row 9) (chc130-field row 10)))))
+)
