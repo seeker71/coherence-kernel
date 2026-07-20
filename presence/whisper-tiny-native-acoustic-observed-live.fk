@@ -5,7 +5,9 @@
 ; released encoder, complete decoder, 51,865-row tied-vocabulary scan, and
 ; world-admission gate.  Form places source-attributed stage nodes around each
 ; boundary, reads them back from fkwu's framebuffer, and carries whole-window
-; clock/allocation/I/O counters into the kernel world model.
+; clock/allocation/I/O counters into the kernel world model.  Each stage now
+; carries its own exact counter delta; the whole-window total remains the
+; independent envelope that also includes inter-stage observation overhead.
 ;
 ; There is no automatic per-function source trace on fkwu yet.  These are
 ; explicit boundary events plus exact kernel counter deltas, not a claim that
@@ -20,40 +22,40 @@
 (do
   (defn wtaol-path ()
     "model/fixtures/whisper-tiny/lingua-libre-book-16k.wav")
-  (defn wtaol-stage (stage parent started ended metric value outcome line)
-    (fbro-stage "whisper-tiny-human-acoustic" stage parent "Sema"
+  (defn wtaol-stage (stage parent before after metric value outcome line)
+    (fbro-stage-observed-stream "whisper-tiny-human-acoustic" stage parent "Sema"
       "senses-human-speech" "understand-what-where-why"
-      "user-requested-native-acoustic-evidence" started ended metric value
+      "user-requested-native-acoustic-evidence" before after metric value
       outcome "presence/whisper-tiny-native-acoustic-observed-live.fk" line 7))
 
   (defn whisper-tiny-native-acoustic-observed-live-run ()
     (do
       (let path (wtaol-path))
-      (let window (fbro-open "whisper-tiny-human-acoustic" "Sema"
+      (let window (fbro-open-stream "whisper-tiny-human-acoustic" "Sema"
         "senses-human-speech" "understand-what-where-why"
         "user-requested-native-acoustic-evidence" (wtal-source-byte-count)
         "presence/whisper-tiny-native-acoustic-observed-live.fk" 32 7))
 
-      (let source-start (now_unix_ms))
+      (let source-start (fbro-snapshot))
       (let source-valid (wtal-source-valid? path))
-      (let source-end (now_unix_ms))
+      (let source-end (fbro-snapshot))
       (let source-event (wtaol-stage "source-verified" "trace-begin"
         source-start source-end "wav-bytes" (wtal-source-byte-count)
         (if (eq source-valid 1) "verified-human-cc0" "rejected") 40))
 
-      (let encoder-start (now_unix_ms))
+      (let encoder-start (fbro-snapshot))
       (let acoustic (if (eq source-valid 1) (wte-infer-file path) (empty)))
-      (let encoder-end (now_unix_ms))
+      (let encoder-end (fbro-snapshot))
       (let encoder-event (wtaol-stage "encoder-complete" "source-verified"
         encoder-start encoder-end "causal-parameters"
         (if (eq (len acoustic) 28) (nth acoustic 15) 0)
         (if (and (eq (len acoustic) 28) (eq (nth acoustic 22) 1))
           "complete" "held") 47))
 
-      (let decoder-start (now_unix_ms))
+      (let decoder-start (fbro-snapshot))
       (let decoder (if (eq (len acoustic) 28)
         (wtd-infer-encoder path (nth acoustic 27)) (empty)))
-      (let decoder-end (now_unix_ms))
+      (let decoder-end (fbro-snapshot))
       (let decoder-event (wtaol-stage "decoder-complete" "encoder-complete"
         decoder-start decoder-end "causal-parameters"
         (if (eq (len decoder) 28) (nth decoder 11) 0)
@@ -63,24 +65,24 @@
       (let final-state (if (and (eq (len decoder) 28)
             (eq (len (nth decoder 27)) 4))
         (nth (nth decoder 27) 3) (empty)))
-      (let vocabulary-start (now_unix_ms))
+      (let vocabulary-start (fbro-snapshot))
       (let vocabulary (if (eq (len final-state) 384)
         (wtv-scan final-state) (list -1 0.0 -1 0.0 0)))
-      (let vocabulary-end (now_unix_ms))
+      (let vocabulary-end (fbro-snapshot))
       (let vocabulary-event (wtaol-stage "vocabulary-scanned" "decoder-complete"
         vocabulary-start vocabulary-end "rows" (nth vocabulary 4)
         (if (eq (nth vocabulary 4) 51865) "complete" "held") 70))
 
       ; No filename-derived or host-decoded text is admitted.  Until native
       ; generation yields decoded content, the same production gate refuses.
-      (let world-start (now_unix_ms))
+      (let world-start (fbro-snapshot))
       (let world-gate (wtal-world-admit (empty) acoustic))
-      (let world-end (now_unix_ms))
+      (let world-end (fbro-snapshot))
       (let world-event (wtaol-stage "world-gate" "vocabulary-scanned"
         world-start world-end "admitted" (nth world-gate 1)
         (if (eq (nth world-gate 1) 1) "admitted" "held-no-native-text") 79))
 
-      (let report (fbro-close window
+      (let report (fbro-close-stream window
         (if (and (eq source-valid 1)
               (and (eq (len acoustic) 28)
                 (and (eq (len decoder) 28) (eq (nth vocabulary 4) 51865))))
@@ -102,12 +104,17 @@
 
   (defn wtaol-stage-duration (report event-index)
     (nth (nth (nth (fbro-events report) event-index) 3) 10))
+  (defn wtaol-stage-resource (report event-index metric)
+    (fbro-event-number (nth (fbro-events report) event-index) metric))
   (defn wtaol-execute ()
     (do
       (let run (whisper-tiny-native-acoustic-observed-live-run))
       (let report (nth run 6))
       (let resources (fbro-resources report))
       (let where (fbro-where report))
+      (let duration-bottleneck (fbro-bottleneck report "duration-ms"))
+      (let dispatch-bottleneck (fbro-bottleneck report "dispatches"))
+      (let float-bottleneck (fbro-bottleneck report "boxed-floats"))
       (print_str (ca13-cat (list
         "framebuffer-runtime-observation trace=whisper-tiny-human-acoustic"
         " start=" (int_to_str (nth (fbro-when report) 1))
@@ -117,6 +124,21 @@
         " decoder-ms=" (int_to_str (wtaol-stage-duration report 3))
         " vocabulary-ms=" (int_to_str (wtaol-stage-duration report 4))
         " world-ms=" (int_to_str (wtaol-stage-duration report 5))
+        " encoder-dispatches=" (int_to_str
+          (wtaol-stage-resource report 2 "dispatches"))
+        " decoder-dispatches=" (int_to_str
+          (wtaol-stage-resource report 3 "dispatches"))
+        " vocabulary-dispatches=" (int_to_str
+          (wtaol-stage-resource report 4 "dispatches"))
+        " encoder-boxed-floats=" (int_to_str
+          (wtaol-stage-resource report 2 "boxed-floats"))
+        " decoder-boxed-floats=" (int_to_str
+          (wtaol-stage-resource report 3 "boxed-floats"))
+        " vocabulary-boxed-floats=" (int_to_str
+          (wtaol-stage-resource report 4 "boxed-floats"))
+        " time-bottleneck=" (nth duration-bottleneck 2)
+        " dispatch-bottleneck=" (nth dispatch-bottleneck 2)
+        " float-bottleneck=" (nth float-bottleneck 2)
         " dispatches=" (int_to_str (fbrw-resource-number resources "dispatches" 0))
         " nodes=" (int_to_str (fbrw-resource-number resources "interned-nodes" 0))
         " strings=" (int_to_str (fbrw-resource-number resources "string-pool" 0))
