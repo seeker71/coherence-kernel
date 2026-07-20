@@ -1,0 +1,173 @@
+; framebuffer-runtime-observation.fk -- trace-first eyes over a real fkwu run.
+;
+; This is the kernel framebuffer, not a screen capture.  fkwu already counts
+; every native operation (kernel_stat), carries a bounded ordered list of
+; source-attributed nodes (framebuffer-events), and can recover each node's
+; (file line col) with node_source.  This organ turns those native facts into
+; one inspectable observation window answering:
+;
+;   what fired; where; who/which relation; why/which offer; when/how long;
+;   dispatch, allocation and I/O cost; and the outcome.
+;
+; The runtime cannot yet emit a source row for every Form function dispatch.
+; Callers therefore place attributed BEGIN/END markers around meaningful
+; stages.  Everything between them is measured exactly by cumulative fkwu
+; counters.  The counter delta includes the small observer cost and says so;
+; an empty-window calibration makes that overhead measurable rather than
+; invisible.  No C seed growth and no host script is involved.
+;
+; witnessed: 2026-07-20 -> native source rows + clock/cost deltas on fkwu
+; preludes: form/form-stdlib/core.fk
+
+(do
+  (defn fbro-stat (key) (kernel_stat key))
+  (defn fbro-io-count ()
+    (sum (list
+      (fbro-stat 160) (fbro-stat 161) (fbro-stat 162) (fbro-stat 163)
+      (fbro-stat 204) (fbro-stat 205) (fbro-stat 207)
+      (fbro-stat 218) (fbro-stat 219) (fbro-stat 220) (fbro-stat 221)
+      (fbro-stat 222) (fbro-stat 223) (fbro-stat 224) (fbro-stat 225)
+      (fbro-stat 226) (fbro-stat 233) (fbro-stat 234) (fbro-stat 235)
+      (fbro-stat 236) (fbro-stat 302) (fbro-stat 305) (fbro-stat 306)
+      (fbro-stat 307) (fbro-stat 308) (fbro-stat 309) (fbro-stat 310)
+      (fbro-stat 311) (fbro-stat 312) (fbro-stat 313) (fbro-stat 314)
+      (fbro-stat 316) (fbro-stat 317) (fbro-stat 318) (fbro-stat 319)
+      (fbro-stat 320) (fbro-stat 321) (fbro-stat 322) (fbro-stat 323)
+      (fbro-stat 334) (fbro-stat 335) (fbro-stat 336) (fbro-stat 337))))
+
+  ; Snapshot shape: time, dispatches, distinct ops, hottest tag/count,
+  ; interned nodes, strings, arena cons cells, value-stack high-water,
+  ; boxed floats, and observable I/O/sense dispatch count.
+  (defn fbro-snapshot ()
+    (do
+      (let t (now_unix_ms))
+      (let distinct (fbro-stat 1))
+      (let hot-tag (fbro-stat 2))
+      (let hot-count (fbro-stat 3))
+      (let nodes (fbro-stat 4))
+      (let strings (fbro-stat 5))
+      (let arena (fbro-stat 6))
+      (let stack (fbro-stat 7))
+      (let floats (fbro-stat 8))
+      (let io (fbro-io-count))
+      ; Total last: the observation calls above are honestly in the window.
+      (let dispatches (fbro-stat 0))
+      (list t dispatches distinct hot-tag hot-count nodes strings arena stack floats io)))
+
+  (defn fbro-snap-time (s) (nth s 0))
+  (defn fbro-snap-dispatches (s) (nth s 1))
+  (defn fbro-snap-nodes (s) (nth s 5))
+  (defn fbro-snap-strings (s) (nth s 6))
+  (defn fbro-snap-arena (s) (nth s 7))
+  (defn fbro-snap-stack (s) (nth s 8))
+  (defn fbro-snap-floats (s) (nth s 9))
+  (defn fbro-snap-io (s) (nth s 10))
+
+  ; Marker payload is deliberately all trivial nodes so a Form observer can
+  ; recover it with node_children + node_value without a side schema.
+  (defn fbro-marker (phase trace-id actor relation why offer stamp file line col)
+    (intern_node_at (bp "FRAMEBUFFER-RUNTIME-EVENT")
+      (list (intern_trivial_string phase)
+            (intern_trivial_string trace-id)
+            (intern_trivial_string actor)
+            (intern_trivial_string relation)
+            (intern_trivial_string why)
+            (intern_trivial_string offer)
+            (intern_trivial_int stamp))
+      file line col))
+
+  ; A caller places one of these immediately after each expensive semantic
+  ; boundary.  causal-parent names the preceding stage; metric/value carry the
+  ; stage's own useful magnitude (bytes, parameters, rows, or world entries).
+  (defn fbro-stage (trace-id stage causal-parent actor relation why offer
+                    started ended metric value outcome file line col)
+    (intern_node_at (bp "FRAMEBUFFER-RUNTIME-STAGE")
+      (list (intern_trivial_string "stage")
+            (intern_trivial_string trace-id)
+            (intern_trivial_string stage)
+            (intern_trivial_string causal-parent)
+            (intern_trivial_string actor)
+            (intern_trivial_string relation)
+            (intern_trivial_string why)
+            (intern_trivial_string offer)
+            (intern_trivial_int started)
+            (intern_trivial_int ended)
+            (intern_trivial_int (sub ended started))
+            (intern_trivial_string metric)
+            (intern_trivial_int value)
+            (intern_trivial_string outcome))
+      file line col))
+
+  ; Window = metadata + initial native snapshot + attributed BEGIN node.
+  (defn fbro-open (trace-id actor relation why offer input-bytes file line col)
+    (do
+      (framebuffer-clear)
+      (let before (fbro-snapshot))
+      (let begin (fbro-marker "begin" trace-id actor relation why offer
+                    (fbro-snap-time before) file line col))
+      (list "framebuffer-window" trace-id actor relation why offer input-bytes
+            file line col before begin)))
+
+  (defn fbro-window-before (w) (nth w 10))
+  (defn fbro-window-begin (w) (nth w 11))
+
+  (defn fbro-source-row (node)
+    (do (let source (node_source node))
+        (if (eq (len source) 3) source (list "" 0 0))))
+  (defn fbro-node-values (kids)
+    (if (eq (len kids) 0) (empty)
+      (cons (node_value (head kids)) (fbro-node-values (tail kids)))))
+  (defn fbro-event-row (node)
+    (list "framebuffer-event" (fbro-source-row node)
+      (node_type (node_category node))
+      (fbro-node-values (node_children node))))
+  (defn fbro-event-rows (nodes)
+    (if (eq (len nodes) 0) (empty)
+      (cons (fbro-event-row (head nodes))
+            (fbro-event-rows (tail nodes)))))
+
+  (defn fbro-resource-delta (before after input-bytes output-units)
+    (list "resources"
+      "dispatches" (sub (fbro-snap-dispatches after) (fbro-snap-dispatches before))
+      "interned-nodes" (sub (fbro-snap-nodes after) (fbro-snap-nodes before))
+      "string-pool" (sub (fbro-snap-strings after) (fbro-snap-strings before))
+      "arena-cons" (sub (fbro-snap-arena after) (fbro-snap-arena before))
+      "boxed-floats" (sub (fbro-snap-floats after) (fbro-snap-floats before))
+      "io-sense-dispatches" (sub (fbro-snap-io after) (fbro-snap-io before))
+      "input-bytes" input-bytes "output-units" output-units
+      "observer-overhead" "included; calibrate-with-empty-window"))
+
+  ; Report fields remain direct data, not prose hidden in a receipt.
+  (defn fbro-close (window outcome output-units file line col)
+    (do
+      (let after-work (fbro-snapshot))
+      (let finish (fbro-marker "end" (nth window 1) (nth window 2)
+                    (nth window 3) (nth window 4) (nth window 5)
+                    (fbro-snap-time after-work) file line col))
+      (let events (framebuffer-events))
+      (let before (fbro-window-before window))
+      (list "framebuffer-runtime-observation"
+        (list "what" (nth window 1) "events" (len events))
+        (list "where" (fbro-source-row (fbro-window-begin window))
+                      (fbro-source-row finish))
+        (list "with" (nth window 2) "relation" (nth window 3))
+        (list "why" (nth window 4) "causal-parent-offer" (nth window 5))
+        (list "when" (fbro-snap-time before)
+          "ended" (fbro-snap-time after-work)
+          "duration-ms" (sub (fbro-snap-time after-work) (fbro-snap-time before)))
+        (fbro-resource-delta before after-work (nth window 6) output-units)
+        (list "outcome" outcome)
+        (fbro-event-rows events)
+        (list "native" "fkwu-kernel-stat+framebuffer-events+node_source"
+              "per-function-dispatch-source" 0
+              "honest-floor" "explicit source markers + exact whole-window counters"))))
+
+  (defn fbro-what (r) (nth r 1))
+  (defn fbro-where (r) (nth r 2))
+  (defn fbro-with (r) (nth r 3))
+  (defn fbro-why (r) (nth r 4))
+  (defn fbro-when (r) (nth r 5))
+  (defn fbro-resources (r) (nth r 6))
+  (defn fbro-outcome (r) (nth r 7))
+  (defn fbro-events (r) (nth r 8))
+)

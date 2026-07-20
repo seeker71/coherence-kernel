@@ -1,0 +1,180 @@
+; whisper-tiny-native-decoder.fk — complete released Whisper-tiny decoder in Form.
+;
+; The real four-token Whisper prompt continues from released decoder layer 0
+; through complete released layers 1, 2, and 3. Every layer executes six-head
+; causal self-attention, six-head cross-attention over two adjacent real-human-
+; speech encoder tokens, and its 1536-wide erf-GELU FFN. The released decoder
+; final layer norm and the same 106-row tied special-token logit window make the
+; complete four-block decoder graph observable without pretending that a
+; bounded probe is a full-vocabulary recognition result.
+;
+; The native recognizer remains pending until the full 51,865-row output scan,
+; tokenizer carrier, and search execute in Form.
+; witnessed: 2026-07-20 -> complete four-block released decoder over real speech
+; preludes: form/form-stdlib/core.fk model/whisper-tiny-native-decoder0.fk
+
+(do
+  (defn wtd-path ()
+    (str_concat (wtc-root) "decoder-layers1-3.f32"))
+  (defn wtd-byte-count () 28389888)
+  (defn wtd-layer-byte-count () 9463296)
+  (defn wtd-extra-layer-parameter-count () 7097472)
+  (defn wtd-decoder-causal-parameter-count () 9506304)
+  (defn wtd-decoder-carried-parameter-count () 9506304)
+
+  ; Relative layout shared by each compact released layer-1..3 segment.
+  (defn wtd-cross-k-weight-off () 0)
+  (defn wtd-cross-out-bias-off () 589824)
+  (defn wtd-cross-out-weight-off () 591360)
+  (defn wtd-cross-q-bias-off () 1181184)
+  (defn wtd-cross-q-weight-off () 1182720)
+  (defn wtd-cross-v-bias-off () 1772544)
+  (defn wtd-cross-v-weight-off () 1774080)
+  (defn wtd-cross-ln-bias-off () 2363904)
+  (defn wtd-cross-ln-weight-off () 2365440)
+  (defn wtd-fc1-bias-off () 2366976)
+  (defn wtd-fc1-weight-off () 2373120)
+  (defn wtd-fc2-bias-off () 4732416)
+  (defn wtd-fc2-weight-off () 4733952)
+  (defn wtd-ffn-ln-bias-off () 7093248)
+  (defn wtd-ffn-ln-weight-off () 7094784)
+  (defn wtd-self-k-weight-off () 7096320)
+  (defn wtd-self-out-bias-off () 7686144)
+  (defn wtd-self-out-weight-off () 7687680)
+  (defn wtd-self-q-bias-off () 8277504)
+  (defn wtd-self-q-weight-off () 8279040)
+  (defn wtd-self-v-bias-off () 8868864)
+  (defn wtd-self-v-weight-off () 8870400)
+  (defn wtd-self-ln-bias-off () 9460224)
+  (defn wtd-self-ln-weight-off () 9461760)
+
+  (defn wtd-load ()
+    (do
+      (let carrier (fs-read-slice (wtd-path) 0 (wtd-byte-count)))
+      (list carrier (if (eq (str_len carrier) (wtd-byte-count)) 1 0))))
+  (defn wtd-carrier (pack) (nth pack 0))
+  (defn wtd-valid? (pack) (nth pack 1))
+  (defn wtd-carrier-crc32 ()
+    (lbpt-crc-string (fs-read-slice (wtd-path) 0 (wtd-byte-count))))
+  ; Exact Form-native CRC witness over the pinned 28,389,888 carrier bytes.
+  (defn wtd-carrier-crc32-expected () 2403457965)
+  (defn wtd-carrier-provenance-valid? ()
+    (eq (wtd-carrier-crc32) (wtd-carrier-crc32-expected)))
+  (defn wtd-at (base relative) (add base relative))
+
+  ; Returns output, self q/k/context/residual, cross q/k/context/residual, hidden.
+  (defn wtd-layer (carrier base input encoder)
+    (do
+      (let self-ln (wte0-layernorm-seq carrier
+        (wtd-at base (wtd-self-ln-weight-off))
+        (wtd-at base (wtd-self-ln-bias-off)) input))
+      (let self-q (wte0-affine-seq carrier
+        (wtd-at base (wtd-self-q-weight-off))
+        (wtd-at base (wtd-self-q-bias-off)) 384 384 self-ln))
+      (let self-k (wte0-affine-seq carrier
+        (wtd-at base (wtd-self-k-weight-off)) -1 384 384 self-ln))
+      (let self-v (wte0-affine-seq carrier
+        (wtd-at base (wtd-self-v-weight-off))
+        (wtd-at base (wtd-self-v-bias-off)) 384 384 self-ln))
+      (let self-context (tb-mh-causal self-q self-k self-v 6 64 0.125))
+      (let self-projected (wte0-affine-seq carrier
+        (wtd-at base (wtd-self-out-weight-off))
+        (wtd-at base (wtd-self-out-bias-off)) 384 384 self-context))
+      (let self-out (tb-add-seq input self-projected))
+      (let cross-ln (wte0-layernorm-seq carrier
+        (wtd-at base (wtd-cross-ln-weight-off))
+        (wtd-at base (wtd-cross-ln-bias-off)) self-out))
+      (let cross-q (wte0-affine-seq carrier
+        (wtd-at base (wtd-cross-q-weight-off))
+        (wtd-at base (wtd-cross-q-bias-off)) 384 384 cross-ln))
+      (let cross-k (wte0-affine-seq carrier
+        (wtd-at base (wtd-cross-k-weight-off)) -1 384 384 encoder))
+      (let cross-v (wte0-affine-seq carrier
+        (wtd-at base (wtd-cross-v-weight-off))
+        (wtd-at base (wtd-cross-v-bias-off)) 384 384 encoder))
+      (let cross-context (tb-mh-attn cross-q cross-k cross-v 6 64 0.125))
+      (let cross-projected (wte0-affine-seq carrier
+        (wtd-at base (wtd-cross-out-weight-off))
+        (wtd-at base (wtd-cross-out-bias-off)) 384 384 cross-context))
+      (let cross-out (tb-add-seq self-out cross-projected))
+      (let ffn-ln (wte0-layernorm-seq carrier
+        (wtd-at base (wtd-ffn-ln-weight-off))
+        (wtd-at base (wtd-ffn-ln-bias-off)) cross-out))
+      (let hidden (wte0-gelu-seq (wte0-affine-seq carrier
+        (wtd-at base (wtd-fc1-weight-off))
+        (wtd-at base (wtd-fc1-bias-off)) 384 1536 ffn-ln)))
+      (let ffn-out (wte0-affine-seq carrier
+        (wtd-at base (wtd-fc2-weight-off))
+        (wtd-at base (wtd-fc2-bias-off)) 1536 384 hidden))
+      (list (tb-add-seq cross-out ffn-out)
+        self-q self-k self-context self-out
+        cross-q cross-k cross-context cross-out hidden)))
+
+  (defn wtd-layer-attention (layer)
+    (list
+      (list (wtd0-causal-weights (nth layer 1) (nth layer 2) 1 0)
+        (wtd0-causal-weights (nth layer 1) (nth layer 2) 3 5))
+      (list (wtd0-cross-weights (nth layer 5) (nth layer 6) 0 0)
+        (wtd0-cross-weights (nth layer 5) (nth layer 6) 3 5))))
+  (defn wtd-stage-distance (before after)
+    (wte0-vector-distance (nth before 3) (nth after 3)))
+
+  (defn wtd-infer-encoder (path encoder)
+    (do
+      (let pack0 (wtd0-load))
+      (let pack13 (wtd-load))
+      (let input (if (and (eq (wtd0-valid? pack0) 1)
+            (eq (wtd-valid? pack13) 1)) (wtd0-embed-prompt pack0) (empty)))
+      (let layer0 (if (and (eq (len encoder) 2) (eq (len input) 4))
+        (wtd0-layer0 (wtd0-layer-carrier pack0) input encoder) (empty)))
+      (let out0 (if (eq (len layer0) 10) (nth layer0 0) (empty)))
+      (let layer1 (if (eq (len out0) 4)
+        (wtd-layer (wtd-carrier pack13) 0 out0 encoder) (empty)))
+      (let out1 (if (eq (len layer1) 10) (nth layer1 0) (empty)))
+      (let layer2 (if (eq (len out1) 4)
+        (wtd-layer (wtd-carrier pack13) (wtd-layer-byte-count) out1 encoder)
+        (empty)))
+      (let out2 (if (eq (len layer2) 10) (nth layer2 0) (empty)))
+      (let layer3 (if (eq (len out2) 4)
+        (wtd-layer (wtd-carrier pack13) (mul 2 (wtd-layer-byte-count))
+          out2 encoder) (empty)))
+      (let out3 (if (eq (len layer3) 10) (nth layer3 0) (empty)))
+      (let final (if (eq (len out3) 4)
+        (wte0-layernorm-seq (wtd0-layer-carrier pack0)
+          (wtd0-final-ln-weight-off) (wtd0-final-ln-bias-off) out3)
+        (empty)))
+      (let logits (if (eq (len final) 4)
+        (wtd0-special-logits (wtd0-tokens pack0) (nth final 3)) (empty)))
+      (let attention (if (eq (len layer3) 10)
+        (list (wtd-layer-attention layer0) (wtd-layer-attention layer1)
+          (wtd-layer-attention layer2) (wtd-layer-attention layer3)) (empty)))
+      (let fingerprints (if (eq (len final) 4)
+        (list (wtd0-fingerprints out0) (wtd0-fingerprints out1)
+          (wtd0-fingerprints out2) (wtd0-fingerprints out3)
+          (wtd0-fingerprints final)) (empty)))
+      (let distances (if (eq (len final) 4)
+        (list (wtd-stage-distance input out0)
+          (wtd-stage-distance out0 out1) (wtd-stage-distance out1 out2)
+          (wtd-stage-distance out2 out3) (wtd-stage-distance out3 final)
+          (wte0-vector-distance (nth final 0) (nth final 3))) (empty)))
+      (list "whisper-tiny-native-decoder" path (wtd0-prompt-ids)
+        (len encoder) (if (eq (len encoder) 2) (len (head encoder)) 0)
+        (len input) (len out0) (len out1) (len out2) (len out3) (len final)
+        (wtd-decoder-causal-parameter-count)
+        (wtd-decoder-carried-parameter-count)
+        (if (and (eq (wtd0-valid? pack0) 1) (eq (wtd-valid? pack13) 1)) 1 0)
+        attention fingerprints distances
+        (if (eq (len logits) 106) (wtd0-argmax logits) -1)
+        (if (eq (len logits) 106)
+          (add (wtd0-token-first) (wtd0-argmax logits)) -1)
+        (if (eq (len logits) 106) (nth logits 0) 0.0)
+        (if (eq (len logits) 106) (nth logits 105) 0.0)
+        "native-decoder-complete" (if (eq (len final) 4) 1 0)
+        "native-recognizer" 0
+        "pending" "full-vocabulary-scan+tokenizer+search"
+        final)))
+  (defn wtd-infer-file (path)
+    (do
+      (let encoder-result (wte-infer-file path))
+      (wtd-infer-encoder path (nth encoder-result 27))))
+  0)
