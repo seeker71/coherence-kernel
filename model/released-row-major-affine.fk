@@ -1,0 +1,52 @@
+; released-row-major-affine.fk -- Form-native f32 affine over released bytes.
+;
+; One row is decoded once and applied across the bounded input sequence before
+; the next row is read.  This is model-agnostic Form arithmetic over an exact
+; row-major f32 carrier, not a host model path.
+; preludes: form/form-stdlib/core.fk model/lingbot-pytorch-checkpoint.fk
+
+(do
+  (defn rrma-dot-acc (weights xs acc)
+    (if (eq (len xs) 0) acc
+      (rrma-dot-acc (tail weights) (tail xs)
+        (add acc (mul (head weights) (head xs))))))
+  (defn rrma-empty-accs (xs)
+    (if (eq (len xs) 0) (empty)
+      (cons (empty) (rrma-empty-accs (tail xs)))))
+  (defn rrma-reverse-accs (accs)
+    (if (eq (len accs) 0) (empty)
+      (cons (reverse (head accs)) (rrma-reverse-accs (tail accs)))))
+  (defn rrma-row-across (row bias xs accs out)
+    (if (eq (len xs) 0) (reverse out)
+      (rrma-row-across row bias (tail xs) (tail accs)
+        (cons (cons (rrma-dot-acc row (head xs) bias) (head accs)) out))))
+  (defn rrma-affine-rows (weights bias cols rows xs row accs)
+    (if (eq row rows) (rrma-reverse-accs accs)
+      (do
+        (let decoded (lbpt-f32-list weights (mul (mul row cols) 4) cols))
+        (let b (if (eq (str_len bias) 0) 0.0 (lbpt-f32 bias (mul row 4))))
+        (rrma-affine-rows weights bias cols rows xs (add row 1)
+          (rrma-row-across decoded b xs accs (empty))))))
+  (defn rrma-affine-seq (weights bias cols rows xs)
+    (rrma-affine-rows weights bias cols rows xs 0 (rrma-empty-accs xs)))
+
+  (defn rrma-affine-norm-go (gamma beta xs i out)
+    (if (eq (len xs) 0) (reverse out)
+      (rrma-affine-norm-go gamma beta (tail xs) (add i 1)
+        (cons (add (mul (head xs) (lbpt-f32 gamma (mul i 4)))
+                   (lbpt-f32 beta (mul i 4))) out))))
+  (defn rrma-layernorm (gamma beta eps x)
+    (rrma-affine-norm-go gamma beta (tn-layernorm x eps) 0 (empty)))
+  (defn rrma-layernorm-seq (gamma beta eps xs)
+    (if (eq (len xs) 0) (empty)
+      (cons (rrma-layernorm gamma beta eps (head xs))
+        (rrma-layernorm-seq gamma beta eps (tail xs)))))
+  (defn rrma-scale-go (gamma xs i out)
+    (if (eq (len xs) 0) (reverse out)
+      (rrma-scale-go gamma (tail xs) (add i 1)
+        (cons (mul (head xs) (lbpt-f32 gamma (mul i 4))) out))))
+  (defn rrma-scale-seq (gamma xs)
+    (if (eq (len xs) 0) (empty)
+      (cons (rrma-scale-go gamma (head xs) 0 (empty))
+        (rrma-scale-seq gamma (tail xs)))))
+  0)

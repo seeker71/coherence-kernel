@@ -110,22 +110,47 @@
       (c10-detect-text-search corpus index text 0 count)))
   (defn c10-detect-text-in (corpus index text)
     (c10-detect-text-n-in corpus index text (c10-count)))
-  ; Compatibility migration: canonical lookup wins, then each displaced
-  ; surface can still resolve through the separate, attributable alias index.
-  ; Alias lookup returns the repaired canonical record at the same stable ID.
+  ; Historical migration only.  Displaced junk surfaces remain readable from
+  ; the attributable migration index, but this function is deliberately not a
+  ; semantic detector: a legacy surface and its replacement have unrelated
+  ; meanings.  Production detection below never consults this index.
   (defn c10-alias-count-in (aliases)
     (if (eq (mod (str_len aliases) (c10-index-width)) 0)
       (div (str_len aliases) (c10-index-width)) -1))
-  (defn c10-detect-text-with-alias-in (corpus index aliases text)
+  (defn c10-resolve-legacy-migration-in (corpus index aliases text)
     (do (let canonical (c10-detect-text-in corpus index text))
         (if (not (c10-missing? canonical)) canonical
           (c10-detect-text-n-in corpus aliases text
             (c10-alias-count-in aliases)))))
-  (defn c10-detect-text (text)
-    (c10-detect-text-with-alias-in
-      (read_file (c10-ranked-path))
+
+  ; Exhaustive boundary audit over every displaced legacy surface.  `rejected`
+  ; counts surfaces absent from the canonical semantic index; `traceable`
+  ; independently proves the migration carrier still resolves its historical
+  ; stable ID.  A false label can therefore be investigated without becoming a
+  ; production meaning again.
+  (defn c10-legacy-migration-audit-go
+    (corpus canonical aliases slot count rejected traceable)
+    (if (ge slot count) (list count rejected traceable)
+      (do (let label (c10-index-label-at aliases slot))
+          (let expected-id (c10-index-id-at aliases slot))
+          (let production (c10-detect-text-in corpus canonical label))
+          (let migration
+            (c10-resolve-legacy-migration-in corpus canonical aliases label))
+          (c10-legacy-migration-audit-go corpus canonical aliases (add slot 1)
+            count (add rejected (c10-missing? production))
+            (add traceable (if (and (not (c10-missing? migration))
+              (eq (c10-concept-id migration) expected-id)) 1 0))))))
+  (defn c10-legacy-migration-audit-in (corpus canonical aliases)
+    (c10-legacy-migration-audit-go corpus canonical aliases 0
+      (c10-alias-count-in aliases) 0 0))
+  (defn c10-legacy-migration-audit ()
+    (c10-legacy-migration-audit-in (read_file (c10-ranked-path))
       (read_file (c10-lexical-index-path))
-      (read_file (csr111-alias-index-path)) text))
+      (read_file (csr111-alias-index-path))))
+  (defn c10-detect-text (text)
+    (c10-detect-text-in
+      (read_file (c10-ranked-path))
+      (read_file (c10-lexical-index-path)) text))
   (defn c10-detect-tokens-in (corpus index tokens)
     (if (eq (len tokens) 0) (empty)
       (cons (c10-detect-text-in corpus index (head tokens))
@@ -133,12 +158,7 @@
   (defn c10-detect-tokens (tokens)
     (do (let corpus (read_file (c10-ranked-path)))
         (let index (read_file (c10-lexical-index-path)))
-        (let aliases (read_file (csr111-alias-index-path)))
-        (c10-detect-tokens-with-alias-in corpus index aliases tokens)))
-  (defn c10-detect-tokens-with-alias-in (corpus index aliases tokens)
-    (if (eq (len tokens) 0) (empty)
-      (cons (c10-detect-text-with-alias-in corpus index aliases (head tokens))
-            (c10-detect-tokens-with-alias-in corpus index aliases (tail tokens)))))
+        (c10-detect-tokens-in corpus index tokens)))
 
   ; Feature detection is indexed by feature[0]=id and then integrity-checked.
   ; A predicted/corrupted id cannot borrow another record's label signature.
