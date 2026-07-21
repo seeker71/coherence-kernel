@@ -1,0 +1,259 @@
+; native-cognition-cycle.fk — learned knowledge becomes inquiry, awareness,
+; recognition, action, response, and routing through one witnessed cycle.
+import "../learn/nl-meaning-error-adaptation.fk"
+import "../observe/bidirectional-framebuffer-channel.fk"
+
+(do
+  ; accumulator = [rows, agree, disagree, native-correct, native-wrong,
+  ;                 caught-base-errors, inquiry-replays, continue-actions,
+  ;                 evidence-actions, notable-records]
+  (defn ncc-acc () (list 0 0 0 0 0 0 0 0 0 (list)))
+
+  ; A recognition response is [nothing,0,1,alternative,ack,action,route].
+  ; route 0=native response, 1=evidence request.
+  (defn ncc-response (alternative ack action route)
+    (list (nothing) 0 1 alternative ack action route))
+
+  ; [best-id, best-distance, second-distance]. This exposes recognition margin
+  ; without changing nmn-classify or inferring confidence from agreement alone.
+  (defn ncc-top2-loop (y protos best-id best-distance second-distance)
+    (if (eq (len protos) 0) (list best-id best-distance second-distance)
+      (do (let proto (head protos))
+        (let distance (nmn-dist2 y (nth proto 1)))
+        (if (lt distance best-distance)
+          (ncc-top2-loop y (tail protos) (nth proto 0) distance best-distance)
+          (if (lt distance second-distance)
+            (ncc-top2-loop y (tail protos) best-id best-distance distance)
+            (ncc-top2-loop y (tail protos) best-id best-distance second-distance))))))
+  (defn ncc-top2 (stack row protos)
+    (ncc-top2-loop (nmn-predict stack
+      (nmn-vec-norm (nmc-ex-text row) (nmil-d)) (nmil-eps))
+      protos -1 999999999.0 999999999.0))
+
+  (defn ncc-margin-observe (rows index base rehearsal protos records)
+    (if (eq (len rows) 0) records
+      (do (let row (head rows))
+        (let truth (nmc-ex-class row))
+        (let base-pred (nmea-predict base row protos))
+        (let top2 (ncc-top2 rehearsal row protos))
+        (let pred (nth top2 0))
+        (if (not (eq base-pred pred))
+          (ncc-margin-observe (tail rows) (add index 1) base rehearsal protos records)
+          (do (let margin (sub (nth top2 2) (nth top2 1)))
+            (let record (list (nmn-hash (nmc-ex-text row))
+              (str_len (nmc-ex-text row)) truth pred
+              (nth top2 1) margin (if (eq truth pred) 1 0)))
+            (let event (fb_record (intern_trivial_int index)
+              "native-cognition-cycle.fk" (add 100 index)))
+            (ncc-margin-observe (tail rows) (add index 1) base rehearsal protos
+              (cons record records)))))))
+
+  (defn ncc-margin-witness ()
+    (do (let original (nmil-training-raw))
+      (let split (nmea-split (nmil-held-raw)))
+      (let adapt (nth split 0))
+      (let eval (nth split 1))
+      (let protos (nmil-protos))
+      (let base (nmn-train (nmn-stack (nmil-d))
+        (nmil-encode-training original) 0.02 (nmil-eps) 40))
+      (let errors (nmea-errors base adapt protos))
+      (let replay (nmc-concat (nmil-encode-training original)
+                              (nmil-encode-training errors)))
+      (let rehearsal (nmn-train base replay 0.01 (nmil-eps) 20))
+      (framebuffer-clear)
+      (let records (ncc-margin-observe eval 1 base rehearsal protos (list)))
+      (list (nothing) 0 1 1001099009 (len records)
+        (len (framebuffer-events)) records
+        (if (and (eq (len records) 18)
+                 (eq (len (framebuffer-events)) 18)) 1 0))))
+
+  ; Independent recognition from nearest native lexical training example.
+  ; This does not reuse either network's transformed prediction.
+  (defn ncc-knn-loop (x training best-class best-distance)
+    (if (eq (len training) 0) best-class
+      (do (let candidate (head training))
+        (let distance (nmn-dist2 x
+          (nmn-vec-norm (nmc-ex-text candidate) (nmil-d))))
+        (if (lt distance best-distance)
+          (ncc-knn-loop x (tail training) (nmc-ex-class candidate) distance)
+          (ncc-knn-loop x (tail training) best-class best-distance)))))
+  (defn ncc-knn-predict (row training)
+    (ncc-knn-loop (nmn-vec-norm (nmc-ex-text row) (nmil-d))
+      training -1 999999999.0))
+
+  ; A representation-independent lexical reader: exact tokens, no hash buckets
+  ; and no trained network transform. Class evidence is learned by summing token
+  ; overlap against every training row of that class.
+  (defn ncc-token-member? (token words)
+    (if (eq (len words) 0) 0
+      (if (str_eq token (head words)) 1
+        (ncc-token-member? token (tail words)))))
+  (defn ncc-overlap (query-words row-words)
+    (if (eq (len query-words) 0) 0
+      (add (ncc-token-member? (head query-words) row-words)
+        (ncc-overlap (tail query-words) row-words))))
+  (defn ncc-lexical-score (query-words training class-id)
+    (if (eq (len training) 0) 0
+      (add (if (eq (nmc-ex-class (head training)) class-id)
+        (ncc-overlap query-words (re-split (nmc-ex-text (head training)))) 0)
+        (ncc-lexical-score query-words (tail training) class-id))))
+  (defn ncc-lexical-best (query training class-id best-id best-score)
+    (if (ge class-id 4) best-id
+      (do (let score (ncc-lexical-score query training class-id))
+        (if (gt score best-score)
+          (ncc-lexical-best query training (add class-id 1) class-id score)
+          (ncc-lexical-best query training (add class-id 1) best-id best-score)))))
+  (defn ncc-lexical-predict (row training)
+    (ncc-lexical-best (re-split (nmc-ex-text row)) training 0 -1 -1))
+
+  ; accumulator matches ncc-observe, plus every notable record carries kNN.
+  (defn ncc-triangulated-observe (rows index training base rehearsal protos acc)
+    (if (eq (len rows) 0) acc
+      (do (let row (head rows))
+        (let truth (nmc-ex-class row))
+        (let base-pred (nmea-predict base row protos))
+        (let rehearsal-pred (nmea-predict rehearsal row protos))
+        (let knn-pred (ncc-lexical-predict row training))
+        (let recognized (if (and (eq base-pred rehearsal-pred)
+                                 (eq rehearsal-pred knn-pred)) 1 0))
+        (let action (if (eq recognized 1) 0 4))
+        (let route (if (eq action 0) 0 1))
+        (let node (lnii-node-for-meaning (add 301 rehearsal-pred)))
+        (let subject (lnii-subject node))
+        (let alternative (nid-alternative subject 0))
+        (let inquiry-ok (if (eq route 0) (lnii-lanes-ok subject 0 0) 0))
+        (let outbound (bfc-envelope 0 index 0
+          (list base-pred rehearsal-pred knn-pred recognized) alternative))
+        (let out-event (bfc-record-out outbound (add 200 (mul index 2))))
+        (let inbound (bfc-control outbound action))
+        (let in-event (bfc-record-in inbound (add 201 (mul index 2))))
+        (let native-correct (if (and (eq route 0) (eq rehearsal-pred truth)) 1 0))
+        (let native-wrong (if (and (eq route 0) (not (eq rehearsal-pred truth))) 1 0))
+        (let caught (if (and (eq route 1) (not (eq rehearsal-pred truth))) 1 0))
+        (let notable (if (or (eq recognized 0) (eq native-wrong 1))
+          (cons (list (nmn-hash (nmc-ex-text row)) (str_len (nmc-ex-text row))
+            truth base-pred rehearsal-pred knn-pred recognized action route)
+            (nth acc 9)) (nth acc 9)))
+        (ncc-triangulated-observe (tail rows) (add index 1) training base rehearsal protos
+          (list (add (nth acc 0) 1)
+            (add (nth acc 1) recognized)
+            (add (nth acc 2) (if (eq recognized 0) 1 0))
+            (add (nth acc 3) native-correct)
+            (add (nth acc 4) native-wrong)
+            (add (nth acc 5) caught)
+            (add (nth acc 6) inquiry-ok)
+            (add (nth acc 7) (if (eq action 0) 1 0))
+            (add (nth acc 8) (if (eq action 4) 1 0)) notable)))))
+
+  (defn ncc-triangulated-witness ()
+    (do (let original (nmil-training-raw))
+      (let split (nmea-split (nmil-held-raw)))
+      (let adapt (nth split 0))
+      (let eval (nth split 1))
+      (let protos (nmil-protos))
+      (let base (nmn-train (nmn-stack (nmil-d))
+        (nmil-encode-training original) 0.02 (nmil-eps) 40))
+      (let errors (nmea-errors base adapt protos))
+      (let replay (nmc-concat (nmil-encode-training original)
+                              (nmil-encode-training errors)))
+      (let rehearsal (nmn-train base replay 0.01 (nmil-eps) 20))
+      (framebuffer-clear)
+      (let r (ncc-triangulated-observe eval 1 original base rehearsal protos (ncc-acc)))
+      (let rows (nth r 0))
+      (let agree (nth r 1))
+      (let disagree (nth r 2))
+      (let correct (nth r 3))
+      (let wrong (nth r 4))
+      (let caught (nth r 5))
+      (let inquiries (nth r 6))
+      (let frames (len (framebuffer-events)))
+      (list (nothing) 0 1 1001099010 rows agree disagree correct wrong caught
+        inquiries (mul agree 7) (nth r 7) (nth r 8) frames (nth r 9)
+        (if (and (eq (add agree disagree) rows)
+          (and (eq wrong 0)
+          (and (eq inquiries (mul agree 7))
+          (and (eq frames (mul rows 2)) (gt caught 0))))) 1 0))))
+
+  (defn ncc-observe (rows index base rehearsal protos acc)
+    (if (eq (len rows) 0) acc
+      (do (let row (head rows))
+        (let truth (nmc-ex-class row))
+        (let base-pred (nmea-predict base row protos))
+        (let rehearsal-pred (nmea-predict rehearsal row protos))
+        ; Awareness is direct model agreement, not correctness.
+        (let recognized (if (eq base-pred rehearsal-pred) 1 0))
+        (let action (if (eq recognized 1) 0 4))
+        (let route (if (eq action 0) 0 1))
+        (let node (lnii-node-for-meaning (add 301 rehearsal-pred)))
+        (let subject (lnii-subject node))
+        (let alternative (nid-alternative subject 0))
+        (let inquiry-ok (if (eq route 0) (lnii-lanes-ok subject 0 0) 0))
+        (let ack (if (eq route 0) node (nothing)))
+        (let response (ncc-response alternative ack action route))
+
+        ; The observation flows out; recognition control flows back. Correlation
+        ; is the held-out row index and both directions are retained.
+        (let outbound (bfc-envelope 0 index 0
+          (list base-pred rehearsal-pred recognized) alternative))
+        (let out-event (bfc-record-out outbound (mul index 2)))
+        (let inbound (bfc-control outbound action))
+        (let in-event (bfc-record-in inbound (add (mul index 2) 1)))
+
+        (let native-correct (if (and (eq route 0) (eq rehearsal-pred truth)) 1 0))
+        (let native-wrong (if (and (eq route 0) (not (eq rehearsal-pred truth))) 1 0))
+        (let caught (if (and (eq route 1) (not (eq base-pred truth))) 1 0))
+        ; Retain every disagreement and every incorrectly recognized row.
+        (let notable (if (or (eq recognized 0) (eq native-wrong 1))
+          (cons (list (nmn-hash (nmc-ex-text row)) (str_len (nmc-ex-text row))
+            truth base-pred rehearsal-pred recognized action route
+            (nothing? (nth response 4))) (nth acc 9))
+          (nth acc 9)))
+        (ncc-observe (tail rows) (add index 1) base rehearsal protos
+          (list (add (nth acc 0) 1)
+            (add (nth acc 1) recognized)
+            (add (nth acc 2) (if (eq recognized 0) 1 0))
+            (add (nth acc 3) native-correct)
+            (add (nth acc 4) native-wrong)
+            (add (nth acc 5) caught)
+            (add (nth acc 6) inquiry-ok)
+            (add (nth acc 7) (if (eq action 0) 1 0))
+            (add (nth acc 8) (if (eq action 4) 1 0))
+            notable)))))
+
+  (defn ncc-witness ()
+    (do (let original (nmil-training-raw))
+      (let split (nmea-split (nmil-held-raw)))
+      (let adapt (nth split 0))
+      (let eval (nth split 1))
+      (let protos (nmil-protos))
+      (let base (nmn-train (nmn-stack (nmil-d))
+        (nmil-encode-training original) 0.02 (nmil-eps) 40))
+      (let errors (nmea-errors base adapt protos))
+      (let replay (nmc-concat (nmil-encode-training original)
+                              (nmil-encode-training errors)))
+      (let rehearsal (nmn-train base replay 0.01 (nmil-eps) 20))
+      (framebuffer-clear)
+      (let result (ncc-observe eval 1 base rehearsal protos (ncc-acc)))
+      (let rows (nth result 0))
+      (let agree (nth result 1))
+      (let disagree (nth result 2))
+      (let native-correct (nth result 3))
+      (let native-wrong (nth result 4))
+      (let caught (nth result 5))
+      (let inquiry-ok (nth result 6))
+      (let continue-actions (nth result 7))
+      (let evidence-actions (nth result 8))
+      (let notable (nth result 9))
+      (let expected-inquiries (mul agree 7))
+      (let frames (len (framebuffer-events)))
+      ; Success proves the cycle/routing contract, not perfect recognition.
+      (list (nothing) 0 1 1001099008 rows agree disagree
+        native-correct native-wrong caught inquiry-ok expected-inquiries
+        continue-actions evidence-actions frames notable
+        (if (and (eq (add agree disagree) rows)
+          (and (eq (add native-correct native-wrong) agree)
+          (and (eq inquiry-ok expected-inquiries)
+          (and (eq continue-actions agree)
+          (and (eq evidence-actions disagree)
+          (and (eq frames (mul rows 2)) (gt caught 0))))))) 1 0))))
+  0)
