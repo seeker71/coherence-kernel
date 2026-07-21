@@ -180,7 +180,7 @@ if [[ -x "$RS_KERNEL" ]] \
     mv -f "$flatten_candidate" "$table_tmp"
     printf '%s\n' 'regen: flatten Rust proof sibling (form-cli table)'
 elif [[ -f "$TS_KERNEL" ]] \
-        && node --stack_size=262144 "$TS_KERNEL" \
+        && node "$TS_KERNEL" \
             "${FLATTEN_CHAIN[@]}" "$work_dir/flatten.fk" \
             > "$flatten_candidate" 2> "$flatten_err" \
         && form_cli_validate_table "$flatten_candidate" >/dev/null; then

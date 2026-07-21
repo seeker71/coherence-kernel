@@ -1,0 +1,132 @@
+; whisper-tiny-centered-preprocess.fk -- official Whisper framing semantics.
+;
+; OpenAI Whisper appends 480,000 zero samples for slicing, torch.stft adds
+; center=True reflection padding of N_FFT/2=200, drops the final STFT column,
+; and sends the first 3,000 mel frames to the encoder.  For the committed
+; 11,392-sample utterance this produces 3,071 available mel frames; the first
+; segment is exactly 3,000 frames, conv1 preserves 3,000, and stride-two conv2
+; produces 1,500 encoder tokens.
+;
+; This cell implements the actual centered sample/window/mel provider and
+; routes all 3,000 columns through the released stem and the same row-major
+; encoder entrypoint.  The 1,500-token four-block execution is deliberately
+; not claimed until observed: its attention/resource envelope is much larger
+; than the completed 35-token valid-STFT lane.
+; witnessed: 2026-07-20 -> executable centered/padded shape and real windows
+; preludes: form/form-stdlib/core.fk model/whisper-tiny-native-frontend-full-row-major.fk
+
+(do
+  (defn wap-trailing-padding () 480000)
+  (defn wap-center-padding () 200)
+  (defn wap-segment-mel-frames () 3000)
+  (defn wap-expected-encoder-tokens () 1500)
+  (defn wap-padded-samples (sample-count)
+    (add sample-count (wap-trailing-padding)))
+
+  ; torch.stft(center=True): 1+floor(L/hop) columns before `[..., :-1]`;
+  ; Whisper drops that final column, leaving floor(L/hop).
+  (defn wap-available-mel-frames (sample-count)
+    (div (wap-padded-samples sample-count) (wtc-hop-size)))
+  (defn wap-segment-frames (sample-count)
+    (if (gt (wap-available-mel-frames sample-count)
+            (wap-segment-mel-frames))
+      (wap-segment-mel-frames) (wap-available-mel-frames sample-count)))
+  (defn wap-conv1-tokens (mel-frames) mel-frames)
+  (defn wap-conv2-tokens (conv1-tokens)
+    (add 1 (div (sub (add conv1-tokens 2) 3) 2)))
+
+  ; Reflect left around sample zero exactly as torch reflect padding:
+  ; logical -1 -> source 1, -200 -> source 200.  The appended right region is
+  ; zero.  Frames 0..2999 never reach the far right reflection boundary.
+  (defn wap-padded-sample (wav data-offset sample-count logical-index)
+    (do
+      (let source-index (if (lt logical-index 0)
+        (sub 0 logical-index) logical-index))
+      (if (lt source-index sample-count)
+        (wtc-wav-sample wav data-offset source-index) 0.0)))
+  (defn wap-window-go (wav data-offset sample-count start n out)
+    (if (eq n (wtc-frame-size)) (reverse out)
+      (wap-window-go wav data-offset sample-count start (add n 1)
+        (cons (mul (wap-padded-sample wav data-offset sample-count (add start n))
+                   (mf-hann n (wtc-frame-size))) out))))
+  (defn wap-window (wav data-offset sample-count frame)
+    (wap-window-go wav data-offset sample-count
+      (sub (mul frame (wtc-hop-size)) (wap-center-padding)) 0 (empty)))
+  (defn wap-log-mel-col (wav data-offset sample-count frame)
+    (wtc-log-mel-col (wap-window wav data-offset sample-count frame)))
+  (defn wap-log-mel-go (wav data-offset sample-count frame count out)
+    (if (eq frame count) (reverse out)
+      (wap-log-mel-go wav data-offset sample-count (add frame 1) count
+        (cons (wap-log-mel-col wav data-offset sample-count frame) out))))
+  (defn wap-log-mel-segment (wav data-offset sample-count)
+    (wap-log-mel-go wav data-offset sample-count 0
+      (wap-segment-frames sample-count) (empty)))
+
+  (defn wap-shape-file (path)
+    (do
+      (let wav (fs-read-slice path 0 (fs-stat-size path)))
+      (let data-offset (wtc-wav-data-offset wav))
+      (let samples (wtf-sample-count wav data-offset))
+      (let mel (wap-segment-frames samples))
+      (let conv1 (wap-conv1-tokens mel))
+      (let conv2 (wap-conv2-tokens conv1))
+      (list "whisper-centered-reflect-30s-shape" path
+        "samples" samples "trailing-zero-samples" (wap-trailing-padding)
+        "center-reflect-samples" (wap-center-padding)
+        "available-mel-frames" (wap-available-mel-frames samples)
+        "segment-mel-frames" mel "conv1-tokens" conv1
+        "conv2-encoder-tokens" conv2
+        "official-shape-ready" (if (and (eq mel 3000) (eq conv2 1500)) 1 0)
+        "native-recognizer" 0)))
+
+  ; Executable corrected frontend.  This is intentionally a real full call,
+  ; not used by the cheap shape gate.
+  (defn wap-frontend-file (path)
+    (do
+      (let wav (fs-read-slice path 0 (fs-stat-size path)))
+      (let data-offset (wtc-wav-data-offset wav))
+      (let samples (wtf-sample-count wav data-offset))
+      (let mel (wap-log-mel-segment wav data-offset samples))
+      (let normalized (wtc-normalize-tile mel))
+      (let stem (wt2-load-weights))
+      (let conv1 (if (eq (wt2-weights-valid? stem) 1)
+        (wtf-conv1 stem (nth normalized 1)) (empty)))
+      (let conv2 (if (eq (len conv1) 3000) (wtf-conv2 stem conv1) (empty)))
+      (list "whisper-centered-reflect-30s-frontend" path
+        "samples" samples "mel-frames" (len mel) "peak" (nth normalized 0)
+        "conv1-tokens" (len conv1) "conv2-tokens" (len conv2)
+        "weights-valid" (wt2-weights-valid? stem)
+        "native-recognizer" 0 "encoder-input" conv2)))
+  (defn wap-frontend-output (result) (nth result 17))
+
+  ; Same released encoder entrypoint as the completed 35-token lane, now fed
+  ; by the corrected 1,500-token frontend.  It is executable but unwitnessed.
+  (defn wap-encoder-file (path)
+    (do
+      (let frontend (wap-frontend-file path))
+      (let pack0 (wte0-load))
+      (let pack13 (wte-load))
+      (let conv2 (wap-frontend-output frontend))
+      (let positioned (if (eq (len conv2) 1500)
+        (wtf-position (wte0-carrier pack0) conv2) (empty)))
+      (let out0 (if (eq (len positioned) 1500)
+        (wafr-layer0 (wte0-carrier pack0) positioned) (empty)))
+      (let out1 (if (eq (len out0) 1500)
+        (wafr-layer (wte-carrier pack13) 0 out0) (empty)))
+      (let out2 (if (eq (len out1) 1500)
+        (wafr-layer (wte-carrier pack13) (wte-layer-byte-count) out1) (empty)))
+      (let out3 (if (eq (len out2) 1500)
+        (wafr-layer (wte-carrier pack13) (mul 2 (wte-layer-byte-count))
+          out2) (empty)))
+      (let final (if (eq (len out3) 1500)
+        (wte0-layernorm-seq (wte0-carrier pack0)
+          (wte0-encoder-ln-weight-off) (wte0-encoder-ln-bias-off) out3)
+        (empty)))
+      (list "whisper-centered-reflect-30s-encoder" path
+        "mel-frames" (nth frontend 5) "encoder-tokens" (len final)
+        "width" (if (gt (len final) 0) (len (head final)) 0)
+        "native-encoder-complete" (if (eq (len final) 1500) 1 0)
+        "native-recognizer" 0
+        "honest-floor" "executable-corrected-entrypoint; 1500-token-run-unwitnessed"
+        "encoder" final)))
+  0)

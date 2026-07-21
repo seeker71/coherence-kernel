@@ -44,13 +44,20 @@ fi
 if [[ -n "$BP_PY" && -f scripts/verify_category_contract.py ]]; then
     $BP_PY scripts/verify_category_contract.py
 fi
+# Registry drift gate: every Go native carries a registry row and the band's
+# pinned counts match — the primitive-registry-band's declared verdict (63)
+# is only honest while these numbers agree. Before this line the gate was a
+# bell nobody rang: the band answered 42 three-way from birth (#231) and the
+# agreement-only sibling comparison printed a green check over it.
+if [[ -n "$BP_PY" && -f scripts/validate_primitive_registry.py ]]; then
+    $BP_PY scripts/validate_primitive_registry.py --quiet
+fi
 
 GO_DIR="form-kernel-go"
 RS_DIR="form-kernel-rust"
 TS_DIR="form-kernel-ts"
 GO_BIN="$GO_DIR/bin-go"
 RS_BIN="$RS_DIR/target/release/form-kernel-rust"
-HOST_STACK_KB="262144"
 
 form_hash16() {
     if command -v shasum >/dev/null 2>&1 && printf test | shasum >/dev/null 2>&1; then
@@ -104,6 +111,37 @@ build_rs &
 build_ts &
 wait
 
+# The runtime walker (repo-root fkwu, runtime/fkwu-uni.c) carries the
+# resolver-driven `--src` door that fkwu-only proof-level bands run on.
+# Distinct from the emitted fourth-arm walker (bootstrap uni.c): that one
+# walks pre-flattened tables; this one resolves `; preludes:` directives.
+FKWU_SRC=""
+build_fkwu_src() {
+    local src="../runtime/fkwu-uni.c" bin="../fkwu"
+    [[ -f "$src" ]] || return 0
+    if [[ ! -x "$bin" || "$src" -nt "$bin" ]]; then
+        command -v cc >/dev/null 2>&1 || return 0
+        echo "  building runtime fkwu (repo root, --src door)..." >&2
+        cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+    fi
+    [[ -x "$bin" ]] && FKWU_SRC="$bin"
+}
+build_fkwu_src
+
+# A band may declare its proof level in its comment head:
+#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu (--src),
+#     compared against the first "Verdict <n>" its head declares. Loud
+#     pass/fail — a wrong home-arm answer is a real failure, never skipped.
+#   ; PROOF LEVEL: FKWU-STAGED ...       → needs a host carrier staging bytes
+#     into input_byte; the carrier did not travel in the CN→CK consolidation,
+#     so the band is reported ⧗ pending — visible every run, never green.
+fk_band_proof_level() {
+    sed -n 's/^; PROOF LEVEL: \([A-Z-]*\).*/\1/p' "$1" 2>/dev/null | head -1
+}
+fk_band_declared_verdict() {
+    awk '/^;/ { if (match($0, /Verdict [0-9]+/)) { print substr($0, RSTART + 8, RLENGTH - 8); exit } } !/^;/ && NF { exit }' "$1" 2>/dev/null
+}
+
 # The fourth sibling — the universal walker binary emitted from Form
 # recipes — joins covered bands as a fourth leg. Built AFTER the Go kernel
 # (its C source is emitted by running the Go walker); everything degrades
@@ -112,15 +150,21 @@ wait
 source scripts/fourth-arm.sh
 build_fourth
 
+# The TS kernel carries its deep Form recursion on a worker thread whose V8
+# limit MATCHES its real stack (main.ts deep-stack door; FORM_KERNEL_STACK_MB
+# passes through the environment, same name as the emitted C walker's door).
+# Never re-add a node --stack_size flag here: it cannot grow the fixed OS
+# main-thread stack, it only lifts V8's overflow check past it — turning deep
+# recursion into a SILENT SIGSEGV with zero output (the aphonia family).
 run_ts() {
     local bundle="$TS_DIR/dist/main.mjs"
     local loader="$PWD/$TS_DIR/node_modules/tsx/dist/loader.mjs"
     if [[ -f "$bundle" ]]; then
-        node --stack_size="$HOST_STACK_KB" "$bundle" "$@"
+        node "$bundle" "$@"
     elif [[ -x "$TS_DIR/node_modules/.bin/tsx" ]]; then
-        node --stack_size="$HOST_STACK_KB" --import "$loader" "$TS_DIR/src/main.ts" "$@"
+        node --import "$loader" "$TS_DIR/src/main.ts" "$@"
     else
-        npx --yes tsx --stack_size="$HOST_STACK_KB" "$TS_DIR/src/main.ts" "$@"
+        npx --yes tsx "$TS_DIR/src/main.ts" "$@"
     fi
 }
 
@@ -181,6 +225,13 @@ fk_resolve_dep_path() {
         printf "%s\n" "$token"
     elif [[ "$token" == form/* && -f "${token#form/}" ]]; then
         printf "%s\n" "${token#form/}"
+    elif [[ -f "../$token" ]]; then
+        # repo-root-anchored preludes (learn/…, observe/…) — the same door
+        # the runtime resolver learned in #270; validate runs with cwd=form/.
+        # Tried only after every form/-shaped rescue has failed, so no
+        # currently-resolving token changes meaning. (Twice-found the same
+        # night by independent lineages — the wound was that real.)
+        printf "%s\n" "../$token"
     else
         printf "%s\n" "$cand"
     fi
@@ -402,6 +453,57 @@ run_siblings_binary() {
 run_workload() {
     local label="$1"; shift
     local bin_artifact
+    if [[ $binary_mode -eq 0 ]]; then
+        local band="${*: -1}" level declared answered
+        level="$(fk_band_proof_level "$band")"
+        if [[ "$level" == "FOURTH-ARM" ]]; then
+            declared="$(fk_band_declared_verdict "$band")"
+            if [[ -z "$FKWU_SRC" ]]; then
+                printf "  ⧗  %-30s  fkwu-only lane — runtime fkwu unavailable; not witnessed this run\n" "$label"
+                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "staged" > "$SUITE_STATUS_FILE"; fi
+                staged=$((staged + 1))
+                return
+            fi
+            if [[ -z "$declared" ]]; then
+                printf "  ✗  %-30s  declares FOURTH-ARM ONLY but pins no Verdict in its head\n" "$label"
+                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+                fail=$((fail + 1))
+                return
+            fi
+            # Verdict equality alone cannot witness: an image with numb
+            # unresolved calls can answer the right number (verdict-parity
+            # numbness — nothing==nothing stays green). Demand the verdict
+            # AND zero axiom-5 diagnostics on stderr.
+            local lane_out lane_diags
+            lane_out="$(mktemp "${TMPDIR:-/tmp}/form-fkwu-lane.XXXXXX")"
+            answered="$( (cd .. && ./fkwu --src "form/$band") 2>"$lane_out" | tail -1 || true)"
+            lane_diags="$(grep -c "unresolved-call\|error:" "$lane_out" 2>/dev/null || true)"
+            rm -f "$lane_out"
+            if [[ "${lane_diags:-0}" -gt 0 ]]; then
+                printf "  ✗  %-30s  fkwu-only lane: %s diagnostic line(s) on stderr — verdict %s untrusted\n" \
+                    "$label" "$lane_diags" "${answered:-<nothing>}"
+                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+                fail=$((fail + 1))
+                return
+            fi
+            if [[ "$answered" == "$declared" ]]; then
+                printf "  ✓  %-30s  → %s (fkwu-only lane)\n" "$label" "$answered"
+                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok fkwu-only" > "$SUITE_STATUS_FILE"; fi
+                ok=$((ok + 1)); fkwu_only=$((fkwu_only + 1))
+            else
+                printf "  ✗  %-30s  fkwu-only lane: declared Verdict %s, fkwu answered %s\n" \
+                    "$label" "$declared" "${answered:-<nothing>}"
+                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+                fail=$((fail + 1))
+            fi
+            return
+        elif [[ "$level" == "FKWU-STAGED" ]]; then
+            printf "  ⧗  %-30s  staged fkwu lane — carrier absent in this checkout; pending, not witnessed\n" "$label"
+            if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "staged" > "$SUITE_STATUS_FILE"; fi
+            staged=$((staged + 1))
+            return
+        fi
+    fi
     if [[ $binary_mode -eq 1 ]]; then
         bin_artifact="$(mktemp "${TMPDIR:-/tmp}/form-kernel.XXXXXX")"
         prepare_sources "$@"
@@ -416,6 +518,8 @@ run_workload() {
 ok=0
 fail=0
 fourth_ok=0
+fkwu_only=0
+staged=0
 
 # --- explicit mode: validate one file list as one workload --------------
 if [[ $# -gt 0 ]]; then
@@ -534,9 +638,11 @@ else
     while [[ $i -lt $total ]]; do
         cat "$suite_dir/$i.out" 2>/dev/null || true
         case "$(cat "$suite_dir/$i.status" 2>/dev/null || echo fail)" in
-            "ok fourth") ok=$((ok + 1)); fourth_ok=$((fourth_ok + 1)) ;;
-            ok)          ok=$((ok + 1)) ;;
-            *)           fail=$((fail + 1)) ;;
+            "ok fourth")    ok=$((ok + 1)); fourth_ok=$((fourth_ok + 1)) ;;
+            "ok fkwu-only") ok=$((ok + 1)); fkwu_only=$((fkwu_only + 1)) ;;
+            ok)             ok=$((ok + 1)) ;;
+            staged)         staged=$((staged + 1)) ;;
+            *)              fail=$((fail + 1)) ;;
         esac
         i=$((i + 1))
     done
@@ -546,6 +652,12 @@ fi
 echo ""
 if [[ $fourth_ok -gt 0 ]]; then
     echo "  fourth arm: $fourth_ok band(s) four-way (fkwu + pre-flattened tables)"
+fi
+if [[ $fkwu_only -gt 0 ]]; then
+    echo "  fkwu-only lanes: $fkwu_only band(s) at declared proof level (runtime fkwu --src)"
+fi
+if [[ $staged -gt 0 ]]; then
+    echo "  staged lanes pending: $staged band(s) need an absent host carrier — not witnessed"
 fi
 if [[ $fail -eq 0 ]]; then
     if [[ $binary_mode -eq 1 ]]; then
