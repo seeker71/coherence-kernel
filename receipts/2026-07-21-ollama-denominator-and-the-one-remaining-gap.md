@@ -1,5 +1,33 @@
 # How far from ollama, measured — and the one number that is the whole gap
 
+> ## ⚠ CORRECTED 2026-07-21 23:30 WITA — §1 and §2 of this receipt were WRONG
+>
+> This receipt claimed the program's quoted ollama denominator (157.83 tok/s decode) was **2.8× too
+> high**, and put the body at **~4.7× behind**. Both are wrong, and the error is mine.
+>
+> My 56–88 tok/s samples were taken **while this machine was running `metal_first_token.sh` and `fkwu`** —
+> the very harness whose result I was contextualizing. Re-measured on an idle host via
+> `form/native/metal/ollama_oracle.sh`, 5 runs of ~245 tokens:
+>
+> | | value |
+> |---|---|
+> | ollama `llama3.2:3b` decode, **median** | **139.62 tok/s** |
+> | spread | 96.52 – 146.71 |
+> | quoted figure it was said to refute | 157.83 — **~13% high, not 2.8×** |
+>
+> The corrected standing: body decode **10.056 tok/s** of 139.62 = **13.9× behind**, measured end to end
+> by the harness itself. Stone 5's 12.9× was very nearly right and my correction of it was not.
+>
+> §3 onward — that the whole remaining decode gap is the Metal kernel at a fraction of a percent of
+> peak, and that the kernel's throughput predicts the token rate — **still stands**, and is the part
+> worth reading. What follows §1/§2 is left unedited so the error stays legible.
+>
+> Repaired in the body, not just in prose: `form/native/metal/ollama_oracle.sh` measures the
+> denominator, and `metal_first_token.sh` now prints it **with its date, run count and spread**, or
+> prints `NO DENOMINATOR` when nobody has earned one. See
+> [2026-07-21-measured-denominator-and-the-loaded-host.md](2026-07-21-measured-denominator-and-the-loaded-host.md).
+
+
 Tuesday 2026-07-21 ~23:20 WITA, Hati Suci. Apple M4 Max, 128 GiB unified memory.
 Worktree `.claude/worktrees/google-turboquant-vector-search-300c68`, branch `claude/agitated-aryabhata-28e213`.
 Model: `llama3.2:3b`, ollama blob `sha256-dde5aa3f…ccdff`, 2 019 377 376 bytes — confirmed by manifest
