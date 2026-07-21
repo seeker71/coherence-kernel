@@ -154,11 +154,34 @@ x 56 layers + output   ~29.9 GiB of QUANTIZED weight actually read per forward
 => one 5.39 s forward is 5.55 GiB/s of real weight read on this machine
 ```
 
-**The external denominator — PENDING.** `ollama run dolphin-mixtral:8x22b-v2.9-q6_K` on this same
-machine, from its own store, is the free comparison and it was started. It did not return a
-`--verbose` eval rate inside this session's window (the model is 107.6 GiB and load alone dominates).
-**Pending is honest**; the ratio against ollama is NOT quoted here because it was not measured. That
-is an open row, not a result.
+**The external denominator — MEASURED.** `ollama run dolphin-mixtral:8x22b-v2.9-q6_K --verbose`, the
+same model, the same machine, from ollama's own store:
+
+```
+load duration        56.709 s
+prompt eval count    33 tokens   prompt eval rate  0.83 tok/s
+eval count           41 tokens   eval rate         0.30 tok/s
+total duration       3m54.568s
+```
+
+Its answer to the same prompt was `Paris.` — the same word this body produced.
+
+```
+                 form-native          ollama          ratio
+decode            0.186 tok/s      0.30 tok/s      1.61x behind
+prefill           0.038 tok/s      0.83 tok/s     21.8x  behind
+```
+
+**1.61x behind on decode.** For context, the same body against ollama on llama3.2:3b is 16.5x behind
+on decode (`receipts/2026-07-21-first-form-native-token.md`). The gap did not close because the
+kernels got 10x better in a day; it closed because at 107.595 GiB **both engines are bound by the
+same disk**, and a disk does not care whose kernel is waiting on it. Quoting the 1.61x as a statement
+about the kernels would be exactly the error row 848 is about.
+
+Two honesty notes on this comparison, neither of which I can remove: ollama ran **second**, on a page
+cache my own run had just warmed with the same 107.6 GiB file — `thawtax` runs in both directions.
+And ollama's own 56.7 s "load duration" is that same cost, sitting where it can be seen; our carrier
+has no equivalent line because it never loads, it maps.
 
 ## `thawtax` — a rate measured twice in one run, disagreeing by 79 %
 
@@ -222,8 +245,9 @@ regression — the re-run is the PASS above. (Memory row: *"Before believing any
 
 ## Gaps left open
 
-1. **The external denominator is not measured.** No ollama tok/s for this model on this machine. The
-   single most valuable next measurement, and the only one this receipt refuses to guess at.
+1. **The comparison against ollama is order-contaminated.** ollama ran second on a cache my run
+   warmed, and neither engine was measured cold-then-cold or warm-then-warm. The 1.61x is real but it
+   is not clean; an alternating A/B/A/B would settle it and was not run.
 2. **`q8-0-msl-band.fk` answers 255 on go and 246 on fkwu/rust** — the two arms that lose raw bytes to
    UTF-8 replacement lose exactly bits 1 and 8 (the absolute/literal bits; the agreement bits still
    pass). This is **byte-for-byte the same signature `q6k-msl-band.fk` already has**, so it is a
