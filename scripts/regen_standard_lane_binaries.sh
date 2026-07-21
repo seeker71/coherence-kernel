@@ -33,7 +33,9 @@ printf 'regen: fkwu-%s (%s bytes) stamp=%s\n' \
     "$fkwu_stamp"
 
 FORM_CLI_SRCS=(
-    form-stdlib/fourth-shim.fk form-stdlib/core.fk form-stdlib/line-grammar.fk
+    form-stdlib/fourth-shim.fk form-stdlib/core.fk
+    form-stdlib/offer-ack-core.fk form-stdlib/federation-graph-offer.fk
+    form-stdlib/line-grammar.fk
     form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hmac-sha256.fk form-stdlib/hex.fk
     form-stdlib/resource-port.fk form-stdlib/bml-native-interface-package-import.fk form-stdlib/hati-os-targets.fk
     form-stdlib/form-native-resource-interfaces.fk form-stdlib/form-fs.fk
