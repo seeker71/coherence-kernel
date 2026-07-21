@@ -1,0 +1,171 @@
+; llama-decode-msl.fk — the SMALL kernels a real llama3.2:3b token needs, emitted by the body, so that
+; every op between one resident quantized matvec and the next also happens on the GPU.
+;
+; WHY THIS EXISTS, and it is a measurement. Stone 3 put the whole model on the GPU in its quantized
+; form and proved the FUSED matvec (q6k-msl.fk / q4k-msl.fk) bit-exact against Form on real weights.
+; What it did not have was everything BETWEEN the matvecs — RMSNorm, RoPE, GQA attention over the
+; pooled KV cache, SwiGLU, the residual add, the argmax. The body already emits all of those, but
+; only INSIDE the monolithic block kernels (jit-tensor-emit.fk's jte-gqa-llama-block-fwd-causal-msl
+; and jte-llama-block-decode-msl), which take f32 weight POINTERS and run the whole block on ONE
+; thread (`if (gid != 0u) return;`). At llama3.2:3b's real width that shape cannot produce a token:
+; one thread would carry 3.21 GMAC, and the weights would have to be f32 (12.8 GB materialized) —
+; both of the walls Stones 1-3 measured and moved.
+;
+; So this cell SPLITS that block into its ops, keeping each op's arithmetic verbatim, and dispatches
+; the ones that parallelize across the axis they parallelize on:
+;
+;   the matvecs   -> q6k-msl.fk / q4k-msl.fk, one thread per ROW, quantized-resident (Stone 3's).
+;   attention     -> one thread per QUERY HEAD (24), each serial over the cache prefix.
+;   swiglu / add  -> one thread per ELEMENT.
+;   rmsnorm       -> ONE thread. Deliberately: the sum-of-squares is a reduction, and reassociating it
+;                    is exactly the named-epsilon question this stone did not have to answer (see the
+;                    receipt). 3072 fused adds on one lane is ~microseconds against a ~40 ms token.
+;   rope          -> one thread per HEAD; the pairs within a head are independent, and the per-pair
+;                    theta is a pure function of (pos, i), so no reduction is reassociated.
+;   argmax        -> ONE thread over 128 256 logits, ties resolved to the LOWEST index (a stated rule,
+;                    not whatever the hardware raced to).
+;
+; NOTHING IS RE-DERIVED. Every arithmetic body below is the body's existing recipe, transcribed with
+; the same op order:
+;   rmsnorm  = jte-llama-blk-rms1 (ss ascending, Newton-50 sqrt from sdv, then x*inv*g)
+;   swiglu   = jte-llama-blk-ffn's act (silu over the recipe's OWN fexp, never Metal's)
+;   attention= jte-gqa-blk-attn-causal, with the causal prefix replaced by the CACHE prefix — which is
+;              the same set of keys (kv-llama-block.fk's lblk-generate-causal proves the cached prefix
+;              at step p IS the causal mask's prefix at query p), and the same folds: dot descending
+;              through a named temporary, max-subtract softmax over fexp, forward weighted value fold.
+;   fexp/fln/fsin/fcos/fpow come from tensor-ir.fk and jit-tensor-emit.fk by CALL, not by copy.
+;
+; ONE THING IS NEW, and it is the model's, not mine: llama3.2 carries a `rope_freqs.weight` tensor
+; (64 f32) and llama.cpp DIVIDES each rope frequency by it. The block kernels' RoPE is base-10000 with
+; no freq factors — the "theta-500000 rope-scaling MSL" their own header names as the next stone. This
+; cell is that stone: theta = pos * base^(-i/HD) / freqs[i/2], with base and the factor buffer both
+; runtime arguments. Omitting the divide would have produced a token that looks fine and is wrong.
+;
+; THE RADIUS THIS CELL SPEAKS FOR. The emitted text is a TRANSCRIPTION, and a transcription can be
+; wrong in a way no amount of GPU running reveals. So each kernel's arithmetic is also read back into
+; Form below (ldm-rms-*, ldm-silu, ldm-theta, ldm-argmax-*) and tests/llama-decode-msl-band.fk proves
+; those twins equal the body's independently-written recipes (ln-rmsnorm, ln-silu, rope's theta,
+; core's max) on committed fixtures. That band speaks for the TRANSCRIPTION only. It does NOT speak
+; for the MSL compiler or the GPU: that is form/native/metal/metal_first_token.sh, which runs the
+; whole stack on real llama3.2:3b weights and gates the ops against Form's own fp64 answers.
+; It also does NOT speak for sequences longer than the KV pool the carrier allocates, nor for
+; nq not divisible by nkv (grp = nq/nkv is integer division and the kernel does not check).
+;
+; Kin: q6k-msl.fk / q4k-msl.fk (the matvecs these ops sit between), jit-tensor-emit.fk (the block
+; kernels this splits; jte-llama-helpers / jte-mlp-helpers are called from here), tensor-ir.fk
+; (tir-transcendentals-ty — the one fexp spine), llama-numerics.fk (ln-rmsnorm / ln-swiglu — the CPU
+; meanings), gqa-attn.fk (tb-gqa-attn — the attention meaning), kv-llama-block.fk (the cached-prefix
+; equality this attention leans on).
+;
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/transformer-numerics.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk
+;
+; Proven by: form-stdlib/tests/llama-decode-msl-band.fk (the transcription) and
+;            form/native/metal/metal_first_token.sh (the GPU, Mac-only carrier witness).
+
+(do
+    ; ================= the transcription, read back into Form =================
+    ; Written with the same op order the emitted C uses, so the band can falsify the transcription
+    ; against recipes that were written independently of it.
+
+    ; Newton-50 from sdv, exactly as jte-llama-blk-rms1 — the initial guess IS sdv, not 1.0
+    (defn ldm-newton (g sdv k) (if (eq k 0) g (ldm-newton (mul 0.5 (add g (div sdv g))) sdv (sub k 1))))
+    (defn ldm-rms-scale (ss n eps) (div 1.0 (ldm-newton (add (div ss n) eps) (add (div ss n) eps) 50)))
+    (defn ldm-silu (x) (mul x (div 1.0 (add 1.0 (tn-exp (sub 0.0 x))))))
+    ; theta for rope pair i/2 of a head-dim `hd` at position `pos`, divided by the model's own
+    ; frequency factor. Every operand is multiplied by 1.0 first for the reason the emitted C writes
+    ; `float(i) / float(hd)`: i and hd are INTEGERS, and an integer division here would silently
+    ; collapse every exponent to 0 and make theta = pos for every pair — a rope that compiles, runs,
+    ; and rotates nothing.
+    (defn ldm-theta (base pos i hd f)
+        (div (mul (mul pos 1.0) (fpow base (div (sub 0.0 (mul i 1.0)) (mul hd 1.0)))) f))
+
+    ; greedy selection with the kernel's rule made explicit: strict `>`, so a tie keeps the EARLIER
+    ; index. A rule, not a race.
+    (defn ldm-argmax-loop (xs i best bv)
+        (if (eq (len xs) 0) best
+            (if (gt (head xs) bv)
+                (ldm-argmax-loop (tail xs) (add i 1) i (head xs))
+                (ldm-argmax-loop (tail xs) (add i 1) best bv))))
+    (defn ldm-argmax (xs) (if (eq (len xs) 0) (sub 0 1) (ldm-argmax-loop (tail xs) 1 0 (head xs))))
+
+    ; ================= the emitted MSL =================
+    ; str_concat over named fragments, one fragment per meaning, so a diff of the emitted text points
+    ; at a recipe and not at a blob.
+
+    ; --- RMSNorm. One thread. y_j = (x_j / sqrt(mean(x^2)+eps)) * g_j, the forward sum-of-squares fold
+    ; ascending and the Newton-50 sqrt seeded at sdv — jte-llama-blk-rms1 verbatim, lifted out of the
+    ; block and given its own buffers. ---
+    (defn ldm-rmsnorm-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; float ss = 0.0f; uint j = 0; while (j < n) { float xv = x[j]; float sq = xv * xv; ss = ss + sq; j += 1; } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50; while (it > 0) { it -= 1; gg = 0.5f * (gg + sdv / gg); } float inv = 1.0f / gg; j = 0; while (j < n) { float nm = x[j] * inv; y[j] = nm * g[j]; j += 1; } }")))
+
+    ; --- RoPE, in place, one thread per head. Pairs are ADJACENT (i, i+1): that is ggml's rope for
+    ; llama (mode 0), and the GGUF conversion permutes Q/K so the adjacent-pair rotation is the same
+    ; rotation HF's half-split form applies. theta = pos * base^(-i/HD) / freqs[i/2] — the divide is
+    ; llama3.2's rope_freqs.weight, without which every position past the low frequencies is wrong. ---
+    (defn ldm-rope-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* v [[buffer(0)]], device const float* fr [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& pos [[buffer(4)]], constant float& base [[buffer(5)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint o = h * hd; uint i = 0; while (i + 1u < hd) { float ex = (-1.0f * float(i)) / float(hd); float fq = fpow(base, ex) / fr[i / 2u]; float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + i]; float q1 = v[o + i + 1u]; float t0 = q0 * ca; float t1 = q1 * sa; v[o + i] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; v[o + i + 1u] = t2 + t3; i += 2u; } }")))
+
+    ; --- GQA attention for ONE query position over the KV CACHE prefix, one thread per query head.
+    ; kc/vc are the pooled cache, laid out [position][nkv*hd]; npos is how many slots are live, and the
+    ; new token's own k/v are already slot npos-1 (the matvec wrote them there and rope rotated them in
+    ; place). Query head h reads KV head h/grp. Scores live in the caller's scratch at h*sstride, the
+    ; exponentials at (nq+h)*sstride — a pooled workspace, never a per-step allocation.
+    ; Every fold is jte-gqa-blk-attn-causal's: dot descending through a named temporary (so no fma
+    ; contraction), max-subtract softmax over the recipe's own fexp, forward weighted value fold. ---
+    (defn ldm-attn-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device const float* vc [[buffer(2)]], device float* y [[buffer(3)]], device float* sc [[buffer(4)]], constant uint& npos [[buffer(5)]], constant uint& nq [[buffer(6)]], constant uint& nkv [[buffer(7)]], constant uint& hd [[buffer(8)]], constant float& scale [[buffer(9)]], constant uint& sstride [[buffer(10)]], uint h [[thread_position_in_grid]]) { if (h >= nq) return; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint qoff = h * hd; uint koff = kvh * hd; uint S = h * sstride; uint E = (nq + h) * sstride; uint t = 0; while (t < npos) { float acc = 0.0f; uint c = hd; while (c > 0) { c -= 1; float p = q[qoff + c] * kc[t * KVD + koff + c]; acc = p + acc; } sc[S + t] = acc * scale; t += 1; } float mx = sc[S + 0]; t = 1; while (t < npos) { if (sc[S + t] > mx) { mx = sc[S + t]; } t += 1; } float sumes = 0.0f; t = 0; while (t < npos) { float e = fexp(sc[S + t] - mx); sc[E + t] = e; sumes = sumes + e; t += 1; } float invs = 1.0f / sumes; t = 0; while (t < npos) { sc[S + t] = sc[E + t] * invs; t += 1; } uint i = 0; while (i < hd) { y[qoff + i] = 0.0f; i += 1; } t = 0; while (t < npos) { i = 0; while (i < hd) { float pv = vc[t * KVD + koff + i] * sc[S + t]; y[qoff + i] = y[qoff + i] + pv; i += 1; } t += 1; } }")))
+
+    ; --- SwiGLU: act_i = silu(gate_i) * up_i, one thread per element. jte-llama-blk-ffn's act line. ---
+    (defn ldm-swiglu-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* g [[buffer(0)]], device const float* u [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float gv = g[i]; float sig = 1.0f / (1.0f + fexp(-1.0f * gv)); float sl = gv * sig; y[i] = sl * u[i]; }")))
+
+    ; --- the residual add, one thread per element. y = a + b, in that order. ---
+    (defn ldm-add-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; y[i] = a[i] + b[i]; }")))
+
+    ; --- greedy selection. One thread, strict `>`, so a tie goes to the LOWEST index — the same rule
+    ; llama-generate.fk's argmax keeps, and a rule at all rather than a race. ---
+    (defn ldm-argmax-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device uint* out [[buffer(1)]], device float* oval [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; uint best = 0u; float bv = x[0]; uint i = 1u; while (i < n) { if (x[i] > bv) { bv = x[i]; best = i; } i += 1u; } out[0] = best; oval[0] = bv; }")))
+
+    ; --- the unit a carrier compiles: the transcendental spine ONCE (Metal rejects a repeated
+    ; `static inline`/free function definition in one translation unit, loudly), then the six kernels.
+    ; The spine is CALLED from tensor-ir.fk and jit-tensor-emit.fk, not copied — fexp/fln/fsin/fcos/
+    ; fpow have exactly one definition in the body and this is a third reach into it. ---
+    ; `round`, defined by the body rather than borrowed. jte-llama-helpers' rr_2pi (the 2*pi range
+    ; reduction fsin needs) calls `round`, which lives in <metal_stdlib> — and q6k-msl.fk's whole point
+    ; is that the emitted unit includes no header, so the f16 decode is the body's arithmetic and not
+    ; the library's bitcast. Including the header here to get ONE function would have quietly undone
+    ; that for the whole translation unit. So the body emits it: nearest integer, ties AWAY from zero,
+    ; which is what C's round means and what rr_2pi assumes. Emitted BEFORE jte-llama-helpers so the
+    ; call site sees a declaration.
+    ; RADIUS: exact for |v| < 2^31 (the int round-trip), which rr_2pi's argument (angle / 2*pi, and the
+    ; angle is pos * a frequency <= 1) cannot approach at any context length this file declares.
+    (defn ldm-msl-round ()
+        "static inline float round(float v) { float a = (v < 0.0f) ? -v : v; float f = float(int(a + 0.5f)); return (v < 0.0f) ? -f : f; } ")
+
+    (defn ldm-msl-helpers ()
+        (str_concat (ldm-msl-round) (str_concat (jte-mlp-helpers "float") (jte-llama-helpers))))
+
+    (defn ldm-msl-unit ()
+        (str_concat (ldm-msl-helpers)
+        (str_concat (ldm-rmsnorm-msl "form_rmsnorm_f32")
+        (str_concat (ldm-rope-msl    "form_rope_f32")
+        (str_concat (ldm-attn-msl    "form_gqa_decode_f32")
+        (str_concat (ldm-swiglu-msl  "form_swiglu_f32")
+        (str_concat (ldm-add-msl     "form_add_f32")
+                    (ldm-argmax-msl  "form_argmax_f32"))))))))
+
+    0)

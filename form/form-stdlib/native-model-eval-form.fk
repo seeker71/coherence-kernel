@@ -1,0 +1,112 @@
+; native-model-eval-form.fk — paired local-model evaluation owned by Form.
+;
+; Expected/actual text exists only while this recipe scores it.  Durable rows
+; contain hashes and aggregate integers.  Artifact identity is observed before
+; and after inference; a changed or unverified identity makes the result dirty.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/native-model-evidence.fk form-stdlib/native-model-control-plane.fk
+
+(do
+    ; input row = (prompt expected actual latency-ms error-bit)
+    (defn nmfv-score-rows (rows)
+        (if (eq (len rows) 0) (list)
+            (cons
+                (nmfe-observation
+                    (nth (head rows) 0) (nth (head rows) 1)
+                    (nth (head rows) 2) (nth (head rows) 3)
+                    (nth (head rows) 4))
+                (nmfv-score-rows (tail rows)))))
+
+    ; result = tag model lane class day split data evaluator grade selection
+    ;          artifact-before artifact-after identity-before identity-after
+    ;          training-artifact observations aggregate
+    (defn nmfv-result
+        (model lane class day split data evaluator grade selection
+         artifact-before artifact-after identity-before identity-after
+         training-artifact observations)
+        (list "native-model-form-eval-v1" model lane class day split data evaluator
+              grade selection artifact-before artifact-after identity-before
+              identity-after training-artifact observations
+              (nmfe-aggregate observations)))
+    (defn nmfv-result? (r)
+        (if (and (eq (len r) 17) (str_eq (nth r 0) "native-model-form-eval-v1")) 1 0))
+    (defn nmfv-model (r) (nth r 1))
+    (defn nmfv-lane (r) (nth r 2))
+    (defn nmfv-class (r) (nth r 3))
+    (defn nmfv-day (r) (nth r 4))
+    (defn nmfv-split (r) (nth r 5))
+    (defn nmfv-data (r) (nth r 6))
+    (defn nmfv-evaluator (r) (nth r 7))
+    (defn nmfv-grade (r) (nth r 8))
+    (defn nmfv-selection (r) (nth r 9))
+    (defn nmfv-artifact-before (r) (nth r 10))
+    (defn nmfv-artifact-after (r) (nth r 11))
+    (defn nmfv-identity-before (r) (nth r 12))
+    (defn nmfv-identity-after (r) (nth r 13))
+    (defn nmfv-training-artifact (r) (nth r 14))
+    (defn nmfv-observations (r) (nth r 15))
+    (defn nmfv-aggregate (r) (nth r 16))
+    (defn nmfv-samples (r) (nth (nmfv-aggregate r) 0))
+    (defn nmfv-exact (r) (nth (nmfv-aggregate r) 1))
+    (defn nmfv-f1 (r) (nth (nmfv-aggregate r) 2))
+    (defn nmfv-sequence (r) (nth (nmfv-aggregate r) 3))
+    (defn nmfv-promotion-score (r) (nth (nmfv-aggregate r) 4))
+    (defn nmfv-latency (r) (nth (nmfv-aggregate r) 5))
+    (defn nmfv-errors (r) (nth (nmfv-aggregate r) 6))
+
+    (defn nmfv-identity-stable? (r)
+        (if (and (eq (nmfv-identity-before r) 1) (eq (nmfv-identity-after r) 1))
+            (if (str_eq (nmfv-artifact-before r) (nmfv-artifact-after r)) 1 0)
+            0))
+    (defn nmfv-clean? (r)
+        (if (and (eq (nmfv-result? r) 1) (gt (nmfv-samples r) 0))
+            (if (and (eq (nmfv-errors r) 0) (eq (nmfv-identity-stable? r) 1)) 1 0)
+            0))
+    (defn nmfv-promotion-grade? (r)
+        (if (and (str_eq (nmfv-grade r) "sealed-task-complete")
+                 (str_eq (nmfv-selection r) "rotating-final-audit")) 1 0))
+
+    (defn nmfv-observation-prompts (rows)
+        (if (eq (len rows) 0) (list)
+            (cons (nth (head rows) 1) (nmfv-observation-prompts (tail rows)))))
+    (defn nmfv-string-lists-equal? (a b)
+        (if (eq (len a) 0) (if (eq (len b) 0) 1 0)
+            (if (eq (len b) 0) 0
+                (if (str_eq (head a) (head b))
+                    (nmfv-string-lists-equal? (tail a) (tail b)) 0))))
+    (defn nmfv-paired? (candidate incumbent)
+        (if (and (str_eq (nmfv-lane candidate) (nmfv-lane incumbent))
+                 (and (eq (nmfv-day candidate) (nmfv-day incumbent))
+                      (and (str_eq (nmfv-split candidate) (nmfv-split incumbent))
+                           (and (str_eq (nmfv-data candidate) (nmfv-data incumbent))
+                                (str_eq (nmfv-evaluator candidate)
+                                        (nmfv-evaluator incumbent))))))
+            (nmfv-string-lists-equal?
+                (nmfv-observation-prompts (nmfv-observations candidate))
+                (nmfv-observation-prompts (nmfv-observations incumbent)))
+            0))
+
+    ; Convert a measured result to the existing strict policy row.  The
+    ; conservative promotion score (min(F1, sequence) per observation, then
+    ; mean) occupies the policy's F1 slot so the authority gate never sees the
+    ; more generous bag-of-token F1 alone.
+    (defn nmfv-policy-row (r)
+        (nmcp-eval
+            (nmfv-model r) (nmfv-lane r) (nmfv-class r) (nmfv-day r)
+            (nmfv-split r) (nmfv-samples r) (nmfv-exact r)
+            (nmfv-promotion-score r) (nmfv-latency r) (nmfv-errors r)
+            (nmfv-artifact-before r) (nmfv-data r) (nmfv-evaluator r)
+            (nmfv-clean? r)))
+
+    ; Authority requires the seal/authorization layer as well as evaluation.
+    ; A diagnostic or historical heldout can be measured but cannot promote.
+    (defn nmfv-authority-input? (candidate incumbent seal-ready authorization-ready)
+        (if (and (eq (nmfv-clean? candidate) 1) (eq (nmfv-clean? incumbent) 1))
+            (if (and (eq (nmfv-paired? candidate incumbent) 1)
+                     (and (eq (nmfv-promotion-grade? candidate) 1)
+                          (eq (nmfv-promotion-grade? incumbent) 1)))
+                (if (and (eq seal-ready 1) (eq authorization-ready 1)) 1 0)
+                0)
+            0))
+
+    0)

@@ -548,4 +548,3 @@ honest work, and I cannot show you its verdict" instead of a tidy green row. It 
 table as KILLED. The second discomfort: satsang-oracle printed eight error witnesses and
 exited 0 — the urge was to look away (a lib, diag-only, not my seam); staying with it found
 the fk_nerr-laundering path and filed it. Restraint would have fabricated a clean close.
-

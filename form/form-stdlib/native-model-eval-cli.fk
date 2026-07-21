@@ -1,0 +1,126 @@
+; native-model-eval-cli.fk -- one paired diagnostic scored entirely in Form.
+;
+; Raw prompt, expected text, and model answers cross stdin only for this
+; process. Output contains hashes, aggregate integer scores, and a diagnostic
+; comparison. It cannot grant authority: grade is diagnostic and selection is
+; fixed rather than a sealed final audit.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/native-model-control-plane.fk form-stdlib/native-model-evidence.fk form-stdlib/native-model-eval-form.fk
+
+(do
+    (defn nmecli-find-model (id rows)
+        (if (eq (len rows) 0) (list)
+            (if (str_eq id (nmcp-id (head rows))) (head rows)
+                (nmecli-find-model id (tail rows)))))
+    (defn nmecli-line (key value)
+        (str_concat key (str_concat "=" (str_concat value "\n"))))
+    (defn nmecli-int-line (key value)
+        (nmecli-line key (int_to_str value)))
+    (defn nmecli-render (lines)
+        (if (eq (len lines) 0) ""
+            (str_concat (head lines) (nmecli-render (tail lines)))))
+
+    ; stdin: day, task lane, candidate id/artifact-before/artifact-after/
+    ; identity-before/identity-after/latency/error/actual, then the same
+    ; incumbent fields, followed by prompt and expected text.
+    (let day (str_to_int (read_line)))
+    (let lane (read_line))
+    (let candidate-id (read_line))
+    (let candidate-before (read_line))
+    (let candidate-after (read_line))
+    (let candidate-identity-before (str_to_int (read_line)))
+    (let candidate-identity-after (str_to_int (read_line)))
+    (let candidate-latency (str_to_int (read_line)))
+    (let candidate-error (str_to_int (read_line)))
+    (let candidate-actual (read_line))
+    (let incumbent-id (read_line))
+    (let incumbent-before (read_line))
+    (let incumbent-after (read_line))
+    (let incumbent-identity-before (str_to_int (read_line)))
+    (let incumbent-identity-after (str_to_int (read_line)))
+    (let incumbent-latency (str_to_int (read_line)))
+    (let incumbent-error (str_to_int (read_line)))
+    (let incumbent-actual (read_line))
+    (let prompt (read_line))
+    (let expected (read_line))
+    (let candidate-row (nmecli-find-model candidate-id (nmcp-registry)))
+    (let incumbent-row (nmecli-find-model incumbent-id (nmcp-registry)))
+    (let pairs (list (list prompt expected)))
+    (let data (nmfe-dataset-sha256 pairs))
+    (let split (nmfe-sha256 (nmfe-fields (list "fixed-diagnostic" data))))
+    (let evaluator
+        (nmfe-sha256 "native-model-eval-cli-v1:exact-f1-sequence"))
+    (let candidate-observations
+        (nmfv-score-rows
+            (list (list prompt expected candidate-actual candidate-latency
+                        candidate-error))))
+    (let incumbent-observations
+        (nmfv-score-rows
+            (list (list prompt expected incumbent-actual incumbent-latency
+                        incumbent-error))))
+    (let candidate
+        (if (eq (len candidate-row) 0) (list)
+            (nmfv-result candidate-id lane (nmcp-class candidate-row) day split
+                data evaluator "diagnostic" "fixed" candidate-before
+                candidate-after candidate-identity-before candidate-identity-after
+                (nmcp-training-receipt candidate-row) candidate-observations)))
+    (let incumbent
+        (if (eq (len incumbent-row) 0) (list)
+            (nmfv-result incumbent-id lane (nmcp-class incumbent-row) day split
+                data evaluator "diagnostic" "fixed" incumbent-before
+                incumbent-after incumbent-identity-before incumbent-identity-after
+                (nmcp-training-receipt incumbent-row) incumbent-observations)))
+    (let recognized
+        (if (and (eq (nmfv-result? candidate) 1)
+                 (eq (nmfv-result? incumbent) 1)) 1 0))
+    (let paired (if (eq recognized 1) (nmfv-paired? candidate incumbent) 0))
+    (let candidate-clean (if (eq recognized 1) (nmfv-clean? candidate) 0))
+    (let incumbent-clean (if (eq recognized 1) (nmfv-clean? incumbent) 0))
+    (let comparable
+        (if (and (eq paired 1)
+                 (and (eq candidate-clean 1) (eq incumbent-clean 1))) 1 0))
+    (let winner
+        (if (eq comparable 0) "invalid"
+            (if (gt (nmfv-promotion-score candidate)
+                    (nmfv-promotion-score incumbent)) "candidate"
+                (if (lt (nmfv-promotion-score candidate)
+                        (nmfv-promotion-score incumbent)) "incumbent" "tie"))))
+    (print_str
+        (str_concat "schema=native-model-paired-diagnostic-v1\n"
+            (nmecli-render
+                (list
+                    (nmecli-line "candidate_model" candidate-id)
+                    (nmecli-line "candidate_class"
+                        (if (eq recognized 1) (nmfv-class candidate) "unrecognized"))
+                    (nmecli-line "candidate_artifact_sha256" candidate-before)
+                    (nmecli-int-line "candidate_clean" candidate-clean)
+                    (nmecli-int-line "candidate_exact_ppm"
+                        (if (eq recognized 1) (nmfv-exact candidate) 0))
+                    (nmecli-int-line "candidate_token_f1_ppm"
+                        (if (eq recognized 1) (nmfv-f1 candidate) 0))
+                    (nmecli-int-line "candidate_sequence_ppm"
+                        (if (eq recognized 1) (nmfv-sequence candidate) 0))
+                    (nmecli-int-line "candidate_score_ppm"
+                        (if (eq recognized 1) (nmfv-promotion-score candidate) 0))
+                    (nmecli-int-line "candidate_latency_ms"
+                        (if (eq recognized 1) (nmfv-latency candidate) 0))
+                    (nmecli-line "incumbent_model" incumbent-id)
+                    (nmecli-line "incumbent_class"
+                        (if (eq recognized 1) (nmfv-class incumbent) "unrecognized"))
+                    (nmecli-line "incumbent_artifact_sha256" incumbent-before)
+                    (nmecli-int-line "incumbent_clean" incumbent-clean)
+                    (nmecli-int-line "incumbent_exact_ppm"
+                        (if (eq recognized 1) (nmfv-exact incumbent) 0))
+                    (nmecli-int-line "incumbent_token_f1_ppm"
+                        (if (eq recognized 1) (nmfv-f1 incumbent) 0))
+                    (nmecli-int-line "incumbent_sequence_ppm"
+                        (if (eq recognized 1) (nmfv-sequence incumbent) 0))
+                    (nmecli-int-line "incumbent_score_ppm"
+                        (if (eq recognized 1) (nmfv-promotion-score incumbent) 0))
+                    (nmecli-int-line "incumbent_latency_ms"
+                        (if (eq recognized 1) (nmfv-latency incumbent) 0))
+                    (nmecli-int-line "paired" paired)
+                    (nmecli-line "diagnostic_winner" winner)
+                    (nmecli-int-line "authority_eligible" 0)
+                    (nmecli-line "dataset_sha256" data)
+                    (nmecli-line "evaluator_sha256" evaluator))))))

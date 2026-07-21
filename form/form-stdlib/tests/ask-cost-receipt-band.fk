@@ -1,0 +1,153 @@
+; preludes: form-stdlib/core.fk form-stdlib/ask-cost-receipt.fk
+;
+; ask-cost-receipt-band — the declared/measured cost shape, proven with no GPU, no blob and no clock.
+;
+; WHAT CAN BE WRONG HERE IN A WAY NO RUN WOULD REVEAL. A cost receipt's whole value is that the
+; DECLARED number was derived before the run and can therefore be contradicted by it. Three ways that
+; silently stops being true, none of which a green end-to-end run would show:
+;   - THE QUANT STRIDE. Q4_K packs 256 weights into 144 bytes and Q6_K into 210. Swap them, or apply
+;     one uniformly to a mixed-quant model, and every byte total is wrong by ~12% while still looking
+;     entirely plausible — and every fraction computed against it is quietly wrong with it. Bit 1
+;     pins both strides and the F32 case at hand-checkable widths.
+;   - THE FRACTION'S DIRECTION. A COUNT is a ceiling (measured above it falsifies the declaration); a
+;     roofline WALL TIME is a floor (measured BELOW it falsifies it). Render a floor through the
+;     ceiling's renderer and every honest run prints `within=0`, which teaches the reader to ignore
+;     the field — the exact failure mode of a check nobody believes. Bits 8 and 16 hold the two
+;     directions apart and prove each catches its own violation.
+;   - THE RUN AGGREGATE. Attention is the one term that grows with context, so a run of n forwards
+;     costs the triangular sum and not n times the final value. Using the final ctx for every forward
+;     overstates it ~2x. Harmless at n=18 where attention is 0.1% of the total; wrong in a way that
+;     grows without bound at long context. Bit 4 checks the triangular fold against a hand sum.
+;
+; AND ONE THING MUST BE TRUE FOR THE RECEIPT TO MEAN ANYTHING: the declared and measured values have
+; to be able to DIFFER. Every cost in a nominal run reads frac_ppm = 1000000 because the run does
+; exactly what was asked, and a band that only exhibited that would be a band that proves the
+; machinery is inert. Bit 32 exhibits a run that fell short — an early stop — and shows the fraction
+; moving off 1000000 in the right direction.
+;
+; WHAT THIS BAND DOES NOT SPEAK FOR — its radius (corpus row 826, aporon). It speaks for the
+; ARITHMETIC and the RENDERING, in Form's own integers, on small hand-checkable fixtures. It does not
+; speak for the byte totals of any actual file (that is metal_ask.sh's gate D1, which requires the
+; sum of all 255 derived tensor lengths plus the data base to equal the blob's size on disk, exactly),
+; nor for the dispatch count matching the kernel graph the carrier really encodes (that is read off
+; first-token.fk's forward()), nor for any wall time.
+;
+; Kin: ask-cost-receipt.fk (under test), whole-tensor-residency.fk (wtr-bytes — the same stride rule
+; over the real file), native/metal/ask-declared-cost.fk (the file walk that folds these),
+; qk-matvec-split-band.fk (the named-epsilon band this one is shaped after).
+;
+; Verdict 511 when the receipt is honest:
+;   1   THE QUANT STRIDES         Q4_K 144/256, Q6_K 210/256, F32 4/weight, and an unknown type is 0
+;                                 rather than a guess
+;   2   MACs FROM SHAPE ALONE     a hand-summed small shape, and llama3.2:3b's real per-layer 100 663
+;                                 296 projection MACs
+;   4   THE RUN IS TRIANGULAR     acr-macs-run over n forwards equals the explicit sum over ctx 1..n
+;   8   A CEILING CATCHES         acr-cost-line: within=1 at and below the bound, 0 above it
+;   16  A FLOOR CATCHES           acr-floor-line: holds=1 at and above the bound, 0 below it — the
+;                                 direction a roofline needs, and the OPPOSITE of bit 8
+;   32  DECLARED CAN DIFFER       a short run moves frac_ppm off 1000000, downward
+;   64  THE DISPATCH GRAPHS       lane 15/layer, split 22/layer, and split > lane at every depth
+;   128 ppm IS EXACT AT THE BOUND measured = declared is exactly 1000000, no rounding drift
+;   256 JOULES STAY PENDING       the joules line carries no number and does carry its fill command
+
+(do
+    (defn acb-bit (ok n) (if (eq ok 1) n 0))
+
+    ; ── 1. the quant strides, at widths that can be checked by hand ──────────────────────────────
+    ; 256 weights is exactly one superblock: Q4_K 144 B, Q6_K 210 B. 512 is two of each.
+    (defn acb-strides ()
+        (if (and (eq (acr-type-bytes 12 256) 144)
+            (and (eq (acr-type-bytes 14 256) 210)
+            (and (eq (acr-type-bytes 12 512) 288)
+            (and (eq (acr-type-bytes 14 512) 420)
+            (and (eq (acr-type-bytes 0 100) 400)
+                 (eq (acr-type-bytes 7 256) 0)))))) 1 0))
+
+    ; ── 2. MACs from shape alone ─────────────────────────────────────────────────────────────────
+    ; A toy shape summed by hand: d=4, dff=8, nkv=2, headdim=2. The k and v projections are d x
+    ; (nkv*headdim) = 4 x 4, NOT d x nkv — writing this bit is what caught the author reading the KV
+    ; width as 2 instead of 4, which is exactly the mistake that makes a GQA model's declared cost
+    ; look plausible and be wrong. q 16, o 16, k 16, v 16, gate 32, up 32, down 32 = 160.
+    ; And llama3.2:3b's real projection total, 100 663 296 MACs per layer.
+    (defn acb-macs ()
+        (if (and (eq (acr-macs-proj 4 8 2 2) 160)
+            (and (eq (acr-macs-proj 3072 8192 8 128) 100663296)
+            (and (eq (acr-macs-attn 2 2 3) 24)
+                 (eq (acr-macs-head 4 10) 40)))) 1 0))
+
+    ; ── 4. the run aggregate is TRIANGULAR, not n times the last ctx ─────────────────────────────
+    (defn acb-explicit-loop (nlayer d dff nhead nkv headdim vocab i n acc)
+        (if (gt i n) acc
+            (acb-explicit-loop nlayer d dff nhead nkv headdim vocab (add i 1) n
+                (add acc (add (mul nlayer (acr-macs-layer d dff nhead nkv headdim i))
+                              (acr-macs-head d vocab))))))
+    (defn acb-triangular ()
+        (do
+            (let a (acr-macs-run 2 4 8 2 2 2 10 5))
+            (let b (acb-explicit-loop 2 4 8 2 2 2 10 1 5 0))
+            ; and the naive-but-wrong reading — every forward at the FINAL ctx — must NOT equal it,
+            ; or the fixture is too small to tell the two apart and bit 4 would prove nothing
+            (let wrong (mul 5 (add (mul 2 (acr-macs-layer 4 8 2 2 2 5)) (acr-macs-head 4 10))))
+            (if (and (eq a b) (if (eq a wrong) 0 1)) 1 0)))
+
+    ; ── 8 / 16. the two directions of a bound ────────────────────────────────────────────────────
+    (defn acb-ceiling ()
+        (if (and (eq (acr-within-bound? 100 100) 1)
+            (and (eq (acr-within-bound? 99 100) 1)
+                 (eq (acr-within-bound? 101 100) 0))) 1 0))
+    (defn acb-floor ()
+        (if (and (eq (acr-above-floor? 100 100) 1)
+            (and (eq (acr-above-floor? 101 100) 1)
+            (and (eq (acr-above-floor? 99 100) 0)
+                 ; and the two are genuinely opposite at the same pair, which is the whole point
+                 (if (eq (acr-within-bound? 101 100) (acr-above-floor? 101 100)) 0 1)))) 1 0))
+
+    ; ── 32. declared and measured CAN differ, and in the right direction ─────────────────────────
+    ; A run asked for 18 forwards and stopped after 12: fewer bytes, fewer MACs, fewer dispatches,
+    ; and every fraction below 1000000.
+    (defn acb-short-run ()
+        (do
+            (let bd (acr-bytes-run 2011539456 2520 28 8 128 18))
+            (let bm (acr-bytes-run 2011539456 2520 28 8 128 12))
+            (let dd (mul 18 (acr-dispatch-forward 28)))
+            (let dm (mul 12 (acr-dispatch-forward 28)))
+            (if (and (lt (acr-frac-ppm bm bd) 1000000)
+                (and (gt (acr-frac-ppm bm bd) 0)
+                (and (eq (acr-frac-ppm dm dd) 666666)
+                     (eq (acr-within-bound? bm bd) 1)))) 1 0)))
+
+    ; ── 64. the two dispatch graphs ──────────────────────────────────────────────────────────────
+    (defn acb-dispatch ()
+        (if (and (eq (acr-dispatch-forward 28) 424)
+            (and (eq (acr-dispatch-forward-split 28) 621)
+            (and (eq (acr-dispatch-forward 1) 19)
+                 (gt (acr-dispatch-forward-split 28) (acr-dispatch-forward 28))))) 1 0))
+
+    ; ── 128. exactness at the bound ──────────────────────────────────────────────────────────────
+    (defn acb-exact ()
+        (if (and (eq (acr-frac-ppm 36246978864 36246978864) 1000000)
+            (and (eq (acr-frac-ppm 0 100) 0)
+                 (eq (acr-frac-ppm 100 0) 0))) 1 0))
+
+    ; ── 256. joules carry no number, and do carry their command ──────────────────────────────────
+    (defn acb-joules ()
+        (do
+            (let l (acr-joules-line))
+            (if (and (ge (str_find l "declared=pending" 0) 0)
+                (and (ge (str_find l "measured=pending" 0) 0)
+                (and (ge (str_find l "powermetrics" 0) 0)
+                     ; and it must not have quietly acquired a digit where a value goes
+                     (if (ge (str_find l "declared=0" 0) 0) 0 1)))) 1 0)))
+
+    (defn acb-verdict ()
+        (add (acb-bit (acb-strides) 1)
+        (add (acb-bit (acb-macs) 2)
+        (add (acb-bit (acb-triangular) 4)
+        (add (acb-bit (acb-ceiling) 8)
+        (add (acb-bit (acb-floor) 16)
+        (add (acb-bit (acb-short-run) 32)
+        (add (acb-bit (acb-dispatch) 64)
+        (add (acb-bit (acb-exact) 128)
+             (acb-bit (acb-joules) 256))))))))))
+
+    (acb-verdict))
