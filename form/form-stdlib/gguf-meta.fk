@@ -1,0 +1,123 @@
+; gguf-meta.fk — the GGUF METADATA VALUES, reached the equireach way.
+;
+; WHY THIS EXISTS. equireach-gguf.fk walks the metadata KV block to SKIP it: `egg-kv-next` knows every
+; value's width so it can step over 30 KVs and arrive at the tensor-info table. That is all Stone 3
+; needed, because Stone 3 only had to know where the WEIGHTS are. A token needs more: the model's own
+; hyper-parameters (how many layers, how wide, which epsilon, which rope base) and its own TOKENIZER
+; (128 256 strings, so an id can be read as text and a piece of text can be found as an id). Those live
+; in exactly the KVs that cell steps over. So this cell is the same walk with the step turned into a
+; READ — nothing here re-derives the GGUF layout, it reuses egg-*'s own arithmetic and stops one field
+; earlier.
+;
+; THE RADIUS THIS CELL SPEAKS FOR. It reads the value types llama3.2:3b's header actually contains:
+; u32 (4), f32 (6), string (8) and array-of-string (9). `gmt-u32` / `gmt-f32` / `gmt-str` refuse
+; (return the sentinel) when the KV is absent — a missing hyper-parameter must never be silently
+; replaced by a plausible one, because a fabricated rms-epsilon produces a token that looks fine and
+; is wrong. Value types 0-3, 5, 7, 10-12 (i8/i16/u16/i32/bool/i64/u64/f64) are SKIPPABLE here (egg's
+; widths carry them) but NOT readable; a caller that asks for one gets the sentinel, not a guess.
+; Array element indexing is a LINEAR walk for variable-width element types — O(i) per element, which
+; is honest for the handful of ids a decode loop names and is NOT a table to iterate over.
+;
+; Kin: equireach-gguf.fk (egg-* — the walk this extends; every offset rule is its), equireach.fk
+; (eqr-at / eqr-u32 / eqr-u64 — the O(1) reach), f16-decode.fk (fd-value at (8,23) — how ewl-f32
+; renders an f32, reused here for f32 metadata).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach-gguf.fk
+;
+; Proven by: form-stdlib/tests/gguf-meta-band.fk (fixture-free claims about the walk's arithmetic) and
+;            form/native/metal/metal_first_token.sh (the real header, as the token's own config).
+
+(do
+    ; the sentinel: "this KV is not in this file". Never 0 — 0 is a legal value for several of these.
+    (defn gmt-absent () (sub 0 1))
+
+    ; ---- one KV record: key string, then u32 value-type, then the value ----
+    (defn gmt-key-len  (src off) (egg-str-len src off))
+    (defn gmt-vtype    (src off) (egg-u32 src (egg-str-next src off)))
+    (defn gmt-valoff   (src off) (add (egg-str-next src off) 4))
+
+    ; key comparison reuses egg-name-bytes-eq: a GGUF key and a GGUF tensor name are the same shape
+    ; (u64 length + bytes), so there is one byte-compare in the body, not two.
+    (defn gmt-key-eq (src off key)
+        (if (eq (gmt-key-len src off) (str_len key))
+            (egg-name-bytes-eq src (add off 8) key 0 (str_len key))
+            0))
+
+    (defn gmt-scan (src off remaining key)
+        (if (eq remaining 0) (gmt-absent)
+            (if (eq (gmt-key-eq src off key) 1)
+                off
+                (gmt-scan src (egg-kv-next src off) (sub remaining 1) key))))
+
+    ; the KV block starts at byte 24, right after magic/version/tensor-count/kv-count
+    (defn gmt-find (src key) (gmt-scan src 24 (egg-kv-count src) key))
+
+    ; ---- typed reads. Each one checks the TYPE as well as the presence, so a key that exists with an
+    ; unexpected width returns the sentinel rather than a misread integer. ----
+    (defn gmt-u32 (src key)
+        (do
+            (let off (gmt-find src key))
+            (if (eq off (gmt-absent)) (gmt-absent)
+                (if (eq (gmt-vtype src off) 4) (egg-u32 src (gmt-valoff src off)) (gmt-absent)))))
+
+    (defn gmt-f32 (src key)
+        (do
+            (let off (gmt-find src key))
+            (if (eq off (gmt-absent)) (gmt-absent)
+                (if (eq (gmt-vtype src off) 6) (ewl-f32 src (gmt-valoff src off)) (gmt-absent)))))
+
+    ; ASCII only, and that is a radius and not an oversight: `substring` is byte-faithful for ASCII on
+    ; every arm that can open this blob, and the metadata keys this cell is asked for
+    ; (general.architecture, tokenizer.ggml.model) are ASCII by the format's own convention. Anything
+    ; that can hold arbitrary bytes — the token pieces — is read BYTEWISE below, never as a string.
+    (defn gmt-str (src key)
+        (do
+            (let off (gmt-find src key))
+            (if (eq off (gmt-absent)) ""
+                (if (eq (gmt-vtype src off) 8)
+                    (do
+                        (let v (gmt-valoff src off))
+                        (substring src (add v 8) (add (add v 8) (egg-u64 src v))))
+                    ""))))
+
+    ; ---- arrays. An array value is (u32 element-type, u64 count, then count elements). ----
+    (defn gmt-arr-off   (src off) (gmt-valoff src off))
+    (defn gmt-arr-etype (src off) (egg-u32 src (gmt-arr-off src off)))
+    (defn gmt-arr-count (src off) (egg-u64 src (add (gmt-arr-off src off) 4)))
+    (defn gmt-arr-first (src off) (add (gmt-arr-off src off) 12))
+
+    ; the i-th element's offset. Fixed-width types are O(1); string elements are a LINEAR walk, which
+    ; is the honest cost of a format that stores no offset table. Named, not hidden.
+    (defn gmt-arr-walk (src at i)
+        (if (eq i 0) at (gmt-arr-walk src (egg-str-next src at) (sub i 1))))
+    (defn gmt-arr-elem (src off i)
+        (do
+            (let et (gmt-arr-etype src off))
+            (if (eq et 8)
+                (gmt-arr-walk src (gmt-arr-first src off) i)
+                (add (gmt-arr-first src off) (mul i (egg-vtype-size et))))))
+
+    ; ---- the tokenizer, which is just two of those arrays ----
+    (defn gmt-tokens-kv (src) (gmt-find src "tokenizer.ggml.tokens"))
+    (defn gmt-vocab-n   (src) (do (let k (gmt-tokens-kv src))
+                                  (if (eq k (gmt-absent)) 0 (gmt-arr-count src k))))
+
+    ; token id -> where its piece lives, and the piece BYTEWISE. llama3's pieces are byte-level BPE
+    ; text: a leading space is stored as the two UTF-8 bytes of U+0120 (the byte-alphabet's stand-in
+    ; for 0x20), and 188 of the 256 single-byte tokens are non-ASCII. So a piece is never read as a
+    ; STRING here — `read_file_slice` is UTF-8-lossy on two of the four arms and `byte_to_str`
+    ; re-encodes on the third, and either door would silently rewrite a token. The bytes are what the
+    ; file has; the caller renders them.
+    (defn gmt-token-off (src id)
+        (do (let k (gmt-tokens-kv src))
+            (if (eq k (gmt-absent)) (gmt-absent) (gmt-arr-elem src k id))))
+    (defn gmt-token-len  (src at) (egg-u64 src at))
+    (defn gmt-token-byte (src at j) (eqr-at src (add (add at 8) j)))
+    ; the walk's cursor: given one token's offset, the next one's. A caller streaming the whole
+    ; vocabulary pays ONE linear walk, not one walk per token.
+    (defn gmt-token-next (src at) (egg-str-next src at))
+    (defn gmt-tokens-first (src)
+        (do (let k (gmt-tokens-kv src))
+            (if (eq k (gmt-absent)) (gmt-absent) (gmt-arr-first src k))))
+
+    0)

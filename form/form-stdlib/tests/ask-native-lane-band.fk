@@ -1,0 +1,143 @@
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/ask-native-lane.fk
+;
+; ask-native-lane-band — the question binding, proven without a GPU, a blob, or a file on disk.
+;
+; THE ONE FAILURE THIS BAND EXISTS FOR. A staged answer is a cache, and the classic way a cache lies
+; is by answering a question it was never asked: yesterday's artifact, still on disk, confidently
+; returning yesterday's prose for today's prompt. Nothing about that failure looks like a failure —
+; the answer is well-formed, fluent, and from a real model. It is simply not an answer to the question
+; that was asked. `anl-bound?` is the whole defence, so the binding is exercised here in both
+; directions, and the WRONG-question case is checked to REFUSE rather than merely to differ.
+;
+; NO FILE IO, ON PURPOSE, AND THAT IS WHY THE CELL IS SHAPED THE WAY IT IS. Every predicate in
+; ask-native-lane.fk comes in an `-of` form that takes the artifact's text directly and an `-at` form
+; that reads a path. Splitting them is not tidiness: `read_file_slice` is UTF-8-lossy on rust and ts,
+; so a band that reached a file would be a two-arm band, and the binding logic is exactly the part
+; that should travel everywhere. The `-at` doors are proven by form/native/metal/metal_ask.sh instead.
+;
+; WHAT THIS BAND DOES NOT SPEAK FOR — its radius (corpus row 826, aporon). It speaks for PARSING an
+; ASK-NATIVE v1 artifact and for BINDING it to a question. It does not speak for the tokens in the
+; artifact being correct — that is metal_first_token.sh's 13 gates — nor for the artifact being
+; produced by the model it names: BLOB-SHA256 is carried and exposed but not adjudicated, a gap named
+; in ask-native-lane.fk's header and in the receipt. A file bound to this exact question but generated
+; from a DIFFERENT model would pass every bit below, and that is stated rather than papered over.
+;
+; Kin: ask-native-lane.fk (under test), rag-ask.fk (the fallback lane), form-cli-ask.fk (the verb that
+; routes between them), ask-cost-receipt-band.fk (the cost half of the same receipt).
+;
+; Verdict 127 when the door is honest:
+;   1   HEADERS PARSE             each "KEY value" line reads back, including the FIRST line
+;   2   A KEY IS NOT A SUBSTRING  a key that appears inside another key's VALUE is not mistaken for a
+;                                 header of its own — the failure a bare str_find would walk into
+;   4   THE ANSWER BLOCK          multi-line prose between ANSWER-BEGIN/END survives intact, newlines
+;                                 and all, which no header value could
+;   8   THE RIGHT QUESTION BINDS  sha256 of the question in hand equals the staged QUESTION-SHA256
+;   16  THE WRONG QUESTION DOES NOT, and the refusal NAMES itself question-not-bound
+;   32  EVERY REFUSAL IS DISTINCT version-mismatch / question-not-bound / empty-answer / accepted are
+;                                 four different values, so a caller can tell them apart. The fourth
+;                                 refusal, `absent`, is NOT asserted here — see the note at the bit.
+;   64  THE ANSWER CARRIES ITS LANE  the returned body names metal-gguf-native exactly once and also
+;                                 carries the receipt — a caller cannot read it as a grounded cell
+
+(do
+    (defn anb-bit (ok n) (if (eq ok 1) n 0))
+    (defn anb-nl () (byte_to_str 10))
+    (defn anb-j (a b) (str_concat a (str_concat (anb-nl) b)))
+
+    ; the fixture, built line by line so the band carries no literal newline escapes
+    (defn anb-qsha () "bbaff4d2ecd5892d4a442b0f53131641bf6e6f284761dd20fc0664bc97145762")
+    (defn anb-question () "The capital of France is")
+    (defn anb-raw ()
+        (anb-j "ASK-NATIVE v1"
+        (anb-j "LANE metal-gguf-native"
+        (anb-j (str_concat "QUESTION-SHA256 " (anb-qsha))
+        (anb-j "MODEL llama3.2:3b"
+        (anb-j "BLOB-SHA256 dde5aa3f"
+        (anb-j "GATES 13-PASS"
+        (anb-j "RECEIPT-BEGIN"
+        (anb-j "COST dispatches declared=7632 measured=7632 frac_ppm=1000000 within=1"
+        (anb-j "RECEIPT-END"
+        (anb-j "ANSWER-BEGIN"
+        (anb-j " Paris. The capital of Italy is Rome."
+        (anb-j "A second line, so the block is not a header."
+               "ANSWER-END")))))))))))))
+
+    ; ── 1. headers, including the first line ─────────────────────────────────────────────────────
+    (defn anb-headers ()
+        (if (and (str_eq (anl-line-value (anb-raw) "ASK-NATIVE") "v1")
+            (and (str_eq (anl-line-value (anb-raw) "MODEL") "llama3.2:3b")
+            (and (str_eq (anl-line-value (anb-raw) "GATES") "13-PASS")
+                 (str_eq (anl-line-value (anb-raw) "QUESTION-SHA256") (anb-qsha))))) 1 0))
+
+    ; ── 2. a key inside a value is not a header ──────────────────────────────────────────────────
+    ; "MODEL" appears inside this LANE value. A bare str_find for "MODEL " would find it there and
+    ; return the wrong text; anchoring on newline+KEY+space must not.
+    (defn anb-tricky-raw ()
+        (anb-j "LANE a MODEL of sorts"
+        (anb-j "MODEL llama3.2:3b" "END")))
+    (defn anb-substring ()
+        (if (str_eq (anl-line-value (anb-tricky-raw) "MODEL") "llama3.2:3b") 1 0))
+
+    ; ── 4. the multi-line answer block ───────────────────────────────────────────────────────────
+    (defn anb-answer-block ()
+        (do
+            (let a (anl-answer-text (anb-raw)))
+            (if (and (ge (str_find a "Paris" 0) 0)
+                (and (ge (str_find a "second line" 0) 0)
+                (and (ge (str_find a (anb-nl) 0) 0)
+                     ; and it must not have swallowed its own end marker
+                     (if (ge (str_find a "ANSWER-END" 0) 0) 0 1)))) 1 0)))
+
+    ; ── 8 / 16. the binding, both ways ───────────────────────────────────────────────────────────
+    (defn anb-binds ()
+        (if (and (eq (anl-bound? (anb-raw) (anb-question)) 1)
+                 (eq (anl-ready-of-text (anb-raw) (anb-question)) 1)) 1 0))
+    (defn anb-refuses-wrong ()
+        (if (and (eq (anl-bound? (anb-raw) "an entirely different question") 0)
+            (and (eq (anl-ready-of-text (anb-raw) "an entirely different question") 0)
+                 (str_eq (anl-refusal-of-text (anb-raw) "an entirely different question")
+                         "native-lane:question-not-bound"))) 1 0))
+
+    ; ── 32. four distinguishable refusals ────────────────────────────────────────────────────────
+    (defn anb-bad-version () (anb-j "ASK-NATIVE v9" (anb-j "ANSWER-BEGIN" "ANSWER-END")))
+    (defn anb-empty-answer ()
+        (anb-j "ASK-NATIVE v1"
+        (anb-j (str_concat "QUESTION-SHA256 " (anb-qsha))
+        (anb-j "ANSWER-BEGIN" "ANSWER-END"))))
+    ; THE ABSENT CASE IS DELIBERATELY NOT ASSERTED HERE, and the reason is a four-way divergence this
+    ; band found: `nil?` answers 1 for an ordinary STRING on fkwu and 0 on go, rust and ts (probed
+    ; directly: (nil? "a") -> 0/0/0/1). anl-refusal-of's absence guard is `(nil? raw)`, so on fkwu
+    ; EVERY artifact — present, well-formed, correctly bound — classifies as `native-lane:absent`, and
+    ; the ask verb falls back to the grounded lane on that arm and always will until `nil?` agrees.
+    ; That degradation is SAFE (it refuses and names its reason; it never fabricates an answer) but it
+    ; is real, and asserting the absent case here would either force a three-arm disclaimer onto a
+    ; band whose actual subject travels fine, or — worse — quietly encode fkwu's answer as the
+    ; expected one. The three CONTENT refusals below agree on all four arms and are what this band
+    ; speaks for. The absent case is proven by form/native/metal/metal_ask.sh on the arms that hold it,
+    ; and the divergence is carried in the receipt as an open gap.
+    (defn anb-refusals ()
+        (if (and (str_eq (anl-refusal-of-text (anb-raw) "another question entirely") "native-lane:question-not-bound")
+            (and (str_eq (anl-refusal-of-text (anb-bad-version) (anb-question)) "native-lane:version-mismatch")
+            (and (str_eq (anl-refusal-of-text (anb-empty-answer) (anb-question)) "native-lane:empty-answer")
+                 (str_eq (anl-refusal-of-text (anb-raw) (anb-question)) "")))) 1 0))
+
+    ; ── 64. the answer says which lane spoke ─────────────────────────────────────────────────────
+    (defn anb-lane-attributed ()
+        (do
+            (let out (anl-answer-of (anb-raw) (anb-question)))
+            (if (and (ge (str_find out "local-lane:metal-gguf-native" 0) 0)
+                (and (ge (str_find out "COST dispatches" 0) 0)
+                (and (ge (str_find out "Paris" 0) 0)
+                     ; and it must NOT claim the grounded lane
+                     (if (ge (str_find out "local-lane:fkwu-rag-grounded" 0) 0) 0 1)))) 1 0)))
+
+    (defn anb-verdict ()
+        (add (anb-bit (anb-headers) 1)
+        (add (anb-bit (anb-substring) 2)
+        (add (anb-bit (anb-answer-block) 4)
+        (add (anb-bit (anb-binds) 8)
+        (add (anb-bit (anb-refuses-wrong) 16)
+        (add (anb-bit (anb-refusals) 32)
+             (anb-bit (anb-lane-attributed) 64))))))))
+
+    (anb-verdict))

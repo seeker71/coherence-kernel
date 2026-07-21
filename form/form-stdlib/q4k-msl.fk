@@ -1,0 +1,122 @@
+; q4k-msl.fk — Q4_K dequant as a Metal kernel the BODY emits, so the OTHER 168 tensors of
+; llama3.2:3b can live on the GPU quantized alongside the Q6_K ones.
+;
+; WHY THIS EXISTS, and it is a witness and not a plan. The Q6_K lane (q6k-msl.fk) reached whole-tensor
+; and multi-layer residency and then the audit said, out loud, `gate 7 multi-layer: all 14
+; blk.N.ffn_down tensors` — 14, not 28. llama3.2:3b is MIXED-quant and nothing in the body had said so:
+; of its 28 ffn_down tensors exactly half are Q6_K (type 14) and half are Q4_K (type 12), and across the
+; whole file it is 29 Q6_K (648 345 600 B), 168 Q4_K (1 362 493 440 B) and 58 F32 (700 672 B). A Q6_K-only
+; device lane can dispatch 32% of the model's bytes. This cell closes the other 68%.
+;
+; THE FORMAT (llama.cpp block_q4_K, QK_K=256, 144 bytes): d f16 @+0 · dmin f16 @+2 · scales[12] @+4 ·
+; qs[128] @+16. Eight sub-blocks of 32 weights, each with a 6-bit scale and a 6-bit min packed across
+; those 12 bytes by get_scale_min_k4, and w = (d * scale) * nib - (dmin * min).
+;
+; WHAT IS EMITTED: the same two shapes as the Q6_K lane, so a carrier holds one habit for both —
+;   q4m-dequant-msl  qb[] (raw Q4_K bytes, 144 per 256 weights) -> w[] f32, one thread per weight
+;   q4m-matvec-msl   the FUSED matvec: the resident buffer is the QUANTIZED tensor and each weight is
+;                    dequantized inside the dot, so nothing f32 is ever materialized.
+;
+; WHERE THIS LANE DIFFERS FROM Q6_K, and it is the one honest asymmetry: Q6_K's w = (d*sc)*q needs at
+; most 25 significand bits, so an f32 GPU and an fp64 Form agree BIT FOR BIT. Q4_K's
+; w = (d*scale)*nib - (dmin*min) ends in a SUBTRACTION of two independently-rounded products, and
+; d*scale is itself an f16 times a 6-bit integer (<= 17 bits, still exact) — so the products are exact
+; but their difference is not: fp64 subtracts exactly and rounds once, f32 rounds the difference to 24
+; bits. The two agree except where cancellation eats bits. So the Q4_K gate in the audit is the DERIVED
+; one-rounding bound |gpu - form| <= u*|w|, u = 2^-24 — not an epsilon anyone chose, and not equality
+; claimed where the arithmetic cannot deliver it. Saying "bit-exact" here would have been a lie the
+; measurement would not have caught, because at 4096 sampled weights it is almost always true anyway.
+;
+; NO HEADER: as in q6k-msl.fk, the f16 super-scale and super-min are decoded by ARITHMETIC (q4k_f16 is
+; fd-value at eb=5, mb=10, transcribed), not by `as_type<half>` out of <metal_stdlib>.
+;
+; THE RADIUS. q4m-flat-at below is the emitted C read back into Form — flat index, 144-byte block
+; stride, literal byte offsets — and tests/q4k-msl-band.fk proves it equals weight-load.fk's
+; FOUR-WAY-PROVEN `wl-q4k-at` at all 512 weights of a committed two-superblock fixture, which is where
+; the block stride is crossed. That band speaks for the transcription, not for the MSL compiler or the
+; GPU; native/metal/metal_whole_tensor_residency_audit.sh speaks for those, on real weights.
+;
+; Kin: q4k-dequant.fk (q4k-scale / q4k-min / the index decomposition — the one Q4_K spine),
+; q6k-msl.fk (the sibling lane; same shapes, same helper discipline, and the note above on why only one
+; of the two can claim bit-exactness), weight-load.fk (wl-q4k-at — the four-way-proven reference),
+; equireach.fk (eqr-at — the O(1) reach the transcription reads bytes through).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q4k-dequant.fk
+;
+; Proven by: form-stdlib/tests/q4k-msl-band.fk (the transcription) and
+;            form/native/metal/metal_whole_tensor_residency_audit.sh (the GPU, Mac-only)
+
+(do
+    ; ================= the transcription, read back into Form =================
+    (defn q4m-stride () 144)
+    (defn q4m-block-n () 256)
+    (defn q4m-blk (idx) (div idx (q4m-block-n)))
+    (defn q4m-i   (idx) (q4k-mod idx (q4m-block-n)))
+
+    (defn q4m-d    (src b) (fd-f16 (add (eqr-at src b)         (mul 256 (eqr-at src (add b 1))))))
+    (defn q4m-dmin (src b) (fd-f16 (add (eqr-at src (add b 2)) (mul 256 (eqr-at src (add b 3))))))
+    (defn q4m-sb   (src b j) (eqr-at src (add b (add 4 j))))          ; scales[j], the packed 12 bytes
+    (defn q4m-qsb  (src b k) (eqr-at src (add b (add 16 k))))         ; qs[k], the packed 128 bytes
+
+    ; get_scale_min_k4, in place: the 6-bit block-scale and block-min for sub-block j (0..7)
+    (defn q4m-scale (src b j)
+        (if (lt j 4)
+            (q4k-mod (q4m-sb src b j) 64)
+            (add (q4k-mod (q4m-sb src b (add j 4)) 16)
+                 (mul (div (q4m-sb src b (sub j 4)) 64) 16))))
+    (defn q4m-min (src b j)
+        (if (lt j 4)
+            (q4k-mod (q4m-sb src b (add j 4)) 64)
+            (add (div (q4m-sb src b (add j 4)) 16)
+                 (mul (div (q4m-sb src b j) 64) 16))))
+
+    ; one weight at FLAT index idx of a tensor whose first superblock starts at `base`
+    (defn q4m-flat-at (src base idx)
+        (do
+            (let b (add base (mul (q4m-stride) (q4m-blk idx))))
+            (let i (q4m-i idx))
+            (let c (div i 64))
+            (let within (q4k-mod i 64))
+            (let hf (div within 32))
+            (let l (q4k-mod within 32))
+            (let j (add (mul 2 c) hf))
+            (let qb (q4m-qsb src b (add (mul c 32) l)))
+            (let nib (if (eq hf 0) (q4k-mod qb 16) (div qb 16)))
+            (sub (mul (mul (q4m-d src b) (q4m-scale src b j)) nib)
+                 (mul (q4m-dmin src b) (q4m-min src b j)))))
+
+    ; ================= the emitted MSL =================
+    ; The integer identities are q4k-dequant.fk's own: x&63 = mod x 64, x&15 = mod x 16, x>>6 = div x 64,
+    ; x>>4 = div x 16, x<<4 = mul x 16, and | over disjoint fields = +. No bitwise operator appears.
+    (defn q4m-msl-int ()
+        "static inline int q4k_mod(int a, int n) { return a - (a / n) * n; } ")
+
+    ; fd-value at (eb 5, mb 10), transcribed — the same decode q6k-msl.fk emits, named for this lane so
+    ; each kernel is a self-contained translation unit
+    (defn q4m-msl-f16 ()
+        "static inline float q4k_pow2(int e) { float a = 1.0f; int k = 0; if (e >= 0) { while (k < e) { a = a * 2.0f; k = k + 1; } } else { while (k < -e) { a = a * 0.5f; k = k + 1; } } return a; } static inline float q4k_f16(int bits) { int mant = q4k_mod(bits, 1024); int ex = q4k_mod(bits / 1024, 32); int sgn = bits / 32768; float frac = float(mant) / 1024.0f; float mag = (ex == 0) ? q4k_pow2(-14) * frac : q4k_pow2(ex - 15) * (1.0f + frac); return (sgn == 1) ? -mag : mag; } ")
+
+    (defn q4m-msl-weight ()
+        "static inline int q4k_sc(device const uchar* qb, uint b, int j) { if (j < 4) { return q4k_mod(int(qb[b + 4u + uint(j)]), 64); } return q4k_mod(int(qb[b + 4u + uint(j + 4)]), 16) + (int(qb[b + 4u + uint(j - 4)]) / 64) * 16; } static inline int q4k_mn(device const uchar* qb, uint b, int j) { if (j < 4) { return q4k_mod(int(qb[b + 4u + uint(j + 4)]), 64); } return (int(qb[b + 4u + uint(j + 4)]) / 16) + (int(qb[b + 4u + uint(j)]) / 64) * 16; } static inline float q4k_w(device const uchar* qb, uint idx) { uint blk = idx / 256u; int i = int(idx - blk * 256u); uint b = blk * 144u; int c = i / 64; int within = q4k_mod(i, 64); int hf = within / 32; int l = q4k_mod(within, 32); int j = 2 * c + hf; int qbyte = int(qb[b + 16u + uint(c * 32 + l)]); int nib = (hf == 0) ? q4k_mod(qbyte, 16) : qbyte / 16; float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u])); return (d * float(q4k_sc(qb, b, j))) * float(nib) - dmin * float(q4k_mn(qb, b, j)); } ")
+
+    (defn q4m-msl-helpers () (str_concat (q4m-msl-int) (str_concat (q4m-msl-f16) (q4m-msl-weight))))
+
+    (defn q4m-dequant-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = q4k_w(qb, off + i); }")))
+
+    ; the fused matvec — j counts DOWN, accumulate p + acc: tb-dot's right fold, the same op order the
+    ; Q6_K lane and jte-matvec-msl emit, so all three are comparable row for row
+    (defn q4m-matvec-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = q4k_w(qb, uint(i) * cols + j) * float(x[j]); acc = p + acc; } y[i] = acc; }")))
+
+    (defn q4m-dequant-msl (fname) (str_concat (q4m-msl-helpers) (q4m-dequant-body fname)))
+    (defn q4m-matvec-msl  (fname) (str_concat (q4m-msl-helpers) (q4m-matvec-body  fname)))
+    (defn q4m-msl-unit (dname mname)
+        (str_concat (q4m-msl-helpers)
+        (str_concat (q4m-dequant-body dname) (q4m-matvec-body mname))))
+
+    0)

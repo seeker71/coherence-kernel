@@ -1,0 +1,96 @@
+; preludes: form-stdlib/core.fk form-stdlib/qk-matvec-split.fk
+;
+; qk-matvec-split-band — the split fold's partition and its two claims, proven without a GPU.
+;
+; qk-matvec-split.fk emits kernels that break a row's sum into contiguous chunks. Two things can be
+; wrong about that in ways no GPU run would reveal:
+;   - the PARTITION. An off-by-one in `chunk`, `lo` or `hi` silently drops or double-counts columns,
+;     and the answer stays plausible: a matvec that quietly sums 3071 of 3072 terms is off by one
+;     weight's worth, which is well inside any epsilon anyone would think to name. So the partition is
+;     checked as a partition — a COVER with no overlap and no gap — and not by comparing sums.
+;   - the parts=1 IDENTITY, which is the whole reason the combine counts DOWN. If it is not exactly
+;     the attestant at parts=1, then "chunking is the only difference between the two paths" is false,
+;     and every epsilon derived from that sentence is derived from nothing.
+;
+; And one thing has to be TRUE for the epsilon to be worth naming at all: the reassociation must
+; actually change results. A band that only showed the two sums agreeing would be a band that proves
+; the fast path is pointless or the fixture is blind. Bit 8 exhibits a fixture where serial and split
+; give DIFFERENT answers — both correct foldings of the same four numbers — because that difference is
+; precisely what the named epsilon in qk-matvec-split.fk bounds.
+;
+; WHAT THIS BAND DOES NOT SPEAK FOR — its radius. It speaks for the PARTITION and the ASSOCIATION, in
+; Form's fp64, on small fixtures. It does not speak for the emitted MSL compiling, for the GPU, for
+; f32 arithmetic, or for the bound holding on real weights: that is
+; form/native/metal/metal_first_token.sh's gates 8 and 9, which run both kernels on a real
+; llama3.2:3b 3072x8192 Q6_K tensor and report the measured deviation as a fraction of the derived
+; bound, every run. Nor does it speak for parts > cols beyond the one case bit 2 checks.
+;
+; Kin: qk-matvec-split.fk (under test), q6k-msl.fk / q4k-msl.fk (the attestant this must reduce to),
+; llama-decode-msl-band.fk (the same band shape for the ops beside the matvec).
+;
+; Verdict 63 when the split is honest:
+;   1   CEILING DIVISION            chunk = ceil(cols/parts) at three shapes, including a non-divisor
+;   2   IT IS A PARTITION           the chunks COVER [0,cols) with no gap and no overlap, at three
+;                                   shapes including parts > cols (where the tail chunks are empty)
+;   4   PARTS=1 IS THE ATTESTANT    the split sum at parts=1 equals the plain right fold, bit for bit
+;   8   REASSOCIATION IS REAL       at parts=2 on a catastrophic-cancellation fixture the two foldings
+;                                   DISAGREE — which is why the epsilon exists and is not decoration
+;   16  THE BOUND COVERS BOTH       the coefficient is cols + chunk + parts, hence never below the
+;                                   attestant's own depth `cols` — a bound that could be tighter than
+;                                   one of the two paths it compares would be no bound at all
+;   32  THREE KERNELS, TWO TWINS    each text declares its own kernel name; the appendix is EXACTLY
+;                                   the three concatenated; and the Q6_K and Q4_K partial kernels are
+;                                   the same length and NOT the same text (one meaning, two weight
+;                                   functions — a copy-paste that forgot to swap q6k_w would make
+;                                   them equal, and Q4_K weights would come out of a Q6_K reach)
+(do
+    (defn qsb-opens-with (s p)
+        (if (lt (str_len s) (str_len p)) 0
+            (if (str_eq (substring s 0 (str_len p)) p) 1 0)))
+
+    ; --- 1: ceiling division ---
+    (let c0 (if (eq (qms-chunk 3072 16) 192)
+            (if (eq (qms-chunk 3072 5) 615)
+            (if (eq (qms-chunk 10 3) 4)
+            (if (eq (qms-chunk 8192 32) 256) 1 0) 0) 0) 0))
+
+    ; --- 2: a real partition. Walk the chunks and demand lo(0)=0, hi(p)=lo(p+1), hi(last)=cols, and
+    ; every chunk non-negative in length. `parts > cols` is included on purpose: the tail chunks are
+    ; empty there, which must be a clean no-op and not a negative width. ---
+    (defn qsb-cover (cols parts p)
+        (if (ge p parts) (if (eq (qms-hi cols parts (sub parts 1)) cols) 1 0)
+            (if (lt (qms-hi cols parts p) (qms-lo cols parts p)) 0
+                (if (eq p (sub parts 1)) (qsb-cover cols parts (add p 1))
+                    (if (eq (qms-hi cols parts p) (qms-lo cols parts (add p 1)))
+                        (qsb-cover cols parts (add p 1)) 0)))))
+    (let c1 (if (eq (qms-lo 3072 16 0) 0)
+            (if (eq (qsb-cover 3072 16 0) 1)
+            (if (eq (qsb-cover 10 3 0) 1)
+            (if (eq (qsb-cover 7 16 0) 1) 2 0) 0) 0) 0))
+
+    ; --- 4 and 8: the two claims about the association, on one fixture. 1.0 + 1e16 - 1e16 + 1.0 is
+    ; the classic cancellation shape: folded right-to-left in one chain the two 1.0s survive one at a
+    ; time; folded in two chunks the first 1.0 is absorbed before the 1e16 pair cancels. Both are
+    ; correct fp64 foldings of the same four numbers. ---
+    (let xs (list 1.0 1e16 -1e16 1.0))
+    (let c2 (if (eq (qms-split-sum xs 4 1) (qms-serial-sum xs 4)) 4 0))
+    (let c3 (if (eq (qms-serial-sum xs 4) 1.0)
+            (if (eq (qms-split-sum xs 4 2) 0.0) 8 0) 0))
+
+    ; --- 16: the bound's coefficient dominates the attestant's own depth ---
+    (let c4 (if (eq (qms-bound-coeff 3072 16) (add 3072 (add 192 16)))
+            (if (gt (qms-bound-coeff 8192 32) 8192)
+            (if (gt (qms-bound-coeff 3072 1) 3072) 16 0) 0) 0))
+
+    ; --- 32: the emitted texts ---
+    (let k6 (qms-part-msl "form_q6k_matvec_part_f32" "q6k_w"))
+    (let k4 (qms-part-msl "form_q4k_matvec_part_f32" "q4k_w"))
+    (let kc (qms-combine-msl "form_part_combine_f32"))
+    (let c5 (if (eq (qsb-opens-with k6 "kernel void form_q6k_matvec_part_f32") 1)
+            (if (eq (qsb-opens-with k4 "kernel void form_q4k_matvec_part_f32") 1)
+            (if (eq (qsb-opens-with kc "kernel void form_part_combine_f32") 1)
+            (if (str_eq (qms-msl-appendix) (str_concat k6 (str_concat k4 kc)))
+            (if (eq (str_len k6) (str_len k4))
+            (if (eq (str_eq k6 k4) 0) 32 0) 0) 0) 0) 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))
