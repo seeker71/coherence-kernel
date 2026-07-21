@@ -1,0 +1,85 @@
+; nl-meaning-inquiry-learning.fk — train on natural-language paraphrases, map
+; held-out predictions to neutral identities, and execute every inquiry lane.
+import "nl-meaning-net.fk"
+import "nl-meaning-corpus.fk"
+import "../cognition/language-neutral-inquiry-induction.fk"
+
+(do
+  (defn nmil-d () 32)
+  (defn nmil-eps () 0.00001)
+  (defn nmil-proto-text (class-id)
+    (if (eq class-id 0) "may all be happy"
+      (if (eq class-id 1) "truth alone triumphs"
+        (if (eq class-id 2) "i am" "peace for every world"))))
+  (defn nmil-proto (class-id)
+    (list class-id (nmn-vec-norm (nmil-proto-text class-id) (nmil-d))))
+  (defn nmil-protos ()
+    (list (nmil-proto 0) (nmil-proto 1) (nmil-proto 2) (nmil-proto 3)))
+
+  (defn nmil-drop (xs n)
+    (if (or (eq n 0) (eq (len xs) 0)) xs (nmil-drop (tail xs) (sub n 1))))
+  (defn nmil-training-raw ()
+    (nmc-concat (tb-take (nmc-class0) 40)
+      (nmc-concat (tb-take (nmc-class1) 40)
+      (nmc-concat (tb-take (nmc-class2) 40) (tb-take (nmc-class3) 40)))))
+  (defn nmil-held-raw ()
+    (nmc-concat (nmil-drop (nmc-class0) 40)
+      (nmc-concat (nmil-drop (nmc-class1) 40)
+      (nmc-concat (nmil-drop (nmc-class2) 40) (nmil-drop (nmc-class3) 40)))))
+  (defn nmil-encode-training (rows)
+    (if (eq (len rows) 0) (list)
+      (cons (list (nmn-vec-norm (nmc-ex-text (head rows)) (nmil-d))
+                  (nth (nmil-proto (nmc-ex-class (head rows))) 1))
+            (nmil-encode-training (tail rows)))))
+
+  ; [correct predictions, evaluated rows, inquiry+replay successes].
+  (defn nmil-evaluate (stack rows protos acc)
+    (if (eq (len rows) 0) acc
+      (do (let row (head rows))
+        (let predicted (nmn-classify stack
+          (nmn-vec-norm (nmc-ex-text row) (nmil-d)) protos (nmil-eps)))
+        (let correct (if (eq predicted (nmc-ex-class row)) 1 0))
+        (let node (lnii-node-for-meaning (add 301 predicted)))
+        (let lanes (lnii-lanes-ok (lnii-subject node) 0 0))
+        (nmil-evaluate stack (tail rows) protos
+          (list (add (nth acc 0) correct)
+                (add (nth acc 1) 1)
+                (add (nth acc 2) lanes))))))
+
+  (defn nmil-witness ()
+    (do (let raw-train (nmil-training-raw))
+      (let held (nmil-held-raw))
+      (let examples (nmil-encode-training raw-train))
+      (let protos (nmil-protos))
+      (let initial (nmn-stack (nmil-d)))
+      (let loss-before (nmn-corpus-loss initial examples (nmil-eps)))
+      (let before (nmil-evaluate initial held protos (list 0 0 0)))
+      (let trained (nmn-train initial examples 0.02 (nmil-eps) 40))
+      (let loss-after (nmn-corpus-loss trained examples (nmil-eps)))
+      (let after (nmil-evaluate trained held protos (list 0 0 0)))
+      (let before-correct (nth before 0))
+      (let after-correct (nth after 0))
+      (let held-count (nth after 1))
+      (let inquiry-ok (nth after 2))
+      (let expected-inquiries (mul held-count 7))
+      (let trace-before (list (fb-frame 0 1 1) (fb-frame 1 before-correct 1)))
+      (let trace-after (list (fb-frame 0 1 1) (fb-frame 1 after-correct 1)))
+      (let learning-divergence (diverge trace-before trace-after))
+      (framebuffer-clear)
+      (let event0 (fb_record (intern_trivial_int before-correct)
+        "nl-meaning-inquiry-learning.fk" 1))
+      (let event1 (fb_record (intern_trivial_int after-correct)
+        "nl-meaning-inquiry-learning.fk" 2))
+      (let event2 (fb_record (intern_trivial_int inquiry-ok)
+        "nl-meaning-inquiry-learning.fk" 3))
+      (let frames (len (framebuffer-events)))
+      ; Loss is scaled only for compact observable output; comparison uses floats.
+      (list (nothing) 0 1 1001099003
+        (len raw-train) held-count before-correct after-correct
+        inquiry-ok expected-inquiries learning-divergence frames
+        (if (and (lt loss-after loss-before)
+          (and (gt after-correct before-correct)
+          (and (gt after-correct (div held-count 4))
+          (and (eq inquiry-ok expected-inquiries)
+          (and (eq learning-divergence 1) (eq frames 3)))))) 1 0))))
+  0)
