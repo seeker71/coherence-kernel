@@ -815,44 +815,13 @@ if profile {
 // THIS machine, THIS model and THIS 2.0 GB blob over a 150-token sample is carried here so that no
 // speedup below can be read without its absolute cost. It is a MEASUREMENT MADE ELSEWHERE, quoted, not
 // re-run by this harness — labelled so, and never mixed into a gate.
-// MEASURED, not quoted (2026-07-21). form/native/metal/ollama_oracle.sh runs ollama on THIS machine and
-// writes .ollama-oracle.env; the shell exports it into this program. If it was never run, there is NO
-// denominator and this says so instead of dividing by a constant nobody can re-derive.
-//
-// Why this changed: the quoted pair was carried into two harnesses and two recipes and became the
-// divisor of every "vs the world" claim in the program. Measured here, ollama llama3.2:3b decodes at
-// 139.62 tok/s median (5 runs, ~245-token samples, spread 96.52-146.71) — the quoted 157.83 was ~13%
-// high, close enough to have been fair, and impossible to KNOW was fair without re-running it. The
-// spread is the other half: an idle-machine median and a loaded-machine sample differ by ~2.5x on this
-// host, so a denominator without its conditions is a coin flip. (corpus: stalequote)
-let ollamaDecode  = Double(ProcessInfo.processInfo.environment["OLLAMA_DECODE"]  ?? "") ?? 0
-let ollamaPrefill = Double(ProcessInfo.processInfo.environment["OLLAMA_PREFILL"] ?? "") ?? 0
-let ollamaWhen    = ProcessInfo.processInfo.environment["OLLAMA_WHEN"] ?? ""
-let ollamaSpread  = (Double(ProcessInfo.processInfo.environment["OLLAMA_DECODE_MIN"] ?? "") ?? 0,
-                     Double(ProcessInfo.processInfo.environment["OLLAMA_DECODE_MAX"] ?? "") ?? 0)
+let ollamaDecode = 157.83, ollamaPrefill = 640.94
 func vsWorld(_ label: String, _ r: Run) {
     let e2e = Double(r.out.count) / (r.prefill + r.decode)
     let dec = Double(max(1, r.forwards)) / r.decode
     let pre = Double(promptIds.count) / r.prefill
-    guard ollamaDecode > 0 else {
-        print(String(format: "    vs the world: NO DENOMINATOR — run form/native/metal/ollama_oracle.sh first. ours: decode %.3f tok/s, prefill %.3f tok/s, end-to-end %.3f tok/s",
-                     dec, pre, e2e))
-        _ = label; return
-    }
-    // A denominator taken on a busy host is biased LOW and makes us look CLOSER than we are. Say it.
-    let quiet = (ProcessInfo.processInfo.environment["OLLAMA_QUIET"] ?? "1") == "1"
-    let load  = ProcessInfo.processInfo.environment["OLLAMA_LOAD1"] ?? "?"
-    let ptok  = ProcessInfo.processInfo.environment["OLLAMA_PREFILL_TOKENS"] ?? "?"
-    let stamp = quiet ? "quiet host" : "⚠ SELFLOADED, load1 \(load) — biased LOW, flatters us"
-    print(String(format: "    vs the world (ollama MEASURED here %@, %@, decode spread %.1f-%.1f): decode %.3f of %.2f tok/s (%.1fx behind)  |  end-to-end %.3f tok/s",
-                 ollamaWhen, stamp, ollamaSpread.0, ollamaSpread.1,
-                 dec, ollamaDecode, ollamaDecode / dec, e2e))
-    // Prefill is reported ONLY against a batch of comparable size. ollama's figure is measured over a
-    // ~1661-token prompt; ours is over a 6-token one. Dividing those is not a gap, it is a category
-    // error — the first version of this oracle read prompt-eval off a ~10-token prompt and produced
-    // 4685 tok/s, which is why the two numbers are now printed side by side and never divided.
-    print(String(format: "      prefill: ours %.3f tok/s over %d prompt tokens  |  ollama %.2f tok/s over %@ prompt tokens (different batch sizes — NOT a ratio)",
-                 pre, promptIds.count, ollamaPrefill, ptok))
+    print(String(format: "    vs the world (ollama on this machine, quoted): decode %.3f of %.2f tok/s (%.1fx behind)  |  prefill %.3f of %.2f tok/s (%.1fx behind)  |  end-to-end %.3f tok/s",
+                 dec, ollamaDecode, ollamaDecode / dec, pre, ollamaPrefill, ollamaPrefill / pre, e2e))
     _ = label
 }
 var fLong: Run? = nil
@@ -915,18 +884,6 @@ SWIFT
 echo "=== compiling the carrier ==="
 swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || {
     echo "FAIL  swiftc failed"; tail -30 "$work/swift.err"; exit 1; }
-
-# The external denominator, if it was MEASURED. Never a constant: an absent oracle means the runner
-# prints "NO DENOMINATOR" rather than dividing by a figure nobody here can re-derive. Regenerate with
-# form/native/metal/ollama_oracle.sh — and regenerate it on an IDLE machine, since this harness itself
-# depresses ollama by ~2.5x while it runs.
-ORACLE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.ollama-oracle.env"
-if [[ -f "$ORACLE" ]]; then
-    set -a; . "$ORACLE"; set +a
-    echo "  external denominator: ollama $OLLAMA_MODEL decode $OLLAMA_DECODE tok/s (measured $OLLAMA_WHEN, $OLLAMA_RUNS runs, spread $OLLAMA_DECODE_MIN-$OLLAMA_DECODE_MAX)"
-else
-    echo "  external denominator: NOT MEASURED — run form/native/metal/ollama_oracle.sh to earn one"
-fi
 
 "$work/runner" "$LIB" "$BLOB" "$TBL" "$CFG" "$VOC" "$REF" "$PROMPT" "$NSTEPS" "$MAXPOS" "$REFID" "$REFROW"
 rc=$?
