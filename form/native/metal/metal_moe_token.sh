@@ -491,6 +491,10 @@ let poolBytes = (dModel * 7 + dFF * 3 + vocabN + 2 * nLayer * maxpos * kvd + 2 *
 print(String(format: "pooled: %.1f MB of activation + KV state, allocated ONCE for the whole run",
              Double(poolBytes) / 1048576.0))
 
+// counted across the WHOLE run, gates and generation alike
+var gpuErrors = 0
+var gpuFirstError: String? = nil
+
 final class Step {
     let cb: MTLCommandBuffer, enc: MTLComputeCommandEncoder
     init() { cb = queue.makeCommandBuffer()!; enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent)! }
@@ -503,7 +507,22 @@ final class Step {
                             threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
         if barrier { enc.memoryBarrier(scope: .buffers) }
     }
-    func done() { enc.endEncoding(); cb.commit(); cb.waitUntilCompleted() }
+    // A command buffer that FAILS writes nothing, and every readback buffer in this
+    // carrier is freshly allocated and therefore zeroed — so an unchecked failure does
+    // not look like an error, it looks like arithmetic that disagrees with Form at
+    // almost every weight. This check is the difference between "the GPU is wrong" and
+    // "the GPU did not run", and those are not the same sentence.
+    func done() {
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        if let e = cb.error {
+            gpuErrors += 1
+            if gpuFirstError == nil { gpuFirstError = "\(e)" }
+        }
+        if cb.status != .completed {
+            gpuErrors += 1
+            if gpuFirstError == nil { gpuFirstError = "command buffer status \(cb.status.rawValue), not .completed" }
+        }
+    }
 }
 
 // a quantized matvec straight off the resident views: rows = d1, cols = d0. `base` is an ABSOLUTE file
@@ -627,6 +646,8 @@ func route(_ s: Step) {
 // closing the expert gather on the host side. It is counted, not hidden: `routeRoundTrips` below.
 var routeRoundTrips = 0
 var routeLog: [[Int]] = []
+var routeWeightFaults = 0      // a routed layer whose chosen weights did not sum to 1
+var routeDupFaults = 0         // a routed layer that "chose" the same expert twice
 func forward(_ id: Int, _ pos: Int, logRoute: Bool = false) -> Int {
     var s = Step()
     dequantAt(s, type: embT.type, base: embT.off, off: id * dModel, n: dModel, bX)
@@ -652,6 +673,12 @@ func forward(_ id: Int, _ pos: Int, logRoute: Bool = false) -> Int {
         let chosen = (0..<nExpertUsed).map { Int(idp[$0]) }
         let weights = (0..<nExpertUsed).map { wtp[$0] }
         if logRoute { routeLog.append(chosen) }
+        // THE LIVE VOICE CANARY, checked on every one of the routed layers rather than
+        // once at the end: softmax-then-renormalize makes these weights sum to exactly 1
+        // by construction, so a sum of 0 is not a bad route — it is no route.
+        let wsum = weights.reduce(0) { $0 + $1 }
+        if abs(Double(wsum) - 1.0) > 1e-4 { routeWeightFaults += 1 }
+        if chosen.allSatisfy({ $0 == chosen[0] }) && nExpertUsed > 1 { routeDupFaults += 1 }
         s = Step()
         for k in 0..<nExpertUsed {
             let e = chosen[k]
@@ -681,6 +708,42 @@ func derivedBound(_ terms: [Double], _ cols: Int) -> Double {
     var s = 0.0; for t in terms { s += abs(t) }
     return Double(cols) * u * s
 }
+// ---- gate 0: DID THE GPU RUN. Asked first, because every gate below reads a buffer
+// back, and a buffer that was never written reads as zeros — which is a NUMBER, and
+// numbers get compared and reported as disagreement. The CPU writes a sentinel no
+// kernel would ever produce; a kernel must overwrite it. If this fails, nothing below
+// this line means anything and the harness says so instead of grading silence.
+print("=== gate 0: did the GPU run at all ===")
+do {
+    let sentinel: Float = -424242.0
+    let sp = bRef.contents().bindMemory(to: Float.self, capacity: 4)
+    for i in 0..<4 { sp[i] = sentinel }
+    let before = gpuErrors
+    let s = Step()
+    // the cheapest real kernel in the unit: dequant 4 weights of token_embd
+    dequantAt(s, type: embT.type, base: embT.off, off: 0, n: 4, bRef)
+    s.done()
+    let after = fvals(bRef, 4)
+    let untouched = after.allSatisfy { $0 == sentinel }
+    if gpuErrors > before {
+        print("  command buffer ERROR: \(gpuFirstError ?? "unknown")")
+    }
+    print("  sentinel \(sentinel) -> \(after)")
+    check(gpuErrors == before && !untouched,
+          "gate 0 the GPU executes: a kernel overwrote the CPU's sentinel, and no command buffer errored",
+          "gate 0 THE GPU DID NOT RUN — the sentinel survived and/or a command buffer failed. Every gate below would grade an unwritten buffer as an arithmetic disagreement; they are not run.")
+    if failures > 0 {
+        print("")
+        print("  This is a RESIDENCY failure, not an arithmetic one. This carrier asks Metal to")
+        print("  make \(String(format: "%.2f", Double(dev.currentAllocatedSize)/1073741824.0)) GiB resident against a recommendedMaxWorkingSetSize of")
+        print("  \(String(format: "%.2f", Double(recWS)/1073741824.0)) GiB. Whether that succeeds depends on what else holds memory on")
+        print("  this machine RIGHT NOW — it is not a property of the code or of the model.")
+        print("  Free memory and re-run; if it persists, lower FORM_VIEW_GIB (default 40).")
+        print("=== VERDICT FAIL — the GPU did not run; no arithmetic was witnessed ===")
+        exit(1)
+    }
+}
+
 print("=== gates 4-8: the body judges the GPU, at every NEW thing ===")
 
 // --- gate 4: the embedding gather, Q6_K, bit for bit ---
@@ -851,19 +914,36 @@ if !routeLog.isEmpty {
     for r in routeLog { for e in r { counts[e] += 1 } }
     print("  expert usage over all \(routeLog.count) routed layers: \(counts)  <- a MoE that used one expert would show it here")
 }
+// GATE 9, REBUILT. "legal vocab indices" is satisfied by [0,0,0,0], so the old form of
+// this gate could not distinguish a working 141 B model from a GPU that wrote nothing —
+// an aporon (corpus row 826) sitting under the headline claim. Four witnesses now, and
+// every one of them is FALSE for a degenerate run:
+//   a  legal indices                     (the old, necessary-but-far-from-sufficient one)
+//   b  the ids are not all the same token (all-<unk> fails; so does any constant)
+//   c  the argmax's own logit VALUE is non-zero (an all-zero logits buffer has argmax 0
+//      with value 0 — that is the exact signature, so it is named and refused)
+//   d  the router's chosen weights summed to 1 at ALL \(routeRoundTrips) routed layers, and
+//      no layer "chose" the same expert twice. This is the strongest of the four because
+//      it is checked live, 560 times, deep inside the run — not once at the end.
 let legal = outIds.allSatisfy { $0 >= 0 && $0 < vocabN }
-let varied = Set(outIds).count > 1 || outIds.count == 1
-check(!outIds.isEmpty && legal,
-      "gate 9 real token ids out of a 141 B Mixture-of-Experts, legal vocab indices",
-      "gate 9 no legal token ids were produced")
-_ = varied
+let varied = Set(outIds).count > 1
+let argmaxVal = fvals(bOutV, 1)[0]
+let routerHealthy = routeWeightFaults == 0 && routeDupFaults == 0 && routeRoundTrips > 0
+print("  witnesses: legal \(legal) | non-constant \(varied) | final argmax logit \(argmaxVal) | router faults \(routeWeightFaults) weight / \(routeDupFaults) duplicate over \(routeRoundTrips) routed layers | command-buffer errors \(gpuErrors)")
+check(!outIds.isEmpty && legal && varied && argmaxVal != 0.0 && routerHealthy && gpuErrors == 0,
+      "gate 9 real token ids out of a 141 B Mixture-of-Experts: legal, NON-CONSTANT, a non-zero winning logit, and a router that summed to 1 at all \(routeRoundTrips) routed layers",
+      "gate 9 the output is degenerate or the GPU did not fully run (legal \(legal), non-constant \(varied), argmax value \(argmaxVal), router faults \(routeWeightFaults)/\(routeDupFaults), cb errors \(gpuErrors))")
 
 // ---- residency, measured after the fact ------------------------------------------------------------
 print("=== residency, measured ===")
 print("  \(views.count) views over one mmap of \(mapLen) B; the GPU never received a host copy of any tensor")
 print(String(format: "  device currentAllocatedSize %.3f GiB", Double(dev.currentAllocatedSize)/1073741824.0))
 
-if failures == 0 { print("=== VERDICT PASS — 9 gates ===") } else { print("=== VERDICT FAIL — \(failures) gate(s) ===") }
+if gpuErrors > 0 {
+    print("=== \(gpuErrors) COMMAND BUFFER(S) FAILED during this run — first: \(gpuFirstError ?? "unknown") ===")
+    print("    Nothing above this line that reads a buffer back can be trusted.")
+}
+if failures == 0 { print("=== VERDICT PASS — 10 gates ===") } else { print("=== VERDICT FAIL — \(failures) gate(s) ===") }
 exit(failures == 0 ? 0 : 1)
 SWIFT
 

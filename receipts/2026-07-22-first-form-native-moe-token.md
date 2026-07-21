@@ -268,6 +268,103 @@ regression — the re-run is the PASS above. (Memory row: *"Before believing any
 
 ---
 
+## ADDENDUM, same night — the coordinator's re-run did not reproduce, and he was right to push
+
+The coordinator re-ran this stone on his own and got:
+
+```
+GENERATED TOKEN IDS: [0, 0, 0, 0]      pieces: ["<unk>", "<unk>", "<unk>", "<unk>"]
+chosen experts: GPU [0, 0]  weights ["0.000000", "0.000000"]
+FAIL gate 4 embedding gather differs from Form at 5959 of 6144 weights
+FAIL gate 5 / gate 6 / gate 7 / gate 8      PASS gates 1, 2, 3, 9
+=== VERDICT FAIL — 5 gate(s) ===
+```
+
+**Everything structural passed; everything that reads weight bytes failed.** That is not a wrong
+answer. It is the signature of **no answer at all**, and his own numbers prove it exactly:
+
+```
+he reported   worst logit delta   0.702794789724033
+the body's    REFGATE[0]        = 0.702794789724033      <- identical, digit for digit
+he reported   worst weight delta  0.5599921638925974
+the body's    REFROUTE w[0]     = 0.5599921638925974     <- identical, digit for digit
+```
+
+**A delta equal to the reference can only mean the GPU side was exactly 0.0.** Every readback buffer
+in this carrier is freshly allocated and therefore zeroed, so `[0,0]` route ids with `0.000000`
+weights are the *initial contents of memory nothing ever wrote*. `argmax` over an all-zero logits
+buffer returns index 0 with value 0 — hence `<unk><unk><unk><unk>`. One fact, wearing the costume of
+five arithmetic disagreements.
+
+### The defect was mine, and it is worse than the failing run
+
+`Step.done()` was:
+
+```swift
+func done() { enc.endEncoding(); cb.commit(); cb.waitUntilCompleted() }
+```
+
+**It never checked `cb.error`.** Every kernel in this carrier — all nine gates and all 560 routed
+layers — ran through that method. A command buffer that fails writes nothing and reports nothing, so
+this carrier could not distinguish *"the GPU is wrong"* from *"the GPU did not run"*, and it
+confidently printed the first while meaning the second. I built eight gates asking **is it right?**
+and not one asking **did it happen?**
+
+### What changed (strictly stricter — no gate was loosened to make a board green)
+
+- **`Step.done()` now checks `cb.error` and `cb.status`**, counts failures across the whole run, and
+  keeps the first Metal error string. Any run with a failed command buffer says so, loudly, and
+  states that nothing which reads a buffer back can be trusted.
+- **New gate 0, asked BEFORE any gate that could mistake silence for a wrong answer.** The CPU writes
+  a sentinel (`-424242.0`) no kernel would produce; a real kernel must overwrite it. If it survives,
+  the harness **refuses to run gates 4-9 at all** rather than grade unwritten memory, and prints that
+  this is a residency condition, not an arithmetic one.
+- **Gate 9 rebuilt.** The coordinator is right that it was an `aporon` (row 826): *"legal vocab
+  indices"* is satisfied by `[0,0,0,0]`, so the gate carrying the headline claim could not tell a
+  working 141 B model from a dead one. It now needs four witnesses, every one false for a degenerate
+  run: legal indices; **non-constant** ids; a **non-zero winning logit** (the exact signature of an
+  all-zero logits buffer, named and refused); and — the strongest, because it is checked live 560
+  times deep inside the run, not once at the end — **the router's chosen weights summed to 1.0 at
+  every routed layer**, with no layer choosing the same expert twice. Softmax-then-renormalize makes
+  that sum exactly 1 by construction, so a sum of 0 is not a bad route, it is *no* route.
+
+### Honest state of reproduction
+
+| | |
+|---|---|
+| my re-run, hardened harness, default `FORM_VIEW_GIB=40` | **VERDICT PASS — 10 gates**, ids `[5465, 28725, 690, 349]`, `" Paris, which is"`, gate 0 PASS, **0 command-buffer errors**, 0 router faults over 560 routed layers |
+| the coordinator's run | FAIL, GPU wrote nothing |
+| **could I force his failure?** | **No — not yet.** I ran `FORM_VIEW_GIB=2` (78 views, ~156 GiB of buffer length against a 128 GiB machine) specifically to starve residency; it had not reached a verdict when this was written. **Inconclusive, and recorded as inconclusive.** |
+
+So: **I have identified the cause with a digit-exact fingerprint, and I have NOT reproduced the
+trigger.** Those are different claims and I am not merging them. What I can say precisely:
+
+- the failure is **not** in the arithmetic, the views, the expert gather, the Q8_0 carver, or the
+  body's emissions — his refs matched mine digit for digit, which is why the fingerprint worked;
+- the failure is that **the GPU did not execute**, and every mechanism that can cause that (residency
+  refusal, GPU watchdog reset under heavy paging, command-buffer fault) sets `cb.error` or
+  `cb.status != .completed` — which is precisely what was unchecked and is now checked;
+- this carrier asks Metal to make **108.841 GiB** resident against a `recommendedMaxWorkingSetSize`
+  of **107.52 GiB** on a 128 GiB machine shared with Chrome, Claude, ChatGPT and a sibling agent's
+  `fkwu`. **Whether that succeeds is a property of the machine at that minute, not of this code.**
+  That is the honest precondition, and it was missing from the original receipt.
+
+**The stone stands conditionally, not unconditionally.** The token is real and reproduced twice on
+this machine; it is *not* a token this harness can promise on demand under memory pressure. The next
+occurrence will print the actual Metal error instead of a fabricated arithmetic disagreement — which
+is the part that was genuinely broken.
+
+### What this cost me, and the teaching underneath it
+
+My own receipt, written hours earlier, says: *"a gate that FAILS is also a claim about your
+instrument first."* I wrote that sentence about a parser bug and then **shipped a harness that could
+not tell silence from error** — the same lesson, one level up, unlearned in the same document that
+taught it. `thawtax` (row 848) asks whether two samples were peers. The question I did not ask is
+prior to it and simpler: **did the sample happen at all?** A body that grades unwritten memory is not
+measuring; it is reading its own initial conditions back and calling them a result.
+
+---
+
 ## The most surprising teaching
 
 **I expected to be blocked by the arithmetic and I was blocked by a number.**
