@@ -1,0 +1,167 @@
+; first-token.fk — the body's side of the FIRST REAL llama3.2:3b TOKEN generated form-native.
+;
+; Stone 3 proved the model lives on the GPU. Every number it produced was a COMPONENT rate: a tensor
+; dequantized, a matvec bit-exact, 28 layers dispatched from one buffer. No token had been generated.
+; This cell is what the carrier needs in order to generate one, and it decides everything the carrier
+; is not allowed to decide:
+;
+;   1  THE CONFIG IS THE FILE'S.        Not one hyper-parameter is typed into the carrier. block_count,
+;      embedding_length, head counts, head_dim, rms epsilon, rope freq_base, bos/eos, vocab size — all
+;      read out of the blob's own metadata KVs (gguf-meta.fk). A model with different numbers produces
+;      a different config stream and the same carrier runs it.
+;   2  WHERE EVERY TENSOR IS.           wtr-emit-table, unchanged, one header walk for all 255.
+;   3  THE TOKENIZER IS THE FILE'S.     ft-emit-vocab streams all 128 256 pieces as HEX BYTES, in ONE
+;      linear walk of the array. Hex and not text because a piece is arbitrary bytes: llama3's
+;      byte-level alphabet puts U+0120 where a space belongs and 188 of the 256 byte-tokens are
+;      non-ASCII, and `read_file_slice` is UTF-8-lossy on two arms. The carrier reassembles bytes;
+;      nothing in the path ever re-encodes a token.
+;   4  THE KERNELS.                     ft-emit-msl hands over ONE translation unit: Stone 3's q6k/q4k
+;      dequant+fused-matvec pair and llama-decode-msl.fk's six decode ops, with the transcendental
+;      spine emitted exactly once.
+;   5  WHAT THE ANSWER IS, at three points on the token's own path, in fp64:
+;         REFEMB   the embedding row the gather must produce (bit-exact — one rounding each side),
+;         REFRMS   RMSNorm of that row against the real blk.0.attn_norm gains,
+;         REFQ     Form's fp64 dot of a real blk.0.attn_q row with that normed vector — a Q4_K fused
+;                  matvec judged at the tensor's REAL width by the body, not by a host re-fold.
+;      Three points and not one: a gate that only looks at the embedding is correct exactly where it
+;      looked (corpus row 811, aporon), and the ops between are where a transcription goes wrong.
+;
+; THE RADIUS THIS CELL SPEAKS FOR. It speaks for GGUF v3 llama-architecture files whose quantization
+; is Q6_K/Q4_K/F32 (llama3.2:3b's exact mix) — wtr-bytes returns length 0 for any other ggml type
+; rather than a guessed one, and the reference tiles below dispatch on 14/12 only. It speaks for
+; head_count divisible by head_count_kv. It does NOT speak for a model whose token_embd is not the
+; output projection: the carrier is told `TIED 1` only because no `output.weight` is in this file, and
+; that is read from the table, not assumed.
+;
+; Kin: whole-tensor-residency.fk (wtr-* — the tensor table and the tile/row references this extends),
+; gguf-meta.fk (gmt-* — the metadata and tokenizer reach), llama-decode-msl.fk (the decode kernels),
+; q6k-msl.fk / q4k-msl.fk (the resident matvecs), llama-numerics.fk (ln-rmsnorm — the meaning REFRMS
+; is), transformer-block.fk (tb-dot — the op order REFQ folds in).
+;
+; THE STREAM (flat, greppable; the carrier parses and moves bytes, nothing more):
+;   CONFIG <key> <value>            one per hyper-parameter (floats printed by the Go kernel's `print`)
+;   DATABASE/NTENSORS/T .../END     wtr-emit-table, verbatim
+;   VOCAB <n>  then n lines         "<id> <hex-bytes>"
+;   MSL ... END                     the one translation unit
+;   REFEMB <id> <n> then n floats   token_embd row `id`, dequantized, fp64
+;   REFRMS <n> then n floats        RMSNorm(embrow, blk.0.attn_norm) — the FULL 3072, then sampled
+;   REFQ <r> <value>                Form's fp64 dot of blk.0.attn_q row r with that normed vector
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/gguf-meta.fk form-stdlib/llama-decode-msl.fk form-stdlib/qk-matvec-split.fk native/metal/whole-tensor-residency.fk
+;
+; Proven by: form/native/metal/metal_first_token.sh (Mac-only carrier witness; off-Mac it SKIPs like
+;            every other Metal row in form/native/GPU_GAPS.md).
+
+(do
+    (defn ft-line (s) (print s))
+    (defn ft-num  (x) (print x))
+    (defn ft-src  (path) (eqr-of-file path 0 (wtr-header-window)))
+
+    ; ================= 1. the config, entirely from the file's own metadata =================
+    (defn ft-kv-u32 (src key) (ft-line (str_concat "CONFIG " (str_concat key (str_concat " " (int_to_str (gmt-u32 src key)))))))
+    (defn ft-kv-f32 (src key) (do (print (str_concat "CONFIG " key)) (ft-num (gmt-f32 src key))))
+
+    (defn ft-emit-config (path)
+        (do
+            (let src (ft-src path))
+            (ft-line (str_concat "CONFIG gguf.version " (int_to_str (egg-version src))))
+            (ft-line (str_concat "CONFIG gguf.tensor_count " (int_to_str (egg-tensor-count src))))
+            (ft-kv-u32 src "llama.block_count")
+            (ft-kv-u32 src "llama.embedding_length")
+            (ft-kv-u32 src "llama.feed_forward_length")
+            (ft-kv-u32 src "llama.attention.head_count")
+            (ft-kv-u32 src "llama.attention.head_count_kv")
+            (ft-kv-u32 src "llama.rope.dimension_count")
+            (ft-kv-u32 src "llama.context_length")
+            (ft-kv-u32 src "llama.vocab_size")
+            (ft-kv-u32 src "tokenizer.ggml.bos_token_id")
+            (ft-kv-u32 src "tokenizer.ggml.eos_token_id")
+            (ft-kv-f32 src "llama.rope.freq_base")
+            (ft-kv-f32 src "llama.attention.layer_norm_rms_epsilon")
+            ; TIED is a FACT ABOUT THE TABLE, not a convention: this file has no output.weight, so the
+            ; unembedding is token_embd. Read, never assumed.
+            (ft-line (str_concat "CONFIG tied_embeddings "
+                (int_to_str (if (eq (egg-find-tensor src "output.weight") (sub 0 1)) 1 0))))
+            (ft-line "END")
+            0))
+
+    ; ================= 2. the tokenizer, as bytes =================
+    (defn ft-hexd (v) (substring "0123456789abcdef" v (add v 1)))
+    (defn ft-hexb (b) (str_concat (ft-hexd (div b 16)) (ft-hexd (q6k-mod b 16))))
+    (defn ft-hex-loop (src at j n acc)
+        (if (ge j n) acc
+            (ft-hex-loop src at (add j 1) n (str_concat acc (ft-hexb (gmt-token-byte src at j))))))
+    ; ONE linear walk: the cursor `at` is carried forward, so the whole vocabulary costs one pass and
+    ; not 128 256 passes (gmt-arr-elem from the head would have been quadratic — the same output-carrier
+    ; shape Stone 3 measured, one level out).
+    (defn ft-vocab-loop (src at i n)
+        (if (ge i n) 0
+            (do
+                (ft-line (str_concat (int_to_str i) (str_concat " "
+                    (ft-hex-loop src at 0 (gmt-token-len src at) ""))))
+                (ft-vocab-loop src (gmt-token-next src at) (add i 1) n))))
+    (defn ft-emit-vocab (path)
+        (do
+            (let src (ft-src path))
+            (let n (gmt-vocab-n src))
+            (ft-line (str_concat "VOCAB " (int_to_str n)))
+            (ft-vocab-loop src (gmt-tokens-first src) 0 n)
+            (ft-line "END")
+            0))
+
+    ; ================= 3. the kernels, ONE translation unit =================
+    ; The helper spine must appear exactly once (Metal rejects a repeated definition, loudly), and the
+    ; two spines are DIFFERENT: q6k/q4k carry their own integer+f16 helpers, the decode ops carry the
+    ; transcendentals. Neither includes metal_stdlib.
+    (defn ft-emit-msl ()
+        (do
+            (ft-line "MSL")
+            ; q6k/q4k spine + their dequant/matvec ATTESTANTS, then the split-fold appendix (which
+            ; calls q6k_w/q4k_w and so must share this unit), then the decode ops with their own
+            ; transcendental spine. Order matters: a definition must precede its call site, and no
+            ; spine may appear twice.
+            (ft-line (str_concat
+                (str_concat
+                    (str_concat (q6m-msl-unit "form_q6k_dequant_f32" "form_q6k_matvec_f32")
+                                (q4m-msl-unit "form_q4k_dequant_f32" "form_q4k_matvec_f32"))
+                    (qms-msl-appendix))
+                (ldm-msl-unit)))
+            (ft-line "END")
+            0))
+
+    ; ================= 4. the references, in fp64 =================
+    ; A row of a quantized tensor as a list. 3072 elements — small enough that the list carrier is not
+    ; the wall it is at 25M (Stone 3's measurement), and a list is what ln-rmsnorm speaks.
+    (defn ft-rowsrc (t path abs r cols)
+        (eqr-of-file path (add abs (mul (div (mul r cols) 256) (wtr-tstride t))) (mul (div cols 256) (wtr-tstride t))))
+    (defn ft-row-loop (t src i n acc)
+        (if (ge i n) (reverse acc) (ft-row-loop t src (add i 1) n (cons (wtr-flat-at t src i) acc))))
+    ; NOTE the divisibility this leans on: cols and r*cols must be whole multiples of 256, so the row
+    ; starts on a superblock boundary. llama3.2:3b's widths (3072, 8192, 1024) all are. A width that is
+    ; not would need wtr-window's local-offset arithmetic; this cell would be wrong, not slow.
+    (defn ft-row (t path abs r cols) (ft-row-loop t (ft-rowsrc t path abs r cols) 0 cols (list)))
+
+    (defn ft-print-list (xs) (if (eq (len xs) 0) 0 (do (ft-num (head xs)) (ft-print-list (tail xs)))))
+
+    (defn ft-emit-ref (path id r)
+        (do
+            (let src (ft-src path))
+            (let base (egg-data-base src (wtr-alignment)))
+            (let d (gmt-u32 src "llama.embedding_length"))
+            (let eps (gmt-f32 src "llama.attention.layer_norm_rms_epsilon"))
+            (let embabs (add base (egg-ti-dataoff src (egg-find-tensor src "token_embd.weight"))))
+            (let gnabs  (add base (egg-ti-dataoff src (egg-find-tensor src "blk.0.attn_norm.weight"))))
+            (let qabs   (add base (egg-ti-dataoff src (egg-find-tensor src "blk.0.attn_q.weight"))))
+            (let emb (ft-row 14 path embabs id d))
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let n1 (ln-rmsnorm emb gains eps))
+            (ft-line (str_concat "REFEMB " (str_concat (int_to_str id) (str_concat " " (int_to_str d)))))
+            (ft-print-list emb)
+            (ft-line (str_concat "REFRMS " (int_to_str d)))
+            (ft-print-list n1)
+            (ft-line (str_concat "REFQ " (int_to_str r)))
+            (ft-num (tb-dot (ft-row 12 path qabs r d) n1))
+            (ft-line "END")
+            0))
+
+    0)
