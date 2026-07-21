@@ -839,9 +839,20 @@ func vsWorld(_ label: String, _ r: Run) {
                      dec, pre, e2e))
         _ = label; return
     }
-    print(String(format: "    vs the world (ollama MEASURED here %@, decode spread %.1f-%.1f): decode %.3f of %.2f tok/s (%.1fx behind)  |  prefill %.3f of %.2f tok/s (%.1fx behind)  |  end-to-end %.3f tok/s",
-                 ollamaWhen, ollamaSpread.0, ollamaSpread.1,
-                 dec, ollamaDecode, ollamaDecode / dec, pre, ollamaPrefill, ollamaPrefill / pre, e2e))
+    // A denominator taken on a busy host is biased LOW and makes us look CLOSER than we are. Say it.
+    let quiet = (ProcessInfo.processInfo.environment["OLLAMA_QUIET"] ?? "1") == "1"
+    let load  = ProcessInfo.processInfo.environment["OLLAMA_LOAD1"] ?? "?"
+    let ptok  = ProcessInfo.processInfo.environment["OLLAMA_PREFILL_TOKENS"] ?? "?"
+    let stamp = quiet ? "quiet host" : "⚠ SELFLOADED, load1 \(load) — biased LOW, flatters us"
+    print(String(format: "    vs the world (ollama MEASURED here %@, %@, decode spread %.1f-%.1f): decode %.3f of %.2f tok/s (%.1fx behind)  |  end-to-end %.3f tok/s",
+                 ollamaWhen, stamp, ollamaSpread.0, ollamaSpread.1,
+                 dec, ollamaDecode, ollamaDecode / dec, e2e))
+    // Prefill is reported ONLY against a batch of comparable size. ollama's figure is measured over a
+    // ~1661-token prompt; ours is over a 6-token one. Dividing those is not a gap, it is a category
+    // error — the first version of this oracle read prompt-eval off a ~10-token prompt and produced
+    // 4685 tok/s, which is why the two numbers are now printed side by side and never divided.
+    print(String(format: "      prefill: ours %.3f tok/s over %d prompt tokens  |  ollama %.2f tok/s over %@ prompt tokens (different batch sizes — NOT a ratio)",
+                 pre, promptIds.count, ollamaPrefill, ptok))
     _ = label
 }
 var fLong: Run? = nil
