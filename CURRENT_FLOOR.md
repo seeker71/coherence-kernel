@@ -1,6 +1,6 @@
 # Current Floor
 
-Date: 2026-07-17 (reground on base `5c0a30d41`, after the 2026-07-05 floor)
+Date: 2026-07-19 (reground on base `7667fad`, after the 2026-07-17 floor)
 
 This file is the current release floor for this worktree. Receipts preserve the
 history, but the claims below are only the state that is present now. Every
@@ -23,6 +23,51 @@ cc -O2 -o fkwu runtime/fkwu-uni.c
 
 The C file is a checkout witness and shrink target. New runtime meaning belongs
 in Form/native-walker cells, not in a larger C seed.
+
+## New since 2026-07-17 (re-measured 2026-07-19 on base `7667fad`)
+
+```text
+cc -O2 -o fkwu runtime/fkwu-uni.c
+./fkwu --src bootstrap/ground.fk -> 42
+./fkwu --src bootstrap/ground-recursive.fk 10 -> 55
+./fkwu --src cognition/tests/nl-neutral-trace-band.fk -> 4194303   (22 bits)
+```
+
+- **The nl-neutral-trace lane** (`cognition/nl-neutral-trace.fk`, live door
+  `cognition/tests/nl-neutral-trace-live.fk`): one command streams the whole
+  NL -> neutral -> NL concept query — locale choice paths with measured
+  tried/failed/cut counters, WordNet 3.1 descriptions and senses, hypernym
+  parents, the 120k-cell machine dictionary as a scored local-oracle lane,
+  a persisted content-addressed rag index, measured choice receipts, and a
+  comparison ledger. Every line is emitted the moment its fact exists
+  (`print_str` op 115 now flushes per line — pipes behave like ttys).
+- **The 10k sweep** (`cognition/tests/nl-neutral-trace-sweep-live.fk`)
+  lands every concept row in the persisted `nodeid-rag-v2` home with
+  sha256-of-row-bytes keys, plus a rank sidecar (a regenerable cache in the
+  `T_flat` sense); the production codec and cryptographic admission run on
+  the selected row. Measured and named: a full production stream over the
+  9.3 MB index needs >4 min on the Form-implemented `str_find` — a native
+  or crystallized `str_find` is the open stone that retires the cache.
+- **Four tongues on the one pivot** (`cognition/nl-pivot-de.fk`,
+  `cognition/nl-pivot-es.fk` on `nl-translate.fk`'s engine): the same
+  meaning from es/de/en/id interns to the SAME pivot cell, witnessed by
+  `node_eq`; articles and adjective gender agreement live in each tongue's
+  column, never in the pivot. Seed rows are agent-authored, awaiting
+  native-speaker review — said on every seat.
+- **HatiOS** (`os/hati-os/`): a bare-metal i386 operating system in
+  freestanding C + GNU assembler — boot sector, protected mode, IDT/PIC/PIT,
+  preemptive scheduler with a real context switch, page allocator, ramfs,
+  serial shell — with a committed qemu execution witness
+  (`os/hati-os/witness/first-boot.txt`, clean debug-exit). Its floors are
+  named in its README: ring 0 only, no paging, ramfs only.
+- Carrier boundaries recorded at their sites in `nl-neutral-trace.fk`:
+  do/let nested in a let value loses bindings; a host string returned as a
+  let-bound name through an if branch loses its value category; `len` per
+  step of a 10k scan is quadratic; line-counting an 8 MB file recurses into
+  the stack wall (a row-meta cell answers instead).
+
+The 2026-07-17 witnesses below were NOT re-run on 2026-07-19; they are
+carried as that reground's claims, in that reground's words.
 
 A grounding correction from this reground: the 2026-07-05 floor listed a
 "kernel source intake framebuffer policy witness -> 16383" among its focused
@@ -309,6 +354,25 @@ BML organ bands, PR #287 wired form_error end to end.)
   and oracle provenance yet.
 - Sema still does not have a native generative mind with real open weights
   loaded as recipe-data through the body.
+
+### 10,000-concept / 26-lens multimodal floor (2026-07-18)
+
+- Exactly 10,000 attributed OpenSubtitles2018 frequency-ranked English lexical
+  anchors are now addressable without allocating a 10,000-row Form list;
+  rank lookup is fixed-width arithmetic and exact text detection is a bounded
+  binary search. They are lexical anchors, not disambiguated senses.
+- Thirteen repository-ready natural-language phrase lenses and thirteen
+  programming-language bounded code lenses generate and detect four-way.
+  The joined live `water` witness re-detects all 26 generated surfaces.
+- Every concept ID and all thirteen lens slots have an independently exhausted
+  18-bit address membrane (130,000 valid concept/lens addresses). Actual PCM
+  audio and lossless FFV1 video generation recover the same address in Form.
+- Semantic completion remains zero: the audio is a tone code, the video is a
+  colour-bit code, NL generation is bounded phrase framing, PL generation is
+  bounded arithmetic-function emission, and the full 10,000 × 13 NL × 13 PL
+  semantic matrix has not been learned or executed.
+- Exact witness and work orders:
+  `receipts/2026-07-18-concept-10000-26-lens-multimodal.md`.
 
 ## Next Step Toward The North Star
 

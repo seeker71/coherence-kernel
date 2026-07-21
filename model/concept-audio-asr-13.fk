@@ -1,0 +1,153 @@
+; concept-audio-asr-13.fk -- speech-content sensing for the 10k x 13 NL surface.
+;
+; Unlike concept-audio-scale-13.fk, this lane emits speech-only PCM: there is no
+; concept/lens tone envelope and therefore no address channel to mistake for
+; semantic recognition. A local multilingual Whisper model transcribes the
+; waveform; Form independently observes the PCM, retrieves the requested label
+; from the pinned 10,000 x 13 table, and decides whether that label occurs in
+; the transcript. The neural acoustic weights remain a named host oracle. PCM
+; measurement, source-label join, candidate ranking, and the evidence record
+; live in Form.
+;
+; This is open-vocabulary ASR followed by closed lexical concept detection. It
+; is not native acoustic weights, word-sense disambiguation, or proof that two
+; concepts sharing one surface form can be separated without context.
+; witnessed: 2026-07-18 -> 20/20 speech-only semantic observations, 13 locales,
+;                            3 concepts, 7 held-out locale voices
+; preludes: form/form-stdlib/core.fk model/concept-multimodal-codec.fk cognition/concept-nl-semantic-13-runtime.fk model/concept-audio-scale-13.fk
+
+(do
+  (defn casr13-model-path ()
+    (host-exec
+      "printf %s \"${SEMA_WHISPER_MODEL:-.cache/whisper.cpp/ggml-large-v3-turbo.bin}\""
+      ""))
+  (defn casr13-model-sha256 ()
+    "1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69")
+  (defn casr13-oracle-name () "whisper.cpp-large-v3-turbo")
+
+  (defn casr13-model-valid? ()
+    (if (str_eq (host-exec
+          (ca13-cat (list
+            "if [ \"${CASR13_MODEL_HASH_VERIFIED:-}\" = '"
+            (casr13-model-sha256) "' ]; then printf 1; else shasum -a 256 "
+            (ca13-shell-quote (casr13-model-path))
+            " | grep -q '^" (casr13-model-sha256) "  ' && printf 1; fi")) "") "1") 1 0))
+
+  (defn casr13-ready? ()
+    (if (str_eq (host-exec
+          (ca13-cat (list
+            "test -f " (ca13-shell-quote (casr13-model-path))
+            " && command -v say >/dev/null"
+            " && command -v ffmpeg >/dev/null"
+            " && command -v whisper-cli >/dev/null && printf 1")) "") "1")
+      (casr13-model-valid?) 0))
+
+  (defn casr13-stem (concept-id code suffix)
+    (ca13-cat (list "/tmp/sema-casr13-" (int_to_str concept-id) "-" code suffix)))
+  (defn casr13-aiff-path (concept-id code suffix)
+    (str_concat (casr13-stem concept-id code suffix) ".aiff"))
+  (defn casr13-wav-path (concept-id code suffix)
+    (str_concat (casr13-stem concept-id code suffix) ".wav"))
+
+  ; One input, one output: no lavfi tone source and no concat stage.
+  (defn casr13-speech-only-command (voice sentence aiff wav)
+    (ca13-cat (list
+      "say -v " (ca13-shell-quote voice) " -r 150 -o "
+      (ca13-shell-quote aiff) " " (ca13-shell-quote sentence)
+      " && ffmpeg -loglevel error -y -i " (ca13-shell-quote aiff)
+      " -af apad=pad_dur=0.4 -ar 16000 -ac 1 -c:a pcm_s16le "
+      (ca13-shell-quote wav) " >/dev/null 2>&1 && printf 1")))
+  (defn casr13-whisper-language (code)
+    (if (str_eq code "pt-br") "pt" code))
+  (defn casr13-transcript-path (wav) (str_concat wav ".transcript.txt"))
+  (defn casr13-whisper-command (wav code)
+    (ca13-cat (list
+      "whisper-cli -m " (ca13-shell-quote (casr13-model-path))
+      " -f " (ca13-shell-quote wav) " -l "
+      (ca13-shell-quote (casr13-whisper-language code))
+      " -nt -np 2>/dev/null | tee "
+      (ca13-shell-quote (casr13-transcript-path wav)))))
+  (defn casr13-transcribe-file (wav code)
+    (host-exec (casr13-whisper-command wav code) ""))
+
+  (defn casr13-ascii-lower-byte (b)
+    (if (and (ge b 65) (le b 90)) (add b 32) b))
+  (defn casr13-ascii-lower-go (s i out)
+    (if (ge i (str_len s)) out
+      (casr13-ascii-lower-go s (add i 1)
+        (str_concat out (byte_to_str (casr13-ascii-lower-byte (str_byte_at s i)))))))
+  (defn casr13-ascii-lower (s) (casr13-ascii-lower-go s 0 ""))
+  (defn casr13-contains? (haystack needle)
+    (if (eq (str_len needle) 0) 0
+      (if (ge (str_find (casr13-ascii-lower haystack)
+                        (casr13-ascii-lower needle) 0) 0) 1 0)))
+
+  (defn casr13-u32le (bs i)
+    (add (str_byte_at bs i)
+      (add (mul 256 (str_byte_at bs (add i 1)))
+        (add (mul 65536 (str_byte_at bs (add i 2)))
+             (mul 16777216 (str_byte_at bs (add i 3)))))))
+  (defn casr13-abs (x) (if (lt x 0) (sub 0 x) x))
+  (defn casr13-level-go (bs i end total count)
+    (if (ge i end) (list total count)
+      (casr13-level-go bs (add i 64) end
+        (add total (casr13-abs (cmm-s16 bs i))) (add count 1))))
+  ; PCM evidence = sample count, mean absolute level at stride 32, present.
+  (defn casr13-pcm-evidence-bytes (bs)
+    (do (let off (cmm-data-offset bs))
+        (if (eq off 0) (list 0 0 0)
+          (do (let end (add off (casr13-u32le bs (sub off 4))))
+              (let measured (casr13-level-go bs off end 0 0))
+              (let count (nth measured 1))
+              (let level (if (eq count 0) 0 (div (nth measured 0) count)))
+              (let samples (div (sub end off) 2))
+              (list samples level
+                (if (and (gt samples 2000) (gt level 20)) 1 0))))))
+  (defn casr13-pcm-evidence-file (path)
+    (casr13-pcm-evidence-bytes (read_file path)))
+
+  ; candidate = concept id, locale label. Longest matching label wins so a
+  ; short surface such as "su" cannot shadow a more specific matched phrase.
+  (defn casr13-candidate (concept-id label) (list concept-id label))
+  (defn casr13-detect-candidates-go (transcript candidates best best-length)
+    (if (eq (len candidates) 0) best
+      (do (let candidate (head candidates))
+          (let label (nth candidate 1))
+          (let matched (casr13-contains? transcript label))
+          (if (and (eq matched 1) (gt (str_len label) best-length))
+            (casr13-detect-candidates-go transcript (tail candidates)
+              candidate (str_len label))
+            (casr13-detect-candidates-go transcript (tail candidates)
+              best best-length)))))
+  (defn casr13-detect-candidates (transcript candidates)
+    (casr13-detect-candidates-go transcript candidates (list -1 "") 0))
+
+  ; observation = tag, concept, locale, pinned label, spoken sentence, voice,
+  ; wav, PCM evidence, transcript, detected candidate, semantic hit,
+  ; semantic evidence kind, address-integrity evidence.
+  (defn casr13-observation-transcript (observation) (nth observation 8))
+  (defn casr13-observation-detected (observation) (nth observation 9))
+  (defn casr13-observation-semantic-hit (observation) (nth observation 10))
+  (defn casr13-observation-semantic-evidence (observation) (nth observation 11))
+  (defn casr13-observation-address-evidence (observation) (nth observation 12))
+  (defn casr13-observe (runtime concept-id code sentence voice suffix candidates)
+    (do (let sourced (cnl13-runtime-lookup-sourced runtime concept-id code))
+        (let label (nth sourced 3))
+        (let aiff (casr13-aiff-path concept-id code suffix))
+        (let wav (casr13-wav-path concept-id code suffix))
+        (let sentence-aligned (casr13-contains? sentence label))
+        (let generated (if (and (eq sentence-aligned 1) (eq (casr13-ready?) 1))
+                         (if (str_eq (host-exec
+                               (casr13-speech-only-command voice sentence aiff wav) "") "1") 1 0)
+                         0))
+        (let pcm (if (eq generated 1) (casr13-pcm-evidence-file wav) (list 0 0 0)))
+        (let transcript (if (eq generated 1) (casr13-transcribe-file wav code) ""))
+        (let detected (casr13-detect-candidates transcript candidates))
+        (let hit (if (and (eq generated 1)
+                       (and (eq (nth pcm 2) 1)
+                         (eq (nth detected 0) concept-id))) 1 0))
+        (list "concept-audio-asr-observation" concept-id code label sentence
+          voice wav pcm transcript detected hit
+          "speech-content:local-neural-asr+form-label-match"
+          "none:speech-only-no-address-envelope")))
+)
