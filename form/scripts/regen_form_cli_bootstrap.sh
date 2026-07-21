@@ -48,8 +48,41 @@ FORM_CLI_SRCS=(
 )
 
 mkdir -p form-stdlib/bootstrap
+# Work files are private, but the final carrier paths are shared.  Serialize
+# publishers so a second regeneration cannot replace a coherent carrier with
+# an older candidate between validation and its final stamp publication.
+regen_lock_dir="form-stdlib/bootstrap/.regen-form-cli.lock"
+regen_lock_owner="$regen_lock_dir/owner.pid"
+if ! mkdir "$regen_lock_dir" 2>/dev/null; then
+    regen_lock_pid=""
+    if [[ -r "$regen_lock_owner" ]]; then
+        IFS= read -r regen_lock_pid < "$regen_lock_owner" || true
+    fi
+    if [[ "$regen_lock_pid" =~ ^[0-9]+$ ]] && kill -0 "$regen_lock_pid" 2>/dev/null; then
+        printf 'regen: another form-cli regeneration owns %s (pid %s)\n' \
+            "$regen_lock_dir" "$regen_lock_pid" >&2
+        exit 75
+    fi
+    rm -f "$regen_lock_owner"
+    rmdir "$regen_lock_dir" 2>/dev/null || {
+        printf 'regen: cannot reclaim stale form-cli regeneration lock %s\n' \
+            "$regen_lock_dir" >&2
+        exit 75
+    }
+    mkdir "$regen_lock_dir" || {
+        printf 'regen: cannot acquire form-cli regeneration lock %s\n' \
+            "$regen_lock_dir" >&2
+        exit 75
+    }
+fi
+printf '%s\n' "$$" > "$regen_lock_owner"
 work_dir="$(mktemp -d)"
-trap 'rm -rf "$work_dir"' EXIT
+cleanup() {
+    rm -rf "$work_dir"
+    rm -f "$regen_lock_owner"
+    rmdir "$regen_lock_dir" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
 
 want_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
 want_source_sha256="$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")"

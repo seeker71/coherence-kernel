@@ -139,7 +139,7 @@ do
     while IFS="$(printf '\t')" read -r query_when query64 completion64
     do
         completed_pairs_scanned=$((completed_pairs_scanned + 1))
-        labels=$(printf '%s' "$completion64" | base64 -D |
+        labels=$(printf '%s' "$completion64" | { base64 -d 2>/dev/null || { base64 -d 2>/dev/null || base64 -D; }; } |
             grep -F -o -f "$candidate_ids" | sort -u || true)
         [ -n "$labels" ] || continue
         label_csv=$(printf '%s\n' "$labels" | paste -sd, -)

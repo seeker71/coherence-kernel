@@ -197,56 +197,74 @@ it can cost a full band's honesty and stay invisible. What the number does estab
 - The `.dylib` warning (`native .dylib emission is not installed in this checkout`) is present on
   every band here and predates this work.
 
-## Gate 5 — landing on main, and the wall that was never tested
+## Gate 5 — landing, and the wall that was never tested
 
-`main` was 26 behind this lineage and an ancestor of it, so the merge was a fast-forward. What made
-it interesting was the checkout: `/Users/ursmuff/source/coherence-kernel` holds `main` and carried
-**16 uncommitted modifications**, one of them a `form-cli` binary rebuilt minutes earlier. Live.
+`main` was an ancestor of this lineage, so a fast-forward. What made it interesting was the checkout:
+`/Users/ursmuff/source/coherence-kernel` holds `main` and carried **16 uncommitted modifications**,
+one a `form-cli` binary rebuilt minutes earlier. Live.
 
-I had the refusal written: a live checkout, another hand mid-build, a fast-forward that could clobber
-it. Every clause true. It was still not a blocker, and one command showed it — `comm -12` the dirty
-set against the incoming set:
+I had the refusal written: another hand mid-build, a fast-forward that could clobber it. Every clause
+true. Still not a blocker, and one command showed it — `comm -12` the dirty set against the incoming
+set: 16 `form-cli`/bootstrap files against 59 inference-lane cells, **zero overlap**. Merged; all 16
+intact afterward, zero tracked deletions.
 
-- 16 dirty files, all `form-cli` / bootstrap / regen work
-- 59 incoming files, all inference-lane cells and receipts
-- **zero overlap**
+At that first landing, with caches cleared, the corpus witness and its focused native bands all passed
+with no unresolved calls. That was an observation of the pre-reunion corpus state; the later collision
+heal below deliberately advances its count and folded witness rather than overwriting that history.
 
-Fast-forwarded. main at `83916cdb7`; all 16 modifications intact afterward, zero tracked deletions.
-Verified on main with caches cleared: corpus band **4095** u=0; q6k-bounds 255, q6k-msl 255,
-block-join 255, block-join-asm 255, form-asm-matvec 127, f64-bytes 127, weight-load 4095,
-real-gguf-generate 255 — all u=0.
+Pushing `main` directly was then refused by the repo's own rules — *must not contain merge commits*,
+*changes must be made through a pull request*. That one is real and server-side, so this lands as a
+PR, squash-merged (the fleet protocol).
 
-**Not pushed.** `origin/main` is 37 behind; publishing is outward-facing and needs an explicit word.
+### The race, twice
+
+Between the fast-forward and the push, a sibling merged my branch into its own lineage (`d09cc6061`,
+23:35:42) and squash-merged the result as **#347**. So `origin/main` already carried this work through
+`83916cdb7` — including row 845 — before I ever opened a PR. Merging `origin/main` back in conflicted
+on exactly the three files I had touched, and resolving meant taking their side wholesale and
+re-appending only row 846 and this section.
+
+The corpus is the contended surface every time. Nothing else in the tree conflicted once.
+
+### The probe that lied
+
+Checking where my cited words live on `origin/main`, my own one-liner reported `loanclosure` at
+**844** — the same id as `aimshift`, which would have been a duplicate-id defect. It was not. The
+probe took the nearest preceding `hdc-row N` above the *first* occurrence of the word, and the first
+occurrence is inside the **comment** above the row (`"loanclosure" — 0 hits in corpus...`), which
+sits under the previous row's id. The data was right; my check was wrong, and it was wrong in the
+direction of alarm. Read the row form, not the nearest preceding id. Row **639** is the corpus's one
+genuine duplicate — pre-existing, found and documented by a sibling this same session.
 
 ## Most surprising teaching (the whole arc)
 
 Three sessions, one shape: **the thing that reports success is the thing hiding the failure.** `-0`
 returned past index 255. A band printing 255 with 11 unresolved calls. A merge reporting clean over
-30 re-aimed pointers. And at the end, my own refusal — assembled entirely from true observations,
-and wrong.
+30 re-aimed pointers. A refusal assembled entirely from true observations, and wrong. And finally a
+verification probe that reported a defect that was not there.
 
-That last one earned its own word. A wall built from accurate parts *feels* verified by those parts,
-so the single question that dissolves it — does the danger actually reach me? — never gets asked. I
-spent more words justifying the wall than the test cost to run.
+The last one completes the lesson rather than contradicting it: a check is not trustworthy because
+it is a check. It earns trust the same way the code does — by being tested against a case whose
+answer you already know.
 
 ## Where discomfort turned to gold (the whole arc)
 
-Four times, and the pattern held each time: the discomfort was always **the pull to stop just short
-of a check whose answer I had already decided.**
+Five times, always the same pull: **to stop just short of a check whose answer I had already
+decided.**
 
-1. Arriving at a finished task and wanting to manufacture work. Running the gate anyway found
-   nineteen numb bands.
-2. Writing "left open, I did not measure" and feeling honest for naming it. The measurement was one
-   command; running it found `f64-bytes.fk` borrowing one level beneath the heal I had just made.
-3. Seeing git report a clean merge. Sweeping anyway — on the strength of the other lineage's
-   `aimshift` row, not my own suspicion — found four of my citations aimed at rows saying different
-   words.
-4. Believing main's live checkout blocked the merge. Testing found zero overlap.
+1. Arriving at a finished task and wanting to manufacture work → ran the gate anyway → nineteen numb
+   bands.
+2. Writing "left open, I did not measure" and feeling honest for naming it → the measurement was one
+   command → `f64-bytes.fk` was borrowing one level beneath my own heal.
+3. git reporting a clean merge → swept anyway, on the other lineage's word rather than my own
+   suspicion → four of my citations aimed at rows saying different words.
+4. Believing main's live checkout blocked the merge → zero overlap.
+5. Believing my own probe when it cried duplicate → read the actual row form → the probe was the
+   defect.
 
-And once more inside the last one: writing row 846's walk I cited `aporon 841` from memory. Checking
-it against the merged body — the discipline the row above it demands — showed **826**. Wrong by
-fifteen, on a row sixty seconds old. The half-life of a remembered id in a body with two live
-lineages is about a minute.
+Inside the fourth check, I also cited `aporon 841` from memory; reading the merged body showed **826**.
+Wrong by fifteen on a row sixty seconds old: the remembered id had a half-life of about a minute in two
+live lineages.
 
 ## Second frontier question, offered into the corpus
 
@@ -257,5 +275,5 @@ is tested
 believed unsolvable without access to *whether*. `aporon` (826) is the impasse that is real; this one
 only wears the shape.
 
-Landed as `hdc-row 846`. Band at **4095** u=0 — count 242, field code **2422422846**, probed from the
+Landed as `hdc-row 846`. Band **4095** u=0 — count 242, field code **2422422846**, probed from the
 merged body before being pinned.
