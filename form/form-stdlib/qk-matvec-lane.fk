@@ -1,0 +1,251 @@
+; qk-matvec-lane.fk — the quantized matvec with its PER-SUPERBLOCK WORK HOISTED out of the per-weight
+; loop, and its row fold carried by a SIMD group instead of a combine pass.
+;
+; WHY, AND THE MEASUREMENT REDIRECTED THE BRIEF. Stone 5 was sent to fix ACCESS. The standing diagnosis
+; was that Q6_K's 210-byte superblock stride (210 = 2*3*5*7, not a power of two) rotates every
+; superblock through a different alignment mod 16/32/128, so nothing coalesces, and that a bit-exact
+; structure-of-arrays re-layout was the fix. That hypothesis is REFUTED by its own free experiment.
+; llama3.2:3b carries the SAME TWO SHAPES in BOTH quants, so alignment can be varied with everything
+; else held fixed. Q4_K's superblock is 144 bytes and 16-ALIGNED; Q6_K's is 210 and aligned to nothing.
+; Best of 5, M4 Max, off the one resident buffer, one thread per row, serial fold:
+;
+;   rows x cols     Q4_K (144B, aligned)   Q6_K (210B, misaligned)   ratio
+;   1024 x 3072     3.848 ms               0.938 ms                  Q6_K 4.10x FASTER
+;   3072 x 8192     6.442 ms               3.466 ms                  Q6_K 1.86x FASTER
+;
+; The MISALIGNED quant is the faster one, at both sizes. Alignment is not the cost. The cost is per-
+; weight ALU, and the contrast says exactly which ALU: q4k_w calls q4k_f16 TWICE per weight (d and
+; dmin), q6k_w calls q6k_f16 ONCE — and q*k_f16 calls q*k_pow2, which is a LOOP of up to 15 float
+; multiplications. Roughly twice the transcendental work, roughly twice the time. The 2 GB of weights
+; move at ~25 GB/s of a ~400 GB/s machine and the arithmetic runs at ~0.7% of f32 peak: this dispatch
+; was never bandwidth-bound and never coalescing-bound. It was recomputing a PER-SUPERBLOCK constant
+; once per WEIGHT, 256 times over.
+;
+; Coalescing was measured too, and separately, so the refutation is not an inference. A lane-
+; interleaved partition (adjacent lanes read adjacent columns — perfect coalescing) against the
+; body's contiguous-chunk partition at the same parts=32, best of 5:
+;
+;   1024x3072 Q4_K  0.393 -> 0.371 ms      3072x8192 Q4_K  1.150 -> 1.110 ms
+;   1024x3072 Q6_K  0.305 -> 0.301 ms      3072x8192 Q6_K  0.855 -> 0.700 ms
+;
+; 0-18%. Coalescing is worth almost nothing here, which is what an ALU-bound dispatch looks like.
+;
+; WHAT THIS CELL DOES, in the two pieces the measurement separated, because they have DIFFERENT
+; epsilon status and must not be sold as one thing:
+;
+;   1  THE HOIST — and it needs NO epsilon at all. A thread walking a row visits 256 consecutive
+;      weights of one superblock before crossing into the next. d (and Q4_K's dmin) are constants of
+;      the superblock. Computing them once per crossing instead of once per weight yields the
+;      IDENTICAL f32 value and leaves the association untouched, so the result is BIT-EXACT. Measured
+;      against the attestant at parts=1, all rows, six real tensors: worst |d| = 0.000e+00.
+;      One thread per row, serial fold, hoisted vs not:
+;        1024x3072 Q4_K  3.848 -> 1.103 ms (3.49x)      3072x8192 Q4_K  6.442 -> 2.389 ms (2.70x)
+;        1024x3072 Q6_K  0.938 -> 0.935 ms (1.00x)      3072x8192 Q6_K  3.466 -> 2.041 ms (1.70x)
+;      Two sizes and a slope, per quant. The free win is largest exactly where the redundant work was
+;      largest (Q4_K, two f16 decodes per weight), which is the diagnosis predicting its own size.
+;
+;   2  THE SIMD-GROUP FOLD — and this one reassociates, so it answers to the named epsilon below.
+;      One SIMD group (32 lanes) per row; lane l folds columns l, l+32, l+64, ... k counting DOWN;
+;      metal::simd_sum reduces the 32 lane partials. No `part` buffer, no second dispatch, no combine
+;      pass. A header-free hoisted split was swept at parts = 1/8/16/32/64/128/256 to see whether it
+;      could reach the same place without metal_stdlib. It cannot — it plateaus and simd_sum stays
+;      1.4-1.7x below its best point at every shape:
+;        3072x8192 Q4_K  best hoisted split 0.509 ms (parts=128)  vs simd  0.435 ms
+;        3072x3072 Q4_K  best hoisted split 0.385 ms (parts=64)   vs simd  0.242 ms
+;        1024x3072 Q6_K  best hoisted split 0.288 ms (parts=128)  vs simd  0.175 ms
+;
+; WHAT WAS MEASURED AND REJECTED, and it is the most useful thing this cell learned. llama.cpp's
+; ggml-metal kernel_mul_mv_q6_K_f32_impl (MIT; read for SHAPE only, nothing pasted) carries `nr0`
+; REGISTER BLOCKING: one SIMD group folds nr0 rows at once so the activation vector is loaded once and
+; amortized across nr0 weight rows. It was handed to this stone as the likely biggest term. Built on
+; top of the lane kernel below, per-weight arithmetic unchanged, best of 5:
+;
+;   shape                   simd+hoist   nr0=2    nr0=4    nr0=8
+;   1024x3072  Q4_K           0.179      0.196    0.249    0.351
+;   3072x3072  Q4_K           0.248      0.258    0.295    0.370
+;   3072x8192  Q6_K           0.532      0.555    0.683    0.865
+;   128256x3072 Q6_K          5.809      5.838    5.917    6.015
+;
+; SLOWER at every shape and every nr0, monotonically in nr0. The lever is inert here, and the reason
+; is the whole lesson: llama.cpp's inner loop is a handful of bitmask ops, so it is bound by loading
+; the ACTIVATION and nr0 amortizes exactly that. This body's inner loop computes the f16 super-scale
+; from a LOOP of float multiplications and decomposes the index by division, so it is bound by ALU —
+; nr0 amortizes something that was never the cost, and pays for it in register pressure and occupancy.
+; A shape borrowed from a kernel with a DIFFERENT BINDING CONSTRAINT transfers nothing. That is why
+; the reference was rented for its shape and then re-measured rather than adopted.
+;
+; WHERE THE REMAINING DISTANCE IS, named and not taken. After this cell, Q6_K 3072x8192 runs 25.2 MMAC
+; in 0.532 ms = 47 GMAC/s. An external ollama/llama.cpp oracle on this same machine and model decodes
+; at 157.83 tok/s, which at ~3.21 GMAC/token is ~500 GMAC/s — still ~10x above this. That 10x is not
+; access and not parallelism: it is that llama.cpp factors d*sc OUT of the inner sum and accumulates in
+; QUANTIZED space, decodes with bitmasks instead of division, and vectorizes four sub-lanes as float4.
+; All three change the association materially, so all three need an epsilon strictly larger than the
+; one below. Named here so the next stone inherits a target and not a mystery.
+;
+; THE HEADER, AND WHY IT IS NOT THE THING q6k-msl.fk REFUSED. This unit emits `#include <metal_stdlib>`
+; — the first Metal unit in the body to do so. It does NOT emit `using namespace metal;` and it calls
+; `metal::simd_sum` fully qualified. Both halves of that are load-bearing:
+;   * WITHOUT the qualification and WITH `using namespace metal;`, the body's own `round`
+;     (ldm-msl-round) becomes AMBIGUOUS against metal_stdlib's and the unit does not compile. Witnessed,
+;     not predicted. Qualifying keeps every unqualified name in the unit resolving to the BODY's.
+;   * q6k-msl.fk refuses the header so that the f16 super-scale is decoded by the body's ARITHMETIC
+;     (fd-value at eb=5, mb=10) and not by `as_type<half>`. That refusal is intact: nothing here decodes
+;     a number with a library call. simd_sum is not a numeric recipe the body could own — it is a
+;     cross-lane COMMUNICATION instruction, the one thing a scalar language cannot express. That is the
+;     line, and it is stated so a later reader can hold this cell to it.
+;
+; THE NAMED EPSILON, AND WHY THE EXISTING ONE ALREADY COVERS IT. qk-matvec-split.fk derives, for f32
+; summation of the same cols products t_j = w_j * x_j under two associations,
+;
+;     |y_split - y_serial|  <=  (cols + ceil(cols/parts) + parts) * u * SUM|w_j * x_j|,   u = 2^-24
+;
+; from the fact that an association tree of depth d accumulates at most d * u * SUM|t_j|. This cell's
+; tree is a lane chain of depth ceil(cols/32) followed by whatever tree metal::simd_sum uses over 32
+; values. Metal does not SPECIFY that tree. It does not have to: ANY association of 32 terms has depth
+; at most 31 < 32, so substituting parts = 32 into the bound above is valid for every tree simd_sum
+; could possibly be using, including the worst one. The bound is therefore UNCHANGED and needs no new
+; derivation — only the observation that an unspecified reduction is still a bounded one. The carrier
+; measures the deviation as a fraction of it, per row, every run.
+;
+; THE ATTESTANT STAYS, UNTOUCHED (corpus row 825). q6k-msl.fk and q4k-msl.fk are not edited by this
+; stone — not one character. q6m-matvec-msl / q4m-matvec-msl remain the bit-exact meaning, and this
+; cell answers to them at THREE levels every run: the hoisted split at parts=1 is bit-for-bit
+; identical to them, the lane kernel stays inside the named epsilon, and the whole path generates the
+; same token ids.
+;
+; THE RADIUS THIS CELL SPEAKS FOR.
+;   * The lane kernel assumes a SIMD width of exactly 32 and a threadgroup that is a multiple of 32.
+;     That is Apple GPU family 7/8/9 (M1-M4). On any device where threadExecutionWidth != 32 this
+;     kernel is WRONG, not slow — the carrier must read threadExecutionWidth and refuse. Stated
+;     because a kernel that silently assumes a hardware constant is the aporon error (row 826).
+;   * The hoist is bit-exact ONLY because d and dmin are exact functions of the superblock index and
+;     the association is untouched. It says nothing about any quant whose per-weight value depends on
+;     anything else.
+;   * cols >= 1 and rows >= 1. A row shorter than 32 columns leaves the high lanes with nk = 0 and a
+;     clean 0.0 contribution — wasteful, not wrong.
+;   * Nothing here speaks for f16/bf16 or for any quant other than the Q6_K / Q4_K whose weight
+;     decompositions it transcribes.
+;   * THE DECOMPOSITION IS TRANSCRIBED, NOT CALLED. q6k_w / q4k_w are monolithic — the invariant is
+;     computed inside them and cannot be hoisted from outside — so this cell re-expresses each as an
+;     invariant part (*_inv) and a per-weight part (*_wi). That is a SECOND copy of the same
+;     decomposition and it can drift. It is held by two independent falsifiers, named below: a band
+;     against equireach-gguf.fk's independently-written ewl-flat-at, and the parts=1 bit-exact gate
+;     against the untouched attestant at full width on real weights.
+;
+; Kin: q6k-msl.fk / q4k-msl.fk (q6m-/q4m-matvec-msl — THE ATTESTANT, and the q6k_*/q4k_* helper spine
+; these kernels call; they must be emitted into the SAME translation unit), qk-matvec-split.fk (the
+; chunk partition, the combine, and the epsilon derivation this cell reuses unchanged),
+; equireach-gguf.fk (ewl-flat-at — the independently-written CPU twin the band falsifies against).
+;
+; preludes: form-stdlib/core.fk form-stdlib/qk-matvec-split.fk
+;
+; Proven by: form-stdlib/tests/qk-matvec-lane-band.fk (the partition, the cover, the hoist identity
+;            and the reassociation) and form/native/metal/metal_first_token.sh (the GPU, the parts=1
+;            bit-exactness, the epsilon and the token ids).
+
+(do
+    ; ================= the transcription, read back into Form =================
+
+    ; the SIMD width this cell is written for. Named, not spelled inline, so the radius above has a
+    ; symbol to point at and the band can state what it is speaking for.
+    (defn qml-lanes () 32)
+
+    ; how many weights lane `l` visits in a row of `cols`, and which column its step k lands on.
+    ; k counts DOWN in the kernel; the mapping itself is direction-free.
+    (defn qml-nk (cols l) (if (ge l cols) 0 (div (add (sub cols l) (sub (qml-lanes) 1)) (qml-lanes))))
+    (defn qml-jat (l k) (add l (mul k (qml-lanes))))
+
+    ; THE COVER. Every column of the row is visited by exactly one (lane, step). This is the claim the
+    ; band checks by counting — a partition that merely "works" on one width is the aporon error.
+    (defn qml-visits (cols l) (qml-nk cols l))
+    (defn qml-count-loop (cols l acc)
+        (if (ge l (qml-lanes)) acc (qml-count-loop cols (add l 1) (add acc (qml-visits cols l)))))
+    (defn qml-cover-count (cols) (qml-count-loop cols 0 0))
+
+    ; the lane-split association, so the band can watch the reassociation actually happen against a
+    ; plain right fold on a fixture rather than being told that it does
+    (defn qml-lane-fold (xs cols l k acc)
+        (if (eq k 0) acc
+            (qml-lane-fold xs cols l (sub k 1) (add (nth xs (qml-jat l (sub k 1))) acc))))
+    (defn qml-lane-part (xs cols l) (qml-lane-fold xs cols l (qml-nk cols l) 0.0))
+    ; the 32 lane partials reduced with l counting DOWN. simd_sum's real tree is unspecified; this is
+    ; ONE admissible tree, and the epsilon above is stated to cover every admissible tree, so the band
+    ; speaks for the partition and the cover — NOT for simd_sum's association.
+    (defn qml-reduce (xs cols l acc)
+        (if (eq l 0) acc (qml-reduce xs cols (sub l 1) (add (qml-lane-part xs cols (sub l 1)) acc))))
+    (defn qml-lane-sum (xs cols) (qml-reduce xs cols (qml-lanes) 0.0))
+
+    ; the bound's coefficient. It is qms-bound-coeff at parts = 32, unchanged, and that identity is
+    ; the whole content of "the existing epsilon already covers this" — the band checks the equality
+    ; rather than trusting the paragraph above.
+    (defn qml-bound-coeff (cols) (qms-bound-coeff cols (qml-lanes)))
+
+    ; ================= the emitted MSL =================
+
+    ; the header. Emitted ONCE, at the very top of the unit, and WITHOUT `using namespace metal;` —
+    ; see the header block: the unqualified `round` the body defines must keep resolving to the body's.
+    (defn qml-msl-header () "#include <metal_stdlib>\n")
+
+    ; ---- the hoisted decomposition, per quant: the superblock INVARIANT and the per-weight rest.
+    ; Both are float2 for one uniform interface: Q6_K carries (d, unused), Q4_K carries (d, dmin).
+    ; Every character below is q6k_w / q4k_w's own body, split at the invariant and nowhere else.
+    (defn qml-q6k-split ()
+        "static inline float2 q6k_inv(device const uchar* qb, uint b) { return float2(q6k_f16(int(qb[b + 208u]) + 256 * int(qb[b + 209u])), 0.0f); } static inline float q6k_wi(device const uchar* qb, uint b, int i, float2 inv) { int h = i / 128; int wi = i - h * 128; int l = q6k_mod(wi, 32); int g = wi / 32; int is = l / 16; int qlb = int(qb[b + uint(h * 64 + l + q6k_mod(g, 2) * 32)]); int nib = (g / 2 == 0) ? q6k_mod(qlb, 16) : qlb / 16; int qhb = int(qb[b + 128u + uint(h * 32 + l)]); int hi = q6k_mod(qhb / q6k_pow4(g), 4); int q = nib + hi * 16 - 32; int sc = q6k_s8(int(qb[b + 192u + uint(h * 8 + is + 2 * g)])); return (inv.x * float(sc)) * float(q); } ")
+
+    (defn qml-q4k-split ()
+        "static inline float2 q4k_inv(device const uchar* qb, uint b) { return float2(q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])), q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u]))); } static inline float q4k_wi(device const uchar* qb, uint b, int i, float2 inv) { int c = i / 64; int within = q4k_mod(i, 64); int hf = within / 32; int l = q4k_mod(within, 32); int j = 2 * c + hf; int qbyte = int(qb[b + 16u + uint(c * 32 + l)]); int nib = (hf == 0) ? q4k_mod(qbyte, 16) : qbyte / 16; return (inv.x * float(q4k_sc(qb, b, j))) * float(nib) - inv.y * float(q4k_mn(qb, b, j)); } ")
+
+    (defn qml-msl-splits () (str_concat (qml-q6k-split) (qml-q4k-split)))
+
+    ; ---- the per-weight inner step, shared by both kernels below. `pfx` is q6k / q4k and `stride` is
+    ; that quant's superblock byte stride as a literal. ONE meaning, two quants reaching into it —
+    ; the same discipline qms-part-msl keeps.
+    (defn qml-step (pfx stride)
+        (str_concat "uint idx = r * cols + j; uint blk = idx / 256u; if (blk != curblk) { curblk = blk; b = blk * "
+        (str_concat stride
+        (str_concat "u; inv = "
+        (str_concat pfx
+        (str_concat "_inv(qb, b); } float pr = "
+        (str_concat pfx
+                    "_wi(qb, b, int(idx - blk * 256u), inv) * float(x[j]); acc = pr + acc; }")))))))
+
+    (defn qml-decl () "float acc = 0.0f; uint curblk = 4294967295u; uint b = 0u; float2 inv = float2(0.0f, 0.0f); ")
+
+    ; ---- kernel 1: THE HOISTED SPLIT. Same signature, same partition and same `part` buffer as
+    ; qms-part-msl, so it drops into the same combine and the same carrier slot — the ONLY difference
+    ; from it is the hoist, which is why parts=1 here is still the attestant BIT FOR BIT. That is the
+    ; falsifier for the hoist, and it is why this kernel exists at all rather than only the fast one.
+    (defn qml-hoist-msl (fname pfx stride)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* part [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& parts [[buffer(5)]], uint gid [[thread_position_in_grid]]) { if (gid >= rows * parts) return; uint r = gid / parts; uint p = gid - r * parts; uint chunk = (cols + parts - 1u) / parts; uint lo = p * chunk; uint hi = lo + chunk; if (lo > cols) lo = cols; if (hi > cols) hi = cols; "
+        (str_concat (qml-decl)
+        (str_concat "uint j = hi; while (j > lo) { j -= 1; "
+        (str_concat (qml-step pfx stride)
+                    " part[gid] = acc; }")))))))
+
+    ; ---- kernel 2: THE LANE KERNEL. One SIMD group per row, lane-interleaved, hoisted, reduced by
+    ; metal::simd_sum. Grid is rows * 32 and the threadgroup MUST be a multiple of 32 (radius above).
+    ; k counts DOWN so the within-lane fold keeps tb-dot's right-fold direction; only the cross-lane
+    ; reduction reassociates, and that is exactly what the named epsilon bounds.
+    (defn qml-lane-msl (fname pfx stride)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; "
+        (str_concat (qml-decl)
+        (str_concat "uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0) { k -= 1; uint j = lane + k * 32u; "
+        (str_concat (qml-step pfx stride)
+                    " float s = metal::simd_sum(acc); if (lane == 0) y[r] = s; }")))))))
+
+    ; ---- the appendix a carrier adds to the q6k/q4k unit. No helper spine of its own: q6k_mod,
+    ; q6k_f16, q4k_sc, q4k_mn and their kin are already defined there, which is exactly why this is an
+    ; appendix and not a translation unit. The HEADER, though, must lead the whole file — qml-msl-header
+    ; is emitted separately, first, by the cell that assembles the unit.
+    (defn qml-msl-appendix ()
+        (str_concat (qml-msl-splits)
+        (str_concat (qml-hoist-msl "form_q6k_matvec_hoist_f32" "q6k" "210")
+        (str_concat (qml-hoist-msl "form_q4k_matvec_hoist_f32" "q4k" "144")
+        (str_concat (qml-lane-msl  "form_q6k_matvec_lane_f32"  "q6k" "210")
+                    (qml-lane-msl  "form_q4k_matvec_lane_f32"  "q4k" "144"))))))
+
+    0)

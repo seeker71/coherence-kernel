@@ -11,15 +11,27 @@
 ; Kin: weight-load.fk (wl-load-q6k), transformer-block.fk (tb-dot/tb-matvec), llama-block.fk
 ; (lblk-proj-seq / lblk-block-causal), llama-gqa-block.fk (lgqa-block-causal), kv-llama-block.fk.
 ;
-; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/gguf-read.fk form-stdlib/q6k-dequant.fk form-stdlib/weight-load.fk form-stdlib/transformer-block.fk
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/gguf-read.fk form-stdlib/q4k-dequant.fk form-stdlib/q6k-dequant.fk form-stdlib/weight-load.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/gqa-attn.fk form-stdlib/llama-block.fk form-stdlib/llama-gqa-block.fk
+;
+; The closure above was previously short of the llama cells this unit actually calls — ln-rmsnorm,
+; ln-swiglu (llama-numerics.fk), rope (rope.fk), lblk-block-causal (llama-block.fk) and
+; lgqa-block-causal (llama-gqa-block.fk). Under axiom-5 those five lowered to nothing and the
+; bands still printed a green verdict: bj-block-causal-d4 / bj-block-causal-gqa-d4 were NUMB, not
+; proven. Dependency-first FULL closure, so the block arms testify instead of recovering to silence.
 ;
 ; Proven by: form-stdlib/tests/block-join-band.fk form-stdlib/tests/block-join-causal-band.fk form-stdlib/tests/block-join-gqa-causal-band.fk form-stdlib/tests/block-join-asm-band.fk
 
 (do
-    ; --- the first n dequantized weights as a row vector (for embedding in wq/wk/...) ---
+    ; --- the first n dequantized weights as a row vector (for embedding in wq/wk/...).
+    ; The reach is wl-q6k-at-FLAT, not wl-q6k-at: the flat accessor strides whole 210-byte
+    ; superblocks, so index 256 is weight 0 of the next block rather than a fabricated -0. Before
+    ; this, bj-row-n / bj-matrix walked one superblock and `nth` answered 0 past its 128/64/16-byte
+    ; fields, which made bj-matrix correct only for dim <= 16 (dim*dim <= 256) — silently, at full
+    ; green, while a real llama3.2:3b row is 3072 weights wide. wl-q6k-at now refuses out loud
+    ; (q6k-at's form_error), and this call site takes the striding door instead. ---
     (defn bj-row-n-from (bytes off i n)
         (if (eq n 0) (empty)
-            (cons (wl-q6k-at bytes off i)
+            (cons (wl-q6k-at-flat bytes off i)
                   (bj-row-n-from bytes off (add i 1) (sub n 1)))))
     (defn bj-row-n (bytes off n) (bj-row-n-from bytes off 0 n))
 
@@ -53,7 +65,11 @@
     (defn bj-wq-row-n (w r bytes off n)
         (bj-replace-row w r (bj-row-n bytes off n)))
 
-    ; --- a dim×dim matrix from consecutive dequantized weights starting at index `start` ---
+    ; --- a dim×dim matrix from consecutive dequantized weights starting at index `start`. The
+    ; maximum weight index it reaches is start + dim*dim - 1; bj-matrix-max-index names it so a
+    ; caller (or a band) can state the reach instead of discovering it as zeros. Since bj-row-n-from
+    ; strides, that index is now SERVED at any width rather than silently truncated at 255. ---
+    (defn bj-matrix-max-index (start dim) (sub (add start (mul dim dim)) 1))
     (defn bj-matrix-row (bytes off start dim r)
         (bj-row-n-from bytes off (add start (mul r dim)) dim))
     (defn bj-matrix-from (bytes off start dim r)

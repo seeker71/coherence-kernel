@@ -1,0 +1,128 @@
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/transformer-numerics.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk
+;
+; llama-decode-msl-band — what the decode kernels' correctness rests on, proven before any GPU runs.
+;
+; llama-decode-msl.fk emits Metal source for the six ops a real llama3.2:3b token needs between the
+; quantized matvecs. Nothing about that text is checked by the Metal compiler beyond syntax: a Newton
+; iteration seeded at 1.0 instead of sdv, a rope exponent computed in INTEGER arithmetic (which
+; collapses every frequency to 1 and rotates nothing), a `>=` where the argmax wants `>`, the model's
+; own rope frequency factors quietly not divided — all compile, all run, all produce plausible
+; activations, and the token they produce looks fine and is wrong.
+;
+; And the failure mode is exactly the aporon shape (corpus row 826): if the emitted C and its Form
+; twin were transcribed from the same head at the same hour, a GPU-vs-CPU comparison agrees and proves
+; nothing. So each kernel's arithmetic is read BACK into Form (ldm-silu, ldm-newton, ldm-rms-scale,
+; ldm-theta, ldm-argmax) and this band demands those twins equal recipes that were written
+; INDEPENDENTLY and years apart from them: llama-numerics.fk's ln-silu and ln-rms, rope.fk's
+; rope-angle. Two independent readings of the same six meanings now have to agree.
+;
+; WHAT THIS BAND DOES NOT SPEAK FOR — its radius, named. It speaks for the TRANSCRIPTION only. It does
+; not speak for the MSL compiler, for the GPU, for the residency, or for a whole token: those are
+; form/native/metal/metal_first_token.sh, which runs the six kernels inside a real full-width
+; llama3.2:3b decode and gates the ops against Form's own fp64 answers on real weights. Nor does it
+; speak for the ATTENTION kernel's fold — that op has no small closed form to pin here; its meaning is
+; gqa-attn.fk's tb-gqa-attn (four-way 7) and kv-llama-block.fk's cached-prefix equality (four-way 255),
+; and the text is a transcription of jte-gqa-blk-attn-causal with the causal prefix replaced by the
+; cache prefix. That substitution is what the carrier's gates cover and this band does not. Named, not
+; hidden.
+;
+; Kin: llama-decode-msl.fk (under test), llama-numerics.fk (ln-silu / ln-rms — the independent
+; references), rope.fk (rope-angle — likewise), jit-tensor-emit.fk (the block kernels these ops were
+; split out of, and the transcendental spine they call), q6k-msl-band.fk (the same band shape one
+; level down, for the matvec these ops sit between).
+;
+; Verdict 511 when the transcription is honest:
+;   1    SILU IS THE BODY'S              ldm-silu == ln-silu exactly, at five points including 0
+;   2    THE NEWTON SQRT CONVERGES       the Newton-50 seeded at sdv reaches a fixed point: g*g == sdv
+;                                        to 1e-12 relative, at four magnitudes
+;   4    RMSNORM'S SCALE IS THE BODY'S   ldm-rms-scale == 1/(ln-rms xs eps) to 1e-12 relative
+;   8    ROPE AGREES WITH THE RECIPE     ldm-theta at factor 1.0 and base 10000 == rope-angle, the
+;                                        block kernels' rope, at three (pos, pair) points
+;   16   THE FREQUENCY FACTOR IS REAL    dividing by f actually divides (theta*f is the f=1 theta), and
+;                                        the f=32 theta DIFFERS from rope-angle — llama3.2's rope
+;                                        scaling is a new meaning, not a decoration
+;   32   THE EXPONENT IS NOT INTEGER     theta at pair 64 of 128 is strictly between 0 and pos: an
+;                                        integer division would make it exactly pos (the silent defect)
+;   64   ARGMAX HAS A RULE               ldm-argmax finds the max and resolves a TIE to the LOWEST index
+;   128  ONE SPINE, EMITTED ONCE, FIRST  the unit opens with the helper spine, the spine opens with the
+;                                        body's own `round` (rr_2pi calls it, and <metal_stdlib> is not
+;                                        included on purpose), and the unit is EXACTLY spine + the six
+;                                        kernel bodies concatenated — nothing dropped, nothing twice
+;   256  SIX KERNELS, EACH DECLARED      each of the six texts opens with `kernel void <its own name>`
+(do
+    (defn abs-diff (a b) (if (gt a b) (sub a b) (sub b a)))
+    (defn ldmb-rel (a b) (div (abs-diff a b) (if (gt a 0.0) a (sub 0.0 a))))
+    (defn ldmb-opens-with (s p)
+        (if (lt (str_len s) (str_len p)) 0
+            (if (str_eq (substring s 0 (str_len p)) p) 1 0)))
+
+    (let helpers (ldm-msl-helpers))
+    (let kr  (ldm-rmsnorm-msl "form_rmsnorm_f32"))
+    (let kro (ldm-rope-msl    "form_rope_f32"))
+    (let ka  (ldm-attn-msl    "form_gqa_decode_f32"))
+    (let ks  (ldm-swiglu-msl  "form_swiglu_f32"))
+    (let kad (ldm-add-msl     "form_add_f32"))
+    (let kam (ldm-argmax-msl  "form_argmax_f32"))
+    (let unit (ldm-msl-unit))
+
+    ; --- 1: SiLU. Both sides compose tn-exp, so this is EQUALITY and not an epsilon. ---
+    (let c0 (if (eq (ldm-silu 0.0) (ln-silu 0.0))
+            (if (eq (ldm-silu 1.5) (ln-silu 1.5))
+            (if (eq (ldm-silu -2.25) (ln-silu -2.25))
+            (if (eq (ldm-silu 7.0) (ln-silu 7.0))
+            (if (eq (ldm-silu -0.001) (ln-silu -0.001)) 1 0) 0) 0) 0) 0))
+
+    ; --- 2: the Newton-50 sqrt, seeded at sdv exactly as the emitted C seeds it. A fixed point is the
+    ; falsifiable claim: whatever the iteration count, g must satisfy g*g = sdv. ---
+    (defn ldmb-fix (sdv) (do (let g (ldm-newton sdv sdv 50)) (if (lt (ldmb-rel (mul g g) sdv) 1e-12) 1 0)))
+    (let c1 (if (eq (ldmb-fix 1.0) 1)
+            (if (eq (ldmb-fix 0.0001) 1)
+            (if (eq (ldmb-fix 4321.75) 1)
+            (if (eq (ldmb-fix 1e-8) 1) 2 0) 0) 0) 0))
+
+    ; --- 4: the RMSNorm scale against llama-numerics' own ln-rms, on a fixture vector ---
+    (let xs (list 0.5 -1.25 3.0 -0.75 2.5 -4.0 0.125 1.0))
+    (defn ldmb-ss (acc ys) (if (eq (len ys) 0) acc (ldmb-ss (add acc (mul (head ys) (head ys))) (tail ys))))
+    (let eps 1e-5)
+    (let mine (ldm-rms-scale (ldmb-ss 0.0 xs) (mul (len xs) 1.0) eps))
+    (let theirs (div 1.0 (ln-rms xs eps)))
+    (let c2 (if (lt (ldmb-rel mine theirs) 1e-12) 4 0))
+
+    ; --- 8: rope. At factor 1.0 and base 10000 the new theta IS the block kernels' rope-angle. ---
+    (let c3 (if (eq (ldm-theta 10000.0 3 0 128 1.0) (rope-angle 3 0 128))
+            (if (eq (ldm-theta 10000.0 7 64 128 1.0) (rope-angle 7 64 128))
+            (if (eq (ldm-theta 10000.0 1 126 128 1.0) (rope-angle 1 126 128)) 8 0) 0) 0))
+
+    ; --- 16: the factor divides, and the result is a DIFFERENT meaning from the un-scaled rope ---
+    (let t1 (ldm-theta 500000.0 5 64 128 1.0))
+    (let t32 (ldm-theta 500000.0 5 64 128 32.0))
+    (let c4 (if (lt (ldmb-rel (mul t32 32.0) t1) 1e-12)
+            (if (eq (eq t32 (rope-angle 5 64 128)) 0) 16 0) 0))
+
+    ; --- 32: the exponent is FLOAT. Integer division would give base^0 = 1 and theta = pos exactly. ---
+    (let tm (ldm-theta 500000.0 9 64 128 1.0))
+    (let c5 (if (gt tm 0.0) (if (lt tm 9.0) 32 0) 0))
+
+    ; --- 64: argmax, including the tie rule the kernel's strict `>` states ---
+    (let c6 (if (eq (ldm-argmax (list 1.0 5.0 2.0 5.0 0.0)) 1)
+            (if (eq (ldm-argmax (list 3.0 3.0 3.0)) 0)
+            (if (eq (ldm-argmax (list -9.0 -2.0 -7.0)) 1) 64 0) 0) 0))
+
+    ; --- 128: the unit is spine-once-first, the spine opens with the body's own `round`, and the unit
+    ; is EXACTLY spine + six bodies. A repeated `static inline` in one Metal translation unit is a
+    ; compile error, not a warning — and a dropped kernel is a missing symbol at pipeline time. ---
+    (let cat (str_concat helpers (str_concat kr (str_concat kro (str_concat ka (str_concat ks (str_concat kad kam)))))))
+    (let c7 (if (eq (ldmb-opens-with unit helpers) 1)
+            (if (eq (ldmb-opens-with helpers (ldm-msl-round)) 1)
+            (if (str_eq unit cat) 128 0) 0) 0))
+
+    ; --- 256: each text declares its own kernel, by name ---
+    (defn ldmb-decl (s n) (ldmb-opens-with s (str_concat "kernel void " n)))
+    (let c8 (if (eq (ldmb-decl kr "form_rmsnorm_f32") 1)
+            (if (eq (ldmb-decl kro "form_rope_f32") 1)
+            (if (eq (ldmb-decl ka "form_gqa_decode_f32") 1)
+            (if (eq (ldmb-decl ks "form_swiglu_f32") 1)
+            (if (eq (ldmb-decl kad "form_add_f32") 1)
+            (if (eq (ldmb-decl kam "form_argmax_f32") 1) 256 0) 0) 0) 0) 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 c8)))))))))
