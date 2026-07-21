@@ -1,0 +1,90 @@
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/gguf-read.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/weight-load.fk form-stdlib/equireach.fk form-stdlib/q4k-msl.fk
+;
+; PROOF LEVEL: TWO-ARM (fkwu + go), for equireach-band.fk's reason and no other: `read_file_slice` over
+; a BINARY file is byte-faithful on fkwu and the Go kernel and LOSSY on rust and ts. The arithmetic under
+; test travels four-way — it is q4k-dequant.fk's, and weight-load-q4k-band.fk crosses all four arms.
+; Only the byte DOOR is two-armed.
+;
+; q4k-msl-band — the Q4_K half of the device lane, proven before any GPU runs.
+;
+; q6k-msl-band's argument, applied to the other 68% of llama3.2:3b's bytes: the Metal source q4k-msl.fk
+; emits is checked by the Metal compiler only for syntax, and a transposed offset in get_scale_min_k4
+; compiles, runs, and produces plausible weights. So the emitted arithmetic is read BACK into Form as
+; `q4m-flat-at` — flat index, 144-byte stride, literal byte offsets, the same expressions the C computes
+; — and this band demands it equal weight-load.fk's FOUR-WAY-PROVEN `wl-q4k-at` at all 512 weights of a
+; committed two-superblock fixture.
+;
+; THE NARROWER CLAIM THAN equireach-band's, said plainly: there the byte list was transcribed BY HAND so
+; that the file and the list were two independent readings of the same bytes. Here the list comes from
+; `eqr-bytes` over the same window, so both sides read the same door and this band does NOT re-prove the
+; door — equireach-band did that, on a fixture carved from the same blob. What is under test here is the
+; ARITHMETIC: two independently written unpacks of the same 288 bytes, one of which is four-way proven.
+;
+; THE FIXTURE: two consecutive REAL llama3.2:3b Q4_K superblocks (288 bytes) from blk.0.ffn_gate.weight
+; at absolute offset 351699168, sha256 9981f8c9a20a12a5aa24e9d7ca719b9bc55f5640a514fec436ab3ba66857b1fa.
+; Two blocks, because one block cannot falsify a stride.
+;
+; Kin: q4k-msl.fk (under test), q4k-dequant.fk (the four-way spine), weight-load.fk (wl-q4k-at — the
+; reference), q6k-msl-band.fk (the sibling band, same shape), equireach-band.fk (the byte door).
+;
+; Verdict 255 when the transcription is honest:
+;   1    the fixture is 288 bytes and carves to a 288-long list
+;   2    d and dmin agree with the list lane's, both superblocks
+;   4    in-block weights agree                                (idx 0, 1, 255)
+;   8    the 144-byte BLOCK STRIDE is crossed identically      (idx 256 == wl-q4k-at at block 1, idx 0)
+;   16   ALL 512 WEIGHTS AGREE, bit for bit
+;   32   the dequant kernel text is complete                   (longer than its spine, which it opens with)
+;   64   the matvec kernel text is complete                    (same)
+;   128  ONE helper spine, and the two-kernel UNIT is exactly spine+body+body
+(do
+    (defn q4b-agree (src bs base i n)
+        (if (ge i n) 1
+            (if (eq (q4m-flat-at src base i)
+                    (wl-q4k-at bs (mul 144 (div i 256)) (sub i (mul 256 (div i 256)))))
+                (q4b-agree src bs base (add i 1) n)
+                0)))
+    (defn q4b-opens-with (s p)
+        (if (lt (str_len s) (str_len p)) 0
+            (if (str_eq (substring s 0 (str_len p)) p) 1 0)))
+
+    (let src (eqr-of-file "form-stdlib/tests/fixtures/q4k-two-superblocks.bin" 0 288))
+    (let bs (eqr-bytes src 0 288))
+    (let helpers (q4m-msl-helpers))
+    (let kdeq (q4m-dequant-msl "form_q4k_dequant_f32"))
+    (let kmv  (q4m-matvec-msl  "form_q4k_matvec_f32"))
+
+    ; --- 1: the fixture is what it claims ---
+    (let c0 (if (eq (eqr-len src) 288) (if (eq (len bs) 288) 1 0) 0))
+
+    ; --- 2: the super-scale and super-min, both superblocks ---
+    (let c1 (if (eq (q4m-d src 0) (wl-q4k-d bs 0))
+            (if (eq (q4m-dmin src 0) (wl-q4k-dmin bs 0))
+            (if (eq (q4m-d src 144) (wl-q4k-d bs 144))
+            (if (eq (q4m-dmin src 144) (wl-q4k-dmin bs 144)) 2 0) 0) 0) 0))
+
+    ; --- 4: in-block weights, the ends and the middle of block 0 ---
+    (let c2 (if (eq (q4m-flat-at src 0 0) (wl-q4k-at bs 0 0))
+            (if (eq (q4m-flat-at src 0 1) (wl-q4k-at bs 0 1))
+            (if (eq (q4m-flat-at src 0 255) (wl-q4k-at bs 0 255)) 4 0) 0) 0))
+
+    ; --- 8: the stride. Weight 256 lives in the second superblock, 144 bytes on ---
+    (let c3 (if (eq (q4m-flat-at src 0 256) (wl-q4k-at bs 144 0)) 8 0))
+
+    ; --- 16: every weight, both readings, no epsilon ---
+    (let c4 (if (eq (q4b-agree src bs 0 0 512) 1) 16 0))
+
+    ; --- 32/64: each kernel is its helper spine followed by an actual kernel body ---
+    (let c5 (if (eq (q4b-opens-with kdeq helpers) 1)
+            (if (gt (str_len kdeq) (str_len helpers)) 32 0) 0))
+    (let c6 (if (eq (q4b-opens-with kmv helpers) 1)
+            (if (gt (str_len kmv) (str_len helpers)) 64 0) 0))
+
+    ; --- 128: ONE spine, and the unit a carrier compiles emits it exactly once ---
+    (let unit (q4m-msl-unit "form_q4k_dequant_f32" "form_q4k_matvec_f32"))
+    (let expect (str_concat helpers
+                (str_concat (q4m-dequant-body "form_q4k_dequant_f32")
+                            (q4m-matvec-body "form_q4k_matvec_f32"))))
+    (let c7 (if (str_eq (substring kdeq 0 (str_len helpers)) (substring kmv 0 (str_len helpers)))
+            (if (str_eq unit expect) 128 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))
