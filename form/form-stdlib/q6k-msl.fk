@@ -1,0 +1,146 @@
+; q6k-msl.fk — Q6_K dequant as a Metal kernel the BODY emits, so the QUANTIZED bytes are what lives
+; on the GPU and the dequant happens there.
+;
+; WHY THIS EXISTS, and it is a measurement and not a preference. Stone 2 made the byte source
+; equireach and then reported Form dequant at 18 460 weights/s, from which one tensor
+; (blk.0.ffn_down.weight, 8192x3072 = 25 165 824 weights) projects to ~23 min and llama3.2:3b's
+; ~3.2G weights to ~48 h. Stone 3 re-measured that rate at two sizes instead of one and found it is
+; not a rate at all — it is a curve, and the curve is the OUTPUT carrier, not the arithmetic:
+;
+;   n weights           65 536        262 144        ratio for 4x n
+;   ewl-weights (list)   4.98 s        39.5 s        7.9x   <- superlinear: the cons/reverse list
+;   fold, no list        0.70 s         1.50 s       2.1x   <- linear: the same dequant arithmetic
+;                                                              (1 048 576 -> 6.45 s, 162k w/s)
+;
+; So Stone 1's teaching repeats one level out. Stone 1: the blocker was the INPUT carrier (the byte
+; list), not the arithmetic. Stone 3: the blocker is the OUTPUT carrier (the weight list), not the
+; arithmetic. The honest projections for one 25.2M-weight tensor are ~10.4 h through the list and
+; ~154 s through the fold — and BOTH are per-run costs no inference lane can pay. That is what sends
+; the dequant to the GPU: not that Form is slow at it, but that the whole shape of "dequantize into a
+; buffer, then upload the buffer" is wrong when the quantized bytes are 1/4 the size and the arithmetic
+; is 8 integer ops per weight.
+;
+; WHAT IS EMITTED (both kernels, one shared helper spine; every character authored here):
+;   q6m-dequant-msl  qb[] (raw Q6_K bytes, 210 per 256 weights) -> w[] f32, one thread per weight.
+;   q6m-matvec-msl   qb[] x[] -> y[], the FUSED kernel: the resident buffer is the QUANTIZED tensor
+;                    and each weight is dequantized inside the dot. 4x less device memory, and no f32
+;                    tensor is ever materialized anywhere — not in Form, not on the host, not on the GPU.
+;
+; BIT-EXACTNESS IS CLAIMABLE HERE, and the reason is arithmetic, not luck. w = (d * sc) * q with d an
+; f16 value (11-bit significand), sc a signed int8 (<= 8 bits) and q in [-32,31] (<= 6 bits). d*sc needs
+; <= 19 bits and is exact in f32; (d*sc)*q needs <= 25 bits, so it rounds ONCE. Form computes the same
+; product in fp64 (53 bits, exact) and the carrier rounds it once to f32. One rounding on each side of
+; the same exact real number is the same f32. So the audit gate is equality, not an epsilon — and the
+; association is left-to-right on both sides ((d*sc)*q in ewl-at, (d*sc)*q here) because that is what
+; makes the sentence above true.
+;
+; NO HEADER, ON PURPOSE. The emitted source has no `#include <metal_stdlib>`: the f16 super-scale is
+; decoded by ARITHMETIC (q6k_f16 below is fd-value at eb=5, mb=10 transcribed line for line), not by
+; `as_type<half>`, which lives in that header. The body already owns the f16 decode as a recipe; reaching
+; for the library's bitcast would have moved a meaning out of the body for one line of convenience.
+;
+; THE RADIUS THIS CELL SPEAKS FOR. The emitted text is a TRANSCRIPTION of q6k-dequant.fk's decomposition
+; into MSL, and a transcription can be wrong in a way no amount of GPU running would reveal if the
+; reference were transcribed the same way. So q6m-flat-at below is the same transcription read back into
+; Form — flat index, block stride, literal byte offsets, exactly as the emitted C computes them — and
+; tests/q6k-msl-band.fk proves it equals equireach-gguf.fk's independently-written `ewl-flat-at` at all
+; 512 weights of the committed two-superblock fixture, which is where the block stride actually gets
+; crossed. That band speaks for the transcription. It does NOT speak for the MSL compiler or the GPU;
+; that is native/metal/metal_whole_tensor_residency_audit.sh, which closes the loop bit-exactly against
+; Form on real llama3.2:3b weights at BOTH ends of a 25.2M-weight tensor.
+;
+; Kin: q6k-dequant.fk (q6k-mod / q6k-s8 / q6k-pow4 and the index decomposition — the one Q6_K spine;
+; this cell is a third reach into it, not a third meaning), equireach-gguf.fk (ewl-flat-at — the CPU
+; twin these kernels must equal), f16-decode.fk (fd-value at (5,10) — the recipe q6k_f16 transcribes),
+; jit-tensor-emit.fk / tensor-ir.fk (jte-matvec-msl — the f32 matvec whose signature and right-fold op
+; order q6m-matvec-msl mirrors so the two are comparable row for row).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk
+;
+; Proven by: form-stdlib/tests/q6k-msl-band.fk (the transcription) and
+;            form/native/metal/metal_whole_tensor_residency_audit.sh (the GPU, Mac-only)
+
+(do
+    ; ================= the transcription, read back into Form =================
+    ; This is what the emitted C computes, written in Form with the same flat index, the same block
+    ; stride and the same literal byte offsets. It exists so the band can falsify the transcription
+    ; against a reference that was written independently (ewl-flat-at).
+
+    (defn q6m-stride () 210)                       ; bytes per Q6_K superblock
+    (defn q6m-block-n () 256)                      ; weights per superblock
+    (defn q6m-blk (idx) (div idx (q6m-block-n)))   ; which superblock a flat weight index falls in
+    (defn q6m-i   (idx) (q6k-mod idx (q6m-block-n)))
+
+    ; the super-scale, decoded by arithmetic from the two little-endian f16 bytes at +208
+    (defn q6m-d (src b) (fd-f16 (add (eqr-at src (add b 208)) (mul 256 (eqr-at src (add b 209))))))
+
+    ; the three field byte reads, at the offsets the emitted C indexes
+    (defn q6m-ql (src b i) (eqr-at src (add b (add (mul (q6k-h i) 64) (add (q6k-l i) (mul (q6k-mod (q6k-g i) 2) 32))))))
+    (defn q6m-qh (src b i) (eqr-at src (add b (add 128 (add (mul (q6k-h i) 32) (q6k-l i))))))
+    (defn q6m-scb (src b i) (eqr-at src (add b (add 192 (add (mul (q6k-h i) 8) (add (q6k-is i) (mul 2 (q6k-g i))))))))
+
+    (defn q6m-nib (src b i)
+        (if (eq (div (q6k-g i) 2) 0)
+            (q6k-mod (q6m-ql src b i) 16)
+            (div (q6m-ql src b i) 16)))
+    (defn q6m-hi (src b i) (q6k-mod (div (q6m-qh src b i) (q6k-pow4 (q6k-g i))) 4))
+    (defn q6m-q  (src b i) (sub (add (q6m-nib src b i) (mul (q6m-hi src b i) 16)) 32))
+    (defn q6m-sc (src b i) (q6k-s8 (q6m-scb src b i)))
+
+    ; one weight at FLAT index idx of a tensor whose first superblock starts at `base` — the association
+    ; is (d * sc) * q, which is the sentence the bit-exactness claim rests on
+    (defn q6m-flat-at (src base idx)
+        (do
+            (let b (add base (mul (q6m-stride) (q6m-blk idx))))
+            (let i (q6m-i idx))
+            (mul (mul (q6m-d src b) (q6m-sc src b i)) (q6m-q src b i))))
+
+    ; ================= the emitted MSL =================
+    ; Composed the way the other MSL spines in the body are: str_concat over named fragments, one
+    ; fragment per meaning, so a diff of the emitted text points at a recipe and not at a blob.
+
+    ; integer identities — the same ones q6k-dequant.fk names: x&15 = mod x 16, x>>4 = div x 16,
+    ; (qh>>2g)&3 = mod (div qh 4^g) 4. No bitwise operator appears, on either side.
+    (defn q6m-msl-int ()
+        "static inline int q6k_mod(int a, int n) { return a - (a / n) * n; } static inline int q6k_s8(int b) { return b < 128 ? b : b - 256; } static inline int q6k_pow4(int g) { return g == 0 ? 1 : (g == 1 ? 4 : (g == 2 ? 16 : 64)); } ")
+
+    ; fd-value at (eb 5, mb 10), transcribed: field extraction by division, the power of two by a loop
+    ; of exact multiplications, the subnormal arm kept. No metal_stdlib, no bitcast.
+    (defn q6m-msl-f16 ()
+        "static inline float q6k_pow2(int e) { float a = 1.0f; int k = 0; if (e >= 0) { while (k < e) { a = a * 2.0f; k = k + 1; } } else { while (k < -e) { a = a * 0.5f; k = k + 1; } } return a; } static inline float q6k_f16(int bits) { int mant = q6k_mod(bits, 1024); int ex = q6k_mod(bits / 1024, 32); int sgn = bits / 32768; float frac = float(mant) / 1024.0f; float mag = (ex == 0) ? q6k_pow2(-14) * frac : q6k_pow2(ex - 15) * (1.0f + frac); return (sgn == 1) ? -mag : mag; } ")
+
+    ; the weight itself, at a flat index into the quantized tensor — q6m-flat-at, in C
+    (defn q6m-msl-weight ()
+        "static inline float q6k_w(device const uchar* qb, uint idx) { uint blk = idx / 256u; int i = int(idx - blk * 256u); uint b = blk * 210u; int h = i / 128; int wi = i - h * 128; int l = q6k_mod(wi, 32); int g = wi / 32; int is = l / 16; int qlb = int(qb[b + uint(h * 64 + l + q6k_mod(g, 2) * 32)]); int nib = (g / 2 == 0) ? q6k_mod(qlb, 16) : qlb / 16; int qhb = int(qb[b + 128u + uint(h * 32 + l)]); int hi = q6k_mod(qhb / q6k_pow4(g), 4); int q = nib + hi * 16 - 32; int sc = q6k_s8(int(qb[b + 192u + uint(h * 8 + is + 2 * g)])); float d = q6k_f16(int(qb[b + 208u]) + 256 * int(qb[b + 209u])); return (d * float(sc)) * float(q); } ")
+
+    (defn q6m-msl-helpers () (str_concat (q6m-msl-int) (str_concat (q6m-msl-f16) (q6m-msl-weight))))
+
+    ; --- kernel 1: dequant a range of the resident quantized tensor into f32. One thread per weight.
+    ; `off` is a flat WEIGHT offset, so a caller can dequant a tile at either end of a 25.2M-weight
+    ; tensor without moving the resident bytes. ---
+    (defn q6m-dequant-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = q6k_w(qb, off + i); }")))
+
+    ; --- kernel 2: the FUSED matvec. The resident buffer is the quantized tensor; nothing is
+    ; materialized. j counts DOWN and the accumulate is `p + acc` — tb-dot's right fold, the same op
+    ; order jte-matvec-msl emits, so the two kernels are comparable row for row and the f32 reference
+    ; in the carrier is the lane's own conversion chain. ---
+    (defn q6m-matvec-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = q6k_w(qb, uint(i) * cols + j) * float(x[j]); acc = p + acc; } y[i] = acc; }")))
+
+    ; --- each kernel as a SELF-CONTAINED translation unit (spine + body), and the two of them as ONE
+    ; unit with the spine emitted once. The second form is what a carrier compiles: C has no `inline`
+    ; forgiveness for a repeated `static inline` definition in one file, and the Metal front end says so
+    ; loudly ("redefinition of 'q6k_mod'"). The self-contained forms stay because a caller that wants
+    ; only one kernel should not have to know what the other one needs. ---
+    (defn q6m-dequant-msl (fname) (str_concat (q6m-msl-helpers) (q6m-dequant-body fname)))
+    (defn q6m-matvec-msl  (fname) (str_concat (q6m-msl-helpers) (q6m-matvec-body  fname)))
+    (defn q6m-msl-unit (dname mname)
+        (str_concat (q6m-msl-helpers)
+        (str_concat (q6m-dequant-body dname) (q6m-matvec-body mname))))
+
+    0)

@@ -1,0 +1,373 @@
+; native-model-session-grounding.fk -- replay real completed Codex queries
+; against the local body with Form-native lexical embeddings and ranking.
+;
+; Raw queries exist only in the invocation.  The shell supplies locally salted
+; SHA-256 identities; Form validates their shape.  Expected labels are paths
+; cited by the completed answer and admitted only when present in the corpus.
+;
+; preludes: form-stdlib/core.fk form-stdlib/rag-embed.fk form-stdlib/rag-retrieve.fk
+
+(do
+    (defn nmsg-reverse-loop (xs acc)
+        (if (eq (len xs) 0) acc
+            (nmsg-reverse-loop (tail xs) (cons (head xs) acc))))
+    (defn nmsg-reverse (xs) (nmsg-reverse-loop xs (list)))
+    (defn nmsg-hex-byte? (b)
+        (if (or (and (ge b 48) (le b 57))
+                (and (ge b 97) (le b 102))) 1 0))
+    (defn nmsg-digest-loop? (s i)
+        (if (ge i 64) 1
+            (if (eq (nmsg-hex-byte? (str_byte_at s i)) 1)
+                (nmsg-digest-loop? s (add i 1)) 0)))
+    (defn nmsg-digest? (s)
+        (if (eq (str_len s) 64) (nmsg-digest-loop? s 0) 0))
+    (defn nmsg-round-div (n d)
+        (if (le d 0) 0 (div (add n (div d 2)) d)))
+
+    (defn nmsg-candidate (id text)
+        (list "native-model-session-grounding-candidate-v1" id text))
+    (defn nmsg-candidate? (r)
+        (if (and (eq (len r) 3)
+                 (str_eq (nth r 0) "native-model-session-grounding-candidate-v1")) 1 0))
+    (defn nmsg-candidate-id (r) (nth r 1))
+    (defn nmsg-candidate-text (r) (nth r 2))
+
+    (defn nmsg-episode (when query query-digest labels)
+        (list "native-model-session-grounding-episode-v1" when query query-digest labels))
+    (defn nmsg-episode? (r)
+        (if (and (eq (len r) 5)
+                 (str_eq (nth r 0) "native-model-session-grounding-episode-v1")) 1 0))
+    (defn nmsg-episode-when (r) (nth r 1))
+    (defn nmsg-episode-query (r) (nth r 2))
+    (defn nmsg-episode-query-digest (r) (nth r 3))
+    (defn nmsg-episode-labels (r) (nth r 4))
+
+    (defn nmsg-safe-path? (s)
+        (if (gt (str_len s) 0)
+            (if (str_eq (substring s 0 1) "/") 0
+                (if (lt (str_find s ".." 0) 0) 1 0))
+            0))
+    (defn nmsg-candidate-valid? (r)
+        (if (eq (nmsg-candidate? r) 1)
+            (if (and (eq (nmsg-safe-path? (nmsg-candidate-id r)) 1)
+                     (gt (str_len (nmsg-candidate-text r)) 0)) 1 0)
+            0))
+    (defn nmsg-candidates-valid? (rows)
+        (if (eq (len rows) 0) 1
+            (if (eq (nmsg-candidate-valid? (head rows)) 1)
+                (nmsg-candidates-valid? (tail rows)) 0)))
+    (defn nmsg-id-in-candidates? (id rows)
+        (if (eq (len rows) 0) 0
+            (if (str_eq id (nmsg-candidate-id (head rows))) 1
+                (nmsg-id-in-candidates? id (tail rows)))))
+    (defn nmsg-labels-valid? (labels candidates)
+        (if (eq (len labels) 0) 0
+            (if (eq (nmsg-id-in-candidates? (head labels) candidates) 1)
+                (if (eq (len (tail labels)) 0) 1
+                    (nmsg-labels-valid? (tail labels) candidates))
+                0)))
+    (defn nmsg-episode-valid? (r candidates)
+        (if (eq (nmsg-episode? r) 1)
+            (if (and (gt (str_len (nmsg-episode-when r)) 0)
+                     (and (gt (str_len (nmsg-episode-query r)) 0)
+                          (and (eq (nmsg-digest? (nmsg-episode-query-digest r)) 1)
+                               (eq (nmsg-labels-valid? (nmsg-episode-labels r) candidates) 1)))) 1 0)
+            0))
+    (defn nmsg-episodes-valid? (rows candidates)
+        (if (eq (len rows) 0) 1
+            (if (eq (nmsg-episode-valid? (head rows) candidates) 1)
+                (nmsg-episodes-valid? (tail rows) candidates) 0)))
+
+    (defn nmsg-index-loop (rows acc)
+        (if (eq (len rows) 0) (nmsg-reverse acc)
+            (do
+                (let r (head rows))
+                (nmsg-index-loop (tail rows)
+                    (cons (rag-entry (nmsg-candidate-id r)
+                                     (re-vec (nmsg-candidate-text r))) acc)))))
+    (defn nmsg-index (rows) (nmsg-index-loop rows (list)))
+
+    ; Stable top-five in one candidate pass.  A scored row is (id distance).
+    ; Equal distances insert after existing rows, preserving source order.  The
+    ; distance reaches nmsg-rank-accept as a forced function argument, so each
+    ; candidate's L1 walk occurs exactly once.
+    (defn nmsg-scored (id distance) (list id distance))
+    (defn nmsg-scored-id (r) (nth r 0))
+    (defn nmsg-scored-distance (r) (nth r 1))
+    (defn nmsg-take (rows remaining)
+        (if (or (le remaining 0) (eq (len rows) 0)) (list)
+            (cons (head rows) (nmsg-take (tail rows) (sub remaining 1)))))
+    (defn nmsg-rank-insert (row ranked remaining)
+        (if (le remaining 0) (list)
+            (if (eq (len ranked) 0) (list row)
+                (if (lt (nmsg-scored-distance row)
+                        (nmsg-scored-distance (head ranked)))
+                    (cons row (nmsg-take ranked (sub remaining 1)))
+                    (cons (head ranked)
+                          (nmsg-rank-insert row (tail ranked)
+                                            (sub remaining 1)))))))
+    (defn nmsg-rank-accept (qvec remaining ranked entry distance)
+        (nmsg-rank-scan qvec remaining
+            (nmsg-rank-insert (nmsg-scored (rag-id entry) distance) ranked 5)))
+    (defn nmsg-rank-scan (qvec entries ranked)
+        (if (eq (len entries) 0) ranked
+            (do
+                (let entry (head entries))
+                (nmsg-rank-accept qvec (tail entries) ranked entry
+                                  (rag-dist qvec entry)))))
+    (defn nmsg-ranked-ids (ranked)
+        (if (eq (len ranked) 0) (list)
+            (cons (nmsg-scored-id (head ranked))
+                  (nmsg-ranked-ids (tail ranked)))))
+    (defn nmsg-top5 (qvec index)
+        (nmsg-ranked-ids (nmsg-rank-scan qvec index (list))))
+
+    (defn nmsg-id-in? (id xs)
+        (if (eq (len xs) 0) 0
+            (if (str_eq id (head xs)) 1 (nmsg-id-in? id (tail xs)))))
+    (defn nmsg-hit-prefix? (ranked labels remaining)
+        (if (or (le remaining 0) (eq (len ranked) 0)) 0
+            (if (eq (nmsg-id-in? (head ranked) labels) 1) 1
+                (nmsg-hit-prefix? (tail ranked) labels (sub remaining 1)))))
+    (defn nmsg-first-hit-rank-loop (ranked labels rank)
+        (if (eq (len ranked) 0) 0
+            (if (eq (nmsg-id-in? (head ranked) labels) 1) rank
+                (nmsg-first-hit-rank-loop (tail ranked) labels (add rank 1)))))
+    (defn nmsg-first-hit-rank (ranked labels)
+        (nmsg-first-hit-rank-loop ranked labels 1))
+    (defn nmsg-rank-points (rank)
+        (if (eq rank 1) 1000000
+        (if (eq rank 2) 500000
+        (if (eq rank 3) 333333
+        (if (eq rank 4) 250000
+        (if (eq rank 5) 200000 0))))))
+    ; result = tag query-sha labels top-five first-rank.
+    (defn nmsg-result (query-sha labels top rank)
+        (list "native-model-session-grounding-result-v1" query-sha labels top rank))
+    (defn nmsg-result-query (r) (nth r 1))
+    (defn nmsg-result-labels (r) (nth r 2))
+    (defn nmsg-result-top (r) (nth r 3))
+    (defn nmsg-result-rank (r) (nth r 4))
+
+    ; Aggregate evaluation is deliberately scalar-only.
+    (defn nmsg-evaluate-loop
+        (episodes index candidate-count pool-digest dataset-digest
+         total labels hit1 hit3 hit5 reciprocal)
+        (if (eq (len episodes) 0)
+            (list "native-model-session-grounding-report-v1"
+                  candidate-count total labels hit1 hit3 hit5
+                  (nmsg-ppm hit1 total)
+                  (nmsg-ppm hit3 total)
+                  (nmsg-ppm hit5 total)
+                  (nmsg-ppm reciprocal total)
+                  pool-digest dataset-digest 1)
+            (do
+                (let e (head episodes))
+                (let top (nmsg-top5 (re-vec (nmsg-episode-query e)) index))
+                (let expected (nmsg-episode-labels e))
+                (let rank (nmsg-first-hit-rank top expected))
+                (nmsg-evaluate-loop (tail episodes) index
+                    candidate-count pool-digest dataset-digest
+                    (add total 1) (add labels (len expected))
+                    (add hit1 (nmsg-hit-prefix? top expected 1))
+                    (add hit3 (nmsg-hit-prefix? top expected 3))
+                    (add hit5 (nmsg-hit-prefix? top expected 5))
+                    (add reciprocal (nmsg-rank-points rank))))))
+    (defn nmsg-ppm (n d)
+        (if (le d 0) 0 (nmsg-round-div (mul n 1000000) d)))
+
+    ; Production observation carries the scalar aggregate and result rows in a
+    ; single traversal.  nmsg-observe-ranked receives a forced top-five value,
+    ; so one episode performs exactly one ranking pass.
+    (defn nmsg-observe-ranked
+        (remaining index candidate-count pool-digest dataset-digest
+         total labels hit1 hit3 hit5 reciprocal results episode top)
+        (do
+            (let expected (nmsg-episode-labels episode))
+            (let rank (nmsg-first-hit-rank top expected))
+            (nmsg-observe-loop remaining index
+                candidate-count pool-digest dataset-digest
+                (add total 1) (add labels (len expected))
+                (add hit1 (nmsg-hit-prefix? top expected 1))
+                (add hit3 (nmsg-hit-prefix? top expected 3))
+                (add hit5 (nmsg-hit-prefix? top expected 5))
+                (add reciprocal (nmsg-rank-points rank))
+                (cons (nmsg-result (nmsg-episode-query-digest episode)
+                                  expected top rank) results))))
+    (defn nmsg-observe-loop
+        (episodes index candidate-count pool-digest dataset-digest
+         total labels hit1 hit3 hit5 reciprocal results)
+        (if (eq (len episodes) 0)
+            (list
+                (list "native-model-session-grounding-report-v1"
+                      candidate-count total labels hit1 hit3 hit5
+                      (nmsg-ppm hit1 total)
+                      (nmsg-ppm hit3 total)
+                      (nmsg-ppm hit5 total)
+                      (nmsg-ppm reciprocal total)
+                      pool-digest dataset-digest 1)
+                (nmsg-reverse results))
+            (do
+                (let e (head episodes))
+                (nmsg-observe-ranked
+                    (tail episodes) index candidate-count pool-digest dataset-digest
+                    total labels hit1 hit3 hit5 reciprocal results e
+                    (nmsg-top5 (re-vec (nmsg-episode-query e)) index))))
+
+    (defn nmsg-input-valid? (candidates episodes pool-digest dataset-digest)
+        (if (and (gt (len candidates) 0)
+                 (and (gt (len episodes) 0)
+                      (and (eq (nmsg-digest? pool-digest) 1)
+                           (and (eq (nmsg-digest? dataset-digest) 1)
+                                (and (eq (nmsg-candidates-valid? candidates) 1)
+                                     (eq (nmsg-episodes-valid? episodes candidates) 1)))))) 1 0))
+    (defn nmsg-invalid-report (candidate-count pool-digest dataset-digest)
+        (list "native-model-session-grounding-report-v1"
+              candidate-count 0 0 0 0 0 0 0 0 0 pool-digest dataset-digest 0))
+    (defn nmsg-observe (candidates episodes pool-digest dataset-digest)
+        (if (eq (nmsg-input-valid? candidates episodes pool-digest dataset-digest) 1)
+            (nmsg-observe-loop episodes (nmsg-index candidates)
+                (len candidates) pool-digest dataset-digest
+                0 0 0 0 0 0 (list))
+            (list (nmsg-invalid-report (len candidates) pool-digest dataset-digest)
+                  (list))))
+
+    (defn nmsg-delta (current previous)
+        (if (lt previous 0) -1 (sub current previous)))
+
+    ; Default daily path: metrics are accumulated in one recursion and rendered
+    ; from scalar arguments at the base case.  No query hash, label list, top-five
+    ; path list, nested observation, or per-query result row survives that step.
+    (defn nmsg-daily-context
+        (pool-digest dataset-digest contract-digest previous-hit5
+         previous-comparable source-files root-files completed labeled-observed
+         source-index-candidates)
+        (list "native-model-session-grounding-daily-context-v1"
+              pool-digest dataset-digest contract-digest previous-hit5
+              previous-comparable source-files root-files completed
+              labeled-observed source-index-candidates))
+    (defn nmsg-daily-context? (ctx)
+        (if (and (eq (len ctx) 11)
+                 (str_eq (nth ctx 0)
+                         "native-model-session-grounding-daily-context-v1")) 1 0))
+    (defn nmsg-daily-pool (ctx) (nth ctx 1))
+    (defn nmsg-daily-dataset (ctx) (nth ctx 2))
+    (defn nmsg-daily-contract (ctx) (nth ctx 3))
+    (defn nmsg-daily-previous (ctx) (nth ctx 4))
+    (defn nmsg-daily-comparable (ctx) (nth ctx 5))
+    (defn nmsg-daily-source-files (ctx) (nth ctx 6))
+    (defn nmsg-daily-root-files (ctx) (nth ctx 7))
+    (defn nmsg-daily-completed (ctx) (nth ctx 8))
+    (defn nmsg-daily-labeled-observed (ctx) (nth ctx 9))
+    (defn nmsg-daily-source-index (ctx) (nth ctx 10))
+    (defn nmsg-daily-kvi (key value)
+        (str_concat key (str_concat "=" (str_concat (int_to_str value) "\n"))))
+    (defn nmsg-daily-kvs (key value)
+        (str_concat key (str_concat "=" (str_concat value "\n"))))
+    (defn nmsg-daily-render-source (ctx candidate-count total labels)
+        (str_concat
+            "schema=native-model-session-grounding-report-v1\nsource=real-root-codex-user-message-to-task-complete\n"
+            (str_concat
+                (nmsg-daily-kvi "source_session_files" (nmsg-daily-source-files ctx))
+                (str_concat
+                    (nmsg-daily-kvi "root_session_files" (nmsg-daily-root-files ctx))
+                    (str_concat
+                        (nmsg-daily-kvi "completed_pairs_scanned" (nmsg-daily-completed ctx))
+                        (str_concat
+                            (nmsg-daily-kvi "labeled_pairs_observed" (nmsg-daily-labeled-observed ctx))
+                            (str_concat
+                                (nmsg-daily-kvi "source_index_candidates" (nmsg-daily-source-index ctx))
+                                (str_concat
+                                    (nmsg-daily-kvi "admitted_candidates" candidate-count)
+                                    (str_concat
+                                        (nmsg-daily-kvi "replayed_queries" total)
+                                        (nmsg-daily-kvi "path_labels" labels)))))))))
+    (defn nmsg-daily-render-metrics
+        (ctx total hit1 hit3 hit5 reciprocal valid)
+        (do
+            (let hit5-ppm (nmsg-ppm hit5 total))
+            (str_concat
+                (nmsg-daily-kvi "top1_hits" hit1)
+                (str_concat
+                    (nmsg-daily-kvi "top3_hits" hit3)
+                    (str_concat
+                        (nmsg-daily-kvi "top5_hits" hit5)
+                        (str_concat
+                            (nmsg-daily-kvi "top1_ppm" (nmsg-ppm hit1 total))
+                            (str_concat
+                                (nmsg-daily-kvi "top3_ppm" (nmsg-ppm hit3 total))
+                                (str_concat
+                                    (nmsg-daily-kvi "top5_ppm" hit5-ppm)
+                                    (str_concat
+                                        (nmsg-daily-kvi "mrr5_ppm" (nmsg-ppm reciprocal total))
+                                        (str_concat
+                                            (nmsg-daily-kvi "label_pool_coverage_ppm"
+                                                (if (eq valid 1) 1000000 0))
+                                            (str_concat
+                                                (nmsg-daily-kvi "previous_top5_ppm" (nmsg-daily-previous ctx))
+                                                (str_concat
+                                                    (nmsg-daily-kvi "previous_comparable" (nmsg-daily-comparable ctx))
+                                                    (nmsg-daily-kvi "top5_delta_ppm"
+                                                        (nmsg-delta hit5-ppm (nmsg-daily-previous ctx))))))))))))))
+    (defn nmsg-daily-render-audit (ctx valid)
+        (str_concat
+            (nmsg-daily-kvs "candidate_set_sha256" (nmsg-daily-pool ctx))
+            (str_concat
+                (nmsg-daily-kvs "dataset_sha256" (nmsg-daily-dataset ctx))
+                (str_concat
+                    (nmsg-daily-kvs "evaluation_contract_sha256" (nmsg-daily-contract ctx))
+                    (str_concat
+                        "ranker=form-native-re-vec64-stable-one-pass-l1-top5\ndetail_rows=0\nraw_query_persisted=0\nscope=real-session-path-grounding-replay-not-language-generation\n"
+                        (nmsg-daily-kvi "replay_valid" valid))))))
+    (defn nmsg-daily-render
+        (ctx candidate-count total labels hit1 hit3 hit5 reciprocal valid)
+        (str_concat
+            (nmsg-daily-render-source ctx candidate-count total labels)
+            (str_concat
+                (nmsg-daily-render-metrics ctx total hit1 hit3 hit5 reciprocal valid)
+                (nmsg-daily-render-audit ctx valid))))
+    (defn nmsg-daily-loop
+        (remaining index ctx candidate-count total labels hit1 hit3 hit5 reciprocal
+         episode top)
+        (do
+            (let expected (nmsg-episode-labels episode))
+            (let rank (nmsg-first-hit-rank top expected))
+            (if (eq (len remaining) 0)
+                (nmsg-daily-render ctx candidate-count
+                    (add total 1) (add labels (len expected))
+                    (add hit1 (nmsg-hit-prefix? top expected 1))
+                    (add hit3 (nmsg-hit-prefix? top expected 3))
+                    (add hit5 (nmsg-hit-prefix? top expected 5))
+                    (add reciprocal (nmsg-rank-points rank)) 1)
+                (do
+                    (let next (head remaining))
+                    (nmsg-daily-loop (tail remaining) index ctx candidate-count
+                        (add total 1) (add labels (len expected))
+                        (add hit1 (nmsg-hit-prefix? top expected 1))
+                        (add hit3 (nmsg-hit-prefix? top expected 3))
+                        (add hit5 (nmsg-hit-prefix? top expected 5))
+                        (add reciprocal (nmsg-rank-points rank)) next
+                        (nmsg-top5 (re-vec (nmsg-episode-query next)) index))))))
+    (defn nmsg-daily-with-index (candidates episodes ctx index)
+        (do
+            (let first (head episodes))
+            (nmsg-daily-loop (tail episodes) index ctx
+                (len candidates) 0 0 0 0 0 0 first
+                (nmsg-top5 (re-vec (nmsg-episode-query first)) index))))
+    (defn nmsg-daily-summary (candidates episodes ctx)
+        (if (and (eq (nmsg-daily-context? ctx) 1)
+                 (and (eq (nmsg-digest? (nmsg-daily-contract ctx)) 1)
+                      (eq (nmsg-input-valid? candidates episodes
+                              (nmsg-daily-pool ctx) (nmsg-daily-dataset ctx)) 1)))
+            (nmsg-daily-with-index candidates episodes ctx (nmsg-index candidates))
+            (nmsg-daily-render ctx (len candidates) 0 0 0 0 0 0 0)))
+
+    ; report = tag candidates queries labels h1 h3 h5 p1 p3 p5 mrr
+    ;          pool-sha dataset-sha valid.  No nested result rows.
+    (defn nmsg-report (candidates episodes pool-digest dataset-digest)
+        (if (eq (nmsg-input-valid? candidates episodes pool-digest dataset-digest) 1)
+            (nmsg-evaluate-loop episodes (nmsg-index candidates)
+                (len candidates) pool-digest dataset-digest
+                0 0 0 0 0 0)
+            (nmsg-invalid-report (len candidates) pool-digest dataset-digest)))
+    0)

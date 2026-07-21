@@ -1,0 +1,158 @@
+; ask-native-lane.fk — the door between the ASK verb and the form-native llama3.2:3b generation lane,
+; and the one rule that makes the door safe: AN ANSWER MUST BE BOUND TO ITS OWN QUESTION.
+;
+; WHY THIS CELL EXISTS AT ALL. form-cli-ask.fk's header said, correctly, that full prose generation
+; over GGUF weights on the fkwu + Metal lane was "a separate composition cell; until that lane is
+; wired end-to-end, this verb returns an attributed grounded cell instead of pretending a host LLM is
+; the local oracle." That condition became FALSE on 2026-07-21: metal_first_token.sh generates real
+; llama3.2:3b tokens from real weights through kernels the body emitted. The refusal was right when it
+; was written and nothing told it the world had moved — so this cell is that separate composition
+; cell, written to make the sentence true rather than to loosen it.
+;
+; WHERE THE LANE ACTUALLY RUNS, said plainly. fkwu is a walker; it does not hold a Metal device. The
+; generation lane is a CARRIER (form/native/metal/metal_ask.sh) that maps the blob, dispatches the
+; body's own kernels, and stages what came back. This cell reads that staged artifact. That is the
+; same shape rag-ask.fk already uses for the staged query and the healed index — the body decides
+; every meaning, the carrier moves bytes — and it is named here rather than hidden, because a reader
+; who thought fkwu itself was running the GPU would be wrong about the whole architecture.
+;
+; THE FAILURE THIS CELL IS BUILT AGAINST. A staged file is a cache, and the classic way a cache lies
+; is by answering a question it was not asked: yesterday's artifact, still on disk, confidently
+; answering today's prompt. So the artifact carries QUESTION-SHA256, and `anl-bound?` recomputes
+; sha256 OF THE QUESTION IN HAND and demands equality. The carrier writes that field with `shasum` and
+; the body checks it with sha256.fk — two independent implementations, verified equal on this host —
+; so a mismatch in either is a refusal, not a silent pass. An unbound artifact does not answer. It
+; does not "probably" answer. It reports `native-lane:question-not-bound` and the RAG lane takes over.
+;
+; NEVER LET A CALLER MISTAKE ONE LANE FOR THE OTHER. Both lanes return prose-shaped text. The only
+; thing that distinguishes a 3-billion-parameter generation from a retrieved grounded cell is what the
+; verb SAYS about itself, so every answer from either lane carries `local-lane:` naming which one
+; spoke, and the native answer additionally carries the model, the blob it came from, and the full
+; declared/measured cost receipt. `anl-refusal` exists so that a fallback is never silent either: the
+; caller can always ask why the native lane declined.
+;
+; THE RADIUS THIS CELL SPEAKS FOR (corpus row 826, aporon). It speaks for reading and validating an
+; ASK-NATIVE v1 artifact and binding it to a question. It does NOT speak for the arithmetic that
+; produced the tokens — that is metal_first_token.sh's 13 gates — nor for the artifact being fresh in
+; any sense other than question-identity: an artifact bound to this exact question but produced by an
+; older model file is caught only by BLOB-SHA256, which this cell exposes but does not adjudicate,
+; because the body has no way to hash a 2 GB blob cheaply and a slow honest check that nobody runs is
+; worse than a named gap. That gap is named in the receipt.
+;
+; Kin: rag-ask.fk (ra-* — the staged-artifact shape this mirrors, and the fallback lane),
+; ask-cost-receipt.fk (acr-* — the declared/measured receipt this carries),
+; form-cli-ask.fk (fca-* — the verb that chooses between the lanes),
+; sha256.fk / hex.fk (the question binding), native/metal/metal_ask.sh (the carrier that writes it).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
+;
+; Proven by: form-stdlib/tests/ask-native-lane-band.fk (four-way; verdict 127)
+
+(do
+    (defn anl-artifact-path () ".coherence-network/ask-native/answer.txt")
+    (defn anl-version () "v1")
+    (defn anl-lane-name () "metal-gguf-native")
+    (defn anl-fallback-lane-name () "fkwu-rag-grounded")
+    (defn anl-nl () (byte_to_str 10))
+
+    ; ================= 1. reading the flat artifact =================
+    ; Every header is one "KEY value" line. Searching for newline+KEY+space (with a newline glued to
+    ; the front of the text so the FIRST line matches the same way as every other) means a key can
+    ; never be found inside a value, which a bare str_find of the key would happily do.
+    (defn anl-line-value (raw key)
+        (do
+            (let hay (str_concat (anl-nl) raw))
+            (let needle (str_concat (anl-nl) (str_concat key " ")))
+            (let i (str_find hay needle 0))
+            (if (lt i 0) ""
+                (do
+                    (let s (add i (str_len needle)))
+                    (let e (str_find hay (anl-nl) s))
+                    (if (lt e 0) (substring hay s (str_len hay)) (substring hay s e))))))
+
+    ; A block between <TAG>-BEGIN and <TAG>-END, exclusive of both marker lines. The answer is prose
+    ; and may hold blank lines and newlines, so it cannot be a header value.
+    (defn anl-section (raw tag)
+        (do
+            (let b (str_concat tag "-BEGIN"))
+            (let e (str_concat tag "-END"))
+            (let i (str_find raw b 0))
+            (if (lt i 0) ""
+                (do
+                    (let s (add i (add (str_len b) 1)))
+                    (let j (str_find raw e s))
+                    (if (lt j 0) "" (substring raw s (if (gt j s) (sub j 1) s)))))))
+
+    (defn anl-answer-text (raw)  (anl-section raw "ANSWER"))
+    (defn anl-receipt-text (raw) (anl-section raw "RECEIPT"))
+
+    ; `read_file` hands back nil for a path that is not there, and every string recipe below would
+    ; crash on it rather than report it. One guard, used by everything that reads a header from disk,
+    ; so "no artifact" is a value ("") and never a stack trace.
+    ;
+    ; A FOURTH-ARM DIVERGENCE THIS CELL SITS ON, named because it changes behaviour and not just
+    ; tidiness. `nil?` answers 1 for an ordinary STRING on fkwu and 0 on go, rust and ts — probed
+    ; directly, (nil? "a") -> 0 / 0 / 0 / 1. Every guard below is therefore ALWAYS TRUE on fkwu, so on
+    ; that arm a present, well-formed, correctly-bound artifact still classifies as
+    ; `native-lane:absent` and the ask verb falls back to the grounded lane. The degradation is safe —
+    ; it refuses, names its reason, and never fabricates — but the native lane cannot answer from an
+    ; fkwu-only host until `nil?` agrees across the arms. That is a kernel movement, not a recipe one,
+    ; and it is not worked around here: a recipe that hid it would make the divergence invisible
+    ; exactly where someone would later trust it.
+    (defn anl-header-of (raw key) (if (nil? raw) "" (anl-line-value raw key)))
+    (defn anl-header-at (path key) (anl-header-of (read_file path) key))
+    (defn anl-model-at (path) (anl-header-at path "MODEL"))
+    (defn anl-model () (anl-model-at (anl-artifact-path)))
+
+    ; ================= 2. the binding — the whole safety of the cache =================
+    (defn anl-question-key (q) (hex-encode (sha256-stream-string q)))
+    (defn anl-versioned? (raw) (if (str_eq (anl-line-value raw "ASK-NATIVE") (anl-version)) 1 0))
+    (defn anl-bound? (raw q)
+        (if (str_eq (anl-line-value raw "QUESTION-SHA256") (anl-question-key q)) 1 0))
+
+    ; Why the artifact did NOT answer, as a value rather than as silence. Ordered so the first true
+    ; thing is the most fundamental: no file at all, then a format this cell does not speak for, then
+    ; the stale-cache case, then an artifact that is well-formed and empty.
+    ;
+    ; THE NIL GUARD IS SPLIT OFF FROM THE STRING LOGIC, and that split is what the divergence above
+    ; forces. `anl-refusal-of-text` assumes it was handed text and decides purely on content — it
+    ; touches no arm-divergent predicate and agrees on all four arms, so it is what the band proves.
+    ; `anl-refusal-of` is that logic plus the one `nil?` guard, and it is therefore exactly as
+    ; trustworthy as `nil?` is on the arm it runs on. Keeping them in one recipe would have made a
+    ; four-way-honest claim impossible to state about either half.
+    (defn anl-refusal-of-text (raw q)
+        (if (eq (anl-versioned? raw) 0) "native-lane:version-mismatch"
+            (if (eq (anl-bound? raw q) 0) "native-lane:question-not-bound"
+                (if (eq (str_len (anl-answer-text raw)) 0) "native-lane:empty-answer" ""))))
+    (defn anl-refusal-of (raw q)
+        (if (nil? raw) "native-lane:absent" (anl-refusal-of-text raw q)))
+
+    (defn anl-ready-of-text (raw q) (if (str_eq (anl-refusal-of-text raw q) "") 1 0))
+    (defn anl-ready-of (raw q) (if (str_eq (anl-refusal-of raw q) "") 1 0))
+    (defn anl-ready-at (path q) (anl-ready-of (read_file path) q))
+    (defn anl-ready? (q) (anl-ready-at (anl-artifact-path) q))
+    (defn anl-refusal-at (path q) (anl-refusal-of (read_file path) q))
+    (defn anl-refusal (q) (anl-refusal-at (anl-artifact-path) q))
+
+    ; ================= 3. the answer, with its lane and its costs attached =================
+    ; The prose alone would be indistinguishable from the RAG lane's prose. What travels with it: the
+    ; lane that spoke, the model and blob it came from, and the receipt in which every cost appears
+    ; declared and measured. A caller that reads only the first line still cannot be misled, because
+    ; the lane name is on its own line and there is exactly one of them.
+    (defn anl-answer-of (raw q)
+        (str_concat (anl-answer-text raw)
+        (str_concat (str_concat (anl-nl) "local-lane:") (str_concat (anl-lane-name)
+        (str_concat (str_concat (anl-nl) "synthesis-lane:") (str_concat (anl-lane-name)
+        (str_concat (str_concat (anl-nl) "model:") (str_concat (anl-line-value raw "MODEL")
+        (str_concat (str_concat (anl-nl) "blob-sha256:") (str_concat (anl-line-value raw "BLOB-SHA256")
+        (str_concat (str_concat (anl-nl) "question-sha256:") (str_concat (anl-line-value raw "QUESTION-SHA256")
+        (str_concat (str_concat (anl-nl) "gates:") (str_concat (anl-line-value raw "GATES")
+        (str_concat (anl-nl) (anl-receipt-text raw))))))))))))))))
+
+    (defn anl-answer-at (path q)
+        (do
+            (let raw (read_file path))
+            (if (eq (anl-ready-of raw q) 0) "" (anl-answer-of raw q))))
+    (defn anl-answer (q) (anl-answer-at (anl-artifact-path) q))
+
+    0)

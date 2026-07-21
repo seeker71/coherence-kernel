@@ -1,0 +1,107 @@
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk
+;
+; PROOF LEVEL: TWO-ARM (fkwu + go), for equireach-band.fk's reason and no other: `read_file_slice` over
+; a BINARY file is byte-faithful on fkwu and the Go kernel and LOSSY on rust and ts (both hand back 767
+; bytes for this 420-byte fixture, UTF-8-replacing every invalid byte). The arithmetic under test travels
+; four-way — it is q6k-dequant.fk's, and q6k-bounds-band.fk crosses all four arms on the same bytes as a
+; transcribed list. Only the byte DOOR is two-armed, and widening it is a kernel movement.
+;
+; q6k-msl-band — what a GPU kernel's correctness actually rests on, proven before any GPU runs.
+;
+; q6k-msl.fk emits Metal source that dequantizes Q6_K on the device. Nothing about that text is checked
+; by the Metal compiler beyond syntax: a transposed byte offset, a dropped `- 32`, an f16 exponent bias
+; off by one — all compile, all run, all produce plausible weights. And the failure mode is exactly the
+; aporon shape (corpus row 826): if the emitted C and the reference were transcribed from the same head
+; at the same hour, a GPU-vs-CPU comparison agrees and proves nothing.
+;
+; So the emitted arithmetic is read BACK into Form as q6m-flat-at — flat index, block stride, literal
+; byte offsets, the same expressions the C computes — and this band demands it equal `ewl-flat-at`, which
+; equireach-gguf.fk wrote independently (field-at-a-time, per-block base, its own offsets) and which
+; equireach-band already pinned against the four-way-proven list lane at all 512 of these weights. Three
+; independent readings of the same 420 real bytes now have to agree.
+;
+; WHAT THIS BAND DOES NOT SPEAK FOR — its radius, named. It speaks for the TRANSCRIPTION only. It does
+; not speak for the MSL compiler, the GPU, or the residency: those are
+; form/native/metal/metal_whole_tensor_residency_audit.sh, which closes the loop bit-exactly on real
+; llama3.2:3b weights at BOTH ends of a 25 165 824-weight tensor. Nor does it speak for the emitted TEXT
+; being the transcription — bits 32/64/128 check that the text is complete and shares one helper spine,
+; which is a structural claim, not a semantic one. The semantic bridge is that both the text and
+; q6m-flat-at are written from q6k-dequant.fk's decomposition, and that q6k-dequant.fk is four-way proven.
+;
+; THE FIXTURE is equireach-band's: two consecutive REAL llama3.2:3b Q6_K superblocks (420 bytes) from
+; blk.0.ffn_down.weight at absolute offset 331055328. 512 weights, and the superblock stride is crossed
+; INSIDE the fixture — which is the whole reason two blocks were committed rather than one.
+;
+; Kin: q6k-msl.fk (under test), equireach-gguf.fk (ewl-flat-at — the independent reference),
+; equireach-band.fk (the same fixture, the list lane pinned), q6k-dequant.fk (the shared four-way spine).
+;
+; Verdict 255 when the transcription is honest:
+;   1    the fixture window is the 420 bytes it claims       (eqr-len, and the f16 super-scale of block 0)
+;   2    the super-scale agrees with the reference lane      (q6m-d == ewl-d at both blocks)
+;   4    in-block weights agree                              (idx 0, 1, 255)
+;   8    the BLOCK STRIDE is crossed identically             (idx 256 == ewl-flat-at 256, and pinned to
+;                                                             ggml's own 0.01924133.., not -0)
+;   16   ALL 512 WEIGHTS AGREE, bit for bit                  (fold, no epsilon, no sampling)
+;   32   the dequant kernel text is complete                 (longer than its helper spine, which it opens with)
+;   64   the matvec kernel text is complete                  (same)
+;   128  ONE helper spine, and the two-kernel UNIT is exactly spine+body+body (both kernels carry the
+;        same spine byte for byte, and the unit a carrier compiles emits it once — a repeated
+;        `static inline` in one translation unit is a compile error, not a warning)
+(do
+    ; elementwise agreement between the emitted transcription and the independent reference
+    (defn qmb-agree (src base i n)
+        (if (ge i n) 1
+            (if (eq (q6m-flat-at src base i) (ewl-flat-at src base i))
+                (qmb-agree src base (add i 1) n)
+                0)))
+    (defn qmb-pin (x lo hi) (if (gt x lo) (if (lt x hi) 1 0) 0))
+    ; does `s` open with `p`, byte for byte? (the helper-spine claim, without needing a search primitive)
+    (defn qmb-opens-with (s p)
+        (if (lt (str_len s) (str_len p)) 0
+            (if (str_eq (substring s 0 (str_len p)) p) 1 0)))
+
+    (let src (eqr-of-file "form-stdlib/tests/fixtures/q6k-two-superblocks.bin" 0 420))
+    (let helpers (q6m-msl-helpers))
+    (let kdeq (q6m-dequant-msl "form_q6k_dequant_f32"))
+    (let kmv  (q6m-matvec-msl  "form_q6k_matvec_f32"))
+
+    ; --- 1: the window is the fixture, and the f16 decode transcribed here reads its super-scale ---
+    (let d0 (mul 1000000.0 (q6m-d src 0)))
+    (let c0 (if (eq (eqr-len src) 420)
+            (if (eq (qmb-pin d0 0.0 1000000.0) 1) 1 0) 0))
+
+    ; --- 2: the super-scale agrees with equireach-gguf's own f16 read, both superblocks ---
+    (let c1 (if (eq (q6m-d src 0) (ewl-d src 0))
+            (if (eq (q6m-d src 210) (ewl-d src 210)) 2 0) 0))
+
+    ; --- 4: in-block weights agree at the ends and the middle of block 0 ---
+    (let c2 (if (eq (q6m-flat-at src 0 0) (ewl-flat-at src 0 0))
+            (if (eq (q6m-flat-at src 0 1) (ewl-flat-at src 0 1))
+            (if (eq (q6m-flat-at src 0 255) (ewl-flat-at src 0 255)) 4 0) 0) 0))
+
+    ; --- 8: the stride. Weight 256 lives in the SECOND superblock, 210 bytes on; this is the index
+    ; the old list lane answered -0 for, so it is pinned to ggml's own value and not only to agreement ---
+    (let w256 (mul 1000000.0 (q6m-flat-at src 0 256)))
+    (let c3 (if (eq (q6m-flat-at src 0 256) (ewl-flat-at src 0 256))
+            (if (eq (qmb-pin w256 19241.33 19241.34) 1) 8 0) 0))
+
+    ; --- 16: every weight, both readings, no epsilon ---
+    (let c4 (if (eq (qmb-agree src 0 0 512) 1) 16 0))
+
+    ; --- 32/64: each kernel is its helper spine followed by an actual kernel body ---
+    (let c5 (if (eq (qmb-opens-with kdeq helpers) 1)
+            (if (gt (str_len kdeq) (str_len helpers)) 32 0) 0))
+    (let c6 (if (eq (qmb-opens-with kmv helpers) 1)
+            (if (gt (str_len kmv) (str_len helpers)) 64 0) 0))
+
+    ; --- 128: ONE spine. Both kernels open with the identical helper text, so there is exactly one
+    ; Q6_K meaning on the device no matter which kernel is dispatched — and the UNIT a carrier compiles
+    ; is that spine followed by both bodies, with the spine appearing exactly once ---
+    (let unit (q6m-msl-unit "form_q6k_dequant_f32" "form_q6k_matvec_f32"))
+    (let expect (str_concat helpers
+                (str_concat (q6m-dequant-body "form_q6k_dequant_f32")
+                            (q6m-matvec-body "form_q6k_matvec_f32"))))
+    (let c7 (if (str_eq (substring kdeq 0 (str_len helpers)) (substring kmv 0 (str_len helpers)))
+            (if (str_eq unit expect) 128 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))

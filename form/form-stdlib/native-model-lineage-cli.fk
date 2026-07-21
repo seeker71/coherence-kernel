@@ -1,0 +1,263 @@
+; native-model-lineage-cli.fk -- fixed real Hati lineage witness carrier.
+;
+; Stdin carries only host-observed sizes, digests, dates, and success bits.
+; Paths, model bytes, training rows, prompts, responses, and session text never
+; cross.  Form constructs and hashes the actual base -> adapter -> fused ->
+; Q4 -> served DAG.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/native-model-evidence.fk form-stdlib/native-model-lineage-form.fk
+
+(do
+    (defn nmlic-component (role)
+        (nmli-component role (str_to_int (read_line)) (read_line)))
+    (defn nmlic-kv-int (key value)
+        (str_concat key (str_concat "=" (str_concat (int_to_str value) "\n"))))
+    (defn nmlic-kv-str (key value)
+        (str_concat key (str_concat "=" (str_concat value "\n"))))
+    (defn nmlic-render (rows)
+        (if (eq (len rows) 0) ""
+            (str_concat (head rows) (nmlic-render (tail rows)))))
+    (defn nmlic-valid-edge-count (rows)
+        (if (eq (len rows) 0) 0
+            (add (nmli-edge-valid? (head rows))
+                 (nmlic-valid-edge-count (tail rows)))))
+
+    ; Previous node identities make day-over-day drift exact. Empty lines mean
+    ; this is the first canonical snapshot and therefore have verdict -1.
+    (let previous
+        (list (read_line) (read_line) (read_line) (read_line) (read_line)))
+
+    ; Component roles are fixed here; the Form schema still validates strict
+    ; canonical order, sizes, digests, and the component floor for each kind.
+    (let base-components
+        (list
+            (nmlic-component "config")
+            (nmlic-component "model")
+            (nmlic-component "model-index")
+            (nmlic-component "special-tokens")
+            (nmlic-component "tokenizer")
+            (nmlic-component "tokenizer-config")))
+    (let adapter-components
+        (list
+            (nmlic-component "adapter-config")
+            (nmlic-component "adapter-weights")))
+    (let fused-components
+        (list
+            (nmlic-component "chat-template")
+            (nmlic-component "config")
+            (nmlic-component "model-index")
+            (nmlic-component "model-shard-00001")
+            (nmlic-component "model-shard-00002")
+            (nmlic-component "tokenizer")
+            (nmlic-component "tokenizer-config")))
+    (let quantized-components (list (nmlic-component "model")))
+    (let served-components
+        (list
+            (nmlic-component "manifest")
+            (nmlic-component "model")
+            (nmlic-component "ollama-config")
+            (nmlic-component "params")
+            (nmlic-component "show")
+            (nmlic-component "show-details")
+            (nmlic-component "show-model-info")
+            (nmlic-component "show-parameters")
+            (nmlic-component "show-system")
+            (nmlic-component "show-template")
+            (nmlic-component "system")))
+
+    ; Private historical text remains outside Form. These are hashes of the
+    ; narrowly selected source session, inputs, tools, invocations, and results.
+    (let session-sha (read_line))
+    (let train-data-sha (read_line))
+    (let valid-data-sha (read_line))
+    (let heldout-data-sha (read_line))
+    (let train-log-sha (read_line))
+    (let lora-tool-sha (read_line))
+    (let train-invocation-sha (read_line))
+    (let fuse-log-sha (read_line))
+    (let fuse-tool-sha (read_line))
+    (let fuse-invocation-sha (read_line))
+    (let quantize-invocation-sha (read_line))
+    (let quantize-modelfile-sha (read_line))
+    (let quantize-tool-sha (read_line))
+    (let stage-sha (read_line))
+    (let current-f16-model-sha (read_line))
+    (let current-modelfile-sha (read_line))
+    (let direct-gguf-export-failed (str_to_int (read_line)))
+    (let current-day (str_to_int (read_line)))
+    (let event-sha (read_line))
+    (let event-artifact-sha (read_line))
+    (let event-day (str_to_int (read_line)))
+    (let event-success (str_to_int (read_line)))
+    (let evaluator-tool-sha (read_line))
+    (let evaluator-sha (read_line))
+
+    (let base
+        (nmli-node "mlx-llama32-3b-base" "base" "mlx-safetensors-4bit"
+            "mlx-community/Llama-3.2-3B-Instruct-4bit@7f0dc925e0d0afb0322d96f9255cfddf2ba5636e"
+            base-components))
+    (let adapter
+        (nmli-node "hati-ptbr-lora" "adapter" "mlx-lora-safetensors"
+            "llama32-3b-ptbr-rank8-layers8" adapter-components))
+    (let fused
+        (nmli-node "hati-translator-fused" "fused" "hf-safetensors-f16"
+            "llama32-3b-ptbr-fused-dequantized" fused-components))
+    (let quantized
+        (nmli-node "hati-translator-q4" "quantized" "gguf-q4-k-m"
+            "hati-translator-q4-k-m" quantized-components))
+    (let served
+        (nmli-node "hati-translator-q4-served" "served" "ollama-manifest-v2"
+            "hati-translator-q4:latest" served-components))
+    (let nodes (list base adapter fused quantized served))
+
+    (let train-evidence
+        (nmfe-sha256
+            (nmfe-fields
+                (list session-sha train-data-sha valid-data-sha heldout-data-sha
+                      train-log-sha
+                      (nmli-component-sha-for-role adapter-components
+                                                   "adapter-config")))))
+    (let fuse-evidence
+        (nmfe-sha256
+            (nmfe-fields
+                (list session-sha fuse-log-sha (nmli-node-sha base)
+                      (nmli-node-sha adapter) (nmli-node-sha fused)
+                      (int_to_str direct-gguf-export-failed)))))
+    (let quantize-evidence
+        (nmfe-sha256
+            (nmfe-fields
+                (list session-sha quantize-modelfile-sha stage-sha
+                      (nmli-node-sha fused) (nmli-node-sha quantized)))))
+    (let serve-evidence
+        (nmfe-sha256
+            (nmfe-fields
+                (list event-sha event-artifact-sha (nmli-node-sha quantized)
+                      (nmli-node-sha served)))))
+
+    (let q4-blob-sha
+        (nmli-component-sha-for-role quantized-components "model"))
+    (let served-model-sha
+        (nmli-component-sha-for-role served-components "model"))
+    (let served-show-sha
+        (nmli-component-sha-for-role served-components "show"))
+    (let copy-equality (nmli-copy3? q4-blob-sha stage-sha served-model-sha))
+    (let serve-bound
+        (if (and (eq event-success 1)
+                 (and (str_eq event-artifact-sha served-show-sha)
+                      (eq (nmli-served-binds-quantized? quantized served) 1))) 1 0))
+    (let serve-fresh
+        (if (and (eq serve-bound 1) (eq event-day current-day)) 1 0))
+
+    ; Historical transformation edges are observed, not reproduced, reviewed,
+    ; authorized, or promoted. The served edge is fresh only when today's real
+    ; successful inference event binds the current show identity.
+    (let train-edge
+        (nmli-edge "mlx-lora-train" "train" (list (nmli-node-sha base))
+            (nmli-node-sha adapter) lora-tool-sha train-invocation-sha
+            train-evidence 20260622 0 0 0 0 1))
+    (let fuse-edge
+        (nmli-edge "mlx-fuse-dequantized" "fuse"
+            (list (nmli-node-sha base) (nmli-node-sha adapter))
+            (nmli-node-sha fused) fuse-tool-sha fuse-invocation-sha
+            fuse-evidence 20260622 0 0 0 0 1))
+    (let quantize-edge
+        (nmli-edge "ollama-create-q4-k-m" "quantize"
+            (list (nmli-node-sha fused)) (nmli-node-sha quantized)
+            quantize-tool-sha quantize-invocation-sha quantize-evidence
+            20260622 0 0 0 0 copy-equality))
+    (let serve-edge
+        (nmli-edge "ollama-served-inference" "serve"
+            (list (nmli-node-sha quantized)) (nmli-node-sha served)
+            evaluator-tool-sha evaluator-sha serve-evidence event-day
+            serve-fresh 0 0 0 serve-bound))
+    (let edges (list train-edge fuse-edge quantize-edge serve-edge))
+
+    (let nodes-valid (nmli-nodes-valid? nodes))
+    (let edges-valid (nmli-edges-valid-for? edges nodes))
+    (let chain-valid
+        (nmli-chain-valid? base adapter fused quantized served
+            train-edge fuse-edge quantize-edge serve-edge))
+    (let valid-edges (nmlic-valid-edge-count edges))
+    (let current-node-shas
+        (list (nmli-node-sha base) (nmli-node-sha adapter)
+              (nmli-node-sha fused) (nmli-node-sha quantized)
+              (nmli-node-sha served)))
+    (let previous-ready (nmli-shas-valid? previous))
+    (let drift-ppm
+        (if (eq previous-ready 1)
+            (nmli-node-drift-ppm current-node-shas previous) -1))
+    (let lineage-valid
+        (if (and (eq nodes-valid 1)
+                 (and (eq edges-valid 1)
+                      (and (eq chain-valid 1)
+                           (and (eq copy-equality 1)
+                                (eq serve-bound 1))))) 1 0))
+    (let authority-ready
+        (if (and (eq lineage-valid 1)
+                 (eq (nmli-authority-ready? edges nodes 4) 1)) 1 0))
+    (let dag-sha
+        (nmfe-sha256
+            (nmfe-fields
+                (list (nmli-node-sha base) (nmli-node-sha adapter)
+                      (nmli-node-sha fused) (nmli-node-sha quantized)
+                      (nmli-node-sha served)
+                      (nmli-edge-sha train-edge) (nmli-edge-sha fuse-edge)
+                      (nmli-edge-sha quantize-edge) (nmli-edge-sha serve-edge)))))
+
+    (print_str
+        (nmlic-render
+            (list
+                "schema=native-model-lineage-form-v1\n"
+                "model=translation.hati-lora-q4\n"
+                (nmlic-kv-str "base_node_sha256" (nmli-node-sha base))
+                (nmlic-kv-str "adapter_node_sha256" (nmli-node-sha adapter))
+                (nmlic-kv-str "fused_node_sha256" (nmli-node-sha fused))
+                (nmlic-kv-str "quantized_node_sha256" (nmli-node-sha quantized))
+                (nmlic-kv-str "served_node_sha256" (nmli-node-sha served))
+                (nmlic-kv-str "dag_sha256" dag-sha)
+                (nmlic-kv-str "base_model_sha256"
+                    (nmli-component-sha-for-role base-components "model"))
+                (nmlic-kv-str "adapter_weights_sha256"
+                    (nmli-component-sha-for-role adapter-components
+                                                 "adapter-weights"))
+                (nmlic-kv-str "fused_shard_1_sha256"
+                    (nmli-component-sha-for-role fused-components
+                                                 "model-shard-00001"))
+                (nmlic-kv-str "fused_shard_2_sha256"
+                    (nmli-component-sha-for-role fused-components
+                                                 "model-shard-00002"))
+                (nmlic-kv-str "q4_blob_sha256" q4-blob-sha)
+                (nmlic-kv-str "q4_stage_sha256" stage-sha)
+                (nmlic-kv-str "served_model_layer_sha256" served-model-sha)
+                (nmlic-kv-str "served_show_sha256" served-show-sha)
+                (nmlic-kv-int "q4_copy_equality" copy-equality)
+                (nmlic-kv-int "served_event_bound" serve-bound)
+                (nmlic-kv-int "nodes_valid" nodes-valid)
+                (nmlic-kv-int "edges_expected" 4)
+                (nmlic-kv-int "edges_valid" valid-edges)
+                (nmlic-kv-int "edges_fresh" (nmli-count-edge-field edges 9))
+                (nmlic-kv-int "edges_reproduced" (nmli-count-edge-field edges 10))
+                (nmlic-kv-int "edges_reviewed" (nmli-count-edge-field edges 11))
+                (nmlic-kv-int "edges_authorized" (nmli-count-edge-field edges 12))
+                (nmlic-kv-int "edges_successful" (nmli-count-edge-field edges 13))
+                (nmlic-kv-int "canonical_edge_coverage_ppm"
+                    (div (mul valid-edges 1000000) 4))
+                (nmlic-kv-int "fresh_edge_coverage_ppm"
+                    (div (mul (nmli-count-edge-field edges 9) 1000000) 4))
+                (nmlic-kv-int "artifact_drift_ppm" drift-ppm)
+                (nmlic-kv-int "direct_gguf_export_failed"
+                    direct-gguf-export-failed)
+                "quantize_parent_kind=fused\n"
+                (nmlic-kv-int "quantize_tool_identity_observed"
+                    (if (nmfe-sha256? quantize-tool-sha) 1 0))
+                (nmlic-kv-str "historical_quantize_modelfile_sha256"
+                    quantize-modelfile-sha)
+                (nmlic-kv-str "current_modelfile_sha256"
+                    current-modelfile-sha)
+                (nmlic-kv-str "current_f16_model_sha256"
+                    current-f16-model-sha)
+                (nmlic-kv-int "current_f16_to_q4_claimed" 0)
+                (nmlic-kv-int "chain_valid" chain-valid)
+                (nmlic-kv-int "lineage_valid" lineage-valid)
+                (nmlic-kv-int "authority_ready" authority-ready)
+                "scope=real-hati-artifacts-historical-transforms-fresh-serve-no-authority\n"))))

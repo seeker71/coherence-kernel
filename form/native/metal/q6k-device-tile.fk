@@ -1,0 +1,107 @@
+; q6k-device-tile.fk — the body's side of GPU_GAPS §C "Weight load -> device": REAL GGUF weights,
+; located by name, dequantized by Form, handed to a Metal carrier to live on the GPU.
+;
+; Everything that decides anything is here: which tensor, where its bytes are, what the weights ARE,
+; what the answer should be. The carrier (metal_weight_residency_audit.sh + its Swift runner) only
+; moves bytes into an MTLBuffer, dispatches the Form-EMITTED MSL kernel (jte-matvec-msl), and compares
+; — the dumb-carrier discipline the Metal/PTX lanes already keep.
+;
+; THE RESIDENCY CLAIM this cell serves. Before Stone 2 the gap row read "GGUF dequant recipes exist;
+; loading + keeping resident on GPU not wired", and it could not have been otherwise: locating a named
+; tensor in llama3.2:3b means walking a 7 837 658-byte header, and the list carrier would have to
+; MATERIALIZE that header first (PROJECTED ~2.7 h at the measured ~1.5e-10*n^2). equireach-gguf.fk
+; walks it in place in ~4.7 s, so the whole path — name -> file offset -> dequantized f32 -> device
+; buffer -> proven kernel — is reachable in one run for the first time.
+;
+; WHAT IT PRINTS (a flat, greppable stream; the carrier parses it, nothing more):
+;   TENSOR <name> TYPE <ggml-type> D0 <dim0> D1 <dim1> ABS <absolute file offset>
+;   ROWS <rows>  COLS <cols>
+;   W  one dequantized f32 weight per line, row-major, rows*cols of them
+;   X  one f32 per line, cols of them — REAL model data (blk.0.attn_norm.weight), not a synthetic ramp
+;   Y  one f64 per line, rows of them — the reference, tb-dot's right fold (j counts DOWN), which is
+;      the exact op order jte-matvec-msl emits. Form is fp64 and the MSL lane is fp32, so this is the
+;      NAMED-EPSILON witness; the bit-exact gates in the carrier are (a) the device weight buffer
+;      against these same W values rounded once to f32 and (b) the GPU y against an f32 right-fold
+;      over that resident buffer.
+;
+; Kin: equireach.fk / equireach-gguf.fk (the O(1)-reach source and the GGUF+Q6_K reach path),
+; jit-tensor-emit.fk (jte-matvec-msl — the kernel text the carrier compiles), transformer-block.fk
+; (tb-dot / tb-matvec — the reference semantics the MSL was emitted to match), weight-load.fk (the
+; four-way-proven list twin of the same unpack), real-gguf-generate.fk (rgg-* — the generation loop
+; these weights feed once residency is general).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk
+;
+; Proven by: form/native/metal/metal_weight_residency_audit.sh (Mac-only carrier witness; off-Mac it
+; SKIPs, like every other Metal row in form/native/GPU_GAPS.md)
+
+(do
+    ; the GGUF header window: big enough to hold the metadata KV block + the tensor-info table
+    (defn qdt-header-window () 8000000)
+    (defn qdt-alignment () 32)
+
+    ; --- THE MOUTH IS THE GO KERNEL. `print` is its output door and it renders a float at full
+    ; precision (0.00914955139160156); fkwu has `print_str` instead and its `int_to_str` CANNOT render
+    ; a float at all — (int_to_str 1.5) comes back as the empty string and a negative comes back as a
+    ; bare "-", silently. So fkwu proves the RECIPES (tests/equireach-band.fk, verdict 511) and the Go
+    ; kernel speaks the weights; that split is the host-kernel.form idiom — the kernel is the mouth,
+    ; the intelligence is the body. fkwu's float rendering is a named gap, not a thing worked around. ---
+    (defn qdt-print-line (s) (print s))
+    (defn qdt-print-num (x) (print x))
+
+    (defn qdt-print-list (xs)
+        (if (nil? xs) 0
+            (do (qdt-print-num (head xs)) (qdt-print-list (tail xs)))))
+
+    ; --- the located tensor, announced so a wrong offset cannot pass quietly ---
+    (defn qdt-announce (hsrc name)
+        (do
+            (let ti (egg-find-tensor hsrc name))
+            (qdt-print-line (str_concat "TENSOR " name))
+            (qdt-print-line (str_concat "TYPE " (int_to_str (egg-ti-type hsrc ti))))
+            (qdt-print-line (str_concat "D0 " (int_to_str (egg-ti-dim0 hsrc ti))))
+            (qdt-print-line (str_concat "D1 " (int_to_str (egg-ti-dim hsrc ti 1))))
+            (qdt-print-line (str_concat "ABS " (int_to_str (egg-tensor-abs hsrc (qdt-alignment) name))))
+            0))
+
+    ; --- the tile: rows*cols dequantized Q6_K weights from the tensor's first superblock onward ---
+    (defn qdt-tile (path abs rows cols)
+        (do
+            (let n (mul rows cols))
+            ; the window must cover ceil(n/256) superblocks of 210 bytes, plus one for the tail
+            (let blocks (add (div (add n 255) 256) 1))
+            (let src (eqr-of-file path abs (mul blocks (ewl-q6k-stride))))
+            (ewl-weights src 0 n)))
+
+    ; --- x: REAL f32 values from an unquantized tensor (the norm gains), cols of them ---
+    (defn qdt-x (path abs cols)
+        (do
+            (let src (eqr-of-file path abs (mul cols 4)))
+            (ewl-gain src 0 cols)))
+
+    ; --- the whole emission, one run: locate, dequantize, reference, print ---
+    (defn qdt-emit (path wname xname rows cols)
+        (do
+            (let hsrc (eqr-of-file path 0 (qdt-header-window)))
+            (qdt-announce hsrc wname)
+            (let wabs (egg-tensor-abs hsrc (qdt-alignment) wname))
+            (let xabs (egg-tensor-abs hsrc (qdt-alignment) xname))
+            (let ws (qdt-tile path wabs rows cols))
+            (let x  (qdt-x path xabs cols))
+            (let m  (ewl-mat ws rows cols))
+            (let y  (tb-matvec m x))
+            (qdt-print-line (str_concat "ROWS " (int_to_str rows)))
+            (qdt-print-line (str_concat "COLS " (int_to_str cols)))
+            (qdt-print-line "W")
+            (qdt-print-list ws)
+            (qdt-print-line "X")
+            (qdt-print-list x)
+            (qdt-print-line "Y")
+            (qdt-print-list y)
+            (qdt-print-line "END")
+            0))
+
+    ; --- the kernel text the carrier compiles: emitted by the body, not written by the carrier ---
+    (defn qdt-emit-msl (name) (qdt-print-line (jte-matvec-msl name)))
+
+    0)

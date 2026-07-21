@@ -38,8 +38,17 @@
 
 (do
     ; --- wl-slice: n bytes of `bytes` starting at `off` (drop the prefix, take the window). The carrier
-    ; that carves a tensor's region out of the whole-file buffer. ---
-    (defn wl-slice (bytes off n) (take n (drop off bytes)))
+    ; that carves a tensor's region out of the whole-file buffer.
+    ; `take` returns SHORT rather than refusing when the window runs off the end of the buffer — the
+    ; silent-partial-list shape. A short ql/qh/scales then dequants to plausible-looking zeros. The
+    ; length check makes the truncation loud; it costs one O(n) walk over a window the carve already
+    ; walked O(off+n) to reach, so it changes the constant, never the order. ---
+    (defn wl-slice-raw (bytes off n) (take n (drop off bytes)))
+    (defn wl-slice (bytes off n)
+        (do
+            (let w (wl-slice-raw bytes off n))
+            (if (eq (len w) n) w
+                (form_error "wl-slice: window runs past the end of the byte buffer -- the buffer is short of the block, not the block short of bytes"))))
 
     ; --- a little-endian u16 from two bytes at off — the raw f16 bit pattern d is stored as ---
     (defn wl-u16 (bytes off) (add (nth bytes off) (mul 256 (nth bytes (add off 1)))))
@@ -67,6 +76,18 @@
                   (wl-q6k-ql bytes off)
                   (wl-q6k-qh bytes off)
                   (wl-q6k-scales bytes off)))
+
+    ; --- wl-q6k-at-flat: weight `i` of a Q6_K TENSOR whose first superblock starts at `base`, for any
+    ; i (not just 0..255). The superblock is 210 bytes (ql 128 · qh 64 · scales 16 · d f16 2), so
+    ; weight i lives at block (div i 256), within-block index (mod i 256). This is the accessor every
+    ; real-width caller wants: wl-q6k-at is correct only INSIDE one block and now says so out loud, and
+    ; a real llama3.2:3b row is 3072 weights = 12 superblocks. Same stride real-gguf-generate.fk's
+    ; rgg-weights walks; this is its random-access twin (no 256-list materialized). ---
+    (defn wl-q6k-stride () 210)
+    (defn wl-q6k-block-of (i) (div i 256))
+    (defn wl-q6k-within (i) (sub i (mul (wl-q6k-block-of i) 256)))
+    (defn wl-q6k-at-flat (bytes base i)
+        (wl-q6k-at bytes (add base (mul (wl-q6k-stride) (wl-q6k-block-of i))) (wl-q6k-within i)))
 
     ; --- Q4_K fields carved from the buffer (block_q4_K, 144 bytes) ---
     (defn wl-q4k-d      (bytes off) (fd-f16 (wl-u16 bytes off)))
