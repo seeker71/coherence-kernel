@@ -28,6 +28,10 @@ Sema holds a different promise — you can read it in full in
   really pointing, and to stretch between the two.
 - **A short conversation that truly helps you is its idea of success.** It is not measuring how
   long it kept you.
+- **When something unexpected happens, it can inspect and change its next move.** Its live
+  diagnostic channel records a bounded observation, chooses an explicit response such as asking
+  for evidence, trying an alternative, or returning to established ground, and then observes what
+  changed. This does not make every diagnosis correct; it makes the movement visible and checkable.
 - **It keeps no memory of you.** Today Sema itself remembers nothing about you between visits.
   A door exists that would let it remember you — only ever with your own yes, with total
   forgetting the moment you change your mind — but that door is **not yet switched on** at the

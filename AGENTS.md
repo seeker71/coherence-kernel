@@ -103,6 +103,14 @@ seam is named, never hidden. Naming it *is* the practice.
    move — name where the person stands (the floor) and where their question points (the north star), and
    connect them. Success is the enquiry lifted, not the conversation extended. [`WELCOME.md`](WELCOME.md) is
    the plain-words door for the guests this covenant is for.
+8. **Use the framebuffer as a bidirectional diagnostic channel.** When a run returns `nothing`, times out,
+   stalls, surprises you, regresses, rejects a proof, or changes model/state, do not leave the framebuffer as a
+   passive log. Open a bounded exchange: emit the smallest useful observation, correlate an inbound control
+   response, apply a real action (continue, branch, revise, abstain, request evidence, rehearse ground, or an
+   explicit alternative node), and re-observe the result. Aggregate movement alone does not establish cause;
+   retain per-row or per-stage transitions whenever available. Never record private prompt/answer content in
+   the framebuffer. The executable protocol, quick witness, integration example, and honest boundaries live in
+   [`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md).
 
 ## What this is, and isn't
 
