@@ -1,0 +1,145 @@
+; concept-semantics-10000.fk — operational WordNet semantics for c10 anchors.
+;
+; A 35-byte fixed record per lexical anchor points into a variable payload.
+; Mappings are only exact WordNet lemmas (method 1) or explicit WordNet
+; exception forms (method 2). Method 0 is an observed miss. Context-free suffix
+; detachment is deliberately absent because it produced semantic false joins.
+;
+; Primary sense law: WordNet sense 1 within each available POS, then greatest
+; WordNet tagged count across POS; zero/ties keep noun, verb, adjective, adverb.
+; Total sense and POS counts remain present so a selected primary never hides
+; polysemy.
+;
+; Semantic record:
+;   (anchor-id method synset-id pos lemma gloss
+;    sense-count pos-count tag-count relation-count relation-bytes)
+; Relations are 11-byte rows: symbol[2 padded] + target-pos[1] + offset[8].
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk model/concept-10000-data.fk model/concept-10000.fk model/concept-semantics-10000-data.fk
+(do
+  ; ---- semantic record and stable accessors ---------------------------------
+  (defn cs10-semantic (anchor-id method synset-id pos lemma gloss senses pos-count tags relation-count relation-bytes)
+    (list anchor-id method synset-id pos lemma gloss senses pos-count tags relation-count relation-bytes))
+  (defn cs10-anchor-id (s) (nth s 0))
+  (defn cs10-method (s) (nth s 1))
+  (defn cs10-synset-id (s) (nth s 2))
+  (defn cs10-pos (s) (nth s 3))
+  (defn cs10-lemma (s) (nth s 4))
+  (defn cs10-gloss (s) (nth s 5))
+  (defn cs10-sense-count (s) (nth s 6))
+  (defn cs10-pos-count (s) (nth s 7))
+  (defn cs10-tag-count (s) (nth s 8))
+  (defn cs10-relation-count-of (s) (nth s 9))
+  (defn cs10-relation-bytes (s) (nth s 10))
+  (defn cs10-mapped? (s) (if (gt (cs10-method s) 0) 1 0))
+  (defn cs10-exact? (s) (if (eq (cs10-method s) 1) 1 0))
+  (defn cs10-exception? (s) (if (eq (cs10-method s) 2) 1 0))
+  (defn cs10-polysemous? (s) (if (gt (cs10-sense-count s) 1) 1 0))
+  (defn cs10-method-label (s)
+    (if (eq (cs10-method s) 1) "exact"
+      (if (eq (cs10-method s) 2) "exception" "unmatched")))
+  (defn cs10-miss (anchor-id)
+    (cs10-semantic anchor-id 0 "" "" "" "" 0 0 0 0 ""))
+
+  ; ---- fixed semantic-index fields ------------------------------------------
+  (defn cs10-field (index id start width)
+    (do (let base (mul id (cs10-index-width)))
+        (substring index (add base start) (add (add base start) width))))
+  (defn cs10-method-at (index id) (str_to_int (cs10-field index id 0 1)))
+  (defn cs10-payload-offset-at (index id) (str_to_int (cs10-field index id 1 8)))
+  (defn cs10-payload-length-at (index id) (str_to_int (cs10-field index id 9 5)))
+  (defn cs10-primary-type-at (index id) (cs10-field index id 14 1))
+  (defn cs10-primary-offset-at (index id) (cs10-field index id 15 8))
+  (defn cs10-senses-at (index id) (str_to_int (cs10-field index id 23 3)))
+  (defn cs10-pos-count-at (index id) (str_to_int (cs10-field index id 26 1)))
+  (defn cs10-tags-at (index id) (str_to_int (cs10-field index id 27 5)))
+  (defn cs10-relations-at (index id) (str_to_int (cs10-field index id 32 3)))
+
+  ; ---- length-prefixed payload decoding -------------------------------------
+  (defn cs10-from-payload (index payload id method)
+    (do (let off (cs10-payload-offset-at index id))
+        (let plen (cs10-payload-length-at index id))
+        (let p (substring payload off (add off plen)))
+        (let lemma-len (str_to_int (substring p 0 2)))
+        (let lemma (substring p 2 (add 2 lemma-len)))
+        (let glen-start (add 2 lemma-len))
+        (let gloss-len (str_to_int (substring p glen-start (add glen-start 4))))
+        (let gloss-start (add glen-start 4))
+        (let gloss-end (add gloss-start gloss-len))
+        (let kind (cs10-primary-type-at index id))
+        (cs10-semantic id method
+          (str_concat kind (cs10-primary-offset-at index id)) kind lemma
+          (substring p gloss-start gloss-end)
+          (cs10-senses-at index id) (cs10-pos-count-at index id)
+          (cs10-tags-at index id) (cs10-relations-at index id)
+          (substring p gloss-end (str_len p)))))
+  (defn cs10-at-in (index payload id)
+    (if (and (ge id 0) (lt id (cs10-count)))
+      (do (let method (cs10-method-at index id))
+          (if (eq method 0) (cs10-miss id)
+            (cs10-from-payload index payload id method)))
+      (cs10-miss id)))
+  (defn cs10-at (id)
+    (cs10-at-in (read_file (cs10-index-path))
+                (read_file (cs10-payload-path)) id))
+  (defn cs10-detect-text-in (ranked lexical-index semantic-index payload text)
+    (do (let anchor (c10-detect-text-n-in
+                      ranked lexical-index text
+                      (c10-index-count-in lexical-index)))
+        (if (c10-missing? anchor) (cs10-miss -1)
+          (cs10-at-in semantic-index payload (c10-concept-id anchor)))))
+  (defn cs10-detect-text (text)
+    (cs10-detect-text-in
+      (read_file (c10-ranked-path))
+      (read_file (c10-lexical-index-path))
+      (read_file (cs10-index-path))
+      (read_file (cs10-payload-path)) text))
+
+  ; ---- typed pointer relations, parsed on demand ----------------------------
+  (defn cs10-relation (symbol target-synset-id)
+    (list symbol target-synset-id))
+  (defn cs10-relation-symbol (r) (nth r 0))
+  (defn cs10-relation-target (r) (nth r 1))
+  (defn cs10-relation-at (s i)
+    (if (and (ge i 0) (lt i (cs10-relation-count-of s)))
+      (do (let start (mul i 11))
+          (let bytes (cs10-relation-bytes s))
+          (cs10-relation
+            (c10-rtrim-space (substring bytes start (add start 2)))
+            (str_concat (substring bytes (add start 2) (add start 3))
+                        (substring bytes (add start 3) (add start 11)))))
+      (cs10-relation "" "")))
+  (defn cs10-relations-go (s i)
+    (if (eq i (cs10-relation-count-of s)) (empty)
+      (cons (cs10-relation-at s i) (cs10-relations-go s (add i 1)))))
+  (defn cs10-relations (s) (cs10-relations-go s 0))
+
+  ; ---- bounded-depth full-index audit ---------------------------------------
+  ; audit = (mapped miss exact exception poly relation-rows relations-total)
+  (defn cs10-audit-empty () (list 0 0 0 0 0 0 0))
+  (defn cs10-audit-row (index id a)
+    (do (let method (cs10-method-at index id))
+        (if (eq method 0)
+          (list (nth a 0) (add (nth a 1) 1) (nth a 2) (nth a 3)
+                (nth a 4) (nth a 5) (nth a 6))
+          (do (let senses (cs10-senses-at index id))
+              (let rels (cs10-relations-at index id))
+              (list (add (nth a 0) 1) (nth a 1)
+                    (add (nth a 2) (if (eq method 1) 1 0))
+                    (add (nth a 3) (if (eq method 2) 1 0))
+                    (add (nth a 4) (if (gt senses 1) 1 0))
+                    (add (nth a 5) (if (gt rels 0) 1 0))
+                    (add (nth a 6) rels))))))
+  (defn cs10-audit-block (index i end a)
+    (if (eq i end) a
+      (cs10-audit-block index (add i 1) end (cs10-audit-row index i a))))
+  (defn cs10-audit-blocks (index start a)
+    (if (eq start (cs10-count)) a
+      (cs10-audit-blocks index (add start 100)
+        (cs10-audit-block index start (add start 100) a))))
+  (defn cs10-audit-in (index)
+    (if (eq (str_len index) (mul (cs10-count) (cs10-index-width)))
+      (cs10-audit-blocks index 0 (cs10-audit-empty))
+      (list -1 -1 -1 -1 -1 -1 -1)))
+  (defn cs10-audit () (cs10-audit-in (read_file (cs10-index-path))))
+)

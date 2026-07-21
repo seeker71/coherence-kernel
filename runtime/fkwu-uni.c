@@ -37,6 +37,7 @@ int dlclose(void *h) {
 }
 #endif
 extern int putchar(int);
+extern int fflush(void *);
 extern int printf(const char *, ...);
 extern int dprintf(int, const char *, ...);
 extern int vdprintf(int, const char *, __builtin_va_list);
@@ -86,8 +87,23 @@ static void fk_die(const char *msg) {
  * so the line:col prefix is suppressed.  sev: 0 = warning, 1 = error. */
 #define FK_DIAG_WARN 0
 #define FK_DIAG_ERR  1
-static long long fk_nerr;        /* errors diagnosed this run   */
-static long long fk_nwarn;       /* warnings diagnosed this run */
+static long long fk_nerr;        /* errors diagnosed this compile (reset per compile pass) */
+static long long fk_nwarn;       /* warnings diagnosed this compile (reset per compile pass) */
+/* PRINTED-diagnostic tallies, monotone for the whole process — never reset.
+ * fk_nerr/fk_nwarn are per-compile working counters and ARE legitimately
+ * wiped by fk_src_reset_compile_state between the speculative per-dep image
+ * compile and the authoritative whole-program compile; before these existed,
+ * that wipe also erased already-printed "error:" lines from the exit code and
+ * the tally (8 errors on stderr, "0 errors" exit — the stamp+shape family).
+ * The exit truth and the gcc-style tally read THESE, so every diagnostic the
+ * user saw is carried, by construction, across any number of resets. */
+static long long fk_nerr_seen;
+static long long fk_nwarn_seen;
+static long long fk_diag_quiet;  /* nonzero: speculative compile — count into
+                                  * fk_nerr/fk_nwarn (the .sym record and the
+                                  * import gate need the truth) but print
+                                  * nothing; a candidate image's diagnostics
+                                  * are not the program's */
 static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_TEXT_CAP */
 /* fk_diag / fk_diag_flush are DEFINED further down (right after fk_srctext /
  * fk_spos / fk_slen are declared), where they can read the source buffer. */
@@ -304,7 +320,6 @@ static long long fk_hp;
 static long long fk_cap;
 static long long fk_vs[FK_VALUE_STACK_CAP];
 static long long fk_vsp;
-extern long long time(long long *);
 extern unsigned int arc4random(void);
 extern void *malloc(unsigned long);
 extern void *calloc(unsigned long, unsigned long);
@@ -4972,7 +4987,7 @@ static void fk_vp(long long v) {
  * the previously-silent corruption case into correct behavior instead of a new
  * failure mode. */
 #define FK_FN_CAP 4096
-#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144*4*8 = 8MB. */
+#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144 STANDS (2026-07-18): a doubling probe disproved a capacity misread — the match-switch band's fill died at the SAME source position at 2x budget, exposing fk_sparse's stray-rparen zero-advance mint spin (fixed in the bare-symbol path), not honest growth; the source-compiler family's full ~514KB prelude closure parses well within 256K nodes. Measure (does the fill position move with the cap?) before raising. */
 #define FK_PARSE_BUF_CAP 16777216 /* fk_buf: scratch buffer for source artifact reads. Raised 1048576->16777216 (2026-07-16): the v4 .fkb signed lane is 9 bytes (was 5), and a measured band-chain artifact (program-image-fkb-byte-decode-band.fkb, 1,292,944 bytes) exceeded the old 1MiB cap, so fresh caches died on reload with "artifact exceeds FK_PARSE_BUF_CAP". Worst case bounded by FK_AST_NODE_CAP (262144) * 4 lanes * 9B = ~9.4MB plus strings/symbols, so 16MiB holds the format at current capacity constants. */
 static long long fk_fn_count;
 static long long fk_node_count;
@@ -5832,7 +5847,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return ((a11 >> 1) % (b11 >> 1)) << 1;
     }
     if (t == 15) {
-        return time(0) << 1;
+        /* now_unix_ms: milliseconds, matching the Go/Rust/TS siblings' shape */
+        return fk_now_ms() << 1;
     }
     if (t == 16) {
         return ((long long)arc4random()) << 1;
@@ -7140,6 +7156,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
         }
         putchar(10);
+        /* print_str is the live event door: a streamed trace line must reach
+         * the reader the moment it is spoken, on a pipe as on a tty. stdio
+         * block-buffers pipes, so flush every emitted line (fflush(0) needs
+         * no FILE type in this freestanding extern set). */
+        fflush((void *)0);
         return 0;
     }
     if (t == 116) {
@@ -7199,6 +7220,14 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
     } else {
         fk_nwarn = fk_nwarn + 1;
     }
+    if (fk_diag_quiet) {
+        return;
+    }
+    if (sev == FK_DIAG_ERR) {
+        fk_nerr_seen = fk_nerr_seen + 1;
+    } else {
+        fk_nwarn_seen = fk_nwarn_seen + 1;
+    }
     if (off < 0) {
         dprintf(2, "fkwu: %s: ", sev == FK_DIAG_ERR ? "error" : "warning");
     } else {
@@ -7223,10 +7252,13 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
     dprintf(2, "\n");
 }
 /* Called ONCE, after parse completes and before execution begins: gcc-style
- * tally. Silent when clean, so the default happy path prints nothing new. */
+ * tally. Silent when clean, so the default happy path prints nothing new.
+ * Tallies the PRINTED counters, not the per-compile ones: a compile-state
+ * reset between passes must never make the tally disagree with what stderr
+ * already shows. */
 static void fk_diag_flush(void) {
-    if (fk_nerr > 0 || fk_nwarn > 0) {
-        dprintf(2, "fkwu: %lld error(s), %lld warning(s)\n", fk_nerr, fk_nwarn);
+    if (fk_nerr_seen > 0 || fk_nwarn_seen > 0) {
+        dprintf(2, "fkwu: %lld error(s), %lld warning(s)\n", fk_nerr_seen, fk_nwarn_seen);
     }
 }
 static int fk_sws(char c) {
@@ -7659,7 +7691,17 @@ static long long fk_sparse(void) {
             long long slot = fk_maxslot + 1;
             fk_maxslot = slot;
             fk_bd_push(ns, nlen, slot);
-            long long body = fk_sparse();
+            fk_sskip();
+            long long body;
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                /* bare 2-arg (let name val): no body follows. Emit the same lit-0
+                 * body the old fk_sparse-on-rparen call produced, WITHOUT sending
+                 * fk_sparse to the rparen -- that is now the loud stray-rparen
+                 * path below, and this legal shape must not trip it. */
+                body = fk_smklit(0);
+            } else {
+                body = fk_sparse();
+            }
             fk_bd_pop();
             fk_sskip();
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
@@ -8054,6 +8096,24 @@ static long long fk_sparse(void) {
      * name wins over a fn-name (lexical scope shadows). */
     long long s = fk_spos;
     fk_spos = fk_sym_end(fk_spos);
+    if (fk_spos == s) {
+        /* ZERO-WIDTH symbol: fk_sym_end stops with no progress only on a stray
+         * rparen (lparen took the branch above; whitespace/semicolons were
+         * skipped). Every statement/operand loop (fk_parse_do, fk_parse_top*,
+         * fk_parse_variadic) re-invokes fk_sparse here, so returning without
+         * consuming turns that caller into an AST-cap mint spin at one source
+         * position -- MEASURED 2026-07-18: 25 bytes of foreign-dialect source
+         * (`list(if 1 then 2 else 3);` in a BML section) minted the entire
+         * 262144-node table this way; doubling the cap died at the same spot.
+         * Diagnose loudly, consume the one character so the parse keeps moving,
+         * decline to honest 0. Well-formed Form never lands here: every op/do/
+         * variadic path consumes its own matching rparen, and the bare 2-arg
+         * value-position let guards its rparen before parsing a body. */
+        fk_diag(FK_DIAG_ERR, s,
+                "stray ')' in value position -- consumed to keep the parse advancing (foreign-dialect source?)");
+        fk_spos = fk_spos + 1;
+        return fk_smklit(0);
+    }
     long long off = fk_bd_lookup(s, fk_spos - s);
     if (off >= 0) {
         return fk_smknode(110, fk_smklit(off), 0, 0);
@@ -10893,6 +10953,103 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
     close(fd);
     return 1;
 }
+#if !defined(_WIN32)
+extern int kill(int, int);
+#ifndef ESRCH
+#define ESRCH 3
+#endif
+/* Orphan sweep for the pid-temp writer below: a writer killed between open()
+ * and rename() (SIGKILL from tools/ftimeout, a crash, a ^C) leaves its
+ * .w<pid> temp behind with no process left responsible for it -- a band
+ * sweep under ftimeout orphaned 793 of them in one afternoon (witnessed
+ * 2026-07-17), and `git add -A` swept 783 into a commit. Before staging its
+ * own temps, a writer clears its artifact's directory of every
+ * *.fkb.w<pid> / *.sym.w<pid> whose writer is DEAD (kill(pid,0) -> ESRCH).
+ * A live pid -- or one we may not signal (EPERM) -- is left alone, so the
+ * concurrent-runner guarantee of the pid-temp scheme is untouched; a
+ * recycled pid at worst delays one orphan's collection until the next
+ * compile in that directory. Windows keeps the leak: no kill() there, and
+ * that lane is the port shim, not the sweep path. */
+static void fk_src_sweep_dead_temps(const char *fkb_path) {
+    char dir[4160];
+    long long n = fk_path_len(fkb_path);
+    if (n > 4096) {
+        return;
+    }
+    long long cut = n;
+    while (cut > 0 && fkb_path[cut - 1] != FK_CH_SLASH) {
+        cut = cut - 1;
+    }
+    if (cut == 0) {
+        dir[0] = FK_CH_DOT;
+        dir[1] = 0;
+    } else if (cut == 1) {
+        dir[0] = FK_CH_SLASH;
+        dir[1] = 0;
+    } else {
+        long long k = 0;
+        while (k < cut - 1) {
+            dir[k] = fkb_path[k];
+            k = k + 1;
+        }
+        dir[k] = 0;
+    }
+    DIR *d = opendir(dir);
+    if (!d) {
+        return;
+    }
+    struct dirent *e;
+    long long self = getpid();
+    while ((e = readdir(d)) != 0) {
+        const char *name = e->d_name;
+        long long len = 0;
+        while (name[len] != 0) {
+            len = len + 1;
+        }
+        long long ds = len;
+        while (ds > 0 && name[ds - 1] >= FK_CH_DIGIT0 && name[ds - 1] <= FK_CH_DIGIT9) {
+            ds = ds - 1;
+        }
+        /* shape: <stem>.fkb.w<1..10 digits> or <stem>.sym.w<1..10 digits> */
+        if (ds == len || len - ds > 10 || ds < 6) {
+            continue;
+        }
+        const char *fkbw = ".fkb.w";
+        const char *symw = ".sym.w";
+        int m_fkb = 1;
+        int m_sym = 1;
+        long long k = 0;
+        while (k < 6) {
+            if (name[ds - 6 + k] != fkbw[k]) {
+                m_fkb = 0;
+            }
+            if (name[ds - 6 + k] != symw[k]) {
+                m_sym = 0;
+            }
+            k = k + 1;
+        }
+        if (!m_fkb && !m_sym) {
+            continue;
+        }
+        long long pid = 0;
+        k = ds;
+        while (k < len) {
+            pid = pid * 10 + (name[k] - FK_CH_DIGIT0);
+            k = k + 1;
+        }
+        if (pid <= 0 || pid == self) {
+            continue;
+        }
+        if (kill((int)pid, 0) == 0 || errno != ESRCH) {
+            continue;
+        }
+        char victim[4600];
+        fk_path_join(victim, 4600, dir, name);
+        unlink(victim);
+    }
+    closedir(d);
+}
+#endif
 static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
                             long long source_mtime, const char *source_hash) {
     /* both artifacts go to pid-suffixed temp names and rename() into place:
@@ -10905,6 +11062,9 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     if (fk_path_len(fkb_path) > 4096 || fk_path_len(sym_path) > 4096) {
         return 0;
     }
+#if !defined(_WIN32)
+    fk_src_sweep_dead_temps(fkb_path);
+#endif
     sprintf(fkb_tmp, "%s.w%d", fkb_path, getpid());
     sprintf(sym_tmp, "%s.w%d", sym_path, getpid());
 #if defined(_WIN32)
@@ -11718,8 +11878,19 @@ static int fk_src_compile_artifact_only(const char *path) {
     if (fk_path_replace_ext(compile_path, ".fkb", fkb_path, 4096) &&
         fk_path_replace_ext(compile_path, ".sym", sym_path, 4096) &&
         fk_src_load_unit(compile_path, source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
+        /* This compile is SPECULATIVE: it builds a candidate per-unit image
+         * for the import path. A unit that only resolves inside the root's
+         * flat prelude chain (e.g. it carries no "; preludes:" line of its
+         * own) diagnoses unresolved calls HERE that the authoritative flat
+         * compile then resolves — printing them as bare "error:" lines while
+         * the run exits 0 was the witnessed lie. Quiet mode: the counts still
+         * reach the .sym compile-errors record (the import gate reads it and
+         * refuses degraded images), but nothing prints; the import gate emits
+         * the one honest, counted warning instead. */
+        fk_diag_quiet = fk_diag_quiet + 1;
         fk_src_reset_compile_state();
         fk_src_compile_current_unit(compile_path, fkb_path, sym_path, unit_mtime, source_hash);
+        fk_diag_quiet = fk_diag_quiet - 1;
         ok = 1;
     }
     fk_src_dep_count = saved_dep_count;
@@ -11801,10 +11972,24 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                  * importing it would bake the degradation invisibly into this
                  * run -- refuse (unknown record counts as degraded), so the
                  * caller falls back to the flat compile where the full chain
-                 * resolves */
+                 * resolves. The refusal itself must not be silent: this is
+                 * where a unit that cannot stand alone costs the run its
+                 * imported-image path, on THIS run and every future one until
+                 * the unit's own prelude chain is healed — say so, once,
+                 * counted, so the tally and stderr agree. */
                 char dep_sym_path[4096];
-                if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, 4096) ||
-                    fk_src_sym_recorded_errors(dep_sym_path) != 0) {
+                if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, 4096)) {
+                    return 0;
+                }
+                long long dep_recorded = fk_src_sym_recorded_errors(dep_sym_path);
+                if (dep_recorded != 0) {
+                    if (dep_recorded > 0) {
+                        fk_diag(FK_DIAG_WARN, -1,
+                                "%s: unit is not importable standalone (%lld unresolved "
+                                "error(s) compiled alone; missing '; preludes:' line?) -- "
+                                "image rejected, falling back to the whole-program compile",
+                                fk_src_dep_path[i], dep_recorded);
+                    }
                     return 0;
                 }
             }
@@ -11969,7 +12154,7 @@ static int fk_run_src(const char *path, long long arg) {
                     unsigned char *img = malloc(n);
                     if (img == 0) {
                         fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
-                        return fk_nerr > 0 ? 1 : 0;
+                        return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
                     }
                     long long ci = 0;
                     while (ci < n) {
@@ -12025,7 +12210,7 @@ static int fk_run_src(const char *path, long long arg) {
         }
     }
     fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
-    return fk_nerr > 0 ? 1 : 0;
+    return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
 }
 /* --feval: run a recipe THROUGH form-eval (Form), not fk_walk directly. The C seed bootstraps the
  * form-eval meta-evaluator (read live from grammars/form-eval.fk); form-eval reads the recipe as a
@@ -12215,7 +12400,7 @@ static int fk_run_feval(const char *path) {
     long long rv = fk_walk(fk_fn[0], 0);
     fk_pv(rv);
     /* print the meta-eval result by value-kind (int / float / nothing) */
-    return fk_nerr > 0 ? 1 : 0;
+    return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
 }
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;

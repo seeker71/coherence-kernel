@@ -1,0 +1,109 @@
+; concept-video-semantic.fk -- Form-native scene/concept learning from pixels.
+;
+; A 24-bit frame is divided into a 4x3 spatial grid. Each region contributes
+; mean luminance, horizontal edge energy, vertical edge energy, and all three
+; colour channels. Training frames are averaged into concept prototypes; held-out
+; frames are classified by nearest L1 distance. ffmpeg may decode a carrier,
+; but BMP validation, pixels, features, memory, and decisions live in Form.
+;
+; This is closed-set scene recognition, not open-vocabulary vision parity.
+; witnessed: 2026-07-18 -> 12/12 interleaved held-out real-life frames,
+; 72 pixel features; contiguous split 10/18 (recorded, not hidden)
+; preludes: form/form-stdlib/core.fk model/lingbot-vision-input.fk
+
+(do
+  (defn cvs-abs (x) (if (lt x 0) (sub 0 x) x))
+  (defn cvs-min (a b) (if (lt a b) a b))
+  (defn cvs-append (a b)
+    (if (eq (len a) 0) b (cons (head a) (cvs-append (tail a) b))))
+  (defn cvs-luma (rgb)
+    (div (add (mul 77 (nth rgb 0))
+              (add (mul 150 (nth rgb 1)) (mul 29 (nth rgb 2)))) 256.0))
+
+  ; result = (sum-luma sum-x-edge sum-y-edge sum-r sum-g sum-b samples)
+  (defn cvs-region-go (bs x y x0 x1 y1 step sl sx sy sr sg sb count)
+    (if (ge y y1) (list sl sx sy sr sg sb count)
+      (if (ge x x1)
+        (cvs-region-go bs x0 (add y step) x0 x1 y1 step sl sx sy sr sg sb count)
+        (do (let rgb (lvi-rgb-at bs x y))
+            (let lum (cvs-luma rgb))
+            (let nx (cvs-min (add x 1) (sub x1 1)))
+            (let ny (cvs-min (add y 1) (sub y1 1)))
+            (let lx (cvs-luma (lvi-rgb-at bs nx y)))
+            (let ly (cvs-luma (lvi-rgb-at bs x ny)))
+            (cvs-region-go bs (add x step) y x0 x1 y1 step
+              (add sl lum) (add sx (cvs-abs (sub lum lx)))
+              (add sy (cvs-abs (sub lum ly)))
+              (add sr (nth rgb 0)) (add sg (nth rgb 1)) (add sb (nth rgb 2))
+              (add count 1))))))
+  (defn cvs-region-features (bs x0 x1 y0 y1 step)
+    (do (let sums (cvs-region-go bs x0 y0 x0 x1 y1 step
+                    0.0 0.0 0.0 0.0 0.0 0.0 0))
+        (let n (nth sums 6))
+        (if (eq n 0) (list 0.0 0.0 0.0 0.0 0.0 0.0)
+          (list (div (nth sums 0) n) (div (nth sums 1) n)
+                (div (nth sums 2) n) (div (nth sums 3) n)
+                (div (nth sums 4) n) (div (nth sums 5) n)))))
+  (defn cvs-grid-go (bs width height tile out)
+    (if (eq tile 12) out
+      (do (let tx (mod tile 4))
+          (let ty (div tile 4))
+          (let x0 (div (mul tx width) 4))
+          (let x1 (div (mul (add tx 1) width) 4))
+          (let y0 (div (mul ty height) 3))
+          (let y1 (div (mul (add ty 1) height) 3))
+          (cvs-grid-go bs width height (add tile 1)
+            (cvs-append out (cvs-region-features bs x0 x1 y0 y1 8))))))
+  (defn cvs-features-bytes (bs)
+    (if (eq (lvi-bmp24? bs) 0) (empty)
+      (cvs-grid-go bs (lvi-width bs) (lvi-height bs) 0 (empty))))
+  (defn cvs-features-file (path)
+    (cvs-features-bytes (read_file path)))
+
+  (defn cvs-vector-add (a b)
+    (if (eq (len a) 0) (empty)
+      (cons (add (head a) (head b)) (cvs-vector-add (tail a) (tail b)))))
+  (defn cvs-vector-div (a divisor)
+    (if (eq (len a) 0) (empty)
+      (cons (div (head a) divisor) (cvs-vector-div (tail a) divisor))))
+  (defn cvs-average4 (a b c d)
+    (cvs-vector-div (cvs-vector-add (cvs-vector-add a b)
+      (cvs-vector-add c d)) 4.0))
+
+  (defn cvs-prototype (concept-id label features sources)
+    (list "concept-video-prototype" concept-id label features sources))
+  (defn cvs-prototype-id (p) (nth p 1))
+  (defn cvs-prototype-label (p) (nth p 2))
+  (defn cvs-prototype-features (p) (nth p 3))
+  (defn cvs-prototype-sources (p) (nth p 4))
+  (defn cvs-prototype4 (concept-id label path-a path-b path-c path-d)
+    (cvs-prototype concept-id label
+      (cvs-average4 (cvs-features-file path-a) (cvs-features-file path-b)
+                    (cvs-features-file path-c) (cvs-features-file path-d))
+      (list path-a path-b path-c path-d)))
+
+  (defn cvs-l1 (a b)
+    (if (eq (len a) 0) 0.0
+      (add (cvs-abs (sub (head a) (head b))) (cvs-l1 (tail a) (tail b)))))
+  (defn cvs-nearest-go (features prototypes best best-distance)
+    (if (eq (len prototypes) 0) best
+      (do (let candidate (head prototypes))
+          (let distance (cvs-l1 features (cvs-prototype-features candidate)))
+          (if (lt distance best-distance)
+            (cvs-nearest-go features (tail prototypes) candidate distance)
+            (cvs-nearest-go features (tail prototypes) best best-distance)))))
+  (defn cvs-nearest (features prototypes)
+    (cvs-nearest-go features (tail prototypes) (head prototypes)
+      (cvs-l1 features (cvs-prototype-features (head prototypes)))))
+  (defn cvs-distances (features prototypes)
+    (if (eq (len prototypes) 0) (empty)
+      (cons (list (cvs-prototype-id (head prototypes))
+                  (cvs-l1 features (cvs-prototype-features (head prototypes))))
+            (cvs-distances features (tail prototypes)))))
+  (defn cvs-detect-file (path prototypes)
+    (do (let features (cvs-features-file path))
+        (let winner (cvs-nearest features prototypes))
+        (list (cvs-prototype-id winner) (cvs-prototype-label winner)
+              (cvs-l1 features (cvs-prototype-features winner))
+              (cvs-distances features prototypes) features)))
+)
