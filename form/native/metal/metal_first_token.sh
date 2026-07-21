@@ -337,6 +337,10 @@ let pComb = try pipe("form_part_combine_f32")
 // answers to the named epsilon). qk-matvec-lane.fk.
 let pQ6H = try pipe("form_q6k_matvec_hoist_f32"), pQ4H = try pipe("form_q4k_matvec_hoist_f32")
 let pQ6L = try pipe("form_q6k_matvec_lane_f32"), pQ4L = try pipe("form_q4k_matvec_lane_f32")
+// STONE 13: the SLOT kernels. Same signature and same dispatch shape as the lane kernels — one SIMD
+// group per row, rows*32 threads — so they drop into the same carrier slot. The ONLY difference is
+// the thread map, which is the whole measured win. qk-matvec-slot.fk.
+let pQ6S = try pipe("form_q6k_matvec_slot_f32"), pQ4S = try pipe("form_q4k_matvec_slot_f32")
 // THE LANE KERNEL ASSUMES A SIMD WIDTH OF EXACTLY 32 (qk-matvec-lane.fk's stated radius). On a device
 // where that is false the kernel is WRONG, not slow, so it is READ from the pipeline and refused —
 // never assumed. A hardware constant a kernel silently depends on is the aporon error (corpus 811).
@@ -359,6 +363,9 @@ let bCacheK = buf(nLayer * maxpos * kvd), bCacheV = buf(nLayer * maxpos * kvd)
 let bScratch = buf(2 * nHead * maxpos)
 let bPart = buf(vocabN * PARTS)          // the split fold's partials, pooled once like everything else
 let bAlt = buf(vocabN)                   // the attestant's answer, for the every-run agreement gate
+let bSlot = buf(vocabN)                  // gate 9b's third answer: the SLOT kernel's, held alongside
+                                         // the split's and the lane's so all three are compared
+                                         // against ONE attestant read, in one pass (Stone 13)
 let bOutI = dev.makeBuffer(length: 16, options: .storageModeShared)!
 let bOutV = buf(4)
 let poolBytes = (dModel * 6 + dFF * 3 + vocabN + 2 * nLayer * maxpos * kvd + 2 * nHead * maxpos) * 4
@@ -458,11 +465,35 @@ func matvecLane(_ s: Step, _ t: TInfo, _ x: MTLBuffer, _ y: MTLBuffer, yOff: Int
         e.setBytes(&rows, length: 4, index: 3); e.setBytes(&cols, length: 4, index: 4)
     }
 }
-enum MVPath: String { case serial, split, hoist, lane }
+// STONE 13, THE SLOT KERNEL. Identical binding and identical grid to matvecLane — one SIMD group per
+// row, no shared scratch, so the caller's `barrier:` flag is honoured exactly as there. What differs
+// is inside: each lane owns a fixed 4-wide slot of every superblock instead of a stride-32 run of flat
+// weight indices, so the field selectors are lane constants and one ql byte feeds 2 weights, one qh
+// byte 4 and one scale byte 16.
+//
+// THE RADIUS IS ASKED, NOT ASSUMED. qk-matvec-slot.fk states that the map has NO tail arm: at a width
+// that is not a whole multiple of 256 it is WRONG, not slow. So the width is CHECKED here and a
+// tensor that fails it falls back to the lane kernel, which has a tail. Every llama3.2:3b width
+// passes; the check exists so that a model whose widths do not will be right rather than plausible.
+func matvecSlot(_ s: Step, _ t: TInfo, _ x: MTLBuffer, _ y: MTLBuffer, yOff: Int = 0, barrier: Bool = true) {
+    guard t.d0 % 256 == 0 else {
+        matvecLane(s, t, x, y, yOff: yOff, barrier: barrier); return
+    }
+    var rows = UInt32(t.d1), cols = UInt32(t.d0)
+    s.go(t.type == 14 ? pQ6S : pQ4S, t.d1 * 32, barrier: barrier, tgMul32: true) { e in
+        e.setBuffer(modelBuf, offset: t.off, index: 0)
+        e.setBuffer(x, offset: 0, index: 1)
+        e.setBuffer(y, offset: yOff, index: 2)
+        e.setBytes(&rows, length: 4, index: 3); e.setBytes(&cols, length: 4, index: 4)
+    }
+}
+enum MVPath: String { case serial, split, hoist, lane, slot }
 var usePartsNow = 1
 var mvNow: MVPath = .serial
 func matvec(_ s: Step, _ t: TInfo, _ x: MTLBuffer, _ y: MTLBuffer, yOff: Int = 0, barrier: Bool = true) {
     switch mvNow {
+    case .slot:
+        matvecSlot(s, t, x, y, yOff: yOff, barrier: barrier)
     case .lane:
         matvecLane(s, t, x, y, yOff: yOff, barrier: barrier)
     case .hoist:
@@ -682,10 +713,17 @@ func splitGates() {
     let many = fvals(bLogits, rows)
     let s2l = Step(); matvecLane(s2l, t, bAct, bAlt); s2l.done()
     let lane = fvals(bAlt, rows)
+    // STONE 13. The SLOT kernel answers to the SAME derived bound, and it is folded into gate 9b
+    // rather than given a gate of its own: 9b's claim is "the fast twins stay inside the epsilon the
+    // body derived", and there are now two of them. One gate, two kernels, and it falls if EITHER
+    // leaves the bound — a separate gate would let one pass while the other quietly did not.
+    let s2s = Step(); matvecSlot(s2s, t, bAct, bSlot); s2s.done()
+    let slot = fvals(bSlot, rows)
     // SUM|term| per row, from the GPU's own dequant of that row and the actual x.
     let xs = fvals(bAct, cols)
     var worstFrac = 0.0, worstAbs = 0.0, out = 0
     var lWorstFrac = 0.0, lWorstAbs = 0.0, lOut = 0
+    var sWorstFrac = 0.0, sWorstAbs = 0.0, sOut = 0
     let chunk = (cols + PARTS - 1) / PARTS
     let coeff = Double(cols + chunk + PARTS)
     // THE LANE KERNEL'S COEFFICIENT, and it is the SAME formula with parts = 32 — no new derivation.
@@ -713,22 +751,32 @@ func splitGates() {
         if lBound > 0 { lWorstFrac = max(lWorstFrac, ld / lBound) }
         lWorstAbs = max(lWorstAbs, ld)
         if ld > lBound { lOut += 1 }
+        // the slot kernel is bounded by the SAME coefficient — see qk-matvec-slot.fk's epsilon block:
+        // its tree is shallower than the lane's and its extra roundings cost less than the per-term u
+        // the depth argument already charges.
+        let sd2 = abs(Double(slot[r]) - Double(ref[r]))
+        if lBound > 0 { sWorstFrac = max(sWorstFrac, sd2 / lBound) }
+        sWorstAbs = max(sWorstAbs, sd2)
+        if sd2 > lBound { sOut += 1 }
     }
     let looseBound = coeff * u * maxSumAbs
     for r in probe..<rows where abs(Double(many[r]) - Double(ref[r])) > looseBound { out += 1 }
     let lLooseBound = lCoeff * u * maxSumAbs
     for r in probe..<rows where abs(Double(lane[r]) - Double(ref[r])) > lLooseBound { lOut += 1 }
+    for r in probe..<rows where abs(Double(slot[r]) - Double(ref[r])) > lLooseBound { sOut += 1 }
     gate9 = (out == 0)
     print(String(format: "  named epsilon: |split - attestant| <= (cols + ceil(cols/parts) + parts)*u*SUM|term|"))
     print(String(format: "    cols %d  parts %d  chunk %d  coeff %.0f  worst |d| %.3e  worst fraction of bound %.4f",
                  cols, PARTS, chunk, coeff, worstAbs, worstFrac))
     check(gate9, "gate 9 at parts=\(PARTS) every row stays inside the DERIVED bound (worst \(String(format: "%.2f", 100*worstFrac))% of it)",
                  "gate 9 \(out) rows left the derived bound")
-    gate9b = (lOut == 0)
+    gate9b = (lOut == 0 && sOut == 0)
     print(String(format: "    LANE (simd_sum, 32 lanes): chunk %d  coeff %.0f  worst |d| %.3e  worst fraction of bound %.4f",
                  lChunk, lCoeff, lWorstAbs, lWorstFrac))
-    check(gate9b, "gate 9b the LANE kernel stays inside the SAME derived bound at parts=32 (worst \(String(format: "%.2f", 100*lWorstFrac))% of it)",
-                  "gate 9b \(lOut) rows left the derived bound on the lane kernel")
+    print(String(format: "    SLOT (simd_sum, 4-wide slot): same coeff %.0f  worst |d| %.3e  worst fraction of bound %.4f",
+                 lCoeff, sWorstAbs, sWorstFrac))
+    check(gate9b, "gate 9b the LANE and SLOT kernels BOTH stay inside the SAME derived bound at parts=32 (worst \(String(format: "%.2f", 100*max(lWorstFrac, sWorstFrac)))% of it)",
+                  "gate 9b \(lOut) row(s) left the bound on the lane kernel and \(sOut) on the slot kernel")
 }
 
 // ---- the run -------------------------------------------------------------------------------------
@@ -845,9 +893,10 @@ print("=== gate 11: the lane path's tokens (simd_sum, superblock-hoisted) ===")
 mvNow = .lane
 let lShort = generate(promptIds, short), lLong = generate(promptIds, nsteps)
 report("lane-short", lShort); report("lane-long ", lLong); vsWorld("lane", lLong)
-check(lLong.out == rLong.out,
-  "gate 11 the lane path generates the SAME \(rLong.out.count) token ids as the attestant",
-  "gate 11 the lane path diverged from the attestant: \(lLong.out) vs \(rLong.out)")
+// The lane path's agreement is NOT checked here: it is checked once, together with the slot path's,
+// at the single gate 11 below. Two `check` calls would be two gates, and this stone deliberately
+// keeps the gate count at 13 while widening what the eleventh one demands.
+print("  lane ids match the attestant: \(lLong.out == rLong.out)")
 print(String(format: "  speedup vs the attestant: decode %.2fx (%.3f s -> %.3f s over %d forwards), end-to-end %.2fx",
              rLong.decode / lLong.decode, rLong.decode, lLong.decode, rLong.forwards,
              (rLong.prefill + rLong.decode) / (lLong.prefill + lLong.decode)))
@@ -862,6 +911,30 @@ if let f = fLong {
 let lSlope = (lLong.decode - lShort.decode) / max(1.0, Double(lLong.forwards - lShort.forwards))
 print(String(format: "  lane, two sizes and a slope: decode %.3f s at %d forwards and %.3f s at %d -> %.4f s per additional token (%.3f tok/s marginal)",
              lShort.decode, lShort.forwards, lLong.decode, lLong.forwards, lSlope, 1.0 / max(1e-9, lSlope)))
+
+// ---- STONE 13: THE SLOT PATH, and it is folded into gate 11 rather than given a gate of its own.
+// Gate 11's claim has always been "the fast path generates the ATTESTANT's tokens". There are now two
+// fast paths, so the gate demands it of BOTH: it falls if either diverges. A fourteenth gate would
+// have let the lane path carry a green while the slot path quietly did not, and the token ids are the
+// one place where a wrong thread map cannot hide.
+print("=== gate 11 (cont.): the slot path's tokens (4-wide superblock slot, simd_sum) ===")
+mvNow = .slot
+let sShort = generate(promptIds, short), sLong = generate(promptIds, nsteps)
+report("slot-short", sShort); report("slot-long ", sLong); vsWorld("slot", sLong)
+check(sLong.out == rLong.out && lLong.out == rLong.out,
+  "gate 11 BOTH fast paths (lane and slot) generate the SAME \(rLong.out.count) token ids as the attestant",
+  "gate 11 a fast path diverged from the attestant: lane \(lLong.out) slot \(sLong.out) vs \(rLong.out)")
+print(String(format: "  speedup vs the attestant: decode %.2fx (%.3f s -> %.3f s over %d forwards), end-to-end %.2fx",
+             rLong.decode / sLong.decode, rLong.decode, sLong.decode, rLong.forwards,
+             (rLong.prefill + rLong.decode) / (sLong.prefill + sLong.decode)))
+print(String(format: "  speedup vs the LANE path (Stone 5's answer): decode %.2fx (%.3f s -> %.3f s), end-to-end %.2fx (%.3f -> %.3f tok/s)",
+             lLong.decode / sLong.decode, lLong.decode, sLong.decode,
+             (lLong.prefill + lLong.decode) / (sLong.prefill + sLong.decode),
+             Double(lLong.out.count) / (lLong.prefill + lLong.decode),
+             Double(sLong.out.count) / (sLong.prefill + sLong.decode)))
+let sSlope = (sLong.decode - sShort.decode) / max(1.0, Double(sLong.forwards - sShort.forwards))
+print(String(format: "  slot, two sizes and a slope: decode %.3f s at %d forwards and %.3f s at %d -> %.4f s per additional token (%.3f tok/s marginal)",
+             sShort.decode, sShort.forwards, sLong.decode, sLong.forwards, sSlope, 1.0 / max(1e-9, sSlope)))
 mvNow = .serial
 
 // ---- gate 5: the pool is a cache, and the run is reproducible -------------------------------------
