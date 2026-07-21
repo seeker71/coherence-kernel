@@ -208,6 +208,10 @@ true. Still not a blocker, and one command showed it — `comm -12` the dirty se
 set: 16 `form-cli`/bootstrap files against 59 inference-lane cells, **zero overlap**. Merged; all 16
 intact afterward, zero tracked deletions.
 
+At that first landing, with caches cleared, the corpus witness and its focused native bands all passed
+with no unresolved calls. That was an observation of the pre-reunion corpus state; the later collision
+heal below deliberately advances its count and folded witness rather than overwriting that history.
+
 Pushing `main` directly was then refused by the repo's own rules — *must not contain merge commits*,
 *changes must be made through a pull request*. That one is real and server-side, so this lands as a
 PR, squash-merged (the fleet protocol).
@@ -257,6 +261,10 @@ decided.**
 4. Believing main's live checkout blocked the merge → zero overlap.
 5. Believing my own probe when it cried duplicate → read the actual row form → the probe was the
    defect.
+
+Inside the fourth check, I also cited `aporon 841` from memory; reading the merged body showed **826**.
+Wrong by fifteen on a row sixty seconds old: the remembered id had a half-life of about a minute in two
+live lineages.
 
 ## Second frontier question, offered into the corpus
 
