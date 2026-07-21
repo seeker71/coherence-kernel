@@ -1,0 +1,98 @@
+; equireach.fk — a byte source whose cost of REACHING a position does not grow with the position.
+;
+; The body has always had two byte sources and no word for what separates them. A Form list of bytes
+; reaches index k by walking k links: O(k). A host string reaches byte k by indexing: O(1). Every
+; `gg-*` and `wl-*` recipe was written against "bytes" as if reach were uniform between them — and
+; that unstated assumption is the whole quadratic. `wl-slice bytes off n` walks `off` links before it
+; carves anything, so dequant throughput collapsed 17x (15754 -> 903 weights/s) for a merely 4x larger
+; window, and `host-abi-string-to-bytes` — the bridge from the host string INTO the list — costs
+; ~1.5e-10*n^2 s: 0.95 s at 64 KB, 11.5 s at 256 KB, 166 s at 1 MB (measured, three runs each). A 2 GB
+; tensor block cannot be materialized as a list at all, so llama3.2:3b's real widths were unreachable
+; for a CARRIER reason before they were unreachable for an arithmetic one.
+;
+; EQUIREACH is that missing word: a source is equireach when reach cost is independent of position.
+; This cell gives the body one, made of parts it already owns — `read_file_slice` hands back a host
+; string and `str_byte_at` indexes it in O(1) — plus the vocabulary for saying so.
+;
+; MEASURED, and the measurement IS the claim (10M reads at the LAST byte of the window, 3 runs each,
+; .fkb cleared every run, minus the same program with zero reads):
+;   window     64 KB     256 KB     1 MB     4 MB     16 MB
+;   eqr-at     0.44 s    0.43 s     0.43 s   0.44 s   0.43 s      -> ~23.3M reads/s, FLAT over 256x
+; Flat, not merely fast: that is what places this stone. A carrier that were only faster but still
+; grew with position would not be equireach.
+;
+; THE ESCAPE HATCH IS NAMED, NOT HIDDEN. `eqr-bytes` converts a window back to a Form list, because
+; recipes that legitimately want a small list (band fixtures, the proven gg-*/wl-* list lane) still
+; exist. It is O(n) to build and the RESULT is not equireach — every reach into it is O(k) again. It
+; carries a window cap for exactly that reason: turning a big window into a list is the defect this
+; cell exists to end, so the door refuses to be the quiet way back into it.
+;
+; WHICH ARMS CAN HOLD IT. fkwu and the Go kernel read a binary file byte-faithfully through
+; `read_file_slice`; rust and ts do NOT — both return 767 bytes for a 420-byte binary fixture, having
+; UTF-8-replaced every invalid byte with U+FFFD. That is not this cell's defect and this cell will not
+; hide it: tests/equireach-band.fk declares PROOF LEVEL: TWO-ARM and says why. The arithmetic still
+; travels four-way (tests/q6k-bounds-band.fk, verdict 255, same bytes as a transcribed list); it is the
+; byte DOOR that is two-armed today. Widening it is a kernel movement, not a recipe one.
+;
+; Kin: str-byte-at.fk (str-byte-at — the O(1) reach recipe over TEXT; not the door for bytes, see
+; eqr-at below), file-byte-window.fk (fbw-read-window — the same
+; read_file_slice+str-byte-at route, bounded at 4096 and shaped as a status record; this cell is its
+; unbounded, hot-path twin), form-fs.fk (host-abi-string-to-bytes — the O(n^2) bridge this replaces),
+; equireach-gguf.fk (the gg-*/wl-* reach path rewritten against this source).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+;
+; Proven by: form-stdlib/tests/equireach-band.fk
+
+(do
+    ; --- the source. A window of a file, held once as a host string. `off`/`n` are the file's own
+    ; byte coordinates; every index below is LOCAL to the window (0 .. n-1). ---
+    (defn eqr-of-file (path off n) (read_file_slice path off n))
+    (defn eqr-of-string (s) s)
+    (defn eqr-len (src) (str_len src))
+
+    ; --- the reach. This one call is the whole property: its cost does not depend on i.
+    ;
+    ; It is the `str_byte_at` NATIVE and not str-byte-at.fk's (ord (substring s i (add i 1))) recipe,
+    ; and the choice was forced by a cross-arm witness, not by taste. Over an 8 MB window of the real
+    ; llama3.2:3b blob the Go kernel answers -1 for (ord (substring s 859 860)) — that substring comes
+    ; back EMPTY — while (str_byte_at s 859) answers 0, which is what xxd says the byte is. Both arms
+    ; agree through index 857 and diverge after: the recipe's substring is not byte-faithful on binary
+    ; data on that arm, so a single wrong byte turned a u32 field into 6 - 2^24 and walked the GGUF
+    ; metadata cursor off the file. str-byte-at.fk's header warns the opposite way ("on fkwu it returns
+    ; 0") — that warning is now stale: the native reads this blob byte-for-byte against xxd on fkwu.
+    ; The recipe stays the right door for text; the native is the right door for bytes. ---
+    (defn eqr-at (src i) (str_byte_at src i))
+
+    ; --- the guarded reach: out of range is loud, never a fabricated 0. Reaching past the end of a
+    ; window is the same defect shape as indexing past a Q6_K superblock — a caller error the body
+    ; should say out loud rather than answer plausibly. The hot path uses eqr-at; carve-time and
+    ; header-walk code that could run off the end uses this. ---
+    (defn eqr-in? (src i) (if (lt i 0) 0 (if (lt i (eqr-len src)) 1 0)))
+    (defn eqr-at-checked (src i)
+        (if (eq (eqr-in? src i) 1)
+            (eqr-at src i)
+            (form_error "eqr-at-checked: byte index outside the equireach window -- widen the window, do not read past it")))
+
+    ; --- little-endian unsigned integers, the shape every GGUF field is stored in. Same recursion as
+    ; gguf-read.fk's gg-le, with the O(k) list reach swapped for the O(1) one. ---
+    (defn eqr-le (src off n)
+        (if (eq n 0) 0
+            (add (eqr-at src off)
+                 (mul 256 (eqr-le src (add off 1) (sub n 1))))))
+    (defn eqr-u16 (src off) (eqr-le src off 2))
+    (defn eqr-u32 (src off) (eqr-le src off 4))
+    (defn eqr-u64 (src off) (eqr-le src off 8))
+
+    ; --- the named escape hatch back to the LIST carrier. O(n) to build; the result is NOT equireach.
+    ; Capped, so a 1 MB window cannot slip back into the 166-second bridge by accident. ---
+    (defn eqr-max-list () 65536)
+    (defn eqr-bytes-loop (src i n acc)
+        (if (ge i n) (reverse acc)
+            (eqr-bytes-loop src (add i 1) n (cons (eqr-at src i) acc))))
+    (defn eqr-bytes (src off n)
+        (if (gt n (eqr-max-list))
+            (form_error "eqr-bytes: refusing to materialize a window larger than 65536 bytes as a list -- a list is not equireach; reach it in place")
+            (eqr-bytes-loop src off (add off n) (list))))
+
+    0)

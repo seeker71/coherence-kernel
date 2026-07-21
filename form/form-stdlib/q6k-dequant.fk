@@ -54,9 +54,28 @@
 (defn q6k-sc (i scales)
   (q6k-s8 (nth scales (add (mul (q6k-h i) 8) (add (q6k-is i) (mul 2 (q6k-g i)))))))
 
+; --- THE BOUNDS SEAM (the silent-partial-list family, closed) ---------------------------------
+; Every index recipe above decomposes i under the ASSUMPTION 0 <= i < 256. For i >= 256, q6k-h
+; returns 2,3,... and q6k-qlidx / the qh index / the scales index all walk past the ends of the
+; 128/64/16-byte fields they were handed. `nth` past the end of a list answers 0, so q6k-at
+; returned d*0*(0-32) = -0: a plausible-looking weight, no diagnostic, full green verdict. That is
+; why bj-matrix (block-join.fk) was only ever correct for dim <= 16 while a real llama3.2:3b row is
+; 3072 weights wide. The superblock is 256 weights and no more; asking for a 257th is a caller
+; error, and the body says so out loud instead of answering -0.
+;
+; q6k-block-n     the superblock's weight count — the wall, named once
+; q6k-index-ok?   1 when i is inside the block, 0 otherwise (in-recipe, so a band can TEST the wall)
+; q6k-at          refuses out loud (form_error: panic-contract) instead of fabricating a weight
+; To reach weight 256 and beyond, STRIDE to the next superblock: real-gguf-generate.fk's rgg-weights
+; and weight-load.fk's wl-q6k-at-flat both do exactly that over the 210-byte Q6_K block stride.
+(defn q6k-block-n () 256)
+(defn q6k-index-ok? (i) (if (lt i 0) 0 (if (lt i (q6k-block-n)) 1 0)))
+
 ; the dequantized weight at output index i: w = d * scale * q
 (defn q6k-at (i d ql qh scales)
-  (mul (mul d (q6k-sc i scales)) (q6k-q i ql qh)))
+  (if (eq (q6k-index-ok? i) 1)
+      (mul (mul d (q6k-sc i scales)) (q6k-q i ql qh))
+      (form_error "q6k-at: weight index outside the 256-weight Q6_K superblock -- stride to the next block (210-byte stride) instead of indexing past it")))
 
 ; the whole superblock as a 256-long list (the full dequant walk)
 (defn q6k-dequant-from (i n d ql qh scales)
