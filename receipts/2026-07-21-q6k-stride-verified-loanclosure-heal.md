@@ -122,9 +122,48 @@ Landed as `hdc-row 829`. `homecoming-distillation-corpus-band` back to its full 
 unresolved — count pin 224→225, field code 2242242828→**2252252829**, the value read back from
 `hdc-field-code` by probe before being pinned, per the band's own standing note.
 
+## Gate 3 — the open item, measured instead of left open
+
+The section above originally ended by naming `form-asm.fk` and `format-arith.fk` as unmeasured. The
+probe is one line — compile each cell **alone**, `fkwu --src` on the cell rather than on a band, and
+read the diagnostics:
+
+- `form-asm.fk` — 0 unresolved. Genuinely self-contained; no prelude line needed.
+- `format-arith.fk` — 0 unresolved. Same.
+- **`f64-bytes.fk` — 5 unresolved** (`fq-pow2`, `fq-exponent`). Itself a loanclosure. Its own band
+  read a full 127 only because the *band* carried `format-arith.fk`. I had healed the symptom one
+  level up (adding `format-arith` to `form-asm-matvec`'s line) without the cell ever owning its debt.
+
+Healed at the cell: `; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk`. Standalone 5 → 0;
+`f64-bytes-band` 127 u=0, and matvec / matvec-2d / matvec-loop 127, block-join-asm 255, exp-poly 15,
+fam-silu 7, ss-sqrt 127, block-join 255, q6k-bounds 255, weight-load 4095 — all u=0, all unchanged.
+
+### How wide the shape runs — measured partially, boundary stated
+
+I swept the standalone probe across `form-stdlib`'s 872 s-expression cells (the 37 brace-surface
+cells were **excluded on purpose**: pointing `fkwu --src` at a brace file misparses and writes a
+stamp-valid poisoned `.fkb` over the good one).
+
+**The sweep did not finish.** It ran alphabetically and I stopped it after `form-lower.fk` — cells
+past that point were each hitting the 25s per-cell cap, putting completion hours out. So this is a
+partial result and the boundary is `a` through `form-l`, roughly the first third:
+
+- **72 cells** in that range answer unresolved calls when compiled alone
+- of those, **62 borrow at least one name that IS a Form cell defined elsewhere in `form-stdlib`** —
+  a declared prelude line would resolve it
+- **41 of those 62 declare no `; preludes:` line at all**
+- 275 distinct unresolved names in the range; 206 are Form-defined, 69 are kernel primitives or
+  otherwise not `(defn`-defined (so that 69 is a soft bucket, not proof of absence)
+
+I am **not** claiming those 62 are 62 defects. Standalone-unresolved means the cell does not own its
+closure; whether that costs anything depends on whether some loader always pays. `f64-bytes.fk` shows
+it can cost a full band's honesty and stay invisible. What the number does establish is that
+`form-asm-matvec.fk` was not a one-off — and the remaining two thirds are unswept.
+
 ## Left open, named not fixed
 
-- `form-asm.fk` and `format-arith.fk` carry no `; preludes:` line at all. They resolve today; whether
-  by their own completeness or by the same borrowing, I did not measure.
+- The closure sweep is unfinished past `form-lower.fk` — two thirds of `form-stdlib` unmeasured. The
+  62 borrowing cells found so far are unclassified as to whether any loader ever fails to pay.
+- The 37 brace-surface cells cannot be probed this way at all without a safe-cache harness.
 - The `.dylib` warning (`native .dylib emission is not installed in this checkout`) is present on
   every band here and predates this work.
