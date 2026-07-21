@@ -147,10 +147,17 @@ else
 fi
 for k in form_q6k_dequant_f32 form_q6k_matvec_f32 form_q4k_dequant_f32 form_q4k_matvec_f32 \
          form_q6k_matvec_part_f32 form_q4k_matvec_part_f32 form_part_combine_f32 \
+         form_q6k_matvec_hoist_f32 form_q4k_matvec_hoist_f32 \
+         form_q6k_matvec_lane_f32 form_q4k_matvec_lane_f32 \
          form_rmsnorm_f32 form_rope_f32 form_gqa_decode_f32 form_swiglu_f32 form_add_f32 form_argmax_f32; do
     grep -q "kernel void $k" "$MSL" || { echo "FAIL  kernel $k was not emitted"; exit 1; }
 done
-echo "  13 kernels emitted, $(wc -c < "$MSL" | tr -d ' ') bytes, every character authored by a .fk cell"
+# The header must LEAD the unit and must NOT drag `using namespace metal;` in with it — the body's own
+# `round` is unqualified and has to keep resolving to the body's. Checked here rather than trusted,
+# because the failure mode is a compile error a hundred lines away from its cause.
+head -c 200 "$MSL" | grep -q '#include <metal_stdlib>' || { echo "FAIL  metal_stdlib header is not at the top of the unit"; exit 1; }
+grep -q 'using namespace metal' "$MSL" && { echo "FAIL  the unit emitted 'using namespace metal;' — the body's round becomes ambiguous"; exit 1; }
+echo "  17 kernels emitted, $(wc -c < "$MSL" | tr -d ' ') bytes, every character authored by a .fk cell"
 
 # ── the .metallib, cached across RUNS by the emitted source's own sha256 ──────────────────────
 msl_sha="$(shasum -a 256 "$MSL" | cut -c1-16)"
@@ -326,6 +333,18 @@ let pAttn = try pipe("form_gqa_decode_f32"), pSwi = try pipe("form_swiglu_f32")
 let pAdd = try pipe("form_add_f32"), pArg = try pipe("form_argmax_f32")
 let pQ6P = try pipe("form_q6k_matvec_part_f32"), pQ4P = try pipe("form_q4k_matvec_part_f32")
 let pComb = try pipe("form_part_combine_f32")
+// STONE 5: the hoisted split (bit-exact, no epsilon) and the SIMD-group lane kernel (reassociates,
+// answers to the named epsilon). qk-matvec-lane.fk.
+let pQ6H = try pipe("form_q6k_matvec_hoist_f32"), pQ4H = try pipe("form_q4k_matvec_hoist_f32")
+let pQ6L = try pipe("form_q6k_matvec_lane_f32"), pQ4L = try pipe("form_q4k_matvec_lane_f32")
+// THE LANE KERNEL ASSUMES A SIMD WIDTH OF EXACTLY 32 (qk-matvec-lane.fk's stated radius). On a device
+// where that is false the kernel is WRONG, not slow, so it is READ from the pipeline and refused —
+// never assumed. A hardware constant a kernel silently depends on is the aporon error (corpus 811).
+let SIMDW = pQ6L.threadExecutionWidth
+if SIMDW != 32 {
+    print("SKIP  this GPU's threadExecutionWidth is \(SIMDW), not 32 — the lane kernel does not speak for it")
+    exit(2)
+}
 // PARTS = 1 is the attestant itself (one chunk, same direction, added to nothing). Anything above 1
 // reassociates the row sum and must answer to the named epsilon below.
 let PARTS = Int(ProcessInfo.processInfo.environment["FORM_PARTS"] ?? "32")!
@@ -359,10 +378,14 @@ print(String(format: "pooled: %.1f MB of activation + KV state, allocated ONCE f
 final class Step {
     let cb: MTLCommandBuffer, enc: MTLComputeCommandEncoder
     init() { cb = queue.makeCommandBuffer()!; enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent)! }
-    func go(_ p: MTLComputePipelineState, _ width: Int, barrier: Bool = true,
+    func go(_ p: MTLComputePipelineState, _ width: Int, barrier: Bool = true, tgMul32: Bool = false,
             _ bind: (MTLComputeCommandEncoder) -> Void) {
         enc.setComputePipelineState(p); bind(enc)
-        let tg = min(p.maxTotalThreadsPerThreadgroup, 256)
+        var tg = min(p.maxTotalThreadsPerThreadgroup, 256)
+        // the lane kernel folds one row per SIMD GROUP, so a threadgroup that is not a whole number of
+        // simdgroups would split a row across two of them and lose part of its sum. Rounded down here,
+        // stated rather than assumed to be true of 256.
+        if tgMul32 { tg = max(32, (tg / 32) * 32) }
         enc.dispatchThreads(MTLSize(width: width, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
         if barrier { enc.memoryBarrier(scope: .buffers) }
@@ -401,13 +424,53 @@ func matvecSplit(_ s: Step, _ t: TInfo, _ x: MTLBuffer, _ y: MTLBuffer, yOff: In
         e.setBytes(&rows, length: 4, index: 2); e.setBytes(&np, length: 4, index: 3)
     }
 }
+// STONE 5, PIECE 1 — THE HOISTED SPLIT. Byte-for-byte the same partition, the same `part` buffer and
+// the same combine as matvecSplit; the ONLY difference is that the superblock-invariant f16 decode is
+// computed once per superblock crossing instead of once per weight. Same f32 value, same association,
+// so at parts = 1 this is STILL the attestant bit for bit — which is exactly what gate 8b checks.
+func matvecHoist(_ s: Step, _ t: TInfo, _ x: MTLBuffer, _ y: MTLBuffer, yOff: Int = 0,
+                 barrier: Bool = true, parts: Int) {
+    var rows = UInt32(t.d1), cols = UInt32(t.d0), np = UInt32(parts)
+    s.go(t.type == 14 ? pQ6H : pQ4H, t.d1 * parts) { e in
+        e.setBuffer(modelBuf, offset: t.off, index: 0)
+        e.setBuffer(x, offset: 0, index: 1)
+        e.setBuffer(bPart, offset: 0, index: 2)
+        e.setBytes(&rows, length: 4, index: 3); e.setBytes(&cols, length: 4, index: 4)
+        e.setBytes(&np, length: 4, index: 5)
+    }
+    s.go(pComb, t.d1, barrier: barrier) { e in
+        e.setBuffer(bPart, offset: 0, index: 0)
+        e.setBuffer(y, offset: yOff, index: 1)
+        e.setBytes(&rows, length: 4, index: 2); e.setBytes(&np, length: 4, index: 3)
+    }
+}
+// STONE 5, PIECE 2 — THE LANE KERNEL. One SIMD group per row, hoisted, reduced by simd_sum. ONE
+// dispatch, and — the part that is not just about speed — NO SHARED SCRATCH. matvecSplit and
+// matvecHoist both write the pooled `bPart`, so two of them can never overlap and every projection
+// pays a barrier it does not need. The lane kernel writes only its own output, so the caller's
+// `barrier:` flag is honoured again and q/k/v (and gate/up) go back to being concurrent.
+func matvecLane(_ s: Step, _ t: TInfo, _ x: MTLBuffer, _ y: MTLBuffer, yOff: Int = 0, barrier: Bool = true) {
+    var rows = UInt32(t.d1), cols = UInt32(t.d0)
+    s.go(t.type == 14 ? pQ6L : pQ4L, t.d1 * 32, barrier: barrier, tgMul32: true) { e in
+        e.setBuffer(modelBuf, offset: t.off, index: 0)
+        e.setBuffer(x, offset: 0, index: 1)
+        e.setBuffer(y, offset: yOff, index: 2)
+        e.setBytes(&rows, length: 4, index: 3); e.setBytes(&cols, length: 4, index: 4)
+    }
+}
+enum MVPath: String { case serial, split, hoist, lane }
 var usePartsNow = 1
+var mvNow: MVPath = .serial
 func matvec(_ s: Step, _ t: TInfo, _ x: MTLBuffer, _ y: MTLBuffer, yOff: Int = 0, barrier: Bool = true) {
-    if usePartsNow > 1 {
-        // the split twin needs its partials to itself, so two split matvecs cannot overlap; the
-        // barrier is not optional here and the carrier says so rather than racing.
+    switch mvNow {
+    case .lane:
+        matvecLane(s, t, x, y, yOff: yOff, barrier: barrier)
+    case .hoist:
+        // shares the pooled partials, so the barrier is not optional; the carrier says so, not races.
+        matvecHoist(s, t, x, y, yOff: yOff, barrier: true, parts: usePartsNow)
+    case .split:
         matvecSplit(s, t, x, y, yOff: yOff, barrier: true, parts: usePartsNow)
-    } else {
+    case .serial:
         matvecSerial(s, t, x, y, yOff: yOff, barrier: barrier)
     }
 }
@@ -589,7 +652,7 @@ func gateQ() {
 // attestant BIT FOR BIT on every row, because one chunk folded downward and added to nothing IS the
 // attestant. Gate 9 is the named epsilon: at the parts the run actually uses, every row must stay
 // inside (cols + ceil(cols/parts) + parts) * u * SUM|term|, derived in qk-matvec-split.fk.
-var gate8 = false, gate9 = false
+var gate8 = false, gate9 = false, gate8b = false, gate9b = false
 func splitGates() {
     let t = L[0].fd                       // a real Q6_K 3072 x 8192 — the deepest row in the model
     let rows = t.d1, cols = t.d0
@@ -603,14 +666,34 @@ func splitGates() {
     gate8 = (bad1 == 0)
     check(gate8, "gate 8 the split kernel at parts=1 IS the attestant, bit for bit, on all \(rows) rows of \(t.d1)x\(t.d0)",
                  "gate 8 the split kernel at parts=1 differs from the attestant on \(bad1)/\(rows) rows")
-    guard PARTS > 1 else { gate9 = true; print("  (parts = 1: no reassociation, no epsilon to name)"); return }
+    // GATE 8b — STONE 5. The HOIST claims to be free: computing the superblock's f16 super-scale once
+    // per crossing instead of once per weight yields the identical f32 and touches no association.
+    // "Claims" is the operative word, so it is checked the same structural way and with no epsilon:
+    // at parts = 1 the hoisted kernel must ALSO be the attestant, bit for bit, on every row.
+    let s1h = Step(); matvecHoist(s1h, t, bAct, bLogits, parts: 1); s1h.done()
+    let oneH = fvals(bLogits, rows)
+    var bad1h = 0
+    for r in 0..<rows where oneH[r] != ref[r] { bad1h += 1 }
+    gate8b = (bad1h == 0)
+    check(gate8b, "gate 8b the HOISTED kernel at parts=1 is ALSO the attestant, bit for bit — the hoist costs no accuracy at all",
+                  "gate 8b the hoisted kernel at parts=1 differs from the attestant on \(bad1h)/\(rows) rows")
+    guard PARTS > 1 else { gate9 = true; gate9b = true; print("  (parts = 1: no reassociation, no epsilon to name)"); return }
     let s2 = Step(); matvecSplit(s2, t, bAct, bLogits, parts: PARTS); s2.done()
     let many = fvals(bLogits, rows)
+    let s2l = Step(); matvecLane(s2l, t, bAct, bAlt); s2l.done()
+    let lane = fvals(bAlt, rows)
     // SUM|term| per row, from the GPU's own dequant of that row and the actual x.
     let xs = fvals(bAct, cols)
     var worstFrac = 0.0, worstAbs = 0.0, out = 0
+    var lWorstFrac = 0.0, lWorstAbs = 0.0, lOut = 0
     let chunk = (cols + PARTS - 1) / PARTS
     let coeff = Double(cols + chunk + PARTS)
+    // THE LANE KERNEL'S COEFFICIENT, and it is the SAME formula with parts = 32 — no new derivation.
+    // Its tree is a lane chain of depth ceil(cols/32) followed by whatever tree metal::simd_sum uses
+    // over 32 values. Metal does not specify that tree and does not have to: ANY association of 32
+    // terms has depth at most 31 < 32, so parts = 32 bounds every tree simd_sum could be using.
+    let lChunk = (cols + 32 - 1) / 32
+    let lCoeff = Double(cols + lChunk + 32)
     let probe = min(rows, 64)             // 64 rows dequantized and bounded exactly; the rest by the
                                           // same coefficient against the max SUM|term| seen (stated)
     var maxSumAbs = 0.0
@@ -625,15 +708,27 @@ func splitGates() {
         if bound > 0 { worstFrac = max(worstFrac, d / bound) }
         worstAbs = max(worstAbs, d)
         if d > bound { out += 1 }
+        let lBound = lCoeff * u * sa
+        let ld = abs(Double(lane[r]) - Double(ref[r]))
+        if lBound > 0 { lWorstFrac = max(lWorstFrac, ld / lBound) }
+        lWorstAbs = max(lWorstAbs, ld)
+        if ld > lBound { lOut += 1 }
     }
     let looseBound = coeff * u * maxSumAbs
     for r in probe..<rows where abs(Double(many[r]) - Double(ref[r])) > looseBound { out += 1 }
+    let lLooseBound = lCoeff * u * maxSumAbs
+    for r in probe..<rows where abs(Double(lane[r]) - Double(ref[r])) > lLooseBound { lOut += 1 }
     gate9 = (out == 0)
     print(String(format: "  named epsilon: |split - attestant| <= (cols + ceil(cols/parts) + parts)*u*SUM|term|"))
     print(String(format: "    cols %d  parts %d  chunk %d  coeff %.0f  worst |d| %.3e  worst fraction of bound %.4f",
                  cols, PARTS, chunk, coeff, worstAbs, worstFrac))
     check(gate9, "gate 9 at parts=\(PARTS) every row stays inside the DERIVED bound (worst \(String(format: "%.2f", 100*worstFrac))% of it)",
                  "gate 9 \(out) rows left the derived bound")
+    gate9b = (lOut == 0)
+    print(String(format: "    LANE (simd_sum, 32 lanes): chunk %d  coeff %.0f  worst |d| %.3e  worst fraction of bound %.4f",
+                 lChunk, lCoeff, lWorstAbs, lWorstFrac))
+    check(gate9b, "gate 9b the LANE kernel stays inside the SAME derived bound at parts=32 (worst \(String(format: "%.2f", 100*lWorstFrac))% of it)",
+                  "gate 9b \(lOut) rows left the derived bound on the lane kernel")
 }
 
 // ---- the run -------------------------------------------------------------------------------------
@@ -676,7 +771,7 @@ if failures > 0 { print("=== \(failures) gate(s) failed BEFORE any token — ref
 
 print("=== gate 6: a token ===")
 let short = max(2, nsteps / 3)
-usePartsNow = 1
+usePartsNow = 1; mvNow = .serial
 let rShort = generate(promptIds, short)
 let rLong  = generate(promptIds, nsteps)
 
@@ -714,20 +809,60 @@ if profile {
                  (profN["argmax"] ?? 1)))
 }
 
-// ---- gate 10: the FAST path generates the ATTESTANT's tokens ---------------------------------------
+// ---- gates 10-11: the FAST paths generate the ATTESTANT's tokens ------------------------------------
+// AN EXTERNAL DENOMINATOR. Every ratio this program has ever reported was against its own attestant —
+// true, and silent about the world (corpus row 819, selfgauge). An ollama/llama.cpp oracle measured on
+// THIS machine, THIS model and THIS 2.0 GB blob over a 150-token sample is carried here so that no
+// speedup below can be read without its absolute cost. It is a MEASUREMENT MADE ELSEWHERE, quoted, not
+// re-run by this harness — labelled so, and never mixed into a gate.
+let ollamaDecode = 157.83, ollamaPrefill = 640.94
+func vsWorld(_ label: String, _ r: Run) {
+    let e2e = Double(r.out.count) / (r.prefill + r.decode)
+    let dec = Double(max(1, r.forwards)) / r.decode
+    let pre = Double(promptIds.count) / r.prefill
+    print(String(format: "    vs the world (ollama on this machine, quoted): decode %.3f of %.2f tok/s (%.1fx behind)  |  prefill %.3f of %.2f tok/s (%.1fx behind)  |  end-to-end %.3f tok/s",
+                 dec, ollamaDecode, ollamaDecode / dec, pre, ollamaPrefill, ollamaPrefill / pre, e2e))
+    _ = label
+}
+var fLong: Run? = nil
 if PARTS > 1 {
     print("=== gate 10: the split path's tokens ===")
-    usePartsNow = PARTS
-    let fShort = generate(promptIds, short), fLong = generate(promptIds, nsteps)
-    report("split-short", fShort); report("split-long ", fLong)
-    check(fLong.out == rLong.out,
+    usePartsNow = PARTS; mvNow = .split
+    let fS = generate(promptIds, short), fL = generate(promptIds, nsteps)
+    report("split-short", fS); report("split-long ", fL); vsWorld("split", fL)
+    check(fL.out == rLong.out,
       "gate 10 the split path at parts=\(PARTS) generates the SAME \(rLong.out.count) token ids as the attestant",
-      "gate 10 the split path diverged from the attestant: \(fLong.out) vs \(rLong.out)")
+      "gate 10 the split path diverged from the attestant: \(fL.out) vs \(rLong.out)")
     print(String(format: "  speedup vs the attestant: decode %.2fx (%.3f s -> %.3f s over %d forwards), end-to-end %.2fx",
-                 rLong.decode / fLong.decode, rLong.decode, fLong.decode, rLong.forwards,
-                 (rLong.prefill + rLong.decode) / (fLong.prefill + fLong.decode)))
+                 rLong.decode / fL.decode, rLong.decode, fL.decode, rLong.forwards,
+                 (rLong.prefill + rLong.decode) / (fL.prefill + fL.decode)))
+    fLong = fL
     usePartsNow = 1
 }
+
+// ---- gate 11: THE LANE PATH — Stone 5's answer -----------------------------------------------------
+print("=== gate 11: the lane path's tokens (simd_sum, superblock-hoisted) ===")
+mvNow = .lane
+let lShort = generate(promptIds, short), lLong = generate(promptIds, nsteps)
+report("lane-short", lShort); report("lane-long ", lLong); vsWorld("lane", lLong)
+check(lLong.out == rLong.out,
+  "gate 11 the lane path generates the SAME \(rLong.out.count) token ids as the attestant",
+  "gate 11 the lane path diverged from the attestant: \(lLong.out) vs \(rLong.out)")
+print(String(format: "  speedup vs the attestant: decode %.2fx (%.3f s -> %.3f s over %d forwards), end-to-end %.2fx",
+             rLong.decode / lLong.decode, rLong.decode, lLong.decode, rLong.forwards,
+             (rLong.prefill + rLong.decode) / (lLong.prefill + lLong.decode)))
+if let f = fLong {
+    print(String(format: "  speedup vs the SPLIT path (Stone 4's answer): decode %.2fx (%.3f s -> %.3f s), end-to-end %.2fx (%.3f -> %.3f tok/s)",
+                 f.decode / lLong.decode, f.decode, lLong.decode,
+                 (f.prefill + f.decode) / (lLong.prefill + lLong.decode),
+                 Double(f.out.count) / (f.prefill + f.decode),
+                 Double(lLong.out.count) / (lLong.prefill + lLong.decode)))
+}
+// two sizes and a slope on the lane path too — no rate here is one point pretending to be a line
+let lSlope = (lLong.decode - lShort.decode) / max(1.0, Double(lLong.forwards - lShort.forwards))
+print(String(format: "  lane, two sizes and a slope: decode %.3f s at %d forwards and %.3f s at %d -> %.4f s per additional token (%.3f tok/s marginal)",
+             lShort.decode, lShort.forwards, lLong.decode, lLong.forwards, lSlope, 1.0 / max(1e-9, lSlope)))
+mvNow = .serial
 
 // ---- gate 5: the pool is a cache, and the run is reproducible -------------------------------------
 let again = generate(promptIds, short)
@@ -742,7 +877,7 @@ check(other.out != rShort.out && rShort.out.allSatisfy { $0 >= 0 && $0 < vocabN 
       "gate 6 real token ids out, legal vocab indices, input-dependent",
       "gate 6 the ids are constant across prompts or out of range")
 
-print(failures == 0 ? "=== VERDICT PASS — \(PARTS > 1 ? 10 : 9) gates ===" : "=== VERDICT FAIL — \(failures) gate(s) ===")
+print(failures == 0 ? "=== VERDICT PASS — \(PARTS > 1 ? 13 : 11) gates ===" : "=== VERDICT FAIL — \(failures) gate(s) ===")
 exit(failures == 0 ? 0 : 1)
 SWIFT
 
