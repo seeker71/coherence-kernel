@@ -4,18 +4,64 @@
 ; preludes: form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
 ; preludes: form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk
 ; preludes: form-stdlib/rag-ask.fk
+; preludes: form-stdlib/ask-cost-receipt.fk form-stdlib/ask-native-lane.fk
 ;
-; The local answer starts with the body: the one-shot CLI stages the question,
-; then fkwu reads the staged query and healed RAG JSONL index directly. It does
-; not call Ollama, localhost:11434, http-fetch, host-exec, or a shell. Full prose
-; generation over GGUF weights on the fkwu + Metal model lane is a separate
-; composition cell; until that lane is wired end-to-end, this verb returns an
-; attributed grounded cell instead of pretending a host LLM is the local oracle.
+; The local answer starts with the body: the one-shot CLI stages the question, then fkwu reads the
+; staged query and healed RAG JSONL index directly. It does not call Ollama, localhost:11434,
+; http-fetch, host-exec, or a shell.
+;
+; WHAT CHANGED ON 2026-07-21, AND WHY THE OLD HEADER HAD TO GO. Until today this file said: "Full
+; prose generation over GGUF weights on the fkwu + Metal model lane is a separate composition cell;
+; until that lane is wired end-to-end, this verb returns an attributed grounded cell instead of
+; pretending a host LLM is the local oracle." That refusal was exactly right, and it was written
+; against a CONDITION — "until that lane is wired end-to-end". The condition became false at 14:14
+; today: metal_first_token.sh generates real llama3.2:3b tokens from real weights, full width, through
+; kernels the body emitted, and passes 13 gates doing it. Nothing tells a comment when the world moves
+; under it, so the verb went on returning a RAG cell for three hours after it no longer had to. The
+; honest repair is to make the sentence TRUE, not to soften it — so the model lane is now wired, and
+; the refusal survives verbatim in `fca-grounded-answer` as a NAMED lane rather than as the only one.
+;
+; TWO LANES, AND THE VERB ALWAYS SAYS WHICH ONE SPOKE.
+;   metal-gguf-native   real llama3.2:3b prose, generated form-native off the resident quantized blob
+;                       (ask-native-lane.fk; carrier form/native/metal/metal_ask.sh). Every answer
+;                       carries the model, the blob, the question it is bound to, and a cost receipt
+;                       in which every cost appears DECLARED (a bound derived from the model's own
+;                       shape, before the run) and MEASURED, with the measured value as a fraction of
+;                       its bound.
+;   fkwu-rag-grounded   the attributed grounded cell out of the healed local index. NOT a degraded
+;                       mode and NOT deleted: when the question wants provenance rather than prose, a
+;                       grounded `@p.l.t.i` cell is the better answer, and when the model lane is
+;                       unavailable it is the honest one.
+; The lanes are never blended and never guessed at. `fca-lane-of` reports the lane that WILL answer
+; before it answers, and every returned body carries `local-lane:` on its own line. A caller that
+; mistook a 3-billion-parameter generation for a retrieved cell, or the reverse, would be misled about
+; the only thing that matters here, so the fallback is announced with its REASON attached
+; (`native-lane:absent`, `...:question-not-bound`, ...) rather than taken silently.
+;
+; THE RADIUS THIS FILE SPEAKS FOR (corpus row 811, aporon). It speaks for CHOOSING between the two
+; lanes and for attributing what it returns. It does not speak for the arithmetic behind either — the
+; native lane's tokens are gated by form/native/metal/metal_first_token.sh, the grounded lane's
+; provenance by rag-ask.fk — and it deliberately does not speak for the model lane being FRESH beyond
+; question identity: see ask-native-lane.fk's named BLOB-SHA256 gap.
+;
+; Kin: ask-native-lane.fk (anl-* — the native lane door and its question binding), ask-cost-receipt.fk
+; (acr-* — declared/measured costs), rag-ask.fk (ra-* — the grounded lane), form-cli-ask-gate.fk
+; (fca-ask-result — the posterior sufficiency gate this feeds), form-cli.fk (the verb table).
+;
+; Proven by: form-stdlib/tests/form-cli-ask-band.fk, form-stdlib/tests/ask-cost-receipt-band.fk
 
 (do
-    (defn fca-local-lane ()
-        "fkwu-rag-grounded")
+    ; The lane that WILL answer this question, asked before answering it. A caller can route on this
+    ; without paying for the answer, and a test can assert the routing without a GPU on the host.
+    (defn fca-native-lane () (anl-lane-name))
+    (defn fca-rag-lane () (anl-fallback-lane-name))
+    (defn fca-lane-of (question)
+        (if (eq (anl-ready? question) 1) (fca-native-lane) (fca-rag-lane)))
+    ; kept: callers and receipts that predate the model lane ask for "the local lane" with no question
+    ; in hand. The grounded lane is the answer to that, because it is the one that is always there.
+    (defn fca-local-lane () (fca-rag-lane))
 
+    ; ── the grounded lane, unchanged in meaning and now NAMED as one lane among two ───────────────
     (defn fca-grounded-answer (question)
         (do (let grounded (ra-grounded question))
         (if (str_eq grounded "grounded:miss")
@@ -23,10 +69,24 @@
             (str_concat grounded
                 "\nlocal-lane:fkwu-rag-grounded\nsynthesis-lane:fkwu-rag-grounded"))))
 
-    (defn fca-ask-model (model question)
-        (fca-grounded-answer question))
+    ; A fallback that does not say it fell back is a fallback that lies by omission. When the native
+    ; lane declines, its reason travels with the grounded answer.
+    (defn fca-fallback-answer (question)
+        (str_concat (fca-grounded-answer question)
+            (str_concat "\ndeclined:" (anl-refusal question))))
 
+    ; ── the verb ─────────────────────────────────────────────────────────────────────────────────
     (defn fca-ask (question)
-        (fca-grounded-answer question))
+        (if (eq (anl-ready? question) 1)
+            (anl-answer question)
+            (fca-fallback-answer question)))
+
+    ; `model` names WHICH model was asked for. The native lane carries exactly one model — the blob
+    ; the carrier mapped — so a request for a different one must not be answered by it wearing that
+    ; name. Asking for the model the lane actually holds routes natively; anything else is grounded.
+    (defn fca-ask-model (model question)
+        (if (str_eq model (anl-model))
+            (fca-ask question)
+            (fca-fallback-answer question)))
 
     0)
