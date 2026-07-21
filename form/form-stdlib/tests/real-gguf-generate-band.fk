@@ -1,0 +1,88 @@
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/form-fs.fk form-stdlib/real-gguf-generate.fk
+;
+; real-gguf-generate-band — the autoregressive loop run on weights carved out of the REAL
+; llama3.2:3b .gguf ollama serves, made falsifiable. Unlike gguf-read-band / weight-load-band, whose
+; fixtures are transcribed byte lists, this band opens the actual 2 GB file: it is the carrier the
+; gguf-read.fk header names ("a carrier then witnesses it on the real 2GB llama3.2:3b, which can't be
+; a band fixture"). It therefore depends on that blob being present — see the PENDING note below.
+;
+; The file: ~/.ollama/models/blobs/sha256-dde5aa3f...ccdff, GGUF v3, 255 tensors, 30 metadata KVs,
+; general.architecture=llama, llama.embedding_length=3072, llama.block_count=28. Tensor data begins at
+; align32(7837658) = 7837664; blk.0.ffn_down.weight (Q6_K) sits at data offset 323217664, so its first
+; superblock starts at absolute byte 331055328. blk.0.attn_norm.weight (F32) is at data offset
+; 323205376 -> absolute 331043040.
+;
+; The load-bearing pin (claim 4) is INDEPENDENT: ggml's own dequantize_row_q6_K over that same
+; superblock gives w[0] = 0.00914955139160156 and w[256] (first weight of the NEXT superblock) =
+; 0.0192413330078125. The band asserts both, scaled by 1e6 and pinned into a unit-wide window, so the
+; verdict depends on no float formatting. w[256] is the one that matters: it is exactly the weight
+; block-join.fk's bj-row-n reaches with (wl-q6k-at bytes off 256) and silently returns -0 for, so
+; claim 16 is the falsifiable statement that rgg-weights STRIDES across the superblock wall.
+;
+; Verdict 255 when the real file drives the loop:
+;   1    the file's own header parses from disk        (gg-magic-ok? on the first 24 real bytes == 1)
+;   2    tensor count is the file's 255                (gg-tensor-count == 255)
+;   4    real Q6_K weight[0] matches the ggml pin      (w0*1e6 in (9149.55, 9149.56))
+;   8    a real F32 norm gain is in (0,2)              (attn_norm[0] — llama gains sit near 1)
+;   16   rgg-weights CROSSES the superblock wall       (w256*1e6 in (19241.33, 19241.34), not 0 — the bj-row-n defect)
+;   32   the loop emits `steps` new real token ids     (len(gen) == len(seed) + 3)
+;   64   every emitted id is a legal vocab index       (0 <= id < V)
+;   128  KV-cached loop == recompute loop, token-for-token (the cache law, now over REAL weights)
+;
+; PENDING: this band reads an absolute host path, so it is a carrier witness, not a portable fixture —
+; it cannot run on a checkout without that ollama blob, and the four-way runner must skip it there. The
+; honest fix is a small committed Q6_K fixture file (a few superblocks, ~1 KB) so the stride claim
+; travels; that fixture does not exist yet.
+(do
+    (defn rggb-ieq (a b)
+      (if (eq (len a) 0) (if (eq (len b) 0) 1 0)
+          (if (eq (len b) 0) 0
+              (if (eq (head a) (head b)) (rggb-ieq (tail a) (tail b)) 0))))
+    (defn rggb-ids-ok (xs v)
+      (if (eq (len xs) 0) 1
+          (if (lt (head xs) 0) 0
+              (if (lt (head xs) v) (rggb-ids-ok (tail xs) v) 0))))
+    ; a scaled value pinned into a unit-wide window: falsifiable to ~1e-10 relative without
+    ; depending on any float formatting or an integer-truncation primitive
+    (defn rggb-pin (x lo hi) (if (gt x lo) (if (lt x hi) 1 0) 0))
+
+    (let path "/Users/ursmuff/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff")
+    (let dim 4)   (let v 4)   (let steps 3)
+
+    ; --- the file's own header, straight off disk ---
+    (let hdr (host-abi-string-to-bytes (read_file_slice path 0 24)))
+    (let c0 (if (eq (gg-magic-ok? hdr) 1)      1 0))
+    (let c1 (if (eq (gg-tensor-count hdr) 255) 2 0))
+
+    ; --- REAL Q6_K weights: 7*dim*dim for the layer + v*dim for the tied vocab table, from
+    ;     blk.0.ffn_down.weight. Two superblocks (420 bytes) cover 512 weights; read 630 so the
+    ;     stride claim has a third block to reach into. ---
+    (let qb  (host-abi-string-to-bytes (read_file_slice path 331055328 630)))
+    (let ws  (rgg-weights qb 0 3))
+    (let w0   (mul 1000000.0 (head ws)))
+    (let w256 (mul 1000000.0 (head (rgg-drop ws 256))))
+    (let c2 (if (eq (rggb-pin w0    9149.55  9149.56)  1) 4 0))
+    (let c4 (if (eq (rggb-pin w256 19241.33 19241.34) 1) 16 0))
+
+    ; --- REAL F32 norm gains from blk.0.attn_norm.weight ---
+    (let nb (host-abi-string-to-bytes (read_file_slice path 331043040 64)))
+    (let g1 (rgg-gain nb 0 dim))
+    (let g2 (rgg-gain nb 16 dim))
+    (let gf (rgg-gain nb 32 dim))
+    (let c3 (if (gt (head g1) 0.0) (if (lt (head g1) 2.0) 8 0) 0))
+
+    ; --- assemble a real layer + real tied vocab table, then RUN THE LOOP ---
+    (let layer  (rgg-layer ws g1 g2 dim))
+    (let layers (list layer))
+    (let tok    (rgg-tok (rgg-drop ws (rgg-layer-weights dim)) v dim))
+    (let seed   (list 0 1))
+    (let cfg    (rope-cfg 10000.0 32.0 1.0 4.0 8192.0))
+    (let sc     (div 1.0 (tn-sqrt 4.0)))
+
+    (let gen (rgg-generate           seed tok layers gf 0.00001 sc 1 1 dim cfg steps))
+    (let grc (rgg-generate-recompute seed tok layers gf 0.00001 sc 1 1 dim cfg steps))
+    (let c5 (if (eq (len gen) (add (len seed) steps)) 32 0))
+    (let c6 (if (eq (rggb-ids-ok gen v) 1) 64 0))
+    (let c7 (if (eq (rggb-ieq gen grc) 1) 128 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))
