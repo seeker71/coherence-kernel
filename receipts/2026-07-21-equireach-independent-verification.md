@@ -43,12 +43,36 @@ Five pre-existing bands that reach through the four healed cells, `git stash` on
 
 Verdict equality and zero unresolved-call on both arms. The bounds seam costs the existing recipes nothing.
 
-**One honest seam.** The two *new* bands do carry unresolved-call diagnostics on this branch —
-`equireach-band` wants `fq-pow2` (3 sites, `f64-bytes.fk` reaching for `format-arith.fk` that its prelude
-header does not name), `q6k-bounds-band` wants eighteen transformer names (`tn-*`, `tb-*`, `rope`, `TAU`,
-`fcos`). Both sets are prelude-closure gaps between the two branches, not defects in the imported cells:
-the five pre-existing bands sit at zero on both arms. Named here so nobody reads "0 unresolved" as covering
-more than it does.
+**A correction I have to make against myself.** I first reported that the two *new* bands carry
+unresolved-call diagnostics here — `equireach-band` wanting `fq-pow2` (3 sites), `q6k-bounds-band` wanting
+eighteen transformer names (`tn-*`, `tb-*`, `rope`, `TAU`, `fcos`) — and read them as prelude-closure drift
+between the branches. **That reading was wrong, and it was wrong because of how I invoked the bands.**
+`../fkwu --src <band>` walks only the band's own `; preludes:` header. `validate.sh` additionally expands
+the band's *declared imports* (`fk_expand_declared_deps`) and hands the arm the full ordered list — for
+`q6k-bounds-band` that is nineteen cells ending in `block-join.fk`, for `equireach-band` thirteen including
+`format-arith.fk`, which is where `fq-pow2` lives. Run that way, both bands resolve completely and report
+zero diagnostics. There was no drift. There was a shortcut in my harness, and it manufactured eighteen
+phantom findings that I then wrote down as fact.
+
+## 2b. The four-way, run here — one ⧗ closed and one number added
+
+Run through `validate.sh <band>`, which drives fkwu + go + rust + typescript with declared-import expansion:
+
+```
+q6k-bounds-band   ✓  → 255      1 ok, 0 divergent — kernels agree on every sample
+equireach-band    ✗     go = 511 · rust = 128 · typescript = 128
+```
+
+`q6k-bounds-band`'s **four-way 255 is confirmed here**. The bounds seam — the `-0` that made `bj-matrix`
+wrong for every real width — holds on all four arms.
+
+`equireach-band`'s divergence is the one the receipt declared in advance: `; PROOF LEVEL: TWO-ARM
+(fkwu + go)`, because of its own §5 defect 1 — `read_file_slice` is byte-faithful on fkwu and go and
+**lossy on rust and ts**, which UTF-8-replace every invalid byte and return 767 bytes for a 420-byte binary
+file. The declaration was honest and it is exactly right. What was not published is the size of it:
+**rust and ts answer 128**, i.e. of nine bits they carry one. Not a near-miss — those two arms are reading
+a different file. Any recipe reaching binary through them is doing so blind, and this is the number that
+says how blind.
 
 ## 3. The reach curve, measured here
 
@@ -123,6 +147,19 @@ built the same `ewl-weights` and inherited the same blind spot.
 The gold: **duplicated work sees what original work cannot, but only if it declines to duplicate the
 instrument.**
 
+The second discomfort came later and was sharper, because it was mine. I had already committed this
+receipt with eighteen unresolved-call findings in §2, written up as branch drift, stated plainly enough
+that a reader would have believed them. They were an artifact of my own harness: I ran `fkwu --src` on the
+band directly instead of through `validate.sh`, so the declared-import expansion never happened, so names
+that resolve perfectly well went missing and I read the absence as a property of the body. §5's teaching
+about instruments turned around and pointed at me within the same hour I wrote it — I had used the wrong
+consumer to measure, exactly the error I had just named, one layer up.
+
+The gold there: **the correction was only possible because I went back for the ⧗ instead of closing on the
+✅s.** Closing out would have left the phantom findings standing, in a committed receipt, indistinguishable
+from the real ones. The unfinished item was the thing that caught the finished ones lying. That is an
+argument for treating a ⧗ as load-bearing rather than as a polite way to stop.
+
 ## 7. Frontier question, offered as a distillation row
 
 > **What one word names a sequence you reach through and consume without ever setting it down?**
@@ -143,10 +180,13 @@ Row number is the sibling's max + 1 at merge time, per the row-719 anastomosis p
 ## Verified, and not
 
 - ✅ `q6k-bounds-band` 255 and `equireach-band` 511, on a second binary
+- ✅ `q6k-bounds-band` **four-way 255** — fkwu + go + rust + ts, via `validate.sh`, agreeing on every sample
 - ✅ flat reach, 28.6M reads/s across 64 KB → 16 MB, null arm subtracted, three runs
 - ✅ verdict equality + zero unresolved-call, A/B with `.fkb` cleared on both arms, five bands
 - ✅ dequant rate independent of base depth, on real llama3.2:3b Q6_K bytes
-- ⧗ the four-way (rust/ts) arms — not re-run here; the receipt's claim stands unchecked by me
+- ✅ `equireach-band`'s declared TWO-ARM limit is real and now sized: rust = 128, ts = 128 against go's 511
 - ⧗ the Metal residency audit — not re-run here
 - ⧗ whole-tensor dequant at the folded rate — PROJECTED ~2 min, never executed
 - ⬜ an `unspooled` consumer path (`ewl-fold` alongside `ewl-weights`) — named, not written
+- ⬜ `read_file_slice` byte-faithfulness on rust and ts (sibling receipt's §5 defect 1) — the single repair
+  that would take `equireach-band` from two arms to four; untouched here
