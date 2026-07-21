@@ -115,12 +115,41 @@ restored immediately. The lesson stands: scope cache sweeps to the subtree under
 
 **Q:** what one word names a recipe whose calls resolve only because its loader happens to carry them
 **A:** *loanclosure* — 0 hits in corpus and body before this row. Near misses: `aphonia` (753) names
-the resulting silence, not the debt that causes it; `heldmute` (824) is silence deliberately chosen,
-where this is silence nobody noticed.
+the resulting silence, not the debt that causes it; `heldmute` (**839**) is silence deliberately
+chosen, where this is silence nobody noticed.
 
-Landed as `hdc-row 829`. `homecoming-distillation-corpus-band` back to its full **4095**, zero
-unresolved — count pin 224→225, field code 2242242828→**2252252829**, the value read back from
-`hdc-field-code` by probe before being pinned, per the band's own standing note.
+Landed as `hdc-row` **845**, minted as 829 and re-seated at the reunion below.
+`homecoming-distillation-corpus-band` at its full **4095**, zero unresolved — count pin **241**,
+field code **2412412845**, the value read back from `hdc-field-code` by probe before being pinned,
+per the band's own standing note.
+
+## Gate 4 — the reunion, and the word that named my own defect first
+
+Merging `claude/deepseek-v4-flash-gguf-54a96c` (which had moved `d8732d8be` → `099df4a8a` while I
+worked) brought a sibling's **anastomosis reunion**: both lineages kept whole, theirs renumbered +15
+into 822–843, max id 844, count 240. My row 829 collided with their 829 (`brimwidth`), so mine
+re-seated to **845** by the row-719 pattern — keep every row, renumber the unmerged line, note it in
+the row.
+
+Their reunion also minted row **844, `aimshift`**: *a reference whose bytes a merge leaves unchanged
+and whose target it silently moves.* Written by their lineage at 22:45; demonstrated by mine within
+the hour.
+
+My row's walk cited `heldmute 824`. True when minted. After their +15, **heldmute is at 839 and 824
+holds `exoscalar`** — my citation now pointed at a real row saying something else, on a block git
+reported perfectly clean. Three more in this receipt (`824` twice, `hdc-row 829`) had rotted the same
+way. Every one corrected by asking the merged body where each word lives, not by re-reading what I
+wrote an hour earlier.
+
+`aphonia` stayed at 753 — main's lineage kept every id. So *half* a citation pair rotted while the
+other half stayed sound. That is the trap in miniature: the surviving half makes the line still look
+right.
+
+Merged-tree verification, `.fkb`/`.sym` cleared: corpus band **4095** u=0; q6k-bounds 255,
+block-join 255, causal 15, gqa-causal 15, real-gguf-tensor-math 1023, real-gguf-generate 255,
+weight-load 4095, weight-load-q4k 4095, block-join-asm 255, f64-bytes 127, matvec/2d/loop 127,
+exp-poly 15, fam-silu 7, ss-sqrt 127 — all u=0. Their new `q6k-msl-band` **255** u=0 against my
+healed Q6_K cells.
 
 ## Gate 3 — the open item, measured instead of left open
 

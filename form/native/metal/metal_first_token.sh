@@ -38,7 +38,7 @@
 #                                         are not constant across different prompts.
 #   7  TWO SIZES AND A SLOPE              the rate is measured at two different generation lengths, so
 #                                         no tok/s here is one point pretending to be a line
-#                                         (corpus row 812, unispan).
+#                                         (corpus row 827, unispan).
 #
 # Run:  form/native/metal/metal_first_token.sh [nsteps] ["prompt"]        (defaults 12, a fixed prompt)
 # Off-Mac (or with no swiftc) it SKIPs with exit 2, like every other Metal row in GPU_GAPS.md.
@@ -811,7 +811,7 @@ if profile {
 
 // ---- gates 10-11: the FAST paths generate the ATTESTANT's tokens ------------------------------------
 // AN EXTERNAL DENOMINATOR. Every ratio this program has ever reported was against its own attestant —
-// true, and silent about the world (corpus row 819, selfgauge). An ollama/llama.cpp oracle measured on
+// true, and silent about the world (corpus row 834, selfgauge). An ollama/llama.cpp oracle measured on
 // THIS machine, THIS model and THIS 2.0 GB blob over a 150-token sample is carried here so that no
 // speedup below can be read without its absolute cost. It is a MEASUREMENT MADE ELSEWHERE, quoted, not
 // re-run by this harness — labelled so, and never mixed into a gate.

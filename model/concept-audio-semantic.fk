@@ -1,0 +1,126 @@
+; concept-audio-semantic.fk -- Form-native spoken-concept feature learning.
+;
+; PCM enters as real speech. Form locates the WAV data chunk, measures four
+; temporal windows (energy, zero crossings, eight Goertzel bands), averages
+; supervised training voices into concept prototypes, and chooses the nearest
+; concept for a held-out voice. The OS voice is a temporary data carrier; the
+; DSP, prototype memory, distance, and decision live here.
+;
+; This is closed-set acoustic concept recognition, not open ASR.
+; witnessed: 2026-07-18 -> 3/3 held-out voice concepts, 40 real PCM features
+; preludes: form/form-stdlib/core.fk form/form-stdlib/trig.fk observe/wav-sense.fk observe/spectrum.fk model/concept-multimodal-codec.fk
+
+(do
+  (defn cas-abs (x) (if (lt x 0) (sub 0 x) x))
+  (defn cas-max (a b) (if (gt a b) a b))
+  (defn cas-min (a b) (if (lt a b) a b))
+  (defn cas-append (a b)
+    (if (eq (len a) 0) b (cons (head a) (cas-append (tail a) b))))
+  (defn cas-first-active (bs i end step threshold)
+    (if (ge i end) end
+      (if (ge (cas-abs (cmm-s16 bs i)) threshold) i
+        (cas-first-active bs (add i step) end step threshold))))
+  (defn cas-last-active (bs i start step threshold)
+    (if (le i start) start
+      (if (ge (cas-abs (cmm-s16 bs i)) threshold) i
+        (cas-last-active bs (sub i step) start step threshold))))
+  ; Keep 50 ms of context on each side, then divide active speech into four
+  ; aligned windows. At 16 kHz mono s16, 50 ms = 1,600 bytes.
+  (defn cas-active-bounds (bs off)
+    (do (let end (sub (str_len bs) 2))
+        (let first (cas-first-active bs off end 16 500))
+        (let last (cas-last-active bs end off 16 500))
+        (list (cas-max off (sub first 1600))
+              (cas-min end (add last 1600)))))
+  (defn cas-window-bytes (start end)
+    (mul 2 (div (div (sub end start) 4) 2)))
+  (defn cas-window-start (start width window) (add start (mul width window)))
+
+  (defn cas-abs-sum (bs i end step total count)
+    (if (ge i end) (list total count)
+      (cas-abs-sum bs (add i step) end step
+        (add total (cas-abs (cmm-s16 bs i))) (add count 1))))
+  (defn cas-energy (bs start end step)
+    (do (let result (cas-abs-sum bs start end step 0 0))
+        (if (eq (nth result 1) 0) 0
+          (div (div (nth result 0) (nth result 1)) 256))))
+
+  (defn cas-zc-go (bs i end step prev total)
+    (if (ge i end) total
+      (do (let sample (cmm-s16 bs i))
+          (cas-zc-go bs (add i step) end step sample
+            (if (or (and (lt prev 0) (ge sample 0))
+                    (and (ge prev 0) (lt sample 0)))
+              (add total 1) total)))))
+  (defn cas-zero-crossings (bs start end step)
+    (if (ge start end) 0
+      (div (cas-zc-go bs (add start step) end step (cmm-s16 bs start) 0) 4)))
+
+  (defn cas-window-features (bs off width window)
+    (do (let start (cas-window-start off width window))
+        (let end (add start width))
+        (cas-append
+          (list (cas-energy bs start end 8)
+                (cas-zero-crossings bs start end 8))
+          (spectrum-levels bs start end 8))))
+  (defn cas-features-go (bs start width window out)
+    (if (eq window 4) out
+      (cas-features-go bs start width (add window 1)
+        (cas-append out (cas-window-features bs start width window)))))
+  (defn cas-features-bytes (bs)
+    (do (let off (cmm-data-offset bs))
+        (if (eq off 0) (empty)
+          (do (let bounds (cas-active-bounds bs off))
+              (cas-features-go bs (nth bounds 0)
+                (cas-window-bytes (nth bounds 0) (nth bounds 1)) 0 (empty))))))
+  (defn cas-features-file (path) (cas-features-bytes (read_file path)))
+
+  (defn cas-vector-add (a b)
+    (if (eq (len a) 0) (empty)
+      (cons (add (head a) (head b)) (cas-vector-add (tail a) (tail b)))))
+  (defn cas-vector-div (a divisor)
+    (if (eq (len a) 0) (empty)
+      (cons (div (head a) divisor) (cas-vector-div (tail a) divisor))))
+  (defn cas-average3 (a b c)
+    (cas-vector-div (cas-vector-add a (cas-vector-add b c)) 3.0))
+
+  (defn cas-prototype (concept-id label features sources)
+    (list "concept-audio-prototype" concept-id label features sources))
+  (defn cas-prototype-id (p) (nth p 1))
+  (defn cas-prototype-label (p) (nth p 2))
+  (defn cas-prototype-features (p) (nth p 3))
+  (defn cas-prototype-sources (p) (nth p 4))
+  (defn cas-prototype3 (concept-id label path-a path-b path-c)
+    (cas-prototype concept-id label
+      (cas-average3 (cas-features-file path-a)
+                    (cas-features-file path-b)
+                    (cas-features-file path-c))
+      (list path-a path-b path-c)))
+
+  (defn cas-l1 (a b)
+    (if (eq (len a) 0) 0.0
+      (add (cas-abs (sub (head a) (head b))) (cas-l1 (tail a) (tail b)))))
+  (defn cas-nearest-go (features prototypes best best-distance)
+    (if (eq (len prototypes) 0) best
+      (do (let candidate (head prototypes))
+          (let distance (cas-l1 features (cas-prototype-features candidate)))
+          (if (lt distance best-distance)
+            (cas-nearest-go features (tail prototypes) candidate distance)
+            (cas-nearest-go features (tail prototypes) best best-distance)))))
+  (defn cas-nearest (features prototypes)
+    (cas-nearest-go features (tail prototypes) (head prototypes)
+      (cas-l1 features (cas-prototype-features (head prototypes)))))
+  (defn cas-distance (features prototype)
+    (cas-l1 features (cas-prototype-features prototype)))
+  (defn cas-distances (features prototypes)
+    (if (eq (len prototypes) 0) (empty)
+      (cons (list (cas-prototype-id (head prototypes))
+                  (cas-distance features (head prototypes)))
+            (cas-distances features (tail prototypes)))))
+  (defn cas-detect-file (path prototypes)
+    (do (let features (cas-features-file path))
+        (let winner (cas-nearest features prototypes))
+        (list (cas-prototype-id winner) (cas-prototype-label winner)
+              (cas-distance features winner) (cas-distances features prototypes)
+              features)))
+)
