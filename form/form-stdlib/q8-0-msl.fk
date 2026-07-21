@@ -1,0 +1,125 @@
+; q8-0-msl.fk — the Q8_0 carver the body did not have, as a Metal kernel the BODY emits.
+;
+; WHY THIS EXISTS. GPU_GAPS.md:29 named Q8_0 as missing, and Stone 11's gap map
+; (receipts/2026-07-21-ds4-metal-gap-map.md, row 5 of the capability table) measured exactly what that
+; costs: dolphin-2.9-mixtral-8x22b carries 112 Q8_0 tensors — every `attn_k` and `attn_v` in its 56
+; layers. Not exotic, and not large (0.70 GiB of a 107.59 GiB file), but a decode that cannot read them
+; cannot take one step. Every other quantization the body owns (Q4_K, Q6_K) has a 256-weight
+; superblock; Q8_0's block is 32. That difference — and NOT the arithmetic — is the whole of the work,
+; which is why the gap map called this "structurally the easiest quant we could add".
+;
+; THE FORMAT, and it is the simplest one ggml has:
+;
+;   block_q8_0 = { half d; int8_t qs[32]; }        34 bytes per 32 weights, w_i = d * q_i
+;
+; No sub-scales, no nibbles, no high-bit plane, no mins. One f16 super-scale and 32 signed bytes.
+;
+; BIT-EXACTNESS IS CLAIMABLE HERE, and more strongly than for Q6_K. w = d * q with d an f16 value
+; (11-bit significand) and q a signed int8 (<= 8 bits). The product needs <= 19 significand bits, so it
+; is EXACT in f32 — it does not even round once. Form computes the same product in fp64 (53 bits,
+; exact) and the carrier rounds that exact value once to f32, which is the same f32. So the audit gate
+; is EQUALITY, not an epsilon. (Q6_K's argument needed 25 bits and one rounding; this one needs none.)
+;
+; NO HEADER, ON PURPOSE — the same discipline q6k-msl.fk states and for the same reason: the f16
+; super-scale is decoded by ARITHMETIC (q80_f16 is fd-value at eb=5, mb=10, transcribed line for line),
+; not by `as_type<half>`, which lives in <metal_stdlib>. A carrier that emits this next to q6k-msl.fk's
+; unit must emit ONE spine, so the shared helpers are factored: `q80-msl-helpers` emits the f16 decode
+; and the int helpers, and `q80-msl-appendix` emits ONLY the Q8_0-specific pieces, for a unit that
+; already has q6k_mod / q6k_s8 / q6k_f16 in it.
+;
+; THE RADIUS THIS CELL SPEAKS FOR. GGML type 8 (Q8_0) only, little-endian f16 super-scale, and a flat
+; weight index whose block boundary is idx/32 — that is, a caller whose tensor base is itself a block
+; boundary. It does NOT speak for Q8_1 (which carries a second f16 sum and a 36-byte block), and it
+; does NOT speak for the MSL compiler or the GPU: the transcription is proven by
+; form-stdlib/tests/q8-0-msl-band.fk and the GPU by form/native/metal/metal_moe_token.sh, which gates a
+; Q8_0 fused matvec at the REAL width (6144) of a real blk.0.attn_k row of dolphin-mixtral-8x22b
+; against Form's fp64 dot.
+;
+; Kin: q6k-msl.fk (the pattern this follows exactly — transcription read back into Form, then the same
+; text emitted as C; and the owner of q6k_mod/q6k_s8/q6k_f16, which this cell reuses rather than
+; re-mints), f16-decode.fk (fd-value at (5,10) — the recipe q80_f16 transcribes), q6k-dequant.fk
+; (q6k-mod / q6k-s8 — the one integer spine), equireach-gguf.fk (eqr-at — the byte reach).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk
+;
+; Proven by: form-stdlib/tests/q8-0-msl-band.fk (the transcription, against an independently written
+;            reference) and form/native/metal/metal_moe_token.sh (the GPU, Mac-only).
+
+(do
+    ; ================= the transcription, read back into Form =================
+    ; This is what the emitted C computes, written in Form with the same flat index, the same block
+    ; stride and the same literal byte offsets. It exists so a band can falsify the transcription.
+
+    (defn q80-stride () 34)                          ; bytes per Q8_0 block
+    (defn q80-block-n () 32)                         ; weights per block
+    (defn q80-blk (idx) (div idx (q80-block-n)))     ; which block a flat weight index falls in
+    (defn q80-i   (idx) (q6k-mod idx (q80-block-n))) ; and where inside it
+
+    ; the block's f16 super-scale, at bytes 0..1 of the block, little-endian
+    (defn q80-d (src b) (fd-f16 (add (eqr-at src b) (mul 256 (eqr-at src (add b 1))))))
+
+    ; the signed byte, at byte 2 + i of the block. q6k-s8 is the body's one two's-complement reach.
+    (defn q80-q (src b i) (q6k-s8 (eqr-at src (add b (add 2 i)))))
+
+    ; the weight at a flat index, relative to a base that is itself a block boundary
+    (defn q80-flat-at (src base idx)
+        (do
+            (let b (add base (mul (q80-blk idx) (q80-stride))))
+            (mul (q80-d src b) (q80-q src b (q80-i idx)))))
+
+    ; byte length of a Q8_0 tensor of n weights — n must be a whole multiple of 32, which every
+    ; ggml Q8_0 tensor is by construction (that is what the quantizer emits).
+    (defn q80-bytes (n) (mul (div n (q80-block-n)) (q80-stride)))
+
+    ; ================= the emitted MSL =================
+    ; str_concat over named fragments, one fragment per meaning, so a diff of the emitted text points
+    ; at a recipe and not at a blob.
+
+    ; The shared integer + f16 spine, IDENTICAL to q6k-msl.fk's (q6m-msl-int / q6m-msl-f16) because it
+    ; is the same meaning: one definition of q6k_mod, q6k_s8 and q6k_f16 in the body, reached a fourth
+    ; time. A unit that already emits q6k-msl.fk's helpers must NOT emit these again — Metal rejects a
+    ; repeated definition, loudly — so `q80-msl-appendix` below exists for exactly that case.
+    (defn q80-msl-spine ()
+        (str_concat (q6m-msl-int) (q6m-msl-f16)))
+
+    ; the weight itself, at a flat index into the quantized tensor — q80-flat-at, in C. The whole
+    ; format is these four lines.
+    (defn q80-msl-weight ()
+        "static inline float q80_w(device const uchar* qb, uint idx) { uint blk = idx / 32u; uint i = idx - blk * 32u; uint b = blk * 34u; float d = q6k_f16(int(qb[b]) + 256 * int(qb[b + 1u])); int q = q6k_s8(int(qb[b + 2u + i])); return d * float(q); } ")
+
+    ; --- kernel 1: dequant a range of the resident quantized tensor into f32. One thread per weight.
+    ; `off` is a flat WEIGHT offset, the same contract q6m-dequant-body keeps. ---
+    (defn q80-dequant-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = q80_w(qb, off + i); }")))
+
+    ; --- kernel 2: the FUSED matvec, THE ATTESTANT. One thread per row, j counting DOWN and the
+    ; accumulate `p + acc` — tb-dot's right fold, the same op order q6m-matvec-body emits, so a Q8_0
+    ; row and a Q6_K row are comparable and the carrier's epsilon argument is one argument, not two. ---
+    (defn q80-matvec-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = q80_w(qb, uint(i) * cols + j) * float(x[j]); acc = p + acc; } y[i] = acc; }")))
+
+    ; --- kernel 3: the LANE matvec. One SIMD group per row, reduced by simd_sum. This REASSOCIATES the
+    ; row sum and so answers to an epsilon, not to equality — the same standing qk-matvec-lane.fk's
+    ; lane kernel has, for the same reason and with the same shape (32 lanes, stride 32, simd_sum).
+    ; It needs <metal_stdlib> for simd_sum, so the emitting unit must lead with that header; the call
+    ; is fully qualified (metal::simd_sum) so no unqualified name in the unit is disturbed. ---
+    (defn q80-matvec-lane-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint tid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = tid / 32u; if (r >= rows) return; float acc = 0.0f; uint j = lane; while (j < cols) { float p = q80_w(qb, r * cols + j) * float(x[j]); acc = acc + p; j += 32u; } float s = metal::simd_sum(acc); if (lane == 0u) { y[r] = s; } }")))
+
+    ; --- the emitted forms. `q80-msl-appendix` is what a carrier that ALREADY emitted q6k-msl.fk's
+    ; spine appends; `q80-msl-unit` is the self-contained form, for a caller that wants Q8_0 alone. ---
+    (defn q80-msl-appendix (dname mname lname)
+        (str_concat (q80-msl-weight)
+        (str_concat (q80-dequant-body dname)
+        (str_concat (q80-matvec-body mname)
+                    (q80-matvec-lane-body lname)))))
+    (defn q80-msl-unit (dname mname lname)
+        (str_concat (q80-msl-spine) (q80-msl-appendix dname mname lname)))
+
+    0)
