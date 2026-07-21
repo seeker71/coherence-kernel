@@ -22,6 +22,8 @@ incumbent_id=base.llama32-3b-local
 incumbent_tag=llama3.2:3b
 task_lane=translation
 ledger="$NM_STATE_DIR/events.jsonl"
+eval_corpus=${NATIVE_MODEL_EVAL_CORPUS:-"$HOME/.coherence-network/form-train-runs/translation-corpus/heldout.jsonl"}
+eval_items=${NATIVE_MODEL_EVAL_ITEMS:-5}
 
 temp_dir=$(nm_new_temp_dir)
 before="$temp_dir/artifacts-before"
@@ -30,6 +32,7 @@ prompt_file="$temp_dir/prompt"
 expected_file="$temp_dir/expected"
 form_result="$temp_dir/form-result"
 summary="$temp_dir/summary"
+case_stream="$temp_dir/heldout-cases"
 nm_snapshot_generated "$before"
 
 cleanup() {
@@ -38,10 +41,21 @@ cleanup() {
 }
 trap cleanup EXIT HUP INT TERM
 
-printf '%s\n' \
-    'Translate this sentence from English to Brazilian Portuguese. Return only the translation: The kernel runs Form source directly.' \
-    > "$prompt_file"
-printf '%s\n' 'O núcleo executa diretamente a fonte Form.' > "$expected_file"
+case "$eval_items" in ''|*[!0-9]*|0) printf 'invalid NATIVE_MODEL_EVAL_ITEMS\n' >&2; exit 64;; esac
+if [ ! -f "$eval_corpus" ]; then
+    printf 'missing heldout evaluation corpus: %s\n' "$eval_corpus" >&2
+    exit 1
+fi
+day=$(date -u +%Y%m%d)
+corpus_rows=$(jq -s 'length' "$eval_corpus")
+if [ "$corpus_rows" -lt "$eval_items" ]; then
+    printf 'insufficient heldout rows: %s\n' "$corpus_rows" >&2
+    exit 1
+fi
+offset=$((day % corpus_rows))
+jq -c -s --argjson offset "$offset" --argjson count "$eval_items" \
+    '. as $rows | ($rows[$offset:] + $rows[:$offset])[:$count] | .[] | {task,answer}' \
+    "$eval_corpus" > "$case_stream"
 
 observe_show() {
     observe_tag=$1
@@ -93,37 +107,49 @@ call_model() {
     nm_sha256_file "$call_output" > "$temp_dir/$call_prefix-output-sha"
 }
 
-call_model "$candidate_tag" candidate
-call_model "$incumbent_tag" incumbent
-
-day=$(date -u +%Y%m%d)
-{
-    printf '%s\n' "$day" "$task_lane" "$candidate_id"
-    cat "$temp_dir/candidate-before-artifact"
-    cat "$temp_dir/candidate-after-artifact"
-    cat "$temp_dir/candidate-before-identity"
-    cat "$temp_dir/candidate-after-identity"
-    cat "$temp_dir/candidate-latency"
-    cat "$temp_dir/candidate-error"
-    sed -n '1p' "$temp_dir/candidate-output"
-    printf '%s\n' "$incumbent_id"
-    cat "$temp_dir/incumbent-before-artifact"
-    cat "$temp_dir/incumbent-after-artifact"
-    cat "$temp_dir/incumbent-before-identity"
-    cat "$temp_dir/incumbent-after-identity"
-    cat "$temp_dir/incumbent-latency"
-    cat "$temp_dir/incumbent-error"
-    sed -n '1p' "$temp_dir/incumbent-output"
-    sed -n '1p' "$prompt_file"
-    sed -n '1p' "$expected_file"
-} | "$NM_FKWU" --src form/form-stdlib/native-model-eval-cli.fk \
-    > "$form_result"
+: > "$form_result"
+while IFS= read -r case_json
+do
+    source_text=$(printf '%s' "$case_json" | jq -r '.task')
+    answer_text=$(printf '%s' "$case_json" | jq -r '.answer')
+    printf 'Translate from English to Brazilian Portuguese. Return only the translation: %s\n' \
+        "$source_text" > "$prompt_file"
+    printf '%s\n' "$answer_text" > "$expected_file"
+    call_model "$candidate_tag" candidate
+    call_model "$incumbent_tag" incumbent
+    {
+        printf '%s\n' "$day" "$task_lane" "$candidate_id"
+        cat "$temp_dir/candidate-before-artifact" "$temp_dir/candidate-after-artifact"
+        cat "$temp_dir/candidate-before-identity" "$temp_dir/candidate-after-identity"
+        cat "$temp_dir/candidate-latency" "$temp_dir/candidate-error"
+        sed -n '1p' "$temp_dir/candidate-output"
+        printf '%s\n' "$incumbent_id"
+        cat "$temp_dir/incumbent-before-artifact" "$temp_dir/incumbent-after-artifact"
+        cat "$temp_dir/incumbent-before-identity" "$temp_dir/incumbent-after-identity"
+        cat "$temp_dir/incumbent-latency" "$temp_dir/incumbent-error"
+        sed -n '1p' "$temp_dir/incumbent-output" "$prompt_file" "$expected_file"
+    } | "$NM_FKWU" --src form/form-stdlib/native-model-eval-cli.fk >> "$form_result"
+done < "$case_stream"
 
 sed '/^$/d; /^0$/d; /^fkwu: warning:/d' "$form_result" > "$summary"
 if ! grep -q '^paired=1$' "$summary"; then
     printf 'Form could not pair the local diagnostic\n' >&2
     cat "$summary" >&2
     exit 1
+fi
+observations=$(awk -F= '$1 == "paired" && $2 == 1 { n += 1 } END { print n + 0 }' "$summary")
+if [ "$observations" -ne "$eval_items" ]; then
+    printf 'Form could not pair every heldout observation: expected=%s observed=%s\n' \
+        "$eval_items" "$observations" >&2
+    exit 1
+fi
+candidate_total=$(awk -F= '$1 == "candidate_score_ppm" { s += $2 } END { print s + 0 }' "$summary")
+incumbent_total=$(awk -F= '$1 == "incumbent_score_ppm" { s += $2 } END { print s + 0 }' "$summary")
+candidate_mean=$((candidate_total / observations))
+incumbent_mean=$((incumbent_total / observations))
+if [ "$candidate_mean" -gt "$incumbent_mean" ]; then quality_decision=observed-better
+elif [ "$candidate_mean" -lt "$incumbent_mean" ]; then quality_decision=observed-not-better
+else quality_decision=observed-tie
 fi
 
 input_sha=$(nm_sha256_file "$prompt_file")
@@ -162,6 +188,11 @@ candidate_event=$(append_eval_event candidate "$candidate_id")
 incumbent_event=$(append_eval_event incumbent "$incumbent_id")
 {
     cat "$summary"
+    printf 'diagnostic_scope=bounded-heldout-paired-quality-check\n'
+    printf 'diagnostic_observations=%s\n' "$observations"
+    printf 'candidate_mean_score_ppm=%s\n' "$candidate_mean"
+    printf 'incumbent_mean_score_ppm=%s\n' "$incumbent_mean"
+    printf 'candidate_quality_decision=%s\n' "$quality_decision"
     printf 'candidate_event_sha256=%s\n' "$candidate_event"
     printf 'incumbent_event_sha256=%s\n' "$incumbent_event"
     printf 'raw_text_persisted=0\n'
