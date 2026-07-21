@@ -1,0 +1,98 @@
+; concept-video-content-sensing.fk -- semantic evidence over pretrained vision labels.
+;
+; A host vision carrier may name visible objects and scene attributes, but it
+; does not choose a kernel concept. This Form organ composes those raw labels
+; into transparent evidence for three real-life concepts and refuses a result
+; below an absolute score or margin. It never receives a filename, scene name,
+; concept id, caption, or identity envelope.
+;
+; This is a small closed evidence vocabulary, not open-vocabulary parity. The
+; target ids are aligned to the ranked 10k substrate: office=493,
+; university=1927, courthouse=9066. In particular, `court`=751 is not silently
+; used for courthouse pixels and a route named `loop` is not treated as a
+; picture of the lexical concept loop.
+;
+; witnessed: 2026-07-18 -> pure evidence band 1023; live raw/band 3/3
+; preludes: form/form-stdlib/core.fk
+
+(do
+  (defn cvcs-key (label weight) (list label weight))
+  (defn cvcs-office-keys ()
+    (list (cvcs-key "whiteboard" 4) (cvcs-key "computer" 3)
+          (cvcs-key "computer_monitor" 2) (cvcs-key "desk" 3)
+          (cvcs-key "printer" 2) (cvcs-key "interior_room" 2)
+          (cvcs-key "office_supplies" 2) (cvcs-key "document" 1)
+          (cvcs-key "cabinet" 1) (cvcs-key "handwriting" 1)))
+  (defn cvcs-university-keys ()
+    (list (cvcs-key "university" 8) (cvcs-key "campus" 8)
+          (cvcs-key "college" 8) (cvcs-key "classroom" 6)
+          (cvcs-key "library" 5) (cvcs-key "dormitory" 5)
+          (cvcs-key "arena" 4) (cvcs-key "rink" 4)
+          (cvcs-key "bridge" 2) (cvcs-key "bench" 2)
+          (cvcs-key "bicycle" 1)))
+  (defn cvcs-courthouse-keys ()
+    (list (cvcs-key "courthouse" 8) (cvcs-key "court" 8)
+          (cvcs-key "dome" 4) (cvcs-key "statue" 3)
+          (cvcs-key "fountain" 3) (cvcs-key "flag" 2)
+          (cvcs-key "arch" 2) (cvcs-key "column" 2)))
+
+  ; The tab anchors a raw classifier identifier rather than prose. A following
+  ; newline makes exact-label checks possible while prefix membership admits
+  ; canonical compounds such as `computer_monitor` for the broader `computer`.
+  (defn cvcs-has-label? (raw label)
+    (if (ge (str_find raw (str_concat "\t" label) 0) 0) 1 0))
+  (defn cvcs-has-exact-label? (raw label)
+    (if (ge (str_find raw (str_concat "\t" (str_concat label "\n")) 0) 0) 1 0))
+  (defn cvcs-key-score (raw keys)
+    (if (eq (len keys) 0) 0
+      (add (if (eq (cvcs-has-label? raw (nth (head keys) 0)) 1)
+               (nth (head keys) 1) 0)
+           (cvcs-key-score raw (tail keys)))))
+  (defn cvcs-evidence (raw keys)
+    (if (eq (len keys) 0) (empty)
+      (if (eq (cvcs-has-label? raw (nth (head keys) 0)) 1)
+        (cons (head keys) (cvcs-evidence raw (tail keys)))
+        (cvcs-evidence raw (tail keys)))))
+  (defn cvcs-score-frames (frames keys)
+    (if (eq (len frames) 0) 0
+      (add (cvcs-key-score (head frames) keys)
+           (cvcs-score-frames (tail frames) keys))))
+  (defn cvcs-evidence-frames (frames keys)
+    (if (eq (len frames) 0) (empty)
+      (append (cvcs-evidence (head frames) keys)
+              (cvcs-evidence-frames (tail frames) keys))))
+  (defn cvcs-exact-frames? (frames label)
+    (if (eq (len frames) 0) 0
+      (if (eq (cvcs-has-exact-label? (head frames) label) 1) 1
+        (cvcs-exact-frames? (tail frames) label))))
+
+  ; score row = (id label score visible-evidence)
+  (defn cvcs-score-row (id label frames keys)
+    (list id label (cvcs-score-frames frames keys)
+          (cvcs-evidence-frames frames keys)))
+  (defn cvcs-score-rows (frames)
+    (list (cvcs-score-row 493 "office" frames (cvcs-office-keys))
+          (cvcs-score-row 1927 "university" frames (cvcs-university-keys))
+          (cvcs-score-row 9066 "courthouse" frames (cvcs-courthouse-keys))))
+  (defn cvcs-best-row (rows best)
+    (if (eq (len rows) 0) best
+      (cvcs-best-row (tail rows)
+        (if (gt (nth (head rows) 2) (nth best 2)) (head rows) best))))
+  (defn cvcs-second-score (rows winner-id best)
+    (if (eq (len rows) 0) best
+      (cvcs-second-score (tail rows) winner-id
+        (if (and (not (eq (nth (head rows) 0) winner-id))
+                 (gt (nth (head rows) 2) best))
+          (nth (head rows) 2) best))))
+  ; detection = (id label score margin score-rows accepted? direct-name-hit?)
+  (defn cvcs-detect-labels (frames)
+    (do (let rows (cvcs-score-rows frames))
+        (let winner (cvcs-best-row (tail rows) (head rows)))
+        (let second (cvcs-second-score rows (nth winner 0) 0))
+        (let margin (sub (nth winner 2) second))
+        (let accepted (if (and (ge (nth winner 2) 10) (ge margin 4)) 1 0))
+        (let direct (cvcs-exact-frames? frames (nth winner 1)))
+        (if (eq accepted 1)
+          (list (nth winner 0) (nth winner 1) (nth winner 2) margin rows 1 direct)
+          (list -1 "unknown" (nth winner 2) margin rows 0 direct))))
+)

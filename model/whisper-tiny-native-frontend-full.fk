@@ -1,0 +1,186 @@
+; whisper-tiny-native-frontend-full.fk — the whole committed utterance in Form.
+;
+; The bounded eight-column witness is generalized here to every complete
+; 400-sample frame in the CC0 WAV. One shared Whisper dynamic-range peak
+; normalizes all columns. Released conv1 uses its specified one-column zero
+; padding; released stride-two conv2 uses its specified one-token zero padding.
+; Every
+; resulting token receives its corresponding released encoder position and
+; crosses all four released encoder blocks plus final layer norm.
+;
+; This is the full valid-STFT utterance carried by the committed waveform, with
+; the released convolutions' exact boundary padding. It is not Whisper's
+; separate centered-STFT and 30-second feature-padding policy.
+; witnessed: 2026-07-20 -> full-valid-utterance frontend generalized; live due
+; preludes: form/form-stdlib/core.fk model/whisper-tiny-native-vocabulary.fk
+
+(do
+  (defn wtf-sample-count (wav data-offset)
+    (div (sub (str_len wav) data-offset) 2))
+  (defn wtf-frame-count (sample-count)
+    (if (lt sample-count (wtc-frame-size)) 0
+      (add 1 (div (sub sample-count (wtc-frame-size)) (wtc-hop-size)))))
+  (defn wtf-log-mel-go (wav data-offset frame count out)
+    (if (eq frame count) (reverse out)
+      (wtf-log-mel-go wav data-offset (add frame 1) count
+        (cons (wtc-log-mel-col (wtc-window wav data-offset
+          (mul frame (wtc-hop-size)))) out))))
+  (defn wtf-log-mel (wav data-offset)
+    (do
+      (let samples (wtf-sample-count wav data-offset))
+      (wtf-log-mel-go wav data-offset 0 (wtf-frame-count samples) (empty))))
+
+  (defn wtf-append (xs value)
+    (if (eq (len xs) 0) (list value)
+      (cons (head xs) (wtf-append (tail xs) value))))
+
+  (defn wtf-conv1-go (conv1 cols out)
+    (if (lt (len cols) 3) (reverse out)
+      (wtf-conv1-go conv1 (tail cols)
+        (cons (wt2-gelu-map (wtc-token conv1
+          (list (head cols) (head (tail cols))
+            (head (tail (tail cols)))))) out))))
+  (defn wtf-conv1 (stem normalized-cols)
+    (wtf-conv1-go (wt2-conv1-pack stem)
+      (cons (tb-zeros 80) (wtf-append normalized-cols (tb-zeros 80)))
+      (empty)))
+  (defn wtf-conv2-one (stem tokens)
+    (wt2-token-go (wt2-weight-bytes stem) (wt2-bias-bytes stem)
+      (list (head tokens) (head (tail tokens))
+        (head (tail (tail tokens)))) 0 (empty)))
+  (defn wtf-conv2-go (stem tokens out)
+    (if (lt (len tokens) 3) (reverse out)
+      (wtf-conv2-go stem (tail (tail tokens))
+        (cons (wtf-conv2-one stem tokens) out))))
+  (defn wtf-conv2 (stem conv1-tokens)
+    (wtf-conv2-go stem
+      (cons (tb-zeros 384) (wtf-append conv1-tokens (tb-zeros 384)))
+      (empty)))
+
+  (defn wtf-position-go (carrier tokens position out)
+    (if (eq (len tokens) 0) (reverse out)
+      (wtf-position-go carrier (tail tokens) (add position 1)
+        (cons (wte0-position carrier (head tokens) position) out))))
+  (defn wtf-position (carrier tokens)
+    (wtf-position-go carrier tokens 0 (empty)))
+  (defn wtf-stage-distance (before after)
+    (wte0-vector-distance (nth before (sub (len before) 1))
+      (nth after (sub (len after) 1))))
+  (defn wtf-three-fingerprints (tokens)
+    (if (eq (len tokens) 0) (empty)
+      (do
+        (let middle (div (len tokens) 2))
+        (list (wt2-fingerprint (head tokens))
+          (wt2-fingerprint (nth tokens middle))
+          (wt2-fingerprint (nth tokens (sub (len tokens) 1)))))))
+  (defn wtf-causal-parameter-count (encoder-tokens)
+    (add (wt2-stem-parameter-count)
+      (add (mul 4 (wte0-layer-parameter-count))
+        (add (mul encoder-tokens 384) 768))))
+
+  ; Keep only conv2 tokens and compact observations across the encoder seam.
+  ; Mel columns and the 69 conv1 vectors can then be reclaimed before the
+  ; quadratic attention path begins.
+  (defn wtf-frontend-file (path)
+    (do
+      (let wav (fs-read-slice path 0 (fs-stat-size path)))
+      (let data-offset (wtc-wav-data-offset wav))
+      (let sample-count (wtf-sample-count wav data-offset))
+      (let mel (wtf-log-mel wav data-offset))
+      (let normalized (wtc-normalize-tile mel))
+      (let stem (wt2-load-weights))
+      (let conv1 (if (eq (wt2-weights-valid? stem) 1)
+        (wtf-conv1 stem (nth normalized 1)) (empty)))
+      (let conv2 (if (gt (len conv1) 2) (wtf-conv2 stem conv1) (empty)))
+      (list "whisper-tiny-native-full-valid-stft-frontend" path
+        (str_len wav) data-offset sample-count (len mel) (nth normalized 0)
+        (len (nth normalized 1)) (len conv1) (len conv2)
+        (wt2-weights-valid? stem)
+        (wtf-three-fingerprints conv1) (wtf-three-fingerprints conv2)
+        (wt2-stem-parameter-count)
+        "full-encoder-attempt" "exit-1-before-verdict-on-first-retained-state-run"
+        "native-recognizer" 0
+        "remaining" "centered-stft+30-second-feature-padding+complete-encoder-rewitness"
+        conv2)))
+  (defn wtf-frontend-summary-file (path)
+    (do
+      (let result (wtf-frontend-file path))
+      (list (nth result 0)
+        "samples" (nth result 4) "valid-mel-columns" (nth result 5)
+        "conv1-tokens" (nth result 8) "conv2-tokens" (nth result 9)
+        "peak" (nth result 6) "weights-valid" (nth result 10)
+        "conv1-fingerprints" (nth result 11)
+        "conv2-fingerprints" (nth result 12)
+        "released-stem-parameters" (nth result 13)
+        "native-recognizer" 0 "remaining" (nth result 19))))
+
+  (defn wtf-infer-file (path)
+    (do
+      (let frontend (wtf-frontend-file path))
+      (let pack0 (wte0-load))
+      (let pack13 (wte-load))
+      (let conv2 (nth frontend 20))
+      (let positioned (if (gt (len conv2) 0)
+        (wtf-position (wte0-carrier pack0) conv2) (empty)))
+      (let layer0 (if (gt (len positioned) 0)
+        (wte0-layer0 (wte0-carrier pack0) positioned) (empty)))
+      (let out0 (if (eq (len layer0) 7) (nth layer0 0) (empty)))
+      (let layer1 (if (gt (len out0) 0)
+        (wte-layer (wte-carrier pack13) 0 out0) (empty)))
+      (let out1 (if (eq (len layer1) 7) (nth layer1 0) (empty)))
+      (let layer2 (if (gt (len out1) 0)
+        (wte-layer (wte-carrier pack13) (wte-layer-byte-count) out1) (empty)))
+      (let out2 (if (eq (len layer2) 7) (nth layer2 0) (empty)))
+      (let layer3 (if (gt (len out2) 0)
+        (wte-layer (wte-carrier pack13) (mul 2 (wte-layer-byte-count)) out2)
+        (empty)))
+      (let out3 (if (eq (len layer3) 7) (nth layer3 0) (empty)))
+      (let final (if (gt (len out3) 0)
+        (wte0-layernorm-seq (wte0-carrier pack0)
+          (wte0-encoder-ln-weight-off) (wte0-encoder-ln-bias-off) out3)
+        (empty)))
+      (let fingerprints (if (gt (len final) 0)
+        (list (wtf-three-fingerprints out0) (wtf-three-fingerprints out1)
+          (wtf-three-fingerprints out2) (wtf-three-fingerprints out3)
+          (wtf-three-fingerprints final)) (empty)))
+      (let distances (if (gt (len final) 0)
+        (list (wtf-stage-distance positioned out0)
+          (wtf-stage-distance out0 out1) (wtf-stage-distance out1 out2)
+          (wtf-stage-distance out2 out3) (wtf-stage-distance out3 final)
+          (wte0-vector-distance (head final)
+            (nth final (sub (len final) 1)))) (empty)))
+      (list "whisper-tiny-native-full-utterance-encoder" path
+        (nth frontend 2) (nth frontend 3) (nth frontend 4)
+        (nth frontend 5) (nth frontend 6) (nth frontend 7)
+        (nth frontend 8) (nth frontend 9) (len positioned)
+        (len out0) (len out1) (len out2) (len out3) (len final)
+        (if (gt (len final) 0) (len (head final)) 0)
+        (wtf-causal-parameter-count (len final))
+        (wte-encoder-carried-parameter-count)
+        (if (and (eq (nth frontend 10) 1)
+              (and (eq (wte0-valid? pack0) 1) (eq (wte-valid? pack13) 1))) 1 0)
+        fingerprints distances
+        "native-full-valid-stft-utterance" (if (gt (len final) 0) 1 0)
+        "native-encoder-complete" (if (gt (len final) 0) 1 0)
+        final)))
+
+  (defn wtf-truth-file (path)
+    (do
+      (let encoder-result (wtf-infer-file path))
+      (let encoder (nth encoder-result 26))
+      (let step (if (gt (len encoder) 0)
+        (wtv-generated-step encoder (wtv-prompt-ids) 0)
+        (list -1 "" 0.0 -1 0.0 0.0)))
+      (list "whisper-tiny-native-full-utterance-truth"
+        "samples" (nth encoder-result 4)
+        "valid-mel-columns" (nth encoder-result 5)
+        "conv1-tokens" (nth encoder-result 8)
+        "conv2-encoder-tokens" (nth encoder-result 9)
+        "encoder-width" (nth encoder-result 16)
+        "generated-token" (nth step 0) "generated-text" (nth step 1)
+        "human-truth" "book"
+        "truth-first-token-match" (wtv-human-book-token-match? step)
+        "native-recognizer" 0
+        "remaining" "centered-stft+30-second-feature-padding+autoregressive-complete-transcript+truth-match"
+        "encoder" encoder-result)))
+  0)

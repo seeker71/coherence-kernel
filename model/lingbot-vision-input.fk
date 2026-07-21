@@ -1,0 +1,204 @@
+; lingbot-vision-input.fk — native image/video ingress and a small frame ViT.
+;
+; Grounded in LingBot-Map commit 7ff6f3ed0913d4d326f8f13bbb429c4ffc0195c2:
+; aggregator/base.py normalizes RGB, builds either a Conv2d patch embed or a
+; DINOv2 ViT patch embed, then stream.py applies a frame Block before global
+; attention. This cell closes that executable shape at small scale:
+;
+;   24-bit BMP bytes -> RGB pixels -> non-overlapping 4x4 convolutional patch
+;   projection -> learned frame token + position signal -> pre-LN Q/K/V
+;   self-attention -> residual FFN -> one encoded frame, repeated for a list
+;   of frames.
+;
+; The numeric weights are small deterministic native weights. They are not the
+; released LingBot/DINO checkpoint and no parity with that checkpoint is
+; claimed. Video ingress means an ordered frame sequence, matching the upstream
+; demo's image-folder/video-to-frames boundary; video decoding is not claimed.
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk form/form-stdlib/transformer-numerics.fk cognition/transformer-block.fk
+(do
+  ; ---- strict 24-bit uncompressed BMP ingress --------------------------------
+  (defn lvi-u16 (s i)
+    (add (str_byte_at s i) (mul 256 (str_byte_at s (add i 1)))))
+  (defn lvi-u32 (s i)
+    (add (lvi-u16 s i) (mul 65536 (lvi-u16 s (add i 2)))))
+  (defn lvi-i32 (s i)
+    (do (let u (lvi-u32 s i))
+        (if (ge u 2147483648) (sub u 4294967296) u)))
+  (defn lvi-abs (x) (if (lt x 0) (sub 0 x) x))
+  (defn lvi-width (s) (lvi-i32 s 18))
+  (defn lvi-signed-height (s) (lvi-i32 s 22))
+  (defn lvi-height (s) (lvi-abs (lvi-signed-height s)))
+  (defn lvi-data-offset (s) (lvi-u32 s 10))
+  (defn lvi-row-stride (s)
+    (mul 4 (div (add (mul 3 (lvi-width s)) 3) 4)))
+  (defn lvi-required-bytes (s)
+    (add (lvi-data-offset s) (mul (lvi-row-stride s) (lvi-height s))))
+  (defn lvi-bmp24? (s)
+    (if (lt (str_len s) 54) 0
+      (if (and (eq (str_byte_at s 0) 66) (eq (str_byte_at s 1) 77))
+        (if (and (eq (lvi-u16 s 26) 1) (eq (lvi-u16 s 28) 24))
+          (if (and (eq (lvi-u32 s 30) 0) (gt (lvi-width s) 0))
+            (if (and (not (eq (lvi-signed-height s) 0))
+                     (le (lvi-required-bytes s) (str_len s))) 1 0)
+            0)
+          0)
+        0)))
+  ; info = (width height top-down? row-stride data-offset byte-count)
+  (defn lvi-image-info (s)
+    (list (lvi-width s) (lvi-height s)
+          (if (lt (lvi-signed-height s) 0) 1 0)
+          (lvi-row-stride s) (lvi-data-offset s) (str_len s)))
+  (defn lvi-storage-y (s y)
+    (if (lt (lvi-signed-height s) 0) y (sub (sub (lvi-height s) 1) y)))
+  (defn lvi-pixel-index (s x y)
+    (add (lvi-data-offset s)
+      (add (mul (lvi-storage-y s y) (lvi-row-stride s)) (mul x 3))))
+  ; BMP stores BGR; the body exposes RGB.
+  (defn lvi-rgb-at (s x y)
+    (do (let i (lvi-pixel-index s x y))
+        (list (str_byte_at s (add i 2))
+              (str_byte_at s (add i 1))
+              (str_byte_at s i))))
+  ; image = (path bytes info)
+  (defn lvi-load-image (path)
+    (do (let bytes (read_file path))
+        (if (eq (lvi-bmp24? bytes) 1)
+          (list path bytes (lvi-image-info bytes))
+          (empty))))
+  (defn lvi-image-bytes (image) (nth image 1))
+  (defn lvi-load-video (paths)
+    (if (eq (len paths) 0) (empty)
+      (do (let image (lvi-load-image (head paths)))
+          (if (eq (len image) 0) (empty)
+            (cons image (lvi-load-video (tail paths)))))))
+  ; Video-file carrier. Decoding is a host concern; image parsing, patching and
+  ; model meaning remain Form. Restrict paths to shell-inert ASCII before
+  ; invoking ffmpeg, require its success marker, then admit only valid BMPs.
+  (defn lvi-safe-path-byte? (c)
+    (if (or (and (ge c 48) (le c 57)) (and (ge c 65) (le c 90))) 1
+      (if (or (and (ge c 97) (le c 122)) (eq c 47)) 1
+        (if (or (eq c 46) (eq c 45)) 1
+          (if (or (eq c 95) (eq c 37)) 1 0)))))
+  (defn lvi-safe-path-go? (s i)
+    (if (eq i (str_len s)) 1
+      (if (eq (lvi-safe-path-byte? (str_byte_at s i)) 1)
+        (lvi-safe-path-go? s (add i 1)) 0)))
+  (defn lvi-safe-path? (s)
+    (if (eq (str_len s) 0) 0 (lvi-safe-path-go? s 0)))
+  (defn lvi-safe-paths? (paths)
+    (if (eq (len paths) 0) 1
+      (if (eq (lvi-safe-path? (head paths)) 1)
+        (lvi-safe-paths? (tail paths)) 0)))
+  (defn lvi-video-decode-command (video-path output-pattern count)
+    (str_concat "ffmpeg -loglevel error -y -i "
+      (str_concat video-path
+        (str_concat " -frames:v "
+          (str_concat (int_to_str count)
+            (str_concat " -c:v bmp "
+              (str_concat output-pattern " >/dev/null 2>&1 && printf 1")))))))
+  (defn lvi-load-video-file (video-path output-pattern decoded-paths)
+    (if (and (eq (lvi-safe-path? video-path) 1)
+             (eq (lvi-safe-path? output-pattern) 1))
+      (if (eq (lvi-safe-paths? decoded-paths) 1)
+        (if (str_eq
+              (host-exec
+                (lvi-video-decode-command video-path output-pattern (len decoded-paths)) "")
+              "1")
+          (do (let frames (lvi-load-video decoded-paths))
+              (if (eq (len frames) (len decoded-paths)) frames (empty)))
+          (empty))
+        (empty))
+      (empty)))
+
+  ; ---- true patch projection over every pixel in a non-overlapping patch ----
+  ; accumulator = (sum-r sum-g sum-b signed-x-luma signed-y-luma).
+  ; Signed spatial terms are fixed Conv2d kernels; together with channel sums
+  ; this is a 4-output linear patch projection, not a single-pixel sample.
+  (defn lvi-patch-acc (s x0 y0 patch i sr sg sb sx sy)
+    (if (eq i (mul patch patch)) (list sr sg sb sx sy)
+      (do (let dx (mod i patch))
+          (let dy (div i patch))
+          (let rgb (lvi-rgb-at s (add x0 dx) (add y0 dy)))
+          (let r (nth rgb 0))
+          (let g (nth rgb 1))
+          (let b (nth rgb 2))
+          (let lum (add (mul 77 r) (add (mul 150 g) (mul 29 b))))
+          (let wx (sub (mul 2 dx) (sub patch 1)))
+          (let wy (sub (mul 2 dy) (sub patch 1)))
+          (lvi-patch-acc s x0 y0 patch (add i 1)
+            (add sr r) (add sg g) (add sb b)
+            (add sx (mul wx lum)) (add sy (mul wy lum))))))
+  ; Pure projection seam, also usable by the independent proof walkers.
+  (defn lvi-project-acc (acc patch px py cols rows)
+    (do (let den (mul (mul patch patch) 255.0))
+        (let spatial-den (mul (mul den patch) 256.0))
+        (list
+          (div (add (nth acc 0) (add (nth acc 1) (nth acc 2))) (mul 3.0 den))
+          (div (sub (nth acc 0) (nth acc 2)) den)
+          (add (div (nth acc 3) spatial-den)
+               (div (mul px 1.0) (mul cols 1.0)))
+          (add (div (nth acc 4) spatial-den)
+               (div (mul py 1.0) (mul rows 1.0))))))
+  (defn lvi-patch-token (s patch px py cols rows)
+    (lvi-project-acc
+      (lvi-patch-acc s (mul px patch) (mul py patch) patch 0 0 0 0 0 0)
+      patch px py cols rows))
+  (defn lvi-patches-go (s patch cols rows i out)
+    (if (eq i (mul cols rows)) (reverse out)
+      (lvi-patches-go s patch cols rows (add i 1)
+        (cons (lvi-patch-token s patch (mod i cols) (div i cols) cols rows) out))))
+  (defn lvi-patch-embed (s patch)
+    (do (let cols (div (lvi-width s) patch))
+        (let rows (div (lvi-height s) patch))
+        (lvi-patches-go s patch cols rows 0 (empty))))
+
+  ; ---- one genuine, small pre-LN ViT block ----------------------------------
+  ; The frame token mirrors the upstream special-token prefix. Q, K and V use
+  ; distinct affine projections; softmax attention and a width-8 GELU FFN are
+  ; supplied by the body transformer primitives.
+  (defn lvi-frame-token () (list 0.125 -0.125 0.0625 -0.0625))
+  (defn lvi-gamma () (list 1.0 1.0 1.0 1.0))
+  (defn lvi-zero4 () (list 0.0 0.0 0.0 0.0))
+  (defn lvi-wq ()
+    (list (list 0.75 0.10 0.00 0.05) (list 0.05 0.70 0.15 0.00)
+          (list 0.00 0.10 0.80 0.10) (list 0.10 0.00 0.15 0.75)))
+  (defn lvi-wk ()
+    (list (list 0.65 0.00 0.20 0.05) (list 0.10 0.75 0.00 0.05)
+          (list 0.15 0.05 0.70 0.00) (list 0.00 0.15 0.10 0.75)))
+  (defn lvi-wv ()
+    (list (list 0.80 0.10 0.05 0.00) (list 0.00 0.75 0.10 0.10)
+          (list 0.10 0.00 0.80 0.05) (list 0.05 0.10 0.00 0.80)))
+  (defn lvi-wo ()
+    (list (list 0.50 0.10 0.00 0.00) (list 0.00 0.50 0.10 0.00)
+          (list 0.00 0.00 0.50 0.10) (list 0.10 0.00 0.00 0.50)))
+  (defn lvi-w1 ()
+    (list (list 0.50 0.10 0.00 0.00) (list 0.00 0.50 0.10 0.00)
+          (list 0.00 0.00 0.50 0.10) (list 0.10 0.00 0.00 0.50)
+          (list -0.25 0.25 0.00 0.10) (list 0.10 -0.25 0.25 0.00)
+          (list 0.00 0.10 -0.25 0.25) (list 0.25 0.00 0.10 -0.25)))
+  (defn lvi-b1 () (list 0.01 -0.01 0.02 -0.02 0.01 0.00 -0.01 0.02))
+  (defn lvi-w2 ()
+    (list (list 0.35 0.00 0.00 0.05 -0.15 0.05 0.00 0.10)
+          (list 0.05 0.35 0.00 0.00 0.15 -0.15 0.05 0.00)
+          (list 0.00 0.05 0.35 0.00 0.00 0.15 -0.15 0.05)
+          (list 0.00 0.00 0.05 0.35 0.05 0.00 0.15 -0.15)))
+  (defn lvi-vit-encode (patches)
+    (tb-block (cons (lvi-frame-token) patches) 0.00001
+      (lvi-gamma) (lvi-zero4)
+      (lvi-wq) (lvi-zero4) (lvi-wk) (lvi-zero4)
+      (lvi-wv) (lvi-zero4) (lvi-wo) (lvi-zero4) 0.5
+      (lvi-gamma) (lvi-zero4) (lvi-w1) (lvi-b1) (lvi-w2) (lvi-zero4)))
+  (defn lvi-encode-image (image patch)
+    (lvi-vit-encode (lvi-patch-embed (lvi-image-bytes image) patch)))
+  (defn lvi-encode-video (images patch)
+    (if (eq (len images) 0) (empty)
+      (cons (lvi-encode-image (head images) patch)
+            (lvi-encode-video (tail images) patch))))
+  ; Pure sequence seam for proof walkers: ordered frame patch-token lists in,
+  ; ordered encoded frame lists out.
+  (defn lvi-encode-token-video (frames)
+    (if (eq (len frames) 0) (empty)
+      (cons (lvi-vit-encode (head frames))
+            (lvi-encode-token-video (tail frames)))))
+)
