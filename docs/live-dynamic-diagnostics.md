@@ -114,3 +114,6 @@ The witnessed vector is documented in
 - `observe/thought-framebuffer.fk` — token/margin trace and divergence helpers.
 - `observe/framebuffer-runtime-observation.fk` — richer runtime/stage observation.
 - `form/form-stdlib/form-cli-surface-inquiry.fk` — bounded CLI read/inquiry surface.
+- `cognition/native-cognition-cycle.fk` — full knowledge → inquiry → awareness →
+  recognition → action → response → routing composition, including a
+  representation-diverse recognition witness.
