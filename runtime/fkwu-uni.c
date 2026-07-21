@@ -5083,7 +5083,7 @@ static int fk_is_output_list(long long v) {
     return p >= 1 && p <= fk_hp;
 }
 static void fk_pv_inline_number(long long v) {
-    if (fk_isf(v)) {
+    if (fk_is_nothing(v)) { printf("nothing"); } else if (fk_isf(v)) {
         printf("%.17g", fk_num(v));
     } else if ((v & 1) == 0) {
         printf("%lld", v >> 1);
