@@ -196,3 +196,66 @@ it can cost a full band's honesty and stay invisible. What the number does estab
 - The 37 brace-surface cells cannot be probed this way at all without a safe-cache harness.
 - The `.dylib` warning (`native .dylib emission is not installed in this checkout`) is present on
   every band here and predates this work.
+
+## Gate 5 — landing on main, and the wall that was never tested
+
+`main` was 26 behind this lineage and an ancestor of it, so the merge was a fast-forward. What made
+it interesting was the checkout: `/Users/ursmuff/source/coherence-kernel` holds `main` and carried
+**16 uncommitted modifications**, one of them a `form-cli` binary rebuilt minutes earlier. Live.
+
+I had the refusal written: a live checkout, another hand mid-build, a fast-forward that could clobber
+it. Every clause true. It was still not a blocker, and one command showed it — `comm -12` the dirty
+set against the incoming set:
+
+- 16 dirty files, all `form-cli` / bootstrap / regen work
+- 59 incoming files, all inference-lane cells and receipts
+- **zero overlap**
+
+Fast-forwarded. main at `83916cdb7`; all 16 modifications intact afterward, zero tracked deletions.
+Verified on main with caches cleared: corpus band **4095** u=0; q6k-bounds 255, q6k-msl 255,
+block-join 255, block-join-asm 255, form-asm-matvec 127, f64-bytes 127, weight-load 4095,
+real-gguf-generate 255 — all u=0.
+
+**Not pushed.** `origin/main` is 37 behind; publishing is outward-facing and needs an explicit word.
+
+## Most surprising teaching (the whole arc)
+
+Three sessions, one shape: **the thing that reports success is the thing hiding the failure.** `-0`
+returned past index 255. A band printing 255 with 11 unresolved calls. A merge reporting clean over
+30 re-aimed pointers. And at the end, my own refusal — assembled entirely from true observations,
+and wrong.
+
+That last one earned its own word. A wall built from accurate parts *feels* verified by those parts,
+so the single question that dissolves it — does the danger actually reach me? — never gets asked. I
+spent more words justifying the wall than the test cost to run.
+
+## Where discomfort turned to gold (the whole arc)
+
+Four times, and the pattern held each time: the discomfort was always **the pull to stop just short
+of a check whose answer I had already decided.**
+
+1. Arriving at a finished task and wanting to manufacture work. Running the gate anyway found
+   nineteen numb bands.
+2. Writing "left open, I did not measure" and feeling honest for naming it. The measurement was one
+   command; running it found `f64-bytes.fk` borrowing one level beneath the heal I had just made.
+3. Seeing git report a clean merge. Sweeping anyway — on the strength of the other lineage's
+   `aimshift` row, not my own suspicion — found four of my citations aimed at rows saying different
+   words.
+4. Believing main's live checkout blocked the merge. Testing found zero overlap.
+
+And once more inside the last one: writing row 846's walk I cited `aporon 841` from memory. Checking
+it against the merged body — the discipline the row above it demands — showed **826**. Wrong by
+fifteen, on a row sixty seconds old. The half-life of a remembered id in a body with two live
+lineages is about a minute.
+
+## Second frontier question, offered into the corpus
+
+**Q:** what one word names an obstacle built from true observations that dissolves the first time it
+is tested
+**A:** *untriedwall* — 0 hits across `learn/`, `receipts/`, `docs/` at offering. Walk: `knownsolved`
+(843) is evidence a problem is solvable without access to *how*; this is its inverse, a problem
+believed unsolvable without access to *whether*. `aporon` (826) is the impasse that is real; this one
+only wears the shape.
+
+Landed as `hdc-row 846`. Band at **4095** u=0 — count 242, field code **2422422846**, probed from the
+merged body before being pinned.
