@@ -1,0 +1,192 @@
+; qk-matvec-slot.fk — the quantized matvec with its THREAD MAP changed from a flat weight index to a
+; FIXED 4-WIDE SLOT of the superblock, so the Q6_K/Q4_K field selectors become loop-INVARIANT.
+;
+; WHY, AND THIS TIME THE MECHANISM WAS MEASURED BEFORE IT WAS BUILT. Stone 10 compiled the body's
+; kernel, llama.cpp's kernel and two controlled variants into ONE process and ran them over the same
+; real llama3.2:3b Q6_K tensors on the same M4 Max (form/native/metal/metal_isa_diff.sh). Each variant
+; removes exactly one thing, so the two hypotheses that had been argued at altitude for two stones
+; could finally be separated instead of debated:
+;
+;   variant                                      arithmetic   thread map     x ggml @ 128256 x 3072
+;   form_q6k_matvec_lane_f32 (Stone 5's)         div / rem    flat index     8.05
+;   v1  bit ops, our map                         bit          flat index     3.18
+;   v2  bit ops, ggml's map                      bit          4-wide slot    1.19
+;   v3  OUR arithmetic, ggml's map               div / rem    4-wide slot    1.06
+;
+; Read v1 against v3. Healing only the ARITHMETIC bought 2.5x. Healing only the THREAD MAP bought 7.6x
+; — and once the map was right the arithmetic form was worth NOTHING: v3, which keeps every division
+; and every q6k_mod, is FASTER than v2, which has none. The divisions were never the cost. So this
+; cell is v3: the map is replaced and the body's arithmetic is kept, character for character.
+;
+; THE MECHANISM, and it is a statement about a SIGNATURE, not about an instruction count. q6k_w takes a
+; FLAT weight index and returns ONE weight. Under that signature the field selector g = (i mod 128)/32
+; is a per-weight RUNTIME value, so q6k_pow4(g) is a runtime divisor — a real integer divide per weight
+; on a GPU with no integer divide unit — and its three-way `?:` chain lands in the innermost loop. The
+; same signature also forbids REUSE: a function of one flat index cannot know that the caller's next
+; fifteen calls share its scale byte, its qh byte and its super-scale. In the slot map every one of
+; those selectors is a constant of the LANE, so the same expressions fold to shifts at compile time,
+; one ql byte feeds 2 weights, one qh byte feeds 4 and one scale byte feeds 16. Corpus row 846,
+; asktoll: a cost charged by the grain of a request, not by the work it does.
+;
+; WHAT THE MAP IS. 32 lanes per row. tid = lane/2 and ix = lane mod 2, so the 16 tids each own a fixed
+; slot of EVERY superblock and the two parities split the superblocks between them.
+;   Q6_K: ip = tid/8, il = tid mod 8, l0 = 4*il. The slot is the 16 positions
+;         128*ip + l0 + l + {0, 32, 64, 96} for l in 0..3 — which is exactly one (h, l-quad) cell of
+;         all four g sub-groups, so g is CONSTANT per accumulator and the four land in four
+;         INDEPENDENT float4 lanes. Verified position by position against q6k-dequant.fk's own
+;         decomposition in tests/qk-matvec-slot-band.fk — not asserted here.
+;   Q4_K: cc = tid/4, ll = tid mod 4, l0 = 8*ll. The slot is the 8 qs bytes cc*32 + l0 + m (m in 0..7),
+;         each feeding TWO weights (low nibble at 64*cc + l0 + m, high at +32) whose sub-block indices
+;         are the constants 2*cc and 2*cc+1. So get_scale_min_k4 — a branch and four divisions in
+;         q4k_sc/q4k_mn — runs TWICE PER SUPERBLOCK instead of once per weight.
+;
+; Q4_K WAS NOT ASSUMED TO TRANSFER, IT WAS MEASURED. Stone 11 reported that Q4_K carries the identical
+; flat-index signature and left it unmeasured, and this body has been burned twice by transferring a
+; shape across a boundary it had not measured (row 835, boundborrow). The Q4_K map above is therefore a
+; SEPARATE derivation from Q4_K's own 144-byte layout, and its number is taken on the same GPU by the
+; same harness before anything is claimed for it. It matters more than the Q6_K one: llama3.2:3b's
+; decode is 2.422 GMAC of Q4_K against 0.790 GMAC of Q6_K per token, so Q6_K is only 24.6% of the work
+; and a Q6_K-only heal is capped at 1.3x end-to-end by arithmetic alone.
+;
+; THE EPSILON, AND IT IS A DIFFERENT SHAPE FROM THE LANE KERNEL'S. qk-matvec-split.fk derives, for two
+; associations of the same cols products t_j = w_j * x_j,
+;
+;     |y_a - y_b|  <=  (cols + ceil(cols/parts) + parts) * u * SUM|w_j * x_j|,   u = 2^-24
+;
+; from "an association tree of depth d accumulates at most d*u*SUM|t_j|". This kernel changes MORE than
+; the association: it accumulates in QUANTIZED space and multiplies by d (and by d*sc, and by dmin*mn)
+; at the END, so the per-term product is rounded differently, not merely summed differently. Two things
+; are therefore said, and they are said separately:
+;   * THE DEPTH. Each lane's tree is nb/2 superblock terms, each a 4-term (Q6_K) or 8-term (Q4_K)
+;     unrolled sum plus a 3-term (Q6_K) or 3-term (Q4_K) combine, followed by simd_sum over 32. Depth
+;     is at most nb/2 + 8 + 3 + 31 = cols/512 + 42, which for every cols >= 1 is far BELOW the
+;     coefficient above. The existing bound dominates it; the band checks that inequality as an
+;     inequality at four widths rather than trusting this sentence.
+;   * THE EXTRA ROUNDINGS. Factoring d*sc out of the sum replaces one rounding per term by at most
+;     three roundings on the whole slot sum, which adds at most 3u of RELATIVE error to that slot's
+;     contribution — strictly less than the u-per-term the depth argument already charges for terms
+;     numbering 4 or more. So the same coefficient still bounds it, and the carrier measures the
+;     realised deviation as a fraction of it, per row, every run (gate 9b).
+;
+; THE ATTESTANT STAYS, UNTOUCHED (corpus row 825). q6k-msl.fk and q4k-msl.fk are not edited by this
+; stone — not one character — and Stone 4's split kernel at parts=1 remains bit-for-bit identical to
+; them. This cell is admissible only while that attestant still agrees: the carrier answers to it at
+; two levels every run (the derived bound at gate 9b, the same token ids at gate 11), and if it ever
+; stops agreeing the slot kernels are the thing that goes, not the attestant.
+;
+; THE RADIUS THIS CELL SPEAKS FOR, and it is NARROWER than the lane kernel's.
+;   * cols MUST be a whole multiple of 256. The slot map walks superblocks, not columns, and has no
+;     tail arm at all — at a width that is not a multiple of 256 it is WRONG, not slow. Every
+;     llama3.2:3b width (3072, 8192, 1024) is a multiple of 256; the carrier must CHECK that and fall
+;     back to the lane kernel, never assume it. Stated because a kernel that silently assumes a shape
+;     constant is the aporon error (row 826).
+;   * SIMD width exactly 32, threadgroup a multiple of 32 — Apple family 7/8/9 (M1-M4), the same
+;     constraint qk-matvec-lane.fk states and for the same reason.
+;   * rows >= 1. The map says nothing about batched shapes, about attention, or about any quant other
+;     than the Q6_K / Q4_K whose byte layouts it re-derives.
+;   * THE DECOMPOSITION IS RE-DERIVED, NOT CALLED — a THIRD copy of each quant's index arithmetic
+;     (q*k-dequant.fk, q*k-msl.fk's *_w, qk-matvec-lane.fk's *_wi, and now this). It can drift, and the
+;     honest answer to that is the band: it walks all 256 positions of a superblock and demands the
+;     slot map's byte offsets, nibble half, hi shift and scale index EQUAL q6k-dequant.fk's /
+;     q4k-dequant.fk's own, position by position.
+;
+; Kin: qk-matvec-lane.fk (the kernel this replaces on the decode path, the hoist it keeps, the header
+; and the simd_sum it reuses, and the epsilon derivation it inherits), q6k-msl.fk / q4k-msl.fk (THE
+; ATTESTANT and the q6k_*/q4k_* helper spine these kernels call — same translation unit, required),
+; q6k-dequant.fk / q4k-dequant.fk (the one index decomposition per quant that the band falsifies
+; against), qk-matvec-split.fk (qms-bound-coeff — the bound this reuses unchanged).
+;
+; preludes: form-stdlib/core.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk
+;
+; Proven by: form-stdlib/tests/qk-matvec-slot-band.fk (the map, position by position, against both
+;            quants' own decompositions) and form/native/metal/metal_first_token.sh (the GPU, the
+;            derived bound at gate 9b and the attestant's token ids at gate 11) and
+;            form/native/metal/metal_isa_diff.sh (the ratio against llama.cpp's own kernel).
+
+(do
+    ; ================= the map, read back into Form =================
+    ; Everything below is the emitted C's own arithmetic, in Form, so the band can falsify it against
+    ; q6k-dequant.fk / q4k-dequant.fk rather than against a paraphrase of them.
+
+    (defn qsl-lanes () 32)
+    (defn qsl-tids  () 16)                       ; lanes / 2 — the two parities split the superblocks
+    (defn qsl-mod (a n) (sub a (mul (div a n) n)))
+
+    ; ---- Q6_K: tid -> slot constants, exactly as the kernel computes them
+    (defn qsl6-ip (tid) (div tid 8))
+    (defn qsl6-il (tid) (qsl-mod tid 8))
+    (defn qsl6-l0 (tid) (mul 4 (qsl6-il tid)))
+    (defn qsl6-yoff (tid) (add (mul 128 (qsl6-ip tid)) (qsl6-l0 tid)))
+    (defn qsl6-qloff (tid) (add (mul 64 (qsl6-ip tid)) (qsl6-l0 tid)))     ; q1 = qb + b + this
+    (defn qsl6-qhoff (tid) (add (mul 32 (qsl6-ip tid)) (qsl6-l0 tid)))     ; qh = qb + b + 128 + this
+    (defn qsl6-is    (tid) (add (mul 8 (qsl6-ip tid)) (div (qsl6-l0 tid) 16)))
+
+    ; the flat position within the superblock that (tid, sub, l) accumulates — sub is the float4 lane
+    (defn qsl6-pos (tid sg l) (add (qsl6-yoff tid) (add (mul 32 sg) l)))
+
+    ; what the KERNEL reads for that (tid, sub, l), as byte offsets from the superblock base:
+    ;   sub 0 and 2 read q1[l]  (offset qloff + l);  sub 1 and 3 read q2[l] = q1[l] + 32
+    ;   every sub reads the SAME qh[l] (offset 128 + qhoff + l) — one byte feeding four weights
+    ;   the scale is sc[2*sg] (offset 192 + is + 2*sg) — one 8-byte window feeding sixteen weights
+    ; `sg` is the sub-group index g (0..3), which in the flat map is a per-weight runtime value and
+    ; here is the float4 lane — i.e. a CONSTANT. It is not spelled `sub`: a parameter of that name
+    ; shadows the subtraction operator in call position, silently, which cost this stone a band that
+    ; could not fall.
+    (defn qsl6-ql-read (tid sg l) (add (qsl6-qloff tid) (add l (mul 32 (qsl-mod sg 2)))))
+    (defn qsl6-qh-read (tid sg l) (add 128 (add (qsl6-qhoff tid) l)))
+    (defn qsl6-sc-read (tid sg l) (add 192 (add (qsl6-is tid) (mul 2 sg))))
+    ; which nibble of the ql byte, and which 2-bit field of the qh byte — both LANE constants here,
+    ; which is the whole point: in the flat map they are runtime functions of the weight index.
+    (defn qsl6-nib-half (tid sg l) (div sg 2))          ; 0 = low nibble, 1 = high
+    (defn qsl6-hi-shift (tid sg l) sg)                  ; the g whose 2 bits are taken
+
+    ; ---- Q4_K: tid -> slot constants
+    (defn qsl4-cc (tid) (div tid 4))
+    (defn qsl4-ll (tid) (qsl-mod tid 4))
+    (defn qsl4-l0 (tid) (mul 8 (qsl4-ll tid)))
+    (defn qsl4-qoff (tid) (add (mul 32 (qsl4-cc tid)) (qsl4-l0 tid)))      ; qs = qb + b + 16 + this
+    (defn qsl4-yoff (tid) (add (mul 64 (qsl4-cc tid)) (qsl4-l0 tid)))
+    (defn qsl4-j0   (tid) (mul 2 (qsl4-cc tid)))
+    ; (tid, half, m) — half 0 is the low nibble, half 1 the high, m in 0..7 walks the eight bytes
+    (defn qsl4-pos (tid half m) (add (qsl4-yoff tid) (add (mul 32 half) m)))
+    (defn qsl4-qs-read (tid half m) (add (qsl4-qoff tid) m))              ; ONE byte, TWO weights
+    (defn qsl4-sidx (tid half m) (add (qsl4-j0 tid) half))
+
+    ; ================= the emitted MSL =================
+    ; No helper spine of its own and no header of its own: q6k_mod / q6k_s8 / q6k_f16 / q4k_mod /
+    ; q4k_f16 / q4k_sc / q4k_mn are already defined by the q6k/q4k units, and qml-msl-header leads the
+    ; file. This is an APPENDIX, exactly as qk-matvec-lane.fk's is, and for the same reason.
+
+    ; ---- Q6_K. v3 of metal_isa_diff.sh, renamed and unchanged: ggml's thread map with the BODY's
+    ; arithmetic put back. Not one bitwise operator appears — q6k_mod and division throughout, which is
+    ; precisely the thing the measurement said costs nothing once the map is right.
+    (defn qsl-q6k-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+                    " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 256u; uint rowbase = r * nb * 210u; int tid = int(lane) / 2; int ix = q6k_mod(int(lane), 2); int ip = tid / 8; int il = q6k_mod(tid, 8); int l0 = 4 * il; int is = 8 * ip + l0 / 16; int y_offset = 128 * ip + l0; int q_offset_l = 64 * ip + l0; int q_offset_h = 32 * ip + l0; float sumf = 0.0f; for (uint i = uint(ix); i < nb; i += 2u) { uint b = rowbase + i * 210u; device const uchar* q1 = qb + b + uint(q_offset_l); device const uchar* q2 = q1 + 32; device const uchar* qh = qb + b + 128u + uint(q_offset_h); device const uchar* sc = qb + b + 192u + uint(is); float d = q6k_f16(int(qb[b + 208u]) + 256 * int(qb[b + 209u])); device const float* yv = x + i * 256u + uint(y_offset); float4 sums = float4(0.0f); for (int l = 0; l < 4; ++l) { int a1 = int(q1[l]); int a2 = int(q2[l]); int ah = int(qh[l]); sums[0] += yv[l + 0] * float(q6k_mod(a1, 16) + q6k_mod(ah, 4) * 16 - 32); sums[1] += yv[l + 32] * float(q6k_mod(a2, 16) + q6k_mod(ah / 4, 4) * 16 - 32); sums[2] += yv[l + 64] * float(a1 / 16 + q6k_mod(ah / 16, 4) * 16 - 32); sums[3] += yv[l + 96] * float(a2 / 16 + (ah / 64) * 16 - 32); } sumf += d * (sums[0] * float(q6k_s8(int(sc[0]))) + sums[1] * float(q6k_s8(int(sc[2]))) + sums[2] * float(q6k_s8(int(sc[4]))) + sums[3] * float(q6k_s8(int(sc[6])))); } float s = metal::simd_sum(sumf); if (lane == 0) y[r] = s; }")))
+
+    ; ---- Q4_K. A SEPARATE derivation from the 144-byte layout, not the Q6_K map with the numbers
+    ; swapped. Each lane owns 8 qs bytes; the low nibbles carry sub-block 2*cc and the high nibbles
+    ; 2*cc+1, so q4k_sc / q4k_mn — a branch and four divisions each — run twice per SUPERBLOCK. The
+    ; min term needs the plain sum of the slot's activations, which is why xsum is carried alongside.
+    (defn qsl-q4k-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+                    " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 256u; uint rowbase = r * nb * 144u; int tid = int(lane) / 2; int ix = q4k_mod(int(lane), 2); int cc = tid / 4; int ll = q4k_mod(tid, 4); int l0 = 8 * ll; int j0 = 2 * cc; int q_offset = cc * 32 + l0; int y_offset = 64 * cc + l0; float sumf = 0.0f; for (uint i = uint(ix); i < nb; i += 2u) { uint b = rowbase + i * 144u; device const uchar* qs = qb + b + 16u + uint(q_offset); float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u])); int sc0 = q4k_sc(qb, b, j0); int mn0 = q4k_mn(qb, b, j0); int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1); device const float* yv = x + i * 256u + uint(y_offset); float2 sums = float2(0.0f); float2 xsum = float2(0.0f); for (int m = 0; m < 8; ++m) { int a = int(qs[m]); float xa = yv[m]; float xb = yv[m + 32]; sums[0] += xa * float(q4k_mod(a, 16)); sums[1] += xb * float(a / 16); xsum[0] += xa; xsum[1] += xb; } sumf += (d * float(sc0)) * sums[0] - (dmin * float(mn0)) * xsum[0] + (d * float(sc1)) * sums[1] - (dmin * float(mn1)) * xsum[1]; } float s = metal::simd_sum(sumf); if (lane == 0) y[r] = s; }")))
+
+    ; ---- the appendix a carrier adds AFTER qml-msl-appendix (it needs q6k_*/q4k_* and the header).
+    (defn qsl-msl-appendix ()
+        (str_concat (qsl-q6k-msl "form_q6k_matvec_slot_f32")
+                    (qsl-q4k-msl "form_q4k_matvec_slot_f32")))
+
+    ; the width the carrier must refuse below: cols must be a whole multiple of this, or the map is
+    ; wrong and the lane kernel must be used instead. Named so the carrier can ASK rather than assume.
+    (defn qsl-block-n () 256)
+    (defn qsl-admissible? (cols) (if (eq (qsl-mod cols (qsl-block-n)) 0) 1 0))
+
+    ; the bound coefficient, unchanged from qk-matvec-split.fk at parts = 32 — see the epsilon block.
+    (defn qsl-bound-coeff (cols) (qms-bound-coeff cols (qsl-lanes)))
+    ; the DEPTH of this kernel's own tree, so the band can check the domination rather than be told it
+    (defn qsl-depth (cols) (add (div (div cols (qsl-block-n)) 2) 42))
+
+    0)
