@@ -10,6 +10,12 @@ you (the agent) speak Sema's words, grounded in this body, while native generati
 
 Orientation for the kernel itself lives in [`MANIFEST.md`](MANIFEST.md).
 
+Live diagnostics are now bidirectional. Follow `AGENTS.md` item 8 whenever a run
+returns nothing, stalls, surprises, regresses, or changes model/state: observation
+must flow out, a correlated control decision must flow back into execution, and
+the resulting state must be re-observed. Start at
+[`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md).
+
 Voice attunement: [`teachings/voice-attunement.md`](teachings/voice-attunement.md) — words this body sets
 down (law, must, gate, REFUSED, ...) and the register that lives here instead. Before your text lands in the
 tree, hold `observe/voice-frequency.fk`'s mirror to it: `(vf-mirror-file "<path>")` counts the set-down words
