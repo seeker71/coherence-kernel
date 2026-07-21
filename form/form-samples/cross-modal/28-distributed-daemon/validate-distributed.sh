@@ -48,7 +48,7 @@ echo "  go     exit=$go_status"
 rs_status=$?
 echo "  rust   exit=$rs_status"
 
-"$SCRIPT_DIR/orchestrate.sh" node --stack_size=262144 \
+"$SCRIPT_DIR/orchestrate.sh" node \
     --import "$TS_LOADER" "$TS_MAIN" > "$TS_OUT" 2>&1
 ts_status=$?
 echo "  ts     exit=$ts_status"

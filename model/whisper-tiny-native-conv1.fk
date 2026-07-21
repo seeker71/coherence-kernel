@@ -1,0 +1,150 @@
+; whisper-tiny-native-conv1.fk — complete released Whisper-tiny conv1 in Form.
+;
+; Every one of the 92,160 released f32 weights and 384 biases from
+; openai/whisper-tiny's first learned acoustic layer is loaded and applied.
+; The input is a real PCM waveform: Form reads it, computes a three-column
+; 80-band Slaney log-mel tile, performs Whisper's dynamic-range normalization,
+; and evaluates the full [384,80,3] Conv1d cross-correlation at its center.
+;
+; This is one complete learned layer, not a native recognizer.  The remaining
+; conv2, positional embedding, encoder, decoder, tokenizer, and search graph are
+; still outside this cell; the strict native-acoustic completion row stays 0.
+; witnessed: 2026-07-18 -> complete 92,544 released parameters over CC0 human speech
+; preludes: form/form-stdlib/core.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/form-fs.fk form/form-stdlib/file-byte-window.fk form/form-stdlib/crc32.fk model/lingbot-pytorch-checkpoint.fk form/form-stdlib/trig.fk form/form-stdlib/mel-frame.fk form/form-stdlib/mel-filterbank.fk
+
+(do
+  (defn wtc-root () "model/fixtures/whisper-tiny/")
+  (defn wtc-weight-path () (str_concat (wtc-root) "encoder-conv1-weight.f32"))
+  (defn wtc-bias-path () (str_concat (wtc-root) "encoder-conv1-bias.f32"))
+  (defn wtc-human-path () (str_concat (wtc-root) "lingua-libre-book-16k.wav"))
+  (defn wtc-input-channels () 80)
+  (defn wtc-kernel-width () 3)
+  (defn wtc-output-channels () 384)
+  (defn wtc-weight-count () 92160)
+  (defn wtc-bias-count () 384)
+  (defn wtc-parameter-count () 92544)
+  (defn wtc-frame-size () 400)
+  (defn wtc-hop-size () 160)
+  ; 4,160 is 260 ms: inside the observed voiced interval of this recording.
+  (defn wtc-sample-start () 4160)
+
+  ; pack = (weight-bytes bias-bytes validity).
+  (defn wtc-load-weights ()
+    (do
+      (let weight (lbpt-read-span (wtc-weight-path) 0 368640))
+      (let bias (lbpt-read-span (wtc-bias-path) 0 1536))
+      (list weight bias
+        (if (and (eq (str_len weight) 368640)
+              (and (eq (lbpt-crc-string weight) 304286549)
+                (and (eq (str_len bias) 1536)
+                     (eq (lbpt-crc-string bias) 3231252610)))) 1 0))))
+  (defn wtc-weight-bytes (pack) (nth pack 0))
+  (defn wtc-bias-bytes (pack) (nth pack 1))
+  (defn wtc-weights-valid? (pack) (nth pack 2))
+
+  (defn wtc-wav-data-offset (bytes)
+    (do (let marker (str_find bytes "data" 0))
+      (if (lt marker 12) 0 (add marker 8))))
+  (defn wtc-wav-sample (bytes data-offset sample-index)
+    (do
+      (let offset (add data-offset (mul sample-index 2)))
+      (let raw (add (str-byte-at bytes offset)
+                   (mul (str-byte-at bytes (add offset 1)) 256)))
+      (div (mul (if (ge raw 32768) (sub raw 65536) raw) 1.0) 32768.0)))
+  (defn wtc-window-go (bytes data-offset start n out)
+    (if (eq n (wtc-frame-size)) (reverse out)
+      (wtc-window-go bytes data-offset start (add n 1)
+        (cons (mul (wtc-wav-sample bytes data-offset (add start n))
+                   (mf-hann n (wtc-frame-size))) out))))
+  (defn wtc-window (bytes data-offset start)
+    (wtc-window-go bytes data-offset start 0 (empty)))
+
+  (defn wtc-log-mel-col-go (window rows out)
+    (if (eq (len rows) 0) (reverse out)
+      (do
+        (let row (head rows))
+        (wtc-log-mel-col-go window (tail rows)
+          (cons (mf-log-mel window (mb-ks row) (mb-ws row)
+                  (wtc-frame-size)) out)))))
+  (defn wtc-log-mel-col (window)
+    (wtc-log-mel-col-go window (melbank) (empty)))
+  (defn wtc-log-mel-tile (bytes data-offset)
+    (list
+      (wtc-log-mel-col (wtc-window bytes data-offset (wtc-sample-start)))
+      (wtc-log-mel-col (wtc-window bytes data-offset
+                         (add (wtc-sample-start) (wtc-hop-size))))
+      (wtc-log-mel-col (wtc-window bytes data-offset
+                         (add (wtc-sample-start) (mul 2 (wtc-hop-size)))))))
+
+  (defn wtc-vector-max-go (xs best)
+    (if (eq (len xs) 0) best
+      (wtc-vector-max-go (tail xs) (if (gt (head xs) best) (head xs) best))))
+  (defn wtc-tile-max-go (cols best)
+    (if (eq (len cols) 0) best
+      (wtc-tile-max-go (tail cols) (wtc-vector-max-go (head cols) best))))
+  (defn wtc-normalize-value (value peak)
+    (div (add (if (lt value (sub peak 8.0)) (sub peak 8.0) value) 4.0) 4.0))
+  (defn wtc-normalize-col-go (xs peak out)
+    (if (eq (len xs) 0) (reverse out)
+      (wtc-normalize-col-go (tail xs) peak
+        (cons (wtc-normalize-value (head xs) peak) out))))
+  (defn wtc-normalize-tile-go (cols peak out)
+    (if (eq (len cols) 0) (reverse out)
+      (wtc-normalize-tile-go (tail cols) peak
+        (cons (wtc-normalize-col-go (head cols) peak (empty)) out))))
+  (defn wtc-normalize-tile (tile)
+    (do
+      (let peak (wtc-tile-max-go tile -10.0))
+      (list peak (wtc-normalize-tile-go tile peak (empty)))))
+
+  ; Safetensors / PyTorch contiguous Conv1d layout: [out, in, time].
+  (defn wtc-weight-index (out-channel in-channel time)
+    (add (mul out-channel 240) (add (mul in-channel 3) time)))
+  (defn wtc-channel-go (weight tile out-channel i acc)
+    (if (eq i 240) acc
+      (do
+        (let in-channel (div i 3))
+        (let time (mod i 3))
+        (let coefficient (lbpt-f32 weight
+          (mul 4 (add (mul out-channel 240) i))))
+        (let input (nth (nth tile time) in-channel))
+        (wtc-channel-go weight tile out-channel (add i 1)
+          (add acc (mul coefficient input))))))
+  (defn wtc-channel (weight bias tile out-channel)
+    (wtc-channel-go weight tile out-channel 0
+      (lbpt-f32 bias (mul out-channel 4))))
+  (defn wtc-token-go (weight bias tile out-channel out)
+    (if (eq out-channel (wtc-output-channels)) (reverse out)
+      (wtc-token-go weight bias tile (add out-channel 1)
+        (cons (wtc-channel weight bias tile out-channel) out))))
+  (defn wtc-token (pack tile)
+    (wtc-token-go (wtc-weight-bytes pack) (wtc-bias-bytes pack) tile 0 (empty)))
+
+  (defn wtc-sum-go (xs acc)
+    (if (eq (len xs) 0) acc (wtc-sum-go (tail xs) (add acc (head xs)))))
+  (defn wtc-l1-go (xs acc)
+    (if (eq (len xs) 0) acc
+      (wtc-l1-go (tail xs) (add acc (abs (head xs))))))
+  (defn wtc-fingerprint (token)
+    (list (nth token 0) (nth token 1) (nth token 2) (nth token 3)
+      (nth token 95) (nth token 191) (nth token 287) (nth token 383)
+      (wtc-sum-go token 0.0) (wtc-l1-go token 0.0)))
+
+  ; result = (source wav-bytes data-offset peak full-token fingerprint
+  ;           learned-parameters weights-valid learned-activity).
+  (defn wtc-infer-file (path)
+    (do
+      (let bytes (fs-read-slice path 0 (fs-stat-size path)))
+      (let data-offset (wtc-wav-data-offset bytes))
+      (let tile0 (wtc-log-mel-tile bytes data-offset))
+      (let normalized (wtc-normalize-tile tile0))
+      (let pack (wtc-load-weights))
+      (let token (if (eq (wtc-weights-valid? pack) 1)
+                   (wtc-token pack (nth normalized 1)) (empty)))
+      (let fingerprint (if (eq (len token) (wtc-output-channels))
+                         (wtc-fingerprint token) (empty)))
+      (list path (str_len bytes) data-offset (nth normalized 0) token fingerprint
+        (wtc-parameter-count) (wtc-weights-valid? pack)
+        (if (and (eq (len token) 384)
+                 (gt (nth fingerprint 9) 1.0)) 1 0))))
+)

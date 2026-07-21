@@ -25,7 +25,7 @@
 #   1  DEQUANT IS THE BODY'S, AT THE HEAD   GPU-dequantized weights 0..4095 equal Form's, bit for bit.
 #   2  ... AND AT THE TAIL                  the LAST 4096 weights of the tensor, likewise. A tile audit
 #                                           that only looks at superblock 0 is correct exactly where it
-#                                           looked (corpus row 811, aporon); this one looks at both ends
+#                                           looked (corpus row 826, aporon); this one looks at both ends
 #                                           of 98 304 superblocks.
 #   3  THE WHOLE TENSOR DEQUANTS            all 25 165 824 weights in one dispatch, and the head and
 #                                           tail tiles read back OUT of that whole-tensor result still

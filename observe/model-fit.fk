@@ -1,0 +1,116 @@
+; model-fit.fk — which model actually fits THIS host: a computation, not a guess.
+;
+; Frontier ingest, distilled from llmfit (Rust terminal tool, llmfit.org):
+; its teaching is that model fit is a measurement joined to a table — detect
+; the hardware floor, walk the WHOLE quantization ladder (never assume Q4),
+; and for Mixture-of-Experts models distinguish total parameters (resident
+; memory) from active parameters (per-token compute, and the offload floor).
+; What is deliberately NOT taken: the Rust body, the 200-model database, GPU
+; probing this container cannot witness. The teaching lands as Form tissue
+; over the host doors this kernel already owns.
+;
+; Honest floors: CPU/RAM only (no GPU door exists in this checkout — said,
+; not guessed); bytes-per-parameter are the published GGUF approximations
+; (Q8_0 1.06 .. Q2_K 0.35, x1000 fixed-point) plus a flat 10% runtime/KV
+; overhead; the model rows are a seed table, not a registry.
+;
+; witnessed: 2026-07-19 -> 255 live fkwu (observe/tests/model-fit-band.fk)
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk
+(do
+  ;; ---- the measured floor: /proc/meminfo through the host read door ----
+  (defn mf-meminfo-path () "/proc/meminfo")
+  (defn mf-parse-int-go (s i n acc started)
+    (if (ge i n) acc
+      (do (let b (str_byte_at s i))
+          (if (and (ge b 48) (le b 57))
+            (mf-parse-int-go s (add i 1) n (add (mul acc 10) (sub b 48)) 1)
+            (if (eq started 1) acc
+              (mf-parse-int-go s (add i 1) n acc 0))))))
+  (defn mf-field-kb (text key)
+    (do (let at (str_find text key 0))
+        (if (lt at 0) -1
+          (mf-parse-int-go text (add at (str_len key))
+            (str_len text) 0 0))))
+  ; (total-mb available-mb) measured now, or (-1 -1) when the door is absent.
+  ; Two procfs lessons, measured not guessed: file_size answers -1 for
+  ; /proc/meminfo while read_file yields the live bytes; and nil? misjudges
+  ; a procfs-read string on this carrier (says NIL while str_len says 1503).
+  ; So the door is judged by str_len alone — 0 covers both absent and empty.
+  (defn mf-host-floor ()
+    (do (let raw (read_file (mf-meminfo-path)))
+        (if (eq (str_len raw) 0) (list -1 -1)
+          (list (div (mf-field-kb raw "MemTotal:") 1024)
+                (div (mf-field-kb raw "MemAvailable:") 1024)))))
+
+  ;; ---- the quantization ladder: bytes-per-parameter x1000 ----
+  (defn mf-quants ()
+    (list (list "Q8_0" 1060) (list "Q6_K" 820) (list "Q5_K" 690)
+          (list "Q4_K" 580) (list "Q3_K" 440) (list "Q2_K" 350)))
+
+  ;; ---- seed model rows: (name total-params-M active-params-M) ----
+  ;; active < total marks Mixture-of-Experts (llmfit's teaching: memory follows
+  ;; total; per-token compute and the offload floor follow active)
+  (defn mf-models ()
+    (list (list "qwen3-4b"      4000  4000)
+          (list "llama3-8b"     8000  8000)
+          (list "qwen3-tts-7b"  7000  7000)
+          (list "mixtral-8x7b" 46700 12900)
+          (list "llama3-70b"  70000 70000)))
+
+  ; resident MB for params-M at bpp-milli, plus 10% runtime/KV overhead
+  (defn mf-resident-mb (params-m bpp-milli)
+    (div (mul (div (mul params-m bpp-milli) 1000) 110) 100))
+  (defn mf-fits? (params-m bpp-milli avail-mb)
+    (if (le (mf-resident-mb params-m bpp-milli) avail-mb) 1 0))
+
+  ; best quant on the ladder that fits, or "" — the WHOLE ladder is walked
+  (defn mf-best-quant-go (quants params-m avail-mb)
+    (if (eq (len quants) 0) ""
+      (if (eq (mf-fits? params-m (nth (head quants) 1) avail-mb) 1)
+        (nth (head quants) 0)
+        (mf-best-quant-go (tail quants) params-m avail-mb))))
+  (defn mf-best-quant (params-m avail-mb)
+    (mf-best-quant-go (mf-quants) params-m avail-mb))
+
+  ;; ---- one verdict row: (name best-quant resident-mb moe-note) ----
+  (defn mf-verdict (model avail-mb)
+    (do (let name (nth model 0))
+        (let total (nth model 1))
+        (let active (nth model 2))
+        (let best (mf-best-quant total avail-mb))
+        (let moe (if (lt active total)
+          (mf-best-quant active avail-mb) ""))
+        (list name best
+          (if (str_eq best "") 0 (mf-resident-mb total (mf-quant-bpp best)))
+          (if (lt active total)
+            (if (str_eq moe "") "moe-active-set-also-too-big" moe)
+            ""))))
+  (defn mf-quant-bpp-go (quants q)
+    (if (eq (len quants) 0) 0
+      (if (str_eq (nth (head quants) 0) q) (nth (head quants) 1)
+        (mf-quant-bpp-go (tail quants) q))))
+  (defn mf-quant-bpp (q) (mf-quant-bpp-go (mf-quants) q))
+
+  ;; ---- the live report ----
+  (defn mf-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (mf-cat (tail xs)))))
+  (defn mf-row-line (model avail-mb)
+    (do (let v (mf-verdict model avail-mb))
+        (mf-cat (list "  " (nth v 0) ": "
+          (if (str_eq (nth v 1) "") "does not fit at any quant"
+            (mf-cat (list "best " (nth v 1) " (" (int_to_str (nth v 2)) " MB resident)")))
+          (if (str_eq (nth v 3) "") ""
+            (mf-cat (list " | MoE offload floor: active set fits at " (nth v 3))))
+          "\n"))))
+  (defn mf-rows-go (models avail-mb out)
+    (if (eq (len models) 0) out
+      (mf-rows-go (tail models) avail-mb
+        (str_concat out (mf-row-line (head models) avail-mb)))))
+  (defn mf-report ()
+    (do (let floor (mf-host-floor))
+        (if (lt (nth floor 0) 0) "host memory door absent (no /proc/meminfo)"
+          (mf-cat (list
+            "host floor (measured now): " (int_to_str (nth floor 0)) " MB total, "
+            (int_to_str (nth floor 1)) " MB available, CPU-only (no GPU door in this checkout)\n"
+            (mf-rows-go (mf-models) (nth floor 1) ""))))))
+  0)

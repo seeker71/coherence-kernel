@@ -23,7 +23,7 @@
 # as a gap rather than hidden: a lean generation-only runner is a later stone, and it will have to
 # prove it emits the same ids as this one before it is allowed to answer anything.
 #
-# THE TWO DENOMINATORS (corpus row 819, selfgauge). Every rate is quoted against BOTH: our own
+# THE TWO DENOMINATORS (corpus row 834, selfgauge). Every rate is quoted against BOTH: our own
 # previous rate, and ollama running the SAME model from the SAME blob on THIS machine. A tok/s that
 # names only the first is the failure this program spent a day finding. The roofline bandwidth is
 # likewise not a vendor brochure number by default — it is DEMONSTRATED: ollama's measured decode rate
@@ -54,7 +54,7 @@ ARTIFACT="$STAGE/answer.txt"
 # through ollama's own eval_count/eval_duration:
 #     64 tok -> 161.395 tok/s     150 tok -> 159.683     300 tok -> 158.449     150 tok again -> 157.696
 # Four points, flat to within 2.3% over a 4.7x span, so this is a RATE and not one sample pretending
-# to be a line (corpus row 812, unispan). The 300-token figure is quoted: longest, most amortized.
+# to be a line (corpus row 827, unispan). The 300-token figure is quoted: longest, most amortized.
 #
 # PREFILL IS QUOTED COLD, AND THAT DISTINCTION IS NOT PEDANTRY. Re-sending the same prompt reported
 # 5417 and 5570 tok/s of "prefill" — ollama's prompt cache returning, not a machine ingesting tokens.

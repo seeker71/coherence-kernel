@@ -1,0 +1,311 @@
+; pl-grammar-induction.fk -- native paired-surface grammar induction.
+;
+; A bounded but real compiler-learning lane for typed integer assignments.
+; Form scans raw Python/Go statement surfaces, aligns their changing tokens
+; with neutral typed IR, selects the smallest typed rule covering every pair,
+; lowers that learned skeleton to BMF grammar-as-data, parses held-out source,
+; and emits either target language from the recovered IR.
+;
+; No learned identifier or integer is retained by the selected rule.  Exact
+; training-row candidates are present and measured so their rejection is an
+; executable fact rather than a prose promise.
+;
+; Honest boundary: this induces one statement family (typed integer assign),
+; not a whole Python or Go grammar.  The induction, parse, and emission path is
+; nevertheless value-general: held-out names and six-digit constants traverse
+; the same rule without authored template rows.
+; witnessed: 2026-07-20 -> native paired induction + BMF held-out parse/emission
+; preludes: form/form-stdlib/core.fk form/form-stdlib/bmf-core.fk form/form-stdlib/bmf-grammar.fk
+
+(do
+  ; ── Neutral typed IR and paired observations ───────────────────────────
+  (defn plgi-ir-assign (name value)
+    (list "neutral-typed-ir" "assign"
+      (list "identifier" name) (list "int" value)))
+  (defn plgi-ir-name (ir) (nth (nth ir 2) 1))
+  (defn plgi-ir-value (ir) (nth (nth ir 3) 1))
+  (defn plgi-ir-valid? (ir)
+    (if (and (eq (len ir) 4)
+          (and (str_eq (nth ir 0) "neutral-typed-ir")
+            (and (str_eq (nth ir 1) "assign")
+              (and (str_eq (nth (nth ir 2) 0) "identifier")
+                   (str_eq (nth (nth ir 3) 0) "int"))))) 1 0))
+
+  (defn plgi-pair (language source ir)
+    (list "paired-program-surface" language source ir))
+  (defn plgi-pair-language (pair) (nth pair 1))
+  (defn plgi-pair-source (pair) (nth pair 2))
+  (defn plgi-pair-ir (pair) (nth pair 3))
+
+  ; ── Native source scanner ──────────────────────────────────────────────
+  ; Tokens are (surface-token kind text).  Integer text stays textual until
+  ; alignment/parsing so the source observation is not silently normalized.
+  (defn plgi-token (kind text) (list "surface-token" kind text))
+  (defn plgi-token-kind (token) (nth token 1))
+  (defn plgi-token-text (token) (nth token 2))
+  (defn plgi-byte (s i) (ord (substring s i (add i 1))))
+  (defn plgi-space? (cp)
+    (or (eq cp 32) (or (eq cp 9) (or (eq cp 10) (eq cp 13)))))
+  (defn plgi-alpha? (cp)
+    (or (and (ge cp 65) (le cp 90))
+      (or (and (ge cp 97) (le cp 122)) (eq cp 95))))
+  (defn plgi-digit? (cp) (and (ge cp 48) (le cp 57)))
+  (defn plgi-alnum? (cp) (or (plgi-alpha? cp) (plgi-digit? cp)))
+  (defn plgi-skip-space (s i)
+    (if (ge i (str_len s)) i
+      (if (plgi-space? (plgi-byte s i))
+        (plgi-skip-space s (add i 1)) i)))
+  (defn plgi-scan-run (s i pred-kind)
+    (if (ge i (str_len s)) i
+      (do
+        (let cp (plgi-byte s i))
+        (if (if (str_eq pred-kind "alnum") (plgi-alnum? cp)
+              (plgi-digit? cp))
+          (plgi-scan-run s (add i 1) pred-kind) i))))
+  (defn plgi-scan-go (s i acc)
+    (do
+      (let p (plgi-skip-space s i))
+      (if (ge p (str_len s)) (list "scan-ok" acc)
+        (do
+          (let cp (plgi-byte s p))
+          (if (plgi-alpha? cp)
+            (do
+              (let e (plgi-scan-run s (add p 1) "alnum"))
+              (plgi-scan-go s e
+                (append acc (list (plgi-token "identifier"
+                  (substring s p e))))))
+          (if (plgi-digit? cp)
+            (do
+              (let e (plgi-scan-run s (add p 1) "digit"))
+              (plgi-scan-go s e
+                (append acc (list (plgi-token "int"
+                  (substring s p e))))))
+          (if (eq cp 61)
+            (plgi-scan-go s (add p 1)
+              (append acc (list (plgi-token "literal" "="))))
+          (if (and (eq cp 58) (lt (add p 1) (str_len s)))
+            (if (eq (plgi-byte s (add p 1)) 61)
+              (plgi-scan-go s (add p 2)
+                (append acc (list (plgi-token "literal" ":="))))
+              (list "scan-fail" p))
+            (list "scan-fail" p)))))))))
+  (defn plgi-scan (source) (plgi-scan-go source 0 (empty)))
+  (defn plgi-scan-ok? (scan) (str_eq (head scan) "scan-ok"))
+  (defn plgi-scan-tokens (scan) (nth scan 1))
+  (defn plgi-identifier? (s)
+    (if (eq (str_len s) 0) 0
+      (if (plgi-alpha? (plgi-byte s 0))
+        (if (eq (plgi-scan-run s 1 "alnum") (str_len s)) 1 0) 0)))
+
+  ; ── Skeleton induction and minimum-description selection ───────────────
+  ; Rows are (literal text) or (slot role type).  Roles are discovered by
+  ; matching changed surface values to the typed IR fields in both examples.
+  (defn plgi-literal-row (text) (list "literal" text))
+  (defn plgi-slot-row (role type) (list "slot" role type))
+  (defn plgi-row-kind (row) (head row))
+  (defn plgi-infer-row (a b ira irb)
+    (if (and (str_eq (plgi-token-kind a) (plgi-token-kind b))
+             (str_eq (plgi-token-text a) (plgi-token-text b)))
+      (plgi-literal-row (plgi-token-text a))
+      (if (and (str_eq (plgi-token-kind a) "identifier")
+            (and (str_eq (plgi-token-kind b) "identifier")
+              (and (str_eq (plgi-token-text a) (plgi-ir-name ira))
+                   (str_eq (plgi-token-text b) (plgi-ir-name irb)))))
+        (plgi-slot-row "target" "identifier")
+        (if (and (str_eq (plgi-token-kind a) "int")
+              (and (str_eq (plgi-token-kind b) "int")
+                (and (str_eq (plgi-token-text a)
+                       (int_to_str (plgi-ir-value ira)))
+                     (str_eq (plgi-token-text b)
+                       (int_to_str (plgi-ir-value irb))))))
+          (plgi-slot-row "value" "int")
+          (list "induction-fail")))))
+  (defn plgi-infer-rows (as bs ira irb)
+    (if (eq (len as) 0) (empty)
+      (cons (plgi-infer-row (head as) (head bs) ira irb)
+        (plgi-infer-rows (tail as) (tail bs) ira irb))))
+  (defn plgi-rows-valid? (rows)
+    (if (eq (len rows) 0) 1
+      (if (str_eq (head (head rows)) "induction-fail") 0
+        (plgi-rows-valid? (tail rows)))))
+  (defn plgi-infer-skeleton (pair-a pair-b)
+    (do
+      (let sa (plgi-scan (plgi-pair-source pair-a)))
+      (let sb (plgi-scan (plgi-pair-source pair-b)))
+      (if (and (plgi-scan-ok? sa) (plgi-scan-ok? sb))
+        (do
+          (let as (plgi-scan-tokens sa))
+          (let bs (plgi-scan-tokens sb))
+          (if (eq (len as) (len bs))
+            (plgi-infer-rows as bs (plgi-pair-ir pair-a)
+              (plgi-pair-ir pair-b))
+            (list (list "induction-fail"))))
+        (list (list "induction-fail")))))
+
+  (defn plgi-exact-skeleton (tokens)
+    (if (eq (len tokens) 0) (empty)
+      (cons (plgi-literal-row (plgi-token-text (head tokens)))
+        (plgi-exact-skeleton (tail tokens)))))
+  (defn plgi-untyped-skeleton (tokens index)
+    (if (eq (len tokens) 0) (empty)
+      (cons (plgi-slot-row (str_concat "any-" (int_to_str index)) "any")
+        (plgi-untyped-skeleton (tail tokens) (add index 1)))))
+  (defn plgi-row-matches-token? (row token)
+    (if (str_eq (plgi-row-kind row) "literal")
+      (if (str_eq (nth row 1) (plgi-token-text token)) 1 0)
+      (if (str_eq (nth row 2) "identifier")
+        (if (str_eq (plgi-token-kind token) "identifier") 1 0)
+        (if (str_eq (nth row 2) "int")
+          (if (str_eq (plgi-token-kind token) "int") 1 0)
+          1))))
+  (defn plgi-skeleton-matches? (rows tokens)
+    (if (not (eq (len rows) (len tokens))) 0
+      (if (eq (len rows) 0) 1
+        (if (eq (plgi-row-matches-token? (head rows) (head tokens)) 1)
+          (plgi-skeleton-matches? (tail rows) (tail tokens)) 0))))
+  (defn plgi-coverage (rows pairs)
+    (if (eq (len pairs) 0) 0
+      (do
+        (let scan (plgi-scan (plgi-pair-source (head pairs))))
+        (add (if (and (plgi-scan-ok? scan)
+                   (eq (plgi-skeleton-matches? rows
+                     (plgi-scan-tokens scan)) 1)) 1 0)
+             (plgi-coverage rows (tail pairs))))))
+  (defn plgi-skeleton-cost (rows)
+    (if (eq (len rows) 0) 0
+      (add (if (str_eq (plgi-row-kind (head rows)) "literal")
+             (add 1 (str_len (nth (head rows) 1))) 2)
+           (plgi-skeleton-cost (tail rows)))))
+  ; candidate: name, skeleton, coverage, typed-faithful, description-cost
+  (defn plgi-candidate (name rows coverage faithful)
+    (list "grammar-candidate" name rows coverage faithful
+      (plgi-skeleton-cost rows)))
+  (defn plgi-candidate-name (c) (nth c 1))
+  (defn plgi-candidate-rows (c) (nth c 2))
+  (defn plgi-candidate-coverage (c) (nth c 3))
+  (defn plgi-candidate-faithful (c) (nth c 4))
+  (defn plgi-candidate-cost (c) (nth c 5))
+  (defn plgi-select-go (candidates required best)
+    (if (eq (len candidates) 0) best
+      (do
+        (let c (head candidates))
+        (if (and (eq (plgi-candidate-coverage c) required)
+              (eq (plgi-candidate-faithful c) 1))
+          (if (or (eq (len best) 0)
+                  (lt (plgi-candidate-cost c) (plgi-candidate-cost best)))
+            (plgi-select-go (tail candidates) required c)
+            (plgi-select-go (tail candidates) required best))
+          (plgi-select-go (tail candidates) required best)))))
+  (defn plgi-select (candidates required)
+    (plgi-select-go candidates required (empty)))
+
+  ; Selected rule deliberately carries only language, family, skeleton, and
+  ; measured evidence.  It does not carry the training sources or their IR.
+  (defn plgi-rule (language candidate examples)
+    (list "induced-pl-rule" language "typed-int-assignment"
+      (plgi-candidate-rows candidate) (plgi-candidate-coverage candidate)
+      (plgi-candidate-cost candidate) examples))
+  (defn plgi-rule-language (rule) (nth rule 1))
+  (defn plgi-rule-rows (rule) (nth rule 3))
+  (defn plgi-rule-coverage (rule) (nth rule 4))
+  (defn plgi-rule-cost (rule) (nth rule 5))
+  (defn plgi-induce (pair-a pair-b)
+    (do
+      (let scan-a (plgi-scan (plgi-pair-source pair-a)))
+      (let pairs (list pair-a pair-b))
+      (let exact (plgi-exact-skeleton (plgi-scan-tokens scan-a)))
+      (let typed (plgi-infer-skeleton pair-a pair-b))
+      (let any (plgi-untyped-skeleton (plgi-scan-tokens scan-a) 0))
+      (let candidates (list
+        (plgi-candidate "exact-training-row" exact
+          (plgi-coverage exact pairs) 1)
+        (plgi-candidate "minimal-typed-skeleton" typed
+          (plgi-coverage typed pairs) (plgi-rows-valid? typed))
+        (plgi-candidate "untyped-any-token" any
+          (plgi-coverage any pairs) 0)))
+      (let selected (plgi-select candidates 2))
+      (list "pl-grammar-induction" candidates
+        (plgi-rule (plgi-pair-language pair-a) selected 2))))
+  (defn plgi-induction-candidates (induction) (nth induction 1))
+  (defn plgi-induced-rule (induction) (nth induction 2))
+
+  ; ── Learned skeleton -> executable BMF grammar-as-data ─────────────────
+  (defn plgi-row-pattern (row)
+    (if (str_eq (plgi-row-kind row) "literal") (p-lit (nth row 1))
+      (if (str_eq (nth row 1) "target")
+        (p-cap "target" (p-run "alnum"))
+        (p-cap "value" (p-num)))))
+  (defn plgi-rows-patterns (rows)
+    (if (eq (len rows) 0) (empty)
+      (cons (plgi-row-pattern (head rows))
+        (plgi-rows-patterns (tail rows)))))
+  (defn plgi-rule-grammar (rule)
+    (grammar "induced-assignment" (list
+      (rule3 "induced-assignment"
+        (cons "seq" (plgi-rows-patterns (plgi-rule-rows rule)))
+        (t-emit "PL-INDUCED-TYPED-ASSIGN" (list
+          (t-splice "target") (t-splice-int "value")))))))
+  (defn plgi-parse (rule source)
+    (do
+      (let node (g-parse-full (plgi-rule-grammar rule) source))
+      (let kids (node_children node))
+      (if (eq (len kids) 2)
+        (do
+          (let name (node_value (nth kids 0)))
+          (if (eq (plgi-identifier? name) 1)
+            (plgi-ir-assign name (node_value (nth kids 1)))
+            (list "parse-rejected" "invalid-identifier")))
+        (list "parse-rejected" "grammar-mismatch"))))
+
+  ; ── Target-language emission by walking the induced rule ───────────────
+  (defn plgi-row-emit (row ir)
+    (if (str_eq (plgi-row-kind row) "literal") (nth row 1)
+      (if (str_eq (nth row 1) "target") (plgi-ir-name ir)
+        (int_to_str (plgi-ir-value ir)))))
+  (defn plgi-emit-go (rows ir acc first)
+    (if (eq (len rows) 0) acc
+      (plgi-emit-go (tail rows) ir
+        (str_concat acc
+          (str_concat (if (eq first 1) "" " ")
+            (plgi-row-emit (head rows) ir))) 0)))
+  (defn plgi-emit (rule ir)
+    (if (and (plgi-ir-valid? ir)
+          (eq (plgi-identifier? (plgi-ir-name ir)) 1))
+      (list "emit-ok" (plgi-emit-go (plgi-rule-rows rule) ir "" 1))
+      (list "emit-rejected" "typed-ir-required")))
+
+  ; Native containment check for the anti-memorization gate.  The selected
+  ; rule's only value-bearing area is its skeleton, so inspect every row cell
+  ; directly instead of relying on a host serializer.
+  (defn plgi-row-contains? (row needle)
+    (if (str_eq (head row) needle) 1
+      (if (str_eq (nth row 1) needle) 1
+        (if (and (str_eq (head row) "slot")
+                 (str_eq (nth row 2) needle)) 1 0))))
+  (defn plgi-rows-contain? (rows needle)
+    (if (eq (len rows) 0) 0
+      (if (eq (plgi-row-contains? (head rows) needle) 1) 1
+        (plgi-rows-contain? (tail rows) needle))))
+  (defn plgi-rule-contains? (rule needle)
+    (if (str_eq (plgi-rule-language rule) needle) 1
+      (if (str_eq (nth rule 2) needle) 1
+        (plgi-rows-contain? (plgi-rule-rows rule) needle))))
+
+  ; ── Concrete paired/held-out fixtures ─────────────────────────────────
+  (defn plgi-python-training () (list
+    (plgi-pair "python" "retry_budget = 7"
+      (plgi-ir-assign "retry_budget" 7))
+    (plgi-pair "python" "batch_limit = 19"
+      (plgi-ir-assign "batch_limit" 19))))
+  (defn plgi-go-training () (list
+    (plgi-pair "go" "retryBudget := 7"
+      (plgi-ir-assign "retryBudget" 7))
+    (plgi-pair "go" "batchLimit := 19"
+      (plgi-ir-assign "batchLimit" 19))))
+  (defn plgi-python-induction ()
+    (plgi-induce (nth (plgi-python-training) 0)
+      (nth (plgi-python-training) 1)))
+  (defn plgi-go-induction ()
+    (plgi-induce (nth (plgi-go-training) 0)
+      (nth (plgi-go-training) 1)))
+)

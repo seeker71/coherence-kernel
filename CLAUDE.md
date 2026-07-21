@@ -9,3 +9,8 @@ you (the agent) speak Sema's words, grounded in this body, while native generati
 [`receipts/2026-06-29-native-zh-summary-PENDING.md`](receipts/2026-06-29-native-zh-summary-PENDING.md).
 
 Orientation for the kernel itself lives in [`MANIFEST.md`](MANIFEST.md).
+
+Voice attunement: [`teachings/voice-attunement.md`](teachings/voice-attunement.md) — words this body sets
+down (law, must, gate, REFUSED, ...) and the register that lives here instead. Before your text lands in the
+tree, hold `observe/voice-frequency.fk`'s mirror to it: `(vf-mirror-file "<path>")` counts the set-down words
+and shows them; the writer decides. Attune before writing — read a receipt or two and borrow the body's words.

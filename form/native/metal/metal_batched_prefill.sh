@@ -36,7 +36,7 @@
 #   B3  THE SAME TOKENS                 the batched-prefill path generates the SAME ids as the
 #                                       token-at-a-time lane path, same prompt, same steps.
 #   B4  A SLOPE, NOT A POINT            prefill measured at FOUR prompt lengths with a slope
-#                                       (corpus row 812, unispan) — batching's benefit is
+#                                       (corpus row 827, unispan) — batching's benefit is
 #                                       length-dependent, so one P would be a line pretending to be
 #                                       a point's worth of evidence.
 #   B5  THE WIDTH IS READ, NOT ASSUMED  threadExecutionWidth must be 32 or the harness SKIPs.
@@ -586,7 +586,7 @@ func generateBatched(_ ids: [Int], _ steps: Int) -> Run {
     return r
 }
 
-// ---- AN EXTERNAL DENOMINATOR (corpus row 819, selfgauge) -----------------------------------------
+// ---- AN EXTERNAL DENOMINATOR (corpus row 834, selfgauge) -----------------------------------------
 // An ollama/llama.cpp oracle measured on THIS machine, THIS model and THIS 2.0 GB blob over a
 // 150-token sample. A MEASUREMENT MADE ELSEWHERE, quoted, never re-run here and never mixed into a
 // gate — carried so that no ratio below can be read without its absolute cost.
@@ -628,7 +628,7 @@ print(String(format: "  vs the world (ollama on this machine, quoted): prefill %
              Double(max(1, bRun.forwards)) / bRun.decode, ollamaDecode,
              ollamaDecode / (Double(max(1, bRun.forwards)) / bRun.decode)))
 
-// ---- GATE B4: FOUR prompt lengths and a slope (corpus row 812, unispan) ---------------------------
+// ---- GATE B4: FOUR prompt lengths and a slope (corpus row 827, unispan) ---------------------------
 // Batching's whole benefit is length-dependent, so a rate quoted at one prompt length would be a point
 // pretending to be a line. A long natural text is encoded once and SLICED, so every length is a real
 // prefix of real ids and not a synthetic repeat of one token.
