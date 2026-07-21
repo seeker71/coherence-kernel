@@ -1,0 +1,192 @@
+; ask-cost-receipt.fk — every cost of a request said TWICE: DECLARED as a bound derived before the
+; run, MEASURED after, and the measured value reported as a FRACTION of its own declared bound.
+;
+; WHY TWICE. Stone 4 already had this shape for numerical error, and it is the only reason its epsilon
+; means anything: |split - attestant| <= (cols + ceil(cols/parts) + parts)*u*SUM|term| is DERIVED from
+; the fold's depth before any GPU runs, and the run then reports 0.000e+00 OF THAT BOUND. A measured
+; deviation with no derived bound beside it is a number nobody can be wrong about. This cell
+; generalises that discipline from error to COST: tokens, MACs, bytes, dispatches, wall time, rate.
+;
+; WHAT MAKES A DECLARED BOUND HONEST, and the trap this cell is built to avoid. A declared cost that
+; was fitted to the measurement is not a bound, it is a restatement — it can never be violated and so
+; it never teaches. Every declaration below is a function of the MODEL'S OWN SHAPE and the KERNEL
+; GRAPH only: block_count, embedding_length, feed_forward_length, head counts, head_dim, vocab_size
+; and the ggml type of each tensor, all read out of the file (gguf-meta.fk / wtr-emit-table). Not one
+; coefficient here was chosen after seeing a stopwatch.
+;
+; THE FALSIFIER, so that the byte and MAC declarations are not circular. The counts below are derived
+; from shape and then keyed to the token counts the run actually produced — they are NOT read off a
+; hardware counter, and this cell will not pretend otherwise. What makes them refutable is the
+; ROOFLINE: a run cannot touch B bytes in less than B/bandwidth seconds. So `acr-roofline-us` turns
+; the byte declaration into a TIME lower bound, and the clock can contradict it. A measured decode
+; faster than its own roofline would mean the byte declaration is wrong — which is exactly the way a
+; declared cost earns the right to be believed. It has not happened; the fraction is reported so that
+; the day it does, it is visible rather than absorbed.
+;
+; TWO DENOMINATORS, ALWAYS (corpus row 819, selfgauge). A rate measured only against our own previous
+; rate, read as though it were a rate against the world, is the failure this program spent a day
+; discovering. `acr-ratio-milli` exists so that every x in the receipt names WHICH denominator it is
+; an x OF — ours-before, or the world's measured number on this same machine and this same blob.
+;
+; NO FLOATS, ON PURPOSE, AND NOT ONLY BECAUSE fkwu CANNOT PRINT ONE. Every quantity here is an exact
+; integer in a named unit — microseconds, bytes, MACs, dispatches, parts-per-million, milli-tok/s —
+; so a receipt is bit-identical across the arms and a fraction is a division of two integers anyone
+; can redo by hand. `frac_ppm` is measured*1e6/declared: 1000000 means exactly at the bound, less than
+; 1000000 means inside it, more than 1000000 means the bound was exceeded and the declaration failed.
+;
+; JOULES ARE PENDING AND STAY PENDING. `acr-pending-line` renders a cost that has a field, a name and
+; the exact command that will fill it, and NO number. Energy on this host needs
+; /usr/bin/powermetrics under sudo, which is not grantable unattended. A modelled joule wearing a
+; measurement's name would be the one failure this whole day has been about, so the field is built
+; and left empty. Pending is honest.
+;
+; THE RADIUS THIS CELL SPEAKS FOR (corpus row 811, aporon). The arithmetic is exact for a DECODER-ONLY
+; transformer with pre-norm attention + gated FFN and a tied or untied unembedding — llama's shape.
+; `acr-type-bytes` speaks for ggml types 0 (F32), 12 (Q4_K) and 14 (Q6_K) and returns 0 for any other,
+; the same refusal wtr-bytes makes, so a model quantized otherwise reports a zero rather than a guess.
+; `acr-dispatch-forward` speaks for the LANE kernel graph as first-token.fk threads it (one dispatch
+; per matvec); `acr-dispatch-forward-split` speaks for the split/hoist graph (two: partials, then
+; combine). It does NOT speak for a batched prefill — every count here is per single-token forward,
+; and prefill is declared as `n` of them, which is an UPPER bound for any carrier that batches.
+;
+; Kin: whole-tensor-residency.fk (wtr-bytes — the same stride rule, the tensor table this sums over),
+; qk-matvec-split.fk (the named-epsilon shape this generalises from error to cost),
+; gguf-meta.fk (gmt-* — where the shape numbers are read from the file),
+; ask-native-lane.fk (anl-* — the lane that carries a receipt built here),
+; form-cli-ask.fk (the verb that reports it).
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/ask-cost-receipt-band.fk (four-way; verdict 511)
+
+(do
+    ; ================= 1. bytes, from the ggml type's own block stride =================
+    ; Q4_K packs 256 weights into 144 bytes, Q6_K into 210, F32 into 4 each. This is the SAME rule
+    ; wtr-bytes applies, restated here without the file reach so the arithmetic can be proven with no
+    ; blob on the host. An unknown type is 0, never a guessed stride.
+    (defn acr-block-n () 256)
+    (defn acr-type-bytes (t n)
+        (if (eq t 0)  (mul n 4)
+        (if (eq t 14) (mul (div n (acr-block-n)) 210)
+        (if (eq t 12) (mul (div n (acr-block-n)) 144) 0))))
+
+    ; ================= 2. MACs, from the shape and nothing else =================
+    ; One decode forward at context length `ctx` (positions 0..ctx-1 already in the cache, this token
+    ; included). Per layer: q (d x d), k and v (d x nkv*headdim each), attn_output (d x d), and the
+    ; three FFN matrices (d x dff twice, dff x d once). Then the attention itself, which is the ONLY
+    ; term that grows with the conversation: QK^T and AV are each nhead*headdim*ctx MACs.
+    (defn acr-macs-proj (d dff nkv headdim)
+        (add (add (mul d d) (mul d d))                                  ; q and attn_output
+        (add (add (mul d (mul nkv headdim)) (mul d (mul nkv headdim)))  ; k and v
+             (add (mul d dff) (add (mul d dff) (mul dff d))))))         ; gate, up, down
+    (defn acr-macs-attn (nhead headdim ctx) (mul 2 (mul nhead (mul headdim ctx))))
+    (defn acr-macs-layer (d dff nhead nkv headdim ctx)
+        (add (acr-macs-proj d dff nkv headdim) (acr-macs-attn nhead headdim ctx)))
+    ; The unembedding is a d x vocab matvec whether or not it is tied — tying saves BYTES, not MACs.
+    (defn acr-macs-head (d vocab) (mul d vocab))
+    (defn acr-macs-forward (nlayer d dff nhead nkv headdim vocab ctx)
+        (add (mul nlayer (acr-macs-layer d dff nhead nkv headdim ctx))
+             (acr-macs-head d vocab)))
+
+    ; A WHOLE RUN of `nfwd` single-token forwards, positions 0..nfwd-1, so the context at forward i is
+    ; i+1. Everything except attention is flat per forward; attention is the one term that grows, and
+    ; summing it over the run is the triangular number nfwd*(nfwd+1)/2 rather than nfwd times its
+    ; final value. Using the final ctx for every forward would overstate the attention MACs by ~2x —
+    ; harmless here, where attention is 0.1% of the total, and badly wrong at long context, which is
+    ; exactly the sort of bound that is right until the day it silently is not.
+    (defn acr-tri (n) (div (mul n (add n 1)) 2))
+    (defn acr-macs-run (nlayer d dff nhead nkv headdim vocab nfwd)
+        (add (mul nfwd (add (mul nlayer (acr-macs-proj d dff nkv headdim)) (acr-macs-head d vocab)))
+             (mul nlayer (mul 2 (mul nhead (mul headdim (acr-tri nfwd)))))))
+
+    ; ================= 3. the KV cache's own traffic =================
+    ; At context `ctx` the attention reads every cached key and value for the kv heads, f32, both
+    ; tensors, in every layer. Small beside 2 GB of weights, and included anyway: a cost that is
+    ; dropped because it is small is a cost nobody notices growing.
+    (defn acr-kv-bytes-forward (nlayer nkv headdim ctx)
+        (mul nlayer (mul 2 (mul 4 (mul nkv (mul headdim ctx))))))
+    (defn acr-kv-bytes-run (nlayer nkv headdim nfwd)
+        (acr-kv-bytes-forward nlayer nkv headdim (acr-tri nfwd)))
+
+    ; The bytes a whole run touches: the resident weights every forward re-reads (this is a decoder at
+    ; batch 1 — there is no reuse to amortize, which is the entire reason the lane is bandwidth-bound
+    ; and not compute-bound), plus the growing cache, plus one dequantized embedding row per forward.
+    (defn acr-bytes-run (weight-bytes embed-row-bytes nlayer nkv headdim nfwd)
+        (add (mul nfwd (add weight-bytes embed-row-bytes))
+             (acr-kv-bytes-run nlayer nkv headdim nfwd)))
+
+    ; ================= 4. dispatches, counted off the kernel graph =================
+    ; Per layer, the lane graph is exactly: rmsnorm, q, k, v, rope(Q), rope(K), gqa_decode,
+    ; attn_output, residual add, rmsnorm, gate, up, swiglu, down, residual add = 15. Around the stack:
+    ; the embedding gather (1) before, and the final rmsnorm + unembedding matvec + argmax (3) after.
+    (defn acr-dispatch-per-layer-lane () 15)
+    ; The split and hoist matvecs are TWO dispatches each (partials, then the down-counting combine),
+    ; and there are 7 matvecs in a layer, so the same graph costs 7 more per layer and 1 more at the
+    ; head. Named separately rather than parameterised: they are two different graphs, not one graph
+    ; with a knob, and a receipt that could not tell them apart would be reporting the wrong one.
+    (defn acr-dispatch-per-layer-split () 22)
+    (defn acr-dispatch-forward (nlayer)       (add 1 (add (mul nlayer (acr-dispatch-per-layer-lane))  3)))
+    (defn acr-dispatch-forward-split (nlayer) (add 1 (add (mul nlayer (acr-dispatch-per-layer-split)) 4)))
+
+    ; ================= 5. the roofline — where a byte count becomes a refutable time =================
+    ; Bandwidth is carried in MB/s meaning 10^6 bytes/s, which makes the conversion exact and
+    ; unit-free: bytes / (MB/s) IS microseconds. No constant is hidden in it.
+    (defn acr-roofline-us (bytes bw-mbs) (if (le bw-mbs 0) 0 (div bytes bw-mbs)))
+    ; and the inverse reading, which is the one that says how much of the machine we are using:
+    (defn acr-achieved-mbs (bytes us) (if (le us 0) 0 (div bytes us)))
+
+    ; ================= 6. rates and fractions, integer and exact =================
+    ; tok/s in THOUSANDTHS, so 12235 reads 12.235 tok/s. tokens/(us/1e6) = tokens*1e6/us tok/s.
+    (defn acr-tokps-milli (tokens us) (if (le us 0) 0 (div (mul tokens 1000000000) us)))
+    (defn acr-us-per-token (tokens us) (if (le tokens 0) 0 (div us tokens)))
+    ; the FRACTION OF THE BOUND. 1000000 is exactly at it; above 1000000 the declaration was exceeded.
+    (defn acr-frac-ppm (measured declared) (if (le declared 0) 0 (div (mul measured 1000000) declared)))
+    (defn acr-within-bound? (measured declared) (if (le measured declared) 1 0))
+    ; a ratio in THOUSANDTHS, for saying how many x behind (or ahead of) a NAMED denominator.
+    (defn acr-ratio-milli (a b) (if (le b 0) 0 (div (mul a 1000) b)))
+
+    ; ================= 7. rendering =================
+    ; One flat line per cost, greppable, every field named. `frac_ppm` is measured of declared.
+    (defn acr-cost-line (label declared measured)
+        (str_concat "COST "
+        (str_concat label
+        (str_concat " declared=" (str_concat (int_to_str declared)
+        (str_concat " measured=" (str_concat (int_to_str measured)
+        (str_concat " frac_ppm=" (str_concat (int_to_str (acr-frac-ppm measured declared))
+        (str_concat " within=" (int_to_str (acr-within-bound? measured declared))))))))))))
+    ; TWO KINDS OF BOUND, AND THEY MUST NOT BE RENDERED THE SAME WAY. A COUNT (MACs, bytes,
+    ; dispatches, tokens) is declared as a CEILING: measured above it means the declaration was wrong.
+    ; A WALL TIME derived from the roofline is a FLOOR: bytes cannot be touched faster than
+    ; bytes/bandwidth, so measured BELOW it is the falsification, and measured above it is merely the
+    ; distance from the machine's limit — the whole point of the number. Printing a floor through
+    ; `acr-cost-line` would stamp `within=0` on every honest run and teach the reader to ignore the
+    ; field. `holds=1` here means measured >= declared, which is what a floor asks for; `frac_ppm`
+    ; then reads as how many times the floor the run actually cost (22190553 = 22.19x the roofline).
+    (defn acr-above-floor? (measured declared) (if (ge measured declared) 1 0))
+    (defn acr-floor-line (label declared measured)
+        (str_concat "COST "
+        (str_concat label
+        (str_concat " kind=floor declared=" (str_concat (int_to_str declared)
+        (str_concat " measured=" (str_concat (int_to_str measured)
+        (str_concat " frac_ppm=" (str_concat (int_to_str (acr-frac-ppm measured declared))
+        (str_concat " holds=" (int_to_str (acr-above-floor? measured declared))))))))))))
+
+    ; A cost with a field, a name, and NO number — because the instrument is not grantable here. The
+    ; command that WILL fill it travels with it, so the pending-ness is actionable and not an excuse.
+    (defn acr-pending-line (label cmd)
+        (str_concat "COST "
+        (str_concat label
+        (str_concat " declared=pending measured=pending frac_ppm=pending reason=instrument-requires-sudo fill-with=" cmd))))
+    (defn acr-joules-command ()
+        "sudo /usr/bin/powermetrics --samplers cpu_power,gpu_power -i 200 -n <samples> --hide-cpu-duty-cycle")
+    (defn acr-joules-line () (acr-pending-line "joules" (acr-joules-command)))
+    ; a rate against a NAMED denominator, both of them printed, so no x is ever anonymous.
+    (defn acr-vs-line (label ours-milli denom-name theirs-milli)
+        (str_concat "RATE "
+        (str_concat label
+        (str_concat " ours_milli=" (str_concat (int_to_str ours-milli)
+        (str_concat " denominator=" (str_concat denom-name
+        (str_concat " theirs_milli=" (str_concat (int_to_str theirs-milli)
+        (str_concat " behind_milli=" (int_to_str (acr-ratio-milli theirs-milli ours-milli))))))))))))
+
+    0)

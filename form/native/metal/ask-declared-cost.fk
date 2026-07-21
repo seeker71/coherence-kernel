@@ -1,0 +1,139 @@
+; ask-declared-cost.fk — the body's side of the ASK cost receipt: every DECLARED bound, derived from
+; the model file itself, emitted BEFORE anything runs.
+;
+; THE POINT OF DOING THIS IN THE BODY. A declared bound computed by the carrier from numbers the
+; carrier also measured is not a bound, it is a restatement, and it can never be violated. So every
+; number below is read out of the blob's own metadata and its own tensor table (gguf-meta.fk,
+; whole-tensor-residency.fk) and folded by ask-cost-receipt.fk's shape arithmetic. The carrier's only
+; job afterwards is to hold a stopwatch and count what came back.
+;
+; THE ONE THING THAT MADE THIS WORTH WALKING THE FILE FOR. llama3.2:3b is NOT uniformly quantized, and
+; the comfortable assumption is wrong in a way that no plausibility check would catch: attn_v and
+; ffn_down are Q6_K on exactly 14 of the 28 layers and Q4_K on the other 14 (Q4_K_M's alternating
+; rule), while attn_q/attn_k/attn_output/ffn_gate/ffn_up are Q4_K on all 28 and the norms are F32.
+; Declaring "attn_v is Q6_K" — which reads perfectly well, matches layer 0, and would have been my
+; assumption — overstates the model's decode traffic by about 12%. A 12% error in the declared bound
+; is invisible against a 22x gap and would quietly poison every fraction in the receipt. So the walk
+; asks each of the 255 tensors for its OWN ggml type and sums the stride rule over what it finds.
+;
+; THE CROSS-CHECK THAT MAKES THE STRIDE RULE MORE THAN AN ASSERTION. GGUF stores no per-tensor byte
+; length — the table's length column is itself derived by wtr-bytes. What IS independent is the file:
+; the tensor data begins at the alignment-padded end of the header and runs to EOF, so the sum of all
+; 255 derived lengths must equal (file size - data base) exactly. `adc-emit-declared` prints both, and
+; a stride rule that is wrong for even one ggml type cannot make that identity hold by accident.
+;
+; WHAT COUNTS AS TOUCHED BY ONE DECODE FORWARD. Every blk.* tensor, output_norm, and token_embd (which
+; is read twice — once as the embedding gather of one row, once in full as the tied unembedding). NOT
+; rope_freqs: the emitted RoPE kernel computes its angles from freq_base and never reads that tensor.
+; 256 bytes either way, and it is excluded because the declaration should describe the kernel graph
+; that actually runs, not the file's inventory.
+;
+; THE RADIUS THIS CELL SPEAKS FOR (corpus row 811, aporon). GGUF v3 llama-architecture files whose
+; tensors are F32 / Q4_K / Q6_K — acr-type-bytes returns 0 for anything else, so a model outside that
+; mix declares a visibly wrong total and fails the file-size identity rather than reporting a guess.
+; It speaks for an UNBATCHED decoder: `nfwd` single-token forwards. A carrier that batched its prefill
+; would touch the weights fewer times, so these numbers remain an upper bound on bytes and dispatches
+; for it, and would need re-deriving to be tight.
+;
+; Kin: whole-tensor-residency.fk (wtr-* — the table walk and the same stride rule), ask-cost-receipt.fk
+; (acr-* — the shape arithmetic), gguf-meta.fk (gmt-* — the hyper-parameters), first-token.fk (the
+; kernel graph the dispatch count is taken from), native/metal/metal_ask.sh (the carrier).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/ask-cost-receipt.fk native/metal/whole-tensor-residency.fk
+;
+; Proven by: form/native/metal/metal_ask.sh (the carrier witness) and the file-size identity it prints;
+;            the shape arithmetic itself by form-stdlib/tests/ask-cost-receipt-band.fk.
+
+(do
+    (defn adc-line (s) (print s))
+    (defn adc-src (path) (eqr-of-file path 0 (wtr-header-window)))
+
+    ; ── which tensors a decode forward reads ─────────────────────────────────────────────────────
+    (defn adc-untouched-name () "rope_freqs.weight")
+    (defn adc-touched? (src off) (if (str_eq (wtr-name src off) (adc-untouched-name)) 0 1))
+
+    ; ── the walk: one pass, two sums (all tensors, and the touched ones) ─────────────────────────
+    ; Two accumulators rather than two walks: the header walk is the expensive part of this cell and
+    ; walking it twice to answer two questions about the same rows would be a cost with no meaning.
+    (defn adc-sum-all (src off n acc)
+        (if (eq n 0) acc
+            (adc-sum-all src (egg-ti-next src off) (sub n 1) (add acc (wtr-bytes src off)))))
+    (defn adc-sum-touched (src off n acc)
+        (if (eq n 0) acc
+            (adc-sum-touched src (egg-ti-next src off) (sub n 1)
+                (add acc (if (eq (adc-touched? src off) 1) (wtr-bytes src off) 0)))))
+
+    (defn adc-kv (label v) (adc-line (str_concat "DECL " (str_concat label (str_concat " " (int_to_str v))))))
+
+    ; ── the declared stream, in TWO parts, and the split is not cosmetic ─────────────────────────
+    ; Part one walks the file's 8 MB header and asks 255 tensors for their type and dims. It costs
+    ; tens of seconds and its answer depends ONLY on the model, so it is emitted alone and cached by
+    ; the carrier against the blob's identity. Part two is the per-request arithmetic, which depends
+    ; on `nfwd` and reaches no file at all. Folding them together would make every question with a
+    ; different length re-walk the whole header to recompute a multiplication — and the pressure to
+    ; then cache the WRONG thing (the arithmetic, keyed by a question) is exactly how a cost receipt
+    ; starts reporting a bound derived for some other run.
+    (defn adc-emit-shape (path)
+        (do
+            (let src (adc-src path))
+            (let base (egg-data-base src (wtr-alignment)))
+            (let nt (egg-tensor-count src))
+            (let t0 (egg-tinfo-start src))
+            (let nlayer  (gmt-u32 src "llama.block_count"))
+            (let d       (gmt-u32 src "llama.embedding_length"))
+            (let dff     (gmt-u32 src "llama.feed_forward_length"))
+            (let nhead   (gmt-u32 src "llama.attention.head_count"))
+            (let nkv     (gmt-u32 src "llama.attention.head_count_kv"))
+            (let headdim (gmt-u32 src "llama.rope.dimension_count"))
+            (let vocab   (gmt-u32 src "llama.vocab_size"))
+            (let allb    (adc-sum-all src t0 nt 0))
+            (let touched (adc-sum-touched src t0 nt 0))
+            ; one dequantized embedding row per forward, at the row's own quant stride
+            (let embrow  (acr-type-bytes 14 d))
+            (adc-kv "nlayer" nlayer)      (adc-kv "d" d)        (adc-kv "dff" dff)
+            (adc-kv "nhead" nhead)        (adc-kv "nkv" nkv)    (adc-kv "headdim" headdim)
+            (adc-kv "vocab" vocab)        (adc-kv "ntensors" nt)
+            (adc-kv "data_base" base)
+            ; the identity: this plus data_base must be the file's size on disk, exactly
+            (adc-kv "tensor_bytes_all" allb)
+            (adc-kv "file_bytes_implied" (add base allb))
+            (adc-kv "decode_weight_bytes" touched)
+            (adc-kv "embed_row_bytes" embrow)
+            (adc-line "END")
+            0))
+
+    ; Part two: the per-request bound. Pure arithmetic over numbers part one already established, so
+    ; it costs nothing and can be re-derived for every question without touching the blob.
+    (defn adc-emit-run (nlayer d dff nhead nkv headdim vocab touched embrow nfwd)
+        (do
+            (adc-kv "nfwd" nfwd)
+            (adc-kv "bytes_per_forward" (add touched embrow))
+            (adc-kv "bytes_run" (acr-bytes-run touched embrow nlayer nkv headdim nfwd))
+            (adc-kv "macs_run" (acr-macs-run nlayer d dff nhead nkv headdim vocab nfwd))
+            (adc-kv "kv_bytes_run" (acr-kv-bytes-run nlayer nkv headdim nfwd))
+            (adc-kv "dispatch_per_forward_lane" (acr-dispatch-forward nlayer))
+            (adc-kv "dispatch_run_lane" (mul nfwd (acr-dispatch-forward nlayer)))
+            (adc-kv "dispatch_run_split" (mul nfwd (acr-dispatch-forward-split nlayer)))
+            (adc-line "END")
+            0))
+
+    ; ── the rendered receipt, after the carrier has measured ─────────────────────────────────────
+    ; Rendering lives in the body too, so the fraction beside a bound is computed by the same cell
+    ; that computed the bound. The carrier passes numbers; it never formats a cost line.
+    (defn adc-emit-receipt (nfwd-d nfwd-m bytes-d bytes-m macs-d macs-m disp-d disp-m
+                            prefill-floor-us prefill-us decode-floor-us decode-us
+                            tokps-ceiling-milli tokps-milli world-tokps-milli)
+        (do
+            (adc-line (acr-cost-line  "forwards"        nfwd-d  nfwd-m))
+            (adc-line (acr-cost-line  "bytes_touched"   bytes-d bytes-m))
+            (adc-line (acr-cost-line  "macs"            macs-d  macs-m))
+            (adc-line (acr-cost-line  "dispatches"      disp-d  disp-m))
+            (adc-line (acr-floor-line "prefill_wall_us" prefill-floor-us prefill-us))
+            (adc-line (acr-floor-line "decode_wall_us"  decode-floor-us  decode-us))
+            (adc-line (acr-cost-line  "decode_tokps_milli" tokps-ceiling-milli tokps-milli))
+            (adc-line (acr-joules-line))
+            (adc-line (acr-vs-line "decode_tokps" tokps-milli "ollama-llama3.2-3b-same-machine-same-blob" world-tokps-milli))
+            (adc-line "END")
+            0))
+
+    0)
