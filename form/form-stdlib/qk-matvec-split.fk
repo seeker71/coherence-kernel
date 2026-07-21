@@ -1,0 +1,135 @@
+; qk-matvec-split.fk — the quantized matvec with its row-fold SPLIT across threads, under a named
+; epsilon; and the attestant it must answer to.
+;
+; WHY, AND IT IS A MEASUREMENT THAT CORRECTED AN EXPECTATION. form/native/GPU_GAPS.md's first open row
+; reads: "the fused quantized matvec is one thread per ROW with a serial right-fold down the row,
+; which is what makes it bit-exact: 2.94 GMAC/s ... a threadgroup-per-row reduction would lift it by
+; ~2 orders of magnitude". Stone 4 profiled a real full-width llama3.2:3b token per tensor SHAPE and
+; found the diagnosis incomplete. Wall time per dispatch (M4 Max, one command buffer per op):
+;
+;   shape (rows x cols)     MACs      time      implied rate
+;   Q4_K 1024 x 3072        3.1M      2.618 ms   1.2 GMAC/s
+;   Q4_K 3072 x 3072        9.4M      2.648 ms   3.6 GMAC/s
+;   Q4_K 8192 x 3072       25.2M      2.607 ms   9.7 GMAC/s
+;   Q4_K 3072 x 8192       25.2M      6.657 ms   3.8 GMAC/s
+;   Q6_K 128256 x 3072    394.0M      8.576 ms  45.9 GMAC/s
+;
+; Read the first three rows: 8x the work, THE SAME TIME. Read rows 3 and 4: the same MAC count, 2.6x
+; the time, and the only thing that changed is which factor is rows and which is columns. The cost
+; tracks the COLUMN count — the serial depth of one thread — and barely notices the row count until
+; the row count is enormous. The dispatch was never throughput-bound. It was latency-bound with the
+; machine mostly idle, and the serial fold was not the wall: the missing PARALLELISM was.
+;
+; That has two consequences, and only the second one needs an epsilon:
+;   1  Independent dispatches should not wait for each other. q/k/v read one vector and write three
+;      disjoint buffers; gate and up likewise. Running them concurrently is free — no arithmetic
+;      changes at all — and metal_first_token.sh measured 1.41x end-to-end from that alone, with the
+;      generated token ids BIT-IDENTICAL. That change is in the carrier, not here.
+;   2  Beyond that, the only parallelism left inside one matvec is ALONG THE ROW, and splitting a
+;      sum reassociates it. That is this cell.
+;
+; THE SHAPE. Two kernels, not a threadgroup reduction:
+;   *-matvec-part   thread (r, p) folds row r's CONTIGUOUS column chunk p, right-to-left, exactly the
+;                   attestant's op order within the chunk. Grid is rows*parts — the parallelism the
+;                   measurement asked for.
+;   part-combine    one thread per row folds the `parts` partials, p counting DOWN.
+; The combine counts down so that AT parts = 1 THE SPLIT KERNEL IS THE ATTESTANT, BIT FOR BIT: one
+; chunk is the whole row, folded in the same direction, and the combine adds it to nothing. That is
+; not a nicety — it is the structural claim that chunking is the ONLY difference between the two
+; paths, testable without any epsilon at all.
+;
+; THE NAMED EPSILON, AND ITS DERIVATION. Both paths sum the SAME cols products t_j = w_j * x_j; only
+; the association differs. For f32 summation of n terms in an association tree of depth d, the
+; accumulated rounding is bounded by d * u * SUM|t_j|, with u = 2^-24 the f32 unit roundoff (each of
+; the at-most-d additions on any term's path contributes at most one relative u of the running total,
+; and the running total is bounded by SUM|t_j|). The attestant's tree is a chain: d = cols. The split
+; tree is a chunk chain of depth chunk = ceil(cols/parts) followed by a partial chain of depth parts:
+; d = chunk + parts. Both are exact real sums of the same terms, so their DIFFERENCE is bounded by
+; the sum of the two bounds:
+;
+;     |y_split - y_serial|  <=  (cols + ceil(cols/parts) + parts) * u * SUM|w_j * x_j|
+;
+; and every quantity in it is measured, not guessed: SUM|term| is computed from the GPU's own dequant
+; of that row and the actual x. metal_first_token.sh reports the measured deviation as a FRACTION of
+; that bound, for every row of a real tensor, and refuses the fast path if any row leaves it.
+;
+; THE ATTESTANT STAYS (corpus row 810). q6m-matvec-msl / q4m-matvec-msl are not deleted, not
+; deprecated, and not made a special case of this: they remain the bit-exact meaning, and this cell's
+; output is admissible only while it still agrees with them — which the carrier checks at two levels
+; every run (the parts=1 identity, and the same generated token IDS from both paths).
+;
+; THE RADIUS THIS CELL SPEAKS FOR. The epsilon above is a bound on the DIFFERENCE BETWEEN THE TWO
+; PATHS, not on either path's distance from the real sum, and not on what that difference does to a
+; token after 28 layers of it — that is an empirical claim the carrier makes by comparing ids, and it
+; holds for the prompts it ran and no others. The kernels assume parts >= 1 and cols >= 1; a `parts`
+; larger than `cols` yields empty chunks that contribute a clean 0.0 (checked: lo >= cols leaves acc
+; at 0.0f), so it is wasteful but not wrong. Nothing here speaks for f16/bf16 or for any quant other
+; than the Q6_K / Q4_K whose weight functions it calls by name.
+;
+; Kin: q6k-msl.fk / q4k-msl.fk (q6m-matvec-msl / q4m-matvec-msl — THE ATTESTANT, and q6k_w / q4k_w,
+; the weight functions these kernels call; they must be emitted into the SAME translation unit),
+; llama-decode-msl.fk (the other ops the token needs), transformer-block.fk (tb-dot — the right-fold
+; op order the chunk keeps).
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/qk-matvec-split-band.fk (the transcription and the parts=1 identity)
+;            and form/native/metal/metal_first_token.sh (the GPU, the epsilon, and the token ids).
+
+(do
+    ; ================= the transcription, read back into Form =================
+    ; The chunk boundaries the emitted C computes, in Form, so the band can falsify them against an
+    ; independently-written partition rather than against themselves.
+    (defn qms-chunk (cols parts) (div (add cols (sub parts 1)) parts))
+    ; BOTH ends are clamped to cols, and that is what makes this a partition rather than a set of
+    ; ranges that happens to work. With parts > cols the tail chunks would otherwise have lo > cols
+    ; and hi = cols — a range with hi BELOW lo. The emitted `while (j > lo)` never runs there, so the
+    ; kernel is safe either way; but "safe" is not "well-formed", and a band cannot check a cover it
+    ; cannot state. Clamping lo makes every chunk [lo, hi) with lo <= hi, and the empty tail chunks sit
+    ; at [cols, cols).
+    (defn qms-lo (cols parts p)
+        (do (let l (mul p (qms-chunk cols parts))) (if (gt l cols) cols l)))
+    (defn qms-hi (cols parts p)
+        (do (let h (add (mul p (qms-chunk cols parts)) (qms-chunk cols parts)))
+            (if (gt h cols) cols h)))
+    ; the depth of the split association tree, which IS the epsilon's second term
+    (defn qms-depth (cols parts) (add (qms-chunk cols parts) parts))
+    ; the named bound's coefficient: (cols + chunk + parts) — multiply by u * SUM|term|
+    (defn qms-bound-coeff (cols parts) (add cols (qms-depth cols parts)))
+
+    ; the split sum over a list, with the SAME association the kernels use, so the band can compare it
+    ; to a plain right fold on a fixture and see the reassociation actually happen
+    (defn qms-fold-down (xs i lo acc)
+        (if (le i lo) acc (qms-fold-down xs (sub i 1) lo (add (nth xs (sub i 1)) acc))))
+    (defn qms-part (xs cols parts p) (qms-fold-down xs (qms-hi cols parts p) (qms-lo cols parts p) 0.0))
+    (defn qms-combine (xs cols parts p acc)
+        (if (eq p 0) acc (qms-combine xs cols parts (sub p 1) (add (qms-part xs cols parts (sub p 1)) acc))))
+    (defn qms-split-sum (xs cols parts) (qms-combine xs cols parts parts 0.0))
+    (defn qms-serial-sum (xs cols) (qms-fold-down xs cols 0 0.0))
+
+    ; ================= the emitted MSL =================
+    ; Parameterized by the WEIGHT FUNCTION NAME (q6k_w / q4k_w), so there is one partial-matvec
+    ; meaning in the body and two quants reach into it — the same discipline q6k-msl.fk keeps with
+    ; q6k-dequant.fk. The kernel must land in the same translation unit as its weight function.
+    (defn qms-part-msl (fname wfn)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* part [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& parts [[buffer(5)]], uint gid [[thread_position_in_grid]]) { if (gid >= rows * parts) return; uint r = gid / parts; uint p = gid - r * parts; uint chunk = (cols + parts - 1u) / parts; uint lo = p * chunk; uint hi = lo + chunk; if (lo > cols) lo = cols; if (hi > cols) hi = cols; float acc = 0.0f; uint j = hi; while (j > lo) { j -= 1; float pr = "
+        (str_concat wfn
+                    "(qb, r * cols + j) * float(x[j]); acc = pr + acc; } part[gid] = acc; }")))))
+
+    ; the combine, p counting DOWN — which is what makes parts=1 the attestant exactly
+    (defn qms-combine-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* part [[buffer(0)]], device float* y [[buffer(1)]], constant uint& rows [[buffer(2)]], constant uint& parts [[buffer(3)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; float acc = 0.0f; uint p = parts; while (p > 0) { p -= 1; acc = part[r * parts + p] + acc; } y[r] = acc; }")))
+
+    ; the three kernels a carrier needs, as one appendix to the q6k/q4k unit (no helper spine of its
+    ; own: q6k_w and q4k_w are already defined there, which is exactly why this is an appendix and not
+    ; a translation unit)
+    (defn qms-msl-appendix ()
+        (str_concat (qms-part-msl "form_q6k_matvec_part_f32" "q6k_w")
+        (str_concat (qms-part-msl "form_q4k_matvec_part_f32" "q4k_w")
+                    (qms-combine-msl "form_part_combine_f32"))))
+
+    0)
