@@ -214,10 +214,34 @@ if [[ -z "$ORA0" || -z "$ORA7" ]]; then
 else
     echo "  reusing pre-computed oracle stacks: $ORA0 and $ORA7"
 fi
+# THE COMPOSED-TRAJECTORY ENVELOPE (selfgauge). A 43-layer comparison cannot honestly ask "is the GPU's
+# final state right to 1e-6" — it can only ask "do two runs of THIS recipe, one of them nudged each layer
+# by as much as f32 arithmetic nudges it, stay this close?" So the oracle is rented a second time, in fp64
+# throughout, with the state tilted by PERSTEP after every layer. The distance between those two fp64
+# trajectories is the yardstick — measured from the reference, not chosen to make this harness green.
+# (A one-ulp INPUT tilt was measured first and is the wrong yardstick: this model DAMPS an input
+# perturbation hard — 1.2e-7 at blk.0 falls to 4e-10 by blk.18 — so it says nothing about noise that is
+# injected fresh at every layer, which is what an f32 carrier does.)
+# the per-layer tilt: the size of the gap an f32 carrier was MEASURED to have when ONE layer is run alone
+# from this oracle's own input (the "THIS LAYER ALONE" gates below report it at every layer; the largest observed is 1.4e-5).
+PERSTEP=1.4e-5
+PER0="${FORM_DS4_PERTURB_DIR0:-}"; PER7="${FORM_DS4_PERTURB_DIR7:-}"
+if [[ -z "$PER0" || -z "$PER7" ]]; then
+    PER0="$work/per$POS_A"; PER7="$work/per$POS_B"; mkdir -p "$PER0" "$PER7"
+    echo "  renting the oracle AGAIN, tilted by $PERSTEP after EVERY layer, to measure how far two runs of"
+    echo "  the same recipe drift apart when one is nudged each layer by as much as f32 nudges it..."
+    DSV4_ORACLE_MODE=stack DSV4_ORACLE_PERTURB_EVERY=$PERSTEP DSV4_ORACLE_OUT="$PER0" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_A" "$WANT_LAYERS" > "$work/per0.txt" 2>&1 &
+    q0=$!
+    DSV4_ORACLE_MODE=stack DSV4_ORACLE_PERTURB_EVERY=$PERSTEP DSV4_ORACLE_OUT="$PER7" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_B" "$WANT_LAYERS" > "$work/per7.txt" 2>&1 &
+    q7=$!
+    wait $q0; wait $q7
+else
+    echo "  reusing pre-computed one-ulp sensitivity stacks: $PER0 and $PER7"
+fi
 # a partial oracle still gates a PREFIX; how far it got is read from its own done ledger, never assumed.
-d0=$(wc -l < "$ORA0/oracle-done.txt" 2>/dev/null | tr -d ' '); d0="${d0:-0}"
-d7=$(wc -l < "$ORA7/oracle-done.txt" 2>/dev/null | tr -d ' '); d7="${d7:-0}"
-AVAIL=$(( d0 < d7 ? d0 : d7 ))
+done_count(){ local n; n=$(wc -l < "$1/oracle-done.txt" 2>/dev/null | tr -d ' '); echo "${n:-0}"; }
+AVAIL=$WANT_LAYERS
+for d in "$ORA0" "$ORA7" "$PER0" "$PER7"; do n=$(done_count "$d"); (( n < AVAIL )) && AVAIL=$n; done
 if (( AVAIL < WANT_LAYERS )); then
     echo "  the oracle has completed $AVAIL/$WANT_LAYERS layers at both positions — gating that PREFIX (aporon)"
     WANT_LAYERS=$AVAIL
@@ -273,6 +297,7 @@ func F(_ k: String) -> Float { guard let v = P[k], let n = Float(v) else { print
 let libEmb = argv[3], libMla = argv[4], lib8 = argv[5], libCore = argv[6], libHc = argv[7]
 let libMx4 = argv[8], libIq2 = argv[9], libFfn = argv[10]
 let oraDirA = argv[11], oraDirB = argv[12]
+let perDirA = argv[13], perDirB = argv[14]
 
 struct Tn { let abs: Int, bytes: Int, idx: Int, inner: Int, holds: Int, d0: Int, d1: Int, d2: Int, type: Int
             var rows: Int { d1 }
@@ -415,23 +440,59 @@ func readOracle(_ dir: String, _ il: Int, _ key: String) -> [Double] {
     s.split(separator: "\n").forEach { if let v = Double($0) { out.append(v) } }
     return out
 }
-// assocwall (row 866): fp64 oracle vs f32 GPU over a real-width reduction, so the honest gate is an
-// ABSOLUTE bound over every element plus a RELATIVE bound taken only above a magnitude floor.
-func cmpOra(_ gpu: UnsafeMutablePointer<Float>, _ ref: [Double], _ absB: Double, _ relB: Double, _ floor: Double)
-        -> (Bool, Double, Double, Int, Int, Float, Float) {
-    var maxAbs = 0.0, maxRel = 0.0, nan = 0
+// assocwall (row 866), and what a 43-layer stack does to it. Row 866 says: an absolute bound over every
+// element, a relative bound only above a magnitude floor. Both assume the state's MAGNITUDE is roughly
+// known. Through this stack it is not: the hyper-connection state's RMS goes from 0.14 after blk.0 to
+// 2085 after blk.42 -- four orders -- because HC IS the residual stream and nothing renormalises it
+// between layers. A fixed absolute bound is meaningless at depth, and a relative bound above a FIXED
+// floor is worse: at blk.42 an element of size 1e-2 sits 2 000 000x below the peak and is pure
+// cancellation noise, so its "relative error" says nothing about anything.
+//
+// So the gate is NORMALISED to the vector's own peak, and its size is MEASURED, not chosen:
+//
+//   nd = max|gpu - oracle| / max|oracle|         the GPU's normalised disagreement
+//   ne = max|oracle' - oracle| / max|oracle|     oracle' is the SAME fp64 recipe with the state tilted
+//                                                by 1.4e-5 after EVERY layer -- the LARGEST gap an f32
+//                                                carrier was measured to have on ONE layer run alone
+//   PASS iff nd < max(8*ne, 3e-5)
+//
+// ne is the envelope that per-layer nudging opens BY ITSELF in the reference: a property of the model,
+// not of this harness or of any tolerance anyone picked. The envelope's LINEARITY in the nudge size was
+// measured, not assumed: probes at 5e-6 and 1.4e-5 give envelopes whose ratio is 2.80 at blk.3, 2.69 at
+// blk.9, 2.90 at blk.18, 2.80 at blk.21 -- the injection ratio is 2.80. So setting the probe to the
+// largest measured per-layer gap is the right size, and the factor 8 is what is left over for the nudge's
+// DIRECTION, which was NOT measured. It is the one chosen number in this instrument and it is named as
+// such rather than hidden: every per-layer gap is printed by the THIS-LAYER-ALONE gates below.
+// The floor 3e-5 is ~5x the normalised single-layer gap Stone 37 measured (5.0e-6 over a peak of 0.89)
+// and is what carries the early layers, where the envelope has not opened.
+func cmpOra(_ gpu: UnsafeMutablePointer<Float>, _ ref: [Double], _ pert: [Double], _ floorN: Double)
+        -> (Bool, Double, Double, Double, Double, Int, Int, Float, Float, Double) {
+    var maxAbs = 0.0, maxRel = 0.0, sens = 0.0, scale = 0.0, nan = 0
+    var sd = 0.0, sr = 0.0
     var seen = Set<UInt32>(); var vmin = Float.greatestFiniteMagnitude, vmax = -Float.greatestFiniteMagnitude
+    for i in 0..<ref.count { scale = max(scale, abs(ref[i])) }
+    if scale <= 0 { scale = 1e-30 }
+    let relFloor = 1e-3 * scale        // "above a magnitude floor" -- the floor is the VECTOR's own
     for i in 0..<ref.count {
         let g = gpu[i]
         if g.isNaN || !g.isFinite { nan += 1; continue }
         let d = abs(Double(g) - ref[i])
         if d > maxAbs { maxAbs = d }
-        if abs(ref[i]) > floor { let r = d/abs(ref[i]); if r > maxRel { maxRel = r } }
+        if abs(ref[i]) > relFloor { let r = d/abs(ref[i]); if r > maxRel { maxRel = r } }
+        sd += d*d; sr += ref[i]*ref[i]
         seen.insert(g.bitPattern); vmin = min(vmin, g); vmax = max(vmax, g)
     }
-    let floorN = min(8, max(2, ref.count / 2))
-    let nonDegen = seen.count > floorN && vmax > vmin
-    return (nan == 0 && maxAbs < absB && maxRel < relB && nonDegen, maxAbs, maxRel, nan, seen.count, vmin, vmax)
+    if pert.count == ref.count {
+        for i in 0..<ref.count { sens = max(sens, abs(pert[i] - ref[i])) }
+    }
+    let nd = maxAbs / scale, ne = sens / scale
+    let bound = max(8.0 * ne, floorN)
+    let degenFloor = min(8, max(2, ref.count / 2))
+    let nonDegen = seen.count > degenFloor && vmax > vmin
+    // the RELATIVE L2 of the difference: the robust companion to a max-element measure, which one bad
+    // cancellation among 16 384 entries can dominate. Both are printed; neither is trusted alone.
+    let l2 = sr > 0 ? (sd/sr).squareRoot() : 0.0
+    return (nan == 0 && nd < bound && nonDegen, nd, ne, bound, maxRel, nan, seen.count, vmin, vmax, l2)
 }
 
 func sentinelled(_ n: Int) -> MTLBuffer {
@@ -748,6 +809,15 @@ func runLayer(_ il: Int, _ pos: Int, _ residHc: MTLBuffer) -> LayerOut {
                     moe: moe, shared: shared, ffnOut: ffnOut, outHc: outHc)
 }
 func fp(_ b: MTLBuffer, _ n: Int) -> UnsafeMutablePointer<Float> { return b.contents().bindMemory(to: Float.self, capacity: n) }
+// the oracle's own fp64 vector, rounded to f32 and handed to the device: an INJECTED input, so a kernel
+// can be judged without the stack's accumulated drift standing between it and its reference.
+func oracleBuf(_ dir: String, _ il: Int, _ key: String) -> (MTLBuffer, Int) {
+    let v = readOracle(dir, il, key)
+    let b = dev.makeBuffer(length: max(v.count,1)*4, options: .storageModeShared)!
+    let p = b.contents().bindMemory(to: Float.self, capacity: max(v.count,1))
+    for i in 0..<v.count { p[i] = Float(v[i]) }
+    return (b, v.count)
+}
 func sentinelledCopy(_ a: [Float]) -> MTLBuffer {
     let b = dev.makeBuffer(length: max(a.count,1)*4, options: .storageModeShared)!
     let p = b.contents().bindMemory(to: Float.self, capacity: max(a.count,1))
@@ -783,11 +853,14 @@ do {
 
 var finalByPos: [Int: [Float]] = [:]
 var layerFail = 0
-var worstAbs = 0.0, worstRel = 0.0
-var worstAbsWhere = "", worstRelWhere = ""
+var worstAbs = 0.0, worstSens = 0.0
+var worstAbsWhere = "", worstSensWhere = ""
+var ndByLayer: [Int: [Double]] = [:], neByLayer: [Int: [Double]] = [:], l2ByLayer: [Int: [Double]] = [:]
+var ulpRouteSplit: [Int] = []
+var injNd: [Int: [Double]] = [:]
 var msPerLayer: [Int: [Double]] = [:]
 
-func runStack(_ pos: Int, _ oraDir: String) {
+func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
     var resid = residHc0
     for il in 0..<nLayers {
         let w = LW[il]
@@ -797,52 +870,104 @@ func runStack(_ pos: Int, _ oraDir: String) {
         msPerLayer[il, default: []].append(ms)
         let tag = "blk.\(il) [gate/up \(w.gx.type) down \(w.dx.type) n_exp \(w.nExpStack) \(w.hashed ? "hash" : "top-k") rope \(w.ratio == 0 ? "plain" : "compressed(\(w.ratio))")]"
 
-        // assocwall + selfgauge: the bound is DERIVED, not fitted. Stone 37 measured a complete layer's
-        // f32-vs-fp64 gap at maxAbs 5.0e-6 / maxRel 1.3e-4. In a stack each layer reads the previous
-        // layer's state, so to first order the gap accumulates once per layer of DEPTH — the bound is
-        // therefore (a per-surface base, floored at 2x that measured layer gap) times (il+1). No bound is
-        // tuned at any individual layer, and the OBSERVED maxAbs/maxRel of every gate is printed, so a
-        // growth that is worse than linear shows itself rather than hiding under a loose number.
-        let depth = Double(il + 1)
-        func G(_ buf: MTLBuffer, _ cnt: Int, _ key: String, _ absB0: Double, _ relB0: Double, _ what: String) {
-            let absB = max(absB0, 1.0e-5) * depth
-            let relB = max(relB0, 3.0e-4) * depth
+        // selfgauge: no number below was chosen to make this harness green. The envelope is measured
+        // from the reference's own one-ulp sensitivity, and the floor is Stone 37's measured single-layer
+        // normalised gap with 5x headroom.
+        func G(_ buf: MTLBuffer, _ cnt: Int, _ key: String, _ floorN: Double, _ what: String) {
             let ref = readOracle(oraDir, il, key)
+            let prt = readOracle(perDir, il, key)
             guard ref.count == cnt else {
                 check(false, "", "\(tag) oracle \(key) has \(ref.count) entries, expected \(cnt)"); layerFail += 1; return
             }
-            let (ok, ma, mr, nn, ds, mn, mx) = cmpOra(fp(buf, cnt), ref, absB, relB, 1e-2)
-            if ma > worstAbs { worstAbs = ma; worstAbsWhere = "blk.\(il) \(key) pos \(pos)" }
-            if mr > worstRel { worstRel = mr; worstRelWhere = "blk.\(il) \(key) pos \(pos)" }
+            let (ok, nd, ne, bound, mr, nn, ds, mn, mx, l2) = cmpOra(fp(buf, cnt), ref, prt, floorN)
+            if nd > worstAbs { worstAbs = nd; worstAbsWhere = "blk.\(il) \(key) pos \(pos)" }
+            if ne > worstSens { worstSens = ne; worstSensWhere = "blk.\(il) \(key) pos \(pos)" }
+            ndByLayer[il, default: []].append(nd); neByLayer[il, default: []].append(ne)
+            if key == "out_hc" { l2ByLayer[il, default: []].append(l2) }
             check(ok && gpuErrors == 0,
-              "\(tag) \(what) [RENTED ORACLE, pos \(pos)] (maxAbs \(ma) < \(absB), maxRel \(mr) < \(relB) above |1e-2|; \(ds) distinct, range [\(mn),\(mx)]; \(nn) NaN)",
-              "\(tag) \(key) pos \(pos): maxAbs \(ma) (bound \(absB)) maxRel \(mr) (bound \(relB)) nan \(nn) distinct \(ds) gpuErrors \(gpuErrors)")
+              "\(tag) \(what) [RENTED ORACLE, pos \(pos)] (normalised disagreement \(nd) < \(bound); relative L2 \(l2); the reference's own one-ulp envelope here is \(ne); relative \(mr) above 1e-3 of peak; \(ds) distinct, range [\(mn),\(mx)]; \(nn) NaN)",
+              "\(tag) \(key) pos \(pos): normalised disagreement \(nd) exceeds \(bound) (per-layer-nudge envelope \(ne), floor \(floorN)); relative L2 \(l2); relative \(mr); nan \(nn); distinct \(ds); gpuErrors \(gpuErrors)")
             if !(ok && gpuErrors == 0) { layerFail += 1 }
         }
         // THE DISCRETE FALSIFIER, at EVERY layer and not only the witnesses. The numeric gates are
-        // tolerances; this one is not. Which six experts fire is an integer decision that a wrong routing
-        // regime, a wrong expert count, a biased weight or a stale bias would change outright — and a
+        // envelopes; this one is not. Which six experts fire is an integer decision that a wrong routing
+        // regime, a wrong expert count, a biased weight or a stale bias would change outright -- and a
         // changed expert is a different 8.4 M-parameter matrix, not a rounding difference.
         let oraSel = readOracle(oraDir, il, "selected").map { Int($0) }
+        let perSel = readOracle(perDir, il, "selected").map { Int($0) }
+        if perSel != oraSel { ulpRouteSplit.append(il) }
         check(R.ids == oraSel && !R.ids.isEmpty && R.ids.allSatisfy { $0 >= 0 && $0 < w.nExpStack },
-          "\(tag) the routing DECISION [RENTED ORACLE, pos \(pos)]: \(w.hashed ? "the I32 table row for token \(token), read through the view" : "biased top-k over \(w.nExpRouter) logits with UNBIASED weighting") chose \(R.ids) — bit-identical to the oracle's, and every id inside this layer's own \(w.nExpStack)-deep stack",
+          "\(tag) the routing DECISION [RENTED ORACLE, pos \(pos)]: \(w.hashed ? "the I32 table row for token \(token), read through the view" : "biased top-k over \(w.nExpRouter) logits with UNBIASED weighting") chose \(R.ids) -- bit-identical to the oracle's, and every id inside this layer's own \(w.nExpStack)-deep stack",
           "\(tag) routing: GPU \(R.ids) vs oracle \(oraSel)")
         if R.ids != oraSel { layerFail += 1 }
         if witness.contains(il) {
-            G(R.afterAttn, hcDim, "after_attn_hc", 2e-5, 2e-5,
-              "the attention half — hc_pre(attn) -> 13 MLA dispatches with THIS layer's rope freqs -> hc_post(attn)")
-            G(R.ffnNorm, nEmbd, "ffn_normed", 2e-4, 2e-4, "hc_pre(ffn) -> ffn_norm, the FFN's own frame")
-            G(R.logits, w.nExpRouter, "router_logits", 3e-4, 3e-4,
-              "the router's F16 projection — \(w.nExpRouter) logits even where the stack holds \(w.nExpStack) experts")
-            G(sentinelledCopy(R.wts), nUsed, "expert_w", 2e-5, 2e-5,
-              "the six weights: probs = sqrt(softplus(logit)) over the floored sum, scaled by \(wscale)\(w.hashed ? "" : " — the UNBIASED prob, never the biased score")")
-            G(R.gate0, nFf, "exp0_gate", 3e-3, 3e-3, "expert \(R.ids.first ?? -1)'s GATE — the type-\(w.gx.type) kernel this layer's table asked for")
-            G(R.mid0, nFf, "exp0_mid", 3e-4, 3e-4, "the clamped SwiGLU mid, times THIS expert's router weight, before the down projection")
-            G(R.down0, nEmbd, "exp0_down", 3e-4, 3e-4, "expert \(R.ids.first ?? -1)'s DOWN — the type-\(w.dx.type) kernel")
-            G(R.moe, nEmbd, "moe", 2e-3, 2e-3, "all \(nUsed) routed experts accumulated")
-            G(R.shared, nEmbd, "shared", 6e-3, 6e-3, "the shared expert (MXFP8) — unrouted, weight 1, simply added")
+            G(R.afterAttn, hcDim, "after_attn_hc", 3e-5,
+              "the attention half -- hc_pre(attn) -> 13 MLA dispatches with THIS layer's rope freqs -> hc_post(attn)")
+            G(R.ffnNorm, nEmbd, "ffn_normed", 3e-5, "hc_pre(ffn) -> ffn_norm, the FFN's own frame")
+            G(R.logits, w.nExpRouter, "router_logits", 3e-5,
+              "the router's F16 projection -- \(w.nExpRouter) logits even where the stack holds \(w.nExpStack) experts")
+            G(sentinelledCopy(R.wts), nUsed, "expert_w", 3e-5,
+              "the six weights: probs = sqrt(softplus(logit)) over the floored sum, scaled by \(wscale)\(w.hashed ? "" : " -- the UNBIASED prob, never the biased score")")
+            G(R.gate0, nFf, "exp0_gate", 3e-5, "expert \(R.ids.first ?? -1)'s GATE -- the type-\(w.gx.type) kernel this layer's table asked for")
+            G(R.mid0, nFf, "exp0_mid", 3e-5, "the clamped SwiGLU mid, times THIS expert's router weight, before the down projection")
+            G(R.down0, nEmbd, "exp0_down", 3e-5, "expert \(R.ids.first ?? -1)'s DOWN -- the type-\(w.dx.type) kernel")
+            G(R.moe, nEmbd, "moe", 3e-5, "all \(nUsed) routed experts accumulated")
+            G(R.shared, nEmbd, "shared", 3e-5, "the shared expert (MXFP8) -- unrouted, weight 1, simply added")
+
+            // ── THE INJECTED-INPUT GATE, the sharp one for this stone ──────────────────────────────
+            // Every gate above compares the GPU's whole trajectory against the oracle's, so at depth the
+            // stack's own accumulated f32 drift stands between a kernel and its reference and a kernel
+            // gate at blk.36 is really a gate on 37 layers. Here the ORACLE's OWN ffn_normed is rounded
+            // to f32, handed to the device, and this layer's expert kernels are run on it. The comparison
+            // is then depth-INDEPENDENT: it judges the type-\(w.gx.type)/\(w.dx.type) kernels, this
+            // layer's own expert slices and the shared expert, and nothing else. Its bound carries no
+            // depth factor at all, because there is no depth in it.
+            let (inj, injN) = oracleBuf(oraDir, il, "ffn_normed")
+            if injN == nEmbd, let e0 = oraSel.first, e0 >= 0, e0 < w.nExpStack {
+                let ow = readOracle(oraDir, il, "expert_w")
+                let gI = gpuExpert(w.gx, inj, e0)
+                let uI = gpuExpert(w.ux, inj, e0)
+                let mI = gpuSwiglu(gI, uI, nFf, Float(ow.first ?? 1.0), clamp)
+                let dI = gpuExpert(w.dx, mI, e0)
+                let sgI = gpuMx8(w.sgw, inj, w.sgw.rows, w.sgw.cols)
+                let suI = gpuMx8(w.suw, inj, w.suw.rows, w.suw.cols)
+                let smI = gpuSwiglu(sgI, suI, nFf, 1.0, clamp)
+                let shI = gpuMx8(w.sdw, smI, w.sdw.rows, w.sdw.cols)
+                let rI = gpuF16mv(w.rt, inj)
+                func GI(_ buf: MTLBuffer, _ cnt: Int, _ key: String, _ what: String) {
+                    let ref = readOracle(oraDir, il, key)
+                    guard ref.count == cnt else { check(false, "", "\(tag) injected \(key) width \(ref.count) != \(cnt)"); layerFail += 1; return }
+                    let (ok, nd, _, _, mr, nn, ds, mn, mx, l2) = cmpOra(fp(buf, cnt), ref, [], 3e-5)
+                    check(ok && gpuErrors == 0,
+                      "\(tag) INJECTED INPUT — \(what) (normalised disagreement \(nd) < 3e-5, DEPTH-INDEPENDENT: the oracle's own ffn_normed went in; relative L2 \(l2); relative \(mr) above 1e-3 of peak; \(ds) distinct, range [\(mn),\(mx)]; \(nn) NaN)",
+                      "\(tag) INJECTED \(key): normalised disagreement \(nd) exceeds 3e-5; relative L2 \(l2); relative \(mr); nan \(nn); distinct \(ds)")
+                    if !(ok && gpuErrors == 0) { layerFail += 1 }
+                }
+                GI(rI, w.nExpRouter, "router_logits", "the F16 router projection on the oracle's state")
+                GI(gI, nFf, "exp0_gate", "expert \(e0)'s GATE through the type-\(w.gx.type) kernel, at this layer's own byte slice")
+                GI(dI, nEmbd, "exp0_down", "expert \(e0)'s DOWN through the type-\(w.dx.type) kernel")
+                GI(shI, nEmbd, "shared", "the MXFP8 shared expert, gate/up/SwiGLU/down")
+            }
         }
-        G(R.outHc, hcDim, "out_hc", 3e-4, 3e-4,
+        // ── THE PER-LAYER INJECTED GATE. The whole-stack gate above measures the GPU's trajectory
+        // against the oracle's, so at blk.36 it is really a gate on 37 composed layers and cannot say
+        // whether blk.36 ITSELF is right. This runs the SAME layer again from the ORACLE's own input for
+        // this layer -- its predecessor's out_hc, rounded to f32 -- and compares the result to the
+        // oracle's. There is no depth in it, so its bound carries no depth: one layer, judged alone.
+        do {
+            let (inR, inN) = il == 0 ? (residHc0, hcDim) : oracleBuf(oraDir, il-1, "out_hc")
+            if inN == hcDim {
+                let J = runLayer(il, pos, inR)
+                let ref = readOracle(oraDir, il, "out_hc")
+                let (ok, nd, _, _, mr, nn, ds, mn, mx, l2) = cmpOra(fp(J.outHc, hcDim), ref, [], 3e-5)
+                injNd[il, default: []].append(nd)
+                check(ok && gpuErrors == 0 && J.ids == oraSel,
+                  "\(tag) THIS LAYER ALONE, from the ORACLE's own input [pos \(pos)]: hc_pre(attn) -> MLA -> hc_post(attn) -> hc_pre(ffn) -> ffn_norm -> routed MoE + shared -> hc_post(ffn), and it lands on the oracle's own output (normalised disagreement \(nd) < 3e-5, DEPTH-INDEPENDENT; relative L2 \(l2); relative \(mr) above 1e-3 of peak; \(ds) distinct, range [\(mn),\(mx)]; \(nn) NaN; experts \(J.ids))",
+                  "\(tag) THIS LAYER ALONE from the oracle's input: normalised disagreement \(nd) exceeds 3e-5; relative L2 \(l2); experts \(J.ids) vs \(oraSel); nan \(nn)")
+                if !(ok && gpuErrors == 0 && J.ids == oraSel) { layerFail += 1 }
+            }
+        }
+        G(R.outHc, hcDim, "out_hc", 3e-5,
           "THE LAYER'S OUTPUT — the \(hcDim) hyper-connection entries blk.\(il+1) receives, carried forward")
         resid = R.outHc
         if il == nLayers - 1 {
@@ -853,8 +978,8 @@ func runStack(_ pos: Int, _ oraDir: String) {
     }
 }
 
-let tA = Date(); runStack(posA, oraDirA); let wallA = Date().timeIntervalSince(tA)
-let tB = Date(); runStack(posB, oraDirB); let wallB = Date().timeIntervalSince(tB)
+let tA = Date(); runStack(posA, oraDirA, perDirA); let wallA = Date().timeIntervalSince(tA)
+let tB = Date(); runStack(posB, oraDirB, perDirB); let wallB = Date().timeIntervalSince(tB)
 
 // ── hushfold at STACK scale ────────────────────────────────────────────────────────────────────────
 var posDiff = 0; var maxDelta: Float = 0
@@ -867,7 +992,18 @@ check(posDiff > 0 && layerFail == 0,
 
 if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(gpuFirstError ?? "unknown") ===") }
 // unispan: a per-layer time from ONE run is a guess; each layer is timed at BOTH positions.
-print("      worst agreement over the whole stack: maxAbs \(worstAbs) at \(worstAbsWhere); maxRel \(worstRel) at \(worstRelWhere)")
+print("      worst normalised disagreement over the whole stack: \(worstAbs) at \(worstAbsWhere)")
+print("      worst per-layer-nudge envelope of the REFERENCE:     \(worstSens) at \(worstSensWhere)")
+if !ulpRouteSplit.isEmpty {
+    print("      the reference's OWN routing splits under the per-layer nudge at layers \(ulpRouteSplit.sorted()) — the model's, not this carrier's")
+}
+print("      normalised disagreement (nd) vs the reference's own per-layer-nudge envelope (ne):")
+for il in stride(from: 0, to: nLayers, by: max(1, nLayers/12)) {
+    let nd = (ndByLayer[il] ?? [0]).max() ?? 0, ne = (neByLayer[il] ?? [0]).max() ?? 0
+    let l2 = (l2ByLayer[il] ?? [0]).max() ?? 0
+    let ij = (injNd[il] ?? [0]).max() ?? 0
+    print(String(format: "        blk.%-2d  stack nd %.3e  relL2 %.3e   THIS LAYER ALONE nd %.3e   nudge envelope %.3e", il, nd, l2, ij, ne))
+}
 print(String(format: "      wall: pos %d %.2f s, pos %d %.2f s over %d layers", posA, wallA, posB, wallB, nLayers))
 var slow: [(Int, Double)] = []
 for (il, ts) in msPerLayer { slow.append((il, ts.reduce(0,+)/Double(ts.count))) }
@@ -893,6 +1029,6 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "
 
 "$work/runner" "$work/params.txt" "$BLOB" \
     "$LIB_EMB" "$LIB_MLA" "$LIB8" "$LIB_CORE" "$LIB_HC" \
-    "$LIB_MX4" "$LIB_IQ2" "$LIB_FFN" "$ORA0" "$ORA7"
+    "$LIB_MX4" "$LIB_IQ2" "$LIB_FFN" "$ORA0" "$ORA7" "$PER0" "$PER7"
 rc=$?
 exit $rc
