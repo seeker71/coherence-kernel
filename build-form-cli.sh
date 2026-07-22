@@ -54,27 +54,36 @@ FLAT_CHAIN="$EMIT_CHAIN $S/core.fk $S/form-parse.fk $S/bmf-core.fk $S/bmf-gramma
 # local through fkwu RAG while http-client remains available to legacy carriers.
 MODS="(list (read_file \"$S/fourth-shim.fk\") (read_file \"$S/core.fk\") (read_file \"$S/resource-port.fk\") (read_file \"$S/bml-native-interface-package-import.fk\") (read_file \"$S/hati-os-targets.fk\") (read_file \"$S/form-native-resource-interfaces.fk\") (read_file \"$S/form-fs.fk\") (read_file \"$S/storage-port.fk\") (read_file \"$S/host-kernel-carrier.fk\") (read_file \"$S/fnri-standin.fk\") (read_file \"$S/fnri-receipt.fk\") (read_file \"$S/http-client.fk\") (read_file \"$S/line-grammar.fk\") (read_file \"$S/str-byte-at.fk\") (read_file \"$S/sha256.fk\") (read_file \"$S/hmac-sha256.fk\") (read_file \"$S/hex.fk\") (read_file \"$S/format-arith.fk\") (read_file \"$S/f16-decode.fk\") (read_file \"$S/q6k-dequant.fk\") (read_file \"$S/q4k-dequant.fk\") (read_file \"$S/weight-load.fk\") (read_file \"$S/voice-traits.fk\") (read_file \"$S/nearest-shape.fk\") (read_file \"$S/co-learning.fk\") (read_file \"$S/co-learning-stream.fk\") (read_file \"$S/mesh-dispatch.fk\") (read_file \"$S/surprise-salience.fk\") (read_file \"$S/host-sense-organ.fk\") (read_file \"$S/speech-organ.fk\") (read_file \"$S/native-host-instance.fk\") (read_file \"$S/text-tokenize.fk\") (read_file \"$S/rag-embed.fk\") (read_file \"$S/rag-index-codec.fk\") (read_file \"$S/rag-retrieve.fk\") (read_file \"$S/rag-ask.fk\") (read_file \"$S/form-cli-ask.fk\") (read_file \"$S/form-cli-router.fk\") (read_file \"$S/form-cli-judge.fk\") (read_file \"$S/form-cli-sufficiency.fk\") (read_file \"$S/form-freq-check.fk\") (read_file \"$S/trust-row.fk\") (read_file \"$S/form-cli-ask-gate.fk\") (read_file \"$S/form-cli-staged-trace.fk\") (read_file \"$S/form-cli-request.fk\") (read_file \"$S/form-cli-carrier.fk\") (read_file \"$S/form-cli-ask-plus.fk\") (read_file \"$S/current-branch-landing.fk\") (read_file \"$S/form-cli.fk\") (read_file \"$S/form-cli-gguf-cell.fk\"))"
 MODS="${MODS/ (read_file \"$S\/form-cli.fk\")/ (read_file \"$S\/offer-ack-core.fk\") (read_file \"$S\/federation-graph-offer.fk\") (read_file \"$S\/form-cli.fk\")}"
+MODS="${MODS/ (read_file \"$S\/core.fk\")/ (read_file \"$S\/core.fk\") (read_file \"$S\/form-ontology-loader.fk\")}"
+MODS="${MODS/ (read_file \"$S\/line-grammar.fk\")/ (read_file \"$S\/line-grammar.fk\") (read_file \"$S\/file-byte-window.fk\") (read_file \"$S\/bmf-byte-cursor.fk\") (read_file \"$S\/bmf-core.fk\") (read_file \"$S\/bmf-grammar.fk\") (read_file \"$S\/grammar-loader.fk\") (read_file \"$S\/shell-grammar.fk\")}"
+MODS="${MODS/ (read_file \"$S\/storage-port.fk\")/ (read_file \"$S\/storage-port.fk\") (read_file \"$S\/cell-log-store.fk\") (read_file \"$S\/storage-port-file.fk\")}"
+MODS="${MODS/ (read_file \"$S\/form-cli-carrier.fk\")/ (read_file \"$S\/form-cli-carrier.fk\") (read_file \"$S\/federation-graph-store.fk\")}"
+MODS="${MODS/ (read_file \"$S\/voice-traits.fk\")/ (read_file \"$S\/voice-traits.fk\") (read_file \"$S\/feature-vector.fk\")}"
+MODS="${MODS/ (read_file \"$S\/nearest-shape.fk\")/ (read_file \"$S\/nearest-shape.fk\") (read_file \"$S\/voice-diarize.fk\")}"
+MODS="${MODS/ (read_file \"$S\/form-cli.fk\")/ (read_file \"$S\/shell-exec.fk\") (read_file \"$S\/form-cli.fk\")}"
 BAND="(read_file \"$S/form-cli-repl.fk\")"
 
 # Prefer fkwu self-host flatten (no Go) when T_flat + cached fkwu are warm.
 FORM_CLI_SRCS=(
-    "$S/fourth-shim.fk" "$S/core.fk" "$S/offer-ack-core.fk" "$S/federation-graph-offer.fk" "$S/line-grammar.fk"
+    "$S/fourth-shim.fk" "$S/core.fk" "$S/form-ontology-loader.fk" "$S/offer-ack-core.fk" "$S/federation-graph-offer.fk" "$S/line-grammar.fk"
+    "$S/file-byte-window.fk" "$S/bmf-byte-cursor.fk" "$S/bmf-core.fk" "$S/bmf-grammar.fk" "$S/grammar-loader.fk" "$S/shell-grammar.fk"
     "$S/str-byte-at.fk" "$S/sha256.fk" "$S/hmac-sha256.fk" "$S/hex.fk"
     "$S/resource-port.fk" "$S/bml-native-interface-package-import.fk" "$S/hati-os-targets.fk"
     "$S/form-native-resource-interfaces.fk" "$S/form-fs.fk" "$S/storage-port.fk"
+    "$S/cell-log-store.fk" "$S/storage-port-file.fk"
     "$S/host-kernel-carrier.fk" "$S/fnri-standin.fk" "$S/fnri-receipt.fk"
     "$S/http-client.fk" "$S/format-arith.fk" "$S/f16-decode.fk"
     "$S/q6k-dequant.fk" "$S/q4k-dequant.fk" "$S/weight-load.fk"
-    "$S/voice-traits.fk"
-    "$S/nearest-shape.fk" "$S/co-learning.fk" "$S/co-learning-stream.fk"
+    "$S/voice-traits.fk" "$S/feature-vector.fk"
+    "$S/nearest-shape.fk" "$S/voice-diarize.fk" "$S/co-learning.fk" "$S/co-learning-stream.fk"
     "$S/mesh-dispatch.fk" "$S/surprise-salience.fk" "$S/host-sense-organ.fk"
     "$S/speech-organ.fk" "$S/native-host-instance.fk"
     "$S/text-tokenize.fk" "$S/rag-embed.fk" "$S/rag-index-codec.fk" "$S/rag-retrieve.fk" "$S/rag-ask.fk"
     "$S/form-cli-ask.fk"
     "$S/form-cli-router.fk" "$S/form-cli-judge.fk" "$S/form-cli-sufficiency.fk"
     "$S/form-freq-check.fk" "$S/trust-row.fk" "$S/form-cli-ask-gate.fk"
-    "$S/form-cli-staged-trace.fk" "$S/form-cli-request.fk" "$S/form-cli-carrier.fk" "$S/form-cli-ask-plus.fk"
-    "$S/current-branch-landing.fk"
+    "$S/form-cli-staged-trace.fk" "$S/form-cli-request.fk" "$S/form-cli-carrier.fk" "$S/federation-graph-store.fk" "$S/form-cli-ask-plus.fk"
+    "$S/current-branch-landing.fk" "$S/shell-exec.fk"
     "$S/form-cli.fk"
     "$S/form-cli-gguf-cell.fk"
     "$S/form-cli-repl.fk"
@@ -158,7 +167,7 @@ grep -q fk_prog "$W/form-cli.c" || { echo "emit missing baked program"; exit 1; 
 #    concatenation of every recipe the build reads plus this script, appended as a
 #    byte array (escape-free) and read at runtime by self_source (walker tag 117).
 SOURCES="minimal-surface hati-os-kernel fkc-table-serialize hati-os-kernel-emit core form-parse bmf-core bmf-grammar host-effect-grammar form-flatten fourth-shim resource-port bml-native-interface-package-import hati-os-targets form-native-resource-interfaces form-fs storage-port host-kernel-carrier fnri-standin fnri-receipt line-grammar str-byte-at sha256 hmac-sha256 hex format-arith f16-decode q6k-dequant q4k-dequant weight-load voice-traits nearest-shape co-learning co-learning-stream mesh-dispatch surprise-salience host-sense-organ speech-organ native-host-instance text-tokenize rag-embed rag-index-codec rag-retrieve rag-ask form-cli-ask form-cli-router form-cli-judge form-cli-sufficiency form-freq-check trust-row form-cli-ask-gate form-cli-staged-trace form-cli-request form-cli-carrier form-cli-ask-plus current-branch-landing form-cli form-cli-gguf-cell form-cli-main form-cli-repl"
-SOURCES="$SOURCES offer-ack-core federation-graph-offer"
+SOURCES="$SOURCES form-ontology-loader offer-ack-core federation-graph-offer federation-graph-store cell-log-store storage-port-file file-byte-window bmf-byte-cursor grammar-loader shell-grammar feature-vector voice-diarize shell-exec"
 {
   for f in $SOURCES; do printf ';;;; ==== FILE: %s/%s.fk ====\n' "$S" "$f"; cat "$S/$f.fk"; done
   printf ';;;; ==== FILE: scripts/form_cli_bootstrap_proof.sh ====\n'; cat scripts/form_cli_bootstrap_proof.sh
