@@ -650,6 +650,20 @@ func attn(_ s: Step, _ l: Int, _ pos: Int) {
 // so the overhead is visible rather than folded into a conclusion.
 var profAcc: [String: Double] = [:], profN: [String: Int] = [:]
 let profile = ProcessInfo.processInfo.environment["FORM_PROFILE"] == "1"
+// ---- FORM_GEN_ONLY: the ANSWERING mode, and why it lives INSIDE the witness ----------------------
+// The full suite generates the same prompt EIGHT times — once short and once long on each of the
+// attestant, split, lane and slot paths — because its subject is that they AGREE. An ask's subject
+// is the answer, and paying 8x (the attestant alone is 18x slower per token) to re-prove agreement
+// on every question a person types is what makes a local model unusable rather than merely slow.
+// FORM_GEN_ONLY=1 runs the slot path ONCE and reports it.
+// It is a mode of THIS file and not a second runner, and that is the whole point: metal_ask.sh's own
+// header names the risk — "a lean generation-only runner ... will have to prove it emits the same ids
+// as this one before it is allowed to answer anything." A separate runner would have to prove that
+// forever, against drift nobody watches. A flag around the CALLS to the SAME `generate`, over the
+// same kernels, the same buffers and the same pool, has nothing left to drift: the agreement gates
+// are what is skipped, never the code they were agreeing about. The verdict says so out loud, and
+// metal_ask.sh stamps GATES with `-genonly` so no receipt can quote a lean run as the full suite.
+let genOnly = ProcessInfo.processInfo.environment["FORM_GEN_ONLY"] == "1"
 // ---- FORM_ABLATE: the seam-free instrument ------------------------------------------------------
 // FORM_PROFILE cuts a command buffer after each op so it can attribute one, and the cut COSTS more
 // than several of the ops it is measuring — which is how this stone was briefed with a mechanism that
@@ -916,10 +930,16 @@ func zeroPool() {
     memset(bCacheK.contents(), 0, bCacheK.length); memset(bCacheV.contents(), 0, bCacheV.length)
     memset(bX.contents(), 0, bX.length)
 }
+// ENCODE IS TIMED because an ASK's latency starts at the person's sentence, not at the first
+// matvec. It is microseconds here and that is exactly why it is worth printing: a latency budget
+// with an untimed term in it invites the reader to imagine the term is large.
+let encT0 = Date()
 let promptIds = encode(prompt)
+let encodeS = Date().timeIntervalSince(encT0)
 print("=== the prompt ===")
 print("  \"\(prompt)\"")
 print("  ids: \(promptIds)")
+print(String(format: "  encode %.6f s for %d prompt tokens", encodeS, promptIds.count))
 print("  pieces: " + promptIds.map { "[" + decodeIds([$0]) + "]" }.joined())
 if promptIds.count + nsteps >= maxpos { print("FAIL  prompt+steps exceeds the KV pool"); exit(1) }
 
@@ -982,6 +1002,40 @@ func generate(_ ids: [Int], _ steps: Int) -> Run {
 
 if failures > 0 { print("=== \(failures) gate(s) failed BEFORE any token — refusing to report a rate ==="); exit(1) }
 if gpuErrors > 0 { print("=== \(gpuErrors) command buffer(s) failed (\(gpuFirstError ?? "?")) — nothing read back is trustworthy, refusing to report a rate ==="); exit(1) }
+
+// ---- FORM_GEN_ONLY: generate once, on the slot path, and stop ------------------------------------
+// The state is set to EXACTLY what the full suite has in hand when it reaches its slot section:
+// usePartsNow = 1, fastOps = true, mvNow = .slot. Anything else here would be a different run
+// wearing the slot path's name.
+if genOnly {
+    print("=== FORM_GEN_ONLY: the slot path, once. The cross-path agreement gates were NOT run. ===")
+    usePartsNow = 1; fastOps = true; mvNow = .slot
+    var g = generate(promptIds, nsteps)
+    // THE ANSWER ENDED, OR THE HARNESS DID, and those are different sentences. `generate` appends the
+    // token and THEN breaks on it, so an end-of-turn id is the last element when the model stopped —
+    // and it is a control token, not prose, so it is trimmed off the text a person reads and reported
+    // separately. When no end token is present the answer did not finish; the receipt says `cap` and
+    // does not dress a truncation up as a completion.
+    let last = g.out.last ?? -1
+    let hitEos = (last == eosId || last == 128001 || last == 128009)
+    if hitEos { g.out.removeLast() }
+    report("slot-long ", g)
+    print("  STOP reason=\(hitEos ? "eos" : "cap") stop_id=\(hitEos ? last : -1) eos_id=\(eosId) generated=\(g.out.count) cap=\(nsteps)")
+    print(String(format: "  LATENCY encode %.6f s + prefill %.3f s (%d prompt tokens) + decode %.3f s (%d forwards) = %.3f s in-process",
+                 encodeS, g.prefill, promptIds.count, g.decode, g.forwards, encodeS + g.prefill + g.decode))
+    if gpuErrors > 0 {
+        print("=== VERDICT FAIL — \(gpuErrors) command buffer(s) failed (\(gpuFirstError ?? "?")) ==="); exit(1)
+    }
+    // The count is what was ACTUALLY asked in this mode, counted from the `check` calls that ran:
+    // gate 1 (config), gate 0 (the GPU ran), gates 2/3/4 (embedding, RMSNorm, matvec against the
+    // body's own fp64) and gates 8/8b/9/9b (the split, hoist, lane and slot kernels against the
+    // attestant, bit for bit or inside the derived bound) = 9. What is NOT asked is gates 5, 6, 7,
+    // 10 and 11 — reproducibility, input-dependence, the slope, and cross-path token agreement —
+    // because every one of them costs a second full generation of the prompt.
+    print(failures == 0 ? "=== VERDICT PASS — 9 gates (FORM_GEN_ONLY; gates 5, 6, 7, 10, 11 not run) ==="
+                        : "=== VERDICT FAIL — \(failures) gate(s) ===")
+    exit(failures == 0 ? 0 : 1)
+}
 
 print("=== gate 6: a token ===")
 let short = max(2, nsteps / 3)
@@ -1129,10 +1183,21 @@ print(failures == 0 ? "=== VERDICT PASS — \(nGates) gates ===" : "=== VERDICT 
 exit(failures == 0 ? 0 : 1)
 SWIFT
 
-echo "=== compiling the carrier ==="
-swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || {
-    echo "FAIL  swiftc failed"; tail -30 "$work/swift.err"; exit 1; }
+# ── the carrier binary, cached across RUNS by its own source's sha256 ─────────────────────────
+# Keyed on the SOURCE, exactly like the .metallib above: an edit to a single character of the runner
+# is a cache MISS by construction, so there is no state in which a stale binary answers for a changed
+# carrier. Without this every ask paid ~9 s of `swiftc -O` to compile a file that had not changed.
+RUNNER_SHA="$(shasum -a 256 "$work/runner.swift" | cut -c1-16)"
+RUNNER="$CACHE/runner-$RUNNER_SHA"
+if [[ -x "$RUNNER" ]]; then
+    echo "=== carrier cache HIT: $(basename "$RUNNER") ==="
+else
+    echo "=== compiling the carrier ==="
+    swiftc -O -o "$RUNNER.tmp" "$work/runner.swift" 2>"$work/swift.err" || {
+        echo "FAIL  swiftc failed"; tail -30 "$work/swift.err"; exit 1; }
+    mv "$RUNNER.tmp" "$RUNNER"
+fi
 
-"$work/runner" "$LIB" "$BLOB" "$TBL" "$CFG" "$VOC" "$REF" "$PROMPT" "$NSTEPS" "$MAXPOS" "$REFID" "$REFROW"
+"$RUNNER" "$LIB" "$BLOB" "$TBL" "$CFG" "$VOC" "$REF" "$PROMPT" "$NSTEPS" "$MAXPOS" "$REFID" "$REFROW"
 rc=$?
 exit $rc
