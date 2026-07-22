@@ -97,7 +97,40 @@ KV_ABS=$(tv blk.0.attn_kv.weight 3); KV_IDX=$(tv blk.0.attn_kv.weight 5); KV_INN
 KV_IN=$(trow blk.0.attn_kv.weight 5); KV_OUT=$(trow blk.0.attn_kv.weight 6)
 # attn_kv_a_norm — F32 [512].
 KVAN_ABS=$(tv blk.0.attn_kv_a_norm.weight 3); KVAN_IDX=$(tv blk.0.attn_kv_a_norm.weight 5); KVAN_INNER=$(tv blk.0.attn_kv_a_norm.weight 6); KVAN_HOLDS=$(tv blk.0.attn_kv_a_norm.weight 7)
+# attn_sinks — F32 [64]; the per-head learned sink logit (softmax DENOMINATOR only).
+SNK_ABS=$(tv blk.0.attn_sinks.weight 3); SNK_IDX=$(tv blk.0.attn_sinks.weight 5); SNK_INNER=$(tv blk.0.attn_sinks.weight 6); SNK_HOLDS=$(tv blk.0.attn_sinks.weight 7)
+# attn_output_a / attn_output_b — MXFP8; the GROUPED output path (Stage 1's resolution from the file).
+OA_ABS=$(tv blk.0.attn_output_a.weight 3); OA_IDX=$(tv blk.0.attn_output_a.weight 5); OA_INNER=$(tv blk.0.attn_output_a.weight 6); OA_HOLDS=$(tv blk.0.attn_output_a.weight 7)
+OA_IN=$(trow blk.0.attn_output_a.weight 5); OA_OUT=$(trow blk.0.attn_output_a.weight 6)
+OB_ABS=$(tv blk.0.attn_output_b.weight 3); OB_IDX=$(tv blk.0.attn_output_b.weight 5); OB_INNER=$(tv blk.0.attn_output_b.weight 6); OB_HOLDS=$(tv blk.0.attn_output_b.weight 7)
+OB_IN=$(trow blk.0.attn_output_b.weight 5); OB_OUT=$(trow blk.0.attn_output_b.weight 6)
 RMS_EPS=0.0000009999999975
+N_HEAD=64; HEAD_DIM=512; N_ROT=64; ROPE_BASE=10000.0; N_GROUPS=8; O_RANK=1024
+POS_A=0; POS_B=7      # hushfold (row 859): RoPE is IDENTITY at pos 0 — one position cannot witness it.
+
+# ── 2b. THE RENTED ORACLE (twinblind, row 868). The attention core is a set of CHOICES, so a self-carve
+# is blind to it. form-stdlib/tests/dsv4-mla-core-oracle.py is an independent fp64 transcription of ds4.c's
+# control flow — it parses this same GGUF itself and shares no code with the band, the MSL or the carrier.
+ORACLE="$ROOT/form-stdlib/tests/dsv4-mla-core-oracle.py"
+[[ -f "$ORACLE" ]] || { echo "FAIL the rented oracle is missing: $ORACLE"; exit 1; }
+for P in "$POS_A" "$POS_B"; do
+    mkdir -p "$work/ora$P"
+    echo "  renting the oracle at pos=$P (independent fp64 transcription of ds4.c)..."
+    DSV4_ORACLE_OUT="$work/ora$P" python3 "$ORACLE" "$BLOB" "$TOKEN" "$P" > "$work/ora$P.txt" 2>"$work/ora$P.err" \
+        || { echo "FAIL oracle run at pos=$P"; tail -5 "$work/ora$P.err"; exit 1; }
+    grep -qx 'END' "$work/ora$P.txt" || { echo "FAIL oracle stream truncated at pos=$P"; exit 1; }
+done
+awk '/^OUTPATH/{print "  oracle reads the file: "$0}' "$work/ora$POS_A.txt"
+# hushfold, witnessed in the ORACLE's own output before any GPU runs: at pos 0 the RoPE is the identity.
+if cmp -s "$work/ora$POS_A/oracle-q_headrms.f64" "$work/ora$POS_A/oracle-q.f64"; then
+    echo "  hushfold: at pos $POS_A the oracle's post-RoPE q is BIT-IDENTICAL to its pre-RoPE q — one position cannot witness RoPE"
+else
+    echo "FAIL hushfold: the oracle's RoPE is not the identity at pos $POS_A"; exit 1
+fi
+if cmp -s "$work/ora$POS_B/oracle-q_headrms.f64" "$work/ora$POS_B/oracle-q.f64"; then
+    echo "FAIL the oracle's RoPE is a no-op at pos $POS_B too — the second position witnesses nothing"; exit 1
+fi
+echo "  hushfold: at pos $POS_B it is NOT — so pos $POS_A and pos $POS_B together do witness it"
 echo "  attn_norm: abs=$NORM_ABS view=$NORM_IDX inner=$NORM_INNER holds=$NORM_HOLDS"
 echo "  attn_q_a (MXFP8 $QA_IN->$QA_OUT): abs=$QA_ABS view=$QA_IDX inner=$QA_INNER holds=$QA_HOLDS"
 echo "  attn_kv  (MXFP8 $KV_IN->$KV_OUT): abs=$KV_ABS view=$KV_IDX inner=$KV_INNER holds=$KV_HOLDS"
@@ -123,6 +156,7 @@ mkdir -p "$CACHE"
 LIB_EMB="$(compile_unit dsv4-embed-msl form_dsv4_embed_f16 dsv4emb)" || exit 1
 LIB_MLA="$(compile_unit dsv4-mla-unit form_mla_rmsnorm_f32 dsv4mla)" || exit 1
 LIB8="$(compile_unit dsv4-mx8-matvec-msl form_dsv4_mx8_matvec dsv4mx8)" || exit 1
+LIB_CORE="$(compile_unit dsv4-mla-core-msl form_dsv4_mx8_matvec_grouped dsv4core)" || exit 1
 
 # ── 4. the carrier ────────────────────────────────────────────────────────────────────────────────
 cat > "$work/runner.swift" <<'SWIFT'
@@ -134,7 +168,7 @@ var ai = 1
 func S() -> String { let v = a[ai]; ai += 1; return v }
 func I() -> Int { let v = Int(a[ai])!; ai += 1; return v }
 func F() -> Float { let v = Float(a[ai])!; ai += 1; return v }
-let libEmb = S(), libMla = S(), lib8 = S(), blobPath = S()
+let libEmb = S(), libMla = S(), lib8 = S(), libCore = S(), blobPath = S()
 let step = I(), viewLimit = I(), nviews = I()
 let embAbs = I(), rowOff = I(), nEmbd = I(), embIdx = I(), embInner = I(), embHolds = I(), token = I()
 let normAbs = I(), normIdx = I(), normInner = I(), normHolds = I()
@@ -144,11 +178,17 @@ let qbAbs = I(), qbIdx = I(), qbInner = I(), qbHolds = I(), qbRows = I(), qbCols
 let kvAbs = I(), kvIdx = I(), kvInner = I(), kvHolds = I(), kvRows = I(), kvCols = I()
 let kvanAbs = I(), kvanIdx = I(), kvanInner = I(), kvanHolds = I()
 let eps = F()
+let snkAbs = I(), snkIdx = I(), snkInner = I(), snkHolds = I()
+let oaAbs = I(), oaIdx = I(), oaInner = I(), oaHolds = I(), oaRows = I(), oaCols = I()
+let obAbs = I(), obIdx = I(), obIdxInner = I(), obHolds = I(), obRows = I(), obCols = I()
+let nHead = I(), headDim = I(), nRot = I(), ropeBase = F(), nGroups = I(), oRank = I()
+let posA = I(), posB = I(), oraDirA = S(), oraDirB = S()
 
 guard let dev = MTLCreateSystemDefaultDevice() else { print("SKIP no Metal device"); exit(2) }
 let lEmb = try dev.makeLibrary(URL: URL(fileURLWithPath: libEmb))
 let lMla = try dev.makeLibrary(URL: URL(fileURLWithPath: libMla))
 let l8   = try dev.makeLibrary(URL: URL(fileURLWithPath: lib8))
+let lCore = try dev.makeLibrary(URL: URL(fileURLWithPath: libCore))
 let queue = dev.makeCommandQueue()!
 var failures = 0, gpuErrors = 0
 var gpuFirstError: String? = nil
@@ -262,10 +302,12 @@ if failures > 0 { print("VERDICT FAIL the views did not map"); exit(1) }
 
 // ── GATE 1: the five MLA tensors are each resident in a single view (holds==1).
 let resident = embHolds==1 && normHolds==1 && qaHolds==1 && qanHolds==1 && qbHolds==1 && kvHolds==1 && kvanHolds==1
+  && snkHolds==1 && oaHolds==1 && obHolds==1
   && embIdx<nviews && normIdx<nviews && qaIdx<nviews && qanIdx<nviews && qbIdx<nviews && kvIdx<nviews && kvanIdx<nviews
+  && snkIdx<nviews && oaIdx<nviews && obIdx<nviews
 check(resident,
-  "gate 1 residency: token_embd(v\(embIdx)), attn_norm(v\(normIdx)), attn_q_a(v\(qaIdx)), attn_q_a_norm(v\(qanIdx)), attn_q_b(v\(qbIdx)), attn_kv(v\(kvIdx)), attn_kv_a_norm(v\(kvanIdx)) each lie wholly inside one view",
-  "gate 1 an MLA tensor spans views (holds: emb\(embHolds) norm\(normHolds) qa\(qaHolds) qan\(qanHolds) kv\(kvHolds) kvan\(kvanHolds))")
+  "gate 1 residency: token_embd(v\(embIdx)), attn_norm(v\(normIdx)), attn_q_a(v\(qaIdx)), attn_q_a_norm(v\(qanIdx)), attn_q_b(v\(qbIdx)), attn_kv(v\(kvIdx)), attn_kv_a_norm(v\(kvanIdx)), attn_sinks(v\(snkIdx)), attn_output_a(v\(oaIdx)), attn_output_b(v\(obIdx)) each lie wholly inside one view",
+  "gate 1 an MLA tensor spans views (holds: emb\(embHolds) norm\(normHolds) qa\(qaHolds) qan\(qanHolds) kv\(kvHolds) kvan\(kvanHolds) snk\(snkHolds) oa\(oaHolds) ob\(obHolds))")
 if failures > 0 { print("VERDICT FAIL"); exit(1) }
 
 // helper: dispatch the one-thread RMSNorm kernel; x is a device buffer, g bound from a view at gOff.
@@ -386,19 +428,256 @@ check(ok6 && gpuErrors == 0,
   "gate 6 KV rank-space RMSNorm at real dims: form_mla_rmsnorm_f32 over the \(kvRows)-wide KV latent with attn_kv_a_norm's g through view \(kvanIdx) agrees with the CPU carve (maxRel \(mr6), maxAbs \(ma6); \(ds6) distinct; \(nn6) NaN)",
   "gate 6 KV rank-norm: maxRel \(mr6) maxAbs \(ma6) nan \(nn6)")
 
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+// STONE 36 — THE ATTENTION CORE, the CHOOSING half, proven against the RENTED ORACLE.
+//
+// Gates 2..7 above are the CANONICAL half: a matvec and an RMSNorm have one right answer, so a self-carve
+// (GPU vs an independent CPU decode of the same bytes) is a real falsifier there. From here on it is not.
+// Where the sink enters the softmax, whether the KV row is fp8+f16 rounded before it is attended to,
+// whether the heads are UN-roped after attending, which output path is taken — all CHOICES, and a
+// self-carve inherits the choice on both sides (twinblind, row 868). So every gate below compares the GPU
+// against dsv4-mla-core-oracle.py: an INDEPENDENT fp64 transcription of ds4.c, written from the C.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+
+func readOracle(_ dir: String, _ key: String) -> [Double] {
+    let p = dir + "/oracle-" + key + ".f64"
+    guard let s = try? String(contentsOfFile: p, encoding: .utf8) else {
+        print("FAIL oracle vector missing: \(p)"); exit(1)
+    }
+    var out: [Double] = []
+    s.split(separator: "\n").forEach { if let v = Double($0) { out.append(v) } }
+    return out
+}
+// The comparator (assocwall, row 866). The oracle is fp64 and the GPU is f32 over a real-width reduction,
+// so bit-equality is not the question — summation ORDER is. The honest gate is an ABSOLUTE bound over
+// every element PLUS a RELATIVE bound taken only above a magnitude floor: below the floor an ~1e-6 absolute
+// difference reads as a huge relative purely because the denominator is ~0 (Stone 35's gate 7 went red at
+// maxRel 0.008 with maxAbs 8.9e-8 — the comparator, not the arithmetic).
+func cmpOra(_ gpu: UnsafeMutablePointer<Float>, _ ref: [Double], _ absBound: Double, _ relBound: Double,
+            _ relFloor: Double) -> (Bool, Double, Double, Int, Int, Float, Float) {
+    var maxAbs = 0.0, maxRel = 0.0, nan = 0
+    var seen = Set<UInt32>(); var vmin = Float.greatestFiniteMagnitude, vmax = -Float.greatestFiniteMagnitude
+    for i in 0..<ref.count {
+        let g = gpu[i]
+        if g.isNaN || !g.isFinite { nan += 1; continue }
+        let d = abs(Double(g) - ref[i])
+        if d > maxAbs { maxAbs = d }
+        if abs(ref[i]) > relFloor { let r = d/abs(ref[i]); if r > maxRel { maxRel = r } }
+        seen.insert(g.bitPattern); vmin = min(vmin, g); vmax = max(vmax, g)
+    }
+    // zerobirth/edgedrop: a dead view or an unrun kernel reads as a sentinel or as one repeated value.
+    let nonDegen = seen.count > 8 && vmax > vmin
+    return (nan == 0 && maxAbs < absBound && maxRel < relBound && nonDegen, maxAbs, maxRel, nan, seen.count, vmin, vmax)
+}
+
+let pHeadrms = try dev.makeComputePipelineState(function: lMla.makeFunction(name: "form_mla_headrms_f32")!)
+let pRope    = try dev.makeComputePipelineState(function: lMla.makeFunction(name: "form_mla_rope_f32")!)
+let pAttend  = try dev.makeComputePipelineState(function: lMla.makeFunction(name: "form_mla_attend_f32")!)
+let pGrouped = try dev.makeComputePipelineState(function: lCore.makeFunction(name: "form_dsv4_mx8_matvec_grouped")!)
+let pKvq     = try dev.makeComputePipelineState(function: lCore.makeFunction(name: "form_dsv4_kv_fp8_f16_round")!)
+
+func sentinelled(_ n: Int) -> MTLBuffer {                 // the offered-interface guard, every dispatch
+    let b = dev.makeBuffer(length: n*4, options: .storageModeShared)!
+    let p = b.contents().bindMemory(to: Float.self, capacity: n)
+    for i in 0..<n { p[i] = Float.nan }
+    return b
+}
+func run(_ cb: MTLCommandBuffer) {
+    cb.commit(); cb.waitUntilCompleted()
+    if let er = cb.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(er)" } }
+    if cb.status != .completed { gpuErrors += 1 }
+}
+func gpuHeadrms(_ x: MTLBuffer, _ nh: Int, _ hd: Int) -> MTLBuffer {
+    let out = sentinelled(nh*hd)
+    var a = UInt32(nh), b = UInt32(hd), e = eps
+    let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+    enc.setComputePipelineState(pHeadrms)
+    enc.setBuffer(x, offset: 0, index: 0); enc.setBuffer(out, offset: 0, index: 1)
+    enc.setBytes(&a, length: 4, index: 2); enc.setBytes(&b, length: 4, index: 3); enc.setBytes(&e, length: 4, index: 4)
+    enc.dispatchThreads(MTLSize(width: nh, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: min(pHeadrms.maxTotalThreadsPerThreadgroup, 64), height: 1, depth: 1))
+    enc.endEncoding(); run(cb); return out
+}
+// ds4.c:10102 — freqs[k] = theta_scale^k, theta_scale = freq_base^(-2/n_rot), built by the SAME repeated
+// multiply the C uses (theta_extrap *= theta_scale), so the accumulation order matches.
+let nPair = nRot/2
+let freqBuf = dev.makeBuffer(length: nPair*4, options: .storageModeShared)!
+do {
+    let fp = freqBuf.contents().bindMemory(to: Float.self, capacity: nPair)
+    let thetaScale = powf(ropeBase, -2.0/Float(nRot))
+    var f: Float = 1.0
+    for k in 0..<nPair { fp[k] = f; f *= thetaScale }
+}
+func gpuRope(_ v: MTLBuffer, _ nh: Int, _ hd: Int, _ pos: Int, _ inverse: Bool) -> MTLBuffer {
+    let out = sentinelled(nh*hd)
+    var a = UInt32(nh), b = UInt32(hd), c = UInt32(nRot), p = Float(pos), s: Float = inverse ? -1.0 : 1.0
+    let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+    enc.setComputePipelineState(pRope)
+    enc.setBuffer(v, offset: 0, index: 0); enc.setBuffer(out, offset: 0, index: 1)
+    enc.setBuffer(freqBuf, offset: 0, index: 2)
+    enc.setBytes(&a, length: 4, index: 3); enc.setBytes(&b, length: 4, index: 4); enc.setBytes(&c, length: 4, index: 5)
+    enc.setBytes(&p, length: 4, index: 6); enc.setBytes(&s, length: 4, index: 7)
+    enc.dispatchThreads(MTLSize(width: nh, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: min(pRope.maxTotalThreadsPerThreadgroup, 64), height: 1, depth: 1))
+    enc.endEncoding(); run(cb); return out
+}
+func gpuKvRound(_ v: MTLBuffer, _ hd: Int) -> MTLBuffer {
+    let out = sentinelled(hd)
+    var a = UInt32(hd), b = UInt32(nRot)
+    let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+    enc.setComputePipelineState(pKvq)
+    enc.setBuffer(v, offset: 0, index: 0); enc.setBuffer(out, offset: 0, index: 1)
+    enc.setBytes(&a, length: 4, index: 2); enc.setBytes(&b, length: 4, index: 3)
+    enc.dispatchThreads(MTLSize(width: 1, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: 1, height: 1, depth: 1))
+    enc.endEncoding(); run(cb); return out
+}
+func gpuAttend(_ q: MTLBuffer, _ rows: MTLBuffer, _ nh: Int, _ hd: Int, _ nrows: Int, _ sinkView: MTLBuffer, _ sinkOff: Int) -> MTLBuffer {
+    let out = sentinelled(nh*hd)
+    var a = UInt32(nh), b = UInt32(hd), c = UInt32(nrows), sc = 1.0/sqrtf(Float(hd))
+    let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+    enc.setComputePipelineState(pAttend)
+    enc.setBuffer(q, offset: 0, index: 0); enc.setBuffer(rows, offset: 0, index: 1); enc.setBuffer(out, offset: 0, index: 2)
+    enc.setBuffer(sinkView, offset: sinkOff, index: 3)
+    enc.setBytes(&a, length: 4, index: 4); enc.setBytes(&b, length: 4, index: 5); enc.setBytes(&c, length: 4, index: 6)
+    enc.setBytes(&sc, length: 4, index: 7)
+    enc.dispatchThreads(MTLSize(width: nh, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: min(pAttend.maxTotalThreadsPerThreadgroup, 32), height: 1, depth: 1))
+    enc.endEncoding(); run(cb); return out
+}
+func gpuGrouped(_ wView: MTLBuffer, _ wOff: Int, _ x: MTLBuffer, _ rows: Int, _ cols: Int, _ rank: Int) -> MTLBuffer {
+    let out = sentinelled(rows)
+    var r32 = UInt32(rows), c32 = UInt32(cols), nel32 = UInt32(rows*cols), rk = UInt32(rank)
+    let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+    enc.setComputePipelineState(pGrouped)
+    enc.setBuffer(wView, offset: wOff, index: 0); enc.setBuffer(x, offset: 0, index: 1); enc.setBuffer(out, offset: 0, index: 2)
+    enc.setBytes(&r32, length: 4, index: 3); enc.setBytes(&c32, length: 4, index: 4)
+    enc.setBytes(&nel32, length: 4, index: 5); enc.setBytes(&rk, length: 4, index: 6)
+    enc.dispatchThreads(MTLSize(width: rows*32, height: 1, depth: 1),
+                        threadsPerThreadgroup: MTLSize(width: min(pGrouped.maxTotalThreadsPerThreadgroup, 256), height: 1, depth: 1))
+    enc.endEncoding(); run(cb); return out
+}
+
+// ── GATE 8: the per-head RMSNorm (ds4.c head_rms_norm_inplace :6646) — the step the PROJECTION surface
+// stopped one line short of. It is unweighted and per-head; nothing in the file names it, so only the C says
+// it is there at all. Position-independent, so it is proven once.
+let qHrBuf = gpuHeadrms(qBuf, nHead, headDim)
+let qHrp = qHrBuf.contents().bindMemory(to: Float.self, capacity: nHead*headDim)
+let oraQhr = readOracle(oraDirA, "q_headrms")
+let (ok8, ma8, mr8, nn8, ds8, mn8, mx8v) = cmpOra(qHrp, oraQhr, 2e-4, 2e-4, 1e-2)
+check(ok8 && gpuErrors == 0 && oraQhr.count == nHead*headDim,
+  "gate 8 per-head RMSNorm at real dims [RENTED ORACLE]: form_mla_headrms_f32 over all \(nHead) heads x \(headDim) agrees with the fp64 ds4.c transcription (maxAbs \(ma8), maxRel \(mr8) above |1e-2|; \(ds8) distinct, range [\(mn8),\(mx8v)]; \(nn8) NaN)",
+  "gate 8 headrms vs oracle: maxAbs \(ma8) maxRel \(mr8) nan \(nn8) distinct \(ds8) n \(oraQhr.count) gpuErrors \(gpuErrors)")
+
+var coreFail = 0
+var lastOut: [Float] = []
+var outsByPos: [Int: [Float]] = [:]
+
+// the sink view — F32 [64], read through its own window like every other weight.
+func runCore(_ pos: Int, _ oraDir: String, _ gateBase: Int) {
+    let oq   = readOracle(oraDir, "q")
+    let okvr = readOracle(oraDir, "kv_roped")
+    let okv  = readOracle(oraDir, "kv")
+    let oha  = readOracle(oraDir, "heads_attn")
+    let ohd  = readOracle(oraDir, "heads")
+    let olow = readOracle(oraDir, "low")
+    let oout = readOracle(oraDir, "attn_out")
+
+    // ds4.c:13793 — RoPE forward on q, then on the kv latent row.
+    let qRoped = gpuRope(qHrBuf, nHead, headDim, pos, false)
+    let qRp = qRoped.contents().bindMemory(to: Float.self, capacity: nHead*headDim)
+    let (a1, m1, r1, n1, d1, _, _) = cmpOra(qRp, oq, 3e-4, 3e-4, 1e-2)
+    check(a1, "gate \(gateBase) RoPE(q) at pos \(pos) [RENTED ORACLE]: the trailing-\(nRot) rotation over all \(nHead) heads (leading \(headDim - nRot) untouched) agrees with the fp64 ds4.c transcription (maxAbs \(m1), maxRel \(r1); \(d1) distinct; \(n1) NaN)",
+      "gate \(gateBase) RoPE(q) pos \(pos): maxAbs \(m1) maxRel \(r1) nan \(n1)")
+    if !a1 { coreFail += 1 }
+
+    let kvRoped = gpuRope(kvLatNBuf, 1, headDim, pos, false)
+    let kvRp = kvRoped.contents().bindMemory(to: Float.self, capacity: headDim)
+    let (a2, m2, r2, n2, d2, _, _) = cmpOra(kvRp, okvr, 3e-5, 3e-5, 1e-2)
+    check(a2, "gate \(gateBase+1) RoPE(kv latent) at pos \(pos) [RENTED ORACLE]: head_count_kv is 1, so the single \(headDim)-wide latent rotates once (maxAbs \(m2), maxRel \(r2); \(d2) distinct; \(n2) NaN)",
+      "gate \(gateBase+1) RoPE(kv) pos \(pos): maxAbs \(m2) maxRel \(r2) nan \(n2)")
+    if !a2 { coreFail += 1 }
+
+    // ds4.c:3211 + :3162 — the kv row is fp8-round-tripped on its NOPE part, then f16-rounded whole. This
+    // is IN the forward path: skipping it is wrong by ~1e-2, not by float precision.
+    let kvR = gpuKvRound(kvRoped, headDim)
+    let kvRp2 = kvR.contents().bindMemory(to: Float.self, capacity: headDim)
+    let (a3, m3, r3, n3, d3, _, _) = cmpOra(kvRp2, okv, 1e-5, 1e-5, 1e-2)
+    // the round-trip must actually MOVE the row — otherwise the kernel is a memcpy that agrees by accident
+    var moved = 0
+    for i in 0..<headDim { if kvRp2[i] != kvRp[i] { moved += 1 } }
+    check(a3 && moved > headDim/4,
+      "gate \(gateBase+2) the KV row's fp8+f16 round-trip at pos \(pos) [RENTED ORACLE]: E4M3FN in \(64)-wide groups over the leading \(headDim - nRot) (the roped tail is NOT fp8-rounded) then f16 over all \(headDim) — agrees with the fp64 ds4.c transcription and MOVED \(moved)/\(headDim) entries (maxAbs \(m3), maxRel \(r3); \(d3) distinct; \(n3) NaN)",
+      "gate \(gateBase+2) kv round-trip pos \(pos): maxAbs \(m3) maxRel \(r3) nan \(n3) moved \(moved)")
+    if !(a3 && moved > headDim/4) { coreFail += 1 }
+
+    // ds4.c:10305 — the sink-aware softmax. The learned per-head sink logit is in the DENOMINATOR and
+    // contributes no value vector, so each row's weights sum to LESS than one.
+    let headsA = gpuAttend(qRoped, kvR, nHead, headDim, 1, views[snkIdx], snkInner)
+    let hap = headsA.contents().bindMemory(to: Float.self, capacity: nHead*headDim)
+    let (a4, m4, r4, n4, d4, _, _) = cmpOra(hap, oha, 3e-4, 3e-4, 1e-2)
+    check(a4, "gate \(gateBase+3) the sink softmax at pos \(pos) [RENTED ORACLE]: form_mla_attend_f32 over \(nHead) heads against the single KV latent row, attn_sinks read through view \(snkIdx), agrees with the fp64 ds4.c transcription (maxAbs \(m4), maxRel \(r4); \(d4) distinct; \(n4) NaN)",
+      "gate \(gateBase+3) sink softmax pos \(pos): maxAbs \(m4) maxRel \(r4) nan \(n4)")
+    if !a4 { coreFail += 1 }
+
+    // ds4.c:13793 — the heads are UN-roped before the output projection (sign = -1).
+    let headsU = gpuRope(headsA, nHead, headDim, pos, true)
+    let hup = headsU.contents().bindMemory(to: Float.self, capacity: nHead*headDim)
+    let (a5, m5, r5, n5, d5, _, _) = cmpOra(hup, ohd, 3e-4, 3e-4, 1e-2)
+    check(a5, "gate \(gateBase+4) the INVERSE RoPE on the attention output at pos \(pos) [RENTED ORACLE]: sign -1 over the same trailing \(nRot), agrees with the fp64 ds4.c transcription (maxAbs \(m5), maxRel \(r5); \(d5) distinct; \(n5) NaN)",
+      "gate \(gateBase+4) inverse RoPE pos \(pos): maxAbs \(m5) maxRel \(r5) nan \(n5)")
+    if !a5 { coreFail += 1 }
+
+    // ds4.c:10356 / :7123 — the GROUPED output, factor a: 8 groups of 8 heads, each -> rank 1024.
+    let low = gpuGrouped(views[oaIdx], oaInner, headsU, oaRows, oaCols, oRank)
+    let lowp = low.contents().bindMemory(to: Float.self, capacity: oaRows)
+    let (a6, m6, r6, n6, d6, _, _) = cmpOra(lowp, olow, 2e-3, 2e-3, 1e-2)
+    check(a6, "gate \(gateBase+5) the GROUPED output factor a at pos \(pos) [RENTED ORACLE]: the type-41 attn_output_a (\(oaRows)x\(oaCols)) with row \(oRank)-grouped input addressing — group g's \(oaCols) heads-slice into rows g*\(oRank)..+\(oRank) — agrees with the fp64 ds4.c transcription (maxAbs \(m6), maxRel \(r6); \(d6) distinct; \(n6) NaN)",
+      "gate \(gateBase+5) grouped out a pos \(pos): maxAbs \(m6) maxRel \(r6) nan \(n6)")
+    if !a6 { coreFail += 1 }
+
+    // ds4.c:10370 — factor b: the concatenated 8*1024 = 8192 latents back to n_embd 4096.
+    let attnOut = gpuMx8(views[obIdx], obIdxInner, low, obRows, obCols)
+    let aop = attnOut.contents().bindMemory(to: Float.self, capacity: obRows)
+    let (a7, m7, r7, n7, d7, mn7b, mx7b) = cmpOra(aop, oout, 6e-3, 6e-3, 1e-2)
+    check(a7, "gate \(gateBase+6) the GROUPED output factor b at pos \(pos) [RENTED ORACLE]: the type-41 attn_output_b (\(obRows)x\(obCols)) maps the \(obCols) group-latents back to n_embd \(obRows) — the WHOLE attention block's output — agreeing with the fp64 ds4.c transcription (maxAbs \(m7), maxRel \(r7); \(d7) distinct, range [\(mn7b),\(mx7b)]; \(n7) NaN)",
+      "gate \(gateBase+6) grouped out b pos \(pos): maxAbs \(m7) maxRel \(r7) nan \(n7)")
+    if !a7 { coreFail += 1 }
+
+    var v = [Float](repeating: 0, count: obRows)
+    for i in 0..<obRows { v[i] = aop[i] }
+    outsByPos[pos] = v
+    lastOut = v
+}
+
+runCore(posA, oraDirA, 9)
+runCore(posB, oraDirB, 16)
+
+// ── GATE 23: hushfold (row 859) on the BODY's own numbers. RoPE is the identity at position 0, so a core
+// checked at one position witnesses nothing about it. The two runs above must therefore DISAGREE with each
+// other while each agrees with its own oracle — that, and only that, is the witness.
+var posDiff = 0; var maxPosDelta: Float = 0
+if let a = outsByPos[posA], let b = outsByPos[posB] {
+    for i in 0..<min(a.count, b.count) { if a[i] != b[i] { posDiff += 1; maxPosDelta = max(maxPosDelta, abs(a[i]-b[i])) } }
+}
+check(posDiff > 0 && coreFail == 0,
+  "gate 23 hushfold: the same token's attention output DIFFERS between pos \(posA) and pos \(posB) in \(posDiff)/\(obRows) entries (max delta \(maxPosDelta)) while each run agrees with its OWN oracle — the RoPE is witnessed, not assumed",
+  "gate 23 hushfold: the two positions produced identical output (\(posDiff) differing) or a core gate failed (\(coreFail))")
+
 if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(gpuFirstError ?? "unknown") ===") }
 print(String(format: "      Q latent[0..3] = %.6f %.6f %.6f %.6f", qLatp[0], qLatp[1], qLatp[2], qLatp[3]))
 print(String(format: "      KV latent[0..3] = %.6f %.6f %.6f %.6f", kvLatp[0], kvLatp[1], kvLatp[2], kvLatp[3]))
 print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — the model is mmapped and wrapped, not copied (onelean)", dev.currentAllocatedSize, Double(dev.currentAllocatedSize)/1073741824.0))
 
+print(String(format: "      attn_out(pos %d)[0..3] = %.6f %.6f %.6f %.6f", posB, lastOut[0], lastOut[1], lastOut[2], lastOut[3]))
+
 let ok = failures == 0 && gpuErrors == 0
-if ok { print("VERDICT PASS  8 gates — Stone 35 Stage 1: the WHOLE MLA projection surface at real dims (input RMSNorm + Q down/rank-norm/up + KV down/rank-norm), through the windowed views, each == an independent CPU carve") }
+if ok { print("VERDICT PASS  23 gates — Stone 35's MLA projection surface at real dims (gates 0-7, CANONICAL, self-carve) PLUS Stone 36's whole ATTENTION CORE at real dims (gates 8-23, CHOOSING, vs a rented fp64 ds4.c transcription) at two positions: per-head RMSNorm, RoPE fwd on q and kv, the KV fp8+f16 round-trip, the sink softmax, the inverse RoPE, and the GROUPED output a then b — the block's whole output") }
 else { print("VERDICT FAIL  \(failures) gate(s), \(gpuErrors) cb errors") }
 exit(ok ? 0 : 1)
 SWIFT
 swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "FAIL swiftc runner"; tail -30 "$work/swift.err"; exit 1; }
 
-"$work/runner" "$LIB_EMB" "$LIB_MLA" "$LIB8" "$BLOB" \
+"$work/runner" "$LIB_EMB" "$LIB_MLA" "$LIB8" "$LIB_CORE" "$BLOB" \
     "$STEP" "$VIEWLIMIT" "$NVIEWS" \
     "$EMB_ABS" "$ROW_OFF" "$N_EMBD" "$EMB_IDX" "$EMB_INNER" "$EMB_HOLDS" "$TOKEN" \
     "$NORM_ABS" "$NORM_IDX" "$NORM_INNER" "$NORM_HOLDS" \
@@ -407,6 +686,11 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "
     "$QB_ABS" "$QB_IDX" "$QB_INNER" "$QB_HOLDS" "$QB_OUT" "$QB_IN" \
     "$KV_ABS" "$KV_IDX" "$KV_INNER" "$KV_HOLDS" "$KV_OUT" "$KV_IN" \
     "$KVAN_ABS" "$KVAN_IDX" "$KVAN_INNER" "$KVAN_HOLDS" \
-    "$RMS_EPS"
+    "$RMS_EPS" \
+    "$SNK_ABS" "$SNK_IDX" "$SNK_INNER" "$SNK_HOLDS" \
+    "$OA_ABS" "$OA_IDX" "$OA_INNER" "$OA_HOLDS" "$OA_OUT" "$OA_IN" \
+    "$OB_ABS" "$OB_IDX" "$OB_INNER" "$OB_HOLDS" "$OB_OUT" "$OB_IN" \
+    "$N_HEAD" "$HEAD_DIM" "$N_ROT" "$ROPE_BASE" "$N_GROUPS" "$O_RANK" \
+    "$POS_A" "$POS_B" "$work/ora$POS_A" "$work/ora$POS_B"
 rc=$?
 exit $rc

@@ -335,24 +335,23 @@ def main():
     qlatn = rms_norm_weight(qlat, read_f32(g, P + "attn_q_a_norm.weight", q_rank), eps)
     q = mx8_matvec(g, P + "attn_q_b.weight", qlatn, n_head * head_dim, q_rank)
     q_preheadrms = list(q)
-    q = head_rms_norm(q, n_head, head_dim, eps)
+    q_headrms = head_rms_norm(list(q), n_head, head_dim, eps)
 
     # --- ds4.c:10041  KV: attn_kv -> kv_a_norm
     kvraw = mx8_matvec(g, P + "attn_kv.weight", xn, head_dim, n_embd)
-    kv = rms_norm_weight(kvraw, read_f32(g, P + "attn_kv_a_norm.weight", head_dim), eps)
+    kv_norm = rms_norm_weight(kvraw, read_f32(g, P + "attn_kv_a_norm.weight", head_dim), eps)
 
     # --- ds4.c:13793  RoPE forward on q and on kv, then the kv row's fp8 + f16 round-trip
-    q = rope_tail(q, n_head, head_dim, n_rot, pos, freq_base, freq_scale, False)
-    kv = rope_tail(kv, n_head_kv, head_dim, n_rot, pos, freq_base, freq_scale, False)
-    kv_prequant = list(kv)
-    kv = fp8_kv_quantize_row(kv, head_dim, n_rot)
+    q = rope_tail(list(q_headrms), n_head, head_dim, n_rot, pos, freq_base, freq_scale, False)
+    kv_roped = rope_tail(list(kv_norm), n_head_kv, head_dim, n_rot, pos, freq_base, freq_scale, False)
+    kv = fp8_kv_quantize_row(list(kv_roped), head_dim, n_rot)
     kv = [f16_round(v) for v in kv]
 
     # --- ds4.c:10305  the sink-aware softmax; this diagnostic path attends to ONE row (itself)
-    heads = attention_rows_one(q, [kv], read_f32(g, P + "attn_sinks.weight", n_head), n_head, head_dim)
+    heads_attn = attention_rows_one(q, [kv], read_f32(g, P + "attn_sinks.weight", n_head), n_head, head_dim)
 
     # --- ds4.c:13793  the heads are UN-roped (inverse rotation) before the output projection
-    heads = rope_tail(heads, n_head, head_dim, n_rot, pos, freq_base, freq_scale, True)
+    heads = rope_tail(list(heads_attn), n_head, head_dim, n_rot, pos, freq_base, freq_scale, True)
 
     # --- ds4.c:10356  the GROUPED output: 8 groups of 8 heads -> rank-1024 low each, then one 8192->4096
     group_dim = head_dim * (n_head // n_groups)
@@ -393,19 +392,15 @@ def main():
         for i in range(min(n, len(vec))):
             print("ORA %s %d %.17g" % (key, i, vec[i]))
 
-    emit("xn", xn, 8)
-    emit("qlatn", qlatn, 8)
-    emit("q_preheadrms", q_preheadrms, 8)
-    emit("q", q, 8)
-    emit("kv_prequant", kv_prequant, 8)
-    emit("kv", kv, 8)
-    emit("heads", heads, 8)
-    emit("low", low, 8)
-    emit("attn_out", attn_out, 8)
+    named = (("xn", xn), ("qlatn", qlatn), ("q_preheadrms", q_preheadrms), ("q_headrms", q_headrms),
+             ("q", q), ("kv_norm", kv_norm), ("kv_roped", kv_roped), ("kv", kv),
+             ("heads_attn", heads_attn), ("heads", heads), ("low", low), ("attn_out", attn_out))
+    for key, vec in named:
+        emit(key, vec, 8)
     # the full vectors the harness compares elementwise, written to a side file for exactness
     outdir = os.environ.get("DSV4_ORACLE_OUT")
     if outdir:
-        for key, vec in (("q", q), ("kv", kv), ("heads", heads), ("low", low), ("attn_out", attn_out)):
+        for key, vec in named:
             with open(os.path.join(outdir, "oracle-%s.f64" % key), "w") as fh:
                 for v in vec:
                     fh.write("%.17g\n" % v)
