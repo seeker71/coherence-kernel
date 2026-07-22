@@ -407,6 +407,9 @@ print(String(format: "pooled: %.1f MB of activation + KV state, allocated ONCE f
 // derived from the source by hand — a hand count of a loop body is exactly the kind of number that
 // stays right until someone edits the loop.
 var nDispatch = 0
+// the acknowledgement axiom 5 offers, counted run-wide rather than per call site
+var gpuErrors = 0
+var gpuFirstError: String? = nil
 final class Step {
     let cb: MTLCommandBuffer, enc: MTLComputeCommandEncoder
     init() { cb = queue.makeCommandBuffer()!; enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent)! }
@@ -435,7 +438,31 @@ final class Step {
                                  threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
         if barrier { enc.memoryBarrier(scope: .buffers) }
     }
-    func done() { enc.endEncoding(); cb.commit(); cb.waitUntilCompleted() }
+    // AXIOM 4 (boundary) AND AXIOM 5 (offer), READ AND APPLIED. A command buffer's OFFERED
+    // interface is `status` and `error`. `contents()` is not that interface — it is the memory
+    // behind it, and reading it without consulting the offer is passage not through the offered
+    // interface, which axiom 4 says is breach and promises is OBSERVABLE. It is observable here.
+    //
+    // And axiom 5 is why the breach is not merely impolite. It acknowledges with exactly one of
+    // `nothing, 0, 1, node` — `nothing` is a STATE, distinct from `0`. Every readback buffer in
+    // this carrier is freshly allocated and therefore zeroed, so on the wire `nothing` and `0`
+    // are byte-identical, and a raw read COLLAPSES two states the axiom holds apart. That
+    // collapse is what cost Stone 14 its MoE token: the GPU acknowledged `nothing`, the carrier
+    // read `0`, and five gates reported an arithmetic disagreement for one residency fact.
+    //
+    // So the offer is consulted, run-wide, and nothing read back is trustworthy if any commit
+    // failed. "The GPU is wrong" and "the GPU did not run" are not the same sentence.
+    func done() {
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        if let e = cb.error {
+            gpuErrors += 1
+            if gpuFirstError == nil { gpuFirstError = "\(e)" }
+        }
+        if cb.status != .completed {
+            gpuErrors += 1
+            if gpuFirstError == nil { gpuFirstError = "command buffer status \(cb.status.rawValue), not .completed" }
+        }
+    }
 }
 // a quantized matvec straight off the resident buffer: rows = d1, cols = d0 (GGUF's dim0 is the
 // fastest-varying axis, so the matrix is d1 rows of d0 columns). The KERNEL is chosen by the
@@ -623,11 +650,23 @@ func attn(_ s: Step, _ l: Int, _ pos: Int) {
 // so the overhead is visible rather than folded into a conclusion.
 var profAcc: [String: Double] = [:], profN: [String: Int] = [:]
 let profile = ProcessInfo.processInfo.environment["FORM_PROFILE"] == "1"
+// ---- FORM_ABLATE: the seam-free instrument ------------------------------------------------------
+// FORM_PROFILE cuts a command buffer after each op so it can attribute one, and the cut COSTS more
+// than several of the ops it is measuring — which is how this stone was briefed with a mechanism that
+// did not exist. This instrument never cuts. It re-dispatches ONE op class `ablDup` extra times,
+// in stream, inside the same single command buffer, and the whole-token time difference divided by
+// the extra count IS that op's real cost between its neighbours. The extra copies write where nothing
+// reads them (or are idempotent), so the token ids are unchanged and the gates still judge the run.
+let ablate = ProcessInfo.processInfo.environment["FORM_ABLATE"] ?? ""
+let ablDup = Int(ProcessInfo.processInfo.environment["FORM_ABLATE_N"] ?? "4")!
 func forward(_ id: Int, _ pos: Int) -> Int {
     var s = Step()
     var t0 = Date()
-    func seam(_ tag: String) {
+    func seam(_ rawTag: String) {
         guard profile else { return }
+        // TAGGED BY OP SET. Since Stone 16 the same op name means two different thread maps, and one
+        // bucket holding both would report their average and call it a measurement.
+        let tag = (fastOps ? "T " : "A ") + rawTag
         s.done()
         profAcc[tag, default: 0] += Date().timeIntervalSince(t0); profN[tag, default: 0] += 1
         s = Step(); t0 = Date()
@@ -636,28 +675,36 @@ func forward(_ id: Int, _ pos: Int) -> Int {
         matvec(s, t, x, y, yOff: off, barrier: barrier)
         seam((t.type == 14 ? "mv Q6_K " : "mv Q4_K ") + "\(t.d1)x\(t.d0)")
     }
+    func dup(_ tag: String, _ f: () -> Void) { if ablate == tag { for _ in 0..<ablDup { f() } } }
     dequant(s, embT, off: id * dModel, n: dModel, bX); seam("embed gather")
     for l in 0..<nLayer {
         let kOff = (l * maxpos + pos) * kvd * 4
         rmsnorm(s, bX, L[l].an, bXb); seam("rmsnorm")
+        dup("rmsnorm") { rmsnorm(s, bX, L[l].an, bXbT) }      // idempotent shape, scratch destination
         mv(L[l].q, bXb, bQ, 0, false)                  // q, k and v read the same vector and
         mv(L[l].k, bXb, bCacheK, kOff, false)          // write disjoint buffers: no dependency,
         mv(L[l].v, bXb, bCacheV, kOff)                 // so no barrier until all three are in
         rope(s, bQ, off: 0, heads: nHead, pos: pos, barrier: false)
         rope(s, bCacheK, off: kOff, heads: nKV, pos: pos); seam("rope")
+        dup("rope") { rope(s, bAlt, off: 0, heads: nHead, pos: pos) }   // same shape, scratch vector
         attn(s, l, pos); seam("attention")
+        dup("attention") { attn(s, l, pos) }                  // idempotent: same inputs, same output
         mv(L[l].o, bAttn, bProj)
         elem(s, pAdd, bX, bProj, bX, dModel); seam("residual add")
+        dup("residual add") { elem(s, pAdd, bX, bProj, bAlt, dModel) }  // scratch destination
         rmsnorm(s, bX, L[l].fn, bXb); seam("rmsnorm")
         mv(L[l].fg, bXb, bGate, 0, false)              // gate and up, likewise independent
         mv(L[l].fu, bXb, bUp)
         elem(s, pSwi, bGate, bUp, bAct, dFF); seam("swiglu")
+        dup("swiglu") { elem(s, pSwi, bGate, bUp, bAlt, dFF) }         // scratch destination
         mv(L[l].fd, bAct, bFfn)
         elem(s, pAdd, bX, bFfn, bX, dModel); seam("residual add")
     }
     rmsnorm(s, bX, onormT, bXb); seam("rmsnorm")
     mv(embT, bXb, bLogits)                 // tied: the unembedding IS token_embd
     var nn = UInt32(vocabN), np = UInt32(ARGP)
+    let nArg = 1 + (ablate == "argmax" ? ablDup : 0)   // idempotent: same logits, same answer
+    for _ in 0..<nArg {
     if fastOps {
         // stage one: ARGP contiguous chunks, each scanned with the attestant's strict `>`
         s.go(pArgP, ARGP) { e in
@@ -677,8 +724,10 @@ func forward(_ id: Int, _ pos: Int) -> Int {
             e.setBuffer(bOutV, offset: 0, index: 2); e.setBytes(&nn, length: 4, index: 3)
         }
     }
+    }
     s.done()
-    if profile { profAcc["argmax", default: 0] += Date().timeIntervalSince(t0); profN["argmax", default: 0] += 1 }
+    if profile { let tg = (fastOps ? "T " : "A ") + "argmax"
+                 profAcc[tg, default: 0] += Date().timeIntervalSince(t0); profN[tg, default: 0] += 1 }
     return Int(bOutI.contents().bindMemory(to: UInt32.self, capacity: 1)[0])
 }
 
@@ -867,6 +916,37 @@ print("  ids: \(promptIds)")
 print("  pieces: " + promptIds.map { "[" + decodeIds([$0]) + "]" }.joined())
 if promptIds.count + nsteps >= maxpos { print("FAIL  prompt+steps exceeds the KV pool"); exit(1) }
 
+// ---- gate 0: DID THE GPU RUN. Asked FIRST, because every gate below reads a buffer back, and a
+// buffer that was never written reads as zeros — which is a NUMBER, and numbers get compared and
+// reported as disagreement (axiom 5: `nothing` is not `0`). The CPU writes a sentinel no kernel
+// would ever produce and a kernel must overwrite it. If it survives, the gates below are REFUSED
+// rather than graded against unwritten memory.
+print("=== gate 0: did the GPU run at all ===")
+do {
+    let sentinel: Float = -424242.0
+    let sp = bXb.contents().bindMemory(to: Float.self, capacity: 4)
+    for i in 0..<4 { sp[i] = sentinel }
+    let before = gpuErrors
+    let s = Step()
+    dequant(s, embT, off: 0, n: 4, bXb)      // the cheapest real kernel in the unit
+    s.done()
+    let after = fvals(bXb, 4)
+    let untouched = after.allSatisfy { $0 == sentinel }
+    if gpuErrors > before { print("  command buffer ERROR: \(gpuFirstError ?? "unknown")") }
+    print("  sentinel \(sentinel) -> \(after)")
+    check(gpuErrors == before && !untouched,
+          "gate 0 the GPU executes: a kernel overwrote the CPU's sentinel, and no command buffer errored",
+          "gate 0 THE GPU DID NOT RUN — the sentinel survived and/or a command buffer failed. Every gate below would grade an unwritten buffer as an arithmetic disagreement; they are not run.")
+    if failures > 0 {
+        print("")
+        print("  This is a RESIDENCY condition, not an arithmetic one. This carrier asks Metal to make")
+        print("  \(String(format: "%.2f", Double(dev.currentAllocatedSize)/1073741824.0)) GiB resident; whether that succeeds depends on what else holds memory on this")
+        print("  machine RIGHT NOW — it is not a property of the code or of the model.")
+        print("=== VERDICT FAIL — refusing to grade unwritten memory ===")
+        exit(1)
+    }
+}
+
 print("=== gates 2-4: three points on the token's own path ===")
 zeroPool()
 gatePass()
@@ -894,6 +974,7 @@ func generate(_ ids: [Int], _ steps: Int) -> Run {
 }
 
 if failures > 0 { print("=== \(failures) gate(s) failed BEFORE any token — refusing to report a rate ==="); exit(1) }
+if gpuErrors > 0 { print("=== \(gpuErrors) command buffer(s) failed (\(gpuFirstError ?? "?")) — nothing read back is trustworthy, refusing to report a rate ==="); exit(1) }
 
 print("=== gate 6: a token ===")
 let short = max(2, nsteps / 3)
@@ -931,8 +1012,7 @@ if profile {
         print(String(format: "  %-20@ %8.3f s  %6.2f%%  over %5d dispatches (%.3f ms each)",
                      k as NSString, v, 100 * v / tot, profN[k]!, 1000 * v / Double(profN[k]!)))
     }
-    print(String(format: "  TOTAL          %8.3f s across %d forwards", tot,
-                 (profN["argmax"] ?? 1)))
+    print(String(format: "  TOTAL          %8.3f s   (A = the attestant's ops, T = Stone 16's twins)", tot))
 }
 
 // ---- gates 10-11: the FAST paths generate the ATTESTANT's tokens ------------------------------------
@@ -1030,7 +1110,15 @@ check(other.out != rShort.out && rShort.out.allSatisfy { $0 >= 0 && $0 < vocabN 
       "gate 6 real token ids out, legal vocab indices, input-dependent",
       "gate 6 the ids are constant across prompts or out of range")
 
-print(failures == 0 ? "=== VERDICT PASS — \(PARTS > 1 ? 13 : 11) gates ===" : "=== VERDICT FAIL — \(failures) gate(s) ===")
+// A command buffer that failed AFTER the last gate still invalidates every number above it, so the
+// offer is consulted once more before any verdict is printed. The gate count is COMPUTED from what
+// was actually asked (0 plus the 13 of Stone 13, or 11 without the split path) rather than typed.
+let nGates = (PARTS > 1 ? 13 : 11) + 1
+if gpuErrors > 0 {
+    print("=== VERDICT FAIL — \(gpuErrors) command buffer(s) failed (\(gpuFirstError ?? "?")); the numbers above are not trustworthy ===")
+    exit(1)
+}
+print(failures == 0 ? "=== VERDICT PASS — \(nGates) gates ===" : "=== VERDICT FAIL — \(failures) gate(s) ===")
 exit(failures == 0 ? 0 : 1)
 SWIFT
 
