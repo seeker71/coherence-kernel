@@ -117,3 +117,6 @@ The witnessed vector is documented in
 - `cognition/native-cognition-cycle.fk` — full knowledge → inquiry → awareness →
   recognition → action → response → routing composition, including a
   representation-diverse recognition witness.
+- `cognition/native-self-orientation.fk` — derive floor and north-star invariants,
+  predict two movements, walk the first available movement, and re-orient from
+  the resulting live witness without clearing the parent diagnostic window.
