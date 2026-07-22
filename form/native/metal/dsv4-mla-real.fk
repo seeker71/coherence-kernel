@@ -40,7 +40,8 @@
 ; tensors (blk.2+ do) — matching ds4.c's ds4_expected_layer_compress_ratio :1065, which returns 0 for
 ; il < 2 on the FLASH variant. So at layer 0 the RoPE is UNCOMPRESSED: freq_base = 10000 (not the
 ; compress_rope_freq_base 160000), freq_scale = 1, ext_factor = 0 — no YaRN ramp at all.
-; and the scalar config KVs: n_head 64, head_count_kv 1, head_dim (key/value_length) 512, nrot
+;
+; The rest of the scalar config KVs: n_head 64, head_count_kv 1, head_dim (key/value_length) 512, nrot
 ; (rope.dimension_count) 64, rms_eps 1e-6, rope.freq_base 10000, block_count 43, expert_used 6, hc 4.
 ; MLA_MAX_HD in mla-msl.fk is 512 — it EXACTLY equals this file's head_dim; the toy cap is the real width.
 ;
@@ -75,6 +76,47 @@
         (do
             (print "MSL")
             (print (mla-msl-unit))
+            (print "END")
+            0))
+
+    ; ================= STONE 36: the two kernels the CORE needs and the projection surface did not =====
+    ; Both are CHOICES read out of ds4.c, not inventions — and both are exactly the kind of choice a
+    ; self-carve is blind to (twinblind, row 868), so both are proven against the rented oracle
+    ; (form-stdlib/tests/dsv4-mla-core-oracle.py), never against a second copy of themselves.
+
+    ; --- kernel 1: the GROUPED MXFP8 matvec (ds4.c matvec_q8_0_grouped_rows :7578, worker :7123).
+    ; This is mxfp8-msl.fk's own fused decode+matvec with ONE change: the output row r no longer reads a
+    ; single x. Output rows are addressed as tensor_row = group*rank + r_in_group, and row r consumes the
+    ; group-th slice of the input: x + (r / rank) * cols. Everything else — the E8M0 scale-plane origin
+    ; (nel + (r*cols)/32), the 32-wide payload group, the simd_sum lane fold — is unchanged, so the decode
+    ; stays the same CANONICAL decode the projection surface already self-carve-proved at real dims.
+    ; The apposition that makes this dangerous: attn_output_a's `cols` is 4096 = group_dim (8 heads x 512),
+    ; and attn_output_b's `cols` is 8192 while ITS output is 4096 = n_embd. The same 4096 means two
+    ; different things one dispatch apart.
+    (defn dsv4-mx8-grouped-body ()
+        "kernel void form_dsv4_mx8_matvec_grouped (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], constant uint& rank [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint grp = r / rank; device const float* xg = x + grp * cols; uint ng = cols / 32u; uint g0 = (r * cols) / 32u; float sumf = 0.0f; for (uint g = lane; g < ng; g += 32u) { float s = mxm_e8m0(int(qb[nel + g0 + g])); uint p = r * cols + g * 32u; device const float* xv = xg + g * 32u; float acc = 0.0f; for (uint m = 0u; m < 32u; ++m) { acc = acc + xv[m] * mx8_val(int(qb[p + m])); } sumf = sumf + s * acc; } float sv = metal::simd_sum(sumf); if (lane == 0u) y[r] = sv; }")
+
+    ; --- kernel 2: the KV row's fp8 + f16 ROUND-TRIP (ds4.c dsv4_fp8_kv_quantize_row_inplace_cpu :3211,
+    ; dsv4_e4m3fn_dequant_cpu :3181, f16_round_inplace_cpu :3162). After the KV latent is roped, ds4.c
+    ; ROUNDS IT — first the NOPE part (the leading head_dim - n_rot = 448 dims) through E4M3FN in 64-wide
+    ; groups with a power-of-two group scale, then the WHOLE 512-wide row through f16. This is not a
+    ; storage detail: it is IN the forward path, so the attention sees a rounded row and a recipe that
+    ; skips it is wrong by ~1e-2, not by float precision. The trailing n_rot (the roped tail) is NOT
+    ; fp8-rounded — only f16-rounded with the rest.
+    ;   ceil(log2(amax/448)) is taken from the float's own exponent field rather than from a library log2,
+    ; so the group scale is exact and deterministic: k = e when the mantissa is exactly 1, else e+1.
+    ;   The E4M3FN nearest is ds4.c's own ladder search over its 127 magnitudes, tie-to-even index.
+    (defn dsv4-kvq-body ()
+        " static inline float ds4_e4m3_mag(int i) { int e = (i >> 3) & 15; int m = i & 7; return (e == 0) ? (float(m) * 0.001953125f) : ((1.0f + float(m) * 0.125f) * metal::exp2(float(e - 7))); } static inline float ds4_e4m3_round(float v) { float sgn = (v < 0.0f) ? -1.0f : 1.0f; float ax = metal::min(metal::abs(v), 448.0f); int lo = 0; int hi = 126; for (int it = 0; it < 7; ++it) { if (lo >= hi) break; int mid = (lo + hi + 1) >> 1; if (ds4_e4m3_mag(mid) <= ax) lo = mid; else hi = mid - 1; } int best = lo; if (best < 126) { float bd = metal::abs(ax - ds4_e4m3_mag(best)); float nd = metal::abs(ax - ds4_e4m3_mag(best + 1)); if (nd < bd || (nd == bd && ((best + 1) & 1) == 0 && (best & 1) != 0)) best = best + 1; } return sgn * ds4_e4m3_mag(best); } static inline float ds4_ceil_log2(float t) { uint b = as_type<uint>(t); int e = int((b >> 23) & 255u) - 127; uint frac = b & 8388607u; return float((frac == 0u) ? e : (e + 1)); } kernel void form_dsv4_kv_fp8_f16_round(device const float* v [[buffer(0)]], device float* out [[buffer(1)]], constant uint& hd [[buffer(2)]], constant uint& nrot [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i != 0u) return; for (uint j = 0u; j < hd; ++j) out[j] = v[j]; uint nnope = hd - nrot; for (uint off = 0u; off + 64u <= nnope; off += 64u) { float amax = 0.0f; for (uint j = 0u; j < 64u; ++j) { float a = metal::abs(out[off + j]); if (a > amax) amax = a; } if (amax < 1.0e-4f) amax = 1.0e-4f; float sc = metal::exp2(ds4_ceil_log2(amax / 448.0f)); for (uint j = 0u; j < 64u; ++j) { float w = out[off + j] / sc; w = metal::clamp(w, -448.0f, 448.0f); out[off + j] = ds4_e4m3_round(w) * sc; } } for (uint j = 0u; j < hd; ++j) out[j] = float(half(out[j])); }")
+
+    ; --- the CORE translation unit: one metal_stdlib, mxfp8-msl.fk's own decode spine once, then the two
+    ; kernels above. A carrier compiles exactly this; it composes nothing itself.
+    (defn dsv4-mla-core-msl ()
+        (do
+            (print "MSL")
+            (print (str_concat (qml-msl-header)
+                    (str_concat (mx8m-msl-helpers)
+                    (str_concat (dsv4-mx8-grouped-body) (dsv4-kvq-body)))))
             (print "END")
             0))
 
