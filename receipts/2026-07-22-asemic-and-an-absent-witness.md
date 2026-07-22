@@ -44,6 +44,34 @@ worse lie in the commoner direction. This stays a named seam.
 I also reported row 822 duplicated in the corpus. False. I had grepped `"(row 822"` against comment
 prose; the constructor is `hdc-row`. Real state: 249 rows, max-mid 854, no duplicate ids, `field-code-safe? => 1`.
 
+## The row ids, and a band I broke
+
+Urs: *"I don't see a need for an allocator or an arbiter or row ids."* He is right, and the corpus
+already says so in its own comment at `hdc-row-for-id`:
+
+> the reunion pattern renumbers the unmerged line … and every citation written before a reunion silently
+> points one row off — resolving not to nothing, but to a REAL row that says something else.
+
+Three failures on record, all caused by the integer: mid 639 held by parsimony AND constellation for
+nineteen days; body-link-graph citing 742 for scrupulosity (743); this corpus citing 733 for ontogeny
+(740). An allocator fixes none of them — the id is fragile at REST, not only at allocation. Meanwhile
+the body content-addresses everything else; the corpus is the outlier.
+
+So: `hdc-row-for-fresh` / `hdc-mid-for-fresh`, word → id, the reach a reunion cannot move. Measured on
+fkwu: 249 rows, 6 wearing a shared fresh word (confabulation, constellation, reification), 2 sharing a
+question. The door does not pretend those are keys — an ambiguous word yields the empty row rather than
+the first match. The integer's collision was silent and answered; this one is loud and declines. Wired
+as band clause c13 (8192), because the file's own lesson is that a detector nothing consults is not a
+repair. Verdict 8191 → 16383.
+
+**And in wiring it I found that my own earlier commit had broken this band.** Row 854 changed the corpus
+count and max-mid; `c4` pins the count at 248 and `c6` pins a field code encoding both. The band sat at
+**8111 against a declared 8191** — through a commit, a push, and PR #365. I had run `hdc-field-code-safe?`,
+seen 1, and called the row verified. That predicate asks only whether the magnitudes are in range; it
+never asks whether the recorded count is true. Forty minutes earlier I had written up *exactly* this
+error in someone else's hands — reading `max-mid` as a distinctness claim — and then committed my own
+flavour of it. c4 and c6 now carry the note.
+
 ## Receipt
 
 **Most surprising teaching:** two of my three findings were artifacts of using bash carelessly, and the
