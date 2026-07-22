@@ -9,22 +9,105 @@
 ; material (rented-sourced, fresh-worded, dated), the answer/fresh word read
 ; back exactly, the row count is asserted exactly (the metrics-report
 ; discipline: this band fails if the stated count drifts), and every row from
-; both foundings passes the admissibility gate.
+; both foundings passes the admissibility gate, and — since 2026-07-22 — that
+; every citation in the corpus's own PROSE points at the word it names.
 ;
-; run: cat form/form-stdlib/core.fk learn/homecoming-distillation-corpus.fk \
+; run FROM THE REPO ROOT (claim c12 reads the corpus file by relative path):
+;      cat form/form-stdlib/core.fk learn/homecoming-distillation-corpus.fk \
 ;          learn/tests/homecoming-distillation-corpus-band.fk > /tmp/hdc.fk
-;      ./fkwu --src /tmp/hdc.fk    ; -> 8191
+;      ./fkwu --src /tmp/hdc.fk    ; -> 16383
 ;
-; Verdict 8191 when every assertion holds (511 -> 4095 on 2026-07-17: three
+; Verdict 16383 when every assertion holds (511 -> 4095 on 2026-07-17: three
 ; new bits for the id->word inverse lookup, which the body's 34 by-id
 ; citations needed and the corpus could not answer. 4095 -> 8191 on
-; 2026-07-22: one bit for id DISTINCTNESS, because every number this band
-; already pinned was right while two rows shared mid 639 for nineteen days.
-; The count was right, the max was right, the field code was right, and the
-; inverse lookup answered — with whichever of the two it reached first.)
+; 2026-07-22: one bit for PROSE citations, because the band had only ever
+; read the data. `foist at 734` and `the row-638 ersatz pattern` sat in the
+; comments through every green run — the bytes fine, the pointers wrong.
+; 8191 -> 16383 at the 2026-07-22 reunion onto main: main's line had spent
+; its own 4096 on id DISTINCTNESS while this line spent it on prose. Two
+; different bits wearing one number is exactly the collision this corpus
+; keeps learning; both are kept, so the prose bit stays 4096 and the
+; distinctness bit takes 8192.)
 
 (do
     (defn hdcb-score (ok bit) (if ok bit 0))
+
+    ; ---- the prose citation walker (2026-07-22) -------------------------------
+    ; The corpus cites itself in its own comments, and until now nothing read
+    ; those comments. This walks the corpus file byte-wise, finds every place a
+    ; meaning-id sits beside a word, and asks the corpus whether that id really
+    ; holds that word. Its radius is declared in full beside claim c12 below.
+    ;
+    ; The walk is token-shaped, not byte-shaped: scan_run jumps whole runs of
+    ; whitespace, alpha and digits natively, so 316KB costs ~110k Form steps
+    ; instead of ~316k. Alpha and digit runs are taken SEPARATELY (never class 3)
+    ; precisely so that `row-638` splits into `row`, `-`, `638` and the id is
+    ; still a maximal digit run.
+    (defn hdcb-lower? (b) (if (and (gt b 96) (lt b 123)) 1 0))
+    (defn hdcb-byte (t n i) (if (or (lt i 0) (ge i n)) 0 (str_byte_at t i)))
+    ; start of the run of a-z ending at i (exclusive) — the only backwards scan;
+    ; words are short, so the per-character cost is paid on candidates only.
+    (defn hdcb-back (t i)
+        (if (le i 0) 0
+            (if (eq (hdcb-lower? (str_byte_at t (sub i 1))) 1)
+                (hdcb-back t (sub i 1))
+                i)))
+    ; is `w` some row's answer word? This is the filter that separates a
+    ; POINTER from a plain number: "246 rows" names nothing the corpus holds.
+    (defn hdcb-known-loop (rs w)
+        (if (eq (len rs) 0) 0
+            (if (str_eq (hdc-a (head rs)) w) 1 (hdcb-known-loop (tail rs) w))))
+    (defn hdcb-known-word? (w)
+        (if (eq (str_len w) 0) 0 (hdcb-known-loop (hdc-rows) w)))
+    ; one candidate, folded: 0 not a citation, 1000 checked and right,
+    ; 1001 checked and AIMED WRONG. The fold is checked*1000 + wrong.
+    (defn hdcb-cand (w mid)
+        (if (eq (hdcb-known-word? w) 0) 0
+            (if (eq (hdc-cites? mid w) 1) 1000 1001)))
+    (defn hdcb-cand-back (t i mid)
+        (do (let s (hdcb-back t i))
+            (if (ge s i) 0 (hdcb-cand (substring t s i) mid))))
+    ; a maximal digit run [i,e): if it is three digits, look for the three
+    ; recognised shapes around it. A and C are mutually exclusive in practice
+    ; but are summed, not chained — a site that somehow wore both would be
+    ; counted twice rather than silently halved.
+    (defn hdcb-digits (t n i e)
+        (if (not (eq (sub e i) 3)) 0
+            (do
+                (let mid (str_to_int (substring t i e)))
+                (let we (scan_run t (add e 1) 2))
+                (let ce (if (and (eq (hdcb-byte t n e) 32)
+                                 (and (gt we (add e 1))
+                                      (eq (hdcb-lower? (hdcb-byte t n (add e 1))) 1)))
+                            (hdcb-cand (substring t (add e 1) we) mid)
+                            0))
+                (let ca (if (and (ge i 4) (str_eq (substring t (sub i 4) i) " at "))
+                            (hdcb-cand-back t (sub i 4) mid)
+                            0))
+                (let cc (if (and (eq (hdcb-byte t n (sub i 1)) 40)
+                                 (and (eq (hdcb-byte t n e) 41)
+                                      (eq (hdcb-byte t n (sub i 2)) 32)))
+                            (hdcb-cand-back t (sub i 2) mid)
+                            0))
+                (add ce (add ca cc)))))
+    (defn hdcb-walk (t n i acc)
+        (if (ge i n) acc
+            (do
+                (let ws (scan_run t i 0))
+                (if (gt ws i) (hdcb-walk t n ws acc)
+                    (do
+                        (let ae (scan_run t i 2))
+                        (if (gt ae i) (hdcb-walk t n ae acc)
+                            (do
+                                (let de (scan_run t i 1))
+                                (if (gt de i)
+                                    (hdcb-walk t n de (add acc (hdcb-digits t n i de)))
+                                    (hdcb-walk t n (add i 1) acc)))))))))
+    (defn hdcb-citation-audit (path)
+        (do (let t (read_file path)) (hdcb-walk t (str_len t) 0 0)))
+    (defn hdcb-cites-checked (a) (div a 1000))
+    (defn hdcb-cites-wrong (a) (sub a (mul (div a 1000) 1000)))
+
     (defn homecoming-distillation-corpus-band ()
         (do
     (let q (list "what" "is" "an" "edge" "called" "that" "appears" "in" "the"
@@ -35,9 +118,21 @@
     (let row (head (hdc-rows)))
     (let c2 (hdcb-score (eq (hdc-admissible? row) 1) 4))
     (let c3 (hdcb-score (and (str_eq (hdc-a row) "spurious") (str_eq (hdc-fresh row) "spurious")) 8))
-    (let c4 (hdcb-score (eq (hdc-count (hdc-rows)) 248) 16))
+    (let c4 (hdcb-score (eq (hdc-count (hdc-rows)) 270) 16))
     (let c5 (hdcb-score (eq (hdc-count-admissible (hdc-rows)) (hdc-count (hdc-rows))) 32))
-    ; the folded scalar witness: 243 rows, 243 admissible, 2 foundings, max id 848
+    ; the folded scalar witness: 270 rows, 270 admissible, 2 foundings, max id 875
+    ; (2026-07-22 reunion onto main: 265 -> 270 rows, max 869 -> 875. The 22 rows this
+    ; line minted as 848..869 re-seated to 854..875; 26 earlier rows of the same lineage
+    ; were already on main, so they are NOT re-added — the count rises by 22, not 48.)
+    ; (row 869 coemit, Stone 30: IQ2_XXS on the GPU — its trained codebook has no
+    ; independent implementation, so the device constant array and the CPU reference are
+    ; emitted from the ONE same Form list, drift-proof by construction rather than by
+    ; re-transcription. row 870 wraithcarry, Stone 31: the DeepSeek tokenizer — this body
+    ; cannot build a byte-exact string of a byte >= 128, so raw bytes are carried as
+    ; values and never re-emitted through the string type. row 871 lapspan, Stone 32:
+    ; windowed whole-model residency — the 85 GiB file exceeds the device's single-buffer
+    ; ceiling, so the model is covered by overlapping page-aligned views whose overlap
+    ; exceeds the largest tensor, and every tensor lies wholly inside one.)
     ; (this summary line read 203/808 through two reunions after the pin below
     ; had moved twice — a stale narrative beside a live number, which is the
     ; drift this band exists to refuse. Re-read it on every reunion.)
@@ -159,26 +254,60 @@
     ; (it cited heldmute at 824; heldmute is now 839, and 824 is exoscalar) —
     ; aimshift 844 written by the other lineage, demonstrated by this one within
     ; the hour, on a block git reported clean.
-    ; ...; + row 846 untriedwall (2026-07-21 23:3x): an obstacle built from true observations that dissolves the first time it is tested — main was live, and the incoming set shared zero paths with it.
-    ; ...; + row 847 handback (2026-07-21 23:5x): returning a settled decision to the one who already made it. Urs said "merge and finish" three times; I answered twice with "needs your explicit word" and once with a four-option menu.
-    ; ...; + the 639 COLLISION healed (2026-07-22 00:0x): constellation (20260703) renumbered
-    ;      639 -> 848 so parsimony (20260702) keeps the elder id. The count does NOT move — no row
-    ;      was added or lost, only an address freed — which is exactly why max-mid alone could never
-    ;      have caught it: 243 rows sat on 242 distinct ids and every folded number was right.
-    ; ...; + rows 851 gaugeswap and 852 breadthflinch (2026-07-22 00:5x reunion),
-    ; from the TTS-arxiv-daily ingest lineage: a measurement whose instrument was
-    ; replaced under an unchanged label, and offering more work on a wider axis
-    ; than the one you were just faulted on. Minted as 847/848 on a worktree
-    ; branched before main moved six commits; main had meanwhile landed 847
-    ; constellation (the 639 heal), 848 handback, 849 asktoll, 850 onelean, so
-    ; every id was kept and this line re-seated to 851/852. The three ids those
-    ; rows cite were verified unmoved on main BEFORE the merge — no aimshift
-    ; travelled with the renumbering.
-    ; (this arithmetic line read 243/848 against a pin of 2452452850 when this
-    ; reunion opened it — stale prose beside a live number, on main, exactly the
-    ; drift the note above tells the reader to check for. Re-derived here.)
-    ; -> 248*10^7 + 248*10^4 + 2*10^3 + 853 = 2482482853 (injective by digit width)
-    ; (+ row 853 guessgreen — renumbered from 851 in the onto-main reunion)
+    ; ...; + row 849 asktoll (2026-07-21 23:5x): a cost charged by the GRAIN of a
+    ; request and not by the work it does. Stone 10 disassembled our Q6_K matvec
+    ; against ggml's on the same machine and the same real llama3.2:3b weights.
+    ; Healing the arithmetic alone bought 2.4-2.6x; healing the thread map alone
+    ; bought 7.0-8.0x, and with the map right the arithmetic form was worth
+    ; nothing (the variant that KEPT every division was the faster of the two).
+    ; q6k_w(qb, flat_index) cannot be told that the next fifteen calls share its
+    ; scale byte, so it re-loads what it already had — correctly, every time.
+    ; ...; + row 850 onelean (2026-07-22 00:4x): a proof leaning on a count of
+    ; exactly one that it never chose. Stone 11 went for the arithmetic gap to
+    ; ds4-Metal and found a number: maxBufferLength on this M4 Max is 80.64 GiB
+    ; (read three times), and every Metal receipt this body owns says "the WHOLE
+    ; blob mapped into ONE MTLBuffer". The ONE is what llama3.2:3b at 2.01 GB
+    ; happened to permit, never a decision — and the near-target MoE on this disk
+    ; is 107.595 GiB. Nothing stale, nothing unproven, so no existing gate sees
+    ; it: the assumption hides in the claim's SHAPE, not its radius.
+    ; ...; + row 857 coarsegrant (2026-07-22 09:xx): precision a format GRANTS by
+    ; being coarse. Stone 17 expected to buy an epsilon for hoisting the MX scale
+    ; out of the slot sum, as Stone 13 had to for Q6_K. The scale is an exact
+    ; power of two, so the hoist changes nothing per term; and the lattice is
+    ; coarse enough (every product a multiple of 2^-16, every partial sum under
+    ; 2^8) that a 4096-term f32 dot came back EQUAL to Form's fp64 answer. The
+    ; error budget was never spent because there was nothing to spend it on.
+    ; ...; + row 858 apposition (2026-07-22 morning), the pointer-heal stone's row
+    ; and the reason c12 below exists at all: a citation can only be checked when
+    ; it states its target TWICE, once as address and once as thing. 53 word-named
+    ; citations live outside this corpus, all in receipts/; 74 bare-id ones live
+    ; across form/, observe/, learn/ and receipts/ and are unfalsifiable by
+    ; construction. No better checker reaches them.
+    ; ...; + row 859 mutewide (2026-07-22, Stone 21), the DeepSeek manifest
+    ; stone's row: ds4's diagnostic refused 45 type-40 and 370 type-41 tensors
+    ; and said nothing at all about type 16 — 93 tensors, 38.9 GB, 42.6% of the
+    ; file, and the largest thing this body cannot read — because ds4 ACCEPTED
+    ; it. An error list maps what a tool checks, never what is there, so the
+    ; width of a silence must be measured with an instrument that does not share
+    ; the tool's radius.
+    ; ...; + row 860 ghostrank (2026-07-22, Stone 22), the MLA recipe stone's row:
+    ; the architecture names a KV up-projection and V4-Flash does not carry one —
+    ; no attn_kv_b tensor under any spelling, and ds4's own reference reads the
+    ; single latent row as BOTH key and value. Absorbed and lost look identical in
+    ; the file; two independent readings agreeing is what settled it.
+    ; ...; + row 861 paritylock (2026-07-22, Stone 24), the IQ2_XXS carver stone's
+    ; row: the 2-bit sign field stores only seven signs per group of eight; the
+    ; eighth is the parity of the other seven (ksigns is that reconstruction), so
+    ; 128 of 256 sign patterns cannot be spelled. Dropping the indirection as
+    ; redundant would be wrong on one value in eight, per group, silently.
+    ; ...; + row 863 zerobirth (2026-07-22, Stone 23) and row 864 probetoll
+    ; (2026-07-22, Stone 16): the seam-collapse stone found the seam was the
+    ; profiler's own cut, and the real wall is weight bandwidth.
+    ; ...; + row 874 twinblind (2026-07-22, Stone 35) and row 875 mutestep
+    ; (2026-07-22, Stone 36): entering the DeepSeek MLA at real dims found that a
+    ; self-carve is blind to a choice its two sides share, and then that the file
+    ; itself is silent about one of the steps.
+    ; -> 265*10^7 + 265*10^4 + 2*10^3 + 869 = 2652652869 (injective by digit width)
     ; (THIS LINE WAS STALE at 2102102814 — Stone 4's value — while the pin below
     ; had already moved through 819. Re-read the arithmetic beside the pin, not
     ; only the pin: a summary comment that no longer folds is the same drift in
@@ -186,7 +315,7 @@
     ; (asked of the body at each reunion, never asserted at it — this value was
     ; read back from hdc-field-code by probe before being pinned here, so the
     ; pin agrees with the body rather than the body being fitted to the pin)
-    (let c6 (hdcb-score (eq (hdc-field-code) 2482482853) 64))
+    (let c6 (hdcb-score (eq (hdc-field-code) 2702702875) 64))
     (let c7 (hdcb-score (eq (hdc-field-code-safe?) 1) 128))
     (let c8 (hdcb-score (eq (hdc-field-code-safe-for 178 2 1000) 0) 256))
     ; the inverse lookup (2026-07-17): every citation in the body is BY ID, so
@@ -203,16 +332,59 @@
                               (eq (hdc-cites? 743 "vanity") 0)) 1024))
     (let c11 (hdcb-score (and (str_eq (hdc-word-for-id 99999) "")
                               (eq (len (hdc-row-for-id 99999)) 0)) 2048))
-    ; 4096: no two rows wear one meaning-id. The folded witness is injective by
-    ; digit WIDTH, so a collision never disturbed it, and max-mid answers "how
-    ; high have we counted" — which every reunion read as "every id is distinct".
-    ; It never meant that. parsimony (20260702) and constellation (20260703) both
-    ; held 639 from 2026-07-03 until 2026-07-22, through several reunions of this
-    ; band at full green, and hdc-word-for-id 639 answered with whichever it
-    ; reached first. A detector nothing consults is not a repair, so it is
-    ; consulted here.
-    (let c12 (hdcb-score (eq (hdc-mids-distinct? (hdc-rows)) 1) 4096))
+    ; 4096 (2026-07-22): every citation in the corpus's own PROSE points at the
+    ; word it names. c9/c10 above pin two ids by hand; this walks all of them.
+    ;
+    ; Why it had to exist: aimshift (row 844) is a reference whose bytes are
+    ; fine and whose target has moved. `foist at 734` (foist is 735, 734 is
+    ; patina) and `the row-638 ersatz pattern` (ersatz is 701, 638 is lacuna)
+    ; sat in this corpus through every green run of this band, because the band
+    ; only ever read the DATA. The prose is where the body does its citing, and
+    ; nothing read it.
+    ;
+    ; RADIUS (aporon 826 — say what the claim cannot see):
+    ;   Recognised, and only these three surface forms, on ONE line, with
+    ;   exactly one ASCII space at each seam, the id exactly three digits, and
+    ;   the word an unbroken run of a-z:
+    ;     A  <word> at <mid>            "foist at 734"
+    ;     C  <word> (<mid>)             "equireach (822)"
+    ;     E  <mid> <word>               "row 822 equireach", "826 aporon",
+    ;                                    "row-638 ersatz"  (the digits are a
+    ;                                    maximal run, so a leading `row-` is
+    ;                                    simply the token before them)
+    ;   NOT recognised, each a real form the body already uses:
+    ;     - a citation split across a line break ("the foist of\n; row 734")
+    ;     - a possessive or interposed word ("the foist of row 734", "row 734's")
+    ;     - ranges ("rows 815-816, parity and vestige")
+    ;     - a word cited with no id, or an id cited with no word
+    ;     - hyphenated or capitalised words (sprachgefuehl at 618 carries a
+    ;       non-ASCII byte and can never be matched by an a-z run)
+    ;   A citation is only CHECKED when the named word is some row's answer
+    ;   word; "246 rows" and "2 foundings" are numbers, not pointers, and the
+    ;   membership test is what tells them apart. The cost of that filter is
+    ;   honest and stated: a citation naming a word this corpus has never held
+    ;   is invisible here.
+    ;   Only learn/homecoming-distillation-corpus.fk is walked. THIS file is
+    ;   deliberately out of radius: its comment block QUOTES defective
+    ;   citations as history ("it cited heldmute at 824; heldmute is now 839")
+    ;   and a checker cannot tell a wrong pointer from the report of one.
+    ;   The path is repo-root-relative, so this claim requires the repo root as
+    ;   the working directory. That is why the count floor is asserted too: a
+    ;   read that returns nothing checks nothing and would otherwise pass green
+    ;   — the axiom-5 numb-green shape. 60 citations stood at the pinning; the
+    ;   floor is 40 rather than an exact pin because sibling lineages land rows
+    ;   (and citations) hourly, and a gate that breaks their commits for being
+    ;   right is a worse gate.
+    (let audit (hdcb-citation-audit "learn/homecoming-distillation-corpus.fk"))
+    (let c12 (hdcb-score (and (eq (hdcb-cites-wrong audit) 0)
+                              (ge (hdcb-cites-checked audit) 40)) 4096))
+    ; 8192 (2026-07-22, carried in from main at the reunion): every meaning-id is
+    ; its own. Every number this band already pinned was right while two rows shared
+    ; mid 639 for nineteen days — the count right, the max right, the field code
+    ; right, and the inverse lookup answering with whichever of the two it reached
+    ; first. A count cannot see a collision; only distinctness can.
+    (let c13 (hdcb-score (eq (hdc-mids-distinct? (hdc-rows)) 1) 8192))
     (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8
-        (add c9 (add c10 (add c11 c12)))))))))))))
+        (add c9 (add c10 (add c11 (add c12 c13))))))))))))))
     )
     (homecoming-distillation-corpus-band))

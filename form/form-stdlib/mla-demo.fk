@@ -1,0 +1,112 @@
+; mla-demo.fk — the ONE toy MLA fixture, shared by the read-back band (mla-msl-band.fk) and the GPU
+; witness (metal_mla_gpu.sh), plus the reference printers that hand the carrier the fp64 recipe answers.
+;
+; The fixture is exactly mla-attn-band.fk's (E=4, R=3, nh=2, hd=4, nrot=2, ng=2, three positions, the
+; same invented weights), so the GPU witness and the CPU band judge the SAME numbers the CPU recipe was
+; proven on. One source of truth: if the toy example ever changes it changes here, in one place.
+;
+; The printers below are the carrier's whole diet. `mld-emit-all` prints, with section markers a Swift
+; runner parses: the config scalars, the pair frequencies (rope-freq-theta), every weight matrix
+; flattened row-major, the three inputs, the three fp64 CACHE ROWS and BLOCK OUTPUTS, and — for the
+; distant case x2/pos2 (snugcause: a layout that fits position 0 is tested far away, and pos 2 exercises
+; RoPE, which is the identity at pos 0, hushfold) — every intermediate STAGE output, so the GPU can be
+; judged stage by stage and not only end to end (a transposed offset that survives an end-to-end compare
+; shows at the stage that carries it — the q6k-msl.fk read-back lesson).
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk form-stdlib/mla-msl.fk
+
+(do
+    ; ---- the fixture (identical to mla-attn-band.fk) ----
+    (defn mld-eps () 0.00001)
+    (defn mld-base () 10000.0)
+    (defn mld-nh () 2) (defn mld-hd () 4) (defn mld-nrot () 2) (defn mld-ng () 2)
+    (defn mld-e () 4) (defn mld-r () 3)
+    (defn mld-c () (mla-cfg (mld-nh) (mld-hd) (mld-nrot) (mld-ng) (mld-base) (mld-eps)))
+
+    (defn mld-an () (list 1.0 1.0 1.0 1.0))
+    (defn mld-wqa () (list (list 0.1 -0.2 0.3 0.4) (list -0.5 0.6 0.1 -0.2) (list 0.2 0.3 -0.4 0.5)))
+    (defn mld-gqa () (list 1.0 1.0 1.0))
+    (defn mld-wqb () (list (list 0.2 -0.1 0.4) (list 0.5 0.3 -0.2) (list -0.3 0.6 0.1) (list 0.1 0.2 0.3)
+                           (list 0.4 -0.5 0.2) (list -0.1 0.3 0.5) (list 0.6 0.1 -0.4) (list 0.2 -0.3 0.1)))
+    (defn mld-wkv () (list (list 0.3 0.1 -0.2 0.5) (list -0.4 0.2 0.6 0.1)
+                           (list 0.2 -0.5 0.3 -0.1) (list 0.1 0.4 -0.3 0.2)))
+    (defn mld-gkv () (list 1.0 1.0 1.0 1.0))
+    (defn mld-was () (list (list (list 0.1 0.2 -0.3 0.4) (list 0.5 -0.1 0.2 0.3))
+                           (list (list -0.2 0.4 0.1 -0.5) (list 0.3 0.2 -0.4 0.1))))
+    (defn mld-wb () (list (list 0.2 -0.3 0.4 0.1) (list -0.1 0.5 0.2 -0.4)
+                          (list 0.3 0.1 -0.2 0.5) (list 0.4 -0.2 0.1 0.3)))
+    (defn mld-sinks () (list 0.0 0.5))
+    (defn mld-w () (mla-w (mld-an) (mld-wqa) (mld-gqa) (mld-wqb) (mld-wkv) (mld-gkv) (mld-was) (mld-wb) (mld-sinks)))
+
+    (defn mld-x0 () (list 0.5 -0.3 0.9 0.2))
+    (defn mld-x1 () (list -0.4 0.7 -0.1 0.6))
+    (defn mld-x2 () (list 0.2 0.1 -0.8 0.4))
+
+    (defn mld-grank () 2)                                  ; each group's output rank (was[g] is grank x gdim)
+    (defn mld-gdim () (mul (div (mld-nh) (mld-ng)) (mld-hd)))   ; = (nh/ng)*hd
+    (defn mld-ncat () (mul (mld-ng) (mld-grank)))          ; concatenated rank width = wb's cols
+
+    ; ---- the pair frequencies base^(-2k/nrot), the body's rope-freq-theta at hd=2k, HD=nrot ----
+    (defn mld-freqs-walk (k npair)
+        (if (eq k npair) (empty)
+            (cons (rope-freq-theta (mld-base) (mul 2 k) (mld-nrot)) (mld-freqs-walk (add k 1) npair))))
+    (defn mld-freqs () (mld-freqs-walk 0 (div (mld-nrot) 2)))
+
+    ; ---- the scale, 1/sqrt(hd) ----
+    (defn mld-scale () (mla-scale (mld-c)))
+
+    ; ---- fp64 references ----
+    (defn mld-r0 () (mla-cache-row (mld-w) (mld-c) (mld-x0) 0))
+    (defn mld-r1 () (mla-cache-row (mld-w) (mld-c) (mld-x1) 1))
+    (defn mld-r2 () (mla-cache-row (mld-w) (mld-c) (mld-x2) 2))
+    (defn mld-rows () (list (mld-r0) (mld-r1) (mld-r2)))
+    (defn mld-o0 () (mla-block-one (mld-w) (mld-c) (mld-x0) 0 (list (mld-r0))))
+    (defn mld-o1 () (mla-block-one (mld-w) (mld-c) (mld-x1) 1 (list (mld-r0) (mld-r1))))
+    (defn mld-o2 () (mla-block-one (mld-w) (mld-c) (mld-x2) 2 (list (mld-r0) (mld-r1) (mld-r2))))
+
+    ; ---- the block STAGE intermediates for x2 at pos 2 (the distant, RoPE-exercising case) ----
+    (defn mld-n2 () (mla-pre (mld-w) (mld-c) (mld-x2)))
+    (defn mld-qr2 () (tb-matvec (mld-wqa) (mld-n2)))
+    (defn mld-qrn2 () (ln-rmsnorm (mld-qr2) (mld-gqa) (mld-eps)))
+    (defn mld-qb2 () (tb-matvec (mld-wqb) (mld-qrn2)))
+    (defn mld-qh2 () (mla-head-rms (mld-qb2) 0 (mld-nh) (mld-hd) (mld-eps)))
+    (defn mld-q2 () (mla-rope-heads (mld-qh2) 0 (mld-nh) (mld-hd) (mld-nrot) 2 (mld-base) 1.0))
+    (defn mld-heads2 () (mla-attn-heads (mld-q2) (mld-rows) 0 (mld-nh) (mld-hd) (mld-scale) (mld-sinks)))
+    (defn mld-back2 () (mla-rope-heads (mld-heads2) 0 (mld-nh) (mld-hd) (mld-nrot) 2 (mld-base) -1.0))
+    ; the cache-row stage intermediates for x2 at pos 2
+    (defn mld-craw2 () (tb-matvec (mld-wkv) (mld-n2)))
+    (defn mld-ckv2 () (ln-rmsnorm (mld-craw2) (mld-gkv) (mld-eps)))
+
+    ; ================= the printers =================
+    (defn mld-plist (xs) (if (eq (len xs) 0) (print "ENDVEC") (do (print (head xs)) (mld-plist (tail xs)))))
+    (defn mld-vec (name xs) (do (print (str_concat "VEC " name)) (mld-plist xs)))
+    (defn mld-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (mld-flat (tail rows)))))
+    (defn mld-mat (name rows) (mld-vec name (mld-flat rows)))
+    ; was is a list of matrices; flatten each and concat
+    (defn mld-was-flat (ms) (if (eq (len ms) 0) (empty) (tb-cat (mld-flat (head ms)) (mld-was-flat (tail ms)))))
+    (defn mld-scalar (name v) (do (print (str_concat "SCALAR " name)) (print v)))
+
+    (defn mld-emit-all ()
+        (do
+            (print "MLADEMO")
+            (mld-scalar "E" (mld-e)) (mld-scalar "R" (mld-r))
+            (mld-scalar "nh" (mld-nh)) (mld-scalar "hd" (mld-hd))
+            (mld-scalar "nrot" (mld-nrot)) (mld-scalar "ng" (mld-ng))
+            (mld-scalar "grank" (mld-grank)) (mld-scalar "gdim" (mld-gdim)) (mld-scalar "ncat" (mld-ncat))
+            (mld-scalar "eps" (mld-eps)) (mld-scalar "base" (mld-base)) (mld-scalar "scale" (mld-scale))
+            (mld-vec "freqs" (mld-freqs))
+            (mld-vec "an" (mld-an)) (mld-vec "gqa" (mld-gqa)) (mld-vec "gkv" (mld-gkv)) (mld-vec "sinks" (mld-sinks))
+            (mld-mat "wqa" (mld-wqa)) (mld-mat "wqb" (mld-wqb)) (mld-mat "wkv" (mld-wkv)) (mld-mat "wb" (mld-wb))
+            (mld-vec "was" (mld-was-flat (mld-was)))
+            (mld-vec "x0" (mld-x0)) (mld-vec "x1" (mld-x1)) (mld-vec "x2" (mld-x2))
+            (mld-vec "r0" (mld-r0)) (mld-vec "r1" (mld-r1)) (mld-vec "r2" (mld-r2))
+            (mld-vec "o0" (mld-o0)) (mld-vec "o1" (mld-o1)) (mld-vec "o2" (mld-o2))
+            ; stage refs for x2/pos2
+            (mld-vec "n2" (mld-n2))
+            (mld-vec "craw2" (mld-craw2)) (mld-vec "ckv2" (mld-ckv2))
+            (mld-vec "qr2" (mld-qr2)) (mld-vec "qrn2" (mld-qrn2)) (mld-vec "qb2" (mld-qb2))
+            (mld-vec "qh2" (mld-qh2)) (mld-vec "q2" (mld-q2))
+            (mld-vec "heads2" (mld-heads2)) (mld-vec "back2" (mld-back2))
+            (print "END")
+            0))
+    0)

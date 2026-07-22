@@ -1,0 +1,198 @@
+; gguf-manifest.fk — the WHOLE header of a GGUF, read once and spoken flat.
+;
+; WHY THIS EXISTS, next to two cells that already walk this header. `equireach-gguf.fk` walks the
+; header to SKIP it (it wants one named tensor). `gguf-meta.fk` walks it to ASK it (it wants one named
+; key). `native/metal/mx-residency.fk` walks it to bind two types (40 and 41) and prints only those
+; rows. None of the three can answer "what is IN this file" — which is the only question a body asks
+; of a model it has never met. This cell is the same walk with nothing filtered: EVERY metadata KV by
+; its own key, and EVERY tensor row, whatever its type.
+;
+; THE ONE RULE IT KEEPS. A row it cannot price prints `bytes 0` and its type id, never a guessed
+; length. The body's pricing radius is exactly the types it has a carver for — 0 (F32), 1 (F16),
+; 12 (Q4_K), 14 (Q6_K), 8 (Q8_0), 26 (I32), 16 (IQ2_XXS), 40 (MXFP4 plane-split), 41 (MXFP8
+; plane-split). Anything else is a NAMED GAP in the stream itself, so a reader counting types never
+; has to distinguish "priced 0" from "unknown".
+;
+; SLICES, and why every row carries `nel` and `slices` separately. For the plane-split types the byte
+; length cannot be computed from the weight count alone: an expert tensor of 4096 x 2048 x 256 is 256
+; plane PAIRS, not one, and pricing it as one reads 255 experts' payload as exponents. This is
+; mx-residency.fk's finding, reused here rather than re-derived. For the block types the third
+; dimension is just more blocks and the distinction is invisible — so it is printed either way and
+; the reader decides.
+;
+; THE KV STREAM, and its radius. Every KV prints its key and its GGUF value type. A value is RENDERED
+; only for the types this body can render faithfully: the fixed-width integers (0-5, 7, 10, 11) as
+; unsigned little-endian magnitudes, f32 (6) through f16-decode's own (8,23) decoder, and string (8)
+; as ASCII. `i64`/`i32`/`i16`/`i8` are printed UNSIGNED and marked `u`, because this body has no
+; two's-complement reader and a silently sign-flipped hyper-parameter is worse than an unrendered one.
+; f64 (12) and arrays (9) print their shape, not their contents: an array is `KVARR <etype> <count>`,
+; which is what a caller needs to decide whether the tokenizer is in this file at all. Reading 129 280
+; token strings is `gmt-token-*`'s job and costs one linear walk; it does not belong in a manifest.
+;
+; THE MOUTH IS THE GO KERNEL, for `gm-emit-manifest`'s float lines: `print` renders a float at full
+; precision and fkwu's int_to_str cannot render a float at all. That is q6k-device-tile.fk's note and
+; it is still true.
+;
+; Kin: equireach-gguf.fk (egg-* — every offset rule below is its), gguf-meta.fk (gmt-* — the KV
+; record's own field layout), mxfp4-plane-dequant.fk / mxfp8-plane-dequant.fk (the plane geometry
+; the two unpriceable-elsewhere types are priced by), native/metal/mx-residency.fk (the type-40/41
+; twin of the table half of this stream).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/mxfp4-plane-dequant.fk form-stdlib/mxfp8-plane-dequant.fk
+;
+; Proven by: form-stdlib/tests/gguf-manifest-band.fk (the pricing arithmetic, fixture-free).
+
+(do
+    (defn gm-window () 8000000)
+    (defn gm-alignment () 32)
+    (defn gm-line (s) (print s))
+
+    ; ================= pricing: bytes per SLICE of n elements, by ggml type =================
+    ; block types: (block-bytes * n) / block-elems, written so the division is exact for legal n.
+    (defn gm-blk (n be bb) (mul (div n be) bb))
+    (defn gm-slice-bytes (t n)
+        (if (eq t 0)  (mul n 4)                     ; F32
+        (if (eq t 1)  (mul n 2)                     ; F16
+        (if (eq t 8)  (gm-blk n 32 34)              ; Q8_0   32 el / 34 B
+        (if (eq t 12) (gm-blk n 256 144)            ; Q4_K  256 el / 144 B
+        (if (eq t 14) (gm-blk n 256 210)            ; Q6_K  256 el / 210 B
+        (if (eq t 16) (gm-blk n 256 66)             ; IQ2_XXS 256 el / 66 B
+        (if (eq t 26) (mul n 4)                     ; I32
+        (if (eq t 40) (mxp4-slice-bytes n)          ; MXFP4, plane-split
+        (if (eq t 41) (mxp8-slice-bytes n)          ; MXFP8, plane-split
+            0)))))))))) ; unknown: 0, never a guess
+
+    (defn gm-priced? (t)
+        (if (eq t 0) 1 (if (eq t 1) 1 (if (eq t 8) 1 (if (eq t 12) 1 (if (eq t 14) 1
+        (if (eq t 16) 1 (if (eq t 26) 1 (if (eq t 40) 1 (if (eq t 41) 1 0))))))))))
+
+    ; ================= the tensor table, every row =================
+    (defn gm-name   (src off) (substring src (add off 8) (add (add off 8) (egg-ti-namelen src off))))
+    (defn gm-dimk   (src off k) (if (gt (egg-ti-ndims src off) k) (egg-ti-dim src off k) 1))
+    (defn gm-nel    (src off) (mul (egg-ti-dim0 src off) (gm-dimk src off 1)))
+    (defn gm-slices (src off) (mul (gm-dimk src off 2) (gm-dimk src off 3)))
+    (defn gm-bytes  (src off)
+        (mul (gm-slices src off) (gm-slice-bytes (egg-ti-type src off) (gm-nel src off))))
+
+    (defn gm-trow (src off base)
+        (gm-line (str_concat "T "
+            (str_concat (gm-name src off)
+            (str_concat " " (str_concat (int_to_str (egg-ti-type src off))
+            (str_concat " " (str_concat (int_to_str (egg-ti-ndims src off))
+            (str_concat " " (str_concat (int_to_str (egg-ti-dim0 src off))
+            (str_concat " " (str_concat (int_to_str (gm-dimk src off 1))
+            (str_concat " " (str_concat (int_to_str (gm-dimk src off 2))
+            (str_concat " " (str_concat (int_to_str (add base (egg-ti-dataoff src off)))
+            (str_concat " " (str_concat (int_to_str (gm-nel src off))
+            (str_concat " " (str_concat (int_to_str (gm-slices src off))
+            (str_concat " " (int_to_str (gm-bytes src off)))))))))))))))))))))))
+
+    (defn gm-trows (src off n base)
+        (if (eq n 0) 0
+            (do (gm-trow src off base)
+                (gm-trows src (egg-ti-next src off) (sub n 1) base))))
+
+    ; ================= the KV block, every record =================
+    (defn gm-key (src off) (substring src (add off 8) (add (add off 8) (gmt-key-len src off))))
+
+    ; an unsigned little-endian magnitude of the type's own width. Signed types print here too, and
+    ; the stream marks them `u` so no reader mistakes the rendering for a two's-complement read.
+    (defn gm-int (src off t) (eqr-le src (gmt-valoff src off) (egg-vtype-size t)))
+    (defn gm-intish? (t)
+        (if (lt t 6) 1 (if (eq t 7) 1 (if (eq t 10) 1 (if (eq t 11) 1 0)))))
+
+    (defn gm-kv-head (src off i)
+        (str_concat "KV " (str_concat (int_to_str i)
+        (str_concat " " (str_concat (int_to_str (gmt-vtype src off))
+        (str_concat " " (gm-key src off)))))))
+
+    (defn gm-kv-value (src off)
+        (do
+            (let t (gmt-vtype src off))
+            (if (eq t 9)
+                (gm-line (str_concat "  KVARR " (str_concat (int_to_str (gmt-arr-etype src off))
+                          (str_concat " " (int_to_str (gmt-arr-count src off))))))
+                (if (eq t 8)
+                    (gm-line (str_concat "  KVSTR " (substring src (add (gmt-valoff src off) 8)
+                              (add (add (gmt-valoff src off) 8) (egg-u64 src (gmt-valoff src off))))))
+                    (if (eq t 6)
+                        (do (print "  KVF32") (print (ewl-f32 src (gmt-valoff src off))))
+                        (if (eq (gm-intish? t) 1)
+                            (gm-line (str_concat "  KVINT u " (int_to_str (gm-int src off t))))
+                            (gm-line "  KVRAW (this body renders no value of this GGUF type)")))))))
+
+    (defn gm-kvs (src off n i)
+        (if (eq n 0) off
+            (do (gm-line (gm-kv-head src off i))
+                (gm-kv-value src off)
+                (gm-kvs src (egg-kv-next src off) (sub n 1) (add i 1)))))
+
+    ; ================= the whole stream =================
+    ; MAGICOK 1 is the file's own four bytes, checked before one offset below it is believed.
+    (defn gm-emit-manifest (path)
+        (do
+            (let src (eqr-of-file path 0 (gm-window)))
+            (gm-line (str_concat "MAGICOK " (int_to_str (egg-magic-ok? src))))
+            (gm-line (str_concat "VERSION " (int_to_str (egg-version src))))
+            (gm-line (str_concat "NTENSORS " (int_to_str (egg-tensor-count src))))
+            (gm-line (str_concat "NKV " (int_to_str (egg-kv-count src))))
+            (gm-kvs src 24 (egg-kv-count src) 0)
+            (gm-line (str_concat "TINFOSTART " (int_to_str (egg-tinfo-start src))))
+            (gm-line (str_concat "TINFOEND " (int_to_str (egg-tinfo-end src))))
+            (let base (egg-data-base src (gm-alignment)))
+            (gm-line (str_concat "DATABASE " (int_to_str base)))
+            (gm-trows src (egg-tinfo-start src) (egg-tensor-count src) base)
+            (gm-line "END")
+            0))
+
+    ; ================= one named array, element by element =================
+    ; The manifest prints an array's SHAPE, never its contents — reading 129 280 token strings does
+    ; not belong in a manifest. But a handful of this file's arrays ARE hyper-parameters wearing an
+    ; array's clothes: deepseek4.attention.compress_ratios (44 i32, one per layer plus one),
+    ; reap.layer.keep_count (43 i32), deepseek4.swiglu_clamp_exp (43 f32). A recipe that has to guess
+    ; a per-layer constant is a recipe that will be fluently wrong. So this is the SAME walk, asked
+    ; for one key, printing the fixed-width elements it can render faithfully and refusing the rest.
+    ;
+    ; RADIUS. Fixed-width element types only. Integer element types print UNSIGNED and marked `u`, for
+    ; gm-int's own reason: this body has no two's-complement reader, and a silently sign-flipped
+    ; per-layer constant is worse than an unrendered one. f32 (6) goes through f16-decode's (8,23).
+    ; A variable-width element type (string, 8) prints its count and nothing else — gmt-arr-elem walks
+    ; those linearly and a whole-array walk of 129 280 of them is a vocabulary, not a manifest row.
+    (defn gm-arr-elem-off (src off i) (add (gmt-arr-first src off) (mul i (egg-vtype-size (gmt-arr-etype src off)))))
+    (defn gm-arr-line (src off et i)
+        (if (eq et 6)
+            (do (print "  A") (print (ewl-f32 src (gm-arr-elem-off src off i))))
+            (gm-line (str_concat "  A u " (int_to_str (eqr-le src (gm-arr-elem-off src off i) (egg-vtype-size et)))))))
+    (defn gm-arr-loop (src off et i n)
+        (if (eq i n) 0 (do (gm-arr-line src off et i) (gm-arr-loop src off et (add i 1) n))))
+
+    (defn gm-emit-array (path key)
+        (do
+            (let src (eqr-of-file path 0 (gm-window)))
+            (let off (gmt-find src key))
+            (if (eq off (gmt-absent))
+                (do (gm-line (str_concat "ABSENT " key)) 0)
+                (if (eq (gmt-vtype src off) 9)
+                    (do
+                        (let et (gmt-arr-etype src off))
+                        (let n  (gmt-arr-count src off))
+                        (gm-line (str_concat "ARR " (str_concat key
+                                  (str_concat " " (str_concat (int_to_str et)
+                                  (str_concat " " (int_to_str n)))))))
+                        (if (eq (gm-intish? et) 1) (gm-arr-loop src off et 0 n)
+                            (if (eq et 6) (gm-arr-loop src off et 0 n)
+                                (gm-line "  (this body renders no element of this GGUF type)")))
+                        (gm-line "END")
+                        0)
+                    (do (gm-line (str_concat "NOTARRAY " key)) 0)))))
+
+    ; the KV half alone — cheap (no tensor walk), for a caller that only wants the config
+    (defn gm-emit-kvs (path)
+        (do
+            (let src (eqr-of-file path 0 (gm-window)))
+            (gm-line (str_concat "NKV " (int_to_str (egg-kv-count src))))
+            (gm-kvs src 24 (egg-kv-count src) 0)
+            (gm-line "END")
+            0))
+
+    0)
