@@ -79,6 +79,16 @@ ARTIFACT="$STAGE/answer.txt"
 # The cold first measurement, 634.79 tok/s over 36 prompt tokens, is the only one that measures what
 # the name says. A benchmark that took the warm number would have overstated the world's prefill by
 # 8.7x and made our gap look far worse than it is.
+#
+# AND A DENOMINATOR MEASURED ON ANOTHER DAY IS A DENOMINATOR FROM ANOTHER MACHINE. Re-derived
+# 2026-07-22 19:12 WITA on this same host, same model, same blob, three runs: 4.62 / 6.91 / 8.34
+# tok/s — a factor of TWENTY below the figure below, because two sibling agents held 87 GB of other
+# models resident and the load average was 31. Our own lane measured 3.2 / 3.2 / 9.5 tok/s in the
+# same minutes. Neither of those pairs measures a kernel; both measure a contended machine, and the
+# ratio between them is the only thing in that window worth anything.
+# The constant below therefore carries its DATE everywhere it is quoted, so no receipt can imply it
+# was taken beside the number it is dividing. Re-derive it before believing any `behind_milli`.
+WORLD_MEASURED_ON="${FORM_WORLD_MEASURED_ON:-2026-07-21}"
 WORLD_DECODE_TOKPS_MILLI="${FORM_WORLD_DECODE_TOKPS_MILLI:-158449}"
 WORLD_PREFILL_TOKPS_MILLI="${FORM_WORLD_PREFILL_TOKPS_MILLI:-634790}"
 
@@ -356,6 +366,8 @@ printf '(adc-emit-receipt %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s)\n' \
   echo "CTX answer_latency_us $(( ENCODE_US + PREFILL_US + DECODE_US )) (encode + prefill + decode, in-process, one clock)"
   echo "CTX end_to_end_tokps_milli $E2E_TOKPS_MILLI"
   echo "CTX world_prefill_tokps_milli_cold $WORLD_PREFILL_TOKPS_MILLI"
+  echo "CTX world_denominator_measured_on $WORLD_MEASURED_ON (NOT re-derived beside this run; a rate from another day is a rate from another machine — re-derive before believing any behind_milli above)"
+  echo "CTX host_load_at_run $(uptime | sed -E 's/.*load averages?: //')"
   echo "CTX token_ids $IDS"
 } >> "$work/receipt.txt"
 
