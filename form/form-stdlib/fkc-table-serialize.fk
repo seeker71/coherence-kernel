@@ -317,10 +317,26 @@
 (defn fkc-needs-melt (hp cap) (if (ge (mul hp 100) (mul cap (fkc-melt-water-pct))) 1 0))
 (defn fkc-next-capacity (live cap) (if (gt (mul live 2) cap) (mul cap 2) cap))
 
+; fk_list_len — `len`'s one body (tag 22 in the slow walker AND state 221 in the walker VM both
+; route here). The `(v & 1) == 0` line is the whole difference between a length and a guess.
+;
+; fkwu's words carry no type: an int is `n << 1`, an interned string is `poolidx << 1`, a cons cell
+; is `(hp << 1) | 1`. Only the low bit tells a list from everything else. Without that first line
+; the walk took ANY even word — an int, a string handle — shifted it, and followed fk_ht from there,
+; so `(len 8)` answered the length of whatever chain sat at heap slot 4 and `(len "hello")` answered
+; the chain at the string's pool index. Probed four-way with 40 live cons cells on the heap:
+; go/rust/ts said 0 / 0 / 5, fkwu said 2 / 4 — and it MEMOIZED the guess into fk_lc, so the next
+; caller inherited it. The old answers were not merely divergent, they were heap-state-dependent:
+; the same expression on an empty heap answered 0, which is why `(nil? 5)` looked four-way-agreed.
+;
+; With the guard, every non-list answers 0 deterministically — which is what go, rust and ts answer
+; for every non-list EXCEPT a string, where they return its byte length. That last gap does not
+; close here and cannot: seeing a string in a value position needs a tag fkwu's words do not carry.
+; `len`, and `nil?` on top of it, are LIST cells. See core.fk's note at `nil?`.
 (defn fkc-arena-init-text ()
     (str_concat "static long long *fk_lc; static long long *fk_nlc; static void fk_vfail(void); static void fk_arena(void) { fk_cap = "
     (str_concat (int_to_str (fkc-arena-capacity))
-                "; fk_hh = malloc(fk_cap * 8); fk_ht = malloc(fk_cap * 8); fk_lc = calloc(fk_cap, 8); if (fk_hh == 0 || fk_ht == 0 || fk_lc == 0) { fk_vfail(); } fk_hh[0] = 1; fk_ht[0] = 1; } static long long fk_list_len(long long v) { long long root = v >> 1; if (root < 1 || root > fk_hp) { return 0; } if (fk_lc[root] > 0) { return fk_lc[root]; } long long p = root; long long n = 0; while (p >= 1 && p <= fk_hp) { if (fk_lc[p] > 0) { n = n + fk_lc[p]; break; } n = n + 1; p = fk_ht[p] >> 1; } fk_lc[root] = n; return n; } ")))
+                "; fk_hh = malloc(fk_cap * 8); fk_ht = malloc(fk_cap * 8); fk_lc = calloc(fk_cap, 8); if (fk_hh == 0 || fk_ht == 0 || fk_lc == 0) { fk_vfail(); } fk_hh[0] = 1; fk_ht[0] = 1; } static long long fk_list_len(long long v) { if ((v & 1) == 0) { return 0; } long long root = v >> 1; if (root < 1 || root > fk_hp) { return 0; }if (fk_lc[root] > 0) { return fk_lc[root]; } long long p = root; long long n = 0; while (p >= 1 && p <= fk_hp) { if (fk_lc[p] > 0) { n = n + fk_lc[p]; break; } n = n + 1; p = fk_ht[p] >> 1; } fk_lc[root] = n; return n; } ")))
 
 (defn fkc-melt-walk-text ()
     "static long long *fk_fw; static long long *fk_nh; static long long *fk_nt; static long long fk_nhp; static void fk_mw(long long v) { char b[32]; long long n = 0; if (v == 0) { b[0] = 48; n = 1; } while (v > 0) { b[n] = 48 + v % 10; v = v / 10; n = n + 1; } while (n > 0) { n = n - 1; write(2, b + n, 1); } } static void fk_mc(long long c) { char b = c; write(2, &b, 1); } static long long fk_mlive(long long b) { if ((b & 1) == 0) { return 0; } long long p = b >> 1; if (p < 1 || p > fk_hp) { return 0; } if (fk_fw[p] != 0) { return 0; } fk_fw[p] = 0 - 1; return 1 + fk_mlive(fk_ht[p]) + fk_mlive(fk_hh[p]); } static long long fk_mcopy(long long b) { if ((b & 1) == 0) { return b; } long long p = b >> 1; if (p < 1 || p > fk_hp) { return b; } if (fk_fw[p] > 0) { return (fk_fw[p] << 1) | 1; } long long t2 = fk_mcopy(fk_ht[p]); long long h2 = fk_mcopy(fk_hh[p]); fk_nhp = fk_nhp + 1; fk_nh[fk_nhp] = h2; fk_nt[fk_nhp] = t2; fk_fw[p] = fk_nhp; return (fk_nhp << 1) | 1; } ")
