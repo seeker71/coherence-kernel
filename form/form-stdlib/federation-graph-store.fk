@@ -1,0 +1,108 @@
+; federation-graph-store.fk — durable native federation graph.
+;
+; The host may carry bytes, but Form owns canonical identity, graph composition,
+; persistence indexes, traversal, and the axiom-5 acknowledgement. The same
+; recipe runs over memory and the segmented file carrier.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/form-ontology-loader.fk form-stdlib/offer-ack-core.fk form-stdlib/federation-graph-offer.fk form-stdlib/storage-port.fk
+(do
+    (defn fgs-bytes-loop (s i)
+        (if (eq i (str_len s)) (empty)
+            (cons (ord (char_at s i)) (fgs-bytes-loop s (add i 1)))))
+    (defn fgs-bytes (s) (fgs-bytes-loop s 0))
+    (defn fgs-field (s) (str_concat (int_to_str (str_len s)) (str_concat ":" s)))
+    (defn fgs-canonical (from-node to-node kind text payload timestamp)
+        (str_concat "federation-message-v1|"
+          (str_concat (fgs-field from-node)
+          (str_concat (fgs-field to-node)
+          (str_concat (fgs-field kind)
+          (str_concat (fgs-field text)
+          (str_concat (fgs-field payload) (fgs-field timestamp))))))))
+    (defn fgs-message-id (from-node to-node kind text payload timestamp)
+        (str_concat "msg_" (hex-encode (sha256
+            (fgs-bytes (fgs-canonical from-node to-node kind text payload timestamp))))))
+
+    (defn fgs-message-key (id) (str_concat "federation/message/" id))
+    (defn fgs-edge-key (id) (str_concat "federation/edge/" id))
+    (defn fgs-in-key (node) (str_concat "federation/index/in/" node))
+    (defn fgs-out-key (node) (str_concat "federation/index/out/" node))
+    (defn fgs-broadcast-key () "federation/index/broadcast")
+    (defn fgs-count-key () "federation/count")
+
+    (defn fgs-envelope (id from-node to-node kind text payload timestamp)
+        (str_concat "id=" (str_concat id
+        (str_concat "\nfrom_node=" (str_concat from-node
+        (str_concat "\nto_node=" (str_concat to-node
+        (str_concat "\ntype=" (str_concat kind
+        (str_concat "\ntext=" (str_concat text
+        (str_concat "\npayload=" (str_concat payload
+        (str_concat "\ntimestamp=" timestamp))))))))))))))
+    (defn fgs-edge-value (id from-node to-node)
+        (str_concat "from=" (str_concat from-node
+          (str_concat "\nto=" (str_concat to-node (str_concat "\nmessage=" id))))))
+
+    (defn fgs-index-text (carrier store key)
+        (do (let got (storage-get carrier store key))
+            (if (eq (storage-found? got) 1) (storage-value got) "\n")))
+    (defn fgs-match-at? (s needle i j)
+        (if (eq j (str_len needle)) 1
+            (if (ge (add i j) (str_len s)) 0
+                (if (str_eq (char_at s (add i j)) (char_at needle j))
+                    (fgs-match-at? s needle i (add j 1)) 0))))
+    (defn fgs-contains-loop? (s needle i)
+        (if (gt i (sub (str_len s) (str_len needle))) 0
+            (if (eq (fgs-match-at? s needle i 0) 1) 1
+                (fgs-contains-loop? s needle (add i 1)))))
+    (defn fgs-index-has? (text id)
+        (fgs-contains-loop? text (str_concat "\n" (str_concat id "\n")) 0))
+    (defn fgs-index-add (carrier store key id)
+        (do (let text (fgs-index-text carrier store key))
+            (if (eq (fgs-index-has? text id) 1) store
+                (storage-put carrier store key (str_concat text (str_concat id "\n"))))))
+    (defn fgs-lines-loop (s i cur acc)
+        (if (eq i (str_len s))
+            (reverse (if (str_eq cur "") acc (cons cur acc)))
+            (if (str_eq (char_at s i) "\n")
+                (fgs-lines-loop s (add i 1) "" (if (str_eq cur "") acc (cons cur acc)))
+                (fgs-lines-loop s (add i 1) (str_concat cur (char_at s i)) acc))))
+    (defn fgs-lines (s) (fgs-lines-loop s 0 "" (empty)))
+    (defn fgs-index-ids (carrier store key)
+        (fgs-lines (fgs-index-text carrier store key)))
+    (defn fgs-count (carrier store)
+        (do (let got (storage-get carrier store (fgs-count-key)))
+            (if (eq (storage-found? got) 1) (str_to_int (storage-value got)) 0)))
+
+    ; Result = (store id ack). Re-offering identical content is idempotent.
+    (defn fgs-offer (carrier store from-node to-node kind text payload timestamp)
+        (do
+            (let id (fgs-message-id from-node to-node kind text payload timestamp))
+            (let ack (fgo-offer id from-node to-node kind payload))
+            (if (eq (storage-has? carrier store (fgs-message-key id)) 1)
+                (list store id ack)
+                (do
+                    (let s1 (storage-put carrier store (fgs-message-key id)
+                        (fgs-envelope id from-node to-node kind text payload timestamp)))
+                    (let s2 (storage-put carrier s1 (fgs-edge-key id)
+                        (fgs-edge-value id from-node to-node)))
+                    (let s3 (fgs-index-add carrier s2 (fgs-out-key from-node) id))
+                    (let s4 (if (str_eq to-node "")
+                        (fgs-index-add carrier s3 (fgs-broadcast-key) id)
+                        (fgs-index-add carrier s3 (fgs-in-key to-node) id)))
+                    (let s5 (storage-put carrier s4 (fgs-count-key)
+                        (int_to_str (add (fgs-count carrier s4) 1))))
+                    (list s5 id ack)))))
+    (defn fgs-result-store (r) (nth r 0))
+    (defn fgs-result-id (r) (nth r 1))
+    (defn fgs-result-ack (r) (nth r 2))
+    (defn fgs-get (carrier store id) (storage-get carrier store (fgs-message-key id)))
+    (defn fgs-edge (carrier store id) (storage-get carrier store (fgs-edge-key id)))
+    (defn fgs-incoming (carrier store node) (fgs-index-ids carrier store (fgs-in-key node)))
+    (defn fgs-outgoing (carrier store node) (fgs-index-ids carrier store (fgs-out-key node)))
+    (defn fgs-broadcasts (carrier store) (fgs-index-ids carrier store (fgs-broadcast-key)))
+    (defn fgs-ack-node? (r)
+        (if (eq (oac-kind (fgs-result-ack r)) (oac-tag-node)) 1 0))
+    (defn fgs-receipt (r)
+        (str_concat "ack=" (str_concat (if (eq (fgs-ack-node? r) 1) "node" "nothing")
+          (str_concat "|message_id=" (str_concat (fgs-result-id r)
+          "|message_node=content-addressed|edge_node=content-addressed|persisted=1|traversable=1|observed=1")))))
+)
