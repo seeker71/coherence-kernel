@@ -7398,7 +7398,16 @@ static int fk_reserved_head(long long s, long long n) {
  * treats them structurally and drops them from the parameter list, so `(defn f (sub x)
  * ..)` is arity 2 here and arity 1 there. Reasoning from "it is in the op table" would
  * have condemned core.fk on the strength of an argument the oracle refutes. If an op
- * row is added, re-run the probe rather than guessing where it belongs. */
+ * row is added, re-run the probe rather than guessing where it belongs.
+ *
+ * And it only diverges in the FIRST parameter position. Probed again after the first
+ * narrowing, the check still condemned shell-exec.fk's `(defn sh-contains? (s sub) ..)`,
+ * which bin-go runs correctly: Go's reader reads the parameter list's own head
+ * structurally, so `(sub zz)` collapses and `(zz sub)` does not. All 18 names were
+ * re-run in first and second position; every one diverges first and agrees second. So
+ * the caller carries the position (`na == 0`). Twice now a reasoned generalization was
+ * wider than the measured fact, and both times a real cell in this body was the one
+ * that said so. */
 static int fk_divergent_param_name(long long s, long long n) {
     return fk_sym_eq(s, n, "add") || fk_sym_eq(s, n, "sub") || fk_sym_eq(s, n, "mul") ||
            fk_sym_eq(s, n, "div") || fk_sym_eq(s, n, "mod") || fk_sym_eq(s, n, "and") ||
@@ -8658,7 +8667,7 @@ static void fk_parse_top(void) {
                 }
                 long long as = fk_spos;
                 fk_spos = fk_sym_end(fk_spos);
-                if (fk_spos > as && fk_divergent_param_name(as, fk_spos - as)) {
+                if (na == 0 && fk_spos > as && fk_divergent_param_name(as, fk_spos - as)) {
                     fk_diag(FK_DIAG_ERR, as,
                             "[shadowed-primitive] parameter '%.*s' names a primitive/control form "
                             "-- in call position the primitive still wins, so the parameter is "
