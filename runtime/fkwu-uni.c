@@ -105,6 +105,15 @@ static long long fk_diag_quiet;  /* nonzero: speculative compile — count into
                                   * nothing; a candidate image's diagnostics
                                   * are not the program's */
 static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_TEXT_CAP */
+/* 1 if the parse met a defect that CANNOT recover into a runnable program: a read
+ * of an unbound name (a read has no value to decline with) or a parameter that
+ * names a primitive (the sibling kernels do not agree on its arity). fkwu's
+ * standing posture is recover-and-run, and it stays that way for every defeasible
+ * diagnostic; these two are not defeasible, and running past them is what let a
+ * deliberately broken band answer 255 and what made one variant spin for minutes
+ * with no output at all. Same gate as fk_src_truncated: surface every diagnostic,
+ * then REFUSE to execute. */
+static int fk_src_unrunnable;
 /* fk_diag / fk_diag_flush are DEFINED further down (right after fk_srctext /
  * fk_spos / fk_slen are declared), where they can read the source buffer. */
 static void fk_diag(int sev, long long off, const char *fmt, ...);
@@ -7357,6 +7366,29 @@ static long long fk_rwtab_find(long long s, long long n) {
     }
     return -1;
 }
+/* A RESERVED HEAD: a name that this parser answers itself in call position —
+ * the four control forms, any rewrite row, any op row. Binding one as a defn
+ * PARAMETER is a silent cross-kernel divergence, not a preference: form-kernel-go's
+ * reader drops such a name from the parameter list, so `(defn f (sub x) ..)` is
+ * arity 2 here and arity 1 there, and the two kernels then answer the same source
+ * differently with neither one saying so (MEASURED 2026-07-22: fkwu 7, bin-go
+ * `walk: "f" wants 1 args, got 2`). fkwu binds it AND then lets the op win in call
+ * position, so the parameter is reachable in value position only — exactly the trap
+ * that returned a full-pass 255 on a deliberately broken band
+ * (receipts/2026-07-22-ship-the-slot-map.md, defect 1). */
+static int fk_reserved_head(long long s, long long n) {
+    if (fk_sym_eq(s, n, "defn") || fk_sym_eq(s, n, "do") || fk_sym_eq(s, n, "let") ||
+        fk_sym_eq(s, n, "if")) {
+        return 1;
+    }
+    if (fk_rwtab_find(s, n) >= 0) {
+        return 1;
+    }
+    if (fk_optab_find(s, n) >= 0) {
+        return 1;
+    }
+    return 0;
+}
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3) {
     long long k = fk_node_count;
     fk_node_count = fk_node_count + 1;
@@ -7655,6 +7687,15 @@ static long long fk_sparse(void) {
             long long fk_bd_saved_maxslot = fk_maxslot;
             fk_bd_top = 0;
             fk_maxslot = 0;
+            if (alen > 0 && fk_reserved_head(as2, alen)) {
+                fk_diag(FK_DIAG_ERR, as2,
+                        "[shadowed-primitive] parameter '%.*s' names a primitive/control form -- "
+                        "in call position the primitive still wins, so the parameter is reachable "
+                        "in value position only, and form-kernel-go drops it from the parameter "
+                        "list entirely (arity divergence). Rename the parameter",
+                        (int)alen, fk_srctext + as2);
+                fk_src_unrunnable = 1;
+            }
             fk_bd_push(as2, alen, 0);
             long long body = fk_sparse();
             fk_sskip();
@@ -7722,6 +7763,20 @@ static long long fk_sparse(void) {
                 fk_spos = fk_spos + 1;
             }
             return fk_smknode(6, c1, c2, c3);
+        }
+
+        /* A LIVE BINDING THIS CALL WILL NOT REACH. `(sub x 128)` where `sub` is a name in
+         * scope reads as subtraction, not as the binding — the op/rewrite tables are
+         * consulted before the local frame, and form-kernel-go answers the same way, so
+         * this is not a divergence and fkwu does not refuse it. It is still the trap that
+         * cost Stone 13 hours (receipts/2026-07-22-ship-the-slot-map.md), so it is said
+         * out loud: a WARNING, counted and printed, where a defn parameter of the same
+         * spelling is the harder ERROR above. */
+        if (fk_bd_lookup(s, hn) >= 0 && fk_reserved_head(s, hn)) {
+            fk_diag(FK_DIAG_WARN, s,
+                    "[shadowed-call] '%.*s' is bound in this scope but in call position the "
+                    "primitive wins -- this call does NOT reach the binding",
+                    (int)hn, fk_srctext + s);
         }
 
         /* DATA-DRIVEN rewrite: gt/ge/lt/eq/and/or/not/abs are rows in fk_rwtab. Parse `arity`
@@ -8132,6 +8187,30 @@ static long long fk_sparse(void) {
     if (vfidx >= 0) {
         return fk_smknode(243, vfidx, 0, 0);
     }
+    /* UNBOUND NAME IN VALUE POSITION. This used to be "an honest 0" — and it was the
+     * deepest silent-green in this body. A name that resolves to nothing is not a
+     * declined OFFER (that is the tag-137 unresolved-call arm above, which has said so
+     * loudly since the ftanh heal); it is a READ of something that was never bound, and
+     * a read has no axiom-5 recovery to appeal to. Left silent it does three things,
+     * all measured on 2026-07-22 against form-kernel-go as the oracle:
+     *   - it makes a band agree with itself. Two walkers reading the same free name both
+     *     read 0, both sides match, verdict 255 on deliberately broken code.
+     *   - it makes fkwu and the Go/Rust/TS walkers answer the SAME source differently
+     *     with neither saying so: fkwu's defn frame cannot see an enclosing do-let by
+     *     construction (fk_bd_top = 0 at the defn arm), Go's closure can. fkwu answered
+     *     5 where bin-go answered 15.
+     *   - it makes fkwu SPIN. A recursion whose base case tests a free name never
+     *     reaches it: `(if (eq i n) ..)` with n silently 0 and i starting at 1 ran for
+     *     minutes with no output at all, where bin-go answered in 40 ms.
+     * So: diagnose, on every occurrence, unconditionally — and still RECOVER to 0, so
+     * the rest of the source is parsed and every other offender is reported in the same
+     * run. The nonzero exit comes from the error count, exactly like unresolved-call. */
+    fk_diag(FK_DIAG_ERR, s,
+            "[unbound-name] '%.*s' in value position matched no binding/const/fn -- typo, "
+            "missing prelude, or a name from an enclosing scope a defn frame cannot see? "
+            "Read recovered to 0; parse continues",
+            (int)(fk_spos - s), fk_srctext + s);
+    fk_src_unrunnable = 1;
     return fk_smklit(0);
 }
 /* (do f1 f2 .. fn): sequence forms (tag 69 = eval-first/return-rest). A do-let `(let name val)`
@@ -8561,6 +8640,15 @@ static void fk_parse_top(void) {
                 }
                 long long as = fk_spos;
                 fk_spos = fk_sym_end(fk_spos);
+                if (fk_spos > as && fk_reserved_head(as, fk_spos - as)) {
+                    fk_diag(FK_DIAG_ERR, as,
+                            "[shadowed-primitive] parameter '%.*s' names a primitive/control form "
+                            "-- in call position the primitive still wins, so the parameter is "
+                            "reachable in value position only, and form-kernel-go drops it from "
+                            "the parameter list entirely (arity divergence). Rename the parameter",
+                            (int)(fk_spos - as), fk_srctext + as);
+                    fk_src_unrunnable = 1;
+                }
                 fk_bd_push(as, fk_spos - as, na);
                 if (na > fk_maxslot) {
                     fk_maxslot = na;
@@ -11790,6 +11878,7 @@ static void fk_src_reset_compile_state(void) {
     fk_nerr = 0;
     fk_nwarn = 0;
     fk_src_truncated = 0;
+    fk_src_unrunnable = 0;
     fk_string_table_reset();
     fk_fntop = 0;
     fk_const_top = 0;
@@ -12084,7 +12173,7 @@ static int fk_run_src(const char *path, long long arg) {
      * OTHER compile error still recovers INTO a runnable (if degraded) program and
      * runs, carrying a nonzero EXIT via fk_nerr at the final return. */
     fk_diag_flush();
-    if (fk_src_truncated) {
+    if (fk_src_truncated || fk_src_unrunnable) {
         return 1;
     }
     if (fk_nerr == 0 && fk_conf("FK_JIT_SCAN")) {
@@ -12339,6 +12428,7 @@ static int fk_run_feval(const char *path) {
     fk_nerr = 0;
     fk_nwarn = 0;
     fk_src_truncated = 0;
+    fk_src_unrunnable = 0;
     fk_sinit();
     fk_fntop = 0;
     fk_const_top = 0;
@@ -12397,6 +12487,9 @@ static int fk_run_feval(const char *path) {
     fk_vsp = 1;
     /* ── PARSE DONE, EXECUTION BEGINS ── gcc-style tally (twin of fk_run_src). */
     fk_diag_flush();
+    if (fk_src_unrunnable) {
+        return 1;
+    }
     long long rv = fk_walk(fk_fn[0], 0);
     fk_pv(rv);
     /* print the meta-eval result by value-kind (int / float / nothing) */
