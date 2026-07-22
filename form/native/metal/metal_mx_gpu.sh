@@ -266,6 +266,12 @@ var failures = 0, dispatches = 0
 func check(_ ok: Bool, _ pass: String, _ fail: String) {
     if ok { print("PASS  " + pass) } else { print("FAIL  " + fail); failures += 1 }
 }
+// axiom-4: a command buffer meets us through cb.status/cb.error. Every gate reads a device
+// buffer back and those buffers are freshly zeroed, so a failed dispatch reads as a dequant
+// that disagrees with the carver at every element — "the GPU is wrong" wearing the costume
+// of "the GPU did not run". Counted over the whole run.
+var gpuErrors = 0
+var gpuFirstError: String? = nil
 
 // --- the plane-split bytes, RESIDENT. mmap and hand the GPU the mapped pages: with bytesNoCopy there
 //     is no copy at all, so "upload" is a page-table fact. The file is still being appended to; only
@@ -300,6 +306,9 @@ func dispatch(_ p: MTLComputePipelineState, width: Int, _ bind: (MTLComputeComma
     enc.dispatchThreads(MTLSize(width: width, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
     enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    if let e = cb.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(e)" } }
+    if cb.status != .completed { gpuErrors += 1
+        if gpuFirstError == nil { gpuFirstError = "command buffer status \(cb.status.rawValue), not .completed" } }
     dispatches += 1
 }
 let u = 5.960464477539063e-08   // 2^-24, the f32 unit roundoff
@@ -336,6 +345,30 @@ guard let head = mx4.tiles[0], let tailT = mx4.tiles[tail4], let farHead = mx4fa
       head.count == tile, tailT.count == tile, farHead.count == tile else {
     print("FAIL  MX4 reference tile shape"); exit(1)
 }
+
+// --- GATE 0: DID THE GPU RUN. Asked before gate 1, which reads tileBuf back — and a tile
+// nothing wrote is zeros, a NUMBER the bit-exact gates would grade as disagreement at every
+// element. The CPU sentinels tileBuf; a real MXFP4 dequant off the resident file must overwrite
+// every element. A survived sentinel is a residency condition (this maps 60+ GiB of a live
+// file), not an arithmetic one.
+do {
+    let sentinel: Float = -424242.0
+    for i in 0..<tile { tg[i] = sentinel }
+    let before = gpuErrors
+    dequant(p4deq, buf: modelBuf, base: abs4, off: 0, cnt: tile, nel: nel4, into: tileBuf)
+    var survived = 0
+    for i in 0..<tile where tg[i] == sentinel { survived += 1 }
+    if gpuErrors > before { print("  command buffer ERROR: \(gpuFirstError ?? "unknown")") }
+    check(gpuErrors == before && survived == 0,
+      "gate 0 the GPU executes: an MXFP4 dequant off the resident file overwrote all \(tile) sentinels, no command buffer errored",
+      "gate 0 THE GPU DID NOT RUN — \(survived)/\(tile) sentinels survived, \(gpuErrors - before) cb error(s); a residency condition, not arithmetic")
+    if failures > 0 {
+        print("  Gates 1-8 below all read a device buffer back; unwritten it reads as zeros they would")
+        print("  grade as disagreement. Refusing them. Free memory and re-run.")
+        print("VERDICT FAIL  the GPU did not run; no MX arithmetic was witnessed"); exit(1)
+    }
+}
+
 dequant(p4deq, buf: modelBuf, base: abs4, off: 0, cnt: tile, nel: nel4, into: tileBuf)
 let bh = bitBad(tg, head, tile)
 check(bh == 0, "gate 1 MXFP4 head tile bit-exact: all \(tile) GPU-dequantized weights at element 0 of slice 0 equal the CPU carver's",
@@ -487,8 +520,13 @@ check(sumAfter == sumFirst,
       "gate 8: the output checksum changed across dispatches")
 print("      dispatch count: \(before) for the whole correctness audit (one command buffer + one encoder each), \(dispatches - before) more for the residency loop — seamtoll: this harness pays a full command buffer per dispatch on purpose, so the numbers above are correctness, never a token-rate claim")
 
-if failures == 0 { print("VERDICT PASS  \(9) gates, MX on the GPU") } else { print("VERDICT FAIL  \(failures) gate(s)") }
-exit(failures == 0 ? 0 : 1)
+if gpuErrors > 0 {
+    print("=== \(gpuErrors) COMMAND BUFFER(S) FAILED during this run — first: \(gpuFirstError ?? "unknown") ===")
+    print("    Nothing above this line that reads a device buffer back can be trusted.")
+}
+let ok = failures == 0 && gpuErrors == 0
+if ok { print("VERDICT PASS  \(10) gates, MX on the GPU") } else { print("VERDICT FAIL  \(failures) gate(s), \(gpuErrors) cb errors") }
+exit(ok ? 0 : 1)
 SWIFT
 
 swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || {
