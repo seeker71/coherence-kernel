@@ -300,13 +300,114 @@
                 (cons merged (tkz-splice syms (add i 2) p merged))
                 (cons (nth syms i) (tkz-splice syms (add i 1) p merged)))))
 
-    ; the BPE loop for a piece's initial symbol list -> final symbol list. A 0- or 1-symbol list has
-    ; no pair, so it never scans the merges (the terminal full pass only happens with >= 2 symbols and
-    ; no applicable merge).
+    ; the REFERENCE BPE loop for a piece's initial symbol list -> final symbol list. A 0- or 1-symbol
+    ; list has no pair, so it never scans the merges (the terminal full pass only happens with >= 2
+    ; symbols and no applicable merge).
+    ;
+    ; This is the definition, kept whole and readable; it is NOT what tkz-encode calls. It walks all
+    ; 127 741 merge records in the mmap'd window per BPE step, which measured 95.3 s of a 95.5 s
+    ; encode of "The capital of France is" (Stone 38 profile, receipts/2026-07-22-tokenizer-speed.md).
+    ; tkz-bpe-c below computes the SAME symbol list from a prefiltered candidate list.
     (defn tkz-bpe (src syms)
         (if (lt (len syms) 2) syms
             (do (let p (tkz-best-merge src (tkz-merges-first src) (tkz-merges-n src) syms))
                 (if (lt p 0) syms (tkz-bpe src (tkz-apply syms p))))))
+
+    ; ================= the candidate prefilter, and BPE over it =================
+    ; WHY THIS IS THE SAME ANSWER, not an approximation. During BPE every symbol is a CONTIGUOUS byte
+    ; slice of the piece, and the symbols partition the piece left to right; so for any adjacent pair
+    ; (symL, symR) the byte sequence symL ++ symR is a contiguous slice of the piece, hence of the
+    ; whole input. A merge whose own byte sequence does not occur contiguously in the input can
+    ; therefore never match any pair, at any step. Dropping those merges — and keeping the survivors
+    ; in the file's own rank order — leaves the "lowest-rank applicable merge, leftmost pair" choice
+    ; untouched. One pass over the table for a whole encode replaces one (early-terminating) pass per
+    ; BPE step. On "The capital of France is", 50 of 127 741 merges survive.
+    ;
+    ; The filter is deliberately looser than the piece split: it tests against the WHOLE input, not
+    ; per piece. A superset of the reachable merges is safe (an unreachable one is simply never
+    ; matched) and it costs one pass for the whole prompt instead of one per piece.
+
+    ; --- input byte presence, 256 flags, built once per encode: the cheap first gate ---
+    (defn tkz-has-byte (inp L b i)
+        (if (lt i L) (if (eq (str_byte_at inp i) b) 1 (tkz-has-byte inp L b (add i 1))) 0))
+    (defn tkz-pres (inp L b)
+        (if (eq b 256) (empty) (cons (tkz-has-byte inp L b 0) (tkz-pres inp L (add b 1)))))
+
+    ; --- the positions of the input still viable as a match start, narrowed one byte at a time ---
+    (defn tkz-pos0 (L i) (if (eq i L) (empty) (cons i (tkz-pos0 L (add i 1)))))
+    (defn tkz-pfilt (inp L pos j b)      ; keep p where inp[p+j] = b
+        (if (eq (len pos) 0) (empty)
+            (do (let p (head pos))
+                (if (if (lt (add p j) L) (eq (str_byte_at inp (add p j)) b) 0)
+                    (cons p (tkz-pfilt inp L (tail pos) j b))
+                    (tkz-pfilt inp L (tail pos) j b)))))
+
+    ; --- walk one merge record's codepoints, narrowing positions; abort the moment none survive.
+    ; Returns the split index (how many bytes are the LEFT symbol) or -1 for "can never apply".
+    ; A non-separator codepoint that cp2b cannot map is -1 and rejects, exactly as tkz-me-left does.
+    (defn tkz-cand-walk (src at mo mlen inp L pos j split)
+        (if (eq (len pos) 0) (sub 0 1)
+        (if (lt mo mlen)
+            (do (let b0 (tkz-rec-byte src at mo))
+                (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (tkz-rec-byte src at (add mo 1)) 128))))
+                (let nlen (if (lt b0 128) 1 2))
+                (if (eq cp 32)
+                    (if (lt split 0) (tkz-cand-walk src at (add mo nlen) mlen inp L pos j j) (sub 0 1))
+                    (do (let by (tkz-cp2b cp))
+                        (if (lt by 0) (sub 0 1)
+                            (tkz-cand-walk src at (add mo nlen) mlen inp L
+                                (tkz-pfilt inp L pos j by) (add j 1) split)))))
+            (if (lt split 0) (sub 0 1) split))))
+
+    ; --- a survivor's two byte lists (the separator is the split) ---
+    (defn tkz-mrg-left (src at mo mlen acc)
+        (if (lt mo mlen)
+            (do (let b0 (tkz-rec-byte src at mo))
+                (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (tkz-rec-byte src at (add mo 1)) 128))))
+                (if (eq cp 32) acc
+                    (tkz-mrg-left src at (add mo (if (lt b0 128) 1 2)) mlen (_list_append acc (tkz-cp2b cp)))))
+            acc))
+    (defn tkz-mrg-right (src at mo mlen acc seen)
+        (if (lt mo mlen)
+            (do (let b0 (tkz-rec-byte src at mo))
+                (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (tkz-rec-byte src at (add mo 1)) 128))))
+                (let nlen (if (lt b0 128) 1 2))
+                (if (eq seen 1)
+                    (tkz-mrg-right src at (add mo nlen) mlen (_list_append acc (tkz-cp2b cp)) 1)
+                    (tkz-mrg-right src at (add mo nlen) mlen acc (if (eq cp 32) 1 0))))
+            acc))
+
+    ; --- THE ONE PASS. Rank order in, rank order out. Each element is (leftbytes rightbytes). ---
+    (defn tkz-cands (src at rem inp L pres pos0 acc)
+        (if (eq rem 0) acc
+            (do (let mlen (tkz-rec-len src at))
+                (let by (tkz-merge-fb src at))
+                (tkz-cands src (tkz-rec-next src at) (sub rem 1) inp L pres pos0
+                    (if (if (lt by 0) 0 (eq (nth pres by) 1))
+                        (if (lt (tkz-cand-walk src at 0 mlen inp L pos0 0 (sub 0 1)) 0)
+                            acc
+                            (_list_append acc (list (tkz-mrg-left src at 0 mlen (empty))
+                                                    (tkz-mrg-right src at 0 mlen (empty) 0))))
+                        acc)))))
+
+    ; --- BPE over the candidate list: same rule, tiny haystack ---
+    (defn tkz-lseq (a b k n) (if (eq n k) 1 (if (eq (nth a k) (nth b k)) (tkz-lseq a b (add k 1) n) 0)))
+    (defn tkz-leq (a b) (if (eq (len a) (len b)) (tkz-lseq a b 0 (len a)) 0))
+    (defn tkz-cfirst-pair (syms i l r)   ; leftmost adjacent pair equal to (l, r), or -1
+        (if (lt (add i 1) (len syms))
+            (if (if (tkz-leq (nth syms i) l) (tkz-leq (nth syms (add i 1)) r) 0)
+                i
+                (tkz-cfirst-pair syms (add i 1) l r))
+            (sub 0 1)))
+    (defn tkz-cbest (cands ci n syms)    ; lowest-rank applicable candidate -> its leftmost pair index
+        (if (eq ci n) (sub 0 1)
+            (do (let m (nth cands ci))
+                (let p (tkz-cfirst-pair syms 0 (nth m 0) (nth m 1)))
+                (if (lt p 0) (tkz-cbest cands (add ci 1) n syms) p))))
+    (defn tkz-bpe-c (cands syms)
+        (if (lt (len syms) 2) syms
+            (do (let p (tkz-cbest cands 0 (len cands) syms))
+                (if (lt p 0) syms (tkz-bpe-c cands (tkz-apply syms p))))))
 
     ; initial symbols: one 1-element byte-value list per input byte in [start,end), read byte-exact
     (defn tkz-syms (inp start end)
@@ -364,12 +465,19 @@
     ; ================= ENCODE: text -> ids =================
     ; walk pieces; BPE each; concatenate ids. add_bos/add_eos are 0 on this file (Stone 21), so no
     ; special ids are prepended — the oracle `--dump-tokens` shows none either.
-    (defn tkz-encode-from (src inp L pos acc)
+    (defn tkz-encode-from (src cands inp L pos acc)
         (if (lt pos L)
             (do (let end (tkz-next-piece inp L pos))
-                (tkz-encode-from src inp L end
-                    (tkz-ids-of-syms src (tkz-bpe src (tkz-syms inp pos end)) acc)))
+                (tkz-encode-from src cands inp L end
+                    (tkz-ids-of-syms src (tkz-bpe-c cands (tkz-syms inp pos end)) acc)))
             acc))
-    (defn tkz-encode (src inp) (tkz-encode-from src inp (str_len inp) 0 (empty)))
+    ; ONE pass over the merge table for the whole prompt (tkz-cands), then BPE per piece over the
+    ; survivors. The ids are the reference ids: see tkz-bpe-c's why-this-is-the-same-answer note.
+    (defn tkz-encode (src inp)
+        (do (let L (str_len inp))
+            (tkz-encode-from src
+                (tkz-cands src (tkz-merges-first src) (tkz-merges-n src) inp L
+                           (tkz-pres inp L 0) (tkz-pos0 L 0) (empty))
+                inp L 0 (empty))))
 
     0)
