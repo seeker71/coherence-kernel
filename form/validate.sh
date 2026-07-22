@@ -150,6 +150,40 @@ fk_band_declared_verdict() {
 source scripts/fourth-arm.sh
 build_fourth
 
+# AXIOM-4: "passage not through the offered interface is breach, and breach is
+# observable." An absent fourth arm is a breach of the proof interface, and until
+# 2026-07-22 it was NOT observable: build_fourth printed one line to stderr,
+# returned with FKWU unset, and validate.sh went on to stamp ✓ on every band and
+# to OMIT the "fourth arm: N four-way" summary entirely. A whole leg of the proof
+# could vanish and the run still read as green.
+#
+# Witnessed on claude/deepseek-v4-flash-gguf-54a96c at 9f8a116e8, pristine
+# checkout: both committed fourth-arm artifacts were stale against their own
+# sources (binary stamp 695a9a0f39c157e6 vs wanted 52d0ef7b7c8a74cf; uni.c stamp
+# 6670bf9df67a1e28 vs wanted 2c1d416f79add09a), so the arm never ran — 1284 ok,
+# 41 divergent, zero four-way lines, and a checkmark on all of it. Regenerating
+# the bootstrap turned the arm back on and seven bands immediately disagreed.
+# They had not regressed; they had never been asked.
+#
+# fourth-arm.sh's own header already stated the law — "every declared fourth-arm
+# workload is mandatory: preparation, execution, and agreement failures fail
+# validation instead of silently reducing the proof to three siblings" — and the
+# code did the opposite of the sentence written above it. This is that sentence,
+# executed. FORM_ALLOW_THREE_ARM=1 is the one door out, for a host that genuinely
+# cannot build fkwu (no clang); it must be asked for out loud, never assumed.
+if ! fourth_available; then
+    if [[ "${FORM_ALLOW_THREE_ARM:-0}" == 1 ]]; then
+        echo "  fourth arm ABSENT — proceeding three-arm by explicit FORM_ALLOW_THREE_ARM=1" >&2
+        echo "  every ✓ below speaks for three kernels, not four" >&2
+    else
+        echo "validate.sh: the fourth arm is ABSENT — refusing to report a three-arm run as green." >&2
+        echo "  A ✓ here would mean 'three kernels agreed', not 'four kernels agreed', and nothing" >&2
+        echo "  in the output would say which. See the reason build_fourth printed above." >&2
+        echo "  Heal it (scripts/regen_fkwu_bootstrap.sh), or say so out loud: FORM_ALLOW_THREE_ARM=1" >&2
+        exit 1
+    fi
+fi
+
 # The TS kernel carries its deep Form recursion on a worker thread whose V8
 # limit MATCHES its real stack (main.ts deep-stack door; FORM_KERNEL_STACK_MB
 # passes through the environment, same name as the emitted C walker's door).
@@ -363,7 +397,19 @@ run_siblings() {
     # so max(legs) — the band's wall time — does not move.
     local fourth_tbl="" fk_out=""
     if fourth_available; then
-        fourth_tbl="$(fourth_table_for_band "${*: -1}")"
+        # AXIOM-4 again, per band. A band DECLARED in fourth-arm-bands.txt whose
+        # table fails to prepare used to leave $fourth_tbl empty, and the band
+        # then ran three-arm and was stamped ✓ like any other — the manifest
+        # said four, the run gave three, and the output said nothing. Declared
+        # means mandatory: if the manifest names this band, its table must exist.
+        local fourth_stem
+        fourth_stem="$(fourth_band_stem "${*: -1}" || true)"
+        fourth_tbl="$(fourth_table_for_band "${*: -1}" || true)"
+        if [[ -n "$fourth_stem" && -z "$fourth_tbl" ]]; then
+            echo "validate.sh: $fourth_stem is declared in $FOURTH_MANIFEST but its fourth-arm table" >&2
+            echo "  did not prepare. Refusing to run it three-arm under a four-arm declaration." >&2
+            exit 1
+        fi
     fi
     # The three kernels run CONCURRENTLY: a band's wall time is max(leg), not
     # sum — on compiler-heavy bands the Go+Rust legs ride inside the TS leg's

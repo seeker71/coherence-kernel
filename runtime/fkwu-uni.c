@@ -5527,7 +5527,22 @@ static long long fk_walk(long long i, long long fp) {
         return fk_ht[p];
     }
     if (t == 22) {
-        long long p = fk_walk(fk_node[i][1], fp) >> 1;
+        /* len — a LIST cell. Only the low bit tells a cons cell (odd) from an
+         * int or a string handle (both even, both `idx << 1`), so an unguarded
+         * walk shifted whatever it was handed and followed fk_ht from there:
+         * with 40 live cons cells on the heap, (len 8) answered 2 and
+         * (len "hello") answered 4 while go/rust/ts answered 0/0/5. Not merely
+         * divergent — heap-state-dependent, which is why the same expression on
+         * an empty heap looked four-way-agreed. Non-lists now answer 0, as they
+         * do on the sibling arms; the one gap that stays is a STRING, whose byte
+         * length the siblings return and fkwu cannot see. Mirrored in the
+         * emitted walker's fk_list_len (fkc-table-serialize.fk) and in
+         * fk_jlist1 below — one law, three carriers. */
+        long long lv22 = fk_walk(fk_node[i][1], fp);
+        if ((lv22 & 1) == 0) {
+            return 0;
+        }
+        long long p = lv22 >> 1;
         long long n = 0;
         while (p >= 1 && p <= fk_hp) {
             n = n + 1;
@@ -8877,6 +8892,11 @@ static long long fk_jlist1(long long tag, long long a) {
     }
     /* tail */
     if (tag == 22) {
+        /* mirrors fk_walk's tag-22 exactly — crystallized code must count the
+         * same list, and refuse the same non-list, as interpreted code. */
+        if ((a & 1) == 0) {
+            return 0;
+        }
         long long p = a >> 1;
         long long n = 0;
         while (p >= 1 && p <= fk_hp) {
