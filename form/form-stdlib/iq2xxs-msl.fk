@@ -1,0 +1,163 @@
+; iq2xxs-msl.fk — GGUF type 16 (IQ2_XXS) as a Metal kernel the BODY emits, so the QUANTIZED bytes are
+; what lives on the GPU and the 2-bit unpack happens THERE.
+;
+; WHY THIS EXISTS. iq2xxs-dequant.fk (Stone 24) proved the 66-byte / 256-element IQ2_XXS superblock on
+; the CPU arithmetic floor — bit-exact vs an independent from-spec oracle over 61 952 real DeepSeek
+; weights. But IQ2_XXS is 42.6% of the file's bytes and the expert weights of 31 of 43 layers; a CPU
+; carver cannot fold a MoE. This cell turns "can read" into "can run": the quantized block bytes go to
+; the device unchanged and the decode happens on the GPU. It is the last dequant type still CPU-only, and
+; DeepSeek's ffn_down_exps are exactly type 16, so the MoE fold needs them here.
+;
+; THE ONE NEW THING versus mxfp4-msl.fk / q6k-msl.fk: two `constant` ARRAY LITERALS. MXFP4's whole
+; codebook is arithmetic (E2M1 is a formula); IQ2's is a TRAINED table with no closed form — 256 curated
+; eight-tuples of {8,25,43} and a 128-entry sign table where the 8th sign of each octet is BORN as the
+; parity of the other seven (corpus row 855, paritylock). Both tables are carried verbatim. This file
+; emits them as `constant uchar iq2_grid[2048]` and `constant uchar iq2_ksigns[128]`, built by iq2m-join
+; from the SAME (iq2-grid) / (iq2-ksigns) lists the CPU carver uses — so the device table is byte-
+; identical to the carver's BY CONSTRUCTION, not by a second transcription that could drift. GPU_GAPS
+; flagged emitting a `constant` array literal as historically untried; it is pure str_concat over
+; int_to_str, and mx-msl-band's shape proves the text before any GPU runs.
+;
+; BIT-EXACTNESS IS THE BAR, not a derived bound, and by the carver's own §3 argument: w is an EXACT
+; product of an f16-derived d, 0.125 (dyadic), a small odd int (<= 31) and a magnitude (<= 43) — <= 21
+; significand bits, bit-identical in f32 and f64. There is no accumulation and no float scale surprise
+; beyond the one f16 d. So Form's answer and the GPU's f32 answer are the same real number and the same
+; f32; the gate is equality with no epsilon, exactly as the MX carvers hit.
+;
+; PARITYLOCK, ON THE DEVICE. The 8th sign is not stored; it is the parity of the other seven, and ksigns
+; is where it is born. This kernel does NOT re-derive the unpack: it feeds sign_idx straight through the
+; transcribed iq2_ksigns table, so the parity bit rides along in the table's 8th bit. A kernel that
+; "simplified" the table away would be right seven values in eight and silently wrong on the last, per
+; group of eight — the exact silent-partial shape this body has been burned by. The table is the DoF.
+;
+; NO HEADER, ON PURPOSE — the q6k-msl / mxfp4-msl discipline. This file emits no `#include <metal_stdlib>`
+; and no `using namespace metal;`: the f16 super-scale d is decoded by ARITHMETIC (iq2_f16 is fd-value at
+; eb=5, mb=10 transcribed, exactly q6k_f16's shape), not by `as_type<half>`. There is no library call at
+; all in the dequant kernel. The header, if a unit needs one, is emitted ONCE by the assembling cell
+; (qml-msl-header), never restated here — a second `using namespace metal;` makes this body's `round`
+; ambiguous and the unit stops compiling.
+;
+; EVERY BIT-OP IS AN ARITHMETIC IDENTITY, so the emitted C matches the carver's div/mod form line for
+; line and the Form-side mirror (iq2m-flat-at) can be checked against the carver with no bitwise operator
+; anywhere: x >> s = div x 2^s ; x & (2^k-1) = mod x 2^k ; x & (1<<j)? = mod (div x 2^j) 2. The one place
+; a device would naturally reach for `>>`/`&` (aux1's 7-bit sign fields) is written as div/mod so the
+; mirror is a faithful hand-copy, not a paraphrase.
+;
+; RADIUS (`aporon`). This cell emits the DEQUANT kernel and its Form mirror only. A FUSED matvec-over-IQ2
+; (dequant inside the dot, like mxfp4-msl's slot path) is what the MoE fold ultimately needs; whether it
+; is reachable on IQ2's block geometry is noted in the receipt, not built here. The GEOMETRY it decodes
+; is gguf-manifest.fk's `gm-blk n 256 66`, proven by that file's own offset chain; a GPU agreeing with
+; the CPU carver proves the TRANSCRIPTION and the residency, and the carver already carries bit-exactness
+; vs an independent oracle — so this closes IQ2 on the device to the same class MX reached.
+;
+; Kin: iq2xxs-dequant.fk (iq2-* — the CPU carver this must equal, and the ONE true (iq2-grid)/(iq2-ksigns)
+; both sides share), mxfp4-msl.fk (the emit idiom, the read-back-into-Form discipline, the no-header rule),
+; q6k-msl.fk (q6k_f16 — the f16-by-arithmetic this transcribes), f16-decode.fk (fd-value at (5,10)),
+; qk-matvec-lane.fk (qml-msl-header — the body's one metal_stdlib).
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/iq2xxs-dequant.fk
+;
+; Proven by: form-stdlib/tests/iq2xxs-msl-band.fk (the transcription, against the carver, on the real
+;            blocks) and form/native/metal/metal_iq2_gpu.sh (the GPU, Mac-only, head AND distant block).
+
+(do
+    ; ================= the transcription, read back into Form =================
+    ; Everything here is what the emitted C computes, written in Form with the same integer identities and
+    ; the same offsets, so iq2xxs-msl-band.fk can falsify the TEXT against iq2xxs-dequant's independently
+    ; written carver rather than against a paraphrase of it. It reads a byte LIST via nth, exactly as the
+    ; carver does, so the two readings are comparable element by element; the f16 decode here is OPEN-CODED
+    ; (the C's iq2_f16) while the carver routes d through fd-f16 — that is the independence on the d path.
+
+    (defn iq2m-mod (a n) (sub a (mul (div a n) n)))
+    ; 2^k as an exact int, k >= 0 (the aux1 sign shift 0/7/14/21 and the sign bit 0..7)
+    (defn iq2m-upow2 (k) (if (eq k 0) 1 (mul 2 (iq2m-upow2 (sub k 1)))))
+    ; 2^e as a float, e signed (the f16 exponent, ex-15 in -15..16, plus the -14 subnormal step)
+    (defn iq2m-p2f (e)
+        (if (lt e 0) (mul 0.5 (iq2m-p2f (add e 1)))
+            (if (gt e 0) (mul 2.0 (iq2m-p2f (sub e 1))) 1.0)))
+
+    ; --- f16 decode by arithmetic: fd-value at (eb 5, mb 10), bias 15 — the C's iq2_f16, line for line.
+    (defn iq2m-f16 (bits)
+        (do
+            (let mant (iq2m-mod bits 1024))
+            (let ex   (iq2m-mod (div bits 1024) 32))
+            (let sgn  (div bits 32768))
+            (let frac (div (mul 1.0 mant) 1024.0))
+            (let mag (if (eq ex 0)
+                         (mul (iq2m-p2f (sub 0 14)) frac)
+                         (mul (iq2m-p2f (sub ex 15)) (add 1.0 frac))))
+            (if (eq sgn 1) (sub 0.0 mag) mag)))
+
+    ; --- one weight at FLAT element index idx, block-0 byte base `base` in the byte list. Mirrors iq2_w:
+    ; blk = idx/256, within = idx%256, block byte base = base + 66*blk. Same field offsets as the carver.
+    (defn iq2m-flat-at (bytes base idx)
+        (do
+            (let blk (div idx 256))
+            (let within (sub idx (mul blk 256)))
+            (let off (add base (mul 66 blk)))
+            (let hbits (add (nth bytes off) (mul 256 (nth bytes (add off 1)))))
+            (let d (iq2m-f16 hbits))
+            (let ib32 (div within 32))
+            (let rem (iq2m-mod within 32))
+            (let l (div rem 8))
+            (let j (iq2m-mod rem 8))
+            (let gbase (add off (add 2 (mul 8 ib32))))
+            (let gidx (nth bytes (add gbase l)))
+            (let aux1 (add (nth bytes (add gbase 4))
+                      (add (mul 256      (nth bytes (add gbase 5)))
+                      (add (mul 65536    (nth bytes (add gbase 6)))
+                           (mul 16777216 (nth bytes (add gbase 7)))))))
+            (let scalecode (div (nth bytes (add gbase 7)) 16))
+            (let scale (mul (mul 0.125 d) (add (mul 2 scalecode) 1)))
+            (let signidx (iq2m-mod (div aux1 (iq2m-upow2 (mul 7 l))) 128))
+            (let signs (nth (iq2-ksigns) signidx))
+            (let sbit (iq2m-mod (div signs (iq2m-upow2 j)) 2))
+            (let sgn (if (eq sbit 1) -1 1))
+            (let mag (nth (iq2-grid) (add (mul gidx 8) j)))
+            (mul (mul scale sgn) mag)))
+
+    ; ================= the constant array literals =================
+    ; join a list of ints into "a,b,c" — the head-wise fold, O(n), so a 2048-entry table builds without an
+    ; O(n^2) nth walk. Built from the SAME lists the carver decodes: the device grid IS the carver's grid.
+    (defn iq2m-join-tail (xs) (if (nil? xs) "" (str_concat "," (str_concat (int_to_str (head xs)) (iq2m-join-tail (tail xs))))))
+    (defn iq2m-join (xs) (if (nil? xs) "" (str_concat (int_to_str (head xs)) (iq2m-join-tail (tail xs)))))
+
+    (defn iq2m-msl-grid ()
+        (str_concat "constant uchar iq2_grid[2048] = { " (str_concat (iq2m-join (iq2-grid)) " };\n")))
+    (defn iq2m-msl-ksigns ()
+        (str_concat "constant uchar iq2_ksigns[128] = { " (str_concat (iq2m-join (iq2-ksigns)) " };\n")))
+
+    ; ================= the emitted MSL =================
+    ; One fragment per meaning, composed by str_concat, so a diff of the emitted text points at a recipe.
+
+    ; --- the spine: integer mod, integer 2^k, float 2^e, and f16-by-arithmetic (fd-value at (5,10)). No
+    ; library call, no header. iq2_f16 is q6k_f16's shape; iq2_upow2 is the exact power of two the sign
+    ; shifts need; iq2_pow2 is the signed float power the f16 exponent needs. ---
+    (defn iq2m-msl-spine ()
+        "static inline int iq2_mod(int a, int n) { return a - (a / n) * n; } static inline uint iq2_upow2(uint k) { uint a = 1u; for (uint i = 0u; i < k; ++i) a = a * 2u; return a; } static inline float iq2_pow2(int e) { float a = 1.0f; int k = 0; if (e >= 0) { while (k < e) { a = a * 2.0f; k = k + 1; } } else { while (k < -e) { a = a * 0.5f; k = k + 1; } } return a; } static inline float iq2_f16(int bits) { int mant = iq2_mod(bits, 1024); int ex = iq2_mod(bits / 1024, 32); int sgn = bits / 32768; float frac = float(mant) / 1024.0f; float mag = (ex == 0) ? iq2_pow2(-14) * frac : iq2_pow2(ex - 15) * (1.0f + frac); return (sgn == 1) ? -mag : mag; } ")
+
+    ; --- one weight at a flat element index, iq2m-flat-at in C. qb points at the block-0 byte base (the
+    ; carrier binds that with a buffer offset, so no 32-bit file offset is ever formed for a 60 GB file).
+    ; The 7-bit sign fields of aux1 are read by div/mod, NOT `>>`/`&`, so this is the mirror's twin. ---
+    (defn iq2m-msl-weight ()
+        "static inline float iq2_w(device const uchar* qb, uint idx) { uint blk = idx / 256u; uint within = idx - blk * 256u; uint off = blk * 66u; int hbits = int(qb[off]) + 256 * int(qb[off + 1u]); float d = iq2_f16(hbits); uint ib32 = within / 32u; uint rem = within - ib32 * 32u; uint l = rem / 8u; uint j = rem - l * 8u; uint gbase = off + 2u + 8u * ib32; int gidx = int(qb[gbase + l]); uint aux1 = uint(qb[gbase + 4u]) + 256u * uint(qb[gbase + 5u]) + 65536u * uint(qb[gbase + 6u]) + 16777216u * uint(qb[gbase + 7u]); int scalecode = int(qb[gbase + 7u]) / 16; float scale = 0.125f * d * float(2 * scalecode + 1); uint signidx = (aux1 / iq2_upow2(7u * l)) % 128u; int signs = int(iq2_ksigns[signidx]); int sbit = iq2_mod(signs / int(iq2_upow2(j)), 2); float sgn = (sbit == 1) ? -1.0f : 1.0f; int mag = int(iq2_grid[uint(gidx) * 8u + j]); return (scale * sgn) * float(mag); } ")
+
+    ; the two tables plus the spine plus the weight fn — everything the dequant kernel needs, once.
+    (defn iq2m-msl-helpers ()
+        (str_concat (iq2m-msl-grid)
+        (str_concat (iq2m-msl-ksigns)
+        (str_concat (iq2m-msl-spine) (iq2m-msl-weight)))))
+
+    ; --- the kernel: dequant a range into f32, one thread per weight. `off` is a flat ELEMENT offset, so a
+    ; caller can dequant a tile anywhere in a slice without moving the resident bytes — the aporon
+    ; discipline, made reachable. `qb` is bound at the block-0 byte base by the carrier. ---
+    (defn iq2m-dequant-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& cnt [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= cnt) return; w[i] = iq2_w(qb, off + i); }")))
+
+    ; each kernel self-contained (tables + spine + body); a unit that also needs a header reaches for
+    ; qml-msl-header in the assembling cell, exactly once.
+    (defn iq2m-dequant-msl (fname) (str_concat (iq2m-msl-helpers) (iq2m-dequant-body fname)))
+
+    0)
