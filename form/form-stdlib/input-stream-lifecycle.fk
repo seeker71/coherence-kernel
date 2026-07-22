@@ -1,0 +1,54 @@
+; input-stream-lifecycle.fk — explicit stream closure before silence.
+; Stop, handoff, offline, timeout, and nothing remain distinct observations.
+; preludes: form-stdlib/core.fk
+; witnessed: 2026-07-22 -> stop/handoff recorded before closure; seven states distinct; verdict 1
+(do
+  (defn isl-data () 0) (defn isl-stop () 1) (defn isl-handoff () 2)
+  (defn isl-heartbeat () 3) (defn isl-offline () 4) (defn isl-nothing () 5)
+  (defn isl-live () 0) (defn isl-stopped () 1) (defn isl-handed-off () 2)
+  (defn isl-went-offline () 3) (defn isl-timed-out () 4)
+  (defn isl-received-nothing () 5) (defn isl-stop-pending () 6)
+
+  ; [stream-id,sequence,kind,target-node,reason-node,ack]
+  (defn isl-signal (stream sequence kind target reason ack)
+    (list stream sequence kind target reason ack))
+  (defn isl-kind (s) (nth s 2)) (defn isl-target (s) (nth s 3))
+  (defn isl-reason (s) (nth s 4)) (defn isl-ack (s) (nth s 5))
+  (defn isl-acked? (s)
+    (if (or (eq (isl-ack s) 1)
+      (and (not (nothing? (isl-ack s))) (not (eq (isl-ack s) 0)))) 1 0))
+  (defn isl-stop-signal (stream sequence reason)
+    (isl-signal stream sequence (isl-stop) (nothing) reason 1))
+  (defn isl-handoff-signal (stream sequence target reason)
+    (isl-signal stream sequence (isl-handoff) target reason target))
+  (defn isl-offline-signal (stream sequence reason)
+    (isl-signal stream sequence (isl-offline) (nothing) reason 1))
+
+  ; Silence is interpreted only after checking the last explicit signal.
+  ; No frame + elapsed below timeout remains live. No frame at/after timeout is
+  ; timeout, never stop or offline. Offline requires its own observed signal.
+  (defn isl-transition (current signal elapsed timeout)
+    (if (nothing? signal)
+      (if (ge elapsed timeout) (isl-timed-out) current)
+      (if (eq (isl-kind signal) (isl-stop))
+        (if (eq (isl-acked? signal) 1) (isl-stopped) (isl-stop-pending))
+      (if (eq (isl-kind signal) (isl-handoff))
+        (if (eq (isl-acked? signal) 1) (isl-handed-off) (isl-stop-pending))
+      (if (eq (isl-kind signal) (isl-offline)) (isl-went-offline)
+      (if (eq (isl-kind signal) (isl-nothing)) (isl-received-nothing)
+        (isl-live)))))))
+
+  ; The control is recorded before the carrier closes. Event identity encodes
+  ; stream*100 + kind; source lineage retains the exact offered boundary.
+  (defn isl-record-control (signal line)
+    (fb_record (intern_trivial_int (add (mul (nth signal 0) 100) (isl-kind signal)))
+      "form/form-stdlib/input-stream-lifecycle.fk" line))
+  (defn isl-close-with-stop (stream sequence reason)
+    (do (let signal (isl-stop-signal stream sequence reason))
+      (let event (isl-record-control signal 72))
+      (list signal event (isl-transition (isl-live) signal 0 1000))))
+  (defn isl-close-with-handoff (stream sequence target reason)
+    (do (let signal (isl-handoff-signal stream sequence target reason))
+      (let event (isl-record-control signal 73))
+      (list signal event (isl-transition (isl-live) signal 0 1000))))
+  0)
