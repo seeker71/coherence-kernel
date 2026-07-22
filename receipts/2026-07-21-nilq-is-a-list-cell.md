@@ -216,7 +216,16 @@ The `len` fix was a symptom fix, and holding it against `axioms/core-axioms.form
 
 - **axiom-3** — *"a cell's identity is computed from its present composition."* The stamps ARE
   content addresses; a committed artifact carrying an identity its sources no longer produce is an
-  axiom-3 violation in the build, not the runtime.
+  axiom-3 violation in the build, not the runtime. This turned out to be **live on main, as a red
+  gate**: `origin/main`'s own `validate.sh` fails phase-0 with "flt-ops drifted from
+  native-op-manifest.fk". The drift is `nothing` (tag 137) and `nothing?` (138) — the axiom-1 ground
+  itself — hand-injected into the GENERATED flt-ops list and the emitted optable, in neither the
+  manifest nor any regen path, yet called in 94 places across 37 files (axiom-5's ack values). The
+  tooling's only offer, `gen_flt_ops --write`, resolves the drift by DELETING them, which heals the
+  gate by breaking 37 files. Healed instead by making the manifest OWN them (two rows added, flt-ops
+  regenerated from the manifest, optable byte-identical): the surface is now produced by its sources
+  rather than edited past them. That `nothing` is still surfaceless on go/rust/ts — axiom-1's third
+  state unnameable from Form on three of four arms — is the movement this unblocks, not completes.
 
 The correction to my own reporting, set down plainly: earlier this session I told the user "the full
 suite ran three times, diff-clean, 1214/111/853." Those runs had **no fourth arm** — three-arm
