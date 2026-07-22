@@ -1,0 +1,65 @@
+; active-learning-tier-cycle.fk — native-first, local-second, remote-last.
+; A higher-tier answer is a teaching observation. Held-out transfer, not the
+; training answer, decides when generation moves inward.
+; witnessed: 2026-07-22 -> routes remote,remote,remote,local,local,local,native
+(do
+  (defn alt-native () 0) (defn alt-local () 1) (defn alt-remote () 2)
+  (defn alt-error (initial transfer-per-variant variants)
+    (do (let e (sub initial (mul transfer-per-variant variants)))
+      (if (lt e 0) 0 e)))
+  (defn alt-ready? (initial transfer variants threshold min-variants)
+    (if (and (ge variants min-variants)
+             (le (alt-error initial transfer variants) threshold)) 1 0))
+
+  ; Every request tries native first. Local is tried only on native miss; remote
+  ; is tried only on both misses. Readiness is held-out transfer readiness.
+  (defn alt-route (native-ready local-ready)
+    (if (eq native-ready 1) (alt-native)
+      (if (eq local-ready 1) (alt-local) (alt-remote))))
+  (defn alt-route-after (variants ni ng li lg threshold minn)
+    (alt-route (alt-ready? ni ng variants threshold minn)
+               (alt-ready? li lg variants threshold minn)))
+
+  (defn alt-first-tier-loop (wanted variants limit ni ng li lg threshold minn)
+    (if (gt variants limit) (nothing)
+      (if (eq (alt-route-after variants ni ng li lg threshold minn) wanted) variants
+        (alt-first-tier-loop wanted (add variants 1) limit ni ng li lg threshold minn))))
+  (defn alt-first-tier (wanted limit ni ng li lg threshold minn)
+    (alt-first-tier-loop wanted 0 limit ni ng li lg threshold minn))
+
+  (defn alt-count-route-loop (tier at through ni ng li lg threshold minn)
+    (if (gt at through) 0
+      (add (if (eq (alt-route-after at ni ng li lg threshold minn) tier) 1 0)
+        (alt-count-route-loop tier (add at 1) through ni ng li lg threshold minn))))
+
+  (defn alt-routes (at through ni ng li lg threshold minn)
+    (if (gt at through) (list)
+      (cons (alt-route-after at ni ng li lg threshold minn)
+        (alt-routes (add at 1) through ni ng li lg threshold minn))))
+
+  ; Returns computed measurements, not a pinned route table:
+  ; [local-variant, native-variant, extra-local-variants,
+  ;  routes-at-each-variant, generation-counts[native,local,remote],
+  ;  final-route, final-heldout-errors[native,local], final-remote-generation]
+  (defn alt-simulate (limit native-initial native-transfer local-initial local-transfer threshold min-variants)
+    (do
+      (let local-at (alt-first-tier (alt-local) limit native-initial native-transfer
+                        local-initial local-transfer threshold min-variants))
+      (let native-at (alt-first-tier (alt-native) limit native-initial native-transfer
+                         local-initial local-transfer threshold min-variants))
+      (if (or (nothing? local-at) (nothing? native-at)) (nothing)
+        (do
+          (let routes (alt-routes 0 native-at native-initial native-transfer
+                          local-initial local-transfer threshold min-variants))
+          (let counts (list
+            (alt-count-route-loop (alt-native) 0 native-at native-initial native-transfer local-initial local-transfer threshold min-variants)
+            (alt-count-route-loop (alt-local) 0 native-at native-initial native-transfer local-initial local-transfer threshold min-variants)
+            (alt-count-route-loop (alt-remote) 0 native-at native-initial native-transfer local-initial local-transfer threshold min-variants)))
+          (list local-at native-at (sub native-at local-at) routes counts
+            (alt-route-after native-at native-initial native-transfer local-initial local-transfer threshold min-variants)
+            (list (alt-error native-initial native-transfer native-at)
+                  (alt-error local-initial local-transfer native-at))
+            (if (eq (alt-route-after native-at native-initial native-transfer local-initial local-transfer threshold min-variants)
+                    (alt-remote)) 1 0)))))
+
+  0)

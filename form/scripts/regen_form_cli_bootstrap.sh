@@ -43,7 +43,7 @@ FORM_CLI_SRCS=(
     form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
     form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
     form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk form-stdlib/form-cli-surface-inquiry.fk
-    form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry.fk form-stdlib/form-cli.fk
+    form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry.fk form-stdlib/relational-inquiry-metabolism.fk form-stdlib/form-cli.fk
     form-stdlib/form-cli-gguf-cell.fk form-stdlib/form-cli-repl.fk
 )
 
@@ -168,7 +168,7 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
     form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk form-stdlib/form-cli-surface-inquiry.fk
     form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry.fk form-stdlib/form-cli.fk
-    form-stdlib/form-cli-gguf-cell.fk
+    form-stdlib/form-cli-gguf-cell.fk form-stdlib/relational-inquiry-metabolism.fk
 )
 FORM_CLI_FLATTEN_SRCS=()
 for src in "${FORM_CLI_SELFHOST_ORDER[@]}"; do
@@ -185,6 +185,7 @@ core_src="$(compile_bml "$stdlib/core.fk")"
 http_client_src="$(compile_bml "$stdlib/http-client.fk")"
 form_cli_ask_src="$(compile_bml "$stdlib/form-cli-ask.fk")"
 modules="(list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/grammars/sanskrit-roots.fk\") (read_file \"$stdlib/resource-port.fk\") (read_file \"$stdlib/bml-native-interface-package-import.fk\") (read_file \"$stdlib/hati-os-targets.fk\") (read_file \"$stdlib/form-native-resource-interfaces.fk\") (read_file \"$stdlib/form-fs.fk\") (read_file \"$stdlib/storage-port.fk\") (read_file \"$stdlib/host-kernel-carrier.fk\") (read_file \"$stdlib/fnri-standin.fk\") (read_file \"$stdlib/fnri-receipt.fk\") (read_file \"$http_client_src\") (read_file \"$stdlib/line-grammar.fk\") (read_file \"$stdlib/str-byte-at.fk\") (read_file \"$stdlib/sha256.fk\") (read_file \"$stdlib/hmac-sha256.fk\") (read_file \"$stdlib/hex.fk\") (read_file \"$stdlib/format-arith.fk\") (read_file \"$stdlib/f16-decode.fk\") (read_file \"$stdlib/q6k-dequant.fk\") (read_file \"$stdlib/q4k-dequant.fk\") (read_file \"$stdlib/weight-load.fk\") (read_file \"$stdlib/voice-traits.fk\") (read_file \"$stdlib/nearest-shape.fk\") (read_file \"$stdlib/co-learning.fk\") (read_file \"$stdlib/co-learning-stream.fk\") (read_file \"$stdlib/mesh-dispatch.fk\") (read_file \"$stdlib/surprise-salience.fk\") (read_file \"$stdlib/host-sense-organ.fk\") (read_file \"$stdlib/speech-organ.fk\") (read_file \"$stdlib/native-host-instance.fk\") (read_file \"$stdlib/text-tokenize.fk\") (read_file \"$stdlib/rag-embed.fk\") (read_file \"$stdlib/rag-index-codec.fk\") (read_file \"$stdlib/rag-retrieve.fk\") (read_file \"$stdlib/rag-ask.fk\") (read_file \"$form_cli_ask_src\") (read_file \"$stdlib/form-cli-router.fk\") (read_file \"$stdlib/form-cli-judge.fk\") (read_file \"$stdlib/confidence-weighted-vote.fk\") (read_file \"$stdlib/lineage-discounted-vote.fk\") (read_file \"$stdlib/form-cli-oracle-loop.fk\") (read_file \"$stdlib/form-cli-sufficiency.fk\") (read_file \"$stdlib/form-freq-check.fk\") (read_file \"$stdlib/trust-row.fk\") (read_file \"$stdlib/form-cli-ask-gate.fk\") (read_file \"$stdlib/form-cli-staged-trace.fk\") (read_file \"$stdlib/form-cli-request.fk\") (read_file \"$carrier_src\") (read_file \"$stdlib/form-cli-ask-plus.fk\") (read_file \"$stdlib/form-cli-surface-inquiry.fk\") (read_file \"$stdlib/current-branch-landing.fk\") (read_file \"$stdlib/form-cli-inquiry.fk\") (read_file \"$stdlib/form-cli.fk\") (read_file \"$stdlib/form-cli-gguf-cell.fk\"))"
+modules="${modules%)} (read_file \"$stdlib/relational-inquiry-metabolism.fk\"))"
 band="(read_file \"$stdlib/form-cli-repl.fk\")"
 FLATTEN_CHAIN=(
     form-stdlib/minimal-surface.fk
