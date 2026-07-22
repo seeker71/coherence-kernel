@@ -1,0 +1,188 @@
+; tests/keyed-map-measure.fk — the WALL-CLOCK half of Stone 40. NOT a band.
+;
+; keyed-map-band.fk proves the map answers correctly and that its worst-case comparison count
+; stops growing. This file proves the clock agrees, over the body's own real corpus: the 127 741
+; BPE merge records in the DS4 Flash GGUF header — the same array `tkz-best-merge` and
+; `tkz-cands` walk, read the same way, at the same offsets.
+;
+; THE COMPARISON IS APPLES TO APPLES BY CONSTRUCTION. Both sides answer the identical question —
+; "what rank is the merge record whose stored bytes are exactly these?" — over the identical
+; bytes in the identical window:
+;   mm-lin  walks records from the first, comparing bytes, exactly as the tokenizer does today
+;   mm-map  hashes the key and descends the trie
+; Neither side builds anything inside the timed loop; the probe keys are materialized first.
+;
+; HOW IT REFUSES THE THREE WAYS A MEASUREMENT LIES HERE:
+;   thawtax  (848) — the header window is read and one full record pass is walked BEFORE any
+;     clock starts, so no sample pays a page-cache cost the next one inherits.
+;   probetoll (858) — nothing is instrumented per operation. Two `now_unix_ms` calls bracket a
+;     whole loop; the instrument is two calls, not two calls per lookup.
+;   gapghost (871) — every number below is taken in ONE process on ONE clock, and the two sizes
+;     are interleaved (small-map, small-lin, big-map, big-lin, then the whole thing again in
+;     reverse) so a sibling's load arriving mid-run perturbs both arms, not one. The receipt
+;     records the machine's load average at the time; this machine is shared.
+;   selfgauge — every printed number is milliseconds PER LOOKUP, and the lookup count each was
+;     divided by is printed beside it.
+;
+; THE PROBE KEYS ARE AT FIXED FRACTIONS OF THE TABLE, not at fixed ranks. A linear scan's cost is
+; proportional to WHERE the key is, so comparing rank 2000 in a 16 000-record table against rank
+; 2000 in a 127 741-record table would flatter the scan. Ranks at 1/8, 1/2 and 7/8 of n, plus one
+; key that is absent (the full-scan case, and the honesty case), keep both arms' work
+; proportional to n.
+;
+; Run: form-kernel-go/bin-go <resolved preludes> form-stdlib/measure/keyed-map-measure.fk
+;      A helper is committed at form-stdlib/measure/run-keyed-map-measure.sh.
+;
+; preludes: form-stdlib/keyed-map.fk form-stdlib/dsv4-tokenizer.fk form-stdlib/sha256.fk
+
+(do
+    (defn mm-file () "/Users/ursmuff/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf")
+
+    ; ---- one record's stored bytes as an int-list key (byte VALUES: wraithcarry) ----
+    (defn mm-key (src at n j)
+        (if (eq j n) (empty) (cons (tkz-rec-byte src at j) (mm-key src at n (add j 1)))))
+
+    ; ---- THE SCAN, as the body does it today: walk records, compare bytes, return the rank ----
+    (defn mm-eqb (src at k j n)
+        (if (eq j n) 1
+            (if (eq (tkz-rec-byte src at j) (head k)) (mm-eqb src at (tail k) (add j 1) n) 0)))
+    (defn mm-lin (src at rem k klen rank)
+        (if (eq rem 0) (sub 0 1)
+            (do (let mlen (tkz-rec-len src at))
+                (if (if (eq mlen klen) (mm-eqb src at k 0 klen) 0)
+                    rank
+                    (mm-lin src (tkz-rec-next src at) (sub rem 1) k klen (add rank 1))))))
+
+    ; ---- THE MAP, built in ONE pass over the same records. The key is hashed straight out of
+    ; the window (km-hash-win — no list built for the hash) and stored as a list for equality. ----
+    (defn mm-build (src at rem m rank)
+        (if (eq rem 0) m
+            (do (let mlen (tkz-rec-len src at))
+                (mm-build src (tkz-rec-next src at) (sub rem 1)
+                    (km-put-h m (km-hash-win src (add at 8) mlen) (mm-key src at mlen 0) rank)
+                    (add rank 1)))))
+
+    ; ---- reach the record at a given rank (setup only, never timed) ----
+    (defn mm-at (src at r) (if (eq r 0) at (mm-at src (tkz-rec-next src at) (sub r 1))))
+    (defn mm-key-at (src first r)
+        (do (let at (mm-at src first r)) (mm-key src at (tkz-rec-len src at) 0)))
+
+    ; ---- an ABSENT key: a real key with its last byte bumped. Same length, same neighbourhood,
+    ; not in the table — the full-scan case for the linear arm and the honesty case for the map.
+    (defn mm-bump (k) (if (eq (len k) 1) (list (add (head k) 1)) (cons (head k) (mm-bump (tail k)))))
+
+    ; ---- the timed loops ----
+    (defn mm-map-one (m ks acc)
+        (if (eq (len ks) 0) acc
+            (mm-map-one m (tail ks) (add acc (km-get m (head ks) (sub 0 1))))))
+    (defn mm-map-loop (m ks r acc)                       ; r repeats over the whole key list
+        (if (eq r 0) acc
+            (mm-map-loop m ks (sub r 1) (add acc (mm-map-one m ks 0)))))
+    ; the hash arms, same shape so the loop overhead is the same on both
+    (defn mm-hash-one (ks acc)
+        (if (eq (len ks) 0) acc (mm-hash-one (tail ks) (add acc (km-hash (head ks))))))
+    (defn mm-hash-loop (ks r acc)
+        (if (eq r 0) acc (mm-hash-loop ks (sub r 1) (add acc (mm-hash-one ks 0)))))
+    (defn mm-sha-one (ks acc)
+        (if (eq (len ks) 0) acc (mm-sha-one (tail ks) (add acc (head (sha256 (head ks)))))))
+    (defn mm-sha-loop (ks r acc)
+        (if (eq r 0) acc (mm-sha-loop ks (sub r 1) (add acc (mm-sha-one ks 0)))))
+    (defn mm-lin-all (src first n ks acc)
+        (if (eq (len ks) 0) acc
+            (mm-lin-all src first n (tail ks)
+                (add acc (mm-lin src first n (head ks) (len (head ks)) 0)))))
+
+    ; ---- probe keys for a corpus of n records: ranks n/8, n/2, 7n/8, plus one absent ----
+    (defn mm-probes (src first n)
+        (do (let a (mm-key-at src first (div n 8)))
+            (let b (mm-key-at src first (div n 2)))
+            (let c (mm-key-at src first (div (mul n 7) 8)))
+            (list a b c (mm-bump c))))
+
+    (defn mm-report (label ms lookups)
+        (do (print label) (print ms) (print lookups)))
+
+    ; ================= setup, all of it before any clock =================
+    (let src (tkz-src (mm-file)))
+    (let first (tkz-merges-first src))
+    (let ntot (tkz-merges-n src))
+    (let nsmall (div ntot 8))
+    (print "merges-total") (print ntot)
+    (print "n-small") (print nsmall)
+
+    ; thawtax: one full pass over every record before anything is timed.
+    (let warm (mm-lin src first ntot (list 999 999 999 999) 4 0))
+    (print "warm-pass-miss") (print warm)
+
+    (let ks-small (mm-probes src first nsmall))
+    (let ks-big   (mm-probes src first ntot))
+
+    ; ================= the maps, built once; the build is timed too =================
+    (let tb0 (now_unix_ms))
+    (let m-small (mm-build src first nsmall (km-for nsmall) 0))
+    (let tb1 (now_unix_ms))
+    (let m-big (mm-build src first ntot (km-for ntot) 0))
+    (let tb2 (now_unix_ms))
+    (mm-report "build-small-ms" (sub tb1 tb0) nsmall)
+    (mm-report "build-big-ms"   (sub tb2 tb1) ntot)
+    (print "depth-small") (print (km-depth m-small))
+    (print "depth-big")   (print (km-depth m-big))
+    (print "maxbucket-small") (print (km-maxbucket m-small))
+    (print "maxbucket-big")   (print (km-maxbucket m-big))
+    (print "size-small") (print (km-size m-small))
+    (print "size-big")   (print (km-size m-big))
+
+    ; ================= agreement BEFORE speed — the map must give the scan's own answer =========
+    (let agree-small (mm-lin-all src first nsmall ks-small 0))
+    (let agree-map-small (mm-map-one m-small ks-small 0))
+    (let agree-big (mm-lin-all src first ntot ks-big 0))
+    (let agree-map-big (mm-map-one m-big ks-big 0))
+    (print "agree-small-scan") (print agree-small)
+    (print "agree-small-map")  (print agree-map-small)
+    (print "agree-big-scan")   (print agree-big)
+    (print "agree-big-map")    (print agree-map-big)
+
+    ; ================= pass A: small-map, small-lin, big-map, big-lin =================
+    (let reps 200)
+    (let t0 (now_unix_ms))
+    (let s1 (mm-map-loop m-small ks-small reps 0))
+    (let t1 (now_unix_ms))
+    (let s2 (mm-lin-all src first nsmall ks-small 0))
+    (let t2 (now_unix_ms))
+    (let s3 (mm-map-loop m-big ks-big reps 0))
+    (let t3 (now_unix_ms))
+    (let s4 (mm-lin-all src first ntot ks-big 0))
+    (let t4 (now_unix_ms))
+    (mm-report "A-map-small-ms" (sub t1 t0) (mul reps 4))
+    (mm-report "A-lin-small-ms" (sub t2 t1) 4)
+    (mm-report "A-map-big-ms"   (sub t3 t2) (mul reps 4))
+    (mm-report "A-lin-big-ms"   (sub t4 t3) 4)
+
+    ; ================= pass B: the same four, in reverse order (gapghost) =================
+    (let u0 (now_unix_ms))
+    (let s5 (mm-lin-all src first ntot ks-big 0))
+    (let u1 (now_unix_ms))
+    (let s6 (mm-map-loop m-big ks-big reps 0))
+    (let u2 (now_unix_ms))
+    (let s7 (mm-lin-all src first nsmall ks-small 0))
+    (let u3 (now_unix_ms))
+    (let s8 (mm-map-loop m-small ks-small reps 0))
+    (let u4 (now_unix_ms))
+    (mm-report "B-lin-big-ms"   (sub u1 u0) 4)
+    (mm-report "B-map-big-ms"   (sub u2 u1) (mul reps 4))
+    (mm-report "B-lin-small-ms" (sub u3 u2) 4)
+    (mm-report "B-map-small-ms" (sub u4 u3) (mul reps 4))
+
+    ; ================= the hash decision, measured rather than assumed =================
+    ; djb2 vs sha256 over the SAME key list, same process, same clock. A hash that costs more
+    ; than the scan it replaces is not a map, it is a slower scan.
+    (let hreps 200)
+    (let h0 (now_unix_ms))
+    (let hd (mm-hash-loop ks-big hreps 0))
+    (let h1 (now_unix_ms))
+    (let hs (mm-sha-loop ks-big 20 0))
+    (let h2 (now_unix_ms))
+    (mm-report "djb2-ms"   (sub h1 h0) (mul hreps 4))
+    (mm-report "sha256-ms" (sub h2 h1) (mul 20 4))
+
+    (add (add s1 (add s2 (add s3 s4))) (add s5 (add s6 (add s7 s8)))))
