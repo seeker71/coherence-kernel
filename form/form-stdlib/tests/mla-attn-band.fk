@@ -1,0 +1,166 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk
+;
+; mla-attn-band — Multi-head Latent Attention (mla-attn.fk), the attention
+; DeepSeek-V4-Flash uses. Six strange-minimal claims at rank-tiny dims
+; (E=4, R=3, nh=2, hd=4, nrot=2, ng=2, three positions), verdict 63 when all cross.
+;
+; ---------------------------------------------------------------------------
+; APORON — THE DECLARED RADIUS. Read this before believing the number.
+;
+; WHAT THIS BAND PROVES
+;   The arithmetic of one MLA attention block, as ds4-engine's CPU reference performs
+;   it, is reproduced by this body at tiny rank: the two low-rank projections, the
+;   rank-space and per-head RMSNorms, the tail-only RoPE with its split, the
+;   sink-aware softmax over latent rows where K and V are the SAME row, the inverse
+;   output rotation, and the grouped low-rank output projection.
+;
+; WHAT IT DOES NOT PROVE
+;   * NOT bit-exactness. There is no independent MLA implementation in this repo to
+;     be bit-exact against. Claim 1's evidence class is AGREEMENT AT 1e-9 WITH AN
+;     INDEPENDENT fp64 TRANSCRIPTION of ds4.c's C reference, written from the C
+;     control flow and not from this recipe (receipts/2026-07-22-mla-recipe.md
+;     records the transcription and where it lives). Observed agreement was ~2e-11;
+;     the residual is this body's own fsin/fcos against libm, NOT the decomposition.
+;   * NOT the real dims. nh=2, hd=4, nrot=2 here; V4-Flash is nh=64, hd=512, nrot=64,
+;     n_lora_q=1024, n_embd=4096, 43 layers. The recipe is rank-generic — the real
+;     dims are a substitution, not a rewrite — but no claim here has SEEN them.
+;   * NOT the quantisation. ds4 stores the cache as E4M3 on the non-rotated part and
+;     f16 on the whole row. This band is fp64 end to end. The cache SHAPE is proven;
+;     the cache ENCODING is not.
+;   * NOT the layer. No residual, no HC mixing, no MoE FFN, no multi-layer stack, no
+;     real weights, no token. This is the attention half of one layer, once.
+;   * NOT the GPU. CPU recipe only; Metal emission is the next stone.
+;
+; A gate that read only "the output has E floats and no NaN" would pass on nonsense.
+; Claims 2, 4, 16 and 32 exist because a beautiful reading needed a falsifier: that RoPE
+; covers the whole head (2), that the inverse output rotation is a no-op (32), that
+; attention weights sum to 1 (16).
+; ---------------------------------------------------------------------------
+;
+;   bit  1  AGREEMENT: the three cache rows and the three block outputs at positions
+;           0,1,2 match an INDEPENDENT fp64 transcription of ds4.c's reference at 1e-9.
+;   bit  2  THE SPLIT IS A SPLIT: at pos=2 the first hd-nrot dims of a rope'd vector are
+;           EXACTLY the input's (maxdiff 0.0) and the tail is NOT (maxdiff > 0.1).
+;           Falsifies "RoPE rotates the whole head" — it would break both halves.
+;   bit  4  ROTATION LAW: pos=0 is exactly the identity (maxdiff 0.0 — fcos 0.0 is
+;           exactly 1 and fsin 0.0 exactly 0 here), and inverse ∘ forward at pos=3
+;           round-trips to 1e-9. NOT tighter: the measured round-trip residual is
+;           5.1e-11, and it is this body's fsin/fcos at 3 rad, not the rotation law.
+;   bit  8  THE LATENT ROUND-TRIPS / the absorbed form IS the classic one: the classic
+;           factored path (mla-c-heads, per-head k_b/v_b up-projection + shared rope'd
+;           key tail — ds4.c:14043's shape) with IDENTITY up-projections reproduces the
+;           absorbed path's heads at 1e-9, once the sinks are pushed to -1000 so the
+;           sink term vanishes. The up-projection is exercised, and V4-Flash is placed
+;           as the identity case of general MLA.
+;   bit 16  THE SINK IS REAL: with one cached row and a finite sink the head output is
+;           NOT that row (the weights sum to less than 1 — a strictly shrunk row),
+;           while at sink -1000 it IS that row to 1e-12. "Attention rows sum to 1" is
+;           FALSE for this architecture; a gate asserting it would be asserting a bug.
+;   bit 32  THE INVERSE OUTPUT ROTATION IS NOT DECORATION: omitting it moves the block
+;           output by more than 1e-3. The output is a mixture of latent rows rotated at
+;           THEIR positions and is consumed by a position-free matrix.
+
+(do
+  (defn mlab-vmaxdiff (a b)
+    (if (eq (len a) 0) 0.0
+        (do (let d (tn-abs (sub (head a) (head b))))
+            (let r (mlab-vmaxdiff (tail a) (tail b)))
+            (if (gt d r) d r))))
+  (defn mlab-maxdiff (as bs)
+    (if (eq (len as) 0) 0.0
+        (do (let d (mlab-vmaxdiff (head as) (head bs)))
+            (let r (mlab-maxdiff (tail as) (tail bs)))
+            (if (gt d r) d r))))
+  ; identity matrix rows, and its first k rows
+  (defn mlab-erow (i n) (if (eq n 0) (empty) (cons (if (eq i 0) 1.0 0.0) (mlab-erow (sub i 1) (sub n 1)))))
+  (defn mlab-eye (i k n) (if (eq i k) (empty) (cons (mlab-erow i n) (mlab-eye (add i 1) k n))))
+  (defn mlab-rep (v n) (if (eq n 0) (empty) (cons v (mlab-rep v (sub n 1)))))
+  ; a classic-form cached row: (latent, krot). nnope = hd - nrot (a defn frame cannot
+  ; see the enclosing lets, so the split width is a parameter).
+  (defn mlab-crow (r nnope) (list r (tb-drop nnope r)))
+  (defn mlab-crows (rs nnope)
+    (if (eq (len rs) 0) (empty) (cons (mlab-crow (head rs) nnope) (mlab-crows (tail rs) nnope))))
+
+  (let eps 0.00001)
+  (let base 10000.0)
+  (let nh 2) (let hd 4) (let nrot 2) (let ng 2)
+  (let c (mla-cfg nh hd nrot ng base eps))
+
+  (let an (list 1.0 1.0 1.0 1.0))
+  (let wqa (list (list 0.1 -0.2 0.3 0.4) (list -0.5 0.6 0.1 -0.2) (list 0.2 0.3 -0.4 0.5)))
+  (let gqa (list 1.0 1.0 1.0))
+  (let wqb (list (list 0.2 -0.1 0.4) (list 0.5 0.3 -0.2) (list -0.3 0.6 0.1) (list 0.1 0.2 0.3)
+                 (list 0.4 -0.5 0.2) (list -0.1 0.3 0.5) (list 0.6 0.1 -0.4) (list 0.2 -0.3 0.1)))
+  (let wkv (list (list 0.3 0.1 -0.2 0.5) (list -0.4 0.2 0.6 0.1)
+                 (list 0.2 -0.5 0.3 -0.1) (list 0.1 0.4 -0.3 0.2)))
+  (let gkv (list 1.0 1.0 1.0 1.0))
+  (let was (list (list (list 0.1 0.2 -0.3 0.4) (list 0.5 -0.1 0.2 0.3))
+                 (list (list -0.2 0.4 0.1 -0.5) (list 0.3 0.2 -0.4 0.1))))
+  (let wb (list (list 0.2 -0.3 0.4 0.1) (list -0.1 0.5 0.2 -0.4)
+                (list 0.3 0.1 -0.2 0.5) (list 0.4 -0.2 0.1 0.3)))
+  (let sinks (list 0.0 0.5))
+  (let w (mla-w an wqa gqa wqb wkv gkv was wb sinks))
+
+  (let x0 (list 0.5 -0.3 0.9 0.2))
+  (let x1 (list -0.4 0.7 -0.1 0.6))
+  (let x2 (list 0.2 0.1 -0.8 0.4))
+
+  ; --- claim 1: agreement with the independent transcription ---
+  (let r0 (mla-cache-row w c x0 0))
+  (let r1 (mla-cache-row w c x1 1))
+  (let r2 (mla-cache-row w c x2 2))
+  (let o0 (mla-block-one w c x0 0 (list r0)))
+  (let o1 (mla-block-one w c x1 1 (list r0 r1)))
+  (let o2 (mla-block-one w c x2 2 (list r0 r1 r2)))
+  (let ref (list
+    (list 0.12177083434262706 0.9132812575697031 1.5221354292828386 -0.9132812575697034)
+    (list 0.7057706876207932 0.7841896529119925 -1.5922471193898504 -0.5929702674693246)
+    (list 1.0558638846329784 -1.2277487030616028 -0.5521196711914005 -1.035807508688837)
+    (list 0.10371976393404729 0.18446139509871373 -0.24450007301810356 -0.09986998400750614)
+    (list 0.2637248425111647 -0.05404736907958933 0.14528571570019377 0.24713930646017315)
+    (list -0.10171868446008428 0.05634827138540402 0.47156254217532556 0.19090032547105806)))
+  (let got (list r0 r1 r2 o0 o1 o2))
+  (let c1 (if (lt (mlab-maxdiff got ref) 0.000000001) 1 0))
+
+  ; --- claim 2: the split is a split (front untouched, tail moved) ---
+  (let vv (list 0.3 -0.7 0.9 0.25))
+  (let vr (mla-rope-tail vv nrot 2 base 1.0))
+  (let front-same (mlab-vmaxdiff (tb-take vr (sub hd nrot)) (tb-take vv (sub hd nrot))))
+  (let tail-moved (mlab-vmaxdiff (tb-drop (sub hd nrot) vr) (tb-drop (sub hd nrot) vv)))
+  (let c2 (if (eq front-same 0.0) (if (gt tail-moved 0.1) 2 0) 0))
+
+  ; --- claim 4: pos=0 identity, and inverse ∘ forward round-trips ---
+  (let v0 (mla-rope-tail vv nrot 0 base 1.0))
+  (let vfwd (mla-rope-tail vv nrot 3 base 1.0))
+  (let vback (mla-rope-tail vfwd nrot 3 base -1.0))
+  (let c4 (if (eq (mlab-vmaxdiff v0 vv) 0.0)
+              (if (lt (mlab-vmaxdiff vback vv) 0.000000001) 4 0) 0))
+
+  ; --- claim 8: the classic up-projection path, with identity up-projections,
+  ;     reproduces the absorbed path (sinks pushed out of the way) ---
+  (let deaf (mlab-rep -1000.0 nh))
+  (let wd (mla-w an wqa gqa wqb wkv gkv was wb deaf))
+  (let rows (list r0 r1 r2))
+  (let nq (mla-pre wd c x2))
+  (let q2 (mla-rope-heads (mla-q-proj nq wqa gqa wqb nh hd eps) 0 nh hd nrot 2 base 1.0))
+  (let heads-abs (mla-attn-heads q2 rows 0 nh hd (mla-scale c) deaf))
+  ; classic rows: (latent, krot) with latent = the full row and krot = its tail;
+  ; k_b = the first hd-nrot rows of the identity, v_b = the identity.
+  (let kb (mlab-rep (mlab-eye 0 (sub hd nrot) hd) nh))
+  (let vb (mlab-rep (mlab-eye 0 hd hd) nh))
+  (let heads-cls (mla-c-heads q2 kb vb 0 nh hd (mlab-crows rows (sub hd nrot)) (mla-scale c)))
+  (let c8 (if (lt (mlab-vmaxdiff heads-abs heads-cls) 0.000000001) 8 0))
+
+  ; --- claim 16: the sink is real — one row, finite sink, shrunk output ---
+  (let qh (tb-vslice q2 hd hd))
+  (let one-sink (mla-attend-head qh (list r0) (mla-scale c) 0.5))
+  (let one-deaf (mla-attend-head qh (list r0) (mla-scale c) -1000.0))
+  (let c16 (if (gt (mlab-vmaxdiff one-sink r0) 0.001)
+               (if (lt (mlab-vmaxdiff one-deaf r0) 0.000000000001) 16 0) 0))
+
+  ; --- claim 32: the inverse output rotation is not decoration ---
+  (let heads2 (mla-attn-heads q2 rows 0 nh hd (mla-scale c) sinks))
+  (let no-back (mla-out-proj heads2 ng (mul (div nh ng) hd) was wb))
+  (let c32 (if (gt (mlab-vmaxdiff no-back o2) 0.001) 32 0))
+
+  (add c1 (add c2 (add c4 (add c8 (add c16 c32))))))
