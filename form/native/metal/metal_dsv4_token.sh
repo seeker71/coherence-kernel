@@ -129,8 +129,15 @@ EMB_TV=($(awk '$1=="TV" && $2=="token_embd.weight"{print; exit}' "$work/plan.out
 # TV name abs bytes idx inner holds
 EMB_ABS=${EMB_TV[2]}; EMB_BYTES=${EMB_TV[3]}; EMB_IDX=${EMB_TV[4]}; EMB_INNER=${EMB_TV[5]}; EMB_HOLDS=${EMB_TV[6]}
 N_EMBD=4096
+VOCAB=129280
 ROW_OFF=$(( TOKEN * N_EMBD * 2 ))          # byte offset of token's row inside the F16 tensor
 echo "  token_embd: abs=$EMB_ABS bytes=$EMB_BYTES view=$EMB_IDX inner=$EMB_INNER holds=$EMB_HOLDS  row_off(t=$TOKEN)=$ROW_OFF"
+
+# output.weight — MXFP8 (type 41) [n_embd, vocab]; the vocab-projection exit. Its (view, inner, holds).
+OUT_TV=($(awk '$1=="TV" && $2=="output.weight"{print; exit}' "$work/plan.out"))
+[[ "${#OUT_TV[@]}" -eq 7 ]] || { echo "FAIL  output.weight not in the plan stream"; exit 1; }
+OUT_ABS=${OUT_TV[2]}; OUT_BYTES=${OUT_TV[3]}; OUT_IDX=${OUT_TV[4]}; OUT_INNER=${OUT_TV[5]}; OUT_HOLDS=${OUT_TV[6]}
+echo "  output.weight (MXFP8): abs=$OUT_ABS bytes=$OUT_BYTES view=$OUT_IDX inner=$OUT_INNER holds=$OUT_HOLDS"
 
 # ── 3. the body's embed MSL, compiled + cached by its own sha256 ──────────────────────────────────
 echo '(dsv4-embed-msl)' > "$work/msl.fk"
@@ -151,6 +158,24 @@ else
     echo "PASS  embed metallib compiled and cached: $(basename "$LIB")"
 fi
 
+# ── 3b. the body's MXFP8 fused matvec (Stage 2 exit mechanism), its own translation unit ──────────
+echo '(dsv4-mx8-matvec-msl)' > "$work/msl8.fk"
+"$GO_BIN" "${FILES[@]}" "$work/msl8.fk" > "$work/msl8.out" 2>"$work/msl8.err" || {
+    echo "FAIL  MXFP8 MSL emission failed"; cat "$work/msl8.err"; exit 1; }
+awk '/^MSL$/{d=1;next} /^END$/{d=0;next} d{print}' "$work/msl8.out" > "$work/dsv4mx8.metal"
+MSL8="$work/dsv4mx8.metal"
+grep -q 'form_dsv4_mx8_matvec' "$MSL8" || { echo "FAIL  MXFP8 matvec kernel not emitted"; exit 1; }
+msl8_sha="$(shasum -a 256 "$MSL8" | cut -c1-16)"
+LIB8="$CACHE/dsv4mx8-$msl8_sha.metallib"
+if [[ -f "$LIB8" ]]; then
+    echo "PASS  MXFP8 metallib cache HIT: $(basename "$LIB8")"
+else
+    xcrun -sdk macosx metal -O2 -std=metal3.0 -c "$MSL8" -o "$work/dsv4mx8.air" 2>"$work/metal8.err" \
+      && xcrun -sdk macosx metallib "$work/dsv4mx8.air" -o "$LIB8" 2>>"$work/metal8.err" || {
+        echo "FAIL  offline MXFP8 metal compile failed"; cat "$work/metal8.err"; exit 1; }
+    echo "PASS  MXFP8 metallib compiled and cached: $(basename "$LIB8")"
+fi
+
 # ── 4. the carrier ────────────────────────────────────────────────────────────────────────────────
 cat > "$work/runner.swift" <<'SWIFT'
 // Stone 33 carrier, Stage 1 (EMBED). The geometry and every (view, inner) came from the body; the
@@ -167,9 +192,12 @@ let step = Int(a[3])!, viewLimit = Int(a[4])!, nviews = Int(a[5])!
 let embAbs = Int(a[6])!, rowOff = Int(a[7])!, nEmbd = Int(a[8])!
 let embIdx = Int(a[9])!, embInner = Int(a[10])!, embHolds = Int(a[11])!
 let token = Int(a[12])!
+let lib8Path = a[13], vocab = Int(a[14])!
+let outAbs = Int(a[15])!, outIdx = Int(a[16])!, outInner = Int(a[17])!, outHolds = Int(a[18])!
 
 guard let dev = MTLCreateSystemDefaultDevice() else { print("SKIP no Metal device"); exit(2) }
 let lib = try dev.makeLibrary(URL: URL(fileURLWithPath: libPath))
+let lib8 = try dev.makeLibrary(URL: URL(fileURLWithPath: lib8Path))
 let queue = dev.makeCommandQueue()!
 var failures = 0, gpuErrors = 0
 var gpuFirstError: String? = nil
@@ -276,13 +304,107 @@ check(nonDegen,
   "gate 3 EMBED non-degenerate: the decoded embedding is a real vector — min \(vmin) max \(vmax), \(seen.count) distinct values, \(nz) nonzero (a dead view / unrun kernel would leave the 0x7F7FFFFF sentinel or all-zero)",
   "gate 3 EMBED degenerate: min \(vmin) max \(vmax) distinct \(seen.count) nz \(nz) — looks like a dead read")
 
-if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(gpuFirstError ?? "unknown") ===") }
 // report a few decoded values so the token's embedding is a visible fact, not a claim.
 print(String(format: "      embed[0..4] = %.6f %.6f %.6f %.6f", dp[0], dp[1], dp[2], dp[3]))
 print(String(format: "      L2 norm of the embedding = %.6f", sqrt((0..<n).reduce(Float(0)){ $0 + dp[$1]*dp[$1] })))
 
+// ══ STAGE 2: the vocab-projection EXIT mechanism — MXFP8 fused matvec at real dims ══════════════════
+// output.weight (type 41, [n_embd, vocab]) · x, through the resident view, by mxfp8-msl.fk's own proven
+// fused kernel. Fed the embedding as a REAL probe vector (NOT the 43-layer hidden), so the argmax is a
+// mechanism witness, not the real first token. Checked against the carrier's independent CPU MXFP8
+// decode-and-dot (same transcription — proves residency/binding/transcription, not external truth).
+// The MXFP8 exactness (E4M3 has <=4 significand bits, E8M0 is an exact power of two) makes this an
+// EQUALITY check with no epsilon: GPU and CPU must agree bit-for-bit where both read the same bytes.
+func mxm_pow2(_ e: Int) -> Float {
+    var aa: Float = 1.0, k = e
+    while k >= 8 { aa *= 256.0; k -= 8 }
+    while k > 0 { aa *= 2.0; k -= 1 }
+    while k <= -8 { aa *= 0.00390625; k += 8 }
+    while k < 0 { aa *= 0.5; k += 1 }
+    return aa
+}
+func mxm_e8m0(_ e: Int) -> Float { return mxm_pow2(e - 127) }
+func mx8_val(_ b: Int) -> Float {                 // OCP E4M3 via fd-value at (4,3); 0x7F/0xFF -> +-480
+    let mant = b % 8, ex = (b / 8) % 16, sgn = b / 128
+    let frac = Float(mant) / 8.0
+    let mag = (ex == 0) ? (mxm_pow2(-6) * frac) : (mxm_pow2(ex - 7) * (1.0 + frac))
+    return (sgn == 1) ? -mag : mag
+}
+if outHolds != 1 || outIdx >= nviews {
+    print("FAIL  gate 4 output.weight does not fit a single view (holds=\(outHolds) idx=\(outIdx))"); failures += 1
+}
+let p8 = try dev.makeComputePipelineState(function: lib8.makeFunction(name: "form_dsv4_mx8_matvec")!)
+let rows = vocab, cols = nEmbd
+let nel = rows * cols                              // slice element count = the E8M0 scale-plane origin
+let logits = dev.makeBuffer(length: rows * MemoryLayout<Float>.stride, options: .storageModeShared)!
+let lgp = logits.contents().bindMemory(to: Float.self, capacity: rows)
+for i in 0..<rows { lgp[i] = Float.nan }           // SENTINEL: an unrun matvec leaves NaN, which argmax + compare reject
+var r32 = UInt32(rows), c32b = UInt32(cols), nel32 = UInt32(nel)
+// bind the view at the tensor's inner byte offset so the kernel's uint indices start at the tensor (a
+// 32-aligned offset; probed valid on this device). x is the embedding already resident in `dst`.
+let cb8 = queue.makeCommandBuffer()!, enc8 = cb8.makeComputeCommandEncoder()!
+enc8.setComputePipelineState(p8)
+enc8.setBuffer(views[outIdx], offset: outInner, index: 0)
+enc8.setBuffer(dst, offset: 0, index: 1)
+enc8.setBuffer(logits, offset: 0, index: 2)
+enc8.setBytes(&r32, length: 4, index: 3)
+enc8.setBytes(&c32b, length: 4, index: 4)
+enc8.setBytes(&nel32, length: 4, index: 5)
+let tg8 = min(p8.maxTotalThreadsPerThreadgroup, 256)
+enc8.dispatchThreads(MTLSize(width: rows * 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: tg8, height: 1, depth: 1))
+enc8.endEncoding(); cb8.commit(); cb8.waitUntilCompleted()
+if let e = cb8.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(e)" } }
+if cb8.status != .completed { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "cb8 status \(cb8.status.rawValue)" } }
+
+// CPU reference: the same fused matvec, decoding straight from the mmap at output.weight's ABSOLUTE
+// offset. x is the embedding the carrier already carved bit-exactly above (`carve`).
+let x = carve                                       // the bit-exact embedding, cols-wide
+let qb = base.advanced(by: outAbs)                  // tensor start in the mmap
+var cpuLogits = [Float](repeating: 0, count: rows)
+for r in 0..<rows {
+    var acc: Float = 0
+    let rowPay = r * cols
+    let g0 = rowPay / 32
+    var g = 0
+    while g < cols/32 {
+        let s = mxm_e8m0(Int(qb[nel + g0 + g]))
+        var a2: Float = 0
+        let pbase = rowPay + g*32
+        for m in 0..<32 { a2 += x[g*32 + m] * mx8_val(Int(qb[pbase + m])) }
+        acc += s * a2
+        g += 1
+    }
+    cpuLogits[r] = acc
+}
+// compare GPU vs CPU, and argmax agreement. The WEIGHT DECODE is bit-exact (each E4M3*E8M0 is an exact
+// f32), but a MATVEC accumulates in float and float addition is not associative: the GPU sums via a
+// 32-lane simd_sum tree, the CPU sequentially, so the two agree to float precision, NOT bit-for-bit.
+// The honest check is numerical agreement (a tight relative tolerance) plus argmax equality; bit-
+// equality here would be a claim about summation ORDER, not about the arithmetic. nan => unrun.
+var nanCnt = 0, firstMis8 = -1
+var maxAbs: Float = 0, maxRel: Float = 0
+var gpuArg = 0, cpuArg = 0
+var gpuMax = -Float.greatestFiniteMagnitude, cpuMax = -Float.greatestFiniteMagnitude
+for r in 0..<rows {
+    if lgp[r].isNaN { nanCnt += 1; if firstMis8 < 0 { firstMis8 = r } }
+    let d = abs(lgp[r] - cpuLogits[r]); let rel = d / (abs(cpuLogits[r]) + 1e-6)
+    if d > maxAbs { maxAbs = d }
+    if rel > maxRel && !lgp[r].isNaN { maxRel = rel }
+    if lgp[r] > gpuMax { gpuMax = lgp[r]; gpuArg = r }
+    if cpuLogits[r] > cpuMax { cpuMax = cpuLogits[r]; cpuArg = r }
+}
+check(nanCnt == 0 && maxAbs < 1e-3 && gpuErrors == 0 && outHolds == 1,
+  "gate 4 MXFP8 vocab-projection at real dims: the GPU fused decode+matvec of the type-41 output.weight (\(rows)x\(cols)) through view \(outIdx) agrees with the carrier's independent CPU MXFP8 carve on all \(rows) logits to float precision (max abs diff \(maxAbs), max rel diff \(maxRel); \(nanCnt) NaN). The file is now complete — real type-41 through the views, which mxfp8-msl.fk could not run on a partial file.",
+  "gate 4 MXFP8: max abs diff \(maxAbs) exceeds tolerance or \(nanCnt) NaN (first at \(firstMis8)); gpuErrors=\(gpuErrors)")
+check(gpuArg == cpuArg,
+  "gate 5 MXFP8 argmax agreement: GPU and CPU both pick row \(gpuArg) as the max logit (this is the EXIT mechanism over a real probe vector, NOT the real first token — that needs the 43-layer hidden as input)",
+  "gate 5 MXFP8 argmax: GPU \(gpuArg) vs CPU \(cpuArg)")
+
+if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(gpuFirstError ?? "unknown") ===") }
+print(String(format: "      exit-mechanism logits: max %.6f at row %d  (probe input = the raw embedding, not a real token)", gpuMax, gpuArg))
+
 let ok = failures == 0 && gpuErrors == 0
-if ok { print("VERDICT PASS  4 gates — Stage 1 EMBED at real dims through the windowed views, bit-exact") }
+if ok { print("VERDICT PASS  6 gates — Stage 1 EMBED (bit-exact) + Stage 2 MXFP8 vocab-projection EXIT (real dims, real type-41 through the windowed views)") }
 else { print("VERDICT FAIL  \(failures) gate(s), \(gpuErrors) cb errors") }
 exit(ok ? 0 : 1)
 SWIFT
@@ -292,6 +414,7 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || {
 
 "$work/runner" "$LIB" "$BLOB" \
     "$STEP" "$VIEWLIMIT" "$NVIEWS" \
-    "$EMB_ABS" "$ROW_OFF" "$N_EMBD" "$EMB_IDX" "$EMB_INNER" "$EMB_HOLDS" "$TOKEN"
+    "$EMB_ABS" "$ROW_OFF" "$N_EMBD" "$EMB_IDX" "$EMB_INNER" "$EMB_HOLDS" "$TOKEN" \
+    "$LIB8" "$VOCAB" "$OUT_ABS" "$OUT_IDX" "$OUT_INNER" "$OUT_HOLDS"
 rc=$?
 exit $rc

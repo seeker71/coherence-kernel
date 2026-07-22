@@ -30,7 +30,7 @@
 ;   heads 64 / kv 1 · q_lora 1024 · kv_lora 512 · rope_dim 64 (trailing) · out_lora 1024 · out_grp 8
 ;   experts 256 · used 6 · shared 1 · expert_ff 2048 · wscale 1.5 · weights_norm 1 · hash_layers 3
 ;
-; preludes: form-stdlib/core.fk native/metal/windowed-residency-emit.fk
+; preludes: form-stdlib/core.fk native/metal/windowed-residency-emit.fk form-stdlib/mxfp8-msl.fk form-stdlib/qk-matvec-lane.fk
 ;
 ; Proven by: native/metal/metal_dsv4_token.sh (the staged forward on the live file, with the
 ; offered-interface guard — an unrun kernel reads as a computed zero, so every dispatch is gated).
@@ -68,5 +68,27 @@
 
     ; the row byte-offset of token t inside an F16 [n_embd, vocab] tensor.
     (defn dsv4-embed-row-off (token n_embd) (mul (mul token n_embd) 2))
+
+    ; ================= STAGE 2: the vocab-projection EXIT mechanism, MXFP8 at real dims =================
+    ; output.weight is GGUF type 41 (MXFP8, plane-split), shape [n_embd=4096, vocab=129280] — a
+    ; [rows=129280, cols=4096] fused decode+matvec producing the 129280 vocab logits. The kernel is
+    ; mxfp8-msl.fk's OWN proven fused matvec (mx8m-matvec-body), reused unchanged; only the entry name is
+    ; ours. It reads the raw plane-split bytes straight from the resident view: payload at r*cols+g*32+m,
+    ; the E8M0 scale plane at nel = rows*cols. `nel` is the SLICE element count (the exoscalar seam).
+    ;
+    ; WHAT THIS PROVES, and the honest bound (selfgauge). When mxfp8-msl.fk was written the 85 GiB file
+    ; was only ~28 GB downloaded and NO type-41 tensor was resident — its GPU witness ran on a 1056-byte
+    ; committed fixture. The file is now COMPLETE, so this runs the MXFP8 fused matvec on a REAL type-41
+    ; tensor at REAL dims through the windowed views. GPU agreeing with the body's own CPU MXFP8 carve
+    ; proves the TRANSCRIPTION and the residency binding, NOT bit-exactness against an external reference
+    ; (none exists — ds4/llama.cpp refuse type 41). It is a mechanism proof of the forward's EXIT, fed a
+    ; real vector as a probe; it is NOT the real first token, which needs the 43-layer hidden as input.
+    (defn dsv4-mx8-matvec-msl ()
+        (do
+            (print "MSL")
+            (print (str_concat (qml-msl-header)
+                    (mx8m-msl-unit "form_dsv4_mx8_dequant" "form_dsv4_mx8_matvec")))
+            (print "END")
+            0))
 
     0)
