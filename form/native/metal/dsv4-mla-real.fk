@@ -14,6 +14,32 @@
 ;   attn_sinks       F32   [64]            the per-head learned sink logit
 ;   attn_output_a    MXFP8 [4096 -> 8192]  output projection, factor a
 ;   attn_output_b    MXFP8 [8192 -> 4096]  output projection, factor b
+;
+; ================= STONE 36 STAGE 1: WHICH OUTPUT PATH THIS FILE TAKES, read from its own table ======
+; ds4.c carries BOTH a dense `attn_output` and a grouped `attn_output_a`/`attn_output_b` pair. Which one
+; a given file uses is a property of the FILE, not of the engine — and a `twinblind` trap: pick the wrong
+; one and every self-check downstream still agrees with itself. So it is READ, from the file's own 1406-row
+; tensor table (gguf-manifest.fk, gm-emit-manifest), never guessed:
+;
+;   `attn_output.weight`        0 rows in the whole file
+;   `attn_output_a.weight`     46 rows  — blk.0 .. blk.42 (all 43) + dspark.0/1/2
+;   `attn_output_b.weight`     46 rows  — the same 46
+;
+; The dense path does not exist in this file. THE GROUPED PATH IS THE ONLY PATH, in every block including
+; blk.0. The file's own scalar KVs price it: attention.output_group_count = 8, attention.output_lora_rank
+; = 1024, head_count = 64, key_length = 512. So group_heads = 64/8 = 8, group_dim = 8*512 = 4096, and
+;   attn_output_a [in 4096, out 8192]  is 8 stacked per-group blocks, each [group_dim 4096 -> rank 1024]
+;   attn_output_b [in 8192, out 4096]  maps the concatenated 8*1024 = 8192 group-latents back to n_embd
+; which is exactly ds4.c's own expectation at :4975 —
+;   tensor_expect_dense_quant_layout(attn_output_a, 2, N_HEAD_DIM*(N_HEAD/N_OUT_GROUP), N_OUT_GROUP*N_LORA_O)
+;   tensor_expect_dense_quant_layout(attn_output_b, 2, N_OUT_GROUP*N_LORA_O, N_EMBD)
+; The 4096 that appears on BOTH sides is an apposition, not an identity: on `_a` it is group_dim (8 heads
+; x 512), on `_b` it is n_embd. A carrier that reads it as one number will still pass every self-carve.
+;
+; Two more facts the same table settles, both bearing on blk.0: blk.0 and blk.1 carry NO `attn_compressor_*`
+; tensors (blk.2+ do) — matching ds4.c's ds4_expected_layer_compress_ratio :1065, which returns 0 for
+; il < 2 on the FLASH variant. So at layer 0 the RoPE is UNCOMPRESSED: freq_base = 10000 (not the
+; compress_rope_freq_base 160000), freq_scale = 1, ext_factor = 0 — no YaRN ramp at all.
 ; and the scalar config KVs: n_head 64, head_count_kv 1, head_dim (key/value_length) 512, nrot
 ; (rope.dimension_count) 64, rms_eps 1e-6, rope.freq_base 10000, block_count 43, expert_used 6, hc 4.
 ; MLA_MAX_HD in mla-msl.fk is 512 — it EXACTLY equals this file's head_dim; the toy cap is the real width.
@@ -60,5 +86,14 @@
     (defn dsv4-mla-rows (d0 d1) d1)
     (defn dsv4-mla-cols (d0 d1) d0)
     (defn dsv4-mla-nel  (d0 d1) (mul d0 d1))
+
+    ; ================= the GROUPED output geometry, from the file's own KVs =============================
+    ; Stage 1's resolution, said in Form so the carrier asks for it rather than repeating a literal.
+    ; n-head 64, head-dim 512, groups 8 (attention.output_group_count), rank 1024 (output_lora_rank).
+    (defn dsv4-out-groups    () 8)
+    (defn dsv4-out-rank      () 1024)
+    (defn dsv4-out-grp-heads (nh ng) (div nh ng))
+    (defn dsv4-out-grp-dim   (nh hd ng) (mul hd (div nh ng)))     ; = 4096 : the `_a` INPUT width
+    (defn dsv4-out-low-dim   (ng rank)  (mul ng rank))            ; = 8192 : `_a` out, `_b` in
 
     0)
