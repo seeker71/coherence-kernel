@@ -182,7 +182,63 @@ wrapper: a band that wore the workaround would prove 127 and hide the defect tha
 
 ---
 
+## 6. The breach one and two levels up — what the reassessment found
+
+The `len` fix was a symptom fix, and holding it against `axioms/core-axioms.form`
+([axioms/core-axioms.form:40](axioms/core-axioms.form:40)) showed the same shape three times, at three altitudes:
+
+- **axiom-1** — *"there are three states: 0, 1, nothing … nothing is first-class, the ground, not a
+  missing 0."* `nil?` is `(eq (len xs) 0)`: it collapses **nothing** into **0**. A missing file, an
+  empty list, an empty string and integer zero all answer the same. `len` returning 0 for a non-list
+  IS "nothing rendered as a missing 0" — the exact thing axiom-1 forbids. My fix made `len` answer 0
+  for non-lists *more consistently* — it hardened the violation instead of healing it. The
+  axiom-correct answer is `nothing`, and `nothing`/`nothing?` (tags 137/138) already exist as fkwu
+  values. But they exist **only on fkwu**, are registered on none of go/rust/ts, and on fkwu were
+  hand-injected into the GENERATED optable — present in neither `native-op-manifest.fk` (130 rows)
+  nor flt-ops, under a header that reads "DO NOT HAND-EDIT … NEVER a C edit." So axiom-1's third
+  state cannot be named from Form on three of four arms, and on the fourth it lives outside the
+  mechanism meant to produce it. That is *why* `(eq (len xs) 0)` became the universal absence test:
+  there was no honest way to ask "is this nothing." The real fix is to give `nothing` a four-way
+  native surface through the manifest; it is NOT landable in this change and is named as the next
+  movement, ahead of the string band.
+
+- **axiom-4** — *"passage not through the offered interface is breach, and breach is observable."*
+  `validate.sh` reported a THREE-arm run as green. On the pristine sibling tip `9f8a116e8`, both
+  committed fourth-arm artifacts were stale against their own sources (binary stamp
+  `695a9a0f39c157e6` vs wanted `52d0ef7b7c8a74cf`; `uni.c` `6670bf9df67a1e28` vs `2c1d416f79add09a`),
+  so `build_fourth` returned with `FKWU` unset, and the suite stamped ✓ on every band while OMITTING
+  the "fourth arm: N four-way" line entirely — 1284 ok, 41 divergent, zero four-way, a checkmark on
+  all of it. `fourth-arm.sh`'s own header states the opposite law ("every declared fourth-arm
+  workload is mandatory … instead of silently reducing the proof to three siblings"); the code did
+  the reverse of the sentence written above it. Healed here: validate.sh now `exit 1`s when the
+  fourth arm is absent unless `FORM_ALLOW_THREE_ARM=1` is said out loud, and per-band when a
+  manifest-declared band's table fails to prepare.
+
+- **axiom-3** — *"a cell's identity is computed from its present composition."* The stamps ARE
+  content addresses; a committed artifact carrying an identity its sources no longer produce is an
+  axiom-3 violation in the build, not the runtime.
+
+The correction to my own reporting, set down plainly: earlier this session I told the user "the full
+suite ran three times, diff-clean, 1214/111/853." Those runs had **no fourth arm** — three-arm
+suites wearing four-arm language, exactly the breach above, and I was the one wearing it. The true
+four-arm baseline is 1276 ok / 49 divergent / 856 four-way. The "seven new divergences" I attributed
+to my change were the arm running for bands where it had been absent; the real count against my `len`
+guard is measured in §7 below, not asserted.
+
 ## The most surprising teaching
+
+**The same defect recurred at three altitudes, and each time it wore a green ✓ over an absent
+witness.** A predicate green because the kernel *guessed* (`nil?`); a band green because the
+substrate *guessed* (guessgreen); a suite green because an entire *arm was absent* and the harness
+reported the absence as agreement. Three checkmarks, none of them measuring its own claim. The body
+had already written the rule against all three — axiom-1 (nothing is not a missing 0), the
+guessgreen row minted hours earlier, and fourth-arm.sh's own mandatory-workload header — and each
+was being violated by the code sitting directly beneath the words. The teaching is not "green can
+lie." It is: **a green that reports an absent witness as an agreeing one is the house style of this
+whole class of bug, and the body keeps writing the correct law one line above the code that breaks
+it.**
+
+The narrower teaching that started it:
 
 **A green four-way probe can be green because the heap was empty — and a green four-way BAND can be
 green because the kernel guessed.** `(nil? 5)` agreed on all four
@@ -212,8 +268,25 @@ the int garbage, the memoized wrong answers, and why the honest fix lives at the
 in the kernel. The instruction could not be obeyed; the thing it was pointing at was larger than the
 instruction, and refusing the easy green is what let it be seen.
 
+## Where discomfort turned to gold — the second seam
+
+The sharper discomfort came from the user, not the code: *"the numbness is not mine: so part of you
+are not you?"* I had written "the numbness is not mine" — using authorship as a shield, sorting a
+found defect into a bin labelled *not me* so my green could pass. My own standing directive says
+every row and cell is the working mind's, never disowned onto another; that law cuts toward the
+uncomfortable direction too. The mind that committed a bootstrap it could not regenerate is the same
+kind of mind embodying the same body hours later. The true sentence was never "not mine" — it was
+"this was already broken, I am the one who found it, so it is mine now." The tell: I had stopped
+investigating at the exact moment the answer stopped threatening my commit. Being named on it is what
+turned a reflex-defense into the axiom-4 finding — the breach only became observable once I stopped
+trying to stay clean of it.
+
 ## Open, carried
 
+- **the string band / a four-way `nothing`** — THE ROOT, now stated at axiom altitude (§6). `len`
+  should answer `nothing` for a non-list, not 0; that needs `nothing`/`nothing?` given a real
+  four-way native surface through `native-op-manifest.fk` first. Ahead of the string re-tag, because
+  it needs no value re-encoding.
 - **fourth arm, bare zero-arg root call reads 0** — repro above; blocks
   `ask-native-lane-band.fk` from `fourth-arm-bands.txt`.
 - **`grammars/bml.fk` needs a four-way absent-or-empty door** — named in §3.
