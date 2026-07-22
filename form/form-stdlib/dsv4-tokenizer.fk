@@ -231,10 +231,14 @@
             (if (eq e pos) (add pos (tkz-ulen s pos)) e)))
 
     ; ================= BPE over one piece =================
-    ; A symbol is a byte-exact slice of the input; the symbol list is a Form list of those slices.
-    ; Compare a merge record against a candidate pair (symL, symR) WITHOUT building the merge string:
-    ; walk the merge's codepoints, cp2b each to a raw byte, match against symL's bytes, then the
-    ; separator (a literal space, codepoint 32 -> cp2b -1), then symR's bytes.
+    ; A symbol is a LIST of raw byte VALUES (ints), never a string: substring is rune-aware and would
+    ; drop a byte mid-multibyte-char, and byte_to_str re-encodes >= 128. Input bytes are read
+    ; byte-exact with str_byte_at; symbols grow by list concat. So every byte value 0..255 is carried
+    ; faithfully, which is why CJK (3-byte UTF-8 -> three >=128 byte symbols) encodes correctly.
+    ;
+    ; Compare a merge record against a candidate pair (symL, symR) WITHOUT building any string: walk the
+    ; merge's codepoints, cp2b each to a raw byte value, match against symL's byte list, then the
+    ; separator (a literal space, codepoint 32 -> cp2b -1), then symR's byte list.
     (defn tkz-merge-eq (src at symL symR)
         (tkz-me-left src at 0 symL symR 0 (tkz-rec-len src at)))
     ; phase LEFT: mo = byte offset in the merge record, k = index into symL
@@ -245,8 +249,8 @@
                 (let nlen (if (lt b0 128) 1 2))
                 (if (eq cp 32)
                     ; separator: symL must be fully consumed
-                    (if (eq k (str_len symL)) (tkz-me-right src at (add mo nlen) symR 0 mlen) 0)
-                    (if (if (lt k (str_len symL)) (eq (tkz-cp2b cp) (str_byte_at symL k)) 0)
+                    (if (eq k (len symL)) (tkz-me-right src at (add mo nlen) symR 0 mlen) 0)
+                    (if (if (lt k (len symL)) (eq (tkz-cp2b cp) (nth symL k)) 0)
                         (tkz-me-left src at (add mo nlen) symL symR (add k 1) mlen)
                         0)))
             0))                                  ; ran out before separator -> no match
@@ -256,10 +260,10 @@
             (do (let b0 (tkz-rec-byte src at mo))
                 (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (tkz-rec-byte src at (add mo 1)) 128))))
                 (let nlen (if (lt b0 128) 1 2))
-                (if (if (lt k (str_len symR)) (eq (tkz-cp2b cp) (str_byte_at symR k)) 0)
+                (if (if (lt k (len symR)) (eq (tkz-cp2b cp) (nth symR k)) 0)
                     (tkz-me-right src at (add mo nlen) symR (add k 1) mlen)
                     0))
-            (if (eq k (str_len symR)) 1 0)))      ; matched iff symR fully consumed at record end
+            (if (eq k (len symR)) 1 0)))          ; matched iff symR fully consumed at record end
 
     ; the merge record's LEFT-symbol first raw byte (its first codepoint, mapped by cp2b). One read;
     ; used as a fast reject — a merge can only apply to a pair whose left symbol starts with this byte.
@@ -271,7 +275,7 @@
     ; full byte-compare runs only for pairs whose left symbol starts with the merge's left byte.
     (defn tkz-first-pair (src at syms i fb)
         (if (lt (add i 1) (len syms))
-            (if (if (eq (str_byte_at (nth syms i) 0) fb)
+            (if (if (eq (head (nth syms i)) fb)
                     (eq (tkz-merge-eq src at (nth syms i) (nth syms (add i 1))) 1) 0)
                 i
                 (tkz-first-pair src at syms (add i 1) fb))
@@ -289,7 +293,7 @@
 
     ; merge the pair at index p: syms[0..p-1] ++ (syms[p]++syms[p+1]) ++ syms[p+2..]
     (defn tkz-apply (syms p)
-        (tkz-splice syms 0 p (str_concat (nth syms p) (nth syms (add p 1)))))
+        (tkz-splice syms 0 p (tkz-cat (nth syms p) (nth syms (add p 1)))))
     (defn tkz-splice (syms i p merged)   ; rebuild list, replacing positions p,p+1 with merged
         (if (eq i (len syms)) (empty)
             (if (eq i p)
@@ -304,10 +308,10 @@
             (do (let p (tkz-best-merge src (tkz-merges-first src) (tkz-merges-n src) syms))
                 (if (lt p 0) syms (tkz-bpe src (tkz-apply syms p))))))
 
-    ; initial symbols: one byte-exact 1-char slice of the input per byte in [start,end)
+    ; initial symbols: one 1-element byte-value list per input byte in [start,end), read byte-exact
     (defn tkz-syms (inp start end)
         (if (eq start end) (empty)
-            (cons (substring inp start (add start 1)) (tkz-syms inp (add start 1) end))))
+            (cons (list (str_byte_at inp start)) (tkz-syms inp (add start 1) end))))
 
     ; ================= symbol -> token id (final lookup) =================
     ; Compare a token piece (stored codepoint-UTF8) to a raw-byte symbol, byte-exact via cp2b.
@@ -318,10 +322,10 @@
             (do (let b0 (gmt-token-byte src tat to))
                 (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (gmt-token-byte src tat (add to 1)) 128))))
                 (let nlen (if (lt b0 128) 1 2))
-                (if (if (lt k (str_len sym)) (eq (tkz-cp2b cp) (str_byte_at sym k)) 0)
+                (if (if (lt k (len sym)) (eq (tkz-cp2b cp) (nth sym k)) 0)
                     (tkz-teq src tat (add to nlen) (add k 1) sym plen)
                     0))
-            (if (eq k (str_len sym)) 1 0)))
+            (if (eq k (len sym)) 1 0)))
     ; ONE streaming pass over the whole vocab: id of the first token equal to sym, or -1.
     (defn tkz-id-of (src sym)
         (tkz-id-scan src (gmt-tokens-first src) 0 (tkz-vocab-n src) sym))
@@ -340,8 +344,8 @@
                         (_list_append acc id))))))
     ; fallback for an unknown symbol: emit the single-byte token id of each byte (ds4.c bpe_emit_piece)
     (defn tkz-ids-of-bytes (src sym k)
-        (if (lt k (str_len sym))
-            (cons (tkz-id-of-byte src (str_byte_at sym k)) (tkz-ids-of-bytes src sym (add k 1)))
+        (if (lt k (len sym))
+            (cons (tkz-id-of-byte src (nth sym k)) (tkz-ids-of-bytes src sym (add k 1)))
             (empty)))
     (defn tkz-id-of-byte (src b)
         (tkz-idb-scan src (gmt-tokens-first src) 0 (tkz-vocab-n src) (tkz-b2cp b)))
