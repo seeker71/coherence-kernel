@@ -1,0 +1,114 @@
+; windowed-residency-band.fk — the view-set geometry and the wholly-inside-one-view invariant, proven
+; fixture-free (no GPU, no 85 GiB file) on the REAL ds4 constants AND on a 3-view synthetic that reaches
+; past what the ds4 file itself needs.
+;
+; RADIUS, declared in full. This band proves the ARITHMETIC of windowed-residency.fk: that the derived
+; view geometry is right, that the lookup places a tensor in floor(aoff/step), and that the invariant
+; (inner+bytes <= view_limit) holds for the head tensor, the ONE tensor that straddles the naive
+; view_limit boundary (dspark.1.ffn_up_exps.weight — a naive two-tile split would cut it in half, the
+; overlap heals it), a tensor past the buffer ceiling (in view 1), and the last tensor (ending exactly at
+; end-of-file). It does NOT read the file — that the file actually contains these tensors at these
+; offsets, and that ALL 1406 of them fit, is metal_windowed_residency.sh's job, on the live bytes. The
+; 3-view synthetic (bit 1024) proves the scheme for a file that needs three views, which the 85 GiB ds4
+; file (two views) does not exercise on its own.
+;
+; run FROM form/:  ./fkwu --src form-stdlib/tests/windowed-residency-band.fk    ; -> 4095
+;
+; Verdict 4095 (12 bits) when every claim holds. Each bit is one claim; a dropped claim drops its bit and
+; the total is no longer 4095, so a partial pass can never wear the whole number.
+;
+; preludes: form-stdlib/core.fk native/metal/windowed-residency.fk
+
+(do
+    (defn wrb-bit (ok b) (if (eq ok 1) b 0))
+    (defn wrb-pagealigned? (x p) (if (eq (sub x (mul (div x p) p)) 0) 1 0))
+
+    ; ---- the real ds4 constants (measured; Stone 11/32) ----
+    (defn wrb-p () 16384)
+    (defn wrb-maxbuf () 86586540032)
+    (defn wrb-filelen () 91321404640)
+    (defn wrb-maxtb () 1140850688)
+    (defn wrb-step () (wr-step (wrb-maxbuf) (wrb-maxtb) (wrb-p)))
+    (defn wrb-vl () (wr-view-limit (wrb-maxbuf) (wrb-p)))
+
+    ; c1: view_limit is maxBufferLength floored to a page, and page-aligned
+    (defn wrb-c1 ()
+        (if (and (eq (wrb-vl) 86586540032) (eq (wrb-pagealigned? (wrb-vl) (wrb-p)) 1)) 1 0))
+    ; c2: overlap = round_up(max_tensor_bytes, page) + page
+    (defn wrb-c2 ()
+        (if (and (eq (wr-overlap (wrb-maxtb) (wrb-p)) 1140867072)
+                 (eq (wr-overlap (wrb-maxtb) (wrb-p))
+                     (add (wr-round-up (wrb-maxtb) (wrb-p)) (wrb-p)))) 1 0))
+    ; c3: step is view_limit-overlap, positive, and page-aligned (so every view origin is)
+    (defn wrb-c3 ()
+        (if (and (eq (wrb-step) 85445672960)
+            (and (gt (wrb-step) 0) (eq (wrb-pagealigned? (wrb-step) (wrb-p)) 1))) 1 0))
+    ; c4: the mapped length is the file rounded up to a page
+    (defn wrb-c4 () (if (eq (wr-mapped (wrb-filelen) (wrb-p)) 91321417728) 1 0))
+    ; c5: two views cover the 85 GiB file
+    (defn wrb-c5 () (if (eq (wr-nviews (wrb-filelen) (wrb-maxbuf) (wrb-maxtb) (wrb-p)) 2) 1 0))
+
+    (defn wrb-holds (aoff bytes) (wr-holds? aoff bytes (wrb-filelen) (wrb-maxbuf) (wrb-maxtb) (wrb-p)))
+    (defn wrb-idx   (aoff)       (wr-view-of aoff (wrb-step)))
+    (defn wrb-inner (aoff)       (wr-inner aoff (wrb-step)))
+
+    ; c6: HEAD tensor (blk.0.ffn_gate_tid2eid.weight) wholly in view 0
+    (defn wrb-c6 ()
+        (if (and (eq (wrb-holds 5339744 3102720) 1)
+            (and (eq (wrb-idx 5339744) 0) (eq (wrb-inner 5339744) 5339744))) 1 0))
+    ; c7: the STRADDLING tensor — a naive tiling at view_limit would cut it (aoff < VL < aoff+bytes); the
+    ; overlap puts it wholly in view 1.
+    (defn wrb-c7 ()
+        (if (and (eq (wrb-holds 86285594016 1140850688) 1)
+            (and (eq (wrb-idx 86285594016) 1)
+            (and (lt 86285594016 (wrb-vl)) (gt (add 86285594016 1140850688) (wrb-vl))))) 1 0))
+    ; c8: a tensor PAST the buffer ceiling (aoff > view_limit) — reachable only in view 1
+    (defn wrb-c8 ()
+        (if (and (eq (wrb-holds 87426444704 8650752) 1)
+            (and (eq (wrb-idx 87426444704) 1) (gt 87426444704 (wrb-vl)))) 1 0))
+    ; c9: the LAST tensor ends exactly at end-of-file, and still fits
+    (defn wrb-c9 ()
+        (if (and (eq (wrb-holds 91269500128 51904512) 1)
+                 (eq (add 91269500128 51904512) (wrb-filelen))) 1 0))
+    ; c10: the aporon guard — a tensor larger than one whole view fits NOWHERE; a max-size one, and the
+    ; view_limit itself, fit.
+    (defn wrb-c10 ()
+        (if (and (eq (wr-fits-view? (add (wrb-vl) 1) (wrb-maxbuf) (wrb-p)) 0)
+            (and (eq (wr-fits-view? (wrb-vl) (wrb-maxbuf) (wrb-p)) 1)
+                 (eq (wr-fits-view? (wrb-maxtb) (wrb-maxbuf) (wrb-p)) 1))) 1 0))
+
+    ; ---- a 3-view synthetic: p=4096, maxbuf=40960, maxtb=8192, filelen=90000 ----
+    ; view_limit=40960, overlap=12288, step=28672, mapped=90112, nviews=3. This is the case the ds4 file
+    ; (two views) never reaches; the scheme must hold for it too (unispan — never one sample).
+    (defn wrb-sp () 4096) (defn wrb-smaxbuf () 40960) (defn wrb-smaxtb () 8192) (defn wrb-sfile () 90000)
+    (defn wrb-sstep () (wr-step (wrb-smaxbuf) (wrb-smaxtb) (wrb-sp)))
+    (defn wrb-sholds (aoff bytes) (wr-holds? aoff bytes (wrb-sfile) (wrb-smaxbuf) (wrb-smaxtb) (wrb-sp)))
+    (defn wrb-sidx (aoff) (wr-view-of aoff (wrb-sstep)))
+    ; c11: three views, and the geometry
+    (defn wrb-c11 ()
+        (if (and (eq (wrb-sstep) 28672)
+            (and (eq (wr-view-limit (wrb-smaxbuf) (wrb-sp)) 40960)
+            (and (eq (wr-overlap (wrb-smaxtb) (wrb-sp)) 12288)
+                 (eq (wr-nviews (wrb-sfile) (wrb-smaxbuf) (wrb-smaxtb) (wrb-sp)) 3)))) 1 0))
+    ; c12: the naive boundaries, healed. step-1 and step land in views 0 and 1; 2*step lands in view 2;
+    ; a tensor straddling the naive view_limit boundary (aoff=40000, end=48192) is wholly in view 1.
+    (defn wrb-c12 ()
+        (if (and (eq (wrb-sholds 28671 8192) 1)
+            (and (and (eq (wrb-sidx 28671) 0) (eq (wrb-sidx 28672) 1))
+            (and (eq (wrb-sholds 28672 8192) 1)
+            (and (eq (wrb-sholds 57344 8192) 1)
+            (and (eq (wrb-sidx 57344) 2)
+            (and (eq (wrb-sholds 40000 8192) 1) (eq (wrb-sidx 40000) 1))))))) 1 0))
+
+    (add (wrb-bit (wrb-c1) 1)
+    (add (wrb-bit (wrb-c2) 2)
+    (add (wrb-bit (wrb-c3) 4)
+    (add (wrb-bit (wrb-c4) 8)
+    (add (wrb-bit (wrb-c5) 16)
+    (add (wrb-bit (wrb-c6) 32)
+    (add (wrb-bit (wrb-c7) 64)
+    (add (wrb-bit (wrb-c8) 128)
+    (add (wrb-bit (wrb-c9) 256)
+    (add (wrb-bit (wrb-c10) 512)
+    (add (wrb-bit (wrb-c11) 1024)
+         (wrb-bit (wrb-c12) 2048)))))))))))))
