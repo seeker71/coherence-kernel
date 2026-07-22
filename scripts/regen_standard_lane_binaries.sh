@@ -33,17 +33,20 @@ printf 'regen: fkwu-%s (%s bytes) stamp=%s\n' \
     "$fkwu_stamp"
 
 FORM_CLI_SRCS=(
-    form-stdlib/fourth-shim.fk form-stdlib/core.fk
+    form-stdlib/fourth-shim.fk form-stdlib/core.fk form-stdlib/form-ontology-loader.fk
     form-stdlib/offer-ack-core.fk form-stdlib/federation-graph-offer.fk
-    form-stdlib/line-grammar.fk
+    form-stdlib/line-grammar.fk form-stdlib/file-byte-window.fk form-stdlib/bmf-byte-cursor.fk
+    form-stdlib/bmf-core.fk form-stdlib/bmf-grammar.fk
+    form-stdlib/grammar-loader.fk form-stdlib/shell-grammar.fk
     form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hmac-sha256.fk form-stdlib/hex.fk
     form-stdlib/resource-port.fk form-stdlib/bml-native-interface-package-import.fk form-stdlib/hati-os-targets.fk
     form-stdlib/form-native-resource-interfaces.fk form-stdlib/form-fs.fk
-    form-stdlib/storage-port.fk form-stdlib/host-kernel-carrier.fk
+    form-stdlib/storage-port.fk form-stdlib/cell-log-store.fk form-stdlib/storage-port-file.fk
+    form-stdlib/host-kernel-carrier.fk
     form-stdlib/fnri-standin.fk form-stdlib/fnri-receipt.fk form-stdlib/http-client.fk
     form-stdlib/format-arith.fk form-stdlib/f16-decode.fk
     form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/weight-load.fk
-    form-stdlib/voice-traits.fk form-stdlib/nearest-shape.fk
+    form-stdlib/voice-traits.fk form-stdlib/feature-vector.fk form-stdlib/nearest-shape.fk form-stdlib/voice-diarize.fk
     form-stdlib/co-learning.fk form-stdlib/co-learning-stream.fk
     form-stdlib/mesh-dispatch.fk form-stdlib/surprise-salience.fk form-stdlib/host-sense-organ.fk
     form-stdlib/speech-organ.fk form-stdlib/native-host-instance.fk
@@ -54,8 +57,8 @@ FORM_CLI_SRCS=(
     form-stdlib/form-cli-sufficiency.fk form-stdlib/form-freq-check.fk
     form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
     form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
-    form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk
-    form-stdlib/current-branch-landing.fk form-stdlib/form-cli.fk
+    form-stdlib/form-cli-carrier.fk form-stdlib/federation-graph-store.fk form-stdlib/form-cli-ask-plus.fk
+    form-stdlib/current-branch-landing.fk form-stdlib/shell-exec.fk form-stdlib/form-cli.fk
     form-stdlib/form-cli-gguf-cell.fk form-stdlib/form-cli-repl.fk
 )
 form_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
