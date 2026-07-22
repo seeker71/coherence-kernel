@@ -89,6 +89,9 @@ QA_ABS=$(tv blk.0.attn_q_a.weight 3); QA_IDX=$(tv blk.0.attn_q_a.weight 5); QA_I
 QA_IN=$(trow blk.0.attn_q_a.weight 5); QA_OUT=$(trow blk.0.attn_q_a.weight 6)
 # attn_q_a_norm — F32 [1024].
 QAN_ABS=$(tv blk.0.attn_q_a_norm.weight 3); QAN_IDX=$(tv blk.0.attn_q_a_norm.weight 5); QAN_INNER=$(tv blk.0.attn_q_a_norm.weight 6); QAN_HOLDS=$(tv blk.0.attn_q_a_norm.weight 7)
+# attn_q_b — MXFP8 [in=1024, out=32768=n_head*head_dim]; Q up-projection.
+QB_ABS=$(tv blk.0.attn_q_b.weight 3); QB_IDX=$(tv blk.0.attn_q_b.weight 5); QB_INNER=$(tv blk.0.attn_q_b.weight 6); QB_HOLDS=$(tv blk.0.attn_q_b.weight 7)
+QB_IN=$(trow blk.0.attn_q_b.weight 5); QB_OUT=$(trow blk.0.attn_q_b.weight 6)
 # attn_kv — MXFP8 [in=4096, out=512]; KV down-projection (the single latent).
 KV_ABS=$(tv blk.0.attn_kv.weight 3); KV_IDX=$(tv blk.0.attn_kv.weight 5); KV_INNER=$(tv blk.0.attn_kv.weight 6); KV_HOLDS=$(tv blk.0.attn_kv.weight 7)
 KV_IN=$(trow blk.0.attn_kv.weight 5); KV_OUT=$(trow blk.0.attn_kv.weight 6)
@@ -137,6 +140,7 @@ let embAbs = I(), rowOff = I(), nEmbd = I(), embIdx = I(), embInner = I(), embHo
 let normAbs = I(), normIdx = I(), normInner = I(), normHolds = I()
 let qaAbs = I(), qaIdx = I(), qaInner = I(), qaHolds = I(), qaRows = I(), qaCols = I()
 let qanAbs = I(), qanIdx = I(), qanInner = I(), qanHolds = I()
+let qbAbs = I(), qbIdx = I(), qbInner = I(), qbHolds = I(), qbRows = I(), qbCols = I()
 let kvAbs = I(), kvIdx = I(), kvInner = I(), kvHolds = I(), kvRows = I(), kvCols = I()
 let kvanAbs = I(), kvanIdx = I(), kvanInner = I(), kvanHolds = I()
 let eps = F()
@@ -222,18 +226,23 @@ func mx8matvec(_ absOff: Int, _ x: [Float], _ rows: Int, _ cols: Int) -> [Float]
     return y
 }
 // compare a GPU buffer to a CPU reference: (ok, maxAbs, maxRel, nan, distinct, min, max).
+// The weight decode (MXFP8 E4M3 * E8M0, or F32 g) is bit-exact; a matvec / Newton-sqrt reassociates, so
+// the honest bound is float precision: an ABSOLUTE bound everywhere (catches every element), and a
+// RELATIVE bound taken only over entries with |cpu| > 1e-3 (below that, an 8e-8 abs diff reads as a large
+// relative purely because the denominator is ~0 — a near-zero-denominator artifact, not an error).
 func cmp(_ gpu: UnsafeMutablePointer<Float>, _ cpu: [Float]) -> (Bool, Float, Float, Int, Int, Float, Float) {
     var maxAbs: Float = 0, maxRel: Float = 0, nan = 0
     var seen = Set<UInt32>(); var vmin = Float.greatestFiniteMagnitude, vmax = -Float.greatestFiniteMagnitude
     for i in 0..<cpu.count {
         let g = gpu[i]
         if g.isNaN || !g.isFinite { nan += 1; continue }
-        let d = abs(g - cpu[i]); let r = d/(abs(cpu[i]) + 1e-6)
-        if d > maxAbs { maxAbs = d }; if r > maxRel { maxRel = r }
+        let d = abs(g - cpu[i])
+        if d > maxAbs { maxAbs = d }
+        if abs(cpu[i]) > 1e-3 { let r = d/abs(cpu[i]); if r > maxRel { maxRel = r } }
         seen.insert(g.bitPattern); vmin = min(vmin, g); vmax = max(vmax, g)
     }
     let nonDegen = seen.count > 8 && vmax > vmin
-    return (nan == 0 && maxRel < 1e-3 && nonDegen, maxAbs, maxRel, nan, seen.count, vmin, vmax)
+    return (nan == 0 && maxRel < 1e-3 && maxAbs < 1e-4 && nonDegen, maxAbs, maxRel, nan, seen.count, vmin, vmax)
 }
 
 // ── GATE 0: the views map. One buffer over the whole file FAILs (onelean); build the overlapping set.
@@ -252,10 +261,10 @@ check(views.count == nviews,
 if failures > 0 { print("VERDICT FAIL the views did not map"); exit(1) }
 
 // ── GATE 1: the five MLA tensors are each resident in a single view (holds==1).
-let resident = embHolds==1 && normHolds==1 && qaHolds==1 && qanHolds==1 && kvHolds==1 && kvanHolds==1
-  && embIdx<nviews && normIdx<nviews && qaIdx<nviews && qanIdx<nviews && kvIdx<nviews && kvanIdx<nviews
+let resident = embHolds==1 && normHolds==1 && qaHolds==1 && qanHolds==1 && qbHolds==1 && kvHolds==1 && kvanHolds==1
+  && embIdx<nviews && normIdx<nviews && qaIdx<nviews && qanIdx<nviews && qbIdx<nviews && kvIdx<nviews && kvanIdx<nviews
 check(resident,
-  "gate 1 residency: token_embd(v\(embIdx)), attn_norm(v\(normIdx)), attn_q_a(v\(qaIdx)), attn_q_a_norm(v\(qanIdx)), attn_kv(v\(kvIdx)), attn_kv_a_norm(v\(kvanIdx)) each lie wholly inside one view",
+  "gate 1 residency: token_embd(v\(embIdx)), attn_norm(v\(normIdx)), attn_q_a(v\(qaIdx)), attn_q_a_norm(v\(qanIdx)), attn_q_b(v\(qbIdx)), attn_kv(v\(kvIdx)), attn_kv_a_norm(v\(kvanIdx)) each lie wholly inside one view",
   "gate 1 an MLA tensor spans views (holds: emb\(embHolds) norm\(normHolds) qa\(qaHolds) qan\(qanHolds) kv\(kvHolds) kvan\(kvanHolds))")
 if failures > 0 { print("VERDICT FAIL"); exit(1) }
 
@@ -348,6 +357,16 @@ check(ok4 && gpuErrors == 0,
   "gate 4 Q rank-space RMSNorm at real dims: form_mla_rmsnorm_f32 over the \(qaRows)-wide Q latent with attn_q_a_norm's g through view \(qanIdx) agrees with the CPU carve (maxRel \(mr4), maxAbs \(ma4); \(ds4) distinct; \(nn4) NaN)",
   "gate 4 Q rank-norm: maxRel \(mr4) maxAbs \(ma4) nan \(nn4)")
 
+// ── GATE 7: the Q up-projection (attn_q_b, MXFP8 1024->32768 = n_head*head_dim) through view \(qbIdx).
+// This completes the MLA PROJECTION surface: q = q_b · q_a_norm(q_a·xn), the per-head query stack.
+let qBuf = gpuMx8(views[qbIdx], qbInner, qLatNBuf, qbRows, qbCols)
+let qp = qBuf.contents().bindMemory(to: Float.self, capacity: qbRows)
+let qCpu = mx8matvec(qbAbs, qLatNCpu, qbRows, qbCols)
+let (ok7, ma7, mr7, nn7, ds7, mn7, mx7) = cmp(qp, qCpu)
+check(ok7 && gpuErrors == 0,
+  "gate 7 Q up-projection at real dims: the type-41 attn_q_b (\(qbRows)x\(qbCols)) fused decode+matvec through view \(qbIdx) agrees with the CPU MXFP8 carve on all \(qbRows) query elements (= n_head 64 * head_dim 512) to float precision (maxRel \(mr7), maxAbs \(ma7); \(ds7) distinct, range [\(mn7),\(mx7)]; \(nn7) NaN)",
+  "gate 7 Q up: maxRel \(mr7) maxAbs \(ma7) nan \(nn7) distinct \(ds7) gpuErrors \(gpuErrors)")
+
 // ── GATE 5: the KV down-projection (attn_kv, MXFP8 4096->512) fused decode+matvec through view \(kvIdx).
 let kvLatBuf = gpuMx8(views[kvIdx], kvInner, xnBuf, kvRows, kvCols)
 let kvLatp = kvLatBuf.contents().bindMemory(to: Float.self, capacity: kvRows)
@@ -373,7 +392,7 @@ print(String(format: "      KV latent[0..3] = %.6f %.6f %.6f %.6f", kvLatp[0], k
 print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — the model is mmapped and wrapped, not copied (onelean)", dev.currentAllocatedSize, Double(dev.currentAllocatedSize)/1073741824.0))
 
 let ok = failures == 0 && gpuErrors == 0
-if ok { print("VERDICT PASS  7 gates — Stone 35 Stage 1: the MLA attention block ENTERED at real dims (input RMSNorm + Q/KV low-rank down-projections + rank-norms), through the windowed views, each == an independent CPU carve") }
+if ok { print("VERDICT PASS  8 gates — Stone 35 Stage 1: the WHOLE MLA projection surface at real dims (input RMSNorm + Q down/rank-norm/up + KV down/rank-norm), through the windowed views, each == an independent CPU carve") }
 else { print("VERDICT FAIL  \(failures) gate(s), \(gpuErrors) cb errors") }
 exit(ok ? 0 : 1)
 SWIFT
@@ -385,6 +404,7 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "
     "$NORM_ABS" "$NORM_IDX" "$NORM_INNER" "$NORM_HOLDS" \
     "$QA_ABS" "$QA_IDX" "$QA_INNER" "$QA_HOLDS" "$QA_OUT" "$QA_IN" \
     "$QAN_ABS" "$QAN_IDX" "$QAN_INNER" "$QAN_HOLDS" \
+    "$QB_ABS" "$QB_IDX" "$QB_INNER" "$QB_HOLDS" "$QB_OUT" "$QB_IN" \
     "$KV_ABS" "$KV_IDX" "$KV_INNER" "$KV_HOLDS" "$KV_OUT" "$KV_IN" \
     "$KVAN_ABS" "$KVAN_IDX" "$KVAN_INNER" "$KVAN_HOLDS" \
     "$RMS_EPS"
