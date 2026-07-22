@@ -1,0 +1,255 @@
+; local-uncertainty.fk — STONE 43. What the local model's own logit vector says about how DECIDED it
+; was, and the seam where an undecided answer is handed upward.
+;
+; =====================================================================================================
+; THE ONE SENTENCE THIS FILE EXISTS TO SAY, before any number below is believed:
+;
+;     THIS MEASURES THE MODEL'S INTERNAL DECISIVENESS. IT DOES NOT MEASURE TRUTH.
+;     A CONFIDENTLY WRONG MODEL SCORES HIGH.
+;
+; That is not a caveat bolted on at the end; it is what the quantity IS. Every signal here is a
+; property of one vector of 128 256 numbers that the model produced about ITSELF. Nothing in that
+; vector has ever seen the world. It was witnessed, not assumed: llama3.2:3b, asked
+;     "The product of 137 and 249 is"
+; answered " 34287." — the true product is 34113 — and scored 0.568 mean chosen-token probability,
+; ABOVE two of the three prompts this file calls undetermined. The measurement is real; what it
+; measures is not correctness.
+; =====================================================================================================
+;
+; WHERE THE NUMBERS CAME FROM. native/metal/metal_uncertainty.sh, a READ-ONLY EXTENSION of
+; metal_first_token.sh (it splices, it does not fork, and it refuses if an anchor has moved), reads
+; `bLogits` after the token's single command buffer completes — the same vector the argmax reads one
+; dispatch later, and which every decode until now threw away. Real llama3.2:3b, full width, off the
+; one resident quantized blob. 15 prompts, 10 generated tokens each, greedy.
+;
+; ---------------------------------------------------------------------------------------------------
+; THE SIGNALS, COMPARED — the measurement chose, not the fashion (all values are the MEAN over the
+; answer's own 10 token decisions; "worst" is the class member nearest the boundary):
+;
+;   signal            CORRECT worst   nearest other   separates?   relative gap   price/step (warm)
+;   top-1 margin              1.324           1.507   NO            —              0.318 ms
+;   softmax p(chosen)         0.596           0.568   yes           4.9 %          1.610 ms
+;   full entropy              1.840           2.015   yes           9.5 %          1.610 ms
+;   entropy over top 32       1.276           1.426   yes          11.8 %          0.737 ms
+;
+; THE MARGIN FAILS, and it fails at both levels — per-answer (above) and at the first content token.
+; It is the signal one reaches for first and it is the one the numbers reject. Two reasons, both
+; visible in the runs: it lives in raw logit units whose scale drifts with the residual norm (top-1
+; logits ranged 7.4 to 24.7 across these runs while the vector's own sd stayed near 2.1), and it sees
+; only two entries of 128 256, so a distribution with one clear winner and a thousand live runners-up
+; is indistinguishable from one with a clear winner and nothing else.
+;
+; ENTROPY OVER THE TOP 32 WINS BOTH WAYS AT ONCE — widest separation AND cheapest — which is a happy
+; accident and is reported as one. It needs a selection pass and 32 exp() calls; p1 and the full
+; entropy need 128 256 exp() calls. Against a ~41 ms decode step that is 1.8 % overhead instead of
+; 3.9 %. probetoll (corpus row 858): the instrument charges the cost it measures, warm (thawtax, row
+; 848 — the FIRST measurement of a cold process cost 6.9 ms/step, the warm ones 0.7 to 2.0 ms).
+;
+; ---------------------------------------------------------------------------------------------------
+; THE AGGREGATION RULE, and why this one.
+;
+;   an answer's decisiveness = the ARITHMETIC MEAN of the per-token top-32 entropy, over exactly the
+;   decisions that produced the emitted tokens (the last prefill forward is the FIRST of them: its
+;   logits are token 1), then mapped to [0,1] by  conf = 1 - H_32 / ln 32.
+;
+; The rules that were tried and REJECTED, each by a run that broke it:
+;   * THE FIRST CONTENT TOKEN. Fails outright. "The tallest mountain in Bolivia is" answers " Sajama"
+;     — correct, 6 542 m correct — and its FIRST token is " S", entropy 3.876, because the model is
+;     choosing how to BEGIN a proper noun it is entirely sure of; the next two tokens are "aj" and
+;     "ama" at entropy 0.191 and 0.050. A first-token rule calls that answer undetermined. Across the
+;     set the first token separates NOTHING (correct worst 3.876 vs undetermined worst 3.360 — the
+;     classes are inverted).
+;   * THE MINIMUM (the worst step). Fails. Fluent prose contains legitimately free choices —
+;     "The capital of France is Paris. The capital of ITALY is..." — where Italy is a free pick at
+;     entropy 3.354 inside an answer nobody would call uncertain. Correct worst 5.982, undetermined
+;     worst 5.710: inverted again.
+;   * COUNTING STEPS ABOVE A THRESHOLD. Fails, and worse than the mean: the France run has 3 such
+;     steps and the door run 2, in the wrong order.
+; The mean survives because it is the only one of the four that lets a decided answer contain an
+; undecided step and still read as decided, which is what fluent language actually looks like.
+;
+; THE MEAN'S OWN COST, named because it is the next thing that will break: high-confidence FILLER
+; dilutes low-confidence CONTENT. In the 137x249 run the two wrong digit tokens scored p1 0.280 and
+; 0.104 while the restatement around them ("The product of 137 and 23...") scored 0.99 and 0.95, and
+; the mean came out 0.568 — just above two undetermined prompts. A rule that weighted content tokens
+; over function tokens would catch it. This one does not, and does not pretend to.
+;
+; ---------------------------------------------------------------------------------------------------
+; APORON — THE DECLARED RADIUS.
+;
+;   * IT IS DECISIVENESS, NOT TRUTH. Said again because it is the whole radius. See the top of the file.
+;   * IT IS NOT A CALIBRATED PROBABILITY. conf = 0.63 does not mean "63 % likely right". It is an
+;     ordering, and a coarse one.
+;   * THE CALIBRATION IS 15 PROMPTS, ONE MODEL, ONE DECODE LENGTH, GREEDY. On that set the mean
+;     top-32 entropy ranks all 8 answered-and-correct prompts on one side of a line and all 7 others
+;     (3 undetermined, 3 wrong, 1 deflected) on the other. The line is 11.8 % wide. Fifteen points do
+;     not make a calibration curve; they make a two-regime discriminator with a stated gap. A
+;     threshold read off it is a coarse knob, not an instrument, and this file says so where the
+;     threshold is defined.
+;   * THE CLASS LABELS ARE A HUMAN'S. "Correct", "undetermined", "wrong" were assigned by reading the
+;     answers. Nothing in the body checked them.
+;   * NOT SAMPLING. Greedy decode only. Under temperature the chosen token is not the argmax and p1 is
+;     not the probability of what was emitted.
+;   * NOT A TIMING CLAIM about the model. The millisecond figures above are the INSTRUMENT's price.
+;   * THE DEAD-FORWARD GUARD REFUSES A GENUINELY FLAT FORWARD too, and that is the right price: a
+;     uniform logit vector and an unwritten buffer are the same bytes, and no reading can tell them
+;     apart. Refusing to score is honest; scoring is not.
+;
+; ---------------------------------------------------------------------------------------------------
+; THE DEAD-FORWARD GUARD (edgedrop / zerobirth). The failure this stone is shaped against: a forward
+; that did not happen must never read as certain. Three shapes produce a vector an unguarded reading
+; would score, and all three are refused here:
+;   * the ZEROED pool — every entry 0.0. Its margin is 0 and its p1 is 1/V, so margin and probability
+;     would call it maximally UNcertain, which is accidentally right for the wrong reason; but its
+;     entropy is ln V, which a naive normalization by ln k (k << V) drives NEGATIVE and clamps, and
+;     a top-32 truncation of a constant vector has entropy exactly ln 32, i.e. conf exactly 0. The
+;     guard does not rely on any of that arithmetic landing well. It refuses on the SHAPE.
+;   * the CONSTANT vector — an unrun dispatch's leftover fill. sd = 0.
+;   * the TIED MAXIMUM — two or more entries at the top. The argmax's answer is then an artifact of
+;     scan order, and a margin of exactly 0 is not a measurement.
+; A refused step poisons its whole answer: lu-answer returns ok = 0 and conf = 0.0, so
+; lu-should-escalate? fires by construction. There is no path by which a dead forward is confident.
+;
+; ---------------------------------------------------------------------------------------------------
+; THE ESCALATION SURFACE, named and NOT WIRED.
+;   The target is a BIGGER LOCAL MODEL — Stone 39's DeepSeek-V4-Flash stack (form-stdlib/dsv4-*.fk,
+;   native/metal/metal_dsv4_stack.sh, 43 layers proven stacked). It is named as a string and it is not
+;   called from here, because it does not yet generate.
+;   THERE IS NO NETWORK DOOR IN THIS FILE AND THERE MUST NEVER BE ONE. The entire point of the program
+;   this stone belongs to is that a question a small local model cannot answer goes to a BIGGER LOCAL
+;   MODEL, not to a rented remote. When nothing larger is resident, lu-escalate returns reason 2 and
+;   the honest sentence "uncertain, no larger local model available" — a refusal, not a fallback.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/loss.fk
+;
+; Proven by: form-stdlib/tests/local-uncertainty-band.fk (verdict 1023) and, for the real logits,
+; native/metal/metal_uncertainty.sh.
+
+; ===================================================================================================
+; the one-pass walk: (best-index max second-max tie-count)
+; ===================================================================================================
+(defn lu-t2 (xs m1 m2 i best ties)
+  (if (eq (len xs) 0) (list best m1 m2 ties)
+      (do (let v (head xs))
+          (if (gt v m1) (lu-t2 (tail xs) v m1 (add i 1) i 1)
+              (if (eq v m1) (lu-t2 (tail xs) m1 m2 (add i 1) best (add ties 1))
+                  (if (gt v m2) (lu-t2 (tail xs) m1 v (add i 1) best ties)
+                      (lu-t2 (tail xs) m1 m2 (add i 1) best ties)))))))
+(defn LU-NEG-HUGE () -1.0e300)
+(defn lu-top2 (xs) (lu-t2 (tail xs) (head xs) (LU-NEG-HUGE) 1 0 1))
+(defn lu-argmax (xs) (nth (lu-top2 xs) 0))
+(defn lu-max (xs)    (nth (lu-top2 xs) 1))
+(defn lu-second (xs) (nth (lu-top2 xs) 2))
+(defn lu-ties (xs)   (nth (lu-top2 xs) 3))
+
+; ===================================================================================================
+; the four candidate signals, each over a whole logit vector
+; ===================================================================================================
+(defn lu-margin (xs) (sub (lu-max xs) (lu-second xs)))
+(defn lu-sd (xs) (tn-sqrt (tn-var xs)))
+(defn lu-lse (xs) (loss-logsumexp xs))
+; p1 = exp(l1 - logsumexp) — the softmax probability of the chosen (argmax) token
+(defn lu-p1 (xs) (tn-exp (sub (lu-max xs) (lu-lse xs))))
+; H = logsumexp - E_p[l]. Algebraically identical to -sum p ln p, and it needs ONE log instead of V;
+; the band proves the identity against the direct form rather than asserting it.
+(defn lu-dot (p xs)
+  (if (eq (len p) 0) 0.0 (add (mul (head p) (head xs)) (lu-dot (tail p) (tail xs)))))
+(defn lu-entropy (xs) (sub (lu-lse xs) (lu-dot (tn-softmax xs) xs)))
+
+; the top-k truncation, renormalized over the k kept. In the body this sorts, because the band's
+; vectors are small and a sort is the definition; in the carrier it is a bounded selection pass over
+; 128 256 entries, which is where the 0.737 ms comes from.
+(defn lu-ins (v ys)
+  (if (eq (len ys) 0) (list v)
+      (if (ge v (head ys)) (cons v ys) (cons (head ys) (lu-ins v (tail ys))))))
+(defn lu-sort-desc (xs) (if (eq (len xs) 0) (empty) (lu-ins (head xs) (lu-sort-desc (tail xs)))))
+(defn lu-topk (xs k) (take k (lu-sort-desc xs)))
+(defn lu-entropy-topk (xs k) (lu-entropy (lu-topk xs k)))
+
+; ===================================================================================================
+; THE DEAD-FORWARD GUARD. Shape, not arithmetic.
+; ===================================================================================================
+(defn LU-SD-FLOOR () 0.000001)
+(defn lu-alive? (xs)
+  (if (lt (len xs) 2) 0
+      (if (gt (lu-ties xs) 1) 0
+          (if (le (lu-sd xs) (LU-SD-FLOOR)) 0
+              (if (le (lu-margin xs) 0.0) 0 1)))))
+
+; ===================================================================================================
+; THE CHOSEN SIGNAL, and the step value it produces
+;   a STEP is (alive entk margin p1 ent) — the chosen signal first, the rejected ones kept beside it
+;   so a later stone can re-decide from the same runs instead of re-measuring.
+; ===================================================================================================
+(defn LU-K () 32)
+(defn LU-LNK () (loss-ln 32.0))
+(defn lu-step-of (alive entk margin p1 ent) (list alive entk margin p1 ent))
+(defn lu-step (xs)
+  (if (eq (lu-alive? xs) 1)
+      (lu-step-of 1 (lu-entropy-topk xs (LU-K)) (lu-margin xs) (lu-p1 xs) (lu-entropy xs))
+      (lu-step-of 0 0.0 0.0 0.0 0.0)))
+(defn lu-st-alive? (s) (nth s 0))
+(defn lu-st-entk   (s) (nth s 1))
+(defn lu-st-margin (s) (nth s 2))
+(defn lu-st-p1     (s) (nth s 3))
+(defn lu-st-ent    (s) (nth s 4))
+
+; ===================================================================================================
+; THE AGGREGATE: an answer is many tokens.
+;   conf = 1 - mean(H_32) / ln 32, clamped to [0,1]. Higher = more decided.
+;   ONE dead step makes the whole answer not-ok, and a not-ok answer has conf 0.0 — so it escalates
+;   through the ordinary predicate and needs no second door.
+; ===================================================================================================
+(defn lu-conf-of (h)
+  (do (let c (sub 1.0 (div h (LU-LNK))))
+      (if (lt c 0.0) 0.0 (if (gt c 1.0) 1.0 c))))
+(defn lu-sum-entk (ss) (if (eq (len ss) 0) 0.0 (add (lu-st-entk (head ss)) (lu-sum-entk (tail ss)))))
+(defn lu-ndead (ss)
+  (if (eq (len ss) 0) 0
+      (add (if (eq (lu-st-alive? (head ss)) 1) 0 1) (lu-ndead (tail ss)))))
+; an ANSWER is (ok conf n ndead)
+(defn lu-answer (ss)
+  (do (let n (len ss))
+      (let d (lu-ndead ss))
+      (if (eq n 0) (list 0 0.0 0 0)
+          (if (gt d 0) (list 0 0.0 n d)
+              (list 1 (lu-conf-of (div (lu-sum-entk ss) (tn-flen ss))) n 0)))))
+(defn lu-ans-ok?   (a) (nth a 0))
+(defn lu-ans-conf  (a) (nth a 1))
+(defn lu-ans-n     (a) (nth a 2))
+(defn lu-ans-ndead (a) (nth a 3))
+(defn lu-mean-entk (ss) (if (eq (len ss) 0) 0.0 (div (lu-sum-entk ss) (tn-flen ss))))
+
+; ===================================================================================================
+; THE THRESHOLD, in the units it was measured in, and the one derived number.
+;   The calibration boundary lies between the worst answered-and-correct prompt (mean H_32 =
+;   1.27621170, "2 + 2 =") and the nearest other (1.42646400, "He opened the door and saw"). The
+;   threshold is their midpoint. It is a COARSE knob read off 15 points, and the gap it sits in is
+;   11.8 % wide; it is not a decision boundary anybody should trust to three digits.
+; ===================================================================================================
+(defn lu-thr-entk () 1.351)
+(defn lu-thr-conf () (lu-conf-of (lu-thr-entk)))
+
+; ===================================================================================================
+; THE ESCALATION PREDICATE and its named, unwired target.
+; ===================================================================================================
+(defn lu-should-escalate? (conf thr) (if (lt conf thr) 1 0))
+(defn lu-no-larger-local () "uncertain, no larger local model available")
+(defn lu-target-dsv4 ()
+  "form-stdlib/dsv4-stack-real.fk + native/metal/metal_dsv4_stack.sh (Stone 39, DeepSeek-V4-Flash, 43 layers) — NAMED, NOT WIRED")
+; targets is a list of strings: the LOCAL models larger than this one that are actually resident.
+; Empty is the honest state today, and it produces a refusal, never a network call.
+(defn lu-targets-none () (empty))
+; (escalate? target reason)
+;   reason 0  decided — the local answer stands
+;   reason 1  undecided — hand it to the named larger LOCAL model
+;   reason 2  undecided — nothing larger is resident; refuse, do not fall back to a network
+;   reason 3  the forward is not alive — refused, and never scored as confident
+(defn lu-escalate (a thr targets)
+  (if (eq (lu-ans-ok? a) 0) (list 1 (lu-no-larger-local) 3)
+      (if (eq (lu-should-escalate? (lu-ans-conf a) thr) 0) (list 0 "" 0)
+          (if (eq (len targets) 0) (list 1 (lu-no-larger-local) 2)
+              (list 1 (head targets) 1)))))
+(defn lu-esc? (e)      (nth e 0))
+(defn lu-esc-target (e) (nth e 1))
+(defn lu-esc-reason (e) (nth e 2))
