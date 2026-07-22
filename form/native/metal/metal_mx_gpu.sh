@@ -123,6 +123,10 @@ fk_expand() {
 cd "$ROOT"
 FILES=()
 while read -r x; do FILES+=("$x"); done < <(fk_expand native/metal/mx-residency.fk)
+# the windowed-residency mouth: onelean (row 847) — the 85 GiB file exceeds maxBufferLength, so one buffer
+# cannot span it. The body prices the largest tensor; the runner builds overlapping views from it.
+WRFILES=()
+while read -r x; do WRFILES+=("$x"); done < <(FK_SEEN=""; fk_expand native/metal/windowed-residency-emit.fk)
 
 # ── 1. the body emits the Metal source (four kernels, one header, one spine) ───────────────────
 echo '(mxr-emit-msl)' > "$work/msl.fk"
@@ -175,6 +179,22 @@ else
 fi
 COUNTS=($(awk '$1=="COUNTS"{print $2, $3}' "$TBL"))
 echo "  ${COUNTS[0]} type-40 (MXFP4) tensors, ${COUNTS[1]} type-41 (MXFP8) tensors, out of $(awk '$1=="NTENSORS"{print $2}' "$TBL")"
+
+# ── 3b. onelean (row 847): the largest tensor over ALL types, so the runner can build overlapping views.
+# The whole 85 GiB file exceeds maxBufferLength — one MTLBuffer cannot span it (this is what regressed).
+# Cached by the same header sha; the geometry is windowed-residency.fk's, proven by its band and agreed
+# byte-for-byte over all 1406 tensors by metal_windowed_residency.sh.
+MTBL="$TABLE_CACHE/maxtb-$hdr_sha.txt"
+if [[ ! -f "$MTBL" ]]; then
+    echo "pricing the largest tensor over all types (once, for the view set)..."
+    printf '(wre-maxtb-only "%s")\n' "$BLOB" > "$work/maxtb.fk"
+    "$GO_BIN" "${WRFILES[@]}" "$work/maxtb.fk" > "$MTBL.tmp" 2>"$work/maxtb.err" || {
+        echo "FAIL  max-tensor pricing failed"; tail -5 "$work/maxtb.err"; rm -f "$MTBL.tmp"; exit 1; }
+    grep -q '^MAXTB ' "$MTBL.tmp" || { echo "FAIL  MAXTB not emitted"; rm -f "$MTBL.tmp"; exit 1; }
+    mv "$MTBL.tmp" "$MTBL"
+fi
+MAXTB=$(awk '$1=="MAXTB"{print $2; exit}' "$MTBL")
+echo "  max tensor over all types: $MAXTB B — the view overlap must exceed it"
 
 ROW=($(awk -v n="$W40" '$1=="T" && $2==n {print; exit}' "$TBL"))
 [[ "${#ROW[@]}" -eq 11 ]] || { echo "FAIL  $W40 is not in the table"; exit 1; }
@@ -233,6 +253,7 @@ let libPath = a[1], refPath = a[2], blobPath = a[3], fixPath = a[4]
 let iters = Int(a[5])!, tile = Int(a[6])!
 let abs4 = Int(a[7])!, nel4 = Int(a[8])!, cols4 = Int(a[9])!, tail4 = Int(a[10])!
 let absFar = Int(a[11])!, mvRows = Int(a[12])!, farSlice = Int(a[13])!
+let maxTensorBytes = Int(a[14])!    // the body's price of the largest tensor, for the view set
 
 struct Ref { var tiles: [Int: [Double]] = [:]; var x: [Double] = []; var rows: [Int: Double] = [:]; var coeff = 0 }
 var refs: [String: Ref] = [:]
@@ -273,9 +294,14 @@ func check(_ ok: Bool, _ pass: String, _ fail: String) {
 var gpuErrors = 0
 var gpuFirstError: String? = nil
 
-// --- the plane-split bytes, RESIDENT. mmap and hand the GPU the mapped pages: with bytesNoCopy there
-//     is no copy at all, so "upload" is a page-table fact. The file is still being appended to; only
-//     the already-written prefix is ever read, and the shell checked that before we got here. --------
+// --- the plane-split bytes, RESIDENT AS OVERLAPPING VIEWS. onelean (corpus row 847): the 85 GiB file
+//     exceeds maxBufferLength, so a single MTLBuffer over the whole mmap FAILs — that is exactly what
+//     regressed. mmap the whole file (bytesNoCopy = no copy at all), then wrap it in a small set of
+//     overlapping, page-aligned views, arranged so every tensor lies wholly inside one. The geometry is
+//     windowed-residency.fk's (proven by its band; agreed byte-for-byte over all 1406 tensors by
+//     metal_windowed_residency.sh); the runner applies the same arithmetic to its own device facts. Every
+//     tensor bind below goes through viewFor(absOffset) -> (a view, an inner offset). The file is still
+//     being appended to; only the already-written prefix is read, and the shell checked that. -----------
 let fd = open(blobPath, O_RDONLY)
 guard fd >= 0 else { print("FAIL  cannot open blob"); exit(1) }
 var st = stat(); fstat(fd, &st)
@@ -285,16 +311,44 @@ let mapLen = (fileLen + page - 1) / page * page
 guard let mapped = mmap(nil, mapLen, PROT_READ, MAP_PRIVATE, fd, 0), mapped != MAP_FAILED else {
     print("FAIL  mmap failed"); exit(1)
 }
+// the view geometry (windowed-residency.fk): view_limit = maxBufferLength floored to a page; overlap =
+// round_up(max_tensor_bytes, page) + page; step = view_limit - overlap. Views at 0, step, 2*step, ...
+let viewLimit = Int(dev.maxBufferLength) / page * page
+let overlap = ((maxTensorBytes + page - 1) / page * page) + page
+guard viewLimit > overlap else {
+    print("FAIL  maxBufferLength \(dev.maxBufferLength) too small for a \(maxTensorBytes) B tensor + overlap"); exit(1)
+}
+let step = viewLimit - overlap
 let tUp0 = Date()
-guard let modelBuf = dev.makeBuffer(bytesNoCopy: mapped, length: mapLen, options: .storageModeShared, deallocator: nil) else {
-    print("FAIL  makeBuffer(bytesNoCopy:) over the mapped file failed"); exit(1)
+var views: [MTLBuffer] = []
+var voff = 0
+while voff < mapLen {
+    let vlen = min(viewLimit, mapLen - voff)
+    guard voff % page == 0 else { print("FAIL  view start \(voff) not page-aligned"); exit(1) }
+    guard let v = dev.makeBuffer(bytesNoCopy: mapped.advanced(by: voff), length: vlen,
+                                 options: .storageModeShared, deallocator: nil) else {
+        print("FAIL  view makeBuffer(bytesNoCopy:) failed at \(voff) length \(vlen)"); exit(1)
+    }
+    v.label = "mx_view_\(views.count)"
+    views.append(v)
+    if voff + vlen >= mapLen { break }
+    voff += step
 }
 let upSecs = Date().timeIntervalSince(tUp0)
-// %ld, not %d: String(format:) takes a 32-bit CInt for %d and this file is 32 GB, which printed as a
-// NEGATIVE byte count on the first run. A carrier that misreports the size of the thing it just mapped
-// is one character away from misreporting whether it mapped the right thing.
-print(String(format: "resident: %ld bytes of the ds4 file mapped into one MTLBuffer on %@ in %.4f s, ZERO copies",
-             fileLen, dev.name, upSecs))
+// viewFor: the lookup a hot path passes — the view wholly holding a tensor at `abs`, and its inner offset.
+func viewFor(_ abs: Int) -> (MTLBuffer, Int) {
+    let idx = abs / step
+    return (views[idx], abs - idx * step)
+}
+// %ld, not %d: String(format:) takes a 32-bit CInt for %d and this file is 85 GiB, which would print as
+// a NEGATIVE byte count. A carrier that misreports the size of the thing it mapped is one character from
+// misreporting whether it mapped the right thing.
+print(String(format: "resident: %ld bytes of the ds4 file mapped as %d overlapping page-aligned views (view_limit %ld B, step %ld B) on %@ in %.4f s, ZERO copies — one buffer over the whole file FAILs; the views do not",
+             fileLen, views.count, viewLimit, step, dev.name, upSecs))
+// the MXFP4 tensor's slice 0 and its distant slice, each resolved to (view, inner offset) once.
+let (mv4, in4) = viewFor(abs4)
+let (mvFar, inFar) = viewFor(absFar)
+if views.count > 1 { print("      view for slice 0: index \(abs4/step) inner \(in4); distant slice: index \(absFar/step) inner \(inFar)") }
 let fixData = try Data(contentsOf: URL(fileURLWithPath: fixPath))
 let fixBuf = dev.makeBuffer(bytes: [UInt8](fixData), length: fixData.count, options: .storageModeShared)!
 
@@ -355,7 +409,7 @@ do {
     let sentinel: Float = -424242.0
     for i in 0..<tile { tg[i] = sentinel }
     let before = gpuErrors
-    dequant(p4deq, buf: modelBuf, base: abs4, off: 0, cnt: tile, nel: nel4, into: tileBuf)
+    dequant(p4deq, buf: mv4, base: in4, off: 0, cnt: tile, nel: nel4, into: tileBuf)
     var survived = 0
     for i in 0..<tile where tg[i] == sentinel { survived += 1 }
     if gpuErrors > before { print("  command buffer ERROR: \(gpuFirstError ?? "unknown")") }
@@ -369,15 +423,15 @@ do {
     }
 }
 
-dequant(p4deq, buf: modelBuf, base: abs4, off: 0, cnt: tile, nel: nel4, into: tileBuf)
+dequant(p4deq, buf: mv4, base: in4, off: 0, cnt: tile, nel: nel4, into: tileBuf)
 let bh = bitBad(tg, head, tile)
 check(bh == 0, "gate 1 MXFP4 head tile bit-exact: all \(tile) GPU-dequantized weights at element 0 of slice 0 equal the CPU carver's",
               "gate 1 MXFP4: \(bh) of \(tile) head weights differ from the carver's")
-dequant(p4deq, buf: modelBuf, base: abs4, off: tail4, cnt: tile, nel: nel4, into: tileBuf)
+dequant(p4deq, buf: mv4, base: in4, off: tail4, cnt: tile, nel: nel4, into: tileBuf)
 let bt = bitBad(tg, tailT, tile)
 check(bt == 0, "gate 2 MXFP4 TAIL tile bit-exact: all \(tile) weights at element \(tail4) (the last of \(nel4), where the payload plane ENDS and the scale plane begins) equal the carver's",
               "gate 2 MXFP4: \(bt) of \(tile) tail weights differ from the carver's")
-dequant(p4deq, buf: modelBuf, base: absFar, off: 0, cnt: tile, nel: nel4, into: tileBuf)
+dequant(p4deq, buf: mvFar, base: inFar, off: 0, cnt: tile, nel: nel4, into: tileBuf)
 let bf = bitBad(tg, farHead, tile)
 check(bf == 0, "gate 3 MXFP4 DISTANT SLICE bit-exact: all \(tile) weights of slice \(farSlice) (\(absFar - abs4) bytes on — the slice stride, not the layout, is what this tests) equal the carver's",
               "gate 3 MXFP4: \(bf) of \(tile) weights of slice \(farSlice) differ from the carver's")
@@ -385,7 +439,7 @@ check(bf == 0, "gate 3 MXFP4 DISTANT SLICE bit-exact: all \(tile) weights of sli
 // gate 4: the WHOLE slice in one dispatch, then read both ends back out of it
 let wbuf = dev.makeBuffer(length: nel4 * 4, options: .storageModeShared)!
 let tD0 = Date()
-dequant(p4deq, buf: modelBuf, base: abs4, off: 0, cnt: nel4, nel: nel4, into: wbuf)
+dequant(p4deq, buf: mv4, base: in4, off: 0, cnt: nel4, nel: nel4, into: wbuf)
 let dqSecs = Date().timeIntervalSince(tD0)
 let wg = wbuf.contents().bindMemory(to: Float.self, capacity: nel4)
 var badWhole = 0
@@ -405,7 +459,7 @@ let ybuf = dev.makeBuffer(length: mvRows * 4, options: .storageModeShared)!
 var r32 = UInt32(mvRows), c32 = UInt32(cols4), n32 = UInt32(nel4)
 func matvec4() {
     dispatch(p4mv, width: mvRows * 32) { enc in
-        enc.setBuffer(modelBuf, offset: abs4, index: 0)
+        enc.setBuffer(mv4, offset: in4, index: 0)
         enc.setBuffer(xbuf, offset: 0, index: 1)
         enc.setBuffer(ybuf, offset: 0, index: 2)
         enc.setBytes(&r32, length: 4, index: 3)
@@ -533,6 +587,6 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || {
     echo "FAIL  swiftc failed"; tail -20 "$work/swift.err"; exit 1; }
 
 "$work/runner" "$LIB" "$work/ref.txt" "$BLOB" "$FIX8" "$ITERS" "$TILE" \
-    "$ABS" "$NEL" "$COLS" "$TAIL" "$ABSFAR" "$MVROWS" "$FAR"
+    "$ABS" "$NEL" "$COLS" "$TAIL" "$ABSFAR" "$MVROWS" "$FAR" "$MAXTB"
 rc=$?
 exit $rc
