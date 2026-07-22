@@ -188,26 +188,115 @@ def head_rms_norm(x, n_head, head_dim, eps):           # ds4.c:6646 — NO weigh
             x[i] *= s
     return x
 
-def rope_tail(x, n_head, head_dim, n_rot, pos, freq_base, freq_scale, inverse):   # ds4.c:10102
-    # Layer 0 of FLASH is UNCOMPRESSED (ds4.c:1065 -> ratio 0), so ext_factor = 0 and attn_factor = 1:
-    # no YaRN ramp, no magnitude scale. Only the TRAILING n_rot of each head rotate; the leading
-    # head_dim - n_rot (the NOPE part) are untouched.
-    n_nope = head_dim - n_rot
+def rope_yarn_ramp(low, high, i0):                     # ds4.c:10086
+    y = (float(i0 // 2) - low) / max(0.001, high - low)
+    return 1.0 - min(1.0, max(0.0, y))
+
+
+def rope_yarn_corr_dim(n_dims, n_ctx_orig, beta, base):  # ds4.c:10091
+    return float(n_dims) * math.log(float(n_ctx_orig) / (beta * 2.0 * math.pi)) / (2.0 * math.log(base))
+
+
+def rope_yarn_corr_dims(n_dims, n_ctx_orig, freq_base, beta_fast, beta_slow):   # ds4.c:10095
+    start = math.floor(rope_yarn_corr_dim(n_dims, n_ctx_orig, beta_fast, freq_base))
+    end = math.ceil(rope_yarn_corr_dim(n_dims, n_ctx_orig, beta_slow, freq_base))
+    return (max(0.0, start), min(float(n_dims - 1), end))
+
+
+def rope_pair_factors(n_rot, pos, n_ctx_orig, freq_base, freq_scale, ext_factor,
+                      attn_factor, beta_fast, beta_slow, inverse):
+    """ds4.c:10102 rope_tail_ext_inplace's per-PAIR (cos*mscale, sin_sign*sin*mscale).
+
+    The whole YaRN body reduces to a per-pair angle and a per-pair magnitude, and both are the same for
+    every head, so they are computed once. On a COMPRESSED layer ext_factor is 1 and
+
+        theta = theta_interp*(1 - ramp) + theta_extrap*ramp
+              = theta_extrap * (freq_scale*(1 - ramp) + ramp)
+
+    -- a per-pair SCALE of the same theta_extrap. And mscale is attn_factor*(1 + 0.1*ln(1/freq_scale))
+    where rope_tail_layer_inplace (:10175) set attn_factor to the reciprocal of exactly that, so the
+    magnitude cancels back to 1 (to within one ulp of the reciprocal round-trip). That is why a
+    compressed layer needs NO new kernel: it is the same rotation with a different per-pair freq.
+    """
     theta_scale = freq_base ** (-2.0 / n_rot)
     sin_sign = -1.0 if inverse else 1.0
+    corr = (0.0, 0.0)
+    if ext_factor != 0.0:
+        corr = rope_yarn_corr_dims(n_rot, n_ctx_orig, freq_base, beta_fast, beta_slow)
+    out = []
+    theta_extrap = float(pos)
+    for i in range(0, n_rot, 2):
+        theta_interp = freq_scale * theta_extrap
+        theta = theta_interp
+        mscale = attn_factor
+        if ext_factor != 0.0:
+            ramp_mix = rope_yarn_ramp(corr[0], corr[1], i) * ext_factor
+            theta = theta_interp * (1.0 - ramp_mix) + theta_extrap * ramp_mix
+            mscale *= 1.0 + 0.1 * math.log(1.0 / freq_scale)
+        out.append((math.cos(theta) * mscale, sin_sign * math.sin(theta) * mscale))
+        theta_extrap *= theta_scale
+    return out
+
+
+def rope_unit_freqs(n_rot, n_ctx_orig, freq_base, freq_scale, ext_factor, beta_fast, beta_slow):
+    """The per-pair FREQ the GPU kernel needs: theta = pos * freqs[k]. Host-side, once per layer."""
+    theta_scale = freq_base ** (-2.0 / n_rot)
+    corr = (0.0, 0.0)
+    if ext_factor != 0.0:
+        corr = rope_yarn_corr_dims(n_rot, n_ctx_orig, freq_base, beta_fast, beta_slow)
+    out = []
+    f = 1.0
+    for i in range(0, n_rot, 2):
+        if ext_factor != 0.0:
+            r = rope_yarn_ramp(corr[0], corr[1], i) * ext_factor
+            out.append(f * (freq_scale * (1.0 - r) + r))
+        else:
+            out.append(f * freq_scale)
+        f *= theta_scale
+    return out
+
+
+def rope_apply(x, n_head, head_dim, n_rot, factors):
+    n_nope = head_dim - n_rot
     for h in range(n_head):
         tail = h * head_dim + n_nope
-        theta_extrap = float(pos)
-        for i in range(0, n_rot, 2):
-            theta = freq_scale * theta_extrap
-            c = math.cos(theta)
-            s = sin_sign * math.sin(theta)
-            x0 = x[tail + i]
-            x1 = x[tail + i + 1]
-            x[tail + i] = x0 * c - x1 * s
-            x[tail + i + 1] = x0 * s + x1 * c
-            theta_extrap *= theta_scale
+        for k in range(len(factors)):
+            c, s = factors[k]
+            i = tail + 2 * k
+            x0 = x[i]
+            x1 = x[i + 1]
+            x[i] = x0 * c - x1 * s
+            x[i + 1] = x0 * s + x1 * c
     return x
+
+
+def rope_layer_params(K, il):                          # ds4.c:10155/:10162/:10166
+    ratios = K.get("deepseek4.attention.compress_ratios", [])
+    ratio = ratios[il] if il < len(ratios) else 0
+    compressed = ratio != 0
+    scale_factor = K.get("deepseek4.rope.scaling.factor", 0.0)
+    cbase = K.get("deepseek4.attention.compress_rope_freq_base", 0.0)
+    freq_base = cbase if (compressed and cbase > 0.0) else K["deepseek4.rope.freq_base"]
+    freq_scale = 1.0 if (not compressed or scale_factor <= 0.0) else 1.0 / scale_factor
+    ext_factor = 1.0 if (compressed and scale_factor > 1.0) else 0.0
+    attn_factor = 1.0
+    if ext_factor != 0.0 and freq_scale > 0.0:
+        attn_factor /= 1.0 + 0.1 * math.log(1.0 / freq_scale)
+    return {
+        "ratio": ratio, "freq_base": freq_base, "freq_scale": freq_scale,
+        "ext_factor": ext_factor, "attn_factor": attn_factor,
+        "n_ctx_orig": K.get("deepseek4.rope.scaling.original_context_length", 0) if compressed else 0,
+        "beta_fast": K.get("deepseek4.rope.scaling.yarn_beta_fast", 32.0),
+        "beta_slow": K.get("deepseek4.rope.scaling.yarn_beta_slow", 1.0),
+    }
+
+
+def rope_tail(x, n_head, head_dim, n_rot, pos, freq_base, freq_scale, inverse):   # ds4.c:10102
+    # The UNCOMPRESSED call (ds4.c:1065 -> ratio 0 for il < 2): ext_factor 0, attn_factor 1, no ramp and
+    # no magnitude scale. Only the TRAILING n_rot of each head rotate; the leading head_dim - n_rot (the
+    # NOPE part) are untouched. Expressed through the general body so there is ONE rotation here.
+    f = rope_pair_factors(n_rot, pos, 0, freq_base, freq_scale, 0.0, 1.0, 32.0, 1.0, inverse)
+    return rope_apply(x, n_head, head_dim, n_rot, f)
 
 def f32_round(v):
     return struct.unpack("<f", struct.pack("<f", v))[0]
@@ -625,6 +714,61 @@ def swiglu(gate, up, clamp):                           # ds4.c:10430
         out[i] = silu(gv) * uv
     return out
 
+def topk_desc(score, n, k):                            # ds4.c:10630 — verbatim control flow
+    idx = [-1] * k
+    for i in range(n):
+        for j in range(k):
+            if idx[j] < 0 or score[i] > score[idx[j]]:
+                for mm in range(k - 1, j, -1):
+                    idx[mm] = idx[mm - 1]
+                idx[j] = i
+                break
+    return idx
+
+
+# STONE 39. The expert matvec DISPATCHES on the tensor's own declared type. A blk.0-shaped stack is
+# silently wrong: gate/up and down flip between GGUF 40 (MXFP4) and 16 (IQ2_XXS) INDEPENDENTLY across six
+# layer groups. The type is read from the file's tensor table, never assumed.
+def expert_matvec(g, name, x, rows, cols, expert):
+    t = g.ttype(name)
+    if t == 40:
+        return mx4_matvec_expert(g, name, x, rows, cols, expert)
+    if t == 16:
+        return iq2_matvec_expert(g, name, x, rows, cols, expert)
+    raise SystemExit("expert tensor %s carries type %d, which this oracle does not decode" % (name, t))
+
+
+def layer_route(g, P, K, probs, token, n_exp_router, n_exp_stack, n_used, wscale):
+    """The two routing regimes, chosen the way ds4.c:10745 chooses: by whether the layer CARRIES a table.
+
+    Layers 0..2 (deepseek4.hash_layer_count = 3) hold ffn_gate_tid2eid and select by an I32 table read on
+    the TOKEN id (forepick, corpus row 867). Layers 3+ hold exp_probs_b.bias and select by BIASED top-k
+    while weighting by the UNbiased prob. Both then divide by the floored sum and scale by 1.5.
+    """
+    if (P + "ffn_gate_tid2eid.weight") in g.tensors:
+        selected = read_i32_row(g, P + "ffn_gate_tid2eid.weight", token, n_used)
+        regime = "hash"
+    else:
+        bias = read_f32(g, P + "exp_probs_b.bias", n_exp_router)
+        selection = [probs[i] + bias[i] for i in range(n_exp_router)]
+        selected = topk_desc(selection, n_exp_router, n_used)
+        regime = "topk"
+    s0 = 0.0
+    for e in selected:
+        if e < 0 or e >= n_exp_router:
+            raise SystemExit("selected expert %d is outside the router's %d logits" % (e, n_exp_router))
+        if e >= n_exp_stack:
+            # REAP-25 pruned this layer to n_exp_stack experts while the router still emits n_exp_router
+            # logits. The file keeps the two consistent by carrying exp_probs_b.bias = -1e30 on every
+            # pruned index, so biased top-k can never reach one. If one is ever reached, say so — do not
+            # index off the end of the stack.
+            raise SystemExit("layer routing chose expert %d but the stack holds only %d" % (e, n_exp_stack))
+        s0 += probs[e]
+    if s0 < 6.103515625e-5:
+        s0 = 6.103515625e-5
+    return selected, [probs[e] / s0 * wscale for e in selected], regime
+
+
 def ffn_half(g, P, after_attn_hc, K, n_embd, n_hc, eps, hc_iters, hc_eps, token, il):
     """ds4.c:11437 layer_ffn_one, re-expressed. Returns a dict of every named intermediate."""
     n_ff = K["deepseek4.expert_feed_forward_length"]
@@ -632,6 +776,8 @@ def ffn_half(g, P, after_attn_hc, K, n_embd, n_hc, eps, hc_iters, hc_eps, token,
     n_used = K["deepseek4.expert_used_count"]
     wscale = K["deepseek4.expert_weights_scale"]
     clamp = K["deepseek4.swiglu_clamp_exp"][il]
+    # the PER-LAYER expert count is the tensor's own dim[2], NEVER the KV's expert_count.
+    n_exp_stack = g.dims(P + "ffn_gate_exps.weight")[2]
     ffn_cur, post, comb, mix, flat = hc_pre(g, P, "ffn", after_attn_hc, n_embd, n_hc,
                                             eps, hc_iters, hc_eps)
     norm = rms_norm_weight(ffn_cur, read_f32(g, P + "ffn_norm.weight", n_embd), eps)
@@ -639,27 +785,16 @@ def ffn_half(g, P, after_attn_hc, K, n_embd, n_hc, eps, hc_iters, hc_eps, token,
     logits = matvec_f16(g, P + "ffn_gate_inp.weight", norm, n_exp, n_embd)
     probs = [math.sqrt(softplus_stable(v)) for v in logits]
 
-    # ds4.c:10566 -- layers 0..2 are hash layers: the six experts come from the I32 table on the TOKEN id.
-    if (P + "ffn_gate_tid2eid.weight") not in g.tensors:
-        raise SystemExit("layer %d carries no hash routing table; this oracle covers the hash layers" % il)
-    selected = read_i32_row(g, P + "ffn_gate_tid2eid.weight", token, n_used)
-    s0 = 0.0
-    for e in selected:
-        if e < 0 or e >= n_exp:
-            raise SystemExit("hash-selected expert %d out of range" % e)
-        s0 += probs[e]
-    if s0 < 6.103515625e-5:
-        s0 = 6.103515625e-5
-    ew = [probs[e] / s0 * wscale for e in selected]
+    selected, ew, regime = layer_route(g, P, K, probs, token, n_exp, n_exp_stack, n_used, wscale)
 
     moe = [0.0] * n_embd
     per_expert_down = []
     for i, e in enumerate(selected):
-        gate = mx4_matvec_expert(g, P + "ffn_gate_exps.weight", norm, n_ff, n_embd, e)
-        up = mx4_matvec_expert(g, P + "ffn_up_exps.weight", norm, n_ff, n_embd, e)
+        gate = expert_matvec(g, P + "ffn_gate_exps.weight", norm, n_ff, n_embd, e)
+        up = expert_matvec(g, P + "ffn_up_exps.weight", norm, n_ff, n_embd, e)
         mid = swiglu(gate, up, clamp)
         mid = [v * ew[i] for v in mid]
-        down = iq2_matvec_expert(g, P + "ffn_down_exps.weight", mid, n_embd, n_ff, e)
+        down = expert_matvec(g, P + "ffn_down_exps.weight", mid, n_embd, n_ff, e)
         per_expert_down.append((e, gate, up, mid, down))
         for d in range(n_embd):
             moe[d] += down[d]
@@ -674,11 +809,152 @@ def ffn_half(g, P, after_attn_hc, K, n_embd, n_hc, eps, hc_iters, hc_eps, token,
     return {
         "ffn_flat": flat, "ffn_mix": mix, "ffn_post_w": post, "ffn_comb": comb, "ffn_cur": ffn_cur,
         "ffn_norm": norm, "router_logits": logits, "router_probs": probs,
-        "selected": selected, "expert_w": ew, "clamp": clamp,
+        "selected": selected, "expert_w": ew, "clamp": clamp, "regime": regime,
+        "n_exp_stack": n_exp_stack,
         "moe": moe, "shared": shared, "ffn_out": ffn_out, "out_hc": out_hc,
         "per_expert": per_expert_down,
         "sh_gate": sg, "sh_up": su, "sh_mid": smid,
     }
+
+# ------------------------------------------------------------------ STONE 39: the heterogeneous stack
+# ds4.c:13793 layer_forward_self_one, re-expressed WHOLE and driven per layer from the file's own table.
+# forward_first_token_cpu (:13849) calls exactly this for every one of the 43 layers, handing the n_hc
+# streams forward, and it never touches a compressor or an indexer -- so the compressor tensors blk.2+
+# carry are not on this path. Grounded, not assumed.
+def attn_half(g, P, K, GEO, residual_hc, il, pos):
+    n_embd = GEO["n_embd"]; n_head = GEO["n_head"]; n_head_kv = GEO["n_head_kv"]
+    head_dim = GEO["head_dim"]; n_rot = GEO["n_rot"]; eps = GEO["eps"]
+    n_hc = GEO["n_hc"]; q_rank = GEO["q_rank"]; n_groups = GEO["n_groups"]; rank = GEO["rank"]
+
+    x_in, post, comb, hc_mix, hc_flat = hc_pre(g, P, "attn", residual_hc, n_embd, n_hc,
+                                               eps, GEO["hc_iters"], GEO["hc_eps"])
+    xn = rms_norm_weight(x_in, read_f32(g, P + "attn_norm.weight", n_embd), eps)
+    qlat = mx8_matvec(g, P + "attn_q_a.weight", xn, q_rank, n_embd)
+    qlatn = rms_norm_weight(qlat, read_f32(g, P + "attn_q_a_norm.weight", q_rank), eps)
+    q = mx8_matvec(g, P + "attn_q_b.weight", qlatn, n_head * head_dim, q_rank)
+    q_headrms = head_rms_norm(list(q), n_head, head_dim, eps)
+    kvraw = mx8_matvec(g, P + "attn_kv.weight", xn, head_dim, n_embd)
+    kv_norm = rms_norm_weight(kvraw, read_f32(g, P + "attn_kv_a_norm.weight", head_dim), eps)
+
+    R = rope_layer_params(K, il)
+    fwd = rope_pair_factors(n_rot, pos, R["n_ctx_orig"], R["freq_base"], R["freq_scale"],
+                            R["ext_factor"], R["attn_factor"], R["beta_fast"], R["beta_slow"], False)
+    inv = rope_pair_factors(n_rot, pos, R["n_ctx_orig"], R["freq_base"], R["freq_scale"],
+                            R["ext_factor"], R["attn_factor"], R["beta_fast"], R["beta_slow"], True)
+    q = rope_apply(list(q_headrms), n_head, head_dim, n_rot, fwd)
+    kv_roped = rope_apply(list(kv_norm), n_head_kv, head_dim, n_rot, fwd)
+    kv = fp8_kv_quantize_row(list(kv_roped), head_dim, n_rot)
+    kv = [f16_round(v) for v in kv]
+
+    heads_attn = attention_rows_one(q, [kv], read_f32(g, P + "attn_sinks.weight", n_head),
+                                    n_head, head_dim)
+    heads = rope_apply(list(heads_attn), n_head, head_dim, n_rot, inv)
+
+    group_dim = head_dim * (n_head // n_groups)
+    a_rows = g.dims(P + "attn_output_a.weight")[1]
+    a_cols = g.dims(P + "attn_output_a.weight")[0]
+    if a_cols != group_dim or a_rows != n_groups * rank:
+        raise SystemExit("attn_output_a layout %dx%d != grouped %dx%d"
+                         % (a_rows, a_cols, n_groups * rank, group_dim))
+    low = [0.0] * (n_groups * rank)
+    base = g.abs_off(P + "attn_output_a.weight")
+    nel = a_rows * a_cols
+    pay = g.mm[base: base + nel]
+    sca = g.mm[base + nel: base + nel + nel // 32]
+    tget = E4M3.__getitem__
+    mul = float.__mul__
+    ngrp32 = group_dim // 32
+    for grp in range(n_groups):
+        xg = heads[grp * group_dim:(grp + 1) * group_dim]
+        xs = [xg[i * 32:(i + 1) * 32] for i in range(ngrp32)]
+        for r in range(rank):
+            tensor_row = grp * rank + r                 # ds4.c:7129
+            rp = tensor_row * group_dim
+            g0 = rp // 32
+            acc = 0.0
+            for gi in range(ngrp32):
+                p = rp + gi * 32
+                acc += E8M0[sca[g0 + gi]] * sum(map(mul, map(tget, pay[p:p + 32]), xs[gi]))
+            low[tensor_row] = acc
+    b_rows = g.dims(P + "attn_output_b.weight")[1]
+    b_cols = g.dims(P + "attn_output_b.weight")[0]
+    attn_out = mx8_matvec(g, P + "attn_output_b.weight", low, b_rows, b_cols)
+    after_attn_hc = hc_post(attn_out, residual_hc, post, comb, n_embd, n_hc)
+    return {
+        "hc_flat": hc_flat, "hc_mix": hc_mix, "hc_post_w": post, "hc_comb": comb, "hc_cur": x_in,
+        "xn": xn, "qlatn": qlatn, "q_headrms": q_headrms, "q": q, "kv_norm": kv_norm,
+        "kv_roped": kv_roped, "kv": kv, "heads_attn": heads_attn, "heads": heads, "low": low,
+        "attn_out": attn_out, "after_attn_hc": after_attn_hc, "rope": R,
+    }
+
+
+def geometry(K):
+    return {
+        "n_embd": K["deepseek4.embedding_length"],
+        "n_head": K["deepseek4.attention.head_count"],
+        "n_head_kv": K["deepseek4.attention.head_count_kv"],
+        "head_dim": K["deepseek4.attention.key_length"],
+        "n_rot": K["deepseek4.rope.dimension_count"],
+        "eps": K["deepseek4.attention.layer_norm_rms_epsilon"],
+        "q_rank": K["deepseek4.attention.q_lora_rank"],
+        "n_groups": K["deepseek4.attention.output_group_count"],
+        "rank": K["deepseek4.attention.output_lora_rank"],
+        "n_hc": K.get("deepseek4.hyper_connection.count", 4),
+        "hc_iters": K.get("deepseek4.hyper_connection.sinkhorn_iterations", 20),
+        "hc_eps": K.get("deepseek4.hyper_connection.epsilon", 1e-6),
+    }
+
+
+def run_stack(g, token, pos, n_layers, outdir):
+    """The 43 heterogeneous layers, carrying the four hyper-connection streams between them.
+
+    Every per-layer decision is READ FROM THE FILE and printed, never inherited from blk.0:
+      * n_exp_stack  = ffn_gate_exps dim[2]     (256 for 0..2, 192 after REAP-25 pruning)
+      * gate/up and down TYPES                  (GGUF 40 MXFP4 or 16 IQ2_XXS, independently)
+      * the routing regime                      (ffn_gate_tid2eid table present, or biased top-k)
+      * the RoPE compress ratio                 (0 for 0..1, then 4/128 alternating)
+    Each layer's vectors are flushed to disk as it completes, so a partial run still gates a prefix.
+    """
+    K = g.kv
+    GEO = geometry(K)
+    n_embd = GEO["n_embd"]; n_hc = GEO["n_hc"]
+    x0 = read_f16_row(g, "token_embd.weight", token, n_embd)
+    resid = list(x0) * n_hc                                # ds4.c:9764 broadcast
+    print("STACKGEOM n_embd %d n_hc %d layers %d token %d pos %d" % (n_embd, n_hc, n_layers, token, pos))
+    if outdir:
+        with open(os.path.join(outdir, "oracle-embed.f64"), "w") as fh:
+            for v in x0:
+                fh.write("%.17g\n" % v)
+    for il in range(n_layers):
+        P = "blk.%d." % il
+        A = attn_half(g, P, K, GEO, resid, il, pos)
+        F = ffn_half(g, P, A["after_attn_hc"], K, n_embd, n_hc, GEO["eps"],
+                     GEO["hc_iters"], GEO["hc_eps"], token, il)
+        R = A["rope"]
+        print("LAYER %d ratio %d freq_base %r freq_scale %r n_exp %d gate_t %d up_t %d down_t %d "
+              "regime %s selected %s weights %s"
+              % (il, R["ratio"], R["freq_base"], R["freq_scale"], F["n_exp_stack"],
+                 g.ttype(P + "ffn_gate_exps.weight"), g.ttype(P + "ffn_up_exps.weight"),
+                 g.ttype(P + "ffn_down_exps.weight"), F["regime"], F["selected"],
+                 ["%.9g" % w for w in F["expert_w"]]))
+        sys.stdout.flush()
+        if outdir:
+            e0 = F["per_expert"][0]
+            named = [("after_attn_hc", A["after_attn_hc"]), ("ffn_cur", F["ffn_cur"]),
+                     ("ffn_normed", F["ffn_norm"]), ("router_logits", F["router_logits"]),
+                     ("expert_w", F["expert_w"]), ("selected", [float(v) for v in F["selected"]]),
+                     ("exp0_gate", e0[1]), ("exp0_up", e0[2]), ("exp0_mid", e0[3]),
+                     ("exp0_down", e0[4]), ("moe", F["moe"]), ("shared", F["shared"]),
+                     ("ffn_out", F["ffn_out"]), ("out_hc", F["out_hc"])]
+            for key, vec in named:
+                with open(os.path.join(outdir, "oracle-L%d-%s.f64" % (il, key)), "w") as fh:
+                    for v in vec:
+                        fh.write("%.17g\n" % v)
+            with open(os.path.join(outdir, "oracle-done.txt"), "a") as fh:
+                fh.write("%d\n" % il)
+        resid = F["out_hc"]
+    print("STACKEND %d" % n_layers)
+
 
 # ------------------------------------------------------------------ the core
 def main():
@@ -688,6 +964,14 @@ def main():
     il = int(sys.argv[4]) if len(sys.argv) > 4 else 0
     g = Gguf(path)
     K = g.kv
+    # STONE 39: mode `stack` runs N heterogeneous layers, carrying the four hyper-connection streams,
+    # every per-layer decision read from the file's own tensor table. argv[4] is the LAYER COUNT here.
+    if os.environ.get("DSV4_ORACLE_MODE") == "stack":
+        n_layers = il if len(sys.argv) > 4 else K["deepseek4.block_count"]
+        print("ORACLE dsv4-stack token %d pos %d layers %d" % (token, pos, n_layers))
+        run_stack(g, token, pos, n_layers, os.environ.get("DSV4_ORACLE_OUT"))
+        print("END")
+        return
     n_embd = K["deepseek4.embedding_length"]
     n_head = K["deepseek4.attention.head_count"]
     n_head_kv = K["deepseek4.attention.head_count_kv"]
