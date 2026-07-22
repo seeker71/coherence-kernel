@@ -78,7 +78,7 @@
 ;     dsv4-kv-cache.fk). The two caps are independent on purpose — a loop that stops only because its
 ;     cache silently stopped growing is the failure this separation exists to make impossible.
 ;
-; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk form-stdlib/dsv4-kv-cache.fk
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk form-stdlib/mla-msl.fk form-stdlib/dsv4-kv-cache.fk
 ;
 ; Proven by: form-stdlib/tests/dsv4-decode-loop-band.fk (verdict 1023) and native/metal/metal_dsv4_decode.sh.
 
@@ -287,4 +287,109 @@
     (defn ddl-prefill-layer-major (ctx mdl ids kv)
         (do (let r (ddl-lm-layers 0 (nth ctx 1) (nth ctx 0) (ddl-embed-all mdl ids) kv))
             (list (ddl-logits mdl (ddl-last (nth r 0))) (nth r 1))))
+
+    ; ===========================================================================
+    ; THE FIXTURE AND ITS fp64 REFERENCES, for native/metal/metal_dsv4_decode.sh.
+    ; The SAME toy MLA layer mla-demo.fk and mla-attn-band.fk use — one source of
+    ; truth for the arithmetic — plus a six-token vocabulary, so there is something
+    ; to argmax over and something to call an answer. The carrier's whole diet is
+    ; printed here; not one number lives in the shell script (the dumb-carrier
+    ; discipline).
+    ; ===========================================================================
+    (defn ddc-eps () 0.00001)
+    (defn ddc-base () 10000.0)
+    (defn ddc-nh () 2) (defn ddc-hd () 4) (defn ddc-nrot () 2) (defn ddc-ng () 2)
+    (defn ddc-e () 4) (defn ddc-r () 3)
+    (defn ddc-grank () 2)
+    (defn ddc-gdim () (mul (div (ddc-nh) (ddc-ng)) (ddc-hd)))
+    (defn ddc-ncat () (mul (ddc-ng) (ddc-grank)))
+    (defn ddc-cap () 16)
+    (defn ddc-npredict () 5)
+    (defn ddc-eos () 99)
+    (defn ddc-vocab () 6)
+    (defn ddc-c () (mla-cfg (ddc-nh) (ddc-hd) (ddc-nrot) (ddc-ng) (ddc-base) (ddc-eps)))
+
+    (defn ddc-an () (list 1.0 1.0 1.0 1.0))
+    (defn ddc-wqa () (list (list 0.1 -0.2 0.3 0.4) (list -0.5 0.6 0.1 -0.2) (list 0.2 0.3 -0.4 0.5)))
+    (defn ddc-gqa () (list 1.0 1.0 1.0))
+    (defn ddc-wqb () (list (list 0.2 -0.1 0.4) (list 0.5 0.3 -0.2) (list -0.3 0.6 0.1) (list 0.1 0.2 0.3)
+                           (list 0.4 -0.5 0.2) (list -0.1 0.3 0.5) (list 0.6 0.1 -0.4) (list 0.2 -0.3 0.1)))
+    (defn ddc-wkv () (list (list 0.3 0.1 -0.2 0.5) (list -0.4 0.2 0.6 0.1)
+                           (list 0.2 -0.5 0.3 -0.1) (list 0.1 0.4 -0.3 0.2)))
+    (defn ddc-gkv () (list 1.0 1.0 1.0 1.0))
+    (defn ddc-was () (list (list (list 0.1 0.2 -0.3 0.4) (list 0.5 -0.1 0.2 0.3))
+                           (list (list -0.2 0.4 0.1 -0.5) (list 0.3 0.2 -0.4 0.1))))
+    (defn ddc-wb () (list (list 0.2 -0.3 0.4 0.1) (list -0.1 0.5 0.2 -0.4)
+                          (list 0.3 0.1 -0.2 0.5) (list 0.4 -0.2 0.1 0.3)))
+    (defn ddc-sinks () (list 0.0 0.5))
+    (defn ddc-w () (mla-w (ddc-an) (ddc-wqa) (ddc-gqa) (ddc-wqb) (ddc-wkv) (ddc-gkv)
+                          (ddc-was) (ddc-wb) (ddc-sinks)))
+    (defn ddc-ctx () (ddl-mla-ctx (ddc-w) (ddc-c)))
+
+    (defn ddc-emb () (list (list 0.5 -0.3 0.9 0.2) (list -0.4 0.7 -0.1 0.6) (list 0.2 0.1 -0.8 0.4)
+                           (list 0.9 0.2 0.3 -0.5) (list -0.7 -0.2 0.4 0.8) (list 0.3 0.6 -0.6 -0.1)))
+    (defn ddc-wout () (list (list 0.4 -0.2 0.1 0.3) (list -0.3 0.5 0.2 -0.1) (list 0.1 0.3 -0.4 0.6)
+                            (list 0.7 -0.1 0.2 0.1) (list -0.2 0.4 0.5 -0.3) (list 0.2 0.2 -0.2 0.4)))
+    (defn ddc-wnorm () (list 1.0 1.0 1.0 1.0))
+    (defn ddc-mdl () (ddl-mdl (ddc-emb) (ddc-wout) (ddc-wnorm) 1))
+
+    ; two prompts. B was chosen for a DIFFERENT FIRST TOKEN: this one-layer toy has a
+    ; fixed point, so whatever it emits first it emits forever, and two prompts that
+    ; agree on the first token would agree on all five. That is the fixture's property
+    ; and not the loop's, and it is said here rather than hidden.
+    (defn ddc-prompt-a () (list 0 1 2))
+    (defn ddc-prompt-b () (list 4 3))
+    (defn ddc-lim () (ddl-lim (ddc-npredict) (ddc-cap) (ddc-eos)))
+    (defn ddc-kv0 () (dkv-new (ddc-cap) 1 (ddc-hd)))
+    (defn ddc-run-a () (ddl-run ddl-mla-step (ddc-ctx) (ddc-mdl) (ddc-lim) (ddc-kv0) (ddc-prompt-a)))
+    (defn ddc-run-b () (ddl-run ddl-mla-step (ddc-ctx) (ddc-mdl) (ddc-lim) (ddc-kv0) (ddc-prompt-b)))
+
+    (defn ddc-freqs-walk (k npair)
+        (if (eq k npair) (empty) (cons (rope-freq-theta (ddc-base) (mul 2 k) (ddc-nrot)) (ddc-freqs-walk (add k 1) npair))))
+    (defn ddc-freqs () (ddc-freqs-walk 0 (div (ddc-nrot) 2)))
+    (defn ddc-scale () (mla-scale (ddc-c)))
+    ; the prefill logits at the LAST prompt position — the first sampled token's source
+    (defn ddc-prefill-a () (ddl-prefill ddl-mla-step (ddc-ctx) (ddc-mdl) (ddc-prompt-a) (ddc-kv0)))
+
+    (defn ddc-plist (xs) (if (eq (len xs) 0) (print "ENDVEC") (do (print (head xs)) (ddc-plist (tail xs)))))
+    (defn ddc-vec (name xs) (do (print (str_concat "VEC " name)) (ddc-plist xs)))
+    (defn ddc-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (ddc-flat (tail rows)))))
+    (defn ddc-mat (name rows) (ddc-vec name (ddc-flat rows)))
+    (defn ddc-was-flat (ms) (if (eq (len ms) 0) (empty) (tb-cat (ddc-flat (head ms)) (ddc-was-flat (tail ms)))))
+    (defn ddc-scalar (name v) (do (print (str_concat "SCALAR " name)) (print v)))
+
+    (defn ddc-emit ()
+        (do
+            (print "DSV4DECODE")
+            (ddc-scalar "E" (ddc-e)) (ddc-scalar "R" (ddc-r))
+            (ddc-scalar "nh" (ddc-nh)) (ddc-scalar "hd" (ddc-hd))
+            (ddc-scalar "nrot" (ddc-nrot)) (ddc-scalar "ng" (ddc-ng))
+            (ddc-scalar "grank" (ddc-grank)) (ddc-scalar "gdim" (ddc-gdim)) (ddc-scalar "ncat" (ddc-ncat))
+            (ddc-scalar "eps" (ddc-eps)) (ddc-scalar "base" (ddc-base)) (ddc-scalar "scale" (ddc-scale))
+            (ddc-scalar "cap" (ddc-cap)) (ddc-scalar "npredict" (ddc-npredict))
+            (ddc-scalar "eos" (ddc-eos)) (ddc-scalar "vocab" (ddc-vocab))
+            (ddc-vec "freqs" (ddc-freqs))
+            (ddc-vec "an" (ddc-an)) (ddc-vec "gqa" (ddc-gqa)) (ddc-vec "gkv" (ddc-gkv)) (ddc-vec "sinks" (ddc-sinks))
+            (ddc-mat "wqa" (ddc-wqa)) (ddc-mat "wqb" (ddc-wqb)) (ddc-mat "wkv" (ddc-wkv)) (ddc-mat "wb" (ddc-wb))
+            (ddc-vec "was" (ddc-was-flat (ddc-was)))
+            (ddc-mat "emb" (ddc-emb)) (ddc-mat "wout" (ddc-wout)) (ddc-vec "wnorm" (ddc-wnorm))
+            (ddc-vec "promptA" (ddc-prompt-a)) (ddc-vec "promptB" (ddc-prompt-b))
+            ; the fp64 answers this body computed, which the GPU must reproduce
+            (ddc-vec "genA" (ddl-run-ids (ddc-run-a)))
+            (ddc-vec "genB" (ddl-run-ids (ddc-run-b)))
+            (ddc-scalar "nrowsA" (dkv-len (ddl-run-kv (ddc-run-a)) 0))
+            (ddc-scalar "posA" (ddl-run-pos (ddc-run-a)))
+            (ddc-scalar "stopA" (ddl-run-stop (ddc-run-a)))
+            (ddc-vec "rowsA" (dkv-flat (ddl-run-kv (ddc-run-a)) 0))
+            (ddc-vec "logitsA0" (nth (ddc-prefill-a) 0))
+            ; hushfold: the same token cached at position 0 and at position 1
+            (ddc-vec "row0" (mla-cache-row (ddc-w) (ddc-c) (nth (ddc-emb) 0) 0))
+            (ddc-vec "row1" (mla-cache-row (ddc-w) (ddc-c) (nth (ddc-emb) 0) 1))
+            (print "END")
+            0))
+
+    ; the Metal translation unit the decode witness runs: mla-msl.fk's five kernels
+    ; (one header, one spine) plus the cache's own append. ONE unit, so the arena's
+    ; append and the attention that reads the arena cannot drift apart.
+    (defn ddc-msl-unit () (str_concat (mla-msl-unit) (dkv-append-msl-body)))
     0)
