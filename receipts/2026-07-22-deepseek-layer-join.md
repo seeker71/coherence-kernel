@@ -229,10 +229,10 @@ Landed as `(hdc-row 870 …)`. Corpus band from the repo root: **8191**.
 | gate | result |
 |---|---|
 | corpus band from repo root | 8191 |
-| `metal_dsv4_layer.sh` (Stone 36, untouched) | PASS 30 |
+| `metal_dsv4_layer.sh` (Stone 36) | PASS 30 — re-run **after** the oracle grew its `layer` mode, to prove the `hc` mode it depends on was not disturbed |
 | `metal_dsv4_layer_join.sh` (new) | **PASS 31** |
-| `metal_first_token.sh` (untouched) | not re-run this session |
-| `metal_dsv4_forward.sh` / `metal_dsv4_token.sh` / `metal_hc_gpu.sh` | untouched |
+| `metal_first_token.sh` | untouched, not re-run this session |
+| `metal_dsv4_forward.sh` / `metal_dsv4_token.sh` / `metal_hc_gpu.sh` | untouched, not re-run this session |
 
 ## Files
 
