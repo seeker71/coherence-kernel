@@ -35,6 +35,9 @@ Current control actions are:
 | 3 | abstain |
 | 4 | request evidence |
 | 5 | rehearse ground |
+| 6 | admit candidate |
+| 7 | defer candidate |
+| 8 | reject candidate |
 
 The action vocabulary is extensible Form data. A consumer must implement the
 actuator for every action it admits and must re-observe the selected state.
@@ -120,3 +123,9 @@ The witnessed vector is documented in
 - `cognition/native-self-orientation.fk` — derive floor and north-star invariants,
   predict two movements, walk the first available movement, and re-orient from
   the resulting live witness without clearing the parent diagnostic window.
+- `cognition/native-node-ontogenesis.fk` — derive a candidate node from live
+  unresolved evidence; build its blueprint, executable recipe, language-neutral
+  identity, names, and seven inquiry interfaces; validate, admit/defer/reject,
+  test held-out transfer, and re-orient from the changed recognition floor.
+- `cognition/tests/native-node-ontogenesis-band.fk` — end-to-end admission and
+  reversibility witness.
