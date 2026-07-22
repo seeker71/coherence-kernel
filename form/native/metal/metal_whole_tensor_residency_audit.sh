@@ -241,6 +241,12 @@ var failures = 0
 func check(_ ok: Bool, _ pass: String, _ fail: String) {
     if ok { print("PASS  " + pass) } else { print("FAIL  " + fail); failures += 1 }
 }
+// axiom-4: a command buffer offers cb.status and cb.error; every gate below reads a device
+// buffer back, and those buffers are freshly zeroed — so a failed dispatch does not read as
+// an error, it reads as arithmetic disagreeing with Form at nearly every weight. Counted over
+// the whole run; if any dispatch failed, nothing read back can be trusted.
+var gpuErrors = 0
+var gpuFirstError: String? = nil
 
 // --- THE WHOLE MODEL, RESIDENT. mmap the blob and hand the GPU the mapped pages themselves: with
 //     bytesNoCopy there is no copy at all, so "upload" is a page-table fact, not a memcpy. ---------
@@ -272,9 +278,46 @@ func dispatch(_ p: MTLComputePipelineState, width: Int, _ bind: (MTLComputeComma
     enc.dispatchThreads(MTLSize(width: width, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
     enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    if let e = cb.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(e)" } }
+    if cb.status != .completed { gpuErrors += 1
+        if gpuFirstError == nil { gpuFirstError = "command buffer status \(cb.status.rawValue), not .completed" } }
 }
 
 let u = 5.960464477539063e-08   // 2^-24, the f32 unit roundoff
+
+// --- GATE 0: DID THE GPU RUN. Asked before any gate reads a device buffer back, because a
+// buffer nothing wrote reads as zeros — a NUMBER the gates below would grade as arithmetic
+// disagreement. The CPU writes a sentinel no dequant would produce into a fresh buffer, then a
+// real dequant kernel off the resident model must overwrite every element. A survived sentinel
+// is a residency condition (the whole blob is asked resident here), not an arithmetic one.
+do {
+    guard let lane0 = lanes.first else { print("FAIL  gate 0: no lanes"); failures += 1; exit(1) }
+    let pDeq0 = try pipeline(lane0.deq)
+    let n0 = tile
+    let sBuf = dev.makeBuffer(length: n0 * 4, options: .storageModeShared)!
+    let sp = sBuf.contents().bindMemory(to: Float.self, capacity: n0)
+    let sentinel: Float = -424242.0
+    for i in 0..<n0 { sp[i] = sentinel }
+    let before = gpuErrors
+    var o32 = UInt32(0), n32 = UInt32(n0)
+    dispatch(pDeq0, width: n0) { enc in
+        enc.setBuffer(modelBuf, offset: lane0.abs, index: 0)
+        enc.setBuffer(sBuf, offset: 0, index: 1)
+        enc.setBytes(&o32, length: 4, index: 2)
+        enc.setBytes(&n32, length: 4, index: 3)
+    }
+    var survived = 0
+    for i in 0..<n0 where sp[i] == sentinel { survived += 1 }
+    if gpuErrors > before { print("      command buffer ERROR: \(gpuFirstError ?? "unknown")") }
+    if gpuErrors == before && survived == 0 {
+        print("PASS  gate 0 the GPU executes: a dequant off the resident model overwrote all \(n0) sentinels, no command buffer errored")
+    } else {
+        print("FAIL  gate 0 THE GPU DID NOT RUN — \(survived)/\(n0) sentinels survived, \(gpuErrors - before) cb error(s).")
+        print("      This is a RESIDENCY condition, not an arithmetic one: every gate below would grade an")
+        print("      unwritten buffer as disagreement. Free memory (the whole blob is asked resident) and re-run.")
+        print("VERDICT FAIL"); exit(1)
+    }
+}
 
 for lane in lanes {
     guard let ref = refs[lane.quant], let head = ref.tiles[0], let tail = ref.tiles[lane.tailOff],
@@ -491,7 +534,11 @@ do {
           "gate 9: the pooled KV cache did not read back what was written")
 }
 
-if failures == 0 { print("VERDICT PASS") } else { print("VERDICT FAIL (\(failures) gates)"); exit(1) }
+if gpuErrors > 0 {
+    print("=== \(gpuErrors) COMMAND BUFFER(S) FAILED during this run — first: \(gpuFirstError ?? "unknown") ===")
+    print("    Nothing above this line that reads a device buffer back can be trusted.")
+}
+if failures == 0 && gpuErrors == 0 { print("VERDICT PASS") } else { print("VERDICT FAIL (\(failures) gates, \(gpuErrors) cb errors)"); exit(1) }
 SWIFT
 
 swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || {

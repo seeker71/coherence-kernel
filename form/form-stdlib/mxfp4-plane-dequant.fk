@@ -1,0 +1,150 @@
+; mxfp4-plane-dequant.fk — GGUF type 40 as it is ACTUALLY laid out in
+; DeepSeek-V4-Flash-REAP25-DSpark-ds4-GGUF, carved from the real file's own bytes.
+;
+; WHAT THE PARSE TABLE SAYS, AND WHY IT IS NOT WHAT THE FILE HOLDS.
+; ds4 (gguf-tools/quants.c:72) carries one placeholder row for this type:
+;     [DS4Q_TYPE_NVFP4] = { "nvfp4", 64, 36, false, false }
+; — 64 elements in 36 bytes, the textbook NVIDIA NVFP4 shape (E2M1 payload + one FP8 E4M3 scale per
+; 16-element microblock: 8 + 1 bytes per 16 = 36 per 64). ds4 never dequantizes type 40 (it warns
+; "unsupported GGUF type 40" and stops), so that row's arithmetic is never exercised, and THIS FILE
+; DOES NOT MATCH IT. The file's own tensor offsets say 34 bytes per 64 elements, not 36, and the
+; scales are not inside a block at all. Both claims are measured below, not assumed.
+;
+; EVIDENCE FOR 34/64 (0.53125 bytes per element).
+; The GGUF header holds 1406 tensor-info records with absolute data offsets. The gap from each tensor
+; to the next in offset order divided by its element count is the bytes-per-element the WRITER used.
+; That instrument recovers f32 = 4.0, f16 = 2.0, i32 = 4.0 and iq2_xxs = 0.2578125 (= 66/256) exactly,
+; so it is validated on four known geometries. Across ALL 45 type-40 tensors it answers exactly one
+; value, 0.53125 = 17/32 = 34/64, with no spread. A block of 36 bytes per 64 would make
+; blk.0.ffn_gate_exps.weight run 67 108 864 bytes into blk.0.ffn_down_exps.weight; tensors do not
+; overlap, so 36 is excluded by the file itself.
+;
+; EVIDENCE THAT THE PAYLOAD IS 4-BIT E2M1, AND THAT NO SCALE SITS INSIDE THE BLOCK.
+; Over 4 MB of blk.0.ffn_gate_exps.weight exactly 225 of the 256 byte values occur, everywhere in the
+; tensor. 225 = 15 x 15: the 31 absent values are precisely those containing the nibble 0x8, and 0x8
+; is E2M1's negative zero — the code a quantizer canonicalizes away. The nibble histogram is
+; sign-symmetric to three digits (count(v) ~ count(v+8) for v = 1..7), which is what a zero-mean
+; trained weight tensor gives under a sign-magnitude code. Because nibble 0x8 NEVER occurs, no byte
+; anywhere in the tensor can be an E8M0 exponent near 0x78 — i.e. there is no in-block scale byte.
+; Positional entropy at period 17 / 34 / 68 (bytes) and 68 (nibbles) is flat at ~7.5 / ~3.77 bits with
+; no low-entropy position, against a control (iq2_xxs at period 66) where the same instrument finds
+; the f16 scale's high byte at entropy 2.13. The scale is elsewhere.
+;
+; WHERE THE SCALE IS: THE PLANE SPLIT — this is the whole stone.
+; A tensor slice of n elements is stored as TWO PLANES, back to back:
+;     [ n/2 bytes of packed 4-bit E2M1 codes ] [ n/32 bytes of E8M0 shared exponents ]
+; n/2 + n/32 = 0.53125*n exactly, closing the byte count with nothing left over. Scanning
+; blk.0.ffn_gate_exps.weight for "does any nibble equal 8" transitions 512 times at a period of
+; 4 456 448 bytes = 4 194 304 payload + 262 144 scales — one plane pair per EXPERT, and 256 experts x
+; 4 456 448 = 1 140 850 688 = the tensor's exact size. In the scale plane only nibbles {7,8,9} occur:
+; the bytes are 0x78 / 0x79 / 0x7A, i.e. E8M0 exponents 120/121/122 = 2^-7 / 2^-6 / 2^-5.
+;
+; EVIDENCE THAT THE SCALE GROUP IS 32 ELEMENTS (not 16, not 64).
+; MX quantization picks the shared exponent from the group's maximum, so the largest magnitude code in
+; a group should saturate the format's top codes. Over 2M elements: at group 32, 100% of groups have
+; max magnitude code 6 or 7 (the two largest E2M1 magnitudes, 4.0 and 6.0) — 54% / 46%. At group 16
+; only 77.4% do; groups fall as low as code 2. 32 is the tightest group size at which saturation is
+; total, and 16 is excluded. This agrees with the n/32 the byte count already demanded.
+;
+; THE VALUE MAP IS NOT A NEW MEANING. E2M1 is 1 sign bit, 2 exponent bits (bias 1), 1 mantissa bit —
+; which is exactly f16-decode.fk's already-four-way-proven general decoder at (eb 2, mb 1):
+;     (fd-value c 2 1)  ->  0, .5, 1, 1.5, 2, 3, 4, 6 and their negatives
+; So this recipe adds NO float arithmetic to the body; it adds a REACH and a geometry. E2M1 has no
+; Inf and no NaN encoding, so fd-value's lack of a special-case branch is exactly right here.
+;
+; THE EXOSCALAR SEAM (corpus row `exoscalar`). Every other carver in this body — q4k, q6k — finds its
+; scale INSIDE the block it is decoding. Here the scale is held outside, in a plane whose base depends
+; on n, the slice's element count. That is why every accessor takes n: a carver cannot find the scale
+; for weight i without knowing how many weights the slice has. A caller that passes the wrong n reads
+; payload bytes as exponents and gets weights off by powers of two — so n is a required argument, not
+; a convenience, and mxp4-slice-bytes is the only honest way to stride between slices.
+;
+; Kin: equireach.fk (eqr-at — the O(1) reach), f16-decode.fk (fd-value — the shared value map),
+; format-arith.fk (fq-pow2 — the signed power of two E8M0 needs), q6k-dequant.fk (the carver idiom and
+; the bounds-wall discipline this copies), mxfp8-plane-dequant.fk (GGUF type 41, the same plane split
+; one payload width up).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk
+;
+; Proven by: form-stdlib/tests/mx-plane-band.fk
+; PROOF RADIUS: the band proves the GEOMETRY and the VALUE MAP against 1024 real weights of
+; blk.0.ffn_gate_exps.weight. It does NOT prove nibble ORDER (see mxp4-code below) and it is NOT
+; bit-exactness against an independent implementation — none exists. See the receipt.
+
+(do
+    ; --- E8M0: the shared exponent byte. value = 2^(e - 127). 0xFF is the format's NaN. ---
+    ; Named once here and reused by mxfp8-plane-dequant.fk — one E8M0 in the body, not two.
+    (defn mxp-e8m0 (e)
+        (if (eq e 255)
+            (form_error "mxp-e8m0: 0xFF is E8M0's NaN encoding, not a scale -- the plane base is wrong, or n is wrong")
+            (fq-pow2 (sub e 127))))
+
+    ; --- integer mod via floor-div; every operand here is a non-negative index or byte ---
+    (defn mxp4-mod (a m) (sub a (mul (div a m) m)))
+
+    ; --- the two constants the format actually has ---
+    (defn mxp4-group () 32)                       ; elements sharing one E8M0 exponent
+    (defn mxp4-code-value (c) (fd-value c 2 1))   ; E2M1, the body's own general IEEE decode
+
+    ; --- PLANE GEOMETRY. n is the slice's element count; every offset below is derived from it. ---
+    (defn mxp4-payload-bytes (n) (div n 2))
+    (defn mxp4-scale-bytes   (n) (div n (mxp4-group)))
+    (defn mxp4-slice-bytes   (n) (add (mxp4-payload-bytes n) (mxp4-scale-bytes n)))
+    ; slice k of a multi-slice tensor (the expert axis of ffn_*_exps: 256 slices of 4096*2048)
+    (defn mxp4-slice-base (base n k) (add base (mul k (mxp4-slice-bytes n))))
+
+    ; --- the packed 4-bit code for element i.
+    ; NIBBLE ORDER IS THE ONE FIELD THE BYTES CANNOT SETTLE. Even i takes the LOW nibble, odd i the
+    ; HIGH nibble. The alternative (even/odd swapped, or a 16-apart split as llama.cpp's block mxfp4
+    ; uses) permutes elements only WITHIN one 16-byte span, which is entirely inside one 32-element
+    ; scale group — so every distributional and statistical test this body can run gives the identical
+    ; answer for both. This is a named uncertainty, not a proven field. It is falsifiable the moment
+    ; any independent decoder for this file exists.
+    (defn mxp4-code (src base i)
+        (if (eq (mxp4-mod i 2) 0)
+            (mxp4-mod (eqr-at src (add base (div i 2))) 16)
+            (div     (eqr-at src (add base (div i 2))) 16)))
+
+    ; --- the shared exponent governing element i, read from the SCALE PLANE at base + n/2 ---
+    (defn mxp4-scale-byte (src base n i)
+        (eqr-at src (add base (add (mxp4-payload-bytes n) (div i (mxp4-group))))))
+    (defn mxp4-scale (src base n i) (mxp-e8m0 (mxp4-scale-byte src base n i)))
+
+    ; --- THE BOUNDS WALL (aporon: the radius is declared, and the body refuses outside it).
+    ; A slice holds exactly n weights. Asking for weight n reads the first SCALE byte as a payload
+    ; byte and answers a plausible-looking number with no diagnostic — the silent-partial-list family
+    ; wearing a new coat. The wall is named, testable in-band, and refuses out loud.
+    (defn mxp4-index-ok? (n i) (if (lt i 0) 0 (if (lt i n) 1 0)))
+
+    ; --- one weight: w = 2^(e-127) * E2M1(code) ---
+    (defn mxp4-at (src base n i)
+        (if (eq (mxp4-index-ok? n i) 1)
+            (mul (mxp4-scale src base n i) (mxp4-code-value (mxp4-code src base i)))
+            (form_error "mxp4-at: element index outside the slice -- weight n would read the scale plane as payload; stride with mxp4-slice-base instead")))
+
+    ; --- m consecutive weights from element i0, one O(m) pass, no slicing and no byte list ---
+    (defn mxp4-weights-loop (src base n i m acc)
+        (if (ge i m) (reverse acc)
+            (mxp4-weights-loop src base n (add i 1) m (cons (mxp4-at src base n i) acc))))
+    (defn mxp4-weights (src base n m) (mxp4-weights-loop src base n 0 m (list)))
+
+    ; --- integer witnesses, so a band can pin a float without rendering one.
+    ; fkwu cannot print a float; it can compare one. These carry a weight to an integer the band pins.
+    (defn mxp4-milli (src base n i) (mul 1000000.0 (mxp4-at src base n i)))
+    ; the sum of |code| over a run — a pure-integer statistic of the payload plane alone
+    (defn mxp4-absmag (c) (mxp4-mod c 8))
+    (defn mxp4-codesum-loop (src base i m acc)
+        (if (ge i m) acc
+            (mxp4-codesum-loop src base (add i 1) m (add acc (mxp4-absmag (mxp4-code src base i))))))
+    (defn mxp4-codesum (src base m) (mxp4-codesum-loop src base 0 m 0))
+    ; the largest magnitude code in the 32-element group containing i — the saturation witness
+    (defn mxp4-groupmax-loop (src base i last acc)
+        (if (gt i last) acc
+            (mxp4-groupmax-loop src base (add i 1) last
+                (if (gt (mxp4-absmag (mxp4-code src base i)) acc) (mxp4-absmag (mxp4-code src base i)) acc))))
+    (defn mxp4-groupmax (src base g)
+        (mxp4-groupmax-loop src base (mul g (mxp4-group)) (sub (mul (add g 1) (mxp4-group)) 1) 0))
+    ; 1 when EVERY group in [0,ng) saturates to code 6 or 7 — the group-size claim, in-band
+    (defn mxp4-sat? (src base g ng)
+        (if (ge g ng) 1
+            (if (ge (mxp4-groupmax src base g) 6) (mxp4-sat? src base (add g 1) ng) 0))))

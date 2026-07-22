@@ -198,6 +198,34 @@ for v in PREFILL_S NPROMPT DECODE_S NFWD_DEC ANSWER; do
     [[ -z "${!v}" ]] && { echo "FAIL  could not read $v out of the lane's output — the harness's format moved"; exit 1; }
 done
 
+# ── gate D2: DID THE LANE ANSWER, or only survive. This harness dispatches no Metal of its own —
+# its whole GPU-liveness guarantee is inherited from the lane's VERDICT PASS. But a PASS is a
+# claim about the lane's gates; STAGING is a claim about the ids we are about to publish, and
+# those are different sentences (axiom-4: the answer meets the world through THIS artifact, so
+# THIS harness must consult the answer, not only the lane's verdict). The Stone 14 signature is a
+# constant id stream — [0,0,0,0], every token the same — which reads as a legal, non-empty answer
+# and would stage cleanly. We refuse it here, independently of the lane. A one-token answer cannot
+# be constant-tested and is exempted by count, named so the exemption is not silent.
+if [[ -z "$IDS" ]]; then
+    echo "FAIL  gate D2: the lane passed but emitted no token ids to stage"; exit 1
+fi
+NDISTINCT=$(echo "$IDS" | tr ',' '\n' | grep -oE '[0-9]+' | sort -u | wc -l | tr -d ' ')
+ILLEGAL=$(echo "$IDS" | tr ',' '\n' | grep -oE '[0-9]+' | awk -v v="$VOCAB" 'NF && ($1<0 || $1>=v){c++} END{print c+0}')
+if [[ "$ILLEGAL" -gt 0 ]]; then
+    echo "FAIL  gate D2: $ILLEGAL of the staged ids are outside [0,$VOCAB) — not legal vocab indices"; exit 1
+fi
+if [[ "$NGEN" -ge 2 && "$NDISTINCT" -lt 2 ]]; then
+    echo "FAIL  gate D2: the lane returned $NGEN tokens but only $NDISTINCT distinct value — a CONSTANT id stream"
+    echo "      is the Stone 14 signature of a GPU that produced zeros, not an answer. Refusing to stage it,"
+    echo "      independently of the lane's PASS. (A legal, non-empty answer is not proof the GPU ran.)"
+    exit 1
+fi
+if [[ "$NGEN" -lt 2 ]]; then
+    echo "  gate D2: $NGEN generated token — too few to test for a constant stream; legality checked, non-constancy exempt by count"
+else
+    echo "  gate D2 the staged answer is non-degenerate: $NGEN legal ids, $NDISTINCT distinct — not the constant stream a dead GPU stages"
+fi
+
 PREFILL_US=$(awk -v s="$PREFILL_S" 'BEGIN{printf "%d", s*1000000}')
 DECODE_US=$(awk  -v s="$DECODE_S"  'BEGIN{printf "%d", s*1000000}')
 NFWD_MEASURED=$(( NPROMPT + NFWD_DEC ))
