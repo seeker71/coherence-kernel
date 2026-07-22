@@ -1,0 +1,204 @@
+; tests/keyed-map-band.fk — proof of the O(1) keyed map (Stone 40).
+;
+; WHAT A MAP HAS TO EARN. Being fast is the easy half and it is not the half that can be wrong.
+; A map earns its place by answering the question it was asked — including when the answer is
+; "I do not hold that key". So this band leads with the two controls that a hash map fails
+; silently if it fails at all:
+;
+;   THE NEGATIVE CONTROL (claim 5). An absent key must answer honestly. The body's own honesty
+;     bar is hdc-locate: an unknown question locates to 0, never to a plausible neighbour. Here
+;     the map is asked for keys it does not hold and must hand back the CALLER'S OWN default —
+;     asserted with two different defaults, because a map that returned some fixed sentinel
+;     would pass a one-default test and still be lying. `km-has?` must say 0 for every one.
+;
+;   THE COLLISION CONTROLS (claims 6 and 7), in both flavours, because they fail differently:
+;     - a BUCKET collision: two keys whose hashes agree in the low 4*depth bits and land in one
+;       bucket. "abc" (djb2 193485963) and "aqt" (193486475) share their low 8 bits (139), so in
+;       a depth-2 map they are the same bucket and different keys.
+;     - a FULL 32-BIT hash collision: "guabx" and "naaeaa" both hash to 260615708 exactly. djb2
+;       is a mixer, not a cryptographic hash; these exist and are findable, and the map's
+;       correctness must not depend on their absence. Claim 7 also asserts km-maxbucket >= 2 —
+;       otherwise the control would be VACUOUS, passing because the pair never met.
+;
+; THE SLOPE IS PROVEN AS WORK, NOT AS A CLOCK (claim 11). Bands are correctness artifacts and
+; fkwu constant-folds them into .fkb, so a timing assertion here would be both fragile and a lie
+; waiting to happen. What a map actually claims is that the number of key comparisons per lookup
+; stops growing — so that is what is asserted: at 256 keys and at 4096 keys, with the depth
+; km-depth-for picks, the DEEPEST bucket in the map stays inside the same small bound, while the
+; association list the map replaces has exactly 256 and 4096 entries to walk. 16x the corpus,
+; the same worst-case comparison count. The wall-clock confirmation of that slope is measured
+; separately, in one process on one clock, and lives in receipts/2026-07-22-keyed-map.md.
+;
+; Claim 10 is the equivalence that makes the speed meaningful at all: over a real corpus, on
+; every key present AND absent, the map and `km-assoc-get` return the same answer. The map is
+; not a different data structure with different semantics; it is the same answer, reached faster.
+;
+; VERDICT 4095 (2^12 - 1) when every one of the 12 claims holds.
+;
+; preludes: form-stdlib/keyed-map.fk
+
+(do
+    (defn kmb-score (ok bit) (if ok bit 0))
+
+    ; --- synthetic corpus keys: i as a 4-byte big-endian list. Distinct for i < 2^32, and every
+    ; element is a byte value (0..255), the carrier real keys ride on (wraithcarry). ---
+    (defn kmb-key (i)
+        (list (band (shr_u32 i 24) 255) (band (shr_u32 i 16) 255)
+              (band (shr_u32 i 8) 255)  (band i 255)))
+
+    ; --- fill a map with keys 0..n-1, value = i*3+1 ---
+    (defn kmb-fill (m i n)
+        (if (eq i n) m (kmb-fill (km-put m (kmb-key i) (add (mul i 3) 1)) (add i 1) n)))
+
+    ; --- every present key answers its own value? returns 1/0 ---
+    (defn kmb-all-present (m i n)
+        (if (eq i n) 1
+            (if (eq (km-get m (kmb-key i) (sub 0 1)) (add (mul i 3) 1))
+                (kmb-all-present m (add i 1) n) 0)))
+
+    ; --- every key in [i,n) absent, answering the caller's own default d? ---
+    (defn kmb-all-absent (m i n d)
+        (if (eq i n) 1
+            (if (eq (km-get m (kmb-key i) d) d)
+                (if (eq (km-has? m (kmb-key i)) 0) (kmb-all-absent m (add i 1) n d) 0)
+                0)))
+
+    ; --- the association list the map replaces, over keys 0..n-1 ---
+    (defn kmb-assoc (i n)
+        (if (eq i n) (empty)
+            (cons (list (kmb-key i) (add (mul i 3) 1)) (kmb-assoc (add i 1) n))))
+
+    ; --- map and assoc agree on every key in [i,n), present or not ---
+    (defn kmb-agree (m ps i n)
+        (if (eq i n) 1
+            (if (eq (km-get m (kmb-key i) (sub 0 7)) (km-assoc-get ps (kmb-key i) (sub 0 7)))
+                (kmb-agree m ps (add i 1) n) 0)))
+
+    ; --- the three literal keys, as byte values (no >=128 byte, no built string) ---
+    (defn kmb-abc    () (list 97 98 99))                    ; djb2 193485963, low8 139
+    (defn kmb-aqt    () (list 97 113 116))                  ; djb2 193486475, low8 139 — same bucket
+    (defn kmb-ayl    () (list 97 121 108))                  ; djb2 193486731, low8 139 — same bucket, ABSENT
+    (defn kmb-guabx  () (list 103 117 97 98 120))           ; djb2 260615708
+    (defn kmb-naaeaa () (list 110 97 97 101 97 97))         ; djb2 260615708 — the same, exactly
+
+    ; ================= 1. the hash, on fixed vectors =================
+    ; djb2/32: h = 5381; h = (h*33 + b) mod 2^32. Independently computed, not read back from here.
+    (let c1 (kmb-score
+        (if (eq (km-hash (empty)) 5381)
+            (if (eq (km-hash (list 97)) 177670)
+                (if (eq (km-hash (kmb-abc)) 193485963)
+                    (if (eq (km-hash (kmb-guabx)) 260615708)
+                        (eq (km-hash (kmb-naaeaa)) 260615708) 0) 0) 0) 0) 1))
+
+    ; ================= 2. the two hash doors agree =================
+    ; A key read out of an equireach window (no list built) must hash identically to the same
+    ; bytes carried as a list. If these ever diverge, a map built over a mapped file cannot find
+    ; keys handed to it as lists — the exact seam the tokenizer would use.
+    (let c2 (kmb-score
+        (if (eq (km-hash-win "abc" 0 3) 193485963)
+            (if (eq (km-hash-win "xxabcxx" 2 3) 193485963)
+                (eq (km-hash-win "guabx" 0 5) 260615708) 0) 0) 2))
+
+    ; ================= 3. km-depth-for — the one number that tracks n =================
+    (let c3 (kmb-score
+        (if (eq (km-depth-for 1) 1)
+            (if (eq (km-depth-for 16) 1)
+                (if (eq (km-depth-for 17) 2)
+                    (if (eq (km-depth-for 256) 2)
+                        (if (eq (km-depth-for 257) 3)
+                            (if (eq (km-depth-for 4096) 3)
+                                (eq (km-depth-for 1000000000) 7) 0) 0) 0) 0) 0) 0) 4))
+
+    ; ================= the corpus under test: 256 keys, depth 2 (256 buckets) =================
+    (let m256 (kmb-fill (km-for 256) 0 256))
+
+    ; ================= 4. every present key answers its own value =================
+    (let c4 (kmb-score (eq (kmb-all-present m256 0 256) 1) 8))
+
+    ; ================= 5. THE NEGATIVE CONTROL =================
+    ; 256 keys the map does not hold. Each must come back as the CALLER'S default — asserted with
+    ; two different defaults so a fixed sentinel cannot masquerade as an honest miss — and
+    ; km-has? must answer 0 for every one.
+    (let c5 (kmb-score
+        (if (eq (kmb-all-absent m256 256 512 (sub 0 1)) 1)
+            (if (eq (kmb-all-absent m256 256 512 987654) 1)
+                (if (eq (km-get m256 (kmb-key 999999) 41) 41)
+                    (eq (km-get m256 (kmb-key 999999) 42) 42) 0) 0) 0) 16))
+
+    ; ================= 6. THE BUCKET-COLLISION CONTROL =================
+    ; "abc" and "aqt" have different 32-bit hashes that agree in the low 8 bits, so in this
+    ; depth-2 map they are one bucket. Both must answer their own value; neither may answer the
+    ; other's; and "ayl" — a third key in that same bucket, never put — must answer the default.
+    (let mcol (km-put (km-put (km-new 2) (kmb-abc) 111) (kmb-aqt) 222))
+    (let c6 (kmb-score
+        (if (eq (km-get mcol (kmb-abc) (sub 0 1)) 111)
+            (if (eq (km-get mcol (kmb-aqt) (sub 0 1)) 222)
+                (if (eq (km-get mcol (kmb-ayl) (sub 0 1)) (sub 0 1))
+                    (if (eq (km-maxbucket mcol) 2)            ; they really did meet
+                        (eq (km-has? mcol (kmb-ayl)) 0) 0) 0) 0) 0) 32))
+
+    ; ================= 7. THE FULL 32-BIT HASH-COLLISION CONTROL =================
+    ; "guabx" and "naaeaa" hash to the same 32 bits at every depth. Correctness here cannot come
+    ; from the hash; it comes from exact key equality inside the bucket. maxbucket = 2 attests
+    ; the control is live rather than vacuously passing.
+    (let mfull (km-put (km-put (km-for 1000) (kmb-guabx) 500) (kmb-naaeaa) 600))
+    (let c7 (kmb-score
+        (if (eq (km-get mfull (kmb-guabx) (sub 0 1)) 500)
+            (if (eq (km-get mfull (kmb-naaeaa) (sub 0 1)) 600)
+                (if (eq (km-maxbucket mfull) 2)
+                    (if (eq (km-size mfull) 2)
+                        (eq (km-get mfull (list 103 117 97 98 121) (sub 0 1)) (sub 0 1)) 0) 0) 0) 0) 64))
+
+    ; ================= 8. last put wins; count and size say different true things =================
+    (let mdup (km-put (km-put (km-put (km-new 2) (kmb-abc) 1) (kmb-abc) 2) (kmb-abc) 3))
+    (let c8 (kmb-score
+        (if (eq (km-get mdup (kmb-abc) (sub 0 1)) 3)
+            (if (eq (km-size mdup) 1)                          ; one distinct key
+                (if (eq (km-count mdup) 3)                     ; three puts, and it says so
+                    (eq (km-maxbucket mdup) 1) 0) 0) 0) 128))
+
+    ; ================= 9. the empty map holds nothing and admits it =================
+    (let mempty (km-new 3))
+    (let c9 (kmb-score
+        (if (eq (km-get mempty (kmb-abc) 77) 77)
+            (if (eq (km-has? mempty (kmb-abc)) 0)
+                (if (eq (km-size mempty) 0)
+                    (eq (km-maxbucket mempty) 0) 0) 0) 0) 256))
+
+    ; ================= 10. the map IS the association list, reached faster =================
+    ; Over 300 keys — 200 present, 100 absent — the map and km-assoc-get give the same answer for
+    ; every one. Speed without this claim would be speed at answering a different question.
+    (let m200 (kmb-fill (km-for 200) 0 200))
+    (let ps200 (kmb-assoc 0 200))
+    (let c10 (kmb-score (eq (kmb-agree m200 ps200 0 300) 1) 512))
+
+    ; ================= 11. THE SLOPE, as work =================
+    ; 256 keys at depth 2 (256 buckets) and 4096 keys at depth 3 (4096 buckets): 16x the corpus
+    ; at the same load factor. The association list's walk is exactly n. The map's worst bucket —
+    ; its actual worst-case comparison count — stays inside one small bound across both.
+    (let m4096 (kmb-fill (km-for 4096) 0 4096))
+    (let mb-small (km-maxbucket m256))
+    (let mb-big   (km-maxbucket m4096))
+    (let c11 (kmb-score
+        (if (eq (km-depth m256) 2)
+            (if (eq (km-depth m4096) 3)
+                (if (eq (len ps200) 200)                       ; the assoc walk IS its length
+                    (if (le mb-small 8)
+                        (if (le mb-big 8)
+                            (if (eq (kmb-all-present m4096 0 4096) 1)
+                                (eq (kmb-all-absent m4096 4096 4200 (sub 0 1)) 1) 0) 0) 0) 0) 0) 0) 1024))
+
+    ; ================= 12. key equality is exact, never blurred =================
+    ; A prefix, an extension, and a one-element difference are three different keys. A map that
+    ; compared by length, or by hash alone, or stopped at the shorter list, fails here.
+    (let mk (km-put (km-put (km-new 2) (list 1 2 3) 10) (list 1 2 4) 20))
+    (let c12 (kmb-score
+        (if (eq (km-get mk (list 1 2 3) (sub 0 1)) 10)
+            (if (eq (km-get mk (list 1 2 4) (sub 0 1)) 20)
+                (if (eq (km-get mk (list 1 2) (sub 0 1)) (sub 0 1))
+                    (if (eq (km-get mk (list 1 2 3 0) (sub 0 1)) (sub 0 1))
+                        (if (eq (km-get mk (empty) (sub 0 1)) (sub 0 1))
+                            (eq (km-keq (list 1 2 3) (list 1 2 3)) 1) 0) 0) 0) 0) 0) 2048))
+
+    (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8
+        (add c9 (add c10 (add c11 c12))))))))))))

@@ -1,0 +1,385 @@
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk
+;
+; decidable-channel.fk — STONE 46. A channel on which silence is impossible.
+;
+; ────────────────────────────────────────────────────────────────────────────────
+; WHY THIS EXISTS
+;
+; Three failures in one day were one defect at three altitudes:
+;   * a Metal buffer never written read back as a computed zero;
+;   * fkwu read a file cut mid-write and answered 3 for `(do (add 1 2)` — a right
+;     computation of the wrong text;
+;   * eight subagents ended and the only signal was the ABSENCE of a completion
+;     record, so a clean finish, a timeout and a kill were indistinguishable.
+;
+; In each case a close carried no evidence of why it closed, and an absence was
+; read as a value. This file is the protocol layer that makes that impossible.
+;
+; ────────────────────────────────────────────────────────────────────────────────
+; THE GROUNDING — this is a theorem, not an invention
+;
+; axioms/core-axioms.form:51
+;   axiom-3-content-addressing
+;     "a cell's identity is computed from its present composition; same
+;      composition is the same cell"
+;   axioms/core-axioms.form:57  (generates … reversibility-of-the-referenced
+;                                names-are-free-query-keys honesty-is-cheap)
+;
+;   Identity is content. So "did you receive what I sent?" is answered by
+;   COMPARING NODE-IDS — from either end, at any time, with no ordering, no
+;   timestamps, no sequence numbers. Order-independence is not a feature added
+;   here; it is what axiom-3 already says. `names-are-free-query-keys` is
+;   literally the resolver below: a digest is a free query key.
+;
+; axioms/core-axioms.form:59-62
+;   axiom-4-boundary
+;     "… passage not through the offered interface is breach, and breach is
+;      observable"
+;   The frame header (magic + declared length + declared digest) IS the offered
+;   interface. Bytes that did not pass through it are refused AS SUCH — state
+;   DC-NOT-A-FRAME — rather than mis-read as a shorter message. Breach is
+;   observable because the refusal has its own name.
+;
+; axioms/core-axioms.form:64-66
+;   axiom-5-offer
+;     "to run a cell and to speak to a cell are one act: offer a cell with
+;      0..many arg-cells; it is acknowledged by exactly one of nothing, 0, 1,
+;      node"
+;   (ack-values-are (axiom-1-states + node))
+;   The ack vocabulary here is EXACTLY those four and no more. And per
+;   axioms/core-axioms.form:37 (axiom-1: "nothing-is-first-class
+;   the-ground-not-a-missing-0"), `nothing` is a STATE that was SENT, not the
+;   absence of a send. That distinction is this whole stone.
+;
+; ────────────────────────────────────────────────────────────────────────────────
+; TWINBLIND (868) — WHAT IS CANONICAL AND WHAT IS CHOSEN
+;
+; CANONICAL (self-checking; a hash either matches or it does not):
+;   * A body's identity is sha256(body). Nothing here can choose that; the
+;     digest is computed from the present composition, axiom-3 exactly.
+;   * Whether a frame is complete: the declared length and declared digest
+;     either agree with the bytes present, or they do not. No judgement.
+;   * Whether an ack names an offer: two 32-byte digests are equal or they are
+;     not.
+;
+; CHOSEN (stated here so the choice is a record, not a preference):
+;   * WHAT COUNTS AS A COMPLETE MESSAGE. Chosen: magic present, the full
+;     38-byte header present, exactly the declared number of body bytes
+;     present, and sha256(body) equal to the declared digest. Justified from
+;     axiom-4: the header IS the offered interface, so a frame is complete when
+;     it has fully crossed that interface and not before. Length is declared
+;     BEFORE the body so that a cut mid-write is short against a promise
+;     already made — the promise is what makes the absence decidable.
+;   * THE ACK VOCABULARY. Chosen: exactly nothing/0/1/node, tagged 0/1/2/3.
+;     Justified from axiom-5's "exactly one of nothing, 0, 1, node" — the
+;     protocol may not add a fifth value, and may not drop `nothing`.
+;   * THE ABSENT AND CONFLICT CODES. Chosen: the resolver answers -1 for ABSENT
+;     and -2 for CONFLICT, disjoint from the four ack tags 0..3. Justified from
+;     axiom-1's nothing-is-first-class: if ABSENT shared a code with `nothing`
+;     the protocol would re-commit the very defect it exists to end.
+;   * REFUSING RATHER THAN RESOLVING A CONFLICT. Chosen: two valid acks naming
+;     one digest with different values answer CONFLICT in every ordering, rather
+;     than last-one-wins. Justified from axiom-3: identity is the present
+;     composition, and position is not composition — so a rule that let position
+;     decide would make the answer order-dependent, contradicting the axiom the
+;     protocol is derived from. Refusal is the only order-free resolution.
+;
+; ────────────────────────────────────────────────────────────────────────────────
+; WIRE FORMAT
+;
+;   frame = MAGIC(2) || LEN(4, big-endian) || DIGEST(32) || BODY(LEN)
+;   MAGIC = 70 75   ("F" "K")
+;   DIGEST = sha256(BODY)
+;   header length = 38
+;
+; Bytes are carried as INT values 0..255 throughout — never as string bytes.
+; (wraithcarry, corpus 864: the body cannot build a byte-exact string of a byte
+; >= 128, so a digest that lived in a string would be silently wrong.)
+;
+;   body of an OFFER  = 79 || payload…                    ; 79 = "O"
+;   body of an ACK    = 65 || value-tag || target-digest(32) [|| node-digest(32)]
+;   body of a CLOSE   = 67 || reason || last-digest(32)   ; 67 = "C"
+;
+; The OFFER's node-id is sha256 of its body — which is exactly the digest its
+; own frame already declares. So the ack names a number both ends can compute
+; independently, at any time, with no shared clock.
+; ────────────────────────────────────────────────────────────────────────────────
+
+(do
+
+  ; ── constants as nullary defns ───────────────────────────────────────────────
+  ; (fkwu's defn frames cannot read an enclosing do-let — see receipts/
+  ; 2026-07-22-fkwu-silent-green.md D3 — so every constant is a call, never a
+  ; free name.)
+  (defn dc-magic0 () 70)                  ; "F"
+  (defn dc-magic1 () 75)                  ; "K"
+  (defn dc-header-len () 38)              ; 2 magic + 4 length + 32 digest
+
+  ; frame states. Every not-a-message state is NEGATIVE and distinct, so no
+  ; failure can ever be read as the value 0 or 1 (edgedrop / zerobirth).
+  (defn dc-complete () 2)                 ; the whole message crossed the interface
+  (defn dc-short-header () -1)            ; cut before the promise was even made
+  (defn dc-short-body () -2)              ; the promise was made and not kept — cut mid-write
+  (defn dc-digest-mismatch () -3)         ; right length, wrong content
+  (defn dc-not-a-frame () -4)             ; never passed through the interface — axiom-4 breach
+  (defn dc-overlong () -5)                ; more bytes than declared
+
+  ; body tags
+  (defn dc-tag-offer () 79)               ; "O"
+  (defn dc-tag-ack () 65)                 ; "A"
+  (defn dc-tag-close () 67)               ; "C"
+
+  ; the ack vocabulary — axiom-5's four, and only those four
+  (defn dc-ack-nothing () 0)
+  (defn dc-ack-zero () 1)
+  (defn dc-ack-one () 2)
+  (defn dc-ack-node () 3)
+
+  ; resolver answers, disjoint from 0..3 above
+  (defn dc-absent () -1)                  ; no ack for this digest exists at all
+  (defn dc-conflict () -2)                ; two valid acks disagree about this digest
+
+  ; close reasons — a close carries evidence of WHY it closed (hushend)
+  (defn dc-close-done () 1)               ; the work finished
+  (defn dc-close-handover () 2)           ; handed to another cell
+  (defn dc-close-offline () 3)            ; going offline on purpose
+
+  ; transcript end kinds
+  (defn dc-end-closed () 3)               ; ends with a valid CLOSE naming a digest
+  (defn dc-end-stopped () -6)             ; ends with valid frames but no CLOSE — it just stopped
+  (defn dc-end-cut () -7)                 ; ends mid-frame — the stream was cut
+
+  ; ── byte helpers ─────────────────────────────────────────────────────────────
+
+  ; dc-u32-be — a 4-byte big-endian length. Pure arithmetic; no bit-ops needed,
+  ; so this reads identically on every kernel arm.
+  (defn dc-u32-be (n)
+    (list (mod (div n 16777216) 256)
+          (mod (div n 65536) 256)
+          (mod (div n 256) 256)
+          (mod n 256)))
+
+  (defn dc-be-u32 (b0 b1 b2 b3)
+    (add (mul b0 16777216) (add (mul b1 65536) (add (mul b2 256) b3))))
+
+  ; dc-bytes-eq — list equality over ints. The whole protocol's comparison
+  ; primitive: this is what "same composition is the same cell" becomes in
+  ; running code.
+  (defn dc-bytes-eq (a b)
+    (if (eq (len a) 0) (if (eq (len b) 0) 1 0)
+      (if (eq (len b) 0) 0
+        (if (eq (head a) (head b)) (dc-bytes-eq (tail a) (tail b)) 0))))
+
+  ; ── the node-id of a body ────────────────────────────────────────────────────
+
+  ; dc-digest — the identity of a body. axiom-3: computed from its present
+  ; composition, nothing else. 32 ints.
+  (defn dc-digest (body) (sha256 body))
+
+  ; dc-nodeid-of-digest — the body's OWN content-address constructor over the
+  ; first 16 digest bytes: four uint32 words -> (make_nodeid pkg level type inst).
+  ; This is the bridge from the wire digest to the kernel's node identity, so
+  ; "does an ack for node X exist?" can be asked with node_eq as well as with
+  ; dc-bytes-eq.
+  (defn dc-nodeid-of-digest (d)
+    (make_nodeid (dc-be-u32 (nth d 0) (nth d 1) (nth d 2) (nth d 3))
+                 (dc-be-u32 (nth d 4) (nth d 5) (nth d 6) (nth d 7))
+                 (dc-be-u32 (nth d 8) (nth d 9) (nth d 10) (nth d 11))
+                 (dc-be-u32 (nth d 12) (nth d 13) (nth d 14) (nth d 15))))
+
+  (defn dc-nodeid-of-body (body) (dc-nodeid-of-digest (dc-digest body)))
+
+  ; ── framing ──────────────────────────────────────────────────────────────────
+
+  ; dc-frame — wrap a body as a complete frame. The length is declared BEFORE
+  ; the body: that declaration is what makes a later cut decidable.
+  (defn dc-frame (body)
+    (append (list (dc-magic0) (dc-magic1))
+            (append (dc-u32-be (len body))
+                    (append (dc-digest body) body))))
+
+  ; dc-frame-declared-len — the length the frame PROMISED. Meaningful only when
+  ; at least 6 bytes are present; callers reach it through dc-frame-state.
+  (defn dc-frame-declared-len (f)
+    (dc-be-u32 (nth f 2) (nth f 3) (nth f 4) (nth f 5)))
+
+  (defn dc-frame-declared-digest (f) (take 32 (drop 6 f)))
+
+  (defn dc-frame-body (f) (drop (dc-header-len) f))
+
+  ; dc-frame-state — THE decision. Answers exactly one of the six states above.
+  ; A frame is a message only when it answers dc-complete.
+  ;
+  ; The ordering of the tests matters and is deliberate:
+  ;   magic first  — a byte run that never crossed the interface is named as
+  ;                  breach (axiom-4) and never gets a length reading;
+  ;   header next  — a cut before the promise is a different failure from a cut
+  ;                  after it, and conflating them is the hushend defect;
+  ;   length next  — short-body is the cut-mid-write case: the frame promised N
+  ;                  and delivered fewer, so the shortfall is arithmetic, not
+  ;                  a guess;
+  ;   digest last  — only reached when the byte count is exactly right, so a
+  ;                  digest mismatch means content corruption specifically.
+  (defn dc-frame-state (f)
+    (if (lt (len f) 2) (dc-short-header)
+      (if (eq (dc-bytes-eq (take 2 f) (list (dc-magic0) (dc-magic1))) 0) (dc-not-a-frame)
+        (if (lt (len f) (dc-header-len)) (dc-short-header)
+          (if (lt (len f) (add (dc-header-len) (dc-frame-declared-len f))) (dc-short-body)
+            (if (gt (len f) (add (dc-header-len) (dc-frame-declared-len f))) (dc-overlong)
+              (if (eq (dc-bytes-eq (dc-digest (dc-frame-body f)) (dc-frame-declared-digest f)) 0)
+                  (dc-digest-mismatch)
+                  (dc-complete))))))))
+
+  (defn dc-frame-complete? (f) (if (eq (dc-frame-state f) (dc-complete)) 1 0))
+
+  ; ── offers, acks, closes ─────────────────────────────────────────────────────
+
+  (defn dc-offer (payload) (dc-frame (cons (dc-tag-offer) payload)))
+
+  ; dc-offer-nodeid-bytes — the digest a receiver must name back. It is exactly
+  ; the digest the offer frame already declares, so BOTH ends compute it from
+  ; the same bytes and neither has to be told it.
+  (defn dc-offer-nodeid-bytes (offer-frame) (dc-frame-declared-digest offer-frame))
+
+  ; dc-ack — an acknowledgement NAMING the digest it answers. value-tag is one
+  ; of the four; node-digest is the 32 bytes for dc-ack-node and (empty) for the
+  ; three terminal values.
+  (defn dc-ack (target-digest value-tag node-digest)
+    (dc-frame (append (list (dc-tag-ack) value-tag)
+                      (append target-digest node-digest))))
+
+  ; dc-ack-nothing-frame — the sentence this stone exists for. "I received it
+  ; and I have nothing." It is a SENT ack whose value is `nothing`, which is why
+  ; it can never be confused with an ack that was never sent.
+  (defn dc-ack-nothing-frame (target-digest)
+    (dc-ack target-digest (dc-ack-nothing) (empty)))
+
+  (defn dc-close (reason last-digest)
+    (dc-frame (append (list (dc-tag-close) reason) last-digest)))
+
+  ; ── reading a validated frame ────────────────────────────────────────────────
+
+  (defn dc-body-tag (f) (head (dc-frame-body f)))
+
+  (defn dc-ack-value-tag (f) (nth (dc-frame-body f) 1))
+
+  (defn dc-ack-target (f) (take 32 (drop 2 (dc-frame-body f))))
+
+  (defn dc-ack-node-digest (f) (take 32 (drop 34 (dc-frame-body f))))
+
+  (defn dc-close-reason (f) (nth (dc-frame-body f) 1))
+
+  (defn dc-close-last (f) (take 32 (drop 2 (dc-frame-body f))))
+
+  ; is this VALIDATED frame an ack naming `d`?
+  (defn dc-ack-names? (f d)
+    (if (eq (dc-frame-complete? f) 0) 0
+      (if (eq (dc-body-tag f) (dc-tag-ack))
+          (dc-bytes-eq (dc-ack-target f) d)
+          0)))
+
+  ; ── the resolver — "does an ack for node X exist?" ───────────────────────────
+  ;
+  ; A total function. It never waits, never blocks, and never answers by the
+  ; passage of time. It answers one of:
+  ;   -1 ABSENT    — no valid ack in this transcript names that digest
+  ;    0 NOTHING   — an ack was SENT whose value is `nothing`
+  ;    1 ZERO      — an ack was sent whose value is 0
+  ;    2 ONE       — an ack was sent whose value is 1
+  ;    3 NODE      — an ack was sent naming a node
+  ;   -2 CONFLICT  — two valid acks name that digest with different values
+  ;
+  ; ABSENT (-1) and NOTHING (0) are different numbers. That is the theorem in
+  ; one line: an unsent ack and an ack of `nothing` are decidably different.
+  ;
+  ; ORDER-FREEDOM. The fold below reads the transcript in whatever order it is
+  ; handed. Its only order-sensitive step would be "a later ack replaces an
+  ; earlier one" — so there is no such step. A second ack that AGREES is
+  ; absorbed (content-addressing: the same composition is the same cell, so a
+  ; duplicate carries no new information); a second ack that DISAGREES latches
+  ; CONFLICT, and CONFLICT absorbs everything after it. Both absorption rules
+  ; are commutative and idempotent, which is exactly what makes the fold
+  ; independent of order.
+  (defn dc-resolve-step (acc f d)
+    (if (eq (dc-ack-names? f d) 0) acc
+      (if (eq acc (dc-conflict)) (dc-conflict)
+        (if (eq acc (dc-absent)) (dc-ack-value-tag f)
+          (if (eq acc (dc-ack-value-tag f)) acc (dc-conflict))))))
+
+  (defn dc-resolve-loop (transcript d acc)
+    (if (eq (len transcript) 0) acc
+      (dc-resolve-loop (tail transcript) d (dc-resolve-step acc (head transcript) d))))
+
+  (defn dc-resolve (transcript d) (dc-resolve-loop transcript d (dc-absent)))
+
+  ; dc-answered? — 1 when the question has ANY definite answer at all, 0 only
+  ; when nothing was ever sent back. Note that an ack of `nothing` answers 1
+  ; here: it is an answer.
+  (defn dc-answered? (transcript d)
+    (if (eq (dc-resolve transcript d) (dc-absent)) 0 1))
+
+  ; ── the offer side: is my offer even ON this transcript? ─────────────────────
+
+  (defn dc-has-offer-loop (transcript d)
+    (if (eq (len transcript) 0) 0
+      (if (eq (dc-frame-complete? (head transcript)) 0) (dc-has-offer-loop (tail transcript) d)
+        (if (eq (dc-body-tag (head transcript)) (dc-tag-offer))
+            (if (eq (dc-bytes-eq (dc-frame-declared-digest (head transcript)) d) 1) 1
+                (dc-has-offer-loop (tail transcript) d))
+            (dc-has-offer-loop (tail transcript) d)))))
+
+  (defn dc-has-offer (transcript d) (dc-has-offer-loop transcript d))
+
+  ; ── breach counting (axiom-4: breach is observable) ──────────────────────────
+  ;
+  ; A scan does not silently skip what did not cross the interface. It counts
+  ; it, so "how many byte-runs on this transcript never passed the boundary?"
+  ; has an answer.
+  (defn dc-breach-count-loop (transcript acc)
+    (if (eq (len transcript) 0) acc
+      (dc-breach-count-loop (tail transcript)
+        (if (eq (dc-frame-state (head transcript)) (dc-not-a-frame)) (add acc 1) acc))))
+
+  (defn dc-breach-count (transcript) (dc-breach-count-loop transcript 0))
+
+  (defn dc-incomplete-count-loop (transcript acc)
+    (if (eq (len transcript) 0) acc
+      (dc-incomplete-count-loop (tail transcript)
+        (if (eq (dc-frame-complete? (head transcript)) 0) (add acc 1) acc))))
+
+  (defn dc-incomplete-count (transcript) (dc-incomplete-count-loop transcript 0))
+
+  ; ── how did this transcript END? (hushend) ───────────────────────────────────
+  ;
+  ; A close must carry evidence of why it closed. Three ends that a plain
+  ; byte-stream renders identical are three different numbers here:
+  ;    3 CLOSED  — the last frame is a valid CLOSE, and it NAMES the digest it
+  ;                closed on and the reason it closed
+  ;   -6 STOPPED — every frame is valid, and then the transcript simply ends.
+  ;                No cut, no close. This is the honest "it just stopped".
+  ;   -7 CUT     — the last frame is incomplete: the stream was severed
+  ;                mid-write.
+  ;
+  ; This is the shape that answers "did that agent finish or die?" without any
+  ; notification arriving. See the receipt for the named-but-unwired application.
+  (defn dc-last (xs) (if (le (len xs) 1) (head xs) (dc-last (tail xs))))
+
+  (defn dc-transcript-end (transcript)
+    (if (eq (len transcript) 0) (dc-end-stopped)
+      (if (eq (dc-frame-complete? (dc-last transcript)) 0) (dc-end-cut)
+        (if (eq (dc-body-tag (dc-last transcript)) (dc-tag-close)) (dc-end-closed)
+            (dc-end-stopped)))))
+
+  ; dc-close-evidence — the reason a closed transcript gives. -1 when the
+  ; transcript did not close, so "no reason" can never read as reason 0.
+  (defn dc-close-evidence (transcript)
+    (if (eq (dc-transcript-end transcript) (dc-end-closed))
+        (dc-close-reason (dc-last transcript))
+        -1))
+
+  ; ── truncation, as a constructor ─────────────────────────────────────────────
+  ; dc-cut — the stream severed after n bytes. Used by the band to walk every
+  ; cut point of a real frame.
+  (defn dc-cut (f n) (take n f))
+
+  1)
