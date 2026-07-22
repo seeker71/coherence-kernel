@@ -1,0 +1,204 @@
+; mla-attn.fk — Multi-head Latent Attention (MLA): the attention DeepSeek-V4-Flash
+; uses. Not GQA. Where GQA shrinks the KV *head count*, MLA shrinks the KV *width*:
+; every token's key/value collapses into ONE low-rank latent row, and the cache holds
+; that row — not per-head K and V. This is the whole point of the design, and it is
+; what changes for the cache.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk
+;
+; ---------------------------------------------------------------------------
+; PROVENANCE. The decomposition below was read from ds4-engine (MIT), the
+; DeepSeek-V4 reference engine at /Users/ursmuff/models/ds4-engine — ds4.c's own
+; CPU reference paths, not from memory of a paper:
+;
+;   ds4.c:13790 layer_forward_self_one           the V4-Flash attention half, in order
+;   ds4.c:10002 layer_q_projection_normed_one    the Q LoRA pair + per-head RMSNorm
+;   ds4.c:10041 layer_kv_projection_normed_one   the ONE 512-wide latent row
+;   ds4.c:10116 rope_tail_ext_inplace            the rope'd/non-rope'd split, and its sign
+;   ds4.c:10305 layer_attention_rows_one         K and V are the SAME row; the sinks
+;   ds4.c:10356 layer_grouped_out_one            the grouped low-rank output projection
+;   ds4.c:14043 layer_glm_attention_prefill_f32_ref   the classic k_b/v_b up-projection
+;
+; Nothing here is copied; the arithmetic is re-derived on this body's own proven
+; primitives (tb-matvec, tb-dot, ln-rmsnorm, rope-rot-pair's rotation, tn-softmax's
+; max-shift). `boundborrow`: ds4 targets a GB10, so its layouts and quantisations are
+; NOT carried over — only the shape of the computation.
+;
+; ---------------------------------------------------------------------------
+; THE ROPE SPLIT — established, not guessed.
+;
+; Each head's dim HD is split into a NON-rotated front and a rotated TAIL of NROT
+; dims: ds4.c:10116 `const uint32_t n_nope = head_dim - n_rot;` and :10125
+; `float *tail = x + h*head_dim + n_nope;`. The rotation touches ONLY the tail; the
+; front is bit-untouched. The concatenation order is confirmed independently at
+; ds4.c:14140-14142, where a key row is assembled as [k_nope (HD-NROT)] ++ [k_rot (NROT)].
+;
+; Within the tail, pairs are ADJACENT (i, i+1) — ds4.c:10141 `tail[i+0], tail[i+1]` —
+; and the angle for pair k is pos * base^(-2k/NROT) (theta_scale = base^(-2/n_rot),
+; multiplied in per pair). That is exactly this body's rope-freq-theta with HD = NROT,
+; hd = 2k — the SAME convention rope.fk already proves four-way. For V4-Flash
+; HD = 512 and NROT = 64: seven eighths of every head is NOT rotated.
+;
+; The reason the split exists: the non-rotated part can be absorbed into the weights
+; (position-free), the rotated part cannot. The latent's rope'd tail is shared by every
+; head (n_head_kv = 1) — one rotation for all 64 heads.
+;
+; ---------------------------------------------------------------------------
+; WHAT THE CACHE MUST HOLD. One row of HD floats per token per layer — the rope'd
+; latent. No per-head K, no V. At V4-Flash's shape that is 512 floats/token/layer
+; against GQA-llama's 2*n_kv*hd. K and V are the SAME stored row (ds4.c:10305 reads
+; `kv` as both the dot operand and the accumulated value).
+
+; ===========================================================================
+; helpers
+; ===========================================================================
+(defn mla-ones (n) (if (eq n 0) (empty) (cons 1.0 (mla-ones (sub n 1)))))
+; unweighted RMSNorm (no learned gamma) — ds4's head_rms_norm_inplace
+(defn mla-rms (v eps) (ln-rmsnorm v (mla-ones (len v)) eps))
+
+; ===========================================================================
+; the rope'd tail — rotate the LAST nrot dims only, leaving the front untouched.
+; s = 1.0 forward, s = -1.0 inverse (ds4's sin_sign; the inverse is used on the
+; attention OUTPUT, see mla-block-one).
+; ===========================================================================
+(defn mla-rot-pair (x0 x1 a s)
+  (cons (sub (mul x0 (fcos a)) (mul x1 (mul s (fsin a))))
+        (cons (add (mul x0 (mul s (fsin a))) (mul x1 (fcos a))) (empty))))
+(defn mla-rope-walk (xs i nrot pos base s)
+  (if (eq (len xs) 0) (empty)
+      (do (let a (mul (mul pos 1.0) (rope-freq-theta base i nrot)))
+          (let r (mla-rot-pair (head xs) (head (tail xs)) a s))
+          (cons (head r)
+                (cons (head (tail r))
+                      (mla-rope-walk (tail (tail xs)) (add i 2) nrot pos base s))))))
+; v is one head (or one latent row) of width >= nrot
+(defn mla-rope-tail (v nrot pos base s)
+  (tb-cat (tb-take v (sub (len v) nrot))
+          (mla-rope-walk (tb-drop (sub (len v) nrot) v) 0 nrot pos base s)))
+; the same rotation applied per head across a concatenated nh*hd vector
+(defn mla-rope-heads (v h nh hd nrot pos base s)
+  (if (eq h nh) (empty)
+      (tb-cat (mla-rope-tail (tb-vslice v (mul h hd) hd) nrot pos base s)
+              (mla-rope-heads v (add h 1) nh hd nrot pos base s))))
+
+; ===========================================================================
+; Q: the low-rank pair. x -> rank R -> RMSNorm in RANK space -> nh*hd,
+; then a per-head RMSNorm, then the tail rotation.
+; ===========================================================================
+(defn mla-head-rms (v h nh hd eps)
+  (if (eq h nh) (empty)
+      (tb-cat (mla-rms (tb-vslice v (mul h hd) hd) eps)
+              (mla-head-rms v (add h 1) nh hd eps))))
+(defn mla-q-proj (n wqa gqa wqb nh hd eps)
+  (mla-head-rms (tb-matvec wqb (ln-rmsnorm (tb-matvec wqa n) gqa eps)) 0 nh hd eps))
+
+; ===========================================================================
+; KV: the down-projection to the latent. ONE row, shared by every head.
+; ===========================================================================
+(defn mla-kv-latent (n wkv gkv eps) (ln-rmsnorm (tb-matvec wkv n) gkv eps))
+
+; ===========================================================================
+; attention over latent rows. K and V are the SAME row. `sink` is a per-head
+; learned logit that enters the softmax DENOMINATOR with no value of its own —
+; so an attention row's weights sum to LESS than 1 (see the band's radius).
+; ===========================================================================
+(defn mla-attend-head (qh rows scale sink)
+  (do (let s (tb-scores qh rows scale))
+      (let m (tn-max (cons sink s)))
+      (let e (tn-exp-map (tn-sub-scalar s m)))
+      (let denom (add (tn-exp (sub sink m)) (tn-sum e)))
+      (tn-scale (tb-weighted-acc e rows (tb-zeros (len (head rows))))
+                (div 1.0 denom))))
+(defn mla-attn-heads (q rows h nh hd scale sinks)
+  (if (eq h nh) (empty)
+      (tb-cat (mla-attend-head (tb-vslice q (mul h hd) hd) rows scale (nth sinks h))
+              (mla-attn-heads q rows (add h 1) nh hd scale sinks))))
+
+; ===========================================================================
+; the grouped low-rank output projection: heads are cut into ng groups, each group
+; maps its own gdim slice to a rank vector, the ranks concatenate, one matrix
+; returns to embedding width.
+; ===========================================================================
+(defn mla-out-low (heads g ng gdim was)
+  (if (eq g ng) (empty)
+      (tb-cat (tb-matvec (nth was g) (tb-vslice heads (mul g gdim) gdim))
+              (mla-out-low heads (add g 1) ng gdim was))))
+(defn mla-out-proj (heads ng gdim was wb) (tb-matvec wb (mla-out-low heads 0 ng gdim was)))
+
+; ===========================================================================
+; the bundles. cfg = (nh hd nrot ng base eps) ; w = the layer's weights.
+; ===========================================================================
+(defn mla-cfg (nh hd nrot ng base eps) (list nh hd nrot ng base eps))
+(defn mla-cfg-nh   (c) (nth c 0))
+(defn mla-cfg-hd   (c) (nth c 1))
+(defn mla-cfg-nrot (c) (nth c 2))
+(defn mla-cfg-ng   (c) (nth c 3))
+(defn mla-cfg-base (c) (nth c 4))
+(defn mla-cfg-eps  (c) (nth c 5))
+(defn mla-w (an wqa gqa wqb wkv gkv was wb sinks)
+  (list an wqa gqa wqb wkv gkv was wb sinks))
+(defn mla-w-an    (w) (nth w 0))
+(defn mla-w-wqa   (w) (nth w 1))
+(defn mla-w-gqa   (w) (nth w 2))
+(defn mla-w-wqb   (w) (nth w 3))
+(defn mla-w-wkv   (w) (nth w 4))
+(defn mla-w-gkv   (w) (nth w 5))
+(defn mla-w-was   (w) (nth w 6))
+(defn mla-w-wb    (w) (nth w 7))
+(defn mla-w-sinks (w) (nth w 8))
+
+; scale is over the FULL head dim, rope'd tail included (ds4.c:10314)
+(defn mla-scale (c) (div 1.0 (tn-sqrt (mul (mla-cfg-hd c) 1.0))))
+
+; the pre-attention RMSNorm, shared by the Q and KV paths
+(defn mla-pre (w c x) (ln-rmsnorm x (mla-w-an w) (mla-cfg-eps c)))
+
+; THE CACHE ROW for token x at position pos: down-project, norm, rotate the tail.
+; This one row is the whole of what the cache stores for this token at this layer.
+(defn mla-cache-row (w c x pos)
+  (mla-rope-tail (mla-kv-latent (mla-pre w c x) (mla-w-wkv w) (mla-w-gkv w) (mla-cfg-eps c))
+                 (mla-cfg-nrot c) pos (mla-cfg-base c) 1.0))
+
+; ONE MLA attention block for token x at position pos, against `rows` — the cache,
+; which must ALREADY include this token's own row (causality is the cache's length).
+;   pre-norm -> Q lora -> per-head norm -> rope tail -> attend over latents (K=V)
+;   -> INVERSE rope the output -> grouped low-rank output projection.
+; The inverse rotation (ds4.c:13829, inverse=true) is not decoration: the output is a
+; mixture of latent rows whose tails were rotated at THEIR positions, and the mixture
+; is consumed by a position-free weight matrix — it must be rotated back at the query's
+; position first.
+(defn mla-block-one (w c x pos rows)
+  (do (let n (mla-pre w c x))
+      (let nh (mla-cfg-nh c))
+      (let hd (mla-cfg-hd c))
+      (let q (mla-rope-heads
+               (mla-q-proj n (mla-w-wqa w) (mla-w-gqa w) (mla-w-wqb w) nh hd (mla-cfg-eps c))
+               0 nh hd (mla-cfg-nrot c) pos (mla-cfg-base c) 1.0))
+      (let heads (mla-attn-heads q rows 0 nh hd (mla-scale c) (mla-w-sinks w)))
+      (let back (mla-rope-heads heads 0 nh hd (mla-cfg-nrot c) pos (mla-cfg-base c) -1.0))
+      (mla-out-proj back (mla-cfg-ng c) (mul (div nh (mla-cfg-ng c)) hd)
+                    (mla-w-was w) (mla-w-wb w))))
+
+; ===========================================================================
+; the CLASSIC factored form (DeepSeek-V2 / the GLM-DSA path, ds4.c:14043): the
+; latent is UP-projected per head into a key front and a value, and the shared
+; rope'd tail is appended to every head's key. V4-Flash is this with identity
+; up-projections — kept because the up-projection is the general MLA, and because
+; the identity case is the bridge the band pins.
+; kb / vb are lists indexed by head; a cached row is (latent, krot).
+; ===========================================================================
+(defn mla-c-key (kb h latent krot) (tb-cat (tb-matvec (nth kb h) latent) krot))
+(defn mla-c-val (vb h latent) (tb-matvec (nth vb h) latent))
+(defn mla-c-keys (kb h rows)
+  (if (eq (len rows) 0) (empty)
+      (cons (mla-c-key kb h (nth (head rows) 0) (nth (head rows) 1))
+            (mla-c-keys kb h (tail rows)))))
+(defn mla-c-vals (vb h rows)
+  (if (eq (len rows) 0) (empty)
+      (cons (mla-c-val vb h (nth (head rows) 0)) (mla-c-vals vb h (tail rows)))))
+(defn mla-c-head (q kb vb h hd rows scale)
+  (tb-attend-one (tb-vslice q (mul h hd) hd) (mla-c-keys kb h rows) (mla-c-vals vb h rows) scale))
+(defn mla-c-heads (q kb vb h nh hd rows scale)
+  (if (eq h nh) (empty)
+      (tb-cat (mla-c-head q kb vb h hd rows scale)
+              (mla-c-heads q kb vb (add h 1) nh hd rows scale))))
