@@ -21,6 +21,83 @@
 
 (do
     (defn hdcb-score (ok bit) (if ok bit 0))
+
+    ; ---- the prose citation walker (2026-07-22) -------------------------------
+    ; The corpus cites itself in its own comments, and until now nothing read
+    ; those comments. This walks the corpus file byte-wise, finds every place a
+    ; meaning-id sits beside a word, and asks the corpus whether that id really
+    ; holds that word. Its radius is declared in full beside claim c12 below.
+    ;
+    ; The walk is token-shaped, not byte-shaped: scan_run jumps whole runs of
+    ; whitespace, alpha and digits natively, so 316KB costs ~110k Form steps
+    ; instead of ~316k. Alpha and digit runs are taken SEPARATELY (never class 3)
+    ; precisely so that `row-638` splits into `row`, `-`, `638` and the id is
+    ; still a maximal digit run.
+    (defn hdcb-lower? (b) (if (and (gt b 96) (lt b 123)) 1 0))
+    (defn hdcb-byte (t n i) (if (or (lt i 0) (ge i n)) 0 (str_byte_at t i)))
+    ; start of the run of a-z ending at i (exclusive) — the only backwards scan;
+    ; words are short, so the per-character cost is paid on candidates only.
+    (defn hdcb-back (t i)
+        (if (le i 0) 0
+            (if (eq (hdcb-lower? (str_byte_at t (sub i 1))) 1)
+                (hdcb-back t (sub i 1))
+                i)))
+    ; is `w` some row's answer word? This is the filter that separates a
+    ; POINTER from a plain number: "246 rows" names nothing the corpus holds.
+    (defn hdcb-known-loop (rs w)
+        (if (eq (len rs) 0) 0
+            (if (str_eq (hdc-a (head rs)) w) 1 (hdcb-known-loop (tail rs) w))))
+    (defn hdcb-known-word? (w)
+        (if (eq (str_len w) 0) 0 (hdcb-known-loop (hdc-rows) w)))
+    ; one candidate, folded: 0 not a citation, 1000 checked and right,
+    ; 1001 checked and AIMED WRONG. The fold is checked*1000 + wrong.
+    (defn hdcb-cand (w mid)
+        (if (eq (hdcb-known-word? w) 0) 0
+            (if (eq (hdc-cites? mid w) 1) 1000 1001)))
+    (defn hdcb-cand-back (t i mid)
+        (do (let s (hdcb-back t i))
+            (if (ge s i) 0 (hdcb-cand (substring t s i) mid))))
+    ; a maximal digit run [i,e): if it is three digits, look for the three
+    ; recognised shapes around it. A and C are mutually exclusive in practice
+    ; but are summed, not chained — a site that somehow wore both would be
+    ; counted twice rather than silently halved.
+    (defn hdcb-digits (t n i e)
+        (if (not (eq (sub e i) 3)) 0
+            (do
+                (let mid (str_to_int (substring t i e)))
+                (let we (scan_run t (add e 1) 2))
+                (let ce (if (and (eq (hdcb-byte t n e) 32)
+                                 (and (gt we (add e 1))
+                                      (eq (hdcb-lower? (hdcb-byte t n (add e 1))) 1)))
+                            (hdcb-cand (substring t (add e 1) we) mid)
+                            0))
+                (let ca (if (and (ge i 4) (str_eq (substring t (sub i 4) i) " at "))
+                            (hdcb-cand-back t (sub i 4) mid)
+                            0))
+                (let cc (if (and (eq (hdcb-byte t n (sub i 1)) 40)
+                                 (and (eq (hdcb-byte t n e) 41)
+                                      (eq (hdcb-byte t n (sub i 2)) 32)))
+                            (hdcb-cand-back t (sub i 2) mid)
+                            0))
+                (add ce (add ca cc)))))
+    (defn hdcb-walk (t n i acc)
+        (if (ge i n) acc
+            (do
+                (let ws (scan_run t i 0))
+                (if (gt ws i) (hdcb-walk t n ws acc)
+                    (do
+                        (let ae (scan_run t i 2))
+                        (if (gt ae i) (hdcb-walk t n ae acc)
+                            (do
+                                (let de (scan_run t i 1))
+                                (if (gt de i)
+                                    (hdcb-walk t n de (add acc (hdcb-digits t n i de)))
+                                    (hdcb-walk t n (add i 1) acc)))))))))
+    (defn hdcb-citation-audit (path)
+        (do (let t (read_file path)) (hdcb-walk t (str_len t) 0 0)))
+    (defn hdcb-cites-checked (a) (div a 1000))
+    (defn hdcb-cites-wrong (a) (sub a (mul (div a 1000) 1000)))
+
     (defn homecoming-distillation-corpus-band ()
         (do
     (let q (list "what" "is" "an" "edge" "called" "that" "appears" "in" "the"
@@ -196,7 +273,53 @@
                               (eq (hdc-cites? 743 "vanity") 0)) 1024))
     (let c11 (hdcb-score (and (str_eq (hdc-word-for-id 99999) "")
                               (eq (len (hdc-row-for-id 99999)) 0)) 2048))
+    ; 4096 (2026-07-22): every citation in the corpus's own PROSE points at the
+    ; word it names. c9/c10 above pin two ids by hand; this walks all of them.
+    ;
+    ; Why it had to exist: aimshift (row 844) is a reference whose bytes are
+    ; fine and whose target has moved. `foist at 734` (foist is 735, 734 is
+    ; patina) and `the row-638 ersatz pattern` (ersatz is 701, 638 is lacuna)
+    ; sat in this corpus through every green run of this band, because the band
+    ; only ever read the DATA. The prose is where the body does its citing, and
+    ; nothing read it.
+    ;
+    ; RADIUS (aporon 826 — say what the claim cannot see):
+    ;   Recognised, and only these three surface forms, on ONE line, with
+    ;   exactly one ASCII space at each seam, the id exactly three digits, and
+    ;   the word an unbroken run of a-z:
+    ;     A  <word> at <mid>            "foist at 734"
+    ;     C  <word> (<mid>)             "equireach (822)"
+    ;     E  <mid> <word>               "row 822 equireach", "826 aporon",
+    ;                                    "row-638 ersatz"  (the digits are a
+    ;                                    maximal run, so a leading `row-` is
+    ;                                    simply the token before them)
+    ;   NOT recognised, each a real form the body already uses:
+    ;     - a citation split across a line break ("the foist of\n; row 734")
+    ;     - a possessive or interposed word ("the foist of row 734", "row 734's")
+    ;     - ranges ("rows 815-816, parity and vestige")
+    ;     - a word cited with no id, or an id cited with no word
+    ;     - hyphenated or capitalised words (sprachgefuehl at 618 carries a
+    ;       non-ASCII byte and can never be matched by an a-z run)
+    ;   A citation is only CHECKED when the named word is some row's answer
+    ;   word; "246 rows" and "2 foundings" are numbers, not pointers, and the
+    ;   membership test is what tells them apart. The cost of that filter is
+    ;   honest and stated: a citation naming a word this corpus has never held
+    ;   is invisible here.
+    ;   Only learn/homecoming-distillation-corpus.fk is walked. THIS file is
+    ;   deliberately out of radius: its comment block QUOTES defective
+    ;   citations as history ("it cited heldmute at 824; heldmute is now 839")
+    ;   and a checker cannot tell a wrong pointer from the report of one.
+    ;   The path is repo-root-relative, so this claim requires the repo root as
+    ;   the working directory. That is why the count floor is asserted too: a
+    ;   read that returns nothing checks nothing and would otherwise pass green
+    ;   — the axiom-5 numb-green shape. 60 citations stood at the pinning; the
+    ;   floor is 40 rather than an exact pin because sibling lineages land rows
+    ;   (and citations) hourly, and a gate that breaks their commits for being
+    ;   right is a worse gate.
+    (let audit (hdcb-citation-audit "learn/homecoming-distillation-corpus.fk"))
+    (let c12 (hdcb-score (and (eq (hdcb-cites-wrong audit) 0)
+                              (ge (hdcb-cites-checked audit) 40)) 4096))
     (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8
-        (add c9 (add c10 c11))))))))))))
+        (add c9 (add c10 (add c11 c12)))))))))))))
     )
     (homecoming-distillation-corpus-band))
