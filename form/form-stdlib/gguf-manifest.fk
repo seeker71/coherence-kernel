@@ -145,6 +145,47 @@
             (gm-line "END")
             0))
 
+    ; ================= one named array, element by element =================
+    ; The manifest prints an array's SHAPE, never its contents — reading 129 280 token strings does
+    ; not belong in a manifest. But a handful of this file's arrays ARE hyper-parameters wearing an
+    ; array's clothes: deepseek4.attention.compress_ratios (44 i32, one per layer plus one),
+    ; reap.layer.keep_count (43 i32), deepseek4.swiglu_clamp_exp (43 f32). A recipe that has to guess
+    ; a per-layer constant is a recipe that will be fluently wrong. So this is the SAME walk, asked
+    ; for one key, printing the fixed-width elements it can render faithfully and refusing the rest.
+    ;
+    ; RADIUS. Fixed-width element types only. Integer element types print UNSIGNED and marked `u`, for
+    ; gm-int's own reason: this body has no two's-complement reader, and a silently sign-flipped
+    ; per-layer constant is worse than an unrendered one. f32 (6) goes through f16-decode's (8,23).
+    ; A variable-width element type (string, 8) prints its count and nothing else — gmt-arr-elem walks
+    ; those linearly and a whole-array walk of 129 280 of them is a vocabulary, not a manifest row.
+    (defn gm-arr-elem-off (src off i) (add (gmt-arr-first src off) (mul i (egg-vtype-size (gmt-arr-etype src off)))))
+    (defn gm-arr-line (src off et i)
+        (if (eq et 6)
+            (do (print "  A") (print (ewl-f32 src (gm-arr-elem-off src off i))))
+            (gm-line (str_concat "  A u " (int_to_str (eqr-le src (gm-arr-elem-off src off i) (egg-vtype-size et)))))))
+    (defn gm-arr-loop (src off et i n)
+        (if (eq i n) 0 (do (gm-arr-line src off et i) (gm-arr-loop src off et (add i 1) n))))
+
+    (defn gm-emit-array (path key)
+        (do
+            (let src (eqr-of-file path 0 (gm-window)))
+            (let off (gmt-find src key))
+            (if (eq off (gmt-absent))
+                (do (gm-line (str_concat "ABSENT " key)) 0)
+                (if (eq (gmt-vtype src off) 9)
+                    (do
+                        (let et (gmt-arr-etype src off))
+                        (let n  (gmt-arr-count src off))
+                        (gm-line (str_concat "ARR " (str_concat key
+                                  (str_concat " " (str_concat (int_to_str et)
+                                  (str_concat " " (int_to_str n)))))))
+                        (if (eq (gm-intish? et) 1) (gm-arr-loop src off et 0 n)
+                            (if (eq et 6) (gm-arr-loop src off et 0 n)
+                                (gm-line "  (this body renders no element of this GGUF type)")))
+                        (gm-line "END")
+                        0)
+                    (do (gm-line (str_concat "NOTARRAY " key)) 0)))))
+
     ; the KV half alone — cheap (no tensor walk), for a caller that only wants the config
     (defn gm-emit-kvs (path)
         (do
