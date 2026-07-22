@@ -149,7 +149,8 @@ for k in form_q6k_dequant_f32 form_q6k_matvec_f32 form_q4k_dequant_f32 form_q4k_
          form_q6k_matvec_part_f32 form_q4k_matvec_part_f32 form_part_combine_f32 \
          form_q6k_matvec_hoist_f32 form_q4k_matvec_hoist_f32 \
          form_q6k_matvec_lane_f32 form_q4k_matvec_lane_f32 \
-         form_rmsnorm_f32 form_rope_f32 form_gqa_decode_f32 form_swiglu_f32 form_add_f32 form_argmax_f32; do
+         form_rmsnorm_f32 form_rope_f32 form_gqa_decode_f32 form_swiglu_f32 form_add_f32 form_argmax_f32 \
+         form_rmsnorm_tg_f32 form_rope_pair_f32 form_argmax_part_f32 form_argmax_comb_f32; do
     grep -q "kernel void $k" "$MSL" || { echo "FAIL  kernel $k was not emitted"; exit 1; }
 done
 # The header must LEAD the unit and must NOT drag `using namespace metal;` in with it — the body's own
@@ -157,7 +158,7 @@ done
 # because the failure mode is a compile error a hundred lines away from its cause.
 head -c 200 "$MSL" | grep -q '#include <metal_stdlib>' || { echo "FAIL  metal_stdlib header is not at the top of the unit"; exit 1; }
 grep -q 'using namespace metal' "$MSL" && { echo "FAIL  the unit emitted 'using namespace metal;' — the body's round becomes ambiguous"; exit 1; }
-echo "  17 kernels emitted, $(wc -c < "$MSL" | tr -d ' ') bytes, every character authored by a .fk cell"
+echo "  21 kernels emitted, $(wc -c < "$MSL" | tr -d ' ') bytes, every character authored by a .fk cell"
 
 # ── the .metallib, cached across RUNS by the emitted source's own sha256 ──────────────────────
 msl_sha="$(shasum -a 256 "$MSL" | cut -c1-16)"
@@ -341,6 +342,23 @@ let pQ6L = try pipe("form_q6k_matvec_lane_f32"), pQ4L = try pipe("form_q4k_matve
 // group per row, rows*32 threads — so they drop into the same carrier slot. The ONLY difference is
 // the thread map, which is the whole measured win. qk-matvec-slot.fk.
 let pQ6S = try pipe("form_q6k_matvec_slot_f32"), pQ4S = try pipe("form_q4k_matvec_slot_f32")
+// STONE 16: the four FAST TWINS of the ops that were dispatched one thread at a time. Each is bit for
+// bit its attestant (llama-decode-msl.fk states why for each), and each attestant stays right here
+// and stays on the attestant's path — the twins are what the lane and slot paths run, and gate 11
+// makes them produce the attestant's own token ids or fall.
+let pRmsT = try pipe("form_rmsnorm_tg_f32"), pRopeP = try pipe("form_rope_pair_f32")
+let pArgP = try pipe("form_argmax_part_f32"), pArgC = try pipe("form_argmax_comb_f32")
+// THE RADII, ASKED OF THIS MODEL RATHER THAN ASSUMED OF EVERY MODEL. The cooperative RMSNorm holds a
+// COMPILE-TIME 4096-float threadgroup scratch and reduces across ONE threadgroup; the pair-grain RoPE
+// has no trailing-odd arm where the per-head kernel silently drops one; the argmax combine holds 4096
+// partials. Outside any of these the twin is WRONG, not slow. Refused here, not discovered later.
+let ARGP = 1024                                   // argmax partitions; also bounded by the combine's scratch
+let rmsTG = min(pRmsT.maxTotalThreadsPerThreadgroup, 1024)
+let argTG = min(pArgC.maxTotalThreadsPerThreadgroup, 1024)
+if dModel > 4096 || headDim % 2 != 0 || ARGP > 4096 {
+    print("SKIP  this model leaves a Stone 16 twin's stated radius (d=\(dModel) hd=\(headDim) parts=\(ARGP))")
+    exit(2)
+}
 // THE LANE KERNEL ASSUMES A SIMD WIDTH OF EXACTLY 32 (qk-matvec-lane.fk's stated radius). On a device
 // where that is false the kernel is WRONG, not slow, so it is READ from the pipeline and refused —
 // never assumed. A hardware constant a kernel silently depends on is the aporon error (corpus 811).
@@ -362,10 +380,13 @@ let bLogits = buf(vocabN)
 let bCacheK = buf(nLayer * maxpos * kvd), bCacheV = buf(nLayer * maxpos * kvd)
 let bScratch = buf(2 * nHead * maxpos)
 let bPart = buf(vocabN * PARTS)          // the split fold's partials, pooled once like everything else
+let bXbT = buf(dModel)                   // gate 3's second answer: the cooperative RMSNorm twin's
 let bAlt = buf(vocabN)                   // the attestant's answer, for the every-run agreement gate
 let bSlot = buf(vocabN)                  // gate 9b's third answer: the SLOT kernel's, held alongside
                                          // the split's and the lane's so all three are compared
                                          // against ONE attestant read, in one pass (Stone 13)
+let bArgPI = dev.makeBuffer(length: max(ARGP,16) * 4, options: .storageModeShared)!  // stage-one indices
+let bArgPV = buf(ARGP)                   // stage-one values — pooled once, like everything else
 let bOutI = dev.makeBuffer(length: 16, options: .storageModeShared)!
 let bOutV = buf(4)
 let poolBytes = (dModel * 6 + dFF * 3 + vocabN + 2 * nLayer * maxpos * kvd + 2 * nHead * maxpos) * 4
@@ -382,11 +403,16 @@ print(String(format: "pooled: %.1f MB of activation + KV state, allocated ONCE f
 // write disjoint buffers — have no reason to wait for each other, nor do gate and up, nor the two
 // RoPEs. `barrier: false` marks exactly those, and NOTHING about the arithmetic changes: each row is
 // still one thread folding right-to-left, bit for bit what the attestant folds.
+// DISPATCHES PER TOKEN is the causal number this stone is measured by, so it is COUNTED rather than
+// derived from the source by hand — a hand count of a loop body is exactly the kind of number that
+// stays right until someone edits the loop.
+var nDispatch = 0
 final class Step {
     let cb: MTLCommandBuffer, enc: MTLComputeCommandEncoder
     init() { cb = queue.makeCommandBuffer()!; enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent)! }
     func go(_ p: MTLComputePipelineState, _ width: Int, barrier: Bool = true, tgMul32: Bool = false,
             _ bind: (MTLComputeCommandEncoder) -> Void) {
+        nDispatch += 1
         enc.setComputePipelineState(p); bind(enc)
         var tg = min(p.maxTotalThreadsPerThreadgroup, 256)
         // the lane kernel folds one row per SIMD GROUP, so a threadgroup that is not a whole number of
@@ -395,6 +421,18 @@ final class Step {
         if tgMul32 { tg = max(32, (tg / 32) * 32) }
         enc.dispatchThreads(MTLSize(width: width, height: 1, depth: 1),
                             threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
+        if barrier { enc.memoryBarrier(scope: .buffers) }
+    }
+    // ONE threadgroup, exactly. The cooperative kernels reduce across a THREADGROUP, not across the
+    // grid, so dispatchThreads (which the driver may split into as many threadgroups as it likes)
+    // would silently give each group its own partial answer. dispatchThreadgroups(1, ...) is the
+    // shape those kernels' stated radius asks for, and it is asked for here rather than assumed.
+    func go1(_ p: MTLComputePipelineState, _ tg: Int, barrier: Bool = true,
+             _ bind: (MTLComputeCommandEncoder) -> Void) {
+        nDispatch += 1
+        enc.setComputePipelineState(p); bind(enc)
+        enc.dispatchThreadgroups(MTLSize(width: 1, height: 1, depth: 1),
+                                 threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
         if barrier { enc.memoryBarrier(scope: .buffers) }
     }
     func done() { enc.endEncoding(); cb.commit(); cb.waitUntilCompleted() }
@@ -513,24 +551,33 @@ func dequant(_ s: Step, _ t: TInfo, off: Int, n: Int, _ y: MTLBuffer) {
         e.setBytes(&o, length: 4, index: 2); e.setBytes(&nn, length: 4, index: 3)
     }
 }
+// STONE 16. `fastOps` chooses the THREAD MAP and nothing else: the same buffers, the same constants,
+// the same expressions. False is the attestant — one thread, 2n device round trips. True is the
+// cooperative twin. The attestant path never sets it, so the every-run agreement gates compare two
+// really different maps and not one map with itself.
+var fastOps = false
 func rmsnorm(_ s: Step, _ x: MTLBuffer, _ gain: TInfo, _ y: MTLBuffer) {
     var n = UInt32(dModel), eps = rmsEps
-    s.go(pRms, 1) { e in
+    let bind: (MTLComputeCommandEncoder) -> Void = { e in
         e.setBuffer(x, offset: 0, index: 0)
         e.setBuffer(modelBuf, offset: gain.off, index: 1)   // F32 gains, read in place
         e.setBuffer(y, offset: 0, index: 2)
         e.setBytes(&n, length: 4, index: 3); e.setBytes(&eps, length: 4, index: 4)
     }
+    if fastOps { s.go1(pRmsT, rmsTG, bind) } else { s.go(pRms, 1, bind) }
 }
 let ropeT = T("rope_freqs.weight")
 func rope(_ s: Step, _ v: MTLBuffer, off: Int, heads: Int, pos: Int, barrier: Bool = true) {
     var nh = UInt32(heads), hd = UInt32(headDim), p = UInt32(pos), b = ropeBase
-    s.go(pRope, heads, barrier: barrier) { e in
+    let bind: (MTLComputeCommandEncoder) -> Void = { e in
         e.setBuffer(v, offset: off, index: 0)
         e.setBuffer(modelBuf, offset: ropeT.off, index: 1)   // llama3.2's OWN frequency factors
         e.setBytes(&nh, length: 4, index: 2); e.setBytes(&hd, length: 4, index: 3)
         e.setBytes(&p, length: 4, index: 4); e.setBytes(&b, length: 4, index: 5)
     }
+    // one thread per head, or one per (head, pair) — the SAME rotation either way
+    if fastOps { s.go(pRopeP, heads * (headDim / 2), barrier: barrier, bind) }
+    else       { s.go(pRope,  heads,                 barrier: barrier, bind) }
 }
 func elem(_ s: Step, _ p: MTLComputePipelineState, _ x: MTLBuffer, _ y: MTLBuffer, _ z: MTLBuffer, _ n: Int) {
     var nn = UInt32(n)
@@ -610,10 +657,25 @@ func forward(_ id: Int, _ pos: Int) -> Int {
     }
     rmsnorm(s, bX, onormT, bXb); seam("rmsnorm")
     mv(embT, bXb, bLogits)                 // tied: the unembedding IS token_embd
-    var nn = UInt32(vocabN)
-    s.go(pArg, 1) { e in
-        e.setBuffer(bLogits, offset: 0, index: 0); e.setBuffer(bOutI, offset: 0, index: 1)
-        e.setBuffer(bOutV, offset: 0, index: 2); e.setBytes(&nn, length: 4, index: 3)
+    var nn = UInt32(vocabN), np = UInt32(ARGP)
+    if fastOps {
+        // stage one: ARGP contiguous chunks, each scanned with the attestant's strict `>`
+        s.go(pArgP, ARGP) { e in
+            e.setBuffer(bLogits, offset: 0, index: 0); e.setBuffer(bArgPI, offset: 0, index: 1)
+            e.setBuffer(bArgPV, offset: 0, index: 2)
+            e.setBytes(&nn, length: 4, index: 3); e.setBytes(&np, length: 4, index: 4)
+        }
+        // stage two: the partials folded in ASCENDING part order, same strict `>`, one threadgroup
+        s.go1(pArgC, argTG) { e in
+            e.setBuffer(bArgPI, offset: 0, index: 0); e.setBuffer(bArgPV, offset: 0, index: 1)
+            e.setBuffer(bOutI, offset: 0, index: 2); e.setBuffer(bOutV, offset: 0, index: 3)
+            e.setBytes(&np, length: 4, index: 4)
+        }
+    } else {
+        s.go(pArg, 1) { e in
+            e.setBuffer(bLogits, offset: 0, index: 0); e.setBuffer(bOutI, offset: 0, index: 1)
+            e.setBuffer(bOutV, offset: 0, index: 2); e.setBytes(&nn, length: 4, index: 3)
+        }
     }
     s.done()
     if profile { profAcc["argmax", default: 0] += Date().timeIntervalSince(t0); profN["argmax", default: 0] += 1 }
@@ -623,12 +685,22 @@ func forward(_ id: Int, _ pos: Int) -> Int {
 // ---- gates 2-4: three points on the token's OWN path, judged by the body -------------------------
 let u: Double = 5.960464477539063e-08      // 2^-24, the f32 unit roundoff
 var gate2 = false, gate3 = false, gate4 = false
+var twinRms: [Float] = [], attestRms: [Float] = []
 // The gate pass re-walks the FIRST THREE OPS of a forward pass with a barrier after each, so each op
 // can be read back and judged on its own. It is deliberately NOT `forward` with hooks: a timing path
 // and a gating path that share a body drift, and the one that drifts is always the one nobody ran.
 func gatePass() {
     let s1 = Step(); dequant(s1, embT, off: refId * dModel, n: dModel, bX); s1.done(); gateEmb()
-    let s2 = Step(); rmsnorm(s2, bX, L[0].an, bXb); s2.done(); gateRms()
+    let s2 = Step(); rmsnorm(s2, bX, L[0].an, bXb); s2.done()
+    // STONE 16: the SAME point, re-walked by the cooperative twin, so gate 3 judges the attestant
+    // against Form AND the twin against the attestant in one place. A twin proven only by the token
+    // ids it happens to produce is proven by a 12-sample; this is proven on all 3072 outputs.
+    let attRms = fvals(bXb, dModel)
+    fastOps = true
+    let s2b = Step(); rmsnorm(s2b, bX, L[0].an, bXbT); s2b.done()
+    fastOps = false
+    twinRms = fvals(bXbT, dModel); attestRms = attRms
+    gateRms()
     let s3 = Step(); matvec(s3, L[0].q, bXb, bQ); s3.done(); gateQ()
 }
 func gateEmb() {
@@ -654,11 +726,15 @@ func gateRms() {
         let r = refRms[j]
         if abs(r) > 1e-30 { worstRel = max(worstRel, abs(Double(got[j]) - r) / abs(r)) }
     }
-    gate3 = worstRel <= bound
+    var twinDiff = 0
+    for j in 0..<dModel where twinRms[j].bitPattern != attestRms[j].bitPattern { twinDiff += 1 }
+    gate3 = worstRel <= bound && twinDiff == 0
     print(String(format: "  rmsnorm worst relative deviation %.3e vs derived bound n*u = %.3e (%.1f%% of it)",
                  worstRel, bound, 100 * worstRel / bound))
-    check(gate3, "gate 3 RMSNorm on the GPU tracks Form's fp64 inside the derived n*u bound",
-                 "gate 3 RMSNorm exceeds the derived n*u bound")
+    print("  cooperative twin vs the one-thread attestant: \(dModel - twinDiff)/\(dModel) outputs BIT-IDENTICAL")
+    check(gate3, "gate 3 RMSNorm on the GPU tracks Form's fp64 inside the derived n*u bound, AND the cooperative twin is the one-thread attestant BIT FOR BIT on all \(dModel) outputs",
+                 twinDiff == 0 ? "gate 3 RMSNorm exceeds the derived n*u bound"
+                               : "gate 3 the cooperative RMSNorm twin differs from the attestant on \(twinDiff)/\(dModel) outputs")
 }
 func gateQ() {
     let got = Double(fvals(bQ, dModel)[refRow])
@@ -798,19 +874,21 @@ print("=== gates 8-9: the split twin answers to the attestant ===")
 splitGates()
 zeroPool()
 
-struct Run { var out: [Int] = []; var prefill = 0.0; var decode = 0.0; var forwards = 0 }
+struct Run { var out: [Int] = []; var prefill = 0.0; var decode = 0.0; var forwards = 0; var disp = 0 }
 func generate(_ ids: [Int], _ steps: Int) -> Run {
     zeroPool()
     var r = Run(); var pos = 0; var cur = 0
     let t0 = Date()
     for id in ids { cur = forward(id, pos); pos += 1 }     // prefill: the last logit IS token 1
     let t1 = Date()
+    let d0 = nDispatch
     for _ in 0..<steps {
         r.out.append(cur)
         if cur == eosId || cur == 128001 { break }
         cur = forward(cur, pos); pos += 1; r.forwards += 1
     }
     let t2 = Date()
+    r.disp = (nDispatch - d0) / max(1, r.forwards)
     r.prefill = t1.timeIntervalSince(t0); r.decode = t2.timeIntervalSince(t1)
     return r
 }
@@ -890,7 +968,7 @@ if PARTS > 1 {
 
 // ---- gate 11: THE LANE PATH — Stone 5's answer -----------------------------------------------------
 print("=== gate 11: the lane path's tokens (simd_sum, superblock-hoisted) ===")
-mvNow = .lane
+mvNow = .lane; fastOps = true          // STONE 16's twins ride with the fast matvecs, from here on
 let lShort = generate(promptIds, short), lLong = generate(promptIds, nsteps)
 report("lane-short", lShort); report("lane-long ", lLong); vsWorld("lane", lLong)
 // The lane path's agreement is NOT checked here: it is checked once, together with the slot path's,
@@ -935,7 +1013,9 @@ print(String(format: "  speedup vs the LANE path (Stone 5's answer): decode %.2f
 let sSlope = (sLong.decode - sShort.decode) / max(1.0, Double(sLong.forwards - sShort.forwards))
 print(String(format: "  slot, two sizes and a slope: decode %.3f s at %d forwards and %.3f s at %d -> %.4f s per additional token (%.3f tok/s marginal)",
              sShort.decode, sShort.forwards, sLong.decode, sLong.forwards, sSlope, 1.0 / max(1e-9, sSlope)))
-mvNow = .serial
+print(String(format: "  DISPATCHES PER TOKEN: %d on the attestant's ops -> %d on Stone 16's twins (counted, not derived)",
+             rLong.disp, sLong.disp))
+mvNow = .serial; fastOps = false
 
 // ---- gate 5: the pool is a cache, and the run is reproducible -------------------------------------
 let again = generate(promptIds, short)
