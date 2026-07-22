@@ -1,0 +1,375 @@
+; dsv4-tokenizer.fk — DeepSeek V4 Flash tokenizer, read from the file's own header.
+;
+; STONE 31. The seam between a human prompt and the proven forward: prompt text -> token ids, and
+; token ids -> text. Everything the tokenizer needs lives in the GGUF header (Stone 21's manifest):
+; tokenizer.ggml.model = gpt2 (byte-level BPE), 129 280 tokens, 127 741 merges, pre = joyai-llm.
+; This cell reads those two arrays the equireach way (gguf-meta.fk's gmt-token-* stream) and derives
+; encode + decode on the body's own primitives.
+;
+; PROVENANCE (rent, do not copy). The algorithm is transcribed from ds4.c (MIT, /Users/ursmuff/
+; models/ds4-engine/ds4.c), the model's own reference engine, read for its shape and re-derived here:
+;   - gpt2_byte_to_codepoint / gpt2_codepoint_to_byte  (ds4.c ~35505, ~36472) — the byte alphabet
+;   - bpe_tokenize_text  (ds4.c ~35985) — the joyai-llm pre-tokenizer split
+;   - bpe_emit_piece  (ds4.c ~35574) — byte-encode, then greedy lowest-rank merge
+;   - ds4_token_text  (ds4.c ~36497) — id -> piece -> byte-unmap -> UTF-8
+; The oracle is ds4 itself: `ds4 --dump-tokens -p "..."`. Every id this cell claims is checked against
+; that (tests/dsv4-tokenizer-band.fk), never against a guess.
+;
+; WHY EVERYTHING IS IN BYTE-VALUE SPACE, not built strings. byte_to_str re-encodes any byte >= 128
+; through the host's rune path (byte_to_str 196 is TWO bytes, c3 84, the UTF-8 of U+00C4), and this
+; body deliberately never constructs a byte-exact string of arbitrary bytes — gguf-meta.fk reads token
+; pieces BYTEWISE and lets the caller render. So this cell holds pieces as byte VALUES: a symbol is a
+; byte-exact slice of the input (substring is byte-faithful for every byte); a merge/token stored in
+; the file as UTF-8-of-codepoints is compared by walking its codepoints and mapping each back to its
+; one raw byte value (tkz-cp2b), an int compare that is exact for all 256 bytes. No >=128 byte is ever
+; built. Decode returns the raw byte sequence (a list of ints), byte-exact; tkz-decode-text renders it
+; and is exact for the ASCII range (< 128), the honest radius byte_to_str allows.
+;
+; THE BYTE ALPHABET (gpt2). A raw byte b maps to a printable codepoint so merges operate on UTF-8
+; without losing byte identity. b is "printable-as-itself" when 33<=b<=126, 161<=b<=172, or b>=174;
+; the other 68 bytes (0..32, 127..160, 173) map to 256+n, n = how many other bytes precede b. So a
+; space (0x20) -> 256+32 = 288 = U+0120, why every mid-word space is that codepoint in the vocab.
+; Codepoints stay <= 323, so an encoded string's codepoints are 1- or 2-byte UTF-8, never more.
+;
+; THE joyai-llm PRE-TOKENIZER (radius, aporon). ds4.c mirrors the JoyAI split for the cases DS4 uses
+; in normal text and source code. This cell covers, exactly as ds4.c does: digit runs of <= 3; a
+; punct/symbol leading an ASCII-letter run; letter runs (ASCII alpha, or any non-ASCII byte, ds4.c's
+; own rule for ordinary UTF-8 such as accents) with one optional non-letter lead; punct/symbol runs
+; that swallow trailing newlines; and space runs where a single leading space joins the next word.
+; CJK / Hiragana / Katakana are isolated one run at a time. OUT of radius, named: Unicode punctuation
+; and number CLASSES beyond ASCII+CJK (ds4.c's glm4_unicode_* tables) — a prompt using them may split
+; differently; the band exercises ASCII, digits, punctuation, and CJK.
+;
+; preludes: form-stdlib/gguf-meta.fk
+;
+; Proven by: form-stdlib/tests/dsv4-tokenizer-band.fk (byte-map both ways, decode round-trip in byte
+;            space, the joyai split, and encode ids matched against ds4's own --dump-tokens).
+
+(do
+    ; ================= the header, and the two arrays =================
+    ; Window covers the whole header: tinfo ends < 5.34 MB on this file, so 8 MB reads all KVs.
+    (defn tkz-window () 8000000)
+    (defn tkz-src (path) (eqr-of-file path 0 (tkz-window)))
+    (defn tkz-vocab-n (src) (gmt-vocab-n src))
+
+    ; --- merges array: KV, first-element offset, count, one record's bytes/next ---
+    (defn tkz-merges-kv    (src) (gmt-find src "tokenizer.ggml.merges"))
+    (defn tkz-merges-first (src) (gmt-arr-first src (tkz-merges-kv src)))
+    (defn tkz-merges-n     (src) (gmt-arr-count src (tkz-merges-kv src)))
+    (defn tkz-rec-len  (src at) (egg-u64 src at))                 ; a GGUF string: u64 len + bytes
+    (defn tkz-rec-byte (src at j) (eqr-at src (add (add at 8) j)))
+    (defn tkz-rec-next (src at) (egg-str-next src at))
+
+    ; ================= gpt2 byte alphabet, both directions =================
+    ; byte -> codepoint (0..323). Branch order matches ds4.c's ranges exactly.
+    (defn tkz-b2cp (b)
+        (if (lt b 33)   (add 256 b)          ; 0..32    -> 256..288
+        (if (lt b 127)  b                    ; 33..126  -> self
+        (if (lt b 161)  (add 162 b)          ; 127..160 -> 289..322
+        (if (eq b 173)  323                  ; 173      -> 323
+            b)))))                           ; 161..172,174..255 -> self
+
+    ; codepoint -> raw byte (inverse). Returns -1 for a codepoint that is NOT an alphabet byte:
+    ; the literal separator space (32) inside a merge record, or a >323 codepoint from a
+    ; literal-special token (out of byte-level radius).
+    (defn tkz-cp2b (cp)
+        (if (lt cp 256)
+            (if (lt cp 33)  (sub 0 1)        ; <33 never a stored alphabet byte (incl. 32 = separator)
+            (if (lt cp 127) cp               ; 33..126 self
+            (if (lt cp 161) (sub 0 1)        ; 127..160 never stored raw
+            (if (lt cp 173) cp               ; 161..172 self
+            (if (eq cp 173) (sub 0 1)        ; 173 never stored raw
+                cp)))))                      ; 174..255 self
+        (if (lt cp 289) (sub cp 256)         ; 256..288 -> 0..32
+        (if (lt cp 323) (sub cp 162)         ; 289..322 -> 127..160
+        (if (eq cp 323) 173                  ; 323 -> 173
+            (sub 0 1))))))                   ; >323 out of radius
+
+    ; ================= UTF-8 readers =================
+    ; ENCODED-codepoint reader (merge/token strings): codepoints <= 323 -> 1 or 2 bytes only.
+    (defn tkz-ecp-len (b0) (if (lt b0 128) 1 2))
+    (defn tkz-ecp-val (s at)
+        (do (let b0 (eqr-at s at))
+            (if (lt b0 128) b0
+                (add (mul (sub b0 192) 64) (sub (eqr-at s (add at 1)) 128)))))
+    ; the same, reading from a Form string (for the decode-text convenience)
+    (defn tkz-secp-len (b0) (if (lt b0 128) 1 2))
+    (defn tkz-secp-val (s i)
+        (do (let b0 (str_byte_at s i))
+            (if (lt b0 128) b0
+                (add (mul (sub b0 192) 64) (sub (str_byte_at s (add i 1)) 128)))))
+
+    ; INPUT UTF-8 reader (the human prompt): real UTF-8, 1..4 bytes.
+    (defn tkz-ulen (s i)
+        (do (let b0 (str_byte_at s i))
+            (if (lt b0 128) 1 (if (lt b0 224) 2 (if (lt b0 240) 3 4)))))
+    (defn tkz-uval (s i)
+        (do (let b0 (str_byte_at s i))
+            (if (lt b0 128) b0
+            (if (lt b0 224) (add (mul (sub b0 192) 64) (sub (str_byte_at s (add i 1)) 128))
+            (if (lt b0 240)
+                (add (add (mul (sub b0 224) 4096) (mul (sub (str_byte_at s (add i 1)) 128) 64))
+                     (sub (str_byte_at s (add i 2)) 128))
+                (add (add (add (mul (sub b0 240) 262144) (mul (sub (str_byte_at s (add i 1)) 128) 4096))
+                          (mul (sub (str_byte_at s (add i 2)) 128) 64))
+                     (sub (str_byte_at s (add i 3)) 128)))))))
+
+    ; ================= DECODE: id -> raw bytes =================
+    ; A token piece is stored as UTF-8-of-alphabet-codepoints. Walk its codepoints, map each back to
+    ; its one raw byte (tkz-cp2b), collect the byte VALUES. Byte-exact for the whole byte-level vocab.
+    ; A codepoint > 323 (a literal-special token, e.g. one carrying U+FF5C) yields -1 and is dropped —
+    ; out of byte-level radius, named. tkz-piece-off / tkz-piece-len come from gguf-meta.fk's stream.
+    (defn tkz-dec-piece-acc (src at j n acc)
+        (if (lt j n)
+            (do (let b0 (gmt-token-byte src at j))
+                (let cp (if (lt b0 128) b0
+                            (add (mul (sub b0 192) 64) (sub (gmt-token-byte src at (add j 1)) 128))))
+                (let by (tkz-cp2b cp))
+                (tkz-dec-piece-acc src at (add j (if (lt b0 128) 1 2)) n
+                    (if (lt by 0) acc (_list_append acc by))))
+            acc))
+    (defn tkz-decode-id-bytes (src id)
+        (do (let at (gmt-token-off src id))
+            (tkz-dec-piece-acc src at 0 (gmt-token-len src at) (empty))))
+    ; a whole id list -> one raw byte list
+    (defn tkz-decode-bytes-acc (src ids acc)
+        (if (eq (len ids) 0) acc
+            (tkz-decode-bytes-acc src (tail ids)
+                (tkz-cat acc (tkz-decode-id-bytes src (head ids))))))
+    (defn tkz-decode-bytes (src ids) (tkz-decode-bytes-acc src ids (empty)))
+
+    ; list concat helper (append every element of b to a)
+    (defn tkz-cat (a b)
+        (if (eq (len b) 0) a (tkz-cat (_list_append a (head b)) (tail b))))
+
+    ; render a raw byte list to a Form string. EXACT for bytes < 128 (ASCII), the radius byte_to_str
+    ; allows; a byte >= 128 renders as its UTF-8 codepoint (host rune path), so multi-byte scripts are
+    ; shown, not byte-reproduced. The byte-exact answer is tkz-decode-bytes; this is for reading.
+    (defn tkz-render-acc (bs acc)
+        (if (eq (len bs) 0) acc
+            (tkz-render-acc (tail bs) (str_concat acc (byte_to_str (head bs))))))
+    (defn tkz-decode-text (src ids) (tkz-render-acc (tkz-decode-bytes src ids) ""))
+
+    ; ================= joyai-llm pre-tokenizer =================
+    (defn tkz-alpha (b) (if (if (lt b 65) 0 (lt b 91)) 1 (if (if (lt b 97) 0 (lt b 123)) 1 0)))
+    (defn tkz-digit (b) (if (if (lt b 48) 0 (lt b 58)) 1 0))
+    (defn tkz-space (b) (if (eq b 32) 1 (if (eq b 9) 1 (if (eq b 10) 1 (if (eq b 13) 1 (if (eq b 11) 1 (if (eq b 12) 1 0)))))))
+    (defn tkz-newline (b) (if (eq b 10) 1 (if (eq b 13) 1 0)))
+    (defn tkz-punct (b)
+        (if (if (lt b 33) 0 (lt b 48)) 1
+        (if (if (lt b 58) 0 (lt b 65)) 1
+        (if (if (lt b 91) 0 (lt b 97)) 1
+        (if (if (lt b 123) 0 (lt b 127)) 1 0)))))
+    (defn tkz-letter-like (s i)
+        (do (let b (str_byte_at s i)) (if (lt b 128) (tkz-alpha b) 1)))
+    (defn tkz-cjk (s i)
+        (do (let b (str_byte_at s i))
+            (if (lt b 128) 0
+                (do (let cp (tkz-uval s i))
+                    (if (if (lt cp 19968) 0 (lt cp 40870)) 1   ; 0x4e00..0x9fa5
+                    (if (if (lt cp 12352) 0 (lt cp 12448)) 1   ; 0x3040..0x309f
+                    (if (if (lt cp 12448) 0 (lt cp 12544)) 1   ; 0x30a0..0x30ff
+                        0)))))))
+
+    ; consume a run of letter-like chars from pos, return end offset
+    (defn tkz-eat-letters (s L pos)
+        (if (if (lt pos L) (tkz-letter-like s pos) 0)
+            (tkz-eat-letters s L (add pos (tkz-ulen s pos)))
+            pos))
+    ; consume ascii-alpha run
+    (defn tkz-eat-alpha (s L pos)
+        (if (if (lt pos L) (tkz-alpha (str_byte_at s pos)) 0) (tkz-eat-alpha s L (add pos 1)) pos))
+    ; consume up to `cap` digits
+    (defn tkz-eat-digits (s L pos cap)
+        (if (eq cap 0) pos
+            (if (if (lt pos L) (tkz-digit (str_byte_at s pos)) 0)
+                (tkz-eat-digits s L (add pos 1) (sub cap 1)) pos)))
+    ; consume punct run
+    (defn tkz-eat-punct (s L pos)
+        (if (if (lt pos L) (tkz-punct (str_byte_at s pos)) 0) (tkz-eat-punct s L (add pos 1)) pos))
+    ; consume newline run
+    (defn tkz-eat-newlines (s L pos)
+        (if (if (lt pos L) (tkz-newline (str_byte_at s pos)) 0) (tkz-eat-newlines s L (add pos 1)) pos))
+    ; consume cjk run
+    (defn tkz-eat-cjk (s L pos)
+        (if (if (lt pos L) (tkz-cjk s pos) 0) (tkz-eat-cjk s L (add pos (tkz-ulen s pos))) pos))
+
+    ; the space-run arm: returns the end offset for a whitespace run starting at pos (ds4.c 36030)
+    (defn tkz-space-end (s L pos)
+        (do (let p (tkz-space-scan s L pos 0))
+            (let ln (tkz-space-lastnl s L pos 0))
+            (if (gt ln 0) ln
+                (if (if (if (lt p L) (gt p (add pos 1)) 0)
+                        (if (tkz-letter-like s p) 1 (tkz-punct (str_byte_at s p))) 0)
+                    (sub p 1)
+                    p))))
+    (defn tkz-space-scan (s L pos acc)   ; end of the maximal space run
+        (if (if (lt pos L) (tkz-space (str_byte_at s pos)) 0) (tkz-space-scan s L (add pos 1) 0) pos))
+    (defn tkz-space-lastnl (s L pos last) ; offset just past the LAST newline in the space run, or 0
+        (if (if (lt pos L) (tkz-space (str_byte_at s pos)) 0)
+            (tkz-space-lastnl s L (add pos 1) (if (eq (tkz-newline (str_byte_at s pos)) 1) (add pos 1) last))
+            last))
+
+    ; the next piece: given start pos, return its end offset (ds4.c bpe_tokenize_text)
+    (defn tkz-next-piece (s L pos)
+        (do (let c (str_byte_at s pos))
+            (let e
+                (if (eq (tkz-digit c) 1) (tkz-eat-digits s L pos 3)
+                (if (eq (tkz-cjk s pos) 1) (tkz-eat-cjk s L pos)
+                (if (if (if (eq (tkz-punct c) 1) (lt (add pos 1) L) 0) (tkz-alpha (str_byte_at s (add pos 1))) 0)
+                    (tkz-eat-alpha s L (add pos 1))
+                (if (eq (tkz-letter-like s pos) 1) (tkz-eat-letters s L pos)
+                (if (if (if (if (eq (tkz-newline c) 0) (eq (tkz-punct c) 0) 0) (lt (add pos 1) L) 0)
+                        (tkz-letter-like s (add pos 1)) 0)
+                    (tkz-eat-letters s L (add pos 1))
+                (if (if (if (eq c 32) (lt (add pos 1) L) 0) (tkz-punct (str_byte_at s (add pos 1))) 0)
+                    (tkz-eat-newlines s L (tkz-eat-punct s L (add pos 1)))
+                (if (eq (tkz-punct c) 1) (tkz-eat-newlines s L (tkz-eat-punct s L pos))
+                (if (eq (tkz-space c) 1) (tkz-space-end s L pos)
+                    (add pos (tkz-ulen s pos)))))))))))
+            ; ds4.c guard: never emit an empty piece
+            (if (eq e pos) (add pos (tkz-ulen s pos)) e)))
+
+    ; ================= BPE over one piece =================
+    ; A symbol is a LIST of raw byte VALUES (ints), never a string: substring is rune-aware and would
+    ; drop a byte mid-multibyte-char, and byte_to_str re-encodes >= 128. Input bytes are read
+    ; byte-exact with str_byte_at; symbols grow by list concat. So every byte value 0..255 is carried
+    ; faithfully, which is why CJK (3-byte UTF-8 -> three >=128 byte symbols) encodes correctly.
+    ;
+    ; Compare a merge record against a candidate pair (symL, symR) WITHOUT building any string: walk the
+    ; merge's codepoints, cp2b each to a raw byte value, match against symL's byte list, then the
+    ; separator (a literal space, codepoint 32 -> cp2b -1), then symR's byte list.
+    (defn tkz-merge-eq (src at symL symR)
+        (tkz-me-left src at 0 symL symR 0 (tkz-rec-len src at)))
+    ; phase LEFT: mo = byte offset in the merge record, k = index into symL
+    (defn tkz-me-left (src at mo symL symR k mlen)
+        (if (lt mo mlen)
+            (do (let b0 (tkz-rec-byte src at mo))
+                (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (tkz-rec-byte src at (add mo 1)) 128))))
+                (let nlen (if (lt b0 128) 1 2))
+                (if (eq cp 32)
+                    ; separator: symL must be fully consumed
+                    (if (eq k (len symL)) (tkz-me-right src at (add mo nlen) symR 0 mlen) 0)
+                    (if (if (lt k (len symL)) (eq (tkz-cp2b cp) (nth symL k)) 0)
+                        (tkz-me-left src at (add mo nlen) symL symR (add k 1) mlen)
+                        0)))
+            0))                                  ; ran out before separator -> no match
+    ; phase RIGHT: symR must match exactly to the record end
+    (defn tkz-me-right (src at mo symR k mlen)
+        (if (lt mo mlen)
+            (do (let b0 (tkz-rec-byte src at mo))
+                (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (tkz-rec-byte src at (add mo 1)) 128))))
+                (let nlen (if (lt b0 128) 1 2))
+                (if (if (lt k (len symR)) (eq (tkz-cp2b cp) (nth symR k)) 0)
+                    (tkz-me-right src at (add mo nlen) symR (add k 1) mlen)
+                    0))
+            (if (eq k (len symR)) 1 0)))          ; matched iff symR fully consumed at record end
+
+    ; the merge record's LEFT-symbol first raw byte (its first codepoint, mapped by cp2b). One read;
+    ; used as a fast reject — a merge can only apply to a pair whose left symbol starts with this byte.
+    (defn tkz-merge-fb (src at)
+        (do (let b0 (tkz-rec-byte src at 0))
+            (tkz-cp2b (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (tkz-rec-byte src at 1) 128))))))
+
+    ; scan symbol list for the FIRST adjacent pair this merge matches; gated by fb so the expensive
+    ; full byte-compare runs only for pairs whose left symbol starts with the merge's left byte.
+    (defn tkz-first-pair (src at syms i fb)
+        (if (lt (add i 1) (len syms))
+            (if (if (eq (head (nth syms i)) fb)
+                    (eq (tkz-merge-eq src at (nth syms i) (nth syms (add i 1))) 1) 0)
+                i
+                (tkz-first-pair src at syms (add i 1) fb))
+            (sub 0 1)))
+
+    ; ONE pass over merges (rank-ascending), early-terminating: return the symbol-index to merge for
+    ; the lowest-rank applicable merge, or -1 if none applies (the terminal, a full pass). Each merge
+    ; costs one first-byte read + a fb-gated pair scan, so a non-matching merge is rejected cheaply.
+    (defn tkz-best-merge (src at rem syms)
+        (if (eq rem 0) (sub 0 1)
+            (do (let p (tkz-first-pair src at syms 0 (tkz-merge-fb src at)))
+                (if (lt p 0)
+                    (tkz-best-merge src (tkz-rec-next src at) (sub rem 1) syms)
+                    p))))
+
+    ; merge the pair at index p: syms[0..p-1] ++ (syms[p]++syms[p+1]) ++ syms[p+2..]
+    (defn tkz-apply (syms p)
+        (tkz-splice syms 0 p (tkz-cat (nth syms p) (nth syms (add p 1)))))
+    (defn tkz-splice (syms i p merged)   ; rebuild list, replacing positions p,p+1 with merged
+        (if (eq i (len syms)) (empty)
+            (if (eq i p)
+                (cons merged (tkz-splice syms (add i 2) p merged))
+                (cons (nth syms i) (tkz-splice syms (add i 1) p merged)))))
+
+    ; the BPE loop for a piece's initial symbol list -> final symbol list. A 0- or 1-symbol list has
+    ; no pair, so it never scans the merges (the terminal full pass only happens with >= 2 symbols and
+    ; no applicable merge).
+    (defn tkz-bpe (src syms)
+        (if (lt (len syms) 2) syms
+            (do (let p (tkz-best-merge src (tkz-merges-first src) (tkz-merges-n src) syms))
+                (if (lt p 0) syms (tkz-bpe src (tkz-apply syms p))))))
+
+    ; initial symbols: one 1-element byte-value list per input byte in [start,end), read byte-exact
+    (defn tkz-syms (inp start end)
+        (if (eq start end) (empty)
+            (cons (list (str_byte_at inp start)) (tkz-syms inp (add start 1) end))))
+
+    ; ================= symbol -> token id (final lookup) =================
+    ; Compare a token piece (stored codepoint-UTF8) to a raw-byte symbol, byte-exact via cp2b.
+    (defn tkz-tok-eq (src tat sym)
+        (tkz-teq src tat 0 0 sym (gmt-token-len src tat)))
+    (defn tkz-teq (src tat to k sym plen)
+        (if (lt to plen)
+            (do (let b0 (gmt-token-byte src tat to))
+                (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (gmt-token-byte src tat (add to 1)) 128))))
+                (let nlen (if (lt b0 128) 1 2))
+                (if (if (lt k (len sym)) (eq (tkz-cp2b cp) (nth sym k)) 0)
+                    (tkz-teq src tat (add to nlen) (add k 1) sym plen)
+                    0))
+            (if (eq k (len sym)) 1 0)))
+    ; ONE streaming pass over the whole vocab: id of the first token equal to sym, or -1.
+    (defn tkz-id-of (src sym)
+        (tkz-id-scan src (gmt-tokens-first src) 0 (tkz-vocab-n src) sym))
+    (defn tkz-id-scan (src tat id n sym)
+        (if (eq id n) (sub 0 1)
+            (if (eq (tkz-tok-eq src tat sym) 1) id
+                (tkz-id-scan src (gmt-token-next src tat) (add id 1) n sym))))
+
+    ; map a final symbol list to ids (one vocab pass per symbol; fallback: per-byte ids)
+    (defn tkz-ids-of-syms (src syms acc)
+        (if (eq (len syms) 0) acc
+            (do (let id (tkz-id-of src (head syms)))
+                (tkz-ids-of-syms src (tail syms)
+                    (if (lt id 0)
+                        (tkz-cat acc (tkz-ids-of-bytes src (head syms) 0))
+                        (_list_append acc id))))))
+    ; fallback for an unknown symbol: emit the single-byte token id of each byte (ds4.c bpe_emit_piece)
+    (defn tkz-ids-of-bytes (src sym k)
+        (if (lt k (len sym))
+            (cons (tkz-id-of-byte src (nth sym k)) (tkz-ids-of-bytes src sym (add k 1)))
+            (empty)))
+    (defn tkz-id-of-byte (src b)
+        (tkz-idb-scan src (gmt-tokens-first src) 0 (tkz-vocab-n src) (tkz-b2cp b)))
+    (defn tkz-idb-scan (src tat id n cp)     ; first token that is exactly the one codepoint cp
+        (if (eq id n) (sub 0 1)
+            (if (tkz-tok-is-cp src tat cp) id
+                (tkz-idb-scan src (gmt-token-next src tat) (add id 1) n cp))))
+    (defn tkz-tok-is-cp (src tat cp)
+        (do (let plen (gmt-token-len src tat))
+            (let b0 (if (gt plen 0) (gmt-token-byte src tat 0) (sub 0 1)))
+            (if (eq plen (if (lt cp 128) 1 2))
+                (if (lt cp 128) (eq b0 cp)
+                    (if (eq b0 (add 192 (div cp 64))) (eq (gmt-token-byte src tat 1) (add 128 (mod cp 64))) 0))
+                0)))
+
+    ; ================= ENCODE: text -> ids =================
+    ; walk pieces; BPE each; concatenate ids. add_bos/add_eos are 0 on this file (Stone 21), so no
+    ; special ids are prepended — the oracle `--dump-tokens` shows none either.
+    (defn tkz-encode-from (src inp L pos acc)
+        (if (lt pos L)
+            (do (let end (tkz-next-piece inp L pos))
+                (tkz-encode-from src inp L end
+                    (tkz-ids-of-syms src (tkz-bpe src (tkz-syms inp pos end)) acc)))
+            acc))
+    (defn tkz-encode (src inp) (tkz-encode-from src inp (str_len inp) 0 (empty)))
+
+    0)

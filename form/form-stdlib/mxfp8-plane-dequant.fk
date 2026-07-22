@@ -1,0 +1,108 @@
+; mxfp8-plane-dequant.fk — GGUF type 41 as it is ACTUALLY laid out in
+; DeepSeek-V4-Flash-REAP25-DSpark-ds4-GGUF. The same plane split as mxfp4-plane-dequant.fk, one
+; payload width up: 8 bits per element instead of 4, the identical E8M0 scale plane behind it.
+;
+; WHAT THE PARSE TABLE SAYS, AND WHY IT IS NOT WHAT THE FILE HOLDS.
+; ds4 (gguf-tools/quants.c:73) carries the placeholder row
+;     [DS4Q_TYPE_Q1_0] = { "q1_0", 128, 18, false, false }
+; — 128 elements in 18 bytes, i.e. 1.125 bits per element, a ONE-BIT format. ds4 never dequantizes
+; type 41 (it warns "unsupported GGUF type 41"), so that row is never exercised. The file says
+; something entirely different, and by a factor of more than seven.
+;
+; EVIDENCE FOR 132/128 (1.03125 bytes per element — EIGHT-bit, not one-bit).
+; Same instrument as mxfp4-plane-dequant.fk's, validated the same way on f32 / f16 / i32 / iq2_xxs:
+; consecutive tensor-info offsets divided by element counts. Across ALL 370 type-41 tensors it answers
+; exactly one value, 1.03125 = 33/32, with no spread. That is 1 byte of payload per element plus
+; 1 byte per 32 elements — not 1.125 bits. The file's name carries the same word the bytes do:
+; "...-mxfp8lt-...". This is MXFP8, and the "q1_0" row is a mislabel ds4 never had to honour.
+;
+; EVIDENCE FOR THE PLANE SPLIT, AND THAT ITS BOUNDARY IS EXACTLY n.
+; Predicted from the mxfp4 finding and then TESTED at the predicted address on three tensors chosen to
+; be far apart — blk.0.attn_kv.weight (2 097 152 elements), blk.42.attn_q_b.weight (33 554 432) and
+; dspark.main_proj.weight (50 331 648), the last tensor in an 85 GiB file. At tensor_start + n, on all
+; three, the byte stream changes character in one byte: payload bytes span 200-221 distinct values;
+; from tensor_start + n onward only 0x72-0x75 occur (blk.0.attn_kv: 114-117, four distinct values in
+; 16 KB; dspark.main_proj: a single value, 117). Those are E8M0 exponents 2^-13 .. 2^-10. A 256-byte
+; straddle read across tensor_start + n shows the transition is sharp to the byte, with no padding.
+;
+; EVIDENCE THAT THE PAYLOAD IS E4M3 AND NOT int8 OR E5M2.
+; Three candidate readings of the same bytes under the same scale plane, on all three tensors:
+;   E5M2  sd 1.99 - 4.77, |max| 14 - 56          -> excluded outright; these are not weights
+;   int8  mean +0.0112 / +0.0128 / +0.0322       -> a systematic bias of about +0.5 sd, every tensor
+;   E4M3  mean -0.00004 / -0.00011 / -0.00108    -> zero-mean, sd 0.029 / 0.032 / 0.073
+; int8 is excluded by more than its bias: the byte histogram is sign-symmetric about BIT 7
+; (count(0xE9) 1599 vs count(0x69) 1551, count(0xEA) 1387 vs count(0x6A) 1372, and so on down the
+; table). Under two's complement 0xE9 is -23 and 0x69 is +105 — two unrelated magnitudes occurring
+; equally often, which is incoherent. Under sign-magnitude it is one magnitude with two signs, which
+; is exactly what a zero-mean weight tensor gives. The dominant codes cluster at exponent field 13
+; (0x68-0x6A), the concentration of a FLOAT format, not the spread of an integer one.
+;
+; THE VALUE MAP IS NOT A NEW MEANING. E4M3 is 1 sign bit, 4 exponent bits (bias 7), 3 mantissa bits —
+; f16-decode.fk's already-four-way-proven general decoder at (eb 4, mb 3):
+;     (fd-value b 4 3)
+; ONE DECLARED DEVIATION, and it is the honest kind. OCP E4M3 has no infinity, and reserves S.1111.111
+; (0x7F / 0xFF) alone as NaN; every other exponent-15 code is a finite normal. fd-value has no
+; special-case branch at all, so it decodes exponent 15 as a normal — which AGREES with OCP on every
+; code except 0x7F / 0xFF, where OCP says NaN and fd-value says 480. Those two codes do not occur in
+; any of the three tensors sampled (0 occurrences in 128 KB); exponent field 15 itself does occur, in
+; dspark.main_proj.weight, with mantissa < 7. So on every code present in this file the decode is
+; exact, and mxp8-nan? names the two codes where it would not be, rather than hiding them.
+;
+; Kin: mxfp4-plane-dequant.fk (mxp-e8m0 and the plane split — this file preludes it, so there is ONE
+; E8M0 in the body), f16-decode.fk (fd-value), equireach.fk (eqr-at), format-arith.fk (fq-pow2).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/mxfp4-plane-dequant.fk
+;
+; Proven by: form-stdlib/tests/mx-plane-band.fk
+; PROOF RADIUS: the band proves the GEOMETRY and the VALUE MAP against 1024 real weights of
+; blk.0.attn_kv.weight. Unlike the type-40 carver there is NO nibble-order uncertainty here — one
+; element is one byte, so element order is the byte order and nothing is packed. It is NOT
+; bit-exactness against an independent implementation; none exists. See the receipt.
+
+(do
+    ; --- E4M3, the payload value map. mxp-e8m0 comes from mxfp4-plane-dequant.fk. ---
+    (defn mxp8-code-value (b) (fd-value b 4 3))
+    ; the two codes where this body's general decode and OCP E4M3 disagree (OCP: NaN). Named, not hidden.
+    (defn mxp8-nan? (b) (if (eq b 127) 1 (if (eq b 255) 1 0)))
+
+    ; --- PLANE GEOMETRY. One byte per element, then one E8M0 byte per 32 elements. ---
+    (defn mxp8-payload-bytes (n) n)
+    (defn mxp8-scale-bytes   (n) (div n (mxp4-group)))
+    (defn mxp8-slice-bytes   (n) (add n (mxp8-scale-bytes n)))
+    (defn mxp8-slice-base (base n k) (add base (mul k (mxp8-slice-bytes n))))
+
+    ; --- the payload byte for element i: no packing, so the index IS the offset ---
+    (defn mxp8-code (src base i) (eqr-at src (add base i)))
+
+    ; --- the shared exponent governing element i, from the scale plane at base + n ---
+    (defn mxp8-scale-byte (src base n i)
+        (eqr-at src (add base (add n (div i (mxp4-group))))))
+    (defn mxp8-scale (src base n i) (mxp-e8m0 (mxp8-scale-byte src base n i)))
+
+    ; --- the wall, same discipline as mxp4-at: weight n is the first SCALE byte, not a weight ---
+    (defn mxp8-index-ok? (n i) (if (lt i 0) 0 (if (lt i n) 1 0)))
+
+    (defn mxp8-at (src base n i)
+        (if (eq (mxp8-index-ok? n i) 1)
+            (mul (mxp8-scale src base n i) (mxp8-code-value (mxp8-code src base i)))
+            (form_error "mxp8-at: element index outside the slice -- weight n would read the scale plane as payload; stride with mxp8-slice-base instead")))
+
+    (defn mxp8-weights-loop (src base n i m acc)
+        (if (ge i m) (reverse acc)
+            (mxp8-weights-loop src base n (add i 1) m (cons (mxp8-at src base n i) acc))))
+    (defn mxp8-weights (src base n m) (mxp8-weights-loop src base n 0 m (list)))
+
+    ; --- integer witnesses (fkwu compares floats, it cannot render them) ---
+    (defn mxp8-milli (src base n i) (mul 1000000.0 (mxp8-at src base n i)))
+    ; the sign-magnitude claim, as a pure-integer statistic: how many of m codes carry the sign bit.
+    ; A zero-mean tensor puts this near m/2; two's complement would put it wherever the values sit.
+    (defn mxp8-negcount-loop (src base i m acc)
+        (if (ge i m) acc
+            (mxp8-negcount-loop src base (add i 1) m
+                (add acc (div (mxp8-code src base i) 128)))))
+    (defn mxp8-negcount (src base m) (mxp8-negcount-loop src base 0 m 0))
+    ; 1 when no code in [0,m) is one of the two OCP-NaN codes — the deviation is absent, in-band
+    (defn mxp8-nanfree? (src base i m)
+        (if (ge i m) 1
+            (if (eq (mxp8-nan? (mxp8-code src base i)) 1) 0
+                (mxp8-nanfree? src base (add i 1) m)))))
