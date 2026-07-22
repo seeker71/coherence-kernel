@@ -289,6 +289,110 @@ def attention_rows_one(q, kv_rows, sinks, n_head, head_dim):   # ds4.c:10305
             out[qb + i] = acc[i] * inv
     return out
 
+# ------------------------------------------------------------------ the HYPER-CONNECTION half (ds4.c)
+# STONE 36 STAGE 4. A complete layer is not the attention block: it is HC-pre -> block -> HC-post, twice.
+# ds4.c anchors, re-expressed here the same way as the core above:
+#   hc_from_plain_embedding  :9764   the plain embedding is BROADCAST to all n_hc streams
+#   hc_pre_from_state_one    :9690   rms(no weight) over the whole n_hc*n_embd state -> f16 matvec ->
+#                                    sinkhorn split -> weighted sum of the streams
+#   hc_split_sinkhorn_one    :9592   pre = sigmoid+eps, post = 2*sigmoid, comb = row-softmax then 20
+#                                    alternating column/row normalisations
+#   hc_weighted_sum_one      :9673
+#   hc_post_one              :9772   out[dst][d] = block_out[d]*post[dst] + sum_src comb[dst+src*n_hc]*resid[src][d]
+def matvec_f16(g, name, x, rows, cols):
+    base = g.abs_off(name)
+    out = [0.0] * rows
+    for r in range(rows):
+        o = base + r * cols * 2
+        hs = struct.unpack_from("<%dH" % cols, g.mm, o)
+        acc = 0.0
+        for j in range(cols):
+            acc += f16_to_f64(hs[j]) * x[j]
+        out[r] = acc
+    return out
+
+def rms_norm_no_weight(x, eps):                        # ds4.c:6628
+    ss = 0.0
+    for v in x:
+        ss += v * v
+    s = 1.0 / math.sqrt(ss / len(x) + eps)
+    return [v * s for v in x]
+
+def sigmoid(z):
+    return 1.0 / (1.0 + math.exp(-z)) if z >= 0 else math.exp(z) / (1.0 + math.exp(z))
+
+def hc_split_sinkhorn(mix, scale, base, n_hc, iters, eps):     # ds4.c:9592
+    out = [0.0] * (2 * n_hc + n_hc * n_hc)
+    for i in range(n_hc):
+        out[i] = sigmoid(mix[i] * scale[0] + base[i]) + eps
+    for i in range(n_hc):
+        o = n_hc + i
+        out[o] = 2.0 * sigmoid(mix[o] * scale[1] + base[o])
+    c = [0.0] * (n_hc * n_hc)
+    for dst in range(n_hc):
+        rmax = -1e300
+        for src in range(n_hc):
+            idx = src + dst * n_hc
+            v = mix[2 * n_hc + idx] * scale[2] + base[2 * n_hc + idx]
+            c[idx] = v
+            if v > rmax:
+                rmax = v
+        rsum = 0.0
+        for src in range(n_hc):
+            idx = src + dst * n_hc
+            c[idx] = math.exp(c[idx] - rmax)
+            rsum += c[idx]
+        for src in range(n_hc):
+            c[src + dst * n_hc] = c[src + dst * n_hc] / rsum + eps
+    for src in range(n_hc):                              # the FIRST normalisation is by COLUMN
+        s = sum(c[src + dst * n_hc] for dst in range(n_hc))
+        inv = 1.0 / (s + eps)
+        for dst in range(n_hc):
+            c[src + dst * n_hc] *= inv
+    for _ in range(1, iters):
+        for dst in range(n_hc):
+            s = sum(c[src + dst * n_hc] for src in range(n_hc))
+            inv = 1.0 / (s + eps)
+            for src in range(n_hc):
+                c[src + dst * n_hc] *= inv
+        for src in range(n_hc):
+            s = sum(c[src + dst * n_hc] for dst in range(n_hc))
+            inv = 1.0 / (s + eps)
+            for dst in range(n_hc):
+                c[src + dst * n_hc] *= inv
+    for k in range(n_hc * n_hc):
+        out[2 * n_hc + k] = c[k]
+    return out
+
+def hc_pre(g, P, kind, residual_hc, n_embd, n_hc, eps, iters, hc_eps):    # ds4.c:9690
+    flat = rms_norm_no_weight(residual_hc, eps)
+    fn = P + "hc_%s_fn.weight" % kind
+    rows = g.dims(fn)[1]
+    cols = g.dims(fn)[0]
+    mix = matvec_f16(g, fn, flat, rows, cols)
+    scale = read_f32(g, P + "hc_%s_scale.weight" % kind, 3)
+    base = read_f32(g, P + "hc_%s_base.weight" % kind, rows)
+    split = hc_split_sinkhorn(mix, scale, base, n_hc, iters, hc_eps)
+    cur = [0.0] * n_embd
+    for d in range(n_embd):
+        acc = 0.0
+        for h in range(n_hc):
+            acc += residual_hc[h * n_embd + d] * split[h]
+        cur[d] = acc
+    post = split[n_hc:2 * n_hc]
+    comb = split[2 * n_hc:]
+    return cur, post, comb, mix, flat
+
+def hc_post(block_out, residual_hc, post, comb, n_embd, n_hc):           # ds4.c:9772
+    out = [0.0] * (n_hc * n_embd)
+    for dst in range(n_hc):
+        for d in range(n_embd):
+            acc = block_out[d] * post[dst]
+            for src in range(n_hc):
+                acc += comb[dst + src * n_hc] * residual_hc[src * n_embd + d]
+            out[dst * n_embd + d] = acc
+    return out
+
 # ------------------------------------------------------------------ the core
 def main():
     if len(sys.argv) < 4:
@@ -324,11 +428,30 @@ def main():
           % (g.dims(P + "attn_output_a.weight"), g.dims(P + "attn_output_b.weight"),
              1 if (P + "attn_output.weight") in g.tensors else 0))
 
-    # --- the probe vector: the token's own F16 embedding (Stone 33/34/35's knownsolved input class).
+    # --- the token's own F16 embedding.
     x0 = read_f16_row(g, "token_embd.weight", token, n_embd)
 
+    # --- STAGE 4: the HC half. mode "probe" feeds the MLA the raw embedding (Stone 33/34/35's
+    # knownsolved input class); mode "hc" builds the REAL layer-0 input — the embedding broadcast to
+    # n_hc streams (ds4.c:9764) and collapsed by hc_pre (ds4.c:9690) — which removes that bound.
+    n_hc = K.get("deepseek4.hyper_connection.count", 4)
+    hc_iters = K.get("deepseek4.hyper_connection.sinkhorn_iterations", 20)
+    hc_eps = K.get("deepseek4.hyper_connection.epsilon", 1e-6)
+    mode = os.environ.get("DSV4_ORACLE_MODE", "probe")
+    residual_hc = list(x0) * n_hc                                     # ds4.c:9764 broadcast
+    hc_flat = []
+    hc_mix = []
+    post = []
+    comb = []
+    if mode == "hc":
+        x_in, post, comb, hc_mix, hc_flat = hc_pre(g, P, "attn", residual_hc, n_embd, n_hc,
+                                                   eps, hc_iters, hc_eps)
+    else:
+        x_in = x0
+    print("MODE %s n_hc %d sinkhorn_iters %d hc_eps %r" % (mode, n_hc, hc_iters, hc_eps))
+
     # --- ds4.c:9981  attn_norm
-    xn = rms_norm_weight(x0, read_f32(g, P + "attn_norm.weight", n_embd), eps)
+    xn = rms_norm_weight(x_in, read_f32(g, P + "attn_norm.weight", n_embd), eps)
 
     # --- ds4.c:10002  Q: q_a -> q_a_norm -> q_b -> per-head RMSNorm (no weight)
     qlat = mx8_matvec(g, P + "attn_q_a.weight", xn, q_rank, n_embd)
@@ -392,9 +515,16 @@ def main():
         for i in range(min(n, len(vec))):
             print("ORA %s %d %.17g" % (key, i, vec[i]))
 
-    named = (("xn", xn), ("qlatn", qlatn), ("q_preheadrms", q_preheadrms), ("q_headrms", q_headrms),
+    named = [("xn", xn), ("qlatn", qlatn), ("q_preheadrms", q_preheadrms), ("q_headrms", q_headrms),
              ("q", q), ("kv_norm", kv_norm), ("kv_roped", kv_roped), ("kv", kv),
-             ("heads_attn", heads_attn), ("heads", heads), ("low", low), ("attn_out", attn_out))
+             ("heads_attn", heads_attn), ("heads", heads), ("low", low), ("attn_out", attn_out)]
+    if mode == "hc":
+        # ds4.c:13793 — the attention half CLOSES with hc_post over the same residual and the same
+        # post/comb the SAME hc_pre produced. This is the complete attention half of a real layer.
+        after_attn_hc = hc_post(attn_out, residual_hc, post, comb, n_embd, n_hc)
+        named = ([("hc_resid", residual_hc), ("hc_flat", hc_flat), ("hc_mix", hc_mix),
+                  ("hc_post_w", post), ("hc_comb", comb), ("hc_cur", x_in)] + named
+                 + [("after_attn_hc", after_attn_hc)])
     for key, vec in named:
         emit(key, vec, 8)
     # the full vectors the harness compares elementwise, written to a side file for exactness
