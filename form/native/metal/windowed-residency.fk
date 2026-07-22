@@ -1,0 +1,87 @@
+; windowed-residency.fk — the body's plan for holding a model LARGER THAN ONE MTLBuffer on the GPU.
+;
+; onelean, biting for real (corpus row 847). "The one in one MTLBuffer was never chosen." The ds4 file
+; is 91 321 404 640 B and the M4 Max maxBufferLength is 86 586 540 032 B: a whole-model-in-one-buffer
+; residency is IMPOSSIBLE — makeBuffer(bytesNoCopy:) over the whole mmap now FAILs, not warns. This cell
+; is what replaces the dead assumption: a small set of overlapping, page-aligned VIEWS of the one mmap,
+; each within the buffer ceiling, arranged so EVERY tensor lies wholly inside at least one, plus the
+; lookup (tensor offset) -> (view index, inner byte offset) a hot path passes.
+;
+; THE SCHEME IS RENTED, NOT COPIED (boundborrow). ds4's Metal backend solves exactly this at
+; /Users/ursmuff/models/ds4-engine/ds4_metal.m:1706-1817 (MIT): N page-aligned newBufferWithBytesNoCopy
+; views over the same mmap, adjacent views overlapping by max_tensor_bytes + one page, so no tensor can
+; fall in a gap. ds4 targets a GB10; the constraint transfers because maxBufferLength here is measured at
+; the same class of ceiling (Stone 11 / row 847). The arithmetic below is re-derived on this body's own
+; primitives; the debt is named, not the text taken.
+;
+; THE INVARIANT, AND WHY IT HOLDS FOR EVERY TENSOR. Let p be the page, VL = maxBufferLength floored to a
+; page, OVERLAP = round_up(max_tensor_bytes, p) + p, STEP = VL - OVERLAP. Views sit at offsets
+; 0, STEP, 2*STEP, ... each of length VL (the last clipped to the mapped file). For a tensor at absolute
+; offset a with length L <= max_tensor_bytes, take view i = floor(a/STEP). Then inner = a - i*STEP is in
+; [0, STEP), and inner + L < STEP + L <= STEP + OVERLAP = VL, so [inner, inner+L) lies wholly inside the
+; view's local [0, VL). VL and OVERLAP are both page multiples, so STEP is too, so every view origin
+; i*STEP is page-aligned — bytesNoCopy demands that. A tensor with L > VL fits in NO single view; that is
+; a real finding, named by wr-fits-view?, never silently mis-bound (aporon).
+;
+; THE CARRIER MEASURES, THE BODY DECIDES. maxBufferLength, the page size, and the file length are OS/
+; device facts the carrier reads and passes in; max_tensor_bytes is a file-content fact this body folds
+; from the manifest (windowed-residency-emit.fk). The geometry and the lookup are decided here and here
+; only — the dumb-carrier discipline every Metal lane in this body keeps.
+;
+; Kin: native/metal/windowed-residency-emit.fk (the manifest-walk mouth that prices max_tensor_bytes and
+; emits the plan + all-1406-tensor invariant stream), form-stdlib/gguf-manifest.fk (every tensor's offset
+; and length), native/metal/mx-residency.fk / iq2-residency.fk (the decode lanes this residency feeds).
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/windowed-residency-band.fk (the geometry + invariant, fixture-free, on
+; the real ds4 constants AND a 3-view synthetic), and end-to-end by native/metal/metal_windowed_residency.sh
+; (byte-exact readback through the views on the live 85 GiB file) and native/metal/metal_mx_gpu.sh
+; (a real MXFP4/MXFP8 decode driven through the view set).
+
+(do
+    ; Apple Silicon page (getpagesize on the M4 Max = 16 KiB). The carrier MEASURES it and passes it to
+    ; every function below; this default only names the value the harness checks against.
+    (defn wr-page () 16384)
+
+    (defn wr-round-up (x p) (mul (div (add x (sub p 1)) p) p))
+    (defn wr-round-dn (x p) (mul (div x p) p))
+
+    ; VL: the largest page-aligned length ONE MTLBuffer can hold (maxBufferLength, floored to a page).
+    (defn wr-view-limit (maxbuf p) (wr-round-dn maxbuf p))
+    ; OVERLAP: adjacent views share MORE than the largest tensor, plus one page of alignment slack, so no
+    ; tensor can fall in the gap between two views (ds4_metal.m:1738, MIT — rented, re-derived here).
+    (defn wr-overlap (maxtb p) (add (wr-round-up maxtb p) p))
+    ; STEP: how far each view origin advances. VL and OVERLAP are both page multiples, so STEP is too, and
+    ; every view start i*STEP is page-aligned.
+    (defn wr-step (maxbuf maxtb p) (sub (wr-view-limit maxbuf p) (wr-overlap maxtb p)))
+    ; the whole file, rounded up to a page (mmap maps whole pages).
+    (defn wr-mapped (filelen p) (wr-round-up filelen p))
+
+    (defn wr-nviews-loop (off step vl mapped k)
+        (if (ge (add off vl) mapped) (add k 1)
+            (wr-nviews-loop (add off step) step vl mapped (add k 1))))
+    (defn wr-nviews (filelen maxbuf maxtb p)
+        (wr-nviews-loop 0 (wr-step maxbuf maxtb p) (wr-view-limit maxbuf p) (wr-mapped filelen p) 0))
+
+    ; THE LOOKUP. Given a tensor's absolute file offset, the view whose window wholly holds it is
+    ; floor(aoff/STEP) — proven for every tensor whose length <= max_tensor_bytes by the header above.
+    (defn wr-view-of (aoff step) (div aoff step))
+    (defn wr-view-start (idx step) (mul idx step))
+    (defn wr-inner (aoff step) (sub aoff (mul (div aoff step) step)))
+
+    ; a tensor LARGER than one whole view fits in NO view — the aporon guard, named, never silent.
+    (defn wr-fits-view? (bytes maxbuf p) (if (le bytes (wr-view-limit maxbuf p)) 1 0))
+
+    ; THE INVARIANT, one tensor: inner in [0,STEP) by construction, inner+bytes <= VL (so the tensor lies
+    ; wholly inside the view's local [0,VL)), and idx < nviews (the view exists).
+    (defn wr-holds? (aoff bytes filelen maxbuf maxtb p)
+        (do
+            (let step (wr-step maxbuf maxtb p))
+            (let vl (wr-view-limit maxbuf p))
+            (let idx (wr-view-of aoff step))
+            (let inner (wr-inner aoff step))
+            (if (and (ge inner 0)
+                (and (le (add inner bytes) vl)
+                     (lt idx (wr-nviews filelen maxbuf maxtb p)))) 1 0)))
+    0)
