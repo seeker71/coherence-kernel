@@ -129,3 +129,8 @@ The witnessed vector is documented in
   test held-out transfer, and re-orient from the changed recognition floor.
 - `cognition/tests/native-node-ontogenesis-band.fk` — end-to-end admission and
   reversibility witness.
+- `cognition/native-three-round-walk.fk` — sequentially admit, defer, or reject
+  evidence-derived proposals while carrying explicit `[native, local, remote]`
+  routing vectors between rounds.
+- `cognition/tests/native-three-round-walk-band.fk` — three-round source and
+  adjudication replay.
