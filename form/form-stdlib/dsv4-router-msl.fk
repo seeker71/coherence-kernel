@@ -1,0 +1,112 @@
+; dsv4-router-msl.fk — the DeepSeek-V4-Flash routed-MoE ROUTER, lifted to a Metal kernel the BODY emits.
+;
+; WHY THIS EXISTS, AND WHAT IS NEW. Stone 26 proved the whole first-token forward on the CPU
+; (dsv4-forward.fk, band dsv4-forward-band.fk = 63), against an independent fp64 transcription of ds4.c.
+; Stone 27 put MLA attention on the GPU. The one piece of the FFN half that no prior GPU cell computes is
+; the routed Mixture-of-Experts, and its heart is a router unlike Mixtral's. dolphin-mixtral (moe-msl.fk /
+; mm-route-msl) routes by a plain softmax over the logits, top-k, renormalize. DeepSeek-V4-Flash does NOT:
+;
+;   probs[i] = sqrt(softplus(logit[i]))                        (ds4.c:10588  — UNbiased)
+;   selection = top-k over (probs[i] + exp_probs_b[i])          (ds4.c:10665  — bias enters SELECTION)
+;   weight[j] = probs[sel[j]]  (the UNbiased prob, NOT the biased score)   (bias-in / weight-out)
+;   s = max(sum weight, 2^-14) ;  weight[j] *= wscale / s       (ds4.c:10697  — routed_scale over the floor)
+;
+; THE ASYMMETRY IS LOAD-BEARING. The bias steers WHICH experts fire; the UNbiased prob sets HOW MUCH each
+; fires. Weight by the biased score instead and the fold changes — the band's falsifier flips exactly that
+; and must break (dr-weights-biased? below). `snugcause`: a router tested on one logit pattern where bias
+; changes nothing witnesses nothing; the band uses a pattern where the bias REORDERS the top-k.
+;
+; THE SLOT (asktoll). The router is ONE THREAD. Over ne experts it is a serial scan: max-free argmax
+; repeated nused times. `boundborrow`: ds4 targets a GB10 and carries a bitonic argsort (metal/argsort.metal)
+; because it routes top-k over 256 experts and wants the GPU's lanes; but the DECISION is one token's, the
+; experts are read from the config (n_expert / n_expert_used — established, not assumed), and a serial scan
+; over ne<=256 in one thread is EXACT with no threadgroup memory, no barrier, no epsilon. The sort is a
+; speed answer to a problem the stone does not have yet (toy correctness first); it is named as the residency
+; upgrade, not imported. The fixed-size arrays cap ne<=256 and nused<=8; above that the kernel WRITES NOTHING
+; (the aporon overrun becomes a refusal, not a silent stomp).
+;
+; edgedrop / zerobirth. An all-zero logits buffer argmaxes to expert 0 with score 0 — indistinguishable from
+; a kernel that never ran. So the GPU gate (metal_moe_gpu.sh gate 0) sentinels the output and demands a real
+; dispatch overwrote it; the band demands the selected weights are NONZERO and the probs sum sanely.
+;
+; THE DETERMINISM DISCIPLINE, carried onto the GPU (as in mla-msl.fk). The kernel does NOT call metal::exp,
+; metal::log, metal::sqrt. It calls the dm_ spine (dsv4-moe-msl.fk), which transcribes THIS body's own
+; tn-exp (14-term Taylor, argument halving), fln (atanh series over the reduced mantissa), and tn-sqrt
+; (50-iter Newton). So the only gap between this body's fp64 answer and the GPU's f32 answer is the working
+; precision, not a different approximation — the gate is a derived f32 bound (selfgauge), not a vendor
+; tolerance. This file emits NO spine of its own; it is a fragment the dsv4-moe-msl.fk unit concatenates, so
+; it can never double-define dm_exp/dm_ln/dm_sqrt.
+;
+; THE RADIUS (aporon) — read before the gate.
+;   * NOT bit-exact (f32 vs fp64 over transcendentals); NOT the real dims (toy ne=4 nused=2; V4-Flash is
+;     256 experts top-8); NOT the quantised expert weights (this router consumes f32 logits — the gate_inp
+;     matvec that PRODUCES the logits is the ordinary matvec, judged separately). NOT the argsort-on-GPU
+;     residency upgrade a 256-expert real token wants. This is the router DECISION, on the GPU, once, at toy
+;     width, bit-close to the proven CPU recipe.
+;   * The top-k ORDER matters for the downstream accumulation fold: dsv4-topk conses head-first, so `sel` is
+;     consumed 2nd-best-first. This kernel writes ids[] in that SAME order ( dr-order-note below), so the
+;     expert-sum association matches the recipe and the closeness is not an order artefact.
+;
+; Kin: dsv4-forward.fk (dsv4-probs / dsv4-topk / dsv4-gather / dsv4-routed-moe — the fp64 recipe this equals),
+; dsv4-moe-msl.fk (the dm_ spine and the clamped-SwiGLU fold this routes into; it owns the unit and appends
+; this fragment), moe-msl.fk / mm-route-msl (Mixtral's plainer router — the shape this is NOT), mla-msl.fk
+; (the emit idiom, the slot discipline, the read-back-into-Form gate, the no-using-namespace rule).
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/transformer-block.fk form-stdlib/dsv4-forward.fk
+;
+; Proven by: form-stdlib/tests/dsv4-moe-msl-band.fk (the routing meaning read back into Form, pinned, with
+;            the bias-asymmetry falsifier) and form/native/metal/metal_moe_gpu.sh (the GPU, Mac-only).
+
+(do
+    ; ================= the routing meaning, read back into Form =================
+    ; What form_dsv4_router_f32 computes, in Form, in the recipe's order of operations, so the band can
+    ; falsify the transcription without a GPU. These mirror dsv4-forward.fk's dsv4-probs / dsv4-topk /
+    ; dsv4-gather EXACTLY (same folds, same tie rule, same floor); the band asserts they agree with the
+    ; proven recipe AND that the bias-in/weight-out asymmetry is the thing that carries the answer.
+
+    (defn dr-floor () 0.00006103515625)                     ; 2^-14, ds4's routed-weight sum floor
+
+    ; probs[i] = sqrt(softplus(logit[i])) — UNbiased. Identical to dsv4-probs.
+    (defn dr-probs (logits) (dsv4-probs logits))
+
+    ; selection score = probs + bias; top-k over it (repeated argmax, strict > keeps the earlier index).
+    ; Identical to (dsv4-topk (tb-vec-add probs bias) k). Returns sel in the recipe's cons order
+    ; (2nd-best at head) so the downstream fold order is preserved. (dr-order-note)
+    (defn dr-select (probs bias k) (dsv4-topk (tb-vec-add probs bias) k))
+
+    ; weight[j] = probs[sel[j]]  — the UNbiased prob at the selected index (NOT probs+bias), then
+    ; scaled by wscale over the floored sum. Identical to dsv4-routed-moe's ews.
+    (defn dr-weights (probs bias k wscale)
+        (do (let sel (dr-select probs bias k))
+            (let ewraw (dsv4-gather probs sel))
+            (let s0 (tn-sum ewraw))
+            (let s (if (lt s0 (dr-floor)) (dr-floor) s0))
+            (tn-scale ewraw (div wscale s))))
+
+    ; THE FALSIFIER, in Form: weight by the BIASED score instead of the unbiased prob. This is what a
+    ; kernel that read `score` where it should read `probs` would compute. The band asserts it DIFFERS
+    ; from dr-weights on the witness pattern — if it did not, the asymmetry would be decorative.
+    (defn dr-weights-biased (probs bias k wscale)
+        (do (let scored (tb-vec-add probs bias))
+            (let sel (dsv4-topk scored k))
+            (let ewraw (dsv4-gather scored sel))
+            (let s0 (tn-sum ewraw))
+            (let s (if (lt s0 (dr-floor)) (dr-floor) s0))
+            (tn-scale ewraw (div wscale s))))
+
+    ; ================= the emitted MSL =================
+    ; ONE thread. logits and bias are ne floats each (the gate_inp matvec already produced logits). The
+    ; kernel writes ids[nused] (uint) and wts[nused] (float). ne>256 or nused>8 or nused>ne writes NOTHING
+    ; (a fixed-size array overrun refuses instead of stomping). The dm_ spine (dm_exp/dm_ln/dm_sqrt) is
+    ; provided by the enclosing unit; this fragment defines no spine and can never double-define it.
+
+    (defn dsv4-router-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* logits [[buffer(0)]], device const float* bias [[buffer(1)]], device uint* ids [[buffer(2)]], device float* wts [[buffer(3)]], constant uint& ne [[buffer(4)]], constant uint& nused [[buffer(5)]], constant float& wscale [[buffer(6)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; if (ne > 256u) return; if (nused > 8u) return; if (nused > ne) return; float probs[256]; float score[256]; float taken[256]; uint pick[8]; for (uint i = 0u; i < ne; ++i) { float sp = dm_ln(1.0f + dm_exp(logits[i])); float p = dm_sqrt(sp); probs[i] = p; score[i] = p + bias[i]; taken[i] = 0.0f; } for (uint k = 0u; k < nused; ++k) { uint best = ne; float bv = -1.0e30f; for (uint i = 0u; i < ne; ++i) { if (taken[i] == 0.0f) { if (score[i] > bv) { bv = score[i]; best = i; } } } taken[best] = 1.0f; pick[k] = best; } float s0 = 0.0f; for (uint k = 0u; k < nused; ++k) { s0 = s0 + probs[pick[k]]; } float s = (s0 < 0.00006103515625f) ? 0.00006103515625f : s0; float sc = wscale / s; for (uint j = 0u; j < nused; ++j) { uint src = nused - 1u - j; ids[j] = pick[src]; wts[j] = probs[pick[src]] * sc; } }")))
+    ; dr-order-note: pick[0..k-1] is selection order (pick[0] = global best). The recipe's dsv4-topk conses
+    ; head-first, so sel is consumed 2nd-best-first: ids[j] = pick[nused-1-j]. wts[j] pairs with ids[j]. The
+    ; floored-sum scale sc is order-independent (a sum), so only the WRITE order is reversed, matching the
+    ; downstream expert-accumulation fold bit-for-bit.
+
+    0)
