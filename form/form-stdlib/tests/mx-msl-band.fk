@@ -1,0 +1,203 @@
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/mxfp4-plane-dequant.fk form-stdlib/mxfp8-plane-dequant.fk form-stdlib/mxfp4-msl.fk form-stdlib/mxfp8-msl.fk
+;
+; PROOF LEVEL: TWO-ARM (fkwu + go), for mx-plane-band.fk's reason and no other: the fixtures are BINARY
+; and read_file_slice is UTF-8-lossy on the rust and ts arms, which hand back a different file. The
+; arithmetic under test travels four ways (fd-value and fq-pow2 are four-way proven already); the byte
+; DOOR does not, and this band will not launder that into a four-way row.
+;
+; mx-msl-band — what the MX GPU kernels' correctness actually rests on, proven before any GPU runs.
+;
+; mxfp4-msl.fk and mxfp8-msl.fk emit Metal source that dequantizes GGUF types 40 and 41 on the device.
+; Nothing about that text is checked by the Metal compiler beyond syntax: a plane base at nel instead of
+; nel/2, a nibble half swapped, an E8M0 bias of 128 instead of 127 — all compile, all run, and all
+; produce plausible-looking weights. And the failure has the aporon shape (corpus row 826): if the
+; emitted C and the reference were transcribed from the same head at the same hour, a GPU-vs-CPU
+; comparison agrees and proves nothing.
+;
+; So the emitted arithmetic is read BACK into Form — mx4m-flat-at / mx8m-flat-at, the same integer
+; identities, the same plane bases, the same staged power of two the C runs — and this band demands it
+; equal mxp4-at / mxp8-at, which mxfp4-plane-dequant.fk and mxfp8-plane-dequant.fk wrote INDEPENDENTLY:
+; they route both value maps through f16-decode.fk's general (eb, mb) decoder and take their scale from
+; fq-pow2's recursive doubling, while the transcription open-codes the field extraction and walks a
+; staged 2^8 loop. Two derivations, the same real bytes, demanded equal at every element.
+;
+; WHAT THIS BAND DOES NOT SPEAK FOR — its radius, named before the gates.
+;   * It speaks for the TRANSCRIPTION only. It does not speak for the MSL compiler, the GPU, or the
+;     residency: that is form/native/metal/metal_mx_gpu.sh, which closes the loop bit-exactly on real
+;     bytes at BOTH ends of a 8 388 608-element slice of blk.0.ffn_gate_exps.weight.
+;   * It does NOT widen Stone 15's evidence grades by one word. The GEOMETRY is STRUCTURAL and
+;     statistically corroborated, not bit-exact against an independent implementation, because no
+;     independent implementation of either type exists anywhere. Agreement between two of this body's own
+;     readings of the same hypothesis is not an oracle for that hypothesis.
+;   * The type-40 NIBBLE ORDER is UNPROVEN and no gate here tests it. mx4m-flat-at transcribes
+;     mxp4-code's even-low/odd-high hypothesis unchanged, so both sides of gate 4 would move together
+;     under the alternative. Named so that a green 511 cannot be misread as settling it.
+;
+; THE FIXTURES are mx-plane-band.fk's, unchanged and re-used deliberately — the same 544 and 1056 real
+; bytes that band already pinned against an independent transcription of the format specifications.
+;
+; Verdict 511 when the transcriptions are honest:
+;   1    the fixture windows are what they claim, and the slot-map widths are admissible
+;   2    the staged power of two IS fq-pow2, over the WHOLE E8M0 range (all 255 exponents) and at both
+;        arms of each type's exactness wall — the only wall an E8M0 byte can actually reach is the
+;        CEILING (e >= 253 for type 40, e >= 246 for type 41); the floor is unreachable by a byte
+;   4    type 40: the transcription equals the carver at ALL 1024 real weights, bit for bit
+;   8    type 41: likewise, all 1024
+;   16   the SLOT MAP lands on exactly the bytes the flat reach does — every (group, byte, half)
+;        position of two full rows, both types, scale byte and payload byte, position by position
+;   32   both dequant kernel texts are complete    (each opens with its helper spine and is longer)
+;   64   both matvec kernel texts are complete     (same)
+;   128  ONE mxm_ spine: the combined two-type unit is exactly spine + 4 helpers + 4 bodies, and both
+;        types' self-contained forms open with the identical spine byte for byte
+;   256  the walls and the declared deviations hold, and the fixtures do not exercise them
+(do
+    ; ---- agreement between the emitted transcription and the independently written carver ----
+    (defn mxq-agree4 (src nel i n)
+        (if (ge i n) 1
+            (if (eq (mx4m-flat-at src 0 nel i) (mxp4-at src 0 nel i))
+                (mxq-agree4 src nel (add i 1) n) 0)))
+    (defn mxq-agree8 (src nel i n)
+        (if (ge i n) 1
+            (if (eq (mx8m-flat-at src 0 nel i) (mxp8-at src 0 nel i))
+                (mxq-agree8 src nel (add i 1) n) 0)))
+
+    ; ---- the staged power of two against fq-pow2, exponent by exponent ----
+    (defn mxq-pow2-walk (e hi)
+        (if (gt e hi) 1
+            (if (eq (mxm-pow2 e) (fq-pow2 e)) (mxq-pow2-walk (add e 1) hi) 0)))
+
+    ; ---- the slot map: does (row, group, byte, half) read the same bytes the flat reach reads? ----
+    (defn mxq-slot4-h (nel r cols g m h)
+        (do
+            (let idx (mx4m-slot-pos r cols g m h))
+            (if (eq (mx4m-pay-read r cols g m) (div idx 2))
+                (if (eq (mx4m-scale-read nel r cols g) (add (div nel 2) (div idx 32))) 1 0) 0)))
+    (defn mxq-slot4-m (nel r cols g m)
+        (if (ge m 16) 1
+            (if (eq (mxq-slot4-h nel r cols g m 0) 1)
+                (if (eq (mxq-slot4-h nel r cols g m 1) 1)
+                    (mxq-slot4-m nel r cols g (add m 1)) 0) 0)))
+    (defn mxq-slot4-g (nel r cols g)
+        (if (ge g (mx4m-groups cols)) 1
+            (if (eq (mxq-slot4-m nel r cols g 0) 1) (mxq-slot4-g nel r cols (add g 1)) 0)))
+    (defn mxq-slot4-r (nel r rows cols)
+        (if (ge r rows) 1
+            (if (eq (mxq-slot4-g nel r cols 0) 1) (mxq-slot4-r nel (add r 1) rows cols) 0)))
+
+    (defn mxq-slot8-m (nel r cols g m)
+        (if (ge m 32) 1
+            (do
+                (let idx (add (mul r cols) (add (mul g 32) m)))
+                (if (eq (mx8m-pay-read r cols g m) idx)
+                    (if (eq (mx8m-scale-read nel r cols g) (add nel (div idx 32)))
+                        (mxq-slot8-m nel r cols g (add m 1)) 0) 0))))
+    (defn mxq-slot8-g (nel r cols g)
+        (if (ge g (mx4m-groups cols)) 1
+            (if (eq (mxq-slot8-m nel r cols g 0) 1) (mxq-slot8-g nel r cols (add g 1)) 0)))
+    (defn mxq-slot8-r (nel r rows cols)
+        (if (ge r rows) 1
+            (if (eq (mxq-slot8-g nel r cols 0) 1) (mxq-slot8-r nel (add r 1) rows cols) 0)))
+
+    ; ---- no scale byte in a fixture is E8M0's NaN, and no type-41 code is one of OCP's two ----
+    (defn mxq-eok (src sbase i n)
+        (if (ge i n) 1
+            (if (eq (mx4m-e-ok? (eqr-at src (add sbase i))) 1) (mxq-eok src sbase (add i 1) n) 0)))
+    (defn mxq-cok (src i n)
+        (if (ge i n) 1
+            (if (eq (mx8m-code-ok? (eqr-at src i)) 1) (mxq-cok src (add i 1) n) 0)))
+
+    ; does `s` open with `p`, byte for byte?
+    (defn mxq-opens-with (s p)
+        (if (lt (str_len s) (str_len p)) 0
+            (if (str_eq (substring s 0 (str_len p)) p) 1 0)))
+
+    ; fixture paths resolve from the repo root AND from form/ (the dual-path pattern)
+    (let s4 (do (let __a (eqr-of-file "form/form-stdlib/tests/fixtures/mxfp4-plane-1024.bin" 0 544))
+                  (if (eq (eqr-len __a) 544) __a
+                      (eqr-of-file "form-stdlib/tests/fixtures/mxfp4-plane-1024.bin" 0 544))))
+    (let s8 (do (let __b (eqr-of-file "form/form-stdlib/tests/fixtures/mxfp8-plane-1024.bin" 0 1056))
+                  (if (eq (eqr-len __b) 1056) __b
+                      (eqr-of-file "form-stdlib/tests/fixtures/mxfp8-plane-1024.bin" 0 1056))))
+
+    (let h4 (mx4m-msl-helpers))
+    (let h8 (mx8m-msl-helpers))
+    (let sp (mxm-msl-spine))
+    (let d4 (mx4m-dequant-msl "form_mxfp4_dequant_f32"))
+    (let v4 (mx4m-matvec-msl  "form_mxfp4_matvec_slot_f32"))
+    (let d8 (mx8m-dequant-msl "form_mxfp8_dequant_f32"))
+    (let v8 (mx8m-matvec-msl  "form_mxfp8_matvec_slot_f32"))
+
+    ; --- 1: the windows are the fixtures, and the slot widths this band uses are admissible ---
+    (let c0 (if (eq (eqr-len s4) 544)
+            (if (eq (eqr-len s8) 1056)
+            (if (eq (mx4m-admissible? 512) 1)
+            (if (eq (mx4m-admissible? 4096) 1)
+            (if (eq (mx4m-admissible? 48) 0)
+            (if (eq (mx8m-admissible? 512) 1)
+            (if (eq (mx4m-groups 512) 16) 1 0) 0) 0) 0) 0) 0) 0))
+
+    ; --- 2: the staged 2^8 walk IS fq-pow2, over every E8M0 exponent and at the exactness walls ---
+    (let c1 (if (eq (mxq-pow2-walk (sub 0 127) 127) 1)
+            (if (eq (mxm-e8m0 127) 1.0)
+            (if (eq (mxm-e8m0 120) (fq-pow2 (sub 0 7)))
+            (if (eq (mx4m-e-safe? 254) 0)
+            (if (eq (mx4m-e-safe? 0) 1)
+            (if (eq (mx8m-e-safe? 254) 0)
+            (if (eq (mx8m-e-safe? 115) 1) 2 0) 0) 0) 0) 0) 0) 0))
+
+    ; --- 4: type 40, every one of the 1024 real weights, two independent readings, no epsilon ---
+    (let c2 (if (eq (mxq-agree4 s4 1024 0 1024) 1)
+            (if (eq (mx4m-flat-at s4 0 1024 0) (mxp4-at s4 0 1024 0)) 4 0) 0))
+
+    ; --- 8: type 41, likewise ---
+    (let c3 (if (eq (mxq-agree8 s8 1024 0 1024) 1)
+            (if (eq (mx8m-flat-at s8 0 1024 1023) (mxp8-at s8 0 1024 1023)) 8 0) 0))
+
+    ; --- 16: the slot map reads the same bytes the flat reach does, every position of two full rows.
+    ; 1024 elements as 2 rows of 512: 16 groups per row, 16 payload bytes (type 40) or 32 (type 41)
+    ; per group. If a group could straddle a row boundary this is where it would show. ---
+    (let c4 (if (eq (mxq-slot4-r 1024 0 2 512) 1)
+            (if (eq (mxq-slot8-r 1024 0 2 512) 1)
+            (if (eq (mx4m-g0 1 512) 16)
+            (if (eq (mx4m-g0 0 512) 0) 16 0) 0) 0) 0))
+
+    ; --- 32/64: each kernel is its helper spine followed by an actual kernel body ---
+    (let c5 (if (eq (mxq-opens-with d4 h4) 1)
+            (if (gt (str_len d4) (str_len h4))
+            (if (eq (mxq-opens-with d8 h8) 1)
+            (if (gt (str_len d8) (str_len h8)) 32 0) 0) 0) 0))
+    (let c6 (if (eq (mxq-opens-with v4 h4) 1)
+            (if (gt (str_len v4) (str_len h4))
+            (if (eq (mxq-opens-with v8 h8) 1)
+            (if (gt (str_len v8) (str_len h8)) 64 0) 0) 0) 0))
+
+    ; --- 128: ONE mxm_ spine. Both types' helper sets open with the identical spine text, and the
+    ; combined unit a carrier compiles is that spine ONCE followed by the four helpers and the four
+    ; bodies — a repeated `static inline` in one translation unit is a compile error, not a warning. ---
+    (let unit (mxm-msl-unit "form_mxfp4_dequant_f32" "form_mxfp4_matvec_slot_f32"
+                            "form_mxfp8_dequant_f32" "form_mxfp8_matvec_slot_f32"))
+    (let expect (str_concat sp
+                (str_concat (mx4m-msl-val)
+                (str_concat (mx4m-msl-weight)
+                (str_concat (mx8m-msl-val)
+                (str_concat (mx8m-msl-weight)
+                (str_concat (mx4m-dequant-body "form_mxfp4_dequant_f32")
+                (str_concat (mx4m-matvec-body "form_mxfp4_matvec_slot_f32")
+                (str_concat (mx8m-dequant-body "form_mxfp8_dequant_f32")
+                            (mx8m-matvec-body "form_mxfp8_matvec_slot_f32"))))))))))
+    (let c7 (if (str_eq (substring h4 0 (str_len sp)) sp)
+            (if (str_eq (substring h8 0 (str_len sp)) sp)
+            (if (str_eq unit expect) 128 0) 0) 0))
+
+    ; --- 256: the walls and the declared deviations. The E8M0 NaN byte and E4M3's two OCP-NaN codes
+    ; are named on the device side, and NEITHER fixture exercises either — so the deviation is a stated
+    ; boundary of these kernels and not a live disagreement in the bytes they are about to decode. ---
+    (let c8 (if (eq (mx4m-e-ok? 255) 0)
+            (if (eq (mx4m-e-ok? 120) 1)
+            (if (eq (mx8m-code-ok? 127) 0)
+            (if (eq (mx8m-code-ok? 255) 0)
+            (if (eq (mxq-eok s4 512 0 32) 1)
+            (if (eq (mxq-eok s8 1024 0 32) 1)
+            (if (eq (mxq-cok s8 0 1024) 1) 256 0) 0) 0) 0) 0) 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 c8)))))))))
