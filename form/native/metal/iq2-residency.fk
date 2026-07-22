@@ -1,0 +1,93 @@
+; iq2-residency.fk — the body's side of putting GGUF type 16 (IQ2_XXS) on the GPU.
+;
+; WHAT THIS CELL DECIDES, AND THE CARRIER DECIDES NONE OF IT (the dumb-carrier discipline every Metal
+; lane keeps):
+;   1  WHERE THE TENSOR IS, AND ITS BLOCK GEOMETRY. `iqr-emit-info` walks the file's own header, finds a
+;      named type-16 tensor, and prints its absolute data offset, its slice (expert) decomposition, and
+;      the 66-byte/256-element block stride — so the carrier can address the HEAD block and a DISTANT
+;      expert's block without ever computing a geometry itself.
+;   2  WHAT THE WEIGHTS ARE, at a named block. `iqr-emit-block` reads the 66 real bytes at a block offset
+;      out of the live file and streams the 256 f32 weights the CPU carver (iq2xxs-dequant.fk) decodes
+;      from them. That is the reference the GPU is judged against — bit for bit, no epsilon (the carver's
+;      §3 exactness: w is an exact f32 product of an f16 d, 0.125, a small odd int and a small mag).
+;   3  THE METAL SOURCE. `iqr-emit-msl` is the mouth of iq2xxs-msl.fk. Not one character of kernel text is
+;      authored here. The IQ2 dequant unit has NO library call, so it needs NO `#include <metal_stdlib>`
+;      at all — the f16 super-scale is decoded by arithmetic (iq2_f16). The unit is emitted bare, and the
+;      carrier compiles exactly what it is handed.
+;
+; THE MOUTH IS THE GO KERNEL (q6k-device-tile.fk's note): `print` renders a float at full precision and
+; fkwu's int_to_str cannot render a float at all. fkwu proves the recipes; the Go kernel speaks weights.
+;
+; THE STREAM (flat, greppable):
+;   INFO <abs> <type> <ndims> <d0> <d1> <d2> <slice-elements> <slices> <slice-bytes> <total-bytes>
+;   BLK <block-file-offset>     then 256 f32 weights, one per line, element 0..255 of that block
+;   MSL ... END                 the Metal source
+;
+; Kin: iq2xxs-msl.fk (the emitted Metal — this cell is its mouth), iq2xxs-dequant.fk (iq2-at — the carver
+; the references come from), equireach-gguf.fk (egg-find-tensor / egg-data-base — the tensor locator),
+; mx-residency.fk (the type-40/41 twin this mirrors, stream shape and all).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/iq2xxs-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/iq2xxs-msl.fk
+;
+; Proven by: form/native/metal/metal_iq2_gpu.sh (Mac-only carrier witness; off-Mac it SKIPs like every
+;            other Metal row in form/native/GPU_GAPS.md). The emitted kernel's arithmetic is proven
+;            separately and without a GPU by form-stdlib/tests/iq2xxs-msl-band.fk.
+
+(do
+    (defn iqr-header-window () 8000000)
+    (defn iqr-align () 32)
+    (defn iqr-line (s) (print s))
+    (defn iqr-num (x) (print x))
+
+    ; ================= 1. the tensor's location and block geometry =================
+    (defn iqr-dimk (src off k) (if (gt (egg-ti-ndims src off) k) (egg-ti-dim src off k) 1))
+    ; one slice (expert) is d0 x d1 elements; a third dimension counts SLICES, it does not widen a slice
+    (defn iqr-nel    (src off) (mul (egg-ti-dim0 src off) (iqr-dimk src off 1)))
+    (defn iqr-slices (src off) (iqr-dimk src off 2))
+    ; IQ2_XXS: 256 elements per 66-byte block, so a slice of nel elements is (nel/256) blocks
+    (defn iqr-slice-bytes (nel) (mul (div nel 256) 66))
+
+    ; join a list of ints as " a b c" and stitch the flat INFO line — no deep str_concat nest to miscount
+    (defn iqr-sp-tail (xs) (if (nil? xs) "" (str_concat " " (str_concat (int_to_str (head xs)) (iqr-sp-tail (tail xs))))))
+    (defn iqr-info-line (xs) (str_concat "INFO" (iqr-sp-tail xs)))
+
+    (defn iqr-emit-info (path name)
+        (do
+            (let hsrc (eqr-of-file path 0 (iqr-header-window)))
+            (let base (egg-data-base hsrc (iqr-align)))
+            (let off  (egg-find-tensor hsrc name))
+            (let abs  (add base (egg-ti-dataoff hsrc off)))
+            (let nel  (iqr-nel hsrc off))
+            (let slices (iqr-slices hsrc off))
+            (let sb   (iqr-slice-bytes nel))
+            (iqr-line (iqr-info-line (list abs (egg-ti-type hsrc off) (egg-ti-ndims hsrc off)
+                (egg-ti-dim0 hsrc off) (iqr-dimk hsrc off 1) (iqr-dimk hsrc off 2)
+                nel slices sb (mul slices sb))))
+            0))
+
+    ; ================= 2. the CPU reference for a 256-weight block at a file offset =================
+    ; Read the 66 real bytes at `blkoff` out of the live file into a Form list, then stream the carver's
+    ; 256 weights. A tiny window per block (66 bytes) — the aporon discipline made cheap.
+    (defn iqr-blk-list (src i n) (if (ge i n) (empty) (cons (eqr-at src i) (iqr-blk-list src (add i 1) n))))
+    (defn iqr-blk-loop (blist i n)
+        (if (ge i n) 0
+            (do (iqr-num (iq2-at blist 0 i)) (iqr-blk-loop blist (add i 1) n))))
+    (defn iqr-emit-block (path blkoff)
+        (do
+            (let src (eqr-of-file path blkoff 66))
+            (let blist (iqr-blk-list src 0 66))
+            (iqr-line (str_concat "BLK " (int_to_str blkoff)))
+            (iqr-blk-loop blist 0 256)
+            0))
+
+    ; ================= 3. the kernel =================
+    ; The IQ2 dequant unit is self-contained (two constant tables + spine + weight fn + the kernel) and
+    ; carries NO library call, so no header leads it — unlike the MX unit, whose fused matvec needed one.
+    (defn iqr-emit-msl ()
+        (do
+            (iqr-line "MSL")
+            (iqr-line (iq2m-dequant-msl "form_iq2xxs_dequant_f32"))
+            (iqr-line "END")
+            0))
+
+    0)
