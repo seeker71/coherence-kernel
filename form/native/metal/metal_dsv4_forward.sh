@@ -118,6 +118,12 @@ GX_STRIDE=$(( GX_BYTES / GX_NEXP ))
 UX_ABS=$(tv blk.0.ffn_up_exps.weight 3); UX_IDX=$(tv blk.0.ffn_up_exps.weight 5); UX_INNER=$(tv blk.0.ffn_up_exps.weight 6); UX_HOLDS=$(tv blk.0.ffn_up_exps.weight 7)
 UX_BYTES=$(tv blk.0.ffn_up_exps.weight 4)
 UX_STRIDE=$(( UX_BYTES / GX_NEXP ))
+# --- ffn_down_exps (routed experts down projection): IQ2_XXS [2048, 4096, 256] ---
+DX_ABS=$(tv blk.0.ffn_down_exps.weight 3); DX_IDX=$(tv blk.0.ffn_down_exps.weight 5); DX_INNER=$(tv blk.0.ffn_down_exps.weight 6); DX_HOLDS=$(tv blk.0.ffn_down_exps.weight 7)
+DX_BYTES=$(tv blk.0.ffn_down_exps.weight 4)
+DX_IN=$(trow blk.0.ffn_down_exps.weight 5); DX_OUT=$(trow blk.0.ffn_down_exps.weight 6)   # d0=in(ff), d1=out(embd)
+DX_STRIDE=$(( DX_BYTES / GX_NEXP ))
+echo "  down_exps:  view=$DX_IDX inner=$DX_INNER holds=$DX_HOLDS  in=$DX_IN out=$DX_OUT stride=$DX_STRIDE"
 
 echo "  embed:      view=$EMB_IDX inner=$EMB_INNER holds=$EMB_HOLDS row_off=$ROW_OFF"
 echo "  router:     view=$RT_IDX inner=$RT_INNER holds=$RT_HOLDS  in=$RT_IN out=$RT_OUT"
@@ -144,6 +150,11 @@ compile_kernel() { # $1=emit-form $2=kernel-name-grep   emits ONLY the lib path 
 }
 LIB_MX4="$(compile_kernel '(dsv4-mx4-matvec-msl)' form_dsv4_mx4_matvec)"
 LIB_RT="$(compile_kernel '(dsv4-router-f16-msl)' form_dsv4_router_f16)"
+LIB_IQ2="$(compile_kernel '(dsv4-iq2-matvec-msl)' form_dsv4_iq2_matvec)"
+# the IQ2_XXS decode tables, from the body's own (iq2-grid)/(iq2-ksigns), for the carrier's CPU reference
+echo '(dsv4-iq2-tables)' > "$work/tbl.fk"
+"$GO_BIN" "${FILES[@]}" "$work/tbl.fk" > "$work/iq2tables.txt" 2>"$work/tbl.err" || { echo "FAIL iq2 tables emit"; cat "$work/tbl.err"; exit 1; }
+grep -q '^GRID ' "$work/iq2tables.txt" && grep -q '^KSIGNS ' "$work/iq2tables.txt" || { echo "FAIL iq2 tables missing"; exit 1; }
 # the embed kernel from dsv4-token.fk (separate prelude set)
 FILES_SAVE=("${FILES[@]}"); FILES=("${EMBFILES[@]}")
 LIB_EMB="$(compile_kernel '(dsv4-embed-msl)' form_dsv4_embed_f16)"
@@ -163,11 +174,24 @@ let rtAbs = I(15), rtIdx = I(16), rtInner = I(17), rtHolds = I(18), rtIn = I(19)
 let htAbs = I(21), nUsed = I(22)
 let gxIdx = I(23), gxInner = I(24), gxHolds = I(25), gxAbs = I(26), gxIn = I(27), gxOut = I(28), gxNel = I(29), gxStride = I(30)
 let uxIdx = I(31), uxInner = I(32), uxHolds = I(33), uxAbs = I(34), uxStride = I(35)
+let libIq2 = a[36], tablesPath = a[37]
+let dxIdx = I(38), dxInner = I(39), dxHolds = I(40), dxAbs = I(41), dxIn = I(42), dxOut = I(43), dxStride = I(44)
+
+// the IQ2_XXS decode tables, loaded from the body's own emit (never hand-copied)
+func loadTable(_ tag: String) -> [Int] {
+    let txt = (try? String(contentsOfFile: tablesPath, encoding: .utf8)) ?? ""
+    for line in txt.split(separator: "\n") where line.hasPrefix(tag + " ") {
+        return line.dropFirst(tag.count + 1).split(separator: ",").map { Int($0)! }
+    }
+    return []
+}
+let IQ2_GRID = loadTable("GRID"), IQ2_KSIGNS = loadTable("KSIGNS")
 
 guard let dev = MTLCreateSystemDefaultDevice() else { print("SKIP no Metal device"); exit(2) }
 let lEmb = try dev.makeLibrary(URL: URL(fileURLWithPath: libEmb))
 let lRt  = try dev.makeLibrary(URL: URL(fileURLWithPath: libRt))
 let lMx4 = try dev.makeLibrary(URL: URL(fileURLWithPath: libMx4))
+let lIq2 = try dev.makeLibrary(URL: URL(fileURLWithPath: libIq2))
 let queue = dev.makeCommandQueue()!
 var failures = 0, gpuErrors = 0
 var gpuFirstError: String? = nil
@@ -293,7 +317,7 @@ print("      router probs of the 6 selected experts \(selected): \(selProbs.map 
 
 // ── the MXFP4 expert gate & up projections at real dims (fed the embedding probe), for expert e0 ──
 func mx4Matvec(_ lib: MTLLibrary, _ vIdx: Int, _ vInner: Int, _ absBase: Int, _ stride: Int, _ e: Int,
-               _ rows: Int, _ cols: Int, _ nel: Int, _ label: String) -> (Float, Int, Int) {
+               _ rows: Int, _ cols: Int, _ nel: Int, _ label: String) -> ([Float], Float, Int, Int) {
     let p = try! dev.makeComputePipelineState(function: lib.makeFunction(name: "form_dsv4_mx4_matvec")!)
     let out = dev.makeBuffer(length: rows * 4, options: .storageModeShared)!
     let op = out.contents().bindMemory(to: Float.self, capacity: rows)
@@ -312,6 +336,7 @@ func mx4Matvec(_ lib: MTLLibrary, _ vIdx: Int, _ vInner: Int, _ absBase: Int, _ 
     let qb = absBase + e * stride
     var maxAbs: Float = 0, nan = 0; var distinct = Set<UInt32>()
     let sbase = nel / 2, ng = cols / 32
+    var gpuVec = [Float](repeating: 0, count: rows)
     for r in 0..<rows {
         var sumf: Float = 0; let g0 = (r * cols) / 32
         for g in 0..<ng {
@@ -321,26 +346,87 @@ func mx4Matvec(_ lib: MTLLibrary, _ vIdx: Int, _ vInner: Int, _ absBase: Int, _ 
                 acc += x[g*32 + m*2] * mx4val(by % 16); acc += x[g*32 + m*2 + 1] * mx4val(by / 16) }
             sumf += s * acc
         }
+        gpuVec[r] = op[r]
         if op[r].isNaN { nan += 1 } else { maxAbs = max(maxAbs, abs(op[r] - sumf)) }
         distinct.insert(op[r].bitPattern)
     }
-    return (maxAbs, nan, distinct.count)
+    return (gpuVec, maxAbs, nan, distinct.count)
 }
-let (gMax, gNan, gDist) = mx4Matvec(lMx4, gxIdx, gxInner, gxAbs, gxStride, e0, gxOut, gxIn, gxNel, "gate")
+let (gateV, gMax, gNan, gDist) = mx4Matvec(lMx4, gxIdx, gxInner, gxAbs, gxStride, e0, gxOut, gxIn, gxNel, "gate")
 check(gNan == 0 && gMax < 5e-3 && gDist > 8 && gpuErrors == 0,
   "gate 5 MXFP4 expert GATE at real dims: the GPU fused MXFP4 decode+matvec of ffn_gate_exps[expert \(e0)] (\(gxOut)x\(gxIn)) through view \(gxIdx) at the expert's byte slice agrees with the carrier's independent CPU MXFP4 carve to float precision (max abs diff \(gMax), \(gDist) distinct). Type 40 at real dims through the views (new beyond Stone 33's type 41). assocwall: simd_sum reassociates, so agreement is to float precision, not bit.",
   "gate 5 MXFP4 gate: max abs \(gMax) or \(gNan) NaN — dead/wrong read")
-let (uMax, uNan, uDist) = mx4Matvec(lMx4, uxIdx, uxInner, uxAbs, uxStride, e0, gxOut, gxIn, gxNel, "up")
+let (upV, uMax, uNan, uDist) = mx4Matvec(lMx4, uxIdx, uxInner, uxAbs, uxStride, e0, gxOut, gxIn, gxNel, "up")
 check(uNan == 0 && uMax < 5e-3 && uDist > 8 && gpuErrors == 0,
   "gate 6 MXFP4 expert UP at real dims: the GPU fused MXFP4 decode+matvec of ffn_up_exps[expert \(e0)] (\(gxOut)x\(gxIn)) through view \(uxIdx) at the expert's slice agrees with the CPU MXFP4 carve to float precision (max abs diff \(uMax), \(uDist) distinct).",
   "gate 6 MXFP4 up: max abs \(uMax) or \(uNan) NaN — dead/wrong read")
+
+// ── the SwiGLU mid, a real expert-\(e0) activation, fed to the IQ2 DOWN projection ──
+// ds4.c:10430 swiglu: mid = silu(gate) * up  (the clamp is disabled when swiglu_clamp_exp <= 1e-6; it is
+// applied elementwise to the SAME input the CPU reference uses, so omitting it here cannot make the down
+// matvec agree falsely — it only changes the shared probe vector). silu(z) = z * sigmoid(z).
+func silu(_ z: Float) -> Float { return z / (1.0 + exp(-z)) }
+let midbuf = dev.makeBuffer(length: dxIn * 4, options: .storageModeShared)!
+let midp = midbuf.contents().bindMemory(to: Float.self, capacity: dxIn)
+var mid = [Float](repeating: 0, count: dxIn)
+for i in 0..<dxIn { let m = silu(gateV[i]) * upV[i]; mid[i] = m; midp[i] = m }
+
+// independent CPU IQ2_XXS decode (iq2xxs-msl.fk's iq2_w, ported; SAME body-emitted grid/ksigns)
+func iq2w(_ qb: Int, _ idx: Int) -> Float {
+    let blk = idx / 256, within = idx - blk*256, off = qb + blk*66
+    let hbits = Int(base[off]) + 256*Int(base[off+1]); let d = f16(UInt16(hbits & 0xFFFF))
+    let ib32 = within/32, rem = within - ib32*32, l = rem/8, j = rem - l*8
+    let gbase = off + 2 + 8*ib32
+    let gidx = Int(base[gbase + l])
+    let aux1 = Int(base[gbase+4]) + 256*Int(base[gbase+5]) + 65536*Int(base[gbase+6]) + 16777216*Int(base[gbase+7])
+    let scalecode = Int(base[gbase+7]) / 16
+    let scale = 0.125 * d * Float(2*scalecode + 1)
+    let signidx = (aux1 / (1 << (7*l))) % 128
+    let signs = IQ2_KSIGNS[signidx]
+    let sbit = (signs / (1 << j)) % 2
+    let sgn: Float = (sbit == 1) ? -1.0 : 1.0
+    let mag = IQ2_GRID[gidx*8 + j]
+    return (scale * sgn) * Float(mag)
+}
+// ── GATE 7: the IQ2_XXS DOWN projection at real dims — the fused matvec iq2xxs-msl.fk named as the gap ──
+check(dxHolds == 1,
+  "gate 7a residency: ffn_down_exps lies wholly inside view \(dxIdx) (holds=1)",
+  "gate 7a ffn_down_exps spans views (holds=\(dxHolds))")
+let pIq2 = try dev.makeComputePipelineState(function: lIq2.makeFunction(name: "form_dsv4_iq2_matvec")!)
+let downOut = dev.makeBuffer(length: dxOut * 4, options: .storageModeShared)!
+let dop = downOut.contents().bindMemory(to: Float.self, capacity: dxOut)
+for i in 0..<dxOut { dop[i] = Float.nan }   // sentinel
+var dr = UInt32(dxOut), dc = UInt32(dxIn)
+do { let cb = queue.makeCommandBuffer()!, enc = cb.makeComputeCommandEncoder()!
+     enc.setComputePipelineState(pIq2)
+     enc.setBuffer(views[dxIdx], offset: dxInner + e0 * dxStride, index: 0)   // expert e0's block-0 base
+     enc.setBuffer(midbuf, offset: 0, index: 1); enc.setBuffer(downOut, offset: 0, index: 2)
+     enc.setBytes(&dr, length: 4, index: 3); enc.setBytes(&dc, length: 4, index: 4)
+     enc.dispatchThreads(MTLSize(width: dxOut * 32, height: 1, depth: 1), threadsPerThreadgroup: MTLSize(width: min(pIq2.maxTotalThreadsPerThreadgroup,256), height: 1, depth: 1))
+     enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+     if let er = cb.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(er)" } }
+     if cb.status != .completed { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "down cb \(cb.status.rawValue)" } } }
+// CPU reference: independent IQ2 carve of expert e0's down slice, matvec against the SAME mid vector.
+let dqb = dxAbs + e0 * dxStride
+var dMax: Float = 0, dNan = 0; var dDistinct = Set<UInt32>()
+for r in 0..<dxOut {
+    var acc: Float = 0; let rbase = r * dxIn
+    for j in 0..<dxIn { acc += iq2w(dqb, rbase + j) * mid[j] }
+    if dop[r].isNaN { dNan += 1 } else { dMax = max(dMax, abs(dop[r] - acc)) }
+    dDistinct.insert(dop[r].bitPattern)
+}
+check(dNan == 0 && dMax < 5e-3 && dDistinct.count > 8 && gpuErrors == 0,
+  "gate 7 IQ2_XXS DOWN matvec at real dims: the GPU FUSED IQ2_XXS decode+matvec of ffn_down_exps[expert \(e0)] (\(dxOut)x\(dxIn)) through view \(dxIdx), fed the real SwiGLU mid of expert \(e0), agrees with the carrier's independent CPU IQ2 carve (iq2xxs-msl.fk's iq2_w, same body-emitted grid) to float precision (max abs diff \(dMax), \(dDistinct.count) distinct). Type 16 at real dims — and the FUSED matvec iq2xxs-msl.fk had named as the missing piece the MoE fold needs, now built.",
+  "gate 7 IQ2 down: max abs \(dMax) or \(dNan) NaN — dead/wrong read")
+print(String(format: "      expert %d full SwiGLU contribution (down.mid): out[0..3] = %.5f %.5f %.5f %.5f",
+      e0, dop[0], dop[1], dop[2], dop[3]))
 
 if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(gpuFirstError ?? "unknown") ===") }
 print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — the 85 GiB is mmapped + wrapped bytesNoCopy, not copied (onelean); working buffers are tiny",
       dev.currentAllocatedSize, Double(dev.currentAllocatedSize)/1073741824.0))
 
 let ok = failures == 0 && gpuErrors == 0
-if ok { print("VERDICT PASS  7 gates — the DeepSeek-V4-Flash forward MIDDLE at real dims: embed probe (bit-exact) + layer-0 hash routing (exact I32 table) + router F16 matvec + MXFP4 expert gate & up matvecs, all through the windowed views. The expert down projection (IQ2_XXS, type 16) has no fused matvec kernel yet — the named blocker to a whole token.") }
+if ok { print("VERDICT PASS  8 gates — the DeepSeek-V4-Flash forward MIDDLE at real dims: embed probe (bit-exact) + layer-0 hash routing (exact I32 table) + router F16 matvec + a full routed-expert SwiGLU (MXFP4 gate & up + IQ2_XXS down), all through the windowed views. Types 40 and 16 fused matvecs at real dims are new beyond Stone 33; the IQ2_XXS FUSED matvec is the piece iq2xxs-msl.fk named as missing, now built. Still pending for a whole token: the MLA attention block (all MXFP8 matvecs + sinks + RoPE + grouped output), HC pre/post on-GPU, real routing input, and the 43-layer stack — named in the receipt.") }
 else { print("VERDICT FAIL  \(failures) gate(s), \(gpuErrors) cb errors") }
 exit(ok ? 0 : 1)
 SWIFT
@@ -352,6 +438,8 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "
     "$RT_ABS" "$RT_IDX" "$RT_INNER" "$RT_HOLDS" "$RT_IN" "$RT_OUT" \
     "$HT_ABS" "$N_USED" \
     "$GX_IDX" "$GX_INNER" "$GX_HOLDS" "$GX_ABS" "$GX_IN" "$GX_OUT" "$GX_NEL" "$GX_STRIDE" \
-    "$UX_IDX" "$UX_INNER" "$UX_HOLDS" "$UX_ABS" "$UX_STRIDE"
+    "$UX_IDX" "$UX_INNER" "$UX_HOLDS" "$UX_ABS" "$UX_STRIDE" \
+    "$LIB_IQ2" "$work/iq2tables.txt" \
+    "$DX_IDX" "$DX_INNER" "$DX_HOLDS" "$DX_ABS" "$DX_IN" "$DX_OUT" "$DX_STRIDE"
 rc=$?
 exit $rc
