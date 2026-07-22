@@ -1,0 +1,186 @@
+; dsv4-kv-cache.fk — STONE 41, part 1: the thing that makes a SECOND token cheaper than the first.
+;
+; MLA's cache is one latent row per token per layer. Not per-head K and per-head V — ONE row, shared by
+; every head, and it is BOTH the key and the value (ds4.c:10305 reads the same row as the dot operand and
+; as the accumulated value; mla-attn.fk's radius says the same). V4-Flash absorbed attn_kv_b into the
+; output path, so there is no up-projection to cache either. At the real dims that is 512 floats per
+; token per layer, against a GQA model's 2 * n_kv_head * head_dim.
+;
+; THE SEAM THIS CELL EXISTS FOR, named exactly, because it is already standing:
+;   form-stdlib/mla-msl.fk's `form_mla_attend_f32` takes
+;       (device const float* q, device const float* rows, device float* out, device const float* sinks,
+;        uint nh, uint hd, uint nrows, float scale)
+;   and metal_dsv4_layer_join.sh binds nrows = 1 — one token, one row. A decode loop is EXACTLY that
+;   binding with `rows` pointing at a growing arena and nrows = pos+1. Nothing in the attention kernel
+;   changes. What has to exist is the arena, its append, and a proof that appending never disturbs what
+;   is already in it.
+;
+; WHAT GOES IN A ROW is the ROUNDED latent, not the raw one: metal_dsv4_layer_join.sh's mlaBlock does
+;   kl -> kln -> kr = rope(kln) -> kq = form_dsv4_kv_fp8_f16_round(kr) -> attend(qr, kq)
+; so the cached row is E4M3-per-64-block on the non-rotated part and f16 across the whole row. The
+; ENCODING is Stone 36/37's, proven there; this cell holds whatever row it is handed and never rounds.
+;
+; THE CLASSIC SILENT DECODE BUG this cell is shaped against: a cache that rewrites history. Prepending
+; instead of appending, or reusing one scratch row for every position, or letting the rope'd row be
+; recomputed at the CURRENT position instead of the one it was written at — each of those produces a
+; cache of exactly the right length, of exactly the right magnitude, with no error anywhere, and answers
+; that drift a little further from right with every token. dkv-history-intact? is the falsifier, and
+; dsv4-kv-cache-band.fk proves the falsifier itself can fail by handing it a deliberately broken append.
+;
+; twinblind (corpus row 868): the cache's SHAPE and GROWTH are canonical — it holds t+1 rows after t+1
+; appends or it does not, and there is one right answer — so a self-check is a real falsifier there.
+; What is NOT canonical, and is therefore NOT claimed here, is where the position index comes from and
+; how prefill batches; those live in dsv4-decode-loop.fk and are answered from ds4.c.
+;
+; APORON — THE DECLARED RADIUS.
+;   * MAX CONTEXT is a parameter, not a constant. The file declares deepseek4.context_length; this cell
+;     takes whatever cap it is given and REFUSES past it.
+;   * AT THE CAP THE APPEND IS REFUSED, not evicted. The cache comes back with its rows untouched and its
+;     refusal counter one higher. There is no sliding window here, because a silent window is the same
+;     class of bug as a rewritten history: right shape, right magnitude, quietly wrong answer. A window,
+;     if this model wants one, is a recipe decision that must be read from the file and proven, and it is
+;     not read and not proven, so it is not written.
+;   * A ROW OF THE WRONG WIDTH IS REFUSED the same way. hd is fixed at construction.
+;   * MEMORY, said in numbers: bytes = tokens * layers * hd * 4. At V4-Flash (43 layers, hd 512, f32)
+;     that is 88 064 B per token: 86 MiB at 1 024 tokens, 344 MiB at 4 096, 5.5 GiB at 65 536 (the file's
+;     n_ctx_orig). dkv-bytes-for says it, so a cap can be chosen with the number in hand.
+;   * This cell is fp32/fp64 lists. It is the SHAPE of the arena and its growth law. It is not the
+;     device buffer; dkv-append-msl-body is the device's half and metal_dsv4_decode.sh witnesses it.
+;   * NOT proven here: that 43 layers' rows are the right rows. That is Stone 39's stack.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/dsv4-kv-cache-band.fk (verdict 511) and native/metal/metal_dsv4_decode.sh.
+
+(do
+    ; ===========================================================================
+    ; the cache value: (cap nlayers hd banks refused)
+    ; banks is a list of nlayers lists of rows, each bank in APPEND ORDER — index i
+    ; is position i. Never reversed, never re-sorted; position IS list index.
+    ; ===========================================================================
+    (defn dkv-banks-new (n) (if (eq n 0) (empty) (cons (empty) (dkv-banks-new (sub n 1)))))
+    (defn dkv-new (cap nl hd) (list cap nl hd (dkv-banks-new nl) 0))
+
+    (defn dkv-cap      (c) (nth c 0))
+    (defn dkv-nlayers  (c) (nth c 1))
+    (defn dkv-hd       (c) (nth c 2))
+    (defn dkv-banks    (c) (nth c 3))
+    (defn dkv-refused  (c) (nth c 4))
+
+    (defn dkv-bank (c l) (nth (dkv-banks c) l))
+    (defn dkv-len  (c l) (len (dkv-bank c l)))
+    (defn dkv-row  (c l i) (nth (dkv-bank c l) i))
+    ; the NEXT position: layer 0's length. Every layer holds one row per token, so
+    ; layer 0 is the token clock. dkv-square? checks that belief instead of assuming it.
+    (defn dkv-pos (c) (dkv-len c 0))
+    (defn dkv-square-loop (c l n)
+        (if (eq l (dkv-nlayers c)) 1
+            (if (eq (dkv-len c l) n) (dkv-square-loop c (add l 1) n) 0)))
+    (defn dkv-square? (c) (dkv-square-loop c 0 (dkv-pos c)))
+
+    ; ===========================================================================
+    ; APPEND. Returns a new cache. Refuses (rows untouched, refused+1) when the bank
+    ; is at cap or the row is the wrong width. A refusal is countable, never silent.
+    ; ===========================================================================
+    (defn dkv-set-nth (xs i v)
+        (if (eq (len xs) 0) (empty)
+            (if (eq i 0) (cons v (tail xs))
+                (cons (head xs) (dkv-set-nth (tail xs) (sub i 1) v)))))
+    (defn dkv-refuse (c) (list (dkv-cap c) (dkv-nlayers c) (dkv-hd c) (dkv-banks c) (add (dkv-refused c) 1)))
+    (defn dkv-accept (c l row)
+        (list (dkv-cap c) (dkv-nlayers c) (dkv-hd c)
+              (dkv-set-nth (dkv-banks c) l (append (dkv-bank c l) (list row)))
+              (dkv-refused c)))
+    (defn dkv-would-accept? (c l row)
+        (if (lt l 0) 0
+            (if (ge l (dkv-nlayers c)) 0
+                (if (ge (dkv-len c l) (dkv-cap c)) 0
+                    (if (eq (len row) (dkv-hd c)) 1 0)))))
+    (defn dkv-append (c l row)
+        (if (eq (dkv-would-accept? c l row) 1) (dkv-accept c l row) (dkv-refuse c)))
+
+    ; ONE STEP's worth: one row per layer, layer order 0..nl-1. `rows` is a list of
+    ; nlayers rows. A short list is a refusal per missing layer, not a short cache.
+    (defn dkv-append-step-loop (c l rows)
+        (if (eq l (dkv-nlayers c)) c
+            (dkv-append-step-loop
+                (dkv-append c l (if (eq (len rows) 0) (empty) (head rows)))
+                (add l 1)
+                (if (eq (len rows) 0) (empty) (tail rows)))))
+    (defn dkv-append-step (c rows) (dkv-append-step-loop c 0 rows))
+
+    ; ===========================================================================
+    ; READ. dkv-bank is the whole of what form_mla_attend_f32 wants — rows in
+    ; position order — and dkv-len is its `nrows`. dkv-read-at is the loop's own
+    ; question: at step t, what does attention see? (t+1 rows, causally exact.)
+    ; ===========================================================================
+    (defn dkv-take (xs n) (if (eq n 0) (empty) (cons (head xs) (dkv-take (tail xs) (sub n 1)))))
+    (defn dkv-read-at (c l t) (dkv-take (dkv-bank c l) (add t 1)))
+    (defn dkv-nrows-at (c l t) (len (dkv-read-at c l t)))
+
+    ; the flat arena, row-major, exactly the bytes a device buffer would hold:
+    ; arena[i*hd + j] = row i, element j. The device's append writes at pos*hd.
+    (defn dkv-cat (a b) (if (eq (len a) 0) b (cons (head a) (dkv-cat (tail a) b))))
+    (defn dkv-flat-loop (rows) (if (eq (len rows) 0) (empty) (dkv-cat (head rows) (dkv-flat-loop (tail rows)))))
+    (defn dkv-flat (c l) (dkv-flat-loop (dkv-bank c l)))
+
+    ; ===========================================================================
+    ; THE FALSIFIER. History is intact when every row the cache held before an
+    ; append is still there, element for element, at the same index. Exact equality
+    ; is the right test and the only honest one: an append is a copy, not a
+    ; computation, so any drift at all is a bug and not a rounding.
+    ; ===========================================================================
+    (defn dkv-vec-eq (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) 1
+                (if (eq (head a) (head b)) (dkv-vec-eq (tail a) (tail b)) 0))
+            0))
+    (defn dkv-rows-eq (as bs)
+        (if (eq (len as) (len bs))
+            (if (eq (len as) 0) 1
+                (if (eq (dkv-vec-eq (head as) (head bs)) 1) (dkv-rows-eq (tail as) (tail bs)) 0))
+            0))
+    ; did `after` keep every row `before` held at layer l, unmoved and unchanged?
+    (defn dkv-history-intact-at? (before after l)
+        (dkv-rows-eq (dkv-bank before l) (dkv-take (dkv-bank after l) (dkv-len before l))))
+    (defn dkv-history-loop (before after l)
+        (if (eq l (dkv-nlayers before)) 1
+            (if (eq (dkv-history-intact-at? before after l) 1) (dkv-history-loop before after (add l 1)) 0)))
+    (defn dkv-history-intact? (before after) (dkv-history-loop before after 0))
+
+    ; grew by exactly one row at every layer, and by no more
+    (defn dkv-grew-by-one-loop (before after l)
+        (if (eq l (dkv-nlayers before)) 1
+            (if (eq (dkv-len after l) (add (dkv-len before l) 1))
+                (dkv-grew-by-one-loop before after (add l 1)) 0)))
+    (defn dkv-grew-by-one? (before after) (dkv-grew-by-one-loop before after 0))
+
+    ; ===========================================================================
+    ; THE RADIUS, in numbers the caller can hold. bytes = tokens * layers * hd * 4.
+    ; ===========================================================================
+    (defn dkv-bytes-per-token (nl hd) (mul (mul nl hd) 4))
+    (defn dkv-bytes-for (tokens nl hd) (mul tokens (dkv-bytes-per-token nl hd)))
+    (defn dkv-headroom (c l) (sub (dkv-cap c) (dkv-len c l)))
+    (defn dkv-full? (c l) (if (ge (dkv-len c l) (dkv-cap c)) 1 0))
+
+    ; ===========================================================================
+    ; THE DEVICE'S HALF. One thread per element of the row; the arena is
+    ; cap*hd floats and the row lands at pos*hd. Past the cap the kernel writes
+    ; NOTHING — an overrun is a refusal the sentinel catches, never a silent stomp
+    ; into position 0 (aporon; the same shape dsv4-stack-real.fk's top-k uses).
+    ; This is the append the CPU dkv-append models, and metal_dsv4_decode.sh gates
+    ; the two against each other element for element.
+    ; ===========================================================================
+    (defn dkv-append-msl-body ()
+        "kernel void form_dkv_append_f32 (device const float* row [[buffer(0)]], device float* arena [[buffer(1)]], constant uint& hd [[buffer(2)]], constant uint& pos [[buffer(3)]], constant uint& cap [[buffer(4)]], uint j [[thread_position_in_grid]]) { if (pos >= cap) return; if (j >= hd) return; arena[pos * hd + j] = row[j]; } ")
+
+    ; the arena's own liveness read: a checksum over the first nrows*hd elements.
+    ; zerobirth/edgedrop — a Metal buffer is born zeroed, so "the cache is all
+    ; zeros" and "the cache was never written" are the same read unless something
+    ; refuses it. The carrier sentinels the arena; this is the body's own version.
+    (defn dkv-sum (xs) (if (eq (len xs) 0) 0.0 (add (head xs) (dkv-sum (tail xs)))))
+    (defn dkv-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn dkv-absmax (xs) (if (eq (len xs) 0) 0.0
+        (do (let r (dkv-absmax (tail xs))) (if (gt (dkv-abs (head xs)) r) (dkv-abs (head xs)) r))))
+    (defn dkv-alive? (c l) (if (gt (dkv-absmax (dkv-flat c l)) 0.0) 1 0))
+    0)

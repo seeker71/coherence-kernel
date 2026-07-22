@@ -11932,11 +11932,113 @@ static void fk_src_reset_compile_state(void) {
     fk_defn_next = 1;
     fk_root = -1;
 }
+/* WHOLE-SOURCE PAREN BALANCE, decided ONCE over the assembled unit.
+ *
+ * Every reader below is permissive by construction: a form's closer is consumed with
+ * `if (pos < len && text[pos] == RPAREN) pos++`, so a form that simply RUNS OUT of text
+ * is auto-closed and evaluated as though the author had written it that way. `(do (add 1 2)`
+ * -- the `(do` never closed -- answered 3 and exited 0. Note the shape: 3 is the RIGHT
+ * answer to the WRONG text, which is exactly why nothing downstream can catch it. Every band
+ * in this body is one `(do ...)` form, so a single missing character anywhere in a band file
+ * yields a plausible verdict that reads green (Stone 41 watched one return 1023 that way, and
+ * the FK_SOURCE_TEXT_CAP comment above records the same family biting once before as the
+ * "N=100 cliff"). It needs no unusual naming -- unlike [unbound-name] or [shadowed-primitive]
+ * it is reachable by a typo.
+ *
+ * fk_src_truncated was declared for precisely this and was never set by anything: a gate that
+ * existed only as a comment. The balance is therefore checked here, over the flattened text
+ * (preludes included, which is why an unbalanced prelude is caught at the root compile), using
+ * the same lexical rules fk_skip_balanced already uses -- `;` runs to end of line, "..." is
+ * opaque to structure and a backslash escape stays inside it.
+ *
+ * Depth going negative is a stray ')'; depth left positive at EOF is an unclosed form, reported
+ * at the '(' that opened it. Either way the program was never fully READ, so there is nothing
+ * for a verdict to be OF -- the same line this stone drew for the unbound read. Set the
+ * unrunnable latch and let both execution doors refuse with a non-zero exit. */
+static void fk_src_check_balance(void) {
+    long long p = 0;
+    long long depth = 0;
+    long long outermost_open = -1;
+    while (p < fk_slen) {
+        char c = fk_srctext[p];
+        if (c == FK_CH_SEMI) {
+            while (p < fk_slen && fk_srctext[p] != FK_CH_LF) {
+                p = p + 1;
+            }
+            continue;
+        }
+        if (c == FK_CH_DQUOTE) {
+            p = p + 1;
+            while (p < fk_slen && fk_srctext[p] != FK_CH_DQUOTE) {
+                if (fk_srctext[p] == FK_CH_BACKSLASH && p + 1 < fk_slen) {
+                    p = p + 1;
+                }
+                p = p + 1;
+            }
+            if (p < fk_slen) {
+                p = p + 1;
+            }
+            continue;
+        }
+        if (c == FK_CH_LPAREN) {
+            if (depth == 0) {
+                outermost_open = p;
+            }
+            depth = depth + 1;
+        } else if (c == FK_CH_RPAREN) {
+            depth = depth - 1;
+            if (depth < 0) {
+                fk_diag(FK_DIAG_ERR, p,
+                        "[unbalanced-source] stray ')' closes a form that was never opened -- "
+                        "the text cannot be read as the program it claims to be, so there is "
+                        "nothing for a verdict to be of. Refusing to run");
+                fk_src_unrunnable = 1;
+                return;
+            }
+        }
+        p = p + 1;
+    }
+    if (depth > 0) {
+        /* THE INPUT ENDED BEFORE THE FORM CLOSED. Named apart from the stray closer above on
+         * purpose: these are different repairs. A stray ')' is code the author got wrong. This
+         * is a stream that STOPPED -- and the reader cannot tell a stream that ENDED from one
+         * that was INTERRUPTED, because the terminator is byte-identical for both (fk_run_src
+         * reads to EOF; fsh-read walks input_byte to a NUL). So a cut pipe and a finished
+         * program arrive looking the same, and the prefix gets evaluated and reported as a
+         * success. That is axiom-5 at the INPUT boundary: `nothing` (the bytes stopped) read as
+         * `0` (the bytes ended) -- the same conflation as a zeroed Metal buffer read as a
+         * computed zero, one layer further out. `edgedrop` is the body's word for it.
+         * fk_src_truncated was declared for exactly "the source was amputated" and was never
+         * once set; this is what it was for, so it is set here and the gate it guards finally
+         * has a meaning. Telling the author the INPUT ended -- rather than that their code is
+         * malformed -- is the difference between "your pipe was cut" and "your code is wrong". */
+        fk_diag(FK_DIAG_ERR, outermost_open >= 0 ? outermost_open : 0,
+                "[input-ended-mid-form] the input ended before this form closed -- %lld open "
+                "paren(s) remain. A stream that STOPPED and a stream that FINISHED end with the "
+                "same terminator, so the prefix would otherwise be read as a whole program: the "
+                "permissive reader auto-closes it and computes the right answer to the wrong "
+                "text. Completion is not the absence of more bytes. Refusing to run",
+                depth);
+        fk_src_truncated = 1;
+        fk_src_unrunnable = 1;
+    }
+}
 static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
                                         const char *sym_path, long long unit_mtime,
                                         const char *source_hash) {
     fk_spos = 0;
     fk_srctext[fk_slen] = 0;
+    fk_src_check_balance();
+    /* Refuse BEFORE the readers touch the text, not after. The parse loop below advances by
+     * consuming forms; on a stray ')' at top level it consumes nothing and does not advance,
+     * so running it over unbalanced text spins (the zero-advance seen 2026-07-18). Diagnosing
+     * and then parsing anyway would trade a silent wrong answer for a silent hang, which is not
+     * a trade. The unit yields the empty program and the execution doors refuse on the latch. */
+    if (fk_src_unrunnable) {
+        fk_fn[0] = fk_smklit(0);
+        fk_fn_count = 1;
+        return;
+    }
     /* stone 4+5: multi-function root logic, preserved */
     fk_prescan_defns();
     /* two-pass: register every top-level defn name+index+arity BEFORE bodies, so forward + mutual
@@ -12481,6 +12583,15 @@ static int fk_run_feval(const char *path) {
     fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;
+    /* twin of fk_src_compile_current_unit's gate: this door parses fk_srctext directly,
+     * so it needs the same balance decision or the meta-eval lane stays permissive.
+     * Same reason as there for deciding BEFORE the readers run: unbalanced text can
+     * spin the top-level loop rather than fail it. */
+    fk_src_check_balance();
+    if (fk_src_unrunnable) {
+        fk_diag_flush();
+        return 1;
+    }
     fk_prescan_defns();
     fk_spos = 0;
     while (1) {

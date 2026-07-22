@@ -1,0 +1,230 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk form-stdlib/dsv4-kv-cache.fk form-stdlib/dsv4-decode-loop.fk
+;
+; dsv4-decode-loop-band — the DeepSeek decode loop (dsv4-decode-loop.fk), Stone 41.
+; Ten claims, verdict 1023 when every one crosses.
+;
+; ---------------------------------------------------------------------------
+; APORON — THE DECLARED RADIUS. Read this before believing the number.
+;
+; WHAT THIS BAND PROVES
+;   That the LOOP is a loop: the step contract holds its shape and refuses a step
+;   that did not visibly happen; the driver's position bookkeeping is real (a driver
+;   that froze pos would be caught); the cache grows by exactly one row per step and
+;   the final row count is the loop's own arithmetic and not a hope; token-major and
+;   layer-major prefill agree exactly; positions >= 1 make RoPE mean something; the
+;   same prompt twice gives the same ids and a different prompt gives different ids;
+;   and the three end conditions fire for the three reasons, with the stop token
+;   NEVER emitted.
+;
+; WHAT IT DOES NOT PROVE, and the evidence class of what it does (twinblind, row 868)
+;   * CANONICAL, self-checkable, no oracle: the cache's growth and immutability, the
+;     step guard, N steps -> N tokens, determinism, prompt-sensitivity, the row-count
+;     arithmetic. One right answer each.
+;   * CHOOSING, rented from ds4.c and NOT self-checkable — the loop would agree with
+;     itself while being wrong at every one of these, so each is transcribed and
+;     cited at its line in dsv4-decode-loop.fk's header: pos starts at prompt->len
+;     (:46530); prefill's logits come from the LAST position (:13782); the stop token
+;     is tested BEFORE emit and never emitted (:37111); the last accepted token is not
+;     fed forward (:37116); argmax breaks ties to the LOWEST index (:36578); prefill
+;     is layer-major (:13631) while decode is token-major (:13606); the embedding
+;     broadcasts into every hc stream (:9764).
+;   * NOT DeepSeek-V4-Flash. The runnable model here is ONE MLA layer at E=4, R=3,
+;     nh=2, hd=4, nrot=2, ng=2, n_hc=1, with a PLAIN RESIDUAL — and V4-Flash has no
+;     plain residual anywhere; its residual stream is the hyper-connection frame.
+;     43 layers, hd 512, the MoE FFN, the HC frames, the real weights: Stone 39's.
+;   * NOT the real head. ds4.c's output_logits_one collapses HC first
+;     (output_hc_head_one); at n_hc = 1 there is nothing to collapse, and
+;     ddl-head-ok? says so rather than letting the head pretend.
+;   * NOT the cache ENCODING (E4M3 + f16 between the rope and the cache write), NOT
+;     YaRN, NOT sampling beyond argmax, NOT a chat template.
+;   * NOT a timing claim. Nothing here is measured in seconds.
+;
+; Claims 1, 2 and 256 exist because a beautiful reading needed a falsifier: that a
+; step which returns the right shape ran (1), that a driver which threads state
+; also threads POSITION (2), and that a loop which counts its tokens right also
+; STOPS right (256).
+; ---------------------------------------------------------------------------
+;
+;   bit    1  THE STEP CONTRACT, AND ITS GUARD: a real step returns hc' of the same
+;             width with the cache one row longer at every layer and ok = 1; a step
+;             that appends nothing is refused (ok = 0) even though its hc' is fine;
+;             a step that appends but returns an all-zero state is refused too —
+;             zerobirth, because a zeroed buffer and an unrun kernel read alike.
+;   bit    2  THE DRIVER THREADS POSITION, not just state: 2 steps through
+;             ddl-run-steps equal two hand-written steps at pos 0 then pos 1, and
+;             DIFFER from two steps both taken at pos 0. A frozen position is the
+;             quietest decode bug there is; this is it, caught.
+;   bit    4  TWO STEPS, TWO ROWS: after two steps over a 2-layer stub every bank
+;             holds exactly 2 rows, in order, and row 0 is untouched.
+;   bit    8  N STEPS PRODUCE N TOKENS: ddl-run over the one-layer MLA model with
+;             n_predict = 5 returns exactly 5 ids, ok = 1, stop reason 1.
+;   bit   16  PREFILL SCHEDULE AGREEMENT: ds4.c prefills LAYER-MAJOR (:13631) and
+;             decodes TOKEN-MAJOR (:13606). Over a 2-layer stub and 3 prompt tokens
+;             the two schedules produce the SAME cache, row for row, and the SAME
+;             final logits. The equivalence is an argument, so it is witnessed.
+;   bit   32  hushfold (corpus row 859) — POSITIONS >= 1 ARE WHY THIS STONE EXISTS:
+;             the same token cached at position 0 and at position 1 gives DIFFERENT
+;             rows, and the position-0 row is EXACTLY the unrotated latent. A
+;             one-position test witnesses neither.
+;   bit   64  DETERMINISM: the same prompt run twice gives identical ids, an
+;             identical row count and an identical final position.
+;   bit  128  PROMPT SENSITIVITY: a different prompt gives different ids. Without
+;             this, claim 64 is also satisfied by a loop that ignores its input.
+;             Said plainly, because it cost a red run: this toy layer has a FIXED
+;             POINT. Whatever token it emits first, it emits forever — argmax of a
+;             one-layer map over invented weights lands in a cycle of length one.
+;             So the second prompt was chosen for a different FIRST token, and the
+;             sequences diverge there. That is a property of the fixture and not of
+;             the loop, and the band would be lying if it hid the reason.
+;   bit  256  THE END CONDITIONS, all three: the stop token is sampled and NOT
+;             emitted (reason 0, and eos is absent from the ids); n_predict ends it
+;             (reason 1); ctx_size ends it (reason 2).
+;   bit  512  THE ROW ARITHMETIC IS EXACT: after a run that ended at n_predict the
+;             cache holds len(prompt) + len(generated) - 1 rows — one row per
+;             prompt token, one per generated token FED BACK, and none for the last
+;             generated token, which ds4.c:37116 never feeds forward because its
+;             logits would go unread. A loop that ran that pass anyway would look
+;             identical in its output and hold one row more.
+
+(do
+    (defn ddlb-vmaxdiff (a b)
+        (if (eq (len a) 0) 0.0
+            (do (let d (tn-abs (sub (head a) (head b))))
+                (let r (ddlb-vmaxdiff (tail a) (tail b)))
+                (if (gt d r) d r))))
+    (defn ddlb-ints-eq (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) 1
+                (if (eq (head a) (head b)) (ddlb-ints-eq (tail a) (tail b)) 0))
+            0))
+    (defn ddlb-has? (xs v) (if (eq (len xs) 0) 0 (if (eq (head xs) v) 1 (ddlb-has? (tail xs) v))))
+    ; a step that returns a fine-looking state and appends NOTHING
+    (defn ddlb-lazy-step (ctx hc kv pos) (list hc kv))
+    ; a step that appends but hands back a zeroed state — an unrun dispatch's bytes
+    (defn ddlb-dead-step (ctx hc kv pos) (list (tb-zeros (len hc)) (dkv-append kv 0 (ddl-stub-row hc pos))))
+    ; a driver with a FROZEN position — every step taken at pos 0
+    (defn ddlb-frozen (stepf ctx hc kv pos n)
+        (if (eq n 0) (list hc kv)
+            (do (let s (ddl-step stepf ctx hc kv pos))
+                (ddlb-frozen stepf ctx (ddl-st-hc s) (ddl-st-kv s) pos (sub n 1)))))
+    (defn ddlb-flat2 (kv nl l acc) (if (eq l nl) acc (ddlb-flat2 kv nl (add l 1) (dkv-cat acc (dkv-flat kv l)))))
+    (defn ddlb-kv-flat (kv) (ddlb-flat2 kv (dkv-nlayers kv) 0 (empty)))
+
+    ; ---- the fixture: mla-demo.fk's toy MLA layer, plus a 6-token vocab ----
+    (let eps 0.00001)
+    (let base 10000.0)
+    (let nh 2) (let hd 4) (let nrot 2) (let ng 2)
+    (let c (mla-cfg nh hd nrot ng base eps))
+    (let an (list 1.0 1.0 1.0 1.0))
+    (let wqa (list (list 0.1 -0.2 0.3 0.4) (list -0.5 0.6 0.1 -0.2) (list 0.2 0.3 -0.4 0.5)))
+    (let gqa (list 1.0 1.0 1.0))
+    (let wqb (list (list 0.2 -0.1 0.4) (list 0.5 0.3 -0.2) (list -0.3 0.6 0.1) (list 0.1 0.2 0.3)
+                   (list 0.4 -0.5 0.2) (list -0.1 0.3 0.5) (list 0.6 0.1 -0.4) (list 0.2 -0.3 0.1)))
+    (let wkv (list (list 0.3 0.1 -0.2 0.5) (list -0.4 0.2 0.6 0.1)
+                   (list 0.2 -0.5 0.3 -0.1) (list 0.1 0.4 -0.3 0.2)))
+    (let gkv (list 1.0 1.0 1.0 1.0))
+    (let was (list (list (list 0.1 0.2 -0.3 0.4) (list 0.5 -0.1 0.2 0.3))
+                   (list (list -0.2 0.4 0.1 -0.5) (list 0.3 0.2 -0.4 0.1))))
+    (let wb (list (list 0.2 -0.3 0.4 0.1) (list -0.1 0.5 0.2 -0.4)
+                  (list 0.3 0.1 -0.2 0.5) (list 0.4 -0.2 0.1 0.3)))
+    (let sinks (list 0.0 0.5))
+    (let w (mla-w an wqa gqa wqb wkv gkv was wb sinks))
+    (let mctx (ddl-mla-ctx w c))
+
+    ; a 6-token vocab: an embedding table and an output head
+    (let emb (list (list 0.5 -0.3 0.9 0.2) (list -0.4 0.7 -0.1 0.6) (list 0.2 0.1 -0.8 0.4)
+                   (list 0.9 0.2 0.3 -0.5) (list -0.7 -0.2 0.4 0.8) (list 0.3 0.6 -0.6 -0.1)))
+    (let wout (list (list 0.4 -0.2 0.1 0.3) (list -0.3 0.5 0.2 -0.1) (list 0.1 0.3 -0.4 0.6)
+                    (list 0.7 -0.1 0.2 0.1) (list -0.2 0.4 0.5 -0.3) (list 0.2 0.2 -0.2 0.4)))
+    (let wnorm (list 1.0 1.0 1.0 1.0))
+    (let mdl (ddl-mdl emb wout wnorm 1))
+
+    (let cap 32)
+    (let kv0 (dkv-new cap 1 hd))
+    (let sctx (ddl-stub-ctx 0.25 2))
+    (let kvs0 (dkv-new cap 2 hd))
+    (let hc0 (list 0.5 -0.3 0.9 0.2))
+
+    ; --- claim 1: the step contract and its guard ---
+    (let s1 (ddl-step ddl-stub-step sctx hc0 kvs0 0))
+    (let slazy (ddl-step ddlb-lazy-step sctx hc0 kvs0 0))
+    (let sdead (ddl-step ddlb-dead-step sctx hc0 (dkv-new cap 1 hd) 0))
+    (let cl1 (if (eq (ddl-st-ok s1) 1)
+                 (if (eq (len (ddl-st-hc s1)) (len hc0))
+                     (if (eq (dkv-len (ddl-st-kv s1) 1) 1)
+                         (if (eq (ddl-st-ok slazy) 0)
+                             (if (eq (ddl-st-ok sdead) 0) 1 0) 0) 0) 0) 0))
+
+    ; --- claim 2: the driver threads POSITION, not just state ---
+    (let r2 (ddl-run-steps ddl-stub-step sctx hc0 kvs0 0 2 1))
+    (let h2a (ddl-step ddl-stub-step sctx hc0 kvs0 0))
+    (let h2b (ddl-step ddl-stub-step sctx (ddl-st-hc h2a) (ddl-st-kv h2a) 1))
+    (let rfrozen (ddlb-frozen ddl-stub-step sctx hc0 kvs0 0 2))
+    (let cl2 (if (lt (ddlb-vmaxdiff (ddl-st-hc r2) (ddl-st-hc h2b)) 0.000000000001)
+                 (if (eq (dkv-rows-eq (dkv-bank (ddl-st-kv r2) 1) (dkv-bank (ddl-st-kv h2b) 1)) 1)
+                     (if (gt (ddlb-vmaxdiff (ddl-st-hc r2) (nth rfrozen 0)) 0.000001) 2 0) 0) 0))
+
+    ; --- claim 4: two steps, two rows, row 0 untouched ---
+    (let cl4 (if (eq (dkv-len (ddl-st-kv r2) 0) 2)
+                 (if (eq (dkv-len (ddl-st-kv r2) 1) 2)
+                     (if (eq (dkv-vec-eq (dkv-row (ddl-st-kv r2) 0 0) (dkv-row (ddl-st-kv h2a) 0 0)) 1)
+                         (if (eq (ddl-st-ok r2) 1) 4 0) 0) 0) 0))
+
+    ; --- claim 8: N steps produce N tokens (the one-layer MLA model) ---
+    (let lim5 (ddl-lim 5 32 99))
+    (let run5 (ddl-run ddl-mla-step mctx mdl lim5 kv0 (list 0 1 2)))
+    (let cl8 (if (eq (len (ddl-run-ids run5)) 5)
+                 (if (eq (ddl-run-ok run5) 1)
+                     (if (eq (ddl-run-stop run5) 1)
+                         (if (eq (ddl-head-ok? mdl) 1) 8 0) 0) 0) 0))
+
+    ; --- claim 16: layer-major prefill == token-major prefill ---
+    (let ids3 (list 0 1 2))
+    (let ptm (ddl-prefill ddl-stub-step sctx mdl ids3 kvs0))
+    (let plm (ddl-prefill-layer-major sctx mdl ids3 kvs0))
+    (let cl16 (if (lt (ddlb-vmaxdiff (nth ptm 0) (nth plm 0)) 0.000000000001)
+                  (if (eq (dkv-rows-eq (dkv-bank (nth ptm 1) 0) (dkv-bank (nth plm 1) 0)) 1)
+                      (if (eq (dkv-rows-eq (dkv-bank (nth ptm 1) 1) (dkv-bank (nth plm 1) 1)) 1)
+                          (if (eq (nth ptm 2) 3) 16 0) 0) 0) 0))
+
+    ; --- claim 32: hushfold — positions >= 1 are why this stone exists ---
+    (let x (nth emb 0))
+    (let row-at-0 (mla-cache-row w c x 0))
+    (let row-at-1 (mla-cache-row w c x 1))
+    (let latent (mla-kv-latent (mla-pre w c x) wkv gkv eps))
+    (let cl32 (if (gt (ddlb-vmaxdiff row-at-0 row-at-1) 0.001)
+                  (if (eq (ddlb-vmaxdiff row-at-0 latent) 0.0) 32 0) 0))
+
+    ; --- claim 64: determinism ---
+    (let runA (ddl-run ddl-mla-step mctx mdl lim5 kv0 (list 0 1 2)))
+    (let cl64 (if (eq (ddlb-ints-eq (ddl-run-ids run5) (ddl-run-ids runA)) 1)
+                  (if (eq (dkv-len (ddl-run-kv run5) 0) (dkv-len (ddl-run-kv runA) 0))
+                      (if (eq (ddl-run-pos run5) (ddl-run-pos runA)) 64 0) 0) 0))
+
+    ; --- claim 128: a different prompt gives different ids ---
+    (let runB (ddl-run ddl-mla-step mctx mdl lim5 kv0 (list 4 3)))
+    (let cl128 (if (eq (len (ddl-run-ids runB)) 5)
+                   (if (eq (ddlb-ints-eq (ddl-run-ids run5) (ddl-run-ids runB)) 0) 128 0) 0))
+
+    ; --- claim 256: the three end conditions; the stop token is never emitted ---
+    (let eos-hit (nth (ddl-run-ids run5) 0))
+    (let lim-eos (ddl-lim 5 32 eos-hit))
+    (let run-eos (ddl-run ddl-mla-step mctx mdl lim-eos kv0 (list 0 1 2)))
+    (let lim-ctx (ddl-lim 5 4 99))
+    (let run-ctx (ddl-run ddl-mla-step mctx mdl lim-ctx kv0 (list 0 1 2)))
+    (let cl256 (if (eq (ddl-run-stop run-eos) 0)
+                   (if (eq (len (ddl-run-ids run-eos)) 0)
+                       (if (eq (ddlb-has? (ddl-run-ids run-eos) eos-hit) 0)
+                           (if (eq (ddl-run-stop run-ctx) 2)
+                               (if (eq (ddl-run-stop run5) 1) 256 0) 0) 0) 0) 0))
+
+    ; --- claim 512: the row arithmetic is exact ---
+    ;   rows = len(prompt) + len(generated) - 1, because ds4.c:37116 never feeds the
+    ;   LAST accepted token forward. A loop that ran that pass would hold one more.
+    (let cl512 (if (eq (dkv-len (ddl-run-kv run5) 0) (sub (add 3 (len (ddl-run-ids run5))) 1))
+                   (if (eq (ddl-run-pos run5) (add 3 (len (ddl-run-ids run5))))
+                       (if (eq (dkv-refused (ddl-run-kv run5)) 0)
+                           (if (eq (dkv-square? (ddl-run-kv run5)) 1) 512 0) 0) 0) 0))
+
+    (add cl1 (add cl2 (add cl4 (add cl8 (add cl16 (add cl32 (add cl64 (add cl128 (add cl256 cl512)))))))))
+)

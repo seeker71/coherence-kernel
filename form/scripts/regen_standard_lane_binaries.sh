@@ -47,7 +47,7 @@ FORM_CLI_SRCS=(
     form-stdlib/speech-organ.fk form-stdlib/native-host-instance.fk
     form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
     form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk
-    form-stdlib/rag-ask.fk form-stdlib/form-cli-ask.fk
+    form-stdlib/rag-ask.fk form-stdlib/ask-cost-receipt.fk form-stdlib/ask-native-lane.fk form-stdlib/form-cli-ask.fk
     form-stdlib/form-cli-router.fk form-stdlib/form-cli-judge.fk
     form-stdlib/confidence-weighted-vote.fk form-stdlib/lineage-discounted-vote.fk
     form-stdlib/form-cli-oracle-loop.fk
