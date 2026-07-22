@@ -919,6 +919,22 @@ def run_stack(g, token, pos, n_layers, outdir):
     GEO = geometry(K)
     n_embd = GEO["n_embd"]; n_hc = GEO["n_hc"]
     x0 = read_f16_row(g, "token_embd.weight", token, n_embd)
+    # THE SENSITIVITY PROBE. A 43-layer stack is a composed map, and its own conditioning is a FACT about
+    # the model that has to be measured before any GPU-vs-oracle disagreement can be read. Setting
+    # DSV4_ORACLE_PERTURB to a relative size (one f32 ulp is 1.1920929e-7) tilts the layer-0 input by that
+    # much, in fp64 throughout, and runs the SAME recipe. The distance between the two fp64 trajectories is
+    # then the envelope a one-ulp difference opens by itself -- the honest yardstick for an f32 carrier,
+    # and a yardstick derived from the model rather than chosen to make a harness green.
+    f32_state = os.environ.get("DSV4_ORACLE_F32_STATE", "") == "1"
+    if f32_state:
+        print("F32STATE 1 (the inter-layer state is rounded to f32; all arithmetic stays fp64)")
+    pert_every = float(os.environ.get("DSV4_ORACLE_PERTURB_EVERY", "0") or "0")
+    if pert_every != 0.0:
+        print("PERTURB_EVERY %r (applied to the state after every layer)" % pert_every)
+    pert = float(os.environ.get("DSV4_ORACLE_PERTURB", "0") or "0")
+    if pert != 0.0:
+        x0 = [v * (1.0 + pert * (1.0 if (i % 2 == 0) else -1.0)) for i, v in enumerate(x0)]
+        print("PERTURB %r (one-sided per element, alternating sign)" % pert)
     resid = list(x0) * n_hc                                # ds4.c:9764 broadcast
     print("STACKGEOM n_embd %d n_hc %d layers %d token %d pos %d" % (n_embd, n_hc, n_layers, token, pos))
     if outdir:
@@ -953,6 +969,19 @@ def run_stack(g, token, pos, n_layers, outdir):
             with open(os.path.join(outdir, "oracle-done.txt"), "a") as fh:
                 fh.write("%d\n" % il)
         resid = F["out_hc"]
+        # THE f32-STATE PROBE. DSV4_ORACLE_F32_STATE=1 rounds ONLY the state handed from one layer to the
+        # next to f32, and leaves every arithmetic step in fp64. That is the one thing an f32 carrier
+        # cannot avoid doing, so the distance between this trajectory and the pure-fp64 one is the floor
+        # under ANY f32 implementation of this stack — measured from the reference, not chosen.
+        if f32_state:
+            resid = [f32_round(v) for v in resid]
+        # THE COMPOSED-TRAJECTORY ENVELOPE. DSV4_ORACLE_PERTURB_EVERY tilts the state by a relative amount
+        # after EVERY layer, in fp64 throughout. Set to the per-layer gap an f32 carrier was MEASURED to
+        # have when each layer is run alone from this oracle's own input, it answers the only question a
+        # 43-layer comparison can honestly ask: how far apart do two runs of the SAME recipe drift when
+        # one of them is nudged, each layer, by exactly as much as f32 arithmetic nudges it?
+        if pert_every != 0.0:
+            resid = [v * (1.0 + pert_every * (1.0 if (i % 2 == 0) else -1.0)) for i, v in enumerate(resid)]
     print("STACKEND %d" % n_layers)
 
 
