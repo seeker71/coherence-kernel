@@ -402,6 +402,8 @@ check(gpuArg == cpuArg,
 
 if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(gpuFirstError ?? "unknown") ===") }
 print(String(format: "      exit-mechanism logits: max %.6f at row %d  (probe input = the raw embedding, not a real token)", gpuMax, gpuArg))
+// memory: the 85 GiB is mmapped unified memory wrapped bytesNoCopy (no device copy); working buffers are tiny.
+print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — the model is mmapped and wrapped, not copied onto the device (onelean)", dev.currentAllocatedSize, Double(dev.currentAllocatedSize)/1073741824.0))
 
 let ok = failures == 0 && gpuErrors == 0
 if ok { print("VERDICT PASS  6 gates — Stage 1 EMBED (bit-exact) + Stage 2 MXFP8 vocab-projection EXIT (real dims, real type-41 through the windowed views)") }
