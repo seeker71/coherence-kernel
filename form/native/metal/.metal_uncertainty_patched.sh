@@ -673,6 +673,99 @@ let genOnly = ProcessInfo.processInfo.environment["FORM_GEN_ONLY"] == "1"
 // reads them (or are idempotent), so the token ids are unchanged and the gates still judge the run.
 let ablate = ProcessInfo.processInfo.environment["FORM_ABLATE"] ?? ""
 let ablDup = Int(ProcessInfo.processInfo.environment["FORM_ABLATE_N"] ?? "4")!
+
+// ==== STONE 43 (metal_uncertainty.sh, read-only extension): the logit vector's own decisiveness ====
+// Spliced in by metal_uncertainty.sh. metal_first_token.sh itself is never modified. Everything below
+// reads `bLogits` AFTER the token's single command buffer has completed, so the bytes are final.
+let uncOn = ProcessInfo.processInfo.environment["FORM_UNC"] == "1"
+var uncRecording = false
+let uncK = 32                       // the truncation width for the cheap entropy
+struct UncStat {
+    let id: Int, ties: Int
+    let l1: Double, l2: Double, margin: Double, p1: Double, ent: Double, entK: Double, sd: Double
+    let alive: Bool
+}
+var uncStats: [UncStat] = []
+var uncSeconds = 0.0
+// PRICED SEPARATELY, because the stone has to CHOOSE one signal and "cheap matters: this runs per
+// token" is a claim about seconds. tScan is the max/second-max/sd pass every signal needs. tExp is
+// the full-vocabulary logsumexp pass that p1 and the full entropy need (128 256 exp() calls). tTopK
+// is the selection pass plus 32 exps. A signal's real price is tScan plus its own column.
+var uncTScan = 0.0, uncTExp = 0.0, uncTTopK = 0.0
+func uncMeasure() {
+    let t0 = Date()
+    let p = bLogits.contents().bindMemory(to: Float.self, capacity: vocabN)
+    var m = -Double.infinity, m2 = -Double.infinity
+    var iMax = -1, ties = 0, nonFinite = 0
+    var sum = 0.0, sumsq = 0.0
+    for i in 0..<vocabN {
+        let v = Double(p[i])
+        if !v.isFinite { nonFinite += 1; continue }
+        sum += v; sumsq += v * v
+        if v > m { m2 = m; m = v; iMax = i; ties = 1 }
+        else if v == m { ties += 1 }
+        else if v > m2 { m2 = v }
+    }
+    let n = Double(vocabN)
+    let mean = sum / n
+    let sd = max(0.0, sumsq / n - mean * mean).squareRoot()
+    let tA = Date(); uncTScan += tA.timeIntervalSince(t0)
+    // one more pass: the softmax denominator and E_p[l], both shifted by the max exactly as
+    // form-stdlib/transformer-numerics.fk's tn-softmax shifts it.
+    var Z = 0.0, wsum = 0.0
+    for i in 0..<vocabN {
+        let v = Double(p[i]); if !v.isFinite { continue }
+        let e = exp(v - m); Z += e; wsum += e * v
+    }
+    let lse = m + log(Z)
+    let p1 = exp(m - lse)
+    let ent = lse - wsum / Z                     // H = logsumexp - E_p[l], in nats
+    let tB = Date(); uncTExp += tB.timeIntervalSince(tA)
+    // the top-k truncation, renormalized over the k kept
+    var top = [Double](repeating: -Double.infinity, count: uncK)
+    for i in 0..<vocabN {
+        let v = Double(p[i]); if !v.isFinite { continue }
+        if v > top[uncK - 1] {
+            var j = uncK - 1
+            while j > 0 && top[j - 1] < v { top[j] = top[j - 1]; j -= 1 }
+            top[j] = v
+        }
+    }
+    var Zk = 0.0, wk = 0.0
+    for v in top { let e = exp(v - m); Zk += e; wk += e * v }
+    let entK = (m + log(Zk)) - wk / Zk
+    uncTTopK += Date().timeIntervalSince(tB)
+    let chosen = Int(bOutI.contents().bindMemory(to: UInt32.self, capacity: 1)[0])
+    // THE DEAD-FORWARD GUARD. A zeroed pool, an unrun dispatch and a NaN blowout all produce a vector
+    // an unguarded margin/probability would happily score. None of them may read as decided.
+    let alive = (nonFinite == 0) && (ties == 1) && (sd > 1e-6) && (m > m2) && (chosen == iMax)
+    uncStats.append(UncStat(id: chosen, ties: ties, l1: m, l2: m2, margin: m - m2,
+                            p1: p1, ent: ent, entK: entK, sd: sd, alive: alive))
+    uncSeconds += Date().timeIntervalSince(t0)
+}
+func uncReport(_ nPrompt: Int) {
+    print("=== UNCERTAINTY — the logit vector, per forward (STONE 43) ===")
+    print("  UNCPROMPT \(nPrompt) prompt forwards; step < \(nPrompt) is prefill, and step \(nPrompt - 1) is the FIRST CONTENT TOKEN's decision")
+    print("  UNCVOCAB \(vocabN) ln(V)=\(String(format: "%.6f", log(Double(vocabN)))) topk=\(uncK)")
+    print("  UNCHEAD step id margin p1 entropy entropy_topk top1 top2 sd ties alive text")
+    for (i, s) in uncStats.enumerated() {
+        print(String(format: "  UNC %d %d %.6f %.6f %.6f %.6f %.6f %.6f %.6f %d %d",
+                     i, s.id, s.margin, s.p1, s.ent, s.entK, s.l1, s.l2, s.sd, s.ties, s.alive ? 1 : 0)
+              + " [" + decodeIds([s.id]) + "]")
+    }
+    let n = max(1, uncStats.count)
+    print(String(format: "  UNCCOST %.6f s of host CPU across %d measurements = %.3f ms each — the instrument's own price, charged (row 858)",
+                 uncSeconds, uncStats.count, 1000.0 * uncSeconds / Double(n)))
+    print(String(format: "  UNCCOSTSPLIT per step, ms: scan(max,2nd,sd) %.3f | full-vocab exp pass (p1, entropy) %.3f | top-%d select+exp (entropy_topk) %.3f",
+                 1000.0 * uncTScan / Double(n), 1000.0 * uncTExp / Double(n), uncK,
+                 1000.0 * uncTTopK / Double(n)))
+    print(String(format: "  UNCPRICE per step, ms: margin %.3f | p1 %.3f | entropy %.3f | entropy_topk %.3f  (each = scan + its own pass)",
+                 1000.0 * uncTScan / Double(n), 1000.0 * (uncTScan + uncTExp) / Double(n),
+                 1000.0 * (uncTScan + uncTExp) / Double(n),
+                 1000.0 * (uncTScan + uncTTopK) / Double(n)))
+}
+// ==== end STONE 43 extension ====
+
 func forward(_ id: Int, _ pos: Int) -> Int {
     var s = Step()
     var t0 = Date()
@@ -749,6 +842,7 @@ func forward(_ id: Int, _ pos: Int) -> Int {
     s.done()
     if profile { let tg = (fastOps ? "T " : "A ") + "argmax"
                  profAcc[tg, default: 0] += Date().timeIntervalSince(t0); profN[tg, default: 0] += 1 }
+    if uncRecording { uncMeasure() }
     return Int(bOutI.contents().bindMemory(to: UInt32.self, capacity: 1)[0])
 }
 
@@ -1010,6 +1104,7 @@ if gpuErrors > 0 { print("=== \(gpuErrors) command buffer(s) failed (\(gpuFirstE
 if genOnly {
     print("=== FORM_GEN_ONLY: the slot path, once. The cross-path agreement gates were NOT run. ===")
     usePartsNow = 1; fastOps = true; mvNow = .slot
+    uncRecording = uncOn
     var g = generate(promptIds, nsteps)
     // THE ANSWER ENDED, OR THE HARNESS DID, and those are different sentences. `generate` appends the
     // token and THEN breaks on it, so an end-of-turn id is the last element when the model stopped —
@@ -1020,9 +1115,17 @@ if genOnly {
     let hitEos = (last == eosId || last == 128001 || last == 128009)
     if hitEos { g.out.removeLast() }
     report("slot-long ", g)
+    // PROSE DOES NOT FIT ON A LINE. `report` prints the text inside quotes on one line, which is
+    // right for a twelve-token fragment and wrong for an answer — the first newline the model emits
+    // makes the line unparseable, and the carrier that reads it reports "the harness's format
+    // moved" rather than an answer. A delimited block carries whatever the model wrote.
+    print("ANSWER-TEXT-BEGIN")
+    print(decodeIds(g.out))
+    print("ANSWER-TEXT-END")
     print("  STOP reason=\(hitEos ? "eos" : "cap") stop_id=\(hitEos ? last : -1) eos_id=\(eosId) generated=\(g.out.count) cap=\(nsteps)")
     print(String(format: "  LATENCY encode %.6f s + prefill %.3f s (%d prompt tokens) + decode %.3f s (%d forwards) = %.3f s in-process",
                  encodeS, g.prefill, promptIds.count, g.decode, g.forwards, encodeS + g.prefill + g.decode))
+    if uncOn { uncReport(promptIds.count) }
     if gpuErrors > 0 {
         print("=== VERDICT FAIL — \(gpuErrors) command buffer(s) failed (\(gpuFirstError ?? "?")) ==="); exit(1)
     }

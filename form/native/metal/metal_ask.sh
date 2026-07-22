@@ -16,12 +16,23 @@
 # counted out of the generation lane's own output.
 #
 # WHY IT INVOKES metal_first_token.sh RATHER THAN RE-IMPLEMENTING THE LOOP. That harness IS the proven
-# generation lane — 13 gates, from "the config is the file's" through "the split and lane paths emit
-# the SAME token ids as the attestant". Re-implementing decode here would create a second path that
-# nobody gates, and the one that drifts is always the one nobody ran. The cost is that every ask pays
-# for the full gate suite (~28 s warm, of which the generation itself is ~1.4 s). That is named here
-# as a gap rather than hidden: a lean generation-only runner is a later stone, and it will have to
-# prove it emits the same ids as this one before it is allowed to answer anything.
+# generation lane — 14 gates, from "the config is the file's" through "the split, lane and slot paths
+# emit the SAME token ids as the attestant". Re-implementing decode here would create a second path
+# that nobody gates, and the one that drifts is always the one nobody ran.
+#
+# WHAT CHANGED ON 2026-07-22. This header used to end: "the cost is that every ask pays for the full
+# gate suite (~28 s warm, of which the generation itself is ~1.4 s). That is named here as a gap
+# rather than hidden: a lean generation-only runner is a later stone, and it will have to prove it
+# emits the same ids as this one before it is allowed to answer anything." The gap was named
+# correctly and the remedy was mis-imagined: a lean RUNNER would indeed owe that proof forever. A
+# lean MODE inside the same harness owes it once, structurally — FORM_GEN_ONLY=1 is a flag around
+# the CALLS to the same `generate`, over the same kernels, the same buffers and the same pool. There
+# is no second implementation, so there is nothing for the ids to drift from. What the flag skips is
+# the AGREEMENT gates (5, 6, 7, 10, 11), each of which costs a whole further generation of the
+# prompt; nine gates still run, including the GPU-liveness sentinel and all four arithmetic points.
+#
+# NO RECEIPT MAY QUOTE A LEAN RUN AS THE FULL SUITE. The GATES field is stamped `-genonly` and the
+# artifact carries GATE-MODE. Set FORM_ASK_FULL_GATES=1 to pay for all fourteen.
 #
 # THE TWO DENOMINATORS (corpus row 834, selfgauge). Every rate is quoted against BOTH: our own
 # previous rate, and ollama running the SAME model from the SAME blob on THIS machine. A tok/s that
@@ -42,8 +53,15 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form
 REPO="$(cd "$ROOT/.." && pwd)"
 GO_BIN="$ROOT/form-kernel-go/bin-go"
-NSTEPS="${1:-12}"
+# NSTEPS IS A CAP, NOT A LENGTH. The model ends its own answer with its end-of-turn id and the
+# harness breaks on it; this number only bounds how long the harness will wait for that to happen.
+# The old default of 12 was a length pretending to be a cap — every answer stopped mid-sentence
+# because the harness ran out, and the artifact could not tell the difference. 96 leaves room for a
+# real paragraph and still fits the 256-position KV pool with a long question in front of it.
+NSTEPS="${1:-96}"
 QUESTION="${2:-The capital of France is}"
+GATE_MODE="genonly"
+if [[ "${FORM_ASK_FULL_GATES:-0}" == "1" ]]; then GATE_MODE="full"; fi
 BLOB="${FORM_GGUF_BLOB:-$HOME/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff}"
 MODEL_NAME="${FORM_ASK_MODEL:-llama3.2:3b}"
 CACHE="$ROOT/native/metal/.ask-cache"
@@ -61,6 +79,16 @@ ARTIFACT="$STAGE/answer.txt"
 # The cold first measurement, 634.79 tok/s over 36 prompt tokens, is the only one that measures what
 # the name says. A benchmark that took the warm number would have overstated the world's prefill by
 # 8.7x and made our gap look far worse than it is.
+#
+# AND A DENOMINATOR MEASURED ON ANOTHER DAY IS A DENOMINATOR FROM ANOTHER MACHINE. Re-derived
+# 2026-07-22 19:12 WITA on this same host, same model, same blob, three runs: 4.62 / 6.91 / 8.34
+# tok/s — a factor of TWENTY below the figure below, because two sibling agents held 87 GB of other
+# models resident and the load average was 31. Our own lane measured 3.2 / 3.2 / 9.5 tok/s in the
+# same minutes. Neither of those pairs measures a kernel; both measure a contended machine, and the
+# ratio between them is the only thing in that window worth anything.
+# The constant below therefore carries its DATE everywhere it is quoted, so no receipt can imply it
+# was taken beside the number it is dividing. Re-derive it before believing any `behind_milli`.
+WORLD_MEASURED_ON="${FORM_WORLD_MEASURED_ON:-2026-07-21}"
 WORLD_DECODE_TOKPS_MILLI="${FORM_WORLD_DECODE_TOKPS_MILLI:-158449}"
 WORLD_PREFILL_TOKPS_MILLI="${FORM_WORLD_PREFILL_TOKPS_MILLI:-634790}"
 
@@ -149,9 +177,13 @@ fi
 echo "  gate D1 the derived tensor bytes + data base ARE the file's $FILE_ACTUAL bytes, exactly"
 
 # ── 2. generate, through the PROVEN lane. The harness is the witness; we read its output. ─────────
-echo "  generating through form/native/metal/metal_first_token.sh (the gated lane)..."
+echo "  generating through form/native/metal/metal_first_token.sh (the gated lane, gate-mode $GATE_MODE)..."
 gen_t0=$(python3 -c 'import time;print(int(time.time()*1000000))')
-"$ROOT/native/metal/metal_first_token.sh" "$NSTEPS" "$QUESTION" > "$work/gen.txt" 2>&1
+if [[ "$GATE_MODE" == "genonly" ]]; then
+    FORM_GEN_ONLY=1 "$ROOT/native/metal/metal_first_token.sh" "$NSTEPS" "$QUESTION" > "$work/gen.txt" 2>&1
+else
+    "$ROOT/native/metal/metal_first_token.sh" "$NSTEPS" "$QUESTION" > "$work/gen.txt" 2>&1
+fi
 gen_rc=$?
 gen_t1=$(python3 -c 'import time;print(int(time.time()*1000000))')
 if [[ $gen_rc -eq 2 ]]; then
@@ -163,17 +195,26 @@ if [[ $gen_rc -ne 0 || "$VERDICT" != *PASS* ]]; then
     echo "      $VERDICT"; tail -20 "$work/gen.txt"; exit 1
 fi
 GATES=$(echo "$VERDICT" | sed -E 's/.*PASS — ([0-9]+) gates.*/\1-PASS/')
+[[ "$GATE_MODE" == "genonly" ]] && GATES="$GATES-genonly"
 echo "  the lane passed its own gates: $GATES"
 
 # WHICH PATH ANSWERED. The harness runs the attestant, the split twin and the lane kernel, and they
 # are gated to emit the SAME ids. We quote the fastest one that is present, and we NAME it — a
 # receipt that silently switched paths between runs would make its own rates incomparable.
+#
+# THE ORDER OF THIS LIST IS A MEASURED FACT AND NOT A PREFERENCE. On this host, same prompt, same
+# ids: attestant 1.57 tok/s, split 3.9, lane 7.8, slot 28.7 decode-only. `slot-long` led the list
+# from the day Stone 13 landed it and this loop did not know the name — it asked for `lane-long`
+# first and every ask since has been answered by a path 3.7x slower than the one sitting beside it,
+# with the receipt truthfully reporting the slower rate. A list of names is a place where the world
+# moves and nothing tells the list.
 PATH_TAG=""
-for cand in lane-long split-long long; do
+for cand in slot-long lane-long split-long long; do
     if grep -q "^  $cand" "$work/gen.txt"; then PATH_TAG="$cand"; break; fi
 done
 [[ -z "$PATH_TAG" ]] && { echo "FAIL  no generation result line found in the lane's output"; exit 1; }
 case "$PATH_TAG" in
+    slot-long)  KERNEL_PATH="slot-simd-4wide";;
     lane-long)  KERNEL_PATH="lane-simd-hoisted";;
     split-long) KERNEL_PATH="split-parts32";;
     *)          KERNEL_PATH="attestant-serial";;
@@ -183,20 +224,49 @@ echo "  the answer came from the $KERNEL_PATH path"
 # the harness prints, for the chosen path:
 #   "  <tag>: prefill A s for N prompt tokens; decode B s for M further forwards"
 #   "    ids  : [...]"  "    text : \"...\""  "    END-TO-END X tok/s ... decode-only Y tok/s"
-RES=$(grep -A3 "^  $PATH_TAG" "$work/gen.txt" | head -4)
+# THE SECTION IS DELIMITED BY ITS OWN END, not by a line count. `grep -A3` assumed the report was
+# exactly four lines — and it is, until the model's text contains a newline, at which point the
+# END-TO-END line falls outside the window and this carrier hands the body an empty rate. The
+# section runs from the path's header line to its END-TO-END line, however many lines the prose
+# takes in between.
+RES=$(awk -v t="  $PATH_TAG" 'index($0,t)==1{f=1} f{print} f && /END-TO-END/{exit}' "$work/gen.txt")
 PREFILL_S=$(echo "$RES" | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="prefill"){print $(i+1);exit}}')
 NPROMPT=$(echo "$RES"  | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="for" && $(i+2)=="prompt"){print $(i+1);exit}}')
 DECODE_S=$(echo "$RES" | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="decode"){print $(i+1);exit}}')
 NFWD_DEC=$(echo "$RES" | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="further"){print $(i-1);exit}}')
 IDS=$(echo "$RES"      | awk -F': *' '/ids  :/{print $2;exit}')
-ANSWER=$(echo "$RES"   | sed -n 's/^ *text *: *"\(.*\)"$/\1/p')
+# THE ANSWER, PREFERRING THE DELIMITED BLOCK. `text : "..."` is one line by construction and prose is
+# not: the first newline a model emits ends the line and the rest of the answer is silently dropped —
+# or, if the quote never closes, nothing matches and this carrier reports "the harness's format
+# moved" about an answer that was perfectly well formed. The block is used when it is there; the
+# one-line form remains the fallback for full-gate runs, where it is only ever read for fragments.
+ANSWER=$(awk '/^ANSWER-TEXT-BEGIN$/{f=1;next} /^ANSWER-TEXT-END$/{f=0} f' "$work/gen.txt")
+if [[ -z "$ANSWER" ]]; then
+    ANSWER=$(echo "$RES" | sed -n 's/^ *text *: *"\(.*\)"$/\1/p')
+fi
 NGEN=$(echo "$IDS" | tr ',' '\n' | grep -c '[0-9]')
-DECODE_TOKPS_MILLI=$(grep -A3 "^  $PATH_TAG" "$work/gen.txt" | awk '/decode-only/{for(i=1;i<=NF;i++) if($i=="decode-only"){printf "%d\n", $(i+1)*1000; exit}}')
-E2E_TOKPS_MILLI=$(grep -A3 "^  $PATH_TAG" "$work/gen.txt" | awk '/END-TO-END/{for(i=1;i<=NF;i++) if($i=="END-TO-END"){printf "%d\n", $(i+1)*1000; exit}}')
+DECODE_TOKPS_MILLI=$(echo "$RES" | awk '/decode-only/{for(i=1;i<=NF;i++) if($i=="decode-only"){printf "%d\n", $(i+1)*1000; exit}}')
+E2E_TOKPS_MILLI=$(echo "$RES" | awk '/END-TO-END/{for(i=1;i<=NF;i++) if($i=="END-TO-END"){printf "%d\n", $(i+1)*1000; exit}}')
 
 for v in PREFILL_S NPROMPT DECODE_S NFWD_DEC ANSWER; do
     [[ -z "${!v}" ]] && { echo "FAIL  could not read $v out of the lane's output — the harness's format moved"; exit 1; }
 done
+
+# ── WHY THE ANSWER STOPPED, carried as a field rather than left to the reader's optimism ──────────
+# An answer that stops because the harness's cap ran out and an answer that stops because the model
+# emitted its end-of-turn id are different objects, and the FIRST one is the one that reads like a
+# bug in the model. Every ask this lane staged before today ended `cap` at 12 tokens, mid-sentence,
+# and the artifact said nothing about it. In gen-only mode the harness reports the reason directly;
+# in full-gate mode it does not, so it is derived from the last staged id — the harness appends the
+# end token and then breaks on it, so its presence at the end IS the model having stopped.
+STOP_REASON=$(awk '/^  STOP reason=/{for(i=1;i<=NF;i++) if($i ~ /^reason=/){sub(/^reason=/,"",$i); print $i; exit}}' "$work/gen.txt")
+LAST_ID=$(echo "$IDS" | tr ',' '\n' | grep -oE '[0-9]+' | tail -1)
+if [[ -z "$STOP_REASON" ]]; then
+    if [[ "$LAST_ID" == "128009" || "$LAST_ID" == "128001" ]]; then STOP_REASON="eos"; else STOP_REASON="cap"; fi
+fi
+ENCODE_S=$(awk '/^  encode /{print $2; exit}' "$work/gen.txt"); ENCODE_S="${ENCODE_S:-0}"
+ENCODE_US=$(awk -v s="$ENCODE_S" 'BEGIN{printf "%d", s*1000000}')
+echo "  the answer stopped because: $STOP_REASON (cap was $NSTEPS tokens; $NGEN generated)"
 
 # ── gate D2: DID THE LANE ANSWER, or only survive. This harness dispatches no Metal of its own —
 # its whole GPU-liveness guarantee is inherited from the lane's VERDICT PASS. But a PASS is a
@@ -290,8 +360,14 @@ printf '(adc-emit-receipt %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s)\n' \
   echo "CTX bandwidth_pct_of_demonstrated $PCT_OF_DEMO"
   echo "CTX prompt_tokens $NPROMPT"
   echo "CTX generated_tokens $NGEN"
+  echo "CTX stop_reason $STOP_REASON (eos = the model ended its own answer; cap = the harness ran out at $NSTEPS)"
+  echo "CTX gate_mode $GATE_MODE"
+  echo "CTX encode_us $ENCODE_US"
+  echo "CTX answer_latency_us $(( ENCODE_US + PREFILL_US + DECODE_US )) (encode + prefill + decode, in-process, one clock)"
   echo "CTX end_to_end_tokps_milli $E2E_TOKPS_MILLI"
   echo "CTX world_prefill_tokps_milli_cold $WORLD_PREFILL_TOKPS_MILLI"
+  echo "CTX world_denominator_measured_on $WORLD_MEASURED_ON (NOT re-derived beside this run; a rate from another day is a rate from another machine — re-derive before believing any behind_milli above)"
+  echo "CTX host_load_at_run $(uptime | sed -E 's/.*load averages?: //')"
   echo "CTX token_ids $IDS"
 } >> "$work/receipt.txt"
 
@@ -306,6 +382,8 @@ mkdir -p "$STAGE"
   echo "MODEL $MODEL_NAME"
   echo "BLOB-SHA256 $BSHA"
   echo "GATES $GATES"
+  echo "GATE-MODE $GATE_MODE"
+  echo "STOP-REASON $STOP_REASON"
   echo "KERNEL-PATH $KERNEL_PATH"
   echo "RECEIPT-BEGIN"
   cat "$work/receipt.txt"

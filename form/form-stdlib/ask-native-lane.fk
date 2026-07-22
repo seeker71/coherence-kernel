@@ -46,9 +46,7 @@
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk
 ;
-; Proven by: form-stdlib/tests/ask-native-lane-band.fk — verdict 127 on go, rust and ts. Every bit
-; also reads 1 on the fourth arm; the band's own root expression does not, for a reason that has
-; nothing to do with this cell and is named in the band's header.
+; Proven by: form-stdlib/tests/ask-native-lane-band.fk (four-way; verdict 127)
 
 (do
     (defn anl-artifact-path () ".coherence-network/ask-native/answer.txt")
@@ -86,30 +84,41 @@
                     (if (lt j 0) "" (substring raw s (if (gt j s) (sub j 1) s)))))))
 
     (defn anl-answer-text (raw)  (anl-section raw "ANSWER"))
+    ; An artifact written before STOP-REASON existed has no such header, and `anl-line-value` would
+    ; return "" for it — which reads as a stop reason of nothing rather than as an unanswerable
+    ; question. `unknown` is the honest word for an artifact from a carrier that did not track it.
+    (defn anl-stop-reason (raw)
+        (do (let s (anl-line-value raw "STOP-REASON"))
+            (if (str_eq s "") "unknown" s)))
     (defn anl-receipt-text (raw) (anl-section raw "RECEIPT"))
 
-    ; "NO ARTIFACT" IS A VALUE HERE, NEVER A STACK TRACE — and the shape of that guard is the whole
-    ; lesson this cell learned. It used to be `(nil? raw)`, and that was wrong on every arm at once,
-    ; in two different ways.
+    ; ASKING THE FILESYSTEM WHETHER THE FILE IS THERE, instead of asking a value what it is.
     ;
-    ; `nil?` is `(eq (len xs) 0)`, and `len` is a LIST cell (see core.fk's note at `nil?`). On go,
-    ; rust and ts it answered by accident: a missing `read_file` gives null, whose `len` is 0. On
-    ; fkwu it answered by accident the other way — fkwu's words carry no type, so `len` of a string
-    ; handle walked the cons heap from that handle's index and returned whatever chain it found. With
-    ; an empty heap that is 0, so a present artifact classified as `native-lane:absent` and the ask
-    ; verb fell back to the grounded lane; with a live heap it was some other number entirely. Neither
-    ; arm was reading the value it thought it was reading.
+    ; What this cell said until 2026-07-22, and it was true: `nil?` answers 1 for an ordinary STRING
+    ; on fkwu and 0 on go, rust and ts, so every `nil?` guard here was ALWAYS TRUE on fkwu and a
+    ; present, well-formed, correctly-bound artifact still classified as `native-lane:absent`. The
+    ; degradation was safe — it refused and named its reason — but it meant the native lane could
+    ; never answer from an fkwu-only host. The cell declined to work around it, on the grounds that a
+    ; recipe hiding a divergence makes it invisible exactly where someone would later trust it.
     ;
-    ; What replaces it asks the two questions separately, and asks each of the right thing:
-    ;   - IS THERE A FILE — asked of the filesystem (`fs_exists`), before `read_file` is ever called.
-    ;     That is what keeps a null out of the string recipes on go/rust/ts, where `str_len` of null
-    ;     is a hard crash, not a 0.
-    ;   - IS THERE TEXT — asked of the string (`str_len`), which every arm answers identically.
-    ; Both doors are four-way. `anl-absent?` therefore means exactly "this artifact has no bytes",
-    ; and a present, well-formed, correctly-bound artifact now reads as present on all four arms.
-    (defn anl-absent? (raw) (if (eq (str_len raw) 0) 1 0))
-    (defn anl-header-of (raw key) (if (eq (anl-absent? raw) 1) "" (anl-line-value raw key)))
-    (defn anl-header-at (path key) (if (fs_exists path) (anl-header-of (read_file path) key) ""))
+    ; The declining was right and the diagnosis was one layer off. Probed again today across all four
+    ; arms: `(len "abc")` is 3 / 3 / 3 / 0 — fkwu measures a STRING's length as a LIST's length, which
+    ; is zero, and `nil?` is `(eq (len xs) 0)`, so `nil?` is not itself divergent; it is downstream of
+    ; a `len` that answers a question about lists when handed a string. Waiting for `nil?` to agree
+    ; was waiting for a kernel movement that the recipe did not actually need.
+    ;
+    ; What the recipe needed was to stop inferring absence from the SHAPE OF A RETURN VALUE and ask
+    ; the filesystem directly. `file_size` returns -1 for a path that is not there and the byte count
+    ; for one that is — probed on go, rust, ts and fkwu, all four: -1 / -1 / -1 / -1 and >0 / >0 / >0
+    ; / >0. That is not a workaround for the divergence; it is a predicate that never had to touch it,
+    ; and it is strictly the better question besides — "is there a file here" is what absence MEANS,
+    ; while "did read_file hand back something odd" was only ever a proxy for it. The `nil?`-shaped
+    ; door (`anl-refusal-of`, `anl-ready-of`) stays for callers that already hold text and never
+    ; touched a path; the path-shaped door below no longer consults it.
+    (defn anl-present? (path) (if (gt (file_size path) 0) 1 0))
+    (defn anl-header-of (raw key) (if (nil? raw) "" (anl-line-value raw key)))
+    (defn anl-header-at (path key)
+        (if (eq (anl-present? path) 0) "" (anl-line-value (read_file path) key)))
     (defn anl-model-at (path) (anl-header-at path "MODEL"))
     (defn anl-model () (anl-model-at (anl-artifact-path)))
 
@@ -123,27 +132,29 @@
     ; thing is the most fundamental: no file at all, then a format this cell does not speak for, then
     ; the stale-cache case, then an artifact that is well-formed and empty.
     ;
-    ; THE ABSENCE GUARD IS STILL SPLIT OFF FROM THE CONTENT LOGIC, though no longer because one half
-    ; was untrustworthy. `anl-refusal-of-text` assumes it was handed text and decides purely on
-    ; content; `anl-refusal-of` is that plus the emptiness guard; `anl-refusal-at` is that plus the
-    ; filesystem question. Three rungs, each provable without the one above it, and the band reaches
-    ; the first two without touching a disk.
+    ; THE NIL GUARD IS SPLIT OFF FROM THE STRING LOGIC, and that split is what the divergence above
+    ; forces. `anl-refusal-of-text` assumes it was handed text and decides purely on content — it
+    ; touches no arm-divergent predicate and agrees on all four arms, so it is what the band proves.
+    ; `anl-refusal-of` is that logic plus the one `nil?` guard, and it is therefore exactly as
+    ; trustworthy as `nil?` is on the arm it runs on. Keeping them in one recipe would have made a
+    ; four-way-honest claim impossible to state about either half.
     (defn anl-refusal-of-text (raw q)
         (if (eq (anl-versioned? raw) 0) "native-lane:version-mismatch"
             (if (eq (anl-bound? raw q) 0) "native-lane:question-not-bound"
                 (if (eq (str_len (anl-answer-text raw)) 0) "native-lane:empty-answer" ""))))
     (defn anl-refusal-of (raw q)
-        (if (eq (anl-absent? raw) 1) "native-lane:absent" (anl-refusal-of-text raw q)))
+        (if (nil? raw) "native-lane:absent" (anl-refusal-of-text raw q)))
 
     (defn anl-ready-of-text (raw q) (if (str_eq (anl-refusal-of-text raw q) "") 1 0))
     (defn anl-ready-of (raw q) (if (str_eq (anl-refusal-of raw q) "") 1 0))
-    ; `-at` is defined before its `-ready` reader on purpose: a band-flattened arm binds forward
-    ; references numb-empty, so a definition that reads another must come after it, not before.
+    ; The path-shaped door: absence is the filesystem's answer, and everything past it is the
+    ; four-way-agreeing text logic. Nothing here consults `nil?`.
     (defn anl-refusal-at (path q)
-        (if (fs_exists path) (anl-refusal-of (read_file path) q) "native-lane:absent"))
-    (defn anl-refusal (q) (anl-refusal-at (anl-artifact-path) q))
+        (if (eq (anl-present? path) 0) "native-lane:absent"
+            (anl-refusal-of-text (read_file path) q)))
     (defn anl-ready-at (path q) (if (str_eq (anl-refusal-at path q) "") 1 0))
     (defn anl-ready? (q) (anl-ready-at (anl-artifact-path) q))
+    (defn anl-refusal (q) (anl-refusal-at (anl-artifact-path) q))
 
     ; ================= 3. the answer, with its lane and its costs attached =================
     ; The prose alone would be indistinguishable from the RAG lane's prose. What travels with it: the
@@ -158,12 +169,17 @@
         (str_concat (str_concat (anl-nl) "blob-sha256:") (str_concat (anl-line-value raw "BLOB-SHA256")
         (str_concat (str_concat (anl-nl) "question-sha256:") (str_concat (anl-line-value raw "QUESTION-SHA256")
         (str_concat (str_concat (anl-nl) "gates:") (str_concat (anl-line-value raw "GATES")
-        (str_concat (anl-nl) (anl-receipt-text raw))))))))))))))))
+        ; WHY THE ANSWER ENDED, beside the lane that produced it and at the same altitude. An answer
+        ; that ran out of harness reads exactly like an answer that ended — it just stops — and a
+        ; caller shown prose with no stop reason will read a truncation as a complete thought. This
+        ; is `eos` when the model emitted its own end token and `cap` when it did not, and it is the
+        ; second thing after the lane name that a caller must not have to dig for.
+        (str_concat (str_concat (anl-nl) "stop-reason:") (str_concat (anl-stop-reason raw)
+        (str_concat (str_concat (anl-nl) "gate-mode:") (str_concat (anl-line-value raw "GATE-MODE")
+        (str_concat (anl-nl) (anl-receipt-text raw))))))))))))))))))))
 
     (defn anl-answer-at (path q)
-        (do
-            (let raw (read_file path))
-            (if (eq (anl-ready-of raw q) 0) "" (anl-answer-of raw q))))
+        (if (eq (anl-ready-at path q) 0) "" (anl-answer-of (read_file path) q)))
     (defn anl-answer (q) (anl-answer-at (anl-artifact-path) q))
 
     0)
