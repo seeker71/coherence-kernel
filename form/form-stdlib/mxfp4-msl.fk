@@ -1,0 +1,194 @@
+; mxfp4-msl.fk — GGUF type 40 (MXFP4, plane-split) as a Metal kernel the BODY emits, so the QUANTIZED
+; bytes are what lives on the GPU and the dequant happens there.
+;
+; WHY THIS EXISTS. Stone 15 established the layout of GGUF types 40 and 41 from the real bytes of
+; DeepSeek-V4-Flash-REAP25-DSpark-ds4-GGUF and wrote the CPU carvers. Those carvers are the only thing
+; on this machine that can read those bytes at all — ds4 itself refuses both types ("unsupported GGUF
+; type 40") before it reads their geometry. But a CPU carver at ~160k weights/s cannot run a model:
+; blk.0.ffn_gate_exps.weight alone is 2 147 483 648 weights. This cell is what turns "can read" into
+; "can run": the quantized planes go to the device unchanged and the decode happens on the GPU.
+;
+; WHAT IS EMITTED (every character authored here):
+;   mx4m-dequant-msl  qb[] (the raw plane-split bytes) -> w[] f32, one thread per weight.
+;   mx4m-matvec-msl   qb[] x[] -> y[], the FUSED kernel on Stone 13's SLOT map: 32 lanes per row, and
+;                     each lane owns whole 32-element SCALE GROUPS. 2x less device memory than f16 and
+;                     no f32 tensor is materialized anywhere.
+;
+; THE SLOT IS THE SCALE GROUP, AND THE FORMAT HANDED IT TO US. Stone 13 measured, on this GPU, that
+; healing the Q6_K thread map bought 7.6x while healing the arithmetic bought 2.5x — the cost was in the
+; GRAIN OF THE ASK (corpus row 846, asktoll): a function of one FLAT weight index cannot know that its
+; caller's next fifteen calls share a scale byte. Q6_K needed a hand-derived 4-wide slot to expose that.
+; Here the exposure is structural: the scale plane is SEPARATE (corpus row exoscalar), so a 32-element
+; group is exactly one scale byte, and a lane that owns a whole group reads that byte ONCE, calls
+; mxm_e8m0 ONCE, and then walks 16 payload bytes each feeding TWO weights. Nothing is hoisted by
+; cleverness; the loop invariant is the format's own unit.
+;
+; BIT-EXACTNESS IS CLAIMABLE HERE, and by a STRONGER argument than Q6_K's. w = 2^(e-127) * E2M1(c).
+;   * E2M1(c) is one of 0, +-0.5, +-1, +-1.5, +-2, +-3, +-4, +-6 — every one exactly an f32 (2 significand
+;     bits suffice).
+;   * 2^(e-127) is an exact power of two.
+;   * Their product is therefore an EXACT f32 whenever it neither overflows nor falls below 2^-149 —
+;     multiplying by a power of two only shifts an exponent. There is NO rounding to disagree about.
+; So Form's fp64 answer and the GPU's f32 answer are the same real number and the same f32, and the gate
+; is equality with no epsilon. THE RADIUS OF THAT SENTENCE: it holds while 2^(e-127)*|E2M1| stays inside
+; f32's exact range, which mx4m-e-safe? derives as -148 <= e - 127 <= 125. An E8M0 BYTE cannot violate
+; the floor at all (e >= 0 gives e - 127 >= -127); only the ceiling is reachable, at e >= 253. This
+; file's tensors sit at e in {120, 121, 122} = 2^-7..2^-5, nowhere near it. The predicate exists so a
+; caller can ASK rather than assume, and the band tests both of its arms.
+;
+; THE FACTORISATION IN THE MATVEC IS FREE, AND THAT IS ALSO A POWER-OF-TWO FACT. The dequant kernel
+; computes (s * v) * x per term; the slot matvec computes s * (sum of v * x) per group. Those differ in
+; general — that is why qk-matvec-slot.fk had to derive an epsilon. Here they do not differ per term:
+; s is an exact power of two, so (s*v)*x and s*(v*x) are the same f32 exactly, for every term. Only the
+; SUMMATION ORDER differs from a reference fold, and that is the ordinary association question, bounded
+; by the coefficient qk-matvec-split.fk already derived. The extra roundings qk-matvec-slot.fk had to
+; charge for Q6_K's d*sc hoist are simply not incurred here.
+;
+; NO HEADER, ON PURPOSE — the same discipline q6k-msl.fk states. This file emits no
+; `#include <metal_stdlib>`: E2M1, E4M3 and E8M0 are decoded by ARITHMETIC transcribed from
+; f16-decode.fk, not by `as_type<half>` or `ldexp`. The matvec's one library call, `metal::simd_sum`, is
+; QUALIFIED, and the header is emitted once by the cell that assembles the translation unit
+; (qml-msl-header, in qk-matvec-lane.fk). Emitting a second `using namespace metal;` would make this
+; body's own `round` ambiguous and the unit would not compile.
+;
+; THE RADIUS THIS CELL SPEAKS FOR — and it does NOT widen Stone 15's.
+;   * The GEOMETRY is Stone 15's: STRUCTURAL and statistically corroborated, NOT bit-exact against an
+;     independent implementation, because none exists anywhere. A GPU kernel that agrees with the CPU
+;     carver proves the TRANSCRIPTION, not the layout. Nothing here upgrades that.
+;   * The type-40 NIBBLE ORDER remains UNPROVEN — even-low/odd-high is mxp4-code's named uncertainty and
+;     mx4_w transcribes it unchanged. The GPU agreeing with the CPU says nothing about it whatsoever,
+;     since both read the same hypothesis. Named again here so a reader of the kernel cannot miss it.
+;   * The matvec slot map requires cols a whole multiple of 32 (the scale group) — at any other width it
+;     is WRONG, not slow, because a group would straddle a row boundary and take the wrong scale byte.
+;     mx4m-admissible? lets the carrier ASK. It also requires SIMD width exactly 32 (Apple family 7/8/9).
+;   * `nel` is the SLICE element count, not the tensor's: the exoscalar seam. ffn_*_exps tensors hold 256
+;     slices (one per expert), each with its own plane pair, and a kernel handed the wrong nel reads
+;     payload bytes as exponents. It is a required argument on every entry point, as in the carver.
+;
+; Kin: mxfp4-plane-dequant.fk (mxp4-* — the CPU carver this must equal, and mxp-e8m0's one meaning),
+; mxfp8-msl.fk (GGUF type 41, sharing the mxm_ spine emitted here so there is ONE E8M0 on the device),
+; q6k-msl.fk (the emit idiom, the read-back-into-Form discipline, and the no-header rule),
+; qk-matvec-slot.fk (the slot map this follows and the epsilon it did NOT have to spend here),
+; f16-decode.fk (fd-value at (2,1) — the recipe mx4_val transcribes).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/mxfp4-plane-dequant.fk
+;
+; Proven by: form-stdlib/tests/mx-msl-band.fk (the transcription, against the carver, on real bytes) and
+;            form/native/metal/metal_mx_gpu.sh (the GPU, Mac-only, head AND tail of a real tensor)
+
+(do
+    ; ================= the transcription, read back into Form =================
+    ; Everything in this section is what the emitted C computes, written in Form with the same integer
+    ; identities and the same offsets, so mx-msl-band.fk can falsify the TEXT against mxp4-plane-dequant's
+    ; independently written carver rather than against a paraphrase of it.
+
+    (defn mxm-mod (a n) (sub a (mul (div a n) n)))
+
+    ; --- 2^e, by exact multiplications, in the four staged loops the emitted mxm_pow2 runs.
+    ; Defined bottom-up: a forward reference in Form binds numb-empty under band-flatten (the load-order
+    ; cataphora this body has been bitten by), so each arm is defined before the arm that calls it.
+    ; The 256.0 / 0.00390625 strides are 2^8 and 2^-8: they cut a 127-iteration walk to at most 22 and
+    ; change no value, because every factor is an exact power of two.
+    (defn mxm-p2-nlo (a k) (if (lt k 0) (mxm-p2-nlo (mul a 0.5) (add k 1)) a))
+    (defn mxm-p2-nhi (a k) (if (le k (sub 0 8)) (mxm-p2-nhi (mul a 0.00390625) (add k 8)) (mxm-p2-nlo a k)))
+    (defn mxm-p2-lo  (a k) (if (gt k 0) (mxm-p2-lo (mul a 2.0) (sub k 1)) (mxm-p2-nhi a k)))
+    (defn mxm-p2-hi  (a k) (if (ge k 8) (mxm-p2-hi (mul a 256.0) (sub k 8)) (mxm-p2-lo a k)))
+    (defn mxm-pow2 (e) (mxm-p2-hi 1.0 e))
+
+    ; --- E8M0: a pure exponent byte, value 2^(e-127). No mantissa exists to decode.
+    ; UNLIKE mxp-e8m0 THIS DOES NOT REFUSE 0xFF. A kernel has no form_error; the device answers +inf for
+    ; the format's NaN encoding, which is loud rather than silent, and mx4m-e-ok? lets a carrier check the
+    ; scale plane before dispatch instead of discovering it in the weights. Named, not hidden.
+    (defn mxm-e8m0 (e) (mxm-pow2 (sub e 127)))
+    (defn mx4m-e-ok? (e) (if (eq e 255) 0 1))
+    ; the exactness wall of the bit-exactness sentence above, as a predicate a caller can ask.
+    ; DERIVED, not guessed: E2M1's values are m*2^j with m in {1, 1.5} and j in [-1, 2], so the product
+    ; 2^(e-127)*E2M1 is an exact f32 iff its smallest bit lands at or above 2^-149 (the subnormal step)
+    ; and its magnitude stays at or below the largest finite f32. 1.5*2^(e-127) carries a bit at
+    ; 2^(e-128), so the floor is e-127 >= -148; 6*2^(e-127) = 1.5*2^(e-125), so the ceiling is
+    ; e-127 <= 125. A byte can only ever violate the CEILING (e >= 253), never the floor — which is
+    ; itself worth saying, and is why this predicate is a named boundary and not a live risk here.
+    (defn mx4m-e-safe? (e) (if (lt (sub e 127) (sub 0 148)) 0 (if (gt (sub e 127) 125) 0 1)))
+
+    ; --- E2M1: fd-value at (eb 2, mb 1), bias 1. Field extraction by division, no bitwise operator.
+    (defn mx4m-val (c)
+        (do
+            (let mant (mxm-mod c 2))
+            (let ex   (mxm-mod (div c 2) 4))
+            (let sgn  (div c 8))
+            (let frac (div (mul 1.0 mant) 2.0))
+            (let mag (if (eq ex 0)
+                         (mul (mxm-pow2 0) frac)
+                         (mul (mxm-pow2 (sub ex 1)) (add 1.0 frac))))
+            (if (eq sgn 1) (sub 0.0 mag) mag)))
+
+    ; --- one weight at FLAT element index idx of a slice of `nel` elements starting at `base`.
+    ; The nibble half is mxp4-code's hypothesis, unchanged: even idx takes the LOW nibble.
+    (defn mx4m-flat-at (src base nel idx)
+        (do
+            (let pb (div idx 2))
+            (let by (eqr-at src (add base pb)))
+            (let c (if (eq (sub idx (mul pb 2)) 0) (mxm-mod by 16) (div by 16)))
+            (let e (eqr-at src (add base (add (div nel 2) (div idx 32)))))
+            (mul (mxm-e8m0 e) (mx4m-val c))))
+
+    ; --- the slot map, read back into Form: which scale byte and which payload bytes lane `lane` reads
+    ; for group `g` of row `r`. The band demands these land on the same weights the flat reach does.
+    (defn mx4m-groups (cols) (div cols 32))
+    (defn mx4m-g0 (r cols) (div (mul r cols) 32))
+    (defn mx4m-scale-read (nel r cols g) (add (div nel 2) (add (mx4m-g0 r cols) g)))
+    (defn mx4m-pay-read (r cols g m) (add (div (add (mul r cols) (mul g 32)) 2) m))
+    ; the flat element index the (g, m, half) position of row r accumulates
+    (defn mx4m-slot-pos (r cols g m half) (add (mul r cols) (add (mul g 32) (add (mul m 2) half))))
+
+    ; the width the carrier must refuse below: cols must be a whole multiple of the scale group
+    (defn mx4m-group () 32)
+    (defn mx4m-admissible? (cols) (if (eq (mxm-mod cols (mx4m-group)) 0) 1 0))
+
+    ; ================= the emitted MSL =================
+    ; One fragment per meaning, composed by str_concat, so a diff of the emitted text points at a recipe.
+
+    ; --- the SHARED spine: integer mod, the staged power of two, and E8M0. mxfp8-msl.fk emits this same
+    ; fragment and no other copy, so there is exactly ONE E8M0 on the device — the same discipline
+    ; mxp-e8m0 keeps in the carvers. ---
+    (defn mxm-msl-spine ()
+        "static inline int mxm_mod(int a, int n) { return a - (a / n) * n; } static inline float mxm_pow2(int e) { float a = 1.0f; int k = e; while (k >= 8) { a = a * 256.0f; k = k - 8; } while (k > 0) { a = a * 2.0f; k = k - 1; } while (k <= -8) { a = a * 0.00390625f; k = k + 8; } while (k < 0) { a = a * 0.5f; k = k + 1; } return a; } static inline float mxm_e8m0(int e) { return mxm_pow2(e - 127); } ")
+
+    ; --- E2M1, mx4m-val in C ---
+    (defn mx4m-msl-val ()
+        "static inline float mx4_val(int c) { int mant = mxm_mod(c, 2); int ex = mxm_mod(c / 2, 4); int sgn = c / 8; float frac = float(mant) / 2.0f; float mag = (ex == 0) ? (mxm_pow2(0) * frac) : (mxm_pow2(ex - 1) * (1.0f + frac)); return (sgn == 1) ? -mag : mag; } ")
+
+    ; --- one weight at a flat element index, mx4m-flat-at in C. `nel` is the SLICE element count. ---
+    (defn mx4m-msl-weight ()
+        "static inline float mx4_w(device const uchar* qb, uint nel, uint idx) { uint pb = idx / 2u; int by = int(qb[pb]); int c = (idx - pb * 2u == 0u) ? mxm_mod(by, 16) : by / 16; int e = int(qb[nel / 2u + idx / 32u]); return mxm_e8m0(e) * mx4_val(c); } ")
+
+    (defn mx4m-msl-helpers ()
+        (str_concat (mxm-msl-spine) (str_concat (mx4m-msl-val) (mx4m-msl-weight))))
+
+    ; --- kernel 1: dequant a range into f32. One thread per weight. `off` is a flat ELEMENT offset into
+    ; the slice, so a caller can dequant a tile at either end of a 8 388 608-element slice without moving
+    ; the resident bytes — the aporon discipline, made reachable. ---
+    (defn mx4m-dequant-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& cnt [[buffer(3)]], constant uint& nel [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= cnt) return; w[i] = mx4_w(qb, nel, off + i); }")))
+
+    ; --- kernel 2: the FUSED matvec on the slot map. 32 lanes per row; lane L owns scale groups
+    ; L, L+32, L+64, ... of that row. Per group: ONE scale byte, ONE mxm_e8m0, 16 payload bytes each
+    ; feeding two weights. The scale multiplies the group sum — free, because it is a power of two. ---
+    (defn mx4m-matvec-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ng = cols / 32u; uint g0 = (r * cols) / 32u; uint sbase = nel / 2u; float sumf = 0.0f; for (uint g = lane; g < ng; g += 32u) { float s = mxm_e8m0(int(qb[sbase + g0 + g])); uint p = (r * cols + g * 32u) / 2u; device const float* xv = x + g * 32u; float acc = 0.0f; for (uint m = 0u; m < 16u; ++m) { int by = int(qb[p + m]); acc = acc + xv[m * 2u] * mx4_val(mxm_mod(by, 16)); acc = acc + xv[m * 2u + 1u] * mx4_val(by / 16); } sumf = sumf + s * acc; } float sv = metal::simd_sum(sumf); if (lane == 0u) y[r] = sv; }")))
+
+    ; --- each kernel self-contained (spine + body), and the two as ONE translation unit with the spine
+    ; emitted once: C has no forgiveness for a repeated `static inline`, and the Metal front end says so
+    ; loudly. The matvec form needs qml-msl-header ahead of it for metal::simd_sum; the assembling cell
+    ; emits that header, exactly once for the whole file. ---
+    (defn mx4m-dequant-msl (fname) (str_concat (mx4m-msl-helpers) (mx4m-dequant-body fname)))
+    (defn mx4m-matvec-msl  (fname) (str_concat (mx4m-msl-helpers) (mx4m-matvec-body  fname)))
+    (defn mx4m-msl-unit (dname mname)
+        (str_concat (mx4m-msl-helpers)
+        (str_concat (mx4m-dequant-body dname) (mx4m-matvec-body mname))))
+
+    0)
