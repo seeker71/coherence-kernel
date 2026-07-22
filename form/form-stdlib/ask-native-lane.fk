@@ -84,23 +84,41 @@
                     (if (lt j 0) "" (substring raw s (if (gt j s) (sub j 1) s)))))))
 
     (defn anl-answer-text (raw)  (anl-section raw "ANSWER"))
+    ; An artifact written before STOP-REASON existed has no such header, and `anl-line-value` would
+    ; return "" for it — which reads as a stop reason of nothing rather than as an unanswerable
+    ; question. `unknown` is the honest word for an artifact from a carrier that did not track it.
+    (defn anl-stop-reason (raw)
+        (do (let s (anl-line-value raw "STOP-REASON"))
+            (if (str_eq s "") "unknown" s)))
     (defn anl-receipt-text (raw) (anl-section raw "RECEIPT"))
 
-    ; `read_file` hands back nil for a path that is not there, and every string recipe below would
-    ; crash on it rather than report it. One guard, used by everything that reads a header from disk,
-    ; so "no artifact" is a value ("") and never a stack trace.
+    ; ASKING THE FILESYSTEM WHETHER THE FILE IS THERE, instead of asking a value what it is.
     ;
-    ; A FOURTH-ARM DIVERGENCE THIS CELL SITS ON, named because it changes behaviour and not just
-    ; tidiness. `nil?` answers 1 for an ordinary STRING on fkwu and 0 on go, rust and ts — probed
-    ; directly, (nil? "a") -> 0 / 0 / 0 / 1. Every guard below is therefore ALWAYS TRUE on fkwu, so on
-    ; that arm a present, well-formed, correctly-bound artifact still classifies as
-    ; `native-lane:absent` and the ask verb falls back to the grounded lane. The degradation is safe —
-    ; it refuses, names its reason, and never fabricates — but the native lane cannot answer from an
-    ; fkwu-only host until `nil?` agrees across the arms. That is a kernel movement, not a recipe one,
-    ; and it is not worked around here: a recipe that hid it would make the divergence invisible
-    ; exactly where someone would later trust it.
+    ; What this cell said until 2026-07-22, and it was true: `nil?` answers 1 for an ordinary STRING
+    ; on fkwu and 0 on go, rust and ts, so every `nil?` guard here was ALWAYS TRUE on fkwu and a
+    ; present, well-formed, correctly-bound artifact still classified as `native-lane:absent`. The
+    ; degradation was safe — it refused and named its reason — but it meant the native lane could
+    ; never answer from an fkwu-only host. The cell declined to work around it, on the grounds that a
+    ; recipe hiding a divergence makes it invisible exactly where someone would later trust it.
+    ;
+    ; The declining was right and the diagnosis was one layer off. Probed again today across all four
+    ; arms: `(len "abc")` is 3 / 3 / 3 / 0 — fkwu measures a STRING's length as a LIST's length, which
+    ; is zero, and `nil?` is `(eq (len xs) 0)`, so `nil?` is not itself divergent; it is downstream of
+    ; a `len` that answers a question about lists when handed a string. Waiting for `nil?` to agree
+    ; was waiting for a kernel movement that the recipe did not actually need.
+    ;
+    ; What the recipe needed was to stop inferring absence from the SHAPE OF A RETURN VALUE and ask
+    ; the filesystem directly. `file_size` returns -1 for a path that is not there and the byte count
+    ; for one that is — probed on go, rust, ts and fkwu, all four: -1 / -1 / -1 / -1 and >0 / >0 / >0
+    ; / >0. That is not a workaround for the divergence; it is a predicate that never had to touch it,
+    ; and it is strictly the better question besides — "is there a file here" is what absence MEANS,
+    ; while "did read_file hand back something odd" was only ever a proxy for it. The `nil?`-shaped
+    ; door (`anl-refusal-of`, `anl-ready-of`) stays for callers that already hold text and never
+    ; touched a path; the path-shaped door below no longer consults it.
+    (defn anl-present? (path) (if (gt (file_size path) 0) 1 0))
     (defn anl-header-of (raw key) (if (nil? raw) "" (anl-line-value raw key)))
-    (defn anl-header-at (path key) (anl-header-of (read_file path) key))
+    (defn anl-header-at (path key)
+        (if (eq (anl-present? path) 0) "" (anl-line-value (read_file path) key)))
     (defn anl-model-at (path) (anl-header-at path "MODEL"))
     (defn anl-model () (anl-model-at (anl-artifact-path)))
 
@@ -129,9 +147,13 @@
 
     (defn anl-ready-of-text (raw q) (if (str_eq (anl-refusal-of-text raw q) "") 1 0))
     (defn anl-ready-of (raw q) (if (str_eq (anl-refusal-of raw q) "") 1 0))
-    (defn anl-ready-at (path q) (anl-ready-of (read_file path) q))
+    ; The path-shaped door: absence is the filesystem's answer, and everything past it is the
+    ; four-way-agreeing text logic. Nothing here consults `nil?`.
+    (defn anl-refusal-at (path q)
+        (if (eq (anl-present? path) 0) "native-lane:absent"
+            (anl-refusal-of-text (read_file path) q)))
+    (defn anl-ready-at (path q) (if (str_eq (anl-refusal-at path q) "") 1 0))
     (defn anl-ready? (q) (anl-ready-at (anl-artifact-path) q))
-    (defn anl-refusal-at (path q) (anl-refusal-of (read_file path) q))
     (defn anl-refusal (q) (anl-refusal-at (anl-artifact-path) q))
 
     ; ================= 3. the answer, with its lane and its costs attached =================
@@ -147,12 +169,17 @@
         (str_concat (str_concat (anl-nl) "blob-sha256:") (str_concat (anl-line-value raw "BLOB-SHA256")
         (str_concat (str_concat (anl-nl) "question-sha256:") (str_concat (anl-line-value raw "QUESTION-SHA256")
         (str_concat (str_concat (anl-nl) "gates:") (str_concat (anl-line-value raw "GATES")
-        (str_concat (anl-nl) (anl-receipt-text raw))))))))))))))))
+        ; WHY THE ANSWER ENDED, beside the lane that produced it and at the same altitude. An answer
+        ; that ran out of harness reads exactly like an answer that ended — it just stops — and a
+        ; caller shown prose with no stop reason will read a truncation as a complete thought. This
+        ; is `eos` when the model emitted its own end token and `cap` when it did not, and it is the
+        ; second thing after the lane name that a caller must not have to dig for.
+        (str_concat (str_concat (anl-nl) "stop-reason:") (str_concat (anl-stop-reason raw)
+        (str_concat (str_concat (anl-nl) "gate-mode:") (str_concat (anl-line-value raw "GATE-MODE")
+        (str_concat (anl-nl) (anl-receipt-text raw))))))))))))))))))))
 
     (defn anl-answer-at (path q)
-        (do
-            (let raw (read_file path))
-            (if (eq (anl-ready-of raw q) 0) "" (anl-answer-of raw q))))
+        (if (eq (anl-ready-at path q) 0) "" (anl-answer-of (read_file path) q)))
     (defn anl-answer (q) (anl-answer-at (anl-artifact-path) q))
 
     0)
