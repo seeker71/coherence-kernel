@@ -1,0 +1,129 @@
+; mla-msl.fk — Multi-head Latent Attention (mla-attn.fk) lifted to Metal kernels the BODY emits.
+;
+; WHY THIS EXISTS. Stone 22 proved the MLA recipe on the CPU (mla-attn.fk, band 63, against an
+; independent fp64 transcription of ds4.c). Stone 1 measured the pure CPU-recipe attention lane at
+; ~51 min/token for a 3B model at real width. DeepSeek-V4-Flash at real width on CPU recipes is
+; infeasible. A real token needs MLA on the GPU. This file is that: the low-rank Q/KV projections, the
+; two RMSNorms (embed-space and rank-space), the per-head unweighted RMSNorm, the trailing-nrot RoPE,
+; the single-latent-row attention with the per-head SINK logit, the inverse-RoPE, and the grouped
+; low-rank output projection — each a Metal kernel, every character authored here.
+;
+; THE ARITHMETIC IS THE RECIPE'S, TO THE ASSOCIATION. The determinism discipline of trig.fk and
+; transformer-numerics.fk ("the recipe DEFINES the reduction order, so every kernel computes the same
+; bits") is carried onto the GPU: this file does NOT call metal::exp, metal::sqrt, metal::sin. It
+; transcribes tn-exp (14-term Taylor with argument halving), tn-sqrt (Newton, 50 iters from the value),
+; and fsin/fcos (round-reduce + 10-term Taylor) into Metal, and it matches the FOLD DIRECTION of every
+; reduction: tb-dot is a RIGHT fold (so mla_dot walks columns DESCENDING), ln-sumsq-acc / tn-sum /
+; tb-weighted-acc are LEFT folds (so those loops ascend). The consequence: the ONLY difference between
+; this body's fp64 answer and the GPU's f32 answer is the WORKING PRECISION — f32 vs fp64 over an
+; identical operation graph — not a different approximation and not a different summation order. So the
+; gate is a derived f32 bound, not a vendor-transcendental tolerance. `selfgauge`.
+;
+; THE SLOT (asktoll, corpus row 846). The attention kernel's thread map is ONE THREAD PER HEAD: head h
+; is the thread's slot, so the per-head SINK logit sinks[h] and the softmax denominator are read/computed
+; ONCE per slot and reused across all hd output dims — never recomputed per output element. That is the
+; grain of the ask the recipe's shape hands us: n_head_kv = 1, one latent row shared by every query head,
+; each head an independent softmax over that row set. The inverse-RoPE kernel is per-head for the same
+; reason. The projection/norm kernels are one-thread-per-output-row (matvec) or one-thread (the single
+; embed-space norm), the ordinary GPU shapes, kept order-identical to the recipe.
+;
+; NO `using namespace metal;`, ONE `#include <metal_stdlib>`. The same discipline q6k-msl.fk / mxfp4-msl.fk
+; keep: emitting a second `using namespace metal;` makes this body's own `round` ambiguous and the unit
+; stops compiling. This file makes ZERO metal:: library calls at all (every transcendental is
+; transcribed), so nothing needs qualifying; the header is emitted once by mla-msl-unit.
+;
+; THE RADIUS THIS CELL SPEAKS FOR (aporon) — read it before believing the gate.
+;   * NOT bit-exact. f32 vs fp64 over transcendentals cannot be bit-exact; the claim is agreement within
+;     a stated f32 bound on a >=2-position example that exercises RoPE (RoPE is the identity at pos 0 —
+;     hushfold, corpus row 859 — so a one-position test cannot witness it; the demo runs positions 0,1,2).
+;   * NOT the real dims. The demo is E=4, R=3, nh=2, hd=4, nrot=2, ng=2; V4-Flash is nh=64, hd=512,
+;     nrot=64, n_embd=4096, 43 layers. The kernels are dim-generic (rows/cols/nh/hd are runtime uniforms)
+;     but no gate here has SEEN the real dims. The attend kernel's per-head accumulator is a private
+;     array capped at MLA_MAX_HD (512, = V4-Flash's head_dim); above that it is WRONG, not slow.
+;   * NOT YaRN, NOT the E4M3 cache encoding, NOT the residual/MoE half of the layer, NOT a resident
+;     real weight tensor. Same gaps mla-attn.fk's radius names. This is the attention block's arithmetic,
+;     on the GPU, once, at toy rank.
+;   * mla_round is a range-reduce that is exact only while |x| stays within a few periods of 2*pi (it
+;     rounds by truncation, no metal::rint). The demo's rope angles are pos*base^(-2k/nrot) with
+;     pos in {0,1,2} and base 10000, i.e. |angle| <= 2 — never near a half-integer of TAU. Real positions
+;     in the thousands need a proper round; named, not hidden.
+;   * The pair FREQUENCIES base^(-2k/nrot) are precomputed by the body (rope-freq-theta -> fpow -> math_exp)
+;     and handed to the rope kernel as a small buffer: the kernel computes angle = pos*freq and the
+;     rotation and its trig, but not the frequency table. That table is position-INDEPENDENT layout, so
+;     computing it once on the host is the honest split, and it is stated here.
+;
+; Kin: mla-attn.fk (the CPU recipe this equals — mla_dot mirrors tb-dot's right fold, the attend kernel
+; mirrors mla-attend-head's sink softmax), mxfp4-msl.fk / qk-matvec-slot.fk (the emit idiom, the slot
+; discipline, the read-back-into-Form gate, the no-header rule), trig.fk / transformer-numerics.fk (the
+; deterministic series this transcribes), mla-demo.fk (the shared toy fixture and the reference printers).
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/mla-msl-band.fk (the emitted text: one header, no using-namespace, one
+;            spine, every kernel present, the structural index maps against the recipe's slicing) and
+;            form/native/metal/metal_mla_gpu.sh (the GPU, Mac-only: every stage and the reassembled
+;            cache-row and block-output against the fp64 recipe at positions 0,1,2 within the f32 bound).
+
+(do
+    ; ================= the structural index maps, read back into Form =================
+    ; The offsets the emitted kernels compute, in Form, so mla-msl-band.fk can falsify the TEXT's
+    ; indexing against mla-attn.fk's own slicing (tb-vslice h*hd, the tail at hd-nrot, the grouped
+    ; g*gdim) rather than trust that the C string got them right. A transposed offset that compiles and
+    ; runs is the failure this guards (q6k-msl.fk's read-back lesson).
+    (defn mlm-head-base (h hd) (mul h hd))              ; head h's slice start in an nh*hd vector
+    (defn mlm-nnope (hd nrot) (sub hd nrot))            ; the non-rotated front width
+    (defn mlm-pair-lo (h hd nnope k) (add (mul h hd) (add nnope (mul 2 k))))  ; pair k's first index
+    (defn mlm-npair (nrot) (div nrot 2))
+    (defn mlm-gout-base (g gdim) (mul g gdim))          ; group g's slice start (grouped output)
+    (defn mlm-gdim (nh ng hd) (mul (div nh ng) hd))     ; each group's width = (nh/ng)*hd
+
+    ; ================= the emitted MSL =================
+    ; One fragment per meaning, composed by str_concat, so a diff of the emitted text points at a recipe.
+
+    ; --- the numerics spine: abs, Newton sqrt (tn-sqrt), Taylor exp (tn-exp), round-reduced sin/cos
+    ;     (fsin/fcos), and the RIGHT-fold dot (tb-dot). Emitted ONCE for the whole unit. ---
+    (defn mla-msl-spine ()
+        "static inline float mla_abs(float x) { return (x < 0.0f) ? -x : x; } static inline float mla_sqrt(float v) { if (v <= 0.0f) return 0.0f; float g = v; for (int n = 0; n < 50; ++n) { g = 0.5f * (g + v / g); } return g; } static inline float mla_exp_small(float x) { float term = 1.0f; float acc = 1.0f; for (int n = 1; n <= 14; ++n) { term = term * (x / float(n)); acc = acc + term; } return acc; } static inline float mla_pow2k(float v, int k) { for (int i = 0; i < k; ++i) v = v * v; return v; } static inline float mla_exp(float x) { float a = x; int k = 0; while (mla_abs(a) > 0.5f) { a = a * 0.5f; k = k + 1; } return mla_pow2k(mla_exp_small(a), k); } static inline float mla_round(float z) { return float(int(z + ((z >= 0.0f) ? 0.5f : -0.5f))); } static inline float mla_sin(float x) { float r = x - 6.283185307179586f * mla_round(x / 6.283185307179586f); float x2 = r * r; float term = r; float acc = 0.0f; for (int k = 0; k < 10; ++k) { acc = acc + term; term = (term * -1.0f * x2) / (float(2 * (k + 1)) * float(2 * (k + 1) + 1)); } return acc; } static inline float mla_cos(float x) { return mla_sin(x + 1.5707963267948966f); } static inline float mla_dot(device const float* a, device const float* b, uint n) { float acc = 0.0f; for (int c = int(n) - 1; c >= 0; --c) acc = a[uint(c)] * b[uint(c)] + acc; return acc; } ")
+
+    ; --- kernel: the weighted RMSNorm (ln-rmsnorm), embed-space or rank-space. sumsq is ln-sumsq-acc's
+    ;     LEFT fold (ascending); out = (x * (1/rms)) * g, matching tn-scale then ln-mul2. One thread. ---
+    (defn mla-rmsnorm-body ()
+        "kernel void form_mla_rmsnorm_f32(device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* out [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i != 0u) return; float sumsq = 0.0f; for (uint j = 0u; j < n; ++j) sumsq = sumsq + x[j] * x[j]; float ms = sumsq / float(n); float rms = mla_sqrt(ms + eps); float inv = 1.0f / rms; for (uint j = 0u; j < n; ++j) out[j] = (x[j] * inv) * g[j]; } ")
+
+    ; --- kernel: plain f32 matvec (tb-matvec). Row r per thread; the dot is tb-dot's RIGHT fold, so the
+    ;     column loop DESCENDS. Serves Wqa, Wqb, Wkv, the grouped was[g], and the final wb. ---
+    (defn mla-matvec-body ()
+        "kernel void form_mla_matvec_f32(device const float* W [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; float acc = 0.0f; for (int c = int(cols) - 1; c >= 0; --c) acc = W[r * cols + uint(c)] * x[uint(c)] + acc; y[r] = acc; } ")
+
+    ; --- kernel: the per-head UNWEIGHTED RMSNorm (mla-head-rms, ds4's head_rms_norm_inplace). One thread
+    ;     per head; g = 1, so out = x * (1/rms). ---
+    (defn mla-headrms-body ()
+        "kernel void form_mla_headrms_f32(device const float* q [[buffer(0)]], device float* out [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant float& eps [[buffer(4)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint base = h * hd; float sumsq = 0.0f; for (uint j = 0u; j < hd; ++j) sumsq = sumsq + q[base + j] * q[base + j]; float ms = sumsq / float(hd); float inv = 1.0f / mla_sqrt(ms + eps); for (uint j = 0u; j < hd; ++j) out[base + j] = q[base + j] * inv; } ")
+
+    ; --- kernel: the trailing-nrot RoPE (mla-rope-heads / mla-rope-tail). One thread per head. The front
+    ;     hd-nrot dims are copied bit-untouched; the tail is rotated pair-adjacent. sign = +1 forward
+    ;     (query and cache row) and -1 inverse (the attention OUTPUT). freqs[k] = base^(-2k/nrot) is the
+    ;     body's rope-freq-theta, handed in; the kernel forms angle = pos*freq and the rotation's trig. ---
+    (defn mla-rope-body ()
+        "kernel void form_mla_rope_f32(device const float* v [[buffer(0)]], device float* out [[buffer(1)]], device const float* freqs [[buffer(2)]], constant uint& nh [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& nrot [[buffer(5)]], constant float& pos [[buffer(6)]], constant float& sign [[buffer(7)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint base = h * hd; uint nnope = hd - nrot; for (uint j = 0u; j < nnope; ++j) out[base + j] = v[base + j]; uint npair = nrot / 2u; for (uint k = 0u; k < npair; ++k) { float a = pos * freqs[k]; float ca = mla_cos(a); float sa = sign * mla_sin(a); uint lo = base + nnope + 2u * k; float x0 = v[lo]; float x1 = v[lo + 1u]; out[lo] = x0 * ca - x1 * sa; out[lo + 1u] = x0 * sa + x1 * ca; } } ")
+
+    ; --- kernel: the single-latent-row attention with the per-head SINK (mla-attend-head / mla-attn-heads).
+    ;     THE SLOT: one thread per head. K and V are the SAME row (rows[j*hd..]). The sink is a learned
+    ;     logit that enters the softmax DENOMINATOR ONLY (no value of its own), so a row's weights sum to
+    ;     LESS than 1. Two passes in the recipe's order: (1) max over (sink :: scores); (2) exp, the LEFT
+    ;     fold sum tn-sum, and the LEFT fold weighted accumulate tb-weighted-acc; denom = exp(sink-m) +
+    ;     sum(e); out = acc * (1/denom). The dot is tb-dot's right fold (mla_dot). ---
+    (defn mla-attend-body ()
+        "kernel void form_mla_attend_f32(device const float* q [[buffer(0)]], device const float* rows [[buffer(1)]], device float* out [[buffer(2)]], device const float* sinks [[buffer(3)]], constant uint& nh [[buffer(4)]], constant uint& hd [[buffer(5)]], constant uint& nrows [[buffer(6)]], constant float& scale [[buffer(7)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; device const float* qh = q + h * hd; float sink = sinks[h]; float m = sink; for (uint j = 0u; j < nrows; ++j) { float s = scale * mla_dot(qh, rows + j * hd, hd); if (s > m) m = s; } float acc[MLA_MAX_HD]; for (uint d = 0u; d < hd; ++d) acc[d] = 0.0f; float se = 0.0f; for (uint j = 0u; j < nrows; ++j) { float s = scale * mla_dot(qh, rows + j * hd, hd); float e = mla_exp(s - m); se = se + e; device const float* rj = rows + j * hd; for (uint d = 0u; d < hd; ++d) acc[d] = acc[d] + rj[d] * e; } float denom = mla_exp(sink - m) + se; float inv = 1.0f / denom; for (uint d = 0u; d < hd; ++d) out[h * hd + d] = acc[d] * inv; } ")
+
+    ; --- ONE translation unit: the body's one metal_stdlib, the MLA_MAX_HD cap, the spine once, then the
+    ;     five kernels. A carrier compiles exactly this; it composes nothing itself. ---
+    (defn mla-msl-unit ()
+        (str_concat "#include <metal_stdlib>\n#define MLA_MAX_HD 512\n"
+        (str_concat (mla-msl-spine)
+        (str_concat (mla-rmsnorm-body)
+        (str_concat (mla-matvec-body)
+        (str_concat (mla-headrms-body)
+        (str_concat (mla-rope-body) (mla-attend-body))))))))
+
+    0)
