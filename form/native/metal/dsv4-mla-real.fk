@@ -54,13 +54,20 @@
 ; (assocwall, row 866). A dead view / unrun kernel reads as a sentinel (NaN / 0x7F7FFFFF) the check rejects
 ; (edgedrop / zerobirth). The offered-interface guard is on EVERY dispatch.
 ;
-; THE HONEST BOUND on the INPUT (knownsolved). The true MLA input at layer 0 is the HC-pre of the residual
-; stream (Stone's Stage 2), which this stage does not yet wire. So the projection chain is fed the token's
-; real EMBEDDING as a PROBE vector — exactly Stone 33/34's mechanism-witness class: it proves the low-rank
-; Q/KV projections and the two rank-space RMSNorms BIND and COMPUTE at real dims through the views, NOT
-; that the numbers are the real layer-0 activations. The tensors, dims, byte offsets and decode ARE real.
+; THE INPUT, and the bound STONE 36 REMOVED. Stone 35's chain was fed the token's raw EMBEDDING as a PROBE
+; (knownsolved): it proved the projections BIND and COMPUTE at real dims, not that the numbers were the real
+; layer-0 activations. Stage 4 wires the missing frame — the embedding broadcast to all 4 hyper-connection
+; streams (ds4.c:9764) and collapsed by hc_pre (ds4.c:9690) — so the MLA is now also run on the REAL layer-0
+; input, and closed by hc_post (ds4.c:9772). Gates 2-22 keep the probe (they are the per-dispatch witnesses
+; and their input must not move); gates 24-29 are the complete attention half on the real activations.
 ;
-; preludes: form-stdlib/core.fk native/metal/dsv4-token.fk form-stdlib/mla-msl.fk
+; THE EVIDENCE CLASS SPLITS IN TWO (twinblind, row 868). The projection surface is CANONICAL — a matvec and
+; an RMSNorm have one right answer — so a self-carve falsifies it. The attention CORE is CHOOSING, and a
+; self-carve inherits the choice on BOTH sides. Everything from the per-head RMSNorm onward is therefore
+; proven against a RENTED ORACLE: form-stdlib/tests/dsv4-mla-core-oracle.py, an independent fp64
+; transcription of ds4.c that parses this same GGUF itself and shares no code with this body's path.
+;
+; preludes: form-stdlib/core.fk native/metal/dsv4-token.fk form-stdlib/mla-msl.fk form-stdlib/dsv4-hc-msl.fk
 ;
 ; Proven by: native/metal/metal_dsv4_layer.sh (the MLA-entry dispatches on the live file, each gated by
 ; the offered-interface guard — an unrun kernel reads as a sentinel, so every dispatch is checked).
@@ -109,14 +116,33 @@
     (defn dsv4-kvq-body ()
         " static inline float ds4_e4m3_mag(int i) { int e = (i >> 3) & 15; int m = i & 7; return (e == 0) ? (float(m) * 0.001953125f) : ((1.0f + float(m) * 0.125f) * metal::exp2(float(e - 7))); } static inline float ds4_e4m3_round(float v) { float sgn = (v < 0.0f) ? -1.0f : 1.0f; float ax = metal::min(metal::abs(v), 448.0f); int lo = 0; int hi = 126; for (int it = 0; it < 7; ++it) { if (lo >= hi) break; int mid = (lo + hi + 1) >> 1; if (ds4_e4m3_mag(mid) <= ax) lo = mid; else hi = mid - 1; } int best = lo; if (best < 126) { float bd = metal::abs(ax - ds4_e4m3_mag(best)); float nd = metal::abs(ax - ds4_e4m3_mag(best + 1)); if (nd < bd || (nd == bd && ((best + 1) & 1) == 0 && (best & 1) != 0)) best = best + 1; } return sgn * ds4_e4m3_mag(best); } static inline float ds4_ceil_log2(float t) { uint b = as_type<uint>(t); int e = int((b >> 23) & 255u) - 127; uint frac = b & 8388607u; return float((frac == 0u) ? e : (e + 1)); } kernel void form_dsv4_kv_fp8_f16_round(device const float* v [[buffer(0)]], device float* out [[buffer(1)]], constant uint& hd [[buffer(2)]], constant uint& nrot [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i != 0u) return; for (uint j = 0u; j < hd; ++j) out[j] = v[j]; uint nnope = hd - nrot; for (uint off = 0u; off + 64u <= nnope; off += 64u) { float amax = 0.0f; for (uint j = 0u; j < 64u; ++j) { float a = metal::abs(out[off + j]); if (a > amax) amax = a; } if (amax < 1.0e-4f) amax = 1.0e-4f; float sc = metal::exp2(ds4_ceil_log2(amax / 448.0f)); for (uint j = 0u; j < 64u; ++j) { float w = out[off + j] / sc; w = metal::clamp(w, -448.0f, 448.0f); out[off + j] = ds4_e4m3_round(w) * sc; } } for (uint j = 0u; j < hd; ++j) out[j] = float(half(out[j])); }")
 
-    ; --- the CORE translation unit: one metal_stdlib, mxfp8-msl.fk's own decode spine once, then the two
+    ; --- kernel 3: the plain F16 matvec (ds4.c matvec_f16). STAGE 4 needs it for hc_attn_fn, which is
+    ; F16 [in 16384, out 24] — the hyper-connection's mixing projection. One thread per output row, a
+    ; straight sequential fold; float(as_type<half>(h)) is the exact IEEE half->single widening.
+    (defn dsv4-f16-matvec-body ()
+        " kernel void form_dsv4_f16_matvec(device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; float acc = 0.0f; ulong base = (ulong)r * (ulong)cols; for (uint j = 0u; j < cols; ++j) { ushort h = *(device const ushort*)(qb + (base + (ulong)j) * 2ul); acc = acc + float(as_type<half>(h)) * x[j]; } y[r] = acc; }")
+
+    ; --- the CORE translation unit: one metal_stdlib, mxfp8-msl.fk's own decode spine once, then the
     ; kernels above. A carrier compiles exactly this; it composes nothing itself.
     (defn dsv4-mla-core-msl ()
         (do
             (print "MSL")
             (print (str_concat (qml-msl-header)
                     (str_concat (mx8m-msl-helpers)
-                    (str_concat (dsv4-mx8-grouped-body) (dsv4-kvq-body)))))
+                    (str_concat (dsv4-mx8-grouped-body)
+                    (str_concat (dsv4-kvq-body) (dsv4-f16-matvec-body))))))
+            (print "END")
+            0))
+
+    ; ================= STONE 36 STAGE 4: the HYPER-CONNECTION unit, at real dims ========================
+    ; dsv4-hc-msl.fk's OWN seven kernels, unchanged, in one translation unit. Stone 29 proved them at toy
+    ; scale (metal_hc_gpu.sh PASS 10); this band carries them onto blk.0's real hc_attn_fn [16384 -> 24],
+    ; hc_attn_scale [3] and hc_attn_base [24]. A complete layer is HC-pre -> block -> HC-post, twice; this
+    ; is the attention half's frame.
+    (defn dsv4-hc-unit ()
+        (do
+            (print "MSL")
+            (print (hc-msl-unit))
             (print "END")
             0))
 

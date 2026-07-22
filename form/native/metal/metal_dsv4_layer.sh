@@ -104,6 +104,12 @@ OA_ABS=$(tv blk.0.attn_output_a.weight 3); OA_IDX=$(tv blk.0.attn_output_a.weigh
 OA_IN=$(trow blk.0.attn_output_a.weight 5); OA_OUT=$(trow blk.0.attn_output_a.weight 6)
 OB_ABS=$(tv blk.0.attn_output_b.weight 3); OB_IDX=$(tv blk.0.attn_output_b.weight 5); OB_INNER=$(tv blk.0.attn_output_b.weight 6); OB_HOLDS=$(tv blk.0.attn_output_b.weight 7)
 OB_IN=$(trow blk.0.attn_output_b.weight 5); OB_OUT=$(trow blk.0.attn_output_b.weight 6)
+# the HYPER-CONNECTION frame (Stage 4): hc_attn_fn F16 [16384 -> 24], hc_attn_scale [3], hc_attn_base [24].
+HF_ABS=$(tv blk.0.hc_attn_fn.weight 3); HF_IDX=$(tv blk.0.hc_attn_fn.weight 5); HF_INNER=$(tv blk.0.hc_attn_fn.weight 6); HF_HOLDS=$(tv blk.0.hc_attn_fn.weight 7)
+HF_IN=$(trow blk.0.hc_attn_fn.weight 5); HF_OUT=$(trow blk.0.hc_attn_fn.weight 6)
+HS_ABS=$(tv blk.0.hc_attn_scale.weight 3); HS_IDX=$(tv blk.0.hc_attn_scale.weight 5); HS_INNER=$(tv blk.0.hc_attn_scale.weight 6); HS_HOLDS=$(tv blk.0.hc_attn_scale.weight 7)
+HB_ABS=$(tv blk.0.hc_attn_base.weight 3); HB_IDX=$(tv blk.0.hc_attn_base.weight 5); HB_INNER=$(tv blk.0.hc_attn_base.weight 6); HB_HOLDS=$(tv blk.0.hc_attn_base.weight 7)
+N_HC=4; HC_ITERS=20; HC_EPS=0.0000009999999975
 RMS_EPS=0.0000009999999975
 N_HEAD=64; HEAD_DIM=512; N_ROT=64; ROPE_BASE=10000.0; N_GROUPS=8; O_RANK=1024
 POS_A=0; POS_B=7      # hushfold (row 859): RoPE is IDENTITY at pos 0 — one position cannot witness it.
@@ -131,6 +137,13 @@ if cmp -s "$work/ora$POS_B/oracle-q_headrms.f64" "$work/ora$POS_B/oracle-q.f64";
     echo "FAIL the oracle's RoPE is a no-op at pos $POS_B too — the second position witnesses nothing"; exit 1
 fi
 echo "  hushfold: at pos $POS_B it is NOT — so pos $POS_A and pos $POS_B together do witness it"
+# STAGE 4 — the same oracle in `hc` mode: the MLA's input is no longer a probe but the REAL layer-0 input,
+# the embedding broadcast to n_hc streams (ds4.c:9764) and collapsed by hc_pre (ds4.c:9690).
+mkdir -p "$work/orahc"
+echo "  renting the oracle in HC mode at pos=$POS_A (the complete attention half of a real layer)..."
+DSV4_ORACLE_MODE=hc DSV4_ORACLE_OUT="$work/orahc" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_A" > "$work/orahc.txt" 2>"$work/orahc.err" \
+    || { echo "FAIL oracle hc-mode run"; tail -5 "$work/orahc.err"; exit 1; }
+grep -qx 'END' "$work/orahc.txt" || { echo "FAIL oracle hc stream truncated"; exit 1; }
 echo "  attn_norm: abs=$NORM_ABS view=$NORM_IDX inner=$NORM_INNER holds=$NORM_HOLDS"
 echo "  attn_q_a (MXFP8 $QA_IN->$QA_OUT): abs=$QA_ABS view=$QA_IDX inner=$QA_INNER holds=$QA_HOLDS"
 echo "  attn_kv  (MXFP8 $KV_IN->$KV_OUT): abs=$KV_ABS view=$KV_IDX inner=$KV_INNER holds=$KV_HOLDS"
@@ -157,6 +170,7 @@ LIB_EMB="$(compile_unit dsv4-embed-msl form_dsv4_embed_f16 dsv4emb)" || exit 1
 LIB_MLA="$(compile_unit dsv4-mla-unit form_mla_rmsnorm_f32 dsv4mla)" || exit 1
 LIB8="$(compile_unit dsv4-mx8-matvec-msl form_dsv4_mx8_matvec dsv4mx8)" || exit 1
 LIB_CORE="$(compile_unit dsv4-mla-core-msl form_dsv4_mx8_matvec_grouped dsv4core)" || exit 1
+LIB_HC="$(compile_unit dsv4-hc-unit form_hc_split_f32 dsv4hc)" || exit 1
 
 # ── 4. the carrier ────────────────────────────────────────────────────────────────────────────────
 cat > "$work/runner.swift" <<'SWIFT'
@@ -168,7 +182,7 @@ var ai = 1
 func S() -> String { let v = a[ai]; ai += 1; return v }
 func I() -> Int { let v = Int(a[ai])!; ai += 1; return v }
 func F() -> Float { let v = Float(a[ai])!; ai += 1; return v }
-let libEmb = S(), libMla = S(), lib8 = S(), libCore = S(), blobPath = S()
+let libEmb = S(), libMla = S(), lib8 = S(), libCore = S(), libHc = S(), blobPath = S()
 let step = I(), viewLimit = I(), nviews = I()
 let embAbs = I(), rowOff = I(), nEmbd = I(), embIdx = I(), embInner = I(), embHolds = I(), token = I()
 let normAbs = I(), normIdx = I(), normInner = I(), normHolds = I()
@@ -183,12 +197,17 @@ let oaAbs = I(), oaIdx = I(), oaInner = I(), oaHolds = I(), oaRows = I(), oaCols
 let obAbs = I(), obIdx = I(), obIdxInner = I(), obHolds = I(), obRows = I(), obCols = I()
 let nHead = I(), headDim = I(), nRot = I(), ropeBase = F(), nGroups = I(), oRank = I()
 let posA = I(), posB = I(), oraDirA = S(), oraDirB = S()
+let hfAbs = I(), hfIdx = I(), hfInner = I(), hfHolds = I(), hfRows = I(), hfCols = I()
+let hsAbs = I(), hsIdx = I(), hsInner = I(), hsHolds = I()
+let hbAbs = I(), hbIdx = I(), hbInner = I(), hbHolds = I()
+let nHc = I(), hcIters = I(), hcEps = F(), oraDirHc = S()
 
 guard let dev = MTLCreateSystemDefaultDevice() else { print("SKIP no Metal device"); exit(2) }
 let lEmb = try dev.makeLibrary(URL: URL(fileURLWithPath: libEmb))
 let lMla = try dev.makeLibrary(URL: URL(fileURLWithPath: libMla))
 let l8   = try dev.makeLibrary(URL: URL(fileURLWithPath: lib8))
 let lCore = try dev.makeLibrary(URL: URL(fileURLWithPath: libCore))
+let lHc = try dev.makeLibrary(URL: URL(fileURLWithPath: libHc))
 let queue = dev.makeCommandQueue()!
 var failures = 0, gpuErrors = 0
 var gpuFirstError: String? = nil
@@ -663,6 +682,131 @@ check(posDiff > 0 && coreFail == 0,
   "gate 23 hushfold: the same token's attention output DIFFERS between pos \(posA) and pos \(posB) in \(posDiff)/\(obRows) entries (max delta \(maxPosDelta)) while each run agrees with its OWN oracle — the RoPE is witnessed, not assumed",
   "gate 23 hushfold: the two positions produced identical output (\(posDiff) differing) or a core gate failed (\(coreFail))")
 
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+// STONE 36 STAGE 4 — ONE COMPLETE ATTENTION HALF OF A REAL LAYER: HC-pre -> MLA -> HC-post.
+//
+// Everything above fed the MLA the token's raw EMBEDDING as a probe (knownsolved). That bound is removed
+// here: the residual state is the embedding BROADCAST to all \(nHc) hyper-connection streams (ds4.c:9764),
+// hc_pre collapses it (ds4.c:9690) and hc_post recombines the block's output with the same residual and the
+// SAME post/comb that hc_pre produced (ds4.c:9772). These are the real layer-0 activations.
+// The whole half is proven against the rented oracle in `hc` mode — the choosing class throughout.
+// ══════════════════════════════════════════════════════════════════════════════════════════════════
+let pHcBcast = try dev.makeComputePipelineState(function: lHc.makeFunction(name: "form_hc_broadcast_f32")!)
+let pHcRmsNw = try dev.makeComputePipelineState(function: lHc.makeFunction(name: "form_hc_rmsnorm_nw_f32")!)
+let pHcSplit = try dev.makeComputePipelineState(function: lHc.makeFunction(name: "form_hc_split_f32")!)
+let pHcWsum  = try dev.makeComputePipelineState(function: lHc.makeFunction(name: "form_hc_wsum_f32")!)
+let pHcPost  = try dev.makeComputePipelineState(function: lHc.makeFunction(name: "form_hc_post_f32")!)
+let pF16mv   = try dev.makeComputePipelineState(function: lCore.makeFunction(name: "form_dsv4_f16_matvec")!)
+
+func enc1(_ p: MTLComputePipelineState, _ n: Int, _ body: (MTLComputeCommandEncoder) -> Void) {
+    let cb = queue.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
+    e.setComputePipelineState(p); body(e)
+    e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
+                      threadsPerThreadgroup: MTLSize(width: min(p.maxTotalThreadsPerThreadgroup, 256), height: 1, depth: 1))
+    e.endEncoding(); run(cb)
+}
+let hcDim = nHc * nEmbd
+// ds4.c:9764 — the plain embedding broadcast to every stream.
+let residHc = sentinelled(hcDim)
+do { var a = UInt32(nHc), b = UInt32(nEmbd)
+     enc1(pHcBcast, hcDim) { e in e.setBuffer(x0, offset: 0, index: 0); e.setBuffer(residHc, offset: 0, index: 1)
+                                  e.setBytes(&a, length: 4, index: 2); e.setBytes(&b, length: 4, index: 3) } }
+// ds4.c:9707 — rms_norm_no_weight over the WHOLE n_hc*n_embd state (not per stream).
+let hcFlat = sentinelled(hcDim)
+do { var n = UInt32(hcDim), e0 = eps
+     enc1(pHcRmsNw, 1) { e in e.setBuffer(residHc, offset: 0, index: 0); e.setBuffer(hcFlat, offset: 0, index: 1)
+                              e.setBytes(&n, length: 4, index: 2); e.setBytes(&e0, length: 4, index: 3) } }
+let hcFlatP = hcFlat.contents().bindMemory(to: Float.self, capacity: hcDim)
+let (okF, maF, mrF, nnF, dsF, _, _) = cmpOra(hcFlatP, readOracle(oraDirHc, "hc_flat"), 2e-4, 2e-4, 1e-2)
+check(okF, "gate 24 the HC state's unweighted RMSNorm at real dims [RENTED ORACLE]: the embedding broadcast to all \(nHc) streams and normed over the WHOLE \(hcDim)-wide state agrees with the fp64 ds4.c transcription (maxAbs \(maF), maxRel \(mrF); \(dsF) distinct; \(nnF) NaN)",
+  "gate 24 hc rmsnorm: maxAbs \(maF) maxRel \(mrF) nan \(nnF)")
+
+// ds4.c:9711 — the F16 mixing projection hc_attn_fn [16384 -> 24].
+let hcMix = sentinelled(hfRows)
+do { var r = UInt32(hfRows), c = UInt32(hfCols)
+     enc1(pF16mv, hfRows) { e in e.setBuffer(views[hfIdx], offset: hfInner, index: 0); e.setBuffer(hcFlat, offset: 0, index: 1)
+                                 e.setBuffer(hcMix, offset: 0, index: 2)
+                                 e.setBytes(&r, length: 4, index: 3); e.setBytes(&c, length: 4, index: 4) } }
+let hcMixP = hcMix.contents().bindMemory(to: Float.self, capacity: hfRows)
+let oMix = readOracle(oraDirHc, "hc_mix")
+var mixAbs = 0.0, mixRel = 0.0
+for i in 0..<min(hfRows, oMix.count) {
+    let d = abs(Double(hcMixP[i]) - oMix[i]); mixAbs = max(mixAbs, d)
+    if abs(oMix[i]) > 1e-2 { mixRel = max(mixRel, d/abs(oMix[i])) }
+}
+check(mixRel < 1e-4 && oMix.count == hfRows && gpuErrors == 0,
+  "gate 25 the HC mixing projection at real dims [RENTED ORACLE]: hc_attn_fn (F16, \(hfRows)x\(hfCols)) through view \(hfIdx) agrees with the fp64 ds4.c transcription on all \(hfRows) mix logits (maxRel \(mixRel), maxAbs \(mixAbs) on a vector reaching \(oMix.map{abs($0)}.max() ?? 0))",
+  "gate 25 hc mix: maxRel \(mixRel) maxAbs \(mixAbs) n \(oMix.count)")
+
+// ds4.c:9592 — the sinkhorn split: pre = sigmoid+eps, post = 2*sigmoid, comb = row-softmax then \(hcIters)
+// alternating column/row normalisations. The FIRST normalisation is by column, then the loop starts at 1.
+let hcSplit = sentinelled(2*nHc + nHc*nHc)
+do { var a = UInt32(nHc), it = UInt32(hcIters), e0 = hcEps
+     enc1(pHcSplit, 1) { e in e.setBuffer(hcMix, offset: 0, index: 0)
+                              e.setBuffer(views[hsIdx], offset: hsInner, index: 1)
+                              e.setBuffer(views[hbIdx], offset: hbInner, index: 2)
+                              e.setBuffer(hcSplit, offset: 0, index: 3)
+                              e.setBytes(&a, length: 4, index: 4); e.setBytes(&it, length: 4, index: 5)
+                              e.setBytes(&e0, length: 4, index: 6) } }
+let hcSplitP = hcSplit.contents().bindMemory(to: Float.self, capacity: 2*nHc + nHc*nHc)
+let oPost = readOracle(oraDirHc, "hc_post_w"), oComb = readOracle(oraDirHc, "hc_comb")
+var splitAbs = 0.0
+for i in 0..<nHc { splitAbs = max(splitAbs, abs(Double(hcSplitP[nHc+i]) - oPost[i])) }
+for i in 0..<(nHc*nHc) { splitAbs = max(splitAbs, abs(Double(hcSplitP[2*nHc+i]) - oComb[i])) }
+var combRowSum = 0.0
+for src in 0..<nHc { combRowSum += Double(hcSplitP[2*nHc + src]) }
+check(splitAbs < 1e-5 && gpuErrors == 0,
+  "gate 26 the HC sinkhorn split at real dims [RENTED ORACLE]: \(hcIters) iterations over the \(nHc)x\(nHc) combine matrix, plus the pre and post gates, agree with the fp64 ds4.c transcription (maxAbs \(splitAbs); post reaches \(oPost.map{abs($0)}.max() ?? 0), comb row 0 sums to \(combRowSum))",
+  "gate 26 hc split: maxAbs \(splitAbs)")
+
+// ds4.c:9717 — the weighted collapse of the streams. THIS is the MLA's real input.
+let hcCur = sentinelled(nEmbd)
+do { var a = UInt32(nHc), b = UInt32(nEmbd)
+     enc1(pHcWsum, nEmbd) { e in e.setBuffer(residHc, offset: 0, index: 0); e.setBuffer(hcSplit, offset: 0, index: 1)
+                                 e.setBuffer(hcCur, offset: 0, index: 2)
+                                 e.setBytes(&a, length: 4, index: 3); e.setBytes(&b, length: 4, index: 4) } }
+let hcCurP = hcCur.contents().bindMemory(to: Float.self, capacity: nEmbd)
+let (okC, maC, mrC, nnC, dsC, mnC, mxC) = cmpOra(hcCurP, readOracle(oraDirHc, "hc_cur"), 2e-5, 2e-5, 1e-2)
+check(okC, "gate 27 the HC-pre collapse at real dims [RENTED ORACLE]: the \(nHc) streams weighted by the split's pre gates give the REAL layer-0 MLA input — no longer a probe (maxAbs \(maC), maxRel \(mrC); \(dsC) distinct, range [\(mnC),\(mxC)]; \(nnC) NaN)",
+  "gate 27 hc-pre collapse: maxAbs \(maC) maxRel \(mrC) nan \(nnC)")
+
+// ── the whole MLA block, re-run on the REAL input. Same kernels, same views, same order as gates 2..22.
+func mlaBlock(_ input: MTLBuffer, _ pos: Int) -> MTLBuffer {
+    let xn = gpuRmsnorm(input, nEmbd, views[normIdx], normInner)
+    let ql = gpuMx8(views[qaIdx], qaInner, xn, qaRows, qaCols)
+    let qln = gpuRmsnorm(ql, qaRows, views[qanIdx], qanInner)
+    let qq = gpuMx8(views[qbIdx], qbInner, qln, qbRows, qbCols)
+    let qh = gpuHeadrms(qq, nHead, headDim)
+    let qr = gpuRope(qh, nHead, headDim, pos, false)
+    let kl = gpuMx8(views[kvIdx], kvInner, xn, kvRows, kvCols)
+    let kln = gpuRmsnorm(kl, kvRows, views[kvanIdx], kvanInner)
+    let kr = gpuRope(kln, 1, headDim, pos, false)
+    let kq = gpuKvRound(kr, headDim)
+    let ha = gpuAttend(qr, kq, nHead, headDim, 1, views[snkIdx], snkInner)
+    let hu = gpuRope(ha, nHead, headDim, pos, true)
+    let lo = gpuGrouped(views[oaIdx], oaInner, hu, oaRows, oaCols, oRank)
+    return gpuMx8(views[obIdx], obIdxInner, lo, obRows, obCols)
+}
+let realAttnOut = mlaBlock(hcCur, posA)
+let raop = realAttnOut.contents().bindMemory(to: Float.self, capacity: obRows)
+let (okR, maR, mrR, nnR, dsR, mnR, mxR) = cmpOra(raop, readOracle(oraDirHc, "attn_out"), 6e-3, 6e-3, 1e-2)
+check(okR, "gate 28 the WHOLE MLA block on the REAL layer-0 input at pos \(posA) [RENTED ORACLE]: the same 13 dispatches gates 2-22 proved, re-run on hc_pre's output instead of a probe, agree with the fp64 ds4.c transcription end to end (maxAbs \(maR), maxRel \(mrR); \(dsR) distinct, range [\(mnR),\(mxR)]; \(nnR) NaN)",
+  "gate 28 real MLA block: maxAbs \(maR) maxRel \(mrR) nan \(nnR)")
+
+// ds4.c:9772 — hc_post: block_out*post[dst] + sum_src comb[dst + src*n_hc]*resid[src]. The combine matrix
+// is addressed [dst, src] — transposing it is a choice a self-carve cannot see.
+let afterAttn = sentinelled(hcDim)
+do { var a = UInt32(nHc), b = UInt32(nEmbd)
+     enc1(pHcPost, nHc) { e in e.setBuffer(realAttnOut, offset: 0, index: 0); e.setBuffer(residHc, offset: 0, index: 1)
+                               e.setBuffer(hcSplit, offset: nHc*4, index: 2)
+                               e.setBuffer(hcSplit, offset: 2*nHc*4, index: 3)
+                               e.setBuffer(afterAttn, offset: 0, index: 4)
+                               e.setBytes(&a, length: 4, index: 5); e.setBytes(&b, length: 4, index: 6) } }
+let aap = afterAttn.contents().bindMemory(to: Float.self, capacity: hcDim)
+let (okA, maA, mrA, nnA, dsA, mnA, mxA) = cmpOra(aap, readOracle(oraDirHc, "after_attn_hc"), 2e-5, 2e-5, 1e-2)
+check(okA, "gate 29 the HC-post recombination at real dims [RENTED ORACLE]: out[dst][d] = attn_out[d]*post[dst] + sum_src comb[dst + src*\(nHc)]*resid[src][d] over all \(hcDim) — the COMPLETE attention half of a real layer-0, HC-pre -> MLA -> HC-post, agreeing with the fp64 ds4.c transcription (maxAbs \(maA), maxRel \(mrA); \(dsA) distinct, range [\(mnA),\(mxA)]; \(nnA) NaN)",
+  "gate 29 hc-post: maxAbs \(maA) maxRel \(mrA) nan \(nnA)")
+
 if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(gpuFirstError ?? "unknown") ===") }
 print(String(format: "      Q latent[0..3] = %.6f %.6f %.6f %.6f", qLatp[0], qLatp[1], qLatp[2], qLatp[3]))
 print(String(format: "      KV latent[0..3] = %.6f %.6f %.6f %.6f", kvLatp[0], kvLatp[1], kvLatp[2], kvLatp[3]))
@@ -671,13 +815,13 @@ print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — t
 print(String(format: "      attn_out(pos %d)[0..3] = %.6f %.6f %.6f %.6f", posB, lastOut[0], lastOut[1], lastOut[2], lastOut[3]))
 
 let ok = failures == 0 && gpuErrors == 0
-if ok { print("VERDICT PASS  23 gates — Stone 35's MLA projection surface at real dims (gates 0-7, CANONICAL, self-carve) PLUS Stone 36's whole ATTENTION CORE at real dims (gates 8-23, CHOOSING, vs a rented fp64 ds4.c transcription) at two positions: per-head RMSNorm, RoPE fwd on q and kv, the KV fp8+f16 round-trip, the sink softmax, the inverse RoPE, and the GROUPED output a then b — the block's whole output") }
+if ok { print("VERDICT PASS  30 gates — Stone 35's MLA projection surface at real dims (gates 0-7, CANONICAL, self-carve) PLUS Stone 36's whole ATTENTION CORE at real dims (gates 8-23, CHOOSING, vs a rented fp64 ds4.c transcription) at two positions: per-head RMSNorm, RoPE fwd on q and kv, the KV fp8+f16 round-trip, the sink softmax, the inverse RoPE, and the GROUPED output a then b — the block's whole output — PLUS Stone 36 Stage 4 (gates 24-29): ONE COMPLETE ATTENTION HALF of a real layer, HC-pre -> MLA -> HC-post on the REAL layer-0 activations, no probe") }
 else { print("VERDICT FAIL  \(failures) gate(s), \(gpuErrors) cb errors") }
 exit(ok ? 0 : 1)
 SWIFT
 swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "FAIL swiftc runner"; tail -30 "$work/swift.err"; exit 1; }
 
-"$work/runner" "$LIB_EMB" "$LIB_MLA" "$LIB8" "$LIB_CORE" "$BLOB" \
+"$work/runner" "$LIB_EMB" "$LIB_MLA" "$LIB8" "$LIB_CORE" "$LIB_HC" "$BLOB" \
     "$STEP" "$VIEWLIMIT" "$NVIEWS" \
     "$EMB_ABS" "$ROW_OFF" "$N_EMBD" "$EMB_IDX" "$EMB_INNER" "$EMB_HOLDS" "$TOKEN" \
     "$NORM_ABS" "$NORM_IDX" "$NORM_INNER" "$NORM_HOLDS" \
@@ -691,6 +835,10 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "
     "$OA_ABS" "$OA_IDX" "$OA_INNER" "$OA_HOLDS" "$OA_OUT" "$OA_IN" \
     "$OB_ABS" "$OB_IDX" "$OB_INNER" "$OB_HOLDS" "$OB_OUT" "$OB_IN" \
     "$N_HEAD" "$HEAD_DIM" "$N_ROT" "$ROPE_BASE" "$N_GROUPS" "$O_RANK" \
-    "$POS_A" "$POS_B" "$work/ora$POS_A" "$work/ora$POS_B"
+    "$POS_A" "$POS_B" "$work/ora$POS_A" "$work/ora$POS_B" \
+    "$HF_ABS" "$HF_IDX" "$HF_INNER" "$HF_HOLDS" "$HF_OUT" "$HF_IN" \
+    "$HS_ABS" "$HS_IDX" "$HS_INNER" "$HS_HOLDS" \
+    "$HB_ABS" "$HB_IDX" "$HB_INNER" "$HB_HOLDS" \
+    "$N_HC" "$HC_ITERS" "$HC_EPS" "$work/orahc"
 rc=$?
 exit $rc
