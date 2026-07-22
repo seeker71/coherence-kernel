@@ -676,6 +676,11 @@ func forward(_ id: Int, _ pos: Int) -> Int {
         seam((t.type == 14 ? "mv Q6_K " : "mv Q4_K ") + "\(t.d1)x\(t.d0)")
     }
     func dup(_ tag: String, _ f: () -> Void) { if ablate == tag { for _ in 0..<ablDup { f() } } }
+    // FORM_ABLATE=seam — the falsifier this stone owes itself (row `snugcause`). Every other ablation
+    // prices an op's WORK plus its seam together. This one inserts dispatches with essentially no
+    // work at all — a 1-element add, barriered exactly like every real op — so the delta over N is
+    // the seam ALONE, measured in the real harness rather than in a synthetic loop. If the seam were
+    // the 113 us the stone was briefed with, this one knob would dominate every other ablation.
     dequant(s, embT, off: id * dModel, n: dModel, bX); seam("embed gather")
     for l in 0..<nLayer {
         let kOff = (l * maxpos + pos) * kvd * 4
@@ -697,6 +702,7 @@ func forward(_ id: Int, _ pos: Int) -> Int {
         mv(L[l].fu, bXb, bUp)
         elem(s, pSwi, bGate, bUp, bAct, dFF); seam("swiglu")
         dup("swiglu") { elem(s, pSwi, bGate, bUp, bAlt, dFF) }         // scratch destination
+        dup("seam") { elem(s, pAdd, bX, bProj, bAlt, 1) }              // ~no work, one full seam
         mv(L[l].fd, bAct, bFfn)
         elem(s, pAdd, bX, bFfn, bX, dModel); seam("residual add")
     }
