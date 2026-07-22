@@ -192,6 +192,10 @@ load-bearing fact in this section.
 it does in every non-MLA GGUF this body has walked. The split's **byte position** (leading 64 or
 trailing 64) is **not determined by anything in this header** — it is a named unknown, and a wrong
 guess produces a fluent wrong token, not an error.
+*SETTLED after the fact by Stone 22 (commit `38b6dde47`): ds4.c reads the split as **trailing** (the
+64 rope dims are the tail of each 512-wide head). The header could not decide it; the engine source
+did. This receipt's DERIVED-(1) is now resolved, and the resolution came from a second reading, not
+from the file.*
 **DERIVED (2) — the grouped output projection.** `attn_output_a [4096, 8192]` and
 `attn_output_b [8192, 4096]` with `output_group_count = 8` and `output_lora_rank = 1024`:
 64 heads / 8 groups = 8 heads per group, 8 heads × 512 latent dims = **4096 per group**. So
