@@ -700,6 +700,7 @@ func forward(_ id: Int, _ pos: Int) -> Int {
         rmsnorm(s, bX, L[l].fn, bXb); seam("rmsnorm")
         mv(L[l].fg, bXb, bGate, 0, false)              // gate and up, likewise independent
         mv(L[l].fu, bXb, bUp)
+        dup("ffnup") { mv(L[l].fu, bXb, bAlt) }  // re-READS the ~17 MB up weight; scratch destination
         elem(s, pSwi, bGate, bUp, bAct, dFF); seam("swiglu")
         dup("swiglu") { elem(s, pSwi, bGate, bUp, bAlt, dFF) }         // scratch destination
         dup("seam") { elem(s, pAdd, bX, bProj, bAlt, 1) }              // ~no work, one full seam
