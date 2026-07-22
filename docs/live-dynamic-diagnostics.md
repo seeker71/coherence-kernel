@@ -134,3 +134,9 @@ The witnessed vector is documented in
   routing vectors between rounds.
 - `cognition/tests/native-three-round-walk-band.fk` — three-round source and
   adjudication replay.
+- `cognition/concept-crystallization-contract.fk` — an offered readiness profile
+  whose node may move among gas, water, and ice while retaining content identity;
+  exposes aliases, recipe, composition, lineage, inquiries, transfer, freshness,
+  axiom compatibility, and an abstaining frequency reading when unmeasured.
+- `cognition/tests/concept-crystallization-contract-band.fk` — ready/candidate
+  facets and gas/water/ice identity-stability witness.
