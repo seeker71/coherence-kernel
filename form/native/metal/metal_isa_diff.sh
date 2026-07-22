@@ -361,6 +361,17 @@ let blobPath = a[1], oursPath = a[2], theirsPath = a[3]
 let off = Int(a[4])!, cols = Int(a[5])!, rows = Int(a[6])!, iters = Int(a[7])!, label = a[8]
 let dev = MTLCreateSystemDefaultDevice()!
 let q = dev.makeCommandQueue()!
+// axiom-4: a command buffer meets us through cb.status/cb.error; reading bY1/bY2 back
+// without consulting them is breach. Both readback buffers are freshly zeroed, so if the
+// GPU never runs, y1 and y2 are BOTH zero and the equality gate below reports max|Δ|=0 —
+// a perfect agreement of two silences (corpus row 826, aporon). Counted here, refused below.
+var gpuErrors = 0
+var gpuFirstError: String? = nil
+func checkCB(_ cb: MTLCommandBuffer) {
+    if let e = cb.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(e)" } }
+    if cb.status != .completed { gpuErrors += 1
+        if gpuFirstError == nil { gpuFirstError = "command buffer status \(cb.status.rawValue), not .completed" } }
+}
 let nb01 = (cols / 256) * 210
 let nbytes = nb01 * rows
 let fh = FileHandle(forReadingAtPath: blobPath)!
@@ -395,7 +406,7 @@ func runOurs(_ n: Int) -> Double {
         e.dispatchThreads(MTLSize(width: ((rows + oursNR0 - 1) / oursNR0) * 32, height: 1, depth: 1),
                           threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
     }
-    e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    e.endEncoding(); cb.commit(); cb.waitUntilCompleted(); checkCB(cb)
     return Date().timeIntervalSince(t0) / Double(n) * 1000.0
 }
 struct Kargs {
@@ -430,7 +441,7 @@ func runTheirs(_ p: MTLComputePipelineState, _ nsg: Int, _ n: Int) -> Double {
         e.dispatchThreadgroups(MTLSize(width: ntg, height: 1, depth: 1),
                                threadsPerThreadgroup: MTLSize(width: 32, height: nsg, depth: 1))
     }
-    e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    e.endEncoding(); cb.commit(); cb.waitUntilCompleted(); checkCB(cb)
     return Date().timeIntervalSince(t0) / Double(n) * 1000.0
 }
 print("SHAPE \(label) rows=\(rows) cols=\(cols) MACs=\(rows*cols) qbytes=\(nbytes)")
@@ -474,19 +485,37 @@ for i in 0..<rows {
 // the same bytes and the body's q6k_mod/division arithmetic yields the same integers as ggml's bit
 // operations — so this is an EQUALITY claim, not an epsilon. Any nonzero difference means the body's
 // decode kernel is not what it says it is.
-print("  AGREE form_q6k_matvec_slot_f32 vs ggml over all \(rows) rows: max|Δ|=\(String(format: "%.3e", maxAbs))  max rel=\(String(format: "%.3e", maxRel))")
-if maxAbs != 0.0 { print("FAIL  the shipped slot kernel and ggml do not agree exactly") }
+// GATE 0, asked of the equality claim itself: max|Δ|=0 is what a CORRECT run prints AND what
+// two never-written buffers print. The equality is only meaningful if a kernel actually wrote
+// bY1 and bY2 and no command buffer errored. A right-fold matvec over these non-degenerate
+// inputs is non-zero for essentially every row, so "all zero" is the GPU-did-not-run signature.
+var nzY1 = 0, nzY2 = 0
+for i in 0..<rows { if y1[i] != 0.0 { nzY1 += 1 }; if y2[i] != 0.0 { nzY2 += 1 } }
+let liveAgree = gpuErrors == 0 && nzY1 > 0 && nzY2 > 0
+if gpuErrors > 0 { print("  command buffer ERROR: \(gpuFirstError ?? "unknown")") }
+print("  AGREE form_q6k_matvec_slot_f32 vs ggml over all \(rows) rows: max|Δ|=\(String(format: "%.3e", maxAbs))  max rel=\(String(format: "%.3e", maxRel))  (nonzero rows: ours \(nzY1)/\(rows), ggml \(nzY2)/\(rows))")
+if !liveAgree {
+    print("FAIL  the equality is not witnessed: \(gpuErrors) cb error(s), ours nonzero \(nzY1), ggml nonzero \(nzY2).")
+    print("      max|Δ|=0 here would be two SILENCES agreeing, not two kernels — a residency condition, not a match.")
+    print("=== VERDICT FAIL — the GPU did not fully run; no equality was witnessed ==="); exit(1)
+}
+if maxAbs != 0.0 { print("FAIL  the shipped slot kernel and ggml do not agree exactly"); print("=== VERDICT FAIL ==="); exit(1) }
 for (nm, mv) in results {
     print("  RATIO \(nm.padding(toLength: 26, withPad: " ", startingAt: 0)) / ggml(nsg=\(bestNsg)) = \(String(format: "%.2f", mv / best))x")
 }
+print("=== VERDICT PASS — shipped slot kernel equals ggml bit-for-bit, both kernels witnessed live ===")
 SWIFT
 xcrun swiftc -O "$work/bench.swift" -o "$work/bench" 2>"$work/sw.err" || {
     echo "FAIL  carrier did not build"; cat "$work/sw.err"; exit 1; }
 
 # ── three real shapes, because no rate here is one point pretending to be a line (row 827) ──
+# each shape is its own witnessed equality; if any bench cannot witness two live kernels it
+# exits nonzero and the harness fails rather than reporting a benched silence as a match.
 echo
-"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal" 331055328 8192   3072 50 blk.0.ffn_down
+"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal" 331055328 8192   3072 50 blk.0.ffn_down     || { echo "=== VERDICT FAIL — blk.0.ffn_down shape ==="; exit 1; }
 echo
-"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal" 392409312 3072   1024 50 blk.0.attn_v
+"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal" 392409312 3072   1024 50 blk.0.attn_v       || { echo "=== VERDICT FAIL — blk.0.attn_v shape ==="; exit 1; }
 echo
-"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal"   7837920 3072 128256 10 token_embd.output
+"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal"   7837920 3072 128256 10 token_embd.output  || { echo "=== VERDICT FAIL — token_embd.output shape ==="; exit 1; }
+echo
+echo "=== VERDICT PASS — 3 shapes, each an equality witnessed against two live kernels ==="
