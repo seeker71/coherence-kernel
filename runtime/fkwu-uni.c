@@ -7389,6 +7389,24 @@ static int fk_reserved_head(long long s, long long n) {
     }
     return 0;
 }
+/* The names where a PARAMETER of that spelling makes fkwu and form-kernel-go answer
+ * the same source differently. This list is MEASURED, not reasoned: all 169 op-table
+ * and rewrite-table names plus the four control forms were each put in a defn's
+ * parameter list and run on both kernels (2026-07-22). 155 agreed — including `len`,
+ * which core.fk's own fstr-to-int-loop has taken as a parameter since before this
+ * check existed, and which is therefore NOT a defect. These 18 diverged: Go's reader
+ * treats them structurally and drops them from the parameter list, so `(defn f (sub x)
+ * ..)` is arity 2 here and arity 1 there. Reasoning from "it is in the op table" would
+ * have condemned core.fk on the strength of an argument the oracle refutes. If an op
+ * row is added, re-run the probe rather than guessing where it belongs. */
+static int fk_divergent_param_name(long long s, long long n) {
+    return fk_sym_eq(s, n, "add") || fk_sym_eq(s, n, "sub") || fk_sym_eq(s, n, "mul") ||
+           fk_sym_eq(s, n, "div") || fk_sym_eq(s, n, "mod") || fk_sym_eq(s, n, "and") ||
+           fk_sym_eq(s, n, "or") || fk_sym_eq(s, n, "not") || fk_sym_eq(s, n, "eq") ||
+           fk_sym_eq(s, n, "lt") || fk_sym_eq(s, n, "le") || fk_sym_eq(s, n, "gt") ||
+           fk_sym_eq(s, n, "ge") || fk_sym_eq(s, n, "list") || fk_sym_eq(s, n, "defn") ||
+           fk_sym_eq(s, n, "do") || fk_sym_eq(s, n, "let") || fk_sym_eq(s, n, "if");
+}
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3) {
     long long k = fk_node_count;
     fk_node_count = fk_node_count + 1;
@@ -7687,7 +7705,7 @@ static long long fk_sparse(void) {
             long long fk_bd_saved_maxslot = fk_maxslot;
             fk_bd_top = 0;
             fk_maxslot = 0;
-            if (alen > 0 && fk_reserved_head(as2, alen)) {
+            if (alen > 0 && fk_divergent_param_name(as2, alen)) {
                 fk_diag(FK_DIAG_ERR, as2,
                         "[shadowed-primitive] parameter '%.*s' names a primitive/control form -- "
                         "in call position the primitive still wins, so the parameter is reachable "
@@ -8640,7 +8658,7 @@ static void fk_parse_top(void) {
                 }
                 long long as = fk_spos;
                 fk_spos = fk_sym_end(fk_spos);
-                if (fk_spos > as && fk_reserved_head(as, fk_spos - as)) {
+                if (fk_spos > as && fk_divergent_param_name(as, fk_spos - as)) {
                     fk_diag(FK_DIAG_ERR, as,
                             "[shadowed-primitive] parameter '%.*s' names a primitive/control form "
                             "-- in call position the primitive still wins, so the parameter is "
