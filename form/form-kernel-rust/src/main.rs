@@ -4430,41 +4430,19 @@ impl Kernel {
             }
             Value::List(out.into())
         });
-        // min / max / sum — common Python builtins applied to a list.
-        // sum returns the integer sum; min/max return the smallest/largest
-        // int element. All three handle empty lists honestly (sum=0,
+        // min / max / sum — common Python builtins, and variadic the way
+        // CPython is: one list argument folds over its elements, two or more
+        // arguments fold over the arguments themselves. The multi-argument
+        // shape used to fall through to `args[0]` unexamined, so `(min 7 3)`
+        // answered 7 with no diagnostic — and Go and TS answered 7 too, an
+        // agreed wrong answer the sibling comparison cannot see. sum returns
+        // the integer sum. All three handle empty lists honestly (sum=0,
         // min/max panic with a clear message matching CPython's TypeError).
         self.register_native("min", cat_method(), |_, _, args| {
-            if let Value::List(xs) = &args[0] {
-                if xs.is_empty() {
-                    panic!("min: empty list");
-                }
-                let mut best = xs[0].as_int();
-                for v in &xs[1..] {
-                    let x = v.as_int();
-                    if x < best {
-                        best = x;
-                    }
-                }
-                return Value::Int(best);
-            }
-            Value::Int(args[0].as_int())
+            Value::Int(fold_extremum(args, "min", false))
         });
         self.register_native("max", cat_method(), |_, _, args| {
-            if let Value::List(xs) = &args[0] {
-                if xs.is_empty() {
-                    panic!("max: empty list");
-                }
-                let mut best = xs[0].as_int();
-                for v in &xs[1..] {
-                    let x = v.as_int();
-                    if x > best {
-                        best = x;
-                    }
-                }
-                return Value::Int(best);
-            }
-            Value::Int(args[0].as_int())
+            Value::Int(fold_extremum(args, "max", true))
         });
         // sum — integer (or float-aware) total of a list. Sibling-parity
         // with the TS kernel. The earlier compost note pointed at core.fk's
@@ -8140,6 +8118,35 @@ fn cat_access() -> NodeID {
         inst: 1,
     }
 }
+// fold_extremum — the shared body of the `min` / `max` natives. One list
+// argument folds over its elements; anything else folds over the arguments
+// themselves, so `(max a b)` compares instead of returning `a`. Every element
+// reads through as_int, the same integer lane Go's AsInt and TS's
+// listElemInt use. `name` only spells the empty-list panic.
+fn fold_extremum(args: &[Value], name: &str, want_max: bool) -> i64 {
+    let list_arm = match (args.len(), &args[0]) {
+        (1, Value::List(xs)) => Some(xs.clone()),
+        _ => None,
+    };
+    let xs: &[Value] = match &list_arm {
+        Some(xs) => {
+            if xs.is_empty() {
+                panic!("{name}: empty list");
+            }
+            xs
+        }
+        None => args,
+    };
+    let mut best = xs[0].as_int();
+    for v in &xs[1..] {
+        let x = v.as_int();
+        if (want_max && x > best) || (!want_max && x < best) {
+            best = x;
+        }
+    }
+    best
+}
+
 fn cat_method() -> NodeID {
     NodeID {
         pkg: 1,
