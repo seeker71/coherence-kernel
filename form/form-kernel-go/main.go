@@ -1335,6 +1335,29 @@ func isDictValue(v Value) bool {
 		v.List[0].Str == "__dict__"
 }
 
+// foldExtremum — the shared body of the `min` / `max` natives. One list
+// argument folds over its elements; anything else folds over the arguments
+// themselves, so `(max a b)` compares instead of returning `a`. Every element
+// reads through AsInt, the same integer lane Rust's as_int and TS's
+// listElemInt use. `name` only spells the empty-list panic.
+func foldExtremum(args []Value, name string, wantMax bool) int64 {
+	xs := args
+	if len(args) == 1 && args[0].Kind == VList {
+		xs = args[0].List
+		if len(xs) == 0 {
+			panic(name + ": empty list")
+		}
+	}
+	best := xs[0].AsInt()
+	for i := 1; i < len(xs); i++ {
+		x := xs[i].AsInt()
+		if (wantMax && x > best) || (!wantMax && x < best) {
+			best = x
+		}
+	}
+	return best
+}
+
 func dictKeyEq(a, b Value) bool {
 	if a.Kind == VStr && b.Kind == VStr {
 		return a.Str == b.Str
@@ -2685,39 +2708,22 @@ func (k *Kernel) registerNatives() {
 		}
 		return Value{Kind: VBool, Bool: false}
 	})
-	// Common Python builtins applied to lists. Sibling-parity with
-	// Rust + TS kernels. Honest error messages on empty lists.
+	// Common Python builtins. Sibling-parity with Rust + TS kernels, and
+	// variadic the way CPython is: one list argument folds over its
+	// elements, two or more arguments fold over the arguments themselves.
+	// Both shapes read every element through AsInt (ints and bools widen,
+	// floats truncate) — a raw `.Int` read on a float element silently
+	// scored it 0, which is how `(max (list 1 9.5))` answered 1 here while
+	// Rust and TS both answered 9. The multi-argument shape used to fall
+	// through to `args[0]` unexamined: `(min 7 3)` answered 7, with no
+	// diagnostic, on all three kernels at once — an agreed wrong answer,
+	// the one shape the sibling comparison cannot see. Honest error
+	// messages on empty lists.
 	k.registerNative("min", catMethod(), func(_ *Kernel, args []Value) Value {
-		if len(args) == 1 && args[0].Kind == VList {
-			xs := args[0].List
-			if len(xs) == 0 {
-				panic("min: empty list")
-			}
-			best := xs[0].Int
-			for i := 1; i < len(xs); i++ {
-				if xs[i].Int < best {
-					best = xs[i].Int
-				}
-			}
-			return Value{Kind: VInt, Int: best}
-		}
-		return Value{Kind: VInt, Int: args[0].AsInt()}
+		return Value{Kind: VInt, Int: foldExtremum(args, "min", false)}
 	})
 	k.registerNative("max", catMethod(), func(_ *Kernel, args []Value) Value {
-		if len(args) == 1 && args[0].Kind == VList {
-			xs := args[0].List
-			if len(xs) == 0 {
-				panic("max: empty list")
-			}
-			best := xs[0].Int
-			for i := 1; i < len(xs); i++ {
-				if xs[i].Int > best {
-					best = xs[i].Int
-				}
-			}
-			return Value{Kind: VInt, Int: best}
-		}
-		return Value{Kind: VInt, Int: args[0].AsInt()}
+		return Value{Kind: VInt, Int: foldExtremum(args, "max", true)}
 	})
 	// `sum` composted from the kernel native list 2026-05-22 —
 	// core.fk's (defn sum (xs) (foldl plus 0 xs)) covers it via the
