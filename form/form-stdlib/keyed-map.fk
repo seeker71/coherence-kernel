@@ -1,0 +1,248 @@
+; keyed-map.fk — a keyed map whose lookup cost does not grow with how many keys it holds.
+;
+; STONE 40. The body had no such thing. `_dict_get` (fourth-shim.fk) is `_dict-scan` — an
+; association list walked pair by pair. `record_get` is a linear field scan. `tkz-best-merge`
+; walks 127 741 variable-length merge records to answer "what rank is this pair?". Every lookup
+; in this kernel was O(n), and the tokenizer's residual ~11 s per encode after Stone 38's
+; prefilter is exactly that: one unavoidable walk over a variable-length record array. That
+; limit is OURS, not the device's — which makes it unbuilt work.
+;
+; ────────────────────────────────────────────────────────────────────────────────────────────
+; WHY A TRIE AND NOT A BUCKET ARRAY — the shape was chosen by a measurement, not by taste.
+;
+; The textbook hash map is one flat array of B buckets. That shape needs a mutable array, and
+; this body has none. It has lists, and on the Go kernel a list is a Go slice: `nth` and `tail`
+; are O(1) (index / reslice) but `cons` COPIES. Measured, warm, one process, one clock:
+;
+;   build a list of n by cons          n=20 000 → 1948 ms      n=40 000 → 8953 ms   (4.6x for 2x)
+;   200 000 strided `nth` reads        over 20 000 → 363 ms    over 40 000 → 503 ms
+;
+; So constructing ANY list of length L costs O(L^2), and reaching into one costs O(1). A flat
+; B-bucket table would therefore cost O(B^2) to rebuild on every single insert — the build would
+; be quadratic in the very number that has to grow for the lookup to stay flat. The nth number
+; is not flat either (1.39x for 2x, not 2x): that residual is the memory hierarchy, a Go `Value`
+; is a wide struct and 40 000 of them leave L2. Named, not hidden — it is a cache slope, not an
+; algorithmic one, and it is what the two-size measurement in the band actually shows.
+;
+; A 16-ary TRIE dissolves the build problem without giving up the lookup one. Every node is a
+; SIXTEEN-element list whatever the map's size, so path-copying an insert rebuilds `depth` lists
+; of sixteen — a CONSTANT ~640 Value copies — while the reachable bucket count is 16^depth.
+; Insert is O(1) and lookup is O(depth) `nth` steps plus a bucket scan whose expected length is
+; n / 16^depth. Both are constant in n once depth is chosen for n. That is the whole stone.
+;
+; ────────────────────────────────────────────────────────────────────────────────────────────
+; THE SHAPE, exactly.
+;
+;   a map     = (list depth root count)
+;   a node    = a 16-element list; slot i is the child for hash nibble i
+;   a child   = a node (levels 1..depth-1) or a BUCKET (level depth)
+;   a bucket  = a list of (list key value) pairs — an association list, deliberately, because at
+;               depth chosen for n it holds ~1 entry and a scan of ~1 is the cheapest thing there is
+;   absent    = the empty list. A node is always 16 long, so `(eq (len ch) 0)` is an unambiguous
+;               "nothing here" — no tag byte, no sentinel value, no way to confuse it with a
+;               present-but-empty child.
+;
+; The hash is consumed four bits at a time from the LOW end (`band h 15`, then `shr_u32 h 4`),
+; so depth d uses the low 4d bits and the bucket count is 16^d.
+;
+; ────────────────────────────────────────────────────────────────────────────────────────────
+; THE HASH: djb2, 32-bit. h = 5381; for each byte b: h = (h*33 + b) mod 2^32, written with the
+; body's own four-way u32 pair as (add_u32 (add_u32 (shl_u32 h 5) h) b) — the same primitives
+; adler32.fk travels on, so the hash is four-way portable and needs no new native.
+;
+; sha256 was the other candidate and it was MEASURED, not assumed away. sha256.fk costs one full
+; 64-round compression per 64-byte block; djb2 costs three u32 ops per byte. For the keys this map
+; exists for — merge pairs, 2 to ~20 bytes — sha256 is ~two orders of magnitude more work per
+; lookup than the entire rest of the lookup. A hash that costs more than the scan it replaces is
+; not a map, it is a slower scan. The measurement is in the band and the receipt.
+;
+; What djb2 buys and what it does not: it is a good MIXER and not a cryptographic hash, so full
+; 32-bit collisions exist and are findable. `guabx` and `naaeaa` both hash to 260615708. The band
+; asserts that pair lands correctly — collisions are RESOLVED (exact key equality inside the
+; bucket), never merely improbable.
+;
+; ────────────────────────────────────────────────────────────────────────────────────────────
+; RADIUS (aporon) — what this map holds, and what it refuses to pretend about.
+;
+;   KEYS are lists of ints. The hash and the equality are exact for every int a Form list can
+;     hold; the collision reasoning below is stated for BYTE values (0..255), the carrier this
+;     body uses for real bytes (`wraithcarry`: a byte >= 128 cannot be built as a string here, so
+;     keys ride as int VALUES, never as constructed strings). `km-key-of-string` is the door for
+;     text keys and goes through `string_bytes`, one native, O(len).
+;   VALUES are any Form value.
+;   ABSENT is honest and explicit. `km-get` takes the caller's own default and returns exactly
+;     that on a miss; `km-has?` answers 0. There is no sentinel to mistake for data and no
+;     circumstance under which a miss returns some other key's value.
+;   COLLISION is resolved, not avoided. Two keys sharing a bucket — whether by sharing the low
+;     4*depth bits or by sharing the whole 32-bit hash — are separated by exact list equality on
+;     the key. Correctness never depends on the hash being good; only speed does.
+;   DUPLICATE KEY: last put wins. `km-put` removes any prior pair for the key, so a map never
+;     holds two entries for one key and `km-count` is the number of PUTS, not of distinct keys
+;     (`km-size` walks and counts distinct keys when that is the number you want).
+;   RESIZE: there is none, and that is a declaration rather than an omission. Depth is fixed when
+;     the map is made. Choose it with `km-depth-for n` for the n you expect. A map grown far past
+;     16^depth does not break — it degrades smoothly toward a linear scan inside its buckets,
+;     which is exactly where the body already was. Growing a map means rebuilding it at a larger
+;     depth; nothing here silently rehashes behind the caller's back.
+;   `formfast` — the constant safe to bake is the BRANCHING FACTOR 16 (four bits, one nibble):
+;     it belongs to the encoding and every node in every map has it. The DEPTH belongs to the
+;     instance and is carried in the map itself, because it is the one number that must track n.
+;
+; Kin: fourth-shim.fk (`_dict_get` — the O(n) association list this is the answer to),
+;      equireach.fk (`eqr-at` — the O(1) byte REACH; this cell is the O(1) keyed reach),
+;      adler32.fk / sha256.fk (the u32 primitives the hash is built from).
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/keyed-map-band.fk
+
+(do
+    ; ================= the encoding's baked constants (formfast) =================
+    (defn km-arity () 16)                       ; branching factor — one hash nibble per level
+    (defn km-nibble () 4)                       ; ... in bits
+    (defn km-mask () 15)                        ; ... as a mask
+    (defn km-seed () 5381)                      ; djb2's seed
+
+    ; ================= the hash =================
+    ; djb2 over a list of ints, 32-bit, on the four-way u32 pair. Tail-recursive: a key of any
+    ; length costs one frame.
+    (defn km-fold (bs h)
+        (if (eq (len bs) 0) h
+            (km-fold (tail bs) (add_u32 (add_u32 (shl_u32 h 5) h) (head bs)))))
+    (defn km-hash (bs) (km-fold bs (km-seed)))
+
+    ; the same hash read straight out of an equireach window — no list is built, so a key living
+    ; in a mapped file costs nothing to hash. `off`/`n` are window-local byte coordinates.
+    (defn km-fold-win (src i end h)
+        (if (eq i end) h
+            (km-fold-win src (add i 1) end
+                (add_u32 (add_u32 (shl_u32 h 5) h) (str_byte_at src i)))))
+    (defn km-hash-win (src off n) (km-fold-win src off (add off n) (km-seed)))
+
+    ; text keys. Built through `str_byte_at`, NOT the `string_bytes` native: string_bytes is
+    ; absent on fkwu, and one call to it turned this whole cell into "not importable standalone"
+    ; plus an unresolved-call diagnostic on the fourth arm — a right verdict with a numb seam
+    ; underneath it (axiom-5). str_byte_at is byte-exact on every arm that reads bytes at all.
+    (defn km-key-loop (s i n)
+        (if (eq i n) (empty) (cons (str_byte_at s i) (km-key-loop s (add i 1) n))))
+    (defn km-key-of-string (s) (km-key-loop s 0 (str_len s)))
+    (defn km-hash-string (s) (km-hash (km-key-of-string s)))
+
+    ; ================= key equality — exact, on int lists =================
+    (defn km-keq (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) 1
+                (if (eq (head a) (head b)) (km-keq (tail a) (tail b)) 0))
+            0))
+
+    ; ================= the empty node, and the constant-cost slot write =================
+    ; Sixteen empties. Written out rather than built, so a fresh node is one native call.
+    (defn km-node ()
+        (list (empty) (empty) (empty) (empty) (empty) (empty) (empty) (empty)
+              (empty) (empty) (empty) (empty) (empty) (empty) (empty) (empty)))
+
+    ; replace slot i of a list — the path-copying write. On a 16-list this is at most 16 conses
+    ; of average length 8: ~128 Value copies, CONSTANT however large the map is.
+    (defn km-lset (xs i v)
+        (if (eq i 0) (cons v (tail xs))
+            (cons (head xs) (km-lset (tail xs) (sub i 1) v))))
+
+    ; ================= buckets — association lists, kept ~1 long by construction =================
+    (defn km-bucket-get (b k d)
+        (if (eq (len b) 0) d
+            (if (km-keq (head (head b)) k) (head (tail (head b)))
+                (km-bucket-get (tail b) k d))))
+    (defn km-bucket-has (b k)
+        (if (eq (len b) 0) 0
+            (if (km-keq (head (head b)) k) 1 (km-bucket-has (tail b) k))))
+    (defn km-bucket-del (b k)
+        (if (eq (len b) 0) (empty)
+            (if (km-keq (head (head b)) k) (km-bucket-del (tail b) k)
+                (cons (head b) (km-bucket-del (tail b) k)))))
+    ; last put wins: the prior pair for this key is removed, never shadowed.
+    (defn km-bucket-put (b k v) (cons (list k v) (km-bucket-del b k)))
+
+    ; ================= the map =================
+    (defn km-depth  (m) (nth m 0))
+    (defn km-root   (m) (nth m 1))
+    (defn km-count  (m) (nth m 2))
+    (defn km-new (depth) (list (if (lt depth 1) 1 depth) (km-node) 0))
+
+    ; the depth whose 16^depth first reaches n — the one number that must track the corpus.
+    ; Capped at 7 (16^7 = 268 435 456 buckets); floored at 1.
+    (defn km-depth-loop (n d cap)
+        (if (ge cap n) d (if (ge d 7) 7 (km-depth-loop n (add d 1) (mul cap 16)))))
+    (defn km-depth-for (n) (km-depth-loop n 1 16))
+    (defn km-for (n) (km-new (km-depth-for n)))
+
+    ; ---- put: descend `depth` levels consuming one nibble each, path-copy back up ----
+    (defn km-put-node (node h dep k v)
+        (do (let i (band h (km-mask)))
+            (if (eq dep 1)
+                (km-lset node i (km-bucket-put (nth node i) k v))
+                (do (let ch (nth node i))
+                    (km-lset node i
+                        (km-put-node (if (eq (len ch) 0) (km-node) ch)
+                                     (shr_u32 h (km-nibble)) (sub dep 1) k v))))))
+    (defn km-put (m k v)
+        (list (km-depth m)
+              (km-put-node (km-root m) (km-hash k) (km-depth m) k v)
+              (add (km-count m) 1)))
+    ; put with a hash the caller already computed (e.g. km-hash-win over a mapped file), so a
+    ; key living in a window is hashed once, not twice.
+    (defn km-put-h (m h k v)
+        (list (km-depth m)
+              (km-put-node (km-root m) h (km-depth m) k v)
+              (add (km-count m) 1)))
+
+    ; ---- get: `depth` O(1) nth steps, then a bucket scan. `d` is the caller's own absent value.
+    (defn km-get-node (node h dep k d)
+        (do (let i (band h (km-mask)))
+            (let ch (nth node i))
+            (if (eq dep 1) (km-bucket-get ch k d)
+                (if (eq (len ch) 0) d
+                    (km-get-node ch (shr_u32 h (km-nibble)) (sub dep 1) k d)))))
+    (defn km-get   (m k d) (km-get-node (km-root m) (km-hash k) (km-depth m) k d))
+    (defn km-get-h (m h k d) (km-get-node (km-root m) h (km-depth m) k d))
+
+    (defn km-has-node (node h dep k)
+        (do (let i (band h (km-mask)))
+            (let ch (nth node i))
+            (if (eq dep 1) (km-bucket-has ch k)
+                (if (eq (len ch) 0) 0
+                    (km-has-node ch (shr_u32 h (km-nibble)) (sub dep 1) k)))))
+    (defn km-has? (m k) (km-has-node (km-root m) (km-hash k) (km-depth m) k))
+
+    ; ---- the honest size: distinct keys actually reachable, walked. O(buckets); this is the
+    ; auditor, not the hot path. km-count is the cheap put counter and says so.
+    (defn km-size-node (node i dep acc)
+        (if (eq i (km-arity)) acc
+            (do (let ch (nth node i))
+                (km-size-node node (add i 1) dep
+                    (add acc (if (eq dep 1) (len ch)
+                                 (if (eq (len ch) 0) 0 (km-size-node ch 0 (sub dep 1) 0))))))))
+    (defn km-size (m) (km-size-node (km-root m) 0 (km-depth m) 0))
+
+    ; ---- the deepest bucket in the map: the map's own worst-case lookup, measurable rather
+    ; than assumed. A map whose max bucket has drifted far above 1 has outgrown its depth.
+    ; NOT the `max` native: on the Go kernel `(max a b)` with two scalar args silently returns
+    ; the FIRST one (main.go ~2706 — only the one-list form compares). A wrong answer that does
+    ; not raise is worse than no answer, so this walk carries its own two-arg max.
+    (defn km-max2 (a b) (if (gt b a) b a))
+    (defn km-maxbucket-node (node i dep acc)
+        (if (eq i (km-arity)) acc
+            (do (let ch (nth node i))
+                (km-maxbucket-node node (add i 1) dep
+                    (km-max2 acc (if (eq dep 1) (len ch)
+                                 (if (eq (len ch) 0) 0 (km-maxbucket-node ch 0 (sub dep 1) 0))))))))
+    (defn km-maxbucket (m) (km-maxbucket-node (km-root m) 0 (km-depth m) 0))
+
+    ; ================= the thing this replaces, kept honest and side by side =================
+    ; The association-list lookup `_dict-scan` / `record_get` / `tkz-best-merge` all are, over a
+    ; list of (key value) pairs. It is here so the band can measure the map against it in ONE
+    ; process on ONE clock (gapghost: a difference of two measurements is only a measurement
+    ; when both share a denominator), and so no reader has to take the comparison on faith.
+    (defn km-assoc-get (ps k d)
+        (if (eq (len ps) 0) d
+            (if (km-keq (head (head ps)) k) (head (tail (head ps)))
+                (km-assoc-get (tail ps) k d)))))

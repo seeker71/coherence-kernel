@@ -1,0 +1,167 @@
+; dsv4-mla-real.fk — Stone 35: the DeepSeek-V4-Flash MLA attention block, ENTERED at REAL DIMS over the
+; windowed-resident 85 GiB file. Stone 22 proved the MLA recipe on the CPU (mla-attn.fk); Stone 30 lifted
+; it to Metal at TOY rank (mla-msl.fk, metal_mla_gpu.sh PASS 10, dimension-parameterized). This band carries
+; those SAME kernels onto the file's OWN blk.0 attention weights, at real dims, through the overlapping
+; views — the way Stone 34 carried the MoE-FFN kernels onto the real ffn_* tensors.
+;
+; THE REAL blk.0 MLA GEOMETRY, read from the file's own header (gguf-manifest.fk), never assumed:
+;   attn_norm        F32   [4096]          the input (embed-space) weighted RMSNorm
+;   attn_q_a         MXFP8 [4096 -> 1024]  Q down-projection     (q_lora_rank = 1024)
+;   attn_q_a_norm    F32   [1024]          Q rank-space weighted RMSNorm
+;   attn_q_b         MXFP8 [1024 -> 32768] Q up-projection       (= n_head 64 * head_dim 512)
+;   attn_kv          MXFP8 [4096 -> 512]   KV down-projection    (kv_lora_rank = 512 = the single latent)
+;   attn_kv_a_norm   F32   [512]           KV rank-space weighted RMSNorm
+;   attn_sinks       F32   [64]            the per-head learned sink logit
+;   attn_output_a    MXFP8 [4096 -> 8192]  output projection, factor a
+;   attn_output_b    MXFP8 [8192 -> 4096]  output projection, factor b
+;
+; ================= STONE 36 STAGE 1: WHICH OUTPUT PATH THIS FILE TAKES, read from its own table ======
+; ds4.c carries BOTH a dense `attn_output` and a grouped `attn_output_a`/`attn_output_b` pair. Which one
+; a given file uses is a property of the FILE, not of the engine — and a `twinblind` trap: pick the wrong
+; one and every self-check downstream still agrees with itself. So it is READ, from the file's own 1406-row
+; tensor table (gguf-manifest.fk, gm-emit-manifest), never guessed:
+;
+;   `attn_output.weight`        0 rows in the whole file
+;   `attn_output_a.weight`     46 rows  — blk.0 .. blk.42 (all 43) + dspark.0/1/2
+;   `attn_output_b.weight`     46 rows  — the same 46
+;
+; The dense path does not exist in this file. THE GROUPED PATH IS THE ONLY PATH, in every block including
+; blk.0. The file's own scalar KVs price it: attention.output_group_count = 8, attention.output_lora_rank
+; = 1024, head_count = 64, key_length = 512. So group_heads = 64/8 = 8, group_dim = 8*512 = 4096, and
+;   attn_output_a [in 4096, out 8192]  is 8 stacked per-group blocks, each [group_dim 4096 -> rank 1024]
+;   attn_output_b [in 8192, out 4096]  maps the concatenated 8*1024 = 8192 group-latents back to n_embd
+; which is exactly ds4.c's own expectation at :4975 —
+;   tensor_expect_dense_quant_layout(attn_output_a, 2, N_HEAD_DIM*(N_HEAD/N_OUT_GROUP), N_OUT_GROUP*N_LORA_O)
+;   tensor_expect_dense_quant_layout(attn_output_b, 2, N_OUT_GROUP*N_LORA_O, N_EMBD)
+; The 4096 that appears on BOTH sides is an apposition, not an identity: on `_a` it is group_dim (8 heads
+; x 512), on `_b` it is n_embd. A carrier that reads it as one number will still pass every self-carve.
+;
+; Two more facts the same table settles, both bearing on blk.0: blk.0 and blk.1 carry NO `attn_compressor_*`
+; tensors (blk.2+ do) — matching ds4.c's ds4_expected_layer_compress_ratio :1065, which returns 0 for
+; il < 2 on the FLASH variant. So at layer 0 the RoPE is UNCOMPRESSED: freq_base = 10000 (not the
+; compress_rope_freq_base 160000), freq_scale = 1, ext_factor = 0 — no YaRN ramp at all.
+;
+; The rest of the scalar config KVs: n_head 64, head_count_kv 1, head_dim (key/value_length) 512, nrot
+; (rope.dimension_count) 64, rms_eps 1e-6, rope.freq_base 10000, block_count 43, expert_used 6, hc 4.
+; MLA_MAX_HD in mla-msl.fk is 512 — it EXACTLY equals this file's head_dim; the toy cap is the real width.
+;
+; THE EVIDENCE CLASS, named up front (aporon / selfgauge / knownsolved). No external oracle can run this
+; file — ds4/llama.cpp/ollama REFUSE GGUF types 40/41 — so any activation here is UNFALSIFIABLE against a
+; reference (selfgauge). Each dispatch therefore stands on the SAME internal falsifier Stone 33/34 used:
+; the GPU result, reading the real bytes straight from the resident view, must agree with an INDEPENDENT
+; CPU carve of the same bytes at the tensor's absolute mmap offset — bit-exact where the decode is exact
+; (the F16/MXFP8 weight decode), and to a stated f32 bound where a matvec or a Newton-sqrt reassociates
+; (assocwall, row 872). A dead view / unrun kernel reads as a sentinel (NaN / 0x7F7FFFFF) the check rejects
+; (edgedrop / zerobirth). The offered-interface guard is on EVERY dispatch.
+;
+; THE INPUT, and the bound STONE 36 REMOVED. Stone 35's chain was fed the token's raw EMBEDDING as a PROBE
+; (knownsolved): it proved the projections BIND and COMPUTE at real dims, not that the numbers were the real
+; layer-0 activations. Stage 4 wires the missing frame — the embedding broadcast to all 4 hyper-connection
+; streams (ds4.c:9764) and collapsed by hc_pre (ds4.c:9690) — so the MLA is now also run on the REAL layer-0
+; input, and closed by hc_post (ds4.c:9772). Gates 2-22 keep the probe (they are the per-dispatch witnesses
+; and their input must not move); gates 24-29 are the complete attention half on the real activations.
+;
+; THE EVIDENCE CLASS SPLITS IN TWO (twinblind, row 874). The projection surface is CANONICAL — a matvec and
+; an RMSNorm have one right answer — so a self-carve falsifies it. The attention CORE is CHOOSING, and a
+; self-carve inherits the choice on BOTH sides. Everything from the per-head RMSNorm onward is therefore
+; proven against a RENTED ORACLE: form-stdlib/tests/dsv4-mla-core-oracle.py, an independent fp64
+; transcription of ds4.c that parses this same GGUF itself and shares no code with this body's path.
+;
+; preludes: form-stdlib/core.fk native/metal/dsv4-token.fk form-stdlib/mla-msl.fk form-stdlib/dsv4-hc-msl.fk
+;
+; Proven by: native/metal/metal_dsv4_layer.sh (the MLA-entry dispatches on the live file, each gated by
+; the offered-interface guard — an unrun kernel reads as a sentinel, so every dispatch is checked).
+
+(do
+    ; ================= the MLA numerics unit: the RMSNorm / matvec / headrms / rope / attend kernels ====
+    ; This is mla-msl.fk's OWN `mla-msl-unit`, unchanged: the deterministic spine (Newton sqrt, Taylor exp,
+    ; round-reduced sin/cos, tb-dot's right fold) and the five kernels, in ONE translation unit under the
+    ; body's single metal_stdlib and the MLA_MAX_HD=512 cap. Stage 1 uses form_mla_rmsnorm_f32 for the
+    ; input and the two rank-space norms; the matvec/headrms/rope/attend kernels ride along for the stages
+    ; that follow (they compiled here means they are ready, not that this stage exercised them).
+    (defn dsv4-mla-unit ()
+        (do
+            (print "MSL")
+            (print (mla-msl-unit))
+            (print "END")
+            0))
+
+    ; ================= STONE 36: the two kernels the CORE needs and the projection surface did not =====
+    ; Both are CHOICES read out of ds4.c, not inventions — and both are exactly the kind of choice a
+    ; self-carve is blind to (twinblind, row 874), so both are proven against the rented oracle
+    ; (form-stdlib/tests/dsv4-mla-core-oracle.py), never against a second copy of themselves.
+
+    ; --- kernel 1: the GROUPED MXFP8 matvec (ds4.c matvec_q8_0_grouped_rows :7578, worker :7123).
+    ; This is mxfp8-msl.fk's own fused decode+matvec with ONE change: the output row r no longer reads a
+    ; single x. Output rows are addressed as tensor_row = group*rank + r_in_group, and row r consumes the
+    ; group-th slice of the input: x + (r / rank) * cols. Everything else — the E8M0 scale-plane origin
+    ; (nel + (r*cols)/32), the 32-wide payload group, the simd_sum lane fold — is unchanged, so the decode
+    ; stays the same CANONICAL decode the projection surface already self-carve-proved at real dims.
+    ; The apposition that makes this dangerous: attn_output_a's `cols` is 4096 = group_dim (8 heads x 512),
+    ; and attn_output_b's `cols` is 8192 while ITS output is 4096 = n_embd. The same 4096 means two
+    ; different things one dispatch apart.
+    (defn dsv4-mx8-grouped-body ()
+        "kernel void form_dsv4_mx8_matvec_grouped (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], constant uint& rank [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint grp = r / rank; device const float* xg = x + grp * cols; uint ng = cols / 32u; uint g0 = (r * cols) / 32u; float sumf = 0.0f; for (uint g = lane; g < ng; g += 32u) { float s = mxm_e8m0(int(qb[nel + g0 + g])); uint p = r * cols + g * 32u; device const float* xv = xg + g * 32u; float acc = 0.0f; for (uint m = 0u; m < 32u; ++m) { acc = acc + xv[m] * mx8_val(int(qb[p + m])); } sumf = sumf + s * acc; } float sv = metal::simd_sum(sumf); if (lane == 0u) y[r] = sv; }")
+
+    ; --- kernel 2: the KV row's fp8 + f16 ROUND-TRIP (ds4.c dsv4_fp8_kv_quantize_row_inplace_cpu :3211,
+    ; dsv4_e4m3fn_dequant_cpu :3181, f16_round_inplace_cpu :3162). After the KV latent is roped, ds4.c
+    ; ROUNDS IT — first the NOPE part (the leading head_dim - n_rot = 448 dims) through E4M3FN in 64-wide
+    ; groups with a power-of-two group scale, then the WHOLE 512-wide row through f16. This is not a
+    ; storage detail: it is IN the forward path, so the attention sees a rounded row and a recipe that
+    ; skips it is wrong by ~1e-2, not by float precision. The trailing n_rot (the roped tail) is NOT
+    ; fp8-rounded — only f16-rounded with the rest.
+    ;   ceil(log2(amax/448)) is taken from the float's own exponent field rather than from a library log2,
+    ; so the group scale is exact and deterministic: k = e when the mantissa is exactly 1, else e+1.
+    ;   The E4M3FN nearest is ds4.c's own ladder search over its 127 magnitudes, tie-to-even index.
+    (defn dsv4-kvq-body ()
+        " static inline float ds4_e4m3_mag(int i) { int e = (i >> 3) & 15; int m = i & 7; return (e == 0) ? (float(m) * 0.001953125f) : ((1.0f + float(m) * 0.125f) * metal::exp2(float(e - 7))); } static inline float ds4_e4m3_round(float v) { float sgn = (v < 0.0f) ? -1.0f : 1.0f; float ax = metal::min(metal::abs(v), 448.0f); int lo = 0; int hi = 126; for (int it = 0; it < 7; ++it) { if (lo >= hi) break; int mid = (lo + hi + 1) >> 1; if (ds4_e4m3_mag(mid) <= ax) lo = mid; else hi = mid - 1; } int best = lo; if (best < 126) { float bd = metal::abs(ax - ds4_e4m3_mag(best)); float nd = metal::abs(ax - ds4_e4m3_mag(best + 1)); if (nd < bd || (nd == bd && ((best + 1) & 1) == 0 && (best & 1) != 0)) best = best + 1; } return sgn * ds4_e4m3_mag(best); } static inline float ds4_ceil_log2(float t) { uint b = as_type<uint>(t); int e = int((b >> 23) & 255u) - 127; uint frac = b & 8388607u; return float((frac == 0u) ? e : (e + 1)); } kernel void form_dsv4_kv_fp8_f16_round(device const float* v [[buffer(0)]], device float* out [[buffer(1)]], constant uint& hd [[buffer(2)]], constant uint& nrot [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i != 0u) return; for (uint j = 0u; j < hd; ++j) out[j] = v[j]; uint nnope = hd - nrot; for (uint off = 0u; off + 64u <= nnope; off += 64u) { float amax = 0.0f; for (uint j = 0u; j < 64u; ++j) { float a = metal::abs(out[off + j]); if (a > amax) amax = a; } if (amax < 1.0e-4f) amax = 1.0e-4f; float sc = metal::exp2(ds4_ceil_log2(amax / 448.0f)); for (uint j = 0u; j < 64u; ++j) { float w = out[off + j] / sc; w = metal::clamp(w, -448.0f, 448.0f); out[off + j] = ds4_e4m3_round(w) * sc; } } for (uint j = 0u; j < hd; ++j) out[j] = float(half(out[j])); }")
+
+    ; --- kernel 3: the plain F16 matvec (ds4.c matvec_f16). STAGE 4 needs it for hc_attn_fn, which is
+    ; F16 [in 16384, out 24] — the hyper-connection's mixing projection. One thread per output row, a
+    ; straight sequential fold; float(as_type<half>(h)) is the exact IEEE half->single widening.
+    (defn dsv4-f16-matvec-body ()
+        " kernel void form_dsv4_f16_matvec(device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; float acc = 0.0f; ulong base = (ulong)r * (ulong)cols; for (uint j = 0u; j < cols; ++j) { ushort h = *(device const ushort*)(qb + (base + (ulong)j) * 2ul); acc = acc + float(as_type<half>(h)) * x[j]; } y[r] = acc; }")
+
+    ; --- the CORE translation unit: one metal_stdlib, mxfp8-msl.fk's own decode spine once, then the
+    ; kernels above. A carrier compiles exactly this; it composes nothing itself.
+    (defn dsv4-mla-core-msl ()
+        (do
+            (print "MSL")
+            (print (str_concat (qml-msl-header)
+                    (str_concat (mx8m-msl-helpers)
+                    (str_concat (dsv4-mx8-grouped-body)
+                    (str_concat (dsv4-kvq-body) (dsv4-f16-matvec-body))))))
+            (print "END")
+            0))
+
+    ; ================= STONE 36 STAGE 4: the HYPER-CONNECTION unit, at real dims ========================
+    ; dsv4-hc-msl.fk's OWN seven kernels, unchanged, in one translation unit. Stone 29 proved them at toy
+    ; scale (metal_hc_gpu.sh PASS 10); this band carries them onto blk.0's real hc_attn_fn [16384 -> 24],
+    ; hc_attn_scale [3] and hc_attn_base [24]. A complete layer is HC-pre -> block -> HC-post, twice; this
+    ; is the attention half's frame.
+    (defn dsv4-hc-unit ()
+        (do
+            (print "MSL")
+            (print (hc-msl-unit))
+            (print "END")
+            0))
+
+    ; ================= a tensor's matvec shape, from its GGUF dims =====================================
+    ; A projection weight [in, out] is stored dim0=in (fastest), dim1=out. The fused matvec computes
+    ; y[o] = sum_j W[o*in + j] * x[j], so rows = out = d1, cols = in = d0, and the per-tensor element
+    ; count nel = rows*cols is the E8M0 scale-plane origin the MXFP8 kernel reads at. These mirror the
+    ; manifest's own d0/d1/nel columns; stated in Form so the carrier reads geometry, never guesses it.
+    (defn dsv4-mla-rows (d0 d1) d1)
+    (defn dsv4-mla-cols (d0 d1) d0)
+    (defn dsv4-mla-nel  (d0 d1) (mul d0 d1))
+
+    ; ================= the GROUPED output geometry, from the file's own KVs =============================
+    ; Stage 1's resolution, said in Form so the carrier asks for it rather than repeating a literal.
+    ; n-head 64, head-dim 512, groups 8 (attention.output_group_count), rank 1024 (output_lora_rank).
+    (defn dsv4-out-groups    () 8)
+    (defn dsv4-out-rank      () 1024)
+    (defn dsv4-out-grp-heads (nh ng) (div nh ng))
+    (defn dsv4-out-grp-dim   (nh hd ng) (mul hd (div nh ng)))     ; = 4096 : the `_a` INPUT width
+    (defn dsv4-out-low-dim   (ng rank)  (mul ng rank))            ; = 8192 : `_a` out, `_b` in
+
+    0)
