@@ -1,0 +1,79 @@
+; lcg-bytes.fk — the deterministic byte stream, as a Form recipe.
+;
+; preludes: form-stdlib/core.fk
+;
+; `seeded_bytes` is a native in the sibling walkers and absent from fkwu, so every
+; cell that reached for it — host-kernel-carrier's entropy door, the metal band's
+; 256 bit — could not run here. It was on my "owed, named, not fixed" list twice,
+; described as a native fkwu lacks, which quietly framed it as a host boundary.
+;
+; It is not one. The registry names its whole contract: "deterministic glibc-LCG
+; byte stream: same (seed,count) everywhere" (primitive-registry.fk). A linear
+; congruential generator is arithmetic — multiply, add, take a remainder — and it
+; touches no device, no clock, and no entropy pool. There was never anything for a
+; host to provide. It is called an entropy door only because it sits beside one;
+; the actual entropy door is `random_bytes`, and that one IS a host boundary and
+; stays where it is.
+;
+; The recurrence, glibc's: x <- (x * 1103515245 + 12345) mod 2^31, seeded with the
+; caller's seed, one byte per step taken as x mod 256, and the FIRST byte comes
+; from x1 rather than the seed itself.
+;
+;   seed 1: x1 = 1103527590            -> 1103527590 mod 256 = 166
+;   seed 7: x1 = 1282168116            -> 1282168116 mod 256 = 52
+;
+; Both derived from the recurrence and both already written down as expectations by
+; cells that predate this one — primitive-registry.fk's probe row says 166, and
+; tests/host-kernel-metal-band.fk says the seed-7 stream opens 52 93 210 163. Two
+; independent witnesses the recipe has to meet rather than declare.
+;
+; WHY THE MULTIPLY IS SPLIT, which is the whole reason this cell crosses four ways.
+; Written the obvious way — (mod (add (mul x (lcg-mult)) (lcg-inc)) (lcg-mod)) — this
+; band returned 63 on fkwu, Go and Rust, and 35 on TS: bytes 2, 3 and 4 of the seed-7
+; stream diverged while byte 1 agreed. Not a transcription slip. x reaches 2^31 and
+; the multiplier is ~2^30, so the product reaches 2^61, and the TS walker's numbers
+; are IEEE doubles — exact only to 2^53. The first step stayed small enough to agree;
+; every step after it silently lost low bits. Three arms agreeing was not the
+; measurement, exactly as proof/README says.
+;
+; So x is split at 16 bits and the halves are reduced before they are recombined:
+;   x = hi*2^16 + lo,  hi < 2^15,  lo < 2^16
+;   (hi*m*2^16) mod 2^31  =  ((hi*m) mod 2^15) * 2^16     -- hi*m < 2^45
+;   (lo*m)                                                 -- lo*m < 2^46
+; Every intermediate now stays under 2^46, comfortably inside a double's exact range,
+; and the result is bit-identical to the wide form on the 64-bit arms. The identity is
+; ordinary modular arithmetic, not an approximation: this is the same function, made
+; reachable by every kernel that has to compute it.
+;
+; Proven by form-stdlib/tests/lcg-bytes-band.fk (verdict 63, four-way).
+
+(do
+    (defn lcg-mult () 1103515245)
+    (defn lcg-inc () 12345)
+    (defn lcg-mod () 2147483648)          ; 2^31
+    (defn lcg-split () 65536)             ; 2^16
+    (defn lcg-hi-mod () 32768)            ; 2^15
+
+    (defn lcg-next (x)
+        (do (let hi (div x (lcg-split)))
+            (let lo (mod x (lcg-split)))
+            (let hi-part (mul (mod (mul hi (lcg-mult)) (lcg-hi-mod)) (lcg-split)))
+            (let lo-part (mul lo (lcg-mult)))
+            (mod (add (add hi-part lo-part) (lcg-inc)) (lcg-mod))))
+
+    ; count bytes from seed, accumulated in reverse then turned once
+    (defn lcg-rev-onto (xs n acc)
+        (if (eq n 0) acc (lcg-rev-onto (tail xs) (sub n 1) (cons (head xs) acc))))
+    (defn lcg-loop (x n acc)
+        (if (eq n 0)
+            acc
+            (do (let nx (lcg-next x))
+                (lcg-loop nx (sub n 1) (cons (mod nx 256) acc)))))
+
+    ; seed count -> a list of `count` bytes, identical on every kernel
+    (defn lcg-bytes (seed count)
+        (if (le count 0)
+            (list)
+            (do (let rev (lcg-loop seed count (list)))
+                (lcg-rev-onto rev count (list)))))
+    0)
