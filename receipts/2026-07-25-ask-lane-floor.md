@@ -31,6 +31,12 @@ The committed `form-cli` binary is the wrong architecture for this box, so the v
 through its own cells on the source runner — which is the more native route regardless: no
 prebuilt binary in the path, every line computed by `form-cli-ask.fk` itself.
 
+That finding is **not new here** and is attributed rather than re-claimed:
+`receipts/2026-07-23-form-cli-verified-reply.md` already recorded the binary answering
+`Exec format error` on an x86 box and its source running on `fkwu --src`. I re-derived it
+independently on this host — arm64 Mach-O, same conclusion — which is corroboration, not a
+discovery. The receipt that got there first owns it.
+
 `./fkwu --src form/form-stdlib/tests/ask-lane-probe.fk`:
 
 ```
@@ -109,6 +115,27 @@ post-change cell: identical, so nothing here regressed them.
 The one error remaining in the ASK closure is `walk_recipe_here`, a sibling-kernel native that
 `form/form-stdlib/primitive-registry.fk` already names as absent from fkwu. Axiom-5 recovers it and
 it is not on the path any of these checks take.
+
+## The hex change, checked against the surface main had already proven
+
+`hex.fk` sits under the whole ASK closure, so the change above had to be checked against the bands
+`receipts/2026-07-23-form-cli-verified-reply.md` landed on main rather than only against my own.
+Merged main in and re-ran every one of them on cold caches:
+
+| band | expected | got |
+|---|---|---|
+| `form-cli-ask-band.fk` | 262143 | **262143** |
+| `form-cli-membrane-band.fk` | 1023 | **1023** |
+| `observe/tests/membrane-lane-band.fk` | 31 | **31** |
+| `observe/tests/membrane-lane-live-band.fk` | 31 | **31** |
+| `dsv4-decode-loop-band.fk` | 1023 | **1023** |
+
+Nothing moved. And a name worth separating while both are in one tree: `form-cli-ask-band.fk`
+shares the `fca-` prefix with this work but proves a **different organ** — `form-cli-ask-gate.fk`,
+the posterior sufficiency gate, over synthetic signal tuples, four-way. `ask-lane-floor` proves the
+step before it on real host state: which lane gets to answer at all. A question can route perfectly
+and still fail the gate, or pass the gate having been answered by a lane nobody named. Cross-
+referenced both ways rather than composted, because neither subsumes the other.
 
 ## The question itself
 
