@@ -11031,8 +11031,21 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
     char line[512];
     /* compile-errors records fk_nerr at image-write time, placed right after
      * the version line so readers find it in the first bytes; a cached run
-     * replays this count as its exit truth (absent line reads as 0) */
-    int hn = sprintf(line, "program-image-sym-lens-v1\ncompile-errors %lld\nsource ", fk_nerr);
+     * replays this count as its exit truth (absent line reads as 0).
+     *
+     * unrunnable records the REFUSAL, which is a different fact from the count.
+     * An [unbound-name] in value position latches fk_src_unrunnable, and the
+     * fresh-compile door then returns WITHOUT printing the root value -- the
+     * kernel declining to compute an answer over a program whose names silently
+     * read as 0. That refusal was not travelling into the image, so the next run
+     * loaded the .fkb and printed the value the compile had just refused to
+     * print: same source, same errors, and a number visible only on the second
+     * run. The count could not stand in for it, because an unresolved CALL
+     * recovers to nothing and DOES run -- errors > 0 and runnable is an ordinary
+     * state. So the latch travels on its own line. */
+    int hn = sprintf(line,
+                     "program-image-sym-lens-v1\ncompile-errors %lld\nunrunnable %d\nsource ",
+                     fk_nerr, fk_src_unrunnable ? 1 : 0);
     if (!fk_write_all_raw(fd, line, (unsigned long)hn) ||
         !fk_write_all_raw(fd, src_path, (unsigned long)fk_path_len(src_path)) ||
         !fk_write_all_raw(fd, "\nfkb ", 5) ||
@@ -11914,6 +11927,47 @@ static long long fk_src_sym_recorded_errors(const char *sym_path) {
     }
     return -1;
 }
+/* the unrunnable latch as the image recorded it: 1 refused, 0 runnable, -1 absent.
+ * -1 means an older lens that predates the field, and the caller treats it the same
+ * way it treats a missing error record -- an incomplete cache to rebuild, never a
+ * clean one. Guessing "probably runnable" here would restore exactly the laundering
+ * this field exists to stop. */
+static long long fk_src_sym_recorded_unrunnable(const char *sym_path) {
+#if defined(_WIN32)
+    int fd = open(sym_path, 0x8000);
+#else
+    int fd = open(sym_path, 0);
+#endif
+    if (fd < 0) {
+        return -1;
+    }
+    char buf[256];
+    long long got = read(fd, buf, 255);
+    close(fd);
+    if (got <= 0) {
+        return -1;
+    }
+    buf[got] = 0;
+    const char *needle = "\nunrunnable ";
+    long long i = 0;
+    while (i < got) {
+        long long j = 0;
+        while (needle[j] != 0 && i + j < got && buf[i + j] == needle[j]) {
+            j = j + 1;
+        }
+        if (needle[j] == 0) {
+            long long v = 0;
+            long long p = i + j;
+            while (p < got && buf[p] >= '0' && buf[p] <= '9') {
+                v = v * 10 + (buf[p] - '0');
+                p = p + 1;
+            }
+            return v;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
 static void fk_src_reset_compile_state(void) {
     fk_arg_n = 0;
     fk_fname_n = 0;
@@ -12274,13 +12328,28 @@ static int fk_run_src(const char *path, long long arg) {
         fk_diag_path("warning", dylib_path, "stale .dylib ignored");
     }
     long long recorded = fk_src_sym_recorded_errors(sym_path);
-    if (fkb_mtime >= unit_mtime && recorded < 0) {
+    long long recorded_unrunnable = fk_src_sym_recorded_unrunnable(sym_path);
+    if (fkb_mtime >= unit_mtime && (recorded < 0 || recorded_unrunnable < 0)) {
         /* an image without its error record is an incomplete cache; rebuild
          * rather than guess (older lenses, or a lens deleted out from under
          * the image) */
         fk_diag_path("warning", sym_path, "sym lens lacks a compile-error record; rebuilding");
     } else if (fkb_mtime >= unit_mtime) {
         if (fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
+            /* THE REFUSAL TRAVELS WITH THE IMAGE. The fresh-compile door returns
+             * without printing the root value when the unrunnable latch is set,
+             * so a cached run that prints it anyway does not merely replay a
+             * degraded image -- it overturns a decision the kernel already made,
+             * and it does so silently, on the second run of an unchanged file.
+             * Refuse identically here: same door, same answer, whichever side of
+             * the cache the caller happens to be standing on. */
+            if (recorded_unrunnable > 0) {
+                fk_diag_path("error", sym_path,
+                        "cached image was REFUSED at compile (unbound name in value position); "
+                        "refusing to run it from cache -- fix source and rerun");
+                fk_diag_flush();
+                return 1;
+            }
             /* the compile carried errors when this image was written; the
              * cache must not launder them -- replay the tally as exit truth */
             if (recorded > 0) {
