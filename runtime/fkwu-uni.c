@@ -12653,11 +12653,38 @@ static int fk_run_feval(const char *path) {
     /* print the meta-eval result by value-kind (int / float / nothing) */
     return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
 }
+/* STAGE argv's trailing token into fk_src, the buffer `input_byte` (tag 17) reads.
+ *
+ * fk_src_len was assigned NOWHERE but its initializer, so the staged-input buffer was
+ * always empty and every input_byte returned 0. form-cli-main.fk's headless front door
+ * is exactly `fc-read` over input_byte, so the form-cli chain could not receive a command
+ * from this seed at all — its header names the filler as fkwu's argv[3] "or the persistent
+ * fkwu-server's per-request buffer (form-kernel-go/fkwu_bridge.go)", and that Go bridge
+ * lives in the origin repo, not here. This is roadmap item 4 (MANIFEST.md) at its exact
+ * location: the binary RAN Go-free while the way IN was still Go-shaped.
+ *
+ * This is host plumbing, not runtime meaning: Form cannot reach argv, and the Form-side
+ * primitive (input_byte) already exists — only the fill was missing. It does not displace
+ * the integer arg: atoi still runs on the same token, so `ground-recursive.fk 10` keeps
+ * its 55 (atoi of a verb like "ping" is 0, which is the arg such a program would get
+ * anyway). Shrink note: this leaves when Form owns its own argv port. */
+static void fk_stage_input(const char *s) {
+    long long i = 0;
+    if (!s) { fk_src_len = 0; return; }
+    while (s[i] != 0 && i < FK_STAGED_INPUT_CAP - 1) { fk_src[i] = s[i]; i++; }
+    fk_src[i] = 0;
+    fk_src_len = i;
+}
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
     fk_stack_base = &fk_stack_here;
     if (argc < 2) {
         return 1;
+    }
+    if (argc > 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH) {
+        fk_stage_input(argv[3]);
+    } else if (argc > 2) {
+        fk_stage_input(argv[2]);
     }
     if (argc >= 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH &&
         argv[1][2] == FK_CH_LOWER_F && argv[1][3] == FK_CH_LOWER_E) {
