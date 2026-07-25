@@ -52,17 +52,36 @@
                 (fstr-int-to-str-pos n))))
 
     ; str_to_int — the inverse of int_to_str. Same digit arithmetic in
-    ; reverse (ASCII '0' is byte 48); a leading "-" negates. Empty-string
-    ; input is not guarded beyond str_len returning 0 (the loop base case),
-    ; matching int_to_str's own scope: covers what the codebase's real
-    ; callers pass, not every malformed input.
+    ; reverse (ASCII '0' is byte 48); leading whitespace is skipped and a
+    ; leading "-" negates. The digit loop STOPS at the first non-digit
+    ; rather than folding its byte into the accumulator.
+    ;
+    ; 2026-07-22 — the unguarded loop answered wrongly, not loudly. Every
+    ; shell-exec builtin returns its stdout with a trailing "\n"; the old
+    ; loop read that newline as a digit and folded (10 - 48) in, so the
+    ; form-native `grep -c` over the corpus came back 2442 instead of 248
+    ; (248*10 - 38). Nothing refused; a plausible integer came out. The
+    ; guard is what makes the body's own shell answerable at all. Kept
+    ; TOTAL (no form_error) because the three sibling kernels ship
+    ; str_to_int as a total native; see receipts/2026-07-22-the-body-
+    ; answers-itself.md for the parity spread across the four arms.
+    (defn fstr-digit-cp? (b) (if (ge b 48) (le b 57) false))
+    (defn fstr-space-cp? (b)
+        (if (eq b 32) true (if (eq b 9) true (if (eq b 10) true (eq b 13)))))
+    (defn fstr-skip-ws (s i len)
+        (if (ge i len) i
+            (if (fstr-space-cp? (str_byte_at s i)) (fstr-skip-ws s (add i 1) len) i)))
     (defn fstr-to-int-loop (s i len acc)
         (if (ge i len) acc
-            (fstr-to-int-loop s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48)))))
+            (if (fstr-digit-cp? (str_byte_at s i))
+                (fstr-to-int-loop s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48)))
+                acc)))
     (defn str_to_int (s)
-        (if (and (gt (str_len s) 0) (str_eq (substring s 0 1) "-"))
-            (sub 0 (fstr-to-int-loop s 1 (str_len s) 0))
-            (fstr-to-int-loop s 0 (str_len s) 0)))
+        (do (let flen (str_len s))
+            (let fi (fstr-skip-ws s 0 flen))
+            (if (if (lt fi flen) (eq (str_byte_at s fi) 45) false)
+                (sub 0 (fstr-to-int-loop s (add fi 1) flen 0))
+                (fstr-to-int-loop s fi flen 0))))
 
     ; str_find — naive substring search from `from`, over the floor.
     ; O(n*m); nothing in this codebase calls it in a hot loop over long

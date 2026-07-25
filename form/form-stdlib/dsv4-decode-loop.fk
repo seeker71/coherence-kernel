@@ -1,0 +1,395 @@
+; dsv4-decode-loop.fk — STONE 41, part 2: the organ that turns ONE token into an ANSWER.
+;
+; A forward pass produces one token. A decode loop produces a reply: prompt ids -> prefill -> argmax ->
+; feed it back -> repeat -> stop. Everything between those arrows is a CHOICE, and none of the choices
+; is visible to a self-carve — two copies of the same wrong loop agree perfectly. So the loop below is
+; TRANSCRIBED from ds4-engine's own C (twinblind, corpus row 868), line by line, and each choice is
+; marked with where it was read.
+;
+; THE RENTED RECIPE — ds4.c, the DeepSeek-V4 reference engine at /Users/ursmuff/models/ds4-engine:
+;
+;   ds4.c:13606 forward_token_raw_swa_cpu       ONE decode step: embed -> hc_from_plain_embedding ->
+;                                               43 layers TOKEN-MAJOR -> output_logits_one.
+;   ds4.c:13631 prefill_layer_major_cpu         PREFILL IS LAYER-MAJOR — "all prompt tokens pass through
+;                                               layer 0, then layer 1". Decode is token-major. They are
+;                                               two different schedules over the same rows.
+;   ds4.c:13782 (prefill)                       the prompt's logits come from the LAST position only:
+;                                               output_logits_one(..., cur + (n_tok-1)*hc_dim).
+;   ds4.c:13198 pos = pos0 + t                  prefill positions are 0..n-1 for a fresh prompt.
+;   ds4.c:46530 pos = (uint32_t)prompt->len     decode starts at prompt->len, NOT prompt->len - 1.
+;   ds4.c:37102 the generation loop             for (i = 0; i < n_predict && pos < ctx_size; i++)
+;   ds4.c:37111 the END CONDITION               `if (is_stop(token)) break;` — BEFORE emit. THE STOP
+;                                               TOKEN IS NEVER EMITTED. A loop that emits it is right
+;                                               in every count and wrong in every answer.
+;   ds4.c:37116 `if (i == n_predict-1 || pos+1 >= ctx_size) { pos++; break; }` — the last accepted token
+;                                               is NOT fed forward. Its logits would go unread, so the
+;                                               loop saves an entire forward pass. A loop that runs it
+;                                               produces identical output and one wasted pass per reply.
+;   ds4.c:36578 sample_argmax                   strict `>`, so on a tie the LOWEST index wins.
+;   ds4.c:13851 rope_tail_layer_inplace(q,...,pos,il,false) and the same `pos` for kv and for the
+;                                               INVERSE rotation of the heads. Q and K rotate at the
+;                                               query's own position; the cached row keeps the rotation
+;                                               it was WRITTEN with (hushfold, corpus row 859: at
+;                                               position 0 RoPE is the identity, so a one-position test
+;                                               witnesses none of this. A decode loop is where positions
+;                                               >= 1 become real).
+;   ds4.c:9764  hc_from_plain_embedding         the embedding is BROADCAST into all n_hc streams.
+;   ds4.c:13904 output_logits_one               output_hc_head_one collapses HC -> embd, then
+;                                               output_norm RMS, then the output matvec.
+;
+; halfrent (corpus row 870) applies unchanged: ds4.c cannot execute this file's FFN, and beyond that
+; tensor_expect_routed_expert refuses every pruned layer. What is rented here is the loop's ORDER and its
+; SCALARS — which is exactly what a loop IS. No arithmetic of this file's weights is rented.
+;
+; ---------------------------------------------------------------------------
+; THE STEP CONTRACT, and the seam to Stone 39's stack, named so that wiring is a SUBSTITUTION:
+;
+;     (stepf ctx hc kv pos) -> (list hc' kv')
+;
+;       ctx   whatever the stack needs to reach its weights (opaque to this loop)
+;       hc    the hyper-connection state, n_hc * n_embd numbers. At V4-Flash: 4 * 4096 = 16384 —
+;             EXACTLY the shape metal_dsv4_layer_join.sh's gate 29 emits, "the four hyper-connection
+;             streams blk.1 receives". One layer's out_hc is the next layer's inp_hc, and a whole
+;             stack's out_hc is what the output head reads.
+;       kv    a dsv4-kv-cache.fk cache: nlayers banks, one latent row per token per layer, hd 512.
+;       pos   the token's absolute position. RoPE's index, and the row's index in the arena.
+;
+;     Stone 39's stack satisfies this contract as `dsv4-stack-step`, with ctx carrying the per-layer
+;     tensor views its band already reads (expert count from dim[2], the type per layer, the routing
+;     regime, the per-layer freqs[]). When it lands, ddl-generate takes it unchanged: the loop never
+;     looks inside ctx and never assumes a layer count beyond (dkv-nlayers kv).
+;
+;     On the device the same seam is one binding. form-stdlib/mla-msl.fk's form_mla_attend_f32 takes
+;     (q, rows, out, sinks, nh, hd, nrows, scale); metal_dsv4_layer_join.sh binds nrows = 1. The loop
+;     binds `rows` = the arena base and nrows = pos+1. The attention kernel does not change.
+; ---------------------------------------------------------------------------
+;
+; APORON — THE DECLARED RADIUS.
+;   * The loop's SHAPE and its end conditions are proven. WHAT THE STEP COMPUTES is the step's business;
+;     this cell never looks inside hc.
+;   * ddl-mla-step is a ONE-LAYER, n_hc = 1 configuration over mla-attn.fk's proven block, with a PLAIN
+;     RESIDUAL. V4-Flash has no plain residual anywhere — its residual stream is the hyper-connection
+;     frame. The stub is a runnable model, not this model, and it is labelled so at every use.
+;   * The output head here is rms-norm + matvec. ds4.c's is output_hc_head_one (the HC collapse) then
+;     output_norm then a Q8_0 matvec. The HC collapse is NOT written here and is not claimed.
+;   * Sampling is argmax only. Temperature, top-p, repetition penalty, speculative drafting: unwritten.
+;   * No chat template, no BOS/EOS insertion policy. The prompt is ids, the eos is an id.
+;   * `pos < ctx_size` is enforced by the loop; the cache enforces its own cap by REFUSING (aporon in
+;     dsv4-kv-cache.fk). The two caps are independent on purpose — a loop that stops only because its
+;     cache silently stopped growing is the failure this separation exists to make impossible.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk form-stdlib/mla-msl.fk form-stdlib/dsv4-kv-cache.fk
+;
+; Proven by: form-stdlib/tests/dsv4-decode-loop-band.fk (verdict 1023) and native/metal/metal_dsv4_decode.sh.
+
+(do
+    ; ===========================================================================
+    ; THE STEP, with the offered-interface guard on it (zerobirth / edgedrop).
+    ; A step returns (hc' kv' ok). `ok` is 0 when the step did not visibly happen:
+    ;   * the cache did not grow by exactly one row at every layer, or
+    ;   * it grew by disturbing what was already there, or
+    ;   * hc' changed width, or
+    ;   * hc' is all zeros — which is what an UNRUN dispatch and a zeroed device
+    ;     buffer both read as. On the GPU that is the whole point: a Metal buffer
+    ;     is born zeroed, so "computed zero" and "never computed" are the same
+    ;     bytes unless something refuses them.
+    ; ===========================================================================
+    (defn ddl-st (hc kv ok) (list hc kv ok))
+    (defn ddl-st-hc (s) (nth s 0))
+    (defn ddl-st-kv (s) (nth s 1))
+    (defn ddl-st-ok (s) (nth s 2))
+
+    (defn ddl-live? (hc kv-before kv-after hc-before)
+        (if (eq (dkv-grew-by-one? kv-before kv-after) 1)
+            (if (eq (dkv-history-intact? kv-before kv-after) 1)
+                (if (eq (len hc) (len hc-before))
+                    (if (gt (dkv-absmax hc) 0.0) 1 0) 0) 0) 0))
+
+    (defn ddl-step (stepf ctx hc kv pos)
+        (do (let r (stepf ctx hc kv pos))
+            (let hc2 (nth r 0))
+            (let kv2 (nth r 1))
+            (ddl-st hc2 kv2 (ddl-live? hc2 kv kv2 hc))))
+
+    ; n steps from `pos`, threading hc, kv and the position. `ok` is the AND of
+    ; every step's guard — one dead step makes the whole run dead, and the run
+    ; does not stop pretending otherwise.
+    (defn ddl-run-steps (stepf ctx hc kv pos n ok)
+        (if (eq n 0) (ddl-st hc kv ok)
+            (do (let s (ddl-step stepf ctx hc kv pos))
+                (ddl-run-steps stepf ctx (ddl-st-hc s) (ddl-st-kv s) (add pos 1) (sub n 1)
+                               (if (eq ok 1) (ddl-st-ok s) 0)))))
+
+    ; ===========================================================================
+    ; SAMPLING — ds4.c:36578 sample_argmax. Strict `>`: on a tie the LOWEST index
+    ; wins. That is a choice, it is load-bearing for reproducibility, and a
+    ; `>=` here would silently pick the highest instead.
+    ; ===========================================================================
+    (defn ddl-argmax-loop (xs i best bestv)
+        (if (eq (len xs) 0) best
+            (if (gt (head xs) bestv)
+                (ddl-argmax-loop (tail xs) (add i 1) i (head xs))
+                (ddl-argmax-loop (tail xs) (add i 1) best bestv))))
+    (defn ddl-argmax (xs) (if (eq (len xs) 0) 0 (ddl-argmax-loop (tail xs) 1 0 (head xs))))
+
+    ; ds4.c:36527 vocab_token_is_generation_stop — for this family it is the eos id.
+    (defn ddl-stop? (tok eos) (if (eq tok eos) 1 0))
+
+    ; ===========================================================================
+    ; THE HEAD and the EMBEDDING. mdl = (emb wout wnorm n-hc).
+    ;   emb    the embedding table, a list of rows indexed by token id
+    ;   wout   the output matrix, rows = vocab
+    ;   wnorm  the output RMSNorm gamma
+    ;   n-hc   how many streams the embedding broadcasts into (ds4.c:9764)
+    ; ===========================================================================
+    (defn ddl-mdl (emb wout wnorm n-hc) (list emb wout wnorm n-hc))
+    (defn ddl-mdl-emb   (m) (nth m 0))
+    (defn ddl-mdl-wout  (m) (nth m 1))
+    (defn ddl-mdl-wnorm (m) (nth m 2))
+    (defn ddl-mdl-nhc   (m) (nth m 3))
+
+    ; ds4.c:9764 — memcpy the SAME embedding into every one of the n_hc streams.
+    (defn ddl-hc-broadcast-loop (x h n) (if (eq h n) (empty) (tb-cat x (ddl-hc-broadcast-loop x (add h 1) n))))
+    (defn ddl-hc-broadcast (x n) (ddl-hc-broadcast-loop x 0 n))
+    (defn ddl-embed (mdl id) (ddl-hc-broadcast (nth (ddl-mdl-emb mdl) id) (ddl-mdl-nhc mdl)))
+
+    ; the head at n_hc = 1: rms-norm then matvec. ds4.c collapses HC first
+    ; (output_hc_head_one); that collapse is Stone 39's and is NOT written here,
+    ; so this head is honest only where n_hc = 1 — ddl-head-ok? says so out loud
+    ; rather than quietly reading the first stream and calling it the answer.
+    (defn ddl-head-ok? (mdl) (if (eq (ddl-mdl-nhc mdl) 1) 1 0))
+    (defn ddl-logits (mdl hc)
+        (tb-matvec (ddl-mdl-wout mdl) (ln-rmsnorm hc (ddl-mdl-wnorm mdl) 0.00001)))
+
+    ; ===========================================================================
+    ; ONE TOKEN, ALL LAYERS — ds4.c:13606's decode step, exactly.
+    ;   embed -> broadcast into the hc streams -> the stack -> logits.
+    ; Returns (logits kv' ok).
+    ; ===========================================================================
+    (defn ddl-forward (stepf ctx mdl id kv pos)
+        (do (let s (ddl-step stepf ctx (ddl-embed mdl id) kv pos))
+            (list (ddl-logits mdl (ddl-st-hc s)) (ddl-st-kv s) (ddl-st-ok s))))
+
+    ; ===========================================================================
+    ; PREFILL, TOKEN-MAJOR. ds4.c prefills LAYER-MAJOR (:13631) for batch matmul
+    ; reach; the two schedules write the same rows at the same positions, because
+    ; a token's row at layer l depends only on that token's input at layer l and
+    ; its own position, and its attention reads rows 0..t which BOTH orders have
+    ; already written. That is an argument, so the band witnesses it rather than
+    ; asserting it (claim 16: a two-layer stub, three tokens, identical caches and
+    ; identical logits from both schedules).
+    ; The prompt's logits come from the LAST position only (ds4.c:13782).
+    ; Returns (logits kv' pos ok) where pos = prompt length (ds4.c:46530).
+    ; ===========================================================================
+    (defn ddl-prefill-loop (stepf ctx mdl ids kv pos ok)
+        (if (eq (len ids) 0) (list (empty) kv pos ok)
+            (do (let f (ddl-forward stepf ctx mdl (head ids) kv pos))
+                (let ok2 (if (eq ok 1) (nth f 2) 0))
+                (if (eq (len (tail ids)) 0)
+                    (list (nth f 0) (nth f 1) (add pos 1) ok2)
+                    (ddl-prefill-loop stepf ctx mdl (tail ids) (nth f 1) (add pos 1) ok2)))))
+    (defn ddl-prefill (stepf ctx mdl ids kv) (ddl-prefill-loop stepf ctx mdl ids kv 0 1))
+
+    ; ===========================================================================
+    ; THE GENERATION LOOP — ds4.c:37102..37124, transcribed.
+    ;   lim = (n-predict ctx-size eos)
+    ; Returns (ids kv pos ok stop-reason), stop-reason:
+    ;   0 the stop token was sampled and NOT emitted   (ds4.c:37111)
+    ;   1 n_predict was reached                        (ds4.c:37116, i == n_predict-1)
+    ;   2 ctx_size was reached                         (ds4.c:37102 / :37116)
+    ;   3 a step's guard refused — a dead or non-growing step (this body's, not ds4's)
+    ; ===========================================================================
+    (defn ddl-lim (npredict ctxsize eos) (list npredict ctxsize eos))
+    (defn ddl-lim-np  (l) (nth l 0))
+    (defn ddl-lim-cs  (l) (nth l 1))
+    (defn ddl-lim-eos (l) (nth l 2))
+
+    (defn ddl-gen-loop (stepf ctx mdl lim kv logits pos i acc ok)
+        (if (ge i (ddl-lim-np lim)) (list acc kv pos ok 1)
+        (if (ge pos (ddl-lim-cs lim)) (list acc kv pos ok 2)
+        (do (let tok (ddl-argmax logits))
+            (if (eq (ddl-stop? tok (ddl-lim-eos lim)) 1) (list acc kv pos ok 0)
+            (do (let acc2 (append acc (list tok)))
+                (if (eq i (sub (ddl-lim-np lim) 1)) (list acc2 kv (add pos 1) ok 1)
+                (if (ge (add pos 1) (ddl-lim-cs lim)) (list acc2 kv (add pos 1) ok 2)
+                (do (let f (ddl-forward stepf ctx mdl tok kv pos))
+                    (if (eq (nth f 2) 0) (list acc2 (nth f 1) (add pos 1) 0 3)
+                        (ddl-gen-loop stepf ctx mdl lim (nth f 1) (nth f 0) (add pos 1) (add i 1)
+                                      acc2 (if (eq ok 1) (nth f 2) 0))))))))))))
+
+    ; prompt ids -> generated ids. The whole organ.
+    (defn ddl-run (stepf ctx mdl lim kv ids)
+        (do (let p (ddl-prefill stepf ctx mdl ids kv))
+            (ddl-gen-loop stepf ctx mdl lim (nth p 1) (nth p 0) (nth p 2) 0 (empty) (nth p 3))))
+    (defn ddl-run-ids  (r) (nth r 0))
+    (defn ddl-run-kv   (r) (nth r 1))
+    (defn ddl-run-pos  (r) (nth r 2))
+    (defn ddl-run-ok   (r) (nth r 3))
+    (defn ddl-run-stop (r) (nth r 4))
+
+    ; ===========================================================================
+    ; A RUNNABLE STEP: one MLA layer, n_hc = 1, plain residual. ctx = (w c).
+    ; This is a model that RUNS TODAY, on mla-attn.fk's four-way-proven block,
+    ; and it is NOT DeepSeek-V4-Flash. Every position >= 1 exercises RoPE for its
+    ; actual purpose here — the query rotates at its own position while the cached
+    ; rows keep the rotations they were written with (hushfold, corpus row 859).
+    ;
+    ; The order is ds4.c:13851's: rope the kv row, cache it, THEN attend over the
+    ; cache INCLUDING this token's own row (mla-attn.fk: causality is the cache's
+    ; length). The fp8/f16 rounding between the rope and the cache write
+    ; (dsv4_fp8_kv_quantize_row_inplace_cpu + f16_round_inplace_cpu) is Stone
+    ; 36/37's kernel and is not applied here — declared, not forgotten.
+    ; ===========================================================================
+    (defn ddl-mla-ctx (w c) (list w c))
+    (defn ddl-mla-step (ctx hc kv pos)
+        (do (let w (nth ctx 0))
+            (let c (nth ctx 1))
+            (let row (mla-cache-row w c hc pos))
+            (let kv2 (dkv-append kv 0 row))
+            (let out (mla-block-one w c hc pos (dkv-bank kv2 0)))
+            (list (tb-vec-add hc out) kv2)))
+
+    ; ===========================================================================
+    ; A STUB STEP over `nl` layers, for proving the loop's own bookkeeping without
+    ; any arithmetic to hide behind. ctx = (gain nl). Each layer's row DEPENDS ON
+    ; pos, and each layer's output depends on every row in its bank, so a driver
+    ; that forgets to advance pos, or drops the cache, or reuses one bank for two
+    ; layers, produces different numbers and is caught.
+    ; ===========================================================================
+    (defn ddl-stub-ctx (gain nl) (list gain nl))
+    (defn ddl-stub-row (hc pos) (tn-scale hc (add (mul pos 1.0) 1.0)))
+    (defn ddl-stub-bank-sum (rows acc)
+        (if (eq (len rows) 0) acc (ddl-stub-bank-sum (tail rows) (tb-vec-add acc (head rows)))))
+    (defn ddl-stub-layer (l gain hc kv pos)
+        (do (let kv2 (dkv-append kv l (ddl-stub-row hc pos)))
+            (let s (ddl-stub-bank-sum (dkv-bank kv2 l) (tb-zeros (len hc))))
+            (list (tb-vec-add hc (tn-scale s gain)) kv2)))
+    (defn ddl-stub-stack-loop (l nl gain hc kv pos)
+        (if (eq l nl) (list hc kv)
+            (do (let r (ddl-stub-layer l gain hc kv pos))
+                (ddl-stub-stack-loop (add l 1) nl gain (nth r 0) (nth r 1) pos))))
+    (defn ddl-stub-step (ctx hc kv pos) (ddl-stub-stack-loop 0 (nth ctx 1) (nth ctx 0) hc kv pos))
+
+    ; ---- LAYER-MAJOR prefill over the same stub (ds4.c:13631's schedule) ----
+    ; `hcs` is a list of per-token hc states; one layer consumes all of them, in
+    ; token order, before the next layer starts.
+    (defn ddl-lm-tokens (l gain hcs kv pos acc)
+        (if (eq (len hcs) 0) (list (reverse acc) kv)
+            (do (let r (ddl-stub-layer l gain (head hcs) kv pos))
+                (ddl-lm-tokens l gain (tail hcs) (nth r 1) (add pos 1) (cons (nth r 0) acc)))))
+    (defn ddl-lm-layers (l nl gain hcs kv)
+        (if (eq l nl) (list hcs kv)
+            (do (let r (ddl-lm-tokens l gain hcs kv 0 (empty)))
+                (ddl-lm-layers (add l 1) nl gain (nth r 0) (nth r 1)))))
+    (defn ddl-embed-all (mdl ids) (if (eq (len ids) 0) (empty) (cons (ddl-embed mdl (head ids)) (ddl-embed-all mdl (tail ids)))))
+    (defn ddl-last (xs) (if (eq (len (tail xs)) 0) (head xs) (ddl-last (tail xs))))
+    ; returns (logits kv) — the logits from the LAST position only (ds4.c:13782)
+    (defn ddl-prefill-layer-major (ctx mdl ids kv)
+        (do (let r (ddl-lm-layers 0 (nth ctx 1) (nth ctx 0) (ddl-embed-all mdl ids) kv))
+            (list (ddl-logits mdl (ddl-last (nth r 0))) (nth r 1))))
+
+    ; ===========================================================================
+    ; THE FIXTURE AND ITS fp64 REFERENCES, for native/metal/metal_dsv4_decode.sh.
+    ; The SAME toy MLA layer mla-demo.fk and mla-attn-band.fk use — one source of
+    ; truth for the arithmetic — plus a six-token vocabulary, so there is something
+    ; to argmax over and something to call an answer. The carrier's whole diet is
+    ; printed here; not one number lives in the shell script (the dumb-carrier
+    ; discipline).
+    ; ===========================================================================
+    (defn ddc-eps () 0.00001)
+    (defn ddc-base () 10000.0)
+    (defn ddc-nh () 2) (defn ddc-hd () 4) (defn ddc-nrot () 2) (defn ddc-ng () 2)
+    (defn ddc-e () 4) (defn ddc-r () 3)
+    (defn ddc-grank () 2)
+    (defn ddc-gdim () (mul (div (ddc-nh) (ddc-ng)) (ddc-hd)))
+    (defn ddc-ncat () (mul (ddc-ng) (ddc-grank)))
+    (defn ddc-cap () 16)
+    (defn ddc-npredict () 5)
+    (defn ddc-eos () 99)
+    (defn ddc-vocab () 6)
+    (defn ddc-c () (mla-cfg (ddc-nh) (ddc-hd) (ddc-nrot) (ddc-ng) (ddc-base) (ddc-eps)))
+
+    (defn ddc-an () (list 1.0 1.0 1.0 1.0))
+    (defn ddc-wqa () (list (list 0.1 -0.2 0.3 0.4) (list -0.5 0.6 0.1 -0.2) (list 0.2 0.3 -0.4 0.5)))
+    (defn ddc-gqa () (list 1.0 1.0 1.0))
+    (defn ddc-wqb () (list (list 0.2 -0.1 0.4) (list 0.5 0.3 -0.2) (list -0.3 0.6 0.1) (list 0.1 0.2 0.3)
+                           (list 0.4 -0.5 0.2) (list -0.1 0.3 0.5) (list 0.6 0.1 -0.4) (list 0.2 -0.3 0.1)))
+    (defn ddc-wkv () (list (list 0.3 0.1 -0.2 0.5) (list -0.4 0.2 0.6 0.1)
+                           (list 0.2 -0.5 0.3 -0.1) (list 0.1 0.4 -0.3 0.2)))
+    (defn ddc-gkv () (list 1.0 1.0 1.0 1.0))
+    (defn ddc-was () (list (list (list 0.1 0.2 -0.3 0.4) (list 0.5 -0.1 0.2 0.3))
+                           (list (list -0.2 0.4 0.1 -0.5) (list 0.3 0.2 -0.4 0.1))))
+    (defn ddc-wb () (list (list 0.2 -0.3 0.4 0.1) (list -0.1 0.5 0.2 -0.4)
+                          (list 0.3 0.1 -0.2 0.5) (list 0.4 -0.2 0.1 0.3)))
+    (defn ddc-sinks () (list 0.0 0.5))
+    (defn ddc-w () (mla-w (ddc-an) (ddc-wqa) (ddc-gqa) (ddc-wqb) (ddc-wkv) (ddc-gkv)
+                          (ddc-was) (ddc-wb) (ddc-sinks)))
+    (defn ddc-ctx () (ddl-mla-ctx (ddc-w) (ddc-c)))
+
+    (defn ddc-emb () (list (list 0.5 -0.3 0.9 0.2) (list -0.4 0.7 -0.1 0.6) (list 0.2 0.1 -0.8 0.4)
+                           (list 0.9 0.2 0.3 -0.5) (list -0.7 -0.2 0.4 0.8) (list 0.3 0.6 -0.6 -0.1)))
+    (defn ddc-wout () (list (list 0.4 -0.2 0.1 0.3) (list -0.3 0.5 0.2 -0.1) (list 0.1 0.3 -0.4 0.6)
+                            (list 0.7 -0.1 0.2 0.1) (list -0.2 0.4 0.5 -0.3) (list 0.2 0.2 -0.2 0.4)))
+    (defn ddc-wnorm () (list 1.0 1.0 1.0 1.0))
+    (defn ddc-mdl () (ddl-mdl (ddc-emb) (ddc-wout) (ddc-wnorm) 1))
+
+    ; two prompts. B was chosen for a DIFFERENT FIRST TOKEN: this one-layer toy has a
+    ; fixed point, so whatever it emits first it emits forever, and two prompts that
+    ; agree on the first token would agree on all five. That is the fixture's property
+    ; and not the loop's, and it is said here rather than hidden.
+    (defn ddc-prompt-a () (list 0 1 2))
+    (defn ddc-prompt-b () (list 4 3))
+    (defn ddc-lim () (ddl-lim (ddc-npredict) (ddc-cap) (ddc-eos)))
+    (defn ddc-kv0 () (dkv-new (ddc-cap) 1 (ddc-hd)))
+    (defn ddc-run-a () (ddl-run ddl-mla-step (ddc-ctx) (ddc-mdl) (ddc-lim) (ddc-kv0) (ddc-prompt-a)))
+    (defn ddc-run-b () (ddl-run ddl-mla-step (ddc-ctx) (ddc-mdl) (ddc-lim) (ddc-kv0) (ddc-prompt-b)))
+
+    (defn ddc-freqs-walk (k npair)
+        (if (eq k npair) (empty) (cons (rope-freq-theta (ddc-base) (mul 2 k) (ddc-nrot)) (ddc-freqs-walk (add k 1) npair))))
+    (defn ddc-freqs () (ddc-freqs-walk 0 (div (ddc-nrot) 2)))
+    (defn ddc-scale () (mla-scale (ddc-c)))
+    ; the prefill logits at the LAST prompt position — the first sampled token's source
+    (defn ddc-prefill-a () (ddl-prefill ddl-mla-step (ddc-ctx) (ddc-mdl) (ddc-prompt-a) (ddc-kv0)))
+
+    (defn ddc-plist (xs) (if (eq (len xs) 0) (print "ENDVEC") (do (print (head xs)) (ddc-plist (tail xs)))))
+    (defn ddc-vec (name xs) (do (print (str_concat "VEC " name)) (ddc-plist xs)))
+    (defn ddc-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (ddc-flat (tail rows)))))
+    (defn ddc-mat (name rows) (ddc-vec name (ddc-flat rows)))
+    (defn ddc-was-flat (ms) (if (eq (len ms) 0) (empty) (tb-cat (ddc-flat (head ms)) (ddc-was-flat (tail ms)))))
+    (defn ddc-scalar (name v) (do (print (str_concat "SCALAR " name)) (print v)))
+
+    (defn ddc-emit ()
+        (do
+            (print "DSV4DECODE")
+            (ddc-scalar "E" (ddc-e)) (ddc-scalar "R" (ddc-r))
+            (ddc-scalar "nh" (ddc-nh)) (ddc-scalar "hd" (ddc-hd))
+            (ddc-scalar "nrot" (ddc-nrot)) (ddc-scalar "ng" (ddc-ng))
+            (ddc-scalar "grank" (ddc-grank)) (ddc-scalar "gdim" (ddc-gdim)) (ddc-scalar "ncat" (ddc-ncat))
+            (ddc-scalar "eps" (ddc-eps)) (ddc-scalar "base" (ddc-base)) (ddc-scalar "scale" (ddc-scale))
+            (ddc-scalar "cap" (ddc-cap)) (ddc-scalar "npredict" (ddc-npredict))
+            (ddc-scalar "eos" (ddc-eos)) (ddc-scalar "vocab" (ddc-vocab))
+            (ddc-vec "freqs" (ddc-freqs))
+            (ddc-vec "an" (ddc-an)) (ddc-vec "gqa" (ddc-gqa)) (ddc-vec "gkv" (ddc-gkv)) (ddc-vec "sinks" (ddc-sinks))
+            (ddc-mat "wqa" (ddc-wqa)) (ddc-mat "wqb" (ddc-wqb)) (ddc-mat "wkv" (ddc-wkv)) (ddc-mat "wb" (ddc-wb))
+            (ddc-vec "was" (ddc-was-flat (ddc-was)))
+            (ddc-mat "emb" (ddc-emb)) (ddc-mat "wout" (ddc-wout)) (ddc-vec "wnorm" (ddc-wnorm))
+            (ddc-vec "promptA" (ddc-prompt-a)) (ddc-vec "promptB" (ddc-prompt-b))
+            ; the fp64 answers this body computed, which the GPU must reproduce
+            (ddc-vec "genA" (ddl-run-ids (ddc-run-a)))
+            (ddc-vec "genB" (ddl-run-ids (ddc-run-b)))
+            (ddc-scalar "nrowsA" (dkv-len (ddl-run-kv (ddc-run-a)) 0))
+            (ddc-scalar "posA" (ddl-run-pos (ddc-run-a)))
+            (ddc-scalar "stopA" (ddl-run-stop (ddc-run-a)))
+            (ddc-vec "rowsA" (dkv-flat (ddl-run-kv (ddc-run-a)) 0))
+            (ddc-vec "logitsA0" (nth (ddc-prefill-a) 0))
+            ; hushfold: the same token cached at position 0 and at position 1
+            (ddc-vec "row0" (mla-cache-row (ddc-w) (ddc-c) (nth (ddc-emb) 0) 0))
+            (ddc-vec "row1" (mla-cache-row (ddc-w) (ddc-c) (nth (ddc-emb) 0) 1))
+            (print "END")
+            0))
+
+    ; the Metal translation unit the decode witness runs: mla-msl.fk's five kernels
+    ; (one header, one spine) plus the cache's own append. ONE unit, so the arena's
+    ; append and the attention that reads the arena cannot drift apart.
+    (defn ddc-msl-unit () (str_concat (mla-msl-unit) (dkv-append-msl-body)))
+    0)

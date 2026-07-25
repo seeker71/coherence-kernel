@@ -53,6 +53,7 @@ FLAT_CHAIN="$EMIT_CHAIN $S/core.fk $S/form-parse.fk $S/bmf-core.fk $S/bmf-gramma
 # Keep the ask support modules before the dispatcher; default ask receipts stay
 # local through fkwu RAG while http-client remains available to legacy carriers.
 MODS="(list (read_file \"$S/fourth-shim.fk\") (read_file \"$S/core.fk\") (read_file \"$S/grammars/sanskrit-roots.fk\") (read_file \"$S/resource-port.fk\") (read_file \"$S/bml-native-interface-package-import.fk\") (read_file \"$S/hati-os-targets.fk\") (read_file \"$S/form-native-resource-interfaces.fk\") (read_file \"$S/form-fs.fk\") (read_file \"$S/storage-port.fk\") (read_file \"$S/host-kernel-carrier.fk\") (read_file \"$S/fnri-standin.fk\") (read_file \"$S/fnri-receipt.fk\") (read_file \"$S/http-client.fk\") (read_file \"$S/line-grammar.fk\") (read_file \"$S/str-byte-at.fk\") (read_file \"$S/sha256.fk\") (read_file \"$S/hmac-sha256.fk\") (read_file \"$S/hex.fk\") (read_file \"$S/format-arith.fk\") (read_file \"$S/f16-decode.fk\") (read_file \"$S/q6k-dequant.fk\") (read_file \"$S/q4k-dequant.fk\") (read_file \"$S/weight-load.fk\") (read_file \"$S/voice-traits.fk\") (read_file \"$S/nearest-shape.fk\") (read_file \"$S/co-learning.fk\") (read_file \"$S/co-learning-stream.fk\") (read_file \"$S/mesh-dispatch.fk\") (read_file \"$S/surprise-salience.fk\") (read_file \"$S/host-sense-organ.fk\") (read_file \"$S/speech-organ.fk\") (read_file \"$S/native-host-instance.fk\") (read_file \"$S/text-tokenize.fk\") (read_file \"$S/rag-embed.fk\") (read_file \"$S/rag-index-codec.fk\") (read_file \"$S/rag-retrieve.fk\") (read_file \"$S/rag-ask.fk\") (read_file \"$S/form-cli-ask.fk\") (read_file \"$S/form-cli-router.fk\") (read_file \"$S/form-cli-judge.fk\") (read_file \"$S/confidence-weighted-vote.fk\") (read_file \"$S/lineage-discounted-vote.fk\") (read_file \"$S/form-cli-oracle-loop.fk\") (read_file \"$S/form-cli-sufficiency.fk\") (read_file \"$S/form-freq-check.fk\") (read_file \"$S/trust-row.fk\") (read_file \"$S/form-cli-ask-gate.fk\") (read_file \"$S/form-cli-staged-trace.fk\") (read_file \"$S/form-cli-request.fk\") (read_file \"$S/form-cli-carrier.fk\") (read_file \"$S/form-cli-ask-plus.fk\") (read_file \"$S/form-cli-surface-inquiry.fk\") (read_file \"$S/current-branch-landing.fk\") (read_file \"$S/form-cli-inquiry.fk\") (read_file \"$S/form-cli.fk\") (read_file \"$S/form-cli-gguf-cell.fk\"))" 
+MODS="${MODS%)} (read_file \"$S/relational-inquiry-metabolism.fk\"))"
 BAND="(read_file \"$S/form-cli-repl.fk\")"
 
 # Prefer fkwu self-host flatten (no Go) when T_flat + cached fkwu are warm.
@@ -77,6 +78,7 @@ FORM_CLI_SRCS=(
     "$S/form-cli-staged-trace.fk" "$S/form-cli-request.fk" "$S/form-cli-carrier.fk" "$S/form-cli-ask-plus.fk" "$S/form-cli-surface-inquiry.fk"
     "$S/current-branch-landing.fk"
     "$S/form-cli-inquiry.fk"
+    "$S/relational-inquiry-metabolism.fk"
     "$S/form-cli.fk"
     "$S/form-cli-gguf-cell.fk"
     "$S/form-cli-repl.fk"
@@ -156,6 +158,7 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/trust-row.fk" "$S/form-cli-ask-gate.fk" "$S/form-cli-staged-trace.fk"
     "$S/form-cli-request.fk" "$S/form-cli-carrier.fk" "$S/form-cli-ask-plus.fk" "$S/form-cli-surface-inquiry.fk"
     "$S/current-branch-landing.fk" "$S/form-cli-inquiry.fk" "$S/form-cli.fk" "$S/form-cli-gguf-cell.fk"
+    "$S/relational-inquiry-metabolism.fk"
     "$S/form-cli-repl.fk"
 )
 if [[ "$bootstrap_carrier_fresh" == 1 ]]; then

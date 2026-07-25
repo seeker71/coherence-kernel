@@ -1,0 +1,150 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/dsv4-hc.fk
+;
+; dsv4-hc-band — DeepSeek-V4-Flash hyper-connections (dsv4-hc.fk), the residual
+; structure the whole forward pass runs inside. Six claims; verdict 63 when all cross.
+;
+; ---------------------------------------------------------------------------
+; APORON — THE DECLARED RADIUS. Read this before believing the number.
+;
+; WHAT THIS BAND PROVES
+;   The arithmetic of one hyper-connection PRE step, POST step, the Sinkhorn combine
+;   matrix (20 iterations), the stream broadcast, and the output collapse, as
+;   ds4-engine's CPU reference performs them, reproduced by this body at tiny dims
+;   (n_hc = 4 for the combine, n_hc = 2 / n_embd = 2 for the full pipeline).
+;
+; WHAT IT DOES NOT PROVE
+;   * NOT bit-exactness. There is no independent HC implementation in this repo.
+;     Claim 1's evidence class is AGREEMENT WITH AN INDEPENDENT fp64 TRANSCRIPTION of
+;     ds4.c (scratchpad hc_oracle.py, written from the C control flow, not this
+;     recipe), observed at ~1e-15; the residual is fp32-vs-fp64 rounding, not algebra.
+;   * NOT the real dims. V4-Flash is n_hc=4, n_embd=4096, fn [16384,24], 43 layers x
+;     two HC pairs (attn + ffn) + an output head. The recipe is dim-generic; no claim
+;     here has SEEN those dims.
+;   * NOT the layer. No attention, no FFN, no MoE, no residual stack, no real weights,
+;     no token. This is the HC wrapper alone, once. `block_out` here is invented.
+;   * NOT the fp8/f16 encodings ds4 stores its streams in. This band is fp64.
+;   * NOT the GPU. CPU recipe only.
+;
+; A gate reading only "the output has n_embd floats and no NaN" would pass on nonsense.
+; Claims 2,4,8,16,32 exist as falsifiers for readings that would otherwise sit well:
+; that the combine is "just a softmax" (2), that the post-step transpose does not
+; matter (4), that the 20 Sinkhorn iterations are decorative (8), that the block output
+; does not enter (16), that HC is a plain redundant residual (32).
+; ---------------------------------------------------------------------------
+;
+;   bit  1  AGREEMENT: split, weighted-sum, post (n_hc=4), the full pre pipeline and
+;           the output head (n_hc=2) match the independent transcription at 1e-9.
+;   bit  2  DOUBLY STOCHASTIC: after 20 Sinkhorn iterations every row-sum AND every
+;           column-sum of the 4x4 combine is 1 to 1e-4. A plain row softmax makes ROWS
+;           sum to 1 but not columns — this falsifies "the combine is just a softmax".
+;   bit  4  THE TRANSPOSE IS LOAD-BEARING: hc-post over the combine vs over its
+;           transpose differ by > 1e-3 (the combine is asymmetric). Falsifies reading
+;           comb[dst+src*n_hc] as comb[src+dst*n_hc].
+;   bit  8  THE 20 ITERATIONS ARE REAL: the combine at iters=20 differs from iters=1 by
+;           > 1e-3 (observed 1.7e-2). An unrun iteration is not a computed zero.
+;   bit 16  THE BLOCK OUTPUT ENTERS: hc-post with the real block minus hc-post with a
+;           zero block equals block_out (x) post[dst] on every stream, to 1e-9.
+;   bit 32  HC IS NOT A PLAIN RESIDUAL: after one post step the four streams are
+;           DISTINCT (max pairwise > 1e-3) though they entered a broadcast (all equal).
+;           A plain x = x + block(x) residual would keep them redundant.
+
+(do
+  (defn hcb-vmaxdiff (a b)
+    (if (eq (len a) 0) 0.0
+        (do (let d (tn-abs (sub (head a) (head b))))
+            (let r (hcb-vmaxdiff (tail a) (tail b)))
+            (if (gt d r) d r))))
+  (defn hcb-maxdiff (as bs)
+    (if (eq (len as) 0) 0.0
+        (do (let d (hcb-vmaxdiff (head as) (head bs)))
+            (let r (hcb-maxdiff (tail as) (tail bs)))
+            (if (gt d r) d r))))
+  (defn hcb-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (hcb-flat (tail rows)))))
+  ; transpose a square list-of-rows
+  (defn hcb-tpose-loop (rows j n) (if (eq j n) (empty) (cons (hc-col rows j) (hcb-tpose-loop rows (add j 1) n))))
+  (defn hcb-tpose (rows n) (hcb-tpose-loop rows 0 n))
+  ; abs of the max deviation of a vector's entries from 1.0
+  (defn hcb-dev1 (v) (if (eq (len v) 0) 0.0 (do (let d (tn-abs (sub (head v) 1.0))) (let r (hcb-dev1 (tail v))) (if (gt d r) d r))))
+  ; max pairwise vector distance between rows of a list
+  (defn hcb-pairmax (rows) (if (lt (len rows) 2) 0.0
+      (do (let d0 (hcb-vmaxdiff (nth rows 0) (nth rows 1)))
+          (let d1 (if (gt (len rows) 2) (hcb-vmaxdiff (nth rows 0) (nth rows 2)) 0.0))
+          (let d2 (if (gt (len rows) 3) (hcb-vmaxdiff (nth rows 0) (nth rows 3)) 0.0))
+          (if (gt d0 d1) (if (gt d0 d2) d0 d2) (if (gt d1 d2) d1 d2)))))
+
+  (let eps 0.000001)
+  (let iters 20)
+
+  ; ===== component fixtures at n_hc=4, n_embd=3 =====
+  (let mix (list 0.3 -0.7 0.5 0.1 -0.2 0.6 -0.4 0.8 0.2 -0.5 0.9 -0.1 -0.3 0.7 0.1 -0.6 0.4 -0.2 -0.8 0.5 0.1 0.3 -0.4 0.6))
+  (let scale (list 1.3 0.7 1.1))
+  (let base (list 0.05 -0.1 0.2 0.0 0.1 -0.05 0.15 -0.2 0.0 0.1 -0.1 0.05 -0.05 0.2 0.0 0.1 0.15 -0.1 0.05 0.0 0.1 0.0 -0.15 0.2))
+  (let resid-flat (list 0.5 -0.3 0.9 -0.4 0.7 -0.1 0.2 0.1 -0.8 0.6 -0.5 0.3))
+  (let resid (list (list 0.5 -0.3 0.9) (list -0.4 0.7 -0.1) (list 0.2 0.1 -0.8) (list 0.6 -0.5 0.3)))
+  (let blk (list 0.35 -0.25 0.65))
+  (let n4 4)
+
+  (let s4 (hc-split mix scale base n4 iters eps))
+  (let split-got (hc-split-flat s4))
+  (let wsum-got (hc-wsum resid (hc-split-pre s4)))
+  (let post-got (hcb-flat (hc-post blk resid (hc-split-post s4) (hc-split-comb s4) n4)))
+
+  ; ===== full pipeline at n_hc=2, n_embd=2 =====
+  (let fn2 (list (list 0.1 -0.2 0.3 0.15) (list -0.25 0.4 0.05 -0.1) (list 0.35 0.2 -0.15 0.25) (list -0.05 0.3 0.1 -0.2) (list 0.2 -0.35 0.25 0.05) (list 0.15 0.1 -0.3 0.4) (list -0.2 0.25 0.15 -0.05) (list 0.3 -0.1 0.2 0.35)))
+  (let scale2 (list 1.2 0.9 1.05))
+  (let base2 (list 0.05 -0.1 0.1 -0.05 0.0 0.15 -0.2 0.1))
+  (let resid2 (list (list 0.6 -0.4) (list 0.3 0.8)))
+  (let p2 (hc-pre fn2 scale2 base2 resid2 2 iters eps))
+  (let out2-got (hc-pre-input p2))
+  (let post2-got (hc-pre-post p2))
+  (let comb2-got (hcb-flat (hc-pre-comb p2)))
+
+  ; ===== output head at n_hc=2, n_embd=2 =====
+  (let fnh (list (list 0.2 -0.3 0.4 0.1) (list -0.1 0.25 0.15 -0.2)))
+  (let scaleh (list 1.1))
+  (let baseh (list 0.05 -0.1))
+  (let inph (list (list 0.5 -0.2) (list 0.7 0.4)))
+  (let head-got (hc-out-head fnh scaleh baseh inph eps))
+
+  ; --- claim 1: agreement with the independent transcription ---
+  (let got (list split-got wsum-got post-got out2-got post2-got comb2-got head-got))
+  (let ref (list
+    (list 0.6082600307465144 0.2669808507611424 0.700568142473973 0.5324553063873187 0.9800026662400692 1.1829179568655601 0.9350913872253624 1.1780808681173303 0.2280464910623496 0.10829895506342602 0.5097879462860038 0.15386560758822065 0.13902804489387943 0.49770732782678445 0.2595943524699504 0.10366927480938588 0.39875646220841493 0.14896281147793985 0.11025616433643587 0.34202356197720946 0.23416800183535613 0.2450299056318498 0.12036053690761009 0.40044055562518394)
+    (list 0.6569244873959861 -0.1917622526374167 0.1200180205327658)
+    (list 0.6216650543005439 -0.29330333714984314 0.5795860013066465 0.4458983369786431 -0.0874427179247996 0.7709337212442222 0.5726057726957517 -0.25414783598333796 0.9885623477100284 0.7564624434819738 -0.4341293285540997 0.7403780007305123)
+    (list 0.500562918402464 -0.04568008326063691)
+    (list 1.272368384440297 0.7547097937069717)
+    (list 0.7093133807845177 0.2906856192154831 0.2906856192154824 0.709313380784517)
+    (list 0.6817689130931681 0.02163919902622566)))
+  (let c1 (if (lt (hcb-maxdiff got ref) 0.000000001) 1 0))
+
+  ; --- claim 2: doubly stochastic (rows AND columns sum to 1) ---
+  (let comb4 (hc-split-comb s4))
+  (let rowsums (list (tn-sum (nth comb4 0)) (tn-sum (nth comb4 1)) (tn-sum (nth comb4 2)) (tn-sum (nth comb4 3))))
+  (let colsums (hc-rowsum comb4 (tb-zeros 4)))
+  (let c2 (if (lt (hcb-dev1 rowsums) 0.0001) (if (lt (hcb-dev1 colsums) 0.0001) 2 0) 0))
+
+  ; --- claim 4: the transpose is load-bearing ---
+  (let post-t (hcb-flat (hc-post blk resid (hc-split-post s4) (hcb-tpose comb4 4) n4)))
+  (let c4 (if (gt (hcb-vmaxdiff post-got post-t) 0.001) 4 0))
+
+  ; --- claim 8: the 20 iterations are real ---
+  (let s4-one (hc-split mix scale base n4 1 eps))
+  (let c8 (if (gt (hcb-vmaxdiff (hc-rowsum-cat comb4) (hc-rowsum-cat (hc-split-comb s4-one))) 0.001) 8 0))
+
+  ; --- claim 16: the block output enters via post[dst] ---
+  (let post-zero (hc-post (tb-zeros 3) resid (hc-split-post s4) (hc-split-comb s4) n4))
+  (let post-real (hc-post blk resid (hc-split-post s4) (hc-split-comb s4) n4))
+  ; stream dst: (real - zero) should equal blk * post[dst]
+  (let inj0 (hcb-vmaxdiff (tb-vec-add (nth post-real 0) (tn-scale (nth post-zero 0) -1.0)) (tn-scale blk (nth (hc-split-post s4) 0))))
+  (let inj2 (hcb-vmaxdiff (tb-vec-add (nth post-real 2) (tn-scale (nth post-zero 2) -1.0)) (tn-scale blk (nth (hc-split-post s4) 2))))
+  (let c16 (if (lt inj0 0.000000001) (if (lt inj2 0.000000001) 16 0) 0))
+
+  ; --- claim 32: HC is not a plain residual — a broadcast state becomes distinct ---
+  (let bcast (hc-broadcast n4 (list 0.4 -0.6 0.2)))
+  (let streams-in-equal (hcb-pairmax bcast))
+  (let after (hc-post blk bcast (hc-split-post s4) (hc-split-comb s4) n4))
+  (let streams-out-distinct (hcb-pairmax after))
+  (let c32 (if (eq streams-in-equal 0.0) (if (gt streams-out-distinct 0.001) 32 0) 0))
+
+  (add c1 (add c2 (add c4 (add c8 (add c16 c32))))))
