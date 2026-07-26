@@ -100,6 +100,30 @@
         (str_concat fname
             " (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; float ss = 0.0f; uint j = 0; while (j < n) { float xv = x[j]; float sq = xv * xv; ss = ss + sq; j += 1; } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50; while (it > 0) { it -= 1; gg = 0.5f * (gg + sdv / gg); } float inv = 1.0f / gg; j = 0; while (j < n) { float nm = x[j] * inv; y[j] = nm * g[j]; j += 1; } }")))
 
+    ; --- STONE 16, THE COOPERATIVE RMSNORM. The attestant above is ONE thread over n device-memory
+    ; loads, then n more loads and stores, and the measurement said that is the largest non-matvec
+    ; term in a whole token: 0.55 ms each, 57 of them, ~31 ms of a ~52 ms token. The cost is not the
+    ; arithmetic — it is that a single thread pays full device-memory latency 2n times with nothing
+    ; to overlap it.
+    ;
+    ; THE ORDER IS NOT TOUCHED, and that is the whole point. The sum-of-squares is still folded
+    ; ASCENDING by ONE thread, j = 0, 1, ... n-1, over exactly the squares the attestant folds. What
+    ; changes is WHERE those squares come from: nt threads compute them in parallel into threadgroup
+    ; memory first, so the serial fold reads a fast local array instead of stalling on device memory,
+    ; and the final normalize/scale pass — which is elementwise and has no order at all — is spread
+    ; over the same nt threads. Same values, same association, same rounding: BIT FOR BIT the
+    ; attestant, not an epsilon-bearing twin. (Corpus row `foldkeep`: the split picked an accumulator
+    ; layout, never an order.)
+    ;
+    ; RADIUS, ASKED NOT ASSUMED: the threadgroup scratch is a COMPILE-TIME 4096 floats, so this
+    ; kernel is correct only for n <= 4096, and it must be dispatched as EXACTLY ONE threadgroup (it
+    ; reduces across the threadgroup, not across the grid). Both are the carrier's to check; at any
+    ; other n or grid it is WRONG, not slow. llama3.2:3b's d=3072 passes. ---
+    (defn ldm-rmsnorm-tg-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { threadgroup float sq[4096]; threadgroup float sinv[1]; uint j = t; while (j < n) { float xv = x[j]; sq[j] = xv * xv; j += nt; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { float ss = 0.0f; uint k = 0u; while (k < n) { ss = ss + sq[k]; k += 1u; } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } sinv[0] = 1.0f / gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float inv = sinv[0]; j = t; while (j < n) { float nm = x[j] * inv; y[j] = nm * g[j]; j += nt; } }")))
+
     ; --- RoPE, in place, one thread per head. Pairs are ADJACENT (i, i+1): that is ggml's rope for
     ; llama (mode 0), and the GGUF conversion permutes Q/K so the adjacent-pair rotation is the same
     ; rotation HF's half-split form applies. theta = pos * base^(-i/HD) / freqs[i/2] — the divide is
@@ -108,6 +132,20 @@
         (str_concat "kernel void "
         (str_concat fname
             " (device float* v [[buffer(0)]], device const float* fr [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& pos [[buffer(4)]], constant float& base [[buffer(5)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint o = h * hd; uint i = 0; while (i + 1u < hd) { float ex = (-1.0f * float(i)) / float(hd); float fq = fpow(base, ex) / fr[i / 2u]; float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + i]; float q1 = v[o + i + 1u]; float t0 = q0 * ca; float t1 = q1 * sa; v[o + i] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; v[o + i + 1u] = t2 + t3; i += 2u; } }")))
+
+    ; --- STONE 16, ROPE AT PAIR GRAIN. The kernel above gives one thread a whole head and makes it
+    ; walk hd/2 pairs, each with an fpow, an fsin and an fcos — 24 threads doing 64 transcendental
+    ; rotations apiece while the machine sits idle. The pairs are INDEPENDENT: pair p of head h reads
+    ; and writes only v[h*hd + 2p] and v[h*hd + 2p + 1], and its theta depends on nothing but
+    ; (base, pos, i, hd, fr[i/2]). So the loop is a thread map, not an order, and unrolling it across
+    ; nh*(hd/2) threads changes no expression and no rounding. BIT FOR BIT the per-head kernel.
+    ; RADIUS: hd must be EVEN. The per-head kernel's `while (i + 1 < hd)` silently drops a trailing
+    ; odd element; this one has no trailing element to drop, so at odd hd the two DIFFER. The carrier
+    ; checks it rather than assuming llama3.2's 128 speaks for every model. ---
+    (defn ldm-rope-pair-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* v [[buffer(0)]], device const float* fr [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& pos [[buffer(4)]], constant float& base [[buffer(5)]], uint gid [[thread_position_in_grid]]) { uint np = hd / 2u; if (gid >= nh * np) return; uint h = gid / np; uint pr = gid - h * np; uint i = pr * 2u; uint o = h * hd; float ex = (-1.0f * float(i)) / float(hd); float fq = fpow(base, ex) / fr[i / 2u]; float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + i]; float q1 = v[o + i + 1u]; float t0 = q0 * ca; float t1 = q1 * sa; v[o + i] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; v[o + i + 1u] = t2 + t3; }")))
 
     ; --- GQA attention for ONE query position over the KV CACHE prefix, one thread per query head.
     ; kc/vc are the pooled cache, laid out [position][nkv*hd]; npos is how many slots are live, and the
@@ -140,6 +178,31 @@
         (str_concat fname
             " (device const float* x [[buffer(0)]], device uint* out [[buffer(1)]], device float* oval [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; uint best = 0u; float bv = x[0]; uint i = 1u; while (i < n) { if (x[i] > bv) { bv = x[i]; best = i; } i += 1u; } out[0] = best; oval[0] = bv; }")))
 
+    ; --- STONE 16, GREEDY SELECTION IN TWO STAGES, AND THE TIE RULE SURVIVES IT. One thread over
+    ; 128 256 logits measured 10.8 ms — a fifth of a whole token, spent scanning a vector. Stage one
+    ; gives thread p the CONTIGUOUS chunk [p*chunk, (p+1)*chunk) and scans it with the same strict
+    ; `>`, so p reports the LOWEST index in its own chunk attaining its own max. Stage two folds the
+    ; partials with the same strict `>` in ASCENDING part order, so the first part attaining the
+    ; global max wins — and because the parts partition the index line in order, that is the globally
+    ; lowest index. The rule is not weakened by the split; it is the reason the split is exact.
+    ; No arithmetic is performed at all — only comparison and selection — so this is EQUALITY with
+    ; the attestant, not an epsilon.
+    ; An EMPTY chunk (only possible when parts > n) reports (0, x[0]): a real candidate at the lowest
+    ; possible index, which can never displace a true winner and can never win a tie it should lose.
+    (defn ldm-argmax-part-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device uint* pi [[buffer(1)]], device float* pv [[buffer(2)]], constant uint& n [[buffer(3)]], constant uint& parts [[buffer(4)]], uint p [[thread_position_in_grid]]) { if (p >= parts) return; uint chunk = (n + parts - 1u) / parts; uint lo = p * chunk; uint hi = lo + chunk; if (hi > n) hi = n; if (lo >= hi) { pi[p] = 0u; pv[p] = x[0]; return; } uint best = lo; float bv = x[lo]; uint i = lo + 1u; while (i < hi) { if (x[i] > bv) { bv = x[i]; best = i; } i += 1u; } pi[p] = best; pv[p] = bv; }")))
+
+    ; --- stage two, in threadgroup memory for the same reason the cooperative RMSNorm is: the fold is
+    ; serial by rule, but its OPERANDS need not be fetched serially from device memory. nt threads
+    ; stage the partials into local scratch, then one thread folds them ascending. RADIUS: parts
+    ; <= 4096, one threadgroup, and the carrier checks both. ---
+    (defn ldm-argmax-comb-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uint* pi [[buffer(0)]], device const float* pv [[buffer(1)]], device uint* out [[buffer(2)]], device float* oval [[buffer(3)]], constant uint& parts [[buffer(4)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { threadgroup uint li[4096]; threadgroup float lv[4096]; uint j = t; while (j < parts) { li[j] = pi[j]; lv[j] = pv[j]; j += nt; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t != 0u) return; uint best = li[0]; float bv = lv[0]; uint p = 1u; while (p < parts) { if (lv[p] > bv) { bv = lv[p]; best = li[p]; } p += 1u; } out[0] = best; oval[0] = bv; }")))
+
     ; --- the unit a carrier compiles: the transcendental spine ONCE (Metal rejects a repeated
     ; `static inline`/free function definition in one translation unit, loudly), then the six kernels.
     ; The spine is CALLED from tensor-ir.fk and jit-tensor-emit.fk, not copied — fexp/fln/fsin/fcos/
@@ -159,6 +222,15 @@
     (defn ldm-msl-helpers ()
         (str_concat (ldm-msl-round) (str_concat (jte-mlp-helpers "float") (jte-llama-helpers))))
 
+    ; STONE 16's four twins are appended AFTER the six, never in place of them: the attestant
+    ; kernels form_rmsnorm_f32, form_rope_f32 and form_argmax_f32 stay in the unit and stay on the
+    ; attestant's path, and the carrier's gates make the twins answer to them (row `attestant`).
+    (defn ldm-msl-fast ()
+        (str_concat (ldm-rmsnorm-tg-msl  "form_rmsnorm_tg_f32")
+        (str_concat (ldm-rope-pair-msl   "form_rope_pair_f32")
+        (str_concat (ldm-argmax-part-msl "form_argmax_part_f32")
+                    (ldm-argmax-comb-msl "form_argmax_comb_f32")))))
+
     (defn ldm-msl-unit ()
         (str_concat (ldm-msl-helpers)
         (str_concat (ldm-rmsnorm-msl "form_rmsnorm_f32")
@@ -166,6 +238,7 @@
         (str_concat (ldm-attn-msl    "form_gqa_decode_f32")
         (str_concat (ldm-swiglu-msl  "form_swiglu_f32")
         (str_concat (ldm-add-msl     "form_add_f32")
-                    (ldm-argmax-msl  "form_argmax_f32"))))))))
+        (str_concat (ldm-argmax-msl  "form_argmax_f32")
+                    (ldm-msl-fast)))))))))
 
     0)

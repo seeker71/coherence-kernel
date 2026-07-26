@@ -308,6 +308,13 @@ let poolBytes = (PCHUNK * (dModel * 6 + dFF * 3 + 2 * nHead * sstride) + vocabN
 print(String(format: "pooled: %.1f MB of activation + KV state for a chunk of %d tokens, allocated ONCE",
              Double(poolBytes) / 1048576.0, PCHUNK))
 
+// counted across the WHOLE run. Gate B2 compares two device buffers exactly, gate B3 compares
+// two token streams; both readback buffers are freshly zeroed, so a command buffer that FAILS
+// makes ref and got BOTH zero and gate B2 reports BIT-EXACT — two silences agreeing (aporon,
+// row 826). axiom-4: cb.status/cb.error is the offered interface; not consulting it is breach.
+var gpuErrors = 0
+var gpuFirstError: String? = nil
+
 final class Step {
     let cb: MTLCommandBuffer, enc: MTLComputeCommandEncoder
     init() { cb = queue.makeCommandBuffer()!; enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent)! }
@@ -320,7 +327,12 @@ final class Step {
                             threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
         if barrier { enc.memoryBarrier(scope: .buffers) }
     }
-    func done() { enc.endEncoding(); cb.commit(); cb.waitUntilCompleted() }
+    func done() {
+        enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+        if let e = cb.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(e)" } }
+        if cb.status != .completed { gpuErrors += 1
+            if gpuFirstError == nil { gpuFirstError = "command buffer status \(cb.status.rawValue), not .completed" } }
+    }
 }
 
 // STONE 5's lane matvec — ONE token. The path this stone must not diverge from.
@@ -598,6 +610,33 @@ print("  \"\(prompt)\"")
 print("  ids: \(promptIds)")
 if promptIds.count + nsteps >= maxpos { print("FAIL  prompt+steps exceeds the KV pool"); exit(1) }
 
+// ---- GATE B0: DID THE GPU RUN. Asked before gate B2, which compares two device buffers
+// exactly — and two buffers nothing wrote are equal, so BIT-EXACT is what a working batched
+// kernel prints AND what a GPU that never ran prints. The CPU writes a sentinel into a fresh
+// buffer; a real dequant off the resident model must overwrite every element. If it survives,
+// this is a residency condition, not an arithmetic one, and the later gates are refused.
+print("=== gate B0: did the GPU run at all ===")
+do {
+    let n0 = dModel
+    let sBuf = buf(n0)
+    let sp = sBuf.contents().bindMemory(to: Float.self, capacity: n0)
+    let sentinel: Float = -424242.0
+    for i in 0..<n0 { sp[i] = sentinel }
+    let before = gpuErrors
+    let s = Step(); dequantRow(s, embT, off: 0, n: n0, sBuf, yOff: 0); s.done()
+    var survived = 0
+    for i in 0..<n0 where sp[i] == sentinel { survived += 1 }
+    if gpuErrors > before { print("  command buffer ERROR: \(gpuFirstError ?? "unknown")") }
+    check(gpuErrors == before && survived == 0,
+      "gate B0 the GPU executes: a dequant off the resident model overwrote all \(n0) sentinels, no command buffer errored",
+      "gate B0 THE GPU DID NOT RUN — \(survived)/\(n0) sentinels survived, \(gpuErrors - before) cb error(s); a residency condition, not arithmetic")
+    if failures > 0 {
+        print("  Gate B2 below compares two device buffers exactly; unwritten they are equal and would")
+        print("  report BIT-EXACT. Refusing the later gates. Free memory and re-run.")
+        print("=== VERDICT FAIL — the GPU did not run; no arithmetic was witnessed ==="); exit(1)
+    }
+}
+
 print("=== gate B2: the batched matmul answers to the lane matvec, bit for bit ===")
 gateB2()
 if failures > 0 { print("=== gate(s) failed BEFORE any token — refusing to report a rate ==="); exit(1) }
@@ -664,8 +703,13 @@ if lens.count >= 2 {
                  sSlope, 1.0 / max(1e-9, sSlope), bSlope, 1.0 / max(1e-9, bSlope), sSlope / max(1e-9, bSlope)))
 }
 
-print(failures == 0 ? "=== VERDICT PASS — 5 gates ===" : "=== VERDICT FAIL — \(failures) gate(s) ===")
-exit(failures == 0 ? 0 : 1)
+if gpuErrors > 0 {
+    print("=== \(gpuErrors) COMMAND BUFFER(S) FAILED during this run — first: \(gpuFirstError ?? "unknown") ===")
+    print("    Nothing above this line that reads a device buffer back can be trusted.")
+}
+let ok = failures == 0 && gpuErrors == 0
+print(ok ? "=== VERDICT PASS — 6 gates ===" : "=== VERDICT FAIL — \(failures) gate(s), \(gpuErrors) cb errors ===")
+exit(ok ? 0 : 1)
 SWIFT
 
 echo "=== compiling the carrier ==="

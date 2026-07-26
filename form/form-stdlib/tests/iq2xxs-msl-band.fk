@@ -1,0 +1,171 @@
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/iq2xxs-dequant.fk form-stdlib/iq2xxs-msl.fk
+;
+; iq2xxs-msl-band — what the IQ2_XXS GPU kernel's correctness rests on, proven before any GPU runs.
+;
+; iq2xxs-msl.fk emits Metal source that dequantizes GGUF type 16 on the device. Nothing about that text
+; is checked by the Metal compiler beyond syntax: a plane base off by one, an f16 bias of 16 instead of
+; 15, a dropped parity sign — all compile, all run, all produce plausible-looking weights. And the
+; failure has the aporon shape (corpus row 826): if the emitted C and the reference were transcribed from
+; the same head at the same hour, a GPU-vs-CPU comparison agrees and proves nothing.
+;
+; So the emitted arithmetic is read BACK into Form — iq2m-flat-at, the same integer identities, the same
+; field offsets, the same block stride the C runs — and this band demands it equal iq2-at-flat, which
+; iq2xxs-dequant.fk wrote INDEPENDENTLY: the carver routes d through f16-decode.fk's general (eb, mb)
+; decoder (fd-f16) and reads its grid/ksigns through iq2-grid/iq2-ksigns, while the transcription
+; open-codes the f16 field extraction and walks its own staged power of two. Two derivations of the f16
+; scale, the same real DeepSeek bytes, demanded equal at every element.
+;
+; WHAT THIS BAND DOES NOT SPEAK FOR — its radius, named before the gates.
+;   * It speaks for the TRANSCRIPTION only. It does not speak for the MSL compiler, the GPU, or the
+;     residency: that is form/native/metal/metal_iq2_gpu.sh, which closes the loop bit-exactly on real
+;     bytes at the HEAD block AND a DISTANT block of blk.0.ffn_down_exps.weight.
+;   * The grid/ksigns tables are the published ggml constants, rented not derived (boundborrow), and this
+;     band does not re-prove them — iq2xxs-dequant-band already checked them bit-exact vs an independent
+;     from-spec oracle over 61 952 weights. Here they are SHARED between the two readings by construction
+;     (one true (iq2-grid)), so this band proves the arithmetic that walks them, not the tables.
+;
+; THE BLOCKS are iq2xxs-dequant-band's, unchanged and re-used deliberately — the same three REAL 66-byte
+; IQ2_XXS blocks from two tensors and three regions of the DeepSeek file, embedded verbatim.
+;
+; Verdict 8191 (2^13 - 1) when the transcription is honest:
+;   1     the emitted C text is complete: the dequant kernel opens with its helper spine+tables and is
+;         strictly longer (a body follows the helpers)
+;   2     the two `constant` array literals are present and carry the full 2048 / 128 entries
+;   4     ONE spine, ONE grid, ONE ksigns in the emitted unit — no repeated `static inline`/`constant`
+;   8     the transcription equals the carver on ALL 256 weights of block a (head), bit for bit
+;   16    ... and on ALL 256 of block b (distant expert)
+;   32    ... and on ALL 256 of block c (second tensor, 23.6 GB in)
+;   64    the parity sign is CARRIED, not dropped: on block a the mirror's 8th-of-8 sign matches the
+;         carver at every one of the 32 octets (paritylock — a kernel that fed sign_idx straight to the
+;         sign bits would be right 7-in-8 and silently wrong here)
+;   128   the mirror's open-coded f16 equals fd-f16 on each block's own super-scale d
+;   256   the block STRIDE is real: iq2m-flat-at reaches block 1 of a two-block buffer at the right bytes
+;   512   div/mod sign-field extraction agrees with the carver at all four sub-blocks of a chosen octet
+;   1024  the grid magnitude read (gidx*8+j) lands on the same value the carver reads, spanning j=0..7
+;   2048  the emitted array text is exactly `constant uchar iq2_grid[2048] = { <join> };` — the join is
+;         the carver's own list, so the device table cannot drift from it
+;   4096  the spine text is a prefix of the helpers, and the helpers are a prefix of the whole kernel
+
+(do
+    ; --- the three real blocks (iq2xxs-dequant-band's fixtures, verbatim) ---
+    (defn iq2b-a () (list
+        151 16 0 0 108 0 169 13 41 252 57 175 49 216 199 72 128 64 125 99 230 146
+        119 164 34 112 192 244 91 203 127 81 187 97 94 112 226 66 29 154 169 98 9 185
+        72 17 132 78 254 144 203 96 175 92 138 202 192 104 167 5 13 171 223 55 133 120))
+    (defn iq2b-b () (list
+        155 14 254 149 159 0 117 210 140 193 0 109 32 58 154 59 30 251 62 52 152 250
+        43 54 5 160 248 157 193 35 45 224 10 147 24 23 242 165 130 87 222 164 152 113
+        126 224 18 252 49 161 133 138 64 133 59 232 129 202 116 170 130 53 199 77 113 158))
+    (defn iq2b-c () (list
+        178 16 58 82 217 132 26 132 180 147 0 58 21 72 58 16 244 224 12 88 66 6
+        57 120 139 121 29 28 138 132 170 206 91 182 234 106 63 248 35 72 85 140 75 235
+        8 9 241 245 143 166 0 210 145 0 102 240 102 244 247 65 140 145 88 233 113 142))
+
+    ; --- agreement: mirror == carver, bit for bit, over a whole 256-weight block ---
+    (defn iq2b-agree (bytes i n)
+        (if (ge i n) 1
+            (if (eq (iq2m-flat-at bytes 0 i) (iq2-at-flat bytes 0 i))
+                (iq2b-agree bytes (add i 1) n) 0)))
+
+    ; --- paritylock: the 8th sign of each octet. Sub-block l of group ib32 owns weights l*8+j; the 8th is
+    ; j=7. Walk all 32 octets (8 groups x 4 sub-blocks) and demand the mirror match the carver at j=7,
+    ; where the parity-born sign lives. ---
+    (defn iq2b-parity-octet (bytes o)
+        (if (ge o 32) 1
+            (do (let i (add (mul o 8) 7))
+                (if (eq (iq2m-flat-at bytes 0 i) (iq2-at-flat bytes 0 i))
+                    (iq2b-parity-octet bytes (add o 1)) 0))))
+
+    ; does `s` open with `p`, byte for byte?
+    (defn iq2b-opens-with (s p)
+        (if (lt (str_len s) (str_len p)) 0
+            (if (str_eq (substring s 0 (str_len p)) p) 1 0)))
+    ; count non-overlapping occurrences of a 1-char... no: count occurrences of needle in hay
+    (defn iq2b-count-from (hay ndl i n)
+        (if (gt (add i (str_len ndl)) n) 0
+            (add (if (str_eq (substring hay i (add i (str_len ndl))) ndl) 1 0)
+                 (iq2b-count-from hay ndl (add i 1) n))))
+    (defn iq2b-count (hay ndl) (iq2b-count-from hay ndl 0 (str_len hay)))
+
+    ; --- the emitted text fragments ---
+    (let helpers (iq2m-msl-helpers))
+    (let spine   (iq2m-msl-spine))
+    (let kernel  (iq2m-dequant-msl "form_iq2xxs_dequant_f32"))
+    (let gridtxt (iq2m-msl-grid))
+    (let ksigtxt (iq2m-msl-ksigns))
+
+    ; --- 1: the kernel text is complete (helpers, then a strictly longer whole with a body after) ---
+    (let c0 (if (eq (iq2b-opens-with kernel helpers) 1)
+            (if (gt (str_len kernel) (str_len helpers))
+            (if (eq (iq2b-count kernel "kernel void form_iq2xxs_dequant_f32") 1) 1 0) 0) 0))
+
+    ; --- 2: both constant arrays present with full entry counts (2047 commas in grid, 127 in ksigns) ---
+    (let c1 (if (eq (iq2b-count gridtxt ",") 2047)
+            (if (eq (iq2b-count ksigtxt ",") 127)
+            (if (eq (iq2b-opens-with gridtxt "constant uchar iq2_grid[2048] = { ") 1)
+            (if (eq (iq2b-opens-with ksigtxt "constant uchar iq2_ksigns[128] = { ") 1) 2 0) 0) 0) 0))
+
+    ; --- 4: ONE of each in the whole unit (a repeated static inline / constant is a compile error) ---
+    (let c2 (if (eq (iq2b-count kernel "static inline float iq2_f16") 1)
+            (if (eq (iq2b-count kernel "constant uchar iq2_grid") 1)
+            (if (eq (iq2b-count kernel "constant uchar iq2_ksigns") 1)
+            (if (eq (iq2b-count kernel "static inline float iq2_w") 1) 4 0) 0) 0) 0))
+
+    ; --- 8/16/32: transcription == carver on all 256 weights of each real block ---
+    (let c3 (if (eq (iq2b-agree (iq2b-a) 0 256) 1) 8 0))
+    (let c4 (if (eq (iq2b-agree (iq2b-b) 0 256) 1) 16 0))
+    (let c5 (if (eq (iq2b-agree (iq2b-c) 0 256) 1) 32 0))
+
+    ; --- 64: paritylock — the 8th sign of all 32 octets of block a matches ---
+    (let c6 (if (eq (iq2b-parity-octet (iq2b-a) 0) 1) 64 0))
+
+    ; --- 128: the mirror's open-coded f16 equals fd-f16 on each block's own d bytes (off 0..1) ---
+    (let da (fd-f16 (add (nth (iq2b-a) 0) (mul 256 (nth (iq2b-a) 1)))))
+    (let db (fd-f16 (add (nth (iq2b-b) 0) (mul 256 (nth (iq2b-b) 1)))))
+    (let dc (fd-f16 (add (nth (iq2b-c) 0) (mul 256 (nth (iq2b-c) 1)))))
+    (let c7 (if (eq (iq2m-f16 (add (nth (iq2b-a) 0) (mul 256 (nth (iq2b-a) 1)))) da)
+            (if (eq (iq2m-f16 (add (nth (iq2b-b) 0) (mul 256 (nth (iq2b-b) 1)))) db)
+            (if (eq (iq2m-f16 (add (nth (iq2b-c) 0) (mul 256 (nth (iq2b-c) 1)))) dc) 128 0) 0) 0))
+
+    ; --- 256: the block STRIDE. Concatenate a then b into one 132-byte buffer; block 1 (idx 256..511) of
+    ; that buffer must decode to exactly what block b decodes at base 0. If iq2m-flat-at strode by the
+    ; wrong byte count this is where it shows — the carver's own stride is 66. ---
+    (defn iq2b-append (xs ys) (if (nil? xs) ys (cons (head xs) (iq2b-append (tail xs) ys))))
+    (defn iq2b-stride-agree (buf i n)
+        (if (ge i n) 1
+            (if (eq (iq2m-flat-at buf 0 (add 256 i)) (iq2-at-flat (iq2b-b) 0 i))
+                (iq2b-stride-agree buf (add i 1) n) 0)))
+    (let ab (iq2b-append (iq2b-a) (iq2b-b)))
+    (let c8 (if (eq (iq2b-stride-agree ab 0 256) 1) 256 0))
+
+    ; --- 512: div/mod sign-field extraction. The four sub-blocks l=0..3 of octet-group ib32=0 (weights
+    ; l*8, i.e. indices 0,8,16,24) each pull sign_idx from a different 7-bit field of aux1; agreement at
+    ; all four with the carver is agreement on the shift arithmetic. ---
+    (defn iq2b-fields (bytes l)
+        (if (ge l 4) 1
+            (do (let i (mul l 8))
+                (if (eq (iq2m-flat-at bytes 0 i) (iq2-at-flat bytes 0 i))
+                    (iq2b-fields bytes (add l 1)) 0))))
+    (let c9 (if (eq (iq2b-fields (iq2b-a) 0) 1) 512 0))
+
+    ; --- 1024: the grid magnitude read spans j=0..7 within one sub-block and lands on the carver's value.
+    ; Indices 0..7 are sub-block 0 of group 0, one magnitude byte each (gidx*8 + j). ---
+    (defn iq2b-mags (bytes j)
+        (if (ge j 8) 1
+            (if (eq (iq2m-flat-at bytes 0 j) (iq2-at-flat bytes 0 j))
+                (iq2b-mags bytes (add j 1)) 0)))
+    (let c10 (if (eq (iq2b-mags (iq2b-a) 0) 1) 1024 0))
+
+    ; --- 2048: the emitted grid text is exactly the header + the carver's own joined list + " };" ---
+    (let want-grid (str_concat "constant uchar iq2_grid[2048] = { "
+                    (str_concat (iq2m-join (iq2-grid)) " };\n")))
+    (let c11 (if (str_eq gridtxt want-grid) 2048 0))
+
+    ; --- 4096: the layering — spine is a prefix of helpers, helpers a prefix of the kernel ---
+    (let c12 (if (eq (iq2b-opens-with helpers spine) 0)
+                 ; spine is NOT at the very start (grid+ksigns precede it); it must be PRESENT once
+                 (if (eq (iq2b-count helpers "static inline int iq2_mod") 1)
+                 (if (eq (iq2b-opens-with kernel helpers) 1) 4096 0) 0)
+                 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8 (add c9 (add c10 (add c11 c12)))))))))))))

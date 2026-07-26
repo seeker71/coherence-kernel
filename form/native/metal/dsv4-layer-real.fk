@@ -1,0 +1,89 @@
+; dsv4-layer-real.fk — Stone 37: JOINING the two proven halves into ONE COMPLETE DeepSeek-V4-Flash layer
+; at REAL DIMS over the windowed-resident 85 GiB file.
+;
+; WHAT WAS ALREADY STANDING, and had never been joined:
+;   * the ATTENTION half — Stone 36 (metal_dsv4_layer.sh, 30 gates): HC-pre -> MLA -> HC-post on the real
+;     layer-0 activations, the choosing surface proven against a rented fp64 ds4.c transcription.
+;   * the FFN half — Stone 34 (metal_dsv4_forward.sh, 8 gates): the hash routing table read, the F16
+;     router matvec, MXFP4 gate/up and the fused IQ2_XXS down, each self-carved at real dims.
+; The join is the SECOND hyper-connection frame: after_attn_hc -> hc_pre(ffn) -> ffn_norm -> MoE + shared
+; -> hc_post(ffn) -> out_hc. HC is the residual stream of this model; there is no plain residual anywhere
+; in it, so "a complete layer" is not the attention block plus the FFN block — it is those two blocks
+; inside two hyper-connection frames that share nothing but the state they hand each other.
+;
+; THE EVIDENCE CLASSES, per surface (twinblind, corpus row 868 — named because they are NOT the same):
+;   CHOOSING  — hc_pre/hc_post for the FFN frame, ffn_norm's placement, the gating function
+;               sqrt(softplus(.)), the hash selection on the TOKEN id, the floored-sum weight
+;               normalisation and the 1.5 scale, the clamp's asymmetry (gate above only, up both ways),
+;               the router weight multiplying the MID and not the DOWN, the shared expert being ADDED and
+;               not routed. A self-carve inherits every one of these on both sides and is blind to all of
+;               them. So they are proven against form-stdlib/tests/dsv4-mla-core-oracle.py in `layer`
+;               mode — an independent fp64 transcription of ds4.c's control flow.
+;   CANONICAL — the MXFP4 / IQ2_XXS / MXFP8 / F16 decodes and their matvecs. One right answer, so a
+;               self-carve (GPU through the view vs an independent CPU carve of the SAME bytes) IS a real
+;               falsifier there; those are Stones 33/34/35's proofs, reused unchanged.
+;
+; THE RECIPE GAP, stated (aporon). ds4.c cannot execute this file's FFN at all: matvec_experts_mid_prequant
+; (:9349) refuses type-40 gate/up, and layer_shared_ffn_one (:10460) requires a Q8_0 shared expert where
+; this file carries type 41. So the oracle rents ds4.c's ORDER and its scalars, and uses the EXACT fp64
+; activation into each expert matvec — which is ds4.c's own ds4_vec_dot_iq2_xxs_f32 (:3779) control flow,
+; not its Q8_K-prequantised one. The radius of what is proven stops exactly there and is said out loud.
+;
+; forepick (corpus row 867): layers 0-2 route by the ffn_gate_tid2eid I32 table on the token id, NOT by
+; the computed router (ds4.c:4806 / :10567, n_hash_layer = 3). The router probs are still computed — they
+; WEIGHT the six table-selected experts. Token 671 selects [147, 78, 30, 248, 217, 179].
+;
+; preludes: form-stdlib/core.fk native/metal/dsv4-mla-real.fk native/metal/dsv4-forward-real.fk form-stdlib/dsv4-moe-msl.fk
+;
+; Proven by: native/metal/metal_dsv4_layer_join.sh (every dispatch sentinelled before and cb.error /
+; cb.status checked after — the offered-interface guard, zerobirth/edgedrop).
+
+(do
+    ; ================= the FFN frame's two new kernels ==================================================
+    ; Everything else the second half needs is already offered and already proven: dsv4-moe-msl.fk's
+    ; clamped-SwiGLU / scale / axpy, dsv4-forward-real.fk's MXFP4 and fused IQ2_XXS matvecs and the F16
+    ; router matvec, dsv4-token.fk's MXFP8 matvec, dsv4-hc-msl.fk's seven hyper-connection kernels.
+
+    ; --- kernel A: the HASH ROUTING table read (ds4.c:10566 layer_hash_selected_experts). The table is
+    ; [n_used, n_vocab] I32 and the row for a token begins at token*n_used. It is a pure read, so the
+    ; selection is bit-exact — but it is read HERE, through the view, by a dispatch that is sentinelled
+    ; like every other, rather than by the carrier reaching into the mmap. A dead view cannot pass as an
+    ; expert id: the sentinel is 0xFFFFFFFF and the harness rejects any id outside [0, n_expert).
+    (defn dsv4-hash-select-body ()
+        "kernel void form_dsv4_hash_select (device const uchar* tb [[buffer(0)]], device uint* ids [[buffer(1)]], constant uint& token [[buffer(2)]], constant uint& nused [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= nused) return; ulong off = ((ulong)token * (ulong)nused + (ulong)i) * 4ul; uint v = uint(tb[off]) + 256u * uint(tb[off + 1ul]) + 65536u * uint(tb[off + 2ul]) + 16777216u * uint(tb[off + 3ul]); ids[i] = v; } ")
+
+    ; --- kernel B: the HASH ROUTER WEIGHTS (ds4.c:10588 layer_router_probs_one + :10600
+    ; layer_hash_router_weights_from_probs). probs[i] = sqrt(softplus(logit[i])) — expert_gating_func 4,
+    ; and NOT a softmax: it is not normalised over the 256, only over the six that were selected. Then
+    ; w[j] = probs[sel[j]] / max(sum, 6.103515625e-5) * expert_weights_scale.
+    ;   The floor 6.103515625e-5 is 2^-14, the smallest normal f16 — ds4.c's own guard, carried exactly.
+    ;   This kernel does NOT choose the experts. That is the whole point of forepick: the selection came
+    ; from the table and the router only weights it. A kernel that re-derived the selection by top-k here
+    ; would be the layer-3-and-up recipe applied to layer 0, and would silently disagree with nothing.
+    (defn dsv4-hash-weights-body ()
+        "kernel void form_dsv4_hash_weights (device const float* logits [[buffer(0)]], device const uint* ids [[buffer(1)]], device float* wts [[buffer(2)]], device float* probs [[buffer(3)]], constant uint& ne [[buffer(4)]], constant uint& nused [[buffer(5)]], constant float& wscale [[buffer(6)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; for (uint i = 0u; i < ne; ++i) { float z = logits[i]; float sp = (z > 20.0f) ? z : ((z < -20.0f) ? dm_exp(z) : dm_ln(1.0f + dm_exp(z))); probs[i] = dm_sqrt(sp); } float s0 = 0.0f; for (uint j = 0u; j < nused; ++j) { s0 = s0 + probs[ids[j]]; } float s = (s0 < 0.00006103515625f) ? 0.00006103515625f : s0; for (uint j = 0u; j < nused; ++j) { wts[j] = probs[ids[j]] / s * wscale; } } ")
+
+    ; --- the FFN translation unit: dsv4-moe-msl.fk's OWN unit (its one metal_stdlib, its numerics spine
+    ; once, the f32 matvec, the clamped SwiGLU, scale, axpy and the top-k router that layers 3+ will need)
+    ; with the two hash-layer kernels appended. dm_exp / dm_ln / dm_sqrt in kernel B are that spine's, so
+    ; there is exactly ONE softplus and ONE sqrt on the device, not a second transcription that could drift.
+    (defn dsv4-ffn-unit ()
+        (do
+            (print "MSL")
+            (print (str_concat (dsv4-moe-msl-unit)
+                    (str_concat (dsv4-hash-select-body) (dsv4-hash-weights-body))))
+            (print "END")
+            0))
+
+    ; ================= the FFN geometry, from the file's own dims ======================================
+    ; A 3D expert stack is [in, out, n_experts]: dim0 = in (fastest), dim1 = out, dim2 = experts. The
+    ; per-expert byte stride is the whole tensor's byte count divided by the expert count — exact for
+    ; every type here, because every expert slice has the identical layout.
+    (defn dsv4-ffn-rows (d0 d1) d1)
+    (defn dsv4-ffn-cols (d0 d1) d0)
+    (defn dsv4-ffn-nel  (d0 d1) (mul d0 d1))
+    (defn dsv4-ffn-stride (total-bytes n-experts) (div total-bytes n-experts))
+    ; the f16 floor ds4.c uses for the router weight denominator: 2^-14.
+    (defn dsv4-weight-floor () 0.00006103515625)
+
+    0)

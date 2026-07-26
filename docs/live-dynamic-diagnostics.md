@@ -35,6 +35,9 @@ Current control actions are:
 | 3 | abstain |
 | 4 | request evidence |
 | 5 | rehearse ground |
+| 6 | admit candidate |
+| 7 | defer candidate |
+| 8 | reject candidate |
 
 The action vocabulary is extensible Form data. A consumer must implement the
 actuator for every action it admits and must re-observe the selected state.
@@ -114,3 +117,26 @@ The witnessed vector is documented in
 - `observe/thought-framebuffer.fk` — token/margin trace and divergence helpers.
 - `observe/framebuffer-runtime-observation.fk` — richer runtime/stage observation.
 - `form/form-stdlib/form-cli-surface-inquiry.fk` — bounded CLI read/inquiry surface.
+- `cognition/native-cognition-cycle.fk` — full knowledge → inquiry → awareness →
+  recognition → action → response → routing composition, including a
+  representation-diverse recognition witness.
+- `cognition/native-self-orientation.fk` — derive floor and north-star invariants,
+  predict two movements, walk the first available movement, and re-orient from
+  the resulting live witness without clearing the parent diagnostic window.
+- `cognition/native-node-ontogenesis.fk` — derive a candidate node from live
+  unresolved evidence; build its blueprint, executable recipe, language-neutral
+  identity, names, and seven inquiry interfaces; validate, admit/defer/reject,
+  test held-out transfer, and re-orient from the changed recognition floor.
+- `cognition/tests/native-node-ontogenesis-band.fk` — end-to-end admission and
+  reversibility witness.
+- `cognition/native-three-round-walk.fk` — sequentially admit, defer, or reject
+  evidence-derived proposals while carrying explicit `[native, local, remote]`
+  routing vectors between rounds.
+- `cognition/tests/native-three-round-walk-band.fk` — three-round source and
+  adjudication replay.
+- `cognition/concept-crystallization-contract.fk` — an offered readiness profile
+  whose node may move among gas, water, and ice while retaining content identity;
+  exposes aliases, recipe, composition, lineage, inquiries, transfer, freshness,
+  axiom compatibility, and an abstaining frequency reading when unmeasured.
+- `cognition/tests/concept-crystallization-contract-band.fk` — ready/candidate
+  facets and gas/water/ice identity-stability witness.
