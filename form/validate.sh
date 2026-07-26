@@ -699,15 +699,23 @@ echo ""
 if [[ $fourth_ok -gt 0 ]]; then
     echo "  fourth arm: $fourth_ok band(s) four-way (fkwu + pre-flattened tables)"
 elif [[ $ok -gt 0 ]]; then
-    # A silent zero is how the fourth arm stayed dark for four days: the
-    # bootstrap seed went stale on 2026-07-21 (a01e24b29 moved the emitter and
-    # regenerated form-cli's bootstrap but not fkwu's), the staleness printed
-    # mid-run as a soft warning that returns 0, and the summary — where results
-    # are actually read — said nothing at all. Bands still printed ✓, because
-    # three kernels agreeing is what ✓ means. Say the zero out loud instead.
-    echo "  fourth arm: 0 band(s) — the emitted fkwu leg did not fire;"
-    echo "              check bootstrap/fkwu-uni.stamp against scripts/fourth-arm.sh"
-    echo "              fourth_emit_chain_stamp, and see scripts/regen_fkwu_bootstrap.sh"
+    # The SECOND way a zero happens, and the one the fourth_available refusal
+    # above cannot see. That gate asks "can the arm be built at all" and exits 1
+    # when it cannot. This asks the different question: the arm built fine, and
+    # then fired for NOT ONE band in the run — because coverage is per-band
+    # (fourth-arm-bands.txt), so a workload naming only unregistered bands gets
+    # a full set of ✓ marks with three kernels behind every one of them.
+    #
+    # Until now that printed nothing whatsoever: the summary line was inside
+    # `if fourth_ok > 0`, so zero was reported by silence. Witnessed 2026-07-25,
+    # from the other side of the same wound the block above documents — a band
+    # written that day claimed four-way in its own header while
+    # scripts/fourth-arm-gate.sh answered NO-FOURTH, and nothing in a plain
+    # validate.sh run would have said so. Say the zero out loud instead.
+    echo "  fourth arm: 0 band(s) — built, but no band in this run is covered;"
+    echo "              every ✓ above speaks for three kernels. Register the band in"
+    echo "              fourth-arm-bands.txt, or check bootstrap/fkwu-uni.stamp against"
+    echo "              scripts/fourth-arm.sh fourth_emit_chain_stamp."
 fi
 if [[ $fkwu_only -gt 0 ]]; then
     echo "  fkwu-only lanes: $fkwu_only band(s) at declared proof level (runtime fkwu --src)"
