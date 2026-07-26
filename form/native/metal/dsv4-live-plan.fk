@@ -1,0 +1,107 @@
+; Live DS4 tensor/layer plan derived from the GGUF itself.
+; No tensor address, expert count, quantization type, or routing regime is
+; stored here. The model header is the authority and every descriptor retains
+; the tensor name that supplied it.
+;
+; preludes: native/metal/legacy-print-compat.fk form-stdlib/gguf-manifest.fk
+(do
+    (defn dlp-model-path ()
+        "/Users/ursmuff/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf")
+    (defn dlp-view-step () 85445672960)
+    (defn dlp-view-limit () 86586540032)
+
+    ; descriptor = [name type d0 d1 d2 absolute-byte bytes]
+    (defn dlp-desc (src base off)
+        (list (gm-name src off)
+              (egg-ti-type src off)
+              (gm-dimk src off 0)
+              (gm-dimk src off 1)
+              (gm-dimk src off 2)
+              (add base (egg-ti-dataoff src off))
+              (gm-bytes src off)))
+    (defn dlp-name (d) (nth d 0))
+    (defn dlp-type (d) (nth d 1))
+    (defn dlp-d0 (d) (nth d 2))
+    (defn dlp-d1 (d) (nth d 3))
+    (defn dlp-d2 (d) (nth d 4))
+    (defn dlp-abs (d) (nth d 5))
+    (defn dlp-bytes (d) (nth d 6))
+
+    (defn dlp-relevant? (name)
+        (if (eq (str_find name "blk." 0) 0) 1
+        (if (str_eq name "token_embd.weight") 1
+        (if (str_eq name "output.weight") 1
+        (if (str_eq name "output_norm.weight") 1
+        (if (eq (str_find name "output_hc_" 0) 0) 1 0))))))
+
+    (defn dlp-collect (src base off remaining)
+        (if (eq remaining 0) (list)
+            (do
+                (let d (dlp-desc src base off))
+                (let rest (dlp-collect src base (egg-ti-next src off) (sub remaining 1)))
+                (if (eq (dlp-relevant? (dlp-name d)) 1) (cons d rest) rest))))
+
+    (defn dlp-find (descs name)
+        (if (eq (len descs) 0) (nothing)
+            (if (str_eq (dlp-name (head descs)) name) (head descs)
+                (dlp-find (tail descs) name))))
+
+    (defn dlp-prefix (layer)
+        (str_concat "blk." (str_concat (int_to_str layer) ".")))
+    (defn dlp-weight-name (layer stem)
+        (str_concat (dlp-prefix layer) (str_concat stem ".weight")))
+    (defn dlp-bias-name (layer stem)
+        (str_concat (dlp-prefix layer) (str_concat stem ".bias")))
+    (defn dlp-weight (descs layer stem)
+        (dlp-find descs (dlp-weight-name layer stem)))
+    (defn dlp-bias (descs layer stem)
+        (dlp-find descs (dlp-bias-name layer stem)))
+
+    ; The two overlapping zero-copy model views. Prefer view 0 whenever it
+    ; contains the complete tensor; otherwise use the content-equivalent view 1.
+    (defn dlp-view (d)
+        (if (le (add (dlp-abs d) (dlp-bytes d)) (dlp-view-limit)) 0 1))
+    (defn dlp-inner (d)
+        (if (eq (dlp-view d) 0) (dlp-abs d) (sub (dlp-abs d) (dlp-view-step))))
+    (defn dlp-stride (d)
+        (if (eq (dlp-d2 d) 0) 0 (div (dlp-bytes d) (dlp-d2 d))))
+
+    (defn dlp-route-name (descs layer)
+        (if (nothing? (dlp-weight descs layer "ffn_gate_tid2eid"))
+            "biased-topk" "token-table"))
+    (defn dlp-compress-name (descs layer)
+        (if (nothing? (dlp-weight descs layer "attn_compressor_kv"))
+            "direct-kv" "compressed-kv"))
+    (defn dlp-compress-ratio (src layer)
+        (do
+            (let row (gmt-find src "deepseek4.attention.compress_ratios"))
+            (eqr-le src (gm-arr-elem-off src row layer) 4)))
+
+    (defn dlp-line (descs layer)
+        (do
+            (let gate (dlp-weight descs layer "ffn_gate_exps"))
+            (let down (dlp-weight descs layer "ffn_down_exps"))
+            (let s0 (str_concat "LAYER " (int_to_str layer)))
+            (let s1 (str_concat s0 (str_concat " route=" (dlp-route-name descs layer))))
+            (let s2 (str_concat s1 (str_concat " kv=" (dlp-compress-name descs layer))))
+            (let s3 (str_concat s2 (str_concat " experts=" (int_to_str (dlp-d2 gate)))))
+            (let s4 (str_concat s3 (str_concat " gate-type=" (int_to_str (dlp-type gate)))))
+            (let s5 (str_concat s4 (str_concat " down-type=" (int_to_str (dlp-type down)))))
+            (let s6 (str_concat s5 (str_concat " gate-view=" (int_to_str (dlp-view gate)))))
+            (let s7 (str_concat s6 (str_concat " gate-inner=" (int_to_str (dlp-inner gate)))))
+            (let s8 (str_concat s7 (str_concat " gate-stride=" (int_to_str (dlp-stride gate)))))
+            (print_str (str_concat s8 "\n"))
+            0))
+    (defn dlp-lines (descs layer count)
+        (if (eq layer count) 0
+            (do (dlp-line descs layer) (dlp-lines descs (add layer 1) count))))
+
+    (defn dlp-witness ()
+        (do
+            (let src (eqr-of-file (dlp-model-path) 0 (gm-window)))
+            (let base (egg-data-base src (gm-alignment)))
+            (let descs (dlp-collect src base (egg-tinfo-start src) (egg-tensor-count src)))
+            (print_str (str_concat "PLAN tensors=" (str_concat (int_to_str (len descs)) "\n")))
+            (dlp-lines descs 0 43)
+            0))
+    0)
