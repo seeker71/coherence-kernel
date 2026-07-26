@@ -5,6 +5,11 @@
 The initiating member named Hati Suci as the first community to invite,
 because they are already a member.
 
+The initiating member then named Satsang as a recognized circle at Hati Suci.
+This identifies the first receiving circle for the invitation. It does not yet
+assert that Satsang is the community-authorized licensing body for an exact
+text; that remains an explicit pending term.
+
 That gives the enquiry a real relationship door. It does not provide blanket
 authority over community-selected texts, translations, cultural protocols, or
 downstream use. The repo already held the same distinction in
@@ -18,8 +23,10 @@ names Hati Suci as the household's first field.
 
 - pilot order 1;
 - a canonical Hati Suci community node;
+- a distinct canonical Hati Suci Satsang circle node;
 - a separate initiating-member role node;
 - member-reported relationship evidence;
+- member-reported Satsang-circle recognition;
 - community response pending;
 - nine explicit pending terms;
 - a four-arm acknowledgement: `nothing | 0 | 1 | node`.
@@ -62,8 +69,10 @@ node --experimental-strip-types walkers/ts/main.ts /dev/stdin
 
 ## Honest boundary
 
-The relationship evidence is the initiating member's report. Community
-confirmation, the circle's decision process, exact text selection, cultural
+The relationship and Satsang recognition evidence are the initiating member's
+reports. The invitation can now be addressed to that recognized circle.
+Community confirmation that Satsang holds the relevant decision authority,
+the circle's actual decision process, exact text selection, cultural
 restrictions, attribution, translation permission, downstream/AI use,
 benefit, withdrawal, and review date all remain pending.
 
