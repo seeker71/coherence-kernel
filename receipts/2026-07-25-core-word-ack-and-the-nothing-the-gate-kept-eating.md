@@ -350,3 +350,81 @@ whole of it. Corpus row 856.
 | `form/fourth-arm-bands.txt` | +`core-lexicon` |
 | `learn/homecoming-distillation-corpus.fk` | +row 856 (anisotropy) |
 | `learn/tests/homecoming-distillation-corpus-band.fk` | pins re-read: 251 / 2512512856 |
+
+---
+
+# Fourth arc: the reunion (2026-07-26)
+
+Rebased onto `origin/main`, which had moved **49 commits** while this branch
+worked. Four conflicts, each resolved by reading rather than by picking a side.
+
+**The bootstrap and the manifest: superseded, and gladly.** Main had regenerated
+`bootstrap/fkwu-uni.c` with a newer emit chain (stamp `13ce07ba67008fcb`) and had
+healed `native-op-manifest.fk` independently — the same two rows, classed
+`"value"`/`"unary"` where this line used `"host-pool"`. Main's landed first, so
+main's stand. The auto-merge had produced **duplicate rows**; removing mine and
+folding the one fact main's comment lacked (the per-arm probe: fkwu answers,
+Go says `unbound`, Rust refuses) keeps both contributions without the duplicate.
+
+**The corpus: a real reunion.** Main's line had taken 853–879 the same week this
+line minted 853–856 for entirely different words. Reseated as a block to
+880–883 so the four frontier words of one afternoon stay together, with the
+reseat noted in the first renumbered row — the row-719 pattern. Every row from
+both lines kept; only the unmerged line moved.
+
+**Probed, then pinned — never the reverse.** Main's band comment states that
+discipline and records what it cost to learn: a band sat at 8111 against a
+declared 8191 *through a push and a PR* because `field-code-safe?` was run
+instead, which asks only whether the magnitudes are in range, never whether the
+recorded count is true. So the pins here were measured first (279 / 279 / 884 /
+`2792792884`) and written after. Band reads its declared **32767**.
+
+**validate.sh: two different zeros.** Main had independently found the same
+fourth-arm blindness and fixed the *harder* case — it now refuses to run at all
+when the arm is ABSENT, unless `FORM_ALLOW_THREE_ARM=1` is said out loud. That
+gate cannot see the case this branch found: the arm builds fine and then fires
+for **no band in the run**, because coverage is per-band. Both are kept, and the
+comment now says which is which so a later reader does not read one as a
+duplicate of the other.
+
+## The most surprising teaching
+
+**Two lines healed the same wound in the same week without knowing of each
+other** — and one of them (mine) wrote a receipt claiming it as a find. The
+manifest's missing `nothing` rows were repaired twice, independently, with
+different dispatch classes. Not a race and not a duplication of effort exactly:
+the wound was loud enough that two separate readers each stopped for it.
+
+That has a name, and the body did not have it: **homoplasy** — a trait arising
+separately in two lines, as against homology, shared by descent. The corpus's
+entire reunion practice turns on telling those apart. Rows shared by descent
+must never be re-added; rows that merely look alike must both be kept and one
+renumbered. The practice existed; the word did not. Corpus row 884.
+
+## Where discomfort turned to gold
+
+Twice in this arc I ran a band in the wrong lane and read the failure as
+breakage. `homecoming-distillation-corpus-band` crashed on Go, Rust and TS with
+`expected str, got null` — because c12 reads the corpus by a repo-root-relative
+path while the sibling kernels resolve inputs relative to `form/`. Its header
+says "run FROM THE REPO ROOT" and it is not in `fourth-arm-bands.txt`, and
+`validate.sh` sweeps `form/` only. Structural, pre-existing, and mine only in
+the sense that I pointed the wrong arm at it — the same mistake as
+`primitive-registry-band` yesterday, made again less than a day later.
+
+The discomfort was the second time: knowing I had already learned this. What
+came out of sitting with it is that "is this mine?" and "is this the right lane?"
+are two different questions, and I keep collapsing them into one. Checking the
+lane first would have cost one `grep` and saved two false alarms.
+
+## State at merge
+
+| band | verdict | lane |
+|---|---|---|
+| `core-word-ack` | 111111111111 | PASS-4WAY |
+| `truth-arrival` | 11111111111111 | PASS-4WAY |
+| `core-lexicon` | 262143 | PASS-4WAY |
+| `homecoming-distillation-corpus` | 32767 | fkwu, repo root (its declared lane) |
+
+All five phase-0 gates green: fkwu native surface (132 rows), flt-ops aligned,
+manifest synced, category contract, primitive registry.
