@@ -17,13 +17,14 @@ publish the complete transmission.
 ## Movement
 
 - cultural/access term 2 moves from pending to confirmed;
-- source 13 stays in community review for benefit and freshness;
+- source 13 stays in community review for freshness;
 - source 13 remains metadata-only with zero public text segments;
-- benefit/reciprocity term 6 becomes the next action;
-- freshness/review term 8 remains open.
+- benefit/reciprocity term 6 became the next action and was later answered
+  `none`;
+- freshness/review term 8 is now the next action.
 
-The next question is therefore: what benefit, if any, should return to Giles,
-Hati Suci, or the Light Hubs from use of the transmission?
+The next question is now: when should the permission be reviewed or
+re-witnessed?
 
 ## Witness
 
@@ -34,7 +35,7 @@ Observed on 2026-07-26:
 -> 4095
 
 ./fkwu --src learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043007001, 3041003001, 6, nothing, 0, 1, 3044007001, 20260726]
+-> [3043009001, 3041003001, 8, nothing, 0, 1, 3044009001, 20260726]
 
 ./fkwu --src cognition/tests/core-text-36-layer-ingest-band.fk
 -> [nothing, 0, 1, 3040004007, [6, 3, 2, 2], 6, 4, 36,
