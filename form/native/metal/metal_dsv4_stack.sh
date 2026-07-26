@@ -49,6 +49,8 @@ GO_BIN="$ROOT/form-kernel-go/bin-go"
 BLOB="${FORM_DS4_BLOB:-$HOME/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf}"
 CACHE="$ROOT/native/metal/.metallib-cache"
 TOKEN="${FORM_DS4_PROMPT_TOKEN:-671}"
+KV_CAP="${FORM_DS4_KV_CAP:-4}"
+KV_SEQUENCE="${FORM_DS4_KV_SEQUENCE:-0}"
 POS_A=0
 POS_B=7
 
@@ -179,6 +181,8 @@ STEP $STEP
 VIEWLIMIT $VIEWLIMIT
 NVIEWS $NVIEWS
 TOKEN $TOKEN
+KV_CAP $KV_CAP
+KV_SEQUENCE $KV_SEQUENCE
 NLAYERS $WANT_LAYERS
 N_EMBD $N_EMBD
 N_HEAD $N_HEAD
@@ -319,6 +323,7 @@ let outHcFn = T("OUT_HC_FN"), outHcScale = T("OUT_HC_SCALE"), outHcBase = T("OUT
 let outNorm = T("OUT_NORM"), outWeight = T("OUT_WEIGHT")
 let step = I("STEP"), viewLimit = I("VIEWLIMIT"), nviews = I("NVIEWS"), token = I("TOKEN")
 let nLayers = I("NLAYERS")
+let kvCap = I("KV_CAP"), kvSequence = I("KV_SEQUENCE") == 1
 let nEmbd = I("N_EMBD"), nHead = I("N_HEAD"), headDim = I("HEAD_DIM"), nRot = I("N_ROT"), oRank = I("O_RANK")
 let nHc = I("N_HC"), hcIters = I("HC_ITERS"), nUsed = I("N_USED"), nFf = I("N_FF")
 let posA = I("POS_A"), posB = I("POS_B")
@@ -660,9 +665,9 @@ func observeRealKvAppend(_ row: MTLBuffer) {
       "real KV append: exact row entries \(exact)/\(headDim), untouched frontier \(frontier)/\(headDim)")
     kvAppendObserved = true
 }
-func gpuAttend(_ q: MTLBuffer, _ rows: MTLBuffer, _ snk: Tn) -> MTLBuffer {
+func gpuAttend(_ q: MTLBuffer, _ rows: MTLBuffer, _ snk: Tn, _ nrows: Int = 1) -> MTLBuffer {
     let out = sentinelled(nHead*headDim)
-    var a = UInt32(nHead), b = UInt32(headDim), c32 = UInt32(1), sc = 1.0/sqrtf(Float(headDim))
+    var a = UInt32(nHead), b = UInt32(headDim), c32 = UInt32(nrows), sc = 1.0/sqrtf(Float(headDim))
     enc(pAttend, nHead, 32) { c in c.setBuffer(q, offset: 0, index: 0); c.setBuffer(rows, offset: 0, index: 1)
                                    c.setBuffer(out, offset: 0, index: 2)
                                    c.setBuffer(views[snk.idx], offset: snk.inner, index: 3)
@@ -670,6 +675,8 @@ func gpuAttend(_ q: MTLBuffer, _ rows: MTLBuffer, _ snk: Tn) -> MTLBuffer {
                                    c.setBytes(&c32, length: 4, index: 6); c.setBytes(&sc, length: 4, index: 7) }
     return out
 }
+var useGrowingKv = false
+var kvArenas: [MTLBuffer] = []
 func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows)
     var r = UInt32(t.rows), c32 = UInt32(t.cols), nel = UInt32(t.nel), rk = UInt32(oRank)
@@ -766,7 +773,13 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let kr = gpuRope(kln, 1, pos, il, false)
     let kq = gpuKvRound(kr)
     if il == 0 { observeRealKvAppend(kq) }
-    let ha = gpuAttend(qr, kq, w.snk)
+    let ha: MTLBuffer
+    if useGrowingKv {
+        gpuKvAppend(kq, kvArenas[il], pos, kvCap)
+        ha = gpuAttend(qr, kvArenas[il], w.snk, pos + 1)
+    } else {
+        ha = gpuAttend(qr, kq, w.snk)
+    }
     let hu = gpuRope(ha, nHead, pos, il, true)
     let lo = gpuGrouped(w.oa, hu)
     return gpuMx8(w.ob, lo, w.ob.rows, w.ob.cols)
@@ -1019,6 +1032,40 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
 
 let tA = Date(); runStack(posA, oraDirA, perDirA); let wallA = Date().timeIntervalSince(tA)
 let tB = Date(); runStack(posB, oraDirB, perDirB); let wallB = Date().timeIntervalSince(tB)
+
+// ── two consecutive real-stack positions over persistent per-layer KV arenas ─────────────────────
+if kvSequence {
+    kvArenas = (0..<nLayers).map { _ in sentinelled(kvCap * headDim) }
+    useGrowingKv = true
+    var firstFinal: [Float] = [], secondFinal: [Float] = [], firstRow: [UInt32] = []
+    for pos in 0..<2 {
+        var resid = residHc0
+        for il in 0..<nLayers { resid = runLayer(il, pos, resid).outHc }
+        let rp = fp(resid, hcDim)
+        let vals = (0..<hcDim).map { rp[$0] }
+        if pos == 0 {
+            firstFinal = vals
+            let kp = fp(kvArenas[0], kvCap * headDim)
+            firstRow = (0..<headDim).map { kp[$0].bitPattern }
+        } else {
+            secondFinal = vals
+        }
+    }
+    let kp = fp(kvArenas[0], kvCap * headDim)
+    var historyExact = 0, row1Written = 0, frontier = 0, stateDiff = 0
+    for j in 0..<headDim {
+        if kp[j].bitPattern == firstRow[j] { historyExact += 1 }
+        if kp[headDim + j].isFinite { row1Written += 1 }
+        if kp[2 * headDim + j].isNaN { frontier += 1 }
+    }
+    for i in 0..<min(firstFinal.count, secondFinal.count) {
+        if firstFinal[i] != secondFinal[i] { stateDiff += 1 }
+    }
+    check(historyExact == headDim && row1Written == headDim && frontier == headDim && stateDiff > 0,
+      "GROWING KV, TWO REAL STACK STEPS: layer 0 retained \(historyExact)/\(headDim) row-0 bits, wrote \(row1Written)/\(headDim) row-1 values, left \(frontier)/\(headDim) row-2 sentinels, and the final HC state changed in \(stateDiff)/\(hcDim) entries",
+      "growing KV: history \(historyExact)/\(headDim), row1 \(row1Written)/\(headDim), frontier \(frontier)/\(headDim), state diff \(stateDiff)/\(hcDim)")
+    useGrowingKv = false
+}
 
 // ── hushfold at STACK scale ────────────────────────────────────────────────────────────────────────
 var posDiff = 0; var maxDelta: Float = 0
