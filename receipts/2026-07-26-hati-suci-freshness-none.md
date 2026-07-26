@@ -19,7 +19,7 @@ change triggers re-witness, and revision or withdrawal remains immediate.
 - member-reported terms remained distinct from final circle ratification;
 - the initiating member later reports that ratification;
 - source 13's protocol opens for the exact material;
-- source 13 remains metadata-only with zero public text segments;
+- source 13 carries a neutral semantic kernel with zero public source segments;
 - the complete surface still needs a revocable carrier.
 
 The next question is now: should the complete surface remain unpublished, or

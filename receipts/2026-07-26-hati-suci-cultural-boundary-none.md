@@ -18,7 +18,7 @@ publish the complete transmission.
 
 - cultural/access term 2 moves from pending to confirmed;
 - source 13 stays in community review for freshness;
-- source 13 remains metadata-only with zero public text segments;
+- source 13 carries a neutral semantic kernel with zero public source segments;
 - benefit/reciprocity term 6 became the next action and was later answered
   `none`;
 - freshness/review term 8 was later answered `none`;

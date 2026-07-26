@@ -18,7 +18,7 @@ material. Attribution to Giles, revision, and withdrawal remain unchanged.
 - freshness/review term 8 became the final open term and was later answered
   `none`;
 - the initiating member later reports final Satsang ratification;
-- source 13 remains metadata-only with zero public text segments;
+- source 13 carries a neutral semantic kernel with zero public source segments;
 - the complete surface still needs a revocable carrier.
 
 The next question is now: should the complete surface remain unpublished, or

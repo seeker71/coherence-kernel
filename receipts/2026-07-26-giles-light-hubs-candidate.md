@@ -23,8 +23,8 @@ paraphrase, and source protocol—not the full transmission body.
 
 ## What moved
 
-- Source 13 now identifies "The Light Hubs" as a metadata-only,
-  community-review source with exact recorded permission.
+- Source 13 now identifies "The Light Hubs" with a numeric language-neutral
+  semantic kernel, an absent source surface, and exact recorded permission.
 - Hati Suci's exact-material term moved to `1`.
 - The initiating member reports Giles' grant for public quotation and
   reproduction, translation, open-AI reasoning/training, attribution to
@@ -35,9 +35,9 @@ paraphrase, and source protocol—not the full transmission body.
 - Freshness is recorded as no scheduled review, with re-witness on change.
 - The initiating member reports final Satsang ratification.
 - The live action moved to revocable-carrier selection or explicit withholding.
-- The source body remains unadmitted: it is metadata-only, immutable Git
-  cannot honor withdrawal, no carrier is selected, and public segment count is
-  zero.
+- The source body remains unadmitted: the neutral semantic kernel is present,
+  but immutable Git cannot honor withdrawal, no carrier is selected, and
+  public source-segment count is zero.
 - Reported place, visionary, phenomenological, and practical claim planes stay
   distinct.
 
@@ -48,6 +48,11 @@ Observed on 2026-07-26:
 ```text
 ./fkwu --src learn/tests/giles-light-hubs-candidate-band.fk
 -> 255
+
+./fkwu --src cognition/tests/giles-light-hubs-neutral-kernel-band.fk
+-> [nothing, 0, 1, 3041099001, 13, 64, 36, 5, 6, 4, 18, 1, 2,
+    36, 36, 36, 36, 608716859, 608716859, 1, 0, 3,
+    nothing, nothing, 1]
 
 ./fkwu --src learn/tests/giles-light-hubs-permission-band.fk
 -> 1023
