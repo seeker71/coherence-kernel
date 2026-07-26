@@ -1422,6 +1422,7 @@ long long fk_metal_model_moe_external(
         uint32_t gate_rows=(uint32_t)nff,gate_cols=(uint32_t)nembd,gate_n32=(uint32_t)gate_nel;
         uint32_t down_rows=(uint32_t)nembd,down_cols=(uint32_t)nff;
         uint32_t embd32=(uint32_t)nembd,ff32=(uint32_t)nff;
+        NSUInteger gate_threads=gate_type==16?((nff+3)/4)*32:nff*32;
         float one=1.0f;
         double started=fk_metal_now_ms();
         for(size_t i=0;i<fk_model_route_count;i++){
@@ -1440,13 +1441,13 @@ long long fk_metal_model_moe_external(
             [enc setBuffer:fk_model_stage offset:0 atIndex:1];[enc setBuffer:gate[i] offset:0 atIndex:2];
             [enc setBytes:&gate_rows length:4 atIndex:3];[enc setBytes:&gate_cols length:4 atIndex:4];
             if(gate_type==40)[enc setBytes:&gate_n32 length:4 atIndex:5];
-            [enc dispatchThreads:MTLSizeMake(nff*32,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];[enc endEncoding];
+            [enc dispatchThreads:MTLSizeMake(gate_threads,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];[enc endEncoding];
             enc=[command computeCommandEncoder];[enc setComputePipelineState:gate_type==40?p_mx4:p_iq2];
             [enc setBuffer:fk_model_views[vi] offset:(NSUInteger)(up_base+up_stride*expert) atIndex:0];
             [enc setBuffer:fk_model_stage offset:0 atIndex:1];[enc setBuffer:up[i] offset:0 atIndex:2];
             [enc setBytes:&gate_rows length:4 atIndex:3];[enc setBytes:&gate_cols length:4 atIndex:4];
             if(gate_type==40)[enc setBytes:&gate_n32 length:4 atIndex:5];
-            [enc dispatchThreads:MTLSizeMake(nff*32,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];[enc endEncoding];
+            [enc dispatchThreads:MTLSizeMake(gate_threads,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];[enc endEncoding];
             enc=[command computeCommandEncoder];[enc setComputePipelineState:p_swiglu];
             [enc setBuffer:gate[i] offset:0 atIndex:0];[enc setBuffer:up[i] offset:0 atIndex:1];
             [enc setBuffer:mid[i] offset:0 atIndex:2];[enc setBytes:&ff32 length:4 atIndex:3];
@@ -1458,7 +1459,8 @@ long long fk_metal_model_moe_external(
             [enc setBytes:&down_rows length:4 atIndex:3];[enc setBytes:&down_cols length:4 atIndex:4];
             uint32_t down_expert_n32=(uint32_t)down_nel;
             if(down_type==40)[enc setBytes:&down_expert_n32 length:4 atIndex:5];
-            [enc dispatchThreads:MTLSizeMake(nembd*32,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];[enc endEncoding];
+            NSUInteger down_threads=down_type==16?((nembd+3)/4)*32:nembd*32;
+            [enc dispatchThreads:MTLSizeMake(down_threads,1,1) threadsPerThreadgroup:MTLSizeMake(256,1,1)];[enc endEncoding];
             enc=[command computeCommandEncoder];[enc setComputePipelineState:i?p_axpy:p_scale];
             [enc setBuffer:down[i] offset:0 atIndex:0];[enc setBuffer:moe offset:0 atIndex:1];
             [enc setBytes:&one length:4 atIndex:2];[enc setBytes:&embd32 length:4 atIndex:3];
