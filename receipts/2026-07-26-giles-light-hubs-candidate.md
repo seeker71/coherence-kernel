@@ -31,10 +31,11 @@ paraphrase, and source protocol—not the full transmission body.
   "Giles", and continuing revision/withdrawal.
 - The initiating member records no additional sacred, cultural, or
   community-use restrictions.
-- The live action moved to term 6: record benefit and reciprocity.
+- The initiating member records no additional benefit/reciprocity condition.
+- The live action moved to term 8: record freshness/review.
 - The source body remains unadmitted: it is metadata-only, immutable Git
-  cannot honor withdrawal, benefit/freshness remain open, and public segment
-  count is zero.
+  cannot honor withdrawal, freshness remains open, and public segment count is
+  zero.
 - Reported place, visionary, phenomenological, and practical claim planes stay
   distinct.
 
@@ -53,7 +54,7 @@ Observed on 2026-07-26:
 -> 4095
 
 ./fkwu --src learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043007001, 3041003001, 6, nothing, 0, 1, 3044007001, 20260726]
+-> [3043009001, 3041003001, 8, nothing, 0, 1, 3044009001, 20260726]
 
 ./fkwu --src cognition/tests/core-text-36-layer-ingest-band.fk
 -> [nothing, 0, 1, 3040004007, [6, 3, 2, 2], 6, 4, 36,
