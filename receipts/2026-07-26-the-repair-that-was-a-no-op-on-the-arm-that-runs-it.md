@@ -67,6 +67,17 @@ one on the other three.
 
 Four-way after: `str-byte-at` **511 ×4**, `hex` 14 ×4, `base64` 12 ×4, `file-byte-window` 2147483647 ×4.
 
+> **CORRECTED 2026-07-26, later the same day.** That `511 ×4` is scoped to a set this receipt never
+> named. This body has **seven** evaluators — fkwu, the three heavy kernels, and the three minimal
+> walkers — and "ts" is two of them. On the minimal ts walker `str-byte-at-band` read **15**, not 511,
+> because that walker took its source in as UTF-8 and measured strings in UTF-16 code units, so
+> `(str_len "λ")` was 1 there and `(str_byte_at "λ" 0)` was 187 — the low byte of the codepoint, not
+> the first byte of the encoding. Six evaluators were at 511 and I wrote "×4" over a set that left out
+> the one that disagreed. Its intake is latin1 now and all seven read 511; the walker's own source had
+> named the gap and said "every test this walker actually needs to pass today is plain ASCII", which
+> stopped being true the moment the non-ASCII claims in this receipt landed. See
+> receipts/2026-07-26-the-tongue-shelf-crosses.md.
+
 `url-encode-band` reads 13 on fkwu and 16 on the walkers. I checked whether I caused it by swapping the
 original cell back into the closure: **go answers 16 either way.** Pre-existing, not this change.
 
