@@ -321,14 +321,15 @@ static long long fk_cap;
 static long long fk_vs[FK_VALUE_STACK_CAP];
 static long long fk_vsp;
 extern unsigned int arc4random(void);
-extern void *malloc(unsigned long);
 extern void *calloc(unsigned long, unsigned long);
 extern void free(void *);
-extern long long write(long long, const void *, unsigned long);
 extern double strtod(const char *, char **);
 extern void *popen(const char *, const char *);
 extern int pclose(void *);
-extern unsigned long fread(void *, unsigned long, unsigned long, void *);
+#ifdef _WIN32
+#define fileno _fileno
+#endif
+extern int fileno(void *);
 static char *fk_sb;
 static long long *fk_so;
 static long long *fk_sl;
@@ -2709,6 +2710,7 @@ static void fk_inv_walk(const char *root, const char *dir, const char *suf, long
 
 #if defined(_WIN32)
 typedef unsigned long long fk_os_socket_t;
+#define FK_SL int
 struct fk_wsadata {
     unsigned short wVersion;
     unsigned short wHighVersion;
@@ -2764,6 +2766,7 @@ static int fk_os_setsockopt_reuse(fk_os_socket_t s, int *yes) {
 }
 #else
 typedef int fk_os_socket_t;
+#define FK_SL unsigned
 extern int socket(int, int, int);
 extern int bind(int, const void *, unsigned int);
 extern int listen(int, int);
@@ -2911,7 +2914,7 @@ static long long fk_socket_port_native(long long h) {
         return -1;
     }
     struct fk_sockaddr4 a;
-    int n = 16;
+    FK_SL n = 16;
     if (getsockname(s, &a, &n) < 0) {
         return -1;
     }
@@ -4141,11 +4144,11 @@ static long long fk_host_exec(long long cmdv, long long inputv) {
     static char hbuf[262144];
     long long total = 0;
     while (total < 262143) {
-        unsigned long got = fread(hbuf + total, 1, (unsigned long)(262143 - total), fp);
-        if (got == 0) {
+        long long got = read(fileno(fp), hbuf + total, (unsigned long)(262143 - total));
+        if (got <= 0) {
             break;
         }
-        total = total + (long long)got;
+        total = total + got;
     }
     pclose(fp);
     return fk_sbuf(hbuf, total);
