@@ -126,7 +126,7 @@
                             (add (mul (sub b0 192) 64) (sub (gmt-token-byte src at (add j 1)) 128))))
                 (let by (tkz-cp2b cp))
                 (tkz-dec-piece-acc src at (add j (if (lt b0 128) 1 2)) n
-                    (if (lt by 0) acc (_list_append acc by))))
+                    (if (lt by 0) acc (append acc (list by)))))
             acc))
     (defn tkz-decode-id-bytes (src id)
         (do (let at (gmt-token-off src id))
@@ -140,7 +140,7 @@
 
     ; list concat helper (append every element of b to a)
     (defn tkz-cat (a b)
-        (if (eq (len b) 0) a (tkz-cat (_list_append a (head b)) (tail b))))
+        (if (eq (len b) 0) a (tkz-cat (append a (list (head b))) (tail b))))
 
     ; render a raw byte list to a Form string. EXACT for bytes < 128 (ASCII), the radius byte_to_str
     ; allows; a byte >= 128 renders as its UTF-8 codepoint (host rune path), so multi-byte scripts are
@@ -365,7 +365,7 @@
             (do (let b0 (tkz-rec-byte src at mo))
                 (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (tkz-rec-byte src at (add mo 1)) 128))))
                 (if (eq cp 32) acc
-                    (tkz-mrg-left src at (add mo (if (lt b0 128) 1 2)) mlen (_list_append acc (tkz-cp2b cp)))))
+                    (tkz-mrg-left src at (add mo (if (lt b0 128) 1 2)) mlen (append acc (list (tkz-cp2b cp))))))
             acc))
     (defn tkz-mrg-right (src at mo mlen acc seen)
         (if (lt mo mlen)
@@ -373,7 +373,7 @@
                 (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (tkz-rec-byte src at (add mo 1)) 128))))
                 (let nlen (if (lt b0 128) 1 2))
                 (if (eq seen 1)
-                    (tkz-mrg-right src at (add mo nlen) mlen (_list_append acc (tkz-cp2b cp)) 1)
+                    (tkz-mrg-right src at (add mo nlen) mlen (append acc (list (tkz-cp2b cp))) 1)
                     (tkz-mrg-right src at (add mo nlen) mlen acc (if (eq cp 32) 1 0))))
             acc))
 
@@ -386,8 +386,8 @@
                     (if (if (lt by 0) 0 (eq (nth pres by) 1))
                         (if (lt (tkz-cand-walk src at 0 mlen inp L pos0 0 (sub 0 1)) 0)
                             acc
-                            (_list_append acc (list (tkz-mrg-left src at 0 mlen (empty))
-                                                    (tkz-mrg-right src at 0 mlen (empty) 0))))
+                            (append acc (list (list (tkz-mrg-left src at 0 mlen (empty))
+                                                   (tkz-mrg-right src at 0 mlen (empty) 0)))))
                         acc)))))
 
     ; --- BPE over the candidate list: same rule, tiny haystack ---
@@ -442,7 +442,7 @@
                 (tkz-ids-of-syms src (tail syms)
                     (if (lt id 0)
                         (tkz-cat acc (tkz-ids-of-bytes src (head syms) 0))
-                        (_list_append acc id))))))
+                        (append acc (list id)))))))
     ; fallback for an unknown symbol: emit the single-byte token id of each byte (ds4.c bpe_emit_piece)
     (defn tkz-ids-of-bytes (src sym k)
         (if (lt k (len sym))
@@ -461,6 +461,25 @@
                 (if (lt cp 128) (eq b0 cp)
                     (if (eq b0 (add 192 (div cp 64))) (eq (gmt-token-byte src tat 1) (add 128 (mod cp 64))) 0))
                 0)))
+
+    ; Literal special/control tokens use their own UTF-8 bytes rather than the
+    ; byte-level BPE alphabet. Match those stored bytes exactly so a chat
+    ; boundary is discovered from the GGUF vocabulary, never a numeric guess.
+    (defn tkz-stored-token-eq-at (src tat literal i n)
+        (if (eq i n) 1
+            (if (eq (gmt-token-byte src tat i) (str_byte_at literal i))
+                (tkz-stored-token-eq-at src tat literal (add i 1) n)
+                0)))
+    (defn tkz-stored-token-eq (src tat literal)
+        (if (eq (gmt-token-len src tat) (str_len literal))
+            (tkz-stored-token-eq-at src tat literal 0 (str_len literal))
+            0))
+    (defn tkz-stored-id-scan (src tat id n literal)
+        (if (eq id n) (sub 0 1)
+            (if (eq (tkz-stored-token-eq src tat literal) 1) id
+                (tkz-stored-id-scan src (gmt-token-next src tat) (add id 1) n literal))))
+    (defn tkz-stored-id-of (src literal)
+        (tkz-stored-id-scan src (gmt-tokens-first src) 0 (tkz-vocab-n src) literal))
 
     ; ================= ENCODE: text -> ids =================
     ; walk pieces; BPE each; concatenate ids. add_bos/add_eos are 0 on this file (Stone 21), so no
