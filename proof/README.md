@@ -8,11 +8,25 @@ The clean kernel no longer borrows the origin's `validate.sh`. It crosses its ow
   investigate the native) / WALKER-SUSPECT (one walker odd — common, a proof-note). Encodes that the native
   walker is rarely the wrong one.
 
-Run it: `fkwu proof/four-way-run.tbl` (the flattened proof driver). `host-exec` is a host PORT
-(`runtime/fkwu-uni.c` optag 136, the VIA-HOST family) and `str_to_int` is optag 31; `fwv-verdict`
-computes 0=FOUR-WAY / 1=FKWU-SUSPECT / 2=WALKER-SUSPECT.
+Run it, from the repository root:
 
-Perturbation-verified 2026-06-29 (the verdict is COMPUTED, not parse-to-zero): the three walkers each
-return 42 on `recipe42.fk` → verdict **0** (FOUR-WAY); force ts→99 → **2** (WALKER-SUSPECT); tell the
-runner fkwu=99 while walkers agree → **1** (FKWU-SUSPECT). The verdict tracks actual agreement among the
-host-exec'd values, not the literal. Full evidence: `receipts/2026-06-29-kernel-self-proves-four-way.md`.
+```
+./fkwu --src proof/four-way-run-recipe42.fk      ->  0   (FOUR-WAY)
+```
+
+This line used to read `fkwu proof/four-way-run.tbl`. That stopped working when `.tbl` execution
+was retired — the seed now answers *".tbl execution has been retired; use .fk, .fkb, or .dylib"* —
+so the proof had no runnable entry until `four-way-run-recipe42.fk` was written on 2026-07-25.
+
+`host-exec` is a host PORT (`runtime/fkwu-uni.c` optag 136, the VIA-HOST family) and `str_to_int`
+is optag 31; `fwv-verdict` computes 0=FOUR-WAY / 1=FKWU-SUSPECT / 2=WALKER-SUSPECT.
+
+The three walkers build from source in one command each — see `walkers/README.md`; the TS one runs
+under `node --experimental-strip-types`, no tsx needed. Nothing prebuilt is required.
+
+Perturbation-verified 2026-06-29 and again live on 2026-07-25 (the verdict is COMPUTED, not
+parse-to-zero): the three walkers each return 42 on `recipe42.fk` → verdict **0** (FOUR-WAY); point
+ts at a recipe answering 99 → **2** (WALKER-SUSPECT); tell the runner fkwu=99 while the walkers agree
+→ **1** (FKWU-SUSPECT). The verdict tracks actual agreement among the host-exec'd values, not the
+literal. Full evidence: `receipts/2026-06-29-kernel-self-proves-four-way.md` and
+`receipts/2026-07-25-all-four-arms-are-here.md`.
