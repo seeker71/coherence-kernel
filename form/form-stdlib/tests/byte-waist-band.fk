@@ -1,0 +1,75 @@
+; preludes: form-stdlib/core.fk
+;
+; byte-waist-band.fk — what the string narrow waist actually agrees on, measured
+; rather than declared.
+;
+; core.fk's header calls str_len / str_byte_at / byte_to_str / str_concat the
+; native composition floor — "measure, decompose (one raw byte, 0-255),
+; construct (the exact dual), join" — and says it is byte-identical on fkwu, Go,
+; Rust and TS. Three of those four names are. `byte_to_str` is not, and nothing
+; in the tree said so until this band, because everything that exercised it
+; passed ASCII through it. Measured 2026-07-26:
+;
+;   (str_byte_at (byte_to_str n) 0)   n=65  127  128  169  206  255
+;     fkwu                              65  127  128  169  206  255
+;     go / rust / ts                    65  127  194  194  195  195
+;
+; Above 127 the walkers read n as a codepoint and hand back its two-byte UTF-8
+; encoding, so decompose-then-construct is the identity for half the range there
+; and all of it on fkwu. This band does NOT assert a number above 127 — a band
+; that did would be red on three arms forever and teach nothing. It asserts the
+; floor that is genuinely four-way, plus the INVARIANT that links the two halves:
+; the construct is the exact dual exactly when it produces one byte. That claim
+; is true on fkwu because both sides hold, true on the walkers because both sides
+; fail, and it goes red on any arm where they come apart — which is the only
+; honest way to pin a divergence in a four-way band.
+;
+; Verdict 63 when every claim lands:
+;   1   DECOMPOSE   — str_byte_at reads both bytes of a two-byte glyph
+;   2   MEASURE     — str_len counts bytes, not characters
+;   4   ASCII DUAL  — byte_to_str is the exact dual for every n in 0..127
+;   8   JOIN        — str_concat joins byte-exactly across a character boundary
+;   16  LINKED      — dual-holds?(n) equals one-byte?(n) at 128, 169, 206, 255
+;   32  LITERAL     — every byte offset of a mixed-script literal reads back
+(do
+    ;; the exact dual, asked one byte at a time
+    (defn bw-dual? (n) (if (eq (str_byte_at (byte_to_str n) 0) n) 1 0))
+    (defn bw-one-byte? (n) (if (eq (str_len (byte_to_str n)) 1) 1 0))
+
+    ;; sweep 0..127: the dual holds AND each is one byte, for every value
+    (defn bw-ascii-sweep (n acc)
+        (if (gt n 127) acc
+            (bw-ascii-sweep (add n 1)
+                (and acc (and (bw-dual? n) (bw-one-byte? n))))))
+
+    ;; the invariant: exact-dual and one-byte are the same question
+    (defn bw-linked? (n) (if (eq (bw-dual? n) (bw-one-byte? n)) 1 0))
+
+    ;; 1 — decompose: the two bytes of a lambda, 0xCE 0xBB
+    (let c0 (if (and (eq (str_byte_at "λ" 0) 206) (eq (str_byte_at "λ" 1) 187)) 1 0))
+
+    ;; 2 — measure: bytes, not characters
+    (let c1 (if (and (eq (str_len "λ") 2)
+                     (and (eq (str_len "€") 3) (eq (str_len "λ€") 5))) 2 0))
+
+    ;; 4 — the dual over the whole ASCII range, all 128 values
+    (let c2 (if (eq (bw-ascii-sweep 0 1) 1) 4 0))
+
+    ;; 8 — join: the euro's first byte still sits at offset 2 after concatenation
+    (let j (str_concat "λ" "€"))
+    (let c3 (if (and (eq (str_byte_at j 1) 187) (eq (str_byte_at j 2) 226)) 8 0))
+
+    ;; 16 — the linked invariant, at four values above 127
+    (let c4 (if (and (bw-linked? 128)
+                     (and (bw-linked? 169)
+                          (and (bw-linked? 206) (bw-linked? 255)))) 16 0))
+
+    ;; 32 — a literal carrying two scripts reads back byte by byte: Ω is CE A9
+    (let s "Ω+1")
+    (let c5 (if (and (eq (str_len s) 4)
+                     (and (eq (str_byte_at s 0) 206)
+                          (and (eq (str_byte_at s 1) 169)
+                               (and (eq (str_byte_at s 2) 43)
+                                    (eq (str_byte_at s 3) 49))))) 32 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))

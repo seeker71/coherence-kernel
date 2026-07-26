@@ -417,15 +417,23 @@ export class Kernel {
     // dual). Everything else string-shaped is Form-native on top of these
     // three plus str_concat; see receipts/2026-07-01-narrow-waist-string-cleanup.md.
     //
-    // Byte scope, named honestly: implemented via latin1 (each JS UTF-16
-    // code unit 0-255 IS the raw byte, losslessly, both directions —
-    // verified round-tripping byte 233 through byte_to_str then
-    // str_byte_at). Source string literals are read as proper UTF-8
-    // (readFileSync(p, "utf8")), so any literal outside the Latin-1 range
-    // (a real multi-byte character, not just an accented one) will NOT
-    // byte-count identically to fkwu's raw-byte view here — a real, bounded
-    // gap, not silently papered over. Every test this walker actually needs
-    // to pass today is plain ASCII, where this is exact.
+    // Byte scope: implemented via latin1 (each JS UTF-16 code unit 0-255 IS
+    // the raw byte, losslessly, both directions — verified round-tripping byte
+    // 233 through byte_to_str then str_byte_at).
+    //
+    // This paragraph used to continue: "Source string literals are read as
+    // proper UTF-8 (readFileSync(p, "utf8")), so any literal outside the
+    // Latin-1 range ... will NOT byte-count identically to fkwu's raw-byte view
+    // here — a real, bounded gap, not silently papered over. Every test this
+    // walker actually needs to pass today is plain ASCII, where this is exact."
+    //
+    // Named, not hidden — and then it stopped being bounded. str-byte-at-band
+    // and byte-waist-band both grew non-ASCII claims, and this walker read 15
+    // and 20 where the other six evaluators read 511 and 63. The intake is
+    // latin1 now (see main()), so the source bytes ARE the string's units and
+    // the three natives below are exact over the whole range, not just ASCII.
+    // Measured after: (str_len "λ") 2, (str_byte_at "λ" 0) 206, and the emoji
+    // 🌊 four bytes rather than two UTF-16 surrogate halves.
     this.registerNative("str_len", catAccess(), (_k, args) => ({
       kind: "int",
       int: Buffer.from(argStr(args, 0), "latin1").length,
@@ -1492,7 +1500,18 @@ function main(): void {
     for (const p of missing) console.error(`input file not found: ${p}`);
     process.exit(2);
   }
-  const src = paths.map((p) => readFileSync(p, "utf8")).join("\n");
+  // "latin1", not "utf8" — REPAIRED 2026-07-26. The three string natives above
+  // are latin1 throughout: each JS UTF-16 code unit 0-255 IS one raw byte, both
+  // directions. Reading source as utf8 broke that on the way in — a literal
+  // outside Latin-1 arrived as codepoints, so `(str_len "λ")` was 1 here and 2
+  // on every other arm, and `(str_byte_at "λ" 0)` was 187 (the low byte of
+  // U+03BB) instead of 206 (the first UTF-8 byte). The comment beside those
+  // natives named this gap and closed with "every test this walker actually
+  // needs to pass today is plain ASCII" — which stopped being true the day
+  // str-byte-at-band grew non-ASCII claims: this walker read 15 where the other
+  // six evaluators read 511. Reading latin1 makes the source bytes the string's
+  // units, which is what the natives already assumed.
+  const src = paths.map((p) => readFileSync(p, "latin1")).join("\n");
   const k = new Kernel();
   const frame = new Frame(null);
   const node = readAll(k, src);
