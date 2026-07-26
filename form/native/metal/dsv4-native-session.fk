@@ -1,0 +1,70 @@
+; One Form-owned DS4 generation session: model open, Form-emitted Metal
+; libraries, layer-major prompt prefill, persistent-cache autoregressive
+; decode, native argmax token ids, and close.
+;
+; preludes: native/metal/dsv4-embed.fk native/metal/dsv4-f16-matvec.fk native/metal/dsv4-rmsnorm.fk native/metal/dsv4-mx8-matvec.fk native/metal/dsv4-rope.fk native/metal/dsv4-hash-route.fk native/metal/dsv4-moe-exec.fk native/metal/dsv4-kv-round.fk native/metal/dsv4-output.fk native/metal/dsv4-layer-walk.fk form-stdlib/dsv4-hc-msl.fk form-stdlib/dsv4-kv-cache.fk
+
+(do
+    (defn dns-open ()
+        (do
+            (print_str (metal_model_open
+                (dlp-model-path)
+                (dlw-nums (list (dlp-view-step) (dlp-view-limit) 2))))
+            (print_str (metal_model_library "dsv4-embed" (dsv4-embed-source)))
+            (print_str (metal_model_library "dsv4-hc" (hc-msl-unit)))
+            (print_str (metal_model_library "dsv4-f16" (dsv4-f16-matvec-source)))
+            (print_str (metal_model_library "dsv4-rms" (dsv4-rmsnorm-source)))
+            (print_str (metal_model_library "dsv4-mx8" (dsv4-mx8-matvec-source)))
+            (print_str (metal_model_library "dsv4-rope" (dsv4-rope-source)))
+            (print_str (metal_model_library "dsv4-route" (dsv4-hash-route-source)))
+            (print_str (metal_model_library "dsv4-mx4" (dsv4-mx4-expert-source)))
+            (print_str (metal_model_library "dsv4-iq2" (dsv4-iq2-expert-source)))
+            (print_str (metal_model_library "dsv4-moe" (dsv4-moe-fold-source)))
+            (print_str (metal_model_library "dsv4-topk" (dsv4-topk-route-source)))
+            (print_str (metal_model_library "dsv4-kv-round" (dsv4-kv-round-source)))
+            (print_str (metal_model_library "dsv4-kv-cache" (dkv-msl-source)))
+            (print_str (metal_model_library "dsv4-output" (dsv4-argmax-source)))
+            0))
+
+    (defn dns-token-id (receipt)
+        (do
+            (let prefix "token-id=")
+            (let at (str_find receipt prefix 0))
+            (let start (add at (str_len prefix)))
+            (let stop (str_find receipt "\n" start))
+            (str_to_int (substring receipt start stop))))
+
+    (defn dns-output-token (descs)
+        (do
+            (let receipt (dlw-output-head descs))
+            (let token (dns-token-id receipt))
+            (print_str (str_concat "NATIVE token-id=" (int_to_str token)))
+            token))
+
+    (defn dns-decode-loop (src descs token position remaining acc)
+        (do
+            (let next-acc (append acc (list token)))
+            (if (eq remaining 1) next-acc
+                (do
+                    (dlw-embed-token descs token)
+                    (dlw-decode-layers src descs token position 0 43)
+                    (let next (dns-output-token descs))
+                    (dns-decode-loop src descs next
+                        (add position 1) (sub remaining 1) next-acc)))))
+
+    (defn dns-generate-ids (ids n)
+        (do
+            (dns-open)
+            (let src (eqr-of-file (dlp-model-path) 0 (gm-window)))
+            (let base (egg-data-base src (gm-alignment)))
+            (let descs (dlp-collect src base (egg-tinfo-start src) (egg-tensor-count src)))
+            (dlw-init-prompt descs ids 0)
+            (dlw-prefill-layers src descs ids 0 43)
+            (dlw-say (metal_model_state_load (dlw-prompt-state (sub (len ids) 1))))
+            (let first (dns-output-token descs))
+            (let generated (dns-decode-loop src descs first (len ids) n (list)))
+            (print_str (str_concat "NATIVE generated-count=" (int_to_str (len generated))))
+            (print_str "NATIVE network=0 remote=0 shell=0 swift=0 temp=0")
+            (print_str (metal_model_close))
+            generated))
+    0)
