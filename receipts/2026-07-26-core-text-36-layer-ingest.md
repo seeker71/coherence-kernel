@@ -50,9 +50,11 @@ At the 2026-07-26 witness epoch, the intended seed partition is:
     First Tablet lines 1-3;
   - Genesis 1:1 in World English Bible, Louis Segond 1910,
     Reina-Valera 1909, and eBible's Delitzsch-attributed Hebrew edition.
-- 2 review nodes:
+- 3 review nodes:
   - the 1908 English Popol Vuh mediation requires K'iche' community review;
-  - StoryWeaver requires an exact book and complete creator attribution.
+  - StoryWeaver requires an exact book and complete creator attribution;
+  - Giles' "The Light Hubs" has exact member-witnessed permission but awaits
+    community restrictions and a revocable full-body carrier.
 - 2 refusals:
   - FirstVoices forbids scraping, merging, and republication without authority;
   - SuttaCentral requests that its content not be used to create generative-AI
@@ -105,7 +107,7 @@ Observed on 2026-07-26:
 
 ```text
 ./fkwu --src cognition/tests/core-text-36-layer-ingest-band.fk
--> [nothing, 0, 1, 3040004007, [6, 2, 2, 3], 6, 4, 36,
+-> [nothing, 0, 1, 3040004007, [6, 3, 2, 2], 6, 4, 36,
     3040007001, nothing, 14, 4095]
 
 ./fkwu --src cognition/tests/core-text-36-layer-structure-four-way-band.fk
@@ -130,9 +132,9 @@ node --experimental-strip-types walkers/ts/main.ts /dev/stdin
 The first community relationship door now lives in
 `learn/hati-suci-core-text-invitation.fk`: Hati Suci is pilot 1 through an
 initiating member. Source 13 now identifies Giles' "The Light Hubs" by exact
-hash as Satsang's selected first material. The registry has thirteen rows and
-the new row is unresolved/metadata-only; no Hati Suci text body has been
-admitted.
+hash as Satsang's selected first material. The registry has thirteen rows.
+Member-witnessed scoped permission moves the new metadata-only row from
+unresolved to community review; no Hati Suci text body has been admitted.
 
 Neighboring laws remained present:
 
