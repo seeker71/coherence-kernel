@@ -284,6 +284,7 @@ LIB_HC="$(compile_unit   dsv4-hc-unit          form_hc_split_f32              ds
 LIB_MX4="$(compile_unit  dsv4-mx4-matvec-msl   form_dsv4_mx4_matvec           dsv4mx4)"    || exit 1
 LIB_IQ2="$(compile_unit  dsv4-iq2-matvec-msl   form_dsv4_iq2_matvec           dsv4iq2)"    || exit 1
 LIB_FFN="$(compile_unit  dsv4-stack-ffn-unit   form_dsv4_topk_weights         dsv4stkffn)" || exit 1
+LIB_KV="$(compile_unit   dsv4-stack-kv-unit    form_dkv_append_f32            dsv4stkkv)"  || exit 1
 
 # ── 4. the carrier ─────────────────────────────────────────────────────────────────────────────────
 cat > "$work/runner.swift" <<'SWIFT'
@@ -301,8 +302,9 @@ func I(_ k: String) -> Int { guard let v = P[k], let n = Int(v) else { print("FA
 func F(_ k: String) -> Float { guard let v = P[k], let n = Float(v) else { print("FAIL missing float param \(k)"); exit(1) }; return n }
 let libEmb = argv[3], libMla = argv[4], lib8 = argv[5], libCore = argv[6], libHc = argv[7]
 let libMx4 = argv[8], libIq2 = argv[9], libFfn = argv[10]
-let oraDirA = argv[11], oraDirB = argv[12]
-let perDirA = argv[13], perDirB = argv[14]
+let libKv = argv[11]
+let oraDirA = argv[12], oraDirB = argv[13]
+let perDirA = argv[14], perDirB = argv[15]
 
 struct Tn { let abs: Int, bytes: Int, idx: Int, inner: Int, holds: Int, d0: Int, d1: Int, d2: Int, type: Int
             var rows: Int { d1 }
@@ -353,6 +355,7 @@ guard let dev = MTLCreateSystemDefaultDevice() else { print("SKIP no Metal devic
 func lib(_ p: String) -> MTLLibrary { return try! dev.makeLibrary(URL: URL(fileURLWithPath: p)) }
 let lEmb = lib(libEmb), lMla = lib(libMla), l8 = lib(lib8), lCore = lib(libCore), lHc = lib(libHc)
 let lMx4 = lib(libMx4), lIq2 = lib(libIq2), lFfn = lib(libFfn)
+let lKv = lib(libKv)
 let queue = dev.makeCommandQueue()!
 var failures = 0, gpuErrors = 0
 var gpuFirstError: String? = nil
@@ -559,6 +562,7 @@ let pAxpy = pipe(lFfn, "form_dsv4_axpy_f32")
 let pHashSel = pipe(lFfn, "form_dsv4_hash_select")
 let pHashW = pipe(lFfn, "form_dsv4_hash_weights")
 let pTopkW = pipe(lFfn, "form_dsv4_topk_weights")
+let pKvAppend = pipe(lKv, "form_dkv_append_f32")
 
 func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
     let out = sentinelled(n); var n32 = UInt32(n), e = eps
@@ -632,6 +636,29 @@ func gpuKvRound(_ v: MTLBuffer) -> MTLBuffer {
     enc(pKvq, 1, 1) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                            c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) }
     return out
+}
+func gpuKvAppend(_ row: MTLBuffer, _ arena: MTLBuffer, _ pos: Int, _ cap: Int) {
+    var h = UInt32(headDim), p = UInt32(pos), c32 = UInt32(cap)
+    enc(pKvAppend, headDim, 256) { c in c.setBuffer(row, offset: 0, index: 0)
+                                        c.setBuffer(arena, offset: 0, index: 1)
+                                        c.setBytes(&h, length: 4, index: 2); c.setBytes(&p, length: 4, index: 3)
+                                        c.setBytes(&c32, length: 4, index: 4) }
+}
+var kvAppendObserved = false
+func observeRealKvAppend(_ row: MTLBuffer) {
+    if kvAppendObserved { return }
+    let cap = 2, arena = sentinelled(cap * headDim)
+    gpuKvAppend(row, arena, 0, cap)
+    let rp = fp(row, headDim), ap = fp(arena, cap * headDim)
+    var exact = 0, frontier = 0
+    for j in 0..<headDim {
+        if rp[j].bitPattern == ap[j].bitPattern { exact += 1 }
+        if ap[headDim + j].isNaN { frontier += 1 }
+    }
+    check(exact == headDim && frontier == headDim,
+      "REAL KV APPEND: the Form-emitted device kernel copied layer 0's \(headDim)-wide quantized latent bit-identically into arena row 0 and left all \(headDim) entries of row 1 NaN-sentinel",
+      "real KV append: exact row entries \(exact)/\(headDim), untouched frontier \(frontier)/\(headDim)")
+    kvAppendObserved = true
 }
 func gpuAttend(_ q: MTLBuffer, _ rows: MTLBuffer, _ snk: Tn) -> MTLBuffer {
     let out = sentinelled(nHead*headDim)
@@ -738,6 +765,7 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let kln = gpuRmsnorm(kl, w.kv.rows, w.kvan)
     let kr = gpuRope(kln, 1, pos, il, false)
     let kq = gpuKvRound(kr)
+    if il == 0 { observeRealKvAppend(kq) }
     let ha = gpuAttend(qr, kq, w.snk)
     let hu = gpuRope(ha, nHead, pos, il, true)
     let lo = gpuGrouped(w.oa, hu)
@@ -1079,6 +1107,6 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "
 
 "$work/runner" "$work/params.txt" "$BLOB" \
     "$LIB_EMB" "$LIB_MLA" "$LIB8" "$LIB_CORE" "$LIB_HC" \
-    "$LIB_MX4" "$LIB_IQ2" "$LIB_FFN" "$ORA0" "$ORA7" "$PER0" "$PER7"
+    "$LIB_MX4" "$LIB_IQ2" "$LIB_FFN" "$LIB_KV" "$ORA0" "$ORA7" "$PER0" "$PER7"
 rc=$?
 exit $rc
