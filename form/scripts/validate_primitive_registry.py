@@ -106,6 +106,9 @@ def ts_names() -> set[str]:
 def registry_entries() -> list[dict]:
     """Parse (prim "name" "token" "spec" <verify> <expected> <mode>) cells."""
     src = REGISTRY.read_text()
+    defined_verifiers = set(
+        re.findall(r"\(defn\s+(pv-[^\s()]+)\s", src)
+    )
     entries = []
     for m in re.finditer(r'\(prim "', src):
         start = m.start()
@@ -138,13 +141,17 @@ def registry_entries() -> list[dict]:
             print(f"FAIL unparseable registry cell at offset {start}: {cell[:80]}...")
             sys.exit(1)
         verifier = cell[head.end():tail.start()].strip()
+        named_verifier = re.fullmatch(r"(pv-[^\s()]+)", verifier)
+        has_verify = bool(verifier)
+        if named_verifier:
+            has_verify = named_verifier.group(1) in defined_verifiers
         entries.append({
             "name": head.group(1),
             "token": head.group(2),
             "spec": head.group(3),
             "expected": int(tail.group(1)),
             "mode": int(tail.group(2)),
-            "has_verify": bool(verifier),
+            "has_verify": has_verify,
         })
     return entries
 
