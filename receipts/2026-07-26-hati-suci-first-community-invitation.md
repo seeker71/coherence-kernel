@@ -28,20 +28,19 @@ names Hati Suci as the household's first field.
 - member-reported relationship evidence;
 - member-reported Satsang-circle recognition;
 - Satsang role `both`: receive/witness and select/approve;
-- current action: Satsang names the first exact material;
-- nine explicit pending terms;
+- first exact material selected: Giles' "The Light Hubs";
+- current action: record Giles' reuse terms and Satsang's selection receipt;
+- eight open terms after exact-material selection;
 - a four-arm acknowledgement: `nothing | 0 | 1 | node`.
 
-The current acknowledgement is the exact-material action node, not a generic
-review marker. Its offer names Satsang as the responsible circle and exposes
-four replies: no observed candidate, decline, approve the exact candidate, or
-counteroffer another candidate/condition. Synthetic fixtures prove that the
-membrane can return every arm, but those fixtures are tests and make no claim
-about Hati Suci's answer.
+The current acknowledgement is the authority/process action node, not a
+generic review marker. Its offer asks for Giles' reuse terms and Satsang's
+selection receipt, with four replies: no observed receipt, decline/withdraw,
+record both, or counteroffer restricted conditions.
 
-No Hati Suci source row or text segment was added to
-`learn/core-text-source-registry.fk`. A complete community confirmation only
-authorizes handoff to that exact-source gate.
+Source row 13 identifies "The Light Hubs" by exact SHA-256 as metadata-only.
+No Hati Suci text segment was added. Author permission and downstream
+conditions still cross the exact-source gate before the body enters.
 
 ## Witness
 
@@ -57,7 +56,7 @@ Observed on 2026-07-26:
 
 ./fkwu --src \
   learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043001001, 3041003001, 0, nothing, 0, 1, 3044001001, 20260726]
+-> [3043002001, 3041003001, 1, nothing, 0, 1, 3044002001, 20260726]
 ```
 
 The structural source was expanded as documented preludes + recipe + band
@@ -77,11 +76,10 @@ node --experimental-strip-types walkers/ts/main.ts /dev/stdin
 
 ## Honest boundary
 
-The relationship, Satsang recognition, and both-role evidence are the
-initiating member's reports. The invitation now asks Satsang for one exact
-first material. Satsang's actual response and exact text selection,
-cultural restrictions, attribution, translation permission, downstream/AI
-use, benefit, withdrawal, and review date all remain pending.
+The relationship, Satsang recognition, both-role evidence, and selection of
+"The Light Hubs" are the initiating member's reports. Giles' full attribution,
+reuse permission, cultural restrictions, translation permission,
+downstream/AI use, benefit, withdrawal, and review date remain open actions.
 
 ## Closing
 
