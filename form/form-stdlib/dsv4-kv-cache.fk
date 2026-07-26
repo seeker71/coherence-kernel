@@ -173,6 +173,27 @@
     ; ===========================================================================
     (defn dkv-append-msl-body ()
         "kernel void form_dkv_append_f32 (device const float* row [[buffer(0)]], device float* arena [[buffer(1)]], constant uint& hd [[buffer(2)]], constant uint& pos [[buffer(3)]], constant uint& cap [[buffer(4)]], uint j [[thread_position_in_grid]]) { if (pos >= cap) return; if (j >= hd) return; arena[pos * hd + j] = row[j]; } ")
+    (defn dkv-compressor-stage-msl-body ()
+        "kernel void form_dkv_compressor_stage_f32(device const float* kv_cur [[buffer(0)]], device const float* score_cur [[buffer(1)]], device const half* ape [[buffer(2)]], device float* state_kv [[buffer(3)]], device float* state_score [[buffer(4)]], constant uint& width [[buffer(5)]], constant uint& ratio [[buffer(6)]], constant uint& pos [[buffer(7)]], uint j [[thread_position_in_grid]]) { if (j >= width) return; uint lane = ratio == 4u ? 2u : 1u; uint row = ratio == 4u ? ratio + (pos % ratio) : (pos % ratio); state_kv[row * width + j] = kv_cur[j]; state_score[row * width + j] = score_cur[j] + float(ape[(pos % ratio) * width + j]); } ")
+    (defn dkv-compressor-pool-msl-body ()
+        "kernel void form_dkv_compressor_pool_f32(device const float* state_kv [[buffer(0)]], device const float* state_score [[buffer(1)]], device float* out [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& ratio [[buffer(4)]], uint j [[thread_position_in_grid]]) { if (j >= hd) return; uint lanes = ratio == 4u ? 2u : 1u; uint width = lanes * hd; float m = -INFINITY; for (uint r=0u;r<ratio;r++) { float s=state_score[r*width+j]; if(s>m)m=s; if(lanes==2u){s=state_score[(ratio+r)*width+hd+j];if(s>m)m=s;} } float den=0.0f,sum=0.0f; for(uint r=0u;r<ratio;r++){float s=state_score[r*width+j];float w=exp(s-m);den+=w;sum+=w*state_kv[r*width+j];if(lanes==2u){s=state_score[(ratio+r)*width+hd+j];w=exp(s-m);den+=w;sum+=w*state_kv[(ratio+r)*width+hd+j];}} out[j]=den>0.0f?sum/den:0.0f; } ")
+    (defn dkv-compressor-roll-msl-body ()
+        "kernel void form_dkv_compressor_roll4_f32(device float* state_kv [[buffer(0)]], device float* state_score [[buffer(1)]], constant uint& width [[buffer(2)]], uint j [[thread_position_in_grid]]) { if (j >= 4u*width) return; uint r=j/width,d=j%width; float kv=state_kv[(4u+r)*width+d]; float sc=state_score[(4u+r)*width+d]; state_kv[r*width+d]=kv;state_score[r*width+d]=sc;state_kv[(4u+r)*width+d]=kv;state_score[(4u+r)*width+d]=sc; } ")
+    (defn dkv-attend-mixed-msl-body ()
+        "kernel void form_dkv_attend_mixed_f32(device const float* q [[buffer(0)]], device const float* raw [[buffer(1)]], device const float* comp [[buffer(2)]], device float* out [[buffer(3)]], device const float* sinks [[buffer(4)]], constant uint& nh [[buffer(5)]], constant uint& hd [[buffer(6)]], constant uint& nraw [[buffer(7)]], constant uint& ncomp [[buffer(8)]], constant float& scale [[buffer(9)]], uint h [[thread_position_in_grid]]) { if(h>=nh)return;device const float* qh=q+h*hd;float m=sinks[h];for(uint r=0u;r<nraw+ncomp;r++){device const float* row=r<nraw?raw+r*hd:comp+(r-nraw)*hd;float s=0.0f;for(uint d=0u;d<hd;d++)s+=qh[d]*row[d];s*=scale;if(s>m)m=s;}float den=exp(sinks[h]-m);for(uint d=0u;d<hd;d++)out[h*hd+d]=0.0f;for(uint r=0u;r<nraw+ncomp;r++){device const float* row=r<nraw?raw+r*hd:comp+(r-nraw)*hd;float s=0.0f;for(uint d=0u;d<hd;d++)s+=qh[d]*row[d];float w=exp(s*scale-m);den+=w;for(uint d=0u;d<hd;d++)out[h*hd+d]+=row[d]*w;}for(uint d=0u;d<hd;d++)out[h*hd+d]/=den; } ")
+    (defn dkv-msl-source ()
+        (str_concat "#include <metal_stdlib>\nusing namespace metal;\n"
+            (str_concat (dkv-append-msl-body)
+            (str_concat (dkv-compressor-stage-msl-body)
+            (str_concat (dkv-compressor-pool-msl-body)
+            (str_concat (dkv-compressor-roll-msl-body)
+                        (dkv-attend-mixed-msl-body)))))))
+    (defn dkv-append-msl-unit ()
+        (do
+            (print_str "MSL")
+            (print_str (dkv-msl-source))
+            (print_str "END")
+            0))
 
     ; the arena's own liveness read: a checksum over the first nrows*hd elements.
     ; zerobirth/edgedrop — a Metal buffer is born zeroed, so "the cache is all
