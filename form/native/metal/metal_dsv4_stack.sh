@@ -111,6 +111,11 @@ echo "  the file declares $NLAYER blocks; this run stacks $WANT_LAYERS"
 : > "$work/want.txt"
 : > "$work/flags.txt"
 echo "EMB token_embd.weight" >> "$work/want.txt"
+echo "OUT_HC_FN output_hc_fn.weight" >> "$work/want.txt"
+echo "OUT_HC_SCALE output_hc_scale.weight" >> "$work/want.txt"
+echo "OUT_HC_BASE output_hc_base.weight" >> "$work/want.txt"
+echo "OUT_NORM output_norm.weight" >> "$work/want.txt"
+echo "OUT_WEIGHT output.weight" >> "$work/want.txt"
 for ((il=0; il<WANT_LAYERS; il++)); do
     P="blk.$il"
     for pair in "NORM attn_norm" "QA attn_q_a" "QAN attn_q_a_norm" "QB attn_q_b" "KV attn_kv" \
@@ -308,6 +313,8 @@ func T(_ k: String) -> Tn {
               holds: I(k+"_HOLDS"), d0: I(k+"_D0"), d1: I(k+"_D1"), d2: I(k+"_D2"), type: I(k+"_TYPE"))
 }
 let emb = T("EMB")
+let outHcFn = T("OUT_HC_FN"), outHcScale = T("OUT_HC_SCALE"), outHcBase = T("OUT_HC_BASE")
+let outNorm = T("OUT_NORM"), outWeight = T("OUT_WEIGHT")
 let step = I("STEP"), viewLimit = I("VIEWLIMIT"), nviews = I("NVIEWS"), token = I("TOKEN")
 let nLayers = I("NLAYERS")
 let nEmbd = I("N_EMBD"), nHead = I("N_HEAD"), headDim = I("HEAD_DIM"), nRot = I("N_ROT"), oRank = I("O_RANK")
@@ -382,6 +389,11 @@ var spanning: [String] = []
 var groups: [String: [Int]] = [:]
 func resident(_ n: String, _ t: Tn) { if t.holds != 1 || t.idx >= nviews { spanning.append(n) } }
 resident("token_embd", emb)
+resident("output_hc_fn", outHcFn)
+resident("output_hc_scale", outHcScale)
+resident("output_hc_base", outHcBase)
+resident("output_norm", outNorm)
+resident("output.weight", outWeight)
 for il in 0..<nLayers {
     let w = LW[il]
     let named: [(String, Tn)] = [("attn_norm", w.nrm), ("attn_q_a", w.qa), ("attn_q_a_norm", w.qan),
@@ -538,6 +550,7 @@ let pHcRmsNw = pipe(lHc, "form_hc_rmsnorm_nw_f32")
 let pHcSplit = pipe(lHc, "form_hc_split_f32")
 let pHcWsum = pipe(lHc, "form_hc_wsum_f32")
 let pHcPost = pipe(lHc, "form_hc_post_f32")
+let pHcHeadw = pipe(lHc, "form_hc_headw_f32")
 let pMx4 = pipe(lMx4, "form_dsv4_mx4_matvec")
 let pIq2 = pipe(lIq2, "form_dsv4_iq2_matvec")
 let pSwiglu = pipe(lFfn, "form_dsv4_swiglu_f32")
@@ -851,7 +864,7 @@ do {
     witness.insert(nLayers - 1)
 }
 
-var finalByPos: [Int: [Float]] = [:]
+var finalByPos: [Int: MTLBuffer] = [:]
 var layerFail = 0
 var worstAbs = 0.0, worstSens = 0.0
 var worstAbsWhere = "", worstSensWhere = ""
@@ -971,9 +984,7 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
           "THE LAYER'S OUTPUT — the \(hcDim) hyper-connection entries blk.\(il+1) receives, carried forward")
         resid = R.outHc
         if il == nLayers - 1 {
-            var v = [Float](repeating: 0, count: hcDim)
-            let op = fp(R.outHc, hcDim); for i in 0..<hcDim { v[i] = op[i] }
-            finalByPos[pos] = v
+            finalByPos[pos] = R.outHc
         }
     }
 }
@@ -984,11 +995,50 @@ let tB = Date(); runStack(posB, oraDirB, perDirB); let wallB = Date().timeInterv
 // ── hushfold at STACK scale ────────────────────────────────────────────────────────────────────────
 var posDiff = 0; var maxDelta: Float = 0
 if let a = finalByPos[posA], let b = finalByPos[posB] {
-    for i in 0..<min(a.count, b.count) { if a[i] != b[i] { posDiff += 1; maxDelta = max(maxDelta, abs(a[i]-b[i])) } }
+    let ap = fp(a, hcDim), bp = fp(b, hcDim)
+    for i in 0..<hcDim { if ap[i] != bp[i] { posDiff += 1; maxDelta = max(maxDelta, abs(ap[i]-bp[i])) } }
 }
 check(posDiff > 0 && layerFail == 0,
   "hushfold at stack scale: the same token's output after all \(nLayers) layers differs between pos \(posA) and pos \(posB) in \(posDiff)/\(hcDim) entries (max delta \(maxDelta)) while every layer of both runs agrees with its OWN oracle",
   "hushfold: \(posDiff) differing entries, \(layerFail) failed layer gates")
+
+// ── the native exit head: HC collapse → final norm → real vocabulary projection → argmax ─────────
+// This stays in the same Metal lifetime as the 43-layer state. No JSON membrane, Ollama, llama.cpp,
+// probe vector, or reconstructed hidden state intervenes.
+var tokenByPos: [Int: Int] = [:]
+for pos in [posA, posB] {
+    guard let resid = finalByPos[pos] else { continue }
+    let flat = sentinelled(hcDim)
+    do { var n = UInt32(hcDim), e0 = eps
+         enc(pHcRmsNw, 1, 1) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
+                                    c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
+    let pre = gpuF16mv(outHcFn, flat)
+    let headw = sentinelled(nHc)
+    do { var a = UInt32(nHc), e0 = hcEps
+         enc(pHcHeadw, nHc, 32) { c in c.setBuffer(pre, offset: 0, index: 0)
+                                       c.setBuffer(views[outHcScale.idx], offset: outHcScale.inner, index: 1)
+                                       c.setBuffer(views[outHcBase.idx], offset: outHcBase.inner, index: 2)
+                                       c.setBuffer(headw, offset: 0, index: 3)
+                                       c.setBytes(&a, length: 4, index: 4); c.setBytes(&e0, length: 4, index: 5) } }
+    let collapsed = sentinelled(nEmbd)
+    do { var a = UInt32(nHc), b = UInt32(nEmbd)
+         enc(pHcWsum, nEmbd, 256) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(headw, offset: 0, index: 1)
+                                         c.setBuffer(collapsed, offset: 0, index: 2)
+                                         c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4) } }
+    let normed = gpuRmsnorm(collapsed, nEmbd, outNorm)
+    let logits = gpuMx8(outWeight, normed, outWeight.rows, outWeight.cols)
+    let lp = fp(logits, outWeight.rows)
+    var arg = 0, best = -Float.infinity, finite = 0
+    for i in 0..<outWeight.rows where lp[i].isFinite {
+        finite += 1
+        if lp[i] > best { best = lp[i]; arg = i }
+    }
+    tokenByPos[pos] = arg
+    let hp = fp(headw, nHc)
+    check(finite == outWeight.rows && arg >= 0 && arg < outWeight.rows,
+      "NATIVE MODEL TOKEN pos \(pos): HC weights \(Array(UnsafeBufferPointer(start: hp, count: nHc))) collapsed the real layer-43 state; output_norm and the \(outWeight.rows)-row MXFP8 vocabulary projection emitted token_id=\(arg), logit=\(best)",
+      "native exit head pos \(pos): finite logits \(finite)/\(outWeight.rows), argmax \(arg)")
+}
 
 if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(gpuFirstError ?? "unknown") ===") }
 // unispan: a per-layer time from ONE run is a guess; each layer is timed at BOTH positions.
