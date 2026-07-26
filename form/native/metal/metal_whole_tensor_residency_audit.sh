@@ -54,6 +54,12 @@ BLOB="${FORM_GGUF_BLOB:-$HOME/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8
 WTENSOR="${FORM_W_TENSOR:-blk.0.ffn_down.weight}"
 XTENSOR="${FORM_X_TENSOR:-blk.1.ffn_down.weight}"
 TILE="${FORM_TILE:-4096}"
+MODEL_LAYERS="${FORM_MODEL_LAYERS:-28}"
+MODEL_LOOPS="${FORM_MODEL_LOOPS:-1}"
+KV_HEADS="${FORM_MODEL_KV_HEADS:-8}"
+HEAD_DIM="${FORM_MODEL_HEAD_DIM:-128}"
+MAX_SEQ="${FORM_MODEL_MAX_SEQ:-2048}"
+QUERY_HEADS="${FORM_MODEL_QUERY_HEADS:-24}"
 CACHE="$ROOT/native/metal/.metallib-cache"
 
 if [[ "$(uname -s)" != "Darwin" ]] || ! command -v swiftc >/dev/null; then
@@ -201,6 +207,8 @@ import Foundation
 let a = CommandLine.arguments
 let libPath = a[1], refPath = a[2], blobPath = a[3], tablePath = a[4]
 let iters = Int(a[5])!, steps = Int(a[6])!, tile = Int(a[7])!
+let modelLayers = Int(a[16])!, modelLoops = Int(a[17])!, modelKVHeads = Int(a[18])!
+let modelHeadDim = Int(a[19])!, modelMaxSeq = Int(a[20])!, modelQueryHeads = Int(a[21])!
 struct Lane {
     let quant: String, abs: Int, rows: Int, cols: Int, tailOff: Int
     let deq: String, mv: String, bitExact: Bool
@@ -258,8 +266,8 @@ guard let modelBuf = dev.makeBuffer(bytesNoCopy: mapped, length: mapLen, options
     print("FAIL  makeBuffer(bytesNoCopy:) over the mapped model failed"); exit(1)
 }
 let upSecs = Date().timeIntervalSince(tUp0)
-print(String(format: "resident: the WHOLE %d-byte blob mapped into one MTLBuffer on %@ in %.4f s, ZERO copies",
-             fileLen, dev.name, upSecs))
+print("resident: the WHOLE \(fileLen)-byte blob mapped into one MTLBuffer on \(dev.name) in " +
+      String(format: "%.4f", upSecs) + " s, ZERO copies")
 
 func pipeline(_ n: String) throws -> MTLComputePipelineState {
     try dev.makeComputePipelineState(function: lib.makeFunction(name: n)!)
@@ -447,15 +455,17 @@ do {
 }
 
 // --- GATE 9: KV-cache device buffers + workspace pooling ------------------------------------------
-// Real llama3.2:3b decode geometry: 28 layers, 8 KV heads, head_dim 128, K and V, f32.
+// Geometry is supplied from the artifact witness. Recurrent models allocate a distinct cache bank
+// per execution loop: stored layers and executed cache slots are deliberately not conflated.
 do {
-    let nLayers = 28, nKVHeads = 8, headDim = 128, maxSeq = 2048
-    let kvFloats = nLayers * nKVHeads * headDim * maxSeq * 2
+    let cacheSlots = modelLayers * modelLoops
+    let kvFloats = cacheSlots * modelKVHeads * modelHeadDim * modelMaxSeq * 2
     let kvBuf = dev.makeBuffer(length: kvFloats * 4, options: .storageModeShared)!
-    let wsBuf = dev.makeBuffer(length: 8 * 8192 * 4, options: .storageModeShared)!   // scratch pool
+    let wsBuf = dev.makeBuffer(length: max(modelKVHeads * 8192, modelQueryHeads * modelMaxSeq * 2) * 4,
+                               options: .storageModeShared)!   // scratch pool
     let allocations = 2
     let kv = kvBuf.contents().bindMemory(to: Float.self, capacity: kvFloats)
-    let ws = wsBuf.contents().bindMemory(to: Float.self, capacity: 8 * 8192)
+    let ws = wsBuf.contents().bindMemory(to: Float.self, capacity: wsBuf.length / 4)
     let p6 = try pipeline("form_q6k_matvec_f32")
     let t = layers.first(where: { $0.type == "14" })!
     let xb = dev.makeBuffer(length: t.cols * 4, options: .storageModeShared)!
@@ -475,19 +485,19 @@ do {
     }
     for s in 0..<steps {
         step(s)
-        let slot = s * headDim                                  // layer 0, K, position s
-        for k in 0..<headDim { kv[slot + k] = yp[k] }           // into the POOLED cache, no alloc
-        for k in 0..<headDim { ws[k] = yp[k] }                  // and through the scratch pool
+        let slot = s * modelHeadDim                             // loop 0, layer 0, K, position s
+        for k in 0..<modelHeadDim { kv[slot + k] = yp[k] }      // into the POOLED cache, no alloc
+        for k in 0..<modelHeadDim { ws[k] = yp[k] }             // and through the scratch pool
     }
     var kvOK = true
     for s in 0..<steps {
         step(s)
-        let slot = s * headDim
-        for k in 0..<headDim where kv[slot + k] != yp[k] { kvOK = false }
+        let slot = s * modelHeadDim
+        for k in 0..<modelHeadDim where kv[slot + k] != yp[k] { kvOK = false }
     }
     check(kvOK && allocations == 2,
           String(format: "gate 9 pooling: a %.0f MB KV cache (%d layers x %d kv-heads x %d head-dim x %d seq x K/V, f32) and a %d-byte workspace allocated ONCE and reused across %d steps, each step re-running a real kernel; every cached slot re-verified against a replay",
-                 Double(kvFloats * 4) / 1e6, nLayers, nKVHeads, headDim, maxSeq, wsBuf.length, steps),
+                 Double(kvFloats * 4) / 1e6, cacheSlots, modelKVHeads, modelHeadDim, modelMaxSeq, wsBuf.length, steps),
           "gate 9: the pooled KV cache did not read back what was written")
 }
 
@@ -497,7 +507,8 @@ SWIFT
 swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || {
     echo "FAIL  swiftc could not build the carrier"; cat "$work/swift.err"; exit 1; }
 "$work/runner" "$LIB" "$work/ref.txt" "$BLOB" "$work/table.txt" "$ITERS" "$STEPS" "$TILE" \
-               "$A6" "$R6" "$C6" "$T6" "$A4" "$R4" "$C4" "$T4"
+               "$A6" "$R6" "$C6" "$T6" "$A4" "$R4" "$C4" "$T4" \
+               "$MODEL_LAYERS" "$MODEL_LOOPS" "$KV_HEADS" "$HEAD_DIM" "$MAX_SEQ" "$QUERY_HEADS"
 rc=$?
 echo "(metallib was a cache $lib_state this run: $LIB)"
 exit $rc
