@@ -58,8 +58,12 @@ The replacement host surface is intentionally thin:
   exact checkpoint admission/continuation, and preserves the minimized result.
 - `form/scripts/native_model_rag.sh` gates the shipped Form-native CLI against
   a deterministic direct `ask`, then observes the live local world index.
-- `form/scripts/native_model_route.sh` currently carries bytes to the registered
-  borrowed `llama3.2:3b` route and records the Form-classified occurrence.
+- `form/scripts/native_model_route.sh` defaults to direct Metal execution
+  (`form-metal`, also named `llama32.form-metal`) with no socket, HTTP, JSON,
+  Ollama, or llama.cpp membrane. `LOCAL_MODEL_ROUTE=ollama-llama32` retains the
+  old borrowed comparator explicitly. `LOCAL_MODEL_ROUTE=nanbeige42` selects
+  the explicitly named Nanbeige challenger carrier; availability still does
+  not grant admission or authority.
 - `form/scripts/native_model_eval.sh` performs paired local candidate/incumbent
   I/O while Form owns normalization, scores, comparison, and authority refusal.
 - `form/scripts/native_model_tally.sh` asks Form to classify the event ledger
@@ -107,10 +111,30 @@ runs on the same machine. Evaluation, training, teacher, and integration-probe
 calls are also separate from accepted production finals and cannot inflate
 sovereignty.
 
-The registry currently contains 32 family-level occurrences: 14 Form-native,
-3 local fine-tunes, 4 borrowed local models, 2 local oracles, 3 remote oracles,
+The registry currently contains 33 family-level occurrences: 14 Form-native,
+3 local fine-tunes, 5 borrowed local models, 2 local oracles, 3 remote oracles,
 and 6 policy/fixture families. It collapses repeated speech windows and
 duplicate synthetic GGUF bands into families rather than inflating the count.
+
+The looped-transformer transfer is executable in
+`form/form-stdlib/nanbeige-looped-lane.fk`. It separates 22 stored decoder
+layers from 44 layer applications, preserves per-loop KV isolation, and admits
+the borrowed Nanbeige challenger only after pinned identity, forward parity,
+sealed quality improvement, and resource gates. The architecture knowledge and
+router law are Form-native. The verified Q4 carrier has produced one exact
+local response through the pinned Nanbeige llama.cpp support revision; it is
+observed local-process evidence, not Form-native execution or benchmark
+authority.
+
+The deeper composition is
+`form/form-stdlib/nanbeige-looped-transformer.fk`: the existing native
+RMSNorm/RoPE/GQA/SwiGLU stack executes twice over the same layer-weight list,
+with final RMSNorm between passes and pass-local cache state. The pinned
+safetensors identity is Form-owned by
+`form/form-stdlib/nanbeige-package-admission.fk`; the distinct operational Q4
+carrier is admitted by `form/form-stdlib/nanbeige-gguf-admission.fk`. Host
+verifiers only observe byte counts and SHA-256 values. Native bf16 tensor
+windows enter math through `form/form-stdlib/safetensors-bf16-slice.fk`.
 
 ## Actual native training observed
 

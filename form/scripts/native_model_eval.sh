@@ -16,14 +16,15 @@ if [ ! -x "$NM_FKWU" ]; then
 fi
 
 ollama_url=${OLLAMA_URL:-http://127.0.0.1:11434}
-candidate_id=translation.hati-lora-q4
-candidate_tag=hati-translator-q4:latest
+candidate_id=${NATIVE_MODEL_CANDIDATE_ID:-translation.hati-lora-q4}
+candidate_tag=${NATIVE_MODEL_CANDIDATE_TAG:-hati-translator-q4:latest}
 incumbent_id=base.llama32-3b-local
 incumbent_tag=llama3.2:3b
-task_lane=translation
+task_lane=${NATIVE_MODEL_EVAL_LANE:-translation}
 ledger="$NM_STATE_DIR/events.jsonl"
 eval_corpus=${NATIVE_MODEL_EVAL_CORPUS:-"$HOME/.coherence-network/form-train-runs/translation-corpus/heldout.jsonl"}
 eval_items=${NATIVE_MODEL_EVAL_ITEMS:-5}
+prompt_prefix=${NATIVE_MODEL_EVAL_PROMPT_PREFIX:-"Translate from English to Brazilian Portuguese. Return only the translation:"}
 
 temp_dir=$(nm_new_temp_dir)
 before="$temp_dir/artifacts-before"
@@ -112,8 +113,7 @@ while IFS= read -r case_json
 do
     source_text=$(printf '%s' "$case_json" | jq -r '.task')
     answer_text=$(printf '%s' "$case_json" | jq -r '.answer')
-    printf 'Translate from English to Brazilian Portuguese. Return only the translation: %s\n' \
-        "$source_text" > "$prompt_file"
+    printf '%s %s\n' "$prompt_prefix" "$source_text" > "$prompt_file"
     printf '%s\n' "$answer_text" > "$expected_file"
     call_model "$candidate_tag" candidate
     call_model "$incumbent_tag" incumbent
