@@ -33,8 +33,10 @@ right misleading. The repository keeps only the exact hash, permission
 metadata, and structural paraphrase. The complete surface needs a revocable
 carrier before publication.
 
-Hati Suci's sacred, cultural, or community-use restrictions remain a separate
-gate. The next actionable reply is `none` or the exact conditions.
+Hati Suci's sacred, cultural, or community-use restrictions remained a
+separate gate. The initiating member answered that gate with `none`, so no
+additional restriction is recorded. The next actionable reply concerns
+benefit and reciprocity.
 
 ## Witness
 
@@ -45,7 +47,7 @@ Observed on 2026-07-26:
 -> 1023
 
 ./fkwu --src learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043003001, 3041003001, 2, nothing, 0, 1, 3044003001, 20260726]
+-> [3043007001, 3041003001, 6, nothing, 0, 1, 3044007001, 20260726]
 
 ./fkwu --src cognition/tests/core-text-36-layer-ingest-band.fk
 -> [nothing, 0, 1, 3040004007, [6, 3, 2, 2], 6, 4, 36,

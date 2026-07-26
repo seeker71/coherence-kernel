@@ -30,20 +30,22 @@ names Hati Suci as the household's first field.
 - Satsang role `both`: receive/witness and select/approve;
 - first exact material selected: Giles' "The Light Hubs";
 - member-witnessed scoped permission from Giles;
-- current action: record sacred, cultural, or community-use restrictions;
-- three open terms after exact-material and scoped-permission recording:
-  cultural restrictions, benefit/reciprocity, and freshness/review;
+- no additional sacred, cultural, or community-use restrictions;
+- current action: record benefit and reciprocity;
+- two open terms after the cultural-boundary answer:
+  benefit/reciprocity and freshness/review;
 - a four-arm acknowledgement: `nothing | 0 | 1 | node`.
 
-The current acknowledgement is the cultural-restrictions action node, not a
-generic review marker. Its offer asks Satsang to record `none` or exact sacred,
-cultural, or community-use boundaries, with four replies: no observed
-statement, decline/closed, record the boundary, or counteroffer a condition.
+The current acknowledgement is the benefit/reciprocity action node, not a
+generic review marker. Its offer asks Satsang to record `none` or an exact
+return, with four replies: no observed statement, decline without acceptable
+return, record the return, or counteroffer an arrangement.
 
 Source row 13 identifies "The Light Hubs" by exact SHA-256 as metadata-only.
 No Hati Suci text segment was added. The recorded withdrawal right cannot be
-honestly implemented by publishing the body into immutable Git; community
-restrictions and a revocable carrier still cross the gate before it enters.
+honestly implemented by publishing the body into immutable Git. The cultural
+restriction term is confirmed, but benefit/freshness and a revocable carrier
+still cross the gate before the complete surface enters.
 
 ## Witness
 
@@ -59,7 +61,7 @@ Observed on 2026-07-26:
 
 ./fkwu --src \
   learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043003001, 3041003001, 2, nothing, 0, 1, 3044003001, 20260726]
+-> [3043007001, 3041003001, 6, nothing, 0, 1, 3044007001, 20260726]
 ```
 
 The structural source was expanded as documented preludes + recipe + band
@@ -82,8 +84,9 @@ node --experimental-strip-types walkers/ts/main.ts /dev/stdin
 The relationship, Satsang recognition, both-role evidence, and selection of
 "The Light Hubs" are the initiating member's reports. The same member reports
 Giles' scoped permission; no direct signed author artifact is fabricated.
-Giles' full name, cultural restrictions, benefit, review date, revocable
-carrier, original date, and original carrier remain open.
+The same member reports no additional cultural restrictions. Giles' full name,
+benefit, review date, revocable carrier, original date, and original carrier
+remain open.
 
 ## Closing
 
