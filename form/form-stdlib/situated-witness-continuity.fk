@@ -1,0 +1,384 @@
+; situated-witness-continuity.fk — shared-secret continuity for situated
+; evidence endorsements.
+;
+; A binding is:
+;   ["situated-witness-binding-v1", witness, key-id, epoch, key-bytes]
+;
+; An entry is:
+;   ["situated-witness-entry-v1", witness, key-id, epoch, sequence,
+;    predecessor-seal, endorsement, seal]
+;
+; The seal is HMAC-SHA256 over a length-prefixed message binding the entry
+; identity, sequence, predecessor, and every field of the endorsement,
+; including all four lens coordinates. Entries for one
+; [witness, key-id, epoch] must arrive in sequence from zero. Sequence zero
+; names "root"; every later entry names the exact preceding seal.
+;
+; This is a shared-secret possession and continuity membrane, not a
+; public-key identity signature. Anyone holding a verification key can mint.
+; A new epoch is an independent root: cross-epoch key rotation/delegation,
+; public trust roots, secret storage/retrieval, constant-time comparison,
+; persistence, and transport remain outside this cell. Key material is caller
+; supplied and never returned in an outcome.
+;
+; Only after every supplied entry verifies does swc-admit project its
+; endorsements into situated-evidence-authority.fk. The existing authority
+; membrane still owns freshness, exactness, distinctness, self-source
+; exclusion, quorum, and equivocation.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hmac-sha256.fk form-stdlib/core-word-inquiry.fk form-stdlib/situated-lens-conclusion.fk form-stdlib/situated-evidence-authority.fk
+; witnessed: 2026-07-26 -> 2147483647 four-way;
+; exact fkwu 2147483647
+
+(do
+    (defn swc-binding-tag () "situated-witness-binding-v1")
+    (defn swc-entry-tag () "situated-witness-entry-v1")
+    (defn swc-message-domain () "situated-witness-continuity-v1")
+    (defn swc-seal-prefix () "hmac-sha256:")
+    (defn swc-root-predecessor () "root")
+
+    (defn swc-reverse-loop (values out)
+        (if (eq (len values) 0) out
+            (swc-reverse-loop (tail values) (cons (head values) out))))
+    (defn swc-reverse (values)
+        (swc-reverse-loop values (list)))
+    (defn swc-string-bytes-loop (value index out)
+        (if (ge index (str_len value))
+            (swc-reverse out)
+            (swc-string-bytes-loop value (add index 1)
+                (cons (str-byte-at value index) out))))
+    (defn swc-string-bytes (value)
+        (swc-string-bytes-loop value 0 (list)))
+    (defn swc-hex-digit (value)
+        (substring "0123456789abcdef" value (add value 1)))
+    (defn swc-hex-loop (bytes out)
+        (if (eq (len bytes) 0) out
+            (do
+                (let byte (head bytes))
+                (swc-hex-loop (tail bytes)
+                    (str_concat out
+                        (str_concat
+                            (swc-hex-digit (div byte 16))
+                            (swc-hex-digit (mod byte 16))))))))
+    (defn swc-hex (bytes)
+        (swc-hex-loop bytes ""))
+    (defn swc-field (value)
+        (str_concat (int_to_str (str_len value))
+            (str_concat ":" value)))
+    (defn swc-fields (values)
+        (if (eq (len values) 0) ""
+            (str_concat (swc-field (head values))
+                (swc-fields (tail values)))))
+    (defn swc-int-string (value)
+        (int_to_str value))
+
+    (defn swc-lower-hex-byte? (byte)
+        (if (or (and (ge byte 48) (le byte 57))
+                (and (ge byte 97) (le byte 102))) 1 0))
+    (defn swc-lower-hex-loop (value index)
+        (if (ge index 76) 1
+            (if (eq (swc-lower-hex-byte?
+                        (str-byte-at value index)) 1)
+                (swc-lower-hex-loop value (add index 1))
+                0)))
+    (defn swc-canonical-seal? (seal)
+        (if (and (eq (str_len seal) 76)
+                 (str_eq (substring seal 0 12)
+                    (swc-seal-prefix)))
+            (swc-lower-hex-loop seal 12)
+            0))
+    (defn swc-key-bytes-valid? (bytes)
+        (if (eq (len bytes) 0) 1
+            (if (and (ge (head bytes) 0)
+                     (le (head bytes) 255))
+                (swc-key-bytes-valid? (tail bytes))
+                0)))
+
+    (defn swc-binding (witness key-id epoch key-bytes)
+        (list (swc-binding-tag) witness key-id epoch key-bytes))
+    (defn swc-b-witness (binding) (nth binding 1))
+    (defn swc-b-key-id (binding) (nth binding 2))
+    (defn swc-b-epoch (binding) (nth binding 3))
+    (defn swc-b-key (binding) (nth binding 4))
+    (defn swc-binding-valid? (binding)
+        (if (and (eq (len binding) 5)
+            (and (str_eq (nth binding 0) (swc-binding-tag))
+            (and (ge (swc-b-witness binding) 2)
+            (and (ge (swc-b-key-id binding) 2)
+            (and (eq (cwi-time? (swc-b-epoch binding)) 1)
+            (and (eq (hmac-sha256-key32-valid?
+                        (swc-b-key binding)) 1)
+                 (eq (swc-key-bytes-valid?
+                        (swc-b-key binding)) 1))))))) 1 0))
+    ; One witness has one key in an epoch. Key ids and key material are also
+    ; unique across the supplied set, so one shared secret cannot be relabeled
+    ; as two witness nodes and satisfy a distinct-witness quorum twice.
+    (defn swc-binding-conflicts? (a b)
+        (if (or
+                (and (eq (swc-b-witness a) (swc-b-witness b))
+                     (eq (swc-b-epoch a) (swc-b-epoch b)))
+                (or (eq (swc-b-key-id a) (swc-b-key-id b))
+                    (value_eq (swc-b-key a) (swc-b-key b)))) 1 0))
+    (defn swc-binding-independent-of? (binding others)
+        (if (eq (len others) 0) 1
+            (if (eq (swc-binding-conflicts?
+                        binding (head others)) 1)
+                0
+                (swc-binding-independent-of?
+                    binding (tail others)))))
+    (defn swc-bindings-valid? (bindings)
+        (if (eq (len bindings) 0) 1
+            (if (and (eq (swc-binding-valid?
+                            (head bindings)) 1)
+                     (eq (swc-binding-independent-of?
+                            (head bindings) (tail bindings)) 1))
+                (swc-bindings-valid? (tail bindings))
+                0)))
+
+    (defn swc-entry
+        (witness key-id epoch sequence predecessor endorsement seal)
+        (list (swc-entry-tag) witness key-id epoch sequence predecessor
+            endorsement seal))
+    (defn swc-e-witness (entry) (nth entry 1))
+    (defn swc-e-key-id (entry) (nth entry 2))
+    (defn swc-e-epoch (entry) (nth entry 3))
+    (defn swc-e-sequence (entry) (nth entry 4))
+    (defn swc-e-predecessor (entry) (nth entry 5))
+    (defn swc-e-endorsement (entry) (nth entry 6))
+    (defn swc-e-seal (entry) (nth entry 7))
+    (defn swc-entry-offender (entry)
+        (if (ge (len entry) 2) (nth entry 1) 0))
+    (defn swc-predecessor-shape-valid? (entry)
+        (if (eq (swc-e-sequence entry) 0)
+            (if (str_eq (swc-e-predecessor entry)
+                    (swc-root-predecessor)) 1 0)
+            (swc-canonical-seal?
+                (swc-e-predecessor entry))))
+    (defn swc-entry-valid? (entry)
+        (if (and (eq (len entry) 8)
+            (and (str_eq (nth entry 0) (swc-entry-tag))
+            (and (ge (swc-e-witness entry) 2)
+            (and (ge (swc-e-key-id entry) 2)
+            (and (eq (cwi-time? (swc-e-epoch entry)) 1)
+            (and (eq (cwi-time? (swc-e-sequence entry)) 1)
+            (and (eq (sea-endorsement-valid?
+                        (swc-e-endorsement entry)) 1)
+            (and (eq (swc-e-witness entry)
+                        (sea-e-witness
+                            (swc-e-endorsement entry)))
+            (and (eq (swc-predecessor-shape-valid? entry) 1)
+                 (eq (swc-canonical-seal?
+                        (swc-e-seal entry)) 1)))))))))) 1 0))
+
+    (defn swc-entry-message (entry)
+        (do
+            (let endorsement (swc-e-endorsement entry))
+            (let lens (sea-e-lens endorsement))
+            (swc-fields
+                (list
+                    (swc-message-domain)
+                    (swc-int-string (swc-e-witness entry))
+                    (swc-int-string (swc-e-key-id entry))
+                    (swc-int-string (swc-e-epoch entry))
+                    (swc-int-string (swc-e-sequence entry))
+                    (swc-e-predecessor entry)
+                    (swc-int-string (sea-e-witness endorsement))
+                    (swc-int-string (sea-e-source endorsement))
+                    (swc-int-string (sea-e-time endorsement))
+                    (swc-int-string (cwi-l-point lens))
+                    (swc-int-string (cwi-l-direction lens))
+                    (swc-int-string (cwi-l-intensity lens))
+                    (swc-int-string (cwi-l-focus lens))
+                    (swc-int-string (sea-e-candidate endorsement))
+                    (swc-int-string (sea-e-push endorsement))
+                    (swc-int-string
+                        (sea-e-witnessed-at endorsement))))))
+    (defn swc-hmac-seal (key-bytes message)
+        (str_concat (swc-seal-prefix)
+            (swc-hex
+                (hmac-sha256 key-bytes
+                    (swc-string-bytes message)))))
+    (defn swc-seal-entry
+        (binding sequence predecessor endorsement)
+        (do
+            (let unsigned
+                (swc-entry
+                    (swc-b-witness binding)
+                    (swc-b-key-id binding)
+                    (swc-b-epoch binding)
+                    sequence predecessor endorsement ""))
+            (swc-entry
+                (swc-b-witness binding)
+                (swc-b-key-id binding)
+                (swc-b-epoch binding)
+                sequence predecessor endorsement
+                (swc-hmac-seal
+                    (swc-b-key binding)
+                    (swc-entry-message unsigned)))))
+
+    (defn swc-binding-matches-entry? (binding entry)
+        (if (and (eq (swc-b-witness binding)
+                     (swc-e-witness entry))
+            (and (eq (swc-b-key-id binding)
+                     (swc-e-key-id entry))
+                 (eq (swc-b-epoch binding)
+                     (swc-e-epoch entry)))) 1 0))
+    (defn swc-binding-count (bindings entry)
+        (if (eq (len bindings) 0) 0
+            (add
+                (swc-binding-matches-entry?
+                    (head bindings) entry)
+                (swc-binding-count (tail bindings) entry))))
+    (defn swc-find-binding (bindings entry)
+        (if (eq (len bindings) 0) (list)
+            (if (eq (swc-binding-matches-entry?
+                        (head bindings) entry) 1)
+                (head bindings)
+                (swc-find-binding (tail bindings) entry))))
+    (defn swc-same-chain? (a b)
+        (if (and (eq (swc-e-witness a) (swc-e-witness b))
+            (and (eq (swc-e-key-id a) (swc-e-key-id b))
+                 (eq (swc-e-epoch a) (swc-e-epoch b)))) 1 0))
+    (defn swc-prior-chain-count (prior entry)
+        (if (eq (len prior) 0) 0
+            (add (swc-same-chain? (head prior) entry)
+                (swc-prior-chain-count (tail prior) entry))))
+    (defn swc-prior-sequence-count (prior entry sequence)
+        (if (eq (len prior) 0) 0
+            (add
+                (if (and (eq (swc-same-chain?
+                                (head prior) entry) 1)
+                         (eq (swc-e-sequence
+                                (head prior)) sequence)) 1 0)
+                (swc-prior-sequence-count
+                    (tail prior) entry sequence))))
+    (defn swc-prior-max-sequence-loop (prior entry current)
+        (if (eq (len prior) 0) current
+            (swc-prior-max-sequence-loop
+                (tail prior) entry
+                (if (and (eq (swc-same-chain?
+                                (head prior) entry) 1)
+                         (gt (swc-e-sequence
+                                (head prior)) current))
+                    (swc-e-sequence (head prior))
+                    current))))
+    (defn swc-prior-max-sequence (prior entry)
+        (swc-prior-max-sequence-loop prior entry -1))
+    (defn swc-prior-seal-at (prior entry sequence)
+        (if (eq (len prior) 0) ""
+            (if (and (eq (swc-same-chain?
+                            (head prior) entry) 1)
+                     (eq (swc-e-sequence
+                            (head prior)) sequence))
+                (swc-e-seal (head prior))
+                (swc-prior-seal-at
+                    (tail prior) entry sequence))))
+    (defn swc-predecessor-valid? (entry prior)
+        (if (eq (swc-e-sequence entry) 0)
+            (if (and (str_eq (swc-e-predecessor entry)
+                        (swc-root-predecessor))
+                     (eq (swc-prior-chain-count
+                            prior entry) 0)) 1 0)
+            (do
+                (let expected-sequence
+                    (sub (swc-e-sequence entry) 1))
+                (if (and
+                        (eq (swc-prior-max-sequence
+                                prior entry) expected-sequence)
+                        (and
+                            (eq (swc-prior-sequence-count
+                                    prior entry expected-sequence) 1)
+                            (str_eq
+                                (swc-e-predecessor entry)
+                                (swc-prior-seal-at
+                                    prior entry
+                                    expected-sequence)))) 1 0))))
+
+    ; Verification status:
+    ;   0 verified
+    ;   1 malformed binding set or entry
+    ;   2 no exact caller-supplied binding
+    ;   3 keyed seal mismatch
+    ;   4 sequence/predecessor break or fork
+    (defn swc-entry-status (entry bindings prior)
+        (if (eq (swc-entry-valid? entry) 0) 1
+            (if (not (eq (swc-binding-count
+                            bindings entry) 1)) 2
+                (if (eq (swc-predecessor-valid?
+                            entry prior) 0) 4
+                    (do
+                        (let binding
+                            (swc-find-binding bindings entry))
+                        (if (str_eq
+                                (swc-e-seal entry)
+                                (swc-hmac-seal
+                                    (swc-b-key binding)
+                                    (swc-entry-message entry)))
+                            0
+                            3))))))
+    (defn swc-verification
+        (status verified-count offender)
+        (list status verified-count offender))
+    (defn swc-v-status (verification) (nth verification 0))
+    (defn swc-v-verified-count (verification)
+        (nth verification 1))
+    (defn swc-v-offender (verification)
+        (nth verification 2))
+    (defn swc-verify-loop
+        (entries bindings prior verified-count)
+        (if (eq (len entries) 0)
+            (swc-verification 0 verified-count 0)
+            (do
+                (let entry (head entries))
+                (let status
+                    (swc-entry-status entry bindings prior))
+                (if (eq status 0)
+                    (swc-verify-loop
+                        (tail entries) bindings
+                        (cons entry prior)
+                        (add verified-count 1))
+                    (swc-verification
+                        status verified-count
+                        (swc-entry-offender entry))))))
+    (defn swc-verify (entries bindings)
+        (if (eq (swc-bindings-valid? bindings) 0)
+            (swc-verification 1 0 0)
+            (swc-verify-loop
+                entries bindings (list) 0)))
+    (defn swc-endorsements (entries)
+        (if (eq (len entries) 0) (list)
+            (cons (swc-e-endorsement (head entries))
+                (swc-endorsements (tail entries)))))
+
+    ; Composite outcome:
+    ;   [admitted, continuity-status, verified-count, offender, authority]
+    (defn swc-outcome
+        (admitted status verified-count offender authority)
+        (list admitted status verified-count offender authority))
+    (defn swc-o-admitted (outcome) (nth outcome 0))
+    (defn swc-o-status (outcome) (nth outcome 1))
+    (defn swc-o-verified-count (outcome) (nth outcome 2))
+    (defn swc-o-offender (outcome) (nth outcome 3))
+    (defn swc-o-authority (outcome) (nth outcome 4))
+    (defn swc-admit (offered entries bindings policy now)
+        (do
+            (let verification (swc-verify entries bindings))
+            (if (not (eq (swc-v-status verification) 0))
+                (swc-outcome 0
+                    (swc-v-status verification)
+                    (swc-v-verified-count verification)
+                    (swc-v-offender verification)
+                    (sea-outcome 0 1 0 0 0 0 0))
+                (do
+                    (let authority
+                        (sea-admit offered
+                            (swc-endorsements entries)
+                            policy now))
+                    (swc-outcome
+                        (sea-o-admitted authority)
+                        0
+                        (swc-v-verified-count verification)
+                        0
+                        authority)))))
+
+    0)
