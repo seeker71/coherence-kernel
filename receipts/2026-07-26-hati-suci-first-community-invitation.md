@@ -28,13 +28,16 @@ names Hati Suci as the household's first field.
 - member-reported relationship evidence;
 - member-reported Satsang-circle recognition;
 - Satsang role `both`: receive/witness and select/approve;
-- community response pending;
+- current action: Satsang names the first exact material;
 - nine explicit pending terms;
 - a four-arm acknowledgement: `nothing | 0 | 1 | node`.
 
-The current acknowledgement is a review node. It is neither refusal nor
-authorization. Synthetic fixtures prove that the membrane can return every
-arm, but those fixtures are tests and make no claim about Hati Suci's answer.
+The current acknowledgement is the exact-material action node, not a generic
+review marker. Its offer names Satsang as the responsible circle and exposes
+four replies: no observed candidate, decline, approve the exact candidate, or
+counteroffer another candidate/condition. Synthetic fixtures prove that the
+membrane can return every arm, but those fixtures are tests and make no claim
+about Hati Suci's answer.
 
 No Hati Suci source row or text segment was added to
 `learn/core-text-source-registry.fk`. A complete community confirmation only
@@ -51,6 +54,10 @@ Observed on 2026-07-26:
 ./fkwu --src \
   learn/tests/hati-suci-core-text-invitation-structure-four-way-band.fk
 -> 127
+
+./fkwu --src \
+  learn/tests/hati-suci-core-text-next-action-witness.fk
+-> [3043001001, 3041003001, 0, nothing, 0, 1, 3044001001, 20260726]
 ```
 
 The structural source was expanded as documented preludes + recipe + band
@@ -71,8 +78,8 @@ node --experimental-strip-types walkers/ts/main.ts /dev/stdin
 ## Honest boundary
 
 The relationship, Satsang recognition, and both-role evidence are the
-initiating member's reports. The invitation can now be addressed to Satsang
-for witness and decision. Satsang's actual response, exact text selection,
+initiating member's reports. The invitation now asks Satsang for one exact
+first material. Satsang's actual response and exact text selection,
 cultural restrictions, attribution, translation permission, downstream/AI
 use, benefit, withdrawal, and review date all remain pending.
 
