@@ -22,10 +22,11 @@ publish the complete transmission.
 - benefit/reciprocity term 6 became the next action and was later answered
   `none`;
 - freshness/review term 8 was later answered `none`;
-- final Satsang ratification is now the next action.
+- final Satsang ratification was later answered `yes`;
+- revocable-carrier selection or explicit withholding is now the next action.
 
-The next question is now: does the Hati Suci Satsang circle ratify the complete
-nine-term packet?
+The next question is now: should the complete surface remain unpublished, or
+which revocable carrier should hold it?
 
 ## Witness
 
@@ -36,7 +37,7 @@ Observed on 2026-07-26:
 -> 4095
 
 ./fkwu --src learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043010001, 3041003001, 9, nothing, 0, 1, 3044010001, 20260726]
+-> [3043011001, 3041003001, 10, nothing, 0, 1, 3044011001, 20260726]
 
 ./fkwu --src cognition/tests/core-text-36-layer-ingest-band.fk
 -> [nothing, 0, 1, 3040004007, [6, 3, 2, 2], 6, 4, 36,

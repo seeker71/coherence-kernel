@@ -33,10 +33,11 @@ paraphrase, and source protocol—not the full transmission body.
   community-use restrictions.
 - The initiating member records no additional benefit/reciprocity condition.
 - Freshness is recorded as no scheduled review, with re-witness on change.
-- The live action moved beyond the nine terms to final Satsang ratification.
+- The initiating member reports final Satsang ratification.
+- The live action moved to revocable-carrier selection or explicit withholding.
 - The source body remains unadmitted: it is metadata-only, immutable Git
-  cannot honor withdrawal, final ratification remains open, and public segment
-  count is zero.
+  cannot honor withdrawal, no carrier is selected, and public segment count is
+  zero.
 - Reported place, visionary, phenomenological, and practical claim planes stay
   distinct.
 
@@ -55,7 +56,7 @@ Observed on 2026-07-26:
 -> 4095
 
 ./fkwu --src learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043010001, 3041003001, 9, nothing, 0, 1, 3044010001, 20260726]
+-> [3043011001, 3041003001, 10, nothing, 0, 1, 3044011001, 20260726]
 
 ./fkwu --src cognition/tests/core-text-36-layer-ingest-band.fk
 -> [nothing, 0, 1, 3040004007, [6, 3, 2, 2], 6, 4, 36,
