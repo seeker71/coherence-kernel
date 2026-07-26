@@ -30,3 +30,33 @@ ts at a recipe answering 99 → **2** (WALKER-SUSPECT); tell the runner fkwu=99 
 → **1** (FKWU-SUSPECT). The verdict tracks actual agreement among the host-exec'd values, not the
 literal. Full evidence: `receipts/2026-06-29-kernel-self-proves-four-way.md` and
 `receipts/2026-07-25-all-four-arms-are-here.md`.
+
+## Running an ordinary band on the other three arms
+
+Two things fkwu does for you that no walker does. Both look like the band is broken when they bite,
+so they are written down here rather than rediscovered.
+
+**1. The walkers do not read `; preludes:`.** fkwu walks the closure itself; a walker takes the
+closure explicitly, in dependency order, on the command line.
+
+```
+$ walker form-stdlib/tests/hex-band.fk                                  walk: unbound function "hex-encode"
+$ walker core.fk form-ontology-loader.fk str-byte-at.fk hex.fk \
+         form-stdlib/tests/hex-band.fk                                  14
+```
+
+**2. The walkers do not know `import`.** It is an fkwu statement; every other arm answers
+`walk: unbound identifier "import"` and stops. To cross a band that uses it, strip the `import`
+lines and hand the same files over as the closure.
+
+Worked twice on 2026-07-26, against the two bands that had just landed on main claiming a four-way
+witness — both claims hold, and neither band runs on a walker as written:
+
+```
+cognition/tests/identity-space-structure-four-way-band.fk        127  on fkwu, go, rust, ts
+cognition/tests/family-constellation-findings-four-way-band.fk  4095  on fkwu, go, rust, ts
+```
+
+So a header that says *"witnessed on fkwu + Go + Rust + TypeScript"* is about the **recipe**, not
+about the band file — the file itself only runs as written on fkwu. Worth saying plainly in a
+header, so the next person reproducing it knows which of the two they are being told.
