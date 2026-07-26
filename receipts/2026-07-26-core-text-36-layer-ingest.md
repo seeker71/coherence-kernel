@@ -105,7 +105,7 @@ Observed on 2026-07-26:
 
 ```text
 ./fkwu --src cognition/tests/core-text-36-layer-ingest-band.fk
--> [nothing, 0, 1, 3040004007, [6, 2, 2, 2], 6, 4, 36,
+-> [nothing, 0, 1, 3040004007, [6, 2, 2, 3], 6, 4, 36,
     3040007001, nothing, 14, 4095]
 
 ./fkwu --src cognition/tests/core-text-36-layer-structure-four-way-band.fk
@@ -129,8 +129,9 @@ node --experimental-strip-types walkers/ts/main.ts /dev/stdin
 
 The first community relationship door now lives in
 `learn/hati-suci-core-text-invitation.fk`: Hati Suci is pilot 1 through an
-initiating member, currently acknowledged by a review node. The source
-registry remains unchanged at twelve rows; no Hati Suci text has been
+initiating member. Source 13 now identifies Giles' "The Light Hubs" by exact
+hash as Satsang's selected first material. The registry has thirteen rows and
+the new row is unresolved/metadata-only; no Hati Suci text body has been
 admitted.
 
 Neighboring laws remained present:
