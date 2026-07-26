@@ -22,13 +22,19 @@ trap 'rm -rf "$work_dir"' EXIT
 
 printf '%s\n' '(fkc-emit-universal)' > "$work_dir/emit.fk"
 "$GO_KERNEL" "${FOURTH_EMIT_CHAIN[@]}" "$work_dir/emit.fk" \
-    > form-stdlib/bootstrap/fkwu-uni.c \
+    > "$work_dir/fkwu-uni.raw.c" \
     2> "$work_dir/uni.err"
 
-if [[ ! -s form-stdlib/bootstrap/fkwu-uni.c ]]; then
+if [[ ! -s "$work_dir/fkwu-uni.raw.c" ]]; then
     sed -n '1,12p' "$work_dir/uni.err" >&2
     exit 1
 fi
+
+# Component emitter strings may meet at a space immediately before a newline.
+# Normalize only line-end whitespace so the committed witness passes the same
+# whitespace gate as handwritten sources without changing emitted C tokens.
+sed 's/[[:space:]]*$//' "$work_dir/fkwu-uni.raw.c" \
+    > form-stdlib/bootstrap/fkwu-uni.c
 
 fourth_emit_chain_stamp > form-stdlib/bootstrap/fkwu-uni.stamp
 
