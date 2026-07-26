@@ -89,11 +89,13 @@ The band carries three independent windows:
 
 ## Witness
 
-Direct source:
+Actual framebuffer carrier:
 
 ```
-./fkwu --src observe/tests/situated-lens-conclusion-cycle-band.fk
--> 131071
+cd form
+./validate.sh ../observe/tests/situated-lens-conclusion-cycle-band.fk
+-> 131071 (fkwu-only lane)
+-> 1 ok, 0 divergent
 ```
 
 Four-way:
