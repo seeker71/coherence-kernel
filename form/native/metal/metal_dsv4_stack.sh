@@ -51,6 +51,7 @@ CACHE="$ROOT/native/metal/.metallib-cache"
 TOKEN="${FORM_DS4_PROMPT_TOKEN:-671}"
 KV_CAP="${FORM_DS4_KV_CAP:-4}"
 KV_SEQUENCE="${FORM_DS4_KV_SEQUENCE:-0}"
+KV_STEPS="${FORM_DS4_KV_STEPS:-2}"
 POS_A=0
 POS_B=7
 
@@ -183,6 +184,7 @@ NVIEWS $NVIEWS
 TOKEN $TOKEN
 KV_CAP $KV_CAP
 KV_SEQUENCE $KV_SEQUENCE
+KV_STEPS $KV_STEPS
 NLAYERS $WANT_LAYERS
 N_EMBD $N_EMBD
 N_HEAD $N_HEAD
@@ -323,7 +325,7 @@ let outHcFn = T("OUT_HC_FN"), outHcScale = T("OUT_HC_SCALE"), outHcBase = T("OUT
 let outNorm = T("OUT_NORM"), outWeight = T("OUT_WEIGHT")
 let step = I("STEP"), viewLimit = I("VIEWLIMIT"), nviews = I("NVIEWS"), token = I("TOKEN")
 let nLayers = I("NLAYERS")
-let kvCap = I("KV_CAP"), kvSequence = I("KV_SEQUENCE") == 1
+let kvCap = I("KV_CAP"), kvSequence = I("KV_SEQUENCE") == 1, kvSteps = I("KV_STEPS")
 let nEmbd = I("N_EMBD"), nHead = I("N_HEAD"), headDim = I("HEAD_DIM"), nRot = I("N_ROT"), oRank = I("O_RANK")
 let nHc = I("N_HC"), hcIters = I("HC_ITERS"), nUsed = I("N_USED"), nFf = I("N_FF")
 let posA = I("POS_A"), posB = I("POS_B")
@@ -785,7 +787,7 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     return gpuMx8(w.ob, lo, w.ob.rows, w.ob.cols)
 }
 
-func runLayer(_ il: Int, _ pos: Int, _ residHc: MTLBuffer) -> LayerOut {
+func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) -> LayerOut {
     let w = LW[il]
     let (attnCur, attnSplit) = hcPre(residHc, w.haf, w.has, w.hab)
     let attnOut = mlaBlock(attnCur, pos, il)
@@ -801,7 +803,7 @@ func runLayer(_ il: Int, _ pos: Int, _ residHc: MTLBuffer) -> LayerOut {
         // forepick (row 867): the six experts come from an I32 TABLE READ on the token id, and the
         // router only WEIGHTS them. A top-k here would be the layer-3-and-up recipe applied to a hash layer.
         let ht = w.ht!
-        var t32 = UInt32(token), nu = UInt32(nUsed)
+        var t32 = UInt32(currentToken), nu = UInt32(nUsed)
         enc(pHashSel, nUsed, 8) { c in c.setBuffer(views[ht.idx], offset: ht.inner, index: 0)
                                        c.setBuffer(idsBuf, offset: 0, index: 1)
                                        c.setBytes(&t32, length: 4, index: 2); c.setBytes(&nu, length: 4, index: 3) }
@@ -879,16 +881,25 @@ func sentinelledCopy(_ a: [Float]) -> MTLBuffer {
     return b
 }
 
-// ---- the token's embedding, broadcast to the four streams: THE stack's input (ds4.c:9764) ----
-let rowOff = token * nEmbd * 2
-let x0 = sentinelled(nEmbd)
-do { var b64 = UInt64(emb.inner + rowOff), c32 = UInt32(nEmbd)
-     enc(pEmb, nEmbd, 256) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x0, offset: 0, index: 1)
-                                  c.setBytes(&b64, length: 8, index: 2); c.setBytes(&c32, length: 4, index: 3) } }
-let residHc0 = sentinelled(hcDim)
-do { var a = UInt32(nHc), b = UInt32(nEmbd)
-     enc(pHcBcast, hcDim, 256) { c in c.setBuffer(x0, offset: 0, index: 0); c.setBuffer(residHc0, offset: 0, index: 1)
-                                      c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) } }
+// ---- a token's embedding, broadcast to the four streams: THE stack's input (ds4.c:9764) ----
+// Token identity is an argument, not process-global state: autoregressive feedback must change both
+// this row and the hashed routers' I32 table row on the following step.
+func embedToken(_ currentToken: Int) -> MTLBuffer {
+    guard currentToken >= 0 && currentToken < emb.rows else {
+        print("FAIL token \(currentToken) outside embedding vocabulary 0..<\(emb.rows)"); exit(1)
+    }
+    let rowOff = currentToken * nEmbd * 2
+    let x = sentinelled(nEmbd)
+    do { var b64 = UInt64(emb.inner + rowOff), c32 = UInt32(nEmbd)
+         enc(pEmb, nEmbd, 256) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x, offset: 0, index: 1)
+                                      c.setBytes(&b64, length: 8, index: 2); c.setBytes(&c32, length: 4, index: 3) } }
+    let resid = sentinelled(hcDim)
+    do { var a = UInt32(nHc), b = UInt32(nEmbd)
+         enc(pHcBcast, hcDim, 256) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
+                                          c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) } }
+    return resid
+}
+let residHc0 = embedToken(token)
 
 // the WITNESS layers: the first layer of every distinct group, plus layer 1. Those get the full gate set
 // (the routing decision, the six weights, the first expert's whole path, the two accumulations); every
@@ -914,12 +925,47 @@ var ulpRouteSplit: [Int] = []
 var injNd: [Int: [Double]] = [:]
 var msPerLayer: [Int: [Double]] = [:]
 
+// The native exit head is reusable inside the same Metal lifetime as the stack state. Its result can
+// therefore become the next step's embedding and hash-routing token without a serialization membrane.
+func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: Float) {
+    let flat = sentinelled(hcDim)
+    do { var n = UInt32(hcDim), e0 = eps
+         enc(pHcRmsNw, 1, 1) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
+                                    c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
+    let pre = gpuF16mv(outHcFn, flat)
+    let headw = sentinelled(nHc)
+    do { var a = UInt32(nHc), e0 = hcEps
+         enc(pHcHeadw, nHc, 32) { c in c.setBuffer(pre, offset: 0, index: 0)
+                                       c.setBuffer(views[outHcScale.idx], offset: outHcScale.inner, index: 1)
+                                       c.setBuffer(views[outHcBase.idx], offset: outHcBase.inner, index: 2)
+                                       c.setBuffer(headw, offset: 0, index: 3)
+                                       c.setBytes(&a, length: 4, index: 4); c.setBytes(&e0, length: 4, index: 5) } }
+    let collapsed = sentinelled(nEmbd)
+    do { var a = UInt32(nHc), b = UInt32(nEmbd)
+         enc(pHcWsum, nEmbd, 256) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(headw, offset: 0, index: 1)
+                                         c.setBuffer(collapsed, offset: 0, index: 2)
+                                         c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4) } }
+    let normed = gpuRmsnorm(collapsed, nEmbd, outNorm)
+    let logits = gpuMx8(outWeight, normed, outWeight.rows, outWeight.cols)
+    let lp = fp(logits, outWeight.rows)
+    var arg = 0, best = -Float.infinity, finite = 0
+    for i in 0..<outWeight.rows where lp[i].isFinite {
+        finite += 1
+        if lp[i] > best { best = lp[i]; arg = i }
+    }
+    let hp = fp(headw, nHc)
+    check(finite == outWeight.rows && arg >= 0 && arg < outWeight.rows,
+      "NATIVE MODEL TOKEN \(label): HC weights \(Array(UnsafeBufferPointer(start: hp, count: nHc))) collapsed the real stack state; output_norm and the \(outWeight.rows)-row MXFP8 vocabulary projection emitted token_id=\(arg), logit=\(best)",
+      "native exit head \(label): finite logits \(finite)/\(outWeight.rows), argmax \(arg)")
+    return (arg, best)
+}
+
 func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
     var resid = residHc0
     for il in 0..<nLayers {
         let w = LW[il]
         let t0 = Date()
-        let R = runLayer(il, pos, resid)
+        let R = runLayer(il, pos, token, resid)
         let ms = Date().timeIntervalSince(t0) * 1000.0
         msPerLayer[il, default: []].append(ms)
         let tag = "blk.\(il) [gate/up \(w.gx.type) down \(w.dx.type) n_exp \(w.nExpStack) \(w.hashed ? "hash" : "top-k") rope \(w.ratio == 0 ? "plain" : "compressed(\(w.ratio))")]"
@@ -1011,7 +1057,7 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
         do {
             let (inR, inN) = il == 0 ? (residHc0, hcDim) : oracleBuf(oraDir, il-1, "out_hc")
             if inN == hcDim {
-                let J = runLayer(il, pos, inR)
+                let J = runLayer(il, pos, token, inR)
                 let ref = readOracle(oraDir, il, "out_hc")
                 let (ok, nd, _, _, mr, nn, ds, mn, mx, l2) = cmpOra(fp(J.outHc, hcDim), ref, [], 3e-5)
                 injNd[il, default: []].append(nd)
@@ -1035,35 +1081,46 @@ let tB = Date(); runStack(posB, oraDirB, perDirB); let wallB = Date().timeInterv
 
 // ── two consecutive real-stack positions over persistent per-layer KV arenas ─────────────────────
 if kvSequence {
+    guard kvSteps >= 2 && kvSteps < kvCap else {
+        print("FAIL KV_STEPS must be at least 2 and below KV_CAP so a sentinel frontier remains"); exit(1)
+    }
     kvArenas = (0..<nLayers).map { _ in sentinelled(kvCap * headDim) }
     useGrowingKv = true
-    var firstFinal: [Float] = [], secondFinal: [Float] = [], firstRow: [UInt32] = []
-    for pos in 0..<2 {
-        var resid = residHc0
-        for il in 0..<nLayers { resid = runLayer(il, pos, resid).outHc }
+    var firstFinal: [Float] = [], lastFinal: [Float] = [], firstRow: [UInt32] = []
+    var currentToken = token
+    var emitted: [Int] = []
+    for pos in 0..<kvSteps {
+        let inputToken = currentToken
+        var resid = embedToken(inputToken)
+        for il in 0..<nLayers { resid = runLayer(il, pos, inputToken, resid).outHc }
+        let exit = nativeExitHead(resid, "feedback step \(pos), input_token=\(inputToken)")
+        emitted.append(exit.token)
+        currentToken = exit.token
         let rp = fp(resid, hcDim)
         let vals = (0..<hcDim).map { rp[$0] }
         if pos == 0 {
             firstFinal = vals
             let kp = fp(kvArenas[0], kvCap * headDim)
             firstRow = (0..<headDim).map { kp[$0].bitPattern }
-        } else {
-            secondFinal = vals
         }
+        lastFinal = vals
     }
     let kp = fp(kvArenas[0], kvCap * headDim)
-    var historyExact = 0, row1Written = 0, frontier = 0, stateDiff = 0
+    var historyExact = 0, written = 0, frontier = 0, stateDiff = 0
     for j in 0..<headDim {
         if kp[j].bitPattern == firstRow[j] { historyExact += 1 }
-        if kp[headDim + j].isFinite { row1Written += 1 }
-        if kp[2 * headDim + j].isNaN { frontier += 1 }
+        if kp[(kvSteps - 1) * headDim + j].isFinite { written += 1 }
+        if kp[kvSteps * headDim + j].isNaN { frontier += 1 }
     }
-    for i in 0..<min(firstFinal.count, secondFinal.count) {
-        if firstFinal[i] != secondFinal[i] { stateDiff += 1 }
+    for i in 0..<min(firstFinal.count, lastFinal.count) {
+        if firstFinal[i] != lastFinal[i] { stateDiff += 1 }
     }
-    check(historyExact == headDim && row1Written == headDim && frontier == headDim && stateDiff > 0,
-      "GROWING KV, TWO REAL STACK STEPS: layer 0 retained \(historyExact)/\(headDim) row-0 bits, wrote \(row1Written)/\(headDim) row-1 values, left \(frontier)/\(headDim) row-2 sentinels, and the final HC state changed in \(stateDiff)/\(hcDim) entries",
-      "growing KV: history \(historyExact)/\(headDim), row1 \(row1Written)/\(headDim), frontier \(frontier)/\(headDim), state diff \(stateDiff)/\(hcDim)")
+    check(historyExact == headDim && written == headDim && frontier == headDim && stateDiff > 0,
+      "GROWING KV, \(kvSteps) REAL STACK STEPS: layer 0 retained \(historyExact)/\(headDim) row-0 bits, wrote \(written)/\(headDim) values in row \(kvSteps-1), left \(frontier)/\(headDim) row-\(kvSteps) sentinels, and the final HC state changed in \(stateDiff)/\(hcDim) entries",
+      "growing KV: history \(historyExact)/\(headDim), last row \(written)/\(headDim), frontier \(frontier)/\(headDim), state diff \(stateDiff)/\(hcDim)")
+    check(emitted.count == kvSteps && emitted.allSatisfy { $0 >= 0 && $0 < emb.rows },
+      "BOUNDED AUTOREGRESSIVE TOKEN FEEDBACK (\(kvSteps) steps, no EOS claim): \(emitted); each emitted token became the next step's exact embedding row and every hashed router's token",
+      "bounded autoregressive token feedback did not produce \(kvSteps) in-vocabulary tokens: \(emitted)")
     useGrowingKv = false
 }
 
@@ -1083,36 +1140,8 @@ check(posDiff > 0 && layerFail == 0,
 var tokenByPos: [Int: Int] = [:]
 for pos in [posA, posB] {
     guard let resid = finalByPos[pos] else { continue }
-    let flat = sentinelled(hcDim)
-    do { var n = UInt32(hcDim), e0 = eps
-         enc(pHcRmsNw, 1, 1) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
-                                    c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
-    let pre = gpuF16mv(outHcFn, flat)
-    let headw = sentinelled(nHc)
-    do { var a = UInt32(nHc), e0 = hcEps
-         enc(pHcHeadw, nHc, 32) { c in c.setBuffer(pre, offset: 0, index: 0)
-                                       c.setBuffer(views[outHcScale.idx], offset: outHcScale.inner, index: 1)
-                                       c.setBuffer(views[outHcBase.idx], offset: outHcBase.inner, index: 2)
-                                       c.setBuffer(headw, offset: 0, index: 3)
-                                       c.setBytes(&a, length: 4, index: 4); c.setBytes(&e0, length: 4, index: 5) } }
-    let collapsed = sentinelled(nEmbd)
-    do { var a = UInt32(nHc), b = UInt32(nEmbd)
-         enc(pHcWsum, nEmbd, 256) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(headw, offset: 0, index: 1)
-                                         c.setBuffer(collapsed, offset: 0, index: 2)
-                                         c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4) } }
-    let normed = gpuRmsnorm(collapsed, nEmbd, outNorm)
-    let logits = gpuMx8(outWeight, normed, outWeight.rows, outWeight.cols)
-    let lp = fp(logits, outWeight.rows)
-    var arg = 0, best = -Float.infinity, finite = 0
-    for i in 0..<outWeight.rows where lp[i].isFinite {
-        finite += 1
-        if lp[i] > best { best = lp[i]; arg = i }
-    }
-    tokenByPos[pos] = arg
-    let hp = fp(headw, nHc)
-    check(finite == outWeight.rows && arg >= 0 && arg < outWeight.rows,
-      "NATIVE MODEL TOKEN pos \(pos): HC weights \(Array(UnsafeBufferPointer(start: hp, count: nHc))) collapsed the real layer-43 state; output_norm and the \(outWeight.rows)-row MXFP8 vocabulary projection emitted token_id=\(arg), logit=\(best)",
-      "native exit head pos \(pos): finite logits \(finite)/\(outWeight.rows), argmax \(arg)")
+    let exit = nativeExitHead(resid, "pos \(pos)")
+    tokenByPos[pos] = exit.token
 }
 
 if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(gpuFirstError ?? "unknown") ===") }
