@@ -56,8 +56,8 @@ At the 2026-07-26 witness epoch, the intended seed partition is:
   - Giles' "The Light Hubs" has exact member-witnessed permission and no
     additional cultural or benefit conditions; freshness has no scheduled
     review and re-witnesses on change. Member-witnessed Satsang ratification
-    opens the protocol; the source remains metadata-only and awaits a
-    revocable carrier.
+    opens the protocol; a numeric neutral semantic kernel is present while the
+    exact source surface still awaits a revocable carrier.
 - 2 refusals:
   - FirstVoices forbids scraping, merging, and republication without authority;
   - SuttaCentral requests that its content not be used to create generative-AI
@@ -136,12 +136,13 @@ The first community relationship door now lives in
 `learn/hati-suci-core-text-invitation.fk`: Hati Suci is pilot 1 through an
 initiating member. Source 13 now identifies Giles' "The Light Hubs" by exact
 hash as Satsang's selected first material. The registry has thirteen rows.
-Member-witnessed scoped permission moves the new metadata-only row from
-unresolved to review. The initiating member then records no additional
-cultural restriction or benefit condition. Freshness is then recorded as no
-scheduled review, with re-witness on change. Final ratification is then
-member-witnessed, opening the protocol. Metadata-only state still prevents
-admission, and no Hati Suci text body enters.
+Member-witnessed scoped permission moves the new row from unresolved to review.
+The initiating member then records no additional cultural restriction or
+benefit condition. Freshness is then recorded as no scheduled review, with
+re-witness on change. Final ratification is then member-witnessed, opening the
+protocol. A numeric neutral semantic kernel now enters, but the absent exact
+source surface still prevents text admission, and no Hati Suci text body
+enters.
 
 Neighboring laws remained present:
 

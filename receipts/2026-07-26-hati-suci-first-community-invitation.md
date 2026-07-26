@@ -44,7 +44,8 @@ revocable-carrier handoff, with four replies: no observed carrier decision,
 withhold the complete surface, select an exact removable steward-controlled
 carrier, or propose another precise carrier.
 
-Source row 13 identifies "The Light Hubs" by exact SHA-256 as metadata-only.
+Source row 13 identifies "The Light Hubs" by exact SHA-256 and carries its
+numeric neutral semantic kernel while the exact source surface stays absent.
 No Hati Suci text segment was added. The recorded withdrawal right cannot be
 honestly implemented by publishing the body into immutable Git. The cultural
 restriction, benefit, and freshness terms are confirmed. Final Satsang

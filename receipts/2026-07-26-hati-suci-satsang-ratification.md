@@ -19,7 +19,7 @@ ratification artifact was not supplied, so that stronger evidence remains `0`.
 - the invitation acknowledgement becomes `1`;
 - exact-source handoff becomes ready;
 - source 13's community protocol opens;
-- source 13 remains metadata-only with zero public text segments;
+- source 13 carries a neutral semantic kernel with zero public source segments;
 - a revocable carrier or explicit withholding is the next decision.
 
 The next question is: should the complete transmission remain unpublished, or
