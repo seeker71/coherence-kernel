@@ -21,10 +21,11 @@ publish the complete transmission.
 - source 13 remains metadata-only with zero public text segments;
 - benefit/reciprocity term 6 became the next action and was later answered
   `none`;
-- freshness/review term 8 is now the next action.
+- freshness/review term 8 was later answered `none`;
+- final Satsang ratification is now the next action.
 
-The next question is now: when should the permission be reviewed or
-re-witnessed?
+The next question is now: does the Hati Suci Satsang circle ratify the complete
+nine-term packet?
 
 ## Witness
 
@@ -35,7 +36,7 @@ Observed on 2026-07-26:
 -> 4095
 
 ./fkwu --src learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043009001, 3041003001, 8, nothing, 0, 1, 3044009001, 20260726]
+-> [3043010001, 3041003001, 9, nothing, 0, 1, 3044010001, 20260726]
 
 ./fkwu --src cognition/tests/core-text-36-layer-ingest-band.fk
 -> [nothing, 0, 1, 3040004007, [6, 3, 2, 2], 6, 4, 36,

@@ -54,8 +54,10 @@ At the 2026-07-26 witness epoch, the intended seed partition is:
   - the 1908 English Popol Vuh mediation requires K'iche' community review;
   - StoryWeaver requires an exact book and complete creator attribution;
   - Giles' "The Light Hubs" has exact member-witnessed permission and no
-    additional cultural or benefit conditions, but freshness remains under
-    community review; it is metadata-only and awaits a revocable carrier.
+    additional cultural or benefit conditions; freshness has no scheduled
+    review and re-witnesses on change. Final Satsang ratification remains under
+    community review; the source is metadata-only and awaits a revocable
+    carrier.
 - 2 refusals:
   - FirstVoices forbids scraping, merging, and republication without authority;
   - SuttaCentral requests that its content not be used to create generative-AI
@@ -136,8 +138,9 @@ initiating member. Source 13 now identifies Giles' "The Light Hubs" by exact
 hash as Satsang's selected first material. The registry has thirteen rows.
 Member-witnessed scoped permission moves the new metadata-only row from
 unresolved to review. The initiating member then records no additional
-cultural restriction or benefit condition; freshness review and metadata-only
-state still prevent admission, and no Hati Suci text body has entered.
+cultural restriction or benefit condition. Freshness is then recorded as no
+scheduled review, with re-witness on change. Final ratification and
+metadata-only state still prevent admission, and no Hati Suci text body enters.
 
 Neighboring laws remained present:
 

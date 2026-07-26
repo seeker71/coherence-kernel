@@ -32,20 +32,22 @@ names Hati Suci as the household's first field.
 - member-witnessed scoped permission from Giles;
 - no additional sacred, cultural, or community-use restrictions;
 - no additional benefit or reciprocity condition;
-- current action: record freshness/review;
-- one open term after the reciprocity answer: freshness/review;
+- no scheduled review, with re-witness on change;
+- all nine terms complete;
+- current action: final Satsang ratification;
 - a four-arm acknowledgement: `nothing | 0 | 1 | node`.
 
-The current acknowledgement is the freshness/review action node, not a generic
-review marker. Its offer asks Satsang to record a date/cadence, `on change`, or
-no scheduled review, with four replies: no observed statement,
-expiry/nonrenewal, record the rule, or counteroffer a schedule.
+The current acknowledgement is a concrete final-ratification action node, not
+a generic review marker. Its four replies are: no observed ratification,
+decline/require changes, ratify the complete packet, or counteroffer a precise
+amendment.
 
 Source row 13 identifies "The Light Hubs" by exact SHA-256 as metadata-only.
 No Hati Suci text segment was added. The recorded withdrawal right cannot be
 honestly implemented by publishing the body into immutable Git. The cultural
-restriction and benefit terms are confirmed, but freshness and a revocable
-carrier still cross the gate before the complete surface enters.
+restriction, benefit, and freshness terms are confirmed. Final Satsang
+ratification and a revocable carrier still cross the gate before the complete
+surface enters.
 
 ## Witness
 
@@ -61,7 +63,7 @@ Observed on 2026-07-26:
 
 ./fkwu --src \
   learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043009001, 3041003001, 8, nothing, 0, 1, 3044009001, 20260726]
+-> [3043010001, 3041003001, 9, nothing, 0, 1, 3044010001, 20260726]
 ```
 
 The structural source was expanded as documented preludes + recipe + band
@@ -85,8 +87,9 @@ The relationship, Satsang recognition, both-role evidence, and selection of
 "The Light Hubs" are the initiating member's reports. The same member reports
 Giles' scoped permission; no direct signed author artifact is fabricated.
 The same member reports no additional cultural restriction or benefit
-condition. Giles' full name, review date, revocable carrier, original date,
-and original carrier remain open.
+condition. No scheduled review is required; change triggers re-witness. Giles'
+full name, revocable carrier, original date, and original carrier remain open.
+Final Satsang ratification has not yet been reported.
 
 ## Closing
 
