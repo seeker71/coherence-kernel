@@ -22,7 +22,7 @@
 # every division and remainder, is not slower than v2, which has none). The divisions were never the
 # cost; a FLAT INDEX makes the field selector g a per-weight runtime value, so q6k_pow4(g) becomes a
 # runtime divisor — a real integer divide, per weight, on a GPU that has no integer divide unit —
-# and a three-way switch lands in the innermost loop. Corpus row 846, asktoll.
+# and a three-way switch lands in the innermost loop. Corpus row 849, asktoll.
 #
 # THE FLOOR THIS INSTRUMENT SITS ON, and it is a real one. Apple ships NO AGX assembly printer:
 # `applegpu-nt -S` answers "Plugin interface not implemented: AIRNTEmitAssembly", and metal-objdump
@@ -103,6 +103,8 @@ printf '(ft-emit-msl)\n' > "$work/e.fk"
 awk '/^MSL$/{d=1;next} /^END$/{d=0;next} d{print}' "$work/msl.out" > "$work/ours.metal"
 grep -q 'kernel void form_q6k_matvec_lane_f32' "$work/ours.metal" || {
     echo "FAIL  the body did not emit form_q6k_matvec_lane_f32"; exit 1; }
+grep -q 'kernel void form_q6k_matvec_slot_f32' "$work/ours.metal" || {
+    echo "FAIL  the body did not emit form_q6k_matvec_slot_f32"; exit 1; }
 echo "  $(wc -c < "$work/ours.metal" | tr -d ' ') bytes, every character authored by a .fk cell"
 
 # ── ggml's kernel. Verbatim; the declarations around it carry their provenance line by line. ──
@@ -289,6 +291,55 @@ kernel void isa_q6k_v3_f32 (device const uchar* qb [[buffer(0)]], device const f
     float s = metal::simd_sum(sumf);
     if (lane == 0) y[r] = s;
 }
+// V4 — STONE 13. The SHIPPED slot map plus llama.cpp's nr0 REGISTER BLOCKING: one SIMD group folds
+// TWO weight rows so the 16 activation values are loaded once and amortized across both. Stone 10
+// attributed the residual ~1.35x to loads-per-MAC (2.125 vs ggml's 1.5625; 2.125/1.5625 = 1.36), and
+// this is the lever that closes exactly that term. It is measured HERE, in C, and not authored into
+// the body, because nr0 was tried once before ON THE FLAT MAP and made things monotonically worse
+// (corpus row 835, boundborrow). A lever that was inert under one binding constraint says nothing
+// about another, in either direction — so it is re-measured rather than re-argued.
+// Assumes rows % 2 == 0 (true of every llama3.2:3b shape) and cols % 256 == 0.
+kernel void isa_q6k_v4_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    uint r0 = (gid / 32u) * 2u; if (r0 >= rows) return;
+    uint nb = cols / 256u;
+    uint rowstride = nb * 210u;
+    uint rb0 = r0 * rowstride;
+    int tid = int(lane) / 2, ix = q6k_mod(int(lane), 2);
+    int ip = tid / 8, il = q6k_mod(tid, 8), l0 = 4 * il;
+    int is = 8 * ip + l0 / 16;
+    int y_offset = 128 * ip + l0, q_offset_l = 64 * ip + l0, q_offset_h = 32 * ip + l0;
+    float sumf[2] = {0.0f, 0.0f};
+    for (uint i = uint(ix); i < nb; i += 2) {
+        device const float* yv = x + i * 256u + uint(y_offset);
+        float yl[16];
+        for (int l = 0; l < 4; ++l) {
+            yl[4*l + 0] = yv[l +  0]; yl[4*l + 1] = yv[l + 32];
+            yl[4*l + 2] = yv[l + 64]; yl[4*l + 3] = yv[l + 96];
+        }
+        for (int row = 0; row < 2; ++row) {
+            uint b = rb0 + uint(row) * rowstride + i * 210u;
+            device const uchar* q1 = qb + b + uint(q_offset_l);
+            device const uchar* q2 = q1 + 32;
+            device const uchar* qh = qb + b + 128u + uint(q_offset_h);
+            device const uchar* sc = qb + b + 192u + uint(is);
+            float d = q6k_f16(int(qb[b + 208u]) + 256 * int(qb[b + 209u]));
+            float4 sums = float4(0.0f);
+            for (int l = 0; l < 4; ++l) {
+                int a1 = int(q1[l]), a2 = int(q2[l]), ah = int(qh[l]);
+                sums[0] += yl[4*l + 0] * float(q6k_mod(a1, 16) + q6k_mod(ah, 4) * 16 - 32);
+                sums[1] += yl[4*l + 1] * float(q6k_mod(a2, 16) + q6k_mod(ah / 4, 4) * 16 - 32);
+                sums[2] += yl[4*l + 2] * float(a1 / 16 + q6k_mod(ah / 16, 4) * 16 - 32);
+                sums[3] += yl[4*l + 3] * float(a2 / 16 + (ah / 64) * 16 - 32);
+            }
+            sumf[row] += d * (sums[0] * float(q6k_s8(int(sc[0]))) + sums[1] * float(q6k_s8(int(sc[2])))
+                            + sums[2] * float(q6k_s8(int(sc[4]))) + sums[3] * float(q6k_s8(int(sc[6]))));
+        }
+    }
+    for (int row = 0; row < 2; ++row) {
+        float sv = metal::simd_sum(sumf[row]);
+        if (lane == 0 && (r0 + uint(row)) < rows) y[r0 + uint(row)] = sv;
+    }
+}
 VARIANTS
 cat "$work/ours.metal" "$work/tail.metal" > "$work/variants.metal"
 
@@ -310,6 +361,17 @@ let blobPath = a[1], oursPath = a[2], theirsPath = a[3]
 let off = Int(a[4])!, cols = Int(a[5])!, rows = Int(a[6])!, iters = Int(a[7])!, label = a[8]
 let dev = MTLCreateSystemDefaultDevice()!
 let q = dev.makeCommandQueue()!
+// axiom-4: a command buffer meets us through cb.status/cb.error; reading bY1/bY2 back
+// without consulting them is breach. Both readback buffers are freshly zeroed, so if the
+// GPU never runs, y1 and y2 are BOTH zero and the equality gate below reports max|Δ|=0 —
+// a perfect agreement of two silences (corpus row 826, aporon). Counted here, refused below.
+var gpuErrors = 0
+var gpuFirstError: String? = nil
+func checkCB(_ cb: MTLCommandBuffer) {
+    if let e = cb.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(e)" } }
+    if cb.status != .completed { gpuErrors += 1
+        if gpuFirstError == nil { gpuFirstError = "command buffer status \(cb.status.rawValue), not .completed" } }
+}
 let nb01 = (cols / 256) * 210
 let nbytes = nb01 * rows
 let fh = FileHandle(forReadingAtPath: blobPath)!
@@ -330,6 +392,7 @@ let libOurs = try libFrom(oursPath), libTheirs = try libFrom(theirsPath)
 // every dispatch of a run is encoded into ONE command buffer, so the per-dispatch command-buffer
 // round trip (~0.2 ms on this host, larger than several of these kernels) is not being timed.
 var pOurs = try dev.makeComputePipelineState(function: libOurs.makeFunction(name: "form_q6k_matvec_lane_f32")!)
+var oursNR0 = 1                          // v4 folds nr0 rows per SIMD group, so it needs 1/nr0 groups
 func runOurs(_ n: Int) -> Double {
     var r = UInt32(rows), c = UInt32(cols)
     let t0 = Date()
@@ -340,10 +403,10 @@ func runOurs(_ n: Int) -> Double {
     e.setBytes(&r, length: 4, index: 3); e.setBytes(&c, length: 4, index: 4)
     let tg = min(256, pOurs.maxTotalThreadsPerThreadgroup / 32 * 32)
     for _ in 0..<n {
-        e.dispatchThreads(MTLSize(width: rows * 32, height: 1, depth: 1),
+        e.dispatchThreads(MTLSize(width: ((rows + oursNR0 - 1) / oursNR0) * 32, height: 1, depth: 1),
                           threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
     }
-    e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    e.endEncoding(); cb.commit(); cb.waitUntilCompleted(); checkCB(cb)
     return Date().timeIntervalSince(t0) / Double(n) * 1000.0
 }
 struct Kargs {
@@ -378,15 +441,19 @@ func runTheirs(_ p: MTLComputePipelineState, _ nsg: Int, _ n: Int) -> Double {
         e.dispatchThreadgroups(MTLSize(width: ntg, height: 1, depth: 1),
                                threadsPerThreadgroup: MTLSize(width: 32, height: nsg, depth: 1))
     }
-    e.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    e.endEncoding(); cb.commit(); cb.waitUntilCompleted(); checkCB(cb)
     return Date().timeIntervalSince(t0) / Double(n) * 1000.0
 }
 print("SHAPE \(label) rows=\(rows) cols=\(cols) MACs=\(rows*cols) qbytes=\(nbytes)")
 var results = [(String, Double)]()
-// the body's kernel FIRST and the fastest variant LAST, so the agreement check below compares the
-// variant that is being proposed against ggml, not whichever one happened to run
-for nm in ["form_q6k_matvec_lane_f32", "isa_q6k_v1_f32", "isa_q6k_v3_f32", "isa_q6k_v2_f32"] {
+// The body's OLD kernel first and the body's SHIPPED kernel LAST, so the agreement check below is a
+// claim about what actually decodes tokens — not about a variant that lives only in this file.
+// STONE 13 shipped v3 as form_q6k_matvec_slot_f32 (qk-matvec-slot.fk), so the equality below is now
+// the body's own emitted kernel against llama.cpp's, and it is an EQUALITY, not an epsilon.
+for nm in ["form_q6k_matvec_lane_f32", "isa_q6k_v1_f32", "isa_q6k_v2_f32", "isa_q6k_v3_f32",
+           "isa_q6k_v4_f32", "form_q6k_matvec_slot_f32"] {
     pOurs = try dev.makeComputePipelineState(function: libOurs.makeFunction(name: nm)!)
+    oursNR0 = (nm == "isa_q6k_v4_f32") ? 2 : 1
     _ = runOurs(1)
     var t = [Double]()
     for _ in 0..<3 { t.append(runOurs(iters)) }        // three runs, the minimum reported
@@ -414,21 +481,41 @@ for i in 0..<rows {
     if d > maxAbs { maxAbs = d }
     if m > 1e-6 { maxRel = max(maxRel, d / m) }
 }
-// V2 and ggml sum the same terms in the same association, so this is an EQUALITY claim, not an
-// epsilon: any nonzero difference here means the transcription of ggml's kernel is not faithful.
-print("  AGREE v2 vs ggml over all \(rows) rows: max|Δ|=\(String(format: "%.3e", maxAbs))  max rel=\(String(format: "%.3e", maxRel))")
-if maxAbs != 0.0 { print("FAIL  v2 and ggml do not agree exactly — the transcription is suspect") }
+// The SHIPPED slot kernel and ggml sum the same terms in the same association — the slot map reaches
+// the same bytes and the body's q6k_mod/division arithmetic yields the same integers as ggml's bit
+// operations — so this is an EQUALITY claim, not an epsilon. Any nonzero difference means the body's
+// decode kernel is not what it says it is.
+// GATE 0, asked of the equality claim itself: max|Δ|=0 is what a CORRECT run prints AND what
+// two never-written buffers print. The equality is only meaningful if a kernel actually wrote
+// bY1 and bY2 and no command buffer errored. A right-fold matvec over these non-degenerate
+// inputs is non-zero for essentially every row, so "all zero" is the GPU-did-not-run signature.
+var nzY1 = 0, nzY2 = 0
+for i in 0..<rows { if y1[i] != 0.0 { nzY1 += 1 }; if y2[i] != 0.0 { nzY2 += 1 } }
+let liveAgree = gpuErrors == 0 && nzY1 > 0 && nzY2 > 0
+if gpuErrors > 0 { print("  command buffer ERROR: \(gpuFirstError ?? "unknown")") }
+print("  AGREE form_q6k_matvec_slot_f32 vs ggml over all \(rows) rows: max|Δ|=\(String(format: "%.3e", maxAbs))  max rel=\(String(format: "%.3e", maxRel))  (nonzero rows: ours \(nzY1)/\(rows), ggml \(nzY2)/\(rows))")
+if !liveAgree {
+    print("FAIL  the equality is not witnessed: \(gpuErrors) cb error(s), ours nonzero \(nzY1), ggml nonzero \(nzY2).")
+    print("      max|Δ|=0 here would be two SILENCES agreeing, not two kernels — a residency condition, not a match.")
+    print("=== VERDICT FAIL — the GPU did not fully run; no equality was witnessed ==="); exit(1)
+}
+if maxAbs != 0.0 { print("FAIL  the shipped slot kernel and ggml do not agree exactly"); print("=== VERDICT FAIL ==="); exit(1) }
 for (nm, mv) in results {
     print("  RATIO \(nm.padding(toLength: 26, withPad: " ", startingAt: 0)) / ggml(nsg=\(bestNsg)) = \(String(format: "%.2f", mv / best))x")
 }
+print("=== VERDICT PASS — shipped slot kernel equals ggml bit-for-bit, both kernels witnessed live ===")
 SWIFT
 xcrun swiftc -O "$work/bench.swift" -o "$work/bench" 2>"$work/sw.err" || {
     echo "FAIL  carrier did not build"; cat "$work/sw.err"; exit 1; }
 
 # ── three real shapes, because no rate here is one point pretending to be a line (row 827) ──
+# each shape is its own witnessed equality; if any bench cannot witness two live kernels it
+# exits nonzero and the harness fails rather than reporting a benched silence as a match.
 echo
-"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal" 331055328 8192   3072 50 blk.0.ffn_down
+"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal" 331055328 8192   3072 50 blk.0.ffn_down     || { echo "=== VERDICT FAIL — blk.0.ffn_down shape ==="; exit 1; }
 echo
-"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal" 392409312 3072   1024 50 blk.0.attn_v
+"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal" 392409312 3072   1024 50 blk.0.attn_v       || { echo "=== VERDICT FAIL — blk.0.attn_v shape ==="; exit 1; }
 echo
-"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal"   7837920 3072 128256 10 token_embd.output
+"$work/bench" "$BLOB" "$work/variants.metal" "$work/theirs.metal"   7837920 3072 128256 10 token_embd.output  || { echo "=== VERDICT FAIL — token_embd.output shape ==="; exit 1; }
+echo
+echo "=== VERDICT PASS — 3 shapes, each an equality witnessed against two live kernels ==="

@@ -1,0 +1,100 @@
+; dsv4-stack-real.fk — STONE 39: STACKING the 43 HETEROGENEOUS DeepSeek-V4-Flash layers.
+;
+; Stone 37 built ONE complete layer (metal_dsv4_layer_join.sh, 31 gates) on blk.0's weights. Stacking is
+; NOT that layer run 43 times. The file's own tensor table says the layers differ on FOUR independent
+; per-layer decisions, and a blk.0-shaped stack is right-shaped, right-magnitude and silently wrong:
+;
+;   1. THE EXPERT COUNT IS NOT THE METADATA'S. deepseek4.expert_count = 256 and it is true only for
+;      layers 0, 1, 2. Layers 3..42 carry ffn_gate_exps with dim[2] = 192 — REAP-25 pruning — while the
+;      router still projects 256 logits at EVERY layer (ffn_gate_inp is [4096, 256] throughout). The
+;      per-layer count is the tensor's own dim[2], never the KV's.
+;      HOW THE FILE KEEPS THE TWO CONSISTENT, read from the file and not assumed: exp_probs_b.bias
+;      carries -1e30 on exactly the 64 pruned indices 192..255 at every pruned layer, so biased top-k
+;      can never reach one. The pruning is carried in the BIAS, not in the router's width.
+;   2. THE EXPERT TYPES CHANGE PER LAYER, and independently for gate/up vs down, across six groups:
+;        gate/up 40  down 16  n_exp 256  hash   layers 0, 1
+;        gate/up 40  down 40  n_exp 256  hash   layer  2
+;        gate/up 40  down 40  n_exp 192  topk   layers 3, 4, 7, 8
+;        gate/up 40  down 16  n_exp 192  topk   layers 5, 6, 10, 11, 12
+;        gate/up 16  down 16  n_exp 192  topk   layers 9, 13..25, 27, 28, 30, 32, 34..38, 41
+;        gate/up 16  down 40  n_exp 192  topk   layers 26, 29, 31, 33, 39, 40, 42
+;      The dispatch reads the TYPE off each tensor. Both matvecs already exist and are already proven;
+;      what is new is that the choice of which one is a per-layer READ.
+;   3. ROUTING CHANGES AT LAYER 3 (deepseek4.hash_layer_count = 3). Layers 0..2 carry ffn_gate_tid2eid
+;      and route by an I32 table read on the TOKEN id (forepick, corpus row 867). Layers 3+ carry
+;      exp_probs_b.bias and route by BIASED top-k while weighting by the UNBIASED prob. That asymmetry
+;      is the whole recipe (ds4.c:10665) and this band adds the kernel for it.
+;   4. ROPE GOES COMPRESSED AT LAYER 2 — and it needs NO NEW KERNEL. In rope_tail_ext_inplace
+;      (ds4.c:10102) the YaRN magnitude cancels exactly, because rope_tail_layer_inplace (:10175) sets
+;      attn_factor to the reciprocal of the very factor the helper then multiplies back in; and the
+;      angle reduces to theta = theta_extrap * (freq_scale*(1 - ramp_k) + ramp_k), a PER-PAIR SCALE of
+;      the same theta_extrap. form_mla_rope_f32 already takes a per-pair freqs[] and computes
+;      pos * freqs[k]. So a compressed layer is the existing kernel with a different freqs[], computed
+;      once per layer on the host from the file's own KV.
+;
+; THE EVIDENCE CLASS, per surface (twinblind, corpus row 868):
+;   CHOOSING  — the per-layer routing regime, the biased-top-k selection with unbiased weighting, WHICH
+;               expert-type kernel a layer's gate/up and down take, the compressed-RoPE reduction, and
+;               how the four hyper-connection streams compose from one layer to the next. A self-carve
+;               inherits every one of those on both sides. They are proven against the rented fp64 ds4.c
+;               transcription in form-stdlib/tests/dsv4-mla-core-oracle.py's new `stack` mode, which
+;               carries its own state through all 43 layers and shares no code with this band.
+;   CANONICAL — the MXFP4 / IQ2_XXS / MXFP8 / F16 decodes and their matvecs, unchanged from Stones
+;               33/34/35 and re-witnessed by the oracle's own independent decode.
+;
+; halfrent (corpus row 870) DEEPENS here, and it is said out loud. ds4.c is a valid reference for this
+; architecture and cannot run this file: beyond the two FFN refusals Stone 37 named, tensor validation
+; itself refuses — tensor_expect_routed_expert (:4641, called at :4892/:5003/:5054) demands
+; dim[2] == DS4_N_EXPERT == 256 and exits(1) on every layer 3..42, which carry 192. What is rented is
+; the ORDER and the SCALARS; the arithmetic for these types is re-derived on both sides.
+;
+; preludes: form-stdlib/core.fk native/metal/dsv4-layer-real.fk
+;
+; Proven by: native/metal/metal_dsv4_stack.sh (every dispatch sentinelled before and cb.error/cb.status
+; checked after; every layer's output compared against the rented oracle's own layer output).
+
+(do
+    ; --- the one new kernel the stack needs: BIASED TOP-K selection with UNBIASED weighting.
+    ; ds4.c:10665 layer_topk_selected_experts_from_probs, transcribed including topk_desc's (:10630)
+    ; exact insertion order and its tie rule (strict >, so the EARLIER index keeps its place).
+    ;
+    ; THE ASYMMETRY IS LOAD-BEARING and it is why this cannot be the hash kernel with a sort bolted on:
+    ; the bias enters the SELECTION score and never the WEIGHT. weight[j] = probs[selected[j]] is the
+    ; UNBIASED prob. A kernel that weighted by the biased score would be right-shaped, right-magnitude
+    ; and silently wrong — exactly the failure mode the rented oracle exists to catch.
+    ;
+    ; probs[] uses the SAME stable softplus as form_dsv4_hash_weights (ds4.c:10424): z above 20 passes
+    ; through, z below -20 is exp(z), otherwise ln(1+exp(z)). dm_exp / dm_ln / dm_sqrt are the enclosing
+    ; unit's spine, so there is exactly ONE softplus and ONE sqrt on the device.
+    ;
+    ; The fixed arrays cap ne<=256 and nused<=8; above that the kernel WRITES NOTHING, so an overrun is
+    ; a refusal the sentinel catches, never a silent stomp (aporon).
+    (defn dsv4-topk-weights-body ()
+        "kernel void form_dsv4_topk_weights (device const float* logits [[buffer(0)]], device const float* bias [[buffer(1)]], device uint* ids [[buffer(2)]], device float* wts [[buffer(3)]], device float* probs [[buffer(4)]], constant uint& ne [[buffer(5)]], constant uint& nused [[buffer(6)]], constant float& wscale [[buffer(7)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; if (ne > 256u) return; if (nused > 8u) return; if (nused > ne) return; float pr[256]; float sc[256]; int idx[8]; for (uint i = 0u; i < ne; ++i) { float z = logits[i]; float sp = (z > 20.0f) ? z : ((z < -20.0f) ? dm_exp(z) : dm_ln(1.0f + dm_exp(z))); float p = dm_sqrt(sp); pr[i] = p; probs[i] = p; sc[i] = p + bias[i]; } for (uint j = 0u; j < nused; ++j) { idx[j] = -1; } for (uint i = 0u; i < ne; ++i) { for (uint j = 0u; j < nused; ++j) { if (idx[j] < 0 || sc[i] > sc[idx[j]]) { for (uint mm = nused - 1u; mm > j; --mm) { idx[mm] = idx[mm - 1u]; } idx[j] = int(i); break; } } } float s0 = 0.0f; for (uint j = 0u; j < nused; ++j) { s0 = s0 + pr[idx[j]]; } float s = (s0 < 0.00006103515625f) ? 0.00006103515625f : s0; for (uint j = 0u; j < nused; ++j) { ids[j] = uint(idx[j]); wts[j] = pr[idx[j]] / s * wscale; } } ")
+
+    ; --- the stack's FFN translation unit: Stone 37's unit (the dm_ spine once, the clamped SwiGLU,
+    ; scale, axpy, the hash table read and the hash weights) with the biased-top-k kernel appended.
+    ; ONE unit, so the two routing regimes cannot drift apart in their softplus or their sqrt.
+    (defn dsv4-stack-ffn-unit ()
+        (do
+            (print "MSL")
+            (print (str_concat (dsv4-moe-msl-unit)
+                    (str_concat (dsv4-hash-select-body)
+                     (str_concat (dsv4-hash-weights-body) (dsv4-topk-weights-body)))))
+            (print "END")
+            0))
+
+    ; ================= the per-layer decisions, as the body reads them =================
+    ; Named here so the recipe is in the body and not only in the carrier. Each takes what the file's own
+    ; table gave and returns the decision; none of them takes a default from blk.0.
+
+    ; the per-layer expert count is dim[2] of the gate stack, NEVER deepseek4.expert_count.
+    (defn dsv4-layer-expert-count (gate-d2) gate-d2)
+    ; the router's width is the logit projection's own out-dim, and it does NOT follow the stack.
+    (defn dsv4-router-width (gate-inp-d1) gate-inp-d1)
+    ; the routing regime: a layer that CARRIES the table routes by it (ds4.c:10745 tests the pointer).
+    (defn dsv4-layer-routes-by-table? (has-tid2eid) has-tid2eid)
+    ; RoPE: any nonzero compress ratio means the long-context base and scale (ds4.c:10155/:10162).
+    (defn dsv4-layer-rope-compressed? (ratio) (not (eq ratio 0)))
+
+    0)

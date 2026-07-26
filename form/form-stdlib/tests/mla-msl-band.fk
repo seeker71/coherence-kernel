@@ -1,0 +1,117 @@
+; mla-msl-band.fk — the read-back gate for mla-msl.fk. Verdict 63 when all six claims cross.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk form-stdlib/mla-msl.fk form-stdlib/mla-demo.fk
+;
+; WHAT THIS BAND PROVES (the q6k-msl.fk read-back discipline, in Form). The emitted MSL is a STRING; a
+; transposed offset or a flipped fold direction compiles and runs and produces plausible numbers. So the
+; band does not trust the string — it re-derives each kernel's arithmetic in Form, STRUCTURED THE WAY
+; THE C IS (the two-pass sink softmax, the DESCENDING dot that mirrors tb-dot's right fold, the ASCENDING
+; sum-of-squares), and demands it equal mla-attn.fk's recipe BIT FOR BIT (fp64). Because the association
+; is identical, the honest bar is exact equality, not a tolerance: a mirror that flips a fold breaks the
+; 0.0. The structural index maps (the tail split width, the grouped-output group width) are tied to the
+; recipe's own OUTPUT, not asserted in the abstract.
+;
+; WHAT IT DOES NOT PROVE (aporon): the f32 GPU numbers (that is metal_mla_gpu.sh), the emitted text's
+; header/using-namespace/kernel-presence discipline (that is the harness's grep gates), the real dims,
+; YaRN, or the resident weights. This band is the fp64 correspondence between the transcription and the
+; recipe; the GPU witness is the f32 correspondence between the compiled kernel and the recipe.
+;
+;   bit  1  THE SPLIT IS WHERE mlm-nnope SAYS: at pos 2 the recipe's rope-tail leaves exactly the first
+;           (hd - nrot) dims untouched (maxdiff 0.0) and moves the rest (maxdiff > 0.1). Falsifies a
+;           kernel that rotates the whole head, and pins mlm-nnope to the recipe's actual split.
+;   bit  2  POS 0 IS THE IDENTITY (hushfold): rope-tail at pos 0 is exactly the input (maxdiff 0.0), so
+;           the >=2-position GPU test is what witnesses RoPE at all — a one-position test cannot.
+;   bit  4  THE GROUPED-OUTPUT MAP TIES TO THE OUTPUT: recomputing the block output's grouped projection
+;           with gdim taken from mlm-gdim reproduces o2 to 1e-12 — the map is the recipe's, not a guess.
+;   bit  8  THE SINK ATTENTION READS BACK: a Form mirror of form_mla_attend_f32 (two passes, right-fold
+;           dot, sink in the denominator only, out = acc * (1/denom)) equals mla-attn-heads bit for bit.
+;   bit 16  THE RMSNORM READS BACK: a Form mirror of form_mla_rmsnorm_f32 (ascending sum-of-squares,
+;           out = (x/rms)*g) equals ln-rmsnorm bit for bit.
+;   bit 32  THE DOT FOLD DIRECTION READS BACK: a Form mirror of mla_dot's DESCENDING accumulate equals
+;           tb-dot's right fold bit for bit. An ascending mirror would not.
+
+(do
+    (defn mlmb-vmaxdiff (a b)
+        (if (eq (len a) 0) 0.0
+            (do (let d (tn-abs (sub (head a) (head b))))
+                (let r (mlmb-vmaxdiff (tail a) (tail b)))
+                (if (gt d r) d r))))
+
+    ; ---- mirror of mla_dot: DESCENDING accumulate, acc = a[i]*b[i] + acc, i from n-1 down to 0 ----
+    (defn mlmb-dot-acc (a b i acc)
+        (if (lt i 0) acc (mlmb-dot-acc a b (sub i 1) (add (mul (nth a i) (nth b i)) acc))))
+    (defn mlmb-dot-desc (a b) (mlmb-dot-acc a b (sub (len a) 1) 0.0))
+
+    ; ---- mirror of form_mla_rmsnorm_f32: ascending sum-of-squares, out = (x*inv)*g ----
+    (defn mlmb-sumsq-acc (xs i n acc)
+        (if (ge i n) acc (mlmb-sumsq-acc xs (add i 1) n (add acc (mul (nth xs i) (nth xs i))))))
+    (defn mlmb-scale-mul (xs gs inv i n)
+        (if (ge i n) (empty) (cons (mul (mul (nth xs i) inv) (nth gs i)) (mlmb-scale-mul xs gs inv (add i 1) n))))
+    (defn mlmb-rmsnorm (xs gs eps)
+        (do (let n (len xs))
+            (let sumsq (mlmb-sumsq-acc xs 0 n 0.0))
+            (let ms (div sumsq (mul n 1.0)))
+            (let rms (tn-sqrt (add ms eps)))
+            (mlmb-scale-mul xs gs (div 1.0 rms) 0 n)))
+
+    ; ---- mirror of form_mla_attend_f32: two passes, right-fold dot, sink in the denominator only ----
+    (defn mlmb-max-acc (qh rows scale j nrows m)
+        (if (ge j nrows) m
+            (do (let s (mul scale (mlmb-dot-desc qh (nth rows j))))
+                (mlmb-max-acc qh rows scale (add j 1) nrows (if (gt s m) s m)))))
+    (defn mlmb-acc-add (acc rj e i n)
+        (if (ge i n) (empty) (cons (add (nth acc i) (mul (nth rj i) e)) (mlmb-acc-add acc rj e (add i 1) n))))
+    (defn mlmb-pass2 (qh rows scale m j nrows hd acc se)
+        (if (ge j nrows) (list acc se)
+            (do (let s (mul scale (mlmb-dot-desc qh (nth rows j))))
+                (let e (tn-exp (sub s m)))
+                (mlmb-pass2 qh rows scale m (add j 1) nrows hd (mlmb-acc-add acc (nth rows j) e 0 hd) (add se e)))))
+    (defn mlmb-attend (qh rows scale sink hd)
+        (do (let m (mlmb-max-acc qh rows scale 0 (len rows) sink))
+            (let ps (mlmb-pass2 qh rows scale m 0 (len rows) hd (tb-zeros hd) 0.0))
+            (add 0 0)                                    ; force ps before the reads (single-use let hygiene)
+            (let acc (nth ps 0))
+            (let se (nth ps 1))
+            (let denom (add (tn-exp (sub sink m)) se))
+            (tn-scale acc (div 1.0 denom))))
+    (defn mlmb-attn-heads (q rows h nh hd scale sinks)
+        (if (eq h nh) (empty)
+            (tb-cat (mlmb-attend (tb-vslice q (mul h hd) hd) rows scale (nth sinks h) hd)
+                    (mlmb-attn-heads q rows (add h 1) nh hd scale sinks))))
+
+    (let hd (mld-hd)) (let nrot (mld-nrot)) (let nh (mld-nh)) (let ng (mld-ng))
+    (let base (mld-base)) (let eps (mld-eps)) (let scale (mld-scale))
+    (let nnope (mlm-nnope hd nrot))
+
+    ; --- c1: the split is where mlm-nnope says ---
+    (let vv (list 0.3 -0.7 0.9 0.25))
+    (let vr (mla-rope-tail vv nrot 2 base 1.0))
+    (let front-same (mlmb-vmaxdiff (tb-take vr nnope) (tb-take vv nnope)))
+    (let tail-moved (mlmb-vmaxdiff (tb-drop nnope vr) (tb-drop nnope vv)))
+    (let c1 (if (eq front-same 0.0) (if (gt tail-moved 0.1) 1 0) 0))
+
+    ; --- c2: pos 0 is the identity (hushfold) ---
+    (let v0 (mla-rope-tail vv nrot 0 base 1.0))
+    (let c2 (if (eq (mlmb-vmaxdiff v0 vv) 0.0) 2 0))
+
+    ; --- c4: the grouped-output map ties to o2 ---
+    (let gdim (mlm-gdim nh ng hd))
+    (let o2b (mla-out-proj (mld-back2) ng gdim (mld-was) (mld-wb)))
+    (let c4 (if (lt (mlmb-vmaxdiff o2b (mld-o2)) 0.000000000001) 4 0))
+
+    ; --- c8: the sink attention reads back, bit for bit ---
+    (let heads-mirror (mlmb-attn-heads (mld-q2) (mld-rows) 0 nh hd scale (mld-sinks)))
+    (let c8 (if (eq (mlmb-vmaxdiff heads-mirror (mld-heads2)) 0.0) 8 0))
+
+    ; --- c16: the rmsnorm reads back, bit for bit (embed-space, on n2's input x2) ---
+    (let rn-mirror (mlmb-rmsnorm (mld-x2) (mld-an) eps))
+    (let c16 (if (eq (mlmb-vmaxdiff rn-mirror (mld-n2)) 0.0) 16 0))
+
+    ; --- c32: the dot fold direction reads back, bit for bit. The operands span magnitudes past fp64's
+    ;     2^53 so left- and right-association genuinely DIVERGE (right fold -> 0, left fold -> 2): the
+    ;     descending mirror must match tb-dot's right fold exactly, and an ascending mirror could not. ---
+    (let da (list 100000000000000000.0 1.0 1.0 -100000000000000000.0 1.0 1.0))
+    (let db (list 1.0 1.0 1.0 1.0 1.0 1.0))
+    (let c32 (if (eq (tn-abs (sub (mlmb-dot-desc da db) (tb-dot da db))) 0.0) 32 0))
+
+    (add c1 (add c2 (add c4 (add c8 (add c16 c32))))))

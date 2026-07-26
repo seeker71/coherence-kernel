@@ -2012,32 +2012,17 @@ export class Kernel {
     // floats truncate, i64/u64 pass through), so wide literals survive
     // aggregation — a raw `.int` read on an i64 element is undefined and
     // silently drops the value (the choice-receipt-band divergence).
-    this.registerNative("min", catMethod(), (_k, args) => {
-      const v = args[0];
-      if (v?.kind === "list") {
-        if (v.list.length === 0) throw new Error("min: empty list");
-        let best = listElemInt(v.list[0]!, "min");
-        for (let i = 1; i < v.list.length; i++) {
-          const x = listElemInt(v.list[i]!, "min");
-          if (x < best) best = x;
-        }
-        return intOrWide(best);
-      }
-      return intOrWide(listElemInt(args[0]!, "min"));
-    });
-    this.registerNative("max", catMethod(), (_k, args) => {
-      const v = args[0];
-      if (v?.kind === "list") {
-        if (v.list.length === 0) throw new Error("max: empty list");
-        let best = listElemInt(v.list[0]!, "max");
-        for (let i = 1; i < v.list.length; i++) {
-          const x = listElemInt(v.list[i]!, "max");
-          if (x > best) best = x;
-        }
-        return intOrWide(best);
-      }
-      return intOrWide(listElemInt(args[0]!, "max"));
-    });
+    // min/max are variadic the way CPython is: one list argument folds over
+    // its elements, two or more arguments fold over the arguments themselves.
+    // The multi-argument shape used to fall through to `args[0]` unexamined,
+    // so `(min 7 3)` answered 7 with no diagnostic — and Go and Rust answered
+    // 7 too, an agreed wrong answer the sibling comparison cannot see.
+    this.registerNative("min", catMethod(), (_k, args) =>
+      intOrWide(foldExtremum(args, "min", false)),
+    );
+    this.registerNative("max", catMethod(), (_k, args) =>
+      intOrWide(foldExtremum(args, "max", true)),
+    );
     this.registerNative("sum", catMethod(), (_k, args) => {
       const v = args[0];
       if (v?.kind === "list") {
@@ -3732,6 +3717,26 @@ function listElemInt(v: Value, op: string): bigint {
   if (v.kind === "bool") return v.bool ? 1n : 0n;
   if (v.kind === "f32" || v.kind === "f64") return BigInt(Math.trunc(v.float));
   return expectBigInt(v, op);
+}
+
+// foldExtremum — the shared body of the `min` / `max` natives. One list
+// argument folds over its elements; anything else folds over the arguments
+// themselves, so `(max a b)` compares instead of returning `a`. Every element
+// reads through listElemInt, the same integer lane Go's AsInt and Rust's
+// as_int use. `op` only spells the empty-list error.
+function foldExtremum(args: Value[], op: string, wantMax: boolean): bigint {
+  const v = args[0];
+  let xs: Value[] = args;
+  if (args.length === 1 && v?.kind === "list") {
+    if (v.list.length === 0) throw new Error(`${op}: empty list`);
+    xs = v.list;
+  }
+  let best = listElemInt(xs[0]!, op);
+  for (let i = 1; i < xs.length; i++) {
+    const x = listElemInt(xs[i]!, op);
+    if (wantMax ? x > best : x < best) best = x;
+  }
+  return best;
 }
 
 // intOrWide — render an aggregate back as the plain int kind when it fits

@@ -163,6 +163,14 @@ let lib = try dev.makeLibrary(source: try String(contentsOfFile: mslPath, encodi
 let pipe = try dev.makeComputePipelineState(function: lib.makeFunction(name: fname)!)
 let queue = dev.makeCommandQueue()!
 
+// Counted across every dispatch in this run. A command buffer that FAILS writes nothing,
+// and ybuf below is freshly allocated and therefore zeroed — so an unchecked failure does
+// not read as an error, it reads as a matvec that disagrees with Form. This is the
+// difference between "the GPU is wrong" and "the GPU did not run" (axiom-4: passage not
+// through the offered interface — cb.status/cb.error — is breach, and breach is observable).
+var gpuErrors = 0
+var gpuFirstError: String? = nil
+
 // THE RESIDENT WEIGHTS. Written once, never rewritten, alive for every dispatch below.
 let wbuf = dev.makeBuffer(bytes: Wf, length: Wf.count * 4, options: .storageModeShared)!
 let xbuf = dev.makeBuffer(bytes: Xf, length: Xf.count * 4, options: .storageModeShared)!
@@ -191,6 +199,33 @@ func dispatchOnce() {
     enc.dispatchThreads(MTLSize(width: rows, height: 1, depth: 1),
                         threadsPerThreadgroup: MTLSize(width: tg, height: 1, depth: 1))
     enc.endEncoding(); cb.commit(); cb.waitUntilCompleted()
+    if let e = cb.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(e)" } }
+    if cb.status != .completed { gpuErrors += 1
+        if gpuFirstError == nil { gpuFirstError = "command buffer status \(cb.status.rawValue), not .completed" } }
+}
+
+// --- GATE 0: DID THE GPU RUN. Asked before gates 2/3, which read ybuf back — and a buffer
+// nothing wrote reads as zeros, a NUMBER that gate 2/3 would grade as an arithmetic
+// disagreement. The CPU writes a sentinel no matvec would produce; the kernel must overwrite
+// every one of the `rows` outputs. If any survives, this is a residency condition, not an
+// arithmetic one, and the harness says so instead of grading silence.
+do {
+    let sentinel: Float = -424242.0
+    let yp = ybuf.contents().bindMemory(to: Float.self, capacity: rows)
+    for i in 0..<rows { yp[i] = sentinel }
+    let before = gpuErrors
+    dispatchOnce()
+    var survived = 0
+    for i in 0..<rows where yp[i] == sentinel { survived += 1 }
+    if gpuErrors > before { print("      command buffer ERROR: \(gpuFirstError ?? "unknown")") }
+    if gpuErrors == before && survived == 0 {
+        print("PASS  gate 0 the GPU executes: a kernel overwrote all \(rows) sentinels, no command buffer errored")
+    } else {
+        print("FAIL  gate 0 THE GPU DID NOT RUN — \(survived)/\(rows) sentinels survived, \(gpuErrors - before) cb error(s).")
+        print("      This is a RESIDENCY condition, not an arithmetic one. Gates 2 and 3 below would grade")
+        print("      an unwritten buffer as disagreement; the verdict refuses them. Free memory and re-run.")
+        print("VERDICT FAIL"); exit(1)
+    }
 }
 
 dispatchOnce()
@@ -246,7 +281,11 @@ for i in 0..<rows { sumFirst += Double(gpu[i]) }
 let stable = (sumAfter == sumFirst)
 print(String(format: "resident dispatches: %d in %.4f s (%.1f us each), zero re-uploads; checksum after == checksum before: %@",
              iters, dt, dt / Double(iters) * 1e6, stable ? "yes" : "NO"))
-if badResident == 0 && badLane == 0 && maxRelOK && stable { print("VERDICT PASS") } else { print("VERDICT FAIL"); exit(1) }
+if gpuErrors > 0 {
+    print("=== \(gpuErrors) COMMAND BUFFER(S) FAILED during this run — first: \(gpuFirstError ?? "unknown") ===")
+    print("    Nothing above this line that reads ybuf back can be trusted.")
+}
+if badResident == 0 && badLane == 0 && maxRelOK && stable && gpuErrors == 0 { print("VERDICT PASS") } else { print("VERDICT FAIL"); exit(1) }
 SWIFT
 
 swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || {

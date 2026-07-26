@@ -130,17 +130,21 @@ def registry_entries() -> list[dict]:
             prev = ch
         cell = src[start:end]
         head = re.match(r'\(prim "([^"]+)" "([^"]+)" "([^"]*)"', cell)
-        tail = re.search(r"\)\s+(-?\d+)\s+([01])\)$", cell)
+        # The verifier may be either an inline Form expression or a named
+        # verifier such as `pv-print`.  The two final scalar fields are the
+        # stable parse boundary: expected value, then execution mode.
+        tail = re.search(r"\s+(-?\d+)\s+([01])\)$", cell)
         if not head or not tail:
             print(f"FAIL unparseable registry cell at offset {start}: {cell[:80]}...")
             sys.exit(1)
+        verifier = cell[head.end():tail.start()].strip()
         entries.append({
             "name": head.group(1),
             "token": head.group(2),
             "spec": head.group(3),
             "expected": int(tail.group(1)),
             "mode": int(tail.group(2)),
-            "has_verify": "(defn pv-" in cell,
+            "has_verify": bool(verifier),
         })
     return entries
 

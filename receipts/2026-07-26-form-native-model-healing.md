@@ -57,13 +57,13 @@ The full 91,321,404,640-byte artifact was scanned directly by the Form cell:
 ```text
 tensor_count=1406
 layout_known=1406
-arithmetic_known=898
+arithmetic_known=1406
 unknown_layout=0
 type40_tensors=45
 type41_tensors=370
-encoded_tensor_bytes=87920167672
+encoded_tensor_bytes=91316062968
 layout_complete=1
-execution_ready=0
+execution_ready=1
 ```
 
 Form now owns byte geometry for every format present:
@@ -72,13 +72,17 @@ Form now owns byte geometry for every format present:
 - F16: 2 / 1;
 - IQ2_XXS: 66 / 256;
 - I32: 4 / 1;
-- NVFP4 (GGUF 40): 36 / 64;
-- Q1_0 (GGUF 41): 18 / 128.
+- plane-split MXFP4 (GGUF 40): 34 / 64;
+- plane-split MXFP8 (GGUF 41): 132 / 128.
 
-Byte geometry does not fabricate dequant arithmetic. The pinned DS4 source
-contains no numerical implementation for types 40 or 41, so those 415 tensors
-remain arithmetic-pending. IQ2_XXS also remains outside the current native
-arithmetic set.
+Reunion with current `main` falsified the pinned DS4 engine's unused 36/64 and
+18/128 rows. The artifact's offsets establish plane-split MXFP4/MXFP8, and the
+merged body already carries their native carvers/MSL plus IQ2_XXS arithmetic.
+All 1,406 tensors therefore have native layout and arithmetic. A complete
+decoded-token witness remains a separate pending claim.
+
+The encoded tensor sum is 1,928 bytes below `file_size - data_base`; those are
+GGUF inter-tensor alignment bytes, not unknown tensor payload.
 
 ## Proofs
 

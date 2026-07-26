@@ -105,6 +105,15 @@ static long long fk_diag_quiet;  /* nonzero: speculative compile — count into
                                   * nothing; a candidate image's diagnostics
                                   * are not the program's */
 static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_TEXT_CAP */
+/* 1 if the parse met a defect that CANNOT recover into a runnable program: a read
+ * of an unbound name (a read has no value to decline with) or a parameter that
+ * names a primitive (the sibling kernels do not agree on its arity). fkwu's
+ * standing posture is recover-and-run, and it stays that way for every defeasible
+ * diagnostic; these two are not defeasible, and running past them is what let a
+ * deliberately broken band answer 255 and what made one variant spin for minutes
+ * with no output at all. Same gate as fk_src_truncated: surface every diagnostic,
+ * then REFUSE to execute. */
+static int fk_src_unrunnable;
 /* fk_diag / fk_diag_flush are DEFINED further down (right after fk_srctext /
  * fk_spos / fk_slen are declared), where they can read the source buffer. */
 static void fk_diag(int sev, long long off, const char *fmt, ...);
@@ -5527,7 +5536,22 @@ static long long fk_walk(long long i, long long fp) {
         return fk_ht[p];
     }
     if (t == 22) {
-        long long p = fk_walk(fk_node[i][1], fp) >> 1;
+        /* len — a LIST cell. Only the low bit tells a cons cell (odd) from an
+         * int or a string handle (both even, both `idx << 1`), so an unguarded
+         * walk shifted whatever it was handed and followed fk_ht from there:
+         * with 40 live cons cells on the heap, (len 8) answered 2 and
+         * (len "hello") answered 4 while go/rust/ts answered 0/0/5. Not merely
+         * divergent — heap-state-dependent, which is why the same expression on
+         * an empty heap looked four-way-agreed. Non-lists now answer 0, as they
+         * do on the sibling arms; the one gap that stays is a STRING, whose byte
+         * length the siblings return and fkwu cannot see. Mirrored in the
+         * emitted walker's fk_list_len (fkc-table-serialize.fk) and in
+         * fk_jlist1 below — one law, three carriers. */
+        long long lv22 = fk_walk(fk_node[i][1], fp);
+        if ((lv22 & 1) == 0) {
+            return 0;
+        }
+        long long p = lv22 >> 1;
         long long n = 0;
         while (p >= 1 && p <= fk_hp) {
             n = n + 1;
@@ -7357,6 +7381,56 @@ static long long fk_rwtab_find(long long s, long long n) {
     }
     return -1;
 }
+/* A RESERVED HEAD: a name that this parser answers itself in call position —
+ * the four control forms, any rewrite row, any op row. Binding one as a defn
+ * PARAMETER is a silent cross-kernel divergence, not a preference: form-kernel-go's
+ * reader drops such a name from the parameter list, so `(defn f (sub x) ..)` is
+ * arity 2 here and arity 1 there, and the two kernels then answer the same source
+ * differently with neither one saying so (MEASURED 2026-07-22: fkwu 7, bin-go
+ * `walk: "f" wants 1 args, got 2`). fkwu binds it AND then lets the op win in call
+ * position, so the parameter is reachable in value position only — exactly the trap
+ * that returned a full-pass 255 on a deliberately broken band
+ * (receipts/2026-07-22-ship-the-slot-map.md, defect 1). */
+static int fk_reserved_head(long long s, long long n) {
+    if (fk_sym_eq(s, n, "defn") || fk_sym_eq(s, n, "do") || fk_sym_eq(s, n, "let") ||
+        fk_sym_eq(s, n, "if")) {
+        return 1;
+    }
+    if (fk_rwtab_find(s, n) >= 0) {
+        return 1;
+    }
+    if (fk_optab_find(s, n) >= 0) {
+        return 1;
+    }
+    return 0;
+}
+/* The names where a PARAMETER of that spelling makes fkwu and form-kernel-go answer
+ * the same source differently. This list is MEASURED, not reasoned: all 169 op-table
+ * and rewrite-table names plus the four control forms were each put in a defn's
+ * parameter list and run on both kernels (2026-07-22). 155 agreed — including `len`,
+ * which core.fk's own fstr-to-int-loop has taken as a parameter since before this
+ * check existed, and which is therefore NOT a defect. These 18 diverged: Go's reader
+ * treats them structurally and drops them from the parameter list, so `(defn f (sub x)
+ * ..)` is arity 2 here and arity 1 there. Reasoning from "it is in the op table" would
+ * have condemned core.fk on the strength of an argument the oracle refutes. If an op
+ * row is added, re-run the probe rather than guessing where it belongs.
+ *
+ * And it only diverges in the FIRST parameter position. Probed again after the first
+ * narrowing, the check still condemned shell-exec.fk's `(defn sh-contains? (s sub) ..)`,
+ * which bin-go runs correctly: Go's reader reads the parameter list's own head
+ * structurally, so `(sub zz)` collapses and `(zz sub)` does not. All 18 names were
+ * re-run in first and second position; every one diverges first and agrees second. So
+ * the caller carries the position (`na == 0`). Twice now a reasoned generalization was
+ * wider than the measured fact, and both times a real cell in this body was the one
+ * that said so. */
+static int fk_divergent_param_name(long long s, long long n) {
+    return fk_sym_eq(s, n, "add") || fk_sym_eq(s, n, "sub") || fk_sym_eq(s, n, "mul") ||
+           fk_sym_eq(s, n, "div") || fk_sym_eq(s, n, "mod") || fk_sym_eq(s, n, "and") ||
+           fk_sym_eq(s, n, "or") || fk_sym_eq(s, n, "not") || fk_sym_eq(s, n, "eq") ||
+           fk_sym_eq(s, n, "lt") || fk_sym_eq(s, n, "le") || fk_sym_eq(s, n, "gt") ||
+           fk_sym_eq(s, n, "ge") || fk_sym_eq(s, n, "list") || fk_sym_eq(s, n, "defn") ||
+           fk_sym_eq(s, n, "do") || fk_sym_eq(s, n, "let") || fk_sym_eq(s, n, "if");
+}
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3) {
     long long k = fk_node_count;
     fk_node_count = fk_node_count + 1;
@@ -7655,6 +7729,15 @@ static long long fk_sparse(void) {
             long long fk_bd_saved_maxslot = fk_maxslot;
             fk_bd_top = 0;
             fk_maxslot = 0;
+            if (alen > 0 && fk_divergent_param_name(as2, alen)) {
+                fk_diag(FK_DIAG_ERR, as2,
+                        "[shadowed-primitive] parameter '%.*s' names a primitive/control form -- "
+                        "in call position the primitive still wins, so the parameter is reachable "
+                        "in value position only, and form-kernel-go drops it from the parameter "
+                        "list entirely (arity divergence). Rename the parameter",
+                        (int)alen, fk_srctext + as2);
+                fk_src_unrunnable = 1;
+            }
             fk_bd_push(as2, alen, 0);
             long long body = fk_sparse();
             fk_sskip();
@@ -7722,6 +7805,20 @@ static long long fk_sparse(void) {
                 fk_spos = fk_spos + 1;
             }
             return fk_smknode(6, c1, c2, c3);
+        }
+
+        /* A LIVE BINDING THIS CALL WILL NOT REACH. `(sub x 128)` where `sub` is a name in
+         * scope reads as subtraction, not as the binding — the op/rewrite tables are
+         * consulted before the local frame, and form-kernel-go answers the same way, so
+         * this is not a divergence and fkwu does not refuse it. It is still the trap that
+         * cost Stone 13 hours (receipts/2026-07-22-ship-the-slot-map.md), so it is said
+         * out loud: a WARNING, counted and printed, where a defn parameter of the same
+         * spelling is the harder ERROR above. */
+        if (fk_bd_lookup(s, hn) >= 0 && fk_reserved_head(s, hn)) {
+            fk_diag(FK_DIAG_WARN, s,
+                    "[shadowed-call] '%.*s' is bound in this scope but in call position the "
+                    "primitive wins -- this call does NOT reach the binding",
+                    (int)hn, fk_srctext + s);
         }
 
         /* DATA-DRIVEN rewrite: gt/ge/lt/eq/and/or/not/abs are rows in fk_rwtab. Parse `arity`
@@ -8132,6 +8229,30 @@ static long long fk_sparse(void) {
     if (vfidx >= 0) {
         return fk_smknode(243, vfidx, 0, 0);
     }
+    /* UNBOUND NAME IN VALUE POSITION. This used to be "an honest 0" — and it was the
+     * deepest silent-green in this body. A name that resolves to nothing is not a
+     * declined OFFER (that is the tag-137 unresolved-call arm above, which has said so
+     * loudly since the ftanh heal); it is a READ of something that was never bound, and
+     * a read has no axiom-5 recovery to appeal to. Left silent it does three things,
+     * all measured on 2026-07-22 against form-kernel-go as the oracle:
+     *   - it makes a band agree with itself. Two walkers reading the same free name both
+     *     read 0, both sides match, verdict 255 on deliberately broken code.
+     *   - it makes fkwu and the Go/Rust/TS walkers answer the SAME source differently
+     *     with neither saying so: fkwu's defn frame cannot see an enclosing do-let by
+     *     construction (fk_bd_top = 0 at the defn arm), Go's closure can. fkwu answered
+     *     5 where bin-go answered 15.
+     *   - it makes fkwu SPIN. A recursion whose base case tests a free name never
+     *     reaches it: `(if (eq i n) ..)` with n silently 0 and i starting at 1 ran for
+     *     minutes with no output at all, where bin-go answered in 40 ms.
+     * So: diagnose, on every occurrence, unconditionally — and still RECOVER to 0, so
+     * the rest of the source is parsed and every other offender is reported in the same
+     * run. The nonzero exit comes from the error count, exactly like unresolved-call. */
+    fk_diag(FK_DIAG_ERR, s,
+            "[unbound-name] '%.*s' in value position matched no binding/const/fn -- typo, "
+            "missing prelude, or a name from an enclosing scope a defn frame cannot see? "
+            "Read recovered to 0; parse continues",
+            (int)(fk_spos - s), fk_srctext + s);
+    fk_src_unrunnable = 1;
     return fk_smklit(0);
 }
 /* (do f1 f2 .. fn): sequence forms (tag 69 = eval-first/return-rest). A do-let `(let name val)`
@@ -8561,6 +8682,15 @@ static void fk_parse_top(void) {
                 }
                 long long as = fk_spos;
                 fk_spos = fk_sym_end(fk_spos);
+                if (na == 0 && fk_spos > as && fk_divergent_param_name(as, fk_spos - as)) {
+                    fk_diag(FK_DIAG_ERR, as,
+                            "[shadowed-primitive] parameter '%.*s' names a primitive/control form "
+                            "-- in call position the primitive still wins, so the parameter is "
+                            "reachable in value position only, and form-kernel-go drops it from "
+                            "the parameter list entirely (arity divergence). Rename the parameter",
+                            (int)(fk_spos - as), fk_srctext + as);
+                    fk_src_unrunnable = 1;
+                }
                 fk_bd_push(as, fk_spos - as, na);
                 if (na > fk_maxslot) {
                     fk_maxslot = na;
@@ -8877,6 +9007,11 @@ static long long fk_jlist1(long long tag, long long a) {
     }
     /* tail */
     if (tag == 22) {
+        /* mirrors fk_walk's tag-22 exactly — crystallized code must count the
+         * same list, and refuse the same non-list, as interpreted code. */
+        if ((a & 1) == 0) {
+            return 0;
+        }
         long long p = a >> 1;
         long long n = 0;
         while (p >= 1 && p <= fk_hp) {
@@ -10896,8 +11031,21 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
     char line[512];
     /* compile-errors records fk_nerr at image-write time, placed right after
      * the version line so readers find it in the first bytes; a cached run
-     * replays this count as its exit truth (absent line reads as 0) */
-    int hn = sprintf(line, "program-image-sym-lens-v1\ncompile-errors %lld\nsource ", fk_nerr);
+     * replays this count as its exit truth (absent line reads as 0).
+     *
+     * unrunnable records the REFUSAL, which is a different fact from the count.
+     * An [unbound-name] in value position latches fk_src_unrunnable, and the
+     * fresh-compile door then returns WITHOUT printing the root value -- the
+     * kernel declining to compute an answer over a program whose names silently
+     * read as 0. That refusal was not travelling into the image, so the next run
+     * loaded the .fkb and printed the value the compile had just refused to
+     * print: same source, same errors, and a number visible only on the second
+     * run. The count could not stand in for it, because an unresolved CALL
+     * recovers to nothing and DOES run -- errors > 0 and runnable is an ordinary
+     * state. So the latch travels on its own line. */
+    int hn = sprintf(line,
+                     "program-image-sym-lens-v1\ncompile-errors %lld\nunrunnable %d\nsource ",
+                     fk_nerr, fk_src_unrunnable ? 1 : 0);
     if (!fk_write_all_raw(fd, line, (unsigned long)hn) ||
         !fk_write_all_raw(fd, src_path, (unsigned long)fk_path_len(src_path)) ||
         !fk_write_all_raw(fd, "\nfkb ", 5) ||
@@ -11779,6 +11927,47 @@ static long long fk_src_sym_recorded_errors(const char *sym_path) {
     }
     return -1;
 }
+/* the unrunnable latch as the image recorded it: 1 refused, 0 runnable, -1 absent.
+ * -1 means an older lens that predates the field, and the caller treats it the same
+ * way it treats a missing error record -- an incomplete cache to rebuild, never a
+ * clean one. Guessing "probably runnable" here would restore exactly the laundering
+ * this field exists to stop. */
+static long long fk_src_sym_recorded_unrunnable(const char *sym_path) {
+#if defined(_WIN32)
+    int fd = open(sym_path, 0x8000);
+#else
+    int fd = open(sym_path, 0);
+#endif
+    if (fd < 0) {
+        return -1;
+    }
+    char buf[256];
+    long long got = read(fd, buf, 255);
+    close(fd);
+    if (got <= 0) {
+        return -1;
+    }
+    buf[got] = 0;
+    const char *needle = "\nunrunnable ";
+    long long i = 0;
+    while (i < got) {
+        long long j = 0;
+        while (needle[j] != 0 && i + j < got && buf[i + j] == needle[j]) {
+            j = j + 1;
+        }
+        if (needle[j] == 0) {
+            long long v = 0;
+            long long p = i + j;
+            while (p < got && buf[p] >= '0' && buf[p] <= '9') {
+                v = v * 10 + (buf[p] - '0');
+                p = p + 1;
+            }
+            return v;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
 static void fk_src_reset_compile_state(void) {
     fk_arg_n = 0;
     fk_fname_n = 0;
@@ -11790,17 +11979,120 @@ static void fk_src_reset_compile_state(void) {
     fk_nerr = 0;
     fk_nwarn = 0;
     fk_src_truncated = 0;
+    fk_src_unrunnable = 0;
     fk_string_table_reset();
     fk_fntop = 0;
     fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;
 }
+/* WHOLE-SOURCE PAREN BALANCE, decided ONCE over the assembled unit.
+ *
+ * Every reader below is permissive by construction: a form's closer is consumed with
+ * `if (pos < len && text[pos] == RPAREN) pos++`, so a form that simply RUNS OUT of text
+ * is auto-closed and evaluated as though the author had written it that way. `(do (add 1 2)`
+ * -- the `(do` never closed -- answered 3 and exited 0. Note the shape: 3 is the RIGHT
+ * answer to the WRONG text, which is exactly why nothing downstream can catch it. Every band
+ * in this body is one `(do ...)` form, so a single missing character anywhere in a band file
+ * yields a plausible verdict that reads green (Stone 41 watched one return 1023 that way, and
+ * the FK_SOURCE_TEXT_CAP comment above records the same family biting once before as the
+ * "N=100 cliff"). It needs no unusual naming -- unlike [unbound-name] or [shadowed-primitive]
+ * it is reachable by a typo.
+ *
+ * fk_src_truncated was declared for precisely this and was never set by anything: a gate that
+ * existed only as a comment. The balance is therefore checked here, over the flattened text
+ * (preludes included, which is why an unbalanced prelude is caught at the root compile), using
+ * the same lexical rules fk_skip_balanced already uses -- `;` runs to end of line, "..." is
+ * opaque to structure and a backslash escape stays inside it.
+ *
+ * Depth going negative is a stray ')'; depth left positive at EOF is an unclosed form, reported
+ * at the '(' that opened it. Either way the program was never fully READ, so there is nothing
+ * for a verdict to be OF -- the same line this stone drew for the unbound read. Set the
+ * unrunnable latch and let both execution doors refuse with a non-zero exit. */
+static void fk_src_check_balance(void) {
+    long long p = 0;
+    long long depth = 0;
+    long long outermost_open = -1;
+    while (p < fk_slen) {
+        char c = fk_srctext[p];
+        if (c == FK_CH_SEMI) {
+            while (p < fk_slen && fk_srctext[p] != FK_CH_LF) {
+                p = p + 1;
+            }
+            continue;
+        }
+        if (c == FK_CH_DQUOTE) {
+            p = p + 1;
+            while (p < fk_slen && fk_srctext[p] != FK_CH_DQUOTE) {
+                if (fk_srctext[p] == FK_CH_BACKSLASH && p + 1 < fk_slen) {
+                    p = p + 1;
+                }
+                p = p + 1;
+            }
+            if (p < fk_slen) {
+                p = p + 1;
+            }
+            continue;
+        }
+        if (c == FK_CH_LPAREN) {
+            if (depth == 0) {
+                outermost_open = p;
+            }
+            depth = depth + 1;
+        } else if (c == FK_CH_RPAREN) {
+            depth = depth - 1;
+            if (depth < 0) {
+                fk_diag(FK_DIAG_ERR, p,
+                        "[unbalanced-source] stray ')' closes a form that was never opened -- "
+                        "the text cannot be read as the program it claims to be, so there is "
+                        "nothing for a verdict to be of. Refusing to run");
+                fk_src_unrunnable = 1;
+                return;
+            }
+        }
+        p = p + 1;
+    }
+    if (depth > 0) {
+        /* THE INPUT ENDED BEFORE THE FORM CLOSED. Named apart from the stray closer above on
+         * purpose: these are different repairs. A stray ')' is code the author got wrong. This
+         * is a stream that STOPPED -- and the reader cannot tell a stream that ENDED from one
+         * that was INTERRUPTED, because the terminator is byte-identical for both (fk_run_src
+         * reads to EOF; fsh-read walks input_byte to a NUL). So a cut pipe and a finished
+         * program arrive looking the same, and the prefix gets evaluated and reported as a
+         * success. That is axiom-5 at the INPUT boundary: `nothing` (the bytes stopped) read as
+         * `0` (the bytes ended) -- the same conflation as a zeroed Metal buffer read as a
+         * computed zero, one layer further out. `edgedrop` is the body's word for it.
+         * fk_src_truncated was declared for exactly "the source was amputated" and was never
+         * once set; this is what it was for, so it is set here and the gate it guards finally
+         * has a meaning. Telling the author the INPUT ended -- rather than that their code is
+         * malformed -- is the difference between "your pipe was cut" and "your code is wrong". */
+        fk_diag(FK_DIAG_ERR, outermost_open >= 0 ? outermost_open : 0,
+                "[input-ended-mid-form] the input ended before this form closed -- %lld open "
+                "paren(s) remain. A stream that STOPPED and a stream that FINISHED end with the "
+                "same terminator, so the prefix would otherwise be read as a whole program: the "
+                "permissive reader auto-closes it and computes the right answer to the wrong "
+                "text. Completion is not the absence of more bytes. Refusing to run",
+                depth);
+        fk_src_truncated = 1;
+        fk_src_unrunnable = 1;
+    }
+}
 static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
                                         const char *sym_path, long long unit_mtime,
                                         const char *source_hash) {
     fk_spos = 0;
     fk_srctext[fk_slen] = 0;
+    fk_src_check_balance();
+    /* Refuse BEFORE the readers touch the text, not after. The parse loop below advances by
+     * consuming forms; on a stray ')' at top level it consumes nothing and does not advance,
+     * so running it over unbalanced text spins (the zero-advance seen 2026-07-18). Diagnosing
+     * and then parsing anyway would trade a silent wrong answer for a silent hang, which is not
+     * a trade. The unit yields the empty program and the execution doors refuse on the latch. */
+    if (fk_src_unrunnable) {
+        fk_fn[0] = fk_smklit(0);
+        fk_fn_count = 1;
+        return;
+    }
     /* stone 4+5: multi-function root logic, preserved */
     fk_prescan_defns();
     /* two-pass: register every top-level defn name+index+arity BEFORE bodies, so forward + mutual
@@ -12036,13 +12328,28 @@ static int fk_run_src(const char *path, long long arg) {
         fk_diag_path("warning", dylib_path, "stale .dylib ignored");
     }
     long long recorded = fk_src_sym_recorded_errors(sym_path);
-    if (fkb_mtime >= unit_mtime && recorded < 0) {
+    long long recorded_unrunnable = fk_src_sym_recorded_unrunnable(sym_path);
+    if (fkb_mtime >= unit_mtime && (recorded < 0 || recorded_unrunnable < 0)) {
         /* an image without its error record is an incomplete cache; rebuild
          * rather than guess (older lenses, or a lens deleted out from under
          * the image) */
         fk_diag_path("warning", sym_path, "sym lens lacks a compile-error record; rebuilding");
     } else if (fkb_mtime >= unit_mtime) {
         if (fk_src_load_fkb_checked(fkb_path, path, expected_source_hash, unit_mtime)) {
+            /* THE REFUSAL TRAVELS WITH THE IMAGE. The fresh-compile door returns
+             * without printing the root value when the unrunnable latch is set,
+             * so a cached run that prints it anyway does not merely replay a
+             * degraded image -- it overturns a decision the kernel already made,
+             * and it does so silently, on the second run of an unchanged file.
+             * Refuse identically here: same door, same answer, whichever side of
+             * the cache the caller happens to be standing on. */
+            if (recorded_unrunnable > 0) {
+                fk_diag_path("error", sym_path,
+                        "cached image was REFUSED at compile (unbound name in value position); "
+                        "refusing to run it from cache -- fix source and rerun");
+                fk_diag_flush();
+                return 1;
+            }
             /* the compile carried errors when this image was written; the
              * cache must not launder them -- replay the tally as exit truth */
             if (recorded > 0) {
@@ -12084,7 +12391,7 @@ static int fk_run_src(const char *path, long long arg) {
      * OTHER compile error still recovers INTO a runnable (if degraded) program and
      * runs, carrying a nonzero EXIT via fk_nerr at the final return. */
     fk_diag_flush();
-    if (fk_src_truncated) {
+    if (fk_src_truncated || fk_src_unrunnable) {
         return 1;
     }
     if (fk_nerr == 0 && fk_conf("FK_JIT_SCAN")) {
@@ -12339,11 +12646,21 @@ static int fk_run_feval(const char *path) {
     fk_nerr = 0;
     fk_nwarn = 0;
     fk_src_truncated = 0;
+    fk_src_unrunnable = 0;
     fk_sinit();
     fk_fntop = 0;
     fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;
+    /* twin of fk_src_compile_current_unit's gate: this door parses fk_srctext directly,
+     * so it needs the same balance decision or the meta-eval lane stays permissive.
+     * Same reason as there for deciding BEFORE the readers run: unbalanced text can
+     * spin the top-level loop rather than fail it. */
+    fk_src_check_balance();
+    if (fk_src_unrunnable) {
+        fk_diag_flush();
+        return 1;
+    }
     fk_prescan_defns();
     fk_spos = 0;
     while (1) {
@@ -12397,16 +12714,46 @@ static int fk_run_feval(const char *path) {
     fk_vsp = 1;
     /* ── PARSE DONE, EXECUTION BEGINS ── gcc-style tally (twin of fk_run_src). */
     fk_diag_flush();
+    if (fk_src_unrunnable) {
+        return 1;
+    }
     long long rv = fk_walk(fk_fn[0], 0);
     fk_pv(rv);
     /* print the meta-eval result by value-kind (int / float / nothing) */
     return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
+}
+/* STAGE argv's trailing token into fk_src, the buffer `input_byte` (tag 17) reads.
+ *
+ * fk_src_len was assigned NOWHERE but its initializer, so the staged-input buffer was
+ * always empty and every input_byte returned 0. form-cli-main.fk's headless front door
+ * is exactly `fc-read` over input_byte, so the form-cli chain could not receive a command
+ * from this seed at all — its header names the filler as fkwu's argv[3] "or the persistent
+ * fkwu-server's per-request buffer (form-kernel-go/fkwu_bridge.go)", and that Go bridge
+ * lives in the origin repo, not here. This is roadmap item 4 (MANIFEST.md) at its exact
+ * location: the binary RAN Go-free while the way IN was still Go-shaped.
+ *
+ * This is host plumbing, not runtime meaning: Form cannot reach argv, and the Form-side
+ * primitive (input_byte) already exists — only the fill was missing. It does not displace
+ * the integer arg: atoi still runs on the same token, so `ground-recursive.fk 10` keeps
+ * its 55 (atoi of a verb like "ping" is 0, which is the arg such a program would get
+ * anyway). Shrink note: this leaves when Form owns its own argv port. */
+static void fk_stage_input(const char *s) {
+    long long i = 0;
+    if (!s) { fk_src_len = 0; return; }
+    while (s[i] != 0 && i < FK_STAGED_INPUT_CAP - 1) { fk_src[i] = s[i]; i++; }
+    fk_src[i] = 0;
+    fk_src_len = i;
 }
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;
     fk_stack_base = &fk_stack_here;
     if (argc < 2) {
         return 1;
+    }
+    if (argc > 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH) {
+        fk_stage_input(argv[3]);
+    } else if (argc > 2) {
+        fk_stage_input(argv[2]);
     }
     if (argc >= 3 && argv[1][0] == FK_CH_DASH && argv[1][1] == FK_CH_DASH &&
         argv[1][2] == FK_CH_LOWER_F && argv[1][3] == FK_CH_LOWER_E) {
