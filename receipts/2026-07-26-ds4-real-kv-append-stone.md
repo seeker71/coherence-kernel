@@ -19,10 +19,28 @@ PASS gate 5 REAL KV APPEND: ... copied ... 512-wide ... bit-identically
 ... and left all 512 entries of row 1 NaN-sentinel
 ```
 
-The complete one-layer integration remained green at 40 gates. This stone
-proves the body-emitted primitive, its compiled ABI, a real model row, exact
-append semantics, and the untouched frontier. It does not yet claim multi-row
-attention. The next stone replaces the transient one-row attention binding
-with one arena per layer and binds `nrows = pos + 1`.
+The complete one-layer integration remained green at 40 gates.
 
-; witnessed: 2026-07-26 -> real DS4 layer-0 KV row appended by Form-emitted Metal, 40 gates PASS
+The next movement then allocated one persistent arena per real layer and
+rebound the unchanged attention kernel to `nrows = pos + 1`. Two consecutive
+steps passed first at one layer (41 gates), then across all 43 heterogeneous
+layers:
+
+```text
+PASS gate 472 GROWING KV, TWO REAL STACK STEPS:
+layer 0 retained 512/512 row-0 bits,
+wrote 512/512 row-1 values,
+left 512/512 row-2 sentinels,
+final HC state changed in 16384/16384 entries
+
+VERDICT PASS 475 gates — 43 HETEROGENEOUS DeepSeek-V4-Flash LAYERS STACKED
+```
+
+This proves the body-emitted primitive, its compiled ABI, persistent per-layer
+arenas, history immutability, exact frontier growth, and real multi-row
+attention across all 43 layers. The two-step depth witness deliberately
+repeats token 671. The next stone extracts the exit head as a reusable step,
+feeds its emitted token back as the next embedding/router token, and records
+the resulting two-token stream.
+
+; witnessed: 2026-07-26 -> real DS4 growing KV across 43 layers, two consecutive steps, 475 gates PASS
