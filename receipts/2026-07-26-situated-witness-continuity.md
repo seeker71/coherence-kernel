@@ -185,6 +185,13 @@ Nothing was silently normalized into green.
    `fourth-arm-bands.txt` made the fourth leg execute; it returned
    `2147483647`, and validation now explicitly reports
    `fourth arm: 1 band four-way` with zero divergence.
+6. The later header-driven `fourth-arm-gate.sh` regression exposed that item
+   3 had not been completely closed: explicit validator arguments had been
+   corrected, but this band's own `; preludes:` declaration still carried the
+   repository-root `form/form-stdlib/...` paths. The gate therefore diagnosed
+   missing inputs rather than a kernel disagreement. The declaration now uses
+   validator-relative `form-stdlib/...` paths, and the registered gate was
+   rerun rather than leaving the inherited miss for a future caller.
 
 There is no unresolved error from this movement.
 
@@ -215,3 +222,29 @@ distinguish verifier from signer. Discomfort turned to gold when the proposed
 “distinct witness” binding was read adversarially and one secret was found
 capable of wearing two node numbers. Refusing that relabeling made the membrane
 smaller in claim and stronger in fact.
+
+## Correction witnessed later on 2026-07-26
+
+The final sentence under **Honest floor** named “public-key verification,
+delegation, and a lineage-aware authority policy” as the next membrane. That
+is implementation vocabulary, not a derivation from `axioms/core-axioms.form`
+and `form/form-stdlib/core-lexicon.fk`.
+
+The corrected next question is made from the closed core words:
+
+```text
+what make I know this say is from you
+```
+
+The HMAC organ can answer only the narrower terminal question:
+
+```text
+whether this say is same before and after
+```
+
+That correction is executable in
+`form/form-stdlib/whether-say-same.fk`. A successful shared-key comparison
+answers `1`; a mismatch answers `0`; missing comparison ground answers
+`nothing`; and the source question remains a `who` node. A signature or some
+other mechanism may later serve the open source question, but it is not the
+semantic root and is not presumed by this receipt.
