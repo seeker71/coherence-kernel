@@ -1,5 +1,5 @@
 #!/bin/sh
-# One registered local route with a Form-owned privacy-safe occurrence.
+# Native-first local route with a Form-owned privacy-safe occurrence.
 # Prompt and output live only in mode-600 temporary files and stdout; the
 # durable ledger receives hashes and bounded metadata only.
 
@@ -14,6 +14,22 @@ elif [ "$#" -ne 0 ]; then
     exit 2
 fi
 
+route=${LOCAL_MODEL_ROUTE:-form-metal}
+
+case "$route" in
+    form-metal|llama32.form-metal)
+        prompt=$(cat)
+        if [ -z "$prompt" ]; then
+            printf 'refusing an empty prompt\n' >&2
+            exit 2
+        fi
+        # Direct model execution: no socket, HTTP, JSON, Ollama, or llama.cpp.
+        # metal_ask stages the question-bound answer plus its 13-gate receipt.
+        exec "$NM_REPO_ROOT/form/native/metal/metal_ask.sh" \
+            "${FORM_METAL_STEPS:-12}" "$prompt"
+        ;;
+esac
+
 nm_require_command curl
 nm_require_command jq
 nm_require_command shasum
@@ -24,8 +40,26 @@ if [ ! -x "$NM_FKWU" ]; then
 fi
 
 ollama_url=${OLLAMA_URL:-http://127.0.0.1:11434}
-ollama_model=llama3.2:3b
-registered_model=base.llama32-3b-local
+case "$route" in
+    ollama-llama32)
+        ollama_model=llama3.2:3b
+        registered_model=base.llama32-3b-local
+        ;;
+    nanbeige42)
+        package_result=$("$NM_REPO_ROOT/form/scripts/nanbeige_gguf_verify.sh")
+        if ! printf '%s\n' "$package_result" | grep -q '^execution_admitted=1$'; then
+            printf 'Form refused the Nanbeige package\n%s\n' "$package_result" >&2
+            exit 1
+        fi
+        ollama_model=nanbeige42-local:Q4_K_M
+        registered_model=challenger.nanbeige42-3b-local
+        ;;
+    *)
+        printf 'unknown LOCAL_MODEL_ROUTE: %s\n' "$route" >&2
+        printf 'known routes: form-metal, llama32.form-metal, ollama-llama32, nanbeige42\n' >&2
+        exit 2
+        ;;
+esac
 ledger="$NM_STATE_DIR/events.jsonl"
 
 temp_dir=$(nm_new_temp_dir)

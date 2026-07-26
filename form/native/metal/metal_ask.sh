@@ -189,12 +189,31 @@ NPROMPT=$(echo "$RES"  | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="for" && $(i+2)=="
 DECODE_S=$(echo "$RES" | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="decode"){print $(i+1);exit}}')
 NFWD_DEC=$(echo "$RES" | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="further"){print $(i-1);exit}}')
 IDS=$(echo "$RES"      | awk -F': *' '/ids  :/{print $2;exit}')
-ANSWER=$(echo "$RES"   | sed -n 's/^ *text *: *"\(.*\)"$/\1/p')
+# The harness may render a decoded leading newline literally:
+#     text : "
+#     Reply with only"
+# Accept both that two-line spelling and the original one-line spelling.
+ANSWER=$(awk -v tag="$PATH_TAG" '
+    $0 ~ "^  " tag "[ :]" { in_result=1; next }
+    in_result && /text *:/ {
+        sub(/^ *text *: *"/, "")
+        if ($0 == "") {
+            if ((getline next_line) > 0) {
+                sub(/"$/, "", next_line)
+                print next_line
+            }
+            exit
+        }
+        sub(/"$/, "")
+        print
+        exit
+    }
+' "$work/gen.txt")
 NGEN=$(echo "$IDS" | tr ',' '\n' | grep -c '[0-9]')
-DECODE_TOKPS_MILLI=$(grep -A3 "^  $PATH_TAG" "$work/gen.txt" | awk '/decode-only/{for(i=1;i<=NF;i++) if($i=="decode-only"){printf "%d\n", $(i+1)*1000; exit}}')
-E2E_TOKPS_MILLI=$(grep -A3 "^  $PATH_TAG" "$work/gen.txt" | awk '/END-TO-END/{for(i=1;i<=NF;i++) if($i=="END-TO-END"){printf "%d\n", $(i+1)*1000; exit}}')
+DECODE_TOKPS_MILLI=$(grep -A5 "^  $PATH_TAG" "$work/gen.txt" | awk '/decode-only/{for(i=1;i<=NF;i++) if($i=="decode-only"){printf "%d\n", $(i+1)*1000; exit}}')
+E2E_TOKPS_MILLI=$(grep -A5 "^  $PATH_TAG" "$work/gen.txt" | awk '/END-TO-END/{for(i=1;i<=NF;i++) if($i=="END-TO-END"){printf "%d\n", $(i+1)*1000; exit}}')
 
-for v in PREFILL_S NPROMPT DECODE_S NFWD_DEC ANSWER; do
+for v in PREFILL_S NPROMPT DECODE_S NFWD_DEC ANSWER DECODE_TOKPS_MILLI E2E_TOKPS_MILLI; do
     [[ -z "${!v}" ]] && { echo "FAIL  could not read $v out of the lane's output — the harness's format moved"; exit 1; }
 done
 
