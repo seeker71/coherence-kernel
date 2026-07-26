@@ -24,12 +24,15 @@ paraphrase, and source protocol—not the full transmission body.
 ## What moved
 
 - Source 13 now identifies "The Light Hubs" as a metadata-only,
-  community-review source.
+  community-review source with exact recorded permission.
 - Hati Suci's exact-material term moved to `1`.
-- The live action moved to term 1: record Giles' reuse terms and Satsang's
-  selection receipt.
-- The source body remains unadmitted: rights are unknown and public segment
-  count is zero.
+- The initiating member reports Giles' grant for public quotation and
+  reproduction, translation, open-AI reasoning/training, attribution to
+  "Giles", and continuing revision/withdrawal.
+- The live action moved to term 2: record sacred, cultural, or community-use
+  restrictions.
+- The source body remains unadmitted: community review remains open, immutable
+  Git cannot honor withdrawal, and public segment count is zero.
 - Reported place, visionary, phenomenological, and practical claim planes stay
   distinct.
 
@@ -41,14 +44,17 @@ Observed on 2026-07-26:
 ./fkwu --src learn/tests/giles-light-hubs-candidate-band.fk
 -> 255
 
+./fkwu --src learn/tests/giles-light-hubs-permission-band.fk
+-> 1023
+
 ./fkwu --src learn/tests/hati-suci-core-text-invitation-band.fk
 -> 4095
 
 ./fkwu --src learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043002001, 3041003001, 1, nothing, 0, 1, 3044002001, 20260726]
+-> [3043003001, 3041003001, 2, nothing, 0, 1, 3044003001, 20260726]
 
 ./fkwu --src cognition/tests/core-text-36-layer-ingest-band.fk
--> [nothing, 0, 1, 3040004007, [6, 2, 2, 3], 6, 4, 36,
+-> [nothing, 0, 1, 3040004007, [6, 3, 2, 2], 6, 4, 36,
     3040007001, nothing, 14, 4095]
 
 invitation structural projection
@@ -61,7 +67,8 @@ core-text structural projection
 ## Honest boundary
 
 "Giles" is the attribution supplied in the conversation. Full name, original
-date, original carrier, and reuse conditions have not yet been recorded. The
+date, and original carrier have not yet been recorded. The permission is the
+initiating member's report of Giles' grant, not a direct signed artifact. The
 kernel knows what the supplied transmission says; it does not certify every
 visionary statement as an externally observed event.
 
@@ -73,6 +80,6 @@ state change—selection—rather than another generic node.
 **Most surprising teaching:** the visionary and practical halves share one
 small kernel: land, community, nature, practice, and service.
 
-**Where discomfort turned to gold:** copyright uncertainty could have frozen
-the work or encouraged an unearned public copy. Hash-plus-structure preserved
-exact identity and movement without taking Giles' permission for granted.
+**Where discomfort turned to gold:** the withdrawal promise exposed Git's
+irreversibility. Keeping the complete surface out of Git made revocability an
+architectural requirement instead of a comforting but false promise.
