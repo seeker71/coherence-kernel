@@ -338,6 +338,8 @@ extern double strtod(const char *, char **);
 extern void *popen(const char *, const char *);
 extern int pclose(void *);
 extern unsigned long fread(void *, unsigned long, unsigned long, void *);
+extern int mkstemp(char *);
+extern int snprintf(char *, unsigned long, const char *, ...);
 static char *fk_sb;
 static long long *fk_so;
 static long long *fk_sl;
@@ -640,9 +642,8 @@ static void fk_conf_load(void) {
         if (kj > 0) { fk_conf_n = fk_conf_n + 1; }
     }
 }
-/* fk_conf: config-file replacement for getenv on OUR toggles. Returns the value string, or 0 when
- * the key is absent OR set to "0"/"" -- so `if (fk_conf("X"))` is on iff X is present and non-zero,
- * matching the old env-presence semantics, and the FK_JIT `v[0] != '0'` check still holds. */
+/* Optional host configuration. Returns the value string, or 0 when the key is
+ * absent or explicitly zero. Execution capabilities do not depend on it. */
 static char *fk_conf(const char *key) {
     fk_conf_load();
     int i = 0;
@@ -829,6 +830,661 @@ static long long fk_metal_matvec_f32_native(long long mslv, long long kernelv, l
         n = FK_METAL_MATVEC_BUF_CAP;
     }
     return fk_sbuf(out, n);
+}
+#define FK_LOCAL_MODEL_GENERATE_UNLINKED (0 - 4611686018427387901LL)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((weak)) long long fk_local_model_generate_external(
+    const char *model, long long model_len,
+    const char *prompt, long long prompt_len,
+    long long n_predict, char *out, long long cap) {
+    (void)model;
+    (void)model_len;
+    (void)prompt;
+    (void)prompt_len;
+    (void)n_predict;
+    (void)out;
+    (void)cap;
+    return FK_LOCAL_MODEL_GENERATE_UNLINKED;
+}
+#else
+static long long fk_local_model_generate_external(
+    const char *model, long long model_len,
+    const char *prompt, long long prompt_len,
+    long long n_predict, char *out, long long cap) {
+    (void)model;
+    (void)model_len;
+    (void)prompt;
+    (void)prompt_len;
+    (void)n_predict;
+    (void)out;
+    (void)cap;
+    return FK_LOCAL_MODEL_GENERATE_UNLINKED;
+}
+#endif
+#define FK_LOCAL_MODEL_GENERATE_BUF_CAP 65536
+static long long fk_local_model_generate_native(long long modelv, long long promptv,
+                                                long long n_predict) {
+    const char *model;
+    const char *prompt;
+    long long model_len;
+    long long prompt_len;
+    if (fk_srange(modelv, &model, &model_len) == 0 ||
+        fk_srange(promptv, &prompt, &prompt_len) == 0) {
+        const char *m = "FAIL local_model_generate invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_LOCAL_MODEL_GENERATE_BUF_CAP];
+    long long n = fk_local_model_generate_external(
+        model, model_len, prompt, prompt_len, n_predict,
+        out, FK_LOCAL_MODEL_GENERATE_BUF_CAP);
+    if (n == FK_LOCAL_MODEL_GENERATE_UNLINKED) {
+        const char *m =
+            "NOTHING local_model_generate no linked local model carrier\n"
+            "rewitness-offer=link-local-model-carrier\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m =
+            "FAIL local_model_generate linked carrier returned error\n"
+            "rewitness-offer=inspect-local-model-carrier\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_LOCAL_MODEL_GENERATE_BUF_CAP) n = FK_LOCAL_MODEL_GENERATE_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+#define FK_METAL_MODEL_PORT_UNLINKED (0 - 4611686018427387900LL)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((weak)) long long fk_metal_model_open_external(
+    const char *path, long long path_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)path; (void)path_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_close_external(char *out, long long cap) {
+    (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_library_external(
+    const char *name, long long name_len,
+    const char *source, long long source_len,
+    char *out, long long cap) {
+    (void)name; (void)name_len; (void)source; (void)source_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_embed_external(
+    const char *library, long long library_len,
+    const char *kernel, long long kernel_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)kernel; (void)kernel_len;
+    (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_hc_begin_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_f16_matvec_external(
+    const char *library, long long library_len,
+    const char *kernel, long long kernel_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)kernel; (void)kernel_len;
+    (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_hc_split_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_hc_reduce_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len, char *out, long long cap) {
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_rmsnorm_external(
+    const char *library,long long library_len,const char *plan,long long plan_len,
+    char *out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_mx8_matvec_external(
+    const char *library,long long library_len,const char *plan,long long plan_len,
+    char *out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_state_save_external(
+    const char*name,long long name_len,char*out,long long cap){
+    (void)name;(void)name_len;(void)out;(void)cap;return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_state_load_external(
+    const char*name,long long name_len,char*out,long long cap){
+    (void)name;(void)name_len;(void)out;(void)cap;return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_rope_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_attention_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_hc_post_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_hash_route_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_moe_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_topk_route_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_hc_output_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_argmax_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_kv_round_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_cached_attention_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_compress_stage_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+#else
+static long long fk_metal_model_open_external(
+    const char *path, long long path_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)path; (void)path_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_close_external(char *out, long long cap) {
+    (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_library_external(
+    const char *name, long long name_len,
+    const char *source, long long source_len,
+    char *out, long long cap) {
+    (void)name; (void)name_len; (void)source; (void)source_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_embed_external(
+    const char *library, long long library_len,
+    const char *kernel, long long kernel_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)kernel; (void)kernel_len;
+    (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_hc_begin_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_f16_matvec_external(
+    const char *library, long long library_len,
+    const char *kernel, long long kernel_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)kernel; (void)kernel_len;
+    (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_hc_split_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_hc_reduce_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len, char *out, long long cap) {
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_rmsnorm_external(
+    const char *library,long long library_len,const char *plan,long long plan_len,
+    char *out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_mx8_matvec_external(
+    const char *library,long long library_len,const char *plan,long long plan_len,
+    char *out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_state_save_external(
+    const char*name,long long name_len,char*out,long long cap){
+    (void)name;(void)name_len;(void)out;(void)cap;return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_state_load_external(
+    const char*name,long long name_len,char*out,long long cap){
+    (void)name;(void)name_len;(void)out;(void)cap;return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_rope_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_attention_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_hc_post_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_hash_route_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_moe_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_topk_route_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_hc_output_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_argmax_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_kv_round_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_cached_attention_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_compress_stage_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+#endif
+#define FK_METAL_MODEL_PORT_BUF_CAP 8192
+static long long fk_metal_model_open_native(long long pathv, long long planv) {
+    const char *path;
+    const char *plan;
+    long long path_len;
+    long long plan_len;
+    if (fk_srange(pathv, &path, &path_len) == 0 ||
+        fk_srange(planv, &plan, &plan_len) == 0) {
+        const char *m = "FAIL metal_model_open invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_open_external(
+        path, path_len, plan, plan_len, out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m =
+            "NOTHING metal_model_open no linked Metal model port\n"
+            "rewitness-offer=link-metal-model-port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m =
+            "FAIL metal_model_open linked port returned error\n"
+            "rewitness-offer=inspect-metal-model-open\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_close_native(void) {
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_close_external(out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m = "NOTHING metal_model_close no linked Metal model port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m = "FAIL metal_model_close linked port returned error\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_library_native(long long namev, long long sourcev) {
+    const char *name;
+    const char *source;
+    long long name_len;
+    long long source_len;
+    if (fk_srange(namev, &name, &name_len) == 0 ||
+        fk_srange(sourcev, &source, &source_len) == 0) {
+        const char *m = "FAIL metal_model_library invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_library_external(
+        name, name_len, source, source_len, out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m =
+            "NOTHING metal_model_library no linked Metal model port\n"
+            "rewitness-offer=link-metal-model-port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m =
+            "FAIL metal_model_library linked port returned error\n"
+            "rewitness-offer=inspect-metal-model-library\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_embed_native(
+    long long libraryv, long long kernelv, long long planv) {
+    const char *library;
+    const char *kernel;
+    const char *plan;
+    long long library_len;
+    long long kernel_len;
+    long long plan_len;
+    if (fk_srange(libraryv, &library, &library_len) == 0 ||
+        fk_srange(kernelv, &kernel, &kernel_len) == 0 ||
+        fk_srange(planv, &plan, &plan_len) == 0) {
+        const char *m = "FAIL metal_model_embed invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_embed_external(
+        library, library_len, kernel, kernel_len, plan, plan_len,
+        out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m =
+            "NOTHING metal_model_embed no linked Metal model port\n"
+            "rewitness-offer=link-metal-model-port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m =
+            "FAIL metal_model_embed linked port returned error\n"
+            "rewitness-offer=inspect-metal-model-embed\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_hc_begin_native(long long libraryv, long long planv) {
+    const char *library;
+    const char *plan;
+    long long library_len;
+    long long plan_len;
+    if (fk_srange(libraryv, &library, &library_len) == 0 ||
+        fk_srange(planv, &plan, &plan_len) == 0) {
+        const char *m = "FAIL metal_model_hc_begin invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_hc_begin_external(
+        library, library_len, plan, plan_len, out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m = "NOTHING metal_model_hc_begin no linked Metal model port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m = "FAIL metal_model_hc_begin linked port returned error\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_f16_matvec_native(
+    long long libraryv, long long kernelv, long long planv) {
+    const char *library; const char *kernel; const char *plan;
+    long long library_len; long long kernel_len; long long plan_len;
+    if (fk_srange(libraryv, &library, &library_len) == 0 ||
+        fk_srange(kernelv, &kernel, &kernel_len) == 0 ||
+        fk_srange(planv, &plan, &plan_len) == 0) {
+        const char *m = "FAIL metal_model_f16_matvec invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_f16_matvec_external(
+        library, library_len, kernel, kernel_len, plan, plan_len,
+        out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m = "NOTHING metal_model_f16_matvec no linked Metal model port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m = "FAIL metal_model_f16_matvec linked port returned error\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_hc_split_native(long long libraryv, long long planv) {
+    const char *library; const char *plan;
+    long long library_len; long long plan_len;
+    if (fk_srange(libraryv, &library, &library_len) == 0 ||
+        fk_srange(planv, &plan, &plan_len) == 0) {
+        const char *m = "FAIL metal_model_hc_split invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_hc_split_external(
+        library, library_len, plan, plan_len, out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m = "NOTHING metal_model_hc_split no linked Metal model port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m = "FAIL metal_model_hc_split linked port returned error\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_hc_reduce_native(long long libraryv, long long planv) {
+    const char *library,*plan; long long library_len,plan_len;
+    if(fk_srange(libraryv,&library,&library_len)==0||fk_srange(planv,&plan,&plan_len)==0){
+        const char*m="FAIL metal_model_hc_reduce invalid string input\n";
+        return fk_sbuf(m,fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_hc_reduce_external(
+        library,library_len,plan,plan_len,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){
+        const char*m="NOTHING metal_model_hc_reduce no linked Metal model port\n";
+        return fk_sbuf(m,fk_cstrlen(m));
+    }
+    if(n<0){const char*m="FAIL metal_model_hc_reduce linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out,n);
+}
+static long long fk_metal_model_rmsnorm_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_rmsnorm invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_rmsnorm_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_rmsnorm no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_rmsnorm linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_mx8_matvec_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_mx8_matvec invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_mx8_matvec_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_mx8_matvec no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_mx8_matvec linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_state_native(long long namev,int save){
+    const char*name;long long nl;if(fk_srange(namev,&name,&nl)==0){
+        const char*m="FAIL metal_model_state invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=save?fk_metal_model_state_save_external(name,nl,out,FK_METAL_MODEL_PORT_BUF_CAP):
+        fk_metal_model_state_load_external(name,nl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_state no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_state linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_rope_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_rope invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_rope_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_rope no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_rope linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_attention_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_attention invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_attention_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_attention no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_attention linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_hc_post_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_hc_post invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_hc_post_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_hc_post no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_hc_post linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_hash_route_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_hash_route invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_hash_route_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_hash_route no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_hash_route linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_moe_native(long long librariesv,long long planv){
+    const char*libraries,*plan;long long ll,pl;
+    if(fk_srange(librariesv,&libraries,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_moe invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_moe_external(libraries,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_moe no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_moe linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_topk_route_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_topk_route invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_topk_route_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_topk_route no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_topk_route linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_hc_output_native(long long librariesv,long long planv){
+    const char*libraries,*plan;long long ll,pl;
+    if(fk_srange(librariesv,&libraries,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_hc_output invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_hc_output_external(libraries,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_hc_output no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_hc_output linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_argmax_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_argmax invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_argmax_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_argmax no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_argmax linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_kv_round_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_kv_round invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_kv_round_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_kv_round no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_kv_round linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_cached_attention_native(long long librariesv,long long planv){
+    const char*libraries,*plan;long long ll,pl;
+    if(fk_srange(librariesv,&libraries,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_cached_attention invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_cached_attention_external(libraries,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_cached_attention no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_cached_attention linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_compress_stage_native(long long librariesv,long long planv){
+    const char*libraries,*plan;long long ll,pl;
+    if(fk_srange(librariesv,&libraries,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_compress_stage invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_compress_stage_external(libraries,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_compress_stage no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_compress_stage linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
 }
 /* ── host sense-channel carriers: camera (world-video) + mic (world-audio) ── The two conditions of
  * host-kernel.form, made concrete: ALLOW-PRESENCE (detect the device through the host's own OS API)
@@ -1991,7 +2647,7 @@ static long long fk_native_call(const unsigned char *code, long long n, long lon
 extern void *mmap(void *, unsigned long, int, int, int, long);
 extern int mprotect(void *, unsigned long, int);
 static long long fk_native_call(const unsigned char *code, long long n, long long arg) {
-#if defined(__x86_64__) || defined(__amd64__)
+#if defined(__x86_64__) || defined(__amd64__) || defined(__aarch64__) || defined(__arm64__)
     void *mem = mmap(0, (unsigned long)n, 0x3, 0x1002, -1, 0);
     /* RW, MAP_PRIVATE|MAP_ANON(bsd) */
     if (mem == (void *)-1) {
@@ -2005,6 +2661,7 @@ static long long fk_native_call(const unsigned char *code, long long n, long lon
     if (mprotect(mem, (unsigned long)n, 0x5) != 0) {
         return -1;
     }
+    __builtin___clear_cache((char *)mem, (char *)mem + n);
     /* RX */
     long long (*fn)(long long) = (long long (*)(long long))mem;
     return fn(arg);
@@ -2016,6 +2673,30 @@ static long long fk_native_call(const unsigned char *code, long long n, long lon
 #endif
 }
 #endif
+/* Generic W^X carrier: Form owns the target byte image; this membrane only
+ * validates a byte list, installs it for the current ISA, and calls it with
+ * one tagged Value-ABI argument. */
+static long long fk_native_call_bytes(long long image, long long arg) {
+    static unsigned char bytes[65536];
+    long long n = 0;
+    long long p = image >> 1;
+    while (p >= 1 && p <= fk_hp) {
+        long long v = fk_hh[p];
+        if ((v & 1) != 0) {
+            return fk_nothing;
+        }
+        v = v >> 1;
+        if (v < 0 || v > 255 || n >= 65536) {
+            return fk_nothing;
+        }
+        bytes[n++] = (unsigned char)v;
+        p = fk_ht[p] >> 1;
+    }
+    if (n == 0 || p != 0) {
+        return fk_nothing;
+    }
+    return fk_native_call(bytes, n, arg);
+}
 static long long fk_native_call_test(long long arg) {
 /* lowered bytes of long long f(long long a){ return a + 1; } — arg1 in RCX (Win64) / RDI (SysV) */
 #if defined(_WIN32)
@@ -4140,11 +4821,33 @@ static long long fk_http_dict_with_headers(long long status, long long headers, 
     return d;
 }
 static long long fk_host_exec(long long cmdv, long long inputv) {
-    (void)inputv;
     char cmd[8192];
+    char input_path[] = "/tmp/form-host-exec-XXXXXX";
+    char wrapped[16384];
     fk_cstr(cmdv, cmd, 8192);
-    void *fp = popen(cmd, "r");
+    long long isa = inputv >> 1;
+    long long input_len = (isa >= 0 && isa < fk_sp) ? fk_sl[isa] : 0;
+    int input_fd = mkstemp(input_path);
+    if (input_fd < 0) {
+        return fk_sbuf("", 0);
+    }
+    long long written = 0;
+    while (written < input_len) {
+        long long n = (long long)write(
+            input_fd, fk_sb + fk_so[isa] + written,
+            (unsigned long)(input_len - written));
+        if (n <= 0) {
+            close(input_fd);
+            unlink(input_path);
+            return fk_sbuf("", 0);
+        }
+        written = written + n;
+    }
+    close(input_fd);
+    snprintf(wrapped, sizeof(wrapped), "( %s ) < '%s'", cmd, input_path);
+    void *fp = popen(wrapped, "r");
     if (fp == 0) {
+        unlink(input_path);
         return fk_sbuf("", 0);
     }
     static char hbuf[262144];
@@ -4157,6 +4860,7 @@ static long long fk_host_exec(long long cmdv, long long inputv) {
         total = total + (long long)got;
     }
     pclose(fp);
+    unlink(input_path);
     return fk_sbuf(hbuf, total);
 }
 static long long fk_sock_request(long long hostv, long long portv, long long reqv) {
@@ -5425,7 +6129,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_vsp = b12;
         return fk_offer_ack(c12, 1, r12);
     }
-    if (t == 240) {
+    if (t == 245) {
         long long c240 = fk_node[i][1];
         if (c240 < 0 || c240 >= FK_FN_CAP) {
             return fk_nothing;
@@ -6825,6 +7529,141 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 215) {
         return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1;
     }
+    if (t == 239) {
+        long long image = fk_walk(fk_node[i][1], fp);
+        long long arg = fk_walk(fk_node[i][2], fp);
+        return fk_native_call_bytes(image, arg);
+    }
+    if (t == 245) {
+        long long model = fk_walk(fk_node[i][1], fp);
+        fk_vp(model);
+        long long prompt = fk_walk(fk_node[i][2], fp);
+        fk_vp(prompt);
+        long long n_predict = fk_walk(fk_node[i][3], fp) >> 1;
+        fk_vsp = fk_vsp - 2;
+        return fk_local_model_generate_native(
+            fk_vs[fk_vsp], fk_vs[fk_vsp + 1], n_predict);
+    }
+    if (t == 246) {
+        long long path = fk_walk(fk_node[i][1], fp);
+        fk_vp(path);
+        long long plan = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_metal_model_open_native(fk_vs[fk_vsp], plan);
+    }
+    if (t == 247) {
+        return fk_metal_model_close_native();
+    }
+    if (t == 248) {
+        long long name = fk_walk(fk_node[i][1], fp);
+        fk_vp(name);
+        long long source = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_metal_model_library_native(fk_vs[fk_vsp], source);
+    }
+    if (t == 249) {
+        long long library = fk_walk(fk_node[i][1], fp);
+        fk_vp(library);
+        long long kernel = fk_walk(fk_node[i][2], fp);
+        fk_vp(kernel);
+        long long plan = fk_walk(fk_node[i][3], fp);
+        fk_vsp = fk_vsp - 2;
+        return fk_metal_model_embed_native(
+            fk_vs[fk_vsp], fk_vs[fk_vsp + 1], plan);
+    }
+    if (t == 250) {
+        long long library = fk_walk(fk_node[i][1], fp);
+        fk_vp(library);
+        long long plan = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_metal_model_hc_begin_native(fk_vs[fk_vsp], plan);
+    }
+    if (t == 251) {
+        long long library = fk_walk(fk_node[i][1], fp); fk_vp(library);
+        long long kernel = fk_walk(fk_node[i][2], fp); fk_vp(kernel);
+        long long plan = fk_walk(fk_node[i][3], fp);
+        fk_vsp = fk_vsp - 2;
+        return fk_metal_model_f16_matvec_native(
+            fk_vs[fk_vsp], fk_vs[fk_vsp + 1], plan);
+    }
+    if (t == 252) {
+        long long library = fk_walk(fk_node[i][1], fp); fk_vp(library);
+        long long plan = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_metal_model_hc_split_native(fk_vs[fk_vsp], plan);
+    }
+    if (t == 253) {
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_hc_reduce_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==254){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_rmsnorm_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==255){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_mx8_matvec_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==139)return fk_metal_model_state_native(fk_walk(fk_node[i][1],fp),1);
+    if(t==140)return fk_metal_model_state_native(fk_walk(fk_node[i][1],fp),0);
+    if(t==141){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_rope_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==142){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_attention_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==143){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_hc_post_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==144){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_hash_route_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==145){
+        long long libraries=fk_walk(fk_node[i][1],fp);fk_vp(libraries);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_moe_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==146){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_topk_route_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==147){
+        long long libraries=fk_walk(fk_node[i][1],fp);fk_vp(libraries);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_hc_output_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==148){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_argmax_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==149){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_kv_round_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==150){
+        long long libraries=fk_walk(fk_node[i][1],fp);fk_vp(libraries);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_cached_attention_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==151){
+        long long libraries=fk_walk(fk_node[i][1],fp);fk_vp(libraries);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_compress_stage_native(fk_vs[fk_vsp],plan);
+    }
     if (t == 216) {
         return fk_wifi_ssid();
     }
@@ -7369,6 +8208,22 @@ static long long fk_optab_find(long long s, long long n) {
         i = i + 1;
     }
     return -1;
+}
+static const char *fk_opcode_identity(char out[32]) {
+    unsigned long long h = 1469598103934665603ULL;
+    long long i = 0;
+    while (i < fk_optab_n) {
+        const unsigned char *p = (const unsigned char *)fk_optab[i].name;
+        while (*p) {
+            h = (h ^ (unsigned long long)*p) * 1099511628211ULL;
+            p = p + 1;
+        }
+        h = (h ^ (unsigned long long)fk_optab[i].arity) * 1099511628211ULL;
+        h = (h ^ (unsigned long long)fk_optab[i].tag) * 1099511628211ULL;
+        i = i + 1;
+    }
+    sprintf(out, "op-%016llx", h);
+    return out;
 }
 /* rewrite-table lookup: source symbol -> row index in fk_rwtab, or -1. */
 static long long fk_rwtab_find(long long s, long long n) {
@@ -10039,6 +10894,15 @@ static void fk_jemit(long long i, int tail) {
  * wrapper (tag 111, slot-count literal) when present; else = arity. */
 /* lower fn f's body into fk_jb; returns length if the whole tree is in-family, else 0. */
 static long long fk_jit_lower(long long f) {
+#if !defined(__x86_64__) && !defined(__amd64__) && !defined(_M_X64)
+    /*
+     * This temporary checkout lowerer emits x86-64 bytes.  Refuse before
+     * claiming crystallization on another ISA; the Form-owned target lowerers
+     * remain the authority for arm64 and other lanes.
+     */
+    (void)f;
+    return 0;
+#else
     /* every current call site already validates f before calling in, but fk_fn[f]
      * below was read unconditionally while the fk_fnar[f] read two lines down was
      * already guarded -- check once, up front, so both reads share one invariant. */
@@ -10092,6 +10956,7 @@ static long long fk_jit_lower(long long f) {
         return 0;
     }
     return fk_jbp;
+#endif
 }
 /* install fk_jb[0..n) executable and call it with an args array (tagged values). */
 static long long fk_native_call_args(const unsigned char *code, long long n, long long *args) {
@@ -11213,13 +12078,14 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     fk_fkb_write_overflow = 0;
     int ok = 1;
     char canon[4096];
+    char opcode_id[32];
     ok = ok && fk_write_all_raw(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
     ok = ok && fk_fkb_write_u32(fd, 4);
     ok = ok && fk_fkb_write_cstr(fd, fk_path_canon_id(src_path, canon));
     ok = ok && fk_fkb_write_cstr(fd, source_hash);
     ok = ok && fk_fkb_write_signed(fd, source_mtime > 0 ? source_mtime : 1);
-    ok = ok && fk_fkb_write_cstr(fd, fkb_path);
+    ok = ok && fk_fkb_write_cstr(fd, fk_opcode_identity(opcode_id));
     ok = ok && fk_fkb_write_signed(fd, 1);
     ok = ok && fk_fkb_write_signed(fd, fk_fn_count);
     long long i = 0;
@@ -11550,7 +12416,10 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     if (stored_source_mtime != expected_source_mtime) {
         source_identity_ok = 0;
     }
-    fk_fkb_skip_string();
+    char opcode_id[32];
+    if (!fk_fkb_read_string_matches_cstr(fk_opcode_identity(opcode_id))) {
+        source_identity_ok = 0;
+    }
     long long sealed = fk_fkb_read_signed();
     if (fk_fkb_bad) {
         fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
@@ -11751,7 +12620,10 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     if (expected_source_mtime > 0 && stored_source_mtime != expected_source_mtime) {
         source_identity_ok = 0;
     }
-    fk_fkb_skip_string();
+    char opcode_id[32];
+    if (!fk_fkb_read_string_matches_cstr(fk_opcode_identity(opcode_id))) {
+        source_identity_ok = 0;
+    }
     long long sealed = fk_fkb_read_signed();
     if (fk_fkb_bad) {
         return 0;
@@ -12347,11 +13219,8 @@ static int fk_run_src(const char *path, long long arg) {
         printf("[scan] lowered=%lld bailed=%lld total=%lld\n", ok, bail, ok + bail);
     }
     if (fk_nerr == 0) {
-        char *je = fk_conf("FK_JIT");
-        long long want = (je && je[0] && je[0] != 48) ? 1 : 0;
-        if (want) {
-            fk_lower_tail_tramp = 1;
-        }
+        long long want = 1;
+        fk_lower_tail_tramp = 1;
         long long root = fk_fn[0];
         long long rt = fk_node[root][0];
         if (want && (rt == 12 || rt == 240 || rt == 241)) {
@@ -12623,8 +13492,7 @@ static int fk_run_feval(const char *path) {
         fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
     }
     {
-        char *je = fk_conf("FK_JIT");
-        fk_feval_jit_on = (je && je[0] && je[0] != 48) ? 1 : 0;
+        fk_feval_jit_on = 1;
         char *jh = fk_conf("FK_JIT_HOT");
         if (jh && jh[0]) {
             long long h = atoi(jh);
