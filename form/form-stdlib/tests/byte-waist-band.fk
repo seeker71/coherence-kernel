@@ -24,13 +24,56 @@
 ; fail, and it goes red on any arm where they come apart — which is the only
 ; honest way to pin a divergence in a four-way band.
 ;
-; Verdict 63 when every claim lands:
+; Bits 64 and 128, added 2026-07-26, pin the rule that came out of counting the
+; 191 `(ord (char_at …))` sites in this tree and RUNNING a sample of them rather
+; than reading them. Three cells that looked like the next `cur-peek` — json.fk,
+; llama3-pretokenize.fk, escape-reader.fk — turned out clean when run on real
+; multilingual text, and grammar-chars.fk's `cm-string` matches a literal with a
+; glyph in it on all four arms even though its `cs-peek-cp` is `cur-peek`'s twin
+; body for body. The reason is the same in every case:
+;
+;   **the fault bites at an ASYMMETRY, not at the accessor.**
+;
+; Where both sides of a comparison go through `char_at`, every arm agrees — even
+; where `char_at` answers -1 inside a glyph, because it answers -1 on both sides.
+; Where one side reads a TRUE byte and the other reads through `char_at`, the arms
+; come apart. That is why 83 of the 87 comparison sites cannot bite: their other
+; side is a literal ASCII constant, which -1 never equals on any arm. And it is
+; why `bmf-core`'s `match-lit` broke — it walked the pattern with `str_byte_at`
+; and the source with `cur-peek`, one true byte against one floored read.
+;
+; Measured at offset 1 of "Ωb", strictly inside the two-byte glyph:
+;
+;                                          fkwu   go   rust   ts
+;   (eq (ord (char_at s 1)) (ord (char_at s 1)))   1     1     1    1   symmetric
+;   (eq (str_byte_at s 1)   (ord (char_at s 1)))   1     0     0    0   asymmetric
+;
+; And `char_at` itself has THREE semantics across the seven evaluators, which is
+; why the mixed form is asserted nowhere below. Over "Ωb", (len · ord · true byte):
+;
+;                        offset 0                offset 1 (inside the glyph)
+;   fkwu                 1 · 206 · 206           1 · 169 · 169   one raw byte
+;   go / rust heavy      2 · 206 · 206           0 ·  -1 · 169   whole char, first byte
+;   ts heavy             2 · 937 · 206           0 ·  -1 · 169   whole char, codepoint
+;   the three walkers    1 · 206 · 206           1 · 169 · 169   one raw byte
+;
+; The heavy go and rust kernels agree with fkwu on `ord` at a character start and
+; disagree on `str_len` of the same read — so "does char_at give the true byte"
+; and "does char_at give one byte" are NOT the same question there, which is why
+; the first draft of bit 128 asked the second and went red on two arms. Recorded
+; rather than smoothed: `str_byte_at` is the only one of the three that answers
+; the same on all seven.
+;
+; Verdict 255 when every claim lands:
 ;   1   DECOMPOSE   — str_byte_at reads both bytes of a two-byte glyph
 ;   2   MEASURE     — str_len counts bytes, not characters
 ;   4   ASCII DUAL  — byte_to_str is the exact dual for every n in 0..127
 ;   8   JOIN        — str_concat joins byte-exactly across a character boundary
 ;   16  LINKED      — dual-holds?(n) equals one-byte?(n) at 128, 169, 206, 255
 ;   32  LITERAL     — every byte offset of a mixed-script literal reads back
+;   64  SYMMETRY    — a comparison of char_at against itself holds inside a glyph
+;   128 JOIN OFFSET — str_byte_at is offset-stable across a concatenation seam,
+;                     read from inside the glyphs on either side of it
 (do
     ;; the exact dual, asked one byte at a time
     (defn bw-dual? (n) (if (eq (str_byte_at (byte_to_str n) 0) n) 1 0))
@@ -72,4 +115,21 @@
                                (and (eq (str_byte_at s 2) 43)
                                     (eq (str_byte_at s 3) 49))))) 32 0))
 
-    (add c0 (add c1 (add c2 (add c3 (add c4 c5))))))
+    ;; 64 — symmetry: char_at read against itself, strictly inside the glyph.
+    ;;      True on every arm, including the three where the read is -1.
+    (let g "Ωb")
+    (let c6 (if (eq (ord (char_at g 1)) (ord (char_at g 1))) 64 0))
+
+    ;; 128 — offset stability under join, across a character boundary. Every
+    ;;       byte-walking scanner in this tree depends on it: the byte at
+    ;;       offset i of (str_concat a b) is a's byte i while i < len a, and
+    ;;       b's byte (i - len a) after. Checked at the two offsets INSIDE the
+    ;;       glyphs on either side of the seam, which is where it could fail.
+    (defn bw-join-at? (a b i)
+        (if (lt i (str_len a))
+            (if (eq (str_byte_at (str_concat a b) i) (str_byte_at a i)) 1 0)
+            (if (eq (str_byte_at (str_concat a b) i) (str_byte_at b (sub i (str_len a)))) 1 0)))
+    (let c7 (if (and (and (bw-join-at? "Ω" "€" 1) (bw-join-at? "Ω" "€" 2))
+                     (and (bw-join-at? "Ω" "€" 4) (bw-join-at? "Ω" "€" 0))) 128 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))
