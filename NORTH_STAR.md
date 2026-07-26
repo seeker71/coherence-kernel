@@ -189,11 +189,16 @@ BMF-style grammar in the translation pipeline. The shelf exists and grows by
 rows (`nl-tongues.fk`): a tongue is a grammar (word order + function words as
 data), a lexicon (tongue-keyed triples), and a decoder template — never an
 engine change. Floor at seating: thirteen tongues across six scripts, one
-meaning interning to ONE pivot node from every door; the ASCII slice four-way
-proven (nl-many-latin 1023), the full shelf fourth-arm-proven (nl-many
-16777215) and blocked from four-way by the cross-kernel string-unit seam
-(cursor unit parity is the shelf's named next door). No tongue is favored;
-the copula moves, the node does not.
+meaning interning to ONE pivot node from every door. **The whole shelf is
+four-way as of 2026-07-26** — fourteen tongues now, `nl-many` 67108863 on
+fkwu, go, rust and ts. It was fourth-arm-only until that date, blocked by the
+cross-kernel string-unit seam, and this paragraph named cursor unit parity as
+the shelf's next door. The door was one line wide: `cur-peek` stepped the
+cursor with `(ord (char_at s p))`, which is a byte on fkwu, −1 inside a
+character on go and rust, and the whole codepoint at a character start on ts.
+It steps with `str_byte_at` now. Before that line changed, the six-script band
+did not disagree on the other three kernels — it crashed there. No tongue is
+favored; the copula moves, the node does not.
 
 **Minimal disk is the same law as minimal kernel.** Measured 2026-07-17: the
 meaning of this body (learn, observe, receipts, docs, teachings, stdlib

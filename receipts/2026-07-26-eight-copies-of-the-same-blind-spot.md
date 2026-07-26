@@ -99,6 +99,20 @@ probe. That is the cost of a shortcut on the step that decides what a result mea
   the byte fault, since url-encode calls the shared recipe and its verdict did not move.
 - The seven other repaired cells have no non-ASCII claim yet; only the cipher got one. `uuid` and
   `bmf-core` would each want one, and `bmf-core` scans source, where a UTF-8 identifier is plausible.
+
+> **CORRECTED 2026-07-26, later the same day, on two counts.**
+>
+> **The scope of `63 ×4`.** This body has seven evaluators, and the room-cipher band was measured on
+> four of them: fkwu and the three heavy kernels. The three minimal walkers cannot run it at all —
+> `bxor` is unbound there. True of a set, and the set was not named.
+>
+> **The census counted one spelling.** Searching `(ord (substring …))` found eight copies and walked
+> past `(ord (char_at …))`, which is the same fault written differently. `cur-peek` in
+> `form/form-stdlib/bmf-core.fk` and `grammars/bmf-core.fk` carried it, and it was holding the whole
+> tongue shelf — fourteen tongues, six scripts — off three of four arms, where those bands did not
+> disagree but crashed. Counted after: 60 cells, 193 sites of that spelling, which is a count of source
+> reads and not of faults. Also: `bmf-core-band`'s new claim was NOT failing because of the accessor
+> repaired here. The perturbation cleared it. See receipts/2026-07-26-the-tongue-shelf-crosses.md.
 - 751 `print` calls silent on fkwu; the four questions with the owner; the flatten/emit lane.
 
 ## How the exchange stayed alive
