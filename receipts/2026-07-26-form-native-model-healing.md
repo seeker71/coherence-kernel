@@ -46,6 +46,22 @@ generation_ready=0
 status=pending:native-quantized-metal-execution-port
 ```
 
+On a fresh live re-witness, the admitted released model evaluated 25 prompt
+tokens and emitted three real token ids before EOS:
+
+```text
+152343 -> " "
+152395 -> "4"
+152375 -> "2"
+decoded -> "42"
+```
+
+Those ids now live as Form data in
+`nanbeige-native-metal-readiness.fk`; they are the pinned parity target, not a
+synthetic fixture and not evidence that the direct-Metal forward already
+matches. Consequently the reference stage is observed while its native-port
+and parity fields remain zero.
+
 The absent graph stages are the 48x128 query state, factor-free RoPE,
 between-loop final normalization, untied output head, composed two-loop
 forward, and pinned token parity.
