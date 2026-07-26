@@ -37,7 +37,9 @@ Hati Suci's sacred, cultural, or community-use restrictions remained a
 separate gate. The initiating member answered that gate with `none`, so no
 additional restriction is recorded. The same member answers benefit and
 reciprocity with `none`, and freshness with `none`: no scheduled review,
-re-witness on change. The next actionable reply is final Satsang ratification.
+re-witness on change. The initiating member now reports final Satsang
+ratification. The next actionable reply selects a revocable full-body carrier
+or withholds the complete surface.
 
 ## Witness
 
@@ -48,7 +50,7 @@ Observed on 2026-07-26:
 -> 1023
 
 ./fkwu --src learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043010001, 3041003001, 9, nothing, 0, 1, 3044010001, 20260726]
+-> [3043011001, 3041003001, 10, nothing, 0, 1, 3044011001, 20260726]
 
 ./fkwu --src cognition/tests/core-text-36-layer-ingest-band.fk
 -> [nothing, 0, 1, 3040004007, [6, 3, 2, 2], 6, 4, 36,

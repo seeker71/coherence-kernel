@@ -34,20 +34,22 @@ names Hati Suci as the household's first field.
 - no additional benefit or reciprocity condition;
 - no scheduled review, with re-witness on change;
 - all nine terms complete;
-- current action: final Satsang ratification;
+- member-witnessed final Satsang ratification;
+- invitation acknowledgement `1` and source handoff ready;
+- current action: revocable-carrier selection or explicit withholding;
 - a four-arm acknowledgement: `nothing | 0 | 1 | node`.
 
-The current acknowledgement is a concrete final-ratification action node, not
-a generic review marker. Its four replies are: no observed ratification,
-decline/require changes, ratify the complete packet, or counteroffer a precise
-amendment.
+The invitation acknowledgement is now `1`. Its alternative is a concrete
+revocable-carrier handoff, with four replies: no observed carrier decision,
+withhold the complete surface, select an exact removable steward-controlled
+carrier, or propose another precise carrier.
 
 Source row 13 identifies "The Light Hubs" by exact SHA-256 as metadata-only.
 No Hati Suci text segment was added. The recorded withdrawal right cannot be
 honestly implemented by publishing the body into immutable Git. The cultural
 restriction, benefit, and freshness terms are confirmed. Final Satsang
-ratification and a revocable carrier still cross the gate before the complete
-surface enters.
+ratification is member-witnessed, while a revocable carrier still crosses the
+gate before the complete surface enters.
 
 ## Witness
 
@@ -63,7 +65,7 @@ Observed on 2026-07-26:
 
 ./fkwu --src \
   learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043010001, 3041003001, 9, nothing, 0, 1, 3044010001, 20260726]
+-> [3043011001, 3041003001, 10, nothing, 0, 1, 3044011001, 20260726]
 ```
 
 The structural source was expanded as documented preludes + recipe + band
@@ -89,7 +91,8 @@ Giles' scoped permission; no direct signed author artifact is fabricated.
 The same member reports no additional cultural restriction or benefit
 condition. No scheduled review is required; change triggers re-witness. Giles'
 full name, revocable carrier, original date, and original carrier remain open.
-Final Satsang ratification has not yet been reported.
+Final Satsang ratification is the initiating member's report, not a direct
+signed circle artifact.
 
 ## Closing
 

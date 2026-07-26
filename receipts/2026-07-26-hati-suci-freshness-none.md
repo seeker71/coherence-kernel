@@ -16,13 +16,14 @@ change triggers re-witness, and revision or withdrawal remains immediate.
 
 - freshness/review term 8 moves from pending to confirmed;
 - all nine ordered consent terms are now complete;
-- member-reported terms remain distinct from final circle ratification;
-- source 13 remains in community review for that ratification;
+- member-reported terms remained distinct from final circle ratification;
+- the initiating member later reports that ratification;
+- source 13's protocol opens for the exact material;
 - source 13 remains metadata-only with zero public text segments;
 - the complete surface still needs a revocable carrier.
 
-The next question is: does the Hati Suci Satsang circle ratify the complete
-nine-term packet?
+The next question is now: should the complete surface remain unpublished, or
+which revocable carrier should hold it?
 
 ## Witness
 
@@ -33,7 +34,7 @@ Observed on 2026-07-26:
 -> 4095
 
 ./fkwu --src learn/tests/hati-suci-core-text-next-action-witness.fk
--> [3043010001, 3041003001, 9, nothing, 0, 1, 3044010001, 20260726]
+-> [3043011001, 3041003001, 10, nothing, 0, 1, 3044011001, 20260726]
 
 ./fkwu --src cognition/tests/core-text-36-layer-ingest-band.fk
 -> [nothing, 0, 1, 3040004007, [6, 3, 2, 2], 6, 4, 36,

@@ -55,9 +55,9 @@ At the 2026-07-26 witness epoch, the intended seed partition is:
   - StoryWeaver requires an exact book and complete creator attribution;
   - Giles' "The Light Hubs" has exact member-witnessed permission and no
     additional cultural or benefit conditions; freshness has no scheduled
-    review and re-witnesses on change. Final Satsang ratification remains under
-    community review; the source is metadata-only and awaits a revocable
-    carrier.
+    review and re-witnesses on change. Member-witnessed Satsang ratification
+    opens the protocol; the source remains metadata-only and awaits a
+    revocable carrier.
 - 2 refusals:
   - FirstVoices forbids scraping, merging, and republication without authority;
   - SuttaCentral requests that its content not be used to create generative-AI
@@ -139,8 +139,9 @@ hash as Satsang's selected first material. The registry has thirteen rows.
 Member-witnessed scoped permission moves the new metadata-only row from
 unresolved to review. The initiating member then records no additional
 cultural restriction or benefit condition. Freshness is then recorded as no
-scheduled review, with re-witness on change. Final ratification and
-metadata-only state still prevent admission, and no Hati Suci text body enters.
+scheduled review, with re-witness on change. Final ratification is then
+member-witnessed, opening the protocol. Metadata-only state still prevents
+admission, and no Hati Suci text body enters.
 
 Neighboring laws remained present:
 
