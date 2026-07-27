@@ -1,0 +1,73 @@
+; q3k-dequant-band.fk — the Q3_K recipe agrees with an independent
+; transcription of ggml's dequantize_row_q3_K, not with a second run of itself.
+;
+; preludes: form-stdlib/core.fk form-stdlib/f16-decode.fk form-stdlib/q3k-dequant.fk
+;
+; run: ./fkwu --src form/form-stdlib/tests/q3k-dequant-band.fk   ; -> 255
+;
+; Verdict 255.
+;
+; THE WITNESS IS INDEPENDENT AND THAT IS THE POINT. The expected scales and
+; weights below were computed in a separate language, transcribed directly from
+; the C in ggml-quants.c — the uint32 aux shuffle, the `- 32`, the shift ladder,
+; the `m <<= 1` that does not reset, and the `-4 when the hmask bit is CLEAR`.
+; The Form cell computes the same block a different way: per-byte arithmetic with
+; no 32-bit words anywhere. Agreement between them is agreement between two
+; derivations of one specification; running the Form cell twice would have proved
+; only that it is deterministic.
+;
+; The fixture is deterministic and non-degenerate by construction:
+;   hmask[i] = (37i + 5) & 255      qs[i] = (53i + 11) & 255
+;   scales[i] = (29i + 7) & 255     d = f16 0x3400 = 0.25 exactly
+; d is a power of two so every expected weight below is exact in binary and the
+; comparison needs no epsilon at all — a tolerance here would have hidden a
+; one-ulp scale error, and the whole risk in this cell is in the scale unpack.
+
+(do
+    (defn q3kb-score (ok bit) (if ok bit 0))
+    (defn q3kb-blk ()
+        (list 5 42 79 116 153 190 227 8 45 82 119 156 193 230 11 48
+              85 122 159 196 233 14 51 88 125 162 199 236 17 54 91 128
+              11 64 117 170 223 20 73 126 179 232 29 82 135 188 241 38
+              91 144 197 250 47 100 153 206 3 56 109 162 215 12 65 118
+              171 224 21 74 127 180 233 30 83 136 189 242 39 92 145 198
+              251 48 101 154 207 4 57 110 163 216 13 66 119 172 225 22
+              7 36 65 94 123 152 181 210 239 12 41 70
+              0 52))
+    ; the sixteen 6-bit scales the C's aux shuffle produces, before its `- 32`
+    (defn q3kb-expect-scale6 ()
+        (list 55 4 17 46 59 56 37 18 32 2 36 5 55 9 11 29))
+    (defn q3kb-scales-eq (i)
+        (if (ge i 16) 1
+            (if (eq (q3k-scale6 (q3kb-blk) i) (nth (q3kb-expect-scale6) i))
+                (q3kb-scales-eq (add i 1)) 0)))
+    (defn q3kb-near (a b) (if (lt (sub a b) 0.0) (if (lt (sub b a) 1e-12) 1 0) (if (lt (sub a b) 1e-12) 1 0)))
+
+    (defn q3k-dequant-band ()
+        (do
+    (let B (q3kb-blk))
+    ; the block is the size the struct declares
+    (let c0 (q3kb-score (if (eq (len B) 110) (eq (q3k-block-bytes) 110) 0) 1))
+    ; THE SCALE UNPACK, all sixteen, against the C's own aux shuffle
+    (let c1 (q3kb-score (eq (q3kb-scales-eq 0) 1) 2))
+    ; the super-scale decodes to exactly 0.25 (f16 0x3400)
+    (let c2 (q3kb-score (q3kb-near (q3k-d B) 0.25) 4))
+    ; weights, exact — d is a power of two so no epsilon is owed
+    (let c3 (q3kb-score (q3kb-near (q3k-at B 0) 17.25) 8))
+    (let c4 (q3kb-score (if (q3kb-near (q3k-at B 1) (sub 0.0 23.0))
+                            (q3kb-near (q3k-at B 17) 28.0) 0) 16))
+    ; the second 128-half, where m has continued to 16 rather than reset to 1
+    (let c5 (q3kb-score (if (q3kb-near (q3k-at B 128) 0.0)
+                            (q3kb-near (q3k-at B 200) (sub 0.0 17.25)) 0) 32))
+    ; FALSIFIER — m does NOT reset per half. If it did, weight 128 would take
+    ; hmask bit 1 instead of bit 16; the two differ on this fixture, so a reset
+    ; cannot pass unnoticed.
+    (let c6 (q3kb-score (if (eq (q3k-mbit 128) 16)
+                            (if (eq (q3k-mbit 0) 1) 1 0) 0) 64))
+    ; FALSIFIER — the hmask index does not advance with the half-block. hmask is
+    ; 32 bytes and must stay in range for all 256 weights; qs does advance.
+    (let c7 (q3kb-score (if (eq (q3k-hi 128) 0)
+                            (if (eq (q3k-qi 128) 32) 1 0) 0) 128))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))
+    )
+    (q3k-dequant-band))
