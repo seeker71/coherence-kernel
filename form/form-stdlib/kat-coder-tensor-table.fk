@@ -47,7 +47,7 @@
 ;   full_attention_interval 4, block_count 41 — 40 layers plus one
 ;     nextn_predict_layers MTP head.
 ;
-; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk
 
 (do
     ; ── the header's own numbers ─────────────────────────────────────────
@@ -91,6 +91,53 @@
         (if (eq (len rs) 0) acc
             (kct-gap-count-go (tail rs) (if (eq (kct-row-covered (head rs)) 0) (add acc 1) acc))))
     (defn kct-gap-kinds () (kct-gap-count-go (kct-census) 0))
+
+    ; ── THE LIVE READ: the same census, derived by this body's own eyes ──
+    ; Everything above is a RECORD — numbers that entered as literals when the
+    ; header was first parsed. Everything below READS THE FILE, through
+    ; equireach-gguf.fk's own walker, and derives them again. The band demands
+    ; the two agree, which retires the scratch the record came from: a hand-
+    ; entered constant that the body can recompute is no longer a claim anyone
+    ; has to take on trust.
+    ;
+    ; The walk is not trivial and is worth stating: egg-tinfo-start skips all 50
+    ; KV pairs, and two of them are arrays of 248 320 and 247 587 strings, each
+    ; of which must be stepped over one length-prefix at a time. It lands on
+    ; 10 943 173 in under a second.
+    ;
+    ; HONEST DEGRADATION. The file is 17.39 GB and is not in the repo. When it
+    ; is absent the live readers report 0 and the band says UNREAD rather than
+    ; passing — a missing witness is not a satisfied one.
+    (defn kct-path () "/Users/ursmuff/models/katcoder/kat-coder-v2.5-dev-compact.gguf")
+    (defn kct-window () 11200000)         ; enough to cover the KV block + table
+    (defn kct-src () (read_file_slice (kct-path) 0 (kct-window)))
+    (defn kct-present? () (if (ge (str_len (kct-src)) (kct-window)) 1 0))
+
+    (defn kct-live-count-go (s off n t acc)
+        (if (eq n 0) acc
+            (kct-live-count-go s (egg-ti-next s off) (sub n 1) t
+                (if (eq (egg-ti-type s off) t) (add acc 1) acc))))
+    (defn kct-live-count (t)
+        (if (eq (kct-present?) 0) 0
+            (do (let s (kct-src))
+                (kct-live-count-go s (egg-tinfo-start s) (egg-tensor-count s) t 0))))
+    (defn kct-live-tensor-count () (if (eq (kct-present?) 0) 0 (egg-tensor-count (kct-src))))
+    (defn kct-live-tinfo-start () (if (eq (kct-present?) 0) 0 (egg-tinfo-start (kct-src))))
+    (defn kct-live-version () (if (eq (kct-present?) 0) 0 (egg-version (kct-src))))
+    ; ggml_type codes: F32 0, Q8_0 8, Q3_K 11, Q4_K 12, Q6_K 14
+    (defn kct-type-code (name)
+        (if (str_eq name "F32") 0
+        (if (str_eq name "Q8_0") 8
+        (if (str_eq name "Q3_K") 11
+        (if (str_eq name "Q4_K") 12
+        (if (str_eq name "Q6_K") 14 (sub 0 1)))))))
+    ; does the recorded census match what the file says, row by row?
+    (defn kct-live-agrees-go (rs)
+        (if (eq (len rs) 0) 1
+            (if (eq (kct-live-count (kct-type-code (kct-row-name (head rs))))
+                    (kct-row-count (head rs)))
+                (kct-live-agrees-go (tail rs)) 0)))
+    (defn kct-live-agrees? () (if (eq (kct-present?) 0) 0 (kct-live-agrees-go (kct-census))))
 
     ; the conv runs over the concatenation: its channel count IS the qkv width
     (defn kct-conv-over-concat? ()
