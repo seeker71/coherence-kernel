@@ -11201,6 +11201,26 @@ static void fk_src_sweep_dead_temps(const char *fkb_path) {
     closedir(d);
 }
 #endif
+/* The .fkb's own pipeline identity. Before v5 the artifact recorded only its
+ * INPUT -- source path, content hash, mtime -- so two different fkwu builds
+ * writing from the same bytes produced artifacts indistinguishable to each
+ * other, and either would load the other's as fresh. That is not theoretical:
+ * a binary built before the unbalanced-form refusal compiles `(do (defn p ()
+ * (add 40 2)) (p)` to 42 and seals a stamp-valid .fkb; the healed binary next
+ * to it then PRINTS 42 and exits 0, because it never compiles the text at all.
+ * The heal is defeated by the cache, silently, with a right-looking number --
+ * the numb-green shape axiom-5 already names.
+ * So the stamp now carries who wrote it as well as what it was written from.
+ * __DATE__/__TIME__ keys the identity to the translation-unit build, which is
+ * conservative in the safe direction: two byte-identical rebuilds refuse each
+ * other's caches (a false REJECT, paid once per rebuild in recompile time),
+ * and no build ever accepts a foreign one (the false ACCEPT, which was paid in
+ * wrong answers). SHRINK NOTE: this is a checkout-witness repair in the C
+ * seed. Its home is the native body's artifact layer, where the identity of a
+ * compiled image belongs next to the image; it lives here only while the seed
+ * still owns .fkb. */
+#define FK_FKB_BUILDER_ID ("fkwu-uni " __DATE__ " " __TIME__)
+
 static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
                             long long source_mtime, const char *source_hash) {
     /* both artifacts go to pid-suffixed temp names and rename() into place:
@@ -11231,7 +11251,8 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     char canon[4096];
     ok = ok && fk_write_all_raw(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
-    ok = ok && fk_fkb_write_u32(fd, 4);
+    ok = ok && fk_fkb_write_u32(fd, 5);
+    ok = ok && fk_fkb_write_cstr(fd, FK_FKB_BUILDER_ID);
     ok = ok && fk_fkb_write_cstr(fd, fk_path_canon_id(src_path, canon));
     ok = ok && fk_fkb_write_cstr(fd, source_hash);
     ok = ok && fk_fkb_write_signed(fd, source_mtime > 0 ? source_mtime : 1);
@@ -11550,13 +11571,16 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
         mi = mi + 1;
     }
     long long version = fk_fkb_read_u32();
-    if (version < 4) {
+    if (version < 5) {
+        /* pre-v5 artifacts carry no builder identity, so there is no way to
+         * ask which pipeline wrote them -- superseded, not corrupt. */
         return 0;
     }
     /* Every identity read must execute unconditionally: these advance the
      * decode stream. A short-circuit here (the old `ok && read(...)` shape)
      * skipped the hash read after a src-path mismatch and desynced every
      * later read into "truncated string" -- the wrong-CWD reproduction. */
+    int builder_matches = fk_fkb_read_string_matches_cstr(FK_FKB_BUILDER_ID);
     char canon[4096];
     int src_path_matches =
         fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon));
@@ -11570,6 +11594,13 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     long long sealed = fk_fkb_read_signed();
     if (fk_fkb_bad) {
         fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
+        return 0;
+    }
+    if (!builder_matches) {
+        fk_diag_path("warning", fkb_path,
+                     "foreign .fkb (written by a different fkwu build); rebuilding from source. "
+                     "The bytes of a source do not fix its meaning -- the binary that compiled "
+                     "them does");
         return 0;
     }
     if (sealed != 1 || !source_identity_ok) {
@@ -11734,13 +11765,14 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
         mi = mi + 1;
     }
     long long version = fk_fkb_read_u32();
-    if (version == 2 || version == 3) {
-        /* pre-v4 lane width: superseded, not corrupt -- invalidate so the
-         * caller recompiles from source and overwrites with a v4 artifact */
-        fk_fkb_mark_bad("pre-v4 artifact lane; superseded");
+    if (version >= 2 && version <= 4) {
+        /* pre-v5 lanes: v2/v3 are the old lane width, v4 carries no builder
+         * identity -- superseded, not corrupt. Invalidate so the caller
+         * recompiles from source and overwrites with a v5 artifact. */
+        fk_fkb_mark_bad("pre-v5 artifact lane; superseded");
         return 0;
     }
-    if (version != 4) {
+    if (version != 5) {
         fk_fkb_mark_bad("unsupported version");
         return 0;
     }
@@ -11748,6 +11780,16 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
      * stream; short-circuiting them desyncs every later read (see
      * fk_src_import_fkb_image). Mismatch stays a soft "rebuild" verdict. */
     int source_identity_ok = 1;
+    if (!fk_fkb_read_string_matches_cstr(FK_FKB_BUILDER_ID)) {
+        /* Named through mark_bad, not folded into source_identity_ok: the
+         * source is exactly what it claims to be here, and reporting "source
+         * path, content, or mtime changed" would send the reader hunting a
+         * directory that is not the cause. A diagnostic that misnames its own
+         * cause is the defect it is reporting on, one level up. */
+        fk_fkb_mark_bad("written by a different fkwu build; the bytes of a source do not fix its "
+                        "meaning -- the binary that compiled them does");
+        return 0;
+    }
     char canon[4096];
     if (expected_src_path != 0) {
         if (!fk_fkb_read_string_matches_cstr(fk_path_canon_id(expected_src_path, canon))) {
@@ -12238,7 +12280,7 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                 return 0;
             }
             if (fk_path_mtime_raw(dep_fkb_path) < dep_mtime ||
-                fk_src_fkb_version_raw(dep_fkb_path) < 4) {
+                fk_src_fkb_version_raw(dep_fkb_path) < 5) {
                 if (!fk_src_compile_artifact_only(fk_src_dep_path[i])) {
                     return 0;
                 }
