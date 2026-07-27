@@ -61,7 +61,7 @@ static void fk_ds4_progress(void *ud, const char *event, int current, int total)
 
 long long fk_local_model_generate_external(
     const char *model, long long model_len,
-    const char *prompt_csv, long long prompt_len,
+    const char *prompt_text, long long prompt_len,
     long long n_predict, char *out, long long cap) {
     @autoreleasepool {
         if (cap <= 0 || n_predict <= 0 || n_predict > 4096) return -1;
@@ -71,46 +71,22 @@ long long fk_local_model_generate_external(
             .token_cap = (int)n_predict, .token_count = 0, .progress_events = 0,
         };
         char *model_path = fk_ds4_copy(model, model_len);
-        char *csv = fk_ds4_copy(prompt_csv, prompt_len);
-        if (observation.tokens == NULL || model_path == NULL || csv == NULL) {
+        char *input = fk_ds4_copy(prompt_text, prompt_len);
+        if (observation.tokens == NULL || model_path == NULL || input == NULL) {
             free(observation.tokens);
             free(model_path);
-            free(csv);
+            free(input);
             return -1;
         }
 
         ds4_tokens prompt = {0};
-        char *cursor = csv;
-        while (*cursor != 0) {
-            char *end = NULL;
-            long token = strtol(cursor, &end, 10);
-            if (end == cursor || token < 0 || token > INT32_MAX) {
-                fk_ds4_append(&observation,
-                    "FAIL local-ds4 prompt-token-csv offset=%ld\n",
-                    (long)(cursor - csv));
-                goto finish;
-            }
-            ds4_tokens_push(&prompt, (int)token);
-            cursor = end;
-            if (*cursor == ',') cursor++;
-            else if (*cursor != 0) {
-                fk_ds4_append(&observation,
-                    "FAIL local-ds4 prompt-token-separator offset=%ld\n",
-                    (long)(cursor - csv));
-                goto finish;
-            }
-        }
-        if (prompt.len == 0) {
-            fk_ds4_append(&observation, "NOTHING local-ds4 prompt-tokens=0\n");
-            goto finish;
-        }
 
         double open_started = fk_ds4_now_ms();
         ds4_engine_options options = {0};
         options.model_path = model_path;
         options.backend = DS4_BACKEND_METAL;
         options.n_threads = 1;
-        options.context_size = prompt.len + (int)n_predict + 16;
+        options.context_size = 4096;
         options.power_percent = 100;
         options.quality = true;
         ds4_engine *engine = NULL;
@@ -118,6 +94,25 @@ long long fk_local_model_generate_external(
             fk_ds4_append(&observation,
                 "FAIL local-ds4 engine-open\n"
                 "rewitness-offer=inspect-model-shape-and-metal-memory\n");
+            goto finish;
+        }
+        /*
+         * Natural language crosses the Form boundary once. Tokenization and
+         * chat framing belong to the resident model engine; representing token
+         * arrays as comma-separated source made the interpreter do generation
+         * plumbing instead of letting the inference engine do token work.
+         */
+        ds4_encode_chat_prompt(engine, NULL, input, DS4_THINK_NONE, &prompt);
+        if (prompt.len == 0) {
+            fk_ds4_append(&observation, "NOTHING local-ds4 prompt-tokens=0\n");
+            ds4_engine_close(engine);
+            goto finish;
+        }
+        if (prompt.len + n_predict + 16 > options.context_size) {
+            fk_ds4_append(&observation,
+                "FAIL local-ds4 context-needed=%lld context-cap=%d\n",
+                (long long)prompt.len + n_predict + 16, options.context_size);
+            ds4_engine_close(engine);
             goto finish;
         }
         double opened_ms = fk_ds4_now_ms() - open_started;
@@ -154,6 +149,19 @@ long long fk_local_model_generate_external(
         for (int i = 0; i < observation.token_count; i++) {
             fk_ds4_append(&observation, i == 0 ? "%d" : ",%d", observation.tokens[i]);
         }
+        fk_ds4_append(&observation, "\nDS4-GENERATED-TEXT ");
+        for (int i = 0; i < observation.token_count; i++) {
+            size_t text_len = 0;
+            char *text = ds4_token_text(engine, observation.tokens[i], &text_len);
+            if (text != NULL && text_len > 0 && observation.used < observation.cap - 1) {
+                long long room = observation.cap - observation.used - 1;
+                long long take = (long long)text_len < room ? (long long)text_len : room;
+                memcpy(observation.out + observation.used, text, (size_t)take);
+                observation.used += take;
+                observation.out[observation.used] = 0;
+            }
+            free(text);
+        }
         fk_ds4_append(&observation,
             "\nTRACE result.stop=engine-complete\n"
             "TRACE membrane.local-engine-to-form-result needed=1 "
@@ -171,7 +179,7 @@ finish:
         ds4_tokens_free(&prompt);
         free(observation.tokens);
         free(model_path);
-        free(csv);
+        free(input);
         if (observation.used < observation.cap) observation.out[observation.used] = 0;
         return observation.used;
     }
