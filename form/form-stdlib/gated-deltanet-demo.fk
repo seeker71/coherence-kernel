@@ -1,0 +1,74 @@
+; gated-deltanet-demo.fk — the fixture the layer kernels are judged on.
+;
+; Two decode steps at toy dims, with the Form layer's own answer as the judge.
+; TWO steps and not one, deliberately: a single step cannot tell a stateful
+; layer from a stateless one, and the whole point of this layer is what it
+; carries between tokens. The runner therefore has to thread the device state
+; the same way gdl-step threads the Form one, and any failure to do so shows up
+; on token 2 alone.
+;
+; Emitted on fkwu with print_str, and every float crosses as round(x * 1e9).
+; float_to_str carries six decimals, which is the same order as f32's own error
+; near 1 — a judge printed through it would measure the printer. Read to the
+; END sentinel, never filtered by content: a legitimate 0 in this stream is
+; ordinary (the state starts at zero) and `grep -v '^0$'` would eat it, which is
+; exactly how the router's first dispatch was corrupted.
+;
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/transformer-numerics.fk form-stdlib/llama-numerics.fk form-stdlib/kimi-kda.fk form-stdlib/gated-deltanet-conv.fk form-stdlib/gated-deltanet-gates.fk form-stdlib/gated-deltanet-layer.fk
+
+(do
+    (defn gdd-nl (s) (print_str s))
+    (defn gdd-i (n) (gdd-nl (int_to_str n)))
+    (defn gdd-scaled (x) (math_floor (add (mul x 1000000000.0) 0.5)))
+    (defn gdd-slist (xs) (if (eq (len xs) 0) (gdd-nl "ENDVEC") (do (gdd-i (gdd-scaled (head xs))) (gdd-slist (tail xs)))))
+    (defn gdd-svec (name xs) (do (gdd-nl (str_concat "VEC " name)) (gdd-slist xs)))
+    (defn gdd-scalar (name v) (do (gdd-nl (str_concat "SCALAR " name)) (gdd-i v)))
+    (defn gdd-flat (hs) (if (eq (len hs) 0) (empty) (gdl-cat (head hs) (gdd-flat (tail hs)))))
+
+    ; ── the shape ────────────────────────────────────────────────────────
+    (defn gdd-nk () 2) (defn gdd-dk () 3) (defn gdd-nv () 4) (defn gdd-dv () 2)
+    (defn gdd-nch () 20)                       ; nk*dk + nk*dk + nv*dv
+    (defn gdd-kw () 4)
+    (defn gdd-alog () 0.0) (defn gdd-dtb () 1.0)
+    (defn gdd-taps () (list 0.25 (sub 0.0 0.5) 0.75 1.5))
+    (defn gdd-ramp (i n acc)
+        (if (ge i n) (reverse acc)
+            (gdd-ramp (add i 1) n (cons (sub (div (mul 1.0 (mod (mul i 7) 13)) 6.0) 1.0) acc))))
+    (defn gdd-x1 () (gdd-ramp 0 (gdd-nch) (empty)))
+    (defn gdd-x2 () (gdd-ramp 5 (add (gdd-nch) 5) (empty)))
+    (defn gdd-as () (list 0.5 (sub 0.0 0.5) 1.0 0.0))
+    (defn gdd-bs () (list 1.0 0.5 (sub 0.0 1.0) 2.0))
+    (defn gdd-zs () (list (list 0.7 (sub 0.0 0.3)) (list 1.1 0.2)
+                          (list (sub 0.0 0.6) 0.9) (list 0.4 1.3)))
+
+    ; ── the judge: the Form layer, two steps ─────────────────────────────
+    (defn gdd-r1 () (gdl-step (gdl-state0 (gdd-nch) (gdd-kw) (gdd-nv) (gdd-dv) (gdd-dk))
+                              (gdd-taps) (gdd-x1) (gdd-as) (gdd-bs) (gdd-zs)
+                              (gdd-alog) (gdd-dtb) (gdd-nk) (gdd-dk) (gdd-nv) (gdd-dv)))
+    (defn gdd-r2 () (gdl-step (gdl-step-state (gdd-r1))
+                              (gdd-taps) (gdd-x2) (gdd-as) (gdd-bs) (gdd-zs)
+                              (gdd-alog) (gdd-dtb) (gdd-nk) (gdd-dk) (gdd-nv) (gdd-dv)))
+
+    ; the per-head alphas and betas cross too, so the runner binds the SAME
+    ; scalars the recipe used rather than recomputing them from a[] and b[] and
+    ; silently testing two gate implementations against each other
+    (defn gdd-alphas () (gdl-alphas (gdd-as) (gdd-alog) (gdd-dtb)))
+    (defn gdd-betas () (gdl-betas (gdd-bs)))
+
+    (defn gdd-emit-all ()
+        (do
+            (gdd-nl "GDNDEMO")
+            (gdd-scalar "nk" (gdd-nk)) (gdd-scalar "dk" (gdd-dk))
+            (gdd-scalar "nv" (gdd-nv)) (gdd-scalar "dv" (gdd-dv))
+            (gdd-scalar "nch" (gdd-nch)) (gdd-scalar "kw" (gdd-kw))
+            (gdd-svec "tapsE9" (gdd-taps))
+            (gdd-svec "x1E9" (gdd-x1))
+            (gdd-svec "x2E9" (gdd-x2))
+            (gdd-svec "alphaE9" (gdd-alphas))
+            (gdd-svec "betaE9" (gdd-betas))
+            (gdd-svec "zE9" (gdd-flat (gdd-zs)))
+            (gdd-svec "expectO1E9" (gdd-flat (gdl-step-out (gdd-r1))))
+            (gdd-svec "expectO2E9" (gdd-flat (gdl-step-out (gdd-r2))))
+            (gdd-nl "END")
+            0))
+    0)
