@@ -149,6 +149,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "metal_model_kv_round", 2, 149 },
   { "metal_model_cached_attention", 2, 150 },
   { "metal_model_compress_stage", 2, 151 },
+  { "metal_model_transaction", 1, 152 },
   { "file_open", 1, 133 },
   { "file_read", 2, 134 },
   { "file_close", 1, 135 },
