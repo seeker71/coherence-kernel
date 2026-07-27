@@ -70,17 +70,44 @@
   (defn gir-index (o i)    (gir "index" (list o i)))
   (defn gir-list (elems)   (gir "list" (list elems)))
   (defn gir-fn (name ps b) (gir "fn" (list name ps b)))
+  ;; a BUILTIN call — its name resolves through the language's builtin table,
+  ;; unlike gir-call whose name is a function the emitted program defines
+  (defn gir-bcall (f args) (gir "bcall" (list f args)))
 
-  (defn gir-kinds () (list "lit" "var" "bin" "cmp" "if" "call" "index" "list" "fn"))
+  (defn gir-kinds () (list "lit" "var" "bin" "cmp" "if" "call" "index" "list" "fn" "bcall"))
 
   ;; ═══ L2 — a language is a TABLE, not a function ════════════════
   ;; %1 %2 %3 are positional slots, %op the operator, %xs a joined list.
   (defn gnc-row (kind shape) (list kind shape))
-  (defn gnc-lang (name rows sep ops) (list name rows sep ops))
+  (defn gnc-lang (name rows sep ops fns pre) (list name rows sep ops fns pre))
   (defn gnc-lang-name (l) (nth l 0))
   (defn gnc-lang-rows (l) (nth l 1))
   (defn gnc-lang-sep  (l) (nth l 2))
   (defn gnc-lang-ops  (l) (nth l 3))
+  (defn gnc-lang-fns  (l) (nth l 4))
+  (defn gnc-lang-pre  (l) (nth l 5))
+  ;; RUNTIME PRELUDE. The builtin table let the emitter name `first` and `rest`
+  ;; in each language — and then emit calls to functions that do not exist.
+  ;; Form has head/tail natively; Python and JavaScript do not, so the generator
+  ;; ships the support they need. A code generator that emits calls into thin
+  ;; air is not finished, and the gap is invisible until someone runs the output.
+  (defn gnc-prelude (lang)
+    (do (let l (gnc-lang-of lang)) (if (eq (len l) 0) "" (gnc-lang-pre l))))
+  (defn gnc-module (lang)
+    (do (let pre (gnc-prelude lang)) (let body (gnc-emit-fn lang))
+        (if (eq (str_len body) 0) ""
+          (if (eq (str_len pre) 0) body (str_concat pre (str_concat "\n" body))))))
+  ;; BUILTINS are the third vocabulary. Syntax was the first table, operator
+  ;; spelling the second; the moment a generated program needs `length` or
+  ;; `first`, a third gap opens in exactly the same shape. Three tables is not
+  ;; three special cases — it is the same fact three times: everything a target
+  ;; language spells is the target language's business.
+  (defn gnc-fn-loop (fs f)
+    (if (eq (len fs) 0) ""
+      (if (str_eq (nth (head fs) 0) f) (nth (head fs) 1) (gnc-fn-loop (tail fs) f))))
+  (defn gnc-builtin (lang f)
+    (do (let l (gnc-lang-of lang))
+        (if (eq (len l) 0) "" (gnc-fn-loop (gnc-lang-fns l) f))))
   ;; the operator's SPELLING is the language's business, never the IR's. The
   ;; first working version leaked `eq` and `add` into Python because the shape
   ;; table covered syntax and forgot vocabulary; the emitted "python" was Form
@@ -103,10 +130,13 @@
           (gnc-row "cmp"   "(%op %1 %2)")
           (gnc-row "if"    "(if %1 %2 %3)")
           (gnc-row "call"  "(%1 %xs)")
+          (gnc-row "bcall" "(%1 %xs)")
           (gnc-row "index" "(nth %1 %2)")
           (gnc-row "list"  "(list %xs)")
           (gnc-row "fn"    "(defn %1 (%xs) %3)"))
-        " " (list (list "eq" "eq") (list "add" "add") (list "lt" "lt")))
+        " " (list (list "eq" "eq") (list "add" "add") (list "lt" "lt"))
+        (list (list "len" "len") (list "first" "head") (list "rest" "tail"))
+        "")
       (gnc-lang "python"
         (list
           (gnc-row "lit"   "%1")
@@ -115,10 +145,13 @@
           (gnc-row "cmp"   "(%1 %op %2)")
           (gnc-row "if"    "(%2 if %1 else %3)")
           (gnc-row "call"  "%1(%xs)")
+          (gnc-row "bcall" "%1(%xs)")
           (gnc-row "index" "%1[%2]")
           (gnc-row "list"  "[%xs]")
           (gnc-row "fn"    "def %1(%xs): return %3"))
-        ", " (list (list "eq" "==") (list "add" "+") (list "lt" "<")))
+        ", " (list (list "eq" "==") (list "add" "+") (list "lt" "<"))
+        (list (list "len" "len") (list "first" "pyfirst") (list "rest" "pyrest"))
+        "def pyfirst(l): return l[0]\ndef pyrest(l): return l[1:]")
       (gnc-lang "javascript"
         (list
           (gnc-row "lit"   "%1")
@@ -127,10 +160,13 @@
           (gnc-row "cmp"   "(%1 %op %2)")
           (gnc-row "if"    "(%1 ? %2 : %3)")
           (gnc-row "call"  "%1(%xs)")
+          (gnc-row "bcall" "%1(%xs)")
           (gnc-row "index" "%1[%2]")
           (gnc-row "list"  "[%xs]")
           (gnc-row "fn"    "function %1(%xs) { return %3; }"))
-        ", " (list (list "eq" "===") (list "add" "+") (list "lt" "<")))))
+        ", " (list (list "eq" "===") (list "add" "+") (list "lt" "<"))
+        (list (list "len" "jslen") (list "first" "jsfirst") (list "rest" "jsrest"))
+        "function jslen(l){return l.length;}\nfunction jsfirst(l){return l[0];}\nfunction jsrest(l){return l.slice(1);}")))
 
   ;; REFUSAL MARKER: the empty string, not `nothing`. This cell has to run on
   ;; the arms that carry walk_recipe (Go/Rust/TS) and `nothing?` is fkwu-only,
@@ -153,11 +189,18 @@
 
   ;; ═══ L3 — ONE renderer. No language named below this line. ═════
   ;; substitute the first occurrence of `mark` in `s` with `v`
+  ;; Named by the panel: the renderer never refused. A child whose shape was
+  ;; missing returned "" and the parent spliced it, yielding `(x + )` — a
+  ;; half-rendered string, which the header had promised could not happen. The
+  ;; cobol check only passed because cobol has NO rows, so the ROOT collapsed;
+  ;; a language with a PARTIAL row set produced holes silently. Emptiness now
+  ;; propagates: any empty part makes the whole empty.
   (defn gnc-sub1 (s mark v)
+    (if (eq (str_len v) 0) ""
     (do (let i (str_find s mark 0))
         (if (lt i 0) s
           (str_concat (substring s 0 i)
-            (str_concat v (substring s (add i (str_len mark)) (str_len s)))))))
+            (str_concat v (substring s (add i (str_len mark)) (str_len s))))))))
 
   (defn gnc-join (xs sep)
     (if (eq (len xs) 0) ""
@@ -167,6 +210,8 @@
   (defn gnc-render-many (lang ns)
     (if (eq (len ns) 0) (list)
       (cons (gnc-render lang (head ns)) (gnc-render-many lang (tail ns)))))
+
+  (defn gnc-binlike? (k) (if (str_eq k "bin") 1 (if (str_eq k "cmp") 1 0)))
 
   ;; the fold: shape from the table, slots filled by rendering children
   (defn gnc-render (lang n)
@@ -179,6 +224,9 @@
         (if (str_eq k "list")
             (gnc-sub1 shape "%xs"
               (gnc-join (gnc-render-many lang (gir-nth n 0)) (gnc-lang-sep (gnc-lang-of lang))))
+        (if (str_eq k "bcall")
+            (gnc-sub1 (gnc-sub1 shape "%1" (gnc-builtin lang (gir-nth n 0))) "%xs"
+              (gnc-join (gnc-render-many lang (gir-nth n 1)) (gnc-lang-sep (gnc-lang-of lang))))
         (if (str_eq k "call")
             (gnc-sub1 (gnc-sub1 shape "%1" (gir-nth n 0)) "%xs"
               (gnc-join (gnc-render-many lang (gir-nth n 1)) (gnc-lang-sep (gnc-lang-of lang))))
@@ -193,10 +241,14 @@
             (gnc-sub1 (gnc-sub1 (gnc-sub1 shape "%1" (gnc-render lang (gir-nth n 0)))
                                 "%2" (gnc-render lang (gir-nth n 1)))
                       "%3" (gnc-render lang (gir-nth n 2)))
-        ;; bin and cmp share a shape family: op plus two rendered children
+        ;; bin and cmp share a shape family: op plus two rendered children.
+        ;; Anything else REFUSES — the old else-branch treated every unknown
+        ;; kind as bin/cmp, so an IR constructor forgotten from gir-kinds stayed
+        ;; green in gnc-total? and mis-rendered silently.
+        (if (eq (gnc-binlike? k) 0) ""
         (gnc-sub1 (gnc-sub1 (gnc-sub1 shape "%op" (gnc-op lang (gir-nth n 0)))
                             "%1" (gnc-render lang (gir-nth n 1)))
-                  "%2" (gnc-render lang (gir-nth n 2)))))))))))))
+                  "%2" (gnc-render lang (gir-nth n 2)))))))))))))))
 
   ;; ═══ L4 — the graph's query, expressed ONCE in IR ══════════════
   ;; one term per has-member fact: (if (eq <subject> C) 1 0)
@@ -214,6 +266,28 @@
   (defn gnc-count-ir (concept) (gnc-sum (gnc-terms (stn-facts) concept)))
 
   (defn gnc-emit (lang concept) (gnc-render lang (gnc-count-ir concept)))
+
+  ;; ═══ THE REAL QUERY — a function over runtime data ═════════════
+  ;; The panel's deepest finding: gnc-count-ir compiles the DATABASE INTO THE
+  ;; PROGRAM TEXT, one `if` term per fact, because the IR had no way to name
+  ;; data at runtime. That is data wearing a program. This is a program:
+  ;;
+  ;;   cnt(xs, c) = if len(xs) == 0 then 0
+  ;;                else (if first(xs) == c then 1 else 0) + cnt(rest(xs), c)
+  ;;
+  ;; It mentions no fact and no node id; the graph is passed IN.
+  (defn gnc-count-fn-ir ()
+    (gir-fn "cnt" (list "xs" "c")
+      (gir-if (gir-cmp "eq" (gir-bcall "len" (list (gir-var "xs"))) (gir-lit 0))
+              (gir-lit 0)
+              (gir-bin "add"
+                (gir-if (gir-cmp "eq" (gir-bcall "first" (list (gir-var "xs"))) (gir-var "c"))
+                        (gir-lit 1) (gir-lit 0))
+                (gir-call "cnt" (list (gir-bcall "rest" (list (gir-var "xs"))) (gir-var "c")))))))
+  (defn gnc-emit-fn (lang) (gnc-render lang (gnc-count-fn-ir)))
+  ;; every graph id carries this coordinate prefix; if it shows up in the
+  ;; emitted function, the data leaked back into the program
+  (defn gnc-data-leaked? (lang) (if (ge (str_find (gnc-emit-fn lang) "3045" 0) 0) 1 0))
 
   ;; ═══ totality: the table covers the IR, in every language ══════
   (defn gnc-kinds-covered-loop (lang ks)
@@ -276,6 +350,16 @@
     (add (if (eq (gnc-run (stn-eurythmy)) 0) 1024 0)
     (add (if (eq (gnc-ops-total?) 1) 2048 0)
     (add (if (str_eq (gnc-op "python" "eq") "==") 4096 0)
-         0))))))))))))))
+    (add (if (eq (gnc-data-leaked? "form") 0)
+             (if (eq (gnc-data-leaked? "python") 0) 8192 0) 0)
+    (add (if (gt (str_len (gnc-emit-fn "python")) 40)
+             (if (gt (str_len (gnc-emit-fn "javascript")) 40) 16384 0) 0)
+    (add (if (eq (str_len (gnc-render "form" (gir-bcall "nosuch" (list (gir-lit 1))))) 0) 32768 0)
+    ;; every language that names a builtin it does not have, ships it
+    (add (if (gt (str_len (gnc-prelude "python")) 20)
+             (if (gt (str_len (gnc-prelude "javascript")) 20)
+                 (if (eq (str_len (gnc-prelude "form")) 0) 65536 0) 0) 0)
+    (add (if (gt (str_len (gnc-module "python")) (str_len (gnc-emit-fn "python"))) 131072 0)
+         0)))))))))))))))))))
 
   0)
