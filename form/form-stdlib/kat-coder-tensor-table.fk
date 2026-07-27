@@ -1,0 +1,101 @@
+; kat-coder-tensor-table.fk — what KAT-Coder-V2.5-Dev's own GGUF says it needs,
+; read from the file's header rather than inferred from a model card.
+;
+; READ 2026-07-28 by HTTP range request over the first 25 165 824 bytes of
+; `Kwaipilot_KAT-Coder-V2.5-Dev-APEX-MTP-I-Compact-v2D-lite.gguf` (17.39 GB
+; total) from huggingface.co/gbuzhf/KAT-Coder-V2.5-Dev-APEX-MTP-GGUF. That
+; window carries the whole header: GGUF v3, 50 KV pairs, and all 753 tensor
+; infos, which begin at byte 10 943 173. NOTHING WAS DOWNLOADED BEYOND IT — no
+; weights were read, nothing was run, and every number below is a field of the
+; header, not a measurement of the model.
+;
+; WHY THIS IS WORTH A CELL. Two receipts earlier tonight built a 256-expert
+; softmax router and a gated-deltanet layer against `config.json` and the
+; reference implementation. This is the third witness, and the one that speaks
+; in the vocabulary a LOADER needs: tensor names, shapes, and quantization
+; types. It confirms the first two and finds one thing neither could — a
+; quantization this body cannot decode.
+;
+; THE CENSUS, and what covers it:
+;   F32   310  — no decode needed
+;   Q4_K  197  — q4k-msl.fk, q4k-dequant.fk        COVERED
+;   Q6_K  140  — q6k-msl.fk, q6k-dequant.fk        COVERED
+;   Q3_K   94  — nothing. THE GAP.                 NOT COVERED
+;   Q8_0   12  — q8-0-msl.fk                       COVERED
+;   753 total
+;
+; Q3_K IS THE ONE MISSING PIECE, and it was found by reading rather than by
+; guessing. Every earlier estimate of "what remains" for this model named the
+; tensor table, the projections and the full-attention layer — all of which the
+; DS4 lane already has in some form — and none of them named a missing
+; quantization, because none of them had opened the file. 94 tensors is not a
+; corner case.
+;
+; WHAT THE HEADER CONFIRMS about the two cells already built:
+;   ssm_conv1d.weight is [4, 8192] — four taps over EIGHT THOUSAND channels,
+;     and attn_qkv.weight is [2048, 8192], so the conv runs over the whole
+;     q||k||v projection exactly as gated-deltanet-layer.fk has it. Had the conv
+;     been per-projection the tensor would have been three smaller ones.
+;   ssm.conv_kernel 4, ssm.group_count 16, ssm.state_size 128,
+;     ssm.inner_size 4096 — 4096 = 32 value heads x 128, so the 16-key/32-value
+;     grouping gated-deltanet-conv.fk read from config.json is the same grouping
+;     the loader sees, arriving through completely different field names.
+;   ffn_gate_inp.weight is [2048, 256] and F32, with expert_used_count 8 —
+;     moe-route-wide-msl.fk's 256-wide softmax router at top-8, and the router
+;     gate is F32 here, so mm-f16mv-msl's F16 path (written for mixtral) is not
+;     needed on this model.
+;   full_attention_interval 4, block_count 41 — 40 layers plus one
+;     nextn_predict_layers MTP head.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    ; ── the header's own numbers ─────────────────────────────────────────
+    (defn kct-gguf-version () 3)
+    (defn kct-tensor-count () 753)
+    (defn kct-kv-count () 50)
+    (defn kct-tensor-infos-at () 10943173)
+    (defn kct-block-count () 41)          ; 40 layers + 1 MTP head
+    (defn kct-embedding-length () 2048)
+    (defn kct-expert-count () 256)
+    (defn kct-expert-used () 8)
+    (defn kct-full-attention-interval () 4)
+    (defn kct-ssm-conv-kernel () 4)
+    (defn kct-ssm-group-count () 16)      ; = linear_num_key_heads
+    (defn kct-ssm-state-size () 128)      ; = linear_key_head_dim
+    (defn kct-ssm-inner-size () 4096)     ; = 32 value heads x 128
+    (defn kct-qkv-out () 8192)            ; attn_qkv.weight [2048, 8192]
+    (defn kct-conv-channels () 8192)      ; ssm_conv1d.weight [4, 8192]
+    (defn kct-vocab () 248320)
+
+    ; ── the type census: (name count covered?) ───────────────────────────
+    (defn kct-row (name count covered) (list name count covered))
+    (defn kct-row-name (r) (nth r 0))
+    (defn kct-row-count (r) (nth r 1))
+    (defn kct-row-covered (r) (nth r 2))
+    (defn kct-census ()
+        (list (kct-row "F32"  310 1)      ; no decode needed
+              (kct-row "Q4_K" 197 1)      ; q4k-msl.fk
+              (kct-row "Q6_K" 140 1)      ; q6k-msl.fk
+              (kct-row "Q3_K"  94 0)      ; THE GAP
+              (kct-row "Q8_0"  12 1)))    ; q8-0-msl.fk
+
+    (defn kct-sum-go (rs acc) (if (eq (len rs) 0) acc (kct-sum-go (tail rs) (add acc (kct-row-count (head rs))))))
+    (defn kct-total () (kct-sum-go (kct-census) 0))
+    (defn kct-uncovered-go (rs acc)
+        (if (eq (len rs) 0) acc
+            (kct-uncovered-go (tail rs)
+                (if (eq (kct-row-covered (head rs)) 0) (add acc (kct-row-count (head rs))) acc))))
+    (defn kct-uncovered-tensors () (kct-uncovered-go (kct-census) 0))
+    (defn kct-gap-count-go (rs acc)
+        (if (eq (len rs) 0) acc
+            (kct-gap-count-go (tail rs) (if (eq (kct-row-covered (head rs)) 0) (add acc 1) acc))))
+    (defn kct-gap-kinds () (kct-gap-count-go (kct-census) 0))
+
+    ; the conv runs over the concatenation: its channel count IS the qkv width
+    (defn kct-conv-over-concat? ()
+        (if (eq (kct-conv-channels) (kct-qkv-out)) 1 0))
+    ; the value-head count the header implies, and the grouping ratio
+    (defn kct-value-heads () (div (kct-ssm-inner-size) (kct-ssm-state-size)))
+    (defn kct-group-ratio () (div (kct-value-heads) (kct-ssm-group-count)))
+    0)
