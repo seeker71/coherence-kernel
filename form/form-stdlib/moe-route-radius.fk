@@ -1,0 +1,84 @@
+; moe-route-radius.fk — how wide is the routing recipe, really?
+;
+; moe-msl.fk declares a radius: "mm-route  ne <= 64 experts and nsel <= 8 chosen
+; (the fixed-size thread-local arrays below; a larger router is WRONG here, not
+; slow, so the carrier must check ne and nsel and the kernel returns without
+; writing if they are exceeded)."
+;
+; That sentence is true of the EMITTED KERNEL. It is not true of the recipe the
+; kernel was transcribed from. `mm-route-weights` takes `(logits n k)` and is
+; generic in both; nothing in the softmax, the argmax-free scan or the
+; renormalization knows about 64. The cap lives in the MSL thread-local arrays
+; and nowhere else — so the Form side of a 256-expert router was already home,
+; and the gap that remains is exactly one bounded thing: the kernel's arrays.
+;
+; This cell exists because that distinction was invisible. A radius stated in a
+; header reads as a property of the meaning; here it was a property of ONE
+; transcription of the meaning. Naming which is which is the whole cell.
+;
+; The shape probed is KAT-Coder-V2.5-Dev's, read from its config.json on
+; 2026-07-28: 256 routed experts, 8 per token, softmax then top-k then
+; renormalize over the chosen (llama.cpp's `norm_topk_prob` order, which is
+; what mm-route already keeps).
+;
+; THE TRUTH IS DERIVED INDEPENDENTLY, NOT RE-RUN. The fixture's logits are
+; (i*97 mod 257)/32 - 4. Because 257 is prime and 97 is coprime to it, i -> i*97
+; mod 257 is a bijection on [0,257), so the ranking of the logits IS the ranking
+; of the residues, and the index holding residue r is closed-form:
+;   97 * 53 = 5141 = 20*257 + 1, so 97^-1 = 53 (mod 257), and i = 53*r mod 257.
+; The band's expected ids come from that modular inverse — integer arithmetic
+; that never touches tn-exp, the softmax, or any float. If mm-route agrees with
+; it, the float path preserved the order it was supposed to preserve.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/moe-msl.fk
+
+(do
+    ; ── the probed shape (KAT-Coder-V2.5-Dev, config.json 2026-07-28) ────
+    (defn mrr-ne () 256)          ; routed experts
+    (defn mrr-nsel () 8)          ; experts per token
+    (defn mrr-kernel-ne-cap () 64)   ; what the EMITTED kernel can hold today
+    (defn mrr-beyond-kernel? ()      ; 1 when the probe is outside the MSL radius
+        (if (gt (mrr-ne) (mrr-kernel-ne-cap)) 1 0))
+
+    ; ── the fixture: a bijective residue ramp, non-degenerate by construction ──
+    (defn mrr-logit (i) (sub (div (mul 1.0 (mod (mul i 97) 257)) 32.0) 4.0))
+    (defn mrr-build (i n acc)
+        (if (ge i n) (reverse acc) (mrr-build (add i 1) n (cons (mrr-logit i) acc))))
+    (defn mrr-logits () (mrr-build 0 (mrr-ne) (list)))
+
+    ; ── the independent truth: i = 53*r mod 257, r counting down from 256 ──
+    (defn mrr-inv () 53)                                   ; 97*53 = 20*257 + 1
+    (defn mrr-idx-of-residue (r) (mod (mul (mrr-inv) r) 257))
+    (defn mrr-expect (j k acc)                             ; j-th best has residue 256-j
+        (if (ge j k) (reverse acc)
+            (mrr-expect (add j 1) k (cons (mrr-idx-of-residue (sub 256 j)) acc))))
+    (defn mrr-expected-ids () (mrr-expect 0 (mrr-nsel) (list)))
+
+    ; ── what the recipe answers at that shape ────────────────────────────
+    (defn mrr-ids () (mm-route-ids (mrr-logits) (mrr-ne) (mrr-nsel)))
+    (defn mrr-weights () (mm-route-weights (mrr-logits) (mrr-ne) (mrr-nsel)))
+    ; the RAW softmax probabilities of the chosen, before renormalization —
+    ; kept so a band can prove the renormalization is load-bearing rather than
+    ; decorative (8 of 256 cannot sum near 1 on their own).
+    (defn mrr-raw-chosen () (mm-gather (mm-softmax (mrr-logits)) (mrr-ids)))
+
+    ; ── small readers the band leans on ──────────────────────────────────
+    (defn mrr-ints-eq (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) 1
+                (if (eq (head a) (head b)) (mrr-ints-eq (tail a) (tail b)) 0))
+            0))
+    (defn mrr-distinct? (xs)
+        (if (le (len xs) 1) 1
+            (if (eq (mm-memq (head xs) (tail xs)) 1) 0 (mrr-distinct? (tail xs)))))
+    (defn mrr-descending? (xs)
+        (if (le (len xs) 1) 1
+            (if (gt (head xs) (head (tail xs))) (mrr-descending? (tail xs)) 0)))
+    (defn mrr-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn mrr-min (xs best)
+        (if (eq (len xs) 0) best
+            (mrr-min (tail xs) (if (lt (head xs) best) (head xs) best))))
+    (defn mrr-spread ()                     ; max - min over the chosen weights;
+        (do (let w (mrr-weights))           ; a FLAT distribution collapses this
+            (sub (mm-max (tail w) (head w)) (mrr-min (tail w) (head w)))))
+    0)
