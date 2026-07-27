@@ -51,6 +51,8 @@ struct fk_model_pipeline {
 static struct fk_model_pipeline *fk_model_pipelines;
 static size_t fk_model_pipeline_count;
 static id<MTLCommandQueue> fk_model_queue;
+static id<MTLResidencySet> fk_model_residency_set;
+static int fk_model_residency_added_to_queue;
 static id<MTLBuffer> fk_model_stage;
 static size_t fk_model_stage_count;
 static id<MTLBuffer> fk_model_residual;
@@ -172,6 +174,20 @@ static void fk_metal_model_release(void) {
     free(fk_model_pipelines);
     fk_model_pipelines = NULL;
     fk_model_pipeline_count = 0;
+    if (@available(macOS 15.0, *)) {
+        if (fk_model_residency_set != nil) {
+            if (fk_model_residency_added_to_queue &&
+                fk_model_queue != nil &&
+                [fk_model_queue respondsToSelector:@selector(removeResidencySet:)]) {
+                [fk_model_queue removeResidencySet:fk_model_residency_set];
+            }
+            [fk_model_residency_set endResidency];
+            [fk_model_residency_set removeAllAllocations];
+            [fk_model_residency_set release];
+            fk_model_residency_set = nil;
+        }
+    }
+    fk_model_residency_added_to_queue = 0;
     [fk_model_queue release];
     fk_model_queue = nil;
     [fk_model_stage release];
@@ -311,6 +327,39 @@ long long fk_metal_model_open_external(
             return fk_out(out, cap,
                 "FAIL metal_model_open views=%zu/%llu\n", got, view_count);
         }
+        int residency_count = 0;
+        if (@available(macOS 15.0, *)) {
+            MTLResidencySetDescriptor *descriptor =
+                [[MTLResidencySetDescriptor alloc] init];
+            descriptor.label = @"form_ds4_model";
+            descriptor.initialCapacity = fk_model_view_count;
+            NSError *residency_error = nil;
+            fk_model_residency_set =
+                [fk_model_device newResidencySetWithDescriptor:descriptor
+                                                         error:&residency_error];
+            [descriptor release];
+            if (fk_model_residency_set == nil) {
+                const char *message =
+                    residency_error.localizedDescription.UTF8String ?: "unknown";
+                fk_metal_model_release();
+                free(path_text);
+                free(plan_text);
+                return fk_out(out, cap,
+                    "FAIL metal_model_open residency-set=%s\n", message);
+            }
+            for (size_t i = 0; i < fk_model_view_count; i++)
+                [fk_model_residency_set addAllocation:fk_model_views[i]];
+            [fk_model_residency_set commit];
+            [fk_model_residency_set requestResidency];
+            id<MTLCommandQueue> residency_queue = fk_model_command_queue();
+            if (residency_queue != nil &&
+                [residency_queue respondsToSelector:@selector(addResidencySet:)]) {
+                [residency_queue addResidencySet:fk_model_residency_set];
+                fk_model_residency_added_to_queue = 1;
+            }
+            [residency_queue release];
+            residency_count = (int)fk_model_view_count;
+        }
         double elapsed = fk_metal_now_ms() - started;
         long long result = fk_out(out, cap,
             "PASS metal_model_open\n"
@@ -320,13 +369,17 @@ long long fk_metal_model_open_external(
             "step-bytes=%llu\n"
             "view-limit-bytes=%llu\n"
             "device=%s\n"
+            "residency-allocations=%d\n"
+            "recommended-working-set-bytes=%llu\n"
             "elapsed-ms=%.3f\n"
             "copy=bytesNoCopy\n"
             "host-exec=0\nshell=0\nswift=0\ntemp=0\nnetwork=0\nremote=0\n"
             "outcome=success\n"
             "rewitness-offer=metal-model-open\n",
             file_len, view_count, step, view_limit,
-            fk_model_device.name.UTF8String, elapsed);
+            fk_model_device.name.UTF8String, residency_count,
+            (unsigned long long)fk_model_device.recommendedMaxWorkingSetSize,
+            elapsed);
         free(path_text);
         free(plan_text);
         return result;
