@@ -61,14 +61,75 @@
                     (tail fragments)
                     (add stack-offset (str_len (head fragments)))))))
 
+    (defn djma-stack-down (remaining)
+        (if (le remaining 0) (list)
+            (append-list
+                (fa-sub-x-imm 31 31 2048)
+                (djma-stack-down (sub remaining 1)))))
+
+    (defn djma-stack-up (remaining)
+        (if (le remaining 0) (list)
+            (append-list
+                (fa-add-x-imm 31 31 2048)
+                (djma-stack-up (sub remaining 1)))))
+
+    ; Return a compact tagged status after releasing the full 64 KiB frame.
+    ; status is ordinary Form data: 0=FAIL/other, 1=PASS, 2=NOTHING.
+    (defn djma-return-status (status)
+        (fa-image
+            (list
+                (fa-movz 0 (mul status 2))
+                (djma-stack-up 32)
+                (fa-ldp-fp)
+                (fa-ldp-post)
+                (fa-ret))))
+
+    ; Emit the byte comparisons for one candidate substring. A mismatch jumps
+    ; to this scanner's advance block. Offsets are derived from the exact
+    ; emitted instruction count, so adding another pattern does not alter them.
+    (defn djma-pattern-checks (pattern i n)
+        (if (ge i n) (list)
+            (append-list
+                (fa-ldrb 8 15 i)
+                (append-list
+                    (fa-movz 9 (str_byte_at pattern i))
+                    (append-list
+                        (fa-cmp-r 8 9)
+                        (append-list
+                            (fa-bcond 1
+                                (sub
+                                    (add 43 (mul 4 n))
+                                    (add 10 (mul 4 i))))
+                            (djma-pattern-checks
+                                pattern (add i 1) n)))))))
+
+    ; Scan x12[0..x19) for one exact pattern. Found returns immediately with
+    ; the requested status; absent falls through to the next scanner.
+    (defn djma-scan-pattern (pattern status)
+        (do
+            (let n (str_len pattern))
+            (fa-image
+                (list
+                    (fa-cmp-x 19 n)
+                    (fa-bcond 11 (add 44 (mul 4 n)))
+                    (fa-movz-x 13 0)
+                    (fa-sub-x-imm 14 19 n)
+                    (djma-cmp-x-r 13 14)
+                    (fa-bcond 12 (add 40 (mul 4 n)))
+                    (djma-add-x-r 15 12 13)
+                    (djma-pattern-checks pattern 0 n)
+                    (djma-return-status status)
+                    (fa-add-x-imm 13 13 1)
+                    (fa-b-off (sub 0 (add 40 (mul 4 n))))))))
+
     ; x0 enters with a tagged route word:
     ;   low 32 bits  = image-relative symbol delta
     ;   high 32 bits = expected live __TEXT region size
     ;
-    ; Stack:
-    ;   [0,96)    proc_regioninfo
-    ;   [128,...) transaction recipe bytes
-    ;   [4096,...) dispatcher receipt
+    ; Stack (64 KiB, emitted as 32 ordinary 2048-byte SP adjustments):
+    ;   [0,96)       proc_regioninfo
+    ;   [128,4096)   transaction recipe bytes
+    ;   [4096,53248) dispatcher receipt (49152-byte cap)
     (defn djma-transaction-controller-parts-bytes (fragments)
         (fa-image
             (list
@@ -77,10 +138,7 @@
                 (djma-lsr-x-imm 20 0 1)
                 (djma-lsr-x-imm 10 20 32)
                 (fa-mov 20 20)
-                (fa-sub-x-imm 31 31 2048)
-                (fa-sub-x-imm 31 31 2048)
-                (fa-sub-x-imm 31 31 2048)
-                (fa-sub-x-imm 31 31 2048)
+                (djma-stack-down 32)
 
                 ; pid = getpid(): Darwin UNIX syscall 20.
                 (fa-movz-x 16 20)
@@ -107,15 +165,8 @@
                 ; live region size is pri_size at byte offset 88 (scaled 11).
                 (fa-ldr 11 31 11)
                 (djma-cmp-x-r 11 10)
-                (fa-bcond 0 9)
-                (fa-movz-x 0 0)
-                (fa-add-x-imm 31 31 2048)
-                (fa-add-x-imm 31 31 2048)
-                (fa-add-x-imm 31 31 2048)
-                (fa-add-x-imm 31 31 2048)
-                (fa-ldp-fp)
-                (fa-ldp-post)
-                (fa-ret)
+                (fa-bcond 0 37)
+                (djma-return-status 0)
 
                 ; Materialize each Form-owned fragment directly in the frame.
                 ; No joined Form string or transaction-list ABI is involved.
@@ -126,7 +177,7 @@
                 (fa-movz-x 1 (djma-fragments-length fragments))
                 (fa-add-x-imm 2 31 2048)
                 (fa-add-x-imm 2 2 2048)
-                (fa-movz-x 3 4096)
+                (fa-movz-x 3 49152)
                 (fa-blr 9)
                 (djma-mov-x 19 0)
 
@@ -140,31 +191,38 @@
                 (fa-movk-x-16 16 512)
                 (fa-svc 128)
 
-                ; Compact tri-state from the unmodified receipt's first byte:
-                ; PASS -> tagged 1, NOTHING -> tagged 2, FAIL/other -> 0.
-                ; The full receipt has already crossed the framebuffer above.
+                ; Exact tri-state over the complete returned receipt. Operation
+                ; receipts begin with transaction-step, so first-byte checking
+                ; is insufficient: FAIL wins, then NOTHING, and PASS requires
+                ; the transaction summary normally present at the tail.
                 (fa-add-x-imm 12 31 2048)
                 (fa-add-x-imm 12 12 2048)
-                (fa-ldrb 8 12 0)
-                (fa-movz 9 80)
-                (fa-cmp-r 8 9)
-                (fa-movz 10 2)
-                (fa-movz 0 0)
-                (fa-csel 0 10 0 0)
-                (fa-movz 9 78)
-                (fa-cmp-r 8 9)
-                (fa-movz 10 4)
-                (fa-csel 0 10 0 0)
-                (fa-add-x-imm 31 31 2048)
-                (fa-add-x-imm 31 31 2048)
-                (fa-add-x-imm 31 31 2048)
-                (fa-add-x-imm 31 31 2048)
-                (fa-ldp-fp)
-                (fa-ldp-post)
-                (fa-ret))))
+                (djma-scan-pattern "FAIL " 0)
+                (djma-scan-pattern "NOTHING " 2)
+                (djma-scan-pattern "PASS metal_model_transaction" 1)
+                (djma-return-status 0))))
 
     (defn djma-transaction-controller-bytes (recipe)
         (djma-transaction-controller-parts-bytes (list recipe)))
+
+    ; Scanner-only live band door: place a synthetic operation-bearing receipt
+    ; in the emitted frame and run the exact same precedence logic.
+    (defn djma-status-controller-bytes (receipt)
+        (fa-image
+            (list
+                (fa-stp-pre)
+                (fa-stp-fp)
+                (djma-stack-down 32)
+                (djma-store-string receipt 128)
+                (fa-add-x-imm 12 31 128)
+                (fa-movz-x 19 (str_len receipt))
+                (djma-scan-pattern "FAIL " 0)
+                (djma-scan-pattern "NOTHING " 2)
+                (djma-scan-pattern "PASS metal_model_transaction" 1)
+                (djma-return-status 0))))
+
+    (defn djma-status-live (receipt)
+        (native_call_bytes (djma-status-controller-bytes receipt) 0))
 
     (defn dsv4-jit-metal-transaction-route (carrier)
         (mls-symbol-route carrier "_fk_metal_model_transaction_external"))
