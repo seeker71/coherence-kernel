@@ -12,9 +12,9 @@
 ;     pointers are built inside the emitted image rather than passed as Values.
 ;
 ; The returned dispatcher receipt is written directly by the emitted controller
-; and its byte count returns as a tagged Form number. No dlsym, nm, C/Go/Python,
-; generated source, compiler, shell dispatcher, or process-specific pointer is
-; part of the live route.
+; while its first byte becomes compact status 1=PASS, 2=NOTHING, 0=FAIL/other.
+; No dlsym, nm, C/Go/Python, generated source, compiler, shell dispatcher, or
+; process-specific pointer is part of the live route.
 ;
 ; witnessed: 2026-07-28 -> PASS metal_model_transaction through emitted BLR
 ;
@@ -47,6 +47,20 @@
     (defn djma-store-string (text stack-offset)
         (djma-store-string-loop text 0 (str_len text) stack-offset))
 
+    (defn djma-fragments-length (fragments)
+        (if (eq (len fragments) 0) 0
+            (add
+                (str_len (head fragments))
+                (djma-fragments-length (tail fragments)))))
+
+    (defn djma-store-fragments (fragments stack-offset)
+        (if (eq (len fragments) 0) (list)
+            (append-list
+                (djma-store-string (head fragments) stack-offset)
+                (djma-store-fragments
+                    (tail fragments)
+                    (add stack-offset (str_len (head fragments)))))))
+
     ; x0 enters with a tagged route word:
     ;   low 32 bits  = image-relative symbol delta
     ;   high 32 bits = expected live __TEXT region size
@@ -55,7 +69,7 @@
     ;   [0,96)    proc_regioninfo
     ;   [128,...) transaction recipe bytes
     ;   [4096,...) dispatcher receipt
-    (defn djma-transaction-controller-bytes (recipe)
+    (defn djma-transaction-controller-parts-bytes (fragments)
         (fa-image
             (list
                 (fa-stp-pre)
@@ -103,12 +117,13 @@
                 (fa-ldp-post)
                 (fa-ret)
 
-                ; Materialize the caller's recipe in the controller frame.
-                (djma-store-string recipe 128)
+                ; Materialize each Form-owned fragment directly in the frame.
+                ; No joined Form string or transaction-list ABI is involved.
+                (djma-store-fragments fragments 128)
 
                 ; dispatcher(recipe, recipe_len, out, out_cap)
                 (fa-add-x-imm 0 31 128)
-                (fa-movz-x 1 (str_len recipe))
+                (fa-movz-x 1 (djma-fragments-length fragments))
                 (fa-add-x-imm 2 31 2048)
                 (fa-add-x-imm 2 2 2048)
                 (fa-movz-x 3 4096)
@@ -125,9 +140,21 @@
                 (fa-movk-x-16 16 512)
                 (fa-svc 128)
 
-                ; Return the dispatcher byte count in the tagged Form ABI.
-                (djma-mov-x 0 19)
-                (fa-lsl-x-imm 0 0 1)
+                ; Compact tri-state from the unmodified receipt's first byte:
+                ; PASS -> tagged 1, NOTHING -> tagged 2, FAIL/other -> 0.
+                ; The full receipt has already crossed the framebuffer above.
+                (fa-add-x-imm 12 31 2048)
+                (fa-add-x-imm 12 12 2048)
+                (fa-ldrb 8 12 0)
+                (fa-movz 9 80)
+                (fa-cmp-r 8 9)
+                (fa-movz 10 2)
+                (fa-movz 0 0)
+                (fa-csel 0 10 0 0)
+                (fa-movz 9 78)
+                (fa-cmp-r 8 9)
+                (fa-movz 10 4)
+                (fa-csel 0 10 0 0)
                 (fa-add-x-imm 31 31 2048)
                 (fa-add-x-imm 31 31 2048)
                 (fa-add-x-imm 31 31 2048)
@@ -135,6 +162,9 @@
                 (fa-ldp-fp)
                 (fa-ldp-post)
                 (fa-ret))))
+
+    (defn djma-transaction-controller-bytes (recipe)
+        (djma-transaction-controller-parts-bytes (list recipe)))
 
     (defn dsv4-jit-metal-transaction-route (carrier)
         (mls-symbol-route carrier "_fk_metal_model_transaction_external"))
@@ -144,14 +174,25 @@
             (let route (dsv4-jit-metal-transaction-route carrier))
             (if (lt (len route) 2) 0 (nth route 0))))
 
-    ; 0 is an honest absent/other-carrier result. A positive result is the byte
-    ; count returned by the linked Metal transaction dispatcher.
-    (defn dsv4-jit-metal-transaction (carrier recipe)
+    ; Return: 1=PASS, 2=NOTHING, 0=FAIL/other-carrier/oversized recipe.
+    ; The controller independently validates that the selected carrier's
+    ; artifact identity matches the live image before BLR.
+    (defn dsv4-jit-metal-transaction-routed-parts (route fragments)
         (do
-            (let route (dsv4-jit-metal-transaction-route carrier))
-            (if (lt (len route) 2) 0
+            (let recipe-length (djma-fragments-length fragments))
+            (if (or (lt (len route) 2)
+                    (or (lt recipe-length 0) (gt recipe-length 3968)))
+                0
                 (native_call_bytes
-                    (djma-transaction-controller-bytes recipe)
+                    (djma-transaction-controller-parts-bytes fragments)
                     (add (nth route 0) (mul (nth route 1) 4294967296))))))
+
+    (defn dsv4-jit-metal-transaction-parts (carrier fragments)
+        (dsv4-jit-metal-transaction-routed-parts
+            (dsv4-jit-metal-transaction-route carrier)
+            fragments))
+
+    (defn dsv4-jit-metal-transaction (carrier recipe)
+        (dsv4-jit-metal-transaction-parts carrier (list recipe)))
 
     0)
