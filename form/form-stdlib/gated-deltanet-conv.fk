@@ -1,0 +1,136 @@
+; gated-deltanet-conv.fk — the two pieces of a Gated DeltaNet linear-attention
+; layer that this body does NOT already have and that the config fully
+; determines: the causal depthwise convolution in front of the recurrence, and
+; the key/value head grouping.
+;
+; WHAT IS ALREADY HOME. kimi-kda.fk carries the gated delta rule itself at band
+; 63 — the matrix-valued state S that each token EDITS (read at the key, measure
+; the error, write a rank-1 correction, decay under a gate). That is the heart
+; and it is proven. What sits around it in Qwen3.5/3.6's linear layers is a
+; short causal conv over q/k/v and a grouped head map, and neither is in that
+; cell.
+;
+; WHAT IS GROUNDED, read 2026-07-28 from KAT-Coder-V2.5-Dev's own config.json:
+;   linear_key_head_dim     128
+;   linear_value_head_dim   128
+;   linear_num_key_heads     16
+;   linear_num_value_heads   32      <- grouped: two value heads per key head
+;   linear_conv_kernel_dim    4
+;   layer_types              linear x3 then full, full_attention_interval 4
+;   attn_output_gate       true
+; Both pieces below follow from those numbers and from what a CAUSAL convolution
+; means. Nothing here is inferred from a picture of the architecture.
+;
+; WHAT IS NOT GROUNDED, AND SO IS NOT BUILT. The decay gate alpha and the write
+; strength beta are produced by a learned parameterization (an A_log / dt_bias
+; style exponential gate, and a sigmoid) whose exact form this body has not read
+; from a primary source — a web search for it returned prose and said plainly it
+; did not carry the formulas. The output gate's exact composition and any q/k
+; normalization are in the same position. kimi-kda.fk already TAKES alpha and
+; beta as arguments, so the recurrence does not need them decided here; when the
+; parameterization is read from the reference implementation it lands as its own
+; cell against its own witness. Inventing it now would put a guess where a
+; measurement belongs.
+;
+; THE CONV, EXACTLY. Depthwise and causal, width k: each channel is convolved
+; with its own k taps and never reads a future position.
+;   y[t] = sum_{j=0..k-1} w[j] * x[t - (k-1) + j]
+; with x before position 0 read as zero. In DECODE the whole sequence is not
+; available, so the same meaning is carried by a rolling window state of the
+; last k-1 inputs per channel: shift the new input in, fold the taps, emit. The
+; band's sharpest claim is that those two — the batch convolution and the
+; streaming state — produce the SAME numbers, because they are two independent
+; expressions of one meaning and a decode lane runs only the second.
+;
+; KIN, AND WHY THIS IS NOT THAT. conv-stem.fk already carries whisper's encoder
+; conv front-end, and a reader arriving here should be told the difference
+; rather than left to find it. conv-stem is symmetric-padded (`padding=1`, so
+; position t reads t+1 — it looks one frame into the FUTURE, which an encoder
+; may do and a decoder may not), CROSS-channel (out_ch x kernel x in_ch, every
+; output channel mixing every input channel), and whole-sequence. This one is
+; causal, depthwise (each channel convolved with its own taps, no mixing), and
+; carries a rolling state because a decode lane sees one token at a time and
+; never holds the sequence. Same word, three different properties; neither cell
+; can stand in for the other.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    ; ── the shape, from the config ───────────────────────────────────────
+    (defn gdc-conv-k () 4)
+    (defn gdc-num-key-heads () 16)
+    (defn gdc-num-value-heads () 32)
+    (defn gdc-key-head-dim () 128)
+    (defn gdc-value-head-dim () 128)
+    ; value head -> the key head it shares. Grouped attention: the value heads
+    ; divide evenly among the key heads, so head v reads key head
+    ; v * nk / nv = v / 2 here. Written as the division rather than the constant
+    ; so a model with a different ratio is not silently mis-grouped.
+    (defn gdc-key-head-for (v) (div (mul v (gdc-num-key-heads)) (gdc-num-value-heads)))
+    (defn gdc-group-size () (div (gdc-num-value-heads) (gdc-num-key-heads)))
+
+    ; ── list helpers (kept local; this cell stands on core alone) ─────────
+    (defn gdc-nth0 (xs i) (if (eq i 0) (head xs) (gdc-nth0 (tail xs) (sub i 1))))
+    (defn gdc-take (xs n) (if (eq n 0) (empty) (cons (head xs) (gdc-take (tail xs) (sub n 1)))))
+    (defn gdc-drop (xs n) (if (eq n 0) xs (gdc-drop (tail xs) (sub n 1))))
+    (defn gdc-zeros (n) (if (eq n 0) (empty) (cons 0.0 (gdc-zeros (sub n 1)))))
+    (defn gdc-append (xs y) (if (eq (len xs) 0) (cons y (empty)) (cons (head xs) (gdc-append (tail xs) y))))
+
+    ; ── the batch convolution: the definition, over a whole sequence ──────
+    ; xs is one channel's sequence. Positions before 0 read as zero, so the
+    ; window at t is (k-1-t) zeros followed by xs[0..t] when t < k-1.
+    (defn gdc-window (xs t k)
+        (if (lt t (sub k 1))
+            (gdc-cat (gdc-zeros (sub (sub k 1) t)) (gdc-take xs (add t 1)))
+            (gdc-take (gdc-drop xs (sub (add t 1) k)) k)))
+    (defn gdc-cat (a b) (if (eq (len a) 0) b (cons (head a) (gdc-cat (tail a) b))))
+    (defn gdc-dot (a b)
+        (if (eq (len a) 0) 0.0 (add (mul (head a) (head b)) (gdc-dot (tail a) (tail b)))))
+    (defn gdc-conv-at (xs w t) (gdc-dot (gdc-window xs t (len w)) w))
+    (defn gdc-conv-seq-go (xs w t n acc)
+        (if (ge t n) (reverse acc)
+            (gdc-conv-seq-go xs w (add t 1) n (cons (gdc-conv-at xs w t) acc))))
+    (defn gdc-conv-seq (xs w) (gdc-conv-seq-go xs w 0 (len xs) (empty)))
+
+    ; ── the streaming form: what a decode lane actually runs ──────────────
+    ; state is the last k inputs, oldest first, zero-filled at the start. One
+    ; step shifts the new input in at the tail and folds the taps.
+    (defn gdc-state0 (k) (gdc-zeros k))
+    (defn gdc-shift (state x) (gdc-append (tail state) x))
+    (defn gdc-step (state w x)
+        (do (let s2 (gdc-shift state x))
+            (list s2 (gdc-dot s2 w))))
+    (defn gdc-step-state (r) (head r))
+    (defn gdc-step-out   (r) (head (tail r)))
+    (defn gdc-stream-go (state w xs acc)
+        (if (eq (len xs) 0) (reverse acc)
+            (do (let r (gdc-step state w (head xs)))
+                (gdc-stream-go (gdc-step-state r) w (tail xs) (cons (gdc-step-out r) acc)))))
+    (defn gdc-stream (w xs) (gdc-stream-go (gdc-state0 (len w)) w xs (empty)))
+
+    ; ── readers a band leans on ──────────────────────────────────────────
+    (defn gdc-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn gdc-close (a b tol)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) 1
+                (if (lt (gdc-abs (sub (head a) (head b))) tol)
+                    (gdc-close (tail a) (tail b) tol) 0))
+            0))
+    (defn gdc-any-nonzero (xs)
+        (if (eq (len xs) 0) 0 (if (gt (gdc-abs (head xs)) 1e-12) 1 (gdc-any-nonzero (tail xs)))))
+    ; a unit impulse at position p in a length-n sequence — the causality probe
+    (defn gdc-impulse-go (i n p acc)
+        (if (ge i n) (reverse acc)
+            (gdc-impulse-go (add i 1) n p (cons (if (eq i p) 1.0 0.0) acc))))
+    (defn gdc-impulse (n p) (gdc-impulse-go 0 n p (empty)))
+    ; every key head is reached by exactly group-size value heads
+    (defn gdc-count-heads-for-go (v nv k c)
+        (if (ge v nv) c
+            (gdc-count-heads-for-go (add v 1) nv k (if (eq (gdc-key-head-for v) k) (add c 1) c))))
+    (defn gdc-count-heads-for (k) (gdc-count-heads-for-go 0 (gdc-num-value-heads) k 0))
+    (defn gdc-grouping-even-go (k nk)
+        (if (ge k nk) 1
+            (if (eq (gdc-count-heads-for k) (gdc-group-size))
+                (gdc-grouping-even-go (add k 1) nk) 0)))
+    (defn gdc-grouping-even? () (gdc-grouping-even-go 0 (gdc-num-key-heads)))
+    0)

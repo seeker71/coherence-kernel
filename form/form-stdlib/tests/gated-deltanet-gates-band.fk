@@ -1,0 +1,83 @@
+; gated-deltanet-gates-band.fk — the gates read from Qwen3_5GatedDeltaNet hold
+; their structural invariants, and the silu/sigmoid substitution is refused.
+;
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/transformer-numerics.fk form-stdlib/llama-numerics.fk form-stdlib/gated-deltanet-gates.fk
+;
+; run: ./fkwu --src form/form-stdlib/tests/gated-deltanet-gates-band.fk   ; -> 511
+;
+; Verdict 511.
+;
+; These are INVARIANT gates, not pinned numbers, and that is deliberate. A pin
+; would say "this implementation returns what it returned when I wrote it down";
+; an invariant says "the decay can never exceed 1", which is the property the
+; recurrence actually leans on and the one a future edit could break silently.
+; Bit 32 is the exception and is a pin of a difference: silu vs sigmoid on the
+; output path, the substitution that reading the cousin instead of the parent
+; would have made.
+
+(do
+    (defn gdgb-score (ok bit) (if ok bit 0))
+
+    (defn gated-deltanet-gates-band ()
+        (do
+    ; softplus survives both tails: 50 comes back as 50 rather than overflowing,
+    ; and -50 comes back as EXACTLY 0 rather than as a NaN.
+    ; The zero is not an error and the band says so on purpose. softplus(-50)
+    ; is truly 1.93e-22, and tn-exp returns exactly that — but the stable form
+    ; evaluates ln(1 + exp(-|x|)), and 1.0 + 1.93e-22 IS 1.0 in float64, since
+    ; anything below 2^-53 vanishes when added to one. So the term is lost to
+    ; the representation, not to the recipe. This band first asserted
+    ; `sp-small > 0` and went dark at 254; the assertion was demanding
+    ; something double precision cannot carry.
+    (let sp-big (gdg-softplus 50.0))
+    (let sp-small (gdg-softplus (sub 0.0 50.0)))
+    (let c0 (gdgb-score (if (gt sp-big 49.9)
+                            (if (lt sp-big 50.1)
+                                (if (ge sp-small 0.0) (lt sp-small 0.0001) 0) 0) 0) 1))
+    ; beta = sigmoid(b) lands strictly inside (0,1), and is monotone
+    (let c1 (gdgb-score (if (gt (gdg-beta 0.0) 0.4999)
+                            (if (lt (gdg-beta 0.0) 0.5001)
+                                (if (gt (gdg-beta 3.0) (gdg-beta (sub 0.0 3.0))) 1 0) 0) 0) 2))
+    ; THE STRUCTURAL INVARIANT: alpha is strictly inside (0,1) for every
+    ; combination, because exp(A_log) > 0 and softplus > 0 force g < 0
+    (let c2 (gdgb-score (if (eq (gdg-alpha-in-range? 0.0 0.0 1.0) 1)
+                            (if (eq (gdg-alpha-in-range? 5.0 2.0 1.0) 1)
+                                (if (eq (gdg-alpha-in-range? (sub 0.0 5.0) (sub 0.0 2.0) 1.0) 1)
+                                    (gdg-alpha-in-range? 20.0 2.7 1.0) 0) 0) 0) 4))
+    ; g is a LOG-decay: it is negative, so alpha = exp(g) shrinks the state
+    (let c3 (gdgb-score (lt (gdg-logdecay 1.0 0.5 1.0) 0.0) 8))
+    ; l2norm sends a vector to unit length (to within what eps 1e-6 permits)
+    (let V (list 3.0 (sub 0.0 4.0) 12.0))
+    (let N (gdg-l2norm V))
+    (let c4 (gdgb-score (lt (gdg-abs (sub (gdg-norm N) 1.0)) 1e-6) 16))
+    ; FALSIFIER, and the finding this cell exists for: the output gate is SILU.
+    ; Substituting sigmoid — what the qwen3_next sibling does — must produce a
+    ; MEASURABLY different vector, so the substitution cannot pass unnoticed.
+    (let X (list 1.0 2.0 (sub 0.0 1.5)))
+    (let Z (list 0.7 (sub 0.0 2.0) 1.3))
+    (let c5 (gdgb-score (gt (gdg-max-dev (gdg-out-gate X Z)
+                                         (gdg-out-gate-sigmoid-WRONG X Z)) 0.1) 32))
+    ; silu(z) = z*sigmoid(z), so a NEGATIVE gate keeps its sign through silu and
+    ; flips nothing — the property sigmoid does not have (sigmoid is always > 0)
+    (let c6 (gdgb-score (if (lt (ln-silu (sub 0.0 2.0)) 0.0)
+                            (gt (ln-sigmoid (sub 0.0 2.0)) 0.0) 0) 64))
+    ; a larger dt_bias decays harder — the gate responds in the direction the
+    ; parameterization claims, so it is wired, not inert
+    (let c7 (gdgb-score (lt (gdg-alpha 1.0 0.5 4.0) (gdg-alpha 1.0 0.5 0.0)) 128))
+    ; THE SATURATION BOUNDARY, WITNESSED RATHER THAN HIDDEN. Because softplus
+    ; flushes to exactly 0 once its argument passes ln(2^-53) ~ -36.7, the decay
+    ; alpha = exp(-exp(A_log)*softplus(.)) saturates to EXACTLY 1 — the state
+    ; stops forgetting at all. Measured on this arithmetic:
+    ;   a+dt_bias = -36  ->  softplus 2.22e-16, alpha 0.99999999999999978
+    ;   a+dt_bias = -37  ->  softplus 0,        alpha 1
+    ; The consequence is negligible and that is worth saying too: a decay of 1
+    ; and a decay of 0.9999999999999998 are the same instruction to a model. It
+    ; is pinned anyway, so the transition cannot move to somewhere that matters
+    ; without a bit going dark. Note this is where c2's strict alpha < 1
+    ; invariant STOPS holding, and c2's inputs stay inside the region where it
+    ; does — a bound with its own edge named, rather than a claim made everywhere.
+    (let c8 (gdgb-score (if (lt (gdg-alpha (sub 0.0 36.0) 0.0 0.0) 1.0)
+                            (if (eq (gdg-alpha (sub 0.0 37.0) 0.0 0.0) 1.0) 1 0) 0) 256))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 c8)))))))))
+    )
+    (gated-deltanet-gates-band))

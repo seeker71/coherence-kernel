@@ -1,0 +1,63 @@
+; gated-deltanet-conv-band.fk — the causal conv is causal, its streaming form
+; means the same thing as its definition, and the head grouping divides evenly.
+;
+; preludes: form-stdlib/core.fk form-stdlib/gated-deltanet-conv.fk
+;
+; run: ./fkwu --src form/form-stdlib/tests/gated-deltanet-conv-band.fk   ; -> 127
+;
+; Verdict 127.
+;
+; Bit 4 is the one that carries weight: the batch convolution (the definition,
+; which sees the whole sequence) and the rolling-state stream (what a decode
+; lane actually runs, seeing one token at a time) are two independent
+; expressions of one meaning, and they are required to agree. A decode lane runs
+; only the second, so if they ever diverge the model drifts with nothing to say
+; so.
+;
+; Bits 8 and 16 are the causality falsifiers, and they are a matched pair: an
+; impulse must reach exactly k outputs FORWARD and exactly zero outputs BACK.
+; Checking only one of those passes a convolution that is shifted the wrong way.
+
+(do
+    (defn gdcb-score (ok bit) (if ok bit 0))
+    (defn gdcb-sum (xs) (if (eq (len xs) 0) 0.0 (add (head xs) (gdcb-sum (tail xs)))))
+
+    (defn gated-deltanet-conv-band ()
+        (do
+    (let W (list 0.25 (sub 0.0 0.5) 0.75 1.5))          ; four taps, from the config's kernel dim
+    (let X (list 1.0 (sub 0.0 2.0) 3.0 0.5 (sub 0.0 1.5) 2.25 0.125 (sub 0.0 0.75)))
+    (let B (gdc-conv-seq X W))
+    (let S (gdc-stream W X))
+
+    ; the config's kernel width is the width actually convolved
+    (let c0 (gdcb-score (if (eq (gdc-conv-k) 4) (eq (len W) (gdc-conv-k)) 0) 1))
+    ; the convolution returns one output per input — no edge is dropped
+    (let c1 (gdcb-score (if (eq (len B) (len X)) (eq (len S) (len X)) 0) 2))
+    ; THE CLAIM: definition and streaming state agree
+    (let c2 (gdcb-score (eq (gdc-close B S 1e-12) 1) 4))
+    ; FALSIFIER (forward reach): an impulse at 0 reaches exactly k outputs.
+    ; Outputs 0..k-1 carry the taps; everything from k on is silent.
+    (let imp (gdc-impulse 9 0))
+    (let ci (gdc-conv-seq imp W))
+    (let c3 (gdcb-score (if (eq (gdc-any-nonzero (gdc-take ci (gdc-conv-k))) 1)
+                            (if (eq (gdc-any-nonzero (gdc-drop ci (gdc-conv-k))) 0) 1 0) 0) 8))
+    ; FALSIFIER (no reach backward): an impulse LATE in the sequence leaves every
+    ; earlier output exactly zero. A conv shifted the wrong way passes bit 8 and
+    ; dies here.
+    (let imp2 (gdc-impulse 9 6))
+    (let ci2 (gdc-conv-seq imp2 W))
+    (let c4 (gdcb-score (eq (gdc-any-nonzero (gdc-take ci2 6)) 0) 16))
+    ; the streaming form is causal too, by the same probe — the state must not
+    ; smuggle in a lookahead
+    (let cs2 (gdc-stream W imp2))
+    (let c5 (gdcb-score (if (eq (gdc-any-nonzero (gdc-take cs2 6)) 0)
+                            (eq (gdc-close ci2 cs2 1e-12) 1) 0) 32))
+    ; the head grouping divides evenly: 32 value heads over 16 key heads, two
+    ; each, every key head reached
+    (let c6 (gdcb-score (if (eq (gdc-group-size) 2)
+                            (if (eq (gdc-grouping-even?) 1)
+                                (if (eq (gdc-key-head-for 31) 15)
+                                    (eq (gdc-key-head-for 0) 0) 0) 0) 0) 64))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 c6)))))))
+    )
+    (gated-deltanet-conv-band))
