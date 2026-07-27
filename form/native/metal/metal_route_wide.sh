@@ -46,8 +46,9 @@ cat > "$WORK/emit.fk" <<'EOF'
 ; preludes: form-stdlib/core.fk form-stdlib/moe-route-wide-msl.fk
 (print_str (mrw-msl-appendix))
 EOF
-# fkwu prints the top-level result after print_str's output; the lone `0` line is that result.
-./fkwu --src "$WORK/emit.fk" 2>/dev/null | grep -v '^0$' > "$WORK/body.msl"
+# fkwu prints the top-level result after print_str's output. Drop it BY POSITION with `sed '$d'`,
+# never by content: filtering `^0$` would also delete any emitted line that is legitimately "0".
+./fkwu --src "$WORK/emit.fk" 2>/dev/null | sed '$d' > "$WORK/body.msl"
 bytes=$(wc -c < "$WORK/body.msl" | tr -d ' ')
 gate "1 the body emits a non-empty appendix ($bytes bytes)" "$([ "$bytes" -gt 200 ] && echo 1 || echo 0)"
 
