@@ -1,0 +1,95 @@
+; gated-deltanet-gates.fk — the decay gate, the write strength, the q/k
+; normalization and the output gate of a Qwen3.5 Gated DeltaNet layer, as Form.
+;
+; gated-deltanet-conv.fk refused to build these, on purpose: it said the
+; parameterization "has not been read from a primary source" and that inventing
+; it would put a guess where a measurement belongs. This cell is written after
+; reading it.
+;
+; READ 2026-07-28 FROM THE REFERENCE, VERBATIM. KAT-Coder-V2.5-Dev's config
+; declares model_type `qwen3_5_moe`, whose `Qwen3_5MoeGatedDeltaNet` is
+;     class Qwen3_5MoeGatedDeltaNet(Qwen3_5GatedDeltaNet):
+;         pass
+; so the meaning lives in `Qwen3_5GatedDeltaNet`
+; (transformers/models/qwen3_5/modeling_qwen3_5.py):
+;     beta  = b.sigmoid()
+;     g     = -self.A_log.float().exp() * F.softplus(a.float() + self.dt_bias)
+;     query = l2norm(query, dim=-1, eps=1e-6)      ; and key, likewise
+;       where l2norm is  x * rsqrt((x*x).sum(dim) + eps)
+;     core_attn_out = self.norm(core_attn_out, z)
+;       where Qwen3_5RMSNormGated does  hidden_states * F.silu(gate)
+;
+; THE ONE THING FETCHING THE PARENT CAUGHT. The sibling implementation
+; `qwen3_next` gates its output with `attn_output * torch.sigmoid(gate)`.
+; Qwen3.5 uses **silu**, not sigmoid. Reading the cousin because it was one
+; search away, instead of the parent the config actually names, would have put
+; the wrong nonlinearity on the output path — a difference no shape check and no
+; magnitude check would have caught, since both are smooth maps landing in a
+; similar range. Band bit 32 falsifies exactly that substitution.
+;
+; g IS A LOG-DECAY, NOT THE DECAY. The recurrence in kimi-kda.fk takes alpha
+; directly (`Spred = alpha * S_{t-1}`), and g is its logarithm: alpha = exp(g).
+; That the state can only ever SHRINK is not a tuning choice, it is structural —
+; exp(A_log) > 0 for every real A_log and softplus > 0 everywhere, so g < 0
+; strictly, so alpha lies in (0,1). The band asserts it as an invariant over a
+; spread of inputs rather than trusting the reading.
+;
+; SOFTPLUS IS WRITTEN IN ITS STABLE FORM. ln(1 + exp(x)) overflows for large x
+; and loses everything for large negative x. The identity
+;     softplus(x) = max(x,0) + ln(1 + exp(-|x|))
+; is exact and evaluates the exponential only at a non-positive argument. Since
+; A_log is initialized as log(U(0,16)) and dt_bias as ones, `a + dt_bias` is not
+; bounded small in practice, so this is not a hypothetical.
+;
+; REUSED, NOT REBUILT: ln-sigmoid / ln-silu (llama-numerics.fk), fln (trig.fk),
+; tn-exp / tn-sqrt (transformer-numerics.fk).
+;
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/transformer-numerics.fk form-stdlib/llama-numerics.fk
+
+(do
+    (defn gdg-eps () 0.000001)                      ; the reference's 1e-6
+
+    (defn gdg-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+    ; softplus(x) = max(x,0) + ln(1 + exp(-|x|))
+    (defn gdg-softplus (x)
+        (add (if (gt x 0.0) x 0.0)
+             (fln (add 1.0 (tn-exp (sub 0.0 (gdg-abs x)))))))
+
+    ; beta = sigmoid(b) — the write strength
+    (defn gdg-beta (b) (ln-sigmoid b))
+
+    ; g = -exp(A_log) * softplus(a + dt_bias) — the LOG decay
+    (defn gdg-logdecay (a alog dtb)
+        (mul (sub 0.0 (tn-exp alog)) (gdg-softplus (add a dtb))))
+    ; alpha = exp(g) — what kimi-kda's kda-step actually takes
+    (defn gdg-alpha (a alog dtb) (tn-exp (gdg-logdecay a alog dtb)))
+
+    ; l2norm: x * rsqrt(sum(x*x) + eps)
+    (defn gdg-sumsq (xs) (if (eq (len xs) 0) 0.0 (add (mul (head xs) (head xs)) (gdg-sumsq (tail xs)))))
+    (defn gdg-scale (s xs) (if (eq (len xs) 0) (empty) (cons (mul s (head xs)) (gdg-scale s (tail xs)))))
+    (defn gdg-l2norm (xs)
+        (gdg-scale (div 1.0 (tn-sqrt (add (gdg-sumsq xs) (gdg-eps)))) xs))
+
+    ; the output gate: elementwise x * silu(z). SILU — see the header.
+    (defn gdg-out-gate (xs zs)
+        (if (eq (len xs) 0) (empty)
+            (cons (mul (head xs) (ln-silu (head zs)))
+                  (gdg-out-gate (tail xs) (tail zs)))))
+    ; the substitution the reference does NOT make, kept so a band can refuse it
+    (defn gdg-out-gate-sigmoid-WRONG (xs zs)
+        (if (eq (len xs) 0) (empty)
+            (cons (mul (head xs) (ln-sigmoid (head zs)))
+                  (gdg-out-gate-sigmoid-WRONG (tail xs) (tail zs)))))
+
+    ; ── readers for the band ─────────────────────────────────────────────
+    (defn gdg-norm (xs) (tn-sqrt (gdg-sumsq xs)))
+    (defn gdg-max-dev (a b)
+        (if (eq (len a) 0) 0.0
+            (do (let d (gdg-abs (sub (head a) (head b))))
+                (let r (gdg-max-dev (tail a) (tail b)))
+                (if (gt d r) d r))))
+    ; alpha strictly inside (0,1) across a spread of (a, A_log, dt_bias)
+    (defn gdg-alpha-in-range? (a alog dtb)
+        (do (let v (gdg-alpha a alog dtb))
+            (if (gt v 0.0) (if (lt v 1.0) 1 0) 0)))
+    0)
