@@ -1023,6 +1023,10 @@ __attribute__((weak)) long long fk_metal_model_compress_stage_external(
     char*out,long long cap){
     (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
     return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_transaction_external(
+    const char*recipe,long long recipe_len,char*out,long long cap){
+    (void)recipe;(void)recipe_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
 #else
 static long long fk_metal_model_open_external(
     const char *path, long long path_len,
@@ -1152,6 +1156,10 @@ static long long fk_metal_model_compress_stage_external(
     const char*libraries,long long libraries_len,const char*plan,long long plan_len,
     char*out,long long cap){
     (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_transaction_external(
+    const char*recipe,long long recipe_len,char*out,long long cap){
+    (void)recipe;(void)recipe_len;(void)out;(void)cap;
     return FK_METAL_MODEL_PORT_UNLINKED;}
 #endif
 #define FK_METAL_MODEL_PORT_BUF_CAP 8192
@@ -1485,6 +1493,43 @@ static long long fk_metal_model_compress_stage_native(long long librariesv,long 
     if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_compress_stage no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
     if(n<0){const char*m="FAIL metal_model_compress_stage linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
     if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_transaction_native(long long recipev){
+    const char*recipe;long long rl;char*joined=0;
+    if(fk_srange(recipev,&recipe,&rl)==0){
+        long long cell=recipev,total=0,count=0;
+        while(cell!=1&&(cell&1)==1){
+            long long hi=cell>>1;const char*part;long long pl;
+            if(hi<=0||hi>fk_hp||fk_srange(fk_hh[hi],&part,&pl)==0){
+                const char*m="FAIL metal_model_transaction invalid recipe cell\n";
+                return fk_sbuf(m,fk_cstrlen(m));}
+            total+=pl;count++;cell=fk_ht[hi];
+        }
+        if(cell!=1||count==0||total<=0){
+            const char*m="FAIL metal_model_transaction invalid recipe list\n";
+            return fk_sbuf(m,fk_cstrlen(m));}
+        joined=malloc((unsigned long)total);
+        if(joined==0){
+            const char*m="FAIL metal_model_transaction recipe allocation\n";
+            return fk_sbuf(m,fk_cstrlen(m));}
+        cell=recipev;long long at=0;
+        while(cell!=1){
+            long long hi=cell>>1;const char*part;long long pl;
+            fk_srange(fk_hh[hi],&part,&pl);
+            long long k=0;while(k<pl){joined[at+k]=part[k];k++;}at+=pl;cell=fk_ht[hi];
+        }
+        recipe=joined;rl=total;
+    }
+    static char out[65536];
+    long long n=fk_metal_model_transaction_external(recipe,rl,out,65536);
+    if(joined!=0)free(joined);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){
+        const char*m="NOTHING metal_model_transaction no linked Metal model port\n";
+        return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){
+        const char*m="FAIL metal_model_transaction linked port returned error\n";
+        return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>65536)n=65536;return fk_sbuf(out,n);
 }
 /* ── host sense-channel carriers: camera (world-video) + mic (world-audio) ── The two conditions of
  * host-kernel.form, made concrete: ALLOW-PRESENCE (detect the device through the host's own OS API)
@@ -7664,6 +7709,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
         return fk_metal_model_compress_stage_native(fk_vs[fk_vsp],plan);
     }
+    if(t==152)return fk_metal_model_transaction_native(fk_walk(fk_node[i][1],fp));
     if (t == 216) {
         return fk_wifi_ssid();
     }

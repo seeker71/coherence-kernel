@@ -15,6 +15,29 @@
 #include <time.h>
 #include <unistd.h>
 
+/*
+ * A transaction is Form recipe-data, not hidden carrier policy:
+ *
+ *   operation<TAB>argument...<NEWLINE>
+ *
+ * Each operation is one of the already exposed Metal membranes below.  The
+ * carrier merely walks the supplied recipe without returning to the Form
+ * interpreter between steps.  Every underlying receipt is retained verbatim
+ * and prefixed by its stable step index, so batching does not erase inquiry.
+ */
+static size_t fk_tx_fields(char *line, char **field, size_t cap) {
+    size_t n = 0;
+    if (cap == 0) return 0;
+    field[n++] = line;
+    for (char *p = line; *p != 0 && n < cap; p++) {
+        if (*p == '\t') {
+            *p = 0;
+            field[n++] = p + 1;
+        }
+    }
+    return n;
+}
+
 static long long fk_out(char *out, long long cap, const char *fmt, ...) {
     if (cap <= 0) return -1;
     va_list args;
@@ -2261,6 +2284,94 @@ long long fk_metal_matvec_f32_external(const char *msl, long long msl_len,
         if (used < cap) out[used] = 0;
         free(values);
         free(model_text);
+        return used;
+    }
+}
+
+long long fk_metal_model_transaction_external(
+    const char *recipe, long long recipe_len, char *out, long long cap) {
+    @autoreleasepool {
+        char *text = fk_copy_cstr(recipe, recipe_len);
+        if (text == NULL)
+            return fk_out(out, cap, "FAIL metal_model_transaction allocation\n");
+        long long used = 0;
+        size_t step = 0;
+        double started = fk_metal_now_ms();
+        char *cursor = text;
+        while (*cursor != 0) {
+            char *line = cursor;
+            char *newline = strchr(cursor, '\n');
+            if (newline != NULL) {
+                *newline = 0;
+                cursor = newline + 1;
+            } else {
+                cursor += strlen(cursor);
+            }
+            if (*line == 0) continue;
+            char *f[4] = {0};
+            size_t nf = fk_tx_fields(line, f, 4);
+            char receipt[8192];
+            long long n = -1;
+#define FK_TX2(name, fn) \
+            if (strcmp(f[0], name) == 0 && nf == 3) \
+                n = fn(f[1], (long long)strlen(f[1]), \
+                       f[2], (long long)strlen(f[2]), receipt, sizeof(receipt))
+            FK_TX2("hc_split", fk_metal_model_hc_split_external);
+            else FK_TX2("hc_reduce", fk_metal_model_hc_reduce_external);
+            else FK_TX2("rmsnorm", fk_metal_model_rmsnorm_external);
+            else FK_TX2("mx8_matvec", fk_metal_model_mx8_matvec_external);
+            else FK_TX2("rope", fk_metal_model_rope_external);
+            else FK_TX2("attention", fk_metal_model_attention_external);
+            else FK_TX2("hc_post", fk_metal_model_hc_post_external);
+            else FK_TX2("hash_route", fk_metal_model_hash_route_external);
+            else FK_TX2("moe", fk_metal_model_moe_external);
+            else FK_TX2("topk_route", fk_metal_model_topk_route_external);
+            else FK_TX2("hc_output", fk_metal_model_hc_output_external);
+            else FK_TX2("argmax", fk_metal_model_argmax_external);
+            else FK_TX2("kv_round", fk_metal_model_kv_round_external);
+            else FK_TX2("cached_attention", fk_metal_model_cached_attention_external);
+            else FK_TX2("compress_stage", fk_metal_model_compress_stage_external);
+#undef FK_TX2
+            else if (strcmp(f[0], "f16_matvec") == 0 && nf == 4)
+                n = fk_metal_model_f16_matvec_external(
+                    f[1], (long long)strlen(f[1]),
+                    f[2], (long long)strlen(f[2]),
+                    f[3], (long long)strlen(f[3]), receipt, sizeof(receipt));
+            else if (strcmp(f[0], "state_save") == 0 && nf == 2)
+                n = fk_metal_model_state_save_external(
+                    f[1], (long long)strlen(f[1]), receipt, sizeof(receipt));
+            else if (strcmp(f[0], "state_load") == 0 && nf == 2)
+                n = fk_metal_model_state_load_external(
+                    f[1], (long long)strlen(f[1]), receipt, sizeof(receipt));
+            else
+                n = fk_out(receipt, sizeof(receipt),
+                           "FAIL metal_model_transaction unknown-or-malformed-operation\n");
+            if (n < 0)
+                n = fk_out(receipt, sizeof(receipt),
+                           "FAIL metal_model_transaction carrier-error\n");
+            if (n >= (long long)sizeof(receipt)) n = sizeof(receipt) - 1;
+            receipt[n] = 0;
+            used += fk_out(out + used, cap - used,
+                           "transaction-step=%zu\noperation=%s\n%s",
+                           step, f[0], receipt);
+            step++;
+            if (strncmp(receipt, "PASS ", 5) != 0) {
+                used += fk_out(out + used, cap - used,
+                               "transaction-outcome=stopped\nfailed-step=%zu\n"
+                               "rewitness-offer=transaction-step-%zu\n",
+                               step - 1, step - 1);
+                free(text);
+                return used;
+            }
+            if (used >= cap - 1) break;
+        }
+        used += fk_out(out + used, cap - used,
+                       "PASS metal_model_transaction\nsteps=%zu\nelapsed-ms=%.3f\n"
+                       "carrier=in-process-metal\nrecipe-owner=form\n"
+                       "network=0\nremote=0\noutcome=success\n"
+                       "rewitness-offer=metal-model-transaction\n",
+                       step, fk_metal_now_ms() - started);
+        free(text);
         return used;
     }
 }
