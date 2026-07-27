@@ -92,12 +92,42 @@
             (let q-rope (dlw-state layer "q-rope"))
             (let ffn-split (dlw-state layer "ffn-hc-split"))
             (let ffn-norm-state (dlw-state layer "ffn-normalized"))
+            ; Materialize descriptor-derived carrier plans once per layer.
+            ; Prompt positions reuse these cells instead of rebuilding and
+            ; re-interning the same decimal strings for every token.
+            (let haf-plan (dlw-f16-plan haf))
+            (let attn-hc-plan
+                (str_concat
+                    (dlw-nums
+                        (list (dlp-view has) (dlp-inner has)
+                              (dlp-inner hab) 4 20))
+                    " 0.000001"))
+            (let an-plan (dlw-rms-plan an 4096))
+            (let qa-plan (dlw-mat-plan qa))
+            (let qan-plan (dlw-rms-plan qan 1024))
+            (let qb-plan (dlw-mat-plan qb))
+            (let kv-plan (dlw-mat-plan kv))
+            (let kvn-plan (dlw-rms-plan kvn 512))
+            (let oa-plan (str_concat (dlw-mat-plan oa) " 1024"))
+            (let ob-plan (dlw-mat-plan ob))
+            (let hff-plan (dlw-f16-plan hff))
+            (let ffn-hc-plan
+                (str_concat
+                    (dlw-nums
+                        (list (dlp-view hfs) (dlp-inner hfs)
+                              (dlp-inner hfb) 4 20))
+                    " 0.000001"))
+            (let fnorm-plan (dlw-rms-plan fnorm 4096))
+            (let router-plan (dlw-f16-plan router))
             (list layer
                   haf has hab an qa qan qb kv kvn snk oa ob
                   hff hfs hfb fnorm router table bias gx ux dx sg su sd
                   compressed ratio ack acg aca acn
                   attn-split attn-norm q-proj kv-norm q-rope
-                  ffn-split ffn-norm-state)))
+                  ffn-split ffn-norm-state
+                  haf-plan attn-hc-plan an-plan qa-plan qan-plan qb-plan
+                  kv-plan kvn-plan oa-plan ob-plan hff-plan ffn-hc-plan
+                  fnorm-plan router-plan)))
 
     (defn dlw-direct-layer-plan (plan token position)
         (do
@@ -140,21 +170,33 @@
             (let q-rope (nth plan 36))
             (let ffn-split (nth plan 37))
             (let ffn-norm-state (nth plan 38))
-            (dlw-say (metal_model_f16_matvec "dsv4-f16" "form_dsv4_f16_matvec" (dlw-f16-plan haf)))
-            (dlw-say (metal_model_hc_split "dsv4-hc"
-                (str_concat (dlw-nums (list (dlp-view has) (dlp-inner has) (dlp-inner hab) 4 20))
-                            " 0.000001")))
+            (let haf-plan (nth plan 39))
+            (let attn-hc-plan (nth plan 40))
+            (let an-plan (nth plan 41))
+            (let qa-plan (nth plan 42))
+            (let qan-plan (nth plan 43))
+            (let qb-plan (nth plan 44))
+            (let kv-plan (nth plan 45))
+            (let kvn-plan (nth plan 46))
+            (let oa-plan (nth plan 47))
+            (let ob-plan (nth plan 48))
+            (let hff-plan (nth plan 49))
+            (let ffn-hc-plan (nth plan 50))
+            (let fnorm-plan (nth plan 51))
+            (let router-plan (nth plan 52))
+            (dlw-say (metal_model_f16_matvec "dsv4-f16" "form_dsv4_f16_matvec" haf-plan))
+            (dlw-say (metal_model_hc_split "dsv4-hc" attn-hc-plan))
             (dlw-say (metal_model_state_save attn-split))
             (dlw-say (metal_model_hc_reduce "dsv4-hc" "4096 4"))
-            (dlw-say (metal_model_rmsnorm "dsv4-rms" (dlw-rms-plan an 4096)))
+            (dlw-say (metal_model_rmsnorm "dsv4-rms" an-plan))
             (dlw-say (metal_model_state_save attn-norm))
-            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" (dlw-mat-plan qa)))
-            (dlw-say (metal_model_rmsnorm "dsv4-rms" (dlw-rms-plan qan 1024)))
-            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" (dlw-mat-plan qb)))
+            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" qa-plan))
+            (dlw-say (metal_model_rmsnorm "dsv4-rms" qan-plan))
+            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" qb-plan))
             (dlw-say (metal_model_state_save q-proj))
             (dlw-say (metal_model_state_load attn-norm))
-            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" (dlw-mat-plan kv)))
-            (dlw-say (metal_model_rmsnorm "dsv4-rms" (dlw-rms-plan kvn 512)))
+            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" kv-plan))
+            (dlw-say (metal_model_rmsnorm "dsv4-rms" kvn-plan))
             (dlw-say (metal_model_state_save kv-norm))
             (dlw-say (metal_model_state_load q-proj))
             (dlw-say (metal_model_rmsnorm "dsv4-rms" "0 0 32768 0.000001 512"))
@@ -187,21 +229,18 @@
                         " 0.0441941738")))))
             (dlw-say (metal_model_rope "dsv4-rope"
                 (dlw-rope-plan compressed 64 position "-1")))
-            (dlw-say (metal_model_mx8_matvec "dsv4-mx8"
-                (str_concat (dlw-mat-plan oa) " 1024")))
-            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" (dlw-mat-plan ob)))
+            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" oa-plan))
+            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" ob-plan))
             (dlw-say (metal_model_hc_post "dsv4-hc"
                 (str_concat attn-split " 4096 4")))
 
-            (dlw-say (metal_model_f16_matvec "dsv4-f16" "form_dsv4_f16_matvec" (dlw-f16-plan hff)))
-            (dlw-say (metal_model_hc_split "dsv4-hc"
-                (str_concat (dlw-nums (list (dlp-view hfs) (dlp-inner hfs) (dlp-inner hfb) 4 20))
-                            " 0.000001")))
+            (dlw-say (metal_model_f16_matvec "dsv4-f16" "form_dsv4_f16_matvec" hff-plan))
+            (dlw-say (metal_model_hc_split "dsv4-hc" ffn-hc-plan))
             (dlw-say (metal_model_state_save ffn-split))
             (dlw-say (metal_model_hc_reduce "dsv4-hc" "4096 4"))
-            (dlw-say (metal_model_rmsnorm "dsv4-rms" (dlw-rms-plan fnorm 4096)))
+            (dlw-say (metal_model_rmsnorm "dsv4-rms" fnorm-plan))
             (dlw-say (metal_model_state_save ffn-norm-state))
-            (dlw-say (metal_model_f16_matvec "dsv4-f16" "form_dsv4_f16_matvec" (dlw-f16-plan router)))
+            (dlw-say (metal_model_f16_matvec "dsv4-f16" "form_dsv4_f16_matvec" router-plan))
             (if (nothing? table)
                 (dlw-say (metal_model_topk_route "dsv4-topk"
                     (str_concat
