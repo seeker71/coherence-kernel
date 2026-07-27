@@ -1,50 +1,157 @@
-; Form-native ARM64 -> Metal dispatcher ABI.
+; Form-native ARM64 -> linked Metal transaction dispatcher.
 ;
-; This cell emits and executes the controller instruction that was previously
-; only named: call an address supplied as data, or return 0 when the address is
-; absent. It does not invent an address. The current host ingress passes one
-; tagged Value and exposes no operation that resolves an already-linked symbol,
-; so address=0 is the exact first unrepresentable value in the DS4 JIT path.
+; A dispatcher pointer is neither stored nor asked from the C seed. Form reads
+; the selected carrier's Mach-O symbol table and obtains an image-relative
+; symbol delta. The emitted controller observes its own live ASLR image base
+; with Darwin getpid/proc_info syscalls, adds the artifact-owned delta, builds
+; the transaction ABI arguments, and calls the linked dispatcher with BLR.
 ;
-; Once the host publishes the existing Metal dispatcher address as a Value,
-; the same emitted bytes take that address through BLR without another compiler,
-; walker, shell, source string, or external toolchain.
+; Both representation seams stay explicit:
+;   * native_call_bytes gives x0 a TAGGED Form value, so the delta is untagged.
+;   * the linked dispatcher uses its four-argument raw C ABI, so recipe/output
+;     pointers are built inside the emitted image rather than passed as Values.
 ;
-; preludes: form-stdlib/core.fk form-stdlib/form-asm.fk
+; The returned dispatcher receipt is written directly by the emitted controller
+; and its byte count returns as a tagged Form number. No dlsym, nm, C/Go/Python,
+; generated source, compiler, shell dispatcher, or process-specific pointer is
+; part of the live route.
+;
+; witnessed: 2026-07-28 -> PASS metal_model_transaction through emitted BLR
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-asm.fk native/metal/macho-live-symbol.fk
 
 (do
-    ; ABI = ("dsv4-jit-metal-abi" address callable value-abi operation)
-    (defn djma-abi (address callable operation)
-        (list "dsv4-jit-metal-abi" address callable "value->value" operation))
+    (defn djma-mov-x (rd rm)
+        (fa-asm 2852127712 (list 1 65536) (list rd rm)))
 
-    (defn djma-address (a) (nth a 1))
-    (defn djma-callable (a) (nth a 2))
+    (defn djma-add-x-r (rd rn rm)
+        (fa-asm 2332033024 (list 1 32 65536) (list rd rn rm)))
 
-    ; x0 carries the dispatcher address:
-    ;   cbz x0, absent
-    ;   blr x0
-    ;   ret
-    ; absent:
-    ;   movz w0,#0
-    ;   ret
-    (defn djma-controller-bytes ()
+    (defn djma-lsr-x-imm (rd rn shift)
+        (fa-asm 3544186880 (list 65536 1024 32 1)
+            (list shift 63 rn rd)))
+
+    (defn djma-cmp-x-r (rn rm)
+        (fa-asm 3942645791 (list 32 65536) (list rn rm)))
+
+    ; Turn any Form string into the emitted stack stores that materialize the
+    ; transaction recipe. The recipe is data at the call site, not a fixed row.
+    (defn djma-store-string-loop (text i n stack-offset)
+        (if (ge i n) (list)
+            (append-list
+                (fa-movz 8 (str_byte_at text i))
+                (append-list
+                    (fa-strb 8 31 (add stack-offset i))
+                    (djma-store-string-loop text (add i 1) n stack-offset)))))
+
+    (defn djma-store-string (text stack-offset)
+        (djma-store-string-loop text 0 (str_len text) stack-offset))
+
+    ; x0 enters with a tagged route word:
+    ;   low 32 bits  = image-relative symbol delta
+    ;   high 32 bits = expected live __TEXT region size
+    ;
+    ; Stack:
+    ;   [0,96)    proc_regioninfo
+    ;   [128,...) transaction recipe bytes
+    ;   [4096,...) dispatcher receipt
+    (defn djma-transaction-controller-bytes (recipe)
         (fa-image
             (list
-                (fa-cbz-x 0 3)
-                (fa-blr 0)
+                (fa-stp-pre)
+                (fa-stp-fp)
+                (djma-lsr-x-imm 20 0 1)
+                (djma-lsr-x-imm 10 20 32)
+                (fa-mov 20 20)
+                (fa-sub-x-imm 31 31 2048)
+                (fa-sub-x-imm 31 31 2048)
+                (fa-sub-x-imm 31 31 2048)
+                (fa-sub-x-imm 31 31 2048)
+
+                ; pid = getpid(): Darwin UNIX syscall 20.
+                (fa-movz-x 16 20)
+                (fa-movk-x-16 16 512)
+                (fa-svc 128)
+                (fa-mov 1 0)
+
+                ; proc_info(PROC_INFO_CALL_PIDINFO=2, pid,
+                ;           PROC_PIDREGIONINFO=7, address=0, sp, 96)
+                (fa-movz-x 0 2)
+                (fa-movz-x 2 7)
+                (fa-movz-x 3 0)
+                (fa-add-x-imm 4 31 0)
+                (fa-movz-x 5 96)
+                (fa-movz-x 16 336)
+                (fa-movk-x-16 16 512)
+                (fa-svc 128)
+
+                ; pri_address at byte offset 80 is the live __TEXT base.
+                (fa-ldr 9 31 10)
+                (djma-add-x-r 9 9 20)
+
+                ; Refuse a carrier artifact that is not the running image. The
+                ; live region size is pri_size at byte offset 88 (scaled 11).
+                (fa-ldr 11 31 11)
+                (djma-cmp-x-r 11 10)
+                (fa-bcond 0 9)
+                (fa-movz-x 0 0)
+                (fa-add-x-imm 31 31 2048)
+                (fa-add-x-imm 31 31 2048)
+                (fa-add-x-imm 31 31 2048)
+                (fa-add-x-imm 31 31 2048)
+                (fa-ldp-fp)
+                (fa-ldp-post)
                 (fa-ret)
-                (fa-movz 0 0)
+
+                ; Materialize the caller's recipe in the controller frame.
+                (djma-store-string recipe 128)
+
+                ; dispatcher(recipe, recipe_len, out, out_cap)
+                (fa-add-x-imm 0 31 128)
+                (fa-movz-x 1 (str_len recipe))
+                (fa-add-x-imm 2 31 2048)
+                (fa-add-x-imm 2 2 2048)
+                (fa-movz-x 3 4096)
+                (fa-blr 9)
+                (djma-mov-x 19 0)
+
+                ; The framebuffer sees the linked dispatcher's unmodified receipt.
+                ; write(1, out, returned_count), Darwin UNIX syscall 4.
+                (fa-movz-x 0 1)
+                (fa-add-x-imm 1 31 2048)
+                (fa-add-x-imm 1 1 2048)
+                (djma-mov-x 2 19)
+                (fa-movz-x 16 4)
+                (fa-movk-x-16 16 512)
+                (fa-svc 128)
+
+                ; Return the dispatcher byte count in the tagged Form ABI.
+                (djma-mov-x 0 19)
+                (fa-lsl-x-imm 0 0 1)
+                (fa-add-x-imm 31 31 2048)
+                (fa-add-x-imm 31 31 2048)
+                (fa-add-x-imm 31 31 2048)
+                (fa-add-x-imm 31 31 2048)
+                (fa-ldp-fp)
+                (fa-ldp-post)
                 (fa-ret))))
 
-    (defn djma-run (abi)
-        (if (eq (djma-callable abi) 1)
-            (native_call_bytes (djma-controller-bytes) (djma-address abi))
-            (native_call_bytes (djma-controller-bytes) 0)))
+    (defn dsv4-jit-metal-transaction-route (carrier)
+        (mls-symbol-route carrier "_fk_metal_model_transaction_external"))
 
-    ; Live current floor: the Form image is executable; the dispatcher address
-    ; is not observable through any current primitive, so the controller takes
-    ; its explicit absent path instead of crashing or pretending to dispatch.
-    (defn dsv4-jit-metal-address-floor ()
-        (djma-run (djma-abi 0 0 "metal_model_dispatch")))
+    (defn dsv4-jit-metal-transaction-delta (carrier)
+        (do
+            (let route (dsv4-jit-metal-transaction-route carrier))
+            (if (lt (len route) 2) 0 (nth route 0))))
+
+    ; 0 is an honest absent/other-carrier result. A positive result is the byte
+    ; count returned by the linked Metal transaction dispatcher.
+    (defn dsv4-jit-metal-transaction (carrier recipe)
+        (do
+            (let route (dsv4-jit-metal-transaction-route carrier))
+            (if (lt (len route) 2) 0
+                (native_call_bytes
+                    (djma-transaction-controller-bytes recipe)
+                    (add (nth route 0) (mul (nth route 1) 4294967296))))))
 
     0)
