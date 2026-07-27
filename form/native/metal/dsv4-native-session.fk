@@ -115,6 +115,15 @@
     (defn dns-record-timeout (sequence)
         (dns-record-control sequence 4 "timeout"))
 
+    ; A stage admits later work only with the explicit integer 1.  Absence and
+    ; observed failure retain separate framebuffer controls and both stop the
+    ; causal chain before an output token can be selected from stale state.
+    (defn dns-stage-admit (sequence state nothing-label fault-label)
+        (if (nothing? state)
+            (do (dns-record-control sequence 3 nothing-label) 0)
+            (if (eq state 1) 1
+                (do (dns-record-control sequence 5 fault-label) 0))))
+
     (defn dns-output-token (src descs sequence)
         (do
             (let receipt (dlw-output-head descs))
@@ -144,11 +153,21 @@
                             (do (dns-record-control sequence 2 "stop:cap") next-acc)
                             (do
                                 (dlw-embed-token descs token)
-                                (dlw-decode-layers src descs token position 0 43)
-                                (let next (dns-output-token src descs (add sequence 1)))
-                                (dns-decode-loop src descs eos next
-                                    (add position 1) (sub remaining 1)
-                                    (add sequence 1) next-acc)))))))))
+                                (let decoded
+                                    (dlw-decode-layers src descs token position 0 43))
+                                (if (eq
+                                        (dns-stage-admit (add sequence 1) decoded
+                                            "nothing:decode-layers"
+                                            "fault:decode-layers")
+                                        1)
+                                    (do
+                                        (let next
+                                            (dns-output-token
+                                                src descs (add sequence 1)))
+                                        (dns-decode-loop src descs eos next
+                                            (add position 1) (sub remaining 1)
+                                            (add sequence 1) next-acc))
+                                    next-acc)))))))))
 
     (defn dns-generate-ids (ids n)
         (do
@@ -171,13 +190,29 @@
                                 (let base (egg-data-base src (gm-alignment)))
                                 (let descs (dlp-collect src base (egg-tinfo-start src) (egg-tensor-count src)))
                                 (dlw-init-prompt descs ids 0)
-                                (dlw-prefill-layers src descs ids 0 43)
-                                (dlw-say (metal_model_state_load (dlw-prompt-state (sub (len ids) 1))))
-                                (let eos (gmt-u32 src "tokenizer.ggml.eos_token_id"))
-                                (let first (dns-output-token src descs 0))
-                                (let generated (dns-decode-loop src descs eos first (len ids) n 0 (list)))
-                                (print_str (str_concat "NATIVE generated-count=" (int_to_str (len generated))))
-                                (print_str "NATIVE network=0 remote=0 shell=0 swift=0 temp=0")
-                                (print_str (metal_model_close))
-                                generated))))))))
+                                (let prefilled
+                                    (dlw-prefill-layers src descs ids 0 43))
+                                (if (eq
+                                        (dns-stage-admit 0 prefilled
+                                            "nothing:prefill-layers"
+                                            "fault:prefill-layers")
+                                        0)
+                                    (do
+                                        (print_str "NATIVE generated-count=0")
+                                        (print_str "NATIVE network=0 remote=0 shell=0 swift=0 temp=0")
+                                        (print_str (metal_model_close))
+                                        (list))
+                                    (do
+                                        (dlw-say (metal_model_state_load
+                                            (dlw-prompt-state (sub (len ids) 1))))
+                                        (let eos (gmt-u32 src "tokenizer.ggml.eos_token_id"))
+                                        (let first (dns-output-token src descs 0))
+                                        (let generated
+                                            (dns-decode-loop
+                                                src descs eos first (len ids) n 0 (list)))
+                                        (print_str (str_concat "NATIVE generated-count="
+                                            (int_to_str (len generated))))
+                                        (print_str "NATIVE network=0 remote=0 shell=0 swift=0 temp=0")
+                                        (print_str (metal_model_close))
+                                        generated))))))))))
     0)
