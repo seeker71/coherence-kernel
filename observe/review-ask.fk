@@ -1,0 +1,244 @@
+; review-ask.fk — the body asks the outside panel ITSELF, in Form.
+;
+; observe/review-panel.fk holds the doors as data and crosses four-way.
+; This cell is the hand: it composes the prompt, opens each door, keeps the
+; answers as files, and hands back what came. No shell script orchestrates it —
+; the body does.
+;
+; HOW THIS BECAME POSSIBLE, which is the finding
+;   `host-exec` (cmd, input) is implemented in runtime/fkwu-uni.c at walker tag
+;   136 and NAMED in runtime/fkwu-optable.h line 130 — `{ "host-exec", 2, 136 }`.
+;   It was in neither native-op-manifest.fk nor form-flatten.fk's flt-ops, so
+;   nothing on the Form side advertised it and no cell had ever called it. It has
+;   been callable from `fkwu --src` the whole time. This is the same shape as the
+;   `nothing` 137/138 gap healed on 2026-07-25: the runtime implements and names
+;   an op, the Form-side tables do not carry it, and the capability sits unused
+;   next to code written around its absence. Tag 136 sits directly below 137.
+;
+; PROOF LANE, stated rather than assumed
+;   host-exec is fkwu-only: Go, Rust and TypeScript have no such native, exactly
+;   as with `nothing`. So this cell CANNOT cross four-way and does not claim to.
+;   Its band declares FOURTH-ARM ONLY and runs on the runtime walker. The door
+;   CATALOG stays in review-panel.fk precisely so the data half keeps its
+;   four-way proof while the acting half is honest about running on one arm.
+;
+; WHAT "NATIVE" MEANS HERE, exactly
+;   The orchestration is Form: this cell builds the scratch path, writes the
+;   prompt, composes each command, calls each door, reads each answer, and saves
+;   the transcript. `host-exec` runs its argument through popen, so a shell does
+;   exist underneath — that is the primitive's nature, not an extra tool layered
+;   on top. The prompt is passed by FILE (`-p "$(cat …)"`) rather than inline,
+;   because an artifact containing a quote would otherwise break the command.
+;
+; THE WITNESS
+;   Every answer is written to disk under a run directory before anything is
+;   returned, so a review is a record and not a thing someone reports having
+;   done. That is the point of the whole exercise: on 2026-07-26 a reply claimed
+;   a corpus row had been landed and none had, and the only reason it surfaced
+;   was that someone later grepped for the artifact. An answer on disk cannot be
+;   claimed into existence.
+;
+; USE
+;   (ra-review "path/to/artifact.md" "your question")     ; ALL doors, parallel
+;   (ra-panel-on "path/to/artifact.md" "your question")   ; same, one at a time
+;   (ra-ask "grok" prompt-path)                           ; one door
+;   (ra-run-dir)                                          ; where answers land
+;
+; Proof: observe/tests/review-ask-band.fk — FOURTH-ARM ONLY, Verdict 127.
+;
+; preludes: form-stdlib/core.fk observe/review-panel.fk
+
+(do
+    ;; ── where a run keeps itself ────────────────────────────────────
+    (defn ra-root () (str_concat (temp_dir) "/review-panel-form"))
+    (defn ra-run-dir () (ra-root))
+    (defn ra-ensure-root () (do (fs_mkdir (ra-root)) (ra-root)))
+    (defn ra-path (name) (str_concat (ra-ensure-root) (str_concat "/" name)))
+
+    ;; ── the prompt, written once and shared by every door ────────────
+    ;; One text for all of them, so the answers are comparable.
+    (defn ra-frame (question artifact-text artifact-name)
+        (str_concat question
+        (str_concat "\n\nAnswer from the artifact below. Be specific and name what is wrong or unsupported; agreement is less useful than a located objection. If a claim is unsupported by the text, say which claim and why.\n\n----- BEGIN ARTIFACT: "
+        (str_concat artifact-name
+        (str_concat " -----\n"
+        (str_concat artifact-text "\n----- END ARTIFACT -----\n"))))))
+
+    (defn ra-write-prompt (question artifact-path)
+        (do (let p (ra-path "prompt.txt"))
+            (write_file p (ra-frame question (read_file artifact-path) artifact-path))
+            p))
+
+    ;; ── the doors, as commands ──────────────────────────────────────
+    ;; The invocation strings live in review-panel.fk as DATA; this turns one
+    ;; into a runnable command. A door whose state is not "open" yields "",
+    ;; which ra-ask reads as "do not knock".
+    (defn ra-quoted-prompt (prompt-path)
+        (str_concat "\"$(cat " (str_concat prompt-path ")\"")))
+
+    (defn ra-cmd (door prompt-path)
+        (if (eq (rp-is-open? door) 0) ""
+            (if (str_eq door "grok")   (str_concat "grok -p "   (ra-quoted-prompt prompt-path))
+            (if (str_eq door "claude") (str_concat "claude -p " (ra-quoted-prompt prompt-path))
+            (if (str_eq door "codex")  (str_concat "codex exec --skip-git-repo-check " (ra-quoted-prompt prompt-path))
+            (if (str_eq door "cursor") (str_concat "cursor-agent -p --trust " (ra-quoted-prompt prompt-path))
+                ""))))))
+
+    ;; ── knocking ────────────────────────────────────────────────────
+    ;; The answer is written BEFORE it is returned. If the body reports a
+    ;; review, the file is already there to be read against the report.
+    (defn ra-ask (door prompt-path)
+        (do (let cmd (ra-cmd door prompt-path))
+            (if (eq (str_len cmd) 0) ""
+                (do (let out (host-exec (str_concat cmd " 2>/dev/null") ""))
+                    (write_file (ra-path (str_concat door ".out")) out)
+                    out))))
+
+    ;; ── the panel ───────────────────────────────────────────────────
+    ;; (door answer) rows, one per open door, every answer already on disk.
+    (defn ra-open-names-loop (ds)
+        (if (eq (len ds) 0) (list)
+            (if (eq (rp-open? (head ds)) 1)
+                (cons (rp-name (head ds)) (ra-open-names-loop (tail ds)))
+                (ra-open-names-loop (tail ds)))))
+    (defn ra-open-names () (ra-open-names-loop (rp-doors)))
+
+    (defn ra-panel-loop (names prompt-path)
+        (if (eq (len names) 0) (list)
+            (cons (list (head names) (ra-ask (head names) prompt-path))
+                  (ra-panel-loop (tail names) prompt-path))))
+
+    (defn ra-panel (prompt-path) (ra-panel-loop (ra-open-names) prompt-path))
+    (defn ra-panel-on (artifact-path question)
+        (ra-panel (ra-write-prompt question artifact-path)))
+
+    (defn ra-row-door   (r) (nth r 0))
+    (defn ra-row-answer (r) (nth r 1))
+    (defn ra-answered-loop (rs)
+        (if (eq (len rs) 0) 0
+            (add (if (gt (str_len (ra-row-answer (head rs))) 200) 1 0)
+                 (ra-answered-loop (tail rs)))))
+    ;; how many doors came back with something substantial
+    (defn ra-answered (rs) (ra-answered-loop rs))
+
+    ;; ── parallel: launch, then wait, both driven from Form ──────────
+    ;; The first version of this cell asked each door in turn and took over ten
+    ;; minutes for four — the shell script it replaced had fanned out in
+    ;; parallel, so going native had made it four times slower. Sequential was
+    ;; not a design choice, it was a loop written without thinking about the
+    ;; clock, and it showed up the first time the panel was actually used.
+    ;;
+    ;; The fix keeps orchestration in Form. Form decides WHICH doors open, backs
+    ;; each one into the background with its own output and flag file, then
+    ;; polls the flags itself. The shell holds no list and makes no decision; it
+    ;; is a timer and a launcher. `sleep` is borrowed as the clock because the
+    ;; alternative is a busy-loop that burns a core to wait.
+    (defn ra-flag (door) (ra-path (str_concat door ".done")))
+    (defn ra-out  (door) (ra-path (str_concat door ".out")))
+
+    (defn ra-launch (door prompt-path)
+        (do (let cmd (ra-cmd door prompt-path))
+            (if (eq (str_len cmd) 0) 0
+                (do (fs_remove (ra-flag door))
+                    (fs_remove (ra-out door))   ; a stale answer must never be collected as fresh
+                    (host-exec
+                        (str_concat "( " (str_concat cmd
+                        (str_concat " > " (str_concat (ra-out door)
+                        (str_concat " 2>/dev/null; printf done > " (str_concat (ra-flag door)
+                                    " ) >/dev/null 2>&1 &")))))) "")
+                    1))))
+    (defn ra-launch-all (names prompt-path)
+        (if (eq (len names) 0) 0
+            (add (ra-launch (head names) prompt-path)
+                 (ra-launch-all (tail names) prompt-path))))
+
+    (defn ra-flags-present (names)
+        (if (eq (len names) 0) 0
+            (add (if (fs_exists (ra-flag (head names))) 1 0)
+                 (ra-flags-present (tail names)))))
+    ;; poll until every door has flagged, or the budget runs out. Each tick
+    ;; costs one `sleep 2`, so waiting is cheap and bounded rather than a spin.
+    (defn ra-wait-loop (names ticks)
+        (if (eq (ra-flags-present names) (len names)) 1
+            (if (le ticks 0) 0
+                (do (host-exec "sleep 2" "")
+                    (ra-wait-loop names (sub ticks 1))))))
+    (defn ra-wait (names) (ra-wait-loop names 180))
+
+    (defn ra-collect (names)
+        (if (eq (len names) 0) (list)
+            (cons (list (head names)
+                        (if (fs_exists (ra-out (head names)))
+                            (read_file (ra-out (head names))) ""))
+                  (ra-collect (tail names)))))
+
+    ;; THE ONE TO CALL. Launches every open door at once, waits for all of them,
+    ;; and hands back (door answer) rows with every answer already on disk.
+    (defn ra-panel-par (prompt-path)
+        (do (let names (ra-open-names))
+            (ra-launch-all names prompt-path)
+            (ra-wait names)
+            (ra-collect names)))
+    (defn ra-review (artifact-path question)
+        (ra-panel-par (ra-write-prompt question artifact-path)))
+
+    ;; ── the live probe: make "measured" true rather than claimed ────
+    ;; Three of four reviewers, asked to judge the door catalog, independently
+    ;; named the same defect: review-panel.fk says a door "was MEASURED on the
+    ;; host, each by running it", while rp-check only scores the shape of a
+    ;; hand-written list. Nothing in that cell could tell a live door from a
+    ;; remembered one. They were right, and it is the third time in one day that
+    ;; a claim ran ahead of its evidence here.
+    ;;
+    ;; A pure four-way cell cannot probe anything — host-exec is fkwu-only. So
+    ;; the catalog DECLARES and this cell VERIFIES, and ra-doors-match? compares
+    ;; the two. A door that quietly disappears now shows up as a mismatch
+    ;; instead of living on as a sentence nobody rechecked.
+    (defn ra-bin (door)
+        (if (str_eq door "cursor") "cursor-agent" door))
+    ;; `command -v` prints a path and exits 0 when the binary exists
+    (defn ra-probe-door (door)
+        (if (gt (str_len (host-exec (str_concat "command -v " (str_concat (ra-bin door) " 2>/dev/null")) "")) 1) 1 0))
+    ;; gemini is declared closed for a reason the binary cannot express: it is
+    ;; installed and tier-refused. So a closed door is verified as CLOSED-BY-
+    ;; DECLARATION and never re-opened by the mere presence of its binary.
+    (defn ra-door-matches? (d)
+        (if (eq (rp-open? d) 1)
+            (ra-probe-door (rp-name d))
+            1))
+    (defn ra-match-loop (ds)
+        (if (eq (len ds) 0) 1
+            (if (eq (ra-door-matches? (head ds)) 1) (ra-match-loop (tail ds)) 0)))
+    ;; every door the catalog calls OPEN really is present on this host, now
+    (defn ra-doors-match? () (ra-match-loop (rp-doors)))
+    (defn ra-live-open-loop (ds)
+        (if (eq (len ds) 0) 0
+            (add (if (eq (rp-open? (head ds)) 1) (ra-probe-door (rp-name (head ds))) 0)
+                 (ra-live-open-loop (tail ds)))))
+    (defn ra-live-open-count () (ra-live-open-loop (rp-doors)))
+
+    ;; ── the band's seven readings ───────────────────────────────────
+    ;; The paid calls are NOT run here — a proof that costs four model
+    ;; invocations every time it is checked would stop being run. What the band
+    ;; proves is that the machinery is real: the primitive executes, the file
+    ;; round-trip holds, the commands are built correctly, and a closed door is
+    ;; refused. Asking the panel is an on-demand act, not a test.
+    (defn ra-probe-exec () (host-exec "printf form-native-exec" ""))
+    (defn ra-probe-file ()
+        (do (let p (ra-path "band-probe.txt"))
+            (write_file p "round-trip")
+            (read_file p)))
+
+    (defn ra-check ()
+        (add (if (str_eq (ra-probe-exec) "form-native-exec") 1 0)
+        (add (if (str_eq (ra-probe-file) "round-trip") 2 0)
+        (add (if (gt (str_len (ra-root)) 10) 4 0)
+        (add (if (eq (len (ra-open-names)) 4) 8 0)
+        (add (if (str_eq (ra-cmd "gemini" "/tmp/x") "") 16 0)
+        (add (if (gt (str_len (ra-cmd "grok" "/tmp/x")) 12) 32 0)
+        (add (if (str_eq (ra-ask "gemini" "/tmp/x") "") 64 0)
+        (add (if (eq (ra-doors-match?) 1) 128 0)
+        (add (if (eq (ra-live-open-count) 4) 256 0)
+             0))))))))))
+
+    0)
