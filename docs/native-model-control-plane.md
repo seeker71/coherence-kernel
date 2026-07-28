@@ -42,6 +42,16 @@ The control plane is Form-owned:
 - `form/form-stdlib/native-model-lineage-form.fk` owns canonical model-package
   nodes, transformation edges, byte-copy equality, DAG identity, and drift.
 
+Model and learning changes also use the bidirectional diagnostic membrane in
+`observe/bidirectional-framebuffer-channel.fk`. A model observation flows out
+with a correlation id; Form returns a bounded control action; the actuator
+selects the next state; and that state is observed again. For any claimed model
+improvement, retain per-row or per-stage transitions when available—an aggregate
+score alone does not establish a cause. Nothing, timeout, and mismatched replies
+must select an explicit alternative node. The protocol, future-session practice,
+privacy boundary, and runnable bands are documented in
+[`live-dynamic-diagnostics.md`](live-dynamic-diagnostics.md).
+
 The replacement host surface is intentionally thin:
 
 - `form/scripts/native_model_train.sh` invokes the Form training report, runs

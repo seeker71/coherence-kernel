@@ -1,0 +1,179 @@
+; preludes: form-stdlib/core.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matvec-slot.fk
+;
+; qk-matvec-slot-band — the SLOT THREAD MAP, checked against each quant's own decomposition at every
+; one of the 256 positions of a superblock. Proven without a GPU.
+;
+; qk-matvec-slot.fk replaces a flat weight index by a fixed 4-wide slot, which is the whole speedup:
+; it turns the field selectors g / hf / j from per-weight runtime values into LANE CONSTANTS. That
+; also makes it the single most dangerous edit in the Metal lane, because a slot map can be wrong in
+; ways that still produce a plausible number:
+;
+;   - IT CAN MISS OR DOUBLE-COVER. Sixteen tids times four sub-lanes times four steps is 256 whether
+;     or not those 256 triples are DISTINCT positions. A map that visits position 5 twice and 6 never
+;     still sums 256 products and still returns a finite float. So the map is inverted and checked as
+;     a bijection, not counted.
+;   - IT CAN READ THE RIGHT SHAPE FROM THE WRONG BYTE. The slot's whole claim is that its ql byte, qh
+;     byte, nibble half, 2-bit field and scale byte are the CONSTANTS the flat decomposition would
+;     have computed. That is 256 equations per quant, and they are checked as 256 equations against
+;     q6k-dequant.fk's q6k-q / q6k-sc and q4k-dequant.fk's q4k-nib / q4k-sidx — the four-way-proven
+;     spines — on a fixture whose bytes exercise every nibble, every 2-bit field and every sub-block.
+;   - ITS EPSILON CAN BE DECORATION. qk-matvec-slot.fk claims the EXISTING bound already dominates its
+;     tree. That is an inequality, so it is checked as one at four widths, not trusted as a paragraph.
+;   - IT CAN BE WRONG WHERE IT IS SILENT. The map has NO tail arm: at a width that is not a multiple
+;     of 256 it is wrong, not slow. Bit 64 pins qsl-admissible? so a carrier has something to ASK.
+;
+; WHAT THIS BAND DOES NOT SPEAK FOR — its radius.
+;   * It speaks for the MAP: the partition, the bijection, the byte offsets, the selectors, the
+;     bound's domination and the emitted text's shape, in Form, on a synthetic superblock.
+;   * It does NOT speak for the MSL compiling, for f32 rounding, for simd_sum's association, for the
+;     GPU or for a token. Those are metal_first_token.sh gates 9b and 11, and metal_isa_diff.sh.
+;   * It does NOT speak for any SIMD width other than 32, nor for cols not a multiple of 256.
+;   * It does NOT speak for the SPEED. Speed is a measurement and lives in the receipts, never here.
+;
+; Kin: qk-matvec-slot.fk (under test), q6k-dequant.fk / q4k-dequant.fk (the spines this falsifies
+; against), qk-matvec-lane-band.fk (the band shape this follows), qk-matvec-split.fk (qms-bound-coeff).
+;
+; Verdict 255 when the slot map is honest:
+;   1   THE WIDTH IS NAMED          qsl-lanes = 32, qsl-tids = 16, and both emitted texts spell 32
+;   2   Q6_K IS A BIJECTION         inverting (tid, sub, l) from a position round-trips at all 256
+;   4   Q6_K READS THE SPINE'S BYTE at all 256 positions the slot's quant code AND its signed scale
+;                                   equal q6k-q / q6k-sc of the same position
+;   8   Q4_K IS A BIJECTION         inverting (tid, half, m) from a position round-trips at all 256
+;   16  Q4_K READS THE SPINE'S BYTE at all 256 positions the slot's nibble AND its sub-block index
+;                                   equal q4k-nib / q4k-sidx of the same position
+;   32  THE BOUND DOMINATES         qsl-depth <= qsl-bound-coeff at four widths, and the coefficient
+;                                   IS qms-bound-coeff at parts = 32 — no new derivation
+;   64  ADMISSIBILITY IS ASKED      qsl-admissible? is 1 on the model's three widths and 0 one column
+;                                   off a 256 boundary, so a carrier can refuse instead of assume
+;   128 TWO KERNELS, TWO QUANTS     each text declares its own kernel name, the appendix is EXACTLY
+;                                   the two concatenated, and the two texts are NEITHER equal NOR the
+;                                   same length — a Q6_K map with the numbers swapped would be both
+
+(do
+    (defn qsb-mod (a n) (sub a (mul (div a n) n)))
+    (defn qsb-opens-with (s p)
+        (if (lt (str_len s) (str_len p)) 0
+            (if (str_eq (substring s 0 (str_len p)) p) 1 0)))
+
+    ; --- NO BYTE FIXTURE, AND THAT IS THE STRONGER CLAIM. What the slot map changes is not how a
+    ; byte is decoded — every arm below still feeds q6k-dequant.fk's / q4k-dequant.fk's own recipes —
+    ; but WHICH BYTE is read and WHICH SELECTOR is applied. So the equality is asserted at exactly that
+    ; level: at all 256 positions the slot's ql/qh/scale byte INDEX and its nibble-half and 2-bit-field
+    ; SELECTOR equal the spine's. Decoded-value equality follows by construction, with no fixture to
+    ; choose badly and no `nth` walk to pay for.
+    ;
+    ; An earlier version of this band did carry a byte fixture and reached it as a FREE NAME from
+    ; inside the walkers. `defn` does not capture `let` in this body — silently, zero diagnostics — so
+    ; both sides read empty and agreed with themselves: a full 255 with the Q6_K qh offset
+    ; deliberately broken. Anything a walker needs is an argument here, and the mutation battery in
+    ; the receipt is what says so.
+
+    ; --- 1: the widths are named once and the emitted texts agree with the name ---
+    (let t6 (qsl-q6k-msl "form_q6k_matvec_slot_f32"))
+    (let t4 (qsl-q4k-msl "form_q4k_matvec_slot_f32"))
+    (let c0 (if (eq (qsl-lanes) 32)
+            (if (eq (qsl-tids) 16)
+            (if (eq (qsl-block-n) 256) 1 0) 0) 0))
+
+    ; --- 2: the Q6_K map is a BIJECTION. Invert a position to the (tid, sub, l) that must own it and
+    ; demand the forward map returns the position. 256 positions, 256 triples, total and surjective —
+    ; so injective too. This is the check a mere count of 256 cannot make. ---
+    (defn qsb6-tid (p) (add (mul 8 (div p 128)) (div (qsb-mod (qsb-mod p 128) 32) 4)))
+    (defn qsb6-sub (p) (div (qsb-mod p 128) 32))
+    (defn qsb6-l   (p) (qsb-mod p 4))
+    (defn qsb6-bij (p)
+        (if (ge p 256) 1
+            (if (eq (qsl6-pos (qsb6-tid p) (qsb6-sub p) (qsb6-l p)) p) (qsb6-bij (add p 1)) 0)))
+    (let c1 (if (eq (qsb6-bij 0) 1) 2 0))
+
+    ; --- 4: and at every one of its OWN 256 triples the slot reads the byte the SPINE would read at
+    ; the position that triple claims. The walk is over TRIPLES, not positions, and the spine is asked
+    ; at (qsl6-pos tid sg l) — that direction matters. Walking positions and inverting them lets a
+    ; shifted map compare its shifted read against its shifted position and agree with itself: the
+    ; first version of this band did exactly that and could not fall when the qh offset was broken.
+    ; Bit 2 supplies the other half — the triples cover every position exactly once — and the two bits
+    ; together are what makes this airtight.
+    ; The slot's quant code is assembled from its OWN lane-constant offsets and selectors: the ql byte
+    ; at qsl6-ql-read, the nibble half from sg/2, the qh byte at qsl6-qh-read - 128, the 2-bit field
+    ; at 4^sg, the scale at qsl6-sc-read - 192. q6k-q / q6k-sc take only the flat position. Neither
+    ; side paraphrases the other. ---
+    ; the SPINE's own byte indices, composed from q6k-dequant.fk's own field decomposers
+    ; (q6k-h / q6k-l / q6k-g / q6k-is) — the same expressions q6k-hi and q6k-sc index their fields
+    ; with; q6k-qlidx is taken by name.
+    (defn qsb6-spine-qh (p) (add (mul 32 (q6k-h p)) (q6k-l p)))
+    (defn qsb6-spine-sc (p) (add (mul 8 (q6k-h p)) (add (q6k-is p) (mul 2 (q6k-g p)))))
+    ; t walks the 256 triples. These are defns and not chained `let`s inside one `do`: a `let` in this
+    ; body cannot see an earlier `let` of the same `do`, and the walker that assumed it could returned
+    ; an unbound name — which fkwu swallowed and the Go kernel named out loud.
+    (defn qsb6-t2tid (t) (div t 16))
+    (defn qsb6-t2sg  (t) (div (qsb-mod t 16) 4))
+    (defn qsb6-t2l   (t) (qsb-mod t 4))
+    (defn qsb6-t2pos (t) (qsl6-pos (qsb6-t2tid t) (qsb6-t2sg t) (qsb6-t2l t)))
+    (defn qsb6-agrees (t)
+        (if (ge t 256) 1
+            (if (eq (qsl6-ql-read (qsb6-t2tid t) (qsb6-t2sg t) (qsb6-t2l t)) (q6k-qlidx (qsb6-t2pos t)))
+            (if (eq (sub (qsl6-qh-read (qsb6-t2tid t) (qsb6-t2sg t) (qsb6-t2l t)) 128) (qsb6-spine-qh (qsb6-t2pos t)))
+            (if (eq (sub (qsl6-sc-read (qsb6-t2tid t) (qsb6-t2sg t) (qsb6-t2l t)) 192) (qsb6-spine-sc (qsb6-t2pos t)))
+            ; and the two selectors really are LANE constants, not functions of the position — which is
+            ; what makes hoisting them out of the inner loop legal at all
+            (if (eq (qsl6-nib-half (qsb6-t2tid t) (qsb6-t2sg t) (qsb6-t2l t)) (div (q6k-g (qsb6-t2pos t)) 2))
+            (if (eq (qsl6-hi-shift (qsb6-t2tid t) (qsb6-t2sg t) (qsb6-t2l t)) (q6k-g (qsb6-t2pos t)))
+                (qsb6-agrees (add t 1)) 0) 0) 0) 0) 0)))
+    (let c2 (if (eq (qsb6-agrees 0) 1) 4 0))
+
+    ; --- 8: the Q4_K map is a bijection, inverted the same way over its own (cc, half, ll, m) ---
+    (defn qsb4-tid  (p) (add (mul 4 (div p 64)) (div (qsb-mod (qsb-mod p 64) 32) 8)))
+    (defn qsb4-half (p) (div (qsb-mod p 64) 32))
+    (defn qsb4-m    (p) (qsb-mod p 8))
+    (defn qsb4-bij (p)
+        (if (ge p 256) 1
+            (if (eq (qsl4-pos (qsb4-tid p) (qsb4-half p) (qsb4-m p)) p) (qsb4-bij (add p 1)) 0)))
+    (let c3 (if (eq (qsb4-bij 0) 1) 8 0))
+
+    ; --- 16: and Q4_K reads the spine's byte too — the qs byte, the nibble half and, the part a
+    ; copy-paste from Q6_K would get wrong, the SUB-BLOCK INDEX that selects the 6-bit scale/min ---
+    ; walked over TRIPLES and asked of the spine at the triple's own position, for the reason bit 4
+    ; states: the inverting form cannot fall when the map is shifted.
+    ; the spine's own qs byte index is q4k-qb's: c*32 + l, composed from q4k-c / q4k-l by name.
+    (defn qsb4-spine-qs (p) (add (mul 32 (q4k-c p)) (q4k-l p)))
+    (defn qsb4-t2tid (t) (div t 16))
+    (defn qsb4-t2hf  (t) (div (qsb-mod t 16) 8))
+    (defn qsb4-t2m   (t) (qsb-mod t 8))
+    (defn qsb4-t2pos (t) (qsl4-pos (qsb4-t2tid t) (qsb4-t2hf t) (qsb4-t2m t)))
+    (defn qsb4-agrees (t)
+        (if (ge t 256) 1
+            (if (eq (qsl4-qs-read (qsb4-t2tid t) (qsb4-t2hf t) (qsb4-t2m t)) (qsb4-spine-qs (qsb4-t2pos t)))
+            (if (eq (qsb4-t2hf t) (q4k-half (qsb4-t2pos t)))
+            (if (eq (qsl4-sidx (qsb4-t2tid t) (qsb4-t2hf t) (qsb4-t2m t)) (q4k-sidx (qsb4-t2pos t)))
+                (qsb4-agrees (add t 1)) 0) 0) 0)))
+    (let c4 (if (eq (qsb4-agrees 0) 1) 16 0))
+
+    ; --- 32: the epsilon needs no new derivation. Two claims, both equations/inequalities: the
+    ; coefficient IS qms-bound-coeff at parts = 32, and this kernel's own tree depth is BELOW it. ---
+    (defn qsb-dom (cols)
+        (if (eq (qsl-bound-coeff cols) (qms-bound-coeff cols 32))
+            (if (lt (qsl-depth cols) (qsl-bound-coeff cols)) 1 0)
+            0))
+    (let c5 (if (eq (qsb-dom 3072) 1)
+            (if (eq (qsb-dom 8192) 1)
+            (if (eq (qsb-dom 1024) 1)
+            (if (eq (qsb-dom 256) 1) 32 0) 0) 0) 0))
+
+    ; --- 64: the radius is ASKABLE. A carrier must be able to refuse a width this map cannot serve
+    ; rather than dispatch it and return a plausible wrong number (row 826, aporon). ---
+    (let c6 (if (eq (qsl-admissible? 3072) 1)
+            (if (eq (qsl-admissible? 8192) 1)
+            (if (eq (qsl-admissible? 1024) 1)
+            (if (eq (qsl-admissible? 257) 0)
+            (if (eq (qsl-admissible? 255) 0) 64 0) 0) 0) 0) 0))
+
+    ; --- 128: two kernels, two quants, two DERIVATIONS. Each text declares its own name; the appendix
+    ; is exactly the two concatenated; and — the bit that catches a Q6_K map with 210 swapped for 144 —
+    ; the two texts are neither equal nor even the same LENGTH, because they are not the same map. ---
+    (let c7 (if (eq (qsb-opens-with t6 "kernel void form_q6k_matvec_slot_f32 ") 1)
+            (if (eq (qsb-opens-with t4 "kernel void form_q4k_matvec_slot_f32 ") 1)
+            (if (str_eq t6 t4) 0
+            (if (eq (str_len t6) (str_len t4)) 0
+            (if (eq (str_len (qsl-msl-appendix)) (add (str_len t6) (str_len t4))) 128 0))) 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))

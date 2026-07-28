@@ -1,0 +1,126 @@
+; q8-0-msl-band.fk — the Q8_0 transcription, proven before any GPU runs.
+;
+; PROOF LEVEL: TWO-ARM (fkwu + go), for q6k-msl-band.fk's reason and no other: `read_file_slice` over
+; a binary fixture is UTF-8-lossy on two arms, so only the two arms that reach raw bytes can hold these
+; 102 bytes. The arithmetic under test is q6k-dequant.fk's q6k-mod/q6k-s8 spine and f16-decode.fk's
+; fd-value, both of which travel four-way in their own bands; what is NEW here is the 34-byte block and
+; the flat index into it, and that is what these 102 bytes falsify.
+;
+; WHAT THIS BAND IS FOR. q8-0-msl.fk emits Metal source as TEXT. Nothing about running that text on a
+; GPU can tell you whether the C computes the Q8_0 layout the file actually has: a transcription can be
+; wrong in a way that compiles, runs fast, and returns confident garbage. So q8-0-msl.fk carries
+; `q80-flat-at` — the same block stride, the same literal byte offsets, the same expressions the C
+; computes — and this band demands it equal a reference written HERE by a deliberately different route:
+;
+;   the transcription (q80-flat-at)          the reference (q8b-ref)
+;   block base by  blk * 34                  block base by RECURSIVE ADDITION of 34, no multiply
+;   index by       q6k-mod idx 32            index by RECURSIVE SUBTRACTION of 32, no division
+;   scale by       fd-f16 bits               scale by fd-sign/fd-exp/fd-mant assembled by hand
+;   sign by        q6k-s8 b                  sign by the two's-complement test written inline
+;
+; Two roads to the same 96 numbers. Agreement between them is worth something precisely because a
+; single slip of the block stride would move one road and not the other.
+;
+; THE FIXTURE is 102 bytes — THREE consecutive REAL Q8_0 blocks — carved from
+; blk.0.attn_k.weight of dolphin-2.9-mixtral-8x22b (ollama blob sha256-550981a7…, tensor data offset
+; 821 991 264, absolute file offset 822 745 440). Three and not one because the interesting failure is
+; the BLOCK STRIDE, which only exists INSIDE the fixture — and two crossings rather than one because a
+; stride that is right once can still be an off-by-one that happens to cancel at the first boundary.
+;
+; Kin: q8-0-msl.fk (the cell under test), q6k-msl-band.fk (the band this is modelled on, one format
+; over), q6k-dequant.fk (the shared four-way spine), f16-decode.fk (fd-value at (5,10)).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/q8-0-msl.fk
+;
+; Verdict 255 when the transcription is honest:
+;   1    the fixture window is the 102 bytes it claims, and q80-bytes says so for 96 weights
+;   2    the super-scale agrees with the independent reference at ALL THREE blocks
+;   4    in-block weights agree at the ends and the middle of block 0   (idx 0, 1, 31)
+;   8    BOTH block-stride crossings are identical, and pinned to literals rather than only to
+;        agreement (idx 32 and idx 65 — the two roads could in principle be wrong together, a literal
+;        cannot be)
+;   16   ALL 96 WEIGHTS AGREE, bit for bit                              (fold, no epsilon, no sampling)
+;   32   the dequant kernel text is complete                            (longer than the spine it opens with)
+;   64   the attestant matvec AND the lane matvec texts are complete
+;   128  ONE spine, and the unit a carrier compiles is exactly spine + appendix — a repeated
+;        `static inline` in one translation unit is a compile error, not a warning, so the appendix
+;        form (for a unit that already carries q6k-msl.fk's spine) must be the unit MINUS that spine
+(do
+    ; ---- the reference: the same meaning, reached by a road that shares no operator with the
+    ; transcription's index arithmetic ----
+    (defn q8b-base (base k) (if (eq k 0) base (q8b-base (add base 34) (sub k 1))))
+    (defn q8b-walk (idx k) (if (lt idx 32) (list idx k) (q8b-walk (sub idx 32) (add k 1))))
+    (defn q8b-s8-inline (b) (if (lt b 128) b (sub b 256)))
+    (defn q8b-f16 (bits)
+        (do
+            (let m (fd-mant bits 10))
+            (let e (fd-exp bits 5 10))
+            (let s (fd-sign bits 5 10))
+            (let frac (div (mul 1.0 m) (fq-pow2 10)))
+            (let mag (if (eq e 0) (mul (fq-pow2 (sub 0 14)) frac)
+                                  (mul (fq-pow2 (sub e 15)) (add 1.0 frac))))
+            (if (eq s 1) (sub 0.0 mag) mag)))
+    (defn q8b-ref (src base idx)
+        (do
+            (let w (q8b-walk idx 0))
+            (let i (head w))
+            (let b (q8b-base base (head (tail w))))
+            (mul (q8b-f16 (add (eqr-at src b) (mul 256 (eqr-at src (add b 1)))))
+                 (q8b-s8-inline (eqr-at src (add b (add 2 i)))))))
+
+    (defn q8b-agree (src base i n)
+        (if (ge i n) 1
+            (if (eq (q80-flat-at src base i) (q8b-ref src base i))
+                (q8b-agree src base (add i 1) n)
+                0)))
+    (defn q8b-pin (x lo hi) (if (gt x lo) (if (lt x hi) 1 0) 0))
+    (defn q8b-opens-with (s p)
+        (if (lt (str_len s) (str_len p)) 0
+            (if (str_eq (substring s 0 (str_len p)) p) 1 0)))
+
+    (let src (eqr-of-file "form-stdlib/tests/fixtures/q8-0-three-blocks.bin" 0 102))
+    (let spine (q80-msl-spine))
+    (let kdeq (q80-dequant-body "form_q8_0_dequant_f32"))
+    (let kmv  (q80-matvec-body  "form_q8_0_matvec_f32"))
+    (let klane (q80-matvec-lane-body "form_q8_0_matvec_lane_f32"))
+
+    ; --- 1: the window is the fixture, and the byte-length recipe agrees with it ---
+    (let c0 (if (eq (eqr-len src) 102) (if (eq (q80-bytes 96) 102) 1 0) 0))
+
+    ; --- 2: the super-scale, both roads, at all three blocks (0, 34, 68) ---
+    (let c1 (if (eq (q80-d src 0) (q8b-f16 (add (eqr-at src 0) (mul 256 (eqr-at src 1)))))
+            (if (eq (q80-d src 34) (q8b-f16 (add (eqr-at src 34) (mul 256 (eqr-at src 35)))))
+            (if (eq (q80-d src 68) (q8b-f16 (add (eqr-at src 68) (mul 256 (eqr-at src 69))))) 2 0) 0) 0))
+
+    ; --- 4: in-block weights at the ends and the middle of block 0 ---
+    (let c2 (if (eq (q80-flat-at src 0 0) (q8b-ref src 0 0))
+            (if (eq (q80-flat-at src 0 1) (q8b-ref src 0 1))
+            (if (eq (q80-flat-at src 0 31) (q8b-ref src 0 31)) 4 0) 0) 0))
+
+    ; --- 8: BOTH stride crossings, pinned to literals. Weight 32 is the first byte of block 1
+    ; (d bits 0x0838 = 2104 -> 2^-13 * (1 + 56/1024), q = 0x24 = 36) and weight 65 is the second byte
+    ; of block 2 (d bits 0x0861 = 2145, q = 0x01). A literal cannot agree with a wrong stride. ---
+    (let w32 (mul 1000000.0 (q80-flat-at src 0 32)))
+    (let w65 (mul 1000000.0 (q80-flat-at src 0 65)))
+    (let c3 (if (eq (q80-flat-at src 0 32) (q8b-ref src 0 32))
+            (if (eq (q80-flat-at src 0 65) (q8b-ref src 0 65))
+            (if (eq (q8b-pin w32 4634.857 4634.858) 1)
+            (if (eq (q8b-pin w65 133.633 133.634) 1) 8 0) 0) 0) 0))
+
+    ; --- 16: every weight, both roads, no epsilon ---
+    (let c4 (if (eq (q8b-agree src 0 0 96) 1) 16 0))
+
+    ; --- 32/64: each kernel body is an actual body, and the spine-carrying forms open with the spine ---
+    (let c5 (if (eq (q8b-opens-with (q80-msl-unit "d" "m" "l") spine) 1)
+            (if (gt (str_len kdeq) 100) 32 0) 0))
+    (let c6 (if (gt (str_len kmv) 100) (if (gt (str_len klane) 100) 64 0) 0))
+
+    ; --- 128: ONE spine. The unit is spine + appendix, byte for byte, and the appendix is what a
+    ; carrier that already emitted q6k-msl.fk's identical spine must append instead. ---
+    (let unit (q80-msl-unit "form_q8_0_dequant_f32" "form_q8_0_matvec_f32" "form_q8_0_matvec_lane_f32"))
+    (let app  (q80-msl-appendix "form_q8_0_dequant_f32" "form_q8_0_matvec_f32" "form_q8_0_matvec_lane_f32"))
+    (let expect (str_concat spine app))
+    (let c7 (if (str_eq unit expect)
+            (if (str_eq spine (str_concat (q6m-msl-int) (q6m-msl-f16))) 128 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))

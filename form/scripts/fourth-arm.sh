@@ -16,6 +16,15 @@
 # workload is mandatory: preparation, execution, and agreement failures fail
 # validation instead of silently reducing the proof to three siblings.
 
+# Bash-only: the array loops below index from 0. Sourced into zsh (arrays
+# 1-based) they SILENTLY malform every flatten expr — ${srcs[0]} reads empty
+# so a (read_file "") row rides the module list, and ${srcs[last]} grabs the
+# wrong band file. Die loudly instead of authoring a malformed carrier.
+if [[ -n "${ZSH_VERSION:-}" ]]; then
+    echo "fourth-arm.sh: bash-only (zsh arrays are 1-indexed; flatten exprs would be silently malformed) — source this under bash" >&2
+    return 1 2>/dev/null || exit 1
+fi
+
 FOURTH_DIR="form-stdlib/.cache/fourth"
 FOURTH_MANIFEST="fourth-arm-bands.txt"
 FOURTH_INDEX="$FOURTH_DIR/table-index-v2.tsv"
@@ -805,7 +814,12 @@ fourth_prepare_all() {
             [[ "$failed" -eq 0 ]] || break
         fi
     done
-    if [[ "$failed" -eq 0 ]]; then
+    if [[ "$failed" -eq 0 && "${#pids[@]}" -gt 0 ]]; then
+        # ${#pids[@]} guard: when the chunk count is an exact multiple of
+        # $jobs, the last wave's reset leaves pids EMPTY here, and bash 3.2
+        # under `set -u` treats expanding an empty array as an unbound
+        # variable — the suite died at the finish line of an 856-table cold
+        # flatten (856 % 8 == 0) before this guard existed.
         local pid
         for pid in "${pids[@]}"; do wait "$pid" || failed=1; done
     fi

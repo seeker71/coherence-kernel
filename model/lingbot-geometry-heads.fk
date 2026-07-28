@@ -1,0 +1,215 @@
+; lingbot-geometry-heads.fk — pure-Form classical geometry heads for real frames.
+;
+; Source anatomy: LingBot-Map commit 7ff6f3ed0913d4d326f8f13bbb429c4ffc0195c2
+; predicts (translation, quaternion, field-of-view) with a learned CameraHead,
+; predicts dense depth/confidence with a learned DPTHead, then unprojects depth
+; through the inverse camera extrinsic. This cell makes that output contract
+; executable without pretending the released 4.63 GB checkpoint is present.
+;
+; What executes here is deliberately classical and scale-relative:
+;   1. bounded dense correspondence search over luma + local contrast;
+;   2. weighted 2-D Procrustes for a real orthonormal rotation and xyz motion;
+;   3. parallax depth/confidence at an explicitly relative monocular scale;
+;   4. pinhole unprojection into a confidence-bearing world point cloud;
+;   5. before/after correspondence error for an observed output comparison.
+;
+; This is a working geometric head, not learned LingBot parity. Monocular metric
+; scale and out-of-plane rotation cannot be recovered from two tiny RGB samples
+; without calibration/weights; tz here is the fitted image-scale change and the
+; rotation is the best image-plane rigid fit. The seam is data, not costume.
+; No Python and no runtime/fkwu-uni.c growth.
+; witnessed: 2026-07-18 -> band 127 four-way (fkwu/Go/Rust/TypeScript),
+; live upstream pair -> 64 depths/points and 0.484741 matching-error reduction
+; preludes: form/form-stdlib/core.fk model/geometric-camera.fk
+
+(do
+  ; Newton sqrt stays local so this organ needs no trig/round surface.
+  (defn lgh-sqrt-iter (a x n)
+    (if (eq n 0) x
+      (lgh-sqrt-iter a (div (add x (div a x)) 2.0) (sub n 1))))
+  (defn lgh-sqrt (a)
+    (if (le a 0.0) 0.0 (lgh-sqrt-iter (mul a 1.0) (max2 1.0 (mul a 1.0)) 20)))
+  (defn lgh-vnorm3 (v)
+    (lgh-sqrt (add (mul (nth v 0) (nth v 0))
+                   (add (mul (nth v 1) (nth v 1)) (mul (nth v 2) (nth v 2))))))
+
+  (defn lgh-grid-at (g n x y) (nth g (add (mul y n) x)))
+  (defn lgh-inside (n x y)
+    (if (and (ge x 0) (lt x n)) (if (and (ge y 0) (lt y n)) 1 0) 0))
+  (defn lgh-clamp-index (n x) (max2 0 (min2 (sub n 1) x)))
+  ; Rotation-tolerant local signature: luma plus unsigned axial contrast.
+  (defn lgh-contrast (g n x y)
+    (add
+      (abs (sub (lgh-grid-at g n (lgh-clamp-index n (sub x 1)) y)
+                (lgh-grid-at g n (lgh-clamp-index n (add x 1)) y)))
+      (abs (sub (lgh-grid-at g n x (lgh-clamp-index n (sub y 1)))
+                (lgh-grid-at g n x (lgh-clamp-index n (add y 1)))))))
+  (defn lgh-signature-cost (a b n px py qx qy)
+    (add (mul 1024 (abs (sub (lgh-grid-at a n px py) (lgh-grid-at b n qx qy))))
+         (abs (sub (lgh-contrast a n px py) (lgh-contrast b n qx qy)))))
+
+  ; match = (source-x source-y target-x target-y dx dy signature-cost)
+  (defn lgh-match-row (px py qx qy cost)
+    (list px py qx qy (sub qx px) (sub qy py) cost))
+  (defn lgh-match-search (a b n px py radius dx dy best)
+    (if (gt dy radius) best
+      (if (gt dx radius)
+        (lgh-match-search a b n px py radius (sub 0 radius) (add dy 1) best)
+        (do
+          (let qx (add px dx))
+          (let qy (add py dy))
+          (if (eq (lgh-inside n qx qy) 0)
+            (lgh-match-search a b n px py radius (add dx 1) dy best)
+            (do
+              (let cost (lgh-signature-cost a b n px py qx qy))
+              (let candidate (lgh-match-row px py qx qy cost))
+              (lgh-match-search a b n px py radius (add dx 1) dy
+                (if (lt cost (nth best 6)) candidate best))))))))
+  (defn lgh-match-one (a b n px py radius)
+    (lgh-match-search a b n px py radius (sub 0 radius) (sub 0 radius)
+      (lgh-match-row px py px py 1000000000000.0)))
+  (defn lgh-correspondences-go (a b n radius i out)
+    (if (eq i (mul n n)) (reverse out)
+      (lgh-correspondences-go a b n radius (add i 1)
+        (cons (lgh-match-one a b n (mod i n) (div i n) radius) out))))
+  (defn lgh-correspondences (a b n radius)
+    (lgh-correspondences-go a b n radius 0 (empty)))
+
+  (defn lgh-match-weight (m) (div 1.0 (add 1.0 (mul (nth m 6) 1.0))))
+  ; First moments = (weight source-x source-y target-x target-y).
+  (defn lgh-first-moments-go (ms w px py qx qy)
+    (if (eq (len ms) 0) (list w px py qx qy)
+      (do
+        (let m (head ms))
+        (let mw (lgh-match-weight m))
+        (lgh-first-moments-go (tail ms)
+          (add w mw)
+          (add px (mul mw (mul (nth m 0) 1.0)))
+          (add py (mul mw (mul (nth m 1) 1.0)))
+          (add qx (mul mw (mul (nth m 2) 1.0)))
+          (add qy (mul mw (mul (nth m 3) 1.0)))))))
+  (defn lgh-first-moments (ms)
+    (lgh-first-moments-go ms 0.0 0.0 0.0 0.0 0.0))
+
+  ; Procrustes covariance = (dot cross source-energy target-energy).
+  (defn lgh-covariance-go (ms cpx cpy cqx cqy dot cross pp qq)
+    (if (eq (len ms) 0) (list dot cross pp qq)
+      (do
+        (let m (head ms))
+        (let w (lgh-match-weight m))
+        (let px (sub (mul (nth m 0) 1.0) cpx))
+        (let py (sub (mul (nth m 1) 1.0) cpy))
+        (let qx (sub (mul (nth m 2) 1.0) cqx))
+        (let qy (sub (mul (nth m 3) 1.0) cqy))
+        (lgh-covariance-go (tail ms) cpx cpy cqx cqy
+          (add dot (mul w (add (mul px qx) (mul py qy))))
+          (add cross (mul w (sub (mul px qy) (mul py qx))))
+          (add pp (mul w (add (mul px px) (mul py py))))
+          (add qq (mul w (add (mul qx qx) (mul qy qy))))))))
+
+  ; diagnostics = (cos sin scale tx-pixels ty-pixels total-weight).
+  (defn lgh-motion-diagnostics (matches)
+    (do
+      (let fm (lgh-first-moments matches))
+      (let w (nth fm 0))
+      (let cpx (div (nth fm 1) w))
+      (let cpy (div (nth fm 2) w))
+      (let cqx (div (nth fm 3) w))
+      (let cqy (div (nth fm 4) w))
+      (let cv (lgh-covariance-go matches cpx cpy cqx cqy 0.0 0.0 0.0 0.0))
+      (let norm (lgh-sqrt (add (mul (nth cv 0) (nth cv 0)) (mul (nth cv 1) (nth cv 1)))))
+      (let c (if (lt norm 0.000000001) 1.0 (div (nth cv 0) norm)))
+      (let s (if (lt norm 0.000000001) 0.0 (div (nth cv 1) norm)))
+      (let scale (if (lt (nth cv 2) 0.000000001) 1.0
+                    (lgh-sqrt (div (nth cv 3) (nth cv 2)))))
+      (let tx (sub cqx (sub (mul c cpx) (mul s cpy))))
+      (let ty (sub cqy (add (mul s cpx) (mul c cpy))))
+      (list c s scale tx ty w)))
+
+  ; The pose is camera-to-world-shaped and fully populated: orthonormal R plus
+  ; xyz translation. x/y are focal-normalized image motion; z is scale change.
+  (defn lgh-pose-from-matches (matches focal)
+    (do
+      (let d (lgh-motion-diagnostics matches))
+      (let c (nth d 0))
+      (let s (nth d 1))
+      (gc-pose
+        (list c (sub 0.0 s) 0.0 s c 0.0 0.0 0.0 1.0)
+        (list (div (nth d 3) (mul focal 1.0))
+              (div (nth d 4) (mul focal 1.0))
+              (sub 1.0 (nth d 2))))))
+
+  ; depth row = (relative-depth confidence disparity signature-cost).
+  ; Metric scale is unknowable here, so pose baseline is clamped to a named
+  ; quarter-unit floor and depth remains in the same relative coordinate frame.
+  (defn lgh-depth-row (m pose focal)
+    (do
+      (let disp (lgh-sqrt (add (mul (nth m 4) (nth m 4)) (mul (nth m 5) (nth m 5)))))
+      (let baseline (max2 0.25 (lgh-vnorm3 (gc-t pose))))
+      (let depth (div (mul (mul focal 1.0) baseline) (max2 0.25 disp)))
+      (list depth (lgh-match-weight m) disp (nth m 6))))
+  (defn lgh-depth-from-matches-go (ms pose focal out)
+    (if (eq (len ms) 0) (reverse out)
+      (lgh-depth-from-matches-go (tail ms) pose focal
+        (cons (lgh-depth-row (head ms) pose focal) out))))
+  (defn lgh-depth-from-matches (matches pose focal)
+    (lgh-depth-from-matches-go matches pose focal (empty)))
+
+  ; prediction = (pose dense-depth-rows correspondences diagnostics).
+  (defn lgh-predict (frame0 frame1 n radius focal)
+    (do
+      (let matches (lgh-correspondences frame0 frame1 n radius))
+      (let pose (lgh-pose-from-matches matches focal))
+      (list pose (lgh-depth-from-matches matches pose focal) matches
+            (lgh-motion-diagnostics matches))))
+
+  ; Cloud row = (xyz confidence); pinhole/world algebra is the shared camera organ.
+  (defn lgh-point-cloud-go (depth-rows n intrinsics pose i out)
+    (if (eq i (len depth-rows)) (reverse out)
+      (do
+        (let row (nth depth-rows i))
+        (let point (gc-depth-to-world (mod i n) (div i n) (nth row 0) intrinsics pose))
+        (lgh-point-cloud-go depth-rows n intrinsics pose (add i 1)
+          (cons (list point (nth row 1)) out)))))
+  (defn lgh-point-cloud (depth-rows n intrinsics pose)
+    (lgh-point-cloud-go depth-rows n intrinsics pose 0 (empty)))
+
+  (defn lgh-bound-step (bounds point)
+    (list
+      (list (min2 (nth (nth bounds 0) 0) (nth point 0))
+            (min2 (nth (nth bounds 0) 1) (nth point 1))
+            (min2 (nth (nth bounds 0) 2) (nth point 2)))
+      (list (max2 (nth (nth bounds 1) 0) (nth point 0))
+            (max2 (nth (nth bounds 1) 1) (nth point 1))
+            (max2 (nth (nth bounds 1) 2) (nth point 2)))))
+  (defn lgh-cloud-bounds-go (rows bounds)
+    (if (eq (len rows) 0) bounds
+      (lgh-cloud-bounds-go (tail rows) (lgh-bound-step bounds (nth (head rows) 0)))))
+  (defn lgh-cloud-bounds (rows)
+    (do (let p (nth (head rows) 0))
+        (lgh-cloud-bounds-go (tail rows) (list p p))))
+
+  (defn lgh-same-cost-go (a b n i acc)
+    (if (eq i (mul n n)) acc
+      (lgh-same-cost-go a b n (add i 1)
+        (add acc (lgh-signature-cost a b n (mod i n) (div i n) (mod i n) (div i n))))))
+  (defn lgh-match-cost-go (matches acc)
+    (if (eq (len matches) 0) acc
+      (lgh-match-cost-go (tail matches) (add acc (nth (head matches) 6)))))
+  (defn lgh-improved-go (a b n matches count)
+    (if (eq (len matches) 0) count
+      (do
+        (let m (head matches))
+        (let same (lgh-signature-cost a b n (nth m 0) (nth m 1) (nth m 0) (nth m 1)))
+        (lgh-improved-go a b n (tail matches)
+          (add count (if (le (nth m 6) same) 1 0))))))
+  ; comparison = (same-index total, matched total, same mean, matched mean,
+  ;               non-worsened pixels, pixel count).
+  (defn lgh-output-comparison (a b n matches)
+    (do
+      (let same (lgh-same-cost-go a b n 0 0))
+      (let matched (lgh-match-cost-go matches 0))
+      (let count (len matches))
+      (list same matched (div (mul same 1.0) count) (div (mul matched 1.0) count)
+            (lgh-improved-go a b n matches 0) count)))
+)

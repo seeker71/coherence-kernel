@@ -1,0 +1,198 @@
+; mx-residency.fk — the body's side of putting GGUF types 40 and 41 on the GPU.
+;
+; WHAT THIS CELL DECIDES, AND THE CARRIER DECIDES NONE OF IT (the dumb-carrier discipline every Metal
+; lane in this body keeps):
+;   1  WHERE EVERY TENSOR IS, AND WHAT ITS PLANE GEOMETRY IS. `mxr-emit-table` walks the file's own
+;      header ONCE and prints all 1406 tensor-info rows with the SLICE decomposition made explicit:
+;      slice element count and slice count, because for these two types the byte length cannot be
+;      computed without them. An expert tensor of dims 4096 x 2048 x 256 is not one plane pair — it is
+;      256 of them, one per expert, and a carrier that treats it as one reads 255 experts' payload as
+;      exponents. That is the exoscalar seam, and it is why every row carries `nel` and `slices`
+;      rather than only a byte length.
+;   2  WHAT THE WEIGHTS ARE, AT ANY FLAT ELEMENT OFFSET OF ANY SLICE. `mxr-emit-tile` streams a
+;      reference tile at an arbitrary offset, so the audit can gate the GPU at element 0 AND at element
+;      8 388 607 of the same slice. A tile audit that only ever looks at the head is correct exactly
+;      where it looked — corpus row 826, aporon.
+;   3  WHAT THE ANSWER IS. `mxr-emit-row` gives Form's fp64 dot for a named row at the tensor's real
+;      width, so the GPU's fused f32 matvec has a BODY-side number to be judged against and not only a
+;      host-side re-fold of its own inputs.
+;   4  THE METAL SOURCE. `mxr-emit-msl` is the mouth of mxfp4-msl.fk and mxfp8-msl.fk. Not one character
+;      of kernel text is authored here. The `#include <metal_stdlib>` that leads the unit is
+;      qml-msl-header — the body's ONE header, reached for rather than restated, because a second
+;      `using namespace metal;` would make this body's own `round` ambiguous and the unit would not
+;      compile.
+;
+; THE WINDOW TRICK, AND WHY IT IS NOT A TRICK. The two planes of a slice are up to 4 MB apart, so a
+; tile at element 0 needs bytes near 0 AND bytes near nel/2. `mxr-window` opens ONE equireach window
+; spanning exactly from the tile's first payload byte to its last scale byte, and `mxr-base` hands the
+; carver a NEGATIVE base so that base + i/2 lands at the right place inside that window. The carvers'
+; own arithmetic is untouched — this only moves the origin. A tail tile therefore costs a 264 KB window
+; where a head tile costs 4.2 MB, and neither costs a second read.
+;
+; THE MOUTH IS THE GO KERNEL (q6k-device-tile.fk's note, still true): `print` renders a float at full
+; precision and fkwu's int_to_str cannot render a float at all. fkwu proves the recipes; the Go kernel
+; speaks the weights.
+;
+; THE STREAM (flat, greppable):
+;   DATABASE <n>   NTENSORS <n>
+;   T <name> <ggml-type> <ndims> <d0> <d1> <d2> <abs-file-offset> <slice-elements> <slices> <bytes>
+;   TILE <off> <n>     then n f32 weights, one per line, flat element index off..off+n-1
+;   X <n>              then n f32
+;   ROW <r>            then Form's fp64 dot of tensor row r with X
+;   END
+;
+; Kin: mxfp4-msl.fk / mxfp8-msl.fk (the emitted Metal — this cell is their mouth),
+; mxfp4-plane-dequant.fk / mxfp8-plane-dequant.fk (the carvers the references come from),
+; whole-tensor-residency.fk (the Q6_K/Q4_K cell this is the MX twin of, stream shape and all),
+; qk-matvec-lane.fk (qml-msl-header — the body's one metal_stdlib).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/mxfp4-plane-dequant.fk form-stdlib/mxfp8-plane-dequant.fk form-stdlib/mxfp4-msl.fk form-stdlib/mxfp8-msl.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk
+;
+; Proven by: form/native/metal/metal_mx_gpu.sh (Mac-only carrier witness; off-Mac it SKIPs, like every
+;            other Metal row in form/native/GPU_GAPS.md). The emitted kernels' arithmetic is proven
+;            separately and without a GPU by form-stdlib/tests/mx-msl-band.fk.
+
+(do
+    (defn mxr-header-window () 8000000)
+    (defn mxr-alignment () 32)
+    (defn mxr-line (s) (print s))
+    (defn mxr-num (x) (print x))
+
+    ; ================= 1. the tensor table, with the slice decomposition made explicit =================
+    (defn mxr-name (src off) (substring src (add off 8) (add (add off 8) (egg-ti-namelen src off))))
+    (defn mxr-dimk (src off k) (if (gt (egg-ti-ndims src off) k) (egg-ti-dim src off k) 1))
+    ; ONE slice is d0 x d1; a third dimension counts SLICES (the expert axis), it does not widen a slice
+    (defn mxr-nel    (src off) (mul (egg-ti-dim0 src off) (mxr-dimk src off 1)))
+    (defn mxr-slices (src off) (mxr-dimk src off 2))
+
+    ; byte length by ggml type. 40 and 41 are the plane-split types this stone is about; 0/1 are carried
+    ; because the file holds them too and a table that cannot price them is a table with holes. An
+    ; unknown type prints 0 rather than a guessed length — a fabricated length is a silently wrong bind.
+    (defn mxr-bytes (src off)
+        (do
+            (let t (egg-ti-type src off))
+            (let n (mxr-nel src off))
+            (let k (mxr-slices src off))
+            (if (eq t 40) (mul k (mxp4-slice-bytes n))
+                (if (eq t 41) (mul k (mxp8-slice-bytes n))
+                    (if (eq t 0) (mul k (mul n 4))
+                        (if (eq t 1) (mul k (mul n 2)) 0))))))
+
+    (defn mxr-row (src off base)
+        (mxr-line (str_concat "T "
+            (str_concat (mxr-name src off)
+            (str_concat " " (str_concat (int_to_str (egg-ti-type src off))
+            (str_concat " " (str_concat (int_to_str (egg-ti-ndims src off))
+            (str_concat " " (str_concat (int_to_str (egg-ti-dim0 src off))
+            (str_concat " " (str_concat (int_to_str (mxr-dimk src off 1))
+            (str_concat " " (str_concat (int_to_str (mxr-dimk src off 2))
+            (str_concat " " (str_concat (int_to_str (add base (egg-ti-dataoff src off)))
+            (str_concat " " (str_concat (int_to_str (mxr-nel src off))
+            (str_concat " " (str_concat (int_to_str (mxr-slices src off))
+            (str_concat " " (int_to_str (mxr-bytes src off)))))))))))))))))))))))
+
+    ; only the two plane-split types are printed: 1406 rows of which 415 are types 40/41, and the audit
+    ; binds only those. The counts of everything else are still reported, so nothing is silently dropped.
+    (defn mxr-rows (src off n base c40 c41)
+        (if (eq n 0)
+            (mxr-line (str_concat "COUNTS " (str_concat (int_to_str c40) (str_concat " " (int_to_str c41)))))
+            (do
+                (let t (egg-ti-type src off))
+                (if (eq t 40) (mxr-row src off base) (if (eq t 41) (mxr-row src off base) 0))
+                (mxr-rows src (egg-ti-next src off) (sub n 1) base
+                    (if (eq t 40) (add c40 1) c40)
+                    (if (eq t 41) (add c41 1) c41)))))
+
+    (defn mxr-emit-table (path)
+        (do
+            (let hsrc (eqr-of-file path 0 (mxr-header-window)))
+            (let base (egg-data-base hsrc (mxr-alignment)))
+            (mxr-line (str_concat "DATABASE " (int_to_str base)))
+            (mxr-line (str_concat "NTENSORS " (int_to_str (egg-tensor-count hsrc))))
+            (mxr-rows hsrc (egg-tinfo-start hsrc) (egg-tensor-count hsrc) base 0 0)
+            (mxr-line "END")
+            0))
+
+    ; ================= 2. a reference tile at ANY flat element offset of ANY slice =================
+    ; `abs` is the SLICE's own base (tensor abs + k * slice-bytes); `nel` is the SLICE element count.
+    (defn mxr-pay-bytes (t nel) (if (eq t 40) (mxp4-payload-bytes nel) (mxp8-payload-bytes nel)))
+    (defn mxr-w0 (t off) (if (eq t 40) (div off 2) off))
+    (defn mxr-w1 (t nel off cnt) (add (mxr-pay-bytes t nel) (div (sub (add off cnt) 1) 32)))
+    (defn mxr-window (t path abs nel off cnt)
+        (eqr-of-file path (add abs (mxr-w0 t off))
+                          (add (sub (mxr-w1 t nel off cnt) (mxr-w0 t off)) 1)))
+    ; the negative origin that puts the carver's own offsets back on the window
+    (defn mxr-base (t off) (sub 0 (mxr-w0 t off)))
+    (defn mxr-flat-at (t src base nel idx)
+        (if (eq t 40) (mxp4-at src base nel idx) (mxp8-at src base nel idx)))
+
+    (defn mxr-tile-loop (t src base nel i off n)
+        (if (ge i n) 0
+            (do (mxr-num (mxr-flat-at t src base nel (add off i)))
+                (mxr-tile-loop t src base nel (add i 1) off n))))
+
+    (defn mxr-emit-tile (t path abs nel off cnt)
+        (do
+            (let src (mxr-window t path abs nel off cnt))
+            (mxr-line (str_concat "TILE " (str_concat (int_to_str off) (str_concat " " (int_to_str cnt)))))
+            (mxr-tile-loop t src (mxr-base t off) nel 0 off cnt)
+            0))
+
+    ; ================= 3. x, and Form's own answer for a row =================
+    ; x is REAL model data: `cnt` dequantized weights of a slice, which is what a real residual would
+    ; hand this projection in shape and in scale.
+    (defn mxr-emit-x (t path abs nel off cnt)
+        (do
+            (let src (mxr-window t path abs nel off cnt))
+            (mxr-line (str_concat "X " (int_to_str cnt)))
+            (mxr-tile-loop t src (mxr-base t off) nel 0 off cnt)
+            0))
+
+    ; Form's fp64 dot of row r (cols wide) with x — tb-dot's op order: j counts DOWN, accumulate p + acc.
+    ; Both operands are dequantized on the fly; no list is built on either side.
+    (defn mxr-dot (t wsrc wbase wnel woff xsrc xbase xnel xoff j acc)
+        (if (eq j 0) acc
+            (mxr-dot t wsrc wbase wnel woff xsrc xbase xnel xoff (sub j 1)
+                (add (mul (mxr-flat-at t wsrc wbase wnel (add woff (sub j 1)))
+                          (mxr-flat-at t xsrc xbase xnel (add xoff (sub j 1))))
+                     acc))))
+
+    (defn mxr-emit-row (t path wabs wnel r cols xabs xnel xoff)
+        (do
+            (let woff (mul r cols))
+            (let wsrc (mxr-window t path wabs wnel woff cols))
+            (let xsrc (mxr-window t path xabs xnel xoff cols))
+            (mxr-line (str_concat "ROW " (int_to_str r)))
+            (mxr-num (mxr-dot t wsrc (mxr-base t woff) wnel woff
+                                xsrc (mxr-base t xoff) xnel xoff cols 0))
+            0))
+
+    (defn mxr-emit-rows (t path wabs wnel r n cols xabs xnel xoff)
+        (if (eq n 0) 0
+            (do (mxr-emit-row t path wabs wnel r cols xabs xnel xoff)
+                (mxr-emit-rows t path wabs wnel (add r 1) (sub n 1) cols xabs xnel xoff))))
+
+    ; the summation bound's COEFFICIENT is the body's, not a tolerance the carrier invents: the slot
+    ; matvec splits each row across 32 lanes, so qk-matvec-split.fk's derived (cols + chunk + parts) at
+    ; parts = 32 is exactly this kernel's association depth budget. The carrier multiplies it by u and
+    ; by SUM|term| and demands the realised deviation stay below it.
+    (defn mxr-emit-bound (cols)
+        (do (mxr-line (str_concat "BOUND " (str_concat (int_to_str cols)
+                      (str_concat " " (int_to_str (qms-bound-coeff cols 32))))))
+            0))
+
+    ; ================= 4. the kernels =================
+    ; ONE translation unit: the body's one metal_stdlib leads it, the mxm_ spine appears once, and both
+    ; types' four kernels follow. Emitting each kernel's self-contained form and concatenating them is
+    ; what a carrier would naively do, and the Metal front end rejects it outright — so the body owns
+    ; the composition too, and the carrier only compiles what it is handed.
+    (defn mxr-emit-msl ()
+        (do
+            (mxr-line "MSL")
+            (mxr-line (str_concat (qml-msl-header)
+                (mxm-msl-unit "form_mxfp4_dequant_f32" "form_mxfp4_matvec_slot_f32"
+                              "form_mxfp8_dequant_f32" "form_mxfp8_matvec_slot_f32")))
+            (mxr-line "END")
+            0))
+
+    0)

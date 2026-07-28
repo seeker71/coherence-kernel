@@ -1,0 +1,193 @@
+; concept-10000.fk — 10,000 ranked lexical concept anchors, Form-native.
+;
+; Data home: model/concept-10000-data.fk, generated from the first 10,000
+; English rows of HermitDave/FrequencyWords OpenSubtitles2018 at pinned commit
+; 525f9b560de45753a5ea01069454e72e9aa541c6. Content license CC-BY-SA-4.0.
+;
+; This is not a claim of 10,000 disambiguated word senses. Each record is one
+; substantive observed surface lexeme with corpus rank/count and a deterministic
+; integrity feature vector. Polysemy, synonymy and compositional semantics remain
+; open. The gain is a real, ranked, addressable substrate rather than generated
+; concept-N placeholders or a 10,000-arm hand-written if-chain.
+;
+; Ranked data uses 30-byte records: label[20]|frequency[8]; id is the slot.
+; Detection uses a 26-byte byte-sorted index: label[20]|id[4]; and binary search.
+; Neither path materializes a 10,000-element Form list.
+;
+; Record: (id label rank frequency features)
+; Features: (id label-byte-hash byte-length first-byte last-byte frequency-band)
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk model/concept-10000-data.fk model/concept-10000-substantive-repair-data.fk
+(do
+  (defn c10-count () 10000)
+  (defn c10-record-width () 30)
+  (defn c10-index-width () 26)
+  (defn c10-label-width () 20)
+  (defn c10-valid-id? (id) (and (ge id 0) (lt id (c10-count))))
+
+  ; ---- record and stable accessors ------------------------------------------
+  (defn c10-record (id label rank frequency features)
+    (list id label rank frequency features))
+  (defn c10-concept-id (record) (nth record 0))
+  (defn c10-concept-label (record) (nth record 1))
+  (defn c10-concept-rank (record) (nth record 2))
+  (defn c10-concept-frequency (record) (nth record 3))
+  (defn c10-concept-features (record) (nth record 4))
+  (defn c10-missing () (empty))
+  (defn c10-missing? (record) (eq (len record) 0))
+
+  ; ---- fixed-width field decoding ------------------------------------------
+  (defn c10-rtrim-space-go (field n)
+    (if (eq n 0) ""
+      (if (eq (str_byte_at field (sub n 1)) 32)
+        (c10-rtrim-space-go field (sub n 1))
+        (substring field 0 n))))
+  (defn c10-rtrim-space (field)
+    (c10-rtrim-space-go field (str_len field)))
+  (defn c10-ranked-label-at (corpus id)
+    (do (let start (mul id (c10-record-width)))
+        (c10-rtrim-space (substring corpus start (add start (c10-label-width))))))
+  (defn c10-ranked-frequency-at (corpus id)
+    (do (let start (add (mul id (c10-record-width)) 21))
+        (str_to_int (substring corpus start (add start 8)))))
+
+  ; ---- deterministic label features ----------------------------------------
+  (defn c10-label-hash-go (label i hash)
+    (if (eq i (str_len label)) hash
+      (c10-label-hash-go label (add i 1)
+        (mod (add (mul hash 131) (str_byte_at label i)) 1000003))))
+  (defn c10-label-hash (label) (c10-label-hash-go label 0 17))
+  (defn c10-frequency-band (frequency)
+    (if (ge frequency 1000000) 0
+      (if (ge frequency 100000) 1
+        (if (ge frequency 10000) 2 3))))
+  (defn c10-features (id label frequency)
+    (list id (c10-label-hash label) (str_len label)
+          (str_byte_at label 0) (str_byte_at label (sub (str_len label) 1))
+          (c10-frequency-band frequency)))
+
+  ; ---- O(1) arithmetic concept lookup ---------------------------------------
+  (defn c10-concept-at-in (corpus id)
+    (if (c10-valid-id? id)
+      (do (let label (c10-ranked-label-at corpus id))
+          (let frequency (c10-ranked-frequency-at corpus id))
+          ; Stable IDs do not pretend to be corpus ranks after the 111-slot
+          ; substantive repair. Repaired records expose their exact upstream
+          ; rank; every untouched record keeps the original arithmetic rank.
+          (c10-record id label (csr111-effective-rank id (add id 1)) frequency
+            (c10-features id label frequency)))
+      (c10-missing)))
+  (defn c10-concept-at (id)
+    (c10-concept-at-in (read_file (c10-ranked-path)) id))
+
+  ; ---- byte-lexical comparator and 14-step binary-search detection ----------
+  (defn c10-str-cmp-go (a b i)
+    (if (eq i (str_len a))
+      (if (eq i (str_len b)) 0 -1)
+      (if (eq i (str_len b)) 1
+        (do (let aa (str_byte_at a i))
+            (let bb (str_byte_at b i))
+            (if (lt aa bb) -1
+              (if (gt aa bb) 1 (c10-str-cmp-go a b (add i 1))))))))
+  (defn c10-str-cmp (a b) (c10-str-cmp-go a b 0))
+  (defn c10-index-label-at (index slot)
+    (do (let start (mul slot (c10-index-width)))
+        (c10-rtrim-space (substring index start (add start (c10-label-width))))))
+  (defn c10-index-id-at (index slot)
+    (do (let start (add (mul slot (c10-index-width)) 21))
+        (str_to_int (substring index start (add start 4)))))
+  (defn c10-detect-text-search (corpus index text lo hi)
+    (if (ge lo hi) (c10-missing)
+      (do (let mid (div (add lo hi) 2))
+          (let label (c10-index-label-at index mid))
+          (let cmp (c10-str-cmp text label))
+          (if (eq cmp 0) (c10-concept-at-in corpus (c10-index-id-at index mid))
+            (if (lt cmp 0)
+              (c10-detect-text-search corpus index text lo mid)
+              (c10-detect-text-search corpus index text (add mid 1) hi))))))
+  (defn c10-detect-text-n-in (corpus index text count)
+    (if (eq (str_len text) 0) (c10-missing)
+      (c10-detect-text-search corpus index text 0 count)))
+  (defn c10-detect-text-in (corpus index text)
+    (c10-detect-text-n-in corpus index text (c10-count)))
+  ; Historical migration only.  Displaced junk surfaces remain readable from
+  ; the attributable migration index, but this function is deliberately not a
+  ; semantic detector: a legacy surface and its replacement have unrelated
+  ; meanings.  Production detection below never consults this index.
+  (defn c10-alias-count-in (aliases)
+    (if (eq (mod (str_len aliases) (c10-index-width)) 0)
+      (div (str_len aliases) (c10-index-width)) -1))
+  (defn c10-resolve-legacy-migration-in (corpus index aliases text)
+    (do (let canonical (c10-detect-text-in corpus index text))
+        (if (not (c10-missing? canonical)) canonical
+          (c10-detect-text-n-in corpus aliases text
+            (c10-alias-count-in aliases)))))
+
+  ; Exhaustive boundary audit over every displaced legacy surface.  `rejected`
+  ; counts surfaces absent from the canonical semantic index; `traceable`
+  ; independently proves the migration carrier still resolves its historical
+  ; stable ID.  A false label can therefore be investigated without becoming a
+  ; production meaning again.
+  (defn c10-legacy-migration-audit-go
+    (corpus canonical aliases slot count rejected traceable)
+    (if (ge slot count) (list count rejected traceable)
+      (do (let label (c10-index-label-at aliases slot))
+          (let expected-id (c10-index-id-at aliases slot))
+          (let production (c10-detect-text-in corpus canonical label))
+          (let migration
+            (c10-resolve-legacy-migration-in corpus canonical aliases label))
+          (c10-legacy-migration-audit-go corpus canonical aliases (add slot 1)
+            count (add rejected (c10-missing? production))
+            (add traceable (if (and (not (c10-missing? migration))
+              (eq (c10-concept-id migration) expected-id)) 1 0))))))
+  (defn c10-legacy-migration-audit-in (corpus canonical aliases)
+    (c10-legacy-migration-audit-go corpus canonical aliases 0
+      (c10-alias-count-in aliases) 0 0))
+  (defn c10-legacy-migration-audit ()
+    (c10-legacy-migration-audit-in (read_file (c10-ranked-path))
+      (read_file (c10-lexical-index-path))
+      (read_file (csr111-alias-index-path))))
+  (defn c10-detect-text (text)
+    (c10-detect-text-in
+      (read_file (c10-ranked-path))
+      (read_file (c10-lexical-index-path)) text))
+  (defn c10-detect-tokens-in (corpus index tokens)
+    (if (eq (len tokens) 0) (empty)
+      (cons (c10-detect-text-in corpus index (head tokens))
+            (c10-detect-tokens-in corpus index (tail tokens)))))
+  (defn c10-detect-tokens (tokens)
+    (do (let corpus (read_file (c10-ranked-path)))
+        (let index (read_file (c10-lexical-index-path)))
+        (c10-detect-tokens-in corpus index tokens)))
+
+  ; Feature detection is indexed by feature[0]=id and then integrity-checked.
+  ; A predicted/corrupted id cannot borrow another record's label signature.
+  (defn c10-number-list-eq? (a b)
+    (if (eq (len a) 0) (eq (len b) 0)
+      (if (eq (len b) 0) 0
+        (if (eq (head a) (head b))
+          (c10-number-list-eq? (tail a) (tail b)) 0))))
+  (defn c10-detect-features-in (corpus features)
+    (if (eq (len features) 6)
+      (do (let record (c10-concept-at-in corpus (head features)))
+          (if (c10-missing? record) (c10-missing)
+            (if (eq (c10-number-list-eq?
+                      (c10-concept-features record) features) 1)
+              record (c10-missing))))
+      (c10-missing)))
+  (defn c10-detect-features (features)
+    (c10-detect-features-in (read_file (c10-ranked-path)) features))
+
+  ; Cardinality is structural: exact generated string widths, independently
+  ; checked for both rank table and sorted detector index.
+  (defn c10-source-count-in (corpus)
+    (if (eq (mod (str_len corpus) (c10-record-width)) 0)
+      (div (str_len corpus) (c10-record-width)) -1))
+  (defn c10-index-count-in (index)
+    (if (eq (mod (str_len index) (c10-index-width)) 0)
+      (div (str_len index) (c10-index-width)) -1))
+  (defn c10-source-count ()
+    (c10-source-count-in (read_file (c10-ranked-path))))
+  (defn c10-index-count ()
+    (c10-index-count-in (read_file (c10-lexical-index-path))))
+)

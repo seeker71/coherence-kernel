@@ -1,0 +1,75 @@
+; geometric-camera.fk — executable pinhole + rigid-pose geometry distilled from
+; LingBot-Map's released reconstruction path (commit 7ff6f3ed0913d4d326f8f13bbb429c4ffc0195c2).
+;
+; Implements the non-learned geometric spine used around the model: depth pixel
+; unprojection, camera-to-world transformation, SE(3) inverse/composition,
+; relative pose, and anchor-scale normalization. Matrices are row-major 3x3
+; lists; a pose is (R t), t and points are xyz lists.
+;
+; Honest floor: no image encoder and no learned pose/depth prediction. Given
+; depth, intrinsics, and a camera pose, this cell really reconstructs world
+; points and composes camera frames. Self-contained over core.
+; witnessed: 2026-07-18 -> band 127 four-way (fkwu/Go/Rust/TS)
+; preludes: form/form-stdlib/core.fk
+
+(do
+    (defn gc-v3 (x y z) (list x y z))
+    (defn gc-vadd (a b) (list (add (nth a 0) (nth b 0)) (add (nth a 1) (nth b 1)) (add (nth a 2) (nth b 2))))
+    (defn gc-vscale (v s) (list (mul (nth v 0) s) (mul (nth v 1) s) (mul (nth v 2) s)))
+    (defn gc-vneg (v) (gc-vscale v -1))
+    (defn gc-list-eq (a b)
+        (if (not (eq (len a) (len b))) 0
+            (if (eq (len a) 0) 1
+                (if (eq (head a) (head b)) (gc-list-eq (tail a) (tail b)) 0))))
+    (defn gc-close (a b) (if (lt (abs (sub a b)) 0.000001) 1 0))
+    (defn gc-list-close (a b)
+        (if (not (eq (len a) (len b))) 0
+            (if (eq (len a) 0) 1
+                (if (eq (gc-close (head a) (head b)) 1) (gc-list-close (tail a) (tail b)) 0))))
+
+    (defn gc-m3-id () (list 1 0 0 0 1 0 0 0 1))
+    (defn gc-m3-transpose (m)
+        (list (nth m 0) (nth m 3) (nth m 6)
+              (nth m 1) (nth m 4) (nth m 7)
+              (nth m 2) (nth m 5) (nth m 8)))
+    (defn gc-m3v (m v)
+        (list (add (mul (nth m 0) (nth v 0)) (add (mul (nth m 1) (nth v 1)) (mul (nth m 2) (nth v 2))))
+              (add (mul (nth m 3) (nth v 0)) (add (mul (nth m 4) (nth v 1)) (mul (nth m 5) (nth v 2))))
+              (add (mul (nth m 6) (nth v 0)) (add (mul (nth m 7) (nth v 1)) (mul (nth m 8) (nth v 2))))))
+    (defn gc-m3mul-t (a bt)
+        (list
+          (sum (list (mul (nth a 0) (nth bt 0)) (mul (nth a 1) (nth bt 1)) (mul (nth a 2) (nth bt 2))))
+          (sum (list (mul (nth a 0) (nth bt 3)) (mul (nth a 1) (nth bt 4)) (mul (nth a 2) (nth bt 5))))
+          (sum (list (mul (nth a 0) (nth bt 6)) (mul (nth a 1) (nth bt 7)) (mul (nth a 2) (nth bt 8))))
+          (sum (list (mul (nth a 3) (nth bt 0)) (mul (nth a 4) (nth bt 1)) (mul (nth a 5) (nth bt 2))))
+          (sum (list (mul (nth a 3) (nth bt 3)) (mul (nth a 4) (nth bt 4)) (mul (nth a 5) (nth bt 5))))
+          (sum (list (mul (nth a 3) (nth bt 6)) (mul (nth a 4) (nth bt 7)) (mul (nth a 5) (nth bt 8))))
+          (sum (list (mul (nth a 6) (nth bt 0)) (mul (nth a 7) (nth bt 1)) (mul (nth a 8) (nth bt 2))))
+          (sum (list (mul (nth a 6) (nth bt 3)) (mul (nth a 7) (nth bt 4)) (mul (nth a 8) (nth bt 5))))
+          (sum (list (mul (nth a 6) (nth bt 6)) (mul (nth a 7) (nth bt 7)) (mul (nth a 8) (nth bt 8))))))
+    (defn gc-m3mul (a b) (gc-m3mul-t a (gc-m3-transpose b)))
+
+    (defn gc-pose (r t) (list r t))
+    (defn gc-r (p) (nth p 0))
+    (defn gc-t (p) (nth p 1))
+    (defn gc-transform (pose point) (gc-vadd (gc-m3v (gc-r pose) point) (gc-t pose)))
+    (defn gc-inverse-r (pose rt)
+        (gc-pose rt (gc-vneg (gc-m3v rt (gc-t pose)))))
+    (defn gc-inverse (pose)
+        (gc-inverse-r pose (gc-m3-transpose (gc-r pose))))
+    (defn gc-compose (a b)
+        (gc-pose (gc-m3mul (gc-r a) (gc-r b))
+                 (gc-vadd (gc-m3v (gc-r a) (gc-t b)) (gc-t a))))
+    (defn gc-relative (from to) (gc-compose (gc-inverse from) to))
+
+    ; intrinsics = (fx fy cx cy). OpenCV camera convention: +z forward.
+    (defn gc-unproject (u v depth intrinsics)
+        (list (div (mul (sub u (nth intrinsics 2)) depth) (nth intrinsics 0))
+              (div (mul (sub v (nth intrinsics 3)) depth) (nth intrinsics 1))
+              depth))
+    (defn gc-depth-to-world (u v depth intrinsics camera-to-world)
+        (gc-transform camera-to-world (gc-unproject u v depth intrinsics)))
+    (defn gc-normalize-point (point anchor-scale) (gc-vscale point (div 1.0 anchor-scale)))
+    (defn gc-normalize-pose (pose anchor-scale)
+        (gc-pose (gc-r pose) (gc-vscale (gc-t pose) (div 1.0 anchor-scale))))
+)

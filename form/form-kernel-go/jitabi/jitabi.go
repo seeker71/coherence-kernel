@@ -55,12 +55,15 @@ func Truthy(v Value) bool {
 	return true
 }
 
+// Len is an HONEST cell count, mirroring the interpreter's len native: a
+// plain list may carry the "__dict__" marker string as data (the flatten
+// string pool does), so no marker sniffing here — a crystallized recipe must
+// answer exactly what its interpreted body answered, or the JIT laundered
+// the semantics. Dict pair-count is the python lane's _len, which the JIT
+// does not lower.
 func Len(v Value) int64 {
 	switch v.Kind {
 	case ListKind:
-		if isDict(v) {
-			return int64((len(v.List) - 1) / 2)
-		}
 		return int64(len(v.List))
 	case StrKind:
 		return int64(len(v.Str))
@@ -328,13 +331,6 @@ func (v Value) AsString() string {
 		return "null"
 	}
 	return ""
-}
-
-func isDict(v Value) bool {
-	return v.Kind == ListKind &&
-		len(v.List) > 0 &&
-		v.List[0].Kind == StrKind &&
-		v.List[0].Str == "__dict__"
 }
 
 func equal(a, b Value) bool {

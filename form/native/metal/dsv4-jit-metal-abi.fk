@@ -1,0 +1,309 @@
+; Form-native ARM64 -> linked Metal transaction dispatcher.
+;
+; A dispatcher pointer is neither stored nor asked from the C seed. Form reads
+; the selected carrier's Mach-O symbol table and obtains an image-relative
+; symbol delta. The emitted controller observes its own live ASLR image base
+; with Darwin getpid/proc_info syscalls, adds the artifact-owned delta, builds
+; the transaction ABI arguments, and calls the linked dispatcher with BLR.
+;
+; Both representation seams stay explicit:
+;   * native_call_bytes gives x0 a TAGGED Form value, so the delta is untagged.
+;   * the linked dispatcher uses its four-argument raw C ABI, so recipe/output
+;     pointers are built inside the emitted image rather than passed as Values.
+;
+; The emitted controller scans the returned dispatcher receipt before deciding
+; what to write. Diagnostics remain complete; PASS can either retain its full
+; receipt or return compact status 1 to Form's existing heartbeat. Status is
+; 1=PASS, 2=NOTHING, 0=FAIL/other.
+; No dlsym, nm, C/Go/Python, generated source, compiler, shell dispatcher, or
+; process-specific pointer is part of the live route.
+;
+; witnessed: 2026-07-28 -> PASS metal_model_transaction through emitted BLR
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-asm.fk native/metal/macho-live-symbol.fk
+
+(do
+    (defn djma-mov-x (rd rm)
+        (fa-asm 2852127712 (list 1 65536) (list rd rm)))
+
+    (defn djma-add-x-r (rd rn rm)
+        (fa-asm 2332033024 (list 1 32 65536) (list rd rn rm)))
+
+    (defn djma-lsr-x-imm (rd rn shift)
+        (fa-asm 3544186880 (list 65536 1024 32 1)
+            (list shift 63 rn rd)))
+
+    (defn djma-cmp-x-r (rn rm)
+        (fa-asm 3942645791 (list 32 65536) (list rn rm)))
+
+    ; Turn any Form string into the emitted stack stores that materialize the
+    ; transaction recipe. The recipe is data at the call site, not a fixed row.
+    (defn djma-store-string-loop (text i n stack-offset)
+        (if (ge i n) (list)
+            (append-list
+                (fa-movz 8 (str_byte_at text i))
+                (append-list
+                    (fa-strb 8 31 (add stack-offset i))
+                    (djma-store-string-loop text (add i 1) n stack-offset)))))
+
+    (defn djma-store-string (text stack-offset)
+        (djma-store-string-loop text 0 (str_len text) stack-offset))
+
+    (defn djma-fragments-length (fragments)
+        (if (eq (len fragments) 0) 0
+            (add
+                (str_len (head fragments))
+                (djma-fragments-length (tail fragments)))))
+
+    (defn djma-store-fragments (fragments stack-offset)
+        (if (eq (len fragments) 0) (list)
+            (append-list
+                (djma-store-string (head fragments) stack-offset)
+                (djma-store-fragments
+                    (tail fragments)
+                    (add stack-offset (str_len (head fragments)))))))
+
+    (defn djma-stack-down (remaining)
+        (if (le remaining 0) (list)
+            (append-list
+                (fa-sub-x-imm 31 31 2048)
+                (djma-stack-down (sub remaining 1)))))
+
+    (defn djma-stack-up (remaining)
+        (if (le remaining 0) (list)
+            (append-list
+                (fa-add-x-imm 31 31 2048)
+                (djma-stack-up (sub remaining 1)))))
+
+    ; Return a compact tagged status after releasing the full 64 KiB frame.
+    ; status is ordinary Form data: 0=FAIL/other, 1=PASS, 2=NOTHING.
+    (defn djma-return-status (status)
+        (fa-image
+            (list
+                (fa-movz 0 (mul status 2))
+                (djma-stack-up 32)
+                (fa-ldp-fp)
+                (fa-ldp-post)
+                (fa-ret))))
+
+    (defn djma-write-receipt ()
+        (fa-image
+            (list
+                ; write(1, out, returned_count), Darwin UNIX syscall 4.
+                (fa-movz-x 0 1)
+                (fa-add-x-imm 1 31 2048)
+                (fa-add-x-imm 1 1 2048)
+                (djma-mov-x 2 19)
+                (fa-movz-x 16 4)
+                (fa-movk-x-16 16 512)
+                (fa-svc 128))))
+
+    ; FAIL and NOTHING always retain their full diagnostic receipt. PASS is
+    ; quiet by default so the Form layer/position heartbeat becomes the compact
+    ; trace funnel; detail=1 restores the full PASS receipt on demand.
+    (defn djma-finish-writes? (status detail)
+        (if (eq detail (sub 0 1)) 0
+            (if (or (not (eq status 1)) (eq detail 1)) 1 0)))
+
+    (defn djma-finish-length (status detail)
+        (if (eq (djma-finish-writes? status detail) 1) 43 36))
+
+    (defn djma-finish-status (status detail)
+        (if (eq (djma-finish-writes? status detail) 1)
+            (fa-image
+                (list
+                    (djma-write-receipt)
+                    (djma-return-status status)))
+            (djma-return-status status)))
+
+    ; Emit the byte comparisons for one candidate substring. A mismatch jumps
+    ; to this scanner's advance block. Offsets are derived from the exact
+    ; emitted instruction count, so adding another pattern does not alter them.
+    (defn djma-pattern-checks (pattern i n finish-length)
+        (if (ge i n) (list)
+            (append-list
+                (fa-ldrb 8 15 i)
+                (append-list
+                    (fa-movz 9 (str_byte_at pattern i))
+                    (append-list
+                        (fa-cmp-r 8 9)
+                        (append-list
+                            (fa-bcond 1
+                                (sub
+                                    (add 7
+                                        (add finish-length (mul 4 n)))
+                                    (add 10 (mul 4 i))))
+                            (djma-pattern-checks
+                                pattern (add i 1) n
+                                finish-length)))))))
+
+    ; Scan x12[0..x19) for one exact pattern. Found returns immediately with
+    ; the requested status; absent falls through to the next scanner.
+    (defn djma-scan-pattern (pattern status detail)
+        (do
+            (let n (str_len pattern))
+            (let finish-length (djma-finish-length status detail))
+            (fa-image
+                (list
+                    (fa-cmp-x 19 n)
+                    (fa-bcond 11
+                        (add 8 (add finish-length (mul 4 n))))
+                    (fa-movz-x 13 0)
+                    (fa-sub-x-imm 14 19 n)
+                    (djma-cmp-x-r 13 14)
+                    (fa-bcond 12
+                        (add 4 (add finish-length (mul 4 n))))
+                    (djma-add-x-r 15 12 13)
+                    (djma-pattern-checks
+                        pattern 0 n finish-length)
+                    (djma-finish-status status detail)
+                    (fa-add-x-imm 13 13 1)
+                    (fa-b-off
+                        (sub 0
+                            (add 4
+                                (add finish-length
+                                    (mul 4 n)))))))))
+
+    ; x0 enters with a tagged route word:
+    ;   low 32 bits  = image-relative symbol delta
+    ;   high 32 bits = expected live __TEXT region size
+    ;
+    ; Stack (64 KiB, emitted as 32 ordinary 2048-byte SP adjustments):
+    ;   [0,96)       proc_regioninfo
+    ;   [128,4096)   transaction recipe bytes
+    ;   [4096,53248) dispatcher receipt (49152-byte cap)
+    (defn djma-transaction-controller-parts-detail-bytes
+        (fragments detail)
+        (fa-image
+            (list
+                (fa-stp-pre)
+                (fa-stp-fp)
+                (djma-lsr-x-imm 20 0 1)
+                (djma-lsr-x-imm 10 20 32)
+                (fa-mov 20 20)
+                (djma-stack-down 32)
+
+                ; pid = getpid(): Darwin UNIX syscall 20.
+                (fa-movz-x 16 20)
+                (fa-movk-x-16 16 512)
+                (fa-svc 128)
+                (fa-mov 1 0)
+
+                ; proc_info(PROC_INFO_CALL_PIDINFO=2, pid,
+                ;           PROC_PIDREGIONINFO=7, address=0, sp, 96)
+                (fa-movz-x 0 2)
+                (fa-movz-x 2 7)
+                (fa-movz-x 3 0)
+                (fa-add-x-imm 4 31 0)
+                (fa-movz-x 5 96)
+                (fa-movz-x 16 336)
+                (fa-movk-x-16 16 512)
+                (fa-svc 128)
+
+                ; pri_address at byte offset 80 is the live __TEXT base.
+                (fa-ldr 9 31 10)
+                (djma-add-x-r 9 9 20)
+
+                ; Refuse a carrier artifact that is not the running image. The
+                ; live region size is pri_size at byte offset 88 (scaled 11).
+                (fa-ldr 11 31 11)
+                (djma-cmp-x-r 11 10)
+                (fa-bcond 0 37)
+                (djma-return-status 0)
+
+                ; Materialize each Form-owned fragment directly in the frame.
+                ; No joined Form string or transaction-list ABI is involved.
+                (djma-store-fragments fragments 128)
+
+                ; dispatcher(recipe, recipe_len, out, out_cap)
+                (fa-add-x-imm 0 31 128)
+                (fa-movz-x 1 (djma-fragments-length fragments))
+                (fa-add-x-imm 2 31 2048)
+                (fa-add-x-imm 2 2 2048)
+                (fa-movz-x 3 49152)
+                (fa-blr 9)
+                (djma-mov-x 19 0)
+
+                ; Exact tri-state over the complete returned receipt. Operation
+                ; receipts begin with transaction-step, so first-byte checking
+                ; is insufficient: FAIL wins, then NOTHING, and PASS requires
+                ; the transaction summary normally present at the tail.
+                (fa-add-x-imm 12 31 2048)
+                (fa-add-x-imm 12 12 2048)
+                (djma-scan-pattern "FAIL " 0 detail)
+                (djma-scan-pattern "NOTHING " 2 detail)
+                (djma-scan-pattern
+                    "PASS metal_model_transaction" 1 detail)
+                (djma-finish-status 0 detail))))
+
+    (defn djma-transaction-controller-parts-bytes (fragments)
+        (djma-transaction-controller-parts-detail-bytes
+            fragments 0))
+
+    (defn djma-transaction-controller-bytes (recipe)
+        (djma-transaction-controller-parts-bytes (list recipe)))
+
+    ; Scanner-only live band door: place a synthetic operation-bearing receipt
+    ; in the emitted frame and run the exact same precedence logic.
+    (defn djma-status-controller-bytes (receipt)
+        (fa-image
+            (list
+                (fa-stp-pre)
+                (fa-stp-fp)
+                (djma-stack-down 32)
+                (djma-store-string receipt 128)
+                (fa-add-x-imm 12 31 128)
+                (fa-movz-x 19 (str_len receipt))
+                (djma-scan-pattern "FAIL " 0 (sub 0 1))
+                (djma-scan-pattern "NOTHING " 2 (sub 0 1))
+                (djma-scan-pattern
+                    "PASS metal_model_transaction" 1 (sub 0 1))
+                (djma-finish-status 0 (sub 0 1)))))
+
+    (defn djma-status-live (receipt)
+        (native_call_bytes (djma-status-controller-bytes receipt) 0))
+
+    (defn dsv4-jit-metal-transaction-route (carrier)
+        (mls-symbol-route carrier "_fk_metal_model_transaction_external"))
+
+    (defn dsv4-jit-metal-transaction-delta (carrier)
+        (do
+            (let route (dsv4-jit-metal-transaction-route carrier))
+            (if (lt (len route) 2) 0 (nth route 0))))
+
+    ; Return: 1=PASS, 2=NOTHING, 0=FAIL/other-carrier/oversized recipe.
+    ; The controller independently validates that the selected carrier's
+    ; artifact identity matches the live image before BLR.
+    (defn dsv4-jit-metal-transaction-routed-parts-detail
+        (route fragments detail)
+        (do
+            (let recipe-length (djma-fragments-length fragments))
+            (if (or (lt (len route) 2)
+                    (or (lt recipe-length 0) (gt recipe-length 3968)))
+                0
+                (native_call_bytes
+                    (djma-transaction-controller-parts-detail-bytes
+                        fragments detail)
+                    (add (nth route 0) (mul (nth route 1) 4294967296))))))
+
+    (defn dsv4-jit-metal-transaction-routed-parts (route fragments)
+        (dsv4-jit-metal-transaction-routed-parts-detail
+            route fragments 1))
+
+    ; Prepared trace funnel: PASS is silent and returns status for the Form
+    ; heartbeat; FAIL/NOTHING still write their full receipt. This is an
+    ; explicit path until the active full-detail token run completes.
+    (defn dsv4-jit-metal-transaction-routed-parts-funnel
+        (route fragments)
+        (dsv4-jit-metal-transaction-routed-parts-detail
+            route fragments 0))
+
+    (defn dsv4-jit-metal-transaction-parts (carrier fragments)
+        (dsv4-jit-metal-transaction-routed-parts
+            (dsv4-jit-metal-transaction-route carrier)
+            fragments))
+
+    (defn dsv4-jit-metal-transaction (carrier recipe)
+        (dsv4-jit-metal-transaction-parts carrier (list recipe)))
+
+    0)

@@ -1,0 +1,111 @@
+; Mach-O symbol resolution owned by Form.
+;
+; A linked function's process address is not stable under ASLR and its offset
+; changes whenever the carrier is relinked. The stable input is the carrier
+; artifact itself. This cell reads that artifact as bytes, walks LC_SYMTAB,
+; resolves a requested nlist_64 entry, reads the preferred __TEXT vmaddr, and
+; returns the symbol's image-relative delta. A Form-emitted controller can add
+; that delta to the live image base it observes through proc_info.
+;
+; No nm, dlsym, compiler, generated source, or stored process pointer is used.
+;
+; witnessed: 2026-07-28 -> 166028 for the current linked transaction symbol
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn mls-le-loop (src off width i place acc)
+        (if (ge i width) acc
+            (mls-le-loop src off width (add i 1) (mul place 256)
+                (add acc (mul (str_byte_at src (add off i)) place)))))
+
+    (defn mls-u32 (src off) (mls-le-loop src off 4 0 1 0))
+    (defn mls-u64 (src off) (mls-le-loop src off 8 0 1 0))
+
+    ; Result: (symoff nsyms stroff strsize), or empty.
+    (defn mls-find-symtab (src at remaining)
+        (if (le remaining 0) (list)
+            (do
+                (let cmd (mls-u32 src at))
+                (let size (mls-u32 src (add at 4)))
+                (if (eq cmd 2)
+                    (list
+                        (mls-u32 src (add at 8))
+                        (mls-u32 src (add at 12))
+                        (mls-u32 src (add at 16))
+                        (mls-u32 src (add at 20)))
+                    (if (lt size 8) (list)
+                        (mls-find-symtab src (add at size) (sub remaining 1)))))))
+
+    ; The first nonzero file-backed segment is __TEXT for MH_EXECUTE. Returning
+    ; the vmaddr rather than assuming 0x100000000 keeps the delta artifact-owned.
+    (defn mls-find-text-vm (src at remaining)
+        (if (le remaining 0) 0
+            (do
+                (let cmd (mls-u32 src at))
+                (let size (mls-u32 src (add at 4)))
+                (let vm (if (eq cmd 25) (mls-u64 src (add at 24)) 0))
+                (let fileoff (if (eq cmd 25) (mls-u64 src (add at 40)) 1))
+                (if (and (gt vm 0) (eq fileoff 0)) vm
+                    (if (lt size 8) 0
+                        (mls-find-text-vm src (add at size) (sub remaining 1)))))))
+
+    (defn mls-find-text-size (src at remaining)
+        (if (le remaining 0) 0
+            (do
+                (let cmd (mls-u32 src at))
+                (let size (mls-u32 src (add at 4)))
+                (let vm (if (eq cmd 25) (mls-u64 src (add at 24)) 0))
+                (let fileoff (if (eq cmd 25) (mls-u64 src (add at 40)) 1))
+                (if (and (gt vm 0) (eq fileoff 0))
+                    (mls-u64 src (add at 32))
+                    (if (lt size 8) 0
+                        (mls-find-text-size src (add at size) (sub remaining 1)))))))
+
+    (defn mls-name-eq-loop (src at name i n)
+        (if (ge i n)
+            (if (eq (str_byte_at src (add at i)) 0) 1 0)
+            (if (eq (str_byte_at src (add at i)) (str_byte_at name i))
+                (mls-name-eq-loop src at name (add i 1) n)
+                0)))
+
+    (defn mls-name-eq (src at name)
+        (mls-name-eq-loop src at name 0 (str_len name)))
+
+    (defn mls-find-nlist (src symoff nsyms stroff name i)
+        (if (ge i nsyms) 0
+            (do
+                (let entry (add symoff (mul i 16)))
+                (let strx (mls-u32 src entry))
+                (if (and (gt strx 0) (eq (mls-name-eq src (add stroff strx) name) 1))
+                    (mls-u64 src (add entry 8))
+                    (mls-find-nlist src symoff nsyms stroff name (add i 1))))))
+
+    ; Returns (symbol-delta __TEXT-vmsize), or empty. The size becomes a live
+    ; carrier-identity guard in the emitted controller before it branches.
+    (defn mls-symbol-route (path name)
+        (do
+            (let src (read_file path))
+            (if (or (lt (str_len src) 32) (not (eq (mls-u32 src 0) 4277009103))) (list)
+                (do
+                    (let ncmds (mls-u32 src 16))
+                    (let symtab (mls-find-symtab src 32 ncmds))
+                    (let text-vm (mls-find-text-vm src 32 ncmds))
+                    (let text-size (mls-find-text-size src 32 ncmds))
+                    (if (or (lt (len symtab) 4) (or (eq text-vm 0) (eq text-size 0))) (list)
+                        (do
+                            (let value
+                                (mls-find-nlist src
+                                    (nth symtab 0) (nth symtab 1) (nth symtab 2)
+                                    name 0))
+                            (if (le value text-vm) (list)
+                                (list (sub value text-vm) text-size))))))))
+
+    ; Returns 0 when the artifact is not a 64-bit little-endian Mach-O, has no
+    ; symbol table / text vmaddr, or the requested symbol is absent.
+    (defn mls-symbol-delta (path name)
+        (do
+            (let route (mls-symbol-route path name))
+            (if (lt (len route) 2) 0 (nth route 0))))
+
+    0)

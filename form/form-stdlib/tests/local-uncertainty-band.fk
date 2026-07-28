@@ -1,0 +1,254 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/loss.fk form-stdlib/local-uncertainty.fk
+;
+; local-uncertainty-band — STONE 43. Ten claims about a measure of the local model's own
+; decisiveness. Verdict 1023 when every one crosses.
+;
+; ---------------------------------------------------------------------------------------------------
+; APORON — THE DECLARED RADIUS. Read this before believing the number.
+;
+; WHAT THIS BAND PROVES
+;   * That the arithmetic is the arithmetic: the top-2 walk finds what it claims; the cheap
+;     logsumexp route to p(chosen) is the body's own softmax at that index; the cheap entropy
+;     identity H = logsumexp - E_p[l] is -sum p ln p; the top-k truncation is a TRUNCATION (at
+;     k >= V it IS the full entropy) and not a different formula.
+;   * That a forward which did not happen can never read as confident. Three shapes of dead
+;     vector — zeroed, constant, tied-at-the-top — are refused, one dead step poisons its whole
+;     answer, and the answer that results escalates through the ordinary predicate.
+;   * That the aggregation rule composes as stated, and refuses the empty answer.
+;   * THE CALIBRATION, recomputed here from the REAL per-token numbers rather than pinned as a
+;     conclusion: the mean is taken by lu-answer over the values metal_uncertainty.sh measured off
+;     llama3.2:3b's own logit vectors, and the ordering is asserted against a threshold this band
+;     could fail.
+;
+; WHAT IT DOES NOT PROVE
+;   * NOT that the signal tracks TRUTH. Claim 256 exists to witness the opposite, in the model's own
+;     numbers: an answer that is WRONG (137 x 249 = 34287; the true product is 34113) is MORE
+;     decisive, under the runner-up signal, than two prompts with no determined answer at all. This
+;     band asserts that inversion rather than hiding it. Decisiveness is not correctness, and a
+;     confidently wrong model scores high.
+;   * NOT a calibration curve. Fifteen prompts, one model, one decode length, greedy. The boundary
+;     the threshold sits in is 11.8 % wide. The class labels ("correct", "undetermined", "wrong")
+;     were assigned by a human reading the answers; nothing in the body checked them.
+;   * NOT the GPU. The real logit vectors are 128 256 floats and never enter this band; what enters
+;     is what the carrier measured off them. native/metal/metal_uncertainty.sh is that witness, and
+;     it runs under metal_first_token.sh's own gates (VERDICT PASS) so the forward producing those
+;     logits is the proven one.
+;   * NOT a timing claim. Nothing here is measured in seconds.
+; ---------------------------------------------------------------------------------------------------
+;
+;   bit    1  THE TOP-2 WALK: index, maximum, second maximum and tie count on a hand vector,
+;             including the case where the maximum is NOT first and the case of a tie.
+;   bit    2  p(chosen) IS THE BODY'S SOFTMAX AT THAT INDEX. lu-p1 goes through logsumexp — one log
+;             instead of V — and tn-softmax goes through the normalized exp vector. Two routes, same
+;             number, or the cheap route is not the quantity it is named after.
+;   bit    4  THE ENTROPY IDENTITY: H = logsumexp - E_p[l] equals -sum p ln p computed directly.
+;             The cheap form is what the carrier runs 128 256 entries wide; if the identity is not
+;             an identity, every entropy in this stone is a different quantity than it claims.
+;   bit    8  BOUNDS AND ENDS: a flat vector's entropy is exactly ln V; a peaked vector's is near 0;
+;             and entropy is never negative.
+;   bit   16  THE DEAD-FORWARD GUARD (edgedrop / zerobirth) — the shape of this stone's worst
+;             failure. The zeroed pool, the constant fill and the tied maximum are each refused;
+;             lu-step hands back alive = 0; and — the sentence that matters — the CONFIDENCE of an
+;             answer containing a dead step is 0.0, not high. A dead model must not score maximally
+;             certain, and here it scores minimally.
+;   bit   32  THE TRUNCATION IS A TRUNCATION: at k >= V, lu-entropy-topk IS lu-entropy, bit for bit.
+;             At k < V it is strictly smaller (mass was dropped and the rest renormalized).
+;   bit   64  THE AGGREGATE COMPOSES: the mean over the answer's own steps; the empty answer is
+;             refused (ok = 0, n = 0); one dead step among nine live ones poisons the whole answer;
+;             and a live answer's conf is exactly 1 - mean(H_32)/ln 32.
+;   bit  128  THE CALIBRATION, on real llama3.2:3b numbers. Three answered-and-correct prompts land
+;             ABOVE the threshold and two undetermined ones land BELOW, with the two class members
+;             NEAREST the boundary (Japan at H_32 1.276, the door continuation at 1.426) on their
+;             correct sides. The escalation predicate agrees with the ordering.
+;   bit  256  APORON, WITNESSED — decisiveness is not truth. The 137 x 249 run answered " 34287"
+;             (true: 34113) and its mean p(chosen) is 0.568, ABOVE the door continuation's 0.528 and
+;             far above the dog prompt's 0.406, both of which have no determined answer at all. The
+;             signal ranked a WRONG answer above two honest non-answers. That is not a defect in the
+;             measurement; it is what the measurement measures, and the band says so with numbers.
+;   bit  512  THE MARGIN DOES NOT SEPARATE, pinned from the same runs so the choice of signal is a
+;             record and not a preference: the top-1 margin of the tightest CORRECT prompt (Japan,
+;             1.324) is BELOW that of the tightest UNDETERMINED one (the door continuation, 1.507).
+;             The classes are inverted. The measurement rejected the signal one reaches for first.
+
+(do
+    ; ---- helpers -------------------------------------------------------------------------------
+    (defn lub-near? (a b tol) (if (lt (tn-abs (sub a b)) tol) 1 0))
+    ; a step built from a value the CARRIER measured (the real 128 256-wide vectors never fit here)
+    (defn lub-steps (es)
+      (if (eq (len es) 0) (empty)
+          (cons (lu-step-of 1 (head es) 0.0 0.0 0.0) (lub-steps (tail es)))))
+    ; entropy the DIRECT way: -sum p ln p, the definition the cheap identity has to equal
+    (defn lub-plnp (ps) (if (eq (len ps) 0) 0.0
+                            (add (mul (head ps) (loss-ln (head ps))) (lub-plnp (tail ps)))))
+    (defn lub-ent-direct (xs) (sub 0.0 (lub-plnp (tn-softmax xs))))
+
+    ; ---- claim 1: the top-2 walk ---------------------------------------------------------------
+    (let v1 (list 1.0 5.0 3.0 -2.0 4.0))            ; max 5.0 at index 1, second 4.0, one maximum
+    (let t1 (lu-top2 v1))
+    (let vtie (list 2.0 7.0 7.0 1.0))               ; two maxima: the argmax is a scan artifact
+    (let ttie (lu-top2 vtie))
+    (let cl1 (if (eq (nth t1 0) 1)
+                 (if (eq (nth t1 1) 5.0)
+                     (if (eq (nth t1 2) 4.0)
+                         (if (eq (nth t1 3) 1)
+                             (if (eq (nth ttie 3) 2)
+                                 (if (eq (lu-margin v1) 1.0) 1 0) 0) 0) 0) 0) 0))
+
+    ; ---- claim 2: p(chosen) is the body's own softmax at the argmax -----------------------------
+    (let sm (tn-softmax v1))
+    (let cl2 (if (eq (lub-near? (lu-p1 v1) (nth sm (lu-argmax v1)) 0.000000001) 1)
+                 (if (gt (lu-p1 v1) 0.0) (if (lt (lu-p1 v1) 1.0) 2 0) 0) 0))
+
+    ; ---- claim 4: the entropy identity ---------------------------------------------------------
+    (let v2 (list 0.5 -1.25 3.0 2.75 -0.5 1.0))
+    (let cl4 (if (eq (lub-near? (lu-entropy v1) (lub-ent-direct v1) 0.000000001) 1)
+                 (if (eq (lub-near? (lu-entropy v2) (lub-ent-direct v2) 0.000000001) 1) 4 0) 0))
+
+    ; ---- claim 8: bounds and ends --------------------------------------------------------------
+    (let vflat (list 0.0 0.0 0.0 0.0))              ; entropy exactly ln 4
+    (let vpeak (list 0.0 0.0 0.0 40.0))             ; one winner by 40 nats: entropy ~ 0
+    (let cl8 (if (eq (lub-near? (lu-entropy vflat) (loss-ln 4.0) 0.000000001) 1)
+                 (if (lt (lu-entropy vpeak) 0.0000000001)
+                     (if (ge (lu-entropy v2) 0.0) 8 0) 0) 0))
+
+    ; ---- claim 16: THE DEAD-FORWARD GUARD ------------------------------------------------------
+    (let vzero (list 0.0 0.0 0.0 0.0 0.0 0.0))      ; the zeroed pool
+    (let vconst (list 3.5 3.5 3.5 3.5))             ; an unrun dispatch's leftover fill
+    (let vshort (list 1.0))                         ; nothing to be second
+    (let szero (lu-step vzero))
+    (let sconst (lu-step vconst))
+    (let stie (lu-step vtie))
+    ; an answer of nine LIVE steps and one dead one — the dead one must poison it
+    (let poisoned (lu-answer (cons szero (lub-steps (list 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1 0.1)))))
+    (let epois (lu-escalate poisoned (lu-thr-conf) (lu-targets-none)))
+    (let cl16 (if (eq (lu-alive? vzero) 0)
+                  (if (eq (lu-alive? vconst) 0)
+                      (if (eq (lu-alive? vtie) 0)
+                          (if (eq (lu-alive? vshort) 0)
+                              (if (eq (lu-st-alive? szero) 0)
+                                  (if (eq (lu-st-alive? sconst) 0)
+                                      (if (eq (lu-st-alive? stie) 0)
+                                          ; the sentence that matters: NOT confident, minimally so
+                                          (if (eq (lu-ans-conf poisoned) 0.0)
+                                              (if (eq (lu-ans-ok? poisoned) 0)
+                                                  (if (eq (lu-esc? epois) 1)
+                                                      (if (eq (lu-esc-reason epois) 3) 16 0)
+                                                      0) 0) 0) 0) 0) 0) 0) 0) 0) 0))
+
+    ; ---- claim 32: the truncation is a truncation ----------------------------------------------
+    ; assocwall (corpus row 866): at k >= V the truncation walks the SAME entries in SORTED order,
+    ; so the two sums are the same quantity reached by a different summation order and the test is an
+    ; absolute bound, not an equality.
+    (let cl32 (if (eq (lub-near? (lu-entropy-topk v2 (len v2)) (lu-entropy v2) 0.000000000001) 1)
+                  (if (eq (lub-near? (lu-entropy-topk v2 99) (lu-entropy v2) 0.000000000001) 1)
+                      (if (lt (lu-entropy-topk v2 3) (lu-entropy v2))
+                          (if (ge (lu-entropy-topk v2 3) 0.0) 32 0) 0) 0) 0))
+
+    ; ---- claim 64: the aggregate composes ------------------------------------------------------
+    (let sempty (lu-answer (empty)))
+    (let three (lub-steps (list 1.0 2.0 3.0)))      ; mean 2.0
+    (let athree (lu-answer three))
+    (let cl64 (if (eq (lu-ans-ok? sempty) 0)
+                  (if (eq (lu-ans-n sempty) 0)
+                      (if (eq (lu-ans-ok? athree) 1)
+                          (if (eq (lu-ans-n athree) 3)
+                              (if (eq (lub-near? (lu-mean-entk three) 2.0 0.000000001) 1)
+                                  (if (eq (lub-near? (lu-ans-conf athree)
+                                                     (sub 1.0 (div 2.0 (loss-ln 32.0)))
+                                                     0.000000001) 1)
+                                      (if (eq (lu-ans-ndead poisoned) 1) 64 0) 0) 0) 0) 0) 0) 0))
+
+    ; ---- the REAL numbers: per-token top-32 entropy, measured off llama3.2:3b's own logit vectors
+    ;      by native/metal/metal_uncertainty.sh, over exactly the 10 decisions that produced the 10
+    ;      emitted tokens (the last prefill forward is the FIRST of them). ----------------------
+    ;   "The capital of France is"        -> " Paris. The capital of Italy is Rome. The"   CORRECT
+    (let e-france (list 1.549326 1.472580 2.519264 2.247335 0.172027
+                        2.645778 0.110812 0.303724 0.582388 1.008053))
+    ;   "The capital of Japan is"         -> " Tokyo, which is also the largest city in Japan"
+    ;   CORRECT (mean 1.234)
+    (let e-japan  (list 1.358190 1.677346 1.967046 0.705090 2.041175
+                        1.173393 1.426296 0.589825 0.544268 0.853309))
+    ;   "2 + 2 ="                         -> " 4\n2 + 2 = 4\n"   CORRECT, and the class member
+    ;   NEAREST the boundary from above (mean 1.27621170)
+    (let e-2plus2 (list 1.487531 1.215147 2.277279 2.865465 1.654253
+                        0.336813 0.675608 0.954673 0.517582 0.777766))
+    ;   "The tallest mountain in Bolivia is" -> " Sajama, which stands at 6,542"  CORRECT (6 542 m).
+    ;   snugcause: its FIRST answer token is " S" at entropy 3.876 — the model choosing how to BEGIN
+    ;   a proper noun it is sure of — which is exactly why the first-content-token rule was rejected.
+    (let e-boliv  (list 2.637071 0.128377 0.037060 1.303066 1.701566
+                        1.814760 0.191824 1.094278 0.252111 0.039851))
+    ;   "He opened the door and saw"      -> " a young woman with long, curly brown hair and"
+    ;   UNDETERMINED (a free continuation), and the class member NEAREST the boundary (mean 1.426)
+    (let e-door   (list 2.129610 2.881731 1.435866 1.915365 2.162226
+                        0.862198 1.378053 0.640487 0.009984 0.849120))
+    ;   "The capital of Zembla is"        -> " not known to the public. The country is a"
+    ;   UNDETERMINED (Zembla is fictional)
+    (let e-zembla (list 3.162263 3.019010 2.368297 1.950001 1.167597
+                        2.288186 2.583979 2.865813 2.060644 2.847196))
+
+    (let a-france (lu-answer (lub-steps e-france)))
+    (let a-japan  (lu-answer (lub-steps e-japan)))
+    (let a-2plus2 (lu-answer (lub-steps e-2plus2)))
+    (let a-boliv  (lu-answer (lub-steps e-boliv)))
+    (let a-door   (lu-answer (lub-steps e-door)))
+    (let a-zembla (lu-answer (lub-steps e-zembla)))
+    (let thr (lu-thr-conf))
+
+    ; ---- claim 128: the calibration ------------------------------------------------------------
+    (let cl128 (if (eq (lu-should-escalate? (lu-ans-conf a-france) thr) 0)
+                   (if (eq (lu-should-escalate? (lu-ans-conf a-japan) thr) 0)
+                     (if (eq (lu-should-escalate? (lu-ans-conf a-2plus2) thr) 0)
+                       (if (eq (lu-should-escalate? (lu-ans-conf a-boliv) thr) 0)
+                           (if (eq (lu-should-escalate? (lu-ans-conf a-door) thr) 1)
+                               (if (eq (lu-should-escalate? (lu-ans-conf a-zembla) thr) 1)
+                                   ; the two nearest the boundary, in order, on their own sides:
+                                   ; "2 + 2 =" at 1.27621170 above it, the door continuation at
+                                   ; 1.42646400 below it, and the threshold 1.351 between them.
+                                   (if (gt (lu-ans-conf a-2plus2) (lu-ans-conf a-door))
+                                       (if (eq (lub-near? (lu-mean-entk (lub-steps e-2plus2))
+                                                          1.27621170 0.0000001) 1)
+                                           (if (eq (lub-near? (lu-mean-entk (lub-steps e-door))
+                                                              1.42646400 0.0000001) 1)
+                                               ; and escalation names the LOCAL target, never a network
+                                               (if (eq (lu-esc-reason
+                                                         (lu-escalate a-zembla thr
+                                                           (list (lu-target-dsv4)))) 1)
+                                                   (if (eq (lu-esc-reason
+                                                             (lu-escalate a-zembla thr
+                                                               (lu-targets-none))) 2)
+                                                       128 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0))
+
+    ; ---- claim 256: APORON — decisiveness is not truth -----------------------------------------
+    ;   the per-token p(chosen) of three runs. The FIRST one is WRONG.
+    ;   "The product of 137 and 249 is" -> " 34287." — the true product is 34113.
+    (let p-wrong  (list 0.525543 0.280391 0.104158 0.433912 0.326794
+                        0.867600 0.992652 0.952402 0.237613 0.958760))
+    ;   "He opened the door and saw"    — UNDETERMINED, no answer to be right about
+    (let p-door   (list 0.229358 0.077820 0.427207 0.263541 0.310797
+                        0.808622 0.603783 0.795642 0.998784 0.768219))
+    ;   "My neighbour's dog is named"   — UNDETERMINED, unknowable
+    (let p-dog    (list 0.131000 0.548668 0.382982 0.379223 0.238550
+                        0.357421 0.280743 0.405438 0.829564 0.508321))
+    (let m-wrong (tn-mean p-wrong))
+    (let m-door  (tn-mean p-door))
+    (let m-dog   (tn-mean p-dog))
+    (let cl256 (if (gt m-wrong m-door)                    ; the WRONG answer is the more decisive one
+                   (if (gt m-wrong m-dog)
+                       (if (eq (lub-near? m-wrong 0.56798250 0.0000001) 1)
+                           (if (eq (lub-near? m-door 0.52837730 0.0000001) 1) 256 0) 0) 0) 0))
+
+    ; ---- claim 512: the margin does not separate -----------------------------------------------
+    (let g-japan (list 2.589321 0.068365 0.748320 2.473167 0.137096
+                       1.125938 0.754822 2.565510 2.634506 0.143110))   ; CORRECT
+    (let g-door  (list 0.185512 0.088770 0.331783 0.093008 0.258066
+                       2.628288 1.150490 1.517208 7.043610 1.775555))   ; UNDETERMINED
+    (let mg-japan (tn-mean g-japan))
+    (let mg-door  (tn-mean g-door))
+    (let cl512 (if (gt mg-door mg-japan)              ; INVERTED: the classes cross under the margin
+                   (if (eq (lub-near? mg-japan 1.32401550 0.0000001) 1)
+                       (if (eq (lub-near? mg-door 1.50722900 0.0000001) 1)
+                           ; while the CHOSEN signal keeps them apart on the same two runs
+                           (if (gt (lu-ans-conf a-japan) (lu-ans-conf a-door)) 512 0) 0) 0) 0))
+
+    (add cl1 (add cl2 (add cl4 (add cl8 (add cl16 (add cl32 (add cl64 (add cl128 (add cl256 cl512)))))))))
+)

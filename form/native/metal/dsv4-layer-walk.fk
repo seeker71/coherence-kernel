@@ -1,0 +1,884 @@
+; Parameterized live DS4 layer walk. Tensor descriptors come from
+; dsv4-live-plan.fk's one-pass GGUF walk; this recipe stores no addresses.
+;
+; This first admitted branch walks a direct-KV/token-table layer (layers 0/1).
+; The same descriptor interface is extended by the compressed-KV and biased
+; top-k branches rather than replaced.
+;
+; preludes: native/metal/dsv4-live-plan.fk native/metal/dsv4-jit-metal-abi.fk
+(do
+    (defn dlw-nums (xs)
+        (if (eq (len xs) 0) ""
+            (if (eq (len xs) 1) (int_to_str (head xs))
+                (str_concat (int_to_str (head xs))
+                    (str_concat " " (dlw-nums (tail xs)))))))
+    ; Full prefill creates thousands of inspectable receipts. Keep the live
+    ; framebuffer legible by emitting failures, compressor boundaries, and
+    ; final-prompt-position cache observations; every call still returns its
+    ; complete receipt to its caller.
+    (defn dlw-matches-any? (receipt patterns)
+        (if (eq (len patterns) 0) 0
+            (if (ge (str_find receipt (head patterns) 0) 0) 1
+                (dlw-matches-any? receipt (tail patterns)))))
+    (defn dlw-say (receipt)
+        (if (dlw-matches-any? receipt
+                (list "FAIL " "NOTHING " "PASS metal_model_moe" "boundary=1"
+                      "position=15\n" "position=31\n" "position=47\n"
+                      "position=63\n" "position=79\n" "position=95\n"
+                      "position=111\n" "position=115\n"))
+            (print_str receipt)
+            0))
+    (defn dlw-join-pairs (parts)
+        (if (eq (len parts) 0) (list)
+            (do
+                (let rest (tail parts))
+                (if (eq (len rest) 0) (list (head parts))
+                    (cons
+                        (str_concat (head parts) (head rest))
+                        (dlw-join-pairs (tail rest)))))))
+    (defn dlw-join-parts (parts)
+        (if (eq (len parts) 0) ""
+            (if (eq (len parts) 1) (head parts)
+                (dlw-join-parts (dlw-join-pairs parts)))))
+    (defn dlw-state (layer suffix)
+        (str_concat "layer" (str_concat (int_to_str layer) (str_concat "-" suffix))))
+    (defn dlw-mat-plan (d)
+        (dlw-nums (list (dlp-view d) (dlp-inner d) (dlp-bytes d) (dlp-d1 d) (dlp-d0 d))))
+    (defn dlw-f16-plan (d)
+        (dlw-nums (list (dlp-view d) (dlp-inner d) (dlp-d1 d) (dlp-d0 d))))
+    (defn dlw-rms-plan (d count)
+        (str_concat (dlw-nums (list (dlp-view d) (dlp-inner d) count)) " 0.000001"))
+    (defn dlw-rope-plan (compressed heads position sign)
+        (str_concat
+            (dlw-nums
+                (list heads 512 64 position
+                      (if (eq compressed 1) 160000 10000)))
+            (str_concat " "
+                (str_concat sign
+                    (if (eq compressed 1)
+                        " 1 16 65536 32 1"
+                        " 0 1 65536 32 1")))))
+
+    ; Crystallize the transaction text that does not vary by prompt position.
+    ; A position then joins 8 cached chunks with 4/5 copies of one position
+    ; string and, only for hash-routed layers, one token string.
+    (defn dlw-layer-transaction-chunks (plan)
+        (do
+            (let layer (nth plan 0))
+            (let snk (nth plan 10))
+            (let table (nth plan 18))
+            (let bias (nth plan 19))
+            (let gx (nth plan 20))
+            (let ux (nth plan 21))
+            (let dx (nth plan 22))
+            (let sg (nth plan 23))
+            (let su (nth plan 24))
+            (let sd (nth plan 25))
+            (let compressed (nth plan 26))
+            (let ratio (nth plan 27))
+            (let ack (nth plan 28))
+            (let acg (nth plan 29))
+            (let aca (nth plan 30))
+            (let acn (nth plan 31))
+            (let attn-split (nth plan 32))
+            (let attn-norm (nth plan 33))
+            (let q-proj (nth plan 34))
+            (let kv-norm (nth plan 35))
+            (let q-rope (nth plan 36))
+            (let ffn-split (nth plan 37))
+            (let ffn-norm-state (nth plan 38))
+            (let haf-plan (nth plan 39))
+            (let attn-hc-plan (nth plan 40))
+            (let an-plan (nth plan 41))
+            (let qa-plan (nth plan 42))
+            (let qan-plan (nth plan 43))
+            (let qb-plan (nth plan 44))
+            (let kv-plan (nth plan 45))
+            (let kvn-plan (nth plan 46))
+            (let oa-plan (nth plan 47))
+            (let ob-plan (nth plan 48))
+            (let hff-plan (nth plan 49))
+            (let ffn-hc-plan (nth plan 50))
+            (let fnorm-plan (nth plan 51))
+            (let router-plan (nth plan 52))
+            (let chunk0
+                (dlw-join-parts
+                    (list
+                        "f16_matvec\tdsv4-f16\tform_dsv4_f16_matvec\t" haf-plan "\n"
+                        "hc_split\tdsv4-hc\t" attn-hc-plan "\n"
+                        "state_save\t" attn-split "\n"
+                        "hc_reduce\tdsv4-hc\t4096 4\n"
+                        "rmsnorm\tdsv4-rms\t" an-plan "\n"
+                        "state_save\t" attn-norm "\n"
+                        "mx8_matvec\tdsv4-mx8\t" qa-plan "\n"
+                        "rmsnorm\tdsv4-rms\t" qan-plan "\n"
+                        "mx8_matvec\tdsv4-mx8\t" qb-plan "\n"
+                        "state_save\t" q-proj "\n"
+                        "state_load\t" attn-norm "\n"
+                        "mx8_matvec\tdsv4-mx8\t" kv-plan "\n"
+                        "rmsnorm\tdsv4-rms\t" kvn-plan "\n"
+                        "state_save\t" kv-norm "\n"
+                        "state_load\t" q-proj "\n"
+                        "rmsnorm\tdsv4-rms\t0 0 32768 0.000001 512\n"
+                        "rope\tdsv4-rope\t64 512 64 ")))
+            (let chunk1
+                (dlw-join-parts
+                    (list
+                        (if (eq compressed 1)
+                            " 160000 1 1 16 65536 32 1\n"
+                            " 10000 1 0 1 65536 32 1\n")
+                        "state_save\t" q-rope "\n"
+                        "state_load\t" kv-norm "\n"
+                        "rope\tdsv4-rope\t1 512 64 ")))
+            (let chunk2
+                (if (eq compressed 1)
+                    (dlw-join-parts
+                        (list
+                            " 160000 1 1 16 65536 32 1\n"
+                            "kv_round\tdsv4-kv-round\t512 64\n"
+                            "compress_stage\tdsv4-kv-cache dsv4-f16 dsv4-rms dsv4-rope dsv4-kv-round\t"
+                            attn-norm " " (int_to_str layer) " "))
+                    ""))
+            (let chunk3
+                (if (eq compressed 1)
+                    (dlw-join-parts
+                        (list
+                            " " (int_to_str ratio) " 256 "
+                            (int_to_str (dlp-view ack)) " " (int_to_str (dlp-inner ack)) " "
+                            (int_to_str (dlp-d1 ack)) " " (int_to_str (dlp-d0 ack)) " "
+                            (int_to_str (dlp-view acg)) " " (int_to_str (dlp-inner acg)) " "
+                            (int_to_str (dlp-d1 acg)) " " (int_to_str (dlp-d0 acg)) " "
+                            (int_to_str (dlp-view aca)) " " (int_to_str (dlp-inner aca)) " "
+                            (int_to_str (dlp-view acn)) " " (int_to_str (dlp-inner acn)) "\n"
+                            "cached_attention\tdsv4-kv-cache\t" q-rope " "
+                            (int_to_str layer) " "))
+                    ""))
+            (let chunk4
+                (if (eq compressed 1) ""
+                    (dlw-join-parts
+                        (list
+                            " 10000 1 0 1 65536 32 1\n"
+                            "kv_round\tdsv4-kv-round\t512 64\n"
+                            "cached_attention\tdsv4-kv-cache\t" q-rope " "
+                            (int_to_str layer) " "))))
+            (let chunk5
+                (dlw-join-parts
+                    (list
+                        " 256 " (int_to_str (dlp-view snk)) " "
+                        (int_to_str (dlp-inner snk))
+                        " 64 512 0.0441941738\n"
+                        "rope\tdsv4-rope\t64 512 64 ")))
+            (let route-prefix
+                (if (nothing? table)
+                    (dlw-join-parts
+                        (list
+                            "topk_route\tdsv4-topk\t"
+                            (int_to_str (dlp-view bias)) " "
+                            (int_to_str (dlp-inner bias))
+                            " 256 6 1.5 " (int_to_str (dlp-d2 gx)) "\n"))
+                    (dlw-join-parts
+                        (list
+                            "hash_route\tdsv4-route\t"
+                            (int_to_str (dlp-view table)) " "
+                            (int_to_str (dlp-inner table)) " "))))
+            (let post-route
+                (dlw-join-parts
+                    (list
+                        "state_load\t" ffn-norm-state "\n"
+                        "moe\tdsv4-mx4 dsv4-iq2 dsv4-moe dsv4-mx8\t"
+                        (int_to_str (dlp-view gx)) " " (int_to_str (dlp-inner gx))
+                        " " (int_to_str (dlp-stride gx))
+                        " " (int_to_str (dlp-inner ux)) " " (int_to_str (dlp-stride ux))
+                        " " (int_to_str (dlp-inner dx)) " " (int_to_str (dlp-stride dx))
+                        " " (int_to_str (dlp-inner sg)) " " (int_to_str (dlp-bytes sg))
+                        " " (int_to_str (dlp-inner su)) " " (int_to_str (dlp-bytes su))
+                        " " (int_to_str (dlp-inner sd)) " " (int_to_str (dlp-bytes sd))
+                        " 4096 2048 10 "
+                        (int_to_str (dlp-type gx)) " " (int_to_str (dlp-type dx))
+                        " " (int_to_str (dlp-d2 gx)) "\n"
+                        "hc_post\tdsv4-hc\t" ffn-split " 4096 4\n"
+                        "state_save\t" (dlw-state layer "output-streams") "\n")))
+            (let chunk6
+                (dlw-join-parts
+                    (list
+                        (if (eq compressed 1)
+                            " 160000 -1 1 16 65536 32 1\n"
+                            " 10000 -1 0 1 65536 32 1\n")
+                        "mx8_matvec\tdsv4-mx8\t" oa-plan "\n"
+                        "mx8_matvec\tdsv4-mx8\t" ob-plan "\n"
+                        "hc_post\tdsv4-hc\t" attn-split " 4096 4\n"
+                        "f16_matvec\tdsv4-f16\tform_dsv4_f16_matvec\t" hff-plan "\n"
+                        "hc_split\tdsv4-hc\t" ffn-hc-plan "\n"
+                        "state_save\t" ffn-split "\n"
+                        "hc_reduce\tdsv4-hc\t4096 4\n"
+                        "rmsnorm\tdsv4-rms\t" fnorm-plan "\n"
+                        "state_save\t" ffn-norm-state "\n"
+                        "f16_matvec\tdsv4-f16\tform_dsv4_f16_matvec\t" router-plan "\n"
+                        route-prefix)))
+            (let chunk7
+                (if (nothing? table)
+                    post-route
+                    (str_concat " 6 1.5 0.00006103515625\n" post-route)))
+            (list chunk0 chunk1 chunk2 chunk3 chunk4 chunk5 chunk6 chunk7)))
+
+    ; Descriptor lookup is a property of a layer, not of a prompt position.
+    ; Crystallize the immutable lookup result once, then reuse it for every
+    ; position in that layer.  The numbered fields intentionally stay plain
+    ; Form data so the plan remains inspectable and content-addressable.
+    (defn dlw-layer-plan (src descs layer)
+        (do
+            (let haf (dlp-weight descs layer "hc_attn_fn"))
+            (let has (dlp-weight descs layer "hc_attn_scale"))
+            (let hab (dlp-weight descs layer "hc_attn_base"))
+            (let an (dlp-weight descs layer "attn_norm"))
+            (let qa (dlp-weight descs layer "attn_q_a"))
+            (let qan (dlp-weight descs layer "attn_q_a_norm"))
+            (let qb (dlp-weight descs layer "attn_q_b"))
+            (let kv (dlp-weight descs layer "attn_kv"))
+            (let kvn (dlp-weight descs layer "attn_kv_a_norm"))
+            (let snk (dlp-weight descs layer "attn_sinks"))
+            (let oa (dlp-weight descs layer "attn_output_a"))
+            (let ob (dlp-weight descs layer "attn_output_b"))
+            (let hff (dlp-weight descs layer "hc_ffn_fn"))
+            (let hfs (dlp-weight descs layer "hc_ffn_scale"))
+            (let hfb (dlp-weight descs layer "hc_ffn_base"))
+            (let fnorm (dlp-weight descs layer "ffn_norm"))
+            (let router (dlp-weight descs layer "ffn_gate_inp"))
+            (let table (dlp-weight descs layer "ffn_gate_tid2eid"))
+            (let bias (dlp-bias descs layer "exp_probs_b"))
+            (let gx (dlp-weight descs layer "ffn_gate_exps"))
+            (let ux (dlp-weight descs layer "ffn_up_exps"))
+            (let dx (dlp-weight descs layer "ffn_down_exps"))
+            (let sg (dlp-weight descs layer "ffn_gate_shexp"))
+            (let su (dlp-weight descs layer "ffn_up_shexp"))
+            (let sd (dlp-weight descs layer "ffn_down_shexp"))
+            (let compressed
+                (if (nothing? (dlp-weight descs layer "attn_compressor_kv")) 0 1))
+            (let ratio (dlp-compress-ratio src layer))
+            (let ack (dlp-weight descs layer "attn_compressor_kv"))
+            (let acg (dlp-weight descs layer "attn_compressor_gate"))
+            (let aca (dlp-weight descs layer "attn_compressor_ape"))
+            (let acn (dlp-weight descs layer "attn_compressor_norm"))
+            (let attn-split (dlw-state layer "attention-hc-split"))
+            (let attn-norm (dlw-state layer "attention-normalized"))
+            (let q-proj (dlw-state layer "q-projected"))
+            (let kv-norm (dlw-state layer "kv-normalized"))
+            (let q-rope (dlw-state layer "q-rope"))
+            (let ffn-split (dlw-state layer "ffn-hc-split"))
+            (let ffn-norm-state (dlw-state layer "ffn-normalized"))
+            ; Materialize descriptor-derived carrier plans once per layer.
+            ; Prompt positions reuse these cells instead of rebuilding and
+            ; re-interning the same decimal strings for every token.
+            (let haf-plan (dlw-f16-plan haf))
+            (let attn-hc-plan
+                (str_concat
+                    (dlw-nums
+                        (list (dlp-view has) (dlp-inner has)
+                              (dlp-inner hab) 4 20))
+                    " 0.000001"))
+            (let an-plan (dlw-rms-plan an 4096))
+            (let qa-plan (dlw-mat-plan qa))
+            (let qan-plan (dlw-rms-plan qan 1024))
+            (let qb-plan (dlw-mat-plan qb))
+            (let kv-plan (dlw-mat-plan kv))
+            (let kvn-plan (dlw-rms-plan kvn 512))
+            (let oa-plan (str_concat (dlw-mat-plan oa) " 1024"))
+            (let ob-plan (dlw-mat-plan ob))
+            (let hff-plan (dlw-f16-plan hff))
+            (let ffn-hc-plan
+                (str_concat
+                    (dlw-nums
+                        (list (dlp-view hfs) (dlp-inner hfs)
+                              (dlp-inner hfb) 4 20))
+                    " 0.000001"))
+            (let fnorm-plan (dlw-rms-plan fnorm 4096))
+            (let router-plan (dlw-f16-plan router))
+            (let plan
+                (list layer
+                      haf has hab an qa qan qb kv kvn snk oa ob
+                      hff hfs hfb fnorm router table bias gx ux dx sg su sd
+                      compressed ratio ack acg aca acn
+                      attn-split attn-norm q-proj kv-norm q-rope
+                      ffn-split ffn-norm-state
+                      haf-plan attn-hc-plan an-plan qa-plan qan-plan qb-plan
+                      kv-plan kvn-plan oa-plan ob-plan hff-plan ffn-hc-plan
+                      fnorm-plan router-plan))
+            (append plan (dlw-layer-transaction-chunks plan))))
+
+    (defn dlw-direct-layer-plan-receipts (plan token position)
+        (do
+            (let layer (nth plan 0))
+            (let haf (nth plan 1))
+            (let has (nth plan 2))
+            (let hab (nth plan 3))
+            (let an (nth plan 4))
+            (let qa (nth plan 5))
+            (let qan (nth plan 6))
+            (let qb (nth plan 7))
+            (let kv (nth plan 8))
+            (let kvn (nth plan 9))
+            (let snk (nth plan 10))
+            (let oa (nth plan 11))
+            (let ob (nth plan 12))
+            (let hff (nth plan 13))
+            (let hfs (nth plan 14))
+            (let hfb (nth plan 15))
+            (let fnorm (nth plan 16))
+            (let router (nth plan 17))
+            (let table (nth plan 18))
+            (let bias (nth plan 19))
+            (let gx (nth plan 20))
+            (let ux (nth plan 21))
+            (let dx (nth plan 22))
+            (let sg (nth plan 23))
+            (let su (nth plan 24))
+            (let sd (nth plan 25))
+            (let compressed (nth plan 26))
+            (let ratio (nth plan 27))
+            (let ack (nth plan 28))
+            (let acg (nth plan 29))
+            (let aca (nth plan 30))
+            (let acn (nth plan 31))
+            (let attn-split (nth plan 32))
+            (let attn-norm (nth plan 33))
+            (let q-proj (nth plan 34))
+            (let kv-norm (nth plan 35))
+            (let q-rope (nth plan 36))
+            (let ffn-split (nth plan 37))
+            (let ffn-norm-state (nth plan 38))
+            (let haf-plan (nth plan 39))
+            (let attn-hc-plan (nth plan 40))
+            (let an-plan (nth plan 41))
+            (let qa-plan (nth plan 42))
+            (let qan-plan (nth plan 43))
+            (let qb-plan (nth plan 44))
+            (let kv-plan (nth plan 45))
+            (let kvn-plan (nth plan 46))
+            (let oa-plan (nth plan 47))
+            (let ob-plan (nth plan 48))
+            (let hff-plan (nth plan 49))
+            (let ffn-hc-plan (nth plan 50))
+            (let fnorm-plan (nth plan 51))
+            (let router-plan (nth plan 52))
+            (dlw-say (metal_model_f16_matvec "dsv4-f16" "form_dsv4_f16_matvec" haf-plan))
+            (dlw-say (metal_model_hc_split "dsv4-hc" attn-hc-plan))
+            (dlw-say (metal_model_state_save attn-split))
+            (dlw-say (metal_model_hc_reduce "dsv4-hc" "4096 4"))
+            (dlw-say (metal_model_rmsnorm "dsv4-rms" an-plan))
+            (dlw-say (metal_model_state_save attn-norm))
+            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" qa-plan))
+            (dlw-say (metal_model_rmsnorm "dsv4-rms" qan-plan))
+            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" qb-plan))
+            (dlw-say (metal_model_state_save q-proj))
+            (dlw-say (metal_model_state_load attn-norm))
+            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" kv-plan))
+            (dlw-say (metal_model_rmsnorm "dsv4-rms" kvn-plan))
+            (dlw-say (metal_model_state_save kv-norm))
+            (dlw-say (metal_model_state_load q-proj))
+            (dlw-say (metal_model_rmsnorm "dsv4-rms" "0 0 32768 0.000001 512"))
+            (dlw-say (metal_model_rope "dsv4-rope"
+                (dlw-rope-plan compressed 64 position "1")))
+            (dlw-say (metal_model_state_save q-rope))
+            (dlw-say (metal_model_state_load kv-norm))
+            (dlw-say (metal_model_rope "dsv4-rope"
+                (dlw-rope-plan compressed 1 position "1")))
+            (dlw-say (metal_model_kv_round "dsv4-kv-round" "512 64"))
+            (if (eq compressed 1)
+                (dlw-say (metal_model_compress_stage
+                    "dsv4-kv-cache dsv4-f16 dsv4-rms dsv4-rope dsv4-kv-round"
+                    (str_concat
+                        attn-norm
+                        (str_concat " "
+                            (dlw-nums
+                                (list layer position ratio 256
+                                      (dlp-view ack) (dlp-inner ack) (dlp-d1 ack) (dlp-d0 ack)
+                                      (dlp-view acg) (dlp-inner acg) (dlp-d1 acg) (dlp-d0 acg)
+                                      (dlp-view aca) (dlp-inner aca)
+                                      (dlp-view acn) (dlp-inner acn)))))))
+                0)
+            (dlw-say (metal_model_cached_attention "dsv4-kv-cache"
+                (str_concat q-rope
+                    (str_concat " " (str_concat
+                        (dlw-nums
+                            (list layer position 256
+                                  (dlp-view snk) (dlp-inner snk) 64 512))
+                        " 0.0441941738")))))
+            (dlw-say (metal_model_rope "dsv4-rope"
+                (dlw-rope-plan compressed 64 position "-1")))
+            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" oa-plan))
+            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" ob-plan))
+            (dlw-say (metal_model_hc_post "dsv4-hc"
+                (str_concat attn-split " 4096 4")))
+
+            (dlw-say (metal_model_f16_matvec "dsv4-f16" "form_dsv4_f16_matvec" hff-plan))
+            (dlw-say (metal_model_hc_split "dsv4-hc" ffn-hc-plan))
+            (dlw-say (metal_model_state_save ffn-split))
+            (dlw-say (metal_model_hc_reduce "dsv4-hc" "4096 4"))
+            (dlw-say (metal_model_rmsnorm "dsv4-rms" fnorm-plan))
+            (dlw-say (metal_model_state_save ffn-norm-state))
+            (dlw-say (metal_model_f16_matvec "dsv4-f16" "form_dsv4_f16_matvec" router-plan))
+            (if (nothing? table)
+                (dlw-say (metal_model_topk_route "dsv4-topk"
+                    (str_concat
+                        (dlw-nums (list (dlp-view bias) (dlp-inner bias) 256 6))
+                        (str_concat " 1.5 " (int_to_str (dlp-d2 gx))))))
+                (dlw-say (metal_model_hash_route "dsv4-route"
+                    (str_concat (dlw-nums (list (dlp-view table) (dlp-inner table) token 6))
+                                " 1.5 0.00006103515625"))))
+            (dlw-say (metal_model_state_load ffn-norm-state))
+            (dlw-say (metal_model_moe "dsv4-mx4 dsv4-iq2 dsv4-moe dsv4-mx8"
+                (str_concat
+                    (dlw-nums
+                        (list (dlp-view gx) (dlp-inner gx) (dlp-stride gx)
+                              (dlp-inner ux) (dlp-stride ux)
+                              (dlp-inner dx) (dlp-stride dx)
+                              (dlp-inner sg) (dlp-bytes sg)
+                              (dlp-inner su) (dlp-bytes su)
+                              (dlp-inner sd) (dlp-bytes sd)
+                              4096 2048))
+                    (str_concat " 10 "
+                        (dlw-nums (list (dlp-type gx) (dlp-type dx) (dlp-d2 gx)))))))
+            (dlw-say (metal_model_hc_post "dsv4-hc"
+                (str_concat ffn-split " 4096 4")))
+            (dlw-say (metal_model_state_save (dlw-state layer "output-streams")))
+            0))
+
+    ; The transaction carrier consumes a flat list of string fragments.  Keep
+    ; descriptor-derived plans as their existing interned cells and join them
+    ; only inside the Metal membrane: assembling lines with str_concat here
+    ; would recreate the O(steps) string-intern bottleneck this path removes.
+    ; The carrier preserves an indexed receipt for every step and stops on the
+    ; first non-PASS result, while one Form/Metal crossing replaces 39.
+    (defn dlw-direct-layer-plan-assembled (plan token position)
+        (do
+            (let layer (nth plan 0))
+            (let snk (nth plan 10))
+            (let table (nth plan 18))
+            (let bias (nth plan 19))
+            (let gx (nth plan 20))
+            (let ux (nth plan 21))
+            (let dx (nth plan 22))
+            (let sg (nth plan 23))
+            (let su (nth plan 24))
+            (let sd (nth plan 25))
+            (let compressed (nth plan 26))
+            (let ratio (nth plan 27))
+            (let ack (nth plan 28))
+            (let acg (nth plan 29))
+            (let aca (nth plan 30))
+            (let acn (nth plan 31))
+            (let attn-split (nth plan 32))
+            (let attn-norm (nth plan 33))
+            (let q-proj (nth plan 34))
+            (let kv-norm (nth plan 35))
+            (let q-rope (nth plan 36))
+            (let ffn-split (nth plan 37))
+            (let ffn-norm-state (nth plan 38))
+            (let haf-plan (nth plan 39))
+            (let attn-hc-plan (nth plan 40))
+            (let an-plan (nth plan 41))
+            (let qa-plan (nth plan 42))
+            (let qan-plan (nth plan 43))
+            (let qb-plan (nth plan 44))
+            (let kv-plan (nth plan 45))
+            (let kvn-plan (nth plan 46))
+            (let oa-plan (nth plan 47))
+            (let ob-plan (nth plan 48))
+            (let hff-plan (nth plan 49))
+            (let ffn-hc-plan (nth plan 50))
+            (let fnorm-plan (nth plan 51))
+            (let router-plan (nth plan 52))
+            (let pos (int_to_str position))
+            (let recipe-a
+                (list
+                    "f16_matvec\tdsv4-f16\tform_dsv4_f16_matvec\t" haf-plan "\n"
+                    "hc_split\tdsv4-hc\t" attn-hc-plan "\n"
+                    "state_save\t" attn-split "\n"
+                    "hc_reduce\tdsv4-hc\t4096 4\n"
+                    "rmsnorm\tdsv4-rms\t" an-plan "\n"
+                    "state_save\t" attn-norm "\n"
+                    "mx8_matvec\tdsv4-mx8\t" qa-plan "\n"
+                    "rmsnorm\tdsv4-rms\t" qan-plan "\n"
+                    "mx8_matvec\tdsv4-mx8\t" qb-plan "\n"
+                    "state_save\t" q-proj "\n"
+                    "state_load\t" attn-norm "\n"
+                    "mx8_matvec\tdsv4-mx8\t" kv-plan "\n"
+                    "rmsnorm\tdsv4-rms\t" kvn-plan "\n"
+                    "state_save\t" kv-norm "\n"
+                    "state_load\t" q-proj "\n"
+                    "rmsnorm\tdsv4-rms\t0 0 32768 0.000001 512\n"
+                    "rope\tdsv4-rope\t"
+                        (if (eq compressed 1) "64 512 64 " "64 512 64 ")
+                        pos
+                        (if (eq compressed 1)
+                            " 160000 1 1 16 65536 32 1\n"
+                            " 10000 1 0 1 65536 32 1\n")
+                    "state_save\t" q-rope "\n"
+                    "state_load\t" kv-norm "\n"
+                    "rope\tdsv4-rope\t1 512 64 " pos
+                        (if (eq compressed 1)
+                            " 160000 1 1 16 65536 32 1\n"
+                            " 10000 1 0 1 65536 32 1\n")
+                    "kv_round\tdsv4-kv-round\t512 64\n"))
+            (let recipe-compress
+                (if (eq compressed 1)
+                    (list
+                        "compress_stage\tdsv4-kv-cache dsv4-f16 dsv4-rms dsv4-rope dsv4-kv-round\t"
+                        attn-norm " "
+                        (int_to_str layer) " " pos " " (int_to_str ratio) " 256 "
+                        (int_to_str (dlp-view ack)) " " (int_to_str (dlp-inner ack)) " "
+                        (int_to_str (dlp-d1 ack)) " " (int_to_str (dlp-d0 ack)) " "
+                        (int_to_str (dlp-view acg)) " " (int_to_str (dlp-inner acg)) " "
+                        (int_to_str (dlp-d1 acg)) " " (int_to_str (dlp-d0 acg)) " "
+                        (int_to_str (dlp-view aca)) " " (int_to_str (dlp-inner aca)) " "
+                        (int_to_str (dlp-view acn)) " " (int_to_str (dlp-inner acn)) "\n")
+                    (list)))
+            (let recipe-b
+                (list
+                    "cached_attention\tdsv4-kv-cache\t" q-rope " "
+                        (int_to_str layer) " " pos " 256 "
+                        (int_to_str (dlp-view snk)) " " (int_to_str (dlp-inner snk))
+                        " 64 512 0.0441941738\n"
+                    "rope\tdsv4-rope\t"
+                        (if (eq compressed 1) "64 512 64 " "64 512 64 ")
+                        pos
+                        (if (eq compressed 1)
+                            " 160000 -1 1 16 65536 32 1\n"
+                            " 10000 -1 0 1 65536 32 1\n")
+                    "mx8_matvec\tdsv4-mx8\t" oa-plan "\n"
+                    "mx8_matvec\tdsv4-mx8\t" ob-plan "\n"
+                    "hc_post\tdsv4-hc\t" attn-split " 4096 4\n"
+                    "f16_matvec\tdsv4-f16\tform_dsv4_f16_matvec\t" hff-plan "\n"
+                    "hc_split\tdsv4-hc\t" ffn-hc-plan "\n"
+                    "state_save\t" ffn-split "\n"
+                    "hc_reduce\tdsv4-hc\t4096 4\n"
+                    "rmsnorm\tdsv4-rms\t" fnorm-plan "\n"
+                    "state_save\t" ffn-norm-state "\n"
+                    "f16_matvec\tdsv4-f16\tform_dsv4_f16_matvec\t" router-plan "\n"))
+            (let recipe-route
+                (if (nothing? table)
+                    (list
+                        "topk_route\tdsv4-topk\t"
+                        (int_to_str (dlp-view bias)) " " (int_to_str (dlp-inner bias))
+                        " 256 6 1.5 " (int_to_str (dlp-d2 gx)) "\n")
+                    (list
+                        "hash_route\tdsv4-route\t"
+                        (int_to_str (dlp-view table)) " " (int_to_str (dlp-inner table))
+                        " " (int_to_str token) " 6 1.5 0.00006103515625\n")))
+            (let recipe-c
+                (list
+                    "state_load\t" ffn-norm-state "\n"
+                    "moe\tdsv4-mx4 dsv4-iq2 dsv4-moe dsv4-mx8\t"
+                        (int_to_str (dlp-view gx)) " " (int_to_str (dlp-inner gx))
+                        " " (int_to_str (dlp-stride gx))
+                        " " (int_to_str (dlp-inner ux)) " " (int_to_str (dlp-stride ux))
+                        " " (int_to_str (dlp-inner dx)) " " (int_to_str (dlp-stride dx))
+                        " " (int_to_str (dlp-inner sg)) " " (int_to_str (dlp-bytes sg))
+                        " " (int_to_str (dlp-inner su)) " " (int_to_str (dlp-bytes su))
+                        " " (int_to_str (dlp-inner sd)) " " (int_to_str (dlp-bytes sd))
+                        " 4096 2048 10 "
+                        (int_to_str (dlp-type gx)) " " (int_to_str (dlp-type dx))
+                        " " (int_to_str (dlp-d2 gx)) "\n"
+                    "hc_post\tdsv4-hc\t" ffn-split " 4096 4\n"
+                    "state_save\t" (dlw-state layer "output-streams") "\n"))
+            (let recipe
+                (dlw-join-parts
+                    (append recipe-a
+                        (append recipe-compress
+                            (append recipe-b
+                                (append recipe-route recipe-c))))))
+            (let receipt (metal_model_transaction recipe))
+            (if (and (ge (str_find receipt "PASS metal_model_transaction" 0) 0)
+                    (lt (str_find receipt "FAIL " 0) 0))
+                1
+                (do
+                    (print_str receipt)
+                    (if (ge (str_find receipt "NOTHING " 0) 0)
+                        (nothing)
+                        0)))))
+
+    (defn dlw-layer-transaction-parts (plan token position)
+        (do
+            (let compressed (nth plan 26))
+            (let table (nth plan 18))
+            (let pos (int_to_str position))
+            (let token-part
+                (if (nothing? table) "" (int_to_str token)))
+            (let chunks
+                (if (eq compressed 1)
+                    (list
+                        (nth plan 53) pos
+                        (nth plan 54) pos
+                        (nth plan 55) pos
+                        (nth plan 56) pos
+                        (nth plan 58) pos
+                        (nth plan 59) token-part
+                        (nth plan 60))
+                    (list
+                        (nth plan 53) pos
+                        (nth plan 54) pos
+                        (nth plan 57) pos
+                        (nth plan 58) pos
+                        (nth plan 59) token-part
+                        (nth plan 60))))
+            chunks))
+
+    ; The native transaction membrane currently admits one string cell
+    ; exactly, while a multi-cell list is refused by the executable refusal
+    ; band below.  Keep the parts inspectable, then join them before execution
+    ; until that ABI seam is repaired without weakening fail-close.
+    (defn dlw-layer-transaction-recipe (plan token position)
+        (dlw-join-parts
+            (dlw-layer-transaction-parts plan token position)))
+
+    (defn dlw-transaction-status (receipt)
+        (if (and (ge (str_find receipt "PASS metal_model_transaction" 0) 0)
+                (lt (str_find receipt "FAIL " 0) 0))
+            1
+            (if (ge (str_find receipt "NOTHING " 0) 0)
+                (nothing)
+                0)))
+
+    (defn dlw-direct-layer-plan (plan token position)
+        (do
+            (let receipt
+                (metal_model_transaction
+                    (dlw-layer-transaction-recipe plan token position)))
+            (let status (dlw-transaction-status receipt))
+            (if (eq status 1) 1
+                (do
+                    (print_str receipt)
+                    status))))
+
+    ; Optional no-join transaction route.  `route` is recipe data resolved once
+    ; from the carrier path by dsv4-jit-metal-transaction-route; no executable
+    ; path is runtime law here.  The emitted controller revalidates the live
+    ; __TEXT identity before BLR on every call.  Status 2 maps back to Form's
+    ; explicit nothing; carrier mismatch and FAIL remain fail-closed at 0.
+    (defn dlw-direct-layer-plan-jit (route plan token position)
+        (if (lt (len route) 2) (nothing)
+            (do
+                (let status
+                    (dsv4-jit-metal-transaction-routed-parts
+                        route
+                        (dlw-layer-transaction-parts
+                            plan token position)))
+                (if (eq status 1) 1
+                    (if (eq status 2) (nothing) 0)))))
+
+    ; Prepared, not default while the current full-detail token witness runs.
+    ; PASS returns compact status to dlw-position-heartbeat; diagnostic outcomes
+    ; retain the complete dispatcher receipt.
+    (defn dlw-direct-layer-plan-jit-funnel
+        (route plan token position)
+        (if (lt (len route) 2) (nothing)
+            (do
+                (let status
+                    (dsv4-jit-metal-transaction-routed-parts-funnel
+                        route
+                        (dlw-layer-transaction-parts
+                            plan token position)))
+                (if (eq status 1) 1
+                    (if (eq status 2) (nothing) 0)))))
+
+    (defn dlw-direct-layer (src descs layer token position)
+        (dlw-direct-layer-plan (dlw-layer-plan src descs layer) token position))
+
+    (defn dlw-direct-layer-jit
+        (route src descs layer token position)
+        (dlw-direct-layer-plan-jit-funnel
+            route (dlw-layer-plan src descs layer) token position))
+
+    (defn dlw-live-direct-layer (layer token)
+        (do
+            (let src (eqr-of-file (dlp-model-path) 0 (gm-window)))
+            (let base (egg-data-base src (gm-alignment)))
+            (let descs (dlp-collect src base (egg-tinfo-start src) (egg-tensor-count src)))
+            (dlw-direct-layer src descs layer token 0)))
+
+    ; For the first generated position, every compressed layer still has one
+    ; raw KV row and no compressed row, and position-zero RoPE has zero phase.
+    ; Therefore the same arithmetic recipe is the exact first-token branch for
+    ; both descriptor-observed KV regimes. Later decode positions extend this
+    ; branch with persistent raw/compressed cache state.
+    (defn dlw-first-token-range (src descs layer end token)
+        (if (eq layer end) 0
+            (do
+                (dlw-direct-layer src descs layer token 0)
+                (dlw-first-token-range src descs (add layer 1) end token))))
+    (defn dlw-live-first-token-range (start end token)
+        (do
+            (let src (eqr-of-file (dlp-model-path) 0 (gm-window)))
+            (let base (egg-data-base src (gm-alignment)))
+            (let descs (dlp-collect src base (egg-tinfo-start src) (egg-tensor-count src)))
+            (dlw-first-token-range src descs start end token)))
+
+    (defn dlw-embed-token (descs token)
+        (do
+            (let emb (dlp-find descs "token_embd.weight"))
+            (let row-bytes (mul (dlp-d0 emb) 2))
+            (let row-base (add (dlp-inner emb) (mul token row-bytes)))
+            (dlw-say (metal_model_embed "dsv4-embed" "form_dsv4_embed_f16"
+                (dlw-nums (list (dlp-view emb) row-base (dlp-d0 emb)))))
+            (dlw-say (metal_model_hc_begin "dsv4-hc" "4096 4 0.000001"))
+            0))
+    (defn dlw-prompt-state (position)
+        (str_concat "prompt-position-" (int_to_str position)))
+    (defn dlw-position-heartbeat (layer position)
+        (if (eq (mod position 2) 1)
+            (print_str
+                (str_concat
+                    "PASS dsv4-prefill-heartbeat\nlayer="
+                    (str_concat (int_to_str layer)
+                        (str_concat "\nposition="
+                            (str_concat (int_to_str position)
+                                (str_concat
+                                    "\npositions-completed="
+                                    (str_concat (int_to_str (add position 1))
+                                        "\nnetwork=0\nremote=0\noutcome=success\nrewitness-offer=dsv4-prefill-heartbeat\n")))))))
+            0))
+    (defn dlw-two-position-two-layer (src descs token0 token1)
+        (do
+            (dlw-embed-token descs token0)
+            (dlw-say (metal_model_state_save (dlw-prompt-state 0)))
+            (dlw-embed-token descs token1)
+            (dlw-say (metal_model_state_save (dlw-prompt-state 1)))
+            (dlw-say (metal_model_state_load (dlw-prompt-state 0)))
+            (dlw-direct-layer src descs 0 token0 0)
+            (dlw-say (metal_model_state_save (dlw-prompt-state 0)))
+            (dlw-say (metal_model_state_load (dlw-prompt-state 1)))
+            (dlw-direct-layer src descs 0 token1 1)
+            (dlw-say (metal_model_state_save (dlw-prompt-state 1)))
+            (dlw-say (metal_model_state_load (dlw-prompt-state 0)))
+            (dlw-direct-layer src descs 1 token0 0)
+            (dlw-say (metal_model_state_save (dlw-prompt-state 0)))
+            (dlw-say (metal_model_state_load (dlw-prompt-state 1)))
+            (dlw-direct-layer src descs 1 token1 1)
+            (dlw-say (metal_model_state_save (dlw-prompt-state 1)))
+            0))
+    (defn dlw-live-two-position-two-layer (token0 token1)
+        (do
+            (let src (eqr-of-file (dlp-model-path) 0 (gm-window)))
+            (let base (egg-data-base src (gm-alignment)))
+            (let descs (dlp-collect src base (egg-tinfo-start src) (egg-tensor-count src)))
+            (dlw-two-position-two-layer src descs token0 token1)))
+    (defn dlw-init-prompt (descs ids position)
+        (if (eq (len ids) 0) 0
+            (do
+                (dlw-embed-token descs (head ids))
+                (dlw-say (metal_model_state_save (dlw-prompt-state position)))
+                (dlw-init-prompt descs (tail ids) (add position 1)))))
+    (defn dlw-layer-plan-positions (plan ids position)
+        (if (eq (len ids) 0) 1
+            (do
+                (dlw-say (metal_model_state_load (dlw-prompt-state position)))
+                (let passed (dlw-direct-layer-plan plan (head ids) position))
+                (if (nothing? passed) (nothing)
+                    (if (eq passed 1)
+                        (do
+                            (dlw-say (metal_model_state_save (dlw-prompt-state position)))
+                            (dlw-position-heartbeat (nth plan 0) position)
+                            (dlw-layer-plan-positions plan (tail ids) (add position 1)))
+                        0)))))
+    (defn dlw-layer-plan-positions-jit (route plan ids position)
+        (if (eq (len ids) 0) 1
+            (do
+                (dlw-say (metal_model_state_load (dlw-prompt-state position)))
+                (let passed
+                    (dlw-direct-layer-plan-jit-funnel
+                        route plan (head ids) position))
+                (if (nothing? passed) (nothing)
+                    (if (eq passed 1)
+                        (do
+                            (dlw-say (metal_model_state_save
+                                (dlw-prompt-state position)))
+                            (dlw-position-heartbeat (nth plan 0) position)
+                            (dlw-layer-plan-positions-jit
+                                route plan (tail ids) (add position 1)))
+                        0)))))
+    (defn dlw-layer-positions (src descs layer ids position)
+        (dlw-layer-plan-positions (dlw-layer-plan src descs layer) ids position))
+    (defn dlw-prefill-layers (src descs ids layer end)
+        (if (eq layer end) 1
+            (do
+                (let passed
+                    (dlw-layer-plan-positions
+                        (dlw-layer-plan src descs layer) ids 0))
+                (if (nothing? passed) (nothing)
+                    (if (eq passed 1)
+                        (dlw-prefill-layers src descs ids (add layer 1) end)
+                        0)))))
+    (defn dlw-prefill-layers-jit (route src descs ids layer end)
+        (if (eq layer end) 1
+            (do
+                (let passed
+                    (dlw-layer-plan-positions-jit
+                        route
+                        (dlw-layer-plan src descs layer)
+                        ids
+                        0))
+                (if (nothing? passed) (nothing)
+                    (if (eq passed 1)
+                        (dlw-prefill-layers-jit
+                            route src descs ids (add layer 1) end)
+                        0)))))
+    (defn dlw-live-prefill (ids end-layer)
+        (do
+            (let src (eqr-of-file (dlp-model-path) 0 (gm-window)))
+            (let base (egg-data-base src (gm-alignment)))
+            (let descs (dlp-collect src base (egg-tinfo-start src) (egg-tensor-count src)))
+            (dlw-init-prompt descs ids 0)
+            (dlw-prefill-layers src descs ids 0 end-layer)))
+    (defn dlw-decode-layers (src descs token position layer end)
+        (if (eq layer end) 1
+            (do
+                (let passed
+                    (dlw-direct-layer src descs layer token position))
+                (if (nothing? passed) (nothing)
+                    (if (eq passed 1)
+                        (dlw-decode-layers
+                            src descs token position (add layer 1) end)
+                        0)))))
+    (defn dlw-decode-layers-jit
+        (route src descs token position layer end)
+        (if (eq layer end) 1
+            (do
+                (let passed
+                    (dlw-direct-layer-jit
+                        route src descs layer token position))
+                (if (nothing? passed) (nothing)
+                    (if (eq passed 1)
+                        (dlw-decode-layers-jit
+                            route src descs token position
+                            (add layer 1) end)
+                        0)))))
+
+    (defn dlw-output-head (descs)
+        (do
+            (let ohf (dlp-find descs "output_hc_fn.weight"))
+            (let ohs (dlp-find descs "output_hc_scale.weight"))
+            (let ohb (dlp-find descs "output_hc_base.weight"))
+            (let onorm (dlp-find descs "output_norm.weight"))
+            (let ow (dlp-find descs "output.weight"))
+            (dlw-say
+                (metal_model_hc_output "dsv4-hc dsv4-f16"
+                    (str_concat
+                        (dlw-nums
+                            (list (dlp-view ohf) (dlp-inner ohf)
+                                  (dlp-view ohs) (dlp-inner ohs)
+                                  (dlp-view ohb) (dlp-inner ohb)
+                                  4 4096))
+                        " 0.000001")))
+            (dlw-say (metal_model_rmsnorm "dsv4-rms" (dlw-rms-plan onorm 4096)))
+            (dlw-say (metal_model_mx8_matvec "dsv4-mx8" (dlw-mat-plan ow)))
+            (let receipt
+                (metal_model_argmax "dsv4-output" (int_to_str (dlp-d1 ow))))
+            (dlw-say receipt)
+            receipt))
+    (defn dlw-live-output-head ()
+        (do
+            (let src (eqr-of-file (dlp-model-path) 0 (gm-window)))
+            (let base (egg-data-base src (gm-alignment)))
+            (let descs (dlp-collect src base (egg-tinfo-start src) (egg-tensor-count src)))
+            (dlw-output-head descs)))
+    0)

@@ -1,0 +1,260 @@
+; whisper-tiny-native-vocabulary.fk — bounded full Whisper vocabulary in Form.
+;
+; The released tied token embedding is 51,865 x 384 f32 values (79,664,640
+; bytes). Loading that carrier as one string exhausted earlier large-carrier
+; paths, so this organ reads 64 rows at a time and retains only the best and
+; runner-up logits. Every row is still scored; the bound is memory, not scope.
+;
+; This is a full-vocabulary projection/search carrier, not recognition. A real
+; transcript requires all decoder blocks, repeated generated positions,
+; suppression rules, token decoding, and agreement with the human recording.
+; witnessed: 2026-07-20 -> 51,865 released tied rows addressable and streamable
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk model/whisper-tiny-native-decoder.fk
+
+(do
+  (defn wtv-path ()
+    (str_concat (wtc-root) "decoder-token-embedding-51865.f32"))
+  (defn wtv-vocab-path () (str_concat (wtc-root) "vocab.json"))
+  (defn wtv-merges-path () (str_concat (wtc-root) "merges.txt"))
+  (defn wtv-tokenizer-config-path ()
+    (str_concat (wtc-root) "tokenizer-config.json"))
+  (defn wtv-generation-config-path ()
+    (str_concat (wtc-root) "generation-config.json"))
+  (defn wtv-position-path ()
+    (str_concat (wtc-root) "decoder-position-448.f32"))
+  (defn wtv-count () 51865)
+  (defn wtv-width () 384)
+  (defn wtv-row-bytes () 1536)
+  (defn wtv-byte-count () 79664640)
+  (defn wtv-window-rows () 64)
+  (defn wtv-start-of-transcript () 50258)
+  (defn wtv-english () 50259)
+  (defn wtv-transcribe () 50359)
+  (defn wtv-no-timestamps () 50363)
+  (defn wtv-prompt-ids ()
+    (list (wtv-start-of-transcript) (wtv-english)
+      (wtv-transcribe) (wtv-no-timestamps)))
+  ; Exact released vocabulary rows for byte-level tokens `Ġbook` and `book`.
+  (defn wtv-book-token-candidates () (list 1446 2939))
+
+  (defn wtv-artifacts-present? ()
+    (and (eq (fs-stat-size (wtv-path)) (wtv-byte-count))
+      (and (eq (fs-stat-size (wtv-vocab-path)) 835550)
+        (and (eq (fs-stat-size (wtv-merges-path)) 493869)
+          (and (eq (fs-stat-size (wtv-tokenizer-config-path)) 282683)
+               (eq (fs-stat-size (wtv-generation-config-path)) 3747))))))
+  (defn wtv-position-count () 448)
+  (defn wtv-position-row (position)
+    (fs-read-slice (wtv-position-path) (mul position (wtv-row-bytes))
+      (wtv-row-bytes)))
+  (defn wtv-row (token-id)
+    (fs-read-slice (wtv-path) (mul token-id (wtv-row-bytes))
+      (wtv-row-bytes)))
+  (defn wtv-row-vector (token-id)
+    (lbpt-f32-list (wtv-row token-id) 0 (wtv-width)))
+  (defn wtv-logit-row (row state)
+    (wte0-dot-bytes row 0 state 0.0))
+  (defn wtv-logit (token-id state)
+    (wtv-logit-row (wtv-row token-id) state))
+
+  ; scan = best-id, best-logit, second-id, second-logit, rows-scored.
+  (defn wtv-scan-update (scan token-id value)
+    (if (gt value (nth scan 1))
+      (list token-id value (nth scan 0) (nth scan 1) (add (nth scan 4) 1))
+      (if (gt value (nth scan 3))
+        (list (nth scan 0) (nth scan 1) token-id value (add (nth scan 4) 1))
+        (list (nth scan 0) (nth scan 1) (nth scan 2) (nth scan 3)
+          (add (nth scan 4) 1)))))
+  (defn wtv-scan-skip (scan)
+    (list (nth scan 0) (nth scan 1) (nth scan 2) (nth scan 3)
+      (add (nth scan 4) 1)))
+  (defn wtv-window-scan (carrier local-row rows global-row state scan)
+    (if (eq local-row rows) scan
+      (wtv-window-scan carrier (add local-row 1) rows (add global-row 1)
+        state (wtv-scan-update scan global-row
+          (wte0-dot-bytes carrier (mul local-row (wtv-row-bytes)) state 0.0)))))
+  (defn wtv-window-count (start)
+    (if (gt (add start (wtv-window-rows)) (wtv-count))
+      (sub (wtv-count) start) (wtv-window-rows)))
+  (defn wtv-scan-go (start state scan)
+    (if (ge start (wtv-count)) scan
+      (do
+        (let rows (wtv-window-count start))
+        (let carrier (fs-read-slice (wtv-path)
+          (mul start (wtv-row-bytes)) (mul rows (wtv-row-bytes))))
+        (if (eq (str_len carrier) (mul rows (wtv-row-bytes)))
+          (wtv-scan-go (add start rows) state
+            (wtv-window-scan carrier 0 rows start state scan))
+          (list -1 0.0 -1 0.0 (nth scan 4))))))
+  (defn wtv-scan (state)
+    (if (eq (len state) (wtv-width))
+      (wtv-scan-go 0 state (list -1 -1000000000.0 -1 -1000000000.0 0))
+      (list -1 0.0 -1 0.0 0)))
+  (defn wtv-margin (scan) (sub (nth scan 1) (nth scan 3)))
+
+  ; Exact generation_config.json policy at the pinned revision.
+  (defn wtv-begin-suppress-tokens () (list 220 50257))
+  (defn wtv-suppress-tokens ()
+    (list 1 2 7 8 9 10 14 25 26 27 28 29 31 58 59 60 61 62 63
+      90 91 92 93 359 503 522 542 873 893 902 918 922 931 1350
+      1853 1982 2460 2627 3246 3253 3268 3536 3846 3961 4183
+      4667 6585 6647 7273 9061 9383 10428 10929 11938 12033
+      12331 12562 13793 14157 14635 15265 15618 16553 16604
+      18362 18956 20075 21675 22520 26130 26161 26435 28279
+      29464 31650 32302 32470 36865 42863 47425 49870 50254
+      50258 50358 50359 50360 50361 50362))
+  (defn wtv-id-member? (token-id ids)
+    (if (eq (len ids) 0) 0
+      (if (eq token-id (head ids)) 1
+        (wtv-id-member? token-id (tail ids)))))
+  (defn wtv-token-allowed-in? (token-id generated-count suppress begin-suppress)
+    (if (eq (wtv-id-member? token-id suppress) 1) 0
+      (if (and (eq generated-count 0)
+            (eq (wtv-id-member? token-id begin-suppress) 1)) 0
+        ; Prompt contains <|notimestamps|>: all timestamp ids are disallowed.
+        (if (ge token-id 50364) 0 1))))
+  (defn wtv-token-allowed? (token-id generated-count)
+    (wtv-token-allowed-in? token-id generated-count
+      (wtv-suppress-tokens) (wtv-begin-suppress-tokens)))
+  (defn wtv-window-scan-policy
+    (carrier local-row rows global-row state generated-count suppress begin-suppress scan)
+    (if (eq local-row rows) scan
+      (wtv-window-scan-policy carrier (add local-row 1) rows
+        (add global-row 1) state generated-count suppress begin-suppress
+        (if (eq (wtv-token-allowed-in? global-row generated-count
+              suppress begin-suppress) 1)
+          (wtv-scan-update scan global-row
+            (wte0-dot-bytes carrier (mul local-row (wtv-row-bytes)) state 0.0))
+          (wtv-scan-skip scan)))))
+  (defn wtv-scan-policy-go
+    (start state generated-count suppress begin-suppress scan)
+    (if (ge start (wtv-count)) scan
+      (do
+        (let rows (wtv-window-count start))
+        (let carrier (fs-read-slice (wtv-path)
+          (mul start (wtv-row-bytes)) (mul rows (wtv-row-bytes))))
+        (if (eq (str_len carrier) (mul rows (wtv-row-bytes)))
+          (wtv-scan-policy-go (add start rows) state generated-count
+            suppress begin-suppress
+            (wtv-window-scan-policy carrier 0 rows start state generated-count
+              suppress begin-suppress scan))
+          (list -1 0.0 -1 0.0 (nth scan 4))))))
+  (defn wtv-scan-policy (state generated-count)
+    (if (eq (len state) (wtv-width))
+      (wtv-scan-policy-go 0 state generated-count
+        (wtv-suppress-tokens) (wtv-begin-suppress-tokens)
+        (list -1 -1000000000.0 -1 -1000000000.0 0))
+      (list -1 0.0 -1 0.0 0)))
+
+  ; The pinned vocab is insertion-ordered id data. Locate the exact `":id,`
+  ; value and walk back to its key quote without parsing 51,865 nodes at once.
+  ; This returns the released byte-mapped token piece; a complete byte-symbol
+  ; inverse over arbitrary escaped keys remains part of tokenizer completion.
+  (defn wtv-key-start-go (s i)
+    (if (lt i 0) -1
+      (if (eq (str_byte_at s i) 34) (add i 1)
+        (wtv-key-start-go s (sub i 1)))))
+  (defn wtv-token-piece-in (vocab token-id)
+    (do
+      (let needle (str_concat "\":"
+        (str_concat (int_to_str token-id) ",")))
+      (let close (str_find vocab needle 0))
+      (if (lt close 0) ""
+        (do (let start (wtv-key-start-go vocab (sub close 1)))
+            (if (lt start 0) "" (substring vocab start close))))))
+  (defn wtv-special-token-piece-in (config token-id)
+    (do
+      (let id-mark (str_concat "\"" (str_concat (int_to_str token-id) "\"")))
+      (let at (str_find config id-mark 0))
+      (if (lt at 0) ""
+        (do
+          (let content-mark "\"content\": \"")
+          (let content-at (str_find config content-mark at))
+          (if (lt content-at 0) ""
+            (do
+              (let start (add content-at (str_len content-mark)))
+              (let finish (str_find config "\"" start))
+              (if (lt finish 0) "" (substring config start finish))))))))
+  (defn wtv-special-token-piece (token-id)
+    (wtv-special-token-piece-in
+      (fs-read-slice (wtv-tokenizer-config-path) 0 282683) token-id))
+  (defn wtv-token-piece (token-id)
+    (if (ge token-id 50257) (wtv-special-token-piece token-id)
+      (wtv-token-piece-in (fs-read-slice (wtv-vocab-path) 0 835550) token-id)))
+  ; Common GPT-2 byte symbol U+0120 (`Ġ`) is the reversible encoding of byte
+  ; 32. This makes ordinary word-start pieces directly readable. The complete
+  ; 256-symbol UTF-8 inverse is still owed for arbitrary multilingual pieces.
+  (defn wtv-token-text-from-piece (piece)
+    (if (and (ge (str_len piece) 2)
+          (and (eq (str_byte_at piece 0) 196) (eq (str_byte_at piece 1) 160)))
+      (str_concat " " (substring piece 2 (str_len piece))) piece))
+  (defn wtv-token-text (token-id)
+    (wtv-token-text-from-piece (wtv-token-piece token-id)))
+
+  ; Reuse the complete four-block decoder without changing its public result.
+  (defn wtv-final-state-file (path)
+    (do
+      (let decoder (wtd-infer-file path))
+      (let final (nth decoder 27))
+      (if (eq (len final) 4) (nth final 3) (empty))))
+
+  ; Arbitrary decoder sequence: full tied token rows + all 448 positions, then
+  ; the existing released four-block decoder organs. This is recomputation,
+  ; not a KV cache claim.
+  (defn wtv-embed-sequence-go (ids position out)
+    (if (eq (len ids) 0) (reverse out)
+      (wtv-embed-sequence-go (tail ids) (add position 1)
+        (cons (tb-vec-add (wtv-row-vector (head ids))
+                (lbpt-f32-list (wtv-position-row position) 0 (wtv-width))) out))))
+  (defn wtv-embed-sequence (ids) (wtv-embed-sequence-go ids 0 (empty)))
+  (defn wtv-state-sequence (encoder ids)
+    (do
+      (let pack0 (wtd0-load))
+      (let pack13 (wtd-load))
+      (let input (if (and (le (len ids) (wtv-position-count))
+            (and (eq (wtd0-valid? pack0) 1) (eq (wtd-valid? pack13) 1)))
+        (wtv-embed-sequence ids) (empty)))
+      (let layer0 (if (gt (len input) 0)
+        (wtd0-layer0 (wtd0-layer-carrier pack0) input encoder) (empty)))
+      (let out0 (if (eq (len layer0) 10) (nth layer0 0) (empty)))
+      (let layer1 (if (gt (len out0) 0)
+        (wtd-layer (wtd-carrier pack13) 0 out0 encoder) (empty)))
+      (let out1 (if (eq (len layer1) 10) (nth layer1 0) (empty)))
+      (let layer2 (if (gt (len out1) 0)
+        (wtd-layer (wtd-carrier pack13) (wtd-layer-byte-count) out1 encoder)
+        (empty)))
+      (let out2 (if (eq (len layer2) 10) (nth layer2 0) (empty)))
+      (let layer3 (if (gt (len out2) 0)
+        (wtd-layer (wtd-carrier pack13) (mul 2 (wtd-layer-byte-count))
+          out2 encoder) (empty)))
+      (let out3 (if (eq (len layer3) 10) (nth layer3 0) (empty)))
+      (let final (if (gt (len out3) 0)
+        (wte0-layernorm-seq (wtd0-layer-carrier pack0)
+          (wtd0-final-ln-weight-off) (wtd0-final-ln-bias-off) out3)
+        (empty)))
+      (if (gt (len final) 0) (nth final (sub (len final) 1)) (empty))))
+  (defn wtv-generated-step (encoder ids generated-count)
+    (do
+      (let state (wtv-state-sequence encoder ids))
+      (let scan (wtv-scan-policy state generated-count))
+      (list (nth scan 0) (wtv-token-text (nth scan 0))
+        (nth scan 1) (nth scan 2) (nth scan 3) (wtv-margin scan))))
+  (defn wtv-human-book-token-match? (step)
+    (if (or (str_eq (nth step 1) " book")
+            (str_eq (nth step 1) "book")) 1 0))
+  (defn wtv-scan-decoder-file (path)
+    (do
+      (let state (wtv-final-state-file path))
+      (let scan (wtv-scan state))
+      (let best-piece (if (ge (nth scan 0) 0)
+        (wtv-token-piece (nth scan 0)) ""))
+      (list "whisper-tiny-native-full-vocabulary"
+        "rows" (nth scan 4) "width" (wtv-width)
+        "best-token" (nth scan 0) "best-logit" (nth scan 1)
+        "runner-token" (nth scan 2) "runner-logit" (nth scan 3)
+        "margin" (wtv-margin scan)
+        "best-token-piece" best-piece
+        "book-token-candidates" (wtv-book-token-candidates)
+        "native-recognizer" 0
+        "floor" "one-full-decoder-step-no-autoregressive-transcript-claim")))
+  0)

@@ -1,0 +1,159 @@
+; moe-msl.fk — the four kernels a Mixture-of-Experts decode needs and a dense decode does not, as
+; Metal the BODY emits.
+;
+; WHY THESE FOUR, AND WHY NOT MORE. Stone 11's gap map (receipts/2026-07-21-ds4-metal-gap-map.md) laid
+; ds4-Metal's MoE surface beside ours and found the honest list is short — and shorter still once you
+; look at the model actually on this disk. ds4 carries a bitonic argsort
+; (`metal/argsort.metal:45,131`, threadgroup memory + barriers) because DeepSeek-V4 routes top-6 of
+; 256 experts. dolphin-mixtral-8x22b routes **top-2 of 8**. Over eight floats a serial scan is EXACT,
+; needs no threadgroup memory, no barrier and no epsilon. Borrowing the sort would have been importing
+; a solution to a problem we do not have (`snugcause`), so this cell does not have one.
+;
+; What is left after that subtraction:
+;
+;   mm-route-msl     softmax over the router logits, top-k by serial scan, renormalize over the chosen.
+;                    ONE thread. The whole routing decision, and the only new *decision* in MoE.
+;   mm-f16mv-msl     an F16 matvec — the router gate `ffn_gate_inp` is F16 6144x8 and nothing else in
+;                    the body could read it. Reuses q6k_f16, the body's one f16 decode.
+;   mm-scale-msl     y = a*x, and
+;   mm-axpy-msl      y = y + a*x — the weighted sum of the chosen experts' outputs. `scale` for the
+;                    first chosen expert and `axpy` for the rest, so no buffer ever has to be zeroed by
+;                    the host: the accumulator is SET by the first term, never memset.
+;   mm-rope-msl      RoPE with NO frequency-factor divide.
+;
+; THE EXPERT GATHER IS NOT HERE, AND THAT IS THE FINDING. The gap map proposed adding an `ids` device
+; parameter and an `nb02` uniform to the matvec so the weight base is computed on device — a
+; transcription of ds4's `kernel_mul_mv_id` (`metal/moe.metal:3521-3597`), which is itself "a thin
+; wrapper, not new arithmetic". In a DECODE of one token, `nb02 * id` is a number the host already has
+; to know, because it is the host that binds the buffer. So the gather is closed by ARITHMETIC ON AN
+; OFFSET the carrier was already computing — `t.off + e * nb02` — and the matvec kernels are not
+; touched at all. Zero new MSL, zero epsilon movement, and the existing bit-exactness argument carries
+; unchanged because it is literally the same kernel on the same bytes. What it costs instead is a
+; ROUND TRIP: the routing ids must reach the host before the expert matvecs can be encoded, so the
+; per-token command buffer is cut once per layer. That cost is real, it is named in the receipt, and it
+; is a decode-only bargain — a PREFILL over many positions routes differently per position and would
+; want the device-side gather after all. Stated as a radius, not sold as a general answer.
+;
+; THE RADIUS THESE KERNELS SPEAK FOR:
+;   mm-route     ne <= 64 experts and nsel <= 8 chosen (the fixed-size thread-local arrays below; a
+;                larger router is WRONG here, not slow, so the carrier must check ne and nsel and the
+;                kernel returns without writing if they are exceeded). Softmax over ALL ne logits, then
+;                top-k, then renormalize over the chosen — llama.cpp's `norm_topk_prob` order, which is
+;                what Mixtral was trained with. Ties keep the EARLIER expert (strict `>`), the same
+;                rule ldm-argmax-msl keeps: a rule, not a race.
+;   mm-f16mv     little-endian F16, row-major, cols the fastest-varying axis (GGUF's own layout).
+;   mm-rope      models with NO `rope_freqs.weight` tensor. That is a fact READ from the tensor table
+;                (dolphin-mixtral has none; llama3.2:3b has one), never assumed — a carrier that
+;                dispatches this kernel for a model that HAS frequency factors would be silently wrong
+;                at every position past the low frequencies, which is exactly the failure
+;                ldm-rope-msl's comment names.
+;
+; THE SPINE. These kernels call `q6k_f16` (q6k-msl.fk) and `fexp` (jte-llama-helpers, via
+; llama-decode-msl.fk). Both must already be in the translation unit; this cell emits NO spine of its
+; own, so it is always an APPENDIX and can never double-define anything.
+;
+; Kin: q6k-msl.fk (q6k_f16 — the f16 decode reached a fifth time), llama-decode-msl.fk (ldm-rope-msl,
+; whose text mm-rope-msl is minus one divide; ldm-argmax-msl, whose tie rule mm-route-msl keeps),
+; q8-0-msl.fk (the other half of what dolphin-mixtral needs), moe-numerics.fk is NOT a thing — the
+; routing meaning read back into Form lives in the `mm-route-*` recipes right here, so the band can
+; falsify it without a GPU.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/transformer-numerics.fk
+;
+; Proven by: form-stdlib/tests/moe-msl-band.fk (the routing meaning, read back into Form and checked
+;            against hand-pinned answers) and form/native/metal/metal_moe_token.sh (the GPU, Mac-only).
+
+(do
+    ; ================= the routing meaning, read back into Form =================
+    ; This is what mm-route-msl computes, in Form, with the same order of operations: max-subtract
+    ; softmax over ALL experts, then top-k by a scan that keeps the earlier index on a tie, then a
+    ; renormalization over the chosen probabilities only. It exists so a band can falsify the
+    ; transcription without a GPU.
+
+    (defn mm-max (xs best) (if (eq (len xs) 0) best (mm-max (tail xs) (if (gt (head xs) best) (head xs) best))))
+    (defn mm-exps (xs mx) (if (eq (len xs) 0) (list) (cons (tn-exp (sub (head xs) mx)) (mm-exps (tail xs) mx))))
+    (defn mm-sum (xs acc) (if (eq (len xs) 0) acc (mm-sum (tail xs) (add acc (head xs)))))
+    (defn mm-scaleall (xs a) (if (eq (len xs) 0) (list) (cons (mul (head xs) a) (mm-scaleall (tail xs) a))))
+    (defn mm-softmax (xs)
+        (do
+            (let e (mm-exps xs (mm-max (tail xs) (head xs))))
+            (mm-scaleall e (div 1.0 (mm-sum e 0.0)))))
+
+    ; the index of the largest entry NOT already taken. `taken` is a list of indices; strict `>` keeps
+    ; the earlier index on a tie.
+    (defn mm-memq (x xs) (if (eq (len xs) 0) 0 (if (eq (head xs) x) 1 (mm-memq x (tail xs)))))
+    (defn mm-argmax-free (ps i n taken best bv)
+        (if (ge i n) best
+            (if (eq (mm-memq i taken) 1)
+                (mm-argmax-free ps (add i 1) n taken best bv)
+                (if (if (eq best (sub 0 1)) 1 (if (gt (nth ps i) bv) 1 0))
+                    (mm-argmax-free ps (add i 1) n taken i (nth ps i))
+                    (mm-argmax-free ps (add i 1) n taken best bv)))))
+    (defn mm-topk-loop (ps n k taken)
+        (if (eq k 0) (reverse taken)
+            (mm-topk-loop ps n (sub k 1) (cons (mm-argmax-free ps 0 n taken (sub 0 1) 0.0) taken))))
+    ; NOTE the reverse: `taken` is built head-first, so the chosen order is restored at the end. The
+    ; SELECTION is order-independent, but the ids the carrier binds are not, and a receipt that names
+    ; "expert 3 then expert 5" must mean the same thing the kernel meant.
+    (defn mm-topk (ps n k) (mm-topk-loop ps n k (list)))
+    (defn mm-gather (ps ids) (if (eq (len ids) 0) (list) (cons (nth ps (head ids)) (mm-gather ps (tail ids)))))
+    (defn mm-route-weights (logits n k)
+        (do
+            (let ps (mm-softmax logits))
+            (let ids (mm-topk ps n k))
+            (let w (mm-gather ps ids))
+            (mm-scaleall w (div 1.0 (mm-sum w 0.0)))))
+    (defn mm-route-ids (logits n k) (mm-topk (mm-softmax logits) n k))
+
+    ; ================= the emitted MSL =================
+
+    ; --- the router. ONE thread. Softmax over all ne logits (max-subtract, the same shape
+    ; ldm-attn-msl's softmax keeps), top-k by a scan that keeps the earlier index on a tie, then a
+    ; renormalization over the chosen. ne > 64 or nsel > 8 writes NOTHING — a fixed-size array silently
+    ; overrun is the aporon error with a stack trace, so the kernel refuses instead. ---
+    (defn mm-route-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* logits [[buffer(0)]], device uint* ids [[buffer(1)]], device float* wts [[buffer(2)]], constant uint& ne [[buffer(3)]], constant uint& nsel [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; if (ne > 64u) return; if (nsel > 8u) return; if (nsel > ne) return; float p[64]; float taken[64]; float mx = logits[0]; uint i = 1u; while (i < ne) { if (logits[i] > mx) { mx = logits[i]; } i += 1u; } float s = 0.0f; i = 0u; while (i < ne) { float e = fexp(logits[i] - mx); p[i] = e; taken[i] = 0.0f; s = s + e; i += 1u; } float inv = 1.0f / s; i = 0u; while (i < ne) { p[i] = p[i] * inv; i += 1u; } float wsum = 0.0f; uint k = 0u; while (k < nsel) { uint best = ne; float bv = -1.0f; i = 0u; while (i < ne) { if (taken[i] == 0.0f) { if (p[i] > bv) { bv = p[i]; best = i; } } i += 1u; } taken[best] = 1.0f; ids[k] = best; wts[k] = bv; wsum = wsum + bv; k += 1u; } float winv = 1.0f / wsum; k = 0u; while (k < nsel) { wts[k] = wts[k] * winv; k += 1u; } }")))
+
+    ; --- an F16 matvec off the resident buffer. The router gate is the only F16 tensor a Mixtral
+    ; decode reads, and it is 6144x8 = 48 K weights; the fused shape is kept anyway so the f32 gate is
+    ; never materialized either. j counts DOWN, `p + acc` — tb-dot's right fold, the same order every
+    ; other matvec in the body folds in, so one epsilon argument covers all of them. ---
+    (defn mm-f16mv-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; uint b = (uint(i) * cols + j) * 2u; float w = q6k_f16(int(qb[b]) + 256 * int(qb[b + 1u])); float p = w * float(x[j]); acc = p + acc; } y[i] = acc; }")))
+
+    ; --- y = a*x. The FIRST chosen expert's contribution, which SETS the accumulator. ---
+    (defn mm-scale-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant float& a [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; y[i] = a * x[i]; }")))
+
+    ; --- y = y + a*x. Every chosen expert after the first. Written as two statements through a named
+    ; temporary so no fma contraction can quietly change the association (the harness compiles with
+    ; -ffp-contract=off as well; belt and braces, because the belt is a compiler flag). ---
+    (defn mm-axpy-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant float& a [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float p = a * x[i]; y[i] = y[i] + p; }")))
+
+    ; --- RoPE with no frequency factors: theta = pos * base^(-i/hd). ldm-rope-msl's text with the
+    ; `/ fr[i/2u]` divide removed and the `fr` buffer gone with it. Adjacent pairs (i, i+1), ggml mode
+    ; 0, exactly as there. ---
+    (defn mm-rope-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* v [[buffer(0)]], constant uint& nh [[buffer(1)]], constant uint& hd [[buffer(2)]], constant uint& pos [[buffer(3)]], constant float& base [[buffer(4)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint o = h * hd; uint i = 0; while (i + 1u < hd) { float ex = (-1.0f * float(i)) / float(hd); float fq = fpow(base, ex); float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + i]; float q1 = v[o + i + 1u]; float t0 = q0 * ca; float t1 = q1 * sa; v[o + i] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; v[o + i + 1u] = t2 + t3; i += 2u; } }")))
+
+    ; --- the appendix a carrier appends to a unit that already carries q6k-msl.fk's spine (for
+    ; q6k_f16) and llama-decode-msl.fk's spine (for fexp/fpow/fsin/fcos). NEVER a unit of its own. ---
+    (defn mm-msl-appendix ()
+        (str_concat (mm-route-msl "form_moe_route_f32")
+        (str_concat (mm-f16mv-msl "form_f16_matvec_f32")
+        (str_concat (mm-scale-msl "form_scale_f32")
+        (str_concat (mm-axpy-msl  "form_axpy_f32")
+                    (mm-rope-msl  "form_rope_plain_f32"))))))
+
+    0)

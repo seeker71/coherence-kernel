@@ -1,0 +1,20 @@
+; Form-owned Metal sources for the real-dimension DS4 routed/shared MoE.
+; The host carrier only binds content-addressed tensor slices and dispatches
+; these kernels; quantized arithmetic and the clamped SwiGLU recipe remain
+; emitted by Form.
+;
+; preludes: native/metal/legacy-print-compat.fk native/metal/dsv4-stack-real.fk
+(do
+    (defn dsv4-mx4-expert-source ()
+        (str_concat (qml-msl-header)
+            (mx4m-matvec-msl "form_dsv4_mx4_matvec")))
+
+    (defn dsv4-iq2-expert-source ()
+        (str_concat (qml-msl-header)
+            (str_concat (iq2m-msl-helpers)
+                "struct form_iq2_block { half d; ushort qs[32]; }; template<int nr0> static inline void form_dsv4_iq2_matvec_rows(device const uchar* qb, device const float* x, device float* y, uint rows, uint cols, uint gid, uint lane) { uint row0 = (gid / 32u) * uint(nr0); if (row0 >= rows) return; uint nb = cols / 256u; uint nb32 = nb * 8u; device const form_iq2_block* base = (device const form_iq2_block*)qb + row0 * nb; float yl[32]; float sums[nr0] = { 0.0f }; device const float* y32 = x + 32u * lane; for (uint ib32 = lane; ib32 < nb32; ib32 += 32u) { for (short j = 0; j < 32; ++j) yl[j] = y32[j]; uint blk = ib32 / 8u; uint sub = ib32 - blk * 8u; for (short rr = 0; rr < nr0; ++rr) { device const form_iq2_block* b = base + uint(rr) * nb + blk; device const ushort* q2 = b->qs + 4u * sub; device const uchar* aux8 = (device const uchar*)q2; uint aux = uint(q2[2]) | (uint(q2[3]) << 16u); float scale = float(b->d) * (0.5f + float(aux >> 28u)); float sum = 0.0f; for (short l = 0; l < 4; ++l) { constant const uchar* grid = iq2_grid + uint(aux8[l]) * 8u; uint signs = uint(iq2_ksigns[(aux >> uint(7 * l)) & 127u]); for (short j = 0; j < 8; ++j) sum += yl[8 * l + j] * float(grid[j]) * ((signs & (1u << uint(j))) ? -1.0f : 1.0f); } sums[rr] += scale * sum; } y32 += 1024u; } for (short rr = 0; rr < nr0 && row0 + uint(rr) < rows; ++rr) { float total = metal::simd_sum(sums[rr]); if (lane == 0u) y[row0 + uint(rr)] = total * 0.25f; } } kernel void form_dsv4_iq2_matvec (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { form_dsv4_iq2_matvec_rows<4>(qb, x, y, rows, cols, gid, lane); }")))
+
+    (defn dsv4-moe-fold-source () (dsv4-moe-msl-unit))
+    (defn dsv4-topk-route-source ()
+        (str_concat (dsv4-moe-msl-unit) (dsv4-topk-weights-body)))
+    0)

@@ -1,0 +1,242 @@
+; One Form-owned DS4 generation session: model open, Form-emitted Metal
+; libraries, layer-major prompt prefill, persistent-cache autoregressive
+; decode, native argmax token ids, and close.
+;
+; preludes: native/metal/dsv4-embed.fk native/metal/dsv4-f16-matvec.fk native/metal/dsv4-rmsnorm.fk native/metal/dsv4-mx8-matvec.fk native/metal/dsv4-rope.fk native/metal/dsv4-hash-route.fk native/metal/dsv4-moe-exec.fk native/metal/dsv4-kv-round.fk native/metal/dsv4-output.fk native/metal/dsv4-layer-walk.fk form-stdlib/dsv4-hc-msl.fk form-stdlib/dsv4-kv-cache.fk form-stdlib/dsv4-tokenizer.fk
+
+(do
+    ; Admission is a four-shape value, not a boolean:
+    ;   nothing = the port offered no observation
+    ;   0       = an observed failure receipt
+    ;   1       = an observed PASS receipt
+    ;   node    = the framebuffer event recorded by the caller
+    ; Keeping these shapes separate prevents an absent port, a failed compile,
+    ; and a valid zero token from collapsing onto the same integer.
+    (defn dns-receipt-state (receipt pass)
+        (if (not (lt (str_find receipt pass 0) 0)) 1
+            (if (not (lt (str_find receipt "NOTHING " 0) 0)) (nothing) 0)))
+
+    (defn dns-library-state (name source)
+        (do
+            (let receipt (metal_model_library name source))
+            (print_str receipt)
+            (dns-receipt-state receipt "PASS metal_model_library")))
+
+    (defn dns-admission-state (states)
+        (if (eq (len states) 0) 1
+            (if (nothing? (head states)) (nothing)
+                (if (eq (head states) 0) 0
+                    (dns-admission-state (tail states))))))
+
+    (defn dns-open ()
+        (do
+            (let opened (metal_model_open
+                (dlp-model-path)
+                (dlw-nums (list (dlp-view-step) (dlp-view-limit) 2))))
+            (print_str opened)
+            (let open-state (dns-receipt-state opened "PASS metal_model_open"))
+            (if (not (eq open-state 1)) open-state
+                (do
+                    (let state (dns-admission-state (list
+                        (dns-library-state "dsv4-embed" (dsv4-embed-source))
+                        (dns-library-state "dsv4-hc" (hc-msl-unit))
+                        (dns-library-state "dsv4-f16" (dsv4-f16-matvec-source))
+                        (dns-library-state "dsv4-rms" (dsv4-rmsnorm-source))
+                        (dns-library-state "dsv4-mx8" (dsv4-mx8-matvec-source))
+                        (dns-library-state "dsv4-rope" (dsv4-rope-source))
+                        (dns-library-state "dsv4-route" (dsv4-hash-route-source))
+                        (dns-library-state "dsv4-mx4" (dsv4-mx4-expert-source))
+                        (dns-library-state "dsv4-iq2" (dsv4-iq2-expert-source))
+                        (dns-library-state "dsv4-moe" (dsv4-moe-fold-source))
+                        (dns-library-state "dsv4-topk" (dsv4-topk-route-source))
+                        (dns-library-state "dsv4-kv-round" (dsv4-kv-round-source))
+                        (dns-library-state "dsv4-kv-cache" (dkv-msl-source))
+                        (dns-library-state "dsv4-output" (dsv4-argmax-source)))))
+                    (if (eq state 1) 1
+                        (do
+                            (print_str (metal_model_close))
+                            state))))))
+
+    (defn dns-token-id (receipt)
+        (do
+            (let prefix "token-id=")
+            (let at (str_find receipt prefix 0))
+            (if (lt at 0) (nothing)
+                (do
+                    (let start (add at (str_len prefix)))
+                    (let stop (str_find receipt "\n" start))
+                    (let end (if (lt stop 0) (str_len receipt) stop))
+                    (if (eq start end) (nothing)
+                        (str_to_int (substring receipt start end)))))))
+
+    ; One immutable framebuffer node per generated token.  The node carries
+    ; sequence, token id, and the byte-exact decoded fragment.  Text rendering
+    ; is only the human-facing side channel; token processing stays integer /
+    ; byte native and does not wait for a final assembled response string.
+    (defn dns-byte-nodes (bytes)
+        (if (eq (len bytes) 0) (list)
+            (cons (intern_trivial_int (head bytes))
+                  (dns-byte-nodes (tail bytes)))))
+
+    (defn dns-token-node (sequence token bytes)
+        (intern_node (make_nodeid 1 2 1912 1)
+            (cons (intern_trivial_int sequence)
+                (cons (intern_trivial_int token) (dns-byte-nodes bytes)))))
+
+    (defn dns-control-node (sequence kind)
+        (intern_node (make_nodeid 1 2 1913 1)
+            (list (intern_trivial_int sequence) (intern_trivial_int kind))))
+
+    (defn dns-record-token (src sequence token)
+        (do
+            (let bytes (tkz-decode-id-bytes src token))
+            (let fragment (tkz-render-acc bytes ""))
+            (let event (fb_record (dns-token-node sequence token bytes)
+                "form/native/metal/dsv4-native-session.fk"
+                (add (mul sequence 65536) 1)))
+            (print_str (str_concat "NATIVE stream-sequence=" (int_to_str sequence)))
+            (print_str (str_concat "NATIVE stream-token-id=" (int_to_str token)))
+            (print_str (str_concat "NATIVE stream-fragment=" fragment))
+            token))
+
+    ; kind: 1=stop/eos, 2=stop/cap, 3=nothing, 4=timeout, 5=observed fault.
+    ; Kind zero remains available as data rather than being used as absence.
+    ; Timeout is never
+    ; inferred from silence here: a caller that observes elapsed expiry must
+    ; explicitly offer dns-record-timeout.  Synchronous generation therefore
+    ; cannot accidentally rename a missing receipt as a timeout.
+    (defn dns-record-control (sequence kind label)
+        (do
+            (let event (fb_record (dns-control-node sequence kind)
+                "form/native/metal/dsv4-native-session.fk"
+                (add (mul sequence 65536) 2)))
+            (print_str (str_concat "NATIVE stream-control=" label))
+            kind))
+    (defn dns-record-timeout (sequence)
+        (dns-record-control sequence 4 "timeout"))
+
+    ; A stage admits later work only with the explicit integer 1.  Absence and
+    ; observed failure retain separate framebuffer controls and both stop the
+    ; causal chain before an output token can be selected from stale state.
+    (defn dns-stage-admit (sequence state nothing-label fault-label)
+        (if (nothing? state)
+            (do (dns-record-control sequence 3 nothing-label) 0)
+            (if (eq state 1) 1
+                (do (dns-record-control sequence 5 fault-label) 0))))
+
+    (defn dns-output-token (src descs sequence)
+        (do
+            (let receipt (dlw-output-head descs))
+            (let state (dns-receipt-state receipt "PASS metal_model_argmax"))
+            (if (nothing? state)
+                (do (dns-record-control sequence 3 "nothing:output-head") (nothing))
+                (if (eq state 0)
+                    (do (dns-record-control sequence 5 "fault:output-head") (nothing))
+                    (do
+                        (let token (dns-token-id receipt))
+                        (if (nothing? token)
+                            (do
+                                (dns-record-control sequence 5 "fault:token-receipt")
+                                (nothing))
+                            (dns-record-token src sequence token)))))))
+
+    (defn dns-decode-loop-route
+        (route use-jit src descs eos token position remaining sequence acc)
+        (do
+            (if (lt remaining 1)
+                (do (dns-record-control sequence 2 "stop:cap") acc)
+                (if (nothing? token) acc
+                (do
+                    (let next-acc (append acc (list token)))
+                    (if (eq token eos)
+                        (do (dns-record-control sequence 1 "stop:eos") next-acc)
+                        (if (eq remaining 1)
+                            (do (dns-record-control sequence 2 "stop:cap") next-acc)
+                            (do
+                                (dlw-embed-token descs token)
+                                (let decoded
+                                    (if (eq use-jit 1)
+                                        (dlw-decode-layers-jit
+                                            route src descs token position 0 43)
+                                        (dlw-decode-layers
+                                            src descs token position 0 43)))
+                                (if (eq
+                                        (dns-stage-admit (add sequence 1) decoded
+                                            "nothing:decode-layers"
+                                            "fault:decode-layers")
+                                        1)
+                                    (do
+                                        (let next
+                                            (dns-output-token
+                                                src descs (add sequence 1)))
+                                        (dns-decode-loop-route
+                                            route use-jit src descs eos next
+                                            (add position 1) (sub remaining 1)
+                                            (add sequence 1) next-acc))
+                                    next-acc)))))))))
+
+    (defn dns-decode-loop
+        (src descs eos token position remaining sequence acc)
+        (dns-decode-loop-route
+            (list) 0 src descs eos token position remaining sequence acc))
+
+    (defn dns-generate-ids-route (carrier use-jit ids n)
+        (do
+            (if (lt n 1)
+                (do (dns-record-control 0 2 "stop:cap") (list))
+                (if (eq (len ids) 0)
+                    (do (dns-record-control 0 5 "fault:empty-prompt") (list))
+                (do
+                    (let admitted (dns-open))
+                    (if (nothing? admitted)
+                        (do
+                            (dns-record-control 0 3 "nothing:model-open")
+                            (list))
+                        (if (eq admitted 0)
+                            (do
+                                (dns-record-control 0 5 "fault:model-admission")
+                                (list))
+                            (do
+                                (let src (eqr-of-file (dlp-model-path) 0 (gm-window)))
+                                (let base (egg-data-base src (gm-alignment)))
+                                (let descs (dlp-collect src base (egg-tinfo-start src) (egg-tensor-count src)))
+                                (let route
+                                    (if (eq use-jit 1)
+                                        (dsv4-jit-metal-transaction-route carrier)
+                                        (list)))
+                                (dlw-init-prompt descs ids 0)
+                                (let prefilled
+                                    (if (eq use-jit 1)
+                                        (dlw-prefill-layers-jit
+                                            route src descs ids 0 43)
+                                        (dlw-prefill-layers
+                                            src descs ids 0 43)))
+                                (if (eq
+                                        (dns-stage-admit 0 prefilled
+                                            "nothing:prefill-layers"
+                                            "fault:prefill-layers")
+                                        0)
+                                    (do
+                                        (print_str "NATIVE generated-count=0")
+                                        (print_str "NATIVE network=0 remote=0 shell=0 swift=0 temp=0")
+                                        (print_str (metal_model_close))
+                                        (list))
+                                    (do
+                                        (dlw-say (metal_model_state_load
+                                            (dlw-prompt-state (sub (len ids) 1))))
+                                        (let eos (gmt-u32 src "tokenizer.ggml.eos_token_id"))
+                                        (let first (dns-output-token src descs 0))
+                                        (let generated
+                                            (dns-decode-loop-route
+                                                route use-jit src descs eos first
+                                                (len ids) n 0 (list)))
+                                        (print_str (str_concat "NATIVE generated-count="
+                                            (int_to_str (len generated))))
+                                        (print_str "NATIVE network=0 remote=0 shell=0 swift=0 temp=0")
+                                        (print_str (metal_model_close))
+                                        generated))))))))))
+    (defn dns-generate-ids (ids n)
+        (dns-generate-ids-route "" 0 ids n))
+    (defn dns-generate-ids-jit (carrier ids n)
+        (dns-generate-ids-route carrier 1 ids n))
+    0)

@@ -68,6 +68,20 @@ C-bootstrapped runner is present, and it executes a real Form body cell through
 the direct source path. This is not file-only grounding and it does not use Go,
 flatten, or `T_flat`.
 
+## Verify the bidirectional diagnostic protocol
+
+After freshness and real grounding, a fast Form-native protocol check is:
+
+```sh
+./fkwu --src observe/tests/bidirectional-framebuffer-channel-band.fk
+```
+
+Its final field must be `1`. This checks correlated observation/control frames,
+state actuation, re-observation, and the explicit no-response alternative. The
+slower real-learning integration is documented in
+[`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md); it is not
+required for every checkout bootstrap.
+
 ## Verify Platform Membrane
 
 ```sh

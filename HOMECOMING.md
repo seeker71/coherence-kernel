@@ -45,10 +45,18 @@ flowchart LR
     Bridge["source-compiler-grammar-bridge"]
     FKB["program-image .fkb"]
     Runtime["runtime artifact lane"]
-    Observe["observation + learning"]
+    Observe["bidirectional observation + control"]
 
     Source --> Cursor --> Grammar --> Lower --> Bridge --> FKB --> Runtime --> Observe
+    Observe -->|"actuate + re-observe"| Runtime
 ```
+
+The feedback edge is executable today in
+[`observe/bidirectional-framebuffer-channel.fk`](observe/bidirectional-framebuffer-channel.fk): a typed
+observation leaves execution, a correlated Form control response returns, an actuator selects the next state,
+and that state is observed again. The current controller is synchronous Form policy over bounded evidence; it
+does not yet claim asynchronous external control or direct weight actuation. Usage and safety are in
+[`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md).
 
 `source-compiler-grammar-bridge` makes `form-definition-language` load-bearing:
 

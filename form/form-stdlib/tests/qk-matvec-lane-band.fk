@@ -1,0 +1,155 @@
+; preludes: form-stdlib/core.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk
+;
+; qk-matvec-lane-band — the lane partition, the hoist's arithmetic status, and the claim that the
+; existing epsilon already covers simd_sum. Proven without a GPU.
+;
+; qk-matvec-lane.fk emits kernels that (a) hoist a per-superblock constant out of the per-weight loop
+; and (b) hand a row's fold to 32 SIMD lanes reduced by metal::simd_sum. Three things can be wrong in
+; ways no GPU run would reveal, because each of them still produces a plausible number:
+;
+;   - THE LANE PARTITION. `nk = ceil((cols - lane)/32)` is an off-by-one waiting to happen at every
+;     width that is not a multiple of 32. Drop one column and the matvec is short by one weight's
+;     worth — well inside any epsilon anyone would think to name, and invisible in a token. So the
+;     partition is checked AS a partition: every column of [0,cols) is reached by exactly one
+;     (lane, step), counted and inverted, not inferred from two sums agreeing.
+;   - THE BOUND'S PROVENANCE. qk-matvec-lane.fk claims it needs NO new epsilon derivation, because
+;     its coefficient IS qms-bound-coeff at parts = 32. That is an equation, so it is checked as one
+;     at several widths rather than trusted as a paragraph. If it ever stops holding, the cell's
+;     central safety argument has silently become decoration.
+;   - THE HEADER. This is the first Metal unit in the body to emit `#include <metal_stdlib>`, and it
+;     is only admissible because it does NOT drag `using namespace metal;` in with it — with that
+;     line the body's own unqualified `round` becomes ambiguous and the unit does not compile.
+;     Witnessed, not predicted. Bit 128 pins the header to exactly the one include and nothing else,
+;     by LENGTH as well as prefix, so nothing can be appended to it unnoticed.
+;
+; And one thing must be TRUE for the epsilon to be worth naming at all: the lane split must actually
+; change results. Bit 8 exhibits a fixture where the lane fold and the plain right fold DISAGREE —
+; both correct fp64 foldings of the same numbers — because that difference is precisely what the
+; named bound bounds. A band that only showed them agreeing would prove the fixture blind.
+;
+; WHAT THIS BAND DOES NOT SPEAK FOR — its radius, and it is narrower than it looks.
+;   * It speaks for the PARTITION, the COVER, the bound's ARITHMETIC and the emitted TEXT's shape, in
+;     Form's fp64, on small fixtures.
+;   * It does NOT speak for metal::simd_sum's association. Metal does not specify that tree and this
+;     band cannot execute it. qml-reduce is ONE admissible tree, used only to exhibit reassociation;
+;     the SAFETY argument does not rest on it, and deliberately so — the bound is stated to cover
+;     every association of 32 terms, because any of them has depth at most 31 < 32.
+;   * It does NOT speak for the HOIST being bit-exact. That claim is about f32 rounding inside an
+;     emitted kernel and cannot be settled in Form: it is metal_first_token.sh's GATE 8b, which runs
+;     the hoisted kernel at parts=1 against the untouched attestant on all 3072 rows of a real
+;     llama3.2:3b 3072x8192 Q6_K tensor and demands bit-for-bit equality.
+;   * It does NOT speak for the MSL compiling, for the GPU, for f32, or for a token — gates 9b and 11.
+;   * It does NOT speak for any SIMD width other than 32 (qml-lanes). Bit 1 pins that constant so a
+;     later edit cannot widen it silently while the kernels still spell 32.
+;
+; Kin: qk-matvec-lane.fk (under test), qk-matvec-split.fk (qms-bound-coeff — the bound this reuses,
+; and the band shape this follows), qk-matvec-split-band.fk, q6k-msl.fk / q4k-msl.fk (the untouched
+; attestant the emitted kernels answer to on the GPU).
+;
+; Verdict 255 when the lane fold is honest:
+;   1   THE WIDTH IS NAMED           qml-lanes = 32, and the emitted kernels spell the same 32
+;   2   IT IS A COVER                sum over lanes of nk = cols, at five widths: multiples of 32,
+;                                    non-multiples, and cols < 32 (where high lanes get nk = 0)
+;   4   THE MAPPING IS A BIJECTION   every column j of [0,cols) is reached by exactly one (lane, k),
+;                                    checked by inverting jat and demanding k < nk
+;   8   REASSOCIATION IS REAL        on a catastrophic-cancellation fixture the lane fold and the
+;                                    plain right fold DISAGREE — which is why the epsilon exists
+;   16  THE BOUND IS ALREADY DERIVED qml-bound-coeff cols = qms-bound-coeff cols 32, at four widths
+;   32  THE BOUND DOMINATES BOTH     the coefficient is never below `cols` (the attestant's own depth)
+;                                    nor below chunk + 32 (the lane tree's) — a bound below either of
+;                                    the two paths it compares would be no bound at all
+;   64  FOUR KERNELS, TWO QUANTS     each text declares its own kernel name; the appendix is EXACTLY
+;                                    the splits plus the four concatenated; and the Q6_K and Q4_K lane
+;                                    texts are the same LENGTH and NOT the same TEXT (one meaning,
+;                                    two quants — a copy-paste that forgot to swap q6k for q4k, or
+;                                    210 for 144, would make them equal)
+;   128 THE HEADER IS ONE INCLUDE    exactly "#include <metal_stdlib>" + newline, 24 chars, so there
+;                                    is no room for `using namespace metal;` to be hiding in it
+
+(do
+    (defn qlb-mod (a n) (sub a (mul (div a n) n)))
+    (defn qlb-opens-with (s p)
+        (if (lt (str_len s) (str_len p)) 0
+            (if (str_eq (substring s 0 (str_len p)) p) 1 0)))
+
+    ; --- 1: the width is named, once, and the emitted text agrees with the name ---
+    ; The kernels spell 32 as a literal (thread_index_in_simdgroup has no other value on this family),
+    ; so the constant and the text can drift apart. Nothing here can execute MSL, but the name can at
+    ; least be pinned, and the radius above says out loud what that does and does not buy.
+    (let c0 (if (eq (qml-lanes) 32) 1 0))
+
+    ; --- 2: a real cover. The lanes' visit counts must sum to EXACTLY cols. Five widths, chosen so
+    ; that the ceiling arithmetic is exercised where it breaks: a clean multiple, a width one above
+    ; and one below a multiple, a real model width, and a width SMALLER than the lane count (where
+    ; the high lanes must contribute a clean 0 and not a negative). ---
+    (let c1 (if (eq (qml-cover-count 3072) 3072)
+            (if (eq (qml-cover-count 8192) 8192)
+            (if (eq (qml-cover-count 33) 33)
+            (if (eq (qml-cover-count 31) 31)
+            (if (eq (qml-cover-count 7) 7) 2 0) 0) 0) 0) 0))
+
+    ; --- 4: and the cover is a BIJECTION, not merely the right total. A partition that visits column
+    ; 5 twice and column 6 never would still count to cols. Invert the mapping: column j must come
+    ; from lane (j mod 32) at step (j div 32), and that step must be inside that lane's nk. ---
+    (defn qlb-bij (cols j)
+        (if (ge j cols) 1
+            (do
+                (let l (qlb-mod j 32))
+                (let k (div j 32))
+                (if (eq (qml-jat l k) j)
+                    (if (lt k (qml-nk cols l)) (qlb-bij cols (add j 1)) 0)
+                    0))))
+    (let c2 (if (eq (qlb-bij 3072 0) 1)
+            (if (eq (qlb-bij 33 0) 1)
+            (if (eq (qlb-bij 7 0) 1) 4 0) 0) 0))
+
+    ; --- 8: the reassociation is real. 1.0 + 1e16 - 1e16 + ... folded as one chain keeps the 1.0s one
+    ; at a time; folded with the cancelling pair separated into different lanes it does not. Both are
+    ; correct fp64 foldings of the same numbers, and that difference is the whole reason the bound in
+    ; qk-matvec-lane.fk is named rather than assumed to be zero. ---
+    ; 34 elements: index 0 = 1.0, index 32 = 1e16, index 33 = -1e16 (lanes 0 and 1 at step 1).
+    (defn qlb-mk (i n acc)
+        (if (ge i n) (reverse acc)
+            (qlb-mk (add i 1) n
+                (cons (if (eq i 0) 1.0 (if (eq i 32) 1e16 (if (eq i 33) -1e16 0.0))) acc))))
+    (let xs (qlb-mk 0 34 (list)))
+    ; the plain right fold: ... + (-1e16 + (1e16 + ... + 1.0)) — the 1.0 is absorbed by 1e16 and lost.
+    ; the lane fold: lane 0 folds {0, 32} = 1e16 + 1.0 (also absorbing), lane 1 folds {33} = -1e16,
+    ; and the two partials cancel to 0.0 in the reduce. Different trees, different answers.
+    (let c3 (if (eq (qms-serial-sum xs 34) (qml-lane-sum xs 34)) 0 8))
+
+    ; --- 16: the bound needs no new derivation, and that is an EQUATION, checked as one ---
+    (let c4 (if (eq (qml-bound-coeff 3072) (qms-bound-coeff 3072 32))
+            (if (eq (qml-bound-coeff 8192) (qms-bound-coeff 8192 32))
+            (if (eq (qml-bound-coeff 1024) (qms-bound-coeff 1024 32))
+            (if (eq (qml-bound-coeff 33)   (qms-bound-coeff 33 32)) 16 0) 0) 0) 0))
+
+    ; --- 32: and it dominates BOTH paths' depths, so it can never be tighter than a thing it bounds ---
+    (defn qlb-dom (cols)
+        (if (lt (qml-bound-coeff cols) cols) 0
+            (if (lt (qml-bound-coeff cols) (add (qms-chunk cols 32) 32)) 0 1)))
+    (let c5 (if (eq (qlb-dom 3072) 1)
+            (if (eq (qlb-dom 8192) 1)
+            (if (eq (qlb-dom 7) 1) 32 0) 0) 0))
+
+    ; --- 64: four kernels, two quants, one meaning. Each text declares its own name; the appendix is
+    ; EXACTLY the splits plus the four; and the two lane kernels are the same LENGTH but NOT the same
+    ; TEXT — which is what a copy-paste that forgot to swap q6k/q4k or 210/144 would break. ---
+    (let k6h (qml-hoist-msl "form_q6k_matvec_hoist_f32" "q6k" "210"))
+    (let k4h (qml-hoist-msl "form_q4k_matvec_hoist_f32" "q4k" "144"))
+    (let k6l (qml-lane-msl  "form_q6k_matvec_lane_f32"  "q6k" "210"))
+    (let k4l (qml-lane-msl  "form_q4k_matvec_lane_f32"  "q4k" "144"))
+    (let c6 (if (eq (qlb-opens-with k6h "kernel void form_q6k_matvec_hoist_f32 ") 1)
+            (if (eq (qlb-opens-with k4l "kernel void form_q4k_matvec_lane_f32 ") 1)
+            (if (eq (str_len k6l) (str_len k4l))
+            (if (str_eq k6l k4l) 0
+            (if (eq (str_len (qml-msl-appendix))
+                    (add (str_len (qml-msl-splits))
+                    (add (str_len k6h) (add (str_len k4h) (add (str_len k6l) (str_len k4l)))))) 64 0)) 0) 0) 0))
+
+    ; --- 128: the header is the one include and NOTHING else. Checked by prefix AND by length, so
+    ; `using namespace metal;` cannot be appended to it without this bit falling. ---
+    (let c7 (if (eq (qlb-opens-with (qml-msl-header) "#include <metal_stdlib>") 1)
+            (if (eq (str_len (qml-msl-header)) 24) 128 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))

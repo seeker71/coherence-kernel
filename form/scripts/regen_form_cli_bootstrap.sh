@@ -42,14 +42,47 @@ FORM_CLI_SRCS=(
     form-stdlib/form-cli-sufficiency.fk form-stdlib/form-freq-check.fk
     form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
     form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
-    form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk
-    form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry.fk
-    form-stdlib/form-cli.fk form-stdlib/form-cli-gguf-cell.fk form-stdlib/form-cli-repl.fk
+    form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk form-stdlib/form-cli-surface-inquiry.fk
+    form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry.fk form-stdlib/relational-inquiry-metabolism.fk form-stdlib/form-cli.fk
+    form-stdlib/form-cli-gguf-cell.fk form-stdlib/form-cli-repl.fk
 )
 
 mkdir -p form-stdlib/bootstrap
+# Work files are private, but the final carrier paths are shared.  Serialize
+# publishers so a second regeneration cannot replace a coherent carrier with
+# an older candidate between validation and its final stamp publication.
+regen_lock_dir="form-stdlib/bootstrap/.regen-form-cli.lock"
+regen_lock_owner="$regen_lock_dir/owner.pid"
+if ! mkdir "$regen_lock_dir" 2>/dev/null; then
+    regen_lock_pid=""
+    if [[ -r "$regen_lock_owner" ]]; then
+        IFS= read -r regen_lock_pid < "$regen_lock_owner" || true
+    fi
+    if [[ "$regen_lock_pid" =~ ^[0-9]+$ ]] && kill -0 "$regen_lock_pid" 2>/dev/null; then
+        printf 'regen: another form-cli regeneration owns %s (pid %s)\n' \
+            "$regen_lock_dir" "$regen_lock_pid" >&2
+        exit 75
+    fi
+    rm -f "$regen_lock_owner"
+    rmdir "$regen_lock_dir" 2>/dev/null || {
+        printf 'regen: cannot reclaim stale form-cli regeneration lock %s\n' \
+            "$regen_lock_dir" >&2
+        exit 75
+    }
+    mkdir "$regen_lock_dir" || {
+        printf 'regen: cannot acquire form-cli regeneration lock %s\n' \
+            "$regen_lock_dir" >&2
+        exit 75
+    }
+fi
+printf '%s\n' "$$" > "$regen_lock_owner"
 work_dir="$(mktemp -d)"
-trap 'rm -rf "$work_dir"' EXIT
+cleanup() {
+    rm -rf "$work_dir"
+    rm -f "$regen_lock_owner"
+    rmdir "$regen_lock_dir" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
 
 want_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
 want_source_sha256="$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")"
@@ -133,9 +166,9 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/form-cli-sufficiency.fk form-stdlib/form-freq-check.fk
     form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
     form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
-    form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk
-    form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry.fk
-    form-stdlib/form-cli.fk form-stdlib/form-cli-gguf-cell.fk
+    form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk form-stdlib/form-cli-surface-inquiry.fk
+    form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry.fk form-stdlib/form-cli.fk
+    form-stdlib/form-cli-gguf-cell.fk form-stdlib/relational-inquiry-metabolism.fk
 )
 FORM_CLI_FLATTEN_SRCS=()
 for src in "${FORM_CLI_SELFHOST_ORDER[@]}"; do
@@ -151,9 +184,8 @@ stdlib=form-stdlib
 core_src="$(compile_bml "$stdlib/core.fk")"
 http_client_src="$(compile_bml "$stdlib/http-client.fk")"
 form_cli_ask_src="$(compile_bml "$stdlib/form-cli-ask.fk")"
-modules="(list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/resource-port.fk\") (read_file \"$stdlib/bml-native-interface-package-import.fk\") (read_file \"$stdlib/hati-os-targets.fk\") (read_file \"$stdlib/form-native-resource-interfaces.fk\") (read_file \"$stdlib/form-fs.fk\") (read_file \"$stdlib/storage-port.fk\") (read_file \"$stdlib/host-kernel-carrier.fk\") (read_file \"$stdlib/fnri-standin.fk\") (read_file \"$stdlib/fnri-receipt.fk\") (read_file \"$http_client_src\") (read_file \"$stdlib/line-grammar.fk\") (read_file \"$stdlib/str-byte-at.fk\") (read_file \"$stdlib/sha256.fk\") (read_file \"$stdlib/hmac-sha256.fk\") (read_file \"$stdlib/hex.fk\") (read_file \"$stdlib/format-arith.fk\") (read_file \"$stdlib/f16-decode.fk\") (read_file \"$stdlib/q6k-dequant.fk\") (read_file \"$stdlib/q4k-dequant.fk\") (read_file \"$stdlib/weight-load.fk\") (read_file \"$stdlib/voice-traits.fk\") (read_file \"$stdlib/nearest-shape.fk\") (read_file \"$stdlib/co-learning.fk\") (read_file \"$stdlib/co-learning-stream.fk\") (read_file \"$stdlib/mesh-dispatch.fk\") (read_file \"$stdlib/surprise-salience.fk\") (read_file \"$stdlib/host-sense-organ.fk\") (read_file \"$stdlib/speech-organ.fk\") (read_file \"$stdlib/native-host-instance.fk\") (read_file \"$stdlib/text-tokenize.fk\") (read_file \"$stdlib/rag-embed.fk\") (read_file \"$stdlib/rag-index-codec.fk\") (read_file \"$stdlib/rag-retrieve.fk\") (read_file \"$stdlib/rag-ask.fk\") (read_file \"$form_cli_ask_src\") (read_file \"$stdlib/form-cli-router.fk\") (read_file \"$stdlib/form-cli-judge.fk\") (read_file \"$stdlib/confidence-weighted-vote.fk\") (read_file \"$stdlib/lineage-discounted-vote.fk\") (read_file \"$stdlib/form-cli-oracle-loop.fk\") (read_file \"$stdlib/form-cli-sufficiency.fk\") (read_file \"$stdlib/form-freq-check.fk\") (read_file \"$stdlib/trust-row.fk\") (read_file \"$stdlib/form-cli-ask-gate.fk\") (read_file \"$stdlib/form-cli-staged-trace.fk\") (read_file \"$stdlib/form-cli-request.fk\") (read_file \"$carrier_src\") (read_file \"$stdlib/form-cli-ask-plus.fk\") (read_file \"$stdlib/current-branch-landing.fk\") (read_file \"$stdlib/form-cli.fk\") (read_file \"$stdlib/form-cli-gguf-cell.fk\"))"
-modules="(append (list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/grammars/sanskrit-roots.fk\")) (tail (tail $modules)))"
-modules="(append (take (sub (len $modules) 2) $modules) (list (read_file \"$stdlib/form-cli-inquiry.fk\") (nth $modules (sub (len $modules) 2)) (nth $modules (sub (len $modules) 1))))"
+modules="(list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/grammars/sanskrit-roots.fk\") (read_file \"$stdlib/resource-port.fk\") (read_file \"$stdlib/bml-native-interface-package-import.fk\") (read_file \"$stdlib/hati-os-targets.fk\") (read_file \"$stdlib/form-native-resource-interfaces.fk\") (read_file \"$stdlib/form-fs.fk\") (read_file \"$stdlib/storage-port.fk\") (read_file \"$stdlib/host-kernel-carrier.fk\") (read_file \"$stdlib/fnri-standin.fk\") (read_file \"$stdlib/fnri-receipt.fk\") (read_file \"$http_client_src\") (read_file \"$stdlib/line-grammar.fk\") (read_file \"$stdlib/str-byte-at.fk\") (read_file \"$stdlib/sha256.fk\") (read_file \"$stdlib/hmac-sha256.fk\") (read_file \"$stdlib/hex.fk\") (read_file \"$stdlib/format-arith.fk\") (read_file \"$stdlib/f16-decode.fk\") (read_file \"$stdlib/q6k-dequant.fk\") (read_file \"$stdlib/q4k-dequant.fk\") (read_file \"$stdlib/weight-load.fk\") (read_file \"$stdlib/voice-traits.fk\") (read_file \"$stdlib/nearest-shape.fk\") (read_file \"$stdlib/co-learning.fk\") (read_file \"$stdlib/co-learning-stream.fk\") (read_file \"$stdlib/mesh-dispatch.fk\") (read_file \"$stdlib/surprise-salience.fk\") (read_file \"$stdlib/host-sense-organ.fk\") (read_file \"$stdlib/speech-organ.fk\") (read_file \"$stdlib/native-host-instance.fk\") (read_file \"$stdlib/text-tokenize.fk\") (read_file \"$stdlib/rag-embed.fk\") (read_file \"$stdlib/rag-index-codec.fk\") (read_file \"$stdlib/rag-retrieve.fk\") (read_file \"$stdlib/rag-ask.fk\") (read_file \"$form_cli_ask_src\") (read_file \"$stdlib/form-cli-router.fk\") (read_file \"$stdlib/form-cli-judge.fk\") (read_file \"$stdlib/confidence-weighted-vote.fk\") (read_file \"$stdlib/lineage-discounted-vote.fk\") (read_file \"$stdlib/form-cli-oracle-loop.fk\") (read_file \"$stdlib/form-cli-sufficiency.fk\") (read_file \"$stdlib/form-freq-check.fk\") (read_file \"$stdlib/trust-row.fk\") (read_file \"$stdlib/form-cli-ask-gate.fk\") (read_file \"$stdlib/form-cli-staged-trace.fk\") (read_file \"$stdlib/form-cli-request.fk\") (read_file \"$carrier_src\") (read_file \"$stdlib/form-cli-ask-plus.fk\") (read_file \"$stdlib/form-cli-surface-inquiry.fk\") (read_file \"$stdlib/current-branch-landing.fk\") (read_file \"$stdlib/form-cli-inquiry.fk\") (read_file \"$stdlib/form-cli.fk\") (read_file \"$stdlib/form-cli-gguf-cell.fk\"))"
+modules="${modules%)} (read_file \"$stdlib/relational-inquiry-metabolism.fk\"))"
 band="(read_file \"$stdlib/form-cli-repl.fk\")"
 FLATTEN_CHAIN=(
     form-stdlib/minimal-surface.fk
@@ -174,18 +206,17 @@ printf '(fks-table-file (flt-band-sources-fns %s %s) (flt-band-sources-pool %s %
     "$modules" "$band" "$modules" "$band" > "$work_dir/flatten.fk"
 
 flatten_candidate="$work_dir/form-cli-table.candidate"
-rust_flatten_err="$work_dir/form-cli-flatten-rust.err"
-ts_flatten_err="$work_dir/form-cli-flatten-typescript.err"
+flatten_err="$work_dir/form-cli-flatten.err"
 if [[ -x "$RS_KERNEL" ]] \
         && "$RS_KERNEL" "${FLATTEN_CHAIN[@]}" "$work_dir/flatten.fk" \
-            > "$flatten_candidate" 2> "$rust_flatten_err" \
+            > "$flatten_candidate" 2> "$flatten_err" \
         && form_cli_validate_table "$flatten_candidate" >/dev/null; then
     mv -f "$flatten_candidate" "$table_tmp"
     printf '%s\n' 'regen: flatten Rust proof sibling (form-cli table)'
 elif [[ -f "$TS_KERNEL" ]] \
-        && node --stack_size=262144 "$TS_KERNEL" \
+        && node "$TS_KERNEL" \
             "${FLATTEN_CHAIN[@]}" "$work_dir/flatten.fk" \
-            > "$flatten_candidate" 2> "$ts_flatten_err" \
+            > "$flatten_candidate" 2> "$flatten_err" \
         && form_cli_validate_table "$flatten_candidate" >/dev/null; then
     mv -f "$flatten_candidate" "$table_tmp"
     printf '%s\n' 'regen: flatten TypeScript proof sibling (form-cli table)'
@@ -196,14 +227,7 @@ elif fourth_selfhost && fourth_flatten_sources \
     printf '%s\n' 'regen: flatten fkwu self-host (form-cli table)'
 else
     printf '%s\n' 'regen: bounded-memory flatten carriers failed' >&2
-    if [[ -s "$rust_flatten_err" ]]; then
-        printf '%s\n' '  Rust carrier:' >&2
-        sed 's/^/    /' "$rust_flatten_err" >&2
-    fi
-    if [[ -s "$ts_flatten_err" ]]; then
-        printf '%s\n' '  TypeScript carrier:' >&2
-        sed 's/^/    /' "$ts_flatten_err" >&2
-    fi
+    sed 's/^/  /' "$flatten_err" >&2
     exit 1
 fi
 [[ -s "$table_tmp" ]] || {

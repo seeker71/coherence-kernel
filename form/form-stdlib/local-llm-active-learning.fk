@@ -1,0 +1,52 @@
+; local-llm-active-learning.fk — owned local generation as a teaching layer.
+; Native is asked first. A native miss may call local; disagreement and novelty
+; select variants. Fine-tune and promotion require sealed held-out transfer.
+; preludes: form-stdlib/core.fk
+; witnessed: pending
+(do
+  ; episode = [question-node,native-ack,local-answer-node,uncertainty,
+  ;            disagreement,novelty,consent,lineage]
+  (defn lla-episode (q native-ack local-answer uncertainty disagreement novelty consent lineage)
+    (list q native-ack local-answer uncertainty disagreement novelty consent lineage))
+  (defn lla-native-ack (e) (nth e 1))
+  (defn lla-local-answer (e) (nth e 2))
+  (defn lla-score (e) (add (nth e 3) (add (nth e 4) (nth e 5))))
+  (defn lla-native-miss? (e)
+    (if (or (nothing? (lla-native-ack e)) (eq (lla-native-ack e) 0)) 1 0))
+  (defn lla-admissible? (e)
+    (if (and (eq (nth e 6) 1) (and (eq (nth e 7) 1) (not (nothing? (lla-local-answer e))))) 1 0))
+  (defn lla-select? (e floor)
+    (if (and (eq (lla-native-miss? e) 1)
+             (and (eq (lla-admissible? e) 1) (ge (lla-score e) floor))) 1 0))
+  (defn lla-selected-count (episodes floor)
+    (if (eq (len episodes) 0) 0
+      (add (lla-select? (head episodes) floor) (lla-selected-count (tail episodes) floor))))
+
+  ; readiness requires enough independently selected variants. Training is an
+  ; offered action node; this cell never equates dataset readiness with success.
+  (defn lla-finetune-ready? (episodes floor min-variants)
+    (if (ge (lla-selected-count episodes floor) min-variants) 1 0))
+
+  ; evaluation = [train-pass,train-total,held-pass,held-total,
+  ;               incumbent-held-pass,no-lineage-breach]
+  (defn lla-eval (train-pass train-total held-pass held-total incumbent-held-pass lineage-ok)
+    (list train-pass train-total held-pass held-total incumbent-held-pass lineage-ok))
+  (defn lla-rate (pass total) (if (eq total 0) 0 (div (mul pass 1000) total)))
+  (defn lla-promote? (evaluation threshold)
+    (do (let held-rate (lla-rate (nth evaluation 2) (nth evaluation 3)))
+      (if (and (eq (nth evaluation 5) 1)
+        (and (ge held-rate threshold) (gt (nth evaluation 2) (nth evaluation 4)))) 1 0)))
+  (defn lla-native-distill? (local-promoted native-held-pass native-held-total threshold)
+    (if (and (eq local-promoted 1)
+             (ge (lla-rate native-held-pass native-held-total) threshold)) 1 0))
+
+  ; [native-first,local-on-miss,selected,finetune-ready,local-promoted,
+  ;  native-transfer,remote-required]
+  (defn lla-cycle (episodes floor min-variants evaluation threshold native-held-pass native-held-total)
+    (do (let selected (lla-selected-count episodes floor))
+      (let ready (lla-finetune-ready? episodes floor min-variants))
+      (let promoted (if (eq ready 1) (lla-promote? evaluation threshold) 0))
+      (let transferred (lla-native-distill? promoted native-held-pass native-held-total threshold))
+      (list 1 1 selected ready promoted transferred
+        (if (or (eq ready 0) (eq promoted 0)) 1 0))))
+  0)
