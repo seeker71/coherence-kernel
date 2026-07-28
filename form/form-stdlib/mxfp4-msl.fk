@@ -158,12 +158,21 @@
     (defn mx4m-msl-val ()
         "static inline float mx4_val(int c) { int mant = mxm_mod(c, 2); int ex = mxm_mod(c / 2, 4); int sgn = c / 8; float frac = float(mant) / 2.0f; float mag = (ex == 0) ? (mxm_pow2(0) * frac) : (mxm_pow2(ex - 1) * (1.0f + frac)); return (sgn == 1) ? -mag : mag; } ")
 
+    ; The production tensors keep payload rows linear while the E8M0 scale
+    ; plane is tiled in 128-row x 4-group blocks.  Fixture dequant below stays
+    ; flat because its 1024 payload values and 32 selected scales were carved
+    ; into a compact witness; the real-model matvec uses this physical offset.
+    (defn mx4m-msl-sf-off ()
+        "static inline uint mx4_sf_off(uint r, uint g, uint ng) { return ((r / 128u) * (ng / 4u) + g / 4u) * 512u + (r % 32u) * 16u + ((r % 128u) / 32u) * 4u + (g % 4u); } ")
+
     ; --- one weight at a flat element index, mx4m-flat-at in C. `nel` is the SLICE element count. ---
     (defn mx4m-msl-weight ()
         "static inline float mx4_w(device const uchar* qb, uint nel, uint idx) { uint pb = idx / 2u; int by = int(qb[pb]); int c = (idx - pb * 2u == 0u) ? mxm_mod(by, 16) : by / 16; int e = int(qb[nel / 2u + idx / 32u]); return mxm_e8m0(e) * mx4_val(c); } ")
 
     (defn mx4m-msl-helpers ()
-        (str_concat (mxm-msl-spine) (str_concat (mx4m-msl-val) (mx4m-msl-weight))))
+        (str_concat (mxm-msl-spine)
+            (str_concat (mx4m-msl-val)
+                (str_concat (mx4m-msl-sf-off) (mx4m-msl-weight)))))
 
     ; --- kernel 1: dequant a range into f32. One thread per weight. `off` is a flat ELEMENT offset into
     ; the slice, so a caller can dequant a tile at either end of a 8 388 608-element slice without moving
@@ -181,12 +190,19 @@
         (str_concat fname
             " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ng = cols / 32u; uint g0 = (r * cols) / 32u; uint sbase = nel / 2u; float sumf = 0.0f; for (uint g = lane; g < ng; g += 32u) { float s = mxm_e8m0(int(qb[sbase + g0 + g])); uint p = (r * cols + g * 32u) / 2u; device const float* xv = x + g * 32u; float acc = 0.0f; for (uint m = 0u; m < 16u; ++m) { int by = int(qb[p + m]); acc = acc + xv[m * 2u] * mx4_val(mxm_mod(by, 16)); acc = acc + xv[m * 2u + 1u] * mx4_val(by / 16); } sumf = sumf + s * acc; } float sv = metal::simd_sum(sumf); if (lane == 0u) y[r] = sv; }")))
 
+    (defn mx4m-matrix-matvec-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ng = cols / 32u; uint sbase = nel / 2u; float sumf = 0.0f; for (uint g = lane; g < ng; g += 32u) { float s = mxm_e8m0(int(qb[sbase + mx4_sf_off(r, g, ng)])); uint p = (r * cols + g * 32u) / 2u; device const float* xv = x + g * 32u; float acc = 0.0f; for (uint m = 0u; m < 16u; ++m) { int by = int(qb[p + m]); acc = acc + xv[m * 2u] * mx4_val(mxm_mod(by, 16)); acc = acc + xv[m * 2u + 1u] * mx4_val(by / 16); } sumf = sumf + s * acc; } float sv = metal::simd_sum(sumf); if (lane == 0u) y[r] = sv; }")))
+
     ; --- each kernel self-contained (spine + body), and the two as ONE translation unit with the spine
     ; emitted once: C has no forgiveness for a repeated `static inline`, and the Metal front end says so
     ; loudly. The matvec form needs qml-msl-header ahead of it for metal::simd_sum; the assembling cell
     ; emits that header, exactly once for the whole file. ---
     (defn mx4m-dequant-msl (fname) (str_concat (mx4m-msl-helpers) (mx4m-dequant-body fname)))
     (defn mx4m-matvec-msl  (fname) (str_concat (mx4m-msl-helpers) (mx4m-matvec-body  fname)))
+    (defn mx4m-matrix-matvec-msl (fname)
+        (str_concat (mx4m-msl-helpers) (mx4m-matrix-matvec-body fname)))
     (defn mx4m-msl-unit (dname mname)
         (str_concat (mx4m-msl-helpers)
         (str_concat (mx4m-dequant-body dname) (mx4m-matvec-body mname))))
