@@ -821,7 +821,7 @@ def ffn_half(g, P, after_attn_hc, K, n_embd, n_hc, eps, hc_iters, hc_eps, token,
 # forward_first_token_cpu (:13849) calls exactly this for every one of the 43 layers, handing the n_hc
 # streams forward, and it never touches a compressor or an indexer -- so the compressor tensors blk.2+
 # carry are not on this path. Grounded, not assumed.
-def attn_half(g, P, K, GEO, residual_hc, il, pos):
+def attn_half(g, P, K, GEO, residual_hc, il, pos, kv_hist=None):
     n_embd = GEO["n_embd"]; n_head = GEO["n_head"]; n_head_kv = GEO["n_head_kv"]
     head_dim = GEO["head_dim"]; n_rot = GEO["n_rot"]; eps = GEO["eps"]
     n_hc = GEO["n_hc"]; q_rank = GEO["q_rank"]; n_groups = GEO["n_groups"]; rank = GEO["rank"]
@@ -846,7 +846,18 @@ def attn_half(g, P, K, GEO, residual_hc, il, pos):
     kv = fp8_kv_quantize_row(list(kv_roped), head_dim, n_rot)
     kv = [f16_round(v) for v in kv]
 
-    heads_attn = attention_rows_one(q, [kv], read_f32(g, P + "attn_sinks.weight", n_head),
+    # THE KV HISTORY. Attention over ONE key is degenerate: softmax over a single score plus the
+    # learned sink cannot SELECT, so it exercises none of the choosing that makes attention
+    # attention. Every gate this oracle has ever anchored passed [kv] here — one row — which means
+    # the multi-key path has never once been compared against a reference. When kv_hist is given it
+    # is THIS LAYER's own list, appended in place, so a caller carries n_layers independent
+    # histories exactly as the device carries n_layers KV arenas.
+    if kv_hist is None:
+        rows = [kv]
+    else:
+        kv_hist.append(kv)
+        rows = kv_hist
+    heads_attn = attention_rows_one(q, rows, read_f32(g, P + "attn_sinks.weight", n_head),
                                     n_head, head_dim)
     heads = rope_apply(list(heads_attn), n_head, head_dim, n_rot, inv)
 
@@ -935,53 +946,86 @@ def run_stack(g, token, pos, n_layers, outdir):
     if pert != 0.0:
         x0 = [v * (1.0 + pert * (1.0 if (i % 2 == 0) else -1.0)) for i, v in enumerate(x0)]
         print("PERTURB %r (one-sided per element, alternating sign)" % pert)
-    resid = list(x0) * n_hc                                # ds4.c:9764 broadcast
+    # ── THE SEQUENCE. DSV4_ORACLE_TOKENS is a space-separated list of real token ids, and when it is
+    # given this oracle stops being a one-token probe: it runs positions 0..pos with those tokens,
+    # carrying a per-LAYER KV history, and gates the LAST one.
+    #
+    # WHY IT WAS ADDED, 2026-07-28. Every gate this oracle has ever anchored ran a single token, so
+    # attention always saw ONE key — a softmax over one score plus the learned sink, which selects
+    # nothing. The device harness gates the same single-key path, and then GENERATES TEXT down a
+    # different one: `useGrowingKv` swaps in the KV arena and asks for pos+1 rows. So the path that
+    # is proven and the path that produces the words were never the same path. Position only ever
+    # changed the RoPE phase; the token only ever changed once. Both are varied here.
+    #
+    # The prefix positions are run in full and dumped nowhere: their whole contribution is the KV
+    # rows they leave behind, and the hash routers they drove with their OWN token id.
+    seq = [int(t) for t in (os.environ.get("DSV4_ORACLE_TOKENS", "") or "").split()]
+    if seq:
+        if len(seq) != pos + 1:
+            raise SystemExit("DSV4_ORACLE_TOKENS has %d ids but pos is %d; the gated position must be "
+                             "the last id in the sequence" % (len(seq), pos))
+        print("SEQUENCE %s (gating position %d, %d prefix positions carry KV)"
+              % (" ".join(str(t) for t in seq), pos, pos))
+    else:
+        seq = [token]
+    kv_hist = [[] for _ in range(n_layers)] if len(seq) > 1 else None
+
     print("STACKGEOM n_embd %d n_hc %d layers %d token %d pos %d" % (n_embd, n_hc, n_layers, token, pos))
-    if outdir:
-        with open(os.path.join(outdir, "oracle-embed.f64"), "w") as fh:
-            for v in x0:
-                fh.write("%.17g\n" % v)
-    for il in range(n_layers):
-        P = "blk.%d." % il
-        A = attn_half(g, P, K, GEO, resid, il, pos)
-        F = ffn_half(g, P, A["after_attn_hc"], K, n_embd, n_hc, GEO["eps"],
-                     GEO["hc_iters"], GEO["hc_eps"], token, il)
-        R = A["rope"]
-        print("LAYER %d ratio %d freq_base %r freq_scale %r n_exp %d gate_t %d up_t %d down_t %d "
-              "regime %s selected %s weights %s"
-              % (il, R["ratio"], R["freq_base"], R["freq_scale"], F["n_exp_stack"],
-                 g.ttype(P + "ffn_gate_exps.weight"), g.ttype(P + "ffn_up_exps.weight"),
-                 g.ttype(P + "ffn_down_exps.weight"), F["regime"], F["selected"],
-                 ["%.9g" % w for w in F["expert_w"]]))
-        sys.stdout.flush()
-        if outdir:
-            e0 = F["per_expert"][0]
-            named = [("after_attn_hc", A["after_attn_hc"]), ("ffn_cur", F["ffn_cur"]),
-                     ("ffn_normed", F["ffn_norm"]), ("router_logits", F["router_logits"]),
-                     ("expert_w", F["expert_w"]), ("selected", [float(v) for v in F["selected"]]),
-                     ("exp0_gate", e0[1]), ("exp0_up", e0[2]), ("exp0_mid", e0[3]),
-                     ("exp0_down", e0[4]), ("moe", F["moe"]), ("shared", F["shared"]),
-                     ("ffn_out", F["ffn_out"]), ("out_hc", F["out_hc"])]
-            for key, vec in named:
-                with open(os.path.join(outdir, "oracle-L%d-%s.f64" % (il, key)), "w") as fh:
-                    for v in vec:
-                        fh.write("%.17g\n" % v)
-            with open(os.path.join(outdir, "oracle-done.txt"), "a") as fh:
-                fh.write("%d\n" % il)
-        resid = F["out_hc"]
-        # THE f32-STATE PROBE. DSV4_ORACLE_F32_STATE=1 rounds ONLY the state handed from one layer to the
-        # next to f32, and leaves every arithmetic step in fp64. That is the one thing an f32 carrier
-        # cannot avoid doing, so the distance between this trajectory and the pure-fp64 one is the floor
-        # under ANY f32 implementation of this stack — measured from the reference, not chosen.
-        if f32_state:
-            resid = [f32_round(v) for v in resid]
-        # THE COMPOSED-TRAJECTORY ENVELOPE. DSV4_ORACLE_PERTURB_EVERY tilts the state by a relative amount
-        # after EVERY layer, in fp64 throughout. Set to the per-layer gap an f32 carrier was MEASURED to
-        # have when each layer is run alone from this oracle's own input, it answers the only question a
-        # 43-layer comparison can honestly ask: how far apart do two runs of the SAME recipe drift when
-        # one of them is nudged, each layer, by exactly as much as f32 arithmetic nudges it?
-        if pert_every != 0.0:
-            resid = [v * (1.0 + pert_every * (1.0 if (i % 2 == 0) else -1.0)) for i, v in enumerate(resid)]
+    for p, tok in enumerate(seq):
+        gated = (p == len(seq) - 1)
+        xp = x0 if tok == token else read_f16_row(g, "token_embd.weight", tok, n_embd)
+        if pert != 0.0 and tok != token:
+            xp = [v * (1.0 + pert * (1.0 if (i % 2 == 0) else -1.0)) for i, v in enumerate(xp)]
+        resid = list(xp) * n_hc                                # ds4.c:9764 broadcast
+        if gated and outdir:
+            with open(os.path.join(outdir, "oracle-embed.f64"), "w") as fh:
+                for v in xp:
+                    fh.write("%.17g\n" % v)
+        for il in range(n_layers):
+            P = "blk.%d." % il
+            A = attn_half(g, P, K, GEO, resid, il, p, None if kv_hist is None else kv_hist[il])
+            F = ffn_half(g, P, A["after_attn_hc"], K, n_embd, n_hc, GEO["eps"],
+                         GEO["hc_iters"], GEO["hc_eps"], tok, il)
+            R = A["rope"]
+            if gated:
+                print("LAYER %d ratio %d freq_base %r freq_scale %r n_exp %d gate_t %d up_t %d down_t %d "
+                      "regime %s selected %s weights %s"
+                      % (il, R["ratio"], R["freq_base"], R["freq_scale"], F["n_exp_stack"],
+                         g.ttype(P + "ffn_gate_exps.weight"), g.ttype(P + "ffn_up_exps.weight"),
+                         g.ttype(P + "ffn_down_exps.weight"), F["regime"], F["selected"],
+                         ["%.9g" % w for w in F["expert_w"]]))
+                sys.stdout.flush()
+            if gated and outdir:
+                e0 = F["per_expert"][0]
+                named = [("after_attn_hc", A["after_attn_hc"]), ("ffn_cur", F["ffn_cur"]),
+                         ("ffn_normed", F["ffn_norm"]), ("router_logits", F["router_logits"]),
+                         ("expert_w", F["expert_w"]), ("selected", [float(v) for v in F["selected"]]),
+                         ("exp0_gate", e0[1]), ("exp0_up", e0[2]), ("exp0_mid", e0[3]),
+                         ("exp0_down", e0[4]), ("moe", F["moe"]), ("shared", F["shared"]),
+                         ("ffn_out", F["ffn_out"]), ("out_hc", F["out_hc"])]
+                for key, vec in named:
+                    with open(os.path.join(outdir, "oracle-L%d-%s.f64" % (il, key)), "w") as fh:
+                        for v in vec:
+                            fh.write("%.17g\n" % v)
+                with open(os.path.join(outdir, "oracle-done.txt"), "a") as fh:
+                    fh.write("%d\n" % il)
+            resid = F["out_hc"]
+            # THE f32-STATE PROBE. DSV4_ORACLE_F32_STATE=1 rounds ONLY the state handed from one layer to the
+            # next to f32, and leaves every arithmetic step in fp64. That is the one thing an f32 carrier
+            # cannot avoid doing, so the distance between this trajectory and the pure-fp64 one is the floor
+            # under ANY f32 implementation of this stack — measured from the reference, not chosen.
+            if f32_state:
+                resid = [f32_round(v) for v in resid]
+            # THE COMPOSED-TRAJECTORY ENVELOPE. DSV4_ORACLE_PERTURB_EVERY tilts the state by a relative amount
+            # after EVERY layer, in fp64 throughout. Set to the per-layer gap an f32 carrier was MEASURED to
+            # have when each layer is run alone from this oracle's own input, it answers the only question a
+            # 43-layer comparison can honestly ask: how far apart do two runs of the SAME recipe drift when
+            # one of them is nudged, each layer, by exactly as much as f32 arithmetic nudges it?
+            if pert_every != 0.0:
+                resid = [v * (1.0 + pert_every * (1.0 if (i % 2 == 0) else -1.0)) for i, v in enumerate(resid)]
+    if kv_hist is not None:
+        print("KVHIST %d layers each carrying %d rows into the gated position"
+              % (n_layers, len(kv_hist[0])))
     print("STACKEND %d" % n_layers)
 
 
