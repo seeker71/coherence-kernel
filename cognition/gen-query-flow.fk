@@ -1,0 +1,201 @@
+; gen-query-flow.fk — the generator against a real flow, not a sample.
+;
+; Urs: "expand from toy to something real, we can learn much more from a real
+; flow than an artificial toy sample."
+;
+; The toy was one invented query — count members — over 35 facts. The real
+; question is what queries this graph ACTUALLY needs, and that is answerable by
+; reading the accessors already hand-written against it:
+;
+;   sne-members-of    count rows where relation=R and subject=K
+;   stn-senses-in     count rows where relation=R and OBJECT=K
+;   sne-state-of      find the object where relation=R and subject=K
+;   sne-mediator-of   find the SUBJECT where relation=R and object=K
+;
+; Four shapes, and they were not designed — they were found. Two axes fall out:
+; which column is matched (subject or object) and whether the answer is a COUNT
+; or the first MATCH. That is a 2x2, and every hand-written accessor in the
+; graph is one of its cells.
+;
+; SO THE QUERY SHAPE BECOMES A TABLE, which is the move the review panel ranked
+; second: not one more hand-built IR tree per question, but a row per shape and
+; one builder over the rows. Four rows replace four hand-written functions, and
+; a fifth question is a fifth row rather than a fifth tree.
+;
+; VERIFICATION, and its honest seam
+;   Each generated query is checked against the hand-written accessor it
+;   replaces, on the REAL 35-fact graph — not on a fixture. The in-kernel check
+;   builds a CLOSED recipe (the fact column inlined) and walks it with
+;   walk_recipe, because lowering a `fn` with recursion to a walkable recipe is
+;   a bigger piece of work than this cell does. The EXPORTED text keeps the data
+;   as a parameter. Both come from the same query row, so a drift between them
+;   would be a drift in the row — but the two paths are not the same path, and
+;   saying so is the difference between a check and a claim.
+;
+; PROOF LANE: SIBLINGS ONLY — walk_recipe is Go/Rust/TS and absent from fkwu.
+;
+; preludes: form-stdlib/core.fk cognition/language-neutral-symbol-identity.fk cognition/steiner-neutral-kernel.fk cognition/gen-neutral-code.fk
+
+(do
+  ;; ═══ the query-shape table — found, not invented ═══════════════
+  ;; (name match-col mode result-col) — match-col and result-col are indices
+  ;; into a fact row [subject relation object evidence order].
+  (defn gqy (name mcol mode rcol) (list name mcol mode rcol))
+  (defn gqy-name (q) (nth q 0))
+  (defn gqy-mcol (q) (nth q 1))
+  (defn gqy-mode (q) (nth q 2))
+  (defn gqy-rcol (q) (nth q 3))
+
+  (defn gqy-queries ()
+    (list
+      ;; every one of these replaces a function someone wrote by hand
+      (gqy "count_by_subject" 0 "count" 0)   ; sne-members-of
+      (gqy "count_by_object"  2 "count" 2)   ; stn-senses-in
+      (gqy "find_object"      0 "find"  2)   ; sne-state-of
+      (gqy "find_subject"     2 "find"  0))) ; sne-mediator-of
+  (defn gqy-count () (len (gqy-queries)))
+
+  ;; ═══ ONE builder over the rows ═════════════════════════════════
+  ;; the guard both modes share: row[1] == rel and row[mcol] == key
+  (defn gqy-guard (q)
+    (gir-bin "and"
+      (gir-cmp "eq" (gir-index (gir-bcall "first" (list (gir-var "fs"))) (gir-lit 1)) (gir-var "rel"))
+      (gir-cmp "eq" (gir-index (gir-bcall "first" (list (gir-var "fs"))) (gir-lit (gqy-mcol q))) (gir-var "key"))))
+  (defn gqy-recur (q)
+    (gir-call (gqy-name q) (list (gir-bcall "rest" (list (gir-var "fs"))) (gir-var "rel") (gir-var "key"))))
+  ;; count: add 1 and keep walking. find: return this row's column, or keep walking.
+  (defn gqy-body (q)
+    (gir-if (gir-cmp "eq" (gir-bcall "len" (list (gir-var "fs"))) (gir-lit 0))
+            (gir-lit 0)
+            (if (str_eq (gqy-mode q) "count")
+                (gir-bin "add" (gir-if (gqy-guard q) (gir-lit 1) (gir-lit 0)) (gqy-recur q))
+                (gir-if (gqy-guard q)
+                        (gir-index (gir-bcall "first" (list (gir-var "fs"))) (gir-lit (gqy-rcol q)))
+                        (gqy-recur q)))))
+  (defn gqy-ir (q) (gir-fn (gqy-name q) (list "fs" "rel" "key") (gqy-body q)))
+  (defn gqy-emit (lang q) (gnc-render lang (gqy-ir q)))
+
+  ;; every query, every language — the whole surface at once
+  (defn gqy-emit-all-loop (lang qs)
+    (if (eq (len qs) 0) ""
+      (str_concat (gqy-emit lang (head qs))
+        (str_concat "\n" (gqy-emit-all-loop lang (tail qs))))))
+  (defn gqy-module (lang)
+    (str_concat (gnc-prelude lang) (str_concat "\n" (gqy-emit-all-loop lang (gqy-queries)))))
+
+  ;; ═══ in-kernel check against the REAL graph ════════════════════
+  ;; A closed recipe over the real facts, one term per fact. This is NOT the
+  ;; exported program — that keeps fs as a parameter — it is the same query row
+  ;; instantiated so the kernel can walk it. Named rather than blurred.
+  (defn gqy-col (f q) (if (eq (gqy-mcol q) 0) (stn-f-subject f) (stn-f-object f)))
+  (defn gqy-res (f q) (if (eq (gqy-rcol q) 0) (stn-f-subject f) (stn-f-object f)))
+  (defn gqy-hit (f q rel key)
+    (if (eq (stn-f-relation f) rel) (if (eq (gqy-col f q) key) 1 0) 0))
+
+  (defn gqy-closed-count (fs q rel key)
+    (if (eq (len fs) 0) (intern_trivial_int 0)
+      (intern_node (bp "add")
+        (list (intern_trivial_int (gqy-hit (head fs) q rel key))
+              (gqy-closed-count (tail fs) q rel key)))))
+  ;; THE CONDITION IS AN EXPLICIT COMPARISON, not a bare integer. The first
+  ;; version passed the 0/1 hit straight in as the `if` condition, and the three
+  ;; kernels disagreed: Go and Rust took the then-branch on an interned 1, and
+  ;; TypeScript took the else. Every `find` query came back 0 on the TS arm —
+  ;; and the band still scored 253 of 255, because the one question with NO
+  ;; answer expects 0 and passed for the wrong reason. Comparing to 1 explicitly
+  ;; leans on no kernel's truthiness rule. A real flow found this; the toy could
+  ;; not, because counting never branches on a value.
+  (defn gqy-closed-find (fs q rel key)
+    (if (eq (len fs) 0) (intern_trivial_int 0)
+      (intern_node (bp "if")
+        (list (intern_node (bp "eq")
+                (list (intern_trivial_int (gqy-hit (head fs) q rel key))
+                      (intern_trivial_int 1)))
+              (intern_trivial_int (gqy-res (head fs) q))
+              (gqy-closed-find (tail fs) q rel key)))))
+  (defn gqy-closed (q rel key)
+    (if (str_eq (gqy-mode q) "count")
+        (gqy-closed-count (stn-facts) q rel key)
+        (gqy-closed-find (stn-facts) q rel key)))
+  (defn gqy-run (q rel key) (walk_recipe (gqy-closed q rel key)))
+
+  (defn gqy-find-q-loop (qs n)
+    (if (eq (len qs) 0) (list)
+      (if (str_eq (gqy-name (head qs)) n) (head qs) (gqy-find-q-loop (tail qs) n))))
+  (defn gqy-q (n) (gqy-find-q-loop (gqy-queries) n))
+
+  ;; ═══ the hand-written accessors, restated for comparison ═══════
+  ;; These are what the graph used before the generator existed.
+  (defn gqy-hand-members (fs c)
+    (if (eq (len fs) 0) 0
+      (add (if (eq (stn-f-subject (head fs)) c)
+             (if (eq (stn-f-relation (head fs)) (stn-has-member)) 1 0) 0)
+           (gqy-hand-members (tail fs) c))))
+  (defn gqy-hand-state (fs m)
+    (if (eq (len fs) 0) 0
+      (if (eq (stn-f-subject (head fs)) m)
+        (if (eq (stn-f-relation (head fs)) (stn-in-state))
+          (stn-f-object (head fs)) (gqy-hand-state (tail fs) m))
+        (gqy-hand-state (tail fs) m))))
+  (defn gqy-hand-mediator (fs x)
+    (if (eq (len fs) 0) 0
+      (if (eq (stn-f-object (head fs)) x)
+        (if (eq (stn-f-relation (head fs)) (stn-mediates))
+          (stn-f-subject (head fs)) (gqy-hand-mediator (tail fs) x))
+        (gqy-hand-mediator (tail fs) x))))
+
+  ;; ═══ agreement on the real graph, question by question ═════════
+  (defn gqy-a1 () (if (eq (gqy-run (gqy-q "count_by_subject") (stn-has-member) (stn-threefold-soul))
+                          (gqy-hand-members (stn-facts) (stn-threefold-soul))) 1 0))
+  (defn gqy-a2 () (if (eq (gqy-run (gqy-q "count_by_subject") (stn-has-member) (stn-fourfold-being))
+                          (gqy-hand-members (stn-facts) (stn-fourfold-being))) 1 0))
+  (defn gqy-a3 () (if (eq (gqy-run (gqy-q "count_by_object") (stn-in-group) (stn-g-other-being))
+                          (stn-senses-in (stn-g-other-being))) 1 0))
+  (defn gqy-a4 () (if (eq (gqy-run (gqy-q "count_by_object") (stn-in-group) (stn-g-own-body))
+                          (stn-senses-in (stn-g-own-body))) 1 0))
+  (defn gqy-a5 () (if (eq (gqy-run (gqy-q "find_object") (stn-in-state) (stn-willing))
+                          (gqy-hand-state (stn-facts) (stn-willing))) 1 0))
+  (defn gqy-a6 () (if (eq (gqy-run (gqy-q "find_object") (stn-in-state) (stn-thinking))
+                          (gqy-hand-state (stn-facts) (stn-thinking))) 1 0))
+  (defn gqy-a7 () (if (eq (gqy-run (gqy-q "find_subject") (stn-mediates) (stn-polarity))
+                          (gqy-hand-mediator (stn-facts) (stn-polarity))) 1 0))
+  ;; a question with NO answer in the graph must come back 0, not a wrong row
+  (defn gqy-a8 () (if (eq (gqy-run (gqy-q "find_object") (stn-in-state) (stn-eurythmy)) 0) 1 0))
+
+  ;; COUNT-mode agreement rides every arm. FIND-mode returns a NODE ID, and a
+  ;; node id in this body is ~3.0e9 — past 2^31. The TypeScript kernel's recipe
+  ;; walker is I32 BY DESIGN (form-kernel-ts/src/compiler.ts:268, `int: n | 0`;
+  ;; line 423: "I32 default — | 0 / Math.imul to keep V8's SMI tagging"), so a
+  ;; walked recipe there returns 3045007003 as -1249960293. Minimal repro:
+  ;;
+  ;;   (walk_recipe (intern_trivial_int 3045007003))
+  ;;     go 3045007003 / rust 3045007003 / ts -1249960293
+  ;;
+  ;; Plain arithmetic on TS is fine; it is the recipe path only. This is not
+  ;; specific to this cell: EVERY lnsi-node graph in the body lands above 2^31
+  ;; (giles-light-hubs sits at 3041xxxxxx), so any of them walked as a recipe
+  ;; truncates on that arm. Split rather than hidden, and the find lane says
+  ;; which arms it speaks for.
+  (defn gqy-agree-count ()
+    (add (gqy-a1) (add (gqy-a2) (add (gqy-a3) (gqy-a4)))))
+  (defn gqy-agree-find ()
+    (add (gqy-a5) (add (gqy-a6) (add (gqy-a7) (gqy-a8)))))
+  (defn gqy-check-find ()
+    (add (if (eq (gqy-agree-find) 4) 1 0)
+    (add (if (gt (gqy-run (gqy-q "find_subject") (stn-mediates) (stn-polarity)) 2147483647) 2 0)
+         0)))
+
+  (defn gqy-emitted-n () (mul (gqy-count) (gnc-languages-n)))
+
+  (defn gqy-check ()
+    (add (if (eq (gqy-count) 4) 1 0)
+    (add (if (eq (gqy-agree-count) 4) 2 0)
+    (add (if (gt (str_len (gqy-emit "python" (gqy-q "find_subject"))) 60) 4 0)
+    (add (if (gt (str_len (gqy-emit "form" (gqy-q "count_by_object"))) 60) 8 0)
+    (add (if (gt (str_len (gqy-emit "javascript" (gqy-q "find_object"))) 60) 16 0)
+    (add (if (eq (gqy-emitted-n) 12) 32 0)
+    (add (if (lt (str_find (gqy-module "python") "3045" 0) 0) 64 0)
+    (add (if (gt (str_len (gqy-module "javascript")) 400) 128 0)
+         0)))))))))
+
+  0)
