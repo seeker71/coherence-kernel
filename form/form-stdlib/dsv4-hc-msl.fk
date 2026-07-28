@@ -43,9 +43,11 @@
 ;     The kernels are dim-generic (n_hc/n_embd/iters/rows/cols are runtime uniforms) but no gate here has
 ;     SEEN the real dims. form_hc_split_f32's private c array is capped at HC_MAX_C (64 = 8*8); above n_hc=8
 ;     it is WRONG, not slow. V4-Flash's n_hc=4 (16 entries) is far inside.
-;   * NOT the fp8/f16 stream encodings ds4 stores its streams in, NOT the attention/FFN/MoE the HC wraps,
-;     NOT a resident real weight tensor, NOT a token. Same gaps dsv4-hc.fk's radius names. This is the HC
-;     wrapper's arithmetic, on the GPU, once, at toy embd width. `block_out` here is invented.
+;   * The live carrier follows the producer's BF16 storage boundary: initial F16 embeddings and every
+;     hc_post result are rounded RNE to BF16 and expanded back to f32 for the next accumulated operation.
+;     The toy fp64 correspondence below does not speak for that storage rounding; the official live vectors do.
+;   * NOT the attention/FFN/MoE the HC wraps, NOT a resident real weight tensor, NOT a token. Same gaps
+;     dsv4-hc.fk's radius names. This is the HC wrapper's arithmetic, on the GPU, once, at toy embd width.
 ;   * The 20 Sinkhorn iterations are threaded as a runtime uniform, never defaulted — an unrun iteration is
 ;     not a computed zero (edgedrop). iters=20 vs iters=1 differ 1.7e-2 at these dims (Stone 25); the count
 ;     is load-bearing and both proofs pin it.
@@ -77,15 +79,15 @@
     ; ================= the emitted MSL =================
     ; One fragment per meaning, composed by str_concat, so a diff of the emitted text points at a recipe.
 
-    ; --- the numerics spine: abs, Newton sqrt (tn-sqrt), Taylor exp (tn-exp), sigmoid (ln-sigmoid), and the
-    ;     RIGHT-fold dot (tb-dot). Emitted ONCE for the whole unit. No trig: HC has no RoPE. ---
+    ; --- the numerics spine: BF16 RNE carrier storage, abs, Newton sqrt (tn-sqrt), Taylor exp (tn-exp),
+    ;     sigmoid (ln-sigmoid), and the RIGHT-fold dot (tb-dot). Emitted ONCE for the whole unit. ---
     (defn hc-msl-spine ()
-        "static inline float hc_abs(float x) { return (x < 0.0f) ? -x : x; } static inline float hc_sqrt(float v) { if (v <= 0.0f) return 0.0f; float g = v; for (int n = 0; n < 50; ++n) { g = 0.5f * (g + v / g); } return g; } static inline float hc_exp_small(float x) { float term = 1.0f; float acc = 1.0f; for (int n = 1; n <= 14; ++n) { term = term * (x / float(n)); acc = acc + term; } return acc; } static inline float hc_pow2k(float v, int k) { for (int i = 0; i < k; ++i) v = v * v; return v; } static inline float hc_exp(float x) { float a = x; int k = 0; while (hc_abs(a) > 0.5f) { a = a * 0.5f; k = k + 1; } return hc_pow2k(hc_exp_small(a), k); } static inline float hc_sigmoid(float x) { return 1.0f / (1.0f + hc_exp(-x)); } static inline float hc_dot(device const float* a, device const float* b, uint n) { float acc = 0.0f; for (int c = int(n) - 1; c >= 0; --c) acc = a[uint(c)] * b[uint(c)] + acc; return acc; } ")
+        "static inline float hc_bf16_rne(float x) { uint bits = as_type<uint>(x); uint mag = bits & 0x7fffffffu; if (mag > 0x7f800000u) return as_type<float>(0x7fff0000u); uint bias = 0x7fffu + ((bits >> 16u) & 1u); return as_type<float>((bits + bias) & 0xffff0000u); } static inline float hc_abs(float x) { return (x < 0.0f) ? -x : x; } static inline float hc_sqrt(float v) { if (v <= 0.0f) return 0.0f; float g = v; for (int n = 0; n < 50; ++n) { g = 0.5f * (g + v / g); } return g; } static inline float hc_exp_small(float x) { float term = 1.0f; float acc = 1.0f; for (int n = 1; n <= 14; ++n) { term = term * (x / float(n)); acc = acc + term; } return acc; } static inline float hc_pow2k(float v, int k) { for (int i = 0; i < k; ++i) v = v * v; return v; } static inline float hc_exp(float x) { float a = x; int k = 0; while (hc_abs(a) > 0.5f) { a = a * 0.5f; k = k + 1; } return hc_pow2k(hc_exp_small(a), k); } static inline float hc_sigmoid(float x) { return 1.0f / (1.0f + hc_exp(-x)); } static inline float hc_dot(device const float* a, device const float* b, uint n) { float acc = 0.0f; for (int c = int(n) - 1; c >= 0; --c) acc = a[uint(c)] * b[uint(c)] + acc; return acc; } ")
 
     ; --- kernel: hc_from_plain_embedding (ds4.c:9764). The token starts every stream equal: out[h*n_embd+d]
-    ;     = x[d]. One thread per output element; d = gid mod n_embd. ---
+    ;     = BF16_RNE(x[d]). One thread per output element; d = gid mod n_embd. ---
     (defn hc-broadcast-body ()
-        "kernel void form_hc_broadcast_f32(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], constant uint& n_hc [[buffer(2)]], constant uint& n_embd [[buffer(3)]], uint gid [[thread_position_in_grid]]) { uint total = n_hc * n_embd; if (gid >= total) return; uint d = gid % n_embd; out[gid] = x[d]; } ")
+        "kernel void form_hc_broadcast_f32(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], constant uint& n_hc [[buffer(2)]], constant uint& n_embd [[buffer(3)]], uint gid [[thread_position_in_grid]]) { uint total = n_hc * n_embd; if (gid >= total) return; uint d = gid % n_embd; out[gid] = hc_bf16_rne(x[d]); } ")
 
     ; --- kernel: the UNWEIGHTED RMSNorm (rms_norm_no_weight, ds4.c:6628 / ln-rmsnorm with g=1). One thread;
     ;     sumsq is ln-sumsq-acc's LEFT fold (ascending); out = x * (1/rms). Serves hc_pre and the head. ---
@@ -116,9 +118,10 @@
     ; --- kernel: hc_post_one (ds4.c:9772), block-inject + combine-mix. THE SLOT: one thread per dst stream;
     ;     post[dst] is a lane constant. new[dst][d] = block_out[d]*post[dst] + sum_src comb[dst+src*n_hc]*
     ;     residual[src][d]. THE TRANSPOSE: comb is stored c[src+dst*n_hc] but read comb[dst+src*n_hc]. The
-    ;     stream sum ASCENDS over src (left fold); the block term is added last (tb-vec-add order). ---
+    ;     stream sum ASCENDS over src (left fold); the block term is added last (tb-vec-add order), then
+    ;     the carrier store rounds RNE to BF16 exactly as the producer's ds4_hc_store. ---
     (defn hc-post-body ()
-        "kernel void form_hc_post_f32(device const float* block_out [[buffer(0)]], device const float* residual [[buffer(1)]], device const float* post [[buffer(2)]], device const float* comb [[buffer(3)]], device float* out [[buffer(4)]], constant uint& n_hc [[buffer(5)]], constant uint& n_embd [[buffer(6)]], uint dst [[thread_position_in_grid]]) { if (dst >= n_hc) return; float pd = post[dst]; for (uint d = 0u; d < n_embd; ++d) { float acc = 0.0f; for (uint src = 0u; src < n_hc; ++src) acc = acc + comb[dst + src * n_hc] * residual[src * n_embd + d]; out[dst * n_embd + d] = block_out[d] * pd + acc; } } ")
+        "kernel void form_hc_post_f32(device const float* block_out [[buffer(0)]], device const float* residual [[buffer(1)]], device const float* post [[buffer(2)]], device const float* comb [[buffer(3)]], device float* out [[buffer(4)]], constant uint& n_hc [[buffer(5)]], constant uint& n_embd [[buffer(6)]], uint dst [[thread_position_in_grid]]) { if (dst >= n_hc) return; float pd = post[dst]; for (uint d = 0u; d < n_embd; ++d) { float acc = 0.0f; for (uint src = 0u; src < n_hc; ++src) acc = acc + comb[dst + src * n_hc] * residual[src * n_embd + d]; out[dst * n_embd + d] = hc_bf16_rne(block_out[d] * pd + acc); } } ")
 
     ; --- kernel: the output head's per-stream weights (output_hc_head_one, ds4.c:13876):
     ;     w[i] = sigmoid(pre[i]*scale + base[i]) + eps. One thread per stream. The head collapse itself is
