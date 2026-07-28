@@ -80,7 +80,13 @@ static id<MTLBuffer> fk_model_stage;
 static size_t fk_model_stage_count;
 static id<MTLBuffer> fk_model_residual;
 static size_t fk_model_residual_count;
-struct fk_model_state { char *name; id<MTLBuffer> buffer; size_t count; };
+struct fk_model_state {
+    char *name;
+    id<MTLBuffer> buffer;
+    size_t count;
+    id<MTLBuffer> residual;
+    size_t residual_count;
+};
 static struct fk_model_state *fk_model_states;
 static size_t fk_model_state_count;
 static uint32_t fk_model_route_ids[16];
@@ -187,7 +193,10 @@ static void fk_metal_model_release(void) {
         memset(&fk_model_dkv[i],0,sizeof(fk_model_dkv[i]));
     }
     for(size_t i=0;i<fk_model_state_count;i++){
-        free(fk_model_states[i].name);[fk_model_states[i].buffer release];}
+        free(fk_model_states[i].name);
+        [fk_model_states[i].buffer release];
+        [fk_model_states[i].residual release];
+    }
     free(fk_model_states);fk_model_states=NULL;fk_model_state_count=0;
     fk_model_route_count=0;
     for (size_t i = 0; i < fk_model_pipeline_count; i++) {
@@ -641,9 +650,16 @@ long long fk_metal_model_hc_begin_external(
         if (end == cursor) goto invalid_hc_plan;
         cursor = end;
         float eps = strtof(cursor, &end);
+        size_t total = (size_t)n_embd * (size_t)n_hc;
+        bool has_embedding =
+            fk_model_stage != nil && fk_model_stage_count == n_embd;
+        bool has_carrier =
+            !has_embedding &&
+            fk_model_stage != nil && fk_model_stage_count == total &&
+            fk_model_residual != nil && fk_model_residual_count == total;
         if (end == cursor || n_embd == 0 || n_hc == 0 ||
             n_embd > 1048576 || n_hc > 64 ||
-            fk_model_stage == nil || fk_model_stage_count != n_embd) {
+            (!has_carrier && !has_embedding)) {
             goto invalid_hc_plan;
         }
 
@@ -661,24 +677,25 @@ long long fk_metal_model_hc_begin_external(
             return n;
         }
 
-        id<MTLFunction> broadcast_fn =
+        id<MTLFunction> broadcast_fn = has_carrier ? nil :
             [library newFunctionWithName:@"form_hc_broadcast_f32"];
         id<MTLFunction> rms_fn =
             [library newFunctionWithName:@"form_hc_rmsnorm_nw_f32"];
         NSError *error = nil;
         id<MTLComputePipelineState> broadcast =
-            broadcast_fn == nil ? nil :
+            has_carrier || broadcast_fn == nil ? nil :
             fk_model_pipeline_for(broadcast_fn, &error);
         id<MTLComputePipelineState> rms =
             rms_fn == nil ? nil :
             fk_model_pipeline_for(rms_fn, &error);
         id<MTLCommandQueue> queue = fk_model_command_queue();
-        size_t total = (size_t)n_embd * (size_t)n_hc;
-        id<MTLBuffer> residual = [fk_model_device
-            newBufferWithLength:total * sizeof(float) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> residual = has_carrier
+            ? [fk_model_residual retain]
+            : [fk_model_device newBufferWithLength:total * sizeof(float)
+                options:MTLResourceStorageModeShared];
         id<MTLBuffer> normalized = [fk_model_device
             newBufferWithLength:total * sizeof(float) options:MTLResourceStorageModeShared];
-        if (broadcast == nil || rms == nil || queue == nil ||
+        if ((!has_carrier && broadcast == nil) || rms == nil || queue == nil ||
             residual == nil || normalized == nil) {
             const char *message = error.localizedDescription.UTF8String ?: "unknown";
             [broadcast_fn release]; [rms_fn release];
@@ -693,18 +710,21 @@ long long fk_metal_model_hc_begin_external(
         uint32_t hc32 = (uint32_t)n_hc;
         uint32_t total32 = (uint32_t)total;
         id<MTLCommandBuffer> command = [queue commandBuffer];
-        id<MTLComputeCommandEncoder> encoder = [command computeCommandEncoder];
-        [encoder setComputePipelineState:broadcast];
-        [encoder setBuffer:fk_model_stage offset:0 atIndex:0];
-        [encoder setBuffer:residual offset:0 atIndex:1];
-        [encoder setBytes:&hc32 length:4 atIndex:2];
-        [encoder setBytes:&embd32 length:4 atIndex:3];
-        NSUInteger width = MIN(
-            broadcast.maxTotalThreadsPerThreadgroup,
-            broadcast.threadExecutionWidth * 4);
-        [encoder dispatchThreads:MTLSizeMake(total, 1, 1)
-            threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
-        [encoder endEncoding];
+        id<MTLComputeCommandEncoder> encoder = nil;
+        if (!has_carrier) {
+            encoder = [command computeCommandEncoder];
+            [encoder setComputePipelineState:broadcast];
+            [encoder setBuffer:fk_model_stage offset:0 atIndex:0];
+            [encoder setBuffer:residual offset:0 atIndex:1];
+            [encoder setBytes:&hc32 length:4 atIndex:2];
+            [encoder setBytes:&embd32 length:4 atIndex:3];
+            NSUInteger width = MIN(
+                broadcast.maxTotalThreadsPerThreadgroup,
+                broadcast.threadExecutionWidth * 4);
+            [encoder dispatchThreads:MTLSizeMake(total, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(width, 1, 1)];
+            [encoder endEncoding];
+        }
         encoder = [command computeCommandEncoder];
         [encoder setComputePipelineState:rms];
         [encoder setBuffer:residual offset:0 atIndex:0];
@@ -742,12 +762,13 @@ long long fk_metal_model_hc_begin_external(
         fk_model_stage = normalized;
         fk_model_stage_count = total;
         long long n = fk_out(out, cap,
-            "PASS metal_model_hc_begin\nlibrary=%s\nn-embd=%lu\nn-hc=%lu\n"
+            "PASS metal_model_hc_begin\nmode=%s\nlibrary=%s\nn-embd=%lu\nn-hc=%lu\n"
             "residual-values=%zu\nnormalized-values=%zu\nfinite=%zu\n"
             "sum=%.17g\nabs-sum=%.17g\nsample=%.9g,%.9g,%.9g,%.9g\n"
             "elapsed-ms=%.3f\ncarrier=in-process-metal\n"
             "host-exec=0\nshell=0\nswift=0\ntemp=0\nnetwork=0\nremote=0\n"
             "outcome=success\nrewitness-offer=metal-model-hc-begin\n",
+            has_carrier ? "renormalize-carrier" : "broadcast-embedding",
             library_text, n_embd, n_hc, total, total, finite_count,
             sum, abs_sum, values[0], values[1], values[2], values[3], elapsed);
         [broadcast_fn release]; [rms_fn release];
@@ -2120,17 +2141,25 @@ long long fk_metal_model_state_save_external(
         if(at==fk_model_state_count){
             struct fk_model_state*g=realloc(fk_model_states,(at+1)*sizeof(*g));
             if(!g){free(n);return fk_out(out,cap,"FAIL metal_model_state_save allocation\n");}
-            fk_model_states=g;fk_model_state_count++;fk_model_states[at].buffer=nil;
+            fk_model_states=g;fk_model_state_count++;
+            fk_model_states[at].buffer=nil;
+            fk_model_states[at].residual=nil;
+            fk_model_states[at].residual_count=0;
             fk_model_states[at].name=n;
         }else free(n);
         [fk_model_states[at].buffer release];
+        [fk_model_states[at].residual release];
         fk_model_states[at].buffer=[fk_model_stage retain];
         fk_model_states[at].count=fk_model_stage_count;
+        fk_model_states[at].residual=[fk_model_residual retain];
+        fk_model_states[at].residual_count=fk_model_residual_count;
         return fk_out(out,cap,
-            "PASS metal_model_state_save\nname=%s\nvalues=%zu\nstates=%zu\n"
+            "PASS metal_model_state_save\nname=%s\nvalues=%zu\nresidual-values=%zu\nstates=%zu\n"
             "carrier=in-process-metal\nhost-exec=0\nshell=0\nswift=0\ntemp=0\nnetwork=0\nremote=0\n"
             "outcome=success\nrewitness-offer=metal-model-state-load:%s\n",
-            fk_model_states[at].name,fk_model_stage_count,fk_model_state_count,fk_model_states[at].name);
+            fk_model_states[at].name,fk_model_stage_count,
+            fk_model_states[at].residual_count,fk_model_state_count,
+            fk_model_states[at].name);
     }}
 long long fk_metal_model_state_load_external(
     const char*name,long long name_len,char*out,long long cap){
@@ -2138,12 +2167,17 @@ long long fk_metal_model_state_load_external(
         char*n=fk_copy_cstr(name,name_len);if(!n)return fk_out(out,cap,"FAIL metal_model_state_load allocation\n");
         for(size_t i=0;i<fk_model_state_count;i++)if(strcmp(fk_model_states[i].name,n)==0){
             [fk_model_stage release];fk_model_stage=[fk_model_states[i].buffer retain];
-            fk_model_stage_count=fk_model_states[i].count;free(n);
+            fk_model_stage_count=fk_model_states[i].count;
+            [fk_model_residual release];
+            fk_model_residual=[fk_model_states[i].residual retain];
+            fk_model_residual_count=fk_model_states[i].residual_count;
+            free(n);
             return fk_out(out,cap,
-                "PASS metal_model_state_load\nname=%s\nvalues=%zu\n"
+                "PASS metal_model_state_load\nname=%s\nvalues=%zu\nresidual-values=%zu\n"
                 "carrier=in-process-metal\nhost-exec=0\nshell=0\nswift=0\ntemp=0\nnetwork=0\nremote=0\n"
                 "outcome=success\nrewitness-offer=metal-model-state-save:%s\n",
-                fk_model_states[i].name,fk_model_stage_count,fk_model_states[i].name);}
+                fk_model_states[i].name,fk_model_stage_count,
+                fk_model_residual_count,fk_model_states[i].name);}
         long long r=fk_out(out,cap,"FAIL metal_model_state_load name=%s not-found\n",n);free(n);return r;
     }}
 
@@ -2316,7 +2350,8 @@ long long fk_metal_model_transaction_external(
             if (strcmp(f[0], name) == 0 && nf == 3) \
                 n = fn(f[1], (long long)strlen(f[1]), \
                        f[2], (long long)strlen(f[2]), receipt, sizeof(receipt))
-            FK_TX2("hc_split", fk_metal_model_hc_split_external);
+            FK_TX2("hc_begin", fk_metal_model_hc_begin_external);
+            else FK_TX2("hc_split", fk_metal_model_hc_split_external);
             else FK_TX2("hc_reduce", fk_metal_model_hc_reduce_external);
             else FK_TX2("rmsnorm", fk_metal_model_rmsnorm_external);
             else FK_TX2("mx8_matvec", fk_metal_model_mx8_matvec_external);
