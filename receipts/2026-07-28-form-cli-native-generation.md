@@ -67,4 +67,15 @@ boundary, not promoted as an answer. The next repair is to make current
 framebuffer/source evidence available to the native prompt before inference
 and to keep generation success distinct from semantic sufficiency.
 
+That state distinction is now executable. A non-empty native stream reports:
+
+```text
+form-cli-local-ds4-generated:1
+form-cli-local-ds4-accepted:0
+form-cli-local-ds4-sufficiency:unadjudicated
+```
+
+An empty stream reports `generated:0`, `accepted:0`, and
+`sufficiency:nothing`. The pure adjudication band returns `15`.
+
 ; witnessed: 2026-07-28 -> PASS native CLI generation and replay; REFUTED generated diagnosis
