@@ -1006,11 +1006,14 @@ let seqIds: [Int] = {
 func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = []) {
     var gateToken = token
     var resid = residHc0
+<<<<<<< HEAD
     // blk.0's injected gate feeds the layer the EMBEDDING, and in a sequence that must be the
     // GATED position's token, not seq[0]. Reading the global residHc0 here compared blk.0 run on
     // token 671 against an oracle that ran token 344 and reported nd 1.05 — a harness defect
     // wearing a model defect's clothes.
     var gateResid0 = residHc0
+=======
+>>>>>>> origin/main
     if seq.count > 1 {
         // ── THE PREFIX ────────────────────────────────────────────────────────────────────────────
         // Run positions 0..<pos through every layer so each layer's KV arena holds the real latents
@@ -1027,7 +1030,10 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = [])
             for il in 0..<nLayers { r = runLayer(il, p, seq[p], r).outHc }
         }
         resid = embedToken(gateToken)
+<<<<<<< HEAD
         gateResid0 = resid
+=======
+>>>>>>> origin/main
     }
     for il in 0..<nLayers {
         let w = LW[il]
