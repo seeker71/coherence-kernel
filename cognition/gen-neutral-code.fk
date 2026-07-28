@@ -79,7 +79,26 @@
   (defn gir-seq (ss) (gir "seq" (list ss)))
   (defn gir-sif (c t) (gir "sif" (list c t)))
   (defn gir-ret (e) (gir "ret" (list e)))
-  (defn gir-fnb (name ps b) (gir "fnb" (list name ps b)))
+  ;; A function body's RETURN TYPE is now data, not a letter baked into Go's
+  ;; shape string. `func %1(%2) int { %3 }` could only ever declare functions
+  ;; returning int, so a function returning a LIST was unspellable and the
+  ;; type table — which already held `rows` -> `[][]int` — was consulted for
+  ;; parameters and ignored for results.
+  (defn gir-fnb (name ps rty b) (gir "fnb" (list name ps rty b)))
+  ;; THE EMPTY LIST, as its own kind. `(gir-list (list))` cannot serve: Go
+  ;; spells a list `[]int{%1}` and an empty kids slot renders "", which the
+  ;; renderer reads as refusal — correctly, since a shape that asks for %1 and
+  ;; gets nothing IS broken. Emptiness of a collection and absence of a part
+  ;; are different facts; giving the first its own kind keeps the second strict.
+  (defn gir-nil () (gir "nil" (list)))
+  (defn gir-slet (name v) (gir "slet" (list name v)))
+  ;; A TYPED collection literal. `list` is type-blind — Go spells it
+  ;; `[]int{%1}` — so a list OF LISTS was unspellable, and the conformance
+  ;; harness had been writing `[][]int{...}` by hand outside the generator,
+  ;; behind an `(if (str_eq lang "go") ...)`. That `if` was the fossil of this
+  ;; missing kind. The element type is a name looked up in the same type table
+  ;; the parameters use.
+  (defn gir-listof (ty elems) (gir "listof" (list ty elems)))
   ;; a BUILTIN call — its name resolves through the language's builtin table,
   ;; unlike gir-call whose name is a function the emitted program defines
   (defn gir-bcall (f args) (gir "bcall" (list f args)))
@@ -129,9 +148,17 @@
       ;; expression route, which made "any PL" untested against a target that
       ;; forbids it. These four are the statement sub-language.
       (gsig "seq"   (list "stmts"))         ; statements — the STATEMENT separator, not the argument one
-      (gsig "sif"   (list "child" "child")) ; if cond { stmt } — no else, falls through
+      (gsig "sif"   (list "child" "body"))  ; if cond { stmt } — no else, falls through
       (gsig "ret"   (list "child"))         ; return an expression
-      (gsig "fnb"   (list "raw" "names" "child"))))  ; a function whose body is a seq
+      (gsig "fnb"   (list "raw" "names" "rty" "body"))    ; body is a seq; %3 is the result type
+      ;; STATEMENT-FORM LOCAL BINDING. The statement sub-language could branch
+      ;; and return but not NAME anything, so "build an index once and reuse
+      ;; it" could only be spelled by recomputing the expression at every use.
+      ;; Form gets no row for it — its own local binding nests rather than
+      ;; sequences — and per-form totality says that absence is an answer.
+      (gsig "slet"  (list "raw" "child"))
+      (gsig "listof" (list "rty" "kids"))
+      (gsig "nil"   (list))))                            ; the empty collection, spelled per language
   (defn gnc-sig-loop (rs k)
     (if (eq (len rs) 0) (list)
       (if (str_eq (gsig-kind (head rs)) k) (head rs) (gnc-sig-loop (tail rs) k))))
@@ -141,15 +168,25 @@
     (if (eq (len rs) 0) (list) (cons (gsig-kind (head rs)) (gnc-kinds-loop (tail rs)))))
   (defn gir-kinds () (gnc-kinds-loop (gnc-signatures)))
   ;; and so does "is this an operator node", from whether slot 0 is an op
+  ;; A NILADIC KIND breaks the assumption every kind has a first slot. `nil`
+  ;; (the empty collection) is the first one, and this read `(head (list))` and
+  ;; died inside str_eq rather than answering 0. The guard is not defensive
+  ;; padding: "does this kind lead with an operator" has a correct answer for a
+  ;; kind with no slots at all, and it is no.
   (defn gnc-binlike? (k)
     (do (let sg (gnc-sig k))
       (if (eq (len sg) 0) 0
-        (if (str_eq (head (gsig-slots sg)) "op") 1 0))))
+        (if (eq (len (gsig-slots sg)) 0) 0
+          (if (str_eq (head (gsig-slots sg)) "op") 1 0)))))
 
   ;; ═══ L2 — a language is a TABLE, not a function ════════════════
   ;; %1 %2 %3 are positional slots, %op the operator, %xs a joined list.
   (defn gnc-row (kind shape) (list kind shape))
-  (defn gnc-lang (name rows sep ops fns pre nota ssep tys psh) (list name rows sep ops fns pre nota ssep tys psh))
+  ;; INDENT UNIT — the whole layout model, as one cell of the table.
+  ;; The empty string means "this language does not lay out": its statements
+  ;; join with the statement separator and its bodies render inline, which is
+  ;; what Form wants. Any other value turns on real nesting.
+  (defn gnc-lang (name rows sep ops fns pre nota ssep tys psh ind) (list name rows sep ops fns pre nota ssep tys psh ind))
   (defn gnc-lang-name (l) (nth l 0))
   (defn gnc-lang-rows (l) (nth l 1))
   (defn gnc-lang-sep  (l) (nth l 2))
@@ -160,6 +197,7 @@
   (defn gnc-lang-ssep (l) (nth l 7))
   (defn gnc-lang-tys  (l) (nth l 8))
   (defn gnc-lang-psh  (l) (nth l 9))
+  (defn gnc-lang-ind  (l) (nth l 10))
   ;; Two more vocabularies, and both were forced by ONE language rather than
   ;; foreseen. Go has no conditional expression (witnessed: `?` is "illegal
   ;; character U+003F"), so it needs the statement form; statements join with a
@@ -167,6 +205,24 @@
   ;; which the IR had no way to say. Each is language data, so each is a table.
   ;; That is now the third time a table turned out to be missing a vocabulary
   ;; rather than a rule — syntax, then operators, then builtins, now types.
+  ;; ═══ LAYOUT: depth is CONTEXT, not content ═════════════════════
+  ;; The same function node rendered inside another body must indent further,
+  ;; so depth cannot live in the node — storing it there would be a lie about
+  ;; the program. It threads through rendering exactly the way binding power
+  ;; already does, which is the precedent this cell had and had not reused.
+  ;;
+  ;; What it replaces: Go's statement separator was the literal string "\n  ",
+  ;; a fixed two-space indent baked into a separator, so every statement
+  ;; rendered at one depth no matter how deep it sat. Go's parser tolerates
+  ;; that; Python's would not, which is the real reason Python had no
+  ;; statement form. And Python carried a "; " separator it could never reach.
+  (defn gnc-indent-unit (lang)
+    (do (let l (gnc-lang-of lang)) (if (eq (len l) 0) "" (gnc-lang-ind l))))
+  (defn gnc-ind-loop (u d) (if (le d 0) "" (str_concat u (gnc-ind-loop u (sub d 1)))))
+  (defn gnc-indent (lang d) (gnc-ind-loop (gnc-indent-unit lang) d))
+  (defn gnc-lays-out? (lang) (if (eq (str_len (gnc-indent-unit lang)) 0) 0 1))
+  (defn gnc-nl (lang d) (str_concat "\n" (gnc-indent lang d)))
+
   (defn gnc-stmt-sep (lang)
     (do (let l (gnc-lang-of lang)) (if (eq (len l) 0) "" (gnc-lang-ssep l))))
   (defn gnc-ty-loop (ts t)
@@ -213,8 +269,9 @@
   (defn gnc-paren (t) (str_concat "(" (str_concat t ")")))
   ;; wrap only when the child binds LOOSER than its parent, and never in a
   ;; prefix language
-  (defn gnc-child (lang parent-prec n)
-    (do (let t (gnc-render lang n))
+  (defn gnc-child (lang parent-prec n) (gnc-child-at lang parent-prec n 0))
+  (defn gnc-child-at (lang parent-prec n d)
+    (do (let t (gnc-render-at lang n d))
       (if (eq (str_len t) 0) ""
         (if (eq (gnc-prefix? lang) 1) t
           (if (lt (gnc-node-prec lang n) parent-prec) (gnc-paren t) t)))))
@@ -270,10 +327,12 @@
           (gnc-row "seq"   "(do %1)")
           (gnc-row "sif"   "(if %1 %2 0)")
           (gnc-row "ret"   "%1")
-          (gnc-row "fnb"   "(defn %1 (%2) %3)"))
+          (gnc-row "fnb"   "(defn %1 (%2) %4)")
+          (gnc-row "nil"   "(list)")
+          (gnc-row "listof" "(list %2)"))
         " " (list (list "eq" "eq" 3) (list "add" "add" 5) (list "lt" "lt" 3) (list "and" "and" 2))
-        (list (list "len" "len") (list "first" "head") (list "rest" "tail"))
-        "" "prefix" " " (list (list "int" "") (list "rows" "")) "%1")
+        (list (list "len" "len") (list "first" "head") (list "rest" "tail") (list "cons" "cons"))
+        "" "prefix" " " (list (list "int" "") (list "rows" "") (list "ints" "")) "%1" "")
       (gnc-lang "python"
         (list
           (gnc-row "lit"   "%1")
@@ -286,10 +345,26 @@
           (gnc-row "index" "%1[%2]")
           (gnc-row "list"  "[%1]")
           (gnc-row "fn"    "def %1(%2): return %3")
-          (gnc-row "let"   "(lambda %1: %3)(%2)"))
+          (gnc-row "let"   "(lambda %1: %3)(%2)")
+          ;; STATEMENT FORM, and the honest limit written into the shapes.
+          ;; Python's block structure is indentation, which this renderer does
+          ;; not model. What makes a statement form possible anyway is the
+          ;; ONE-LINE SUITE: `if c: return x` is legal Python and needs no
+          ;; block. So every body here is exactly one indent deep, and the
+          ;; statement separator carries that one indent. A body nested two
+          ;; deep would need a real layout algebra and is refused by absence,
+          ;; not spelled wrongly — the queries and the driver are written with
+          ;; early returns, which is idiomatic and happens to stay at depth 1.
+          (gnc-row "seq"   "%1")
+          (gnc-row "sif"   "if %1:%2")
+          (gnc-row "ret"   "return %1")
+          (gnc-row "fnb"   "def %1(%2):%4")
+          (gnc-row "slet"  "%1 = %2")
+          (gnc-row "nil"   "[]")
+          (gnc-row "listof" "[%2]"))
         ", " (list (list "eq" "==" 3) (list "add" "+" 5) (list "lt" "<" 3) (list "and" "and" 2))
-        (list (list "len" "len") (list "first" "pyfirst") (list "rest" "pyrest"))
-        "def pyfirst(l): return l[0]\ndef pyrest(l): return l[1:]" "infix" "; " (list (list "int" "") (list "rows" "")) "%1")
+        (list (list "len" "len") (list "first" "pyfirst") (list "rest" "pyrest") (list "cons" "pycons"))
+        "def pyfirst(l): return l[0]\ndef pyrest(l): return l[1:]\ndef pycons(x, l): return [x] + l" "infix" "\n" (list (list "int" "") (list "rows" "") (list "ints" "")) "%1" "    ")
       (gnc-lang "javascript"
         (list
           (gnc-row "lit"   "%1")
@@ -304,12 +379,15 @@
           (gnc-row "fn"    "function %1(%2) { return %3; }")
           (gnc-row "let"   "((%1) => %3)(%2)")
           (gnc-row "seq"   "%1")
-          (gnc-row "sif"   "if (%1) { %2 }")
+          (gnc-row "sif"   "if (%1) {%2}")
           (gnc-row "ret"   "return %1;")
-          (gnc-row "fnb"   "function %1(%2) { %3 }"))
+          (gnc-row "fnb"   "function %1(%2) {%4}")
+          (gnc-row "slet"  "const %1 = %2;")
+          (gnc-row "nil"   "[]")
+          (gnc-row "listof" "[%2]"))
         ", " (list (list "eq" "===" 3) (list "add" "+" 5) (list "lt" "<" 3) (list "and" "&&" 2))
-        (list (list "len" "jslen") (list "first" "jsfirst") (list "rest" "jsrest"))
-        "function jslen(l){return l.length;}\nfunction jsfirst(l){return l[0];}\nfunction jsrest(l){return l.slice(1);}" "infix" " " (list (list "int" "") (list "rows" "")) "%1")
+        (list (list "len" "jslen") (list "first" "jsfirst") (list "rest" "jsrest") (list "cons" "jscons"))
+        "function jslen(l){return l.length;}\nfunction jsfirst(l){return l[0];}\nfunction jsrest(l){return l.slice(1);}\nfunction jscons(x,l){return [x].concat(l);}" "infix" "\n" (list (list "int" "") (list "rows" "") (list "ints" "")) "%1" "  ")
       ;; GO — the language that forced the statement layer. It has NO `if`
       ;; expression row and no `fn` row: asking Go for the expression form
       ;; returns empty, which is correct rather than a gap. It renders the
@@ -325,13 +403,16 @@
           (gnc-row "index" "%1[%2]")
           (gnc-row "list"  "[]int{%1}")
           (gnc-row "seq"   "%1")
-          (gnc-row "sif"   "if %1 { %2 }")
+          (gnc-row "sif"   "if %1 {%2}")
           (gnc-row "ret"   "return %1")
-          (gnc-row "fnb"   "func %1(%2) int { %3 }"))
+          (gnc-row "slet"  "%1 := %2")
+          (gnc-row "fnb"   "func %1(%2) %3 {%4}")
+          (gnc-row "nil"   "[]int{}")
+          (gnc-row "listof" "%1{%2}"))
         ", " (list (list "eq" "==" 3) (list "add" "+" 5) (list "lt" "<" 3) (list "and" "&&" 2))
-        (list (list "len" "len") (list "first" "gofirst") (list "rest" "gorest"))
-        "func gofirst(l [][]int) []int { return l[0] }\nfunc gorest(l [][]int) [][]int { return l[1:] }"
-        "infix" "\n  " (list (list "int" "int") (list "rows" "[][]int")) "%1 %2")))
+        (list (list "len" "len") (list "first" "gofirst") (list "rest" "gorest") (list "cons" "gocons"))
+        "func gofirst(l [][]int) []int { return l[0] }\nfunc gorest(l [][]int) [][]int { return l[1:] }\nfunc gocons(x int, l []int) []int { return append([]int{x}, l...) }"
+        "infix" "\n" (list (list "int" "int") (list "rows" "[][]int") (list "ints" "[]int")) "%1 %2" "\t")))
 
   ;; REFUSAL MARKER: the empty string, not `nothing`. This cell has to run on
   ;; the arms that carry walk_recipe (Go/Rust/TS) and `nothing?` is fkwu-only,
@@ -372,9 +453,10 @@
       (if (eq (len (tail xs)) 0) (head xs)
         (str_concat (head xs) (str_concat sep (gnc-join (tail xs) sep))))))
 
-  (defn gnc-render-many (lang ns)
+  (defn gnc-render-many (lang ns) (gnc-render-many-at lang ns 0))
+  (defn gnc-render-many-at (lang ns d)
     (if (eq (len ns) 0) (list)
-      (cons (gnc-render lang (head ns)) (gnc-render-many lang (tail ns)))))
+      (cons (gnc-render-at lang (head ns) d) (gnc-render-many-at lang (tail ns) d))))
 
   ;; ═══ L3 — ONE generic fold. No IR kind is named below this line. ═
   ;; Before the signature table this was a ten-armed if-chain, one arm per
@@ -382,29 +464,53 @@
   ;; fold"; the code was a switch. Now the signature says what each slot IS and
   ;; the renderer walks it, so a new IR kind costs one signature row plus one
   ;; shape row per language and NO renderer edit at all.
-  (defn gnc-slot (lang ptype part prec)
+  ;; A BODY is a child one level deeper, opened on its own line and closed
+  ;; back at the parent's level. In a language with no indent unit it is the
+  ;; child, unchanged — so Form's shapes stay exactly as they were.
+  (defn gnc-body (lang part d)
+    (do (let t (gnc-render-at lang part (add d 1)))
+      (if (eq (str_len t) 0) ""
+        (if (eq (gnc-lays-out? lang) 0) t
+          (str_concat (gnc-nl lang (add d 1)) (str_concat t (gnc-nl lang d)))))))
+  (defn gnc-slot (lang ptype part prec d)
     (if (str_eq ptype "int")   (int_to_str part)
     (if (str_eq ptype "raw")   part
     (if (str_eq ptype "op")    (gnc-op lang part)
     (if (str_eq ptype "bi")    (gnc-builtin lang part)
-    (if (str_eq ptype "child") (gnc-child lang prec part)
+    (if (str_eq ptype "child") (gnc-child-at lang prec part d)
+    (if (str_eq ptype "body")  (gnc-body lang part d)
     (if (str_eq ptype "kids")
-        (gnc-join (gnc-render-many lang part) (gnc-lang-sep (gnc-lang-of lang)))
+        (gnc-join (gnc-render-many-at lang part d) (gnc-lang-sep (gnc-lang-of lang)))
     (if (str_eq ptype "stmts")
-        (gnc-join (gnc-render-many lang part) (gnc-stmt-sep lang))
+        (gnc-join (gnc-render-many-at lang part d)
+                  (if (eq (gnc-lays-out? lang) 1) (gnc-nl lang d) (gnc-stmt-sep lang)))
     (if (str_eq ptype "names")
         (gnc-join (gnc-params lang part) (gnc-lang-sep (gnc-lang-of lang)))
-        "")))))))))
+    (if (str_eq ptype "rty")   (gnc-type lang part)
+        "")))))))))))
 
-  ;; fill %1..%N in slot order; an empty slot refuses the whole node
-  (defn gnc-fill (lang shape slots parts i prec)
+  ;; fill %1..%N in slot order. An empty part refuses the node ONLY IF THE
+  ;; SHAPE ASKS FOR IT. The old rule refused unconditionally, which is right
+  ;; for a missing child and wrong for a slot the language does not spell:
+  ;; Python's result type is legitimately empty and its `def %1(%2): ...` shape
+  ;; never mentions %3, so the unconditional rule would have refused every
+  ;; Python function the moment result types became data. Same distinction
+  ;; gnc-param already had to make for parameter types, hoisted to where it
+  ;; belongs. Absent-because-missing and absent-because-there-is-none are not
+  ;; the same absence.
+  (defn gnc-fill (lang shape slots parts i prec d)
     (if (eq (len slots) 0) shape
-      (do (let v (gnc-slot lang (head slots) (head parts) prec))
-        (if (eq (str_len v) 0) ""
-          (gnc-fill lang (gnc-sub1 shape (str_concat "%" (int_to_str i)) v)
-                    (tail slots) (tail parts) (add i 1) prec)))))
+      (do (let mark (str_concat "%" (int_to_str i)))
+        (let v (gnc-slot lang (head slots) (head parts) prec d))
+        (if (eq (str_len v) 0)
+            (if (lt (str_find shape mark 0) 0)
+                (gnc-fill lang shape (tail slots) (tail parts) (add i 1) prec d)
+                "")
+            (gnc-fill lang (gnc-sub1 shape mark v)
+                      (tail slots) (tail parts) (add i 1) prec d)))))
 
-  (defn gnc-render (lang n)
+  (defn gnc-render (lang n) (gnc-render-at lang n 0))
+  (defn gnc-render-at (lang n d)
     (do
       (let k (gir-kind n))
       (let shape (gnc-shape lang k))
@@ -412,7 +518,7 @@
       (if (eq (str_len shape) 0) ""
         (if (eq (len sg) 0) ""
           (gnc-fill lang shape (gsig-slots sg) (gir-parts n) 1
-                    (if (eq (gnc-binlike? k) 1) (gnc-prec lang (gir-nth n 0)) 0))))))
+                    (if (eq (gnc-binlike? k) 1) (gnc-prec lang (gir-nth n 0)) 0) d)))))
 
   ;; ═══ L4 — the graph's query, expressed ONCE in IR ══════════════
   ;; one term per has-member fact: (if (eq <subject> C) 1 0)
@@ -490,7 +596,7 @@
   (defn gnc-recur ()
     (gir-call "qs" (list (gir-bcall "rest" (list (gir-var "fs"))) (gir-var "rel") (gir-var "key"))))
   (defn gnc-query-stmt-ir ()
-    (gir-fnb "qs" (list (list "fs" "rows") (list "rel" "int") (list "key" "int"))
+    (gir-fnb "qs" (list (list "fs" "rows") (list "rel" "int") (list "key" "int")) "int"
       (gir-seq (list
         (gir-sif (gir-cmp "eq" (gir-bcall "len" (list (gir-var "fs"))) (gir-lit 0)) (gir-ret (gir-lit 0)))
         (gir-sif (gnc-guard) (gir-ret (gir-bin "add" (gir-lit 1) (gnc-recur))))

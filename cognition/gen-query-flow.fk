@@ -110,7 +110,7 @@
   (defn gqy-recur-s (q)
     (gir-call (gqy-name q) (list (gir-bcall "rest" (list (gir-var "fs"))) (gir-var "rel") (gir-var "key"))))
   (defn gqy-stmt-ir (q)
-    (gir-fnb (gqy-name q) (list (list "fs" "rows") (list "rel" "int") (list "key" "int"))
+    (gir-fnb (gqy-name q) (list (list "fs" "rows") (list "rel" "int") (list "key" "int")) "int"
       (gir-seq (list
         (gir-sif (gir-cmp "eq" (gir-bcall "len" (list (gir-var "fs"))) (gir-lit 0)) (gir-ret (gir-lit 0)))
         (if (str_eq (gqy-mode q) "count")
@@ -135,5 +135,228 @@
       (if (eq (gqy-covered? (gnc-lang-name (head ls))) 1) (gqy-cov-loop (tail ls)) 0)))
   (defn gqy-all-covered? () (gqy-cov-loop (gnc-languages)))
 
+
+  ;; ═══ A PAGE OF CODE, and the samples to justify one ════════════
+  ;;
+  ;; Four hardcoded calls tested four things. The graph holds 35 facts over
+  ;; several relations, and every one of them is a question this query surface
+  ;; can be asked. So the CASES come from the graph too: for each query shape
+  ;; and each fact, the (shape, relation, key) triple that fact makes askable.
+  ;; Deduplicated, because many facts share a relation and a key — and the
+  ;; dedup matters: without it the sweep would look larger while testing the
+  ;; same question repeatedly, which is the count-the-declared trap wearing a
+  ;; bigger number.
+  ;;
+  ;; Every case is DRAWN FROM A FACT, so none of them is trivially absent. A
+  ;; sweep of 300 questions with no answers would be a green wall proving
+  ;; nothing; these questions all have a row that could answer them, and the
+  ;; find-shapes still include the honest zero because a key present in the
+  ;; subject column may be absent from the object column.
+  (defn gqy-case (qid rel key) (list qid rel key))
+  (defn gqy-case-q   (c) (nth c 0))
+  (defn gqy-case-rel (c) (nth c 1))
+  (defn gqy-case-key (c) (nth c 2))
+
+  (defn gqy-case-eq? (a b)
+    (if (eq (gqy-case-q a) (gqy-case-q b))
+      (if (eq (gqy-case-rel a) (gqy-case-rel b))
+        (if (eq (gqy-case-key a) (gqy-case-key b)) 1 0) 0) 0))
+  (defn gqy-seen? (cs c)
+    (if (eq (len cs) 0) 0
+      (if (eq (gqy-case-eq? (head cs) c) 1) 1 (gqy-seen? (tail cs) c))))
+  (defn gqy-push-new (cs c) (if (eq (gqy-seen? cs c) 1) cs (cons c cs)))
+
+  (defn gqy-key-of (f q)
+    (if (eq (gqy-mcol q) 0) (stn-f-subject f) (stn-f-object f)))
+  (defn gqy-cases-for (fs qid q acc)
+    (if (eq (len fs) 0) acc
+      (gqy-cases-for (tail fs) qid q
+        (gqy-push-new acc (gqy-case qid (stn-f-relation (head fs))
+                                        (gqy-key-of (head fs) q))))))
+  (defn gqy-cases-loop (qs qid acc)
+    (if (eq (len qs) 0) acc
+      (gqy-cases-loop (tail qs) (add qid 1)
+        (gqy-cases-for (stn-facts) qid (head qs) acc))))
+  (defn gqy-cases () (gqy-cases-loop (gqy-queries) 0 (list)))
+  (defn gqy-cases-n () (len (gqy-cases)))
+
+  ;; ── the case table as a literal in the target's own list syntax ──
+  (defn gqy-case-ir (c)
+    (gir-listof "ints" (list (gir-lit (gqy-case-q c)) (gir-lit (gqy-case-rel c))
+                             (gir-lit (gqy-case-key c)))))
+  (defn gqy-cases-ir-loop (cs)
+    (if (eq (len cs) 0) (list) (cons (gqy-case-ir (head cs)) (gqy-cases-ir-loop (tail cs)))))
+  (defn gqy-cases-ir () (gir-listof "rows" (gqy-cases-ir-loop (gqy-cases))))
+  (defn gqy-emit-cases (lang) (gnc-render lang (gqy-cases-ir)))
+  (defn gqy-fact-ir (f)
+    (gir-listof "ints" (list (gir-lit (stn-f-subject f)) (gir-lit (stn-f-relation f))
+                             (gir-lit (stn-f-object f)) (gir-lit (stn-f-evidence f))
+                             (gir-lit (stn-f-order f)))))
+  (defn gqy-facts-ir-loop (fs)
+    (if (eq (len fs) 0) (list) (cons (gqy-fact-ir (head fs)) (gqy-facts-ir-loop (tail fs)))))
+  ;; the graph itself as a literal, in the target's own syntax — the last place
+  ;; the conformance harness still branched on the language by hand
+  (defn gqy-facts-ir () (gir-listof "rows" (gqy-facts-ir-loop (stn-facts))))
+  (defn gqy-emit-facts (lang) (gnc-render lang (gqy-facts-ir)))
+
+  ;; ── the DRIVER: one generated function that answers every case ──
+  ;; This is what turns four functions into a program. It dispatches on the
+  ;; case's shape id, calls the query the graph wrote, and conses the answer
+  ;; onto the answers for the rest — a fold over a table, in whichever language
+  ;; was asked, from the same IR.
+  (defn gqy-c-at (i) (gir-index (gir-bcall "first" (list (gir-var "cs"))) (gir-lit i)))
+  (defn gqy-dispatch-arm (qs qid)
+    (if (eq (len qs) 0) (gir-nil)
+      (gir-sif (gir-cmp "eq" (gqy-c-at 0) (gir-lit qid))
+        (gir-ret (gir-bcall "cons"
+          (list (gir-call (gqy-name (head qs))
+                  (list (gir-var "fs") (gqy-c-at 1) (gqy-c-at 2)))
+                (gir-call "run_all"
+                  (list (gir-var "fs") (gir-bcall "rest" (list (gir-var "cs")))))))))))
+  (defn gqy-arms-loop (qs qid)
+    (if (eq (len qs) 0) (list)
+      (cons (gqy-dispatch-arm qs qid) (gqy-arms-loop (tail qs) (add qid 1)))))
+  (defn gqy-runall-ir ()
+    (gir-fnb "run_all" (list (list "fs" "rows") (list "cs" "rows")) "ints"
+      (gir-seq (cons (gir-sif (gir-cmp "eq" (gir-bcall "len" (list (gir-var "cs"))) (gir-lit 0))
+                              (gir-ret (gir-nil)))
+                     (append (gqy-arms-loop (gqy-queries) 0)
+                             (list (gir-ret (gir-nil))))))))
+  (defn gqy-emit-runall (lang) (gnc-render lang (gqy-runall-ir)))
+
+  ;; ── the whole module: prelude, four queries, the driver ─────────
+  (defn gqy-module-page (lang)
+    (do (let qs (gqy-stmt-all-loop lang (gqy-queries)))
+        (let d (gqy-emit-runall lang))
+        (if (eq (str_len d) 0) ""
+          (if (eq (str_len qs) 0) ""
+            (str_concat (gnc-prelude lang)
+              (str_concat "\n" (str_concat qs (str_concat "\n" d))))))))
+  (defn gqy-page-lines-loop (s i n)
+    (if (ge i (str_len s)) n
+      (gqy-page-lines-loop s (add i 1)
+        (if (str_eq (substring s i (add i 1)) "\n") (add n 1) n))))
+  ;; how many lines the generated module actually is — a page is ~50
+  (defn gqy-page-lines (lang) (add 1 (gqy-page-lines-loop (gqy-module-page lang) 0 0)))
+
+  ;; ── what the GRAPH answers, case by case ───────────────────────
+  ;; Still one hand's reading of the rows (corpus row 921, common-mode), and
+  ;; named as such rather than called "the data". What the sweep adds against
+  ;; that risk is not a better reference but INDEPENDENT EXECUTORS: python3,
+  ;; node and go run share no code with each other or with this cell, so
+  ;; agreement among the three is evidence the Form reference alone cannot be.
+  (defn gqy-answer-count (fs c q)
+    (if (eq (len fs) 0) 0
+      (add (if (eq (stn-f-relation (head fs)) (gqy-case-rel c))
+             (if (eq (gqy-key-of (head fs) q) (gqy-case-key c)) 1 0) 0)
+           (gqy-answer-count (tail fs) c q))))
+  (defn gqy-answer-find (fs c q)
+    (if (eq (len fs) 0) 0
+      (if (eq (stn-f-relation (head fs)) (gqy-case-rel c))
+        (if (eq (gqy-key-of (head fs) q) (gqy-case-key c))
+            (if (eq (gqy-rcol q) 0) (stn-f-subject (head fs)) (stn-f-object (head fs)))
+            (gqy-answer-find (tail fs) c q))
+        (gqy-answer-find (tail fs) c q))))
+  (defn gqy-q-at (qs i) (if (eq i 0) (head qs) (gqy-q-at (tail qs) (sub i 1))))
+  (defn gqy-answer-in (fs c)
+    (do (let q (gqy-q-at (gqy-queries) (gqy-case-q c)))
+      (if (str_eq (gqy-mode q) "count") (gqy-answer-count fs c q)
+                                        (gqy-answer-find fs c q))))
+  (defn gqy-answer (c) (gqy-answer-in (stn-facts) c))
+  (defn gqy-answers-loop (cs)
+    (if (eq (len cs) 0) ""
+      (if (eq (len (tail cs)) 0) (int_to_str (gqy-answer (head cs)))
+        (str_concat (int_to_str (gqy-answer (head cs)))
+          (str_concat " " (gqy-answers-loop (tail cs)))))))
+  ;; every answer, one line, in case order — the string a toolchain must match
+  (defn gqy-answers () (gqy-answers-loop (gqy-cases)))
+  (defn gqy-nonzero-loop (cs n)
+    (if (eq (len cs) 0) n
+      (gqy-nonzero-loop (tail cs) (add n (if (gt (gqy-answer (head cs)) 0) 1 0)))))
+  ;; how many of the sweep's questions have a real answer. A sweep whose cases
+  ;; are mostly zero would be a wall of agreement about nothing.
+  (defn gqy-nonzero-n () (gqy-nonzero-loop (gqy-cases) 0))
+
+  ;; ═══ METAMORPHIC INVARIANTS — a check with no second implementation ══
+  ;;
+  ;; Every reference in this stack is one hand reading the same rows (corpus
+  ;; row 921, common-mode), so three channels agreeing is three copies of one
+  ;; understanding. These are different in kind: they are properties of
+  ;; COUNTING, true of any correct implementation and of no author.
+  ;;
+  ;; The first: summing count_by_subject over every DISTINCT key that appears
+  ;; in the subject column for a relation must give exactly the number of facts
+  ;; carrying that relation. Every fact is counted once, by its own key. A
+  ;; column-swap bug leaves each individual answer looking plausible and breaks
+  ;; this sum — which is the exact failure class the sweep cannot see, because
+  ;; a swapped column would be swapped in the reference too.
+  (defn gqy-rel-facts (fs r n)
+    (if (eq (len fs) 0) n
+      (gqy-rel-facts (tail fs) r (add n (if (eq (stn-f-relation (head fs)) r) 1 0)))))
+  (defn gqy-sum-for (cs qid r n)
+    (if (eq (len cs) 0) n
+      (gqy-sum-for (tail cs) qid r
+        (add n (if (eq (gqy-case-q (head cs)) qid)
+                 (if (eq (gqy-case-rel (head cs)) r) (gqy-answer (head cs)) 0) 0)))))
+  (defn gqy-rels-loop (fs acc)
+    (if (eq (len fs) 0) acc
+      (gqy-rels-loop (tail fs)
+        (if (eq (gqy-mem? acc (stn-f-relation (head fs))) 1) acc
+            (cons (stn-f-relation (head fs)) acc)))))
+  (defn gqy-mem? (xs v)
+    (if (eq (len xs) 0) 0 (if (eq (head xs) v) 1 (gqy-mem? (tail xs) v))))
+  (defn gqy-relations () (gqy-rels-loop (stn-facts) (list)))
+  (defn gqy-inv-loop (rs qid)
+    (if (eq (len rs) 0) 1
+      (if (eq (gqy-sum-for (gqy-cases) qid (head rs) 0)
+              (gqy-rel-facts (stn-facts) (head rs) 0))
+          (gqy-inv-loop (tail rs) qid) 0)))
+  ;; both count shapes must satisfy it, on both columns
+  (defn gqy-invariant-sums? ()
+    (if (eq (gqy-inv-loop (gqy-relations) 0) 1) (gqy-inv-loop (gqy-relations) 1) 0))
+
+  ;; MULTI-MATCH cases are the payload of a find sweep: only a case with two or
+  ;; more matching rows tests first-match order at all. Counted rather than
+  ;; assumed, so a graph that stopped producing them shows up as a number
+  ;; falling instead of a sweep quietly testing less.
+  (defn gqy-matches (fs c q n)
+    (if (eq (len fs) 0) n
+      (gqy-matches (tail fs) c q
+        (add n (if (eq (stn-f-relation (head fs)) (gqy-case-rel c))
+                 (if (eq (gqy-key-of (head fs) q) (gqy-case-key c)) 1 0) 0)))))
+  (defn gqy-multi-loop (cs n)
+    (if (eq (len cs) 0) n
+      (gqy-multi-loop (tail cs)
+        (add n (if (gt (gqy-matches (stn-facts) (head cs)
+                         (gqy-q-at (gqy-queries) (gqy-case-q (head cs))) 0) 1) 1 0)))))
+  (defn gqy-multi-n () (gqy-multi-loop (gqy-cases) 0))
+
+  ;; ── THE DELTA WITNESS: the output tracks the input ──────────────
+  ;; No single emitted program can prove it was generated rather than
+  ;; templated — any one output could have been typed. What a template cannot
+  ;; do is track a PREDICTED CHANGE in its input. So: take the graph, add one
+  ;; fact whose relation and subject already occur, and the count answer for
+  ;; exactly that (shape, relation, key) must rise by exactly one while every
+  ;; other answer stays identical. One moved, all else still.
+  (defn gqy-plus-one (r k)
+    (cons (list k r k 0 0) (stn-facts)))
+  (defn gqy-delta-loop (cs fs2 target moved same)
+    (if (eq (len cs) 0) (list moved same)
+      (do (let a (gqy-answer (head cs)))
+        (let b (gqy-answer-in fs2 (head cs)))
+        (if (eq (gqy-case-eq? (head cs) target)
+                1)
+            (gqy-delta-loop (tail cs) fs2 target (add moved (sub b a)) same)
+            (gqy-delta-loop (tail cs) fs2 target moved
+                            (add same (if (eq a b) 1 0)))))))
+  (defn gqy-first-count-case-loop (cs)
+    (if (eq (len cs) 0) (list)
+      (if (eq (gqy-case-q (head cs)) 0) (head cs) (gqy-first-count-case-loop (tail cs)))))
+  (defn gqy-delta () (do (let t (gqy-first-count-case-loop (gqy-cases)))
+    (gqy-delta-loop (gqy-cases) (gqy-plus-one (gqy-case-rel t) (gqy-case-key t)) t 0 0)))
+  ;; the target answer moved by exactly 1, and every OTHER count case that does
+  ;; not share the new fact's key is untouched
+  (defn gqy-delta-moved () (nth (gqy-delta) 0))
+  (defn gqy-delta-same  () (nth (gqy-delta) 1))
 
   0)
