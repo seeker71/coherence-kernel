@@ -359,7 +359,12 @@ let pArgP = try pipe("form_argmax_part_f32"), pArgC = try pipe("form_argmax_comb
 // has no trailing-odd arm where the per-head kernel silently drops one; the argmax combine holds 4096
 // partials. Outside any of these the twin is WRONG, not slow. Refused here, not discovered later.
 let ARGP = 1024                                   // argmax partitions; also bounded by the combine's scratch
-let rmsTG = min(pRmsT.maxTotalThreadsPerThreadgroup, 1024)
+// FORM_RMS_TG overrides the cooperative rmsnorm's threadgroup width. It exists to answer one
+// question by measurement instead of by reading: the tg kernel stages n squares with nt threads and
+// then folds them ASCENDING on thread 0 alone. If the cost is the staging, this width moves it. If
+// the cost is the serial fold, this width does NOTHING — 1023 threads waiting cost the same as 31.
+let rmsTG = min(pRmsT.maxTotalThreadsPerThreadgroup,
+                Int(ProcessInfo.processInfo.environment["FORM_RMS_TG"] ?? "1024") ?? 1024)
 let argTG = min(pArgC.maxTotalThreadsPerThreadgroup, 1024)
 if dModel > 4096 || headDim % 2 != 0 || ARGP > 4096 {
     print("SKIP  this model leaves a Stone 16 twin's stated radius (d=\(dModel) hd=\(headDim) parts=\(ARGP))")
