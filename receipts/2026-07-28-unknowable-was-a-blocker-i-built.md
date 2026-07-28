@@ -70,8 +70,8 @@ that the refutation was cheaper than the excuse: one prompt, one run, one decode
 
 **`pseudo-oracle`** — the testing term for a check that stands in when no reference implementation
 exists. Distinct from `heteronomy` (899), a gate whose criteria you did not author: this gate has no
-author at all, only the world. Verified 0 hits. Row **916**; band **32767**, 311 rows,
-field code 3113112916.
+author at all, only the world. Verified 0 hits. Row **918**; band **32767**, 311 rows,
+field code 3133132918.
 
 ## Ground stamp
 
