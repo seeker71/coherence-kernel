@@ -46,6 +46,13 @@ TOKEN="${FORM_DS4_PROMPT_TOKEN:-671}"
 KV_CAP="${FORM_DS4_KV_CAP:-4}"
 KV_SEQUENCE="${FORM_DS4_KV_SEQUENCE:-0}"
 KV_STEPS="${FORM_DS4_KV_STEPS:-2}"
+# PROMPT PREFILL. A single seed token can only ever continue itself; a real answer needs the model
+# to have read a real prompt first. FORM_DS4_PROMPT_IDS carries the tokenizer's own output — the
+# body encodes the text with dsv4-tokenizer-cli and hands the ids here, so no text parsing enters
+# this carrier and the tokenizer stays the one authority on what a prompt IS.
+PROMPT_IDS="${FORM_DS4_PROMPT_IDS:-}"
+PROMPT_N=0
+if [ -n "$PROMPT_IDS" ]; then PROMPT_N=$(echo "$PROMPT_IDS" | wc -w | tr -d ' '); else PROMPT_IDS="none"; fi
 CONTROL_ADAPTER="${FORM_DS4_CONTROL_ADAPTER:-$ROOT/native/metal/artifacts/dsv4-control-logit-adapter.f32}"
 POS_A=0
 POS_B=7
@@ -181,6 +188,8 @@ TOKEN $TOKEN
 KV_CAP $KV_CAP
 KV_SEQUENCE $KV_SEQUENCE
 KV_STEPS $KV_STEPS
+PROMPT_N $PROMPT_N
+PROMPT_IDS $PROMPT_IDS
 NLAYERS $WANT_LAYERS
 N_EMBD $N_EMBD
 N_HEAD $N_HEAD
@@ -271,6 +280,8 @@ let outNorm = T("OUT_NORM"), outWeight = T("OUT_WEIGHT")
 let step = I("STEP"), viewLimit = I("VIEWLIMIT"), nviews = I("NVIEWS"), token = I("TOKEN")
 let nLayers = I("NLAYERS")
 let kvCap = I("KV_CAP"), kvSequence = I("KV_SEQUENCE") == 1, kvSteps = I("KV_STEPS")
+let promptN = I("PROMPT_N")
+let promptIds: [Int] = promptN == 0 ? [] : ((P["PROMPT_IDS"] ?? "none").split(separator: " ").compactMap { Int($0) })
 let nEmbd = I("N_EMBD"), nHead = I("N_HEAD"), headDim = I("HEAD_DIM"), nRot = I("N_ROT"), oRank = I("O_RANK")
 let nHc = I("N_HC"), hcIters = I("HC_ITERS"), nUsed = I("N_USED"), nFf = I("N_FF")
 let posA = I("POS_A"), posB = I("POS_B")
@@ -917,12 +928,15 @@ if kvSequence {
     var firstFinal: [Float] = [], lastFinal: [Float] = [], firstRow: [UInt32] = []
     var currentToken = token
     var emitted: [Int] = []
+    // PREFILL then GENERATE. While pos is inside the prompt the input is the prompt's token and
+    // the emitted id is discarded — the model is READING. Past the prompt it eats its own output.
+    // The boundary is the whole difference between a continuation of one token and an answer.
     for pos in 0..<kvSteps {
-        let inputToken = currentToken
+        let inputToken = pos < promptIds.count ? promptIds[pos] : currentToken
         var resid = embedToken(inputToken)
         for il in 0..<nLayers { resid = runLayer(il, pos, inputToken, resid).outHc }
         let exit = nativeExitHead(resid, "feedback step \(pos), input_token=\(inputToken)")
-        emitted.append(exit.token)
+        if pos >= promptIds.count - 1 { emitted.append(exit.token) }
         currentToken = exit.token
         let rp = fp(resid, hcDim)
         let vals = (0..<hcDim).map { rp[$0] }
@@ -946,9 +960,13 @@ if kvSequence {
     check(historyExact == headDim && written == headDim && frontier == headDim && stateDiff > 0,
       "GROWING KV, \(kvSteps) REAL STACK STEPS: layer 0 retained \(historyExact)/\(headDim) row-0 bits, wrote \(written)/\(headDim) values in row \(kvSteps-1), left \(frontier)/\(headDim) row-\(kvSteps) sentinels, and the final HC state changed in \(stateDiff)/\(hcDim) entries",
       "growing KV: history \(historyExact)/\(headDim), last row \(written)/\(headDim), frontier \(frontier)/\(headDim), state diff \(stateDiff)/\(hcDim)")
-    check(emitted.count == kvSteps && emitted.allSatisfy { $0 >= 0 && $0 < emb.rows },
+    // The expected count is kvSteps MINUS the prefill positions whose outputs are discarded: while
+    // the model is reading the prompt its emissions are not answers. With no prompt this is kvSteps,
+    // which is what it was before prefill existed.
+    let expectEmitted = kvSteps - max(0, promptIds.count - 1)
+    check(emitted.count == expectEmitted && emitted.allSatisfy { $0 >= 0 && $0 < emb.rows },
       "BOUNDED AUTOREGRESSIVE TOKEN FEEDBACK (\(kvSteps) steps, no EOS claim): \(emitted); each emitted token became the next step's exact embedding row and every hashed router's token",
-      "bounded autoregressive token feedback did not produce \(kvSteps) in-vocabulary tokens: \(emitted)")
+      "bounded autoregressive token feedback did not produce \(expectEmitted) in-vocabulary tokens: \(emitted)")
     useGrowingKv = false
 }
 
