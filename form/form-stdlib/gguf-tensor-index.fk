@@ -1,0 +1,108 @@
+; gguf-tensor-index.fk — one walk that COLLECTS, instead of many walks that
+; search.
+;
+; THE COST THIS EXISTS TO REMOVE, measured on KAT-Coder's 753-tensor table:
+;   one full-scan miss through egg-find-tensor   0.35 s
+;   kat-coder-layer-shape-band's ~90 lookups     122 s
+; `egg-find-tensor` is exactly right for asking about ONE tensor — it walks and
+; stops at the match, builds no list, and returns -1 rather than inventing a
+; hit. It is the wrong shape for asking about a HUNDRED, because every question
+; restarts the walk and every absent name pays a full scan. A stack harness
+; binding a whole model asks hundreds of times.
+;
+; THE MOVE. Ask the table once and carry away the answer. `gti-blocks-with`
+; walks all N records a single time and conses the block index of every tensor
+; whose name ends in a given leaf, so "which blocks have a causal conv" costs
+; one walk instead of forty-one.
+;
+; MATCHING BY SUFFIX, NOT BY WHOLE NAME, is what makes one walk enough. The
+; per-block names differ only in their number — `blk.0.ssm_conv1d.weight`,
+; `blk.1.ssm_conv1d.weight`, … — so a whole-name compare can only answer for one
+; block at a time. A suffix compare against `.ssm_conv1d.weight` answers for all
+; of them at once, and the block index is read out of the name rather than
+; supplied to it.
+;
+; THIS IS A SECOND REACH INTO ONE MEANING, NOT A SECOND MEANING. The byte
+; comparison below is egg-name-bytes-eq's, walked from the tail instead of the
+; head; the record walk is egg-ti-next's. Nothing here re-derives the GGUF
+; layout, and `egg-find-tensor` stays exactly as it is — the single-tensor
+; question still deserves the single-tensor answer.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk
+
+(do
+    ; ── does this record's name end with `suffix`? ───────────────────────
+    ; boff is the name's first byte; nl its length. The comparison runs from the
+    ; END of both, so a name shorter than the suffix is refused before any read.
+    (defn gti-tail-eq (src boff nl suffix k sl)
+        (if (eq k sl) 1
+            (if (eq (eqr-at src (add boff (sub nl (add k 1))))
+                    (str_byte_at suffix (sub sl (add k 1))))
+                (gti-tail-eq src boff nl suffix (add k 1) sl)
+                0)))
+    (defn gti-suffix-eq (src off suffix)
+        (do (let nl (egg-ti-namelen src off))
+            (let sl (str_len suffix))
+            (if (lt nl sl) 0 (gti-tail-eq src (add off 8) nl suffix 0 sl))))
+
+    ; ── read the block index out of `blk.<N>.…` ──────────────────────────
+    ; -1 for any name that does not start with `blk.`, which is how the
+    ; model-level tensors (token_embd, output_norm, output) fall out without
+    ; being special-cased anywhere.
+    (defn gti-digits (src boff i nl acc seen)
+        (if (ge i nl) (if (eq seen 1) acc (sub 0 1))
+            (do (let b (eqr-at src (add boff i)))
+                (if (eq b 46) (if (eq seen 1) acc (sub 0 1))          ; '.'
+                    (if (if (ge b 48) (le b 57) 0)
+                        (gti-digits src boff (add i 1) nl (add (mul acc 10) (sub b 48)) 1)
+                        (sub 0 1))))))
+    (defn gti-blk-prefix? (src boff)
+        (if (eq (eqr-at src boff) 98)                                  ; 'b'
+            (if (eq (eqr-at src (add boff 1)) 108)                     ; 'l'
+                (if (eq (eqr-at src (add boff 2)) 107)                 ; 'k'
+                    (if (eq (eqr-at src (add boff 3)) 46) 1 0) 0) 0) 0))
+    (defn gti-blk-index (src off)
+        (do (let boff (add off 8))
+            (if (eq (gti-blk-prefix? src boff) 0) (sub 0 1)
+                (gti-digits src boff 4 (egg-ti-namelen src off) 0 0))))
+
+    ; ── ONE walk, all the answers for one leaf ───────────────────────────
+    (defn gti-collect-go (src off n suffix acc)
+        (if (eq n 0) (reverse acc)
+            (gti-collect-go src (egg-ti-next src off) (sub n 1) suffix
+                (if (eq (gti-suffix-eq src off suffix) 1)
+                    (do (let b (gti-blk-index src off))
+                        (if (lt b 0) acc (cons b acc)))
+                    acc))))
+    (defn gti-blocks-with (src suffix)
+        (gti-collect-go src (egg-tinfo-start src) (egg-tensor-count src) suffix (empty)))
+
+    ; count without building the list, for a band that only wants the number
+    (defn gti-count-go (src off n suffix acc)
+        (if (eq n 0) acc
+            (gti-count-go src (egg-ti-next src off) (sub n 1) suffix
+                (add acc (gti-suffix-eq src off suffix)))))
+    (defn gti-count-with (src suffix)
+        (gti-count-go src (egg-tinfo-start src) (egg-tensor-count src) suffix 0))
+
+    ; ── membership in a collected list ───────────────────────────────────
+    (defn gti-memq (x xs) (if (eq (len xs) 0) 0 (if (eq (head xs) x) 1 (gti-memq x (tail xs)))))
+
+    ; ── every record's TYPE, in one walk ─────────────────────────────────
+    ; The census cells asked the table once per quantization — five walks of 753
+    ; records to answer five questions about the same 753 records. This carries
+    ; the types away in one walk; counting them afterwards is arithmetic over a
+    ; list already in memory, which costs nothing next to re-reading the table.
+    ;
+    ; The list is 753 entries for KAT-Coder and 1406 for DS4 — small enough to
+    ; hold, and that is the whole reason this shape is available here. It would
+    ; not be for the tensor DATA, which is why the weight lanes stream instead.
+    (defn gti-types-go (src off n acc)
+        (if (eq n 0) (reverse acc)
+            (gti-types-go src (egg-ti-next src off) (sub n 1) (cons (egg-ti-type src off) acc))))
+    (defn gti-types (src)
+        (gti-types-go src (egg-tinfo-start src) (egg-tensor-count src) (empty)))
+    (defn gti-count-in (ts t)
+        (if (eq (len ts) 0) 0
+            (add (if (eq (head ts) t) 1 0) (gti-count-in (tail ts) t))))
+    0)
