@@ -107,7 +107,7 @@ grep -q 'kernel void form_q6k_matvec_slot_f32' "$work/ours.metal" || {
     echo "FAIL  the body did not emit form_q6k_matvec_slot_f32"; exit 1; }
 # STONE 17: the Q4_K pair carries 75.4% of decode, so its absence is a FAIL here too rather than a
 # silently skipped arm — the whole point of this stone is that the majority kernel stops being unraced.
-for k in form_q4k_matvec_lane_f32 form_q4k_matvec_slot_f32; do
+for k in form_q4k_matvec_lane_f32 form_q4k_matvec_slot_f32 form_q4k_matvec_slot4_f32; do
     grep -q "kernel void $k" "$work/ours.metal" || { echo "FAIL  the body did not emit $k"; exit 1; }
 done
 echo "  $(wc -c < "$work/ours.metal" | tr -d ' ') bytes, every character authored by a .fk cell"
@@ -526,7 +526,7 @@ let off = Int(a[4])!, cols = Int(a[5])!, rows = Int(a[6])!, iters = Int(a[7])!, 
 // raced; Q4_K is the other 75.4% (168 tensors against 29, read from the blob by gti-types).
 let qtype = a.count > 9 ? Int(a[9])! : 6
 let sbBytes = qtype == 6 ? 210 : 144        // Q6_K superblock 210 B, Q4_K 144 B, both over QK_K=256
-let oursName  = qtype == 6 ? "form_q6k_matvec_slot_f32" : "form_q4k_matvec_slot_f32"
+let oursName  = qtype == 6 ? "form_q6k_matvec_slot_f32" : "form_q4k_matvec_slot4_f32"
 let theirsName = qtype == 6 ? "kernel_mul_mv_q6_K_f32"  : "kernel_mul_mv_q4_K_f32"
 let dev = MTLCreateSystemDefaultDevice()!
 let q = dev.makeCommandQueue()!
@@ -625,7 +625,7 @@ var yLane: [Float]? = nil
 let sweep = qtype == 6
     ? ["form_q6k_matvec_lane_f32", "isa_q6k_v1_f32", "isa_q6k_v2_f32", "isa_q6k_v3_f32",
        "isa_q6k_v4_f32", "form_q6k_matvec_slot_f32"]
-    : ["form_q4k_matvec_lane_f32", "isa_q4k_v3_f32", "form_q4k_matvec_slot_f32"]
+    : ["form_q4k_matvec_lane_f32", "isa_q4k_v3_f32", "form_q4k_matvec_slot_f32", "form_q4k_matvec_slot4_f32"]
 for nm in sweep {
     pOurs = try dev.makeComputePipelineState(function: libOurs.makeFunction(name: nm)!)
     oursNR0 = (nm == "isa_q6k_v4_f32") ? 2 : 1
