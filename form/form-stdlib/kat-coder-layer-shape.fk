@@ -1,0 +1,116 @@
+; kat-coder-layer-shape.fk — which of KAT-Coder's 41 blocks are linear-attention
+; and which are full-attention, decided by the tensors each block actually
+; carries rather than by a KV field.
+;
+; WHY NOT JUST READ full_attention_interval. The file declares
+; `qwen35moe.full_attention_interval = 4`, and believing it would be one field
+; standing for 41 structural facts. The DS4 stack harness does not work that way
+; either — metal_dsv4_stack.sh reads every per-layer decision (expert count,
+; gate/up and down type, routing regime, rope regime) out of the tensor table,
+; because the file's own tensors are what a loader must bind and a KV field is a
+; summary someone wrote about them. This cell asks each block what it has.
+;
+; THE TWO SHAPES, read 2026-07-28 from the verified 17.39 GB file
+; (sha256 5f5fcf95… matching the publisher's sha256sums.txt):
+;
+;   LINEAR block (0, 1, 2, 4, 5, 6, …)
+;     attn_qkv.weight      Q4_K  [2048, 8192]   fused q||k||v — one projection
+;     ssm_conv1d.weight    F32   [4, 8192]      the causal conv over that concat
+;     attn_gate.weight     Q4_K  [2048, 4096]   the silu output gate
+;     ssm_a, ssm_dt.bias, ssm_alpha, ssm_beta, ssm_norm, ssm_out
+;     NO attn_q / attn_k / attn_v / attn_output
+;
+;   FULL block (3, 7, 11, …, 39)
+;     attn_q.weight        Q4_K  [2048]
+;     attn_k.weight        Q6_K  [2048]
+;     attn_v.weight        Q6_K  [2048]
+;     attn_output.weight   Q4_K  [4096]
+;     NO attn_qkv, NO ssm_conv1d, NO attn_gate
+;
+; The k and v projections are Q6_K where q is Q4_K — a per-tensor precision
+; choice this body would not have guessed and does not have to, because it is in
+; the table.
+;
+; WHAT THIS IS FOR. gated-deltanet-layer.fk computes a linear block and
+; moe-route-wide-msl.fk routes its experts, both on the device. This cell is the
+; map that says WHICH blocks take that path, and it is the piece a stack harness
+; binds against. It does not load weights and it does not run anything.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/kat-coder-tensor-table.fk
+
+(do
+    (defn kls-blocks () 41)                  ; 40 layers + one MTP head
+    (defn kls-interval () 4)                 ; the file's declared full_attention_interval
+
+    ; the block index -> the name of a tensor only that shape carries
+    (defn kls-int-str (n) (int_to_str n))
+    (defn kls-name (b leaf) (str_concat "blk." (str_concat (kls-int-str b) (str_concat "." leaf))))
+    (defn kls-has (s b leaf) (if (lt (egg-find-tensor s (kls-name b leaf)) 0) 0 1))
+    (defn kls-type (s b leaf)
+        (do (let o (egg-find-tensor s (kls-name b leaf)))
+            (if (lt o 0) (sub 0 1) (egg-ti-type s o))))
+
+    ; ── the decision, made from the block's own tensors ──────────────────
+    ; A block is LINEAR when it carries the causal conv; FULL when it carries a
+    ; separate q projection. Both are asked, so a block carrying neither or both
+    ; is visible as such rather than defaulting into one branch.
+    (defn kls-linear? (s b) (kls-has s b "ssm_conv1d.weight"))
+    (defn kls-full? (s b) (kls-has s b "attn_q.weight"))
+    (defn kls-well-formed? (s b)
+        (if (eq (add (kls-linear? s b) (kls-full? s b)) 1) 1 0))
+
+    ; what the declared interval WOULD say, for the band to compare against
+    (defn kls-declared-full? (b)
+        (if (eq (sub b (mul (div b (kls-interval)) (kls-interval))) 3) 1 0))
+
+    ; ── THE MTP HEAD IS NOT ON THE INTERVAL, AND THAT IS THE FINDING ─────
+    ; Asking the tensors gives 30 linear and 11 full, at blocks
+    ;   [3, 7, 11, 15, 19, 23, 27, 31, 35, 39, 40]
+    ; The first ten are the interval's. The eleventh is block 40 — the
+    ; `nextn_predict_layers = 1` multi-token-prediction head, appended after the
+    ; 40 transformer layers — and it is FULL attention while `b mod 4 == 0`
+    ; would call it linear.
+    ;
+    ; This is exactly the cost of believing the KV field. A loader that routed
+    ; blocks by `full_attention_interval` alone would send the MTP head down the
+    ; linear path, where `blk.40.ssm_conv1d.weight` does not exist — and the
+    ; failure would arrive as a missing tensor at bind time if it were lucky, or
+    ; as a bound-but-wrong projection if it were not. The field is TRUE of what
+    ; it describes: the 40 transformer layers. It simply does not describe all 41
+    ; blocks, and nothing in the field says so.
+    (defn kls-transformer-layers () 40)      ; the interval's domain
+    (defn kls-mtp-head () 40)                ; the block index outside it
+    (defn kls-expected-full? (b)
+        (if (eq b (kls-mtp-head)) 1 (kls-declared-full? b)))
+    ; the interval holds over the layers it describes, and only over those
+    (defn kls-interval-holds-go (s b n)
+        (if (ge b n) 1
+            (if (eq (kls-full? s b) (kls-declared-full? b))
+                (kls-interval-holds-go s (add b 1) n) 0)))
+    (defn kls-interval-holds-over-layers? (s)
+        (kls-interval-holds-go s 0 (kls-transformer-layers)))
+    (defn kls-mtp-is-full? (s) (kls-full? s (kls-mtp-head)))
+    ; the corrected predicate, over all 41
+    (defn kls-shape-known-go (s b n)
+        (if (ge b n) 1
+            (if (eq (kls-full? s b) (kls-expected-full? b))
+                (kls-shape-known-go s (add b 1) n) 0)))
+    (defn kls-shape-known? (s) (kls-shape-known-go s 0 (kls-blocks)))
+
+    ; ── walks over all 41 blocks ─────────────────────────────────────────
+    (defn kls-count-go (s b n f acc)
+        (if (ge b n) acc
+            (kls-count-go s (add b 1) n f (add acc (if (eq f 1) (kls-full? s b) (kls-linear? s b))))))
+    (defn kls-full-count (s) (kls-count-go s 0 (kls-blocks) 1 0))
+    (defn kls-linear-count (s) (kls-count-go s 0 (kls-blocks) 0 0))
+    ; every block is exactly one shape
+    (defn kls-all-well-formed-go (s b n)
+        (if (ge b n) 1 (if (eq (kls-well-formed? s b) 1) (kls-all-well-formed-go s (add b 1) n) 0)))
+    (defn kls-all-well-formed? (s) (kls-all-well-formed-go s 0 (kls-blocks)))
+    ; the tensors agree with the declared interval, block for block
+    (defn kls-matches-interval-go (s b n)
+        (if (ge b n) 1
+            (if (eq (kls-full? s b) (kls-declared-full? b))
+                (kls-matches-interval-go s (add b 1) n) 0)))
+    (defn kls-matches-interval? (s) (kls-matches-interval-go s 0 (kls-blocks)))
+    0)
