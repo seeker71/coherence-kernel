@@ -87,13 +87,21 @@
     (defn mx8m-msl-val ()
         "static inline float mx8_val(int b) { int mant = mxm_mod(b, 8); int ex = mxm_mod(b / 8, 16); int sgn = b / 128; float frac = float(mant) / 8.0f; float mag = (ex == 0) ? (mxm_pow2(-6) * frac) : (mxm_pow2(ex - 7) * (1.0f + frac)); return (sgn == 1) ? -mag : mag; } ")
 
+    ; Real type-41 matrices use the same 128-row x 4-group scale
+    ; permutation as type 40.  Compact fixtures retain their selected scale
+    ; bytes in flat order; only the production matrix path uses this offset.
+    (defn mx8m-msl-sf-off ()
+        "static inline uint mx8_sf_off(uint r, uint g, uint ng) { return ((r / 128u) * (ng / 4u) + g / 4u) * 512u + (r % 32u) * 16u + ((r % 128u) / 32u) * 4u + (g % 4u); } ")
+
     ; --- one weight, mx8m-flat-at in C ---
     (defn mx8m-msl-weight ()
         "static inline float mx8_w(device const uchar* qb, uint nel, uint idx) { int e = int(qb[nel + idx / 32u]); return mxm_e8m0(e) * mx8_val(int(qb[idx])); } ")
 
     ; the spine is mxfp4-msl.fk's, not a copy of it
     (defn mx8m-msl-helpers ()
-        (str_concat (mxm-msl-spine) (str_concat (mx8m-msl-val) (mx8m-msl-weight))))
+        (str_concat (mxm-msl-spine)
+            (str_concat (mx8m-msl-val)
+                (str_concat (mx8m-msl-sf-off) (mx8m-msl-weight)))))
 
     (defn mx8m-dequant-body (fname)
         (str_concat "kernel void "
@@ -105,8 +113,15 @@
         (str_concat fname
             " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ng = cols / 32u; uint g0 = (r * cols) / 32u; float sumf = 0.0f; for (uint g = lane; g < ng; g += 32u) { float s = mxm_e8m0(int(qb[nel + g0 + g])); uint p = r * cols + g * 32u; device const float* xv = x + g * 32u; float acc = 0.0f; for (uint m = 0u; m < 32u; ++m) { acc = acc + xv[m] * mx8_val(int(qb[p + m])); } sumf = sumf + s * acc; } float sv = metal::simd_sum(sumf); if (lane == 0u) y[r] = sv; }")))
 
+    (defn mx8m-matrix-matvec-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ng = cols / 32u; float sumf = 0.0f; for (uint g = lane; g < ng; g += 32u) { float s = mxm_e8m0(int(qb[nel + mx8_sf_off(r, g, ng)])); uint p = r * cols + g * 32u; device const float* xv = x + g * 32u; float acc = 0.0f; for (uint m = 0u; m < 32u; ++m) { acc = acc + xv[m] * mx8_val(int(qb[p + m])); } sumf = sumf + s * acc; } float sv = metal::simd_sum(sumf); if (lane == 0u) y[r] = sv; }")))
+
     (defn mx8m-dequant-msl (fname) (str_concat (mx8m-msl-helpers) (mx8m-dequant-body fname)))
     (defn mx8m-matvec-msl  (fname) (str_concat (mx8m-msl-helpers) (mx8m-matvec-body  fname)))
+    (defn mx8m-matrix-matvec-msl (fname)
+        (str_concat (mx8m-msl-helpers) (mx8m-matrix-matvec-body fname)))
     (defn mx8m-msl-unit (dname mname)
         (str_concat (mx8m-msl-helpers)
         (str_concat (mx8m-dequant-body dname) (mx8m-matvec-body mname))))
