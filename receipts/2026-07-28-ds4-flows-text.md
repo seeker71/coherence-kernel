@@ -64,7 +64,7 @@ do by default*, and that silence read as absence.
 
 **`phenotype`** — against *genotype*. Distinct from `autoepistemic` (897, not-found read as
 not-there): this was found, run, and passed, and its capability still went unread because a default
-hid it. Verified 0 hits. Row **914**; band **32767**, 309 rows, field code 3093092914.
+hid it. Verified 0 hits. Row **915**; band **32767**, 310 rows, field code 3103102915.
 
 ## Ground stamp
 
