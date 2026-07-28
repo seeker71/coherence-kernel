@@ -762,8 +762,24 @@ export class Kernel {
   }
 
   internTrivialInt(n: number): NodeID {
-    const inst = (n | 0) >>> 0;
-    return { pkg: 1, level: Level.TRIVIAL, type: Triv.INT, inst };
+    // Mirrors the Go kernel (main.go internTrivialInt): inline while the value
+    // fits the 32-bit inst slot, overflow into the i64 table once it crosses
+    // the int32 ceiling. Before this the overflow branch did not exist and the
+    // value was silently truncated by `(n | 0)` — 3045007003 came back as
+    // -1249960293, so every language-neutral node id (all of them sit above
+    // 2^31) was destroyed by a round trip through a recipe. Go's comment states
+    // the intent plainly: "Both paths decode back to Value{VInt, int64} … so
+    // callers and arithmetic never see the storage split."
+    //
+    // Remaining seam, named rather than papered over: Go decodes both paths to
+    // its int kind, while this kernel decodes Triv.INT64 to the `i64` bigint
+    // kind, which 78 sites depend on (make_int64 among them). Aligning THAT is
+    // a larger change than stopping the data loss, and is not attempted here.
+    if (n >= -2147483648 && n <= 2147483647) {
+      const inst = (n | 0) >>> 0;
+      return { pkg: 1, level: Level.TRIVIAL, type: Triv.INT, inst };
+    }
+    return this.internTrivialInt64(BigInt(Math.trunc(n)));
   }
 
   internString(s: string): NodeID {
