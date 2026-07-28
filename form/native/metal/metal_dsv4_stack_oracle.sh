@@ -654,6 +654,11 @@ func ropeFreqs(_ il: Int) -> MTLBuffer {
         f *= thetaScale
     }
     freqCache[il] = buf
+    if il < 4 {
+        var head: [String] = []
+        for k in 0..<min(6, nPair) { head.append(String(format: "%.9g", p[k])) }
+        print("      ROPEFREQ blk.\(il) ratio=\(LW[il].ratio) fbase=\(fbase) fscale=\(fscale) ext=\(ext) lo=\(lo) hi=\(hi) first6=\(head.joined(separator: ","))")
+    }
     return buf
 }
 func gpuRope(_ v: MTLBuffer, _ nh: Int, _ pos: Int, _ il: Int, _ inverse: Bool) -> MTLBuffer {
@@ -705,6 +710,8 @@ func gpuAttend(_ q: MTLBuffer, _ rows: MTLBuffer, _ snk: Tn, _ nrows: Int = 1) -
     return out
 }
 var useGrowingKv = false
+// the attention half's insides, captured so runStack can gate between its ends
+var lastQr: MTLBuffer? = nil, lastKq: MTLBuffer? = nil, lastHa: MTLBuffer? = nil, lastAo: MTLBuffer? = nil
 var kvArenas: [MTLBuffer] = []
 func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows)
@@ -802,6 +809,7 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let kr = gpuRope(kln, 1, pos, il, false)
     let kq = gpuKvRound(kr)
     if il == 0 { observeRealKvAppend(kq) }
+    lastQr = qr; lastKq = kq
     let ha: MTLBuffer
     if useGrowingKv {
         gpuKvAppend(kq, kvArenas[il], pos, kvCap)
@@ -809,9 +817,12 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     } else {
         ha = gpuAttend(qr, kq, w.snk)
     }
+    lastHa = ha
     let hu = gpuRope(ha, nHead, pos, il, true)
     let lo = gpuGrouped(w.oa, hu)
-    return gpuMx8(w.ob, lo, w.ob.rows, w.ob.cols)
+    let ao = gpuMx8(w.ob, lo, w.ob.rows, w.ob.cols)
+    lastAo = ao
+    return ao
 }
 
 func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) -> LayerOut {
@@ -995,6 +1006,14 @@ let seqIds: [Int] = {
 func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = []) {
     var gateToken = token
     var resid = residHc0
+<<<<<<< HEAD
+    // blk.0's injected gate feeds the layer the EMBEDDING, and in a sequence that must be the
+    // GATED position's token, not seq[0]. Reading the global residHc0 here compared blk.0 run on
+    // token 671 against an oracle that ran token 344 and reported nd 1.05 — a harness defect
+    // wearing a model defect's clothes.
+    var gateResid0 = residHc0
+=======
+>>>>>>> origin/main
     if seq.count > 1 {
         // ── THE PREFIX ────────────────────────────────────────────────────────────────────────────
         // Run positions 0..<pos through every layer so each layer's KV arena holds the real latents
@@ -1011,6 +1030,10 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = [])
             for il in 0..<nLayers { r = runLayer(il, p, seq[p], r).outHc }
         }
         resid = embedToken(gateToken)
+<<<<<<< HEAD
+        gateResid0 = resid
+=======
+>>>>>>> origin/main
     }
     for il in 0..<nLayers {
         let w = LW[il]
@@ -1105,7 +1128,7 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = [])
         // this layer -- its predecessor's out_hc, rounded to f32 -- and compares the result to the
         // oracle's. There is no depth in it, so its bound carries no depth: one layer, judged alone.
         do {
-            let (inR, inN) = il == 0 ? (residHc0, hcDim) : oracleBuf(oraDir, il-1, "out_hc")
+            let (inR, inN) = il == 0 ? (gateResid0, hcDim) : oracleBuf(oraDir, il-1, "out_hc")
             if inN == hcDim {
                 let J = runLayer(il, pos, gateToken, inR)
                 let ref = readOracle(oraDir, il, "out_hc")
@@ -1117,6 +1140,63 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = [])
                 if !(ok && gpuErrors == 0 && J.ids == oraSel) { layerFail += 1 }
             }
         }
+        // ── INSIDE THE ATTENTION HALF ───────────────────────────────────────────────────────────
+        if let q = lastQr { G(q, nHead*headDim, "q_roped", 3e-5, "the ROPED query, \(nHead) heads x \(headDim)") }
+        if let k = lastKq { G(k, headDim, "kv_q", 3e-5, "the quantized latent this position APPENDS to the arena") }
+        if let h = lastHa { G(h, nHead*headDim, "heads_attn", 3e-5, "the attention output over \(pos+1) key(s), BEFORE the inverse rotation") }
+        // ── THE ARENA ITSELF ───────────────────────────────────────────────────────────────────
+        // The attend kernel is proven over the oracle's rows, so what remains is whether OUR rows
+        // are the oracle's. Every row is compared, not just the last: a per-row report says WHICH
+        // position drifted, and a drift that grows with distance from the gated position is a
+        // different animal from one that is uniform.
+        if useGrowingKv && pos > 0 && il < 4 {
+            let kh = readOracle(oraDir, il, "kv_hist")
+            if kh.count == (pos+1)*headDim {
+                let ap = kvArenas[il].contents().bindMemory(to: Float.self, capacity: kvCap*headDim)
+                var report: [String] = []
+                var worst = 0.0
+                for r in 0...pos {
+                    var mx = 0.0, den = 0.0
+                    for d in 0..<headDim {
+                        let g = Double(ap[r*headDim + d]), o = kh[r*headDim + d]
+                        mx = max(mx, abs(g - o)); den = max(den, abs(o))
+                    }
+                    let nd = den > 0 ? mx/den : mx
+                    worst = max(worst, nd)
+                    // HOW MANY elements differ, not just how much. One element off by a quantisation
+                    // step in an otherwise bit-identical row is a knife-edge; many elements off is a
+                    // wrong kernel. The two need opposite repairs, so the count decides.
+                    var ndiff = 0, inTail = 0, firstIdx = -1
+                    let nNope = headDim - nRot
+                    for d in 0..<headDim where Double(ap[r*headDim + d]) != kh[r*headDim + d] {
+                        ndiff += 1; if d >= nNope { inTail += 1 }; if firstIdx < 0 { firstIdx = d }
+                    }
+                    report.append(String(format: "row%d %.3e[%d/%d tail%d first%d]", r, nd, ndiff, headDim, inTail, firstIdx))
+                }
+                check(worst < 3e-5,
+                  "\(tag) THE ARENA — every stored KV row matches the oracle's own history [pos \(pos)]: \(report.joined(separator: " "))",
+                  "\(tag) THE ARENA has drifted from the oracle's history [pos \(pos)]: \(report.joined(separator: " ")) (worst \(worst))")
+                if worst >= 3e-5 { layerFail += 1 }
+            }
+        }
+        // ── THE ATTEND KERNEL, JUDGED ALONE ────────────────────────────────────────────────────
+        // History reaches a layer by TWO doors: the residual input, and the KV arena. Injecting only
+        // the first leaves the second carrying our own accumulated drift, so the gate above is not
+        // depth-independent in a sequence however much it says so. This one loads the ORACLE's whole
+        // per-layer KV history into a fresh arena and runs OUR attend kernel over it with OUR proven
+        // query. Both doors replaced: whatever it reports is the kernel's, at this key count.
+        if let q = lastQr {
+            let kh = readOracle(oraDir, il, "kv_hist")
+            if kh.count == (pos+1)*headDim {
+                let arena = dev.makeBuffer(length: kh.count*4, options: .storageModeShared)!
+                let ap = arena.contents().bindMemory(to: Float.self, capacity: kh.count)
+                for i in 0..<kh.count { ap[i] = Float(kh[i]) }
+                let hi = gpuAttend(q, arena, LW[il].snk, pos+1)
+                G(hi, nHead*headDim, "heads_attn", 3e-5,
+                  "INJECTED HISTORY — our attend kernel over the ORACLE's own \(pos+1) KV rows")
+            }
+        }
+        if let a = lastAo { G(a, nEmbd, "attn_out", 3e-5, "the attention block's output, after the inverse rotation and both output projections") }
         G(R.outHc, hcDim, "out_hc", 3e-5,
           "THE LAYER'S OUTPUT — the \(hcDim) hyper-connection entries blk.\(il+1) receives, carried forward")
         resid = R.outHc
