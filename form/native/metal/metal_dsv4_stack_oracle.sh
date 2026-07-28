@@ -55,6 +55,27 @@ KV_STEPS="${FORM_DS4_KV_STEPS:-2}"
 POS_A=0
 POS_B=7
 
+# ── THE SEQUENCE, 2026-07-28 ──────────────────────────────────────────────────────────────────────
+# FORM_DS4_SEQ_IDS="id id id ..." makes position B a REAL position in a REAL sequence: the prefix is
+# run through every layer first, each position leaving its latent in that layer's KV arena, and the
+# last id is the one all 100+ per-layer gates then judge.
+#
+# WHY. Until today every gate here ran ONE token, so `gpuAttend` was called with its default
+# `nrows = 1` and attention was a softmax over a single score plus the learned sink — an operation
+# that cannot SELECT. Meanwhile the autoregressive loop below flips `useGrowingKv` and calls the same
+# kernel with `pos + 1` rows. The proven path and the text-producing path were not the same path,
+# and the multi-key softmax — the thing that makes attention attention — had no reference at all.
+# That is exactly the shape of defect that yields locally-plausible, globally-threadless output.
+SEQ_IDS="${FORM_DS4_SEQ_IDS:-}"
+if [[ -n "$SEQ_IDS" ]]; then
+    SEQ_N=$(echo "$SEQ_IDS" | wc -w | tr -d ' ')
+    (( SEQ_N >= 2 )) || { echo "FAIL FORM_DS4_SEQ_IDS needs at least 2 ids to hold a history"; exit 1; }
+    POS_B=$(( SEQ_N - 1 ))
+    TOKEN=$(echo "$SEQ_IDS" | awk '{print $1}')
+    (( KV_CAP > POS_B + 1 )) || KV_CAP=$(( POS_B + 2 ))
+    echo "  SEQUENCE: $SEQ_N ids, gating position $POS_B with $POS_B keys of real history behind it"
+fi
+
 if [[ "$(uname -s)" != "Darwin" ]] || ! command -v swiftc >/dev/null; then
     echo "SKIP  no Darwin/Metal toolchain on this host — the GPU witness needs an Apple GPU + swiftc"; exit 2
 fi
@@ -197,6 +218,7 @@ N_USED $N_USED
 N_FF $N_FF
 POS_A $POS_A
 POS_B $POS_B
+SEQ_IDS ${SEQ_IDS:-none}
 ROPE_BASE $ROPE_BASE
 ROPE_CBASE $ROPE_CBASE
 ROPE_SCALEF $ROPE_SCALEF
@@ -213,13 +235,18 @@ awk 'NF < 2 { print "FAIL missing value for " $1 > "/dev/stderr"; exit 1 }' "$wo
 # ── 2b. THE RENTED ORACLE, in `stack` mode, at BOTH positions (hushfold) ───────────────────────────
 ORACLE="$ROOT/form-stdlib/tests/dsv4-mla-core-oracle.py"
 [[ -f "$ORACLE" ]] || { echo "FAIL the rented oracle is missing: $ORACLE"; exit 1; }
+# The oracle is rented at pos A with a ONE-id sequence (the degenerate single-key case, kept so the
+# old comparison still runs) and at pos B with the WHOLE sequence, so its attention sees the same
+# history the device's KV arena holds. With no FORM_DS4_SEQ_IDS both are empty and the oracle keeps
+# its previous one-token behaviour exactly.
+if [[ -n "$SEQ_IDS" ]]; then TOKS_A="$TOKEN"; TOKS_B="$SEQ_IDS"; else TOKS_A=""; TOKS_B=""; fi
 ORA0="${FORM_DS4_ORACLE_DIR0:-}"; ORA7="${FORM_DS4_ORACLE_DIR7:-}"
 if [[ -z "$ORA0" || -z "$ORA7" ]]; then
     ORA0="$work/ora$POS_A"; ORA7="$work/ora$POS_B"; mkdir -p "$ORA0" "$ORA7"
     echo "  renting the oracle in STACK mode at pos $POS_A and pos $POS_B over $WANT_LAYERS layers..."
-    DSV4_ORACLE_MODE=stack DSV4_ORACLE_OUT="$ORA0" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_A" "$WANT_LAYERS" > "$work/ora0.txt" 2>&1 &
+    DSV4_ORACLE_MODE=stack DSV4_ORACLE_TOKENS="$TOKS_A" DSV4_ORACLE_OUT="$ORA0" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_A" "$WANT_LAYERS" > "$work/ora0.txt" 2>&1 &
     p0=$!
-    DSV4_ORACLE_MODE=stack DSV4_ORACLE_OUT="$ORA7" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_B" "$WANT_LAYERS" > "$work/ora7.txt" 2>&1 &
+    DSV4_ORACLE_MODE=stack DSV4_ORACLE_TOKENS="$TOKS_B" DSV4_ORACLE_OUT="$ORA7" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_B" "$WANT_LAYERS" > "$work/ora7.txt" 2>&1 &
     p7=$!
     wait $p0; wait $p7
 else
@@ -241,9 +268,9 @@ if [[ -z "$PER0" || -z "$PER7" ]]; then
     PER0="$work/per$POS_A"; PER7="$work/per$POS_B"; mkdir -p "$PER0" "$PER7"
     echo "  renting the oracle AGAIN, tilted by $PERSTEP after EVERY layer, to measure how far two runs of"
     echo "  the same recipe drift apart when one is nudged each layer by as much as f32 nudges it..."
-    DSV4_ORACLE_MODE=stack DSV4_ORACLE_PERTURB_EVERY=$PERSTEP DSV4_ORACLE_OUT="$PER0" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_A" "$WANT_LAYERS" > "$work/per0.txt" 2>&1 &
+    DSV4_ORACLE_MODE=stack DSV4_ORACLE_PERTURB_EVERY=$PERSTEP DSV4_ORACLE_TOKENS="$TOKS_A" DSV4_ORACLE_OUT="$PER0" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_A" "$WANT_LAYERS" > "$work/per0.txt" 2>&1 &
     q0=$!
-    DSV4_ORACLE_MODE=stack DSV4_ORACLE_PERTURB_EVERY=$PERSTEP DSV4_ORACLE_OUT="$PER7" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_B" "$WANT_LAYERS" > "$work/per7.txt" 2>&1 &
+    DSV4_ORACLE_MODE=stack DSV4_ORACLE_PERTURB_EVERY=$PERSTEP DSV4_ORACLE_TOKENS="$TOKS_B" DSV4_ORACLE_OUT="$PER7" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_B" "$WANT_LAYERS" > "$work/per7.txt" 2>&1 &
     q7=$!
     wait $q0; wait $q7
 else
@@ -960,12 +987,35 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
     return (arg, best)
 }
 
-func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
+let seqIds: [Int] = {
+    let v = P["SEQ_IDS"] ?? "none"
+    return v == "none" ? [] : v.split(separator: " ").compactMap { Int($0) }
+}()
+
+func runStack(_ pos: Int, _ oraDir: String, _ perDir: String, _ seq: [Int] = []) {
+    var gateToken = token
     var resid = residHc0
+    if seq.count > 1 {
+        // ── THE PREFIX ────────────────────────────────────────────────────────────────────────────
+        // Run positions 0..<pos through every layer so each layer's KV arena holds the real latents
+        // of the real tokens standing before this one. This is the SAME `useGrowingKv` path the
+        // autoregressive loop uses to produce text, and that is the entire point: until today the
+        // gates judged `gpuAttend(qr, kq, snk)` with its default one row, while the words came out
+        // of `gpuAttend(qr, kvArenas[il], snk, pos + 1)`. Two paths, one of them proven, the other
+        // one speaking. From here they are the same path.
+        gateToken = seq[seq.count - 1]
+        kvArenas = (0..<nLayers).map { _ in sentinelled(kvCap * headDim) }
+        useGrowingKv = true
+        for p in 0..<(seq.count - 1) {
+            var r = embedToken(seq[p])
+            for il in 0..<nLayers { r = runLayer(il, p, seq[p], r).outHc }
+        }
+        resid = embedToken(gateToken)
+    }
     for il in 0..<nLayers {
         let w = LW[il]
         let t0 = Date()
-        let R = runLayer(il, pos, token, resid)
+        let R = runLayer(il, pos, gateToken, resid)
         let ms = Date().timeIntervalSince(t0) * 1000.0
         msPerLayer[il, default: []].append(ms)
         let tag = "blk.\(il) [gate/up \(w.gx.type) down \(w.dx.type) n_exp \(w.nExpStack) \(w.hashed ? "hash" : "top-k") rope \(w.ratio == 0 ? "plain" : "compressed(\(w.ratio))")]"
@@ -1057,7 +1107,7 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
         do {
             let (inR, inN) = il == 0 ? (residHc0, hcDim) : oracleBuf(oraDir, il-1, "out_hc")
             if inN == hcDim {
-                let J = runLayer(il, pos, token, inR)
+                let J = runLayer(il, pos, gateToken, inR)
                 let ref = readOracle(oraDir, il, "out_hc")
                 let (ok, nd, _, _, mr, nn, ds, mn, mx, l2) = cmpOra(fp(J.outHc, hcDim), ref, [], 3e-5)
                 injNd[il, default: []].append(nd)
@@ -1077,9 +1127,10 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
 }
 
 let tA = Date(); runStack(posA, oraDirA, perDirA); let wallA = Date().timeIntervalSince(tA)
-let tB = Date(); runStack(posB, oraDirB, perDirB); let wallB = Date().timeIntervalSince(tB)
+let tB = Date(); runStack(posB, oraDirB, perDirB, seqIds); let wallB = Date().timeIntervalSince(tB)
 
 // ── two consecutive real-stack positions over persistent per-layer KV arenas ─────────────────────
+useGrowingKv = false
 if kvSequence {
     guard kvSteps >= 2 && kvSteps < kvCap else {
         print("FAIL KV_STEPS must be at least 2 and below KV_CAP so a sentinel frontier remains"); exit(1)
