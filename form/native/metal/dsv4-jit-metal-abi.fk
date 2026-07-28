@@ -18,7 +18,7 @@
 ; No dlsym, nm, C/Go/Python, generated source, compiler, shell dispatcher, or
 ; process-specific pointer is part of the live route.
 ;
-; witnessed: 2026-07-28 -> PASS metal_model_transaction through emitted BLR
+; witnessed: 2026-07-28 -> PASS literal-recipe transaction through emitted BLR
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/form-asm.fk native/metal/macho-live-symbol.fk
 
@@ -62,6 +62,22 @@
                 (djma-store-fragments
                     (tail fragments)
                     (add stack-offset (str_len (head fragments)))))))
+
+    ; Recipe data belongs in the emitted image as data, not as two ARM64
+    ; instructions per byte. ADR gives the linked dispatcher a direct pointer
+    ; to this literal tail. This keeps every changing fragment inspectable while
+    ; shrinking controller construction and instruction-cache pressure.
+    (defn djma-string-bytes (value i)
+        (if (ge i (str_len value)) (list)
+            (cons
+                (str_byte_at value i)
+                (djma-string-bytes value (add i 1)))))
+
+    (defn djma-fragments-bytes (fragments)
+        (if (eq (len fragments) 0) (list)
+            (append-list
+                (djma-string-bytes (head fragments) 0)
+                (djma-fragments-bytes (tail fragments)))))
 
     (defn djma-stack-down (remaining)
         (if (le remaining 0) (list)
@@ -170,12 +186,33 @@
     ;
     ; Stack (64 KiB, emitted as 32 ordinary 2048-byte SP adjustments):
     ;   [0,96)       proc_regioninfo
-    ;   [128,4096)   transaction recipe bytes
     ;   [4096,53248) dispatcher receipt (49152-byte cap)
     (defn djma-transaction-controller-parts-detail-bytes
         (fragments detail)
-        (fa-image
-            (list
+        (do
+            (let recipe-bytes (djma-fragments-bytes fragments))
+            (let suffix
+                (fa-image
+                    (list
+                        ; dispatcher(recipe, recipe_len, out, out_cap)
+                        (fa-movz-x 1 (djma-fragments-length fragments))
+                        (fa-add-x-imm 2 31 2048)
+                        (fa-add-x-imm 2 2 2048)
+                        (fa-movz-x 3 49152)
+                        (fa-blr 9)
+                        (djma-mov-x 19 0)
+
+                        ; Exact tri-state over the complete returned receipt.
+                        (fa-add-x-imm 12 31 2048)
+                        (fa-add-x-imm 12 12 2048)
+                        (djma-scan-pattern "FAIL " 0 detail)
+                        (djma-scan-pattern "NOTHING " 2 detail)
+                        (djma-scan-pattern
+                            "PASS metal_model_transaction" 1 detail)
+                        (djma-finish-status 0 detail))))
+            (let recipe-offset (add 4 (len suffix)))
+            (fa-image
+                (list
                 (fa-stp-pre)
                 (fa-stp-fp)
                 (djma-lsr-x-imm 20 0 1)
@@ -211,30 +248,10 @@
                 (fa-bcond 0 37)
                 (djma-return-status 0)
 
-                ; Materialize each Form-owned fragment directly in the frame.
-                ; No joined Form string or transaction-list ABI is involved.
-                (djma-store-fragments fragments 128)
-
-                ; dispatcher(recipe, recipe_len, out, out_cap)
-                (fa-add-x-imm 0 31 128)
-                (fa-movz-x 1 (djma-fragments-length fragments))
-                (fa-add-x-imm 2 31 2048)
-                (fa-add-x-imm 2 2 2048)
-                (fa-movz-x 3 49152)
-                (fa-blr 9)
-                (djma-mov-x 19 0)
-
-                ; Exact tri-state over the complete returned receipt. Operation
-                ; receipts begin with transaction-step, so first-byte checking
-                ; is insufficient: FAIL wins, then NOTHING, and PASS requires
-                ; the transaction summary normally present at the tail.
-                (fa-add-x-imm 12 31 2048)
-                (fa-add-x-imm 12 12 2048)
-                (djma-scan-pattern "FAIL " 0 detail)
-                (djma-scan-pattern "NOTHING " 2 detail)
-                (djma-scan-pattern
-                    "PASS metal_model_transaction" 1 detail)
-                (djma-finish-status 0 detail))))
+                ; Point directly at the Form-owned literal recipe tail.
+                (fa-adr-x 0 recipe-offset)
+                suffix
+                recipe-bytes))))
 
     (defn djma-transaction-controller-parts-bytes (fragments)
         (djma-transaction-controller-parts-detail-bytes
