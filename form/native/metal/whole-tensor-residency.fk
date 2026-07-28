@@ -1,0 +1,194 @@
+; whole-tensor-residency.fk — the body's side of GPU_GAPS §C beyond one tile: WHOLE tensors and
+; MULTI-LAYER weight sets resident on the GPU, in their QUANTIZED form, dequantized by a kernel the
+; body emitted.
+;
+; WHAT CHANGED SINCE q6k-device-tile.fk, and it is a measurement. That cell dequantized a 256x256 tile
+; in Form and uploaded f32. Scaling it was projected at ~23 min for one 25 165 824-weight tensor. Stone 3
+; measured the rate at two sizes instead of one and found the projection was itself carrier-bound:
+; `ewl-weights` is superlinear (4x n costs 7.9x time — the cons/reverse list), so the honest projection
+; was ~10.4 h, while the SAME dequant arithmetic as a fold with no list is linear at ~162k weights/s
+; (~154 s for that tensor). Neither is payable per run. So the f32 tensor is never built at all: the
+; QUANTIZED bytes go to the device and q6k-msl.fk's emitted kernel dequantizes them there.
+;
+; THREE THINGS THIS CELL DECIDES (the carrier decides none of them):
+;   1  WHERE EVERY TENSOR IS. `wtr-emit-table` walks the file's own header ONCE and prints all 255
+;      tensor-info rows — name, ggml type, dims, absolute file offset, byte length. The old path called
+;      egg-tensor-abs per tensor, and each call re-walks the 7.8 MB header (measured 10.2 / 9.5 / 10.3 s),
+;      so the tile audit spent ~50 s in five walks of the same bytes and 255 tensors would have cost
+;      ~42 min. One walk answers for all of them.
+;   2  WHAT THE WEIGHTS ARE, at BOTH ENDS of a tensor. `wtr-emit-tile` streams a reference tile at an
+;      arbitrary FLAT weight offset, so the audit can gate the GPU at weight 0 and at weight 25 165 823.
+;      A tile audit that only ever looks at the first superblock is the aporon shape: correct at the
+;      only place it looked. Streaming (print per weight, no list) is also what keeps the reference
+;      linear — the same finding as above, applied to this cell's own output.
+;   3  WHAT THE ANSWER IS. `wtr-emit-row` gives Form's fp64 dot for a named row at the tensor's REAL
+;      width (8192), so the GPU's f32 fused matvec has a body-side number to be judged against, not
+;      only a host-side re-fold of its own inputs.
+;
+; THE STREAM (flat, greppable; the carrier parses and moves bytes, nothing more):
+;   DATABASE <n>  NTENSORS <n>                 then one row per tensor:
+;   T <name> <ggml-type> <ndims> <d0> <d1> <abs-file-offset> <byte-length>
+;   TILE <off> <n>   then n f32 weights, one per line, flat index off..off+n-1
+;   X <n>            then n f32, one per line
+;   ROW <r> <value>  Form's fp64 dot of tensor row r with X
+;   END
+;
+; Kin: q6k-msl.fk (the emitted Metal — this cell is its mouth), equireach-gguf.fk (egg-* / ewl-* — the
+; header walk and the CPU dequant), q6k-device-tile.fk (the one-tile predecessor; still the narrower,
+; f32-upload witness), transformer-block.fk (tb-dot — the reference dot's op order),
+; jit-tensor-emit.fk (jte-matvec-msl — the f32 matvec the fused kernel is compared against).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk
+;
+; Proven by: form/native/metal/metal_whole_tensor_residency_audit.sh (Mac-only carrier witness; off-Mac
+;            it SKIPs, like every other Metal row in form/native/GPU_GAPS.md). The emitted kernel's
+;            arithmetic is proven separately and without a GPU by form-stdlib/tests/q6k-msl-band.fk.
+
+(do
+    (defn wtr-header-window () 8000000)
+    (defn wtr-alignment () 32)
+    (defn wtr-stride () 210)
+    (defn wtr-block-n () 256)
+
+    ; --- THE MOUTH IS THE GO KERNEL (q6k-device-tile.fk's note still holds): `print` renders a float at
+    ; full precision; fkwu's int_to_str cannot render a float at all. fkwu proves the recipes, the Go
+    ; kernel speaks the weights. ---
+    (defn wtr-line (s) (print s))
+    (defn wtr-num (x) (print x))
+
+    ; ================= 1. the whole tensor table, in ONE header walk =================
+    ; The name is ASCII in the file; `substring` is byte-faithful for ASCII on both arms that can read
+    ; this blob at all. Dim 1 is printed as 1 for a 1-D tensor so every row has the same arity.
+    (defn wtr-name (src off) (substring src (add off 8) (add (add off 8) (egg-ti-namelen src off))))
+    (defn wtr-dim1 (src off) (if (gt (egg-ti-ndims src off) 1) (egg-ti-dim src off 1) 1))
+    (defn wtr-nweights (src off) (mul (egg-ti-dim0 src off) (wtr-dim1 src off)))
+
+    ; byte length by ggml type: 0 = F32 (4 B/weight), 12 = Q4_K (144 B / 256 weights), 14 = Q6_K (210 B
+    ; / 256 weights). llama3.2:3b uses exactly these three. An unknown type prints length 0 rather than
+    ; a guessed one — a fabricated length would be a silently wrong upload.
+    (defn wtr-bytes (src off)
+        (do
+            (let t (egg-ti-type src off))
+            (let n (wtr-nweights src off))
+            (if (eq t 0) (mul n 4)
+                (if (eq t 14) (mul (div n (wtr-block-n)) 210)
+                    (if (eq t 12) (mul (div n (wtr-block-n)) 144) 0)))))
+
+    (defn wtr-row (src off base)
+        (wtr-line (str_concat "T "
+            (str_concat (wtr-name src off)
+            (str_concat " " (str_concat (int_to_str (egg-ti-type src off))
+            (str_concat " " (str_concat (int_to_str (egg-ti-ndims src off))
+            (str_concat " " (str_concat (int_to_str (egg-ti-dim0 src off))
+            (str_concat " " (str_concat (int_to_str (wtr-dim1 src off))
+            (str_concat " " (str_concat (int_to_str (add base (egg-ti-dataoff src off)))
+            (str_concat " " (int_to_str (wtr-bytes src off)))))))))))))))))
+
+    (defn wtr-rows (src off n base)
+        (if (eq n 0) 0
+            (do (wtr-row src off base)
+                (wtr-rows src (egg-ti-next src off) (sub n 1) base))))
+
+    (defn wtr-emit-table (path)
+        (do
+            (let hsrc (eqr-of-file path 0 (wtr-header-window)))
+            (let base (egg-data-base hsrc (wtr-alignment)))
+            (wtr-line (str_concat "DATABASE " (int_to_str base)))
+            (wtr-line (str_concat "NTENSORS " (int_to_str (egg-tensor-count hsrc))))
+            (wtr-rows hsrc (egg-tinfo-start hsrc) (egg-tensor-count hsrc) base)
+            (wtr-line "END")
+            0))
+
+    ; ================= 2. a reference tile at ANY flat weight offset, EITHER quant =================
+    ; llama3.2:3b is MIXED-quant — 29 Q6_K tensors, 168 Q4_K, 58 F32 — and a lane that knows only one of
+    ; them can speak for 32% of the model's bytes. The ggml type IS the dispatch: 14 -> Q6_K (210-byte
+    ; superblock), 12 -> Q4_K (144-byte). Everything below takes `t` and asks the right spine.
+    (defn wtr-tstride (t) (if (eq t 14) 210 144))
+    (defn wtr-flat-at (t src idx) (if (eq t 14) (q6m-flat-at src 0 idx) (q4m-flat-at src 0 idx)))
+
+    ; The window opens at the superblock the tile starts in, so a tile at weight 25 165 823 costs the
+    ; same as a tile at weight 0 — that is equireach doing its one job. Nothing is accumulated: each
+    ; weight is dequantized, printed, and dropped, so the reference is linear in n and the superlinear
+    ; list carrier never appears.
+    (defn wtr-window (t path abs off n)
+        (do
+            (let blk0 (div off (wtr-block-n)))
+            (let local (sub off (mul blk0 (wtr-block-n))))
+            (let blocks (add (div (add (add local n) 255) (wtr-block-n)) 1))
+            (eqr-of-file path (add abs (mul blk0 (wtr-tstride t))) (mul blocks (wtr-tstride t)))))
+    (defn wtr-local (off) (sub off (mul (div off (wtr-block-n)) (wtr-block-n))))
+
+    (defn wtr-tile-loop (t src local i n)
+        (if (ge i n) 0
+            (do (wtr-num (wtr-flat-at t src (add local i)))
+                (wtr-tile-loop t src local (add i 1) n))))
+
+    (defn wtr-emit-tile (t path abs off n)
+        (do
+            (let src (wtr-window t path abs off n))
+            (wtr-line (str_concat "TILE " (str_concat (int_to_str off) (str_concat " " (int_to_str n)))))
+            (wtr-tile-loop t src (wtr-local off) 0 n)
+            0))
+
+    ; ================= 3. x, and Form's own answer for a row =================
+    ; x is REAL model data — either n dequantized weights of a quantized tensor, or n values of an
+    ; UNQUANTIZED F32 tensor (the norm gains, which is what a real residual actually hands an FFN).
+    (defn wtr-emit-x (t path abs n)
+        (do
+            (wtr-line (str_concat "X " (int_to_str n)))
+            (wtr-tile-loop t (wtr-window t path abs 0 n) 0 0 n)
+            0))
+    (defn wtr-gain-loop (src i n)
+        (if (ge i n) 0
+            (do (wtr-num (ewl-f32 src (mul i 4))) (wtr-gain-loop src (add i 1) n))))
+    (defn wtr-emit-x-f32 (path abs n)
+        (do
+            (wtr-line (str_concat "X " (int_to_str n)))
+            (wtr-gain-loop (eqr-of-file path abs (mul n 4)) 0 n)
+            0))
+
+    ; Form's fp64 dot of tensor row r (cols wide) with x — tb-dot's op order: j counts DOWN, accumulate
+    ; p + acc. Both operands are dequantized on the fly; no list is built on either side.
+    (defn wtr-dot (t wsrc wlocal xsrc xlocal j acc)
+        (if (eq j 0) acc
+            (wtr-dot t wsrc wlocal xsrc xlocal (sub j 1)
+                (add (mul (wtr-flat-at t wsrc (add wlocal (sub j 1)))
+                          (wtr-flat-at t xsrc (add xlocal (sub j 1))))
+                     acc))))
+    (defn wtr-dot-f32 (t wsrc wlocal xsrc j acc)
+        (if (eq j 0) acc
+            (wtr-dot-f32 t wsrc wlocal xsrc (sub j 1)
+                (add (mul (wtr-flat-at t wsrc (add wlocal (sub j 1)))
+                          (ewl-f32 xsrc (mul (sub j 1) 4)))
+                     acc))))
+
+    (defn wtr-emit-row (t path wabs xabs r cols xf32)
+        (do
+            (let woff (mul r cols))
+            (let wsrc (wtr-window t path wabs woff cols))
+            (wtr-line (str_concat "ROW " (int_to_str r)))
+            (if (eq xf32 1)
+                (wtr-num (wtr-dot-f32 t wsrc (wtr-local woff) (eqr-of-file path xabs (mul cols 4)) cols 0))
+                (wtr-num (wtr-dot t wsrc (wtr-local woff) (wtr-window t path xabs 0 cols) 0 cols 0)))
+            0))
+
+    (defn wtr-emit-rows (t path wabs xabs r n cols xf32)
+        (if (eq n 0) 0
+            (do (wtr-emit-row t path wabs xabs r cols xf32)
+                (wtr-emit-rows t path wabs xabs (add r 1) (sub n 1) cols xf32))))
+
+    ; ================= 4. the kernels =================
+    ; ONE translation unit: the helper spine appears once and both kernels follow it. Emitting each
+    ; kernel's self-contained form and concatenating them is what a carrier would naively do, and the
+    ; Metal front end rejects it outright ("redefinition of 'q6k_mod'") — so the body owns the
+    ; composition too, and the carrier only compiles what it is handed.
+    (defn wtr-emit-msl ()
+        (do
+            (wtr-line "MSL")
+            (wtr-line (str_concat
+                (q6m-msl-unit "form_q6k_dequant_f32" "form_q6k_matvec_f32")
+                (q4m-msl-unit "form_q4k_dequant_f32" "form_q4k_matvec_f32")))
+            (wtr-line "END")
+            0))
+
+    0)

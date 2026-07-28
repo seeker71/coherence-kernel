@@ -214,26 +214,26 @@ func (t *pgHandleTable) close(h int64) bool {
 
 func (k *Kernel) registerHostIONatives() {
 	k.registerNative("volatile_cell_put", catCall(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VInt, Int: goVolatileCells.put(args[0].Str, args[1].Str, args[2])}
+		return Value{Kind: VInt, Int: goVolatileCells.put(argStr(args, 0), argStr(args, 1), args[2])}
 	})
 	k.registerNative("volatile_cell_get", catAccess(), func(_ *Kernel, args []Value) Value {
-		cell, ok := goVolatileCells.get(args[0].Str, args[1].Str)
+		cell, ok := goVolatileCells.get(argStr(args, 0), argStr(args, 1))
 		if !ok {
 			return Value{Kind: VNull}
 		}
 		return cell.value
 	})
 	k.registerNative("volatile_cell_delete", catCall(), func(_ *Kernel, args []Value) Value {
-		if goVolatileCells.delete(args[0].Str, args[1].Str) {
+		if goVolatileCells.delete(argStr(args, 0), argStr(args, 1)) {
 			return Value{Kind: VInt, Int: 1}
 		}
 		return Value{Kind: VInt, Int: 0}
 	})
 	k.registerNative("volatile_cell_scan_since", catAccess(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VList, List: goVolatileCells.scanSince(args[0].Str, args[1].Int)}
+		return Value{Kind: VList, List: goVolatileCells.scanSince(argStr(args, 0), args[1].Int)}
 	})
 	k.registerNative("volatile_cell_prune_before", catCall(), func(_ *Kernel, args []Value) Value {
-		return Value{Kind: VInt, Int: goVolatileCells.pruneBefore(args[0].Str, args[1].Int)}
+		return Value{Kind: VInt, Int: goVolatileCells.pruneBefore(argStr(args, 0), args[1].Int)}
 	})
 	k.registerNative("repo_root", catAccess(), func(_ *Kernel, _ []Value) Value {
 		root, err := findRepoRoot()
@@ -258,11 +258,11 @@ func (k *Kernel) registerHostIONatives() {
 		config, err := loadKernelConfig()
 		if err != nil {
 			goPgHandles.setErr(err)
-			return Value{Kind: VStr, Str: args[1].Str}
+			return Value{Kind: VStr, Str: argStr(args, 1)}
 		}
-		value, ok := lookupConfigPath(config, args[0].Str)
+		value, ok := lookupConfigPath(config, argStr(args, 0))
 		if !ok {
-			return Value{Kind: VStr, Str: args[1].Str}
+			return Value{Kind: VStr, Str: argStr(args, 1)}
 		}
 		switch v := value.(type) {
 		case string:
@@ -275,7 +275,7 @@ func (k *Kernel) registerHostIONatives() {
 			}
 			return Value{Kind: VFloat, Float: v}
 		case nil:
-			return Value{Kind: VStr, Str: args[1].Str}
+			return Value{Kind: VStr, Str: argStr(args, 1)}
 		default:
 			return Value{Kind: VStr, Str: fmt.Sprint(v)}
 		}
@@ -300,7 +300,7 @@ func (k *Kernel) registerHostIONatives() {
 		if len(args) > 2 {
 			timeout = formHTTPTimeout(args[2], timeout)
 		}
-		return externalHTTPGetValue(args[0].Str, headers, timeout)
+		return externalHTTPGetValue(argStr(args, 0), headers, timeout)
 	})
 	k.registerNative("pg_last_error", catCall(), func(_ *Kernel, _ []Value) Value {
 		goPgHandles.mu.Lock()
@@ -308,7 +308,7 @@ func (k *Kernel) registerHostIONatives() {
 		return Value{Kind: VStr, Str: goPgHandles.lastErr}
 	})
 	k.registerNative("pg_connect", catCall(), func(_ *Kernel, args []Value) Value {
-		dsn := strings.TrimSpace(args[0].Str)
+		dsn := strings.TrimSpace(argStr(args, 0))
 		if !strings.HasPrefix(dsn, "postgres://") && !strings.HasPrefix(dsn, "postgresql://") {
 			err := fmt.Errorf("pg_connect: database.url is not a PostgreSQL URL")
 			goPgHandles.setErr(err)
@@ -361,7 +361,7 @@ func (k *Kernel) registerHostIONatives() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		res, err := db.ExecContext(ctx, args[1].Str, formSQLArgs(args, 2)...)
+		res, err := db.ExecContext(ctx, argStr(args, 1), formSQLArgs(args, 2)...)
 		if err != nil {
 			goPgHandles.setErr(err)
 			return Value{Kind: VInt, Int: -1}
@@ -456,7 +456,7 @@ func queryRows(args []Value) (*sql.Rows, context.CancelFunc, error) {
 		return nil, nil, errors.New("pg_query_rows: unknown connection handle")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	rows, err := db.QueryContext(ctx, args[1].Str, formSQLArgs(args, 2)...)
+	rows, err := db.QueryContext(ctx, argStr(args, 1), formSQLArgs(args, 2)...)
 	if err != nil {
 		cancel()
 		return nil, nil, err

@@ -1,0 +1,126 @@
+; lingbot-geometry-live-witness.fk — observed geometry from two upstream frames.
+;
+; Input provenance: Robbyant/lingbot-map commit
+; 7ff6f3ed0913d4d326f8f13bbb429c4ffc0195c2, example/loop/000000.png
+; and example/loop/000001.png, retained as deterministic 16x16 24-bit BMP
+; fixtures. This witness reads their actual bytes and emits pose, relative dense
+; depth, world-cloud bounds, and before/after matching error.
+;
+; It does NOT compare against LingBot checkpoint output: the learned checkpoint
+; is not loaded by this organ. The final parity field stays 0 by construction.
+; The real comparison here is same-pixel error versus searched-correspondence
+; error over the two upstream images.
+; Run from the repository root.
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk model/geometric-camera.fk model/lingbot-geometry-heads.fk
+
+(do
+  (defn lghw-u16 (s i)
+    (add (str_byte_at s i) (mul 256 (str_byte_at s (add i 1)))))
+  (defn lghw-u32 (s i)
+    (add (lghw-u16 s i) (mul 65536 (lghw-u16 s (add i 2)))))
+  (defn lghw-i32 (s i)
+    (do (let u (lghw-u32 s i))
+        (if (ge u 2147483648) (sub u 4294967296) u)))
+  (defn lghw-bmp-ok (s)
+    (if (and (eq (str_byte_at s 0) 66) (eq (str_byte_at s 1) 77)) 1 0))
+  (defn lghw-width (s) (lghw-i32 s 18))
+  (defn lghw-height-signed (s) (lghw-i32 s 22))
+  (defn lghw-height (s) (abs (lghw-height-signed s)))
+  (defn lghw-offset (s) (lghw-u32 s 10))
+  (defn lghw-row-stride (s)
+    (mul 4 (div (add (mul 3 (lghw-width s)) 3) 4)))
+  (defn lghw-storage-y (s y)
+    (if (lt (lghw-height-signed s) 0) y (sub (sub (lghw-height s) 1) y)))
+  (defn lghw-pixel-index (s x y)
+    (add (lghw-offset s)
+      (add (mul (lghw-storage-y s y) (lghw-row-stride s)) (mul x 3))))
+  (defn lghw-luma-at (s x y)
+    (do
+      (let i (lghw-pixel-index s x y))
+      ; BMP order B,G,R; integer BT.601 coefficients sum to 256.
+      (div (add (mul 77 (str_byte_at s (add i 2)))
+                (add (mul 150 (str_byte_at s (add i 1)))
+                     (mul 29 (str_byte_at s i)))) 256)))
+  (defn lghw-sample-x (s n x)
+    (min2 (sub (lghw-width s) 1)
+      (div (mul (add (mul 2 x) 1) (lghw-width s)) (mul 2 n))))
+  (defn lghw-sample-y (s n y)
+    (min2 (sub (lghw-height s) 1)
+      (div (mul (add (mul 2 y) 1) (lghw-height s)) (mul 2 n))))
+  (defn lghw-grid-go (s n i out)
+    (if (eq i (mul n n)) (reverse out)
+      (lghw-grid-go s n (add i 1)
+        (cons (lghw-luma-at s
+                (lghw-sample-x s n (mod i n))
+                (lghw-sample-y s n (div i n))) out))))
+  (defn lghw-grid (s n) (lghw-grid-go s n 0 (empty)))
+
+  (defn lghw-q (x)
+    (if (lt x 0.0)
+      (sub 0 (float_to_int (add 0.5 (mul -1.0 x))))
+      (float_to_int (add 0.5 (mul x 1.0)))))
+  (defn lghw-q6 (x) (lghw-q (mul x 1000000.0)))
+  (defn lghw-q6-list (xs)
+    (if (eq (len xs) 0) (empty)
+      (cons (lghw-q6 (head xs)) (lghw-q6-list (tail xs)))))
+  (defn lghw-slot-sum (rows slot acc)
+    (if (eq (len rows) 0) acc
+      (lghw-slot-sum (tail rows) slot (add acc (nth (head rows) slot)))))
+  (defn lghw-slot-min-go (rows slot best)
+    (if (eq (len rows) 0) best
+      (lghw-slot-min-go (tail rows) slot (min2 best (nth (head rows) slot)))))
+  (defn lghw-slot-max-go (rows slot best)
+    (if (eq (len rows) 0) best
+      (lghw-slot-max-go (tail rows) slot (max2 best (nth (head rows) slot)))))
+  (defn lghw-slot-min (rows slot) (lghw-slot-min-go (tail rows) slot (nth (head rows) slot)))
+  (defn lghw-slot-max (rows slot) (lghw-slot-max-go (tail rows) slot (nth (head rows) slot)))
+  (defn lghw-q6-bounds (bounds)
+    (list (lghw-q6-list (nth bounds 0)) (lghw-q6-list (nth bounds 1))))
+  (defn lghw-cloud-point-q6 (row) (lghw-q6-list (nth row 0)))
+
+  (let path0 "model/fixtures/lingbot-map/loop-000000.bmp")
+  (let path1 "model/fixtures/lingbot-map/loop-000001.bmp")
+  (let bytes0 (read_file path0))
+  (let bytes1 (read_file path1))
+  (let n 8)
+  (let focal 8.0)
+  (let frame0 (lghw-grid bytes0 n))
+  (let frame1 (lghw-grid bytes1 n))
+  (let prediction (lgh-predict frame0 frame1 n 2 focal))
+  (let pose (nth prediction 0))
+  (let depths (nth prediction 1))
+  (let matches (nth prediction 2))
+  (let diagnostics (nth prediction 3))
+  (let cloud (lgh-point-cloud depths n (list focal focal 3.5 3.5) pose))
+  (let bounds (lgh-cloud-bounds cloud))
+  (let compare (lgh-output-comparison frame0 frame1 n matches))
+  (let depth-mean (div (lghw-slot-sum depths 0 0.0) (mul (len depths) 1.0)))
+  (let confidence-mean (div (lghw-slot-sum depths 1 0.0) (mul (len depths) 1.0)))
+  (let error-drop (if (eq (nth compare 0) 0) 0.0
+                    (div (mul (sub (nth compare 0) (nth compare 1)) 1.0)
+                         (mul (nth compare 0) 1.0))))
+  (list "lingbot-geometry-live"
+    (list "source"
+      "7ff6f3ed0913d4d326f8f13bbb429c4ffc0195c2"
+      "example/loop/000000.png" "example/loop/000001.png")
+    (list "fixture-sha256"
+      "28f1ff7a54d68d45266173d20901930ba9588a8e561eb3b0f632b43a77b751d3"
+      "5f0802f143057521506f074cce664955986b97dff0e7b89e1551f2a4d33fbe52")
+    (list "bmp" (lghw-bmp-ok bytes0) (lghw-bmp-ok bytes1)
+      (lghw-width bytes0) (lghw-height bytes0) (str_len bytes0) (str_len bytes1))
+    (list "sampled-luma" n (sum frame0) (sum frame1) (head frame0) (head frame1))
+    (list "rotation-x1e6" (lghw-q6-list (gc-r pose)))
+    (list "translation-x1e6" (lghw-q6-list (gc-t pose)))
+    (list "fit-x1e6" (lghw-q6-list diagnostics))
+    (list "relative-depth-x1e6" (len depths)
+      (lghw-q6 (lghw-slot-min depths 0)) (lghw-q6 depth-mean)
+      (lghw-q6 (lghw-slot-max depths 0)) (lghw-q6 confidence-mean))
+    (list "world-cloud-x1e6" (len cloud) (lghw-q6-bounds bounds)
+      (lghw-cloud-point-q6 (head cloud))
+      (lghw-cloud-point-q6 (nth cloud (div (len cloud) 2)))
+      (lghw-cloud-point-q6 (nth cloud (sub (len cloud) 1))))
+    (list "matching-comparison" (nth compare 0) (nth compare 1)
+      (lghw-q6 (nth compare 2)) (lghw-q6 (nth compare 3))
+      (nth compare 4) (nth compare 5) (lghw-q6 error-drop))
+    (list "learned-lingbot-checkpoint-parity" 0
+      "not claimed: classical relative geometry, no learned checkpoint")))

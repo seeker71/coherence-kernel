@@ -1,0 +1,107 @@
+; concept-text-senses-10000.fk -- explicit WordNet senses for each c10 anchor.
+;
+; The older semantic projection intentionally selects one primary sense but
+; records how many senses were hidden behind that choice.  This cell opens the
+; hidden set without changing that projection: 34,244 attributed WordNet 3.1
+; senses, indexed by the same 10,000 concept IDs.  Context ranking below is a
+; transparent bag-of-words observation over the real glosses.  It is evidence,
+; not a claim that polysemy has been resolved.
+; witnessed: 2026-07-18 -> 34,244 senses / 5,618 ambiguous anchors
+; preludes: form/form-stdlib/core.fk form/form-stdlib/text-tokenize.fk cognition/concept-text-senses-10000-metadata.fk cognition/concept-text-senses-10000-offsets.fk
+(do
+  (defn cts10-offset-tail (offsets id)
+    (if (eq id 0) offsets (cts10-offset-tail (tail offsets) (sub id 1))))
+  (defn cts10-row-line (data offsets id)
+    (if (or (lt id 0) (ge id (cts10-count))) ""
+      (do (let os (cts10-offset-tail offsets id))
+          (substring data (head os) (sub (head (tail os)) 1)))))
+
+  (defn cts10-field-go (line target col start i)
+    (if (ge i (str_len line))
+      (if (eq col target) (substring line start i) "")
+      (if (eq (str_byte_at line i) 9)
+        (if (eq col target) (substring line start i)
+          (cts10-field-go line target (add col 1) (add i 1) (add i 1)))
+        (cts10-field-go line target col start (add i 1)))))
+  (defn cts10-field (line col) (cts10-field-go line col 0 0 0))
+  (defn cts10-sense-count-in (data offsets id)
+    (str_to_int (cts10-field (cts10-row-line data offsets id) 1)))
+
+  ; sense = (concept-id synset pos sense-number tagged-count gloss)
+  (defn cts10-sense (id synset pos number tags gloss)
+    (list id synset pos number tags gloss))
+  (defn cts10-sense-id (s) (nth s 0))
+  (defn cts10-sense-synset (s) (nth s 1))
+  (defn cts10-sense-pos (s) (nth s 2))
+  (defn cts10-sense-number (s) (nth s 3))
+  (defn cts10-sense-tags (s) (nth s 4))
+  (defn cts10-sense-gloss (s) (nth s 5))
+  (defn cts10-sense-at-line (line id index)
+    (if (or (lt index 0) (ge index (str_to_int (cts10-field line 1)))) (empty)
+      (do (let col (add 2 (mul index 5)))
+          (cts10-sense id (cts10-field line col) (cts10-field line (add col 1))
+            (str_to_int (cts10-field line (add col 2)))
+            (str_to_int (cts10-field line (add col 3)))
+            (cts10-field line (add col 4))))))
+  (defn cts10-sense-at-in (data offsets id index)
+    (cts10-sense-at-line (cts10-row-line data offsets id) id index))
+  (defn cts10-senses-line-go (line id i count out)
+    (if (eq i count) (reverse out)
+      (cts10-senses-line-go line id (add i 1) count
+        (cons (cts10-sense-at-line line id i) out))))
+  (defn cts10-senses-in (data offsets id)
+    (do (let line (cts10-row-line data offsets id))
+        (cts10-senses-line-go line id 0 (str_to_int (cts10-field line 1)) (empty))))
+
+  ; Count exact normalized word overlap between context and a WordNet gloss.
+  ; Both sides use the body's four-way ASCII tokenizer; UTF-8 context therefore
+  ; remains an explicit no-evidence case rather than being mangled into tokens.
+  (defn cts10-context-has-word? (context word)
+    (if (str_eq word "") 0
+      (if (ge (str_find (str_concat " " (str_concat context " "))
+                        (str_concat " " (str_concat word " ")) 0) 0) 1 0)))
+  (defn cts10-gloss-overlap-go (context words i start score)
+    (if (ge i (str_len words))
+      (add score (cts10-context-has-word? context (substring words start i)))
+      (if (eq (str_byte_at words i) 32)
+        (cts10-gloss-overlap-go context words (add i 1) (add i 1)
+          (add score (cts10-context-has-word? context (substring words start i))))
+        (cts10-gloss-overlap-go context words (add i 1) start score))))
+  (defn cts10-gloss-overlap (sentence gloss)
+    (do (let context (tk-words sentence 3))
+        (let words (tk-words gloss 3))
+        (if (str_eq words "") 0 (cts10-gloss-overlap-go context words 0 0 0))))
+
+  ; scored sense = (sense overlap score). Tags only break equal overlap.
+  (defn cts10-score-sense (sentence sense)
+    (do (let overlap (cts10-gloss-overlap sentence (cts10-sense-gloss sense)))
+        (list sense overlap (add (mul overlap 1000) (cts10-sense-tags sense)))))
+  (defn cts10-scored-score (s) (nth s 2))
+  (defn cts10-insert-scored (row rows)
+    (if (eq (len rows) 0) (list row)
+      (if (gt (cts10-scored-score row) (cts10-scored-score (head rows)))
+        (cons row rows)
+        (cons (head rows) (cts10-insert-scored row (tail rows))))))
+  (defn cts10-rank-senses-go (sentence senses ranked)
+    (if (eq (len senses) 0) ranked
+      (cts10-rank-senses-go sentence (tail senses)
+        (cts10-insert-scored (cts10-score-sense sentence (head senses)) ranked))))
+  (defn cts10-rank-senses-in (data offsets id sentence)
+    (cts10-rank-senses-go sentence (cts10-senses-in data offsets id) (empty)))
+
+  ; analysis = (state sense-count ranked-senses top-overlap score-margin).
+  ; Even a unique top score stays context-ranked-not-resolved: lexical overlap
+  ; is useful evidence, not a learned word-sense disambiguator.
+  (defn cts10-analyze-in (data offsets id sentence)
+    (do (let ranked (cts10-rank-senses-in data offsets id sentence))
+        (let count (len ranked))
+        (if (eq count 0) (list "semantic-unmapped" 0 ranked 0 0)
+          (do (let overlap (nth (head ranked) 1))
+              (let margin (if (eq count 1) (cts10-scored-score (head ranked))
+                (sub (cts10-scored-score (head ranked))
+                     (cts10-scored-score (head (tail ranked))))))
+              (list (if (eq count 1) "sense-unique"
+                      (if (and (gt overlap 0) (gt margin 0))
+                        "context-ranked-not-resolved" "sense-ambiguous"))
+                    count ranked overlap margin)))))
+)

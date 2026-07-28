@@ -37,6 +37,7 @@ int dlclose(void *h) {
 }
 #endif
 extern int putchar(int);
+extern int fflush(void *);
 extern int printf(const char *, ...);
 extern int dprintf(int, const char *, ...);
 extern int vdprintf(int, const char *, __builtin_va_list);
@@ -86,9 +87,33 @@ static void fk_die(const char *msg) {
  * so the line:col prefix is suppressed.  sev: 0 = warning, 1 = error. */
 #define FK_DIAG_WARN 0
 #define FK_DIAG_ERR  1
-static long long fk_nerr;        /* errors diagnosed this run   */
-static long long fk_nwarn;       /* warnings diagnosed this run */
+static long long fk_nerr;        /* errors diagnosed this compile (reset per compile pass) */
+static long long fk_nwarn;       /* warnings diagnosed this compile (reset per compile pass) */
+/* PRINTED-diagnostic tallies, monotone for the whole process — never reset.
+ * fk_nerr/fk_nwarn are per-compile working counters and ARE legitimately
+ * wiped by fk_src_reset_compile_state between the speculative per-dep image
+ * compile and the authoritative whole-program compile; before these existed,
+ * that wipe also erased already-printed "error:" lines from the exit code and
+ * the tally (8 errors on stderr, "0 errors" exit — the stamp+shape family).
+ * The exit truth and the gcc-style tally read THESE, so every diagnostic the
+ * user saw is carried, by construction, across any number of resets. */
+static long long fk_nerr_seen;
+static long long fk_nwarn_seen;
+static long long fk_diag_quiet;  /* nonzero: speculative compile — count into
+                                  * fk_nerr/fk_nwarn (the .sym record and the
+                                  * import gate need the truth) but print
+                                  * nothing; a candidate image's diagnostics
+                                  * are not the program's */
 static int fk_src_truncated;     /* 1 if the source was amputated at FK_SOURCE_TEXT_CAP */
+/* 1 if the parse met a defect that CANNOT recover into a runnable program: a read
+ * of an unbound name (a read has no value to decline with) or a parameter that
+ * names a primitive (the sibling kernels do not agree on its arity). fkwu's
+ * standing posture is recover-and-run, and it stays that way for every defeasible
+ * diagnostic; these two are not defeasible, and running past them is what let a
+ * deliberately broken band answer 255 and what made one variant spin for minutes
+ * with no output at all. Same gate as fk_src_truncated: surface every diagnostic,
+ * then REFUSE to execute. */
+static int fk_src_unrunnable;
 /* fk_diag / fk_diag_flush are DEFINED further down (right after fk_srctext /
  * fk_spos / fk_slen are declared), where they can read the source buffer. */
 static void fk_diag(int sev, long long off, const char *fmt, ...);
@@ -304,7 +329,6 @@ static long long fk_hp;
 static long long fk_cap;
 static long long fk_vs[FK_VALUE_STACK_CAP];
 static long long fk_vsp;
-extern long long time(long long *);
 extern unsigned int arc4random(void);
 extern void *malloc(unsigned long);
 extern void *calloc(unsigned long, unsigned long);
@@ -314,6 +338,8 @@ extern double strtod(const char *, char **);
 extern void *popen(const char *, const char *);
 extern int pclose(void *);
 extern unsigned long fread(void *, unsigned long, unsigned long, void *);
+extern int mkstemp(char *);
+extern int snprintf(char *, unsigned long, const char *, ...);
 static char *fk_sb;
 static long long *fk_so;
 static long long *fk_sl;
@@ -616,9 +642,8 @@ static void fk_conf_load(void) {
         if (kj > 0) { fk_conf_n = fk_conf_n + 1; }
     }
 }
-/* fk_conf: config-file replacement for getenv on OUR toggles. Returns the value string, or 0 when
- * the key is absent OR set to "0"/"" -- so `if (fk_conf("X"))` is on iff X is present and non-zero,
- * matching the old env-presence semantics, and the FK_JIT `v[0] != '0'` check still holds. */
+/* Optional host configuration. Returns the value string, or 0 when the key is
+ * absent or explicitly zero. Execution capabilities do not depend on it. */
 static char *fk_conf(const char *key) {
     fk_conf_load();
     int i = 0;
@@ -805,6 +830,706 @@ static long long fk_metal_matvec_f32_native(long long mslv, long long kernelv, l
         n = FK_METAL_MATVEC_BUF_CAP;
     }
     return fk_sbuf(out, n);
+}
+#define FK_LOCAL_MODEL_GENERATE_UNLINKED (0 - 4611686018427387901LL)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((weak)) long long fk_local_model_generate_external(
+    const char *model, long long model_len,
+    const char *prompt, long long prompt_len,
+    long long n_predict, char *out, long long cap) {
+    (void)model;
+    (void)model_len;
+    (void)prompt;
+    (void)prompt_len;
+    (void)n_predict;
+    (void)out;
+    (void)cap;
+    return FK_LOCAL_MODEL_GENERATE_UNLINKED;
+}
+#else
+static long long fk_local_model_generate_external(
+    const char *model, long long model_len,
+    const char *prompt, long long prompt_len,
+    long long n_predict, char *out, long long cap) {
+    (void)model;
+    (void)model_len;
+    (void)prompt;
+    (void)prompt_len;
+    (void)n_predict;
+    (void)out;
+    (void)cap;
+    return FK_LOCAL_MODEL_GENERATE_UNLINKED;
+}
+#endif
+#define FK_LOCAL_MODEL_GENERATE_BUF_CAP 65536
+static long long fk_local_model_generate_native(long long modelv, long long promptv,
+                                                long long n_predict) {
+    const char *model;
+    const char *prompt;
+    long long model_len;
+    long long prompt_len;
+    if (fk_srange(modelv, &model, &model_len) == 0 ||
+        fk_srange(promptv, &prompt, &prompt_len) == 0) {
+        const char *m = "FAIL local_model_generate invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_LOCAL_MODEL_GENERATE_BUF_CAP];
+    long long n = fk_local_model_generate_external(
+        model, model_len, prompt, prompt_len, n_predict,
+        out, FK_LOCAL_MODEL_GENERATE_BUF_CAP);
+    if (n == FK_LOCAL_MODEL_GENERATE_UNLINKED) {
+        const char *m =
+            "NOTHING local_model_generate no linked local model carrier\n"
+            "rewitness-offer=link-local-model-carrier\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m =
+            "FAIL local_model_generate linked carrier returned error\n"
+            "rewitness-offer=inspect-local-model-carrier\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_LOCAL_MODEL_GENERATE_BUF_CAP) n = FK_LOCAL_MODEL_GENERATE_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+#define FK_METAL_MODEL_PORT_UNLINKED (0 - 4611686018427387900LL)
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((weak)) long long fk_metal_model_open_external(
+    const char *path, long long path_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)path; (void)path_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_close_external(char *out, long long cap) {
+    (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_library_external(
+    const char *name, long long name_len,
+    const char *source, long long source_len,
+    char *out, long long cap) {
+    (void)name; (void)name_len; (void)source; (void)source_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_embed_external(
+    const char *library, long long library_len,
+    const char *kernel, long long kernel_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)kernel; (void)kernel_len;
+    (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_hc_begin_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_f16_matvec_external(
+    const char *library, long long library_len,
+    const char *kernel, long long kernel_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)kernel; (void)kernel_len;
+    (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_hc_split_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_hc_reduce_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len, char *out, long long cap) {
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_rmsnorm_external(
+    const char *library,long long library_len,const char *plan,long long plan_len,
+    char *out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_mx8_matvec_external(
+    const char *library,long long library_len,const char *plan,long long plan_len,
+    char *out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+__attribute__((weak)) long long fk_metal_model_state_save_external(
+    const char*name,long long name_len,char*out,long long cap){
+    (void)name;(void)name_len;(void)out;(void)cap;return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_state_load_external(
+    const char*name,long long name_len,char*out,long long cap){
+    (void)name;(void)name_len;(void)out;(void)cap;return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_rope_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_attention_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_hc_post_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_hash_route_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_moe_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_topk_route_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_hc_output_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_argmax_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_kv_round_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_cached_attention_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_compress_stage_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+__attribute__((weak)) long long fk_metal_model_transaction_external(
+    const char*recipe,long long recipe_len,char*out,long long cap){
+    (void)recipe;(void)recipe_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+#else
+static long long fk_metal_model_open_external(
+    const char *path, long long path_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)path; (void)path_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_close_external(char *out, long long cap) {
+    (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_library_external(
+    const char *name, long long name_len,
+    const char *source, long long source_len,
+    char *out, long long cap) {
+    (void)name; (void)name_len; (void)source; (void)source_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_embed_external(
+    const char *library, long long library_len,
+    const char *kernel, long long kernel_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)kernel; (void)kernel_len;
+    (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_hc_begin_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_f16_matvec_external(
+    const char *library, long long library_len,
+    const char *kernel, long long kernel_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)kernel; (void)kernel_len;
+    (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_hc_split_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len,
+    char *out, long long cap) {
+    (void)library; (void)library_len; (void)plan; (void)plan_len; (void)out; (void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_hc_reduce_external(
+    const char *library, long long library_len,
+    const char *plan, long long plan_len, char *out, long long cap) {
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_rmsnorm_external(
+    const char *library,long long library_len,const char *plan,long long plan_len,
+    char *out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_mx8_matvec_external(
+    const char *library,long long library_len,const char *plan,long long plan_len,
+    char *out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;
+}
+static long long fk_metal_model_state_save_external(
+    const char*name,long long name_len,char*out,long long cap){
+    (void)name;(void)name_len;(void)out;(void)cap;return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_state_load_external(
+    const char*name,long long name_len,char*out,long long cap){
+    (void)name;(void)name_len;(void)out;(void)cap;return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_rope_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_attention_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_hc_post_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_hash_route_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_moe_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_topk_route_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_hc_output_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_argmax_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_kv_round_external(
+    const char*library,long long library_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)library;(void)library_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_cached_attention_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_compress_stage_external(
+    const char*libraries,long long libraries_len,const char*plan,long long plan_len,
+    char*out,long long cap){
+    (void)libraries;(void)libraries_len;(void)plan;(void)plan_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+static long long fk_metal_model_transaction_external(
+    const char*recipe,long long recipe_len,char*out,long long cap){
+    (void)recipe;(void)recipe_len;(void)out;(void)cap;
+    return FK_METAL_MODEL_PORT_UNLINKED;}
+#endif
+#define FK_METAL_MODEL_PORT_BUF_CAP 8192
+static long long fk_metal_model_open_native(long long pathv, long long planv) {
+    const char *path;
+    const char *plan;
+    long long path_len;
+    long long plan_len;
+    if (fk_srange(pathv, &path, &path_len) == 0 ||
+        fk_srange(planv, &plan, &plan_len) == 0) {
+        const char *m = "FAIL metal_model_open invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_open_external(
+        path, path_len, plan, plan_len, out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m =
+            "NOTHING metal_model_open no linked Metal model port\n"
+            "rewitness-offer=link-metal-model-port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m =
+            "FAIL metal_model_open linked port returned error\n"
+            "rewitness-offer=inspect-metal-model-open\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_close_native(void) {
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_close_external(out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m = "NOTHING metal_model_close no linked Metal model port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m = "FAIL metal_model_close linked port returned error\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_library_native(long long namev, long long sourcev) {
+    const char *name;
+    const char *source;
+    long long name_len;
+    long long source_len;
+    if (fk_srange(namev, &name, &name_len) == 0 ||
+        fk_srange(sourcev, &source, &source_len) == 0) {
+        const char *m = "FAIL metal_model_library invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_library_external(
+        name, name_len, source, source_len, out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m =
+            "NOTHING metal_model_library no linked Metal model port\n"
+            "rewitness-offer=link-metal-model-port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m =
+            "FAIL metal_model_library linked port returned error\n"
+            "rewitness-offer=inspect-metal-model-library\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_embed_native(
+    long long libraryv, long long kernelv, long long planv) {
+    const char *library;
+    const char *kernel;
+    const char *plan;
+    long long library_len;
+    long long kernel_len;
+    long long plan_len;
+    if (fk_srange(libraryv, &library, &library_len) == 0 ||
+        fk_srange(kernelv, &kernel, &kernel_len) == 0 ||
+        fk_srange(planv, &plan, &plan_len) == 0) {
+        const char *m = "FAIL metal_model_embed invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_embed_external(
+        library, library_len, kernel, kernel_len, plan, plan_len,
+        out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m =
+            "NOTHING metal_model_embed no linked Metal model port\n"
+            "rewitness-offer=link-metal-model-port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m =
+            "FAIL metal_model_embed linked port returned error\n"
+            "rewitness-offer=inspect-metal-model-embed\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_hc_begin_native(long long libraryv, long long planv) {
+    const char *library;
+    const char *plan;
+    long long library_len;
+    long long plan_len;
+    if (fk_srange(libraryv, &library, &library_len) == 0 ||
+        fk_srange(planv, &plan, &plan_len) == 0) {
+        const char *m = "FAIL metal_model_hc_begin invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_hc_begin_external(
+        library, library_len, plan, plan_len, out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m = "NOTHING metal_model_hc_begin no linked Metal model port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m = "FAIL metal_model_hc_begin linked port returned error\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_f16_matvec_native(
+    long long libraryv, long long kernelv, long long planv) {
+    const char *library; const char *kernel; const char *plan;
+    long long library_len; long long kernel_len; long long plan_len;
+    if (fk_srange(libraryv, &library, &library_len) == 0 ||
+        fk_srange(kernelv, &kernel, &kernel_len) == 0 ||
+        fk_srange(planv, &plan, &plan_len) == 0) {
+        const char *m = "FAIL metal_model_f16_matvec invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_f16_matvec_external(
+        library, library_len, kernel, kernel_len, plan, plan_len,
+        out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m = "NOTHING metal_model_f16_matvec no linked Metal model port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m = "FAIL metal_model_f16_matvec linked port returned error\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_hc_split_native(long long libraryv, long long planv) {
+    const char *library; const char *plan;
+    long long library_len; long long plan_len;
+    if (fk_srange(libraryv, &library, &library_len) == 0 ||
+        fk_srange(planv, &plan, &plan_len) == 0) {
+        const char *m = "FAIL metal_model_hc_split invalid string input\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n = fk_metal_model_hc_split_external(
+        library, library_len, plan, plan_len, out, FK_METAL_MODEL_PORT_BUF_CAP);
+    if (n == FK_METAL_MODEL_PORT_UNLINKED) {
+        const char *m = "NOTHING metal_model_hc_split no linked Metal model port\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m = "FAIL metal_model_hc_split linked port returned error\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_MODEL_PORT_BUF_CAP) n = FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out, n);
+}
+static long long fk_metal_model_hc_reduce_native(long long libraryv, long long planv) {
+    const char *library,*plan; long long library_len,plan_len;
+    if(fk_srange(libraryv,&library,&library_len)==0||fk_srange(planv,&plan,&plan_len)==0){
+        const char*m="FAIL metal_model_hc_reduce invalid string input\n";
+        return fk_sbuf(m,fk_cstrlen(m));
+    }
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_hc_reduce_external(
+        library,library_len,plan,plan_len,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){
+        const char*m="NOTHING metal_model_hc_reduce no linked Metal model port\n";
+        return fk_sbuf(m,fk_cstrlen(m));
+    }
+    if(n<0){const char*m="FAIL metal_model_hc_reduce linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;
+    return fk_sbuf(out,n);
+}
+static long long fk_metal_model_rmsnorm_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_rmsnorm invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_rmsnorm_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_rmsnorm no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_rmsnorm linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_mx8_matvec_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_mx8_matvec invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_mx8_matvec_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_mx8_matvec no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_mx8_matvec linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_state_native(long long namev,int save){
+    const char*name;long long nl;if(fk_srange(namev,&name,&nl)==0){
+        const char*m="FAIL metal_model_state invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=save?fk_metal_model_state_save_external(name,nl,out,FK_METAL_MODEL_PORT_BUF_CAP):
+        fk_metal_model_state_load_external(name,nl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_state no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_state linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_rope_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_rope invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_rope_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_rope no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_rope linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_attention_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_attention invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_attention_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_attention no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_attention linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_hc_post_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_hc_post invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_hc_post_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_hc_post no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_hc_post linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_hash_route_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_hash_route invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_hash_route_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_hash_route no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_hash_route linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_moe_native(long long librariesv,long long planv){
+    const char*libraries,*plan;long long ll,pl;
+    if(fk_srange(librariesv,&libraries,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_moe invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_moe_external(libraries,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_moe no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_moe linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_topk_route_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_topk_route invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_topk_route_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_topk_route no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_topk_route linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_hc_output_native(long long librariesv,long long planv){
+    const char*libraries,*plan;long long ll,pl;
+    if(fk_srange(librariesv,&libraries,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_hc_output invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_hc_output_external(libraries,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_hc_output no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_hc_output linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_argmax_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_argmax invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_argmax_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_argmax no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_argmax linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_kv_round_native(long long libraryv,long long planv){
+    const char*library,*plan;long long ll,pl;
+    if(fk_srange(libraryv,&library,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_kv_round invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_kv_round_external(library,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_kv_round no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_kv_round linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_cached_attention_native(long long librariesv,long long planv){
+    const char*libraries,*plan;long long ll,pl;
+    if(fk_srange(librariesv,&libraries,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_cached_attention invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_cached_attention_external(libraries,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_cached_attention no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_cached_attention linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_compress_stage_native(long long librariesv,long long planv){
+    const char*libraries,*plan;long long ll,pl;
+    if(fk_srange(librariesv,&libraries,&ll)==0||fk_srange(planv,&plan,&pl)==0){
+        const char*m="FAIL metal_model_compress_stage invalid string input\n";return fk_sbuf(m,fk_cstrlen(m));}
+    static char out[FK_METAL_MODEL_PORT_BUF_CAP];
+    long long n=fk_metal_model_compress_stage_external(libraries,ll,plan,pl,out,FK_METAL_MODEL_PORT_BUF_CAP);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){const char*m="NOTHING metal_model_compress_stage no linked Metal model port\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){const char*m="FAIL metal_model_compress_stage linked port returned error\n";return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>FK_METAL_MODEL_PORT_BUF_CAP)n=FK_METAL_MODEL_PORT_BUF_CAP;return fk_sbuf(out,n);
+}
+static long long fk_metal_model_transaction_native(long long recipev){
+    const char*recipe;long long rl;char*joined=0;
+    if(fk_srange(recipev,&recipe,&rl)==0){
+        long long cell=recipev,total=0,count=0;
+        while(cell!=1&&(cell&1)==1){
+            long long hi=cell>>1;const char*part;long long pl;
+            if(hi<=0||hi>fk_hp||fk_srange(fk_hh[hi],&part,&pl)==0){
+                const char*m="FAIL metal_model_transaction invalid recipe cell\n";
+                return fk_sbuf(m,fk_cstrlen(m));}
+            total+=pl;count++;cell=fk_ht[hi];
+        }
+        if(cell!=1||count==0||total<=0){
+            const char*m="FAIL metal_model_transaction invalid recipe list\n";
+            return fk_sbuf(m,fk_cstrlen(m));}
+        joined=malloc((unsigned long)total);
+        if(joined==0){
+            const char*m="FAIL metal_model_transaction recipe allocation\n";
+            return fk_sbuf(m,fk_cstrlen(m));}
+        cell=recipev;long long at=0;
+        while(cell!=1){
+            long long hi=cell>>1;const char*part;long long pl;
+            fk_srange(fk_hh[hi],&part,&pl);
+            long long k=0;while(k<pl){joined[at+k]=part[k];k++;}at+=pl;cell=fk_ht[hi];
+        }
+        recipe=joined;rl=total;
+    }
+    static char out[65536];
+    long long n=fk_metal_model_transaction_external(recipe,rl,out,65536);
+    if(joined!=0)free(joined);
+    if(n==FK_METAL_MODEL_PORT_UNLINKED){
+        const char*m="NOTHING metal_model_transaction no linked Metal model port\n";
+        return fk_sbuf(m,fk_cstrlen(m));}
+    if(n<0){
+        const char*m="FAIL metal_model_transaction linked port returned error\n";
+        return fk_sbuf(m,fk_cstrlen(m));}
+    if(n>65536)n=65536;return fk_sbuf(out,n);
 }
 /* ── host sense-channel carriers: camera (world-video) + mic (world-audio) ── The two conditions of
  * host-kernel.form, made concrete: ALLOW-PRESENCE (detect the device through the host's own OS API)
@@ -1967,7 +2692,7 @@ static long long fk_native_call(const unsigned char *code, long long n, long lon
 extern void *mmap(void *, unsigned long, int, int, int, long);
 extern int mprotect(void *, unsigned long, int);
 static long long fk_native_call(const unsigned char *code, long long n, long long arg) {
-#if defined(__x86_64__) || defined(__amd64__)
+#if defined(__x86_64__) || defined(__amd64__) || defined(__aarch64__) || defined(__arm64__)
     void *mem = mmap(0, (unsigned long)n, 0x3, 0x1002, -1, 0);
     /* RW, MAP_PRIVATE|MAP_ANON(bsd) */
     if (mem == (void *)-1) {
@@ -1981,6 +2706,7 @@ static long long fk_native_call(const unsigned char *code, long long n, long lon
     if (mprotect(mem, (unsigned long)n, 0x5) != 0) {
         return -1;
     }
+    __builtin___clear_cache((char *)mem, (char *)mem + n);
     /* RX */
     long long (*fn)(long long) = (long long (*)(long long))mem;
     return fn(arg);
@@ -1992,6 +2718,30 @@ static long long fk_native_call(const unsigned char *code, long long n, long lon
 #endif
 }
 #endif
+/* Generic W^X carrier: Form owns the target byte image; this membrane only
+ * validates a byte list, installs it for the current ISA, and calls it with
+ * one tagged Value-ABI argument. */
+static long long fk_native_call_bytes(long long image, long long arg) {
+    static unsigned char bytes[65536];
+    long long n = 0;
+    long long p = image >> 1;
+    while (p >= 1 && p <= fk_hp) {
+        long long v = fk_hh[p];
+        if ((v & 1) != 0) {
+            return fk_nothing;
+        }
+        v = v >> 1;
+        if (v < 0 || v > 255 || n >= 65536) {
+            return fk_nothing;
+        }
+        bytes[n++] = (unsigned char)v;
+        p = fk_ht[p] >> 1;
+    }
+    if (n == 0 || p != 0) {
+        return fk_nothing;
+    }
+    return fk_native_call(bytes, n, arg);
+}
 static long long fk_native_call_test(long long arg) {
 /* lowered bytes of long long f(long long a){ return a + 1; } — arg1 in RCX (Win64) / RDI (SysV) */
 #if defined(_WIN32)
@@ -4116,11 +4866,33 @@ static long long fk_http_dict_with_headers(long long status, long long headers, 
     return d;
 }
 static long long fk_host_exec(long long cmdv, long long inputv) {
-    (void)inputv;
     char cmd[8192];
+    char input_path[] = "/tmp/form-host-exec-XXXXXX";
+    char wrapped[16384];
     fk_cstr(cmdv, cmd, 8192);
-    void *fp = popen(cmd, "r");
+    long long isa = inputv >> 1;
+    long long input_len = (isa >= 0 && isa < fk_sp) ? fk_sl[isa] : 0;
+    int input_fd = mkstemp(input_path);
+    if (input_fd < 0) {
+        return fk_sbuf("", 0);
+    }
+    long long written = 0;
+    while (written < input_len) {
+        long long n = (long long)write(
+            input_fd, fk_sb + fk_so[isa] + written,
+            (unsigned long)(input_len - written));
+        if (n <= 0) {
+            close(input_fd);
+            unlink(input_path);
+            return fk_sbuf("", 0);
+        }
+        written = written + n;
+    }
+    close(input_fd);
+    snprintf(wrapped, sizeof(wrapped), "( %s ) < '%s'", cmd, input_path);
+    void *fp = popen(wrapped, "r");
     if (fp == 0) {
+        unlink(input_path);
         return fk_sbuf("", 0);
     }
     static char hbuf[262144];
@@ -4133,6 +4905,7 @@ static long long fk_host_exec(long long cmdv, long long inputv) {
         total = total + (long long)got;
     }
     pclose(fp);
+    unlink(input_path);
     return fk_sbuf(hbuf, total);
 }
 static long long fk_sock_request(long long hostv, long long portv, long long reqv) {
@@ -4972,7 +5745,7 @@ static void fk_vp(long long v) {
  * the previously-silent corruption case into correct behavior instead of a new
  * failure mode. */
 #define FK_FN_CAP 4096
-#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144*4*8 = 8MB. */
+#define FK_AST_NODE_CAP 262144 /* fk_node[][4]: the parsed program's own syntax tree (see NOTE above FK_NODE_CAP). Raised 65536->262144 (2026-07-02): a full mel-spectrogram --src program exceeded 64K AST nodes, and "--src is a gate" was a misdiagnosis — this is a raisable capacity constant (same class as FK_TOP_FN_SYM_CAP), not a fundamental limit. 262144 STANDS (2026-07-18): a doubling probe disproved a capacity misread — the match-switch band's fill died at the SAME source position at 2x budget, exposing fk_sparse's stray-rparen zero-advance mint spin (fixed in the bare-symbol path), not honest growth; the source-compiler family's full ~514KB prelude closure parses well within 256K nodes. Measure (does the fill position move with the cap?) before raising. */
 #define FK_PARSE_BUF_CAP 16777216 /* fk_buf: scratch buffer for source artifact reads. Raised 1048576->16777216 (2026-07-16): the v4 .fkb signed lane is 9 bytes (was 5), and a measured band-chain artifact (program-image-fkb-byte-decode-band.fkb, 1,292,944 bytes) exceeded the old 1MiB cap, so fresh caches died on reload with "artifact exceeds FK_PARSE_BUF_CAP". Worst case bounded by FK_AST_NODE_CAP (262144) * 4 lanes * 9B = ~9.4MB plus strings/symbols, so 16MiB holds the format at current capacity constants. */
 static long long fk_fn_count;
 static long long fk_node_count;
@@ -5401,7 +6174,7 @@ static long long fk_walk(long long i, long long fp) {
         fk_vsp = b12;
         return fk_offer_ack(c12, 1, r12);
     }
-    if (t == 240) {
+    if (t == 245) {
         long long c240 = fk_node[i][1];
         if (c240 < 0 || c240 >= FK_FN_CAP) {
             return fk_nothing;
@@ -5512,7 +6285,22 @@ static long long fk_walk(long long i, long long fp) {
         return fk_ht[p];
     }
     if (t == 22) {
-        long long p = fk_walk(fk_node[i][1], fp) >> 1;
+        /* len — a LIST cell. Only the low bit tells a cons cell (odd) from an
+         * int or a string handle (both even, both `idx << 1`), so an unguarded
+         * walk shifted whatever it was handed and followed fk_ht from there:
+         * with 40 live cons cells on the heap, (len 8) answered 2 and
+         * (len "hello") answered 4 while go/rust/ts answered 0/0/5. Not merely
+         * divergent — heap-state-dependent, which is why the same expression on
+         * an empty heap looked four-way-agreed. Non-lists now answer 0, as they
+         * do on the sibling arms; the one gap that stays is a STRING, whose byte
+         * length the siblings return and fkwu cannot see. Mirrored in the
+         * emitted walker's fk_list_len (fkc-table-serialize.fk) and in
+         * fk_jlist1 below — one law, three carriers. */
+        long long lv22 = fk_walk(fk_node[i][1], fp);
+        if ((lv22 & 1) == 0) {
+            return 0;
+        }
+        long long p = lv22 >> 1;
         long long n = 0;
         while (p >= 1 && p <= fk_hp) {
             n = n + 1;
@@ -5832,7 +6620,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return ((a11 >> 1) % (b11 >> 1)) << 1;
     }
     if (t == 15) {
-        return time(0) << 1;
+        /* now_unix_ms: milliseconds, matching the Go/Rust/TS siblings' shape */
+        return fk_now_ms() << 1;
     }
     if (t == 16) {
         return ((long long)arc4random()) << 1;
@@ -6785,6 +7574,142 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 215) {
         return fk_native_call_test(fk_walk(fk_node[i][1], fp) >> 1) << 1;
     }
+    if (t == 239) {
+        long long image = fk_walk(fk_node[i][1], fp);
+        long long arg = fk_walk(fk_node[i][2], fp);
+        return fk_native_call_bytes(image, arg);
+    }
+    if (t == 245) {
+        long long model = fk_walk(fk_node[i][1], fp);
+        fk_vp(model);
+        long long prompt = fk_walk(fk_node[i][2], fp);
+        fk_vp(prompt);
+        long long n_predict = fk_walk(fk_node[i][3], fp) >> 1;
+        fk_vsp = fk_vsp - 2;
+        return fk_local_model_generate_native(
+            fk_vs[fk_vsp], fk_vs[fk_vsp + 1], n_predict);
+    }
+    if (t == 246) {
+        long long path = fk_walk(fk_node[i][1], fp);
+        fk_vp(path);
+        long long plan = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_metal_model_open_native(fk_vs[fk_vsp], plan);
+    }
+    if (t == 247) {
+        return fk_metal_model_close_native();
+    }
+    if (t == 248) {
+        long long name = fk_walk(fk_node[i][1], fp);
+        fk_vp(name);
+        long long source = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_metal_model_library_native(fk_vs[fk_vsp], source);
+    }
+    if (t == 249) {
+        long long library = fk_walk(fk_node[i][1], fp);
+        fk_vp(library);
+        long long kernel = fk_walk(fk_node[i][2], fp);
+        fk_vp(kernel);
+        long long plan = fk_walk(fk_node[i][3], fp);
+        fk_vsp = fk_vsp - 2;
+        return fk_metal_model_embed_native(
+            fk_vs[fk_vsp], fk_vs[fk_vsp + 1], plan);
+    }
+    if (t == 250) {
+        long long library = fk_walk(fk_node[i][1], fp);
+        fk_vp(library);
+        long long plan = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_metal_model_hc_begin_native(fk_vs[fk_vsp], plan);
+    }
+    if (t == 251) {
+        long long library = fk_walk(fk_node[i][1], fp); fk_vp(library);
+        long long kernel = fk_walk(fk_node[i][2], fp); fk_vp(kernel);
+        long long plan = fk_walk(fk_node[i][3], fp);
+        fk_vsp = fk_vsp - 2;
+        return fk_metal_model_f16_matvec_native(
+            fk_vs[fk_vsp], fk_vs[fk_vsp + 1], plan);
+    }
+    if (t == 252) {
+        long long library = fk_walk(fk_node[i][1], fp); fk_vp(library);
+        long long plan = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_metal_model_hc_split_native(fk_vs[fk_vsp], plan);
+    }
+    if (t == 253) {
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_hc_reduce_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==254){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_rmsnorm_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==255){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_mx8_matvec_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==139)return fk_metal_model_state_native(fk_walk(fk_node[i][1],fp),1);
+    if(t==140)return fk_metal_model_state_native(fk_walk(fk_node[i][1],fp),0);
+    if(t==141){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_rope_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==142){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_attention_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==143){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_hc_post_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==144){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_hash_route_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==145){
+        long long libraries=fk_walk(fk_node[i][1],fp);fk_vp(libraries);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_moe_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==146){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_topk_route_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==147){
+        long long libraries=fk_walk(fk_node[i][1],fp);fk_vp(libraries);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_hc_output_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==148){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_argmax_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==149){
+        long long library=fk_walk(fk_node[i][1],fp);fk_vp(library);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_kv_round_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==150){
+        long long libraries=fk_walk(fk_node[i][1],fp);fk_vp(libraries);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_cached_attention_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==151){
+        long long libraries=fk_walk(fk_node[i][1],fp);fk_vp(libraries);
+        long long plan=fk_walk(fk_node[i][2],fp);fk_vsp=fk_vsp-1;
+        return fk_metal_model_compress_stage_native(fk_vs[fk_vsp],plan);
+    }
+    if(t==152)return fk_metal_model_transaction_native(fk_walk(fk_node[i][1],fp));
     if (t == 216) {
         return fk_wifi_ssid();
     }
@@ -7140,6 +8065,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             }
         }
         putchar(10);
+        /* print_str is the live event door: a streamed trace line must reach
+         * the reader the moment it is spoken, on a pipe as on a tty. stdio
+         * block-buffers pipes, so flush every emitted line (fflush(0) needs
+         * no FILE type in this freestanding extern set). */
+        fflush((void *)0);
         return 0;
     }
     if (t == 116) {
@@ -7199,6 +8129,14 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
     } else {
         fk_nwarn = fk_nwarn + 1;
     }
+    if (fk_diag_quiet) {
+        return;
+    }
+    if (sev == FK_DIAG_ERR) {
+        fk_nerr_seen = fk_nerr_seen + 1;
+    } else {
+        fk_nwarn_seen = fk_nwarn_seen + 1;
+    }
     if (off < 0) {
         dprintf(2, "fkwu: %s: ", sev == FK_DIAG_ERR ? "error" : "warning");
     } else {
@@ -7223,10 +8161,13 @@ static void fk_diag(int sev, long long off, const char *fmt, ...) {
     dprintf(2, "\n");
 }
 /* Called ONCE, after parse completes and before execution begins: gcc-style
- * tally. Silent when clean, so the default happy path prints nothing new. */
+ * tally. Silent when clean, so the default happy path prints nothing new.
+ * Tallies the PRINTED counters, not the per-compile ones: a compile-state
+ * reset between passes must never make the tally disagree with what stderr
+ * already shows. */
 static void fk_diag_flush(void) {
-    if (fk_nerr > 0 || fk_nwarn > 0) {
-        dprintf(2, "fkwu: %lld error(s), %lld warning(s)\n", fk_nerr, fk_nwarn);
+    if (fk_nerr_seen > 0 || fk_nwarn_seen > 0) {
+        dprintf(2, "fkwu: %lld error(s), %lld warning(s)\n", fk_nerr_seen, fk_nwarn_seen);
     }
 }
 static int fk_sws(char c) {
@@ -7314,6 +8255,22 @@ static long long fk_optab_find(long long s, long long n) {
     }
     return -1;
 }
+static const char *fk_opcode_identity(char out[32]) {
+    unsigned long long h = 1469598103934665603ULL;
+    long long i = 0;
+    while (i < fk_optab_n) {
+        const unsigned char *p = (const unsigned char *)fk_optab[i].name;
+        while (*p) {
+            h = (h ^ (unsigned long long)*p) * 1099511628211ULL;
+            p = p + 1;
+        }
+        h = (h ^ (unsigned long long)fk_optab[i].arity) * 1099511628211ULL;
+        h = (h ^ (unsigned long long)fk_optab[i].tag) * 1099511628211ULL;
+        i = i + 1;
+    }
+    sprintf(out, "op-%016llx", h);
+    return out;
+}
 /* rewrite-table lookup: source symbol -> row index in fk_rwtab, or -1. */
 static long long fk_rwtab_find(long long s, long long n) {
     long long i = 0;
@@ -7324,6 +8281,56 @@ static long long fk_rwtab_find(long long s, long long n) {
         i = i + 1;
     }
     return -1;
+}
+/* A RESERVED HEAD: a name that this parser answers itself in call position —
+ * the four control forms, any rewrite row, any op row. Binding one as a defn
+ * PARAMETER is a silent cross-kernel divergence, not a preference: form-kernel-go's
+ * reader drops such a name from the parameter list, so `(defn f (sub x) ..)` is
+ * arity 2 here and arity 1 there, and the two kernels then answer the same source
+ * differently with neither one saying so (MEASURED 2026-07-22: fkwu 7, bin-go
+ * `walk: "f" wants 1 args, got 2`). fkwu binds it AND then lets the op win in call
+ * position, so the parameter is reachable in value position only — exactly the trap
+ * that returned a full-pass 255 on a deliberately broken band
+ * (receipts/2026-07-22-ship-the-slot-map.md, defect 1). */
+static int fk_reserved_head(long long s, long long n) {
+    if (fk_sym_eq(s, n, "defn") || fk_sym_eq(s, n, "do") || fk_sym_eq(s, n, "let") ||
+        fk_sym_eq(s, n, "if")) {
+        return 1;
+    }
+    if (fk_rwtab_find(s, n) >= 0) {
+        return 1;
+    }
+    if (fk_optab_find(s, n) >= 0) {
+        return 1;
+    }
+    return 0;
+}
+/* The names where a PARAMETER of that spelling makes fkwu and form-kernel-go answer
+ * the same source differently. This list is MEASURED, not reasoned: all 169 op-table
+ * and rewrite-table names plus the four control forms were each put in a defn's
+ * parameter list and run on both kernels (2026-07-22). 155 agreed — including `len`,
+ * which core.fk's own fstr-to-int-loop has taken as a parameter since before this
+ * check existed, and which is therefore NOT a defect. These 18 diverged: Go's reader
+ * treats them structurally and drops them from the parameter list, so `(defn f (sub x)
+ * ..)` is arity 2 here and arity 1 there. Reasoning from "it is in the op table" would
+ * have condemned core.fk on the strength of an argument the oracle refutes. If an op
+ * row is added, re-run the probe rather than guessing where it belongs.
+ *
+ * And it only diverges in the FIRST parameter position. Probed again after the first
+ * narrowing, the check still condemned shell-exec.fk's `(defn sh-contains? (s sub) ..)`,
+ * which bin-go runs correctly: Go's reader reads the parameter list's own head
+ * structurally, so `(sub zz)` collapses and `(zz sub)` does not. All 18 names were
+ * re-run in first and second position; every one diverges first and agrees second. So
+ * the caller carries the position (`na == 0`). Twice now a reasoned generalization was
+ * wider than the measured fact, and both times a real cell in this body was the one
+ * that said so. */
+static int fk_divergent_param_name(long long s, long long n) {
+    return fk_sym_eq(s, n, "add") || fk_sym_eq(s, n, "sub") || fk_sym_eq(s, n, "mul") ||
+           fk_sym_eq(s, n, "div") || fk_sym_eq(s, n, "mod") || fk_sym_eq(s, n, "and") ||
+           fk_sym_eq(s, n, "or") || fk_sym_eq(s, n, "not") || fk_sym_eq(s, n, "eq") ||
+           fk_sym_eq(s, n, "lt") || fk_sym_eq(s, n, "le") || fk_sym_eq(s, n, "gt") ||
+           fk_sym_eq(s, n, "ge") || fk_sym_eq(s, n, "list") || fk_sym_eq(s, n, "defn") ||
+           fk_sym_eq(s, n, "do") || fk_sym_eq(s, n, "let") || fk_sym_eq(s, n, "if");
 }
 static long long fk_smknode(long long t0, long long c1, long long c2, long long c3) {
     long long k = fk_node_count;
@@ -7623,6 +8630,15 @@ static long long fk_sparse(void) {
             long long fk_bd_saved_maxslot = fk_maxslot;
             fk_bd_top = 0;
             fk_maxslot = 0;
+            if (alen > 0 && fk_divergent_param_name(as2, alen)) {
+                fk_diag(FK_DIAG_ERR, as2,
+                        "[shadowed-primitive] parameter '%.*s' names a primitive/control form -- "
+                        "in call position the primitive still wins, so the parameter is reachable "
+                        "in value position only, and form-kernel-go drops it from the parameter "
+                        "list entirely (arity divergence). Rename the parameter",
+                        (int)alen, fk_srctext + as2);
+                fk_src_unrunnable = 1;
+            }
             fk_bd_push(as2, alen, 0);
             long long body = fk_sparse();
             fk_sskip();
@@ -7659,7 +8675,17 @@ static long long fk_sparse(void) {
             long long slot = fk_maxslot + 1;
             fk_maxslot = slot;
             fk_bd_push(ns, nlen, slot);
-            long long body = fk_sparse();
+            fk_sskip();
+            long long body;
+            if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
+                /* bare 2-arg (let name val): no body follows. Emit the same lit-0
+                 * body the old fk_sparse-on-rparen call produced, WITHOUT sending
+                 * fk_sparse to the rparen -- that is now the loud stray-rparen
+                 * path below, and this legal shape must not trip it. */
+                body = fk_smklit(0);
+            } else {
+                body = fk_sparse();
+            }
             fk_bd_pop();
             fk_sskip();
             if (fk_spos < fk_slen && fk_srctext[fk_spos] == FK_CH_RPAREN) {
@@ -7680,6 +8706,20 @@ static long long fk_sparse(void) {
                 fk_spos = fk_spos + 1;
             }
             return fk_smknode(6, c1, c2, c3);
+        }
+
+        /* A LIVE BINDING THIS CALL WILL NOT REACH. `(sub x 128)` where `sub` is a name in
+         * scope reads as subtraction, not as the binding — the op/rewrite tables are
+         * consulted before the local frame, and form-kernel-go answers the same way, so
+         * this is not a divergence and fkwu does not refuse it. It is still the trap that
+         * cost Stone 13 hours (receipts/2026-07-22-ship-the-slot-map.md), so it is said
+         * out loud: a WARNING, counted and printed, where a defn parameter of the same
+         * spelling is the harder ERROR above. */
+        if (fk_bd_lookup(s, hn) >= 0 && fk_reserved_head(s, hn)) {
+            fk_diag(FK_DIAG_WARN, s,
+                    "[shadowed-call] '%.*s' is bound in this scope but in call position the "
+                    "primitive wins -- this call does NOT reach the binding",
+                    (int)hn, fk_srctext + s);
         }
 
         /* DATA-DRIVEN rewrite: gt/ge/lt/eq/and/or/not/abs are rows in fk_rwtab. Parse `arity`
@@ -8054,6 +9094,24 @@ static long long fk_sparse(void) {
      * name wins over a fn-name (lexical scope shadows). */
     long long s = fk_spos;
     fk_spos = fk_sym_end(fk_spos);
+    if (fk_spos == s) {
+        /* ZERO-WIDTH symbol: fk_sym_end stops with no progress only on a stray
+         * rparen (lparen took the branch above; whitespace/semicolons were
+         * skipped). Every statement/operand loop (fk_parse_do, fk_parse_top*,
+         * fk_parse_variadic) re-invokes fk_sparse here, so returning without
+         * consuming turns that caller into an AST-cap mint spin at one source
+         * position -- MEASURED 2026-07-18: 25 bytes of foreign-dialect source
+         * (`list(if 1 then 2 else 3);` in a BML section) minted the entire
+         * 262144-node table this way; doubling the cap died at the same spot.
+         * Diagnose loudly, consume the one character so the parse keeps moving,
+         * decline to honest 0. Well-formed Form never lands here: every op/do/
+         * variadic path consumes its own matching rparen, and the bare 2-arg
+         * value-position let guards its rparen before parsing a body. */
+        fk_diag(FK_DIAG_ERR, s,
+                "stray ')' in value position -- consumed to keep the parse advancing (foreign-dialect source?)");
+        fk_spos = fk_spos + 1;
+        return fk_smklit(0);
+    }
     long long off = fk_bd_lookup(s, fk_spos - s);
     if (off >= 0) {
         return fk_smknode(110, fk_smklit(off), 0, 0);
@@ -8072,6 +9130,30 @@ static long long fk_sparse(void) {
     if (vfidx >= 0) {
         return fk_smknode(243, vfidx, 0, 0);
     }
+    /* UNBOUND NAME IN VALUE POSITION. This used to be "an honest 0" — and it was the
+     * deepest silent-green in this body. A name that resolves to nothing is not a
+     * declined OFFER (that is the tag-137 unresolved-call arm above, which has said so
+     * loudly since the ftanh heal); it is a READ of something that was never bound, and
+     * a read has no axiom-5 recovery to appeal to. Left silent it does three things,
+     * all measured on 2026-07-22 against form-kernel-go as the oracle:
+     *   - it makes a band agree with itself. Two walkers reading the same free name both
+     *     read 0, both sides match, verdict 255 on deliberately broken code.
+     *   - it makes fkwu and the Go/Rust/TS walkers answer the SAME source differently
+     *     with neither saying so: fkwu's defn frame cannot see an enclosing do-let by
+     *     construction (fk_bd_top = 0 at the defn arm), Go's closure can. fkwu answered
+     *     5 where bin-go answered 15.
+     *   - it makes fkwu SPIN. A recursion whose base case tests a free name never
+     *     reaches it: `(if (eq i n) ..)` with n silently 0 and i starting at 1 ran for
+     *     minutes with no output at all, where bin-go answered in 40 ms.
+     * So: diagnose, on every occurrence, unconditionally — and still RECOVER to 0, so
+     * the rest of the source is parsed and every other offender is reported in the same
+     * run. The nonzero exit comes from the error count, exactly like unresolved-call. */
+    fk_diag(FK_DIAG_ERR, s,
+            "[unbound-name] '%.*s' in value position matched no binding/const/fn -- typo, "
+            "missing prelude, or a name from an enclosing scope a defn frame cannot see? "
+            "Read recovered to 0; parse continues",
+            (int)(fk_spos - s), fk_srctext + s);
+    fk_src_unrunnable = 1;
     return fk_smklit(0);
 }
 /* (do f1 f2 .. fn): sequence forms (tag 69 = eval-first/return-rest). A do-let `(let name val)`
@@ -8501,6 +9583,15 @@ static void fk_parse_top(void) {
                 }
                 long long as = fk_spos;
                 fk_spos = fk_sym_end(fk_spos);
+                if (na == 0 && fk_spos > as && fk_divergent_param_name(as, fk_spos - as)) {
+                    fk_diag(FK_DIAG_ERR, as,
+                            "[shadowed-primitive] parameter '%.*s' names a primitive/control form "
+                            "-- in call position the primitive still wins, so the parameter is "
+                            "reachable in value position only, and form-kernel-go drops it from "
+                            "the parameter list entirely (arity divergence). Rename the parameter",
+                            (int)(fk_spos - as), fk_srctext + as);
+                    fk_src_unrunnable = 1;
+                }
                 fk_bd_push(as, fk_spos - as, na);
                 if (na > fk_maxslot) {
                     fk_maxslot = na;
@@ -8817,6 +9908,11 @@ static long long fk_jlist1(long long tag, long long a) {
     }
     /* tail */
     if (tag == 22) {
+        /* mirrors fk_walk's tag-22 exactly — crystallized code must count the
+         * same list, and refuse the same non-list, as interpreted code. */
+        if ((a & 1) == 0) {
+            return 0;
+        }
         long long p = a >> 1;
         long long n = 0;
         while (p >= 1 && p <= fk_hp) {
@@ -9844,6 +10940,15 @@ static void fk_jemit(long long i, int tail) {
  * wrapper (tag 111, slot-count literal) when present; else = arity. */
 /* lower fn f's body into fk_jb; returns length if the whole tree is in-family, else 0. */
 static long long fk_jit_lower(long long f) {
+#if !defined(__x86_64__) && !defined(__amd64__) && !defined(_M_X64)
+    /*
+     * This temporary checkout lowerer emits x86-64 bytes.  Refuse before
+     * claiming crystallization on another ISA; the Form-owned target lowerers
+     * remain the authority for arm64 and other lanes.
+     */
+    (void)f;
+    return 0;
+#else
     /* every current call site already validates f before calling in, but fk_fn[f]
      * below was read unconditionally while the fk_fnar[f] read two lines down was
      * already guarded -- check once, up front, so both reads share one invariant. */
@@ -9897,6 +11002,7 @@ static long long fk_jit_lower(long long f) {
         return 0;
     }
     return fk_jbp;
+#endif
 }
 /* install fk_jb[0..n) executable and call it with an args array (tagged values). */
 static long long fk_native_call_args(const unsigned char *code, long long n, long long *args) {
@@ -10893,6 +11999,103 @@ static int fk_src_write_sym_text(const char *sym_path, const char *src_path, con
     close(fd);
     return 1;
 }
+#if !defined(_WIN32)
+extern int kill(int, int);
+#ifndef ESRCH
+#define ESRCH 3
+#endif
+/* Orphan sweep for the pid-temp writer below: a writer killed between open()
+ * and rename() (SIGKILL from tools/ftimeout, a crash, a ^C) leaves its
+ * .w<pid> temp behind with no process left responsible for it -- a band
+ * sweep under ftimeout orphaned 793 of them in one afternoon (witnessed
+ * 2026-07-17), and `git add -A` swept 783 into a commit. Before staging its
+ * own temps, a writer clears its artifact's directory of every
+ * *.fkb.w<pid> / *.sym.w<pid> whose writer is DEAD (kill(pid,0) -> ESRCH).
+ * A live pid -- or one we may not signal (EPERM) -- is left alone, so the
+ * concurrent-runner guarantee of the pid-temp scheme is untouched; a
+ * recycled pid at worst delays one orphan's collection until the next
+ * compile in that directory. Windows keeps the leak: no kill() there, and
+ * that lane is the port shim, not the sweep path. */
+static void fk_src_sweep_dead_temps(const char *fkb_path) {
+    char dir[4160];
+    long long n = fk_path_len(fkb_path);
+    if (n > 4096) {
+        return;
+    }
+    long long cut = n;
+    while (cut > 0 && fkb_path[cut - 1] != FK_CH_SLASH) {
+        cut = cut - 1;
+    }
+    if (cut == 0) {
+        dir[0] = FK_CH_DOT;
+        dir[1] = 0;
+    } else if (cut == 1) {
+        dir[0] = FK_CH_SLASH;
+        dir[1] = 0;
+    } else {
+        long long k = 0;
+        while (k < cut - 1) {
+            dir[k] = fkb_path[k];
+            k = k + 1;
+        }
+        dir[k] = 0;
+    }
+    DIR *d = opendir(dir);
+    if (!d) {
+        return;
+    }
+    struct dirent *e;
+    long long self = getpid();
+    while ((e = readdir(d)) != 0) {
+        const char *name = e->d_name;
+        long long len = 0;
+        while (name[len] != 0) {
+            len = len + 1;
+        }
+        long long ds = len;
+        while (ds > 0 && name[ds - 1] >= FK_CH_DIGIT0 && name[ds - 1] <= FK_CH_DIGIT9) {
+            ds = ds - 1;
+        }
+        /* shape: <stem>.fkb.w<1..10 digits> or <stem>.sym.w<1..10 digits> */
+        if (ds == len || len - ds > 10 || ds < 6) {
+            continue;
+        }
+        const char *fkbw = ".fkb.w";
+        const char *symw = ".sym.w";
+        int m_fkb = 1;
+        int m_sym = 1;
+        long long k = 0;
+        while (k < 6) {
+            if (name[ds - 6 + k] != fkbw[k]) {
+                m_fkb = 0;
+            }
+            if (name[ds - 6 + k] != symw[k]) {
+                m_sym = 0;
+            }
+            k = k + 1;
+        }
+        if (!m_fkb && !m_sym) {
+            continue;
+        }
+        long long pid = 0;
+        k = ds;
+        while (k < len) {
+            pid = pid * 10 + (name[k] - FK_CH_DIGIT0);
+            k = k + 1;
+        }
+        if (pid <= 0 || pid == self) {
+            continue;
+        }
+        if (kill((int)pid, 0) == 0 || errno != ESRCH) {
+            continue;
+        }
+        char victim[4600];
+        fk_path_join(victim, 4600, dir, name);
+        unlink(victim);
+    }
+    closedir(d);
+}
+#endif
 static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const char *sym_path,
                             long long source_mtime, const char *source_hash) {
     /* both artifacts go to pid-suffixed temp names and rename() into place:
@@ -10905,6 +12108,9 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     if (fk_path_len(fkb_path) > 4096 || fk_path_len(sym_path) > 4096) {
         return 0;
     }
+#if !defined(_WIN32)
+    fk_src_sweep_dead_temps(fkb_path);
+#endif
     sprintf(fkb_tmp, "%s.w%d", fkb_path, getpid());
     sprintf(sym_tmp, "%s.w%d", sym_path, getpid());
 #if defined(_WIN32)
@@ -10918,13 +12124,14 @@ static int fk_src_write_fkb(const char *src_path, const char *fkb_path, const ch
     fk_fkb_write_overflow = 0;
     int ok = 1;
     char canon[4096];
+    char opcode_id[32];
     ok = ok && fk_write_all_raw(fd, "FKPIFB1", 7);
     ok = ok && fk_fkb_write_u8(fd, 0);
     ok = ok && fk_fkb_write_u32(fd, 4);
     ok = ok && fk_fkb_write_cstr(fd, fk_path_canon_id(src_path, canon));
     ok = ok && fk_fkb_write_cstr(fd, source_hash);
     ok = ok && fk_fkb_write_signed(fd, source_mtime > 0 ? source_mtime : 1);
-    ok = ok && fk_fkb_write_cstr(fd, fkb_path);
+    ok = ok && fk_fkb_write_cstr(fd, fk_opcode_identity(opcode_id));
     ok = ok && fk_fkb_write_signed(fd, 1);
     ok = ok && fk_fkb_write_signed(fd, fk_fn_count);
     long long i = 0;
@@ -11255,7 +12462,10 @@ static int fk_src_import_fkb_image(const char *fkb_path, const char *expected_sr
     if (stored_source_mtime != expected_source_mtime) {
         source_identity_ok = 0;
     }
-    fk_fkb_skip_string();
+    char opcode_id[32];
+    if (!fk_fkb_read_string_matches_cstr(fk_opcode_identity(opcode_id))) {
+        source_identity_ok = 0;
+    }
     long long sealed = fk_fkb_read_signed();
     if (fk_fkb_bad) {
         fk_diag_path("warning", fkb_path, "corrupt .fkb artifact; rebuilding from source");
@@ -11456,7 +12666,10 @@ static int fk_src_load_fkb_checked(const char *fkb_path, const char *expected_sr
     if (expected_source_mtime > 0 && stored_source_mtime != expected_source_mtime) {
         source_identity_ok = 0;
     }
-    fk_fkb_skip_string();
+    char opcode_id[32];
+    if (!fk_fkb_read_string_matches_cstr(fk_opcode_identity(opcode_id))) {
+        source_identity_ok = 0;
+    }
     long long sealed = fk_fkb_read_signed();
     if (fk_fkb_bad) {
         return 0;
@@ -11630,17 +12843,120 @@ static void fk_src_reset_compile_state(void) {
     fk_nerr = 0;
     fk_nwarn = 0;
     fk_src_truncated = 0;
+    fk_src_unrunnable = 0;
     fk_string_table_reset();
     fk_fntop = 0;
     fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;
 }
+/* WHOLE-SOURCE PAREN BALANCE, decided ONCE over the assembled unit.
+ *
+ * Every reader below is permissive by construction: a form's closer is consumed with
+ * `if (pos < len && text[pos] == RPAREN) pos++`, so a form that simply RUNS OUT of text
+ * is auto-closed and evaluated as though the author had written it that way. `(do (add 1 2)`
+ * -- the `(do` never closed -- answered 3 and exited 0. Note the shape: 3 is the RIGHT
+ * answer to the WRONG text, which is exactly why nothing downstream can catch it. Every band
+ * in this body is one `(do ...)` form, so a single missing character anywhere in a band file
+ * yields a plausible verdict that reads green (Stone 41 watched one return 1023 that way, and
+ * the FK_SOURCE_TEXT_CAP comment above records the same family biting once before as the
+ * "N=100 cliff"). It needs no unusual naming -- unlike [unbound-name] or [shadowed-primitive]
+ * it is reachable by a typo.
+ *
+ * fk_src_truncated was declared for precisely this and was never set by anything: a gate that
+ * existed only as a comment. The balance is therefore checked here, over the flattened text
+ * (preludes included, which is why an unbalanced prelude is caught at the root compile), using
+ * the same lexical rules fk_skip_balanced already uses -- `;` runs to end of line, "..." is
+ * opaque to structure and a backslash escape stays inside it.
+ *
+ * Depth going negative is a stray ')'; depth left positive at EOF is an unclosed form, reported
+ * at the '(' that opened it. Either way the program was never fully READ, so there is nothing
+ * for a verdict to be OF -- the same line this stone drew for the unbound read. Set the
+ * unrunnable latch and let both execution doors refuse with a non-zero exit. */
+static void fk_src_check_balance(void) {
+    long long p = 0;
+    long long depth = 0;
+    long long outermost_open = -1;
+    while (p < fk_slen) {
+        char c = fk_srctext[p];
+        if (c == FK_CH_SEMI) {
+            while (p < fk_slen && fk_srctext[p] != FK_CH_LF) {
+                p = p + 1;
+            }
+            continue;
+        }
+        if (c == FK_CH_DQUOTE) {
+            p = p + 1;
+            while (p < fk_slen && fk_srctext[p] != FK_CH_DQUOTE) {
+                if (fk_srctext[p] == FK_CH_BACKSLASH && p + 1 < fk_slen) {
+                    p = p + 1;
+                }
+                p = p + 1;
+            }
+            if (p < fk_slen) {
+                p = p + 1;
+            }
+            continue;
+        }
+        if (c == FK_CH_LPAREN) {
+            if (depth == 0) {
+                outermost_open = p;
+            }
+            depth = depth + 1;
+        } else if (c == FK_CH_RPAREN) {
+            depth = depth - 1;
+            if (depth < 0) {
+                fk_diag(FK_DIAG_ERR, p,
+                        "[unbalanced-source] stray ')' closes a form that was never opened -- "
+                        "the text cannot be read as the program it claims to be, so there is "
+                        "nothing for a verdict to be of. Refusing to run");
+                fk_src_unrunnable = 1;
+                return;
+            }
+        }
+        p = p + 1;
+    }
+    if (depth > 0) {
+        /* THE INPUT ENDED BEFORE THE FORM CLOSED. Named apart from the stray closer above on
+         * purpose: these are different repairs. A stray ')' is code the author got wrong. This
+         * is a stream that STOPPED -- and the reader cannot tell a stream that ENDED from one
+         * that was INTERRUPTED, because the terminator is byte-identical for both (fk_run_src
+         * reads to EOF; fsh-read walks input_byte to a NUL). So a cut pipe and a finished
+         * program arrive looking the same, and the prefix gets evaluated and reported as a
+         * success. That is axiom-5 at the INPUT boundary: `nothing` (the bytes stopped) read as
+         * `0` (the bytes ended) -- the same conflation as a zeroed Metal buffer read as a
+         * computed zero, one layer further out. `edgedrop` is the body's word for it.
+         * fk_src_truncated was declared for exactly "the source was amputated" and was never
+         * once set; this is what it was for, so it is set here and the gate it guards finally
+         * has a meaning. Telling the author the INPUT ended -- rather than that their code is
+         * malformed -- is the difference between "your pipe was cut" and "your code is wrong". */
+        fk_diag(FK_DIAG_ERR, outermost_open >= 0 ? outermost_open : 0,
+                "[input-ended-mid-form] the input ended before this form closed -- %lld open "
+                "paren(s) remain. A stream that STOPPED and a stream that FINISHED end with the "
+                "same terminator, so the prefix would otherwise be read as a whole program: the "
+                "permissive reader auto-closes it and computes the right answer to the wrong "
+                "text. Completion is not the absence of more bytes. Refusing to run",
+                depth);
+        fk_src_truncated = 1;
+        fk_src_unrunnable = 1;
+    }
+}
 static void fk_src_compile_current_unit(const char *path, const char *fkb_path,
                                         const char *sym_path, long long unit_mtime,
                                         const char *source_hash) {
     fk_spos = 0;
     fk_srctext[fk_slen] = 0;
+    fk_src_check_balance();
+    /* Refuse BEFORE the readers touch the text, not after. The parse loop below advances by
+     * consuming forms; on a stray ')' at top level it consumes nothing and does not advance,
+     * so running it over unbalanced text spins (the zero-advance seen 2026-07-18). Diagnosing
+     * and then parsing anyway would trade a silent wrong answer for a silent hang, which is not
+     * a trade. The unit yields the empty program and the execution doors refuse on the latch. */
+    if (fk_src_unrunnable) {
+        fk_fn[0] = fk_smklit(0);
+        fk_fn_count = 1;
+        return;
+    }
     /* stone 4+5: multi-function root logic, preserved */
     fk_prescan_defns();
     /* two-pass: register every top-level defn name+index+arity BEFORE bodies, so forward + mutual
@@ -11718,8 +13034,19 @@ static int fk_src_compile_artifact_only(const char *path) {
     if (fk_path_replace_ext(compile_path, ".fkb", fkb_path, 4096) &&
         fk_path_replace_ext(compile_path, ".sym", sym_path, 4096) &&
         fk_src_load_unit(compile_path, source_hash, FK_SRC_HASH_CAP, &unit_mtime)) {
+        /* This compile is SPECULATIVE: it builds a candidate per-unit image
+         * for the import path. A unit that only resolves inside the root's
+         * flat prelude chain (e.g. it carries no "; preludes:" line of its
+         * own) diagnoses unresolved calls HERE that the authoritative flat
+         * compile then resolves — printing them as bare "error:" lines while
+         * the run exits 0 was the witnessed lie. Quiet mode: the counts still
+         * reach the .sym compile-errors record (the import gate reads it and
+         * refuses degraded images), but nothing prints; the import gate emits
+         * the one honest, counted warning instead. */
+        fk_diag_quiet = fk_diag_quiet + 1;
         fk_src_reset_compile_state();
         fk_src_compile_current_unit(compile_path, fkb_path, sym_path, unit_mtime, source_hash);
+        fk_diag_quiet = fk_diag_quiet - 1;
         ok = 1;
     }
     fk_src_dep_count = saved_dep_count;
@@ -11801,10 +13128,24 @@ static int fk_src_try_import_fkb_images(const char *root_path) {
                  * importing it would bake the degradation invisibly into this
                  * run -- refuse (unknown record counts as degraded), so the
                  * caller falls back to the flat compile where the full chain
-                 * resolves */
+                 * resolves. The refusal itself must not be silent: this is
+                 * where a unit that cannot stand alone costs the run its
+                 * imported-image path, on THIS run and every future one until
+                 * the unit's own prelude chain is healed — say so, once,
+                 * counted, so the tally and stderr agree. */
                 char dep_sym_path[4096];
-                if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, 4096) ||
-                    fk_src_sym_recorded_errors(dep_sym_path) != 0) {
+                if (!fk_path_replace_ext(fk_src_dep_path[i], ".sym", dep_sym_path, 4096)) {
+                    return 0;
+                }
+                long long dep_recorded = fk_src_sym_recorded_errors(dep_sym_path);
+                if (dep_recorded != 0) {
+                    if (dep_recorded > 0) {
+                        fk_diag(FK_DIAG_WARN, -1,
+                                "%s: unit is not importable standalone (%lld unresolved "
+                                "error(s) compiled alone; missing '; preludes:' line?) -- "
+                                "image rejected, falling back to the whole-program compile",
+                                fk_src_dep_path[i], dep_recorded);
+                    }
                     return 0;
                 }
             }
@@ -11899,7 +13240,7 @@ static int fk_run_src(const char *path, long long arg) {
      * OTHER compile error still recovers INTO a runnable (if degraded) program and
      * runs, carrying a nonzero EXIT via fk_nerr at the final return. */
     fk_diag_flush();
-    if (fk_src_truncated) {
+    if (fk_src_truncated || fk_src_unrunnable) {
         return 1;
     }
     if (fk_nerr == 0 && fk_conf("FK_JIT_SCAN")) {
@@ -11924,11 +13265,8 @@ static int fk_run_src(const char *path, long long arg) {
         printf("[scan] lowered=%lld bailed=%lld total=%lld\n", ok, bail, ok + bail);
     }
     if (fk_nerr == 0) {
-        char *je = fk_conf("FK_JIT");
-        long long want = (je && je[0] && je[0] != 48) ? 1 : 0;
-        if (want) {
-            fk_lower_tail_tramp = 1;
-        }
+        long long want = 1;
+        fk_lower_tail_tramp = 1;
         long long root = fk_fn[0];
         long long rt = fk_node[root][0];
         if (want && (rt == 12 || rt == 240 || rt == 241)) {
@@ -11969,7 +13307,7 @@ static int fk_run_src(const char *path, long long arg) {
                     unsigned char *img = malloc(n);
                     if (img == 0) {
                         fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
-                        return fk_nerr > 0 ? 1 : 0;
+                        return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
                     }
                     long long ci = 0;
                     while (ci < n) {
@@ -12025,7 +13363,7 @@ static int fk_run_src(const char *path, long long arg) {
         }
     }
     fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
-    return fk_nerr > 0 ? 1 : 0;
+    return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
 }
 /* --feval: run a recipe THROUGH form-eval (Form), not fk_walk directly. The C seed bootstraps the
  * form-eval meta-evaluator (read live from grammars/form-eval.fk); form-eval reads the recipe as a
@@ -12154,11 +13492,21 @@ static int fk_run_feval(const char *path) {
     fk_nerr = 0;
     fk_nwarn = 0;
     fk_src_truncated = 0;
+    fk_src_unrunnable = 0;
     fk_sinit();
     fk_fntop = 0;
     fk_const_top = 0;
     fk_defn_next = 1;
     fk_root = -1;
+    /* twin of fk_src_compile_current_unit's gate: this door parses fk_srctext directly,
+     * so it needs the same balance decision or the meta-eval lane stays permissive.
+     * Same reason as there for deciding BEFORE the readers run: unbalanced text can
+     * spin the top-level loop rather than fail it. */
+    fk_src_check_balance();
+    if (fk_src_unrunnable) {
+        fk_diag_flush();
+        return 1;
+    }
     fk_prescan_defns();
     fk_spos = 0;
     while (1) {
@@ -12190,8 +13538,7 @@ static int fk_run_feval(const char *path) {
         fk_fn[0] = fk_smknode(111, fk_smklit(fk_maxslot), fk_fn[0], 0);
     }
     {
-        char *je = fk_conf("FK_JIT");
-        fk_feval_jit_on = (je && je[0] && je[0] != 48) ? 1 : 0;
+        fk_feval_jit_on = 1;
         char *jh = fk_conf("FK_JIT_HOT");
         if (jh && jh[0]) {
             long long h = atoi(jh);
@@ -12212,10 +13559,13 @@ static int fk_run_feval(const char *path) {
     fk_vsp = 1;
     /* ── PARSE DONE, EXECUTION BEGINS ── gcc-style tally (twin of fk_run_src). */
     fk_diag_flush();
+    if (fk_src_unrunnable) {
+        return 1;
+    }
     long long rv = fk_walk(fk_fn[0], 0);
     fk_pv(rv);
     /* print the meta-eval result by value-kind (int / float / nothing) */
-    return fk_nerr > 0 ? 1 : 0;
+    return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
 }
 static int fk_run(int argc, char **argv) {
     char fk_stack_here;

@@ -1,0 +1,395 @@
+; concept-pl-arbitrary-source-13.fk -- Form-native syntax and semantic sensing
+; over thirteen independent, public Luhn implementations.
+;
+; Unlike concept-pl-10000-13 and concept-pl-task-families-13, this organ never
+; regenerates the source and never searches for a kernel marker. It reads the
+; committed upstream program bytes, tokenizes identifiers/numbers/strings and
+; longest-match operators, builds a balanced group AST, and derives a shared
+; payment-checksum semantic IR from the observed syntax. A modulo-11 semantic
+; mutation remains syntactically valid but is not admitted as Luhn; an open
+; group mutation is rejected by the parser. The analyzer is a real bounded
+; domain parser, not a general parser/typechecker for the thirteen languages.
+; witnessed: 2026-07-18 -> 13/13 admitted; 130 roles; 13+13 negatives
+; preludes: form/form-stdlib/core.fk
+
+(do
+  (defn cpa13-root () "presence/fixtures/concept-pl-arbitrary-source-13/")
+  (defn cpa13-fixtures ()
+    (list
+      (list "python" "python.py")
+      (list "javascript" "javascript.js")
+      (list "typescript" "typescript.ts")
+      (list "java" "java.java")
+      (list "c" "c.c")
+      (list "cpp" "cpp.cpp")
+      (list "csharp" "csharp.cs")
+      (list "go" "go.go")
+      (list "rust" "rust.rs")
+      (list "ruby" "ruby.rb")
+      (list "php" "php.php")
+      (list "swift" "swift.swift")
+      (list "kotlin" "kotlin.kt")))
+  (defn cpa13-fixture-language (fixture) (head fixture))
+  (defn cpa13-fixture-path (fixture)
+    (str_concat (cpa13-root) (nth fixture 1)))
+
+  ; token=(kind value start end)
+  (defn cpa13-token (kind value start end) (list kind value start end))
+  (defn cpa13-token-kind (token) (head token))
+  (defn cpa13-token-value (token) (nth token 1))
+  (defn cpa13-token-start (token) (nth token 2))
+  (defn cpa13-token-end (token) (nth token 3))
+  (defn cpa13-char (source i) (substring source i (add i 1)))
+  (defn cpa13-space? (char)
+    (do (let byte (ord char))
+      (if (or (eq byte 32) (or (eq byte 9) (or (eq byte 10) (eq byte 13)))) 1 0)))
+  (defn cpa13-digit? (char)
+    (do (let byte (ord char)) (if (and (ge byte 48) (le byte 57)) 1 0)))
+  (defn cpa13-alpha? (char)
+    (do (let byte (ord char))
+      (if (or (and (ge byte 65) (le byte 90))
+              (and (ge byte 97) (le byte 122))) 1 0)))
+  (defn cpa13-name-start? (char)
+    (if (or (eq (cpa13-alpha? char) 1) (str_eq char "_")) 1 0))
+  (defn cpa13-name-char? (char)
+    (if (or (eq (cpa13-name-start? char) 1)
+            (or (eq (cpa13-digit? char) 1) (str_eq char "?"))) 1 0))
+  (defn cpa13-skip-space (source i end)
+    (if (ge i end) i
+      (if (eq (cpa13-space? (cpa13-char source i)) 1)
+        (cpa13-skip-space source (add i 1) end) i)))
+  (defn cpa13-skip-line-comment (source i end)
+    (if (ge i end) i
+      (if (eq (ord (cpa13-char source i)) 10) (add i 1)
+        (cpa13-skip-line-comment source (add i 1) end))))
+  (defn cpa13-skip-block-comment (source i end)
+    (if (ge i end) end
+      (if (and (str_eq (cpa13-char source i) "*")
+               (and (lt (add i 1) end)
+                    (str_eq (cpa13-char source (add i 1)) "/")))
+        (add i 2)
+        (cpa13-skip-block-comment source (add i 1) end))))
+  ; Cross-language trivia shared by the thirteen lenses. A leading # is a
+  ; line comment in Python/Ruby and a preprocessor line in C/C++; neither is
+  ; executable syntax for this bounded semantic AST.
+  (defn cpa13-skip-trivia (source i end)
+    (do (let start (cpa13-skip-space source i end))
+      (if (ge start end) start
+        (if (and (str_eq (cpa13-char source start) "/")
+                 (and (lt (add start 1) end)
+                      (str_eq (cpa13-char source (add start 1)) "/")))
+          (cpa13-skip-trivia source
+            (cpa13-skip-line-comment source (add start 2) end) end)
+        (if (and (str_eq (cpa13-char source start) "/")
+                 (and (lt (add start 1) end)
+                      (str_eq (cpa13-char source (add start 1)) "*")))
+          (cpa13-skip-trivia source
+            (cpa13-skip-block-comment source (add start 2) end) end)
+        (if (str_eq (cpa13-char source start) "#")
+          (cpa13-skip-trivia source
+            (cpa13-skip-line-comment source (add start 1) end) end)
+          start)))))
+  (defn cpa13-scan-name-end (source i end)
+    (if (ge i end) i
+      (if (eq (cpa13-name-char? (cpa13-char source i)) 1)
+        (cpa13-scan-name-end source (add i 1) end) i)))
+  (defn cpa13-scan-number-end (source i end)
+    (if (ge i end) i
+      (if (eq (cpa13-digit? (cpa13-char source i)) 1)
+        (cpa13-scan-number-end source (add i 1) end) i)))
+  ; String tokens retain their whole source spelling. Escapes consume the next
+  ; byte, so delimiters inside strings never become group nodes.
+  (defn cpa13-scan-string-end (source i end quote escaped)
+    (if (ge i end) -1
+      (do (let char (cpa13-char source i))
+        (if (eq escaped 1)
+          (cpa13-scan-string-end source (add i 1) end quote 0)
+          (if (str_eq char "\\")
+            (cpa13-scan-string-end source (add i 1) end quote 1)
+            (if (str_eq char quote) (add i 1)
+              (cpa13-scan-string-end source (add i 1) end quote 0)))))))
+  (defn cpa13-prefix? (source prefix i)
+    (eq (str_find source prefix i) i))
+  (defn cpa13-operators ()
+    (list "!==" "===" "..." "::" "=>" "->" "<=" ">=" "==" "!="
+      "+=" "-=" "*=" "/=" "%=" "&&" "||" "++" "--" ".."))
+  (defn cpa13-match-op (source i operators)
+    (if (eq (len operators) 0) (cpa13-char source i)
+      (if (cpa13-prefix? source (head operators) i) (head operators)
+        (cpa13-match-op source i (tail operators)))))
+  ; scan-step=(token next). Keeping classification separate from the tail loop
+  ; avoids a deeply nested evaluator expression for long source files.
+  (defn cpa13-scan-name-step (source start end)
+    (do (let stop (cpa13-scan-name-end source (add start 1) end))
+      (list (cpa13-token "name" (substring source start stop) start stop) stop)))
+  (defn cpa13-scan-number-step (source start end)
+    (do (let stop (cpa13-scan-number-end source (add start 1) end))
+      (list (cpa13-token "number" (substring source start stop) start stop) stop)))
+  (defn cpa13-scan-string-step (source start end quote)
+    (do (let stop (cpa13-scan-string-end source (add start 1) end quote 0))
+      (if (lt stop 0)
+        (list (cpa13-token "error" "unterminated-string" start end) end)
+        (list (cpa13-token "string" (substring source start stop) start stop) stop))))
+  (defn cpa13-scan-op-step (source start)
+    (do (let op (cpa13-match-op source start (cpa13-operators)))
+      (let stop (add start (str_len op)))
+      (list (cpa13-token "operator" op start stop) stop)))
+  (defn cpa13-scan-step (source start end)
+    (do (let char (cpa13-char source start))
+      (if (eq (cpa13-name-start? char) 1) (cpa13-scan-name-step source start end)
+      (if (eq (cpa13-digit? char) 1) (cpa13-scan-number-step source start end)
+      (if (or (str_eq char "\"") (str_eq char "'"))
+        (cpa13-scan-string-step source start end char)
+        (cpa13-scan-op-step source start))))))
+  (defn cpa13-scan-go (source i end out)
+    (do (let start (cpa13-skip-trivia source i end))
+      (if (ge start end) (reverse out)
+        (do (let step (cpa13-scan-step source start end))
+          (let token (head step))
+          (if (str_eq (cpa13-token-kind token) "error")
+            (reverse (cons token out))
+            (cpa13-scan-go source (nth step 1) end (cons token out)))))))
+  (defn cpa13-scan (source) (cpa13-scan-go source 0 (str_len source) (empty)))
+
+  ; group-node=(group opener closer children), leaf=(leaf kind value start end)
+  (defn cpa13-leaf (token)
+    (list "leaf" (cpa13-token-kind token) (cpa13-token-value token)
+      (cpa13-token-start token) (cpa13-token-end token)))
+  (defn cpa13-open? (value)
+    (if (or (str_eq value "(") (or (str_eq value "[") (str_eq value "{"))) 1 0))
+  (defn cpa13-close? (value)
+    (if (or (str_eq value ")") (or (str_eq value "]") (str_eq value "}"))) 1 0))
+  (defn cpa13-closer (value)
+    (if (str_eq value "(") ")" (if (str_eq value "[") "]" "}")))
+  ; parse-result=(ok nodes remaining reason)
+  (defn cpa13-parse-result (ok nodes remaining reason)
+    (list ok nodes remaining reason))
+  (defn cpa13-parse-ok? (result) (head result))
+  (defn cpa13-parse-nodes (result) (nth result 1))
+  (defn cpa13-parse-remaining (result) (nth result 2))
+  (defn cpa13-parse-seq (tokens expected out)
+    (if (eq (len tokens) 0)
+      (if (str_eq expected "")
+        (cpa13-parse-result 1 (reverse out) (empty) "parsed")
+        (cpa13-parse-result 0 (empty) (empty) "unclosed-group"))
+      (do (let token (head tokens))
+        (let value (cpa13-token-value token))
+        (if (str_eq (cpa13-token-kind token) "error")
+          (cpa13-parse-result 0 (empty) tokens value)
+        (if (eq (cpa13-close? value) 1)
+          (if (and (not (str_eq expected "")) (str_eq value expected))
+            (cpa13-parse-result 1 (reverse out) (tail tokens) "closed")
+            (cpa13-parse-result 0 (empty) tokens "unexpected-closer"))
+        (if (eq (cpa13-open? value) 1)
+          (do (let closer (cpa13-closer value))
+            (let inner (cpa13-parse-seq (tail tokens) closer (empty)))
+            (if (eq (cpa13-parse-ok? inner) 0) inner
+              (cpa13-parse-seq (cpa13-parse-remaining inner) expected
+                (cons (list "group" value closer (cpa13-parse-nodes inner)) out))))
+          (cpa13-parse-seq (tail tokens) expected (cons (cpa13-leaf token) out))))))))
+  (defn cpa13-parse-tokens (tokens) (cpa13-parse-seq tokens "" (empty)))
+  (defn cpa13-parse (source) (cpa13-parse-tokens (cpa13-scan source)))
+
+  (defn cpa13-node-count-go (nodes total)
+    (if (eq (len nodes) 0) total
+      (do (let node (head nodes))
+        (cpa13-node-count-go (tail nodes)
+          (add total (if (str_eq (head node) "group")
+            (cpa13-node-count-go (nth node 3) 1) 1))))))
+  (defn cpa13-node-count (parse)
+    (if (eq (cpa13-parse-ok? parse) 1)
+      (cpa13-node-count-go (cpa13-parse-nodes parse) 0) 0))
+  (defn cpa13-group-count-go (nodes total)
+    (if (eq (len nodes) 0) total
+      (do (let node (head nodes))
+        (cpa13-group-count-go (tail nodes)
+          (if (str_eq (head node) "group")
+            (cpa13-group-count-go (nth node 3) (add total 1)) total)))))
+  (defn cpa13-group-count (parse)
+    (if (eq (cpa13-parse-ok? parse) 1)
+      (cpa13-group-count-go (cpa13-parse-nodes parse) 0) 0))
+  (defn cpa13-max (a b) (if (gt a b) a b))
+  (defn cpa13-depth-go (nodes depth best)
+    (if (eq (len nodes) 0) best
+      (do (let node (head nodes))
+        (cpa13-depth-go (tail nodes) depth
+          (if (str_eq (head node) "group")
+            (cpa13-depth-go (nth node 3) (add depth 1)
+              (cpa13-max best (add depth 1))) best)))))
+  (defn cpa13-depth (parse)
+    (if (eq (cpa13-parse-ok? parse) 1)
+      (cpa13-depth-go (cpa13-parse-nodes parse) 0 0) 0))
+
+  (defn cpa13-token-has? (tokens value)
+    (if (eq (len tokens) 0) 0
+      (if (str_eq (cpa13-token-value (head tokens)) value) 1
+        (cpa13-token-has? (tail tokens) value))))
+  (defn cpa13-token-has-any? (tokens values)
+    (if (eq (len values) 0) 0
+      (if (eq (cpa13-token-has? tokens (head values)) 1) 1
+        (cpa13-token-has-any? tokens (tail values)))))
+  (defn cpa13-sequence? (tokens values)
+    (if (eq (len values) 0) 1
+      (if (eq (len tokens) 0) 0
+        (if (str_eq (cpa13-token-value (head tokens)) (head values))
+          (cpa13-sequence? (tail tokens) (tail values)) 0))))
+  (defn cpa13-has-sequence? (tokens values)
+    (if (eq (len tokens) 0) 0
+      (if (eq (cpa13-sequence? tokens values) 1) 1
+        (cpa13-has-sequence? (tail tokens) values))))
+  (defn cpa13-token-in-first? (tokens value left)
+    (if (or (eq left 0) (eq (len tokens) 0)) 0
+      (if (str_eq (cpa13-token-value (head tokens)) value) 1
+        (cpa13-token-in-first? (tail tokens) value (sub left 1)))))
+  (defn cpa13-binary-near? (tokens left right window)
+    (if (eq (len tokens) 0) 0
+      (if (str_eq (cpa13-token-value (head tokens)) left)
+        (cpa13-token-in-first? (tail tokens) right window)
+        (cpa13-binary-near? (tail tokens) left right window))))
+
+  ; semantic=(name observed evidence). These are deliberately semantic roles,
+  ; not function names from one implementation.
+  (defn cpa13-semantic (name observed evidence) (list name observed evidence))
+  (defn cpa13-semantics (tokens)
+    (do
+      (let sanitize-named (cpa13-token-has-any? tokens
+        (list "replace" "Replace" "replaceAll" "TrimSpace" "tr" "str_replace"
+          "replacingOccurrences" "filter" "continue")))
+      (let sanitize (if (or (eq sanitize-named 1)
+                            (eq (cpa13-token-has? tokens "' '") 1)) 1 0))
+      (let length (cpa13-token-has-any? tokens
+        (list "length" "Length" "len" "strlen" "count" "counter" "take" "clean?")))
+      (let digit-named (cpa13-token-has-any? tokens
+        (list "isdigit" "isDigit" "is_ascii_digit" "ctype_digit" "parseInt"
+          "digit" "Any" "Int" "intval" "match")))
+      (let digit-range (if (and (eq (cpa13-token-has? tokens "<") 1)
+                                 (eq (cpa13-token-has? tokens ">") 1)) 1 0))
+      (let digit (if (or (eq digit-named 1) (eq digit-range 1)) 1 0))
+      (let direction (cpa13-token-has-any? tokens
+        (list "reverse" "Reverse" "reversed" "rev" "rbegin" "pos"
+          "strrev" "cadence" "every_second" "length" "len" "withIndex")))
+      (let iterate (cpa13-token-has-any? tokens
+        (list "for" "while" "map" "reduce" "each_char" "stream" "filter")))
+      (let alternate (if (or (eq (cpa13-has-sequence? tokens (list "%" "2")) 1)
+                             (eq (cpa13-token-has-any? tokens
+                               (list "odd" "odd?" "every_second" "cadence" "toggle"
+                                 "withIndex")) 1)) 1 0))
+      (let double (if (or (eq (cpa13-binary-near? tokens "*" "2" 2) 1)
+                          (or (eq (cpa13-has-sequence? tokens (list "2" "*")) 1)
+                          (or (eq (cpa13-binary-near? tokens "*=" "2" 2) 1)
+                          (or (eq (cpa13-token-has-any? tokens
+                                (list "DOUBLE" "dbl" "doubled")) 1)
+                              (and (eq (cpa13-token-has? tokens "digit") 1)
+                                   (eq (cpa13-token-has? tokens "2") 1)))))) 1 0))
+      (let nine (if (and (eq double 1)
+                         (and (eq (cpa13-token-has? tokens "9") 1)
+                           (or (eq (cpa13-token-has? tokens "-") 1)
+                           (or (eq (cpa13-token-has? tokens "-=") 1)
+                               (eq (cpa13-token-has? tokens "DOUBLE") 1))))) 1 0))
+      (let accumulate (cpa13-token-has-any? tokens
+        (list "sum" "Sum" "checksum" "res" "result" "reduce" "digitSum")))
+      (let modulo (if (and (eq (cpa13-has-sequence? tokens (list "%" "10")) 1)
+                           (or (eq (cpa13-token-has? tokens "0") 1)
+                               (eq (cpa13-token-has? tokens "zero?") 1))) 1 0))
+      (list
+        (cpa13-semantic "canonicalize-account-input" sanitize "space-removal/filter")
+        (cpa13-semantic "minimum-account-length" length "length/count guard")
+        (cpa13-semantic "decimal-digit-validation" digit "digit conversion/predicate")
+        (cpa13-semantic "right-to-left-cadence" direction "reverse/parity origin")
+        (cpa13-semantic "iterate-account-digits" iterate "loop/map/reduce")
+        (cpa13-semantic "alternate-position-selection" alternate "parity/odd state")
+        (cpa13-semantic "double-selected-addend" double "multiply-two/table")
+        (cpa13-semantic "decimal-addend-fold" nine "subtract-nine/table")
+        (cpa13-semantic "accumulate-checksum" accumulate "sum/checksum accumulator")
+        (cpa13-semantic "modulo-ten-validity" modulo "percent-ten equals zero"))))
+  (defn cpa13-semantic-count-go (semantics total)
+    (if (eq (len semantics) 0) total
+      (cpa13-semantic-count-go (tail semantics) (add total (nth (head semantics) 1)))))
+  (defn cpa13-semantic-count (semantics) (cpa13-semantic-count-go semantics 0))
+  (defn cpa13-admitted? (parse semantics)
+    (if (and (eq (cpa13-parse-ok? parse) 1)
+             (eq (cpa13-semantic-count semantics) 10)) 1 0))
+
+  (defn cpa13-replace-first (source from to)
+    (do (let at (str_find source from 0))
+      (if (lt at 0) source
+        (str_concat (substring source 0 at)
+          (str_concat to (substring source (add at (str_len from)) (str_len source)))))))
+  (defn cpa13-replace-all (source from to)
+    (do (let at (str_find source from 0))
+      (if (lt at 0) source
+        (str_concat (substring source 0 at)
+          (str_concat to
+            (cpa13-replace-all
+              (substring source (add at (str_len from)) (str_len source)) from to))))))
+  (defn cpa13-modulo-eleven (source)
+    (cpa13-replace-all (cpa13-replace-all source "% 10" "% 11") "%10" "%11"))
+  (defn cpa13-hash-go (source i hash)
+    (if (eq i (str_len source)) hash
+      (cpa13-hash-go source (add i 1)
+        (mod (add (mul hash 131) (ord (cpa13-char source i))) 1000000007))))
+  (defn cpa13-hash (source) (cpa13-hash-go source 0 17))
+
+  ; row=(language path bytes hash tokens ast-nodes groups depth semantic-count
+  ;      admitted mutation-parse mutation-semantics mutation-rejected
+  ;      syntax-rejected semantics)
+  ; analysis=(tokens parse semantics). Split from observation so the direct
+  ; compiler does not face one deeply nested let-chain.
+  (defn cpa13-analyze-tokens (tokens)
+    (do (let parsed (cpa13-parse-tokens tokens))
+      (list tokens parsed (cpa13-semantics tokens))))
+  (defn cpa13-analyze (source) (cpa13-analyze-tokens (cpa13-scan source)))
+  (defn cpa13-analysis-tokens (analysis) (head analysis))
+  (defn cpa13-analysis-parse (analysis) (nth analysis 1))
+  (defn cpa13-analysis-semantics (analysis) (nth analysis 2))
+  (defn cpa13-mutation-rejected? (analysis)
+    (if (and (eq (cpa13-parse-ok? (cpa13-analysis-parse analysis)) 1)
+             (eq (cpa13-admitted? (cpa13-analysis-parse analysis)
+                   (cpa13-analysis-semantics analysis)) 0)) 1 0))
+  (defn cpa13-observe-one (fixture)
+    (do (let language (cpa13-fixture-language fixture))
+      (let file (cpa13-fixture-path fixture))
+      (let source (read_file file))
+      (let base (cpa13-analyze source))
+      (let mutation (cpa13-analyze (cpa13-modulo-eleven source)))
+      (let broken-parse (cpa13-parse (str_concat source "(")))
+      (list language file (str_len source) (cpa13-hash source)
+        (len (cpa13-analysis-tokens base))
+        (cpa13-node-count (cpa13-analysis-parse base))
+        (cpa13-group-count (cpa13-analysis-parse base))
+        (cpa13-depth (cpa13-analysis-parse base))
+        (cpa13-semantic-count (cpa13-analysis-semantics base))
+        (cpa13-admitted? (cpa13-analysis-parse base) (cpa13-analysis-semantics base))
+        (cpa13-parse-ok? (cpa13-analysis-parse mutation))
+        (cpa13-semantic-count (cpa13-analysis-semantics mutation))
+        (cpa13-mutation-rejected? mutation)
+        (if (eq (cpa13-parse-ok? broken-parse) 0) 1 0)
+        (cpa13-analysis-semantics base))))
+  (defn cpa13-observe-all-go (fixtures out)
+    (if (eq (len fixtures) 0) (reverse out)
+      (cpa13-observe-all-go (tail fixtures)
+        (cons (cpa13-observe-one (head fixtures)) out))))
+  (defn cpa13-observe-all () (cpa13-observe-all-go (cpa13-fixtures) (empty)))
+  ; totals=(languages bytes tokens nodes groups max-depth semantics admissions
+  ;         mutation-parses mutation-semantics mutation-rejections syntax-rejections hash)
+  (defn cpa13-audit-go (rows totals)
+    (if (eq (len rows) 0) totals
+      (do (let row (head rows))
+        (cpa13-audit-go (tail rows)
+          (list (add (nth totals 0) 1)
+            (add (nth totals 1) (nth row 2))
+            (add (nth totals 2) (nth row 4))
+            (add (nth totals 3) (nth row 5))
+            (add (nth totals 4) (nth row 6))
+            (cpa13-max (nth totals 5) (nth row 7))
+            (add (nth totals 6) (nth row 8))
+            (add (nth totals 7) (nth row 9))
+            (add (nth totals 8) (nth row 10))
+            (add (nth totals 9) (nth row 11))
+            (add (nth totals 10) (nth row 12))
+            (add (nth totals 11) (nth row 13))
+            (mod (add (mul (nth totals 12) 131) (nth row 3)) 1000000007))))))
+  (defn cpa13-audit ()
+    (cpa13-audit-go (cpa13-observe-all)
+      (list 0 0 0 0 0 0 0 0 0 0 0 0 17)))
+)

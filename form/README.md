@@ -42,6 +42,21 @@ support live above it in Form runtime modules. Low-level Form is the execution
 floor and verifier surface; each layer should expose the highest honest
 language surface it can carry.
 
+## Bidirectional live diagnostics
+
+The kernel framebuffer primitives remain a small attributed carrier. The
+observation/control protocol and actuator live above them in Form at
+`../observe/bidirectional-framebuffer-channel.fk`. Use the quick direct-source
+band after grounding when changing the carrier or protocol:
+
+```sh
+./fkwu --src observe/tests/bidirectional-framebuffer-channel-band.fk
+```
+
+For usage during failures, surprises, and model changes, including bounds on
+retained content, see
+[`../docs/live-dynamic-diagnostics.md`](../docs/live-dynamic-diagnostics.md).
+
 ## Consumer Submodule
 
 Repositories that already address the runtime as `form/` consume a generated,

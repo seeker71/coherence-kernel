@@ -1,0 +1,65 @@
+Read the C function below carefully and answer ONE question about it. The answer is fully
+determined by the code shown; do not rely on outside knowledge of any model.
+
+THE CODE (verbatim from ds4.c, the DeepSeek-V4-Flash CPU reference engine):
+
+    static float sigmoid_stable(float x) {
+        if (x >= 0.0f) {
+            const float e = expf(-x);
+            return 1.0f / (1.0f + e);
+        } else {
+            const float e = expf(x);
+            return e / (1.0f + e);
+        }
+    }
+    
+    /* Sink-aware attention over a set of KV rows.  The learned sink logit is part
+     * of the softmax denominator but contributes no value vector. */
+    static void layer_attention_rows_one(
+            float             * out_heads,
+            const ds4_model   * model,
+            const ds4_layer_weights * layer,
+            const float       * q,
+            const float       * kv_rows,
+            uint32_t            n_kv) {
+        const float *sinks = tensor_data(model, layer->attn_sinks);
+        const float kq_scale = 1.0f / sqrtf((float)DS4_N_HEAD_DIM);
+        float score_stack[512];
+        float *score = n_kv <= 512 ? score_stack : xmalloc((size_t)n_kv * sizeof(score[0]));
+    
+        for (uint32_t h = 0; h < DS4_N_HEAD; h++) {
+            const float *qh = q + (uint64_t)h * DS4_N_HEAD_DIM;
+    
+            float max_score = sinks[h];
+            for (uint32_t r = 0; r < n_kv; r++) {
+                const float *kv = kv_rows + (uint64_t)r * DS4_N_HEAD_DIM;
+                score[r] = dot_f32(qh, kv, DS4_N_HEAD_DIM) * kq_scale;
+                if (score[r] > max_score) max_score = score[r];
+            }
+    
+            float *oh = out_heads + (uint64_t)h * DS4_N_HEAD_DIM;
+            memset(oh, 0, (size_t)DS4_N_HEAD_DIM * sizeof(oh[0]));
+    
+            float denom = expf(sinks[h] - max_score);
+            for (uint32_t r = 0; r < n_kv; r++) {
+                const float weight = expf(score[r] - max_score);
+                const float *kv = kv_rows + (uint64_t)r * DS4_N_HEAD_DIM;
+                denom += weight;
+                axpy_f32(oh, kv, weight, DS4_N_HEAD_DIM);
+            }
+    
+            const float inv = 1.0f / denom;
+            scale_f32(oh, inv, DS4_N_HEAD_DIM);
+        }
+    
+        if (score != score_stack) free(score);
+    }
+
+THE QUESTION. Softmax is computed with a max-shift for numerical stability: every logit has a
+maximum subtracted from it before exp(). Does the learned per-head sink logit `sinks[h]`
+participate in choosing that maximum, or is the maximum taken over the n_kv dot-product scores
+only?
+
+Answer in exactly two lines:
+ANSWER: <one of: SINK IS INCLUDED IN THE MAX  |  SINK IS NOT INCLUDED IN THE MAX>
+LINE: <the single line of code that decides it>

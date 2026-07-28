@@ -1,0 +1,280 @@
+; neutral-rule-mdl-admission.fk -- shared NL/PL learned-rule admission.
+;
+; A rule is bidirectional structure, not a language registry row.  Levels are:
+; 1 exact atom, 2 open prefix, 3 closed frame, 4 composed model.  Admission
+; minimizes description length (literal grammar bytes + rule structure + data
+; residue), then separately requires heldout exactness and bidirectional
+; roundtrip. Unknown surfaces route only from observed punctuation/layout.
+;
+; This is a neutral adapter floor for NL and PL learners. It does not claim
+; arbitrary translation, parsing, or induction: callers supply candidate rules
+; and real development/heldout cases; this cell decides whether evidence earns
+; admission and exposes no output from a refused model.
+; witnessed: 2026-07-20 -> NL 2/2 heldout + PL 2/2 heldout admitted;
+; bidirectional 4/4; development memorizer refused; band 65535
+; preludes: form/form-stdlib/core.fk observe/framebuffer-runtime-observation.fk
+
+(do
+  ; rule = id, domain, level, family, kind, source-left, source-right,
+  ;        target-left, target-right, structural units.
+  (defn nrma-rule (id domain level family kind sl sr tl tr units)
+    (list id domain level family kind sl sr tl tr units))
+  (defn nrma-rule-id (r) (nth r 0))
+  (defn nrma-rule-domain (r) (nth r 1))
+  (defn nrma-rule-level (r) (nth r 2))
+  (defn nrma-rule-family (r) (nth r 3))
+  (defn nrma-rule-kind (r) (nth r 4))
+  (defn nrma-rule-sl (r) (nth r 5))
+  (defn nrma-rule-sr (r) (nth r 6))
+  (defn nrma-rule-tl (r) (nth r 7))
+  (defn nrma-rule-tr (r) (nth r 8))
+  (defn nrma-rule-units (r) (nth r 9))
+
+  ; case = split, direction, input, expected, weight, provenance.
+  (defn nrma-case (split direction input expected weight provenance)
+    (list split direction input expected weight provenance))
+  (defn nrma-case-split (c) (nth c 0))
+  (defn nrma-case-direction (c) (nth c 1))
+  (defn nrma-case-input (c) (nth c 2))
+  (defn nrma-case-expected (c) (nth c 3))
+  (defn nrma-case-weight (c) (nth c 4))
+  (defn nrma-case-provenance (c) (nth c 5))
+
+  ; model = id, domain, level, family, rules, cases, provenance.
+  (defn nrma-model (id domain level family rules cases provenance)
+    (list id domain level family rules cases provenance))
+  (defn nrma-model-id (m) (nth m 0))
+  (defn nrma-model-domain (m) (nth m 1))
+  (defn nrma-model-level (m) (nth m 2))
+  (defn nrma-model-family (m) (nth m 3))
+  (defn nrma-model-rules (m) (nth m 4))
+  (defn nrma-model-cases (m) (nth m 5))
+  (defn nrma-model-provenance (m) (nth m 6))
+
+  (defn nrma-starts? (s prefix)
+    (if (lt (str_len s) (str_len prefix)) 0
+      (if (str_eq (substring s 0 (str_len prefix)) prefix) 1 0)))
+  (defn nrma-ends? (s suffix)
+    (if (lt (str_len s) (str_len suffix)) 0
+      (if (str_eq (substring s (sub (str_len s) (str_len suffix))
+                    (str_len s)) suffix) 1 0)))
+  (defn nrma-frame-rewrite (input il ir ol oright)
+    (if (and (eq (nrma-starts? input il) 1) (eq (nrma-ends? input ir) 1))
+      (do
+        (let start (str_len il))
+        (let end (sub (str_len input) (str_len ir)))
+        (str_concat ol (str_concat (substring input start end) oright))) ""))
+  (defn nrma-rewrite-rule (rule direction input)
+    (do
+      (let forward (str_eq direction "forward"))
+      (let il (if forward (nrma-rule-sl rule) (nrma-rule-tl rule)))
+      (let ir (if forward (nrma-rule-sr rule) (nrma-rule-tr rule)))
+      (let ol (if forward (nrma-rule-tl rule) (nrma-rule-sl rule)))
+      (let oright (if forward (nrma-rule-tr rule) (nrma-rule-sr rule)))
+      (if (str_eq (nrma-rule-kind rule) "exact")
+        (if (str_eq input il) ol "")
+        (if (str_eq (nrma-rule-kind rule) "prefix")
+          (if (eq (nrma-starts? input il) 1)
+            (str_concat ol (substring input (str_len il) (str_len input))) "")
+          (if (str_eq (nrma-rule-kind rule) "frame")
+            (nrma-frame-rewrite input il ir ol oright) "")))))
+  (defn nrma-apply-go (rules direction input)
+    (if (eq (len rules) 0) ""
+      (do
+        (let output (nrma-rewrite-rule (head rules) direction input))
+        (if (str_eq output "")
+          (nrma-apply-go (tail rules) direction input) output))))
+  (defn nrma-apply (model direction input)
+    (nrma-apply-go (nrma-model-rules model) direction input))
+
+  ; Grammar size is literal bytes + structural units + kind/level carriers.
+  (defn nrma-rule-grammar-size (r)
+    (add (nrma-rule-units r)
+      (add (nrma-rule-level r)
+        (add 2 (add (str_len (nrma-rule-sl r))
+          (add (str_len (nrma-rule-sr r))
+            (add (str_len (nrma-rule-tl r)) (str_len (nrma-rule-tr r)))))))))
+  (defn nrma-grammar-size-go (rules total)
+    (if (eq (len rules) 0) total
+      (nrma-grammar-size-go (tail rules)
+        (add total (nrma-rule-grammar-size (head rules))))))
+  (defn nrma-grammar-size (model)
+    (add (nrma-model-level model)
+      (nrma-grammar-size-go (nrma-model-rules model) 0)))
+  (defn nrma-byte-error-go (actual expected i common errors)
+    (if (ge i common) errors
+      (nrma-byte-error-go actual expected (add i 1) common
+        (add errors (if (eq (str_byte_at actual i)
+                            (str_byte_at expected i)) 0 1)))))
+  (defn nrma-residue-error (actual expected)
+    (if (str_eq actual "") (add 16 (str_len expected))
+      (do
+        (let alen (str_len actual))
+        (let elen (str_len expected))
+        (let common (if (lt alen elen) alen elen))
+        (let delta (if (gt alen elen) (sub alen elen) (sub elen alen)))
+        (add delta (nrma-byte-error-go actual expected 0 common 0)))))
+  (defn nrma-case-error (model case)
+    (mul (nrma-case-weight case)
+      (nrma-residue-error
+        (nrma-apply model (nrma-case-direction case) (nrma-case-input case))
+        (nrma-case-expected case))))
+  (defn nrma-data-error-go (model cases split total count exact)
+    (if (eq (len cases) 0) (list total count exact)
+      (do
+        (let c (head cases))
+        (if (not (str_eq (nrma-case-split c) split))
+          (nrma-data-error-go model (tail cases) split total count exact)
+          (do
+            (let error (nrma-case-error model c))
+            (nrma-data-error-go model (tail cases) split (add total error)
+              (add count 1) (add exact (if (eq error 0) 1 0))))))))
+  (defn nrma-data-error (model split)
+    (nrma-data-error-go model (nrma-model-cases model) split 0 0 0))
+  (defn nrma-mdl-cost (model)
+    (add (nrma-grammar-size model) (nth (nrma-data-error model "development") 0)))
+  (defn nrma-case-compatible? (a b)
+    (and (str_eq (nrma-case-split a) (nrma-case-split b))
+      (and (str_eq (nrma-case-direction a) (nrma-case-direction b))
+      (and (str_eq (nrma-case-input a) (nrma-case-input b))
+      (and (str_eq (nrma-case-expected a) (nrma-case-expected b))
+      (and (eq (nrma-case-weight a) (nrma-case-weight b))
+           (str_eq (nrma-case-provenance a) (nrma-case-provenance b)))))))
+  (defn nrma-cases-compatible? (a b)
+    (if (not (eq (len a) (len b))) 0
+      (if (eq (len a) 0) 1
+        (if (nrma-case-compatible? (head a) (head b))
+          (nrma-cases-compatible? (tail a) (tail b)) 0))))
+  (defn nrma-rule-level-valid? (r)
+    (if (str_eq (nrma-rule-kind r) "exact") (eq (nrma-rule-level r) 1)
+      (if (str_eq (nrma-rule-kind r) "prefix") (eq (nrma-rule-level r) 2)
+        (if (str_eq (nrma-rule-kind r) "frame") (eq (nrma-rule-level r) 3) 0))))
+  (defn nrma-rules-valid-go (rules domain)
+    (if (eq (len rules) 0) 1
+      (if (and (str_eq (nrma-rule-domain (head rules)) domain)
+               (nrma-rule-level-valid? (head rules)))
+        (nrma-rules-valid-go (tail rules) domain) 0)))
+  (defn nrma-model-shape-valid? (model)
+    (and (eq (nrma-model-level model) 4)
+      (and (gt (len (nrma-model-rules model)) 0)
+        (nrma-rules-valid-go (nrma-model-rules model) (nrma-model-domain model)))))
+
+  (defn nrma-case-roundtrip? (model c)
+    (do
+      (let direction (nrma-case-direction c))
+      (let inverse (if (str_eq direction "forward") "backward" "forward"))
+      (let first (nrma-apply model direction (nrma-case-input c)))
+      (if (str_eq first "") 0
+        (if (str_eq (nrma-apply model inverse first) (nrma-case-input c)) 1 0))))
+  (defn nrma-roundtrip-go (model cases split count exact)
+    (if (eq (len cases) 0) (list count exact)
+      (if (not (str_eq (nrma-case-split (head cases)) split))
+        (nrma-roundtrip-go model (tail cases) split count exact)
+        (nrma-roundtrip-go model (tail cases) split (add count 1)
+          (add exact (nrma-case-roundtrip? model (head cases)))))))
+  (defn nrma-roundtrip (model split)
+    (nrma-roundtrip-go model (nrma-model-cases model) split 0 0))
+
+  ; admission = status, domain, family, level, grammar, dev residue, heldout
+  ; residue, heldout count/exact, roundtrip count/exact, model/baseline MDL,
+  ; reason, model id, provenance.
+  (defn nrma-admit (model baseline)
+    (do
+      (let dev (nrma-data-error model "development"))
+      (let heldout (nrma-data-error model "heldout"))
+      (let base-heldout (nrma-data-error baseline "heldout"))
+      (let roundtrip (nrma-roundtrip model "heldout"))
+      (let mdl (nrma-mdl-cost model))
+      (let base-mdl (nrma-mdl-cost baseline))
+      (let gate (and (str_eq (nrma-model-domain model)
+                             (nrma-model-domain baseline))
+        (and (nrma-model-shape-valid? model)
+        (and (nrma-cases-compatible? (nrma-model-cases model)
+                                     (nrma-model-cases baseline))
+        (and (eq (nth dev 0) 0)
+        (and (gt (nth heldout 1) 0)
+        (and (eq (nth heldout 0) 0)
+        (and (lt (nth heldout 0) (nth base-heldout 0))
+        (and (eq (nth heldout 1) (nth heldout 2))
+        (and (eq (nth roundtrip 0) (nth roundtrip 1))
+             (lt mdl base-mdl))))))))))
+      (list (if gate "admitted" "refused") (nrma-model-domain model)
+        (nrma-model-family model) (nrma-model-level model)
+        (nrma-grammar-size model) (nth dev 0) (nth heldout 0)
+        (nth heldout 1) (nth heldout 2) (nth roundtrip 0) (nth roundtrip 1)
+        mdl base-mdl
+        (if gate "mdl-improves-and-heldout-roundtrips"
+          "mdl-or-heldout-or-roundtrip-gate-failed")
+        (nrma-model-id model) (nrma-model-provenance model))))
+  (defn nrma-admitted? (admission) (str_eq (nth admission 0) "admitted"))
+  (defn nrma-apply-admitted (admission model direction input)
+    (if (nrma-admitted? admission) (nrma-apply model direction input) ""))
+
+  ; Structural routing has no language ids or registry lookup. Families are
+  ; exemplar data; the shared feature extractor is static, while selection is
+  ; the highest observed structural fit against those exemplars.
+  (defn nrma-has? (text marker) (if (ge (str_find text marker 0) 0) 1 0))
+  (defn nrma-space-count-go (text text-len i count)
+    (if (ge i text-len) count
+      (nrma-space-count-go text text-len (add i 1)
+        (add count (if (eq (str_byte_at text i) 32) 1 0)))))
+  (defn nrma-space-count (text)
+    (nrma-space-count-go text (str_len text) 0 0))
+  (defn nrma-structure-evidence (text)
+    (list (nrma-has? text "{") (nrma-has? text "}")
+      (nrma-has? text ";") (nrma-has? text "=>")
+      (nrma-has? text "</") (nrma-has? text ">")
+      (nrma-has? text ":\n") (nrma-has? text "\n    ")
+      (nrma-has? text "(") (nrma-has? text ")")
+      (nrma-has? text ".") (nrma-has? text "?")
+      (nrma-space-count text)))
+  (defn nrma-family-exemplars () (list
+    (list "brace-semicolon" "fn sample(x) { return x + 1; }" "observed-shape")
+    (list "indent-colon" "def sample(x):\n    return x + 1" "observed-shape")
+    (list "paired-tag" "<item>value</item>" "observed-shape")
+    (list "arrow-expression" "const sample = (x) => x + 1" "observed-shape")
+    (list "parenthesized" "(define (sample x) (+ x 1))" "observed-shape")
+    (list "natural-prose" "How does this observed structure carry meaning?"
+      "observed-shape")))
+  (defn nrma-signature-score-go (actual exemplar i score)
+    (if (ge i 12)
+      (add score (if (and (ge (nth actual 12) 3)
+                          (ge (nth exemplar 12) 3)) 2 0))
+      (do
+        (let a (nth actual i))
+        (let e (nth exemplar i))
+        (nrma-signature-score-go actual exemplar (add i 1)
+          (add score (if (and (eq a 1) (eq e 1)) 4
+            (if (eq a e) 0 -1)))))))
+  (defn nrma-signature-score (actual exemplar)
+    (nrma-signature-score-go actual exemplar 0 0))
+  (defn nrma-route-exemplars-go (signature exemplars best best-score)
+    (if (eq (len exemplars) 0) (list best best-score)
+      (do
+        (let row (head exemplars))
+        (let score (nrma-signature-score signature
+          (nrma-structure-evidence (nth row 1))))
+        (if (gt score best-score)
+          (nrma-route-exemplars-go signature (tail exemplars) row score)
+          (nrma-route-exemplars-go signature (tail exemplars) best best-score)))))
+  (defn nrma-route-unknown (text)
+    (do
+      (let signature (nrma-structure-evidence text))
+      (let selected (nrma-route-exemplars-go signature
+        (nrma-family-exemplars) (empty) -1000))
+      (if (or (eq (len (nth selected 0)) 0) (le (nth selected 1) 0))
+        (list "unknown-structure" (nth selected 1) signature
+          "no-exemplar-fit")
+        (list (nth (nth selected 0) 0) (nth selected 1) signature
+          "scored-from-structural-exemplar" (nth (nth selected 0) 1)))))
+
+  ; Stable shared API for independent NL and PL agents.
+  (defn nrma-adapt-nl (model baseline)
+    (if (and (str_eq (nrma-model-domain model) "nl")
+             (str_eq (nrma-model-domain baseline) "nl"))
+      (nrma-admit model baseline) (list "refused" "nl" "domain-mismatch")))
+  (defn nrma-adapt-pl (model baseline)
+    (if (and (str_eq (nrma-model-domain model) "pl")
+             (str_eq (nrma-model-domain baseline) "pl"))
+      (nrma-admit model baseline) (list "refused" "pl" "domain-mismatch")))
+)

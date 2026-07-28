@@ -1,0 +1,314 @@
+; moe-token.fk — the body's side of the FIRST REAL Mixture-of-Experts token generated form-native:
+; dolphin-2.9-mixtral-8x22b, 141 B parameters, Q6_K, 107.595 GiB, off this disk.
+;
+; WHAT WAS MISSING BEFORE THIS. first-token.fk generates real llama3.2:3b tokens — 2.01 GB, dense,
+; Q6_K/Q4_K, one MTLBuffer. Stone 11's gap map (receipts/2026-07-21-ds4-metal-gap-map.md) measured the
+; three things between that and a 141 B MoE, and every one of them turned out to be a fact about
+; ADDRESSING rather than about arithmetic:
+;
+;   1  THE `one` IN "ONE MTLBUFFER" WAS NEVER CHOSEN. Measured on this M4 Max, three samples:
+;      maxBufferLength = 86 586 540 032 B = 80.64 GiB. The model is 115 529 748 672 B = 107.595 GiB.
+;      Every Metal proof this body owns is phrased "the WHOLE blob mapped into ONE MTLBuffer", and that
+;      `one` is simply what a 2.01 GB model happened to permit — an undeclared radius (corpus row 826,
+;      `aporon`) sitting under the proudest result we had. The remedy is OVERLAPPING PAGE-ALIGNED
+;      VIEWS: N buffers over the same mmap, adjacent views overlapping by (largest tensor + one page),
+;      so every tensor lies wholly inside at least one view and a kernel still receives one buffer and
+;      one inner offset. Host-side only — this cell contributes the VIEW-INDEPENDENT half: absolute
+;      file offsets and byte lengths for all 563 tensors, from one header walk.
+;   2  THE EXPERT GATHER IS AN OFFSET. See moe-msl.fk's head: for a DECODE of one token, the base of
+;      expert e is `tensor_offset + e * nb02`, and nb02 is (d0*d1/256)*210 — a number this cell prints,
+;      because the ROW below prints d2 as well as d0 and d1. No kernel changes.
+;   3  Q8_0 EXISTED NOWHERE IN THE BODY. 112 of this file's tensors are Q8_0 (every attn_k, every
+;      attn_v). q8-0-msl.fk is that carver; REFK below is what gates it, at the tensor's REAL width.
+;
+; And one thing the gap map called a blocker that is NOT one: top-k routing. ds4 needs a bitonic sort
+; because DeepSeek routes top-6 of 256; Mixtral routes top-2 of 8, where a serial scan is exact. There
+; is no sort in this lane and there should not be.
+;
+; WHAT THIS CELL DECIDES (the carrier decides none of it):
+;   1  THE CONFIG IS THE FILE'S — including `llama.expert_count` and `llama.expert_used_count`, and
+;      including two facts read from the TABLE rather than assumed: whether `output.weight` exists (it
+;      does here, so the unembedding is NOT tied, unlike llama3.2:3b) and whether `rope_freqs.weight`
+;      exists (it does NOT here, so the plain RoPE is the correct one — see moe-msl.fk's radius).
+;   2  WHERE EVERY TENSOR IS, in THREE dimensions. `mtk-emit-table` prints d2, which is 8 for the
+;      expert tensors and 1 for everything else, and a byte length that knows four ggml types
+;      (F32/F16/Q8_0/Q6_K) instead of three. An unknown type prints length 0 rather than a guess.
+;   3  THE TOKENIZER IS THE FILE'S — all 32 002 pieces as HEX BYTES, one linear walk. This file's
+;      tokenizer.ggml.model is "llama" (SentencePiece), not llama3's byte-level BPE, so the piece bytes
+;      are UTF-8 text with U+2581 where a space belongs. Hex and not text for the same reason as
+;      before: `read_file_slice` is UTF-8-lossy on two arms and nothing in the path may re-encode.
+;   4  THE KERNELS — one translation unit: q6k + q4k + Q8_0 + the split/lane appendices + the six
+;      decode ops + moe-msl.fk's five.
+;   5  WHAT THE ANSWER IS, in fp64, at SEVEN points on the token's own path — and seven and not one
+;      because a gate is correct exactly where it looked (corpus row 826):
+;        REFEMB    the token_embd row the gather must produce (Q6_K, bit-exact)
+;        REFRMS    RMSNorm of that row against real blk.0.attn_norm gains
+;        REFQ      Form's fp64 dot of a real blk.0.attn_q row (Q6_K) with that normed vector
+;        REFK      the same for blk.0.attn_k — Q8_0, at the tensor's real width 6144. THE NEW CARVER.
+;        REFGATE   all 8 router logits: Form's fp64 dots of blk.0.ffn_gate_inp (F16) with that vector
+;        REFROUTE  the ids and weights the router must choose from those logits
+;        REFEXP    Form's fp64 dot of blk.0.ffn_gate_exps EXPERT e, row r, with that vector — THE
+;                  EXPERT GATHER, judged at the 3-D offset and not merely at the tensor's start
+;        REFFAR    weights of output.weight, whose data begins at file offset 113 386 576 224 —
+;                  32.7 GiB PAST the 80.64 GiB one-buffer ceiling. THE VIEW GATE. Nothing in this
+;                  body has ever read a byte that far into a file through the GPU.
+;
+;      Note that REFQ, REFK, REFGATE and REFEXP all fold against the SAME normed vector. That is
+;      deliberate and it is a gate on ADDRESSING AND CARVING, not on the model's semantics — the FFN
+;      of a real forward pass would norm again with ffn_norm. Using one vector everywhere means a
+;      disagreement points at exactly one thing: which bytes were read and how they were decoded.
+;
+; THE RADIUS THIS CELL SPEAKS FOR. GGUF v3, `general.architecture` = llama, quantization in
+; {F32, F16, Q8_0, Q6_K} (dolphin-mixtral's exact mix; Q4_K is emitted in the MSL because the unit is
+; shared, but no tensor here uses it). head_count divisible by head_count_kv. Row reads below require
+; each row to start on a block boundary — cols and r*cols must be whole multiples of 256 for Q6_K and
+; 32 for Q8_0, which 6144 and 16384 both are. A width that is not would make this cell WRONG, not slow.
+;
+; Kin: first-token.fk (the dense sibling this is shaped after, cell for cell), whole-tensor-residency.fk
+; (wtr-* — the table walk this widens to 3-D and four types, left untouched so its own audit keeps
+; speaking), q8-0-msl.fk + moe-msl.fk (the two new kernel cells), gguf-meta.fk (gmt-*),
+; llama-numerics.fk (ln-rmsnorm), transformer-block.fk (tb-dot — the op order every REF folds in).
+;
+; THE STREAM (flat, greppable):
+;   CONFIG <key> <value> ... END
+;   DATABASE <n> / NTENSORS <n> / T <name> <type> <ndims> <d0> <d1> <d2> <abs-off> <bytes> ... END
+;   VOCAB <n> then n lines "<id> <hex-bytes>" ... END
+;   MSL ... END
+;   REFEMB/REFRMS/REFQ/REFK/REFGATE/REFROUTE/REFEXP/REFFAR ... END
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/q8-0-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/gguf-meta.fk form-stdlib/llama-decode-msl.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matmul-batch.fk form-stdlib/moe-msl.fk native/metal/whole-tensor-residency.fk
+;
+; Proven by: form/native/metal/metal_moe_token.sh (Mac-only carrier witness; off-Mac it SKIPs like
+;            every other Metal row in form/native/GPU_GAPS.md).
+
+(do
+    (defn mtk-line (s) (print s))
+    (defn mtk-num  (x) (print x))
+    (defn mtk-src  (path) (eqr-of-file path 0 (wtr-header-window)))
+
+    ; ================= 1. the config, entirely from the file's own metadata =================
+    (defn mtk-kv-u32 (src key) (mtk-line (str_concat "CONFIG " (str_concat key (str_concat " " (int_to_str (gmt-u32 src key)))))))
+    (defn mtk-kv-f32 (src key) (do (print (str_concat "CONFIG " key)) (mtk-num (gmt-f32 src key))))
+    (defn mtk-has (src name) (if (eq (egg-find-tensor src name) (sub 0 1)) 0 1))
+
+    (defn mtk-emit-config (path)
+        (do
+            (let src (mtk-src path))
+            (mtk-line (str_concat "CONFIG gguf.version " (int_to_str (egg-version src))))
+            (mtk-line (str_concat "CONFIG gguf.tensor_count " (int_to_str (egg-tensor-count src))))
+            (mtk-kv-u32 src "llama.block_count")
+            (mtk-kv-u32 src "llama.embedding_length")
+            (mtk-kv-u32 src "llama.feed_forward_length")
+            (mtk-kv-u32 src "llama.attention.head_count")
+            (mtk-kv-u32 src "llama.attention.head_count_kv")
+            (mtk-kv-u32 src "llama.rope.dimension_count")
+            (mtk-kv-u32 src "llama.context_length")
+            (mtk-kv-u32 src "llama.vocab_size")
+            (mtk-kv-u32 src "llama.expert_count")
+            (mtk-kv-u32 src "llama.expert_used_count")
+            (mtk-kv-u32 src "tokenizer.ggml.bos_token_id")
+            (mtk-kv-u32 src "tokenizer.ggml.eos_token_id")
+            (mtk-kv-f32 src "llama.rope.freq_base")
+            (mtk-kv-f32 src "llama.attention.layer_norm_rms_epsilon")
+            ; both of these are FACTS ABOUT THE TABLE. This file HAS output.weight (so the
+            ; unembedding is not tied — the opposite of llama3.2:3b) and has NO rope_freqs.weight
+            ; (so the plain RoPE is the correct kernel). Read, never assumed.
+            (mtk-line (str_concat "CONFIG tied_embeddings " (int_to_str (if (eq (mtk-has src "output.weight") 1) 0 1))))
+            (mtk-line (str_concat "CONFIG has_rope_freqs " (int_to_str (mtk-has src "rope_freqs.weight"))))
+            (mtk-line "END")
+            0))
+
+    ; ================= 2. the tensor table, in ONE header walk, in THREE dimensions =================
+    ; byte length by ggml type: 0 = F32 (4 B/weight), 1 = F16 (2 B/weight), 8 = Q8_0 (34 B / 32
+    ; weights), 14 = Q6_K (210 B / 256), 12 = Q4_K (144 B / 256). An unknown type prints 0 rather than
+    ; a guessed length — a fabricated length is a silently wrong upload, which is worse than a refusal.
+    (defn mtk-dimk (src off k) (if (gt (egg-ti-ndims src off) k) (egg-ti-dim src off k) 1))
+    (defn mtk-nweights (src off)
+        (mul (egg-ti-dim0 src off) (mul (mtk-dimk src off 1) (mtk-dimk src off 2))))
+    (defn mtk-bytes-of (t n)
+        (if (eq t 0) (mul n 4)
+            (if (eq t 1) (mul n 2)
+                (if (eq t 8) (mul (div n 32) 34)
+                    (if (eq t 14) (mul (div n 256) 210)
+                        (if (eq t 12) (mul (div n 256) 144) 0))))))
+    (defn mtk-bytes (src off) (mtk-bytes-of (egg-ti-type src off) (mtk-nweights src off)))
+
+    (defn mtk-row (src off base)
+        (mtk-line (str_concat "T "
+            (str_concat (wtr-name src off)
+            (str_concat " " (str_concat (int_to_str (egg-ti-type src off))
+            (str_concat " " (str_concat (int_to_str (egg-ti-ndims src off))
+            (str_concat " " (str_concat (int_to_str (egg-ti-dim0 src off))
+            (str_concat " " (str_concat (int_to_str (mtk-dimk src off 1))
+            (str_concat " " (str_concat (int_to_str (mtk-dimk src off 2))
+            (str_concat " " (str_concat (int_to_str (add base (egg-ti-dataoff src off)))
+            (str_concat " " (int_to_str (mtk-bytes src off)))))))))))))))))))
+
+    (defn mtk-table-loop (src off remaining base)
+        (if (eq remaining 0) 0
+            (do (mtk-row src off base)
+                (mtk-table-loop src (egg-ti-next src off) (sub remaining 1) base))))
+
+    (defn mtk-emit-table (path)
+        (do
+            (let src (mtk-src path))
+            (let base (egg-data-base src (wtr-alignment)))
+            (mtk-line (str_concat "DATABASE " (int_to_str base)))
+            (mtk-line (str_concat "NTENSORS " (int_to_str (egg-tensor-count src))))
+            (mtk-table-loop src (egg-tinfo-start src) (egg-tensor-count src) base)
+            (mtk-line "END")
+            0))
+
+    ; ================= 3. the tokenizer, as bytes =================
+    (defn mtk-hexd (v) (substring "0123456789abcdef" v (add v 1)))
+    (defn mtk-hexb (b) (str_concat (mtk-hexd (div b 16)) (mtk-hexd (q6k-mod b 16))))
+    (defn mtk-hex-loop (src at j n acc)
+        (if (ge j n) acc
+            (mtk-hex-loop src at (add j 1) n (str_concat acc (mtk-hexb (gmt-token-byte src at j))))))
+    (defn mtk-vocab-loop (src at i n)
+        (if (ge i n) 0
+            (do
+                (mtk-line (str_concat (int_to_str i) (str_concat " "
+                    (mtk-hex-loop src at 0 (gmt-token-len src at) ""))))
+                (mtk-vocab-loop src (gmt-token-next src at) (add i 1) n))))
+    (defn mtk-emit-vocab (path)
+        (do
+            (let src (mtk-src path))
+            (let n (gmt-vocab-n src))
+            (mtk-line (str_concat "VOCAB " (int_to_str n)))
+            (mtk-vocab-loop src (gmt-tokens-first src) 0 n)
+            (mtk-line "END")
+            0))
+
+    ; ================= 4. the kernels, ONE translation unit =================
+    ; The header leads the unit and `using namespace metal;` is never emitted — q6k-msl.fk's whole
+    ; argument. Order: the shared q6k/q4k spine and attestants, the split and lane appendices, the
+    ; batched appendix, then Q8_0 as an APPENDIX (it reuses q6k_mod/q6k_s8/q6k_f16 and must not
+    ; redefine them), then the decode ops with their own transcendental spine, then moe-msl.fk's five,
+    ; which need BOTH spines and so come last.
+    (defn mtk-emit-msl ()
+        (do
+            (mtk-line "MSL")
+            (mtk-line (str_concat (qml-msl-header)
+                (str_concat
+                    (str_concat
+                        (str_concat (q6m-msl-unit "form_q6k_dequant_f32" "form_q6k_matvec_f32")
+                                    (q4m-msl-unit "form_q4k_dequant_f32" "form_q4k_matvec_f32"))
+                        (str_concat (qms-msl-appendix)
+                                    (str_concat (qml-msl-appendix)
+                                    (str_concat (qmb-msl-appendix)
+                                                (q80-msl-appendix "form_q8_0_dequant_f32"
+                                                                  "form_q8_0_matvec_f32"
+                                                                  "form_q8_0_matvec_lane_f32")))))
+                    (str_concat (ldm-msl-unit) (mm-msl-appendix)))))
+            (mtk-line "END")
+            0))
+
+    ; ================= 5. the references, in fp64 =================
+    ; Rows as lists. 6144 and 16384 elements — well inside the size where the list carrier is not the
+    ; wall Stone 3 measured at 25 M, and a list is what ln-rmsnorm and tb-dot speak.
+
+    (defn mtk-tstride (t) (if (eq t 14) 210 (if (eq t 12) 144 (if (eq t 8) 34 (if (eq t 1) 2 4)))))
+    (defn mtk-tblock  (t) (if (eq t 14) 256 (if (eq t 12) 256 (if (eq t 8) 32 1))))
+    ; bytes for `n` weights of type t, and the byte offset of flat weight index `i`
+    (defn mtk-tbytes (t n) (mul (div n (mtk-tblock t)) (mtk-tstride t)))
+
+    ; the weight at flat index i of a window whose byte 0 is a block boundary
+    (defn mtk-at (t src i)
+        (if (eq t 14) (q6m-flat-at src 0 i)
+            (if (eq t 8) (q80-flat-at src 0 i)
+                (if (eq t 1) (fd-f16 (add (eqr-at src (mul i 2)) (mul 256 (eqr-at src (add (mul i 2) 1)))))
+                    (ewl-f32 src (mul i 4))))))
+
+    ; a window holding exactly row r of a (rows x cols) tensor of type t at absolute offset `abs`
+    (defn mtk-rowsrc (t path abs r cols)
+        (eqr-of-file path (add abs (mtk-tbytes t (mul r cols))) (mtk-tbytes t cols)))
+    (defn mtk-row-loop (t src i n acc)
+        (if (ge i n) (reverse acc) (mtk-row-loop t src (add i 1) n (cons (mtk-at t src i) acc))))
+    (defn mtk-rowvals (t path abs r cols) (mtk-row-loop t (mtk-rowsrc t path abs r cols) 0 cols (list)))
+
+    (defn mtk-abs (src base name) (add base (egg-ti-dataoff src (egg-find-tensor src name))))
+    (defn mtk-type (src name) (egg-ti-type src (egg-find-tensor src name)))
+
+    (defn mtk-print-list (xs) (if (eq (len xs) 0) 0 (do (mtk-num (head xs)) (mtk-print-list (tail xs)))))
+
+    ; SUM |w_j * x_j| over a row and the vector it folds against. This is the ONLY quantity the
+    ; carrier's error bound needs and cannot compute for itself without re-dequantizing the row on the
+    ; host — which is precisely the f32 host copy this whole lane exists to avoid. The GPU's fold is
+    ; f32, right-to-left, cols terms deep, so its worst case is cols * u * SUM|term| with u = 2^-24.
+    ; Emitting the sum here means the bound is DERIVED from the tensor's own magnitudes, not chosen.
+    (defn mtk-abs1 (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn mtk-sumabs (w x acc)
+        (if (eq (len w) 0) acc
+            (mtk-sumabs (tail w) (tail x) (add acc (mtk-abs1 (mul (head w) (head x)))))))
+
+    ; the eight router logits: one fp64 dot per row of the F16 gate
+    (defn mtk-gate-loop (path abs e ne d x acc)
+        (if (ge e ne) (reverse acc)
+            (mtk-gate-loop path abs (add e 1) ne d x (cons (tb-dot (mtk-rowvals 1 path abs e d) x) acc))))
+
+    (defn mtk-emit-ref (path id r expert)
+        (do
+            (let src (mtk-src path))
+            (let base (egg-data-base src (wtr-alignment)))
+            (let d (gmt-u32 src "llama.embedding_length"))
+            (let dff (gmt-u32 src "llama.feed_forward_length"))
+            (let ne (gmt-u32 src "llama.expert_count"))
+            (let nsel (gmt-u32 src "llama.expert_used_count"))
+            (let eps (gmt-f32 src "llama.attention.layer_norm_rms_epsilon"))
+            (let embabs (mtk-abs src base "token_embd.weight"))
+            (let gnabs  (mtk-abs src base "blk.0.attn_norm.weight"))
+            (let qabs   (mtk-abs src base "blk.0.attn_q.weight"))
+            (let kabs   (mtk-abs src base "blk.0.attn_k.weight"))
+            (let giabs  (mtk-abs src base "blk.0.ffn_gate_inp.weight"))
+            (let geabs  (mtk-abs src base "blk.0.ffn_gate_exps.weight"))
+            (let outabs (mtk-abs src base "output.weight"))
+            (let vocabn (gmt-u32 src "llama.vocab_size"))
+
+            (let emb (mtk-rowvals 14 path embabs id d))
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let n1 (ln-rmsnorm emb gains eps))
+
+            (mtk-line (str_concat "REFEMB " (str_concat (int_to_str id) (str_concat " " (int_to_str d)))))
+            (mtk-print-list emb)
+            (mtk-line (str_concat "REFRMS " (int_to_str d)))
+            (mtk-print-list n1)
+
+            ; Q6_K at width d, with the SUM|term| its bound is derived from
+            (let qrow (mtk-rowvals 14 path qabs r d))
+            (mtk-line (str_concat "REFQ " (int_to_str r)))
+            (mtk-num (tb-dot qrow n1))
+            (mtk-line "REFQABS")
+            (mtk-num (mtk-sumabs qrow n1 0.0))
+            ; Q8_0 at width d — THE NEW CARVER, at the tensor's real width
+            (let krow (mtk-rowvals 8 path kabs r d))
+            (mtk-line (str_concat "REFK " (int_to_str r)))
+            (mtk-num (tb-dot krow n1))
+            (mtk-line "REFKABS")
+            (mtk-num (mtk-sumabs krow n1 0.0))
+            ; F16 router gate: every logit
+            (let logits (mtk-gate-loop path giabs 0 ne d n1 (list)))
+            (mtk-line (str_concat "REFGATE " (int_to_str ne)))
+            (mtk-print-list logits)
+            ; the routing decision those logits imply
+            (mtk-line (str_concat "REFROUTE " (int_to_str nsel)))
+            (mtk-print-list (mm-route-ids logits ne nsel))
+            (mtk-print-list (mm-route-weights logits ne nsel))
+            ; THE EXPERT GATHER: expert `expert`, row r of ffn_gate_exps, at the 3-D offset
+            ; nb02 = bytes of ONE expert's (d x dff) slice.
+            (let nb02 (mtk-tbytes 14 (mul d dff)))
+            (let erow (mtk-rowvals 14 path (add geabs (mul expert nb02)) r d))
+            (mtk-line (str_concat "REFEXP " (str_concat (int_to_str expert) (str_concat " " (str_concat (int_to_str r) (str_concat " " (int_to_str nb02)))))))
+            (mtk-num (tb-dot erow n1))
+            (mtk-line "REFEXPABS")
+            (mtk-num (mtk-sumabs erow n1 0.0))
+            ; THE VIEW GATE: output.weight begins 32.7 GiB past the one-buffer ceiling. Its row 0, and
+            ; its LAST row, so both ends of the far region are judged.
+            (mtk-line (str_concat "REFFAR " (str_concat (int_to_str outabs) (str_concat " " (int_to_str d)))))
+            (mtk-print-list (mtk-rowvals 14 path outabs 0 d))
+            (mtk-line (str_concat "REFFARLAST " (int_to_str (sub vocabn 1))))
+            (mtk-print-list (mtk-rowvals 14 path outabs (sub vocabn 1) d))
+            (mtk-line "END")
+            0))
+
+    0)

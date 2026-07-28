@@ -132,7 +132,7 @@ func (k *Kernel) registerInRAMJIT() {
 		if len(args) != 3 || args[0].Kind != VStr || args[1].Kind != VStr || args[2].Kind != VInt {
 			return Value{Kind: VNull}
 		}
-		r, ok := dylibCall(args[0].Str, args[1].Str, args[2].Int)
+		r, ok := dylibCall(argStr(args, 0), argStr(args, 1), args[2].Int)
 		if !ok {
 			return Value{Kind: VNull}
 		}

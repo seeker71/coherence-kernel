@@ -1,0 +1,110 @@
+; dsv4-moe-demo.fk — the ONE toy MoE fixture, shared by the read-back band (dsv4-moe-msl-band.fk) and the
+; GPU witness (metal_moe_gpu.sh), with the reference printers that hand the carrier the fp64 recipe answers.
+;
+; The fixture's weights come from dsv4-forward.fk's OWN deterministic generator (dsv4-gen-mat / dsv4-gen-vec,
+; Park-Miller), so every reference below is the PROVEN CPU recipe (dsv4-routed-moe / dsv4-shared / dsv4-mid,
+; band dsv4-forward-band.fk = 63) run at these dims — the GPU is judged against the same arithmetic already
+; agreed with the ds4.c transcription, not a second hand-rolled reference. One source of truth: change the
+; fixture here and both witnesses move together.
+;
+; TWO CLAMP CONFIGS (snugcause): lim = 0.9 (the clamp BITES — a gate/up value exceeds it) and lim = 0.0 (the
+; clamp is DISABLED, ds4's <=1e-6 sill). The bias is chosen so the biased top-k REORDERS versus the unbiased
+; probs, so the bias-in/weight-out asymmetry is actually exercised (a bias that changes nothing witnesses
+; nothing). dm-witness-* below assert both properties hold, so the fixture cannot silently go inert.
+;
+; The experts are emitted FLAT, indexed by expert (experts_gate = ne*ff*E, etc.), so the carrier gathers the
+; chosen expert host-side at e*ff*E / e*E*ff — the `t.off + e*nb02` decode gather (moe-msl.fk).
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk form-stdlib/dsv4-hc.fk form-stdlib/dsv4-forward.fk form-stdlib/dsv4-router-msl.fk form-stdlib/dsv4-moe-msl.fk
+
+(do
+    ; ---- the fixture dims ----
+    (defn dmd-e () 8) (defn dmd-ne () 4) (defn dmd-nused () 2) (defn dmd-ff () 6)
+    (defn dmd-wscale () 1.5)
+    (defn dmd-lim-on () 0.9) (defn dmd-lim-off () 0.0)
+
+    ; ---- the toy weights (dsv4-forward.fk's generator; the band uses the same seeds by construction) ----
+    (defn dmd-norm () (dsv4-gen-vec 7000 (dmd-e) 1.0))          ; the RMSNorm'd hidden (toy input)
+    (defn dmd-gate-inp () (dsv4-gen-mat 7001 (dmd-ne) (dmd-e) 0.5))  ; router gate [ne x E]
+    (defn dmd-bias () (dsv4-gen-vec 7002 (dmd-ne) 0.6))         ; exp_probs_b [ne] (reorders the top-k)
+    ; expert e = (gate [ff x E]  up [ff x E]  down [E x ff]) — one generator seed band per expert
+    (defn dmd-expert (e)
+        (do (let b (add 7010 (mul e 10)))
+            (list (dsv4-gen-mat (add b 0) (dmd-ff) (dmd-e) 0.6)
+                  (dsv4-gen-mat (add b 1) (dmd-ff) (dmd-e) 0.6)
+                  (dsv4-gen-mat (add b 2) (dmd-e) (dmd-ff) 0.6))))
+    (defn dmd-experts-go (e n) (if (eq e n) (empty) (cons (dmd-expert e) (dmd-experts-go (add e 1) n))))
+    (defn dmd-experts () (dmd-experts-go 0 (dmd-ne)))
+    (defn dmd-sh-gate () (dsv4-gen-mat 7100 (dmd-ff) (dmd-e) 0.6))
+    (defn dmd-sh-up   () (dsv4-gen-mat 7101 (dmd-ff) (dmd-e) 0.6))
+    (defn dmd-sh-down () (dsv4-gen-mat 7102 (dmd-e) (dmd-ff) 0.6))
+
+    ; ---- fp64 references, from the proven recipe ----
+    (defn dmd-logits () (tb-matvec (dmd-gate-inp) (dmd-norm)))
+    (defn dmd-probs () (dsv4-probs (dmd-logits)))
+    (defn dmd-sel () (dsv4-topk (tb-vec-add (dmd-probs) (dmd-bias)) (dmd-nused)))  ; recipe cons order
+    (defn dmd-ews ()                                                              ; scaled unbiased weights
+        (do (let ewraw (dsv4-gather (dmd-probs) (dmd-sel)))
+            (let s0 (tn-sum ewraw))
+            (let s (if (lt s0 (dr-floor)) (dr-floor) s0))
+            (tn-scale ewraw (div (dmd-wscale) s))))
+
+    ; the FIRST-consumed selected expert (sel head = ids[0]) — the stage-by-stage witness at lim 0.9
+    (defn dmd-e0 () (nth (dmd-sel) 0))
+    (defn dmd-w0 () (nth (dmd-ews) 0))
+    (defn dmd-gate0 () (tb-matvec (nth (nth (dmd-experts) (dmd-e0)) 0) (dmd-norm)))
+    (defn dmd-up0 ()   (tb-matvec (nth (nth (dmd-experts) (dmd-e0)) 1) (dmd-norm)))
+    (defn dmd-mid0 ()  (dsv4-mid (dmd-gate0) (dmd-up0) (dmd-w0) (dmd-lim-on)))
+    (defn dmd-eout0 () (tb-matvec (nth (nth (dmd-experts) (dmd-e0)) 2) (dmd-mid0)))
+
+    ; the whole routed-MoE output, shared, and their sum, for both clamp configs
+    (defn dmd-moe-on ()  (dsv4-routed-moe (dmd-norm) (dmd-gate-inp) (dmd-bias) (dmd-experts) (dmd-nused) (dmd-wscale) (dmd-lim-on)))
+    (defn dmd-moe-off () (dsv4-routed-moe (dmd-norm) (dmd-gate-inp) (dmd-bias) (dmd-experts) (dmd-nused) (dmd-wscale) (dmd-lim-off)))
+    (defn dmd-sh-on ()  (dsv4-shared (dmd-norm) (dmd-sh-gate) (dmd-sh-up) (dmd-sh-down) (dmd-lim-on)))
+    (defn dmd-sh-off () (dsv4-shared (dmd-norm) (dmd-sh-gate) (dmd-sh-up) (dmd-sh-down) (dmd-lim-off)))
+    (defn dmd-total-on ()  (tb-vec-add (dmd-moe-on) (dmd-sh-on)))
+    (defn dmd-total-off () (tb-vec-add (dmd-moe-off) (dmd-sh-off)))
+
+    ; ---- witnesses the fixture must satisfy (so it cannot go inert) ----
+    ; 1: the bias reorders — the unbiased top-1 differs from the biased top-1 (asymmetry exercised)
+    (defn dmd-w-reorder ()
+        (if (eq (dsv4-argmax (dmd-probs)) (dsv4-argmax (tb-vec-add (dmd-probs) (dmd-bias)))) 0 1))
+    ; 2: the clamp bites — some gate0 or up0 magnitude exceeds lim-on
+    (defn dmd-any-gt (xs lim) (if (eq (len xs) 0) 0 (if (gt (tn-abs (head xs)) lim) 1 (dmd-any-gt (tail xs) lim))))
+    (defn dmd-w-clampbites ()
+        (if (eq (add (dmd-any-gt (dmd-gate0) (dmd-lim-on)) (dmd-any-gt (dmd-up0) (dmd-lim-on))) 0) 0 1))
+    ; 3: the selected weights are nonzero (edgedrop/zerobirth guard)
+    (defn dmd-w-nonzero () (if (gt (tn-sum (dmd-ews)) 0.0001) 1 0))
+
+    ; ================= flatteners + printers (mla-demo.fk's shape) =================
+    (defn dmd-plist (xs) (if (eq (len xs) 0) (print "ENDVEC") (do (print (head xs)) (dmd-plist (tail xs)))))
+    (defn dmd-vec (name xs) (do (print (str_concat "VEC " name)) (dmd-plist xs)))
+    (defn dmd-flat (rows) (if (eq (len rows) 0) (empty) (tb-cat (head rows) (dmd-flat (tail rows)))))
+    (defn dmd-mat (name rows) (dmd-vec name (dmd-flat rows)))
+    (defn dmd-scalar (name v) (do (print (str_concat "SCALAR " name)) (print v)))
+    ; flatten experts: pick component c (0 gate,1 up,2 down) of every expert, flatten each, concat
+    (defn dmd-experts-comp (es c) (if (eq (len es) 0) (empty) (tb-cat (dmd-flat (nth (head es) c)) (dmd-experts-comp (tail es) c))))
+
+    (defn dmd-emit-all ()
+        (do
+            (print "MOEDEMO")
+            (dmd-scalar "E" (dmd-e)) (dmd-scalar "ne" (dmd-ne)) (dmd-scalar "nused" (dmd-nused)) (dmd-scalar "ff" (dmd-ff))
+            (dmd-scalar "wscale" (dmd-wscale)) (dmd-scalar "limOn" (dmd-lim-on)) (dmd-scalar "limOff" (dmd-lim-off))
+            (dmd-scalar "e0" (dmd-e0))
+            (dmd-vec "norm" (dmd-norm))
+            (dmd-mat "gateInp" (dmd-gate-inp))
+            (dmd-vec "bias" (dmd-bias))
+            (dmd-vec "expertsGate" (dmd-experts-comp (dmd-experts) 0))
+            (dmd-vec "expertsUp"   (dmd-experts-comp (dmd-experts) 1))
+            (dmd-vec "expertsDown" (dmd-experts-comp (dmd-experts) 2))
+            (dmd-mat "shGate" (dmd-sh-gate)) (dmd-mat "shUp" (dmd-sh-up)) (dmd-mat "shDown" (dmd-sh-down))
+            ; references
+            (dmd-vec "logits" (dmd-logits)) (dmd-vec "probs" (dmd-probs))
+            (dmd-vec "sel" (dmd-sel)) (dmd-vec "ews" (dmd-ews))
+            (dmd-vec "gate0" (dmd-gate0)) (dmd-vec "up0" (dmd-up0)) (dmd-vec "mid0" (dmd-mid0)) (dmd-vec "eout0" (dmd-eout0))
+            (dmd-vec "moeOn" (dmd-moe-on)) (dmd-vec "moeOff" (dmd-moe-off))
+            (dmd-vec "shOn" (dmd-sh-on)) (dmd-vec "shOff" (dmd-sh-off))
+            (dmd-vec "totalOn" (dmd-total-on)) (dmd-vec "totalOff" (dmd-total-off))
+            (print "END")
+            0))
+    0)
