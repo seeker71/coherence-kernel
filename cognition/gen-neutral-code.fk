@@ -70,11 +70,63 @@
   (defn gir-index (o i)    (gir "index" (list o i)))
   (defn gir-list (elems)   (gir "list" (list elems)))
   (defn gir-fn (name ps b) (gir "fn" (list name ps b)))
+  (defn gir-let (name v b) (gir "let" (list name v b)))
   ;; a BUILTIN call — its name resolves through the language's builtin table,
   ;; unlike gir-call whose name is a function the emitted program defines
   (defn gir-bcall (f args) (gir "bcall" (list f args)))
 
-  (defn gir-kinds () (list "lit" "var" "bin" "cmp" "if" "call" "index" "list" "fn" "bcall"))
+  ;; ═══ THE KIND SIGNATURES — slot semantics as DATA ══════════════
+  ;; Named by the review panel, and the sting is that this cell already stated
+  ;; the gap: "a part is sometimes a child node, sometimes an operator name,
+  ;; sometimes an integer — a generic walker has to know which is which." That
+  ;; sentence was written as a REASON TO GIVE UP on the generic walker. It is a
+  ;; missing table. You can induce rows; you cannot induce an if-chain.
+  ;;
+  ;; A signature says what each slot IS, so the renderer stops needing an arm
+  ;; per kind. Slot kinds:
+  ;;   child  an IR node — recurse
+  ;;   op     an operator name — resolve through the language's operator table
+  ;;   bi     a builtin name — resolve through the builtin table
+  ;;   raw    splice literally (a variable or function name)
+  ;;   int    an integer literal
+  ;;   kids   a LIST of IR nodes — render each, join with the language separator
+  ;;   names  a list of literal names — join with the separator
+  ;;
+  ;; Shapes now use %1..%N in SLOT ORDER, uniformly. Adding an IR kind is one
+  ;; signature row plus one shape row per language and ZERO renderer edits.
+  (defn gsig (kind slots) (list kind slots))
+  (defn gsig-kind (r) (nth r 0))
+  (defn gsig-slots (r) (nth r 1))
+  (defn gnc-signatures ()
+    (list
+      (gsig "lit"   (list "int"))
+      (gsig "var"   (list "raw"))
+      (gsig "bin"   (list "op" "child" "child"))
+      (gsig "cmp"   (list "op" "child" "child"))
+      (gsig "if"    (list "child" "child" "child"))
+      (gsig "call"  (list "raw" "kids"))
+      (gsig "bcall" (list "bi" "kids"))
+      (gsig "index" (list "child" "child"))
+      (gsig "list"  (list "kids"))
+      (gsig "fn"    (list "raw" "names" "child"))
+      ;; PROOF OF THE CLAIM: `let` was added after the generic fold, as one
+      ;; signature row and one shape row per language. The renderer was not
+      ;; touched. Its slot pattern (raw child child) matches no existing kind,
+      ;; so it could not have worked by accident.
+      (gsig "let"   (list "raw" "child" "child"))))
+  (defn gnc-sig-loop (rs k)
+    (if (eq (len rs) 0) (list)
+      (if (str_eq (gsig-kind (head rs)) k) (head rs) (gnc-sig-loop (tail rs) k))))
+  (defn gnc-sig (k) (gnc-sig-loop (gnc-signatures) k))
+  ;; gir-kinds DERIVES from the signatures now — it was a second hand-mirror
+  (defn gnc-kinds-loop (rs)
+    (if (eq (len rs) 0) (list) (cons (gsig-kind (head rs)) (gnc-kinds-loop (tail rs)))))
+  (defn gir-kinds () (gnc-kinds-loop (gnc-signatures)))
+  ;; and so does "is this an operator node", from whether slot 0 is an op
+  (defn gnc-binlike? (k)
+    (do (let sg (gnc-sig k))
+      (if (eq (len sg) 0) 0
+        (if (str_eq (head (gsig-slots sg)) "op") 1 0))))
 
   ;; ═══ L2 — a language is a TABLE, not a function ════════════════
   ;; %1 %2 %3 are positional slots, %op the operator, %xs a joined list.
@@ -153,14 +205,15 @@
         (list
           (gnc-row "lit"   "%1")
           (gnc-row "var"   "%1")
-          (gnc-row "bin"   "(%op %1 %2)")
-          (gnc-row "cmp"   "(%op %1 %2)")
+          (gnc-row "bin"   "(%1 %2 %3)")
+          (gnc-row "cmp"   "(%1 %2 %3)")
           (gnc-row "if"    "(if %1 %2 %3)")
-          (gnc-row "call"  "(%1 %xs)")
-          (gnc-row "bcall" "(%1 %xs)")
+          (gnc-row "call"  "(%1 %2)")
+          (gnc-row "bcall" "(%1 %2)")
           (gnc-row "index" "(nth %1 %2)")
-          (gnc-row "list"  "(list %xs)")
-          (gnc-row "fn"    "(defn %1 (%xs) %3)"))
+          (gnc-row "list"  "(list %1)")
+          (gnc-row "fn"    "(defn %1 (%2) %3)")
+          (gnc-row "let"   "(do (let %1 %2) %3)"))
         " " (list (list "eq" "eq" 3) (list "add" "add" 5) (list "lt" "lt" 3) (list "and" "and" 2))
         (list (list "len" "len") (list "first" "head") (list "rest" "tail"))
         "" "prefix")
@@ -168,14 +221,15 @@
         (list
           (gnc-row "lit"   "%1")
           (gnc-row "var"   "%1")
-          (gnc-row "bin"   "%1 %op %2")
-          (gnc-row "cmp"   "%1 %op %2")
+          (gnc-row "bin"   "%2 %1 %3")
+          (gnc-row "cmp"   "%2 %1 %3")
           (gnc-row "if"    "(%2 if %1 else %3)")
-          (gnc-row "call"  "%1(%xs)")
-          (gnc-row "bcall" "%1(%xs)")
+          (gnc-row "call"  "%1(%2)")
+          (gnc-row "bcall" "%1(%2)")
           (gnc-row "index" "%1[%2]")
-          (gnc-row "list"  "[%xs]")
-          (gnc-row "fn"    "def %1(%xs): return %3"))
+          (gnc-row "list"  "[%1]")
+          (gnc-row "fn"    "def %1(%2): return %3")
+          (gnc-row "let"   "(lambda %1: %3)(%2)"))
         ", " (list (list "eq" "==" 3) (list "add" "+" 5) (list "lt" "<" 3) (list "and" "and" 2))
         (list (list "len" "len") (list "first" "pyfirst") (list "rest" "pyrest"))
         "def pyfirst(l): return l[0]\ndef pyrest(l): return l[1:]" "infix")
@@ -183,14 +237,15 @@
         (list
           (gnc-row "lit"   "%1")
           (gnc-row "var"   "%1")
-          (gnc-row "bin"   "%1 %op %2")
-          (gnc-row "cmp"   "%1 %op %2")
+          (gnc-row "bin"   "%2 %1 %3")
+          (gnc-row "cmp"   "%2 %1 %3")
           (gnc-row "if"    "(%1 ? %2 : %3)")
-          (gnc-row "call"  "%1(%xs)")
-          (gnc-row "bcall" "%1(%xs)")
+          (gnc-row "call"  "%1(%2)")
+          (gnc-row "bcall" "%1(%2)")
           (gnc-row "index" "%1[%2]")
-          (gnc-row "list"  "[%xs]")
-          (gnc-row "fn"    "function %1(%xs) { return %3; }"))
+          (gnc-row "list"  "[%1]")
+          (gnc-row "fn"    "function %1(%2) { return %3; }")
+          (gnc-row "let"   "((%1) => %3)(%2)"))
         ", " (list (list "eq" "===" 3) (list "add" "+" 5) (list "lt" "<" 3) (list "and" "&&" 2))
         (list (list "len" "jslen") (list "first" "jsfirst") (list "rest" "jsrest"))
         "function jslen(l){return l.length;}\nfunction jsfirst(l){return l[0];}\nfunction jsrest(l){return l.slice(1);}" "infix")))
@@ -238,44 +293,40 @@
     (if (eq (len ns) 0) (list)
       (cons (gnc-render lang (head ns)) (gnc-render-many lang (tail ns)))))
 
-  (defn gnc-binlike? (k) (if (str_eq k "bin") 1 (if (str_eq k "cmp") 1 0)))
+  ;; ═══ L3 — ONE generic fold. No IR kind is named below this line. ═
+  ;; Before the signature table this was a ten-armed if-chain, one arm per
+  ;; kind, each hardcoding that kind's slot semantics. The header claimed "one
+  ;; fold"; the code was a switch. Now the signature says what each slot IS and
+  ;; the renderer walks it, so a new IR kind costs one signature row plus one
+  ;; shape row per language and NO renderer edit at all.
+  (defn gnc-slot (lang ptype part prec)
+    (if (str_eq ptype "int")   (int_to_str part)
+    (if (str_eq ptype "raw")   part
+    (if (str_eq ptype "op")    (gnc-op lang part)
+    (if (str_eq ptype "bi")    (gnc-builtin lang part)
+    (if (str_eq ptype "child") (gnc-child lang prec part)
+    (if (str_eq ptype "kids")
+        (gnc-join (gnc-render-many lang part) (gnc-lang-sep (gnc-lang-of lang)))
+    (if (str_eq ptype "names") (gnc-join part (gnc-lang-sep (gnc-lang-of lang)))
+        ""))))))))
 
-  ;; the fold: shape from the table, slots filled by rendering children
+  ;; fill %1..%N in slot order; an empty slot refuses the whole node
+  (defn gnc-fill (lang shape slots parts i prec)
+    (if (eq (len slots) 0) shape
+      (do (let v (gnc-slot lang (head slots) (head parts) prec))
+        (if (eq (str_len v) 0) ""
+          (gnc-fill lang (gnc-sub1 shape (str_concat "%" (int_to_str i)) v)
+                    (tail slots) (tail parts) (add i 1) prec)))))
+
   (defn gnc-render (lang n)
     (do
       (let k (gir-kind n))
       (let shape (gnc-shape lang k))
+      (let sg (gnc-sig k))
       (if (eq (str_len shape) 0) ""
-        (if (str_eq k "lit") (gnc-sub1 shape "%1" (int_to_str (gir-nth n 0)))
-        (if (str_eq k "var") (gnc-sub1 shape "%1" (gir-nth n 0))
-        (if (str_eq k "list")
-            (gnc-sub1 shape "%xs"
-              (gnc-join (gnc-render-many lang (gir-nth n 0)) (gnc-lang-sep (gnc-lang-of lang))))
-        (if (str_eq k "bcall")
-            (gnc-sub1 (gnc-sub1 shape "%1" (gnc-builtin lang (gir-nth n 0))) "%xs"
-              (gnc-join (gnc-render-many lang (gir-nth n 1)) (gnc-lang-sep (gnc-lang-of lang))))
-        (if (str_eq k "call")
-            (gnc-sub1 (gnc-sub1 shape "%1" (gir-nth n 0)) "%xs"
-              (gnc-join (gnc-render-many lang (gir-nth n 1)) (gnc-lang-sep (gnc-lang-of lang))))
-        (if (str_eq k "fn")
-            (gnc-sub1 (gnc-sub1 (gnc-sub1 shape "%1" (gir-nth n 0)) "%xs"
-                        (gnc-join (gir-nth n 1) (gnc-lang-sep (gnc-lang-of lang))))
-                      "%3" (gnc-render lang (gir-nth n 2)))
-        (if (str_eq k "index")
-            (gnc-sub1 (gnc-sub1 shape "%1" (gnc-render lang (gir-nth n 0)))
-                      "%2" (gnc-render lang (gir-nth n 1)))
-        (if (str_eq k "if")
-            (gnc-sub1 (gnc-sub1 (gnc-sub1 shape "%1" (gnc-render lang (gir-nth n 0)))
-                                "%2" (gnc-render lang (gir-nth n 1)))
-                      "%3" (gnc-render lang (gir-nth n 2)))
-        ;; bin and cmp share a shape family: op plus two rendered children.
-        ;; Anything else REFUSES — the old else-branch treated every unknown
-        ;; kind as bin/cmp, so an IR constructor forgotten from gir-kinds stayed
-        ;; green in gnc-total? and mis-rendered silently.
-        (if (eq (gnc-binlike? k) 0) ""
-        (gnc-sub1 (gnc-sub1 (gnc-sub1 shape "%op" (gnc-op lang (gir-nth n 0)))
-                            "%1" (gnc-child lang (gnc-prec lang (gir-nth n 0)) (gir-nth n 1)))
-                  "%2" (gnc-child lang (gnc-prec lang (gir-nth n 0)) (gir-nth n 2)))))))))))))))
+        (if (eq (len sg) 0) ""
+          (gnc-fill lang shape (gsig-slots sg) (gir-parts n) 1
+                    (if (eq (gnc-binlike? k) 1) (gnc-prec lang (gir-nth n 0)) 0))))))
 
   ;; ═══ L4 — the graph's query, expressed ONCE in IR ══════════════
   ;; one term per has-member fact: (if (eq <subject> C) 1 0)
@@ -359,8 +410,18 @@
     (if (eq (len ls) 0) 0 (add (gnc-rows-of (head ls)) (gnc-authored-loop (tail ls)))))
   (defn gnc-authored () (gnc-authored-loop (gnc-languages)))
   (defn gnc-languages-n () (len (gnc-languages)))
-  (defn gnc-relations-n () 6)
-  (defn gnc-concepts-n () 10)
+  ;; grok caught these hardcoded as 6 and 10 — a leverage number resting on two
+  ;; magic constants is a leverage number that cannot move when the graph does.
+  ;; Both are now COUNTED from the graph, so growing the graph grows the measure.
+  (defn gnc-seen? (xs v) (if (eq (len xs) 0) 0 (if (eq (head xs) v) 1 (gnc-seen? (tail xs) v))))
+  (defn gnc-distinct-loop (fs sel seen n)
+    (if (eq (len fs) 0) n
+      (do (let v (sel (head fs)))
+        (if (eq (gnc-seen? seen v) 1)
+            (gnc-distinct-loop (tail fs) sel seen n)
+            (gnc-distinct-loop (tail fs) sel (cons v seen) (add n 1))))))
+  (defn gnc-relations-n () (gnc-distinct-loop (stn-facts) stn-f-relation (list) 0))
+  (defn gnc-concepts-n ()  (gnc-distinct-loop (stn-facts) stn-f-subject (list) 0))
   ;; the emitted function takes facts, relation and key as ARGUMENTS, so one
   ;; program answers the whole product
   (defn gnc-answerable ()
@@ -448,6 +509,15 @@
     (add (if (lt (str_find (gnc-emit-query "python") "3045" 0) 0) 2097152 0)
     ;; LEVERAGE is a number, and it is greater than one
     (add (if (gt (gnc-leverage) 1) 4194304 0)
-         0))))))))))))))))))))))))
+    ;; the signature table drives everything: gir-kinds derives from it
+    (add (if (eq (len (gir-kinds)) 11) 8388608 0)
+    ;; a NEW IR kind, added with zero renderer edits, renders in all three
+    (add (if (gt (str_len (gnc-render "form" (gir-let "x" (gir-lit 1) (gir-var "x")))) 8)
+             (if (gt (str_len (gnc-render "python" (gir-let "x" (gir-lit 1) (gir-var "x")))) 8)
+                 (if (gt (str_len (gnc-render "javascript" (gir-let "x" (gir-lit 1) (gir-var "x")))) 8)
+                     16777216 0) 0) 0)
+    ;; and the counts come from the graph, not from two constants
+    (add (if (gt (gnc-relations-n) 1) (if (gt (gnc-concepts-n) 1) 33554432 0) 0)
+         0)))))))))))))))))))))))))))
 
   0)
