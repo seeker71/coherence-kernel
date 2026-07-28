@@ -2100,8 +2100,8 @@ long long fk_metal_model_argmax_external(
         id<MTLFunction>fn=[lib newFunctionWithName:@"form_dsv4_argmax_f32"];NSError*error=nil;
         id<MTLComputePipelineState>pipe=fn?fk_model_pipeline_for(fn,&error):nil;
         id<MTLCommandQueue>queue=fk_model_command_queue();
-        id<MTLBuffer>token=[fk_model_device newBufferWithLength:sizeof(uint32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer>score=[fk_model_device newBufferWithLength:sizeof(float) options:MTLResourceStorageModeShared];
+        id<MTLBuffer>token=[fk_model_device newBufferWithLength:8*sizeof(uint32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer>score=[fk_model_device newBufferWithLength:8*sizeof(float) options:MTLResourceStorageModeShared];
         if(!pipe||!queue||!token||!score){const char*m=error.localizedDescription.UTF8String?:"unknown";
             [fn release];[pipe release];[queue release];[token release];[score release];
             free(ln);free(pt);return fk_out(out,cap,"FAIL metal_model_argmax pipeline=%s\n",m);}
@@ -2115,15 +2115,25 @@ long long fk_metal_model_argmax_external(
         if(command.status!=MTLCommandBufferStatusCompleted){const char*m=command.error.localizedDescription.UTF8String?:"unknown";
             [fn release];[pipe release];[queue release];[token release];[score release];
             free(ln);free(pt);return fk_out(out,cap,"FAIL metal_model_argmax dispatch=%s\n",m);}
-        uint32_t token_id=*(uint32_t*)token.contents;float best=*(float*)score.contents;
+        uint32_t *token_ids=(uint32_t*)token.contents;
+        float *scores=(float*)score.contents;
+        uint32_t token_id=token_ids[0];float best=scores[0];
         float*logits=fk_model_stage.contents;size_t finite=0;
         for(size_t i=0;i<vocab;i++)if(isfinite(logits[i]))finite++;
         long long n=fk_out(out,cap,
-            "PASS metal_model_argmax\ntoken-id=%u\nscore=%.9g\nvocab=%lu\nfinite=%zu\n"
+            "PASS metal_model_argmax\ntoken-id=%u\nscore=%.9g\n"
+            "top-ids=%u,%u,%u,%u,%u,%u,%u,%u\n"
+            "top-scores=%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g,%.9g\n"
+            "vocab=%lu\nfinite=%zu\n"
             "elapsed-ms=%.3f\ncarrier=in-process-metal\ntoken-owner=form-emitted-metal\n"
             "host-exec=0\nshell=0\nswift=0\ntemp=0\nnetwork=0\nremote=0\n"
             "outcome=success\nrewitness-offer=metal-model-argmax\n",
-            token_id,best,vocab,finite,elapsed);
+            token_id,best,
+            token_ids[0],token_ids[1],token_ids[2],token_ids[3],
+            token_ids[4],token_ids[5],token_ids[6],token_ids[7],
+            scores[0],scores[1],scores[2],scores[3],
+            scores[4],scores[5],scores[6],scores[7],
+            vocab,finite,elapsed);
         [fn release];[pipe release];[queue release];[token release];[score release];
         free(ln);free(pt);return n;
 bad_argmax:

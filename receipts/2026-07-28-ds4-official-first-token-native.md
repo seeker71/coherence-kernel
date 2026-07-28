@@ -39,6 +39,15 @@ The after-run therefore matches the producer's official first continuation
 bytes exactly. The vector now returns `255` only when the live computed token is
 `926`; the expected ID is a falsifier at the boundary, not generated model data.
 
+After the producer-grounded BF16 HC carrier storage boundary was added, this
+vector was re-witnessed rather than assumed:
+
+- argmax: token `926`, fragment `16`, score `33.7992325`
+- top two: `926 @ 33.7992325`, `11154 @ 26.7022457`
+- finite logits: `129280 / 129280`
+- vector verdict: `255`
+- membrane counts: `network=0 remote=0 shell=0 swift=0 temp=0`
+
 Re-witness:
 
 ```sh
