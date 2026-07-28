@@ -36,7 +36,7 @@
 ; map that says WHICH blocks take that path, and it is the piece a stack harness
 ; binds against. It does not load weights and it does not run anything.
 ;
-; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/kat-coder-tensor-table.fk
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-tensor-index.fk form-stdlib/kat-coder-tensor-table.fk
 
 (do
     (defn kls-blocks () 41)                  ; 40 layers + one MTP head
@@ -97,20 +97,41 @@
                 (kls-shape-known-go s (add b 1) n) 0)))
     (defn kls-shape-known? (s) (kls-shape-known-go s 0 (kls-blocks)))
 
-    ; ── walks over all 41 blocks ─────────────────────────────────────────
-    (defn kls-count-go (s b n f acc)
-        (if (ge b n) acc
-            (kls-count-go s (add b 1) n f (add acc (if (eq f 1) (kls-full? s b) (kls-linear? s b))))))
-    (defn kls-full-count (s) (kls-count-go s 0 (kls-blocks) 1 0))
-    (defn kls-linear-count (s) (kls-count-go s 0 (kls-blocks) 0 0))
+    ; ── ONE WALK PER LEAF, then everything is list membership ────────────
+    ; The first version of this section asked egg-find-tensor per block per leaf
+    ; — 82 searches, each restarting the walk, each miss paying a full scan of
+    ; all 753 records at 0.35 s. The band took 122 s. gguf-tensor-index.fk
+    ; collects instead: one walk gathers every block index carrying a given leaf,
+    ; and the per-block questions become membership in a list already in hand.
+    ; Same two lists, 1 s. The lists are computed by the CALLER and threaded
+    ; through, because a `(defn kls-full-blocks (s) …)` called from inside a
+    ; per-block loop would quietly restore the original cost with a tidier face.
+    (defn kls-full-blocks (s) (gti-blocks-with s ".attn_q.weight"))
+    (defn kls-linear-blocks (s) (gti-blocks-with s ".ssm_conv1d.weight"))
+
+    (defn kls-full-in? (fl b) (gti-memq b fl))
+    (defn kls-linear-in? (ll b) (gti-memq b ll))
+    (defn kls-well-formed-in? (ll fl b)
+        (if (eq (add (kls-linear-in? ll b) (kls-full-in? fl b)) 1) 1 0))
+
+    (defn kls-full-count (fl) (len fl))
+    (defn kls-linear-count (ll) (len ll))
     ; every block is exactly one shape
-    (defn kls-all-well-formed-go (s b n)
-        (if (ge b n) 1 (if (eq (kls-well-formed? s b) 1) (kls-all-well-formed-go s (add b 1) n) 0)))
-    (defn kls-all-well-formed? (s) (kls-all-well-formed-go s 0 (kls-blocks)))
-    ; the tensors agree with the declared interval, block for block
-    (defn kls-matches-interval-go (s b n)
+    (defn kls-all-well-formed-go (ll fl b n)
         (if (ge b n) 1
-            (if (eq (kls-full? s b) (kls-declared-full? b))
-                (kls-matches-interval-go s (add b 1) n) 0)))
-    (defn kls-matches-interval? (s) (kls-matches-interval-go s 0 (kls-blocks)))
+            (if (eq (kls-well-formed-in? ll fl b) 1) (kls-all-well-formed-go ll fl (add b 1) n) 0)))
+    (defn kls-all-well-formed? (ll fl) (kls-all-well-formed-go ll fl 0 (kls-blocks)))
+    ; the interval holds over the layers it describes, and only over those
+    (defn kls-interval-holds-go2 (fl b n)
+        (if (ge b n) 1
+            (if (eq (kls-full-in? fl b) (kls-declared-full? b))
+                (kls-interval-holds-go2 fl (add b 1) n) 0)))
+    (defn kls-interval-over-layers? (fl) (kls-interval-holds-go2 fl 0 (kls-transformer-layers)))
+    (defn kls-mtp-full-in? (fl) (kls-full-in? fl (kls-mtp-head)))
+    ; the corrected predicate, over all 41
+    (defn kls-shape-known-go2 (fl b n)
+        (if (ge b n) 1
+            (if (eq (kls-full-in? fl b) (kls-expected-full? b))
+                (kls-shape-known-go2 fl (add b 1) n) 0)))
+    (defn kls-shape-known2? (fl) (kls-shape-known-go2 fl 0 (kls-blocks)))
     0)
