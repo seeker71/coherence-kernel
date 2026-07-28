@@ -1,0 +1,241 @@
+; Full native trajectory for the exact prompt whose earlier 64-token answer was
+; semantically rejected.  The model path is unchanged: one Form-owned open,
+; layer-major JIT prefill, persistent-cache autoregressive decode, native
+; output head, native tokenizer decode, and close.  This witness additionally
+; retains each output head's top-eight surface and top1/top2 margin as a
+; content-addressed Form receipt.
+; witnessed: 2026-07-29 -> 255 (64 native tokens; run 9ae318d...)
+;
+; preludes: form-stdlib/form-cli-dsv4-local.fk native/metal/dsv4-jit-metal-abi.fk
+
+(do
+    (defn dat-score-margin (scores)
+        (do
+            (let comma1 (str_find scores "," 0))
+            (if (lt comma1 0) "nothing"
+                (do
+                    (let start2 (add comma1 1))
+                    (let comma2 (str_find scores "," start2))
+                    (if (lt comma2 0) "nothing"
+                        (float_to_str
+                            (sub
+                                (str_to_float (substring scores 0 comma1))
+                                (str_to_float
+                                    (substring scores start2 comma2)))))))))
+
+    (defn dat-candidate-row (src sequence receipt)
+        (do
+            (let token (dns-token-id receipt))
+            (let scores (fdl-line-value receipt "top-scores="))
+            (let bytes
+                (if (nothing? token) (list)
+                    (tkz-decode-id-bytes src token)))
+            (let r0 (str_concat "token."
+                (str_concat (int_to_str sequence) ".id=")))
+            (let r1 (str_concat r0
+                (if (nothing? token) "nothing" (int_to_str token))))
+            (let r2 (str_concat r1
+                (str_concat "\ntoken."
+                    (str_concat (int_to_str sequence) ".bytes="))))
+            (let r3 (str_concat r2 (dns-byte-values bytes)))
+            (let r4 (str_concat r3
+                (str_concat "\ntoken."
+                    (str_concat (int_to_str sequence) ".score="))))
+            (let r5 (str_concat r4
+                (fdl-line-value receipt "score=")))
+            (let r6 (str_concat r5
+                (str_concat "\ntoken."
+                    (str_concat (int_to_str sequence) ".top-ids="))))
+            (let r7 (str_concat r6
+                (fdl-line-value receipt "top-ids=")))
+            (let r8 (str_concat r7
+                (str_concat "\ntoken."
+                    (str_concat (int_to_str sequence) ".top-scores="))))
+            (let r9 (str_concat r8 scores))
+            (str_concat r9
+                (str_concat "\ntoken."
+                    (str_concat (int_to_str sequence)
+                        (str_concat ".top1-top2-margin="
+                            (dat-score-margin scores)))))))
+
+    ; An observation is (token-id, candidate-row).  Nothing remains distinct
+    ; from token zero and from an observed output-head fault.
+    (defn dat-output-observation (src descs sequence)
+        (do
+            (let receipt (dlw-output-head descs))
+            (print_str receipt)
+            (let state
+                (dns-receipt-state receipt "PASS metal_model_argmax"))
+            (if (not (eq state 1))
+                (list (nothing)
+                    (str_concat "token."
+                        (str_concat (int_to_str sequence)
+                            ".state=nothing-or-fault")))
+                (do
+                    (let token (dns-token-id receipt))
+                    (list token
+                        (dat-candidate-row src sequence receipt))))))
+
+    ; Returns (generated-token-ids, trajectory-text).
+    (defn dat-decode
+        (route src descs eos observation position remaining sequence ids rows)
+        (do
+            (let token (nth observation 0))
+            (let row (nth observation 1))
+            (let next-rows
+                (if (eq (str_len rows) 0) row
+                    (str_concat rows (str_concat "\n" row))))
+            (if (nothing? token)
+                (list ids next-rows)
+                (do
+                    (let next-ids (append ids (list token)))
+                    (if (or (eq token eos) (lt remaining 2))
+                        (list next-ids next-rows)
+                        (do
+                            (dlw-embed-token descs token)
+                            (let decoded
+                                (dlw-decode-layers-jit
+                                    route src descs token position 0 43))
+                            (if (not (eq decoded 1))
+                                (list next-ids
+                                    (str_concat next-rows
+                                        (str_concat "\ntoken."
+                                            (str_concat
+                                                (int_to_str (add sequence 1))
+                                                ".state=decode-fault"))))
+                                (dat-decode
+                                    route src descs eos
+                                    (dat-output-observation
+                                        src descs (add sequence 1))
+                                    (add position 1)
+                                    (sub remaining 1)
+                                    (add sequence 1)
+                                    next-ids next-rows)))))))))
+
+    (defn dat-run ()
+        (do
+            (let question
+                "Identify the largest remaining bottleneck in this local native generation path and name the next code change.")
+            (let model (dsv4-local-model-resource))
+            (let src (tkz-src model))
+            (let prompt-ids (fdl-chat-ids src question))
+            (let admitted (dns-open))
+            (if (not (eq admitted 1)) 0
+                (do
+                    (let base
+                        (egg-data-base src (gm-alignment)))
+                    (let descs
+                        (dlp-collect
+                            src base
+                            (egg-tinfo-start src)
+                            (egg-tensor-count src)))
+                    (let route
+                        (dsv4-jit-metal-transaction-route
+                            (dsv4-local-jit-carrier-resource)))
+                    (print_str "DAT manifest-begin")
+                    (print_str (str_concat "question=" question))
+                    (print_str (str_concat "prompt-token-count="
+                        (int_to_str (len prompt-ids))))
+                    (print_str "generation-cap=64")
+                    (print_str "network=0")
+                    (print_str "remote=0")
+                    (print_str "DAT manifest-end")
+                    (dlw-init-prompt descs prompt-ids 0)
+                    (let started (now_unix_ms))
+                    (let prefilled
+                        (dlw-prefill-layers-jit
+                            route src descs prompt-ids 0 43))
+                    (let prefill-elapsed
+                        (sub (now_unix_ms) started))
+                    (print_str (str_concat "DAT prefill-ms="
+                        (int_to_str prefill-elapsed)))
+                    (if (not (eq prefilled 1))
+                        (do (print_str (metal_model_close)) 0)
+                        (do
+                            (dlw-say
+                                (metal_model_state_load
+                                    (dlw-prompt-state
+                                        (sub (len prompt-ids) 1))))
+                            (let eos
+                                (gmt-u32 src
+                                    "tokenizer.ggml.eos_token_id"))
+                            (let trajectory
+                                (dat-decode
+                                    route src descs eos
+                                    (dat-output-observation src descs 0)
+                                    (len prompt-ids) 64 0
+                                    (list) ""))
+                            (let result-ids (nth trajectory 0))
+                            (let rows (nth trajectory 1))
+                            (let answer
+                                (tkz-decode-text src result-ids))
+                            (let result-csv
+                                (dgr-ids-csv result-ids))
+                            (let run-id
+                                (nmfe-sha256
+                                    (nmfe-fields
+                                        (list model question
+                                            result-csv rows))))
+                            (let receipt-dir
+                                (fdl-ensure-receipt-dir
+                                    ".coherence-network"))
+                            (let receipt-path
+                                (str_concat receipt-dir
+                                    (str_concat "/"
+                                        (str_concat run-id
+                                            ".trajectory.receipt.txt"))))
+                            (let h0
+                                (str_concat
+                                    "form-cli-native-trajectory-version=1\nrun-id="
+                                    run-id))
+                            (let h1
+                                (str_concat h0
+                                    (str_concat "\nquestion=" question)))
+                            (let h2
+                                (str_concat h1
+                                    (str_concat "\nmodel=" model)))
+                            (let h3
+                                (str_concat h2
+                                    (str_concat "\nprompt-token-ids="
+                                        (dgr-ids-csv prompt-ids))))
+                            (let h4
+                                (str_concat h3
+                                    (str_concat "\nresult-token-ids="
+                                        result-csv)))
+                            (let h5
+                                (str_concat h4
+                                    (str_concat "\nanswer=" answer)))
+                            (let h6
+                                (str_concat h5
+                                    "\ngenerated=1\naccepted=0\nsufficiency=unadjudicated"))
+                            (let h7
+                                (str_concat h6
+                                    "\nnetwork=0\nremote=0\ntrajectory:\n"))
+                            (let receipt (str_concat h7 rows))
+                            (let wrote
+                                (write_file receipt-path receipt))
+                            (print_str (str_concat
+                                "DAT generated-count="
+                                (int_to_str (len result-ids))))
+                            (print_str (str_concat
+                                "DAT result-token-ids=" result-csv))
+                            (print_str (str_concat
+                                "DAT answer=" answer))
+                            (print_str (str_concat
+                                "DAT trajectory-run-id=" run-id))
+                            (print_str (str_concat
+                                "DAT trajectory-receipt-path="
+                                receipt-path))
+                            (print_str (str_concat
+                                "DAT trajectory-receipt-written="
+                                (if (gt wrote 0) "1" "0")))
+                            (print_str "DAT accepted=0")
+                            (print_str "DAT sufficiency=unadjudicated")
+                            (print_str "DAT network=0 remote=0")
+                            (print_str (metal_model_close))
+                            (if (and
+                                    (eq (len result-ids) 64)
+                                    (gt wrote 0))
+                                255 0)))))))
+
+(dat-run)

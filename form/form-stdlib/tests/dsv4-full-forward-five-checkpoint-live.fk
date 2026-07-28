@@ -1,0 +1,282 @@
+; Continuous DS4 framebuffer witness.
+;
+; Arm A executes one real token through every predecessor layer and emits
+; detailed receipts only at layers 0, 2, and 42. Arm B reopens the model to
+; clear session/cache state, then executes four repeated positions through
+; layers 0, 1, and 2, emitting detail at layer 2 positions 0 and 3. Position 3
+; is the first ratio-4 compressor boundary.
+;
+; The repeated-token arm controls token identity; it is not natural language.
+; One token and one timing run are observations, not a population or ranking.
+; witnessed: 2026-07-29 -> 63 (five sequential framebuffer checkpoints)
+;
+; preludes: native/metal/dsv4-native-session.fk native/metal/dsv4-jit-metal-abi.fk config/dsv4-local-resource.fk
+
+(do
+    (defn dff-status-code (status)
+        (if (nothing? status) 2 status))
+
+    (defn dff-checkpoint-node (arm layer position status elapsed)
+        (intern_node (make_nodeid 1 2 1914 1)
+            (list
+                (intern_trivial_int arm)
+                (intern_trivial_int layer)
+                (intern_trivial_int position)
+                (intern_trivial_int (dff-status-code status))
+                (intern_trivial_int elapsed))))
+
+    (defn dff-record-checkpoint
+        (arm label layer position status elapsed)
+        (do
+            (let event
+                (fb_record
+                    (dff-checkpoint-node
+                        arm layer position status elapsed)
+                    "form/form-stdlib/tests/dsv4-full-forward-five-checkpoint-live.fk"
+                    (add
+                        (mul arm 65536)
+                        (add (mul layer 256) position))))
+            (print_str "DFF checkpoint-begin")
+            (print_str (str_concat "arm=" label))
+            (print_str (str_concat "layer=" (int_to_str layer)))
+            (print_str (str_concat "position=" (int_to_str position)))
+            (print_str
+                (str_concat "status="
+                    (int_to_str (dff-status-code status))))
+            (print_str
+                (str_concat "native-call-ms=" (int_to_str elapsed)))
+            (print_str "framebuffer-recorded=1")
+            (print_str "DFF checkpoint-end")
+            status))
+
+    (defn dff-based-token? (bytes)
+        (and (eq (len bytes) 5)
+            (and (eq (nth bytes 0) 66)
+                (and (eq (nth bytes 1) 97)
+                    (and (eq (nth bytes 2) 115)
+                        (and (eq (nth bytes 3) 101)
+                            (eq (nth bytes 4) 100)))))))
+
+    (defn dff-depth-checkpoint? (layer)
+        (or (eq layer 0) (or (eq layer 2) (eq layer 42))))
+
+    (defn dff-depth-walk
+        (route src descs token position layer end)
+        (if (eq layer end) 1
+            (do
+                (let plan (dlw-layer-plan src descs layer))
+                (let checkpoint (dff-depth-checkpoint? layer))
+                (let started (now_unix_ms))
+                (let passed
+                    (if checkpoint
+                        (dlw-direct-layer-plan-jit
+                            route plan token position)
+                        (dlw-direct-layer-plan-jit-funnel
+                            route plan token position)))
+                (let elapsed (sub (now_unix_ms) started))
+                (if checkpoint
+                    (dff-record-checkpoint
+                        1 "depth" layer position passed elapsed)
+                    0)
+                (if (nothing? passed) (nothing)
+                    (if (eq passed 1)
+                        (dff-depth-walk
+                            route src descs token position
+                            (add layer 1) end)
+                        0)))))
+
+    (defn dff-boundary-checkpoint? (layer position)
+        (and (eq layer 2)
+            (or (eq position 0) (eq position 3))))
+
+    (defn dff-boundary-positions
+        (route plan ids position)
+        (if (eq (len ids) 0) 1
+            (do
+                (let layer (nth plan 0))
+                (let checkpoint
+                    (dff-boundary-checkpoint? layer position))
+                (let started (now_unix_ms))
+                (let passed
+                    (if checkpoint
+                        (dlw-direct-layer-plan-jit-prefill-detail
+                            route plan (head ids) position)
+                        (dlw-direct-layer-plan-jit-prefill
+                            route plan (head ids) position)))
+                (let elapsed (sub (now_unix_ms) started))
+                (if checkpoint
+                    (dff-record-checkpoint
+                        2 "compression-boundary"
+                        layer position passed elapsed)
+                    0)
+                (if (nothing? passed) (nothing)
+                    (if (eq passed 1)
+                        (dff-boundary-positions
+                            route plan (tail ids) (add position 1))
+                        0)))))
+
+    (defn dff-boundary-layers
+        (route src descs ids layer end)
+        (if (eq layer end) 1
+            (do
+                (let passed
+                    (dff-boundary-positions
+                        route
+                        (dlw-layer-plan src descs layer)
+                        ids
+                        0))
+                (if (nothing? passed) (nothing)
+                    (if (eq passed 1)
+                        (dff-boundary-layers
+                            route src descs ids (add layer 1) end)
+                        0)))))
+
+    (defn dff-open-ground ()
+        (do
+            (let src
+                (eqr-of-file
+                    (dlp-model-path) 0 (gm-window)))
+            (let base
+                (egg-data-base src (gm-alignment)))
+            (let descs
+                (dlp-collect
+                    src base
+                    (egg-tinfo-start src)
+                    (egg-tensor-count src)))
+            (list src descs
+                (dsv4-jit-metal-transaction-route
+                    (dsv4-local-jit-carrier-resource)))))
+
+    (defn dff-run ()
+        (do
+            (let token 32111)
+            (let depth-open (dns-open))
+            (if (not (eq depth-open 1)) 0
+                (do
+                    (let depth-ground (dff-open-ground))
+                    (let depth-src (nth depth-ground 0))
+                    (let depth-descs (nth depth-ground 1))
+                    (let depth-route (nth depth-ground 2))
+                    (let token-bytes
+                        (tkz-decode-id-bytes depth-src token))
+                    (let token-valid
+                        (dff-based-token? token-bytes))
+                    (print_str "DFF manifest-begin")
+                    (print_str
+                        (str_concat "model=" (dlp-model-path)))
+                    (print_str
+                        (str_concat "carrier="
+                            (dsv4-local-jit-carrier-resource)))
+                    (print_str
+                        (str_concat "token-id=" (int_to_str token)))
+                    (print_str
+                        (str_concat "token-bytes="
+                            (dns-byte-values token-bytes)))
+                    (print_str
+                        (str_concat "token-valid="
+                            (int_to_str token-valid)))
+                    (print_str
+                        "depth-checkpoints=0:0,2:0,42:0")
+                    (print_str
+                        "boundary-checkpoints=2:0,2:3")
+                    (print_str
+                        "network=0")
+                    (print_str
+                        "remote=0")
+                    (print_str "DFF manifest-end")
+                    (dlw-embed-token depth-descs token)
+                    (let depth-started (now_unix_ms))
+                    (let depth-status
+                        (dff-depth-walk
+                            depth-route depth-src depth-descs
+                            token 0 0 43))
+                    (let depth-elapsed
+                        (sub (now_unix_ms) depth-started))
+                    (print_str
+                        (str_concat "DFF depth-total-ms="
+                            (int_to_str depth-elapsed)))
+                    (let depth-close-receipt
+                        (metal_model_close))
+                    (print_str depth-close-receipt)
+                    (let depth-close
+                        (dns-receipt-state
+                            depth-close-receipt
+                            "PASS metal_model_close"))
+
+                    ; A new resident session is the cache-reset witness.
+                    (let boundary-open (dns-open))
+                    (if (not (eq boundary-open 1)) 0
+                        (do
+                            (let boundary-ground (dff-open-ground))
+                            (let boundary-src
+                                (nth boundary-ground 0))
+                            (let boundary-descs
+                                (nth boundary-ground 1))
+                            (let boundary-route
+                                (nth boundary-ground 2))
+                            (let ids
+                                (list token token token token))
+                            (dlw-init-prompt
+                                boundary-descs ids 0)
+                            (let boundary-started
+                                (now_unix_ms))
+                            (let boundary-status
+                                (dff-boundary-layers
+                                    boundary-route
+                                    boundary-src
+                                    boundary-descs
+                                    ids 0 3))
+                            (let boundary-elapsed
+                                (sub
+                                    (now_unix_ms)
+                                    boundary-started))
+                            (print_str
+                                (str_concat
+                                    "DFF boundary-total-ms="
+                                    (int_to_str boundary-elapsed)))
+                            (let boundary-close-receipt
+                                (metal_model_close))
+                            (print_str boundary-close-receipt)
+                            (let boundary-close
+                                (dns-receipt-state
+                                    boundary-close-receipt
+                                    "PASS metal_model_close"))
+                            (print_str "DFF outcome-begin")
+                            (print_str
+                                (str_concat "depth-status="
+                                    (int_to_str
+                                        (dff-status-code
+                                            depth-status))))
+                            (print_str
+                                (str_concat "boundary-status="
+                                    (int_to_str
+                                        (dff-status-code
+                                            boundary-status))))
+                            (print_str
+                                (str_concat "clean-reopen="
+                                    (int_to_str
+                                        (if (eq boundary-open 1)
+                                            1 0))))
+                            (print_str
+                                "claim-radius=one-token-one-run")
+                            (print_str
+                                "semantic-precursor=unadjudicated")
+                            (print_str
+                                "outcome=observed")
+                            (print_str "DFF outcome-end")
+                            (add
+                                (if (eq token-valid 1) 1 0)
+                                (add
+                                    (if (eq depth-status 1) 2 0)
+                                    (add
+                                        (if (eq depth-close 1) 4 0)
+                                        (add
+                                            (if (eq boundary-status 1)
+                                                8 0)
+                                            (add
+                                                (if (eq boundary-close 1)
+                                                    16 0)
+                                                (if (eq boundary-open 1)
+                                                    32 0))))))))))))
+
+    (dff-run))
