@@ -54,6 +54,37 @@ operation.  Form now performs the same round-to-nearest-even storage boundary.
 The internal values changed but the four token IDs did not, so BF16 carrier
 storage was a real semantic gap but is not the cause of this divergence.
 
+The next producer comparison exposed another load-bearing difference: Form
+added the four residual HC terms before adding `block_out × post`, while both
+the producer's fused and unfused kernels initialize with the block term and
+then add residual streams in ascending order.  After correcting that
+association, the live result changed to:
+
+- token IDs: `201,3916,1`
+- decoded bytes: newline, `return`, EOS
+- first-step top IDs: `201,671,9854,28986,3916,9544,66,32111`
+- first-step top scores:
+  `31.7534275,29.9342632,29.442234,29.419157,26.9408646,26.8973083,26.8531055,26.6911659`
+
+The official first token moved from `4.2286033` to `2.3111935` logits behind
+the selected newline, and the next local token became the official fourth
+token `return`.  That is a measured semantic movement, not yet a pass.
+
+The live kernels also carry proof-oracle transcendental approximations—Newton
+square root and Taylor/atanh exp/log—where the producer uses native operations.
+A Form-emitted native Metal replacement was implemented and run through the
+same full prompt.  It preserved the token sequence but moved the official first
+token farther away:
+
+- selected newline: `34.1531944`
+- official backticks token: `27.8821678`
+- gap: `6.2710266`
+- observed wall time: approximately `5m33s`, with no material speed gain
+
+That candidate was therefore rejected rather than merged.  The surprising
+result localizes neither correctness nor speed to transcendental substitution;
+the retained next enquiry is the layer-position graph and its reductions.
+
 The top-eight candidates and scores are now emitted by the Form-authored Metal
 argmax kernel on every live step.  They are diagnostic observations, not host
 reconstructed guesses.
