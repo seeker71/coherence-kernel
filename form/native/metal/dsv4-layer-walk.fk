@@ -730,6 +730,45 @@
             0))
     (defn dlw-prompt-state (position)
         (str_concat "prompt-position-" (int_to_str position)))
+
+    ; Preserve layer-major cache order while moving each prompt-state load,
+    ; layer transaction, and prompt-state save through one emitted controller.
+    ; The state operations remain exact; two outer membrane crossings disappear.
+    (defn dlw-prefill-layer-transaction-parts
+        (plan token position)
+        (append
+            (list
+                "state_load\t" (dlw-prompt-state position) "\n")
+            (append
+                (dlw-layer-transaction-parts plan token position)
+                (list
+                    "state_save\t" (dlw-prompt-state position) "\n"))))
+
+    (defn dlw-direct-layer-plan-jit-prefill
+        (route plan token position)
+        (if (lt (len route) 2) (nothing)
+            (do
+                (let status
+                    (dsv4-jit-metal-transaction-routed-parts-funnel
+                        route
+                        (dlw-prefill-layer-transaction-parts
+                            plan token position)))
+                (if (eq status 1) 1
+                    (if (eq status 2) (nothing) 0)))))
+
+    (defn dlw-direct-layer-plan-jit-prefill-detail
+        (route plan token position)
+        (if (lt (len route) 2) (nothing)
+            (do
+                (let status
+                    (dsv4-jit-metal-transaction-routed-parts-detail
+                        route
+                        (dlw-prefill-layer-transaction-parts
+                            plan token position)
+                        1))
+                (if (eq status 1) 1
+                    (if (eq status 2) (nothing) 0)))))
+
     (defn dlw-position-heartbeat (layer position)
         (if (eq (mod position 2) 1)
             (print_str
@@ -789,7 +828,6 @@
     (defn dlw-layer-plan-positions-jit (route plan ids position)
         (if (eq (len ids) 0) 1
             (do
-                (dlw-say (metal_model_state_load (dlw-prompt-state position)))
                 ; Keep the ordinary successful path compact, but let the
                 ; framebuffer see two complete causal cross-sections of every
                 ; real prompt: its final position entering layer 0 and leaving
@@ -801,15 +839,13 @@
                     (or (eq (nth plan 0) 0) (eq (nth plan 0) 42)))
                 (let passed
                     (if (and final-position boundary-layer)
-                        (dlw-direct-layer-plan-jit
+                        (dlw-direct-layer-plan-jit-prefill-detail
                             route plan (head ids) position)
-                        (dlw-direct-layer-plan-jit-funnel
+                        (dlw-direct-layer-plan-jit-prefill
                             route plan (head ids) position)))
                 (if (nothing? passed) (nothing)
                     (if (eq passed 1)
                         (do
-                            (dlw-say (metal_model_state_save
-                                (dlw-prompt-state position)))
                             (dlw-position-heartbeat (nth plan 0) position)
                             (dlw-layer-plan-positions-jit
                                 route plan (tail ids) (add position 1)))
