@@ -448,6 +448,61 @@ kernel void isa_q6k_v4_f32 (device const uchar* qb [[buffer(0)]], device const f
     }
 }
 VARIANTS
+
+# ── STONE 17's variant: OUR Q4_K arithmetic, ggml's Q4_K thread map ───────────────────────────────
+# Exactly the move Stone 10 made for Q6_K, at the type that carries 75.4% of decode. Everything the
+# body computes is kept character for character — q4k_sc / q4k_mn with their divisions, q4k_mod for
+# the nibbles, byte loads rather than ggml's uint16 loads — and ONLY the map changes:
+#
+#            superblock stride   slots   sub-blocks per lane per superblock   activations cached
+#   ours              2 (lane%2)   16      2  (2*cc, 2*cc+1)                          16
+#   ggml              4 (lane/8)    8      4  (2*iq, 2*iq+1, 2*iq+4, 2*iq+5)          32
+#
+# So ggml walks HALF as many superblock iterations and does twice the work in each. If the Q6_K
+# lesson transfers, this variant lands near ggml while keeping every division the body performs —
+# and if it does not, the transfer was the thing to doubt (row 835, boundborrow), not the map.
+cat >> "$work/tail.metal" <<'Q4V3'
+kernel void isa_q4k_v3_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) {
+    uint r = gid / 32u; if (r >= rows) return;
+    uint nb = cols / 256u; uint rowbase = r * nb * 144u;
+    int ix = int(lane) / 8;
+    int it = q4k_mod(int(lane), 8);
+    int iq = it / 4;
+    int ir = q4k_mod(it, 4);
+    int qoff = 32 * iq + 8 * ir;
+    int yoff = 64 * iq + 8 * ir;
+    int j0 = 2 * iq;
+    float sumf = 0.0f;
+    for (uint i = uint(ix); i < nb; i += 4u) {
+        uint b = rowbase + i * 144u;
+        device const uchar* qs = qb + b + 16u + uint(qoff);
+        device const float* yv = x + i * 256u + uint(yoff);
+        float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u]));
+        float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u]));
+        int sc0 = q4k_sc(qb, b, j0);     int mn0 = q4k_mn(qb, b, j0);
+        int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1);
+        int sc2 = q4k_sc(qb, b, j0 + 4); int mn2 = q4k_mn(qb, b, j0 + 4);
+        int sc3 = q4k_sc(qb, b, j0 + 5); int mn3 = q4k_mn(qb, b, j0 + 5);
+        float4 sums = float4(0.0f); float4 xsum = float4(0.0f);
+        for (int m = 0; m < 8; ++m) {
+            int a1 = int(qs[m]); int a2 = int(qs[m + 64]);
+            float x0 = yv[m]; float x1 = yv[m + 32]; float x2 = yv[m + 128]; float x3 = yv[m + 160];
+            sums[0] += x0 * float(q4k_mod(a1, 16));
+            sums[1] += x1 * float(a1 / 16);
+            sums[2] += x2 * float(q4k_mod(a2, 16));
+            sums[3] += x3 * float(a2 / 16);
+            xsum[0] += x0; xsum[1] += x1; xsum[2] += x2; xsum[3] += x3;
+        }
+        sumf += (d * float(sc0)) * sums[0] - (dmin * float(mn0)) * xsum[0]
+              + (d * float(sc1)) * sums[1] - (dmin * float(mn1)) * xsum[1]
+              + (d * float(sc2)) * sums[2] - (dmin * float(mn2)) * xsum[2]
+              + (d * float(sc3)) * sums[3] - (dmin * float(mn3)) * xsum[3];
+    }
+    float s = metal::simd_sum(sumf);
+    if (lane == 0) y[r] = s;
+}
+Q4V3
+
 cat "$work/ours.metal" "$work/tail.metal" > "$work/variants.metal"
 
 # ── the AIR both sides are counted in. There is no native slice to count: see the header. ──
@@ -570,7 +625,7 @@ var yLane: [Float]? = nil
 let sweep = qtype == 6
     ? ["form_q6k_matvec_lane_f32", "isa_q6k_v1_f32", "isa_q6k_v2_f32", "isa_q6k_v3_f32",
        "isa_q6k_v4_f32", "form_q6k_matvec_slot_f32"]
-    : ["form_q4k_matvec_lane_f32", "form_q4k_matvec_slot_f32"]
+    : ["form_q4k_matvec_lane_f32", "isa_q4k_v3_f32", "form_q4k_matvec_slot_f32"]
 for nm in sweep {
     pOurs = try dev.makeComputePipelineState(function: libOurs.makeFunction(name: nm)!)
     oursNR0 = (nm == "isa_q6k_v4_f32") ? 2 : 1
