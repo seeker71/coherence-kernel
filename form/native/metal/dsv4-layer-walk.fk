@@ -724,6 +724,32 @@
             0))
     (defn dlw-prompt-state (position)
         (str_concat "prompt-position-" (int_to_str position)))
+
+    ; Preserve layer-major cache order while moving each prompt-state load,
+    ; layer transaction, and prompt-state save through one emitted controller.
+    ; The state operations remain exact; two outer membrane crossings disappear.
+    (defn dlw-prefill-layer-transaction-parts
+        (plan token position)
+        (append
+            (list
+                "state_load\t" (dlw-prompt-state position) "\n")
+            (append
+                (dlw-layer-transaction-parts plan token position)
+                (list
+                    "state_save\t" (dlw-prompt-state position) "\n"))))
+
+    (defn dlw-direct-layer-plan-jit-prefill
+        (route plan token position)
+        (if (lt (len route) 2) (nothing)
+            (do
+                (let status
+                    (dsv4-jit-metal-transaction-routed-parts-funnel
+                        route
+                        (dlw-prefill-layer-transaction-parts
+                            plan token position)))
+                (if (eq status 1) 1
+                    (if (eq status 2) (nothing) 0)))))
+
     (defn dlw-position-heartbeat (layer position)
         (if (eq (mod position 2) 1)
             (print_str
@@ -783,15 +809,12 @@
     (defn dlw-layer-plan-positions-jit (route plan ids position)
         (if (eq (len ids) 0) 1
             (do
-                (dlw-say (metal_model_state_load (dlw-prompt-state position)))
                 (let passed
-                    (dlw-direct-layer-plan-jit-funnel
+                    (dlw-direct-layer-plan-jit-prefill
                         route plan (head ids) position))
                 (if (nothing? passed) (nothing)
                     (if (eq passed 1)
                         (do
-                            (dlw-say (metal_model_state_save
-                                (dlw-prompt-state position)))
                             (dlw-position-heartbeat (nth plan 0) position)
                             (dlw-layer-plan-positions-jit
                                 route plan (tail ids) (add position 1)))
