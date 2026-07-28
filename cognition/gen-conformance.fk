@@ -43,16 +43,24 @@
   (defn gcf-harness (r) (nth r 3))
   (defn gcf-cmd     (r) (nth r 4))
 
+  ;; The facts-shape column is gone. It used to be a per-language spelling of
+  ;; a list of rows — `[%1]` here, `[][]int{%1}` there — with a
+  ;; `(str_eq lang "go")` branch choosing braces or brackets. That branch was
+  ;; the fossil of a missing IR kind: `list` was type-blind, so a list OF LISTS
+  ;; was unspellable and the harness spelled it by hand. With `listof` the
+  ;; generator renders the graph AND the case table itself, and the runner row
+  ;; carries only what is genuinely per-language: how a file becomes a running
+  ;; program that prints its answers.
   (defn gcf-runners ()
     (list
-      (gcf-run "python" "py" "[%1]"
-        "%1\nF=%2\nprint(%3)\n"
+      (gcf-run "python" "py" ""
+        "%1\nF=%2\nC=%3\nprint(' '.join(str(x) for x in run_all(F,C)))\n"
         "python3 %f")
-      (gcf-run "javascript" "js" "[%1]"
-        "%1\nconst F=%2;\nconsole.log(%3);\n"
+      (gcf-run "javascript" "js" ""
+        "%1\nconst F=%2;\nconst C=%3;\nconsole.log(run_all(F,C).join(' '));\n"
         "node %f")
-      (gcf-run "go" "go" "[][]int{%1}"
-        "package main\nimport \"fmt\"\n%1\nfunc main(){ F := %2\nfmt.Println(%3) }\n"
+      (gcf-run "go" "go" ""
+        "package main\nimport (\"fmt\"\n\"strings\"\n\"strconv\")\n%1\nfunc main(){ F := %2\n  C := %3\n  out := run_all(F, C)\n  ss := make([]string, len(out))\n  for i, v := range out { ss[i] = strconv.Itoa(v) }\n  fmt.Println(strings.Join(ss, \" \")) }\n"
         "cd %d && go run %f")))
 
   (defn gcf-find-loop (rs l)
@@ -61,83 +69,56 @@
   (defn gcf-runner (l) (gcf-find-loop (gcf-runners) l))
   (defn gcf-runnable? (l) (if (eq (len (gcf-runner l)) 0) 0 1))
 
-  ;; ── the facts, in the target's list syntax ──────────────────────
-  (defn gcf-row (f)
-    (gcf-cat (list "{" (int_to_str (stn-f-subject f)) "," (int_to_str (stn-f-relation f))
-                   "," (int_to_str (stn-f-object f)) ",0,0}")))
-  (defn gcf-row-brackets (f)
-    (gcf-cat (list "[" (int_to_str (stn-f-subject f)) "," (int_to_str (stn-f-relation f))
-                   "," (int_to_str (stn-f-object f)) ",0,0]")))
-  (defn gcf-rows-loop (fs brace)
-    (if (eq (len fs) 0) ""
-      (gcf-cat (list (if (eq brace 1) (gcf-row (head fs)) (gcf-row-brackets (head fs)))
-                     "," (gcf-rows-loop (tail fs) brace)))))
-  (defn gcf-facts-lit (r)
-    (gnc-sub1 (gcf-facts r)
-      "%1" (gcf-rows-loop (stn-facts) (if (str_eq (gcf-lang r) "go") 1 0))))
+  ;; ── the graph and the sweep, both rendered BY THE GENERATOR ─────
+  ;; Twenty lines of hand-spelled list literals with a language branch used to
+  ;; live here. They are gone: gqy-emit-facts and gqy-emit-cases render both
+  ;; through the same fold that renders the code, so a language that can spell
+  ;; a typed collection gets its data for free.
+  (defn gcf-facts-lit (r) (gqy-emit-facts (gcf-lang r)))
+  (defn gcf-cases-lit (r) (gqy-emit-cases (gcf-lang r)))
 
-  ;; ── the four questions, in the target's call syntax ─────────────
-  ;; The same four the graph is asked in Form, so the comparison is real.
-  (defn gcf-call (name rel key)
-    (gcf-cat (list name "(F," (int_to_str rel) "," (int_to_str key) ")")))
-  (defn gcf-calls (sep)
-    (gcf-cat (list
-      (gcf-call "count_by_subject" (stn-has-member) (stn-threefold-soul)) sep
-      (gcf-call "count_by_object"  (stn-in-group)   (stn-g-other-being)) sep
-      (gcf-call "find_object"      (stn-in-state)   (stn-willing)) sep
-      (gcf-call "find_subject"     (stn-mediates)   (stn-polarity)))))
-  ;; What the GRAPH answers to the same four — computed in PLAIN FORM, with no
-  ;; walk_recipe. The first version used gqy-run, and the cell became homeless:
-  ;; walk_recipe is Go/Rust/TS-only, host-exec is fkwu-only, and a cell needing
-  ;; one op from each side of a split surface can run nowhere. That is exactly
-  ;; corpus row 913 (impedance-mismatch), written yesterday, walked into today.
-  ;; Reading the graph directly needs neither op — but the sentence I first
-  ;; wrote here, that the toolchain is thereby "compared against the DATA
-  ;; rather than another execution engine's opinion of it", is FALSE, and the
-  ;; review panel located it. gcf-count-loop and gcf-find-first are a THIRD
-  ;; hand-written implementation of the same four query semantics, after the
-  ;; graph's hand accessors and the emitters. First-match order, column choice,
-  ;; what "find" means — all of it lives here, authored by the same hand. If the
-  ;; query semantics drifted, all three channels would drift together and print
-  ;; green. Four independent kernels guard against independent error; nothing
-  ;; here guards against ONE MIND'S error reproduced three times. That is corpus
-  ;; row 921, common-mode. What this reference is honestly good for: it needs no
-  ;; arm-specific op, so the cell can run, and it catches emitter bugs (the Go
-  ;; statement separator) — not semantic drift in the shared understanding.
-  (defn gcf-count-loop (fs rel key col)
-    (if (eq (len fs) 0) 0
-      (add (if (eq (stn-f-relation (head fs)) rel)
-             (if (eq (if (eq col 0) (stn-f-subject (head fs)) (stn-f-object (head fs))) key) 1 0) 0)
-           (gcf-count-loop (tail fs) rel key col))))
-  (defn gcf-find-first (fs rel key mcol rcol)
-    (if (eq (len fs) 0) 0
-      (if (eq (stn-f-relation (head fs)) rel)
-        (if (eq (if (eq mcol 0) (stn-f-subject (head fs)) (stn-f-object (head fs))) key)
-            (if (eq rcol 0) (stn-f-subject (head fs)) (stn-f-object (head fs)))
-            (gcf-find-first (tail fs) rel key mcol rcol))
-        (gcf-find-first (tail fs) rel key mcol rcol))))
-  (defn gcf-expected ()
-    (gcf-cat (list
-      (int_to_str (gcf-count-loop (stn-facts) (stn-has-member) (stn-threefold-soul) 0)) " "
-      (int_to_str (gcf-count-loop (stn-facts) (stn-in-group) (stn-g-other-being) 2)) " "
-      (int_to_str (gcf-find-first (stn-facts) (stn-in-state) (stn-willing) 0 2)) " "
-      (int_to_str (gcf-find-first (stn-facts) (stn-mediates) (stn-polarity) 2 0)))))
+  ;; ── WHAT IS ASKED: every question the graph makes askable ───────
+  ;; Four hardcoded calls became 106 cases enumerated from the facts — every
+  ;; (query shape, relation, key) triple some fact makes answerable, deduped.
+  ;; Every one of them has a row that could answer it, so this is not a wall of
+  ;; agreeing zeros; 14 of them have two or more matching rows, which are the
+  ;; only cases that test first-match order at all.
+  ;;
+  ;; What the GRAPH answers is still gqy-answer — one hand reading the same
+  ;; rows, corpus row 921, common-mode, and this cell no longer pretends
+  ;; otherwise. Two things now stand against that, neither of them another
+  ;; reading of the rows:
+  ;;   1. THREE INDEPENDENT EXECUTORS. python3, node and go run share no code
+  ;;      with each other or with Form. They cannot agree by inheriting an
+  ;;      assumption; they can only agree by computing.
+  ;;   2. A METAMORPHIC INVARIANT (gqy-invariant-sums?). Summing a count shape
+  ;;      over every distinct key for a relation must equal the number of facts
+  ;;      carrying it — a property of counting, true of any correct
+  ;;      implementation and authored by nobody. A swapped column leaves every
+  ;;      individual answer plausible and breaks the sum.
+  (defn gcf-expected () (gqy-answers))
 
   ;; ── build, run, compare ─────────────────────────────────────────
   ;; A language takes whichever form it can speak; Go has no expression form,
   ;; Python no statement form, and neither absence is a failure.
-  (defn gcf-module (l)
-    (do (let e (gqy-module l))
-      (if (gt (str_len (gqy-emit l (gqy-q "find_subject"))) 0) e (gqy-module-stmt l))))
+  ;; the page: prelude, the four query functions, and the driver that answers
+  ;; a whole case table. Every language that carries the statement rows speaks
+  ;; it; Form does not carry `slet` and does not need to, and says so by the
+  ;; absence of a row rather than by a special case here.
+  (defn gcf-module (l) (gqy-module-page l))
 
   (defn gcf-dir () (do (fs_mkdir (str_concat (temp_dir) "/gen-conformance"))
                        (str_concat (temp_dir) "/gen-conformance")))
   (defn gcf-path (r) (gcf-cat (list (gcf-dir) "/gen_q." (gcf-ext r))))
 
+  ;; %3 was `(if (str_eq (gcf-lang r) "go") "," ",")` — a conditional whose
+  ;; branches were identical, the fossil of a distinction that stopped
+  ;; mattering and was never removed. The panel found it by reading the harness
+  ;; as closely as the renderer. It is now the case table.
   (defn gcf-source (r)
     (gnc-sub1 (gnc-sub1 (gnc-sub1 (gcf-harness r) "%1" (gcf-module (gcf-lang r)))
                         "%2" (gcf-facts-lit r))
-              "%3" (gcf-calls (if (str_eq (gcf-lang r) "go") "," ","))))
+              "%3" (gcf-cases-lit r)))
 
   (defn gcf-exec (r)
     (do (let p (gcf-path r))
@@ -183,7 +164,33 @@
     (add (if (eq (gcf-judge "javascript") 1) 16 0)
     (add (if (eq (gcf-judge "go") 1) 32 0)
     (add (if (eq (gcf-runnable? "form") 0) 64 0)
-    (add (if (gt (str_len (gcf-expected)) 12) 128 0)
-         0)))))))))
+    ;; THE SWEEP IS LARGE, and its size is read from the graph rather than
+    ;; pinned to a number someone typed
+    (add (if (gt (gqy-cases-n) 100) 128 0)
+    ;; and every case has an answering row — no wall of agreeing zeros
+    (add (if (eq (gqy-nonzero-n) (gqy-cases-n)) 256 0)
+    ;; and enough of them are multi-match to test first-match order at all
+    (add (if (gt (gqy-multi-n) 10) 512 0)
+    ;; THE METAMORPHIC INVARIANT: a check no implementation authored
+    (add (if (eq (gqy-invariant-sums?) 1) 1024 0)
+    ;; A PAGE OF CODE — measured on the emitted text, in three languages
+    (add (if (gt (gqy-page-lines "python") 50) 2048 0)
+    (add (if (gt (gqy-page-lines "javascript") 50) 4096 0)
+    (add (if (gt (gqy-page-lines "go") 50) 8192 0)
+    ;; Form still refuses the statement page — it carries no `slet` row, and
+    ;; the refusal is the row's absence rather than a branch in this cell
+    (add (if (lt (gqy-page-lines "form") 20) 16384 0)
+    ;; THE DELTA WITNESS. No single emitted program can prove it was generated
+    ;; rather than typed — any one output could have been written by hand. What
+    ;; a template cannot do is track a PREDICTED CHANGE in its input. Add one
+    ;; fact to the graph and exactly one count answer rises by exactly one...
+    (add (if (eq (gqy-delta-moved) 1) 32768 0)
+    ;; ...while 104 of the other 105 stay identical. Not 105: the injected row
+    ;; has subject == object, so the object-column count for the same key moves
+    ;; too. That second mover is the delta landing exactly where the semantics
+    ;; say it should, and pinning 104 rather than rounding to "the rest" is the
+    ;; difference between a witness and a slogan.
+    (add (if (eq (gqy-delta-same) 104) 65536 0)
+         0))))))))))))))))))
 
   0)
