@@ -997,7 +997,17 @@ def run_stack(g, token, pos, n_layers, outdir):
                 sys.stdout.flush()
             if gated and outdir:
                 e0 = F["per_expert"][0]
-                named = [("after_attn_hc", A["after_attn_hc"]), ("ffn_cur", F["ffn_cur"]),
+                # THE ATTENTION HALF'S INSIDES. after_attn_hc was the only attention gate, so 13 MLA
+                # dispatches sat between two compared points with nothing compared in between. These
+                # four split it: the roped query, the quantized latent that goes INTO the arena, the
+                # attention output BEFORE the inverse rotation, and the block's output.
+                # THE WHOLE KV HISTORY this layer attends over, all (pos+1) rows flattened. Without it a
+                # harness can inject this layer's INPUT and still be attending over its own accumulated
+                # rows — history enters a layer by two doors, and replacing one is not depth-independence.
+                khist = [v for row in (kv_hist[il] if kv_hist is not None else [A["kv"]]) for v in row]
+                named = [("kv_hist", khist), ("q_roped", A["q"]), ("kv_q", A["kv"]),
+                         ("heads_attn", A["heads_attn"]), ("attn_out", A["attn_out"]),
+                         ("after_attn_hc", A["after_attn_hc"]), ("ffn_cur", F["ffn_cur"]),
                          ("ffn_normed", F["ffn_norm"]), ("router_logits", F["router_logits"]),
                          ("expert_w", F["expert_w"]), ("selected", [float(v) for v in F["selected"]]),
                          ("exp0_gate", e0[1]), ("exp0_up", e0[2]), ("exp0_mid", e0[3]),
