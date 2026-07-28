@@ -1,0 +1,63 @@
+; q3k-equireach.fk — the Q3_K decode reached in place over a byte source.
+;
+; q3k-dequant.fk is the recipe and is proven exactly against ggml
+; (q3k-dequant-band 255, no epsilon). It indexes a byte LIST with `nth`, which
+; is right for a fixture and wrong for a 17 GB file: carving 880 bytes out of a
+; window to read one embedding row means building a list per row.
+;
+; This is the SAME arithmetic reached differently, exactly as `ewl-*` mirrors
+; `wl-*` in equireach-gguf.fk. Every index expression below has a named
+; counterpart in q3k-dequant.fk and nothing here re-derives the format:
+;
+;   eq3k-scale6   q3k-scale6      the per-byte 6-bit scale unpack
+;   eq3k-wint     q3k-wint        the 2-bit quant minus 4-when-the-hmask-is-clear
+;   eq3k-at       q3k-at          d * (scale - 32) * w
+;
+; `b` is the byte offset of the 110-byte superblock inside the source. Offsets
+; are absolute in the window the source was opened over — open it where the
+; tensor lives and index from there.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/f16-decode.fk form-stdlib/q3k-dequant.fk
+
+(do
+    (defn eq3k-stride () 110)
+    (defn eq3k-per-block () 256)
+
+    ; the same field offsets q3k-dequant.fk names
+    (defn eq3k-hm (src b i) (eqr-at src (add b (q3k-hi i))))
+    (defn eq3k-qs (src b i) (eqr-at src (add b (add 32 (q3k-qi i)))))
+    (defn eq3k-sb (src b k) (eqr-at src (add b (add 96 k))))
+    (defn eq3k-d  (src b) (fd-f16 (eqr-u16 src (add b 108))))
+
+    (defn eq3k-scale6 (src b is)
+        (do
+            (let g (div is 4))
+            (let j (q3k-mod is 4))
+            (let h2 (eq3k-sb src b (add 8 j)))
+            (if (eq g 0) (add (q3k-mod (eq3k-sb src b j) 16)          (mul 16 (q3k-mod h2 4)))
+            (if (eq g 1) (add (q3k-mod (eq3k-sb src b (add 4 j)) 16)  (mul 16 (q3k-mod (div h2 4) 4)))
+            (if (eq g 2) (add (div (eq3k-sb src b j) 16)              (mul 16 (q3k-mod (div h2 16) 4)))
+                         (add (div (eq3k-sb src b (add 4 j)) 16)      (mul 16 (q3k-mod (div h2 64) 4))))))))
+    (defn eq3k-scale (src b is) (sub (eq3k-scale6 src b is) 32))
+
+    (defn eq3k-q2 (src b i)
+        (q3k-mod (div (eq3k-qs src b i) (q3k-pow4 (q3k-j i))) 4))
+    (defn eq3k-hset (src b i)
+        (q3k-mod (div (eq3k-hm src b i) (q3k-mbit i)) 2))
+    (defn eq3k-wint (src b i)
+        (sub (eq3k-q2 src b i) (if (eq (eq3k-hset src b i) 1) 0 4)))
+
+    (defn eq3k-at (src b i)
+        (mul (mul (eq3k-d src b) (mul 1.0 (eq3k-scale src b (q3k-is i))))
+             (mul 1.0 (eq3k-wint src b i))))
+
+    ; ── a whole row of a [ne0 x ne1] Q3_K tensor ─────────────────────────
+    ; Row r of a tensor whose rows are ne0 long begins ne0/256*110 bytes in.
+    ; The band checks that stride against the file rather than trusting it.
+    (defn eq3k-row-bytes (ne0) (mul (div ne0 (eq3k-per-block)) (eq3k-stride)))
+    (defn eq3k-row-base (base ne0 r) (add base (mul r (eq3k-row-bytes ne0))))
+    ; element k of row r
+    (defn eq3k-row-at (src base ne0 r k)
+        (eq3k-at src (add (eq3k-row-base base ne0 r) (mul (div k (eq3k-per-block)) (eq3k-stride)))
+                     (q3k-mod k (eq3k-per-block))))
+    0)
