@@ -79,13 +79,40 @@
   ;; ═══ L2 — a language is a TABLE, not a function ════════════════
   ;; %1 %2 %3 are positional slots, %op the operator, %xs a joined list.
   (defn gnc-row (kind shape) (list kind shape))
-  (defn gnc-lang (name rows sep ops fns pre) (list name rows sep ops fns pre))
+  (defn gnc-lang (name rows sep ops fns pre nota) (list name rows sep ops fns pre nota))
   (defn gnc-lang-name (l) (nth l 0))
   (defn gnc-lang-rows (l) (nth l 1))
   (defn gnc-lang-sep  (l) (nth l 2))
   (defn gnc-lang-ops  (l) (nth l 3))
   (defn gnc-lang-fns  (l) (nth l 4))
   (defn gnc-lang-pre  (l) (nth l 5))
+  (defn gnc-lang-nota (l) (nth l 6))
+  ;; PRECEDENCE, which is a COMPRESSION before it is a correctness fix.
+  ;; Every infix shape used to carry its own parentheses — "(%1 %op %2)" — so
+  ;; the paren rule was duplicated into every row of every language and could
+  ;; not be got right in any of them. One binding power per operator plus one
+  ;; wrap rule replaces all of it: the shapes get shorter, the output loses its
+  ;; noise, and a language that is PREFIX needs no rule at all because its
+  ;; brackets are structural. Fewer authored characters, more correctness.
+  (defn gnc-notation (lang)
+    (do (let l (gnc-lang-of lang)) (if (eq (len l) 0) "" (gnc-lang-nota l))))
+  (defn gnc-prefix? (lang) (if (str_eq (gnc-notation lang) "prefix") 1 0))
+  (defn gnc-prec-loop (os o)
+    (if (eq (len os) 0) 0
+      (if (str_eq (nth (head os) 0) o) (nth (head os) 2) (gnc-prec-loop (tail os) o))))
+  (defn gnc-prec (lang o)
+    (do (let l (gnc-lang-of lang)) (if (eq (len l) 0) 0 (gnc-prec-loop (gnc-lang-ops l) o))))
+  ;; the binding power of a rendered child, 99 for anything atomic
+  (defn gnc-node-prec (lang n)
+    (if (eq (gnc-binlike? (gir-kind n)) 1) (gnc-prec lang (gir-nth n 0)) 99))
+  (defn gnc-paren (t) (str_concat "(" (str_concat t ")")))
+  ;; wrap only when the child binds LOOSER than its parent, and never in a
+  ;; prefix language
+  (defn gnc-child (lang parent-prec n)
+    (do (let t (gnc-render lang n))
+      (if (eq (str_len t) 0) ""
+        (if (eq (gnc-prefix? lang) 1) t
+          (if (lt (gnc-node-prec lang n) parent-prec) (gnc-paren t) t)))))
   ;; RUNTIME PRELUDE. The builtin table let the emitter name `first` and `rest`
   ;; in each language — and then emit calls to functions that do not exist.
   ;; Form has head/tail natively; Python and JavaScript do not, so the generator
@@ -134,39 +161,39 @@
           (gnc-row "index" "(nth %1 %2)")
           (gnc-row "list"  "(list %xs)")
           (gnc-row "fn"    "(defn %1 (%xs) %3)"))
-        " " (list (list "eq" "eq") (list "add" "add") (list "lt" "lt"))
+        " " (list (list "eq" "eq" 3) (list "add" "add" 5) (list "lt" "lt" 3) (list "and" "and" 2))
         (list (list "len" "len") (list "first" "head") (list "rest" "tail"))
-        "")
+        "" "prefix")
       (gnc-lang "python"
         (list
           (gnc-row "lit"   "%1")
           (gnc-row "var"   "%1")
-          (gnc-row "bin"   "(%1 %op %2)")
-          (gnc-row "cmp"   "(%1 %op %2)")
+          (gnc-row "bin"   "%1 %op %2")
+          (gnc-row "cmp"   "%1 %op %2")
           (gnc-row "if"    "(%2 if %1 else %3)")
           (gnc-row "call"  "%1(%xs)")
           (gnc-row "bcall" "%1(%xs)")
           (gnc-row "index" "%1[%2]")
           (gnc-row "list"  "[%xs]")
           (gnc-row "fn"    "def %1(%xs): return %3"))
-        ", " (list (list "eq" "==") (list "add" "+") (list "lt" "<"))
+        ", " (list (list "eq" "==" 3) (list "add" "+" 5) (list "lt" "<" 3) (list "and" "and" 2))
         (list (list "len" "len") (list "first" "pyfirst") (list "rest" "pyrest"))
-        "def pyfirst(l): return l[0]\ndef pyrest(l): return l[1:]")
+        "def pyfirst(l): return l[0]\ndef pyrest(l): return l[1:]" "infix")
       (gnc-lang "javascript"
         (list
           (gnc-row "lit"   "%1")
           (gnc-row "var"   "%1")
-          (gnc-row "bin"   "(%1 %op %2)")
-          (gnc-row "cmp"   "(%1 %op %2)")
+          (gnc-row "bin"   "%1 %op %2")
+          (gnc-row "cmp"   "%1 %op %2")
           (gnc-row "if"    "(%1 ? %2 : %3)")
           (gnc-row "call"  "%1(%xs)")
           (gnc-row "bcall" "%1(%xs)")
           (gnc-row "index" "%1[%2]")
           (gnc-row "list"  "[%xs]")
           (gnc-row "fn"    "function %1(%xs) { return %3; }"))
-        ", " (list (list "eq" "===") (list "add" "+") (list "lt" "<"))
+        ", " (list (list "eq" "===" 3) (list "add" "+" 5) (list "lt" "<" 3) (list "and" "&&" 2))
         (list (list "len" "jslen") (list "first" "jsfirst") (list "rest" "jsrest"))
-        "function jslen(l){return l.length;}\nfunction jsfirst(l){return l[0];}\nfunction jsrest(l){return l.slice(1);}")))
+        "function jslen(l){return l.length;}\nfunction jsfirst(l){return l[0];}\nfunction jsrest(l){return l.slice(1);}" "infix")))
 
   ;; REFUSAL MARKER: the empty string, not `nothing`. This cell has to run on
   ;; the arms that carry walk_recipe (Go/Rust/TS) and `nothing?` is fkwu-only,
@@ -247,8 +274,8 @@
         ;; green in gnc-total? and mis-rendered silently.
         (if (eq (gnc-binlike? k) 0) ""
         (gnc-sub1 (gnc-sub1 (gnc-sub1 shape "%op" (gnc-op lang (gir-nth n 0)))
-                            "%1" (gnc-render lang (gir-nth n 1)))
-                  "%2" (gnc-render lang (gir-nth n 2)))))))))))))))
+                            "%1" (gnc-child lang (gnc-prec lang (gir-nth n 0)) (gir-nth n 1)))
+                  "%2" (gnc-child lang (gnc-prec lang (gir-nth n 0)) (gir-nth n 2)))))))))))))))
 
   ;; ═══ L4 — the graph's query, expressed ONCE in IR ══════════════
   ;; one term per has-member fact: (if (eq <subject> C) 1 0)
@@ -288,6 +315,57 @@
   ;; every graph id carries this coordinate prefix; if it shows up in the
   ;; emitted function, the data leaked back into the program
   (defn gnc-data-leaked? (lang) (if (ge (str_find (gnc-emit-fn lang) "3045" 0) 0) 1 0))
+
+  ;; ═══ THE DENSITY MOVE — one program for every relation ═════════
+  ;; cnt(xs, c) answered ONE question shape: members of a concept. A second
+  ;; question meant a second hand-built IR, so authored work grew with
+  ;; questions asked — the opposite of scaling. This takes the RELATION as an
+  ;; argument too:
+  ;;
+  ;;   q(fs, rel, key) = if len(fs) == 0 then 0
+  ;;                     else (if fs[0][1] == rel and fs[0][0] == key then 1
+  ;;                           else 0) + q(rest(fs), rel, key)
+  ;;
+  ;; One emitted function now answers (every relation x every subject) instead
+  ;; of one pair, and it needed NO new IR kind — `and` is a bin with a binding
+  ;; power, and indexing was already there. The generalisation cost nothing in
+  ;; vocabulary, which is the shape a compressing model should have.
+  (defn gnc-query-ir ()
+    (gir-fn "q" (list "fs" "rel" "key")
+      (gir-if (gir-cmp "eq" (gir-bcall "len" (list (gir-var "fs"))) (gir-lit 0))
+              (gir-lit 0)
+              (gir-bin "add"
+                (gir-if (gir-bin "and"
+                          (gir-cmp "eq" (gir-index (gir-bcall "first" (list (gir-var "fs"))) (gir-lit 1)) (gir-var "rel"))
+                          (gir-cmp "eq" (gir-index (gir-bcall "first" (list (gir-var "fs"))) (gir-lit 0)) (gir-var "key")))
+                        (gir-lit 1) (gir-lit 0))
+                (gir-call "q" (list (gir-bcall "rest" (list (gir-var "fs"))) (gir-var "rel") (gir-var "key")))))))
+  (defn gnc-emit-query (lang) (gnc-render lang (gnc-query-ir)))
+
+  ;; ═══ THE LEVERAGE, MEASURED ════════════════════════════════════
+  ;; "it generalises" should be a number the band checks, not a claim in a
+  ;; header. Authored = IR nodes in the one query. Answerable = languages x
+  ;; relations x concepts, because the emitted function takes all three as
+  ;; arguments. The ratio is what scaling means here.
+  ;; AUTHORED is counted over the TABLES, not by walking the IR. The first
+  ;; attempt walked IR parts generically and crashed on str_eq, because a part
+  ;; is sometimes a child node, sometimes an operator name, sometimes an
+  ;; integer — the IR is heterogeneous by design and a generic walker has to
+  ;; know which is which. Counting rows needs no type test and measures the
+  ;; thing that actually grows when a language or an operator is added.
+  (defn gnc-rows-of (l)
+    (add (len (gnc-lang-rows l)) (add (len (gnc-lang-ops l)) (len (gnc-lang-fns l)))))
+  (defn gnc-authored-loop (ls)
+    (if (eq (len ls) 0) 0 (add (gnc-rows-of (head ls)) (gnc-authored-loop (tail ls)))))
+  (defn gnc-authored () (gnc-authored-loop (gnc-languages)))
+  (defn gnc-languages-n () (len (gnc-languages)))
+  (defn gnc-relations-n () 6)
+  (defn gnc-concepts-n () 10)
+  ;; the emitted function takes facts, relation and key as ARGUMENTS, so one
+  ;; program answers the whole product
+  (defn gnc-answerable ()
+    (mul (gnc-languages-n) (mul (gnc-relations-n) (gnc-concepts-n))))
+  (defn gnc-leverage () (div (gnc-answerable) (gnc-authored)))
 
   ;; ═══ totality: the table covers the IR, in every language ══════
   (defn gnc-kinds-covered-loop (lang ks)
@@ -360,6 +438,16 @@
              (if (gt (str_len (gnc-prelude "javascript")) 20)
                  (if (eq (str_len (gnc-prelude "form")) 0) 65536 0) 0) 0)
     (add (if (gt (str_len (gnc-module "python")) (str_len (gnc-emit-fn "python"))) 131072 0)
-         0)))))))))))))))))))
+    ;; PRECEDENCE: the infix output no longer wraps what it need not wrap
+    (add (if (eq (gnc-prefix? "form") 1) (if (eq (gnc-prefix? "python") 0) 262144 0) 0)
+    (add (if (gt (gnc-prec "python" "add") (gnc-prec "python" "eq")) 524288 0)
+    ;; the relation-parameterised query emits in every language
+    (add (if (gt (str_len (gnc-emit-query "python")) 60)
+             (if (gt (str_len (gnc-emit-query "form")) 60) 1048576 0) 0)
+    ;; and it still carries no data
+    (add (if (lt (str_find (gnc-emit-query "python") "3045" 0) 0) 2097152 0)
+    ;; LEVERAGE is a number, and it is greater than one
+    (add (if (gt (gnc-leverage) 1) 4194304 0)
+         0))))))))))))))))))))))))
 
   0)
