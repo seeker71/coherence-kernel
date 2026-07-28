@@ -1,0 +1,94 @@
+; kat-coder-embed.fk — the entrance: a real KAT-Coder embedding row, decoded
+; from the real file by this body.
+;
+; THE FIRST STONE THE DS4 LANE TOOK FOR A NEW MODEL was both ENDS —
+; receipts/2026-07-22-first-deepseek-token.md stood up the embed lookup and the
+; vocab projection before orchestrating anything between them, because those are
+; the two places a model touches the world and each can be checked on its own.
+; This is that stone for KAT-Coder.
+;
+; WHAT THE FILE SAYS, read by egg-* on 2026-07-28 from the sha256-verified
+; 17.39 GB `kat-coder-v2.5-dev-compact.gguf`:
+;   tensor infos end       10 990 712
+;   data base (align 32)   10 990 720
+;   token_embd.weight      type 11 = Q3_K, [2048 x 248320], dataoff 540 352 512
+;                          absolute 551 343 232
+;   output.weight          type  8 = Q8_0, dataoff 0
+;   output_norm.weight     type  0 = F32
+;
+; THE EMBEDDING TABLE IS Q3_K, which is the point. Q3_K was the gap this file's
+; own header named this morning — 94 tensors with no decoder anywhere in this
+; body — and the very first tensor a forward pass touches is one of them. The
+; decoder built today (q3k-dequant.fk, band 255 exact against ggml; q3k-msl.fk,
+; 256/256 bit-exact on the device) is what makes this row readable at all.
+;
+; A ROW IS 880 BYTES. 2048 weights at 256 per Q3_K superblock is 8 blocks of
+; 110. The band checks that against the file's own dim0 rather than trusting the
+; arithmetic here.
+;
+; NOTHING IS RUN AND NOTHING IS CLAIMED ABOUT MEANING. This decodes weights. It
+; is not a forward pass, not a token, and not evidence that any later stage is
+; right. What it establishes is that the bytes of this model are legible to this
+; body — the precondition for everything after it, and the thing that was false
+; until this morning.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/f16-decode.fk form-stdlib/q3k-dequant.fk form-stdlib/q3k-equireach.fk
+
+(do
+    (defn kce-path () "/Users/ursmuff/models/katcoder/kat-coder-v2.5-dev-compact.gguf")
+    (defn kce-align () 32)
+    (defn kce-header-window () 11200000)
+
+    ; ── the record, for the band to check the live read against ──────────
+    (defn kce-embed-type () 11)              ; Q3_K
+    (defn kce-embed-ne0 () 2048)             ; the embedding dimension
+    (defn kce-embed-ne1 () 248320)           ; the vocabulary
+    (defn kce-data-base () 10990720)
+    (defn kce-embed-abs () 551343232)
+    (defn kce-row-bytes () 880)              ; 2048/256 * 110
+
+    ; ── the live header read ─────────────────────────────────────────────
+    (defn kce-hdr () (read_file_slice (kce-path) 0 (kce-header-window)))
+    (defn kce-present? () (if (ge (str_len (kce-hdr)) (kce-header-window)) 1 0))
+    (defn kce-live-embed-off (h) (egg-find-tensor h "token_embd.weight"))
+    (defn kce-live-type (h) (egg-ti-type h (kce-live-embed-off h)))
+    (defn kce-live-ne0 (h) (egg-ti-dim h (kce-live-embed-off h) 0))
+    (defn kce-live-ne1 (h) (egg-ti-dim h (kce-live-embed-off h) 1))
+    (defn kce-live-base (h) (egg-data-base h (kce-align)))
+    (defn kce-live-abs (h) (add (kce-live-base h) (egg-ti-dataoff h (kce-live-embed-off h))))
+
+    ; ── one row, reached in place ────────────────────────────────────────
+    ; The window is opened AT the row, so the source's byte 0 is the row's first
+    ; byte and every offset below is inside 880 bytes. Opening at the row rather
+    ; than at the file's start is the whole reason this is affordable: the row
+    ; lives 551 MB in, and reaching it from byte 0 would pay for all of that.
+    (defn kce-row-src (t) (read_file_slice (kce-path) (add (kce-embed-abs) (mul t (kce-row-bytes))) (kce-row-bytes)))
+    (defn kce-w (src k)
+        (eq3k-at src (mul (div k 256) (eq3k-stride)) (q3k-mod k 256)))
+
+    ; ── the same row through the LIST recipe, for a two-reach agreement ──
+    ; q3k-dequant.fk indexes a byte list; this carves one 110-byte block out of
+    ; the row so the proven list path and the equireach path can be set against
+    ; each other on REAL bytes, not a fixture.
+    (defn kce-blk-list-go (src b i acc)
+        (if (ge i (eq3k-stride)) (reverse acc)
+            (kce-blk-list-go src b (add i 1) (cons (eqr-at src (add b i)) acc))))
+    (defn kce-blk-list (src b) (kce-blk-list-go src b 0 (empty)))
+
+    ; ── readers for the band ─────────────────────────────────────────────
+    (defn kce-nonzero-go (src i n acc)
+        (if (ge i n) acc
+            (kce-nonzero-go src (add i 1) n (if (eq (kce-w src i) 0.0) acc (add acc 1)))))
+    (defn kce-nonzero (src n) (kce-nonzero-go src 0 n 0))
+    (defn kce-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn kce-maxabs-go (src i n acc)
+        (if (ge i n) acc
+            (kce-maxabs-go src (add i 1) n (do (let v (kce-abs (kce-w src i))) (if (gt v acc) v acc)))))
+    (defn kce-maxabs (src n) (kce-maxabs-go src 0 n 0.0))
+    ; do the two reaches agree over a whole superblock of real weights?
+    (defn kce-two-reach-go (src bl b i)
+        (if (ge i 256) 1
+            (if (eq (eq3k-at src b i) (q3k-at bl i))
+                (kce-two-reach-go src bl b (add i 1)) 0)))
+    (defn kce-two-reach-agree? (src b) (kce-two-reach-go src (kce-blk-list src b) b 0))
+    0)
