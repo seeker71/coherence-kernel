@@ -78,24 +78,45 @@
             (cons (intern_trivial_int (head bytes))
                   (dns-byte-nodes (tail bytes)))))
 
-    (defn dns-token-node (sequence token bytes)
+    (defn dns-byte-values (bytes)
+        (if (eq (len bytes) 0) ""
+            (if (eq (len (tail bytes)) 0)
+                (int_to_str (head bytes))
+                (str_concat (int_to_str (head bytes))
+                    (str_concat "," (dns-byte-values (tail bytes)))))))
+
+    (defn dns-token-node (sequence token observed elapsed bytes)
         (intern_node (make_nodeid 1 2 1912 1)
             (cons (intern_trivial_int sequence)
-                (cons (intern_trivial_int token) (dns-byte-nodes bytes)))))
+                (cons (intern_trivial_int token)
+                    (cons (intern_trivial_int observed)
+                        (cons (intern_trivial_int elapsed)
+                            (dns-byte-nodes bytes)))))))
 
     (defn dns-control-node (sequence kind)
         (intern_node (make_nodeid 1 2 1913 1)
             (list (intern_trivial_int sequence) (intern_trivial_int kind))))
 
-    (defn dns-record-token (src sequence token)
+    (defn dns-record-token (src sequence token started)
         (do
             (let bytes (tkz-decode-id-bytes src token))
             (let fragment (tkz-render-acc bytes ""))
-            (let event (fb_record (dns-token-node sequence token bytes)
+            (let observed (now_unix_ms))
+            (let elapsed (sub observed started))
+            (let event (fb_record
+                (dns-token-node sequence token observed elapsed bytes)
                 "form/native/metal/dsv4-native-session.fk"
                 (add (mul sequence 65536) 1)))
             (print_str (str_concat "NATIVE stream-sequence=" (int_to_str sequence)))
             (print_str (str_concat "NATIVE stream-token-id=" (int_to_str token)))
+            (print_str (str_concat "NATIVE stream-observed-unix-ms="
+                (int_to_str observed)))
+            (print_str (str_concat "NATIVE stream-session-elapsed-ms="
+                (int_to_str elapsed)))
+            (print_str (str_concat "NATIVE stream-byte-count="
+                (int_to_str (len bytes))))
+            (print_str (str_concat "NATIVE stream-byte-values="
+                (dns-byte-values bytes)))
             (print_str (str_concat "NATIVE stream-fragment=" fragment))
             token))
 
@@ -151,7 +172,7 @@
             (if (eq state 1) 1
                 (do (dns-record-control sequence 5 fault-label) 0))))
 
-    (defn dns-output-token (src descs sequence)
+    (defn dns-output-token (src descs sequence started)
         (do
             (let receipt (dlw-output-head descs))
             (let state (dns-receipt-state receipt "PASS metal_model_argmax"))
@@ -165,10 +186,10 @@
                             (do
                                 (dns-record-control sequence 5 "fault:token-receipt")
                                 (nothing))
-                            (dns-record-token src sequence token)))))))
+                            (dns-record-token src sequence token started)))))))
 
     (defn dns-decode-loop-route
-        (route use-jit src descs eos token position remaining sequence acc)
+        (route use-jit src descs eos token position remaining sequence started acc)
         (do
             (if (lt remaining 1)
                 (do (dns-record-control sequence 2 "stop:cap") acc)
@@ -195,20 +216,22 @@
                                     (do
                                         (let next
                                             (dns-output-token
-                                                src descs (add sequence 1)))
+                                                src descs (add sequence 1) started))
                                         (dns-decode-loop-route
                                             route use-jit src descs eos next
                                             (add position 1) (sub remaining 1)
-                                            (add sequence 1) next-acc))
+                                            (add sequence 1) started next-acc))
                                     next-acc)))))))))
 
     (defn dns-decode-loop
         (src descs eos token position remaining sequence acc)
         (dns-decode-loop-route
-            (list) 0 src descs eos token position remaining sequence acc))
+            (list) 0 src descs eos token position remaining sequence
+            (now_unix_ms) acc))
 
     (defn dns-generate-ids-route (carrier use-jit ids n)
         (do
+            (let started (now_unix_ms))
             (if (lt n 1)
                 (do (dns-record-control 0 2 "stop:cap") (list))
                 (if (eq (len ids) 0)
@@ -256,11 +279,12 @@
                                         (dlw-say (metal_model_state_load
                                             (dlw-prompt-state (sub (len ids) 1))))
                                         (let eos (gmt-u32 src "tokenizer.ggml.eos_token_id"))
-                                        (let first (dns-output-token src descs 0))
+                                        (let first
+                                            (dns-output-token src descs 0 started))
                                         (let generated
                                             (dns-decode-loop-route
                                                 route use-jit src descs eos first
-                                                (len ids) n 0 (list)))
+                                                (len ids) n 0 started (list)))
                                         (print_str (str_concat "NATIVE generated-count="
                                             (int_to_str (len generated))))
                                         (print_str "NATIVE network=0 remote=0 shell=0 swift=0 temp=0")
