@@ -148,7 +148,7 @@ fi
 for k in form_q6k_dequant_f32 form_q6k_matvec_f32 form_q4k_dequant_f32 form_q4k_matvec_f32 \
          form_q6k_matvec_part_f32 form_q4k_matvec_part_f32 form_part_combine_f32 \
          form_q6k_matvec_hoist_f32 form_q4k_matvec_hoist_f32 \
-         form_q6k_matvec_lane_f32 form_q4k_matvec_lane_f32 \
+         form_q6k_matvec_lane_f32 form_q4k_matvec_lane_f32 form_q4k_matvec_slot4_f32 \
          form_rmsnorm_f32 form_rope_f32 form_gqa_decode_f32 form_swiglu_f32 form_add_f32 form_argmax_f32 \
          form_rmsnorm_tg_f32 form_rope_pair_f32 form_argmax_part_f32 form_argmax_comb_f32; do
     grep -q "kernel void $k" "$MSL" || { echo "FAIL  kernel $k was not emitted"; exit 1; }
@@ -341,7 +341,13 @@ let pQ6L = try pipe("form_q6k_matvec_lane_f32"), pQ4L = try pipe("form_q4k_matve
 // STONE 13: the SLOT kernels. Same signature and same dispatch shape as the lane kernels — one SIMD
 // group per row, rows*32 threads — so they drop into the same carrier slot. The ONLY difference is
 // the thread map, which is the whole measured win. qk-matvec-slot.fk.
-let pQ6S = try pipe("form_q6k_matvec_slot_f32"), pQ4S = try pipe("form_q4k_matvec_slot_f32")
+// STONE 17, 2026-07-28. pQ4S was form_q4k_matvec_slot_f32, the two-wide map. Raced against ggml for
+// the first time it came back 2.26x-2.60x off across four real shapes while Q6_K sat at 1.05x — Q4_K
+// is 168 of this model's 197 quantised tensors and 75.4% of its decode MACs, and had never been
+// measured. The four-wide map (qk-matvec-slot.fk, band 511) reaches 1.57x-1.67x with the body's
+// arithmetic unchanged. The old kernel is still emitted and still band-proven; only this line moves,
+// and gate 11 below is what decides whether the move was allowed — it demands the SAME token ids.
+let pQ6S = try pipe("form_q6k_matvec_slot_f32"), pQ4S = try pipe("form_q4k_matvec_slot4_f32")
 // STONE 16: the four FAST TWINS of the ops that were dispatched one thread at a time. Each is bit for
 // bit its attestant (llama-decode-msl.fk states why for each), and each attestant stays right here
 // and stays on the attestant's path — the twins are what the lane and slot paths run, and gate 11

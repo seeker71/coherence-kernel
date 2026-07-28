@@ -174,10 +174,49 @@
         (str_concat fname
                     " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 256u; uint rowbase = r * nb * 144u; int tid = int(lane) / 2; int ix = q4k_mod(int(lane), 2); int cc = tid / 4; int ll = q4k_mod(tid, 4); int l0 = 8 * ll; int j0 = 2 * cc; int q_offset = cc * 32 + l0; int y_offset = 64 * cc + l0; float sumf = 0.0f; for (uint i = uint(ix); i < nb; i += 2u) { uint b = rowbase + i * 144u; device const uchar* qs = qb + b + 16u + uint(q_offset); float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u])); int sc0 = q4k_sc(qb, b, j0); int mn0 = q4k_mn(qb, b, j0); int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1); device const float* yv = x + i * 256u + uint(y_offset); float2 sums = float2(0.0f); float2 xsum = float2(0.0f); for (int m = 0; m < 8; ++m) { int a = int(qs[m]); float xa = yv[m]; float xb = yv[m + 32]; sums[0] += xa * float(q4k_mod(a, 16)); sums[1] += xb * float(a / 16); xsum[0] += xa; xsum[1] += xb; } sumf += (d * float(sc0)) * sums[0] - (dmin * float(mn0)) * xsum[0] + (d * float(sc1)) * sums[1] - (dmin * float(mn1)) * xsum[1]; } float s = metal::simd_sum(sumf); if (lane == 0) y[r] = s; }")))
 
+    ; ---- Q4_K, THE FOUR-WIDE MAP. 2026-07-28, and it exists because the map above was raced for the
+    ; first time and lost. metal_isa_diff.sh had only ever run Q6_K — 24.6% of llama3.2:3b's decode
+    ; MACs — so the kernel carrying the other 75.4% had no number at all. Given one (row 924,
+    ; sliverproof) it came back 2.26x-2.60x off ggml across four real shapes while Q6_K sat at 1.05x.
+    ;
+    ; ONLY THE MAP CHANGES. Every division the body performs is kept character for character:
+    ; q4k_sc / q4k_mn with their branch and four divisions, q4k_mod for the nibbles, byte loads rather
+    ; than ggml's uint16 loads. What moves is the shape of the walk:
+    ;
+    ;                   superblock stride   slots   sub-blocks per lane   activations cached
+    ;   qsl-q4k-msl            2 (lane%2)    16      2  (2*cc, 2*cc+1)             16
+    ;   this                   4 (lane/8)     8      4  (2*iq, 2*iq+1, +4, +5)     32
+    ;
+    ; ix = lane/8 and it = lane mod 8, iq = it/4, ir = it mod 4. The lane owns the 8 qs bytes at
+    ; 32*iq + 8*ir AND the 8 at +64, whose nibbles carry sub-blocks 2*iq, 2*iq+1, 2*iq+4, 2*iq+5, with
+    ; the matching activations at 64*iq + 8*ir and +32, +128, +160. So the loop runs nb/4 times
+    ; instead of nb/2 and does twice the work in each pass.
+    ;
+    ; MEASURED BEFORE IT WAS WRITTEN, as isa_q4k_v3_f32 in the harness (M4 Max, 2026-07-28):
+    ;   shape              qsl-q4k-msl   this map     ggml       old      new
+    ;   blk.0.ffn_up        0.0738 ms    0.0472 ms   0.0284 ms   2.60x   1.66x
+    ;   blk.0.ffn_gate      0.0737       0.0474      0.0283      2.60x   1.67x
+    ;   blk.0.attn_q        0.0319       0.0221      0.0141      2.26x   1.57x
+    ;   blk.0.attn_output   0.0326       0.0230      0.0141      2.32x   1.63x
+    ;
+    ; AND THE Q6_K CONCLUSION DID NOT TRANSFER, only its direction. There, once the map was right the
+    ; arithmetic was worth NOTHING — v3 with every division beat v2 with none. Here the map alone
+    ; stops at 1.66x, so at Q4_K the byte loads and divisions DO cost, and a further stone is owed
+    ; before this type reaches parity. Row 835, boundborrow: the shape was not assumed to carry, and
+    ; this time the part that did not carry is named rather than discovered later.
+    ;
+    ; The old map is NOT deleted. It is band-proven, on the inference path, and the switch is a
+    ; carrier's choice — the same way the lane kernel stayed when the slot kernel arrived (row 825).
+    (defn qsl-q4k-slot4-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+                    " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 256u; uint rowbase = r * nb * 144u; int ix = int(lane) / 8; int it = q4k_mod(int(lane), 8); int iq = it / 4; int ir = q4k_mod(it, 4); int qoff = 32 * iq + 8 * ir; int yoff = 64 * iq + 8 * ir; int j0 = 2 * iq; float sumf = 0.0f; for (uint i = uint(ix); i < nb; i += 4u) { uint b = rowbase + i * 144u; device const uchar* qs = qb + b + 16u + uint(qoff); device const float* yv = x + i * 256u + uint(yoff); float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u])); int sc0 = q4k_sc(qb, b, j0); int mn0 = q4k_mn(qb, b, j0); int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1); int sc2 = q4k_sc(qb, b, j0 + 4); int mn2 = q4k_mn(qb, b, j0 + 4); int sc3 = q4k_sc(qb, b, j0 + 5); int mn3 = q4k_mn(qb, b, j0 + 5); float4 sums = float4(0.0f); float4 xsum = float4(0.0f); for (int m = 0; m < 8; ++m) { int a1 = int(qs[m]); int a2 = int(qs[m + 64]); float x0 = yv[m]; float x1 = yv[m + 32]; float x2 = yv[m + 128]; float x3 = yv[m + 160]; sums[0] += x0 * float(q4k_mod(a1, 16)); sums[1] += x1 * float(a1 / 16); sums[2] += x2 * float(q4k_mod(a2, 16)); sums[3] += x3 * float(a2 / 16); xsum[0] += x0; xsum[1] += x1; xsum[2] += x2; xsum[3] += x3; } sumf += (d * float(sc0)) * sums[0] - (dmin * float(mn0)) * xsum[0] + (d * float(sc1)) * sums[1] - (dmin * float(mn1)) * xsum[1] + (d * float(sc2)) * sums[2] - (dmin * float(mn2)) * xsum[2] + (d * float(sc3)) * sums[3] - (dmin * float(mn3)) * xsum[3]; } float s = metal::simd_sum(sumf); if (lane == 0) y[r] = s; }")))
+
     ; ---- the appendix a carrier adds AFTER qml-msl-appendix (it needs q6k_*/q4k_* and the header).
     (defn qsl-msl-appendix ()
         (str_concat (qsl-q6k-msl "form_q6k_matvec_slot_f32")
-                    (qsl-q4k-msl "form_q4k_matvec_slot_f32")))
+        (str_concat (qsl-q4k-msl "form_q4k_matvec_slot_f32")
+                    (qsl-q4k-slot4-msl "form_q4k_matvec_slot4_f32"))))
 
     ; the width the carrier must refuse below: cols must be a whole multiple of this, or the map is
     ; wrong and the lane kernel must be used instead. Named so the carrier can ASK rather than assume.
