@@ -1,0 +1,168 @@
+; preludes: form-stdlib/core.fk form-stdlib/dsv4-kv-cache.fk
+;
+; dsv4-kv-cache-band — the MLA KV cache (dsv4-kv-cache.fk), Stone 41. Nine claims,
+; verdict 511 when every one crosses.
+;
+; ---------------------------------------------------------------------------
+; APORON — THE DECLARED RADIUS. Read this before believing the number.
+;
+; WHAT THIS BAND PROVES
+;   The cache's GROWTH LAW and its IMMUTABILITY. After t+1 appends a bank holds
+;   exactly t+1 rows; reading at step t hands attention exactly t+1 rows; appending
+;   token t leaves rows 0..t-1 element-for-element identical and in place; layers do
+;   not leak into each other; at the cap the append is REFUSED and countable rather
+;   than evicting anything; a wrong-width row is refused the same way; the flat arena
+;   is row-major at stride hd, which is the layout the device buffer has.
+;
+;   twinblind (corpus row 868): every one of those is CANONICAL — there is one right
+;   answer and no recipe choice anywhere in it — so a self-check IS a real falsifier
+;   here, and no oracle is rented. The choosing surface (where the position index
+;   comes from, how prefill batches, the EOS condition) is not in this cell and not
+;   in this band; it is in dsv4-decode-loop.fk, answered from ds4.c.
+;
+; WHAT IT DOES NOT PROVE
+;   * NOT that the rows are the right rows. A cache is indifferent to its contents;
+;     the latent's arithmetic is mla-attn-band.fk's and Stone 36/37's.
+;   * NOT the cache ENCODING. ds4 stores E4M3 on the non-rotated part and f16 across
+;     the row (form_dsv4_kv_fp8_f16_round). This cell holds whatever it is handed.
+;   * NOT the device buffer. This is the shape and the growth law; the Metal arena
+;     and its append kernel are gated by native/metal/metal_dsv4_decode.sh.
+;   * NOT a windowing policy. There is none, deliberately: at the cap this refuses.
+;   * NOT the real layer count or the real hd — 3 layers, hd 4 here. Claim 256 is the
+;     only place the real numbers (43, 512) appear, and it only does arithmetic.
+;
+; A gate reading "the cache has the right length" would pass on a cache that rewrote
+; every row on every append. Claim 4 exists because of that: it hands the immutability
+; check a DELIBERATELY BROKEN append and demands the check go red. A falsifier that
+; cannot fail is decoration.
+; ---------------------------------------------------------------------------
+;
+;   bit   1  GROWTH: 3 steps into a 3-layer cache -> every bank holds 3 rows, dkv-pos
+;            is 3, dkv-square? holds, and dkv-read-at t returns exactly t+1 rows for
+;            t = 0, 1, 2. Reading at step t is the causal window, by construction.
+;   bit   2  HISTORY IS IMMUTABLE: after appending the third row, rows 0 and 1 are
+;            EXACTLY what they were (dkv-history-intact?), at every layer, and the
+;            cache grew by exactly one row (dkv-grew-by-one?).
+;   bit   4  THE FALSIFIER CAN FAIL: a broken append that PREPENDS produces a cache of
+;            exactly the right length whose history check goes red. The right-length
+;            wrong-history cache is the classic silent decode bug; this is it, caught.
+;   bit   8  LAYERS DO NOT LEAK: appending at layer 0 leaves layers 1 and 2 untouched,
+;            and the cache is then NOT square — which dkv-square? reports honestly.
+;   bit  16  THE CAP REFUSES, IT DOES NOT EVICT: at cap the append returns the rows
+;            untouched, the length unchanged, dkv-refused one higher, dkv-full? 1 and
+;            dkv-headroom 0. Nothing slides. (aporon: no window is claimed.)
+;   bit  32  A WRONG-WIDTH ROW IS REFUSED: hd is fixed at construction; a short row is
+;            counted as a refusal and never lands.
+;   bit  64  THE ARENA LAYOUT IS ROW-MAJOR AT STRIDE hd: dkv-flat has n*hd elements and
+;            its slice at i*hd is row i. This is the layout form_dkv_append_f32 writes
+;            and form_mla_attend_f32 reads.
+;   bit 128  A STEP IS ONE ROW PER LAYER: dkv-append-step over 2 steps leaves 2 rows at
+;            every one of the 3 layers, in order, and a step with a missing layer's row
+;            is refused per missing layer rather than silently shortening the cache.
+;   bit 256  THE RADIUS IS ARITHMETIC, NOT A FEELING: at V4-Flash's shape (43 layers,
+;            hd 512, f32) a token costs 88 064 B, 4 096 tokens cost 360 710 144 B, and
+;            dkv-alive? refuses an all-zero bank (zerobirth: a zeroed buffer and an
+;            unwritten buffer read the same).
+
+(do
+    ; a deliberately broken append: right length, wrong history. Claim 4's control.
+    (defn dkvb-bad-append (c l row)
+        (list (dkv-cap c) (dkv-nlayers c) (dkv-hd c)
+              (dkv-set-nth (dkv-banks c) l (cons row (dkv-bank c l)))
+              (dkv-refused c)))
+    (defn dkvb-eqn (a b) (if (eq a b) 1 0))
+    ; append the same row to every layer, n times, walking the position
+    (defn dkvb-fill (c rows) (if (eq (len rows) 0) c (dkvb-fill (dkv-append-step c (head rows)) (tail rows))))
+    (defn dkvb-rep (v n) (if (eq n 0) (empty) (cons v (dkvb-rep v (sub n 1)))))
+
+    (let hd 4)
+    (let nl 3)
+    (let cap 3)
+
+    (let a0 (list 1.0 2.0 3.0 4.0))
+    (let a1 (list 5.0 6.0 7.0 8.0))
+    (let a2 (list 9.0 10.0 11.0 12.0))
+    (let b0 (list -1.0 -2.0 -3.0 -4.0))
+    (let b1 (list -5.0 -6.0 -7.0 -8.0))
+    (let b2 (list -9.0 -10.0 -11.0 -12.0))
+    (let c0 (list 0.5 0.25 0.125 0.0625))
+    (let c1 (list 1.5 1.25 1.125 1.0625))
+    (let c2 (list 2.5 2.25 2.125 2.0625))
+
+    ; step 0, 1, 2 — each step is (row for layer 0, row for layer 1, row for layer 2)
+    (let s0 (list a0 b0 c0))
+    (let s1 (list a1 b1 c1))
+    (let s2 (list a2 b2 c2))
+
+    (let k0 (dkv-new cap nl hd))
+    (let k1 (dkv-append-step k0 s0))
+    (let k2 (dkv-append-step k1 s1))
+    (let k3 (dkv-append-step k2 s2))
+
+    ; --- claim 1: the growth law, and the causal read ---
+    (let c1a (if (eq (dkv-pos k3) 3) (if (eq (dkv-square? k3) 1) 1 0) 0))
+    (let c1b (if (eq (dkv-nrows-at k3 0 0) 1)
+                 (if (eq (dkv-nrows-at k3 0 1) 2)
+                     (if (eq (dkv-nrows-at k3 2 2) 3) 1 0) 0) 0))
+    (let c1c (if (eq (dkv-len k1 0) 1) (if (eq (dkv-len k2 0) 2) (if (eq (dkv-len k3 0) 3) 1 0) 0) 0))
+    (let cl1 (if (eq c1a 1) (if (eq c1b 1) (if (eq c1c 1) 1 0) 0) 0))
+
+    ; --- claim 2: history is immutable across the third append ---
+    (let cl2 (if (eq (dkv-history-intact? k2 k3) 1)
+                 (if (eq (dkv-grew-by-one? k2 k3) 1)
+                     (if (eq (dkv-vec-eq (dkv-row k3 0 0) a0) 1)
+                         (if (eq (dkv-vec-eq (dkv-row k3 0 1) a1) 1) 2 0) 0) 0) 0))
+
+    ; --- claim 4: the falsifier can fail (right length, wrong history) ---
+    (let kbad (dkvb-bad-append k2 0 a2))
+    (let cl4 (if (eq (dkv-len kbad 0) 3)                        ; the length is RIGHT
+                 (if (eq (dkv-history-intact? k2 kbad) 0)       ; and the history check catches it
+                     (if (eq (dkv-history-intact? k2 k3) 1) 4 0) 0) 0))
+
+    ; --- claim 8: layers do not leak ---
+    (let klk (dkv-append k2 0 a2))
+    (let cl8 (if (eq (dkv-len klk 0) 3)
+                 (if (eq (dkv-len klk 1) 2)
+                     (if (eq (dkv-len klk 2) 2)
+                         (if (eq (dkv-rows-eq (dkv-bank klk 1) (dkv-bank k2 1)) 1)
+                             (if (eq (dkv-square? klk) 0) 8 0) 0) 0) 0) 0))
+
+    ; --- claim 16: the cap refuses, it does not evict ---
+    (let kcap (dkv-append k3 0 a0))
+    (let cl16 (if (eq (dkv-len kcap 0) 3)
+                  (if (eq (dkv-refused kcap) (add (dkv-refused k3) 1))
+                      (if (eq (dkv-rows-eq (dkv-bank kcap 0) (dkv-bank k3 0)) 1)
+                          (if (eq (dkv-full? k3 0) 1)
+                              (if (eq (dkv-headroom k3 0) 0)
+                                  (if (eq (dkv-headroom k2 0) 1) 16 0) 0) 0) 0) 0) 0))
+
+    ; --- claim 32: a wrong-width row is refused ---
+    (let kw (dkv-append k1 0 (list 1.0 2.0)))
+    (let cl32 (if (eq (dkv-len kw 0) 1)
+                  (if (eq (dkv-refused kw) 1)
+                      (if (eq (dkv-would-accept? k1 0 (list 1.0 2.0)) 0)
+                          (if (eq (dkv-would-accept? k1 0 a1) 1) 32 0) 0) 0) 0))
+
+    ; --- claim 64: the arena is row-major at stride hd ---
+    (let fl (dkv-flat k3 0))
+    (let cl64 (if (eq (len fl) (mul 3 hd))
+                  (if (eq (dkv-vec-eq (dkv-take fl hd) a0) 1)
+                      (if (eq (nth fl (add (mul 1 hd) 2)) 7.0)
+                          (if (eq (nth fl (add (mul 2 hd) 3)) 12.0) 64 0) 0) 0) 0))
+
+    ; --- claim 128: a step is one row per layer; a short step is refused, not silent ---
+    (let kshort (dkv-append-step k0 (list a0 b0)))              ; layer 2's row is missing
+    (let cl128 (if (eq (dkv-len k2 0) 2)
+                   (if (eq (dkv-len k2 1) 2)
+                       (if (eq (dkv-len k2 2) 2)
+                           (if (eq (dkv-len kshort 2) 0)
+                               (if (eq (dkv-refused kshort) 1) 128 0) 0) 0) 0) 0))
+
+    ; --- claim 256: the radius is arithmetic; a zeroed bank is not alive ---
+    (let kzero (dkv-append (dkv-new cap 1 hd) 0 (list 0.0 0.0 0.0 0.0)))
+    (let cl256 (if (eq (dkv-bytes-per-token 43 512) 88064)
+                   (if (eq (dkv-bytes-for 4096 43 512) 360710144)
+                       (if (eq (dkv-alive? k3 0) 1)
+                           (if (eq (dkv-alive? kzero 0) 0) 256 0) 0) 0) 0))
+
+    (add cl1 (add cl2 (add cl4 (add cl8 (add cl16 (add cl32 (add cl64 (add cl128 cl256)))))))))

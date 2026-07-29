@@ -1,0 +1,59 @@
+; gated-deltanet-msl-band.fk — the emitted layer kernels say what the Form
+; recipe says, and differ from it nowhere the reader can be fooled.
+;
+; preludes: form-stdlib/core.fk form-stdlib/gated-deltanet-msl.fk
+;
+; run: ./fkwu --src form/form-stdlib/tests/gated-deltanet-msl-band.fk   ; -> 255
+;
+; Verdict 255. A read-back gate, no GPU. The compile gate lives in
+; form/native/metal/metal_gdn.sh and the dispatch gate beside it; this band can
+; only read text, and says so rather than implying more.
+
+(do
+    (defn gdmb-find (h n) (str_find h n 0))
+    (defn gdmb-has (h n) (if (lt (gdmb-find h n) 0) 0 1))
+    (defn gdmb-count-from (h n from c)
+        (do (let i (str_find h n from))
+            (if (lt i 0) c (gdmb-count-from h n (add i 1) (add c 1)))))
+    (defn gdmb-count (h n) (gdmb-count-from h n 0 0))
+    (defn gdmb-score (ok bit) (if ok bit 0))
+
+    (defn gated-deltanet-msl-band ()
+        (do
+    (let U (gdm-msl-appendix))
+    ; all four kernels present, once each
+    (let c0 (gdmb-score (if (eq (gdmb-count U "kernel void form_gdn_conv_f32") 1)
+                            (if (eq (gdmb-count U "kernel void form_gdn_l2norm_f32") 1)
+                                (if (eq (gdmb-count U "kernel void form_gdn_delta_f32") 1)
+                                    (eq (gdmb-count U "kernel void form_gdn_gate_f32") 1) 0) 0) 0) 1))
+    ; the conv shifts the window and folds the taps — causal by construction
+    (let c1 (gdmb-score (if (eq (gdmb-has U "win[b + kw - 1u] = x[c];") 1)
+                            (gdmb-has U "acc = acc + win[b + j] * w[j];") 0) 2))
+    ; l2norm is rsqrt-shaped and uses the body's own fsqrt, not metal::
+    (let c2 (gdmb-score (if (eq (gdmb-has U "1.0f / fsqrt(s + eps)") 1)
+                            (eq (gdmb-has U "metal::") 0) 0) 4))
+    ; the delta rule decays, corrects, and writes back
+    (let c3 (gdmb-score (if (eq (gdmb-has U "float sp = alpha * S[r + j];") 1)
+                            (if (eq (gdmb-has U "float err = v[i] - pred;") 1)
+                                (gdmb-has U "float sn = S[r + j] + bw * k[j];") 0) 0) 8))
+    ; FALSIFIER — the read uses the NEW state. `acc` accumulates sn*q inside the
+    ; second loop, so o = S_t . q and not Spred . q. A reader "simplifying" this
+    ; to read before the write makes a one-token-late layer whose magnitudes all
+    ; stay plausible.
+    (let c4 (gdmb-score (if (eq (gdmb-has U "acc = acc + sn * q[j];") 1)
+                            (eq (gdmb-has U "acc = acc + sp * q[j];") 0) 0) 16))
+    ; FALSIFIER — the output gate is SILU: z * sigmoid(z), not sigmoid(z). The
+    ; `zz *` is the whole difference and the whole finding of the gates cell.
+    (let c5 (gdmb-score (if (eq (gdmb-has U "x[i] = x[i] * (zz * sg);") 1)
+                            (eq (gdmb-has U "x[i] = x[i] * sg;") 0) 0) 32))
+    ; one thread per state ROW: guarded on dv, indexing rows by i*dk
+    (let c6 (gdmb-score (if (eq (gdmb-has U "if (i >= dv) return;") 1)
+                            (gdmb-has U "uint r = i * dk;") 0) 64))
+    ; APPENDIX contract: no spine of its own, nothing double-defined
+    (let c7 (gdmb-score (if (eq (gdmb-has U "#include") 0)
+                            (if (eq (gdmb-has U "using namespace") 0)
+                                (if (eq (gdmb-has U "float fexp(") 0)
+                                    (eq (gdmb-has U "float fsqrt(") 0) 0) 0) 0) 128))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))
+    )
+    (gated-deltanet-msl-band))

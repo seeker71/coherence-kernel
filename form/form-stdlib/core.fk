@@ -18,6 +18,47 @@
     ; dual), join. str_eq remains an orthogonal compare primitive. Confirmed
     ; present, byte-identical, on fkwu, Go,
     ; Rust, and TS (receipts/2026-07-01-narrow-waist-string-cleanup.md).
+    ;
+    ; RE-WITNESSED 2026-07-26, and the sentence above holds for only three of the
+    ; four names. `byte_to_str` is NOT byte-identical across the arms, and the
+    ; "exact dual" is exact on one of them:
+    ;
+    ;   (str_len (byte_to_str n))          n=65  127  128  169  206  255
+    ;     fkwu                                1    1    1    1    1    1
+    ;     go / rust / ts                      1    1    2    2    2    2
+    ;
+    ;   (str_byte_at (byte_to_str n) 0)    n=65  127  128  169  206  255
+    ;     fkwu                               65  127  128  169  206  255   <- the dual
+    ;     go / rust / ts                     65  127  194  194  195  195   <- a lead byte
+    ;
+    ; Above 127 the three walkers read n as a CODEPOINT and hand back its two-byte
+    ; UTF-8 encoding, so decompose-then-construct is not the identity there for
+    ; half the byte range. `str_len` and `str_byte_at` ARE four-way sound on the
+    ; same inputs — 206 and 169 for the two bytes of a lambda on every arm — so
+    ; the waist can take a string apart everywhere and put it back together in
+    ; exactly one place.
+    ;
+    ; This is why `substring` below cannot be trusted to be byte-indexed off fkwu
+    ; even though it is written over the waist: it constructs through byte_to_str.
+    ; Measured, with the loop under a private name so the dispatch override noted
+    ; below could not shadow it, over "Ω+1":
+    ;
+    ;   (str_len (substring "Ω+1" a b))   (0,1) (1,2) (2,3) (0,2) (0,4)
+    ;     fkwu                               1     1     1     2     4    raw bytes
+    ;     the recipe on go/rust/ts           2     2     1     4     6    re-encoded
+    ;     the NATIVE on go/rust/ts           0     2     1     2     4    char-floored
+    ;
+    ; The native the override keeps floors each byte offset to the start of the
+    ; character containing it and then slices whole characters — which is what
+    ; "return the whole char at a start and nothing inside it" means, measured.
+    ;
+    ; Is the capability missing, or only the name? Only the name, on the walkers:
+    ; (write_file_bytes p (list 206 169 65)) then (read_file_slice p 0 3) gives a
+    ; 3-byte string reading 206, 169, 65 on go, rust and ts. On fkwu those two
+    ; names are unbound and recover to `nothing` — no file is written. So each
+    ; side has exactly one door to a raw byte above 127 inside a string, and it is
+    ; a different door on each side. No door is open on all four.
+    ; Pinned by: tests/byte-waist-band.fk.
     ; Everything below is Form composition over that floor — substring,
     ; char_at, ord, int_to_str — kept as the portable fallback shape. The
     ; kernel dispatch override is intentionally narrow: byte-string/cursor
@@ -41,6 +82,19 @@
     ; under form/form-stdlib/) passes an integer, never a bool/null/string,
     ; so this covers the load-bearing surface; the native's bool/null/string
     ; pass-through fallback is not reproduced here.
+    ;
+    ; A NON-INTEGER ARGUMENT DIVERGES THREE WAYS — measured 2026-07-26:
+    ;
+    ;     (int_to_str 10.5)     fkwu ""      go "10"     rust "10"     ts "10.5"
+    ;
+    ; fkwu answers the EMPTY STRING, which is the dangerous one: it makes no error and
+    ; the caller's output is simply missing a piece. Found by having four kernels each
+    ; emit the same SVG and hashing the results — three hashes, and the diff was two
+    ; font-size attributes. Every band over that cell read 1023 on all four while the
+    ; pictures differed, because a band folds to a scalar and cannot compare documents.
+    ; The header above says every caller passes an integer; that was true and stayed
+    ; true only by luck the moment someone wrote a font size of 11.5.
+    ; See receipts/2026-07-26-navier-stokes-comes-home.md.
     (defn fstr-digit-char (d) (byte_to_str (add d 48)))
     (defn fstr-int-to-str-pos (n)
         (if (lt n 10)
@@ -52,17 +106,36 @@
                 (fstr-int-to-str-pos n))))
 
     ; str_to_int — the inverse of int_to_str. Same digit arithmetic in
-    ; reverse (ASCII '0' is byte 48); a leading "-" negates. Empty-string
-    ; input is not guarded beyond str_len returning 0 (the loop base case),
-    ; matching int_to_str's own scope: covers what the codebase's real
-    ; callers pass, not every malformed input.
+    ; reverse (ASCII '0' is byte 48); leading whitespace is skipped and a
+    ; leading "-" negates. The digit loop STOPS at the first non-digit
+    ; rather than folding its byte into the accumulator.
+    ;
+    ; 2026-07-22 — the unguarded loop answered wrongly, not loudly. Every
+    ; shell-exec builtin returns its stdout with a trailing "\n"; the old
+    ; loop read that newline as a digit and folded (10 - 48) in, so the
+    ; form-native `grep -c` over the corpus came back 2442 instead of 248
+    ; (248*10 - 38). Nothing refused; a plausible integer came out. The
+    ; guard is what makes the body's own shell answerable at all. Kept
+    ; TOTAL (no form_error) because the three sibling kernels ship
+    ; str_to_int as a total native; see receipts/2026-07-22-the-body-
+    ; answers-itself.md for the parity spread across the four arms.
+    (defn fstr-digit-cp? (b) (if (ge b 48) (le b 57) false))
+    (defn fstr-space-cp? (b)
+        (if (eq b 32) true (if (eq b 9) true (if (eq b 10) true (eq b 13)))))
+    (defn fstr-skip-ws (s i len)
+        (if (ge i len) i
+            (if (fstr-space-cp? (str_byte_at s i)) (fstr-skip-ws s (add i 1) len) i)))
     (defn fstr-to-int-loop (s i len acc)
         (if (ge i len) acc
-            (fstr-to-int-loop s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48)))))
+            (if (fstr-digit-cp? (str_byte_at s i))
+                (fstr-to-int-loop s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48)))
+                acc)))
     (defn str_to_int (s)
-        (if (and (gt (str_len s) 0) (str_eq (substring s 0 1) "-"))
-            (sub 0 (fstr-to-int-loop s 1 (str_len s) 0))
-            (fstr-to-int-loop s 0 (str_len s) 0)))
+        (do (let flen (str_len s))
+            (let fi (fstr-skip-ws s 0 flen))
+            (if (if (lt fi flen) (eq (str_byte_at s fi) 45) false)
+                (sub 0 (fstr-to-int-loop s (add fi 1) flen 0))
+                (fstr-to-int-loop s fi flen 0))))
 
     ; str_find — naive substring search from `from`, over the floor.
     ; O(n*m); nothing in this codebase calls it in a hot loop over long
@@ -143,6 +216,17 @@
     (defn max2 (a b) (if (gt a b) a b))
 
     ; List<T> public vocabulary.
+    ;
+    ; `nil?` IS A LIST CELL AND ONLY A LIST CELL. It reads `len`, and `len` counts cons cells; the
+    ; one honest question it answers is "does this list have no elements". Handed a STRING it does
+    ; not answer "is this string empty" on any arm: go, rust and ts return the string's byte length,
+    ; so `(nil? "a")` is 0 and `(nil? "")` is 1 — an emptiness test by coincidence, not by contract.
+    ; fkwu cannot answer at all: its words carry no type (an int is `n << 1`, a string handle is
+    ; `poolidx << 1`), so `len` has nothing to read a string-ness from and returns 0 for every
+    ; non-list. That gap does not close by making one arm behave like the other three — it closes by
+    ; asking the right cell. For "is this string empty", use `(eq (str_len s) 0)`, which agrees
+    ; four-way. For "is there a file", use `fs_exists`, before `read_file` can hand back a null.
+    ; ask-native-lane.fk carries the worked example, and the receipt carries how it was found.
     (defn nil? (xs) (eq (len xs) 0))
     (defn map (f xs)
         (if (nil? xs)

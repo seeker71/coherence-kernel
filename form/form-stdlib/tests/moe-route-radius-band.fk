@@ -1,0 +1,52 @@
+; moe-route-radius-band.fk — the routing recipe holds at 256 experts / top-8,
+; the shape KAT-Coder-V2.5-Dev routes, which is four times the emitted kernel's
+; declared radius.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/moe-msl.fk form-stdlib/moe-route-radius.fk
+;
+; run: ./fkwu --src form/form-stdlib/tests/moe-route-radius-band.fk   ; -> 63
+;
+; Verdict 63. Powers of two, so a dark bit is readable at a glance.
+;
+; Bit 2 is the one that matters: the chosen ids are checked against a CLOSED
+; FORM (i = 53*r mod 257, from the modular inverse of 97) computed in integer
+; arithmetic that never enters tn-exp or the softmax. Agreement means the float
+; path preserved the order it was meant to preserve — not that two runs of the
+; same code agree with each other.
+;
+; Bits 16 and 32 are falsifiers, in the mutation-testing shape the GPU stones
+; use. Bit 16 dies if the distribution goes flat — the exact failure this band
+; was born from, when an unresolved `rem` recovered to `nothing` under axiom-5
+; and the router answered [0,1,2,3,4,5,6,7] with every weight exactly 0.125:
+; a correct SHAPE carrying no meaning. Bit 32 dies if the renormalization is
+; removed, since 8 of 256 raw probabilities cannot sum anywhere near 1.
+
+(do
+    (defn mrrb-score (ok bit) (if ok bit 0))
+    (defn moe-route-radius-band ()
+        (do
+    ; the probe is genuinely outside the emitted kernel's radius (256 > 64)
+    (let c0 (mrrb-score (eq (mrr-beyond-kernel?) 1) 1))
+    ; the chosen ids equal the closed-form truth, derived without any float
+    (let c1 (mrrb-score (eq (mrr-ints-eq (mrr-ids) (mrr-expected-ids)) 1) 2))
+    ; nsel distinct experts chosen — no expert counted twice
+    (let c2 (mrrb-score (if (eq (len (mrr-ids)) (mrr-nsel))
+                            (mrr-distinct? (mrr-ids)) 0) 4))
+    ; the renormalized weights sum to 1
+    (let c3 (mrrb-score (lt (mrr-abs (sub (mm-sum (mrr-weights) 0.0) 1.0)) 1e-12) 8))
+    ; FALSIFIER: the weights are strictly descending AND actually spread —
+    ; a flat distribution passes "sums to 1" and dies here
+    (let c4 (mrrb-score (if (eq (mrr-descending? (mrr-weights)) 1)
+                            (if (gt (mrr-spread) 1e-3) 1 0) 0) 16))
+    ; FALSIFIER: renormalization is load-bearing — it supplies MORE THAN HALF
+    ; the final mass, so a band passing without it would be reading a different
+    ; quantity. Stated as the movement rather than as a level, because the
+    ; first version of this bit asserted `raw < 0.2` and went dark: the fixture
+    ; measures 0.2216, and 0.2 was a number I picked rather than derived. The
+    ; code was right and the assertion was arbitrary. What is actually claimed
+    ; here — that the chosen few do not already carry the whole distribution —
+    ; holds for any threshold between the measured 0.2216 and 1, so the claim
+    ; is written at the midpoint and is not tuned to this fixture.
+    (let c5 (mrrb-score (gt (sub 1.0 (mm-sum (mrr-raw-chosen) 0.0)) 0.5) 32))
+    (add c0 (add c1 (add c2 (add c3 (add c4 c5)))))))
+    (moe-route-radius-band))

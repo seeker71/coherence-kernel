@@ -1,0 +1,119 @@
+; kimi-quantile-router.fk — STONE 48: Kimi K3's quantile-balancing MoE router, form-native.
+;
+; Kimi K3 routes each token to 16 of 896 experts and picks them by "quantile balancing — derives expert
+; allocation directly from router-score quantiles, eliminating heuristic updates." DS4's router (Stone 44,
+; the sqrt-softplus one) leaned on a learned bias nudged by an auxiliary loss; K3 drops the heuristic and
+; reads the allocation straight off the ORDER STATISTICS of the score vector. That is a thing with one right
+; answer, so it comes home canonical.
+;
+; The move, said plainly: an expert is chosen iff its score sits in the top k of the token's E scores. "Top
+; k" and "at or above the (1 - k/E) quantile" are the SAME cut — the k-th largest score IS that quantile's
+; threshold. This cell computes the cut by RANK, the honest form of a quantile: rank(e) is how many experts
+; outrank e, and e is chosen iff rank(e) < k. No sort, no learned bias, no per-step heuristic — the quantile
+; falls straight out of the counting.
+;
+; THE TIE THAT MUST NOT LEAK, named exactly: when two experts share the boundary score, a naive "count
+; strictly greater" rank chooses BOTH — k+1 experts, a silently over-full step that a capacity buffer then
+; drops somewhere downstream. The honest rank breaks ties by index (lower index outranks), so exactly k are
+; ever chosen. kqr-rank-naive is that impostor, kept so kimi-quantile-router-band.fk can drive it red on a
+; straddling tie: naive selects k+1, the tie-broken rank selects exactly k. A falsifier that can fail.
+;
+; twinblind: top-k-by-score with a deterministic tie-break is CANONICAL — one right answer given the scores,
+; no recipe choice, no oracle. A self-check is a real falsifier, the standing dsv4-kv-cache-band.fk earns.
+;
+; APORON — THE DECLARED RADIUS.
+;   * WHAT IS PROVEN: the SELECTION and its quantile identity — exactly k chosen; the chosen set is the k
+;     largest; the rank cut equals the threshold cut at the k-th-largest score (the quantile made concrete);
+;     permuting experts permutes the selection identically; ties break deterministically toward the lower
+;     index so the step is never over-full; and, over a batch under a per-expert capacity, load is counted
+;     and overflow is REFUSED-and-counted, never silently dropped (the aporon Stone 41's cache stands on).
+;   * WHAT IS NOT PROVEN, and NOT claimed: the score vector's PROVENANCE (the router projection and its
+;     weights), the gate VALUES applied to chosen experts (softmax/normalization of the kept scores), and
+;     any training-time balancing dynamics. This cell is the ALLOCATION law, not the projection and not the
+;     learned weights. Real dims (896, 16) appear only in one arithmetic claim, as Stone 41's claim 256 does.
+;   * NOT four-way. fkwu-witnessed by its own band.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/kimi-quantile-router-band.fk (verdict 31).
+
+(do
+    ; ===========================================================================
+    ; RANK — the quantile, made of counting. rank(e) is how many experts outrank
+    ; e: strictly-higher score, or equal score with a lower index (the tie-break
+    ; that keeps the step from ever choosing more than k). Selected iff rank < k.
+    ; ===========================================================================
+    (defn kqr-outrank? (scores i e)
+        (if (gt (nth scores i) (nth scores e)) 1
+            (if (eq (nth scores i) (nth scores e))
+                (if (lt i e) 1 0)
+                0)))
+    (defn kqr-outrank-naive? (scores i e)     ; the impostor: strictly-greater only
+        (if (gt (nth scores i) (nth scores e)) 1 0))
+    (defn kqr-rank-loop (scores e i bound f)
+        (if (eq i bound) 0
+            (add (f scores i e) (kqr-rank-loop scores e (add i 1) bound f))))
+    (defn kqr-rank (scores e E)       (kqr-rank-loop scores e 0 E kqr-outrank?))
+    (defn kqr-rank-naive (scores e E) (kqr-rank-loop scores e 0 E kqr-outrank-naive?))
+
+    (defn kqr-select?       (scores e E k) (if (lt (kqr-rank scores e E) k) 1 0))
+    (defn kqr-select-naive? (scores e E k) (if (lt (kqr-rank-naive scores e E) k) 1 0))
+
+    ; ===========================================================================
+    ; the MASK: a 1 at every chosen expert, in expert order. kqr-count is |chosen|.
+    ; ===========================================================================
+    (defn kqr-mask-loop (scores E k e f)
+        (if (eq e E) (empty) (cons (f scores e E k) (kqr-mask-loop scores E k (add e 1) f))))
+    (defn kqr-mask       (scores E k) (kqr-mask-loop scores E k 0 kqr-select?))
+    (defn kqr-mask-naive (scores E k) (kqr-mask-loop scores E k 0 kqr-select-naive?))
+    (defn kqr-count (mask) (if (eq (len mask) 0) 0 (add (head mask) (kqr-count (tail mask)))))
+
+    ; ===========================================================================
+    ; the QUANTILE THRESHOLD made concrete: the k-th largest score is the smallest
+    ; score among the chosen. count-ge counts scores at or above a threshold; the
+    ; identity the band proves is count-ge(threshold) == k, so the rank cut and the
+    ; threshold cut are the same cut. min-chosen finds that threshold.
+    ; ===========================================================================
+    (defn kqr-min-chosen-loop (scores mask e E have best)
+        (if (eq e E) best
+            (if (eq (nth mask e) 1)
+                (if (eq have 0)
+                    (kqr-min-chosen-loop scores mask (add e 1) E 1 (nth scores e))
+                    (kqr-min-chosen-loop scores mask (add e 1) E 1
+                        (if (lt (nth scores e) best) (nth scores e) best)))
+                (kqr-min-chosen-loop scores mask (add e 1) E have best))))
+    (defn kqr-threshold (scores mask E) (kqr-min-chosen-loop scores mask 0 E 0 0.0))
+    (defn kqr-count-ge-loop (scores thr i E)
+        (if (eq i E) 0
+            (add (if (ge (nth scores i) thr) 1 0) (kqr-count-ge-loop scores thr (add i 1) E))))
+    (defn kqr-count-ge (scores thr E) (kqr-count-ge-loop scores thr 0 E))
+
+    ; ===========================================================================
+    ; EQUIVARIANCE helper: apply a permutation (a list of source indices) to a list.
+    ; perm[e] says "put element perm[e] of xs at position e". Used to show routing is
+    ; a function of scores, not of where an expert happens to sit.
+    ; ===========================================================================
+    (defn kqr-permute (xs perm)
+        (if (eq (len perm) 0) (empty) (cons (nth xs (head perm)) (kqr-permute xs (tail perm)))))
+    (defn kqr-veq (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) 1 (if (eq (head a) (head b)) (kqr-veq (tail a) (tail b)) 0)) 0))
+
+    ; ===========================================================================
+    ; BALANCING under capacity, across a batch of token masks. Per-expert load is
+    ; how many tokens chose it; under capacity C an expert takes min(load, C) and
+    ; REFUSES the rest, counted as overflow. routed + overflow = k * ntok, always —
+    ; nothing is silently dropped. (aporon: this counts overflow; it does not decide
+    ; where a refused token re-routes. That is a recipe choice, not read here.)
+    ; ===========================================================================
+    (defn kqr-load-at (masks e)          ; how many token-masks put a 1 at expert e
+        (if (eq (len masks) 0) 0 (add (nth (head masks) e) (kqr-load-at (tail masks) e))))
+    (defn kqr-min (a b) (if (lt a b) a b))
+    (defn kqr-max0 (x) (if (lt x 0) 0 x))
+    (defn kqr-routed-loop (masks E C e)
+        (if (eq e E) 0 (add (kqr-min (kqr-load-at masks e) C) (kqr-routed-loop masks E C (add e 1)))))
+    (defn kqr-overflow-loop (masks E C e)
+        (if (eq e E) 0 (add (kqr-max0 (sub (kqr-load-at masks e) C)) (kqr-overflow-loop masks E C (add e 1)))))
+    (defn kqr-routed   (masks E C) (kqr-routed-loop masks E C 0))
+    (defn kqr-overflow (masks E C) (kqr-overflow-loop masks E C 0))
+    0)

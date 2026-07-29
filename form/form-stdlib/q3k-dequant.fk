@@ -1,0 +1,117 @@
+; q3k-dequant.fk — the Q3_K superblock, as a Form recipe.
+;
+; THE GAP KAT-CODER'S OWN HEADER NAMED. Reading the GGUF header of
+; KAT-Coder-V2.5-Dev this morning gave a type census: F32 310, Q4_K 197,
+; Q6_K 140, Q3_K 94, Q8_0 12. Every kind but one had a decoder here. Ninety-four
+; tensors of Q3_K cannot be loaded without this cell, and no estimate of "what
+; remains" had named it, because none had opened the file
+; (receipts/2026-07-28-the-header-names-the-gap.md, corpus row `imputation`).
+;
+; READ FROM THE REFERENCE, NOT FROM MEMORY. Layout from ggml-common.h:
+;   typedef struct {
+;       uint8_t hmask[QK_K/8]; // quants - high bit          32 bytes
+;       uint8_t qs[QK_K/4];    // quants - low 2 bits        64 bytes
+;       uint8_t scales[12];    // scales, quantized with 6 bits
+;       ggml_half d;           // super-block scale           2 bytes
+;   } block_q3_K;                                          110 bytes, QK_K 256
+; and the arithmetic from dequantize_row_q3_K in ggml-quants.c, quoted in full
+; where it matters below.
+;
+; NO BITWISE OPS, THE SAME WAY THE BODY ALREADY DOES IT. q6k-dequant.fk's
+; header states the idiom this cell keeps: `x & 0xF = (mod x 16)`,
+; `x >> 4 = (div x 16)`, `(q >> shift) & 3 = (mod (div q 4^j) 4)`. There is one
+; arithmetic spine here, not a second one in bit clothing.
+;
+; THE SCALE UNPACK, DERIVED TO BYTES. The reference works in four uint32s:
+;     tmp    = aux[2]
+;     aux[2] = ((aux[0] >> 4) & kmask2) | (((tmp >> 4) & kmask1) << 4)
+;     aux[3] = ((aux[1] >> 4) & kmask2) | (((tmp >> 6) & kmask1) << 4)
+;     aux[0] = ( aux[0]       & kmask2) | (((tmp >> 0) & kmask1) << 4)
+;     aux[1] = ( aux[1]       & kmask2) | (((tmp >> 2) & kmask1) << 4)
+;   with kmask1 = 0x03030303, kmask2 = 0x0f0f0f0f.
+; A u32 shift crosses byte boundaries, so this looks like it needs 32-bit
+; arithmetic. It does not, and the reason is the mask that follows every shift:
+; byte b of `(aux0 >> 4) & 0x0f0f0f0f` is bits 4..7 of byte b of aux0 — the HIGH
+; NIBBLE OF s[b], with nothing borrowed from its neighbour. The mask discards
+; exactly the bits the shift dragged across. So the whole unpack is per-byte:
+;     scale[ 0..3 ] = (s[b]   & 15) + 16*( s[8+b]        & 3)
+;     scale[ 4..7 ] = (s[4+b] & 15) + 16*((s[8+b] >>  2) & 3)
+;     scale[ 8..11] = (s[b]   >> 4) + 16*((s[8+b] >>  4) & 3)
+;     scale[12..15] = (s[4+b] >> 4) + 16*((s[8+b] >>  6) & 3)
+; Six bits each, 0..63, and the reference then takes `scales[is] - 32`, so the
+; effective block scale is -32..31. This derivation is the one thing here a
+; reader should check hardest, and the band checks it against a hand-computed
+; witness rather than against a second run of this same code.
+;
+; THE -4 IS NOT A TYPO. `((q >> shift) & 3) - ((hm & m) ? 0 : 4)` subtracts 4
+; when the high-bit mask is CLEAR, not when it is set. The 2-bit quant carries
+; 0..3 and the hmask bit lifts it into 0..3 instead of -4..-1; a reader who
+; inverts the test gets a distribution that still looks like weights.
+;
+; m DOES NOT RESET. `uint8_t m = 1` is declared before the `n` loop and shifts
+; left once per j across BOTH halves, so it runs 1,2,4,8 over the first 128
+; weights and 16,32,64,128 over the second. Resetting it per half is the
+; plausible mistake that costs nothing visible.
+;
+; preludes: form-stdlib/core.fk form-stdlib/f16-decode.fk
+
+(do
+    (defn q3k-mod (a n) (sub a (mul (div a n) n)))
+    (defn q3k-pow2 (e) (if (eq e 0) 1 (mul 2 (q3k-pow2 (sub e 1)))))
+    (defn q3k-pow4 (e) (if (eq e 0) 1 (mul 4 (q3k-pow4 (sub e 1)))))
+
+    ; ── the block's own shape ────────────────────────────────────────────
+    (defn q3k-qk () 256)
+    (defn q3k-block-bytes () 110)
+    (defn q3k-hmask-at () 0)
+    (defn q3k-qs-at () 32)
+    (defn q3k-scales-at () 96)
+    (defn q3k-d-at () 108)
+
+    ; ── where weight i lives ─────────────────────────────────────────────
+    (defn q3k-n2 (i) (div i 128))                        ; which 128-half (0/1)
+    (defn q3k-r (i) (q3k-mod i 128))
+    (defn q3k-j (i) (div (q3k-r i) 32))                  ; 0..3, the shift group
+    (defn q3k-half (i) (div (q3k-mod (q3k-r i) 32) 16))  ; 0/1, q[l+0] vs q[l+16]
+    (defn q3k-l (i) (q3k-mod i 16))                      ; 0..15
+    (defn q3k-qi (i) (add (mul (q3k-n2 i) 32) (add (mul (q3k-half i) 16) (q3k-l i))))
+    ; hmask is NOT advanced by the half-block loop (only `q += 32` is), so its
+    ; index stays inside 0..31 for all 256 weights
+    (defn q3k-hi (i) (add (mul (q3k-half i) 16) (q3k-l i)))
+    (defn q3k-mbit (i) (q3k-pow2 (add (q3k-j i) (mul 4 (q3k-n2 i)))))
+    (defn q3k-is (i) (add (mul (q3k-n2 i) 8) (add (mul (q3k-j i) 2) (q3k-half i))))
+
+    ; ── the scale unpack, per byte ───────────────────────────────────────
+    (defn q3k-sbyte (bytes k) (nth bytes (add (q3k-scales-at) k)))
+    (defn q3k-scale6 (bytes is)
+        (do
+            (let g (div is 4))
+            (let b (q3k-mod is 4))
+            (let hi2 (q3k-sbyte bytes (add 8 b)))
+            (if (eq g 0) (add (q3k-mod (q3k-sbyte bytes b) 16)       (mul 16 (q3k-mod hi2 4)))
+            (if (eq g 1) (add (q3k-mod (q3k-sbyte bytes (add 4 b)) 16) (mul 16 (q3k-mod (div hi2 4) 4)))
+            (if (eq g 2) (add (div (q3k-sbyte bytes b) 16)             (mul 16 (q3k-mod (div hi2 16) 4)))
+                         (add (div (q3k-sbyte bytes (add 4 b)) 16)     (mul 16 (q3k-mod (div hi2 64) 4))))))))
+    ; the reference's `scales[is] - 32`
+    (defn q3k-scale (bytes is) (sub (q3k-scale6 bytes is) 32))
+
+    ; ── the quant, the high bit, the weight ──────────────────────────────
+    (defn q3k-q2 (bytes i)
+        (q3k-mod (div (nth bytes (add (q3k-qs-at) (q3k-qi i))) (q3k-pow4 (q3k-j i))) 4))
+    ; 1 when the hmask bit is SET
+    (defn q3k-hset (bytes i)
+        (q3k-mod (div (nth bytes (add (q3k-hmask-at) (q3k-hi i))) (q3k-mbit i)) 2))
+    ; the reference subtracts 4 when the bit is CLEAR
+    (defn q3k-wint (bytes i) (sub (q3k-q2 bytes i) (if (eq (q3k-hset bytes i) 1) 0 4)))
+
+    ; ── the super-scale and the weight ───────────────────────────────────
+    (defn q3k-d (bytes)
+        (fd-f16 (add (nth bytes (q3k-d-at))
+                         (mul 256 (nth bytes (add (q3k-d-at) 1))))))
+    (defn q3k-at (bytes i)
+        (if (eq (q3k-index-ok? i) 1)
+            (mul (mul (q3k-d bytes) (mul 1.0 (q3k-scale bytes (q3k-is i))))
+                 (mul 1.0 (q3k-wint bytes i)))
+            (form_error "q3k-at: weight index outside the 256-weight Q3_K superblock -- stride to the next block (110-byte stride) instead of indexing past it")))
+    (defn q3k-index-ok? (i) (if (lt i 0) 0 (if (ge i (q3k-qk)) 0 1)))
+    0)

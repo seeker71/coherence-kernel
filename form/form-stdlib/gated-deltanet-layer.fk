@@ -1,0 +1,122 @@
+; gated-deltanet-layer.fk — the Qwen3.5 linear-attention layer assembled from
+; the pieces, one decode step at a time.
+;
+; THE PIECES WERE ALREADY CUT:
+;   kimi-kda.fk              the gated delta rule (kda-step / kda-read), band 63
+;   gated-deltanet-conv.fk   the causal depthwise conv + the head grouping, 127
+;   gated-deltanet-gates.fk  alpha, beta, l2norm, the silu output gate, 511
+; This cell is the ORDER they go in, and nothing else. No new arithmetic.
+;
+; THE ORDER, read 2026-07-28 from Qwen3_5GatedDeltaNet (the class KAT-Coder's
+; config reaches through `class Qwen3_5MoeGatedDeltaNet(Qwen3_5GatedDeltaNet):
+; pass`):
+;   1. q, k, v arrive CONCATENATED and the causal conv runs over the whole
+;      concatenation BEFORE the split. Not one conv per projection — the
+;      reference convolves `mixed_qkv` and splits afterwards. Getting this
+;      backwards changes which channels share taps.
+;   2. q and k are L2-normalized (eps 1e-6); v is NOT.
+;   3. alpha = exp(-exp(A_log) * softplus(a + dt_bias)), beta = sigmoid(b).
+;   4. the delta rule advances the per-head state and reads it at q.
+;   5. the output is gated elementwise by silu(z) — silu, not sigmoid.
+;
+; GROUPING. 16 key heads serve 32 value heads (config: linear_num_key_heads 16,
+; linear_num_value_heads 32), so each value head owns its own state and its own
+; alpha/beta, and BORROWS the q and k of key head `gdc-key-head-for j`. The
+; state is per VALUE head because its shape is dv x dk and dv is the value side.
+;
+; WHAT IS TAKEN AS GIVEN. q, k, v, a, b, z arrive already projected. The
+; in-projections are plain matvecs this body has had for a long time, and
+; putting them here would bury the part that is actually new — the order and
+; the threading — under weight plumbing. A carrier binds the projections; this
+; cell is the meaning between them.
+;
+; ONE DECODE STEP. The whole cell is written for a single token with carried
+; state, because that is what a decode lane runs. gated-deltanet-conv.fk proves
+; the streaming conv agrees with the batch definition (band bit 4), so the
+; single-step form is not a second meaning — it is the same one, witnessed.
+;
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/transformer-numerics.fk form-stdlib/llama-numerics.fk form-stdlib/kimi-kda.fk form-stdlib/gated-deltanet-conv.fk form-stdlib/gated-deltanet-gates.fk
+
+(do
+    ; ── carried state: one conv window per channel, one delta state per value
+    ; head. Kept as a pair so a carrier threads ONE value between tokens.
+    (defn gdl-state (convs deltas) (list convs deltas))
+    (defn gdl-convs  (s) (nth s 0))
+    (defn gdl-deltas (s) (nth s 1))
+
+    (defn gdl-nth0 (xs i) (if (eq i 0) (head xs) (gdl-nth0 (tail xs) (sub i 1))))
+    (defn gdl-cat (a b) (if (eq (len a) 0) b (cons (head a) (gdl-cat (tail a) b))))
+    (defn gdl-rep (n x) (if (eq n 0) (empty) (cons x (gdl-rep (sub n 1) x))))
+
+    ; ── 1. the conv, over the CONCATENATION, per channel ─────────────────
+    ; chans is one window-state per channel; xs is this token's value per
+    ; channel. Returns (new-chans, convolved-xs).
+    (defn gdl-conv-all (chans w xs)
+        (if (eq (len xs) 0) (list (empty) (empty))
+            (do (let r (gdc-step (head chans) w (head xs)))
+                (let rest (gdl-conv-all (tail chans) w (tail xs)))
+                (list (cons (gdc-step-state r) (head rest))
+                      (cons (gdc-step-out r)   (head (tail rest)))))))
+    (defn gdl-conv-state (r) (head r))
+    (defn gdl-conv-out   (r) (head (tail r)))
+
+    ; ── splitting the convolved concatenation back into heads ────────────
+    (defn gdl-heads (xs nh hd)
+        (if (eq nh 0) (empty)
+            (cons (gdc-take xs hd) (gdl-heads (gdc-drop xs hd) (sub nh 1) hd))))
+    (defn gdl-l2-each (hs) (if (eq (len hs) 0) (empty) (cons (gdg-l2norm (head hs)) (gdl-l2-each (tail hs)))))
+
+    ; ── 4. the recurrence, per VALUE head, borrowing its key head's q and k ──
+    ; Returns (new-states, outputs). j counts value heads.
+    ; src is computed from THIS call's nk and nv, not from the config constants
+    ; in gated-deltanet-conv.fk. Those give v*16/32 = v/2, which happens to be
+    ; right for any 2:1 shape and would be silently wrong for any other — a
+    ; toy band at nk=2,nv=4 would have agreed with it by coincidence and taught
+    ; nothing. The ratio belongs to the call.
+    (defn gdl-heads-go (j nk nv states qh kh vh alphas betas)
+        (if (ge j nv) (list (empty) (empty))
+            (do (let src (div (mul j nk) nv))
+                (let s2 (kda-step (gdl-nth0 states j)
+                                  (gdl-nth0 kh src)
+                                  (gdl-nth0 vh j)
+                                  (gdl-nth0 alphas j)
+                                  (gdl-nth0 betas j)))
+                (let o (kda-read s2 (gdl-nth0 qh src)))
+                (let rest (gdl-heads-go (add j 1) nk nv states qh kh vh alphas betas))
+                (list (cons s2 (head rest)) (cons o (head (tail rest)))))))
+
+    ; ── the gates, per value head ────────────────────────────────────────
+    (defn gdl-alphas (as alog dtb)
+        (if (eq (len as) 0) (empty) (cons (gdg-alpha (head as) alog dtb) (gdl-alphas (tail as) alog dtb))))
+    (defn gdl-betas (bs)
+        (if (eq (len bs) 0) (empty) (cons (gdg-beta (head bs)) (gdl-betas (tail bs)))))
+
+    ; ── 5. the silu output gate, per value head ──────────────────────────
+    (defn gdl-gate-each (os zs)
+        (if (eq (len os) 0) (empty)
+            (cons (gdg-out-gate (head os) (head zs)) (gdl-gate-each (tail os) (tail zs)))))
+
+    ; ── one decode step ──────────────────────────────────────────────────
+    ; qkv  : the concatenated projection for THIS token, nk*dk + nk*dk + nv*dv long
+    ; w    : the conv taps (length gdc-conv-k)
+    ; as,bs: per value head, pre-activation
+    ; zs   : per value head, the output gate's pre-activation vector (dv long)
+    ; Returns (new-state, per-value-head outputs).
+    (defn gdl-step (st w qkv as bs zs alog dtb nk dk nv dv)
+        (do
+            (let cr (gdl-conv-all (gdl-convs st) w qkv))
+            (let c  (gdl-conv-out cr))
+            (let qh (gdl-l2-each (gdl-heads (gdc-take c (mul nk dk)) nk dk)))
+            (let kh (gdl-l2-each (gdl-heads (gdc-take (gdc-drop c (mul nk dk)) (mul nk dk)) nk dk)))
+            (let vh (gdl-heads (gdc-drop c (mul 2 (mul nk dk))) nv dv))
+            (let hr (gdl-heads-go 0 nk nv (gdl-deltas st) qh kh vh
+                                  (gdl-alphas as alog dtb) (gdl-betas bs)))
+            (list (gdl-state (gdl-conv-state cr) (head hr))
+                  (gdl-gate-each (head (tail hr)) zs))))
+    (defn gdl-step-state (r) (head r))
+    (defn gdl-step-out   (r) (head (tail r)))
+
+    ; ── a zero state for a given shape ───────────────────────────────────
+    (defn gdl-state0 (nchan k nv dv dk)
+        (gdl-state (gdl-rep nchan (gdc-state0 k)) (gdl-rep nv (kda-zeros dv dk))))
+    0)
