@@ -1,0 +1,118 @@
+; ds4-query-channel.fk — consent-scoped BMF stream for the native DS4 lane.
+; preludes: form-stdlib/core.fk
+; witnessed: 2026-07-26 -> isolated four-way channel before CLI attachment
+
+(do
+    ; A token event is evidence supplied by the native model lane, not a request
+    ; to simulate that lane here:
+    ;
+    ;   observed:<token-id>:<exact-byte-hex>:<display-text>
+    ;
+    ; The channel retains the exact bytes alongside the display text because
+    ; decoding may contain invisible or non-UTF-8 material.  "eos" is the
+    ; explicit end event.  There is no JSON or process/network envelope.
+    ; Parse only the first three colons. Display text may itself contain colons;
+    ; exact bytes remain authoritative.
+    (defn dqc-c1 (event) (str_find event ":" 0))
+    (defn dqc-c2 (event c1) (str_find event ":" (add c1 1)))
+    (defn dqc-c3 (event c2) (str_find event ":" (add c2 1)))
+    (defn dqc-slice (event a b) (substring event a b))
+
+    (defn dqc-event-valid? (event)
+        (do
+            (let c1 (dqc-c1 event))
+            (let c2 (if (ge c1 0) (dqc-c2 event c1) (sub 0 1)))
+            (let c3 (if (ge c2 0) (dqc-c3 event c2) (sub 0 1)))
+            (if (and (ge c1 0) (and (ge c2 0) (ge c3 0)))
+                (and (str_eq (dqc-slice event 0 c1) "observed")
+                    (and (gt (sub c2 (add c1 1)) 0)
+                        (gt (sub c3 (add c2 1)) 0)))
+                false)))
+
+    (defn dqc-event-line (index event)
+        (do
+            (let c1 (dqc-c1 event))
+            (let c2 (dqc-c2 event c1))
+            (let c3 (dqc-c3 event c2))
+            (str_concat "\nevent."
+                (str_concat (int_to_str index)
+                    (str_concat "=token;id:"
+                        (str_concat (dqc-slice event (add c1 1) c2)
+                            (str_concat ";bytes:"
+                                (str_concat (dqc-slice event (add c2 1) c3)
+                                    (str_concat ";text:"
+                                        (substring event (add c3 1)
+                                            (str_len event)))))))))))
+
+    (defn dqc-events-walk (events index bound rendered)
+        (if (eq (len events) 0)
+            (str_concat rendered
+                (str_concat "\ncount=" (str_concat (int_to_str (sub index 1))
+                    "\ncompletion=pending-token\nterminal=Cut:await-native-token")))
+            (if (str_eq (head events) "eos")
+                (str_concat rendered
+                    (str_concat "\nevent."
+                        (str_concat (int_to_str index)
+                            (str_concat "=eos\ncount="
+                                (str_concat (int_to_str (sub index 1))
+                                    "\ncompletion=complete\nterminal=Nil")))))
+                (if (not (dqc-event-valid? (head events)))
+                    (str_concat rendered
+                        (str_concat "\ncount=" (str_concat (int_to_str (sub index 1))
+                            "\ncompletion=incomplete\nterminal=Fail:invalid-native-token-evidence")))
+                    (do
+                        (let next-rendered
+                            (str_concat rendered (dqc-event-line index (head events))))
+                        (if (ge index bound)
+                            (str_concat next-rendered
+                                (str_concat "\ncount=" (str_concat (int_to_str index)
+                                    "\ncompletion=bounded\nterminal=Cut:token-bound-reached")))
+                            (dqc-events-walk (tail events) (add index 1) bound next-rendered)))))))
+
+    (defn dqc-native-token-stream (consent bound events)
+        (if (not (str_eq consent "consent:yes"))
+            "bmf=Fail\nchannel=ds4.form-native.tokens\nconsent=absent\ncount=0\ncompletion=not-started\nterminal=Fail:consent-required"
+            (if (ge bound 128000)
+                (if (eq bound 128000)
+                    "bmf=Control\nchannel=ds4.form-native.control\nconsent=granted\nevidence=observed:128000\ncontrol-id=128000\ncontrol=NIL\ncompletion=complete\nterminal=Nil"
+                (if (eq bound 128001)
+                    "bmf=Control\nchannel=ds4.form-native.control\nconsent=granted\nevidence=observed:128001\ncontrol-id=128001\ncontrol=CUT\ncompletion=paused-by-model\nterminal=Cut:model-emitted"
+                (if (eq bound 128002)
+                    "bmf=Control\nchannel=ds4.form-native.control\nconsent=granted\nevidence=observed:128002\ncontrol-id=128002\ncontrol=FAIL\ncompletion=incomplete\nterminal=Fail:model-emitted"
+                (if (eq bound 128003)
+                    "bmf=Control\nchannel=ds4.form-native.control\nconsent=granted\nevidence=observed:128003\ncontrol-id=128003\ncontrol=TIMEOUT\ncompletion=pending-resume\nterminal=Cut:model-timeout"
+                (if (eq bound 128004)
+                    "bmf=Control\nchannel=ds4.form-native.control\nconsent=granted\nevidence=observed:128004\ncontrol-id=128004\ncontrol=CHOICE\ncompletion=pending-choice\nterminal=Cut:model-choice"
+                    "bmf=Fail\nchannel=ds4.form-native.control\nconsent=granted\ncompletion=incomplete\nterminal=Fail:unverified-control-id")))))
+            (if (le bound 0)
+                "bmf=Fail\nchannel=ds4.form-native.tokens\nconsent=granted\ncount=0\ncompletion=not-started\nterminal=Fail:positive-bound-required"
+                (do
+                    (let prefix
+                        (str_concat "bmf=Stream\nchannel=ds4.form-native.tokens\nconsent=granted\nbound="
+                            (int_to_str bound)))
+                    (dqc-events-walk events 1 bound prefix))))))
+
+    (defn dqc-stream (consent role request)
+        (if (not (str_eq consent "consent:yes"))
+            (str_concat "bmf=Nil\nchannel=ds4.form-native\nconsent=absent\nrequest="
+                (str_concat request
+                    "\ncompletion=not-started\nterminal=Fail:consent-required"))
+            (if (str_eq role "generate")
+                (do
+                    (let a "bmf=Cut\nchannel=ds4.form-native\nconsent=granted\nrole=generator\nrequest=")
+                    (let b (str_concat a request))
+                    (let c (str_concat b "\nevidence=layout:1406/1406;arithmetic:1406/1406;stack:43/43;exit-head:real;total:473-gates;token-id:19129;token-bytes:efbbbf7573696e67;token-text:BOM+using"))
+                    (let d (str_concat c "\ncompletion=pending-gap-resolution\nnext=autoregressive-kv-loop;request-tokenization;multi-token-completion"))
+                    (str_concat d "\nterminal=Cut:continue-building"))
+                (do
+                    (let a (str_concat "bmf=Cut\nchannel=ds4.form-native\nconsent=granted\nrole=" role))
+                    (let b (str_concat a (str_concat "\nrequest=" request)))
+                    (let c (str_concat b "\nevent.1=accepted:request-scoped"))
+                    (let d (str_concat c "\nevent.2=witnessed:real-91321404640-byte-artifact"))
+                    (let e (str_concat d "\nevent.3=witnessed:1406-of-1406-layout-and-arithmetic"))
+                    (let f (str_concat e "\nevent.4=witnessed:43-of-43-real-layers"))
+                    (let g (str_concat f "\nevent.5=witnessed:real-exit-head;129280-logits;token-id-19129;bytes-efbbbf7573696e67;473-gates"))
+                    (let h (str_concat g "\naxiom=observe-before-claim"))
+                    (let i (str_concat h "\ncompletion=complete-as-witness-review"))
+                    (str_concat i "\nterminal=Nil")))))
+    0)

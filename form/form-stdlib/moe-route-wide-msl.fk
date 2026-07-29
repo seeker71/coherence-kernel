@@ -1,0 +1,61 @@
+; moe-route-wide-msl.fk — the softmax router at 256 experts, as Metal the BODY emits.
+;
+; A RECOMBINATION, not new arithmetic. Two proven routers already exist here and
+; each has half of what KAT-Coder-V2.5-Dev needs:
+;
+;   moe-msl.fk        mm-route-msl        the MATH — softmax with max-subtract,
+;                                         top-k keeping the earlier index on a tie,
+;                                         renormalize over the chosen only
+;                                         (llama.cpp's `norm_topk_prob` order).
+;                                         Radius: ne <= 64. Written for
+;                                         dolphin-mixtral, top-2 of 8.
+;   dsv4-router-msl.fk  form_dsv4_router  the SCALE — probs[256]/score[256]/
+;                                         taken[256]/pick[8] thread-local, one
+;                                         thread, serial argmax. But DS4's math:
+;                                         sqrt(softplus), a steering bias in the
+;                                         selection, an unbiased floored weight,
+;                                         and a wscale.
+;
+; KAT-Coder routes 256 experts, 8 per token, plain softmax — so it wants the first
+; cell's arithmetic at the second cell's width. Nothing between them is new; the
+; 64 was never a property of the routing meaning, only of one transcription's
+; arrays (moe-route-radius.fk proves the recipe already answers at 256, checked
+; against a closed form).
+;
+; THE ORDER IS LOAD-BEARING AND THE TWO SIBLINGS DISAGREE ON IT. Read this before
+; touching the write loop. `dsv4-router` writes `ids[j] = pick[nused-1-j]` —
+; REVERSED — because `dsv4-topk` conses head-first, so its recipe consumes the
+; selection 2nd-best-first and the expert accumulation associates along that order
+; (receipts/2026-07-22-moe-on-the-gpu.md names this as its sharpest teaching: a
+; set-selection that looks order-free is secretly a fold-order commitment, and
+; writing the natural order there would still have passed the ids gate while the
+; drift hid inside the f32 envelope). `mm-topk` ends with `(reverse taken)` and so
+; returns BEST-FIRST. This kernel transcribes mm-route, therefore it writes
+; `ids[k] = pick[k]` — natural order — and a future reader who "fixes" it to match
+; dsv4 would be making it wrong in the direction that still looks right.
+;
+; NO BIAS. DS4's router admits a bias into the selection and withholds it from the
+; weight (corpus row 867 `steerdrop`). Softmax routing has no such signal at all,
+; and the band falsifies its absence rather than trusting the reading.
+;
+; SPINE: `fexp` only, from llama-decode-msl.fk's spine — the same one mm-route-msl
+; already leans on, so this cell stays in that appendix family and introduces no
+; second spine. It emits NO spine of its own and can never double-define anything.
+;
+; RADIUS: ne <= 256, nsel <= 8. Beyond either the kernel writes NOTHING and
+; returns — a fixed-size array silently overrun is the aporon error with a stack
+; trace, so refusing is the rule (mm-route-msl's own words, kept).
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn mrw-ne-cap () 256)
+    (defn mrw-nsel-cap () 8)
+
+    (defn mrw-route-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* logits [[buffer(0)]], device uint* ids [[buffer(1)]], device float* wts [[buffer(2)]], constant uint& ne [[buffer(3)]], constant uint& nsel [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; if (ne > 256u) return; if (nsel > 8u) return; if (nsel > ne) return; float p[256]; float taken[256]; uint pick[8]; float mx = logits[0]; for (uint i = 1u; i < ne; ++i) { if (logits[i] > mx) { mx = logits[i]; } } float s = 0.0f; for (uint i = 0u; i < ne; ++i) { float e = fexp(logits[i] - mx); p[i] = e; taken[i] = 0.0f; s = s + e; } float inv = 1.0f / s; for (uint i = 0u; i < ne; ++i) { p[i] = p[i] * inv; } float wsum = 0.0f; for (uint k = 0u; k < nsel; ++k) { uint best = ne; float bv = -1.0e30f; for (uint i = 0u; i < ne; ++i) { if (taken[i] == 0.0f) { if (p[i] > bv) { bv = p[i]; best = i; } } } taken[best] = 1.0f; pick[k] = best; wsum = wsum + bv; } float winv = 1.0f / wsum; for (uint k = 0u; k < nsel; ++k) { ids[k] = pick[k]; wts[k] = p[pick[k]] * winv; } }")))
+
+    (defn mrw-msl-appendix () (mrw-route-msl "form_moe_route_wide_f32"))
+    0)

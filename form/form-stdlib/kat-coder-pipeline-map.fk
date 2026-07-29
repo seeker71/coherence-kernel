@@ -1,0 +1,184 @@
+; kat-coder-pipeline-map.fk — the WHOLE forward pass, every stage, every gap,
+; named at once.
+;
+; WHY THIS CELL EXISTS. The KAT-Coder work until now went gap-at-a-time: find a
+; missing piece, build it, discover the next. That march found real things (the
+; Q3_K decoder, the MTP head off the interval) and it also meant every estimate
+; of "what remains" was an imputation — a list derived from a model of the model
+; rather than from the model. Urs, 2026-07-28: "instead of doing one gap at a
+; time and try and find another gap ... do the full end-to-end analysis and then
+; place all the stones in parallel".
+;
+; So: the complete tensor inventory, read from the file in one second, and from
+; it the complete stage list with every gap marked. Nothing below is inferred
+; from an architecture diagram.
+;
+; ── THE INVENTORY, exact, 753 tensors ─────────────────────────────────
+;   3   model level      token_embd Q3_K [2048x248320], output Q8_0, output_norm F32
+;   30  linear blocks    19 tensors each
+;   10  full blocks      16 tensors each
+;   1   block 40         20 tensors — the nextn MTP head
+;   3 + 30*19 + 10*16 + 20 = 753, and the band checks that sum against the file.
+;
+; ── LINEAR BLOCK (30 of them) ─────────────────────────────────────────
+;   attn_norm            F32   2048
+;   attn_qkv             Q4_K  2048x8192     q 16x128 | k 16x128 | v 32x128
+;   ssm_conv1d           F32   4x8192        over the whole concatenation
+;   ssm_alpha            Q4_K  2048x32       -> a, then the decay gate
+;   ssm_beta             Q4_K  2048x32       -> b, then sigmoid
+;   ssm_a                F32   32            A_log
+;   ssm_dt.bias          F32   32            dt_bias
+;   ssm_norm             F32   128           per-head RMSNorm on the read
+;   attn_gate            Q4_K  2048x4096     the silu output gate
+;   ssm_out              Q4_K  4096x2048
+;   post_attention_norm  F32   2048
+;   ffn_gate_inp         F32   2048x256      the 256-expert router
+;   ffn_gate_exps        Q4_K  2048x512x256
+;   ffn_up_exps          Q4_K  2048x512x256
+;   ffn_down_exps        Q4_K  512x2048x256
+;   ffn_gate_inp_shexp   F32   2048          the shared expert's own gate
+;   ffn_gate_shexp       Q6_K  2048x512
+;   ffn_up_shexp         Q6_K  2048x512
+;   ffn_down_shexp       Q6_K  512x2048
+;
+; ── FULL BLOCK (10 of them) ───────────────────────────────────────────
+;   attn_norm F32 2048 · attn_q Q4_K 2048x8192 · attn_k Q6_K 2048x512
+;   attn_v Q6_K 2048x512 · attn_q_norm F32 256 · attn_k_norm F32 256
+;   attn_output Q4_K 4096x2048 · then the same 9-tensor MoE half.
+;
+;   attn_q IS 8192 WIDE AND attn_output TAKES 4096. The q projection emits the
+;   query AND the output gate fused — 4096 + 4096 — which is `attn_output_gate:
+;   true` in the config, and is a stage that would have arrived as a surprise
+;   halfway through wiring an attention path. k and v are 512 = 2 heads x 256,
+;   against q's 16 x 256: GQA 16/2 at head_dim 256, and the q/k norms are per
+;   head over 256.
+;
+; ── BLOCK 40 IS NOT ON THE PATH ───────────────────────────────────────
+;   Its four extras are nextn.enorm, nextn.hnorm, nextn.eh_proj (Q8_0
+;   4096x2048) and nextn.shared_head_norm — a multi-token-prediction head, and
+;   its whole block is Q8_0 where every other block is Q4_K/Q6_K. MTP is for
+;   SPECULATIVE decoding. A plain next-token forward runs blocks 0..39 and stops.
+;   That is a whole block class off the critical path, found by reading rather
+;   than by building into it.
+;
+; ── THE STAGE LIST, AND EVERY GAP ─────────────────────────────────────
+; HAVE = a kernel this body emits and has run on a device.
+;   embed lookup Q3_K              HAVE  form_q3k_dequant_f32, ran on this file
+;   RMSNorm with gain              HAVE  form_mla_rmsnorm_f32, ran
+;   Q4_K matvec                    HAVE  form_q4_k_matvec_f32, ran on this file
+;   Q6_K matvec                    HAVE  q6k-msl.fk
+;   Q8_0 matvec                    HAVE  form_q8_0_matvec_f32, ran on this file
+;   causal conv over the concat    HAVE  form_gdn_conv_f32, ran on this file
+;   q/k l2norm                     HAVE  form_gdn_l2norm_f32
+;   the delta rule                 HAVE  form_gdn_delta_f32, device-proven
+;   silu output gate               HAVE  form_gdn_gate_f32, device-proven
+;   256-wide top-8 softmax router  HAVE  form_moe_route_wide_f32, device-proven
+;   scale / axpy accumulation      HAVE  moe-msl.fk
+;   argmax                         HAVE  host side, ran
+;
+;   GAP 1  F32 matvec              ffn_gate_inp and ffn_gate_inp_shexp are F32,
+;                                  and every matvec here is quantized. mm-f16mv
+;                                  exists for F16. One kernel.
+;   GAP 2  the deltanet gates      alpha = exp(-exp(A_log)*softplus(a+dt_bias))
+;                                  and beta = sigmoid(b) exist in Form
+;                                  (gated-deltanet-gates.fk, band 511) and have
+;                                  no MSL. One kernel.
+;   GAP 3  plain SwiGLU            the experts want silu(g)*u; dsv4-moe-msl's
+;                                  fold is CLAMPED, which is DeepSeek's, not
+;                                  this model's. One kernel.
+;   GAP 4  partial RoPE            rope.dimension_count 64 of head_dim 256 —
+;                                  partial_rotary_factor 0.25. mm-rope-msl
+;                                  rotates the whole head. One bounded edit.
+;   GAP 5  GQA attention           16 q-heads over 2 kv-heads at head_dim 256.
+;                                  At position 0 there is ONE key, so softmax
+;                                  over one element is 1 and the stage reduces
+;                                  to a copy of v — the first token needs almost
+;                                  nothing here, and a second token needs the
+;                                  real thing.
+;   GAP 6  expert gather           NOT a kernel. nb02*e is arithmetic the host
+;                                  already has (moe-msl.fk's own finding), at
+;                                  the cost of one round trip per layer.
+;
+; Six gaps, five of them one kernel each, and none of them new arithmetic —
+; every one is a variant of something already proven here. That is the whole
+; value of reading the file first: the remaining work is bounded and knowable
+; before any of it is written.
+;
+; ── THE DISPATCH BUDGET, before optimizing anything ───────────────────
+; Per linear block: norm, qkv, conv, 2 l2norm, 2 gate matvecs, 32 delta, gate,
+; out, add, norm, router matvec, route, 8 experts x 3 matvecs + swiglu, shared
+; x 3, accumulate, add — on the order of 90 dispatches.
+; Per full block: norm, q, k, v, 2 norms, rope, attention, gate, out, add, then
+; the same MoE half — on the order of 60.
+; 30*90 + 10*60 = ~3300 dispatches per token, before the exit.
+;
+; The body already measured what a dispatch costs on this machine: ~113 us
+; (2026-07-22-ship-the-slot-map.md, corpus row 849 `seamtoll`). 3300 x 113 us is
+; ~0.37 s of pure seam per token, against DS4's measured 2.77 s for 43 layers.
+; So the arithmetic is not the thing to optimize first — the dispatch COUNT is,
+; and the fix is the same one that took the layer-shape band from 122 s to 5 s:
+; fewer, larger, batched. That is a prediction made before the run, so the run
+; can refute it.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-tensor-index.fk
+
+(do
+    (defn kpm-path () "/Users/ursmuff/models/katcoder/kat-coder-v2.5-dev-compact.gguf")
+    (defn kpm-window () 11200000)
+    (defn kpm-src () (read_file_slice (kpm-path) 0 (kpm-window)))
+    (defn kpm-present? () (if (ge (str_len (kpm-src)) (kpm-window)) 1 0))
+
+    ; ── the inventory, as counts the band re-derives ─────────────────────
+    (defn kpm-total () 753)
+    (defn kpm-model-level () 3)
+    (defn kpm-linear-blocks () 30)
+    (defn kpm-full-blocks () 10)
+    (defn kpm-mtp-blocks () 1)
+    (defn kpm-linear-tensors () 19)
+    (defn kpm-full-tensors () 16)
+    (defn kpm-mtp-tensors () 20)
+    (defn kpm-sum ()
+        (add (kpm-model-level)
+        (add (mul (kpm-linear-blocks) (kpm-linear-tensors))
+        (add (mul (kpm-full-blocks) (kpm-full-tensors))
+             (mul (kpm-mtp-blocks) (kpm-mtp-tensors))))))
+
+    ; ── the blocks a PLAIN next-token forward runs ───────────────────────
+    (defn kpm-forward-blocks () 40)          ; 0..39; the MTP head is skipped
+    (defn kpm-mtp-index () 40)
+
+    ; ── the gap ledger: (id have? one-kernel? what) ──────────────────────
+    (defn kpm-gap (id have onek) (list id have onek))
+    (defn kpm-gap-id (g) (nth g 0))
+    (defn kpm-gap-have (g) (nth g 1))
+    (defn kpm-gap-onek (g) (nth g 2))
+    (defn kpm-gaps ()
+        (list (kpm-gap 1 0 1)     ; F32 matvec
+              (kpm-gap 2 0 1)     ; the deltanet gates in MSL
+              (kpm-gap 3 0 1)     ; plain SwiGLU
+              (kpm-gap 4 0 1)     ; partial RoPE
+              (kpm-gap 5 0 1)     ; GQA attention
+              (kpm-gap 6 1 0)))   ; the expert gather — host arithmetic, no kernel
+    (defn kpm-open-go (gs acc)
+        (if (eq (len gs) 0) acc
+            (kpm-open-go (tail gs) (add acc (if (eq (kpm-gap-have (head gs)) 0) 1 0)))))
+    (defn kpm-open-gaps () (kpm-open-go (kpm-gaps) 0))
+    (defn kpm-onek-go (gs acc)
+        (if (eq (len gs) 0) acc
+            (kpm-onek-go (tail gs)
+                (add acc (if (eq (kpm-gap-have (head gs)) 0) (kpm-gap-onek (head gs)) 0)))))
+    (defn kpm-open-one-kernel () (kpm-onek-go (kpm-gaps) 0))
+
+    ; ── the dispatch prediction, made before the run ─────────────────────
+    (defn kpm-disp-linear () 90)
+    (defn kpm-disp-full () 60)
+    (defn kpm-disp-per-token ()
+        (add (mul (kpm-linear-blocks) (kpm-disp-linear))
+             (mul (kpm-full-blocks) (kpm-disp-full))))
+    (defn kpm-seam-us () 113)                ; measured, 2026-07-22, corpus 849
+    (defn kpm-predicted-seam-us () (mul (kpm-disp-per-token) (kpm-seam-us)))
+
+    ; ── live checks ──────────────────────────────────────────────────────
+    (defn kpm-live-total (s) (egg-tensor-count s))
+    (defn kpm-live-count (s leaf) (gti-count-with s leaf))
+    0)

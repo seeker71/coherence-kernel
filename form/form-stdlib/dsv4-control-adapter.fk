@@ -1,0 +1,114 @@
+; dsv4-control-adapter.fk — trained native centroid adapter over the BMF corpus.
+;
+; This is an actual fit/evaluate path, not a hand-written label router:
+;  - input: the situation field only (the explicit requested class suffix is removed);
+;  - features: 64 learned byte-bigram buckets;
+;  - fit: sum feature vectors over the 600 training rows, one centroid per class;
+;  - predict: maximum centroid dot product;
+;  - evaluate: a 5x5 held-out confusion matrix over 150 rows.
+;
+; It also audits exact semantic-template overlap after case numbers and split
+; prefixes are removed. Accuracy is never called sufficient when that overlap
+; dominates.
+;
+; preludes: form-stdlib/dsv4-control-training-corpus.fk
+
+(do
+    (defn dca-dim () 64)
+    (defn dca-zero-n (n) (if (eq n 0) (empty) (cons 0 (dca-zero-n (sub n 1)))))
+    (defn dca-zero () (dca-zero-n (dca-dim)))
+    (defn dca-vadd (a b)
+        (if (eq (len a) 0) (empty)
+            (cons (add (head a) (head b)) (dca-vadd (tail a) (tail b)))))
+    (defn dca-vinc (v at i)
+        (if (eq (len v) 0) (empty)
+            (cons (if (eq i at) (add (head v) 1) (head v))
+                  (dca-vinc (tail v) at (add i 1)))))
+    (defn dca-dot (a b)
+        (if (eq (len a) 0) 0
+            (add (mul (head a) (head b)) (dca-dot (tail a) (tail b)))))
+
+    ; Remove the corpus bookkeeping and the deliberately explicit class query.
+    ; The classifier sees only the observed situation.
+    (defn dca-input (row)
+        (do (let s (nth row 3))
+            (let begin (if (eq (nth row 0) "train") 9 24))
+            (let stop (str_find s "; decide whether" begin))
+            (let body (substring s begin stop))
+            (let case-at (str_find body " for case " 0))
+            (if (ge case-at 0) (substring body 0 case-at) body)))
+
+    (defn dca-features-walk (s i L v)
+        (if (ge (add i 1) L) v
+            (do (let h (mod (add (mul (str_byte_at s i) 31)
+                                  (str_byte_at s (add i 1))) (dca-dim)))
+                (dca-features-walk s (add i 1) L (dca-vinc v h 0)))))
+    (defn dca-features (s) (dca-features-walk s 0 (str_len s) (dca-zero)))
+
+    (defn dca-fit-class (rows class acc)
+        (if (eq (len rows) 0) acc
+            (do (let row (head rows))
+                (dca-fit-class (tail rows) class
+                    (if (if (eq (nth row 0) "train") (eq (nth row 1) class) 0)
+                        (dca-vadd acc (dca-features (dca-input row)))
+                        acc)))))
+    (defn dca-fit (rows names)
+        (if (eq (len names) 0) (empty)
+            (cons (dca-fit-class rows (head names) (dca-zero))
+                  (dca-fit rows (tail names)))))
+
+    (defn dca-best (models feat i best-i best-dot best-norm)
+        (if (eq (len models) 0) best-i
+            (do (let dot (dca-dot (head models) feat))
+                (let norm (dca-dot (head models) (head models)))
+                ; Compare cosine^2 without floats. The feature norm is common
+                ; to every class and cancels.
+                (if (if (lt best-dot 0) 1
+                        (gt (mul (mul dot dot) best-norm)
+                            (mul (mul best-dot best-dot) norm)))
+                    (dca-best (tail models) feat (add i 1) i dot norm)
+                    (dca-best (tail models) feat (add i 1) best-i best-dot best-norm)))))
+    (defn dca-predict-index (models s)
+        (dca-best models (dca-features s) 0 0 -1 1))
+    (defn dca-index (names name i)
+        (if (eq (len names) 0) -1
+            (if (eq (head names) name) i (dca-index (tail names) name (add i 1)))))
+
+    ; Row-major confusion matrix: actual class * 5 + predicted class.
+    (defn dca-eval (rows names models matrix)
+        (if (eq (len rows) 0) matrix
+            (do (let row (head rows))
+                (if (eq (nth row 0) "heldout-boundary")
+                    (do (let actual (dca-index names (nth row 1) 0))
+                        (let predicted (dca-predict-index models (dca-input row)))
+                        (dca-eval (tail rows) names models
+                            (dca-vinc matrix (add (mul actual 5) predicted) 0)))
+                    (dca-eval (tail rows) names models matrix)))))
+    (defn dca-diagonal (m i)
+        (if (eq i 5) 0 (add (nth m (add (mul i 5) i)) (dca-diagonal m (add i 1)))))
+
+    ; Exact post-sanitization template overlap between heldout and training.
+    (defn dca-seen-train? (rows input)
+        (if (eq (len rows) 0) 0
+            (if (if (eq (nth (head rows) 0) "train")
+                    (eq (dca-input (head rows)) input) 0)
+                1
+                (dca-seen-train? (tail rows) input))))
+    (defn dca-leakage (all rows)
+        (if (eq (len rows) 0) 0
+            (add
+                (if (eq (nth (head rows) 0) "heldout-boundary")
+                    (dca-seen-train? all (dca-input (head rows)))
+                    0)
+                (dca-leakage all (tail rows)))))
+
+    (defn dca-report ()
+        (do (let rows (dcc-corpus))
+            (let names (dct-names))
+            (let models (dca-fit rows names))
+            (let matrix (dca-eval rows names models (dca-zero-n 25)))
+            (list matrix (dca-diagonal matrix 0) (dca-leakage rows rows)
+                  (if (gt (dca-leakage rows rows) 75)
+                      "insufficient-template-leakage"
+                      "candidate-for-semantic-evaluation"))))
+    0)

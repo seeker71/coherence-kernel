@@ -8,95 +8,155 @@
 ; bytes ARE the text, so this recovers a real transcript without a full xref
 ; walk. The LOGIC is pure Form; only read_file_bytes is a host carrier (so this
 ; lane is Go/Rust/TS — fkwu has no host I/O). inflate is proven four-way on its
-; own band; here it is exercised on real streams.
+; own band; here it is exercised on real streams. `pdf-text-windowed.fk` reaches
+; the same bytes on fkwu through bounded `read_file_slice` windows.
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/inflate.fk
 ;
 ; Named gaps (the robust M2/M4 still to come): cross-reference / object streams,
 ; octal + control escapes in strings, and /ToUnicode CMap glyph remapping for
 ; non-standard font encodings. This path handles the common digital PDF.
+;
+; ---- why every walk here carries its own count -------------------------------
+; The first version of this cell asked "is this list empty?" as `(eq (len xs) 0)`
+; at every step. `head`, `tail` and `cons` are O(1) on fkwu but `len` walks the
+; whole list, so that one idiom made every byte walk quadratic: reversing 262144
+; bytes took 68.7s, and a 459KB file did not finish in 120s. The accumulators had
+; the same shape — `append-list` re-walked the growing result on each step.
+;
+; So each walk now carries the remaining count as an argument and tests `(eq n 0)`,
+; and each accumulator grows by `cons` and is turned right way round once at the
+; end. `len` is called once per list, never once per step. That is only integer
+; comparison and O(1) list ops, so it stays portable to all four kernels — it does
+; not lean on any fkwu-specific reading of `head` on an empty list. Measured
+; after: the same 262144-byte reverse takes 0.156s.
+; (receipts/2026-07-25-pdf-native-window-lane.md)
 
 (do
-    ; ---- list helpers ------------------------------------------------------
-    (defn rev-onto (xs acc) (if (eq (len xs) 0) acc (rev-onto (tail xs) (cons (head xs) acc))))
-    (defn rev (xs) (rev-onto xs (list)))
-    (defn append-list (xs ys) (if (eq (len xs) 0) ys (cons (head xs) (append-list (tail xs) ys))))
-    (defn drop-n (xs n) (if (eq n 0) xs (if (eq (len xs) 0) xs (drop-n (tail xs) (sub n 1)))))
+    ; ---- list helpers, counted ---------------------------------------------
+    (defn rev-onto-n (xs n acc)
+        (if (eq n 0) acc (rev-onto-n (tail xs) (sub n 1) (cons (head xs) acc))))
+    (defn rev-onto (xs acc) (rev-onto-n xs (len xs) acc))
+    (defn rev (xs) (rev-onto-n xs (len xs) (list)))
+    (defn drop-n (xs n) (if (eq n 0) xs (drop-n (tail xs) (sub n 1))))
+    (defn append-list-n (xs n ys)
+        (if (eq n 0) ys (cons (head xs) (append-list-n (tail xs) (sub n 1) ys))))
+    (defn append-list (xs ys) (append-list-n xs (len xs) ys))
+    (defn list-eq-n (a b n)
+        (if (eq n 0) 1
+            (if (eq (head a) (head b)) (list-eq-n (tail a) (tail b) (sub n 1)) 0)))
     (defn list-eq (a b)
-        (if (eq (len a) 0) (if (eq (len b) 0) 1 0)
-            (if (eq (len b) 0) 0
-                (if (eq (head a) (head b)) (list-eq (tail a) (tail b)) 0))))
+        (do (let la (len a))
+            (if (eq la (len b)) (list-eq-n a b la) 0)))
 
-    ; ---- byte-sequence search ----------------------------------------------
-    (defn starts-with (hay needle)
-        (if (eq (len needle) 0) 1
-            (if (eq (len hay) 0) 0
-                (if (eq (head hay) (head needle)) (starts-with (tail hay) (tail needle)) 0))))
-    ; suffix immediately AFTER the first occurrence of needle (empty if absent)
-    (defn after-sub (hay needle)
-        (if (eq (len hay) 0) (list)
-            (if (starts-with hay needle) (drop-n hay (len needle))
-                (after-sub (tail hay) needle))))
-    ; (list collected-reversed rest-at-needle) — collect bytes until needle
-    (defn take-until (hay needle acc)
-        (if (eq (len hay) 0) (list acc hay)
-            (if (starts-with hay needle) (list acc hay)
-                (take-until (tail hay) needle (cons (head hay) acc)))))
+    ; ---- byte-sequence search, counted -------------------------------------
+    (defn starts-with-n (hay hn needle nl)
+        (if (eq nl 0) 1
+            (if (eq hn 0) 0
+                (if (eq (head hay) (head needle))
+                    (starts-with-n (tail hay) (sub hn 1) (tail needle) (sub nl 1))
+                    0))))
+    (defn starts-with (hay needle) (starts-with-n hay (len hay) needle (len needle)))
+    ; (list suffix suffix-len) immediately AFTER the first occurrence of needle;
+    ; (list (list) 0) when the needle is absent.
+    (defn after-sub-n (hay hn needle nl)
+        (if (eq hn 0) (list (list) 0)
+            (if (starts-with-n hay hn needle nl)
+                (list (drop-n hay nl) (sub hn nl))
+                (after-sub-n (tail hay) (sub hn 1) needle nl))))
+    ; (list collected-reversed rest rest-len) — collect bytes until needle
+    (defn take-until-n (hay hn needle nl acc)
+        (if (eq hn 0) (list acc hay hn)
+            (if (starts-with-n hay hn needle nl) (list acc hay hn)
+                (take-until-n (tail hay) (sub hn 1) needle nl (cons (head hay) acc)))))
 
     ; ---- ASCII markers (byte lists) ----------------------------------------
     (defn kw-stream () (list 115 116 114 101 97 109))                  ; "stream"
+    (defn kw-stream-len () 6)
     (defn kw-endstream () (list 101 110 100 115 116 114 101 97 109))   ; "endstream"
+    (defn kw-endstream-len () 9)
 
-    ; skip one CR then one LF after the `stream` keyword
-    (defn skip-eol (xs)
-        (do (let a (if (eq (len xs) 0) xs (if (eq (head xs) 13) (tail xs) xs)))
-            (if (eq (len a) 0) a (if (eq (head a) 10) (tail a) a))))
+    ; skip one CR then one LF after the `stream` keyword -> (list xs n)
+    (defn skip-lf (xs n)
+        (if (eq n 0) (list xs n)
+            (if (eq (head xs) 10) (list (tail xs) (sub n 1)) (list xs n))))
+    (defn skip-eol-n (xs n)
+        (if (eq n 0) (list xs n)
+            (if (eq (head xs) 13) (skip-lf (tail xs) (sub n 1)) (skip-lf xs n))))
 
     ; ---- FlateDecode auto-detect via the zlib header (RFC 1950) ------------
     ;   CMF low nibble = 8 (deflate); (CMF*256 + FLG) divisible by 31.
-    (defn zlib? (data)
-        (if (ge (len data) 2)
+    (defn zlib-n? (data n)
+        (if (lt n 2) 0
             (if (eq (band (head data) 15) 8)
                 (eq (mod (add (mul (head data) 256) (head (tail data))) 31) 0)
-                0)
-            0))
-    (defn maybe-inflate (data) (if (zlib? data) (zlib-inflate data) data))
+                0)))
+    (defn zlib? (data) (zlib-n? data (len data)))
+    (defn maybe-inflate-n (data n) (if (zlib-n? data n) (zlib-inflate data) data))
+    (defn maybe-inflate (data) (maybe-inflate-n data (len data)))
 
     ; ---- walk every stream, accumulate decompressed content ----------------
+    ; acc is held REVERSED while walking; the caller turns it round once.
+    (defn collect-onto (bytes bn acc)
+        (do (let a (after-sub-n bytes bn (kw-stream) (kw-stream-len)))
+            (let an (nth a 1))
+            (if (eq an 0)
+                acc
+                (do (let se (skip-eol-n (nth a 0) an))
+                    (let tu (take-until-n (nth se 0) (nth se 1) (kw-endstream) (kw-endstream-len) (list)))
+                    (let slen (len (nth tu 0)))
+                    (let sdata (rev-onto-n (nth tu 0) slen (list)))
+                    (let inf (maybe-inflate-n sdata slen))
+                    (let tailn (nth tu 2))
+                    (let short (lt tailn (kw-endstream-len)))
+                    (let rest (if short (list) (drop-n (nth tu 1) (kw-endstream-len))))
+                    (let restn (if short 0 (sub tailn (kw-endstream-len))))
+                    (collect-onto rest restn (rev-onto-n inf (len inf) acc))))))
     (defn collect-content (bytes acc)
-        (do (let after (after-sub bytes (kw-stream)))
-            (if (eq (len after) 0) acc
-                (do (let tu (take-until (skip-eol after) (kw-endstream) (list)))
-                    (let sdata (rev (nth tu 0)))
-                    (let rest (drop-n (nth tu 1) 9))
-                    (collect-content rest (append-list acc (maybe-inflate sdata)))))))
+        (do (let r (collect-onto bytes (len bytes) (rev-onto-n acc (len acc) (list))))
+            (rev-onto-n r (len r) (list))))
 
     ; ---- pull text from `( … )` string literals (Tj / TJ operands) ---------
-    ; xs begins after the opening '('; returns (list strbytes-reversed rest).
+    ; xs begins after the opening '('; returns (list strbytes-reversed rest rest-len).
     ; Handles \( \) \\ escapes and balanced nested parens (PDF string grammar).
-    (defn read-paren (xs depth acc)
-        (if (eq (len xs) 0) (list acc xs)
+    (defn read-paren-n (xs n depth acc)
+        (if (eq n 0) (list acc xs n)
             (do (let c (head xs))
                 (if (eq c 92)
-                    (read-paren (drop-n xs 2) depth (cons (head (tail xs)) acc))
+                    (if (lt n 2)
+                        (list acc (list) 0)
+                        (read-paren-n (drop-n xs 2) (sub n 2) depth (cons (head (tail xs)) acc)))
                     (if (eq c 41)
-                        (if (eq depth 0) (list acc (tail xs))
-                            (read-paren (tail xs) (sub depth 1) (cons c acc)))
+                        (if (eq depth 0)
+                            (list acc (tail xs) (sub n 1))
+                            (read-paren-n (tail xs) (sub n 1) (sub depth 1) (cons c acc)))
                         (if (eq c 40)
-                            (read-paren (tail xs) (add depth 1) (cons c acc))
-                            (read-paren (tail xs) depth (cons c acc))))))))
-    (defn extract-text (content out)
-        (if (eq (len content) 0) out
+                            (read-paren-n (tail xs) (sub n 1) (add depth 1) (cons c acc))
+                            (read-paren-n (tail xs) (sub n 1) depth (cons c acc))))))))
+    (defn read-paren (xs depth acc) (read-paren-n xs (len xs) depth acc))
+    ; out is held REVERSED; each string is pushed on in reading order.
+    (defn extract-onto (content n out)
+        (if (eq n 0) out
             (if (eq (head content) 40)
-                (do (let r (read-paren (tail content) 0 (list)))
-                    (extract-text (nth r 1) (append-list out (rev (nth r 0)))))
-                (extract-text (tail content) out))))
+                (do (let r (read-paren-n (tail content) (sub n 1) 0 (list)))
+                    (let sl (len (nth r 0)))
+                    (let s (rev-onto-n (nth r 0) sl (list)))
+                    (extract-onto (nth r 1) (nth r 2) (rev-onto-n s sl out)))
+                (extract-onto (tail content) (sub n 1) out))))
+    (defn extract-text (content out)
+        (do (let r (extract-onto content (len content) (rev-onto-n out (len out) (list))))
+            (rev-onto-n r (len r) (list))))
 
     ; ---- THE ENTRY POINT: path -> extracted text as a byte list ------------
-    (defn pdf-text-file (path)
-        (extract-text (collect-content (read_file_bytes path) (list)) (list)))
+    (defn pdf-text-bytes-n (bytes bn)
+        (do (let crev (collect-onto bytes bn (list)))
+            (let cl (len crev))
+            (let content (rev-onto-n crev cl (list)))
+            (let orev (extract-onto content cl (list)))
+            (rev-onto-n orev (len orev) (list))))
     ; bytes -> text (for in-recipe fixtures, no host I/O)
-    (defn pdf-text-bytes (bytes)
-        (extract-text (collect-content bytes (list)) (list)))
+    (defn pdf-text-bytes (bytes) (pdf-text-bytes-n bytes (len bytes)))
+    (defn pdf-text-file (path)
+        (do (let b (read_file_bytes path)) (pdf-text-bytes-n b (len b))))
 
     0)

@@ -1,0 +1,115 @@
+; ds4-quant-layout.fk — Form-owned byte geometry for the observed DS4 GGUF.
+;
+; This cell knows how many encoded bytes every tensor occupies. It deliberately
+; The pinned ds4 engine's unused type rows were falsified after this cell's
+; first draft: the file itself carries plane-split MXFP4 (type 40) and MXFP8
+; (type 41), now decoded by the body's mxp4/mxp8 cells. Layout readiness and
+; whole-model execution readiness remain separate observations.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/equireach-gguf.fk
+; witnessed: 2026-07-26 -> merged with the file-derived 2026-07-22 geometry;
+; live full-artifact coverage closes exactly at file-size minus data-base
+
+(do
+    (defn dsql-type-known? (t)
+        (or (eq t 0)
+            (or (eq t 1)
+                (or (eq t 16)
+                    (or (eq t 26)
+                        (or (eq t 40) (eq t 41)))))))
+
+    (defn dsql-block-elements (t)
+        (if (eq t 0) 1
+            (if (eq t 1) 1
+                (if (eq t 16) 256
+                    (if (eq t 26) 1
+                        (if (eq t 40) 64
+                            (if (eq t 41) 128 0)))))))
+
+    (defn dsql-block-bytes (t)
+        (if (eq t 0) 4
+            (if (eq t 1) 2
+                (if (eq t 16) 66
+                    (if (eq t 26) 4
+                        (if (eq t 40) 34
+                            (if (eq t 41) 132 0)))))))
+
+    (defn dsql-arithmetic-ready? (t)
+        ; Every format in this artifact now has a Form dequant cell:
+        ; IQ2_XXS plus plane-split MXFP4/MXFP8 joined F32/F16/I32 upstream.
+        (if (dsql-type-known? t) 1 0))
+
+    (defn dsql-nweights-loop (src off i n acc)
+        (if (ge i n) acc
+            (dsql-nweights-loop src off (add i 1) n
+                (mul acc (egg-ti-dim src off i)))))
+
+    (defn dsql-nweights (src off)
+        (dsql-nweights-loop src off 0 (egg-ti-ndims src off) 1))
+
+    (defn dsql-tensor-bytes (src off)
+        (do
+            (let t (egg-ti-type src off))
+            (let block-n (dsql-block-elements t))
+            (let block-bytes (dsql-block-bytes t))
+            (if (or (eq block-n 0) (eq block-bytes 0)) 0
+                (mul (div (dsql-nweights src off) block-n) block-bytes))))
+
+    ; row:
+    ; (ds4-layout tensors layout-known arithmetic-ready unknown-layout
+    ;  type40-tensors type41-tensors encoded-bytes)
+    (defn dsql-row (tensors layout-known arithmetic-ready unknown-layout t40 t41 bytes)
+        (list "ds4-layout" tensors layout-known arithmetic-ready unknown-layout t40 t41 bytes))
+
+    (defn dsql-scan-loop (src off remaining tensors layout-known arithmetic-ready unknown-layout t40 t41 bytes)
+        (if (eq remaining 0)
+            (dsql-row tensors layout-known arithmetic-ready unknown-layout t40 t41 bytes)
+            (do
+                (let t (egg-ti-type src off))
+                (let known (if (dsql-type-known? t) 1 0))
+                (let arithmetic (dsql-arithmetic-ready? t))
+                (dsql-scan-loop src (egg-ti-next src off) (sub remaining 1)
+                    (add tensors 1)
+                    (add layout-known known)
+                    (add arithmetic-ready arithmetic)
+                    (add unknown-layout (if (eq known 1) 0 1))
+                    (add t40 (if (eq t 40) 1 0))
+                    (add t41 (if (eq t 41) 1 0))
+                    (add bytes (dsql-tensor-bytes src off))))))
+
+    (defn dsql-scan-source (src)
+        (dsql-scan-loop src (egg-tinfo-start src) (egg-tensor-count src)
+            0 0 0 0 0 0 0))
+
+    (defn dsql-scan-path (path)
+        (dsql-scan-source (eqr-of-file path 0 8000000)))
+
+    (defn dsql-layout-complete? (row)
+        (if (and (eq (nth row 1) (nth row 2))
+                 (eq (nth row 4) 0)) 1 0))
+
+    (defn dsql-execution-ready? (row)
+        (if (and (eq (dsql-layout-complete? row) 1)
+                 (eq (nth row 1) (nth row 3))) 1 0))
+
+    (defn dsql-render-lines (xs)
+        (if (eq (len xs) 0) ""
+            (str_concat (head xs) (dsql-render-lines (tail xs)))))
+
+    (defn dsql-line (name value)
+        (str_concat name (str_concat "=" (str_concat (int_to_str value) "\n"))))
+
+    (defn dsql-render (row)
+        (dsql-render-lines
+            (list
+                (dsql-line "tensor_count" (nth row 1))
+                (dsql-line "layout_known" (nth row 2))
+                (dsql-line "arithmetic_known" (nth row 3))
+                (dsql-line "unknown_layout" (nth row 4))
+                (dsql-line "type40_tensors" (nth row 5))
+                (dsql-line "type41_tensors" (nth row 6))
+                (dsql-line "encoded_tensor_bytes" (nth row 7))
+                (dsql-line "layout_complete" (dsql-layout-complete? row))
+                (dsql-line "execution_ready" (dsql-execution-ready? row)))))
+
+    0)

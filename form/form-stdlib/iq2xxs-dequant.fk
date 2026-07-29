@@ -1,0 +1,197 @@
+;; iq2xxs-dequant.fk — GGUF type 16 (IQ2_XXS) superblock dequant as a Form recipe.
+;;
+;; WHY THIS EXISTS. The DeepSeek V4 Flash file is 1406 tensors; gguf-manifest.fk measured type 16
+;; (IQ2_XXS) at 93 tensors / 38.9 GB / 42.6% of the model — the single largest byte-share the body
+;; had no carver for. It is the expert weights of 31 of 43 layers. This recipe closes it on the CPU,
+;; so the manifest's `gm-blk n 256 66` geometry (256 elements / 66 bytes, proven by that file's own
+;; offset chain) becomes real f32 weights.
+;;
+;; THE BLOCK (ggml block_iq2_xxs, QK_K=256), 66 bytes at the block base:
+;;   d   f16      off + 0    the super-scale, 2 little-endian bytes
+;;   qs  u16[32]  off + 2    64 bytes = 8 groups of 8 bytes (ib32 = 0..7)
+;; Each 8-byte group carries 4 codebook indices then a 32-bit sign/scale word:
+;;   aux8[0..3] = the group's bytes 0..3     (each 0..255, an index into the 256-entry grid)
+;;   aux1       = the group's bytes 4..7 as a little-endian u32
+;;   scalecode  = aux1 >> 28  (the top 4 bits = high nibble of byte 7)
+;;   scale      = 0.125 * d * (2*scalecode + 1)
+;;   for l in 0..3:  sign_idx = (aux1 >> (7*l)) & 127
+;;                   signs     = ksigns[sign_idx]                 (an 8-bit sign mask)
+;;                   for j in 0..7:  mag  = grid[ aux8[l] ][j]    (magnitude byte, one of 8/25/43)
+;;                                   w    = scale * mag * (bit j of signs ? -1 : +1)
+;;   output element index  =  ib32*32 + l*8 + j.
+;;
+;; EVERY BIT-OP IS AN ARITHMETIC IDENTITY, so like q6k-dequant.fk this needs no bitwise primitive and
+;; proves on the four-way arithmetic floor:
+;;   x >> s        = (div x 2^s)      x & (2^k - 1) = (mod x 2^k)      x & (1<<j) ? = (mod (div x 2^j) 2)
+;; d enters as f32 via f16-decode's fd-f16 (the proven adjacent rung). w is an EXACT product of a
+;; f16-derived d with 0.125 (dyadic), a small odd int (2*scalecode+1 <= 31) and a small magnitude
+;; (<= 43) — <= 21 significant bits — so it is bit-identical in f32 and f64: no accumulation, no blur.
+;;
+;; PROVENANCE (rent, do not copy). The two fixed tables below are the published ggml constants,
+;; transcribed independently: the 256-entry codebook `iq2xxs_grid` (each uint64 expanded to its 8
+;; little-endian magnitude bytes -> 2048 values, only 8/25/43 ever appear) and `ksigns_iq2xs[128]`.
+;; Source: ds4-engine ds4.c (MIT) iq2xxs_grid / ksigns_iq2xs, cross-checked byte-identical against
+;; ds4_iq2_tables_cuda.inc (a second independent copy). The UNPACK above was written from the ggml
+;; formula in div/mod form, NOT lifted — ds4's C uses shifts; if a translation slipped, the from-spec
+;; Python oracle (real shifts) would diverge. It does not: bit-exact, head and distant block. `boundborrow`
+;; noted — ds4 targets a GB10; our regime is the M-series CPU, and only the fixed integer tables travel.
+;;
+;; RADIUS (`aporon`). CPU dequant only. GPU (MSL) emission is the NEXT stone, as q6k-msl.fk / mxfp4-msl.fk
+;; are for their types. The recipe reads a byte LIST (the q6k-dequant / weight-load idiom); carving those
+;; bytes out of a whole-file buffer is wl-slice's job, reused, not re-derived.
+;;
+;; Kin: q6k-dequant.fk (the superblock-unpack idiom and the bounds seam), weight-load.fk (wl-slice /
+;; wl-u16 carve a real tensor's bytes), f16-decode.fk (fd-f16), gguf-manifest.fk (gm-blk n 256 66 —
+;; the geometry this decodes), equireach-gguf.fk (egg-find-tensor locates a real type-16 tensor).
+;;
+;; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk
+;;
+;; Proven by: form-stdlib/tests/iq2xxs-dequant-band.fk (four-way; fixture carries a REAL DeepSeek
+;; blk.0.ffn_down_exps.weight IQ2_XXS block, bit-exact vs the from-spec oracle).
+
+(do
+    ;; ===== the published IQ2_XXS codebook: 256 entries x 8 little-endian magnitude bytes =====
+    (defn iq2-grid () (list
+        8 8 8 8 8 8 8 8 43 8 8 8 8 8 8 8 25 25 8 8 8 8 8 8 8 43 8 8 8 8 8 8
+        43 43 8 8 8 8 8 8 25 8 25 8 8 8 8 8 8 25 25 8 8 8 8 8 8 8 43 8 8 8 8 8
+        43 8 43 8 8 8 8 8 8 43 43 8 8 8 8 8 43 43 43 8 8 8 8 8 25 8 8 25 8 8 8 8
+        8 25 8 25 8 8 8 8 8 8 25 25 8 8 8 8 8 43 25 25 8 8 8 8 25 8 43 25 8 8 8 8
+        8 25 43 25 8 8 8 8 8 8 8 43 8 8 8 8 43 8 8 43 8 8 8 8 43 43 8 43 8 8 8 8
+        43 8 43 43 8 8 8 8 25 8 8 8 25 8 8 8 8 25 8 8 25 8 8 8 8 8 25 8 25 8 8 8
+        25 25 25 8 25 8 8 8 8 8 8 25 25 8 8 8 8 25 8 43 25 8 8 8 8 43 25 43 25 8 8 8
+        8 8 8 8 43 8 8 8 43 8 8 8 43 8 8 8 43 8 43 8 43 8 8 8 43 8 8 43 43 8 8 8
+        25 8 8 8 8 25 8 8 8 25 8 8 8 25 8 8 8 8 25 8 8 25 8 8 25 8 43 8 8 25 8 8
+        8 25 43 8 8 25 8 8 8 8 8 25 8 25 8 8 43 8 8 25 8 25 8 8 8 43 8 25 8 25 8 8
+        8 8 43 25 8 25 8 8 25 8 8 43 8 25 8 8 8 25 8 43 8 25 8 8 8 8 25 43 8 25 8 8
+        8 25 43 43 8 25 8 8 8 8 8 8 25 25 8 8 43 8 8 8 25 25 8 8 8 43 8 8 25 25 8 8
+        8 8 43 8 25 25 8 8 43 25 8 25 25 25 8 8 25 43 43 25 25 25 8 8 8 8 8 43 25 25 8 8
+        25 8 25 43 25 25 8 8 25 43 8 8 43 25 8 8 8 8 25 8 43 25 8 8 8 8 8 25 43 25 8 8
+        8 25 8 43 43 25 8 8 8 25 43 43 43 25 8 8 8 8 8 8 8 43 8 8 25 25 8 8 8 43 8 8
+        8 43 8 8 8 43 8 8 8 25 25 8 8 43 8 8 8 43 43 8 8 43 8 8 25 8 8 25 8 43 8 8
+        8 25 8 25 8 43 8 8 8 8 25 25 8 43 8 8 43 8 25 25 8 43 8 8 8 43 8 43 8 43 8 8
+        8 25 8 8 25 43 8 8 8 8 8 25 25 43 8 8 43 8 8 8 43 43 8 8 8 25 25 8 43 43 8 8
+        25 8 8 8 8 8 25 8 8 25 8 8 8 8 25 8 8 8 25 8 8 8 25 8 25 8 43 8 8 8 25 8
+        8 8 8 25 8 8 25 8 8 8 43 25 8 8 25 8 8 25 8 43 8 8 25 8 8 8 25 43 8 8 25 8
+        25 25 25 43 8 8 25 8 8 8 8 8 25 8 25 8 8 43 8 8 25 8 25 8 8 8 43 8 25 8 25 8
+        8 8 25 25 25 8 25 8 43 43 25 25 25 8 25 8 8 8 8 43 25 8 25 8 8 25 43 8 43 8 25 8
+        25 25 8 25 43 8 25 8 8 8 8 8 8 25 25 8 8 43 8 8 8 25 25 8 8 8 43 8 8 25 25 8
+        25 25 43 8 8 25 25 8 25 43 8 25 8 25 25 8 8 8 8 43 8 25 25 8 8 43 25 8 25 25 25 8
+        43 8 43 25 25 25 25 8 8 8 8 8 43 25 25 8 43 25 25 8 43 25 25 8 25 8 8 8 8 43 25 8
+        8 25 8 8 8 43 25 8 8 8 25 8 8 43 25 8 8 8 8 25 8 43 25 8 25 8 8 43 8 43 25 8
+        8 8 8 8 25 43 25 8 25 25 8 8 25 43 25 8 8 8 43 43 25 43 25 8 25 8 25 25 43 43 25 8
+        8 8 8 8 8 8 43 8 43 8 8 8 8 8 43 8 43 43 8 8 8 8 43 8 8 25 8 25 8 8 43 8
+        25 8 43 25 8 8 43 8 8 8 8 43 8 8 43 8 43 8 8 43 8 8 43 8 25 43 43 8 25 8 43 8
+        8 43 8 25 25 8 43 8 8 8 8 8 43 8 43 8 43 8 8 8 43 8 43 8 25 8 8 8 8 25 43 8
+        8 25 8 8 8 25 43 8 8 8 25 8 8 25 43 8 8 8 8 25 8 25 43 8 43 25 25 25 8 25 43 8
+        8 8 8 8 25 25 43 8 25 8 8 25 25 25 43 8 8 25 43 25 25 25 43 8 8 8 25 43 43 25 43 8
+        8 43 8 8 8 43 43 8 8 8 43 8 8 43 43 8 8 25 25 43 8 43 43 8 8 25 8 25 43 43 43 8
+        25 8 8 8 8 8 8 25 8 25 8 8 8 8 8 25 8 8 25 8 8 8 8 25 8 43 25 8 8 8 8 25
+        25 8 43 8 8 8 8 25 8 25 43 8 8 8 8 25 8 8 8 25 8 8 8 25 8 43 8 25 8 8 8 25
+        43 25 25 25 8 8 8 25 8 8 43 25 8 8 8 25 25 8 8 43 8 8 8 25 8 25 8 43 8 8 8 25
+        8 8 25 43 8 8 8 25 8 8 8 8 25 8 8 25 8 8 43 8 25 8 8 25 25 8 43 25 25 8 8 25
+        8 8 8 43 25 8 8 25 25 25 8 43 25 8 8 25 25 8 8 8 43 8 8 25 8 8 25 8 43 8 8 25
+        8 43 8 25 43 8 8 25 43 25 25 25 43 8 8 25 8 43 43 25 43 8 8 25 8 8 8 8 8 25 8 25
+        8 43 8 8 8 25 8 25 8 8 43 8 8 25 8 25 8 8 8 43 8 25 8 25 25 43 25 43 8 25 8 25
+        43 8 25 8 25 25 8 25 8 25 43 8 25 25 8 25 8 8 8 8 43 25 8 25 25 8 8 8 8 43 8 25
+        8 25 8 8 8 43 8 25 8 8 25 8 8 43 8 25 8 8 8 25 8 43 8 25 25 25 8 25 8 43 8 25
+        8 8 8 8 25 43 8 25 8 43 25 25 25 43 8 25 25 8 43 25 25 43 8 25 43 8 8 43 25 43 8 25
+        25 25 8 25 43 43 8 25 8 8 25 43 43 43 8 25 8 8 8 8 8 8 25 25 8 43 8 8 8 8 25 25
+        25 8 25 8 8 8 25 25 25 43 25 8 8 8 25 25 8 8 43 8 8 8 25 25 8 8 8 43 8 8 25 25
+        8 43 8 43 8 8 25 25 8 25 8 8 25 8 25 25 43 8 8 25 25 8 25 25 8 25 43 43 25 8 25 25
+        25 8 25 43 43 8 25 25 8 8 25 43 8 25 25 25 43 8 25 43 8 25 25 25 43 43 8 8 25 25 25 25
+        25 8 8 8 43 25 25 25 8 25 25 25 43 25 25 25 8 8 8 8 8 43 25 25 25 8 25 8 8 43 25 25
+        25 43 25 8 8 43 25 25 8 25 43 25 8 43 25 25 8 8 8 25 25 43 25 25 8 43 8 8 43 43 25 25
+        8 25 8 8 8 8 43 25 8 8 25 8 8 8 43 25 8 8 8 25 8 8 43 25 8 43 43 25 8 8 43 25
+        8 8 8 8 25 8 43 25 25 25 25 25 25 8 43 25 8 43 25 8 43 8 43 25 8 8 43 25 43 8 43 25
+        8 8 8 8 8 25 43 25 25 25 8 8 8 25 43 25 8 8 25 8 25 25 43 25 43 8 25 8 25 25 43 25
+        8 25 8 43 25 25 43 25 43 8 8 25 8 43 43 25 8 8 8 8 8 8 8 43 43 8 8 8 8 8 8 43
+        43 43 8 8 8 8 8 43 25 8 8 25 8 8 8 43 43 8 8 43 8 8 8 43 8 25 8 8 25 8 8 43
+        8 43 25 8 25 8 8 43 8 8 8 25 25 8 8 43 25 8 25 8 43 8 8 43 25 8 8 8 8 25 8 43
+        8 25 8 8 8 25 8 43 8 8 25 8 8 25 8 43 25 25 25 8 8 25 8 43 8 8 8 25 8 25 8 43
+        8 8 43 25 8 25 8 43 8 8 8 8 25 25 8 43 43 25 8 25 25 25 8 43 8 25 25 43 25 25 8 43
+        25 43 8 8 43 25 8 43 8 8 8 25 43 25 8 43 8 8 43 25 43 25 8 43 43 8 8 8 8 43 8 43
+        8 25 8 8 25 43 8 43 25 8 25 8 43 43 8 43 8 25 8 8 8 8 25 43 8 8 25 8 8 8 25 43
+        8 25 43 8 8 8 25 43 8 8 8 25 8 8 25 43 25 8 43 43 8 8 25 43 43 25 25 8 25 8 25 43
+        8 8 8 43 25 8 25 43 25 25 8 25 43 8 25 43 8 8 8 8 8 25 25 43 43 8 43 8 8 25 25 43
+        8 25 8 25 8 25 25 43 25 8 25 25 25 25 25 43 25 8 8 43 8 43 25 43 8 8 43 8 25 43 25 43
+        43 8 8 8 8 8 43 43 8 8 25 25 8 8 43 43 25 25 8 43 8 8 43 43 25 43 8 8 25 8 43 43
+        8 8 8 8 43 8 43 43 8 43 25 8 8 25 43 43 8 8 25 25 8 43 43 43 8 25 8 8 25 43 43 43))
+    ;; ===== ksigns_iq2xs[128]: sign_idx -> 8-bit sign mask =====
+    (defn iq2-ksigns () (list
+        0 129 130 3 132 5 6 135 136 9 10 139 12 141 142 15 144 17 18 147 20 149 150 23 24 153 154 27 156 29 30 159
+        160 33 34 163 36 165 166 39 40 169 170 43 172 45 46 175 48 177 178 51 180 53 54 183 184 57 58 187 60 189 190 63
+        192 65 66 195 68 197 198 71 72 201 202 75 204 77 78 207 80 209 210 83 212 85 86 215 216 89 90 219 92 221 222 95
+        96 225 226 99 228 101 102 231 232 105 106 235 108 237 238 111 240 113 114 243 116 245 246 119 120 249 250 123 252 125 126 255))
+
+    ;; integer mod via floor-div (operands are non-negative bytes/indices)
+    (defn iq2-mod (a n) (sub a (mul (div a n) n)))
+    ;; 2^k, k >= 0 (k is small: 0..21 for the sign shift, 0..7 for the sign bit)
+    (defn iq2-pow2 (k) (if (eq k 0) 1 (mul 2 (iq2-pow2 (sub k 1)))))
+
+    ;; --- the block wall, named once (q6k's bounds seam, same shape) ---
+    (defn iq2-block-n () 256)
+    (defn iq2-block-bytes () 66)
+    (defn iq2-index-ok? (i) (if (lt i 0) 0 (if (lt i (iq2-block-n)) 1 0)))
+
+    ;; --- little-endian u16 at off (the raw f16 bit pattern of d) ---
+    (defn iq2-u16 (bytes off) (add (nth bytes off) (mul 256 (nth bytes (add off 1)))))
+    ;; --- the super-scale d, decoded from the block's own f16 bytes at off+0 ---
+    (defn iq2-d (bytes off) (fd-f16 (iq2-u16 bytes off)))
+
+    ;; --- output index i (0..255) decomposition ---
+    (defn iq2-ib32 (i) (div i 32))              ; which group of 32 (0..7)
+    (defn iq2-rem  (i) (iq2-mod i 32))          ; within the group (0..31)
+    (defn iq2-l    (i) (div (iq2-rem i) 8))     ; which sub-block of 8 (0..3)
+    (defn iq2-j    (i) (iq2-mod (iq2-rem i) 8)) ; which element in the sub-block (0..7)
+
+    ;; --- the group's byte base inside the block: off + 2 (past d) + 8*ib32 ---
+    (defn iq2-gbase (off i) (add (add off 2) (mul 8 (iq2-ib32 i))))
+    ;; --- aux8[l]: the codebook index for sub-block l = group byte l ---
+    (defn iq2-gidx (bytes off i) (nth bytes (add (iq2-gbase off i) (iq2-l i))))
+    ;; --- aux1: the group's sign/scale u32 = little-endian of group bytes 4..7 ---
+    (defn iq2-aux1 (bytes off i)
+        (add (nth bytes (add (iq2-gbase off i) 4))
+        (add (mul 256      (nth bytes (add (iq2-gbase off i) 5)))
+        (add (mul 65536    (nth bytes (add (iq2-gbase off i) 6)))
+             (mul 16777216 (nth bytes (add (iq2-gbase off i) 7)))))))
+    ;; --- scalecode = aux1 >> 28 = high nibble of byte 7 = div byte7 16 ---
+    (defn iq2-scalecode (bytes off i) (div (nth bytes (add (iq2-gbase off i) 7)) 16))
+    ;; --- scale = 0.125 * d * (2*scalecode + 1) ---
+    (defn iq2-scale (bytes off i d)
+        (mul (mul 0.125 d) (add (mul 2 (iq2-scalecode bytes off i)) 1)))
+
+    ;; --- sign_idx for sub-block l: (aux1 >> 7l) & 127 ---
+    (defn iq2-signidx (bytes off i)
+        (iq2-mod (div (iq2-aux1 bytes off i) (iq2-pow2 (mul 7 (iq2-l i)))) 128))
+    ;; --- the 8-bit sign mask from ksigns ---
+    (defn iq2-signs (bytes off i) (nth (iq2-ksigns) (iq2-signidx bytes off i)))
+    ;; --- +1 / -1 for element j: bit j of the sign mask ---
+    (defn iq2-sign (bytes off i)
+        (if (eq (iq2-mod (div (iq2-signs bytes off i) (iq2-pow2 (iq2-j i))) 2) 1) -1 1))
+    ;; --- the magnitude: grid[ aux8[l] ][ j ] = flat index gidx*8 + j ---
+    (defn iq2-mag (bytes off i)
+        (nth (iq2-grid) (add (mul (iq2-gidx bytes off i) 8) (iq2-j i))))
+
+    ;; --- the dequantized weight at output index i (0..255), inside the block at `off` ---
+    (defn iq2-at (bytes off i)
+        (if (eq (iq2-index-ok? i) 1)
+            (mul (mul (iq2-scale bytes off i (iq2-d bytes off)) (iq2-sign bytes off i))
+                 (iq2-mag bytes off i))
+            (form_error "iq2-at: weight index outside the 256-weight IQ2_XXS block -- stride to the next block (66-byte stride) instead of indexing past it")))
+
+    ;; --- the whole block as a 256-long list ---
+    (defn iq2-dequant-from (bytes off i n)
+        (if (eq i n) (empty)
+            (cons (iq2-at bytes off i) (iq2-dequant-from bytes off (add i 1) n))))
+    (defn iq2-dequant (bytes off) (iq2-dequant-from bytes off 0 256))
+
+    ;; --- flat-tensor accessor: weight i of a type-16 TENSOR whose block 0 starts at `base`.
+    ;; The block is 66 bytes; weight i lives in block (div i 256) at within-index (mod i 256).
+    ;; Same stride pattern as wl-q6k-at-flat, for any i (not just 0..255). ---
+    (defn iq2-stride () 66)
+    (defn iq2-block-of (i) (div i 256))
+    (defn iq2-within (i) (sub i (mul (iq2-block-of i) 256)))
+    (defn iq2-at-flat (bytes base i)
+        (iq2-at bytes (add base (mul (iq2-stride) (iq2-block-of i))) (iq2-within i)))
+
+    0)

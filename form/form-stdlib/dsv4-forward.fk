@@ -1,0 +1,178 @@
+; dsv4-forward.fk — the assembled DeepSeek-V4-Flash first-token forward. This is the
+; capstone: it wires the proven subsystems (hyper-connections dsv4-hc.fk, MLA attention
+; mla-attn.fk, RMSNorm/SwiGLU llama-numerics.fk) into the exact sequence ds4-engine's
+; own CPU reference runs for the first token, and adds the one piece not yet in this
+; body — the routed Mixture-of-Experts FFN with its sqrt-softplus / biased-top-k router.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk form-stdlib/dsv4-hc.fk
+;
+; ---------------------------------------------------------------------------
+; PROVENANCE. The control flow is read from ds4-engine (MIT) at
+; /Users/ursmuff/models/ds4-engine — ds4.c's own first-token CPU path, quoted by line,
+; NOT copied. `boundborrow`: ds4 targets a GB10; no layout, no f16/fp8 crossed over —
+; only the SHAPE of the computation. This body is fp64 throughout.
+;
+;   ds4.c:13848 forward_first_token_cpu    embed -> hc broadcast -> layers -> collapse -> norm -> vocab
+;   ds4.c:13793 layer_forward_self_one     attn half (hc_pre -> MLA -> hc_post) then layer_ffn_one
+;   ds4.c:11437 layer_ffn_one              hc_pre -> ffn_norm -> (routed MoE + shared FFN) -> hc_post
+;   ds4.c:10697 layer_routed_moe_one       the routed experts, and the router weight
+;   ds4.c:10588 layer_router_probs_one     probs[i] = sqrt(softplus(logit[i]))   (UNbiased)
+;   ds4.c:10665 layer_topk..from_probs     selection = probs + exp_probs_b bias; top-k; weight by probs
+;   ds4.c:10430 swiglu / :10444 shared     silu(clamp(gate))*clamp(up); shared has no router weight
+;   ds4.c:13876 output_hc_head_one         collapse the n_hc streams before the vocab head
+;
+; Every piece the forward needs was proven separately and is reused here unchanged:
+;   HC   (dsv4-hc.fk, band 63)  hc-broadcast, hc-pre, hc-post, hc-out-head
+;   MLA  (mla-attn.fk, band 63) mla-cache-row, mla-block-one, mla-cfg, mla-w
+;   norm/act (llama-numerics.fk) ln-rmsnorm, ln-silu
+; The only NEW arithmetic below is the routed-MoE router and the clamped SwiGLU expert
+; fold. Its evidence class is named in the band (dsv4-forward-band.fk): AGREEMENT with an
+; independent fp64 transcription of ds4.c, at toy dims. NOT bit-exact, NOT the real dims,
+; NOT the quantised weights, NOT the GPU. See the band's radius.
+;
+; THE FIRST-TOKEN SIMPLIFICATIONS, grounded (receipts/2026-07-22-dsv4-subsystems.md):
+;   * compressor + indexer are NEVER called on forward_first_token_cpu (dormant below their
+;     sill; n_comp=0 => indexer identity). aporon: this forward omits both, faithfully.
+;   * pos=0 => every RoPE is the identity (cos 0 = 1, sin 0 = 0) AND, with a single cache
+;     row, relative position is zero so RoPE is a no-op even at pos>0 (q and k rotate by the
+;     same angle; the output un-rotates). RoPE-at-position is owned by the MLA band, not this
+;     one; the pos argument is threaded so the recipe is not hard-wired to zero.
+
+; ===========================================================================
+; deterministic weight generator — Park-Miller (MINSTD). Integer-exact; the band's
+; oracle reproduces this bit-for-bit so both sides consume IDENTICAL toy weights.
+; ===========================================================================
+(defn dsv4-pm-next (s) (mod (mul 16807 s) 2147483647))
+(defn dsv4-pm-at (seed i) (dsv4-pm-next (dsv4-pm-next (dsv4-pm-next (add (mul seed 100003) (add i 1))))))
+(defn dsv4-gen-w (seed i amp) (mul amp (sub (div (mul 2.0 (dsv4-pm-at seed i)) 2147483647.0) 1.0)))
+(defn dsv4-gen-vec-go (seed n i amp)
+  (if (eq i n) (empty) (cons (dsv4-gen-w seed i amp) (dsv4-gen-vec-go seed n (add i 1) amp))))
+(defn dsv4-gen-vec (seed n amp) (dsv4-gen-vec-go seed n 0 amp))
+(defn dsv4-gen-mat-go (seed rows cols r amp)
+  (if (eq r rows) (empty)
+      (cons (dsv4-gen-vec-go seed (mul (add r 1) cols) (mul r cols) amp)
+            (dsv4-gen-mat-go seed rows cols (add r 1) amp))))
+; row r holds indices [r*cols .. (r+1)*cols) — same flat index as the oracle's r*cols+c
+(defn dsv4-gen-mat (seed rows cols amp) (dsv4-gen-mat-go seed rows cols 0 amp))
+; add 1.0 to each element (for norm gains, centred near 1)
+(defn dsv4-plus1 (v) (if (eq (len v) 0) (empty) (cons (add 1.0 (head v)) (dsv4-plus1 (tail v)))))
+
+; ===========================================================================
+; the routed-MoE router (ds4.c:10588 / 10665)
+; ===========================================================================
+; softplus(z) = ln(1 + e^z); probs = sqrt(softplus(logit)). Toy magnitudes are O(1),
+; well inside ds4's |x|<20 stable branch, so the plain form is exact enough.
+(defn dsv4-softplus (z) (fln (add 1.0 (tn-exp z))))
+(defn dsv4-probs (logits)
+  (if (eq (len logits) 0) (empty)
+      (cons (tn-sqrt (dsv4-softplus (head logits))) (dsv4-probs (tail logits)))))
+; --- top-k by descending score: repeated argmax (== ds4's topk_desc SET) ---
+(defn dsv4-set-nth (xs i v)
+  (if (eq i 0) (cons v (tail xs)) (cons (head xs) (dsv4-set-nth (tail xs) (sub i 1) v))))
+(defn dsv4-argmax-go (xs i best bi)
+  (if (eq (len xs) 0) bi
+      (if (gt (head xs) best) (dsv4-argmax-go (tail xs) (add i 1) (head xs) i)
+          (dsv4-argmax-go (tail xs) (add i 1) best bi))))
+(defn dsv4-argmax (xs) (dsv4-argmax-go (tail xs) 1 (head xs) 0))
+(defn dsv4-topk-go (scores k acc)
+  (if (eq k 0) acc
+      (do (let i (dsv4-argmax scores))
+          (dsv4-topk-go (dsv4-set-nth scores i -1000000000.0) (sub k 1) (cons i acc)))))
+(defn dsv4-topk (scores k) (dsv4-topk-go scores k (empty)))
+(defn dsv4-gather (xs idxs)
+  (if (eq (len idxs) 0) (empty) (cons (nth xs (head idxs)) (dsv4-gather xs (tail idxs)))))
+
+; ===========================================================================
+; the clamped SwiGLU expert fold (ds4.c:10430 swiglu + :10828 the routed weight)
+;   gate is clamped ABOVE only; up is clamped to [-lim, lim]; result = silu(gate)*up*w
+; clamp is disabled when lim <= 1e-6 (ds4's `if (clamp > 1.0e-6f)`).
+; ===========================================================================
+(defn dsv4-cl-hi (x lim) (if (gt lim 0.000001) (if (gt x lim) lim x) x))
+(defn dsv4-cl-lo (x lim) (if (gt lim 0.000001) (if (lt x (sub 0.0 lim)) (sub 0.0 lim) x) x))
+(defn dsv4-mid (gate up w lim)
+  (if (eq (len gate) 0) (empty)
+      (cons (mul (mul (ln-silu (dsv4-cl-hi (head gate) lim))
+                      (dsv4-cl-lo (dsv4-cl-hi (head up) lim) lim)) w)
+            (dsv4-mid (tail gate) (tail up) w lim))))
+; one expert = (gate up down); out = down · (silu(clamp gate)·clamp(up)·w)
+(defn dsv4-expert-out (norm expert w lim)
+  (tb-matvec (nth expert 2) (dsv4-mid (tb-matvec (nth expert 0) norm) (tb-matvec (nth expert 1) norm) w lim)))
+(defn dsv4-moe-acc (norm experts sel ews acc lim)
+  (if (eq (len sel) 0) acc
+      (dsv4-moe-acc norm experts (tail sel) (tail ews)
+                    (tb-vec-add acc (dsv4-expert-out norm (nth experts (head sel)) (head ews) lim)) lim)))
+; the routed MoE output for one token (ds4.c:10697)
+(defn dsv4-routed-moe (norm gate-inp bias experts n-used wscale lim)
+  (do (let probs (dsv4-probs (tb-matvec gate-inp norm)))
+      (let sel (dsv4-topk (tb-vec-add probs bias) n-used))
+      (let ewraw (dsv4-gather probs sel))
+      (let s0 (tn-sum ewraw))
+      (let s (if (lt s0 0.00006103515625) 0.00006103515625 s0))
+      (let ews (tn-scale ewraw (div wscale s)))
+      (dsv4-moe-acc norm experts sel ews (tb-zeros (len norm)) lim)))
+; the shared expert (ds4.c:10444): a normal clamped SwiGLU MLP, router weight 1.0
+(defn dsv4-shared (norm g u d lim)
+  (tb-matvec d (dsv4-mid (tb-matvec g norm) (tb-matvec u norm) 1.0 lim)))
+
+; ===========================================================================
+; the cfg bundle. mla = (mla-cfg nh hd nrot ng base eps); plus HC/MoE scalars.
+; ===========================================================================
+(defn dsv4-cfg (mla n_hc iters n_used wscale clamp) (list mla n_hc iters n_used wscale clamp))
+(defn dsv4-cfg-mla    (c) (nth c 0))
+(defn dsv4-cfg-nhc    (c) (nth c 1))
+(defn dsv4-cfg-iters  (c) (nth c 2))
+(defn dsv4-cfg-nused  (c) (nth c 3))
+(defn dsv4-cfg-wscale (c) (nth c 4))
+(defn dsv4-cfg-clamp  (c) (nth c 5))
+
+; the per-layer weight bundle Lw:
+;   0 hc_attn_fn  1 hc_attn_scale  2 hc_attn_base
+;   3 hc_ffn_fn   4 hc_ffn_scale   5 hc_ffn_base
+;   6 mla-w  (the mla-attn.fk bundle: an wqa gqa wqb wkv gkv was wb sinks)
+;   7 ffn_norm
+;   8 gate_inp  9 bias  10 experts  11 sh_gate  12 sh_up  13 sh_down
+; the global weights Gw: 0 out_hc_fn 1 out_hc_scale 2 out_hc_base 3 out_norm 4 output
+
+; ===========================================================================
+; one layer (ds4.c:13793). attention half then FFN half, each HC-wrapped.
+; ===========================================================================
+(defn dsv4-attn-half (C Lw streams pos)
+  (do (let mc (dsv4-cfg-mla C))
+      (let n_hc (dsv4-cfg-nhc C))
+      (let eps (mla-cfg-eps mc))
+      (let pr (hc-pre (nth Lw 0) (nth Lw 1) (nth Lw 2) streams n_hc (dsv4-cfg-iters C) eps))
+      (let attn-cur (hc-pre-input pr))
+      (let w (nth Lw 6))
+      (let row (mla-cache-row w mc attn-cur pos))
+      (let attn-out (mla-block-one w mc attn-cur pos (list row)))
+      (hc-post attn-out streams (hc-pre-post pr) (hc-pre-comb pr) n_hc)))
+(defn dsv4-ffn-half (C Lw streams)
+  (do (let mc (dsv4-cfg-mla C))
+      (let n_hc (dsv4-cfg-nhc C))
+      (let eps (mla-cfg-eps mc))
+      (let lim (dsv4-cfg-clamp C))
+      (let pr (hc-pre (nth Lw 3) (nth Lw 4) (nth Lw 5) streams n_hc (dsv4-cfg-iters C) eps))
+      (let norm (ln-rmsnorm (hc-pre-input pr) (nth Lw 7) eps))
+      (let moe (dsv4-routed-moe norm (nth Lw 8) (nth Lw 9) (nth Lw 10)
+                                (dsv4-cfg-nused C) (dsv4-cfg-wscale C) lim))
+      (let shared (dsv4-shared norm (nth Lw 11) (nth Lw 12) (nth Lw 13) lim))
+      (hc-post (tb-vec-add moe shared) streams (hc-pre-post pr) (hc-pre-comb pr) n_hc)))
+(defn dsv4-layer (C Lw streams pos) (dsv4-ffn-half C Lw (dsv4-attn-half C Lw streams pos)))
+(defn dsv4-run-layers (C Lws streams pos)
+  (if (eq (len Lws) 0) streams
+      (dsv4-run-layers C (tail Lws) (dsv4-layer C (head Lws) streams pos) pos)))
+
+; ===========================================================================
+; the head (ds4.c:13876 + :13904): collapse streams, RMSNorm, vocab projection.
+; ===========================================================================
+(defn dsv4-head (Gw streams eps)
+  (tb-matvec (nth Gw 4)
+             (ln-rmsnorm (hc-out-head (nth Gw 0) (nth Gw 1) (nth Gw 2) streams eps) (nth Gw 3) eps)))
+
+; ===========================================================================
+; the whole first-token forward (ds4.c:13848): plain is the token's embedding row.
+; Returns the vocab logits; (dsv4-argmax logits) is the first token id.
+; ===========================================================================
+(defn dsv4-forward (C Lws Gw plain pos)
+  (do (let mc (dsv4-cfg-mla C))
+      (dsv4-head Gw (dsv4-run-layers C Lws (hc-broadcast (dsv4-cfg-nhc C) plain) pos) (mla-cfg-eps mc))))

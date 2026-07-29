@@ -1,0 +1,139 @@
+; steiner-py-native.fk — the graph writes Python, and the BODY runs it.
+;
+; Urs: "using host-exec during generation is cheating and avoids the actual
+; learning-how-to-code task." He is right, and the cheat was sharper than
+; shelling out. The prior emitter concatenated a Python TEMPLATE I had written
+; by hand, then asked python3 whether my template worked. The body never had a
+; model of Python at any point — it interpolated numbers into someone else's
+; strings and outsourced the judgement. Execution-checking is exactly what lets
+; you skip having a model, which is why it felt like proof.
+;
+; So: no host-exec here, and no python3. The body already carries Python as a
+; MODEL — form-stdlib/grammars/python-bmf.fk gives the constructs and
+; form-stdlib/python-bmf-eval.fk walks them back to values. This cell builds a
+; Python program as STRUCTURE out of that model, from the meaning graph, and
+; evaluates it with the body's own evaluator.
+;
+; WHAT THE GRAPH WRITES
+;   The program below is the Python for "how many members does this concept
+;   have", over a column the graph supplies:
+;
+;     total = 0
+;     i = 0
+;     while i < n:
+;         if data[i] == concept:
+;             total = total + 1
+;         i = i + 1
+;     total
+;
+;   Nothing about that is a template with holes: every node is built by
+;   composing PY-BMF constructors, the list literal is emitted from the graph's
+;   own subject column, and the comparison target is the graph's concept id.
+;   Change the graph and a different program is built.
+;
+; FIRST BREATH, and its edge named
+;   This covers ONE query — member counting — using ASSIGN, WHILE, COMPARE, IF,
+;   SUBSCRIPT, BINOP, IDENT, INT, LIST and MODULE. It is not a general compiler
+;   from the graph to Python, and the text-rendering emitter in
+;   steiner-neutral-emit.fk is still a hand-written template. That cell's Python
+;   is honest about being a data projection with query helpers; THIS cell is the
+;   one that can claim the body wrote the code, and it claims it for one query.
+;
+; STATUS 2026-07-28: BUILT, NOT YET RUN. This is the honest state and it is
+; recorded rather than smoothed. The composition below is real — every node is a
+; PY-BMF constructor applied to the graph's own data — but it could not be
+; EVALUATED in this session, and the reason is pre-existing and now diagnosed to
+; root:
+;
+;   form-stdlib/compiler.fk, which sits in python-bmf-eval.fk's declared prelude
+;   chain, is a BML brace-surface file (it carries a `section` header). A BML
+;   file needs the source compiler's explicit text lens before a walker can read
+;   it as executable Form, and neither `fkwu --src` nor a bare sibling-kernel
+;   invocation applies that lens. Under --src the chain reports 85
+;   unresolved-call diagnostics and produces no value; on the Go arm it stops at
+;   `unbound identifier "section"`. The evaluator's OWN band
+;   (tests/python-bmf-eval-band.fk) fails identically, is absent from
+;   fourth-arm-bands.txt, and declares no PROOF LEVEL — so it has no working
+;   lane today either. This cell did not break that; it walked into it.
+;
+;   What remains is to stage that chain through the source compiler's text lens.
+;   That is a bounded piece of work and it is fully specified by the paragraph
+;   above; it is not started here, and nothing in this cell claims otherwise.
+;
+; NO BAND is offered for this cell precisely because a band would have to assert
+; something that has not been witnessed. Pending is honest.
+;
+; preludes: form-stdlib/core.fk form-stdlib/json.fk form-stdlib/cache.fk form-stdlib/form-ontology-loader.fk form-stdlib/engine.fk form-stdlib/compiler.fk form-stdlib/source-compiler.fk form-stdlib/grammars/python-bmf.fk form-stdlib/python-bmf-eval.fk cognition/language-neutral-symbol-identity.fk cognition/steiner-neutral-kernel.fk
+
+(do
+  ;; ── the constructors, borrowed from the evaluator's own band ─────
+  (defn spy-int (n) (intern_node PY-BMF-INT (list (intern_trivial_int n))))
+  (defn spy-id (name) (intern_node PY-BMF-IDENT (list (intern_trivial_string name))))
+  (defn spy-binop (l op r)
+    (intern_node PY-BMF-BINOP (list l (intern_trivial_string op) r)))
+  (defn spy-cmp (l op r)
+    (intern_node PY-BMF-COMPARE (list l (intern_trivial_string op) r)))
+  (defn spy-assign (name v)
+    (intern_node PY-BMF-ASSIGN (list (intern_trivial_string name) v)))
+  (defn spy-if (c t e) (intern_node PY-BMF-IF (list c t e)))
+  (defn spy-while (c body) (intern_node PY-BMF-WHILE (cons c body)))
+  (defn spy-sub (obj idx) (intern_node PY-BMF-SUBSCRIPT (list obj idx)))
+  (defn spy-list (elems) (intern_node PY-BMF-LIST elems))
+  (defn spy-module (stmts) (intern_node PY-BMF-MODULE stmts))
+
+  ;; ── the graph supplies the data, not a literal ──────────────────
+  ;; The subject column of every has-member fact. This is where the program's
+  ;; content comes from: change the graph and the emitted list changes.
+  (defn spy-subject-col-loop (fs)
+    (if (eq (len fs) 0) (list)
+      (if (eq (stn-f-relation (head fs)) (stn-has-member))
+        (cons (spy-int (stn-f-subject (head fs))) (spy-subject-col-loop (tail fs)))
+        (spy-subject-col-loop (tail fs)))))
+  (defn spy-subject-col () (spy-subject-col-loop (stn-facts)))
+  (defn spy-col-len () (len (spy-subject-col)))
+
+  ;; ── the program, composed ───────────────────────────────────────
+  ;; while i < n:  if data[i] == concept: total = total + 1
+  ;;               i = i + 1
+  (defn spy-body (concept)
+    (list
+      (spy-if (spy-cmp (spy-sub (spy-id "data") (spy-id "i")) "==" (spy-int concept))
+              (spy-assign "total" (spy-binop (spy-id "total") "+" (spy-int 1)))
+              (spy-assign "total" (spy-id "total")))
+      (spy-assign "i" (spy-binop (spy-id "i") "+" (spy-int 1)))))
+
+  (defn spy-program (concept)
+    (spy-module (list
+      (spy-assign "data" (spy-list (spy-subject-col)))
+      (spy-assign "n" (spy-int (spy-col-len)))
+      (spy-assign "total" (spy-int 0))
+      (spy-assign "i" (spy-int 0))
+      (spy-while (spy-cmp (spy-id "i") "<" (spy-id "n")) (spy-body concept))
+      (spy-id "total"))))
+
+  ;; ── the body runs the Python it wrote ───────────────────────────
+  (defn spy-run (concept) (py-eval (spy-program concept) (py-env-empty)))
+
+  ;; ── and the graph answers the same question in Form ─────────────
+  (defn spy-form-count-loop (fs c)
+    (if (eq (len fs) 0) 0
+      (add (if (eq (stn-f-subject (head fs)) c)
+             (if (eq (stn-f-relation (head fs)) (stn-has-member)) 1 0) 0)
+           (spy-form-count-loop (tail fs) c))))
+  (defn spy-form-count (c) (spy-form-count-loop (stn-facts) c))
+
+  ;; agreement between the Python the graph WROTE and the Form that holds it —
+  ;; neither side asked an outside interpreter anything
+  (defn spy-agrees? (c) (if (eq (spy-run c) (spy-form-count c)) 1 0))
+
+  (defn spy-check ()
+    (add (if (eq (spy-agrees? (stn-threefold-soul)) 1) 1 0)
+    (add (if (eq (spy-agrees? (stn-fourfold-being)) 1) 2 0)
+    (add (if (eq (spy-agrees? (stn-threefold-social)) 1) 4 0)
+    (add (if (eq (spy-run (stn-threefold-soul)) 3) 8 0)
+    (add (if (eq (spy-run (stn-fourfold-being)) 4) 16 0)
+    (add (if (eq (spy-run (stn-polarity)) 2) 32 0)
+    (add (if (eq (spy-col-len) 13) 64 0)
+         0))))))))
+
+  0)

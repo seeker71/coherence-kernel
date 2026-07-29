@@ -1,0 +1,79 @@
+; kat-coder-layer-shape-band.fk — every one of the 41 blocks declares exactly
+; one shape through its own tensors, and the shapes fall where the file's
+; declared interval says they do.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-tensor-index.fk form-stdlib/kat-coder-tensor-table.fk form-stdlib/kat-coder-layer-shape.fk
+;
+; run: ./fkwu --src form/form-stdlib/tests/kat-coder-layer-shape-band.fk   ; -> 255 with the file, 0 without
+;
+; Verdict 255 when the 17.39 GB file is readable. Without it every bit is dark,
+; because every claim here is a claim about the file and none of them can be
+; made from a record.
+;
+; BIT 128 IS THE ONE THAT COULD HAVE BEEN SKIPPED. It checks the tensors against
+; `full_attention_interval = 4` — the KV field this cell deliberately does not
+; trust. Having read the shapes structurally, comparing them to the declaration
+; costs nothing and turns a believed field into a checked one; if a future build
+; ever moved a full-attention block off the interval, the field and the tensors
+; would disagree and this bit is where that shows.
+
+(do
+    (defn klsb-score (ok bit) (if ok bit 0))
+
+    (defn kat-coder-layer-shape-band ()
+        (do
+    (let s (kct-src))
+    (let ok (kct-present?))
+    ; ONE walk each. Everything below is membership in these two lists — see
+    ; gguf-tensor-index.fk for why the search-per-block shape cost 122 s.
+    (let LL (kls-linear-blocks s))
+    (let FL (kls-full-blocks s))
+    ; block 0 is LINEAR by its own tensors: it has the conv, and no separate q
+    (let c0 (klsb-score (if (eq ok 1)
+                            (if (eq (kls-linear-in? LL 0) 1) (eq (kls-full-in? FL 0) 0) 0) 0) 1))
+    ; block 3 is FULL by its own tensors: separate q, and no conv
+    (let c1 (klsb-score (if (eq ok 1)
+                            (if (eq (kls-full-in? FL 3) 1) (eq (kls-linear-in? LL 3) 0) 0) 0) 2))
+    ; the linear block carries the fused qkv and the silu output gate; the full
+    ; block carries neither — the three tensors that distinguish the paths
+    (let c2 (klsb-score (if (eq ok 1)
+                            (if (eq (kls-has s 0 "attn_qkv.weight") 1)
+                                (if (eq (kls-has s 0 "attn_gate.weight") 1)
+                                    (if (eq (kls-has s 3 "attn_qkv.weight") 0)
+                                        (eq (kls-has s 3 "attn_gate.weight") 0) 0) 0) 0) 0) 4))
+    ; the full block's four projections are all present
+    (let c3 (klsb-score (if (eq ok 1)
+                            (if (eq (kls-has s 3 "attn_k.weight") 1)
+                                (if (eq (kls-has s 3 "attn_v.weight") 1)
+                                    (kls-has s 3 "attn_output.weight") 0) 0) 0) 8))
+    ; k and v are Q6_K where q and output are Q4_K — a per-tensor precision
+    ; choice read from the table, not assumed
+    (let c4 (klsb-score (if (eq ok 1)
+                            (if (eq (kls-type s 3 "attn_q.weight") 12)
+                                (if (eq (kls-type s 3 "attn_k.weight") 14)
+                                    (if (eq (kls-type s 3 "attn_v.weight") 14)
+                                        (eq (kls-type s 3 "attn_output.weight") 12) 0) 0) 0) 0) 16))
+    ; EVERY block is exactly one shape — neither both nor neither
+    (let c5 (klsb-score (if (eq ok 1) (kls-all-well-formed? LL FL) 0) 32))
+    ; the counts partition the 41 blocks: 30 linear, 11 full. This bit first
+    ; asserted 10 full and went dark, which is how the MTP head was found — the
+    ; interval predicts ten and the file carries eleven.
+    (let c6 (klsb-score (if (eq ok 1)
+                            (if (eq (add (kls-linear-count LL) (kls-full-count FL)) (kls-blocks))
+                                (if (eq (kls-full-count FL) 11)
+                                    (eq (kls-linear-count LL) 30) 0) 0) 0) 64))
+    ; THE FIELD IS TRUE OF WHAT IT DESCRIBES, AND DOES NOT DESCRIBE EVERYTHING.
+    ; Both halves are asserted because only the pair carries the finding:
+    ; full_attention_interval holds exactly over the 40 transformer layers, and
+    ; block 40 — the nextn_predict_layers MTP head — is full attention while the
+    ; interval would call it linear. A loader believing the field alone routes
+    ; that head down the linear path, where blk.40.ssm_conv1d.weight does not
+    ; exist.
+    (let c7 (klsb-score (if (eq ok 1)
+                            (if (eq (kls-interval-over-layers? FL) 1)
+                                (if (eq (kls-mtp-full-in? FL) 1)
+                                    (if (eq (kls-declared-full? (kls-mtp-head)) 0)
+                                        (kls-shape-known2? FL) 0) 0) 0) 0) 128))
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))
+    )
+    (kat-coder-layer-shape-band))
