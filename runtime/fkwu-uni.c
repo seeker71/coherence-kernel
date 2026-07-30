@@ -130,7 +130,7 @@ static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
 #define FK_OPCODE_ARM_CAP 256           /* fk_arms: per-tag hit counters, indexed by node tag t */
 #define FK_MEM_CELL_CAP 4096            /* fk_mem: mutable record-cell table (tags 13/14) */
 #define FK_STAGED_INPUT_CAP 262144      /* fk_src: staged auxiliary input (the input_byte primitive) */
-#define FK_VALUE_STACK_CAP 65536        /* fk_vs: the evaluator's argument/value stack */
+#define FK_VALUE_STACK_CAP 1048576      /* fk_vs: the evaluator's argument/value stack. Raised 65536->1048576 (2026-07-30): one slot per call frame, so the old cap was a ~65,500-deep recursion wall — measured, 65000 answered and 70000 died — while Go, Rust and TypeScript all answer a 100,000-deep count. A behaviour three of four kernels have and the fourth does not is a bug, not a design; the four exist to make exactly that visible. 1048576 * 8B = 8MB static, the same raisable-constant class as FK_NODE_CAP (65536->262144) and FK_BD_STACK_CAP (128->1024). Past this the walker's own 6MB host-stack wall is reached first, and THAT one speaks. */
 #define FK_STRING_POOL_INIT_BYTES 1048576 /* fk_sb: interned-string byte pool, initial size */
 #define FK_STRING_TABLE_INIT_CAP 16384  /* fk_so/fk_sl: interned-string table, initial entry count */
 /* NOTE: FK_NODE_CAP and FK_AST_NODE_CAP are DIFFERENT tables that happen to share
@@ -4979,9 +4979,22 @@ static void fk_melt(void) {
                 fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_fp, fk_sp);
     }
 }
+/* THE WALL THAT COULD NOT SPEAK. Thirty lines below, fk_walk's host-stack wall
+ * says what it measured, what the limit was, and what the recipe should do
+ * instead — "the wall is honest, the silent crash was not". This one said
+ * `fk_vp: value stack overflow` and exited: no depth, no cap, no remedy, and
+ * nothing to distinguish a runaway recursion from a legitimately deep one. It
+ * was also the wall reached FIRST, so the body's honest diagnostic never got
+ * the chance to speak. Two walls, one voice between them, and the mute one in
+ * front. */
 static void fk_vp(long long v) {
     if (fk_vsp >= FK_VALUE_STACK_CAP) {
-        fk_die("fk_vp: value stack overflow");
+        printf("fkwu: value stack full — %lld of %lld slots, one per live call frame. "
+               "Either the recursion does not terminate, or it is deeper than this "
+               "kernel carries; the recipe-side home for deep recursion is the same "
+               "as for the walker wall — make it tail or balanced.\n",
+               (long long)fk_vsp, (long long)FK_VALUE_STACK_CAP);
+        fk_die("value-stack wall");
     }
     fk_vs[fk_vsp] = v;
     fk_vsp = fk_vsp + 1;
@@ -10281,6 +10294,27 @@ static void fk_diag_path(const char *level, const char *path, const char *msg) {
 static char fk_src_dep_path[FK_SRC_DEP_CAP][4096];
 static long long fk_src_dep_mtime[FK_SRC_DEP_CAP];
 static long long fk_src_dep_size[FK_SRC_DEP_CAP];
+/* CONTENT DIGEST per dependency. The artifact identity used to be
+ * path@mtime:size and the code that wrote it said "source path, content, or
+ * mtime changed" -- but content was never in it. Two sources of the SAME LENGTH
+ * written inside the SAME mtime second are indistinguishable, and fkwu then
+ * runs the previous program and prints its answer with no warning and exit 0.
+ * Witnessed 2026-07-30: `(do 111)` and `(do 222)` are both 41 bytes with the
+ * preludes line; the second run printed 111. Same-length edits are the common
+ * case, not the exotic one -- a verdict pin, a constant, an operator, a depth.
+ * FNV-1a over the dependency's bytes, taken where the bytes are already in
+ * hand, closes it. */
+static unsigned long long fk_src_dep_digest[FK_SRC_DEP_CAP];
+static unsigned long long fk_bytes_fnv1a(const char *p, long long n) {
+    unsigned long long h = 14695981039346656037ULL;
+    long long k = 0;
+    while (k < n) {
+        h = h ^ (unsigned long long)(unsigned char)p[k];
+        h = h * 1099511628211ULL;
+        k = k + 1;
+    }
+    return h;
+}
 static long long fk_src_dep_parent[FK_SRC_DEP_CAP];
 static long long fk_src_dep_end[FK_SRC_DEP_CAP];
 static long long fk_src_dep_count;
@@ -10544,7 +10578,10 @@ static int fk_src_unit_hash_range(long long start, long long end, char *out, lon
     long long pos = 0;
     long long i = start;
     char canon[4096];
-    if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v1")) {
+    /* v1 -> v2: the identity now carries a content digest. Every v1 artifact is
+     * invalidated by the tag change rather than trusted, because a v1 artifact
+     * cannot testify about the content it was written from. */
+    if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v2")) {
         return 0;
     }
     while (i < end && i < fk_src_dep_count) {
@@ -10553,7 +10590,10 @@ static int fk_src_unit_hash_range(long long start, long long end, char *out, lon
             !fk_source_hash_append(out, cap, &pos, "@") ||
             !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_mtime[i]) ||
             !fk_source_hash_append(out, cap, &pos, ":") ||
-            !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_size[i])) {
+            !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_size[i]) ||
+            !fk_source_hash_append(out, cap, &pos, "#") ||
+            !fk_source_hash_append_ll(out, cap, &pos,
+                                      (long long)(fk_src_dep_digest[i] >> 1))) {
             return 0;
         }
         i = i + 1;
@@ -10894,6 +10934,7 @@ static int fk_src_collect_file(const char *path, long long parent_idx) {
     fk_cstr_copy(fk_src_dep_path[fk_src_dep_count], path, 4096);
     fk_src_dep_mtime[fk_src_dep_count] = mtime;
     fk_src_dep_size[fk_src_dep_count] = size;
+    fk_src_dep_digest[fk_src_dep_count] = fk_bytes_fnv1a(owned, got);
     fk_src_dep_parent[fk_src_dep_count] = parent_idx;
     fk_src_dep_end[fk_src_dep_count] = fk_src_dep_count + 1;
     fk_src_dep_count = fk_src_dep_count + 1;
