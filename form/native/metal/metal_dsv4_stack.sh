@@ -495,6 +495,8 @@ let pHcHeadw = pipe(lHc, "form_hc_headw_f32")
 let pMx4 = pipe(lMx4, "form_dsv4_mx4_matvec")
 let pIq2 = pipe(lIq2, "form_dsv4_iq2_matvec")
 let pQ2k = pipe(lQ2k, "form_dsv4_q2k_matvec")
+let pQ2kDeq = pipe(lQ2k, "form_q2k_dequant_f32")
+let pPlainMv = pipe(lMla, "form_mla_matvec_f32")
 let pQ80 = pipe(lQ80, "form_dsv4_q80_matvec")
 let pQ80g = pipe(lQ8g, "form_dsv4_q80_matvec_grouped")
 let pSwiglu = pipe(lFfn, "form_dsv4_swiglu_f32")
@@ -768,6 +770,14 @@ func gpuF16mv(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
 // r*cols+j indices address inside that expert and never form a 32-bit offset into an 85 GiB file.
 func gpuExpert(_ t: Tn, _ x: MTLBuffer, _ expert: Int) -> MTLBuffer {
     let rows = t.d1, cols = t.d0
+    // A ZERO SIZE IS A REFUSAL, NOT A SIZE (gguf-manifest.fk's gm-slice-bytes returns 0 for a type it
+    // does not price). Dividing it by the expert count gives a 0 stride, and every routed expert then
+    // reads expert 0's bytes: plausible weights, right magnitude, wrong expert, and nothing fires.
+    // That is what an unpriced Q2_K did to this stack until 2026-07-30. Refuse loudly instead.
+    guard t.bytes > 0 else {
+        print("FAIL an expert tensor of ggml type \(t.type) carries 0 bytes in the residency plan — gguf-manifest.fk does not price that type, so its per-expert stride cannot be formed. Price the type; do not divide a refusal.")
+        exit(1)
+    }
     let stride = t.bytes / t.d2
     let out = sentinelled(rows); var r = UInt32(rows), c32 = UInt32(cols), n32 = UInt32(rows*cols)
     if t.type == 40 {
@@ -843,6 +853,45 @@ func stage(_ name: String, _ b: MTLBuffer, _ n: Int) {
     guard stageBlk0 else { return }
     let s = stageStats(b, n)
     print(String(format: "      blk.0 %@: min=%g max=%g rms=%g", name, s.0, s.1, s.2))
+}
+// THE FUSED KERNEL AGAINST ITS OWN CARVER. form_dsv4_q2k_matvec decodes and folds in one pass; this
+// dequants the SAME expert slice with form_q2k_dequant_f32 (one thread per weight, q2k-dequant-band's
+// proven recipe) and folds it with the body's plain f32 matvec. Same bytes, same input vector, two
+// independent paths. They cannot agree bit for bit — the folds associate differently — but a
+// disagreement past a few f32 ulps means the FOLD or the MAP is wrong, not the decode.
+func q2kFusedVsCarved(_ t: Tn, _ x: MTLBuffer, _ expert: Int) {
+    guard t.type == 10 else { return }
+    let rows = t.d1, cols = t.d0, stride = t.bytes / t.d2
+    // THE SLICE ITSELF, before anything read through it. A Q2_K expert is rows*cols/256 blocks of 84
+    // bytes; if the per-expert stride is not exactly that, both the fused kernel and its carver read
+    // the SAME wrong slice and agree with each other perfectly while answering about another expert.
+    let wantStride = rows * cols / 256 * 84
+    check(stride == wantStride && t.bytes % t.d2 == 0,
+      "Q2_K EXPERT STRIDE: blk.0 down carries \(t.bytes) B over \(t.d2) experts = \(stride) B each, exactly rows*cols/256*84 = \(wantStride) — expert \(expert) begins on a block boundary",
+      "Q2_K expert stride is \(stride) B but rows*cols/256*84 = \(wantStride) B (tensor \(t.bytes) B, \(t.d2) experts, remainder \(t.bytes % t.d2)) — every expert past 0 reads a misaligned slice")
+    let wbuf = dev.makeBuffer(length: rows*cols*4, options: .storageModeShared)!
+    var off = UInt32(0), n32 = UInt32(rows*cols)
+    enc(pQ2kDeq, rows*cols, 256) { c in c.setBuffer(views[t.idx], offset: t.inner + expert*stride, index: 0)
+                                        c.setBuffer(wbuf, offset: 0, index: 1)
+                                        c.setBytes(&off, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
+    let carved = sentinelled(rows)
+    var r32 = UInt32(rows), c32 = UInt32(cols)
+    enc(pPlainMv, rows, 256) { c in c.setBuffer(wbuf, offset: 0, index: 0); c.setBuffer(x, offset: 0, index: 1)
+                                    c.setBuffer(carved, offset: 0, index: 2)
+                                    c.setBytes(&r32, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
+    let fused = gpuExpert(t, x, expert)
+    let a = fp(fused, rows), b = fp(carved, rows)
+    var maxAbs: Float = 0, maxRel: Float = 0, scaleA: Double = 0, scaleB: Double = 0
+    for i in 0..<rows {
+        let d = abs(a[i] - b[i]); if d > maxAbs { maxAbs = d }
+        let m = max(abs(a[i]), abs(b[i]))
+        if m > 1e-6 { let rel = d/m; if rel > maxRel { maxRel = rel } }
+        scaleA += Double(a[i])*Double(a[i]); scaleB += Double(b[i])*Double(b[i])
+    }
+    let rmsA = sqrt(scaleA/Double(rows)), rmsB = sqrt(scaleB/Double(rows))
+    check(maxRel < 0.01,
+      String(format: "Q2_K FUSED vs CARVED, blk.0 expert %d down [%d<-%d]: the one-pass decode+fold and an independent per-weight carve of the same bytes folded by the plain f32 matvec agree to max rel %.3g (max abs %.3g), rms %.6g vs %.6g", expert, rows, cols, maxRel, maxAbs, rmsA, rmsB),
+      String(format: "Q2_K fused matvec disagrees with its own carver on blk.0 expert %d down: max rel %.3g, max abs %.3g, rms %.6g vs %.6g — the FOLD or the MAP, not the decode", expert, maxRel, maxAbs, rmsA, rmsB))
 }
 func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let w = LW[il]
@@ -939,6 +988,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         if il == 0 {
             stage("expert \(e) gate", gt, nFf); stage("expert \(e) up", up, nFf)
             stage("expert \(e) mid", mid, nFf); stage("expert \(e) down", dn, nEmbd)
+            if i == 0 { q2kFusedVsCarved(w.dx, mid, e) }
         }
         var one: Float = 1.0, n32 = UInt32(nEmbd)
         if i == 0 {
