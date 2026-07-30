@@ -583,7 +583,7 @@ let matchOrder = ProcessInfo.processInfo.environment["FORM_DS4_MATCH_ORDER"] == 
 // harness keeps proving itself when nobody has said otherwise.
 let gatesOn = ProcessInfo.processInfo.environment["FORM_DS4_GATES"] != "0"
 let pQ8aQuant = pipe(lKv, "form_dsv4_q8a_quantize_f32")
-let pQ80Ord = pipe(lKv, "form_dsv4_q80_matvec_ordered")
+let pQ80Ord = pipe(lKv, "form_dsv4_q80_matvec_ordered8")
 let pF16Ord = pipe(lKv, "form_dsv4_f16_matvec_ordered8")
 let pQ2kOrd = pipe(lQ2k, "form_dsv4_q2k_matvec_ordered")
 let pCompInit = pipe(lKv, "form_dsv4_comp_init_f32")
@@ -621,7 +621,7 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
             var n32 = UInt32(cols)
             enc(pQ8aQuant, blocks, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
                                               c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
-            enc(pQ80Ord, rows, 64) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+            enc(pQ80Ord, rows*8, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                           c.setBuffer(xq, offset: 0, index: 1); c.setBuffer(xs, offset: 0, index: 2)
                                           c.setBuffer(out, offset: 0, index: 3)
                                           c.setBytes(&r, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5) }
