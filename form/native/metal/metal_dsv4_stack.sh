@@ -113,6 +113,18 @@ if [[ -z "$NLAYER" ]]; then echo "FAIL the manifest does not carry deepseek4.blo
 WANT_LAYERS="${FORM_DS4_STACK_LAYERS:-$NLAYER}"
 echo "  the file declares $NLAYER blocks; this run stacks $WANT_LAYERS"
 
+# the per-layer compress ratios are a HYPER-PARAMETER wearing an array's clothes, and the body already
+# has a reader for exactly that case (gguf-manifest.fk, gm-emit-array). Walked, never guessed.
+# READ BEFORE THE WANT LIST, because the ratio decides WHICH TENSORS A LAYER HAS: a compressing layer
+# carries the second cache's four (attn_compressor_kv/gate/ape/norm) and a ratio-0 layer carries none.
+printf '(gm-emit-array "%s" "deepseek4.attention.compress_ratios")\n' "$BLOB" > "$work/arr.fk"
+"$GO_BIN" "${FILES[@]}" "$work/arr.fk" > "$work/arr.out" 2>"$work/arr.err" || { echo "FAIL ratio array emission"; tail -5 "$work/arr.err"; exit 1; }
+grep -q '^ARR deepseek4.attention.compress_ratios' "$work/arr.out" || { echo "FAIL the file carries no deepseek4.attention.compress_ratios"; cat "$work/arr.out"; exit 1; }
+RATIOS="$(awk '$1=="A"{ s = s (n++ ? "," : "") $3 } END{ print s }' "$work/arr.out")"
+NRATIO="$(awk '$1=="A"{n++} END{print n+0}' "$work/arr.out")"
+(( NRATIO >= WANT_LAYERS )) || { echo "FAIL compress_ratios carries $NRATIO entries for $WANT_LAYERS layers"; exit 1; }
+LRATIO=(); while read -r r; do LRATIO+=("$r"); done < <(awk '$1=="A"{print $3}' "$work/arr.out")
+
 # ── 2a. the WANT list: every tensor every stacked layer touches, named, then resolved in ONE pass ──
 : > "$work/want.txt"
 : > "$work/flags.txt"
@@ -133,6 +145,18 @@ for ((il=0; il<WANT_LAYERS; il++)); do
         k="${pair%% *}"; t="${pair#* }"
         echo "L${il}_${k} $P.$t.weight" >> "$work/want.txt"
     done
+    # THE SECOND CACHE'S TENSORS, on exactly the layers whose ratio is nonzero (ds4.c:4978). A ratio-0
+    # layer does not carry them and asking for them would fail residency on a file that is correct.
+    if [[ "${LRATIO[$il]:-0}" != "0" ]]; then
+        for pair in "CKV attn_compressor_kv" "CGT attn_compressor_gate" \
+                    "CAP attn_compressor_ape" "CNM attn_compressor_norm"; do
+            k="${pair%% *}"; t="${pair#* }"
+            echo "L${il}_${k} $P.$t.weight" >> "$work/want.txt"
+        done
+        echo "L${il}_HASCOMP 1" >> "$work/flags.txt"
+    else
+        echo "L${il}_HASCOMP 0" >> "$work/flags.txt"
+    fi
     # the two routing regimes carry DIFFERENT tensors; which one a layer has IS the regime.
     if awk -v n="$P.ffn_gate_tid2eid.weight" '$1=="T" && $2==n{f=1} END{exit !f}' "$work/man.out"; then
         echo "L${il}_HT $P.ffn_gate_tid2eid.weight" >> "$work/want.txt"
@@ -166,18 +190,9 @@ ROPE_SCALEF="$(kvf deepseek4.rope.scaling.factor)";               ROPE_SCALEF="$
 ROPE_ORIGCTX="$(kvf deepseek4.rope.scaling.original_context_length)"; ROPE_ORIGCTX="${ROPE_ORIGCTX:-65536}"
 BETA_FAST="$(kvf deepseek4.rope.scaling.yarn_beta_fast)";         BETA_FAST="${BETA_FAST:-32.0}"
 BETA_SLOW="$(kvf deepseek4.rope.scaling.yarn_beta_slow)";         BETA_SLOW="${BETA_SLOW:-1.0}"
-# the per-layer compress ratios are a HYPER-PARAMETER wearing an array's clothes, and the body already
-# has a reader for exactly that case (gguf-manifest.fk, gm-emit-array). Walked, never guessed.
-printf '(gm-emit-array "%s" "deepseek4.attention.compress_ratios")\n' "$BLOB" > "$work/arr.fk"
-"$GO_BIN" "${FILES[@]}" "$work/arr.fk" > "$work/arr.out" 2>"$work/arr.err" || { echo "FAIL ratio array emission"; tail -5 "$work/arr.err"; exit 1; }
-grep -q '^ARR deepseek4.attention.compress_ratios' "$work/arr.out" || { echo "FAIL the file carries no deepseek4.attention.compress_ratios"; cat "$work/arr.out"; exit 1; }
-RATIOS="$(awk '$1=="A"{ s = s (n++ ? "," : "") $3 } END{ print s }' "$work/arr.out")"
-NRATIO="$(awk '$1=="A"{n++} END{print n+0}' "$work/arr.out")"
-(( NRATIO >= WANT_LAYERS )) || { echo "FAIL compress_ratios carries $NRATIO entries for $WANT_LAYERS layers"; exit 1; }
 echo "  rope: base=$ROPE_BASE compressed_base=$ROPE_CBASE scale_factor=$ROPE_SCALEF orig_ctx=$ROPE_ORIGCTX beta=[$BETA_FAST,$BETA_SLOW]"
 for ((il=0; il<WANT_LAYERS; il++)); do
-    r="$(echo "$RATIOS" | cut -d, -f$((il+1)))"
-    echo "L${il}_RATIO ${r:-0}" >> "$work/params.txt"
+    echo "L${il}_RATIO ${LRATIO[$il]:-0}" >> "$work/params.txt"
 done
 
 cat >> "$work/params.txt" <<EOF
@@ -299,13 +314,19 @@ struct LayerW {
     let haf, has, hab, hff, hfs, hfb: Tn
     let fnw, rt, gx, ux, dx, sgw, suw, sdw: Tn
     let ht: Tn?, bias: Tn?
+    let ckv: Tn?, cgt: Tn?, cap: Tn?, cnm: Tn?   // the SECOND cache's four, on ratio != 0 layers only
     let hashed: Bool, ratio: Int
     var nExpStack: Int { gx.d2 }          // the PER-LAYER expert count: the tensor's own dim[2]
     var nExpRouter: Int { rt.d1 }         // the router's width: the logit projection's own out-dim
+    // ds4.c:12395 — a ratio-4 layer keeps TWO lanes in one state row, so its row is 2*head_dim wide
+    // and the state holds 2*ratio rows. Every other ratio keeps one lane and `ratio` rows.
+    var coff: Int { ratio == 4 ? 2 : 1 }
+    var compRows: Int { coff * ratio }
 }
 func layerW(_ il: Int) -> LayerW {
     let p = "L\(il)_"
     let hashed = I(p+"HASHED") == 1
+    let hasComp = I(p+"HASCOMP") == 1
     return LayerW(nrm: T(p+"NORM"), qa: T(p+"QA"), qan: T(p+"QAN"), qb: T(p+"QB"), kv: T(p+"KV"),
                   kvan: T(p+"KVAN"), snk: T(p+"SNK"), oa: T(p+"OA"), ob: T(p+"OB"),
                   haf: T(p+"HAF"), has: T(p+"HAS"), hab: T(p+"HAB"),
@@ -313,6 +334,8 @@ func layerW(_ il: Int) -> LayerW {
                   fnw: T(p+"FN"), rt: T(p+"RT"), gx: T(p+"GX"), ux: T(p+"UX"), dx: T(p+"DX"),
                   sgw: T(p+"SG"), suw: T(p+"SU"), sdw: T(p+"SD"),
                   ht: hashed ? T(p+"HT") : nil, bias: hashed ? nil : T(p+"BI"),
+                  ckv: hasComp ? T(p+"CKV") : nil, cgt: hasComp ? T(p+"CGT") : nil,
+                  cap: hasComp ? T(p+"CAP") : nil, cnm: hasComp ? T(p+"CNM") : nil,
                   hashed: hashed, ratio: I(p+"RATIO"))
 }
 let LW = (0..<nLayers).map { layerW($0) }
@@ -383,6 +406,10 @@ for il in 0..<nLayers {
     for (n, t) in named { resident("blk.\(il).\(n)", t) }
     if let h = w.ht { resident("blk.\(il).ffn_gate_tid2eid", h) }
     if let b = w.bias { resident("blk.\(il).exp_probs_b", b) }
+    if let t = w.ckv { resident("blk.\(il).attn_compressor_kv", t) }
+    if let t = w.cgt { resident("blk.\(il).attn_compressor_gate", t) }
+    if let t = w.cap { resident("blk.\(il).attn_compressor_ape", t) }
+    if let t = w.cnm { resident("blk.\(il).attn_compressor_norm", t) }
     let key = "gate/up \(w.gx.type)  down \(w.dx.type)  n_exp \(w.nExpStack)  \(w.hashed ? "hash" : "topk")  rope \(w.ratio == 0 ? "plain" : "compressed")"
     groups[key, default: []].append(il)
 }
@@ -454,6 +481,7 @@ let pRms = pipe(lMla, "form_mla_rmsnorm_f32")
 let pHeadrms = pipe(lMla, "form_mla_headrms_f32")
 let pRope = pipe(lMla, "form_mla_rope_f32")
 let pAttend = pipe(lMla, "form_mla_attend_f32")
+let pAttendMixed = pipe(lMla, "form_mla_attend_mixed_f32")
 let pMx8 = pipe(l8, "form_dsv4_mx8_matvec")
 let pGrouped = pipe(lCore, "form_dsv4_mx8_matvec_grouped")
 let pKvq = pipe(lCore, "form_dsv4_kv_fp8_f16_round")
@@ -477,6 +505,10 @@ let pHashW = pipe(lFfn, "form_dsv4_hash_weights")
 let pTopkW = pipe(lFfn, "form_dsv4_topk_weights")
 let pKvAppend = pipe(lKv, "form_dkv_append_f32")
 let pControlAdapter = pipe(lKv, "form_dsv4_control_logit_adapter")
+let pCompInit = pipe(lKv, "form_dsv4_comp_init_f32")
+let pCompState = pipe(lKv, "form_dsv4_comp_state_f32")
+let pCompPool = pipe(lKv, "form_dsv4_comp_pool_f32")
+let pCompShift = pipe(lKv, "form_dsv4_comp_shift_f32")
 
 func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
     let out = sentinelled(n); var n32 = UInt32(n), e = eps
@@ -616,8 +648,99 @@ func gpuAttend(_ q: MTLBuffer, _ rows: MTLBuffer, _ snk: Tn, _ nrows: Int = 1) -
                                    c.setBytes(&c32, length: 4, index: 6); c.setBytes(&sc, length: 4, index: 7) }
     return out
 }
+// ds4.c:12567 layer_attention_mixed_one — one softmax over the raw window AND the compressed rows.
+func gpuAttendMixed(_ q: MTLBuffer, _ rows: MTLBuffer, _ crows: MTLBuffer, _ snk: Tn,
+                    _ nrows: Int, _ ncomp: Int) -> MTLBuffer {
+    let out = sentinelled(nHead*headDim)
+    var a = UInt32(nHead), b = UInt32(headDim), c32 = UInt32(nrows), d32 = UInt32(ncomp)
+    var sc = 1.0/sqrtf(Float(headDim))
+    enc(pAttendMixed, nHead, 32) { c in c.setBuffer(q, offset: 0, index: 0); c.setBuffer(rows, offset: 0, index: 1)
+                                        c.setBuffer(crows, offset: 0, index: 2); c.setBuffer(out, offset: 0, index: 3)
+                                        c.setBuffer(views[snk.idx], offset: snk.inner, index: 4)
+                                        c.setBytes(&a, length: 4, index: 5); c.setBytes(&b, length: 4, index: 6)
+                                        c.setBytes(&c32, length: 4, index: 7); c.setBytes(&d32, length: 4, index: 8)
+                                        c.setBytes(&sc, length: 4, index: 9) }
+    return out
+}
 var useGrowingKv = false
 var kvArenas: [MTLBuffer] = []
+// FORM_DS4_NO_COMPRESSOR=1 runs the raw-only lane this harness had before the second cache existed.
+// It is kept as the A/B the boundary measurement needs, not as an option: with it the run reproduces
+// rank 148 on a five-token prompt, without it the compressed rows exist and the number is the claim.
+let useCompressor = ProcessInfo.processInfo.environment["FORM_DS4_NO_COMPRESSOR"] != "1"
+
+// ── THE SECOND CACHE. dsv4-compressor.fk's four kernels, driven per layer ──────────────────────────
+// This is the half the boundary measurement isolated: our lane matched ds4 op-for-op wherever no
+// compressed row existed (rank 5 on a 3-token prompt) and drifted exactly as ratio-4 layers began
+// emitting rows at pos 3 (27, then 148). What follows is compressor_decode_one (ds4.c:12381) and the
+// mixed attention that reads its output — nothing else was missing.
+//
+// THE INDEXER MASK IS OMITTED, and the omission is enforced, not assumed: ds4.c:12822 returns
+// all-allowed whenever n_comp <= top_k = 512, so below 2048 tokens on a ratio-4 layer there is nothing
+// to hide. compRefusals counts every step that walks past that radius and the run reports it.
+var compState: [MTLBuffer] = []          // per layer: the rolling kv plane, compRows * width floats
+var compScore: [MTLBuffer] = []          // per layer: the rolling score plane, born NEG_INF
+var compRows: [[MTLBuffer]] = []         // per layer: the emitted compressed rows, in order
+var compPacked: [MTLBuffer] = []         // per layer: those rows packed contiguous for attention
+var compRefusals = 0
+let indexerTopK = 512
+func compWidth(_ w: LayerW) -> Int { return w.coff * headDim }
+func compStateLen(_ w: LayerW) -> Int { return w.compRows * compWidth(w) }
+func compInit() {
+    compState = []; compScore = []; compRows = []; compPacked = []; compRefusals = 0
+    for il in 0..<nLayers {
+        let w = LW[il]
+        if w.ratio == 0 {
+            compState.append(sentinelled(1)); compScore.append(sentinelled(1))
+            compRows.append([]); compPacked.append(sentinelled(1)); continue
+        }
+        let n = compStateLen(w)
+        let kvB = dev.makeBuffer(length: n*4, options: .storageModeShared)!
+        let scB = dev.makeBuffer(length: n*4, options: .storageModeShared)!
+        var n32 = UInt32(n)
+        enc(pCompInit, n, 256) { c in c.setBuffer(kvB, offset: 0, index: 0); c.setBuffer(scB, offset: 0, index: 1)
+                                      c.setBytes(&n32, length: 4, index: 2) }
+        compState.append(kvB); compScore.append(scB); compRows.append([]); compPacked.append(sentinelled(1))
+    }
+}
+// one token through the compressor: project, bias, write the state row, and on a ratio boundary pool,
+// norm, rope at comp_pos with the layer's own compressed freqs, fp8+f16 round, and keep the row.
+func compStep(_ w: LayerW, _ il: Int, _ xn: MTLBuffer, _ pos: Int) {
+    guard w.ratio != 0, let ckv = w.ckv, let cgt = w.cgt, let ape = w.cap, let cnm = w.cnm else { return }
+    let width = compWidth(w)
+    let kvCur = gpuF16mv(ckv, xn)
+    let scCur = gpuF16mv(cgt, xn)
+    let row = w.ratio == 4 ? w.ratio + (pos % w.ratio) : (pos % w.ratio)
+    var wd = UInt32(width), rw = UInt32(row), pm = UInt32(pos % w.ratio)
+    enc(pCompState, width, 256) { c in c.setBuffer(kvCur, offset: 0, index: 0); c.setBuffer(scCur, offset: 0, index: 1)
+                                       c.setBuffer(views[ape.idx], offset: ape.inner, index: 2)
+                                       c.setBuffer(compState[il], offset: 0, index: 3)
+                                       c.setBuffer(compScore[il], offset: 0, index: 4)
+                                       c.setBytes(&wd, length: 4, index: 5); c.setBytes(&rw, length: 4, index: 6)
+                                       c.setBytes(&pm, length: 4, index: 7) }
+    guard (pos + 1) % w.ratio == 0 else { return }
+    let pooled = sentinelled(headDim)
+    var hd32 = UInt32(headDim), rt32 = UInt32(w.ratio)
+    enc(pCompPool, headDim, 256) { c in c.setBuffer(compState[il], offset: 0, index: 0)
+                                        c.setBuffer(compScore[il], offset: 0, index: 1)
+                                        c.setBuffer(pooled, offset: 0, index: 2)
+                                        c.setBytes(&hd32, length: 4, index: 3); c.setBytes(&rt32, length: 4, index: 4) }
+    if w.ratio == 4 {
+        let n = w.ratio * width
+        enc(pCompShift, n, 256) { c in c.setBuffer(compState[il], offset: 0, index: 0)
+                                       c.setBuffer(compScore[il], offset: 0, index: 1)
+                                       c.setBytes(&wd, length: 4, index: 2); c.setBytes(&rt32, length: 4, index: 3) }
+    }
+    let normed = gpuRmsnorm(pooled, headDim, cnm)
+    let roped = gpuRope(normed, 1, pos + 1 - w.ratio, il, false)
+    compRows[il].append(gpuKvRound(roped))
+    // pack the layer's rows into one contiguous arena for the mixed attention to read
+    let n = compRows[il].count
+    let packed = sentinelled(n * headDim)
+    for (i, r) in compRows[il].enumerated() { gpuKvAppend(r, packed, i, n) }
+    compPacked[il] = packed
+    if n > indexerTopK { compRefusals += 1 }
+}
 func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows)
     var r = UInt32(t.rows), c32 = UInt32(t.cols), nel = UInt32(t.nel), rk = UInt32(oRank)
@@ -730,7 +853,12 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let ha: MTLBuffer
     if useGrowingKv {
         gpuKvAppend(kq, kvArenas[il], pos, kvCap)
-        ha = gpuAttend(qr, kvArenas[il], w.snk, pos + 1)
+        // the second cache is fed from attn_norm, the SAME activation the q/kv projections read
+        // (ds4.c:12986), and it is fed AFTER the raw row is pushed — the order the spine has.
+        if useCompressor { compStep(w, il, xn, pos) }
+        let nComp = useCompressor ? compRows[il].count : 0
+        ha = nComp == 0 ? gpuAttend(qr, kvArenas[il], w.snk, pos + 1)
+                        : gpuAttendMixed(qr, kvArenas[il], compPacked[il], w.snk, pos + 1, nComp)
     } else {
         ha = gpuAttend(qr, kq, w.snk)
     }
@@ -925,14 +1053,46 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
         var top = "      FORM top10:"
         for i in 0..<10 { top += " \(order[i])(\(String(format: "%.2f", lp[order[i]])))" }
         print(top)
+        var rank = [Int](repeating: 0, count: outWeight.rows)
+        for (r, id) in order.enumerated() { rank[id] = r }
         if let refIds = ProcessInfo.processInfo.environment["FORM_DS4_REF_IDS"] {
-            var rank = [Int](repeating: 0, count: outWeight.rows)
-            for (r, id) in order.enumerated() { rank[id] = r }
             var line = "      our rank of reference ids:"
             for tok in refIds.split(separator: " ").compactMap({ Int($0) }) {
                 line += " \(tok)->\(rank[tok])"
             }
             print(line)
+        }
+        // WHOLE-DISTRIBUTION AGREEMENT, computed here so no shell arithmetic stands between the
+        // measurement and the reader. The rank of ONE token is a noisy yardstick — a lane can move a
+        // single id thirty places while the distribution as a whole comes closer or goes further. r
+        // over all \(outWeight.rows) logits, plus how many of the reference's top-10 we place in our
+        // top-10, is what a change to the recipe has to move.
+        if let refPath = ProcessInfo.processInfo.environment["FORM_DS4_REF_LOGITS"],
+           let raw = try? String(contentsOfFile: refPath, encoding: .utf8),
+           let lb = raw.range(of: "\"logits\":[") {
+            let rest = raw[lb.upperBound...]
+            let end = rest.firstIndex(of: "]") ?? rest.endIndex
+            let ref = rest[..<end].split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            if ref.count == outWeight.rows {
+                var sa: Double = 0, sb: Double = 0
+                for i in 0..<ref.count { sa += Double(lp[i]); sb += Double(ref[i]) }
+                let ma = sa/Double(ref.count), mb = sb/Double(ref.count)
+                var num: Double = 0, da: Double = 0, db: Double = 0
+                for i in 0..<ref.count {
+                    let x = Double(lp[i]) - ma, y = Double(ref[i]) - mb
+                    num += x*y; da += x*x; db += y*y
+                }
+                let r = num / (sqrt(da) * sqrt(db))
+                var refOrder = Array(0..<ref.count); refOrder.sort { ref[$0] > ref[$1] }
+                let ourTop10 = Set(order.prefix(10)), refTop10 = Set(refOrder.prefix(10))
+                var refRank = [Int](repeating: 0, count: ref.count)
+                for (k, id) in refOrder.enumerated() { refRank[id] = k }
+                print(String(format: "      AGREEMENT with %@: r=%.6f over %d logits, top-10 overlap %d/10, their argmax at our rank %d, our argmax at their rank %d",
+                             (refPath as NSString).lastPathComponent, r, ref.count,
+                             ourTop10.intersection(refTop10).count, rank[refOrder[0]], refRank[order[0]]))
+            } else {
+                print("      AGREEMENT: reference carries \(ref.count) logits, this vocabulary is \(outWeight.rows) — not comparable")
+            }
         }
     }
     if !controlAdapterProved {
@@ -1012,6 +1172,7 @@ if kvSequence {
         print("FAIL KV_STEPS must be at least 2 and below KV_CAP so a sentinel frontier remains"); exit(1)
     }
     kvArenas = (0..<nLayers).map { _ in sentinelled(kvCap * headDim) }
+    compInit()
     useGrowingKv = true
     var firstFinal: [Float] = [], lastFinal: [Float] = [], firstRow: [UInt32] = []
     var currentToken = token
@@ -1049,6 +1210,29 @@ if kvSequence {
     check(historyExact == headDim && written == headDim && frontier == headDim && stateDiff > 0,
       "GROWING KV, \(kvSteps) REAL STACK STEPS: layer 0 retained \(historyExact)/\(headDim) row-0 bits, wrote \(written)/\(headDim) values in row \(kvSteps-1), left \(frontier)/\(headDim) row-\(kvSteps) sentinels, and the final HC state changed in \(stateDiff)/\(hcDim) entries",
       "growing KV: history \(historyExact)/\(headDim), last row \(written)/\(headDim), frontier \(frontier)/\(headDim), state diff \(stateDiff)/\(hcDim)")
+    // ── the second cache's own witness ─────────────────────────────────────────────────────────────
+    // A compressing layer must hold exactly floor(kvSteps/ratio) rows, no ratio-0 layer may hold any,
+    // and every held row must be finite. A silently-empty compressed cache is the failure this catches:
+    // it would read as the raw-only lane and pass every other gate in this file.
+    if useCompressor {
+        var wrongCount: [Int] = [], nonFinite = 0, totalRows = 0
+        for il in 0..<nLayers {
+            let w = LW[il]
+            let want = w.ratio == 0 ? 0 : kvSteps / w.ratio
+            if compRows[il].count != want { wrongCount.append(il) }
+            totalRows += compRows[il].count
+            if compRows[il].count > 0 {
+                let p = fp(compPacked[il], compRows[il].count * headDim)
+                for j in 0..<(compRows[il].count * headDim) where !p[j].isFinite { nonFinite += 1 }
+            }
+        }
+        let ratio4 = (0..<nLayers).filter { LW[$0].ratio == 4 }.count
+        check(wrongCount.isEmpty && nonFinite == 0 && compRefusals == 0,
+          "THE SECOND CACHE RAN: after \(kvSteps) steps every one of the \(nLayers) layers holds exactly floor(steps/ratio) compressed rows (\(totalRows) rows total, \(ratio4) layers at ratio 4, whose first row lands at pos 3), all \(totalRows * headDim) entries finite, and no step walked past the indexer's inert radius of \(indexerTopK)",
+          "second cache: layers with the wrong row count \(wrongCount.prefix(8)), non-finite entries \(nonFinite), steps past the indexer radius \(compRefusals)")
+    } else {
+        print("      ── FORM_DS4_NO_COMPRESSOR=1: the raw-only lane, kept as the A/B ──")
+    }
     // The expected count is kvSteps MINUS the prefill positions whose outputs are discarded: while
     // the model is reading the prompt its emissions are not answers. With no prompt this is kvSteps,
     // which is what it was before prefill existed.

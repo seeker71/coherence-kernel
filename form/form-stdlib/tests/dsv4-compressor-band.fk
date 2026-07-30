@@ -1,0 +1,149 @@
+; tests/dsv4-compressor-band.fk — the SECOND cache's recipe, and the falsifiers that give it teeth.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/dsv4-compressor.fk
+;
+; run: ./fkwu --src form/form-stdlib/tests/dsv4-compressor-band.fk   ; -> 2047
+;
+; HOW THE EXPECTED VALUES ARE FORMED, and why that is not circular. The pool is a per-dimension softmax
+; blend, so its answer at toy dims has a CLOSED FORM the band writes out directly — (e+3)/(e+1) with
+; e = tn-exp(-1.0), the same arithmetic ds4.c:12357-12375 does, expressed as one expression instead of
+; as a fold over a state. The band never calls dcp-pool to build its own expectation. Two of the
+; comparisons are additionally pinned to truncation-safe decimals so a shared mistake in both
+; expressions would still show.
+;
+; Verdict 2047:
+;      1  THE GEOMETRY of both live ratios (4 and 128) — coff, width, nrows, the write row, the
+;         emission boundary, and comp_pos — read off ds4.c:12395-12399
+;      2  A STATE IS BORN INERT: pooling a wholly unwritten window gives zeros, not garbage and not a
+;         mean of zeros with a live denominator. The NEG_INF guard is what makes a partial window safe.
+;      4  THE POOL IS THE SOFTMAX BLEND at ratio 2, against its closed form
+;      8  THE FALSIFIER: a plain MEAN over the same window disagrees. Without this bit the band would
+;         pass on any pooling that has the right shape.
+;     16  THE APE BIAS ENTERS THE SCORE AND NEVER THE KV — the whole point of two projections
+;     32  THE RATIO-4 CANDIDATE MAP: eight candidates per output dim, the previous window read at
+;         offset j and the current at offset hd+j. A four-candidate map is the natural wrong answer.
+;     64  THE SHIFT is exactly rows[0,r) <- rows[r,2r) and moves nothing else (ds4's second memcpy
+;         loop is the identity, so a carrier that runs both loops literally is doing extra work)
+;    128  A PARTIAL FIRST WINDOW on ratio 4 pools only what was written: the unwritten previous half
+;         contributes nothing, and the written rows are read at hd+j and not at j
+;    256  THE EMISSION BOUNDARY: driving four tokens through dcp-step yields nothing at pos 0,1,2 and
+;         a row at pos 3 — the very position where our lane's agreement with ds4 begins to fall
+;    512  THE NORM is weighted RMS with an ascending sum of squares, pinned
+;   1024  THE DECLARED RADIUS: the indexer is inert while n_comp <= top_k and NOT inert past it, so a
+;         carrier can tell which side of its own honesty it is standing on
+
+(do
+    (defn dcpb-score (ok bit) (if ok bit 0))
+    (defn dcpb-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn dcpb-near? (a b) (if (lt (dcpb-abs (sub a b)) 0.000000001) 1 0))
+    (defn dcpb-milli (x) (float_to_int (mul 1000.0 x)))
+    (defn dcpb-zeros? (xs) (if (eq (len xs) 0) 1 (if (eq (head xs) 0.0) (dcpb-zeros? (tail xs)) 0)))
+
+    ; ---- the ratio-2 fixture: two tokens, hd 2, no APE bias ----
+    (defn dcpb-r2-state ()
+        (do (let s0 (dcp-state-new 2 2))
+            (let ape (list 0.0 0.0 0.0 0.0))
+            (let s1 (dcp-update s0 2 2 0 (list 1.0 2.0) (list 0.0 0.0) ape))
+            (dcp-update s1 2 2 1 (list 3.0 4.0) (list 1.0 1.0) ape)))
+    ; the closed form: weights exp(0-1) and exp(1-1) over kv 1,3 and 2,4
+    (defn dcpb-r2-expect (a b) (do (let e (tn-exp (sub 0.0 1.0))) (div (add (mul e a) b) (add e 1.0))))
+
+    ; ---- the APE fixture: the same two tokens with a live bias column ----
+    (defn dcpb-ape-state ()
+        (do (let s0 (dcp-state-new 2 2))
+            ; ape is [width, ratio] — column 0 is the first `width` entries
+            (let ape (list 5.0 7.0 11.0 13.0))
+            (dcp-update s0 2 2 0 (list 1.0 2.0) (list 0.5 0.5) ape)))
+
+    ; ---- the ratio-4 partial window: four tokens, hd 1, width 2 ----
+    ; each row's SECOND element is the one pooling reads (offset hd+j), so 99.0 in
+    ; the first element is a tripwire: a map that reads offset j returns it.
+    (defn dcpb-r4-drive (s p vs ss)
+        (if (eq p 4) s
+            (dcpb-r4-drive (dcp-update s 4 1 p (list 99.0 (nth vs p)) (list 99.0 (nth ss p))
+                                       (list 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0))
+                           (add p 1) vs ss)))
+    (defn dcpb-r4-state () (dcpb-r4-drive (dcp-state-new 4 1) 0 (list 1.0 2.0 3.0 4.0) (list 0.0 1.0 0.0 0.0)))
+    (defn dcpb-r4-expect ()
+        (do (let e (tn-exp (sub 0.0 1.0)))
+            (div (add (add (mul e 1.0) 2.0) (add (mul e 3.0) (mul e 4.0)))
+                 (add 1.0 (add e (add e e))))))
+
+    ; ---- the shift fixture: 16 distinguishable floats over 8 rows of width 2 ----
+    (defn dcpb-cat (a b) (if (eq (len a) 0) b (cons (head a) (dcpb-cat (tail a) b))))
+    (defn dcpb-count (n i) (if (eq i n) (empty) (cons (add 0.0 i) (dcpb-count n (add i 1)))))
+    (defn dcpb-shifted () (dcp-shift-one (dcpb-count 16 0) 4 1))
+    (defn dcpb-expect-shift () (dcpb-cat (dcpb-count 16 8) (dcpb-count 16 8)))
+    (defn dcpb-list-eq (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) 1 (if (eq (head a) (head b)) (dcpb-list-eq (tail a) (tail b)) 0))
+            0))
+
+    ; ---- the emission boundary: four ratio-4 tokens through the whole step ----
+    (defn dcpb-emits (s p acc)
+        (if (eq p 4) acc
+            (do (let r (dcp-step s 4 1 p (list 0.0 1.0) (list 0.0 0.0)
+                                 (list 0.0 0.0 0.0 0.0 0.0 0.0 0.0 0.0) (list 1.0) 0.000001))
+                (dcpb-emits (nth r 0) (add p 1) (append acc (list (len (nth r 1))))))))
+
+    (defn dsv4-compressor-band ()
+        (do
+            (let c0 (dcpb-score (if (eq (dcp-coff 4) 2)
+                                (if (eq (dcp-coff 128) 1)
+                                (if (eq (dcp-width 4 512) 1024)
+                                (if (eq (dcp-width 128 512) 512)
+                                (if (eq (dcp-nrows 4) 8)
+                                (if (eq (dcp-nrows 128) 128)
+                                (if (eq (dcp-row 4 7) 7)
+                                (if (eq (dcp-row 128 7) 7)
+                                (if (eq (dcp-compress? 4 2) 0)
+                                (if (eq (dcp-compress? 4 3) 1)
+                                (if (eq (dcp-comp-pos 4 3) 0)
+                                    (eq (dcp-comp-pos 4 7) 4) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 1))
+            (let c1 (dcpb-score (eq (dcpb-zeros? (dcp-pool (dcp-state-new 4 3) 4 3)) 1) 2))
+
+            (let p2 (dcp-pool (dcpb-r2-state) 2 2))
+            (let c2 (dcpb-score (if (eq (dcpb-near? (nth p2 0) (dcpb-r2-expect 1.0 3.0)) 1)
+                                (if (eq (dcpb-near? (nth p2 1) (dcpb-r2-expect 2.0 4.0)) 1)
+                                (if (eq (dcpb-milli (nth p2 0)) 2462)
+                                    (eq (dcpb-milli (nth p2 1)) 3462) 0) 0) 0) 4))
+            ; the mean of the same window is 2.0 and 3.0 — the pool must NOT be that
+            (let c3 (dcpb-score (if (eq (dcpb-near? (nth p2 0) 2.0) 0)
+                                    (eq (dcpb-near? (nth p2 1) 3.0) 0) 0) 8))
+
+            (let sa (dcpb-ape-state))
+            (let c4 (dcpb-score (if (eq (nth (dcp-state-kv sa) 0) 1.0)
+                                (if (eq (nth (dcp-state-kv sa) 1) 2.0)
+                                (if (eq (nth (dcp-state-score sa) 0) 5.5)
+                                    (eq (nth (dcp-state-score sa) 1) 7.5) 0) 0) 0) 16))
+
+            (let c5 (dcpb-score (if (eq (dcp-nrows 4) 8)
+                                (if (eq (dcp-cand 4 1 0 0) 0)
+                                (if (eq (dcp-cand 4 1 3 0) 6)
+                                (if (eq (dcp-cand 4 1 4 0) 9)
+                                (if (eq (dcp-cand 4 1 7 0) 15)
+                                (if (eq (dcp-row 4 0) 4)
+                                    (eq (dcp-row 4 3) 7) 0) 0) 0) 0) 0) 0) 32))
+
+            (let c6 (dcpb-score (eq (dcpb-list-eq (dcpb-shifted) (dcpb-expect-shift)) 1) 64))
+
+            (let p4 (dcp-pool (dcpb-r4-state) 4 1))
+            (let c7 (dcpb-score (if (eq (len p4) 1)
+                                (if (eq (dcpb-near? (nth p4 0) (dcpb-r4-expect)) 1)
+                                    (if (lt (nth p4 0) 50.0) 1 0) 0) 0) 128))
+
+            (let c8 (dcpb-score (eq (dcpb-list-eq (dcpb-emits (dcp-state-new 4 1) 0 (empty))
+                                                  (list 0 0 0 1)) 1) 256))
+
+            ; pooled [3,4] with gains [1,1]: mean square 12.5, 3/sqrt(12.5) = 0.848528137
+            (let nrm (dcp-norm (list 3.0 4.0) (list 1.0 1.0) 0.0))
+            (let c9 (dcpb-score (if (eq (dcpb-milli (nth nrm 0)) 848)
+                                    (eq (dcpb-milli (nth nrm 1)) 1131) 0) 512))
+
+            (let c10 (dcpb-score (if (eq (dcp-n-comp 4 2048) 512)
+                                 (if (eq (dcp-indexer-inert? 4 2048 512) 1)
+                                 (if (eq (dcp-indexer-inert? 4 2052 512) 0)
+                                     (eq (dcp-n-comp 128 2048) 16) 0) 0) 0) 1024))
+
+            (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 (add c8 (add c9 c10))))))))))))
+    (dsv4-compressor-band))
