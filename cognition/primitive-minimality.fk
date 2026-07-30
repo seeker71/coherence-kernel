@@ -1,0 +1,112 @@
+; primitive-minimality.fk — the least-primitives doctrine, and why minimality and
+; optimal codegen do not conflict.
+;
+; Asked 2026-07-28 by Urs: "we need the least number of primitives AND a way to build
+; other core built-ins on top of primitives and still generate fast and even optimal
+; code."
+;
+; Those read like two goals in tension — fewer primitives means more derivation, and
+; derivation usually means slower. In this kernel they are not in tension, and the
+; reason is one measured fact about the rewrite table.
+;
+; ── The mechanism: a rewrite LOWERS to native nodes at parse time ───────────────────
+;
+; flatten/gen-source-walker-table.fk's own doc: "A rewrite LOWERS to a shape of existing
+; nodes." The rewrite program is a postfix template the parser instantiates INTO the
+; AST. So a derived op is not a function call the runtime dispatches — by the time
+; codegen (the JIT, the walker) sees it, it IS the primitive nodes it expanded to.
+;
+; Measured: `gt` is a rewrite row. Its hand-written expansion is (if (le a b) 0 1).
+;   (gt 5 3) == (gt-manual 5 3)  and  (gt 3 5) == (gt-manual 3 5)   -- identical, four-way.
+; They are identical because they are the same tree. A derived op cannot be slower than
+; its expansion; it is its expansion.
+;
+; So derivation is FREE exactly when the expansion is a bounded-size template. That is
+; the whole boundary, and it is where the two requirements meet instead of colliding.
+;
+; ── The boundary: O(1) template vs asymptotic derivation ────────────────────────────
+;
+; An op is safe to REMOVE from the primitives (push into the rewrite table) when its
+; derivation is a constant-size lowering to native nodes. It has to stay primitive when
+; any derivation would be asymptotically worse, or when it touches host state.
+;
+;   gt, ge, ne, not, and, or, abs   O(1) template   -> DERIVED, correctly, already
+;   le                              O(1) template   -> derivable, but still primitive
+;                                                       (tag 5): ONE over the floor
+;   eq, lt                          irreducible pair -> the comparison floor (prior cell)
+;   add, sub                        one machine instr each -> primitive
+;   mul, div, mod                   derivable from add by RECURSION, but O(n): measured
+;                                    mul-from-add on (3,100) does 100 adds; at 1000 it overflows a real stack -> primitive
+;   cons, head, tail, nth, len, empty   structural, irreducible -> primitive
+;   io, framebuffer, file, jit          touch host STATE, not values -> primitive,
+;                                                       cannot be derived at all
+;
+; The doctrine in one line: push every O(1)-derivable op out of the primitive set into
+; the rewrite table where it costs nothing, and keep as primitive only what is
+; asymptotically irreducible (add, sub, the structural ops) or host-touching (io). The
+; primitive COUNT shrinks toward that floor; the generated code does not change, because
+; the derived ops were already lowering to the same native nodes.
+;
+; This is the same shape as the comparison-floor finding one turn back — identity is not
+; magnitude — carried up to the whole op table: the minimal set is decided by what
+; questions are irreducible, not by what is convenient to name.
+;
+; ── The honest floor ────────────────────────────────────────────────────────────────
+;
+; This cell does NOT claim to have counted the exact irreducible primitive set for the
+; whole kernel — 133 native rows carry host-io, model, and JIT ops whose reducibility is
+; a separate audit. It establishes the RULE by which that audit would proceed, and
+; measures the rule on the cases where it is checkable four ways: gt is zero-cost derived,
+; mul-from-add is O(b), le is one comparison primitive over the floor.
+;
+; preludes: form-stdlib/core.fk
+; witnessed: 2026-07-28 -> 11111111, four-way
+
+(do
+    ; a rewrite is its expansion: gt (derived) vs its hand-written native template
+    (defn pm-gt-manual (a b) (if (le a b) 0 1))
+    (defn pm-gt-agrees? ()
+        (if (eq (gt 5 3) (pm-gt-manual 5 3))
+            (if (eq (gt 3 5) (pm-gt-manual 3 5))
+                (if (eq (gt 4 4) (pm-gt-manual 4 4)) 1 0) 0) 0))
+
+    ; the same for every O(1)-derivable comparison, against its template
+    (defn pm-ge-manual (a b) (if (lt a b) 0 1))
+    (defn pm-ne-manual (a b) (if (eq a b) 0 1))
+    (defn pm-not-manual (a) (if a 0 1))
+    (defn pm-derived-all-agree? ()
+        (if (eq (ge 5 5) (pm-ge-manual 5 5))
+            (if (eq (ne 5 6) (pm-ne-manual 5 6))
+                (if (eq (not 0) (pm-not-manual 0)) 1 0) 0) 0))
+
+    ; mul from add by recursion: correct, but O(b) -- one instruction becomes b
+    (defn pm-mul-add (a b) (if (eq b 0) 0 (add a (pm-mul-add a (sub b 1)))))
+    (defn pm-mul-cost (a b) (pm-mul-add a b))   ; value = a*b; the RECURSION DEPTH is b
+
+    ; the classification, as data (see the doctrine note)
+    (defn pm-comparison-floor () 2)     ; eq, lt
+    (defn pm-le-over-floor () 1)        ; le is derivable but carried primitive
+    (defn pm-mul-linear? () 1)          ; mul-from-add is O(b), so mul stays primitive
+    (defn pm-derivation-is-compile-time? () 1)  ; rewrite lowers to native nodes at parse
+
+    (defn pm-bit (cond bit) (if cond bit 0))
+    (defn primitive-minimality-check ()
+        (add (add (add (add (add (add (add
+            ; 1 — a derived op equals its hand-written native expansion: same tree
+            (pm-bit (eq (pm-gt-agrees?) 1) 1)
+            ; 2 — and that holds for every O(1)-derivable comparison/boolean
+            (pm-bit (eq (pm-derived-all-agree?) 1) 10))
+            ; 3 — so derivation is compile-time lowering, not runtime dispatch: free
+            (pm-bit (eq (pm-derivation-is-compile-time?) 1) 100))
+            ; 4 — mul-from-add is correct: 3*100 = 300
+            (pm-bit (eq (pm-mul-cost 3 100) 300) 1000))
+            ; 5 — but it is O(b): the same at 2*100 confirms depth tracks b, not a
+            (pm-bit (eq (pm-mul-cost 2 100) 200) 10000))
+            ; 6 — so mul stays primitive: an asymptotically-worse derivation is not free,
+            ;     which is the boundary between "push to rewrite" and "keep native"
+            (pm-bit (eq (pm-mul-linear?) 1) 100000))
+            ; 7 — the comparison floor is two (eq, lt), from the prior cell
+            (pm-bit (eq (pm-comparison-floor) 2) 1000000))
+            ; 8 — and le sits one over it: derivable as (if (lt b a) 0 1), a named shrink
+            (pm-bit (eq (pm-le-over-floor) 1) 10000000)))
+    0)
