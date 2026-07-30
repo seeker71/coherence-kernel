@@ -90,6 +90,17 @@
     (defn mla-rmsnorm-body ()
         "kernel void form_mla_rmsnorm_f32(device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* out [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i != 0u) return; float sumsq = 0.0f; for (uint j = 0u; j < n; ++j) sumsq = sumsq + x[j] * x[j]; float ms = sumsq / float(n); float rms = mla_sqrt(ms + eps); float inv = 1.0f / rms; for (uint j = 0u; j < n; ++j) out[j] = (x[j] * inv) * g[j]; } ")
 
+    ; --- THE SAME WEIGHTED NORM, SPLIT AND FOLDED ACROSS A SIMDGROUP. Profiling named the one-thread
+    ;     version the second most expensive kernel in the whole stack: 1232 calls a run, each walking
+    ;     4096 elements twice on a single lane. ds4 accumulates this sum of squares in DOUBLE
+    ;     (ds4.c:6638), so a lone f32 chain is not the faithful shape either — thirty-two lanes over
+    ;     contiguous slices, combined by simd_sum, both shortens every chain and shortens the wall.
+    ;     The apply half has no association to preserve and becomes one thread per element. ---
+    (defn mla-rmsnorm-reduce-body ()
+        "kernel void form_mla_rmsnorm_reduce_f32(device const float* x [[buffer(0)]], device float* inv [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& eps [[buffer(3)]], uint lane [[thread_position_in_grid]]) { if (lane >= 32u) return; uint per = (n + 31u) / 32u; uint lo = lane * per; uint hi = (lo + per < n) ? (lo + per) : n; float s = 0.0f; for (uint j = lo; j < hi; ++j) s = s + x[j] * x[j]; float sumsq = metal::simd_sum(s); if (lane != 0u) return; float ms = sumsq / float(n); inv[0] = 1.0f / mla_sqrt(ms + eps); } ")
+    (defn mla-rmsnorm-apply-body ()
+        "kernel void form_mla_rmsnorm_apply_f32(device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* out [[buffer(2)]], device const float* inv [[buffer(3)]], constant uint& n [[buffer(4)]], uint j [[thread_position_in_grid]]) { if (j >= n) return; out[j] = (x[j] * inv[0]) * g[j]; } ")
+
     ; --- kernel: plain f32 matvec (tb-matvec). Row r per thread; the dot is tb-dot's RIGHT fold, so the
     ;     column loop DESCENDS. Serves Wqa, Wqb, Wkv, the grouped was[g], and the final wb. ---
     (defn mla-matvec-body ()
@@ -133,9 +144,11 @@
         (str_concat "#include <metal_stdlib>\n#define MLA_MAX_HD 512\n"
         (str_concat (mla-msl-spine)
         (str_concat (mla-rmsnorm-body)
+        (str_concat (mla-rmsnorm-reduce-body)
+        (str_concat (mla-rmsnorm-apply-body)
         (str_concat (mla-matvec-body)
         (str_concat (mla-headrms-body)
         (str_concat (mla-rope-body)
-        (str_concat (mla-attend-body) (mla-attend-mixed-body)))))))))
+        (str_concat (mla-attend-body) (mla-attend-mixed-body)))))))))))
 
     0)
