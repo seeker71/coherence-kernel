@@ -423,12 +423,13 @@ var gpuErrors = 0
 var gpuFirstError: String? = nil
 final class Step {
     let cb: MTLCommandBuffer, enc: MTLComputeCommandEncoder
+    let requestedTG = Int(ProcessInfo.processInfo.environment["FORM_METAL_TG"] ?? "256") ?? 256
     init() { cb = queue.makeCommandBuffer()!; enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent)! }
     func go(_ p: MTLComputePipelineState, _ width: Int, barrier: Bool = true, tgMul32: Bool = false,
             _ bind: (MTLComputeCommandEncoder) -> Void) {
         nDispatch += 1
         enc.setComputePipelineState(p); bind(enc)
-        var tg = min(p.maxTotalThreadsPerThreadgroup, 256)
+        var tg = min(p.maxTotalThreadsPerThreadgroup, max(1, requestedTG))
         // the lane kernel folds one row per SIMD GROUP, so a threadgroup that is not a whole number of
         // simdgroups would split a row across two of them and lose part of its sum. Rounded down here,
         // stated rather than assumed to be true of 256.
@@ -1207,6 +1208,18 @@ else
     swiftc -O -o "$RUNNER.tmp" "$work/runner.swift" 2>"$work/swift.err" || {
         echo "FAIL  swiftc failed"; tail -30 "$work/swift.err"; exit 1; }
     mv "$RUNNER.tmp" "$RUNNER"
+fi
+
+# The external denominator, if it was MEASURED. Never a constant: an absent oracle means the runner
+# prints "NO DENOMINATOR" rather than dividing by a figure nobody here can re-derive. Regenerate with
+# form/native/metal/ollama_oracle.sh — and regenerate it on an IDLE machine, since this harness itself
+# depresses ollama by ~2.5x while it runs.
+ORACLE="$ROOT/native/metal/.ollama-oracle.env"
+if [[ -f "$ORACLE" ]]; then
+    set -a; . "$ORACLE"; set +a
+    echo "  external denominator: ollama $OLLAMA_MODEL decode $OLLAMA_DECODE tok/s (measured $OLLAMA_WHEN, $OLLAMA_RUNS runs, spread $OLLAMA_DECODE_MIN-$OLLAMA_DECODE_MAX)"
+else
+    echo "  external denominator: NOT MEASURED — run form/native/metal/ollama_oracle.sh to earn one"
 fi
 
 "$RUNNER" "$LIB" "$BLOB" "$TBL" "$CFG" "$VOC" "$REF" "$PROMPT" "$NSTEPS" "$MAXPOS" "$REFID" "$REFROW"
