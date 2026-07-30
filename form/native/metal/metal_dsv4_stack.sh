@@ -539,7 +539,7 @@ let pAttend = pipe(lMla, "form_mla_attend_f32")
 let pAttendMixed = pipe(lMla, "form_mla_attend_mixed_f32")
 let pMx8 = pipe(l8, "form_dsv4_mx8_matvec")
 let pGrouped = pipe(lCore, "form_dsv4_mx8_matvec_grouped")
-let pKvq = pipe(lCore, "form_dsv4_kv_fp8_f16_round")
+let pKvq = pipe(lCore, "form_dsv4_kv_fp8_f16_round_par")
 let pF16mv = pipe(lCore, "form_dsv4_f16_matvec")
 let pHcBcast = pipe(lHc, "form_hc_broadcast_f32")
 let pHcRmsNw = pipe(lHc, "form_hc_rmsnorm_nw_f32")
@@ -714,7 +714,7 @@ func gpuRope(_ v: MTLBuffer, _ nh: Int, _ pos: Int, _ il: Int, _ inverse: Bool) 
 }
 func gpuKvRound(_ v: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(headDim); var a = UInt32(headDim), b = UInt32(nRot)
-    enc(pKvq, 1, 1) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+    enc(pKvq, headDim, headDim) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                            c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) }
     return out
 }
