@@ -41,7 +41,7 @@
 ; THE FIRST-TOKEN SIMPLIFICATIONS still hold (grounded, receipts/2026-07-22-dsv4-subsystems.md):
 ;   compressor + indexer are IDENTITY at the first token (n_comp=0), so they are omitted, faithfully.
 ;
-; preludes: form-stdlib/core.fk native/metal/windowed-residency-emit.fk form-stdlib/mxfp8-msl.fk form-stdlib/mxfp4-msl.fk form-stdlib/qk-matvec-lane.fk form-stdlib/iq2xxs-msl.fk
+; preludes: form-stdlib/core.fk native/metal/windowed-residency-emit.fk form-stdlib/mxfp8-msl.fk form-stdlib/mxfp4-msl.fk form-stdlib/qk-matvec-lane.fk form-stdlib/iq2xxs-msl.fk form-stdlib/q2k-msl.fk form-stdlib/q8-0-msl.fk
 ;
 ; Proven by: native/metal/metal_dsv4_forward.sh (the middle-forward dispatches on the live file, each
 ; gated by the offered-interface guard — an unrun kernel reads as a computed zero, so every dispatch is
@@ -109,6 +109,56 @@
                         "kernel void form_dsv4_iq2_matvec (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0u) { k -= 1u; uint j = lane + k * 32u; uint idx = r * cols + j; acc = iq2_w(qb, idx) * x[j] + acc; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }")))
             (print "END")
             0))
+    ; --- Q2_K, the mainline Mac quant's w2/down projections. Same lane-strided fold as the IQ2
+    ; kernel above, one weight function swapped: q2k_w for iq2_w. The mainline
+    ; DeepSeek-V4-Flash-IQ2XXS-w2Q2K file carries 43 of these, one per layer, and without this branch
+    ; gpuExpert dies on "an expert tensor carries type 10".
+    (defn dsv4-q2k-matvec-msl ()
+        (do
+            (print "MSL")
+            (print (str_concat (qml-msl-header)
+                    (str_concat (q2km-msl-helpers)
+                    (str_concat
+                        "kernel void form_dsv4_q2k_matvec (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0u) { k -= 1u; uint j = lane + k * 32u; uint idx = r * cols + j; acc = q2k_w(qb, idx) * x[j] + acc; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }"
+                        ; the INDEPENDENT half of the fused matvec's falsifier: one thread per weight,
+                        ; carving the same bytes through the same q2k_w, so a carrier can dequant a
+                        ; slice and fold it with the body's plain f32 matvec and demand the fused
+                        ; kernel's answer. A fused decode that drifts from its own carver is a fold
+                        ; or map defect, not a decode defect (the decode is q2k-dequant-band's, 511).
+                        (str_concat (q2km-dequant-body "form_q2k_dequant_f32") (dom-q2k-appendix))))))
+            (print "END")
+            0))
+    ; --- Q8_0, the mainline file's DENSE path: attn_q_a/q_b/kv/output_a/output_b and output.weight
+    ; are all type 8 there, where the reap25 file had MXFP8 (41). Same lane-strided fold, q80_w for
+    ; the weight. Without this branch gpuMx8 reads Q8_0 bytes through the MXFP8 decoder and every
+    ; layer output is NaN — which is exactly what the first run on the mainline file reported:
+    ; "native self-witness failed: finite 0/16384".
+    (defn dsv4-q80-matvec-msl ()
+        (do
+            (print "MSL")
+            (print (str_concat (qml-msl-header)
+                    (str_concat (q80-msl-spine)
+                    (str_concat (q80-msl-weight)
+                        "kernel void form_dsv4_q80_matvec (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0u) { k -= 1u; uint j = lane + k * 32u; uint idx = r * cols + j; acc = q80_w(qb, idx) * x[j] + acc; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }"))))
+            (print "END")
+            0))
+    ; --- Q8_0, GROUPED. attn_output_a is type 8 in the mainline file and its rows are grouped by
+    ; oRank — row r reads activation group r/rank. The MXFP8 grouped kernel cannot serve it: that one
+    ; reads a separate SCALE PLANE at qb[nel + ...], which is the planar layout of the reap25 file.
+    ; Q8_0 is blocked (34 bytes per 32: one f16 then 32 int8), so the scale is inside the block and
+    ; the plane offset would read payload as exponents. Same grouping, different reach.
+    (defn dsv4-q80-grouped-msl ()
+        (do
+            (print "MSL")
+            (print (str_concat (qml-msl-header)
+                    (str_concat (q80-msl-spine)
+                    (str_concat (q80-msl-weight)
+                        "kernel void form_dsv4_q80_matvec_grouped (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], constant uint& rank [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint grp = r / rank; device const float* xg = x + grp * cols; float acc = 0.0f; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0u) { k -= 1u; uint j = lane + k * 32u; uint idx = r * cols + j; acc = q80_w(qb, idx) * xg[j] + acc; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }"))))
+            (print "END")
+            0))
+
+
+
 
     ; the IQ2_XXS decode tables, emitted from the body's OWN (iq2-grid)/(iq2-ksigns) so the carrier's
     ; independent CPU reference decodes the SAME grid the GPU does — never a hand-copied table.
