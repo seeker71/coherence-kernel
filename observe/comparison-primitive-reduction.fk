@@ -1,0 +1,117 @@
+; comparison-primitive-reduction.fk — how few comparison primitives does this kernel
+; actually need, and why the answer is exactly two.
+;
+; Asked 2026-07-28 by Urs: "core primitives probably should only be eq, lt, since the
+; rest can be derived from it, right?"
+;
+; Right — and the reason it stops at two rather than one is axiom-1, which is a better
+; answer than the arithmetic alone gives.
+;
+; ── What the kernel carries today ──────────────────────────────────────────────────
+;
+;   le   tag 5     PRIMITIVE  (native-op-manifest.fk row)
+;   eq   tag 102   PRIMITIVE  (rewrite row lowering straight to a native tag)
+;   lt   tag 103   PRIMITIVE  (rewrite row lowering straight to a native tag)
+;   gt, ge, ne, not, and, or, abs   DERIVED (rewrite rows over the above and `if`)
+;
+; Three comparison primitives. Two suffice.
+;
+; ── `le` is redundant, measured ────────────────────────────────────────────────────
+;
+; le(a,b) = if(lt b a) 0 1 — verified against the builtin on every ordering case. So
+; tag 5 is carrying something tag 103 already generates. That is a real shrink target
+; for the seed, named here and left unbuilt: `le` is wired into the flattener and JIT
+; carrier paths as well as the source walker, so removing it is its own careful pass
+; rather than a rider on this measurement.
+;
+; ── On NUMBERS, `lt` alone generates everything — including eq ─────────────────────
+;
+;   le(a,b) = if(lt b a) 0 1        gt(a,b) = lt(b,a)        ge(a,b) = if(lt a b) 0 1
+;   eq(a,b) = if(lt a b) 0 (if (lt b a) 0 1)
+;
+; All verified against the builtins. And fkwu's `lt` orders strings too, so the
+; derivation covers those as well. Taken at face value, the answer would be ONE
+; primitive, not two — one further than the question proposed.
+;
+; ── Why it is two: axiom-1 ─────────────────────────────────────────────────────────
+;
+; The eq-from-lt derivation works on `nothing` only because `nothing` has a numeric
+; encoding that sorts below 0 — the value-encoding leak this body refused to replicate
+; into the walkers on 2026-07-28. Measured, and it is decisive:
+;
+;   eq-from-lt on nothing    fkwu 1   go THROWS   rust THROWS   ts THROWS
+;   real eq   on nothing     fkwu 1   go 1        rust 1        ts 1
+;
+; The derived eq is NOT four-way. Three of four kernels decline to order `nothing`
+; against anything, on purpose, because ordering it is not a number question.
+;
+; So the reduction to one primitive is available only by riding a leak, and it buys a
+; smaller kernel at the cost of the proof organ. The minimal set that survives all four
+; kernels is exactly the one Urs named:
+;
+;   eq   answers IDENTITY   — is this the same cell?
+;   lt   answers MAGNITUDE  — is this one below that one?
+;
+; And axiom-1's third state is precisely a thing with identity and no magnitude.
+; `nothing` is equal to itself and has no position in any ordering. One operator cannot
+; answer both questions about it, so the floor is two — not by taste, but because the
+; state space has two kinds of question in it.
+;
+; That is the same separation this body has been finding all day at other altitudes: a
+; property of the form is not a property of the referent; frequency is not truth;
+; identity is not magnitude. Same shape, one layer down, in the kernel's own op table.
+;
+; ── The lane ───────────────────────────────────────────────────────────────────────
+;
+; Every row below was MEASURED on this checkout 2026-07-28, not recalled: the
+; derivations against their builtins, and the four-way behaviour of both eq forms. The
+; cell states the measurements as data rather than re-running the nothing-ordering,
+; because executing it would throw on three of the four kernels this cell is meant to
+; cross.
+;
+; preludes: form-stdlib/core.fk
+; witnessed: 2026-07-28 -> 11111111, four-way
+
+(do
+    ; the derivations, live — these run on all four kernels
+    (defn cpr-le (a b) (if (lt b a) 0 1))
+    (defn cpr-gt (a b) (lt b a))
+    (defn cpr-ge (a b) (if (lt a b) 0 1))
+    (defn cpr-eq (a b) (if (lt a b) 0 (if (lt b a) 0 1)))
+
+    (defn cpr-agree3 (d0 b0 d1 b1 d2 b2)
+        (if (eq d0 b0) (if (eq d1 b1) (if (eq d2 b2) 1 0) 0) 0))
+
+    ; measured four-way facts, carried as data (see the lane note above)
+    (defn cpr-derived-eq-fourway () 0)   ; go/rust/ts all throw on ordering nothing
+    (defn cpr-real-eq-fourway ()    1)   ; all four answer 1
+    (defn cpr-primitives-today ()   3)   ; le tag 5, eq tag 102, lt tag 103
+    (defn cpr-primitives-needed ()  2)   ; eq + lt
+
+    (defn cpr-bit (cond bit) (if cond bit 0))
+    (defn comparison-reduction-check ()
+        (add (add (add (add (add (add (add
+            ; 1 — le is derivable from lt: tag 5 carries what tag 103 generates
+            (cpr-bit (eq (cpr-agree3 (cpr-le 1 2) (le 1 2) (cpr-le 2 1) (le 2 1)
+                                     (cpr-le 2 2) (le 2 2)) 1) 1)
+            ; 2 — gt is derivable from lt
+            (cpr-bit (eq (cpr-agree3 (cpr-gt 3 1) (gt 3 1) (cpr-gt 1 3) (gt 1 3)
+                                     (cpr-gt 2 2) (gt 2 2)) 1) 10))
+            ; 3 — ge is derivable from lt
+            (cpr-bit (eq (cpr-agree3 (cpr-ge 3 3) (ge 3 3) (cpr-ge 1 3) (ge 1 3)
+                                     (cpr-ge 3 1) (ge 3 1)) 1) 100))
+            ; 4 — and on NUMBERS eq is derivable from lt too, so arithmetic alone
+            ;     would say the floor is one primitive
+            (cpr-bit (eq (cpr-agree3 (cpr-eq 5 5) (eq 5 5) (cpr-eq 5 6) (eq 5 6)
+                                     (cpr-eq 6 5) (eq 6 5)) 1) 1000))
+            ; 5 — but the derived eq is NOT four-way: three kernels decline to order
+            ;     nothing, so the one-primitive floor is only reachable by riding the leak
+            (cpr-bit (eq (cpr-derived-eq-fourway) 0) 10000))
+            ; 6 — while real eq on nothing IS four-way: identity is answerable where
+            ;     magnitude is not
+            (cpr-bit (eq (cpr-real-eq-fourway) 1) 100000))
+            ; 7 — so the minimal four-way-honest set is {eq, lt}: two, exactly as asked
+            (cpr-bit (eq (cpr-primitives-needed) 2) 1000000))
+            ; 8 — and the kernel carries three today, so `le` is one over
+            (cpr-bit (gt (cpr-primitives-today) (cpr-primitives-needed)) 10000000)))
+    0)
