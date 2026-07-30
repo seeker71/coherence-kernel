@@ -835,16 +835,28 @@ func hcPost(_ blockOut: MTLBuffer, _ resid: MTLBuffer, _ split: MTLBuffer) -> MT
                                   c.setBytes(&a, length: 4, index: 5); c.setBytes(&b, length: 4, index: 6) }
     return out
 }
+// FORM_DS4_STAGE_BLK0=1 prints blk.0's stages in the SAME order and at the same boundaries as
+// `ds4 --head-test` (ds4.c:53089-53124, an undocumented flag). Each line is directly diffable against
+// the reference's own, which turns "the stack disagrees" into "this operation disagrees".
+var stageBlk0 = ProcessInfo.processInfo.environment["FORM_DS4_STAGE_BLK0"] == "1"
+func stage(_ name: String, _ b: MTLBuffer, _ n: Int) {
+    guard stageBlk0 else { return }
+    let s = stageStats(b, n)
+    print(String(format: "      blk.0 %@: min=%g max=%g rms=%g", name, s.0, s.1, s.2))
+}
 func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let w = LW[il]
+    if il == 0 { stage("attn_pre", input, nEmbd) }
     let xn = gpuRmsnorm(input, nEmbd, w.nrm)
     let ql = gpuMx8(w.qa, xn, w.qa.rows, w.qa.cols)
     let qln = gpuRmsnorm(ql, w.qa.rows, w.qan)
     let qq = gpuMx8(w.qb, qln, w.qb.rows, w.qb.cols)
     let qh = gpuHeadrms(qq)
+    if il == 0 { stage("q", qh, nHead*headDim) }
     let qr = gpuRope(qh, nHead, pos, il, false)
     let kl = gpuMx8(w.kv, xn, w.kv.rows, w.kv.cols)
     let kln = gpuRmsnorm(kl, w.kv.rows, w.kvan)
+    if il == 0 { stage("kv", kln, headDim) }
     let kr = gpuRope(kln, 1, pos, il, false)
     // raw lane: the fp8+f16 round is the COMPRESSED cache's storage format (ds4.c:3210 says so in its
     // own comment); the raw cache is f32, so the roped key passes through untouched.
@@ -862,9 +874,12 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     } else {
         ha = gpuAttend(qr, kq, w.snk)
     }
+    if il == 0 { stage("attn_heads", ha, nHead*headDim) }
     let hu = gpuRope(ha, nHead, pos, il, true)
     let lo = gpuGrouped(w.oa, hu)
-    return gpuMx8(w.ob, lo, w.ob.rows, w.ob.cols)
+    let ao = gpuMx8(w.ob, lo, w.ob.rows, w.ob.cols)
+    if il == 0 { stage("attn_out", ao, nEmbd) }
+    return ao
 }
 
 func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) -> LayerOut {
@@ -872,9 +887,12 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
     let (attnCur, attnSplit) = hcPre(residHc, w.haf, w.has, w.hab)
     let attnOut = mlaBlock(attnCur, pos, il)
     let afterAttn = hcPost(attnOut, residHc, attnSplit)
+    if il == 0 { stage("after_attn_hc", afterAttn, hcDim) }
 
     let (ffnCur, ffnSplit) = hcPre(afterAttn, w.hff, w.hfs, w.hfb)
+    if il == 0 { stage("ffn_cur", ffnCur, nEmbd) }
     let ffnNorm = gpuRmsnorm(ffnCur, nEmbd, w.fnw)
+    if il == 0 { stage("ffn_norm", ffnNorm, nEmbd) }
     let logits = gpuF16mv(w.rt, ffnNorm)
 
     let nExpR = w.nExpRouter
@@ -918,6 +936,10 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         let up = gpuExpert(w.ux, ffnNorm, e)
         let mid = gpuSwiglu(gt, up, nFf, wts[i], clamp)
         let dn = gpuExpert(w.dx, mid, e)
+        if il == 0 {
+            stage("expert \(e) gate", gt, nFf); stage("expert \(e) up", up, nFf)
+            stage("expert \(e) mid", mid, nFf); stage("expert \(e) down", dn, nEmbd)
+        }
         var one: Float = 1.0, n32 = UInt32(nEmbd)
         if i == 0 {
             enc(pScale, nEmbd, 256) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
@@ -933,13 +955,20 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
     let smid = gpuSwiglu(sgv, suv, nFf, 1.0, clamp)
     let shared = gpuMx8(w.sdw, smid, w.sdw.rows, w.sdw.cols)
 
+    if il == 0 { stage("routed_moe", moe, nEmbd); stage("shared_ffn", shared, nEmbd) }
     let ffnOut = sentinelled(nEmbd)
     do { var one: Float = 1.0, n32 = UInt32(nEmbd)
          enc(pScale, nEmbd, 256) { c in c.setBuffer(moe, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
                                         c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
          enc(pAxpy, nEmbd, 256) { c in c.setBuffer(shared, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
                                        c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) } }
+    if il == 0 { stage("ffn_out", ffnOut, nEmbd) }
     let outHc = hcPost(ffnOut, afterAttn, ffnSplit)
+    if il == 0 && stageBlk0 {
+        stage("after_ffn_hc", outHc, hcDim)
+        print("      blk.0 experts: \(ids) weights \(wts)   (ds4 --head-test names its own)")
+        stageBlk0 = false
+    }
     return LayerOut(afterAttn: afterAttn, ffnCur: ffnCur, ffnNorm: ffnNorm, logits: logits,
                     ids: ids, wts: wts, gate0: g0, up0: u0, mid0: m0, down0: d0,
                     moe: moe, shared: shared, ffnOut: ffnOut, outHc: outHc)
@@ -1012,6 +1041,16 @@ var controlAdapterProved = false
 
 // The native exit head is reusable inside the same Metal lifetime as the stack state. Its result can
 // therefore become the next step's embedding and hash-routing token without a serialization membrane.
+// THE STAGE WITNESS ds4 also prints. `ds4 --first-token-test` reports
+//   first-token final_hc: min=… max=… rms=…      and      first-token logits: min=… max=… rms=…
+// which is a comparison point UPSTREAM of the exit head — the only per-stage door the reference
+// offers. If final_hc already disagrees, no amount of exit-head work can be the cause.
+func stageStats(_ b: MTLBuffer, _ n: Int) -> (Float, Float, Float) {
+    let p = fp(b, n)
+    var lo = Float.infinity, hi = -Float.infinity, ss: Double = 0
+    for i in 0..<n { let v = p[i]; if v < lo { lo = v }; if v > hi { hi = v }; ss += Double(v)*Double(v) }
+    return (lo, hi, Float(sqrt(ss/Double(n))))
+}
 func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: Float) {
     let flat = sentinelled(hcDim)
     do { var n = UInt32(hcDim), e0 = eps
@@ -1039,6 +1078,9 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
     if let dumpPath = ProcessInfo.processInfo.environment["FORM_DS4_DUMP_LOGITS"], dumpArmed, !dumpLogitsDone {
         dumpLogitsDone = true
         let lp = fp(logits, outWeight.rows)
+        let hs = stageStats(resid, hcDim), ls = stageStats(logits, outWeight.rows)
+        print(String(format: "      STAGE final_hc: min=%.6g max=%.6g rms=%.6g   logits: min=%.6g max=%.6g rms=%.6g   (ds4 --first-token-test prints the same two lines)",
+                     hs.0, hs.1, hs.2, ls.0, ls.1, ls.2))
         var out = "{\"vocab\":\(outWeight.rows),\"argmax_token\":\(base.token),\"logits\":["
         out.reserveCapacity(outWeight.rows * 12)
         for i in 0..<outWeight.rows { if i > 0 { out += "," }; out += String(lp[i]) }
@@ -1067,22 +1109,29 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
         // single id thirty places while the distribution as a whole comes closer or goes further. r
         // over all \(outWeight.rows) logits, plus how many of the reference's top-10 we place in our
         // top-10, is what a change to the recipe has to move.
-        if let refPath = ProcessInfo.processInfo.environment["FORM_DS4_REF_LOGITS"],
-           let raw = try? String(contentsOfFile: refPath, encoding: .utf8),
-           let lb = raw.range(of: "\"logits\":[") {
+        func readRefLogits(_ path: String) -> [Float]? {
+            guard let raw = try? String(contentsOfFile: path, encoding: .utf8),
+                  let lb = raw.range(of: "\"logits\":[") else { return nil }
             let rest = raw[lb.upperBound...]
             let end = rest.firstIndex(of: "]") ?? rest.endIndex
-            let ref = rest[..<end].split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+            return rest[..<end].split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
+        }
+        func pearson(_ a: [Float], _ b: [Float]) -> Double {
+            var sa: Double = 0, sb: Double = 0
+            for i in 0..<a.count { sa += Double(a[i]); sb += Double(b[i]) }
+            let ma = sa/Double(a.count), mb = sb/Double(a.count)
+            var num: Double = 0, da: Double = 0, db: Double = 0
+            for i in 0..<a.count {
+                let x = Double(a[i]) - ma, y = Double(b[i]) - mb
+                num += x*y; da += x*x; db += y*y
+            }
+            return num / (sqrt(da) * sqrt(db))
+        }
+        if let refPath = ProcessInfo.processInfo.environment["FORM_DS4_REF_LOGITS"],
+           let ref = readRefLogits(refPath) {
             if ref.count == outWeight.rows {
-                var sa: Double = 0, sb: Double = 0
-                for i in 0..<ref.count { sa += Double(lp[i]); sb += Double(ref[i]) }
-                let ma = sa/Double(ref.count), mb = sb/Double(ref.count)
-                var num: Double = 0, da: Double = 0, db: Double = 0
-                for i in 0..<ref.count {
-                    let x = Double(lp[i]) - ma, y = Double(ref[i]) - mb
-                    num += x*y; da += x*x; db += y*y
-                }
-                let r = num / (sqrt(da) * sqrt(db))
+                let ours = (0..<outWeight.rows).map { lp[$0] }
+                let r = pearson(ours, ref)
                 var refOrder = Array(0..<ref.count); refOrder.sort { ref[$0] > ref[$1] }
                 let ourTop10 = Set(order.prefix(10)), refTop10 = Set(refOrder.prefix(10))
                 var refRank = [Int](repeating: 0, count: ref.count)
@@ -1090,6 +1139,18 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
                 print(String(format: "      AGREEMENT with %@: r=%.6f over %d logits, top-10 overlap %d/10, their argmax at our rank %d, our argmax at their rank %d",
                              (refPath as NSString).lastPathComponent, r, ref.count,
                              ourTop10.intersection(refTop10).count, rank[refOrder[0]], refRank[order[0]]))
+                // THE NOISE FLOOR. An r against a reference means nothing until the reference's
+                // spread against ITSELF is known — two of its own backends on the same prompt bound
+                // how much agreement is even available. Quoting our number without this one would be
+                // quoting a denominator nobody re-derived.
+                if let refBPath = ProcessInfo.processInfo.environment["FORM_DS4_REF_LOGITS_B"],
+                   let refB = readRefLogits(refBPath), refB.count == ref.count {
+                    var bOrder = Array(0..<refB.count); bOrder.sort { refB[$0] > refB[$1] }
+                    print(String(format: "      NOISE FLOOR %@ vs %@: r=%.6f, top-10 overlap %d/10, same argmax %@ — ours is r=%.6f against the first",
+                                 (refPath as NSString).lastPathComponent, (refBPath as NSString).lastPathComponent,
+                                 pearson(ref, refB), refTop10.intersection(Set(bOrder.prefix(10))).count,
+                                 refOrder[0] == bOrder[0] ? "yes" : "no", r))
+                }
             } else {
                 print("      AGREEMENT: reference carries \(ref.count) logits, this vocabulary is \(outWeight.rows) — not comparable")
             }
@@ -1183,7 +1244,18 @@ if kvSequence {
     for pos in 0..<kvSteps {
         let inputToken = pos < promptIds.count ? promptIds[pos] : currentToken
         var resid = embedToken(inputToken)
-        for il in 0..<nLayers { resid = runLayer(il, pos, inputToken, resid).outHc }
+        // FORM_DS4_TRACE_HC=1 prints the hyper-connection stream's RMS after every layer. ds4 reports
+        // only the final one (--first-token-test), but the SHAPE of the growth is diagnostic on its
+        // own: a stream that plateaus is being renormalised somewhere it should not be, while one that
+        // grows steadily but lands short is off by a per-layer factor.
+        let traceHc = ProcessInfo.processInfo.environment["FORM_DS4_TRACE_HC"] == "1" && pos == promptIds.count - 1
+        if traceHc { print(String(format: "      HC rms after embed: %.4g", stageStats(resid, hcDim).2)) }
+        for il in 0..<nLayers {
+            resid = runLayer(il, pos, inputToken, resid).outHc
+            if traceHc && (il < 4 || il % 6 == 0 || il == nLayers - 1) {
+                print(String(format: "      HC rms after blk.%d: %.4g", il, stageStats(resid, hcDim).2))
+            }
+        }
         dumpArmed = (pos == promptIds.count - 1)
         let exit = nativeExitHead(resid, "feedback step \(pos), input_token=\(inputToken)")
         if pos >= promptIds.count - 1 { emitted.append(exit.token) }
