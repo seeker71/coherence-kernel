@@ -116,14 +116,26 @@
     (defn mla-attend-body ()
         "kernel void form_mla_attend_f32(device const float* q [[buffer(0)]], device const float* rows [[buffer(1)]], device float* out [[buffer(2)]], device const float* sinks [[buffer(3)]], constant uint& nh [[buffer(4)]], constant uint& hd [[buffer(5)]], constant uint& nrows [[buffer(6)]], constant float& scale [[buffer(7)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; device const float* qh = q + h * hd; float sink = sinks[h]; float m = sink; for (uint j = 0u; j < nrows; ++j) { float s = scale * mla_dot(qh, rows + j * hd, hd); if (s > m) m = s; } float acc[MLA_MAX_HD]; for (uint d = 0u; d < hd; ++d) acc[d] = 0.0f; float se = 0.0f; for (uint j = 0u; j < nrows; ++j) { float s = scale * mla_dot(qh, rows + j * hd, hd); float e = mla_exp(s - m); se = se + e; device const float* rj = rows + j * hd; for (uint d = 0u; d < hd; ++d) acc[d] = acc[d] + rj[d] * e; } float denom = mla_exp(sink - m) + se; float inv = 1.0f / denom; for (uint d = 0u; d < hd; ++d) out[h * hd + d] = acc[d] * inv; } ")
 
+    ; --- kernel: the SAME attention over TWO row arenas (ds4.c:12567 layer_attention_mixed_one). A
+    ;     compressing layer attends over its raw sliding window AND the compressed rows the second cache
+    ;     holds (dsv4-compressor.fk), one softmax across the union with the sink still in the denominator
+    ;     only. Two buffers rather than one concatenated arena because the raw arena's frontier sentinel
+    ;     is a live falsifier — appending the compressed rows into it would overwrite the evidence.
+    ;     ds4's mask argument is omitted here on purpose: indexer_allowed_decode_one (:12822) returns
+    ;     all-allowed whenever n_comp <= top_k, and top_k is 512, so below 2048 tokens on a ratio-4 layer
+    ;     there is nothing to mask. A carrier past that must refuse, not pretend. ---
+    (defn mla-attend-mixed-body ()
+        "kernel void form_mla_attend_mixed_f32(device const float* q [[buffer(0)]], device const float* rows [[buffer(1)]], device const float* crows [[buffer(2)]], device float* out [[buffer(3)]], device const float* sinks [[buffer(4)]], constant uint& nh [[buffer(5)]], constant uint& hd [[buffer(6)]], constant uint& nrows [[buffer(7)]], constant uint& ncomp [[buffer(8)]], constant float& scale [[buffer(9)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; device const float* qh = q + h * hd; float sink = sinks[h]; float m = sink; for (uint j = 0u; j < nrows; ++j) { float s = scale * mla_dot(qh, rows + j * hd, hd); if (s > m) m = s; } for (uint j = 0u; j < ncomp; ++j) { float s = scale * mla_dot(qh, crows + j * hd, hd); if (s > m) m = s; } float acc[MLA_MAX_HD]; for (uint d = 0u; d < hd; ++d) acc[d] = 0.0f; float se = 0.0f; for (uint j = 0u; j < nrows; ++j) { float s = scale * mla_dot(qh, rows + j * hd, hd); float e = mla_exp(s - m); se = se + e; device const float* rj = rows + j * hd; for (uint d = 0u; d < hd; ++d) acc[d] = acc[d] + rj[d] * e; } for (uint j = 0u; j < ncomp; ++j) { float s = scale * mla_dot(qh, crows + j * hd, hd); float e = mla_exp(s - m); se = se + e; device const float* rj = crows + j * hd; for (uint d = 0u; d < hd; ++d) acc[d] = acc[d] + rj[d] * e; } float denom = mla_exp(sink - m) + se; float inv = 1.0f / denom; for (uint d = 0u; d < hd; ++d) out[h * hd + d] = acc[d] * inv; } ")
+
     ; --- ONE translation unit: the body's one metal_stdlib, the MLA_MAX_HD cap, the spine once, then the
-    ;     five kernels. A carrier compiles exactly this; it composes nothing itself. ---
+    ;     kernels. A carrier compiles exactly this; it composes nothing itself. ---
     (defn mla-msl-unit ()
         (str_concat "#include <metal_stdlib>\n#define MLA_MAX_HD 512\n"
         (str_concat (mla-msl-spine)
         (str_concat (mla-rmsnorm-body)
         (str_concat (mla-matvec-body)
         (str_concat (mla-headrms-body)
-        (str_concat (mla-rope-body) (mla-attend-body))))))))
+        (str_concat (mla-rope-body)
+        (str_concat (mla-attend-body) (mla-attend-mixed-body)))))))))
 
     0)

@@ -1,0 +1,110 @@
+; tests/q2k-dequant-band.fk — the Q2_K carver against an INDEPENDENT reference.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/f16-decode.fk form-stdlib/q2k-dequant.fk
+;
+; run: ./fkwu --src form/form-stdlib/tests/q2k-dequant-band.fk   ; -> 511
+;
+; WHERE THE EXPECTED VALUES COME FROM, AND WHY A FIXTURE IS RIGHT HERE. mxfp4-plane-dequant's band
+; declines a byte fixture and checks one recipe against another, which is the stronger move when the
+; body already holds two recipes. It does not, for Q2_K. So the pinned values below were taken from
+; ds4.c's own q2_k_value_f32 (:3466) run over these exact bytes — a second implementation, by another
+; hand, in another language. That is `askalike` (row 932): the oracle need not be an engine, only
+; something that answers the same question on its own.
+;
+; The full run agreed on 512 of 512 elements across two blocks, including an awkward f16 d (0x3555)
+; and a NEGATIVE dmin (0xB400). Ten of those are pinned here, chosen to sit on the seams: 0 and 1 (the
+; first two elements share a qs byte), 15/16/17 (the group boundary, where q_base and shift both move),
+; 31, 127/128 (the 32-byte half boundary that q_base folds), 200, and 255 (the last element).
+;
+; Verdict 511:
+;     1  the block geometry is 256 elements in 84 bytes, and the four field offsets are ds4's struct
+;     2  the decomposition constants: group, l, q_base and shift at hand-checked indices
+;     4  THE HALF-BOUNDARY: q_base for group 8 is 32, not 128 — the fold ds4 does and a naive
+;        contiguous stride would not
+;     8  THE SHIFT CYCLE: shift repeats every 8 groups, 0 2 4 6 0 2 4 6 — not a monotone walk
+;    16  d and dmin decode through f16-decode.fk at the pinned bytes
+;    32  ten pinned values match the independent reference exactly
+;    64  THE FALSIFIER: a contiguous-stride reading (q_base = group*16) disagrees on at least one
+;        pinned index. If it did not, this band would be proving nothing about the fold.
+;   128  the min is a per-GROUP offset, not per-element: within one group the 16 differences
+;        value(i) - d*scale*q(i) are all equal
+;   256  alignment is honest — 256 aligns, 255 does not, and the byte count follows
+
+(do
+    (defn q2b-score (ok bit) (if ok bit 0))
+
+    ; THE FIXTURE IS A FILE, because it has to be. Form's string primitives are
+    ; str_byte_at / str_concat / str_len / str_find / str_eq / str_to_* — there is no way to BUILD a
+    ; string from arbitrary byte values, so a carver cannot be handed an inline block. Every carver in
+    ; this body takes its src from read_file_slice for the same reason. Two seeded blocks, 168 bytes:
+    ; block 0 has d = 0x3C00 (1.0) and dmin = 0x3800 (0.5); block 1 has d = 0x3555, an awkward f16,
+    ; and dmin = 0xB400, NEGATIVE — so the sign path is exercised and not assumed.
+    (defn q2b-file () "form/form-stdlib/tests/fixtures/q2k-two-blocks.bin")
+    (defn q2b-src () (read_file_slice (q2b-file) 0 168))
+    (defn q2b-present? () (if (ge (str_len (q2b-src)) 168) 1 0))
+
+    ; the ten pinned probes, in micro units, from ds4.c:3466 over these bytes
+    (defn q2b-probe (i v) (list i v))
+    (defn q2b-probes ()
+        (list (q2b-probe 0 20500000)   (q2b-probe 1 2500000)    (q2b-probe 15 11500000)
+              (q2b-probe 16 -3500000)  (q2b-probe 17 -7500000)  (q2b-probe 31 -5500000)
+              (q2b-probe 127 -2500000) (q2b-probe 128 500000)   (q2b-probe 200 4000000)
+              (q2b-probe 255 17000000)))
+
+    (defn q2b-micro (src i) (float_to_int (mul 1000000.0 (q2k-at src 0 i))))
+    (defn q2b-match-loop (src ps)
+        (if (eq (len ps) 0) 1
+            (if (eq (q2b-micro src (nth (head ps) 0)) (nth (head ps) 1))
+                (q2b-match-loop src (tail ps)) 0)))
+
+    ; the falsifier's rival: q_base = group*16, the "obvious" contiguous stride
+    (defn q2b-naive-q (src i)
+        (q2k-mod (div (eqr-at src (add (q2k-qs-off) (add (mul (q2k-group i) 16) (q2k-l i))))
+                      (q2k-pow2 (q2k-shift i))) 4))
+    (defn q2b-naive-differs-loop (src ps)
+        (if (eq (len ps) 0) 0
+            (if (eq (q2b-naive-q src (nth (head ps) 0)) (q2k-q src 0 (nth (head ps) 0)))
+                (q2b-naive-differs-loop src (tail ps)) 1)))
+
+    ; the min is per-group: value(i) + dmin*min == d*scale*q(i), so the residual is constant in a group
+    (defn q2b-resid (src i)
+        (float_to_int (mul 1000000.0
+            (add (q2k-at src 0 i) (mul (q2k-dmin src 0) (q2k-min src 0 i))))))
+    (defn q2b-pergroup-loop (src i m first)
+        (if (eq i m) 1
+            (if (eq (q2b-resid src i)
+                    (float_to_int (mul 1000000.0 (mul (mul (q2k-d src 0) (q2k-scale src 0 i)) (q2k-q src 0 i)))))
+                (q2b-pergroup-loop src (add i 1) m first) 0)))
+
+    (defn q2k-dequant-band ()
+        (do
+            (let src (q2b-src))
+            (let c0 (q2b-score (if (eq (q2b-present?) 1)
+                               (if (eq (q2k-block-n) 256)
+                                   (if (eq (q2k-block-bytes) 84)
+                                       (if (eq (q2k-qs-off) 16)
+                                           (if (eq (q2k-d-off) 80) (eq (q2k-dmin-off) 82) 0) 0) 0) 0) 0) 1))
+            (let c1 (q2b-score (if (eq (q2k-group 0) 0)
+                                   (if (eq (q2k-group 16) 1)
+                                       (if (eq (q2k-l 17) 1)
+                                           (eq (q2k-group 255) 15) 0) 0) 0) 2))
+            ; group 8 folds to q_base 32, not 128
+            (let c2 (q2b-score (if (eq (q2k-qbase 128) 32)
+                                   (if (eq (q2k-qbase 0) 0)
+                                       (eq (q2k-qbase 16) 16) 0) 0) 4))
+            ; shift cycles 0 2 4 6 over groups 0,2,4,6 and repeats at group 8
+            (let c3 (q2b-score (if (eq (q2k-shift 0) 0)
+                                   (if (eq (q2k-shift 32) 2)
+                                       (if (eq (q2k-shift 64) 4)
+                                           (if (eq (q2k-shift 96) 6) (eq (q2k-shift 128) 0) 0) 0) 0) 0) 8))
+            (let c4 (q2b-score (if (eq (float_to_int (mul 1000.0 (q2k-d src 0))) 1000)
+                                   (eq (float_to_int (mul 1000.0 (q2k-dmin src 0))) 500) 0) 16))
+            (let c5 (q2b-score (eq (q2b-match-loop src (q2b-probes)) 1) 32))
+            (let c6 (q2b-score (eq (q2b-naive-differs-loop src (q2b-probes)) 1) 64))
+            (let c7 (q2b-score (eq (q2b-pergroup-loop src 0 32 0) 1) 128))
+            (let c8 (q2b-score (if (eq (q2k-aligned? 256) 1)
+                                   (if (eq (q2k-aligned? 255) 0)
+                                       (eq (q2k-bytes 512) 168) 0) 0) 256))
+            (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 c8)))))))))
+        )
+    (q2k-dequant-band))
