@@ -1,0 +1,187 @@
+; dsv4-compressor.fk — the SECOND cache. DeepSeek-V4-Flash keeps two KV lanes per compressing layer:
+; the raw sliding window (dsv4-kv-cache.fk) and a compressed lane that pools every `ratio` raw steps
+; into ONE row and appends it beside the raw rows for attention to see.
+;
+; WHY THIS CELL EXISTS, and why it is exactly the measured gap. Against `ds4 --raw-prompt` on
+; "The capital of France is" our lane put ds4's argmax at rank 5 on a 3-token prompt and at 27/148 on
+; 4/5 tokens. compressor_decode_one emits its first row when (pos+1) mod ratio == 0 — pos = 3 on the
+; ratio-4 layers, which is 21 of V4-Flash's 43. The degradation begins at the token where this cell's
+; output would first exist and nowhere earlier (receipts/2026-07-30-helpfuldefault.md). Everything the
+; raw half does was read whole and matches op for op; this is what was missing.
+;
+; THE INDEXER IS NOT MISSING, IT IS INERT. ds4.c:12822 —
+;     top_k = min(DS4_N_INDEXER_TOP_K, n_comp); if (top_k == n_comp) { all allowed; return; }
+; with n_indexer_top_k = 512 (ds4.c:558). n_comp = floor((pos+1)/ratio), so the indexer selects nothing
+; until 2048 tokens on a ratio-4 layer; below that every compressed row is visible and the indexer's own
+; compressor lane feeds a scorer whose answer is already fixed. So the mask is omitted HERE — declared,
+; not overlooked — and a carrier past 2048 tokens must refuse rather than pretend (aporon).
+;
+; THE POOLING IS A PER-DIMENSION SOFTMAX, not a mean (ds4.c:12326). Each of head_dim output dims runs
+; its own softmax over the window's scores at that dim and blends the window's kv values at that dim.
+; A mean would be right-shaped, right-magnitude and silently wrong — the class dsv4-kv-cache.fk names.
+;
+; THE RATIO-4 LAYERS CARRY TWO LANES IN ONE STATE, and this is the trap. coff = 2 there, so a row is
+; 2*head_dim wide and the state holds 2*ratio rows. Rows [0, ratio) are the PREVIOUS window and are read
+; at offset j; rows [ratio, 2*ratio) are the CURRENT window and are read at offset head_dim + j. Eight
+; candidates per output dim, not four. After a compression ds4 copies the current half down over the
+; previous half (:12455) and then copies it back — the second copy is the identity, so the net law is
+; `rows[r] = rows[ratio + r]`, which is what dcp-shift does and what the device kernel does.
+;
+; WHAT IS NOT HERE, said plainly: the rope, the fp8 round and the f16 store on the emitted row. Those
+; are the SAME operations the raw lane already runs (form_mla_rope_f32 at comp_pos = pos+1-ratio with
+; the layer's own compressed freqs, then form_dsv4_kv_fp8_f16_round), so they are reused rather than
+; re-authored. This cell ends at the normed pooled row.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk
+;
+; Proven by: form-stdlib/tests/dsv4-compressor-band.fk (the recipe and the emitted text)
+;            and native/metal/metal_dsv4_stack.sh (the device half, on the real file).
+
+(do
+    ; ===========================================================================
+    ; THE GEOMETRY. Every one of these is ds4.c:12395-12399 read literally.
+    ; ===========================================================================
+    (defn dcp-coff (r) (if (eq r 4) 2 1))
+    (defn dcp-width (r hd) (mul (dcp-coff r) hd))
+    (defn dcp-nrows (r) (mul (dcp-coff r) r))
+    (defn dcp-row (r pos) (if (eq r 4) (add r (mod pos r)) (mod pos r)))
+    (defn dcp-compress? (r pos) (if (eq (mod (add pos 1) r) 0) 1 0))
+    (defn dcp-comp-pos (r pos) (sub (add pos 1) r))
+    ; the sentinel an unwritten score row carries (DS4_NEG_INF, ds4.c:367), built from plain literals
+    (defn dcp-neg-inf () (sub 0.0 (mul 1000000000000000.0 1000000000000000.0)))
+    (defn dcp-dead? (mx) (if (le mx (mul (dcp-neg-inf) 0.5)) 1 0))
+
+    ; ===========================================================================
+    ; THE STATE: (kv score), each a flat list of nrows*width, kv born 0 and score
+    ; born NEG_INF so a partial first window contributes nothing (ds4.c:12224).
+    ; ===========================================================================
+    (defn dcp-fill (n v) (if (eq n 0) (empty) (cons v (dcp-fill (sub n 1) v))))
+    (defn dcp-state-new (r hd)
+        (do (let n (mul (dcp-nrows r) (dcp-width r hd)))
+            (list (dcp-fill n 0.0) (dcp-fill n (dcp-neg-inf)))))
+    (defn dcp-state-kv    (s) (nth s 0))
+    (defn dcp-state-score (s) (nth s 1))
+
+    ; replace len(vals) elements starting at `at` — the only write this state takes
+    (defn dcp-splice (xs at vals)
+        (if (eq (len xs) 0) (empty)
+            (if (gt at 0) (cons (head xs) (dcp-splice (tail xs) (sub at 1) vals))
+                (if (eq (len vals) 0) xs
+                    (cons (head vals) (dcp-splice (tail xs) 0 (tail vals)))))))
+
+    (defn dcp-drop (xs n) (if (eq n 0) xs (dcp-drop (tail xs) (sub n 1))))
+    (defn dcp-take (xs n) (if (eq n 0) (empty) (cons (head xs) (dcp-take (tail xs) (sub n 1)))))
+    (defn dcp-add2 (a b) (if (eq (len a) 0) (empty) (cons (add (head a) (head b)) (dcp-add2 (tail a) (tail b)))))
+    ; the APE bias a token's score row carries: ape is [width, ratio], column pos_mod
+    (defn dcp-ape-col (ape width pmod)
+        (dcp-take (dcp-drop ape (mul pmod width)) width))
+
+    ; ONE TOKEN's state write (ds4.c:12423-12428): kv_cur lands unchanged, sc_cur
+    ; lands with the position-in-window bias added, both at row dcp-row.
+    (defn dcp-update (s r hd pos kv-cur sc-cur ape)
+        (do (let width (dcp-width r hd))
+            (let at (mul (dcp-row r pos) width))
+            (list (dcp-splice (dcp-state-kv s) at kv-cur)
+                  (dcp-splice (dcp-state-score s) at
+                              (dcp-add2 sc-cur (dcp-ape-col ape width (mod pos r)))))))
+
+    ; ===========================================================================
+    ; THE POOL. Candidate k of output dim j lives at k*width + (k >= r ? hd+j : j)
+    ; — which for a non-4 ratio (where k never reaches r) is just k*width + j.
+    ; The accumulation ORDER is ds4's: for ratio 4 the previous and current lanes
+    ; of the same window slot are added as a PAIR, not lane after lane (assocwall).
+    ; ===========================================================================
+    (defn dcp-cand (r hd k j) (add (mul k (dcp-width r hd)) (if (ge k r) (add hd j) j)))
+    (defn dcp-max-loop (sc r hd j k best)
+        (if (eq k (dcp-nrows r)) best
+            (do (let v (nth sc (dcp-cand r hd k j)))
+                (dcp-max-loop sc r hd j (add k 1) (if (gt v best) v best)))))
+    ; ratio 4 walks slots 0..r-1 and touches candidates k and r+k together
+    (defn dcp-blend-4 (kv sc r hd j k mx den num)
+        (if (eq k r) (list den num)
+            (do (let ip (dcp-cand r hd k j))
+                (let ic (dcp-cand r hd (add r k) j))
+                (let wp (tn-exp (sub (nth sc ip) mx)))
+                (let wc (tn-exp (sub (nth sc ic) mx)))
+                (dcp-blend-4 kv sc r hd j (add k 1) mx
+                             (add den (add wp wc))
+                             (add (add num (mul wp (nth kv ip))) (mul wc (nth kv ic)))))))
+    (defn dcp-blend-1 (kv sc r hd j k mx den num)
+        (if (eq k r) (list den num)
+            (do (let i (dcp-cand r hd k j))
+                (let w (tn-exp (sub (nth sc i) mx)))
+                (dcp-blend-1 kv sc r hd j (add k 1) mx (add den w) (add num (mul w (nth kv i)))))))
+    (defn dcp-pool-one (s r hd j)
+        (do (let sc (dcp-state-score s))
+            (let mx (dcp-max-loop sc r hd j 0 (dcp-neg-inf)))
+            (if (eq (dcp-dead? mx) 1) 0.0
+                (do (let dn (if (eq r 4) (dcp-blend-4 (dcp-state-kv s) sc r hd j 0 mx 0.0 0.0)
+                                         (dcp-blend-1 (dcp-state-kv s) sc r hd j 0 mx 0.0 0.0)))
+                    (if (gt (nth dn 0) 0.0) (div (nth dn 1) (nth dn 0)) 0.0)))))
+    (defn dcp-pool-loop (s r hd j)
+        (if (eq j hd) (empty) (cons (dcp-pool-one s r hd j) (dcp-pool-loop s r hd (add j 1)))))
+    (defn dcp-pool (s r hd) (dcp-pool-loop s r hd 0))
+
+    ; ===========================================================================
+    ; THE NORM on the pooled row (ds4.c:12440-12445): weighted RMSNorm, sum of
+    ; squares accumulated ASCENDING, then out[i] = pooled[i] * rms * g[i].
+    ; ===========================================================================
+    (defn dcp-sumsq-acc (xs a) (if (eq (len xs) 0) a (dcp-sumsq-acc (tail xs) (add a (mul (head xs) (head xs))))))
+    (defn dcp-scale-mul (xs inv g)
+        (if (eq (len xs) 0) (empty) (cons (mul (mul (head xs) inv) (head g)) (dcp-scale-mul (tail xs) inv (tail g)))))
+    (defn dcp-norm (pooled g eps)
+        (do (let inv (div 1.0 (tn-sqrt (add (div (dcp-sumsq-acc pooled 0.0) (tn-flen pooled)) eps))))
+            (dcp-scale-mul pooled inv g)))
+
+    ; ===========================================================================
+    ; THE SHIFT after a ratio-4 compression: rows [0,r) take rows [r,2r).
+    ; ds4's second memcpy loop writes back what the first just copied — identity.
+    ; ===========================================================================
+    (defn dcp-shift-one (xs r hd)
+        (do (let n (mul r (dcp-width r hd)))
+            (dcp-splice xs 0 (dcp-take (dcp-drop xs n) n))))
+    (defn dcp-shift (s r hd)
+        (if (eq r 4) (list (dcp-shift-one (dcp-state-kv s) r hd) (dcp-shift-one (dcp-state-score s) r hd)) s))
+
+    ; ONE STEP whole: (state' row-or-empty). An empty row is the honest answer on
+    ; a non-boundary token — never a zero row, which reads as a real value.
+    (defn dcp-step (s r hd pos kv-cur sc-cur ape g eps)
+        (do (let s1 (dcp-update s r hd pos kv-cur sc-cur ape))
+            (if (eq (dcp-compress? r pos) 0) (list s1 (empty))
+                (list (dcp-shift s1 r hd) (dcp-norm (dcp-pool s1 r hd) g eps)))))
+
+    ; the count of compressed rows a layer holds after n tokens, and the radius a
+    ; carrier must refuse past: the indexer is inert only while this stays under top_k
+    (defn dcp-n-comp (r n) (div n r))
+    (defn dcp-indexer-inert? (r n topk) (if (le (dcp-n-comp r n) topk) 1 0))
+
+    ; ===========================================================================
+    ; THE DEVICE'S HALF. Four kernels: init, per-token state write, pool, shift.
+    ; Every loop bound and every index mirrors the recipe above line for line.
+    ; ===========================================================================
+    (defn dcp-init-msl-body ()
+        "kernel void form_dsv4_comp_init_f32 (device float* skv [[buffer(0)]], device float* ssc [[buffer(1)]], constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; skv[i] = 0.0f; ssc[i] = -1.0e30f; } ")
+
+    ; one thread per element of the row. ape is the raw F16 plane, column pos_mod.
+    (defn dcp-state-msl-body ()
+        "kernel void form_dsv4_comp_state_f32 (device const float* kvc [[buffer(0)]], device const float* scc [[buffer(1)]], device const uchar* ape [[buffer(2)]], device float* skv [[buffer(3)]], device float* ssc [[buffer(4)]], constant uint& width [[buffer(5)]], constant uint& row [[buffer(6)]], constant uint& pmod [[buffer(7)]], uint j [[thread_position_in_grid]]) { if (j >= width) return; ushort h = *(device const ushort*)(ape + ((ulong)pmod * (ulong)width + (ulong)j) * 2ul); skv[row * width + j] = kvc[j]; ssc[row * width + j] = scc[j] + float(as_type<half>(h)); } ")
+
+    ; one thread per OUTPUT dim; each runs its own softmax over the window.
+    (defn dcp-pool-msl-body ()
+        "kernel void form_dsv4_comp_pool_f32 (device const float* skv [[buffer(0)]], device const float* ssc [[buffer(1)]], device float* out [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& ratio [[buffer(4)]], uint j [[thread_position_in_grid]]) { if (j >= hd) return; uint coff = (ratio == 4u) ? 2u : 1u; uint width = coff * hd; float mx = -1.0e30f; if (ratio == 4u) { for (uint r = 0u; r < ratio; ++r) { float sp = ssc[r * width + j]; float sc = ssc[(ratio + r) * width + hd + j]; if (sp > mx) mx = sp; if (sc > mx) mx = sc; } } else { for (uint r = 0u; r < ratio; ++r) { float s = ssc[r * width + j]; if (s > mx) mx = s; } } if (mx <= -5.0e29f) { out[j] = 0.0f; return; } float den = 0.0f; float num = 0.0f; if (ratio == 4u) { for (uint r = 0u; r < ratio; ++r) { uint ip = r * width + j; uint ic = (ratio + r) * width + hd + j; float wp = comp_exp(ssc[ip] - mx); float wc = comp_exp(ssc[ic] - mx); den = den + wp + wc; num = num + wp * skv[ip]; num = num + wc * skv[ic]; } } else { for (uint r = 0u; r < ratio; ++r) { uint i = r * width + j; float w = comp_exp(ssc[i] - mx); den = den + w; num = num + w * skv[i]; } } out[j] = (den > 0.0f) ? (num / den) : 0.0f; } ")
+
+    ; the net law of ds4.c:12455-12471 — the second memcpy loop is the identity.
+    (defn dcp-shift-msl-body ()
+        "kernel void form_dsv4_comp_shift_f32 (device float* skv [[buffer(0)]], device float* ssc [[buffer(1)]], constant uint& width [[buffer(2)]], constant uint& ratio [[buffer(3)]], uint i [[thread_position_in_grid]]) { uint n = ratio * width; if (i >= n) return; skv[i] = skv[n + i]; ssc[i] = ssc[n + i]; } ")
+
+    ; the same range-reduced Taylor exp the MLA spine carries, named apart so this
+    ; unit stands whether or not the MLA spine shares its translation unit.
+    (defn dcp-msl-spine ()
+        "static inline float comp_abs(float x) { return (x < 0.0f) ? -x : x; } static inline float comp_exp_small(float x) { float term = 1.0f; float acc = 1.0f; for (int n = 1; n <= 14; ++n) { term = term * (x / float(n)); acc = acc + term; } return acc; } static inline float comp_exp(float x) { float a = x; int k = 0; while (comp_abs(a) > 0.5f) { a = a * 0.5f; k = k + 1; } float v = comp_exp_small(a); for (int i = 0; i < k; ++i) v = v * v; return v; } ")
+
+    (defn dcp-msl-appendix ()
+        (str_concat (dcp-msl-spine)
+        (str_concat (dcp-init-msl-body)
+        (str_concat (dcp-state-msl-body)
+        (str_concat (dcp-pool-msl-body) (dcp-shift-msl-body))))))
+    0)

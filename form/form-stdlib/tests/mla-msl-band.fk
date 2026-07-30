@@ -74,6 +74,22 @@
             (let se (nth ps 1))
             (let denom (add (tn-exp (sub sink m)) se))
             (tn-scale acc (div 1.0 denom))))
+    ; ---- mirror of form_mla_attend_mixed_f32: the SAME two passes over TWO row lists, one shared max,
+    ;      one shared denominator, raw rows before compressed ones. A kernel that ran two softmaxes and
+    ;      blended them, or that seeded a second max, would break the equalities below. ----
+    (defn mlmb-attend-mixed (qh rows crows scale sink hd)
+        (do (let m1 (mlmb-max-acc qh rows scale 0 (len rows) sink))
+            (let m (mlmb-max-acc qh crows scale 0 (len crows) m1))
+            (let p1 (mlmb-pass2 qh rows scale m 0 (len rows) hd (tb-zeros hd) 0.0))
+            (add 0 0)                                    ; force p1 before the reads
+            (let a1 (nth p1 0))
+            (let s1 (nth p1 1))
+            (let p2 (mlmb-pass2 qh crows scale m 0 (len crows) hd a1 s1))
+            (add 0 0)                                    ; force p2 before the reads
+            (let acc (nth p2 0))
+            (let se (nth p2 1))
+            (let denom (add (tn-exp (sub sink m)) se))
+            (tn-scale acc (div 1.0 denom))))
     (defn mlmb-attn-heads (q rows h nh hd scale sinks)
         (if (eq h nh) (empty)
             (tb-cat (mlmb-attend (tb-vslice q (mul h hd) hd) rows scale (nth sinks h) hd)
@@ -114,4 +130,18 @@
     (let db (list 1.0 1.0 1.0 1.0 1.0 1.0))
     (let c32 (if (eq (tn-abs (sub (mlmb-dot-desc da db) (tb-dot da db))) 0.0) 32 0))
 
-    (add c1 (add c2 (add c4 (add c8 (add c16 c32))))))
+    ; --- c64: the MIXED attention is ONE softmax over the union. Two equalities, both bit for bit:
+    ;     with an empty compressed set it IS the plain attention (so a compressing layer with no rows
+    ;     yet cannot drift), and splitting the same rows across the two arguments changes nothing (so
+    ;     the shared max and the shared denominator are real, not two softmaxes stitched together). ---
+    (let mrows (mld-rows))
+    (let mqh (tb-vslice (mld-q2) 0 hd))
+    (let msink (nth (mld-sinks) 0))
+    (let m-plain (mlmb-attend mqh mrows scale msink hd))
+    (let m-empty (mlmb-attend-mixed mqh mrows (empty) scale msink hd))
+    (let m-split (mlmb-attend-mixed mqh (tb-take mrows 1) (tb-drop 1 mrows) scale msink hd))
+    (let c64 (if (gt (len mrows) 1)
+                 (if (eq (mlmb-vmaxdiff m-empty m-plain) 0.0)
+                     (if (eq (mlmb-vmaxdiff m-split m-plain) 0.0) 64 0) 0) 0))
+
+    (add c1 (add c2 (add c4 (add c8 (add c16 (add c32 c64)))))))
