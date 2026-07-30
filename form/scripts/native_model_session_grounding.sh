@@ -42,6 +42,9 @@ form_input="$temp_dir/form-input"
 contract_source="$temp_dir/session-grounding-contract.fk"
 raw_report="$temp_dir/report-raw"
 report="$temp_dir/report"
+evidence_delta_input="$temp_dir/evidence-delta-input"
+evidence_delta_raw="$temp_dir/evidence-delta-raw"
+evidence_delta="$temp_dir/evidence-delta"
 timeout_marker="$temp_dir/cli-timeout"
 cli_pid=
 watchdog_pid=
@@ -266,22 +269,37 @@ dataset_digest=$( { printf '%s\n' "$salt"; cat "$pairs"; } |
     shasum -a 256 | awk '{print $1}')
 
 previous_hit5=-1
-previous_comparable=0
+previous_candidate=
+previous_dataset=
+previous_contract=
 previous_report=$(find "$NM_STATE_DIR" -maxdepth 1 -type f \
     -name 'session-grounding-[0-9]*-[0-9]*.txt' -print | sort | tail -n 1)
 if [ -n "$previous_report" ]; then
     previous_candidate=$(awk -F= '$1 == "candidate_set_sha256" {print $2; exit}' "$previous_report")
     previous_dataset=$(awk -F= '$1 == "dataset_sha256" {print $2; exit}' "$previous_report")
     previous_contract=$(awk -F= '$1 == "evaluation_contract_sha256" {print $2; exit}' "$previous_report")
-    if [ "$previous_candidate" = "$pool_digest" ] && \
-       [ "$previous_dataset" = "$dataset_digest" ] && \
-       [ "$previous_contract" = "$evaluation_contract_sha256" ]; then
-        comparable_hit5=$(awk -F= '$1 == "top5_ppm" {print $2; exit}' "$previous_report")
-        case "$comparable_hit5" in
-            ''|*[!0-9]*) ;;
-            *) previous_hit5=$comparable_hit5; previous_comparable=1 ;;
-        esac
-    fi
+    comparable_hit5=$(awk -F= '$1 == "top5_ppm" {print $2; exit}' "$previous_report")
+    case "$comparable_hit5" in
+        ''|*[!0-9]*) ;;
+        *) previous_hit5=$comparable_hit5 ;;
+    esac
+fi
+{
+    printf '%s\n' "$pool_digest" "$dataset_digest" "$evaluation_contract_sha256"
+    printf '%s\n' "$previous_candidate" "$previous_dataset" "$previous_contract"
+} > "$evidence_delta_input"
+$NM_FKWU form/form-stdlib/native-model-evidence-delta-cli.fk \
+    < "$evidence_delta_input" > "$evidence_delta_raw"
+sed '/^$/d; /^0$/d; /^fkwu: warning:/d' "$evidence_delta_raw" > "$evidence_delta"
+if ! grep -q '^schema=native-model-evidence-delta-v1$' "$evidence_delta" || \
+   ! grep -q '^comparison_admissible=[01]$' "$evidence_delta"; then
+    printf 'Form evidence-delta verdict was incomplete\n' >&2
+    cat "$evidence_delta" >&2
+    exit 1
+fi
+previous_comparable=$(awk -F= '$1 == "comparison_admissible" {print $2; exit}' "$evidence_delta")
+if [ "$previous_comparable" != 1 ]; then
+    previous_hit5=-1
 fi
 
 {
@@ -410,6 +428,7 @@ if [ -f "$timeout_marker" ]; then
         printf 'candidate_set_sha256=%s\n' "$pool_digest"
         printf 'dataset_sha256=%s\n' "$dataset_digest"
         printf 'evaluation_contract_sha256=%s\n' "$evaluation_contract_sha256"
+        cat "$evidence_delta"
         printf 'framing_preflight_episodes=%s\n' "$framing_preflight_episodes"
         printf 'framing_preflight_min_labels=%s\n' "$framing_preflight_min_labels"
         printf 'production_cli_budget_seconds=%s\n' "$cli_budget"
@@ -441,6 +460,7 @@ fi
 durable="$NM_STATE_DIR/session-grounding-${day}-${epoch}.txt"
 {
     cat "$report"
+    cat "$evidence_delta"
     printf 'grounding_band=%s\n' "$band"
     printf 'framing_preflight_episodes=%s\n' "$framing_preflight_episodes"
     printf 'framing_preflight_min_labels=%s\n' "$framing_preflight_min_labels"
