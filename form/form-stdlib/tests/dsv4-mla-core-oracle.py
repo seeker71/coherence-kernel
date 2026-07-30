@@ -997,7 +997,6 @@ def run_stack(g, token, pos, n_layers, outdir):
                 sys.stdout.flush()
             if gated and outdir:
                 e0 = F["per_expert"][0]
-<<<<<<< HEAD
                 # THE ATTENTION HALF'S INSIDES. after_attn_hc was the only attention gate, so 13 MLA
                 # dispatches sat between two compared points with nothing compared in between. These
                 # four split it: the roped query, the quantized latent that goes INTO the arena, the
@@ -1009,9 +1008,6 @@ def run_stack(g, token, pos, n_layers, outdir):
                 named = [("kv_hist", khist), ("q_roped", A["q"]), ("kv_q", A["kv"]),
                          ("heads_attn", A["heads_attn"]), ("attn_out", A["attn_out"]),
                          ("after_attn_hc", A["after_attn_hc"]), ("ffn_cur", F["ffn_cur"]),
-=======
-                named = [("after_attn_hc", A["after_attn_hc"]), ("ffn_cur", F["ffn_cur"]),
->>>>>>> origin/main
                          ("ffn_normed", F["ffn_norm"]), ("router_logits", F["router_logits"]),
                          ("expert_w", F["expert_w"]), ("selected", [float(v) for v in F["selected"]]),
                          ("exp0_gate", e0[1]), ("exp0_up", e0[2]), ("exp0_mid", e0[3]),
