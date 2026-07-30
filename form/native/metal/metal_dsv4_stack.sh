@@ -507,6 +507,14 @@ let pHashW = pipe(lFfn, "form_dsv4_hash_weights")
 let pTopkW = pipe(lFfn, "form_dsv4_topk_weights")
 let pKvAppend = pipe(lKv, "form_dkv_append_f32")
 let pControlAdapter = pipe(lKv, "form_dsv4_control_logit_adapter")
+// FORM_DS4_MATCH_ORDER=1 swaps the fast folds for ones that reproduce ds4's ASSOCIATION (see
+// ds4-order-match.fk). Slower by construction — one thread per row instead of 32 — and the only
+// route to a matching greedy stream, because the ties that decide tokens are 0.02 logits wide.
+let matchOrder = ProcessInfo.processInfo.environment["FORM_DS4_MATCH_ORDER"] == "1"
+let pQ8aQuant = pipe(lKv, "form_dsv4_q8a_quantize_f32")
+let pQ80Ord = pipe(lKv, "form_dsv4_q80_matvec_ordered")
+let pF16Ord = pipe(lKv, "form_dsv4_f16_matvec_ordered")
+let pQ2kOrd = pipe(lQ2k, "form_dsv4_q2k_matvec_ordered")
 let pCompInit = pipe(lKv, "form_dsv4_comp_init_f32")
 let pCompState = pipe(lKv, "form_dsv4_comp_state_f32")
 let pCompPool = pipe(lKv, "form_dsv4_comp_pool_f32")
@@ -526,6 +534,22 @@ func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
 func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
     let out = sentinelled(rows); var r = UInt32(rows), c32 = UInt32(cols), nel = UInt32(rows*cols)
     if t.type == 8 {
+        if matchOrder {
+            // ds4.c:6814 — the Q8_0 path is not an f32 fold. The ACTIVATION is quantised to int8
+            // (:7051), each 32-block is an exact int32 dot, and only the scale product re-enters f32.
+            // Reproducing that means reproducing its loss in x, not just its association.
+            let blocks = (cols + 31) / 32
+            let xq = dev.makeBuffer(length: blocks*32, options: .storageModeShared)!
+            let xs = dev.makeBuffer(length: blocks*4, options: .storageModeShared)!
+            var n32 = UInt32(cols)
+            enc(pQ8aQuant, blocks, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
+                                              c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
+            enc(pQ80Ord, rows, 64) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+                                          c.setBuffer(xq, offset: 0, index: 1); c.setBuffer(xs, offset: 0, index: 2)
+                                          c.setBuffer(out, offset: 0, index: 3)
+                                          c.setBytes(&r, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5) }
+            return out
+        }
         enc(pQ80, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                        c.setBuffer(out, offset: 0, index: 2)
                                        c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
@@ -761,9 +785,11 @@ func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
 }
 func gpuF16mv(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows); var r = UInt32(t.rows), c32 = UInt32(t.cols)
-    enc(pF16mv, t.rows, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
-                                    c.setBuffer(out, offset: 0, index: 2)
-                                    c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
+    // ds4.c:6664 dot_f16_row — two FMA accumulators over widened halves, reduced pairwise.
+    enc(matchOrder ? pF16Ord : pF16mv, t.rows, 256) { c in
+        c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+        c.setBuffer(out, offset: 0, index: 2)
+        c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
     return out
 }
 // THE PER-LAYER TYPE DISPATCH. The view is bound at the EXPERT's own byte slice, so the kernel's
@@ -789,9 +815,12 @@ func gpuExpert(_ t: Tn, _ x: MTLBuffer, _ expert: Int) -> MTLBuffer {
                                        c.setBuffer(x, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
                                        c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
     } else if t.type == 10 {
-        enc(pQ2k, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner + expert*stride, index: 0)
-                                       c.setBuffer(x, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
-                                       c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
+        // ds4.c:3480 ds4_vec_dot_q2_K_f32 is a PLAIN ASCENDING SCALAR SUM — no NEON, no FMA, no
+        // blocking. The ordered variant walks k upward one thread per row; the fast one splits 32 ways.
+        enc(matchOrder ? pQ2kOrd : pQ2k, matchOrder ? rows : rows*32, matchOrder ? 64 : 256) { c in
+            c.setBuffer(views[t.idx], offset: t.inner + expert*stride, index: 0)
+            c.setBuffer(x, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
+            c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
     } else {
         print("FAIL an expert tensor carries type \(t.type); this stack decodes 40 (MXFP4), 16 (IQ2_XXS) and 10 (Q2_K)")
         exit(1)
