@@ -533,6 +533,7 @@ let pHcPost = pipe(lHc, "form_hc_post_f32")
 let pHcHeadw = pipe(lHc, "form_hc_headw_f32")
 let pMx4 = pipe(lMx4, "form_dsv4_mx4_matvec")
 let pIq2 = pipe(lIq2, "form_dsv4_iq2_matvec")
+let pIq2H = pipe(lIq2, "form_dsv4_iq2_matvec_hoist")
 let pQ2k = pipe(lQ2k, "form_dsv4_q2k_matvec")
 let pQ2kDeq = pipe(lQ2k, "form_q2k_dequant_f32")
 let pPlainMv = pipe(lMla, "form_mla_matvec_f32")
@@ -855,7 +856,7 @@ func gpuExpert(_ t: Tn, _ x: MTLBuffer, _ expert: Int) -> MTLBuffer {
                                        c.setBuffer(x, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
                                        c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4); c.setBytes(&n32, length: 4, index: 5) }
     } else if t.type == 16 {
-        enc(pIq2, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner + expert*stride, index: 0)
+        enc(pIq2H, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner + expert*stride, index: 0)
                                        c.setBuffer(x, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
                                        c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
     } else if t.type == 10 {

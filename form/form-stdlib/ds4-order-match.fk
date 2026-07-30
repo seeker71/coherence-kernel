@@ -83,8 +83,31 @@
     ; SCALAR SUM. No NEON, no FMA, no blocking. Our fused kernel splits it 32 ways and simd_sums; this
     ; walks k from 0 upward and adds. q2k_w is q2k-dequant.fk's carver, unchanged.
     ; =========================================================================
+    ; HOISTED, AND BIT-IDENTICAL. The naive form calls q2k_w per element, which re-derives per-BLOCK
+    ; and per-GROUP constants every time: two f16 decodes (each a divide-and-compare chain) for every
+    ; one of 256 elements that share them, plus a power-of-two loop per element. This walks the same k
+    ; ASCENDING — blk outer, group next, l inner, so k = blk*256 + g*16 + l counts 0,1,2,... — and only
+    ; moves the invariants out. The accumulation order is untouched, which is the whole point: order is
+    ; what fidelity rests on, and decode placement is free.
+    ;   ds = d*(sc mod 16) then ds*q  associates exactly as d*(sc mod 16)*q did (left to right)
+    ;   dm = dmin*(sc/16)             is the per-group min, subtracted per element as before
     (defn dom-q2k-ordered-body ()
-        "kernel void form_dsv4_q2k_matvec_ordered (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; uint nb = cols / 256u; ulong rowbase = (ulong)r * (ulong)nb * 84ul; float sum = 0.0f; for (uint k = 0u; k < cols; ++k) { sum = sum + q2k_w(qb + rowbase, k) * x[k]; } y[r] = sum; } ")
+        "kernel void form_dsv4_q2k_matvec_ordered (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; uint nb = cols / 256u; ulong rowbase = (ulong)r * (ulong)nb * 84ul; float sum = 0.0f; for (uint blk = 0u; blk < nb; ++blk) { device const uchar* b = qb + rowbase + (ulong)blk * 84ul; float d = q2k_f16(int(b[80]) + 256 * int(b[81])); float dmin = q2k_f16(int(b[82]) + 256 * int(b[83])); device const float* xb = x + blk * 256u; for (uint g = 0u; g < 16u; ++g) { uint sc = uint(b[g]); float ds = d * float(q2k_umod(sc, 16u)); float dm = dmin * float(sc / 16u); uint qbase = 32u * (g / 8u) + 16u * q2k_umod(g, 2u); uint p2 = q2k_upow2(q2k_umod(g / 2u, 4u) * 2u); device const uchar* qs = b + 16u + qbase; device const float* xg = xb + g * 16u; for (uint l = 0u; l < 16u; ++l) { float w = ds * float(q2k_umod(uint(qs[l]) / p2, 4u)) - dm; sum = sum + w * xg[l]; } } } y[r] = sum; } ")
+
+    ; =========================================================================
+    ; IQ2_XXS, HOISTED. iq2_w re-derives, for EVERY weight: an f16 decode, a 4-byte aux1
+    ; reconstruction, a scale, and TWO power-of-two loops (one to select the sign index, one to pick
+    ; the sign bit). Of those, d/aux1/scalecode/scale are constant across a 32-element sub-block and
+    ; the sign word is constant across each group of 8. Only the grid magnitude and one sign bit vary
+    ; per element. On this file that redundancy is most of the model's work: gate AND up are IQ2_XXS,
+    ; two of every three routed-expert weights.
+    ;
+    ; THE MAP CHANGES, and that is said out loud rather than hidden: each lane now owns whole 32-element
+    ; sub-blocks (lane L takes sub-block L, L+32, ...) instead of striding single columns, so the
+    ; within-lane summation order is NOT the old one. Unlike the Q2_K hoist, this is not bit-identical
+    ; by construction, so the token stream has to be re-measured, not assumed.
+    (defn dom-iq2-hoist-body ()
+        "kernel void form_dsv4_iq2_matvec_hoist (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nsub = cols / 32u; ulong rowbase = (ulong)r * (ulong)(cols / 256u) * 66ul; float acc = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { uint blk = sub / 8u; uint ib32 = sub - blk * 8u; device const uchar* off = qb + rowbase + (ulong)blk * 66ul; float d = iq2_f16(int(off[0]) + 256 * int(off[1])); device const uchar* gbase = off + 2u + 8u * ib32; uint aux1 = uint(gbase[4]) + 256u * uint(gbase[5]) + 65536u * uint(gbase[6]) + 16777216u * uint(gbase[7]); int scalecode = int(gbase[7]) / 16; float scale = 0.125f * d * float(2 * scalecode + 1); device const float* xs = x + sub * 32u; uint pl = 1u; for (uint l = 0u; l < 4u; ++l) { int gidx = int(gbase[l]); uint signidx = (aux1 / pl) % 128u; pl = pl * 128u; int signs = int(iq2_ksigns[signidx]); constant uchar* g8 = iq2_grid + uint(gidx) * 8u; device const float* xl = xs + l * 8u; int sr = signs; for (uint j = 0u; j < 8u; ++j) { int sbit = iq2_mod(sr, 2); sr = sr / 2; float sgn = (sbit == 1) ? -1.0f : 1.0f; acc = acc + ((scale * sgn) * float(g8[j])) * xl[j]; } } } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
 
     ; two appendices, because the Q2_K one needs q2k-msl.fk's carver in its translation unit and the
     ; others stand alone. A carrier composes nothing; it takes whichever its unit can compile.
