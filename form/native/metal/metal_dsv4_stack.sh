@@ -967,7 +967,7 @@ func q2kFusedVsCarved(_ t: Tn, _ x: MTLBuffer, _ expert: Int) {
         scaleA += Double(a[i])*Double(a[i]); scaleB += Double(b[i])*Double(b[i])
     }
     let rmsA = sqrt(scaleA/Double(rows)), rmsB = sqrt(scaleB/Double(rows))
-    // THE BAR IS AGAINST THE VECTOR'S SCALE, NOT EACH ELEMENT'S OWN MAGNITUDE (overfine, row 933).
+    // THE BAR IS AGAINST THE VECTOR'S SCALE, NOT EACH ELEMENT'S OWN MAGNITUDE (overfine, row 934).
     // These two folds associate 2048 signed terms differently, so an element that very nearly cancels
     // lands near zero with a few ulps of difference and its RELATIVE error explodes — expert 87 gave
     // max rel 2.6% on a max abs of 3.8e-07 against an rms of 0.0837. Judging that as a defect is

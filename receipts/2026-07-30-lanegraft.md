@@ -21,7 +21,7 @@ ds4: memory: KV 0.61 GiB (raw 0.36 + compressed 0.25)
 Two lanes. We ported the compressed side-cache **as the attention itself**: on 41 of 43 layers our keys
 were rotated base-160000 at raw positions and fp8-rounded, where ds4's short-context answer comes from
 the raw base-10000 lane we never implemented — at 14 tokens its layer-3 compressed cache (ratio 128)
-holds *zero rows*. Positional order destroyed, token content survives: `promptbound` (941) is the
+holds *zero rows*. Positional order destroyed, token content survives: `promptbound` (942) is the
 symptom of exactly this.
 
 ## Why there was no fix until now
@@ -56,7 +56,7 @@ unblocked this morning — can arbitrate the remaining gap once Q8_0 and Q2_K ar
 worldview is silent about the worldview itself.** Every instrument this week — 286 oracle gates, the
 injected-input gates, the KV-history gates — checked whether the machine executed *our reading* of
 ds4.c faithfully. It did. The reading was of the wrong lane. Nothing inside that loop could ever have
-said so, because both ends of every comparison were downstream of one act of reading. Corpus row 942,
+said so, because both ends of every comparison were downstream of one act of reading. Corpus row 943,
 `lanegraft`: porting a side path as the trunk, then checking it against a reference written from the
 same mistake.
 

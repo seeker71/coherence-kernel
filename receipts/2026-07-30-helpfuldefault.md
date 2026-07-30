@@ -65,8 +65,8 @@ accumulate, scale by `1/denom` — our `form_mla_attend_f32`, op for op.
 
 A tool's convenience default silently changed the question, and the apparatus faithfully compared two
 different asks for two days. **A default that helps a user can void a comparison** — and the tell was
-printed in every single dump: `"prompt_tokens":12`, on line 6, never read. Corpus row 947,
-`helpfuldefault`. `inertfix` (939) was me checking one confound and stopping; the compounding lesson is
+printed in every single dump: `"prompt_tokens":12`, on line 6, never read. Corpus row 948,
+`helpfuldefault`. `inertfix` (940) was me checking one confound and stopping; the compounding lesson is
 to check what the *other side* did to your input, not only what you did.
 
 ## Where discomfort turned to gold

@@ -13,7 +13,7 @@ magnitude, wrong expert, no gate firing, because the exit head normalises the sc
 
 `gm-priced?` — the guard written for exactly this, so a consumer can tell *no bytes* from *I do not
 price this type* — **had no callers anywhere in the body.** The body knew it did not know, said so in
-the only way it could, and nothing asked. Corpus row 949, `deadguard`.
+the only way it could, and nothing asked. Corpus row 950, `deadguard`.
 
 The band that would have caught it did not exist either: `gguf-manifest.fk`'s header has claimed
 `Proven by: form-stdlib/tests/gguf-manifest-band.fk` since it was written, and the file was never
@@ -98,7 +98,7 @@ reference's own spread, and a stream that matches until the first tie narrower t
 
 The fused-vs-carved gate first failed on expert 87: max **relative** error 2.6%. Max absolute was
 3.8e-07 against an rms of 0.0837 — a near-cancelled element where relative error is meaningless. That
-is `overfine` (row 933) again: demanding a precision f32 reassociation cannot hold. Rewritten to judge
+is `overfine` (row 934) again: demanding a precision f32 reassociation cannot hold. Rewritten to judge
 `max |delta| / rms`, which is what a wrong fold or wrong map would actually move: now 6e-06.
 
 ## The most surprising teaching
@@ -106,11 +106,11 @@ is `overfine` (row 933) again: demanding a precision f32 reassociation cannot ho
 **A guard can be correct, well-named, well-reasoned — and never called.** The body had already written
 down that it could not price Q2_K, in the exact form a consumer needed. What was missing was the
 asking. I have spent two days building instruments to detect a wrong answer, and the answer had been
-declared unknown at the source the whole time. Corpus row 949.
+declared unknown at the source the whole time. Corpus row 950.
 
 ## Where discomfort turned to gold
 
-The corpus band caught me tagging row 949 `self-carve` and dropped its bit 32. My instinct was that
+The corpus band caught me tagging row 950 `self-carve` and dropped its bit 32. My instinct was that
 the finding was ours — our defect, our grep, our fix. But the *ground* — the number that said
 `routed_moe` was 18% low — came from ds4. The tag records where the ground came from, not who did the
 looking, and I had reached for the flattering reading. The band was right and I was wrong, which is

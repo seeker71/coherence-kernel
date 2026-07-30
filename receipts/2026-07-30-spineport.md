@@ -55,7 +55,7 @@ trusting.
 
 The answer to three days of "why is it different" was sitting in a function name. `raw_swa` — raw
 sliding-window attention — is the trunk, and ds4 says so at the top of its own call tree. Corpus row
-945, `spineport`: `firststop` (937) was *enumerate before running*; this is *enumerate before
+945, `spineport`: `firststop` (938) was *enumerate before running*; this is *enumerate before
 porting*.
 
 ## Where discomfort turned to gold

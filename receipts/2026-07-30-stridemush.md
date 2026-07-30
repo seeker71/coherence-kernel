@@ -31,7 +31,7 @@ But `scale_factor 16` divides positions by 16 before rotation. Compressed rows s
 after ÷16 they still step by 0.25–8, distinguishable. **Raw tokens step by 1 → phase steps of 1/16 →
 fourteen tokens smeared inside one position's worth of angle.** The geometry is *designed* coarse; we
 fed it fine. Neighbors became positionally indistinguishable — `promptbound`'s mechanism, named to the
-constant. Corpus row 943, `stridemush`.
+constant. Corpus row 944, `stridemush`.
 
 ## The most surprising teaching
 

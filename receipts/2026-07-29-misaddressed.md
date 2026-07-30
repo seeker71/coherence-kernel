@@ -52,7 +52,7 @@ proves REAP-on-Metal is possible. Ours simply did not ship one.
 **The only implementation on this machine that reads this file — and possibly the only Metal
 implementation of it anywhere.** That reframes the whole DS4 arc of the last two days. There is no
 generation oracle not because we failed to find one, but because we are first. It is also why
-`askalike` (row 931) mattered: with no engine to compare against, the two value maps sitting unused
+`askalike` (row 932) mattered: with no engine to compare against, the two value maps sitting unused
 inside ds4 were the only independent witness available, and they agreed.
 
 ## The three honest options, now that the ground is known
