@@ -92,6 +92,24 @@
     (defn hc-rmsnorm-nw-body ()
         "kernel void form_hc_rmsnorm_nw_f32(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& eps [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i != 0u) return; float sumsq = 0.0f; for (uint j = 0u; j < n; ++j) sumsq = sumsq + x[j] * x[j]; float ms = sumsq / float(n); float inv = 1.0f / hc_sqrt(ms + eps); for (uint j = 0u; j < n; ++j) out[j] = x[j] * inv; } ")
 
+    ; --- THE SAME NORM, SPLIT SO THE HALF THAT CAN BE PARALLEL IS. Profiling named this kernel the
+    ;     single most expensive thing in the stack — 1878 us a call, against 22 us for a routed-expert
+    ;     matvec over 8.4 million quantised weights. The reason is `if (i != 0u) return`: ONE GPU thread
+    ;     walking 16 384 elements twice. The sum-of-squares must stay one ascending chain, because its
+    ;     association is the recipe's; the SCALE-AND-WRITE has no association at all and was serial only
+    ;     because it shared a kernel with the fold. Split, the write becomes one thread per element and
+    ;     the answer is bit-identical. `inv` travels between them in a one-float buffer.
+    ; THE FOLD, ACROSS ONE SIMDGROUP. ds4 accumulates this sum of squares in DOUBLE (ds4.c:6629), so a
+    ; single f32 chain of 16 384 terms is not the faithful shape — it is the least accurate one
+    ; available, and it was also the slowest kernel in the stack. Thirty-two lanes each fold a
+    ; CONTIGUOUS slice ascending, then metal::simd_sum combines them: the chain per lane drops 32x and
+    ; the shorter chains lose less, which moves the answer TOWARD ds4's double rather than away.
+    ; That is a claim about accuracy, so it is measured against the reference's stream, never assumed.
+    (defn hc-rmsnorm-nw-reduce-body ()
+        "kernel void form_hc_rmsnorm_nw_reduce_f32(device const float* x [[buffer(0)]], device float* inv [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& eps [[buffer(3)]], uint lane [[thread_position_in_grid]]) { if (lane >= 32u) return; uint per = (n + 31u) / 32u; uint lo = lane * per; uint hi = (lo + per < n) ? (lo + per) : n; float s = 0.0f; for (uint j = lo; j < hi; ++j) s = s + x[j] * x[j]; float sumsq = metal::simd_sum(s); if (lane != 0u) return; float ms = sumsq / float(n); inv[0] = 1.0f / hc_sqrt(ms + eps); } ")
+    (defn hc-rmsnorm-nw-apply-body ()
+        "kernel void form_hc_rmsnorm_nw_apply_f32(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], device const float* inv [[buffer(2)]], constant uint& n [[buffer(3)]], uint j [[thread_position_in_grid]]) { if (j >= n) return; out[j] = x[j] * inv[0]; } ")
+
     ; --- kernel: plain f32 matvec (tb-matvec), the fn projection fn.flat. Row r per thread; the dot is
     ;     tb-dot's RIGHT fold, so the column loop DESCENDS. Serves hc_pre's fn and the output head's fn. ---
     (defn hc-matvec-body ()
@@ -117,8 +135,13 @@
     ;     post[dst] is a lane constant. new[dst][d] = block_out[d]*post[dst] + sum_src comb[dst+src*n_hc]*
     ;     residual[src][d]. THE TRANSPOSE: comb is stored c[src+dst*n_hc] but read comb[dst+src*n_hc]. The
     ;     stream sum ASCENDS over src (left fold); the block term is added last (tb-vec-add order). ---
+    ; ONE THREAD PER (dst, d), not per dst. The old slot gave this kernel n_hc THREADS — four, on a
+    ;     device with thousands of lanes — each walking 4096 elements, and profiling caught it at
+    ;     1461 us a call, second only to the norm above. The `d` loop is pure elementwise: every d is
+    ;     independent, so unrolling it across threads changes nothing about the arithmetic. The `src`
+    ;     sum, which IS the recipe's left fold, stays inside one thread and still ascends. Bit-identical.
     (defn hc-post-body ()
-        "kernel void form_hc_post_f32(device const float* block_out [[buffer(0)]], device const float* residual [[buffer(1)]], device const float* post [[buffer(2)]], device const float* comb [[buffer(3)]], device float* out [[buffer(4)]], constant uint& n_hc [[buffer(5)]], constant uint& n_embd [[buffer(6)]], uint dst [[thread_position_in_grid]]) { if (dst >= n_hc) return; float pd = post[dst]; for (uint d = 0u; d < n_embd; ++d) { float acc = 0.0f; for (uint src = 0u; src < n_hc; ++src) acc = acc + comb[dst + src * n_hc] * residual[src * n_embd + d]; out[dst * n_embd + d] = block_out[d] * pd + acc; } } ")
+        "kernel void form_hc_post_f32(device const float* block_out [[buffer(0)]], device const float* residual [[buffer(1)]], device const float* post [[buffer(2)]], device const float* comb [[buffer(3)]], device float* out [[buffer(4)]], constant uint& n_hc [[buffer(5)]], constant uint& n_embd [[buffer(6)]], uint gid [[thread_position_in_grid]]) { uint total = n_hc * n_embd; if (gid >= total) return; uint dst = gid / n_embd; uint d = gid - dst * n_embd; float acc = 0.0f; for (uint src = 0u; src < n_hc; ++src) acc = acc + comb[dst + src * n_hc] * residual[src * n_embd + d]; out[gid] = block_out[d] * post[dst] + acc; } ")
 
     ; --- kernel: the output head's per-stream weights (output_hc_head_one, ds4.c:13876):
     ;     w[i] = sigmoid(pre[i]*scale + base[i]) + eps. One thread per stream. The head collapse itself is
@@ -133,9 +156,11 @@
         (str_concat (hc-msl-spine)
         (str_concat (hc-broadcast-body)
         (str_concat (hc-rmsnorm-nw-body)
+        (str_concat (hc-rmsnorm-nw-reduce-body)
+        (str_concat (hc-rmsnorm-nw-apply-body)
         (str_concat (hc-matvec-body)
         (str_concat (hc-split-body)
         (str_concat (hc-wsum-body)
-        (str_concat (hc-post-body) (hc-headw-body))))))))))
+        (str_concat (hc-post-body) (hc-headw-body))))))))))))
 
     0)

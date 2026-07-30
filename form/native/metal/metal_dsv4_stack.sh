@@ -447,15 +447,13 @@ check(pruneOK,
   "the pruning is in the BIAS: at every top-k layer, exp_probs_b.bias carries a -1e30 sentinel on exactly the indices at or beyond that layer's own ffn_gate_exps dim[2], and a finite value below it. That, and nothing in the metadata, is what keeps a 256-wide router from selecting an expert a 192-deep stack does not have",
   "the bias sentinel does not match the stack depth: \(pruneWhy)")
 
-// THE SENTINEL IS EVIDENCE, AND EVIDENCE HAS A PRICE. Every intermediate is born all-NaN so an unrun
-// kernel reads as a refusal instead of a plausible zero (zerobirth/edgedrop) — and that CPU fill runs
-// on every buffer of every dispatch of every layer of every token. With FORM_DS4_GATES=0 nothing reads
-// a sentinel, so filling one is work done for a witness nobody called. The buffer is still fresh; only
-// the fill is skipped, and the moment gates come back so does the sentinel.
-let sentinelFill = ProcessInfo.processInfo.environment["FORM_DS4_GATES"] != "0"
+// THE SENTINEL IS UNCONDITIONAL. It was briefly skipped when gates were off, on the theory that its
+// CPU fill was a cost worth removing. Measured: it bought NOTHING (floor unchanged). And it left the
+// sentinel-CHECKING gates reading an unfilled buffer, so two of them reported FAIL on a healthy run —
+// an optimisation that gained nothing and manufactured a false defect. Every intermediate is born
+// all-NaN again, so an unrun kernel reads as a refusal and never as a plausible zero.
 func sentinelled(_ n: Int) -> MTLBuffer {
     let b = dev.makeBuffer(length: max(n,1)*4, options: .storageModeShared)!
-    if !sentinelFill { return b }
     let p = b.contents().bindMemory(to: Float.self, capacity: max(n,1))
     for i in 0..<max(n,1) { p[i] = Float.nan }
     return b
@@ -477,9 +475,18 @@ func run(_ cb: MTLCommandBuffer) {
     if cb.status != .completed { gpuErrors += 1 }
     gpuBusyS += cb.gpuEndTime - cb.gpuStartTime
 }
+// FORM_DS4_PROFILE=1 attributes GPU time to KERNELS instead of to the run as a whole. It submits each
+// dispatch on its own so the device clock can be read per kernel, which inflates the total — the
+// ranking is the answer, not the sum. Built because the last three optimisations were guesses and two
+// were wrong (floorfirst, row 952): a name for the hot kernel is cheaper than another hypothesis.
+let profileOn = ProcessInfo.processInfo.environment["FORM_DS4_PROFILE"] == "1"
+var pipeName: [ObjectIdentifier: String] = [:]
+var profS: [String: Double] = [:], profN: [String: Int] = [:]
 func pipe(_ l: MTLLibrary, _ n: String) -> MTLComputePipelineState {
     guard let f = l.makeFunction(name: n) else { print("FAIL kernel \(n) is not in its library"); exit(1) }
-    return try! dev.makeComputePipelineState(function: f)
+    let p = try! dev.makeComputePipelineState(function: f)
+    pipeName[ObjectIdentifier(p)] = n
+    return p
 }
 // ── ONE COMMAND BUFFER PER SYNC POINT, not one per dispatch ────────────────────────────────────────
 // This harness was built dispatch-by-dispatch because every kernel had to be witnessed the moment it
@@ -513,10 +520,19 @@ func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, _ body: (MTLCompute
     e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
                       threadsPerThreadgroup: MTLSize(width: min(p.maxTotalThreadsPerThreadgroup, cap), height: 1, depth: 1))
     gpuDispatches += 1
+    if profileOn {
+        let nm = pipeName[ObjectIdentifier(p)] ?? "?"
+        let before = gpuBusyS
+        flush()
+        profS[nm, default: 0] += gpuBusyS - before
+        profN[nm, default: 0] += 1
+    }
 }
 
 let pEmb = pipe(lEmb, "form_dsv4_embed_f16")
 let pRms = pipe(lMla, "form_mla_rmsnorm_f32")
+let pRmsRed = pipe(lMla, "form_mla_rmsnorm_reduce_f32")
+let pRmsApp = pipe(lMla, "form_mla_rmsnorm_apply_f32")
 let pHeadrms = pipe(lMla, "form_mla_headrms_f32")
 let pRope = pipe(lMla, "form_mla_rope_f32")
 let pAttend = pipe(lMla, "form_mla_attend_f32")
@@ -527,6 +543,8 @@ let pKvq = pipe(lCore, "form_dsv4_kv_fp8_f16_round")
 let pF16mv = pipe(lCore, "form_dsv4_f16_matvec")
 let pHcBcast = pipe(lHc, "form_hc_broadcast_f32")
 let pHcRmsNw = pipe(lHc, "form_hc_rmsnorm_nw_f32")
+let pHcRmsRed = pipe(lHc, "form_hc_rmsnorm_nw_reduce_f32")
+let pHcRmsApp = pipe(lHc, "form_hc_rmsnorm_nw_apply_f32")
 let pHcSplit = pipe(lHc, "form_hc_split_f32")
 let pHcWsum = pipe(lHc, "form_hc_wsum_f32")
 let pHcPost = pipe(lHc, "form_hc_post_f32")
@@ -567,9 +585,15 @@ let pCompShift = pipe(lKv, "form_dsv4_comp_shift_f32")
 
 func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
     let out = sentinelled(n); var n32 = UInt32(n), e = eps
-    enc(pRms, 1, 1) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(views[t.idx], offset: t.inner, index: 1)
-                           c.setBuffer(out, offset: 0, index: 2)
-                           c.setBytes(&n32, length: 4, index: 3); c.setBytes(&e, length: 4, index: 4) }
+    // reduce across one simdgroup, then apply one thread per element. The one-thread version is kept
+    // in the library as the read-back reference; this is the same recipe with the fold widened.
+    let invB = dev.makeBuffer(length: 4, options: .storageModeShared)!
+    enc(pRmsRed, 32, 32) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(invB, offset: 0, index: 1)
+                                c.setBytes(&n32, length: 4, index: 2); c.setBytes(&e, length: 4, index: 3) }
+    enc(pRmsApp, n, 256) { c in c.setBuffer(x, offset: 0, index: 0)
+                                c.setBuffer(views[t.idx], offset: t.inner, index: 1)
+                                c.setBuffer(out, offset: 0, index: 2); c.setBuffer(invB, offset: 0, index: 3)
+                                c.setBytes(&n32, length: 4, index: 4) }
     return out
 }
 // THE DENSE TYPE DISPATCH. The reap25 file carried MXFP8 (41) on every dense projection; the mainline
@@ -891,9 +915,15 @@ struct LayerOut {
 
 func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLBuffer) {
     let flat = sentinelled(hcDim)
+    // the fold stays one ascending chain (its association is the recipe's); only the scale-and-write
+    // is unrolled across threads, which has no association to preserve. Bit-identical, and it was the
+    // most expensive kernel in the stack at 1878 us a call.
     do { var n = UInt32(hcDim), e0 = eps
-         enc(pHcRmsNw, 1, 1) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
-                                    c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
+         let invB = dev.makeBuffer(length: 4, options: .storageModeShared)!
+         enc(pHcRmsRed, 32, 32) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(invB, offset: 0, index: 1)
+                                     c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) }
+         enc(pHcRmsApp, hcDim, 256) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
+                                           c.setBuffer(invB, offset: 0, index: 2); c.setBytes(&n, length: 4, index: 3) } }
     let mix = gpuF16mv(fn, flat)
     let split = sentinelled(2*nHc + nHc*nHc)
     do { var a = UInt32(nHc), it = UInt32(hcIters), e0 = hcEps
@@ -912,7 +942,7 @@ func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLB
 }
 func hcPost(_ blockOut: MTLBuffer, _ resid: MTLBuffer, _ split: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(hcDim); var a = UInt32(nHc), b = UInt32(nEmbd)
-    enc(pHcPost, nHc, 256) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
+    enc(pHcPost, nHc*nEmbd, 256) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
                                   c.setBuffer(split, offset: nHc*4, index: 2)
                                   c.setBuffer(split, offset: 2*nHc*4, index: 3)
                                   c.setBuffer(out, offset: 0, index: 4)
@@ -1193,9 +1223,15 @@ func stageStats(_ b: MTLBuffer, _ n: Int) -> (Float, Float, Float) {
 }
 func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: Float) {
     let flat = sentinelled(hcDim)
+    // the fold stays one ascending chain (its association is the recipe's); only the scale-and-write
+    // is unrolled across threads, which has no association to preserve. Bit-identical, and it was the
+    // most expensive kernel in the stack at 1878 us a call.
     do { var n = UInt32(hcDim), e0 = eps
-         enc(pHcRmsNw, 1, 1) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
-                                    c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
+         let invB = dev.makeBuffer(length: 4, options: .storageModeShared)!
+         enc(pHcRmsRed, 32, 32) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(invB, offset: 0, index: 1)
+                                     c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) }
+         enc(pHcRmsApp, hcDim, 256) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
+                                           c.setBuffer(invB, offset: 0, index: 2); c.setBytes(&n, length: 4, index: 3) } }
     let pre = gpuF16mv(outHcFn, flat)
     let headw = sentinelled(nHc)
     do { var a = UInt32(nHc), e0 = hcEps
@@ -1537,6 +1573,13 @@ print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — t
 flush()   // nothing may be left unsubmitted when the verdict is read: an uncommitted buffer is an
           // unchecked cb.error, and a green verdict standing on work that never ran is the exact
           // failure this harness sentinels everything else against.
+if profileOn {
+    print("      ── GPU time by kernel (profile mode: one submit per dispatch, so totals inflate; the RANKING is the reading) ──")
+    for (nm, s) in profS.sorted(by: { $0.value > $1.value }).prefix(12) {
+        let n = profN[nm] ?? 1
+        print(String(format: "      %8.3f s  %6d calls  %8.1f us each   %@", s, n, 1e6*s/Double(n), nm))
+    }
+}
 print("      dispatches \(gpuDispatches) in \(gpuBatches) command buffers (\(gpuBatches == 0 ? 0 : gpuDispatches/gpuBatches) per submit) — one buffer per dispatch was 47x of ds4")
 let ok = failures == 0 && gpuErrors == 0
 if ok {
