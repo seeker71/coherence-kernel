@@ -1632,6 +1632,16 @@ if profileOn {
         let n = profN[nm] ?? 1
         print(String(format: "      %8.3f s  %6d calls  %8.1f us each   %@", s, n, 1e6*s/Double(n), nm))
     }
+    // THE OVERHEAD FLOOR, measured rather than assumed. The cheapest kernel per call is an UPPER BOUND
+    // on what a bare submit costs, because it also does real work. Subtracting that bound x call-count
+    // from every total is what turns this ranking from "cost plus call count" into cost (callbias 955).
+    let cheapest = profS.map { ($0.key, 1e6 * $0.value / Double(profN[$0.key] ?? 1)) }.sorted { $0.1 < $1.1 }
+    print("      ── cheapest per call (the submit-overhead ceiling) ──")
+    for (nm, us) in cheapest.prefix(4) { print(String(format: "      %8.1f us each  %6d calls   %@", us, profN[nm] ?? 0, nm)) }
+    let floorUs = cheapest.first?.1 ?? 0
+    print(String(format: "      ── same table with %.0f us x calls subtracted from each total ──", floorUs))
+    let corrected = profS.map { ($0.key, $0.value - floorUs * 1e-6 * Double(profN[$0.key] ?? 0)) }.sorted { $0.1 > $1.1 }
+    for (nm, s) in corrected.prefix(8) { print(String(format: "      %8.3f s corrected  %6d calls   %@", s, profN[nm] ?? 0, nm)) }
 }
 print("      dispatches \(gpuDispatches) in \(gpuBatches) command buffers (\(gpuBatches == 0 ? 0 : gpuDispatches/gpuBatches) per submit) — one buffer per dispatch was 47x of ds4")
 let ok = failures == 0 && gpuErrors == 0
