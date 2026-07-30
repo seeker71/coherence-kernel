@@ -911,6 +911,23 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
         out += "]}"
         try? out.write(toFile: dumpPath, atomically: true, encoding: .utf8)
         print("      FORM logits dumped: \(outWeight.rows) values -> \(dumpPath)")
+        // The lane reports its own comparison integers, so no shell arithmetic stands between the
+        // measurement and the reader. FORM_DS4_REF_IDS carries the reference's top ids (from
+        // ds4 --dump-logits); for each, this prints OUR rank of that id.
+        var order = Array(0..<outWeight.rows)
+        order.sort { lp[$0] > lp[$1] }
+        var top = "      FORM top10:"
+        for i in 0..<10 { top += " \(order[i])(\(String(format: "%.2f", lp[order[i]])))" }
+        print(top)
+        if let refIds = ProcessInfo.processInfo.environment["FORM_DS4_REF_IDS"] {
+            var rank = [Int](repeating: 0, count: outWeight.rows)
+            for (r, id) in order.enumerated() { rank[id] = r }
+            var line = "      our rank of reference ids:"
+            for tok in refIds.split(separator: " ").compactMap({ Int($0) }) {
+                line += " \(tok)->\(rank[tok])"
+            }
+            print(line)
+        }
     }
     if !controlAdapterProved {
         let zero = copyFloatBuffer(logits, outWeight.rows)
