@@ -552,6 +552,13 @@ let pHcHeadw = pipe(lHc, "form_hc_headw_f32")
 let pMx4 = pipe(lMx4, "form_dsv4_mx4_matvec")
 let pIq2 = pipe(lIq2, "form_dsv4_iq2_matvec")
 let pIq2H = pipe(lIq2, "form_dsv4_iq2_matvec_hoist")
+let pIq2E = pipe(lIq2, "form_dsv4_iq2_matvec_experts")
+let pQ2kE = pipe(lQ2k, "form_dsv4_q2k_matvec_experts")
+let pSwigE = pipe(lFfn, "form_dsv4_swiglu_experts")
+let pMoeRed = pipe(lFfn, "form_dsv4_moe_reduce")
+// FORM_DS4_NO_FUSE=1 falls back to the per-expert dispatch path, kept as the A/B that says whether
+// fusing changed a value or only the number of asks.
+let fuseExperts = ProcessInfo.processInfo.environment["FORM_DS4_NO_FUSE"] != "1"
 let pQ2k = pipe(lQ2k, "form_dsv4_q2k_matvec")
 let pQ2kDeq = pipe(lQ2k, "form_q2k_dequant_f32")
 let pPlainMv = pipe(lMla, "form_mla_matvec_f32")
@@ -1094,6 +1101,46 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
 
     let moe = sentinelled(nEmbd)
     var g0 = moe, u0 = moe, m0 = moe, d0 = moe
+    // ── ALL SIX EXPERTS IN FIVE DISPATCHES INSTEAD OF THIRTY ────────────────────────────────────────
+    // The slot loop below asks the device gate/up/swiglu/down/accumulate six times over. At 72 us of
+    // measured cost per dispatch, the asking is what is left. The expert ids already live in a device
+    // buffer (the router kernel wrote them), so the loop never needed the CPU: the fused kernels take
+    // (slot, row, lane) and pick their own byte slice. Every expert's arithmetic is untouched, so this
+    // is a rearrangement of dispatches and not a second copy of the recipe — the values are identical.
+    // Only the shapes this file actually carries are fused (gate/up IQ2_XXS, down Q2_K); any other
+    // type falls through to the per-expert path rather than being guessed at.
+    if fuseExperts && w.gx.type == 16 && w.ux.type == 16 && w.dx.type == 10 {
+        for e in ids where e < 0 || e >= w.nExpStack {
+            print("FAIL layer \(il) selected expert \(e) but its stack holds only \(w.nExpStack)"); exit(1)
+        }
+        let nE = ids.count
+        var r32 = UInt32(nFf), c32 = UInt32(nEmbd), st = UInt32(w.gx.bytes / w.gx.d2), ne = UInt32(nE)
+        let gt = sentinelled(nE*nFf), up = sentinelled(nE*nFf)
+        for (t, out) in [(w.gx, gt), (w.ux, up)] {
+            enc(pIq2E, nE*nFf*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+                                              c.setBuffer(ffnNorm, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
+                                              c.setBuffer(idsBuf, offset: 0, index: 3)
+                                              c.setBytes(&r32, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
+                                              c.setBytes(&st, length: 4, index: 6); c.setBytes(&ne, length: 4, index: 7) }
+        }
+        let mid = sentinelled(nE*nFf)
+        var nff = UInt32(nFf), lim = clamp
+        enc(pSwigE, nE*nFf, 256) { c in c.setBuffer(gt, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
+                                        c.setBuffer(mid, offset: 0, index: 2); c.setBuffer(wtsBuf, offset: 0, index: 3)
+                                        c.setBytes(&nff, length: 4, index: 4); c.setBytes(&ne, length: 4, index: 5)
+                                        c.setBytes(&lim, length: 4, index: 6) }
+        let parts = sentinelled(nE*nEmbd)
+        var dr = UInt32(nEmbd), dc = UInt32(nFf), dst = UInt32(w.dx.bytes / w.dx.d2)
+        enc(pQ2kE, nE*nEmbd, 256) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
+                                         c.setBuffer(mid, offset: 0, index: 1); c.setBuffer(parts, offset: 0, index: 2)
+                                         c.setBuffer(idsBuf, offset: 0, index: 3)
+                                         c.setBytes(&dr, length: 4, index: 4); c.setBytes(&dc, length: 4, index: 5)
+                                         c.setBytes(&dst, length: 4, index: 6); c.setBytes(&ne, length: 4, index: 7) }
+        var mn = UInt32(nEmbd)
+        enc(pMoeRed, nEmbd, 256) { c in c.setBuffer(parts, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
+                                        c.setBytes(&mn, length: 4, index: 2); c.setBytes(&ne, length: 4, index: 3) }
+        g0 = gt; u0 = up; m0 = mid; d0 = parts
+    } else {
     for (i, e) in ids.enumerated() {
         guard e >= 0 && e < w.nExpStack else {
             print("FAIL layer \(il) selected expert \(e) but its stack holds only \(w.nExpStack)"); exit(1)
@@ -1116,6 +1163,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
             enc(pAxpy, nEmbd, 256) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
                                           c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
         }
+    }
     }
     let sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
     let suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
