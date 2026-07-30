@@ -130,7 +130,7 @@ type Value struct {
 func (v Value) String() string {
 	switch v.Kind {
 	case VNull:
-		return "null"
+		return "nothing"
 	case VInt:
 		return strconv.FormatInt(v.Int, 10)
 	case VFloat:
@@ -537,6 +537,21 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 		case RBasicCompare:
 			lv := k.walk(kids[0], env)
 			rv := k.walk(kids[1], env)
+			// `nothing` (axiom-1's third state) is a value, not a number. It is equal
+			// to itself and to nothing else — never to 0. Ordering it against a number
+			// is declined rather than answered: fkwu currently leaks its own value
+			// encoding there (add (nothing) 1 -> -8999999999999999997), and a walker
+			// that copied that would be agreeing by imitation instead of witnessing.
+			// Throwing here is what lets this walker DISAGREE if a cell ever leans on it.
+			if lv.Kind == VNull || rv.Kind == VNull {
+				switch cat.Inst {
+				case RCompareEq:
+					return boolInt(lv.Kind == VNull && rv.Kind == VNull)
+				case RCompareNe:
+					return boolInt(!(lv.Kind == VNull && rv.Kind == VNull))
+				}
+				panic(fmt.Sprintf("compare on nothing: ordering %v against %v is not a number question", lv, rv))
+			}
 			if lv.Kind == VFloat || rv.Kind == VFloat {
 				l := lv.AsFloat()
 				r := rv.AsFloat()
@@ -1239,6 +1254,10 @@ func (k *Kernel) registerNatives() {
 	})
 	k.registerNative("empty", func(_ *Kernel, _ []Value) Value {
 		return Value{Kind: VList, List: []Value{}}
+	})
+	// axiom-1's third state, first-class: the ground, not a missing 0.
+	k.registerNative("nothing", func(_ *Kernel, _ []Value) Value {
+		return Value{Kind: VNull}
 	})
 	k.registerNative("len", func(_ *Kernel, args []Value) Value {
 		switch args[0].Kind {
