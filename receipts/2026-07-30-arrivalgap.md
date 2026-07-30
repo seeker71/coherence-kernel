@@ -45,7 +45,7 @@ mode. Every piece of that apparatus already exists.
 Directional evidence does not accumulate into arrival. Two independent confirmations of the mechanism,
 a 10× rank movement, an exact prefix — and the honest answer to "can we use it" is still no, because
 arrival is a different *kind* of fact than movement, and no amount of the second adds up to the first.
-Corpus row 944, `arrivalgap`. The inverse of `inertfix` (939): there a real fix moved nothing; here a
+Corpus row 945, `arrivalgap`. The inverse of `inertfix` (940): there a real fix moved nothing; here a
 real fix moved everything measurable and still did not arrive.
 
 ## Where discomfort turned to gold

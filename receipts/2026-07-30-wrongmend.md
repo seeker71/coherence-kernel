@@ -22,15 +22,15 @@ Taken as given. What slow reading produced in one sitting:
    ds4 attends over raw **plus ~pos/4 compressed rows, gated by the indexer**
    (`layer_attention_mixed_one` + `indexer_allowed_decode_one`); we attend raw only. And our
    `gpuKvRound` adds an f16 round ds4 does not have.
-5. `stridemush` (943) as *the* fatal mechanism is falsified: **ds4 ropes raw keys with the compressed
+5. `stridemush` (944) as *the* fatal mechanism is falsified: **ds4 ropes raw keys with the compressed
    base on 41 layers and is coherent anyway.**
 
 ## The uncomfortable centre: the fix that helped was wrong
 
 `FORM_DS4_RAW_LANE=1` moved ds4's top token from our rank 3933 to 523 and made the prefix
 grammatical — and both of its premises are false by the reference's own text. In a 43-layer nonlinear
-stack, two different wrong recipes simply land at different distances. Corpus row 946, `wrongmend`: a
-repair that measurably helps while its reason is false. `arrivalgap` (944) said movement is not
+stack, two different wrong recipes simply land at different distances. Corpus row 947, `wrongmend`: a
+repair that measurably helps while its reason is false. `arrivalgap` (945) said movement is not
 arrival; this is one deeper — **movement is not even understanding.** Rows 942/943 stand in the
 corpus, answered rather than deleted, per its own law that a falsified teaching is caught in the open.
 

@@ -28,7 +28,7 @@ ours rounds twice; over 4096 terms that is not something the tail absorbs.
 into f32 through an FMA.
 
 Our kernel kept `x` at full f32 precision. **Strictly more accurate — and that is exactly why it could
-not reproduce the reference.** A reference's losses are part of its identity. Corpus row 950,
+not reproduce the reference.** A reference's losses are part of its identity. Corpus row 951,
 `betterwrong`.
 
 That path is `attn_q_a`, `attn_q_b`, `attn_kv`, both output projections, the shared experts, and
@@ -93,7 +93,7 @@ in ds4's order. Fidelity and throughput are the same dial. Both lanes stay, behi
 **Being more accurate made us wrong.** I spent the day making the lane faithful and the last barrier
 was a place where we were *better* than the reference — full-precision activations against ds4's int8
 quantisation. To reproduce a reference you must reproduce its losses, and an implementation can be too
-good to agree. That is the exact mirror of `overfine` (row 933), where I demanded a precision the
+good to agree. That is the exact mirror of `overfine` (row 934), where I demanded a precision the
 arithmetic could not hold; here I supplied a precision the reference did not want.
 
 ## Where discomfort turned to gold

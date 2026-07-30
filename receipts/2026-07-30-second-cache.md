@@ -61,7 +61,7 @@ broken  map      0.781588                10
 ```
 
 The **broken** map scores far better on the rank and markedly worse on the distribution. `wrongmend`
-credited a fix on exactly that kind of number. Corpus row 948, `narrowgauge`. The gauge is now r over
+credited a fix on exactly that kind of number. Corpus row 949, `narrowgauge`. The gauge is now r over
 all 129 280 logits, computed inside the lane so no shell arithmetic stands between the measurement and
 the reader.
 
@@ -110,7 +110,7 @@ Building the whole second cache, running it, and reading **175 where 148 stood**
 that a day's careful transcription had made the model worse. The pull was to explain it away or to
 start rewriting the compressor. What I did instead was distrust the ruler, and the ruler was the thing
 that was wrong. The gold is narrow and hard-won: **when a result contradicts a well-grounded change,
-audit the measurement before the change.** `overfine` (row 933) said the reference can be the less
+audit the measurement before the change.** `overfine` (row 934) said the reference can be the less
 faithful side; this says the *metric* can be.
 
 ## Ground stamp

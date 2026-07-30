@@ -6,7 +6,7 @@
 # over the same 168 bytes q2k-dequant-band.fk uses, answers exactly what q2k-dequant.fk answers on the
 # CPU — element for element, no epsilon. Two carriers, one recipe.
 #
-# WHY IT CAN RUN BEFORE THE MODEL DOES. The fixture is two seeded blocks on disk (row 934 onewaybyte:
+# WHY IT CAN RUN BEFORE THE MODEL DOES. The fixture is two seeded blocks on disk (row 935 onewaybyte:
 # Form can read bytes and cannot write them, so a carver's test data must come from a file). That is
 # enough to prove the decode. What it does NOT prove is the matvec fold or anything at real dims —
 # those wait for the mainline GGUF, and this file says so rather than implying otherwise.

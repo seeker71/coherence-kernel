@@ -8,7 +8,7 @@ not before I started optimising.
 
 ## The measurements, in the order I should have taken them
 
-**The reference, quiet, twice, warm** (never while our harness runs — row 941):
+**The reference, quiet, twice, warm** (never while our harness runs — row 942):
 
 ```
 ds4 --raw-prompt --temp 0 -n 25:   prefill 43.79 t/s,  generation 32.29 t/s
@@ -41,7 +41,7 @@ At perfect occupancy a token still costs 1106 ms of GPU against ds4's 31 ms tota
 the harness removed entirely.** The scaffolding is worth at most 2×; the kernels are the ceiling.
 
 A busy *fraction* alone would have sent me on to fix the scaffolding for a week. The *floor* says
-where the work is. Corpus row 951, `floorfirst`.
+where the work is. Corpus row 952, `floorfirst`.
 
 Why the kernels: we issue **3234 dispatches per token** and decode every quantised weight individually
 — roughly **6.5 billion decodes per token** — where ds4 decodes once per block and dots in int8. That

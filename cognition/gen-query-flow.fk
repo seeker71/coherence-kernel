@@ -152,15 +152,22 @@
   ;; nothing; these questions all have a row that could answer them, and the
   ;; find-shapes still include the honest zero because a key present in the
   ;; subject column may be absent from the object column.
-  (defn gqy-case (qid rel key) (list qid rel key))
+  ;; A case carries a SECOND relation, zero for the shapes that do not chain.
+  ;; The join needs two, and a ragged table would have made the generated
+  ;; dispatcher branch on row length — a per-shape `if` in the emitted code
+  ;; rather than in the data, which is the shape of mistake this cell keeps
+  ;; finding one layer up.
+  (defn gqy-case (qid rel key r2) (list qid rel key r2))
   (defn gqy-case-q   (c) (nth c 0))
   (defn gqy-case-rel (c) (nth c 1))
   (defn gqy-case-key (c) (nth c 2))
+  (defn gqy-case-r2  (c) (nth c 3))
 
   (defn gqy-case-eq? (a b)
     (if (eq (gqy-case-q a) (gqy-case-q b))
       (if (eq (gqy-case-rel a) (gqy-case-rel b))
-        (if (eq (gqy-case-key a) (gqy-case-key b)) 1 0) 0) 0))
+        (if (eq (gqy-case-key a) (gqy-case-key b))
+          (if (eq (gqy-case-r2 a) (gqy-case-r2 b)) 1 0) 0) 0) 0))
   (defn gqy-seen? (cs c)
     (if (eq (len cs) 0) 0
       (if (eq (gqy-case-eq? (head cs) c) 1) 1 (gqy-seen? (tail cs) c))))
@@ -172,18 +179,60 @@
     (if (eq (len fs) 0) acc
       (gqy-cases-for (tail fs) qid q
         (gqy-push-new acc (gqy-case qid (stn-f-relation (head fs))
-                                        (gqy-key-of (head fs) q))))))
+                                        (gqy-key-of (head fs) q) 0)))))
   (defn gqy-cases-loop (qs qid acc)
     (if (eq (len qs) 0) acc
       (gqy-cases-loop (tail qs) (add qid 1)
         (gqy-cases-for (stn-facts) qid (head qs) acc))))
-  (defn gqy-cases () (gqy-cases-loop (gqy-queries) 0 (list)))
+  ;; ═══ THE JOIN — the structure the 2x2 table cannot hold ═════════
+  ;;
+  ;; Grok's objection to the first page stands and this answers it: four
+  ;; cloned scanners and a dispatcher is a page by MEASUREMENT and one program
+  ;; by STRUCTURE, and no number of extra count shapes buys a second shape of
+  ;; program. A join does: it follows a fact's object into another fact's
+  ;; subject, so the emitted code is two mutually-sized recursions with five
+  ;; and three parameters — not another row of (match-column, mode,
+  ;; result-column), which is a 2x2 and always was.
+  ;;
+  ;; Which pairs chain is READ FROM THE GRAPH, not chosen: a pair (r1,r2)
+  ;; earns a case only if some fact's object under r1 is some fact's subject
+  ;; under r2. Four pairs qualify over the 35 facts; the rest would have been
+  ;; questions with no path, and a sweep of those is the thin space corpus row
+  ;; 930 names (thinmatch) wearing a bigger number.
+  (defn gqy-join-qid () 4)
+  (defn gqy-inner-hits (gs r2 x n)
+    (if (eq (len gs) 0) n
+      (gqy-inner-hits (tail gs) r2 x
+        (add n (if (eq (stn-f-relation (head gs)) r2)
+                 (if (eq (stn-f-subject (head gs)) x) 1 0) 0)))))
+  (defn gqy-join-count (fs r1 r2 key n)
+    (if (eq (len fs) 0) n
+      (gqy-join-count (tail fs) r1 r2 key
+        (add n (if (eq (stn-f-relation (head fs)) r1)
+                 (if (eq (stn-f-subject (head fs)) key)
+                   (gqy-inner-hits (stn-facts) r2 (stn-f-object (head fs)) 0) 0) 0)))))
+  (defn gqy-join-cases-loop (fs rs acc)
+    (if (eq (len fs) 0) acc
+      (gqy-join-cases-loop (tail fs) rs (gqy-join-r2-loop (head fs) rs acc))))
+  (defn gqy-join-r2-loop (f rs acc)
+    (if (eq (len rs) 0) acc
+      (do (let n (gqy-inner-hits (stn-facts) (head rs) (stn-f-object f) 0))
+        (gqy-join-r2-loop f (tail rs)
+          (if (gt n 0)
+              (gqy-push-new acc (gqy-case (gqy-join-qid) (stn-f-relation f)
+                                          (stn-f-subject f) (head rs)))
+              acc)))))
+  (defn gqy-join-cases () (gqy-join-cases-loop (stn-facts) (gqy-relations) (list)))
+  (defn gqy-join-cases-n () (len (gqy-join-cases)))
+
+  (defn gqy-cases ()
+    (append (gqy-cases-loop (gqy-queries) 0 (list)) (gqy-join-cases)))
   (defn gqy-cases-n () (len (gqy-cases)))
 
   ;; ── the case table as a literal in the target's own list syntax ──
   (defn gqy-case-ir (c)
     (gir-listof "ints" (list (gir-lit (gqy-case-q c)) (gir-lit (gqy-case-rel c))
-                             (gir-lit (gqy-case-key c)))))
+                             (gir-lit (gqy-case-key c)) (gir-lit (gqy-case-r2 c)))))
   (defn gqy-cases-ir-loop (cs)
     (if (eq (len cs) 0) (list) (cons (gqy-case-ir (head cs)) (gqy-cases-ir-loop (tail cs)))))
   (defn gqy-cases-ir () (gir-listof "rows" (gqy-cases-ir-loop (gqy-cases))))
@@ -204,7 +253,10 @@
   ;; case's shape id, calls the query the graph wrote, and conses the answer
   ;; onto the answers for the rest — a fold over a table, in whichever language
   ;; was asked, from the same IR.
-  (defn gqy-c-at (i) (gir-index (gir-bcall "first" (list (gir-var "cs"))) (gir-lit i)))
+  ;; `first(cs)` was spelled nine times in the driver because the statement
+  ;; sub-language could not name it. It is bound once now, which is what slet
+  ;; was added for and the shortest honest proof that it works.
+  (defn gqy-c-at (i) (gir-index (gir-var "c") (gir-lit i)))
   (defn gqy-dispatch-arm (qs qid)
     (if (eq (len qs) 0) (gir-nil)
       (gir-sif (gir-cmp "eq" (gqy-c-at 0) (gir-lit qid))
@@ -216,22 +268,64 @@
   (defn gqy-arms-loop (qs qid)
     (if (eq (len qs) 0) (list)
       (cons (gqy-dispatch-arm qs qid) (gqy-arms-loop (tail qs) (add qid 1)))))
+  ;; the join arm: two relations, and the whole fact list threaded a second
+  ;; time so the inner scan can run while the outer one recurses
+  (defn gqy-join-arm ()
+    (gir-sif (gir-cmp "eq" (gqy-c-at 0) (gir-lit (gqy-join-qid)))
+      (gir-ret (gir-bcall "cons"
+        (list (gir-call "join_count"
+                (list (gir-var "fs") (gir-var "fs") (gqy-c-at 1) (gqy-c-at 3) (gqy-c-at 2)))
+              (gir-call "run_all"
+                (list (gir-var "fs") (gir-bcall "rest" (list (gir-var "cs"))))))))))
   (defn gqy-runall-ir ()
     (gir-fnb "run_all" (list (list "fs" "rows") (list "cs" "rows")) "ints"
       (gir-seq (cons (gir-sif (gir-cmp "eq" (gir-bcall "len" (list (gir-var "cs"))) (gir-lit 0))
                               (gir-ret (gir-nil)))
+               (cons (gir-slet "c" (gir-bcall "first" (list (gir-var "cs"))))
                      (append (gqy-arms-loop (gqy-queries) 0)
-                             (list (gir-ret (gir-nil))))))))
+                             (list (gqy-join-arm) (gir-ret (gir-nil)))))))))
+
+  ;; ── the join, as two generated functions ────────────────────────
+  (defn gqy-f-at (v i) (gir-index (gir-bcall "first" (list (gir-var v))) (gir-lit i)))
+  (defn gqy-inner-ir ()
+    (gir-fnb "inner_hits" (list (list "gs" "rows") (list "r2" "int") (list "x" "int")) "int"
+      (gir-seq (list
+        (gir-sif (gir-cmp "eq" (gir-bcall "len" (list (gir-var "gs"))) (gir-lit 0)) (gir-ret (gir-lit 0)))
+        (gir-sif (gir-cmp "and" (gir-cmp "eq" (gqy-f-at "gs" 1) (gir-var "r2"))
+                                (gir-cmp "eq" (gqy-f-at "gs" 0) (gir-var "x")))
+          (gir-ret (gir-bin "add" (gir-lit 1)
+            (gir-call "inner_hits" (list (gir-bcall "rest" (list (gir-var "gs"))) (gir-var "r2") (gir-var "x"))))))
+        (gir-ret (gir-bin "add" (gir-lit 0)
+          (gir-call "inner_hits" (list (gir-bcall "rest" (list (gir-var "gs"))) (gir-var "r2") (gir-var "x")))))))))
+  (defn gqy-join-ir ()
+    (gir-fnb "join_count" (list (list "fs" "rows") (list "gs" "rows") (list "r1" "int")
+                                (list "r2" "int") (list "key" "int")) "int"
+      (gir-seq (list
+        (gir-sif (gir-cmp "eq" (gir-bcall "len" (list (gir-var "fs"))) (gir-lit 0)) (gir-ret (gir-lit 0)))
+        (gir-sif (gir-cmp "and" (gir-cmp "eq" (gqy-f-at "fs" 1) (gir-var "r1"))
+                                (gir-cmp "eq" (gqy-f-at "fs" 0) (gir-var "key")))
+          (gir-ret (gir-bin "add"
+            (gir-call "inner_hits" (list (gir-var "gs") (gir-var "r2") (gqy-f-at "fs" 2)))
+            (gir-call "join_count" (list (gir-bcall "rest" (list (gir-var "fs"))) (gir-var "gs")
+                                         (gir-var "r1") (gir-var "r2") (gir-var "key"))))))
+        (gir-ret (gir-bin "add" (gir-lit 0)
+          (gir-call "join_count" (list (gir-bcall "rest" (list (gir-var "fs"))) (gir-var "gs")
+                                       (gir-var "r1") (gir-var "r2") (gir-var "key")))))))))
+  (defn gqy-emit-join (lang)
+    (str_concat (gnc-render lang (gqy-inner-ir))
+      (str_concat "\n" (gnc-render lang (gqy-join-ir)))))
   (defn gqy-emit-runall (lang) (gnc-render lang (gqy-runall-ir)))
 
   ;; ── the whole module: prelude, four queries, the driver ─────────
   (defn gqy-module-page (lang)
     (do (let qs (gqy-stmt-all-loop lang (gqy-queries)))
+        (let j (gqy-emit-join lang))
         (let d (gqy-emit-runall lang))
         (if (eq (str_len d) 0) ""
           (if (eq (str_len qs) 0) ""
             (str_concat (gnc-prelude lang)
-              (str_concat "\n" (str_concat qs (str_concat "\n" d))))))))
+              (str_concat "\n" (str_concat qs
+                (str_concat "\n" (str_concat j (str_concat "\n" d)))))))))) 
   (defn gqy-page-lines-loop (s i n)
     (if (ge i (str_len s)) n
       (gqy-page-lines-loop s (add i 1)
@@ -259,9 +353,11 @@
         (gqy-answer-find (tail fs) c q))))
   (defn gqy-q-at (qs i) (if (eq i 0) (head qs) (gqy-q-at (tail qs) (sub i 1))))
   (defn gqy-answer-in (fs c)
-    (do (let q (gqy-q-at (gqy-queries) (gqy-case-q c)))
-      (if (str_eq (gqy-mode q) "count") (gqy-answer-count fs c q)
-                                        (gqy-answer-find fs c q))))
+    (if (eq (gqy-case-q c) (gqy-join-qid))
+        (gqy-join-count fs (gqy-case-rel c) (gqy-case-r2 c) (gqy-case-key c) 0)
+      (do (let q (gqy-q-at (gqy-queries) (gqy-case-q c)))
+        (if (str_eq (gqy-mode q) "count") (gqy-answer-count fs c q)
+                                          (gqy-answer-find fs c q)))))
   (defn gqy-answer (c) (gqy-answer-in (stn-facts) c))
   (defn gqy-answers-loop (cs)
     (if (eq (len cs) 0) ""
@@ -327,8 +423,9 @@
   (defn gqy-multi-loop (cs n)
     (if (eq (len cs) 0) n
       (gqy-multi-loop (tail cs)
-        (add n (if (gt (gqy-matches (stn-facts) (head cs)
-                         (gqy-q-at (gqy-queries) (gqy-case-q (head cs))) 0) 1) 1 0)))))
+        (add n (if (eq (gqy-case-q (head cs)) (gqy-join-qid)) 0
+                 (if (gt (gqy-matches (stn-facts) (head cs)
+                           (gqy-q-at (gqy-queries) (gqy-case-q (head cs))) 0) 1) 1 0))))))
   (defn gqy-multi-n () (gqy-multi-loop (gqy-cases) 0))
 
   ;; ── THE DELTA WITNESS: the output tracks the input ──────────────

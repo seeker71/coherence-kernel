@@ -46,7 +46,7 @@ possible error.
 
 ## Verified against an independent reference, on identical bytes
 
-`askalike` (row 931) applied a second time, and this time *before* the data — `q2koracle.c`, ds4's
+`askalike` (row 932) applied a second time, and this time *before* the data — `q2koracle.c`, ds4's
 `q2_k_value_f32` verbatim, over a seeded 168-byte fixture whose second block carries an awkward f16
 `d` (0x3555) and a **negative** `dmin` (0xB400) so the sign path is exercised rather than assumed:
 

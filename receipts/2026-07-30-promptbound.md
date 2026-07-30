@@ -30,7 +30,7 @@ quote (`echo-ds4 4` is the four-id run `671 6102 294 8760`).
 
 So the forward is not merely weak: it is **promptbound** — every token it emits is drawn from what it
 was shown, none from what the model knows. A model that answers must produce ids the prompt never
-contained; ds4's `2581`-stream does, ours never does. Corpus row 941.
+contained; ds4's `2581`-stream does, ours never does. Corpus row 942.
 
 Three integers on the body's channel said this more precisely than 129 280 floats in a shell pipeline
 did an hour earlier. `r = 0.46` said "half the structure is missing"; `bag 2, both prompt words` says
