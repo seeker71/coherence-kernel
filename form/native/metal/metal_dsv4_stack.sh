@@ -576,7 +576,7 @@ let matchOrder = ProcessInfo.processInfo.environment["FORM_DS4_MATCH_ORDER"] == 
 let gatesOn = ProcessInfo.processInfo.environment["FORM_DS4_GATES"] != "0"
 let pQ8aQuant = pipe(lKv, "form_dsv4_q8a_quantize_f32")
 let pQ80Ord = pipe(lKv, "form_dsv4_q80_matvec_ordered")
-let pF16Ord = pipe(lKv, "form_dsv4_f16_matvec_ordered")
+let pF16Ord = pipe(lKv, "form_dsv4_f16_matvec_ordered8")
 let pQ2kOrd = pipe(lQ2k, "form_dsv4_q2k_matvec_ordered")
 let pCompInit = pipe(lKv, "form_dsv4_comp_init_f32")
 let pCompState = pipe(lKv, "form_dsv4_comp_state_f32")
@@ -855,7 +855,7 @@ func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
 func gpuF16mv(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows); var r = UInt32(t.rows), c32 = UInt32(t.cols)
     // ds4.c:6664 dot_f16_row — two FMA accumulators over widened halves, reduced pairwise.
-    enc(matchOrder ? pF16Ord : pF16mv, t.rows, 256) { c in
+    enc(matchOrder ? pF16Ord : pF16mv, matchOrder ? t.rows*8 : t.rows, 256) { c in
         c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
         c.setBuffer(out, offset: 0, index: 2)
         c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
@@ -1574,7 +1574,11 @@ flush()   // nothing may be left unsubmitted when the verdict is read: an uncomm
           // unchecked cb.error, and a green verdict standing on work that never ran is the exact
           // failure this harness sentinels everything else against.
 if profileOn {
-    print("      ── GPU time by kernel (profile mode: one submit per dispatch, so totals inflate; the RANKING is the reading) ──")
+    print("      ── GPU time by kernel. READ THE BIAS FIRST: profile mode submits each dispatch ALONE, so every")
+    print("         kernel is charged a fixed submit overhead ONCE PER CALL. A kernel called 1484 times carries")
+    print("         1484 helpings of it. This column is cost PLUS call count, not cost — trust it for gaps of")
+    print("         10x or more (those survive the bias) and never for neighbours. The us/call column is the")
+    print("         one to compare when call counts differ. (callbias, corpus row 955.)")
     for (nm, s) in profS.sorted(by: { $0.value > $1.value }).prefix(12) {
         let n = profN[nm] ?? 1
         print(String(format: "      %8.3f s  %6d calls  %8.1f us each   %@", s, n, 1e6*s/Double(n), nm))
