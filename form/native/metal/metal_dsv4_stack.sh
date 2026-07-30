@@ -324,6 +324,13 @@ let lMx4 = lib(libMx4), lIq2 = lib(libIq2), lQ2k = lib(libQ2k), lQ80 = lib(libQ8
 let lKv = lib(libKv)
 let queue = dev.makeCommandQueue()!
 var failures = 0, gpuErrors = 0
+var dumpLogitsDone = false
+// THE DUMP MUST FIRE AT THE RIGHT STEP. The generation loop calls the exit head at pos 0 first, when
+// only promptIds[0] has been read — so an unguarded dump captures P(next | "The") while
+// `ds4 --dump-logits` gives P(next | the WHOLE prompt). Diffing those compares two different
+// questions and says nothing about correctness. This arms only at the last prompt position, which is
+// the step whose token is the first EMITTED one and the only one ds4's dump is comparable to.
+var dumpArmed = false
 var gpuFirstError: String? = nil
 var gateNo = 0
 func check(_ ok: Bool, _ pass: String, _ fail: String) {
@@ -878,6 +885,19 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
     let normed = gpuRmsnorm(collapsed, nEmbd, outNorm)
     let logits = gpuMx8(outWeight, normed, outWeight.rows, outWeight.cols)
     let base = argmax(logits, outWeight.rows)
+    // FORM_DS4_DUMP_LOGITS writes this body's full next-token distribution so it can be diffed
+    // element-for-element against `ds4 --dump-logits` on the SAME weights and prompt — the first
+    // real-dims comparison this DS4 work has been able to make.
+    if let dumpPath = ProcessInfo.processInfo.environment["FORM_DS4_DUMP_LOGITS"], dumpArmed, !dumpLogitsDone {
+        dumpLogitsDone = true
+        let lp = fp(logits, outWeight.rows)
+        var out = "{\"vocab\":\(outWeight.rows),\"argmax_token\":\(base.token),\"logits\":["
+        out.reserveCapacity(outWeight.rows * 12)
+        for i in 0..<outWeight.rows { if i > 0 { out += "," }; out += String(lp[i]) }
+        out += "]}"
+        try? out.write(toFile: dumpPath, atomically: true, encoding: .utf8)
+        print("      FORM logits dumped: \(outWeight.rows) values -> \(dumpPath)")
+    }
     if !controlAdapterProved {
         let zero = copyFloatBuffer(logits, outWeight.rows)
         applyControlAdapter(zero, [Float](repeating: 0, count: controlCount))
@@ -966,6 +986,7 @@ if kvSequence {
         let inputToken = pos < promptIds.count ? promptIds[pos] : currentToken
         var resid = embedToken(inputToken)
         for il in 0..<nLayers { resid = runLayer(il, pos, inputToken, resid).outHc }
+        dumpArmed = (pos == promptIds.count - 1)
         let exit = nativeExitHead(resid, "feedback step \(pos), input_token=\(inputToken)")
         if pos >= promptIds.count - 1 { emitted.append(exit.token) }
         currentToken = exit.token
