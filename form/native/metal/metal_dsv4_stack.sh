@@ -889,9 +889,16 @@ func q2kFusedVsCarved(_ t: Tn, _ x: MTLBuffer, _ expert: Int) {
         scaleA += Double(a[i])*Double(a[i]); scaleB += Double(b[i])*Double(b[i])
     }
     let rmsA = sqrt(scaleA/Double(rows)), rmsB = sqrt(scaleB/Double(rows))
-    check(maxRel < 0.01,
-      String(format: "Q2_K FUSED vs CARVED, blk.0 expert %d down [%d<-%d]: the one-pass decode+fold and an independent per-weight carve of the same bytes folded by the plain f32 matvec agree to max rel %.3g (max abs %.3g), rms %.6g vs %.6g", expert, rows, cols, maxRel, maxAbs, rmsA, rmsB),
-      String(format: "Q2_K fused matvec disagrees with its own carver on blk.0 expert %d down: max rel %.3g, max abs %.3g, rms %.6g vs %.6g — the FOLD or the MAP, not the decode", expert, maxRel, maxAbs, rmsA, rmsB))
+    // THE BAR IS AGAINST THE VECTOR'S SCALE, NOT EACH ELEMENT'S OWN MAGNITUDE (overfine, row 933).
+    // These two folds associate 2048 signed terms differently, so an element that very nearly cancels
+    // lands near zero with a few ulps of difference and its RELATIVE error explodes — expert 87 gave
+    // max rel 2.6% on a max abs of 3.8e-07 against an rms of 0.0837. Judging that as a defect is
+    // demanding a precision f32 reassociation cannot hold. What a wrong fold or a wrong map would move
+    // is the vector's scale, and that is what this asks.
+    let scaled = maxAbs / Float(max(rmsA, 1e-12))
+    check(scaled < 1e-3,
+      String(format: "Q2_K FUSED vs CARVED, blk.0 expert %d down [%d<-%d]: the one-pass decode+fold and an independent per-weight carve of the same bytes folded by the plain f32 matvec agree to max abs %.3g = %.2g of the vector's rms %.6g (worst single-element rel %.3g sits on a near-cancellation, which reassociation owns)", expert, rows, cols, maxAbs, scaled, rmsA, maxRel),
+      String(format: "Q2_K fused matvec disagrees with its own carver on blk.0 expert %d down: max abs %.3g = %.2g of rms %.6g (vs %.6g) — the FOLD or the MAP, not the decode", expert, maxAbs, scaled, rmsA, rmsB))
 }
 func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let w = LW[il]
@@ -1166,6 +1173,17 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
             let end = rest.firstIndex(of: "]") ?? rest.endIndex
             return rest[..<end].split(separator: ",").compactMap { Float($0.trimmingCharacters(in: .whitespacesAndNewlines)) }
         }
+        // GREEDY DECODING IS DISCONTINUOUS IN THE DISTRIBUTION. r says how close two distributions are
+        // on average; whether a TOKEN flips is decided by the top-two margin against the per-logit
+        // error. So the pair that actually predicts stream agreement is (max |delta| over the top
+        // band, top-two margin) — reported for us AND for the reference against itself, so the bar is
+        // the reference's own and not a number I chose.
+        func maxDelta(_ a: [Float], _ b: [Float], _ top: [Int]) -> Float {
+            var m: Float = 0
+            for i in top { let d = abs(a[i] - b[i]); if d > m { m = d } }
+            return m
+        }
+        func margin(_ v: [Float], _ ord: [Int]) -> Float { return v[ord[0]] - v[ord[1]] }
         func pearson(_ a: [Float], _ b: [Float]) -> Double {
             var sa: Double = 0, sb: Double = 0
             for i in 0..<a.count { sa += Double(a[i]); sb += Double(b[i]) }
@@ -1193,13 +1211,17 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
                 // spread against ITSELF is known — two of its own backends on the same prompt bound
                 // how much agreement is even available. Quoting our number without this one would be
                 // quoting a denominator nobody re-derived.
+                let band = Array(refOrder.prefix(64))
+                print(String(format: "      TIE BUDGET: reference top-two margin %.4f logits; our max |delta| over its top 64 is %.4f — a token flips when the delta exceeds the margin",
+                             margin(ref, refOrder), maxDelta(ours, ref, band)))
                 if let refBPath = ProcessInfo.processInfo.environment["FORM_DS4_REF_LOGITS_B"],
                    let refB = readRefLogits(refBPath), refB.count == ref.count {
                     var bOrder = Array(0..<refB.count); bOrder.sort { refB[$0] > refB[$1] }
-                    print(String(format: "      NOISE FLOOR %@ vs %@: r=%.6f, top-10 overlap %d/10, same argmax %@ — ours is r=%.6f against the first",
+                    print(String(format: "      NOISE FLOOR %@ vs %@: r=%.6f, top-10 overlap %d/10, same argmax %@, its own max |delta| over that band %.4f — ours is r=%.6f, max |delta| %.4f",
                                  (refPath as NSString).lastPathComponent, (refBPath as NSString).lastPathComponent,
                                  pearson(ref, refB), refTop10.intersection(Set(bOrder.prefix(10))).count,
-                                 refOrder[0] == bOrder[0] ? "yes" : "no", r))
+                                 refOrder[0] == bOrder[0] ? "yes" : "no", maxDelta(refB, ref, band),
+                                 r, maxDelta(ours, ref, band)))
                 }
             } else {
                 print("      AGREEMENT: reference carries \(ref.count) logits, this vocabulary is \(outWeight.rows) — not comparable")
