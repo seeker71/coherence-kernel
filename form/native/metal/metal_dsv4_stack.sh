@@ -1094,11 +1094,24 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
                                  c.setBytes(&ne, length: 4, index: 5); c.setBytes(&nu, length: 4, index: 6)
                                  c.setBytes(&ws, length: 4, index: 7) }
     }
-    flush()   // the router's choice is read on the CPU to pick expert slices — a real sync point
-    let idp = idsBuf.contents().bindMemory(to: UInt32.self, capacity: nUsed)
-    let wtp = wtsBuf.contents().bindMemory(to: Float.self, capacity: nUsed)
+    // THE FLUSH THAT OUTLIVED ITS REASON. This used to read the router's choice back to the CPU so the
+    // host could pick each expert's byte slice — a real sync point, once. Then the fused kernels
+    // started taking idsBuf and wtsBuf as DEVICE buffers, and the comment forty lines below has said
+    // "the loop never needed the CPU" ever since. Both comments sat here, disagreeing, while 43
+    // blocking commit+waitUntilCompleted ran per token to produce: `wts`, which nothing reads, and
+    // `ids`, read only by a bounds assertion — whose count is nUsed, a model constant known before the
+    // token loop starts. The assertion moves to the unfused path, which genuinely needs the ids.
+    let fusedHere = fuseExperts && w.gx.type == 16 && w.ux.type == 16 && w.dx.type == 10
     var ids: [Int] = [], wts: [Float] = []
-    for i in 0..<nUsed { ids.append(Int(idp[i])); wts.append(wtp[i]) }
+    // gates-on still needs the ids: the per-layer self-witness asserts every selected expert is inside
+    // the layer's own stack. Reading them back is evidence, so it is paid when evidence is asked for
+    // and not otherwise — the same line deadguard 950 and this row draw.
+    if !fusedHere || gatesOn {
+        flush()
+        let idp = idsBuf.contents().bindMemory(to: UInt32.self, capacity: nUsed)
+        let wtp = wtsBuf.contents().bindMemory(to: Float.self, capacity: nUsed)
+        for i in 0..<nUsed { ids.append(Int(idp[i])); wts.append(wtp[i]) }
+    }
 
     let moe = sentinelled(nEmbd)
     var g0 = moe, u0 = moe, m0 = moe, d0 = moe
@@ -1110,11 +1123,8 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
     // is a rearrangement of dispatches and not a second copy of the recipe — the values are identical.
     // Only the shapes this file actually carries are fused (gate/up IQ2_XXS, down Q2_K); any other
     // type falls through to the per-expert path rather than being guessed at.
-    if fuseExperts && w.gx.type == 16 && w.ux.type == 16 && w.dx.type == 10 {
-        for e in ids where e < 0 || e >= w.nExpStack {
-            print("FAIL layer \(il) selected expert \(e) but its stack holds only \(w.nExpStack)"); exit(1)
-        }
-        let nE = ids.count
+    if fusedHere {
+        let nE = nUsed
         var r32 = UInt32(nFf), c32 = UInt32(nEmbd), st = UInt32(w.gx.bytes / w.gx.d2), ne = UInt32(nE)
         let gt = sentinelled(nE*nFf), up = sentinelled(nE*nFf)
         for (t, out) in [(w.gx, gt), (w.ux, up)] {
