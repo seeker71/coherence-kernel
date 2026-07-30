@@ -532,6 +532,12 @@ var freqCache: [Int: MTLBuffer] = [:]
 // agreement was common-mode and could not catch it. With this flag: plain rope every layer, no fp8
 // round — the raw lane's semantics. The compressor/indexer lanes remain unimplemented and are only
 // reachable past compress_ratio tokens; at short contexts ds4's compressed cache is empty too.
+// REFUTED 2026-07-30, kept only as a falsifier. Reading layer_attention_raw_swa_one (ds4.c:12936)
+// whole shows the raw path DOES rope per-layer at true pos with the compressed base on ratio layers
+// AND fp8-rounds the row (kv_cache_push_raw f16-rounds it too) — i.e. the DEFAULT lane above is
+// ds4's recipe, and this flag's two premises are both false. Measured against ds4 --raw-prompt on
+// "The capital of France is": default lane puts " Paris" at rank 148, this flag at 407. The earlier
+// "10x improvement" was measured against a CHAT-TEMPLATED ds4 prompt and was an artifact.
 let rawLane = ProcessInfo.processInfo.environment["FORM_DS4_RAW_LANE"] == "1"
 func ropeFreqs(_ il: Int) -> MTLBuffer {
     if let b = freqCache[il] { return b }
