@@ -521,9 +521,21 @@ func gpuHeadrms(_ x: MTLBuffer) -> MTLBuffer {
 // own scalars and ratio array.
 let nPair = nRot/2
 var freqCache: [Int: MTLBuffer] = [:]
+// FORM_DS4_RAW_LANE=1: run the RAW attention lane. ds4.c:12437-12460 shows the compressed-base rope
+// and the fp8 KV round belong to a SECOND cache — a compressor pools compress_ratio raw KVs into one
+// row (gated pooling over compressor_gate/ape/norm, tensors this harness never loads), rotates that
+// pooled row at comp_pos = pos+1-ratio with the compressed base, fp8-rounds it, and stores it BESIDE
+// a raw f32 cache whose keys carry PLAIN rope at true positions (ds4 --inspect: "KV raw + compressed").
+// This harness had ported the compressed lane as if it were the attention itself — on 41 of 43 layers
+// keys were rotated base-160000 where ds4's short-context answer comes from the raw base-10000 lane.
+// The per-layer fp64 oracle shares the misreading (its line 822 skips the compressor), so their
+// agreement was common-mode and could not catch it. With this flag: plain rope every layer, no fp8
+// round — the raw lane's semantics. The compressor/indexer lanes remain unimplemented and are only
+// reachable past compress_ratio tokens; at short contexts ds4's compressed cache is empty too.
+let rawLane = ProcessInfo.processInfo.environment["FORM_DS4_RAW_LANE"] == "1"
 func ropeFreqs(_ il: Int) -> MTLBuffer {
     if let b = freqCache[il] { return b }
-    let compressed = LW[il].ratio != 0
+    let compressed = LW[il].ratio != 0 && !rawLane
     let fbase: Float = (compressed && ropeCBase > 0) ? ropeCBase : ropeBase
     let fscale: Float = (!compressed || ropeScaleF <= 0) ? 1.0 : 1.0/ropeScaleF
     let ext: Float = (compressed && ropeScaleF > 1.0) ? 1.0 : 0.0
@@ -705,7 +717,9 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let kl = gpuMx8(w.kv, xn, w.kv.rows, w.kv.cols)
     let kln = gpuRmsnorm(kl, w.kv.rows, w.kvan)
     let kr = gpuRope(kln, 1, pos, il, false)
-    let kq = gpuKvRound(kr)
+    // raw lane: the fp8+f16 round is the COMPRESSED cache's storage format (ds4.c:3210 says so in its
+    // own comment); the raw cache is f32, so the roped key passes through untouched.
+    let kq = rawLane ? kr : gpuKvRound(kr)
     if il == 0 { observeRealKvAppend(kq) }
     let ha: MTLBuffer
     if useGrowingKv {
