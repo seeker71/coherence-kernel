@@ -244,6 +244,9 @@ LIB_CORE="$(compile_unit dsv4-mla-core-msl     form_dsv4_mx8_matvec_grouped   ds
 LIB_HC="$(compile_unit   dsv4-hc-unit          form_hc_split_f32              dsv4hc)"     || exit 1
 LIB_MX4="$(compile_unit  dsv4-mx4-matvec-msl   form_dsv4_mx4_matvec           dsv4mx4)"    || exit 1
 LIB_IQ2="$(compile_unit  dsv4-iq2-matvec-msl   form_dsv4_iq2_matvec           dsv4iq2)"    || exit 1
+LIB_Q2K="$(compile_unit  dsv4-q2k-matvec-msl   form_dsv4_q2k_matvec           dsv4q2k)"    || exit 1
+LIB_Q80="$(compile_unit  dsv4-q80-matvec-msl   form_dsv4_q80_matvec           dsv4q80)"    || exit 1
+LIB_Q8G="$(compile_unit  dsv4-q80-grouped-msl  form_dsv4_q80_matvec_grouped   dsv4q8g)"    || exit 1
 LIB_FFN="$(compile_unit  dsv4-stack-ffn-unit   form_dsv4_topk_weights         dsv4stkffn)" || exit 1
 LIB_KV="$(compile_unit   dsv4-stack-kv-unit    form_dkv_append_f32            dsv4stkkv)"  || exit 1
 
@@ -262,9 +265,9 @@ for line in (try! String(contentsOfFile: paramPath, encoding: .utf8)).split(sepa
 func I(_ k: String) -> Int { guard let v = P[k], let n = Int(v) else { print("FAIL missing int param \(k)"); exit(1) }; return n }
 func F(_ k: String) -> Float { guard let v = P[k], let n = Float(v) else { print("FAIL missing float param \(k)"); exit(1) }; return n }
 let libEmb = argv[3], libMla = argv[4], lib8 = argv[5], libCore = argv[6], libHc = argv[7]
-let libMx4 = argv[8], libIq2 = argv[9], libFfn = argv[10]
-let libKv = argv[11]
-let controlAdapterPath = argv[12]
+let libMx4 = argv[8], libIq2 = argv[9], libQ2k = argv[10], libQ80 = argv[11], libQ8g = argv[12], libFfn = argv[13]
+let libKv = argv[14]
+let controlAdapterPath = argv[15]
 
 struct Tn { let abs: Int, bytes: Int, idx: Int, inner: Int, holds: Int, d0: Int, d1: Int, d2: Int, type: Int
             var rows: Int { d1 }
@@ -317,7 +320,7 @@ let LW = (0..<nLayers).map { layerW($0) }
 guard let dev = MTLCreateSystemDefaultDevice() else { print("SKIP no Metal device"); exit(2) }
 func lib(_ p: String) -> MTLLibrary { return try! dev.makeLibrary(URL: URL(fileURLWithPath: p)) }
 let lEmb = lib(libEmb), lMla = lib(libMla), l8 = lib(lib8), lCore = lib(libCore), lHc = lib(libHc)
-let lMx4 = lib(libMx4), lIq2 = lib(libIq2), lFfn = lib(libFfn)
+let lMx4 = lib(libMx4), lIq2 = lib(libIq2), lQ2k = lib(libQ2k), lQ80 = lib(libQ80), lQ8g = lib(libQ8g), lFfn = lib(libFfn)
 let lKv = lib(libKv)
 let queue = dev.makeCommandQueue()!
 var failures = 0, gpuErrors = 0
@@ -456,6 +459,9 @@ let pHcPost = pipe(lHc, "form_hc_post_f32")
 let pHcHeadw = pipe(lHc, "form_hc_headw_f32")
 let pMx4 = pipe(lMx4, "form_dsv4_mx4_matvec")
 let pIq2 = pipe(lIq2, "form_dsv4_iq2_matvec")
+let pQ2k = pipe(lQ2k, "form_dsv4_q2k_matvec")
+let pQ80 = pipe(lQ80, "form_dsv4_q80_matvec")
+let pQ80g = pipe(lQ8g, "form_dsv4_q80_matvec_grouped")
 let pSwiglu = pipe(lFfn, "form_dsv4_swiglu_f32")
 let pScale = pipe(lFfn, "form_dsv4_scale_f32")
 let pAxpy = pipe(lFfn, "form_dsv4_axpy_f32")
@@ -472,8 +478,22 @@ func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
                            c.setBytes(&n32, length: 4, index: 3); c.setBytes(&e, length: 4, index: 4) }
     return out
 }
+// THE DENSE TYPE DISPATCH. The reap25 file carried MXFP8 (41) on every dense projection; the mainline
+// Mac quant carries Q8_0 (8) on attn_q_a/q_b/kv/output_a/output_b and on output.weight. Reading one
+// through the other's decoder does not fail loudly — it yields NaN, and the first mainline run said
+// exactly that: "native self-witness failed: finite 0/16384". So the type is asked, never assumed.
 func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
     let out = sentinelled(rows); var r = UInt32(rows), c32 = UInt32(cols), nel = UInt32(rows*cols)
+    if t.type == 8 {
+        enc(pQ80, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+                                       c.setBuffer(out, offset: 0, index: 2)
+                                       c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
+        return out
+    }
+    if t.type != 41 {
+        print("FAIL a dense tensor carries type \(t.type); this stack decodes 41 (MXFP8) and 8 (Q8_0)")
+        exit(1)
+    }
     enc(pMx8, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                    c.setBuffer(out, offset: 0, index: 2)
                                    c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4); c.setBytes(&nel, length: 4, index: 5) }
@@ -576,6 +596,13 @@ var kvArenas: [MTLBuffer] = []
 func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows)
     var r = UInt32(t.rows), c32 = UInt32(t.cols), nel = UInt32(t.nel), rk = UInt32(oRank)
+    if t.type == 8 {
+        enc(pQ80g, t.rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+                                          c.setBuffer(out, offset: 0, index: 2)
+                                          c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4)
+                                          c.setBytes(&nel, length: 4, index: 5); c.setBytes(&rk, length: 4, index: 6) }
+        return out
+    }
     enc(pGrouped, t.rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                          c.setBuffer(out, offset: 0, index: 2)
                                          c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4)
@@ -603,8 +630,12 @@ func gpuExpert(_ t: Tn, _ x: MTLBuffer, _ expert: Int) -> MTLBuffer {
         enc(pIq2, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner + expert*stride, index: 0)
                                        c.setBuffer(x, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
                                        c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
+    } else if t.type == 10 {
+        enc(pQ2k, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner + expert*stride, index: 0)
+                                       c.setBuffer(x, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
+                                       c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
     } else {
-        print("FAIL an expert tensor carries type \(t.type); this stack decodes 40 (MXFP4) and 16 (IQ2_XXS)")
+        print("FAIL an expert tensor carries type \(t.type); this stack decodes 40 (MXFP4), 16 (IQ2_XXS) and 10 (Q2_K)")
         exit(1)
     }
     return out
@@ -1017,7 +1048,7 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "
 
 "$work/runner" "$work/params.txt" "$BLOB" \
     "$LIB_EMB" "$LIB_MLA" "$LIB8" "$LIB_CORE" "$LIB_HC" \
-    "$LIB_MX4" "$LIB_IQ2" "$LIB_FFN" "$LIB_KV" "$CONTROL_ADAPTER" | tee "$work/native.out"
+    "$LIB_MX4" "$LIB_IQ2" "$LIB_Q2K" "$LIB_Q80" "$LIB_Q8G" "$LIB_FFN" "$LIB_KV" "$CONTROL_ADAPTER" | tee "$work/native.out"
 rc=${PIPESTATUS[0]}
 if [[ $rc -eq 0 && "$KV_SEQUENCE" == 1 ]]; then
     FKWU="$ROOT/../fkwu"
