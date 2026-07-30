@@ -447,8 +447,15 @@ check(pruneOK,
   "the pruning is in the BIAS: at every top-k layer, exp_probs_b.bias carries a -1e30 sentinel on exactly the indices at or beyond that layer's own ffn_gate_exps dim[2], and a finite value below it. That, and nothing in the metadata, is what keeps a 256-wide router from selecting an expert a 192-deep stack does not have",
   "the bias sentinel does not match the stack depth: \(pruneWhy)")
 
+// THE SENTINEL IS EVIDENCE, AND EVIDENCE HAS A PRICE. Every intermediate is born all-NaN so an unrun
+// kernel reads as a refusal instead of a plausible zero (zerobirth/edgedrop) — and that CPU fill runs
+// on every buffer of every dispatch of every layer of every token. With FORM_DS4_GATES=0 nothing reads
+// a sentinel, so filling one is work done for a witness nobody called. The buffer is still fresh; only
+// the fill is skipped, and the moment gates come back so does the sentinel.
+let sentinelFill = ProcessInfo.processInfo.environment["FORM_DS4_GATES"] != "0"
 func sentinelled(_ n: Int) -> MTLBuffer {
     let b = dev.makeBuffer(length: max(n,1)*4, options: .storageModeShared)!
+    if !sentinelFill { return b }
     let p = b.contents().bindMemory(to: Float.self, capacity: max(n,1))
     for i in 0..<max(n,1) { p[i] = Float.nan }
     return b
@@ -459,21 +466,53 @@ func sentinelledU(_ n: Int) -> MTLBuffer {
     for i in 0..<max(n,1) { p[i] = 0xFFFFFFFF }
     return b
 }
+// GPU-BUSY VERSUS WALL, because "we are slower" has two completely different cures. If the GPU is busy
+// the whole time, the kernels are the problem and the thread maps need work. If it is idle most of the
+// wall clock, the harness is stalling it and no kernel change will help. Metal hands us both clocks;
+// asking is cheaper than inferring.
+var gpuBusyS: Double = 0
 func run(_ cb: MTLCommandBuffer) {
     cb.commit(); cb.waitUntilCompleted()
     if let er = cb.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(er)" } }
     if cb.status != .completed { gpuErrors += 1 }
+    gpuBusyS += cb.gpuEndTime - cb.gpuStartTime
 }
 func pipe(_ l: MTLLibrary, _ n: String) -> MTLComputePipelineState {
     guard let f = l.makeFunction(name: n) else { print("FAIL kernel \(n) is not in its library"); exit(1) }
     return try! dev.makeComputePipelineState(function: f)
 }
+// ── ONE COMMAND BUFFER PER SYNC POINT, not one per dispatch ────────────────────────────────────────
+// This harness was built dispatch-by-dispatch because every kernel had to be witnessed the moment it
+// ran. That shape survived into generation, where a layer issues ~60 dispatches and each one was its
+// own command buffer with commit()+waitUntilCompleted() — a full CPU/GPU round trip. At 43 layers that
+// is ~2600 blocking round trips PER TOKEN, and it, not the arithmetic, was 47x of ds4's speed.
+//
+// Dispatches now accumulate into one pending buffer and are submitted at the next point the CPU
+// actually needs a value. Correctness is preserved by making every reader flush first, so no read can
+// see memory the GPU has not yet written — the sync points move, they do not disappear.
+// gpuBatches counts them, so the harness can say how many round trips a token really costs.
+// ONE ENCODER TOO, not one per dispatch. makeComputeCommandEncoder() returns a SERIAL encoder: its
+// dispatches run in order with implicit barriers between them, which is exactly the dependency chain a
+// layer is. So a whole layer's dispatches belong in one encoder, and building 97 043 of them per run
+// was paying an encoder's setup cost for every kernel to buy a guarantee we already had.
+var pendingCB: MTLCommandBuffer? = nil
+var pendingEnc: MTLComputeCommandEncoder? = nil
+var gpuBatches = 0, gpuDispatches = 0
+func flush() {
+    pendingEnc?.endEncoding(); pendingEnc = nil
+    guard let cb = pendingCB else { return }
+    pendingCB = nil
+    gpuBatches += 1
+    run(cb)
+}
 func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, _ body: (MTLComputeCommandEncoder) -> Void) {
-    let cb = queue.makeCommandBuffer()!, e = cb.makeComputeCommandEncoder()!
+    if pendingCB == nil { pendingCB = queue.makeCommandBuffer()! }
+    if pendingEnc == nil { pendingEnc = pendingCB!.makeComputeCommandEncoder()! }
+    let e = pendingEnc!
     e.setComputePipelineState(p); body(e)
     e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
                       threadsPerThreadgroup: MTLSize(width: min(p.maxTotalThreadsPerThreadgroup, cap), height: 1, depth: 1))
-    e.endEncoding(); run(cb)
+    gpuDispatches += 1
 }
 
 let pEmb = pipe(lEmb, "form_dsv4_embed_f16")
@@ -511,6 +550,11 @@ let pControlAdapter = pipe(lKv, "form_dsv4_control_logit_adapter")
 // ds4-order-match.fk). Slower by construction — one thread per row instead of 32 — and the only
 // route to a matching greedy stream, because the ties that decide tokens are 0.02 logits wide.
 let matchOrder = ProcessInfo.processInfo.environment["FORM_DS4_MATCH_ORDER"] == "1"
+// FORM_DS4_GATES=0 runs the model without the proving apparatus: no two-position hushfold sweep, no
+// per-layer self-witness, no one-shot carve falsifier. The evidence does not vanish — it is asked
+// once, in the run that is meant to ask it, instead of on every token. Default stays ON so the
+// harness keeps proving itself when nobody has said otherwise.
+let gatesOn = ProcessInfo.processInfo.environment["FORM_DS4_GATES"] != "0"
 let pQ8aQuant = pipe(lKv, "form_dsv4_q8a_quantize_f32")
 let pQ80Ord = pipe(lKv, "form_dsv4_q80_matvec_ordered")
 let pF16Ord = pipe(lKv, "form_dsv4_f16_matvec_ordered")
@@ -888,8 +932,13 @@ func stage(_ name: String, _ b: MTLBuffer, _ n: Int) {
 // proven recipe) and folds it with the body's plain f32 matvec. Same bytes, same input vector, two
 // independent paths. They cannot agree bit for bit — the folds associate differently — but a
 // disagreement past a few f32 ulps means the FOLD or the MAP is wrong, not the decode.
+// ONE-SHOT. A falsifier answers a question; asking it again every time layer 0 runs answers nothing
+// new and dequants 8.4M weights to do it. It fired 31 times in a 29-step run and was the single
+// largest cost in the harness — evidence-gathering charged to every token the model produced.
+var q2kCarveProved = false
 func q2kFusedVsCarved(_ t: Tn, _ x: MTLBuffer, _ expert: Int) {
-    guard t.type == 10 else { return }
+    guard t.type == 10, !q2kCarveProved, gatesOn else { return }
+    q2kCarveProved = true
     let rows = t.d1, cols = t.d0, stride = t.bytes / t.d2
     // THE SLICE ITSELF, before anything read through it. A Q2_K expert is rows*cols/256 blocks of 84
     // bytes; if the per-expert stride is not exactly that, both the fused kernel and its carver read
@@ -1006,6 +1055,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
                                  c.setBytes(&ne, length: 4, index: 5); c.setBytes(&nu, length: 4, index: 6)
                                  c.setBytes(&ws, length: 4, index: 7) }
     }
+    flush()   // the router's choice is read on the CPU to pick expert slices — a real sync point
     let idp = idsBuf.contents().bindMemory(to: UInt32.self, capacity: nUsed)
     let wtp = wtsBuf.contents().bindMemory(to: Float.self, capacity: nUsed)
     var ids: [Int] = [], wts: [Float] = []
@@ -1059,7 +1109,9 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
                     ids: ids, wts: wts, gate0: g0, up0: u0, mid0: m0, down0: d0,
                     moe: moe, shared: shared, ffnOut: ffnOut, outHc: outHc)
 }
-func fp(_ b: MTLBuffer, _ n: Int) -> UnsafeMutablePointer<Float> { return b.contents().bindMemory(to: Float.self, capacity: n) }
+// EVERY CPU READ FLUSHES. This is the one invariant that makes batching safe: a reader can never see
+// memory the GPU has not written, because asking to read IS the sync point.
+func fp(_ b: MTLBuffer, _ n: Int) -> UnsafeMutablePointer<Float> { flush(); return b.contents().bindMemory(to: Float.self, capacity: n) }
 
 // ---- a token's embedding, broadcast to the four streams: THE stack's input (ds4.c:9764) ----
 // Token identity is an argument, not process-global state: autoregressive feedback must change both
@@ -1103,6 +1155,7 @@ func floatBuffer(_ a: [Float]) -> MTLBuffer {
 }
 func copyFloatBuffer(_ source: MTLBuffer, _ n: Int) -> MTLBuffer {
     let b = dev.makeBuffer(length: n * 4, options: .storageModeShared)!
+    flush()
     memcpy(b.contents(), source.contents(), n * 4)
     return b
 }
@@ -1325,8 +1378,11 @@ func runStack(_ pos: Int) {
     }
 }
 
-let tA = Date(); runStack(posA); let wallA = Date().timeIntervalSince(tA)
-let tB = Date(); runStack(posB); let wallB = Date().timeIntervalSince(tB)
+// The two-position hushfold sweep is EVIDENCE, not generation: it runs the whole 43-layer stack twice
+// on a single token to prove position enters the answer. With FORM_DS4_GATES=0 it is skipped, and the
+// run costs what generating costs.
+let tA = Date(); if gatesOn { runStack(posA) }; let wallA = Date().timeIntervalSince(tA)
+let tB = Date(); if gatesOn { runStack(posB) }; let wallB = Date().timeIntervalSince(tB)
 
 // ── two consecutive real-stack positions over persistent per-layer KV arenas ─────────────────────
 if kvSequence {
@@ -1339,6 +1395,15 @@ if kvSequence {
     var firstFinal: [Float] = [], lastFinal: [Float] = [], firstRow: [UInt32] = []
     var currentToken = token
     var emitted: [Int] = []
+    // THE ONLY HONEST SPEED NUMBER is the one that covers exactly what ds4's "generation: N t/s"
+    // covers: steps past the prompt, model already resident. Prefill is timed apart, as ds4 does.
+    var tPrefillEnd = Date()
+    let tGenStart = Date()
+    // the busy clock must span the SAME window as the wall clock, or the fraction is nonsense — it
+    // read 124% the first time, because gpuBusyS still carried the two-position hushfold sweeps that
+    // ran before this loop began. A ratio of two clocks that do not cover the same interval is not a
+    // ratio of anything.
+    let gpuBusyAtGenStart = gpuBusyS
     // PREFILL then GENERATE. While pos is inside the prompt the input is the prompt's token and
     // the emitted id is discarded — the model is READING. Past the prompt it eats its own output.
     // The boundary is the whole difference between a continuation of one token and an answer.
@@ -1359,6 +1424,7 @@ if kvSequence {
         }
         dumpArmed = (pos == promptIds.count - 1)
         let exit = nativeExitHead(resid, "feedback step \(pos), input_token=\(inputToken)")
+        if pos == promptIds.count - 1 { tPrefillEnd = Date() }
         if pos >= promptIds.count - 1 { emitted.append(exit.token) }
         currentToken = exit.token
         let rp = fp(resid, hcDim)
@@ -1370,6 +1436,22 @@ if kvSequence {
         }
         lastFinal = vals
     }
+    let nPrefill = max(1, promptIds.count), nGen = max(1, kvSteps - promptIds.count)
+    let prefillS = tPrefillEnd.timeIntervalSince(tGenStart)
+    let genS = Date().timeIntervalSince(tPrefillEnd)
+    let busyAtEnd = gpuBusyS - gpuBusyAtGenStart
+    // TWO NUMBERS, BECAUSE THEY HAVE DIFFERENT CURES AND ONLY ONE IS THE CEILING.
+    //   the FRACTION says how much of the wall clock the device was working — the harness's share.
+    //   GPU SECONDS PER TOKEN is the floor: the time a token would still cost at 100% occupancy.
+    // Comparing the floor to the reference's whole per-token time says whether the kernels or the
+    // scaffolding are the thing to fix. Quoting only the fraction would have blamed the harness.
+    print(String(format: "      GPU BUSY: %.2fs of %.2fs wall (%.0f%%); floor = %.0f ms of GPU per token at 100%% occupancy, over %d dispatches per token",
+                 busyAtEnd, prefillS + genS, 100.0 * busyAtEnd / max(prefillS + genS, 1e-9),
+                 1000.0 * busyAtEnd / Double(max(kvSteps, 1)), gpuDispatches / max(kvSteps, 1)))
+    print(String(format: "      SPEED: prefill %.2f t/s (%d tokens in %.2fs), generation %.2f t/s (%d tokens in %.2fs)%@ — ds4 prints the same two numbers",
+                 Double(nPrefill)/max(prefillS, 1e-9), nPrefill, prefillS,
+                 Double(nGen)/max(genS, 1e-9), nGen, genS,
+                 matchOrder ? "  [MATCH_ORDER]" : ""))
     let kp = fp(kvArenas[0], kvCap * headDim)
     var historyExact = 0, written = 0, frontier = 0, stateDiff = 0
     for j in 0..<headDim {
@@ -1422,9 +1504,9 @@ if let a = finalByPos[posA], let b = finalByPos[posB] {
     let ap = fp(a, hcDim), bp = fp(b, hcDim)
     for i in 0..<hcDim { if ap[i] != bp[i] { posDiff += 1; maxDelta = max(maxDelta, abs(ap[i]-bp[i])) } }
 }
-check(posDiff > 0 && layerFail == 0,
+if gatesOn { check(posDiff > 0 && layerFail == 0,
   "hushfold at stack scale: the same token's output after all \(nLayers) layers differs between pos \(posA) and pos \(posB) in \(posDiff)/\(hcDim) entries (max delta \(maxDelta)) while every layer passes its native self-witness",
-  "hushfold: \(posDiff) differing entries, \(layerFail) failed layer gates")
+  "hushfold: \(posDiff) differing entries, \(layerFail) failed layer gates") }
 
 // ── the native exit head: HC collapse → final norm → real vocabulary projection → argmax ─────────
 // This stays in the same Metal lifetime as the 43-layer state. No JSON membrane, Ollama, llama.cpp,
@@ -1451,6 +1533,10 @@ for (il, ms) in slow.prefix(3) {
 print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — the model is mmapped and wrapped, not copied (onelean); it does NOT grow with layer count",
              dev.currentAllocatedSize, Double(dev.currentAllocatedSize)/1073741824.0))
 
+flush()   // nothing may be left unsubmitted when the verdict is read: an uncommitted buffer is an
+          // unchecked cb.error, and a green verdict standing on work that never ran is the exact
+          // failure this harness sentinels everything else against.
+print("      dispatches \(gpuDispatches) in \(gpuBatches) command buffers (\(gpuBatches == 0 ? 0 : gpuDispatches/gpuBatches) per submit) — one buffer per dispatch was 47x of ds4")
 let ok = failures == 0 && gpuErrors == 0
 if ok {
     print("VERDICT PASS  \(gateNo) gates — \(nLayers) HETEROGENEOUS DeepSeek-V4-Flash LAYERS STACKED at real dims over the 85 GiB file, the four hyper-connection streams carried from each layer into the next, every per-layer decision (expert count, gate/up and down type, routing regime, rope regime) read from the file's own tensor table, at TWO positions, with native self-witnesses and every dispatch sentinelled")
