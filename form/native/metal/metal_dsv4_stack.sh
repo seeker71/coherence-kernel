@@ -465,19 +465,62 @@ check(pruneOK,
 // the thing being measured, and this number is a finding to act on once, not a meter to leave running.
 let hostShareOn = ProcessInfo.processInfo.environment["FORM_DS4_HOSTSHARE"] == "1"
 var cpuAllocS: Double = 0, cpuFillS: Double = 0, cpuAllocN = 0
-func sentinelled(_ n: Int) -> MTLBuffer {
-    if !hostShareOn {
-        let b = dev.makeBuffer(length: max(n,1)*4, options: .storageModeShared)!
-        var pat = Float.nan.bitPattern
-        memset_pattern4(b.contents(), &pat, max(n,1)*4)
-        return b
+// ── THE PER-PASS POOL. makeBuffer was 5.0 of the 12 host milliseconds a token, over ~1650 allocations
+// that ask for the SAME sizes in the SAME order every pass, because a pass is the same 43 layers every
+// time. So the allocation is a per-run cost wearing a per-token costume: hand out the pass's i-th
+// buffer from a list instead of asking the driver for a new page mapping, and the second pass onward
+// pays nothing.
+//
+// WHAT MAKES IT SAFE, said rather than assumed. Two buffers alias only if the same pool slot is live
+// twice. Inside a pass the index only increases, so no slot is handed out twice. Across passes, a
+// slot is reused, so anything that OUTLIVES its pass must not come from the pool — and there are
+// exactly three such producers: gpuKvRound's compressed row (kept in compRows forever), compStep's
+// packed arena (compPacked, read by every later pass), and everything allocated before generation
+// begins (kvArenas, compInit's placeholders, padBuf, the gates' two-position sweep). The first two
+// take `sentinelledKeep`; the third is covered by `poolOn` being false until the generation loop.
+//
+// The SENTINEL IS UNCHANGED. Every handed-out buffer is memset to all-NaN before it is returned,
+// pooled or not, so an unrun kernel still reads as a refusal. Only the page mapping is reused.
+//
+// Slots carry headroom because two sizes GROW with position (the attention score/exp planes are
+// nHead*(pos+1+ncomp) wide). Rounding the allocation up means a growing site reallocates every few
+// hundred steps instead of every step, while the memset still covers exactly the asked-for length.
+var poolOn = false
+var poolBufs: [MTLBuffer] = []
+var poolIdx = 0
+var poolMisses = 0
+func poolReset() { poolIdx = 0 }
+// one slot counter for every transient buffer a pass takes, sentinelled or raw, so a slot can never
+// be handed out twice inside a pass.
+func poolTake(_ bytes: Int) -> MTLBuffer {
+    guard poolOn else { return dev.makeBuffer(length: bytes, options: .storageModeShared)! }
+    if poolIdx < poolBufs.count && poolBufs[poolIdx].length >= bytes {
+        let b = poolBufs[poolIdx]; poolIdx += 1; return b
     }
-    let t0 = Date()
+    poolMisses += 1
+    let alloc = ((bytes + bytes/4) + 16383) & ~16383
+    let b = dev.makeBuffer(length: alloc, options: .storageModeShared)!
+    if poolIdx < poolBufs.count { poolBufs[poolIdx] = b } else { poolBufs.append(b) }
+    poolIdx += 1
+    return b
+}
+func sentinelled(_ n: Int) -> MTLBuffer {
+    let bytes = max(n,1)*4
+    let t0 = hostShareOn ? Date() : nil
+    let b = poolTake(bytes)
+    let t1 = hostShareOn ? Date() : nil
+    var pat = Float.nan.bitPattern
+    memset_pattern4(b.contents(), &pat, bytes)
+    if let t0 = t0, let t1 = t1 {
+        cpuAllocS += t1.timeIntervalSince(t0); cpuFillS += Date().timeIntervalSince(t1); cpuAllocN += 1
+    }
+    return b
+}
+// the same birth, never from the pool: for the two producers whose output is read by a LATER pass.
+func sentinelledKeep(_ n: Int) -> MTLBuffer {
     let b = dev.makeBuffer(length: max(n,1)*4, options: .storageModeShared)!
-    let t1 = Date()
     var pat = Float.nan.bitPattern
     memset_pattern4(b.contents(), &pat, max(n,1)*4)
-    cpuAllocS += t1.timeIntervalSince(t0); cpuFillS += Date().timeIntervalSince(t1); cpuAllocN += 1
     return b
 }
 func sentinelledU(_ n: Int) -> MTLBuffer {
@@ -491,11 +534,34 @@ func sentinelledU(_ n: Int) -> MTLBuffer {
 // wall clock, the harness is stalling it and no kernel change will help. Metal hands us both clocks;
 // asking is cheaper than inferring.
 var gpuBusyS: Double = 0
-func run(_ cb: MTLCommandBuffer) {
-    cb.commit(); cb.waitUntilCompleted()
+// ── COMMIT IS NOT WAIT, and treating them as one word is what kept the device idle ─────────────────
+// The pass encoded ~2287 dispatches and then committed once and waited: twelve milliseconds of host
+// work with the GPU doing nothing, then forty-eight of GPU with the host doing nothing. They are
+// independent engines and the only thing that forced them to take turns was `waitUntilCompleted`
+// sitting inside the same word as `commit`.
+//
+// Split: `submit` hands the encoded work to the queue and returns; `drain` is the only place that
+// waits. Metal runs command buffers on one queue IN SUBMISSION ORDER, so nothing about the ordering
+// of the arithmetic changes — a later buffer cannot start before an earlier one finishes. What
+// changes is that the host can be encoding layer n+1 while the device runs layer n.
+//
+// Every reader still drains: `fp` (the only door to a buffer's contents) drains before it hands back
+// a pointer, so no gate and no readback can see an unfinished write. The per-token feedback loop
+// drains at its end by construction — it reads the residual.
+var inFlight: [MTLCommandBuffer] = []
+func harvest(_ cb: MTLCommandBuffer) {
     if let er = cb.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(er)" } }
     if cb.status != .completed { gpuErrors += 1 }
     gpuBusyS += cb.gpuEndTime - cb.gpuStartTime
+}
+func run(_ cb: MTLCommandBuffer) {
+    cb.commit()
+    inFlight.append(cb)
+}
+func drain() {
+    if inFlight.isEmpty { return }
+    for cb in inFlight { cb.waitUntilCompleted(); harvest(cb) }
+    inFlight.removeAll(keepingCapacity: true)
 }
 // FORM_DS4_PROFILE=1 attributes GPU time to KERNELS instead of to the run as a whole. It submits each
 // dispatch on its own so the device clock can be read per kernel, which inflates the total — the
@@ -531,13 +597,22 @@ var gpuBatches = 0, gpuDispatches = 0
 // that must read N bytes of weight cannot beat N/peak seconds however the arithmetic is arranged.
 // Counted per weight class so the ratio to the measured floor says how much of peak we are reaching.
 var wbQ80 = 0, wbF16 = 0, wbExp = 0, wbOther = 0
-func flush() {
+// submit: the encoded work goes to the queue and the host keeps encoding. No value is readable yet.
+func submit() {
     pendingEnc?.endEncoding(); pendingEnc = nil
     guard let cb = pendingCB else { return }
     pendingCB = nil
     gpuBatches += 1
     run(cb)
 }
+// flush: submit AND wait. Every reader calls this; it is the only place the host blocks.
+func flush() {
+    submit()
+    drain()
+}
+// FORM_DS4_SUBMIT_EVERY=N hands the queue a buffer every N layers instead of once at the end of the
+// pass, so the device starts layer 0 while the host is still encoding layer N. 0 keeps the old shape.
+let submitEvery = Int(ProcessInfo.processInfo.environment["FORM_DS4_SUBMIT_EVERY"] ?? "8") ?? 8
 // FORM_DS4_DOUBLE=<kernel name> SIZES a kernel without breaking anything. The profiler charges every
 // dispatch a submit and cannot see the overlap the batched path gets, so its ranking overstates
 // high-call-count kernels. Ablation by halving a loop is trustworthy but breaks the answer while it
@@ -774,8 +849,11 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
             // (:7051), each 32-block is an exact int32 dot, and only the scale product re-enters f32.
             // Reproducing that means reproducing its loss in x, not just its association.
             let blocks = (cols + 31) / 32
-            let xq = dev.makeBuffer(length: blocks*32, options: .storageModeShared)!
-            let xs = dev.makeBuffer(length: blocks*4, options: .storageModeShared)!
+            // the quantised activation is written by the kernel below before anything reads it, so it
+            // needs a slot and not a sentinel — but it takes the slot from the same counter, or two
+            // live buffers could share one.
+            let xq = poolTake(blocks*32)
+            let xs = poolTake(blocks*4)
             var n32 = UInt32(cols)
             enc(pQ8aQuant, blocks, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
                                               c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
@@ -875,8 +953,11 @@ func gpuRope(_ v: MTLBuffer, _ nh: Int, _ pos: Int, _ il: Int, _ inverse: Bool) 
                               c.setBytes(&p, length: 4, index: 6); c.setBytes(&s, length: 4, index: 7) }
     return out
 }
-func gpuKvRound(_ v: MTLBuffer) -> MTLBuffer {
-    let out = sentinelled(headDim); var a = UInt32(headDim), b = UInt32(nRot)
+// `keep` is the compressor's call: its row is appended to compRows and read by every later pass, so
+// it cannot come from a slot the next pass will hand out again.
+func gpuKvRound(_ v: MTLBuffer, keep: Bool = false) -> MTLBuffer {
+    let out = keep ? sentinelledKeep(headDim) : sentinelled(headDim)
+    var a = UInt32(headDim), b = UInt32(nRot)
     enc(pKvq, headDim, headDim) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                            c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) }
     return out
@@ -999,10 +1080,10 @@ func compStep(_ w: LayerW, _ il: Int, _ xn: MTLBuffer, _ pos: Int) {
     }
     let normed = gpuRmsnorm(pooled, headDim, cnm)
     let roped = gpuRope(normed, 1, pos + 1 - w.ratio, il, false)
-    compRows[il].append(gpuKvRound(roped))
+    compRows[il].append(gpuKvRound(roped, keep: true))
     // pack the layer's rows into one contiguous arena for the mixed attention to read
     let n = compRows[il].count
-    let packed = sentinelled(n * headDim)
+    let packed = sentinelledKeep(n * headDim)
     for (i, r) in compRows[il].enumerated() { gpuKvAppend(r, packed, i, n) }
     compPacked[il] = packed
     if n > indexerTopK { compRefusals += 1 }
@@ -1713,6 +1794,9 @@ if kvSequence {
     // the emitted id is discarded — the model is READING. Past the prompt it eats its own output.
     // The boundary is the whole difference between a continuation of one token and an answer.
     for pos in 0..<kvSteps {
+        // the pass's slot counter goes back to zero here, and only here. Everything born before this
+        // line — the arenas, the compressor's planes, the gates' sweep — was born outside the pool.
+        poolOn = true; poolReset()
         let inputToken = pos < promptIds.count ? promptIds[pos] : currentToken
         var resid = embedToken(inputToken)
         // FORM_DS4_TRACE_HC=1 prints the hyper-connection stream's RMS after every layer. ds4 reports
@@ -1723,6 +1807,7 @@ if kvSequence {
         if traceHc { print(String(format: "      HC rms after embed: %.4g", stageStats(resid, hcDim).2)) }
         for il in 0..<nLayers {
             resid = runLayer(il, pos, inputToken, resid).outHc
+            if submitEvery > 0 && (il + 1) % submitEvery == 0 { submit() }
             if traceHc && (il < 4 || il % 6 == 0 || il == nLayers - 1) {
                 print(String(format: "      HC rms after blk.%d: %.4g", il, stageStats(resid, hcDim).2))
             }
@@ -1746,6 +1831,7 @@ if kvSequence {
         }
         lastFinal = vals
     }
+    poolOn = false
     let nPrefill = max(1, promptIds.count), nGen = max(1, kvSteps - promptIds.count)
     let prefillS = tPrefillEnd.timeIntervalSince(tGenStart)
     let genS = Date().timeIntervalSince(tPrefillEnd)
@@ -1770,7 +1856,8 @@ if kvSequence {
     print(String(format: "      HOST SHARE: %d sentinelled buffers over the whole run — makeBuffer %.2fs, NaN fill %.2fs; over generation that is %.1f ms and %.1f ms a token",
                  cpuAllocN, cpuAllocS, cpuFillS,
                  1000.0 * cpuAllocS * Double(nGen) / Double(max(kvSteps,1)) / Double(max(nGen,1)),
-                 1000.0 * cpuFillS * Double(nGen) / Double(max(kvSteps,1)) / Double(max(nGen,1)))) }
+                 1000.0 * cpuFillS * Double(nGen) / Double(max(kvSteps,1)) / Double(max(nGen,1))))
+    print("      POOL: \(poolBufs.count) slots, \(poolMisses) real allocations over the whole run — a slot that misses is one whose width GREW with position") }
     let g = Double(max(nGen, 1))
     let dQ80 = Double(wbQ80 - wb0Q80)/g, dF16 = Double(wbF16 - wb0F16)/g
     let dExp = Double(wbExp - wb0Exp)/g, dOth = Double(wbOther - wb0Oth)/g
