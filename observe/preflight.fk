@@ -1,0 +1,216 @@
+; preflight.fk — see the symbol and lane problems BEFORE the deep analysis.
+;
+; THE QUESTION THIS ANSWERS, and the honest first half of the answer:
+; "how come those errors are not detected when compiling?" They ARE. Witnessed
+; 2026-07-31 on a fresh cell calling a name that does not exist:
+;
+;   fkwu:102:25: error: [unresolved-call] 'nosuchname' matched no
+;     op/rewrite/fn/binding -- typo or missing prelude? Recovered to nothing
+;     (axiom-5); parse continues
+;   fkwu: 1 error(s), 0 warning(s)          <- and exit 1
+;
+; File, line, column, name, cause, and a nonzero exit. Detection is not the gap.
+; Three things bury it:
+;
+;   1. THE VERDICT PRINTS ANYWAY. axiom-5 recovers the call to `nothing`, the
+;      fold computes over it, and a green number lands on stdout one line below
+;      the error on stderr. People read the number.
+;   2. THE WARM CACHE ERASES THE DETAIL. On the second run the reader gets only
+;      "cached image was compiled with errors; fix source and rerun to clear" —
+;      no name, no line. That is exactly why nl-extract-band looked like an
+;      error with no error: I had a warm cache and reported the tally.
+;   3. ONLY ONE ARM LOOKS. Probed on the same cell: Go, Rust and TypeScript all
+;      exit 0 and print the answer, because they bind names when execution
+;      REACHES them. A bad symbol in an unreached branch is invisible on three
+;      of four kernels. fkwu resolves every call site in the chain, which is why
+;      it is the arm that finds these — and why its findings arrive as a wall of
+;      chain-wide diagnostics rather than as one cell's problem.
+;
+; So this cell does not add detection. It adds ATTENTION: a fresh compile whose
+; detail cannot be replaced by a tally, and one more thing the compiler cannot
+; know on its own —
+;
+; IS THIS A TYPO OR A LANE SEAM?
+;   An unresolved name means two completely different things and the diagnostic
+;   cannot tell them apart: either nobody defines it (a typo, fix the cell), or
+;   another kernel defines it and this one does not (an arm seam, fix the
+;   preludes or declare the lane). Every numb-green this week was the second
+;   kind read as neither. So preflight PROBES: it asks each kernel whether it
+;   resolves the name, and reports the answer as data.
+;
+; THE PROBE, NOT THE TABLE — and why, with evidence.
+;   The body already holds two op tables: native-op-manifest.fk (fkwu's surface)
+;   and primitive-registry.fk (the siblings'). Both are hand-maintained, and the
+;   per-arm facts that matter most live in PROSE. Measured 2026-07-31, the prose
+;   is wrong: observe/review-ask.fk states "host-exec is fkwu-only: Go, Rust and
+;   TypeScript have no such native", and its band declares FOURTH-ARM ONLY on
+;   that basis. Probed:
+;
+;       op            go    rust  ts    fkwu
+;       host-exec     YES   no    no    YES
+;       nothing       no    no    no    YES
+;       walk_recipe   YES   YES   YES   no
+;
+;   Go has host-exec and returns the same five bytes fkwu does. The sentence was
+;   mine, from four days ago, written from inference and installed as a declared
+;   proof lane — corpus row 914, teleological. A table that is asserted rather
+;   than probed will do this again; a probe cannot.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY — this cell shells out to compare kernels.
+;
+; USE
+;   (pf-report "path/to/cell.fk")   ; the page: balance, diagnostics, lanes
+;   (pf-arm-mask "walk_recipe")     ; 4-bit: go 1, rust 2, ts 4, fkwu 8
+;   (pf-fresh "path")               ; a compile whose detail no cache can hide
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn pf-cat2 (a b) (str_concat a b))
+    (defn pf-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (pf-cat (tail xs)))))
+    (defn pf-nl () "\n")
+
+    ;; ── the arms, as data ───────────────────────────────────────────
+    ;; (name bit command-shape) — %f is the probe file. The three siblings take
+    ;; a bare file; fkwu takes --src and resolves the `; preludes:` line itself.
+    (defn pf-arm (name bit cmd) (list name bit cmd))
+    (defn pf-arm-name (a) (nth a 0))
+    (defn pf-arm-bit  (a) (nth a 1))
+    (defn pf-arm-cmd  (a) (nth a 2))
+    (defn pf-arms ()
+        (list
+            (pf-arm "go"   1 "cd form && ./form-kernel-go/bin-go form-stdlib/core.fk %f")
+            (pf-arm "rust" 2 "cd form && ./form-kernel-rust/target/release/form-kernel-rust form-stdlib/core.fk %f")
+            (pf-arm "ts"   4 "cd form && node form-kernel-ts/dist/main.mjs form-stdlib/core.fk %f")
+            (pf-arm "fkwu" 8 "./fkwu --src %f")))
+
+    (defn pf-sub (s mark v)
+        (do (let i (str_find s mark 0))
+            (if (lt i 0) s
+                (str_concat (substring s 0 i)
+                    (str_concat v (substring s (add i (str_len mark)) (str_len s)))))))
+
+    (defn pf-dir () (do (fs_mkdir (str_concat (temp_dir) "/preflight"))
+                        (str_concat (temp_dir) "/preflight")))
+    (defn pf-run (cmd) (host-exec (str_concat cmd " 2>&1") ""))
+
+    ;; ── does an arm resolve this name? ──────────────────────────────
+    ;; The probe calls the name with one argument and asks only whether the
+    ;; kernel could RESOLVE it. A wrong argument count, a type error, even a
+    ;; crash inside the op all count as RESOLVED — the question is whether the
+    ;; name exists on that arm, not whether this call is correct. Only the
+    ;; unresolved/unbound answers count as absent, which is the one thing every
+    ;; kernel says in words.
+    (defn pf-probe-path (arm)
+        (pf-cat (list (pf-dir) "/probe-" arm (if (str_eq arm "fkwu") ".fk" ".fk"))))
+    (defn pf-probe-text (arm name)
+        (if (str_eq arm "fkwu")
+            (pf-cat (list "; preludes: form-stdlib/core.fk\n(do (" name " 1))\n"))
+            (pf-cat (list "(do (" name " 1))\n"))))
+    (defn pf-absent? (out)
+        (if (ge (str_find out "unresolved-call" 0) 0) 1
+            (if (ge (str_find out "unbound" 0) 0) 1
+                (if (ge (str_find out "no such" 0) 0) 1 0))))
+    (defn pf-has? (arm name)
+        (do (let p (pf-probe-path (pf-arm-name arm)))
+            (write_file p (pf-probe-text (pf-arm-name arm) name))
+            (fs_remove (pf-sub p ".fk" ".fkb"))
+            (fs_remove (pf-sub p ".fk" ".sym"))
+            (let out (pf-run (pf-sub (pf-arm-cmd arm) "%f" p)))
+            (if (eq (pf-absent? out) 1) 0 1)))
+
+    (defn pf-mask-loop (as name m)
+        (if (eq (len as) 0) m
+            (pf-mask-loop (tail as) name
+                (add m (if (eq (pf-has? (head as) name) 1) (pf-arm-bit (head as)) 0)))))
+    ;; go 1, rust 2, ts 4, fkwu 8 — 15 is portable, 0 is a typo
+    (defn pf-arm-mask (name) (pf-mask-loop (pf-arms) name 0))
+
+    (defn pf-mask-names-loop (as m acc)
+        (if (eq (len as) 0) acc
+            (pf-mask-names-loop (tail as) m
+                (if (eq (mod (div m (pf-arm-bit (head as))) 2) 1)
+                    (pf-cat (list acc (if (eq (str_len acc) 0) "" " ") (pf-arm-name (head as))))
+                    acc))))
+    (defn pf-mask-names (m) (pf-mask-names-loop (pf-arms) m ""))
+
+    ;; THE ANSWER THE DIAGNOSTIC CANNOT GIVE
+    (defn pf-classify (name)
+        (do (let m (pf-arm-mask name))
+            (if (eq m 0) "TYPO — no kernel resolves this name"
+                (if (eq m 15) "portable — every kernel has it; a missing prelude, not a lane"
+                    (pf-cat (list "LANE SEAM — resolves on: " (pf-mask-names m)
+                                  "  (this chain cannot run on the others)"))))))
+
+    ;; ── a compile whose detail no cache can replace ─────────────────
+    ;; The artifacts are removed first ON PURPOSE. A warm run reports a tally
+    ;; and drops the name and the line, and a tally is not an insight.
+    (defn pf-fresh (path)
+        (do (fs_remove (pf-sub path ".fk" ".fkb"))
+            (fs_remove (pf-sub path ".fk" ".sym"))
+            (pf-run (str_concat "./fkwu --src " path))))
+
+    ;; ── the unresolved names in that output ─────────────────────────
+    (defn pf-mark () "[unresolved-call] '")
+    (defn pf-first-name (out from)
+        (do (let i (str_find out (pf-mark) from))
+            (if (lt i 0) ""
+                (do (let s (add i (str_len (pf-mark))))
+                    (let e (str_find out "'" s))
+                    (if (lt e 0) "" (substring out s e))))))
+    (defn pf-seen? (xs v)
+        (if (eq (len xs) 0) 0 (if (str_eq (head xs) v) 1 (pf-seen? (tail xs) v))))
+    (defn pf-names-loop (out from acc)
+        (do (let i (str_find out (pf-mark) from))
+            (if (lt i 0) acc
+                (do (let n (pf-first-name out from))
+                    (pf-names-loop out (add i (str_len (pf-mark)))
+                        (if (eq (pf-seen? acc n) 1) acc (cons n acc)))))))
+    (defn pf-unresolved (out) (pf-names-loop out 0 (list)))
+
+    ;; ── paren balance, in plain Form ────────────────────────────────
+    ;; Three cells landed unbalanced this week and each was found only when
+    ;; something refused to run. The reader already refuses loudly; this asks
+    ;; the same question without needing a run.
+    (defn pf-bal-loop (s i n depth instr)
+        (if (ge i n) depth
+            (do (let c (substring s i (add i 1)))
+                (if (eq instr 1)
+                    (pf-bal-loop s (add i 1) n depth (if (str_eq c "\"") 0 1))
+                    (if (str_eq c "\"") (pf-bal-loop s (add i 1) n depth 1)
+                    (if (str_eq c ";") (pf-bal-loop s (pf-eol s (add i 1) n) n depth 0)
+                    (if (str_eq c "(") (pf-bal-loop s (add i 1) n (add depth 1) 0)
+                    (if (str_eq c ")") (pf-bal-loop s (add i 1) n (sub depth 1) 0)
+                        (pf-bal-loop s (add i 1) n depth 0)))))))))
+    (defn pf-eol (s i n)
+        (if (ge i n) n (if (str_eq (substring s i (add i 1)) "\n") i (pf-eol s (add i 1) n))))
+    (defn pf-balance (path)
+        (do (let s (read_file path)) (pf-bal-loop s 0 (str_len s) 0 0)))
+
+    ;; ── counts a reader actually wants ──────────────────────────────
+    (defn pf-count-loop (s mark from n)
+        (do (let i (str_find s mark from))
+            (if (lt i 0) n (pf-count-loop s mark (add i (str_len mark)) (add n 1)))))
+    (defn pf-count (s mark) (pf-count-loop s mark 0 0))
+    (defn pf-errors (out) (pf-count out " error: "))
+    (defn pf-warnings (out) (pf-count out " warning: "))
+    (defn pf-clean? (out) (if (eq (pf-errors out) 0) 1 0))
+
+    ;; ── the page ────────────────────────────────────────────────────
+    (defn pf-lines-loop (ns)
+        (if (eq (len ns) 0) ""
+            (pf-cat (list "    " (head ns) "  ->  " (pf-classify (head ns)) (pf-nl)
+                          (pf-lines-loop (tail ns))))))
+    (defn pf-report (path)
+        (do (let b (pf-balance path))
+            (let out (pf-fresh path))
+            (let ns (pf-unresolved out))
+            (pf-cat (list
+                "preflight " path (pf-nl)
+                "  parens        " (if (eq b 0) "balanced" (pf-cat (list "UNBALANCED, depth " (int_to_str b)))) (pf-nl)
+                "  errors        " (int_to_str (pf-errors out)) (pf-nl)
+                "  warnings      " (int_to_str (pf-warnings out)) (pf-nl)
+                "  unresolved    " (int_to_str (len ns)) (pf-nl)
+                (if (eq (len ns) 0) "" (pf-lines-loop ns))))))
+
+    0)
