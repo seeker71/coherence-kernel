@@ -497,7 +497,11 @@ var poolOn = false
 var poolBufs: [MTLBuffer] = []
 var poolIdx = 0
 var poolMisses = 0
-func poolReset() { poolIdx = 0 }
+// THE INT8 ACTIVATION MEMO, cleared with the pool because it is keyed on pool identity. See the use
+// in gpuMx8: two projections that read the SAME activation at the SAME width were each quantising it.
+struct QKey: Hashable { let buf: ObjectIdentifier; let cols: Int }
+var q8aMemo: [QKey: (MTLBuffer, MTLBuffer)] = [:]
+func poolReset() { poolIdx = 0; q8aMemo.removeAll(keepingCapacity: true) }
 // one slot counter for every transient buffer a pass takes, sentinelled or raw, so a slot can never
 // be handed out twice inside a pass.
 func poolTake(_ bytes: Int) -> MTLBuffer {
@@ -598,7 +602,14 @@ func pipe(_ l: MTLLibrary, _ n: String) -> MTLComputePipelineState {
 // dispatches run in order with implicit barriers between them, which is exactly the dependency chain a
 // layer is. So a whole layer's dispatches belong in one encoder, and building 97 043 of them per run
 // was paying an encoder's setup cost for every kernel to buy a guarantee we already had.
-let concurrentMode = ProcessInfo.processInfo.environment["FORM_DS4_CONCURRENT"] ?? "0"
+// THE CONCURRENT ENCODER IS NOW THE DEFAULT, which it could not be while it meant "no barriers". It
+// stopped being a measuring instrument when enc() learned to read a dispatch's buffers and place a
+// barrier only on a real hazard (see the hazard tracker below): the barriers that carry the values are
+// all still there, and the ones that only carried the encoder's ignorance are gone.
+// FORM_DS4_CONCURRENT=0 goes back to the serial encoder, and it is the A/B that proves the stream —
+// same tokens, both ways, or the annotations are wrong. =2 keeps the old ceiling probe: no barriers
+// at all, a race, a garbage answer, and the number nothing correct can beat.
+let concurrentMode = ProcessInfo.processInfo.environment["FORM_DS4_CONCURRENT"] ?? "1"
 let concurrentEnc = concurrentMode != "0"
 // mode 2 encodes NO barriers at all: a race, a garbage answer, and the ceiling probe.
 let concurrentRaw = concurrentMode == "2"
@@ -650,7 +661,39 @@ let skipMatch = ProcessInfo.processInfo.environment["FORM_DS4_SKIP"] ?? ""
 // stands, and barrier-before-every-dispatch on a concurrent encoder IS the serial encoder — same
 // order, same values, same stream — so the default is the old behaviour and each removal is a
 // separate, named claim that has to be measured.
-func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, indep: Bool = false, _ body: (MTLComputeCommandEncoder) -> Void) {
+// ── THE BARRIER IS PAID WHERE THE VALUES NEED IT, NOT BEFORE EVERY DISPATCH ────────────────────────
+// `indep:` is a hand claim, one call site at a time, and it does not scale past the two or three
+// places somebody has argued about. What the stack IS, per layer, is THREE chains that share only
+// attn_norm — the q projections, the kv projections, the compressor — and TWO in the FFN, the routed
+// experts and the shared expert. A barrier between two dispatches that touch no common buffer buys
+// nothing and costs a full device drain.
+//
+// So enc() is TOLD what a dispatch reads and writes, and inserts a barrier only on a real hazard:
+// read-after-write, write-after-write, or write-after-read against anything encoded since the last
+// barrier. Buffers are compared by identity, which is sound here because poolTake never hands one
+// slot out twice inside a pass — two live values are never the same MTLBuffer.
+//
+// THE DEFAULT IS THE SAFE ONE, and that is the whole reason this can be landed incrementally. A call
+// site that declares nothing gets nil, which reads as "assume it touches everything" and forces a
+// barrier before AND after itself. An un-annotated dispatch is therefore exactly as correct as it was
+// under barrier-before-everything, and each annotation is a separate claim that can be measured and
+// reverted on its own. A wrong claim shows up as a broken token stream, which the run already gates.
+//
+// WEIGHT VIEWS ARE NOT DECLARED, on purpose. views[] are the mmap'd file's own bytes and no dispatch
+// in this stack ever writes one, so a weight can never be the write half of a hazard and leaving it
+// out of `reads` cannot hide one. Only buffers something writes are named.
+var hzWritten = Set<ObjectIdentifier>()
+var hzRead = Set<ObjectIdentifier>()
+var hzDirtyAll = true
+var hzBarriers = 0
+var hzBarrierFrom = 0
+func hzBarrier(_ e: MTLComputeCommandEncoder) {
+    e.memoryBarrier(scope: .buffers)
+    hzWritten.removeAll(); hzRead.removeAll(); hzDirtyAll = false; hzBarriers += 1
+}
+func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, indep: Bool = false,
+         reads: [MTLBuffer]? = nil, writes: [MTLBuffer]? = nil,
+         _ body: (MTLComputeCommandEncoder) -> Void) {
     if !skipMatch.isEmpty, let nm = pipeName[ObjectIdentifier(p)] {
         for pat in skipMatch.split(separator: ",") where nm.contains(pat) { _ = pat; return }
     }
@@ -666,9 +709,28 @@ func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, indep: Bool = false
         // question can be settled before anyone pays for placing barriers by hand.
         pendingEnc = concurrentEnc ? pendingCB!.makeComputeCommandEncoder(dispatchType: .concurrent)!
                                    : pendingCB!.makeComputeCommandEncoder()!
+        // A NEW ENCODER IS ITSELF A BARRIER. Encoders on a command buffer run in the order they were
+        // created, so everything encoded before this one has landed before any of it starts; the
+        // hazard field starts clean rather than carrying the last encoder's writes forward.
+        hzWritten.removeAll(); hzRead.removeAll(); hzDirtyAll = false
     }
     let e = pendingEnc!
-    if concurrentEnc && !concurrentRaw && !indep { e.memoryBarrier(scope: .buffers) }
+    if concurrentEnc && !concurrentRaw && !indep {
+        if let rd = reads, let wr = writes {
+            // hzDirtyAll is its own hazard: an un-annotated dispatch is in flight and nobody knows
+            // what it wrote, so the first annotated dispatch after it must still wait.
+            let hazard = hzDirtyAll
+                      || rd.contains { hzWritten.contains(ObjectIdentifier($0)) }
+                      || wr.contains { hzWritten.contains(ObjectIdentifier($0)) || hzRead.contains(ObjectIdentifier($0)) }
+            if hazard { hzBarrier(e) }
+            rd.forEach { hzRead.insert(ObjectIdentifier($0)) }
+            wr.forEach { hzWritten.insert(ObjectIdentifier($0)) }
+        } else {
+            // nothing declared: barrier before, and leave the field dirty so the next one waits too.
+            hzBarrier(e)
+            hzDirtyAll = true
+        }
+    }
     e.setComputePipelineState(p); body(e)
     e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
                       threadsPerThreadgroup: MTLSize(width: min(p.maxTotalThreadsPerThreadgroup, cap), height: 1, depth: 1))
@@ -712,16 +774,16 @@ func gpuAttendSplit(_ q: MTLBuffer, _ rows: MTLBuffer, _ crows: MTLBuffer?, _ sn
     let cb = crows ?? rows
     var a = UInt32(nHead), b = UInt32(headDim), nr = UInt32(nrows), nc = UInt32(ncomp)
     var sc = 1.0/sqrtf(Float(headDim)), nt = UInt32(ntot)
-    enc(pAttScores, nHead*ntot, 256) { c in c.setBuffer(q, offset: 0, index: 0); c.setBuffer(rows, offset: 0, index: 1)
+    enc(pAttScores, nHead*ntot, 256, reads: [q, rows, cb], writes: [sco]) { c in c.setBuffer(q, offset: 0, index: 0); c.setBuffer(rows, offset: 0, index: 1)
                                             c.setBuffer(cb, offset: 0, index: 2); c.setBuffer(sco, offset: 0, index: 3)
                                             c.setBytes(&a, length: 4, index: 4); c.setBytes(&b, length: 4, index: 5)
                                             c.setBytes(&nr, length: 4, index: 6); c.setBytes(&nc, length: 4, index: 7)
                                             c.setBytes(&sc, length: 4, index: 8) }
-    enc(pAttStats, nHead, 64) { c in c.setBuffer(sco, offset: 0, index: 0)
+    enc(pAttStats, nHead, 64, reads: [sco], writes: [ex, inv]) { c in c.setBuffer(sco, offset: 0, index: 0)
                                      c.setBuffer(views[snk.idx], offset: snk.inner, index: 1)
                                      c.setBuffer(ex, offset: 0, index: 2); c.setBuffer(inv, offset: 0, index: 3)
                                      c.setBytes(&a, length: 4, index: 4); c.setBytes(&nt, length: 4, index: 5) }
-    enc(pAttAcc, nHead*headDim, 256) { c in c.setBuffer(rows, offset: 0, index: 0); c.setBuffer(cb, offset: 0, index: 1)
+    enc(pAttAcc, nHead*headDim, 256, reads: [rows, cb, ex, inv], writes: [out]) { c in c.setBuffer(rows, offset: 0, index: 0); c.setBuffer(cb, offset: 0, index: 1)
                                             c.setBuffer(ex, offset: 0, index: 2); c.setBuffer(inv, offset: 0, index: 3)
                                             c.setBuffer(out, offset: 0, index: 4)
                                             c.setBytes(&a, length: 4, index: 5); c.setBytes(&b, length: 4, index: 6)
@@ -897,7 +959,7 @@ func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
     let out = sentinelled(n); var n32 = UInt32(n), e = eps
     // ONE threadgroup striding the row, folding the way metal/norm.metal folds, applying in the same
     // kernel. The reduce/apply pair it replaces is kept in the library as the read-back reference.
-    enc(pRmsWide, 1024, 1024) { c in c.setBuffer(x, offset: 0, index: 0)
+    enc(pRmsWide, 1024, 1024, reads: [x], writes: [out]) { c in c.setBuffer(x, offset: 0, index: 0)
                                      c.setBuffer(views[t.idx], offset: t.inner, index: 1)
                                      c.setBuffer(out, offset: 0, index: 2)
                                      c.setBytes(&n32, length: 4, index: 3); c.setBytes(&e, length: 4, index: 4) }
@@ -964,17 +1026,34 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
             // the quantised activation is written by the kernel below before anything reads it, so it
             // needs a slot and not a sentinel — but it takes the slot from the same counter, or two
             // live buffers could share one.
-            let xq = poolTake(blocks*32)
-            let xs = poolTake(blocks*4)
-            var n32 = UInt32(cols)
-            enc(pQ8aQuant, blocks*q8aThreads, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
-                                              c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
+            // ONE QUANTISATION PER ACTIVATION, not one per projection that reads it. attn_norm is read
+            // by BOTH the q_a and the kv projection, and ffn_norm by both the shared gate and the
+            // shared up — same buffer, same width, so the int8 activation each of them asks for is
+            // the same bytes computed twice. The memo is keyed by buffer identity and width and
+            // cleared with the pool, which is what makes identity sound: poolTake never hands one
+            // slot out twice inside a pass, so a key can never name two different values.
+            // It is worth more than the 86 dispatches it removes — the two projections now READ a
+            // common buffer instead of each writing its own, which is what lets them run at once.
+            let key = QKey(buf: ObjectIdentifier(x), cols: cols)
+            let xq: MTLBuffer, xs: MTLBuffer
+            if let hit = q8aMemo[key] {
+                xq = hit.0; xs = hit.1
+            } else {
+                xq = poolTake(blocks*32)
+                xs = poolTake(blocks*4)
+                var n32 = UInt32(cols)
+                enc(pQ8aQuant, blocks*q8aThreads, 64, reads: [x], writes: [xq, xs]) { c in
+                                                  c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
+                                                  c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
+                q8aMemo[key] = (xq, xs)
+            }
             wbQ80 += rows * blocks * 34
             // Two rows to a thread was written and measured here: it halves the activation loads
             // (xa/xb/xs are the same eight bytes for every row) and is BIT-IDENTICAL, stream exact.
             // It ran 48 -> 51 ms. Halving the thread count costs more than the loads it saves, on the
             // real stack and not only on the microbench this file already recorded it losing on.
-            enc(pQ80Ord, rows*8, q80Tg) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+            enc(pQ80Ord, rows*8, q80Tg, reads: [xq, xs], writes: [out]) { c in
+                                          c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                           c.setBuffer(xq, offset: 0, index: 1); c.setBuffer(xs, offset: 0, index: 2)
                                           c.setBuffer(out, offset: 0, index: 3)
                                           c.setBytes(&r, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5) }
@@ -989,14 +1068,14 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
         print("FAIL a dense tensor carries type \(t.type); this stack decodes 41 (MXFP8) and 8 (Q8_0)")
         exit(1)
     }
-    enc(pMx8, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+    enc(pMx8, rows*32, 256, reads: [x], writes: [out]) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                    c.setBuffer(out, offset: 0, index: 2)
                                    c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4); c.setBytes(&nel, length: 4, index: 5) }
     return out
 }
 func gpuHeadrms(_ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(nHead*headDim); var a = UInt32(nHead), b = UInt32(headDim), e = eps
-    enc(pHeadrmsWide, nHead*256, 256) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+    enc(pHeadrmsWide, nHead*256, 256, reads: [x], writes: [out]) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                                     c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3); c.setBytes(&e, length: 4, index: 4) }
     return out
 }
@@ -1059,7 +1138,7 @@ func ropeFreqs(_ il: Int) -> MTLBuffer {
 func gpuRope(_ v: MTLBuffer, _ nh: Int, _ pos: Int, _ il: Int, _ inverse: Bool) -> MTLBuffer {
     let out = sentinelled(nh*headDim)
     var a = UInt32(nh), b = UInt32(headDim), c32 = UInt32(nRot), p = Float(pos), s: Float = inverse ? -1.0 : 1.0
-    enc(pRope, nh*headDim, 64) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+    enc(pRope, nh*headDim, 64, reads: [v], writes: [out]) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                               c.setBuffer(ropeFreqs(il), offset: 0, index: 2)
                               c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
                               c.setBytes(&p, length: 4, index: 6); c.setBytes(&s, length: 4, index: 7) }
@@ -1070,13 +1149,13 @@ func gpuRope(_ v: MTLBuffer, _ nh: Int, _ pos: Int, _ il: Int, _ inverse: Bool) 
 func gpuKvRound(_ v: MTLBuffer, keep: Bool = false) -> MTLBuffer {
     let out = keep ? sentinelledKeep(headDim) : sentinelled(headDim)
     var a = UInt32(headDim), b = UInt32(nRot)
-    enc(pKvq, headDim, headDim) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+    enc(pKvq, headDim, headDim, reads: [v], writes: [out]) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                            c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) }
     return out
 }
 func gpuKvAppend(_ row: MTLBuffer, _ arena: MTLBuffer, _ pos: Int, _ cap: Int) {
     var h = UInt32(headDim), p = UInt32(pos), c32 = UInt32(cap)
-    enc(pKvAppend, headDim, 256) { c in c.setBuffer(row, offset: 0, index: 0)
+    enc(pKvAppend, headDim, 256, reads: [row], writes: [arena]) { c in c.setBuffer(row, offset: 0, index: 0)
                                         c.setBuffer(arena, offset: 0, index: 1)
                                         c.setBytes(&h, length: 4, index: 2); c.setBytes(&p, length: 4, index: 3)
                                         c.setBytes(&c32, length: 4, index: 4) }
@@ -1171,7 +1250,7 @@ func compStep(_ w: LayerW, _ il: Int, _ xn: MTLBuffer, _ pos: Int) {
     let scCur = gpuF16mv(cgt, xn)
     let row = w.ratio == 4 ? w.ratio + (pos % w.ratio) : (pos % w.ratio)
     var wd = UInt32(width), rw = UInt32(row), pm = UInt32(pos % w.ratio)
-    enc(pCompState, width, 256) { c in c.setBuffer(kvCur, offset: 0, index: 0); c.setBuffer(scCur, offset: 0, index: 1)
+    enc(pCompState, width, 256, reads: [kvCur, scCur], writes: [compState[il], compScore[il]]) { c in c.setBuffer(kvCur, offset: 0, index: 0); c.setBuffer(scCur, offset: 0, index: 1)
                                        c.setBuffer(views[ape.idx], offset: ape.inner, index: 2)
                                        c.setBuffer(compState[il], offset: 0, index: 3)
                                        c.setBuffer(compScore[il], offset: 0, index: 4)
@@ -1180,13 +1259,13 @@ func compStep(_ w: LayerW, _ il: Int, _ xn: MTLBuffer, _ pos: Int) {
     guard (pos + 1) % w.ratio == 0 else { return }
     let pooled = sentinelled(headDim)
     var hd32 = UInt32(headDim), rt32 = UInt32(w.ratio)
-    enc(pCompPool, headDim, 256) { c in c.setBuffer(compState[il], offset: 0, index: 0)
+    enc(pCompPool, headDim, 256, reads: [compState[il], compScore[il]], writes: [pooled]) { c in c.setBuffer(compState[il], offset: 0, index: 0)
                                         c.setBuffer(compScore[il], offset: 0, index: 1)
                                         c.setBuffer(pooled, offset: 0, index: 2)
                                         c.setBytes(&hd32, length: 4, index: 3); c.setBytes(&rt32, length: 4, index: 4) }
     if w.ratio == 4 {
         let n = w.ratio * width
-        enc(pCompShift, n, 256) { c in c.setBuffer(compState[il], offset: 0, index: 0)
+        enc(pCompShift, n, 256, reads: [compState[il], compScore[il]], writes: [compState[il], compScore[il]]) { c in c.setBuffer(compState[il], offset: 0, index: 0)
                                        c.setBuffer(compScore[il], offset: 0, index: 1)
                                        c.setBytes(&wd, length: 4, index: 2); c.setBytes(&rt32, length: 4, index: 3) }
     }
@@ -1205,13 +1284,13 @@ func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     var r = UInt32(t.rows), c32 = UInt32(t.cols), nel = UInt32(t.nel), rk = UInt32(oRank)
     if t.type == 8 {
         wbQ80 += t.rows * ((t.cols + 31) / 32) * 34
-        enc(pQ80g, t.rows*32, tgFree) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+        enc(pQ80g, t.rows*32, tgFree, reads: [x], writes: [out]) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                           c.setBuffer(out, offset: 0, index: 2)
                                           c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4)
                                           c.setBytes(&nel, length: 4, index: 5); c.setBytes(&rk, length: 4, index: 6) }
         return out
     }
-    enc(pGrouped, t.rows*32, tgFree) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+    enc(pGrouped, t.rows*32, tgFree, reads: [x], writes: [out]) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                          c.setBuffer(out, offset: 0, index: 2)
                                          c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4)
                                          c.setBytes(&nel, length: 4, index: 5); c.setBytes(&rk, length: 4, index: 6) }
@@ -1225,7 +1304,7 @@ func gpuF16mv(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     wbF16 += t.rows * t.cols * 2
     let wide = matchOrder && !f16Chain8
     enc(wide ? pF16Wide : (matchOrder ? pF16Ord : pF16mv),
-        wide ? ((t.rows + 1) / 2) * 256 : (matchOrder ? t.rows*8 : t.rows), 256) { c in
+        wide ? ((t.rows + 1) / 2) * 256 : (matchOrder ? t.rows*8 : t.rows), 256, reads: [x], writes: [out]) { c in
         c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
         c.setBuffer(out, offset: 0, index: 2)
         c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
@@ -1268,7 +1347,7 @@ func gpuExpert(_ t: Tn, _ x: MTLBuffer, _ expert: Int) -> MTLBuffer {
 }
 func gpuSwiglu(_ gate: MTLBuffer, _ up: MTLBuffer, _ n: Int, _ w: Float, _ lim: Float) -> MTLBuffer {
     let out = sentinelled(n); var n32 = UInt32(n), ww = w, ll = lim
-    enc(pSwiglu, n, 256) { c in c.setBuffer(gate, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
+    enc(pSwiglu, n, 256, reads: [gate, up], writes: [out]) { c in c.setBuffer(gate, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
                                 c.setBuffer(out, offset: 0, index: 2)
                                 c.setBytes(&n32, length: 4, index: 3); c.setBytes(&ww, length: 4, index: 4); c.setBytes(&ll, length: 4, index: 5) }
     return out
@@ -1289,7 +1368,7 @@ func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLB
     // is unrolled across threads, which has no association to preserve. Bit-identical, and it was the
     // most expensive kernel in the stack at 1878 us a call.
     do { var n = UInt32(hcDim), e0 = eps
-         enc(pHcRmsWide, 1024, 1024) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
+         enc(pHcRmsWide, 1024, 1024, reads: [resid], writes: [flat]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
                                             c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
     let mix = gpuF16mv(fn, flat)
     let split = sentinelled(2*nHc + nHc*nHc)
@@ -1298,7 +1377,7 @@ func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLB
          // kernel took its grid from one flag and its pipeline from another it ran on a quarter of its
          // rows and reported a floor 5 ms lower for work it had not done.
          let (pSplitUse, nSplit) = hcSplitSeq ? (pHcSplitSeq, 1) : (pHcSplit, nHc)
-         enc(pSplitUse, nSplit, nSplit) { c in c.setBuffer(mix, offset: 0, index: 0)
+         enc(pSplitUse, nSplit, nSplit, reads: [mix], writes: [split]) { c in c.setBuffer(mix, offset: 0, index: 0)
                                     c.setBuffer(views[sc.idx], offset: sc.inner, index: 1)
                                     c.setBuffer(views[bs.idx], offset: bs.inner, index: 2)
                                     c.setBuffer(split, offset: 0, index: 3)
@@ -1306,14 +1385,14 @@ func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLB
                                     c.setBytes(&e0, length: 4, index: 6) } }
     let cur = sentinelled(nEmbd)
     do { var a = UInt32(nHc), b = UInt32(nEmbd)
-         enc(pHcWsum, nEmbd, 256) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(split, offset: 0, index: 1)
+         enc(pHcWsum, nEmbd, 256, reads: [resid, split], writes: [cur]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(split, offset: 0, index: 1)
                                          c.setBuffer(cur, offset: 0, index: 2)
                                          c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4) } }
     return (cur, split)
 }
 func hcPost(_ blockOut: MTLBuffer, _ resid: MTLBuffer, _ split: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(hcDim); var a = UInt32(nHc), b = UInt32(nEmbd)
-    enc(pHcPost, nHc*nEmbd, 256) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
+    enc(pHcPost, nHc*nEmbd, 256, reads: [blockOut, resid, split], writes: [out]) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
                                   c.setBuffer(split, offset: nHc*4, index: 2)
                                   c.setBuffer(split, offset: 2*nHc*4, index: 3)
                                   c.setBuffer(out, offset: 0, index: 4)
@@ -1384,16 +1463,35 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let w = LW[il]
     if il == 0 { stage("attn_pre", input, nEmbd) }
     let xn = gpuRmsnorm(input, nEmbd, w.nrm)
+    // ── THE TWO PROJECTIONS INTERLEAVED, BECAUSE ADJACENCY IS WHAT THE SCHEDULER CAN SEE ───────────
+    // The q chain and the kv chain share exactly one value, attn_norm, and nothing after it. Written
+    // one after the other they still ran one after the other: the hazard tracker only ever lets a
+    // dispatch overlap what was encoded since the LAST BARRIER, and with the whole q chain emitted
+    // first, kv's first matvec arrived five barriers late and had only the rope to keep it company.
+    // Measured: the tracker alone, on the old order, was worth nothing at all (39.81 both ways).
+    // Emitted in step with each other, each pair reads buffers the other does not write, so the
+    // tracker finds no hazard between them and the encoder runs them together. Two nearly-pure
+    // bandwidth matvecs and two one-threadgroup norms now fill each other's idle cores.
+    // The int8 activation memo in gpuMx8 is what makes the first pair possible: both projections read
+    // attn_norm at the same width, so kv's matvec READS the buffer q's matvec reads instead of each
+    // writing its own — a shared read is not a hazard, a pair of writes would have been.
     let ql = gpuMx8(w.qa, xn, w.qa.rows, w.qa.cols)
+    let kl = gpuMx8(w.kv, xn, w.kv.rows, w.kv.cols)
+    // THE COMPRESSOR IS A THIRD CHAIN OFF THE SAME ACTIVATION, and it was the longest one still
+    // running alone: eight dispatches that read attn_norm and their own rolling plane, and touch
+    // nothing the q or kv chain writes. It used to be emitted after the raw row was pushed, which is
+    // the order ds4.c:12986 reads in — but the raw cache and the compressed plane are DISJOINT
+    // buffers, so no value in either can tell which was written first, and the CPU-side sequencing
+    // that does matter (its rows are appended before attention counts them) is unchanged.
+    if useGrowingKv && useCompressor { compStep(w, il, xn, pos) }
     let qln = gpuRmsnorm(ql, w.qa.rows, w.qan)
+    let kln = gpuRmsnorm(kl, w.kv.rows, w.kvan)
+    if il == 0 { stage("kv", kln, headDim) }
     let qq = gpuMx8(w.qb, qln, w.qb.rows, w.qb.cols)
+    let kr = gpuRope(kln, 1, pos, il, false)
     let qh = gpuHeadrms(qq)
     if il == 0 { stage("q", qh, nHead*headDim) }
     let qr = gpuRope(qh, nHead, pos, il, false)
-    let kl = gpuMx8(w.kv, xn, w.kv.rows, w.kv.cols)
-    let kln = gpuRmsnorm(kl, w.kv.rows, w.kvan)
-    if il == 0 { stage("kv", kln, headDim) }
-    let kr = gpuRope(kln, 1, pos, il, false)
     // raw lane: the fp8+f16 round is the COMPRESSED cache's storage format (ds4.c:3210 says so in its
     // own comment); the raw cache is f32, so the roped key passes through untouched.
     let kq = rawLane ? kr : gpuKvRound(kr)
@@ -1401,9 +1499,6 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let ha: MTLBuffer
     if useGrowingKv {
         gpuKvAppend(kq, kvArenas[il], pos, kvCap)
-        // the second cache is fed from attn_norm, the SAME activation the q/kv projections read
-        // (ds4.c:12986), and it is fed AFTER the raw row is pushed — the order the spine has.
-        if useCompressor { compStep(w, il, xn, pos) }
         let nComp = useCompressor ? compRows[il].count : 0
         ha = gpuAttendSplit(qr, kvArenas[il], nComp == 0 ? nil : compPacked[il], w.snk, pos + 1, nComp)
     } else {
@@ -1452,21 +1547,21 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         // router only WEIGHTS them. A top-k here would be the layer-3-and-up recipe applied to a hash layer.
         let ht = w.ht!
         var t32 = UInt32(currentToken), nu = UInt32(nUsed)
-        enc(pHashSel, nUsed, 8) { c in c.setBuffer(views[ht.idx], offset: ht.inner, index: 0)
+        enc(pHashSel, nUsed, 8, reads: [], writes: [idsBuf]) { c in c.setBuffer(views[ht.idx], offset: ht.inner, index: 0)
                                        c.setBuffer(idsBuf, offset: 0, index: 1)
                                        c.setBytes(&t32, length: 4, index: 2); c.setBytes(&nu, length: 4, index: 3) }
         var ne = UInt32(nExpR), nu2 = UInt32(nUsed), ws = wscale
         if hashSplit {
             // the 256 softplus-and-sqrt across 256 threads, then the six weights on one — the same
             // shape layers 3 and up have had since the top-k router was split.
-            enc(pHashP, nExpR, 256) { c in c.setBuffer(logits, offset: 0, index: 0)
+            enc(pHashP, nExpR, 256, reads: [logits], writes: [probsBuf]) { c in c.setBuffer(logits, offset: 0, index: 0)
                                            c.setBuffer(probsBuf, offset: 0, index: 1)
                                            c.setBytes(&ne, length: 4, index: 2) }
-            enc(pHashWt, 1, 1) { c in c.setBuffer(probsBuf, offset: 0, index: 0); c.setBuffer(idsBuf, offset: 0, index: 1)
+            enc(pHashWt, 1, 1, reads: [probsBuf, idsBuf], writes: [wtsBuf]) { c in c.setBuffer(probsBuf, offset: 0, index: 0); c.setBuffer(idsBuf, offset: 0, index: 1)
                                       c.setBuffer(wtsBuf, offset: 0, index: 2)
                                       c.setBytes(&nu2, length: 4, index: 3); c.setBytes(&ws, length: 4, index: 4) }
         } else {
-        enc(pHashW, 1, 1) { c in c.setBuffer(logits, offset: 0, index: 0); c.setBuffer(idsBuf, offset: 0, index: 1)
+        enc(pHashW, 1, 1, reads: [logits, idsBuf], writes: [wtsBuf, probsBuf]) { c in c.setBuffer(logits, offset: 0, index: 0); c.setBuffer(idsBuf, offset: 0, index: 1)
                                  c.setBuffer(wtsBuf, offset: 0, index: 2); c.setBuffer(probsBuf, offset: 0, index: 3)
                                  c.setBytes(&ne, length: 4, index: 4); c.setBytes(&nu2, length: 4, index: 5)
                                  c.setBytes(&ws, length: 4, index: 6) }
@@ -1477,14 +1572,14 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         var ne = UInt32(nExpR), nu = UInt32(nUsed), ws = wscale
         // the elementwise half across nExpR threads, the selection on one — see dsv4-stack-real.fk
         let scBuf = sentinelled(nExpR)
-        enc(pTopkP, nExpR, 256) { c in c.setBuffer(logits, offset: 0, index: 0)
+        enc(pTopkP, nExpR, 256, reads: [logits], writes: [probsBuf, scBuf]) { c in c.setBuffer(logits, offset: 0, index: 0)
                                        c.setBuffer(views[bi.idx], offset: bi.inner, index: 1)
                                        c.setBuffer(probsBuf, offset: 0, index: 2); c.setBuffer(scBuf, offset: 0, index: 3)
                                        c.setBytes(&ne, length: 4, index: 4) }
         // ONE THREADGROUP, not one thread: the scan is still serial and still thread 0's, but the 256
         // scores it walks are staged into threadgroup memory by 256 lanes first. The dispatch must be
         // exactly one group — nExpR threads with the cap at nExpR — or `tsz` would not cover ne.
-        enc(pTopkS, topkTg ? nExpR : 1, topkTg ? nExpR : 1) { c in c.setBuffer(probsBuf, offset: 0, index: 0); c.setBuffer(scBuf, offset: 0, index: 1)
+        enc(pTopkS, topkTg ? nExpR : 1, topkTg ? nExpR : 1, reads: [probsBuf, scBuf], writes: [idsBuf, wtsBuf]) { c in c.setBuffer(probsBuf, offset: 0, index: 0); c.setBuffer(scBuf, offset: 0, index: 1)
                                  c.setBuffer(idsBuf, offset: 0, index: 2); c.setBuffer(wtsBuf, offset: 0, index: 3)
                                  c.setBytes(&ne, length: 4, index: 4); c.setBytes(&nu, length: 4, index: 5)
                                  c.setBytes(&ws, length: 4, index: 6) }
@@ -1510,6 +1605,15 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
 
     let moe = sentinelled(nEmbd)
     var g0 = moe, u0 = moe, m0 = moe, d0 = moe
+    // ── THE SHARED EXPERT WALKS BESIDE THE ROUTED ONES ─────────────────────────────────────────────
+    // The shared expert reads ffn_norm and writes its own buffers; it touches nothing the routed
+    // experts touch until the two sums are added at the end. Emitted after them it simply waited.
+    // Its four steps are the routed path's four steps — gate/up, swiglu, down — so they pair off, and
+    // the pairing matters because the two are bound by DIFFERENT things: the routed gate/up is IQ2
+    // decode, arithmetic-bound and leaving the bus idle; the shared gate/up is Q8_0, bandwidth-bound
+    // and leaving the ALUs idle. Overlapping two kernels that queue for the same thing gains nothing,
+    // which is why the easy independences were worth so little before. These two do not.
+    var sgv: MTLBuffer? = nil, suv: MTLBuffer? = nil, smid: MTLBuffer? = nil, sharedOut: MTLBuffer? = nil
     // ── ALL SIX EXPERTS IN FIVE DISPATCHES INSTEAD OF THIRTY ────────────────────────────────────────
     // The slot loop below asks the device gate/up/swiglu/down/accumulate six times over. At 72 us of
     // measured cost per dispatch, the asking is what is left. The expert ids already live in a device
@@ -1536,18 +1640,25 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
             let pIq2Use = iq2Alu ? (iq2Probe == "2" ? pIq2EM : pIq2EA)
                                  : (fast4 ? pIq2E4F
                                           : (iq2Fast ? pIq2EF : (spanOk ? pIq2ES : (useRows4 ? pIq2E4 : pIq2E))))
-            enc(pIq2Use, useRows4 ? nE*(nFf/4)*32 : nE*nFf*32, tgFree) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+            enc(pIq2Use, useRows4 ? nE*(nFf/4)*32 : nE*nFf*32, tgFree, reads: [ffnNorm, idsBuf], writes: [out]) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                               c.setBuffer(ffnNorm, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
                                               c.setBuffer(idsBuf, offset: 0, index: 3)
                                               c.setBytes(&r32, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
                                               c.setBytes(&st, length: 4, index: 6); c.setBytes(&ne, length: 4, index: 7) }
         }
+        // stage 1 pair: the shared gate/up beside the routed gate/up. ffn_norm's int8 form is taken
+        // once by the memo and read by both shared projections, so neither of them writes what the
+        // other reads and the tracker leaves all four in flight together.
+        sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
+        suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
         let mid = sentinelled(nE*nFf)
         var nff = UInt32(nFf), lim = clamp
-        enc(pSwigE, nE*nFf, 256) { c in c.setBuffer(gt, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
+        enc(pSwigE, nE*nFf, 256, reads: [gt, up, wtsBuf], writes: [mid]) { c in c.setBuffer(gt, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
                                         c.setBuffer(mid, offset: 0, index: 2); c.setBuffer(wtsBuf, offset: 0, index: 3)
                                         c.setBytes(&nff, length: 4, index: 4); c.setBytes(&ne, length: 4, index: 5)
                                         c.setBytes(&lim, length: 4, index: 6) }
+        // stage 2 pair: the shared swiglu beside the routed one.
+        smid = gpuSwiglu(sgv!, suv!, nFf, 1.0, clamp)
         let parts = sentinelled(nE*nEmbd)
         var dr = UInt32(nEmbd), dc = UInt32(nFf), dst = UInt32(w.dx.bytes / w.dx.d2)
         wbExp += nE * (w.dx.bytes / w.dx.d2)
@@ -1556,13 +1667,15 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         let dRows4 = q2kRows4 && !q2kOneThread && !q2kFast && nEmbd % 4 == 0
         let pQ2kUse = q2kOneThread ? pQ2kE : (dRows4 ? pQ2kE4 : (q2kFast ? pQ2kEF : pQ2kEW))
         let dThreads = q2kOneThread ? nE*nEmbd : (dRows4 ? nE*(nEmbd/4)*32 : nE*nEmbd*32)
-        enc(pQ2kUse, dThreads, tgFree) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
+        enc(pQ2kUse, dThreads, tgFree, reads: [mid, idsBuf], writes: [parts]) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
                                          c.setBuffer(mid, offset: 0, index: 1); c.setBuffer(parts, offset: 0, index: 2)
                                          c.setBuffer(idsBuf, offset: 0, index: 3)
                                          c.setBytes(&dr, length: 4, index: 4); c.setBytes(&dc, length: 4, index: 5)
                                          c.setBytes(&dst, length: 4, index: 6); c.setBytes(&ne, length: 4, index: 7) }
+        // stage 3 pair: the shared down projection beside the routed one.
+        sharedOut = gpuMx8(w.sdw, smid!, w.sdw.rows, w.sdw.cols)
         var mn = UInt32(nEmbd)
-        enc(pMoeRed, nEmbd, 256) { c in c.setBuffer(parts, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
+        enc(pMoeRed, nEmbd, 256, reads: [parts], writes: [moe]) { c in c.setBuffer(parts, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
                                         c.setBytes(&mn, length: 4, index: 2); c.setBytes(&ne, length: 4, index: 3) }
         g0 = gt; u0 = up; m0 = mid; d0 = parts
     } else {
@@ -1581,26 +1694,31 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         }
         var one: Float = 1.0, n32 = UInt32(nEmbd)
         if i == 0 {
-            enc(pScale, nEmbd, 256) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
+            enc(pScale, nEmbd, 256, reads: [dn], writes: [moe]) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
                                            c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
             g0 = gt; u0 = up; m0 = mid; d0 = dn
         } else {
-            enc(pAxpy, nEmbd, 256) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
+            enc(pAxpy, nEmbd, 256, reads: [dn, moe], writes: [moe]) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
                                           c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
         }
     }
     }
-    let sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
-    let suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
-    let smid = gpuSwiglu(sgv, suv, nFf, 1.0, clamp)
-    let shared = gpuMx8(w.sdw, smid, w.sdw.rows, w.sdw.cols)
+    // the per-expert fallback path above does not interleave; it computes the shared expert here, the
+    // way the fused path did before the stages were paired.
+    if sharedOut == nil {
+        sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
+        suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
+        smid = gpuSwiglu(sgv!, suv!, nFf, 1.0, clamp)
+        sharedOut = gpuMx8(w.sdw, smid!, w.sdw.rows, w.sdw.cols)
+    }
+    let shared = sharedOut!
 
     if il == 0 { stage("routed_moe", moe, nEmbd); stage("shared_ffn", shared, nEmbd) }
     let ffnOut = sentinelled(nEmbd)
     do { var one: Float = 1.0, n32 = UInt32(nEmbd)
-         enc(pScale, nEmbd, 256) { c in c.setBuffer(moe, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
+         enc(pScale, nEmbd, 256, reads: [moe], writes: [ffnOut]) { c in c.setBuffer(moe, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
                                         c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
-         enc(pAxpy, nEmbd, 256) { c in c.setBuffer(shared, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
+         enc(pAxpy, nEmbd, 256, reads: [shared, ffnOut], writes: [ffnOut]) { c in c.setBuffer(shared, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
                                        c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) } }
     if il == 0 { stage("ffn_out", ffnOut, nEmbd) }
     let outHc = hcPost(ffnOut, afterAttn, ffnSplit)
@@ -1627,11 +1745,11 @@ func embedToken(_ currentToken: Int) -> MTLBuffer {
     let rowOff = currentToken * nEmbd * 2
     let x = sentinelled(nEmbd)
     do { var b64 = UInt64(emb.inner + rowOff), c32 = UInt32(nEmbd)
-         enc(pEmb, nEmbd, 256) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x, offset: 0, index: 1)
+         enc(pEmb, nEmbd, 256, reads: [], writes: [x]) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                       c.setBytes(&b64, length: 8, index: 2); c.setBytes(&c32, length: 4, index: 3) } }
     let resid = sentinelled(hcDim)
     do { var a = UInt32(nHc), b = UInt32(nEmbd)
-         enc(pHcBcast, hcDim, 256) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
+         enc(pHcBcast, hcDim, 256, reads: [x], writes: [resid]) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
                                           c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) } }
     return resid
 }
@@ -1700,19 +1818,19 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
     // is unrolled across threads, which has no association to preserve. Bit-identical, and it was the
     // most expensive kernel in the stack at 1878 us a call.
     do { var n = UInt32(hcDim), e0 = eps
-         enc(pHcRmsWide, 1024, 1024) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
+         enc(pHcRmsWide, 1024, 1024, reads: [resid], writes: [flat]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
                                             c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
     let pre = gpuF16mv(outHcFn, flat)
     let headw = sentinelled(nHc)
     do { var a = UInt32(nHc), e0 = hcEps
-         enc(pHcHeadw, nHc, 32) { c in c.setBuffer(pre, offset: 0, index: 0)
+         enc(pHcHeadw, nHc, 32, reads: [pre], writes: [headw]) { c in c.setBuffer(pre, offset: 0, index: 0)
                                        c.setBuffer(views[outHcScale.idx], offset: outHcScale.inner, index: 1)
                                        c.setBuffer(views[outHcBase.idx], offset: outHcBase.inner, index: 2)
                                        c.setBuffer(headw, offset: 0, index: 3)
                                        c.setBytes(&a, length: 4, index: 4); c.setBytes(&e0, length: 4, index: 5) } }
     let collapsed = sentinelled(nEmbd)
     do { var a = UInt32(nHc), b = UInt32(nEmbd)
-         enc(pHcWsum, nEmbd, 256) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(headw, offset: 0, index: 1)
+         enc(pHcWsum, nEmbd, 256, reads: [resid, headw], writes: [collapsed]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(headw, offset: 0, index: 1)
                                          c.setBuffer(collapsed, offset: 0, index: 2)
                                          c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4) } }
     let normed = gpuRmsnorm(collapsed, nEmbd, outNorm)
@@ -1967,18 +2085,25 @@ if kvSequence {
             wb0Q80 = wbQ80; wb0F16 = wbF16; wb0Exp = wbExp; wb0Oth = wbOther
             dispAtGenStart = gpuDispatches
             dispCensusFrom = gpuDispatches
+            hzBarrierFrom = hzBarriers
             dispN.removeAll()
         }
         if pos >= promptIds.count - 1 { emitted.append(exit.token) }
         currentToken = exit.token
-        let rp = fp(resid, hcDim)
-        let vals = (0..<hcDim).map { rp[$0] }
-        if pos == 0 {
-            firstFinal = vals
-            let kp = fp(kvArenas[0], kvCap * headDim)
-            firstRow = (0..<headDim).map { kp[$0].bitPattern }
+        // ONLY THE TWO STEPS THE GATE COMPARES ARE COPIED OUT. This built a 16 384-element Swift array
+        // out of the residual on EVERY step to keep the last one; the state-moved gate reads the first
+        // and the last and nothing in between. It is host time sitting on the token's critical path
+        // after the device has already finished — the gap between the 37 ms GPU floor and the wall.
+        if pos == 0 || pos == kvSteps - 1 {
+            let rp = fp(resid, hcDim)
+            let vals = (0..<hcDim).map { rp[$0] }
+            if pos == 0 {
+                firstFinal = vals
+                let kp = fp(kvArenas[0], kvCap * headDim)
+                firstRow = (0..<headDim).map { kp[$0].bitPattern }
+            }
+            lastFinal = vals
         }
-        lastFinal = vals
     }
     poolOn = false
     let nPrefill = max(1, promptIds.count), nGen = max(1, kvSteps - promptIds.count)
@@ -2126,6 +2251,8 @@ if profileOn {
 }
 if ProcessInfo.processInfo.environment["FORM_DS4_CENSUS"] == "1" {
     let genTok = max(gpuDispatches - dispCensusFrom, 1)
+    let nTok0 = max(kvSteps - promptIds.count + 1, 1)
+    print("      HAZARD BARRIERS: \(hzBarriers - hzBarrierFrom) over \(genTok) dispatches = \((hzBarriers - hzBarrierFrom)/nTok0) a token against \(genTok/nTok0) dispatches a token")
     let nTok = max(kvSteps - promptIds.count + 1, 1)
     print("      ── DISPATCH CENSUS, generation only: \(genTok) dispatches over \(nTok) tokens ──")
     for (nm, n) in dispN.sorted(by: { $0.1 > $1.1 }).prefix(22) {
