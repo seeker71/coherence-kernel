@@ -647,12 +647,36 @@ let submitEvery = Int(ProcessInfo.processInfo.environment["FORM_DS4_SUBMIT_EVERY
 // runs. Encoding the SAME dispatch twice does neither: a pure matvec writes the same value the second
 // time, so the token stream stays bit-exact — and if it does not, the kernel was not idempotent and
 // the number is refused rather than believed. The floor's rise IS the kernel's cost.
+//
+// AND IT STOPPED BEING TRUE THE DAY THE CONCURRENT ENCODER BECAME THE DEFAULT. The twin is encoded
+// here, inside enc(), AFTER the hazard tracker has already decided about the barrier — so the two
+// copies have none between them and the device runs them AT ONCE. What used to price a kernel's whole
+// serial cost now prices only what a second parallel copy adds, which for anything that does not fill
+// the device is nothing at all. Measured: form_hc_post_f32 doubled for 0.02 ms a token, and the same
+// kernel doubled under FORM_DS4_CONCURRENT=0 costs 0.24 ms.
+// SO: RUN THIS WITH FORM_DS4_CONCURRENT=0, ALWAYS. The serial encoder is what makes the twin wait,
+// and waiting is the whole measurement.
 let dblKernel = ProcessInfo.processInfo.environment["FORM_DS4_DOUBLE"] ?? ""
 // FORM_DS4_SKIP=<substring> SIZES A SUBSYSTEM. Doubling one kernel at a time said every small kernel
 // costs under a millisecond, which cannot be the whole story when forty of the fifty-nine are not in
 // the matvecs. Not encoding a whole class at once — every hc_, every attend, every rope — prices the
 // class including whatever it costs its neighbours. It BREAKS THE STREAM by construction, so it is a
 // measuring instrument and never a configuration: the run that uses it is thrown away.
+//
+// IT OVER-REPORTS, AND BY MORE THAN AN ORDER OF MAGNITUDE. The known trap was address-steering: skip
+// the router and the six expert matvecs read one cached slice six times, so the ablation prices a
+// cache hit. There is a SECOND one, and it does not need addresses. A skipped kernel leaves its
+// output at the NaN sentinel, NaN flows downstream, and this body's transcendentals have
+// VALUE-DEPENDENT TRIP COUNTS: hc_exp halves its argument in `while (hc_abs(a) > 0.5f)`, and NaN > 0.5
+// is false, so the loop that normally runs several times exits at once. Skipping ONE kernel therefore
+// makes every sigmoid, every softmax and every softplus behind it cheap.
+// It said form_hc_post_f32 was worth 7.80 ms of a 37 ms token. Doubled on a serial encoder — same
+// kernel, stream intact — it is worth 0.24 ms. A factor of THIRTY-TWO, and it sent a whole afternoon
+// at the wrong kernel.
+// So an ablation here is honest only when the removed kernel steers no addresses AND poisons no value
+// that reaches a data-dependent loop. Against this stack that is almost nothing: prefer the doubling
+// instrument with FORM_DS4_CONCURRENT=0, and treat any SKIP number as an upper bound wanting a second
+// witness.
 let skipMatch = ProcessInfo.processInfo.environment["FORM_DS4_SKIP"] ?? ""
 // `indep: true` says THIS DISPATCH DOES NOT READ WHAT THE ONE BEFORE IT WROTE. It is the only thing
 // the concurrent encoder needs from a caller, and it is a claim about the model, not about Metal: the
