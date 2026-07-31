@@ -105,6 +105,23 @@
     ; same values, out of a memory that answers in a few cycles instead of a few hundred nanoseconds.
     ; The comparisons, the tie rule, the shift-down, the sum and the normalisation are character for
     ; character the ones above, so the six experts chosen and their weights are bit-identical.
+    ; AND THE SCAN WAS STILL PAYING DEVICE LATENCY, on the other side. Staging sc[] and probs[] moved
+    ; the INPUT onto the core; the six slots the scan carries — idx[8] and val[8], indexed by a loop
+    ; whose bound is the runtime `nused` and shifted by an inner loop whose bound is the runtime `j` —
+    ; never left it. A thread array the compiler cannot resolve to constants does not live in
+    ; registers; it lives in the thread's own device-backed stack, and every `val[j]` in that scan is a
+    ; device round trip. FORM_DS4_DOUBLE priced the kernel at 1.6 ms of a 39 ms token over 43 asks —
+    ; 37 us to walk 256 floats, the same order as the attention scores over a million multiply-adds.
+    ;
+    ; The remedy is the one hc-split-seq4-body already used on the Sinkhorn: make the width LITERAL so
+    ; the compiler unrolls, every index becomes a constant, and the slots live in registers. Here they
+    ; are not even an array — six named ints and six named floats, and the shift-down written out. The
+    ; comparisons, the first-index-wins tie rule, the shift, the ascending sum, the 2^-14 floor and the
+    ; normalisation are character for character the general kernel's; only nused's six is now a number
+    ; the compiler can see. The general kernel stays, serves any other nused, and is the A/B.
+    (defn dsv4-topk-select-tg6-body ()
+        "kernel void form_dsv4_topk_select_tg6 (device const float* probs [[buffer(0)]], device const float* sc [[buffer(1)]], device uint* ids [[buffer(2)]], device float* wts [[buffer(3)]], constant uint& ne [[buffer(4)]], constant uint& nused [[buffer(5)]], constant float& wscale [[buffer(6)]], uint tid [[thread_position_in_threadgroup]], uint tsz [[threads_per_threadgroup]]) { threadgroup float ts[256]; threadgroup float tp[256]; if (ne <= 256u) { for (uint i = tid; i < ne; i += tsz) { ts[i] = sc[i]; tp[i] = probs[i]; } } threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tid != 0u) return; if (ne > 256u) return; if (nused != 6u) return; if (nused > ne) return; int i0 = -1; int i1 = -1; int i2 = -1; int i3 = -1; int i4 = -1; int i5 = -1; float v0 = 0.0f; float v1 = 0.0f; float v2 = 0.0f; float v3 = 0.0f; float v4 = 0.0f; float v5 = 0.0f; for (uint i = 0u; i < ne; ++i) { float si = ts[i]; if (i5 >= 0 && !(si > v5)) continue; if (i0 < 0 || si > v0) { i5 = i4; v5 = v4; i4 = i3; v4 = v3; i3 = i2; v3 = v2; i2 = i1; v2 = v1; i1 = i0; v1 = v0; i0 = int(i); v0 = si; } else if (i1 < 0 || si > v1) { i5 = i4; v5 = v4; i4 = i3; v4 = v3; i3 = i2; v3 = v2; i2 = i1; v2 = v1; i1 = int(i); v1 = si; } else if (i2 < 0 || si > v2) { i5 = i4; v5 = v4; i4 = i3; v4 = v3; i3 = i2; v3 = v2; i2 = int(i); v2 = si; } else if (i3 < 0 || si > v3) { i5 = i4; v5 = v4; i4 = i3; v4 = v3; i3 = int(i); v3 = si; } else if (i4 < 0 || si > v4) { i5 = i4; v5 = v4; i4 = int(i); v4 = si; } else if (i5 < 0 || si > v5) { i5 = int(i); v5 = si; } } float s0 = 0.0f; s0 = s0 + tp[i0]; s0 = s0 + tp[i1]; s0 = s0 + tp[i2]; s0 = s0 + tp[i3]; s0 = s0 + tp[i4]; s0 = s0 + tp[i5]; float s = (s0 < 0.00006103515625f) ? 0.00006103515625f : s0; ids[0] = uint(i0); wts[0] = tp[i0] / s * wscale; ids[1] = uint(i1); wts[1] = tp[i1] / s * wscale; ids[2] = uint(i2); wts[2] = tp[i2] / s * wscale; ids[3] = uint(i3); wts[3] = tp[i3] / s * wscale; ids[4] = uint(i4); wts[4] = tp[i4] / s * wscale; ids[5] = uint(i5); wts[5] = tp[i5] / s * wscale; } ")
+
     (defn dsv4-topk-select-tg-body ()
         "kernel void form_dsv4_topk_select_tg (device const float* probs [[buffer(0)]], device const float* sc [[buffer(1)]], device uint* ids [[buffer(2)]], device float* wts [[buffer(3)]], constant uint& ne [[buffer(4)]], constant uint& nused [[buffer(5)]], constant float& wscale [[buffer(6)]], uint tid [[thread_position_in_threadgroup]], uint tsz [[threads_per_threadgroup]]) { threadgroup float ts[256]; threadgroup float tp[256]; if (ne <= 256u) { for (uint i = tid; i < ne; i += tsz) { ts[i] = sc[i]; tp[i] = probs[i]; } } threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tid != 0u) return; if (ne > 256u) return; if (nused > 8u) return; if (nused > ne) return; int idx[8]; float val[8]; for (uint j = 0u; j < nused; ++j) { idx[j] = -1; val[j] = 0.0f; } uint last = nused - 1u; for (uint i = 0u; i < ne; ++i) { float si = ts[i]; if (idx[last] >= 0 && !(si > val[last])) continue; for (uint j = 0u; j < nused; ++j) { if (idx[j] < 0 || si > val[j]) { for (uint mm = nused - 1u; mm > j; --mm) { idx[mm] = idx[mm - 1u]; val[mm] = val[mm - 1u]; } idx[j] = int(i); val[j] = si; break; } } } float s0 = 0.0f; for (uint j = 0u; j < nused; ++j) { s0 = s0 + tp[idx[j]]; } float s = (s0 < 0.00006103515625f) ? 0.00006103515625f : s0; for (uint j = 0u; j < nused; ++j) { ids[j] = uint(idx[j]); wts[j] = tp[idx[j]] / s * wscale; } } ")
 
@@ -126,7 +143,7 @@
                      (str_concat (str_concat (dsv4-hash-probs-body) (str_concat (dsv4-hash-wts-body) (dsv4-hash-weights-body)))
         (str_concat (dsv4-topk-weights-body)
         (str_concat (dsv4-topk-split-body)
-        (str_concat (dsv4-topk-select-tg-body) (dom-ffn-appendix))))))))
+        (str_concat (dsv4-topk-select-tg-body) (str_concat (dsv4-topk-select-tg6-body) (dom-ffn-appendix)))))))))
             (print "END")
             0))
 
