@@ -822,16 +822,16 @@ func gpuAttendSplit(_ q: MTLBuffer, _ rows: MTLBuffer, _ crows: MTLBuffer?, _ sn
     let cb = crows ?? rows
     var a = UInt32(nHead), b = UInt32(headDim), nr = UInt32(nrows), nc = UInt32(ncomp)
     var sc = 1.0/sqrtf(Float(headDim)), nt = UInt32(ntot)
-    enc(pAttScores, nHead*ntot, 256, reads: [q, rows, cb], writes: [sco]) { c in c.setBuffer(q, offset: 0, index: 0); c.setBuffer(rows, offset: 0, index: 1)
+    enc(pAttScores, nHead*ntot, tgSmall, reads: [q, rows, cb], writes: [sco]) { c in c.setBuffer(q, offset: 0, index: 0); c.setBuffer(rows, offset: 0, index: 1)
                                             c.setBuffer(cb, offset: 0, index: 2); c.setBuffer(sco, offset: 0, index: 3)
                                             c.setBytes(&a, length: 4, index: 4); c.setBytes(&b, length: 4, index: 5)
                                             c.setBytes(&nr, length: 4, index: 6); c.setBytes(&nc, length: 4, index: 7)
                                             c.setBytes(&sc, length: 4, index: 8) }
-    enc(pAttStats, nHead, 64, reads: [sco], writes: [ex, inv]) { c in c.setBuffer(sco, offset: 0, index: 0)
+    enc(pAttStats, nHead, tgSmall, reads: [sco], writes: [ex, inv]) { c in c.setBuffer(sco, offset: 0, index: 0)
                                      c.setBuffer(views[snk.idx], offset: snk.inner, index: 1)
                                      c.setBuffer(ex, offset: 0, index: 2); c.setBuffer(inv, offset: 0, index: 3)
                                      c.setBytes(&a, length: 4, index: 4); c.setBytes(&nt, length: 4, index: 5) }
-    enc(pAttAcc, nHead*headDim, 256, reads: [rows, cb, ex, inv], writes: [out]) { c in c.setBuffer(rows, offset: 0, index: 0); c.setBuffer(cb, offset: 0, index: 1)
+    enc(pAttAcc, nHead*headDim, tgSmall, reads: [rows, cb, ex, inv], writes: [out]) { c in c.setBuffer(rows, offset: 0, index: 0); c.setBuffer(cb, offset: 0, index: 1)
                                             c.setBuffer(ex, offset: 0, index: 2); c.setBuffer(inv, offset: 0, index: 3)
                                             c.setBuffer(out, offset: 0, index: 4)
                                             c.setBytes(&a, length: 4, index: 5); c.setBytes(&b, length: 4, index: 6)
@@ -879,10 +879,33 @@ let pIq2E4T = pipe(lIq2, "form_dsv4_iq2_matvec_experts4_tg")
 
 let iq2Tg = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_TG"] == "1"
 let pIq2E4F = iq2Tg ? pIq2E4T : pIq2E4F0
+// THE MoE'S FIVE ASKS AS TWO. gate+up+swiglu in one, down+reduce in the other — ds4's own metal/moe.metal
+// carries the same two shapes (kernel_mul_mv_id_iq2_xxs_pair_swiglu_f32, ..._sum6_f32), which is what
+// says the fusion is a shape and not a trick. The two halves are INDEPENDENT flags because a fusion
+// buys a dispatch and spends simdgroups, and only a measurement can say which way each trade went:
+// the pair runs a quarter of the gate/up simdgroups it replaces, the sum a sixth of the down's.
+//
+// MEASURED, AND THE TRADE WENT THE OTHER WAY. Both on: 2204 dispatches a token become 2075, and the
+// floor goes 26.46 t/s -> 26.15. The stream is bit-exact either way, so this is not a correctness
+// finding, it is a PRICE finding: 129 fewer asks bought about 0.14 ms (the FORM_DS4_PAD slope says
+// 1.1 us an ask) and the simdgroups they cost were worth more than that. It is the clearest refutation
+// this row has of "the dispatch count is what is left" — the count fell by 6% and the token did not.
+// Kept, OFF, with the number, the way the IQ2 threadgroup-table probe is kept: FORM_DS4_MOE_PAIR=1
+// and FORM_DS4_MOE_SUM=1 turn them on, and the pair also stands ready for the day the gate/up decode
+// stops being ALU-bound, when reading the activation once for two stacks would start to matter.
+let moePair = ProcessInfo.processInfo.environment["FORM_DS4_MOE_PAIR"] == "1"
+let moeSum = ProcessInfo.processInfo.environment["FORM_DS4_MOE_SUM"] == "1"
+let pIq2PairSw = pipe(lIq2, "form_dsv4_iq2_matvec_experts4_pair_swiglu")
 let pQ2kE = pipe(lQ2k, "form_dsv4_q2k_matvec_experts")
 let pQ2kEW = pipe(lQ2k, "form_dsv4_q2k_matvec_experts_wide")
 let pQ2kEF = pipe(lQ2k, "form_dsv4_q2k_matvec_experts_fast")
 let pQ2kE4 = pipe(lQ2k, "form_dsv4_q2k_matvec_experts4")
+let pQ2kSum = pipe(lQ2k, "form_dsv4_q2k_matvec_experts4_sum")
+// THE FOUR-ROW KERNEL WITH THE WIDE READS INSIDE IT, which is what the IQ2 side has had since
+// form_dsv4_iq2_matvec_experts4_fast and the Q2_K side never did. Same thread map as pQ2kE4, same
+// folds, nine loads a group instead of thirty-six. FORM_DS4_Q2K_R4FAST=0 goes back to the scalar reads.
+let q2kR4Fast = ProcessInfo.processInfo.environment["FORM_DS4_Q2K_R4FAST"] != "0"
+let pQ2kE4F = pipe(lQ2k, "form_dsv4_q2k_matvec_experts4_fast")
 // FORM_DS4_Q2K_ROWS4=0 goes back to one output row per simdgroup on the down projection.
 let q2kRows4 = ProcessInfo.processInfo.environment["FORM_DS4_Q2K_ROWS4"] != "0"
 // FORM_DS4_Q2K_FAST=1 reads d and dmin as one word, the group's quants as four and its activations
@@ -954,6 +977,18 @@ let q80Tg = Int(ProcessInfo.processInfo.environment["FORM_DS4_Q80_TG"] ?? "64") 
 // 512 26.12, each repeated and never out of order. The old number was not wrong, it was answered in
 // a regime that no longer exists.
 let tgFree = Int(ProcessInfo.processInfo.environment["FORM_DS4_TG"] ?? "64") ?? 64
+// ── A THREADGROUP IS A CORE, AND A WIDE GROUP ON A SMALL GRID IS A CORE COUNT ──────────────────────
+// dispatchThreads hands each THREADGROUP to one core, so a kernel's core count is grid/group, not
+// grid. form_mla_attend_scores runs nh*(pos+1+ncomp) threads — 2432 at position 30 — and at 256 to a
+// group that is TEN threadgroups on a forty-core device: three quarters of the machine idle while a
+// thread walks a 512-long dot product one element at a time. FORM_DS4_DOUBLE priced it at 1.6 ms of a
+// 39 ms token for 43 asks, which is 37 us each for 1.2 million multiply-adds — half a percent of the
+// device's arithmetic rate, and the missing cores are the whole explanation.
+// This is the ONE change that touches no arithmetic at all: the same threads, the same indices, the
+// same folds, spread over more cores. It applies only to kernels where a thread cooperates with
+// NOTHING — no threadgroup memory, no simd reduction, no group-wide fold. Every kernel that reduces
+// (the rmsnorms, the topk scan, the Sinkhorn, every matvec) keeps the group width its fold needs.
+let tgSmall = Int(ProcessInfo.processInfo.environment["FORM_DS4_TG_SMALL"] ?? "32") ?? 32
 // FORM_DS4_IQ2_ROWS4=0 goes back to one row per thread for the routed IQ2_XXS experts. The four-row
 // kernel holds the 32 activations of a sub-block in a private array so four rows can spend them; a
 // private array is registers only while the compiler can keep it there, and if it cannot, those
@@ -1204,7 +1239,7 @@ func ropeFreqs(_ il: Int) -> MTLBuffer {
 func gpuRope(_ v: MTLBuffer, _ nh: Int, _ pos: Int, _ il: Int, _ inverse: Bool) -> MTLBuffer {
     let out = sentinelled(nh*headDim)
     var a = UInt32(nh), b = UInt32(headDim), c32 = UInt32(nRot), p = Float(pos), s: Float = inverse ? -1.0 : 1.0
-    enc(pRope, nh*headDim, 64, reads: [v], writes: [out]) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+    enc(pRope, nh*headDim, tgSmall, reads: [v], writes: [out]) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                               c.setBuffer(ropeFreqs(il), offset: 0, index: 2)
                               c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
                               c.setBytes(&p, length: 4, index: 6); c.setBytes(&s, length: 4, index: 7) }
@@ -1221,7 +1256,7 @@ func gpuKvRound(_ v: MTLBuffer, keep: Bool = false) -> MTLBuffer {
 }
 func gpuKvAppend(_ row: MTLBuffer, _ arena: MTLBuffer, _ pos: Int, _ cap: Int) {
     var h = UInt32(headDim), p = UInt32(pos), c32 = UInt32(cap)
-    enc(pKvAppend, headDim, 256, reads: [row], writes: [arena]) { c in c.setBuffer(row, offset: 0, index: 0)
+    enc(pKvAppend, headDim, tgSmall, reads: [row], writes: [arena]) { c in c.setBuffer(row, offset: 0, index: 0)
                                         c.setBuffer(arena, offset: 0, index: 1)
                                         c.setBytes(&h, length: 4, index: 2); c.setBytes(&p, length: 4, index: 3)
                                         c.setBytes(&c32, length: 4, index: 4) }
@@ -1316,7 +1351,7 @@ func compStep(_ w: LayerW, _ il: Int, _ xn: MTLBuffer, _ pos: Int) {
     let scCur = gpuF16mv(cgt, xn)
     let row = w.ratio == 4 ? w.ratio + (pos % w.ratio) : (pos % w.ratio)
     var wd = UInt32(width), rw = UInt32(row), pm = UInt32(pos % w.ratio)
-    enc(pCompState, width, 256, reads: [kvCur, scCur], writes: [compState[il], compScore[il]]) { c in c.setBuffer(kvCur, offset: 0, index: 0); c.setBuffer(scCur, offset: 0, index: 1)
+    enc(pCompState, width, tgSmall, reads: [kvCur, scCur], writes: [compState[il], compScore[il]]) { c in c.setBuffer(kvCur, offset: 0, index: 0); c.setBuffer(scCur, offset: 0, index: 1)
                                        c.setBuffer(views[ape.idx], offset: ape.inner, index: 2)
                                        c.setBuffer(compState[il], offset: 0, index: 3)
                                        c.setBuffer(compScore[il], offset: 0, index: 4)
@@ -1325,13 +1360,13 @@ func compStep(_ w: LayerW, _ il: Int, _ xn: MTLBuffer, _ pos: Int) {
     guard (pos + 1) % w.ratio == 0 else { return }
     let pooled = sentinelled(headDim)
     var hd32 = UInt32(headDim), rt32 = UInt32(w.ratio)
-    enc(pCompPool, headDim, 256, reads: [compState[il], compScore[il]], writes: [pooled]) { c in c.setBuffer(compState[il], offset: 0, index: 0)
+    enc(pCompPool, headDim, tgSmall, reads: [compState[il], compScore[il]], writes: [pooled]) { c in c.setBuffer(compState[il], offset: 0, index: 0)
                                         c.setBuffer(compScore[il], offset: 0, index: 1)
                                         c.setBuffer(pooled, offset: 0, index: 2)
                                         c.setBytes(&hd32, length: 4, index: 3); c.setBytes(&rt32, length: 4, index: 4) }
     if w.ratio == 4 {
         let n = w.ratio * width
-        enc(pCompShift, n, 256, reads: [compState[il], compScore[il]], writes: [compState[il], compScore[il]]) { c in c.setBuffer(compState[il], offset: 0, index: 0)
+        enc(pCompShift, n, tgSmall, reads: [compState[il], compScore[il]], writes: [compState[il], compScore[il]]) { c in c.setBuffer(compState[il], offset: 0, index: 0)
                                        c.setBuffer(compScore[il], offset: 0, index: 1)
                                        c.setBytes(&wd, length: 4, index: 2); c.setBytes(&rt32, length: 4, index: 3) }
     }
@@ -1413,7 +1448,7 @@ func gpuExpert(_ t: Tn, _ x: MTLBuffer, _ expert: Int) -> MTLBuffer {
 }
 func gpuSwiglu(_ gate: MTLBuffer, _ up: MTLBuffer, _ n: Int, _ w: Float, _ lim: Float) -> MTLBuffer {
     let out = sentinelled(n); var n32 = UInt32(n), ww = w, ll = lim
-    enc(pSwiglu, n, 256, reads: [gate, up], writes: [out]) { c in c.setBuffer(gate, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
+    enc(pSwiglu, n, tgSmall, reads: [gate, up], writes: [out]) { c in c.setBuffer(gate, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
                                 c.setBuffer(out, offset: 0, index: 2)
                                 c.setBytes(&n32, length: 4, index: 3); c.setBytes(&ww, length: 4, index: 4); c.setBytes(&ll, length: 4, index: 5) }
     return out
@@ -1451,14 +1486,14 @@ func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLB
                                     c.setBytes(&e0, length: 4, index: 6) } }
     let cur = sentinelled(nEmbd)
     do { var a = UInt32(nHc), b = UInt32(nEmbd)
-         enc(pHcWsum, nEmbd, 256, reads: [resid, split], writes: [cur]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(split, offset: 0, index: 1)
+         enc(pHcWsum, nEmbd, tgSmall, reads: [resid, split], writes: [cur]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(split, offset: 0, index: 1)
                                          c.setBuffer(cur, offset: 0, index: 2)
                                          c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4) } }
     return (cur, split)
 }
 func hcPost(_ blockOut: MTLBuffer, _ resid: MTLBuffer, _ split: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(hcDim); var a = UInt32(nHc), b = UInt32(nEmbd)
-    enc(pHcPost, nHc*nEmbd, 256, reads: [blockOut, resid, split], writes: [out]) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
+    enc(pHcPost, nHc*nEmbd, tgSmall, reads: [blockOut, resid, split], writes: [out]) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
                                   c.setBuffer(split, offset: nHc*4, index: 2)
                                   c.setBuffer(split, offset: 2*nHc*4, index: 3)
                                   c.setBuffer(out, offset: 0, index: 4)
@@ -1630,7 +1665,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         if hashSplit {
             // the 256 softplus-and-sqrt across 256 threads, then the six weights on one — the same
             // shape layers 3 and up have had since the top-k router was split.
-            enc(pHashP, nExpR, 256, reads: [logits], writes: [probsBuf]) { c in c.setBuffer(logits, offset: 0, index: 0)
+            enc(pHashP, nExpR, tgSmall, reads: [logits], writes: [probsBuf]) { c in c.setBuffer(logits, offset: 0, index: 0)
                                            c.setBuffer(probsBuf, offset: 0, index: 1)
                                            c.setBytes(&ne, length: 4, index: 2) }
             enc(pHashWt, 1, 1, reads: [probsBuf, idsBuf], writes: [wtsBuf]) { c in c.setBuffer(probsBuf, offset: 0, index: 0); c.setBuffer(idsBuf, offset: 0, index: 1)
@@ -1648,7 +1683,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         var ne = UInt32(nExpR), nu = UInt32(nUsed), ws = wscale
         // the elementwise half across nExpR threads, the selection on one — see dsv4-stack-real.fk
         let scBuf = sentinelled(nExpR)
-        enc(pTopkP, nExpR, 256, reads: [logits], writes: [probsBuf, scBuf]) { c in c.setBuffer(logits, offset: 0, index: 0)
+        enc(pTopkP, nExpR, tgSmall, reads: [logits], writes: [probsBuf, scBuf]) { c in c.setBuffer(logits, offset: 0, index: 0)
                                        c.setBuffer(views[bi.idx], offset: bi.inner, index: 1)
                                        c.setBuffer(probsBuf, offset: 0, index: 2); c.setBuffer(scBuf, offset: 0, index: 3)
                                        c.setBytes(&ne, length: 4, index: 4) }
@@ -1701,18 +1736,51 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
     if fusedHere {
         let nE = nUsed
         var r32 = UInt32(nFf), c32 = UInt32(nEmbd), st = UInt32(w.gx.bytes / w.gx.d2), ne = UInt32(nE)
-        let gt = sentinelled(nE*nFf), up = sentinelled(nE*nFf)
+        // ── FIVE DISPATCHES BECOME TWO, WHICH IS WHERE THE ROUND TRIPS WERE ────────────────────────
+        // The five were: gate, up, swiglu, down, reduce. The gate and the up read the SAME activation
+        // and the SAME expert ids off two identically shaped stacks, and the four-row kernel's whole
+        // reason for existing is that a sub-block's 32 activations are worth holding in registers —
+        // held, they can be spent on both stacks instead of one, and the two sums then meet in a
+        // register where form_dsv4_swiglu_experts used to meet them in device memory. The down
+        // projection likewise: a simdgroup that owns four output rows can walk the six slots itself
+        // and add their simd_sums in the same ascending order form_dsv4_moe_reduce used, so the
+        // nexp*n_embd plane is never written at all. Both fused kernels are the SAME decode and the
+        // SAME accumulation chains — a rearrangement of dispatches, never a second recipe.
+        // FORM_DS4_MOE_FUSE2=0 goes back to the five, and it is the A/B that proves the stream.
+        // ONE ROW PER SIMDGROUP unless the four-row kernel is the one selected. Every other IQ2
+        // expert kernel here — fast, span, and both probes — gives a row its own simdgroup and
+        // needs FOUR TIMES the threads. Deriving the thread count from the same flag that picks
+        // the pipeline is not decoration: when it was written the other way the fast kernel ran on
+        // a quarter of its rows, left the rest at the sentinel, and reported a floor 5 ms lower
+        // for work it had not done.
+        let spanOk = iq2Span && nEmbd % 1024 == 0
+        let fast4 = iq2Fast && iq2Rows4 && !iq2Alu && nFf % 4 == 0
+        let useRows4 = fast4 || (!iq2Alu && !iq2Fast && !spanOk && iq2Rows4 && nFf % 4 == 0)
+        // As with the IQ2 gate/up: the thread count comes from the SAME expression that picks the
+        // pipeline. The four-row kernel needs a quarter of the simdgroups; every other one needs all.
+        let dRows4 = q2kRows4 && !q2kOneThread && !q2kFast && nEmbd % 4 == 0
+        let pairOn = moePair && fast4 && !iq2Tg
+        let sumOn = moeSum && dRows4
+        let mid = sentinelled(nE*nFf)
+        var nff = UInt32(nFf), lim = clamp
+        var gt = mid, up = mid
+        if pairOn {
+            wbExp += 2 * nE * (w.gx.bytes / w.gx.d2)
+            // ONE dispatch for gate, up AND the SwiGLU. Four rows to a simdgroup on EACH stack, and
+            // the thread count comes from that same four — the caution above is why.
+            enc(pIq2PairSw, nE*(nFf/4)*32, tgFree,
+                reads: [ffnNorm, idsBuf, wtsBuf], writes: [mid]) { c in
+                c.setBuffer(views[w.gx.idx], offset: w.gx.inner, index: 0)
+                c.setBuffer(views[w.ux.idx], offset: w.ux.inner, index: 1)
+                c.setBuffer(ffnNorm, offset: 0, index: 2); c.setBuffer(mid, offset: 0, index: 3)
+                c.setBuffer(idsBuf, offset: 0, index: 4); c.setBuffer(wtsBuf, offset: 0, index: 5)
+                c.setBytes(&r32, length: 4, index: 6); c.setBytes(&c32, length: 4, index: 7)
+                c.setBytes(&st, length: 4, index: 8); c.setBytes(&ne, length: 4, index: 9)
+                c.setBytes(&lim, length: 4, index: 10) }
+        } else {
+        gt = sentinelled(nE*nFf); up = sentinelled(nE*nFf)
         for (t, out) in [(w.gx, gt), (w.ux, up)] {
             wbExp += nE * (t.bytes / t.d2)
-            // ONE ROW PER SIMDGROUP unless the four-row kernel is the one selected. Every other IQ2
-            // expert kernel here — fast, span, and both probes — gives a row its own simdgroup and
-            // needs FOUR TIMES the threads. Deriving the thread count from the same flag that picks
-            // the pipeline is not decoration: when it was written the other way the fast kernel ran on
-            // a quarter of its rows, left the rest at the sentinel, and reported a floor 5 ms lower
-            // for work it had not done.
-            let spanOk = iq2Span && nEmbd % 1024 == 0
-            let fast4 = iq2Fast && iq2Rows4 && !iq2Alu && nFf % 4 == 0
-            let useRows4 = fast4 || (!iq2Alu && !iq2Fast && !spanOk && iq2Rows4 && nFf % 4 == 0)
             let pIq2Use = iq2Alu ? (iq2Probe == "2" ? pIq2EM : pIq2EA)
                                  : (fast4 ? pIq2E4F
                                           : (iq2Fast ? pIq2EF : (spanOk ? pIq2ES : (useRows4 ? pIq2E4 : pIq2E))))
@@ -1722,12 +1790,11 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
                                               c.setBytes(&r32, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
                                               c.setBytes(&st, length: 4, index: 6); c.setBytes(&ne, length: 4, index: 7) }
         }
-        let mid = sentinelled(nE*nFf)
-        var nff = UInt32(nFf), lim = clamp
-        enc(pSwigE, nE*nFf, 256, reads: [gt, up, wtsBuf], writes: [mid]) { c in c.setBuffer(gt, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
+        enc(pSwigE, nE*nFf, tgSmall, reads: [gt, up, wtsBuf], writes: [mid]) { c in c.setBuffer(gt, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
                                         c.setBuffer(mid, offset: 0, index: 2); c.setBuffer(wtsBuf, offset: 0, index: 3)
                                         c.setBytes(&nff, length: 4, index: 4); c.setBytes(&ne, length: 4, index: 5)
                                         c.setBytes(&lim, length: 4, index: 6) }
+        }
         // stage 2 pair: the shared swiglu beside the routed one.
         smid = gpuSwiglu(sgv!, suv!, nFf, 1.0, clamp)
         // and its int8 activation TAKEN HERE, not inside the matvec below. The routed down projection
@@ -1735,13 +1802,21 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         // flight together, and leaving the quantise inside the shared matvec put a barrier between
         // them — the matvec would have stalled on its own activation while the Q2_K ran alone.
         _ = q8aQuant(smid!, w.sdw.cols)
-        let parts = sentinelled(nE*nEmbd)
         var dr = UInt32(nEmbd), dc = UInt32(nFf), dst = UInt32(w.dx.bytes / w.dx.d2)
         wbExp += nE * (w.dx.bytes / w.dx.d2)
-        // As with the IQ2 gate/up: the thread count comes from the SAME expression that picks the
-        // pipeline. The four-row kernel needs a quarter of the simdgroups; every other one needs all.
-        let dRows4 = q2kRows4 && !q2kOneThread && !q2kFast && nEmbd % 4 == 0
-        let pQ2kUse = q2kOneThread ? pQ2kE : (dRows4 ? pQ2kE4 : (q2kFast ? pQ2kEF : pQ2kEW))
+        var parts = moe
+        if sumOn {
+            enc(pQ2kSum, (nEmbd/4)*32, tgFree, reads: [mid, idsBuf], writes: [moe]) { c in
+                c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
+                c.setBuffer(mid, offset: 0, index: 1); c.setBuffer(moe, offset: 0, index: 2)
+                c.setBuffer(idsBuf, offset: 0, index: 3)
+                c.setBytes(&dr, length: 4, index: 4); c.setBytes(&dc, length: 4, index: 5)
+                c.setBytes(&dst, length: 4, index: 6); c.setBytes(&ne, length: 4, index: 7) }
+            // stage 3 pair: the shared down projection beside the routed one.
+            sharedOut = gpuMx8(w.sdw, smid!, w.sdw.rows, w.sdw.cols)
+        } else {
+        parts = sentinelled(nE*nEmbd)
+        let pQ2kUse = q2kOneThread ? pQ2kE : (dRows4 ? (q2kR4Fast ? pQ2kE4F : pQ2kE4) : (q2kFast ? pQ2kEF : pQ2kEW))
         let dThreads = q2kOneThread ? nE*nEmbd : (dRows4 ? nE*(nEmbd/4)*32 : nE*nEmbd*32)
         enc(pQ2kUse, dThreads, tgFree, reads: [mid, idsBuf], writes: [parts]) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
                                          c.setBuffer(mid, offset: 0, index: 1); c.setBuffer(parts, offset: 0, index: 2)
@@ -1751,8 +1826,9 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         // stage 3 pair: the shared down projection beside the routed one.
         sharedOut = gpuMx8(w.sdw, smid!, w.sdw.rows, w.sdw.cols)
         var mn = UInt32(nEmbd)
-        enc(pMoeRed, nEmbd, 256, reads: [parts], writes: [moe]) { c in c.setBuffer(parts, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
+        enc(pMoeRed, nEmbd, tgSmall, reads: [parts], writes: [moe]) { c in c.setBuffer(parts, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
                                         c.setBytes(&mn, length: 4, index: 2); c.setBytes(&ne, length: 4, index: 3) }
+        }
         g0 = gt; u0 = up; m0 = mid; d0 = parts
     } else {
     for (i, e) in ids.enumerated() {
@@ -1770,11 +1846,11 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         }
         var one: Float = 1.0, n32 = UInt32(nEmbd)
         if i == 0 {
-            enc(pScale, nEmbd, 256, reads: [dn], writes: [moe]) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
+            enc(pScale, nEmbd, tgSmall, reads: [dn], writes: [moe]) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
                                            c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
             g0 = gt; u0 = up; m0 = mid; d0 = dn
         } else {
-            enc(pAxpy, nEmbd, 256, reads: [dn, moe], writes: [moe]) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
+            enc(pAxpy, nEmbd, tgSmall, reads: [dn, moe], writes: [moe]) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
                                           c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
         }
     }
@@ -1794,9 +1870,9 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
     if il == 0 { stage("routed_moe", moe, nEmbd); stage("shared_ffn", shared, nEmbd) }
     let ffnOut = sentinelled(nEmbd)
     do { var one: Float = 1.0, n32 = UInt32(nEmbd)
-         enc(pScale, nEmbd, 256, reads: [moe], writes: [ffnOut]) { c in c.setBuffer(moe, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
+         enc(pScale, nEmbd, tgSmall, reads: [moe], writes: [ffnOut]) { c in c.setBuffer(moe, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
                                         c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
-         enc(pAxpy, nEmbd, 256, reads: [shared, ffnOut], writes: [ffnOut]) { c in c.setBuffer(shared, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
+         enc(pAxpy, nEmbd, tgSmall, reads: [shared, ffnOut], writes: [ffnOut]) { c in c.setBuffer(shared, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
                                        c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) } }
     if il == 0 { stage("ffn_out", ffnOut, nEmbd) }
     let outHc = hcPost(ffnOut, afterAttn, ffnSplit)
@@ -1823,11 +1899,11 @@ func embedToken(_ currentToken: Int) -> MTLBuffer {
     let rowOff = currentToken * nEmbd * 2
     let x = sentinelled(nEmbd)
     do { var b64 = UInt64(emb.inner + rowOff), c32 = UInt32(nEmbd)
-         enc(pEmb, nEmbd, 256, reads: [], writes: [x]) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x, offset: 0, index: 1)
+         enc(pEmb, nEmbd, tgSmall, reads: [], writes: [x]) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                       c.setBytes(&b64, length: 8, index: 2); c.setBytes(&c32, length: 4, index: 3) } }
     let resid = sentinelled(hcDim)
     do { var a = UInt32(nHc), b = UInt32(nEmbd)
-         enc(pHcBcast, hcDim, 256, reads: [x], writes: [resid]) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
+         enc(pHcBcast, hcDim, tgSmall, reads: [x], writes: [resid]) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
                                           c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) } }
     return resid
 }
@@ -1908,7 +1984,7 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
                                        c.setBytes(&a, length: 4, index: 4); c.setBytes(&e0, length: 4, index: 5) } }
     let collapsed = sentinelled(nEmbd)
     do { var a = UInt32(nHc), b = UInt32(nEmbd)
-         enc(pHcWsum, nEmbd, 256, reads: [resid, headw], writes: [collapsed]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(headw, offset: 0, index: 1)
+         enc(pHcWsum, nEmbd, tgSmall, reads: [resid, headw], writes: [collapsed]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(headw, offset: 0, index: 1)
                                          c.setBuffer(collapsed, offset: 0, index: 2)
                                          c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4) } }
     let normed = gpuRmsnorm(collapsed, nEmbd, outNorm)
