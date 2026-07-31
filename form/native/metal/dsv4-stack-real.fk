@@ -84,6 +84,16 @@
     ;
     ; The fixed arrays cap ne<=256 and nused<=8; above that the kernel WRITES NOTHING, so an overrun is
     ; a refusal the sentinel catches, never a silent stomp (aporon).
+    ; SPLIT: the 256 softplus+sqrt evaluations are elementwise-independent and were running on ONE
+    ; thread with a 2 KB private array; the selection that follows is a cheap compare loop. ds4 does the
+    ; same job in one 256-thread threadgroup with no sort at all (metal/dsv4_misc.metal:4828) and its
+    ; router stage costs ~1.8 ms a token against our 48 ms — a 27x gap on identical work. Splitting
+    ; keeps the selection order and its strict-> first-index-wins tie rule exactly, so the choice is
+    ; bit-identical; only the arithmetic pass parallelises.
+    (defn dsv4-topk-split-body ()
+        "kernel void form_dsv4_topk_probs (device const float* logits [[buffer(0)]], device const float* bias [[buffer(1)]], device float* probs [[buffer(2)]], device float* sc [[buffer(3)]], constant uint& ne [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= ne) return; float z = logits[i]; float sp = (z > 20.0f) ? z : ((z < -20.0f) ? dm_exp(z) : dm_ln(1.0f + dm_exp(z))); float p = dm_sqrt(sp); probs[i] = p; sc[i] = p + bias[i]; } kernel void form_dsv4_topk_select (device const float* probs [[buffer(0)]], device const float* sc [[buffer(1)]], device uint* ids [[buffer(2)]], device float* wts [[buffer(3)]], constant uint& ne [[buffer(4)]], constant uint& nused [[buffer(5)]], constant float& wscale [[buffer(6)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; if (nused > 8u) return; if (nused > ne) return; int idx[8]; for (uint j = 0u; j < nused; ++j) { idx[j] = -1; } for (uint i = 0u; i < ne; ++i) { for (uint j = 0u; j < nused; ++j) { if (idx[j] < 0 || sc[i] > sc[idx[j]]) { for (uint mm = nused - 1u; mm > j; --mm) { idx[mm] = idx[mm - 1u]; } idx[j] = int(i); break; } } } float s0 = 0.0f; for (uint j = 0u; j < nused; ++j) { s0 = s0 + probs[idx[j]]; } float s = (s0 < 0.00006103515625f) ? 0.00006103515625f : s0; for (uint j = 0u; j < nused; ++j) { ids[j] = uint(idx[j]); wts[j] = probs[idx[j]] / s * wscale; } } "
+)
+
     (defn dsv4-topk-weights-body ()
         "kernel void form_dsv4_topk_weights (device const float* logits [[buffer(0)]], device const float* bias [[buffer(1)]], device uint* ids [[buffer(2)]], device float* wts [[buffer(3)]], device float* probs [[buffer(4)]], constant uint& ne [[buffer(5)]], constant uint& nused [[buffer(6)]], constant float& wscale [[buffer(7)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; if (ne > 256u) return; if (nused > 8u) return; if (nused > ne) return; float pr[256]; float sc[256]; int idx[8]; for (uint i = 0u; i < ne; ++i) { float z = logits[i]; float sp = (z > 20.0f) ? z : ((z < -20.0f) ? dm_exp(z) : dm_ln(1.0f + dm_exp(z))); float p = dm_sqrt(sp); pr[i] = p; probs[i] = p; sc[i] = p + bias[i]; } for (uint j = 0u; j < nused; ++j) { idx[j] = -1; } for (uint i = 0u; i < ne; ++i) { for (uint j = 0u; j < nused; ++j) { if (idx[j] < 0 || sc[i] > sc[idx[j]]) { for (uint mm = nused - 1u; mm > j; --mm) { idx[mm] = idx[mm - 1u]; } idx[j] = int(i); break; } } } float s0 = 0.0f; for (uint j = 0u; j < nused; ++j) { s0 = s0 + pr[idx[j]]; } float s = (s0 < 0.00006103515625f) ? 0.00006103515625f : s0; for (uint j = 0u; j < nused; ++j) { ids[j] = uint(idx[j]); wts[j] = pr[idx[j]] / s * wscale; } } ")
 
@@ -96,7 +106,8 @@
             (print (str_concat (dsv4-moe-msl-unit)
                     (str_concat (dsv4-hash-select-body)
                      (str_concat (dsv4-hash-weights-body)
-        (str_concat (dsv4-topk-weights-body) (dom-ffn-appendix))))))
+        (str_concat (dsv4-topk-weights-body)
+        (str_concat (dsv4-topk-split-body) (dom-ffn-appendix)))))))
             (print "END")
             0))
 
