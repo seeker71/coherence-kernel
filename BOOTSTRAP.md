@@ -50,6 +50,34 @@ The first cell proves direct source execution. The second proves `defn` calls an
 recursion through the same surface. The trailing `10` is kept as the checkout
 convention; direct-source Form does not yet read argv without a table entry.
 
+## A number is not a pass
+
+Every check on this page compares an expected number, and that habit is exactly
+how this body has been fooled. `fkwu --src` prints the root value on stdout and
+its diagnostics on stderr, and **exits nonzero when the compile carried errors**
+— so a cell whose chain has an unresolved name still prints a plausible verdict
+(axiom-5 recovers the call to `nothing` and the fold computes over it) while
+exiting 1. Reading the number alone reports a pass that is not one.
+
+So, from here on:
+
+```sh
+./fkwu --src <cell>; echo "exit=$?"
+```
+
+and before trusting a cell you did not just write:
+
+```sh
+echo path/to/cell.fk > /tmp/preflight-target
+./fkwu --src observe/preflight-run.fk
+```
+
+Preflight forces a fresh compile — a warm cache replaces the error with a tally
+that has no name and no line — checks paren balance without running anything,
+and classifies each unresolved name by offering it to all four kernels: a TYPO
+(nobody has it) or a LANE SEAM (another kernel does). `AGENTS.md` item 9 carries
+the practice and what each rule cost.
+
 ## Verify Real Grounding
 
 ```sh

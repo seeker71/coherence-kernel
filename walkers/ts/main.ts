@@ -372,7 +372,7 @@ export class Kernel {
   render(v: Value): string {
     switch (v.kind) {
       case "null":
-        return "null";
+        return "nothing";
       case "int":
         return String(v.int);
       case "i64":
@@ -478,6 +478,8 @@ export class Kernel {
       return lst[i] ?? { kind: "null" };
     });
     this.registerNative("empty", catListNat(), () => ({ kind: "list", list: [] }));
+    // axiom-1's third state, first-class: the ground, not a missing 0.
+    this.registerNative("nothing", catListNat(), () => ({ kind: "null" }));
     // bp — Blueprint name → NodeID, looked up in BP_TABLE. Unknown name fails
     // loud (sibling parity: Go/Rust panic) — the substrate never invents a
     // NodeID for an unknown name.
@@ -1210,6 +1212,19 @@ function walkCompare(
   const av = walk(k, kids[0]!, frame);
   const bv = walk(k, kids[1]!, frame);
 
+  // `nothing` (axiom-1's third state) is a value, not a number. Equal to itself,
+  // never to 0. Ordering it against a number is declined rather than answered: fkwu
+  // currently leaks its own value encoding there (add (nothing) 1 ->
+  // -8999999999999999997), and a walker that copied that would agree by imitation
+  // instead of witnessing. Throwing is what lets this walker DISAGREE if a cell
+  // ever leans on it.
+  if (av.kind === "null" || bv.kind === "null") {
+    const both = av.kind === "null" && bv.kind === "null";
+    if (op === RCmp.EQ) return boolInt(both);
+    if (op === RCmp.NE) return boolInt(!both);
+    throw new Error("compare on nothing: ordering it against a number is not a number question");
+  }
+
   let r: boolean;
   if (av.kind === "f32" || av.kind === "f64" || bv.kind === "f32" || bv.kind === "f64") {
     const a = av.kind === "bool" ? (av.bool ? 1 : 0) : expectFloat(av, "compare");
@@ -1322,7 +1337,9 @@ function truthy(v: Value): boolean {
     case "bool":
       return v.bool;
     case "null":
-      return false;
+      // `nothing` is not a yes/no. Branching on it is declined rather than silently
+      // read as false — see walkCompare for why this walker declines to imitate.
+      throw new Error("truthy: nothing is not a yes/no question");
     case "int":
       return v.int !== 0;
     case "i64":

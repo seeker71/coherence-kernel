@@ -3010,6 +3010,23 @@ export class Kernel {
       k.framebufferRoots.push(nid);
       return { kind: "nodeid", nodeid: nid };
     });
+    // fb_record — native provenance primitive (tag 128). Records source
+    // attribution for an already-interned node, retains it as a framebuffer
+    // root, and returns the same node. The packed coordinate is
+    // line<<16|col, matching Go, Rust, and the fkwu fourth arm.
+    this.registerNative("fb_record", catWitness(), (k, args) => {
+      const nid = argNodeID(args, 0);
+      const file = k.internName(argStr(args, 1));
+      const packed = argInt(args, 2);
+      k.sourceAttr.set(nodeKey(nid), {
+        file,
+        line: packed >>> 16,
+        col: packed & 0xffff,
+      });
+      k.activeRoots.push(nid);
+      k.framebufferRoots.push(nid);
+      return { kind: "nodeid", nodeid: nid };
+    });
     this.registerNative("node_category", catWitness(), (k, args) => ({
       kind: "nodeid",
       nodeid: k.category(argNodeID(args, 0)),

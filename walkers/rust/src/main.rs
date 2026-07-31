@@ -66,7 +66,7 @@ impl Value {
     // Faithful copy of the full kernel's Value::display.
     fn display(&self) -> String {
         match self {
-            Value::Null => "null".to_string(),
+            Value::Null => "nothing".to_string(),
             Value::Int(n) => n.to_string(),
             Value::Float(f) => format_float(*f),
             Value::Str(s) => s.to_string(),
@@ -120,7 +120,10 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Int(n) => *n != 0,
             Value::Float(f) => *f != 0.0,
-            Value::Null => false,
+            // `nothing` is not a yes/no. Branching on it is declined rather than
+            // silently read as false — see the Compare arm for why this walker
+            // declines instead of imitating.
+            Value::Null => panic!("as_bool: nothing is not a yes/no question"),
             _ => true,
         }
     }
@@ -680,6 +683,20 @@ fn walk(n: &Rc<Node>, env: &Env) -> Value {
         Node::Compare(op, a, b) => {
             let lv = walk(a, env);
             let rv = walk(b, env);
+            // `nothing` (axiom-1's third state) is a value, not a number. Equal to
+            // itself, never to 0. Ordering it against a number is declined rather than
+            // answered: fkwu currently leaks its own value encoding there
+            // (add (nothing) 1 -> -8999999999999999997), and a walker that copied that
+            // would agree by imitation instead of witnessing. Erroring is what lets
+            // this walker DISAGREE if a cell ever leans on it.
+            if matches!(lv, Value::Null) || matches!(rv, Value::Null) {
+                let both = matches!(lv, Value::Null) && matches!(rv, Value::Null);
+                return match *op {
+                    CMP_EQ => bool_int(both),
+                    CMP_NE => bool_int(!both),
+                    _ => panic!("compare on nothing: ordering it against a number is not a number question"),
+                };
+            }
             if matches!(lv, Value::Float(_)) || matches!(rv, Value::Float(_)) {
                 let l = lv.as_float();
                 let r = rv.as_float();
@@ -797,6 +814,8 @@ fn call_native(name: &str, arg_nodes: &[Rc<Node>], env: &Env) -> Option<Value> {
     match name {
         "list" => Some(Value::List(Rc::new(args))),
         "empty" => Some(Value::List(Rc::new(vec![]))),
+        // axiom-1's third state, first-class: the ground, not a missing 0.
+        "nothing" => Some(Value::Null),
         "cons" => {
             let mut out = vec![args[0].clone()];
             if let Value::List(rest) = &args[1] {
