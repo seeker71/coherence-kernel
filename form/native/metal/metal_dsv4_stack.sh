@@ -724,6 +724,13 @@ let pIq2EF = pipe(lIq2, "form_dsv4_iq2_matvec_experts_fast")
 let pIq2E4F = pipe(lIq2, "form_dsv4_iq2_matvec_experts4_fast")
 let pQ2kE = pipe(lQ2k, "form_dsv4_q2k_matvec_experts")
 let pQ2kEW = pipe(lQ2k, "form_dsv4_q2k_matvec_experts_wide")
+let pQ2kEF = pipe(lQ2k, "form_dsv4_q2k_matvec_experts_fast")
+// FORM_DS4_Q2K_FAST=1 reads d and dmin as one word, the group's quants as four and its activations
+// as four — thirty-six scalar loads become nine, bit-identically. MEASURED NULL: 41 ms either way,
+// stream bit-exact either way. It is off by default because a null is a null, and it stays in the
+// tree because it is the third independent confirmation that load COUNT is not what these kernels
+// pay — the same thing the Q8_0 pair said and the same thing the IQ2 probes said.
+let q2kFast = ProcessInfo.processInfo.environment["FORM_DS4_Q2K_FAST"] == "1"
 // FORM_DS4_Q2K_ONE_THREAD=1 goes back to one thread per expert row.
 let q2kOneThread = ProcessInfo.processInfo.environment["FORM_DS4_Q2K_ONE_THREAD"] == "1"
 let pSwigE = pipe(lFfn, "form_dsv4_swiglu_experts")
@@ -755,7 +762,12 @@ let matchOrder = ProcessInfo.processInfo.environment["FORM_DS4_MATCH_ORDER"] == 
 // once, in the run that is meant to ask it, instead of on every token. Default stays ON so the
 // harness keeps proving itself when nobody has said otherwise.
 let gatesOn = ProcessInfo.processInfo.environment["FORM_DS4_GATES"] != "0"
-let pQ8aQuant = pipe(lKv, "form_dsv4_q8a_quantize_f32")
+let pQ8aQuant0 = pipe(lKv, "form_dsv4_q8a_quantize_f32")
+ let pQ8aQuantP = pipe(lKv, "form_dsv4_q8a_quantize_par")
+ // FORM_DS4_Q8A_PAR=0 goes back to one thread per 32-element block.
+ let q8aPar = ProcessInfo.processInfo.environment["FORM_DS4_Q8A_PAR"] != "0"
+ let pQ8aQuant = q8aPar ? pQ8aQuantP : pQ8aQuant0
+ let q8aThreads = q8aPar ? 32 : 1
 let pQ80Ord = pipe(lKv, "form_dsv4_q80_matvec_ordered8")
 // how many threads share a core for the token's biggest kernel — 5.07 of its 9.1 GB. The number was
 // 256 because 256 is what every other dispatch here says; nothing measured it. FORM_DS4_Q80_TG asks.
@@ -853,7 +865,7 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
             let xs = dev.makeBuffer(length: blocks*4, options: .storageModeShared)!
             var n32 = UInt32(cols)
             let outA = sentinelled(rows), outB = sentinelled(rows)
-            enc(pQ8aQuant, blocks, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
+            enc(pQ8aQuant, blocks*q8aThreads, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
                                               c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
             enc(pQ80Ord, rows*8, q80Tg) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                              c.setBuffer(xq, offset: 0, index: 1); c.setBuffer(xs, offset: 0, index: 2)
@@ -898,7 +910,7 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
             let xq = poolTake(blocks*32)
             let xs = poolTake(blocks*4)
             var n32 = UInt32(cols)
-            enc(pQ8aQuant, blocks, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
+            enc(pQ8aQuant, blocks*q8aThreads, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
                                               c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
             wbQ80 += rows * blocks * 34
             // Two rows to a thread was written and measured here: it halves the activation loads
@@ -1464,7 +1476,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         let parts = sentinelled(nE*nEmbd)
         var dr = UInt32(nEmbd), dc = UInt32(nFf), dst = UInt32(w.dx.bytes / w.dx.d2)
         wbExp += nE * (w.dx.bytes / w.dx.d2)
-        enc(q2kOneThread ? pQ2kE : pQ2kEW, q2kOneThread ? nE*nEmbd : nE*nEmbd*32, tgFree) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
+        enc(q2kOneThread ? pQ2kE : (q2kFast ? pQ2kEF : pQ2kEW), q2kOneThread ? nE*nEmbd : nE*nEmbd*32, tgFree) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
                                          c.setBuffer(mid, offset: 0, index: 1); c.setBuffer(parts, offset: 0, index: 2)
                                          c.setBuffer(idsBuf, offset: 0, index: 3)
                                          c.setBytes(&dr, length: 4, index: 4); c.setBytes(&dc, length: 4, index: 5)
