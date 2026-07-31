@@ -152,13 +152,21 @@
     ; reads a separate SCALE PLANE at qb[nel + ...], which is the planar layout of the reap25 file.
     ; Q8_0 is blocked (34 bytes per 32: one f16 then 32 int8), so the scale is inside the block and
     ; the plane offset would read payload as exponents. Same grouping, different reach.
+    ;
+    ; THE SAME BLOCK, READ SIXTEEN TIMES INSTEAD OF SIXTY-FOUR. ds4-order-match.fk's own note on this
+    ; kernel says it "reads its bytes ONE AT A TIME — 34 scalar uchar loads per block" and still
+    ; reaches 383 GB/s on the strength of its span; FORM_DS4_DOUBLE prices it at 2.8 ms of the token.
+    ; The _wide twin takes the block's 32 weight bytes as eight packed_uchar4 and the group's 32
+    ; activations as eight packed_float4, and forms the SAME terms through the SAME q6k_s8 in the SAME
+    ; ascending i — sq is added into directly, never through a per-quad temporary — so it is the scalar
+    ; kernel's float, bit for bit. Only the number of load instructions moves.
     (defn dsv4-q80-grouped-msl ()
         (do
             (print "MSL")
             (print (str_concat (qml-msl-header)
                     (str_concat (q80-msl-spine)
                     (str_concat (q80-msl-weight)
-                        "kernel void form_dsv4_q80_matvec_grouped (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], constant uint& rank [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint grp = r / rank; device const float* xg = x + grp * cols; uint nblk = cols / 32u; ulong rowblk = (ulong)r * (ulong)nblk; float acc = 0.0f; for (uint blk = lane; blk < nblk; blk += 32u) { ulong b = (rowblk + (ulong)blk) * 34ul; ushort hb = (ushort)qb[b] | ((ushort)qb[b + 1ul] << 8); float d = float(as_type<half>(hb)); device const float* xb = xg + blk * 32u; float sq = 0.0f; for (uint i = 0u; i < 32u; ++i) { sq = sq + float(q6k_s8(int(qb[b + 2ul + (ulong)i]))) * xb[i]; } acc = acc + d * sq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }"
+                        "kernel void form_dsv4_q80_matvec_grouped (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], constant uint& rank [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint grp = r / rank; device const float* xg = x + grp * cols; uint nblk = cols / 32u; ulong rowblk = (ulong)r * (ulong)nblk; float acc = 0.0f; for (uint blk = lane; blk < nblk; blk += 32u) { ulong b = (rowblk + (ulong)blk) * 34ul; ushort hb = (ushort)qb[b] | ((ushort)qb[b + 1ul] << 8); float d = float(as_type<half>(hb)); device const float* xb = xg + blk * 32u; float sq = 0.0f; for (uint i = 0u; i < 32u; ++i) { sq = sq + float(q6k_s8(int(qb[b + 2ul + (ulong)i]))) * xb[i]; } acc = acc + d * sq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } kernel void form_dsv4_q80_matvec_grouped_wide (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], constant uint& rank [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint grp = r / rank; device const float* xg = x + grp * cols; uint nblk = cols / 32u; ulong rowblk = (ulong)r * (ulong)nblk; float acc = 0.0f; for (uint blk = lane; blk < nblk; blk += 32u) { ulong b = (rowblk + (ulong)blk) * 34ul; ushort hb = (ushort)qb[b] | ((ushort)qb[b + 1ul] << 8); float d = float(as_type<half>(hb)); device const float* xb = xg + blk * 32u; device const uchar* wb = qb + b + 2ul; float sq = 0.0f; for (uint k = 0u; k < 8u; ++k) { uchar4 w4 = uchar4(*(device const packed_uchar4*)(wb + 4u * k)); float4 v4 = float4(*(device const packed_float4*)(xb + 4u * k)); sq = sq + float(q6k_s8(int(w4.x))) * v4.x; sq = sq + float(q6k_s8(int(w4.y))) * v4.y; sq = sq + float(q6k_s8(int(w4.z))) * v4.z; sq = sq + float(q6k_s8(int(w4.w))) * v4.w; } acc = acc + d * sq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }"
 ))))
             (print "END")
             0))
