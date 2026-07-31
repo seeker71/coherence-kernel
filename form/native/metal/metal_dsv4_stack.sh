@@ -452,16 +452,21 @@ check(pruneOK,
 // sentinel-CHECKING gates reading an unfilled buffer, so two of them reported FAIL on a healthy run —
 // an optimisation that gained nothing and manufactured a false defect. Every intermediate is born
 // all-NaN again, so an unrun kernel reads as a refusal and never as a plausible zero.
+// zerobirth/edgedrop: every output buffer carries a sentinel so an unrun kernel reads as a refusal
+// and not as a computed zero. That discipline is kept exactly; only the WRITING of it changes. A
+// Swift `for i in 0..<n { p[i] = .nan }` is a scalar store loop, and it runs about 2287 times a token
+// over tens of megabytes. memset_pattern4 lays down the identical bits — Float.nan is 0x7FC00000 —
+// with the platform's own vector store. Same sentinel, same evidence, one word of setup.
 func sentinelled(_ n: Int) -> MTLBuffer {
     let b = dev.makeBuffer(length: max(n,1)*4, options: .storageModeShared)!
-    let p = b.contents().bindMemory(to: Float.self, capacity: max(n,1))
-    for i in 0..<max(n,1) { p[i] = Float.nan }
+    var pat = Float.nan.bitPattern
+    memset_pattern4(b.contents(), &pat, max(n,1)*4)
     return b
 }
 func sentinelledU(_ n: Int) -> MTLBuffer {
     let b = dev.makeBuffer(length: max(n,1)*4, options: .storageModeShared)!
-    let p = b.contents().bindMemory(to: UInt32.self, capacity: max(n,1))
-    for i in 0..<max(n,1) { p[i] = 0xFFFFFFFF }
+    var pat: UInt32 = 0xFFFFFFFF
+    memset_pattern4(b.contents(), &pat, max(n,1)*4)
     return b
 }
 // GPU-BUSY VERSUS WALL, because "we are slower" has two completely different cures. If the GPU is busy
@@ -758,6 +763,10 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
             enc(pQ8aQuant, blocks, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
                                               c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
             wbQ80 += rows * blocks * 34
+            // Two rows to a thread was written and measured here: it halves the activation loads
+            // (xa/xb/xs are the same eight bytes for every row) and is BIT-IDENTICAL, stream exact.
+            // It ran 48 -> 51 ms. Halving the thread count costs more than the loads it saves, on the
+            // real stack and not only on the microbench this file already recorded it losing on.
             enc(pQ80Ord, rows*8, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                           c.setBuffer(xq, offset: 0, index: 1); c.setBuffer(xs, offset: 0, index: 2)
                                           c.setBuffer(out, offset: 0, index: 3)
