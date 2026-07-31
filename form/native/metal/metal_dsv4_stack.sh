@@ -737,7 +737,7 @@ func ropeFreqs(_ il: Int) -> MTLBuffer {
 func gpuRope(_ v: MTLBuffer, _ nh: Int, _ pos: Int, _ il: Int, _ inverse: Bool) -> MTLBuffer {
     let out = sentinelled(nh*headDim)
     var a = UInt32(nh), b = UInt32(headDim), c32 = UInt32(nRot), p = Float(pos), s: Float = inverse ? -1.0 : 1.0
-    enc(pRope, nh, 64) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+    enc(pRope, nh*headDim, 64) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                               c.setBuffer(ropeFreqs(il), offset: 0, index: 2)
                               c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
                               c.setBytes(&p, length: 4, index: 6); c.setBytes(&s, length: 4, index: 7) }
