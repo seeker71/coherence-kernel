@@ -235,15 +235,23 @@ awk 'NF < 2 { print "FAIL missing value for " $1 > "/dev/stderr"; exit 1 }' "$wo
 echo "  native-only execution: Form emits the kernels; Metal carries and checks the full stack"
 
 # ── 3. compile the translation units, cached by sha ────────────────────────────────────────────────
+# FORM_DS4_FPCONTRACT PRICES THE ASSOCIATION ITSELF. `-ffp-contract=off` is deliberate and stated at
+# the top of ds4-order-match.fk: a fused multiply-add rounds once where ours rounds twice, so every
+# metallib here is compiled without it and the whole match rests on that. But `off` is not free — a
+# kernel that is arithmetic-bound runs every multiply and every add as its own instruction where the
+# machine could have issued one. Setting this to `fast` BREAKS THE STREAM by construction, so it is a
+# measuring instrument and never a setting: it says what the pinned association costs, in milliseconds.
+# The flag goes into the cache key, or the run would silently reuse a metallib built the other way.
+FPCONTRACT="${FORM_DS4_FPCONTRACT:-off}"
 compile_unit() { # $1 emit-form  $2 grep-token  $3 cache-prefix -> echoes LIB path
     local form="$1" tok="$2" pre="$3" lib sha
     echo "($form)" > "$work/$pre.fk"
     "$GO_BIN" "${FILES[@]}" "$work/$pre.fk" > "$work/$pre.out" 2>"$work/$pre.err" || { echo "FAIL $pre MSL emission" >&2; cat "$work/$pre.err" >&2; return 1; }
     awk '/^MSL$/{d=1;next} /^END$/{d=0;next} d{print}' "$work/$pre.out" > "$work/$pre.metal"
     grep -q "$tok" "$work/$pre.metal" || { echo "FAIL $pre kernel $tok not emitted" >&2; return 1; }
-    sha="$(shasum -a 256 "$work/$pre.metal" | cut -c1-16)"; lib="$CACHE/$pre-$sha.metallib"
+    sha="$( { shasum -a 256 "$work/$pre.metal"; echo "contract=$FPCONTRACT"; } | shasum -a 256 | cut -c1-16)"; lib="$CACHE/$pre-$sha.metallib"
     if [[ ! -f "$lib" ]]; then
-        xcrun -sdk macosx metal -O2 -std=metal3.0 -ffp-contract=off -c "$work/$pre.metal" -o "$work/$pre.air" 2>"$work/$pre.merr" \
+        xcrun -sdk macosx metal -O2 -std=metal3.0 "-ffp-contract=$FPCONTRACT" -c "$work/$pre.metal" -o "$work/$pre.air" 2>"$work/$pre.merr" \
           && xcrun -sdk macosx metallib "$work/$pre.air" -o "$lib" 2>>"$work/$pre.merr" || { echo "FAIL $pre metal compile" >&2; cat "$work/$pre.merr" >&2; return 1; }
         echo "PASS  $pre metallib compiled: $(basename "$lib")" >&2
     else
@@ -447,23 +455,90 @@ check(pruneOK,
   "the pruning is in the BIAS: at every top-k layer, exp_probs_b.bias carries a -1e30 sentinel on exactly the indices at or beyond that layer's own ffn_gate_exps dim[2], and a finite value below it. That, and nothing in the metadata, is what keeps a 256-wide router from selecting an expert a 192-deep stack does not have",
   "the bias sentinel does not match the stack depth: \(pruneWhy)")
 
-// THE SENTINEL IS EVIDENCE, AND EVIDENCE HAS A PRICE. Every intermediate is born all-NaN so an unrun
-// kernel reads as a refusal instead of a plausible zero (zerobirth/edgedrop) — and that CPU fill runs
-// on every buffer of every dispatch of every layer of every token. With FORM_DS4_GATES=0 nothing reads
-// a sentinel, so filling one is work done for a witness nobody called. The buffer is still fresh; only
-// the fill is skipped, and the moment gates come back so does the sentinel.
-let sentinelFill = ProcessInfo.processInfo.environment["FORM_DS4_GATES"] != "0"
+// THE SENTINEL IS UNCONDITIONAL. It was briefly skipped when gates were off, on the theory that its
+// CPU fill was a cost worth removing. Measured: it bought NOTHING (floor unchanged). And it left the
+// sentinel-CHECKING gates reading an unfilled buffer, so two of them reported FAIL on a healthy run —
+// an optimisation that gained nothing and manufactured a false defect. Every intermediate is born
+// all-NaN again, so an unrun kernel reads as a refusal and never as a plausible zero.
+// zerobirth/edgedrop: every output buffer carries a sentinel so an unrun kernel reads as a refusal
+// and not as a computed zero. That discipline is kept exactly; only the WRITING of it changes. A
+// Swift `for i in 0..<n { p[i] = .nan }` is a scalar store loop, and it runs about 2287 times a token
+// over tens of megabytes. memset_pattern4 lays down the identical bits — Float.nan is 0x7FC00000 —
+// with the platform's own vector store. Same sentinel, same evidence, one word of setup.
+// THE HOST'S SHARE, TIMED SEPARATELY. A generated token costs 48 ms of GPU and 60 ms of wall, and the
+// twelve between them are the host: it allocates a buffer and encodes a dispatch about 2287 times a
+// token, and the device is idle while it does. Splitting allocation from sentinelling says which of
+// the two to fix before anyone builds a pool.
+// FORM_DS4_HOSTSHARE=1 times it. Off by default: two Date() calls per allocation is itself a tax on
+// the thing being measured, and this number is a finding to act on once, not a meter to leave running.
+let hostShareOn = ProcessInfo.processInfo.environment["FORM_DS4_HOSTSHARE"] == "1"
+var cpuAllocS: Double = 0, cpuFillS: Double = 0, cpuAllocN = 0
+// ── THE PER-PASS POOL. makeBuffer was 5.0 of the 12 host milliseconds a token, over ~1650 allocations
+// that ask for the SAME sizes in the SAME order every pass, because a pass is the same 43 layers every
+// time. So the allocation is a per-run cost wearing a per-token costume: hand out the pass's i-th
+// buffer from a list instead of asking the driver for a new page mapping, and the second pass onward
+// pays nothing.
+//
+// WHAT MAKES IT SAFE, said rather than assumed. Two buffers alias only if the same pool slot is live
+// twice. Inside a pass the index only increases, so no slot is handed out twice. Across passes, a
+// slot is reused, so anything that OUTLIVES its pass must not come from the pool — and there are
+// exactly three such producers: gpuKvRound's compressed row (kept in compRows forever), compStep's
+// packed arena (compPacked, read by every later pass), and everything allocated before generation
+// begins (kvArenas, compInit's placeholders, padBuf, the gates' two-position sweep). The first two
+// take `sentinelledKeep`; the third is covered by `poolOn` being false until the generation loop.
+//
+// The SENTINEL IS UNCHANGED. Every handed-out buffer is memset to all-NaN before it is returned,
+// pooled or not, so an unrun kernel still reads as a refusal. Only the page mapping is reused.
+//
+// Slots carry headroom because two sizes GROW with position (the attention score/exp planes are
+// nHead*(pos+1+ncomp) wide). Rounding the allocation up means a growing site reallocates every few
+// hundred steps instead of every step, while the memset still covers exactly the asked-for length.
+var poolOn = false
+var poolBufs: [MTLBuffer] = []
+var poolIdx = 0
+var poolMisses = 0
+// THE INT8 ACTIVATION MEMO, cleared with the pool because it is keyed on pool identity. See the use
+// in gpuMx8: two projections that read the SAME activation at the SAME width were each quantising it.
+struct QKey: Hashable { let buf: ObjectIdentifier; let cols: Int }
+var q8aMemo: [QKey: (MTLBuffer, MTLBuffer)] = [:]
+func poolReset() { poolIdx = 0; q8aMemo.removeAll(keepingCapacity: true) }
+// one slot counter for every transient buffer a pass takes, sentinelled or raw, so a slot can never
+// be handed out twice inside a pass.
+func poolTake(_ bytes: Int) -> MTLBuffer {
+    guard poolOn else { return dev.makeBuffer(length: bytes, options: .storageModeShared)! }
+    if poolIdx < poolBufs.count && poolBufs[poolIdx].length >= bytes {
+        let b = poolBufs[poolIdx]; poolIdx += 1; return b
+    }
+    poolMisses += 1
+    let alloc = ((bytes + bytes/4) + 16383) & ~16383
+    let b = dev.makeBuffer(length: alloc, options: .storageModeShared)!
+    if poolIdx < poolBufs.count { poolBufs[poolIdx] = b } else { poolBufs.append(b) }
+    poolIdx += 1
+    return b
+}
 func sentinelled(_ n: Int) -> MTLBuffer {
+    let bytes = max(n,1)*4
+    let t0 = hostShareOn ? Date() : nil
+    let b = poolTake(bytes)
+    let t1 = hostShareOn ? Date() : nil
+    var pat = Float.nan.bitPattern
+    memset_pattern4(b.contents(), &pat, bytes)
+    if let t0 = t0, let t1 = t1 {
+        cpuAllocS += t1.timeIntervalSince(t0); cpuFillS += Date().timeIntervalSince(t1); cpuAllocN += 1
+    }
+    return b
+}
+// the same birth, never from the pool: for the two producers whose output is read by a LATER pass.
+func sentinelledKeep(_ n: Int) -> MTLBuffer {
     let b = dev.makeBuffer(length: max(n,1)*4, options: .storageModeShared)!
-    if !sentinelFill { return b }
-    let p = b.contents().bindMemory(to: Float.self, capacity: max(n,1))
-    for i in 0..<max(n,1) { p[i] = Float.nan }
+    var pat = Float.nan.bitPattern
+    memset_pattern4(b.contents(), &pat, max(n,1)*4)
     return b
 }
 func sentinelledU(_ n: Int) -> MTLBuffer {
     let b = dev.makeBuffer(length: max(n,1)*4, options: .storageModeShared)!
-    let p = b.contents().bindMemory(to: UInt32.self, capacity: max(n,1))
-    for i in 0..<max(n,1) { p[i] = 0xFFFFFFFF }
+    var pat: UInt32 = 0xFFFFFFFF
+    memset_pattern4(b.contents(), &pat, max(n,1)*4)
     return b
 }
 // GPU-BUSY VERSUS WALL, because "we are slower" has two completely different cures. If the GPU is busy
@@ -471,15 +546,47 @@ func sentinelledU(_ n: Int) -> MTLBuffer {
 // wall clock, the harness is stalling it and no kernel change will help. Metal hands us both clocks;
 // asking is cheaper than inferring.
 var gpuBusyS: Double = 0
-func run(_ cb: MTLCommandBuffer) {
-    cb.commit(); cb.waitUntilCompleted()
+// ── COMMIT IS NOT WAIT, and treating them as one word is what kept the device idle ─────────────────
+// The pass encoded ~2287 dispatches and then committed once and waited: twelve milliseconds of host
+// work with the GPU doing nothing, then forty-eight of GPU with the host doing nothing. They are
+// independent engines and the only thing that forced them to take turns was `waitUntilCompleted`
+// sitting inside the same word as `commit`.
+//
+// Split: `submit` hands the encoded work to the queue and returns; `drain` is the only place that
+// waits. Metal runs command buffers on one queue IN SUBMISSION ORDER, so nothing about the ordering
+// of the arithmetic changes — a later buffer cannot start before an earlier one finishes. What
+// changes is that the host can be encoding layer n+1 while the device runs layer n.
+//
+// Every reader still drains: `fp` (the only door to a buffer's contents) drains before it hands back
+// a pointer, so no gate and no readback can see an unfinished write. The per-token feedback loop
+// drains at its end by construction — it reads the residual.
+var inFlight: [MTLCommandBuffer] = []
+func harvest(_ cb: MTLCommandBuffer) {
     if let er = cb.error { gpuErrors += 1; if gpuFirstError == nil { gpuFirstError = "\(er)" } }
     if cb.status != .completed { gpuErrors += 1 }
     gpuBusyS += cb.gpuEndTime - cb.gpuStartTime
 }
+func run(_ cb: MTLCommandBuffer) {
+    cb.commit()
+    inFlight.append(cb)
+}
+func drain() {
+    if inFlight.isEmpty { return }
+    for cb in inFlight { cb.waitUntilCompleted(); harvest(cb) }
+    inFlight.removeAll(keepingCapacity: true)
+}
+// FORM_DS4_PROFILE=1 attributes GPU time to KERNELS instead of to the run as a whole. It submits each
+// dispatch on its own so the device clock can be read per kernel, which inflates the total — the
+// ranking is the answer, not the sum. Built because the last three optimisations were guesses and two
+// were wrong (floorfirst, row 952): a name for the hot kernel is cheaper than another hypothesis.
+let profileOn = ProcessInfo.processInfo.environment["FORM_DS4_PROFILE"] == "1"
+var pipeName: [ObjectIdentifier: String] = [:]
+var profS: [String: Double] = [:], profN: [String: Int] = [:]
 func pipe(_ l: MTLLibrary, _ n: String) -> MTLComputePipelineState {
     guard let f = l.makeFunction(name: n) else { print("FAIL kernel \(n) is not in its library"); exit(1) }
-    return try! dev.makeComputePipelineState(function: f)
+    let p = try! dev.makeComputePipelineState(function: f)
+    pipeName[ObjectIdentifier(p)] = n
+    return p
 }
 // ── ONE COMMAND BUFFER PER SYNC POINT, not one per dispatch ────────────────────────────────────────
 // This harness was built dispatch-by-dispatch because every kernel had to be witnessed the moment it
@@ -495,55 +602,371 @@ func pipe(_ l: MTLLibrary, _ n: String) -> MTLComputePipelineState {
 // dispatches run in order with implicit barriers between them, which is exactly the dependency chain a
 // layer is. So a whole layer's dispatches belong in one encoder, and building 97 043 of them per run
 // was paying an encoder's setup cost for every kernel to buy a guarantee we already had.
+// THE CONCURRENT ENCODER IS NOW THE DEFAULT, which it could not be while it meant "no barriers". It
+// stopped being a measuring instrument when enc() learned to read a dispatch's buffers and place a
+// barrier only on a real hazard (see the hazard tracker below): the barriers that carry the values are
+// all still there, and the ones that only carried the encoder's ignorance are gone.
+// FORM_DS4_CONCURRENT=0 goes back to the serial encoder, and it is the A/B that proves the stream —
+// same tokens, both ways, or the annotations are wrong. =2 keeps the old ceiling probe: no barriers
+// at all, a race, a garbage answer, and the number nothing correct can beat.
+let concurrentMode = ProcessInfo.processInfo.environment["FORM_DS4_CONCURRENT"] ?? "1"
+let concurrentEnc = concurrentMode != "0"
+// mode 2 encodes NO barriers at all: a race, a garbage answer, and the ceiling probe.
+let concurrentRaw = concurrentMode == "2"
 var pendingCB: MTLCommandBuffer? = nil
 var pendingEnc: MTLComputeCommandEncoder? = nil
 var gpuBatches = 0, gpuDispatches = 0
-func flush() {
+// A FREE CENSUS. Counting which kernel each dispatch belongs to costs one dictionary bump and no
+// sync, so unlike the profiler it cannot distort what it measures. It answers the only question
+// fusion needs asked first: of the 2290 dispatches a token pays for, WHICH kernels are the many?
+var dispN: [String: Int] = [:]
+var dispCensusFrom = 0
+// WEIGHT BYTES TOUCHED. The bandwidth floor is a fact about the file, not about the kernels: a token
+// that must read N bytes of weight cannot beat N/peak seconds however the arithmetic is arranged.
+// Counted per weight class so the ratio to the measured floor says how much of peak we are reaching.
+var wbQ80 = 0, wbF16 = 0, wbExp = 0, wbOther = 0
+// submit: the encoded work goes to the queue and the host keeps encoding. No value is readable yet.
+func submit() {
     pendingEnc?.endEncoding(); pendingEnc = nil
     guard let cb = pendingCB else { return }
     pendingCB = nil
     gpuBatches += 1
     run(cb)
 }
-func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, _ body: (MTLComputeCommandEncoder) -> Void) {
+// flush: submit AND wait. Every reader calls this; it is the only place the host blocks.
+func flush() {
+    submit()
+    drain()
+}
+// FORM_DS4_SUBMIT_EVERY=N hands the queue a buffer every N layers instead of once at the end of the
+// pass, so the device starts layer 0 while the host is still encoding layer N. 0 keeps the old shape.
+let submitEvery = Int(ProcessInfo.processInfo.environment["FORM_DS4_SUBMIT_EVERY"] ?? "2") ?? 2
+// FORM_DS4_DOUBLE=<kernel name> SIZES a kernel without breaking anything. The profiler charges every
+// dispatch a submit and cannot see the overlap the batched path gets, so its ranking overstates
+// high-call-count kernels. Ablation by halving a loop is trustworthy but breaks the answer while it
+// runs. Encoding the SAME dispatch twice does neither: a pure matvec writes the same value the second
+// time, so the token stream stays bit-exact — and if it does not, the kernel was not idempotent and
+// the number is refused rather than believed. The floor's rise IS the kernel's cost.
+//
+// AND IT STOPPED BEING TRUE THE DAY THE CONCURRENT ENCODER BECAME THE DEFAULT. The twin is encoded
+// here, inside enc(), AFTER the hazard tracker has already decided about the barrier — so the two
+// copies have none between them and the device runs them AT ONCE. What used to price a kernel's whole
+// serial cost now prices only what a second parallel copy adds, which for anything that does not fill
+// the device is nothing at all. Measured: form_hc_post_f32 doubled for 0.02 ms a token, and the same
+// kernel doubled under FORM_DS4_CONCURRENT=0 costs 0.24 ms.
+// SO: RUN THIS WITH FORM_DS4_CONCURRENT=0, ALWAYS. The serial encoder is what makes the twin wait,
+// and waiting is the whole measurement.
+let dblKernel = ProcessInfo.processInfo.environment["FORM_DS4_DOUBLE"] ?? ""
+// FORM_DS4_SKIP=<substring> SIZES A SUBSYSTEM. Doubling one kernel at a time said every small kernel
+// costs under a millisecond, which cannot be the whole story when forty of the fifty-nine are not in
+// the matvecs. Not encoding a whole class at once — every hc_, every attend, every rope — prices the
+// class including whatever it costs its neighbours. It BREAKS THE STREAM by construction, so it is a
+// measuring instrument and never a configuration: the run that uses it is thrown away.
+//
+// IT OVER-REPORTS, AND BY MORE THAN AN ORDER OF MAGNITUDE. The known trap was address-steering: skip
+// the router and the six expert matvecs read one cached slice six times, so the ablation prices a
+// cache hit. There is a SECOND one, and it does not need addresses. A skipped kernel leaves its
+// output at the NaN sentinel, NaN flows downstream, and this body's transcendentals have
+// VALUE-DEPENDENT TRIP COUNTS: hc_exp halves its argument in `while (hc_abs(a) > 0.5f)`, and NaN > 0.5
+// is false, so the loop that normally runs several times exits at once. Skipping ONE kernel therefore
+// makes every sigmoid, every softmax and every softplus behind it cheap.
+// It said form_hc_post_f32 was worth 7.80 ms of a 37 ms token. Doubled on a serial encoder — same
+// kernel, stream intact — it is worth 0.24 ms. A factor of THIRTY-TWO, and it sent a whole afternoon
+// at the wrong kernel.
+// So an ablation here is honest only when the removed kernel steers no addresses AND poisons no value
+// that reaches a data-dependent loop. Against this stack that is almost nothing: prefer the doubling
+// instrument with FORM_DS4_CONCURRENT=0, and treat any SKIP number as an upper bound wanting a second
+// witness.
+let skipMatch = ProcessInfo.processInfo.environment["FORM_DS4_SKIP"] ?? ""
+// `indep: true` says THIS DISPATCH DOES NOT READ WHAT THE ONE BEFORE IT WROTE. It is the only thing
+// the concurrent encoder needs from a caller, and it is a claim about the model, not about Metal: the
+// gate and up projections of the same experts read the same normed activation and write different
+// buffers; the shared expert's path does not touch the routed experts'. Everywhere else the barrier
+// stands, and barrier-before-every-dispatch on a concurrent encoder IS the serial encoder — same
+// order, same values, same stream — so the default is the old behaviour and each removal is a
+// separate, named claim that has to be measured.
+// ── THE BARRIER IS PAID WHERE THE VALUES NEED IT, NOT BEFORE EVERY DISPATCH ────────────────────────
+// `indep:` is a hand claim, one call site at a time, and it does not scale past the two or three
+// places somebody has argued about. What the stack IS, per layer, is THREE chains that share only
+// attn_norm — the q projections, the kv projections, the compressor — and TWO in the FFN, the routed
+// experts and the shared expert. A barrier between two dispatches that touch no common buffer buys
+// nothing and costs a full device drain.
+//
+// So enc() is TOLD what a dispatch reads and writes, and inserts a barrier only on a real hazard:
+// read-after-write, write-after-write, or write-after-read against anything encoded since the last
+// barrier. Buffers are compared by identity, which is sound here because poolTake never hands one
+// slot out twice inside a pass — two live values are never the same MTLBuffer.
+//
+// THE DEFAULT IS THE SAFE ONE, and that is the whole reason this can be landed incrementally. A call
+// site that declares nothing gets nil, which reads as "assume it touches everything" and forces a
+// barrier before AND after itself. An un-annotated dispatch is therefore exactly as correct as it was
+// under barrier-before-everything, and each annotation is a separate claim that can be measured and
+// reverted on its own. A wrong claim shows up as a broken token stream, which the run already gates.
+//
+// WEIGHT VIEWS ARE NOT DECLARED, on purpose. views[] are the mmap'd file's own bytes and no dispatch
+// in this stack ever writes one, so a weight can never be the write half of a hazard and leaving it
+// out of `reads` cannot hide one. Only buffers something writes are named.
+// FORM_DS4_HZ_SCOPED=1 names the buffers in the barrier instead of draining the whole device.
+// REFUTED, and kept as the falsifier. memoryBarrier(resources:) costs MORE per call here than
+// memoryBarrier(scope: .buffers), and because it settles only the buffers it names it leaves the rest
+// of the field dirty, so MORE dispatches end up needing one: 1844 barriers a token against 1510, and
+// 39.14 ms against 38.17. The finer claim is true and the hardware does not reward it.
+let hzScoped = ProcessInfo.processInfo.environment["FORM_DS4_HZ_SCOPED"] == "1"
+var hzWritten = Set<ObjectIdentifier>()
+var hzRead = Set<ObjectIdentifier>()
+var hzDirtyAll = true
+var hzBarriers = 0
+var hzBarrierFrom = 0
+func hzBarrier(_ e: MTLComputeCommandEncoder) {
+    e.memoryBarrier(scope: .buffers)
+    hzWritten.removeAll(); hzRead.removeAll(); hzDirtyAll = false; hzBarriers += 1
+}
+func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, indep: Bool = false,
+         reads: [MTLBuffer]? = nil, writes: [MTLBuffer]? = nil,
+         _ body: (MTLComputeCommandEncoder) -> Void) {
+    if !skipMatch.isEmpty, let nm = pipeName[ObjectIdentifier(p)] {
+        for pat in skipMatch.split(separator: ",") where nm.contains(pat) { _ = pat; return }
+    }
     if pendingCB == nil { pendingCB = queue.makeCommandBuffer()! }
-    if pendingEnc == nil { pendingEnc = pendingCB!.makeComputeCommandEncoder()! }
+    if pendingEnc == nil {
+        // FORM_DS4_CONCURRENT=1 IS A MEASURING INSTRUMENT AND NEVER A SETTING. A serial encoder puts a
+        // full barrier between every dispatch: the device drains one kernel completely before starting
+        // the next. That is exactly the dependency chain a layer is, so it is CORRECT — and it also
+        // means the token's 16 ms of pure-bandwidth Q8_0 work and its 12 ms of arithmetic-bound expert
+        // decode can never be in flight together, though the routed and shared expert paths do not
+        // depend on each other. A concurrent encoder with NO barriers added is a RACE and its answer is
+        // garbage; what it reports is the ceiling on what overlap could ever be worth here, so the
+        // question can be settled before anyone pays for placing barriers by hand.
+        pendingEnc = concurrentEnc ? pendingCB!.makeComputeCommandEncoder(dispatchType: .concurrent)!
+                                   : pendingCB!.makeComputeCommandEncoder()!
+        // A NEW ENCODER IS ITSELF A BARRIER. Encoders on a command buffer run in the order they were
+        // created, so everything encoded before this one has landed before any of it starts; the
+        // hazard field starts clean rather than carrying the last encoder's writes forward.
+        hzWritten.removeAll(); hzRead.removeAll(); hzDirtyAll = false
+    }
     let e = pendingEnc!
+    if concurrentEnc && !concurrentRaw && !indep {
+        if let rd = reads, let wr = writes {
+            // hzDirtyAll is its own hazard: an un-annotated dispatch is in flight and nobody knows
+            // what it wrote, so the first annotated dispatch after it must still wait, and it has to
+            // wait on EVERYTHING — that is the one case the scoped barrier cannot express.
+            if hzDirtyAll {
+                hzBarrier(e)
+            } else if hzScoped {
+                // THE BARRIER NAMES ITS BUFFERS. memoryBarrier(scope: .buffers) drains the device for
+                // every buffer there is; what a dispatch actually needs is that the two or three
+                // buffers it is about to touch have settled. Everything else in flight — a matvec
+                // streaming weights, an expert decoding into its own slice — has no reason to stop.
+                var need: [MTLResource] = []
+                for b in rd where hzWritten.contains(ObjectIdentifier(b)) { need.append(b) }
+                for b in wr where hzWritten.contains(ObjectIdentifier(b)) || hzRead.contains(ObjectIdentifier(b)) { need.append(b) }
+                if !need.isEmpty {
+                    e.memoryBarrier(resources: need)
+                    hzBarriers += 1
+                    // only the named buffers are settled; the rest of the field stays as it was.
+                    for b in need { hzWritten.remove(ObjectIdentifier(b)); hzRead.remove(ObjectIdentifier(b)) }
+                }
+            } else {
+                let hazard = rd.contains { hzWritten.contains(ObjectIdentifier($0)) }
+                          || wr.contains { hzWritten.contains(ObjectIdentifier($0)) || hzRead.contains(ObjectIdentifier($0)) }
+                if hazard { hzBarrier(e) }
+            }
+            rd.forEach { hzRead.insert(ObjectIdentifier($0)) }
+            wr.forEach { hzWritten.insert(ObjectIdentifier($0)) }
+        } else {
+            // nothing declared: barrier before, and leave the field dirty so the next one waits too.
+            hzBarrier(e)
+            hzDirtyAll = true
+        }
+    }
     e.setComputePipelineState(p); body(e)
     e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
                       threadsPerThreadgroup: MTLSize(width: min(p.maxTotalThreadsPerThreadgroup, cap), height: 1, depth: 1))
     gpuDispatches += 1
+    dispN[pipeName[ObjectIdentifier(p)] ?? "?", default: 0] += 1
+    if !dblKernel.isEmpty && pipeName[ObjectIdentifier(p)] == dblKernel {
+        e.setComputePipelineState(p); body(e)
+        e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
+                          threadsPerThreadgroup: MTLSize(width: min(p.maxTotalThreadsPerThreadgroup, cap), height: 1, depth: 1))
+        gpuDispatches += 1
+    }
+    if profileOn {
+        let nm = pipeName[ObjectIdentifier(p)] ?? "?"
+        let before = gpuBusyS
+        flush()
+        profS[nm, default: 0] += gpuBusyS - before
+        profN[nm, default: 0] += 1
+    }
 }
 
 let pEmb = pipe(lEmb, "form_dsv4_embed_f16")
 let pRms = pipe(lMla, "form_mla_rmsnorm_f32")
+let pRmsRed = pipe(lMla, "form_mla_rmsnorm_reduce_f32")
+let pRmsApp = pipe(lMla, "form_mla_rmsnorm_apply_f32")
 let pHeadrms = pipe(lMla, "form_mla_headrms_f32")
+let pRmsWide = pipe(lMla, "form_mla_rmsnorm_wide_f32")
+let pHeadrmsWide = pipe(lMla, "form_mla_headrms_wide_f32")
 let pRope = pipe(lMla, "form_mla_rope_f32")
 let pAttend = pipe(lMla, "form_mla_attend_f32")
 let pAttendMixed = pipe(lMla, "form_mla_attend_mixed_f32")
+let pAttScores = pipe(lMla, "form_mla_attend_scores")
+// FORM_DS4_ATT_STATS_SG=1 gives a head a SIMDGROUP instead of a thread: the row max is shared across
+// 32 lanes (a maximum is a member of the set, not a fold of it), the per-row exponentials are shared
+// (each is a function of its own row alone), and the denominator's ascending sum stays on lane 0,
+// where its order lives. FORM_DS4_DOUBLE prices the thread-per-head kernel at 0.8 ms of a 39 ms token.
+//
+// MEASURED NULL, AND KEPT WITH ITS NUMBER — the third such null this round, and they all say the same
+// thing. 0.85 s of GPU over 25 tokens either way; 28.48 t/s against 28.37, which is the run-to-run
+// spread. The stream is bit-exact both ways over thirty steps, so the separation of what is ordered
+// from what is not holds; it simply buys nothing, because on the concurrent encoder this kernel was
+// already running under the work around it. What a serial-encoder doubling prices is a kernel's
+// EXCLUSIVE cost, and for the narrow kernels that is not what the token pays. Default stays on the
+// kernel the tree already proved.
+let attStatsSg = ProcessInfo.processInfo.environment["FORM_DS4_ATT_STATS_SG"] == "1"
+let pAttStats  = pipe(lMla, attStatsSg ? "form_mla_attend_stats_sg" : "form_mla_attend_stats")
+let pAttAcc    = pipe(lMla, "form_mla_attend_acc")
+// one entry for both the raw-only and the mixed case: ncomp = 0 is the raw one. Three dispatches
+// instead of one, and 32 768 threads instead of 64, with every fold direction preserved.
+func gpuAttendSplit(_ q: MTLBuffer, _ rows: MTLBuffer, _ crows: MTLBuffer?, _ snk: Tn,
+                    _ nrows: Int, _ ncomp: Int) -> MTLBuffer {
+    let out = sentinelled(nHead*headDim)
+    let ntot = nrows + ncomp
+    let sco = sentinelled(nHead*ntot), ex = sentinelled(nHead*ntot), inv = sentinelled(nHead)
+    let cb = crows ?? rows
+    var a = UInt32(nHead), b = UInt32(headDim), nr = UInt32(nrows), nc = UInt32(ncomp)
+    var sc = 1.0/sqrtf(Float(headDim)), nt = UInt32(ntot)
+    enc(pAttScores, nHead*ntot, tgSmall, reads: [q, rows, cb], writes: [sco]) { c in c.setBuffer(q, offset: 0, index: 0); c.setBuffer(rows, offset: 0, index: 1)
+                                            c.setBuffer(cb, offset: 0, index: 2); c.setBuffer(sco, offset: 0, index: 3)
+                                            c.setBytes(&a, length: 4, index: 4); c.setBytes(&b, length: 4, index: 5)
+                                            c.setBytes(&nr, length: 4, index: 6); c.setBytes(&nc, length: 4, index: 7)
+                                            c.setBytes(&sc, length: 4, index: 8) }
+    // thread count and pipeline out of ONE expression — see the caution in enc().
+    enc(pAttStats, attStatsSg ? nHead*32 : nHead, tgSmall, reads: [sco], writes: [ex, inv]) { c in c.setBuffer(sco, offset: 0, index: 0)
+                                     c.setBuffer(views[snk.idx], offset: snk.inner, index: 1)
+                                     c.setBuffer(ex, offset: 0, index: 2); c.setBuffer(inv, offset: 0, index: 3)
+                                     c.setBytes(&a, length: 4, index: 4); c.setBytes(&nt, length: 4, index: 5) }
+    enc(pAttAcc, nHead*headDim, tgSmall, reads: [rows, cb, ex, inv], writes: [out]) { c in c.setBuffer(rows, offset: 0, index: 0); c.setBuffer(cb, offset: 0, index: 1)
+                                            c.setBuffer(ex, offset: 0, index: 2); c.setBuffer(inv, offset: 0, index: 3)
+                                            c.setBuffer(out, offset: 0, index: 4)
+                                            c.setBytes(&a, length: 4, index: 5); c.setBytes(&b, length: 4, index: 6)
+                                            c.setBytes(&nr, length: 4, index: 7); c.setBytes(&nc, length: 4, index: 8) }
+    return out
+}
 let pMx8 = pipe(l8, "form_dsv4_mx8_matvec")
 let pGrouped = pipe(lCore, "form_dsv4_mx8_matvec_grouped")
-let pKvq = pipe(lCore, "form_dsv4_kv_fp8_f16_round")
+let pKvq = pipe(lCore, "form_dsv4_kv_fp8_f16_round_par")
 let pF16mv = pipe(lCore, "form_dsv4_f16_matvec")
 let pHcBcast = pipe(lHc, "form_hc_broadcast_f32")
 let pHcRmsNw = pipe(lHc, "form_hc_rmsnorm_nw_f32")
+let pHcRmsRed = pipe(lHc, "form_hc_rmsnorm_nw_reduce_f32")
+let pHcRmsApp = pipe(lHc, "form_hc_rmsnorm_nw_apply_f32")
+let pHcRmsWide = pipe(lHc, "form_hc_rmsnorm_nw_wide_f32")
 let pHcSplit = pipe(lHc, "form_hc_split_f32")
+// THE SINKHORN'S FENCES, PRICED AND REMOVED. form_hc_split_f32 spreads a 4x4 Sinkhorn over n_hc = 4
+// threads and pays 2*HC_ITERS = 40 threadgroup barriers to keep them in step. FORM_DS4_DOUBLE priced
+// it at 21.9 us a call against a 1.1 us dispatch (the FORM_DS4_PAD slope), and the stack asks for it
+// 83 times a token: 1.8 ms of a 40 ms token, on four threads, almost all of it fencing.
+// The seq kernel is the same arithmetic in the same fold directions on ONE thread, where a barrier
+// between four threads has nothing left to synchronise. Bit-exactness is the gate, not the intent:
+// FORM_DS4_HC_SPLIT_PAR=1 puts the four-thread kernel back so the two can be run against each other.
+let hcSplitSeq = ProcessInfo.processInfo.environment["FORM_DS4_HC_SPLIT_PAR"] != "1"
+let pHcSplitSeq = pipe(lHc, "form_hc_split_seq4_f32")
+let pHcSplitPre = pipe(lHc, "form_hc_split_pre4_f32")
+let pHcSplitComb = pipe(lHc, "form_hc_split_comb4_f32")
 let pHcWsum = pipe(lHc, "form_hc_wsum_f32")
 let pHcPost = pipe(lHc, "form_hc_post_f32")
 let pHcHeadw = pipe(lHc, "form_hc_headw_f32")
 let pMx4 = pipe(lMx4, "form_dsv4_mx4_matvec")
 let pIq2 = pipe(lIq2, "form_dsv4_iq2_matvec")
+let pIq2H = pipe(lIq2, "form_dsv4_iq2_matvec_hoist")
+let pIq2E = pipe(lIq2, "form_dsv4_iq2_matvec_experts")
+let pIq2E4 = pipe(lIq2, "form_dsv4_iq2_matvec_experts4")
+let pIq2ES = pipe(lIq2, "form_dsv4_iq2_matvec_experts_span")
+let pIq2EA = pipe(lIq2, "form_dsv4_iq2_matvec_experts_alu")
+let pIq2EM = pipe(lIq2, "form_dsv4_iq2_matvec_experts_mem")
+let pIq2EF = pipe(lIq2, "form_dsv4_iq2_matvec_experts_fast")
+let pIq2E4F0 = pipe(lIq2, "form_dsv4_iq2_matvec_experts4_fast")
+let pIq2E4T = pipe(lIq2, "form_dsv4_iq2_matvec_experts4_tg")
+// FORM_DS4_IQ2_TG=1 copies the 2 KB IQ2 grid and its 128 sign words into threadgroup memory once per
+// group, because a simdgroup asks that table for 32 unrelated addresses every instruction and
+// `constant` is the space a GPU serves fastest when a simdgroup wants ONE address. MEASURED NULL,
+// and a shade worse: 24.34 t/s against 24.45. Kept, off, as the fourth thing the IQ2 kernel has been
+// asked about its memory and the fourth that was not there.
+
+let iq2Tg = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_TG"] == "1"
+let pIq2E4F = iq2Tg ? pIq2E4T : pIq2E4F0
+// THE MoE'S FIVE ASKS AS TWO. gate+up+swiglu in one, down+reduce in the other — ds4's own metal/moe.metal
+// carries the same two shapes (kernel_mul_mv_id_iq2_xxs_pair_swiglu_f32, ..._sum6_f32), which is what
+// says the fusion is a shape and not a trick. The two halves are INDEPENDENT flags because a fusion
+// buys a dispatch and spends simdgroups, and only a measurement can say which way each trade went:
+// the pair runs a quarter of the gate/up simdgroups it replaces, the sum a sixth of the down's.
+//
+// MEASURED, AND THE TRADE WENT THE OTHER WAY. Both on: 2204 dispatches a token become 2075, and the
+// floor goes 26.46 t/s -> 26.15. The stream is bit-exact either way, so this is not a correctness
+// finding, it is a PRICE finding: 129 fewer asks bought about 0.14 ms (the FORM_DS4_PAD slope says
+// 1.1 us an ask) and the simdgroups they cost were worth more than that. It is the clearest refutation
+// this row has of "the dispatch count is what is left" — the count fell by 6% and the token did not.
+// Kept, OFF, with the number, the way the IQ2 threadgroup-table probe is kept: FORM_DS4_MOE_PAIR=1
+// and FORM_DS4_MOE_SUM=1 turn them on, and the pair also stands ready for the day the gate/up decode
+// stops being ALU-bound, when reading the activation once for two stacks would start to matter.
+let moePair = ProcessInfo.processInfo.environment["FORM_DS4_MOE_PAIR"] == "1"
+let moeSum = ProcessInfo.processInfo.environment["FORM_DS4_MOE_SUM"] == "1"
+let pIq2PairSw = pipe(lIq2, "form_dsv4_iq2_matvec_experts4_pair_swiglu")
+let pQ2kE = pipe(lQ2k, "form_dsv4_q2k_matvec_experts")
+let pQ2kEW = pipe(lQ2k, "form_dsv4_q2k_matvec_experts_wide")
+let pQ2kEF = pipe(lQ2k, "form_dsv4_q2k_matvec_experts_fast")
+let pQ2kE4 = pipe(lQ2k, "form_dsv4_q2k_matvec_experts4")
+let pQ2kSum = pipe(lQ2k, "form_dsv4_q2k_matvec_experts4_sum")
+// THE FOUR-ROW KERNEL WITH THE WIDE READS INSIDE IT, which is what the IQ2 side has had since
+// form_dsv4_iq2_matvec_experts4_fast and the Q2_K side never did. Same thread map as pQ2kE4, same
+// folds, nine loads a group instead of thirty-six. FORM_DS4_Q2K_R4FAST=0 goes back to the scalar reads.
+let q2kR4Fast = ProcessInfo.processInfo.environment["FORM_DS4_Q2K_R4FAST"] != "0"
+let pQ2kE4F = pipe(lQ2k, "form_dsv4_q2k_matvec_experts4_fast")
+// FORM_DS4_Q2K_ROWS4=0 goes back to one output row per simdgroup on the down projection.
+let q2kRows4 = ProcessInfo.processInfo.environment["FORM_DS4_Q2K_ROWS4"] != "0"
+// FORM_DS4_Q2K_FAST=1 reads d and dmin as one word, the group's quants as four and its activations
+// as four — thirty-six scalar loads become nine, bit-identically. MEASURED NULL: 41 ms either way,
+// stream bit-exact either way. It is off by default because a null is a null, and it stays in the
+// tree because it is the third independent confirmation that load COUNT is not what these kernels
+// pay — the same thing the Q8_0 pair said and the same thing the IQ2 probes said.
+let q2kFast = ProcessInfo.processInfo.environment["FORM_DS4_Q2K_FAST"] == "1"
+// FORM_DS4_Q2K_ONE_THREAD=1 goes back to one thread per expert row.
+let q2kOneThread = ProcessInfo.processInfo.environment["FORM_DS4_Q2K_ONE_THREAD"] == "1"
+let pSwigE = pipe(lFfn, "form_dsv4_swiglu_experts")
+let pMoeRed = pipe(lFfn, "form_dsv4_moe_reduce")
+// FORM_DS4_NO_FUSE=1 falls back to the per-expert dispatch path, kept as the A/B that says whether
+// fusing changed a value or only the number of asks.
+let fuseExperts = ProcessInfo.processInfo.environment["FORM_DS4_NO_FUSE"] != "1"
 let pQ2k = pipe(lQ2k, "form_dsv4_q2k_matvec")
 let pQ2kDeq = pipe(lQ2k, "form_q2k_dequant_f32")
 let pPlainMv = pipe(lMla, "form_mla_matvec_f32")
 let pQ80 = pipe(lQ80, "form_dsv4_q80_matvec")
-let pQ80g = pipe(lQ8g, "form_dsv4_q80_matvec_grouped")
+// FORM_DS4_Q80G_WIDE=0 goes back to the block read one byte at a time. The twin forms the same terms
+// through the same q6k_s8 in the same ascending i; sixty-four scalar loads become sixteen vector ones.
+let q80gWide = ProcessInfo.processInfo.environment["FORM_DS4_Q80G_WIDE"] != "0"
+let pQ80g0 = pipe(lQ8g, "form_dsv4_q80_matvec_grouped")
+let pQ80gW = pipe(lQ8g, "form_dsv4_q80_matvec_grouped_wide")
+let pQ80g = q80gWide ? pQ80gW : pQ80g0
 let pSwiglu = pipe(lFfn, "form_dsv4_swiglu_f32")
 let pScale = pipe(lFfn, "form_dsv4_scale_f32")
 let pAxpy = pipe(lFfn, "form_dsv4_axpy_f32")
 let pHashSel = pipe(lFfn, "form_dsv4_hash_select")
 let pHashW = pipe(lFfn, "form_dsv4_hash_weights")
+let pHashP = pipe(lFfn, "form_dsv4_hash_probs")
+let pHashWt = pipe(lFfn, "form_dsv4_hash_wts")
+// FORM_DS4_HASH_SPLIT=0 goes back to the single one-thread hash router.
+let hashSplit = ProcessInfo.processInfo.environment["FORM_DS4_HASH_SPLIT"] != "0"
 let pTopkW = pipe(lFfn, "form_dsv4_topk_weights")
+let pTopkP = pipe(lFfn, "form_dsv4_topk_probs")
+// FORM_DS4_TOPK_TG=0 goes back to the one-thread selection that reads its 256 scores from device
+// memory. The threadgroup form stages them on the core first and runs the identical scan.
+let topkTg = ProcessInfo.processInfo.environment["FORM_DS4_TOPK_TG"] != "0"
+// FORM_DS4_TOPK_TG6=0 goes back to the runtime-width scan, whose six slots the compiler cannot hold
+// in registers. The specialization is the same scan with nused's six made literal; it refuses any
+// other nused rather than guessing, and the general kernel is still here to serve it.
+let topkTg6 = ProcessInfo.processInfo.environment["FORM_DS4_TOPK_TG6"] != "0" && nUsed == 6
+let pTopkS = topkTg ? pipe(lFfn, topkTg6 ? "form_dsv4_topk_select_tg6" : "form_dsv4_topk_select_tg")
+                    : pipe(lFfn, "form_dsv4_topk_select")
 let pKvAppend = pipe(lKv, "form_dkv_append_f32")
 let pControlAdapter = pipe(lKv, "form_dsv4_control_logit_adapter")
 // FORM_DS4_MATCH_ORDER=1 swaps the fast folds for ones that reproduce ds4's ASSOCIATION (see
@@ -555,9 +978,92 @@ let matchOrder = ProcessInfo.processInfo.environment["FORM_DS4_MATCH_ORDER"] == 
 // once, in the run that is meant to ask it, instead of on every token. Default stays ON so the
 // harness keeps proving itself when nobody has said otherwise.
 let gatesOn = ProcessInfo.processInfo.environment["FORM_DS4_GATES"] != "0"
-let pQ8aQuant = pipe(lKv, "form_dsv4_q8a_quantize_f32")
-let pQ80Ord = pipe(lKv, "form_dsv4_q80_matvec_ordered")
-let pF16Ord = pipe(lKv, "form_dsv4_f16_matvec_ordered")
+let pQ8aQuant0 = pipe(lKv, "form_dsv4_q8a_quantize_f32")
+ let pQ8aQuantP = pipe(lKv, "form_dsv4_q8a_quantize_par")
+ // FORM_DS4_Q8A_PAR=0 goes back to one thread per 32-element block.
+ let q8aPar = ProcessInfo.processInfo.environment["FORM_DS4_Q8A_PAR"] != "0"
+ let pQ8aQuant = q8aPar ? pQ8aQuantP : pQ8aQuant0
+ let q8aThreads = q8aPar ? 32 : 1
+let pQ80Ord = pipe(lKv, "form_dsv4_q80_matvec_ordered8")
+// how many threads share a core for the token's biggest kernel — 5.07 of its 9.1 GB. The number was
+// 256 because 256 is what every other dispatch here says; nothing measured it. FORM_DS4_Q80_TG asks.
+let q80Tg = Int(ProcessInfo.processInfo.environment["FORM_DS4_Q80_TG"] ?? "64") ?? 64
+// the same question for every OTHER simdgroup-per-row matvec — grouped Q8_0, the routed IQ2_XXS and
+// Q2_K experts. These kernels take their whole shape from `lane` and simd_sum: they allocate no
+// threadgroup memory and never read threads_per_threadgroup, so the group size is free and only the
+// scheduler sees it. The norms, the f16 matvec and the attention DO read it, so they are left alone.
+// ASKED, AND THE ANSWER WAS THE OPPOSITE OF Q8_0's: 256 43 ms, 128 44, 64 44, 32 44. So this is not
+// a rule about Apple threadgroups, it is a fact about ONE kernel — the eight-thread chain map is
+// what makes a wide group hurt, and a kernel whose rows each own a simdgroup does not care. The knob
+// stays so the next reader can re-ask instead of inheriting a number nobody measured.
+// RE-ASKED UNDER THE CONCURRENT ENCODER, AND THE ANSWER FLIPPED. The sweep above was taken when
+// every dispatch had the device to itself, and a wide group was the way to fill it. With the hazard
+// tracker the expert matvec is no longer alone — the shared expert Q8_0 read and the router are in
+// flight beside it — and a narrower group leaves cores for them: 64 26.38 t/s, 96 26.35, 256 26.20,
+// 512 26.12, each repeated and never out of order. The old number was not wrong, it was answered in
+// a regime that no longer exists.
+let tgFree = Int(ProcessInfo.processInfo.environment["FORM_DS4_TG"] ?? "64") ?? 64
+// ── A THREADGROUP IS A CORE, AND A WIDE GROUP ON A SMALL GRID IS A CORE COUNT ──────────────────────
+// dispatchThreads hands each THREADGROUP to one core, so a kernel's core count is grid/group, not
+// grid. form_mla_attend_scores runs nh*(pos+1+ncomp) threads — 2432 at position 30 — and at 256 to a
+// group that is TEN threadgroups on a forty-core device: three quarters of the machine idle while a
+// thread walks a 512-long dot product one element at a time. FORM_DS4_DOUBLE priced it at 1.6 ms of a
+// 39 ms token for 43 asks, which is 37 us each for 1.2 million multiply-adds — half a percent of the
+// device's arithmetic rate, and the missing cores are the whole explanation.
+// This is the ONE change that touches no arithmetic at all: the same threads, the same indices, the
+// same folds, spread over more cores. It applies only to kernels where a thread cooperates with
+// NOTHING — no threadgroup memory, no simd reduction, no group-wide fold. Every kernel that reduces
+// (the rmsnorms, the topk scan, the Sinkhorn, every matvec) keeps the group width its fold needs.
+let tgSmall = Int(ProcessInfo.processInfo.environment["FORM_DS4_TG_SMALL"] ?? "32") ?? 32
+// FORM_DS4_IQ2_ROWS4=0 goes back to one row per thread for the routed IQ2_XXS experts. The four-row
+// kernel holds the 32 activations of a sub-block in a private array so four rows can spend them; a
+// private array is registers only while the compiler can keep it there, and if it cannot, those
+// reads are device traffic wearing a register's name. Two kernels, one question, one run.
+let iq2Rows4 = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_ROWS4"] != "0"
+// FORM_DS4_IQ2_SPAN=1 gives the routed IQ2_XXS gate/up the SPAN map: one row per simdgroup, lane L
+// owning sub-blocks 4L..4L+3, so the 32 lanes reach the row's whole 1056 bytes in one pass instead
+// of a 264-byte quarter of it (dom-iq2-experts-span-body). Needs cols % 1024 == 0.
+let iq2Span = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_SPAN"] == "1"
+// FORM_DS4_IQ2_ALU=1 runs the ARITHMETIC PROBE in place of the real gate/up kernel: same bytes, same
+// order, four of the eight per-element operations removed. It answers WRONG on purpose. The run that
+// uses it is thrown away and only its floor is read (dom-iq2-experts-alu-probe-body).
+// FORM_DS4_IQ2_FAST=0 goes back to the software-f16 decode. The fast kernel widens the block scale
+// with the machine's own half instruction instead of iq2_f16's divide-and-double loop, reads the
+// eight grid magnitudes as two words, and drops one multiply per element — all bit-identical.
+let iq2Fast = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_FAST"] != "0"
+let iq2Probe = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_ALU"] ?? ""
+let iq2Alu = !iq2Probe.isEmpty
+let pQ80Ds4 = pipe(lKv, "form_dsv4_q80_matvec_ds4")
+let pBwProbe = pipe(lKv, "form_bw_probe")
+// THE TWO ARMS OF THE SAME REFERENCE, AND WHY THE CPU ONE IS STILL THE DEFAULT.
+// form_dsv4_q80_matvec_ds4 is metal/dense.metal's own kernel: 128 threads to a row, eight contiguous
+// payload bytes a thread, and NO activation quantisation — `qs[i] * yl[i]` is int8 weight times f32
+// activation. Ours quantises x to int8 first because that is what ds4.c:7051 does on the NEON path.
+// Running both on the same weights and the same x (FORM_DS4_Q80_AB=1) says how far apart they are:
+//     rows=1024 cols=4096   max|A-B| = 7.7e-04 on rows of magnitude 2.0e-01
+//     rows=32768 cols=1024  max|A-B| = 1.1e-03 on rows of magnitude 8.8e-01
+// A thousand times f32 rounding. So this is not the association differing — it is the ACTIVATION's
+// int8 loss, present in one arm and absent in the other, and the reference disagrees with itself by
+// that much. The Metal arm is the more accurate one and it decodes better text (" Paris. It is known
+// for its rich history, stunning architecture..." where the pinned arm loops "The capital of France
+// is Paris." forever). It also runs 55 ms against 59.
+// It is NOT the default, because the stream this body is held to is the CPU arm's, and re-pinning the
+// reference is a decision to be made in the open, not smuggled in under a speed number.
+// FORM_DS4_Q80_METAL_ORDER=1 runs the reference's other arm.
+let q80CpuOrder = ProcessInfo.processInfo.environment["FORM_DS4_Q80_METAL_ORDER"] != "1"
+let q80Compare = ProcessInfo.processInfo.environment["FORM_DS4_Q80_AB"] == "1"
+var q80Compared = 0
+// SAY THE WIDTH OUT LOUD. The kernel partitions a row's blocks across its simdgroups, so if Metal
+// hands the pipeline fewer threads than asked — register pressure lowers
+// maxTotalThreadsPerThreadgroup without a word — the missing simdgroups' blocks are simply never
+// summed, and the answer is quietly short rather than absent. The kernel reads its own width at
+// runtime; this line is here so the number is on the page and not inferred.
+print("      q80 ds4-shape matvec: maxTotalThreadsPerThreadgroup = \(pQ80Ds4.maxTotalThreadsPerThreadgroup), threadExecutionWidth = \(pQ80Ds4.threadExecutionWidth)")
+let pF16Ord = pipe(lKv, "form_dsv4_f16_matvec_ordered8")
+let pF16Wide = pipe(lKv, "form_dsv4_f16_matvec_wide")
+// FORM_DS4_F16_CHAIN8=1 goes back to ds4.c:6664's eight-chain NEON association, which ceilings a
+// 24-row tensor at 192 threads.
+let f16Chain8 = ProcessInfo.processInfo.environment["FORM_DS4_F16_CHAIN8"] == "1"
 let pQ2kOrd = pipe(lQ2k, "form_dsv4_q2k_matvec_ordered")
 let pCompInit = pipe(lKv, "form_dsv4_comp_init_f32")
 let pCompState = pipe(lKv, "form_dsv4_comp_state_f32")
@@ -566,10 +1072,37 @@ let pCompShift = pipe(lKv, "form_dsv4_comp_shift_f32")
 
 func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
     let out = sentinelled(n); var n32 = UInt32(n), e = eps
-    enc(pRms, 1, 1) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(views[t.idx], offset: t.inner, index: 1)
-                           c.setBuffer(out, offset: 0, index: 2)
-                           c.setBytes(&n32, length: 4, index: 3); c.setBytes(&e, length: 4, index: 4) }
+    // ONE threadgroup striding the row, folding the way metal/norm.metal folds, applying in the same
+    // kernel. The reduce/apply pair it replaces is kept in the library as the read-back reference.
+    enc(pRmsWide, 1024, 1024, reads: [x], writes: [out]) { c in c.setBuffer(x, offset: 0, index: 0)
+                                     c.setBuffer(views[t.idx], offset: t.inner, index: 1)
+                                     c.setBuffer(out, offset: 0, index: 2)
+                                     c.setBytes(&n32, length: 4, index: 3); c.setBytes(&e, length: 4, index: 4) }
     return out
+}
+// ONE QUANTISATION PER ACTIVATION, not one per projection that reads it. attn_norm is read by BOTH
+// the q_a and the kv projection, and ffn_norm by both the shared gate and the shared up — same
+// buffer, same width, so the int8 activation each of them asks for is the same bytes computed twice.
+// The memo is keyed by buffer identity and width and cleared with the pool, which is what makes
+// identity sound: poolTake never hands one slot out twice inside a pass, so a key can never name two
+// different values. It is worth more than the dispatches it removes — two projections that READ a
+// common buffer can run at once, where two that each wrote their own could not.
+//
+// IT IS ALSO A SCHEDULING HANDLE. Called ahead of the matvec that needs it, it moves the quantise off
+// the point where the matvec would otherwise stall on it — see the shared expert's down projection,
+// whose int8 activation is taken while the routed experts are still deciding, so that its Q8_0 read
+// and the routed Q2_K decode are in flight together instead of queueing.
+func q8aQuant(_ x: MTLBuffer, _ cols: Int) -> (MTLBuffer, MTLBuffer) {
+    let key = QKey(buf: ObjectIdentifier(x), cols: cols)
+    if let hit = q8aMemo[key] { return hit }
+    let blocks = (cols + 31) / 32
+    let xq = poolTake(blocks*32), xs = poolTake(blocks*4)
+    var n32 = UInt32(cols)
+    enc(pQ8aQuant, blocks*q8aThreads, 64, reads: [x], writes: [xq, xs]) { c in
+                          c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
+                          c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
+    q8aMemo[key] = (xq, xs)
+    return (xq, xs)
 }
 // THE DENSE TYPE DISPATCH. The reap25 file carried MXFP8 (41) on every dense projection; the mainline
 // Mac quant carries Q8_0 (8) on attn_q_a/q_b/kv/output_a/output_b and on output.weight. Reading one
@@ -578,17 +1111,76 @@ func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
 func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
     let out = sentinelled(rows); var r = UInt32(rows), c32 = UInt32(cols), nel = UInt32(rows*cols)
     if t.type == 8 {
+        // A DIVERGED STREAM HAS TWO CAUSES AND THEY NEED OPPOSITE ANSWERS: a wrong kernel must be
+        // reverted, a faithful reassociation is a tie-flip and must be argued about. Running both
+        // kernels on the SAME weights and the SAME activation and printing how far apart they land
+        // tells them apart without any external oracle. A bug shows up as a large relative gap on
+        // some rows; a reassociation shows up as f32 rounding.
+        if q80Compare && q80Compared < 3 {
+            q80Compared += 1
+            let blocks = (cols + 31) / 32
+            let xq = dev.makeBuffer(length: blocks*32, options: .storageModeShared)!
+            let xs = dev.makeBuffer(length: blocks*4, options: .storageModeShared)!
+            var n32 = UInt32(cols)
+            let outA = sentinelled(rows), outB = sentinelled(rows)
+            enc(pQ8aQuant, blocks*q8aThreads, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
+                                              c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
+            enc(pQ80Ord, rows*8, q80Tg) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+                                             c.setBuffer(xq, offset: 0, index: 1); c.setBuffer(xs, offset: 0, index: 2)
+                                             c.setBuffer(outA, offset: 0, index: 3)
+                                             c.setBytes(&r, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5) }
+            enc(pQ80Ds4, ((rows + 1) / 2) * 256, 256) { c in
+                c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+                c.setBuffer(outB, offset: 0, index: 2)
+                c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
+            flush()
+            let pa = fp(outA, rows), pb = fp(outB, rows)
+            var maxRel = 0.0 as Float, maxAbs = 0.0 as Float, mag = 0.0 as Float, nfin = 0
+            for i in 0..<rows {
+                if !pa[i].isFinite || !pb[i].isFinite { continue }
+                nfin += 1
+                let d = abs(pa[i] - pb[i]); let m = max(abs(pa[i]), abs(pb[i]))
+                if d > maxAbs { maxAbs = d }
+                if m > mag { mag = m }
+                if m > 1e-3 && d/m > maxRel { maxRel = d/m }
+            }
+            print(String(format: "      q80 A/B  rows=%d cols=%d finite=%d  max|cpu-order - ds4-order| = %.3e   max rel = %.3e   row magnitude = %.3e",
+                         rows, cols, nfin, maxAbs, maxRel, mag))
+        }
+        // ds4's OWN GPU association, and the activation left in f32 because its Metal kernel never
+        // quantises it. FORM_DS4_Q80_CPU_ORDER=1 goes back to the NEON transcription above it.
+        if matchOrder && !q80CpuOrder {
+            wbQ80 += rows * ((cols + 31) / 32) * 34
+            enc(pQ80Ds4, ((rows + 1) / 2) * 256, 256) { c in
+                c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+                c.setBuffer(out, offset: 0, index: 2)
+                c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
+            return out
+        }
         if matchOrder {
             // ds4.c:6814 — the Q8_0 path is not an f32 fold. The ACTIVATION is quantised to int8
             // (:7051), each 32-block is an exact int32 dot, and only the scale product re-enters f32.
             // Reproducing that means reproducing its loss in x, not just its association.
             let blocks = (cols + 31) / 32
-            let xq = dev.makeBuffer(length: blocks*32, options: .storageModeShared)!
-            let xs = dev.makeBuffer(length: blocks*4, options: .storageModeShared)!
-            var n32 = UInt32(cols)
-            enc(pQ8aQuant, blocks, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
-                                              c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
-            enc(pQ80Ord, rows, 64) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+            // the quantised activation is written by the kernel below before anything reads it, so it
+            // needs a slot and not a sentinel — but it takes the slot from the same counter, or two
+            // live buffers could share one.
+            // ONE QUANTISATION PER ACTIVATION, not one per projection that reads it. attn_norm is read
+            // by BOTH the q_a and the kv projection, and ffn_norm by both the shared gate and the
+            // shared up — same buffer, same width, so the int8 activation each of them asks for is
+            // the same bytes computed twice. The memo is keyed by buffer identity and width and
+            // cleared with the pool, which is what makes identity sound: poolTake never hands one
+            // slot out twice inside a pass, so a key can never name two different values.
+            // It is worth more than the 86 dispatches it removes — the two projections now READ a
+            // common buffer instead of each writing its own, which is what lets them run at once.
+            let (xq, xs) = q8aQuant(x, cols)
+            wbQ80 += rows * blocks * 34
+            // Two rows to a thread was written and measured here: it halves the activation loads
+            // (xa/xb/xs are the same eight bytes for every row) and is BIT-IDENTICAL, stream exact.
+            // It ran 48 -> 51 ms. Halving the thread count costs more than the loads it saves, on the
+            // real stack and not only on the microbench this file already recorded it losing on.
+            enc(pQ80Ord, rows*8, q80Tg, reads: [xq, xs], writes: [out]) { c in
+                                          c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                           c.setBuffer(xq, offset: 0, index: 1); c.setBuffer(xs, offset: 0, index: 2)
                                           c.setBuffer(out, offset: 0, index: 3)
                                           c.setBytes(&r, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5) }
@@ -603,14 +1195,14 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
         print("FAIL a dense tensor carries type \(t.type); this stack decodes 41 (MXFP8) and 8 (Q8_0)")
         exit(1)
     }
-    enc(pMx8, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+    enc(pMx8, rows*32, 256, reads: [x], writes: [out]) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                    c.setBuffer(out, offset: 0, index: 2)
                                    c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4); c.setBytes(&nel, length: 4, index: 5) }
     return out
 }
 func gpuHeadrms(_ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(nHead*headDim); var a = UInt32(nHead), b = UInt32(headDim), e = eps
-    enc(pHeadrms, nHead, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+    enc(pHeadrmsWide, nHead*256, 256, reads: [x], writes: [out]) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                                     c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3); c.setBytes(&e, length: 4, index: 4) }
     return out
 }
@@ -673,21 +1265,24 @@ func ropeFreqs(_ il: Int) -> MTLBuffer {
 func gpuRope(_ v: MTLBuffer, _ nh: Int, _ pos: Int, _ il: Int, _ inverse: Bool) -> MTLBuffer {
     let out = sentinelled(nh*headDim)
     var a = UInt32(nh), b = UInt32(headDim), c32 = UInt32(nRot), p = Float(pos), s: Float = inverse ? -1.0 : 1.0
-    enc(pRope, nh, 64) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+    enc(pRope, nh*headDim, tgSmall, reads: [v], writes: [out]) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                               c.setBuffer(ropeFreqs(il), offset: 0, index: 2)
                               c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
                               c.setBytes(&p, length: 4, index: 6); c.setBytes(&s, length: 4, index: 7) }
     return out
 }
-func gpuKvRound(_ v: MTLBuffer) -> MTLBuffer {
-    let out = sentinelled(headDim); var a = UInt32(headDim), b = UInt32(nRot)
-    enc(pKvq, 1, 1) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+// `keep` is the compressor's call: its row is appended to compRows and read by every later pass, so
+// it cannot come from a slot the next pass will hand out again.
+func gpuKvRound(_ v: MTLBuffer, keep: Bool = false) -> MTLBuffer {
+    let out = keep ? sentinelledKeep(headDim) : sentinelled(headDim)
+    var a = UInt32(headDim), b = UInt32(nRot)
+    enc(pKvq, headDim, headDim, reads: [v], writes: [out]) { c in c.setBuffer(v, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                            c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) }
     return out
 }
 func gpuKvAppend(_ row: MTLBuffer, _ arena: MTLBuffer, _ pos: Int, _ cap: Int) {
     var h = UInt32(headDim), p = UInt32(pos), c32 = UInt32(cap)
-    enc(pKvAppend, headDim, 256) { c in c.setBuffer(row, offset: 0, index: 0)
+    enc(pKvAppend, headDim, tgSmall, reads: [row], writes: [arena]) { c in c.setBuffer(row, offset: 0, index: 0)
                                         c.setBuffer(arena, offset: 0, index: 1)
                                         c.setBytes(&h, length: 4, index: 2); c.setBytes(&p, length: 4, index: 3)
                                         c.setBytes(&c32, length: 4, index: 4) }
@@ -782,7 +1377,7 @@ func compStep(_ w: LayerW, _ il: Int, _ xn: MTLBuffer, _ pos: Int) {
     let scCur = gpuF16mv(cgt, xn)
     let row = w.ratio == 4 ? w.ratio + (pos % w.ratio) : (pos % w.ratio)
     var wd = UInt32(width), rw = UInt32(row), pm = UInt32(pos % w.ratio)
-    enc(pCompState, width, 256) { c in c.setBuffer(kvCur, offset: 0, index: 0); c.setBuffer(scCur, offset: 0, index: 1)
+    enc(pCompState, width, tgSmall, reads: [kvCur, scCur], writes: [compState[il], compScore[il]]) { c in c.setBuffer(kvCur, offset: 0, index: 0); c.setBuffer(scCur, offset: 0, index: 1)
                                        c.setBuffer(views[ape.idx], offset: ape.inner, index: 2)
                                        c.setBuffer(compState[il], offset: 0, index: 3)
                                        c.setBuffer(compScore[il], offset: 0, index: 4)
@@ -791,22 +1386,22 @@ func compStep(_ w: LayerW, _ il: Int, _ xn: MTLBuffer, _ pos: Int) {
     guard (pos + 1) % w.ratio == 0 else { return }
     let pooled = sentinelled(headDim)
     var hd32 = UInt32(headDim), rt32 = UInt32(w.ratio)
-    enc(pCompPool, headDim, 256) { c in c.setBuffer(compState[il], offset: 0, index: 0)
+    enc(pCompPool, headDim, tgSmall, reads: [compState[il], compScore[il]], writes: [pooled]) { c in c.setBuffer(compState[il], offset: 0, index: 0)
                                         c.setBuffer(compScore[il], offset: 0, index: 1)
                                         c.setBuffer(pooled, offset: 0, index: 2)
                                         c.setBytes(&hd32, length: 4, index: 3); c.setBytes(&rt32, length: 4, index: 4) }
     if w.ratio == 4 {
         let n = w.ratio * width
-        enc(pCompShift, n, 256) { c in c.setBuffer(compState[il], offset: 0, index: 0)
+        enc(pCompShift, n, tgSmall, reads: [compState[il], compScore[il]], writes: [compState[il], compScore[il]]) { c in c.setBuffer(compState[il], offset: 0, index: 0)
                                        c.setBuffer(compScore[il], offset: 0, index: 1)
                                        c.setBytes(&wd, length: 4, index: 2); c.setBytes(&rt32, length: 4, index: 3) }
     }
     let normed = gpuRmsnorm(pooled, headDim, cnm)
     let roped = gpuRope(normed, 1, pos + 1 - w.ratio, il, false)
-    compRows[il].append(gpuKvRound(roped))
+    compRows[il].append(gpuKvRound(roped, keep: true))
     // pack the layer's rows into one contiguous arena for the mixed attention to read
     let n = compRows[il].count
-    let packed = sentinelled(n * headDim)
+    let packed = sentinelledKeep(n * headDim)
     for (i, r) in compRows[il].enumerated() { gpuKvAppend(r, packed, i, n) }
     compPacked[il] = packed
     if n > indexerTopK { compRefusals += 1 }
@@ -815,13 +1410,14 @@ func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows)
     var r = UInt32(t.rows), c32 = UInt32(t.cols), nel = UInt32(t.nel), rk = UInt32(oRank)
     if t.type == 8 {
-        enc(pQ80g, t.rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+        wbQ80 += t.rows * ((t.cols + 31) / 32) * 34
+        enc(pQ80g, t.rows*32, tgFree, reads: [x], writes: [out]) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                           c.setBuffer(out, offset: 0, index: 2)
                                           c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4)
                                           c.setBytes(&nel, length: 4, index: 5); c.setBytes(&rk, length: 4, index: 6) }
         return out
     }
-    enc(pGrouped, t.rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+    enc(pGrouped, t.rows*32, tgFree, reads: [x], writes: [out]) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                          c.setBuffer(out, offset: 0, index: 2)
                                          c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4)
                                          c.setBytes(&nel, length: 4, index: 5); c.setBytes(&rk, length: 4, index: 6) }
@@ -829,8 +1425,13 @@ func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
 }
 func gpuF16mv(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows); var r = UInt32(t.rows), c32 = UInt32(t.cols)
-    // ds4.c:6664 dot_f16_row — two FMA accumulators over widened halves, reduced pairwise.
-    enc(matchOrder ? pF16Ord : pF16mv, t.rows, 256) { c in
+    // ds4_metal.m:4346's own f16 dispatch shape: a 256-thread group to two rows, each thread striding
+    // the row. ds4.c:6664's eight-chain NEON association is the fallback, and it is a 192-thread
+    // ceiling on the 24-row hc_fn tensors that are most of this kernel's calls.
+    wbF16 += t.rows * t.cols * 2
+    let wide = matchOrder && !f16Chain8
+    enc(wide ? pF16Wide : (matchOrder ? pF16Ord : pF16mv),
+        wide ? ((t.rows + 1) / 2) * 256 : (matchOrder ? t.rows*8 : t.rows), 256, reads: [x], writes: [out]) { c in
         c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
         c.setBuffer(out, offset: 0, index: 2)
         c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
@@ -855,7 +1456,7 @@ func gpuExpert(_ t: Tn, _ x: MTLBuffer, _ expert: Int) -> MTLBuffer {
                                        c.setBuffer(x, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
                                        c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4); c.setBytes(&n32, length: 4, index: 5) }
     } else if t.type == 16 {
-        enc(pIq2, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner + expert*stride, index: 0)
+        enc(pIq2H, rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner + expert*stride, index: 0)
                                        c.setBuffer(x, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
                                        c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
     } else if t.type == 10 {
@@ -873,7 +1474,7 @@ func gpuExpert(_ t: Tn, _ x: MTLBuffer, _ expert: Int) -> MTLBuffer {
 }
 func gpuSwiglu(_ gate: MTLBuffer, _ up: MTLBuffer, _ n: Int, _ w: Float, _ lim: Float) -> MTLBuffer {
     let out = sentinelled(n); var n32 = UInt32(n), ww = w, ll = lim
-    enc(pSwiglu, n, 256) { c in c.setBuffer(gate, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
+    enc(pSwiglu, n, tgSmall, reads: [gate, up], writes: [out]) { c in c.setBuffer(gate, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
                                 c.setBuffer(out, offset: 0, index: 2)
                                 c.setBytes(&n32, length: 4, index: 3); c.setBytes(&ww, length: 4, index: 4); c.setBytes(&ll, length: 4, index: 5) }
     return out
@@ -888,30 +1489,60 @@ struct LayerOut {
     let moe: MTLBuffer, shared: MTLBuffer, ffnOut: MTLBuffer, outHc: MTLBuffer
 }
 
-func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLBuffer) {
+// ── THE SINKHORN COMES BACK AS A CLOSURE, TO BE EMITTED WHERE IT CAN BE COVERED ───────────────────
+// hcPre used to emit all twenty-four split weights and then the weighted sum, which reads four of
+// them. The other twenty are the Sinkhorn — one thread, iters rounds of a 4x4 — and nothing until
+// hc_post at the end of the sublayer wants them. Returned as a closure, the carrier emits them after
+// the sublayer's first big matvecs are already encoded: they read a `mix` written before that
+// barrier and write a slice nothing in flight touches, so the tracker finds no hazard and the device
+// runs the Sinkhorn underneath a Q8_0 stream instead of in front of it.
+// FORM_DS4_HC_SPLIT_DEFER=0 emits the whole seq4 kernel in place, which is the A/B for the stream.
+let hcSplitDefer = ProcessInfo.processInfo.environment["FORM_DS4_HC_SPLIT_DEFER"] != "0"
+func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLBuffer, () -> Void) {
     let flat = sentinelled(hcDim)
+    // the fold stays one ascending chain (its association is the recipe's); only the scale-and-write
+    // is unrolled across threads, which has no association to preserve. Bit-identical, and it was the
+    // most expensive kernel in the stack at 1878 us a call.
     do { var n = UInt32(hcDim), e0 = eps
-         enc(pHcRmsNw, 1, 1) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
-                                    c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
+         enc(pHcRmsWide, 1024, 1024, reads: [resid], writes: [flat]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
+                                            c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
     let mix = gpuF16mv(fn, flat)
     let split = sentinelled(2*nHc + nHc*nHc)
+    let deferSplit = hcSplitDefer && hcSplitSeq && nHc == 4
     do { var a = UInt32(nHc), it = UInt32(hcIters), e0 = hcEps
-         enc(pHcSplit, 1, 1) { c in c.setBuffer(mix, offset: 0, index: 0)
+         // pipeline AND thread count out of ONE expression. Read the caution in enc(): the last time a
+         // kernel took its grid from one flag and its pipeline from another it ran on a quarter of its
+         // rows and reported a floor 5 ms lower for work it had not done.
+         let (pSplitUse, nSplit) = deferSplit ? (pHcSplitPre, 1)
+                                              : (hcSplitSeq ? (pHcSplitSeq, 1) : (pHcSplit, nHc))
+         enc(pSplitUse, nSplit, nSplit, reads: [mix], writes: [split]) { c in c.setBuffer(mix, offset: 0, index: 0)
                                     c.setBuffer(views[sc.idx], offset: sc.inner, index: 1)
                                     c.setBuffer(views[bs.idx], offset: bs.inner, index: 2)
                                     c.setBuffer(split, offset: 0, index: 3)
-                                    c.setBytes(&a, length: 4, index: 4); c.setBytes(&it, length: 4, index: 5)
-                                    c.setBytes(&e0, length: 4, index: 6) } }
+                                    c.setBytes(&a, length: 4, index: 4)
+                                    // the pre kernel takes eps at 5; seq4 and the parallel one take
+                                    // iters there and eps at 6, so the bytes follow the pipeline.
+                                    if deferSplit { c.setBytes(&e0, length: 4, index: 5) }
+                                    else { c.setBytes(&it, length: 4, index: 5); c.setBytes(&e0, length: 4, index: 6) } } }
+    let comb: () -> Void = deferSplit ? {
+        var a = UInt32(nHc), it = UInt32(hcIters), e0 = hcEps
+        enc(pHcSplitComb, 1, 1, reads: [mix], writes: [split]) { c in c.setBuffer(mix, offset: 0, index: 0)
+                                   c.setBuffer(views[sc.idx], offset: sc.inner, index: 1)
+                                   c.setBuffer(views[bs.idx], offset: bs.inner, index: 2)
+                                   c.setBuffer(split, offset: 0, index: 3)
+                                   c.setBytes(&a, length: 4, index: 4); c.setBytes(&it, length: 4, index: 5)
+                                   c.setBytes(&e0, length: 4, index: 6) }
+    } : { }
     let cur = sentinelled(nEmbd)
     do { var a = UInt32(nHc), b = UInt32(nEmbd)
-         enc(pHcWsum, nEmbd, 256) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(split, offset: 0, index: 1)
+         enc(pHcWsum, nEmbd, tgSmall, reads: [resid, split], writes: [cur]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(split, offset: 0, index: 1)
                                          c.setBuffer(cur, offset: 0, index: 2)
                                          c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4) } }
-    return (cur, split)
+    return (cur, split, comb)
 }
 func hcPost(_ blockOut: MTLBuffer, _ resid: MTLBuffer, _ split: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(hcDim); var a = UInt32(nHc), b = UInt32(nEmbd)
-    enc(pHcPost, nHc, 256) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
+    enc(pHcPost, nHc*nEmbd, tgSmall, reads: [blockOut, resid, split], writes: [out]) { c in c.setBuffer(blockOut, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
                                   c.setBuffer(split, offset: nHc*4, index: 2)
                                   c.setBuffer(split, offset: 2*nHc*4, index: 3)
                                   c.setBuffer(out, offset: 0, index: 4)
@@ -978,20 +1609,43 @@ func q2kFusedVsCarved(_ t: Tn, _ x: MTLBuffer, _ expert: Int) {
       String(format: "Q2_K FUSED vs CARVED, blk.0 expert %d down [%d<-%d]: the one-pass decode+fold and an independent per-weight carve of the same bytes folded by the plain f32 matvec agree to max abs %.3g = %.2g of the vector's rms %.6g (worst single-element rel %.3g sits on a near-cancellation, which reassociation owns)", expert, rows, cols, maxAbs, scaled, rmsA, maxRel),
       String(format: "Q2_K fused matvec disagrees with its own carver on blk.0 expert %d down: max abs %.3g = %.2g of rms %.6g (vs %.6g) — the FOLD or the MAP, not the decode", expert, maxAbs, scaled, rmsA, rmsB))
 }
-func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
+func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int, _ underCover: () -> Void = { }) -> MTLBuffer {
     let w = LW[il]
     if il == 0 { stage("attn_pre", input, nEmbd) }
     let xn = gpuRmsnorm(input, nEmbd, w.nrm)
+    // ── THE TWO PROJECTIONS INTERLEAVED, BECAUSE ADJACENCY IS WHAT THE SCHEDULER CAN SEE ───────────
+    // The q chain and the kv chain share exactly one value, attn_norm, and nothing after it. Written
+    // one after the other they still ran one after the other: the hazard tracker only ever lets a
+    // dispatch overlap what was encoded since the LAST BARRIER, and with the whole q chain emitted
+    // first, kv's first matvec arrived five barriers late and had only the rope to keep it company.
+    // Measured: the tracker alone, on the old order, was worth nothing at all (39.81 both ways).
+    // Emitted in step with each other, each pair reads buffers the other does not write, so the
+    // tracker finds no hazard between them and the encoder runs them together. Two nearly-pure
+    // bandwidth matvecs and two one-threadgroup norms now fill each other's idle cores.
+    // The int8 activation memo in gpuMx8 is what makes the first pair possible: both projections read
+    // attn_norm at the same width, so kv's matvec READS the buffer q's matvec reads instead of each
+    // writing its own — a shared read is not a hazard, a pair of writes would have been.
     let ql = gpuMx8(w.qa, xn, w.qa.rows, w.qa.cols)
+    let kl = gpuMx8(w.kv, xn, w.kv.rows, w.kv.cols)
+    // AND HERE IS WHERE THE SINKHORN GOES. Two Q8_0 streams are encoded and no barrier stands after
+    // them; the one-thread 4x4 Sinkhorn reads the hc `mix` written before the last barrier and writes
+    // a slice neither matvec touches, so it is emitted into the same window and runs underneath them.
+    underCover()
+    // THE COMPRESSOR IS A THIRD CHAIN OFF THE SAME ACTIVATION, and it was the longest one still
+    // running alone: eight dispatches that read attn_norm and their own rolling plane, and touch
+    // nothing the q or kv chain writes. It used to be emitted after the raw row was pushed, which is
+    // the order ds4.c:12986 reads in — but the raw cache and the compressed plane are DISJOINT
+    // buffers, so no value in either can tell which was written first, and the CPU-side sequencing
+    // that does matter (its rows are appended before attention counts them) is unchanged.
+    if useGrowingKv && useCompressor { compStep(w, il, xn, pos) }
     let qln = gpuRmsnorm(ql, w.qa.rows, w.qan)
+    let kln = gpuRmsnorm(kl, w.kv.rows, w.kvan)
+    if il == 0 { stage("kv", kln, headDim) }
     let qq = gpuMx8(w.qb, qln, w.qb.rows, w.qb.cols)
+    let kr = gpuRope(kln, 1, pos, il, false)
     let qh = gpuHeadrms(qq)
     if il == 0 { stage("q", qh, nHead*headDim) }
     let qr = gpuRope(qh, nHead, pos, il, false)
-    let kl = gpuMx8(w.kv, xn, w.kv.rows, w.kv.cols)
-    let kln = gpuRmsnorm(kl, w.kv.rows, w.kvan)
-    if il == 0 { stage("kv", kln, headDim) }
-    let kr = gpuRope(kln, 1, pos, il, false)
     // raw lane: the fp8+f16 round is the COMPRESSED cache's storage format (ds4.c:3210 says so in its
     // own comment); the raw cache is f32, so the roped key passes through untouched.
     let kq = rawLane ? kr : gpuKvRound(kr)
@@ -999,12 +1653,8 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let ha: MTLBuffer
     if useGrowingKv {
         gpuKvAppend(kq, kvArenas[il], pos, kvCap)
-        // the second cache is fed from attn_norm, the SAME activation the q/kv projections read
-        // (ds4.c:12986), and it is fed AFTER the raw row is pushed — the order the spine has.
-        if useCompressor { compStep(w, il, xn, pos) }
         let nComp = useCompressor ? compRows[il].count : 0
-        ha = nComp == 0 ? gpuAttend(qr, kvArenas[il], w.snk, pos + 1)
-                        : gpuAttendMixed(qr, kvArenas[il], compPacked[il], w.snk, pos + 1, nComp)
+        ha = gpuAttendSplit(qr, kvArenas[il], nComp == 0 ? nil : compPacked[il], w.snk, pos + 1, nComp)
     } else {
         ha = gpuAttend(qr, kq, w.snk)
     }
@@ -1016,18 +1666,68 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     return ao
 }
 
+// FORM_DS4_PAD=N PRICES A DISPATCH. The token costs 2550 asks against the reference's ~950, and
+// "reduce the dispatch count" is only worth doing if an ask is expensive. N extra one-element scale
+// dispatches per layer, writing a scratch nobody reads, move nothing but the count — the slope of the
+// floor against N is the price of an ask, measured rather than assumed.
+let padPerLayer = Int(ProcessInfo.processInfo.environment["FORM_DS4_PAD"] ?? "0") ?? 0
+let padBuf = sentinelled(1)
+func padDispatches() {
+    if padPerLayer <= 0 { return }
+    var a = Float(1.0), n1 = UInt32(1)
+    for _ in 0..<padPerLayer {
+        enc(pScale, 1, 1) { c in c.setBuffer(padBuf, offset: 0, index: 0); c.setBuffer(padBuf, offset: 0, index: 1)
+                                 c.setBytes(&a, length: 4, index: 2); c.setBytes(&n1, length: 4, index: 3) }
+    }
+}
 func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) -> LayerOut {
+    padDispatches()
     let w = LW[il]
-    let (attnCur, attnSplit) = hcPre(residHc, w.haf, w.has, w.hab)
-    let attnOut = mlaBlock(attnCur, pos, il)
+    let (attnCur, attnSplit, attnComb) = hcPre(residHc, w.haf, w.has, w.hab)
+    let attnOut = mlaBlock(attnCur, pos, il, attnComb)
     let afterAttn = hcPost(attnOut, residHc, attnSplit)
     if il == 0 { stage("after_attn_hc", afterAttn, hcDim) }
 
-    let (ffnCur, ffnSplit) = hcPre(afterAttn, w.hff, w.hfs, w.hfb)
+    let (ffnCur, ffnSplit, ffnComb) = hcPre(afterAttn, w.hff, w.hfs, w.hfb)
     if il == 0 { stage("ffn_cur", ffnCur, nEmbd) }
     let ffnNorm = gpuRmsnorm(ffnCur, nEmbd, w.fnw)
     if il == 0 { stage("ffn_norm", ffnNorm, nEmbd) }
     let logits = gpuF16mv(w.rt, ffnNorm)
+    // ── THE SHARED EXPERT DOES NOT WAIT FOR THE ROUTER, BECAUSE IT IS NEVER ROUTED ──────────────────
+    // Its gate and up read ffn_norm and nothing else; the router's selection kernels are three serial
+    // dispatches, two of them a single threadgroup picking six experts out of the layer's stack. Those
+    // three had the whole device to themselves, and this is where the two Q8_0 projections were put to
+    // keep them company.
+    //
+    // COMPANY IS DOWNSTREAM OF A BARRIER, NOT UPSTREAM OF IT, and for a long time this pair was on the
+    // wrong side. A dispatch overlaps only what was encoded since the LAST BARRIER; a barrier drains
+    // everything encoded before it. So the pair, emitted HERE, was drained by the barrier the router's
+    // probs kernel needs for `logits`, and drained again by the one its selection needs for `probs` —
+    // and form_dsv4_topk_select_tg, one threadgroup walking 256 scores on thread 0, then ran alone.
+    // FORM_DS4_DOUBLE prices that walk at 1.6 ms of the token, the same order as attend_scores.
+    // The pair is emitted below instead, in the same barrier window as the selection: it reads
+    // ffn_norm, which the selection does not write, and writes its own, which the selection does not
+    // read, so the tracker finds nothing between them and the 17.8 MB of Q8_0 stream now actually runs
+    // underneath the scan.
+    //
+    // MEASURED NULL, AND KEPT WITH ITS NUMBER. Moving the pair below the selection: 0.87 s of GPU over
+    // 25 tokens either way, 27.95 t/s in front against 27.71 behind — noise, and if anything a shade
+    // worse. So the reading of the barrier window is right and the device was already finding the
+    // work: two 8.9 MB Q8_0 streams are long enough that the queue still has them when the scan
+    // arrives, whichever side of the barrier they were encoded on. FORM_DS4_SHARED_AFTER_ROUTE=1 moves
+    // them; the default leaves the order the tree already proved, and the scan's 1.6 ms stands as an
+    // open number rather than a solved one.
+    let sharedAfterRoute = ProcessInfo.processInfo.environment["FORM_DS4_SHARED_AFTER_ROUTE"] == "1"
+    var sgv: MTLBuffer? = nil, suv: MTLBuffer? = nil, smid: MTLBuffer? = nil, sharedOut: MTLBuffer? = nil
+    func emitSharedGateUp() {
+        guard fuseExperts, sgv == nil else { return }
+        sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
+        suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
+    }
+    if !sharedAfterRoute { emitSharedGateUp() }
+    // the FFN half's Sinkhorn takes the same cover the attention half's took: it reads a `mix` from
+    // before the last barrier and writes a slice nothing in flight touches, so nothing waits for it.
+    ffnComb()
 
     let nExpR = w.nExpRouter
     let idsBuf = sentinelledU(nUsed), wtsBuf = sentinelled(nUsed), probsBuf = sentinelled(nExpR)
@@ -1036,33 +1736,182 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         // router only WEIGHTS them. A top-k here would be the layer-3-and-up recipe applied to a hash layer.
         let ht = w.ht!
         var t32 = UInt32(currentToken), nu = UInt32(nUsed)
-        enc(pHashSel, nUsed, 8) { c in c.setBuffer(views[ht.idx], offset: ht.inner, index: 0)
+        enc(pHashSel, nUsed, 8, reads: [], writes: [idsBuf]) { c in c.setBuffer(views[ht.idx], offset: ht.inner, index: 0)
                                        c.setBuffer(idsBuf, offset: 0, index: 1)
                                        c.setBytes(&t32, length: 4, index: 2); c.setBytes(&nu, length: 4, index: 3) }
         var ne = UInt32(nExpR), nu2 = UInt32(nUsed), ws = wscale
-        enc(pHashW, 1, 1) { c in c.setBuffer(logits, offset: 0, index: 0); c.setBuffer(idsBuf, offset: 0, index: 1)
+        if hashSplit {
+            // the 256 softplus-and-sqrt across 256 threads, then the six weights on one — the same
+            // shape layers 3 and up have had since the top-k router was split.
+            enc(pHashP, nExpR, tgSmall, reads: [logits], writes: [probsBuf]) { c in c.setBuffer(logits, offset: 0, index: 0)
+                                           c.setBuffer(probsBuf, offset: 0, index: 1)
+                                           c.setBytes(&ne, length: 4, index: 2) }
+            enc(pHashWt, 1, 1, reads: [probsBuf, idsBuf], writes: [wtsBuf]) { c in c.setBuffer(probsBuf, offset: 0, index: 0); c.setBuffer(idsBuf, offset: 0, index: 1)
+                                      c.setBuffer(wtsBuf, offset: 0, index: 2)
+                                      c.setBytes(&nu2, length: 4, index: 3); c.setBytes(&ws, length: 4, index: 4) }
+        } else {
+        enc(pHashW, 1, 1, reads: [logits, idsBuf], writes: [wtsBuf, probsBuf]) { c in c.setBuffer(logits, offset: 0, index: 0); c.setBuffer(idsBuf, offset: 0, index: 1)
                                  c.setBuffer(wtsBuf, offset: 0, index: 2); c.setBuffer(probsBuf, offset: 0, index: 3)
                                  c.setBytes(&ne, length: 4, index: 4); c.setBytes(&nu2, length: 4, index: 5)
                                  c.setBytes(&ws, length: 4, index: 6) }
+        }
     } else {
         // ds4.c:10665 — the bias enters the SELECTION and never the WEIGHT.
         let bi = w.bias!
         var ne = UInt32(nExpR), nu = UInt32(nUsed), ws = wscale
-        enc(pTopkW, 1, 1) { c in c.setBuffer(logits, offset: 0, index: 0)
-                                 c.setBuffer(views[bi.idx], offset: bi.inner, index: 1)
+        // the elementwise half across nExpR threads, the selection on one — see dsv4-stack-real.fk
+        let scBuf = sentinelled(nExpR)
+        enc(pTopkP, nExpR, tgSmall, reads: [logits], writes: [probsBuf, scBuf]) { c in c.setBuffer(logits, offset: 0, index: 0)
+                                       c.setBuffer(views[bi.idx], offset: bi.inner, index: 1)
+                                       c.setBuffer(probsBuf, offset: 0, index: 2); c.setBuffer(scBuf, offset: 0, index: 3)
+                                       c.setBytes(&ne, length: 4, index: 4) }
+        // ONE THREADGROUP, not one thread: the scan is still serial and still thread 0's, but the 256
+        // scores it walks are staged into threadgroup memory by 256 lanes first. The dispatch must be
+        // exactly one group — nExpR threads with the cap at nExpR — or `tsz` would not cover ne.
+        enc(pTopkS, topkTg ? nExpR : 1, topkTg ? nExpR : 1, reads: [probsBuf, scBuf], writes: [idsBuf, wtsBuf]) { c in c.setBuffer(probsBuf, offset: 0, index: 0); c.setBuffer(scBuf, offset: 0, index: 1)
                                  c.setBuffer(idsBuf, offset: 0, index: 2); c.setBuffer(wtsBuf, offset: 0, index: 3)
-                                 c.setBuffer(probsBuf, offset: 0, index: 4)
-                                 c.setBytes(&ne, length: 4, index: 5); c.setBytes(&nu, length: 4, index: 6)
-                                 c.setBytes(&ws, length: 4, index: 7) }
+                                 c.setBytes(&ne, length: 4, index: 4); c.setBytes(&nu, length: 4, index: 5)
+                                 c.setBytes(&ws, length: 4, index: 6) }
     }
-    flush()   // the router's choice is read on the CPU to pick expert slices — a real sync point
-    let idp = idsBuf.contents().bindMemory(to: UInt32.self, capacity: nUsed)
-    let wtp = wtsBuf.contents().bindMemory(to: Float.self, capacity: nUsed)
+    // and HERE is the window the selection leaves open: whatever the routing regime, its last dispatch
+    // is a one-threadgroup scan sitting alone after a barrier. The shared gate and up go in beside it.
+    if sharedAfterRoute { emitSharedGateUp() }
+    // THE FLUSH THAT OUTLIVED ITS REASON. This used to read the router's choice back to the CPU so the
+    // host could pick each expert's byte slice — a real sync point, once. Then the fused kernels
+    // started taking idsBuf and wtsBuf as DEVICE buffers, and the comment forty lines below has said
+    // "the loop never needed the CPU" ever since. Both comments sat here, disagreeing, while 43
+    // blocking commit+waitUntilCompleted ran per token to produce: `wts`, which nothing reads, and
+    // `ids`, read only by a bounds assertion — whose count is nUsed, a model constant known before the
+    // token loop starts. The assertion moves to the unfused path, which genuinely needs the ids.
+    let fusedHere = fuseExperts && w.gx.type == 16 && w.ux.type == 16 && w.dx.type == 10
     var ids: [Int] = [], wts: [Float] = []
-    for i in 0..<nUsed { ids.append(Int(idp[i])); wts.append(wtp[i]) }
+    // gates-on still needs the ids: the per-layer self-witness asserts every selected expert is inside
+    // the layer's own stack. Reading them back is evidence, so it is paid when evidence is asked for
+    // and not otherwise — the same line deadguard 950 and this row draw.
+    if !fusedHere || gatesOn {
+        flush()
+        let idp = idsBuf.contents().bindMemory(to: UInt32.self, capacity: nUsed)
+        let wtp = wtsBuf.contents().bindMemory(to: Float.self, capacity: nUsed)
+        for i in 0..<nUsed { ids.append(Int(idp[i])); wts.append(wtp[i]) }
+    }
 
     let moe = sentinelled(nEmbd)
     var g0 = moe, u0 = moe, m0 = moe, d0 = moe
+    // ── THE SHARED EXPERT WALKS BESIDE THE ROUTED ONES ─────────────────────────────────────────────
+    // The shared expert reads ffn_norm and writes its own buffers; it touches nothing the routed
+    // experts touch until the two sums are added at the end. Emitted after them it simply waited.
+    // Its four steps are the routed path's four steps — gate/up, swiglu, down — so they pair off, and
+    // the pairing matters because the two are bound by DIFFERENT things: the routed gate/up is IQ2
+    // decode, arithmetic-bound and leaving the bus idle; the shared gate/up is Q8_0, bandwidth-bound
+    // and leaving the ALUs idle. Overlapping two kernels that queue for the same thing gains nothing,
+    // which is why the easy independences were worth so little before. These two do not.
+    // Its gate and up are already in flight: they were emitted under the router, above.
+    // ── ALL SIX EXPERTS IN FIVE DISPATCHES INSTEAD OF THIRTY ────────────────────────────────────────
+    // The slot loop below asks the device gate/up/swiglu/down/accumulate six times over. At 72 us of
+    // measured cost per dispatch, the asking is what is left. The expert ids already live in a device
+    // buffer (the router kernel wrote them), so the loop never needed the CPU: the fused kernels take
+    // (slot, row, lane) and pick their own byte slice. Every expert's arithmetic is untouched, so this
+    // is a rearrangement of dispatches and not a second copy of the recipe — the values are identical.
+    // Only the shapes this file actually carries are fused (gate/up IQ2_XXS, down Q2_K); any other
+    // type falls through to the per-expert path rather than being guessed at.
+    if fusedHere {
+        let nE = nUsed
+        var r32 = UInt32(nFf), c32 = UInt32(nEmbd), st = UInt32(w.gx.bytes / w.gx.d2), ne = UInt32(nE)
+        // ── FIVE DISPATCHES BECOME TWO, WHICH IS WHERE THE ROUND TRIPS WERE ────────────────────────
+        // The five were: gate, up, swiglu, down, reduce. The gate and the up read the SAME activation
+        // and the SAME expert ids off two identically shaped stacks, and the four-row kernel's whole
+        // reason for existing is that a sub-block's 32 activations are worth holding in registers —
+        // held, they can be spent on both stacks instead of one, and the two sums then meet in a
+        // register where form_dsv4_swiglu_experts used to meet them in device memory. The down
+        // projection likewise: a simdgroup that owns four output rows can walk the six slots itself
+        // and add their simd_sums in the same ascending order form_dsv4_moe_reduce used, so the
+        // nexp*n_embd plane is never written at all. Both fused kernels are the SAME decode and the
+        // SAME accumulation chains — a rearrangement of dispatches, never a second recipe.
+        // FORM_DS4_MOE_FUSE2=0 goes back to the five, and it is the A/B that proves the stream.
+        // ONE ROW PER SIMDGROUP unless the four-row kernel is the one selected. Every other IQ2
+        // expert kernel here — fast, span, and both probes — gives a row its own simdgroup and
+        // needs FOUR TIMES the threads. Deriving the thread count from the same flag that picks
+        // the pipeline is not decoration: when it was written the other way the fast kernel ran on
+        // a quarter of its rows, left the rest at the sentinel, and reported a floor 5 ms lower
+        // for work it had not done.
+        let spanOk = iq2Span && nEmbd % 1024 == 0
+        let fast4 = iq2Fast && iq2Rows4 && !iq2Alu && nFf % 4 == 0
+        let useRows4 = fast4 || (!iq2Alu && !iq2Fast && !spanOk && iq2Rows4 && nFf % 4 == 0)
+        // As with the IQ2 gate/up: the thread count comes from the SAME expression that picks the
+        // pipeline. The four-row kernel needs a quarter of the simdgroups; every other one needs all.
+        let dRows4 = q2kRows4 && !q2kOneThread && !q2kFast && nEmbd % 4 == 0
+        let pairOn = moePair && fast4 && !iq2Tg
+        let sumOn = moeSum && dRows4
+        let mid = sentinelled(nE*nFf)
+        var nff = UInt32(nFf), lim = clamp
+        var gt = mid, up = mid
+        if pairOn {
+            wbExp += 2 * nE * (w.gx.bytes / w.gx.d2)
+            // ONE dispatch for gate, up AND the SwiGLU. Four rows to a simdgroup on EACH stack, and
+            // the thread count comes from that same four — the caution above is why.
+            enc(pIq2PairSw, nE*(nFf/4)*32, tgFree,
+                reads: [ffnNorm, idsBuf, wtsBuf], writes: [mid]) { c in
+                c.setBuffer(views[w.gx.idx], offset: w.gx.inner, index: 0)
+                c.setBuffer(views[w.ux.idx], offset: w.ux.inner, index: 1)
+                c.setBuffer(ffnNorm, offset: 0, index: 2); c.setBuffer(mid, offset: 0, index: 3)
+                c.setBuffer(idsBuf, offset: 0, index: 4); c.setBuffer(wtsBuf, offset: 0, index: 5)
+                c.setBytes(&r32, length: 4, index: 6); c.setBytes(&c32, length: 4, index: 7)
+                c.setBytes(&st, length: 4, index: 8); c.setBytes(&ne, length: 4, index: 9)
+                c.setBytes(&lim, length: 4, index: 10) }
+        } else {
+        gt = sentinelled(nE*nFf); up = sentinelled(nE*nFf)
+        for (t, out) in [(w.gx, gt), (w.ux, up)] {
+            wbExp += nE * (t.bytes / t.d2)
+            let pIq2Use = iq2Alu ? (iq2Probe == "2" ? pIq2EM : pIq2EA)
+                                 : (fast4 ? pIq2E4F
+                                          : (iq2Fast ? pIq2EF : (spanOk ? pIq2ES : (useRows4 ? pIq2E4 : pIq2E))))
+            enc(pIq2Use, useRows4 ? nE*(nFf/4)*32 : nE*nFf*32, tgFree, reads: [ffnNorm, idsBuf], writes: [out]) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+                                              c.setBuffer(ffnNorm, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
+                                              c.setBuffer(idsBuf, offset: 0, index: 3)
+                                              c.setBytes(&r32, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
+                                              c.setBytes(&st, length: 4, index: 6); c.setBytes(&ne, length: 4, index: 7) }
+        }
+        enc(pSwigE, nE*nFf, tgSmall, reads: [gt, up, wtsBuf], writes: [mid]) { c in c.setBuffer(gt, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
+                                        c.setBuffer(mid, offset: 0, index: 2); c.setBuffer(wtsBuf, offset: 0, index: 3)
+                                        c.setBytes(&nff, length: 4, index: 4); c.setBytes(&ne, length: 4, index: 5)
+                                        c.setBytes(&lim, length: 4, index: 6) }
+        }
+        // stage 2 pair: the shared swiglu beside the routed one.
+        smid = gpuSwiglu(sgv!, suv!, nFf, 1.0, clamp)
+        // and its int8 activation TAKEN HERE, not inside the matvec below. The routed down projection
+        // is Q2_K decode and the shared one is a Q8_0 read; they are the ALU/bus pair worth having in
+        // flight together, and leaving the quantise inside the shared matvec put a barrier between
+        // them — the matvec would have stalled on its own activation while the Q2_K ran alone.
+        _ = q8aQuant(smid!, w.sdw.cols)
+        var dr = UInt32(nEmbd), dc = UInt32(nFf), dst = UInt32(w.dx.bytes / w.dx.d2)
+        wbExp += nE * (w.dx.bytes / w.dx.d2)
+        var parts = moe
+        if sumOn {
+            enc(pQ2kSum, (nEmbd/4)*32, tgFree, reads: [mid, idsBuf], writes: [moe]) { c in
+                c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
+                c.setBuffer(mid, offset: 0, index: 1); c.setBuffer(moe, offset: 0, index: 2)
+                c.setBuffer(idsBuf, offset: 0, index: 3)
+                c.setBytes(&dr, length: 4, index: 4); c.setBytes(&dc, length: 4, index: 5)
+                c.setBytes(&dst, length: 4, index: 6); c.setBytes(&ne, length: 4, index: 7) }
+            // stage 3 pair: the shared down projection beside the routed one.
+            sharedOut = gpuMx8(w.sdw, smid!, w.sdw.rows, w.sdw.cols)
+        } else {
+        parts = sentinelled(nE*nEmbd)
+        let pQ2kUse = q2kOneThread ? pQ2kE : (dRows4 ? (q2kR4Fast ? pQ2kE4F : pQ2kE4) : (q2kFast ? pQ2kEF : pQ2kEW))
+        let dThreads = q2kOneThread ? nE*nEmbd : (dRows4 ? nE*(nEmbd/4)*32 : nE*nEmbd*32)
+        enc(pQ2kUse, dThreads, tgFree, reads: [mid, idsBuf], writes: [parts]) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
+                                         c.setBuffer(mid, offset: 0, index: 1); c.setBuffer(parts, offset: 0, index: 2)
+                                         c.setBuffer(idsBuf, offset: 0, index: 3)
+                                         c.setBytes(&dr, length: 4, index: 4); c.setBytes(&dc, length: 4, index: 5)
+                                         c.setBytes(&dst, length: 4, index: 6); c.setBytes(&ne, length: 4, index: 7) }
+        // stage 3 pair: the shared down projection beside the routed one.
+        sharedOut = gpuMx8(w.sdw, smid!, w.sdw.rows, w.sdw.cols)
+        var mn = UInt32(nEmbd)
+        enc(pMoeRed, nEmbd, tgSmall, reads: [parts], writes: [moe]) { c in c.setBuffer(parts, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
+                                        c.setBytes(&mn, length: 4, index: 2); c.setBytes(&ne, length: 4, index: 3) }
+        }
+        g0 = gt; u0 = up; m0 = mid; d0 = parts
+    } else {
     for (i, e) in ids.enumerated() {
         guard e >= 0 && e < w.nExpStack else {
             print("FAIL layer \(il) selected expert \(e) but its stack holds only \(w.nExpStack)"); exit(1)
@@ -1078,25 +1927,33 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         }
         var one: Float = 1.0, n32 = UInt32(nEmbd)
         if i == 0 {
-            enc(pScale, nEmbd, 256) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
+            enc(pScale, nEmbd, tgSmall, reads: [dn], writes: [moe]) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
                                            c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
             g0 = gt; u0 = up; m0 = mid; d0 = dn
         } else {
-            enc(pAxpy, nEmbd, 256) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
+            enc(pAxpy, nEmbd, tgSmall, reads: [dn, moe], writes: [moe]) { c in c.setBuffer(dn, offset: 0, index: 0); c.setBuffer(moe, offset: 0, index: 1)
                                           c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
         }
     }
-    let sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
-    let suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
-    let smid = gpuSwiglu(sgv, suv, nFf, 1.0, clamp)
-    let shared = gpuMx8(w.sdw, smid, w.sdw.rows, w.sdw.cols)
+    }
+    // the per-expert fallback path above does not interleave; it computes the shared expert here, the
+    // way the fused path did before the stages were paired.
+    if sharedOut == nil {
+        if sgv == nil {
+            sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
+            suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
+        }
+        smid = gpuSwiglu(sgv!, suv!, nFf, 1.0, clamp)
+        sharedOut = gpuMx8(w.sdw, smid!, w.sdw.rows, w.sdw.cols)
+    }
+    let shared = sharedOut!
 
     if il == 0 { stage("routed_moe", moe, nEmbd); stage("shared_ffn", shared, nEmbd) }
     let ffnOut = sentinelled(nEmbd)
     do { var one: Float = 1.0, n32 = UInt32(nEmbd)
-         enc(pScale, nEmbd, 256) { c in c.setBuffer(moe, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
+         enc(pScale, nEmbd, tgSmall, reads: [moe], writes: [ffnOut]) { c in c.setBuffer(moe, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
                                         c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) }
-         enc(pAxpy, nEmbd, 256) { c in c.setBuffer(shared, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
+         enc(pAxpy, nEmbd, tgSmall, reads: [shared, ffnOut], writes: [ffnOut]) { c in c.setBuffer(shared, offset: 0, index: 0); c.setBuffer(ffnOut, offset: 0, index: 1)
                                        c.setBytes(&one, length: 4, index: 2); c.setBytes(&n32, length: 4, index: 3) } }
     if il == 0 { stage("ffn_out", ffnOut, nEmbd) }
     let outHc = hcPost(ffnOut, afterAttn, ffnSplit)
@@ -1123,11 +1980,11 @@ func embedToken(_ currentToken: Int) -> MTLBuffer {
     let rowOff = currentToken * nEmbd * 2
     let x = sentinelled(nEmbd)
     do { var b64 = UInt64(emb.inner + rowOff), c32 = UInt32(nEmbd)
-         enc(pEmb, nEmbd, 256) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x, offset: 0, index: 1)
+         enc(pEmb, nEmbd, tgSmall, reads: [], writes: [x]) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                       c.setBytes(&b64, length: 8, index: 2); c.setBytes(&c32, length: 4, index: 3) } }
     let resid = sentinelled(hcDim)
     do { var a = UInt32(nHc), b = UInt32(nEmbd)
-         enc(pHcBcast, hcDim, 256) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
+         enc(pHcBcast, hcDim, tgSmall, reads: [x], writes: [resid]) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(resid, offset: 0, index: 1)
                                           c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) } }
     return resid
 }
@@ -1192,20 +2049,23 @@ func stageStats(_ b: MTLBuffer, _ n: Int) -> (Float, Float, Float) {
 }
 func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: Float) {
     let flat = sentinelled(hcDim)
+    // the fold stays one ascending chain (its association is the recipe's); only the scale-and-write
+    // is unrolled across threads, which has no association to preserve. Bit-identical, and it was the
+    // most expensive kernel in the stack at 1878 us a call.
     do { var n = UInt32(hcDim), e0 = eps
-         enc(pHcRmsNw, 1, 1) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
-                                    c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
+         enc(pHcRmsWide, 1024, 1024, reads: [resid], writes: [flat]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
+                                            c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
     let pre = gpuF16mv(outHcFn, flat)
     let headw = sentinelled(nHc)
     do { var a = UInt32(nHc), e0 = hcEps
-         enc(pHcHeadw, nHc, 32) { c in c.setBuffer(pre, offset: 0, index: 0)
+         enc(pHcHeadw, nHc, 32, reads: [pre], writes: [headw]) { c in c.setBuffer(pre, offset: 0, index: 0)
                                        c.setBuffer(views[outHcScale.idx], offset: outHcScale.inner, index: 1)
                                        c.setBuffer(views[outHcBase.idx], offset: outHcBase.inner, index: 2)
                                        c.setBuffer(headw, offset: 0, index: 3)
                                        c.setBytes(&a, length: 4, index: 4); c.setBytes(&e0, length: 4, index: 5) } }
     let collapsed = sentinelled(nEmbd)
     do { var a = UInt32(nHc), b = UInt32(nEmbd)
-         enc(pHcWsum, nEmbd, 256) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(headw, offset: 0, index: 1)
+         enc(pHcWsum, nEmbd, tgSmall, reads: [resid, headw], writes: [collapsed]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(headw, offset: 0, index: 1)
                                          c.setBuffer(collapsed, offset: 0, index: 2)
                                          c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4) } }
     let normed = gpuRmsnorm(collapsed, nEmbd, outNorm)
@@ -1403,11 +2263,40 @@ if kvSequence {
     // read 124% the first time, because gpuBusyS still carried the two-position hushfold sweeps that
     // ran before this loop began. A ratio of two clocks that do not cover the same interval is not a
     // ratio of anything.
-    let gpuBusyAtGenStart = gpuBusyS
+    // ── THE BUS, ASKED RATHER THAN LOOKED UP ──────────────────────────────────────────────────────
+    // A token must pull ~9.1 GB of weight across this bus, so N/peak is the floor no arrangement of
+    // arithmetic can beat, and every "this kernel is slow" is a claim about a peak. Reading a resident
+    // span with nothing but 16-byte loads measures what this device actually gives a streaming read.
+    if ProcessInfo.processInfo.environment["FORM_DS4_BW"] == "1" {
+        let sink = sentinelled(4)
+        for (tag, nthreads) in [("262144 threads", 262144), ("1048576 threads", 1048576)] {
+            let probeWords = min(views[0].length / 4, 2_000_000_000 / 4)
+            var nw = UInt32(probeWords)
+            let t0 = gpuBusyS
+            enc(pBwProbe, nthreads, 256) { c in c.setBuffer(views[0], offset: 0, index: 0)
+                                                c.setBuffer(sink, offset: 0, index: 1)
+                                                c.setBytes(&nw, length: 4, index: 2) }
+            flush()
+            let s = gpuBusyS - t0
+            print(String(format: "      BUS PROBE (%@): %.3f GB of resident weight in %.1f ms = %.0f GB/s streaming read",
+                         tag, Double(probeWords)*4/1e9, s*1000, Double(probeWords)*4/s/1e9))
+        }
+    }
+    // THESE ARE TAKEN WHERE GENERATION ACTUALLY BEGINS, not before the prompt. Named AtGenStart and
+    // read before the prompt's passes, they averaged the floor over thirty passes while the t/s line
+    // counted twenty-five — a floor 1.2x kinder than the run, and every per-token byte count with it.
+    // The prompt's passes are also the ones that fault 83 GiB of file in, so they are not the same
+    // pass at all. The assignment now sits beside tPrefillEnd, on the step that ends the prompt.
+    var gpuBusyAtGenStart = gpuBusyS
+    var wb0Q80 = wbQ80, wb0F16 = wbF16, wb0Exp = wbExp, wb0Oth = wbOther
+    var dispAtGenStart = gpuDispatches
     // PREFILL then GENERATE. While pos is inside the prompt the input is the prompt's token and
     // the emitted id is discarded — the model is READING. Past the prompt it eats its own output.
     // The boundary is the whole difference between a continuation of one token and an answer.
     for pos in 0..<kvSteps {
+        // the pass's slot counter goes back to zero here, and only here. Everything born before this
+        // line — the arenas, the compressor's planes, the gates' sweep — was born outside the pool.
+        poolOn = true; poolReset()
         let inputToken = pos < promptIds.count ? promptIds[pos] : currentToken
         var resid = embedToken(inputToken)
         // FORM_DS4_TRACE_HC=1 prints the hyper-connection stream's RMS after every layer. ds4 reports
@@ -1418,24 +2307,40 @@ if kvSequence {
         if traceHc { print(String(format: "      HC rms after embed: %.4g", stageStats(resid, hcDim).2)) }
         for il in 0..<nLayers {
             resid = runLayer(il, pos, inputToken, resid).outHc
+            if submitEvery > 0 && (il + 1) % submitEvery == 0 { submit() }
             if traceHc && (il < 4 || il % 6 == 0 || il == nLayers - 1) {
                 print(String(format: "      HC rms after blk.%d: %.4g", il, stageStats(resid, hcDim).2))
             }
         }
         dumpArmed = (pos == promptIds.count - 1)
         let exit = nativeExitHead(resid, "feedback step \(pos), input_token=\(inputToken)")
-        if pos == promptIds.count - 1 { tPrefillEnd = Date() }
+        if pos == promptIds.count - 1 {
+            tPrefillEnd = Date()
+            gpuBusyAtGenStart = gpuBusyS
+            wb0Q80 = wbQ80; wb0F16 = wbF16; wb0Exp = wbExp; wb0Oth = wbOther
+            dispAtGenStart = gpuDispatches
+            dispCensusFrom = gpuDispatches
+            hzBarrierFrom = hzBarriers
+            dispN.removeAll()
+        }
         if pos >= promptIds.count - 1 { emitted.append(exit.token) }
         currentToken = exit.token
-        let rp = fp(resid, hcDim)
-        let vals = (0..<hcDim).map { rp[$0] }
-        if pos == 0 {
-            firstFinal = vals
-            let kp = fp(kvArenas[0], kvCap * headDim)
-            firstRow = (0..<headDim).map { kp[$0].bitPattern }
+        // ONLY THE TWO STEPS THE GATE COMPARES ARE COPIED OUT. This built a 16 384-element Swift array
+        // out of the residual on EVERY step to keep the last one; the state-moved gate reads the first
+        // and the last and nothing in between. It is host time sitting on the token's critical path
+        // after the device has already finished — the gap between the 37 ms GPU floor and the wall.
+        if pos == 0 || pos == kvSteps - 1 {
+            let rp = fp(resid, hcDim)
+            let vals = (0..<hcDim).map { rp[$0] }
+            if pos == 0 {
+                firstFinal = vals
+                let kp = fp(kvArenas[0], kvCap * headDim)
+                firstRow = (0..<headDim).map { kp[$0].bitPattern }
+            }
+            lastFinal = vals
         }
-        lastFinal = vals
     }
+    poolOn = false
     let nPrefill = max(1, promptIds.count), nGen = max(1, kvSteps - promptIds.count)
     let prefillS = tPrefillEnd.timeIntervalSince(tGenStart)
     let genS = Date().timeIntervalSince(tPrefillEnd)
@@ -1447,7 +2352,29 @@ if kvSequence {
     // scaffolding are the thing to fix. Quoting only the fraction would have blamed the harness.
     print(String(format: "      GPU BUSY: %.2fs of %.2fs wall (%.0f%%); floor = %.0f ms of GPU per token at 100%% occupancy, over %d dispatches per token",
                  busyAtEnd, prefillS + genS, 100.0 * busyAtEnd / max(prefillS + genS, 1e-9),
-                 1000.0 * busyAtEnd / Double(max(kvSteps, 1)), gpuDispatches / max(kvSteps, 1)))
+                 // PER GENERATED TOKEN, and nGen is the count of those. busyAtEnd is measured from
+                 // gpuBusyAtGenStart, so it holds the GENERATION steps only — dividing it by kvSteps
+                 // (which counts the prompt's steps too) reported a floor 1.2x better than the run.
+                 // It read 65 ms next to a 79 ms wall and invited "the harness is stalling the GPU";
+                 // the truth was 78 against 79 and the device was never idle.
+                 1000.0 * busyAtEnd / Double(max(nGen, 1)), (gpuDispatches - dispAtGenStart) / max(nGen, 1)))
+    // THE BANDWIDTH FLOOR, from the file's own tensor sizes. Every weight byte a token touches must
+    // cross the bus once; N/peak is a floor no arrangement of arithmetic can beat. Printing the
+    // achieved fraction says whether a kernel has room left or is already at the wall.
+    if hostShareOn {
+    print(String(format: "      HOST SHARE: %d sentinelled buffers over the whole run — makeBuffer %.2fs, NaN fill %.2fs; over generation that is %.1f ms and %.1f ms a token",
+                 cpuAllocN, cpuAllocS, cpuFillS,
+                 1000.0 * cpuAllocS * Double(nGen) / Double(max(kvSteps,1)) / Double(max(nGen,1)),
+                 1000.0 * cpuFillS * Double(nGen) / Double(max(kvSteps,1)) / Double(max(nGen,1))))
+    print("      POOL: \(poolBufs.count) slots, \(poolMisses) real allocations over the whole run — a slot that misses is one whose width GREW with position") }
+    let g = Double(max(nGen, 1))
+    let dQ80 = Double(wbQ80 - wb0Q80)/g, dF16 = Double(wbF16 - wb0F16)/g
+    let dExp = Double(wbExp - wb0Exp)/g, dOth = Double(wbOther - wb0Oth)/g
+    let perTok = dQ80 + dF16 + dExp + dOth
+    print(String(format: "      WEIGHT BYTES: %.3f GB per token (q80 %.3f, f16 %.4f, experts %.3f) — %.0f GB/s achieved over the GPU floor; %d dispatches/token over generation only",
+                 perTok/1e9, dQ80/1e9, dF16/1e9, dExp/1e9,
+                 perTok * g / max(busyAtEnd, 1e-9) / 1e9,
+                 (gpuDispatches - dispAtGenStart) / max(nGen, 1)))
     print(String(format: "      SPEED: prefill %.2f t/s (%d tokens in %.2fs), generation %.2f t/s (%d tokens in %.2fs)%@ — ds4 prints the same two numbers",
                  Double(nPrefill)/max(prefillS, 1e-9), nPrefill, prefillS,
                  Double(nGen)/max(genS, 1e-9), nGen, genS,
@@ -1536,6 +2463,37 @@ print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — t
 flush()   // nothing may be left unsubmitted when the verdict is read: an uncommitted buffer is an
           // unchecked cb.error, and a green verdict standing on work that never ran is the exact
           // failure this harness sentinels everything else against.
+if profileOn {
+    print("      ── GPU time by kernel. READ THE BIAS FIRST: profile mode submits each dispatch ALONE, so every")
+    print("         kernel is charged a fixed submit overhead ONCE PER CALL. A kernel called 1484 times carries")
+    print("         1484 helpings of it. This column is cost PLUS call count, not cost — trust it for gaps of")
+    print("         10x or more (those survive the bias) and never for neighbours. The us/call column is the")
+    print("         one to compare when call counts differ. (callbias, corpus row 967.)")
+    for (nm, s) in profS.sorted(by: { $0.value > $1.value }).prefix(60) {
+        let n = profN[nm] ?? 1
+        print(String(format: "      %8.3f s  %6d calls  %8.1f us each   %@", s, n, 1e6*s/Double(n), nm))
+    }
+    // THE OVERHEAD FLOOR, measured rather than assumed. The cheapest kernel per call is an UPPER BOUND
+    // on what a bare submit costs, because it also does real work. Subtracting that bound x call-count
+    // from every total is what turns this ranking from "cost plus call count" into cost (callbias 967).
+    let cheapest = profS.map { ($0.key, 1e6 * $0.value / Double(profN[$0.key] ?? 1)) }.sorted { $0.1 < $1.1 }
+    print("      ── cheapest per call (the submit-overhead ceiling) ──")
+    for (nm, us) in cheapest.prefix(4) { print(String(format: "      %8.1f us each  %6d calls   %@", us, profN[nm] ?? 0, nm)) }
+    let floorUs = cheapest.first?.1 ?? 0
+    print(String(format: "      ── same table with %.0f us x calls subtracted from each total ──", floorUs))
+    let corrected = profS.map { ($0.key, $0.value - floorUs * 1e-6 * Double(profN[$0.key] ?? 0)) }.sorted { $0.1 > $1.1 }
+    for (nm, s) in corrected.prefix(8) { print(String(format: "      %8.3f s corrected  %6d calls   %@", s, profN[nm] ?? 0, nm)) }
+}
+if ProcessInfo.processInfo.environment["FORM_DS4_CENSUS"] == "1" {
+    let genTok = max(gpuDispatches - dispCensusFrom, 1)
+    let nTok0 = max(kvSteps - promptIds.count + 1, 1)
+    print("      HAZARD BARRIERS: \(hzBarriers - hzBarrierFrom) over \(genTok) dispatches = \((hzBarriers - hzBarrierFrom)/nTok0) a token against \(genTok/nTok0) dispatches a token")
+    let nTok = max(kvSteps - promptIds.count + 1, 1)
+    print("      ── DISPATCH CENSUS, generation only: \(genTok) dispatches over \(nTok) tokens ──")
+    for (nm, n) in dispN.sorted(by: { $0.1 > $1.1 }).prefix(22) {
+        print(String(format: "      %6d total  %6.1f per token   %@", n, Double(n)/Double(nTok), nm))
+    }
+}
 print("      dispatches \(gpuDispatches) in \(gpuBatches) command buffers (\(gpuBatches == 0 ? 0 : gpuDispatches/gpuBatches) per submit) — one buffer per dispatch was 47x of ds4")
 let ok = failures == 0 && gpuErrors == 0
 if ok {

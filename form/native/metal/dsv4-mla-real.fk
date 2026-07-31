@@ -119,6 +119,15 @@
     ; --- kernel 3: the plain F16 matvec (ds4.c matvec_f16). STAGE 4 needs it for hc_attn_fn, which is
     ; F16 [in 16384, out 24] — the hyper-connection's mixing projection. One thread per output row, a
     ; straight sequential fold; float(as_type<half>(h)) is the exact IEEE half->single widening.
+    ; THE SAME ROUND, PARALLEL. The one-thread form walks 512 elements twice — a 64-wide amax per
+    ; block, then a 7-step binary search per element — and profiling put it at 764 us a call. Each
+    ; 64-block's amax is independent and max is exact and associative, so the scales can be computed by
+    ; one thread per block into threadgroup memory; each element's E4M3 round is independent of every
+    ; other. One barrier between the two phases, 512 threads instead of one. Bit-identical.
+    (defn dsv4-kvq-par-body ()
+        " kernel void form_dsv4_kv_fp8_f16_round_par (device const float* v [[buffer(0)]], device float* out [[buffer(1)]], constant uint& hd [[buffer(2)]], constant uint& nrot [[buffer(3)]], uint i [[thread_position_in_grid]], uint ti [[thread_position_in_threadgroup]]) { threadgroup float sc[16]; uint nnope = hd - nrot; uint nblk = nnope / 64u; if (ti < nblk) { float amax = 0.0f; for (uint j = 0u; j < 64u; ++j) { float a = metal::abs(v[ti * 64u + j]); if (a > amax) amax = a; } if (amax < 1.0e-4f) amax = 1.0e-4f; sc[ti] = metal::exp2(ds4_ceil_log2(amax / 448.0f)); } threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (i >= hd) return; float x = v[i]; if (i < nblk * 64u) { float s = sc[i / 64u]; float w = metal::clamp(x / s, -448.0f, 448.0f); x = ds4_e4m3_round(w) * s; } out[i] = float(half(x)); } "
+)
+
     (defn dsv4-f16-matvec-body ()
         " kernel void form_dsv4_f16_matvec(device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; float acc = 0.0f; ulong base = (ulong)r * (ulong)cols; for (uint j = 0u; j < cols; ++j) { ushort h = *(device const ushort*)(qb + (base + (ulong)j) * 2ul); acc = acc + float(as_type<half>(h)) * x[j]; } y[r] = acc; }")
 
@@ -130,7 +139,8 @@
             (print (str_concat (qml-msl-header)
                     (str_concat (mx8m-msl-helpers)
                     (str_concat (dsv4-mx8-grouped-body)
-                    (str_concat (dsv4-kvq-body) (dsv4-f16-matvec-body))))))
+                    (str_concat (dsv4-kvq-body)
+                    (str_concat (dsv4-kvq-par-body) (dsv4-f16-matvec-body)))))))
             (print "END")
             0))
 
