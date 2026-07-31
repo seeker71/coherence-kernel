@@ -717,6 +717,11 @@ let pIq2 = pipe(lIq2, "form_dsv4_iq2_matvec")
 let pIq2H = pipe(lIq2, "form_dsv4_iq2_matvec_hoist")
 let pIq2E = pipe(lIq2, "form_dsv4_iq2_matvec_experts")
 let pIq2E4 = pipe(lIq2, "form_dsv4_iq2_matvec_experts4")
+let pIq2ES = pipe(lIq2, "form_dsv4_iq2_matvec_experts_span")
+let pIq2EA = pipe(lIq2, "form_dsv4_iq2_matvec_experts_alu")
+let pIq2EM = pipe(lIq2, "form_dsv4_iq2_matvec_experts_mem")
+let pIq2EF = pipe(lIq2, "form_dsv4_iq2_matvec_experts_fast")
+let pIq2E4F = pipe(lIq2, "form_dsv4_iq2_matvec_experts4_fast")
 let pQ2kE = pipe(lQ2k, "form_dsv4_q2k_matvec_experts")
 let pQ2kEW = pipe(lQ2k, "form_dsv4_q2k_matvec_experts_wide")
 // FORM_DS4_Q2K_ONE_THREAD=1 goes back to one thread per expert row.
@@ -769,6 +774,19 @@ let tgFree = Int(ProcessInfo.processInfo.environment["FORM_DS4_TG"] ?? "256") ??
 // private array is registers only while the compiler can keep it there, and if it cannot, those
 // reads are device traffic wearing a register's name. Two kernels, one question, one run.
 let iq2Rows4 = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_ROWS4"] != "0"
+// FORM_DS4_IQ2_SPAN=1 gives the routed IQ2_XXS gate/up the SPAN map: one row per simdgroup, lane L
+// owning sub-blocks 4L..4L+3, so the 32 lanes reach the row's whole 1056 bytes in one pass instead
+// of a 264-byte quarter of it (dom-iq2-experts-span-body). Needs cols % 1024 == 0.
+let iq2Span = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_SPAN"] == "1"
+// FORM_DS4_IQ2_ALU=1 runs the ARITHMETIC PROBE in place of the real gate/up kernel: same bytes, same
+// order, four of the eight per-element operations removed. It answers WRONG on purpose. The run that
+// uses it is thrown away and only its floor is read (dom-iq2-experts-alu-probe-body).
+// FORM_DS4_IQ2_FAST=0 goes back to the software-f16 decode. The fast kernel widens the block scale
+// with the machine's own half instruction instead of iq2_f16's divide-and-double loop, reads the
+// eight grid magnitudes as two words, and drops one multiply per element — all bit-identical.
+let iq2Fast = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_FAST"] != "0"
+let iq2Probe = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_ALU"] ?? ""
+let iq2Alu = !iq2Probe.isEmpty
 let pQ80Ds4 = pipe(lKv, "form_dsv4_q80_matvec_ds4")
 let pBwProbe = pipe(lKv, "form_bw_probe")
 // THE TWO ARMS OF THE SAME REFERENCE, AND WHY THE CPU ONE IS STILL THE DEFAULT.
@@ -1419,7 +1437,19 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         let gt = sentinelled(nE*nFf), up = sentinelled(nE*nFf)
         for (t, out) in [(w.gx, gt), (w.ux, up)] {
             wbExp += nE * (t.bytes / t.d2)
-            enc(iq2Rows4 && nFf % 4 == 0 ? pIq2E4 : pIq2E, iq2Rows4 && nFf % 4 == 0 ? nE*(nFf/4)*32 : nE*nFf*32, tgFree) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+            // ONE ROW PER SIMDGROUP unless the four-row kernel is the one selected. Every other IQ2
+            // expert kernel here — fast, span, and both probes — gives a row its own simdgroup and
+            // needs FOUR TIMES the threads. Deriving the thread count from the same flag that picks
+            // the pipeline is not decoration: when it was written the other way the fast kernel ran on
+            // a quarter of its rows, left the rest at the sentinel, and reported a floor 5 ms lower
+            // for work it had not done.
+            let spanOk = iq2Span && nEmbd % 1024 == 0
+            let fast4 = iq2Fast && iq2Rows4 && !iq2Alu && nFf % 4 == 0
+            let useRows4 = fast4 || (!iq2Alu && !iq2Fast && !spanOk && iq2Rows4 && nFf % 4 == 0)
+            let pIq2Use = iq2Alu ? (iq2Probe == "2" ? pIq2EM : pIq2EA)
+                                 : (fast4 ? pIq2E4F
+                                          : (iq2Fast ? pIq2EF : (spanOk ? pIq2ES : (useRows4 ? pIq2E4 : pIq2E))))
+            enc(pIq2Use, useRows4 ? nE*(nFf/4)*32 : nE*nFf*32, tgFree) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                               c.setBuffer(ffnNorm, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
                                               c.setBuffer(idsBuf, offset: 0, index: 3)
                                               c.setBytes(&r32, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)

@@ -273,7 +273,88 @@
         (str_concat (dom-bw-probe-body)
         (str_concat (dom-f16-mv-wide-body)
         (str_concat (dom-f16-ordered-body) (dom-f16-ordered8-body)))))))))
+    ; THE SPAN A SIMDGROUP REACHES, asked of the routed experts. The Q8_0 finding above is a statement
+    ; about ADDRESSES AT ONE INSTRUCTION, not about loads: a simdgroup that reaches 1088 contiguous
+    ; bytes runs at 383 GB/s and one that reaches 68 bytes of four rows runs at 241, reading the SAME
+    ; bytes with the same instructions. The routed IQ2 kernels had never been asked this question.
+    ; What they were doing: `sub = lane + 32k` means lane L reads block L/8, so the 32 lanes of a pass
+    ; reach FOUR blocks — 264 bytes of a 1056-byte row (cols=4096: 16 blocks of 66). experts4 makes it
+    ; worse, four such 264-byte windows 1056 bytes apart. Four passes to walk the row, each spending a
+    ; quarter of it.
+    ; What this does instead: lane L owns the FOUR CONSECUTIVE sub-blocks 4L..4L+3. Those four always
+    ; land in one 66-byte block (4L is 8*(L/2) for even L and 8*((L-1)/2)+4 for odd), so lane pair
+    ; (2m, 2m+1) covers block m whole and the 32 lanes of ONE pass cover all 16 blocks: the entire row,
+    ; contiguous, in a single reach. Same weights, same bytes, same per-element association within a
+    ; sub-block — only which lane owns which sub-block changes, so like dom-iq2-hoist-body this is NOT
+    ; bit-identical by construction (the simd_sum tree combines a different partition) and the token
+    ; stream is MEASURED, never assumed.
+    ; Requires nsub = cols/32 to be a multiple of 32, i.e. cols % 1024 == 0; the carrier checks.
+    ; AND IT BOUGHT NOTHING — 43 ms before, 44 after, stream bit-exact either way, with four times the
+    ; threads and four times the reach. It is kept, with its result written on it, because the reasoning
+    ; that produced it is sound and the next reader will otherwise build it again: the Q8_0 span finding
+    ; is TRUE and it is NOT TRANSFERABLE, because it answered a question this kernel was not asking.
+    ; What settled it was two probes rather than an eighth hypothesis (dom-iq2-experts-alu-probe-body,
+    ; dom-iq2-experts-mem-probe-body): the reads alone are 3 of the 7 ms and already run at 372 GB/s.
+    ; There was never any span to recover. The cost was in the decode, and seven memory-shaped
+    ; experiments in a row had been searching the half of the kernel that was already fast.
+    (defn dom-iq2-experts-span-body ()
+        "kernel void form_dsv4_iq2_matvec_experts_span (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint per = rows * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r = g / 32u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; uint spl = nsub / 32u; ulong rowbase = ebase + (ulong)r * (ulong)(cols / 256u) * 66ul; float acc = 0.0f; uint sub0 = lane * spl; for (uint t = 0u; t < spl; ++t) { uint sub = sub0 + t; uint blk = sub / 8u; uint ib32 = sub - blk * 8u; device const uchar* off = qb + rowbase + (ulong)blk * 66ul; float d = iq2_f16(int(off[0]) + 256 * int(off[1])); device const uchar* gb = off + 2u + 8u * ib32; uint aux1 = uint(gb[4]) + 256u * uint(gb[5]) + 65536u * uint(gb[6]) + 16777216u * uint(gb[7]); int scalecode = int(uint(gb[7]) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); device const float* xs = x + sub * 32u; for (uint l = 0u; l < 4u; ++l) { int gidx = int(gb[l]); uint signidx = (aux1 >> (7u * l)) & 127u; constant uchar* g8 = iq2_grid + uint(gidx) * 8u; device const float* xl = xs + l * 8u; uint sr = uint(iq2_ksigns[signidx]); for (uint j = 0u; j < 8u; ++j) { uint sbit = sr & 1u; sr = sr >> 1u; float sgn = (sbit == 1u) ? -1.0f : 1.0f; acc = acc + ((scale * sgn) * float(g8[j])) * xl[j]; } } } float s = metal::simd_sum(acc); if (lane == 0u) y[slot * rows + r] = s; } ")
+
+    ; A MEASURING INSTRUMENT, NOT A KERNEL. It reads exactly the bytes the span kernel reads, in the
+    ; same order, and then throws four of the eight per-element operations away: no sign word, no sign
+    ; bit, no select, no scale*sgn — just scale * mag * x. The answer it computes is WRONG and the
+    ; stream it produces is garbage; what it reports is the EXCHANGE RATE between operations per
+    ; element and milliseconds. If the time does not move, this kernel is waiting on memory and no
+    ; amount of arithmetic thrift will help it. If it halves, every operation removed is time.
+    (defn dom-iq2-experts-alu-probe-body ()
+        "kernel void form_dsv4_iq2_matvec_experts_alu (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint per = rows * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r = g / 32u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rowbase = ebase + (ulong)r * (ulong)(cols / 256u) * 66ul; float acc = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { uint blk = sub / 8u; uint ib32 = sub - blk * 8u; device const uchar* off = qb + rowbase + (ulong)blk * 66ul; float d = iq2_f16(int(off[0]) + 256 * int(off[1])); device const uchar* gb = off + 2u + 8u * ib32; uint aux1 = uint(gb[4]) + 256u * uint(gb[5]) + 65536u * uint(gb[6]) + 16777216u * uint(gb[7]); int scalecode = int(uint(gb[7]) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); device const float* xs = x + sub * 32u; for (uint l = 0u; l < 4u; ++l) { int gidx = int(gb[l]) + int(aux1 & 0u); constant uchar* g8 = iq2_grid + uint(gidx) * 8u; device const float* xl = xs + l * 8u; for (uint j = 0u; j < 8u; ++j) { acc = acc + (scale * float(g8[j])) * xl[j]; } } } float s = metal::simd_sum(acc); if (lane == 0u) y[slot * rows + r] = s; } ")
+
+    ; THE OTHER HALF OF THE SAME QUESTION. The arithmetic probe above removed operations and kept the
+    ; reads; this one keeps the reads and removes EVERYTHING else — no f16 decode, no grid table, no
+    ; signs, no activation. It touches the same ten bytes of every sub-block in the same order and adds
+    ; them. Its answer is garbage. What it reports is what the MEMORY PATH alone costs, which is the
+    ; number the byte count has to be divided by before any GB/s claim about this kernel is honest.
+    (defn dom-iq2-experts-mem-probe-body ()
+        "kernel void form_dsv4_iq2_matvec_experts_mem (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint per = rows * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r = g / 32u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rowbase = ebase + (ulong)r * (ulong)(cols / 256u) * 66ul; uint acc = 0u; for (uint sub = lane; sub < nsub; sub += 32u) { uint blk = sub / 8u; uint ib32 = sub - blk * 8u; device const uchar* off = qb + rowbase + (ulong)blk * 66ul; acc += uint(off[0]) + uint(off[1]); device const uchar* gb = off + 2u + 8u * ib32; for (uint j = 0u; j < 8u; ++j) { acc += uint(gb[j]); } } float s = metal::simd_sum(float(acc)); if (lane == 0u) y[slot * rows + r] = s; } ")
+
+    ; WHAT THE TWO PROBES ABOVE ACTUALLY SAID, measured on this host at 43 ms/token:
+    ;   full kernel  7 ms | reads only  3 ms (1.116 GB -> 372 GB/s, next door to the Q8_0 kernel's 412)
+    ;   half the per-element operations removed  6 ms
+    ; So the memory path was never the problem — seven memory-shaped experiments found nothing because
+    ; there was nothing there — and the DECODE is four of the seven milliseconds. The arithmetic probe
+    ; found only one of those four because it removed the sign work and left the two expensive things
+    ; standing: the grid table read, and iq2_f16.
+    ;
+    ; iq2_f16 is the one that does not belong. Every other kernel in this file widens a stored half with
+    ; `float(as_type<half>(h))` — one instruction. iq2xxs-msl.fk's spine instead REBUILDS the value out
+    ; of arithmetic: two integer divisions for mantissa and exponent, then iq2_pow2, which is a LOOP
+    ; that multiplies by two up to fifteen times. That was written so the GPU decode and the Form-side
+    ; carver could be read as the same recipe, and at one call per weight in a dequant kernel it cost
+    ; nothing worth naming. Here it runs once per 32-element sub-block per row — 135 million times a
+    ; token — and it is a divide-and-loop where the machine has an instruction.
+    ; The values are the same. Half to float is EXACT for every finite half: iq2_f16's two branches are
+    ; the IEEE subnormal (2^-14 * mant/1024) and normal (2^(ex-15) * (1+frac)) forms written out, and
+    ; float has both the exponent range and the mantissa bits to hold either without rounding. They part
+    ; company only at ex == 31, where the hardware yields Inf/NaN and the arithmetic form yields a finite
+    ; 2^16 * (1+frac) — and a block scale of Inf or NaN is not a value a quantiser writes. So this is
+    ; bit-identical on any file that decodes at all, and the stream is measured all the same.
+    ; Two more, both free and both bit-identical: the eight grid magnitudes are read as two four-byte
+    ; loads instead of eight one-byte ones, and `(scale * sgn) * mag` becomes `scale * (sgn * mag)` —
+    ; multiplying by +-1.0f is exact, so both are exactly +-(scale*mag), and one multiply per element
+    ; goes away.
+    (defn dom-iq2-experts-fast-body ()
+        "kernel void form_dsv4_iq2_matvec_experts_fast (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint per = rows * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r = g / 32u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rowbase = ebase + (ulong)r * (ulong)(cols / 256u) * 66ul; float acc = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { uint blk = sub / 8u; uint ib32 = sub - blk * 8u; device const uchar* off = qb + rowbase + (ulong)blk * 66ul; ushort hb = (ushort)off[0] | ((ushort)off[1] << 8); float d = float(as_type<half>(hb)); device const uchar* gb = off + 2u + 8u * ib32; uchar4 g0 = uchar4(*(device const packed_uchar4*)(gb)); uchar4 g1 = uchar4(*(device const packed_uchar4*)(gb + 4u)); uint aux1 = uint(g1.x) + 256u * uint(g1.y) + 65536u * uint(g1.z) + 16777216u * uint(g1.w); int scalecode = int(uint(g1.w) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); device const float* xs = x + sub * 32u; for (uint l = 0u; l < 4u; ++l) { uint gidx = uint(g0[l]); uint signidx = (aux1 >> (7u * l)) & 127u; constant uchar* g8 = iq2_grid + gidx * 8u; uchar4 m0 = uchar4(*(constant packed_uchar4*)(g8)); uchar4 m1 = uchar4(*(constant packed_uchar4*)(g8 + 4u)); device const float* xl = xs + l * 8u; uint sr = uint(iq2_ksigns[signidx]); float b0 = float(m0.x); float b1 = float(m0.y); float b2 = float(m0.z); float b3 = float(m0.w); float b4 = float(m1.x); float b5 = float(m1.y); float b6 = float(m1.z); float b7 = float(m1.w); acc = acc + (scale * (((sr & 1u) == 1u) ? -b0 : b0)) * xl[0]; acc = acc + (scale * ((((sr >> 1u) & 1u) == 1u) ? -b1 : b1)) * xl[1]; acc = acc + (scale * ((((sr >> 2u) & 1u) == 1u) ? -b2 : b2)) * xl[2]; acc = acc + (scale * ((((sr >> 3u) & 1u) == 1u) ? -b3 : b3)) * xl[3]; acc = acc + (scale * ((((sr >> 4u) & 1u) == 1u) ? -b4 : b4)) * xl[4]; acc = acc + (scale * ((((sr >> 5u) & 1u) == 1u) ? -b5 : b5)) * xl[5]; acc = acc + (scale * ((((sr >> 6u) & 1u) == 1u) ? -b6 : b6)) * xl[6]; acc = acc + (scale * ((((sr >> 7u) & 1u) == 1u) ? -b7 : b7)) * xl[7]; } } float s = metal::simd_sum(acc); if (lane == 0u) y[slot * rows + r] = s; } ")
+
+    ; THE SAME DECODE, WITH THE ACTIVATION HELD. What is left after the fast decode is one device read
+    ; of x per element, and dom-iq2-experts4-body already knows the answer to that: hold the 32
+    ; activations of a sub-block in registers and spend them on four output rows. That kernel is here
+    ; with the fast decode inside it — hardware half widening, two-word grid reads, one multiply fewer
+    ; per element — and its per-row accumulation chain untouched: sumf[rr] is added into directly, in l
+    ; then j order, exactly as before.
+    (defn dom-iq2-experts4-fast-body ()
+        "kernel void form_dsv4_iq2_matvec_experts4_fast (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rg = rows / 4u; uint per = rg * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r0 = (g / 32u) * 4u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rstride = (ulong)(cols / 256u) * 66ul; float sumf[4]; for (uint i = 0u; i < 4u; ++i) sumf[i] = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { float xl[32]; device const float* xsrc = x + sub * 32u; for (uint i = 0u; i < 32u; ++i) xl[i] = xsrc[i]; uint blk = sub / 8u; uint ib32 = sub - blk * 8u; for (uint rr = 0u; rr < 4u; ++rr) { device const uchar* off = qb + ebase + (ulong)(r0 + rr) * rstride + (ulong)blk * 66ul; ushort hb = (ushort)off[0] | ((ushort)off[1] << 8); float d = float(as_type<half>(hb)); device const uchar* gb = off + 2u + 8u * ib32; uchar4 g0 = uchar4(*(device const packed_uchar4*)(gb)); uchar4 g1 = uchar4(*(device const packed_uchar4*)(gb + 4u)); uint aux1 = uint(g1.x) + 256u * uint(g1.y) + 65536u * uint(g1.z) + 16777216u * uint(g1.w); int scalecode = int(uint(g1.w) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); for (uint l = 0u; l < 4u; ++l) { uint gidx = uint(g0[l]); uint signidx = (aux1 >> (7u * l)) & 127u; constant uchar* g8 = iq2_grid + gidx * 8u; uchar4 m0 = uchar4(*(constant packed_uchar4*)(g8)); uchar4 m1 = uchar4(*(constant packed_uchar4*)(g8 + 4u)); uint sr = uint(iq2_ksigns[signidx]); float b0 = float(m0.x); float b1 = float(m0.y); float b2 = float(m0.z); float b3 = float(m0.w); float b4 = float(m1.x); float b5 = float(m1.y); float b6 = float(m1.z); float b7 = float(m1.w); sumf[rr] = sumf[rr] + (scale * (((sr & 1u) == 1u) ? -b0 : b0)) * xl[l * 8u + 0u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 1u) & 1u) == 1u) ? -b1 : b1)) * xl[l * 8u + 1u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 2u) & 1u) == 1u) ? -b2 : b2)) * xl[l * 8u + 2u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 3u) & 1u) == 1u) ? -b3 : b3)) * xl[l * 8u + 3u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 4u) & 1u) == 1u) ? -b4 : b4)) * xl[l * 8u + 4u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 5u) & 1u) == 1u) ? -b5 : b5)) * xl[l * 8u + 5u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 6u) & 1u) == 1u) ? -b6 : b6)) * xl[l * 8u + 6u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 7u) & 1u) == 1u) ? -b7 : b7)) * xl[l * 8u + 7u]; } } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sumf[rr]); if (lane == 0u) y[slot * rows + r0 + rr] = s; } } ")
+
     (defn dom-q2k-appendix () (str_concat (dom-q2k-ordered-body) (str_concat (dom-q2k-experts-body) (dom-q2k-experts-wide-body))))
-    (defn dom-iq2-appendix () (str_concat (dom-iq2-hoist-body) (str_concat (dom-iq2-experts-body) (dom-iq2-experts4-body))))
+    (defn dom-iq2-appendix () (str_concat (dom-iq2-hoist-body) (str_concat (dom-iq2-experts-body) (str_concat (dom-iq2-experts4-body) (str_concat (dom-iq2-experts-span-body) (str_concat (dom-iq2-experts-alu-probe-body) (str_concat (dom-iq2-experts-mem-probe-body) (str_concat (dom-iq2-experts-fast-body) (dom-iq2-experts4-fast-body)))))))))
     (defn dom-ffn-appendix () (str_concat (dom-swiglu-experts-body) (dom-moe-reduce-body)))
     0)
