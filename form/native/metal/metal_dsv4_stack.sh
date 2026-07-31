@@ -605,6 +605,11 @@ let concurrentRaw = concurrentMode == "2"
 var pendingCB: MTLCommandBuffer? = nil
 var pendingEnc: MTLComputeCommandEncoder? = nil
 var gpuBatches = 0, gpuDispatches = 0
+// A FREE CENSUS. Counting which kernel each dispatch belongs to costs one dictionary bump and no
+// sync, so unlike the profiler it cannot distort what it measures. It answers the only question
+// fusion needs asked first: of the 2290 dispatches a token pays for, WHICH kernels are the many?
+var dispN: [String: Int] = [:]
+var dispCensusFrom = 0
 // WEIGHT BYTES TOUCHED. The bandwidth floor is a fact about the file, not about the kernels: a token
 // that must read N bytes of weight cannot beat N/peak seconds however the arithmetic is arranged.
 // Counted per weight class so the ratio to the measured floor says how much of peak we are reaching.
@@ -668,6 +673,7 @@ func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, indep: Bool = false
     e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
                       threadsPerThreadgroup: MTLSize(width: min(p.maxTotalThreadsPerThreadgroup, cap), height: 1, depth: 1))
     gpuDispatches += 1
+    dispN[pipeName[ObjectIdentifier(p)] ?? "?", default: 0] += 1
     if !dblKernel.isEmpty && pipeName[ObjectIdentifier(p)] == dblKernel {
         e.setComputePipelineState(p); body(e)
         e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
@@ -732,6 +738,15 @@ let pHcRmsRed = pipe(lHc, "form_hc_rmsnorm_nw_reduce_f32")
 let pHcRmsApp = pipe(lHc, "form_hc_rmsnorm_nw_apply_f32")
 let pHcRmsWide = pipe(lHc, "form_hc_rmsnorm_nw_wide_f32")
 let pHcSplit = pipe(lHc, "form_hc_split_f32")
+// THE SINKHORN'S FENCES, PRICED AND REMOVED. form_hc_split_f32 spreads a 4x4 Sinkhorn over n_hc = 4
+// threads and pays 2*HC_ITERS = 40 threadgroup barriers to keep them in step. FORM_DS4_DOUBLE priced
+// it at 21.9 us a call against a 1.1 us dispatch (the FORM_DS4_PAD slope), and the stack asks for it
+// 83 times a token: 1.8 ms of a 40 ms token, on four threads, almost all of it fencing.
+// The seq kernel is the same arithmetic in the same fold directions on ONE thread, where a barrier
+// between four threads has nothing left to synchronise. Bit-exactness is the gate, not the intent:
+// FORM_DS4_HC_SPLIT_PAR=1 puts the four-thread kernel back so the two can be run against each other.
+let hcSplitSeq = ProcessInfo.processInfo.environment["FORM_DS4_HC_SPLIT_PAR"] != "1"
+let pHcSplitSeq = pipe(lHc, "form_hc_split_seq4_f32")
 let pHcWsum = pipe(lHc, "form_hc_wsum_f32")
 let pHcPost = pipe(lHc, "form_hc_post_f32")
 let pHcHeadw = pipe(lHc, "form_hc_headw_f32")
@@ -1279,7 +1294,11 @@ func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLB
     let mix = gpuF16mv(fn, flat)
     let split = sentinelled(2*nHc + nHc*nHc)
     do { var a = UInt32(nHc), it = UInt32(hcIters), e0 = hcEps
-         enc(pHcSplit, nHc, nHc) { c in c.setBuffer(mix, offset: 0, index: 0)
+         // pipeline AND thread count out of ONE expression. Read the caution in enc(): the last time a
+         // kernel took its grid from one flag and its pipeline from another it ran on a quarter of its
+         // rows and reported a floor 5 ms lower for work it had not done.
+         let (pSplitUse, nSplit) = hcSplitSeq ? (pHcSplitSeq, 1) : (pHcSplit, nHc)
+         enc(pSplitUse, nSplit, nSplit) { c in c.setBuffer(mix, offset: 0, index: 0)
                                     c.setBuffer(views[sc.idx], offset: sc.inner, index: 1)
                                     c.setBuffer(views[bs.idx], offset: bs.inner, index: 2)
                                     c.setBuffer(split, offset: 0, index: 3)
@@ -1947,6 +1966,8 @@ if kvSequence {
             gpuBusyAtGenStart = gpuBusyS
             wb0Q80 = wbQ80; wb0F16 = wbF16; wb0Exp = wbExp; wb0Oth = wbOther
             dispAtGenStart = gpuDispatches
+            dispCensusFrom = gpuDispatches
+            dispN.removeAll()
         }
         if pos >= promptIds.count - 1 { emitted.append(exit.token) }
         currentToken = exit.token
@@ -2102,6 +2123,14 @@ if profileOn {
     print(String(format: "      ── same table with %.0f us x calls subtracted from each total ──", floorUs))
     let corrected = profS.map { ($0.key, $0.value - floorUs * 1e-6 * Double(profN[$0.key] ?? 0)) }.sorted { $0.1 > $1.1 }
     for (nm, s) in corrected.prefix(8) { print(String(format: "      %8.3f s corrected  %6d calls   %@", s, profN[nm] ?? 0, nm)) }
+}
+if ProcessInfo.processInfo.environment["FORM_DS4_CENSUS"] == "1" {
+    let genTok = max(gpuDispatches - dispCensusFrom, 1)
+    let nTok = max(kvSteps - promptIds.count + 1, 1)
+    print("      ── DISPATCH CENSUS, generation only: \(genTok) dispatches over \(nTok) tokens ──")
+    for (nm, n) in dispN.sorted(by: { $0.1 > $1.1 }).prefix(22) {
+        print(String(format: "      %6d total  %6.1f per token   %@", n, Double(n)/Double(nTok), nm))
+    }
 }
 print("      dispatches \(gpuDispatches) in \(gpuBatches) command buffers (\(gpuBatches == 0 ? 0 : gpuDispatches/gpuBatches) per submit) — one buffer per dispatch was 47x of ds4")
 let ok = failures == 0 && gpuErrors == 0
