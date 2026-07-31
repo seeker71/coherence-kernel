@@ -107,6 +107,12 @@
     ; That is a claim about accuracy, so it is measured against the reference's stream, never assumed.
     (defn hc-rmsnorm-nw-reduce-body ()
         "kernel void form_hc_rmsnorm_nw_reduce_f32(device const float* x [[buffer(0)]], device float* inv [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& eps [[buffer(3)]], uint lane [[thread_position_in_grid]]) { if (lane >= 32u) return; uint per = (n + 31u) / 32u; uint lo = lane * per; uint hi = (lo + per < n) ? (lo + per) : n; float s = 0.0f; for (uint j = lo; j < hi; ++j) s = s + x[j] * x[j]; float sumsq = metal::simd_sum(s); if (lane != 0u) return; float ms = sumsq / float(n); inv[0] = 1.0f / hc_sqrt(ms + eps); } ")
+    ; The same row folded the way metal/norm.metal folds it: one threadgroup, every thread striding the
+    ; row, simd_sum then a simd_sum over the simdgroups' partials, and the scale applied in the SAME
+    ; kernel. Thirty-two lanes over a 16384-wide row left each lane 512 deep and cost a second dispatch
+    ; to spend what the first one found; the oracle does neither.
+    (defn hc-rmsnorm-nw-wide-body ()
+        "kernel void form_hc_rmsnorm_nw_wide_f32(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& eps [[buffer(3)]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]]) { threadgroup float sh[32]; if (sgitg == 0u) sh[tiisg] = 0.0f; float s = 0.0f; for (uint j = tpitg.x; j < n; j += ntg.x) { float v = x[j]; s = s + v * v; } s = metal::simd_sum(s); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) sh[sgitg] = s; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); s = metal::simd_sum(sh[tiisg]); float inv = 1.0f / hc_sqrt(s / float(n) + eps); for (uint j = tpitg.x; j < n; j += ntg.x) out[j] = x[j] * inv; } ")
     (defn hc-rmsnorm-nw-apply-body ()
         "kernel void form_hc_rmsnorm_nw_apply_f32(device const float* x [[buffer(0)]], device float* out [[buffer(1)]], device const float* inv [[buffer(2)]], constant uint& n [[buffer(3)]], uint j [[thread_position_in_grid]]) { if (j >= n) return; out[j] = x[j] * inv[0]; } ")
 
@@ -158,9 +164,10 @@
         (str_concat (hc-rmsnorm-nw-body)
         (str_concat (hc-rmsnorm-nw-reduce-body)
         (str_concat (hc-rmsnorm-nw-apply-body)
+        (str_concat (hc-rmsnorm-nw-wide-body)
         (str_concat (hc-matvec-body)
         (str_concat (hc-split-body)
         (str_concat (hc-wsum-body)
-        (str_concat (hc-post-body) (hc-headw-body))))))))))))
+        (str_concat (hc-post-body) (hc-headw-body)))))))))))))
 
     0)

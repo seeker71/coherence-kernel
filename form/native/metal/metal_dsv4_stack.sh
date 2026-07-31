@@ -505,6 +505,10 @@ func pipe(_ l: MTLLibrary, _ n: String) -> MTLComputePipelineState {
 var pendingCB: MTLCommandBuffer? = nil
 var pendingEnc: MTLComputeCommandEncoder? = nil
 var gpuBatches = 0, gpuDispatches = 0
+// WEIGHT BYTES TOUCHED. The bandwidth floor is a fact about the file, not about the kernels: a token
+// that must read N bytes of weight cannot beat N/peak seconds however the arithmetic is arranged.
+// Counted per weight class so the ratio to the measured floor says how much of peak we are reaching.
+var wbQ80 = 0, wbF16 = 0, wbExp = 0, wbOther = 0
 func flush() {
     pendingEnc?.endEncoding(); pendingEnc = nil
     guard let cb = pendingCB else { return }
@@ -512,6 +516,13 @@ func flush() {
     gpuBatches += 1
     run(cb)
 }
+// FORM_DS4_DOUBLE=<kernel name> SIZES a kernel without breaking anything. The profiler charges every
+// dispatch a submit and cannot see the overlap the batched path gets, so its ranking overstates
+// high-call-count kernels. Ablation by halving a loop is trustworthy but breaks the answer while it
+// runs. Encoding the SAME dispatch twice does neither: a pure matvec writes the same value the second
+// time, so the token stream stays bit-exact — and if it does not, the kernel was not idempotent and
+// the number is refused rather than believed. The floor's rise IS the kernel's cost.
+let dblKernel = ProcessInfo.processInfo.environment["FORM_DS4_DOUBLE"] ?? ""
 func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, _ body: (MTLComputeCommandEncoder) -> Void) {
     if pendingCB == nil { pendingCB = queue.makeCommandBuffer()! }
     if pendingEnc == nil { pendingEnc = pendingCB!.makeComputeCommandEncoder()! }
@@ -520,6 +531,12 @@ func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, _ body: (MTLCompute
     e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
                       threadsPerThreadgroup: MTLSize(width: min(p.maxTotalThreadsPerThreadgroup, cap), height: 1, depth: 1))
     gpuDispatches += 1
+    if !dblKernel.isEmpty && pipeName[ObjectIdentifier(p)] == dblKernel {
+        e.setComputePipelineState(p); body(e)
+        e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
+                          threadsPerThreadgroup: MTLSize(width: min(p.maxTotalThreadsPerThreadgroup, cap), height: 1, depth: 1))
+        gpuDispatches += 1
+    }
     if profileOn {
         let nm = pipeName[ObjectIdentifier(p)] ?? "?"
         let before = gpuBusyS
@@ -534,6 +551,8 @@ let pRms = pipe(lMla, "form_mla_rmsnorm_f32")
 let pRmsRed = pipe(lMla, "form_mla_rmsnorm_reduce_f32")
 let pRmsApp = pipe(lMla, "form_mla_rmsnorm_apply_f32")
 let pHeadrms = pipe(lMla, "form_mla_headrms_f32")
+let pRmsWide = pipe(lMla, "form_mla_rmsnorm_wide_f32")
+let pHeadrmsWide = pipe(lMla, "form_mla_headrms_wide_f32")
 let pRope = pipe(lMla, "form_mla_rope_f32")
 let pAttend = pipe(lMla, "form_mla_attend_f32")
 let pAttendMixed = pipe(lMla, "form_mla_attend_mixed_f32")
@@ -574,6 +593,7 @@ let pHcBcast = pipe(lHc, "form_hc_broadcast_f32")
 let pHcRmsNw = pipe(lHc, "form_hc_rmsnorm_nw_f32")
 let pHcRmsRed = pipe(lHc, "form_hc_rmsnorm_nw_reduce_f32")
 let pHcRmsApp = pipe(lHc, "form_hc_rmsnorm_nw_apply_f32")
+let pHcRmsWide = pipe(lHc, "form_hc_rmsnorm_nw_wide_f32")
 let pHcSplit = pipe(lHc, "form_hc_split_f32")
 let pHcWsum = pipe(lHc, "form_hc_wsum_f32")
 let pHcPost = pipe(lHc, "form_hc_post_f32")
@@ -624,15 +644,12 @@ let pCompShift = pipe(lKv, "form_dsv4_comp_shift_f32")
 
 func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
     let out = sentinelled(n); var n32 = UInt32(n), e = eps
-    // reduce across one simdgroup, then apply one thread per element. The one-thread version is kept
-    // in the library as the read-back reference; this is the same recipe with the fold widened.
-    let invB = dev.makeBuffer(length: 4, options: .storageModeShared)!
-    enc(pRmsRed, 32, 32) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(invB, offset: 0, index: 1)
-                                c.setBytes(&n32, length: 4, index: 2); c.setBytes(&e, length: 4, index: 3) }
-    enc(pRmsApp, n, 256) { c in c.setBuffer(x, offset: 0, index: 0)
-                                c.setBuffer(views[t.idx], offset: t.inner, index: 1)
-                                c.setBuffer(out, offset: 0, index: 2); c.setBuffer(invB, offset: 0, index: 3)
-                                c.setBytes(&n32, length: 4, index: 4) }
+    // ONE threadgroup striding the row, folding the way metal/norm.metal folds, applying in the same
+    // kernel. The reduce/apply pair it replaces is kept in the library as the read-back reference.
+    enc(pRmsWide, 1024, 1024) { c in c.setBuffer(x, offset: 0, index: 0)
+                                     c.setBuffer(views[t.idx], offset: t.inner, index: 1)
+                                     c.setBuffer(out, offset: 0, index: 2)
+                                     c.setBytes(&n32, length: 4, index: 3); c.setBytes(&e, length: 4, index: 4) }
     return out
 }
 // THE DENSE TYPE DISPATCH. The reap25 file carried MXFP8 (41) on every dense projection; the mainline
@@ -652,6 +669,7 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
             var n32 = UInt32(cols)
             enc(pQ8aQuant, blocks, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
                                               c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
+            wbQ80 += rows * blocks * 34
             enc(pQ80Ord, rows*8, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                           c.setBuffer(xq, offset: 0, index: 1); c.setBuffer(xs, offset: 0, index: 2)
                                           c.setBuffer(out, offset: 0, index: 3)
@@ -674,7 +692,7 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
 }
 func gpuHeadrms(_ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(nHead*headDim); var a = UInt32(nHead), b = UInt32(headDim), e = eps
-    enc(pHeadrms, nHead, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
+    enc(pHeadrmsWide, nHead*256, 256) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(out, offset: 0, index: 1)
                                     c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3); c.setBytes(&e, length: 4, index: 4) }
     return out
 }
@@ -879,6 +897,7 @@ func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows)
     var r = UInt32(t.rows), c32 = UInt32(t.cols), nel = UInt32(t.nel), rk = UInt32(oRank)
     if t.type == 8 {
+        wbQ80 += t.rows * ((t.cols + 31) / 32) * 34
         enc(pQ80g, t.rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                           c.setBuffer(out, offset: 0, index: 2)
                                           c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4)
@@ -894,6 +913,7 @@ func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
 func gpuF16mv(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows); var r = UInt32(t.rows), c32 = UInt32(t.cols)
     // ds4.c:6664 dot_f16_row — two FMA accumulators over widened halves, reduced pairwise.
+    wbF16 += t.rows * t.cols * 2
     enc(matchOrder ? pF16Ord : pF16mv, matchOrder ? t.rows*8 : t.rows, 256) { c in
         c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
         c.setBuffer(out, offset: 0, index: 2)
@@ -958,11 +978,8 @@ func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLB
     // is unrolled across threads, which has no association to preserve. Bit-identical, and it was the
     // most expensive kernel in the stack at 1878 us a call.
     do { var n = UInt32(hcDim), e0 = eps
-         let invB = dev.makeBuffer(length: 4, options: .storageModeShared)!
-         enc(pHcRmsRed, 32, 32) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(invB, offset: 0, index: 1)
-                                     c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) }
-         enc(pHcRmsApp, hcDim, 256) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
-                                           c.setBuffer(invB, offset: 0, index: 2); c.setBytes(&n, length: 4, index: 3) } }
+         enc(pHcRmsWide, 1024, 1024) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
+                                            c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
     let mix = gpuF16mv(fn, flat)
     let split = sentinelled(2*nHc + nHc*nHc)
     do { var a = UInt32(nHc), it = UInt32(hcIters), e0 = hcEps
@@ -1085,7 +1102,22 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     return ao
 }
 
+// FORM_DS4_PAD=N PRICES A DISPATCH. The token costs 2550 asks against the reference's ~950, and
+// "reduce the dispatch count" is only worth doing if an ask is expensive. N extra one-element scale
+// dispatches per layer, writing a scratch nobody reads, move nothing but the count — the slope of the
+// floor against N is the price of an ask, measured rather than assumed.
+let padPerLayer = Int(ProcessInfo.processInfo.environment["FORM_DS4_PAD"] ?? "0") ?? 0
+let padBuf = sentinelled(1)
+func padDispatches() {
+    if padPerLayer <= 0 { return }
+    var a = Float(1.0), n1 = UInt32(1)
+    for _ in 0..<padPerLayer {
+        enc(pScale, 1, 1) { c in c.setBuffer(padBuf, offset: 0, index: 0); c.setBuffer(padBuf, offset: 0, index: 1)
+                                 c.setBytes(&a, length: 4, index: 2); c.setBytes(&n1, length: 4, index: 3) }
+    }
+}
 func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) -> LayerOut {
+    padDispatches()
     let w = LW[il]
     let (attnCur, attnSplit) = hcPre(residHc, w.haf, w.has, w.hab)
     let attnOut = mlaBlock(attnCur, pos, il)
@@ -1162,6 +1194,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         var r32 = UInt32(nFf), c32 = UInt32(nEmbd), st = UInt32(w.gx.bytes / w.gx.d2), ne = UInt32(nE)
         let gt = sentinelled(nE*nFf), up = sentinelled(nE*nFf)
         for (t, out) in [(w.gx, gt), (w.ux, up)] {
+            wbExp += nE * (t.bytes / t.d2)
             enc(nFf % 4 == 0 ? pIq2E4 : pIq2E, nFf % 4 == 0 ? nE*(nFf/4)*32 : nE*nFf*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                               c.setBuffer(ffnNorm, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
                                               c.setBuffer(idsBuf, offset: 0, index: 3)
@@ -1176,6 +1209,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
                                         c.setBytes(&lim, length: 4, index: 6) }
         let parts = sentinelled(nE*nEmbd)
         var dr = UInt32(nEmbd), dc = UInt32(nFf), dst = UInt32(w.dx.bytes / w.dx.d2)
+        wbExp += nE * (w.dx.bytes / w.dx.d2)
         enc(pQ2kE, nE*nEmbd, 256) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
                                          c.setBuffer(mid, offset: 0, index: 1); c.setBuffer(parts, offset: 0, index: 2)
                                          c.setBuffer(idsBuf, offset: 0, index: 3)
@@ -1320,11 +1354,8 @@ func nativeExitHead(_ resid: MTLBuffer, _ label: String) -> (token: Int, logit: 
     // is unrolled across threads, which has no association to preserve. Bit-identical, and it was the
     // most expensive kernel in the stack at 1878 us a call.
     do { var n = UInt32(hcDim), e0 = eps
-         let invB = dev.makeBuffer(length: 4, options: .storageModeShared)!
-         enc(pHcRmsRed, 32, 32) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(invB, offset: 0, index: 1)
-                                     c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) }
-         enc(pHcRmsApp, hcDim, 256) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
-                                           c.setBuffer(invB, offset: 0, index: 2); c.setBytes(&n, length: 4, index: 3) } }
+         enc(pHcRmsWide, 1024, 1024) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(flat, offset: 0, index: 1)
+                                            c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
     let pre = gpuF16mv(outHcFn, flat)
     let headw = sentinelled(nHc)
     do { var a = UInt32(nHc), e0 = hcEps
@@ -1534,6 +1565,8 @@ if kvSequence {
     // ran before this loop began. A ratio of two clocks that do not cover the same interval is not a
     // ratio of anything.
     let gpuBusyAtGenStart = gpuBusyS
+    let wb0Q80 = wbQ80, wb0F16 = wbF16, wb0Exp = wbExp, wb0Oth = wbOther
+    let dispAtGenStart = gpuDispatches
     // PREFILL then GENERATE. While pos is inside the prompt the input is the prompt's token and
     // the emitted id is discarded — the model is READING. Past the prompt it eats its own output.
     // The boundary is the whole difference between a continuation of one token and an answer.
@@ -1578,6 +1611,17 @@ if kvSequence {
     print(String(format: "      GPU BUSY: %.2fs of %.2fs wall (%.0f%%); floor = %.0f ms of GPU per token at 100%% occupancy, over %d dispatches per token",
                  busyAtEnd, prefillS + genS, 100.0 * busyAtEnd / max(prefillS + genS, 1e-9),
                  1000.0 * busyAtEnd / Double(max(kvSteps, 1)), gpuDispatches / max(kvSteps, 1)))
+    // THE BANDWIDTH FLOOR, from the file's own tensor sizes. Every weight byte a token touches must
+    // cross the bus once; N/peak is a floor no arrangement of arithmetic can beat. Printing the
+    // achieved fraction says whether a kernel has room left or is already at the wall.
+    let g = Double(max(nGen, 1))
+    let dQ80 = Double(wbQ80 - wb0Q80)/g, dF16 = Double(wbF16 - wb0F16)/g
+    let dExp = Double(wbExp - wb0Exp)/g, dOth = Double(wbOther - wb0Oth)/g
+    let perTok = dQ80 + dF16 + dExp + dOth
+    print(String(format: "      WEIGHT BYTES: %.3f GB per token (q80 %.3f, f16 %.4f, experts %.3f) — %.0f GB/s achieved over the GPU floor; %d dispatches/token over generation only",
+                 perTok/1e9, dQ80/1e9, dF16/1e9, dExp/1e9,
+                 perTok * g / max(busyAtEnd, 1e-9) / 1e9,
+                 (gpuDispatches - dispAtGenStart) / max(nGen, 1)))
     print(String(format: "      SPEED: prefill %.2f t/s (%d tokens in %.2fs), generation %.2f t/s (%d tokens in %.2fs)%@ — ds4 prints the same two numbers",
                  Double(nPrefill)/max(prefillS, 1e-9), nPrefill, prefillS,
                  Double(nGen)/max(genS, 1e-9), nGen, genS,
@@ -1672,7 +1716,7 @@ if profileOn {
     print("         1484 helpings of it. This column is cost PLUS call count, not cost — trust it for gaps of")
     print("         10x or more (those survive the bias) and never for neighbours. The us/call column is the")
     print("         one to compare when call counts differ. (callbias, corpus row 955.)")
-    for (nm, s) in profS.sorted(by: { $0.value > $1.value }).prefix(12) {
+    for (nm, s) in profS.sorted(by: { $0.value > $1.value }).prefix(60) {
         let n = profN[nm] ?? 1
         print(String(format: "      %8.3f s  %6d calls  %8.1f us each   %@", s, n, 1e6*s/Double(n), nm))
     }

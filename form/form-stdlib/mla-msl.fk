@@ -101,6 +101,15 @@
     (defn mla-rmsnorm-apply-body ()
         "kernel void form_mla_rmsnorm_apply_f32(device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* out [[buffer(2)]], device const float* inv [[buffer(3)]], constant uint& n [[buffer(4)]], uint j [[thread_position_in_grid]]) { if (j >= n) return; out[j] = (x[j] * inv[0]) * g[j]; } ")
 
+    ; --- kernel: the RMSNorm the ORACLE actually writes (metal/norm.metal kernel_rms_norm_fuse_impl).
+    ;     Read there, not inferred: ds4 gives a row ONE THREADGROUP, strides every thread over the row,
+    ;     folds with simd_sum and a second simd_sum across the simdgroups' partials, and then applies
+    ;     the scale IN THE SAME KERNEL. Two things ours had that the reference does not: a 32-lane
+    ;     ceiling on a 4096-wide row, and a second dispatch to apply what the first one found. The fold
+    ;     association is the reference's own, so this is not a liberty taken — it is the recipe read. ---
+    (defn mla-rmsnorm-wide-body ()
+        "kernel void form_mla_rmsnorm_wide_f32(device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* out [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]]) { threadgroup float sh[32]; if (sgitg == 0u) sh[tiisg] = 0.0f; float s = 0.0f; for (uint j = tpitg.x; j < n; j += ntg.x) { float v = x[j]; s = s + v * v; } s = metal::simd_sum(s); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) sh[sgitg] = s; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); s = metal::simd_sum(sh[tiisg]); float inv = 1.0f / mla_sqrt(s / float(n) + eps); for (uint j = tpitg.x; j < n; j += ntg.x) out[j] = (x[j] * inv) * g[j]; } ")
+
     ; --- kernel: plain f32 matvec (tb-matvec). Row r per thread; the dot is tb-dot's RIGHT fold, so the
     ;     column loop DESCENDS. Serves Wqa, Wqb, Wkv, the grouped was[g], and the final wb. ---
     (defn mla-matvec-body ()
@@ -110,6 +119,12 @@
     ;     per head; g = 1, so out = x * (1/rms). ---
     (defn mla-headrms-body ()
         "kernel void form_mla_headrms_f32(device const float* q [[buffer(0)]], device float* out [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant float& eps [[buffer(4)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint base = h * hd; float sumsq = 0.0f; for (uint j = 0u; j < hd; ++j) sumsq = sumsq + q[base + j] * q[base + j]; float ms = sumsq / float(hd); float inv = 1.0f / mla_sqrt(ms + eps); for (uint j = 0u; j < hd; ++j) out[base + j] = q[base + j] * inv; } ")
+
+    ; --- kernel: the per-head RMSNorm in the oracle's shape. One THREADGROUP per head instead of one
+    ;     THREAD: sixty-four threads were walking 512 elements twice each, reading and writing 256 KiB
+    ;     at 3.6 GB/s on a device that does hundreds. tgpig.x names the head; the fold is norm.metal's. ---
+    (defn mla-headrms-wide-body ()
+        "kernel void form_mla_headrms_wide_f32(device const float* q [[buffer(0)]], device float* out [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant float& eps [[buffer(4)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]]) { threadgroup float sh[32]; uint h = tgpig.x; if (h >= nh) return; uint base = h * hd; if (sgitg == 0u) sh[tiisg] = 0.0f; float s = 0.0f; for (uint j = tpitg.x; j < hd; j += ntg.x) { float v = q[base + j]; s = s + v * v; } s = metal::simd_sum(s); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) sh[sgitg] = s; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); s = metal::simd_sum(sh[tiisg]); float inv = 1.0f / mla_sqrt(s / float(hd) + eps); for (uint j = tpitg.x; j < hd; j += ntg.x) out[base + j] = q[base + j] * inv; } ")
 
     ; --- kernel: the trailing-nrot RoPE (mla-rope-heads / mla-rope-tail). One thread per head. The front
     ;     hd-nrot dims are copied bit-untouched; the tail is rotated pair-adjacent. sign = +1 forward
@@ -162,8 +177,10 @@
         (str_concat (mla-rmsnorm-apply-body)
         (str_concat (mla-matvec-body)
         (str_concat (mla-headrms-body)
+        (str_concat (mla-rmsnorm-wide-body)
+        (str_concat (mla-headrms-wide-body)
         (str_concat (mla-rope-body)
         (str_concat (mla-attend-body)
-        (str_concat (mla-attend-mixed-body) (mla-attend-split-body))))))))))))
+        (str_concat (mla-attend-mixed-body) (mla-attend-split-body))))))))))))))
 
     0)
