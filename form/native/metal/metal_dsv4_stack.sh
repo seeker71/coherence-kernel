@@ -635,6 +635,31 @@ let matchOrder = ProcessInfo.processInfo.environment["FORM_DS4_MATCH_ORDER"] == 
 let gatesOn = ProcessInfo.processInfo.environment["FORM_DS4_GATES"] != "0"
 let pQ8aQuant = pipe(lKv, "form_dsv4_q8a_quantize_f32")
 let pQ80Ord = pipe(lKv, "form_dsv4_q80_matvec_ordered8")
+let pQ80Ds4 = pipe(lKv, "form_dsv4_q80_matvec_ds4")
+// THE TWO ARMS OF THE SAME REFERENCE, AND WHY THE CPU ONE IS STILL THE DEFAULT.
+// form_dsv4_q80_matvec_ds4 is metal/dense.metal's own kernel: 128 threads to a row, eight contiguous
+// payload bytes a thread, and NO activation quantisation — `qs[i] * yl[i]` is int8 weight times f32
+// activation. Ours quantises x to int8 first because that is what ds4.c:7051 does on the NEON path.
+// Running both on the same weights and the same x (FORM_DS4_Q80_AB=1) says how far apart they are:
+//     rows=1024 cols=4096   max|A-B| = 7.7e-04 on rows of magnitude 2.0e-01
+//     rows=32768 cols=1024  max|A-B| = 1.1e-03 on rows of magnitude 8.8e-01
+// A thousand times f32 rounding. So this is not the association differing — it is the ACTIVATION's
+// int8 loss, present in one arm and absent in the other, and the reference disagrees with itself by
+// that much. The Metal arm is the more accurate one and it decodes better text (" Paris. It is known
+// for its rich history, stunning architecture..." where the pinned arm loops "The capital of France
+// is Paris." forever). It also runs 55 ms against 59.
+// It is NOT the default, because the stream this body is held to is the CPU arm's, and re-pinning the
+// reference is a decision to be made in the open, not smuggled in under a speed number.
+// FORM_DS4_Q80_METAL_ORDER=1 runs the reference's other arm.
+let q80CpuOrder = ProcessInfo.processInfo.environment["FORM_DS4_Q80_METAL_ORDER"] != "1"
+let q80Compare = ProcessInfo.processInfo.environment["FORM_DS4_Q80_AB"] == "1"
+var q80Compared = 0
+// SAY THE WIDTH OUT LOUD. The kernel partitions a row's blocks across its simdgroups, so if Metal
+// hands the pipeline fewer threads than asked — register pressure lowers
+// maxTotalThreadsPerThreadgroup without a word — the missing simdgroups' blocks are simply never
+// summed, and the answer is quietly short rather than absent. The kernel reads its own width at
+// runtime; this line is here so the number is on the page and not inferred.
+print("      q80 ds4-shape matvec: maxTotalThreadsPerThreadgroup = \(pQ80Ds4.maxTotalThreadsPerThreadgroup), threadExecutionWidth = \(pQ80Ds4.threadExecutionWidth)")
 let pF16Ord = pipe(lKv, "form_dsv4_f16_matvec_ordered8")
 let pQ2kOrd = pipe(lQ2k, "form_dsv4_q2k_matvec_ordered")
 let pCompInit = pipe(lKv, "form_dsv4_comp_init_f32")
@@ -659,6 +684,52 @@ func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
 func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
     let out = sentinelled(rows); var r = UInt32(rows), c32 = UInt32(cols), nel = UInt32(rows*cols)
     if t.type == 8 {
+        // A DIVERGED STREAM HAS TWO CAUSES AND THEY NEED OPPOSITE ANSWERS: a wrong kernel must be
+        // reverted, a faithful reassociation is a tie-flip and must be argued about. Running both
+        // kernels on the SAME weights and the SAME activation and printing how far apart they land
+        // tells them apart without any external oracle. A bug shows up as a large relative gap on
+        // some rows; a reassociation shows up as f32 rounding.
+        if q80Compare && q80Compared < 3 {
+            q80Compared += 1
+            let blocks = (cols + 31) / 32
+            let xq = dev.makeBuffer(length: blocks*32, options: .storageModeShared)!
+            let xs = dev.makeBuffer(length: blocks*4, options: .storageModeShared)!
+            var n32 = UInt32(cols)
+            let outA = sentinelled(rows), outB = sentinelled(rows)
+            enc(pQ8aQuant, blocks, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
+                                              c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
+            enc(pQ80Ord, rows*8, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+                                             c.setBuffer(xq, offset: 0, index: 1); c.setBuffer(xs, offset: 0, index: 2)
+                                             c.setBuffer(outA, offset: 0, index: 3)
+                                             c.setBytes(&r, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5) }
+            enc(pQ80Ds4, ((rows + 1) / 2) * 256, 256) { c in
+                c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+                c.setBuffer(outB, offset: 0, index: 2)
+                c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
+            flush()
+            let pa = fp(outA, rows), pb = fp(outB, rows)
+            var maxRel = 0.0 as Float, maxAbs = 0.0 as Float, mag = 0.0 as Float, nfin = 0
+            for i in 0..<rows {
+                if !pa[i].isFinite || !pb[i].isFinite { continue }
+                nfin += 1
+                let d = abs(pa[i] - pb[i]); let m = max(abs(pa[i]), abs(pb[i]))
+                if d > maxAbs { maxAbs = d }
+                if m > mag { mag = m }
+                if m > 1e-3 && d/m > maxRel { maxRel = d/m }
+            }
+            print(String(format: "      q80 A/B  rows=%d cols=%d finite=%d  max|cpu-order - ds4-order| = %.3e   max rel = %.3e   row magnitude = %.3e",
+                         rows, cols, nfin, maxAbs, maxRel, mag))
+        }
+        // ds4's OWN GPU association, and the activation left in f32 because its Metal kernel never
+        // quantises it. FORM_DS4_Q80_CPU_ORDER=1 goes back to the NEON transcription above it.
+        if matchOrder && !q80CpuOrder {
+            wbQ80 += rows * ((cols + 31) / 32) * 34
+            enc(pQ80Ds4, ((rows + 1) / 2) * 256, 256) { c in
+                c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+                c.setBuffer(out, offset: 0, index: 2)
+                c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
+            return out
+        }
         if matchOrder {
             // ds4.c:6814 — the Q8_0 path is not an f32 fold. The ACTIVATION is quantised to int8
             // (:7051), each 32-block is an exact int32 dot, and only the scale product re-enters f32.
