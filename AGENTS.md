@@ -111,6 +111,42 @@ seam is named, never hidden. Naming it *is* the practice.
    retain per-row or per-stage transitions whenever available. Never record private prompt/answer content in
    the framebuffer. The executable protocol, quick witness, integration example, and honest boundaries live in
    [`docs/live-dynamic-diagnostics.md`](docs/live-dynamic-diagnostics.md).
+9. **Preflight before you believe a verdict.** A band that prints a green number and exits nonzero is not a
+   pass — it is a fold computed over `nothing`. Run
+   [`observe/preflight.fk`](observe/preflight.fk) on a cell before you trust what it says:
+
+   ```
+   (pf-report "cognition/tests/your-band.fk")
+   ```
+
+   As a runnable one-liner (direct-source Form does not read argv, so the target
+   arrives in a file):
+
+   ```sh
+   echo cognition/tests/your-band.fk > /tmp/preflight-target
+   ./fkwu --src observe/preflight-run.fk
+   ```
+
+   It forces a fresh compile (a warm cache replaces the error with a tally — no name, no line), checks paren
+   balance without running anything, and answers the one question the compiler cannot: `[unresolved-call] 'x'`
+   is **nonspecific** (corpus row 955) — one red line with two opposite repairs. Either nobody defines `x` (a
+   TYPO — fix the cell) or another kernel defines it and this one does not (a LANE SEAM — fix the preludes, or
+   declare the lane). Preflight offers the name to all four kernels and tells you which. Every numb-green of
+   2026-07-26..31 was the second read as neither.
+
+   Two rules fall out, and both were paid for:
+   - **Read the exit code, not the number.** `fkwu --src` exits 1 when the compile carried errors. On a warm
+     cache you get only "cached image was compiled with errors" — delete the `.fkb`/`.sym` and run again before
+     reporting anything.
+   - **Never declare a proof lane from inference — probe it.** A `PROOF LEVEL:` line written from "X is
+     surely fkwu-only" is a defect written in as a law (corpus row 914, `teleological`). `observe/review-ask.fk`
+     carried exactly that for five days: it said `host-exec` was fkwu-only, and its band answers **511 on Go**.
+     `(pf-arm-mask "host-exec")` is 9 — go + fkwu — and takes one call.
+
+   Only one arm looks. Go, Rust and TypeScript bind names when execution *reaches* them, so a bad symbol in an
+   unreached branch exits 0 there; fkwu resolves every call site in the whole prelude chain. That is why fkwu
+   finds these, and why its findings arrive as a chain-wide wall rather than as one cell's problem — preflight
+   is what separates *your* cell's problem from the chain's.
 
 ## What this is, and isn't
 

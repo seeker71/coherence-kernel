@@ -130,7 +130,7 @@ static int fk_write_all_raw(int fd, const void *buf, unsigned long n);
 #define FK_OPCODE_ARM_CAP 256           /* fk_arms: per-tag hit counters, indexed by node tag t */
 #define FK_MEM_CELL_CAP 4096            /* fk_mem: mutable record-cell table (tags 13/14) */
 #define FK_STAGED_INPUT_CAP 262144      /* fk_src: staged auxiliary input (the input_byte primitive) */
-#define FK_VALUE_STACK_CAP 65536        /* fk_vs: the evaluator's argument/value stack */
+#define FK_VALUE_STACK_CAP 1048576      /* fk_vs: the evaluator's argument/value stack. Raised 65536->1048576 (2026-07-30): one slot per call frame, so the old cap was a ~65,500-deep recursion wall — measured, 65000 answered and 70000 died — while Go, Rust and TypeScript all answer a 100,000-deep count. A behaviour three of four kernels have and the fourth does not is a bug, not a design; the four exist to make exactly that visible. 1048576 * 8B = 8MB static, the same raisable-constant class as FK_NODE_CAP (65536->262144) and FK_BD_STACK_CAP (128->1024). Past this the walker's own 6MB host-stack wall is reached first, and THAT one speaks. */
 #define FK_STRING_POOL_INIT_BYTES 1048576 /* fk_sb: interned-string byte pool, initial size */
 #define FK_STRING_TABLE_INIT_CAP 16384  /* fk_so/fk_sl: interned-string table, initial entry count */
 /* NOTE: FK_NODE_CAP and FK_AST_NODE_CAP are DIFFERENT tables that happen to share
@@ -304,13 +304,116 @@ static void fk_pr(long long v) {
     }
     putchar(10);
 }
+extern int sprintf(char *, const char *, ...);
+extern double strtod(const char *, char **);
+/* fk_fmt_float_js — the ONE float rendering, byte-identical to the Go kernel's
+ * core.FormatFloatJS (strconv.FormatFloat(f,'g',-1,64) with NaN/Inf spelled out).
+ *
+ * fkwu used to print floats with printf's %.15g (fk_pv) and %.17g
+ * (fk_pv_inline_number). Neither is Go's rule, and the gap is not academic:
+ * MEASURED 2026-07-31 on this checkout, the source `1000000.0` answered
+ *   bin-go  1e+06
+ *   fkwu    1000000
+ * -- a four-arm divergence sitting in the top-level VERDICT printer, so any band
+ * whose verdict is a float at or past 1e6 (or below 1e-4) disagreed with three
+ * siblings while validate.sh compared the other three and called it green.
+ *
+ * Go's shortest 'g' is two decisions. First the DIGITS: the fewest decimal digits
+ * that round-trip back to the same float64. printf cannot be asked for that
+ * directly, so ask for each precision in turn and stop at the first that strtod
+ * returns the identical bits for -- the shortest round-tripping digit string is
+ * unique, so this reaches the same digits Ryu does. Second the LAYOUT: with
+ * exp = (decimal point position - 1), Go uses %e when exp < -4 || exp >= 6 and
+ * %f otherwise. That 6 is a literal in Go's shortest path (eprec is pinned to 6,
+ * NOT to the digit count) -- it is exactly why 1e6 leaves fixed notation while
+ * 999999 stays in it. In the %e branch the precision is nd-1; in %f it is
+ * max(nd-dp, 0). C and Go agree on %e's shape (sign always present, at least two
+ * exponent digits), so the branch can hand the formatting back to printf.
+ *
+ * PROVEN, not reasoned: 2,000,000 values -- 1.5M uniform-random 64-bit patterns
+ * (subnormals, extreme exponents, NaN payloads), 500k near-tie decimal
+ * round-trips, plus every boundary at exp -5/-4/5/6, the integral floats, and
+ * 0/-0/DBL_MAX/DBL_MIN/inf/nan -- rendered by this code and by the Go kernel's
+ * own FormatFloatJS, compared byte for byte, zero mismatches.
+ *
+ * No libm: NaN is (f != f) and infinity is a comparison against DBL_MAX, so the
+ * one-cc seed keeps building with no -lm. */
+static void fk_fmt_float_js(double f, char *out) {
+    if (f != f) {
+        out[0] = 'N'; out[1] = 'a'; out[2] = 'N'; out[3] = 0;
+        return;
+    }
+    if (f > 1.7976931348623157e308) {
+        sprintf(out, "Infinity");
+        return;
+    }
+    if (f < -1.7976931348623157e308) {
+        sprintf(out, "-Infinity");
+        return;
+    }
+    char ebuf[64];
+    long long p = 0;
+    while (p <= 17) {
+        sprintf(ebuf, "%.*e", (int)p, f);
+        if (strtod(ebuf, (char **)0) == f) {
+            break;
+        }
+        p = p + 1;
+    }
+    if (p > 17) {
+        p = 17;
+    }
+    long long nd = p + 1;
+    /* the exponent printf just wrote IS dp-1; read it back rather than re-deriving */
+    long long k = 0;
+    while (ebuf[k] != 0 && ebuf[k] != FK_CH_LOWER_E) {
+        k = k + 1;
+    }
+    long long exp10 = 0;
+    long long esign = 1;
+    if (ebuf[k] == FK_CH_LOWER_E) {
+        k = k + 1;
+        if (ebuf[k] == FK_CH_DASH) {
+            esign = 0 - 1;
+            k = k + 1;
+        } else if (ebuf[k] == FK_CH_PLUS) {
+            k = k + 1;
+        }
+        while (ebuf[k] >= FK_CH_DIGIT0 && ebuf[k] <= FK_CH_DIGIT9) {
+            exp10 = exp10 * 10 + (ebuf[k] - FK_CH_DIGIT0);
+            k = k + 1;
+        }
+        exp10 = exp10 * esign;
+    }
+    if (exp10 < 0 - 4 || exp10 >= 6) {
+        sprintf(out, "%.*e", (int)(nd - 1), f);
+        return;
+    }
+    long long dp = exp10 + 1;
+    long long prec = nd - dp;
+    if (prec < 0) {
+        prec = 0;
+    }
+    sprintf(out, "%.*f", (int)prec, f);
+}
+static long long fk_is_str(long long v);
+/* writes a string value's bytes to stdout, no newline (defined with the string pool
+ * below -- fk_pv is declared above it and cannot reach fk_sb/fk_so/fk_sl directly) */
+static void fk_put_str(long long v);
 static void fk_pv(long long v) {
     if (v == fk_nothing) {
         printf("nothing\n");
         return;
     }
+    if (fk_is_str(v)) {
+        fk_put_str(v);
+        putchar(10);
+        return;
+    }
     if (fk_isf(v)) {
-        printf("%.15g\n", fk_num(v));
+        char fb[64];
+        fk_fmt_float_js(fk_num(v), fb);
+        printf("%s\n", fb);
     } else {
         if ((v & 1) == 0) {
             fk_pr(v >> 1);
@@ -431,6 +534,70 @@ static long long fk_sintern(long long off, long long len) {
     fk_sp = i + 1;
     fk_sbp = off + len;
     return i;
+}
+/* stone: a STRING VALUE is its own odd-negative band, minted exactly like the boxed
+ * float (fk_fbase) and the fn-value (fk_fnbase) before it.
+ *
+ * Until 2026-07-31 a string value was `poolidx << 1` -- POSITIVE EVEN, the very same
+ * word an int of that index is. The comment above fk_nothing said "not a string/list
+ * (those are positive)" while the comment above fk_fidx said "every even word is an
+ * int across the full 63-bit range"; both cannot hold, and the string lost. MEASURED
+ * on this checkout before the change: with "alpha" interned first,
+ *   (print_str (add 0 0))   printed   alpha
+ * -- an int walked into a string door and came out as somebody else's text. Every
+ * string-typed op survived only because its CALL SITE declared the type; no
+ * kind-dispatched door (a `print` that renders whatever it is given) could exist at
+ * all, because the word carries no answer to "which kind are you".
+ *
+ * This is the same defect the float band healed on 2026-07-17 (a deep-negative int
+ * aliasing a float slot at every kind-dispatched door), and it takes the same cure
+ * rather than a magnitude heuristic: a magnitude split was re-examined and REFUSED
+ * here, because now_unix_ms already returns ~1.7e12, so any "ints are small, strings
+ * are big" line is crossed by a clock reading on the first call.
+ *
+ * fk_sbase = -8.5e18 sits BELOW the fn-value band (fk_fnbase = -8e18, width 8192) and
+ * ABOVE nothing (-8.999e18) and the float base (-9e18, floats at or below it), so
+ * fk_strv(si) = fk_sbase - (si<<1) - 1 is: not an int (ints even), not a float
+ * (fk_isf needs v <= fk_fbase-3 ~ -9e18; these are ~-8.5e18, above it), not a
+ * fn-value (fk_is_fnval excludes v <= fk_fnbase - 16384), not nothing (distinct
+ * constant), not a record ((0-v) is odd here, records even), not a cons cell or nil
+ * (positive), not a node (fk_nidx maps ~8.5e18 far past fk_np). Room for ~2.5e17
+ * strings before the band meets nothing.
+ *
+ * fk_stri is the ONE door from a value word back to a pool index. It answers -1 for
+ * anything that is not a string value, so the existing `sa < 0 || sa >= fk_sp` guards
+ * at every string-typed op keep their meaning unchanged and a mistyped argument is
+ * refused instead of read as text. */
+static const long long fk_sbase = -8500000000000000000LL;
+static long long fk_strv(long long si) {
+    return fk_sbase - (si << 1) - 1;
+}
+static long long fk_is_str(long long v) {
+    if ((v & 1) == 0) {
+        return 0;
+    }
+    if (v > fk_sbase - 1) {
+        return 0;
+    }
+    long long si = (fk_sbase - v - 1) >> 1;
+    return (si >= 0 && si < fk_sp) ? 1 : 0;
+}
+static long long fk_stri(long long v) {
+    if (!fk_is_str(v)) {
+        return 0 - 1;
+    }
+    return (fk_sbase - v - 1) >> 1;
+}
+static void fk_put_str(long long v) {
+    long long si = fk_stri(v);
+    if (si < 0) {
+        return;
+    }
+    long long j = 0;
+    while (j < fk_sl[si]) {
+        putchar((int)(unsigned char)fk_sb[fk_so[si] + j]);
+        j = j + 1;
+    }
 }
 static long long fk_nkind[FK_NODE_CAP];
 static long long fk_ncat[FK_NODE_CAP];
@@ -685,7 +852,7 @@ static long long fk_cstrlen(const char *s) {
     return n;
 }
 static void fk_cstr(long long sv, char *out, long long cap) {
-    long long sa = sv >> 1;
+    long long sa = fk_stri(sv);
     long long n = 0;
     if (sa >= 0 && sa < fk_sp) {
         n = fk_sl[sa];
@@ -726,7 +893,7 @@ static long long fk_sbuf(const char *buf, long long n) {
         fk_sb[fk_sbp + j] = buf[j];
         j = j + 1;
     }
-    return fk_sintern(fk_sbp, n) << 1;
+    return fk_strv(fk_sintern(fk_sbp, n));
 }
 #define FK_METAL_FIXTURE_UNLINKED (0 - 4611686018427387903LL)
 #define FK_METAL_MATVEC_UNLINKED (0 - 4611686018427387902LL)
@@ -773,7 +940,7 @@ static long long fk_metal_matvec_f32_external(const char *msl, long long msl_len
 }
 #endif
 static long long fk_srange(long long sv, const char **ptr, long long *len) {
-    long long sa = sv >> 1;
+    long long sa = fk_stri(sv);
     if (sa < 0 || sa >= fk_sp) {
         *ptr = "";
         *len = 0;
@@ -1711,6 +1878,443 @@ static long long fk_wav_loopback(const char *inpath, const char *outpath) {
     r = fk_cons_val(nplay << 1, r);
     return r;
 }
+#elif defined(__APPLE__)
+static long long fk_cons_val(long long h, long long t);
+extern void *memcpy(void *, const void *, unsigned long);
+/* ── mac CoreAudio arm (2026-07-31): the else branch below stood honest for a season — "mac
+ * CoreAudio/AVFoundation carriers are named pending" — and the live voice loop is what finally
+ * demanded it: the loop ran with ffmpeg at the eardrum and afplay at the cone, and the goal is
+ * ALL Form native. AudioToolbox is reached through dlopen/dlsym (the nvcuda/Metal door
+ * discipline), so the canonical `cc -O2 fkwu-uni.c` build gains no link flags. AudioQueue's C
+ * API carries both directions; 16 kHz mono s16le both ways, the same wire every ear cell reads.
+ *
+ * Camera stays honestly pending here — this movement is the VOICE loop's; the eye is its own. */
+extern void *dlopen(const char *, int);
+extern void *dlsym(void *, const char *);
+extern int usleep(unsigned int);
+struct fk_asbd {
+    double mSampleRate;
+    unsigned int mFormatID;
+    unsigned int mFormatFlags;
+    unsigned int mBytesPerPacket;
+    unsigned int mFramesPerPacket;
+    unsigned int mBytesPerFrame;
+    unsigned int mChannelsPerFrame;
+    unsigned int mBitsPerChannel;
+    unsigned int mReserved;
+};
+struct fk_aqbuf {
+    unsigned int mAudioDataBytesCapacity;
+    void *mAudioData;
+    unsigned int mAudioDataByteSize;
+    void *mUserData;
+    unsigned int mPacketDescriptionCapacity;
+    void *mPacketDescriptions;
+    unsigned int mPacketDescriptionCount;
+};
+typedef void (*fk_aq_incb)(void *, void *, struct fk_aqbuf *, const void *, unsigned int,
+                           const void *);
+typedef void (*fk_aq_outcb)(void *, void *, struct fk_aqbuf *);
+static int (*fk_AQNewInput)(const struct fk_asbd *, fk_aq_incb, void *, void *, void *,
+                            unsigned int, void **);
+static int (*fk_AQNewOutput)(const struct fk_asbd *, fk_aq_outcb, void *, void *, void *,
+                             unsigned int, void **);
+static int (*fk_AQAllocBuf)(void *, unsigned int, struct fk_aqbuf **);
+static int (*fk_AQEnqueue)(void *, struct fk_aqbuf *, unsigned int, const void *);
+static int (*fk_AQStart)(void *, const void *);
+static int (*fk_AQStop)(void *, unsigned char);
+static int (*fk_AQDispose)(void *, unsigned char);
+static int fk_aq_loaded;
+static int fk_aq_load(void) {
+    if (fk_aq_loaded) {
+        return fk_AQNewInput != 0;
+    }
+    fk_aq_loaded = 1;
+    void *h = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", 2);
+    if (h == 0) {
+        printf("sense: AudioToolbox not reachable\n");
+        return 0;
+    }
+    fk_AQNewInput = (int (*)(const struct fk_asbd *, fk_aq_incb, void *, void *, void *,
+                             unsigned int, void **))dlsym(h, "AudioQueueNewInput");
+    fk_AQNewOutput = (int (*)(const struct fk_asbd *, fk_aq_outcb, void *, void *, void *,
+                              unsigned int, void **))dlsym(h, "AudioQueueNewOutput");
+    fk_AQAllocBuf = (int (*)(void *, unsigned int, struct fk_aqbuf **))dlsym(
+        h, "AudioQueueAllocateBuffer");
+    fk_AQEnqueue = (int (*)(void *, struct fk_aqbuf *, unsigned int, const void *))dlsym(
+        h, "AudioQueueEnqueueBuffer");
+    fk_AQStart = (int (*)(void *, const void *))dlsym(h, "AudioQueueStart");
+    fk_AQStop = (int (*)(void *, unsigned char))dlsym(h, "AudioQueueStop");
+    fk_AQDispose = (int (*)(void *, unsigned char))dlsym(h, "AudioQueueDispose");
+    return fk_AQNewInput != 0 && fk_AQNewOutput != 0 && fk_AQAllocBuf != 0 && fk_AQEnqueue != 0 &&
+           fk_AQStart != 0 && fk_AQStop != 0 && fk_AQDispose != 0;
+}
+static void fk_asbd_16k(struct fk_asbd *f) {
+    f->mSampleRate = 16000.0;
+    f->mFormatID = 0x6C70636D; /* 'lpcm' */
+    f->mFormatFlags = 0x4 | 0x8; /* signed-integer | packed */
+    f->mBytesPerPacket = 2;
+    f->mFramesPerPacket = 1;
+    f->mBytesPerFrame = 2;
+    f->mChannelsPerFrame = 1;
+    f->mBitsPerChannel = 16;
+    f->mReserved = 0;
+}
+/* ── the STREAM session (tags 239-241): one input queue held open across calls, so the live
+ * loop's frame quantum is the only latency and no file stands between the diaphragm and the
+ * ear. Single producer (the AQ thread appends), single consumer (Form reads a prefix and the
+ * offsets advance after AQStop or under the produced/consumed discipline below): produced is
+ * written ONLY by the callback, consumed ONLY by the reader, both monotone — no lock needed
+ * for a bounded ring read behind produced. */
+#define FK_MICRING (16000 * 2 * 30) /* 30 s of 16 kHz s16le */
+static char fk_micring[FK_MICRING];
+static volatile long long fk_mic_produced;
+static long long fk_mic_consumed;
+static void *fk_micq;
+static struct fk_aqbuf *fk_micbufs[4];
+static void fk_mic_incb(void *ud, void *q, struct fk_aqbuf *b, const void *ts, unsigned int nd,
+                        const void *pd) {
+    (void)ud;
+    (void)ts;
+    (void)nd;
+    (void)pd;
+    long long n = (long long)b->mAudioDataByteSize;
+    long long at = fk_mic_produced;
+    long long i;
+    for (i = 0; i < n; i = i + 1) {
+        fk_micring[(at + i) % FK_MICRING] = ((char *)b->mAudioData)[i];
+    }
+    fk_mic_produced = at + n;
+    fk_AQEnqueue(q, b, 0, 0);
+}
+static long long fk_mic_stream_start(void) {
+    if (!fk_aq_load()) {
+        return -1;
+    }
+    if (fk_micq != 0) {
+        return 0; /* already open: idempotent */
+    }
+    struct fk_asbd f;
+    fk_asbd_16k(&f);
+    if (fk_AQNewInput(&f, fk_mic_incb, 0, 0, 0, 0, &fk_micq) != 0 || fk_micq == 0) {
+        printf("sense: mic stream open refused\n");
+        fk_micq = 0;
+        return -1;
+    }
+    fk_mic_produced = 0;
+    fk_mic_consumed = 0;
+    long long i;
+    for (i = 0; i < 4; i = i + 1) {
+        if (fk_AQAllocBuf(fk_micq, 3200, &fk_micbufs[i]) == 0) { /* 100 ms each */
+            fk_AQEnqueue(fk_micq, fk_micbufs[i], 0, 0);
+        }
+    }
+    if (fk_AQStart(fk_micq, 0) != 0) {
+        printf("sense: mic stream start refused\n");
+        fk_AQDispose(fk_micq, 1);
+        fk_micq = 0;
+        return -1;
+    }
+    return 0;
+}
+/* read up to max-bytes of new capture as an s16le STRING (the read_file_slice shape, so every
+ * ear cell consumes it unchanged). Blocks up to ~wait_ms for the first byte, then returns what
+ * is there — the caller owns pacing. Empty string = nothing new within the wait. */
+static long long fk_mic_stream_read(long long maxbytes, long long wait_ms) {
+    if (fk_micq == 0) {
+        return fk_sbuf("", 0);
+    }
+    if (maxbytes < 2) {
+        maxbytes = 2;
+    }
+    if (maxbytes > FK_MICRING / 2) {
+        maxbytes = FK_MICRING / 2;
+    }
+    long long waited = 0;
+    while (fk_mic_produced - fk_mic_consumed < maxbytes && waited < wait_ms) {
+        usleep(2000);
+        waited = waited + 2;
+    }
+    long long have = fk_mic_produced - fk_mic_consumed;
+    if (have > maxbytes) {
+        have = maxbytes;
+    }
+    if (have <= 0) {
+        return fk_sbuf("", 0);
+    }
+    fk_sinit();
+    long long base = fk_sbp;
+    while (base + have > fk_scap_b) {
+        fk_scap_b = fk_scap_b * 2;
+        fk_sb = realloc(fk_sb, fk_scap_b);
+        fk_sb_check();
+    }
+    long long i;
+    for (i = 0; i < have; i = i + 1) {
+        fk_sb[base + i] = fk_micring[(fk_mic_consumed + i) % FK_MICRING];
+    }
+    fk_mic_consumed = fk_mic_consumed + have;
+    return fk_sintern(base, have) << 1;
+}
+static long long fk_mic_stream_stop(void) {
+    if (fk_micq == 0) {
+        return 0;
+    }
+    fk_AQStop(fk_micq, 1);
+    fk_AQDispose(fk_micq, 1);
+    fk_micq = 0;
+    return 0;
+}
+/* speaker OUT: play a 16 kHz mono s16le wav through AudioQueue output. done-flag set by the
+ * callback when the last buffer drains; while capturing (outpath non-empty in fk_wav_loopback)
+ * the mic stream keeps running, so play+capture is one session, not a race of processes. */
+static volatile int fk_spk_pending;
+static void fk_spk_outcb(void *ud, void *q, struct fk_aqbuf *b) {
+    (void)ud;
+    (void)q;
+    (void)b;
+    fk_spk_pending = fk_spk_pending - 1;
+}
+static long long fk_spk_play(const char *inbuf, long long doff, long long dlen) {
+    if (!fk_aq_load()) {
+        return -1;
+    }
+    struct fk_asbd f;
+    fk_asbd_16k(&f);
+    void *q = 0;
+    if (fk_AQNewOutput(&f, fk_spk_outcb, 0, 0, 0, 0, &q) != 0 || q == 0) {
+        printf("sense: speaker open refused\n");
+        return -1;
+    }
+    long long chunk = 16000; /* 500 ms per buffer */
+    long long off = 0;
+    fk_spk_pending = 0;
+    while (off < dlen) {
+        long long n = dlen - off > chunk ? chunk : dlen - off;
+        struct fk_aqbuf *b = 0;
+        if (fk_AQAllocBuf(q, (unsigned int)n, &b) != 0 || b == 0) {
+            break;
+        }
+        long long i;
+        for (i = 0; i < n; i = i + 1) {
+            ((char *)b->mAudioData)[i] = inbuf[doff + off + i];
+        }
+        b->mAudioDataByteSize = (unsigned int)n;
+        fk_spk_pending = fk_spk_pending + 1;
+        fk_AQEnqueue(q, b, 0, 0);
+        off = off + n;
+    }
+    fk_AQStart(q, 0);
+    long long ms = dlen / 32;
+    long long waited = 0;
+    while (fk_spk_pending > 0 && waited < ms + 2000) {
+        usleep(10000);
+        waited = waited + 10;
+    }
+    fk_AQStop(q, 1);
+    fk_AQDispose(q, 1);
+    return 0;
+}
+static long long fk_mic_count(void) {
+    return fk_aq_load() ? 1 : 0;
+}
+static long long fk_mic_name(long long i) {
+    if (i == 0 && fk_aq_load()) {
+        return fk_sbuf("coreaudio-default", 17);
+    }
+    return fk_sbuf("", 0);
+}
+static long long fk_mic_health(long long i) {
+    return (i == 0 && fk_aq_load()) ? 1 : -1;
+}
+static long long fk_cam_count(void) {
+    return 0;
+}
+static long long fk_cam_name(long long i) {
+    (void)i;
+    return fk_sbuf("", 0);
+}
+static long long fk_cam_health(long long i) {
+    (void)i;
+    return -1;
+}
+static long long fk_cam_grab(long long i, const char *path) {
+    (void)i;
+    (void)path;
+    return -1;
+}
+/* tag 234 keeps the Windows arm's exact privacy contract: stats only, nothing retained */
+static long long fk_mic_capture(long long ms) {
+    if (ms < 100) {
+        ms = 100;
+    }
+    if (ms > 10000) {
+        ms = 10000;
+    }
+    if (fk_mic_stream_start() != 0) {
+        return 1;
+    }
+    long long want = ms * 32;
+    long long t = 0;
+    while (fk_mic_produced < want && t < ms + 2000) {
+        usleep(10000);
+        t = t + 10;
+    }
+    long long nsamp = (fk_mic_produced < want ? fk_mic_produced : want) / 2;
+    long long nonzero = 0, peak = 0, sumabs = 0, i;
+    for (i = 0; i < nsamp; i = i + 1) {
+        long long lo = (unsigned char)fk_micring[(i * 2) % FK_MICRING];
+        long long hi = (unsigned char)fk_micring[(i * 2 + 1) % FK_MICRING];
+        long long v = lo | (hi << 8);
+        if (v >= 32768) {
+            v = v - 65536;
+        }
+        long long a = v < 0 ? 0 - v : v;
+        if (a > 0) {
+            nonzero = nonzero + 1;
+        }
+        if (a > peak) {
+            peak = a;
+        }
+        sumabs = sumabs + a;
+    }
+    fk_mic_stream_stop();
+    long long meanabs = nsamp > 0 ? sumabs / nsamp : 0;
+    printf("sense: mic captured %lld samples (%lld ms) nonzero=%lld mean-abs=%lld peak=%lld — "
+           "measured, not retained\n",
+           nsamp, ms, nonzero, meanabs, peak);
+    long long r = 1;
+    r = fk_cons_val(peak << 1, r);
+    r = fk_cons_val(meanabs << 1, r);
+    r = fk_cons_val(nonzero << 1, r);
+    r = fk_cons_val(nsamp << 1, r);
+    return r;
+}
+static long long fk_cam_luma(long long timeout_ms) {
+    (void)timeout_ms;
+    return 1;
+}
+static long long fk_audio_loopback(long long ms) {
+    (void)ms;
+    return 1;
+}
+/* tag 237 mac arm: play inpath through the speakers; when outpath is non-empty, capture the
+ * played span + a half-second tail through the mic stream and write it as a canonical 16 kHz
+ * wav — the air loopback, one process, no ffmpeg, no afplay. Returns (played captured peak
+ * mean-abs) like the Windows arm; play-only when outpath is "". */
+static long long fk_wav_loopback(const char *inpath, const char *outpath) {
+    int fd = open(inpath, O_RDBIN);
+    if (fd < 0) {
+        printf("sense: air-loopback input wav missing\n");
+        return 1;
+    }
+    long long incap = 4000000;
+    char *inbuf = malloc((unsigned long)incap);
+    if (inbuf == 0) {
+        close(fd);
+        return 1;
+    }
+    long long inlen = 0;
+    long long g;
+    while (inlen < incap && (g = read(fd, inbuf + inlen, 65536)) > 0) {
+        inlen = inlen + g;
+    }
+    close(fd);
+    long long doff = -1;
+    long long i;
+    for (i = 12; i + 8 < inlen; i = i + 1) {
+        if (inbuf[i] == 'd' && inbuf[i + 1] == 'a' && inbuf[i + 2] == 't' &&
+            inbuf[i + 3] == 'a') {
+            doff = i + 8;
+            break;
+        }
+    }
+    if (doff < 0) {
+        printf("sense: air-loopback input wav has no data chunk\n");
+        free(inbuf);
+        return 1;
+    }
+    long long dlen = (long long)(unsigned char)inbuf[doff - 4] |
+                     ((long long)(unsigned char)inbuf[doff - 3] << 8) |
+                     ((long long)(unsigned char)inbuf[doff - 2] << 16) |
+                     ((long long)(unsigned char)inbuf[doff - 1] << 24);
+    if (dlen <= 0 || doff + dlen > inlen) {
+        dlen = inlen - doff;
+    }
+    long long capture = outpath != 0 && outpath[0] != 0;
+    long long mark = 0;
+    if (capture) {
+        if (fk_mic_stream_start() != 0) {
+            capture = 0;
+        } else {
+            mark = fk_mic_produced;
+        }
+    }
+    long long played = fk_spk_play(inbuf, doff, dlen) == 0 ? dlen / 2 : 0;
+    free(inbuf);
+    long long got = 0, peak = 0, sumabs = 0;
+    if (capture) {
+        long long tailwant = dlen + 16000; /* half-second tail at 32 B/ms */
+        long long t = 0;
+        while (fk_mic_produced - mark < tailwant && t < dlen / 32 + 1500) {
+            usleep(10000);
+            t = t + 10;
+        }
+        long long have = fk_mic_produced - mark;
+        if (have > tailwant) {
+            have = tailwant;
+        }
+        int ofd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (ofd >= 0) {
+            unsigned char hd[44];
+            long long dl = have;
+            memcpy(hd, "RIFF", 4);
+            hd[4] = (unsigned char)((36 + dl) & 255);
+            hd[5] = (unsigned char)(((36 + dl) >> 8) & 255);
+            hd[6] = (unsigned char)(((36 + dl) >> 16) & 255);
+            hd[7] = (unsigned char)(((36 + dl) >> 24) & 255);
+            memcpy(hd + 8, "WAVEfmt ", 8);
+            hd[16] = 16; hd[17] = 0; hd[18] = 0; hd[19] = 0;
+            hd[20] = 1; hd[21] = 0; hd[22] = 1; hd[23] = 0;
+            hd[24] = 0x80; hd[25] = 0x3E; hd[26] = 0; hd[27] = 0; /* 16000 */
+            hd[28] = 0; hd[29] = 0x7D; hd[30] = 0; hd[31] = 0;    /* 32000 */
+            hd[32] = 2; hd[33] = 0; hd[34] = 16; hd[35] = 0;
+            memcpy(hd + 36, "data", 4);
+            hd[40] = (unsigned char)(dl & 255);
+            hd[41] = (unsigned char)((dl >> 8) & 255);
+            hd[42] = (unsigned char)((dl >> 16) & 255);
+            hd[43] = (unsigned char)((dl >> 24) & 255);
+            write(ofd, hd, 44);
+            for (i = 0; i < have; i = i + 1) {
+                char c = fk_micring[(mark + i) % FK_MICRING];
+                write(ofd, &c, 1);
+            }
+            close(ofd);
+        }
+        for (i = 0; i + 1 < have; i = i + 2) {
+            long long lo = (unsigned char)fk_micring[(mark + i) % FK_MICRING];
+            long long hi = (unsigned char)fk_micring[(mark + i + 1) % FK_MICRING];
+            long long v = lo | (hi << 8);
+            if (v >= 32768) {
+                v = v - 65536;
+            }
+            long long a = v < 0 ? 0 - v : v;
+            if (a > peak) {
+                peak = a;
+            }
+            sumabs = sumabs + a;
+        }
+        got = have / 2;
+        fk_mic_stream_stop();
+    }
+    long long meanabs = got > 0 ? sumabs / got : 0;
+    long long r = 1;
+    r = fk_cons_val(meanabs << 1, r);
+    r = fk_cons_val(peak << 1, r);
+    r = fk_cons_val(got << 1, r);
+    r = fk_cons_val(played << 1, r);
+    return r;
+}
 #else
 static long long fk_mic_count(void) {
     return 0;
@@ -1755,6 +2359,19 @@ static long long fk_wav_loopback(const char *inpath, const char *outpath) {
     (void)inpath;
     (void)outpath;
     return 1;
+}
+#endif
+#if !defined(__APPLE__)
+static long long fk_mic_stream_start(void) {
+    return -1;
+}
+static long long fk_mic_stream_read(long long maxbytes, long long wait_ms) {
+    (void)maxbytes;
+    (void)wait_ms;
+    return fk_sbuf("", 0);
+}
+static long long fk_mic_stream_stop(void) {
+    return 0;
 }
 #endif
 static long long fk_sense_report(void) {
@@ -2390,7 +3007,7 @@ static int fk_scan_match(unsigned char c, long long cls) {
     return 0;
 }
 static long long fk_scan_run(long long sv, long long fromv, long long clsv) {
-    long long sa = sv >> 1;
+    long long sa = fk_stri(sv);
     long long from = fromv >> 1;
     long long cls = clsv >> 1;
     if (from < 0) {
@@ -2531,8 +3148,8 @@ static void fk_ls_add(long long sv) {
     }
 }
 static int fk_sv_less(long long a, long long b) {
-    long long aa = a >> 1;
-    long long bb = b >> 1;
+    long long aa = fk_stri(a);
+    long long bb = fk_stri(b);
     if (aa < 0 || bb < 0 || aa >= fk_sp || bb >= fk_sp) {
         return 0;
     }
@@ -2981,7 +3598,7 @@ static long long fk_socket_connect_native(long long hostv, long long portv) {
 }
 static long long fk_socket_send_native(long long h, long long sv) {
     fk_os_socket_t s = fk_sock_lookup(h, 2);
-    long long sa = sv >> 1;
+    long long sa = fk_stri(sv);
     if (!fk_os_socket_ok(s) || sa < 0 || sa >= fk_sp) {
         return -1;
     }
@@ -4035,9 +4652,9 @@ static long long fk_http_append_request_headers(char *req, long long rn, long lo
                     long long vp = fk_ht[np] >> 1;
                     if (vp >= 1 && vp <= fk_hp) {
                         long long valuev = fk_hh[vp];
-                        long long ns = namev >> 1;
-                        long long vs = valuev >> 1;
-                        if ((namev & 1) == 0 && (valuev & 1) == 0 && ns >= 0 && ns < fk_sp &&
+                        long long ns = fk_stri(namev);
+                        long long vs = fk_stri(valuev);
+                        if (fk_is_str(namev) && fk_is_str(valuev) && ns >= 0 && ns < fk_sp &&
                             vs >= 0 && vs < fk_sp) {
                             const char *name = fk_sb + fk_so[ns];
                             const char *value = fk_sb + fk_so[vs];
@@ -4167,7 +4784,7 @@ static long long fk_sock_request(long long hostv, long long portv, long long req
     char port[16];
     fk_cstr(hostv, host, 512);
     fk_cstr(portv, port, 16);
-    long long rsa = reqv >> 1;
+    long long rsa = fk_stri(reqv);
     long long rlen = (rsa >= 0 && rsa < fk_sp) ? fk_sl[rsa] : 0;
     struct addrinfo hints;
     hints.ai_flags = 0;
@@ -4230,22 +4847,22 @@ static long long fk_is_dict_value(long long v) {
     }
     long long marker = fk_sbuf("__dict__", 8);
     long long h = fk_hh[p];
-    if ((h & 1) != 0) {
+    if (!fk_is_str(h)) {
         return 0;
     }
-    return fk_keyeq(h >> 1, marker >> 1);
+    return fk_keyeq(fk_stri(h), fk_stri(marker));
 }
 static long long fk_get_value(long long target, long long key) {
     if (fk_is_dict_value(target)) {
         long long p = fk_ht[target >> 1] >> 1;
-        long long ks = key >> 1;
+        long long ks = fk_stri(key);
         while (p >= 1 && p <= fk_hp) {
             long long k = fk_hh[p];
             long long vp = fk_ht[p] >> 1;
             if (vp < 1 || vp > fk_hp) {
                 return 0;
             }
-            if ((k & 1) == 0 && (key & 1) == 0 && fk_keyeq(k >> 1, ks)) {
+            if (fk_is_str(k) && fk_is_str(key) && fk_keyeq(fk_stri(k), ks)) {
                 return fk_hh[vp];
             }
             p = fk_ht[vp] >> 1;
@@ -4502,7 +5119,7 @@ static long long fk_tls_request(long long hostv, long long portv, long long reqv
     char port[16];
     fk_cstr(hostv, host, 512);
     fk_cstr(portv, port, 16);
-    long long rsa = reqv >> 1;
+    long long rsa = fk_stri(reqv);
     long long rlen = (rsa >= 0 && rsa < fk_sp) ? fk_sl[rsa] : 0;
     void *lib = fk_ssl_lib();
     if (lib == 0) {
@@ -4979,9 +5596,22 @@ static void fk_melt(void) {
                 fk_nmelt, hp0, fk_hp, nlive, fk_cap, fk_vsp, fk_np, fk_fp, fk_sp);
     }
 }
+/* THE WALL THAT COULD NOT SPEAK. Thirty lines below, fk_walk's host-stack wall
+ * says what it measured, what the limit was, and what the recipe should do
+ * instead — "the wall is honest, the silent crash was not". This one said
+ * `fk_vp: value stack overflow` and exited: no depth, no cap, no remedy, and
+ * nothing to distinguish a runaway recursion from a legitimately deep one. It
+ * was also the wall reached FIRST, so the body's honest diagnostic never got
+ * the chance to speak. Two walls, one voice between them, and the mute one in
+ * front. */
 static void fk_vp(long long v) {
     if (fk_vsp >= FK_VALUE_STACK_CAP) {
-        fk_die("fk_vp: value stack overflow");
+        printf("fkwu: value stack full — %lld of %lld slots, one per live call frame. "
+               "Either the recursion does not terminate, or it is deeper than this "
+               "kernel carries; the recipe-side home for deep recursion is the same "
+               "as for the walker wall — make it tail or balanced.\n",
+               (long long)fk_vsp, (long long)FK_VALUE_STACK_CAP);
+        fk_die("value-stack wall");
     }
     fk_vs[fk_vsp] = v;
     fk_vsp = fk_vsp + 1;
@@ -5033,40 +5663,8 @@ static long long fk_next() {
     }
     return sg * v;
 }
-static long long fk_str_root_depth(long long i, long long d) {
-    if (d > 64 || i < 0 || i >= fk_node_count) {
-        return 0;
-    }
-    long long t = fk_node[i][0];
-    if (t == 24 || t == 27 || t == 29 || t == 32 || t == 33 || t == 62 || t == 63 || t == 125) {
-        return 1;
-    }
-    if (t == 6) {
-        if (fk_str_root_depth(fk_node[i][2], d + 1) && fk_str_root_depth(fk_node[i][3], d + 1)) {
-            return 1;
-        }
-        return 0;
-    }
-    if (t == 12) {
-        long long f = fk_node[i][1];
-        if (f >= 0 && f < fk_fn_count) {
-            return fk_str_root_depth(fk_fn[f], d + 1);
-        }
-        return 0;
-    }
-    if (t == 69) {
-        return fk_str_root_depth(fk_node[i][2], d + 1);
-    }
-    if (t == 109) {
-        return fk_str_root_depth(fk_node[i][3], d + 1);
-    }
-    if (t == 111) {
-        return fk_str_root_depth(fk_node[i][2], d + 1);
-    }
-    return 0;
-}
 static void fk_psv(long long v) {
-    long long sa = v >> 1;
+    long long sa = fk_stri(v);
     if (sa >= 0 && sa < fk_sp) {
         long long j = 0;
         while (j < fk_sl[sa]) {
@@ -5095,8 +5693,12 @@ static int fk_is_output_list(long long v) {
     return p >= 1 && p <= fk_hp;
 }
 static void fk_pv_inline_number(long long v) {
-    if (fk_is_nothing(v)) { printf("nothing"); } else if (fk_isf(v)) {
-        printf("%.17g", fk_num(v));
+    if (fk_is_str(v)) {
+        fk_put_str(v);
+    } else if (fk_is_nothing(v)) { printf("nothing"); } else if (fk_isf(v)) {
+        char fb[64];
+        fk_fmt_float_js(fk_num(v), fb);
+        printf("%s", fb);
     } else if ((v & 1) == 0) {
         printf("%lld", v >> 1);
     } else {
@@ -5126,12 +5728,20 @@ static void fk_pv_list(long long v, long long depth) {
     }
     putchar(FK_CH_RBRACKET);
 }
-static void fk_pv_root(long long root, long long v) {
-    if (fk_is_output_list(v)) {
+/* The result boundary. Until the string band existed (2026-07-31) this asked the
+ * NODE whether the result was a string (fk_str_root_depth), because the WORD could
+ * not say -- and the node only knows for literals, str_concat, read_file and the
+ * like, never for a string that arrives through a parameter. MEASURED on the 400-band
+ * sweep: concept-corpus-band and fnri-receipt-band each return a string, the node
+ * analysis said "not a string", and fkwu printed the interned POOL INDEX -- 143 and
+ * 1299 -- numbers indistinguishable from an honest verdict. The value now carries its
+ * own kind, so ask the value. */
+static void fk_pv_root(long long v) {
+    if (fk_is_str(v)) {
+        fk_psv(v);
+    } else if (fk_is_output_list(v)) {
         fk_pv_list(v, 0);
         putchar(FK_CH_LF);
-    } else if (fk_str_root_depth(root, 0)) {
-        fk_psv(v);
     } else {
         fk_pv(v);
     }
@@ -5888,10 +6498,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return ((long long)(unsigned char)fk_src[ix17]) << 1;
     }
     if (t == 24) {
-        return fk_node[i][1] << 1;
+        return fk_strv(fk_node[i][1]);
     }
     if (t == 25) {
-        long long sa = fk_walk(fk_node[i][1], fp) >> 1;
+        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
         if (sa < 0 || sa >= fk_sp) {
             return 0;
         }
@@ -5904,7 +6514,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * Go/Rust/TS panic on their native form_error. Before 2026-07-17 this
          * op was absent here and axiom-5 lowered every raise to nothing — the
          * bp "property" aphonia: bands sailed green past raised errors. */
-        long long sa = fk_walk(fk_node[i][1], fp) >> 1;
+        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
         fk_write_all_raw(2, "fkwu: form_error: ", 18);
         if (sa >= 0 && sa < fk_sp) {
             fk_write_all_raw(2, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
@@ -5913,16 +6523,16 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         exit(1);
     }
     if (t == 26) {
-        long long sa26 = fk_walk(fk_node[i][1], fp) >> 1;
-        long long sb26 = fk_walk(fk_node[i][2], fp) >> 1;
+        long long sa26 = fk_stri(fk_walk(fk_node[i][1], fp));
+        long long sb26 = fk_stri(fk_walk(fk_node[i][2], fp));
         if (fk_keyeq(sa26, sb26)) {
             return 2;
         }
         return 0;
     }
     if (t == 27) {
-        long long sa = fk_walk(fk_node[i][1], fp) >> 1;
-        long long sb = fk_walk(fk_node[i][2], fp) >> 1;
+        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
+        long long sb = fk_stri(fk_walk(fk_node[i][2], fp));
         if (sa < 0 || sa >= fk_sp || sb < 0 || sb >= fk_sp) {
             return 0 - 2;
         }
@@ -5942,10 +6552,10 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_sb[fk_sbp + fk_sl[sa] + j] = fk_sb[fk_so[sb] + j];
             j = j + 1;
         }
-        return fk_sintern(fk_sbp, ln) << 1;
+        return fk_strv(fk_sintern(fk_sbp, ln));
     }
     if (t == 28) {
-        long long sa = fk_walk(fk_node[i][1], fp) >> 1;
+        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
         long long k = fk_walk(fk_node[i][2], fp) >> 1;
         if (sa < 0 || sa >= fk_sp || k < 0 || k >= fk_sl[sa]) {
             return 0 - 2;
@@ -5953,8 +6563,8 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return ((long long)(unsigned char)fk_sb[fk_so[sa] + k]) << 1;
     }
     if (t == 30) {
-        long long sa = fk_walk(fk_node[i][1], fp) >> 1;
-        long long sb = fk_walk(fk_node[i][2], fp) >> 1;
+        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
+        long long sb = fk_stri(fk_walk(fk_node[i][2], fp));
         long long from = fk_walk(fk_node[i][3], fp) >> 1;
         if (sa < 0 || sa >= fk_sp || sb < 0 || sb >= fk_sp) {
             return 0 - 2;
@@ -5984,7 +6594,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return 0 - 2;
     }
     if (t == 31) {
-        long long sa = fk_walk(fk_node[i][1], fp) >> 1;
+        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
         if (sa < 0 || sa >= fk_sp) {
             return 0;
         }
@@ -6014,7 +6624,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 33) {
         long long b = fk_walk(fk_node[i][1], fp) >> 1;
         if (b < 0 || b > 255) {
-            return fk_sintern(fk_sbp, 0) << 1;
+            return fk_strv(fk_sintern(fk_sbp, 0));
         }
         while (fk_sbp + 1 > fk_scap_b) {
             fk_scap_b = fk_scap_b * 2;
@@ -6022,7 +6632,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_sb_check();
         }
         fk_sb[fk_sbp] = (char)b;
-        return fk_sintern(fk_sbp, 1) << 1;
+        return fk_strv(fk_sintern(fk_sbp, 1));
     }
     if (t == 34) {
         return (((fk_walk(fk_node[i][1], fp) >> 1) & (fk_walk(fk_node[i][2], fp) >> 1)) << 1);
@@ -6082,7 +6692,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 46) {
         long long sv46 = fk_walk(fk_node[i][1], fp);
-        long long sa46 = sv46 >> 1;
+        long long sa46 = fk_stri(sv46);
         long long ix46 = 1;
         while (ix46 <= fk_np) {
             if (fk_nkind[ix46] == 1 && fk_nid[ix46][2] == 2 && fk_nval[ix46] == sv46) {
@@ -6200,7 +6810,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_nbox(fk_np);
     }
     if (t == 113) {
-        long long sa113 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long sa113 = fk_stri(fk_walk(fk_node[i][1], fp));
         double fd113 = 0.0;
         if (sa113 >= 0 && sa113 < fk_sp) {
             char tb113[128];
@@ -6263,7 +6873,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         return fk_fbox(fk_round_ndigits_decimal(x, nd));
     }
     if (t == 53) {
-        long long sa = fk_walk(fk_node[i][1], fp) >> 1;
+        long long sa = fk_stri(fk_walk(fk_node[i][1], fp));
         if (sa < 0 || sa >= fk_sp) {
             return fk_fbox(0.0);
         }
@@ -6391,15 +7001,29 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (fd < 0) {
             return -2;
         }
+        /* Flush-and-continue, never truncate: the old `n < 8192` gate FILLED the buffer, wrote
+         * it once, and returned the file's size as if all was written -- the silent-partial
+         * family, on the write side. Witnessed 2026-07-30: a 9644-byte WAV ("sema", the body's
+         * first word) landed as 8192 bytes and the ear heard (1 3) out of the stump. Tag 104
+         * twenty lines down always had the loop-until-done shape; this is the same shape for
+         * the byte-list walk. */
         static char tmp[8192];
         long long n = 0;
         long long q = xs >> 1;
-        while (q >= 1 && q <= fk_hp && n < 8192) {
+        while (q >= 1 && q <= fk_hp) {
+            if (n == 8192) {
+                long long w61 = write(fd, tmp, n);
+                if (w61 < n) {
+                    close(fd);
+                    return -2;
+                }
+                n = 0;
+            }
             tmp[n] = (char)(fk_hh[q] >> 1);
             n = n + 1;
             q = fk_ht[q] >> 1;
         }
-        long long wr = write(fd, tmp, n);
+        long long wr = n > 0 ? write(fd, tmp, n) : 0;
         long long total = lseek(fd, 0, 2);
         close(fd);
         if (wr < 0 || total < 0) {
@@ -6431,7 +7055,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (got < 0) {
             got = 0;
         }
-        return fk_sintern(fk_sbp, got) << 1;
+        return fk_strv(fk_sintern(fk_sbp, got));
     }
     if (t == 63) {
         static char p[4096];
@@ -6442,7 +7066,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         int fd = open(p, O_RDBIN);
         if (fd < 0) {
             if (fk_conf("FK_READ_WITNESS")) {
-                long long sa63 = pv63 >> 1;
+                long long sa63 = fk_stri(pv63);
                 dprintf(2, "[read_file] OPEN FAILED at read #%lld: '%s' (handle=%lld sa=%lld sl=%lld so=%lld sp=%lld)\n",
                         fk_nreads, p, pv63, sa63, (sa63 >= 0 && sa63 < fk_sp) ? fk_sl[sa63] : -1,
                         (sa63 >= 0 && sa63 < fk_sp) ? fk_so[sa63] : -1, fk_sp);
@@ -6469,7 +7093,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             total = total + got;
         }
         close(fd);
-        return fk_sintern(base, total) << 1;
+        return fk_strv(fk_sintern(base, total));
     }
     if (t == 64) {
         long long xs64 = fk_walk(fk_node[i][1], fp);
@@ -6484,7 +7108,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             long long e64 = fk_hh[q64];
             long long ep64 = e64 >> 1;
             if (ep64 >= 1 && ep64 <= fk_hp) {
-                long long k64 = fk_hh[ep64] >> 1;
+                long long k64 = fk_stri(fk_hh[ep64]);
                 long long tp64 = fk_ht[ep64] >> 1;
                 long long v64 = 0;
                 if (tp64 >= 1 && tp64 <= fk_hp) {
@@ -6506,7 +7130,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 65) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
-        long long key = fk_walk(fk_node[i][2], fp) >> 1;
+        long long key = fk_stri(fk_walk(fk_node[i][2], fp));
         if (r < 1 || r >= FK_RECORD_CAP) {
             return 0;
         }
@@ -6522,7 +7146,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 66) {
         long long rec = fk_walk(fk_node[i][1], fp);
         long long r = fk_ridx(rec);
-        long long key = fk_walk(fk_node[i][2], fp) >> 1;
+        long long key = fk_stri(fk_walk(fk_node[i][2], fp));
         long long val = fk_walk(fk_node[i][3], fp);
         if (r < 1 || r >= FK_RECORD_CAP) {
             return 0;
@@ -6544,7 +7168,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 67) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
-        long long key = fk_walk(fk_node[i][2], fp) >> 1;
+        long long key = fk_stri(fk_walk(fk_node[i][2], fp));
         if (r < 1 || r >= FK_RECORD_CAP) {
             return 0;
         }
@@ -6576,7 +7200,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
                 return out;
             }
             fk_hp = fk_hp + 1;
-            fk_hh[fk_hp] = fk_rkey[r][j] << 1;
+            fk_hh[fk_hp] = fk_strv(fk_rkey[r][j]);
             fk_ht[fk_hp] = out;
             out = (fk_hp << 1) | 1;
         }
@@ -6589,7 +7213,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         static char p[4096];
         fk_cstr(fk_walk(fk_node[i][1], fp), p, 4096);
         long long sv104 = fk_walk(fk_node[i][2], fp);
-        long long sa104 = sv104 >> 1;
+        long long sa104 = fk_stri(sv104);
         if (sa104 < 0 || sa104 >= fk_sp) {
             return -2;
         }
@@ -6774,7 +7398,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (got71 <= 0) {
             return fk_sbuf("", 0);
         }
-        return fk_sintern(fk_sbp, got71) << 1;
+        return fk_strv(fk_sintern(fk_sbp, got71));
     }
     if (t == 135) {
         long long fd72 = fk_walk(fk_node[i][1], fp) >> 1;
@@ -6895,6 +7519,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 236) {
         return fk_audio_loopback(fk_walk(fk_node[i][1], fp) >> 1);
     }
+    if (t == 139) {
+        return fk_mic_stream_start() << 1;
+    }
+    if (t == 140) {
+        long long mb140 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long wm140 = fk_walk(fk_node[i][2], fp) >> 1;
+        return fk_mic_stream_read(mb140, wm140);
+    }
+    if (t == 141) {
+        return fk_mic_stream_stop() << 1;
+    }
     if (t == 237) {
         static char p237a[4096];
         static char p237b[4096];
@@ -6957,7 +7592,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 97) {
         long long r = fk_ridx(fk_walk(fk_node[i][1], fp));
-        long long key = fk_walk(fk_node[i][2], fp) >> 1;
+        long long key = fk_stri(fk_walk(fk_node[i][2], fp));
         if (r < 1 || r >= FK_RECORD_CAP) {
             return 0;
         }
@@ -6973,7 +7608,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 98) {
         long long rec = fk_walk(fk_node[i][1], fp);
         long long r = fk_ridx(rec);
-        long long key = fk_walk(fk_node[i][2], fp) >> 1;
+        long long key = fk_stri(fk_walk(fk_node[i][2], fp));
         long long val = fk_walk(fk_node[i][3], fp);
         if (r < 1 || r >= FK_RECORD_CAP) {
             return 0;
@@ -7170,11 +7805,11 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_sb[fk_sbp + rj] = rbuf[rj];
             rj = rj + 1;
         }
-        return fk_sintern(fk_sbp, rn) << 1;
+        return fk_strv(fk_sintern(fk_sbp, rn));
     }
     if (t == 115) {
         long long psv = fk_walk(fk_node[i][1], fp);
-        long long psa = psv >> 1;
+        long long psa = fk_stri(psv);
         if (psa >= 0 && psa < fk_sp) {
             long long pj = 0;
             while (pj < fk_sl[psa]) {
@@ -7190,6 +7825,48 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         fflush((void *)0);
         return 0;
     }
+    if (t == 239) {
+        /* print — the VALUE printer. Mirrors form-kernel-go's registerNative("print")
+         * exactly: each operand rendered by its kind, single space BETWEEN operands,
+         * one newline after, and the call itself answers nothing.
+         *
+         * Go writes a.String() per operand (core.Value.String); the kinds a fkwu word
+         * can be map onto it one for one now that the string band exists:
+         *   string  -> the bytes themselves      (Go VStr  -> v.Str)
+         *   float   -> fk_fmt_float_js           (Go VFloat -> FormatFloatJS)
+         *   int     -> decimal                   (Go VInt  -> FormatInt base 10)
+         *   list    -> "[a, b]", elements likewise (Go VList -> "[" + join ", " + "]")
+         * fkwu's `nothing` prints as "nothing" here, which is the word this kernel
+         * already answers for it at the verdict boundary; Go's VNull prints "null"
+         * and the two kernels do not yet agree on that ONE spelling -- named, not
+         * papered over, and reachable only through (nothing), which bin-go cannot
+         * currently evaluate at all (it crashes), so no band can witness the gap
+         * today. Every other kind is byte-for-byte.
+         *
+         * The operands arrive as a real list (the parser folds them through cons),
+         * so this walks the heap chain -- already evaluated, already in order. */
+        long long pv = fk_walk(fk_node[i][1], fp);
+        long long pp = pv >> 1;
+        long long pfirst = 1;
+        while (pp >= 1 && pp <= fk_hp) {
+            if (!pfirst) {
+                putchar(FK_CH_SPACE);
+            }
+            pfirst = 0;
+            long long pel = fk_hh[pp];
+            if (fk_is_output_list(pel)) {
+                fk_pv_list(pel, 0);
+            } else {
+                fk_pv_inline_number(pel);
+            }
+            pp = fk_ht[pp] >> 1;
+        }
+        putchar(10);
+        /* same live-event door as print_str: a driven emitter's line must reach the
+         * reader as it is spoken, and stdio block-buffers a pipe. */
+        fflush((void *)0);
+        return 0;
+    }
     if (t == 116) {
         if (isatty(0)) {
             return 2;
@@ -7198,7 +7875,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 117) {
         if (fk_gen_len <= 0) {
-            return fk_sintern(fk_sbp, 0) << 1;
+            return fk_strv(fk_sintern(fk_sbp, 0));
         }
         while (fk_sbp + fk_gen_len > fk_scap_b) {
             fk_scap_b = fk_scap_b * 2;
@@ -7210,7 +7887,7 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             fk_sb[fk_sbp + gj] = (char)fk_gen[gj];
             gj = gj + 1;
         }
-        return fk_sintern(fk_sbp, fk_gen_len) << 1;
+        return fk_strv(fk_sintern(fk_sbp, fk_gen_len));
     }
     return 0;
 }
@@ -7854,6 +8531,17 @@ static long long fk_sparse(void) {
             long long ar = fk_optab[oi].arity;
             long long tag = fk_optab[oi].tag;
             if (ar < 0) {
+                /* print (239) folds its operands through cons (19) and hangs the
+                 * resulting LIST under one print node, rather than chaining on its
+                 * own tag the way (list ..) does. Two reasons, both measured against
+                 * bin-go: a self-chain makes `(print)` with no operands lower to the
+                 * empty node (tag 18) -- not a print at all, where Go emits the bare
+                 * newline -- and the list shape hands the walker every operand
+                 * already evaluated and in order, which is what Go's variadic
+                 * `for i, a := range args` sees. */
+                if (tag == 239) {
+                    return fk_smknode(239, fk_parse_variadic(19), 0, 0);
+                }
                 return fk_parse_variadic(tag);
             }
             if (tag == 91 && ar == 4) {
@@ -8837,8 +9525,8 @@ static long long fk_jprim2(long long tag, long long a, long long b) {
     /* mod — mirrors fk_walk tag-11 (float-aware) */
     if (tag == 27) {
         /* str_concat — mirrors fk_walk's tag-27 exactly */
-        long long sa = a >> 1;
-        long long sb = b >> 1;
+        long long sa = fk_stri(a);
+        long long sb = fk_stri(b);
         if (sa < 0 || sa >= fk_sp || sb < 0 || sb >= fk_sp) {
             return 0 - 2;
         }
@@ -8859,15 +9547,15 @@ static long long fk_jprim2(long long tag, long long a, long long b) {
             fk_sb[off + fk_sl[sa] + m] = fk_sb[fk_so[sb] + m];
             m = m + 1;
         }
-        return fk_sintern(off, ln) << 1;
+        return fk_strv(fk_sintern(off, ln));
     }
     if (tag == 26) {
-        return fk_keyeq(a >> 1, b >> 1) ? 2 : 0;
+        return fk_keyeq(fk_stri(a), fk_stri(b)) ? 2 : 0;
     }
     /* str_eq — mirrors fk_walk tag-26 */
     if (tag == 28) {
         /* str_byte_at — mirrors fk_walk tag-28 */
-        long long sa = a >> 1;
+        long long sa = fk_stri(a);
         long long k = b >> 1;
         if (sa < 0 || sa >= fk_sp || k < 0 || k >= fk_sl[sa]) {
             return 0 - 2;
@@ -8879,7 +9567,7 @@ static long long fk_jprim2(long long tag, long long a, long long b) {
 static long long fk_jprim3(long long tag, long long a, long long b, long long c) {
     if (tag == 29) {
         /* substring — mirrors fk_walk tag-29 */
-        long long sa = a >> 1;
+        long long sa = fk_stri(a);
         long long lo = b >> 1;
         long long hi = c >> 1;
         if (sa < 0 || sa >= fk_sp || lo < 0 || hi < lo || hi > fk_sl[sa]) {
@@ -8896,13 +9584,13 @@ static long long fk_jprim3(long long tag, long long a, long long b, long long c)
             fk_sb[fk_sbp + j] = fk_sb[fk_so[sa] + lo + j];
             j = j + 1;
         }
-        return fk_sintern(fk_sbp, ln) << 1;
+        return fk_strv(fk_sintern(fk_sbp, ln));
     }
     return fk_nothing;
 }
 static long long fk_jprim1(long long tag, long long a) {
     if (tag == 25) {
-        long long sa = a >> 1;
+        long long sa = fk_stri(a);
         if (sa < 0 || sa >= fk_sp) {
             return 0;
         }
@@ -8911,7 +9599,7 @@ static long long fk_jprim1(long long tag, long long a) {
     if (tag == 238) {
         /* form_error — mirrors fk_walk's tag-238 exactly: crystallized code
          * must die as loudly as interpreted code. */
-        long long sa = a >> 1;
+        long long sa = fk_stri(a);
         fk_write_all_raw(2, "fkwu: form_error: ", 18);
         if (sa >= 0 && sa < fk_sp) {
             fk_write_all_raw(2, fk_sb + fk_so[sa], (unsigned long)fk_sl[sa]);
@@ -8926,7 +9614,7 @@ static long long fk_jprim1(long long tag, long long a) {
     /* float_to_int */
     if (tag == 53) {
         /* str_to_float — mirrors fk_walk's tag-53 exactly */
-        long long sa = a >> 1;
+        long long sa = fk_stri(a);
         if (sa < 0 || sa >= fk_sp) {
             return fk_fbox(0.0);
         }
@@ -9422,10 +10110,10 @@ static void fk_jemit(long long i, int tail) {
     if (t == 24) {
         fk_jb1(0x48);
         fk_jb1(0xB8);
-        fk_jb8(fk_node[i][1] << 1);
+        fk_jb8(fk_strv(fk_node[i][1]));
         return;
     }
-    /* STRING lit: tagged word = poolidx<<1 (known at lower-time, interned at parse) */
+    /* STRING lit: tagged word = fk_strv(poolidx) (known at lower-time, interned at parse) */
     if (t == 2) {
         fk_jb1(0x48);
         fk_jb1(0x8B);
@@ -10281,6 +10969,27 @@ static void fk_diag_path(const char *level, const char *path, const char *msg) {
 static char fk_src_dep_path[FK_SRC_DEP_CAP][4096];
 static long long fk_src_dep_mtime[FK_SRC_DEP_CAP];
 static long long fk_src_dep_size[FK_SRC_DEP_CAP];
+/* CONTENT DIGEST per dependency. The artifact identity used to be
+ * path@mtime:size and the code that wrote it said "source path, content, or
+ * mtime changed" -- but content was never in it. Two sources of the SAME LENGTH
+ * written inside the SAME mtime second are indistinguishable, and fkwu then
+ * runs the previous program and prints its answer with no warning and exit 0.
+ * Witnessed 2026-07-30: `(do 111)` and `(do 222)` are both 41 bytes with the
+ * preludes line; the second run printed 111. Same-length edits are the common
+ * case, not the exotic one -- a verdict pin, a constant, an operator, a depth.
+ * FNV-1a over the dependency's bytes, taken where the bytes are already in
+ * hand, closes it. */
+static unsigned long long fk_src_dep_digest[FK_SRC_DEP_CAP];
+static unsigned long long fk_bytes_fnv1a(const char *p, long long n) {
+    unsigned long long h = 14695981039346656037ULL;
+    long long k = 0;
+    while (k < n) {
+        h = h ^ (unsigned long long)(unsigned char)p[k];
+        h = h * 1099511628211ULL;
+        k = k + 1;
+    }
+    return h;
+}
 static long long fk_src_dep_parent[FK_SRC_DEP_CAP];
 static long long fk_src_dep_end[FK_SRC_DEP_CAP];
 static long long fk_src_dep_count;
@@ -10544,7 +11253,10 @@ static int fk_src_unit_hash_range(long long start, long long end, char *out, lon
     long long pos = 0;
     long long i = start;
     char canon[4096];
-    if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v1")) {
+    /* v1 -> v2: the identity now carries a content digest. Every v1 artifact is
+     * invalidated by the tag change rather than trusted, because a v1 artifact
+     * cannot testify about the content it was written from. */
+    if (!fk_source_hash_append(out, cap, &pos, "fk-unit-v2")) {
         return 0;
     }
     while (i < end && i < fk_src_dep_count) {
@@ -10553,7 +11265,10 @@ static int fk_src_unit_hash_range(long long start, long long end, char *out, lon
             !fk_source_hash_append(out, cap, &pos, "@") ||
             !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_mtime[i]) ||
             !fk_source_hash_append(out, cap, &pos, ":") ||
-            !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_size[i])) {
+            !fk_source_hash_append_ll(out, cap, &pos, fk_src_dep_size[i]) ||
+            !fk_source_hash_append(out, cap, &pos, "#") ||
+            !fk_source_hash_append_ll(out, cap, &pos,
+                                      (long long)(fk_src_dep_digest[i] >> 1))) {
             return 0;
         }
         i = i + 1;
@@ -10894,6 +11609,7 @@ static int fk_src_collect_file(const char *path, long long parent_idx) {
     fk_cstr_copy(fk_src_dep_path[fk_src_dep_count], path, 4096);
     fk_src_dep_mtime[fk_src_dep_count] = mtime;
     fk_src_dep_size[fk_src_dep_count] = size;
+    fk_src_dep_digest[fk_src_dep_count] = fk_bytes_fnv1a(owned, got);
     fk_src_dep_parent[fk_src_dep_count] = parent_idx;
     fk_src_dep_end[fk_src_dep_count] = fk_src_dep_count + 1;
     fk_src_dep_count = fk_src_dep_count + 1;
@@ -11880,7 +12596,7 @@ static int fk_run_loaded_program_image(long long arg) {
     }
     fk_vs[0] = arg << 1;
     fk_vsp = 1;
-    fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
+    fk_pv_root(fk_walk(fk_fn[0], 0));
     return 0;
 }
 typedef long long (*fk_dylib_main_v1_fn)(long long);
@@ -12505,7 +13221,7 @@ static int fk_run_src(const char *path, long long arg) {
                 if (n > 0) {
                     unsigned char *img = malloc(n);
                     if (img == 0) {
-                        fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
+                        fk_pv_root(fk_walk(fk_fn[0], 0));
                         return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
                     }
                     long long ci = 0;
@@ -12561,7 +13277,7 @@ static int fk_run_src(const char *path, long long arg) {
             }
         }
     }
-    fk_pv_root(fk_fn[0], fk_walk(fk_fn[0], 0));
+    fk_pv_root(fk_walk(fk_fn[0], 0));
     return (fk_nerr > 0 || fk_nerr_seen > 0) ? 1 : 0;
 }
 /* --feval: run a recipe THROUGH form-eval (Form), not fk_walk directly. The C seed bootstraps the

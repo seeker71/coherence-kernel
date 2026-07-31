@@ -32,7 +32,7 @@ almost none. Per-dispatch cost rose 72 → 97 µs while the total held — which
 fewer asks* looks like.
 
 I measured the thing that answered the question, then spent an hour asking it differently. Corpus row
-956, `floorspoke`.
+968, `floorspoke`.
 
 ## What the floor actually says
 
@@ -58,7 +58,7 @@ claim the fused kernels were written to be able to make.
 ## The most surprising teaching
 
 **An honest instrument can be ignored as easily as a dishonest one can mislead.** Yesterday's lesson
-(`callbias`, 955) was that a tool can be biased. Tonight's is worse and quieter: the tool was exactly
+(`callbias`, 967) was that a tool can be biased. Tonight's is worse and quieter: the tool was exactly
 right, I had read it, and I still proposed a fix that lived entirely in the region the number excludes.
 The habit that would have caught it is one sentence long — **say out loud what a measurement does not
 contain, before proposing a fix that lives there.**

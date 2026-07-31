@@ -2468,14 +2468,14 @@ if profileOn {
     print("         kernel is charged a fixed submit overhead ONCE PER CALL. A kernel called 1484 times carries")
     print("         1484 helpings of it. This column is cost PLUS call count, not cost — trust it for gaps of")
     print("         10x or more (those survive the bias) and never for neighbours. The us/call column is the")
-    print("         one to compare when call counts differ. (callbias, corpus row 955.)")
+    print("         one to compare when call counts differ. (callbias, corpus row 967.)")
     for (nm, s) in profS.sorted(by: { $0.value > $1.value }).prefix(60) {
         let n = profN[nm] ?? 1
         print(String(format: "      %8.3f s  %6d calls  %8.1f us each   %@", s, n, 1e6*s/Double(n), nm))
     }
     // THE OVERHEAD FLOOR, measured rather than assumed. The cheapest kernel per call is an UPPER BOUND
     // on what a bare submit costs, because it also does real work. Subtracting that bound x call-count
-    // from every total is what turns this ranking from "cost plus call count" into cost (callbias 955).
+    // from every total is what turns this ranking from "cost plus call count" into cost (callbias 967).
     let cheapest = profS.map { ($0.key, 1e6 * $0.value / Double(profN[$0.key] ?? 1)) }.sorted { $0.1 < $1.1 }
     print("      ── cheapest per call (the submit-overhead ceiling) ──")
     for (nm, us) in cheapest.prefix(4) { print(String(format: "      %8.1f us each  %6d calls   %@", us, profN[nm] ?? 0, nm)) }

@@ -2621,15 +2621,30 @@ export class Kernel {
       const offset = argInt(args, 1);
       const length = argInt(args, 2);
       if (offset < 0 || length <= 0) return { kind: "str", str: "" };
+      let bytes: Uint8Array;
       try {
         const read = this.host.readBinarySlice;
         if (read === undefined) return { kind: "str", str: "" };
-        return {
-          kind: "str",
-          str: utf8Decode(read(argStr(args, 0), offset, length)),
-        };
+        bytes = read(argStr(args, 0), offset, length);
       } catch {
         return { kind: "str", str: "" };
+      }
+      // Decode STRICTLY, separately from the read. utf8Decode replaces every invalid byte with
+      // U+FFFD, so a binary slice came back as a plausible LONGER string: equireach-band.fk has
+      // carried the witness since 2026-07-21 — 767 bytes for a 420-byte Q6_K fixture, byte 4
+      // reading 239 instead of 210 — and that band is two-arm today because of it. A recipe
+      // reading binary here was silently reading a different file. Null is the failure value this
+      // kernel's read_file gives for non-UTF-8, so the string primitives stop loudly instead of
+      // computing on replacement characters. A JS string cannot hold arbitrary bytes; losslessness
+      // would need a byte string in the Value type. Until then it says it cannot, rather than
+      // answering wrong. An I/O failure keeps its own "" above — a short read is not a bad decode.
+      try {
+        return {
+          kind: "str",
+          str: new TextDecoder("utf-8", { fatal: true }).decode(bytes),
+        };
+      } catch {
+        return { kind: "null" };
       }
     };
     this.registerNative("host_file_read_slice", catCall(), readFileSliceNative);
@@ -2990,6 +3005,23 @@ export class Kernel {
         file,
         line: argInt(args, 3),
         col: argInt(args, 4),
+      });
+      k.activeRoots.push(nid);
+      k.framebufferRoots.push(nid);
+      return { kind: "nodeid", nodeid: nid };
+    });
+    // fb_record — native provenance primitive (tag 128). Records source
+    // attribution for an already-interned node, retains it as a framebuffer
+    // root, and returns the same node. The packed coordinate is
+    // line<<16|col, matching Go, Rust, and the fkwu fourth arm.
+    this.registerNative("fb_record", catWitness(), (k, args) => {
+      const nid = argNodeID(args, 0);
+      const file = k.internName(argStr(args, 1));
+      const packed = argInt(args, 2);
+      k.sourceAttr.set(nodeKey(nid), {
+        file,
+        line: packed >>> 16,
+        col: packed & 0xffff,
       });
       k.activeRoots.push(nid);
       k.framebufferRoots.push(nid);

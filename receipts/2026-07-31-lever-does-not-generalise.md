@@ -40,7 +40,7 @@ no thread ever holds two of them together.
 Hoisting requires each lane to own **whole blocks** (`blk = lane, lane+32, ...`, 32 contiguous
 elements each), which decodes the scale once per 32 elements instead of once per element. That changes
 the within-lane summation order, so it is **(b) association-changing** and must be re-measured against
-the reference stream — which the night's evidence says is likely tolerated (`freewall`, row 959: ds4's
+the reference stream — which the night's evidence says is likely tolerated (`freewall`, row 971: ds4's
 own CPU and Metal arms produce the identical 24-token stream under two different associations).
 
 That is the next edit, and it is one kernel.
