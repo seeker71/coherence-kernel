@@ -613,6 +613,9 @@ let pIq2H = pipe(lIq2, "form_dsv4_iq2_matvec_hoist")
 let pIq2E = pipe(lIq2, "form_dsv4_iq2_matvec_experts")
 let pIq2E4 = pipe(lIq2, "form_dsv4_iq2_matvec_experts4")
 let pQ2kE = pipe(lQ2k, "form_dsv4_q2k_matvec_experts")
+let pQ2kEW = pipe(lQ2k, "form_dsv4_q2k_matvec_experts_wide")
+// FORM_DS4_Q2K_ONE_THREAD=1 goes back to one thread per expert row.
+let q2kOneThread = ProcessInfo.processInfo.environment["FORM_DS4_Q2K_ONE_THREAD"] == "1"
 let pSwigE = pipe(lFfn, "form_dsv4_swiglu_experts")
 let pMoeRed = pipe(lFfn, "form_dsv4_moe_reduce")
 // FORM_DS4_NO_FUSE=1 falls back to the per-expert dispatch path, kept as the A/B that says whether
@@ -1299,7 +1302,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         let parts = sentinelled(nE*nEmbd)
         var dr = UInt32(nEmbd), dc = UInt32(nFf), dst = UInt32(w.dx.bytes / w.dx.d2)
         wbExp += nE * (w.dx.bytes / w.dx.d2)
-        enc(pQ2kE, nE*nEmbd, 256) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
+        enc(q2kOneThread ? pQ2kE : pQ2kEW, q2kOneThread ? nE*nEmbd : nE*nEmbd*32, 256) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
                                          c.setBuffer(mid, offset: 0, index: 1); c.setBuffer(parts, offset: 0, index: 2)
                                          c.setBuffer(idsBuf, offset: 0, index: 3)
                                          c.setBytes(&dr, length: 4, index: 4); c.setBytes(&dc, length: 4, index: 5)
@@ -1672,9 +1675,14 @@ if kvSequence {
                          tag, Double(probeWords)*4/1e9, s*1000, Double(probeWords)*4/s/1e9))
         }
     }
-    let gpuBusyAtGenStart = gpuBusyS
-    let wb0Q80 = wbQ80, wb0F16 = wbF16, wb0Exp = wbExp, wb0Oth = wbOther
-    let dispAtGenStart = gpuDispatches
+    // THESE ARE TAKEN WHERE GENERATION ACTUALLY BEGINS, not before the prompt. Named AtGenStart and
+    // read before the prompt's passes, they averaged the floor over thirty passes while the t/s line
+    // counted twenty-five — a floor 1.2x kinder than the run, and every per-token byte count with it.
+    // The prompt's passes are also the ones that fault 83 GiB of file in, so they are not the same
+    // pass at all. The assignment now sits beside tPrefillEnd, on the step that ends the prompt.
+    var gpuBusyAtGenStart = gpuBusyS
+    var wb0Q80 = wbQ80, wb0F16 = wbF16, wb0Exp = wbExp, wb0Oth = wbOther
+    var dispAtGenStart = gpuDispatches
     // PREFILL then GENERATE. While pos is inside the prompt the input is the prompt's token and
     // the emitted id is discarded — the model is READING. Past the prompt it eats its own output.
     // The boundary is the whole difference between a continuation of one token and an answer.
@@ -1695,7 +1703,12 @@ if kvSequence {
         }
         dumpArmed = (pos == promptIds.count - 1)
         let exit = nativeExitHead(resid, "feedback step \(pos), input_token=\(inputToken)")
-        if pos == promptIds.count - 1 { tPrefillEnd = Date() }
+        if pos == promptIds.count - 1 {
+            tPrefillEnd = Date()
+            gpuBusyAtGenStart = gpuBusyS
+            wb0Q80 = wbQ80; wb0F16 = wbF16; wb0Exp = wbExp; wb0Oth = wbOther
+            dispAtGenStart = gpuDispatches
+        }
         if pos >= promptIds.count - 1 { emitted.append(exit.token) }
         currentToken = exit.token
         let rp = fp(resid, hcDim)
@@ -1718,7 +1731,12 @@ if kvSequence {
     // scaffolding are the thing to fix. Quoting only the fraction would have blamed the harness.
     print(String(format: "      GPU BUSY: %.2fs of %.2fs wall (%.0f%%); floor = %.0f ms of GPU per token at 100%% occupancy, over %d dispatches per token",
                  busyAtEnd, prefillS + genS, 100.0 * busyAtEnd / max(prefillS + genS, 1e-9),
-                 1000.0 * busyAtEnd / Double(max(kvSteps, 1)), gpuDispatches / max(kvSteps, 1)))
+                 // PER GENERATED TOKEN, and nGen is the count of those. busyAtEnd is measured from
+                 // gpuBusyAtGenStart, so it holds the GENERATION steps only — dividing it by kvSteps
+                 // (which counts the prompt's steps too) reported a floor 1.2x better than the run.
+                 // It read 65 ms next to a 79 ms wall and invited "the harness is stalling the GPU";
+                 // the truth was 78 against 79 and the device was never idle.
+                 1000.0 * busyAtEnd / Double(max(nGen, 1)), (gpuDispatches - dispAtGenStart) / max(nGen, 1)))
     // THE BANDWIDTH FLOOR, from the file's own tensor sizes. Every weight byte a token touches must
     // cross the bus once; N/peak is a floor no arrangement of arithmetic can beat. Printing the
     // achieved fraction says whether a kernel has room left or is already at the wall.
