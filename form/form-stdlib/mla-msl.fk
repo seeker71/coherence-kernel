@@ -178,6 +178,23 @@
 
     ; --- ONE translation unit: the body's one metal_stdlib, the MLA_MAX_HD cap, the spine once, then the
     ;     kernels. A carrier compiles exactly this; it composes nothing itself. ---
+    ; --- THE STATS KERNEL ON A SIMDGROUP A HEAD, AND WHAT IN IT IS ORDERED. It gives one THREAD a head:
+    ;     64 threads on the whole device, each walking the head's scores twice and calling mla_exp —
+    ;     range-reduction loop, then a fourteen-term series with a divide in every term — once per row.
+    ;     FORM_DS4_DOUBLE prices it at 0.8 ms of a 39 ms token over 43 asks.
+    ;     Two of its three passes have no order to keep and one does, and they are separable:
+    ;       the MAX is associative and commutative over these finite floats, so simd_max over lanes that
+    ;         each start at `sink` returns the same float the serial scan returns — the same set's
+    ;         maximum, and a maximum is a member of the set, not a fold of it;
+    ;       each e[j] is a function of s[j] and m alone, so whichever lane computes it computes the
+    ;         same float;
+    ;       the DENOMINATOR is a left fold and stays exactly that — lane 0 alone, ascending j, over the
+    ;         values the lanes just wrote, then the sink term added the way it always was.
+    ;     So thirty-two lanes share the transcendentals and one lane keeps the sum. Bit-identical.
+    ;     n_head simdgroups replace n_head threads; FORM_DS4_ATT_STATS_SG=0 is the A/B. ---
+    (defn mla-attend-stats-sg-body ()
+        "kernel void form_mla_attend_stats_sg(device const float* sco [[buffer(0)]], device const float* sinks [[buffer(1)]], device float* ex [[buffer(2)]], device float* inv [[buffer(3)]], constant uint& nh [[buffer(4)]], constant uint& ntot [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint h = gid / 32u; if (h >= nh) return; device const float* s = sco + h * ntot; device float* e = ex + h * ntot; float sink = sinks[h]; float lm = sink; for (uint j = lane; j < ntot; j += 32u) { float v = s[j]; if (v > lm) lm = v; } float m = metal::simd_max(lm); for (uint j = lane; j < ntot; j += 32u) { e[j] = mla_exp(s[j] - m); } metal::simdgroup_barrier(metal::mem_flags::mem_device); if (lane != 0u) return; float se = 0.0f; for (uint j = 0u; j < ntot; ++j) { se = se + e[j]; } inv[h] = 1.0f / (mla_exp(sink - m) + se); } ")
+
     (defn mla-msl-unit ()
         (str_concat "#include <metal_stdlib>\n#define MLA_MAX_HD 512\n"
         (str_concat (mla-msl-spine)
@@ -190,6 +207,7 @@
         (str_concat (mla-headrms-wide-body)
         (str_concat (mla-rope-body)
         (str_concat (mla-attend-body)
-        (str_concat (mla-attend-mixed-body) (mla-attend-split-body))))))))))))))
+        (str_concat (mla-attend-mixed-body)
+        (str_concat (mla-attend-split-body) (mla-attend-stats-sg-body)))))))))))))))
 
     0)

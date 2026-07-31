@@ -810,7 +810,20 @@ let pRope = pipe(lMla, "form_mla_rope_f32")
 let pAttend = pipe(lMla, "form_mla_attend_f32")
 let pAttendMixed = pipe(lMla, "form_mla_attend_mixed_f32")
 let pAttScores = pipe(lMla, "form_mla_attend_scores")
-let pAttStats  = pipe(lMla, "form_mla_attend_stats")
+// FORM_DS4_ATT_STATS_SG=1 gives a head a SIMDGROUP instead of a thread: the row max is shared across
+// 32 lanes (a maximum is a member of the set, not a fold of it), the per-row exponentials are shared
+// (each is a function of its own row alone), and the denominator's ascending sum stays on lane 0,
+// where its order lives. FORM_DS4_DOUBLE prices the thread-per-head kernel at 0.8 ms of a 39 ms token.
+//
+// MEASURED NULL, AND KEPT WITH ITS NUMBER — the third such null this round, and they all say the same
+// thing. 0.85 s of GPU over 25 tokens either way; 28.48 t/s against 28.37, which is the run-to-run
+// spread. The stream is bit-exact both ways over thirty steps, so the separation of what is ordered
+// from what is not holds; it simply buys nothing, because on the concurrent encoder this kernel was
+// already running under the work around it. What a serial-encoder doubling prices is a kernel's
+// EXCLUSIVE cost, and for the narrow kernels that is not what the token pays. Default stays on the
+// kernel the tree already proved.
+let attStatsSg = ProcessInfo.processInfo.environment["FORM_DS4_ATT_STATS_SG"] == "1"
+let pAttStats  = pipe(lMla, attStatsSg ? "form_mla_attend_stats_sg" : "form_mla_attend_stats")
 let pAttAcc    = pipe(lMla, "form_mla_attend_acc")
 // one entry for both the raw-only and the mixed case: ncomp = 0 is the raw one. Three dispatches
 // instead of one, and 32 768 threads instead of 64, with every fold direction preserved.
@@ -827,7 +840,8 @@ func gpuAttendSplit(_ q: MTLBuffer, _ rows: MTLBuffer, _ crows: MTLBuffer?, _ sn
                                             c.setBytes(&a, length: 4, index: 4); c.setBytes(&b, length: 4, index: 5)
                                             c.setBytes(&nr, length: 4, index: 6); c.setBytes(&nc, length: 4, index: 7)
                                             c.setBytes(&sc, length: 4, index: 8) }
-    enc(pAttStats, nHead, tgSmall, reads: [sco], writes: [ex, inv]) { c in c.setBuffer(sco, offset: 0, index: 0)
+    // thread count and pipeline out of ONE expression — see the caution in enc().
+    enc(pAttStats, attStatsSg ? nHead*32 : nHead, tgSmall, reads: [sco], writes: [ex, inv]) { c in c.setBuffer(sco, offset: 0, index: 0)
                                      c.setBuffer(views[snk.idx], offset: snk.inner, index: 1)
                                      c.setBuffer(ex, offset: 0, index: 2); c.setBuffer(inv, offset: 0, index: 3)
                                      c.setBytes(&a, length: 4, index: 4); c.setBytes(&nt, length: 4, index: 5) }
