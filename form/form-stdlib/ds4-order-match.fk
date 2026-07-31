@@ -1,0 +1,95 @@
+; ds4-order-match.fk — kernels that reproduce ds4's ARITHMETIC ORDER, not merely its recipe.
+;
+; WHY A CELL FOR THIS. Our lane now agrees with ds4 to r=0.999995 at three tokens and matches its
+; argmax at every prompt length — inside ds4's own backend-to-backend spread. And it still cannot
+; reproduce ds4's greedy TOKEN STREAM past two steps, because greedy decoding is discontinuous: at the
+; third step ds4 chooses between " The" and " It" on a margin of 0.0197 logits out of 24, and whoever
+; is on the wrong side of that tie never converges again (receipts/2026-07-30-tie-budget.md).
+;
+; Matching a stream therefore needs our f32 ERRORS to be ds4's f32 errors, which means matching its
+; association exactly. Read from ds4.c, by line, never guessed:
+;
+;   :10246 dot_f32       — TWO NEON accumulators, 8 elements per step, vfmaq_f32 (FUSED multiply-add),
+;                          reduced by vaddvq_f32(vaddq_f32(acc0, acc1))
+;   :6664  dot_f16_row   — the same two-accumulator FMA shape over widened halves
+;   :6814  dot_q8_0_row  — NOT an f32 fold at all: the ACTIVATION is quantised to int8 (:7051), each
+;                          32-block is an EXACT int32 dot (vdotq_s32, four lanes of four products),
+;                          and only the per-block scale product re-enters f32, through an FMA
+;   :3480  ds4_vec_dot_q2_K_f32 — a plain ASCENDING scalar f32 sum, no NEON, no FMA
+;
+; So there is no single "ds4 order": each type has its own, and one of them is not floating-point
+; arithmetic at all. That is the finding this cell exists to carry.
+;
+; THE TWO THINGS OUR LANE DOES DIFFERENTLY, both deliberate and both now optional:
+;   1. `-ffp-contract=off` on every metallib — no FMA anywhere. ds4 fuses on every product it can.
+;      A fused multiply-add rounds ONCE where ours rounds twice; over 4096 terms that is not noise
+;      the far tail can absorb.
+;   2. a 32-lane strided fold reduced by simd_sum. ds4 has 8 chains, not 32, and reduces pairwise.
+;
+; APORON — WHAT THIS CELL CANNOT GIVE. Matching the association makes the same roundings in the same
+; places; it does NOT make our transcendentals ds4's. mla_exp is a range-reduced Taylor series and
+; ds4 calls libm expf; they differ in the last ulp or two, which the softmax then spreads. So this
+; cell narrows the tie budget, and a claim of stream equality has to be MEASURED, never inferred from
+; "the order matches now".
+;
+; vdotq_s32 semantics, since the whole int path rests on it: lane l of the result gets
+; acc[l] + sum over k in 0..3 of a[4l+k]*b[4l+k], in exact int32. A 32-element int8 dot cannot exceed
+; 32*127*128 = 520 192 < 2^24, so the int32 -> f32 conversion that follows is exact.
+;
+; vaddvq_f32 over four lanes is the ARM pairwise tree (faddp, faddp): (v0+v1) + (v2+v3). Not a left
+; fold — a left fold here would be a different answer and is the obvious wrong transcription.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/ds4-order-match-band.fk (the emitted text and the reduction shape)
+;            and native/metal/metal_dsv4_stack.sh under FORM_DS4_MATCH_ORDER=1, against
+;            `ds4 --head-test`'s own per-stage numbers.
+
+(do
+    ; --- the shape constants, so a band can pin them rather than read them out of a string ---
+    (defn dom-neon-lanes () 4)        ; float32x4_t
+    (defn dom-neon-accs () 2)         ; acc0 and acc1
+    (defn dom-step () 8)              ; 8 elements per loop iteration (2 accs * 4 lanes)
+    (defn dom-q8-block () 32)         ; Q8_0 block elements
+    (defn dom-q8-block-bytes () 34)   ; 2 scale + 32 payload
+    (defn dom-dot-lane-span () 4)     ; vdotq_s32: 4 products per lane
+
+    ; =========================================================================
+    ; THE ACTIVATION QUANTISER (ds4.c:7051 quantize_q8_0_activation), per 32-block.
+    ; d = amax/127, id = 1/d or 0, then lrintf -> clamp. lrintf rounds half to EVEN under the default
+    ; mode, which is metal::rint — NOT metal::round, which rounds half away from zero and would
+    ; disagree on every exact .5 the activation happens to land on.
+    ; =========================================================================
+    (defn dom-q8a-quantize-body ()
+        "kernel void form_dsv4_q8a_quantize_f32 (device const float* x [[buffer(0)]], device char* xq [[buffer(1)]], device float* xs [[buffer(2)]], constant uint& n [[buffer(3)]], uint b [[thread_position_in_grid]]) { uint blocks = (n + 31u) / 32u; if (b >= blocks) return; uint i0 = b * 32u; uint bn = (n - i0 < 32u) ? (n - i0) : 32u; float amax = 0.0f; for (uint i = 0u; i < bn; ++i) { float ax = metal::abs(x[i0 + i]); if (ax > amax) amax = ax; } float d = amax / 127.0f; float id = (d != 0.0f) ? (1.0f / d) : 0.0f; xs[b] = d; for (uint i = 0u; i < bn; ++i) { int v = int(metal::rint(x[i0 + i] * id)); if (v > 127) v = 127; if (v < -128) v = -128; xq[i0 + i] = char(v); } for (uint i = bn; i < 32u; ++i) xq[i0 + i] = char(0); } ")
+
+    ; =========================================================================
+    ; THE Q8_0 ROW DOT (ds4.c:6814), transcribed with its accumulator structure intact.
+    ; ONE THREAD PER ROW — deliberately. A 32-lane split would be a different association, which is
+    ; the whole thing this kernel exists not to do. Blocks are walked in PAIRS, block b landing in
+    ; accv0 and block b+1 in accv1, with an odd tail block folded into accv0, exactly as ds4 does.
+    ; =========================================================================
+    (defn dom-q80-ordered-body ()
+        "kernel void form_dsv4_q80_matvec_ordered (device const uchar* qb [[buffer(0)]], device const char* xq [[buffer(1)]], device const float* xs [[buffer(2)]], device float* y [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; uint blocks = cols / 32u; ulong rowbase = (ulong)r * (ulong)blocks * 34ul; float a0[4]; float a1[4]; for (uint l = 0u; l < 4u; ++l) { a0[l] = 0.0f; a1[l] = 0.0f; } uint b = 0u; for (; b + 1u < blocks; b += 2u) { ulong o0 = rowbase + (ulong)b * 34ul; ulong o1 = rowbase + (ulong)(b + 1u) * 34ul; ushort h0 = (ushort)qb[o0] | ((ushort)qb[o0 + 1ul] << 8); ushort h1 = (ushort)qb[o1] | ((ushort)qb[o1 + 1ul] << 8); float s0 = float(as_type<half>(h0)) * xs[b]; float s1 = float(as_type<half>(h1)) * xs[b + 1u]; for (uint l = 0u; l < 4u; ++l) { int d0 = 0; int d1 = 0; for (uint k = 0u; k < 4u; ++k) { d0 += int((char)qb[o0 + 2ul + (ulong)(4u * l + k)]) * int(xq[b * 32u + 4u * l + k]); d0 += int((char)qb[o0 + 2ul + (ulong)(16u + 4u * l + k)]) * int(xq[b * 32u + 16u + 4u * l + k]); d1 += int((char)qb[o1 + 2ul + (ulong)(4u * l + k)]) * int(xq[(b + 1u) * 32u + 4u * l + k]); d1 += int((char)qb[o1 + 2ul + (ulong)(16u + 4u * l + k)]) * int(xq[(b + 1u) * 32u + 16u + 4u * l + k]); } a0[l] = metal::fma(float(d0), s0, a0[l]); a1[l] = metal::fma(float(d1), s1, a1[l]); } } if (b < blocks) { ulong o0 = rowbase + (ulong)b * 34ul; ushort h0 = (ushort)qb[o0] | ((ushort)qb[o0 + 1ul] << 8); float s0 = float(as_type<half>(h0)) * xs[b]; for (uint l = 0u; l < 4u; ++l) { int d0 = 0; for (uint k = 0u; k < 4u; ++k) { d0 += int((char)qb[o0 + 2ul + (ulong)(4u * l + k)]) * int(xq[b * 32u + 4u * l + k]); d0 += int((char)qb[o0 + 2ul + (ulong)(16u + 4u * l + k)]) * int(xq[b * 32u + 16u + 4u * l + k]); } a0[l] = metal::fma(float(d0), s0, a0[l]); } } float t0 = a0[0] + a1[0]; float t1 = a0[1] + a1[1]; float t2 = a0[2] + a1[2]; float t3 = a0[3] + a1[3]; y[r] = (t0 + t1) + (t2 + t3); } ")
+
+    ; =========================================================================
+    ; THE F16 ROW DOT (ds4.c:6664). Same two-accumulator FMA shape; the halves widen exactly.
+    ; =========================================================================
+    (defn dom-f16-ordered-body ()
+        "kernel void form_dsv4_f16_matvec_ordered (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; ulong base = (ulong)r * (ulong)cols; float a0[4]; float a1[4]; for (uint l = 0u; l < 4u; ++l) { a0[l] = 0.0f; a1[l] = 0.0f; } uint i = 0u; for (; i + 8u <= cols; i += 8u) { for (uint l = 0u; l < 4u; ++l) { ushort hv0 = *(device const ushort*)(qb + (base + (ulong)(i + l)) * 2ul); ushort hv1 = *(device const ushort*)(qb + (base + (ulong)(i + 4u + l)) * 2ul); a0[l] = metal::fma(float(as_type<half>(hv0)), x[i + l], a0[l]); a1[l] = metal::fma(float(as_type<half>(hv1)), x[i + 4u + l], a1[l]); } } float t0 = a0[0] + a1[0]; float t1 = a0[1] + a1[1]; float t2 = a0[2] + a1[2]; float t3 = a0[3] + a1[3]; float acc = (t0 + t1) + (t2 + t3); for (; i < cols; ++i) { ushort hv = *(device const ushort*)(qb + (base + (ulong)i) * 2ul); acc = acc + float(as_type<half>(hv)) * x[i]; } y[r] = acc; } ")
+
+    ; =========================================================================
+    ; THE Q2_K ROW DOT (ds4.c:3480) — the easy one, and the one most unlike our own: a PLAIN ASCENDING
+    ; SCALAR SUM. No NEON, no FMA, no blocking. Our fused kernel splits it 32 ways and simd_sums; this
+    ; walks k from 0 upward and adds. q2k_w is q2k-dequant.fk's carver, unchanged.
+    ; =========================================================================
+    (defn dom-q2k-ordered-body ()
+        "kernel void form_dsv4_q2k_matvec_ordered (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; uint nb = cols / 256u; ulong rowbase = (ulong)r * (ulong)nb * 84ul; float sum = 0.0f; for (uint k = 0u; k < cols; ++k) { sum = sum + q2k_w(qb + rowbase, k) * x[k]; } y[r] = sum; } ")
+
+    ; two appendices, because the Q2_K one needs q2k-msl.fk's carver in its translation unit and the
+    ; others stand alone. A carrier composes nothing; it takes whichever its unit can compile.
+    (defn dom-msl-appendix ()
+        (str_concat (dom-q8a-quantize-body)
+        (str_concat (dom-q80-ordered-body) (dom-f16-ordered-body))))
+    (defn dom-q2k-appendix () (dom-q2k-ordered-body))
+    0)

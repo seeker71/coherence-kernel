@@ -1,0 +1,100 @@
+; q2k-dequant.fk — GGUF type 10, Q2_K, carved in place.
+;
+; WHY NOW. DeepSeek-V4-Flash's mainline Mac quant is
+; IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8: routed experts IQ2_XXS, the w2/down projections Q2_K, attention
+; and shared and output Q8_0. This body already carries iq2xxs-dequant.fk and q8-0-msl.fk. Q2_K was
+; the one missing reach, and it is the only thing standing between our Form lane and the file that
+; ds4 runs natively on Metal — i.e. between us and the first GENERATION oracle this DS4 work has had.
+;
+; THE BLOCK, 256 elements in 84 bytes, and every offset is ds4.c's own struct (ds4.c:759, asserted
+; there by DS4_STATIC_ASSERT(sizeof(block_q2_K) == 84)):
+;
+;     scales[16]  @  0    one byte per 16-element group: low nibble scale, high nibble min
+;     qs[64]      @ 16    two bits per element
+;     d           @ 80    f16, the super-block scale for the scales
+;     dmin        @ 82    f16, the super-block scale for the mins
+;
+; THE INDEX DECOMPOSITION is ds4.c:3466 q2_k_value_f32, transcribed with the same op order rather
+; than re-derived — the whole point of a carver is that its arithmetic is SOMEONE ELSE'S recipe held
+; exactly, so a disagreement is a real disagreement and not two guesses:
+;
+;     group  = idx / 16                      0..15
+;     l      = idx mod 16                    0..15
+;     q_base = 32*(group/8) + 16*(group mod 2)
+;     shift  = ((group/2) mod 4) * 2
+;     q      = (qs[q_base + l] >> shift) mod 4
+;     sc     = scales[group]
+;     value  = d * (sc mod 16) * q  -  dmin * (sc / 16)
+;
+; Note the two different roles of `group`: it selects the SCALE byte directly, but it reaches the
+; quant bits through a base-and-shift that is deliberately not group*16 — the two bits for group g
+; live interleaved across a 32-byte half, which is why q_base folds group/8 and group mod 2 while the
+; shift folds (group/2) mod 4. A carver that "simplified" that to a contiguous stride would read
+; plausible numbers from the wrong bits, which is exactly the failure the band below is built to
+; catch.
+;
+; THE MIN IS NOT SCALED BY q. `- dmin * (sc/16)` stands outside the product: it is a per-group offset,
+; not a per-element one, so a group's 16 values share one subtraction. Getting this wrong gives a
+; tensor that is sign-symmetric and wrong only in the mean — the quietest possible error.
+;
+; NO NEW FLOAT ARITHMETIC. d and dmin go through f16-decode.fk's fd-f16, the same decoder the mxfp
+; and q6k carvers use. This cell adds a REACH and a geometry, nothing else.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/f16-decode.fk
+;
+; Proven by: form-stdlib/tests/q2k-dequant-band.fk
+
+(do
+    (defn q2k-mod (a n) (sub a (mul (div a n) n)))
+
+    ; ---- the geometry, named once ----
+    (defn q2k-block-n     () 256)
+    (defn q2k-block-bytes () 84)
+    (defn q2k-scales-off  () 0)
+    (defn q2k-qs-off      () 16)
+    (defn q2k-d-off       () 80)
+    (defn q2k-dmin-off    () 82)
+    (defn q2k-group-n     () 16)
+
+    ; ---- block base for weight i within a tensor whose data starts at `base` ----
+    (defn q2k-block-of (i) (div i (q2k-block-n)))
+    (defn q2k-block-base (base i) (add base (mul (q2k-block-of i) (q2k-block-bytes))))
+    (defn q2k-idx (i) (q2k-mod i (q2k-block-n)))
+
+    ; ---- the decomposition, ds4.c:3466's own ----
+    (defn q2k-group (i) (div (q2k-idx i) (q2k-group-n)))
+    (defn q2k-l     (i) (q2k-mod (q2k-idx i) (q2k-group-n)))
+    (defn q2k-qbase (i)
+        (add (mul 32 (div (q2k-group i) 8))
+             (mul 16 (q2k-mod (q2k-group i) 2))))
+    (defn q2k-shift (i) (mul 2 (q2k-mod (div (q2k-group i) 2) 4)))
+
+    ; ---- the three field reads ----
+    (defn q2k-qs-byte (src b i)
+        (eqr-at src (add b (add (q2k-qs-off) (add (q2k-qbase i) (q2k-l i))))))
+    (defn q2k-q (src b i)
+        (q2k-mod (div (q2k-qs-byte src b i) (q2k-pow2 (q2k-shift i))) 4))
+    (defn q2k-pow2 (e) (if (eq e 0) 1 (mul 2 (q2k-pow2 (sub e 1)))))
+    (defn q2k-sc-byte (src b i)
+        (eqr-at src (add b (add (q2k-scales-off) (q2k-group i)))))
+    (defn q2k-scale (src b i) (q2k-mod (q2k-sc-byte src b i) 16))
+    (defn q2k-min   (src b i) (div (q2k-sc-byte src b i) 16))
+    (defn q2k-d     (src b) (fd-f16 (eqr-u16 src (add b (q2k-d-off)))))
+    (defn q2k-dmin  (src b) (fd-f16 (eqr-u16 src (add b (q2k-dmin-off)))))
+
+    ; ---- the value, in ds4.c:3466's op order: d*scale*q MINUS dmin*min ----
+    (defn q2k-at (src base i)
+        (do (let b (q2k-block-base base i))
+            (sub (mul (mul (q2k-d src b) (q2k-scale src b i)) (q2k-q src b i))
+                 (mul (q2k-dmin src b) (q2k-min src b i)))))
+
+    ; ---- a run of m weights from `base` ----
+    (defn q2k-weights-loop (src base i m acc)
+        (if (eq i m) (reverse acc)
+            (q2k-weights-loop src base (add i 1) m (cons (q2k-at src base i) acc))))
+    (defn q2k-weights (src base m) (q2k-weights-loop src base 0 m (empty)))
+
+    ; ---- how many bytes a run of n elements occupies (n must be a whole number of blocks) ----
+    (defn q2k-bytes (n) (mul (div n (q2k-block-n)) (q2k-block-bytes)))
+    (defn q2k-aligned? (n) (if (eq (q2k-mod n (q2k-block-n)) 0) 1 0))
+    0)

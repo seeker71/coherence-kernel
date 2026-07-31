@@ -1,0 +1,82 @@
+; tests/gguf-manifest-band.fk — the pricing arithmetic, fixture-free.
+;
+; preludes: form-stdlib/core.fk form-stdlib/gguf-manifest.fk
+;
+; run: ./fkwu --src form/form-stdlib/tests/gguf-manifest-band.fk   ; -> 127
+;
+; WHY THIS BAND EXISTS NOW AND NOT BEFORE. gguf-manifest.fk's own header has claimed
+; "Proven by: form-stdlib/tests/gguf-manifest-band.fk" since it was written. The file did not exist.
+; On 2026-07-30 that gap cost a day: gm-slice-bytes had no case for ggml type 10 (Q2_K) and returned
+; its honest 0, the DeepSeek-V4-Flash stack divided that 0 by the expert count to get a per-expert
+; byte stride of 0, and every routed expert on every Q2_K tensor read expert 0's weights. Plausible
+; weights, right magnitude, wrong expert — the residual stream came out 62x short and 104 gates passed
+; over it, because the exit head's RMSNorm normalises the scale away.
+;
+; gm-priced? — the guard that exists precisely so a consumer can tell "no bytes" from "I do not price
+; this type" — HAD NO CALLERS anywhere in the body. A guard nobody calls is not a guard. So bit 64
+; below is not decoration: it is the invariant the carrier now asks before it divides.
+;
+;   bit  1  the scalar types: F32 and I32 are 4 bytes an element, F16 is 2
+;   bit  2  the block types carry their published block sizes, checked at one block and at a real
+;           tensor width: Q8_0 32/34, Q2_K 256/84, Q4_K 256/144, Q6_K 256/210, IQ2_XXS 256/66
+;   bit  4  Q2_K AT THE SHAPE THAT BROKE: one DeepSeek expert's ffn_down is 2048*4096 elements, which
+;           must price to 2 752 512 B, and the 256-expert tensor to 704 643 072 B
+;   bit  8  the plane-split types answer through their own cells and are nonzero
+;   bit 16  THE REFUSAL IS LEGIBLE: an unpriced type prices to 0 AND gm-priced? says 0, so the two
+;           readings agree that nothing is known — a consumer can distinguish it from an empty tensor
+;   bit 32  every type gm-priced? admits has a NONZERO price at 256 elements
+;   bit 64  THE INVARIANT, swept over ggml type ids 0..45: gm-priced? is 1 exactly when
+;           gm-slice-bytes is nonzero. Either half drifting from the other is the 2026-07-30 bug
+;           returning under another type id.
+
+(do
+    (defn gmb-score (ok bit) (if ok bit 0))
+
+    ; the sweep: for every type id in 0..hi, priced? must agree with "prices to something"
+    (defn gmb-agree? (t hi)
+        (if (gt t hi) 1
+            (do (let priced (gm-priced? t))
+                (let bytes (gm-slice-bytes t 256))
+                (if (eq priced 1)
+                    (if (gt bytes 0) (gmb-agree? (add t 1) hi) 0)
+                    (if (eq bytes 0) (gmb-agree? (add t 1) hi) 0)))))
+
+    ; every admitted type prices nonzero at one block's worth
+    (defn gmb-nonzero-loop (ts)
+        (if (eq (len ts) 0) 1
+            (if (gt (gm-slice-bytes (head ts) 256) 0) (gmb-nonzero-loop (tail ts)) 0)))
+
+    (defn gguf-manifest-band ()
+        (do
+            (let c0 (gmb-score (if (eq (gm-slice-bytes 0 1000) 4000)
+                                (if (eq (gm-slice-bytes 26 1000) 4000)
+                                    (eq (gm-slice-bytes 1 1000) 2000) 0) 0) 1))
+
+            (let c1 (gmb-score (if (eq (gm-slice-bytes 8 32) 34)
+                                (if (eq (gm-slice-bytes 10 256) 84)
+                                (if (eq (gm-slice-bytes 12 256) 144)
+                                (if (eq (gm-slice-bytes 14 256) 210)
+                                (if (eq (gm-slice-bytes 16 256) 66)
+                                (if (eq (gm-slice-bytes 8 4096) 4352)
+                                (if (eq (gm-slice-bytes 10 4096) 1344)
+                                    (eq (gm-slice-bytes 16 4096) 1056) 0) 0) 0) 0) 0) 0) 0) 2))
+
+            ; 2048*4096 = 8388608 elements = 32768 blocks * 84 B = 2752512 B per expert
+            (let c2 (gmb-score (if (eq (gm-slice-bytes 10 8388608) 2752512)
+                                   (eq (mul 256 (gm-slice-bytes 10 8388608)) 704643072) 0) 4))
+
+            (let c3 (gmb-score (if (gt (gm-slice-bytes 40 8388608) 0)
+                                   (if (gt (gm-slice-bytes 41 8388608) 0) 1 0) 0) 8))
+
+            ; 13, 15, 30 are ggml ids this body does not price; the refusal must read as a refusal
+            (let c4 (gmb-score (if (eq (gm-slice-bytes 13 256) 0)
+                                (if (eq (gm-priced? 13) 0)
+                                (if (eq (gm-slice-bytes 30 256) 0)
+                                    (eq (gm-priced? 30) 0) 0) 0) 0) 16))
+
+            (let c5 (gmb-score (eq (gmb-nonzero-loop (list 0 1 8 10 12 14 16 26 40 41)) 1) 32))
+
+            (let c6 (gmb-score (eq (gmb-agree? 0 45) 1) 64))
+
+            (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 c6))))))))
+    (gguf-manifest-band))

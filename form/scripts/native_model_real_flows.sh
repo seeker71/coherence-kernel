@@ -164,6 +164,16 @@ durable="$NM_STATE_DIR/real-flows-${day}-${epoch}.txt"
         "$(nm_report_value "$grounding" top5_ppm)"
     printf 'session_grounding_delta_ppm=%s\n' \
         "$(nm_report_value "$grounding" top5_delta_ppm)"
+    printf 'session_grounding_evidence_state=%s\n' \
+        "$(nm_report_value "$grounding" evidence_state)"
+    printf 'session_grounding_candidate_identity_changed=%s\n' \
+        "$(nm_report_value "$grounding" candidate_identity_changed)"
+    printf 'session_grounding_dataset_identity_changed=%s\n' \
+        "$(nm_report_value "$grounding" dataset_identity_changed)"
+    printf 'session_grounding_contract_identity_changed=%s\n' \
+        "$(nm_report_value "$grounding" contract_identity_changed)"
+    printf 'session_grounding_comparison_admissible=%s\n' \
+        "$(nm_report_value "$grounding" comparison_admissible)"
     printf 'lineage_dag_sha256=%s\n' \
         "$(nm_report_value "$lineage" dag_sha256)"
     printf 'lineage_artifact_drift_ppm=%s\n' \
