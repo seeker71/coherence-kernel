@@ -857,6 +857,8 @@ let pHcSplit = pipe(lHc, "form_hc_split_f32")
 // FORM_DS4_HC_SPLIT_PAR=1 puts the four-thread kernel back so the two can be run against each other.
 let hcSplitSeq = ProcessInfo.processInfo.environment["FORM_DS4_HC_SPLIT_PAR"] != "1"
 let pHcSplitSeq = pipe(lHc, "form_hc_split_seq4_f32")
+let pHcSplitPre = pipe(lHc, "form_hc_split_pre4_f32")
+let pHcSplitComb = pipe(lHc, "form_hc_split_comb4_f32")
 let pHcWsum = pipe(lHc, "form_hc_wsum_f32")
 let pHcPost = pipe(lHc, "form_hc_post_f32")
 let pHcHeadw = pipe(lHc, "form_hc_headw_f32")
@@ -1468,7 +1470,16 @@ struct LayerOut {
     let moe: MTLBuffer, shared: MTLBuffer, ffnOut: MTLBuffer, outHc: MTLBuffer
 }
 
-func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLBuffer) {
+// ── THE SINKHORN COMES BACK AS A CLOSURE, TO BE EMITTED WHERE IT CAN BE COVERED ───────────────────
+// hcPre used to emit all twenty-four split weights and then the weighted sum, which reads four of
+// them. The other twenty are the Sinkhorn — one thread, iters rounds of a 4x4 — and nothing until
+// hc_post at the end of the sublayer wants them. Returned as a closure, the carrier emits them after
+// the sublayer's first big matvecs are already encoded: they read a `mix` written before that
+// barrier and write a slice nothing in flight touches, so the tracker finds no hazard and the device
+// runs the Sinkhorn underneath a Q8_0 stream instead of in front of it.
+// FORM_DS4_HC_SPLIT_DEFER=0 emits the whole seq4 kernel in place, which is the A/B for the stream.
+let hcSplitDefer = ProcessInfo.processInfo.environment["FORM_DS4_HC_SPLIT_DEFER"] != "0"
+func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLBuffer, () -> Void) {
     let flat = sentinelled(hcDim)
     // the fold stays one ascending chain (its association is the recipe's); only the scale-and-write
     // is unrolled across threads, which has no association to preserve. Bit-identical, and it was the
@@ -1478,23 +1489,37 @@ func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLB
                                             c.setBytes(&n, length: 4, index: 2); c.setBytes(&e0, length: 4, index: 3) } }
     let mix = gpuF16mv(fn, flat)
     let split = sentinelled(2*nHc + nHc*nHc)
+    let deferSplit = hcSplitDefer && hcSplitSeq && nHc == 4
     do { var a = UInt32(nHc), it = UInt32(hcIters), e0 = hcEps
          // pipeline AND thread count out of ONE expression. Read the caution in enc(): the last time a
          // kernel took its grid from one flag and its pipeline from another it ran on a quarter of its
          // rows and reported a floor 5 ms lower for work it had not done.
-         let (pSplitUse, nSplit) = hcSplitSeq ? (pHcSplitSeq, 1) : (pHcSplit, nHc)
+         let (pSplitUse, nSplit) = deferSplit ? (pHcSplitPre, 1)
+                                              : (hcSplitSeq ? (pHcSplitSeq, 1) : (pHcSplit, nHc))
          enc(pSplitUse, nSplit, nSplit, reads: [mix], writes: [split]) { c in c.setBuffer(mix, offset: 0, index: 0)
                                     c.setBuffer(views[sc.idx], offset: sc.inner, index: 1)
                                     c.setBuffer(views[bs.idx], offset: bs.inner, index: 2)
                                     c.setBuffer(split, offset: 0, index: 3)
-                                    c.setBytes(&a, length: 4, index: 4); c.setBytes(&it, length: 4, index: 5)
-                                    c.setBytes(&e0, length: 4, index: 6) } }
+                                    c.setBytes(&a, length: 4, index: 4)
+                                    // the pre kernel takes eps at 5; seq4 and the parallel one take
+                                    // iters there and eps at 6, so the bytes follow the pipeline.
+                                    if deferSplit { c.setBytes(&e0, length: 4, index: 5) }
+                                    else { c.setBytes(&it, length: 4, index: 5); c.setBytes(&e0, length: 4, index: 6) } } }
+    let comb: () -> Void = deferSplit ? {
+        var a = UInt32(nHc), it = UInt32(hcIters), e0 = hcEps
+        enc(pHcSplitComb, 1, 1, reads: [mix], writes: [split]) { c in c.setBuffer(mix, offset: 0, index: 0)
+                                   c.setBuffer(views[sc.idx], offset: sc.inner, index: 1)
+                                   c.setBuffer(views[bs.idx], offset: bs.inner, index: 2)
+                                   c.setBuffer(split, offset: 0, index: 3)
+                                   c.setBytes(&a, length: 4, index: 4); c.setBytes(&it, length: 4, index: 5)
+                                   c.setBytes(&e0, length: 4, index: 6) }
+    } : { }
     let cur = sentinelled(nEmbd)
     do { var a = UInt32(nHc), b = UInt32(nEmbd)
          enc(pHcWsum, nEmbd, tgSmall, reads: [resid, split], writes: [cur]) { c in c.setBuffer(resid, offset: 0, index: 0); c.setBuffer(split, offset: 0, index: 1)
                                          c.setBuffer(cur, offset: 0, index: 2)
                                          c.setBytes(&a, length: 4, index: 3); c.setBytes(&b, length: 4, index: 4) } }
-    return (cur, split)
+    return (cur, split, comb)
 }
 func hcPost(_ blockOut: MTLBuffer, _ resid: MTLBuffer, _ split: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(hcDim); var a = UInt32(nHc), b = UInt32(nEmbd)
@@ -1565,7 +1590,7 @@ func q2kFusedVsCarved(_ t: Tn, _ x: MTLBuffer, _ expert: Int) {
       String(format: "Q2_K FUSED vs CARVED, blk.0 expert %d down [%d<-%d]: the one-pass decode+fold and an independent per-weight carve of the same bytes folded by the plain f32 matvec agree to max abs %.3g = %.2g of the vector's rms %.6g (worst single-element rel %.3g sits on a near-cancellation, which reassociation owns)", expert, rows, cols, maxAbs, scaled, rmsA, maxRel),
       String(format: "Q2_K fused matvec disagrees with its own carver on blk.0 expert %d down: max abs %.3g = %.2g of rms %.6g (vs %.6g) — the FOLD or the MAP, not the decode", expert, maxAbs, scaled, rmsA, rmsB))
 }
-func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
+func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int, _ underCover: () -> Void = { }) -> MTLBuffer {
     let w = LW[il]
     if il == 0 { stage("attn_pre", input, nEmbd) }
     let xn = gpuRmsnorm(input, nEmbd, w.nrm)
@@ -1583,6 +1608,10 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     // writing its own — a shared read is not a hazard, a pair of writes would have been.
     let ql = gpuMx8(w.qa, xn, w.qa.rows, w.qa.cols)
     let kl = gpuMx8(w.kv, xn, w.kv.rows, w.kv.cols)
+    // AND HERE IS WHERE THE SINKHORN GOES. Two Q8_0 streams are encoded and no barrier stands after
+    // them; the one-thread 4x4 Sinkhorn reads the hc `mix` written before the last barrier and writes
+    // a slice neither matvec touches, so it is emitted into the same window and runs underneath them.
+    underCover()
     // THE COMPRESSOR IS A THIRD CHAIN OFF THE SAME ACTIVATION, and it was the longest one still
     // running alone: eight dispatches that read attn_norm and their own rolling plane, and touch
     // nothing the q or kv chain writes. It used to be emitted after the raw row was pushed, which is
@@ -1635,12 +1664,12 @@ func padDispatches() {
 func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) -> LayerOut {
     padDispatches()
     let w = LW[il]
-    let (attnCur, attnSplit) = hcPre(residHc, w.haf, w.has, w.hab)
-    let attnOut = mlaBlock(attnCur, pos, il)
+    let (attnCur, attnSplit, attnComb) = hcPre(residHc, w.haf, w.has, w.hab)
+    let attnOut = mlaBlock(attnCur, pos, il, attnComb)
     let afterAttn = hcPost(attnOut, residHc, attnSplit)
     if il == 0 { stage("after_attn_hc", afterAttn, hcDim) }
 
-    let (ffnCur, ffnSplit) = hcPre(afterAttn, w.hff, w.hfs, w.hfb)
+    let (ffnCur, ffnSplit, ffnComb) = hcPre(afterAttn, w.hff, w.hfs, w.hfb)
     if il == 0 { stage("ffn_cur", ffnCur, nEmbd) }
     let ffnNorm = gpuRmsnorm(ffnCur, nEmbd, w.fnw)
     if il == 0 { stage("ffn_norm", ffnNorm, nEmbd) }
@@ -1648,13 +1677,38 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
     // ── THE SHARED EXPERT DOES NOT WAIT FOR THE ROUTER, BECAUSE IT IS NEVER ROUTED ──────────────────
     // Its gate and up read ffn_norm and nothing else; the router's selection kernels are three serial
     // dispatches, two of them a single threadgroup picking six experts out of the layer's stack. Those
-    // three had the whole device to themselves. Emitted here the two Q8_0 projections — the heaviest
-    // pure-bandwidth work in the sublayer — run underneath the selection instead of after it.
+    // three had the whole device to themselves, and this is where the two Q8_0 projections were put to
+    // keep them company.
+    //
+    // COMPANY IS DOWNSTREAM OF A BARRIER, NOT UPSTREAM OF IT, and for a long time this pair was on the
+    // wrong side. A dispatch overlaps only what was encoded since the LAST BARRIER; a barrier drains
+    // everything encoded before it. So the pair, emitted HERE, was drained by the barrier the router's
+    // probs kernel needs for `logits`, and drained again by the one its selection needs for `probs` —
+    // and form_dsv4_topk_select_tg, one threadgroup walking 256 scores on thread 0, then ran alone.
+    // FORM_DS4_DOUBLE prices that walk at 1.6 ms of the token, the same order as attend_scores.
+    // The pair is emitted below instead, in the same barrier window as the selection: it reads
+    // ffn_norm, which the selection does not write, and writes its own, which the selection does not
+    // read, so the tracker finds nothing between them and the 17.8 MB of Q8_0 stream now actually runs
+    // underneath the scan.
+    //
+    // MEASURED NULL, AND KEPT WITH ITS NUMBER. Moving the pair below the selection: 0.87 s of GPU over
+    // 25 tokens either way, 27.95 t/s in front against 27.71 behind — noise, and if anything a shade
+    // worse. So the reading of the barrier window is right and the device was already finding the
+    // work: two 8.9 MB Q8_0 streams are long enough that the queue still has them when the scan
+    // arrives, whichever side of the barrier they were encoded on. FORM_DS4_SHARED_AFTER_ROUTE=1 moves
+    // them; the default leaves the order the tree already proved, and the scan's 1.6 ms stands as an
+    // open number rather than a solved one.
+    let sharedAfterRoute = ProcessInfo.processInfo.environment["FORM_DS4_SHARED_AFTER_ROUTE"] == "1"
     var sgv: MTLBuffer? = nil, suv: MTLBuffer? = nil, smid: MTLBuffer? = nil, sharedOut: MTLBuffer? = nil
-    if fuseExperts {
+    func emitSharedGateUp() {
+        guard fuseExperts, sgv == nil else { return }
         sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
         suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
     }
+    if !sharedAfterRoute { emitSharedGateUp() }
+    // the FFN half's Sinkhorn takes the same cover the attention half's took: it reads a `mix` from
+    // before the last barrier and writes a slice nothing in flight touches, so nothing waits for it.
+    ffnComb()
 
     let nExpR = w.nExpRouter
     let idsBuf = sentinelledU(nUsed), wtsBuf = sentinelled(nUsed), probsBuf = sentinelled(nExpR)
@@ -1700,6 +1754,9 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
                                  c.setBytes(&ne, length: 4, index: 4); c.setBytes(&nu, length: 4, index: 5)
                                  c.setBytes(&ws, length: 4, index: 6) }
     }
+    // and HERE is the window the selection leaves open: whatever the routing regime, its last dispatch
+    // is a one-threadgroup scan sitting alone after a barrier. The shared gate and up go in beside it.
+    if sharedAfterRoute { emitSharedGateUp() }
     // THE FLUSH THAT OUTLIVED ITS REASON. This used to read the router's choice back to the CPU so the
     // host could pick each expert's byte slice — a real sync point, once. Then the fused kernels
     // started taking idsBuf and wtsBuf as DEVICE buffers, and the comment forty lines below has said

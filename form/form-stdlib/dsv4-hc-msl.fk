@@ -147,6 +147,25 @@
     ;     Every expression and every fold direction is the parallel kernel's: rows ascend over src, columns
     ;     ascend over dst, the +eps lands where it landed. Bit-exactness is the gate, and n_hc != 4 keeps
     ;     the parallel kernel — this is a specialization, not a replacement. ---
+    ; --- THE SINKHORN IS NOT ON THE PATH IT WAS EMITTED ON. hc-split-seq4 writes twenty-four floats and
+    ;     the block that follows it reads FOUR: hc_wsum takes out[0..n_hc-1], the pre weights, and
+    ;     nothing else until hc_post — at the far end of the sublayer — asks for the post weights and
+    ;     the sixteen combine weights. So twenty of the twenty-four are computed in front of a barrier
+    ;     that only four of them need to stand behind, and the twenty are the expensive ones: iters
+    ;     rounds of a 4x4 Sinkhorn on ONE thread, which FORM_DS4_DOUBLE prices at 0.8 ms of a 39 ms
+    ;     token over 86 asks.
+    ;     Cut where the readers already cut. `pre4` is the two sigmoid loops, letter for letter; `comb4`
+    ;     is everything after them, letter for letter, reading and writing the same slots. Together they
+    ;     write exactly what seq4 writes, and seq4 stays in the unit as the A/B. What the split buys is
+    ;     placement: the carrier emits comb4 beside the sublayer's own big matvecs, where it reads a
+    ;     `mix` written before the last barrier and writes a slice nothing in flight touches, so the
+    ;     hazard tracker lets it run underneath them instead of in front of them. ---
+    (defn hc-split-pre4-body ()
+        "kernel void form_hc_split_pre4_f32(device const float* mix [[buffer(0)]], device const float* scale [[buffer(1)]], device const float* base [[buffer(2)]], device float* out [[buffer(3)]], constant uint& n_hc [[buffer(4)]], constant float& eps [[buffer(5)]], uint g [[thread_position_in_grid]]) { if (g != 0u) return; float pre_scale = scale[0]; float post_scale = scale[1]; for (uint t = 0u; t < 4u; ++t) { float z = mix[t] * pre_scale + base[t]; out[t] = hc_sigmoid(z) + eps; } for (uint t = 0u; t < 4u; ++t) { uint off = 4u + t; float z = mix[off] * post_scale + base[off]; out[off] = 2.0f * hc_sigmoid(z); } } ")
+
+    (defn hc-split-comb4-body ()
+        "kernel void form_hc_split_comb4_f32(device const float* mix [[buffer(0)]], device const float* scale [[buffer(1)]], device const float* base [[buffer(2)]], device float* out [[buffer(3)]], constant uint& n_hc [[buffer(4)]], constant uint& iters [[buffer(5)]], constant float& eps [[buffer(6)]], uint g [[thread_position_in_grid]]) { if (g != 0u) return; thread float c[16]; float comb_scale = scale[2]; for (uint dst = 0u; dst < 4u; ++dst) { float row_max = -1.0e30f; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; uint off = 8u + idx; float v = mix[off] * comb_scale + base[off]; c[idx] = v; if (v > row_max) row_max = v; } float row_sum = 0.0f; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; float v = hc_exp(c[idx] - row_max); c[idx] = v; row_sum = row_sum + v; } float rinv = 1.0f / row_sum; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; c[idx] = c[idx] * rinv + eps; } } for (uint src = 0u; src < 4u; ++src) { float s = 0.0f; for (uint dst = 0u; dst < 4u; ++dst) s = s + c[src + dst * 4u]; float cinv = 1.0f / (s + eps); for (uint dst = 0u; dst < 4u; ++dst) c[src + dst * 4u] = c[src + dst * 4u] * cinv; } for (uint it = 1u; it < iters; ++it) { for (uint dst = 0u; dst < 4u; ++dst) { float s = 0.0f; for (uint src = 0u; src < 4u; ++src) s = s + c[src + dst * 4u]; float rinv = 1.0f / (s + eps); for (uint src = 0u; src < 4u; ++src) c[src + dst * 4u] = c[src + dst * 4u] * rinv; } for (uint src = 0u; src < 4u; ++src) { float s = 0.0f; for (uint dst = 0u; dst < 4u; ++dst) s = s + c[src + dst * 4u]; float cinv = 1.0f / (s + eps); for (uint dst = 0u; dst < 4u; ++dst) c[src + dst * 4u] = c[src + dst * 4u] * cinv; } } for (uint k = 0u; k < 16u; ++k) out[8u + k] = c[k]; } ")
+
     (defn hc-split-seq4-body ()
         "kernel void form_hc_split_seq4_f32(device const float* mix [[buffer(0)]], device const float* scale [[buffer(1)]], device const float* base [[buffer(2)]], device float* out [[buffer(3)]], constant uint& n_hc [[buffer(4)]], constant uint& iters [[buffer(5)]], constant float& eps [[buffer(6)]], uint g [[thread_position_in_grid]]) { if (g != 0u) return; thread float c[16]; float pre_scale = scale[0]; float post_scale = scale[1]; float comb_scale = scale[2]; for (uint t = 0u; t < 4u; ++t) { float z = mix[t] * pre_scale + base[t]; out[t] = hc_sigmoid(z) + eps; } for (uint t = 0u; t < 4u; ++t) { uint off = 4u + t; float z = mix[off] * post_scale + base[off]; out[off] = 2.0f * hc_sigmoid(z); } for (uint dst = 0u; dst < 4u; ++dst) { float row_max = -1.0e30f; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; uint off = 8u + idx; float v = mix[off] * comb_scale + base[off]; c[idx] = v; if (v > row_max) row_max = v; } float row_sum = 0.0f; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; float v = hc_exp(c[idx] - row_max); c[idx] = v; row_sum = row_sum + v; } float rinv = 1.0f / row_sum; for (uint src = 0u; src < 4u; ++src) { uint idx = src + dst * 4u; c[idx] = c[idx] * rinv + eps; } } for (uint src = 0u; src < 4u; ++src) { float s = 0.0f; for (uint dst = 0u; dst < 4u; ++dst) s = s + c[src + dst * 4u]; float cinv = 1.0f / (s + eps); for (uint dst = 0u; dst < 4u; ++dst) c[src + dst * 4u] = c[src + dst * 4u] * cinv; } for (uint it = 1u; it < iters; ++it) { for (uint dst = 0u; dst < 4u; ++dst) { float s = 0.0f; for (uint src = 0u; src < 4u; ++src) s = s + c[src + dst * 4u]; float rinv = 1.0f / (s + eps); for (uint src = 0u; src < 4u; ++src) c[src + dst * 4u] = c[src + dst * 4u] * rinv; } for (uint src = 0u; src < 4u; ++src) { float s = 0.0f; for (uint dst = 0u; dst < 4u; ++dst) s = s + c[src + dst * 4u]; float cinv = 1.0f / (s + eps); for (uint dst = 0u; dst < 4u; ++dst) c[src + dst * 4u] = c[src + dst * 4u] * cinv; } } for (uint k = 0u; k < 16u; ++k) out[8u + k] = c[k]; } ")
 
@@ -187,7 +206,9 @@
         (str_concat (hc-matvec-body)
         (str_concat (hc-split-body)
         (str_concat (hc-split-seq4-body)
+        (str_concat (hc-split-pre4-body)
+        (str_concat (hc-split-comb4-body)
         (str_concat (hc-wsum-body)
-        (str_concat (hc-post-body) (hc-headw-body))))))))))))))
+        (str_concat (hc-post-body) (hc-headw-body))))))))))))))))
 
     0)
