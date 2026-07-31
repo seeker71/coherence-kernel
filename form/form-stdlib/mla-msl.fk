@@ -83,12 +83,32 @@
     ; --- the numerics spine: abs, Newton sqrt (tn-sqrt), Taylor exp (tn-exp), round-reduced sin/cos
     ;     (fsin/fcos), and the RIGHT-fold dot (tb-dot). Emitted ONCE for the whole unit. ---
     (defn mla-msl-spine ()
-        "static inline float mla_abs(float x) { return (x < 0.0f) ? -x : x; } static inline float mla_sqrt(float v) { if (v <= 0.0f) return 0.0f; float g = v; for (int n = 0; n < 50; ++n) { g = 0.5f * (g + v / g); } return g; } static inline float mla_exp_small(float x) { float term = 1.0f; float acc = 1.0f; for (int n = 1; n <= 14; ++n) { term = term * (x / float(n)); acc = acc + term; } return acc; } static inline float mla_pow2k(float v, int k) { for (int i = 0; i < k; ++i) v = v * v; return v; } static inline float mla_exp(float x) { float a = x; int k = 0; while (mla_abs(a) > 0.5f) { a = a * 0.5f; k = k + 1; } return mla_pow2k(mla_exp_small(a), k); } static inline float mla_round(float z) { return float(int(z + ((z >= 0.0f) ? 0.5f : -0.5f))); } static inline float mla_sin(float x) { float r = x - 6.283185307179586f * mla_round(x / 6.283185307179586f); float x2 = r * r; float term = r; float acc = 0.0f; for (int k = 0; k < 10; ++k) { acc = acc + term; term = (term * -1.0f * x2) / (float(2 * (k + 1)) * float(2 * (k + 1) + 1)); } return acc; } static inline float mla_cos(float x) { return mla_sin(x + 1.5707963267948966f); } static inline float mla_dot(device const float* a, device const float* b, uint n) { float acc = 0.0f; for (int c = int(n) - 1; c >= 0; --c) acc = a[uint(c)] * b[uint(c)] + acc; return acc; } ")
+        "static inline float mla_abs(float x) { return (x < 0.0f) ? -x : x; } static inline float mla_sqrt(float v) { if (v <= 0.0f) return 0.0f; float g = v; for (int n = 0; n < 50; ++n) { g = 0.5f * (g + v / g); } return g; } static inline float mla_exp_small(float x) { float term = 1.0f; float acc = 1.0f; for (int n = 1; n <= 14; ++n) { term = term * (x / float(n)); acc = acc + term; } return acc; } static inline float mla_pow2k(float v, int k) { for (int i = 0; i < k; ++i) v = v * v; return v; } static inline float mla_exp(float x) { float a = x; int k = 0; while (mla_abs(a) > 0.5f) { a = a * 0.5f; k = k + 1; } return mla_pow2k(mla_exp_small(a), k); } static inline float mla_round(float z) { return float(int(z + ((z >= 0.0f) ? 0.5f : -0.5f))); } static inline float mla_sin(float x) { float r = x - 6.283185307179586f * mla_round(x / 6.283185307179586f); float x2 = r * r; float term = r; float acc = 0.0f; for (int k = 0; k < 10; ++k) { acc = acc + term; term = (term * -1.0f * x2) / (float(2 * (k + 1)) * float(2 * (k + 1) + 1)); } return acc; } static inline float mla_cos(float x) { return mla_sin(x + 1.5707963267948966f); } static inline float mla_dot(device const float* a, device const float* b, uint n) { float acc = 0.0f; for (int c = int(n) - 1; c >= 0; --c) acc = a[uint(c)] * b[uint(c)] + acc; return acc; } static inline float mla_dot4(device const float* a, device const float* b, uint n) { float acc = 0.0f; int c = int(n) - 1; for (; c >= 3; c -= 4) { float4 av = float4(*(device const packed_float4*)(a + (c - 3))); float4 bv = float4(*(device const packed_float4*)(b + (c - 3))); acc = av.w * bv.w + acc; acc = av.z * bv.z + acc; acc = av.y * bv.y + acc; acc = av.x * bv.x + acc; } for (; c >= 0; --c) acc = a[uint(c)] * b[uint(c)] + acc; return acc; } ")
 
     ; --- kernel: the weighted RMSNorm (ln-rmsnorm), embed-space or rank-space. sumsq is ln-sumsq-acc's
     ;     LEFT fold (ascending); out = (x * (1/rms)) * g, matching tn-scale then ln-mul2. One thread. ---
     (defn mla-rmsnorm-body ()
         "kernel void form_mla_rmsnorm_f32(device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* out [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i != 0u) return; float sumsq = 0.0f; for (uint j = 0u; j < n; ++j) sumsq = sumsq + x[j] * x[j]; float ms = sumsq / float(n); float rms = mla_sqrt(ms + eps); float inv = 1.0f / rms; for (uint j = 0u; j < n; ++j) out[j] = (x[j] * inv) * g[j]; } ")
+
+    ; --- THE SAME WEIGHTED NORM, SPLIT AND FOLDED ACROSS A SIMDGROUP. Profiling named the one-thread
+    ;     version the second most expensive kernel in the whole stack: 1232 calls a run, each walking
+    ;     4096 elements twice on a single lane. ds4 accumulates this sum of squares in DOUBLE
+    ;     (ds4.c:6638), so a lone f32 chain is not the faithful shape either — thirty-two lanes over
+    ;     contiguous slices, combined by simd_sum, both shortens every chain and shortens the wall.
+    ;     The apply half has no association to preserve and becomes one thread per element. ---
+    (defn mla-rmsnorm-reduce-body ()
+        "kernel void form_mla_rmsnorm_reduce_f32(device const float* x [[buffer(0)]], device float* inv [[buffer(1)]], constant uint& n [[buffer(2)]], constant float& eps [[buffer(3)]], uint lane [[thread_position_in_grid]]) { if (lane >= 32u) return; uint per = (n + 31u) / 32u; uint lo = lane * per; uint hi = (lo + per < n) ? (lo + per) : n; float s = 0.0f; for (uint j = lo; j < hi; ++j) s = s + x[j] * x[j]; float sumsq = metal::simd_sum(s); if (lane != 0u) return; float ms = sumsq / float(n); inv[0] = 1.0f / mla_sqrt(ms + eps); } ")
+    (defn mla-rmsnorm-apply-body ()
+        "kernel void form_mla_rmsnorm_apply_f32(device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* out [[buffer(2)]], device const float* inv [[buffer(3)]], constant uint& n [[buffer(4)]], uint j [[thread_position_in_grid]]) { if (j >= n) return; out[j] = (x[j] * inv[0]) * g[j]; } ")
+
+    ; --- kernel: the RMSNorm the ORACLE actually writes (metal/norm.metal kernel_rms_norm_fuse_impl).
+    ;     Read there, not inferred: ds4 gives a row ONE THREADGROUP, strides every thread over the row,
+    ;     folds with simd_sum and a second simd_sum across the simdgroups' partials, and then applies
+    ;     the scale IN THE SAME KERNEL. Two things ours had that the reference does not: a 32-lane
+    ;     ceiling on a 4096-wide row, and a second dispatch to apply what the first one found. The fold
+    ;     association is the reference's own, so this is not a liberty taken — it is the recipe read. ---
+    (defn mla-rmsnorm-wide-body ()
+        "kernel void form_mla_rmsnorm_wide_f32(device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* out [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]]) { threadgroup float sh[32]; if (sgitg == 0u) sh[tiisg] = 0.0f; float s = 0.0f; for (uint j = tpitg.x; j < n; j += ntg.x) { float v = x[j]; s = s + v * v; } s = metal::simd_sum(s); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) sh[sgitg] = s; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); s = metal::simd_sum(sh[tiisg]); float inv = 1.0f / mla_sqrt(s / float(n) + eps); if ((n & 3u) == 0u) { uint n4 = n >> 2u; for (uint j = tpitg.x; j < n4; j += ntg.x) { float4 xv = float4(*(device const packed_float4*)(x + 4u * j)); float4 gv = float4(*(device const packed_float4*)(g + 4u * j)); float4 r; r.x = (xv.x * inv) * gv.x; r.y = (xv.y * inv) * gv.y; r.z = (xv.z * inv) * gv.z; r.w = (xv.w * inv) * gv.w; *(device packed_float4*)(out + 4u * j) = packed_float4(r); } return; } for (uint j = tpitg.x; j < n; j += ntg.x) out[j] = (x[j] * inv) * g[j]; } ")
 
     ; --- kernel: plain f32 matvec (tb-matvec). Row r per thread; the dot is tb-dot's RIGHT fold, so the
     ;     column loop DESCENDS. Serves Wqa, Wqb, Wkv, the grouped was[g], and the final wb. ---
@@ -100,12 +120,18 @@
     (defn mla-headrms-body ()
         "kernel void form_mla_headrms_f32(device const float* q [[buffer(0)]], device float* out [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant float& eps [[buffer(4)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint base = h * hd; float sumsq = 0.0f; for (uint j = 0u; j < hd; ++j) sumsq = sumsq + q[base + j] * q[base + j]; float ms = sumsq / float(hd); float inv = 1.0f / mla_sqrt(ms + eps); for (uint j = 0u; j < hd; ++j) out[base + j] = q[base + j] * inv; } ")
 
+    ; --- kernel: the per-head RMSNorm in the oracle's shape. One THREADGROUP per head instead of one
+    ;     THREAD: sixty-four threads were walking 512 elements twice each, reading and writing 256 KiB
+    ;     at 3.6 GB/s on a device that does hundreds. tgpig.x names the head; the fold is norm.metal's. ---
+    (defn mla-headrms-wide-body ()
+        "kernel void form_mla_headrms_wide_f32(device const float* q [[buffer(0)]], device float* out [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant float& eps [[buffer(4)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]]) { threadgroup float sh[32]; uint h = tgpig.x; if (h >= nh) return; uint base = h * hd; if (sgitg == 0u) sh[tiisg] = 0.0f; float s = 0.0f; for (uint j = tpitg.x; j < hd; j += ntg.x) { float v = q[base + j]; s = s + v * v; } s = metal::simd_sum(s); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) sh[sgitg] = s; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); s = metal::simd_sum(sh[tiisg]); float inv = 1.0f / mla_sqrt(s / float(hd) + eps); for (uint j = tpitg.x; j < hd; j += ntg.x) out[base + j] = q[base + j] * inv; } ")
+
     ; --- kernel: the trailing-nrot RoPE (mla-rope-heads / mla-rope-tail). One thread per head. The front
     ;     hd-nrot dims are copied bit-untouched; the tail is rotated pair-adjacent. sign = +1 forward
     ;     (query and cache row) and -1 inverse (the attention OUTPUT). freqs[k] = base^(-2k/nrot) is the
     ;     body's rope-freq-theta, handed in; the kernel forms angle = pos*freq and the rotation's trig. ---
     (defn mla-rope-body ()
-        "kernel void form_mla_rope_f32(device const float* v [[buffer(0)]], device float* out [[buffer(1)]], device const float* freqs [[buffer(2)]], constant uint& nh [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& nrot [[buffer(5)]], constant float& pos [[buffer(6)]], constant float& sign [[buffer(7)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint base = h * hd; uint nnope = hd - nrot; for (uint j = 0u; j < nnope; ++j) out[base + j] = v[base + j]; uint npair = nrot / 2u; for (uint k = 0u; k < npair; ++k) { float a = pos * freqs[k]; float ca = mla_cos(a); float sa = sign * mla_sin(a); uint lo = base + nnope + 2u * k; float x0 = v[lo]; float x1 = v[lo + 1u]; out[lo] = x0 * ca - x1 * sa; out[lo + 1u] = x0 * sa + x1 * ca; } } ")
+        "kernel void form_mla_rope_f32(device const float* v [[buffer(0)]], device float* out [[buffer(1)]], device const float* freqs [[buffer(2)]], constant uint& nh [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& nrot [[buffer(5)]], constant float& pos [[buffer(6)]], constant float& sign [[buffer(7)]], uint gid [[thread_position_in_grid]]) { if (gid >= nh * hd) return; uint h = gid / hd; uint j = gid - h * hd; uint base = h * hd; uint nnope = hd - nrot; if (j < nnope) { out[base + j] = v[base + j]; return; } uint r = j - nnope; uint npair = nrot / 2u; if (r >= 2u * npair) return; uint k = r / 2u; float a = pos * freqs[k]; float ca = mla_cos(a); float sa = sign * mla_sin(a); uint lo = base + nnope + 2u * k; float x0 = v[lo]; float x1 = v[lo + 1u]; if (r - k * 2u == 0u) { out[lo] = x0 * ca - x1 * sa; } else { out[lo + 1u] = x0 * sa + x1 * ca; } } ")
 
     ; --- kernel: the single-latent-row attention with the per-head SINK (mla-attend-head / mla-attn-heads).
     ;     THE SLOT: one thread per head. K and V are the SAME row (rows[j*hd..]). The sink is a learned
@@ -127,15 +153,61 @@
     (defn mla-attend-mixed-body ()
         "kernel void form_mla_attend_mixed_f32(device const float* q [[buffer(0)]], device const float* rows [[buffer(1)]], device const float* crows [[buffer(2)]], device float* out [[buffer(3)]], device const float* sinks [[buffer(4)]], constant uint& nh [[buffer(5)]], constant uint& hd [[buffer(6)]], constant uint& nrows [[buffer(7)]], constant uint& ncomp [[buffer(8)]], constant float& scale [[buffer(9)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; device const float* qh = q + h * hd; float sink = sinks[h]; float m = sink; for (uint j = 0u; j < nrows; ++j) { float s = scale * mla_dot(qh, rows + j * hd, hd); if (s > m) m = s; } for (uint j = 0u; j < ncomp; ++j) { float s = scale * mla_dot(qh, crows + j * hd, hd); if (s > m) m = s; } float acc[MLA_MAX_HD]; for (uint d = 0u; d < hd; ++d) acc[d] = 0.0f; float se = 0.0f; for (uint j = 0u; j < nrows; ++j) { float s = scale * mla_dot(qh, rows + j * hd, hd); float e = mla_exp(s - m); se = se + e; device const float* rj = rows + j * hd; for (uint d = 0u; d < hd; ++d) acc[d] = acc[d] + rj[d] * e; } for (uint j = 0u; j < ncomp; ++j) { float s = scale * mla_dot(qh, crows + j * hd, hd); float e = mla_exp(s - m); se = se + e; device const float* rj = crows + j * hd; for (uint d = 0u; d < hd; ++d) acc[d] = acc[d] + rj[d] * e; } float denom = mla_exp(sink - m) + se; float inv = 1.0f / denom; for (uint d = 0u; d < hd; ++d) out[h * hd + d] = acc[d] * inv; } ")
 
+    ; THE SAME ATTENTION IN THREE STAGES, order untouched. The single-kernel form runs one thread per
+    ; HEAD — 64 threads on a 40-core device — computes every score TWICE (once to find the max, once to
+    ; weight it), and carries a 512-float private array that cannot live in registers. ds4 has no
+    ; separate attention stage at all in its decode list; it fuses. We cannot fuse without changing the
+    ; THE SCORES KERNEL READS ITS TWO VECTORS FOUR AT A TIME, and that is not a reassociation. A dot of
+    ; head_dim = 512 is a thread's whole loop here — one thread to a (head, row) pair, 1024 scalar
+    ; device loads per thread, and at position 30 only nh*(pos+1+ncomp) = 2432 threads to hide their
+    ; latency behind. FORM_DS4_DOUBLE priced the kernel at 1.6 ms of a 39 ms token for 43 asks.
+    ; mla_dot4 walks the SAME descending index — c, c-1, c-2, c-3 read out of one packed_float4 as
+    ; .w, .z, .y, .x, in that order, into the same accumulator — and takes the tail scalar when n is
+    ; not a multiple of four, so it is mla_dot's answer for every n and every alignment. What changes
+    ; is that a thread issues a quarter of the load instructions. This is the same reading that turned
+    ; the Q2_K expert kernel's thirty-six scalar loads into nine (ds4-order-match.fk).
+    ; association, but we CAN stop recomputing and stop serialising:
+    ;   scores: one thread per (head, row) — each dot computed ONCE
+    ;   stats : one thread per head — max, exp, running sum, denominator, all in the recipe order
+    ;   acc   : one thread per (head, d) — the ascending-j chain each output dim already had
+    ; Every fold keeps its direction and its operands, so the answer is bit-identical; what changes is
+    ; that 64 threads become 32 768 and the duplicate dot disappears.
+    (defn mla-attend-split-body ()
+        "kernel void form_mla_attend_scores(device const float* q [[buffer(0)]], device const float* rows [[buffer(1)]], device const float* crows [[buffer(2)]], device float* sco [[buffer(3)]], constant uint& nh [[buffer(4)]], constant uint& hd [[buffer(5)]], constant uint& nrows [[buffer(6)]], constant uint& ncomp [[buffer(7)]], constant float& scale [[buffer(8)]], uint gid [[thread_position_in_grid]]) { uint tot = nrows + ncomp; if (gid >= nh * tot) return; uint h = gid / tot; uint j = gid - h * tot; device const float* rj = (j < nrows) ? (rows + j * hd) : (crows + (j - nrows) * hd); sco[gid] = scale * mla_dot4(q + h * hd, rj, hd); } kernel void form_mla_attend_stats(device const float* sco [[buffer(0)]], device const float* sinks [[buffer(1)]], device float* ex [[buffer(2)]], device float* inv [[buffer(3)]], constant uint& nh [[buffer(4)]], constant uint& ntot [[buffer(5)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; device const float* s = sco + h * ntot; device float* e = ex + h * ntot; float sink = sinks[h]; float m = sink; for (uint j = 0u; j < ntot; ++j) { if (s[j] > m) m = s[j]; } float se = 0.0f; for (uint j = 0u; j < ntot; ++j) { float v = mla_exp(s[j] - m); e[j] = v; se = se + v; } inv[h] = 1.0f / (mla_exp(sink - m) + se); } kernel void form_mla_attend_acc(device const float* rows [[buffer(0)]], device const float* crows [[buffer(1)]], device const float* ex [[buffer(2)]], device const float* inv [[buffer(3)]], device float* out [[buffer(4)]], constant uint& nh [[buffer(5)]], constant uint& hd [[buffer(6)]], constant uint& nrows [[buffer(7)]], constant uint& ncomp [[buffer(8)]], uint gid [[thread_position_in_grid]]) { if (gid >= nh * hd) return; uint h = gid / hd; uint d = gid - h * hd; uint ntot = nrows + ncomp; device const float* e = ex + h * ntot; float acc = 0.0f; for (uint j = 0u; j < nrows; ++j) acc = acc + rows[j * hd + d] * e[j]; for (uint j = 0u; j < ncomp; ++j) acc = acc + crows[j * hd + d] * e[nrows + j]; out[gid] = acc * inv[h]; } "
+)
+
     ; --- ONE translation unit: the body's one metal_stdlib, the MLA_MAX_HD cap, the spine once, then the
     ;     kernels. A carrier compiles exactly this; it composes nothing itself. ---
+    ; --- THE STATS KERNEL ON A SIMDGROUP A HEAD, AND WHAT IN IT IS ORDERED. It gives one THREAD a head:
+    ;     64 threads on the whole device, each walking the head's scores twice and calling mla_exp —
+    ;     range-reduction loop, then a fourteen-term series with a divide in every term — once per row.
+    ;     FORM_DS4_DOUBLE prices it at 0.8 ms of a 39 ms token over 43 asks.
+    ;     Two of its three passes have no order to keep and one does, and they are separable:
+    ;       the MAX is associative and commutative over these finite floats, so simd_max over lanes that
+    ;         each start at `sink` returns the same float the serial scan returns — the same set's
+    ;         maximum, and a maximum is a member of the set, not a fold of it;
+    ;       each e[j] is a function of s[j] and m alone, so whichever lane computes it computes the
+    ;         same float;
+    ;       the DENOMINATOR is a left fold and stays exactly that — lane 0 alone, ascending j, over the
+    ;         values the lanes just wrote, then the sink term added the way it always was.
+    ;     So thirty-two lanes share the transcendentals and one lane keeps the sum. Bit-identical.
+    ;     n_head simdgroups replace n_head threads; FORM_DS4_ATT_STATS_SG=0 is the A/B. ---
+    (defn mla-attend-stats-sg-body ()
+        "kernel void form_mla_attend_stats_sg(device const float* sco [[buffer(0)]], device const float* sinks [[buffer(1)]], device float* ex [[buffer(2)]], device float* inv [[buffer(3)]], constant uint& nh [[buffer(4)]], constant uint& ntot [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint h = gid / 32u; if (h >= nh) return; device const float* s = sco + h * ntot; device float* e = ex + h * ntot; float sink = sinks[h]; float lm = sink; for (uint j = lane; j < ntot; j += 32u) { float v = s[j]; if (v > lm) lm = v; } float m = metal::simd_max(lm); for (uint j = lane; j < ntot; j += 32u) { e[j] = mla_exp(s[j] - m); } metal::simdgroup_barrier(metal::mem_flags::mem_device); if (lane != 0u) return; float se = 0.0f; for (uint j = 0u; j < ntot; ++j) { se = se + e[j]; } inv[h] = 1.0f / (mla_exp(sink - m) + se); } ")
+
     (defn mla-msl-unit ()
         (str_concat "#include <metal_stdlib>\n#define MLA_MAX_HD 512\n"
         (str_concat (mla-msl-spine)
         (str_concat (mla-rmsnorm-body)
+        (str_concat (mla-rmsnorm-reduce-body)
+        (str_concat (mla-rmsnorm-apply-body)
         (str_concat (mla-matvec-body)
         (str_concat (mla-headrms-body)
+        (str_concat (mla-rmsnorm-wide-body)
+        (str_concat (mla-headrms-wide-body)
         (str_concat (mla-rope-body)
-        (str_concat (mla-attend-body) (mla-attend-mixed-body)))))))))
+        (str_concat (mla-attend-body)
+        (str_concat (mla-attend-mixed-body)
+        (str_concat (mla-attend-split-body) (mla-attend-stats-sg-body)))))))))))))))
 
     0)
