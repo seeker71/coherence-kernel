@@ -235,15 +235,23 @@ awk 'NF < 2 { print "FAIL missing value for " $1 > "/dev/stderr"; exit 1 }' "$wo
 echo "  native-only execution: Form emits the kernels; Metal carries and checks the full stack"
 
 # ── 3. compile the translation units, cached by sha ────────────────────────────────────────────────
+# FORM_DS4_FPCONTRACT PRICES THE ASSOCIATION ITSELF. `-ffp-contract=off` is deliberate and stated at
+# the top of ds4-order-match.fk: a fused multiply-add rounds once where ours rounds twice, so every
+# metallib here is compiled without it and the whole match rests on that. But `off` is not free — a
+# kernel that is arithmetic-bound runs every multiply and every add as its own instruction where the
+# machine could have issued one. Setting this to `fast` BREAKS THE STREAM by construction, so it is a
+# measuring instrument and never a setting: it says what the pinned association costs, in milliseconds.
+# The flag goes into the cache key, or the run would silently reuse a metallib built the other way.
+FPCONTRACT="${FORM_DS4_FPCONTRACT:-off}"
 compile_unit() { # $1 emit-form  $2 grep-token  $3 cache-prefix -> echoes LIB path
     local form="$1" tok="$2" pre="$3" lib sha
     echo "($form)" > "$work/$pre.fk"
     "$GO_BIN" "${FILES[@]}" "$work/$pre.fk" > "$work/$pre.out" 2>"$work/$pre.err" || { echo "FAIL $pre MSL emission" >&2; cat "$work/$pre.err" >&2; return 1; }
     awk '/^MSL$/{d=1;next} /^END$/{d=0;next} d{print}' "$work/$pre.out" > "$work/$pre.metal"
     grep -q "$tok" "$work/$pre.metal" || { echo "FAIL $pre kernel $tok not emitted" >&2; return 1; }
-    sha="$(shasum -a 256 "$work/$pre.metal" | cut -c1-16)"; lib="$CACHE/$pre-$sha.metallib"
+    sha="$( { shasum -a 256 "$work/$pre.metal"; echo "contract=$FPCONTRACT"; } | shasum -a 256 | cut -c1-16)"; lib="$CACHE/$pre-$sha.metallib"
     if [[ ! -f "$lib" ]]; then
-        xcrun -sdk macosx metal -O2 -std=metal3.0 -ffp-contract=off -c "$work/$pre.metal" -o "$work/$pre.air" 2>"$work/$pre.merr" \
+        xcrun -sdk macosx metal -O2 -std=metal3.0 "-ffp-contract=$FPCONTRACT" -c "$work/$pre.metal" -o "$work/$pre.air" 2>"$work/$pre.merr" \
           && xcrun -sdk macosx metallib "$work/$pre.air" -o "$lib" 2>>"$work/$pre.merr" || { echo "FAIL $pre metal compile" >&2; cat "$work/$pre.merr" >&2; return 1; }
         echo "PASS  $pre metallib compiled: $(basename "$lib")" >&2
     else
