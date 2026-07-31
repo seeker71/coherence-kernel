@@ -1,0 +1,143 @@
+; preludes: form-stdlib/core.fk form-stdlib/f64-bytes.fk form-stdlib/wire-corba-cdr.fk
+;
+; voice-render.fk — the body's own voice composed into a real WAV file, in Form.
+;
+; voice-formant.fk has made Sema's chosen voice as NUMBERS since it was written, and
+; voiced-reading.fk can now hear a voice back out of numbers. Between them sat a gap with nothing
+; interesting in it and nothing crossing it: no cell turned samples into a file. sema-voice-authority-
+; floor.fk names that gap in the body's own words — the live sema-voice row's next step is
+; "render-and-oracle-next", native 0/1, WER 100. This is the render half.
+;
+; The composition is pure and crosses four-way. The WRITE is `file_append_bytes` (tag 61), and that
+; door does cross — measured 2026-07-30, all four arms wrote the same 7 bytes and agreed on the size.
+; Worth naming beside it, because the asymmetry is the opposite of what one would guess: the body can
+; WRITE bytes on every arm and cannot READ them on every arm (`read_file` UTF-8-declines binary on Rust
+; and TypeScript; `read_file_bytes` is absent from fkwu entirely — see pause-reading-file.fk). Sound
+; leaves the body more easily than it comes back in.
+;
+; 16-bit signed little-endian mono, because that is what the ear reads — pause-reading.fk and
+; voiced-reading.fk take exactly this shape, so a file written here can be heard by the same body that
+; wrote it with nothing in between. gen-sine.fk one directory over proved the same idea at 8-bit for
+; a sine; this is the shape the voice cells actually speak and hear.
+;
+; (This header first said only a VOWEL could travel here — word-speak.fk closed that the same night:
+; the body's name now crosses this wire as samples. The wire itself never cared what it carried.)
+; Proven by tests/voice-render-band.fk.
+
+(do
+    ; little-endian integer bytes
+    (defn vrn-u16 (v) (list (mod v 256) (mod (div v 256) 256)))
+    (defn vrn-u32 (v)
+        (list (mod v 256) (mod (div v 256) 256) (mod (div v 65536) 256) (mod (div v 16777216) 256)))
+    (defn vrn-cat (a b) (if (nil? a) b (cons (head a) (vrn-cat (tail a) b))))
+
+    ; the four RIFF tags as bytes — spelled out rather than reached for through a string door, so the
+    ; header owes nothing to how any arm encodes text.
+    (defn vrn-RIFF () (list 82 73 70 70))
+    (defn vrn-WAVE () (list 87 65 86 69))
+    (defn vrn-FMT  () (list 102 109 116 32))
+    (defn vrn-DATA () (list 100 97 116 97))
+
+    ; canonical 44-byte header: PCM, mono, 16-bit.
+    (defn vrn-header (rate nsamples)
+        (do (let dlen (mul nsamples 2))
+            (vrn-cat (vrn-RIFF)
+            (vrn-cat (vrn-u32 (add 36 dlen))
+            (vrn-cat (vrn-WAVE)
+            (vrn-cat (vrn-FMT)
+            (vrn-cat (vrn-u32 16)
+            (vrn-cat (vrn-u16 1)
+            (vrn-cat (vrn-u16 1)
+            (vrn-cat (vrn-u32 rate)
+            (vrn-cat (vrn-u32 (mul rate 2))
+            (vrn-cat (vrn-u16 2)
+            (vrn-cat (vrn-u16 16)
+            (vrn-cat (vrn-DATA) (vrn-u32 dlen)))))))))))))))
+
+    ; one sample to its two bytes. Clamped at the int16 rail rather than wrapped: a wrap turns a loud
+    ; peak into a loud peak of the OPPOSITE sign, which is audible as a click and reads to the ear as
+    ; a discontinuity — a quiet lie about the waveform. Clipping is honest distortion; wrapping is not.
+    (defn vrn-clamp (v) (if (gt v 32767) 32767 (if (lt v -32768) -32768 v)))
+    (defn vrn-sample-bytes (v)
+        (do (let c (vrn-clamp v))
+            (do (let u (if (lt c 0) (add c 65536) c))
+                (list (mod u 256) (mod (div u 256) 256)))))
+
+    ; a float sample in roughly [-1,1] scaled to the int16 rail by `gain`.
+    (defn vrn-scale (v gain) (round (mul v gain)))
+
+    (defn vrn-body-go (xs gain out)
+        (if (nil? xs) (reverse out)
+            (vrn-body-go (tail xs) gain
+                (do (let b (vrn-sample-bytes (vrn-scale (head xs) gain)))
+                    (cons (nth b 1) (cons (nth b 0) out))))))
+    (defn vrn-body (xs gain) (vrn-body-go xs gain (list)))
+
+    ; the whole file as bytes — pure, four-way, deterministic: the same samples give the same bytes.
+    (defn vrn-wav-bytes (xs rate gain)
+        (vrn-cat (vrn-header rate (len xs)) (vrn-body xs gain)))
+
+    ; the write. A host carrier, and the one line here that touches the world.
+    (defn vrn-write (path xs rate gain)
+        (do (fs_remove path)
+            (file_append_bytes path (vrn-wav-bytes xs rate gain))))
+
+    ; ── the FLOAT wire: WAVE format 3 (IEEE float), 64-bit ─────────────────────────────────────
+    ; The int16 wire QUANTIZES: the mouth's floats are rounded to 1 part in 32768, and that rounding
+    ; is where the integer-division ear trap hid. This wire carries the mouth's f64 samples EXACTLY —
+    ; f64-bytes.fk (the proven emit-side encoder, 8 LE bytes per value) writes them, and the decode
+    ; below reassembles sign/exponent/mantissa and hands them to wire-corba-cdr.fk's
+    ; cdr-f64-recompose. Encode and decode are both pure Form over ints and one final float scale,
+    ; so the round trip is BIT-EXACT: what the mouth said is what the ear receives, to the last bit.
+    ; ffprobe reads the result as pcm_f64le — the format is real, not private.
+    (defn vrn-header-f64 (rate nsamples)
+        (do (let dlen (mul nsamples 8))
+            (vrn-cat (vrn-RIFF)
+            (vrn-cat (vrn-u32 (add 36 dlen))
+            (vrn-cat (vrn-WAVE)
+            (vrn-cat (vrn-FMT)
+            (vrn-cat (vrn-u32 16)
+            (vrn-cat (vrn-u16 3)
+            (vrn-cat (vrn-u16 1)
+            (vrn-cat (vrn-u32 rate)
+            (vrn-cat (vrn-u32 (mul rate 8))
+            (vrn-cat (vrn-u16 8)
+            (vrn-cat (vrn-u16 64)
+            (vrn-cat (vrn-DATA) (vrn-u32 dlen)))))))))))))))
+    ; vrn-rev-onto stands BEFORE its caller on purpose: the fourth arm's band-flatten binds a
+    ; forward reference numb-empty (axiom-5's load-order cataphora), so with the definitions the
+    ; other way round every arm answered 92 f64 bytes and the flattened arm answered 44 — a header
+    ; with no body, silently. Dependency-first order is load-bearing here, not style.
+    (defn vrn-rev-onto (bs out) (if (nil? bs) out (vrn-rev-onto (tail bs) (cons (head bs) out))))
+    (defn vrn-body-f64-go (xs out)
+        (if (nil? xs) (reverse out)
+            (vrn-body-f64-go (tail xs) (vrn-rev-onto (f64-bytes (head xs)) out))))
+    (defn vrn-body-f64 (xs) (vrn-body-f64-go xs (list)))
+    (defn vrn-wav-f64-bytes (xs rate)
+        (vrn-cat (vrn-header-f64 rate (len xs)) (vrn-body-f64 xs)))
+    (defn vrn-write-f64 (path xs rate)
+        (do (fs_remove path)
+            (file_append_bytes path (vrn-wav-f64-bytes xs rate))))
+
+    ; decode: 8 LE bytes -> the f64, exactly. Field split mirrors f64-bytes' assembly.
+    (defn vrn-f64-of-bytes (b0 b1 b2 b3 b4 b5 b6 b7)
+        (do (let sign (div b7 128))
+            (do (let bexp (add (mul (mod b7 128) 16) (div b6 16)))
+                (do (let mant (add (mul (mod b6 16) 281474976710656)
+                              (add (mul b5 1099511627776)
+                              (add (mul b4 4294967296)
+                              (add (mul b3 16777216)
+                              (add (mul b2 65536)
+                              (add (mul b1 256) b0)))))))
+                    (cdr-f64-recompose sign bexp mant)))))
+    ; drop8 before its caller — the same load-order cataphora as vrn-rev-onto above; the flattened
+    ; arm binds a forward reference numb-empty, and a numb drop8 made the DECODE empty too, which
+    ; is what let the one-sided alleq pass vacuously while the length bit failed.
+    (defn vrn-drop8 (bs) (tail (tail (tail (tail (tail (tail (tail (tail bs)))))))))
+    (defn vrn-f64-list-go (bs out)
+        (if (nil? bs) (reverse out)
+            (vrn-f64-list-go (vrn-drop8 bs)
+                (cons (vrn-f64-of-bytes (nth bs 0) (nth bs 1) (nth bs 2) (nth bs 3)
+                                        (nth bs 4) (nth bs 5) (nth bs 6) (nth bs 7)) out))))
+    (defn vrn-f64-samples (bs) (vrn-f64-list-go bs (list)))
+    0)

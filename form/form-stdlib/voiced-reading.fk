@@ -1,0 +1,158 @@
+; preludes: form-stdlib/core.fk
+;
+; voiced-reading.fk — PERIODICITY from PCM, in Form. The step wav-sense.fk named and never took:
+; "f0 follows the same path (read the wav, compute in Form)". This is that path.
+;
+; pause-reading.fk answers "is this frame loud or quiet". That is an energy question, and it is the
+; wrong question twice over: a whisper is quiet and is speech, a fan is loud and is not. It also needs
+; the room's own floor to mean anything at all, so a clip with no silence in it cannot be read.
+;
+; The question above energy is PERIODICITY. A voiced sound is a pitched source — the vocal folds open
+; and close at f0, and the waveform repeats. Room tone, a fan, a fricative, a breath: none of them
+; repeat. So instead of asking how big the samples are, ask whether the frame looks like ITSELF one
+; period later. That is autocorrelation: R(lag) = Σ x[k]·x[k+lag]. Search the lag range that
+; corresponds to a human f0 (60–400 Hz), take the best, and divide by R(0) to normalize.
+;
+; Three things fall out, and each of them is a limit of the energy reading lifting:
+;
+;   IT IS NOT ENERGY IN DISGUISE. Two frames can carry identical R(0) — the same total energy, sample
+;   for sample — and one be a vowel and the other noise. The normalized peak separates them. The band
+;   proves exactly this pair, because a feature that merely correlated with loudness would be a
+;   rename and not an advance.
+;
+;   IT NEEDS NO FLOOR. R(best)/R(0) is scale-invariant: double every sample and both terms scale by
+;   four. So there is no room to measure, no contrast question to ask, and a clip of unbroken speech —
+;   which pause-reading.fk honestly declines — reads fine here. The measurement stopped depending on
+;   the clip containing its own opposite.
+;
+;   IT CARRIES f0. The lag that won IS the period, so rate/lag is the pitch in Hz, for free, from the
+;   same walk. voice-formant.fk has synthesized Sema's chosen voice at f0 = 165 Hz since it was
+;   written; nothing in the body could hear it back. Now the body's own ear recovers the body's own
+;   voice, and the band proves that round trip with no outside oracle in it.
+;
+; What this still is NOT: a recognizer. Periodicity tells voice from not-voice; it does not tell a
+; breath mid-sentence from a breath at the end, because that difference is in the WORDS. unmute's STT
+; predicts turn-end because it is already decoding meaning. This is the honest rung below that, and
+; naming the rung is the point — the ladder is energy → periodicity → recognition, and the body has
+; just taken the second.
+;
+; Named limits, measured not guessed: autocorrelation peaks at every MULTIPLE of the true period, so a
+; strongly harmonic voice can read one octave low if the range admits both; keep f0min·2 > f0max to
+; make that impossible, or accept it and say so. A frame shorter than the longest lag has nothing to
+; correlate against — vr-frame-ok? asks that before any answer is given, rather than truncating the
+; walk and reporting the stump.
+;
+; Walks two cursors down the same list with `tail`, so it is O(n) per lag rather than O(n) per SAMPLE:
+; `nth` down a byte list would make this quadratic and it is the reason this cell takes samples, not
+; bytes. Feeds endpointing.fk's ep-fold in place of pause-reading.fk's reading, unchanged downstream.
+; Proven by tests/voiced-reading-band.fk.
+
+(do
+    ; drop k elements — the lag shift, O(k) once per lag rather than per sample.
+    (defn vr-drop (xs k) (if (le k 0) xs (vr-drop (tail xs) (sub k 1))))
+
+    ; Σ a[i]·b[i] over exactly n steps. NO emptiness test inside the loop, on purpose: core's `nil?`
+    ; is `(eq (len xs) 0)`, which WALKS the list — asking a list its length inside its own loop turns
+    ; O(n) into O(n²), and with a lag search on top that is O(n²·lags). The first draft of this cell
+    ; did exactly that. The length is checked ONCE per frame instead, by vr-frame-ok?, and every
+    ; caller here goes through it.
+    (defn vr-dot (a b n acc)
+        (if (le n 0) acc
+            (vr-dot (tail a) (tail b) (sub n 1) (add acc (mul (head a) (head b))))))
+
+    ; R(lag) over the first n samples.
+    (defn vr-r (xs lag n) (vr-dot xs (vr-drop xs lag) n 0))
+
+    ; the lag range a human f0 lives in. Longest lag ↔ lowest pitch.
+    (defn vr-lag-lo (rate f0max) (div rate f0max))
+    (defn vr-lag-hi (rate f0min) (div rate f0min))
+
+    ; PRE-EMPHASIS: x'[k] = x[k] − x[k−1]. One line, and it is what makes this a discriminator rather
+    ; than a hint. Raw autocorrelation's adversarial case is 1/f noise — room tone, fans, traffic all
+    ; carry most of their power low, and low-frequency noise correlates with ITSELF at short lags, so
+    ; it reads as partly periodic. Measured on a rendered clip with a pink-noise bed (2026-07-30):
+    ; raw periodicity was 0.934 for a speech frame and 0.698 for a quiet one — separated, but nowhere
+    ; near a threshold anyone should trust. A first difference flattens the 1/f slope to white and the
+    ; same two frames read 0.798 and 0.096: the gap goes from 1.34× to 8.3×. The recovered f0 does not
+    ; move (242 Hz both ways) — differencing changes the spectral tilt, not the period.
+    (defn vr-diff-go (xs n out)
+        (if (le n 0) (reverse out)
+            (vr-diff-go (tail xs) (sub n 1) (cons (sub (head (tail xs)) (head xs)) out))))
+    (defn vr-diff (xs n) (vr-diff-go xs n (list)))
+
+    ; a frame can only answer if the samples it needs are actually THERE: n for the window, the longest
+    ; lag to shift against, and one more for the difference to look back at. Below that the dot would
+    ; walk off the end. This is the one O(n) length question in the cell, asked once per frame and
+    ; never inside a loop.
+    (defn vr-frame-ok? (xs n rate f0min)
+        (if (ge (len xs) (add n (add (vr-lag-hi rate f0min) 1))) 1 0))
+
+    ; the winning lag and its raw R, searched over [lag, hi]. R(0) is a constant across the search, so
+    ; the argmax of R is the argmax of R/R(0) and the division waits until the end.
+    (defn vr-search (xs n lag hi bestlag bestval)
+        (if (gt lag hi) (list bestlag bestval)
+            (do (let v (vr-r xs lag n))
+                (if (gt v bestval)
+                    (vr-search xs n (add lag 1) hi lag v)
+                    (vr-search xs n (add lag 1) hi bestlag bestval)))))
+
+    (defn vr-best (xs n rate f0min f0max)
+        (do (let lo (vr-lag-lo rate f0max))
+            (vr-search xs n lo (vr-lag-hi rate f0min) lo (vr-r xs lo n))))
+
+    (defn vr-best-lag (xs n rate f0min f0max) (head (vr-best xs n rate f0min f0max)))
+
+    ; how much this frame looks like itself one period later, in [0,1]. A frame with no energy has
+    ; nothing to be periodic ABOUT and reads 0 — which is the truth, not a fallback. A negative peak
+    ; (anti-correlation) is not periodicity either, so the floor is 0 rather than a signed ratio.
+    ; the normalized peak of an ALREADY-prepared window (right length, already pre-emphasized). No
+    ; length question in here — its caller answered that.
+    (defn vr-peak-ratio (xs n rate f0min f0max)
+        (do (let r0 (vr-r xs 0 n))
+            (if (le r0 0) 0.0
+                (do (let peak (nth (vr-best xs n rate f0min f0max) 1))
+                    (if (le peak 0) 0.0
+                        (if (ge peak r0) 1.0 (div (mul peak 1.0) r0)))))))
+
+    ; how much this frame looks like itself one period later, in [0,1], measured on the pre-emphasized
+    ; signal. A frame with no energy has nothing to be periodic ABOUT and reads 0 — the truth, not a
+    ; fallback. A negative peak (anti-correlation) is not periodicity either, so the floor is 0 rather
+    ; than a signed ratio. vr-periodicity-raw is the un-emphasized reading, kept because it is what the
+    ; textbook formula says and because the difference between the two is the measurement above.
+    (defn vr-window (xs n rate f0min) (vr-diff xs (add n (vr-lag-hi rate f0min))))
+    (defn vr-periodicity (xs n rate f0min f0max)
+        (if (eq (vr-frame-ok? xs n rate f0min) 0) 0.0
+            (vr-peak-ratio (vr-window xs n rate f0min) n rate f0min f0max)))
+    (defn vr-periodicity-raw (xs n rate f0min f0max)
+        (if (eq (vr-frame-ok? xs n rate f0min) 0) 0.0
+            (vr-peak-ratio xs n rate f0min f0max)))
+
+    ; the pitch the winning lag implies, in Hz — 0.0 when the frame could not answer.
+    (defn vr-f0 (xs n rate f0min f0max)
+        (if (eq (vr-frame-ok? xs n rate f0min) 0) 0.0
+            (do (let lag (vr-best-lag (vr-window xs n rate f0min) n rate f0min f0max))
+                (if (le lag 0) 0.0 (div (mul rate 1.0) lag)))))
+
+    ; the reading endpointing.fk asks for, now meaning "no VOICE here" rather than "no energy here":
+    ; 1.0 is a pause, 0.0 is speech, and the slide between is how voiced the frame is.
+    (defn vr-reading (xs n rate f0min f0max)
+        (sub 1.0 (vr-periodicity xs n rate f0min f0max)))
+
+    ; frame i of a sample list, as its own tail — the walk that turns a clip into readings.
+    (defn vr-frame (xs i width) (vr-drop xs (mul i width)))
+
+    ; how many frames a clip can actually ANSWER for: every frame needs its width plus the longest lag
+    ; still ahead of it, so the last lag-hi samples carry no frame of their own. They are dropped, not
+    ; guessed — a frame that could not be analysed is not evidence of a pause, and defaulting it to
+    ; "pause" would silently lengthen every clip's trailing silence by the lag range.
+    (defn vr-frame-count (n width rate f0min)
+        (if (le width 0) 0 (div (sub n (vr-lag-hi rate f0min)) width)))
+
+    (defn vr-readings-go (xs i frames width rate f0min f0max out)
+        (if (ge i frames) out
+            (vr-readings-go xs (add i 1) frames width rate f0min f0max
+                (cons (vr-reading (vr-frame xs i width) width rate f0min f0max) out))))
+    (defn vr-readings (xs n width rate f0min f0max)
+        (reverse (vr-readings-go xs 0 (vr-frame-count n width rate f0min)
+                                 width rate f0min f0max (list))))
+    0)
