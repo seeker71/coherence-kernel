@@ -537,6 +537,35 @@ let pHeadrms = pipe(lMla, "form_mla_headrms_f32")
 let pRope = pipe(lMla, "form_mla_rope_f32")
 let pAttend = pipe(lMla, "form_mla_attend_f32")
 let pAttendMixed = pipe(lMla, "form_mla_attend_mixed_f32")
+let pAttScores = pipe(lMla, "form_mla_attend_scores")
+let pAttStats  = pipe(lMla, "form_mla_attend_stats")
+let pAttAcc    = pipe(lMla, "form_mla_attend_acc")
+// one entry for both the raw-only and the mixed case: ncomp = 0 is the raw one. Three dispatches
+// instead of one, and 32 768 threads instead of 64, with every fold direction preserved.
+func gpuAttendSplit(_ q: MTLBuffer, _ rows: MTLBuffer, _ crows: MTLBuffer?, _ snk: Tn,
+                    _ nrows: Int, _ ncomp: Int) -> MTLBuffer {
+    let out = sentinelled(nHead*headDim)
+    let ntot = nrows + ncomp
+    let sco = sentinelled(nHead*ntot), ex = sentinelled(nHead*ntot), inv = sentinelled(nHead)
+    let cb = crows ?? rows
+    var a = UInt32(nHead), b = UInt32(headDim), nr = UInt32(nrows), nc = UInt32(ncomp)
+    var sc = 1.0/sqrtf(Float(headDim)), nt = UInt32(ntot)
+    enc(pAttScores, nHead*ntot, 256) { c in c.setBuffer(q, offset: 0, index: 0); c.setBuffer(rows, offset: 0, index: 1)
+                                            c.setBuffer(cb, offset: 0, index: 2); c.setBuffer(sco, offset: 0, index: 3)
+                                            c.setBytes(&a, length: 4, index: 4); c.setBytes(&b, length: 4, index: 5)
+                                            c.setBytes(&nr, length: 4, index: 6); c.setBytes(&nc, length: 4, index: 7)
+                                            c.setBytes(&sc, length: 4, index: 8) }
+    enc(pAttStats, nHead, 64) { c in c.setBuffer(sco, offset: 0, index: 0)
+                                     c.setBuffer(views[snk.idx], offset: snk.inner, index: 1)
+                                     c.setBuffer(ex, offset: 0, index: 2); c.setBuffer(inv, offset: 0, index: 3)
+                                     c.setBytes(&a, length: 4, index: 4); c.setBytes(&nt, length: 4, index: 5) }
+    enc(pAttAcc, nHead*headDim, 256) { c in c.setBuffer(rows, offset: 0, index: 0); c.setBuffer(cb, offset: 0, index: 1)
+                                            c.setBuffer(ex, offset: 0, index: 2); c.setBuffer(inv, offset: 0, index: 3)
+                                            c.setBuffer(out, offset: 0, index: 4)
+                                            c.setBytes(&a, length: 4, index: 5); c.setBytes(&b, length: 4, index: 6)
+                                            c.setBytes(&nr, length: 4, index: 7); c.setBytes(&nc, length: 4, index: 8) }
+    return out
+}
 let pMx8 = pipe(l8, "form_dsv4_mx8_matvec")
 let pGrouped = pipe(lCore, "form_dsv4_mx8_matvec_grouped")
 let pKvq = pipe(lCore, "form_dsv4_kv_fp8_f16_round_par")
@@ -1044,8 +1073,7 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
         // (ds4.c:12986), and it is fed AFTER the raw row is pushed — the order the spine has.
         if useCompressor { compStep(w, il, xn, pos) }
         let nComp = useCompressor ? compRows[il].count : 0
-        ha = nComp == 0 ? gpuAttend(qr, kvArenas[il], w.snk, pos + 1)
-                        : gpuAttendMixed(qr, kvArenas[il], compPacked[il], w.snk, pos + 1, nComp)
+        ha = gpuAttendSplit(qr, kvArenas[il], nComp == 0 ? nil : compPacked[il], w.snk, pos + 1, nComp)
     } else {
         ha = gpuAttend(qr, kq, w.snk)
     }
