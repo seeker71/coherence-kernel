@@ -756,6 +756,11 @@ let q80Tg = Int(ProcessInfo.processInfo.environment["FORM_DS4_Q80_TG"] ?? "64") 
 // what makes a wide group hurt, and a kernel whose rows each own a simdgroup does not care. The knob
 // stays so the next reader can re-ask instead of inheriting a number nobody measured.
 let tgFree = Int(ProcessInfo.processInfo.environment["FORM_DS4_TG"] ?? "256") ?? 256
+// FORM_DS4_IQ2_ROWS4=0 goes back to one row per thread for the routed IQ2_XXS experts. The four-row
+// kernel holds the 32 activations of a sub-block in a private array so four rows can spend them; a
+// private array is registers only while the compiler can keep it there, and if it cannot, those
+// reads are device traffic wearing a register's name. Two kernels, one question, one run.
+let iq2Rows4 = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_ROWS4"] != "0"
 let pQ80Ds4 = pipe(lKv, "form_dsv4_q80_matvec_ds4")
 let pBwProbe = pipe(lKv, "form_bw_probe")
 // THE TWO ARMS OF THE SAME REFERENCE, AND WHY THE CPU ONE IS STILL THE DEFAULT.
@@ -1406,7 +1411,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         let gt = sentinelled(nE*nFf), up = sentinelled(nE*nFf)
         for (t, out) in [(w.gx, gt), (w.ux, up)] {
             wbExp += nE * (t.bytes / t.d2)
-            enc(nFf % 4 == 0 ? pIq2E4 : pIq2E, nFf % 4 == 0 ? nE*(nFf/4)*32 : nE*nFf*32, tgFree) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+            enc(iq2Rows4 && nFf % 4 == 0 ? pIq2E4 : pIq2E, iq2Rows4 && nFf % 4 == 0 ? nE*(nFf/4)*32 : nE*nFf*32, tgFree) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                               c.setBuffer(ffnNorm, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
                                               c.setBuffer(idsBuf, offset: 0, index: 3)
                                               c.setBytes(&r32, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
