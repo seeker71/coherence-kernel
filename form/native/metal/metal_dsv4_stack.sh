@@ -571,6 +571,8 @@ let pAxpy = pipe(lFfn, "form_dsv4_axpy_f32")
 let pHashSel = pipe(lFfn, "form_dsv4_hash_select")
 let pHashW = pipe(lFfn, "form_dsv4_hash_weights")
 let pTopkW = pipe(lFfn, "form_dsv4_topk_weights")
+let pTopkP = pipe(lFfn, "form_dsv4_topk_probs")
+let pTopkS = pipe(lFfn, "form_dsv4_topk_select")
 let pKvAppend = pipe(lKv, "form_dkv_append_f32")
 let pControlAdapter = pipe(lKv, "form_dsv4_control_logit_adapter")
 // FORM_DS4_MATCH_ORDER=1 swaps the fast folds for ones that reproduce ds4's ASSOCIATION (see
@@ -1087,12 +1089,16 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         // ds4.c:10665 — the bias enters the SELECTION and never the WEIGHT.
         let bi = w.bias!
         var ne = UInt32(nExpR), nu = UInt32(nUsed), ws = wscale
-        enc(pTopkW, 1, 1) { c in c.setBuffer(logits, offset: 0, index: 0)
-                                 c.setBuffer(views[bi.idx], offset: bi.inner, index: 1)
+        // the elementwise half across nExpR threads, the selection on one — see dsv4-stack-real.fk
+        let scBuf = sentinelled(nExpR)
+        enc(pTopkP, nExpR, 256) { c in c.setBuffer(logits, offset: 0, index: 0)
+                                       c.setBuffer(views[bi.idx], offset: bi.inner, index: 1)
+                                       c.setBuffer(probsBuf, offset: 0, index: 2); c.setBuffer(scBuf, offset: 0, index: 3)
+                                       c.setBytes(&ne, length: 4, index: 4) }
+        enc(pTopkS, 1, 1) { c in c.setBuffer(probsBuf, offset: 0, index: 0); c.setBuffer(scBuf, offset: 0, index: 1)
                                  c.setBuffer(idsBuf, offset: 0, index: 2); c.setBuffer(wtsBuf, offset: 0, index: 3)
-                                 c.setBuffer(probsBuf, offset: 0, index: 4)
-                                 c.setBytes(&ne, length: 4, index: 5); c.setBytes(&nu, length: 4, index: 6)
-                                 c.setBytes(&ws, length: 4, index: 7) }
+                                 c.setBytes(&ne, length: 4, index: 4); c.setBytes(&nu, length: 4, index: 5)
+                                 c.setBytes(&ws, length: 4, index: 6) }
     }
     // THE FLUSH THAT OUTLIVED ITS REASON. This used to read the router's choice back to the CPU so the
     // host could pick each expert's byte slice — a real sync point, once. Then the fused kernels
