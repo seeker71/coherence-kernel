@@ -744,6 +744,18 @@ let matchOrder = ProcessInfo.processInfo.environment["FORM_DS4_MATCH_ORDER"] == 
 let gatesOn = ProcessInfo.processInfo.environment["FORM_DS4_GATES"] != "0"
 let pQ8aQuant = pipe(lKv, "form_dsv4_q8a_quantize_f32")
 let pQ80Ord = pipe(lKv, "form_dsv4_q80_matvec_ordered8")
+// how many threads share a core for the token's biggest kernel — 5.07 of its 9.1 GB. The number was
+// 256 because 256 is what every other dispatch here says; nothing measured it. FORM_DS4_Q80_TG asks.
+let q80Tg = Int(ProcessInfo.processInfo.environment["FORM_DS4_Q80_TG"] ?? "64") ?? 64
+// the same question for every OTHER simdgroup-per-row matvec — grouped Q8_0, the routed IQ2_XXS and
+// Q2_K experts. These kernels take their whole shape from `lane` and simd_sum: they allocate no
+// threadgroup memory and never read threads_per_threadgroup, so the group size is free and only the
+// scheduler sees it. The norms, the f16 matvec and the attention DO read it, so they are left alone.
+// ASKED, AND THE ANSWER WAS THE OPPOSITE OF Q8_0's: 256 43 ms, 128 44, 64 44, 32 44. So this is not
+// a rule about Apple threadgroups, it is a fact about ONE kernel — the eight-thread chain map is
+// what makes a wide group hurt, and a kernel whose rows each own a simdgroup does not care. The knob
+// stays so the next reader can re-ask instead of inheriting a number nobody measured.
+let tgFree = Int(ProcessInfo.processInfo.environment["FORM_DS4_TG"] ?? "256") ?? 256
 let pQ80Ds4 = pipe(lKv, "form_dsv4_q80_matvec_ds4")
 let pBwProbe = pipe(lKv, "form_bw_probe")
 // THE TWO ARMS OF THE SAME REFERENCE, AND WHY THE CPU ONE IS STILL THE DEFAULT.
@@ -812,7 +824,7 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
             let outA = sentinelled(rows), outB = sentinelled(rows)
             enc(pQ8aQuant, blocks, 64) { c in c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
                                               c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
-            enc(pQ80Ord, rows*8, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+            enc(pQ80Ord, rows*8, q80Tg) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                              c.setBuffer(xq, offset: 0, index: 1); c.setBuffer(xs, offset: 0, index: 2)
                                              c.setBuffer(outA, offset: 0, index: 3)
                                              c.setBytes(&r, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5) }
@@ -862,7 +874,7 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
             // (xa/xb/xs are the same eight bytes for every row) and is BIT-IDENTICAL, stream exact.
             // It ran 48 -> 51 ms. Halving the thread count costs more than the loads it saves, on the
             // real stack and not only on the microbench this file already recorded it losing on.
-            enc(pQ80Ord, rows*8, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+            enc(pQ80Ord, rows*8, q80Tg) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                           c.setBuffer(xq, offset: 0, index: 1); c.setBuffer(xs, offset: 0, index: 2)
                                           c.setBuffer(out, offset: 0, index: 3)
                                           c.setBytes(&r, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5) }
@@ -1093,13 +1105,13 @@ func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     var r = UInt32(t.rows), c32 = UInt32(t.cols), nel = UInt32(t.nel), rk = UInt32(oRank)
     if t.type == 8 {
         wbQ80 += t.rows * ((t.cols + 31) / 32) * 34
-        enc(pQ80g, t.rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+        enc(pQ80g, t.rows*32, tgFree) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                           c.setBuffer(out, offset: 0, index: 2)
                                           c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4)
                                           c.setBytes(&nel, length: 4, index: 5); c.setBytes(&rk, length: 4, index: 6) }
         return out
     }
-    enc(pGrouped, t.rows*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
+    enc(pGrouped, t.rows*32, tgFree) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
                                          c.setBuffer(out, offset: 0, index: 2)
                                          c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4)
                                          c.setBytes(&nel, length: 4, index: 5); c.setBytes(&rk, length: 4, index: 6) }
@@ -1394,7 +1406,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         let gt = sentinelled(nE*nFf), up = sentinelled(nE*nFf)
         for (t, out) in [(w.gx, gt), (w.ux, up)] {
             wbExp += nE * (t.bytes / t.d2)
-            enc(nFf % 4 == 0 ? pIq2E4 : pIq2E, nFf % 4 == 0 ? nE*(nFf/4)*32 : nE*nFf*32, 256) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
+            enc(nFf % 4 == 0 ? pIq2E4 : pIq2E, nFf % 4 == 0 ? nE*(nFf/4)*32 : nE*nFf*32, tgFree) { c in c.setBuffer(views[t.idx], offset: t.inner, index: 0)
                                               c.setBuffer(ffnNorm, offset: 0, index: 1); c.setBuffer(out, offset: 0, index: 2)
                                               c.setBuffer(idsBuf, offset: 0, index: 3)
                                               c.setBytes(&r32, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
@@ -1409,7 +1421,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         let parts = sentinelled(nE*nEmbd)
         var dr = UInt32(nEmbd), dc = UInt32(nFf), dst = UInt32(w.dx.bytes / w.dx.d2)
         wbExp += nE * (w.dx.bytes / w.dx.d2)
-        enc(q2kOneThread ? pQ2kE : pQ2kEW, q2kOneThread ? nE*nEmbd : nE*nEmbd*32, 256) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
+        enc(q2kOneThread ? pQ2kE : pQ2kEW, q2kOneThread ? nE*nEmbd : nE*nEmbd*32, tgFree) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
                                          c.setBuffer(mid, offset: 0, index: 1); c.setBuffer(parts, offset: 0, index: 2)
                                          c.setBuffer(idsBuf, offset: 0, index: 3)
                                          c.setBytes(&dr, length: 4, index: 4); c.setBytes(&dc, length: 4, index: 5)
