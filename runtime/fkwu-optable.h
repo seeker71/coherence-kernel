@@ -124,6 +124,7 @@ static const struct fk_optab_row fk_optab[] = {
   { "sense_audio_loopback", 1, 236 },
   { "sense_wav_loopback", 2, 237 },
   { "form_error", 1, 238 },
+  { "print", -1, 239 },
   { "file_open", 1, 133 },
   { "file_read", 2, 134 },
   { "file_close", 1, 135 },
