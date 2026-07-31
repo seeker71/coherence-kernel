@@ -774,7 +774,7 @@ func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLB
     let mix = gpuF16mv(fn, flat)
     let split = sentinelled(2*nHc + nHc*nHc)
     do { var a = UInt32(nHc), it = UInt32(hcIters), e0 = hcEps
-         enc(pHcSplit, 1, 1) { c in c.setBuffer(mix, offset: 0, index: 0)
+         enc(pHcSplit, nHc, nHc) { c in c.setBuffer(mix, offset: 0, index: 0)
                                     c.setBuffer(views[sc.idx], offset: sc.inner, index: 1)
                                     c.setBuffer(views[bs.idx], offset: bs.inner, index: 2)
                                     c.setBuffer(split, offset: 0, index: 3)
