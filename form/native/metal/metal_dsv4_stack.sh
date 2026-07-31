@@ -640,7 +640,7 @@ func flush() {
 }
 // FORM_DS4_SUBMIT_EVERY=N hands the queue a buffer every N layers instead of once at the end of the
 // pass, so the device starts layer 0 while the host is still encoding layer N. 0 keeps the old shape.
-let submitEvery = Int(ProcessInfo.processInfo.environment["FORM_DS4_SUBMIT_EVERY"] ?? "8") ?? 8
+let submitEvery = Int(ProcessInfo.processInfo.environment["FORM_DS4_SUBMIT_EVERY"] ?? "2") ?? 2
 // FORM_DS4_DOUBLE=<kernel name> SIZES a kernel without breaking anything. The profiler charges every
 // dispatch a submit and cannot see the overlap the batched path gets, so its ranking overstates
 // high-call-count kernels. Ablation by halving a loop is trustworthy but breaks the answer while it
@@ -682,6 +682,12 @@ let skipMatch = ProcessInfo.processInfo.environment["FORM_DS4_SKIP"] ?? ""
 // WEIGHT VIEWS ARE NOT DECLARED, on purpose. views[] are the mmap'd file's own bytes and no dispatch
 // in this stack ever writes one, so a weight can never be the write half of a hazard and leaving it
 // out of `reads` cannot hide one. Only buffers something writes are named.
+// FORM_DS4_HZ_SCOPED=1 names the buffers in the barrier instead of draining the whole device.
+// REFUTED, and kept as the falsifier. memoryBarrier(resources:) costs MORE per call here than
+// memoryBarrier(scope: .buffers), and because it settles only the buffers it names it leaves the rest
+// of the field dirty, so MORE dispatches end up needing one: 1844 barriers a token against 1510, and
+// 39.14 ms against 38.17. The finer claim is true and the hardware does not reward it.
+let hzScoped = ProcessInfo.processInfo.environment["FORM_DS4_HZ_SCOPED"] == "1"
 var hzWritten = Set<ObjectIdentifier>()
 var hzRead = Set<ObjectIdentifier>()
 var hzDirtyAll = true
@@ -718,11 +724,29 @@ func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, indep: Bool = false
     if concurrentEnc && !concurrentRaw && !indep {
         if let rd = reads, let wr = writes {
             // hzDirtyAll is its own hazard: an un-annotated dispatch is in flight and nobody knows
-            // what it wrote, so the first annotated dispatch after it must still wait.
-            let hazard = hzDirtyAll
-                      || rd.contains { hzWritten.contains(ObjectIdentifier($0)) }
-                      || wr.contains { hzWritten.contains(ObjectIdentifier($0)) || hzRead.contains(ObjectIdentifier($0)) }
-            if hazard { hzBarrier(e) }
+            // what it wrote, so the first annotated dispatch after it must still wait, and it has to
+            // wait on EVERYTHING — that is the one case the scoped barrier cannot express.
+            if hzDirtyAll {
+                hzBarrier(e)
+            } else if hzScoped {
+                // THE BARRIER NAMES ITS BUFFERS. memoryBarrier(scope: .buffers) drains the device for
+                // every buffer there is; what a dispatch actually needs is that the two or three
+                // buffers it is about to touch have settled. Everything else in flight — a matvec
+                // streaming weights, an expert decoding into its own slice — has no reason to stop.
+                var need: [MTLResource] = []
+                for b in rd where hzWritten.contains(ObjectIdentifier(b)) { need.append(b) }
+                for b in wr where hzWritten.contains(ObjectIdentifier(b)) || hzRead.contains(ObjectIdentifier(b)) { need.append(b) }
+                if !need.isEmpty {
+                    e.memoryBarrier(resources: need)
+                    hzBarriers += 1
+                    // only the named buffers are settled; the rest of the field stays as it was.
+                    for b in need { hzWritten.remove(ObjectIdentifier(b)); hzRead.remove(ObjectIdentifier(b)) }
+                }
+            } else {
+                let hazard = rd.contains { hzWritten.contains(ObjectIdentifier($0)) }
+                          || wr.contains { hzWritten.contains(ObjectIdentifier($0)) || hzRead.contains(ObjectIdentifier($0)) }
+                if hazard { hzBarrier(e) }
+            }
             rd.forEach { hzRead.insert(ObjectIdentifier($0)) }
             wr.forEach { hzWritten.insert(ObjectIdentifier($0)) }
         } else {
@@ -899,7 +923,13 @@ let q80Tg = Int(ProcessInfo.processInfo.environment["FORM_DS4_Q80_TG"] ?? "64") 
 // a rule about Apple threadgroups, it is a fact about ONE kernel — the eight-thread chain map is
 // what makes a wide group hurt, and a kernel whose rows each own a simdgroup does not care. The knob
 // stays so the next reader can re-ask instead of inheriting a number nobody measured.
-let tgFree = Int(ProcessInfo.processInfo.environment["FORM_DS4_TG"] ?? "256") ?? 256
+// RE-ASKED UNDER THE CONCURRENT ENCODER, AND THE ANSWER FLIPPED. The sweep above was taken when
+// every dispatch had the device to itself, and a wide group was the way to fill it. With the hazard
+// tracker the expert matvec is no longer alone — the shared expert Q8_0 read and the router are in
+// flight beside it — and a narrower group leaves cores for them: 64 26.38 t/s, 96 26.35, 256 26.20,
+// 512 26.12, each repeated and never out of order. The old number was not wrong, it was answered in
+// a regime that no longer exists.
+let tgFree = Int(ProcessInfo.processInfo.environment["FORM_DS4_TG"] ?? "64") ?? 64
 // FORM_DS4_IQ2_ROWS4=0 goes back to one row per thread for the routed IQ2_XXS experts. The four-row
 // kernel holds the 32 activations of a sub-block in a private array so four rows can spend them; a
 // private array is registers only while the compiler can keep it there, and if it cannot, those
@@ -964,6 +994,30 @@ func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
                                      c.setBuffer(out, offset: 0, index: 2)
                                      c.setBytes(&n32, length: 4, index: 3); c.setBytes(&e, length: 4, index: 4) }
     return out
+}
+// ONE QUANTISATION PER ACTIVATION, not one per projection that reads it. attn_norm is read by BOTH
+// the q_a and the kv projection, and ffn_norm by both the shared gate and the shared up — same
+// buffer, same width, so the int8 activation each of them asks for is the same bytes computed twice.
+// The memo is keyed by buffer identity and width and cleared with the pool, which is what makes
+// identity sound: poolTake never hands one slot out twice inside a pass, so a key can never name two
+// different values. It is worth more than the dispatches it removes — two projections that READ a
+// common buffer can run at once, where two that each wrote their own could not.
+//
+// IT IS ALSO A SCHEDULING HANDLE. Called ahead of the matvec that needs it, it moves the quantise off
+// the point where the matvec would otherwise stall on it — see the shared expert's down projection,
+// whose int8 activation is taken while the routed experts are still deciding, so that its Q8_0 read
+// and the routed Q2_K decode are in flight together instead of queueing.
+func q8aQuant(_ x: MTLBuffer, _ cols: Int) -> (MTLBuffer, MTLBuffer) {
+    let key = QKey(buf: ObjectIdentifier(x), cols: cols)
+    if let hit = q8aMemo[key] { return hit }
+    let blocks = (cols + 31) / 32
+    let xq = poolTake(blocks*32), xs = poolTake(blocks*4)
+    var n32 = UInt32(cols)
+    enc(pQ8aQuant, blocks*q8aThreads, 64, reads: [x], writes: [xq, xs]) { c in
+                          c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
+                          c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
+    q8aMemo[key] = (xq, xs)
+    return (xq, xs)
 }
 // THE DENSE TYPE DISPATCH. The reap25 file carried MXFP8 (41) on every dense projection; the mainline
 // Mac quant carries Q8_0 (8) on attn_q_a/q_b/kv/output_a/output_b and on output.weight. Reading one
@@ -1034,19 +1088,7 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
             // slot out twice inside a pass, so a key can never name two different values.
             // It is worth more than the 86 dispatches it removes — the two projections now READ a
             // common buffer instead of each writing its own, which is what lets them run at once.
-            let key = QKey(buf: ObjectIdentifier(x), cols: cols)
-            let xq: MTLBuffer, xs: MTLBuffer
-            if let hit = q8aMemo[key] {
-                xq = hit.0; xs = hit.1
-            } else {
-                xq = poolTake(blocks*32)
-                xs = poolTake(blocks*4)
-                var n32 = UInt32(cols)
-                enc(pQ8aQuant, blocks*q8aThreads, 64, reads: [x], writes: [xq, xs]) { c in
-                                                  c.setBuffer(x, offset: 0, index: 0); c.setBuffer(xq, offset: 0, index: 1)
-                                                  c.setBuffer(xs, offset: 0, index: 2); c.setBytes(&n32, length: 4, index: 3) }
-                q8aMemo[key] = (xq, xs)
-            }
+            let (xq, xs) = q8aQuant(x, cols)
             wbQ80 += rows * blocks * 34
             // Two rows to a thread was written and measured here: it halves the activation loads
             // (xa/xb/xs are the same eight bytes for every row) and is BIT-IDENTICAL, stream exact.
@@ -1539,6 +1581,16 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
     let ffnNorm = gpuRmsnorm(ffnCur, nEmbd, w.fnw)
     if il == 0 { stage("ffn_norm", ffnNorm, nEmbd) }
     let logits = gpuF16mv(w.rt, ffnNorm)
+    // ── THE SHARED EXPERT DOES NOT WAIT FOR THE ROUTER, BECAUSE IT IS NEVER ROUTED ──────────────────
+    // Its gate and up read ffn_norm and nothing else; the router's selection kernels are three serial
+    // dispatches, two of them a single threadgroup picking six experts out of the layer's stack. Those
+    // three had the whole device to themselves. Emitted here the two Q8_0 projections — the heaviest
+    // pure-bandwidth work in the sublayer — run underneath the selection instead of after it.
+    var sgv: MTLBuffer? = nil, suv: MTLBuffer? = nil, smid: MTLBuffer? = nil, sharedOut: MTLBuffer? = nil
+    if fuseExperts {
+        sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
+        suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
+    }
 
     let nExpR = w.nExpRouter
     let idsBuf = sentinelledU(nUsed), wtsBuf = sentinelled(nUsed), probsBuf = sentinelled(nExpR)
@@ -1613,7 +1665,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
     // decode, arithmetic-bound and leaving the bus idle; the shared gate/up is Q8_0, bandwidth-bound
     // and leaving the ALUs idle. Overlapping two kernels that queue for the same thing gains nothing,
     // which is why the easy independences were worth so little before. These two do not.
-    var sgv: MTLBuffer? = nil, suv: MTLBuffer? = nil, smid: MTLBuffer? = nil, sharedOut: MTLBuffer? = nil
+    // Its gate and up are already in flight: they were emitted under the router, above.
     // ── ALL SIX EXPERTS IN FIVE DISPATCHES INSTEAD OF THIRTY ────────────────────────────────────────
     // The slot loop below asks the device gate/up/swiglu/down/accumulate six times over. At 72 us of
     // measured cost per dispatch, the asking is what is left. The expert ids already live in a device
@@ -1646,11 +1698,6 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
                                               c.setBytes(&r32, length: 4, index: 4); c.setBytes(&c32, length: 4, index: 5)
                                               c.setBytes(&st, length: 4, index: 6); c.setBytes(&ne, length: 4, index: 7) }
         }
-        // stage 1 pair: the shared gate/up beside the routed gate/up. ffn_norm's int8 form is taken
-        // once by the memo and read by both shared projections, so neither of them writes what the
-        // other reads and the tracker leaves all four in flight together.
-        sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
-        suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
         let mid = sentinelled(nE*nFf)
         var nff = UInt32(nFf), lim = clamp
         enc(pSwigE, nE*nFf, 256, reads: [gt, up, wtsBuf], writes: [mid]) { c in c.setBuffer(gt, offset: 0, index: 0); c.setBuffer(up, offset: 0, index: 1)
@@ -1659,6 +1706,11 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
                                         c.setBytes(&lim, length: 4, index: 6) }
         // stage 2 pair: the shared swiglu beside the routed one.
         smid = gpuSwiglu(sgv!, suv!, nFf, 1.0, clamp)
+        // and its int8 activation TAKEN HERE, not inside the matvec below. The routed down projection
+        // is Q2_K decode and the shared one is a Q8_0 read; they are the ALU/bus pair worth having in
+        // flight together, and leaving the quantise inside the shared matvec put a barrier between
+        // them — the matvec would have stalled on its own activation while the Q2_K ran alone.
+        _ = q8aQuant(smid!, w.sdw.cols)
         let parts = sentinelled(nE*nEmbd)
         var dr = UInt32(nEmbd), dc = UInt32(nFf), dst = UInt32(w.dx.bytes / w.dx.d2)
         wbExp += nE * (w.dx.bytes / w.dx.d2)
@@ -1706,8 +1758,10 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
     // the per-expert fallback path above does not interleave; it computes the shared expert here, the
     // way the fused path did before the stages were paired.
     if sharedOut == nil {
-        sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
-        suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
+        if sgv == nil {
+            sgv = gpuMx8(w.sgw, ffnNorm, w.sgw.rows, w.sgw.cols)
+            suv = gpuMx8(w.suw, ffnNorm, w.suw.rows, w.suw.cols)
+        }
         smid = gpuSwiglu(sgv!, suv!, nFf, 1.0, clamp)
         sharedOut = gpuMx8(w.sdw, smid!, w.sdw.rows, w.sdw.cols)
     }
