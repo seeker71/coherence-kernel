@@ -138,6 +138,20 @@
     (defn mla-attend-mixed-body ()
         "kernel void form_mla_attend_mixed_f32(device const float* q [[buffer(0)]], device const float* rows [[buffer(1)]], device const float* crows [[buffer(2)]], device float* out [[buffer(3)]], device const float* sinks [[buffer(4)]], constant uint& nh [[buffer(5)]], constant uint& hd [[buffer(6)]], constant uint& nrows [[buffer(7)]], constant uint& ncomp [[buffer(8)]], constant float& scale [[buffer(9)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; device const float* qh = q + h * hd; float sink = sinks[h]; float m = sink; for (uint j = 0u; j < nrows; ++j) { float s = scale * mla_dot(qh, rows + j * hd, hd); if (s > m) m = s; } for (uint j = 0u; j < ncomp; ++j) { float s = scale * mla_dot(qh, crows + j * hd, hd); if (s > m) m = s; } float acc[MLA_MAX_HD]; for (uint d = 0u; d < hd; ++d) acc[d] = 0.0f; float se = 0.0f; for (uint j = 0u; j < nrows; ++j) { float s = scale * mla_dot(qh, rows + j * hd, hd); float e = mla_exp(s - m); se = se + e; device const float* rj = rows + j * hd; for (uint d = 0u; d < hd; ++d) acc[d] = acc[d] + rj[d] * e; } for (uint j = 0u; j < ncomp; ++j) { float s = scale * mla_dot(qh, crows + j * hd, hd); float e = mla_exp(s - m); se = se + e; device const float* rj = crows + j * hd; for (uint d = 0u; d < hd; ++d) acc[d] = acc[d] + rj[d] * e; } float denom = mla_exp(sink - m) + se; float inv = 1.0f / denom; for (uint d = 0u; d < hd; ++d) out[h * hd + d] = acc[d] * inv; } ")
 
+    ; THE SAME ATTENTION IN THREE STAGES, order untouched. The single-kernel form runs one thread per
+    ; HEAD — 64 threads on a 40-core device — computes every score TWICE (once to find the max, once to
+    ; weight it), and carries a 512-float private array that cannot live in registers. ds4 has no
+    ; separate attention stage at all in its decode list; it fuses. We cannot fuse without changing the
+    ; association, but we CAN stop recomputing and stop serialising:
+    ;   scores: one thread per (head, row) — each dot computed ONCE
+    ;   stats : one thread per head — max, exp, running sum, denominator, all in the recipe order
+    ;   acc   : one thread per (head, d) — the ascending-j chain each output dim already had
+    ; Every fold keeps its direction and its operands, so the answer is bit-identical; what changes is
+    ; that 64 threads become 32 768 and the duplicate dot disappears.
+    (defn mla-attend-split-body ()
+        "kernel void form_mla_attend_scores(device const float* q [[buffer(0)]], device const float* rows [[buffer(1)]], device const float* crows [[buffer(2)]], device float* sco [[buffer(3)]], constant uint& nh [[buffer(4)]], constant uint& hd [[buffer(5)]], constant uint& nrows [[buffer(6)]], constant uint& ncomp [[buffer(7)]], constant float& scale [[buffer(8)]], uint gid [[thread_position_in_grid]]) { uint tot = nrows + ncomp; if (gid >= nh * tot) return; uint h = gid / tot; uint j = gid - h * tot; device const float* rj = (j < nrows) ? (rows + j * hd) : (crows + (j - nrows) * hd); sco[gid] = scale * mla_dot(q + h * hd, rj, hd); } kernel void form_mla_attend_stats(device const float* sco [[buffer(0)]], device const float* sinks [[buffer(1)]], device float* ex [[buffer(2)]], device float* inv [[buffer(3)]], constant uint& nh [[buffer(4)]], constant uint& ntot [[buffer(5)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; device const float* s = sco + h * ntot; device float* e = ex + h * ntot; float sink = sinks[h]; float m = sink; for (uint j = 0u; j < ntot; ++j) { if (s[j] > m) m = s[j]; } float se = 0.0f; for (uint j = 0u; j < ntot; ++j) { float v = mla_exp(s[j] - m); e[j] = v; se = se + v; } inv[h] = 1.0f / (mla_exp(sink - m) + se); } kernel void form_mla_attend_acc(device const float* rows [[buffer(0)]], device const float* crows [[buffer(1)]], device const float* ex [[buffer(2)]], device const float* inv [[buffer(3)]], device float* out [[buffer(4)]], constant uint& nh [[buffer(5)]], constant uint& hd [[buffer(6)]], constant uint& nrows [[buffer(7)]], constant uint& ncomp [[buffer(8)]], uint gid [[thread_position_in_grid]]) { if (gid >= nh * hd) return; uint h = gid / hd; uint d = gid - h * hd; uint ntot = nrows + ncomp; device const float* e = ex + h * ntot; float acc = 0.0f; for (uint j = 0u; j < nrows; ++j) acc = acc + rows[j * hd + d] * e[j]; for (uint j = 0u; j < ncomp; ++j) acc = acc + crows[j * hd + d] * e[nrows + j]; out[gid] = acc * inv[h]; } "
+)
+
     ; --- ONE translation unit: the body's one metal_stdlib, the MLA_MAX_HD cap, the spine once, then the
     ;     kernels. A carrier compiles exactly this; it composes nothing itself. ---
     (defn mla-msl-unit ()
@@ -149,6 +163,7 @@
         (str_concat (mla-matvec-body)
         (str_concat (mla-headrms-body)
         (str_concat (mla-rope-body)
-        (str_concat (mla-attend-body) (mla-attend-mixed-body)))))))))))
+        (str_concat (mla-attend-body)
+        (str_concat (mla-attend-mixed-body) (mla-attend-split-body))))))))))))
 
     0)
