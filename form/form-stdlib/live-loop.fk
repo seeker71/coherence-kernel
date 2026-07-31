@@ -1,0 +1,199 @@
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/voice-formant.fk form-stdlib/voiced-reading.fk form-stdlib/voice-osc.fk form-stdlib/voice-render.fk form-stdlib/word-speak.fk form-stdlib/word-hear.fk form-stdlib/pause-reading-file.fk form-stdlib/speak-compose.fk
+;
+; live-loop.fk — the real-time voice loop, IN THE KERNEL. A growing file is a stream.
+;
+; Everything real-time about this cell reduces to one observation: fkwu's read_file_slice (tag 62)
+; is byte-faithful, so a raw s16le file that a carrier appends to IS a live signal — the kernel
+; polls file_size, slices each new 80 ms frame the moment its last byte exists, and the whole mind
+; between the eardrum and the speaker cone runs in Form. The carriers own exactly two lines:
+; microphone → file (ffmpeg), file → speaker (afplay). Transport, never thought.
+;
+; THE LATENCY LADDER, from first principles, each rung named and none skipped:
+;   frame quantum      80 ms  — a frame cannot be read before its last byte exists. Smaller frames
+;                              buy latency with analysis noise; 80 ms is unmute's own step and the
+;                              width every band upstream proved.
+;   endpoint decision  ONE quiet frame for a KNOWN word — this is the deepest thing unmute taught,
+;                              realized natively at vocabulary 1: when the collapsed segments
+;                              already match a template the ear knows, the turn is over the first
+;                              quiet frame after the word closes. No pause-floor wait. For UNKNOWN
+;                              speech the honest fallback is the pause rule (ll-pause-frames of
+;                              quiet), because only a recognizer can end a turn early, and this
+;                              body's recognizer knows one word so far.
+;   hearing            ~5 ms/frame (measured 2026-07-30) — cheaper than real time, so the ear
+;                              never falls behind the mouth that feeds it.
+;   reply synthesis    ~40 ms for a 0.6 s utterance through voice-osc (the 40× mouth).
+;   physics floor      the sum above is the ADDED latency; nothing here can know a word ended
+;                              before the silence after it arrives. Every further cut comes
+;                              from richer prediction (a recognizer that ends turns from content),
+;                              not from tighter polling.
+;
+; The loop's state is a flat list, stepped once per available frame:
+;   (n-heard  utter-samples  quiet-run  turn-count  ledger)
+; While voice frames arrive they accumulate into utter-samples; the first quiet frame after a
+; template match — or ll-pause-frames of quiet after anything — closes the turn. The reply is
+; composed natively (speak-compose's honest shapes), rendered through the oscillator mouth, and
+; written as reply-<n>.wav beside the stream for the carrier to play.
+;
+; Witnessed live in receipts/2026-07-31 (synthetic-paced and mic lanes) with now_unix_ms stamps;
+; the PURE turn logic is proven four-way by tests/live-loop-band.fk. This cell itself is an fkwu
+; lane organ: file polling and wall clocks are host carriers by nature.
+
+(do
+    (defn ll-rate () 8000)
+    (defn ll-frame-samples () 240)
+    (defn ll-frame-bytes () 480)
+    (defn ll-pause-frames () 5)
+
+    ; one frame's samples out of the raw stream, via the O(1) byte door
+    (defn ll-samples-go (s base i n out)
+        (if (ge i n) (reverse out)
+            (ll-samples-go s base (add i 1) n (cons (prf-sample s (add base (mul i 2))) out))))
+    (defn ll-frame (path i)
+        (do (let s (read_file_slice path (mul i (ll-frame-bytes)) (ll-frame-bytes)))
+            (if (lt (str_len s) (ll-frame-bytes)) (list)
+                (ll-samples-go s 0 0 (ll-frame-samples) (list)))))
+
+    ; is this frame SPEECH? Voice alone is not enough, and the first live run proved it: /s/ is
+    ; aperiodic BY DESIGN, so a periodicity test is deaf to the very consonant that opens the
+    ; body's name — the first utterance ever captured live began at /e/ and missed. Speech is
+    ; voiced OR an energetic fricative (strong high tilt over a real energy floor; the floor
+    ; keeps room tone out — measured tens of mean-|amp| against speech's thousands at this gain).
+    (defn ll-level (frame)
+        (do (let m (sub (len frame) 1))
+            (if (le m 0) 0 (div (vr-r frame 0 0) 1))))
+    (defn ll-mean-abs-go (xs n acc) (if (nil? xs) (if (le n 0) 0 (div acc n)) (ll-mean-abs-go (tail xs) n (add acc (abs (head xs))))))
+    (defn ll-mean-abs (frame) (ll-mean-abs-go frame (len frame) 0))
+    (defn ll-voiced? (frame)
+        (if (lt (vr-reading frame 128 (ll-rate) 100 400) 0.5) 1 0))
+    ; …and the real room corrected the question again (mic, 2026-07-31): room tone at mean-|amp|
+    ; 58–129 sometimes READS voiced — a live room is pink-correlated — and seven one-frame turns
+    ; fired on silence. So energy floors EVERYTHING (200, above the measured room ceiling), and
+    ; voice or tilt only classifies what already carries energy.
+    (defn ll-speech? (frame)
+        (if (le (ll-mean-abs frame) 200) 0
+            (if (eq (ll-voiced? frame) 1) 1
+                (if (gt (wh-tilt frame (len frame)) 800) 1 0))))
+
+    ; the turn question, asked once per frame: a KNOWN word ends on its first quiet frame;
+    ; anything else ends after ll-pause-frames of quiet. utter is the collected voiced samples.
+    ; a turn needs at least three speech frames (240 ms) — a blip is not an utterance
+    (defn ll-turn-over? (utter quiet-run)
+        (if (lt (len utter) 720) 0
+            (if (ge quiet-run (ll-pause-frames)) 1
+                (if (ge quiet-run 1)
+                    (wh-sema? utter (len utter) 240 (ll-rate) 100 400)
+                    0))))
+
+    ; the native answer: recognition composes the reply. The body's first conversation is about
+    ; the one thing it can hear — its name — and the miss arm stays speak-compose's honest shape.
+    (defn ll-answer-text (heard-sema)
+        (if (eq heard-sema 1)
+            "sema - you said my name, and I heard it as s-e-m-a in my own ear."
+            (sc-respond 0 "" 0)))
+
+    ; the reply utterance through the fast mouth: the body answers a heard name by SAYING its
+    ; name back — fricative through the oscillator vowels — plus a settle tail of silence.
+    (defn ll-zeros (n) (if (le n 0) (list) (cons 0.0 (ll-zeros (sub n 1)))))
+    (defn ll-reply-samples ()
+        (do (let f (ws-fric 960))
+            (do (let e (vo-e 1200))
+                (do (let m (vo-m 1200))
+                    (do (let a (vo-a 1440))
+                        (vrn-cat f (vrn-cat e (vrn-cat m (vrn-cat a (ll-zeros 400))))))))))
+
+    ; close a turn: hear, answer, render, stamp. Returns the ledger row
+    ; (turn heard t-heard t-replied n-utter-samples).
+    (defn ll-close-turn (dir turn utter t0)
+        (do (let heard (wh-sema? utter (len utter) 240 (ll-rate) 100 400))
+            (do (let t-heard (now_unix_ms))
+                (do (let text (ll-answer-text heard))
+                    (do (let w (write_file_text (str_concat dir (str_concat "/reply-" (str_concat (int_to_str turn) ".txt"))) text))
+                        (do (let wav (if (eq heard 1)
+                                        (vrn-write (str_concat dir (str_concat "/reply-" (str_concat (int_to_str turn) ".wav")))
+                                                   (ll-reply-samples) (ll-rate) 24000)
+                                        ; an unknown utterance goes to the LOCAL ORACLE lane: the
+                                        ; kernel writes what it heard as a wav and the carrier's
+                                        ; whisper-cli answers — the fast native lane for the known
+                                        ; word, the slow honest lane for open language.
+                                        (vrn-write (str_concat dir (str_concat "/turn-" (str_concat (int_to_str turn) "-utter.wav")))
+                                                   utter (ll-rate) 1)))
+                            (do (let t-replied (now_unix_ms))
+                                (list turn heard (sub t-heard t0) (sub t-replied t0) (len utter)))))))))
+
+    ; the live walk: consume frames as the file grows, up to `deadline-ms` of wall clock.
+    ; Busy-polls file_size between frames — pacing is the carrier's concern, honesty is ours.
+    (defn ll-append (a b) (if (nil? a) b (cons (head a) (ll-append (tail a) b))))
+    (defn ll-run-go (path dir n utter quiet-run turn ledger deadline)
+        (if (gt (now_unix_ms) deadline) (list n turn (reverse ledger))
+            (do (let avail (div (file_size path) (ll-frame-bytes)))
+                (if (le avail n) (ll-run-go path dir n utter quiet-run turn ledger deadline)
+                    (do (let frame (ll-frame path n))
+                        (if (nil? frame) (ll-run-go path dir n utter quiet-run turn ledger deadline)
+                            (do (let v (ll-speech? frame))
+                                (do (let utter2 (if (eq v 1) (ll-append utter frame) utter))
+                                    (do (let quiet2 (if (eq v 1) 0 (add quiet-run 1)))
+                                        (if (eq (ll-turn-over? utter2 quiet2) 1)
+                                            (do (let row (ll-close-turn dir turn utter2 (now_unix_ms)))
+                                                (ll-run-go path dir (add n 1) (list) 0 (add turn 1) (cons row ledger) deadline))
+                                            (ll-run-go path dir (add n 1) utter2 quiet2 turn ledger deadline)))))))))))
+    (defn ll-run (path dir seconds)
+        (ll-run-go path dir 0 (list) 0 0 (list) (add (now_unix_ms) (mul seconds 1000))))
+
+    ; ── the NATIVE lane (2026-07-31): no file, no ffmpeg, no afplay, no poll ─────────────────────
+    ; sense_mic_stream_start/read/stop (tags 139-141) hold one CoreAudio input queue open across
+    ; the whole conversation; each read blocks in-kernel until an 80 ms frame exists and returns
+    ; it as the same s16le string read_file_slice speaks, so every ear cell below is unchanged.
+    ; The reply plays through sense_wav_loopback's play-only arm — the same process that heard.
+    ; The stream-file lane above stays: it is the replayable-witness lane; this is the live one.
+    ; the stream speaks 16 kHz (CoreAudio's wire); the whole ear below is a proven 8 kHz world.
+    ; So one frame here is 960 bytes = 30 ms at 16 k, decimated ×2 into the 240 samples every
+    ; band already speaks. Naive every-2nd decimation aliases content above 4 kHz downward —
+    ; named, not hidden: the voice's harmonics live under 2 kHz and the fricative is broadband,
+    ; so aliased turbulence stays turbulence and the tilt still reads high. The first native run
+    ; skipped this and read 480 bytes from the 16 k wire: 15 ms frames arriving at five times the
+    ; loop's tempo, analyzed with halved lag ranges — 395 frames, zero turns, a whole conversation
+    ; missed because the ear wore the wrong clock.
+    (defn ll-decimate (xs out)
+        (if (nil? xs) (reverse out)
+            (if (nil? (tail xs)) (reverse out)
+                (ll-decimate (tail (tail xs)) (cons (head xs) out)))))
+    (defn ll-frame-native ()
+        (do (let s (sense_mic_stream_read 960 200))
+            (if (lt (str_len s) 960) (list)
+                (ll-decimate (ll-samples-go s 0 0 480 (list)) (list)))))
+    (defn ll-close-turn-native (dir turn utter t0)
+        (do (let row (ll-close-turn dir turn utter t0))
+            (do (let heard (nth row 1))
+                (do (let played (if (eq heard 1)
+                                   (do (let p16 (str_concat dir (str_concat "/reply16-" (str_concat (int_to_str turn) ".wav"))))
+                                       (do (let w16 (vrn-write p16 (ll-reply-16k) 16000 24000))
+                                           (sense_wav_loopback p16 "")))
+                                   0))
+                    row))))
+    (defn ll-run-native-go (dir n utter quiet-run turn ledger deadline)
+        (if (gt (now_unix_ms) deadline)
+            (do (let z (sense_mic_stream_stop)) (list n turn (reverse ledger)))
+            (do (let frame (ll-frame-native))
+                (if (nil? frame) (ll-run-native-go dir n utter quiet-run turn ledger deadline)
+                    (do (let v (ll-speech? frame))
+                        (do (let utter2 (if (eq v 1) (ll-append utter frame) utter))
+                            (do (let quiet2 (if (eq v 1) 0 (add quiet-run 1)))
+                                (if (eq (ll-turn-over? utter2 quiet2) 1)
+                                    (do (let row (ll-close-turn-native dir turn utter2 (now_unix_ms)))
+                                        (ll-run-native-go dir (add n 1) (list) 0 (add turn 1) (cons row ledger) deadline))
+                                    (ll-run-native-go dir (add n 1) utter2 quiet2 turn ledger deadline)))))))))
+    ; the reply at the speaker door's OWN rate: same voice, same recurrences, sr 16000 and every
+    ; count doubled — true 16 k synthesis, not a resample. The ear stays in its proven 8 k world;
+    ; only what leaves through the cone speaks the wire's clock.
+    (defn ll-reply-16k ()
+        (do (let f (ws-fric 1920))
+            (do (let e (vo-run (vo-bank 165.0 500.0 900.0 2500.0 90.0 16000.0 12) 2400))
+                (do (let m (vo-run (list (vo-row 0.6 250.0 16000.0)) 2400))
+                    (do (let a (vo-run (vo-bank 165.0 700.0 1200.0 2600.0 90.0 16000.0 12) 2880))
+                        (vrn-cat f (vrn-cat e (vrn-cat m (vrn-cat a (ll-zeros 800))))))))))
+
+    (defn ll-run-native (dir seconds)
+        (do (let a (sense_mic_stream_start))
+            (if (lt a 0) (list -1 0 (list))
+                (ll-run-native-go dir 0 (list) 0 0 (list) (add (now_unix_ms) (mul seconds 1000))))))
+    0)

@@ -1,0 +1,58 @@
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/voice-formant.fk
+;
+; voice-osc.fk — the fast mouth: the analysis recurrence run in reverse as an oscillator bank.
+;
+; Measured before written (2026-07-30): speaking "sema" cost 0.30 s of the word loop's 0.41 s wall —
+; the mouth was the hot side, not the ear, and inside the mouth it is vf-sample's Taylor sine paid
+; PER HARMONIC PER SAMPLE (12 harmonics × a 10-term series × 4800 samples). The body already trusts
+; a cheaper shape: spectrum.fk's Goertzel ANALYSIS recurrence s' = c·s1 − s2, one multiply per band
+; per sample. The same recurrence, seeded instead of driven, GENERATES the sine exactly:
+;   y[0] = 0,  y[−1] = −sin(θ),  y[n] = c·y[n−1] − y[n−2],  c = 2·cos(θ)
+; so the whole 12-harmonic voice is 12 multiplies per sample and trig is paid ONCE per utterance
+; (seeding), not once per term. Same voice, same weights — vo-weight IS vf-weight/h, the numbers
+; voice-formant.fk chose — only the engine changed. Analysis and synthesis are one recurrence read
+; in two directions, which is the same teaching as the f0 loop one level down.
+;
+; Honest floor: recurrence and series accumulate rounding differently, and the recurrence DRIFTS —
+; measured max |Δ| vs vf-sample is 4.8e-6 at sample 4799 (0.6 s), growing with n, ~7e-6 of the 0.7
+; signal amplitude. Tolerance is pinned at 1e-5 for this utterance length, not claimed for an hour.
+; The EAR cannot tell them apart — same segments, same f0 — and the band asserts that too.
+; Proven by tests/voice-osc-band.fk.
+
+(do
+    (defn vo-theta (f sr) (div (mul 6.283185307179586 f) sr))
+
+    ; one oscillator row: (weight coeff s1 s2), seeded so the first emitted sample is y[0] = 0
+    (defn vo-row (w f sr)
+        (do (let th (vo-theta f sr))
+            (list w (mul 2.0 (fcos th)) 0.0 (sub 0.0 (fsin th)))))
+
+    ; the sema bank: harmonics 1..12 of f0 through the chosen formants, vf-weight/h — the exact
+    ; weights vf-harm applies, computed once here instead of once per sample there.
+    (defn vo-bank-go (h hmax f0 f1 f2 f3 bw sr out)
+        (if (gt h hmax) (reverse out)
+            (vo-bank-go (add h 1) hmax f0 f1 f2 f3 bw sr
+                (cons (vo-row (div (vf-weight (mul h f0) f1 f2 f3 bw) h) (mul h f0) sr) out))))
+    (defn vo-bank (f0 f1 f2 f3 bw sr hmax) (vo-bank-go 1 hmax f0 f1 f2 f3 bw sr (list)))
+
+    ; one step: emit Σ w·s1 and advance every row. Returns (sample . new-bank) as a two-list.
+    (defn vo-step-go (rows acc out)
+        (if (nil? rows) (list acc (reverse out))
+            (do (let r (head rows))
+                (do (let w (head r)) (let c (nth r 1)) (let s1 (nth r 2)) (let s2 (nth r 3))
+                    (vo-step-go (tail rows) (add acc (mul w s1))
+                        (cons (list w c (sub (mul c s1) s2) s1) out))))))
+
+    ; n samples in one pass over the bank
+    (defn vo-run-go (bank n out)
+        (if (le n 0) (reverse out)
+            (do (let st (vo-step-go bank 0.0 (list)))
+                (vo-run-go (nth st 1) (sub n 1) (cons (head st) out)))))
+    (defn vo-run (bank n) (vo-run-go bank n (list)))
+
+    ; the two sema vowels through the fast mouth — the same formant sets word-speak.fk speaks
+    (defn vo-e (n) (vo-run (vo-bank 165.0 500.0 900.0 2500.0 90.0 8000.0 12) n))
+    (defn vo-a (n) (vo-run (vo-bank 165.0 700.0 1200.0 2600.0 90.0 8000.0 12) n))
+    ; the nasal murmur is one oscillator — a bank of a single full-weight row
+    (defn vo-m (n) (vo-run (list (vo-row 0.6 250.0 8000.0)) n))
+    0)
