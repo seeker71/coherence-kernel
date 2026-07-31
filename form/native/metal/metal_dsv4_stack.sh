@@ -523,7 +523,16 @@ func flush() {
 // time, so the token stream stays bit-exact — and if it does not, the kernel was not idempotent and
 // the number is refused rather than believed. The floor's rise IS the kernel's cost.
 let dblKernel = ProcessInfo.processInfo.environment["FORM_DS4_DOUBLE"] ?? ""
+// FORM_DS4_SKIP=<substring> SIZES A SUBSYSTEM. Doubling one kernel at a time said every small kernel
+// costs under a millisecond, which cannot be the whole story when forty of the fifty-nine are not in
+// the matvecs. Not encoding a whole class at once — every hc_, every attend, every rope — prices the
+// class including whatever it costs its neighbours. It BREAKS THE STREAM by construction, so it is a
+// measuring instrument and never a configuration: the run that uses it is thrown away.
+let skipMatch = ProcessInfo.processInfo.environment["FORM_DS4_SKIP"] ?? ""
 func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, _ body: (MTLComputeCommandEncoder) -> Void) {
+    if !skipMatch.isEmpty, let nm = pipeName[ObjectIdentifier(p)] {
+        for pat in skipMatch.split(separator: ",") where nm.contains(pat) { _ = pat; return }
+    }
     if pendingCB == nil { pendingCB = queue.makeCommandBuffer()! }
     if pendingEnc == nil { pendingEnc = pendingCB!.makeComputeCommandEncoder()! }
     let e = pendingEnc!
@@ -636,6 +645,7 @@ let gatesOn = ProcessInfo.processInfo.environment["FORM_DS4_GATES"] != "0"
 let pQ8aQuant = pipe(lKv, "form_dsv4_q8a_quantize_f32")
 let pQ80Ord = pipe(lKv, "form_dsv4_q80_matvec_ordered8")
 let pQ80Ds4 = pipe(lKv, "form_dsv4_q80_matvec_ds4")
+let pBwProbe = pipe(lKv, "form_bw_probe")
 // THE TWO ARMS OF THE SAME REFERENCE, AND WHY THE CPU ONE IS STILL THE DEFAULT.
 // form_dsv4_q80_matvec_ds4 is metal/dense.metal's own kernel: 128 threads to a row, eight contiguous
 // payload bytes a thread, and NO activation quantisation — `qs[i] * yl[i]` is int8 weight times f32
@@ -661,6 +671,10 @@ var q80Compared = 0
 // runtime; this line is here so the number is on the page and not inferred.
 print("      q80 ds4-shape matvec: maxTotalThreadsPerThreadgroup = \(pQ80Ds4.maxTotalThreadsPerThreadgroup), threadExecutionWidth = \(pQ80Ds4.threadExecutionWidth)")
 let pF16Ord = pipe(lKv, "form_dsv4_f16_matvec_ordered8")
+let pF16Wide = pipe(lKv, "form_dsv4_f16_matvec_wide")
+// FORM_DS4_F16_CHAIN8=1 goes back to ds4.c:6664's eight-chain NEON association, which ceilings a
+// 24-row tensor at 192 threads.
+let f16Chain8 = ProcessInfo.processInfo.environment["FORM_DS4_F16_CHAIN8"] == "1"
 let pQ2kOrd = pipe(lQ2k, "form_dsv4_q2k_matvec_ordered")
 let pCompInit = pipe(lKv, "form_dsv4_comp_init_f32")
 let pCompState = pipe(lKv, "form_dsv4_comp_state_f32")
@@ -983,9 +997,13 @@ func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
 }
 func gpuF16mv(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
     let out = sentinelled(t.rows); var r = UInt32(t.rows), c32 = UInt32(t.cols)
-    // ds4.c:6664 dot_f16_row — two FMA accumulators over widened halves, reduced pairwise.
+    // ds4_metal.m:4346's own f16 dispatch shape: a 256-thread group to two rows, each thread striding
+    // the row. ds4.c:6664's eight-chain NEON association is the fallback, and it is a 192-thread
+    // ceiling on the 24-row hc_fn tensors that are most of this kernel's calls.
     wbF16 += t.rows * t.cols * 2
-    enc(matchOrder ? pF16Ord : pF16mv, matchOrder ? t.rows*8 : t.rows, 256) { c in
+    let wide = matchOrder && !f16Chain8
+    enc(wide ? pF16Wide : (matchOrder ? pF16Ord : pF16mv),
+        wide ? ((t.rows + 1) / 2) * 256 : (matchOrder ? t.rows*8 : t.rows), 256) { c in
         c.setBuffer(views[t.idx], offset: t.inner, index: 0); c.setBuffer(x, offset: 0, index: 1)
         c.setBuffer(out, offset: 0, index: 2)
         c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
@@ -1635,6 +1653,25 @@ if kvSequence {
     // read 124% the first time, because gpuBusyS still carried the two-position hushfold sweeps that
     // ran before this loop began. A ratio of two clocks that do not cover the same interval is not a
     // ratio of anything.
+    // ── THE BUS, ASKED RATHER THAN LOOKED UP ──────────────────────────────────────────────────────
+    // A token must pull ~9.1 GB of weight across this bus, so N/peak is the floor no arrangement of
+    // arithmetic can beat, and every "this kernel is slow" is a claim about a peak. Reading a resident
+    // span with nothing but 16-byte loads measures what this device actually gives a streaming read.
+    if ProcessInfo.processInfo.environment["FORM_DS4_BW"] == "1" {
+        let sink = sentinelled(4)
+        for (tag, nthreads) in [("262144 threads", 262144), ("1048576 threads", 1048576)] {
+            let probeWords = min(views[0].length / 4, 2_000_000_000 / 4)
+            var nw = UInt32(probeWords)
+            let t0 = gpuBusyS
+            enc(pBwProbe, nthreads, 256) { c in c.setBuffer(views[0], offset: 0, index: 0)
+                                                c.setBuffer(sink, offset: 0, index: 1)
+                                                c.setBytes(&nw, length: 4, index: 2) }
+            flush()
+            let s = gpuBusyS - t0
+            print(String(format: "      BUS PROBE (%@): %.3f GB of resident weight in %.1f ms = %.0f GB/s streaming read",
+                         tag, Double(probeWords)*4/1e9, s*1000, Double(probeWords)*4/s/1e9))
+        }
+    }
     let gpuBusyAtGenStart = gpuBusyS
     let wb0Q80 = wbQ80, wb0F16 = wbF16, wb0Exp = wbExp, wb0Oth = wbOther
     let dispAtGenStart = gpuDispatches
