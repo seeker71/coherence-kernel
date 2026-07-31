@@ -5227,7 +5227,19 @@ impl Kernel {
             }
             let mut buf = vec![0u8; length as usize];
             match file.read(&mut buf) {
-                Ok(n) => Value::Str(String::from_utf8_lossy(&buf[..n]).to_string().into()),
+                // Decode STRICTLY. from_utf8_lossy replaced every invalid byte with U+FFFD, so a
+                // binary slice came back as a plausible longer string: equireach-band.fk has carried
+                // the witness since 2026-07-21 — 767 bytes handed back for a 420-byte Q6_K fixture,
+                // byte 4 reading 239 instead of 210 — and that band is two-arm today because of it.
+                // A recipe reading binary here was silently reading a different file. Null is the
+                // same failure value this kernel's read_file already gives for non-UTF-8, so the
+                // string primitives stop loudly instead of computing on replacement characters.
+                // Rust's String cannot hold arbitrary bytes at all; losslessness would need a byte
+                // string in the Value type. Until then the honest answer is that it cannot say.
+                Ok(n) => match String::from_utf8(buf[..n].to_vec()) {
+                    Ok(s) => Value::Str(s.into()),
+                    Err(_) => Value::Null,
+                },
                 Err(_) => Value::Str(String::new().into()),
             }
         };

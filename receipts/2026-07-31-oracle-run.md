@@ -58,7 +58,7 @@ was wrong, and I caught it only because the stream is checked every run.
 
 **The reference will report its own operation list if asked.** One environment variable
 (`DS4_METAL_DECODE_STAGE_PROFILE`) gave the per-token stage inventory I had spent two days
-reconstructing by reading C — and it named the attention gap in the first reading. `secondoracle` (957)
+reconstructing by reading C — and it named the attention gap in the first reading. `secondoracle` (969)
 said I had never opened ds4's Metal shaders; this goes further: I never asked ds4 to *describe itself*,
 only to answer questions I posed. A reference is an instrument, not just a text.
 

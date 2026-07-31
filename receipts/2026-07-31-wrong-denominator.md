@@ -47,7 +47,7 @@ most expensive single call in the profile.
 Not because the gap was subtle. Because a wrong denominator does not announce itself: it produced a
 *plausible* conclusion ("latency-bound"), which was even locally true for the kernels I then looked
 at, and every measurement I took afterwards was consistent with it — because I only measured inside
-the region it pointed me to. Four nulls in a row (`nullwitness`, row 958) were the model asking to be
+the region it pointed me to. Four nulls in a row (`nullwitness`, row 970) were the model asking to be
 replaced, and I replaced the *fixes* instead.
 
 ## The most surprising teaching

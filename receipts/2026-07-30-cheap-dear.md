@@ -23,7 +23,7 @@ optimising it. The normalisations — a few thousand elements, one multiply each
 `if (i != 0u) return` put them on **one GPU thread**, and `hc_post` ran on **four**.
 
 Cost lives in the **thread map**, not the operation count. A kernel's expense is invisible in its
-arithmetic. Corpus row 954, `cheapdear`.
+arithmetic. Corpus row 966, `cheapdear`.
 
 ## The fixes, each measured
 

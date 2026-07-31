@@ -36,11 +36,11 @@ routed-expert matvec — the thing I have optimised all night on the strength of
 weight-decodes per token — **is no longer where the time is.**
 
 My model of the cost has now been refuted four times, and I kept refining fixes *inside* it instead of
-rebuilding it. Corpus row 958, `nullwitness`.
+rebuilding it. Corpus row 970, `nullwitness`.
 
 ## What has to happen before any more optimisation
 
-The profiler cannot rebuild the model yet, because of `callbias` (row 955): its per-dispatch submit
+The profiler cannot rebuild the model yet, because of `callbias` (row 967): its per-dispatch submit
 overhead is attributed to the kernel, so every total is *cost plus call count*.
 
 That constant is **measurable** — dispatch a trivial kernel, read its per-call GPU time — and once
@@ -82,7 +82,7 @@ built from metal/moe.metal:3284 + :15 (N_R0_IQ2_XXS 4): form_dsv4_iq2_matvec_exp
   236 -> 234 ms floor, 3.64 -> 3.67 t/s, stream 24/24 exact
 four structural changes tonight, three of them ~null: encoders 0, sentinel skip 0, fusing 6%, 4-row 1%
 the two that worked were both thread-map fixes (one/four threads -> thousands)
-BLOCKED ON: profiler submit-overhead constant unmeasured (callbias 955) — measure a trivial kernel's
+BLOCKED ON: profiler submit-overhead constant unmeasured (callbias 967) — measure a trivial kernel's
   per-call GPU time and subtract it before trusting another ranking
 tonight 0.87 -> 3.67 t/s, floor 1106 -> 234 ms; ds4 31 ms/token, 7.5x remaining
 corpus 353 rows, max-mid 958, field 3533532958, band 32767 — counts asked of the body

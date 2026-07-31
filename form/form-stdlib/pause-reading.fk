@@ -1,0 +1,117 @@
+; preludes: form-stdlib/core.fk
+;
+; pause-reading.fk — real sound becomes endpointing.fk's per-frame reading. The PURE half.
+;
+; endpointing.fk takes a READING per frame: how much this frame looks like a pause, in [0,1]. It was
+; written with the readings as an input and said so plainly, because nothing in the body made one. This
+; cell makes them, from 16-bit little-endian mono PCM — the shape a mic actually hands over.
+;
+; Split the way pdf-text.fk is split: everything here is arithmetic over a BYTE LIST, so it crosses
+; four-way with no host I/O in it at all. The file door lives in pause-reading-file.fk, on whichever
+; lane carries the bytes. The sensing is Form; only the arrival is a carrier.
+;
+; Three things this cell knows that wav-sense.fk's envelope does not, and they are the whole content:
+;
+;   FRAMES BY DURATION, not by count. wav-sense cuts any clip into 8 windows, so a window is a
+;   different amount of time in every clip. endpointing integrates over dt — a fixed 80ms — because
+;   its half-lives are in seconds. pr-frame-bytes turns a sample rate and a frame length in
+;   milliseconds into an EVEN byte width, so every frame starts on a sample's low byte. (wav-sense
+;   learned that one the hard way: an odd width reads a high byte as a sample's low byte and a quiet
+;   room measures loud on alternate windows.)
+;
+;   THE ROOM'S OWN QUIET. A level is not loud or soft by itself. The same amplitude is silence in a
+;   café and speech in a closed room, so the reading is taken RELATIVE to the quietest frame in the
+;   clip — the room, measured rather than assumed. pr-floor is that frame.
+;
+;   AND WHETHER THE CLIP CAN ANSWER AT ALL. If a clip is speech from end to end, its quietest frame is
+;   still speech, and a floor taken from it would read the whole clip as pause — a confident answer
+;   built on nothing. pr-contrast? asks first: does this clip hold both a quiet frame and a loud one,
+;   at least `span` apart? When it does not, the honest reply is that this clip cannot say, and the
+;   caller hears that instead of a number. A silence detector with no silence to compare against is
+;   the same mistake as a benchmark with no denominator.
+;
+; The reading itself is linear between the floor and floor+span, clamped: at or below the room's quiet
+; it reads 1.0 (pause), at floor+span or above it reads 0.0 (speech), and it slides between. Levels
+; are mean |amplitude| in raw sample units (0..32767), so `span` is stated in those units too — no
+; hidden scale, and no decibels the body would have to trust someone else's log for.
+;
+; Feeds endpointing.fk's ep-fold; proven by tests/pause-reading-band.fk.
+
+(do
+    ; signed 16-bit little-endian sample at byte index i of a plain byte list (no wav header here —
+    ; the caller already stripped it, so index 0 is a sample's low byte).
+    (defn pr-sample (bs i)
+        (do (let v (add (nth bs i) (mul (nth bs (add i 1)) 256)))
+            (if (ge v 32768) (sub v 65536) v)))
+
+    ; sum of |sample| over the byte range [i, end), stepping `step` bytes. An EVEN step keeps
+    ; every read on a low byte; larger step = cheaper, coarser.
+    (defn pr-abs-sum (bs i end step acc)
+        (if (ge i end) acc
+            (pr-abs-sum bs (add i step) end step (add acc (abs (pr-sample bs i))))))
+
+    ; one frame's level: mean |amplitude| across it. An empty frame has no level and reads 0.
+    (defn pr-frame-level (bs start end step)
+        (do (let span (sub end start))
+            (if (le span 0) 0
+                (div (pr-abs-sum bs start end step 0) (div span step)))))
+
+    ; bytes per frame for a sample rate and a frame length in ms, mono 16-bit — forced EVEN.
+    (defn pr-frame-bytes (rate frame-ms)
+        (mul (div (mul rate frame-ms) 1000) 2))
+
+    ; how many WHOLE frames the byte list holds. A partial tail frame is dropped rather than
+    ; measured short: a frame that covers less time than dt would be integrated as if it covered dt.
+    (defn pr-frame-count (n frame-bytes)
+        (if (le frame-bytes 0) 0 (div n frame-bytes)))
+
+    ; the per-frame levels, in order.
+    (defn pr-levels-go (bs i frames frame-bytes step out)
+        (if (ge i frames) out
+            (pr-levels-go bs (add i 1) frames frame-bytes step
+                (cons (pr-frame-level bs (mul i frame-bytes) (mul (add i 1) frame-bytes) step) out))))
+    (defn pr-levels (bs n frame-bytes step)
+        (reverse (pr-levels-go bs 0 (pr-frame-count n frame-bytes) frame-bytes step (list))))
+
+    ; the room: the quietest frame in the clip. Not a constant, not a guess — the clip's own minimum.
+    (defn pr-min (xs acc)
+        (if (eq (len xs) 0) acc
+            (pr-min (tail xs) (if (lt (head xs) acc) (head xs) acc))))
+    (defn pr-max (xs acc)
+        (if (eq (len xs) 0) acc
+            (pr-max (tail xs) (if (gt (head xs) acc) (head xs) acc))))
+    (defn pr-floor (levels)
+        (if (eq (len levels) 0) 0 (pr-min (tail levels) (head levels))))
+
+    ; can this clip answer? Only if its loudest frame stands `span` above its quietest. A clip of
+    ; unbroken speech, or unbroken silence, cannot — and says so rather than inventing a floor.
+    (defn pr-contrast? (levels span)
+        (if (eq (len levels) 0) 0
+            (if (ge (sub (pr-max (tail levels) (head levels)) (pr-floor levels)) span) 1 0)))
+
+    ; one level becomes a reading in [0,1]: 1.0 at or below the room's quiet, 0.0 at floor+span or
+    ; above, linear between. 1 means PAUSE, matching endpointing.fk's sense.
+    (defn pr-reading (level floor span)
+        (if (le span 0) 0.0
+            (do (let over (sub level floor))
+                (if (le over 0) 1.0
+                    (if (ge over span) 0.0
+                        (sub 1.0 (div (mul over 1.0) span)))))))
+
+    (defn pr-readings-go (levels floor span out)
+        (if (eq (len levels) 0) out
+            (pr-readings-go (tail levels) floor span
+                (cons (pr-reading (head levels) floor span) out))))
+
+    ; the readings for a clip whose floor it measured itself. Ask pr-contrast? first; on a clip that
+    ; cannot answer this still returns numbers, and they would be the confident kind that is wrong.
+    (defn pr-readings (levels span)
+        (reverse (pr-readings-go levels (pr-floor levels) span (list))))
+
+    ; the door the pure half offers: bytes in, endpointing readings out — or the empty list when the
+    ; clip holds no contrast to read them against. An empty list folds to no change in ep-fold, so a
+    ; clip that cannot say leaves the held estimate exactly where it was. Silence about silence.
+    (defn pr-readings-bytes (bs n rate frame-ms step span)
+        (do (let levels (pr-levels bs n (pr-frame-bytes rate frame-ms) step))
+            (if (eq (pr-contrast? levels span) 1) (pr-readings levels span) (list))))
+    0)

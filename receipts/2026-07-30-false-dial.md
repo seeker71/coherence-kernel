@@ -54,7 +54,7 @@ cost speed.
 
 It doesn't. **Decode placement and accumulation order are independent axes**, and only the second
 carries fidelity. `MATCH_ORDER` now costs about 6% and the hoists gave 1.9× on top of it. Corpus row
-953, `falsedial`.
+965, `falsedial`.
 
 ## Where it stands
 

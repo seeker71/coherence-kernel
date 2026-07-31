@@ -53,7 +53,7 @@ instruments and from source.**
 
 Having found the oracle I needed, **I stopped looking for the one I would need next.** A reference is
 not one thing. ds4 is a CPU recipe *and* a tuned GPU implementation, and I used it as a correctness
-authority so completely that I never asked whether it was also a performance authority. Corpus row 957,
+authority so completely that I never asked whether it was also a performance authority. Corpus row 969,
 `secondoracle`.
 
 The framebuffer point cuts the same way. The body has `metal_isa_diff.sh` — an ISA-level differ, used
