@@ -598,6 +598,10 @@ func pipe(_ l: MTLLibrary, _ n: String) -> MTLComputePipelineState {
 // dispatches run in order with implicit barriers between them, which is exactly the dependency chain a
 // layer is. So a whole layer's dispatches belong in one encoder, and building 97 043 of them per run
 // was paying an encoder's setup cost for every kernel to buy a guarantee we already had.
+let concurrentMode = ProcessInfo.processInfo.environment["FORM_DS4_CONCURRENT"] ?? "0"
+let concurrentEnc = concurrentMode != "0"
+// mode 2 encodes NO barriers at all: a race, a garbage answer, and the ceiling probe.
+let concurrentRaw = concurrentMode == "2"
 var pendingCB: MTLCommandBuffer? = nil
 var pendingEnc: MTLComputeCommandEncoder? = nil
 var gpuBatches = 0, gpuDispatches = 0
@@ -634,13 +638,32 @@ let dblKernel = ProcessInfo.processInfo.environment["FORM_DS4_DOUBLE"] ?? ""
 // class including whatever it costs its neighbours. It BREAKS THE STREAM by construction, so it is a
 // measuring instrument and never a configuration: the run that uses it is thrown away.
 let skipMatch = ProcessInfo.processInfo.environment["FORM_DS4_SKIP"] ?? ""
-func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, _ body: (MTLComputeCommandEncoder) -> Void) {
+// `indep: true` says THIS DISPATCH DOES NOT READ WHAT THE ONE BEFORE IT WROTE. It is the only thing
+// the concurrent encoder needs from a caller, and it is a claim about the model, not about Metal: the
+// gate and up projections of the same experts read the same normed activation and write different
+// buffers; the shared expert's path does not touch the routed experts'. Everywhere else the barrier
+// stands, and barrier-before-every-dispatch on a concurrent encoder IS the serial encoder — same
+// order, same values, same stream — so the default is the old behaviour and each removal is a
+// separate, named claim that has to be measured.
+func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, indep: Bool = false, _ body: (MTLComputeCommandEncoder) -> Void) {
     if !skipMatch.isEmpty, let nm = pipeName[ObjectIdentifier(p)] {
         for pat in skipMatch.split(separator: ",") where nm.contains(pat) { _ = pat; return }
     }
     if pendingCB == nil { pendingCB = queue.makeCommandBuffer()! }
-    if pendingEnc == nil { pendingEnc = pendingCB!.makeComputeCommandEncoder()! }
+    if pendingEnc == nil {
+        // FORM_DS4_CONCURRENT=1 IS A MEASURING INSTRUMENT AND NEVER A SETTING. A serial encoder puts a
+        // full barrier between every dispatch: the device drains one kernel completely before starting
+        // the next. That is exactly the dependency chain a layer is, so it is CORRECT — and it also
+        // means the token's 16 ms of pure-bandwidth Q8_0 work and its 12 ms of arithmetic-bound expert
+        // decode can never be in flight together, though the routed and shared expert paths do not
+        // depend on each other. A concurrent encoder with NO barriers added is a RACE and its answer is
+        // garbage; what it reports is the ceiling on what overlap could ever be worth here, so the
+        // question can be settled before anyone pays for placing barriers by hand.
+        pendingEnc = concurrentEnc ? pendingCB!.makeComputeCommandEncoder(dispatchType: .concurrent)!
+                                   : pendingCB!.makeComputeCommandEncoder()!
+    }
     let e = pendingEnc!
+    if concurrentEnc && !concurrentRaw && !indep { e.memoryBarrier(scope: .buffers) }
     e.setComputePipelineState(p); body(e)
     e.dispatchThreads(MTLSize(width: n, height: 1, depth: 1),
                       threadsPerThreadgroup: MTLSize(width: min(p.maxTotalThreadsPerThreadgroup, cap), height: 1, depth: 1))
@@ -760,6 +783,10 @@ let pScale = pipe(lFfn, "form_dsv4_scale_f32")
 let pAxpy = pipe(lFfn, "form_dsv4_axpy_f32")
 let pHashSel = pipe(lFfn, "form_dsv4_hash_select")
 let pHashW = pipe(lFfn, "form_dsv4_hash_weights")
+let pHashP = pipe(lFfn, "form_dsv4_hash_probs")
+let pHashWt = pipe(lFfn, "form_dsv4_hash_wts")
+// FORM_DS4_HASH_SPLIT=0 goes back to the single one-thread hash router.
+let hashSplit = ProcessInfo.processInfo.environment["FORM_DS4_HASH_SPLIT"] != "0"
 let pTopkW = pipe(lFfn, "form_dsv4_topk_weights")
 let pTopkP = pipe(lFfn, "form_dsv4_topk_probs")
 // FORM_DS4_TOPK_TG=0 goes back to the one-thread selection that reads its 256 scores from device
@@ -1410,10 +1437,21 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
                                        c.setBuffer(idsBuf, offset: 0, index: 1)
                                        c.setBytes(&t32, length: 4, index: 2); c.setBytes(&nu, length: 4, index: 3) }
         var ne = UInt32(nExpR), nu2 = UInt32(nUsed), ws = wscale
+        if hashSplit {
+            // the 256 softplus-and-sqrt across 256 threads, then the six weights on one — the same
+            // shape layers 3 and up have had since the top-k router was split.
+            enc(pHashP, nExpR, 256) { c in c.setBuffer(logits, offset: 0, index: 0)
+                                           c.setBuffer(probsBuf, offset: 0, index: 1)
+                                           c.setBytes(&ne, length: 4, index: 2) }
+            enc(pHashWt, 1, 1) { c in c.setBuffer(probsBuf, offset: 0, index: 0); c.setBuffer(idsBuf, offset: 0, index: 1)
+                                      c.setBuffer(wtsBuf, offset: 0, index: 2)
+                                      c.setBytes(&nu2, length: 4, index: 3); c.setBytes(&ws, length: 4, index: 4) }
+        } else {
         enc(pHashW, 1, 1) { c in c.setBuffer(logits, offset: 0, index: 0); c.setBuffer(idsBuf, offset: 0, index: 1)
                                  c.setBuffer(wtsBuf, offset: 0, index: 2); c.setBuffer(probsBuf, offset: 0, index: 3)
                                  c.setBytes(&ne, length: 4, index: 4); c.setBytes(&nu2, length: 4, index: 5)
                                  c.setBytes(&ws, length: 4, index: 6) }
+        }
     } else {
         // ds4.c:10665 — the bias enters the SELECTION and never the WEIGHT.
         let bi = w.bias!
