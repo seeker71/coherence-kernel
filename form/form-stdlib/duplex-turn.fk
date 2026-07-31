@@ -1,0 +1,57 @@
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/endpointing.fk form-stdlib/voiced-reading.fk form-stdlib/word-hear.fk
+;
+; duplex-turn.fk — speaking and listening in the SAME walk: the turn engine unmute taught.
+;
+; Half-duplex is a walkie-talkie: the speaker cannot be interrupted because nobody is listening
+; while the mouth runs. What unmute showed (and this body took as endpointing.fk) is that duplex
+; is not two audio channels — it is ONE decision loop holding two thresholds over one estimate:
+; above 0.6 the room has yielded, below 0.4 while the agent speaks a voice has come in over it.
+; This cell is that loop as a Form walk: each tick carries one incoming frame's READING (from
+; voiced-reading — 1.0 no voice, 0.0 voice) while an outgoing utterance has `remaining` frames
+; still unspoken. The state is (held remaining spoke-count barge-tick), stepped per tick:
+;
+;   speaking  (remaining > 0): speak one frame; fold the incoming reading into the held estimate;
+;             if ep-barge-in? fires — the incoming voice pushed the estimate under the barge floor —
+;             CUT: remaining drops to 0 mid-utterance and the tick is recorded. The voice yields
+;             the room the moment the room speaks. Guard: the first `guard` ticks are immune, which
+;             is unmute's own echo seam (UNINTERRUPTIBLE_BY_VAD_TIME_SEC) — at utterance start the
+;             agent's own sound leaks into the ear and would interrupt the agent with itself.
+;   listening (remaining = 0): fold only; the turn is over when ep-turn-over? holds.
+;
+; What makes it duplex and not politeness: the CONTENT of what interrupted is kept — the engine
+; hands the captured incoming samples to word-hear, so a barge-in is not merely a stop signal, it
+; is an utterance the body then recognizes. Stop-and-listen is the floor; stop-and-UNDERSTAND is
+; the point.
+;
+; Deterministic, pure, four-way; the scenario band drives it with word-speak's own signals.
+; Proven by tests/duplex-turn-band.fk.
+
+(do
+    ; one tick. state = (held remaining spoke barge-tick), reading in [0,1], tick index for guard.
+    (defn dt-tick (state reading dt attack release tick guard)
+        (do (let held (nth state 0))
+            (do (let remaining (nth state 1))
+                (do (let spoke (nth state 2))
+                    (do (let barge (nth state 3))
+                        (do (let held2 (ep-step held reading dt attack release))
+                            (if (gt remaining 0)
+                                (if (eq (ep-barge-in? held2 1) 1)
+                                    (if (ge tick guard)
+                                        (list held2 0 spoke tick)
+                                        (list held2 (sub remaining 1) (add spoke 1) barge))
+                                    (list held2 (sub remaining 1) (add spoke 1) barge))
+                                (list held2 0 spoke barge))))))))
+
+    ; run the engine over the incoming readings. Returns (held remaining spoke barge-tick).
+    (defn dt-run (utter-frames readings dt attack release guard)
+        (dt-run-loop (list 1.0 utter-frames 0 -1) readings dt attack release 0 guard))
+    (defn dt-run-loop (state readings dt attack release tick guard)
+        (if (nil? readings) state
+            (dt-run-loop (dt-tick state (head readings) dt attack release tick guard)
+                         (tail readings) dt attack release (add tick 1) guard)))
+
+    (defn dt-spoke (state) (nth state 2))
+    (defn dt-barge-tick (state) (nth state 3))
+    (defn dt-interrupted? (state) (if (ge (nth state 3) 0) 1 0))
+    (defn dt-turn-over? (state) (ep-turn-over? (nth state 0)))
+    0)
