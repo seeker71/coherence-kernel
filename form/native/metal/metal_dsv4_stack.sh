@@ -925,7 +925,12 @@ let pQ2k = pipe(lQ2k, "form_dsv4_q2k_matvec")
 let pQ2kDeq = pipe(lQ2k, "form_q2k_dequant_f32")
 let pPlainMv = pipe(lMla, "form_mla_matvec_f32")
 let pQ80 = pipe(lQ80, "form_dsv4_q80_matvec")
-let pQ80g = pipe(lQ8g, "form_dsv4_q80_matvec_grouped")
+// FORM_DS4_Q80G_WIDE=0 goes back to the block read one byte at a time. The twin forms the same terms
+// through the same q6k_s8 in the same ascending i; sixty-four scalar loads become sixteen vector ones.
+let q80gWide = ProcessInfo.processInfo.environment["FORM_DS4_Q80G_WIDE"] != "0"
+let pQ80g0 = pipe(lQ8g, "form_dsv4_q80_matvec_grouped")
+let pQ80gW = pipe(lQ8g, "form_dsv4_q80_matvec_grouped_wide")
+let pQ80g = q80gWide ? pQ80gW : pQ80g0
 let pSwiglu = pipe(lFfn, "form_dsv4_swiglu_f32")
 let pScale = pipe(lFfn, "form_dsv4_scale_f32")
 let pAxpy = pipe(lFfn, "form_dsv4_axpy_f32")
