@@ -947,7 +947,12 @@ let pTopkP = pipe(lFfn, "form_dsv4_topk_probs")
 // FORM_DS4_TOPK_TG=0 goes back to the one-thread selection that reads its 256 scores from device
 // memory. The threadgroup form stages them on the core first and runs the identical scan.
 let topkTg = ProcessInfo.processInfo.environment["FORM_DS4_TOPK_TG"] != "0"
-let pTopkS = topkTg ? pipe(lFfn, "form_dsv4_topk_select_tg") : pipe(lFfn, "form_dsv4_topk_select")
+// FORM_DS4_TOPK_TG6=0 goes back to the runtime-width scan, whose six slots the compiler cannot hold
+// in registers. The specialization is the same scan with nused's six made literal; it refuses any
+// other nused rather than guessing, and the general kernel is still here to serve it.
+let topkTg6 = ProcessInfo.processInfo.environment["FORM_DS4_TOPK_TG6"] != "0" && nUsed == 6
+let pTopkS = topkTg ? pipe(lFfn, topkTg6 ? "form_dsv4_topk_select_tg6" : "form_dsv4_topk_select_tg")
+                    : pipe(lFfn, "form_dsv4_topk_select")
 let pKvAppend = pipe(lKv, "form_dkv_append_f32")
 let pControlAdapter = pipe(lKv, "form_dsv4_control_logit_adapter")
 // FORM_DS4_MATCH_ORDER=1 swaps the fast folds for ones that reproduce ds4's ASSOCIATION (see
