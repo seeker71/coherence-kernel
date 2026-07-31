@@ -457,10 +457,27 @@ check(pruneOK,
 // Swift `for i in 0..<n { p[i] = .nan }` is a scalar store loop, and it runs about 2287 times a token
 // over tens of megabytes. memset_pattern4 lays down the identical bits — Float.nan is 0x7FC00000 —
 // with the platform's own vector store. Same sentinel, same evidence, one word of setup.
+// THE HOST'S SHARE, TIMED SEPARATELY. A generated token costs 48 ms of GPU and 60 ms of wall, and the
+// twelve between them are the host: it allocates a buffer and encodes a dispatch about 2287 times a
+// token, and the device is idle while it does. Splitting allocation from sentinelling says which of
+// the two to fix before anyone builds a pool.
+// FORM_DS4_HOSTSHARE=1 times it. Off by default: two Date() calls per allocation is itself a tax on
+// the thing being measured, and this number is a finding to act on once, not a meter to leave running.
+let hostShareOn = ProcessInfo.processInfo.environment["FORM_DS4_HOSTSHARE"] == "1"
+var cpuAllocS: Double = 0, cpuFillS: Double = 0, cpuAllocN = 0
 func sentinelled(_ n: Int) -> MTLBuffer {
+    if !hostShareOn {
+        let b = dev.makeBuffer(length: max(n,1)*4, options: .storageModeShared)!
+        var pat = Float.nan.bitPattern
+        memset_pattern4(b.contents(), &pat, max(n,1)*4)
+        return b
+    }
+    let t0 = Date()
     let b = dev.makeBuffer(length: max(n,1)*4, options: .storageModeShared)!
+    let t1 = Date()
     var pat = Float.nan.bitPattern
     memset_pattern4(b.contents(), &pat, max(n,1)*4)
+    cpuAllocS += t1.timeIntervalSince(t0); cpuFillS += Date().timeIntervalSince(t1); cpuAllocN += 1
     return b
 }
 func sentinelledU(_ n: Int) -> MTLBuffer {
@@ -1749,6 +1766,11 @@ if kvSequence {
     // THE BANDWIDTH FLOOR, from the file's own tensor sizes. Every weight byte a token touches must
     // cross the bus once; N/peak is a floor no arrangement of arithmetic can beat. Printing the
     // achieved fraction says whether a kernel has room left or is already at the wall.
+    if hostShareOn {
+    print(String(format: "      HOST SHARE: %d sentinelled buffers over the whole run — makeBuffer %.2fs, NaN fill %.2fs; over generation that is %.1f ms and %.1f ms a token",
+                 cpuAllocN, cpuAllocS, cpuFillS,
+                 1000.0 * cpuAllocS * Double(nGen) / Double(max(kvSteps,1)) / Double(max(nGen,1)),
+                 1000.0 * cpuFillS * Double(nGen) / Double(max(kvSteps,1)) / Double(max(nGen,1)))) }
     let g = Double(max(nGen, 1))
     let dQ80 = Double(wbQ80 - wb0Q80)/g, dF16 = Double(wbF16 - wb0F16)/g
     let dExp = Double(wbExp - wb0Exp)/g, dOth = Double(wbOther - wb0Oth)/g
