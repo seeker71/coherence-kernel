@@ -721,10 +721,22 @@ let pIq2ES = pipe(lIq2, "form_dsv4_iq2_matvec_experts_span")
 let pIq2EA = pipe(lIq2, "form_dsv4_iq2_matvec_experts_alu")
 let pIq2EM = pipe(lIq2, "form_dsv4_iq2_matvec_experts_mem")
 let pIq2EF = pipe(lIq2, "form_dsv4_iq2_matvec_experts_fast")
-let pIq2E4F = pipe(lIq2, "form_dsv4_iq2_matvec_experts4_fast")
+let pIq2E4F0 = pipe(lIq2, "form_dsv4_iq2_matvec_experts4_fast")
+let pIq2E4T = pipe(lIq2, "form_dsv4_iq2_matvec_experts4_tg")
+// FORM_DS4_IQ2_TG=1 copies the 2 KB IQ2 grid and its 128 sign words into threadgroup memory once per
+// group, because a simdgroup asks that table for 32 unrelated addresses every instruction and
+// `constant` is the space a GPU serves fastest when a simdgroup wants ONE address. MEASURED NULL,
+// and a shade worse: 24.34 t/s against 24.45. Kept, off, as the fourth thing the IQ2 kernel has been
+// asked about its memory and the fourth that was not there.
+
+let iq2Tg = ProcessInfo.processInfo.environment["FORM_DS4_IQ2_TG"] == "1"
+let pIq2E4F = iq2Tg ? pIq2E4T : pIq2E4F0
 let pQ2kE = pipe(lQ2k, "form_dsv4_q2k_matvec_experts")
 let pQ2kEW = pipe(lQ2k, "form_dsv4_q2k_matvec_experts_wide")
 let pQ2kEF = pipe(lQ2k, "form_dsv4_q2k_matvec_experts_fast")
+let pQ2kE4 = pipe(lQ2k, "form_dsv4_q2k_matvec_experts4")
+// FORM_DS4_Q2K_ROWS4=0 goes back to one output row per simdgroup on the down projection.
+let q2kRows4 = ProcessInfo.processInfo.environment["FORM_DS4_Q2K_ROWS4"] != "0"
 // FORM_DS4_Q2K_FAST=1 reads d and dmin as one word, the group's quants as four and its activations
 // as four — thirty-six scalar loads become nine, bit-identically. MEASURED NULL: 41 ms either way,
 // stream bit-exact either way. It is off by default because a null is a null, and it stays in the
@@ -750,7 +762,10 @@ let pHashSel = pipe(lFfn, "form_dsv4_hash_select")
 let pHashW = pipe(lFfn, "form_dsv4_hash_weights")
 let pTopkW = pipe(lFfn, "form_dsv4_topk_weights")
 let pTopkP = pipe(lFfn, "form_dsv4_topk_probs")
-let pTopkS = pipe(lFfn, "form_dsv4_topk_select")
+// FORM_DS4_TOPK_TG=0 goes back to the one-thread selection that reads its 256 scores from device
+// memory. The threadgroup form stages them on the core first and runs the identical scan.
+let topkTg = ProcessInfo.processInfo.environment["FORM_DS4_TOPK_TG"] != "0"
+let pTopkS = topkTg ? pipe(lFfn, "form_dsv4_topk_select_tg") : pipe(lFfn, "form_dsv4_topk_select")
 let pKvAppend = pipe(lKv, "form_dkv_append_f32")
 let pControlAdapter = pipe(lKv, "form_dsv4_control_logit_adapter")
 // FORM_DS4_MATCH_ORDER=1 swaps the fast folds for ones that reproduce ds4's ASSOCIATION (see
@@ -1409,7 +1424,10 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
                                        c.setBuffer(views[bi.idx], offset: bi.inner, index: 1)
                                        c.setBuffer(probsBuf, offset: 0, index: 2); c.setBuffer(scBuf, offset: 0, index: 3)
                                        c.setBytes(&ne, length: 4, index: 4) }
-        enc(pTopkS, 1, 1) { c in c.setBuffer(probsBuf, offset: 0, index: 0); c.setBuffer(scBuf, offset: 0, index: 1)
+        // ONE THREADGROUP, not one thread: the scan is still serial and still thread 0's, but the 256
+        // scores it walks are staged into threadgroup memory by 256 lanes first. The dispatch must be
+        // exactly one group — nExpR threads with the cap at nExpR — or `tsz` would not cover ne.
+        enc(pTopkS, topkTg ? nExpR : 1, topkTg ? nExpR : 1) { c in c.setBuffer(probsBuf, offset: 0, index: 0); c.setBuffer(scBuf, offset: 0, index: 1)
                                  c.setBuffer(idsBuf, offset: 0, index: 2); c.setBuffer(wtsBuf, offset: 0, index: 3)
                                  c.setBytes(&ne, length: 4, index: 4); c.setBytes(&nu, length: 4, index: 5)
                                  c.setBytes(&ws, length: 4, index: 6) }
@@ -1476,7 +1494,12 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         let parts = sentinelled(nE*nEmbd)
         var dr = UInt32(nEmbd), dc = UInt32(nFf), dst = UInt32(w.dx.bytes / w.dx.d2)
         wbExp += nE * (w.dx.bytes / w.dx.d2)
-        enc(q2kOneThread ? pQ2kE : (q2kFast ? pQ2kEF : pQ2kEW), q2kOneThread ? nE*nEmbd : nE*nEmbd*32, tgFree) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
+        // As with the IQ2 gate/up: the thread count comes from the SAME expression that picks the
+        // pipeline. The four-row kernel needs a quarter of the simdgroups; every other one needs all.
+        let dRows4 = q2kRows4 && !q2kOneThread && !q2kFast && nEmbd % 4 == 0
+        let pQ2kUse = q2kOneThread ? pQ2kE : (dRows4 ? pQ2kE4 : (q2kFast ? pQ2kEF : pQ2kEW))
+        let dThreads = q2kOneThread ? nE*nEmbd : (dRows4 ? nE*(nEmbd/4)*32 : nE*nEmbd*32)
+        enc(pQ2kUse, dThreads, tgFree) { c in c.setBuffer(views[w.dx.idx], offset: w.dx.inner, index: 0)
                                          c.setBuffer(mid, offset: 0, index: 1); c.setBuffer(parts, offset: 0, index: 2)
                                          c.setBuffer(idsBuf, offset: 0, index: 3)
                                          c.setBytes(&dr, length: 4, index: 4); c.setBytes(&dc, length: 4, index: 5)

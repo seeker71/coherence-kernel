@@ -90,6 +90,24 @@
     ; router stage costs ~1.8 ms a token against our 48 ms — a 27x gap on identical work. Splitting
     ; keeps the selection order and its strict-> first-index-wins tie rule exactly, so the choice is
     ; bit-identical; only the arithmetic pass parallelises.
+    ; AND THE SELECTION WAS STILL THE EXPENSIVE HALF, which the split did not say and ablation did:
+    ; skipping form_dsv4_topk_select and form_dsv4_hash_weights takes the token's GPU floor from 40 ms
+    ; to 37, over FORTY-THREE dispatches. That is 70 us apiece to compare 256 floats — about two
+    ; thousand instructions of arithmetic. It is not the compare loop. It is `sc[i]` read from device
+    ; memory 256 times, one at a time, by one thread, each read waited on before the next begins,
+    ; because the `continue` makes the loop's next step depend on the value just fetched. Nothing else
+    ; in the stack can cover that latency: it is one thread, so there is no other warp to run.
+    ;
+    ; The fix is not to parallelise the selection — the strict-> first-index-wins rule is what makes
+    ; the choice reproducible and a tree would have to re-derive it. It is to stop paying device
+    ; latency for the reads. 256 threads fetch sc[] and probs[] into threadgroup memory, which is on
+    ; the core; they meet at a barrier; then thread 0 runs THE SAME SCAN, in the same order, over the
+    ; same values, out of a memory that answers in a few cycles instead of a few hundred nanoseconds.
+    ; The comparisons, the tie rule, the shift-down, the sum and the normalisation are character for
+    ; character the ones above, so the six experts chosen and their weights are bit-identical.
+    (defn dsv4-topk-select-tg-body ()
+        "kernel void form_dsv4_topk_select_tg (device const float* probs [[buffer(0)]], device const float* sc [[buffer(1)]], device uint* ids [[buffer(2)]], device float* wts [[buffer(3)]], constant uint& ne [[buffer(4)]], constant uint& nused [[buffer(5)]], constant float& wscale [[buffer(6)]], uint tid [[thread_position_in_threadgroup]], uint tsz [[threads_per_threadgroup]]) { threadgroup float ts[256]; threadgroup float tp[256]; if (ne <= 256u) { for (uint i = tid; i < ne; i += tsz) { ts[i] = sc[i]; tp[i] = probs[i]; } } threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tid != 0u) return; if (ne > 256u) return; if (nused > 8u) return; if (nused > ne) return; int idx[8]; float val[8]; for (uint j = 0u; j < nused; ++j) { idx[j] = -1; val[j] = 0.0f; } uint last = nused - 1u; for (uint i = 0u; i < ne; ++i) { float si = ts[i]; if (idx[last] >= 0 && !(si > val[last])) continue; for (uint j = 0u; j < nused; ++j) { if (idx[j] < 0 || si > val[j]) { for (uint mm = nused - 1u; mm > j; --mm) { idx[mm] = idx[mm - 1u]; val[mm] = val[mm - 1u]; } idx[j] = int(i); val[j] = si; break; } } } float s0 = 0.0f; for (uint j = 0u; j < nused; ++j) { s0 = s0 + tp[idx[j]]; } float s = (s0 < 0.00006103515625f) ? 0.00006103515625f : s0; for (uint j = 0u; j < nused; ++j) { ids[j] = uint(idx[j]); wts[j] = tp[idx[j]] / s * wscale; } } ")
+
     (defn dsv4-topk-split-body ()
         "kernel void form_dsv4_topk_probs (device const float* logits [[buffer(0)]], device const float* bias [[buffer(1)]], device float* probs [[buffer(2)]], device float* sc [[buffer(3)]], constant uint& ne [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= ne) return; float z = logits[i]; float sp = (z > 20.0f) ? z : ((z < -20.0f) ? dm_exp(z) : dm_ln(1.0f + dm_exp(z))); float p = dm_sqrt(sp); probs[i] = p; sc[i] = p + bias[i]; } kernel void form_dsv4_topk_select (device const float* probs [[buffer(0)]], device const float* sc [[buffer(1)]], device uint* ids [[buffer(2)]], device float* wts [[buffer(3)]], constant uint& ne [[buffer(4)]], constant uint& nused [[buffer(5)]], constant float& wscale [[buffer(6)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; if (nused > 8u) return; if (nused > ne) return; int idx[8]; float val[8]; for (uint j = 0u; j < nused; ++j) { idx[j] = -1; val[j] = 0.0f; } uint last = nused - 1u; for (uint i = 0u; i < ne; ++i) { float si = sc[i]; if (idx[last] >= 0 && !(si > val[last])) continue; for (uint j = 0u; j < nused; ++j) { if (idx[j] < 0 || si > val[j]) { for (uint mm = nused - 1u; mm > j; --mm) { idx[mm] = idx[mm - 1u]; val[mm] = val[mm - 1u]; } idx[j] = int(i); val[j] = si; break; } } } float s0 = 0.0f; for (uint j = 0u; j < nused; ++j) { s0 = s0 + probs[idx[j]]; } float s = (s0 < 0.00006103515625f) ? 0.00006103515625f : s0; for (uint j = 0u; j < nused; ++j) { ids[j] = uint(idx[j]); wts[j] = probs[idx[j]] / s * wscale; } } "
 )
@@ -107,7 +125,8 @@
                     (str_concat (dsv4-hash-select-body)
                      (str_concat (dsv4-hash-weights-body)
         (str_concat (dsv4-topk-weights-body)
-        (str_concat (dsv4-topk-split-body) (dom-ffn-appendix)))))))
+        (str_concat (dsv4-topk-split-body)
+        (str_concat (dsv4-topk-select-tg-body) (dom-ffn-appendix))))))))
             (print "END")
             0))
 
