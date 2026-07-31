@@ -1,0 +1,102 @@
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/trig.fk form-stdlib/endpointing.fk form-stdlib/pause-reading.fk form-stdlib/voiced-reading.fk
+;
+; pause-reading-file.fk — the file door for pause-reading.fk. SINGLE-LANE, and here is why.
+;
+; pause-reading.fk is arithmetic over bytes and crosses four-way. Getting the bytes off disk does not,
+; and this is measured, not assumed. On 2026-07-30 the same raw 16-bit PCM file (19936 bytes, byte 1 =
+; 255) was read through each arm:
+;
+;   fkwu        read_file       → str_len 19936, byte 255      byte-exact
+;   Go          read_file       → str_len 19936, byte 255      byte-exact
+;   Rust        read_file       → null, and the string ops then decline it as non-text
+;   TypeScript  read_file       → str_len 37558, byte 191      SILENTLY UTF-8-DECODED
+;   fkwu        read_file_bytes → absent from the op surface entirely (axiom-5 lowers it to nothing)
+;   Go          read_file_bytes → the byte list, exact
+;
+; So there are two partial lanes and no whole one. TypeScript's is the one to name loudly: it does not
+; refuse, it ANSWERS — with a length half again too long and every high byte replaced. A cell that read
+; audio through it would compute plausible levels from text that never existed. Rust's refusal is the
+; honest failure of the two.
+;
+; This cell therefore takes the fkwu/Go lane and says so in its own header rather than in a comment
+; somewhere downstream. It reads through `read_file` + `str-byte-at`, which is also the fast shape:
+; str_byte_at is O(1) where `nth` down a byte list is O(n), so a clip that would be quadratic as a list
+; is linear as a string. Same posture as pdf-text-windowed.fk one directory over — the limit is about
+; the carrier, the walk is Form.
+;
+; WAV layout: the RIFF `data` chunk is located rather than assumed at 44, because a clip that has been
+; through a filter graph carries LIST/INFO chunks ahead of it and a fixed 44 would read metadata as
+; audio. Mono 16-bit little-endian after that.
+
+(do
+    ; byte offset of the first PCM sample: the "data" tag plus its 4-byte size field.
+    ; -1 when there is no data chunk — a file this cell cannot read, said plainly.
+    (defn prf-data-offset (s)
+        (do (let at (str_find s "data" 0))
+            (if (lt at 0) -1 (add at 8))))
+
+    ; signed 16-bit little-endian sample at byte offset i of the string.
+    (defn prf-sample (s i)
+        (do (let v (add (str-byte-at s i) (mul (str-byte-at s (add i 1)) 256)))
+            (if (ge v 32768) (sub v 65536) v)))
+
+    (defn prf-abs-sum (s i end step acc)
+        (if (ge i end) acc
+            (prf-abs-sum s (add i step) end step (add acc (abs (prf-sample s i))))))
+
+    (defn prf-frame-level (s start end step)
+        (do (let width (sub end start))
+            (if (le width 0) 0
+                (div (prf-abs-sum s start end step 0) (div width step)))))
+
+    (defn prf-levels-go (s base i frames frame-bytes step out)
+        (if (ge i frames) out
+            (prf-levels-go s base (add i 1) frames frame-bytes step
+                (cons (prf-frame-level s (add base (mul i frame-bytes))
+                                         (add base (mul (add i 1) frame-bytes)) step) out))))
+
+    ; the levels of a wav on disk, one per frame-ms frame. An unreadable file yields the empty list.
+    (defn prf-levels-file (path rate frame-ms step)
+        (do (let s (read_file path))
+            (do (let base (prf-data-offset s))
+                (if (lt base 0) (list)
+                    (do (let fb (pr-frame-bytes rate frame-ms))
+                        (reverse (prf-levels-go s base 0
+                            (pr-frame-count (sub (str_len s) base) fb) fb step (list))))))))
+
+    ; the readings — the same contrast question pause-reading.fk asks, now of a real clip.
+    (defn prf-readings-file (path rate frame-ms step span)
+        (do (let levels (prf-levels-file path rate frame-ms step))
+            (if (eq (pr-contrast? levels span) 1) (pr-readings levels span) (list))))
+
+    ; the wav's samples as a list, from the data chunk on — what voiced-reading.fk eats. It takes
+    ; SAMPLES and not bytes on purpose: its autocorrelation walks two cursors with `tail`, and `nth`
+    ; down a byte list would make that quadratic.
+    (defn prf-samples-go (s base i n out)
+        (if (ge i n) (reverse out)
+            (prf-samples-go s base (add i 1) n (cons (prf-sample s (add base (mul i 2))) out))))
+    (defn prf-samples-file (path)
+        (do (let s (read_file path))
+            (do (let base (prf-data-offset s))
+                (if (lt base 0) (list)
+                    (prf-samples-go s base 0 (div (sub (str_len s) base) 2) (list))))))
+
+    ; the VOICED path: a wav becomes periodicity readings, which mean "no voice here" rather than "no
+    ; energy here". Same downstream shape as prf-readings-file, so ep-fold and ep-pause-run are
+    ; untouched — the reading got better and nothing below it had to change.
+    (defn prf-voiced-readings-file (path width rate f0min f0max)
+        (do (let xs (prf-samples-file path))
+            (vr-readings xs (len xs) width rate f0min f0max)))
+
+    ; how long the room has been quiet, decided by VOICE. dt is the frame width in seconds.
+    (defn prf-voiced-pause-file (path width rate f0min f0max)
+        (ep-pause-run (prf-voiced-readings-file path width rate f0min f0max)
+                      (div (mul width 1.0) rate)))
+
+    ; the whole way from a wav to the seconds turn-taking.fk asks for.
+    (defn prf-pause-seconds-file (path rate frame-ms step span attack release warmup)
+        (ep-pause-seconds
+            (ep-fold 1.0 (prf-readings-file path rate frame-ms step span)
+                     (div (mul frame-ms 1.0) 1000) attack release warmup)
+            attack))
+    0)

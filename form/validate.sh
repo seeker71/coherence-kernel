@@ -132,6 +132,11 @@ build_fkwu_src
 #   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu (--src),
 #     compared against the first "Verdict <n>" its head declares. Loud
 #     pass/fail — a wrong home-arm answer is a real failure, never skipped.
+#   ; PROOF LEVEL: TWO-ARM ...            → the band's bytes only ARRIVE on some arms
+#     (a binary fixture: a Form string cannot hold arbitrary bytes in Rust or TS).
+#     Runs go (+ fkwu when built) against the declared Verdict and names the lane.
+#     Never counted four-way. Without this, such a band reports "divergent,
+#     investigate" forever — a red that asks for work its own head already did.
 #   ; PROOF LEVEL: FKWU-STAGED ...       → needs a host carrier staging bytes
 #     into input_byte; the carrier did not travel in the CN→CK consolidation,
 #     so the band is reported ⧗ pending — visible every run, never green.
@@ -539,6 +544,43 @@ run_workload() {
             else
                 printf "  ✗  %-30s  fkwu-only lane: declared Verdict %s, fkwu answered %s\n" \
                     "$label" "$declared" "${answered:-<nothing>}"
+                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+                fail=$((fail + 1))
+            fi
+            return
+        elif [[ "$level" == "TWO-ARM" ]]; then
+            # A band whose bytes only ARRIVE on some arms. equireach-band declares this: its
+            # Q6_K fixture is binary, and a Form string cannot hold arbitrary bytes in Rust or
+            # TypeScript, so those two decline the read where fkwu and Go carry it exactly.
+            # Before 2026-07-30 they did worse than decline — they UTF-8-replaced the invalid
+            # bytes and answered from a longer, different file; that is healed, and both now
+            # stop loudly. The band was still reported "divergent, investigate" on every run,
+            # which is a declared proof level the harness did not honor: a permanent red that
+            # tells the reader to investigate something the band already explains in its head.
+            # Run the arms that CAN carry it, against the band's own pinned Verdict, and say
+            # which lane answered. Never counted as four-way — the roster is elsewhere.
+            declared="$(fk_band_declared_verdict "$band")"
+            if [[ -z "$declared" ]]; then
+                printf "  ✗  %-30s  declares TWO-ARM but pins no Verdict in its head\n" "$label"
+                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+                fail=$((fail + 1))
+                return
+            fi
+            local go_ans fkwu_ans
+            prepare_sources "$@"
+            go_ans="$("$GO_BIN" "${prepared_args[@]}" 2>/dev/null | tail -1 || true)"
+            fkwu_ans=""
+            if [[ -n "$FKWU_SRC" ]]; then
+                fkwu_ans="$( (cd .. && ./fkwu --src "form/$band") 2>/dev/null | tail -1 || true)"
+            fi
+            if [[ "$go_ans" == "$declared" && ( -z "$fkwu_ans" || "$fkwu_ans" == "$declared" ) ]]; then
+                printf "  ✓  %-30s  → %s (two-arm lane: go%s; rust/ts decline the binary read)\n" \
+                    "$label" "$declared" "$([[ -n "$fkwu_ans" ]] && echo " + fkwu")"
+                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok two-arm" > "$SUITE_STATUS_FILE"; fi
+                ok=$((ok + 1))
+            else
+                printf "  ✗  %-30s  two-arm lane: declared %s, go %s, fkwu %s\n" \
+                    "$label" "$declared" "${go_ans:-<nothing>}" "${fkwu_ans:-<not run>}"
                 if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
                 fail=$((fail + 1))
             fi

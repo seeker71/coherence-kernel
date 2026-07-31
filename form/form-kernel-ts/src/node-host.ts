@@ -333,7 +333,14 @@ export function createNodeKernelHost(options: NodeKernelHostOptions = {}): Kerne
   return {
     writeStdout: options.writeStdout ?? ((text) => process.stdout.write(text)),
     writeStderr: options.writeStderr ?? ((text) => process.stderr.write(text)),
-    readTextFile: (path) => readFileSync(path, "utf8"),
+    // Decode STRICTLY. `readFileSync(path, "utf8")` decodes with replacement, so a binary
+    // file came back as a plausible string: measured 2026-07-30, a 19936-byte raw PCM clip
+    // read as str_len 37558 with byte 255 arriving as 191 — a cell computing audio levels
+    // off that would get confident numbers from text that never existed. Rust's read_file
+    // (fs::read_to_string) already yields Null on invalid UTF-8; this matches it, and the
+    // caller's existing catch turns the throw into that same Null. Valid UTF-8 is untouched.
+    readTextFile: (path) =>
+      new TextDecoder("utf-8", { fatal: true }).decode(readFileSync(path)),
     readBinaryFile: (path) => readFileSync(path),
     readBinarySlice: (path, offset, length) => {
       const descriptor = openSync(path, "r");

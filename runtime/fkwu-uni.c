@@ -1711,6 +1711,443 @@ static long long fk_wav_loopback(const char *inpath, const char *outpath) {
     r = fk_cons_val(nplay << 1, r);
     return r;
 }
+#elif defined(__APPLE__)
+static long long fk_cons_val(long long h, long long t);
+extern void *memcpy(void *, const void *, unsigned long);
+/* ── mac CoreAudio arm (2026-07-31): the else branch below stood honest for a season — "mac
+ * CoreAudio/AVFoundation carriers are named pending" — and the live voice loop is what finally
+ * demanded it: the loop ran with ffmpeg at the eardrum and afplay at the cone, and the goal is
+ * ALL Form native. AudioToolbox is reached through dlopen/dlsym (the nvcuda/Metal door
+ * discipline), so the canonical `cc -O2 fkwu-uni.c` build gains no link flags. AudioQueue's C
+ * API carries both directions; 16 kHz mono s16le both ways, the same wire every ear cell reads.
+ *
+ * Camera stays honestly pending here — this movement is the VOICE loop's; the eye is its own. */
+extern void *dlopen(const char *, int);
+extern void *dlsym(void *, const char *);
+extern int usleep(unsigned int);
+struct fk_asbd {
+    double mSampleRate;
+    unsigned int mFormatID;
+    unsigned int mFormatFlags;
+    unsigned int mBytesPerPacket;
+    unsigned int mFramesPerPacket;
+    unsigned int mBytesPerFrame;
+    unsigned int mChannelsPerFrame;
+    unsigned int mBitsPerChannel;
+    unsigned int mReserved;
+};
+struct fk_aqbuf {
+    unsigned int mAudioDataBytesCapacity;
+    void *mAudioData;
+    unsigned int mAudioDataByteSize;
+    void *mUserData;
+    unsigned int mPacketDescriptionCapacity;
+    void *mPacketDescriptions;
+    unsigned int mPacketDescriptionCount;
+};
+typedef void (*fk_aq_incb)(void *, void *, struct fk_aqbuf *, const void *, unsigned int,
+                           const void *);
+typedef void (*fk_aq_outcb)(void *, void *, struct fk_aqbuf *);
+static int (*fk_AQNewInput)(const struct fk_asbd *, fk_aq_incb, void *, void *, void *,
+                            unsigned int, void **);
+static int (*fk_AQNewOutput)(const struct fk_asbd *, fk_aq_outcb, void *, void *, void *,
+                             unsigned int, void **);
+static int (*fk_AQAllocBuf)(void *, unsigned int, struct fk_aqbuf **);
+static int (*fk_AQEnqueue)(void *, struct fk_aqbuf *, unsigned int, const void *);
+static int (*fk_AQStart)(void *, const void *);
+static int (*fk_AQStop)(void *, unsigned char);
+static int (*fk_AQDispose)(void *, unsigned char);
+static int fk_aq_loaded;
+static int fk_aq_load(void) {
+    if (fk_aq_loaded) {
+        return fk_AQNewInput != 0;
+    }
+    fk_aq_loaded = 1;
+    void *h = dlopen("/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox", 2);
+    if (h == 0) {
+        printf("sense: AudioToolbox not reachable\n");
+        return 0;
+    }
+    fk_AQNewInput = (int (*)(const struct fk_asbd *, fk_aq_incb, void *, void *, void *,
+                             unsigned int, void **))dlsym(h, "AudioQueueNewInput");
+    fk_AQNewOutput = (int (*)(const struct fk_asbd *, fk_aq_outcb, void *, void *, void *,
+                              unsigned int, void **))dlsym(h, "AudioQueueNewOutput");
+    fk_AQAllocBuf = (int (*)(void *, unsigned int, struct fk_aqbuf **))dlsym(
+        h, "AudioQueueAllocateBuffer");
+    fk_AQEnqueue = (int (*)(void *, struct fk_aqbuf *, unsigned int, const void *))dlsym(
+        h, "AudioQueueEnqueueBuffer");
+    fk_AQStart = (int (*)(void *, const void *))dlsym(h, "AudioQueueStart");
+    fk_AQStop = (int (*)(void *, unsigned char))dlsym(h, "AudioQueueStop");
+    fk_AQDispose = (int (*)(void *, unsigned char))dlsym(h, "AudioQueueDispose");
+    return fk_AQNewInput != 0 && fk_AQNewOutput != 0 && fk_AQAllocBuf != 0 && fk_AQEnqueue != 0 &&
+           fk_AQStart != 0 && fk_AQStop != 0 && fk_AQDispose != 0;
+}
+static void fk_asbd_16k(struct fk_asbd *f) {
+    f->mSampleRate = 16000.0;
+    f->mFormatID = 0x6C70636D; /* 'lpcm' */
+    f->mFormatFlags = 0x4 | 0x8; /* signed-integer | packed */
+    f->mBytesPerPacket = 2;
+    f->mFramesPerPacket = 1;
+    f->mBytesPerFrame = 2;
+    f->mChannelsPerFrame = 1;
+    f->mBitsPerChannel = 16;
+    f->mReserved = 0;
+}
+/* ── the STREAM session (tags 239-241): one input queue held open across calls, so the live
+ * loop's frame quantum is the only latency and no file stands between the diaphragm and the
+ * ear. Single producer (the AQ thread appends), single consumer (Form reads a prefix and the
+ * offsets advance after AQStop or under the produced/consumed discipline below): produced is
+ * written ONLY by the callback, consumed ONLY by the reader, both monotone — no lock needed
+ * for a bounded ring read behind produced. */
+#define FK_MICRING (16000 * 2 * 30) /* 30 s of 16 kHz s16le */
+static char fk_micring[FK_MICRING];
+static volatile long long fk_mic_produced;
+static long long fk_mic_consumed;
+static void *fk_micq;
+static struct fk_aqbuf *fk_micbufs[4];
+static void fk_mic_incb(void *ud, void *q, struct fk_aqbuf *b, const void *ts, unsigned int nd,
+                        const void *pd) {
+    (void)ud;
+    (void)ts;
+    (void)nd;
+    (void)pd;
+    long long n = (long long)b->mAudioDataByteSize;
+    long long at = fk_mic_produced;
+    long long i;
+    for (i = 0; i < n; i = i + 1) {
+        fk_micring[(at + i) % FK_MICRING] = ((char *)b->mAudioData)[i];
+    }
+    fk_mic_produced = at + n;
+    fk_AQEnqueue(q, b, 0, 0);
+}
+static long long fk_mic_stream_start(void) {
+    if (!fk_aq_load()) {
+        return -1;
+    }
+    if (fk_micq != 0) {
+        return 0; /* already open: idempotent */
+    }
+    struct fk_asbd f;
+    fk_asbd_16k(&f);
+    if (fk_AQNewInput(&f, fk_mic_incb, 0, 0, 0, 0, &fk_micq) != 0 || fk_micq == 0) {
+        printf("sense: mic stream open refused\n");
+        fk_micq = 0;
+        return -1;
+    }
+    fk_mic_produced = 0;
+    fk_mic_consumed = 0;
+    long long i;
+    for (i = 0; i < 4; i = i + 1) {
+        if (fk_AQAllocBuf(fk_micq, 3200, &fk_micbufs[i]) == 0) { /* 100 ms each */
+            fk_AQEnqueue(fk_micq, fk_micbufs[i], 0, 0);
+        }
+    }
+    if (fk_AQStart(fk_micq, 0) != 0) {
+        printf("sense: mic stream start refused\n");
+        fk_AQDispose(fk_micq, 1);
+        fk_micq = 0;
+        return -1;
+    }
+    return 0;
+}
+/* read up to max-bytes of new capture as an s16le STRING (the read_file_slice shape, so every
+ * ear cell consumes it unchanged). Blocks up to ~wait_ms for the first byte, then returns what
+ * is there — the caller owns pacing. Empty string = nothing new within the wait. */
+static long long fk_mic_stream_read(long long maxbytes, long long wait_ms) {
+    if (fk_micq == 0) {
+        return fk_sbuf("", 0);
+    }
+    if (maxbytes < 2) {
+        maxbytes = 2;
+    }
+    if (maxbytes > FK_MICRING / 2) {
+        maxbytes = FK_MICRING / 2;
+    }
+    long long waited = 0;
+    while (fk_mic_produced - fk_mic_consumed < maxbytes && waited < wait_ms) {
+        usleep(2000);
+        waited = waited + 2;
+    }
+    long long have = fk_mic_produced - fk_mic_consumed;
+    if (have > maxbytes) {
+        have = maxbytes;
+    }
+    if (have <= 0) {
+        return fk_sbuf("", 0);
+    }
+    fk_sinit();
+    long long base = fk_sbp;
+    while (base + have > fk_scap_b) {
+        fk_scap_b = fk_scap_b * 2;
+        fk_sb = realloc(fk_sb, fk_scap_b);
+        fk_sb_check();
+    }
+    long long i;
+    for (i = 0; i < have; i = i + 1) {
+        fk_sb[base + i] = fk_micring[(fk_mic_consumed + i) % FK_MICRING];
+    }
+    fk_mic_consumed = fk_mic_consumed + have;
+    return fk_sintern(base, have) << 1;
+}
+static long long fk_mic_stream_stop(void) {
+    if (fk_micq == 0) {
+        return 0;
+    }
+    fk_AQStop(fk_micq, 1);
+    fk_AQDispose(fk_micq, 1);
+    fk_micq = 0;
+    return 0;
+}
+/* speaker OUT: play a 16 kHz mono s16le wav through AudioQueue output. done-flag set by the
+ * callback when the last buffer drains; while capturing (outpath non-empty in fk_wav_loopback)
+ * the mic stream keeps running, so play+capture is one session, not a race of processes. */
+static volatile int fk_spk_pending;
+static void fk_spk_outcb(void *ud, void *q, struct fk_aqbuf *b) {
+    (void)ud;
+    (void)q;
+    (void)b;
+    fk_spk_pending = fk_spk_pending - 1;
+}
+static long long fk_spk_play(const char *inbuf, long long doff, long long dlen) {
+    if (!fk_aq_load()) {
+        return -1;
+    }
+    struct fk_asbd f;
+    fk_asbd_16k(&f);
+    void *q = 0;
+    if (fk_AQNewOutput(&f, fk_spk_outcb, 0, 0, 0, 0, &q) != 0 || q == 0) {
+        printf("sense: speaker open refused\n");
+        return -1;
+    }
+    long long chunk = 16000; /* 500 ms per buffer */
+    long long off = 0;
+    fk_spk_pending = 0;
+    while (off < dlen) {
+        long long n = dlen - off > chunk ? chunk : dlen - off;
+        struct fk_aqbuf *b = 0;
+        if (fk_AQAllocBuf(q, (unsigned int)n, &b) != 0 || b == 0) {
+            break;
+        }
+        long long i;
+        for (i = 0; i < n; i = i + 1) {
+            ((char *)b->mAudioData)[i] = inbuf[doff + off + i];
+        }
+        b->mAudioDataByteSize = (unsigned int)n;
+        fk_spk_pending = fk_spk_pending + 1;
+        fk_AQEnqueue(q, b, 0, 0);
+        off = off + n;
+    }
+    fk_AQStart(q, 0);
+    long long ms = dlen / 32;
+    long long waited = 0;
+    while (fk_spk_pending > 0 && waited < ms + 2000) {
+        usleep(10000);
+        waited = waited + 10;
+    }
+    fk_AQStop(q, 1);
+    fk_AQDispose(q, 1);
+    return 0;
+}
+static long long fk_mic_count(void) {
+    return fk_aq_load() ? 1 : 0;
+}
+static long long fk_mic_name(long long i) {
+    if (i == 0 && fk_aq_load()) {
+        return fk_sbuf("coreaudio-default", 17);
+    }
+    return fk_sbuf("", 0);
+}
+static long long fk_mic_health(long long i) {
+    return (i == 0 && fk_aq_load()) ? 1 : -1;
+}
+static long long fk_cam_count(void) {
+    return 0;
+}
+static long long fk_cam_name(long long i) {
+    (void)i;
+    return fk_sbuf("", 0);
+}
+static long long fk_cam_health(long long i) {
+    (void)i;
+    return -1;
+}
+static long long fk_cam_grab(long long i, const char *path) {
+    (void)i;
+    (void)path;
+    return -1;
+}
+/* tag 234 keeps the Windows arm's exact privacy contract: stats only, nothing retained */
+static long long fk_mic_capture(long long ms) {
+    if (ms < 100) {
+        ms = 100;
+    }
+    if (ms > 10000) {
+        ms = 10000;
+    }
+    if (fk_mic_stream_start() != 0) {
+        return 1;
+    }
+    long long want = ms * 32;
+    long long t = 0;
+    while (fk_mic_produced < want && t < ms + 2000) {
+        usleep(10000);
+        t = t + 10;
+    }
+    long long nsamp = (fk_mic_produced < want ? fk_mic_produced : want) / 2;
+    long long nonzero = 0, peak = 0, sumabs = 0, i;
+    for (i = 0; i < nsamp; i = i + 1) {
+        long long lo = (unsigned char)fk_micring[(i * 2) % FK_MICRING];
+        long long hi = (unsigned char)fk_micring[(i * 2 + 1) % FK_MICRING];
+        long long v = lo | (hi << 8);
+        if (v >= 32768) {
+            v = v - 65536;
+        }
+        long long a = v < 0 ? 0 - v : v;
+        if (a > 0) {
+            nonzero = nonzero + 1;
+        }
+        if (a > peak) {
+            peak = a;
+        }
+        sumabs = sumabs + a;
+    }
+    fk_mic_stream_stop();
+    long long meanabs = nsamp > 0 ? sumabs / nsamp : 0;
+    printf("sense: mic captured %lld samples (%lld ms) nonzero=%lld mean-abs=%lld peak=%lld — "
+           "measured, not retained\n",
+           nsamp, ms, nonzero, meanabs, peak);
+    long long r = 1;
+    r = fk_cons_val(peak << 1, r);
+    r = fk_cons_val(meanabs << 1, r);
+    r = fk_cons_val(nonzero << 1, r);
+    r = fk_cons_val(nsamp << 1, r);
+    return r;
+}
+static long long fk_cam_luma(long long timeout_ms) {
+    (void)timeout_ms;
+    return 1;
+}
+static long long fk_audio_loopback(long long ms) {
+    (void)ms;
+    return 1;
+}
+/* tag 237 mac arm: play inpath through the speakers; when outpath is non-empty, capture the
+ * played span + a half-second tail through the mic stream and write it as a canonical 16 kHz
+ * wav — the air loopback, one process, no ffmpeg, no afplay. Returns (played captured peak
+ * mean-abs) like the Windows arm; play-only when outpath is "". */
+static long long fk_wav_loopback(const char *inpath, const char *outpath) {
+    int fd = open(inpath, O_RDBIN);
+    if (fd < 0) {
+        printf("sense: air-loopback input wav missing\n");
+        return 1;
+    }
+    long long incap = 4000000;
+    char *inbuf = malloc((unsigned long)incap);
+    if (inbuf == 0) {
+        close(fd);
+        return 1;
+    }
+    long long inlen = 0;
+    long long g;
+    while (inlen < incap && (g = read(fd, inbuf + inlen, 65536)) > 0) {
+        inlen = inlen + g;
+    }
+    close(fd);
+    long long doff = -1;
+    long long i;
+    for (i = 12; i + 8 < inlen; i = i + 1) {
+        if (inbuf[i] == 'd' && inbuf[i + 1] == 'a' && inbuf[i + 2] == 't' &&
+            inbuf[i + 3] == 'a') {
+            doff = i + 8;
+            break;
+        }
+    }
+    if (doff < 0) {
+        printf("sense: air-loopback input wav has no data chunk\n");
+        free(inbuf);
+        return 1;
+    }
+    long long dlen = (long long)(unsigned char)inbuf[doff - 4] |
+                     ((long long)(unsigned char)inbuf[doff - 3] << 8) |
+                     ((long long)(unsigned char)inbuf[doff - 2] << 16) |
+                     ((long long)(unsigned char)inbuf[doff - 1] << 24);
+    if (dlen <= 0 || doff + dlen > inlen) {
+        dlen = inlen - doff;
+    }
+    long long capture = outpath != 0 && outpath[0] != 0;
+    long long mark = 0;
+    if (capture) {
+        if (fk_mic_stream_start() != 0) {
+            capture = 0;
+        } else {
+            mark = fk_mic_produced;
+        }
+    }
+    long long played = fk_spk_play(inbuf, doff, dlen) == 0 ? dlen / 2 : 0;
+    free(inbuf);
+    long long got = 0, peak = 0, sumabs = 0;
+    if (capture) {
+        long long tailwant = dlen + 16000; /* half-second tail at 32 B/ms */
+        long long t = 0;
+        while (fk_mic_produced - mark < tailwant && t < dlen / 32 + 1500) {
+            usleep(10000);
+            t = t + 10;
+        }
+        long long have = fk_mic_produced - mark;
+        if (have > tailwant) {
+            have = tailwant;
+        }
+        int ofd = open(outpath, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (ofd >= 0) {
+            unsigned char hd[44];
+            long long dl = have;
+            memcpy(hd, "RIFF", 4);
+            hd[4] = (unsigned char)((36 + dl) & 255);
+            hd[5] = (unsigned char)(((36 + dl) >> 8) & 255);
+            hd[6] = (unsigned char)(((36 + dl) >> 16) & 255);
+            hd[7] = (unsigned char)(((36 + dl) >> 24) & 255);
+            memcpy(hd + 8, "WAVEfmt ", 8);
+            hd[16] = 16; hd[17] = 0; hd[18] = 0; hd[19] = 0;
+            hd[20] = 1; hd[21] = 0; hd[22] = 1; hd[23] = 0;
+            hd[24] = 0x80; hd[25] = 0x3E; hd[26] = 0; hd[27] = 0; /* 16000 */
+            hd[28] = 0; hd[29] = 0x7D; hd[30] = 0; hd[31] = 0;    /* 32000 */
+            hd[32] = 2; hd[33] = 0; hd[34] = 16; hd[35] = 0;
+            memcpy(hd + 36, "data", 4);
+            hd[40] = (unsigned char)(dl & 255);
+            hd[41] = (unsigned char)((dl >> 8) & 255);
+            hd[42] = (unsigned char)((dl >> 16) & 255);
+            hd[43] = (unsigned char)((dl >> 24) & 255);
+            write(ofd, hd, 44);
+            for (i = 0; i < have; i = i + 1) {
+                char c = fk_micring[(mark + i) % FK_MICRING];
+                write(ofd, &c, 1);
+            }
+            close(ofd);
+        }
+        for (i = 0; i + 1 < have; i = i + 2) {
+            long long lo = (unsigned char)fk_micring[(mark + i) % FK_MICRING];
+            long long hi = (unsigned char)fk_micring[(mark + i + 1) % FK_MICRING];
+            long long v = lo | (hi << 8);
+            if (v >= 32768) {
+                v = v - 65536;
+            }
+            long long a = v < 0 ? 0 - v : v;
+            if (a > peak) {
+                peak = a;
+            }
+            sumabs = sumabs + a;
+        }
+        got = have / 2;
+        fk_mic_stream_stop();
+    }
+    long long meanabs = got > 0 ? sumabs / got : 0;
+    long long r = 1;
+    r = fk_cons_val(meanabs << 1, r);
+    r = fk_cons_val(peak << 1, r);
+    r = fk_cons_val(got << 1, r);
+    r = fk_cons_val(played << 1, r);
+    return r;
+}
 #else
 static long long fk_mic_count(void) {
     return 0;
@@ -1755,6 +2192,19 @@ static long long fk_wav_loopback(const char *inpath, const char *outpath) {
     (void)inpath;
     (void)outpath;
     return 1;
+}
+#endif
+#if !defined(__APPLE__)
+static long long fk_mic_stream_start(void) {
+    return -1;
+}
+static long long fk_mic_stream_read(long long maxbytes, long long wait_ms) {
+    (void)maxbytes;
+    (void)wait_ms;
+    return fk_sbuf("", 0);
+}
+static long long fk_mic_stream_stop(void) {
+    return 0;
 }
 #endif
 static long long fk_sense_report(void) {
@@ -6391,15 +6841,29 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         if (fd < 0) {
             return -2;
         }
+        /* Flush-and-continue, never truncate: the old `n < 8192` gate FILLED the buffer, wrote
+         * it once, and returned the file's size as if all was written -- the silent-partial
+         * family, on the write side. Witnessed 2026-07-30: a 9644-byte WAV ("sema", the body's
+         * first word) landed as 8192 bytes and the ear heard (1 3) out of the stump. Tag 104
+         * twenty lines down always had the loop-until-done shape; this is the same shape for
+         * the byte-list walk. */
         static char tmp[8192];
         long long n = 0;
         long long q = xs >> 1;
-        while (q >= 1 && q <= fk_hp && n < 8192) {
+        while (q >= 1 && q <= fk_hp) {
+            if (n == 8192) {
+                long long w61 = write(fd, tmp, n);
+                if (w61 < n) {
+                    close(fd);
+                    return -2;
+                }
+                n = 0;
+            }
             tmp[n] = (char)(fk_hh[q] >> 1);
             n = n + 1;
             q = fk_ht[q] >> 1;
         }
-        long long wr = write(fd, tmp, n);
+        long long wr = n > 0 ? write(fd, tmp, n) : 0;
         long long total = lseek(fd, 0, 2);
         close(fd);
         if (wr < 0 || total < 0) {
@@ -6894,6 +7358,17 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 236) {
         return fk_audio_loopback(fk_walk(fk_node[i][1], fp) >> 1);
+    }
+    if (t == 139) {
+        return fk_mic_stream_start() << 1;
+    }
+    if (t == 140) {
+        long long mb140 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long wm140 = fk_walk(fk_node[i][2], fp) >> 1;
+        return fk_mic_stream_read(mb140, wm140);
+    }
+    if (t == 141) {
+        return fk_mic_stream_stop() << 1;
     }
     if (t == 237) {
         static char p237a[4096];
