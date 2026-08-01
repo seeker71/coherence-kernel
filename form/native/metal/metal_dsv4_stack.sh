@@ -51,6 +51,20 @@ KV_STEPS="${FORM_DS4_KV_STEPS:-2}"
 # body encodes the text with dsv4-tokenizer-cli and hands the ids here, so no text parsing enters
 # this carrier and the tokenizer stays the one authority on what a prompt IS.
 PROMPT_IDS="${FORM_DS4_PROMPT_IDS:-}"
+# FORM_DS4_PROMPT takes TEXT and asks the body's own tokenizer for the ids, so a request can be made
+# in words rather than in numbers. The tokenizer is form-stdlib/dsv4-tokenizer-cli.fk — the same cell
+# that decodes the answer at the end of this file — so the text goes in and comes out through ONE
+# authority on what a token is, and no text parsing enters this carrier. Explicit ids still win if
+# both are given: a caller who has already tokenized is not overridden.
+if [ -z "$PROMPT_IDS" ] && [ -n "${FORM_DS4_PROMPT:-}" ]; then
+    _tok="$ROOT/form-stdlib/dsv4-tokenizer-cli.fk"
+    _fkwu="$ROOT/../fkwu"
+    [ -x "$_fkwu" ] || { echo "FAIL native fkwu tokenizer carrier missing: $_fkwu"; exit 1; }
+    PROMPT_IDS="$(printf 'encode %s\n' "$FORM_DS4_PROMPT" | "$_fkwu" "$_tok" 2>/dev/null \
+                  | awk -F= '$1=="token_ids"{print $2; exit}')"
+    [ -n "$PROMPT_IDS" ] || { echo "FAIL the tokenizer returned no ids for: $FORM_DS4_PROMPT"; exit 1; }
+    echo "  prompt: \"$FORM_DS4_PROMPT\" -> $PROMPT_IDS   (tokenized by the body's own cell)"
+fi
 PROMPT_N=0
 if [ -n "$PROMPT_IDS" ]; then PROMPT_N=$(echo "$PROMPT_IDS" | wc -w | tr -d ' '); else PROMPT_IDS="none"; fi
 CONTROL_ADAPTER="${FORM_DS4_CONTROL_ADAPTER:-$ROOT/native/metal/artifacts/dsv4-control-logit-adapter.f32}"
