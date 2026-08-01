@@ -1,0 +1,97 @@
+; metal-door-band.fk — a Form cell drives this GPU, and checks the number it gets back.
+;
+; WHAT IS PROVEN. Not that a Metal carrier exists — that is one link line. What is proven is that the
+; WHOLE ROUND TRIP belongs to the body: this cell emits its own MSL, encodes its own IEEE-754 bytes,
+; hands both through the kernel's metal_matvec_f32 door, and then recomputes the answer in Form and
+; demands the GPU agree. Nothing outside this file chose the arithmetic, and no bash and no python
+; stands between the cell and the device.
+;
+; WHY THE ENCODER IS HERE AND NOT BORROWED. The model argument is raw bytes, so somebody must turn
+; numbers into IEEE-754. If a carrier did it, the carrier would own the meaning of every weight and
+; this band would prove only that two pieces of native code agree with each other. fw-bits below is
+; exact for integers under 2^24, which is the whole range this witness uses.
+;
+; THE VALUES ARE HAND-CHECKABLE ON PURPOSE. w is 1..16 row-major, x is 1..4, so
+;   y0 = 1+4+9+16 = 30    y1 = 5+12+21+32 = 70
+;   y2 = 9+20+33+48 = 110 y3 = 13+28+45+64 = 150   sum = 360
+; A reader can verify the GPU without running anything. A witness whose expected value only another
+; program knows is a witness that cannot catch the two programs being wrong together.
+;
+; RUN (needs the carrier linked; plain ./fkwu answers metal_linked=false and this band reports 0):
+;   cc -O2 -o fkwu-metal runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
+;      -framework Metal -framework Foundation -fobjc-arc
+;   ./fkwu-metal --src form/form-stdlib/tests/metal-door-band.fk
+;
+; Verdict 15 = 1 door-linked | 2 dispatch-passed | 4 sum-agrees | 8 every-element-agrees.
+; Bits are powers of two so a dark bit is readable on sight.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn md-nl () (byte_to_str 10))
+
+    ; ---- IEEE-754 f32 for a non-negative integer, exact below 2^24 --------------------
+    (defn md-pow2 (k) (if (le k 0) 1 (mul 2 (md-pow2 (sub k 1)))))
+    (defn md-e (n e) (if (lt n 2) e (md-e (floor (div n 2)) (add e 1))))
+    (defn md-bits (n)
+        (if (eq n 0) 0
+            (do (let e (md-e n 0))
+                (let m (sub (floor (div (mul n 8388608) (md-pow2 e))) 8388608))
+                (add (mul (add e 127) 8388608) m))))
+
+    ; ---- little-endian u32 -------------------------------------------------------------
+    (defn md-u32 (v)
+        (str_concat (byte_to_str (mod v 256))
+        (str_concat (byte_to_str (mod (floor (div v 256)) 256))
+        (str_concat (byte_to_str (mod (floor (div v 65536)) 256))
+                    (byte_to_str (mod (floor (div v 16777216)) 256))))))
+    (defn md-f32 (n) (md-u32 (md-bits n)))
+
+    ; ---- the model argument, exactly the layout the carrier documents ------------------
+    (defn md-seq (i n acc) (if (gt i n) acc (md-seq (add i 1) n (str_concat acc (md-f32 i)))))
+    (defn md-rows () 4)
+    (defn md-cols () 4)
+    (defn md-model ()
+        (str_concat (md-u32 (md-rows))
+        (str_concat (md-u32 (md-cols))
+        (str_concat (md-seq 1 (mul (md-rows) (md-cols)) "")
+                    (md-seq 1 (md-cols) "")))))
+
+    ; ---- the kernel, emitted by this cell ----------------------------------------------
+    (defn md-msl ()
+        (str_concat "#include <metal_stdlib>" (str_concat (md-nl)
+        (str_concat "using namespace metal;" (str_concat (md-nl)
+        (str_concat "kernel void form_fkwu_generic_matvec_f32(" (str_concat (md-nl)
+        (str_concat "  device const float *w [[buffer(0)]]," (str_concat (md-nl)
+        (str_concat "  device const float *x [[buffer(1)]]," (str_concat (md-nl)
+        (str_concat "  device float *y [[buffer(2)]]," (str_concat (md-nl)
+        (str_concat "  constant uint &rows [[buffer(3)]]," (str_concat (md-nl)
+        (str_concat "  constant uint &cols [[buffer(4)]]," (str_concat (md-nl)
+        (str_concat "  uint gid [[thread_position_in_grid]]) {" (str_concat (md-nl)
+        (str_concat "  if (gid >= rows) return;" (str_concat (md-nl)
+        (str_concat "  float a = 0.0f;" (str_concat (md-nl)
+        (str_concat "  for (uint j = 0; j < cols; j++) a += w[gid*cols + j] * x[j];" (str_concat (md-nl)
+        (str_concat "  y[gid] = a;" (str_concat (md-nl)
+                    "}" )))))))))))))))))))))))))))
+
+    ; ---- Form's own answer, so the GPU has something to be wrong against ---------------
+    (defn md-dot (r j acc)
+        (if (ge j (md-cols)) acc
+            (md-dot r (add j 1)
+                (add acc (mul (add (mul r (md-cols)) (add j 1)) (add j 1))))))
+    (defn md-expect-sum (r acc)
+        (if (ge r (md-rows)) acc (md-expect-sum (add r 1) (add acc (md-dot r 0 0)))))
+
+    ; ---- ask the device -----------------------------------------------------------------
+    (let reply (metal_matvec_f32 (md-msl) "form_fkwu_generic_matvec_f32" (md-model)))
+    (print_str reply)
+
+    (defn md-has (s sub) (if (ge (str_find s sub 0) 0) 1 0))
+
+    (let linked (md-has reply "metal_linked=true"))
+    (let passed (md-has reply "PASS fkwu-form-cli-metal-matvec-f32"))
+    (let sum-ok (md-has reply (str_concat "sum=" (int_to_str (md-expect-sum 0 0)))))
+    (let elems-ok (md-has reply "y=30 70 110 150"))
+
+    (print_str (str_concat "expected-sum " (int_to_str (md-expect-sum 0 0))))
+    (add (mul linked 1) (add (mul passed 2) (add (mul sum-ok 4) (mul elems-ok 8)))))
