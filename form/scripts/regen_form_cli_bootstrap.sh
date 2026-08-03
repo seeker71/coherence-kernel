@@ -79,7 +79,7 @@ fi
 printf '%s\n' "$$" > "$regen_lock_owner"
 work_dir="$(mktemp -d)"
 cleanup() {
-    cp -r "$work_dir" /tmp/regen-keep 2>/dev/null; rm -rf "$work_dir"
+    rm -rf "$work_dir"
     rm -f "$regen_lock_owner"
     rmdir "$regen_lock_dir" 2>/dev/null || true
 }
@@ -193,7 +193,16 @@ stdlib=form-stdlib
 # equireach-gguf.fk, gguf-meta.fk and model-discovery.fk arrived on 2026-08-03
 # as 52 KB of quotable text and zero callable functions: the `functions=` count
 # printed at the end moved by 1 (the band's own fc-models) where ~100 were due.
-# Read that number as the witness. Four lists, one program: keep them mirrored.
+# Read that number as the witness.
+#
+# SIX lists, not four — the count grew on 2026-08-03 when ask-lane-router.fk was
+# wired in. build-form-cli.sh carries two more of its own: FORM_CLI_SRCS (~:73)
+# authors the stamp the build compares against the one THIS script wrote, and
+# FORM_CLI_SELFHOST_SRCS (~:160) is its no-Go flatten arm. Mirror all six, and
+# mirror the ORDER too: the stamp is a hash over the list, so the same files in
+# a different place hash differently and the build stops with "source stamp
+# stale" naming two hashes and no file. That message is a mirroring gap, not a
+# stale tree. Six lists, one program: keep them mirrored.
 core_src="$(compile_bml "$stdlib/core.fk")"
 http_client_src="$(compile_bml "$stdlib/http-client.fk")"
 form_cli_ask_src="$(compile_bml "$stdlib/form-cli-ask.fk")"

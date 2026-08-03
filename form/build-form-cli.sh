@@ -70,6 +70,12 @@ MODS="${MODS/ (read_file \"$S\/form-cli.fk\")/ (read_file \"$S\/ds4-query-channe
 BAND="(read_file \"$S/form-cli-repl.fk\")"
 
 # Prefer fkwu self-host flatten (no Go) when T_flat + cached fkwu are warm.
+# This list authors the stamp the build compares against the one
+# scripts/regen_form_cli_bootstrap.sh wrote, so it mirrors that script's
+# FORM_CLI_SRCS in CONTENT AND ORDER. A cell added there and not here stops the
+# build with "source stamp stale (have=... want=...)" — two hashes and no
+# filename — which reads like a stale tree and is a mirroring gap. See the
+# "SIX lists, one program" note in that script.
 FORM_CLI_SRCS=(
     "$S/fourth-shim.fk" "$S/core.fk" "$S/grammars/sanskrit-roots.fk" "$S/line-grammar.fk"
     "$S/str-byte-at.fk" "$S/sha256.fk" "$S/hmac-sha256.fk" "$S/hex.fk"
@@ -95,6 +101,8 @@ FORM_CLI_SRCS=(
     "$S/native-model-native-hierarchy.fk"
     "$S/ds4-query-channel.fk"
     "$S/form-cli.fk"
+    "$S/native-model-control-plane.fk"
+    "$S/ask-lane-router.fk"
     "$S/form-cli-gguf-cell.fk"
     "$S/form-cli-repl.fk"
 )
@@ -175,6 +183,8 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/current-branch-landing.fk" "$S/form-cli-inquiry.fk" "$S/ds4-query-channel.fk" "$S/form-cli.fk" "$S/form-cli-gguf-cell.fk"
     "$S/relational-inquiry-metabolism.fk"
     "$S/native-model-native-hierarchy.fk"
+    "$S/native-model-control-plane.fk"
+    "$S/ask-lane-router.fk"
     "$S/form-cli-repl.fk"
 )
 if [[ "$bootstrap_carrier_fresh" == 1 ]]; then
