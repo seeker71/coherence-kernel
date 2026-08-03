@@ -24,6 +24,18 @@ FORM_CLI_FORCE_LINK="${FORM_CLI_FORCE_LINK:-0}"
 FORM_CLI_EXTRA_SRC="${FORM_CLI_EXTRA_SRC:-}"
 FORM_CLI_EXTRA_LDFLAGS="${FORM_CLI_EXTRA_LDFLAGS:-}"
 
+# The accelerator this host HAS is not a question for the caller. The kernel already settles the
+# Windows side with no flag at all — fkwu-uni.c LoadLibraryA's nvcuda.dll at runtime, JITs the
+# Form-emitted PTX, and reports absence if no driver answers. Darwin gets the same treatment here:
+# Metal.framework ships on every Mac, so there is nothing to opt into, and the carrier itself
+# returns SKIP when MTLCreateSystemDefaultDevice() finds no device. A build that asked
+# FORM_CLI_EXTRA_SRC for this was asking the caller a question the host already answers, which is
+# how a body ends up not knowing what it is capable of.
+if [[ "$(uname -s 2>/dev/null)" == "Darwin" && -f "native/metal/fk-metal-carrier.m" ]]; then
+    FORM_CLI_EXTRA_SRC="native/metal/fk-metal-carrier.m${FORM_CLI_EXTRA_SRC:+ $FORM_CLI_EXTRA_SRC}"
+    FORM_CLI_EXTRA_LDFLAGS="-framework Metal -framework Foundation -fobjc-arc${FORM_CLI_EXTRA_LDFLAGS:+ $FORM_CLI_EXTRA_LDFLAGS}"
+fi
+
 is_windows_host() {
     [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]
 }
