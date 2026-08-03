@@ -83,7 +83,7 @@ in `BOOTSTRAP.md` and `AGENTS.md`:
 cc -O2 -o fkwu runtime/fkwu-uni.c
 ./fkwu --src bootstrap/ground.fk                                # -> 42
 ./fkwu --src bootstrap/ground-recursive.fk 10                   # -> 55
-./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk    # -> 15 (anything else: REBUILD first)
+./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk    # -> 31 (anything else: REBUILD first)
 ```
 
 The **binary-freshness canary** (third line) exists because `fkwu` is gitignored and a stale local binary

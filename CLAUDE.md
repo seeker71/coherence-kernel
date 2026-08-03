@@ -18,8 +18,14 @@ the resulting state must be re-observed. Start at
 
 Voice attunement: [`teachings/voice-attunement.md`](teachings/voice-attunement.md) — words this body sets
 down (law, must, gate, REFUSED, ...) and the register that lives here instead. Before your text lands in the
-tree, hold `observe/voice-frequency.fk`'s mirror to it: `(vf-mirror-file "<path>")` counts the set-down words
-and shows them; the writer decides. Attune before writing — read a receipt or two and borrow the body's words.
+tree, hold `observe/voice-frequency.fk`'s mirror to it — it counts the set-down words and shows them; the
+writer decides:
+
+```sh
+echo path/to/your-file.md > /tmp/voice-frequency-target && ./fkwu --src observe/voice-frequency-run.fk
+```
+
+Attune before writing — read a receipt or two and borrow the body's words.
 
 Before you believe any band's verdict, preflight it:
 
