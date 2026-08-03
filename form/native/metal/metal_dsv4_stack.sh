@@ -720,12 +720,12 @@ let skipMatch = ProcessInfo.processInfo.environment["FORM_DS4_SKIP"] ?? ""
 // WEIGHT VIEWS ARE NOT DECLARED, on purpose. views[] are the mmap'd file's own bytes and no dispatch
 // in this stack ever writes one, so a weight can never be the write half of a hazard and leaving it
 // out of `reads` cannot hide one. Only buffers something writes are named.
-// FORM_DS4_HZ_SCOPED=1 names the buffers in the barrier instead of draining the whole device.
-// REFUTED, and kept as the falsifier. memoryBarrier(resources:) costs MORE per call here than
-// memoryBarrier(scope: .buffers), and because it settles only the buffers it names it leaves the rest
-// of the field dirty, so MORE dispatches end up needing one: 1844 barriers a token against 1510, and
-// 39.14 ms against 38.17. The finer claim is true and the hardware does not reward it.
-let hzScoped = ProcessInfo.processInfo.environment["FORM_DS4_HZ_SCOPED"] == "1"
+// NAMING THE BUFFERS IN THE BARRIER WAS REFUTED (2026-07-31) and the code is gone rather than kept
+// behind a flag. memoryBarrier(resources:) costs MORE per call here than memoryBarrier(scope:
+// .buffers), and because it settles only the buffers it names it leaves the rest of the field dirty,
+// so MORE dispatches end up needing one: 1844 barriers a token against 1510, and 39.14 ms against
+// 38.17. The finer claim is true and the hardware does not reward it. The numbers are the falsifier;
+// a live branch nobody takes is not a falsifier, it is a second program maintained in the dark.
 var hzWritten = Set<ObjectIdentifier>()
 var hzRead = Set<ObjectIdentifier>()
 var hzDirtyAll = true
@@ -766,20 +766,6 @@ func enc(_ p: MTLComputePipelineState, _ n: Int, _ cap: Int, indep: Bool = false
             // wait on EVERYTHING — that is the one case the scoped barrier cannot express.
             if hzDirtyAll {
                 hzBarrier(e)
-            } else if hzScoped {
-                // THE BARRIER NAMES ITS BUFFERS. memoryBarrier(scope: .buffers) drains the device for
-                // every buffer there is; what a dispatch actually needs is that the two or three
-                // buffers it is about to touch have settled. Everything else in flight — a matvec
-                // streaming weights, an expert decoding into its own slice — has no reason to stop.
-                var need: [MTLResource] = []
-                for b in rd where hzWritten.contains(ObjectIdentifier(b)) { need.append(b) }
-                for b in wr where hzWritten.contains(ObjectIdentifier(b)) || hzRead.contains(ObjectIdentifier(b)) { need.append(b) }
-                if !need.isEmpty {
-                    e.memoryBarrier(resources: need)
-                    hzBarriers += 1
-                    // only the named buffers are settled; the rest of the field stays as it was.
-                    for b in need { hzWritten.remove(ObjectIdentifier(b)); hzRead.remove(ObjectIdentifier(b)) }
-                }
             } else {
                 let hazard = rd.contains { hzWritten.contains(ObjectIdentifier($0)) }
                           || wr.contains { hzWritten.contains(ObjectIdentifier($0)) || hzRead.contains(ObjectIdentifier($0)) }
@@ -878,7 +864,7 @@ let pHcRmsWide = pipe(lHc, "form_hc_rmsnorm_nw_wide_f32")
 let pHcSplit = pipe(lHc, "form_hc_split_f32")
 // THE SINKHORN'S FENCES, PRICED AND REMOVED. form_hc_split_f32 spreads a 4x4 Sinkhorn over n_hc = 4
 // threads and pays 2*HC_ITERS = 40 threadgroup barriers to keep them in step. FORM_DS4_DOUBLE priced
-// it at 21.9 us a call against a 1.1 us dispatch (the FORM_DS4_PAD slope), and the stack asks for it
+// it at 21.9 us a call against a 1.1 us dispatch (the measured 1.1 us dispatch slope), and the stack asks for it
 // 83 times a token: 1.8 ms of a 40 ms token, on four threads, almost all of it fencing.
 // The seq kernel is the same arithmetic in the same fold directions on ONE thread, where a barrier
 // between four threads has nothing left to synchronise. Bit-exactness is the gate, not the intent:
@@ -917,7 +903,7 @@ let pIq2E4F = iq2Tg ? pIq2E4T : pIq2E4F0
 //
 // MEASURED, AND THE TRADE WENT THE OTHER WAY. Both on: 2204 dispatches a token become 2075, and the
 // floor goes 26.46 t/s -> 26.15. The stream is bit-exact either way, so this is not a correctness
-// finding, it is a PRICE finding: 129 fewer asks bought about 0.14 ms (the FORM_DS4_PAD slope says
+// finding, it is a PRICE finding: 129 fewer asks bought about 0.14 ms (the measured 1.1 us dispatch slope says
 // 1.1 us an ask) and the simdgroups they cost were worth more than that. It is the clearest refutation
 // this row has of "the dispatch count is what is left" — the count fell by 6% and the token did not.
 // Kept, OFF, with the number, the way the IQ2 threadgroup-table probe is kept: FORM_DS4_MOE_PAIR=1
@@ -1162,7 +1148,7 @@ func gpuMx8(_ t: Tn, _ x: MTLBuffer, _ rows: Int, _ cols: Int) -> MTLBuffer {
                          rows, cols, nfin, maxAbs, maxRel, mag))
         }
         // ds4's OWN GPU association, and the activation left in f32 because its Metal kernel never
-        // quantises it. FORM_DS4_Q80_CPU_ORDER=1 goes back to the NEON transcription above it.
+        // quantises it. The NEON transcription above it is the record of what ds4 does, not a live path.
         if matchOrder && !q80CpuOrder {
             wbQ80 += rows * ((cols + 31) / 32) * 34
             enc(pQ80Ds4, ((rows + 1) / 2) * 256, 256) { c in
@@ -1680,22 +1666,13 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int, _ underCover: () -> Voi
     return ao
 }
 
-// FORM_DS4_PAD=N PRICES A DISPATCH. The token costs 2550 asks against the reference's ~950, and
-// "reduce the dispatch count" is only worth doing if an ask is expensive. N extra one-element scale
-// dispatches per layer, writing a scratch nobody reads, move nothing but the count — the slope of the
-// floor against N is the price of an ask, measured rather than assumed.
-let padPerLayer = Int(ProcessInfo.processInfo.environment["FORM_DS4_PAD"] ?? "0") ?? 0
-let padBuf = sentinelled(1)
-func padDispatches() {
-    if padPerLayer <= 0 { return }
-    var a = Float(1.0), n1 = UInt32(1)
-    for _ in 0..<padPerLayer {
-        enc(pScale, 1, 1) { c in c.setBuffer(padBuf, offset: 0, index: 0); c.setBuffer(padBuf, offset: 0, index: 1)
-                                 c.setBytes(&a, length: 4, index: 2); c.setBytes(&n1, length: 4, index: 3) }
-    }
-}
+// THE PRICE OF A DISPATCH IS MEASURED AND THE INSTRUMENT IS GONE. Padding N empty one-element scale
+// dispatches per layer moved nothing but the count, which is exactly what made it a good ruler: the
+// slope of the floor against N is 1.1 us an ask. That number settled the question — removing 129
+// dispatches made the stack SLOWER and adding 86 made it FASTER, so dispatch count is not what this
+// token costs. The slope is the finding; the padding code was the ruler, and a ruler left inside the
+// thing it measured is just an extra branch pretending to be evidence.
 func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) -> LayerOut {
-    padDispatches()
     let w = LW[il]
     let (attnCur, attnSplit, attnComb) = hcPre(residHc, w.haf, w.has, w.hab)
     let attnOut = mlaBlock(attnCur, pos, il, attnComb)
@@ -1841,7 +1818,7 @@ func runLayer(_ il: Int, _ pos: Int, _ currentToken: Int, _ residHc: MTLBuffer) 
         // and add their simd_sums in the same ascending order form_dsv4_moe_reduce used, so the
         // nexp*n_embd plane is never written at all. Both fused kernels are the SAME decode and the
         // SAME accumulation chains — a rearrangement of dispatches, never a second recipe.
-        // FORM_DS4_MOE_FUSE2=0 goes back to the five, and it is the A/B that proves the stream.
+        // Fusing the five expert dispatches into two won and the five-dispatch path is deleted, not flagged.
         // ONE ROW PER SIMDGROUP unless the four-row kernel is the one selected. Every other IQ2
         // expert kernel here — fast, span, and both probes — gives a row its own simdgroup and
         // needs FOUR TIMES the threads. Deriving the thread count from the same flag that picks
