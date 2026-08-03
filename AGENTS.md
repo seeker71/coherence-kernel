@@ -24,7 +24,7 @@ Verify the direct source bootstrap first:
 ```sh
 ./fkwu --src bootstrap/ground.fk                 # -> 42
 ./fkwu --src bootstrap/ground-recursive.fk 10    # -> 55
-./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk   # -> 15 (anything else: REBUILD fkwu first)
+./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk   # -> 31 (anything else: REBUILD fkwu first)
 ./fkwu --src bootstrap/ground-numeric-list.fk    # -> [1, 2.5, [3, 4]]
 ```
 
@@ -32,7 +32,11 @@ The third line matters more than it looks: `fkwu` is gitignored (a local build a
 stale binary from before an upstream merge **still passes ground.fk** while silently lacking newer
 evaluator capabilities — a real day was once lost "discovering" evaluator constraints that were
 only ever the stale binary (receipts/2026-07-01-stale-binary-root-cause.md). If the freshness band
-does not return 15, rebuild before believing anything else you observe.
+does not return 31, rebuild before believing anything else you observe. The band grew a bit on
+2026-08-03 for the same reason it was born: it answered its then-full 15 on a binary built hours
+before the string-value band, and two organs that report in prose — `observe/preflight-run.fk` and
+voice-frequency's mirror — printed bare pool indices (`5171`, `15101`) that read as verdicts. Each
+stale-binary day the canary sleeps through is one more bit it owes.
 
 Then verify it runs the body — a **real cell**, native, with no Go, no flatten, no T_flat:
 
