@@ -1,0 +1,88 @@
+; model-discovery.fk — the body looks at what models are on this host, instead of being told about one.
+;
+; WHAT THIS REPLACES, and why that was never an "input". FORM_DS4_BLOB is a static path to a single
+; GGUF, defaulted in metal_dsv4_stack.sh:43 to one ds4 file. Yesterday I classified it INPUT and kept
+; it, on the reasoning that only the caller knows which model they mean. That reasoning is wrong and
+; it is the same wrongness as every other switch here: THE HOST KNOWS. There are six GGUFs on this
+; machine and the body had been told about one. A switch is what you build when you decide the body
+; cannot look; discovery is what you build when you decide it can.
+;
+; THE DISTINCTION URS DREW, which is the whole design. A STATIC switch is configuration chosen before
+; the body runs, baked into an invocation, invisible afterwards, and multiplied by every other switch
+; into a space nobody can hold. A RUNTIME switch is a choice made while the body is running, from
+; options the body FOUND, visible in the asking. The first makes a body that must be configured; the
+; second makes a body that can be talked to. `models` then `use <n>` is a runtime switch. FORM_DS4_BLOB
+; is not, and it goes.
+;
+; WHY THE ROOT IS AN ARGUMENT AND NOT A CONSTANT. fkwu has no getenv — the whole op table was read on
+; 2026-08-03 and there is no door to the environment — so a cell cannot expand `~`. Passing the root
+; is therefore a real argument, the kind only the caller can supply, not a knob standing in for a
+; question the body could have answered. If a getenv door is ever carried, md-default-roots is where
+; the home directory belongs and this comment is the reason.
+;
+; WHAT IT READS. Only the header window: architecture and block count, the two facts that decide how a
+; file must be run. It never pages the weights, so listing six models costs six small reads and not
+; 85 GiB.
+;
+; preludes: form-stdlib/core.fk, form-stdlib/gguf-meta.fk
+
+(do
+    (defn md-header-bytes () 1048576)   ; the KV block lives at the front; a MiB has held every file here
+    (defn md-gguf? (name) (ge (str_find name ".gguf" 0) 0))
+    (defn md-join (dir name) (str_concat dir (str_concat "/" name)))
+
+    ; architecture names its own block-count key, so the second read depends on the first
+    (defn md-arch (src) (gmt-str src "general.architecture"))
+    (defn md-nlayer (src arch) (gmt-u32 src (str_concat arch ".block_count")))
+
+    (defn md-describe (path)
+        (do
+            (let src (read_file_slice path 0 (md-header-bytes)))
+            (let arch (md-arch src))
+            (if (str_eq arch "")
+                (str_concat path "   (not a GGUF header this body can read — unfinished, not unsupported)")
+                (str_concat path (str_concat "   arch=" (str_concat arch
+                    (str_concat "  layers=" (int_to_str (md-nlayer src arch)))))))))
+
+    ; ---- the walk. One directory deep plus its immediate subdirectories, because that is how the
+    ; models on this host are actually laid out (some loose, some in a per-model folder). ----
+    (defn md-scan-files (dir names acc)
+        (if (eq (len names) 0) acc
+            (do (let n (head names))
+                (md-scan-files dir (tail names)
+                    (if (md-gguf? n) (cons (md-join dir n) acc) acc)))))
+
+    ; Two levels, not one. The first pass found five of this host's six files: ds4-engine/gguf/ is a
+    ; directory inside a directory, and a scan that stops at one level reports a smaller world with
+    ; the same confidence as a complete one. Depth is named here rather than assumed, so when a
+    ; seventh model appears three deep the gap is a number in this cell and not a mystery.
+    (defn md-depth () 2)
+
+    (defn md-scan-dirs (root names acc depth)
+        (if (eq (len names) 0) acc
+            (do (let n (head names))
+                (let sub (md-join root n))
+                (md-scan-dirs root (tail names)
+                    (if (fs_is_dir sub) (md-walk sub acc (sub depth 1)) acc)
+                    depth))))
+
+    (defn md-walk (dir acc depth)
+        (do (let names (fs_list dir))
+            (let here (md-scan-files dir names acc))
+            (if (le depth 0) here (md-scan-dirs dir names here depth))))
+
+    (defn md-find (root) (md-walk root (list) (md-depth)))
+
+    (defn md-report (paths i)
+        (if (eq (len paths) 0) i
+            (do (print_str (str_concat "  [" (str_concat (int_to_str i)
+                           (str_concat "] " (md-describe (head paths))))))
+                (md-report (tail paths) (add i 1)))))
+
+    (defn md-list (root)
+        (do (print_str (str_concat "— models this body can see under " (str_concat root " —")))
+            (let found (md-find root))
+            (let n (md-report found 0))
+            (print_str (str_concat "  " (str_concat (int_to_str n) " found; choose one at runtime, none is compiled in")))
+            n))
+    0)
