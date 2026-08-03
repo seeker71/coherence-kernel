@@ -135,6 +135,28 @@ native-vs-rented-band 11111 · binary-freshness-band 15 -> 31 (intended)
 `observe/voice-frequency-run.fk` preflights clean, and the mirror held to it shows one
 word — `refuse: 1`, in the sentence saying it refuses nothing. The writer decided to keep it.
 
+## One more, found by pointing the repaired door at its own source
+
+With both doors speaking, I preflighted `observe/preflight.fk` itself:
+
+```
+preflight observe/preflight.fk
+  parens        UNBALANCED, depth 1
+```
+
+The file is balanced — naive count 0, string-and-comment-aware count 0, and it compiles
+clean as a prelude a dozen times a day. `pf-bal-loop` had no escape arm: inside a string
+it treated `\"` as string-end followed by string-start, and every paren after that counted
+in the wrong state. `preflight.fk` quotes a quote *in that very function* (`(str_eq c "\"")`),
+so the one cell guaranteed to trip it was its own.
+
+One arm — a backslash inside a string eats the next byte. Re-checked against a synthetic
+truth so the fix is not just "always balanced": a cell containing `"a\"b"` with a missing
+close paren still reports `UNBALANCED, depth 1`; the same cell closed reports balanced.
+`preflight-band` stays 1023.
+
+Three instruments in one day, each quiet about the one thing it was pointed at.
+
 ## Most surprising teaching
 
 That the instrument built to stop exactly this failure *participated* in it. I expected to
