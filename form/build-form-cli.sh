@@ -77,7 +77,7 @@ FORM_CLI_SRCS=(
     "$S/form-native-resource-interfaces.fk" "$S/form-fs.fk" "$S/storage-port.fk"
     "$S/host-kernel-carrier.fk" "$S/fnri-standin.fk" "$S/fnri-receipt.fk"
     "$S/http-client.fk" "$S/format-arith.fk" "$S/f16-decode.fk"
-    "$S/q6k-dequant.fk" "$S/q4k-dequant.fk" "$S/weight-load.fk"
+    "$S/q6k-dequant.fk" "$S/equireach.fk" "$S/equireach-gguf.fk" "$S/gguf-meta.fk" "$S/model-discovery.fk" "$S/q4k-dequant.fk" "$S/weight-load.fk"
     "$S/voice-traits.fk"
     "$S/nearest-shape.fk" "$S/co-learning.fk" "$S/co-learning-stream.fk"
     "$S/mesh-dispatch.fk" "$S/surprise-salience.fk" "$S/host-sense-organ.fk"
@@ -163,7 +163,7 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/storage-port.fk" "$S/host-kernel-carrier.fk" "$S/fnri-standin.fk" "$S/fnri-receipt.fk"
     "$S/http-client.fk" "$S/line-grammar.fk" "$S/str-byte-at.fk" "$S/sha256.fk"
     "$S/hmac-sha256.fk" "$S/hex.fk" "$S/format-arith.fk" "$S/f16-decode.fk"
-    "$S/q6k-dequant.fk" "$S/q4k-dequant.fk" "$S/weight-load.fk" "$S/voice-traits.fk"
+    "$S/q6k-dequant.fk" "$S/equireach.fk" "$S/equireach-gguf.fk" "$S/gguf-meta.fk" "$S/model-discovery.fk" "$S/q4k-dequant.fk" "$S/weight-load.fk" "$S/voice-traits.fk"
     "$S/nearest-shape.fk" "$S/co-learning.fk" "$S/co-learning-stream.fk" "$S/mesh-dispatch.fk"
     "$S/surprise-salience.fk" "$S/host-sense-organ.fk" "$S/speech-organ.fk"
     "$S/native-host-instance.fk" "$S/text-tokenize.fk" "$S/rag-embed.fk" "$S/rag-index-codec.fk"
@@ -202,7 +202,7 @@ grep -q fk_prog "$W/form-cli.c" || { echo "emit missing baked program"; exit 1; 
 #    print it and you can rebuild from the binary alone. It's the file-marked
 #    concatenation of every recipe the build reads plus this script, appended as a
 #    byte array (escape-free) and read at runtime by self_source (walker tag 117).
-SOURCES="minimal-surface hati-os-kernel fkc-table-serialize hati-os-kernel-emit core form-parse bmf-core bmf-grammar host-effect-grammar form-flatten fourth-shim resource-port bml-native-interface-package-import hati-os-targets form-native-resource-interfaces form-fs storage-port host-kernel-carrier fnri-standin fnri-receipt line-grammar str-byte-at sha256 hmac-sha256 hex format-arith f16-decode q6k-dequant q4k-dequant weight-load voice-traits nearest-shape co-learning co-learning-stream mesh-dispatch surprise-salience host-sense-organ speech-organ native-host-instance text-tokenize rag-embed rag-index-codec rag-retrieve rag-ask form-cli-ask form-cli-router form-cli-judge confidence-weighted-vote lineage-discounted-vote form-cli-oracle-loop form-cli-sufficiency form-freq-check trust-row form-cli-ask-gate form-cli-staged-trace form-cli-request form-cli-carrier form-cli-ask-plus form-cli-surface-inquiry current-branch-landing form-cli form-cli-gguf-cell form-cli-main form-cli-repl"
+SOURCES="minimal-surface hati-os-kernel fkc-table-serialize hati-os-kernel-emit core form-parse bmf-core bmf-grammar host-effect-grammar form-flatten fourth-shim resource-port bml-native-interface-package-import hati-os-targets form-native-resource-interfaces form-fs storage-port host-kernel-carrier fnri-standin fnri-receipt line-grammar str-byte-at sha256 hmac-sha256 hex format-arith f16-decode q6k-dequant equireach equireach-gguf gguf-meta model-discovery q4k-dequant weight-load voice-traits nearest-shape co-learning co-learning-stream mesh-dispatch surprise-salience host-sense-organ speech-organ native-host-instance text-tokenize rag-embed rag-index-codec rag-retrieve rag-ask form-cli-ask form-cli-router form-cli-judge confidence-weighted-vote lineage-discounted-vote form-cli-oracle-loop form-cli-sufficiency form-freq-check trust-row form-cli-ask-gate form-cli-staged-trace form-cli-request form-cli-carrier form-cli-ask-plus form-cli-surface-inquiry current-branch-landing form-cli form-cli-gguf-cell form-cli-main form-cli-repl"
 {
   for f in $SOURCES; do printf ';;;; ==== FILE: %s/%s.fk ====\n' "$S" "$f"; cat "$S/$f.fk"; done
   printf ';;;; ==== FILE: scripts/form_cli_bootstrap_proof.sh ====\n'; cat scripts/form_cli_bootstrap_proof.sh
