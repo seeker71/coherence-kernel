@@ -29,7 +29,7 @@ FORM_CLI_SRCS=(
     form-stdlib/form-native-resource-interfaces.fk form-stdlib/form-fs.fk
     form-stdlib/storage-port.fk form-stdlib/host-kernel-carrier.fk form-stdlib/fnri-standin.fk
     form-stdlib/fnri-receipt.fk form-stdlib/http-client.fk
-    form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk
+    form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/model-discovery.fk
     form-stdlib/q4k-dequant.fk form-stdlib/weight-load.fk
     form-stdlib/voice-traits.fk form-stdlib/nearest-shape.fk
     form-stdlib/co-learning.fk form-stdlib/co-learning-stream.fk form-stdlib/mesh-dispatch.fk
@@ -153,7 +153,7 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/fnri-standin.fk form-stdlib/fnri-receipt.fk
     form-stdlib/http-client.fk form-stdlib/line-grammar.fk form-stdlib/str-byte-at.fk
     form-stdlib/sha256.fk form-stdlib/hmac-sha256.fk form-stdlib/hex.fk
-    form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk
+    form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/model-discovery.fk
     form-stdlib/q4k-dequant.fk form-stdlib/weight-load.fk
     form-stdlib/voice-traits.fk form-stdlib/nearest-shape.fk
     form-stdlib/co-learning.fk form-stdlib/co-learning-stream.fk form-stdlib/mesh-dispatch.fk
