@@ -14,11 +14,16 @@
 ; second makes a body that can be talked to. `models` then `use <n>` is a runtime switch. FORM_DS4_BLOB
 ; is not, and it goes.
 ;
-; WHY THE ROOT IS AN ARGUMENT AND NOT A CONSTANT. fkwu has no getenv — the whole op table was read on
-; 2026-08-03 and there is no door to the environment — so a cell cannot expand `~`. Passing the root
-; is therefore a real argument, the kind only the caller can supply, not a knob standing in for a
-; question the body could have answered. If a getenv door is ever carried, md-default-roots is where
-; the home directory belongs and this comment is the reason.
+; WHY THE ROOT IS AN ARGUMENT AND NOT A CONSTANT. fkwu has no getenv — re-read on 2026-08-03: getenv
+; is declared in fkwu-uni.c and used for TMPDIR and by fk_conf, and it is bound to no Form op — so a
+; cell cannot expand `~`. Passing a root is therefore a real argument, the kind only the caller can
+; supply, not a knob standing in for a question the body could have answered. What the body CAN answer
+; from one named root is which OTHER model homes exist beside it, and md-kin-of asks the host that.
+;
+; WHY ROOTS ARE A LIST. Because one root was the same failure as one file. `~/models` is where a
+; person puts a model on purpose; ollama and huggingface_hub put theirs in caches under different
+; names, and the champion of this body's own registry — llama3.2:3b — lives in one of them under a
+; filename that is a hash. See md-kin-suffixes for the three witnessed here.
 ;
 ; WHAT IT READS. Only the header window: architecture and block count, the two facts that decide how a
 ; file must be run. It never pages the weights, so listing six models costs six small reads and not
@@ -28,12 +33,46 @@
 
 (do
     (defn md-header-bytes () 1048576)   ; the KV block lives at the front; a MiB has held every file here
-    (defn md-gguf? (name) (ge (str_find name ".gguf" 0) 0))
     (defn md-join (dir name) (str_concat dir (str_concat "/" name)))
+
+    ; ---- WHAT MAKES A FILE A MODEL: its own first four bytes, never its name. ----
+    ; `.gguf` was a NAME test, and a name test is the same wrongness as a switch one size smaller:
+    ; it trusts a label instead of looking. The champion of this registry — llama3.2:3b, the one
+    ; base.llama32-3b-metal decodes tokens from — is stored by ollama as
+    ;   ~/.ollama/models/blobs/sha256-dde5aa3fc5ff…
+    ; with NO extension at all, and the extension test called it "not a model" with total confidence.
+    ; Sixteen models on this host were invisible for that reason alone. GGUF's own first four bytes
+    ; are the magic "GGUF"; four bytes read is cheaper than any name convention and cannot be fooled
+    ; by a host that renames its files, so this is what the body asks.
+    (defn md-magic () "GGUF")
+    (defn md-gguf? (path)
+        (if (fs_is_dir path) 0
+            (if (str_eq (read_file_slice path 0 4) (md-magic)) 1 0)))
 
     ; architecture names its own block-count key, so the second read depends on the first
     (defn md-arch (src) (gmt-str src "general.architecture"))
-    (defn md-nlayer (src arch) (gmt-u32 src (str_concat arch ".block_count")))
+    ; …and not every architecture puts its depth under `<arch>.block_count`. `clip` (the moondream and
+    ; llava projectors on this host) declares `clip.vision.block_count`, so a single-key read returns
+    ; the sentinel for it. Two named keys, then an honest absence — never a plausible number.
+    (defn md-nlayer (src arch)
+        (do
+            (let n (gmt-u32 src (str_concat arch ".block_count")))
+            (if (eq n (gmt-absent)) (gmt-u32 src (str_concat arch ".vision.block_count")) n)))
+    (defn md-layers-str (src arch)
+        (do
+            (let n (md-nlayer src arch))
+            (if (eq n (gmt-absent)) "(header declares no block_count)" (int_to_str n))))
+
+    ; A BLOB'S IDENTITY IS NOT ITS FILENAME. ollama's naming lives in
+    ; ~/.ollama/models/manifests/<registry>/<library>/<model>/<tag>, a JSON document whose
+    ; `application/vnd.ollama.image.model` layer digest is the blob file's name. That is ollama's
+    ; ledger about the file. But the file also names ITSELF: `general.name` is in the same header
+    ; window this cell already reads, and it survives being copied, renamed, or reached through a
+    ; runtime that never heard of ollama. So the body asks the file, not the ledger — sha256-dde5aa3f…
+    ; answers "Llama 3.2 3B Instruct" without a manifest being opened.
+    (defn md-name (src)
+        (do (let n (gmt-str src "general.name"))
+            (if (str_eq n "") "(header names no model)" n)))
 
     (defn md-describe (path)
         (do
@@ -42,15 +81,23 @@
             (if (str_eq arch "")
                 (str_concat path "   (not a GGUF header this body can read — unfinished, not unsupported)")
                 (str_concat path (str_concat "   arch=" (str_concat arch
-                    (str_concat "  layers=" (int_to_str (md-nlayer src arch)))))))))
+                    (str_concat "  layers=" (str_concat (md-layers-str src arch)
+                        (str_concat "  name=" (md-name src))))))))))
 
     ; ---- the walk. One directory deep plus its immediate subdirectories, because that is how the
     ; models on this host are actually laid out (some loose, some in a per-model folder). ----
+    ; A path is listed once however many roots reach it: ~/models and a kin root derived from it can
+    ; overlap, and a second copy of one file is a second model to every reader downstream.
+    (defn md-path-in? (p ps)
+        (if (eq (len ps) 0) 0
+            (if (str_eq p (head ps)) 1 (md-path-in? p (tail ps)))))
+    (defn md-add (p acc) (if (eq (md-path-in? p acc) 1) acc (cons p acc)))
+
     (defn md-scan-files (dir names acc)
         (if (eq (len names) 0) acc
-            (do (let n (head names))
+            (do (let p (md-join dir (head names)))
                 (md-scan-files dir (tail names)
-                    (if (md-gguf? n) (cons (md-join dir n) acc) acc)))))
+                    (if (eq (md-gguf? p) 1) (md-add p acc) acc)))))
 
     ; Two levels, not one. The first pass found five of this host's six files: ds4-engine/gguf/ is a
     ; directory inside a directory, and a scan that stops at one level reports a smaller world with
@@ -76,7 +123,48 @@
             (let here (md-scan-files dir names acc))
             (if (le depth 0) here (md-scan-dirs dir names here depth))))
 
-    (defn md-find (root) (md-walk root (list) (md-depth)))
+    ; ---- ROOTS ARE A LIST, because a host keeps its models in more than one place. ----
+    ; One root was the same shape of answer as one file: a smaller world reported with a complete
+    ; world's confidence. This host keeps GGUFs in three places, all witnessed on 2026-08-03:
+    ;   ~/models                       what a person downloaded and put somewhere on purpose
+    ;   ~/.ollama/models/blobs         what ollama pulled — content-addressed, no extension
+    ;   ~/.cache/huggingface/hub       what huggingface_hub cached — models--<org>--<repo>/blobs/<sha>
+    ; and a fourth (lm-studio) is only absent from this list because it is absent from this host.
+    ; A convention nobody has witnessed here is UNFINISHED, not unsupported: add it below and it costs
+    ; one fs_is_dir when it is not there.
+    (defn md-walk-roots (roots acc)
+        (if (eq (len roots) 0) acc
+            (md-walk-roots (tail roots) (md-walk (head roots) acc (md-depth)))))
+    (defn md-find-in (roots) (md-walk-roots roots (list)))
+
+    (defn md-kin-suffixes ()
+        (list "/.ollama/models/blobs" "/.cache/huggingface/hub" "/models"))
+
+    ; the parent directory of a path — the last '/' decides, and a path with none is its own parent
+    (defn md-last-slash (s i best)
+        (if (ge i (str_len s)) best
+            (md-last-slash s (add i 1) (if (eq (ord (char_at s i)) 47) i best))))
+    (defn md-parent (p)
+        (do (let k (md-last-slash p 0 (sub 0 1)))
+            (if (lt k 0) p (substring p 0 k))))
+
+    ; The kin of a named root: the conventional model homes that ACTUALLY EXIST beside it. Every
+    ; candidate is a question to the host (fs_is_dir), never an assumption; a candidate that is the
+    ; root itself is dropped so one directory is not walked twice.
+    (defn md-kin-try (base sfx root acc)
+        (if (eq (len sfx) 0) acc
+            (do (let cand (str_concat base (head sfx)))
+                (md-kin-try base (tail sfx) root
+                    (if (str_eq cand root) acc
+                        (if (fs_is_dir cand) (md-add cand acc) acc))))))
+    (defn md-kin-of (root)
+        (md-kin-try (md-parent root) (md-kin-suffixes) root
+            (md-kin-try root (md-kin-suffixes) root (list))))
+
+    ; `md-find root` keeps its old signature and gains the host's other model homes: the caller names
+    ; the place they know, and the body adds the places it can SEE. Nothing is compiled in — a host
+    ; without ~/.ollama simply has no kin and the answer is the root alone.
+    (defn md-find (root) (md-find-in (cons root (md-kin-of root))))
 
     (defn md-report (paths i)
         (if (eq (len paths) 0) i
@@ -85,8 +173,16 @@
                 (md-report (tail paths) (add i 1)))))
 
     (defn md-list (root)
-        (do (print_str (str_concat "— models this body can see under " (str_concat root " —")))
+        (do (print_str (str_concat "— models this body can see under " (str_concat root " and its kin —")))
             (let found (md-find root))
+            (let n (md-report found 0))
+            (print_str (str_concat "  " (str_concat (int_to_str n) " found; choose one at runtime, none is compiled in")))
+            n))
+
+    (defn md-list-in (roots)
+        (do (print_str (str_concat "— models this body can see under "
+                                   (str_concat (int_to_str (len roots)) " named roots —")))
+            (let found (md-find-in roots))
             (let n (md-report found 0))
             (print_str (str_concat "  " (str_concat (int_to_str n) " found; choose one at runtime, none is compiled in")))
             n))
