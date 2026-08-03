@@ -1,0 +1,61 @@
+; emit-matvec-msl.fk — a Form cell EMITS the kernel and the operands; form-cli RUNS them on Metal.
+;
+; This closes the sentence "form-cli should be able to emit and run on metal" into two witnessed
+; halves that meet on disk. This cell writes an MSL kernel it composes itself and a model file in the
+; byte layout native/metal/fk-metal-carrier.m documents. Nothing here dispatches. Then:
+;
+;   form-cli metal-matvec <msl-path> form_fkwu_generic_matvec_f32 <model-path>
+;
+; reads both back through its own metal_matvec_f32 door (form-cli-repl.fk:74-82) and answers from the
+; GPU. Emit and run are separate verbs on purpose — the emitting cell can be read, diffed and banded
+; without a GPU in the room, and the running binary needs no Form source at all.
+;
+; THE OPERANDS ARE HAND-CHECKABLE, same as tests/metal-door-band.fk: w is 1..16 row-major, x is 1..4,
+; so y = 30 70 110 150 and sum = 360. A witness whose expected value only another program knows
+; cannot catch the two programs being wrong together.
+;
+; Writes to the paths given as FORM_MSL_OUT / FORM_MODEL_OUT if a caller sets them, else to the two
+; names below, relative to wherever it is run.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn em-nl () (byte_to_str 10))
+    (defn em-p2 (k) (if (le k 0) 1 (mul 2 (em-p2 (sub k 1)))))
+    (defn em-e2 (n e) (if (lt n 2) e (em-e2 (floor (div n 2)) (add e 1))))
+    (defn em-u32 (v)
+        (str_concat (byte_to_str (mod v 256))
+        (str_concat (byte_to_str (mod (floor (div v 256)) 256))
+        (str_concat (byte_to_str (mod (floor (div v 65536)) 256))
+                    (byte_to_str (mod (floor (div v 16777216)) 256))))))
+    (defn em-bits (n)
+        (if (eq n 0) 0
+            (do (let e (em-e2 n 0))
+                (add (mul (add e 127) 8388608)
+                     (sub (floor (div (mul n 8388608) (em-p2 e))) 8388608)))))
+    (defn em-f32 (n) (em-u32 (em-bits n)))
+    (defn em-seq (i n acc) (if (gt i n) acc (em-seq (add i 1) n (str_concat acc (em-f32 i)))))
+
+    (defn em-rows () 4)
+    (defn em-cols () 4)
+    (defn em-model ()
+        (str_concat (em-u32 (em-rows))
+        (str_concat (em-u32 (em-cols))
+        (str_concat (em-seq 1 (mul (em-rows) (em-cols)) "")
+                    (em-seq 1 (em-cols) "")))))
+
+    ; the kernel this body composes — the binding matches what the carrier documents
+    (defn em-body ()
+        "using namespace metal; kernel void form_fkwu_generic_matvec_f32(device const float *w [[buffer(0)]], device const float *x [[buffer(1)]], device float *y [[buffer(2)]], constant uint &rows [[buffer(3)]], constant uint &cols [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid >= rows) return; float a = 0.0f; for (uint j = 0; j < cols; j++) a += w[gid*cols + j] * x[j]; y[gid] = a; }")
+    (defn em-msl () (str_concat "#include <metal_stdlib>" (str_concat (em-nl) (em-body))))
+
+    (let msl-path "emitted-matvec.metal")
+    (let model-path "emitted-matvec.bin")
+    (write_file_text msl-path (em-msl))
+    (write_file model-path (em-model))
+    (print_str (str_concat "emitted " (str_concat msl-path
+               (str_concat " (" (str_concat (int_to_str (str_len (em-msl))) " bytes MSL)")))))
+    (print_str (str_concat "emitted " (str_concat model-path
+               (str_concat " (" (str_concat (int_to_str (str_len (em-model))) " bytes model)")))))
+    (print_str "expect: y=30 70 110 150  sum=360")
+    (str_len (em-model)))
