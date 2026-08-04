@@ -67,7 +67,32 @@ ids="$(printf '%s\n' "$out" | grep -oE 'FEEDBACK \([^)]*\): \[[0-9, ]*\]' | tail
 answer="$(printf '%s\n' "$out" | grep -A 1 'NATIVE DECODED CONTINUATION' | tail -1)"
 speed="$(printf '%s\n' "$out" | grep -oE 'generation [0-9.]+ t/s' | tail -1)"
 
+blob="$(printf '%s\n' "$out" | grep -oE '^ds4 blob: [^ ]+' | head -1 | sed 's/^ds4 blob: //')"
+
+# THE STREAM IS READ BEFORE IT IS QUOTED. form-stdlib/ds4-stream-sanity.fk's three readings —
+# reserved-block emission, single-id multiplicity, alternating-run length — proven in
+# form-stdlib/tests/ds4-stream-sanity-band.fk (verdict 255, five mutations refuted). This is the
+# reading whose absence let " the name, the<|place_holder_mm_span_0155|> detection device detection
+# device" be quoted for three days under 107 green gates. It is a floor, not an oracle: it refutes a
+# class, and a fluent confident wrong sentence passes it. ~/models/ds4-engine/ds4 answers truth.
+verdict=""
+if [[ -n "$ids" ]]; then
+    _fk="$ROOT/../fkwu"
+    if [[ -x "$_fk" ]]; then
+        pdir="$(mktemp -d -t ds4sanity)"; probe="$pdir/probe.fk"; trap 'rm -rf "$pdir"' EXIT
+        printf '; preludes: form-stdlib/ds4-stream-sanity.fk\n(dss-trip-count (list %s))\n' \
+               "$(printf '%s' "$ids" | tr -d '[],')" > "$probe"
+        trips="$(cd "$ROOT" && "$_fk" --src "$probe" 2>/dev/null | tail -1)"
+        case "$trips" in
+            0) verdict="stream sane (0 of 3 readings tripped)" ;;
+            1|2|3) verdict="STREAM DEGENERATE — $trips of 3 readings tripped (repetition, cycling, or a reserved token)" ;;
+        esac
+    fi
+fi
+
 printf '\n%s%s\n' "$PROMPT" "$answer"
 printf '\n  [form-native · 43 layers · %s · %ss wall · greedy, base-model continuation]\n' \
        "${speed:-speed unmeasured}" "$((t1 - t0))"
+printf '  [weights: %s]\n' "${blob:-unnamed}"
+[[ -n "$verdict" ]] && printf '  [%s]\n' "$verdict"
 printf '  [token ids: %s]\n' "${ids:-none}"
