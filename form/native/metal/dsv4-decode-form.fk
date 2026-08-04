@@ -223,6 +223,165 @@
                 (if (eq (dfd-rd32 o 4) 973079552) 1 0)
                 0)))
 
+    ; ═══════════════ RUNG 2: RMSNORM over the embedded row (reduce / apply) ═══════════════
+    ; The first kernel with real arithmetic, and therefore the first place the contract pragma is
+    ; load-bearing rather than precautionary: `sumsq + x[j]*x[j]` is a multiply feeding an add, which is
+    ; exactly what an unpinned compiler fuses.
+    ;
+    ; WHY reduce/apply AND NOT rmsnorm_wide. The oracle runs form_mla_rmsnorm_wide_f32 in production and
+    ; keeps reduce/apply "in the library as the read-back reference" (metal_dsv4_stack.sh:1075). The
+    ; reference pair is the right first rung: its fold is 32 lanes of contiguous spans plus one
+    ; simd_sum, which is a shape this cell can state exactly, where wide's fold is threadgroup-strided
+    ; and depends on a group size the door only gained today.
+    ;
+    ; THE DISPATCH SHAPE MATTERS AND IS NOT FREE. reduce is `if (lane >= 32u) return;` over
+    ; thread_position_in_grid and folds with metal::simd_sum, so it needs EXACTLY ONE SIMDGROUP: 32
+    ; threads capped to a 32-wide group. Dispatched free, the door would take
+    ; min(maxTotalThreadsPerThreadgroup, 32) — which is also 32 here, so this one happens to survive a
+    ; free dispatch. It is pinned anyway, because "correct by coincidence at this width" is not a
+    ; property the next width inherits.
+
+    (defn dfd-f32at (s o) (fd-value (dfd-rd32 s o) 8 23))
+    (defn dfd-f16at (s o) (fd-f16 (dfd-rd16 s o)))
+
+    ; the reference fold, in Form's own fp64, over the SAME f16 bytes whose widening bit-64 already
+    ; pinned. This is the independent anchor for the REDUCE step.
+    (defn dfd-sumsq (raw i n acc)
+        (if (ge i n) acc
+            (do (let v (dfd-f16at raw (mul i 2)))
+                (dfd-sumsq raw (add i 1) n (add acc (mul v v))))))
+
+    ; the reference apply, and the bar is against the VECTOR'S SCALE rather than each element's own
+    ; magnitude — the body's own precedent (overfine, corpus row 934): two folds that very nearly
+    ; cancel at one element make its relative error meaningless while the vector is fine.
+    (defn dfd-maxdiff (raw wraw got inv i n acc)
+        (if (ge i n) acc
+            (do (let r (mul (mul (dfd-f16at raw (mul i 2)) inv) (dfd-f32at wraw (mul i 4))))
+                (let d (abs (sub (dfd-f32at got (mul i 4)) r)))
+                (dfd-maxdiff raw wraw got inv (add i 1) n (if (gt d acc) d acc)))))
+    (defn dfd-maxref (raw wraw inv i n acc)
+        (if (ge i n) acc
+            (do (let r (abs (mul (mul (dfd-f16at raw (mul i 2)) inv) (dfd-f32at wraw (mul i 4)))))
+                (dfd-maxref raw wraw inv (add i 1) n (if (gt r acc) r acc)))))
+
+    ; eps as the file itself carries it. 897988541 = 0x358637BD = f32(1e-6), derived by hand
+    ; (107<<23 | 407485) and confirmed to decode to 9.999999974752427e-07 — the exact value the Go
+    ; arm's manifest walk printed for deepseek4.attention.layer_norm_rms_epsilon. Three roads.
+    (defn dfd-eps-bits () 897988541)
+
+    ; ── SYNTHETIC TRUTH for the pair, and it is the strongest bit in this rung ──
+    ; The real-row anchors below are fp64-vs-fp32 MAGNITUDE checks with a stated tolerance; this one is
+    ; EXACT and hand-computed, which is the difference between "nothing structural is broken" and "this
+    ; is the right number". x=2.0, g=1.0, eps=0:
+    ;     sumsq = 4n, ms = 4, rms = 2, inv = 0.5, out = 1.0 — every step exact in f32, no rounding.
+    ; 2.0 = 0x40000000, 1.0 = 0x3F800000, 0.5 = 0x3F000000, written down without a tool.
+    ; A wrong n, a lane span that misses or double-counts, a dropped g, or an inv that is not the
+    ; reciprocal all move the answer off 0x3F800000.
+    (defn dfd-fill (h i n v)
+        (if (ge i n) 0 (do (metal_buf_write h (mul i 4) (dfd-u32 v)) (dfd-fill h (add i 1) n v))))
+    (defn dfd-count-eq (s i n want acc)
+        (if (ge i n) acc
+            (dfd-count-eq s (add i 1) n want (if (eq (dfd-rd32 s (mul i 4)) want) (add acc 1) acc))))
+
+    (defn dfd-rmsnorm-synth (n)
+        (do (let msl (str_concat (dfd-msl-pragma) (mla-msl-unit)))
+            (let pr (metal_pipeline msl "form_mla_rmsnorm_reduce_f32"))
+            (let pa (metal_pipeline msl "form_mla_rmsnorm_apply_f32"))
+            (let xb (metal_buf_alloc (mul n 4)))
+            (let gb (metal_buf_alloc (mul n 4)))
+            (let ob (metal_buf_alloc (mul n 4)))
+            (let ib (metal_buf_alloc 4))
+            (let f1 (dfd-fill xb 0 n 1073741824))
+            (let f2 (dfd-fill gb 0 n 1065353216))
+            (let e1 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 xb) (dfd-u32 ib)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 n) (dfd-u32 0)))) 32 0) 32))
+            (let iv (metal_buf_read ib 0 4))
+            (let e2 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 xb) (dfd-u32 gb))
+                                                                (str_concat (dfd-u32 ob) (dfd-u32 ib))))
+                            (str_concat (dfd-u32 1) (dfd-u32 n))) n))
+            (let out (metal_buf_read ob 0 (mul n 4)))
+            (print (str_concat "SYNTH inv_bits=" (str_concat (int_to_str (dfd-rd32 iv 0)) " (want 1056964608)")))
+            (print (str_concat "SYNTH lanes_eq_one=" (str_concat (int_to_str (dfd-count-eq out 0 n 1065353216 0))
+                   (str_concat " of " (int_to_str n)))))
+            (if (eq (dfd-rd32 iv 0) 1056964608)
+                (if (eq (dfd-count-eq out 0 n 1065353216 0) n) 1 0) 0)))
+
+    (defn dfd-rmsnorm-rung (path token)
+        (do
+            (let src (dfd-src path))
+            (let n (dfd-td0 src "token_embd.weight"))
+            (let eabs (dfd-tabs src path "token_embd.weight"))
+            (let ebytes (dfd-tbytes src "token_embd.weight"))
+            (let gabs (dfd-tabs src path "blk.0.attn_norm.weight"))
+            (let gty (dfd-ttype src "blk.0.attn_norm.weight"))
+            (let gn (dfd-td0 src "blk.0.attn_norm.weight"))
+            (let gbytes (dfd-tbytes src "blk.0.attn_norm.weight"))
+            (print (str_concat "GEOM attn_norm_abs=" (int_to_str gabs)))
+            (print (str_concat "GEOM attn_norm_type=" (int_to_str gty)))
+            (print (str_concat "GEOM attn_norm_n=" (int_to_str gn)))
+
+            (let msl (str_concat (dfd-msl-pragma) (mla-msl-unit)))
+            (let pe (metal_pipeline (dfd-embed-msl) "form_dsv4_embed_f16_u32"))
+            (let pr (metal_pipeline msl "form_mla_rmsnorm_reduce_f32"))
+            (let pa (metal_pipeline msl "form_mla_rmsnorm_apply_f32"))
+
+            (let wh (metal_buf_from_file path eabs ebytes))
+            (let gh (metal_buf_from_file path gabs gbytes))
+            (let xb (metal_buf_alloc (mul n 4)))
+            (let ob (metal_buf_alloc (mul n 4)))
+            (let ib (metal_buf_alloc 4))
+            (let rowoff (mul (mul token n) 2))
+
+            (let e0 (metal_enqueue pe
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 wh) (dfd-u32 xb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 rowoff) (dfd-u32 n)))) n))
+            ; reduce — 32 threads, group pinned to 32 so simd_sum folds one simdgroup
+            (let e1 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 xb) (dfd-u32 ib)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 n) (dfd-u32 (dfd-eps-bits)))))
+                32 0) 32))
+            (let e2 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 xb) (dfd-u32 gh))
+                                                                (str_concat (dfd-u32 ob) (dfd-u32 ib))))
+                            (str_concat (dfd-u32 1) (dfd-u32 n))) n))
+            (print (str_concat "ENQ embed/reduce/apply=" (str_concat (int_to_str e0)
+                   (str_concat "/" (str_concat (int_to_str e1) (str_concat "/" (int_to_str e2)))))))
+
+            (let ivb (metal_buf_read ib 0 4))
+            (let got (metal_buf_read ob 0 (mul n 4)))
+            (let inv (dfd-f32at ivb 0))
+            (print (str_concat "GPU inv=" (float_to_str inv)))
+
+            ; --- anchor 1: the REDUCE, via implied mean-square. No sqrt is needed on this side, which
+            ; is the point: 1/(inv*inv) - eps must be the mean square the fp64 fold computed.
+            (let raw (eqr-of-file path (add eabs rowoff) (mul n 2)))
+            (let refms (div (dfd-sumsq raw 0 n 0.0) n))
+            (let impms (sub (div 1.0 (mul inv inv)) (fd-value (dfd-eps-bits) 8 23)))
+            (let rel1 (div (abs (sub impms refms)) refms))
+            (print (str_concat "ref_ms (x1e6)=" (float_to_str (mul refms 1000000.0))))
+            (print (str_concat "implied_ms (x1e6)=" (float_to_str (mul impms 1000000.0))))
+            (print (str_concat "REL reduce (parts per billion)=" (float_to_str (mul rel1 1000000000.0))))
+
+            ; --- anchor 2: the APPLY, against the vector's scale
+            (let wraw (eqr-of-file path gabs (mul n 4)))
+            (let md (dfd-maxdiff raw wraw got inv 0 n 0.0))
+            (let mr (dfd-maxref raw wraw inv 0 n 0.0))
+            (let rel2 (div md mr))
+            (print (str_concat "max|gpu-ref| (x1e9)=" (float_to_str (mul md 1000000000.0))))
+            (print (str_concat "max|ref|=" (float_to_str mr)))
+            (print (str_concat "REL apply (parts per billion)=" (float_to_str (mul rel2 1000000000.0))))
+            (print (metal_status))
+            ; rowaddr and gabs are RETURNED so the band can pin them. Without that these two
+            ; relative errors are COMOVED: the fp64 reference reads `raw` at the same computed row and
+            ; `wraw` at the same computed weight address the GPU was handed, so a wrong row or a wrong
+            ; norm tensor moves BOTH sides and the agreement is automatic. Measured, not reasoned —
+            ; mutation N5 (wrong row) answered 2047 and N1 (output_norm for attn_norm) answered 1791
+            ; where 767 was predicted. Same defect as M2, twice more, in one rung.
+            (cons rel1 (cons rel2 (cons gabs (cons (metal_status)
+                (cons n (cons (add eabs rowoff) 0))))))))
+
     ; ================= UNFINISHED, named so it cannot be mistaken for done =================
     ; - the 43-layer stack. The oracle's runner is ~1200 lines of essential orchestration beyond this
     ;   rung: two routing regimes, six expert quantizations, the 20-iteration hyper-connection sinkhorn,

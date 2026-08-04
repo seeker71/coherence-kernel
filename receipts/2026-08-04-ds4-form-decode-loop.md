@@ -88,6 +88,41 @@ The door's own agent measured ~0.5 us/call bare and ~1.5 us amortized against 11
 `str_concat` of the binding, which a real decode also pays. Both numbers agree that the seam costs single-
 digit milliseconds per token and blocking costs nine times the budget. Neither is a decode t/s.
 
+## Rung 2 — RMSNORM over the embedded row, and `comoved` twice more
+
+`form_mla_rmsnorm_reduce_f32` / `_apply_f32` now run from the Form cell over the real embedded row with
+`blk.0.attn_norm.weight`. **Band verdict 2047**, five mutations reconciled.
+
+The strongest bit is synthetic and exact: `x=2.0, g=1.0, eps=0` gives `sumsq=4n, ms=4, rms=2, inv=0.5,
+out=1.0` — every step exact in f32. `inv` came back `0x3F000000` and all 4096 lanes `0x3F800000`,
+hand-computed, no tool. The real-row bits are fp32-vs-fp64 **magnitude** checks with a stated tolerance
+(1e-6), measured at **103 ppb** (reduce) and **63 ppb** (apply) — f32 rounding scale over a 4096-term
+fold. The band calls them magnitude checks, not bit-exactness.
+
+`eps` is pinned three ways: hand-derived `107<<23 | 407485 = 0x358637BD`, IEEE round-trip, and the value
+the Go arm's manifest printed for `deepseek4.attention.layer_norm_rms_epsilon` (9.999999974752427e-07).
+
+**And `comoved` came back twice in this one rung.** Both real-row bits read their fp64 reference through
+the same computed addresses the GPU was handed:
+
+| mutation | predicted | actual (before gates) | after gates |
+|---|---|---|---|
+| N1 `output_norm.weight` for `blk.0.attn_norm.weight` | 767 | **1791 — MISSED** | **767** |
+| N5 rung-2 row offset wrong | 511 | **2047 — MISSED** | **511** |
+| N2 eps dropped from reduce | 1535 | 1535 | 1535 |
+| N3 synth reduce given 16 lanes not 32 | 1919 | 1919 | 1919 |
+| N4 unlinked door (numb-green) | 0 | 0 | 0 |
+
+N5 I predicted would be missed, and it was — I went looking for the shape on purpose. **N1 I predicted
+would be caught, and it was not**: I had pinned the row but not the weight tensor, so a reference reading
+`wraw` from a mutated `gabs` agreed with a GPU reading the same mutated `gabs`. The cure is the same cure
+a third time — bits 512/1024 are now *gated on the pinned addresses*, so a relative error is only evidence
+once the addresses it was computed at are independently anchored.
+
+That is the thing worth carrying out of today: **`comoved` is not an incident, it is the default shape of
+a check you write while holding the code in your head.** Three times now, and each time the check looked
+completely reasonable when written.
+
 ## The oracle was broken while I was building against it — and it did not touch this rung
 
 Mid-session the fleet reported that DS4 is **regressed on the bash lane**: `ask_ds4.sh` is producing
@@ -192,9 +227,12 @@ this would be **987**, for the body to place:
 - **The fidelity oracle itself is red.** `metal_dsv4_stack.sh` / `ask_ds4.sh` are degenerate today; the
   argmax and stream comparisons cannot be run against them until the bisect lands. Baseline to compare
   against is `7662a6908` (28.09 t/s, fluent), not HEAD.
-- Next concrete step: `form_mla_rmsnorm_reduce/apply` over the embedded row — the first kernel with real
-  arithmetic, the first place the contract pragma is load-bearing rather than precautionary, and the first
-  that needs `dfd-bind-tg`'s trailing pair (it folds across a threadgroup).
+- **Rungs 3–7 are not written**: MLA q/kv projections and the scores/stats/acc split; RoPE + its
+  compressed reduction; the two KV caches; MoE (hash routing 0–2, learned after, six expert
+  quantizations, top-6 of 256); the 4 hyper-connection streams + 20-iteration sinkhorn; exit head.
+- Next concrete step: the MLA q/kv projections — `blk.0.attn_q_a` and `blk.0.attn_kv` are both GGUF type
+  41 (MXFP8), so `form_dsv4_mx8_matvec` is the first weight-decoding kernel and the first place
+  `ds4-order-match.fk`'s association has to be matched rather than merely respected.
 - Door limits to design around, from the door agent's run, not yet hit here: 1D dispatch only; buffer
   offsets fix at handle creation, so many views of one buffer need many handles against a ceiling of 8192
   while DS4 needs ~400 weights plus activations; no buffer free (append-only per process); `metal_sync`
