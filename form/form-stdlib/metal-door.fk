@@ -1,0 +1,124 @@
+; metal-door.fk — the body's side of the HANDLE door, so a Form cell can hold a decode loop.
+;
+; WHAT WAS MISSING. fk-metal-carrier.m landed eight primitives (metal_pipeline, metal_buf_alloc,
+; metal_buf_from_file, metal_buf_write, metal_enqueue, metal_sync, metal_buf_read, metal_status)
+; and stated their contract in bytes: the binding argument to metal_enqueue is a little-endian
+; u32 stream, and a constant is four raw bytes that Metal hands to `setBytes`. Nothing in the body
+; could WRITE those bytes. Every existing Metal lane wrote them from Swift, which is why every
+; existing Metal lane has a host holding its loop. This cell is the missing half — after it, the
+; only thing crossing to the host is the model file's bytes.
+;
+; THE THREE THINGS IT ADDS, and why each is not decoration:
+;
+;   md-le32     an int -> its four little-endian bytes, as a Form string. `byte_to_str` gives one
+;               byte and `str_concat` is binary, so this is four calls, and it is exact for the
+;               whole u32 range because Form's ints are 62-bit tagged words, not floats.
+;
+;   md-f32-bits a float -> the u32 IEEE-754 binary32 word that Metal will read back as that float.
+;               Three of the kernels this door has to drive take a `constant float&` — RMSNorm's
+;               eps, RoPE's freq_base, attention's 1/sqrt(head_dim) — and a `setBytes` constant is
+;               four bytes with no type. Without this the body could dispatch every matvec in a
+;               model and still not say what epsilon to normalize with.
+;               It is built out of format-arith.fk's own pieces rather than a second float
+;               decomposition: fq-exponent finds e with a/2^e in [1,2), fq-pow2 scales by an exact
+;               power of two, and fq-rne is ROUND-TO-NEAREST-EVEN, which is the rounding binary32
+;               actually uses. Halving and doubling are exact in binary floating point, and
+;               (m - 1) * 2^23 is exact for m in [1,2), so the ONLY rounding in the whole path is
+;               the one fq-rne performs, in the place the IEEE format performs it.
+;               RADIUS, ASKED NOT ASSUMED: normals only. A magnitude whose exponent falls outside
+;               [-126, 127] is REFUSED with -1 rather than encoded to a subnormal or an infinity
+;               that would dispatch and produce a plausible wrong number. Zero is 0 (and -0 is
+;               returned as +0: the sign of a zero epsilon changes no kernel here, and inventing a
+;               distinction the caller cannot use would be the more dishonest choice).
+;
+;   md-bind     the binding string the carrier's header specifies, built from two lists:
+;                   u32 n_buf | u32 handle[n_buf] | u32 n_const | u32 value[n_const]
+;               Buffers bind at buffer(0 .. n_buf-1); constants at buffer(n_buf ..). The layout is
+;               the CELL's to decide — the carrier knows nothing about what a weight is — so the
+;               cell that decides it is the cell that writes it.
+;
+; THE CANARY IS NOT OPTIONAL. Every primitive in this door but one answers an integer, and an
+; unbound name under axiom 5 recovers to `nothing` and answers 0. A door that was never linked, a
+; door that refused, and a typo all answer 0. md-door-live? reads metal_status — the one primitive
+; that SPEAKS — and demands to see `metal_linked=true` AND `metal_door=handle` before any caller
+; believes a handle. `metal_linked=true` alone is not enough: the matvec-only carrier answers that
+; too, and under it every handle call is numb.
+;
+; md-status-has? is a substring test over the status text and nothing more. It is written here
+; rather than borrowed so that the canary itself has no dependency that could go numb.
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk
+;
+; Proven by: form/native/metal/tests/kat-exit-handle-band.fk and llama-token-handle-band.fk, bit 1
+;            of each (the canary) and every bit above it (the bytes). md-f32-bits was additionally
+;            gated against C's own binary32 on twelve values — 1.0, 0.5, 2.0, -1.0, 1e-6, 1e-5,
+;            500000.0, 0.0, 3.0, 1/sqrt(128), and two out-of-range magnitudes it must REFUSE — with
+;            each expected word written down before the run. All twelve agreed and both refusals
+;            refused.
+
+(do
+    ; ---- bytes ------------------------------------------------------------------------------
+    ; A small integer power, for md-byte-at's 256^k. `mul` on ints is exact here (256^3 is far
+    ; inside the tagged-word range) and this avoids reaching for a float pow and rounding back.
+    ; DEFINED BEFORE ITS CALLER, and that is not style: a forward reference in this body binds
+    ; numb-empty on the flattening arm, so a name used above its definition answers nothing and
+    ; the fold that reads it prints a plausible zero.
+    (defn fq-pow-int (b n) (if (eq n 0) 1 (mul b (fq-pow-int b (sub n 1)))))
+
+    ; One byte of v at byte position k, little-endian. `div` on two ints is integer division
+    ; (probed, not assumed: (div 7 2) is 3), so this is a shift by 8k without a shift op.
+    (defn md-byte-at (v k) (mod (div v (fq-pow-int 256 k)) 256))
+
+    (defn md-le32 (v)
+        (str_concat (byte_to_str (md-byte-at v 0))
+        (str_concat (byte_to_str (md-byte-at v 1))
+        (str_concat (byte_to_str (md-byte-at v 2))
+                    (byte_to_str (md-byte-at v 3))))))
+
+    ; ---- binary32 ---------------------------------------------------------------------------
+    ; The mantissa field for a POSITIVE normal a: scale into [1,2) by an exact power of two, take
+    ; the fraction, and round it to 23 bits the way the format rounds — nearest, ties to even.
+    (defn md-f32-mant (a e) (float_to_int (fq-rne (mul (sub (div a (fq-pow2 e)) 1.0) 8388608.0))))
+
+    ; A mantissa that rounded all the way up to 2^23 is the value 2.0 in disguise: it belongs one
+    ; exponent higher with a zero fraction. Handled rather than clamped, because clamping here
+    ; would silently return the largest float BELOW the answer.
+    (defn md-f32-word (e m)
+        (if (eq m 8388608)
+            (md-f32-word (add e 1) 0)
+            (if (lt e (sub 0 126)) (sub 0 1)
+            (if (gt e 127) (sub 0 1)
+                (add (mul (add e 127) 8388608) m)))))
+
+    (defn md-f32-pos (a) (md-f32-word (fq-exponent a) (md-f32-mant a (fq-exponent a))))
+
+    ; The sign bit, kept separate so a refusal survives it: -1 must stay -1 and not become
+    ; 2147483647, which is a perfectly well-formed float word and would dispatch.
+    (defn md-f32-neg (b) (if (lt b 0) b (add b 2147483648)))
+
+    (defn md-f32-bits (x)
+        (if (eq x 0.0) 0
+        (if (lt x 0.0)
+            (md-f32-neg (md-f32-pos (sub 0.0 x)))
+            (md-f32-pos x))))
+
+    ; ---- the binding string -----------------------------------------------------------------
+    (defn md-le32-list (xs acc)
+        (if (eq (len xs) 0) acc
+            (md-le32-list (tail xs) (str_concat acc (md-le32 (head xs))))))
+
+    (defn md-bind (bufs consts)
+        (str_concat (md-le32 (len bufs))
+        (str_concat (md-le32-list bufs "")
+        (str_concat (md-le32 (len consts))
+                    (md-le32-list consts "")))))
+
+    ; ---- the canary -------------------------------------------------------------------------
+    (defn md-status-has? (needle) (ge (str_find (metal_status) needle 0) 0))
+
+    (defn md-door-live?
+        ()
+        (if (md-status-has? "metal_linked=true")
+            (md-status-has? "metal_door=handle")
+            false))
+    0)
