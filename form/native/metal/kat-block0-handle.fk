@@ -1,0 +1,154 @@
+; kat-block0-handle.fk — KAT-Coder block 0's front half through the HANDLE DOOR, and the defect
+; the door-in oracle could not see.
+;
+; WHAT MOVED. metal_kat_block0.sh proved the door in on 2026-08-03 and again today (re-witnessed,
+; VERDICT PASS: embed row 100 -> 1578/2048 nonzero max |w| 0.051116943; q||k||v -> 8080/8192
+; nonzero; conv -> 8080/8192). It proved it through a Swift runner the shell wrote at run time.
+; This cell is the same four stages with the loop's side in the body: no swiftc, no metallib on
+; disk, and the only host crossing is metal_buf_from_file reading the model file's bytes. The rung
+; discipline is llama-token-handle.fk's: one block proven against its oracle BEFORE block 1 exists.
+;
+; WHAT THIS IS AND IS NOT — the oracle's own words carried forward. attn_norm, the fused q||k||v
+; projection and the causal conv, at real width, on real weights. NOT a completed block and NOT a
+; token: the delta rule, the gates, ssm_out and the 256-expert MoE are not wired here, and the
+; pipeline map (kat-coder-pipeline-map.fk) prices what remains at six MSL gaps and ~3300 dispatches
+; per token.
+;
+; THE DEFECT, FOUND BY READING THE KERNEL BEFORE REPRODUCING IT. form_gdn_conv_f32 folds
+;
+;     acc = acc + win[b + j] * w[j]                                  (gated-deltanet-msl.fk)
+;
+; w indexed by TAP alone. The lane that proved that kernel (metal_gdn_gpu.sh) fed it the demo's
+; taps, one set shared by every channel, so w[j] was RIGHT there. blk.0.ssm_conv1d.weight is
+; 4 x 8192 — per-channel taps, "each channel convolved with its own taps" in the Form conv cell's
+; own words — and the block0 oracle binds that whole tensor at its base. So every channel folds
+; CHANNEL 0's taps, and the oracle's checks (nonzero, finite) cannot see it: probed today, channel
+; 0's taps are (0.00337, 0.00549, -0.06640, -0.00383) and channel 1's are different numbers
+; entirely, so the broadcast is live, not latent. This cell reproduces the oracle's binding EXACTLY
+; for the agreement gate — a gate against an oracle must run the oracle's arithmetic — and runs the
+; corrected depthwise kernel BESIDE it:
+;
+;     acc = acc + win[b + j] * w[c * kw + j]                          (kxb-convc-msl, here)
+;
+; gated bit-exact against Form's own fold of the file's own taps. The corrected kernel is authored
+; HERE, not in gated-deltanet-msl.fk, for the same reason llama-token-handle.fk authored its copy
+; kernel locally: that cell's text is a cache key other proven lanes compile against, and the
+; repair belongs there only when a lane that OWNS it lands it. Until then the correction exists,
+; is proven, and is one str_concat from home.
+;
+; EPS IS THE FILE'S. qwen35moe.attention.layer_norm_rms_epsilon, read from the KV
+; (gmt-f32), encoded by md-f32-bits. Probed today: the KV holds 9.999999974752427e-07, which IS
+; binary32's nearest to 1e-6 — so the oracle's hardcoded 1e-6 happens to agree with the file, and
+; now nothing depends on that happening.
+;
+; FP CONTRACTION IS OFF, BY THE CELL'S OWN PRAGMA. The oracle compiles with -ffp-contract=off; the
+; handle door's metal_pipeline compiles with the default, which FUSES a*b+c into fma and diverges
+; in the last bit (fk-metal-carrier.m's own measurement, 973079552 vs 973078528). The carrier says
+; the fix belongs to the Form cell, so this cell emits `#pragma clang fp contract(off)` at the head
+; of its unit. The two landed handle lanes predate this pragma and matched their oracles anyway
+; (witnessed: 12/12 ids, argmax 3637); this cell's gates are BIT-EXACT gates, so it takes no such
+; chance.
+;
+; Kin: form-stdlib/metal-door.fk (the bytes), form-stdlib/kat-coder-embed.fk (kce-w — the Form
+;      Q3_K reference), form-stdlib/gated-deltanet-msl.fk (the conv attestant this corrects),
+;      form-stdlib/kat-coder-pipeline-map.fk (what remains), native/metal/metal_kat_block0.sh
+;      (the oracle this must agree with).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/q8-0-msl.fk form-stdlib/q3k-msl.fk form-stdlib/q4k-dequant.fk form-stdlib/q4k-msl.fk form-stdlib/gated-deltanet-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/mla-msl.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/kat-coder-embed.fk form-stdlib/metal-door.fk
+;
+; Proven by: form/native/metal/tests/kat-block0-handle-band.fk
+
+(do
+    ; ── the corrected depthwise conv: tap j of CHANNEL c, nothing else changed ────────────────
+    (defn kxb-convc-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* win [[buffer(0)]], device const float* x [[buffer(1)]], device const float* w [[buffer(2)]], device float* y [[buffer(3)]], constant uint& nch [[buffer(4)]], constant uint& kw [[buffer(5)]], uint c [[thread_position_in_grid]]) { if (c >= nch) return; uint b = c * kw; for (uint j = 0u; j + 1u < kw; ++j) { win[b + j] = win[b + j + 1u]; } win[b + kw - 1u] = x[c]; float acc = 0.0f; for (uint j = 0u; j < kw; ++j) { acc = acc + win[b + j] * w[b + j]; } y[c] = acc; }")))
+
+    ; ── the unit: the oracle's emission, verbatim, plus the correction and the pragma ─────────
+    (defn kxb-msl ()
+        (str_concat "#include <metal_stdlib>\n#pragma clang fp contract(off)\n"
+        (str_concat (q80-msl-unit "form_q8_0_dequant_f32" "form_q8_0_matvec_f32" "form_q8_0_matvec_lane_f32")
+        (str_concat "static inline float fh16(uint b) { return q6k_f16(int(b)); }"
+        (str_concat (q3m-msl-appendix)
+        (str_concat (q4m-matvec-msl "form_q4_k_matvec_f32")
+        (str_concat (gdm-conv-msl "form_gdn_conv_f32")
+        (str_concat (mla-msl-spine)
+        (str_concat (mla-rmsnorm-body)
+                    (kxb-convc-msl "form_gdn_convc_f32"))))))))))
+
+    ; ── byte pricing, per declared ggml type; 0 for anything unpriced, so it refuses to map ───
+    (defn kxb-bytes (ty n)
+        (if (eq ty 0)  (mul n 4)
+        (if (eq ty 8)  (mul (div n 32) 34)
+        (if (eq ty 11) (mul (div n 256) 110)
+        (if (eq ty 12) (mul (div n 256) 144)
+            0)))))
+
+    ; ── readback: f32 value at word i of a metal_buf_read string ──────────────────────────────
+    (defn kxb-word (s i)
+        (add (str_byte_at s (mul i 4))
+        (add (mul (str_byte_at s (add (mul i 4) 1)) 256)
+        (add (mul (str_byte_at s (add (mul i 4) 2)) 65536)
+             (mul (str_byte_at s (add (mul i 4) 3)) 16777216)))))
+    (defn kxb-f32 (s i) (fd-value (kxb-word s i) 8 23))
+
+    ; ── folds over a readback ─────────────────────────────────────────────────────────────────
+    (defn kxb-nz-go (s i n acc)
+        (if (ge i n) acc
+            (kxb-nz-go s (add i 1) n (add acc (if (eq (kxb-f32 s i) 0.0) 0 1)))))
+    (defn kxb-nz (s n) (kxb-nz-go s 0 n 0))
+
+    (defn kxb-differ-go (a b i n acc)
+        (if (ge i n) acc
+            (kxb-differ-go a b (add i 1) n (add acc (if (eq (kxb-word a i) (kxb-word b i)) 0 1)))))
+    (defn kxb-differ (a b n) (kxb-differ-go a b 0 n 0))
+
+    ; ── the Form Q3_K reference row, decoded once and carried ─────────────────────────────────
+    (defn kxb-embrow-go (src k n acc)
+        (if (ge k n) (reverse acc) (kxb-embrow-go src (add k 1) n (cons (kce-w src k) acc))))
+    (defn kxb-embrow (t) (kxb-embrow-go (kce-row-src t) 0 (kce-embed-ne0) (empty)))
+
+    ; device word == RNE(binary32) of the Form value, for every one of the 2048 — with ONE stated
+    ; equivalence: a zero agrees with a zero of either sign. The device's Q3_K fold produces -0.0
+    ; (word 2147483648) where a negative quant multiplies a zero, Form's fp64 fold carries -0 too,
+    ; and md-f32-bits collapses both to +0 by its own documented choice. The proven precedent
+    ; (llama gate 2) compares VALUES, where -0 == 0; witnessed here 2026-08-04: 252 of embed row
+    ; 100's 470 zeros are negative on the device, and a word-only compare called them mismatches.
+    (defn kxb-word-zero? (w) (eq (mod w 2147483648) 0))
+    (defn kxb-embed-agree-go (s vals i acc)
+        (if (eq (len vals) 0) acc
+            (kxb-embed-agree-go s (tail vals) (add i 1)
+                (add acc
+                    (do (let w (kxb-word s i))
+                        (if (eq w (md-f32-bits (head vals))) 1
+                            (if (eq (head vals) 0.0) (if (kxb-word-zero? w) 1 0) 0)))))))
+    (defn kxb-embed-agree (s vals) (kxb-embed-agree-go s vals 0 0))
+
+    ; ── the fp64 RMSNorm reference, over the Form-decoded row and the file's own gains ────────
+    (defn kxb-ssq (vals acc) (if (eq (len vals) 0) acc (kxb-ssq (tail vals) (add acc (mul (head vals) (head vals))))))
+    (defn kxb-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+
+    ; worst relative error over every element whose reference magnitude clears the floor;
+    ; the floor keeps a near-zero reference from turning a last-bit wobble into a giant ratio.
+    ; vals is CONSUMED as the walk advances — an (nth vals i) here would re-walk the list from its
+    ; head every element and turn 2048 comparisons into two million steps.
+    (defn kxb-norm-worst-go (s vals gains inv i worst)
+        (if (eq (len vals) 0) worst
+            (do (let ref (mul (mul (head vals) inv) (ewl-f32 gains (mul i 4))))
+                (kxb-norm-worst-go s (tail vals) gains inv (add i 1)
+                    (if (gt (kxb-abs ref) 0.0001)
+                        (do (let e (kxb-abs (div (sub (kxb-f32 s i) ref) ref)))
+                            (if (gt e worst) e worst))
+                        worst)))))
+
+    ; ── the corrected conv's own reference: position 0, zero window, y[c] = fl(x[c] * tap3[c]) ─
+    (defn kxb-convc-agree-go (yc xq taps c n step acc)
+        (if (ge c n) acc
+            (kxb-convc-agree-go yc xq taps (add c step) n step
+                (add acc
+                    (do (let ref (mul (kxb-f32 xq c) (ewl-f32 taps (mul (add (mul c 4) 3) 4))))
+                        (let w (kxb-word yc c))
+                        (if (eq w (md-f32-bits ref)) 1
+                            (if (eq ref 0.0) (if (kxb-word-zero? w) 1 0) 0)))))))
+    0)
