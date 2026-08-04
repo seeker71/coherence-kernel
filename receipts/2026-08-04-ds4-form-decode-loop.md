@@ -165,6 +165,38 @@ is reported as a wrong one.
 Rung 3 was pinned *before* the mutations rather than after: bit 8192 is gated on bit 4096 and on the
 row pin from the start, because by then `comoved` had already cost three bits.
 
+## Rung 4 — q_b, the rank norms, headrms, and the fold-ORDER witness
+
+The chain now runs eleven dispatches under ONE sync from the Form cell:
+**embed -> rmsnorm -> {q_a matvec, kv matvec} -> {q_a_norm, kv_a_norm rank rmsnorms} -> q_b matvec
+(32768 x 1024, type 41) -> headrms over 64 heads.** Band verdict **524287**. 21 handles of 8192.
+
+The new instrument is the **fold-order witness** (bit 16384), built once for every rung after this,
+because from the attention split onward order is the whole question and the uniform synthetics are
+association-blind by construction. Weights 1.0, `x[0] = 2^24`, `x[1..31] = 1.0`: fp64 truth is
+`2^24+31`; the kernel's stated ascending in-group fold lands each `+1` on a tie-to-even that rounds
+BACK to `2^24`, so the f32 answer must be EXACTLY `0x4B800000` — a reversed or pairwise fold answers
+`2^24+32`, sixteen bits away. Verified by f32-step simulation before the kernel ran. The GPU answered
+`1266679808` — ascending, as `ds4-order-match.fk` requires.
+
+Per-step fp64 references, judged against the vector's scale, all under the 1e-6 bar:
+q_a_norm **120 ppb**, kv_a_norm **77 ppb**, q_b **178 ppb**, headrms **429 ppb** (higher because the
+kernel's mla_sqrt is f32 Newton against the reference's fp64 Newton — still 2000x under the bar). The
+chain is covered by induction: each step's reference reads the GPU's INPUT for that step — the
+previous step's separately-checked output buffer — and weights at pinned addresses.
+
+| mutation | predicted | actual |
+|---|---|---|
+| baseline | 524287 | **524287** |
+| Q1 order-synth degraded to x[0]=1.0 | 507903 | **507903** |
+| Q2 q_a_norm and kv_a_norm SWAPPED everywhere | 32767 | **32767** |
+| Q3 headrms told hd=511 | 262143 | **262143** |
+| Q4 unlinked door | 0 | **0** |
+
+Q2 is the one that matters: it is exactly the M2/N1 shape — a fully self-consistent swap where the
+reference and the GPU move together — and this time the address pin caught it on the first try,
+because the pin was written before the mutation instead of after it.
+
 ## The oracle was broken while I was building against it — and it did not touch this rung
 
 Mid-session the fleet reported that DS4 is **regressed on the bash lane**: `ask_ds4.sh` is producing
@@ -272,9 +304,8 @@ this would be **987**, for the body to place:
 - **Rungs 4–7 are not written**: the attention split (scores/stats/acc); RoPE + its
   compressed reduction; the two KV caches; MoE (hash routing 0–2, learned after, six expert
   quantizations, top-6 of 256); the 4 hyper-connection streams + 20-iteration sinkhorn; exit head.
-- Next concrete step: `attn_q_b` / `attn_kv_a_norm` and then the attention split itself
-  (`form_mla_attend_scores` -> `_stats` -> `_acc`), which is the first rung where ORDER is the whole
-  question and a synthetic that is association-blind will no longer be worth anything.
+- Next concrete step: RoPE (deliberately UNFUSED in the oracle for bit-exactness) and the attention
+  split (`form_mla_attend_scores` -> `_stats` -> `_acc`), then the KV caches.
 - Door limits to design around, from the door agent's run, not yet hit here: 1D dispatch only; buffer
   offsets fix at handle creation, so many views of one buffer need many handles against a ceiling of 8192
   while DS4 needs ~400 weights plus activations; no buffer free (append-only per process); `metal_sync`
