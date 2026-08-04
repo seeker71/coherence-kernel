@@ -23,7 +23,7 @@ Host: Apple M4 Max, 128 GiB, Darwin 25.3.0. Every command below was run from thi
 | lane | model | said something? | how fast | Form floor |
 | --- | --- | --- | --- | --- |
 | `metal_first_token.sh` | llama3.2:3b (2 019 377 376 B blob) | **yes — a real, fluent, correct paragraph** | 20.138 tok/s end-to-end, 20.891 decode-only, 5.46 s wall | MSL emitted by a Form cell; **1020-line Swift driving loop** |
-| `metal_ask.sh` | llama3.2:3b | no — `FAIL`, but the generation underneath it succeeded | 11.06 s wall | same, plus a broken text extractor |
+| `metal_ask.sh` | llama3.2:3b | no — `FAIL`, but the generation underneath it succeeded *(healed same day, see below — it now stages the same 96 ids and the same 485 bytes as the harness above)* | 11.06 s wall | same, plus a broken text extractor |
 | `ask_ds4.sh` | DeepSeek-V4-Flash, 91 321 404 640 B | **text, but degenerate** — on this question and on its own witnessed control prompts | 8.05 / 7.82 / 8.08 / 8.25 / 8.20 t/s; ~105–110 s wall each | tokenizer is a Form cell, MSL from Form cells; **2206-line Swift driving loop** |
 | `metal_kat_exit.sh` | KAT-Coder v2.5, 17 391 937 152 B | one token id, not a continuation — `3637`, which a Form cell decodes as `parent` | 7.131 s device wall, 11.62 s total | 93-line Swift driver; the decode of 3637 was 100% Form |
 | `metal_kat_block0.sh` | KAT-Coder v2.5 | no token at all, by construction | 1.210 s device wall, 5.91 s total | 111-line Swift driver |
@@ -49,8 +49,17 @@ rc=1, 11.06 s.
 **The generation did not fail.** `metal_ask.sh:243` reads the answer with
 `awk '/^ANSWER-TEXT-BEGIN$/{f=1;next} …'` and falls back at `:245` to
 `sed -n 's/^ *text *: *"\(.*\)"$/\1/p'` — a one-line pattern. This answer has newlines in it, so both
-readers came back empty and the carrier called a working model a failure. Going one level down to the
-harness that actually generates:
+readers came back empty and the carrier called a working model a failure.
+
+> **HEALED, same day.** The reader wanted a block the harness it calls had never emitted: the two halves
+> of that contract arrived from opposite sides of a fleet reunion, and only the reader's half landed on
+> the live path. The producer now owns it — `metal_first_token.sh`'s `report` emits
+> `ANSWER-TEXT-BEGIN <path-tag>` … `END` for every path it reports, in both gate modes, and escapes its
+> one-line `text :` field so a line that says it is one line is one. The same ask now stages 96 ids and
+> 485 bytes of prose byte-identical to the direct harness run (`sha 37c2475…`). Gate D2 was never wrong
+> and is untouched — it refused to publish an answer it could not read, which is its whole job.
+
+Going one level down to the harness that actually generates:
 
 ```
 $ FORM_GEN_ONLY=1 form/native/metal/metal_first_token.sh 96 "what is unique to an ant colony?"
