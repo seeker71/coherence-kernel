@@ -44,7 +44,7 @@
 ;   rm -f form/form-stdlib/tests/metal-handle-door-band.fkb
 ;   ./fkwu-metal --src form/form-stdlib/tests/metal-handle-door-band.fk
 ;
-; Verdict 2047, bits as powers of two so a dark one is readable on sight:
+; Verdict 65535, bits as powers of two so a dark one is readable on sight:
 ;     1  door linked and speaking            32  sync drained exactly 3
 ;     2  pipeline compiled once              64  y == Form's own [30 70 110 150]
 ;     4  device buffers allocated           128  z == Form's own [1100 2540 3980 5420]
@@ -52,6 +52,22 @@
 ;    16  3 enqueues left pending, no block  512  explicit threads_per_group agrees with d1
 ;                                          1024  a half-written binding tail is REFUSED
 ;                                                while a well-formed one is ACCEPTED
+;
+; and the second growth (dispatch shapes, concurrency, free, fences):
+;  2048  a COOPERATIVE kernel — one threadgroup of 4 threads folding through
+;        threadgroup memory, dispatch_mode 1 — sums the GPU-computed z to the same
+;        13040 Form computed, so dispatchThreadgroups and dispatchThreads witness
+;        each other through one number
+;  4096  a CONCURRENT batch whose second dispatch declares its hazard with
+;        barrier_before reproduces the serial chain's z exactly
+;  8192  barrier_before in a SERIAL batch is turned away, while the same binding in
+;        a concurrent batch was accepted — the pair, not the refusal alone
+; 16384  metal_buf_free: the freed handle's read answers empty and its write is
+;        turned away, while a fresh alloc REUSES the slot under a new generation
+;        and round-trips — stale death and slot reuse proven together
+; 32768  two batches in flight at once: submit answers two distinct fences, each
+;        wait drains exactly its own batch's dispatch, a second wait on a spent
+;        fence answers 0, and both outputs equal Form's y
 ;
 ; preludes: form-stdlib/core.fk
 
@@ -123,6 +139,23 @@
     ; read as far as it parses.
     (defn mhd-bind-half (b0 b1 b2 c0 c1)
         (str_concat (mhd-bind b0 b1 b2 c0 c1) (mhd-u32 4)))
+    ; the full 16-byte tail: threads_per_group, threadgroup_bytes, dispatch_mode,
+    ; barrier_before — the shape a cooperative kernel and a declared hazard ride in
+    (defn mhd-bind-x (b0 b1 b2 c0 c1 tpg tgm md bar)
+        (str_concat (mhd-bind b0 b1 b2 c0 c1)
+        (str_concat (mhd-u32 tpg)
+        (str_concat (mhd-u32 tgm)
+        (str_concat (mhd-u32 md) (mhd-u32 bar))))))
+    ; a two-buffer binding with the full tail, for the cooperative sum kernel
+    (defn mhd-bind2-x (b0 b1 c0 tpg tgm md bar)
+        (str_concat (mhd-u32 2)
+        (str_concat (mhd-u32 b0)
+        (str_concat (mhd-u32 b1)
+        (str_concat (mhd-u32 1)
+        (str_concat (mhd-u32 c0)
+        (str_concat (mhd-u32 tpg)
+        (str_concat (mhd-u32 tgm)
+        (str_concat (mhd-u32 md) (mhd-u32 bar))))))))))
 
     ; ---- the kernel, emitted by this cell ------------------------------------------------
     (defn mhd-msl ()
@@ -140,6 +173,23 @@
         (str_concat "  for (uint j = 0; j < cols; j++) a += w[gid*cols + j] * x[j];" (str_concat (mhd-nl)
         (str_concat "  y[gid] = a;" (str_concat (mhd-nl)
                     "}" )))))))))))))))))))))))))))
+
+    ; the cooperative twin: one threadgroup, each thread stages one element into
+    ; threadgroup memory, thread 0 folds. This shape NEEDS dispatch_mode 1 — under
+    ; dispatchThreads a partial trailing group would fold a different partition.
+    (defn mhd-msl-coop ()
+        (str_concat "#include <metal_stdlib>" (str_concat (mhd-nl)
+        (str_concat "using namespace metal;" (str_concat (mhd-nl)
+        (str_concat "kernel void form_fkwu_coop_sum_f32(" (str_concat (mhd-nl)
+        (str_concat "  device const float *x [[buffer(0)]]," (str_concat (mhd-nl)
+        (str_concat "  device float *y [[buffer(1)]]," (str_concat (mhd-nl)
+        (str_concat "  constant uint &n [[buffer(2)]]," (str_concat (mhd-nl)
+        (str_concat "  uint tid [[thread_position_in_threadgroup]]," (str_concat (mhd-nl)
+        (str_concat "  threadgroup float *sh [[threadgroup(0)]]) {" (str_concat (mhd-nl)
+        (str_concat "  sh[tid] = x[tid];" (str_concat (mhd-nl)
+        (str_concat "  threadgroup_barrier(mem_flags::mem_threadgroup);" (str_concat (mhd-nl)
+        (str_concat "  if (tid == 0) { float a = 0.0f; for (uint j = 0; j < n; j++) a += sh[j]; y[0] = a; }" (str_concat (mhd-nl)
+                    "}" )))))))))))))))))))))))
 
     (defn mhd-has (s sub) (if (ge (str_find s sub 0) 0) 1 0))
 
@@ -224,6 +274,93 @@
     (print_str (str_concat "half-tail-refused(0 wanted) " (int_to_str bad)))
     (print_str (str_concat "gpu   y-with-threads_per_group" (mhd-show y2bytes 0 4 "")))
 
+    ; ---- cooperative dispatch: one group of 4 threads sums the GPU-computed z ------------
+    ; The input is hz, which the chain above COMPUTED — so this bit ties both dispatch
+    ; shapes together through one number a reader can check by hand: 13040.
+    (let pcoop (metal_pipeline (mhd-msl-coop) "form_fkwu_coop_sum_f32"))
+    (let hsum2 (metal_buf_alloc 4))
+    (let ecoop (metal_enqueue pcoop (mhd-bind2-x hz hsum2 4 4 16 1 0) 1))
+    (let coopbytes (metal_buf_read hsum2 0 4))
+    (print_str (str_concat "coop  s" (mhd-show coopbytes 0 1 "")))
+
+    ; ---- a concurrent batch with its one hazard declared ---------------------------------
+    ; d1' and d2' are the same dependent pair as the chain's d1/d2; in a concurrent
+    ; batch nothing orders them until the CELL says so, and the cell says so.
+    (let hy3 (metal_buf_alloc 16))
+    (let hz3 (metal_buf_alloc 16))
+    (let armed (metal_batch_concurrent))
+    (let ec1 (metal_enqueue pipe (mhd-bind hW hx hy3 4 4) 4))
+    (let ec2 (metal_enqueue pipe (mhd-bind-x hW2 hy3 hz3 4 4 0 0 0 1) 4))
+    (let cdrained (metal_sync))
+    (let z3bytes (metal_buf_read hz3 0 16))
+    (print_str (str_concat "conc  z" (mhd-show z3bytes 0 4 "")))
+    (print_str (str_concat "conc-armed-e-e-drained "
+        (str_concat (int_to_str armed)
+        (str_concat " " (str_concat (int_to_str ec1)
+        (str_concat " " (str_concat (int_to_str ec2)
+                    (str_concat " " (int_to_str cdrained)))))))))
+
+    ; ---- the same barrier in a SERIAL batch is turned away -------------------------------
+    (let badbar (metal_enqueue pipe (mhd-bind-x hW hx hy3 4 4 0 0 0 1) 4))
+    (print_str (str_concat "serial-barrier-refused(0 wanted) " (int_to_str badbar)))
+
+    ; ---- free: stale death and slot reuse, proven together -------------------------------
+    (let hscratch (metal_buf_alloc 16))
+    (let wsc (metal_buf_write hscratch 0 (mhd-seq 1 4 "")))
+    (let freed (metal_buf_free hscratch))
+    (let stale-read (metal_buf_read hscratch 0 4))
+    (let stale-write (metal_buf_write hscratch 0 (mhd-f32 9)))
+    (let hreuse (metal_buf_alloc 16))
+    (let wru (metal_buf_write hreuse 0 (mhd-f32 7)))
+    (let rub (metal_buf_read hreuse 0 4))
+    ; the sharpest stale probe is AFTER the slot is reused: a door without
+    ; generations would answer the old handle with the NEW tenant's bytes
+    (let stale-read2 (metal_buf_read hscratch 0 4))
+    (print_str (str_concat "free-stale-reuse "
+        (str_concat (int_to_str freed)
+        (str_concat " " (str_concat (int_to_str (str_len stale-read))
+        (str_concat " " (str_concat (int_to_str hscratch)
+                    (str_concat "->" (int_to_str hreuse)))))))))
+
+    ; ---- two batches in flight at once, one fence each -----------------------------------
+    (let hy4 (metal_buf_alloc 16))
+    (let hy5 (metal_buf_alloc 16))
+    (let ef1 (metal_enqueue pipe (mhd-bind hW hx hy4 4 4) 4))
+    (let f1 (metal_submit))
+    (let ef2 (metal_enqueue pipe (mhd-bind hW hx hy5 4 4) 4))
+    (let f2 (metal_submit))
+    (let w1 (metal_fence_wait f1))
+    (let w2 (metal_fence_wait f2))
+    (let w3 (metal_fence_wait f1))
+    (let y4bytes (metal_buf_read hy4 0 16))
+    (let y5bytes (metal_buf_read hy5 0 16))
+    (print_str (str_concat "fences-waits-rewait "
+        (str_concat (int_to_str f1)
+        (str_concat " " (str_concat (int_to_str f2)
+        (str_concat " " (str_concat (int_to_str w1)
+        (str_concat " " (str_concat (int_to_str w2)
+                    (str_concat " " (int_to_str w3)))))))))))
+
+    (let b-coop (if (gt ecoop 0) (if (str_eq coopbytes (mhd-f32 (mhd-s 0 0))) 1 0) 0))
+    (let b-conc (if (eq armed 1)
+                    (if (eq ec1 1) (if (eq ec2 1) (if (str_eq z3bytes (mhd-zb 0 "")) 1 0) 0) 0) 0))
+    ; refusal paired with acceptance, same discipline as bit 1024: the serial refusal
+    ; only testifies next to the concurrent acceptance of the SAME tail shape
+    (let b-serbar (if (eq badbar 0) (if (eq ec2 1) 1 0) 0))
+    (let b-free (if (eq freed 1)
+                    (if (eq (str_len stale-read) 0)
+                        (if (eq stale-write 0)
+                            (if (gt hreuse 0)
+                                (if (str_eq rub (mhd-f32 7))
+                                    (if (eq (str_len stale-read2) 0) 1 0) 0) 0) 0) 0) 0))
+    (let b-fence (if (gt f1 0)
+                     (if (gt f2 0)
+                         (if (eq w1 1)
+                             (if (eq w2 1)
+                                 (if (eq w3 0)
+                                     (if (str_eq y4bytes (mhd-yb 0 ""))
+                                         (if (str_eq y5bytes (mhd-yb 0 "")) 1 0) 0) 0) 0) 0) 0) 0))
+
     (add (mul b-linked 1)
     (add (mul b-pipe 2)
     (add (mul b-bufs 4)
@@ -234,4 +371,9 @@
     (add (mul b-z 128)
     (add (mul b-s 256)
     (add (mul b-tg 512)
-         (mul b-half 1024))))))))))))
+    (add (mul b-half 1024)
+    (add (mul b-coop 2048)
+    (add (mul b-conc 4096)
+    (add (mul b-serbar 8192)
+    (add (mul b-free 16384)
+         (mul b-fence 32768)))))))))))))))))

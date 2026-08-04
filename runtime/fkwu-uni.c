@@ -994,6 +994,16 @@ FK_METAL_WEAK long long fk_metal_status_external(char *out, long long cap) {
     (void)out; (void)cap;
     return FK_METAL_HANDLE_UNLINKED;
 }
+FK_METAL_WEAK long long fk_metal_batch_concurrent_external(void) { return FK_METAL_HANDLE_UNLINKED; }
+FK_METAL_WEAK long long fk_metal_buf_free_external(long long h) {
+    (void)h;
+    return FK_METAL_HANDLE_UNLINKED;
+}
+FK_METAL_WEAK long long fk_metal_submit_external(void) { return FK_METAL_HANDLE_UNLINKED; }
+FK_METAL_WEAK long long fk_metal_fence_wait_external(long long fence) {
+    (void)fence;
+    return FK_METAL_HANDLE_UNLINKED;
+}
 static long long fk_srange(long long sv, const char **ptr, long long *len) {
     long long sa = fk_stri(sv);
     if (sa < 0 || sa >= fk_sp) {
@@ -1148,6 +1158,34 @@ static long long fk_metal_buf_read_native(long long h, long long off, long long 
         return fk_sbuf("", 0);
     }
     return fk_strv(fk_sintern(fk_sbp, n));
+}
+static long long fk_metal_batch_concurrent_native(void) {
+    long long r = fk_metal_batch_concurrent_external();
+    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+        return 0;
+    }
+    return r;
+}
+static long long fk_metal_buf_free_native(long long h) {
+    long long r = fk_metal_buf_free_external(h);
+    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+        return 0;
+    }
+    return r;
+}
+static long long fk_metal_submit_native(void) {
+    long long r = fk_metal_submit_external();
+    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+        return 0;
+    }
+    return r;
+}
+static long long fk_metal_fence_wait_native(long long fence) {
+    long long r = fk_metal_fence_wait_external(fence);
+    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+        return 0;
+    }
+    return r;
 }
 #define FK_METAL_STATUS_BUF_CAP 4096
 static long long fk_metal_status_native(void) {
@@ -7634,6 +7672,21 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
     }
     if (t == 252) {
         return fk_metal_status_native();
+    }
+    if (t == 253) {
+        return fk_metal_batch_concurrent_native() << 1;
+    }
+    if (t == 254) {
+        return fk_metal_buf_free_native(fk_walk(fk_node[i][1], fp) >> 1) << 1;
+    }
+    if (t == 255) {
+        return fk_metal_submit_native() << 1;
+    }
+    /* 142 and not 256: the walker's tag space ends at FK_OPCODE_ARM_CAP (256), so
+     * 255 is the last tag that exists — 256 died as "corrupt node tag" at the first
+     * call. The op table lists ops; FK_OPCODE_ARM_CAP bounds them. */
+    if (t == 142) {
+        return fk_metal_fence_wait_native(fk_walk(fk_node[i][1], fp) >> 1) << 1;
     }
     if (t == 205) {
         return fk_mic_count() << 1;
