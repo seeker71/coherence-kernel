@@ -1,0 +1,104 @@
+; ask-ds4.fk — the ASK verb for the form-native DeepSeek-V4-Flash lane, as a BODY cell.
+;
+; WHY THIS EXISTS AS A CELL AND NOT AS A SCRIPT. Yesterday I wrote the ask door as bash: it chose the
+; step count, computed the cache cap, decided what the radius was, and formatted the answer. Every one
+; of those is a DECISION, and a decision in a carrier is a decision the body cannot state, band, or
+; be held to. This cell holds them; the carrier reads what it emits and spawns one subprocess.
+;
+; A CLAIM THAT WAS HERE AND WAS WRONG. This header used to say Form has no exec primitive, therefore
+; the final dispatch cannot be Form, therefore an ask that ends in a GPU has a shell in it somewhere.
+; The first clause is true and the conclusion does not follow, because a cell does not need to SPAWN
+; anything to reach the GPU — the kernel has carried a Metal door the whole time. metal_matvec_f32
+; (tag 204) takes MSL text, a kernel name and model bytes; form-cli-repl.fk:82 has been calling it
+; since it was written. It answered "metal_linked=false" every time for one reason: its carrier was
+; a weak stub and nobody had ever written the strong symbol. That is now
+; native/metal/fk-metal-carrier.m, and tests/metal-door-band.fk drives this M4 Max from a cell —
+; own MSL, own IEEE-754 bytes, verdict 15, five mutations refuted. I reached for "the language
+; can't" when the truth was "no one had built it yet"; the probe that settled it cost one line.
+;
+; THE REAL LIMIT, which is about SHAPE and not about capability. That door is text in, text out,
+; capped at 8192 bytes, one dispatch per call. A 43-layer step is ~2600 dispatches whose activations
+; blow past that cap by themselves and must stay RESIDENT on the device between calls — re-uploading
+; 9.1 GB of weights per dispatch is not a slow ask, it is a different machine. So a form-native ask
+; needs a door that passes HANDLES rather than strings. The matvec door earns the right to ask for
+; that one; it does not stand in for it, and a working matvec must not be read as a working model.
+;
+; WHAT IS ALREADY THE BODY'S, and is only assembled here:
+;   the tokenizer      form-stdlib/dsv4-tokenizer-cli.fk   — text to ids AND ids back to text
+;   the kernels        form-stdlib/{mla-msl,dsv4-hc-msl,ds4-order-match,dsv4-compressor}.fk and kin
+;   the residency plan native/metal/windowed-residency-emit.fk
+;   the geometry       read from the file's own header by gguf-manifest.fk, never hardcoded
+; So the arithmetic of an answer is already form-native end to end. What was not was the ASKING.
+;
+; THE CACHE CAP IS A REFUSAL, NOT A GUESS. dsv4-kv-cache.fk's radius says the arena refuses past its
+; cap rather than sliding, because a silent window is the same class of bug as a rewritten history.
+; So the cap must EXCEED the walk, and by enough to leave the frontier sentinel unwritten — that is
+; what the harness's own growing-KV gate reads. ad-cap-for states the margin instead of leaving a
+; carrier to pick one.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/ask-ds4-band.fk (the decisions, fixture-free).
+
+(do
+    ; ===========================================================================
+    ; THE DECISIONS. Each is a number or a sentence the body can be held to.
+    ; ===========================================================================
+
+    ; the default walk. Long enough that a factual continuation finishes a thought, short enough that
+    ; a wrong answer is cheap to see. Measured: 28 t/s generation, so 40 steps is ~1.4 s of walking.
+    (defn ad-default-steps () 40)
+
+    ; the arena must outrun the walk AND leave a sentinel row untouched, so the growing-KV witness can
+    ; still read an unwritten frontier. Eight is the margin: one for the frontier the gate reads, and
+    ; seven so a prompt of ordinary length does not push the walk into the cap.
+    (defn ad-cap-margin () 8)
+    (defn ad-cap-for (steps) (add steps (ad-cap-margin)))
+    (defn ad-cap-ok? (steps cap) (if (gt cap steps) 1 0))
+
+    ; ===========================================================================
+    ; THE RADIUS. Said BEFORE an answer is read, not discovered by being surprised.
+    ; Each line is a limit this lane genuinely has, witnessed, not a disclaimer.
+    ; ===========================================================================
+    (defn ad-radius ()
+        (list
+            "greedy only: temp 0, argmax every step, no sampling and no seed — the same question returns the same words"
+            "a BASE-MODEL continuation: no chat template and no stop token, so the answer continues your sentence"
+            "'The capital of France is' works; 'What is the capital of France?' is continued as a question, not answered"
+            "the step count is a hard stop, not an end of thought — the last sentence is usually cut"
+            "not ds4's token stream: on the verified prompt 24 of 24 match, elsewhere the facts agree and the wording may not"
+            "the first ask pages 85 GiB in from disk; generation is 28 t/s but the first wall clock is not"))
+
+    ; ===========================================================================
+    ; THE CONTRACT the carrier must satisfy. Named so a carrier that drifts is
+    ; caught by a band rather than by a surprising answer.
+    ; ===========================================================================
+    (defn ad-tokenizer () "form-stdlib/dsv4-tokenizer-cli.fk")
+    (defn ad-lane () "native/metal/metal_dsv4_stack.sh")
+    (defn ad-env-prompt () "FORM_DS4_PROMPT")
+    (defn ad-env-steps () "FORM_DS4_KV_STEPS")
+    (defn ad-env-cap () "FORM_DS4_KV_CAP")
+    (defn ad-needs-sequence? () 1)   ; the KV cache, the compressed cache and the router all cross steps
+    (defn ad-needs-match-order? () 1); the fidelity lane, not the fast one — the ask is not a benchmark
+
+    ; ===========================================================================
+    ; THE EMISSION the carrier reads. Keyed lines, one meaning each, so a carrier
+    ; parses by NAME and never by position (the same walk gguf-manifest.fk takes).
+    ; ===========================================================================
+    (defn ad-line (k v) (print_str (str_concat k (str_concat " " v))))
+    (defn ad-radius-lines (xs)
+        (if (eq (len xs) 0) 0 (do (ad-line "RADIUS" (head xs)) (ad-radius-lines (tail xs)))))
+    (defn ad-emit (steps)
+        (do (print_str "ASKDS4")
+            (ad-line "STEPS" (int_to_str steps))
+            (ad-line "CAP" (int_to_str (ad-cap-for steps)))
+            (ad-line "SEQUENCE" (int_to_str (ad-needs-sequence?)))
+            (ad-line "MATCHORDER" (int_to_str (ad-needs-match-order?)))
+            (ad-line "LANE" (ad-lane))
+            (ad-line "TOKENIZER" (ad-tokenizer))
+            (ad-line "ENVPROMPT" (ad-env-prompt))
+            (ad-radius-lines (ad-radius))
+            (print_str "END")
+            0))
+    (defn ad-emit-default () (ad-emit (ad-default-steps)))
+    0)

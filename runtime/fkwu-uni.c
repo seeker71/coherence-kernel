@@ -897,6 +897,12 @@ static long long fk_sbuf(const char *buf, long long n) {
 }
 #define FK_METAL_FIXTURE_UNLINKED (0 - 4611686018427387903LL)
 #define FK_METAL_MATVEC_UNLINKED (0 - 4611686018427387902LL)
+/* The handle door's unlinked sentinel. Distinct from the two above so a reader of
+ * a failing band can tell "no carrier on this build" from "carrier said no". Every
+ * handle-returning primitive answers 0 when unlinked and 0 is never a live handle;
+ * metal_status is the voice canary that says WHICH of the two it was, because a
+ * bare 0 is exactly the shape axiom-5 hands back for a name that was never bound. */
+#define FK_METAL_HANDLE_UNLINKED (0 - 4611686018427387901LL)
 #if defined(__GNUC__) || defined(__clang__)
 __attribute__((weak)) long long fk_metal_matvec_fixture_external(char *out, long long cap) {
     (void)out;
@@ -939,6 +945,55 @@ static long long fk_metal_matvec_f32_external(const char *msl, long long msl_len
     return FK_METAL_MATVEC_UNLINKED;
 }
 #endif
+/* ── the handle door's eight weak symbols ──
+ * Same weak-stub pattern as the two above, and for the same reason: a build with
+ * no Metal carrier linked must still COMPILE and still ANSWER, honestly, that the
+ * door is shut. It must not fail to link, and it must not answer a plausible
+ * number. Each returns FK_METAL_HANDLE_UNLINKED, which the native wrappers turn
+ * into 0 for handles and into a spoken metal_linked=false for metal_status. */
+#if defined(__GNUC__) || defined(__clang__)
+#define FK_METAL_WEAK __attribute__((weak))
+#else
+#define FK_METAL_WEAK static
+#endif
+/* No error-text parameter here on purpose: an MSL compile diagnostic is far larger
+ * than a return value and must not be summarised into one. The carrier keeps the
+ * compiler's own words and metal_status speaks them, so the band that got a 0
+ * handle has exactly one place to look and finds the real message there. */
+FK_METAL_WEAK long long fk_metal_pipeline_external(const char *msl, long long msl_len,
+                                                   const char *name, long long name_len) {
+    (void)msl; (void)msl_len; (void)name; (void)name_len;
+    return FK_METAL_HANDLE_UNLINKED;
+}
+FK_METAL_WEAK long long fk_metal_buf_alloc_external(long long nbytes) {
+    (void)nbytes;
+    return FK_METAL_HANDLE_UNLINKED;
+}
+FK_METAL_WEAK long long fk_metal_buf_from_file_external(const char *path, long long path_len,
+                                                        long long off, long long len) {
+    (void)path; (void)path_len; (void)off; (void)len;
+    return FK_METAL_HANDLE_UNLINKED;
+}
+FK_METAL_WEAK long long fk_metal_buf_write_external(long long h, long long off,
+                                                    const char *bytes, long long len) {
+    (void)h; (void)off; (void)bytes; (void)len;
+    return FK_METAL_HANDLE_UNLINKED;
+}
+FK_METAL_WEAK long long fk_metal_enqueue_external(long long pipe, const char *binding,
+                                                  long long binding_len, long long threads) {
+    (void)pipe; (void)binding; (void)binding_len; (void)threads;
+    return FK_METAL_HANDLE_UNLINKED;
+}
+FK_METAL_WEAK long long fk_metal_sync_external(void) { return FK_METAL_HANDLE_UNLINKED; }
+FK_METAL_WEAK long long fk_metal_buf_read_external(long long h, long long off, long long len,
+                                                   char *out, long long cap) {
+    (void)h; (void)off; (void)len; (void)out; (void)cap;
+    return FK_METAL_HANDLE_UNLINKED;
+}
+FK_METAL_WEAK long long fk_metal_status_external(char *out, long long cap) {
+    (void)out; (void)cap;
+    return FK_METAL_HANDLE_UNLINKED;
+}
 static long long fk_srange(long long sv, const char **ptr, long long *len) {
     long long sa = fk_stri(sv);
     if (sa < 0 || sa >= fk_sp) {
@@ -995,6 +1050,119 @@ static long long fk_metal_matvec_f32_native(long long mslv, long long kernelv, l
     }
     if (n > FK_METAL_MATVEC_BUF_CAP) {
         n = FK_METAL_MATVEC_BUF_CAP;
+    }
+    return fk_sbuf(out, n);
+}
+/* ── handle-door natives ──
+ * Every one of these is a translation and nothing more: unwrap Form's tagged
+ * values, hand the carrier plain bytes and plain integers, wrap the answer back.
+ * There is no arithmetic here and no policy; the layout of the binding string is
+ * decided by the Form cell that emits it, exactly as the MSL is. */
+static long long fk_metal_pipeline_native(long long mslv, long long namev) {
+    const char *msl;
+    const char *name;
+    long long ml;
+    long long nl;
+    if (fk_srange(mslv, &msl, &ml) == 0 || fk_srange(namev, &name, &nl) == 0) {
+        return 0;
+    }
+    long long h = fk_metal_pipeline_external(msl, ml, name, nl);
+    if (h == FK_METAL_HANDLE_UNLINKED || h < 0) {
+        return 0;
+    }
+    return h;
+}
+static long long fk_metal_buf_alloc_native(long long nbytes) {
+    long long h = fk_metal_buf_alloc_external(nbytes);
+    if (h == FK_METAL_HANDLE_UNLINKED || h < 0) {
+        return 0;
+    }
+    return h;
+}
+static long long fk_metal_buf_from_file_native(long long pathv, long long off, long long len) {
+    const char *path;
+    long long pl;
+    if (fk_srange(pathv, &path, &pl) == 0) {
+        return 0;
+    }
+    long long h = fk_metal_buf_from_file_external(path, pl, off, len);
+    if (h == FK_METAL_HANDLE_UNLINKED || h < 0) {
+        return 0;
+    }
+    return h;
+}
+static long long fk_metal_buf_write_native(long long h, long long off, long long bytesv) {
+    const char *b;
+    long long bl;
+    if (fk_srange(bytesv, &b, &bl) == 0) {
+        return 0;
+    }
+    long long n = fk_metal_buf_write_external(h, off, b, bl);
+    if (n == FK_METAL_HANDLE_UNLINKED || n < 0) {
+        return 0;
+    }
+    return n;
+}
+static long long fk_metal_enqueue_native(long long pipe, long long bindv, long long threads) {
+    const char *b;
+    long long bl;
+    if (fk_srange(bindv, &b, &bl) == 0) {
+        return 0;
+    }
+    long long r = fk_metal_enqueue_external(pipe, b, bl, threads);
+    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+        return 0;
+    }
+    return r;
+}
+static long long fk_metal_sync_native(void) {
+    long long r = fk_metal_sync_external();
+    if (r == FK_METAL_HANDLE_UNLINKED || r < 0) {
+        return 0;
+    }
+    return r;
+}
+/* Read-back is the one primitive whose size the CALLER chooses, so it is the one
+ * that must not quietly hand back less than it was asked for. A short read here
+ * would look to a Form cell exactly like a correct read of a shorter tensor. */
+static long long fk_metal_buf_read_native(long long h, long long off, long long len) {
+    if (len <= 0) {
+        return fk_sbuf("", 0);
+    }
+    fk_sinit();
+    while (fk_sbp + len > fk_scap_b) {
+        fk_scap_b = fk_scap_b * 2;
+        fk_sb = realloc(fk_sb, fk_scap_b);
+        fk_sb_check();
+    }
+    long long n = fk_metal_buf_read_external(h, off, len, fk_sb + fk_sbp, len);
+    if (n == FK_METAL_HANDLE_UNLINKED || n < 0) {
+        return fk_sbuf("", 0);
+    }
+    /* The carrier answers all of `len` or it answers an error. A partial read
+     * returned as a short string is indistinguishable, to the Form cell holding
+     * it, from a correct read of a smaller tensor — that is the silent-truncation
+     * shape this body has already been bitten by, so it is refused here rather
+     * than passed on. */
+    if (n != len) {
+        return fk_sbuf("", 0);
+    }
+    return fk_strv(fk_sintern(fk_sbp, n));
+}
+#define FK_METAL_STATUS_BUF_CAP 4096
+static long long fk_metal_status_native(void) {
+    static char out[FK_METAL_STATUS_BUF_CAP];
+    long long n = fk_metal_status_external(out, FK_METAL_STATUS_BUF_CAP);
+    if (n == FK_METAL_HANDLE_UNLINKED) {
+        const char *m = "metal_owner=fkwu-form-cli\nmetal_linked=false\nmetal_door=handle\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n < 0) {
+        const char *m = "metal_owner=fkwu-form-cli\nmetal_linked=false\nmetal_door=handle\nlast_error=carrier returned error\n";
+        return fk_sbuf(m, fk_cstrlen(m));
+    }
+    if (n > FK_METAL_STATUS_BUF_CAP) {
+        n = FK_METAL_STATUS_BUF_CAP;
     }
     return fk_sbuf(out, n);
 }
@@ -7418,6 +7586,54 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
         long long b204 = fk_walk(fk_node[i][3], fp);
         fk_vsp = fk_vsp - 2;
         return fk_metal_matvec_f32_native(fk_vs[fk_vsp], fk_vs[fk_vsp + 1], b204);
+    }
+    /* Handle door. Where two heap values are live across a second fk_walk the
+     * first is pushed with fk_vp, same as tag 204 above — an argument expression
+     * can allocate, and a collection between the two walks would otherwise move
+     * a string the carrier is about to read. */
+    if (t == 245) {
+        long long m245 = fk_walk(fk_node[i][1], fp);
+        fk_vp(m245);
+        long long n245 = fk_walk(fk_node[i][2], fp);
+        fk_vsp = fk_vsp - 1;
+        return fk_metal_pipeline_native(fk_vs[fk_vsp], n245) << 1;
+    }
+    if (t == 246) {
+        return fk_metal_buf_alloc_native(fk_walk(fk_node[i][1], fp) >> 1) << 1;
+    }
+    if (t == 247) {
+        long long p247 = fk_walk(fk_node[i][1], fp);
+        fk_vp(p247);
+        long long o247 = fk_walk(fk_node[i][2], fp) >> 1;
+        long long l247 = fk_walk(fk_node[i][3], fp) >> 1;
+        fk_vsp = fk_vsp - 1;
+        return fk_metal_buf_from_file_native(fk_vs[fk_vsp], o247, l247) << 1;
+    }
+    if (t == 248) {
+        long long h248 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long o248 = fk_walk(fk_node[i][2], fp) >> 1;
+        long long b248 = fk_walk(fk_node[i][3], fp);
+        return fk_metal_buf_write_native(h248, o248, b248) << 1;
+    }
+    if (t == 249) {
+        long long p249 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long b249 = fk_walk(fk_node[i][2], fp);
+        fk_vp(b249);
+        long long n249 = fk_walk(fk_node[i][3], fp) >> 1;
+        fk_vsp = fk_vsp - 1;
+        return fk_metal_enqueue_native(p249, fk_vs[fk_vsp], n249) << 1;
+    }
+    if (t == 250) {
+        return fk_metal_sync_native() << 1;
+    }
+    if (t == 251) {
+        long long h251 = fk_walk(fk_node[i][1], fp) >> 1;
+        long long o251 = fk_walk(fk_node[i][2], fp) >> 1;
+        long long l251 = fk_walk(fk_node[i][3], fp) >> 1;
+        return fk_metal_buf_read_native(h251, o251, l251);
+    }
+    if (t == 252) {
+        return fk_metal_status_native();
     }
     if (t == 205) {
         return fk_mic_count() << 1;

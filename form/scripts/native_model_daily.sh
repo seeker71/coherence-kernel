@@ -49,7 +49,7 @@ training_band=$(awk -F= '$1 == "training_band" { print $2; exit }' "$training")
 checkpoint_band=$(awk -F= '$1 == "checkpoint_band" { print $2; exit }' "$training")
 
 if [ "$ground" != 42 ] || [ "$recursive" != 55 ] ||
-   [ "$freshness" != 15 ] || [ "$native" != 11111 ] ||
+   [ "$freshness" != 31 ] || [ "$native" != 11111 ] ||
    [ "$live_loop" != 4095 ] || [ "$training_band" != 255 ] ||
    [ "$checkpoint_band" != 4095 ] || [ "$sha256_band" != 2 ] ||
    [ "$replacement_band" != 262143 ] || [ "$rag_band" != 7 ]; then

@@ -224,6 +224,7 @@ echo "  the answer came from the $KERNEL_PATH path"
 # the harness prints, for the chosen path:
 #   "  <tag>: prefill A s for N prompt tokens; decode B s for M further forwards"
 #   "    ids  : [...]"  "    text : \"...\""  "    END-TO-END X tok/s ... decode-only Y tok/s"
+#   "ANSWER-TEXT-BEGIN <tag>" / the prose, however many lines it takes / "ANSWER-TEXT-END <tag>"
 # THE SECTION IS DELIMITED BY ITS OWN END, not by a line count. `grep -A3` assumed the report was
 # exactly four lines — and it is, until the model's text contains a newline, at which point the
 # END-TO-END line falls outside the window and this carrier hands the body an empty rate. The
@@ -235,14 +236,46 @@ NPROMPT=$(echo "$RES"  | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="for" && $(i+2)=="
 DECODE_S=$(echo "$RES" | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="decode"){print $(i+1);exit}}')
 NFWD_DEC=$(echo "$RES" | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="further"){print $(i-1);exit}}')
 IDS=$(echo "$RES"      | awk -F': *' '/ids  :/{print $2;exit}')
-# THE ANSWER, PREFERRING THE DELIMITED BLOCK. `text : "..."` is one line by construction and prose is
-# not: the first newline a model emits ends the line and the rest of the answer is silently dropped —
-# or, if the quote never closes, nothing matches and this carrier reports "the harness's format
-# moved" about an answer that was perfectly well formed. The block is used when it is there; the
-# one-line form remains the fallback for full-gate runs, where it is only ever read for fragments.
-ANSWER=$(awk '/^ANSWER-TEXT-BEGIN$/{f=1;next} /^ANSWER-TEXT-END$/{f=0} f' "$work/gen.txt")
+# THE ANSWER, FROM THE BLOCK THAT NAMES ITS PATH. `text : "..."` is one line by construction and
+# prose is not: the first newline a model emits ends the line and the rest of the answer is silently
+# dropped — or, if the quote never closes, nothing matches and this carrier reports "the harness's
+# format moved" about an answer that was perfectly well formed. That is exactly what it did, on every
+# ask whose answer ran past one line: the untagged block this reader wanted was never emitted by the
+# harness it calls (it lived only in a generated copy, and the two halves of the contract arrived
+# from different sides of a fleet reunion), so the block came back empty, the one-line fallback
+# matched nothing, and gate D2 refused a generation that had passed all nine of its own gates.
+#
+# The harness now emits the block for EVERY path it reports, tagged with that path's label — the same
+# label this carrier already chose above. Untagged would splice one path's prose onto another's name
+# in a full-gate run, where several paths report and they need not generate the same tokens.
+ANSWER=$(awk -v t="$PATH_TAG" '
+    $1=="ANSWER-TEXT-BEGIN" && $2==t {f=1; next}
+    $1=="ANSWER-TEXT-END"   && $2==t {f=0}
+    f' "$work/gen.txt")
 if [[ -z "$ANSWER" ]]; then
-    ANSWER=$(echo "$RES" | sed -n 's/^ *text *: *"\(.*\)"$/\1/p')
+    # the untagged block, for a harness that emits one block and does not say whose it is
+    ANSWER=$(awk '/^ANSWER-TEXT-BEGIN$/{f=1;next} /^ANSWER-TEXT-END$/{f=0} f' "$work/gen.txt")
+fi
+if [[ -z "$ANSWER" ]]; then
+    # LAST, the one-line field — now genuinely one line, because the harness escapes it. Read back
+    # through the same escapes it was written through; a harness that never escaped loses nothing,
+    # since unescaping prose that carries no backslash is the identity.
+    ANSWER=$(echo "$RES" | sed -n 's/^ *text *: *"\(.*\)"$/\1/p' | awk '
+        function unesc(s,   o,i,c,n) {
+            o=""; n=length(s)
+            for (i = 1; i <= n; i++) {
+                c = substr(s, i, 1)
+                if (c == "\\" && i < n) {
+                    i++; c = substr(s, i, 1)
+                    if      (c == "n") o = o "\n"
+                    else if (c == "t") o = o "\t"
+                    else if (c == "r") o = o "\r"
+                    else               o = o c
+                } else o = o c
+            }
+            return o
+        }
+        {print unesc($0)}')
 fi
 NGEN=$(echo "$IDS" | tr ',' '\n' | grep -c '[0-9]')
 DECODE_TOKPS_MILLI=$(echo "$RES" | awk '/decode-only/{for(i=1;i<=NF;i++) if($i=="decode-only"){printf "%d\n", $(i+1)*1000; exit}}')

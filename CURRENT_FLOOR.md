@@ -17,7 +17,7 @@ this floor was written.
 cc -O2 -o fkwu runtime/fkwu-uni.c
 ./fkwu --src bootstrap/ground.fk -> 42
 ./fkwu --src bootstrap/ground-recursive.fk 10 -> 55
-./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk -> 15
+./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk -> 31
 ./fkwu --src form/form-stdlib/tests/native-vs-rented-band.fk -> 11111
 ```
 

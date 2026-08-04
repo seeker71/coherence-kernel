@@ -1,0 +1,237 @@
+; metal-handle-door-band.fk — a Form cell drives a MULTI-DISPATCH chain on this GPU,
+; keeps the intermediates on the device, never waits between dispatches, and checks
+; every number against its own arithmetic.
+;
+; WHAT metal-door-band.fk ALREADY PROVED, and what this adds. That band proved one
+; dispatch belongs to the body: Form emits the MSL, Form emits the IEEE-754 bytes,
+; Form recomputes the answer. True, and not a machine. One call there is one compile,
+; one copy-in, one dispatch, one BLOCK, one text reply — at the ~2600 dispatches a
+; 43-layer token costs, the blocking alone is nine times the whole budget. This band
+; proves the shape that removes: buffers that live on the device across calls, a
+; dispatch that enqueues and returns, and one single wait at the end.
+;
+; THE CHAIN, and it is hand-checkable end to end. W is 4x4 row-major 1..16, x is 1..4:
+;
+;   d1:  y = W  . x     y = [30, 70, 110, 150]              (W comes from a FILE, mmap'd)
+;   d2:  z = W  . y     z = [1100, 2540, 3980, 5420]
+;   d3:  s = 1 . z      s = 13040                            (1x4 row of ones)
+;
+;   z0 = 1*30 + 2*70 + 3*110 + 4*150   =   30 + 140 + 330 + 600  = 1100
+;   z1 = 5*30 + 6*70 + 7*110 + 8*150   =  150 + 420 + 770 +1200  = 2540
+;   z2 = 9*30 +10*70 +11*110 +12*150   =  270 + 700 +1210 +1800  = 3980
+;   z3 =13*30 +14*70 +15*110 +16*150   =  390 + 980 +1650 +2400  = 5420
+;   s  = 1100 + 2540 + 3980 + 5420     = 13040
+;
+; y and z are the point. Neither ever crosses back to Form between dispatches — d2
+; reads the y that d1 wrote, on the device, and d3 reads the z that d2 wrote. That is
+; the thing a 43-layer forward needs and the text door cannot express: its activations
+; would not even fit in the 8192-byte reply cap, let alone stay put.
+;
+; THE THREE DISPATCHES ARE ENQUEUED BEFORE ANYTHING IS WAITED FOR. metal_status is read
+; while they are still outstanding and reads pending=3; metal_sync then reports
+; draining exactly 3. That pair is the direct witness that enqueue did not block — not
+; an inference from a stopwatch, but the door's own count of work it had not yet done.
+;
+; WHY THE FIRST GATE IS A STRING AND NOT A NUMBER. Every primitive in this door but one
+; answers an integer handle, and under axiom-5 an unbound name recovers to NOTHING and
+; answers 0 — so a numb call, a turned-away call, and a typo all wear the same shape. Bit 1
+; asks metal_status to SPEAK "metal_linked=true". A verdict here that has bit 1 dark
+; is a verdict about nothing, and the other ten bits are not evidence of anything.
+;
+; RUN (needs the carrier linked; plain ./fkwu answers metal_linked=false, verdict 0):
+;   cc -O2 -o fkwu-metal runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
+;      -framework Metal -framework Foundation -fobjc-arc
+;   rm -f form/form-stdlib/tests/metal-handle-door-band.fkb
+;   ./fkwu-metal --src form/form-stdlib/tests/metal-handle-door-band.fk
+;
+; Verdict 2047, bits as powers of two so a dark one is readable on sight:
+;     1  door linked and speaking            32  sync drained exactly 3
+;     2  pipeline compiled once              64  y == Form's own [30 70 110 150]
+;     4  device buffers allocated           128  z == Form's own [1100 2540 3980 5420]
+;     8  weights mmap'd from a file, nocopy 256  s == Form's own 13040
+;    16  3 enqueues left pending, no block  512  explicit threads_per_group agrees with d1
+;                                          1024  a half-written binding tail is REFUSED
+;                                                while a well-formed one is ACCEPTED
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn mhd-nl () (byte_to_str 10))
+
+    ; ---- IEEE-754 f32 for a non-negative integer, exact below 2^24 --------------------
+    (defn mhd-pow2 (k) (if (le k 0) 1 (mul 2 (mhd-pow2 (sub k 1)))))
+    (defn mhd-e (n e) (if (lt n 2) e (mhd-e (floor (div n 2)) (add e 1))))
+    (defn mhd-bits (n)
+        (if (eq n 0) 0
+            (do (let e (mhd-e n 0))
+                (let m (sub (floor (div (mul n 8388608) (mhd-pow2 e))) 8388608))
+                (add (mul (add e 127) 8388608) m))))
+    (defn mhd-u32 (v)
+        (str_concat (byte_to_str (mod v 256))
+        (str_concat (byte_to_str (mod (floor (div v 256)) 256))
+        (str_concat (byte_to_str (mod (floor (div v 65536)) 256))
+                    (byte_to_str (mod (floor (div v 16777216)) 256))))))
+    (defn mhd-f32 (n) (mhd-u32 (mhd-bits n)))
+
+    ; ---- and back again, so the printed numbers are read off the GPU's own bytes -------
+    ; This is a second, independent path: the equality bits compare bytes, these lines
+    ; decode them. A reader sees 13040 rather than being asked to trust a bit.
+    (defn mhd-rd32 (s off)
+        (add (str_byte_at s off)
+        (add (mul (str_byte_at s (add off 1)) 256)
+        (add (mul (str_byte_at s (add off 2)) 65536)
+             (mul (str_byte_at s (add off 3)) 16777216)))))
+    (defn mhd-dec (b)
+        (if (eq b 0) 0
+            (do (let ex (mod (floor (div b 8388608)) 256))
+                (let sig (add 8388608 (mod b 8388608)))
+                (let sh (sub (sub ex 127) 23))
+                (if (ge sh 0) (mul sig (mhd-pow2 sh))
+                              (floor (div sig (mhd-pow2 (sub 0 sh))))))))
+    (defn mhd-show (s i n acc)
+        (if (ge i n) acc
+            (mhd-show s (add i 1) n
+                (str_concat acc (str_concat " " (int_to_str (mhd-dec (mhd-rd32 s (mul i 4)))))))))
+
+    ; ---- the tensors this cell owns ----------------------------------------------------
+    (defn mhd-seq (i n acc) (if (gt i n) acc (mhd-seq (add i 1) n (str_concat acc (mhd-f32 i)))))
+    (defn mhd-ones (i n acc) (if (gt i n) acc (mhd-ones (add i 1) n (str_concat acc (mhd-f32 1)))))
+
+    ; ---- Form's own answer, computed before the GPU is asked ----------------------------
+    (defn mhd-w (r j) (add (add (mul r 4) j) 1))
+    (defn mhd-y (r j acc) (if (ge j 4) acc (mhd-y r (add j 1) (add acc (mul (mhd-w r j) (add j 1))))))
+    (defn mhd-z (r j acc) (if (ge j 4) acc (mhd-z r (add j 1) (add acc (mul (mhd-w r j) (mhd-y j 0 0))))))
+    (defn mhd-s (r acc) (if (ge r 4) acc (mhd-s (add r 1) (add acc (mhd-z r 0 0)))))
+    (defn mhd-yb (r acc) (if (ge r 4) acc (mhd-yb (add r 1) (str_concat acc (mhd-f32 (mhd-y r 0 0))))))
+    (defn mhd-zb (r acc) (if (ge r 4) acc (mhd-zb (add r 1) (str_concat acc (mhd-f32 (mhd-z r 0 0))))))
+
+    ; ---- the binding string, this cell's layout, not the carrier's ----------------------
+    ; u32 n_buf | u32 handle[3] | u32 n_const | u32 rows | u32 cols
+    (defn mhd-bind (b0 b1 b2 c0 c1)
+        (str_concat (mhd-u32 3)
+        (str_concat (mhd-u32 b0)
+        (str_concat (mhd-u32 b1)
+        (str_concat (mhd-u32 b2)
+        (str_concat (mhd-u32 2)
+        (str_concat (mhd-u32 c0) (mhd-u32 c1))))))))
+    ; the same binding plus the optional pair: threads_per_group, threadgroup_bytes
+    (defn mhd-bind-tg (b0 b1 b2 c0 c1 tpg tgmem)
+        (str_concat (mhd-bind b0 b1 b2 c0 c1)
+                    (str_concat (mhd-u32 tpg) (mhd-u32 tgmem))))
+    ; and a deliberately malformed one: the pair is a PAIR, so half of it is not a
+    ; shorter binding, it is a wrong one, and the door has to say so rather than
+    ; read as far as it parses.
+    (defn mhd-bind-half (b0 b1 b2 c0 c1)
+        (str_concat (mhd-bind b0 b1 b2 c0 c1) (mhd-u32 4)))
+
+    ; ---- the kernel, emitted by this cell ------------------------------------------------
+    (defn mhd-msl ()
+        (str_concat "#include <metal_stdlib>" (str_concat (mhd-nl)
+        (str_concat "using namespace metal;" (str_concat (mhd-nl)
+        (str_concat "kernel void form_fkwu_generic_matvec_f32(" (str_concat (mhd-nl)
+        (str_concat "  device const float *w [[buffer(0)]]," (str_concat (mhd-nl)
+        (str_concat "  device const float *x [[buffer(1)]]," (str_concat (mhd-nl)
+        (str_concat "  device float *y [[buffer(2)]]," (str_concat (mhd-nl)
+        (str_concat "  constant uint &rows [[buffer(3)]]," (str_concat (mhd-nl)
+        (str_concat "  constant uint &cols [[buffer(4)]]," (str_concat (mhd-nl)
+        (str_concat "  uint gid [[thread_position_in_grid]]) {" (str_concat (mhd-nl)
+        (str_concat "  if (gid >= rows) return;" (str_concat (mhd-nl)
+        (str_concat "  float a = 0.0f;" (str_concat (mhd-nl)
+        (str_concat "  for (uint j = 0; j < cols; j++) a += w[gid*cols + j] * x[j];" (str_concat (mhd-nl)
+        (str_concat "  y[gid] = a;" (str_concat (mhd-nl)
+                    "}" )))))))))))))))))))))))))))
+
+    (defn mhd-has (s sub) (if (ge (str_find s sub 0) 0) 1 0))
+
+    ; ---- requirement 1: the weights arrive by mmap, not by copy --------------------------
+    ; Writing the fixture from Form and then mapping it back is the whole crossing this
+    ; door permits: reading a model file's bytes. Nothing else about the model leaves Form.
+    (let wpath "/tmp/fk-metal-handle-door-weights.bin")
+    (let wrote (write_file wpath (mhd-seq 1 16 "")))
+    (let hW (metal_buf_from_file wpath 0 64))
+
+    ; ---- requirement 2: buffers that persist across calls --------------------------------
+    (let hx (metal_buf_alloc 16))
+    (let wx (metal_buf_write hx 0 (mhd-seq 1 4 "")))
+    (let hy (metal_buf_alloc 16))
+    (let hW2 (metal_buf_alloc 64))
+    (let wW2 (metal_buf_write hW2 0 (mhd-seq 1 16 "")))
+    (let hz (metal_buf_alloc 16))
+    (let hones (metal_buf_alloc 16))
+    (let wones (metal_buf_write hones 0 (mhd-ones 1 4 "")))
+    (let hs (metal_buf_alloc 4))
+
+    ; ---- compile once ---------------------------------------------------------------------
+    (let pipe (metal_pipeline (mhd-msl) "form_fkwu_generic_matvec_f32"))
+
+    ; ---- requirement 3: three dispatches, no wait between them -----------------------------
+    (let e1 (metal_enqueue pipe (mhd-bind hW   hx hy 4 4) 4))
+    (let e2 (metal_enqueue pipe (mhd-bind hW2  hy hz 4 4) 4))
+    (let e3 (metal_enqueue pipe (mhd-bind hones hz hs 1 4) 1))
+
+    ; read the door's own count while the work is still outstanding
+    (let st (metal_status))
+    (print_str st)
+
+    ; ---- requirement 4: one sync ------------------------------------------------------------
+    (let synced (metal_sync))
+
+    (let ybytes (metal_buf_read hy 0 16))
+    (let zbytes (metal_buf_read hz 0 16))
+    (let sbytes (metal_buf_read hs 0 4))
+
+    ; ---- the explicit per-dispatch shape, after the batch above is drained ---------------
+    ; A half-tail is TURNED AWAY (its length is neither of the two legal ones), and a
+    ; full tail dispatches and agrees with d1. Both are checked here rather than in the
+    ; chain above so the pending=3 and drained=3 witnesses stay about the chain alone.
+    (let bad (metal_enqueue pipe (mhd-bind-half hW hx hy 4 4) 4))
+    (let hy2 (metal_buf_alloc 16))
+    (let e4 (metal_enqueue pipe (mhd-bind-tg hW hx hy2 4 4 4 0) 4))
+    (let y2bytes (metal_buf_read hy2 0 16))
+
+    (print_str (str_concat "handles W/x/y/W2/z/ones/s/pipe"
+        (str_concat (str_concat " " (int_to_str hW))
+        (str_concat (str_concat " " (int_to_str hx))
+        (str_concat (str_concat " " (int_to_str hy))
+        (str_concat (str_concat " " (int_to_str hW2))
+        (str_concat (str_concat " " (int_to_str hz))
+        (str_concat (str_concat " " (int_to_str hones))
+        (str_concat (str_concat " " (int_to_str hs))
+                    (str_concat " " (int_to_str pipe)))))))))))
+    (print_str (str_concat "synced-dispatches " (int_to_str synced)))
+    (print_str (str_concat "gpu   y" (mhd-show ybytes 0 4 "")))
+    (print_str (str_concat "gpu   z" (mhd-show zbytes 0 4 "")))
+    (print_str (str_concat "gpu   s" (mhd-show sbytes 0 1 "")))
+    (print_str (str_concat "form  s " (int_to_str (mhd-s 0 0))))
+
+    (let b-linked (mhd-has st "metal_linked=true"))
+    (let b-pipe   (if (gt pipe 0) 1 0))
+    (let b-bufs   (if (gt (mul (mul (mul hx hy) (mul hW2 hz)) (mul (mul hones hs) 1)) 0) 1 0))
+    (let b-mmap   (if (gt hW 0) (mhd-has st "mmap_nocopy_buffers=1") 0))
+    (let b-pend   (mhd-has st "pending=3"))
+    (let b-sync   (if (eq synced 3) 1 0))
+    (let b-y      (if (str_eq ybytes (mhd-yb 0 "")) 1 0))
+    (let b-z      (if (str_eq zbytes (mhd-zb 0 "")) 1 0))
+    (let b-s      (if (str_eq sbytes (mhd-f32 (mhd-s 0 0))) 1 0))
+    (let b-tg     (if (str_eq y2bytes (mhd-yb 0 "")) 1 0))
+    ; A refusal only means something next to an acceptance. Asking "was the malformed
+    ; binding refused?" alone lights this bit on a build with NO carrier at all, where
+    ; every enqueue answers 0 and nothing was discriminated — the first run of this band
+    ; on plain fkwu scored 1024 for exactly that reason. So the bit demands the pair:
+    ; the half-written tail refused AND the well-formed one accepted.
+    (let b-half   (if (eq bad 0) (if (eq e4 1) 1 0) 0))
+
+    (print_str (str_concat "half-tail-refused(0 wanted) " (int_to_str bad)))
+    (print_str (str_concat "gpu   y-with-threads_per_group" (mhd-show y2bytes 0 4 "")))
+
+    (add (mul b-linked 1)
+    (add (mul b-pipe 2)
+    (add (mul b-bufs 4)
+    (add (mul b-mmap 8)
+    (add (mul b-pend 16)
+    (add (mul b-sync 32)
+    (add (mul b-y 64)
+    (add (mul b-z 128)
+    (add (mul b-s 256)
+    (add (mul b-tg 512)
+         (mul b-half 1024))))))))))))
