@@ -28,7 +28,7 @@
 ;     T token_embd.weight 1 2 4096 129280 1 71707886176 529530880 1 1059061760
 ; Same recipe, different kernel. A literal cannot drift with the code that produced it.
 ;
-; Verdict 8388607 when the five rungs are honest:
+; Verdict 67108863 when the six rungs are honest:
 ;   1   the door SPEAKS — metal_status carries metal_linked=true (the voice canary, checked first)
 ;   2   the geometry is READ FROM THE HEADER and matches the Go arm's manifest literally:
 ;       n_embd 4096, vocab 129280, ggml type 1 (F16), absolute offset 71707886176, bytes 1059061760
@@ -94,6 +94,24 @@
 ;       folded in fp64 (tn-exp, tn-sqrt): measured 886 ppb — the widest step yet because mla_exp is
 ;       an f32 Taylor against fp64, still under the bar. scale = 1/sqrt(512) rides as f32 bits
 ;       1026884851; the reference derives its own from tn-sqrt, so the literal is cross-checked.
+; 4194304 rung-6 geometry, both attention-exit tensors at the Go arm's addresses on the canonical
+;       imatrix file: output_a 78989329472 [8192 x 4096] and output_b 79024981056 [4096 x 8192],
+;       both type 8 (Q8_0, 35651584 bytes = rows*cols/32*34 exactly), AND the grouping rank DERIVED
+;       from that pinned geometry as rows*cols/hu_len = 8192*4096/32768 = 1024 — never a constant
+;       taken on faith.
+; 8388608 the INVERSE rope (the attention exit's un-rotation, oracle: gpuRope(ha,...,true)): the
+;       NOPE dims of heads 0 and 63 are BIT-EQUAL through the kernel (896 of 896) and the rotated
+;       tails agree with fcos/fsin in fp64 at the NEGATED angle (sign=-1 multiplies only sin, which
+;       IS angle negation): measured 194 ppb. GATED on the chain pins and on bit 524288, because the
+;       reference widens the freqs the DEVICE computed.
+; 16777216 the GROUPED output_a projection (dsv4-forward-real.fk's own Q8_0 grouped kernel text,
+;       compiled in process): eight rows sampled ON BOTH SIDES of group seams {0,1, 1024,1025,
+;       4096,4097, 7168,7169} agree with the body's q80-flat-at reader folded in fp64, each row
+;       reading its (r/rank)-th 4096-wide slice of the GPU's actual inverse-roped buffer: measured
+;       114 ppb. GATED on bit 4194304 — the reference reads weights at the PINNED address.
+; 33554432 the output_b projection closing the attention block (type 8, eight sampled rows of
+;       8192-term fp64 folds, input = the GPU's actual grouped output): measured 108 ppb. GATED on
+;       bit 4194304 and the chain pins. attn_out[0] printed by the run: 1.559525.
 ;   64  the token's row lands at the absolute address an INDEPENDENT computation says it must:
 ;       71707886176 + 671*4096*2 = 77933529920. THIS BIT WAS ADDED BECAUSE THE BAND FAILED A
 ;       MUTATION WITHOUT IT (M2, embed the wrong row: predicted 47, band answered 63). bit16 now
@@ -207,6 +225,23 @@
         (if (eq (nth rung4 13) 896) (if (lt (nth rung4 11) (dfb-tol)) 1 0) 0) 0) 0) 0))
     (let b2097152 (if (eq b1 1) (if (eq gate4 1) (if (eq b524288 1)
         (if (lt (nth rung4 12) (dfb-tol)) 1 0) 0) 0) 0))
+    ; ── RUNG 6: inverse rope -> grouped output_a -> output_b (same chain, three more dispatches)
+    ; facts 17.. : oaabs obabs oarows oacols obcols rank oaty obty nope6 relir relgrp relob
+    (let b4194304 (if (eq b1 1)
+        (if (eq (nth rung4 17) 78989329472)
+            (if (eq (nth rung4 18) 79024981056)
+                (if (eq (nth rung4 19) 8192)
+                    (if (eq (nth rung4 20) 4096)
+                        (if (eq (nth rung4 21) 8192)
+                            (if (eq (nth rung4 22) 1024)
+                                (if (eq (nth rung4 23) 8)
+                                    (if (eq (nth rung4 24) 8) 1 0) 0) 0) 0) 0) 0) 0) 0) 0))
+    (let b8388608 (if (eq b1 1) (if (eq gate4 1) (if (eq b524288 1)
+        (if (eq (nth rung4 25) 896) (if (lt (nth rung4 26) (dfb-tol)) 1 0) 0) 0) 0) 0))
+    (let b16777216 (if (eq b1 1) (if (eq gate4 1) (if (eq b4194304 1)
+        (if (lt (nth rung4 27) (dfb-tol)) 1 0) 0) 0) 0))
+    (let b33554432 (if (eq b1 1) (if (eq gate4 1) (if (eq b4194304 1)
+        (if (lt (nth rung4 28) (dfb-tol)) 1 0) 0) 0) 0))
 
     (print (str_concat "bit1  door speaks          = " (int_to_str b1)))
     (print (str_concat "bit2  geometry from header = " (int_to_str b2)))
@@ -230,6 +265,10 @@
     (print (str_concat "bit524288 sinks+freqs0 pins = " (int_to_str b524288)))
     (print (str_concat "bit1048576 rope ref+NOPE    = " (int_to_str b1048576)))
     (print (str_concat "bit2097152 attend ref       = " (int_to_str b2097152)))
+    (print (str_concat "bit4194304 rung6 geometry   = " (int_to_str b4194304)))
+    (print (str_concat "bit8388608 inverse rope ref = " (int_to_str b8388608)))
+    (print (str_concat "bit16777216 grouped oa ref  = " (int_to_str b16777216)))
+    (print (str_concat "bit33554432 output_b ref    = " (int_to_str b33554432)))
 
     (let verdict (add b1 (add (mul 2 b2) (add (mul 4 b4)
                     (add (mul 8 b8) (add (mul 16 b16) (add (mul 32 b32) (add (mul 64 b64)
@@ -240,6 +279,8 @@
                     (add (mul 32768 b32768) (add (mul 65536 b65536)
                     (add (mul 131072 b131072) (add (mul 262144 b262144)
                     (add (mul 524288 b524288) (add (mul 1048576 b1048576)
-                         (mul 2097152 b2097152)))))))))))))))))))))))
+                    (add (mul 2097152 b2097152) (add (mul 4194304 b4194304)
+                    (add (mul 8388608 b8388608) (add (mul 16777216 b16777216)
+                         (mul 33554432 b33554432)))))))))))))))))))))))))))
     (print (str_concat "Verdict: " (int_to_str verdict)))
     verdict)
