@@ -40,10 +40,24 @@
     ; one pass; nothing is read from a future position, which is what makes it
     ; causal and is exactly what gated-deltanet-conv-band.fk's bits 8 and 16
     ; falsify on the Form side.
+    ;
+    ; THE TAPS ARE PER CHANNEL: w[b + j], the same c*kw base the window uses.
+    ; This kernel folded w[j] — tap index alone — until 2026-08-04. The lane that
+    ; proved it (metal_gdn_gpu.sh) fed the demo's one tap set shared by every
+    ; channel, where w[j] is right; the real model's ssm_conv1d is kw x nch,
+    ; "each channel convolved with its own taps" (gated-deltanet-conv.fk), and a
+    ; carrier binding that tensor at its base broadcast CHANNEL 0's taps to all
+    ; 8192 channels while every nonzero/finite check stayed green. Found by
+    ; READING the kernel (kat-block0-handle.fk), proven different from the
+    ; broadcast AND bit-exact to Form's own fold on the file's own taps at 16
+    ; sampled channels (kat-block0-handle-band bit 128), landed here by the lane
+    ; that owns those bands. A carrier with genuinely shared taps must now bind
+    ; them replicated per channel — nch*kw floats — which is what the re-gated
+    ; attestant harness does.
     (defn gdm-conv-msl (fname)
         (str_concat "kernel void "
         (str_concat fname
-            " (device float* win [[buffer(0)]], device const float* x [[buffer(1)]], device const float* w [[buffer(2)]], device float* y [[buffer(3)]], constant uint& nch [[buffer(4)]], constant uint& kw [[buffer(5)]], uint c [[thread_position_in_grid]]) { if (c >= nch) return; uint b = c * kw; for (uint j = 0u; j + 1u < kw; ++j) { win[b + j] = win[b + j + 1u]; } win[b + kw - 1u] = x[c]; float acc = 0.0f; for (uint j = 0u; j < kw; ++j) { acc = acc + win[b + j] * w[j]; } y[c] = acc; }")))
+            " (device float* win [[buffer(0)]], device const float* x [[buffer(1)]], device const float* w [[buffer(2)]], device float* y [[buffer(3)]], constant uint& nch [[buffer(4)]], constant uint& kw [[buffer(5)]], uint c [[thread_position_in_grid]]) { if (c >= nch) return; uint b = c * kw; for (uint j = 0u; j + 1u < kw; ++j) { win[b + j] = win[b + j + 1u]; } win[b + kw - 1u] = x[c]; float acc = 0.0f; for (uint j = 0u; j < kw; ++j) { acc = acc + win[b + j] * w[b + j]; } y[c] = acc; }")))
 
     ; ── l2norm, one thread per head: x * rsqrt(sum(x*x) + eps) ──────────────
     (defn gdm-l2norm-msl (fname)

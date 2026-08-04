@@ -97,7 +97,11 @@ let bS   = dev.makeBuffer(length: nv * dv * dk * 4, options: .storageModeShared)
 memset(bWin.contents(), 0, nch * kw * 4)
 memset(bS.contents(), 0, nv * dv * dk * 4)
 
-let bTaps = dev.makeBuffer(bytes: taps, length: taps.count * 4, options: .storageModeShared)!
+// form_gdn_conv_f32 folds PER-CHANNEL taps (w[c*kw + j]) since the 2026-08-04 repair; the
+// demo's one shared tap set is therefore bound REPLICATED, nch copies, which computes exactly
+// what the old broadcast computed on this fixture and keeps the recorded expectations valid.
+let tapsFull = (0..<nch).flatMap { _ in taps }
+let bTaps = dev.makeBuffer(bytes: tapsFull, length: tapsFull.count * 4, options: .storageModeShared)!
 let bZ    = dev.makeBuffer(bytes: zv, length: zv.count * 4, options: .storageModeShared)!
 let bY    = dev.makeBuffer(length: nch * 4, options: .storageModeShared)!
 let bO    = dev.makeBuffer(length: nv * dv * 4, options: .storageModeShared)!
