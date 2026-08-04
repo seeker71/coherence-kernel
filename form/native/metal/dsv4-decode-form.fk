@@ -650,26 +650,29 @@
         (if (eq which 0)
             (sub (mul x0 (fcos a)) (mul x1 (fsin a)))
             (add (mul x0 (fsin a)) (mul x1 (fcos a)))))
-    (defn dfd-rope-tail-md (inraw outraw freqraw hbase k acc)
+    ; pos is a PARAMETER, not a literal: the forward rope passes +7.0 and rung 6's INVERSE rope
+    ; passes -7.0, because the kernel's sign = -1 multiplies only sin(a) — which is exactly the
+    ; negated angle (cos even, sin odd). One reference text serves both directions.
+    (defn dfd-rope-tail-md (inraw outraw freqraw hbase pos k acc)
         (if (ge k 32) acc
             (do (let lo (add hbase (add 448 (mul k 2))))
-                (let a (mul 7.0 (fd-value (dfd-rd32 freqraw (mul k 4)) 8 23)))
+                (let a (mul pos (fd-value (dfd-rd32 freqraw (mul k 4)) 8 23)))
                 (let x0 (dfd-f32at inraw (mul lo 4)))
                 (let x1 (dfd-f32at inraw (mul (add lo 1) 4)))
                 (let d0 (abs (sub (dfd-f32at outraw (mul lo 4)) (dfd-rope-pair-ref x0 x1 a 0))))
                 (let d1 (abs (sub (dfd-f32at outraw (mul (add lo 1) 4)) (dfd-rope-pair-ref x0 x1 a 1))))
                 (let d (if (gt d0 d1) d0 d1))
-                (dfd-rope-tail-md inraw outraw freqraw hbase (add k 1) (if (gt d acc) d acc)))))
-    (defn dfd-rope-tail-mr (inraw freqraw hbase k acc)
+                (dfd-rope-tail-md inraw outraw freqraw hbase pos (add k 1) (if (gt d acc) d acc)))))
+    (defn dfd-rope-tail-mr (inraw freqraw hbase pos k acc)
         (if (ge k 32) acc
             (do (let lo (add hbase (add 448 (mul k 2))))
-                (let a (mul 7.0 (fd-value (dfd-rd32 freqraw (mul k 4)) 8 23)))
+                (let a (mul pos (fd-value (dfd-rd32 freqraw (mul k 4)) 8 23)))
                 (let x0 (dfd-f32at inraw (mul lo 4)))
                 (let x1 (dfd-f32at inraw (mul (add lo 1) 4)))
                 (let r0 (abs (dfd-rope-pair-ref x0 x1 a 0)))
                 (let r1 (abs (dfd-rope-pair-ref x0 x1 a 1)))
                 (let r (if (gt r0 r1) r0 r1))
-                (dfd-rope-tail-mr inraw freqraw hbase (add k 1) (if (gt r acc) r acc)))))
+                (dfd-rope-tail-mr inraw freqraw hbase pos (add k 1) (if (gt r acc) r acc)))))
     (defn dfd-nope-eq (inraw outraw hbase j acc)
         (if (ge j 448) acc
             (dfd-nope-eq inraw outraw hbase (add j 1)
@@ -714,6 +717,28 @@
     ; dispatch cannot agree its way past the reference.
     (defn dfd-mx8g-msl ()
         (str_concat (qml-msl-header) (str_concat (mx8m-msl-helpers) (dsv4-mx8-grouped-body))))
+    ; the Q8_0 grouped unit — the TEXT is dsv4-forward-real.fk's own dsv4-q80-grouped-body, the same
+    ; bytes the bash lane compiles, taken in process. The pragma is prepended here because this door
+    ; compiles options:nil (header note 1); the bash lane gets it from -ffp-contract=off instead.
+    (defn dfd-q80g-msl ()
+        (str_concat (dfd-msl-pragma)
+        (str_concat (qml-msl-header)
+        (str_concat (q80-msl-spine)
+        (str_concat (q80-msl-weight) (dsv4-q80-grouped-body))))))
+    ; type-dispatched GROUPED pipeline + enqueue, mirroring dfd-mv-pipe/dfd-mv-enq: the file's own
+    ; tensor type picks the kernel; an unpriced type is a spoken refusal (0), never a guess. Both
+    ; kernels share one signature (rows, cols, nel, rank; one simdgroup per row) so one enqueue
+    ; serves both. tg capped 64 — the oracle's tgFree default for exactly this dispatch.
+    (defn dfd-mvg-pipe (ty)
+        (if (eq ty 8) (metal_pipeline (dfd-q80g-msl) "form_dsv4_q80_matvec_grouped")
+        (if (eq ty 41) (metal_pipeline (str_concat (dfd-msl-pragma) (dfd-mx8g-msl)) "form_dsv4_mx8_matvec_grouped")
+            0)))
+    (defn dfd-mvg-enq (p w x y rows cols rank)
+        (metal_enqueue p (dfd-bind-tg
+            (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 w) (dfd-u32 x)) (dfd-u32 y)))
+                        (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 rows) (dfd-u32 cols))
+                                                            (str_concat (dfd-u32 (mul rows cols)) (dfd-u32 rank)))))
+            64 0) (mul rows 32)))
 
     ; the grouped fp64 reference: tensor row r consumes the (r/rank)-th cols-wide slice of x.
     (defn dfd-mx8g-dot (ty wraw nel cols rank xraw r j acc)
@@ -898,6 +923,49 @@
             (print (str_concat "ENQ rope/attend=" (str_concat (int_to_str e11) (str_concat (int_to_str e12)
                    (str_concat (int_to_str e13) (int_to_str e14))))))
 
+            ; ── rung 6 continues the SAME batch: inverse rope -> grouped output_a -> output_b ──
+            ; the oracle's exit is gpuRope(ha, nHead, pos, il, TRUE) -> gpuGrouped(w.oa, hu) ->
+            ; gpuMx8(w.ob, lo). The RANK is not taken on faith: it is DERIVED from pinned geometry as
+            ; oa_rows*oa_cols/hu_len = 8192*4096/32768 = 1024, so a wrong rank in this dispatch cannot
+            ; agree its way past a reference that samples rows on BOTH sides of every group seam.
+            (let oaabs (dfd-tabs src path "blk.0.attn_output_a.weight"))
+            (let oabytes (dfd-tbytes src "blk.0.attn_output_a.weight"))
+            (let oaty (dfd-ttype src "blk.0.attn_output_a.weight"))
+            (let oacols (dfd-td0 src "blk.0.attn_output_a.weight"))
+            (let oarows (dfd-td1 src "blk.0.attn_output_a.weight"))
+            (let obabs (dfd-tabs src path "blk.0.attn_output_b.weight"))
+            (let obbytes (dfd-tbytes src "blk.0.attn_output_b.weight"))
+            (let obty (dfd-ttype src "blk.0.attn_output_b.weight"))
+            (let obcols (dfd-td0 src "blk.0.attn_output_b.weight"))
+            (let obrows (dfd-td1 src "blk.0.attn_output_b.weight"))
+            (let orank (div (mul oarows oacols) qbrows))
+            (print (str_concat "GEOM output_a abs=" (str_concat (int_to_str oaabs)
+                   (str_concat " type=" (str_concat (int_to_str oaty)
+                   (str_concat " rows=" (str_concat (int_to_str oarows)
+                   (str_concat " cols=" (str_concat (int_to_str oacols)
+                   (str_concat " rank=" (int_to_str orank)))))))))))
+            (print (str_concat "GEOM output_b abs=" (str_concat (int_to_str obabs)
+                   (str_concat " type=" (str_concat (int_to_str obty)
+                   (str_concat " rows=" (str_concat (int_to_str obrows)
+                   (str_concat " cols=" (int_to_str obcols)))))))))
+            (let pg (dfd-mvg-pipe oaty))
+            (let pob (dfd-mv-pipe obty))
+            (let oah (metal_buf_from_file path oaabs oabytes))
+            (let obh (metal_buf_from_file path obabs obbytes))
+            (let hub (metal_buf_alloc (mul qbrows 4)))
+            (let lob (metal_buf_alloc (mul oarows 4)))
+            (let aob (metal_buf_alloc (mul obrows 4)))
+            ; inverse rope: same kernel, sign = -1.0f (bits 3212836864); pos stays +7.0f, as the
+            ; oracle passes it. sign only multiplies sin(a), so this IS the negated angle.
+            (let e15 (metal_enqueue pro
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 hab) (dfd-u32 hub)) (dfd-u32 fb)))
+                            (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512))
+                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 1088421888) (dfd-u32 3212836864)))))) qbrows))
+            (let e16 (dfd-mvg-enq pg oah hub lob oarows oacols orank))
+            (let e17 (dfd-mv-enq pob obty obh lob aob obrows obcols))
+            (print (str_concat "ENQ irope/grouped/output_b=" (str_concat (int_to_str e15)
+                   (str_concat (int_to_str e16) (int_to_str e17)))))
+
             (let fraw (metal_buf_read fb 0 128))
             (let qrraw (metal_buf_read qrb 0 (mul qbrows 4)))
             (let krraw (metal_buf_read krb 0 (mul 512 4)))
@@ -907,10 +975,10 @@
 
             ; rope: NOPE bit-equality on k row + q head 0, tail vs fp64 on the same two heads
             (let nopeeq (add (dfd-nope-eq klnraw krraw 0 0 0) (dfd-nope-eq qhraw qrraw 0 0 0)))
-            (let rmd (dfd-rope-tail-md klnraw krraw fraw 0 0
-                      (dfd-rope-tail-md qhraw qrraw fraw 0 0 0.0)))
-            (let rmr (dfd-rope-tail-mr klnraw fraw 0 0
-                      (dfd-rope-tail-mr qhraw fraw 0 0 0.0)))
+            (let rmd (dfd-rope-tail-md klnraw krraw fraw 0 7.0 0
+                      (dfd-rope-tail-md qhraw qrraw fraw 0 7.0 0 0.0)))
+            (let rmr (dfd-rope-tail-mr klnraw fraw 0 7.0 0
+                      (dfd-rope-tail-mr qhraw fraw 0 7.0 0 0.0)))
             (let relrope (div rmd rmr))
             (print (str_concat "NOPE bit-equal dims=" (str_concat (int_to_str nopeeq) " of 896")))
             (print (str_concat "REL rope tails (ppb)=" (float_to_str (mul relrope 1000000000.0))))
@@ -920,20 +988,61 @@
             (let amr (dfd-att-all-mr qrraw krraw snkraw 0 0.0))
             (let relatt (div amd amr))
             (print (str_concat "REL attend 64 heads (ppb)=" (float_to_str (mul relatt 1000000000.0))))
+
+            ; ── rung 6 references. Induction as before: each step's fp64 reference reads the GPU's
+            ; ACTUAL input buffer for that step and weights at the pinned file addresses.
+            (let huraw (metal_buf_read hub 0 (mul qbrows 4)))
+            (let loraw (metal_buf_read lob 0 (mul oarows 4)))
+            (let aoraw (metal_buf_read aob 0 (mul obrows 4)))
+
+            ; inverse rope: NOPE dims are a copy checked as a copy (heads 0 and 63, 896 dims), and
+            ; the rotated tails against fcos/fsin in fp64 at the NEGATED angle (pos = -7.0).
+            (let nope6 (add (dfd-nope-eq haraw huraw 0 0 0) (dfd-nope-eq haraw huraw 32256 0 0)))
+            (let imd (dfd-rope-tail-md haraw huraw fraw 32256 -7.0 0
+                      (dfd-rope-tail-md haraw huraw fraw 0 -7.0 0 0.0)))
+            (let imr (dfd-rope-tail-mr haraw fraw 32256 -7.0 0
+                      (dfd-rope-tail-mr haraw fraw 0 -7.0 0 0.0)))
+            (let relir (div imd imr))
+            (print (str_concat "IROPE NOPE bit-equal dims=" (str_concat (int_to_str nope6) " of 896")))
+            (print (str_concat "REL inverse-rope tails (ppb)=" (float_to_str (mul relir 1000000000.0))))
+
+            ; grouped output_a: eight rows ON BOTH SIDES of group seams — {0,1} in group 0,
+            ; {1024,1025} astride the rank-1024 seam, {4096,4097} at group 4, {7168,7169} at group 7.
+            ; A wrong rank moves the group a sampled row reads and the reference catches it at the seam.
+            (let oawraw (eqr-of-file path oaabs oabytes))
+            (let oanel (mul oarows oacols))
+            (let grows (cons 0 (cons 1 (cons 1024 (cons 1025 (cons 4096 (cons 4097 (cons 7168 (cons 7169 0)))))))))
+            (let relgrp (div (dfd-mx8g-md oaty oawraw oanel oacols orank huraw loraw grows 0.0)
+                             (dfd-mx8g-mr oaty oawraw oanel oacols orank huraw grows 0.0)))
+            (print (str_concat "REL grouped output_a 8 rows (ppb)=" (float_to_str (mul relgrp 1000000000.0))))
+
+            ; output_b: eight sampled rows of the plain matvec, 8192-term fp64 folds each.
+            (let obwraw (eqr-of-file path obabs obbytes))
+            (let obnel (mul obrows obcols))
+            (let brows (cons 0 (cons 1 (cons 1365 (cons 1366 (cons 2730 (cons 2731 (cons 4094 (cons 4095 0)))))))))
+            (let relob (div (dfd-mx8-md-rows obty obwraw obnel obcols loraw aoraw brows 0.0)
+                            (dfd-mx8-mr-rows obty obwraw obnel obcols loraw brows 0.0)))
+            (print (str_concat "REL output_b 8 rows (ppb)=" (float_to_str (mul relob 1000000000.0))))
+            (print (str_concat "attn_out[0]=" (float_to_str (dfd-f32at aoraw 0))))
             (print (metal_status))
             (cons relqln (cons relkln (cons relqb (cons relhr
                 (cons qanabs (cons kvanabs (cons qbabs (cons kvabs
                 (cons (add eabs rowoff) (cons qbrows (cons qbcols
                 (cons relrope (cons relatt (cons nopeeq
-                (cons snkabs (cons (dfd-rd32 fraw 0) (cons (dfd-rd32 fraw 4) 0)))))))))))))))))))
+                (cons snkabs (cons (dfd-rd32 fraw 0) (cons (dfd-rd32 fraw 4)
+                (cons oaabs (cons obabs (cons oarows (cons oacols (cons obcols
+                (cons orank (cons oaty (cons obty
+                (cons nope6 (cons relir (cons relgrp (cons relob 0)))))))))))))))))))))))))))))))
 
     ; ================= UNFINISHED, named so it cannot be mistaken for done =================
+    ; - the full MLA attention block for layer 0 at pos 7 now runs end to end from this cell
+    ;   (embed -> ... -> attend -> inverse rope -> grouped output_a -> output_b, 18 dispatches),
+    ;   but WITHOUT the fp8+f16 KV round (ds4.c:3211, in the forward path, ~1e-2 not a rounding
+    ;   detail) and WITHOUT the KV caches — one position, one KV row, no growth.
     ; - the 43-layer stack. The oracle's runner is ~1200 lines of essential orchestration beyond this
     ;   rung: two routing regimes, six expert quantizations, the 20-iteration hyper-connection sinkhorn,
     ;   the second (compressed) KV cache on the ratio-nonzero layers, MLA split into scores/stats/acc,
     ;   YaRN RoPE and its compressed reduction, and the exit head. None of it is written here.
     ; - the one-token argmax against metal_dsv4_stack.sh. Not attempted, because there is no stack yet
     ;   to take an argmax of. Claiming it from a working embed would be a fabrication.
-    ; - door note 2 (threadgroup size) must land before any kernel that folds across a threadgroup can
-    ;   be driven faithfully from here.
     0)
