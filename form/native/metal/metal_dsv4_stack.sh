@@ -40,7 +40,41 @@ set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form
 GO_BIN="$ROOT/form-kernel-go/bin-go"
-BLOB="${FORM_DS4_BLOB:-$HOME/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf}"
+# WHICH WEIGHTS ANSWER, and why this is a list rather than a path.
+#
+# This defaulted to `ds4/ds4flash-v5mx-reap25-…` from the day the lane was born. On 2026-08-04 the ask
+# door answered "The largest planet in our solar system is" with " the name, the<|place_holder_mm_span
+# _0155|> detection device detection device detection" at 8 t/s — while this harness printed VERDICT
+# PASS 107 gates and validate.sh printed 54 gates, 0 FAIL. The arithmetic was never wrong: pointed at
+# the mainline file, the SAME COMMIT answers " Jupiter. It is so big that you could fit all the other
+# planets in the solar system into it." at 28 t/s.
+#
+# `reap25` names the difference in the filename itself — 25% of the experts REMOVED
+# (receipts/2026-07-22-deepseek-manifest.md: "layers 3 … 42 -> 192 experts"). It is the specimen the
+# Stones were built on, it is a real GGUF, and every kernel receipt earned on it still stands, because
+# those are claims about arithmetic over bytes. What it cannot do is finish a sentence, and this body
+# had already written that down twice — receipts/2026-07-30-head-to-head-and-a-logit-oracle.md records
+# it emitting " to the detection Specialists Protocol detection protocol setName", and ds4-paris-probe
+# .fk records ~/models/ds4-engine/ds4 REFUSING to read it, so it has no oracle either. The mainline
+# chat-v2-imatrix file arrived 2026-07-30, every fluent DS4 receipt since rests on it, and this line
+# was never moved. Three days later the door was read as a regression in the kernels.
+#
+# So: prefer the engine's own canonical name (a symlink, so it follows whatever the engine considers
+# current), fall back to the reaped specimen only when it is the only file here, and NAME the choice
+# out loud either way. A default that silently picks a specimen is a body that cannot tell you which
+# of its own answers you are reading.
+DS4_BLOB_PREFERRED="$HOME/models/ds4-engine/ds4flash.gguf"
+DS4_BLOB_SPECIMEN="$HOME/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf"
+if [[ -n "${FORM_DS4_BLOB:-}" ]]; then BLOB="$FORM_DS4_BLOB"
+elif [[ -f "$DS4_BLOB_PREFERRED" ]]; then BLOB="$DS4_BLOB_PREFERRED"
+else BLOB="$DS4_BLOB_SPECIMEN"
+fi
+# FOLLOW THE LINK, AND SAY THE REAL NAME. `ds4flash.gguf` is a symlink, and the first draft of this
+# block reported it as such: `stat -f%z` handed back 110 — the LINK's own bytes — the residency plan
+# was built over a 110-byte file, and the runner took SIGTRAP. Two costs in one line: a plan over a
+# nonsense size, and a printed name that would have hidden which specimen answered, which is the very
+# thing this block exists to stop. Resolving here fixes both, and every later `stat` sees a real file.
+[[ -L "$BLOB" ]] && BLOB="$(readlink -f "$BLOB")"
 CACHE="$ROOT/native/metal/.metallib-cache"
 TOKEN="${FORM_DS4_PROMPT_TOKEN:-671}"
 KV_CAP="${FORM_DS4_KV_CAP:-4}"
@@ -83,7 +117,13 @@ if [[ ! -x "$GO_BIN" ]]; then
 fi
 FSIZE=$(stat -f%z "$BLOB")
 work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
-echo "ds4 blob: $FSIZE bytes at $(date '+%H:%M:%S')   THE HETEROGENEOUS STACK (token=$TOKEN)"
+# The SIZE was printed here and the NAME was not, which is how 91 321 404 640 and 86 720 111 488 sat
+# in a hundred receipts as two numbers nobody read as two files.
+echo "ds4 blob: $(basename "$BLOB") — $FSIZE bytes at $(date '+%H:%M:%S')   THE HETEROGENEOUS STACK (token=$TOKEN)"
+case "$BLOB" in
+    *reap25*) echo "  NOTE  these are the REAPED weights (25% of experts removed) — a kernel specimen, not a"
+              echo "        model that finishes sentences. ~/models/ds4-engine/ds4 cannot read this file either." ;;
+esac
 
 # ── the `; preludes:` directives are LIVE recursive load instructions; walked, never hand-catted ──
 fk_deps(){ awk 'BEGIN{IGNORECASE=1} /^;[ \t]*preludes:/{ s=$0; sub(/^;[ \t]*preludes:[ \t]*/,"",s); n=split(s,a,/[ \t]+/); for(i=1;i<=n;i++){ if(a[i]=="\\"||tolower(a[i])=="none"||tolower(a[i])=="(none)"||a[i]=="")continue; if(a[i]~/\.fk$/)print a[i] } }' "$1" 2>/dev/null; }
