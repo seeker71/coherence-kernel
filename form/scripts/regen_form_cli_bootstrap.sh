@@ -29,7 +29,7 @@ FORM_CLI_SRCS=(
     form-stdlib/form-native-resource-interfaces.fk form-stdlib/form-fs.fk
     form-stdlib/storage-port.fk form-stdlib/host-kernel-carrier.fk form-stdlib/fnri-standin.fk
     form-stdlib/fnri-receipt.fk form-stdlib/http-client.fk
-    form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk
+    form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/model-discovery.fk
     form-stdlib/q4k-dequant.fk form-stdlib/weight-load.fk
     form-stdlib/voice-traits.fk form-stdlib/nearest-shape.fk
     form-stdlib/co-learning.fk form-stdlib/co-learning-stream.fk form-stdlib/mesh-dispatch.fk
@@ -44,6 +44,7 @@ FORM_CLI_SRCS=(
     form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
     form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk form-stdlib/form-cli-surface-inquiry.fk
     form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry.fk form-stdlib/relational-inquiry-metabolism.fk form-stdlib/native-model-native-hierarchy.fk form-stdlib/ds4-query-channel.fk form-stdlib/form-cli.fk
+    form-stdlib/native-model-control-plane.fk form-stdlib/ask-lane-router.fk
     form-stdlib/form-cli-gguf-cell.fk form-stdlib/form-cli-repl.fk
 )
 
@@ -153,7 +154,7 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/fnri-standin.fk form-stdlib/fnri-receipt.fk
     form-stdlib/http-client.fk form-stdlib/line-grammar.fk form-stdlib/str-byte-at.fk
     form-stdlib/sha256.fk form-stdlib/hmac-sha256.fk form-stdlib/hex.fk
-    form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk
+    form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/model-discovery.fk
     form-stdlib/q4k-dequant.fk form-stdlib/weight-load.fk
     form-stdlib/voice-traits.fk form-stdlib/nearest-shape.fk
     form-stdlib/co-learning.fk form-stdlib/co-learning-stream.fk form-stdlib/mesh-dispatch.fk
@@ -169,6 +170,7 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk form-stdlib/form-cli-surface-inquiry.fk
     form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry.fk form-stdlib/ds4-query-channel.fk form-stdlib/form-cli.fk
     form-stdlib/form-cli-gguf-cell.fk form-stdlib/relational-inquiry-metabolism.fk form-stdlib/native-model-native-hierarchy.fk
+    form-stdlib/native-model-control-plane.fk form-stdlib/ask-lane-router.fk
 )
 FORM_CLI_FLATTEN_SRCS=()
 for src in "${FORM_CLI_SELFHOST_ORDER[@]}"; do
@@ -181,11 +183,31 @@ done
 FORM_CLI_FLATTEN_SRCS+=(form-stdlib/form-cli-repl.fk)
 
 stdlib=form-stdlib
+# $modules below is THE list that becomes the program. FORM_CLI_SRCS only
+# authors the stamp and the source digest; FORM_CLI_SELFHOST_ORDER is the
+# fallback arm that runs only when both Rust and TypeScript are absent. On any
+# host carrying form-kernel-rust, the Rust branch fires first and flattens
+# $modules — so a cell added to the other two lists and not to this one lands
+# in the stamp, in the genesis text, and in `form-cli source`, while the
+# program cannot call a single one of its recipes. That is how equireach.fk,
+# equireach-gguf.fk, gguf-meta.fk and model-discovery.fk arrived on 2026-08-03
+# as 52 KB of quotable text and zero callable functions: the `functions=` count
+# printed at the end moved by 1 (the band's own fc-models) where ~100 were due.
+# Read that number as the witness.
+#
+# SIX lists, not four — the count grew on 2026-08-03 when ask-lane-router.fk was
+# wired in. build-form-cli.sh carries two more of its own: FORM_CLI_SRCS (~:73)
+# authors the stamp the build compares against the one THIS script wrote, and
+# FORM_CLI_SELFHOST_SRCS (~:160) is its no-Go flatten arm. Mirror all six, and
+# mirror the ORDER too: the stamp is a hash over the list, so the same files in
+# a different place hash differently and the build stops with "source stamp
+# stale" naming two hashes and no file. That message is a mirroring gap, not a
+# stale tree. Six lists, one program: keep them mirrored.
 core_src="$(compile_bml "$stdlib/core.fk")"
 http_client_src="$(compile_bml "$stdlib/http-client.fk")"
 form_cli_ask_src="$(compile_bml "$stdlib/form-cli-ask.fk")"
-modules="(list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/grammars/sanskrit-roots.fk\") (read_file \"$stdlib/resource-port.fk\") (read_file \"$stdlib/bml-native-interface-package-import.fk\") (read_file \"$stdlib/hati-os-targets.fk\") (read_file \"$stdlib/form-native-resource-interfaces.fk\") (read_file \"$stdlib/form-fs.fk\") (read_file \"$stdlib/storage-port.fk\") (read_file \"$stdlib/host-kernel-carrier.fk\") (read_file \"$stdlib/fnri-standin.fk\") (read_file \"$stdlib/fnri-receipt.fk\") (read_file \"$http_client_src\") (read_file \"$stdlib/line-grammar.fk\") (read_file \"$stdlib/str-byte-at.fk\") (read_file \"$stdlib/sha256.fk\") (read_file \"$stdlib/hmac-sha256.fk\") (read_file \"$stdlib/hex.fk\") (read_file \"$stdlib/format-arith.fk\") (read_file \"$stdlib/f16-decode.fk\") (read_file \"$stdlib/q6k-dequant.fk\") (read_file \"$stdlib/q4k-dequant.fk\") (read_file \"$stdlib/weight-load.fk\") (read_file \"$stdlib/voice-traits.fk\") (read_file \"$stdlib/nearest-shape.fk\") (read_file \"$stdlib/co-learning.fk\") (read_file \"$stdlib/co-learning-stream.fk\") (read_file \"$stdlib/mesh-dispatch.fk\") (read_file \"$stdlib/surprise-salience.fk\") (read_file \"$stdlib/host-sense-organ.fk\") (read_file \"$stdlib/speech-organ.fk\") (read_file \"$stdlib/native-host-instance.fk\") (read_file \"$stdlib/text-tokenize.fk\") (read_file \"$stdlib/rag-embed.fk\") (read_file \"$stdlib/rag-index-codec.fk\") (read_file \"$stdlib/rag-retrieve.fk\") (read_file \"$stdlib/rag-ask.fk\") (read_file \"$form_cli_ask_src\") (read_file \"$stdlib/form-cli-router.fk\") (read_file \"$stdlib/form-cli-judge.fk\") (read_file \"$stdlib/confidence-weighted-vote.fk\") (read_file \"$stdlib/lineage-discounted-vote.fk\") (read_file \"$stdlib/form-cli-oracle-loop.fk\") (read_file \"$stdlib/form-cli-sufficiency.fk\") (read_file \"$stdlib/form-freq-check.fk\") (read_file \"$stdlib/trust-row.fk\") (read_file \"$stdlib/form-cli-ask-gate.fk\") (read_file \"$stdlib/form-cli-staged-trace.fk\") (read_file \"$stdlib/form-cli-request.fk\") (read_file \"$carrier_src\") (read_file \"$stdlib/form-cli-ask-plus.fk\") (read_file \"$stdlib/form-cli-surface-inquiry.fk\") (read_file \"$stdlib/current-branch-landing.fk\") (read_file \"$stdlib/form-cli-inquiry.fk\") (read_file \"$stdlib/form-cli.fk\") (read_file \"$stdlib/form-cli-gguf-cell.fk\"))"
-modules="${modules%)} (read_file \"$stdlib/relational-inquiry-metabolism.fk\") (read_file \"$stdlib/native-model-native-hierarchy.fk\"))"
+modules="(list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/grammars/sanskrit-roots.fk\") (read_file \"$stdlib/resource-port.fk\") (read_file \"$stdlib/bml-native-interface-package-import.fk\") (read_file \"$stdlib/hati-os-targets.fk\") (read_file \"$stdlib/form-native-resource-interfaces.fk\") (read_file \"$stdlib/form-fs.fk\") (read_file \"$stdlib/storage-port.fk\") (read_file \"$stdlib/host-kernel-carrier.fk\") (read_file \"$stdlib/fnri-standin.fk\") (read_file \"$stdlib/fnri-receipt.fk\") (read_file \"$http_client_src\") (read_file \"$stdlib/line-grammar.fk\") (read_file \"$stdlib/str-byte-at.fk\") (read_file \"$stdlib/sha256.fk\") (read_file \"$stdlib/hmac-sha256.fk\") (read_file \"$stdlib/hex.fk\") (read_file \"$stdlib/format-arith.fk\") (read_file \"$stdlib/f16-decode.fk\") (read_file \"$stdlib/q6k-dequant.fk\") (read_file \"$stdlib/equireach.fk\") (read_file \"$stdlib/equireach-gguf.fk\") (read_file \"$stdlib/gguf-meta.fk\") (read_file \"$stdlib/model-discovery.fk\") (read_file \"$stdlib/q4k-dequant.fk\") (read_file \"$stdlib/weight-load.fk\") (read_file \"$stdlib/voice-traits.fk\") (read_file \"$stdlib/nearest-shape.fk\") (read_file \"$stdlib/co-learning.fk\") (read_file \"$stdlib/co-learning-stream.fk\") (read_file \"$stdlib/mesh-dispatch.fk\") (read_file \"$stdlib/surprise-salience.fk\") (read_file \"$stdlib/host-sense-organ.fk\") (read_file \"$stdlib/speech-organ.fk\") (read_file \"$stdlib/native-host-instance.fk\") (read_file \"$stdlib/text-tokenize.fk\") (read_file \"$stdlib/rag-embed.fk\") (read_file \"$stdlib/rag-index-codec.fk\") (read_file \"$stdlib/rag-retrieve.fk\") (read_file \"$stdlib/rag-ask.fk\") (read_file \"$form_cli_ask_src\") (read_file \"$stdlib/form-cli-router.fk\") (read_file \"$stdlib/form-cli-judge.fk\") (read_file \"$stdlib/confidence-weighted-vote.fk\") (read_file \"$stdlib/lineage-discounted-vote.fk\") (read_file \"$stdlib/form-cli-oracle-loop.fk\") (read_file \"$stdlib/form-cli-sufficiency.fk\") (read_file \"$stdlib/form-freq-check.fk\") (read_file \"$stdlib/trust-row.fk\") (read_file \"$stdlib/form-cli-ask-gate.fk\") (read_file \"$stdlib/form-cli-staged-trace.fk\") (read_file \"$stdlib/form-cli-request.fk\") (read_file \"$carrier_src\") (read_file \"$stdlib/form-cli-ask-plus.fk\") (read_file \"$stdlib/form-cli-surface-inquiry.fk\") (read_file \"$stdlib/current-branch-landing.fk\") (read_file \"$stdlib/form-cli-inquiry.fk\") (read_file \"$stdlib/form-cli.fk\") (read_file \"$stdlib/form-cli-gguf-cell.fk\"))"
+modules="${modules%)} (read_file \"$stdlib/relational-inquiry-metabolism.fk\") (read_file \"$stdlib/native-model-native-hierarchy.fk\") (read_file \"$stdlib/native-model-control-plane.fk\") (read_file \"$stdlib/ask-lane-router.fk\"))"
 modules="${modules/ (read_file \"$stdlib\/form-cli.fk\")/ (read_file \"$stdlib\/ds4-query-channel.fk\") (read_file \"$stdlib\/form-cli.fk\")}"
 band="(read_file \"$stdlib/form-cli-repl.fk\")"
 FLATTEN_CHAIN=(

@@ -1,0 +1,132 @@
+; kat-exit-handle.fk — KAT-Coder's exit path with the LOOP IN A FORM CELL.
+;
+; WHAT MOVED. metal_kat_exit.sh proved this arithmetic on 2026-08-03: argmax id=3637 for token 100,
+; VERDICT PASS. It proved it through a Swift program the shell wrote out at run time — 90 lines that
+; opened the file, mmap'd it, made the buffers, bound them at their offsets, dispatched, waited, and
+; scanned 248 320 logits on the CPU. Every decision in the token's path was in that Swift. This cell
+; makes exactly the same four things happen with NOTHING between the body and the device but the
+; handle door: no swiftc, no metallib on disk, no host scan. The only host crossing left is
+; metal_buf_from_file reading the model file's bytes, which is the one crossing the standard permits.
+;
+; THE PATH, and what it is honestly worth:
+;     embed(t) -> output_norm -> output.weight -> argmax
+; The vector handed to the 540 MB vocabulary projection is the EMBEDDING, not the hidden state of 41
+; blocks. So the id that falls out is a MECHANISM witness — the Q3_K entrance decodes on the device,
+; the RMSNorm runs, the Q8_0 projection reaches all 248 320 rows, and a greedy pick comes back — and
+; it is NOT the token KAT-Coder would emit. metal_kat_exit.sh says this in its own words and the
+; claim does not get cheaper by being re-run through a different door. What IS new here is WHO held
+; the loop, and that is the whole of what this cell claims.
+;
+; EVERY NUMBER COMES FROM THE FILE'S OWN HEADER. Not one tensor offset, dimension or ggml type is
+; typed in. kce-hdr reads the header window, egg-find-tensor walks it, and the byte length of each
+; region is computed from that tensor's OWN declared type — Q3_K at 110 bytes per 256 weights, Q8_0
+; at 34 bytes per 32, F32 at 4. A file with different numbers produces different handles and the
+; same recipe runs it. The three ggml types are CHECKED before anything is dispatched, because a
+; length computed with the wrong pricing maps a region that exists and decodes to noise.
+;
+; THE ONE CONSTANT THAT IS NOT A HANDLE. RMSNorm takes `constant float& eps`, four raw bytes, and
+; the value used here is 1e-6 — the same value metal_kat_exit.sh's runner used, so that the two
+; answers are comparable at all. It is written as (div 1.0 1000000.0) and encoded by
+; metal-door.fk's md-f32-bits, which is round-to-nearest-even and was gated against C's own
+; binary32 on twelve values before this cell was allowed to call it. NAMED AS A GAP: this model's
+; own rms_eps metadata KV is not what is read here; matching the attestant came first.
+;
+; WHY THE ARGMAX IS ON THE DEVICE. The Swift scanned the logits on the CPU because it had them in
+; host memory anyway. This cell must not: pulling 248 320 floats back through metal_buf_read to fold
+; them in Form would be a host membrane crossing carrying activations, which is the thing the
+; standard forbids. So the body's own greedy kernel (ldm-argmax-msl, one thread, strict `>`, ties to
+; the LOWEST index) runs on the device and FOUR BYTES come back. That is also the honest shape for a
+; decode loop: what a token costs to read back is one id.
+;
+; THE LOOP IS REAL AND IT IS HERE. kxh-steps recurses: dispatch four kernels, sync once, read four
+; bytes, feed the id back in as the next token. The door's own contract is what makes that possible
+; — metal_enqueue does not block, so the cell is never waiting, and metal_buf_read is the single
+; sync point per step. The exit path has no KV state, so each step is independent; the loop proves
+; the CARRIAGE, not a continuation with meaning.
+;
+; Kin: form-stdlib/metal-door.fk (md-bind, md-le32, md-f32-bits — the bytes this door reads),
+;      form-stdlib/kat-coder-embed.fk (kce-* — the file and its header window),
+;      form-stdlib/equireach-gguf.fk (egg-* — the header walk),
+;      form-stdlib/q3k-msl.fk, q8-0-msl.fk, mla-msl.fk, llama-decode-msl.fk (every kernel).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/q8-0-msl.fk form-stdlib/q3k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/mla-msl.fk form-stdlib/trig.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk form-stdlib/equireach-gguf.fk form-stdlib/kat-coder-embed.fk form-stdlib/metal-door.fk
+;
+; Proven by: form/native/metal/tests/kat-exit-handle-band.fk
+
+(do
+    ; ---- the translation unit, every character of it emitted by a body cell ----------------------
+    ; q3k-msl.fk's appendix calls `fh16` for its super-scale and the q6k/q80 spine already carries
+    ; that decode, so ONE alias keeps a single f16 decode in the unit instead of a second copy —
+    ; metal_kat_exit.sh's emitter does exactly this and the text must match it to be comparable.
+    (defn kxh-msl ()
+        (str_concat "#include <metal_stdlib>\n"
+        (str_concat (q80-msl-unit "form_q8_0_dequant_f32" "form_q8_0_matvec_f32" "form_q8_0_matvec_lane_f32")
+        (str_concat "static inline float fh16(uint b) { return q6k_f16(int(b)); }"
+        (str_concat (q3m-msl-appendix)
+        (str_concat (mla-msl-spine)
+        (str_concat (mla-rmsnorm-body)
+                    (ldm-argmax-msl "form_argmax_f32"))))))))
+
+    ; ---- byte pricing, from each tensor's OWN declared ggml type --------------------------------
+    ; Length 0 for anything else, so an unpriced type refuses to map rather than mapping a guess.
+    (defn kxh-bytes (ty n)
+        (if (eq ty 0)  (mul n 4)
+        (if (eq ty 8)  (mul (div n 32) 34)
+        (if (eq ty 11) (mul (div n 256) 110)
+            0))))
+
+    ; ---- reading four bytes back as a little-endian u32 -----------------------------------------
+    (defn kxh-u32 (s)
+        (add (str_byte_at s 0)
+        (add (mul (str_byte_at s 1) 256)
+        (add (mul (str_byte_at s 2) 65536)
+             (mul (str_byte_at s 3) 16777216)))))
+
+    ; ---- the context a step needs, packed so the recursion carries one argument ------------------
+    ;   0 path        4 rows        8  pMv        12 bLog       16 embedAbs
+    ;   1 ne0         5 cols        9  pArg       13 bOutI      17 rowBytes
+    ;   2 nblocks     6 pQ3         10 bEmb       14 bOutV      18 epsBits
+    ;   3 normH       7 pNrm        11 bH         15 outH
+    (defn kxh-g (c i) (nth c i))
+
+    ; ---- ONE step: four enqueues, one sync, four bytes back --------------------------------------
+    ; The order is the arithmetic's order and the door's serial encoder is what enforces it: within
+    ; one command encoder each dispatch's writes are visible to the next, which is exactly why an
+    ; activation can live on the device between two enqueues and never touch the host.
+    (defn kxh-step (c token)
+        (do
+            ; 1. the Q3_K entrance. The embedding ROW is its own file view — the offset is the
+            ;    token's, so a new token is a new mapping and never a copy.
+            (let bRow (metal_buf_from_file (kxh-g c 0)
+                                           (add (kxh-g c 16) (mul token (kxh-g c 17)))
+                                           (kxh-g c 17)))
+            (let e1 (metal_enqueue (kxh-g c 6)
+                        (md-bind (list bRow (kxh-g c 10)) (list (kxh-g c 2)))
+                        (kxh-g c 1)))
+            ; 2. output_norm, F32 gains read straight out of the mapped file
+            (let e2 (metal_enqueue (kxh-g c 7)
+                        (md-bind (list (kxh-g c 10) (kxh-g c 3) (kxh-g c 11))
+                                 (list (kxh-g c 1) (kxh-g c 18)))
+                        1))
+            ; 3. the 540 MB Q8_0 vocabulary projection, one thread per row
+            (let e3 (metal_enqueue (kxh-g c 8)
+                        (md-bind (list (kxh-g c 15) (kxh-g c 11) (kxh-g c 12))
+                                 (list (kxh-g c 4) (kxh-g c 5)))
+                        (kxh-g c 4)))
+            ; 4. greedy pick, on the device, so only an id crosses back
+            (let e4 (metal_enqueue (kxh-g c 9)
+                        (md-bind (list (kxh-g c 12) (kxh-g c 13) (kxh-g c 14))
+                                 (list (kxh-g c 4)))
+                        1))
+            ; every enqueue answers 1; a refusal answers -1 and must not be folded into an id
+            (if (lt (add (add e1 e2) (add e3 e4)) 4)
+                (sub 0 1)
+                (kxh-u32 (metal_buf_read (kxh-g c 13) 0 4)))))
+
+    ; ---- the loop, in the body ------------------------------------------------------------------
+    (defn kxh-steps (c token n acc)
+        (if (le n 0) acc
+            (do (let id (kxh-step c token))
+                (if (lt id 0) acc
+                    (kxh-steps c id (sub n 1) (append acc (list id)))))))
+    0)
