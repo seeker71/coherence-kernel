@@ -740,6 +740,119 @@
                                                             (str_concat (dfd-u32 (mul rows cols)) (dfd-u32 rank)))))
             64 0) (mul rows 32)))
 
+    ; ═══════════════ RUNG 7: the fp8+f16 KV round (ds4.c:3211, IN the forward path) ═══════════════
+    ; After the k row is roped, ds4.c ROUNDS it before attention sees it: the leading 448 NOPE dims
+    ; through E4M3FN in 64-wide groups with a power-of-two group scale, then the WHOLE 512 row
+    ; through f16. Skipping it is wrong by ~1e-2, not by float precision. The kernel text is
+    ; dsv4-mla-real.fk's own (the par twin the oracle runs, pipe(lCore, "..._round_par")); this cell
+    ; adds the pragma the door's options:nil compile needs.
+    (defn dfd-kvq-msl ()
+        (str_concat (dfd-msl-pragma)
+        (str_concat (qml-msl-header)
+        (str_concat (dsv4-kvq-body) (dsv4-kvq-par-body)))))
+
+    ; ── the Form fp64 reference — a DIFFERENT TEXT from the MSL, built on format-arith's fq- spine.
+    ; Every step below is exact in fp64 over f32 inputs: the group amax is a max of exact values, the
+    ; scale is a power of two (division by it exact), the E4M3 magnitudes are exactly representable,
+    ; and the ladder's distance comparisons subtract nearby exact values. The ONE rounding the f32
+    ; kernel performs that fp64 does not share — amax/448.0f — is emulated with fq-quant(...,23).
+    ; So the check demands BIT EQUALITY on all 512 lanes, not a tolerance.
+    (defn dfd-kvq-e4m3-mag (i)
+        (if (lt i 8) (mul i 0.001953125)
+            (mul (add 1.0 (mul (mod i 8) 0.125)) (fq-pow2 (sub (div i 8) 7)))))
+    ; largest index whose magnitude does not exceed ax (the ladder is ascending)
+    (defn dfd-kvq-ladder (ax i best)
+        (if (gt i 126) best
+            (if (gt (dfd-kvq-e4m3-mag i) ax) best
+                (dfd-kvq-ladder ax (add i 1) i))))
+    ; ds4.c's nearest with tie to the EVEN INDEX: move up only on a strict win, or on a tie when the
+    ; neighbor's index is even and best's is odd.
+    (defn dfd-kvq-round (v)
+        (do (let sgn (if (lt v 0.0) -1.0 1.0))
+            (let ax0 (abs v))
+            (let ax (if (gt ax0 448.0) 448.0 ax0))
+            (let best (dfd-kvq-ladder ax 0 0))
+            (let bd (abs (sub ax (dfd-kvq-e4m3-mag best))))
+            (let nd (if (lt best 126) (abs (sub ax (dfd-kvq-e4m3-mag (add best 1)))) 1000000.0))
+            (let pick (if (lt nd bd) (add best 1)
+                      (if (eq nd bd)
+                          (if (eq (mod best 2) 1) (add best 1) best)
+                          best)))
+            (mul sgn (dfd-kvq-e4m3-mag pick))))
+    ; ceil(log2(amax/448)) off the f32 quotient's own exponent field: k = e when the quotient IS a
+    ; power of two, else e+1. 953267991 is f32(1e-4), the kernel's own floor literal, as bits.
+    (defn dfd-kvq-scale (amax0)
+        (do (let flo (fd-value 953267991 8 23))
+            (let amax (if (lt amax0 flo) flo amax0))
+            (let t (fq-quant (div amax 448.0) 23))
+            (let e (fq-exponent t))
+            (fq-pow2 (if (eq t (fq-pow2 e)) e (add e 1)))))
+    (defn dfd-kvq-amax (raw base j acc)
+        (if (ge j 64) acc
+            (do (let a (abs (dfd-f32at raw (mul (add base j) 4))))
+                (dfd-kvq-amax raw base (add j 1) (if (gt a acc) a acc)))))
+    ; IEEE half of an f32 value, denormals included: normals quantize the mantissa to 10 stored bits
+    ; (fq-quant); below 2^-14 the grid is fixed at 2^-24 and the round is RNE on that grid.
+    (defn dfd-f16-rne (x)
+        (if (eq x 0.0) 0.0
+            (do (let ax (abs x))
+                (let sgn (if (lt x 0.0) -1.0 1.0))
+                (if (ge (fq-exponent ax) (sub 0 14))
+                    (fq-quant x 10)
+                    (mul sgn (mul (fq-rne (mul ax 16777216.0)) (fq-pow2 (sub 0 24))))))))
+    ; one lane's reference: fp8 path for the 7 NOPE groups, then f16 across the whole row
+    (defn dfd-kvq-ref (raw i sc)
+        (do (let v (dfd-f32at raw (mul i 4)))
+            (if (lt i 448)
+                (do (let w0 (div v sc))
+                    (let w (if (gt w0 448.0) 448.0 (if (lt w0 -448.0) -448.0 w0)))
+                    (dfd-f16-rne (mul (dfd-kvq-round w) sc)))
+                (dfd-f16-rne v))))
+    ; count bit-equal lanes; the group scale is recomputed at each group boundary
+    (defn dfd-kvq-cmp (inraw outraw i sc acc)
+        (if (ge i 512) acc
+            (do (let sc2 (if (lt i 448)
+                             (if (eq (mod i 64) 0) (dfd-kvq-scale (dfd-kvq-amax inraw i 0 0.0)) sc)
+                             sc))
+                (dfd-kvq-cmp inraw outraw (add i 1) sc2
+                    (if (eq (dfd-kvq-ref inraw i sc2) (dfd-f32at outraw (mul i 4))) (add acc 1) acc)))))
+
+    ; ── SYNTHETIC TRUTH for the round, hand-computed, the tie rule on the knife edge ──
+    ; Group 0 carries amax = 448 so the scale is exactly 1 (448/448 = 1.0, a power of two, k = 0) and
+    ; the E4M3 ladder is exercised bare: lane 0 = 448 (the top magnitude, index 126, stays), lane 1 =
+    ; 1.0625 (EXACT midpoint of 1.0 [index 56] and 1.125 [57]; tie, best even, stays -> 1.0), lane 2 =
+    ; 1.1875 (EXACT midpoint of 1.125 [57] and 1.25 [58]; tie, best odd, moves -> 1.25), lanes 3..63 =
+    ; 1.0 (on-grid, unmoved). Groups 1..6 are all zero (the amax floor path; zero stays zero). The
+    ; roped tail 448..511 = 1.5, f16-identity. A wrong tie direction, a wrong scale, a wrong group
+    ; seam, or a missing f16 stage each move at least one pinned lane.
+    (defn dfd-kvq-synth ()
+        (do (let p (metal_pipeline (dfd-kvq-msl) "form_dsv4_kv_fp8_f16_round_par"))
+            (let vb (metal_buf_alloc 2048))
+            (let ob (metal_buf_alloc 2048))
+            (let f1 (dfd-fill vb 3 64 1065353216))
+            (let f2 (metal_buf_write vb 0 (dfd-u32 1138753536)))
+            (let f3 (metal_buf_write vb 4 (dfd-u32 1065877504)))
+            (let f4 (metal_buf_write vb 8 (dfd-u32 1066926080)))
+            ; groups 1..6 are zeroed EXPLICITLY — a fresh device allocation owes no one zeroes
+            (let f5 (dfd-fill vb 64 448 0))
+            (let f6 (dfd-fill vb 448 512 1069547520))
+            (let e (metal_enqueue p (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 vb) (dfd-u32 ob)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 64)))) 512 0) 512))
+            (let o (metal_buf_read ob 0 2048))
+            (print (str_concat "KVQSYNTH lanes 0/1/2/3/64/448 = " (str_concat (int_to_str (dfd-rd32 o 0))
+                   (str_concat "/" (str_concat (int_to_str (dfd-rd32 o 4))
+                   (str_concat "/" (str_concat (int_to_str (dfd-rd32 o 8))
+                   (str_concat "/" (str_concat (int_to_str (dfd-rd32 o 12))
+                   (str_concat "/" (str_concat (int_to_str (dfd-rd32 o 256))
+                   (str_concat "/" (int_to_str (dfd-rd32 o 1792))))))))))))))
+            (if (eq (dfd-rd32 o 0) 1138753536)
+                (if (eq (dfd-rd32 o 4) 1065353216)
+                    (if (eq (dfd-rd32 o 8) 1067450368)
+                        (if (eq (dfd-rd32 o 12) 1065353216)
+                            (if (eq (dfd-rd32 o 256) 0)
+                                (if (eq (dfd-rd32 o 1792) 1069547520) 1 0) 0) 0) 0) 0) 0)))
+
     ; the grouped fp64 reference: tensor row r consumes the (r/rank)-th cols-wide slice of x.
     (defn dfd-mx8g-dot (ty wraw nel cols rank xraw r j acc)
         (if (ge j cols) acc
@@ -914,9 +1027,18 @@
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 klnb) (dfd-u32 krb)) (dfd-u32 fb)))
                             (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 1) (dfd-u32 512))
                                 (str_concat (dfd-u32 64) (str_concat (dfd-u32 1088421888) (dfd-u32 1065353216)))))) 512))
+            ; the fp8+f16 round, BETWEEN the rope and the attention — where ds4.c:3211 puts it. The
+            ; par kernel needs its whole row in ONE threadgroup (the group scales stage through
+            ; threadgroup memory), so tg is pinned to 512, the oracle's own enc(pKvq, headDim, headDim).
+            (let pkq (metal_pipeline (dfd-kvq-msl) "form_dsv4_kv_fp8_f16_round_par"))
+            (let kqb (metal_buf_alloc (mul 512 4)))
+            (let e13b (metal_enqueue pkq (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 krb) (dfd-u32 kqb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 64)))) 512 0) 512))
             ; attend: nh=64 hd=512 nrows=1 scale=1/sqrt(512) (bits 1026884851, Form-verified in band)
+            ; — and its K row is now the ROUNDED one, as the oracle's gpuAttend(qr, kq, snk) reads it
             (let e14 (metal_enqueue pat
-                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 qrb) (dfd-u32 krb))
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 qrb) (dfd-u32 kqb))
                                                                 (str_concat (dfd-u32 hab) (dfd-u32 snkh))))
                             (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512))
                                 (str_concat (dfd-u32 1) (dfd-u32 1026884851))))) 64))
@@ -969,6 +1091,7 @@
             (let fraw (metal_buf_read fb 0 128))
             (let qrraw (metal_buf_read qrb 0 (mul qbrows 4)))
             (let krraw (metal_buf_read krb 0 (mul 512 4)))
+            (let kqraw (metal_buf_read kqb 0 (mul 512 4)))
             (let haraw (metal_buf_read hab 0 (mul qbrows 4)))
             (let snkraw (eqr-of-file path snkabs snkbytes))
             (print (str_concat "freqs[0] bits=" (int_to_str (dfd-rd32 fraw 0))))
@@ -983,9 +1106,16 @@
             (print (str_concat "NOPE bit-equal dims=" (str_concat (int_to_str nopeeq) " of 896")))
             (print (str_concat "REL rope tails (ppb)=" (float_to_str (mul relrope 1000000000.0))))
 
-            ; attend: all 64 heads vs fp64, against the output vector's scale
-            (let amd (dfd-att-all-md qrraw krraw snkraw haraw 0 0.0))
-            (let amr (dfd-att-all-mr qrraw krraw snkraw 0 0.0))
+            ; the KV round: BIT EQUALITY on all 512 lanes against the fq- spine reference — the
+            ; input is the GPU's actual roped row (induction), the arithmetic is ds4.c's, transcribed
+            ; as a different text.
+            (let kvqeq (dfd-kvq-cmp krraw kqraw 0 1.0 0))
+            (print (str_concat "KVROUND bit-equal lanes=" (str_concat (int_to_str kvqeq) " of 512")))
+
+            ; attend: all 64 heads vs fp64, against the output vector's scale — reading the ROUNDED
+            ; K row, the buffer the GPU's attend actually read
+            (let amd (dfd-att-all-md qrraw kqraw snkraw haraw 0 0.0))
+            (let amr (dfd-att-all-mr qrraw kqraw snkraw 0 0.0))
             (let relatt (div amd amr))
             (print (str_concat "REL attend 64 heads (ppb)=" (float_to_str (mul relatt 1000000000.0))))
 
@@ -1032,13 +1162,14 @@
                 (cons snkabs (cons (dfd-rd32 fraw 0) (cons (dfd-rd32 fraw 4)
                 (cons oaabs (cons obabs (cons oarows (cons oacols (cons obcols
                 (cons orank (cons oaty (cons obty
-                (cons nope6 (cons relir (cons relgrp (cons relob 0)))))))))))))))))))))))))))))))
+                (cons nope6 (cons relir (cons relgrp (cons relob
+                (cons kvqeq 0))))))))))))))))))))))))))))))))
 
     ; ================= UNFINISHED, named so it cannot be mistaken for done =================
     ; - the full MLA attention block for layer 0 at pos 7 now runs end to end from this cell
-    ;   (embed -> ... -> attend -> inverse rope -> grouped output_a -> output_b, 18 dispatches),
-    ;   but WITHOUT the fp8+f16 KV round (ds4.c:3211, in the forward path, ~1e-2 not a rounding
-    ;   detail) and WITHOUT the KV caches — one position, one KV row, no growth.
+    ;   (embed -> ... -> rope -> fp8+f16 KV round -> attend -> inverse rope -> grouped output_a ->
+    ;   output_b, 19 dispatches), but WITHOUT the KV caches — one position, one KV row, no growth,
+    ;   and no compressed cache (the ratio-nonzero layers'"'"' second lane).
     ; - the 43-layer stack. The oracle's runner is ~1200 lines of essential orchestration beyond this
     ;   rung: two routing regimes, six expert quantizations, the 20-iteration hyper-connection sinkhorn,
     ;   the second (compressed) KV cache on the ratio-nonzero layers, MLA split into scores/stats/acc,
