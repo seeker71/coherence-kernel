@@ -1,0 +1,276 @@
+; llama-token-handle.fk — a llama3.2:3b token with the DECODE LOOP IN A FORM CELL.
+;
+; WHAT MOVED, AND WHAT DID NOT. metal_first_token.sh generates real tokens from this blob and has
+; since 2026-07-21. It does it by writing out a 1000-line Swift program at run time: that program
+; holds the pool, the layer loop, the KV cache, the barriers, the command buffer and the readback.
+; Every kernel it runs is the body's, and the harness says so honestly — but the RECIPE, the order
+; in which 452 dispatches happen and what each one is bound to, lived in Swift. This cell is that
+; recipe, in the body. There is no swiftc, no .metallib on disk, no runner binary. The only host
+; crossing is metal_buf_from_file reading the model file's bytes.
+;
+; NOT ONE KERNEL IS NEW EXCEPT ONE, AND THAT ONE DOES NO ARITHMETIC. The unit is
+; q6m-msl-unit + q4m-msl-unit + ldm-msl-unit, exactly as first-token.fk's ft-emit-msl assembles it
+; (minus the speed appendices, which are twins of the attestants and not needed to be right). The
+; single addition is form_copy_off_f32, and the reason it exists is a property of the door rather
+; than of llama:
+;
+;   THE DOOR BINDS A HANDLE AT THAT HANDLE'S OWN OFFSET. metal_enqueue's binding string carries
+;   handles, and the carrier binds each at fk_buf_meta[h].view_off — a FIXED offset decided when
+;   the handle was made. The Swift bound the KV cache at (layer * maxpos + pos) * kvd * 4, an
+;   offset that changes every token. There is no primitive that makes a view of a device buffer at
+;   a new offset, so a cache write cannot be expressed as a bind. It can be expressed as a MOVE:
+;   the matvec writes k and v to a scratch at offset 0, RoPE rotates them there, and a copy kernel
+;   places them in the cache at doff = pos * kvd. A copy performs no arithmetic — no add, no
+;   multiply, no rounding — so the attestant's numbers are untouched and the twin question does not
+;   arise. It is authored HERE rather than in llama-decode-msl.fk on purpose: that cell's text is
+;   the cache key metal_first_token.sh compiles against, and a kernel appended there would
+;   invalidate the proven lane's pipeline cache for a reason that has nothing to do with it.
+;
+; THE ATTESTANTS ONLY. form_rmsnorm_f32 (one thread), form_rope_f32 (one per head),
+; form_gqa_decode_f32 (one per query head), form_q6k_matvec_f32 / form_q4k_matvec_f32 (one per
+; row, serial right-fold), form_argmax_f32 (one thread, strict `>`, ties to the lowest index). The
+; cooperative twins are in the unit — ldm-msl-unit carries them — and are NOT dispatched, because
+; they reduce across a threadgroup and require dispatchThreadgroups(1, ...). metal_enqueue offers
+; dispatchThreads only. Dispatching a threadgroup-reducing kernel through it would let the driver
+; split the grid and give each group its own partial answer: a number, plausible, and wrong. So
+; this cell is SLOWER than the Swift lane by exactly the twins it declines to use, and that is a
+; stated cost rather than a discovered one.
+;
+; EVERY NUMBER IS THE FILE'S. block_count, embedding_length, feed_forward_length, head counts,
+; rope dimension_count, rope.freq_base and layer_norm_rms_epsilon come from the metadata KVs
+; (gmt-u32 / gmt-f32); every tensor's offset, both dimensions and its ggml type come from the
+; tensor table (egg-*); every tensor's byte length is priced by wtr-bytes from that tensor's own
+; declared type. Nothing is typed in. The two float constants Metal wants as raw bytes — eps and
+; freq_base — go through metal-door.fk's md-f32-bits, and the third, the attention scale, is
+; 1/sqrt(head_dim) folded from head_dim the file declares.
+;
+; TIED EMBEDDINGS ARE READ, NOT ASSUMED. If the table has no output.weight the unembedding IS
+; token_embd, and that is what lth-out-tv returns. A file that has one uses it.
+;
+; ONE SYNC PER TOKEN, and the loop never waits. metal_enqueue returns without committing, so the
+; whole token — embed gather, 28 layers, final norm, the vocabulary projection and the greedy pick
+; — accumulates in one command buffer, and metal_buf_read of FOUR BYTES is the single drain. That
+; shape is what the seam measurement bought: at ~2 us per crossing a Form cell can afford 452 of
+; them per token, and at ~112 us per blocking dispatch it could not afford eight.
+;
+; Kin: form-stdlib/metal-door.fk (md-bind, md-f32-bits — the bytes the door reads),
+;      native/metal/whole-tensor-residency.fk (wtr-bytes — the byte pricing per ggml type),
+;      form-stdlib/gguf-meta.fk (gmt-* — the metadata reach), form-stdlib/equireach-gguf.fk (egg-*),
+;      form-stdlib/q6k-msl.fk / q4k-msl.fk / llama-decode-msl.fk (every kernel but the copy),
+;      native/metal/metal_first_token.sh (the attestant this cell must agree with).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/gguf-meta.fk form-stdlib/trig.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matvec-slot.fk form-stdlib/qk-matmul-batch.fk native/metal/whole-tensor-residency.fk form-stdlib/metal-door.fk
+;
+; Proven by: form/native/metal/tests/llama-token-handle-band.fk
+
+(do
+    ; ================= the translation unit =================
+    ; The pure move the door's fixed-offset binding makes necessary. No arithmetic, so nothing to
+    ; attest against: dst[doff + i] = src[i] is the identity with a shifted destination.
+    (defn lth-copy-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& doff [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; d[doff + i] = s[i]; }")))
+
+    ; qml-msl-header leads the file for the same reason ft-emit-msl gives: a #include is only legal
+    ; at the top, and it is emitted WITHOUT `using namespace metal;` so ldm-msl-round's `round`
+    ; still resolves to the body's and not the library's.
+    (defn lth-msl ()
+        (str_concat (qml-msl-header)
+        (str_concat (q6m-msl-unit "form_q6k_dequant_f32" "form_q6k_matvec_f32")
+        (str_concat (q4m-msl-unit "form_q4k_dequant_f32" "form_q4k_matvec_f32")
+        (str_concat (ldm-msl-unit)
+                    (lth-copy-msl "form_copy_off_f32"))))))
+
+    ; ================= the file's own numbers =================
+    (defn lth-src (path) (eqr-of-file path 0 (wtr-header-window)))
+
+    ; A tensor VIEW: (handle, rows, cols, ggml-type). rows is dim1 and cols is dim0, because GGUF's
+    ; dim0 is the fastest-varying axis — the matrix is dim1 rows of dim0 columns.
+    (defn lth-tv (src base path name)
+        (do (let off (egg-find-tensor src name))
+            (list (metal_buf_from_file path
+                      (add base (egg-ti-dataoff src off))
+                      (wtr-bytes src off))
+                  (wtr-dim1 src off)
+                  (egg-ti-dim0 src off)
+                  (egg-ti-type src off))))
+
+    (defn lth-tv-h  (t) (nth t 0))
+    (defn lth-tv-r  (t) (nth t 1))
+    (defn lth-tv-c  (t) (nth t 2))
+    (defn lth-tv-ty (t) (nth t 3))
+
+    (defn lth-blk (l suffix) (str_concat "blk." (str_concat (int_to_str l) (str_concat "." suffix))))
+
+    ; The nine tensors one llama block reaches: the two norms and the seven projections.
+    (defn lth-layer (src base path l)
+        (list (lth-tv src base path (lth-blk l "attn_norm.weight"))
+              (lth-tv src base path (lth-blk l "attn_q.weight"))
+              (lth-tv src base path (lth-blk l "attn_k.weight"))
+              (lth-tv src base path (lth-blk l "attn_v.weight"))
+              (lth-tv src base path (lth-blk l "attn_output.weight"))
+              (lth-tv src base path (lth-blk l "ffn_norm.weight"))
+              (lth-tv src base path (lth-blk l "ffn_gate.weight"))
+              (lth-tv src base path (lth-blk l "ffn_up.weight"))
+              (lth-tv src base path (lth-blk l "ffn_down.weight"))))
+
+    (defn lth-layers (src base path l n acc)
+        (if (ge l n) acc (lth-layers src base path (add l 1) n (append acc (list (lth-layer src base path l))))))
+
+    ; TIED IS A FACT ABOUT THE TABLE. No output.weight in the file means the unembedding IS
+    ; token_embd; egg-find-tensor answers -1 and that -1 is what decides, not a convention.
+    (defn lth-out-tv (src base path)
+        (if (eq (egg-find-tensor src "output.weight") (sub 0 1))
+            (lth-tv src base path "token_embd.weight")
+            (lth-tv src base path "output.weight")))
+
+    ; ================= the pool =================
+    ; pipes: 0 q6dq 1 q4dq 2 q6mv 3 q4mv 4 rms 5 rope 6 attn 7 swiglu 8 add 9 argmax 10 copy
+    (defn lth-pipes (msl)
+        (list (metal_pipeline msl "form_q6k_dequant_f32")
+              (metal_pipeline msl "form_q4k_dequant_f32")
+              (metal_pipeline msl "form_q6k_matvec_f32")
+              (metal_pipeline msl "form_q4k_matvec_f32")
+              (metal_pipeline msl "form_rmsnorm_f32")
+              (metal_pipeline msl "form_rope_f32")
+              (metal_pipeline msl "form_gqa_decode_f32")
+              (metal_pipeline msl "form_swiglu_f32")
+              (metal_pipeline msl "form_add_f32")
+              (metal_pipeline msl "form_argmax_f32")
+              (metal_pipeline msl "form_copy_off_f32")))
+
+    (defn lth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (lth-pipe-ok? (tail ps)))))
+
+    ; bufs: 0 X 1 Xb 2 Q 3 Ks 4 Vs 5 Attn 6 Proj 7 Ffn 8 Gate 9 Up 10 Act 11 Logits 12 Scratch
+    ;       13 OutI 14 OutV
+    ; ALLOCATED ONCE, before any token, and never reallocated — the pool the seam measurement said
+    ; a decode loop must have. bScratch is 2*nHead*maxpos: the attention kernel keeps scores at
+    ; h*sstride and their exponentials at (nq+h)*sstride, with sstride = maxpos.
+    (defn lth-bufs (dModel dFF vocabN nHead maxpos)
+        (list (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dFF 4))
+              (metal_buf_alloc (mul dFF 4))
+              (metal_buf_alloc (mul dFF 4))
+              (metal_buf_alloc (mul vocabN 4))
+              (metal_buf_alloc (mul (mul (mul 2 nHead) maxpos) 4))
+              (metal_buf_alloc 16)
+              (metal_buf_alloc 16)))
+
+    ; One K and one V buffer PER LAYER. Per-layer rather than one big cache because the door binds
+    ; at a handle's own offset: the layer stride can be a handle, the position stride cannot.
+    (defn lth-cache (n kvd maxpos acc)
+        (if (le n 0) acc (lth-cache (sub n 1) kvd maxpos (append acc (list (metal_buf_alloc (mul (mul kvd maxpos) 4)))))))
+
+    ; ================= the dispatches =================
+    (defn lth-mv (ps tv xh yh)
+        (metal_enqueue (if (eq (lth-tv-ty tv) 14) (nth ps 2) (nth ps 3))
+                       (md-bind (list (lth-tv-h tv) xh yh) (list (lth-tv-r tv) (lth-tv-c tv)))
+                       (lth-tv-r tv)))
+
+    (defn lth-dq (ps tv yh off n)
+        (metal_enqueue (if (eq (lth-tv-ty tv) 14) (nth ps 0) (nth ps 1))
+                       (md-bind (list (lth-tv-h tv) yh) (list off n))
+                       n))
+
+    (defn lth-rms (ps xh gtv yh n epsBits)
+        (metal_enqueue (nth ps 4) (md-bind (list xh (lth-tv-h gtv) yh) (list n epsBits)) 1))
+
+    (defn lth-rope (ps vh ropeH nh hd pos baseBits)
+        (metal_enqueue (nth ps 5) (md-bind (list vh ropeH) (list nh hd pos baseBits)) nh))
+
+    (defn lth-attn (ps qh kh vh yh sh npos nq nkv hd scaleBits sstride)
+        (metal_enqueue (nth ps 6)
+                       (md-bind (list qh kh vh yh sh) (list npos nq nkv hd scaleBits sstride))
+                       nq))
+
+    (defn lth-elem (ps p ah bh yh n) (metal_enqueue p (md-bind (list ah bh yh) (list n)) n))
+
+    (defn lth-copy (ps sh dh n doff) (metal_enqueue (nth ps 10) (md-bind (list sh dh) (list n doff)) n))
+
+    ; ================= one block =================
+    ; The order is jte-llama-blk's, op for op, and it is the order the Swift attestant walks. The
+    ; door's encoder is SERIAL, so each dispatch's writes are visible to the next and an activation
+    ; never leaves the device between two of them.
+    (defn lth-block (ps bs geo lay ck cv pos)
+        (do
+            (lth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8))
+            (lth-mv ps (nth lay 1) (nth bs 1) (nth bs 2))
+            (lth-mv ps (nth lay 2) (nth bs 1) (nth bs 3))
+            (lth-mv ps (nth lay 3) (nth bs 1) (nth bs 4))
+            (lth-rope ps (nth bs 2) (nth geo 11) (nth geo 2) (nth geo 4) pos (nth geo 9))
+            (lth-rope ps (nth bs 3) (nth geo 11) (nth geo 3) (nth geo 4) pos (nth geo 9))
+            (lth-copy ps (nth bs 3) ck (nth geo 5) (mul pos (nth geo 5)))
+            (lth-copy ps (nth bs 4) cv (nth geo 5) (mul pos (nth geo 5)))
+            (lth-attn ps (nth bs 2) ck cv (nth bs 5) (nth bs 12)
+                      (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6))
+            (lth-mv ps (nth lay 4) (nth bs 5) (nth bs 6))
+            (lth-elem ps (nth ps 8) (nth bs 0) (nth bs 6) (nth bs 0) (nth geo 0))
+            (lth-rms ps (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8))
+            (lth-mv ps (nth lay 6) (nth bs 1) (nth bs 8))
+            (lth-mv ps (nth lay 7) (nth bs 1) (nth bs 9))
+            (lth-elem ps (nth ps 7) (nth bs 8) (nth bs 9) (nth bs 10) (nth geo 1))
+            (lth-mv ps (nth lay 8) (nth bs 10) (nth bs 7))
+            (lth-elem ps (nth ps 8) (nth bs 0) (nth bs 7) (nth bs 0) (nth geo 0))
+            1))
+
+    (defn lth-blocks (ps bs geo lays cks cvs pos l n)
+        (if (ge l n) 1
+            (do (lth-block ps bs geo (nth lays l) (nth cks l) (nth cvs l) pos)
+                (lth-blocks ps bs geo lays cks cvs pos (add l 1) n))))
+
+    ; ================= one token =================
+    ; geo: 0 dModel 1 dFF 2 nHead 3 nKV 4 headDim 5 kvd 6 maxpos 7 vocabN 8 epsBits 9 baseBits
+    ;      10 scaleBits 11 ropeH 12 nLayer
+    ;
+    ; The final norm's GAIN is output_norm.weight, not the unembedding — kept separate so the tied
+    ; case cannot quietly feed the projection's own bytes to the normalizer.
+    (defn lth-head (ps bs geo onormTv projTv)
+        (do
+            (lth-rms ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 8))
+            (lth-mv ps projTv (nth bs 1) (nth bs 11))
+            (metal_enqueue (nth ps 9)
+                           (md-bind (list (nth bs 11) (nth bs 13) (nth bs 14)) (list (nth geo 7)))
+                           1)
+            0))
+
+    (defn lth-u32 (s)
+        (add (str_byte_at s 0)
+        (add (mul (str_byte_at s 1) 256)
+        (add (mul (str_byte_at s 2) 65536)
+             (mul (str_byte_at s 3) 16777216)))))
+
+    ; ONE forward pass: embed, every block, the head, then FOUR BYTES back. metal_buf_read is the
+    ; only drain in the whole token — it syncs first by construction, so the id it returns cannot be
+    ; a stale buffer read before the work that fills it.
+    (defn lth-forward (ps bs geo lays cks cvs embTv onormTv projTv id pos)
+        (do
+            (lth-dq ps embTv (nth bs 0) (mul id (nth geo 0)) (nth geo 0))
+            (lth-blocks ps bs geo lays cks cvs pos 0 (nth geo 12))
+            (lth-head ps bs geo onormTv projTv)
+            (lth-u32 (metal_buf_read (nth bs 13) 0 4))))
+
+    ; ================= the loop, in the body =================
+    ; Greedy: the id that comes back is the id that goes in, at the next position. The KV cache is
+    ; where the history lives, and it lives on the device across every step.
+    (defn lth-generate (ps bs geo lays cks cvs embTv onormTv projTv id pos n acc)
+        (if (le n 0) acc
+            (do (let nid (lth-forward ps bs geo lays cks cvs embTv onormTv projTv id pos))
+                (lth-generate ps bs geo lays cks cvs embTv onormTv projTv
+                              nid (add pos 1) (sub n 1) (append acc (list nid))))))
+
+    ; Feeding a PROMPT: the same forward at each position, but the answer is discarded until the
+    ; last one — that last id is the model's first real prediction.
+    (defn lth-prefill (ps bs geo lays cks cvs embTv onormTv projTv ids pos)
+        (if (eq (len ids) 1)
+            (list (lth-forward ps bs geo lays cks cvs embTv onormTv projTv (head ids) pos) pos)
+            (do (lth-forward ps bs geo lays cks cvs embTv onormTv projTv (head ids) pos)
+                (lth-prefill ps bs geo lays cks cvs embTv onormTv projTv (tail ids) (add pos 1)))))
+    0)

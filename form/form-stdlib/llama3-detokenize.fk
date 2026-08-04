@@ -1,0 +1,109 @@
+; llama3-detokenize.fk — token ids back to TEXT, in the body.
+;
+; WHAT WAS MISSING. The body has read llama3's vocabulary out of a GGUF file for a long time —
+; gmt-tokens-first / gmt-token-len / gmt-token-byte walk it, and first-token.fk streams all 128 256
+; pieces as hex so a carrier can reassemble them. What the body could not do was turn an id back
+; into the characters a person reads. Every lane that printed an answer printed it from Swift. A
+; decode loop that generates ids in Form and then hands them to a host to be made readable has
+; moved the loop and left the meaning behind.
+;
+; THE ALPHABET IS NOT ASCII AND THAT IS THE WHOLE DIFFICULTY. llama3 tokenizes BYTES, but a GGUF
+; vocabulary entry is TEXT, so the 68 byte values that are not safely printable are carried as
+; substitute codepoints — GPT-2's byte-level alphabet, which llama3 inherits. The map is built, not
+; tabulated:
+;
+;   the 188 bytes in [33,126] u [161,172] u [174,255] stand for themselves;
+;   the remaining 68, IN INCREASING BYTE ORDER, are carried as codepoints 256, 257, ... 323.
+;
+; Inverting that is arithmetic rather than a lookup table, because those 68 bytes fall in exactly
+; three runs: 0..32 (33 of them), 127..160 (34), and 173 (1). So substitute n maps back to n for
+; n <= 32, to n + 94 for n <= 66, and to 173 at n = 67. Written as three cases and derived here
+; rather than copied, so the boundaries can be checked against the runs they came from: n = 33 is
+; 127, n = 66 is 160, n = 67 is 173.
+;
+; THE UTF-8 REACH IS EXACTLY TWO BYTES, AND THAT IS A RADIUS, NOT A SHORTCUT. Every codepoint this
+; alphabet can produce is at most 323, so a piece contains only 1-byte (< 0x80) and 2-byte
+; (0xC2..0xC5 lead) sequences. l3d-cp REFUSES anything else with -1 rather than decoding a
+; continuation byte as a character, because a 3-byte sequence here would mean the vocabulary is not
+; the alphabet this cell speaks for and the text it produced would be quietly wrong.
+;
+; ONE WALK, NOT N. gmt-token-off would find one id by walking the array from its head, so decoding
+; k ids would cost k walks of 128 256 variable-length strings. l3d-pieces carries the cursor
+; forward exactly once and picks up every id it was asked for on the way past — the same
+; output-carrier shape ft-emit-vocab uses, for the same reason.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk
+;
+; Proven by: form/native/metal/tests/llama-token-handle-band.fk (bit 128)
+
+(do
+    ; ---- the byte-level alphabet, inverted -------------------------------------------------------
+    (defn l3d-printable? (c)
+        (if (ge c 33) (if (le c 126) true
+                      (if (lt c 161) false
+                      (if (le c 172) true
+                      (if (eq c 173) false (le c 255)))))
+            false))
+
+    ; A substitute codepoint back to the byte it stands for: the three runs, in order.
+    (defn l3d-sub-byte (n)
+        (if (le n 32) n
+        (if (le n 66) (add n 94)
+        (if (eq n 67) 173
+            (sub 0 1)))))
+
+    (defn l3d-uni-byte (c)
+        (if (l3d-printable? c) c
+        (if (lt c 256) (sub 0 1)
+            (l3d-sub-byte (sub c 256)))))
+
+    ; ---- UTF-8, for the only two widths this alphabet can produce --------------------------------
+    ; The width of the sequence that starts at byte b, or -1 for a byte that cannot start one here.
+    (defn l3d-width (b) (if (lt b 128) 1 (if (lt b 194) (sub 0 1) (if (lt b 224) 2 (sub 0 1)))))
+
+    (defn l3d-cp (src at j w)
+        (if (eq w 1) (eqr-at src (add at j))
+        (if (eq w 2)
+            (do (let b0 (eqr-at src (add at j)))
+                (let b1 (eqr-at src (add at (add j 1))))
+                (if (lt b1 128) (sub 0 1)
+                (if (ge b1 192) (sub 0 1)
+                    (add (mul (sub b0 192) 64) (sub b1 128)))))
+            (sub 0 1))))
+
+    ; ---- one piece: its stored bytes -> the bytes it actually means -------------------------------
+    ; `at` is the cursor at the piece's 8-byte length prefix; the bytes begin at at+8.
+    (defn l3d-piece-go (src at j n acc)
+        (if (ge j n) acc
+            (do (let w (l3d-width (eqr-at src (add (add at 8) j))))
+                (if (lt w 0) acc
+                (do (let c (l3d-cp src (add at 8) j w))
+                    (let b (l3d-uni-byte c))
+                    (if (lt b 0) acc
+                        (l3d-piece-go src at (add j w) n (str_concat acc (byte_to_str b)))))))))
+
+    (defn l3d-piece (src at) (l3d-piece-go src at 0 (gmt-token-len src at) ""))
+
+    ; ---- one walk, collecting every id asked for --------------------------------------------------
+    (defn l3d-mem? (x xs)
+        (if (eq (len xs) 0) false (if (eq (head xs) x) true (l3d-mem? x (tail xs)))))
+
+    (defn l3d-pieces-go (src at i n ids acc)
+        (if (ge i n) acc
+            (l3d-pieces-go src (gmt-token-next src at) (add i 1) n ids
+                (if (l3d-mem? i ids) (append acc (list (list i (l3d-piece src at)))) acc))))
+
+    (defn l3d-pieces (src ids)
+        (l3d-pieces-go src (gmt-tokens-first src) 0 (gmt-vocab-n src) ids (empty)))
+
+    (defn l3d-find (id pairs)
+        (if (eq (len pairs) 0) ""
+            (if (eq (head (head pairs)) id) (nth (head pairs) 1) (l3d-find id (tail pairs)))))
+
+    (defn l3d-join (ids pairs acc)
+        (if (eq (len ids) 0) acc
+            (l3d-join (tail ids) pairs (str_concat acc (l3d-find (head ids) pairs)))))
+
+    ; The whole of it: ids in, the text they spell out.
+    (defn l3d-text (src ids) (l3d-join ids (l3d-pieces src ids) ""))
+    0)
