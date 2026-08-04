@@ -383,3 +383,26 @@ close). The word's only tree occurrences are this session's own coinage — the 
 - Tags 240–244 look free in the op table and are **not** — they are the evaluator's structural node tags,
   and seven of the door's first eight ops went numb behind them with no diagnostic and exit 0. This is why
   band bit 1 is `metal_status` and every other bit is gated behind it.
+
+---
+
+## Addendum, 2026-08-04 evening — the block above is the rung-5 state, and the climb went on
+
+The UNFINISHED list above froze at rung 5; the continuation session's edit to refresh it failed to
+match and its commit ran without it, so the correction lands here as an addendum rather than a
+rewrite. State as of `9cd9df5bb`:
+
+- **Rung 6 landed** (`3ad198e40`): the attention block closes — inverse rope, the grouped Q8_0 exit
+  (`output_a`/`output_b`, the inlined kernel text factored into a named defn), rank derived from
+  geometry, nothing taken on faith.
+- **Rung 7 landed** (`a549ed3c5`): the fp8+f16 KV round enters the path; the tie rule pinned on its
+  knife edge.
+- **Rung 8 landed** (`9cd9df5bb`): the KV cache grows over the real prompt — "The capital of France
+  is" → ids 671 6102 294 8760 344 from the body's own tokenizer, five positions appended by a
+  cell-emitted kernel, the last token's q attending all five at 882 ppb vs fp64. Band 2147483647,
+  four mutations predicted exactly.
+- The door limits listed above have since FALLEN: buf_free (254), submit/fence (255/142),
+  threadgroups (dispatch_mode 1), concurrent batches (253) are all landed and banded (65535).
+- Still open on this ladder: MoE (six expert quantizations, hash→learned routing, top-6 of 256),
+  the hyper-connection streams + sinkhorn, the exit head, the 43-layer fold, and the stream diff
+  against the recorded 24/24. The session limit ended the climb here, not a wall.
