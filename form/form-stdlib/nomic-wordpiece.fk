@@ -1,0 +1,156 @@
+; nomic-wordpiece.fk — the WordPiece walk for a BERT-family vocabulary, over the GGUF's own token table.
+;
+; WHY THIS EXISTS. The body already reads a GGUF's tokenizer arrays (gguf-meta.fk) and already walks
+; byte-level BPE for the llama family. nomic-embed-text-v1.5 declares `tokenizer.ggml.model = bert`,
+; which is a different walk: whole words first, then greedy longest-match against the vocabulary,
+; with continuation pieces spelled `##`. Nothing here invents a vocabulary — every piece is found in
+; the file's own 30 522-entry token array, and the special ids (cls/sep/unk) are read from the
+; file's own keys, never typed in.
+;
+; THE RADIUS, stated rather than implied. This walk speaks for ASCII text: bytes A-Z fold to a-z,
+; runs of [a-z0-9] are words, every other visible byte stands alone as its own one-byte word, and
+; whitespace separates. The uncased BERT normalizer also folds accents and walks CJK — text that
+; carries bytes past 127 will still tokenize (each byte stands alone and usually lands on unk), but
+; this cell does not claim the uncased normalizer's answer for it. A caller with such text sees unk
+; ids, not a silent wrong id.
+;
+; THE SPELLING IS THE FILE'S, NOT THE PAPER'S. WordPiece is usually written about with `##`
+; continuations. This GGUF's token array carries ZERO entries spelled `##` — witnessed by folding
+; nwp-start-entry? over all 30 522 entries before this cell believed anything. What the file has
+; instead is the SentencePiece-style marker: a WORD-START piece is `▁the` (bytes 226 150 129 then
+; the letters, id 1996) and a CONTINUATION is the bare `the` (id 10760). A scanner that assumes
+; `##` matches every word to its continuation form and is fluently wrong on every id. So: at a word
+; start only `▁`-prefixed entries stand (the three marker bytes are skipped before comparing), and
+; at a continuation only unmarked entries stand.
+;
+; WHAT GREEDY LONGEST-MATCH MEANS HERE, exactly: at each position in a word, the LONGEST vocabulary
+; entry that matches wins. If any position in a word matches nothing, the WHOLE word becomes one
+; unk — that is WordPiece's own rule, kept because half-tokenized words are the kind of plausible
+; drift no later check can see.
+;
+; Kin: gguf-meta.fk (gmt-* — the token table this walks), bpe-tokenizer.fk / llama3-pretokenize.fk
+; (the other family's walk, for contrast), native/metal/nomic-embed-form.fk (the first caller).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk
+;
+; Proven by: form/native/metal/tests/nomic-embed-band.fk (piece-count and round-trip bits, with the
+;            count written down before the run).
+
+(do
+    (defn nwp-window () 8000000)
+    (defn nwp-src (path) (eqr-of-file path 0 (nwp-window)))
+
+    ; ---- byte classes, ASCII ----
+    (defn nwp-lower (b) (if (ge b 65) (if (le b 90) (add b 32) b) b))
+    (defn nwp-alnum? (b)
+        (if (ge b 97) (if (le b 122) 1 0)
+            (if (ge b 48) (if (le b 57) 1 0) 0)))
+    (defn nwp-space? (b) (if (eq b 32) 1 (if (eq b 9) 1 (if (eq b 10) 1 (if (eq b 13) 1 0)))))
+
+    (defn nwp-rev (xs acc) (if (eq (len xs) 0) acc (nwp-rev (tail xs) (cons (head xs) acc))))
+
+    ; ---- the word split: lowercased alnum runs; any other visible byte is its own word ----
+    (defn nwp-flush (cur acc) (if (str_eq cur "") acc (cons cur acc)))
+    (defn nwp-words-go (text i n cur acc)
+        (if (ge i n)
+            (nwp-rev (nwp-flush cur acc) 0)
+            (do (let b (nwp-lower (str_byte_at text i)))
+                (if (eq (nwp-space? b) 1)
+                    (nwp-words-go text (add i 1) n "" (nwp-flush cur acc))
+                    (if (eq (nwp-alnum? b) 1)
+                        (nwp-words-go text (add i 1) n (str_concat cur (byte_to_str b)) acc)
+                        (nwp-words-go text (add i 1) n ""
+                            (cons (byte_to_str b) (nwp-flush cur acc))))))))
+    (defn nwp-words (text) (nwp-words-go text 0 (str_len text) "" 0))
+
+    ; ---- the vocabulary, walked ONCE into an offset list (id = list position) ----
+    (defn nwp-offs-go (src at k acc)
+        (if (eq k 0) (nwp-rev acc 0)
+            (nwp-offs-go src (gmt-token-next src at) (sub k 1) (cons at acc))))
+    (defn nwp-offs (src) (nwp-offs-go src (gmt-tokens-first src) (gmt-vocab-n src) 0))
+
+    ; ---- byte-faithful equality between an entry's payload and a span of the word ----
+    (defn nwp-eq-go (src p text q k)
+        (if (eq k 0) 1
+            (if (eq (eqr-at src p) (str_byte_at text q))
+                (nwp-eq-go src (add p 1) text (add q 1) (sub k 1))
+                0)))
+
+    ; does this entry carry the word-start marker `▁` (bytes 226 150 129)? Word starts demand it,
+    ; continuations decline it — the file's own spelling, per the header above.
+    (defn nwp-start-entry? (src at elen)
+        (if (ge elen 3)
+            (if (eq (eqr-at src (add at 8)) 226)
+                (if (eq (eqr-at src (add at 9)) 150)
+                    (if (eq (eqr-at src (add at 10)) 129) 1 0) 0) 0)
+            0))
+
+    ; the longest matching entry at word[pos..], as (cons matched-length id); (cons 0 -1) when none.
+    (defn nwp-scan (src offs id word pos rem cont bestlen bestid)
+        (if (eq (len offs) 0) (cons bestlen bestid)
+            (do (let at (head offs))
+                (let elen (gmt-token-len src at))
+                (let isstart (nwp-start-entry? src at elen))
+                (let skip (if (eq cont 1) 0 3))
+                (let eff (sub elen skip))
+                (if (eq isstart (if (eq cont 1) 0 1))
+                    (if (gt eff bestlen)
+                        (if (le eff rem)
+                            (if (eq (nwp-eq-go src (add (add at 8) skip) word pos eff) 1)
+                                (nwp-scan src (tail offs) (add id 1) word pos rem cont eff id)
+                                (nwp-scan src (tail offs) (add id 1) word pos rem cont bestlen bestid))
+                            (nwp-scan src (tail offs) (add id 1) word pos rem cont bestlen bestid))
+                        (nwp-scan src (tail offs) (add id 1) word pos rem cont bestlen bestid))
+                    (nwp-scan src (tail offs) (add id 1) word pos rem cont bestlen bestid)))))
+
+    ; one word -> its pieces, or ONE unk when any position matches nothing (WordPiece's own rule)
+    (defn nwp-word-go (src offs word pos n cont acc unkid)
+        (if (ge pos n) (nwp-rev acc 0)
+            (do (let m (nwp-scan src offs 0 word pos (sub n pos) cont 0 (sub 0 1)))
+                (if (eq (head m) 0)
+                    (cons unkid 0)
+                    (nwp-word-go src offs word (add pos (head m)) n 1 (cons (tail m) acc) unkid)))))
+    (defn nwp-word-ids (src offs word unkid)
+        (nwp-word-go src offs word 0 (str_len word) 0 0 unkid))
+
+    (defn nwp-append (a b) (if (eq (len a) 0) b (cons (head a) (nwp-append (tail a) b))))
+    (defn nwp-words-ids (src offs ws acc unkid)
+        (if (eq (len ws) 0) acc
+            (nwp-words-ids src offs (tail ws)
+                (nwp-append acc (nwp-word-ids src offs (head ws) unkid)) unkid)))
+
+    ; ---- the whole text: [cls] pieces [sep], every special id read from the file's own keys ----
+    (defn nwp-ids (src offs text)
+        (do (let cls (gmt-u32 src "tokenizer.ggml.bos_token_id"))
+            (let sep (gmt-u32 src "tokenizer.ggml.eos_token_id"))
+            (let unk (gmt-u32 src "tokenizer.ggml.unknown_token_id"))
+            (cons cls (nwp-append (nwp-words-ids src offs (nwp-words text) 0 unk)
+                                  (cons sep 0)))))
+
+    ; convenience: one call, one text (walks the vocabulary each call — a caller embedding many
+    ; texts holds src and offs itself and calls nwp-ids)
+    (defn nwp-text-ids (path text)
+        (do (let src (nwp-src path))
+            (nwp-ids src (nwp-offs src) text)))
+
+    ; ---- rendering an id back to its piece, for the round-trip witness ----
+    (defn nwp-id-piece (src offs id)
+        (do (let at (nth offs id))
+            (substring src (add at 8) (add (add at 8) (gmt-token-len src at)))))
+
+    ; the pieces of an id list, re-joined with the `▁` markers stripped — a text that tokenized
+    ; without unk re-concatenates to its own normalized words, and the band folds exactly that.
+    (defn nwp-strip-cont (piece)
+        (if (ge (str_len piece) 3)
+            (if (eq (str_byte_at piece 0) 226)
+                (if (eq (str_byte_at piece 1) 150)
+                    (if (eq (str_byte_at piece 2) 129) (substring piece 3 (str_len piece)) piece)
+                    piece)
+                piece)
+            piece))
+    (defn nwp-rejoin (src offs ids acc)
+        (if (eq (len ids) 0) acc
+            (nwp-rejoin src offs (tail ids)
+                (str_concat acc (nwp-strip-cont (nwp-id-piece src offs (head ids)))))))
+
+    0)
