@@ -1,0 +1,40 @@
+; moe-gate.fk — Mixture-of-Experts GATING: router matvec → softmax → top-k expert mask → weighted
+; mix of expert outputs. The first rung of the frontier-scale-MoE ladder (Coherence-Network
+; docs/coherence-substrate/form-native-models.form, "MEMORY DIAL" north star; oracle: kimi-k3-in-c's
+; top-16-of-896 gating, held at honest proof scale d=4 / E=8 / k=2).
+;
+; preludes: form-stdlib/transformer-block.fk form-stdlib/sampling.fk
+;
+; All fp64, pure list-walk recursion — same discipline as sampling.fk. The router is tb-matvec's
+; bits; gate probabilities are smp-softmax's bits; the top-k mask is smp-topk-mask's bits (zero the
+; unpicked, renormalize the kept — the standard MoE normalization). The mix walks the expert list
+; beside the gate list and SKIPS a zero-gate expert before computing it: an unpicked expert's
+; weights are never read — sparsity as genuine absence (axiom-1's nothing), not a zero-weighted
+; full pass. That skip is the whole MoE teaching: compute scales with k, not with E.
+
+; --- router: E gate probabilities from router weight rows (E x d) and input x (d) ---
+(defn moe-router (Wr x) (smp-softmax (tb-matvec Wr x)))
+
+; --- top-k gate mask: keep the k largest gates, zero the rest, renormalize over the kept ---
+(defn moe-gate-topk (gates k) (smp-topk-mask gates k))
+
+; --- acc + g * y, elementwise (the weighted accumulate of one expert's output) ---
+(defn moe-scale-add (acc g y)
+  (if (eq (len acc) 0) (empty)
+      (cons (add (head acc) (mul g (head y))) (moe-scale-add (tail acc) g (tail y)))))
+
+; --- the zero vector of length n (the mix's starting accumulator) ---
+(defn moe-zeros (n) (if (eq n 0) (empty) (cons 0.0 (moe-zeros (sub n 1)))))
+
+; --- mix: fold experts beside gates; a zero gate SKIPS its expert (never computed) ---
+; experts = list of weight matrices (each a list of rows); expert compute = tb-matvec (the
+; expert FFN's dominant op at this rung; the full SwiGLU expert composes later on the same walk).
+(defn moe-mix (experts gates x acc)
+  (if (eq (len experts) 0) acc
+      (moe-mix (tail experts) (tail gates) x
+               (if (eq (head gates) 0.0) acc
+                   (moe-scale-add acc (head gates) (tb-matvec (head experts) x))))))
+
+; --- forward: route, mask to k experts, mix — one engine, no parallel path ---
+(defn moe-forward (Wr experts x k)
+  (moe-mix experts (moe-gate-topk (moe-router Wr x) k) x (moe-zeros (len x))))
