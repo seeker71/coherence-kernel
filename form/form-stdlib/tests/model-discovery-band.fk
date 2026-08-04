@@ -1,0 +1,217 @@
+; model-discovery-band.fk — the walk proven against a fixture tree the band emits itself.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY (fkwu). Discovery reads files by their own bytes through
+; read_file_slice, which is byte-faithful on fkwu and re-encodes high bytes on the other arms
+; (core.fk's narrow-waist measurement); a discovery verdict from a byte-lossy arm would be a
+; verdict about a different file.
+;
+; WHY THE FIXTURES ARE EMITTED AND NOT CHECKED IN. Every file below is written by this band from
+; Form arithmetic before any read — a real GGUF header the emitter spells byte by byte (the
+; pattern tests/emit-matvec-msl-band.fk proved), a real safetensors container with a padded
+; 160-byte header, two ollama-shaped manifests, and three files that must NOT match. A fixture
+; whose bytes the band does not own is a fixture that can drift without the band noticing.
+;
+; WHY /tmp AND NOT A SESSION SCRATCH DIR: the band must run identically from any future session,
+; and every byte under its root is rewritten by this band before every read — a concurrent
+; identical run writes identical bytes, so the shared-/tmp collision this repo has witnessed
+; (a sibling's build clobbering yours) has nothing here to clobber into a different answer.
+;
+; THE CO-MOVED-REFERENCE TRAP, stepped around twice on purpose. Every expectation below is a pinned literal
+; (tensors=2, bytes=200, layers=7, count 6), never a value computed by the code under test —
+; and the count bit alone is provably too weak: mutation M3 below swaps which manifest matches
+; and the count stays 6 while two membership claims go dark. The count is kept AND the members
+; are named.
+;
+; MUTATION TABLE — predictions written before the first run, reconciled after (2026-08-04):
+;   M0 baseline                                          predicted 255   witnessed 255
+;   M1 md-magic -> "GGUX"        (gguf door dies,        predicted 114   witnessed 114
+;      bad-magic.gguf starts matching: b1 b4 b8 b128 dark)
+;   M2 md-safetensors? byte-9 test 34 -> 35              predicted  45   witnessed  45
+;      (b2 b16 b64 b128 dark)
+;   M3 md-manifest-needle -> image.model                 predicted 223   witnessed 223
+;      (b32 dark; the count in b128 STAYS 6 — the trap made visible)
+;   M4 fixture hlen field 160 -> 159, padding unchanged  predicted 253   witnessed 253
+;      (detection still lands on padding; bytes=199 breaks only b2)
+;
+; Verdict 255 = 1 gguf-door | 2 safetensors-facts | 4 not-models | 8 depth | 16 config-hint
+;             | 32 ledger-door | 64 one-door | 128 exact-count-and-dedup
+;
+; preludes: form-stdlib/core.fk form-stdlib/model-discovery.fk
+
+(do
+    (defn mdb-all (xs)
+        (if (eq (len xs) 0) 1
+            (if (head xs) (mdb-all (tail xs)) 0)))
+    (defn mdb-bit (weight claims) (if (eq (mdb-all claims) 1) weight 0))
+    (defn mdb-has (s sub) (if (ge (md-find-bytes s sub 0) 0) 1 0))
+
+    ; ---- byte emitters: LE words through byte_to_str, the emit-matvec pattern ----
+    (defn mdb-u32 (v)
+        (str_concat (byte_to_str (mod v 256))
+        (str_concat (byte_to_str (mod (floor (div v 256)) 256))
+        (str_concat (byte_to_str (mod (floor (div v 65536)) 256))
+                    (byte_to_str (mod (floor (div v 16777216)) 256))))))
+    (defn mdb-u64 (v) (str_concat (mdb-u32 (mod v 4294967296)) (mdb-u32 (floor (div v 4294967296)))))
+    (defn mdb-gstr (s) (str_concat (mdb-u64 (str_len s)) s))
+    (defn mdb-kv-str (key val) (str_concat (mdb-gstr key) (str_concat (mdb-u32 8) (mdb-gstr val))))
+    (defn mdb-kv-u32 (key v) (str_concat (mdb-gstr key) (str_concat (mdb-u32 4) (mdb-u32 v))))
+
+    ; a REAL GGUF header: magic, version 3, no tensors, three KVs the describe path reads
+    (defn mdb-gguf ()
+        (str_concat "GGUF"
+        (str_concat (mdb-u32 3)
+        (str_concat (mdb-u64 0)
+        (str_concat (mdb-u64 3)
+        (str_concat (mdb-kv-str "general.architecture" "fixturearch")
+        (str_concat (mdb-kv-u32 "fixturearch.block_count" 7)
+                    (mdb-kv-str "general.name" "band fixture model"))))))))
+
+    ; a REAL safetensors container: u64 LE header length 160, compact JSON padded with the
+    ; format's own trailing spaces, then 32 data bytes the offsets account for exactly.
+    ; The JSON is a flat list folded by mdb-cat — the first draft nested forty str_concat and
+    ; came up two parens short, which preflight caught before any verdict could fold over it.
+    (defn mdb-cat (xs)
+        (if (eq (len xs) 0) "" (str_concat (head xs) (mdb-cat (tail xs)))))
+    (defn mdb-k (s) (str_concat (md-q) (str_concat s (md-q))))
+    (defn mdb-pad (s n) (if (ge (str_len s) n) s (mdb-pad (str_concat s " ") n)))
+    (defn mdb-st-json ()
+        (mdb-cat (list
+            "{" (mdb-k "t0") ":{" (mdb-k "dtype") ":" (mdb-k "F32") ","
+            (mdb-k "shape") ":[2,2]," (mdb-k "data_offsets") ":[0,16]},"
+            (mdb-k "t1") ":{" (mdb-k "dtype") ":" (mdb-k "F32") ","
+            (mdb-k "shape") ":[2,2]," (mdb-k "data_offsets") ":[16,32]}}")))
+    (defn mdb-st-hlen () 160)
+    (defn mdb-data (i n acc)
+        (if (gt i n) acc (mdb-data (add i 1) n (str_concat acc (byte_to_str i)))))
+    (defn mdb-st ()
+        (str_concat (mdb-u64 (mdb-st-hlen))
+        (str_concat (mdb-pad (mdb-st-json) 160)
+                    (mdb-data 1 32 ""))))
+
+    ; the two ollama-shaped manifests: one whose layers are tensors, one whose layer is a model
+    (defn mdb-mani-tensor ()
+        (mdb-cat (list
+            "{" (mdb-k "schemaVersion") ":2," (mdb-k "layers") ":[{"
+            (mdb-k "mediaType") ":" (mdb-k "application/vnd.ollama.image.tensor") ","
+            (mdb-k "size") ":100},{"
+            (mdb-k "mediaType") ":" (mdb-k "application/vnd.ollama.image.tensor") ","
+            (mdb-k "size") ":200}]}")))
+    (defn mdb-mani-plain ()
+        (mdb-cat (list
+            "{" (mdb-k "schemaVersion") ":2," (mdb-k "layers") ":[{"
+            (mdb-k "mediaType") ":" (mdb-k "application/vnd.ollama.image.model") ","
+            (mdb-k "size") ":999}]}")))
+
+    ; ---- the tree, every directory made one honest level at a time ----
+    (defn mdb-root () "/tmp/form-md-band-fixture")
+    (defn mdb-j (a b) (md-join a b))
+    (let r (mdb-root))
+    (fs_mkdir r)
+    (fs_mkdir (mdb-j r "home"))
+    (fs_mkdir (mdb-j r "home/cfg"))
+    (fs_mkdir (mdb-j r "home/a"))
+    (fs_mkdir (mdb-j r "home/a/b"))
+    (fs_mkdir (mdb-j r "home2"))
+    (fs_mkdir (mdb-j r "home2/blobs"))
+    (fs_mkdir (mdb-j r "home2/manifests"))
+    (fs_mkdir (mdb-j r "home2/manifests/reg"))
+    (fs_mkdir (mdb-j r "home2/manifests/reg/lib"))
+    (fs_mkdir (mdb-j r "home2/manifests/reg/lib/fxmodel"))
+    (fs_mkdir (mdb-j r "home2/manifests/reg/lib/plain"))
+    (fs_mkdir (mdb-j r "hub"))
+    (fs_mkdir (mdb-j r "hub/models--fx--repo"))
+    (fs_mkdir (mdb-j r "hub/models--fx--repo/blobs"))
+    (fs_mkdir (mdb-j r "hub/models--fx--repo/snapshots"))
+    (fs_mkdir (mdb-j r "hub/models--fx--repo/snapshots/hash"))
+
+    (let tiny (mdb-j r "home/tiny.gguf"))
+    (let deep (mdb-j r "home/a/b/deep.gguf"))
+    (let fxst (mdb-j r "home/fx.safetensors"))
+    (let cfgst (mdb-j r "home/cfg/model.safetensors"))
+    (let notes (mdb-j r "home/notes.txt"))
+    (let badmagic (mdb-j r "home/bad-magic.gguf"))
+    (let trunc (mdb-j r "home/trunc.safetensors"))
+    (let shard (mdb-j r "home2/blobs/shardblob"))
+    (let fxmani (mdb-j r "home2/manifests/reg/lib/fxmodel/latest"))
+    (let plainmani (mdb-j r "home2/manifests/reg/lib/plain/latest"))
+    (let hubblob (mdb-j r "hub/models--fx--repo/blobs/aabbccdd"))
+    (let hubsnap (mdb-j r "hub/models--fx--repo/snapshots/hash/model.safetensors"))
+
+    (write_file tiny (mdb-gguf))
+    (write_file deep (mdb-gguf))
+    (write_file fxst (mdb-st))
+    (write_file cfgst (mdb-st))
+    (write_file (mdb-j r "home/cfg/config.json")
+        (mdb-cat (list "{" (mdb-k "model_type") ":" (mdb-k "fixturenet") "}")))
+    (write_file notes "not a model, and honestly so")
+    (write_file badmagic (str_concat "GGUX" (substring (mdb-gguf) 4 (str_len (mdb-gguf)))))
+    (write_file trunc (str_concat (mdb-u64 160) "{\"x"))
+    (write_file shard (mdb-st))
+    (write_file fxmani (mdb-mani-tensor))
+    (write_file plainmani (mdb-mani-plain))
+    (write_file hubblob (mdb-st))
+    (write_file hubsnap (mdb-st))
+
+    ; ---- the walk under test: the same md-find-in every caller uses ----
+    (let roots (list (mdb-j r "home") (mdb-j r "home2/blobs")
+                     (mdb-j r "home2/manifests") (mdb-j r "hub")))
+    (let found (md-find-in roots))
+    (let home-found (md-find-in (list (mdb-j r "home"))))
+    (let home-twice (md-find-in (list (mdb-j r "home") (mdb-j r "home"))))
+
+    ; ---- 1: the gguf door, read back through gmt off the emitted bytes ----
+    (let tiny-line (md-describe tiny))
+    (let b1 (mdb-bit 1 (list
+        (eq (md-path-in? tiny found) 1)
+        (eq (mdb-has tiny-line "arch=fixturearch") 1)
+        (eq (mdb-has tiny-line "layers=7") 1)
+        (eq (mdb-has tiny-line "name=band fixture model") 1))))
+
+    ; ---- 2: safetensors facts against pinned literals: 2 tensors, 8+160+32=200 bytes ----
+    (let fx-line (md-describe fxst))
+    (let b2 (mdb-bit 2 (list
+        (eq (md-safetensors? fxst) 1)
+        (eq (md-path-in? fxst found) 1)
+        (eq (mdb-has fx-line "tensors=2") 1)
+        (eq (mdb-has fx-line "bytes=200") 1)
+        (eq (mdb-has fx-line "(no config.json beside it)") 1))))
+
+    ; ---- 4: three not-models, each told apart for its own reason ----
+    (let b3 (mdb-bit 4 (list
+        (eq (md-model-file? notes) 0)
+        (eq (md-model-file? badmagic) 0)
+        (eq (md-model-file? trunc) 0)
+        (eq (md-path-in? notes found) 0)
+        (eq (md-path-in? badmagic found) 0)
+        (eq (md-path-in? trunc found) 0))))
+
+    ; ---- 8: a model two directories down is not a smaller world ----
+    (let b4 (mdb-bit 8 (list (eq (md-path-in? deep found) 1))))
+
+    ; ---- 16: the config.json beside the file names its kind ----
+    (let b5 (mdb-bit 16 (list (eq (mdb-has (md-describe cfgst) "config=fixturenet") 1))))
+
+    ; ---- 32: the ledger door — tensors listed through their manifest, and ONLY tensor
+    ; manifests; membership is claimed by name because the count alone cannot see M3 ----
+    (let mani-line (md-describe fxmani))
+    (let b6 (mdb-bit 32 (list
+        (eq (md-path-in? fxmani found) 1)
+        (eq (md-path-in? plainmani found) 0)
+        (eq (mdb-has mani-line "tensor-manifest") 1)
+        (eq (mdb-has mani-line "model=fxmodel:latest") 1)
+        (eq (mdb-has mani-line "tensors=2") 1)
+        (eq (mdb-has mani-line "bytes=300") 1))))
+
+    ; ---- 64: one file, one door — hub snapshot in, hub blob out, ledger-claimed shard out ----
+    (let b7 (mdb-bit 64 (list
+        (eq (md-path-in? hubsnap found) 1)
+        (eq (md-path-in? hubblob found) 0)
+        (eq (md-path-in? shard found) 0))))
+
+    ; ---- 128: the exact count, pinned as a literal, and a root named twice adds nothing ----
+    (let b8 (mdb-bit 128 (list
+        (eq (len found) 6)
+        (eq (len home-found) 4)
+        (eq (len home-twice) 4))))
+
+    (add b1 (add b2 (add b3 (add b4 (add b5 (add b6 (add b7 b8))))))))
