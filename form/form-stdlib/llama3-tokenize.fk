@@ -1,0 +1,108 @@
+; llama3-tokenize.fk — text to token ids, in the body. The last leaning on the attestant's encoder.
+;
+; WHAT WAS MISSING. llama3-detokenize.fk brought ids -> text home on 2026-08-04, and the decode
+; loop's prompt was still the ATTESTANT's ids — the llama band says so about itself ("the prompt
+; ids are the attestant's, so the decode path is judged alone"). This cell is the other direction:
+; text -> ids, from the GGUF's own vocabulary, no host anywhere in the path.
+;
+; THE ALGORITHM IS THE ATTESTANT'S, NAMED THE SAME WAY IT NAMES IT: greedy LONGEST-MATCH over the
+; vocabulary, not BPE's merge order (metal_first_token.sh:283 — "stated, not hidden"). For prompts
+; whose words are whole vocabulary entries the two agree, and the recorded oracle this cell is
+; gated on — "The capital of France is" -> [128000, 791, 6864, 315, 9822, 374] — is such a prompt.
+; The full merge-order BPE lives one rung away: llama3-pretokenize.fk (the regex, proven
+; bit-identical to Python re on fixtures) + bpe-tokenizer.fk (the merge core) + the file's own
+; tokenizer.ggml.merges. Naming the rung rather than claiming it: THIS cell is longest-match, and
+; a prompt where the two algorithms diverge is out of its radius until that rung lands.
+;
+; THE MATCH RUNS IN THE MAPPED ALPHABET, NOT IN RAW BYTES. A GGUF vocabulary entry is stored as
+; UTF-8 of GPT-2's byte-level alphabet — a space is U+0120, stored as 0xC4 0xA0 — so comparing
+; pieces against raw prompt bytes would never match a piece containing a space. The prompt is
+; mapped ONCE (each raw byte -> its alphabet codepoint -> that codepoint's UTF-8), and every piece
+; is compared against the mapped string byte for byte. The map is the inverse of
+; llama3-detokenize.fk's l3d-uni-byte and is built from the same three runs, so the two cells
+; cannot drift apart without one of them failing its band.
+;
+; ONE WALK OF THE VOCABULARY, ALL CANDIDATES. 128 256 pieces, each tried at every start position
+; of the mapped prompt where it fits, longest kept per position. The walk is the cursor-forward
+; shape ft-emit-vocab and l3d-pieces use, for the same reason: a per-lookup walk of a variable-
+; length array is quadratic, and a prompt of any length would pay it per position.
+;
+; BOS IS THE FILE'S. tokenizer.ggml.bos_token_id, read from the KV, prepended — not the number
+; 128000 typed in.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/llama3-detokenize.fk
+;
+; Proven by: form/form-stdlib/tests/llama3-tokenize-band.fk
+
+(do
+    ; ── raw byte -> alphabet codepoint: the inverse of l3d-uni-byte, from the same three runs ──
+    ; non-printables in increasing byte order: 0..32 (33 of them), 127..160 (34), 173 (1).
+    (defn l3t-np-index (b)
+        (if (le b 32) b
+        (if (le b 160) (add 33 (sub b 127))
+            67)))
+    (defn l3t-cp (b) (if (l3d-printable? b) b (add 256 (l3t-np-index b))))
+
+    ; codepoint -> its UTF-8 bytes. Every codepoint this alphabet produces is <= 323, so the
+    ; widths are one and two — the same radius l3d-width states from the other side.
+    (defn l3t-cp-str (cp)
+        (if (lt cp 128) (byte_to_str cp)
+            (str_concat (byte_to_str (add 192 (div cp 64)))
+                        (byte_to_str (add 128 (mod cp 64))))))
+
+    (defn l3t-map-go (text i n acc)
+        (if (ge i n) acc
+            (l3t-map-go text (add i 1) n
+                (str_concat acc (l3t-cp-str (l3t-cp (str_byte_at text i)))))))
+    (defn l3t-map (text) (l3t-map-go text 0 (str_len text) ""))
+
+    ; ── does piece (at cursor `at`, length pl) match the mapped prompt at start s? ─────────────
+    (defn l3t-match (src at m s j pl)
+        (if (ge j pl) 1
+            (if (eq (gmt-token-byte src at j) (str_byte_at m (add s j)))
+                (l3t-match src at m s (add j 1) pl)
+                0)))
+
+    ; ── functional list update, for the per-position best tables ───────────────────────────────
+    (defn l3t-upd (xs i v)
+        (if (eq i 0) (cons v (tail xs))
+            (cons (head xs) (l3t-upd (tail xs) (sub i 1) v))))
+    (defn l3t-zeros (n v) (if (le n 0) (empty) (cons v (l3t-zeros (sub n 1) v))))
+
+    ; try one piece at every start where it fits; bl/bi are the best-length and best-id tables
+    (defn l3t-starts (src at pl id m L s bl bi)
+        (if (gt (add s pl) L) (list bl bi)
+            (if (eq (l3t-match src at m s 0 pl) 1)
+                (if (gt pl (nth bl s))
+                    (l3t-starts src at pl id m L (add s 1) (l3t-upd bl s pl) (l3t-upd bi s id))
+                    (l3t-starts src at pl id m L (add s 1) bl bi))
+                (l3t-starts src at pl id m L (add s 1) bl bi))))
+
+    ; the one walk: cursor forward through all n pieces
+    (defn l3t-walk (src at i n m L bl bi)
+        (if (ge i n) (list bl bi)
+            (do (let pl (gmt-token-len src at))
+                (let r (if (le pl L) (l3t-starts src at pl i m L 0 bl bi) (list bl bi)))
+                (l3t-walk src (gmt-token-next src at) (add i 1) n m L (nth r 0) (nth r 1)))))
+
+    ; ── greedy longest-match emission, left to right ──────────────────────────────────────────
+    ; A position with no candidate is a refusal (empty list), not a skip: silently stepping one
+    ; byte would emit ids that decode to a DIFFERENT string than the prompt, which is the numb
+    ; answer this cell exists to refuse. With a byte-level vocabulary every byte has a candidate,
+    ; so this arm fires only on a vocabulary this cell does not speak for.
+    (defn l3t-emit (bl bi pos L acc)
+        (if (ge pos L) acc
+            (do (let n (nth bl pos))
+                (if (le n 0) (empty)
+                    (l3t-emit bl bi (add pos n) L (append acc (list (nth bi pos))))))))
+
+    ; ── the whole of it: text in, ids out, BOS first ──────────────────────────────────────────
+    (defn l3t-encode (src text)
+        (do (let m (l3t-map text))
+            (let L (str_len m))
+            (let r (l3t-walk src (gmt-tokens-first src) 0 (gmt-vocab-n src) m L
+                             (l3t-zeros L 0) (l3t-zeros L (sub 0 1))))
+            (let body (l3t-emit (nth r 0) (nth r 1) 0 L (empty)))
+            (if (eq (len body) 0) (empty)
+                (cons (gmt-u32 src "tokenizer.ggml.bos_token_id") body))))
+    0)
