@@ -28,7 +28,7 @@
 ;     T token_embd.weight 1 2 4096 129280 1 71707886176 529530880 1 1059061760
 ; Same recipe, different kernel. A literal cannot drift with the code that produced it.
 ;
-; Verdict 127 when the rung is honest:
+; Verdict 2047 when the two rungs are honest:
 ;   1   the door SPEAKS — metal_status carries metal_linked=true (the voice canary, checked first)
 ;   2   the geometry is READ FROM THE HEADER and matches the Go arm's manifest literally:
 ;       n_embd 4096, vocab 129280, ggml type 1 (F16), absolute offset 71707886176, bytes 1059061760
@@ -40,6 +40,18 @@
 ;       bad=0 AND odd=0 (a fold over all n_embd, no epsilon, no sampling, nothing excused)
 ;   32  the fp-contract pragma this cell emits ACTUALLY suppresses contraction through this door —
 ;       checked, not asserted, because the door compiles with options:nil and contracts by default
+;  128  RMSNORM ON SYNTHETIC TRUTH, EXACT. x=2.0, g=1.0, eps=0 -> inv must be 0x3F000000 and every
+;       lane exactly 0x3F800000. Hand-computed, no tolerance, no tool. The strongest bit in rung 2.
+;  256  blk.0.attn_norm.weight sits at the address the Go arm printed (72877251424) and is n_embd wide
+;  512  the REDUCE agrees with a Form fp64 fold over the same bytes, via implied mean-square
+;       (1/inv^2 - eps), which needs no sqrt on the reference side. Tolerance 1e-6; measured 1.03e-7.
+;       GATED on the row address pin — see below.
+; 1024  the APPLY agrees with the fp64 reference against the VECTOR'S SCALE (overfine, row 934),
+;       not each element's own magnitude. Tolerance 1e-6; measured 6.25e-8. GATED on the row pin AND
+;       on bit 256, because the reference reads the norm weights through the same address the GPU got.
+;       WITHOUT THOSE GATES BOTH BITS WERE COMOVED AND PROVED NOTHING: mutation N5 (embed the wrong
+;       row) answered 2047, and N1 (output_norm.weight in place of blk.0.attn_norm.weight) answered
+;       1791 where 767 was predicted. The relative error is only evidence once the addresses are pinned.
 ;   64  the token's row lands at the absolute address an INDEPENDENT computation says it must:
 ;       71707886176 + 671*4096*2 = 71713383008. THIS BIT WAS ADDED BECAUSE THE BAND FAILED A
 ;       MUTATION WITHOUT IT (M2, embed the wrong row: predicted 47, band answered 63). bit16 now
@@ -87,6 +99,15 @@
             (if (eq (nth f 0) (nth f 3))
                 (if (eq (nth f 1) 0) (if (eq (nth f 2) 0) 1 0) 0) 0) 0))
 
+    ; ── RUNG 2 anchors. rel1/rel2 are fp32-vs-fp64 MAGNITUDE checks and the tolerance is stated
+    ; rather than discovered: measured 103 ppb (reduce) and 63 ppb (apply), which is f32 rounding
+    ; scale (f32 eps ~119 ppb) over a 4096-term fold. The bar is 1e-6 — ~10x the observed noise and
+    ; ~4 orders below any structural error, which lands at 1e-2 or worse. These are NOT bit-exactness
+    ; and this band does not call them that; bit 128 is the exact one.
+    (defn dfb-tol () 0.000001)
+    (defn dfb-rmsgeom? (f2 n)
+        (if (eq (nth f2 2) 72877251424) (if (eq (nth f2 4) n) 1 0) 0))
+
     (let facts (dfd-embed (dfb-model) (dfb-token)))
     (let st (nth facts 8))
     (let b1  (dfb-linked? st))
@@ -96,6 +117,14 @@
     (let b16 (if (eq b1 1) (dfb-exact? facts) 0))
     (let b32 (if (eq b1 1) (dfd-contract-ok?) 0))
     (let b64 (if (eq b1 1) (dfb-rowaddr? facts) 0))
+    (let b128 (if (eq b1 1) (dfd-rmsnorm-synth (nth facts 3)) 0))
+    (let rung2 (if (eq b1 1) (dfd-rmsnorm-rung (dfb-model) (dfb-token)) 0))
+    (let b256 (if (eq b1 1) (dfb-rmsgeom? rung2 (nth facts 3)) 0))
+    ; bits 512/1024 are GATED ON THE PINNED ADDRESSES, not only on the relative error. A relative
+    ; error computed against a reference that read the same wrong bytes is not evidence of anything.
+    (let rowpin (if (eq (nth rung2 5) 71713383008) 1 0))
+    (let b512 (if (eq b1 1) (if (eq rowpin 1) (if (lt (nth rung2 0) (dfb-tol)) 1 0) 0) 0))
+    (let b1024 (if (eq b1 1) (if (eq rowpin 1) (if (eq b256 1) (if (lt (nth rung2 1) (dfb-tol)) 1 0) 0) 0) 0))
 
     (print (str_concat "bit1  door speaks          = " (int_to_str b1)))
     (print (str_concat "bit2  geometry from header = " (int_to_str b2)))
@@ -104,8 +133,14 @@
     (print (str_concat "bit16 embedding bit-exact  = " (int_to_str b16)))
     (print (str_concat "bit32 contraction off      = " (int_to_str b32)))
     (print (str_concat "bit64 token row address    = " (int_to_str b64)))
+    (print (str_concat "bit128 rmsnorm synth exact = " (int_to_str b128)))
+    (print (str_concat "bit256 attn_norm geometry  = " (int_to_str b256)))
+    (print (str_concat "bit512 rmsnorm reduce ref  = " (int_to_str b512)))
+    (print (str_concat "bit1024 rmsnorm apply ref  = " (int_to_str b1024)))
 
     (let verdict (add b1 (add (mul 2 b2) (add (mul 4 b4)
-                    (add (mul 8 b8) (add (mul 16 b16) (add (mul 32 b32) (mul 64 b64))))))))
+                    (add (mul 8 b8) (add (mul 16 b16) (add (mul 32 b32) (add (mul 64 b64)
+                    (add (mul 128 b128) (add (mul 256 b256)
+                    (add (mul 512 b512) (mul 1024 b1024))))))))))))
     (print (str_concat "Verdict: " (int_to_str verdict)))
     verdict)
