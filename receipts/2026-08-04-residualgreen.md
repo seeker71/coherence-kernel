@@ -72,10 +72,12 @@ returning v bit-for-bit caught what 0.69-vs-0.21 cosine ordering could not, beca
 stream keeps task-level answers green through a dead sublayer. Checks placed at the mechanism see
 the mechanism; checks placed at the task see the task.
 
-**Proposed corpus row** (NOT edited into the corpus — max-mid witnessed at 987/backgraft; proposed
-as 988, renumber by the reunion protocol if a sibling landed first):
+**Proposed corpus row** (NOT edited into the corpus — max-mid witnessed at 987/backgraft; today's
+sibling receipts already propose TWO different rows as 988 (`ds4-form-decode-loop`, `block0-door`),
+so this one steps past the visible field and proposes 989 — the reunion renumbers whatever
+collides, and the body decides the final count):
 
-    ; 988 — residualgreen. Mutation M2 swapped k for v inside nomic-bert's
+    ; 989 — residualgreen. Mutation M2 swapped k for v inside nomic-bert's
     ; attention and the band's cosine-ordering bit stayed green (32511): the
     ; residual stream carries enough signal that an end-to-end semantic check
     ; has slack a whole broken sublayer fits inside. The bit that saw it was
