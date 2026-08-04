@@ -1,0 +1,235 @@
+; dsv4-decode-form.fk — the DS4 decode loop held by a FORM CELL, on the handle door.
+;
+; WHAT THIS IS AND WHAT IT IS NOT, said first so no one reads a rung as the stair.
+; metal_dsv4_stack.sh produces a bit-exact 43-layer DS4 stream at ~28 t/s and stays the fidelity and
+; performance oracle. Its kernels ARE emitted by Form cells — but its LOOP is a ~2200-line Swift
+; heredoc compiled by swiftc inside a 2538-line bash file. This cell is the beginning of that loop
+; coming home to Form: the geometry is read from the file's own header BY THIS CELL, the weights are
+; mmap'd resident through metal_buf_from_file, the MSL is taken from the body's own emitters IN
+; PROCESS (no file round-trip, no awk), and every dispatch is enqueued from Form.
+;
+; WHAT IS PROVEN HERE TODAY (2026-08-04): the door carries, the geometry is read from the header and
+; not hardcoded, and one real token's embedding row comes off the real 9.1 GB file through a real GPU
+; dispatch and matches this body's own f16->f32 widening bit for bit. That is one rung. The 43-layer
+; argmax against the oracle is NOT proven here and this cell does not claim it — see the UNFINISHED
+; block at the bottom, which names exactly what is missing and why.
+;
+; ── THREE THINGS THE DOOR DOES NOT CARRY, MEASURED THROUGH IT, NOT READ OFF A DOC ─────────────────
+;
+; 1. FP CONTRACTION. metal_pipeline compiles with newLibraryWithSource:options:nil. Probed with
+;    a=b=1+2^-12 (0x3F800800), c=-1.0 — inputs chosen so the product genuinely ROUNDS, because the
+;    first values tried made it exact and the two agreed for a reason that had nothing to do with
+;    contraction (a green that proved nothing; the shape this body calls numb-green):
+;        through the door   a*b+c = 973079552 == fma(a,b,c)     -> CONTRACTED
+;        non-contracted                973078528
+;    metal_dsv4_stack.sh compiles every metallib with -ffp-contract=off and ds4-order-match.fk states
+;    the whole bit-exactness rests on that. So the door fuses where the oracle does not, and a stream
+;    built on it would be plausible and wrong.
+;    THE CELL FIXES THIS ITSELF, because the cell emits the MSL: dfd-msl-pragma prepends
+;    "#pragma clang fp contract(off)", and with it the same probe answers 973078528 / 973079552,
+;    correctly different. ("#pragma METAL fp math_mode(safe)" does NOT stop contraction — also probed.)
+;
+; 2. THREADGROUP SIZE — WAS NOT EXPRESSIBLE, NOW IS (closed by the door in 66111c9ea, same day).
+;    The gap: metal_enqueue took tg = min(maxTotalThreadsPerThreadgroup, threads), while the oracle's
+;    enc(pipeline, n, cap) takes an INDEPENDENT cap. Real oracle call sites where cap is not n:
+;    enc(pQ80, rows*32, 256), enc(pMx8, rows*32, 256), enc(pQ8aQuant, blocks*q8aThreads, 64),
+;    enc(pQ2kDeq, rows*cols, 256), enc(pAttAcc, nHead*headDim, tgSmall). Any kernel that stages into
+;    threadgroup memory or takes a group-wide fold would have been partitioned differently here.
+;    The door did NOT grow a fourth argument, and the reason is worth carrying: past arity 3 an op is
+;    handed a CONS LIST in slot 1 (fkwu-uni.c:6920, fk_node rows are four wide), and making the
+;    ~2600x/token primitive walk a cons chain is the wrong trade. The BINDING STRING grew instead:
+;
+;        u32 n_buf | u32 handle[n_buf] | u32 n_const | u32 value[n_const]
+;                                      [ u32 threads_per_group | u32 threadgroup_bytes ]
+;
+;    Exactly two legal lengths, base and base+8; anything else is refused out loud. 0 = prior
+;    behaviour. VERIFIED HERE FROM THE GPU rather than from the note: a kernel reporting its own
+;    threads_per_threadgroup at grid 1024 answered 1024 free, 256 asked 256, 64 asked 64, and a
+;    16-byte binding was refused with `binding is 16 bytes; ... 12 (no tail) or 20 (with ...)` and did
+;    not dispatch. dfd-bind-tg below emits the tail; the base form stays legal, which is why this
+;    cell's own bindings did not change.
+;
+; 3. CONSTANTS ARE u32 ONLY. The binding string carries 4-byte constants and the carrier setBytes them
+;    at length 4. dsv4-token.fk's form_dsv4_embed_f16 declares `constant ulong& base` because the
+;    ORACLE hands it one big windowed view whose second window begins ~85 GiB in, past 2^32. This door
+;    does not have that problem — metal_buf_from_file maps THE TENSOR, and metal_enqueue binds at the
+;    handle's own view offset, so the kernel sees the tensor starting at 0 and the row offset is
+;    token*n_embd*2, which for this file's vocabulary is ~1.06e9 and fits a u32 with room. So this cell
+;    emits a u32-base variant of that one kernel rather than asking the door to grow. The arithmetic is
+;    untouched — float(as_type<half>(h)) either way — so the values are the oracle's values.
+;
+; preludes: native/metal/dsv4-stack-real.fk
+
+(do
+    ; ================= little-endian u32, the door's one wire format =================
+    ; The binding string and every constant the door carries are u32 LE. Built here from bytes so the
+    ; layout is the CELL's decision, exactly as the carrier's header says it should be.
+    (defn dfd-u32 (n)
+        (str_concat
+            (str_concat (byte_to_str (mod n 256))
+                        (byte_to_str (mod (div n 256) 256)))
+            (str_concat (byte_to_str (mod (div n 65536) 256))
+                        (byte_to_str (mod (div n 16777216) 256)))))
+
+    (defn dfd-rd32 (s o)
+        (add (str_byte_at s o)
+             (add (mul 256 (str_byte_at s (add o 1)))
+                  (add (mul 65536 (str_byte_at s (add o 2)))
+                       (mul 16777216 (str_byte_at s (add o 3)))))))
+
+    (defn dfd-rd16 (s o)
+        (add (str_byte_at s o) (mul 256 (str_byte_at s (add o 1)))))
+
+    ; the optional trailing pair (note 2). `base` is a complete binding; this appends the oracle's
+    ; per-dispatch cap and the threadgroup byte count. Kept beside dfd-u32 rather than inlined at the
+    ; call sites, because the next rung — form_mla_rmsnorm_reduce, which folds across a threadgroup —
+    ; is the first kernel that cannot be dispatched without it, and every kernel after it needs the
+    ; same tail. threads_per_group is a CAP, not a grid: the door takes
+    ; min(maxTotalThreadsPerThreadgroup, cap) and does not clamp it to the dispatch width.
+    (defn dfd-bind-tg (base tpg tgbytes)
+        (str_concat base (str_concat (dfd-u32 tpg) (dfd-u32 tgbytes))))
+
+    ; ================= the pragma the door's compile needs =================
+    ; Not decoration. See note 1 in the header — without this the door contracts a*b+c into an fma and
+    ; the stream diverges from the oracle while still looking like language.
+    (defn dfd-msl-pragma () "#pragma clang fp contract(off)\n")
+
+    ; ================= geometry, read from the file's own header =================
+    ; Never hardcoded. Every one of these is a walk of the bytes the file actually carries, through the
+    ; body's own gguf reader. A recipe that assumes 4096 is a recipe that is fluently wrong on the next
+    ; file.
+    (defn dfd-src (path) (eqr-of-file path 0 (gm-window)))
+    (defn dfd-tabs (src path name) (add (egg-data-base src (gm-alignment))
+                                        (egg-ti-dataoff src (egg-find-tensor src name))))
+    (defn dfd-ttype (src name) (egg-ti-type src (egg-find-tensor src name)))
+    (defn dfd-td0   (src name) (egg-ti-dim0 src (egg-find-tensor src name)))
+    (defn dfd-td1   (src name) (gm-dimk src (egg-find-tensor src name) 1))
+    (defn dfd-tbytes (src name) (gm-bytes src (egg-find-tensor src name)))
+
+    ; ================= the embed kernel, u32-base variant (note 3) =================
+    (defn dfd-embed-msl ()
+        (str_concat (dfd-msl-pragma)
+        (str_concat "#include <metal_stdlib>\nusing namespace metal;\n"
+            (str_concat "kernel void form_dsv4_embed_f16_u32(device const uchar* src [[buffer(0)]], device float* dst [[buffer(1)]], constant uint& base [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) { "
+                        "if (gid < n) { ushort h = *(device const ushort*)(src + base + gid*2u); dst[gid] = float(as_type<half>(h)); } }"))))
+
+    ; ================= this body's OWN f16 -> f32 widening, as BITS =================
+    ; The cross-check for the GPU's answer, and it is deliberately not a float comparison: the widening
+    ; from IEEE half to IEEE single is a pure bit rearrangement, so the honest gate is EQUALITY of the
+    ; 32 bits, not an epsilon.
+    ;
+    ; THE SIX THAT WERE NOT COVERED, AND WHY THEY ARE NOW. The first cut widened only normals and
+    ; ZERO, and COUNTED everything else as `odd` rather than folding it into `ok`. On the real
+    ; token_embd row for token 671 that left ok=4090 bad=0 odd=6 — six lanes of a real weight row
+    ; that the check was silent about. Six unverified lanes are not a rounding detail; they are the
+    ; exact place a wrong answer could sit and still read green, so they are widened here rather than
+    ; excused. A half DENORMAL is m * 2^-24 with no implicit leading one, so it renormalizes: with p
+    ; the highest set bit of m, the f32 exponent field is p+103 and the mantissa is (m - 2^p) shifted
+    ; left by 23-p. inf/nan carries e=255 and the payload, which is the standard widening.
+    (defn dfd-hibit-go (m p) (if (lt m 2) p (dfd-hibit-go (div m 2) (add p 1))))
+    (defn dfd-hibit (m) (dfd-hibit-go m 0))
+    (defn dfd-pow2 (k) (if (eq k 0) 1 (mul 2 (dfd-pow2 (sub k 1)))))
+
+    (defn dfd-h2f (b)
+        (do (let s (div b 32768))
+            (let e (mod (div b 1024) 32))
+            (let m (mod b 1024))
+            (if (eq e 31)
+                (add (mul s 2147483648) (add 2139095040 (mul m 8192)))
+                (if (eq e 0)
+                    (if (eq m 0)
+                        (mul s 2147483648)
+                        (do (let p (dfd-hibit m))
+                            (add (mul s 2147483648)
+                                 (add (mul (add p 103) 8388608)
+                                      (mul (sub m (dfd-pow2 p)) (dfd-pow2 (sub 23 p)))))))
+                    (add (mul s 2147483648) (add (mul (add e 112) 8388608) (mul m 8192)))))))
+
+    ; every half is widened now, so `odd` counts only what this cell still refuses — which is nothing.
+    ; It is KEPT rather than deleted: a nonzero odd in a later run is the honest way for a case this
+    ; body has not met to announce itself instead of being averaged into a pass.
+    (defn dfd-h-odd? (b) 0)
+
+    ; walk the row: count bit-exact agreements, disagreements, and un-widened (odd) halfs
+    (defn dfd-cmp-go (raw got i n ok bad odd)
+        (if (ge i n) (cons ok (cons bad (cons odd 0)))
+            (do (let h (dfd-rd16 raw (mul i 2)))
+                (if (eq (dfd-h-odd? h) 1)
+                    (dfd-cmp-go raw got (add i 1) n ok bad (add odd 1))
+                    (if (eq (dfd-h2f h) (dfd-rd32 got (mul i 4)))
+                        (dfd-cmp-go raw got (add i 1) n (add ok 1) bad odd)
+                        (dfd-cmp-go raw got (add i 1) n ok (add bad 1) odd))))))
+
+    ; ================= RUNG 1: one real token's embedding, file -> GPU -> back =================
+    ; Geometry from the header, weights mmap'd resident, MSL from this cell, dispatch from Form.
+    (defn dfd-embed (path token)
+        (do
+            (let src (dfd-src path))
+            (let nembd (dfd-td0 src "token_embd.weight"))
+            (let vocab (dfd-td1 src "token_embd.weight"))
+            (let ety (dfd-ttype src "token_embd.weight"))
+            (let abs (dfd-tabs src path "token_embd.weight"))
+            (let nby (dfd-tbytes src "token_embd.weight"))
+            (print (str_concat "GEOM n_embd=" (int_to_str nembd)))
+            (print (str_concat "GEOM vocab=" (int_to_str vocab)))
+            (print (str_concat "GEOM embd_type=" (int_to_str ety)))
+            (print (str_concat "GEOM embd_abs=" (int_to_str abs)))
+            (print (str_concat "GEOM embd_bytes=" (int_to_str nby)))
+            (let wh (metal_buf_from_file path abs nby))
+            (print (str_concat "BUF weights=" (int_to_str wh)))
+            (let oh (metal_buf_alloc (mul nembd 4)))
+            (let pipe (metal_pipeline (dfd-embed-msl) "form_dsv4_embed_f16_u32"))
+            (print (str_concat "PIPE embed=" (int_to_str pipe)))
+            (let rowoff (mul (mul token nembd) 2))
+            (let bind (str_concat
+                          (str_concat (dfd-u32 2) (str_concat (dfd-u32 wh) (dfd-u32 oh)))
+                          (str_concat (dfd-u32 2) (str_concat (dfd-u32 rowoff) (dfd-u32 nembd)))))
+            (let e (metal_enqueue pipe bind nembd))
+            (print (str_concat "ENQ=" (int_to_str e)))
+            (let got (metal_buf_read oh 0 (mul nembd 4)))
+            (print (str_concat "READ bytes=" (int_to_str (str_len got))))
+            ; the same row's raw bytes, read straight off the file by this cell
+            (let raw (eqr-of-file path (add abs rowoff) (mul nembd 2)))
+            (let r (dfd-cmp-go raw got 0 nembd 0 0 0))
+            (print (str_concat "BITEXACT ok=" (int_to_str (head r))))
+            (print (str_concat "BITEXACT bad=" (int_to_str (head (tail r)))))
+            (print (str_concat "BITEXACT odd=" (int_to_str (head (tail (tail r))))))
+            (print (metal_status))
+            ; the facts, in the order a band folds them. Returned rather than only printed, so the
+            ; band reads what the run actually produced instead of re-deriving it.
+            (cons (head r) (cons (head (tail r)) (cons (head (tail (tail r)))
+                (cons nembd (cons vocab (cons ety (cons abs (cons nby
+                (cons (metal_status) (cons (add abs rowoff) 0))))))))))))
+
+    ; ================= the contraction probe, as a callable the band can fold =================
+    ; Answers 1 when the pragma this cell emits actually suppresses contraction THROUGH THIS DOOR.
+    ; a=b=1+2^-12, c=-1.0, chosen so the product rounds: mul-then-add 973078528, fma 973079552.
+    ; A cell that emits the pragma and never checks it has a comment, not a guarantee.
+    (defn dfd-contract-ok? ()
+        (do (let msl (str_concat (dfd-msl-pragma)
+                (str_concat "#include <metal_stdlib>\nusing namespace metal;\n"
+                    "kernel void fpk(device const float* v [[buffer(0)]], device float* y [[buffer(1)]], uint g [[thread_position_in_grid]]) { float a=v[0]; float b=v[1]; float c=v[2]; y[0]=a*b+c; y[1]=fma(a,b,c); }")))
+            (let pipe (metal_pipeline msl "fpk"))
+            (let vi (metal_buf_alloc 16))
+            (let vo (metal_buf_alloc 16))
+            (let w (metal_buf_write vi 0
+                (str_concat (str_concat (dfd-u32 1065355264) (dfd-u32 1065355264))
+                            (str_concat (dfd-u32 3212836864) (dfd-u32 0)))))
+            (let bind (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 vi) (dfd-u32 vo)))
+                                  (dfd-u32 0)))
+            (let e (metal_enqueue pipe bind 1))
+            (let o (metal_buf_read vo 0 16))
+            (if (eq (dfd-rd32 o 0) 973078528)
+                (if (eq (dfd-rd32 o 4) 973079552) 1 0)
+                0)))
+
+    ; ================= UNFINISHED, named so it cannot be mistaken for done =================
+    ; - the 43-layer stack. The oracle's runner is ~1200 lines of essential orchestration beyond this
+    ;   rung: two routing regimes, six expert quantizations, the 20-iteration hyper-connection sinkhorn,
+    ;   the second (compressed) KV cache on the ratio-nonzero layers, MLA split into scores/stats/acc,
+    ;   YaRN RoPE and its compressed reduction, and the exit head. None of it is written here.
+    ; - the one-token argmax against metal_dsv4_stack.sh. Not attempted, because there is no stack yet
+    ;   to take an argmax of. Claiming it from a working embed would be a fabrication.
+    ; - door note 2 (threadgroup size) must land before any kernel that folds across a threadgroup can
+    ;   be driven faithfully from here.
+    0)
