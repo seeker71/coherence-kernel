@@ -332,7 +332,9 @@ leaf.
 
 Name **`comoved`** — verified 0 hits in `learn/homecoming-distillation-corpus.fk` and 0 files across the
 tree. (Also-fresh and rejected: `codrift`, `yokeref`, `samesite`, `twinsited`.) Corpus max-mid is 986, so
-this would be **987**, for the body to place:
+this would be **988** (987 was taken by `backgraft` while this session ran; max-mid re-checked at
+close). The word's only tree occurrences are this session's own coinage — the comments in
+`dsv4-decode-form.fk` and this receipt — not a prior use:
 
 ```
 ; 987 — comoved. A band's bit-exactness check compared 4096 GPU lanes against
@@ -351,7 +353,7 @@ this would be **987**, for the body to place:
 ; "comoved" — 0 hits in corpus before this row.
 ; (walk: twinblind 874 — proving a choice against a second copy of itself; this
 ;  is the same blindness at the level of an ADDRESS rather than an arithmetic.)
-(hdc-row 987 20260804
+(hdc-row 988 20260804
     (list "when" "do" "two" "checks" "that" "agree" "prove" "nothing")
     "comoved"
     "comoved"
