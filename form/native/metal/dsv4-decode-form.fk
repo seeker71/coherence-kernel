@@ -609,6 +609,80 @@
         (if (ge h nh) acc
             (dfd-headrms-all qraw got (add h 1) nh hd (dfd-headrms-head qraw got h hd acc))))
 
+    ; ═══════════════ RUNG 5: RoPE + the sink-softmax attention, continuing the same chain ═══════════
+    ; The freqs are COMPUTED ON THE DEVICE by a kernel this cell emits — freqs[k] = pow(base, -2k/64)
+    ; with base = 10000.0 read from the file's own KV (deepseek4.rope.freq_base; layer 0 is a ratio-0
+    ; raw-regime layer, so fscale = 1 and no YaRN ramp — the compressed reduction belongs to layer 2+
+    ; and is NOT claimed here). freqs[0] = pow(base, 0) must be EXACTLY 1.0f: that is an identity of
+    ; the function, not a tolerance. The fp64 rope reference reads the freqs BACK from the device and
+    ; widens them, so a wrong pow shows up as a wrong freqs[0] or as a rope mismatch, never as a
+    ; comoved agreement. pos = 7.0 (f32 bits 1088421888, exact), sign +1. The NOPE dims (0..447 of
+    ; each head) are a pure COPY in the kernel, so their check is BIT EQUALITY, not a tolerance.
+    (defn dfd-freqs-msl ()
+        (str_concat (dfd-msl-pragma)
+        (str_concat "#include <metal_stdlib>\nusing namespace metal;\n"
+            "kernel void dfd_freqs(device float* f [[buffer(0)]], constant uint& npair [[buffer(1)]], constant uint& nrot [[buffer(2)]], constant float& base [[buffer(3)]], uint k [[thread_position_in_grid]]) { if (k < npair) f[k] = metal::pow(base, -2.0f * float(k) / float(nrot)); }")))
+
+    (defn dfd-rope-pair-ref (x0 x1 a which)
+        (if (eq which 0)
+            (sub (mul x0 (fcos a)) (mul x1 (fsin a)))
+            (add (mul x0 (fsin a)) (mul x1 (fcos a)))))
+    (defn dfd-rope-tail-md (inraw outraw freqraw hbase k acc)
+        (if (ge k 32) acc
+            (do (let lo (add hbase (add 448 (mul k 2))))
+                (let a (mul 7.0 (fd-value (dfd-rd32 freqraw (mul k 4)) 8 23)))
+                (let x0 (dfd-f32at inraw (mul lo 4)))
+                (let x1 (dfd-f32at inraw (mul (add lo 1) 4)))
+                (let d0 (abs (sub (dfd-f32at outraw (mul lo 4)) (dfd-rope-pair-ref x0 x1 a 0))))
+                (let d1 (abs (sub (dfd-f32at outraw (mul (add lo 1) 4)) (dfd-rope-pair-ref x0 x1 a 1))))
+                (let d (if (gt d0 d1) d0 d1))
+                (dfd-rope-tail-md inraw outraw freqraw hbase (add k 1) (if (gt d acc) d acc)))))
+    (defn dfd-rope-tail-mr (inraw freqraw hbase k acc)
+        (if (ge k 32) acc
+            (do (let lo (add hbase (add 448 (mul k 2))))
+                (let a (mul 7.0 (fd-value (dfd-rd32 freqraw (mul k 4)) 8 23)))
+                (let x0 (dfd-f32at inraw (mul lo 4)))
+                (let x1 (dfd-f32at inraw (mul (add lo 1) 4)))
+                (let r0 (abs (dfd-rope-pair-ref x0 x1 a 0)))
+                (let r1 (abs (dfd-rope-pair-ref x0 x1 a 1)))
+                (let r (if (gt r0 r1) r0 r1))
+                (dfd-rope-tail-mr inraw freqraw hbase (add k 1) (if (gt r acc) r acc)))))
+    (defn dfd-nope-eq (inraw outraw hbase j acc)
+        (if (ge j 448) acc
+            (dfd-nope-eq inraw outraw hbase (add j 1)
+                (if (eq (dfd-rd32 inraw (mul (add hbase j) 4)) (dfd-rd32 outraw (mul (add hbase j) 4)))
+                    (add acc 1) acc))))
+
+    ; the attend reference: per head, one KV row, the sink in the max and in the denominator —
+    ; mla-attn.fk's own softmax shape, folded in fp64 with tn-exp and tn-sqrt.
+    (defn dfd-att-dot (qraw kraw hbase j acc)
+        (if (ge j 512) acc
+            (dfd-att-dot qraw kraw hbase (add j 1)
+                (add acc (mul (dfd-f32at qraw (mul (add hbase j) 4)) (dfd-f32at kraw (mul j 4)))))))
+    (defn dfd-att-w (qraw kraw sraw h)
+        (do (let s (mul (div 1.0 (tn-sqrt 512.0)) (dfd-att-dot qraw kraw (mul h 512) 0 0.0)))
+            (let sink (dfd-f32at sraw (mul h 4)))
+            (let m (if (gt sink s) sink s))
+            (let e (tn-exp (sub s m)))
+            (div e (add (tn-exp (sub sink m)) e))))
+    (defn dfd-att-head-md (qraw kraw sraw haraw h d acc w)
+        (if (ge d 512) acc
+            (do (let dd (abs (sub (dfd-f32at haraw (mul (add (mul h 512) d) 4))
+                                  (mul (dfd-f32at kraw (mul d 4)) w))))
+                (dfd-att-head-md qraw kraw sraw haraw h (add d 1) (if (gt dd acc) dd acc) w))))
+    (defn dfd-att-head-mr (kraw d acc w)
+        (if (ge d 512) acc
+            (do (let r (abs (mul (dfd-f32at kraw (mul d 4)) w)))
+                (dfd-att-head-mr kraw (add d 1) (if (gt r acc) r acc) w))))
+    (defn dfd-att-all-md (qraw kraw sraw haraw h acc)
+        (if (ge h 64) acc
+            (dfd-att-all-md qraw kraw sraw haraw (add h 1)
+                (dfd-att-head-md qraw kraw sraw haraw h 0 acc (dfd-att-w qraw kraw sraw h)))))
+    (defn dfd-att-all-mr (qraw kraw sraw h acc)
+        (if (ge h 64) acc
+            (dfd-att-all-mr qraw kraw sraw (add h 1)
+                (dfd-att-head-mr kraw 0 acc (dfd-att-w qraw kraw sraw h)))))
+
     (defn dfd-mla2-rung (path token)
         (do
             (let src (dfd-src path))
@@ -730,10 +804,70 @@
 
             (let relhr (dfd-headrms-all qqraw qhraw 0 64 512 0.0))
             (print (str_concat "REL headrms 64 heads (ppb)=" (float_to_str (mul relhr 1000000000.0))))
+
+            ; ── rung 5 continues the SAME batch: freqs -> rope(q,64h) -> rope(k,1h) -> attend ──
+            (let snkabs (dfd-tabs src path "blk.0.attn_sinks.weight"))
+            (let snkbytes (dfd-tbytes src "blk.0.attn_sinks.weight"))
+            (print (str_concat "GEOM sinks abs=" (int_to_str snkabs)))
+            (let snkh (metal_buf_from_file path snkabs snkbytes))
+            (let pf (metal_pipeline (dfd-freqs-msl) "dfd_freqs"))
+            (let pro (metal_pipeline mslm "form_mla_rope_f32"))
+            (let pat (metal_pipeline mslm "form_mla_attend_f32"))
+            (let fb (metal_buf_alloc 128))
+            (let qrb (metal_buf_alloc (mul qbrows 4)))
+            (let krb (metal_buf_alloc (mul 512 4)))
+            (let hab (metal_buf_alloc (mul qbrows 4)))
+            ; base = 10000.0f (bits 1176256512), from the file's KV deepseek4.rope.freq_base
+            (let e11 (metal_enqueue pf
+                (str_concat (str_concat (dfd-u32 1) (dfd-u32 fb))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 32) (dfd-u32 64)) (dfd-u32 1176256512)))) 32))
+            ; rope q: nh=64 hd=512 nrot=64 pos=7.0f sign=+1.0f
+            (let e12 (metal_enqueue pro
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 qhb) (dfd-u32 qrb)) (dfd-u32 fb)))
+                            (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512))
+                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 1088421888) (dfd-u32 1065353216)))))) qbrows))
+            ; rope k: nh=1
+            (let e13 (metal_enqueue pro
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 klnb) (dfd-u32 krb)) (dfd-u32 fb)))
+                            (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 1) (dfd-u32 512))
+                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 1088421888) (dfd-u32 1065353216)))))) 512))
+            ; attend: nh=64 hd=512 nrows=1 scale=1/sqrt(512) (bits 1026884851, Form-verified in band)
+            (let e14 (metal_enqueue pat
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 qrb) (dfd-u32 krb))
+                                                                (str_concat (dfd-u32 hab) (dfd-u32 snkh))))
+                            (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512))
+                                (str_concat (dfd-u32 1) (dfd-u32 1026884851))))) 64))
+            (print (str_concat "ENQ rope/attend=" (str_concat (int_to_str e11) (str_concat (int_to_str e12)
+                   (str_concat (int_to_str e13) (int_to_str e14))))))
+
+            (let fraw (metal_buf_read fb 0 128))
+            (let qrraw (metal_buf_read qrb 0 (mul qbrows 4)))
+            (let krraw (metal_buf_read krb 0 (mul 512 4)))
+            (let haraw (metal_buf_read hab 0 (mul qbrows 4)))
+            (let snkraw (eqr-of-file path snkabs snkbytes))
+            (print (str_concat "freqs[0] bits=" (int_to_str (dfd-rd32 fraw 0))))
+
+            ; rope: NOPE bit-equality on k row + q head 0, tail vs fp64 on the same two heads
+            (let nopeeq (add (dfd-nope-eq klnraw krraw 0 0 0) (dfd-nope-eq qhraw qrraw 0 0 0)))
+            (let rmd (dfd-rope-tail-md klnraw krraw fraw 0 0
+                      (dfd-rope-tail-md qhraw qrraw fraw 0 0 0.0)))
+            (let rmr (dfd-rope-tail-mr klnraw fraw 0 0
+                      (dfd-rope-tail-mr qhraw fraw 0 0 0.0)))
+            (let relrope (div rmd rmr))
+            (print (str_concat "NOPE bit-equal dims=" (str_concat (int_to_str nopeeq) " of 896")))
+            (print (str_concat "REL rope tails (ppb)=" (float_to_str (mul relrope 1000000000.0))))
+
+            ; attend: all 64 heads vs fp64, against the output vector's scale
+            (let amd (dfd-att-all-md qrraw krraw snkraw haraw 0 0.0))
+            (let amr (dfd-att-all-mr qrraw krraw snkraw 0 0.0))
+            (let relatt (div amd amr))
+            (print (str_concat "REL attend 64 heads (ppb)=" (float_to_str (mul relatt 1000000000.0))))
             (print (metal_status))
             (cons relqln (cons relkln (cons relqb (cons relhr
                 (cons qanabs (cons kvanabs (cons qbabs (cons kvabs
-                (cons (add eabs rowoff) (cons qbrows (cons qbcols 0)))))))))))))
+                (cons (add eabs rowoff) (cons qbrows (cons qbcols
+                (cons relrope (cons relatt (cons nopeeq
+                (cons snkabs (cons (dfd-rd32 fraw 0) (cons (dfd-rd32 fraw 4) 0)))))))))))))))))))
 
     ; ================= UNFINISHED, named so it cannot be mistaken for done =================
     ; - the 43-layer stack. The oracle's runner is ~1200 lines of essential orchestration beyond this
