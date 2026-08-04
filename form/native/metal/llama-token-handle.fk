@@ -59,7 +59,7 @@
 ;      form-stdlib/q6k-msl.fk / q4k-msl.fk / llama-decode-msl.fk (every kernel but the copy),
 ;      native/metal/metal_first_token.sh (the attestant this cell must agree with).
 ;
-; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/gguf-meta.fk form-stdlib/trig.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matvec-slot.fk form-stdlib/qk-matmul-batch.fk native/metal/whole-tensor-residency.fk form-stdlib/metal-door.fk
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/gguf-meta.fk form-stdlib/trig.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matvec-slot.fk form-stdlib/qk-matmul-batch.fk native/metal/whole-tensor-residency.fk form-stdlib/gguf-tensor-index.fk form-stdlib/metal-door.fk
 ;
 ; Proven by: form/native/metal/tests/llama-token-handle-band.fk
 
@@ -103,20 +103,44 @@
 
     (defn lth-blk (l suffix) (str_concat "blk." (str_concat (int_to_str l) (str_concat "." suffix))))
 
-    ; The nine tensors one llama block reaches: the two norms and the seven projections.
-    (defn lth-layer (src base path l)
-        (list (lth-tv src base path (lth-blk l "attn_norm.weight"))
-              (lth-tv src base path (lth-blk l "attn_q.weight"))
-              (lth-tv src base path (lth-blk l "attn_k.weight"))
-              (lth-tv src base path (lth-blk l "attn_v.weight"))
-              (lth-tv src base path (lth-blk l "attn_output.weight"))
-              (lth-tv src base path (lth-blk l "ffn_norm.weight"))
-              (lth-tv src base path (lth-blk l "ffn_gate.weight"))
-              (lth-tv src base path (lth-blk l "ffn_up.weight"))
-              (lth-tv src base path (lth-blk l "ffn_down.weight"))))
+    ; A tensor view from a KNOWN record offset — the collected-walk twin of lth-tv. Same four
+    ; fields, no walk.
+    (defn lth-tv-at (src base path off)
+        (list (metal_buf_from_file path
+                  (add base (egg-ti-dataoff src off))
+                  (wtr-bytes src off))
+              (wtr-dim1 src off)
+              (egg-ti-dim0 src off)
+              (egg-ti-type src off)))
 
+    ; The nine tensors one llama block reaches: the two norms and the seven projections.
+    ;
+    ; THE LOOKUPS ARE COLLECTED, NOT SEARCHED (2026-08-04). The first cut called egg-find-tensor
+    ; 252 times — each a full parse of the 255-record table — and that was ~73 s of a 96 s band:
+    ; the O(n^2) gguf-tensor-index.fk names, arrived at again. Nine gti-offs-with walks now carry
+    ; every block's record offset away at once, and a per-layer lookup is a 28-entry list scan.
+    ; egg-find-tensor stays for the four model-level singles, where it is exactly right.
+    (defn lth-suffixes ()
+        (list ".attn_norm.weight" ".attn_q.weight" ".attn_k.weight" ".attn_v.weight"
+              ".attn_output.weight" ".ffn_norm.weight" ".ffn_gate.weight" ".ffn_up.weight"
+              ".ffn_down.weight"))
+    (defn lth-tabs-go (src sfx acc)
+        (if (eq (len sfx) 0) (reverse acc)
+            (lth-tabs-go src (tail sfx) (cons (gti-offs-with src (head sfx)) acc))))
+    (defn lth-tabs (src) (lth-tabs-go src (lth-suffixes) (empty)))
+
+    (defn lth-layer-go (src base path l tabs acc)
+        (if (eq (len tabs) 0) (reverse acc)
+            (lth-layer-go src base path l (tail tabs)
+                (cons (lth-tv-at src base path (gti-off-for (head tabs) l)) acc))))
+    (defn lth-layer (src base path l tabs) (lth-layer-go src base path l tabs (empty)))
+
+    (defn lth-layers-go (src base path l n tabs acc)
+        (if (ge l n) acc
+            (lth-layers-go src base path (add l 1) n tabs
+                (append acc (list (lth-layer src base path l tabs))))))
     (defn lth-layers (src base path l n acc)
-        (if (ge l n) acc (lth-layers src base path (add l 1) n (append acc (list (lth-layer src base path l))))))
+        (lth-layers-go src base path l n (lth-tabs src) acc))
 
     ; TIED IS A FACT ABOUT THE TABLE. No output.weight in the file means the unembedding IS
     ; token_embd; egg-find-tensor answers -1 and that -1 is what decides, not a convention.
