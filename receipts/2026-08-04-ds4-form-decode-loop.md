@@ -229,6 +229,42 @@ the one that owns the position. And one more wrong prediction on my side, record
 8388607 for the baseline by doubling one bit too far — the band's 4194303 (bits through 2^21) was
 right. A prediction ledger only works if the wrong entries stay in it.
 
+## The file-identity pivot — every anchor re-derived, and the chain re-grounded in one pass
+
+The bisect landed the truth about the "regression": it was never code. The bash lane's default BLOB
+points at the **reap25 specimen** (25% of experts removed, 1328-vs-1406 tensor tables, attention
+projections MXFP8) while every fluent recorded stream ran the **canonical imatrix file**
+(`~/models/ds4-engine/gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf`,
+86,720,111,488 bytes). Rungs 1-5 as first measured were pinned to the specimen.
+
+**The whole chain is now re-grounded on the canonical file, and the statement of record is: every
+pinned address in `dsv4-decode-form-band.fk` belongs to the imatrix file** — token_embd 77928033088,
+row 671 at 77933529920, attn_norm 79100740672, q_a 79060632640, q_a_norm 78987097152, kv 78987101248,
+kv_a_norm 78987095104, q_b 79065089088, sinks 78987094848 — all re-derived through the Go arm's
+independent walk of the new file, none carried over.
+
+The pivot was bigger than addresses: on the canonical file the attention projections are **Q8_0
+(type 8), not MXFP8** — "AProjQ8" in the filename says so. The cell now dispatches BY THE TENSOR'S OWN
+TYPE, as the oracle does: type 8 takes `form_dsv4_q80_matvec_ds4` (ds4-order-match.fk's
+association-matching kernel, one 256-wide threadgroup per two rows, through the door's
+threads_per_group tail) and type 41 keeps the MXFP8 path; an unpriced type is a spoken refusal. The
+fp64 reference reads the weights through `q80-flat-at` — q8-0-msl.fk's transcription, a different text
+from the MSL, already proven against an independently-written reference in its own band.
+
+Re-measured on the canonical file, all under the 1e-6 bar: q_a_norm 64 ppb, kv_a_norm 60 ppb, q_b 142
+ppb, headrms 521 ppb, rope tails 314 ppb, attend 519 ppb. **Verdict 4194303, exit 0, zero
+diagnostics.** Geometry printed by the run: `proj types q_a/kv/q_b = 8/8/8`.
+
+| mutation (re-grounded) | predicted | actual |
+|---|---|---|
+| baseline on imatrix file | 4194303 | **4194303** |
+| T1 rank norms swapped | 32767 | **557055 — my ledger, band right** |
+| T2 unlinked door | 0 | **0** |
+
+T1 reconciled: 557055 - 32767 = 524288 exactly — the sinks/freqs bit does not depend on the norm-swap
+gate and rightly stays green; the prediction forgot an independent bit. Wrong entries stay in the
+ledger.
+
 ## The oracle was broken while I was building against it — and it did not touch this rung
 
 Mid-session the fleet reported that DS4 is **regressed on the bash lane**: `ask_ds4.sh` is producing
@@ -330,7 +366,7 @@ this would be **987**, for the body to place:
   into scores/stats/acc, YaRN RoPE and its compressed reduction, and the exit head. None of it exists here.
 - **No one-token argmax comparison, and no token-id stream diff.** Not attempted — there is no stack to take
   an argmax of. Claiming either from a working embedding would be a fabrication.
-- **The fidelity oracle itself is red.** `metal_dsv4_stack.sh` / `ask_ds4.sh` are degenerate today; the
+- (Resolved: the "red oracle" was a wrong default model file, fixed in 3018f334. Recorded streams are trustworthy.) **Historical:** `metal_dsv4_stack.sh` / `ask_ds4.sh` are degenerate today; the
   argmax and stream comparisons cannot be run against them until the bisect lands. Baseline to compare
   against is `7662a6908` (28.09 t/s, fluent), not HEAD.
 - **Rungs 4–7 are not written**: the attention split (scores/stats/acc); RoPE + its
