@@ -28,7 +28,7 @@
 ;     T token_embd.weight 1 2 4096 129280 1 71707886176 529530880 1 1059061760
 ; Same recipe, different kernel. A literal cannot drift with the code that produced it.
 ;
-; Verdict 524287 when the four rungs are honest:
+; Verdict 8388607 when the five rungs are honest:
 ;   1   the door SPEAKS — metal_status carries metal_linked=true (the voice canary, checked first)
 ;   2   the geometry is READ FROM THE HEADER and matches the Go arm's manifest literally:
 ;       n_embd 4096, vocab 129280, ggml type 1 (F16), absolute offset 71707886176, bytes 1059061760
@@ -82,6 +82,18 @@
 ;       kernel's mla_sqrt is f32 Newton against the reference's fp64 Newton, still 2000x under the
 ;       bar. The chain is covered by induction: each step's reference reads the GPU's INPUT for that
 ;       step (the previous step's separately-checked output buffer) and weights at pinned addresses.
+; 524288 blk.0.attn_sinks.weight at the Go arm's 72766947936, AND freqs[0] == 0x3F800000 exactly —
+;       pow(base, 0) = 1 is an identity of the function, not a tolerance. The freqs are computed ON
+;       THE DEVICE by a cell-emitted kernel and read back; the fp64 rope reference widens those same
+;       bits, so a wrong pow cannot agree its way past this bit.
+; 1048576 RoPE at pos 7: the NOPE dims (448 per head, k row + q head 0) are BIT-EQUAL through the
+;       kernel — a copy is checked as a copy — and the rotated tails agree with fcos/fsin in fp64:
+;       measured 236 ppb against the tail's scale. Layer 0 is a ratio-0 raw-regime layer; the
+;       compressed-base reduction (layer 2+) is NOT claimed by this bit.
+; 2097152 the sink-softmax attention (one KV row, 64 heads) agrees with mla-attn.fk's softmax shape
+;       folded in fp64 (tn-exp, tn-sqrt): measured 886 ppb — the widest step yet because mla_exp is
+;       an f32 Taylor against fp64, still under the bar. scale = 1/sqrt(512) rides as f32 bits
+;       1026884851; the reference derives its own from tn-sqrt, so the literal is cross-checked.
 ;   64  the token's row lands at the absolute address an INDEPENDENT computation says it must:
 ;       71707886176 + 671*4096*2 = 71713383008. THIS BIT WAS ADDED BECAUSE THE BAND FAILED A
 ;       MUTATION WITHOUT IT (M2, embed the wrong row: predicted 47, band answered 63). bit16 now
@@ -180,6 +192,21 @@
         (if (lt (nth rung4 0) (dfb-tol)) (if (lt (nth rung4 1) (dfb-tol)) 1 0) 0) 0) 0))
     (let b131072 (if (eq b1 1) (if (eq gate4 1) (if (lt (nth rung4 2) (dfb-tol)) 1 0) 0) 0))
     (let b262144 (if (eq b1 1) (if (eq gate4 1) (if (lt (nth rung4 3) (dfb-tol)) 1 0) 0) 0))
+    ; ── RUNG 5: RoPE + sink-softmax attention (same chain, four more dispatches)
+    ; freqs[1] is pinned against fpow(10000, -1/32) computed IN FORM fp64 — 10000.0 is the file's own
+    ; deepseek4.rope.freq_base as the Go arm printed it. Without this, the cell's base literal and the
+    ; rope reference are COMOVED: the reference widens the freqs the GPU computed, so a wrong base
+    ; agrees with itself perfectly. freqs[0] cannot see it (pow(b,0)=1 for every b); freqs[1] can.
+    (let f1ref (fpow 10000.0 (div -1.0 32.0)))
+    (let f1got (fd-value (nth rung4 16) 8 23))
+    (let f1ok (if (lt (div (abs (sub f1got f1ref)) f1ref) (dfb-tol)) 1 0))
+    (let b524288 (if (eq b1 1)
+        (if (eq (nth rung4 14) 72766947936)
+            (if (eq (nth rung4 15) 1065353216) f1ok 0) 0) 0))
+    (let b1048576 (if (eq b1 1) (if (eq gate4 1) (if (eq b524288 1)
+        (if (eq (nth rung4 13) 896) (if (lt (nth rung4 11) (dfb-tol)) 1 0) 0) 0) 0) 0))
+    (let b2097152 (if (eq b1 1) (if (eq gate4 1) (if (eq b524288 1)
+        (if (lt (nth rung4 12) (dfb-tol)) 1 0) 0) 0) 0))
 
     (print (str_concat "bit1  door speaks          = " (int_to_str b1)))
     (print (str_concat "bit2  geometry from header = " (int_to_str b2)))
@@ -200,6 +227,9 @@
     (print (str_concat "bit65536 rank norms ref     = " (int_to_str b65536)))
     (print (str_concat "bit131072 q_b projection ref= " (int_to_str b131072)))
     (print (str_concat "bit262144 headrms ref       = " (int_to_str b262144)))
+    (print (str_concat "bit524288 sinks+freqs0 pins = " (int_to_str b524288)))
+    (print (str_concat "bit1048576 rope ref+NOPE    = " (int_to_str b1048576)))
+    (print (str_concat "bit2097152 attend ref       = " (int_to_str b2097152)))
 
     (let verdict (add b1 (add (mul 2 b2) (add (mul 4 b4)
                     (add (mul 8 b8) (add (mul 16 b16) (add (mul 32 b32) (add (mul 64 b64)
@@ -208,6 +238,8 @@
                     (add (mul 2048 b2048) (add (mul 4096 b4096)
                     (add (mul 8192 b8192) (add (mul 16384 b16384)
                     (add (mul 32768 b32768) (add (mul 65536 b65536)
-                    (add (mul 131072 b131072) (mul 262144 b262144))))))))))))))))))))
+                    (add (mul 131072 b131072) (add (mul 262144 b262144)
+                    (add (mul 524288 b524288) (add (mul 1048576 b1048576)
+                         (mul 2097152 b2097152)))))))))))))))))))))))
     (print (str_concat "Verdict: " (int_to_str verdict)))
     verdict)

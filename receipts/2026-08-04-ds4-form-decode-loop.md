@@ -197,6 +197,38 @@ Q2 is the one that matters: it is exactly the M2/N1 shape — a fully self-consi
 reference and the GPU move together — and this time the address pin caught it on the first try,
 because the pin was written before the mutation instead of after it.
 
+## Rung 5 — RoPE and the sink-softmax attention. Band 4194303.
+
+The same chain continues: **freqs (computed ON the device by a cell-emitted pow kernel) -> rope over the
+64 q heads and the k row at pos 7 -> the sink-softmax attend over one KV row.** Fifteen dispatches, one
+sync, 23 handles. Layer 0 is a ratio-0 raw-regime layer, so plain base 10000 — the compressed-base
+reduction (layer 2+) is NOT claimed.
+
+What each new bit stands on: `freqs[0] == 0x3F800000` exactly (pow(b,0)=1 is an identity, not a
+tolerance); the NOPE dims are BIT-EQUAL through the rope kernel (a copy checked as a copy, 896/896);
+the rotated tails agree with fcos/fsin in fp64 at **236 ppb**; the attention agrees with the softmax
+shape folded in fp64 (tn-exp/tn-sqrt) at **886 ppb** — the widest step yet, mla_exp being an f32
+Taylor, still under the bar.
+
+**The comoved hole found on paper this time, before the mutation.** The rope reference widens the freqs
+the GPU computed, and freqs[0] is 1.0 for EVERY base — so the cell's base literal was unwitnessed.
+The cure: pin `freqs[1]` against `fpow(10000, -1/32)` computed in Form fp64, 10000.0 provenanced to the
+file's own `deepseek4.rope.freq_base` via the Go arm. R3 then confirmed the pin catches a wrong base.
+
+| mutation | predicted | actual |
+|---|---|---|
+| baseline | 4194303 | **4194303** |
+| R1 rope pos 7 -> 8 in the cell only | 3145727 | **3145727** |
+| R2 attend bound to kv_a_norm handle for sinks | 2097151 | **2097151** |
+| R3 freqs base literal 10000 -> 1000 | 524287 | **524287** |
+| R4 unlinked door | 0 | **0** |
+
+R1's prediction carries a subtlety worth keeping: the attend bit STAYS green under the rope mutation,
+and that is correct — it tests attend on the GPU's actual q/k, not the chain's intent; the rope bit is
+the one that owns the position. And one more wrong prediction on my side, recorded: I predicted
+8388607 for the baseline by doubling one bit too far — the band's 4194303 (bits through 2^21) was
+right. A prediction ledger only works if the wrong entries stay in it.
+
 ## The oracle was broken while I was building against it — and it did not touch this rung
 
 Mid-session the fleet reported that DS4 is **regressed on the bash lane**: `ask_ds4.sh` is producing
