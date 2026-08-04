@@ -1055,16 +1055,47 @@ usePartsNow = 1; mvNow = .serial
 let rShort = generate(promptIds, short)
 let rLong  = generate(promptIds, nsteps)
 
+// A LINE THAT SAYS IT IS ONE LINE HAS TO BE ONE. `text : "\(prose)"` was written for a twelve-token
+// fragment and stayed when the fragment grew into an answer: the first newline the model emits ends
+// the line, the quote never closes, and every reader downstream sees a field whose shape it cannot
+// parse and whose content it cannot trust. Worse, the loose prose lands INSIDE the section a reader
+// slices for rates — a model that writes the words END-TO-END or decode-only in its answer would cut
+// that slice short. So the one-line field is escaped and stays genuinely one line, and the prose is
+// carried whole in its own delimited block, placed AFTER the numbers so no sentence the model writes
+// can ever be read as a measurement.
+func oneLine(_ s: String) -> String {
+    var o = ""
+    for c in s {
+        switch c {
+        case "\\": o += "\\\\"
+        case "\"": o += "\\\""
+        case "\n": o += "\\n"
+        case "\r": o += "\\r"
+        case "\t": o += "\\t"
+        default:   o.append(c)
+        }
+    }
+    return o
+}
+
 func report(_ label: String, _ r: Run) {
+    let tag = label.trimmingCharacters(in: .whitespaces)
     print("  \(label): prefill \(String(format: "%.3f", r.prefill)) s for \(promptIds.count) prompt tokens; decode \(String(format: "%.3f", r.decode)) s for \(r.forwards) further forwards")
     print("    ids  : \(r.out)")
-    print("    text : \"\(decodeIds(r.out))\"")
+    print("    text : \"\(oneLine(decodeIds(r.out)))\"")
     // END-TO-END means what it says: generated tokens divided by ALL the wall clock it took to have
     // them, prefill included. The decode-only number is reported next to it and labelled, never
     // instead of it.
     print(String(format: "    END-TO-END %.3f tok/s over %d generated tokens (prefill+decode %.3f s)  |  decode-only %.3f tok/s",
                  Double(r.out.count) / (r.prefill + r.decode), r.out.count, r.prefill + r.decode,
                  Double(max(1, r.forwards)) / r.decode))
+    // THE ANSWER, WHOLE, AND SAYING WHOSE IT IS. This harness reports several paths in a full-gate
+    // run and they do not all generate the same number of tokens, so an untagged block would let a
+    // reader splice one path's prose onto another's name. The tag is the path label the reader
+    // already selected on.
+    print("ANSWER-TEXT-BEGIN \(tag)")
+    print(decodeIds(r.out))
+    print("ANSWER-TEXT-END \(tag)")
 }
 report("short", rShort)
 report("long ", rLong)
