@@ -1,0 +1,134 @@
+; q5-msl.fk — the two five-bit carvers, Q5_K and Q5_0, as Metal kernels the BODY emits.
+;
+; WHY THIS EXISTS. Qwen2.5-Coder-32B carries 385 Q5_K tensors — every attn_q, attn_output and both
+; ffn wings of its 64 layers — and Qwen2.5-72B carries 40 Q5_K and 40 Q5_0 beside its Q4_K spine. A
+; decode that prices them 0 cannot take one step on either file. Neither format is exotic:
+;
+;   block_q5_K = { half d; half dmin; uint8 scales[12]; uint8 qh[32]; uint8 qs[128]; }
+;                176 bytes per 256 weights. The scales/mins are Q4_K's OWN 6-bit packing, byte for
+;                byte (get_scale_min_k4), and the nibble layout is Q4_K's own (c = i/64, the low
+;                and high half of qs[c*32 + l]). The ONLY new element is the high-bit plane: weight
+;                i's fifth bit is bit j = 2*(i/64) + ((i%64)/32) of qh[i%32], and the quant is
+;                nib + 16*bit, 0..31, so  w = d*sc*q - dmin*m.
+;
+;   block_q5_0 = { half d; uint8 qh[4]; uint8 qs[16]; }
+;                22 bytes per 32 weights. qh is one little-endian u32 of high bits: weight i < 16
+;                reads nibble qs[i]&0xF and bit i; weight i >= 16 reads qs[i-16]>>4 and bit i.
+;                q = nib + 16*bit - 16, w = d * q.
+;
+; AN APPENDIX, NOT A UNIT — the same discipline q8-0-msl.fk states: q4k_mod and q4k_f16 are already
+; in any translation unit that dequantizes Q4_K, and Metal rejects a repeated definition loudly. So
+; this cell emits ONLY the five-bit pieces and requires the q4k helpers to precede it. No bitwise
+; operator appears: x>>k is division by 2^k, x&(2^k - 1) is mod, and | over disjoint fields is +,
+; the same identities every carver in this family keeps. The u32 high-bit word of Q5_0 is handled
+; in UINT arithmetic (its bit 31 does not fit a positive int), with mod written out as
+; a - (a/n)*n over uint.
+;
+; The Form-side twins (q5m-flat-at / q50-flat-at) are the transcription read back into Form, one
+; expression per emitted expression, so a band can falsify the transcription against
+; weight-load.fk's independently written reference without a GPU.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q4k-dequant.fk form-stdlib/q4k-msl.fk
+;
+; Proven by: form/native/metal/tests/dense-family-band.fk (the GPU, through the dense loop on real
+;            qwen2.5 weights, Mac-only).
+
+(do
+    ; ================= the transcription, read back into Form =================
+    ; ---- Q5_K ----
+    (defn q5m-stride () 176)
+    (defn q5m-block-n () 256)
+    (defn q5m-pow2i (k) (if (le k 0) 1 (mul 2 (q5m-pow2i (sub k 1)))))
+
+    (defn q5m-d    (src b) (fd-f16 (add (eqr-at src b)         (mul 256 (eqr-at src (add b 1))))))
+    (defn q5m-dmin (src b) (fd-f16 (add (eqr-at src (add b 2)) (mul 256 (eqr-at src (add b 3))))))
+    (defn q5m-sb   (src b j) (eqr-at src (add b (add 4 j))))          ; scales[j], 12 packed bytes
+    (defn q5m-qhb  (src b l) (eqr-at src (add b (add 16 l))))         ; qh[l], 32 bytes
+    (defn q5m-qsb  (src b k) (eqr-at src (add b (add 48 k))))         ; qs[k], 128 bytes
+
+    ; get_scale_min_k4 — Q4_K's packing, transcribed against q4m-scale/q4m-min
+    (defn q5m-scale (src b j)
+        (if (lt j 4)
+            (q4k-mod (q5m-sb src b j) 64)
+            (add (q4k-mod (q5m-sb src b (add j 4)) 16)
+                 (mul (div (q5m-sb src b (sub j 4)) 64) 16))))
+    (defn q5m-min (src b j)
+        (if (lt j 4)
+            (q4k-mod (q5m-sb src b (add j 4)) 64)
+            (add (div (q5m-sb src b (add j 4)) 16)
+                 (mul (div (q5m-sb src b j) 64) 16))))
+
+    (defn q5m-flat-at (src base idx)
+        (do
+            (let b (add base (mul (q5m-stride) (div idx (q5m-block-n)))))
+            (let i (q4k-mod idx (q5m-block-n)))
+            (let c (div i 64))
+            (let within (q4k-mod i 64))
+            (let hf (div within 32))
+            (let l (q4k-mod within 32))
+            (let j (add (mul 2 c) hf))
+            (let qb (q5m-qsb src b (add (mul c 32) l)))
+            (let nib (if (eq hf 0) (q4k-mod qb 16) (div qb 16)))
+            (let hbit (q4k-mod (div (q5m-qhb src b l) (q5m-pow2i j)) 2))
+            (sub (mul (mul (q5m-d src b) (q5m-scale src b j)) (add nib (mul 16 hbit)))
+                 (mul (q5m-dmin src b) (q5m-min src b j)))))
+
+    ; ---- Q5_0 ----
+    (defn q50-stride () 22)
+    (defn q50-block-n () 32)
+    (defn q50-d (src b) (fd-f16 (add (eqr-at src b) (mul 256 (eqr-at src (add b 1))))))
+    (defn q50-qh32 (src b)
+        (add (eqr-at src (add b 2))
+        (add (mul 256 (eqr-at src (add b 3)))
+        (add (mul 65536 (eqr-at src (add b 4)))
+             (mul 16777216 (eqr-at src (add b 5)))))))
+    (defn q50-flat-at (src base idx)
+        (do
+            (let b (add base (mul (q50-stride) (div idx (q50-block-n)))))
+            (let i (q4k-mod idx (q50-block-n)))
+            (let half (div i 16))
+            (let j (q4k-mod i 16))
+            (let qb (eqr-at src (add b (add 6 j))))
+            (let nib (if (eq half 0) (q4k-mod qb 16) (div qb 16)))
+            (let hbit (q4k-mod (div (q50-qh32 src b) (q5m-pow2i i)) 2))
+            (mul (q50-d src b) (sub (add nib (mul 16 hbit)) 16))))
+
+    ; ================= the emitted MSL =================
+    ; q5k_bit: bit k of a byte, k <= 7 — int arithmetic, loop power. q50_bit: bit k of the
+    ; reassembled u32, k <= 31 — UINT arithmetic throughout, with mod spelled a - (a/n)*n because
+    ; bit 31 does not fit a positive int and q4k_mod takes ints.
+    (defn q5m-msl-bits ()
+        "static inline int q5k_pw(int k) { int a = 1; int t = 0; while (t < k) { a = a * 2; t = t + 1; } return a; } static inline int q5k_bit(int by, int k) { return q4k_mod(by / q5k_pw(k), 2); } static inline uint q50_pwu(uint k) { uint a = 1u; uint t = 0u; while (t < k) { a = a * 2u; t = t + 1u; } return a; } static inline uint q50_bit(uint w, uint k) { uint s = w / q50_pwu(k); return s - (s / 2u) * 2u; } ")
+
+    ; the Q5_K weight — q4k_sc / q4k_mn / q4k_f16 are the UNIT's, reached, never re-minted, and the
+    ; scales live at the same +4 offset as Q4_K's so those helpers apply verbatim
+    (defn q5m-msl-weight ()
+        "static inline float q5k_w(device const uchar* qb, uint idx) { uint blk = idx / 256u; int i = int(idx - blk * 256u); uint b = blk * 176u; int c = i / 64; int within = q4k_mod(i, 64); int hf = within / 32; int l = q4k_mod(within, 32); int j = 2 * c + hf; int qbyte = int(qb[b + 48u + uint(c * 32 + l)]); int nib = (hf == 0) ? q4k_mod(qbyte, 16) : qbyte / 16; int hb = q5k_bit(int(qb[b + 16u + uint(l)]), j); float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u])); return (d * float(q4k_sc(qb, b, j))) * float(nib + 16 * hb) - dmin * float(q4k_mn(qb, b, j)); } ")
+
+    (defn q50-msl-weight ()
+        "static inline float q50_w(device const uchar* qb, uint idx) { uint blk = idx / 32u; uint i = idx - blk * 32u; uint b = blk * 22u; uint half_ = i / 16u; uint j = i - half_ * 16u; int qbyte = int(qb[b + 6u + j]); int nib = (half_ == 0u) ? q4k_mod(qbyte, 16) : qbyte / 16; uint qh = uint(qb[b + 2u]) + 256u * uint(qb[b + 3u]) + 65536u * uint(qb[b + 4u]) + 16777216u * uint(qb[b + 5u]); int hb = int(q50_bit(qh, i)); float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); return d * float(nib + 16 * hb - 16); } ")
+
+    (defn q5m-dequant-body (fname wfn)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = "
+        (str_concat wfn "(qb, off + i); }")))))
+
+    ; the fused matvec — j counts DOWN, accumulate p + acc: tb-dot's right fold, the family's one
+    ; op order, so a Q5 row is judged the same way a Q4/Q6/Q8 row is
+    (defn q5m-matvec-body (fname wfn)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = "
+        (str_concat wfn "(qb, uint(i) * cols + j) * float(x[j]); acc = p + acc; } y[i] = acc; }")))))
+
+    ; the appendix: everything Q5, for a unit that already carries the q4k helpers
+    (defn q5m-msl-appendix (kdname kmname zdname zmname)
+        (str_concat (q5m-msl-bits)
+        (str_concat (q5m-msl-weight)
+        (str_concat (q50-msl-weight)
+        (str_concat (q5m-dequant-body kdname "q5k_w")
+        (str_concat (q5m-matvec-body kmname "q5k_w")
+        (str_concat (q5m-dequant-body zdname "q50_w")
+                    (q5m-matvec-body zmname "q50_w"))))))))
+    0)
