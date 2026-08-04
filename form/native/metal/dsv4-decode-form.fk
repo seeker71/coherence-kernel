@@ -382,6 +382,149 @@
             (cons rel1 (cons rel2 (cons gabs (cons (metal_status)
                 (cons n (cons (add eabs rowoff) 0))))))))
 
+    ; ═══════════════ RUNG 3: the MLA q/kv projections (MXFP8, type 41) ═══════════════
+    ; blk.0.attn_q_a.weight is [4096 x 1024] and blk.0.attn_kv.weight is [4096 x 512], both GGUF type
+    ; 41. The Go arm's byte counts confirm the plane-split layout arithmetically before any kernel
+    ; runs: nel = 4096*1024 = 4194304, and 4194304 + 4194304/32 = 4325376, which is exactly the
+    ; tensor's size. Payload plane first, one E8M0 scale byte per 32 weights after it at offset nel.
+    ;
+    ; THE SYNTHETIC, AND WHAT IT DOES NOT COVER — said because a synthetic that is not bounded is a
+    ; claim. mxm_e8m0(e) = 2^(e-127) so scale byte 127 is 1.0; mx8_val is E4M3 (sign<<7 | exp<<3 |
+    ; mant, bias 7) so payload byte 56 = 0x38 is 1.0. With x = 1.0 everywhere, every term is 1.0 and
+    ; y[r] = cols = 4096.0 = 0x45800000. Every partial sum is an integer below 2^24, so that answer is
+    ; exact NO MATTER HOW THE FOLD ASSOCIATES. That is the strength and the limit in one sentence: it
+    ; proves the decode, the scale-plane origin, and that all `cols` columns were visited exactly once
+    ; — and it is BLIND to association, which is the very thing ds4-order-match.fk exists for. The
+    ; association is what the real-weight check below is for, and neither bit is the other's evidence.
+    ; the MXFP8 unit as TEXT. dsv4-token.fk's dsv4-mx8-matvec-msl PRINTS it (the bash lane greps the
+    ; stream between MSL and END); this cell needs the same bytes as a value, so it composes the same
+    ; two pieces the printer composes and hands them straight to metal_pipeline. Same text, no file.
+    (defn dfd-mx8-msl ()
+        (str_concat (qml-msl-header)
+                    (mx8m-msl-unit "form_dsv4_mx8_dequant" "form_dsv4_mx8_matvec")))
+
+    (defn dfd-fillb (h i n v)
+        (if (ge i n) 0 (do (metal_buf_write h i (byte_to_str v)) (dfd-fillb h (add i 1) n v))))
+
+    (defn dfd-mx8-synth (rows cols)
+        (do (let msl (str_concat (dfd-msl-pragma) (dfd-mx8-msl)))
+            (let p (metal_pipeline msl "form_dsv4_mx8_matvec"))
+            (let nel (mul rows cols))
+            (let wb (metal_buf_alloc (add nel (div nel 32))))
+            (let xb (metal_buf_alloc (mul cols 4)))
+            (let yb (metal_buf_alloc (mul rows 4)))
+            (let f1 (dfd-fillb wb 0 nel 56))                       ; payload: E4M3 1.0
+            (let f2 (dfd-fillb wb nel (add nel (div nel 32)) 127))  ; scale plane: E8M0 1.0
+            (let f3 (dfd-fill xb 0 cols 1065353216))                ; x = 1.0f
+            (let e (metal_enqueue p (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 wb) (dfd-u32 xb)) (dfd-u32 yb)))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 rows) (dfd-u32 cols)) (dfd-u32 nel))))
+                256 0) (mul rows 32)))
+            (let y (metal_buf_read yb 0 (mul rows 4)))
+            (print (str_concat "MX8SYNTH y[0] bits=" (str_concat (int_to_str (dfd-rd32 y 0))
+                   (str_concat "  want " (int_to_str 1166016512)))))
+            (print (str_concat "MX8SYNTH rows_eq=" (str_concat (int_to_str (dfd-count-eq y 0 rows 1166016512 0))
+                   (str_concat " of " (int_to_str rows)))))
+            (if (eq (dfd-count-eq y 0 rows 1166016512 0) rows) 1 0)))
+
+    ; the real projection, against the body's OWN MXFP8 reader (mxp8-at) folded in fp64. That reader is
+    ; a different text from the MSL kernel — a Form recipe, not the emitted C — so this is two roads to
+    ; one number rather than one road walked twice. EIGHT ROWS, not 1024: each row is a 4096-term fp64
+    ; fold in Form, and 1024 of them is 4.2M interpreted operations. Eight is enough to catch a decode
+    ; fault, a wrong row stride, or a scale-plane origin off by anything, all of which are uniform
+    ; across rows; it would NOT catch a fault that only touches high row indices, and that is stated
+    ; rather than hidden behind the word "verified".
+    (defn dfd-mx8dot (wraw nel cols xraw r j acc)
+        (if (ge j cols) acc
+            (dfd-mx8dot wraw nel cols xraw r (add j 1)
+                (add acc (mul (mxp8-at wraw 0 nel (add (mul r cols) j))
+                              (dfd-f32at xraw (mul j 4)))))))
+    ; THE BAR IS AGAINST THE VECTOR'S SCALE, NOT EACH ELEMENT'S OWN MAGNITUDE — the body's own
+    ; precedent (overfine, corpus row 934), and this rung is exactly the case it was written for. A
+    ; 4096-term signed dot in fp32 against the same dot in fp64 lands at ~1e-6 PER ELEMENT here
+    ; (measured 1018 ppb) purely because y[0] = 0.017 is a near-cancellation of terms of scale ~0.1 —
+    ; the element's own magnitude is not the quantity the error should be judged against. Against the
+    ; row-vector's scale the same disagreement is what it actually is: f32 rounding.
+    (defn dfd-mx8-maxdiff (wraw nel cols xraw got r nr acc)
+        (if (ge r nr) acc
+            (do (let d (abs (sub (dfd-f32at got (mul r 4)) (dfd-mx8dot wraw nel cols xraw r 0 0.0))))
+                (dfd-mx8-maxdiff wraw nel cols xraw got (add r 1) nr (if (gt d acc) d acc)))))
+    (defn dfd-mx8-maxref (wraw nel cols xraw r nr acc)
+        (if (ge r nr) acc
+            (do (let a (abs (dfd-mx8dot wraw nel cols xraw r 0 0.0)))
+                (dfd-mx8-maxref wraw nel cols xraw (add r 1) nr (if (gt a acc) a acc)))))
+    (defn dfd-mx8-cmp (wraw nel cols xraw got r nr acc)
+        (div (dfd-mx8-maxdiff wraw nel cols xraw got 0 nr 0.0)
+             (dfd-mx8-maxref wraw nel cols xraw 0 nr 0.0)))
+
+    ; the real q_a projection: embed -> rmsnorm -> MXFP8 matvec, all enqueued from Form, then eight
+    ; rows folded independently in fp64. Returns (maxrel qabs rows cols) so the band can PIN the
+    ; address rather than trust a relative error computed at whatever address the code chose — the
+    ; comoved lesson, applied before the mutation rather than after it this time.
+    (defn dfd-mla-rung (path token)
+        (do
+            (let src (dfd-src path))
+            (let n (dfd-td0 src "token_embd.weight"))
+            (let eabs (dfd-tabs src path "token_embd.weight"))
+            (let ebytes (dfd-tbytes src "token_embd.weight"))
+            (let gabs (dfd-tabs src path "blk.0.attn_norm.weight"))
+            (let gbytes (dfd-tbytes src "blk.0.attn_norm.weight"))
+            (let qabs (dfd-tabs src path "blk.0.attn_q_a.weight"))
+            (let qbytes (dfd-tbytes src "blk.0.attn_q_a.weight"))
+            (let qty (dfd-ttype src "blk.0.attn_q_a.weight"))
+            (let cols (dfd-td0 src "blk.0.attn_q_a.weight"))
+            (let rows (dfd-td1 src "blk.0.attn_q_a.weight"))
+            (let nel (mul rows cols))
+            (print (str_concat "GEOM q_a abs=" (str_concat (int_to_str qabs)
+                   (str_concat " type=" (str_concat (int_to_str qty)
+                   (str_concat " rows=" (str_concat (int_to_str rows)
+                   (str_concat " cols=" (int_to_str cols)))))))))
+            (print (str_concat "GEOM q_a bytes=" (str_concat (int_to_str qbytes)
+                   (str_concat "  nel+nel/32=" (int_to_str (add nel (div nel 32)))))))
+
+            (let mslm (str_concat (dfd-msl-pragma) (mla-msl-unit)))
+            (let pe (metal_pipeline (dfd-embed-msl) "form_dsv4_embed_f16_u32"))
+            (let pr (metal_pipeline mslm "form_mla_rmsnorm_reduce_f32"))
+            (let pa (metal_pipeline mslm "form_mla_rmsnorm_apply_f32"))
+            (let pm (metal_pipeline (str_concat (dfd-msl-pragma) (dfd-mx8-msl)) "form_dsv4_mx8_matvec"))
+
+            (let wh (metal_buf_from_file path eabs ebytes))
+            (let gh (metal_buf_from_file path gabs gbytes))
+            (let qh (metal_buf_from_file path qabs qbytes))
+            (let xb (metal_buf_alloc (mul n 4)))
+            (let ob (metal_buf_alloc (mul n 4)))
+            (let ib (metal_buf_alloc 4))
+            (let yb (metal_buf_alloc (mul rows 4)))
+            (let rowoff (mul (mul token n) 2))
+
+            (let e0 (metal_enqueue pe
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 wh) (dfd-u32 xb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 rowoff) (dfd-u32 n)))) n))
+            (let e1 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 xb) (dfd-u32 ib)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 n) (dfd-u32 (dfd-eps-bits)))))
+                32 0) 32))
+            (let e2 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 xb) (dfd-u32 gh))
+                                                                (str_concat (dfd-u32 ob) (dfd-u32 ib))))
+                            (str_concat (dfd-u32 1) (dfd-u32 n))) n))
+            (let e3 (metal_enqueue pm (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 qh) (dfd-u32 ob)) (dfd-u32 yb)))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 rows) (dfd-u32 cols)) (dfd-u32 nel))))
+                256 0) (mul rows 32)))
+            (print (str_concat "ENQ e/r/a/m=" (str_concat (int_to_str e0) (str_concat (int_to_str e1)
+                   (str_concat (int_to_str e2) (int_to_str e3))))))
+
+            (let got (metal_buf_read yb 0 (mul rows 4)))
+            (let normed (metal_buf_read ob 0 (mul n 4)))
+            (let wraw (eqr-of-file path qabs qbytes))
+            (let mx (dfd-mx8-cmp wraw nel cols normed got 0 8 0.0))
+            (print (str_concat "MX8 real maxrel over 8 rows (ppb)=" (float_to_str (mul mx 1000000000.0))))
+            (print (str_concat "y[0]=" (float_to_str (dfd-f32at got 0))))
+            (print (str_concat "y[1]=" (float_to_str (dfd-f32at got 4))))
+            (print (metal_status))
+            (cons mx (cons qabs (cons rows (cons cols (cons (add eabs rowoff) 0)))))))
+
     ; ================= UNFINISHED, named so it cannot be mistaken for done =================
     ; - the 43-layer stack. The oracle's runner is ~1200 lines of essential orchestration beyond this
     ;   rung: two routing regimes, six expert quantizations, the 20-iteration hyper-connection sinkhorn,

@@ -123,6 +123,48 @@ That is the thing worth carrying out of today: **`comoved` is not an incident, i
 a check you write while holding the code in your head.** Three times now, and each time the check looked
 completely reasonable when written.
 
+## Rung 3 — the MLA q_a projection (MXFP8), and a bar that had to be argued rather than tightened
+
+`blk.0.attn_q_a.weight` is GGUF type 41. The full chain now runs from the Form cell:
+**embed -> rmsnorm reduce -> rmsnorm apply -> MXFP8 fused matvec, four dispatches, ONE sync.**
+**Band verdict 16383.**
+
+The layout is confirmed by arithmetic before any kernel reads it: the Go arm's byte count for the
+tensor is 4325376, and `nel + nel/32 = 4096*1024 + 131072` is 4325376 exactly — plane-split, payload
+first, E8M0 scale plane at offset `nel`.
+
+Synthetic truth again, and again bounded out loud: payload byte 56 (E4M3 1.0) and scale byte 127
+(E8M0 2^0) with `x = 1.0` must give `y[r] = cols = 4096.0 = 0x45800000`. It came back exact on **all
+1024 rows**. Every partial sum is an integer below 2^24, so that answer is exact *under any
+association* — which is the bit's strength and its limit in one sentence. It proves the decode, the
+scale-plane origin, and that every column was visited exactly once; it is **blind to association**,
+which is precisely what `ds4-order-match.fk` exists for.
+
+**The bar had to be argued, not tightened.** The real projection first measured **1018 ppb** against
+rung 2's 1e-6 tolerance — just over, and the tempting move was to loosen the bar to 2e-6 and move on.
+The actual reason is visible in the values: `y[0] = 0.016937` is a near-cancellation of 4096 signed
+terms of scale ~0.1, so *the element's own magnitude is not the quantity the error should be judged
+against*. Judged against the row vector's scale — the body's own precedent, `overfine`, corpus row 934
+— the same disagreement reads **68 ppb**, matching rung 2's 63 ppb and sitting squarely in f32
+rounding. The measurement did not change; the denominator was wrong, and finding that out was worth
+more than a looser tolerance would have been.
+
+| mutation | predicted | actual |
+|---|---|---|
+| baseline | 16383 | **16383** |
+| P1 `attn_kv` for `attn_q_a` | 4095 | **4095** |
+| P2 synth payload 56 -> 57 (E4M3 1.125) | 14335 | **14335** |
+| P3 synth scale 127 -> 128 (E8M0 2.0) | 8191 | **14335 — my arithmetic, not the band** |
+| P4 unlinked door | 0 | **0** |
+
+P3 is worth keeping visible: the band was right and I was wrong. That mutation touches only the
+*synthetic* scale plane, so bit 2048 alone drops and `16383-2048 = 14335`; I wrote 8191, which is the
+number for a bit I had not mutated. A prediction written before the run is only useful if a wrong one
+is reported as a wrong one.
+
+Rung 3 was pinned *before* the mutations rather than after: bit 8192 is gated on bit 4096 and on the
+row pin from the start, because by then `comoved` had already cost three bits.
+
 ## The oracle was broken while I was building against it — and it did not touch this rung
 
 Mid-session the fleet reported that DS4 is **regressed on the bash lane**: `ask_ds4.sh` is producing
@@ -227,12 +269,12 @@ this would be **987**, for the body to place:
 - **The fidelity oracle itself is red.** `metal_dsv4_stack.sh` / `ask_ds4.sh` are degenerate today; the
   argmax and stream comparisons cannot be run against them until the bisect lands. Baseline to compare
   against is `7662a6908` (28.09 t/s, fluent), not HEAD.
-- **Rungs 3–7 are not written**: MLA q/kv projections and the scores/stats/acc split; RoPE + its
+- **Rungs 4–7 are not written**: the attention split (scores/stats/acc); RoPE + its
   compressed reduction; the two KV caches; MoE (hash routing 0–2, learned after, six expert
   quantizations, top-6 of 256); the 4 hyper-connection streams + 20-iteration sinkhorn; exit head.
-- Next concrete step: the MLA q/kv projections — `blk.0.attn_q_a` and `blk.0.attn_kv` are both GGUF type
-  41 (MXFP8), so `form_dsv4_mx8_matvec` is the first weight-decoding kernel and the first place
-  `ds4-order-match.fk`'s association has to be matched rather than merely respected.
+- Next concrete step: `attn_q_b` / `attn_kv_a_norm` and then the attention split itself
+  (`form_mla_attend_scores` -> `_stats` -> `_acc`), which is the first rung where ORDER is the whole
+  question and a synthetic that is association-blind will no longer be worth anything.
 - Door limits to design around, from the door agent's run, not yet hit here: 1D dispatch only; buffer
   offsets fix at handle creation, so many views of one buffer need many handles against a ceiling of 8192
   while DS4 needs ~400 weights plus activations; no buffer free (append-only per process); `metal_sync`
