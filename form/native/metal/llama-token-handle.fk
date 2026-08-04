@@ -26,15 +26,21 @@
 ;   the cache key metal_first_token.sh compiles against, and a kernel appended there would
 ;   invalidate the proven lane's pipeline cache for a reason that has nothing to do with it.
 ;
-; THE ATTESTANTS ONLY. form_rmsnorm_f32 (one thread), form_rope_f32 (one per head),
-; form_gqa_decode_f32 (one per query head), form_q6k_matvec_f32 / form_q4k_matvec_f32 (one per
-; row, serial right-fold), form_argmax_f32 (one thread, strict `>`, ties to the lowest index). The
-; cooperative twins are in the unit — ldm-msl-unit carries them — and are NOT dispatched, because
-; they reduce across a threadgroup and require dispatchThreadgroups(1, ...). metal_enqueue offers
-; dispatchThreads only. Dispatching a threadgroup-reducing kernel through it would let the driver
-; split the grid and give each group its own partial answer: a number, plausible, and wrong. So
-; this cell is SLOWER than the Swift lane by exactly the twins it declines to use, and that is a
-; stated cost rather than a discovered one.
+; THE BIT-EXACT SET, AND WHY THE LINE SITS EXACTLY THERE. First cut (2026-08-04 morning): the
+; attestants only, one thread apiece, serial encoder — 0.855 tok/s, and the header here said the
+; cooperative twins were unreachable because metal_enqueue offered dispatchThreads alone.
+; The door's second growth removed that: dispatch_mode 1 makes the op's threads argument the GROUP
+; COUNT with threads_per_group exact (refused past the pipeline ceiling, never clamped), and
+; metal_batch_concurrent opens a concurrent batch whose hazards THIS CELL declares per dispatch
+; via barrier_before. So this cell now dispatches the twins whose cells claim EQUALITY, not an
+; epsilon: form_rmsnorm_tg_f32 (same fold order, staged operands, BIT FOR BIT, n <= 4096, one
+; threadgroup — both honored by mode 1), form_rope_pair_f32 (a thread map, not an order; hd even),
+; form_argmax_part/comb_f32 (comparison and selection only, ties still to the lowest index). The
+; epsilon-bearing matvec twins (split/lane/slot) are NOT taken: a rate bought with an epsilon
+; belongs to a rung that states its bound, and the matvecs here stay the serial attestants. The
+; barrier plan is the proven Swift lane's, translated to barrier_before (see the dispatch section);
+; none of this changes one expression, which is why the recorded 12-id stream is REQUIRED to
+; survive this rung unchanged and the band checks that it does.
 ;
 ; EVERY NUMBER IS THE FILE'S. block_count, embedding_length, feed_forward_length, head counts,
 ; rope dimension_count, rope.freq_base and layer_norm_rms_epsilon come from the metadata KVs
@@ -59,7 +65,7 @@
 ;      form-stdlib/q6k-msl.fk / q4k-msl.fk / llama-decode-msl.fk (every kernel but the copy),
 ;      native/metal/metal_first_token.sh (the attestant this cell must agree with).
 ;
-; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/gguf-meta.fk form-stdlib/trig.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matvec-slot.fk form-stdlib/qk-matmul-batch.fk native/metal/whole-tensor-residency.fk form-stdlib/metal-door.fk
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/gguf-meta.fk form-stdlib/trig.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matvec-slot.fk form-stdlib/qk-matmul-batch.fk native/metal/whole-tensor-residency.fk form-stdlib/gguf-tensor-index.fk form-stdlib/metal-door.fk
 ;
 ; Proven by: form/native/metal/tests/llama-token-handle-band.fk
 
@@ -81,6 +87,9 @@
         (str_concat (q4m-msl-unit "form_q4k_dequant_f32" "form_q4k_matvec_f32")
         (str_concat (ldm-msl-unit)
                     (lth-copy-msl "form_copy_off_f32"))))))
+    ; ldm-msl-unit already carries the four bit-exact twins (ldm-msl-fast): form_rmsnorm_tg_f32,
+    ; form_rope_pair_f32, form_argmax_part_f32, form_argmax_comb_f32. Nothing new is emitted for
+    ; the fast path — the door grew the shape they need, not the kernels.
 
     ; ================= the file's own numbers =================
     (defn lth-src (path) (eqr-of-file path 0 (wtr-header-window)))
@@ -103,20 +112,44 @@
 
     (defn lth-blk (l suffix) (str_concat "blk." (str_concat (int_to_str l) (str_concat "." suffix))))
 
-    ; The nine tensors one llama block reaches: the two norms and the seven projections.
-    (defn lth-layer (src base path l)
-        (list (lth-tv src base path (lth-blk l "attn_norm.weight"))
-              (lth-tv src base path (lth-blk l "attn_q.weight"))
-              (lth-tv src base path (lth-blk l "attn_k.weight"))
-              (lth-tv src base path (lth-blk l "attn_v.weight"))
-              (lth-tv src base path (lth-blk l "attn_output.weight"))
-              (lth-tv src base path (lth-blk l "ffn_norm.weight"))
-              (lth-tv src base path (lth-blk l "ffn_gate.weight"))
-              (lth-tv src base path (lth-blk l "ffn_up.weight"))
-              (lth-tv src base path (lth-blk l "ffn_down.weight"))))
+    ; A tensor view from a KNOWN record offset — the collected-walk twin of lth-tv. Same four
+    ; fields, no walk.
+    (defn lth-tv-at (src base path off)
+        (list (metal_buf_from_file path
+                  (add base (egg-ti-dataoff src off))
+                  (wtr-bytes src off))
+              (wtr-dim1 src off)
+              (egg-ti-dim0 src off)
+              (egg-ti-type src off)))
 
+    ; The nine tensors one llama block reaches: the two norms and the seven projections.
+    ;
+    ; THE LOOKUPS ARE COLLECTED, NOT SEARCHED (2026-08-04). The first cut called egg-find-tensor
+    ; 252 times — each a full parse of the 255-record table — and that was ~73 s of a 96 s band:
+    ; the O(n^2) gguf-tensor-index.fk names, arrived at again. Nine gti-offs-with walks now carry
+    ; every block's record offset away at once, and a per-layer lookup is a 28-entry list scan.
+    ; egg-find-tensor stays for the four model-level singles, where it is exactly right.
+    (defn lth-suffixes ()
+        (list ".attn_norm.weight" ".attn_q.weight" ".attn_k.weight" ".attn_v.weight"
+              ".attn_output.weight" ".ffn_norm.weight" ".ffn_gate.weight" ".ffn_up.weight"
+              ".ffn_down.weight"))
+    (defn lth-tabs-go (src sfx acc)
+        (if (eq (len sfx) 0) (reverse acc)
+            (lth-tabs-go src (tail sfx) (cons (gti-offs-with src (head sfx)) acc))))
+    (defn lth-tabs (src) (lth-tabs-go src (lth-suffixes) (empty)))
+
+    (defn lth-layer-go (src base path l tabs acc)
+        (if (eq (len tabs) 0) (reverse acc)
+            (lth-layer-go src base path l (tail tabs)
+                (cons (lth-tv-at src base path (gti-off-for (head tabs) l)) acc))))
+    (defn lth-layer (src base path l tabs) (lth-layer-go src base path l tabs (empty)))
+
+    (defn lth-layers-go (src base path l n tabs acc)
+        (if (ge l n) acc
+            (lth-layers-go src base path (add l 1) n tabs
+                (append acc (list (lth-layer src base path l tabs))))))
     (defn lth-layers (src base path l n acc)
-        (if (ge l n) acc (lth-layers src base path (add l 1) n (append acc (list (lth-layer src base path l))))))
+        (lth-layers-go src base path l n (lth-tabs src) acc))
 
     ; TIED IS A FACT ABOUT THE TABLE. No output.weight in the file means the unembedding IS
     ; token_embd; egg-find-tensor answers -1 and that -1 is what decides, not a convention.
@@ -138,7 +171,11 @@
               (metal_pipeline msl "form_swiglu_f32")
               (metal_pipeline msl "form_add_f32")
               (metal_pipeline msl "form_argmax_f32")
-              (metal_pipeline msl "form_copy_off_f32")))
+              (metal_pipeline msl "form_copy_off_f32")
+              (metal_pipeline msl "form_rmsnorm_tg_f32")
+              (metal_pipeline msl "form_rope_pair_f32")
+              (metal_pipeline msl "form_argmax_part_f32")
+              (metal_pipeline msl "form_argmax_comb_f32")))
 
     (defn lth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (lth-pipe-ok? (tail ps)))))
 
@@ -162,7 +199,9 @@
               (metal_buf_alloc (mul vocabN 4))
               (metal_buf_alloc (mul (mul (mul 2 nHead) maxpos) 4))
               (metal_buf_alloc 16)
-              (metal_buf_alloc 16)))
+              (metal_buf_alloc 16)
+              (metal_buf_alloc 4096)
+              (metal_buf_alloc 4096)))
 
     ; One K and one V buffer PER LAYER. Per-layer rather than one big cache because the door binds
     ; at a handle's own offset: the layer stride can be a handle, the position stride cannot.
@@ -170,30 +209,71 @@
         (if (le n 0) acc (lth-cache (sub n 1) kvd maxpos (append acc (list (metal_buf_alloc (mul (mul kvd maxpos) 4)))))))
 
     ; ================= the dispatches =================
-    (defn lth-mv (ps tv xh yh)
+    ; EVERY MODE-0 DISPATCH CAPS ITS GROUP AT 256 — the proven lane's own FORM_METAL_TG default,
+    ; measured there, not re-derived here. With tpg 0 this door fills groups to the pipeline's
+    ; 1024 ceiling, and on the memory-bound serial-fold matvecs that costs real occupancy:
+    ; witnessed on this cell 2026-08-04, 1083 ms/token at the ceiling against 388 ms/token in the
+    ; oracle's recorded attestant run at 256.
+    ; EVERY BINDING CARRIES THE base+16 TAIL and every batch is CONCURRENT (door's second growth,
+    ; 2026-08-04). Hazards are DECLARED BY THIS CELL via barrier_before — the door guesses nothing.
+    ; The barrier plan is the proven Swift lane's, translated: that lane put a barrier AFTER each
+    ; dispatch except where the next one was independent (q/k/v read the same normed vector and
+    ; write disjoint buffers; so do gate/up and the two RoPEs), so barrier_before here is exactly
+    ; "was there a barrier between my predecessor and me" — and nothing about the arithmetic
+    ; changes, which is why the recorded 12-id stream is required to survive this rung unchanged.
+    ;
+    ; THE TWINS DISPATCHED HERE ARE THE BIT-EXACT ONES ONLY: the cooperative RMSNorm (same fold
+    ; order, staged operands — BIT FOR BIT its attestant, radius n <= 4096, one threadgroup, both
+    ; honored via dispatch_mode 1), RoPE at pair grain (a thread map, not an order; hd must be
+    ; even), and the two-stage argmax (comparison and selection only, ties still to the lowest
+    ; index). The epsilon-bearing matvec twins (split/lane/slot) are NOT taken — a rate bought
+    ; with an epsilon belongs to a rung with its own stated bound.
+    (defn lth-mv (ps tv xh yh bb)
         (metal_enqueue (if (eq (lth-tv-ty tv) 14) (nth ps 2) (nth ps 3))
-                       (md-bind (list (lth-tv-h tv) xh yh) (list (lth-tv-r tv) (lth-tv-c tv)))
+                       (md-bind16 (list (lth-tv-h tv) xh yh) (list (lth-tv-r tv) (lth-tv-c tv))
+                                  256 0 0 bb)
                        (lth-tv-r tv)))
 
-    (defn lth-dq (ps tv yh off n)
+    (defn lth-dq (ps tv yh off n bb)
         (metal_enqueue (if (eq (lth-tv-ty tv) 14) (nth ps 0) (nth ps 1))
-                       (md-bind (list (lth-tv-h tv) yh) (list off n))
+                       (md-bind16 (list (lth-tv-h tv) yh) (list off n) 256 0 0 bb)
                        n))
 
-    (defn lth-rms (ps xh gtv yh n epsBits)
-        (metal_enqueue (nth ps 4) (md-bind (list xh (lth-tv-h gtv) yh) (list n epsBits)) 1))
+    ; ONE threadgroup of 256, exactly, and the kernel's whole radius honored by the mode that
+    ; cannot split it: threads argument = group count = 1.
+    (defn lth-rms (ps xh gtv yh n epsBits bb)
+        (metal_enqueue (nth ps 11)
+                       (md-bind16 (list xh (lth-tv-h gtv) yh) (list n epsBits) 256 0 1 bb)
+                       1))
 
-    (defn lth-rope (ps vh ropeH nh hd pos baseBits)
-        (metal_enqueue (nth ps 5) (md-bind (list vh ropeH) (list nh hd pos baseBits)) nh))
+    (defn lth-rope (ps vh ropeH nh hd pos baseBits bb)
+        (metal_enqueue (nth ps 12)
+                       (md-bind16 (list vh ropeH) (list nh hd pos baseBits) 256 0 0 bb)
+                       (mul nh (div hd 2))))
 
-    (defn lth-attn (ps qh kh vh yh sh npos nq nkv hd scaleBits sstride)
+    (defn lth-attn (ps qh kh vh yh sh npos nq nkv hd scaleBits sstride bb)
         (metal_enqueue (nth ps 6)
-                       (md-bind (list qh kh vh yh sh) (list npos nq nkv hd scaleBits sstride))
+                       (md-bind16 (list qh kh vh yh sh) (list npos nq nkv hd scaleBits sstride)
+                                  256 0 0 bb)
                        nq))
 
-    (defn lth-elem (ps p ah bh yh n) (metal_enqueue p (md-bind (list ah bh yh) (list n)) n))
+    (defn lth-elem (ps p ah bh yh n bb)
+        (metal_enqueue p (md-bind16 (list ah bh yh) (list n) 256 0 0 bb) n))
 
-    (defn lth-copy (ps sh dh n doff) (metal_enqueue (nth ps 10) (md-bind (list sh dh) (list n doff)) n))
+    (defn lth-copy (ps sh dh n doff bb)
+        (metal_enqueue (nth ps 10) (md-bind16 (list sh dh) (list n doff) 256 0 0 bb) n))
+
+    ; greedy selection in two stages: 1024 contiguous chunks, then one group folds the partials
+    ; ascending — the tie rule survives the split by construction (llama-decode-msl.fk).
+    (defn lth-argmax (ps bs vocabN)
+        (do (metal_enqueue (nth ps 13)
+                           (md-bind16 (list (nth bs 11) (nth bs 15) (nth bs 16))
+                                      (list vocabN 1024) 256 0 0 1)
+                           1024)
+            (metal_enqueue (nth ps 14)
+                           (md-bind16 (list (nth bs 15) (nth bs 16) (nth bs 13) (nth bs 14))
+                                      (list 1024) 1024 0 1 1)
+                           1)))
 
     ; ================= one block =================
     ; The order is jte-llama-blk's, op for op, and it is the order the Swift attestant walks. The
@@ -201,24 +281,24 @@
     ; never leaves the device between two of them.
     (defn lth-block (ps bs geo lay ck cv pos)
         (do
-            (lth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8))
-            (lth-mv ps (nth lay 1) (nth bs 1) (nth bs 2))
-            (lth-mv ps (nth lay 2) (nth bs 1) (nth bs 3))
-            (lth-mv ps (nth lay 3) (nth bs 1) (nth bs 4))
-            (lth-rope ps (nth bs 2) (nth geo 11) (nth geo 2) (nth geo 4) pos (nth geo 9))
-            (lth-rope ps (nth bs 3) (nth geo 11) (nth geo 3) (nth geo 4) pos (nth geo 9))
-            (lth-copy ps (nth bs 3) ck (nth geo 5) (mul pos (nth geo 5)))
-            (lth-copy ps (nth bs 4) cv (nth geo 5) (mul pos (nth geo 5)))
+            (lth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8) 1)
+            (lth-mv ps (nth lay 1) (nth bs 1) (nth bs 2) 1)
+            (lth-mv ps (nth lay 2) (nth bs 1) (nth bs 3) 0)
+            (lth-mv ps (nth lay 3) (nth bs 1) (nth bs 4) 0)
+            (lth-rope ps (nth bs 2) (nth geo 11) (nth geo 2) (nth geo 4) pos (nth geo 9) 1)
+            (lth-rope ps (nth bs 3) (nth geo 11) (nth geo 3) (nth geo 4) pos (nth geo 9) 0)
+            (lth-copy ps (nth bs 3) ck (nth geo 5) (mul pos (nth geo 5)) 1)
+            (lth-copy ps (nth bs 4) cv (nth geo 5) (mul pos (nth geo 5)) 0)
             (lth-attn ps (nth bs 2) ck cv (nth bs 5) (nth bs 12)
-                      (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6))
-            (lth-mv ps (nth lay 4) (nth bs 5) (nth bs 6))
-            (lth-elem ps (nth ps 8) (nth bs 0) (nth bs 6) (nth bs 0) (nth geo 0))
-            (lth-rms ps (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8))
-            (lth-mv ps (nth lay 6) (nth bs 1) (nth bs 8))
-            (lth-mv ps (nth lay 7) (nth bs 1) (nth bs 9))
-            (lth-elem ps (nth ps 7) (nth bs 8) (nth bs 9) (nth bs 10) (nth geo 1))
-            (lth-mv ps (nth lay 8) (nth bs 10) (nth bs 7))
-            (lth-elem ps (nth ps 8) (nth bs 0) (nth bs 7) (nth bs 0) (nth geo 0))
+                      (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6) 1)
+            (lth-mv ps (nth lay 4) (nth bs 5) (nth bs 6) 1)
+            (lth-elem ps (nth ps 8) (nth bs 0) (nth bs 6) (nth bs 0) (nth geo 0) 1)
+            (lth-rms ps (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8) 1)
+            (lth-mv ps (nth lay 6) (nth bs 1) (nth bs 8) 1)
+            (lth-mv ps (nth lay 7) (nth bs 1) (nth bs 9) 0)
+            (lth-elem ps (nth ps 7) (nth bs 8) (nth bs 9) (nth bs 10) (nth geo 1) 1)
+            (lth-mv ps (nth lay 8) (nth bs 10) (nth bs 7) 1)
+            (lth-elem ps (nth ps 8) (nth bs 0) (nth bs 7) (nth bs 0) (nth geo 0) 1)
             1))
 
     (defn lth-blocks (ps bs geo lays cks cvs pos l n)
@@ -234,11 +314,9 @@
     ; case cannot quietly feed the projection's own bytes to the normalizer.
     (defn lth-head (ps bs geo onormTv projTv)
         (do
-            (lth-rms ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 8))
-            (lth-mv ps projTv (nth bs 1) (nth bs 11))
-            (metal_enqueue (nth ps 9)
-                           (md-bind (list (nth bs 11) (nth bs 13) (nth bs 14)) (list (nth geo 7)))
-                           1)
+            (lth-rms ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 8) 1)
+            (lth-mv ps projTv (nth bs 1) (nth bs 11) 1)
+            (lth-argmax ps bs (nth geo 7))
             0))
 
     (defn lth-u32 (s)
@@ -252,7 +330,8 @@
     ; a stale buffer read before the work that fills it.
     (defn lth-forward (ps bs geo lays cks cvs embTv onormTv projTv id pos)
         (do
-            (lth-dq ps embTv (nth bs 0) (mul id (nth geo 0)) (nth geo 0))
+            (metal_batch_concurrent)
+            (lth-dq ps embTv (nth bs 0) (mul id (nth geo 0)) (nth geo 0) 0)
             (lth-blocks ps bs geo lays cks cvs pos 0 (nth geo 12))
             (lth-head ps bs geo onormTv projTv)
             (lth-u32 (metal_buf_read (nth bs 13) 0 4))))

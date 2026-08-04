@@ -1,0 +1,424 @@
+; tests/kat-token-handle-band.fk — the whole KAT-Coder forward, judged stage by stage against
+; fp64 and against the one recorded oracle the exit path has.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY. Bit 1 is the metal_status canary; without a live handle door
+; the fold answers 0, which is a refusal and not a verdict.
+;
+; Verdict 262143 = bits 1..131072, power-of-two weights so a reader can subtract.
+;
+;   bit      1  THE DOOR IS REAL. metal_linked=true AND metal_door=handle.
+;   bit      2  THE GEOMETRY IS THE FILE'S. The KVs name the dims this cell dispatches with;
+;               the schedule is the interval's (30 attn_qkv, 11 attn_q — ten trunk full blocks
+;               plus the MTP head the forward skips); the expert census is MIXED (block 0 Q4_K,
+;               block 5 Q3_K — the fact the pipeline map's single-class row missed, and the
+;               reason form_q3k_matvec_off_f32 exists); ssm_a[0] < 0 (the file stores
+;               -exp(A_log), the converter's own transform).
+;   bit      4  EVERY KERNEL COMPILED. 29 nonzero pipeline handles.
+;   bit      8  THE WEIGHTS ARE VIEWS. mmap_nocopy_buffers=733: 30 linear x 19 + 10 full x 16
+;               + embed + output_norm + output.
+;   bit     16  THE ENTRANCE IS BIT-EXACT. 8 sampled words of embed row 100 equal RNE-binary32
+;               of the body's own Q3_K decode (kce-w), zeros equivalent across sign (the ±0
+;               finding, carried from kat-block0-handle-band).
+;   bit     32  THE NORM ANSWERS TO FP64. attn_norm(embed row) worst relative deviation inside
+;               the derived n*u bound (2048 * 2^-24), gains from their absolute file offset,
+;               eps from the KV.
+;   bit     64  THE QKV PROJECTION ANSWERS TO FP64 at sampled rows 0 / 2048 / 4096 / 8191 —
+;               Form's own Q4_K decode (q4m-flat-at) dotted fp64 with the device's normed x.
+;   bit    128  CONV + SILU. At position 0 the window is zero, so channel c answers
+;               silu(x_c * tap3_c); sampled V channels against fp64, taps from the file.
+;   bit    256  L2NORM per head, sampled heads 0 (q) and 17 (k head 1), fp64 chain from the
+;               raw projection through conv, silu, and the head's rsqrt.
+;   bit    512  THE GATES. All 32 alphas and betas against fp64
+;               (alpha = exp(ssm_a * softplus(a + dt_bias)), beta = sigmoid(b)), and every
+;               alpha inside [0,1] — CLOSED at zero, because the interval was first written
+;               open and the file refused it: head 11's decay at token 100 is 1.7e-40 in fp64,
+;               under binary32's floor, so the device answers EXACTLY 0.0 and agrees with the
+;               reference within any honest bound. The 2026-07-28 receipt pinned the decay
+;               CEILING (alpha saturating to 1 past softplus's swamping edge); this is the
+;               same boundary from below, witnessed rather than legislated away.
+;   bit   1024  THE DELTA RULE AT POSITION 0, where the zero state gives the closed form
+;               o_i = beta_h * v_i * (k_h . q_h*qscale) — every dim of heads 0 AND 20,
+;               HEAD-NORMALIZED (worst |dev-ref| against 1e-3 of the head's own max |ref|),
+;               because the first pointwise gate's 1e-4 floor was LARGER than these ~2e-5
+;               outputs and passed the key-head-mapping mutation without seeing it. Head 20
+;               witnesses the h mod 16 mapping this file's tiled order requires: the HF-text
+;               mapping (h div 2) reads key head 10 there and this bit refuses it.
+;   bit   2048  THE GATED NORM: RMS -> ssm_norm gains -> silu(z), in that order, sampled
+;               against fp64. The Mamba2 order (gate before norm) fails this bit.
+;   bit   4096  SSM_OUT + RESIDUAL at sampled dims: Form-decoded Q4_K rows dotted fp64 with
+;               the device's gated output, plus the fp64 embed reference.
+;   bit   8192  THE ROUTER AGREES WITH FORM: softmax -> top-8 -> renormalize (mm-route),
+;               ids 8/8 EXACT, weights within bound.
+;   bit  16384  THE EXPERT GATHER IS AN OFFSET, AND THE OFFSET IS RIGHT: the top expert's
+;               gate rows recomputed fp64 from that expert's OWN slab bytes (independent
+;               pricing), against the device's offset-matvec.
+;   bit  32768  THE FULL BLOCK'S STAGES (block 3, synthetic drive off the embed row):
+;               the query/gate deinterleave is word-exact; the per-head weighted q-norm
+;               answers to fp64; partial RoPE at pos 5 rotates pairs (k, k+32) within the
+;               first 64 dims to fp64 and leaves dims 64+ WORD-IDENTICAL (an adjacent-pair
+;               rope fails both ways); attention at one position collapses to v, gated by
+;               sigmoid — sampled at head 9 so the h/8 KV mapping is witnessed.
+;   bit  65536  THE EXIT PATH'S RECORDED ORACLE: embed(100) -> output_norm -> output ->
+;               argmax = 3637, the mechanism witness metal_kat_exit.sh recorded, through
+;               THIS cell's unit and two-stage argmax.
+;   bit 131072  THE LOOP IS DETERMINISTIC AND WHOLE: two fresh streams greedily decode 3 ids
+;               from token 100; the streams agree id for id and every id is inside the vocab.
+;
+; WHAT THIS BAND DOES NOT CLAIM: an end-to-end recorded oracle for a full token — none exists;
+; the stages are gated severally and the exit path against its one recorded number. The
+; continuation cells state the same.
+;
+; preludes: native/metal/kat-token-handle.fk form-stdlib/moe-msl.fk
+
+(do
+    ; ---- readback helpers (every anchor defn is FULLY parameterized: a defn frame cannot
+    ;      see an enclosing let, and this band learned that again before it learned anything
+    ;      about the model) ----
+    (defn ktb-w (s i)
+        (add (str_byte_at s (mul i 4))
+        (add (mul (str_byte_at s (add (mul i 4) 1)) 256)
+        (add (mul (str_byte_at s (add (mul i 4) 2)) 65536)
+             (mul (str_byte_at s (add (mul i 4) 3)) 16777216)))))
+    (defn ktb-f (s i) (fd-value (ktb-w s i) 8 23))
+    (defn ktb-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn ktb-close? (dev ref tol)
+        (le (ktb-abs (sub dev ref)) (if (gt (mul tol (ktb-abs ref)) 0.0001) (mul tol (ktb-abs ref)) 0.0001)))
+    (defn ktb-sig (x) (div 1.0 (add 1.0 (tn-exp (sub 0.0 x)))))
+    (defn ktb-silu (x) (mul x (ktb-sig x)))
+    (defn ktb-softplus (x)
+        (add (if (gt x 0.0) x 0.0)
+             (fln (add 1.0 (tn-exp (sub 0.0 (ktb-abs x)))))))
+    (defn ktb-digits (s i acc)
+        (do (let b (str_byte_at s i))
+            (if (if (ge b 48) (le b 57) false)
+                (ktb-digits s (add i 1) (add (mul acc 10) (sub b 48)))
+                acc)))
+    (defn ktb-status-num (needle)
+        (do (let st (metal_status))
+            (let i (str_find st needle 0))
+            (if (lt i 0) (sub 0 1) (ktb-digits st (add i (str_len needle)) 0))))
+
+    (defn ktb-embrow-go (src k n acc)
+        (if (ge k n) (reverse acc) (ktb-embrow-go src (add k 1) n (cons (kce-w src k) acc))))
+    (defn ktb-word-zero? (w) (eq (mod w 2147483648) 0))
+    (defn ktb-emb-spot (sE vs idxs acc)
+        (if (eq (len idxs) 0) acc
+            (do (let i (head idxs))
+                (let w (ktb-w sE i))
+                (let r (nth vs i))
+                (ktb-emb-spot sE vs (tail idxs)
+                    (add acc (if (eq w (md-f32-bits r)) 1
+                             (if (eq r 0.0) (if (ktb-word-zero? w) 1 0) 0)))))))
+    (defn ktb-ssq (vs acc) (if (eq (len vs) 0) acc (ktb-ssq (tail vs) (add acc (mul (head vs) (head vs))))))
+    (defn ktb-norm-worst (sh vs g inv i worst)
+        (if (eq (len vs) 0) worst
+            (do (let ref (mul (mul (head vs) inv) (ewl-f32 g (mul i 4))))
+                (ktb-norm-worst sh (tail vs) g inv (add i 1)
+                    (if (gt (ktb-abs ref) 0.0001)
+                        (do (let e (ktb-abs (div (sub (ktb-f sh i) ref) ref)))
+                            (if (gt e worst) e worst))
+                        worst)))))
+
+    (defn ktb-q4dot-go (wsrc rbase xs j n acc)
+        (if (ge j n) acc
+            (ktb-q4dot-go wsrc rbase xs (add j 1) n
+                (add acc (mul (q4m-flat-at wsrc 0 (add rbase j)) (ktb-f xs j))))))
+    (defn ktb-qkvrow-ok (sRaw wq sh r)
+        (ktb-close? (ktb-f sRaw r) (ktb-q4dot-go wq (mul r 2048) sh 0 2048 0.0) 0.001))
+
+    (defn ktb-tap3 (taps c) (ewl-f32 taps (mul (add (mul c 4) 3) 4)))
+    (defn ktb-convref (sRaw taps c) (ktb-silu (mul (ktb-f sRaw c) (ktb-tap3 taps c))))
+    (defn ktb-conv-ok (sC sRaw taps c)
+        (ktb-close? (ktb-f sC c) (ktb-convref sRaw taps c) 0.0001))
+
+    (defn ktb-l2ssq (sRaw taps b j acc)
+        (if (ge j 128) acc
+            (ktb-l2ssq sRaw taps b (add j 1)
+                (add acc (do (let v (ktb-convref sRaw taps (add b j))) (mul v v))))))
+    (defn ktb-l2-ok (sC sRaw taps epsv hd j)
+        (do (let b (mul hd 128))
+            (let linv (div 1.0 (math_sqrt (add (ktb-l2ssq sRaw taps b 0 0.0) epsv))))
+            (ktb-close? (ktb-f sC (add b j)) (mul (ktb-convref sRaw taps (add b j)) linv) 0.0001)))
+
+    (defn ktb-gates-go (sA sB sAl sBe ssmA dtb h acc)
+        (if (ge h 32) acc
+            (do (let aref (tn-exp (mul (ewl-f32 ssmA (mul h 4))
+                                       (ktb-softplus (add (ktb-f sA h) (ewl-f32 dtb (mul h 4)))))))
+                (let bref (ktb-sig (ktb-f sB h)))
+                (let adev (ktb-f sAl h))
+                (ktb-gates-go sA sB sAl sBe ssmA dtb (add h 1)
+                    (add acc (if (ktb-close? adev aref 0.00001)
+                             (if (ktb-close? (ktb-f sBe h) bref 0.00001)
+                                 (if (ge adev 0.0) (if (le adev 1.0) 1 0) 0) 0) 0))))))
+
+    (defn ktb-kqdot (sC qs kh j acc)
+        (if (ge j 128) acc
+            (ktb-kqdot sC qs kh (add j 1)
+                (add acc (mul (ktb-f sC (add (add 2048 (mul kh 128)) j))
+                              (mul qs (ktb-f sC (add (mul kh 128) j))))))))
+    ; HEAD-NORMALIZED, over every dim of the head — because the pointwise gate with the 1e-4
+    ; absolute floor SURVIVED the key-head-mapping mutation on 2026-08-04: at position 0 the
+    ; delta outputs are ~2e-5, smaller than the floor, so any number passed. The comparison is
+    ; now |dev - ref| against 1e-3 of the head's own max |ref| — a wrong mapping is O(1) in
+    ; that scale and the f32-vs-fp64 seam is ~1e-6 of it. A gate must be measured against the
+    ; magnitude of the signal it guards, not against a floor chosen for other stages.
+    (defn ktb-delta-worst (sC sO sBe qs h kh dot i mx worst)
+        (if (ge i 128) (list mx worst)
+            (do (let vref (ktb-f sC (add 4096 (add (mul h 128) i))))
+                (let oref (mul (ktb-f sBe h) (mul vref dot)))
+                (let e (ktb-abs (sub (ktb-f sO (add (mul h 128) i)) oref)))
+                (let ar (ktb-abs oref))
+                (ktb-delta-worst sC sO sBe qs h kh dot (add i 1)
+                    (if (gt ar mx) ar mx) (if (gt e worst) e worst)))))
+    (defn ktb-delta-ok (sC sO sBe qs h)
+        (do (let kh (mod h 16))
+            (let r (ktb-delta-worst sC sO sBe qs h kh (ktb-kqdot sC qs kh 0 0.0) 0 0.0 0.0))
+            (if (gt (head r) 0.000001)
+                (le (nth r 1) (mul 0.001 (head r)))
+                false)))
+
+    (defn ktb-ossq (sO b j acc)
+        (if (ge j 128) acc (ktb-ossq sO b (add j 1) (add acc (do (let v (ktb-f sO (add b j))) (mul v v))))))
+    (defn ktb-gn-ok (sO sZ sG snw epsv h j)
+        (do (let b (mul h 128))
+            (let ginv (div 1.0 (math_sqrt (add (div (ktb-ossq sO b 0 0.0) 128.0) epsv))))
+            (let ref (mul (mul (mul (ktb-f sO (add b j)) ginv) (ewl-f32 snw (mul j 4)))
+                          (ktb-silu (ktb-f sZ (add b j)))))
+            (ktb-close? (ktb-f sG (add b j)) ref 0.0001)))
+
+    (defn ktb-sodot (wSo sG r j acc)
+        (if (ge j 4096) acc
+            (ktb-sodot wSo sG r (add j 1)
+                (add acc (mul (q4m-flat-at wSo 0 (add (mul r 4096) j)) (ktb-f sG j))))))
+    (defn ktb-so-ok (sX vs wSo sG r)
+        (ktb-close? (ktb-f sX r) (add (nth vs r) (ktb-sodot wSo sG r 0 0.0)) 0.001))
+
+    (defn ktb-logits-go (sLog i acc)
+        (if (ge i 256) (reverse acc) (ktb-logits-go sLog (add i 1) (cons (ktb-f sLog i) acc))))
+    (defn ktb-route-go (sIds sWts k rids rwts acc)
+        (if (ge k 8) acc
+            (ktb-route-go sIds sWts (add k 1) (tail rids) (tail rwts)
+                (add acc (if (eq (kth-u32at sIds k) (head rids))
+                             (if (ktb-close? (ktb-f sWts k) (head rwts) 0.0001) 1 0) 0)))))
+
+    (defn ktb-edot (wE sH2 r j acc)
+        (if (ge j 2048) acc
+            (ktb-edot wE sH2 r (add j 1)
+                (add acc (mul (q4m-flat-at wE 0 (add (mul r 2048) j)) (ktb-f sH2 j))))))
+    (defn ktb-exp-ok (sGe wE sH2 r) (ktb-close? (ktb-f sGe r) (ktb-edot wE sH2 r 0 0.0) 0.001))
+
+    (defn ktb-gsplit-ok (sGt sQF h dd)
+        (eq (ktb-w sGt (add (mul h 256) dd)) (ktb-w sQF (add (add (mul h 512) 256) dd))))
+    (defn ktb-qssq (sQF h j acc)
+        (if (ge j 256) acc
+            (ktb-qssq sQF h (add j 1) (add acc (do (let v (ktb-f sQF (add (mul h 512) j))) (mul v v))))))
+    (defn ktb-qn-ok (sQ sQF qnw epsv h j)
+        (do (let qinv (div 1.0 (math_sqrt (add (div (ktb-qssq sQF h 0 0.0) 256.0) epsv))))
+            (ktb-close? (ktb-f sQ (add (mul h 256) j))
+                        (mul (mul (ktb-f sQF (add (mul h 512) j)) qinv) (ewl-f32 qnw (mul j 4)))
+                        0.0001)))
+    (defn ktb-rope-ok (sQ sQr k)
+        (do (let fq (fpow 10000000.0 (div (mul -2.0 (add k 0.0)) 64.0)))
+            (let a (mul 5.0 fq))
+            (let ca (fcos a))
+            (let sa (fsin a))
+            (let x0 (ktb-f sQ k))
+            (let x1 (ktb-f sQ (add k 32)))
+            (if (ktb-close? (ktb-f sQr k) (sub (mul x0 ca) (mul x1 sa)) 0.0001)
+                (ktb-close? (ktb-f sQr (add k 32)) (add (mul x0 sa) (mul x1 ca)) 0.0001)
+                false)))
+    (defn ktb-attn-ok (sAg sV sGt h dd)
+        (do (let kvh (div h 8))
+            (let vref (ktb-f sV (add (mul kvh 256) dd)))
+            (ktb-close? (ktb-f sAg (add (mul h 256) dd))
+                        (mul vref (ktb-sig (ktb-f sGt (add (mul h 256) dd))))
+                        0.0001)))
+    (defn ktb-ids-ok (xa xb vn)
+        (if (eq (len xa) 0) (eq (len xb) 0)
+            (if (eq (len xb) 0) false
+                (if (eq (head xa) (head xb))
+                    (if (ge (head xa) 0) (if (lt (head xa) vn) (ktb-ids-ok (tail xa) (tail xb) vn) false) false)
+                    false))))
+
+    ; ==================================================================
+    (let live (md-door-live?))
+    (let ctx (kth-setup 64))
+    (let ps (nth ctx 0))
+    (let bs (nth ctx 1))
+    (let geo (nth ctx 2))
+    (let lays (nth ctx 3))
+    (let embTv (nth ctx 4))
+    (let src (nth ctx 7))
+    (let base (nth ctx 8))
+    (let path (kce-path))
+    (let d (nth geo 0))
+    (let eps (gmt-f32 src "qwen35moe.attention.layer_norm_rms_epsilon"))
+    (let qscale32 (fd-value (nth geo 7) 8 23))
+    (let tabsAll (kth-tabs src))
+
+    ; ---- bit 2: geometry ----
+    (let geo-n (add (if (eq d 2048) 1 0)
+               (add (if (eq (nth geo 1) 8192) 1 0)
+               (add (if (eq (nth geo 21) 40) 1 0)
+               (add (if (eq (gti-count-with src ".attn_qkv.weight") 30) 1 0)
+               (add (if (eq (gti-count-with src ".attn_q.weight") 11) 1 0)
+               (add (if (eq (kth-tv-ty (nth (nth lays 0) 3)) 12) 1 0)
+               (add (if (eq (kth-tv-ty (nth (nth lays 5) 3)) 11) 1 0)
+               (add (if (lt (ewl-f32 (read_file_slice path (add base (egg-ti-dataoff src (gti-off-for (nth tabsAll 14) 0))) 4) 0) 0.0) 1 0)
+               (add (if (kth-full? 3 (nth geo 22)) 1 0)
+                    (if (kth-full? 5 (nth geo 22)) 0 1)))))))))))
+    (let geo-ok (eq geo-n 10))
+
+    (let pipes-ok (kth-pipes-ok? ps))
+    (let resident (eq (ktb-status-num "mmap_nocopy_buffers=") 733))
+
+    ; ---- embed(100) and the exit oracle ----
+    (let e1 (metal_enqueue (nth ps 0)
+        (kth-b16 (list (kth-tv-h embTv) (nth bs 0)) (list (mul 100 (div d 256)) d)) d))
+    (let sEmb (metal_buf_read (nth bs 0) 0 (mul d 4)))
+    (kth-head ps bs geo (nth ctx 5) (nth ctx 6))
+    (let exitId (kth-u32at (metal_buf_read (nth bs 31) 0 4) 0))
+    (let exit-ok (eq exitId 3637))
+
+    (let vals (ktb-embrow-go (kce-row-src 100) 0 d (empty)))
+    (let emb-ok (eq (ktb-emb-spot sEmb vals (list 0 1 100 500 1000 1500 2000 2047) 0) 8))
+
+    (let gains (read_file_slice path (add base (egg-ti-dataoff src (gti-off-for (nth tabsAll 0) 0))) (mul d 4)))
+    (let inv0 (div 1.0 (math_sqrt (add (div (ktb-ssq vals 0.0) (add d 0.0)) eps))))
+
+    ; ---- raw qkv: rms + qkv matvec only, read both ----
+    (kth-rms ps (nth bs 0) (nth (nth lays 0) 0) (nth bs 1) d (nth geo 6))
+    (kth-mv ps (nth (nth lays 0) 10) (nth bs 1) (nth bs 2))
+    (let sH (metal_buf_read (nth bs 1) 0 (mul d 4)))
+    (let sRawQKV (metal_buf_read (nth bs 2) 0 (mul (nth geo 1) 4)))
+
+    (let norm-ok (lt (ktb-norm-worst sH vals gains inv0 0 0.0) 0.0001221))
+
+    (let qkOff (gti-off-for (nth tabsAll 10) 0))
+    (let wQkv (read_file_slice path (add base (egg-ti-dataoff src qkOff)) (kth-bytes src qkOff)))
+    (let qkv-ok (if (ktb-qkvrow-ok sRawQKV wQkv sH 0)
+                (if (ktb-qkvrow-ok sRawQKV wQkv sH 2048)
+                (if (ktb-qkvrow-ok sRawQKV wQkv sH 4096)
+                    (ktb-qkvrow-ok sRawQKV wQkv sH 8191) false) false) false))
+
+    ; ---- run block 0's attention half whole, read every stage ----
+    (let sts (kth-new-state geo))
+    (kth-linear-attn ps bs geo (nth lays 0) (nth sts 0))
+    (let sC (metal_buf_read (nth bs 2) 0 (mul (nth geo 1) 4)))
+    (let sA (metal_buf_read (nth bs 3) 0 128))
+    (let sB (metal_buf_read (nth bs 4) 0 128))
+    (let sAl (metal_buf_read (nth bs 5) 0 128))
+    (let sBe (metal_buf_read (nth bs 6) 0 128))
+    (let sZ (metal_buf_read (nth bs 7) 0 16384))
+    (let sO (metal_buf_read (nth bs 8) 0 16384))
+    (let sG (metal_buf_read (nth bs 9) 0 16384))
+    (let sX (metal_buf_read (nth bs 0) 0 (mul d 4)))
+
+    (let cvOff (gti-off-for (nth tabsAll 11) 0))
+    (let taps (read_file_slice path (add base (egg-ti-dataoff src cvOff)) (mul (mul 4 (nth geo 1)) 4)))
+    (let conv-ok (if (ktb-conv-ok sC sRawQKV taps 4096)
+                 (if (ktb-conv-ok sC sRawQKV taps 5000)
+                     (ktb-conv-ok sC sRawQKV taps 8191) false) false))
+
+    (let l2-ok (if (ktb-l2-ok sC sRawQKV taps eps 0 0)
+               (if (ktb-l2-ok sC sRawQKV taps eps 0 100)
+               (if (ktb-l2-ok sC sRawQKV taps eps 17 5)
+                   (ktb-l2-ok sC sRawQKV taps eps 17 127) false) false) false))
+
+    (let ssmA (read_file_slice path (add base (egg-ti-dataoff src (gti-off-for (nth tabsAll 14) 0))) 128))
+    (let dtb (read_file_slice path (add base (egg-ti-dataoff src (gti-off-for (nth tabsAll 15) 0))) 128))
+    (let gates-ok (eq (ktb-gates-go sA sB sAl sBe ssmA dtb 0 0) 32))
+
+    (let delta-ok (if (ktb-delta-ok sC sO sBe qscale32 0)
+                      (ktb-delta-ok sC sO sBe qscale32 20) false))
+
+    (let snw (read_file_slice path (add base (egg-ti-dataoff src (gti-off-for (nth tabsAll 16) 0))) 512))
+    (let gn-ok (if (ktb-gn-ok sO sZ sG snw eps 0 0)
+               (if (ktb-gn-ok sO sZ sG snw eps 0 5)
+               (if (ktb-gn-ok sO sZ sG snw eps 0 127)
+                   (ktb-gn-ok sO sZ sG snw eps 20 3) false) false) false))
+
+    (let soOff (gti-off-for (nth tabsAll 18) 0))
+    (let wSo (read_file_slice path (add base (egg-ti-dataoff src soOff)) (kth-bytes src soOff)))
+    (let so-ok (if (ktb-so-ok sX vals wSo sG 0) (ktb-so-ok sX vals wSo sG 2047) false))
+
+    ; ---- the MoE half, then its anchors ----
+    (kth-moe ps bs geo (nth lays 0))
+    (let sLog (metal_buf_read (nth bs 11) 0 1024))
+    (let sIds (metal_buf_read (nth bs 12) 0 32))
+    (let sWts (metal_buf_read (nth bs 13) 0 32))
+    (let sH2 (metal_buf_read (nth bs 1) 0 (mul d 4)))
+
+    (let logits (ktb-logits-go sLog 0 (empty)))
+    (let refIds (mm-route-ids logits 256 8))
+    (let refWts (mm-route-weights logits 256 8))
+    (let route-ok (eq (ktb-route-go sIds sWts 0 refIds refWts 0) 8))
+
+    (let e0 (kth-u32at sIds 0))
+    (let geOff (gti-off-for (nth tabsAll 3) 0))
+    (let slabBytes (mul (div (mul (nth geo 10) d) 256) 144))
+    (let wE (read_file_slice path
+                (add (add base (egg-ti-dataoff src geOff)) (mul e0 slabBytes)) slabBytes))
+    (metal_enqueue (nth ps 2)
+        (kth-b16 (list (kth-tv-h (nth (nth lays 0) 3)) (nth bs 1) (nth bs 14))
+                 (list (nth geo 10) d (mul e0 (mul (nth geo 10) d))))
+        (nth geo 10))
+    (let sGe (metal_buf_read (nth bs 14) 0 (mul (nth geo 10) 4)))
+    (let exp-ok (if (ktb-exp-ok sGe wE sH2 0) (ktb-exp-ok sGe wE sH2 511) false))
+
+    ; ---- the full block's stages, synthetic drive off the embed row ----
+    (let e2 (metal_enqueue (nth ps 0)
+        (kth-b16 (list (kth-tv-h embTv) (nth bs 0)) (list (mul 100 (div d 256)) d)) d))
+    (kth-rms ps (nth bs 0) (nth (nth lays 3) 0) (nth bs 1) d (nth geo 6))
+    (kth-mv ps (nth (nth lays 3) 10) (nth bs 1) (nth bs 2))
+    (let sQF (metal_buf_read (nth bs 2) 0 32768))
+    (kth-full-attn ps bs geo (nth lays 3) (nth sts 3) 0)
+    (let sQ (metal_buf_read (nth bs 22) 0 16384))
+    (let sGt (metal_buf_read (nth bs 23) 0 16384))
+    (let sV (metal_buf_read (nth bs 25) 0 2048))
+    (let sAg (metal_buf_read (nth bs 26) 0 16384))
+    (let split-ok (if (ktb-gsplit-ok sGt sQF 0 0)
+                  (if (ktb-gsplit-ok sGt sQF 7 100) (ktb-gsplit-ok sGt sQF 15 255) false) false))
+    (let qnw (read_file_slice path (add base (egg-ti-dataoff src (gti-off-for (nth tabsAll 22) 3))) 1024))
+    (let qn-ok (if (ktb-qn-ok sQ sQF qnw eps 0 0) (ktb-qn-ok sQ sQF qnw eps 0 255) false))
+    (metal_enqueue (nth ps 15)
+        (kth-b16 (list (nth bs 22)) (list (nth geo 12) (nth geo 14) (nth geo 15) 5 (nth geo 16)))
+        (mul (nth geo 12) (div (nth geo 15) 2)))
+    (let sQr (metal_buf_read (nth bs 22) 0 16384))
+    (let rope-ok (if (ktb-rope-ok sQ sQr 0)
+                 (if (ktb-rope-ok sQ sQr 1)
+                 (if (ktb-rope-ok sQ sQr 31)
+                 (if (eq (ktb-w sQr 64) (ktb-w sQ 64))
+                     (eq (ktb-w sQr 200) (ktb-w sQ 200)) false) false) false) false))
+    (let attn-ok (if (ktb-attn-ok sAg sV sGt 0 0)
+                 (if (ktb-attn-ok sAg sV sGt 0 100)
+                 (if (ktb-attn-ok sAg sV sGt 9 0)
+                     (ktb-attn-ok sAg sV sGt 9 200) false) false) false))
+    (let full-ok (if split-ok (if qn-ok (if rope-ok attn-ok false) false) false))
+
+    ; ---- the loop, twice, from fresh states ----
+    (let stsA (kth-new-state geo))
+    (let outA (kth-generate ps bs geo lays stsA embTv (nth ctx 5) (nth ctx 6) 100 0 3 (empty)))
+    (let stsB (kth-new-state geo))
+    (let outB (kth-generate ps bs geo lays stsB embTv (nth ctx 5) (nth ctx 6) 100 0 3 (empty)))
+    (let loop-ok (if (eq (len outA) 3) (ktb-ids-ok outA outB (nth geo 19)) false))
+
+    ; ---- the verdict ----
+    (add (if live 1 0)
+    (add (if live (if geo-ok 2 0) 0)
+    (add (if live (if pipes-ok 4 0) 0)
+    (add (if live (if resident 8 0) 0)
+    (add (if live (if emb-ok 16 0) 0)
+    (add (if live (if norm-ok 32 0) 0)
+    (add (if live (if qkv-ok 64 0) 0)
+    (add (if live (if conv-ok 128 0) 0)
+    (add (if live (if l2-ok 256 0) 0)
+    (add (if live (if gates-ok 512 0) 0)
+    (add (if live (if delta-ok 1024 0) 0)
+    (add (if live (if gn-ok 2048 0) 0)
+    (add (if live (if so-ok 4096 0) 0)
+    (add (if live (if route-ok 8192 0) 0)
+    (add (if live (if exp-ok 16384 0) 0)
+    (add (if live (if full-ok 32768 0) 0)
+    (add (if live (if exit-ok 65536 0) 0)
+         (if live (if loop-ok 131072 0) 0)))))))))))))))))))

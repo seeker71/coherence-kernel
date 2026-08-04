@@ -86,13 +86,25 @@
 //     u32  n_const
 //     u32  value[n_const]    setBytes, 4 bytes each, at buffer(n_buf .. n_buf+n_const-1)
 //   [ u32  threads_per_group   0 = free: min(maxTotalThreadsPerThreadgroup, threads) ]
-//   [ u32  threadgroup_bytes   0 = none                                              ]
+//   [ u32  threadgroup_bytes   0 = none; else setThreadgroupMemoryLength at index 0  ]
+//   [ u32  dispatch_mode       0 = dispatchThreads(threads); 1 = dispatchThreadgroups:]
+//   [                          the op's `threads` argument is the GROUP COUNT and    ]
+//   [                          threads_per_group is required nonzero                  ]
+//   [ u32  barrier_before      1 = memoryBarrier(buffers) before this dispatch;       ]
+//   [                          legal only in a concurrent batch                       ]
 //
-// The last two are a PAIR and are either both present or both absent. Exactly two
-// lengths are legal — base, and base+8 — and anything else is refused out loud
-// rather than read as far as it parses. That is why they are not an open-ended
-// optional tail: a binding one field short would otherwise bind a handle as a
-// constant and dispatch something plausible.
+// The tail fields are PAIRS and arrive whole or not at all. Exactly three lengths
+// are legal — base, base+8, base+16 — and anything else is refused out loud rather
+// than read as far as it parses. That is why they are not an open-ended optional
+// tail: a binding one field short would otherwise bind a handle as a constant and
+// dispatch something plausible.
+//
+// dispatch_mode 1 exists because cooperative kernels — group-wide folds staged
+// through threadgroup memory — are shaped as "G groups of exactly T threads", and
+// dispatchThreads cannot promise a full group at the tail of the grid. With mode 1
+// threads_per_group is not clamped-if-large but REFUSED past the pipeline's
+// maxTotalThreadsPerThreadgroup, because silently shrinking T repartitions the
+// very fold the mode exists for.
 //
 // WHY THESE TWO LIVE HERE AND NOT AS ARGUMENTS. Past arity 3 this kernel hands an
 // op a CONS LIST in slot 1 instead of separate node slots (make_nodeid, tag 91,
@@ -333,8 +345,21 @@ typedef struct {
     int nocopy;            // 1 = the file's own pages, 0 = a copy we made
 } fk_bufmeta;
 
-static NSMutableArray *fk_buf_objs = nil;   // handle h -> element h-1
+// A buffer handle is (generation << 16) | slot, slot 1-based. The generation is
+// what lets metal_buf_free exist without inviting the worst failure a handle
+// system has: a freed slot reused by a NEW buffer, silently read through an OLD
+// handle a Form cell is still holding. Freeing bumps the slot's generation, so
+// every outstanding handle to it stops matching and is refused at the door rather
+// than answering a stranger's bytes. Generation 0 makes every pre-free handle
+// value numerically identical to the plain slot index, so nothing that held a
+// handle before this scheme existed sees a different number. The generation wraps
+// at 16 bits; a slot freed and reused 65536 times could in principle revive one
+// ancient stale handle, and that is stated here rather than discovered.
+static NSMutableArray *fk_buf_objs = nil;   // slot s -> element s-1 (NSNull when freed)
 static fk_bufmeta fk_buf_meta[FK_MAX_BUF];
+static unsigned int fk_buf_gen[FK_MAX_BUF];
+static long long fk_free_slots[FK_MAX_BUF];
+static long long fk_free_top = 0;
 static NSMutableArray *fk_pipe_objs = nil;  // handle h -> element h-1
 static NSMutableDictionary *fk_pipe_by_key = nil;  // msl+name -> NSNumber handle
 
@@ -351,6 +376,22 @@ static long long fk_total_sync = 0;
 static long long fk_nocopy_bufs = 0;
 static NSString *fk_last_err = nil;
 
+// Concurrent batches are OPT-IN, per batch, and the flag arms only the NEXT batch:
+// metal_batch_concurrent before the first enqueue, back to serial when that batch
+// ends. Within a concurrent batch nothing orders two dispatches unless the cell
+// says so through barrier_before — this door does not guess hazards, because a
+// door that guessed would own correctness, and this one owns none.
+static int fk_batch_concurrent = 0;   // the OPEN batch's mode
+static int fk_next_concurrent = 0;    // armed for the batch about to open
+
+// Submitted-but-not-waited batches, for double-buffering: metal_submit commits and
+// answers a fence id, metal_fence_wait drains that one batch. metal_sync and
+// metal_buf_read drain everything, so the old "read is the sync point" contract
+// still holds with fences in flight.
+static NSMutableDictionary *fk_inflight = nil;    // @(fence) -> MTLCommandBuffer
+static NSMutableDictionary *fk_inflight_n = nil;  // @(fence) -> @(dispatch count)
+static long long fk_fence_next = 1;
+
 static void fk_err(NSString *s) { fk_last_err = s; }
 
 static unsigned int fk_le32(const unsigned char *p) {
@@ -358,12 +399,24 @@ static unsigned int fk_le32(const unsigned char *p) {
            ((unsigned int)p[2] << 16) | ((unsigned int)p[3] << 24);
 }
 
-// Handle validity is checked on every use. A handle is an index the Form cell is
-// holding; if a cell hands back a stale or fabricated one, the honest answer is a
-// refusal, not a read of whatever buffer happens to sit at that index.
+// Handle validity is checked on every use. A handle is a claim the Form cell is
+// holding; if a cell hands back a stale, freed, or fabricated one, the honest
+// answer is a refusal, not a read of whatever buffer happens to sit at that slot
+// now. Returns the 1-based SLOT (the index into fk_buf_meta), 0 when the claim
+// does not hold.
+static long long fk_buf_slot(long long h) {
+    long long slot = h & 0xFFFF;
+    long long gen = h >> 16;
+    if (fk_buf_objs == nil) { return 0; }
+    if (slot < 1 || slot > (long long)[fk_buf_objs count]) { return 0; }
+    if (gen < 0 || gen != (long long)fk_buf_gen[slot - 1]) { return 0; }
+    if (fk_buf_objs[(NSUInteger)(slot - 1)] == [NSNull null]) { return 0; }
+    return slot;
+}
 static id<MTLBuffer> fk_buf_at(long long h) {
-    if (h < 1 || h > (long long)[fk_buf_objs count]) { return nil; }
-    return fk_buf_objs[(NSUInteger)(h - 1)];
+    long long slot = fk_buf_slot(h);
+    if (slot == 0) { return nil; }
+    return fk_buf_objs[(NSUInteger)(slot - 1)];
 }
 
 long long fk_metal_pipeline_external(const char *msl, long long msl_len,
@@ -419,19 +472,26 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
 static long long fk_buf_register(id<MTLBuffer> b, void *map_base, size_t map_len,
                                  unsigned long long view_off, unsigned long long view_len,
                                  int nocopy) {
-    if ([fk_buf_objs count] >= FK_MAX_BUF) {
-        fk_err([NSString stringWithFormat:@"buffer table full at %d", FK_MAX_BUF]);
-        return 0;
+    long long slot;
+    if (fk_free_top > 0) {
+        fk_free_top--;
+        slot = fk_free_slots[fk_free_top];
+        fk_buf_objs[(NSUInteger)(slot - 1)] = b;
+    } else {
+        if ([fk_buf_objs count] >= FK_MAX_BUF) {
+            fk_err([NSString stringWithFormat:@"buffer table full at %d live slots", FK_MAX_BUF]);
+            return 0;
+        }
+        [fk_buf_objs addObject:b];
+        slot = (long long)[fk_buf_objs count];
     }
-    [fk_buf_objs addObject:b];
-    long long h = (long long)[fk_buf_objs count];
-    fk_buf_meta[h - 1].map_base = map_base;
-    fk_buf_meta[h - 1].map_len = map_len;
-    fk_buf_meta[h - 1].view_off = view_off;
-    fk_buf_meta[h - 1].view_len = view_len;
-    fk_buf_meta[h - 1].nocopy = nocopy;
+    fk_buf_meta[slot - 1].map_base = map_base;
+    fk_buf_meta[slot - 1].map_len = map_len;
+    fk_buf_meta[slot - 1].view_off = view_off;
+    fk_buf_meta[slot - 1].view_len = view_len;
+    fk_buf_meta[slot - 1].nocopy = nocopy;
     if (nocopy) { fk_nocopy_bufs++; }
-    return h;
+    return ((long long)fk_buf_gen[slot - 1] << 16) | slot;
 }
 
 long long fk_metal_buf_alloc_external(long long nbytes) {
@@ -517,10 +577,11 @@ long long fk_metal_buf_from_file_external(const char *path, long long path_len,
 
 long long fk_metal_buf_write_external(long long h, long long off, const char *bytes, long long len) {
     @autoreleasepool {
-        id<MTLBuffer> b = fk_buf_at(h);
-        if (b == nil) { fk_err([NSString stringWithFormat:@"buf_write: bad handle %lld", h]); return -1; }
+        long long slot = fk_buf_slot(h);
+        if (slot == 0) { fk_err([NSString stringWithFormat:@"buf_write: bad handle %lld", h]); return -1; }
+        id<MTLBuffer> b = fk_buf_objs[(NSUInteger)(slot - 1)];
         if (off < 0 || len < 0) { fk_err(@"buf_write: negative off or len"); return -1; }
-        fk_bufmeta *m = &fk_buf_meta[h - 1];
+        fk_bufmeta *m = &fk_buf_meta[slot - 1];
         if ((unsigned long long)(off + len) > m->view_len) {
             fk_err([NSString stringWithFormat:@"buf_write: [%lld,%lld) past view_len %llu",
                     off, off + len, m->view_len]);
@@ -553,59 +614,108 @@ long long fk_metal_enqueue_external(long long pipe, const char *binding,
         }
         unsigned int nconst = fk_le32(bp + 4 + 4 * nbuf);
         long long base = (long long)(4 + 4 * nbuf + 4 + 4 * nconst);
-        // Exactly two legal lengths. A binding that is merely "long enough" is not
+        // Exactly three legal lengths. A binding that is merely "long enough" is not
         // accepted: a short one would silently read a handle as a constant, and a
         // long one means the cell and this door disagree about the layout.
         unsigned int tpg = 0;
         unsigned int tgmem = 0;
-        if (binding_len == base + 8) {
+        unsigned int mode = 0;
+        unsigned int barrier = 0;
+        if (binding_len == base + 8 || binding_len == base + 16) {
             tpg = fk_le32(bp + base);
             tgmem = fk_le32(bp + base + 4);
+            if (binding_len == base + 16) {
+                mode = fk_le32(bp + base + 8);
+                barrier = fk_le32(bp + base + 12);
+            }
         } else if (binding_len != base) {
             fk_err([NSString stringWithFormat:
-                @"enqueue: binding is %lld bytes; n_buf=%u n_const=%u makes %lld (no tail) "
-                 "or %lld (with threads_per_group + threadgroup_bytes)",
-                binding_len, nbuf, nconst, base, base + 8]);
+                @"enqueue: binding is %lld bytes; n_buf=%u n_const=%u makes %lld (no tail), "
+                 "%lld (threads_per_group + threadgroup_bytes), or %lld (+ dispatch_mode + barrier_before)",
+                binding_len, nbuf, nconst, base, base + 8, base + 16]);
+            return -1;
+        }
+        // Everything about the tail is judged BEFORE a batch opens, so a refused
+        // enqueue leaves no half-open state behind it. The batch this dispatch would
+        // join is either the open one or the one the armed flag describes.
+        int concurrent = (fk_cb != nil) ? fk_batch_concurrent : fk_next_concurrent;
+        if (mode > 1) {
+            fk_err([NSString stringWithFormat:@"enqueue: dispatch_mode %u is not 0 or 1", mode]);
+            return -1;
+        }
+        if (barrier > 1) {
+            fk_err([NSString stringWithFormat:@"enqueue: barrier_before %u is not 0 or 1", barrier]);
+            return -1;
+        }
+        if (mode == 1 && tpg == 0) {
+            fk_err(@"enqueue: dispatch_mode 1 (threadgroups) needs threads_per_group nonzero");
+            return -1;
+        }
+        if (barrier == 1 && !concurrent) {
+            // In a serial batch every dispatch already sees its predecessors, so a
+            // barrier here is not harmless noise — it means the cell believes it is
+            // in a concurrent batch and is not, and that belief will place hazards.
+            fk_err(@"enqueue: barrier_before is only legal in a concurrent batch");
             return -1;
         }
 
         if (fk_cb == nil) {
             fk_cb = [fk_q commandBuffer];
-            fk_enc = [fk_cb computeCommandEncoder];
+            fk_batch_concurrent = fk_next_concurrent;
+            fk_next_concurrent = 0;
+            fk_enc = [fk_cb computeCommandEncoderWithDispatchType:
+                (fk_batch_concurrent ? MTLDispatchTypeConcurrent : MTLDispatchTypeSerial)];
             if (fk_cb == nil || fk_enc == nil) { fk_err(@"could not open a command buffer"); return -1; }
         }
+        if (barrier == 1) { [fk_enc memoryBarrierWithScope:MTLBarrierScopeBuffers]; }
         id<MTLComputePipelineState> ps = fk_pipe_objs[(NSUInteger)(pipe - 1)];
         [fk_enc setComputePipelineState:ps];
         for (unsigned int k = 0; k < nbuf; k++) {
             long long bh = (long long)fk_le32(bp + 4 + 4 * k);
-            id<MTLBuffer> b = fk_buf_at(bh);
-            if (b == nil) {
+            long long bslot = fk_buf_slot(bh);
+            if (bslot == 0) {
                 fk_err([NSString stringWithFormat:@"enqueue: bad buffer handle %lld at slot %u", bh, k]);
                 return -1;
             }
-            [fk_enc setBuffer:b offset:(NSUInteger)fk_buf_meta[bh - 1].view_off atIndex:k];
+            [fk_enc setBuffer:fk_buf_objs[(NSUInteger)(bslot - 1)]
+                       offset:(NSUInteger)fk_buf_meta[bslot - 1].view_off
+                      atIndex:k];
         }
         for (unsigned int k = 0; k < nconst; k++) {
             unsigned int v = fk_le32(bp + 4 + 4 * nbuf + 4 + 4 * k);
             [fk_enc setBytes:&v length:4 atIndex:(NSUInteger)(nbuf + k)];
         }
         if (tgmem > 0) { [fk_enc setThreadgroupMemoryLength:(NSUInteger)tgmem atIndex:0]; }
-        // With a cap the oracle's rule exactly: min(maxTotalThreadsPerThreadgroup, cap),
-        // and NOT clamped down to the grid — a partial trailing group is what
-        // dispatchThreads is for, and clamping would repartition a group-wide fold.
-        // Without one, the door's own earlier behaviour, unchanged.
         NSUInteger tgmax = [ps maxTotalThreadsPerThreadgroup];
-        NSUInteger tg;
-        if (tpg > 0) {
-            tg = (NSUInteger)tpg;
-            if (tg > tgmax) { tg = tgmax; }
+        if (mode == 1) {
+            // Cooperative shape: the op's threads argument is the GROUP count and tpg
+            // is exact. Past the pipeline's ceiling it is refused, not clamped —
+            // silently shrinking T repartitions the very fold this mode exists for.
+            if ((NSUInteger)tpg > tgmax) {
+                fk_err([NSString stringWithFormat:
+                    @"enqueue: threads_per_group %u past this pipeline's max %lu",
+                    tpg, (unsigned long)tgmax]);
+                return -1;
+            }
+            [fk_enc dispatchThreadgroups:MTLSizeMake((NSUInteger)threads, 1, 1)
+                   threadsPerThreadgroup:MTLSizeMake((NSUInteger)tpg, 1, 1)];
         } else {
-            tg = tgmax;
-            if (tg > (NSUInteger)threads) { tg = (NSUInteger)threads; }
+            // With a cap the oracle's rule exactly: min(maxTotalThreadsPerThreadgroup,
+            // cap), and NOT clamped down to the grid — a partial trailing group is what
+            // dispatchThreads is for, and clamping would repartition a group-wide fold.
+            // Without one, the door's own earlier behaviour, unchanged.
+            NSUInteger tg;
+            if (tpg > 0) {
+                tg = (NSUInteger)tpg;
+                if (tg > tgmax) { tg = tgmax; }
+            } else {
+                tg = tgmax;
+                if (tg > (NSUInteger)threads) { tg = (NSUInteger)threads; }
+            }
+            if (tg == 0) { tg = 1; }
+            [fk_enc dispatchThreads:MTLSizeMake((NSUInteger)threads, 1, 1)
+              threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
         }
-        if (tg == 0) { tg = 1; }
-        [fk_enc dispatchThreads:MTLSizeMake((NSUInteger)threads, 1, 1)
-          threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
         fk_pending++;
         fk_total_dispatch++;
         return 1;   // enqueued. NOT completed, and this door never pretends otherwise.
@@ -617,19 +727,43 @@ long long fk_metal_enqueue_external(long long pipe, const char *binding,
 // outstanding — that number IS the evidence that enqueue did not block.
 long long fk_metal_sync_external(void) {
     @autoreleasepool {
-        if (fk_cb == nil) { return 0; }
-        long long n = fk_pending;
-        [fk_enc endEncoding];
-        [fk_cb commit];
-        [fk_cb waitUntilCompleted];
-        if ([fk_cb error] != nil) {
-            fk_err([NSString stringWithFormat:@"dispatch: %@", [[fk_cb error] localizedDescription]]);
-            n = -1;
+        long long n = 0;
+        int had_work = 0;
+        // Everything in flight drains first — a fence the caller stopped tracking
+        // still completes here, so sync remains the one word that means "the GPU
+        // holds nothing of ours".
+        if (fk_inflight != nil && [fk_inflight count] > 0) {
+            for (NSNumber *key in [fk_inflight allKeys]) {
+                id<MTLCommandBuffer> cb = fk_inflight[key];
+                [cb waitUntilCompleted];
+                if ([cb error] != nil) {
+                    fk_err([NSString stringWithFormat:@"dispatch: %@",
+                            [[cb error] localizedDescription]]);
+                    return -1;
+                }
+                n += [fk_inflight_n[key] longLongValue];
+            }
+            [fk_inflight removeAllObjects];
+            [fk_inflight_n removeAllObjects];
+            had_work = 1;
         }
-        fk_enc = nil;
-        fk_cb = nil;
-        fk_pending = 0;
-        fk_total_sync++;
+        if (fk_cb != nil) {
+            n += fk_pending;
+            [fk_enc endEncoding];
+            [fk_cb commit];
+            [fk_cb waitUntilCompleted];
+            if ([fk_cb error] != nil) {
+                fk_err([NSString stringWithFormat:@"dispatch: %@",
+                        [[fk_cb error] localizedDescription]]);
+                n = -1;
+            }
+            fk_enc = nil;
+            fk_cb = nil;
+            fk_pending = 0;
+            fk_batch_concurrent = 0;
+            had_work = 1;
+        }
+        if (had_work) { fk_total_sync++; }
         return n;
     }
 }
@@ -641,13 +775,14 @@ long long fk_metal_sync_external(void) {
 long long fk_metal_buf_read_external(long long h, long long off, long long len,
                                      char *out, long long cap) {
     @autoreleasepool {
-        if (fk_cb != nil) {
+        if (fk_cb != nil || (fk_inflight != nil && [fk_inflight count] > 0)) {
             if (fk_metal_sync_external() < 0) { return -1; }
         }
-        id<MTLBuffer> b = fk_buf_at(h);
-        if (b == nil) { fk_err([NSString stringWithFormat:@"buf_read: bad handle %lld", h]); return -1; }
+        long long slot = fk_buf_slot(h);
+        if (slot == 0) { fk_err([NSString stringWithFormat:@"buf_read: bad handle %lld", h]); return -1; }
+        id<MTLBuffer> b = fk_buf_objs[(NSUInteger)(slot - 1)];
         if (off < 0 || len < 0 || len > cap) { fk_err(@"buf_read: off/len out of range"); return -1; }
-        fk_bufmeta *m = &fk_buf_meta[h - 1];
+        fk_bufmeta *m = &fk_buf_meta[slot - 1];
         if ((unsigned long long)(off + len) > m->view_len) {
             fk_err([NSString stringWithFormat:@"buf_read: [%lld,%lld) past view_len %llu",
                     off, off + len, m->view_len]);
@@ -655,6 +790,114 @@ long long fk_metal_buf_read_external(long long h, long long off, long long len,
         }
         memcpy(out, (const char *)[b contents] + m->view_off + off, (size_t)len);
         return len;   // all of it, or the error above. Never a short read.
+    }
+}
+
+long long fk_metal_batch_concurrent_external(void) {
+    @autoreleasepool {
+        NSString *err = nil;
+        if (!fk_metal_up(&err)) { fk_err(err); return 0; }
+        // Arming is refused while a batch is open: switching an encoder's dispatch
+        // type mid-batch is not a thing Metal has, and pretending by silently
+        // deferring the flag would make the NEXT batch concurrent long after the
+        // cell stopped meaning it.
+        if (fk_cb != nil) {
+            fk_err(@"batch_concurrent: a batch is already open; sync or submit it first");
+            return 0;
+        }
+        fk_next_concurrent = 1;
+        return 1;
+    }
+}
+
+long long fk_metal_buf_free_external(long long h) {
+    @autoreleasepool {
+        long long slot = fk_buf_slot(h);
+        if (slot == 0) {
+            fk_err([NSString stringWithFormat:@"buf_free: bad handle %lld", h]);
+            return -1;
+        }
+        // Only at a quiescent point. For a plain buffer Metal would keep the object
+        // alive through any command buffer that references it, but an mmap'd one is
+        // OUR mapping under Metal's object — munmap while a dispatch reads it is a
+        // fault Metal cannot see coming. One rule for both kinds, stated: free when
+        // nothing is open and nothing is in flight.
+        if (fk_cb != nil || (fk_inflight != nil && [fk_inflight count] > 0)) {
+            fk_err(@"buf_free: work is open or in flight; sync first");
+            return -1;
+        }
+        fk_bufmeta *m = &fk_buf_meta[slot - 1];
+        if (m->map_base != NULL) { munmap(m->map_base, m->map_len); }
+        if (m->nocopy) { fk_nocopy_bufs--; }
+        m->map_base = NULL;
+        m->map_len = 0;
+        m->view_off = 0;
+        m->view_len = 0;
+        m->nocopy = 0;
+        fk_buf_objs[(NSUInteger)(slot - 1)] = [NSNull null];
+        fk_buf_gen[slot - 1] = (fk_buf_gen[slot - 1] + 1) & 0xFFFF;
+        fk_free_slots[fk_free_top] = slot;
+        fk_free_top++;
+        return 1;
+    }
+}
+
+long long fk_metal_submit_external(void) {
+    @autoreleasepool {
+        if (fk_cb == nil) {
+            fk_err(@"submit: no open batch");
+            return 0;
+        }
+        if (fk_pending == 0) {
+            // An empty batch earns no fence — a caller waiting on it would learn
+            // nothing, and a fence id for nothing is a number wearing a meaning.
+            [fk_enc endEncoding];
+            [fk_cb commit];
+            [fk_cb waitUntilCompleted];
+            fk_enc = nil;
+            fk_cb = nil;
+            fk_batch_concurrent = 0;
+            fk_err(@"submit: batch had no dispatches");
+            return 0;
+        }
+        if (fk_inflight == nil) {
+            fk_inflight = [NSMutableDictionary dictionary];
+            fk_inflight_n = [NSMutableDictionary dictionary];
+        }
+        [fk_enc endEncoding];
+        [fk_cb commit];   // committed, NOT waited — that is the whole point
+        long long fence = fk_fence_next;
+        fk_fence_next++;
+        fk_inflight[@(fence)] = fk_cb;
+        fk_inflight_n[@(fence)] = @(fk_pending);
+        fk_enc = nil;
+        fk_cb = nil;
+        fk_pending = 0;
+        fk_batch_concurrent = 0;
+        return fence;
+    }
+}
+
+long long fk_metal_fence_wait_external(long long fence) {
+    @autoreleasepool {
+        if (fk_inflight == nil || fk_inflight[@(fence)] == nil) {
+            // Unknown and already-drained fences answer alike, and the refusal is
+            // spoken: a wait that "succeeds" on a fence nobody issued is how a
+            // double-buffered loop drifts one token out of step silently.
+            fk_err([NSString stringWithFormat:@"fence_wait: no in-flight fence %lld", fence]);
+            return 0;
+        }
+        id<MTLCommandBuffer> cb = fk_inflight[@(fence)];
+        long long n = [fk_inflight_n[@(fence)] longLongValue];
+        [cb waitUntilCompleted];
+        [fk_inflight removeObjectForKey:@(fence)];
+        [fk_inflight_n removeObjectForKey:@(fence)];
+        if ([cb error] != nil) {
+            fk_err([NSString stringWithFormat:@"dispatch: %@", [[cb error] localizedDescription]]);
+            return -1;
+        }
+        fk_total_sync++;
+        return n;   // how many dispatches this fence held — proof they were outstanding
     }
 }
 
@@ -671,10 +914,16 @@ long long fk_metal_status_external(char *out, long long cap) {
         NSMutableString *r = [NSMutableString string];
         [r appendString:@"metal_owner=fkwu-form-cli\nmetal_linked=true\nmetal_door=handle\n"];
         [r appendFormat:@"device=%@\nunified_memory=%d\n", [fk_dev name], (int)[fk_dev hasUnifiedMemory]];
-        [r appendFormat:@"buffers=%lu\npipelines=%lu\n",
-            (unsigned long)[fk_buf_objs count], (unsigned long)[fk_pipe_objs count]];
+        [r appendFormat:@"buffers=%lld\npipelines=%lu\n",
+            (long long)[fk_buf_objs count] - fk_free_top, (unsigned long)[fk_pipe_objs count]];
+        [r appendFormat:@"buffer_slots=%lu\nfree_slots=%lld\n",
+            (unsigned long)[fk_buf_objs count], fk_free_top];
         [r appendFormat:@"mmap_nocopy_buffers=%lld\n", fk_nocopy_bufs];
         [r appendFormat:@"pending=%lld\n", fk_pending];
+        [r appendFormat:@"batch=%s\n",
+            fk_cb == nil ? "none" : (fk_batch_concurrent ? "concurrent" : "serial")];
+        [r appendFormat:@"in_flight=%lu\n",
+            (unsigned long)(fk_inflight == nil ? 0 : [fk_inflight count])];
         [r appendFormat:@"total_dispatch=%lld\ntotal_sync=%lld\n", fk_total_dispatch, fk_total_sync];
         [r appendFormat:@"last_error=%@\n", fk_last_err == nil ? @"none" : fk_last_err];
         return fk_emit(out, cap, r);

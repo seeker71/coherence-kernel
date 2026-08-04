@@ -126,4 +126,39 @@
     (print_str (str_concat "us/call B " (int_to_str (floor (div (mul (sub b1 b0) 1000) n)))))
     (print_str (str_concat "us/call C " (int_to_str (floor (div (mul (sub c1 c0) 1000) n)))))
     (print_str (str_concat "us/call C+sync " (int_to_str (floor (div (mul (sub c2 c0) 1000) n)))))
+
+    ; ---- D/E: the ENCODER's dispatch type, serial vs concurrent ---------------------------
+    ; n INDEPENDENT dispatches (each into its own output buffer, so there is no hazard
+    ; and no barrier) built into one batch, then one sync. The same work twice; only the
+    ; encoder's dispatch type differs. Read the caveat before quoting these numbers: the
+    ; kernels here are 4x4 matvecs, far too small to occupy this GPU, so what this
+    ; measures is the DOOR's cost of each mode plus how much the serializer charges for
+    ; ordering tiny kernels — not the 3x a real 43-layer workload saw. The workload-level
+    ; number belongs to the port that runs real kernels through this same surface.
+    (defn tmp-ind (i n pipe hW hx acc)
+        (if (ge i n) acc
+            (do (let hy (metal_buf_alloc 16))
+                (tmp-ind (add i 1) n pipe hW hx
+                    (add acc (metal_enqueue pipe (tmp-bind hW hx hy 4 4) 4))))))
+
+    (let d0 (now_unix_ms))
+    (let rd (tmp-ind 0 n pipe hW hx 0))
+    (let d1 (now_unix_ms))
+    (let ddr (metal_sync))
+    (let d2 (now_unix_ms))
+
+    (let earm (metal_batch_concurrent))
+    (let e0 (now_unix_ms))
+    (let re (tmp-ind 0 n pipe hW hx 0))
+    (let e1x (now_unix_ms))
+    (let edr (metal_sync))
+    (let e2x (now_unix_ms))
+
+    (print_str (str_concat "D serial-encoder   enq-ms " (str_concat (int_to_str (sub d1 d0))
+        (str_concat "  sync-ms " (str_concat (int_to_str (sub d2 d1))
+        (str_concat "  drained " (int_to_str ddr)))))))
+    (print_str (str_concat "E concurrent-enc   enq-ms " (str_concat (int_to_str (sub e1x e0))
+        (str_concat "  sync-ms " (str_concat (int_to_str (sub e2x e1x))
+        (str_concat "  drained " (str_concat (int_to_str edr)
+                    (str_concat "  armed " (int_to_str earm)))))))))
     (add (sub b1 b0) 0))
