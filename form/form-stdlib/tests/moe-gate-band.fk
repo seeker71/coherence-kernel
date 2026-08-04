@@ -1,0 +1,95 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/sampling.fk form-stdlib/moe-gate.fk
+;
+; moe-gate-band — Mixture-of-Experts GATING proven four-way: router matvec → softmax → top-k
+; expert mask → weighted mix, at honest scale d=4 / E=8 / k=2 (the top-16-of-896 shape of
+; kimi-k3-in-c, our oracle for the frontier-scale-MoE ladder). Every value is reduced to an
+; integer at 1e-6 and pinned by EQUALITY; the pinned integers were EMITTED FROM the recipe
+; (moe-gate-probe run, three-way agreed) and hand-checked:
+;
+; Fixtures:
+;   x  = [0.5, -1.0, 2.0, 0.25]                        (d=4 input)
+;   Wr = 8x4 router rows chosen so logits = Wr·x = [1.5, 2.0, 1.0, -1.0, 0.5, 0.0, 3.0, 0.5]
+;   expert_e = (e+1)·I4                                 (diagonal, so expert_e(x) = (e+1)·x —
+;                                                        the mix is hand-checkable as s·x)
+;
+; Verdict 511 when every claim lands:
+;   1   router logits x1e6      = [1500000,2000000,1000000,-1000000,500000,0,3000000,500000]
+;   2   gate probs x1e6         = [113922,187826,69097,9351,41910,25419,510564,41910]
+;   4   gate probs sum to 1     = 1000000
+;   8   top-2 mask x1e6         = [0,268941,0,0,0,0,731059,0]   (kept e6,e1 renormalize to
+;                                  σ(1)=0.731059 / 0.268941 — the logistic of the logit gap 1.0)
+;   16  top-2 mask nonzeros     = 2                              (exactly k experts survive)
+;   32  top-2 mask sums to 1    = 1000000
+;   64  moe-forward k=2 x1e6    = [2827646,-5655293,11310586,1413823]
+;                                  (s = 0.268941·2 + 0.731059·7 = 5.655293; out = s·x)
+;   128 POISON invariance: the six unpicked experts replaced by 1e9·I4 → the SAME out ints.
+;                                  A zero gate SKIPS its expert in moe-mix — the unpicked
+;                                  expert's weights are never read; compute scales with k,
+;                                  not E. This is the MoE sparsity teaching as a pinned claim.
+;   256 moe-forward k=8 x1e6    = [2502782,-5005564,10011127,1251391]
+;                                  (full soft mix: s = Σ g_e·(e+1) = 5.005564)
+(do
+    (defn mgb-ints (v)
+      (if (eq (len v) 0) (empty) (cons (round (mul (head v) 1000000.0)) (mgb-ints (tail v)))))
+    (defn mgb-ieq (a b)
+      (if (eq (len a) 0) (eq (len b) 0)
+          (if (eq (len b) 0) false
+              (if (eq (head a) (head b)) (mgb-ieq (tail a) (tail b)) false))))
+    (defn mgb-nonzeros (v)
+      (if (eq (len v) 0) 0
+          (add (if (eq (head v) 0.0) 0 1) (mgb-nonzeros (tail v)))))
+
+    ; --- fixtures ---
+    (let x (list 0.5 -1.0 2.0 0.25))
+    (let Wr (list (list 1.0 0.0 0.5 0.0)
+                  (list 0.0 -1.0 0.5 0.0)
+                  (list 1.0 0.0 0.0 2.0)
+                  (list 0.0 1.0 0.0 0.0)
+                  (list 0.5 0.0 0.0 1.0)
+                  (list -1.0 0.0 0.0 2.0)
+                  (list 2.0 -1.0 0.5 0.0)
+                  (list 0.0 0.0 0.25 0.0)))
+    (defn mgb-diag-row (n i s)
+      (if (eq n 0) (empty)
+          (cons (if (eq i 0) s 0.0) (mgb-diag-row (sub n 1) (sub i 1) s))))
+    (defn mgb-diag (n i s)
+      (if (eq i n) (empty)
+          (cons (mgb-diag-row n i s) (mgb-diag n (add i 1) s))))
+    (defn mgb-experts (e s n)
+      (if (eq e 8) (empty)
+          (cons (mgb-diag n 0 s) (mgb-experts (add e 1) (add s 1.0) n))))
+    (let experts (mgb-experts 0 1.0 4))
+    ; poison experts: picked e1/e6 keep their true scales, the six unpicked get 1e9·I4
+    (defn mgb-poison (e n)
+      (if (eq e 8) (empty)
+          (cons (mgb-diag n 0 (if (eq e 1) 2.0 (if (eq e 6) 7.0 1000000000.0)))
+                (mgb-poison (add e 1) n))))
+    (let poisoned (mgb-poison 0 4))
+
+    ; --- the walk ---
+    (let logits (tb-matvec Wr x))
+    (let gates (moe-router Wr x))
+    (let g2 (moe-gate-topk gates 2))
+    (let out (moe-forward Wr experts x 2))
+    (let outp (moe-forward Wr poisoned x 2))
+    (let outfull (moe-forward Wr experts x 8))
+
+    ; --- pinned integers (emitted from the recipe, three-way agreed, hand-checked above) ---
+    (let logits-want (list 1500000 2000000 1000000 -1000000 500000 0 3000000 500000))
+    (let gates-want (list 113922 187826 69097 9351 41910 25419 510564 41910))
+    (let g2-want (list 0 268941 0 0 0 0 731059 0))
+    (let out-want (list 2827646 -5655293 11310586 1413823))
+    (let outfull-want (list 2502782 -5005564 10011127 1251391))
+
+    ; --- claims ---
+    (let c0 (if (mgb-ieq (mgb-ints logits) logits-want) 1 0))
+    (let c1 (if (mgb-ieq (mgb-ints gates) gates-want) 2 0))
+    (let c2 (if (eq (round (mul (tn-sum gates) 1000000.0)) 1000000) 4 0))
+    (let c3 (if (mgb-ieq (mgb-ints g2) g2-want) 8 0))
+    (let c4 (if (eq (mgb-nonzeros g2) 2) 16 0))
+    (let c5 (if (eq (round (mul (tn-sum g2) 1000000.0)) 1000000) 32 0))
+    (let c6 (if (mgb-ieq (mgb-ints out) out-want) 64 0))
+    (let c7 (if (mgb-ieq (mgb-ints outp) (mgb-ints out)) 128 0))
+    (let c8 (if (mgb-ieq (mgb-ints outfull) outfull-want) 256 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7 c8)))))))))
