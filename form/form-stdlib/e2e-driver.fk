@@ -1,0 +1,96 @@
+; e2e-driver.fk — the END-TO-END CHAT DRIVER: one composition shell for the whole conversation lane —
+; template -> tokenize -> forward -> sample -> detokenize -> transcript. Each stage binds to a NAMED
+; cell; the shell is the fixed spine the landing pieces snap into (llama-tokenizer, tensor staging,
+; wide forward, asm nonlinears), so composition order is proven ONCE, here, and stays proven as each
+; stage's binding widens from fixture scale to full width.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/gqa-attn.fk form-stdlib/llama-block.fk form-stdlib/llama-gqa-block.fk form-stdlib/kv-cache.fk form-stdlib/kv-llama-block.fk form-stdlib/kv-gqa-llama-block.fk form-stdlib/multi-layer-stack.fk form-stdlib/gqa-multi-layer-stack.fk form-stdlib/greedy-decode.fk form-stdlib/llama-generate.fk
+;
+; THE LAW OF THIS CELL: the driver never fabricates. A stage either runs a proven recipe over real
+; data, or it REFUSES and the transcript says exactly where the lane stopped. There is no canned
+; response path anywhere below — a refusal is (0 tpl () ()), never invented text.
+;
+; Stage bindings TODAY (ed-lane-table), provenance codes 2=native-full-width 1=proven-recipe-at-
+; reduced-width-or-fixture-scale 0=pending-no-proven-binding:
+;   1 template    1  byte-list composition (ed-template), proven by tests/e2e-driver-band.fk;
+;                    the real llama3.2 chat template bytes ride the same recipe at the witness.
+;   2 tokenize    0  PENDING. llama3-pretokenize.fk (fks 255) proves the splitter and
+;                    bpe-tokenizer.fk (fks 31) the merge core, but the llama3 rank TABLE carrier
+;                    has not landed (claude/tokenizer-carriers). ed-tokenize below is the fixture-
+;                    scale binding: exact byte->id lookup, REFUSING (status 0) on any unmapped byte.
+;   3 forward     1  proven recipe at reduced width: lg-generate-cached (llama-generate.fk, fks 255),
+;                    fed real llama3.2:3b Q6_K bytes through real-gguf-generate.fk's rgg lane at the
+;                    width that is real today (dim=4, 1 layer). Full width d=3072 x 28 layers is the
+;                    wide-forward lane, pending.
+;   4 sample      1  greedy argmax (greedy-decode.fk gd-token) — the k=1 special case of the proven
+;                    sampled draw (llama-sample-generate.fk fks 255, sampling.fk fks 255): greedy is
+;                    NOT a parallel path, it is top-k(1) with any seed.
+;   5 detokenize  0  PENDING with the same rank-table carrier as tokenize. ed-detokenize below is
+;                    the fixture-scale inverse lookup, live only where the vocab binding is live.
+;
+; Kin: llama-generate.fk (the loop this drives), real-gguf-generate.fk (the real-weight lane the
+; forward stage rides), sampling.fk / llama-sample-generate.fk (the draw the sample stage reduces
+; to greedy from), llama3-pretokenize.fk (the proven half of the pending tokenize binding).
+; Host IO stays outside: the witness carrier (scripts/e2e_driver_witness.sh) hands in prompt bytes
+; and weight bytes; every structural decision below is Form.
+;
+; Proven by: form-stdlib/tests/e2e-driver-band.fk
+
+(do
+    ; --- provenance codes and today's lane table: (stage-id provenance) per stage, canonical order ---
+    (defn ed-prov-native ()  2)
+    (defn ed-prov-reduced () 1)
+    (defn ed-prov-pending () 0)
+    (defn ed-lane-table ()
+        (list (list 1 (ed-prov-reduced))
+              (list 2 (ed-prov-pending))
+              (list 3 (ed-prov-reduced))
+              (list 4 (ed-prov-reduced))
+              (list 5 (ed-prov-pending))))
+
+    ; --- list carving shared by the stages ---
+    (defn ed-append (a b) (if (eq (len a) 0) b (cons (head a) (ed-append (tail a) b))))
+    (defn ed-drop (xs n) (if (eq n 0) xs (ed-drop (tail xs) (sub n 1))))
+
+    ; --- STAGE 1, template: chat-template bytes around the prompt bytes. Pure composition; the
+    ;     real llama3.2 header/footer byte lists ride this same recipe at the witness. ---
+    (defn ed-template (pre ps suf) (ed-append pre (ed-append ps suf)))
+
+    ; --- STAGE 2, tokenize: exact byte->id lookup over the bound vocab. Returns (cons 1 ids) when
+    ;     EVERY byte maps, (cons 0 ()) the moment one does not — refusal, never a guessed id. ---
+    (defn ed-vocab-idx (vocab b i)
+        (if (eq (len vocab) 0) (sub 0 1)
+            (if (eq (head vocab) b) i (ed-vocab-idx (tail vocab) b (add i 1)))))
+    (defn ed-tokenize-loop (vocab bs acc)
+        (if (eq (len bs) 0) (cons 1 acc)
+            (do (let id (ed-vocab-idx vocab (head bs) 0))
+                (if (lt id 0) (cons 0 (empty))
+                    (ed-tokenize-loop vocab (tail bs) (ed-append acc (cons id (empty))))))))
+    (defn ed-tokenize (vocab bs) (ed-tokenize-loop vocab bs (empty)))
+
+    ; --- STAGES 3+4, forward+sample: the proven KV-cached greedy loop, tied unembed (llama3.2 ties
+    ;     unembed = token_embd). Greedy IS the sample stage at k=1 (llama-sample-generate's law). ---
+    (defn ed-generate (ids tok layers gf eps scale n_q n_kv HD c steps)
+        (lg-generate-cached ids tok layers gf tok eps scale n_q n_kv HD c steps))
+    (defn ed-generate-recompute (ids tok layers gf eps scale n_q n_kv HD c steps)
+        (lg-generate ids tok layers gf tok eps scale n_q n_kv HD c steps))
+
+    ; --- STAGE 5, detokenize: inverse lookup, live only where the vocab binding is live ---
+    (defn ed-detokenize (vocab ids)
+        (if (eq (len ids) 0) (empty)
+            (cons (nth vocab (head ids)) (ed-detokenize vocab (tail ids)))))
+
+    ; --- THE DRIVER: template -> tokenize -> forward+sample -> detokenize -> transcript.
+    ;     Transcript is (status tpl gen txt): status 1 = every stage ran on a live binding;
+    ;     status 0 = the lane STOPPED at tokenize — tpl is real, gen and txt are honestly empty. ---
+    (defn ed-run (pre ps suf vocab tok layers gf eps scale n_q n_kv HD c steps)
+        (do (let tpl (ed-template pre ps suf))
+            (let tk  (ed-tokenize vocab tpl))
+            (if (eq (head tk) 0)
+                (list 0 tpl (empty) (empty))
+                (do (let ids (tail tk))
+                    (let gen (ed-generate ids tok layers gf eps scale n_q n_kv HD c steps))
+                    (let txt (ed-detokenize vocab (ed-drop gen (len ids))))
+                    (list 1 tpl gen txt)))))
+
+    0)
