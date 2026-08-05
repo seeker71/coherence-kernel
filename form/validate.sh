@@ -111,25 +111,43 @@ build_rs &
 build_ts &
 wait
 
-# The runtime walker (repo-root fkwu, runtime/fkwu-uni.c) carries the
-# resolver-driven `--src` door that fkwu-only proof-level bands run on.
+# The runtime walker (repo-root fkwu, runtime/fkwu-uni.c) is the fkwu-only
+# proof-level door: `./fkwu path/to/file.fk` resolves that file's own
+# `; preludes:` directives and runs it — no flag. (`--src` used to be typed
+# in front of the file; it hit the identical fk_run_src() code path as the
+# bare-filename form, so it added a word without adding a behavior. Retired.)
 # Distinct from the emitted fourth-arm walker (bootstrap uni.c): that one
-# walks pre-flattened tables; this one resolves `; preludes:` directives.
+# walks pre-flattened tables; this one resolves `; preludes:` directives live.
+#
+# METAL IS PART OF THIS BUILD, NOT A SEPARATE ONE. fk-metal-carrier.m overrides
+# weak Metal stubs already declared in fkwu-uni.c (FK_METAL_WEAK); on a host
+# without the framework the same binary answers metal_linked=false, same as
+# before. There is exactly one repo-root fkwu — no hand-built "fkwu-metal"
+# sibling, no witness-script-local cc invocation to keep in sync by hand.
 FKWU_SRC=""
 build_fkwu_src() {
-    local src="../runtime/fkwu-uni.c" bin="../fkwu"
+    local src="../runtime/fkwu-uni.c" bin="../fkwu" metal_src="native/metal/fk-metal-carrier.m"
     [[ -f "$src" ]] || return 0
-    if [[ ! -x "$bin" || "$src" -nt "$bin" ]]; then
+    local stale=0
+    [[ ! -x "$bin" || "$src" -nt "$bin" ]] && stale=1
+    [[ -f "$metal_src" && "$metal_src" -nt "$bin" ]] && stale=1
+    if [[ "$stale" == "1" ]]; then
         command -v cc >/dev/null 2>&1 || return 0
-        echo "  building runtime fkwu (repo root, --src door)..." >&2
-        cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+        if [[ "$(uname -s)" == "Darwin" && -f "$metal_src" ]]; then
+            echo "  building runtime fkwu (repo root, Metal linked)..." >&2
+            cc -O2 -o "$bin" "$src" "$metal_src" -framework Metal -framework Foundation -fobjc-arc 2>/dev/null \
+                || { echo "  Metal link failed — falling back to a plain build" >&2; cc -O2 -o "$bin" "$src" 2>/dev/null || return 0; }
+        else
+            echo "  building runtime fkwu (repo root)..." >&2
+            cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+        fi
     fi
     [[ -x "$bin" ]] && FKWU_SRC="$bin"
 }
 build_fkwu_src
 
 # A band may declare its proof level in its comment head:
-#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu (--src),
+#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu,
 #     compared against the first "Verdict <n>" its head declares. Loud
 #     pass/fail — a wrong home-arm answer is a real failure, never skipped.
 #   ; PROOF LEVEL: TWO-ARM ...            → the band's bytes only ARRIVE on some arms
@@ -527,7 +545,7 @@ run_workload() {
             # AND zero axiom-5 diagnostics on stderr.
             local lane_out lane_diags
             lane_out="$(mktemp "${TMPDIR:-/tmp}/form-fkwu-lane.XXXXXX")"
-            answered="$( (cd .. && ./fkwu --src "form/$band") 2>"$lane_out" | tail -1 || true)"
+            answered="$( (cd .. && ./fkwu "form/$band") 2>"$lane_out" | tail -1 || true)"
             lane_diags="$(grep -c "unresolved-call\|error:" "$lane_out" 2>/dev/null || true)"
             rm -f "$lane_out"
             if [[ "${lane_diags:-0}" -gt 0 ]]; then
@@ -571,7 +589,7 @@ run_workload() {
             go_ans="$("$GO_BIN" "${prepared_args[@]}" 2>/dev/null | tail -1 || true)"
             fkwu_ans=""
             if [[ -n "$FKWU_SRC" ]]; then
-                fkwu_ans="$( (cd .. && ./fkwu --src "form/$band") 2>/dev/null | tail -1 || true)"
+                fkwu_ans="$( (cd .. && ./fkwu "form/$band") 2>/dev/null | tail -1 || true)"
             fi
             if [[ "$go_ans" == "$declared" && ( -z "$fkwu_ans" || "$fkwu_ans" == "$declared" ) ]]; then
                 printf "  ✓  %-30s  → %s (two-arm lane: go%s; rust/ts decline the binary read)\n" \
@@ -760,7 +778,7 @@ elif [[ $ok -gt 0 ]]; then
     echo "              scripts/fourth-arm.sh fourth_emit_chain_stamp."
 fi
 if [[ $fkwu_only -gt 0 ]]; then
-    echo "  fkwu-only lanes: $fkwu_only band(s) at declared proof level (runtime fkwu --src)"
+    echo "  fkwu-only lanes: $fkwu_only band(s) at declared proof level (runtime fkwu)"
 fi
 if [[ $staged -gt 0 ]]; then
     echo "  staged lanes pending: $staged band(s) need an absent host carrier — not witnessed"
