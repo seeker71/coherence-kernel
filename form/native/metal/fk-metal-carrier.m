@@ -9,7 +9,13 @@
 // that missing side. Nothing in the kernel changes; linking this translation unit in overrides
 // the weak stubs, and the SAME Form cell that printed SKIP yesterday dispatches on the GPU.
 //
-//   cc -O2 -o fkwu-metal runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
+// BUILD. Metal linking is automatic: validate.sh's own build_fkwu_src links this file into the
+// repo-root fkwu by default on Darwin (falling back to a plain build elsewhere or on link
+// failure) — there is no separate binary to hand-compile and no "fkwu-metal" name. For a
+// standalone build outside validate.sh (direct experimentation), the same one-liner produces
+// the same binary, just named fkwu, not "fkwu-metal":
+//
+//   cc -O2 -o fkwu runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
 //      -framework Metal -framework Foundation -fobjc-arc
 //
 // WHY THIS IS NATIVE AND THAT IS NOT A COMPROMISE. Metal is reachable only through an Objective-C
