@@ -713,9 +713,21 @@ func resolveKernelHostPath(path string) string {
 	}
 	slashPath := filepath.ToSlash(path)
 	if slashPath == "form-stdlib" || strings.HasPrefix(slashPath, "form-stdlib/") {
+		// The working directory is the first authority: a caller standing
+		// inside the kernel tree already names the file correctly.
+		if _, err := os.Stat(filepath.FromSlash(slashPath)); err == nil {
+			return path
+		}
+		// From a host-repo root the kernel tree is nested (form/form/…);
+		// older flat checkouts and container images carry form/… directly.
 		root, err := findRepoRoot()
 		if err == nil {
-			return filepath.Join(root, "form", filepath.FromSlash(slashPath))
+			for _, base := range []string{filepath.Join(root, "form", "form"), filepath.Join(root, "form")} {
+				candidate := filepath.Join(base, filepath.FromSlash(slashPath))
+				if _, statErr := os.Stat(candidate); statErr == nil {
+					return candidate
+				}
+			}
 		}
 	}
 	return path
