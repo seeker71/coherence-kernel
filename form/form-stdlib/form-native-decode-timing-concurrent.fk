@@ -1,0 +1,162 @@
+; form-native-decode-timing-concurrent.fk — the SAME probe form-native-decode-timing.fk runs (424
+; real form_rmsnorm_f32 dispatches against real blk.0.attn_norm.weight bytes, one sync at the end),
+; with exactly ONE line added: (metal_batch_concurrent), called once before the enqueue loop opens
+; its command buffer, arming MTLDispatchTypeConcurrent instead of the door's serial default. This
+; answers one question and one question only: how much of the serial probe's enqueue+sync cost was
+; the encoder's own MTLDispatchTypeSerial "in order, implicit barrier between every pair" contract
+; (Metal's documented behavior — fk-metal-carrier.m's own header for fk_batch_concurrent names the
+; same trap), independent of how cheap or expensive form_rmsnorm_f32 itself is.
+;
+; WHY CONCURRENT IS SAFE HERE, NOT ASSUMED: form-native-decode-timing.fk's own header (the file this
+; one otherwise mirrors byte-for-byte in shape) states it plainly and the alloc loop proves it — N
+; FRESH output buffers, one per dispatch, allocated before any enqueue. Every one of the N dispatches
+; reads the same two resident, never-written-during-the-batch handles (hx the synthetic input, hg the
+; real gain tensor) and writes its own distinct slot in `ys`. No dispatch writes what another reads or
+; writes: no WAW, no RAW, no WAR between any pair of the 424. That is why this file passes barrier=0
+; (via plain md-bind, no tail) into a concurrent batch rather than reaching for md-bind16's
+; barrier_before — there is no real data dependency between any two of these dispatches for a barrier
+; to protect, and fk-metal-carrier.m itself never orders a concurrent batch's dispatches unless the
+; cell asks with barrier_before=1 (metal-door.fk's own header, "this door does not guess hazards").
+; Had the probe instead reused one output buffer across all N calls, concurrent dispatch WITHOUT a
+; barrier on every one of them would be a genuine write-after-write race and this file would need to
+; either serialize with barriers (defeating the point) or refuse concurrent mode outright — that is
+; not the shape this probe has, so that branch is named here and not taken.
+;
+; metal_batch_concurrent is refused if a batch is already open (fk_cb != nil), so it is called AFTER
+; the N-buffer alloc loop (metal_buf_alloc never opens a command buffer — it is a resource call, not
+; an encoder call) and BEFORE the first metal_enqueue of the timed loop, which is the call that opens
+; the encoder and reads the armed flag. It arms only the batch about to open; nothing here reaches for
+; barrier_before because nothing in this probe needs an order.
+;
+; WHAT THIS DOES AND DOES NOT PROVE, same discipline as the file it mirrors: even a dramatic swing in
+; the printed numbers below would show that SERIAL ENCODING, not the RMSNorm kernel itself, was the
+; dominant tax on the merged probe's ~390-398us/dispatch — it would not make form_rmsnorm_f32 itself
+; any faster, it would not prove anything about a real 424-dispatch heterogeneous decode forward (which
+; mixes many different kernels with real data dependencies between them, not one kernel repeated on
+; fixed inputs), and it does not by itself close the gap between this measurement and any observed
+; tok/s. NOT A BAND for the same reason the file it mirrors is not one: a wall-clock duration is not a
+; four-way-provable value, and Metal has no Go/Rust/TS arm to cross-check a millisecond against.
+;
+; Kin: form-stdlib/form-native-decode-timing.fk (the serial probe this mirrors exactly but for the one
+;      armed flag), form-stdlib/form-native-decode.fk (fnd-run, the one-dispatch proof both repeat),
+;      form-stdlib/metal-door.fk (md-bind / md-bind16, the binding-string contract; the concurrent-arm
+;      header comment on fk_batch_concurrent), native/metal/fk-metal-carrier.m (fk_metal_enqueue_external,
+;      fk_metal_batch_concurrent_external — read directly to confirm the arm-before-open contract).
+;
+; RUN (needs the carrier linked; plain ./fkwu answers metal_linked=false and every duration is ~0):
+;   cc -O2 -o fkwu-metal runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
+;      -framework Metal -framework Foundation -fobjc-arc
+;   ./fkwu-metal --src form/form-stdlib/form-native-decode-timing-concurrent.fk
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/metal-door.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk native/metal/whole-tensor-residency.fk form-stdlib/llama-decode-msl.fk form-stdlib/llama-numerics.fk form-stdlib/form-native-decode.fk
+
+(do
+    ; N is a plain nullary defn, matching the serial probe's own 424 (llama3.2:3b, 28 layers,
+    ; metal_first_token.sh's measured per-forward dispatch count).
+    (defn fndtc-n () 424)
+
+    ; ---- N fresh output buffers, timed on their own, exactly as the serial probe does ----------
+    (defn fndtc-alloc-loop (i n d acc)
+        (if (ge i n) (reverse acc)
+            (fndtc-alloc-loop (add i 1) n d (cons (metal_buf_alloc (mul d 4)) acc))))
+
+    ; ---- the timed enqueue loop: identical binding shape to the serial probe (plain md-bind, no
+    ; ---- tail, barrier defaults to 0) — the only difference is WHICH dispatch type the encoder that
+    ; ---- opens on the first call was armed with, decided once, before this loop starts.
+    (defn fndtc-enq-loop (i n pipe hx hg d ebits ys acc)
+        (if (ge i n) acc
+            (fndtc-enq-loop (add i 1) n pipe hx hg d ebits (tail ys)
+                (add acc (metal_enqueue pipe (md-bind (list hx hg (head ys)) (list d ebits)) 1)))))
+
+    (defn fndtc-run ()
+        (do
+            (let live (md-door-live?))
+            (let path (fnd-blob-path))
+            (let src (fnd-src path))
+            (let d (fnd-dmodel src))
+            (let eps (fnd-eps src))
+            (let ebits (md-f32-bits eps))
+            (let gnabs (fnd-norm-abs src path))
+            (let n (fndtc-n))
+
+            ; resident, built ONCE: the real gain tensor (mmap'd, not copied) and the synthetic
+            ; input — the same bytes fnd-run itself uses, so this stays comparable to the n=1 proof
+            ; and to the serial probe.
+            (let hg (metal_buf_from_file path gnabs (mul d 4)))
+            (let hx (metal_buf_alloc (mul d 4)))
+            (let wx (metal_buf_write hx 0 (fnd-x-bytes d)))
+            (let pipe (metal_pipeline (fnd-msl) "form_rmsnorm_f32"))
+
+            ; ---- A: N buffer allocations, timed alone -------------------------------------------
+            (let ta0 (now_unix_ms))
+            (let ys (fndtc-alloc-loop 0 n d (list)))
+            (let ta1 (now_unix_ms))
+
+            ; ---- ARM: the one line this file adds. No batch is open yet (alloc never opens one),
+            ; ---- so this is legal; it arms MTLDispatchTypeConcurrent for the batch the very next
+            ; ---- enqueue call opens. Left OUTSIDE both timed windows (alloc and enqueue) so neither
+            ; ---- number quietly pays for it — it is one primitive call, arity 0, no bytes moved.
+            (let armed (metal_batch_concurrent))
+
+            ; ---- B: N real dispatches enqueued, nothing waited for until every one is in ----------
+            (let te0 (now_unix_ms))
+            (let ok-count (fndtc-enq-loop 0 n pipe hx hg d ebits ys 0))
+            (let te1 (now_unix_ms))
+
+            ; ---- C: ONE sync for the whole batch --------------------------------------------------
+            (let ts0 (now_unix_ms))
+            (let drained (metal_sync))
+            (let ts1 (now_unix_ms))
+
+            ; ---- D: read back and check correctness on the LAST dispatch's output only ------------
+            (let last-hy (head (reverse ys)))
+            (let tr0 (now_unix_ms))
+            (let ybytes (metal_buf_read last-hy 0 (mul d 4)))
+            (let tr1 (now_unix_ms))
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let gpu-y (ewl-gain ybytes 0 d))
+            (let form-y (ln-rmsnorm (fnd-x-list d) gains eps))
+            (let maxdiff (fnd-maxdiff form-y gpu-y))
+
+            (list live n d armed
+                  (sub ta1 ta0) (sub te1 te0) (sub ts1 ts0) (sub tr1 tr0)
+                  drained ok-count maxdiff)))
+
+    (defn fndtc-us-per (ms n) (floor (div (mul ms 1000) n)))
+
+    (defn fndtc-show ()
+        (do
+            (let r (fndtc-run))
+            (let live (nth r 0))
+            (let n (nth r 1))
+            (let d (nth r 2))
+            (let armed (nth r 3))
+            (let alloc-ms (nth r 4))
+            (let enq-ms (nth r 5))
+            (let sync-ms (nth r 6))
+            (let read-ms (nth r 7))
+            (let drained (nth r 8))
+            (let ok-count (nth r 9))
+            (let maxdiff (nth r 10))
+            (let batch-ms (add (add alloc-ms enq-ms) sync-ms))
+
+            (print_str (metal_status))
+            (print_str (str_concat "door-live " (if live "true" "false")))
+            (print_str (str_concat "batch_concurrent armed(want=1) " (int_to_str armed)))
+            (print_str (str_concat "n " (int_to_str n)))
+            (print_str (str_concat "d_model " (int_to_str d)))
+            (print_str (str_concat "ok-count(want=n) " (int_to_str ok-count)))
+            (print_str (str_concat "drained(want=n) " (int_to_str drained)))
+            (print_str (str_concat "max-abs-delta form-vs-gpu(last) " (float_to_str maxdiff)))
+            (print_str (str_concat "alloc-ms " (int_to_str alloc-ms)))
+            (print_str (str_concat "enqueue-ms " (int_to_str enq-ms)))
+            (print_str (str_concat "sync-ms " (int_to_str sync-ms)))
+            (print_str (str_concat "readback-ms(1 buffer) " (int_to_str read-ms)))
+            (print_str (str_concat "alloc+enqueue+sync-ms " (int_to_str batch-ms)))
+            (print_str (str_concat "us/dispatch enqueue-only " (int_to_str (fndtc-us-per enq-ms n))))
+            (print_str (str_concat "us/dispatch enqueue+sync " (int_to_str (fndtc-us-per (add enq-ms sync-ms) n))))
+            (print_str (str_concat "us/dispatch alloc+enqueue+sync " (int_to_str (fndtc-us-per batch-ms n))))
+
+            (if live (if (eq armed 1) (if (eq ok-count n) (if (eq drained n) (if (lt maxdiff 0.001) 1 0) 0) 0) 0) 0)))
+
+    (fndtc-show))
