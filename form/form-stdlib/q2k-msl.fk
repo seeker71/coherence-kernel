@@ -1,0 +1,67 @@
+; q2k-msl.fk — GGUF type 10 (Q2_K) as a Metal kernel the BODY emits, so the quantized bytes are what
+; lives on the GPU and the 2-bit unpack happens THERE.
+;
+; WHY THIS EXISTS. q2k-dequant.fk proved the 84-byte / 256-element block on the CPU floor — 512 of 512
+; elements bit-identical against an independent reference (ds4.c:3466, another hand, another language).
+; But a CPU carver cannot fold a matvec. DeepSeek-V4-Flash's mainline Mac quant puts Q2_K on the w2 /
+; down projections of every expert, so the MoE fold needs the decode on the device.
+;
+; SAME SHAPE AS ITS SIBLINGS, deliberately. iq2xxs-msl.fk and q6k-msl.fk both carry a spine (mod, a
+; power of two, a HAND-WRITTEN f16) and then one `*_w(qb, idx)` that answers a single weight at a flat
+; element index. This follows them character for character in structure, including decoding f16 by the
+; body's own mantissa/exponent arithmetic rather than reaching for Metal's `half` — the arithmetic in a
+; carver is the body's, or the carver is not the body's.
+;
+; NO BIT OPERATORS. q6k-msl and the slot-map work both settled this: div and mod cost nothing once the
+; THREAD MAP is right (metal_isa_diff.sh, 2026-07-28: v3 keeps every division and beats v2 which has
+; none). So the shift is a division by a power of two and the mask is a mod, matching q2k-dequant.fk's
+; CPU arithmetic exactly — one recipe, two carriers.
+;
+; THE TWO TRAPS, carried over from the CPU cell because MSL cannot make them less true:
+;   q_base = 32*(group/8) + 16*(group mod 2), NOT group*16 — a group's two bits live interleaved
+;   across a 32-byte half.
+;   the min stands OUTSIDE the product — per-group, not per-element.
+;
+; preludes: form-stdlib/core.fk form-stdlib/q2k-dequant.fk
+;
+; Proven by: form-stdlib/tests/q2k-msl-band.fk  (the emitted text)
+;            and, once the mainline GGUF lands, a device run against q2k-dequant.fk's own values.
+
+(do
+    ; --- the spine: mod, an unsigned power of two, and f16 by hand. Named q2k_* so it can share a
+    ; translation unit with iq2_* and q6k_* without collision. ---
+    (defn q2km-msl-spine ()
+        "static inline uint q2k_umod(uint a, uint n) { return a - (a / n) * n; } static inline uint q2k_upow2(uint k) { uint a = 1u; for (uint i = 0u; i < k; ++i) a = a * 2u; return a; } static inline float q2k_pow2(int e) { float a = 1.0f; int k = 0; if (e >= 0) { while (k < e) { a = a * 2.0f; k = k + 1; } } else { while (k < -e) { a = a * 0.5f; k = k + 1; } } return a; } static inline int q2k_imod(int a, int n) { return a - (a / n) * n; } static inline float q2k_f16(int bits) { int mant = q2k_imod(bits, 1024); int ex = q2k_imod(bits / 1024, 32); int sgn = bits / 32768; float frac = float(mant) / 1024.0f; float mag = (ex == 0) ? q2k_pow2(-14) * frac : q2k_pow2(ex - 15) * (1.0f + frac); return (sgn == 1) ? -mag : mag; } ")
+
+    ; --- one weight at a flat element index. qb points at the tensor's block-0 byte base.
+    ;     The offsets are ds4.c:759's struct: scales[16]@0, qs[64]@16, d@80, dmin@82, 84 bytes. ---
+    (defn q2km-msl-weight ()
+        "static inline float q2k_w(device const uchar* qb, uint idx) { uint blk = idx / 256u; uint within = idx - blk * 256u; uint b = blk * 84u; uint group = within / 16u; uint l = within - group * 16u; uint qbase = 32u * (group / 8u) + 16u * q2k_umod(group, 2u); uint shift = q2k_umod(group / 2u, 4u) * 2u; uint q = q2k_umod(uint(qb[b + 16u + qbase + l]) / q2k_upow2(shift), 4u); uint sc = uint(qb[b + group]); float d = q2k_f16(int(qb[b + 80u]) + 256 * int(qb[b + 81u])); float dmin = q2k_f16(int(qb[b + 82u]) + 256 * int(qb[b + 83u])); return d * float(q2k_umod(sc, 16u)) * float(q) - dmin * float(sc / 16u); } ")
+
+    (defn q2km-msl-helpers () (str_concat (q2km-msl-spine) (q2km-msl-weight)))
+
+    ; --- the dequant kernel: one thread per weight, exactly q6k-msl / iq2xxs-msl's shape. ---
+    (defn q2km-dequant-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = q2k_w(qb, off + i); } ")))
+
+    ; --- the matvec, SLOT-MAPPED. 32 lanes per row, and the lane strides whole BLOCKS rather than
+    ;     single weights, so every one of a block's 84 bytes is touched by one lane and the two f16
+    ;     reads happen once per block instead of once per weight. That is the same lesson the Q4_K /
+    ;     Q6_K slot map bought (1.65x-2.6x): the map, not the arithmetic. ---
+    (defn q2km-matvec-body (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 256u; uint rowbase = r * nb * 84u; float sumf = 0.0f; for (uint blk = lane; blk < nb; blk += 32u) { uint b = rowbase + blk * 84u; float d = q2k_f16(int(qb[b + 80u]) + 256 * int(qb[b + 81u])); float dmin = q2k_f16(int(qb[b + 82u]) + 256 * int(qb[b + 83u])); device const float* yv = x + blk * 256u; for (uint g = 0u; g < 16u; ++g) { uint sc = uint(qb[b + g]); float ds = d * float(q2k_umod(sc, 16u)); float dm = dmin * float(sc / 16u); uint qbase = 32u * (g / 8u) + 16u * q2k_umod(g, 2u); uint shift = q2k_umod(g / 2u, 4u) * 2u; uint p2 = q2k_upow2(shift); float acc = 0.0f; float xs = 0.0f; for (uint l = 0u; l < 16u; ++l) { float xv = yv[g * 16u + l]; acc += xv * float(q2k_umod(uint(qb[b + 16u + qbase + l]) / p2, 4u)); xs += xv; } sumf += ds * acc - dm * xs; } } float s = metal::simd_sum(sumf); if (lane == 0u) y[r] = s; } ")))
+
+    ; --- one translation unit a carrier can hand to Metal ---
+    (defn q2km-dequant-msl (fname) (str_concat (q2km-msl-helpers) (q2km-dequant-body fname)))
+    (defn q2km-msl-appendix ()
+        (str_concat (q2km-dequant-body "form_q2k_dequant_f32")
+                    (q2km-matvec-body "form_q2k_matvec_slot_f32")))
+
+    ; the width a carrier must refuse below: cols must be a whole multiple of this
+    (defn q2km-block-n () 256)
+    (defn q2km-admissible? (cols) (q2k-aligned? cols))
+    0)

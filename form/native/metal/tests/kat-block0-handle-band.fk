@@ -1,0 +1,160 @@
+; tests/kat-block0-handle-band.fk — block 0's front half through the handle door, judged three
+; ways: against the oracle, against the body's own fp64, and against the defect the oracle misses.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY. Bit 1 is the metal_status canary; without a live handle door the
+; fold answers 0, which is a refusal and not a verdict.
+;
+; Verdict 511 = 1+2+4+8+16+32+64+128+256, power-of-two weights so a reader can subtract.
+;
+;   bit   1  THE DOOR IS REAL. metal_linked=true AND metal_door=handle, asked of the one primitive
+;            that speaks, before anything else is believed.
+;   bit   2  THE GEOMETRY IS THE FILE'S. attn_qkv is Q4_K 8192x2048, ssm_conv1d is F32 4x8192,
+;            attn_norm is F32, embed is Q3_K — read from the table, and the rms epsilon KV
+;            (qwen35moe.attention.layer_norm_rms_epsilon) is PRESENT and sane. Nothing below runs
+;            with a typed-in epsilon: the oracle's 1e-6 happens to equal this file's KV (probed
+;            2026-08-04, 9.999999974752427e-07 = binary32's nearest to 1e-6) and now nothing
+;            depends on that happening.
+;   bit   4  EVERY KERNEL COMPILED. Five nonzero pipeline handles — the oracle's four plus the
+;            corrected depthwise conv. A zero is an MSL diagnostic metal_status is holding.
+;   bit   8  THE WEIGHTS ARE VIEWS, NOT COPIES. Four no-copy mappings: the embed row, the attn_norm
+;            gains, the 9.4 MB Q4_K qkv, the conv taps.
+;   bit  16  THE ENTRANCE IS BIT-EXACT AGAINST FORM. All 2048 device words of embed row 100 equal
+;            RNE-binary32 of the body's own Q3_K decode (kce-w), the same claim metal_q3k_gpu.sh
+;            proved on its arm, now through this door. This is the gate the exit band's M-K1
+;            mutation taught this program to want: not "an answer came out", but "the answer is
+;            the body's number".
+;   bit  32  THE ORACLE'S COUNTS, REPRODUCED. embed 1578/2048 nonzero, q||k||v 8080/8192, conv
+;            (the oracle's own binding, channel-0 taps broadcast) 8080/8192 — the numbers
+;            metal_kat_block0.sh witnessed today, from the same arithmetic through a different
+;            carrier.
+;   bit  64  THE NORM ANSWERS TO FP64. Worst relative deviation of the device RMSNorm output
+;            against the body's fp64 fold — the Form-decoded row, the file's own F32 gains read
+;            from their absolute offset, the file's own epsilon — inside the derived n*u bound
+;            (2048 * 2^-24 = 1.221e-4), over every element whose reference clears 1e-4.
+;   bit 128  THE DEFECT IS REAL AND THE CORRECTION IS RIGHT. The corrected per-channel conv
+;            differs from the oracle's broadcast conv (if the taps were secretly identical across
+;            channels this bit would refuse), AND at 16 sampled channels the corrected output is
+;            BIT-EXACT fl(x[c] * tap3[c]) against the file's own taps — position 0's zero window
+;            makes that the whole fold, so the reference has one rounding and so does the device.
+;   bit 256  THE SHAPE IS THE DOOR'S. total_dispatch=5, total_sync=1 — five stages accumulated,
+;            one drain, read from the carrier's own counters.
+;
+; WHAT THIS BAND DOES NOT CLAIM: a completed block, a token, or anything about blocks 1..39. The
+; delta rule, gates, ssm_out and the MoE are the pipeline map's six named gaps, still open.
+;
+; preludes: native/metal/kat-block0-handle.fk
+
+(do
+    (defn kbb-token () 100)
+
+    (let live (md-door-live?))
+
+    (let h (kce-hdr))
+    (let base (egg-data-base h (kce-align)))
+    (let oe (egg-find-tensor h "token_embd.weight"))
+    (let an (egg-find-tensor h "blk.0.attn_norm.weight"))
+    (let qk (egg-find-tensor h "blk.0.attn_qkv.weight"))
+    (let cv (egg-find-tensor h "blk.0.ssm_conv1d.weight"))
+    (let ne0 (egg-ti-dim h oe 0))
+    (let qkvRows (egg-ti-dim h qk 1))
+    (let qkvCols (egg-ti-dim h qk 0))
+    (let taps (egg-ti-dim h cv 0))
+    (let nch (egg-ti-dim h cv 1))
+    (let eps (gmt-f32 h "qwen35moe.attention.layer_norm_rms_epsilon"))
+
+    ; counted, not nested: nine independent facts summed, so a paren cannot rearrange them
+    (let geo-n (add (if (eq (egg-ti-type h oe) 11) 1 0)
+               (add (if (eq (egg-ti-type h qk) 12) 1 0)
+               (add (if (eq (egg-ti-type h cv) 0) 1 0)
+               (add (if (eq (egg-ti-type h an) 0) 1 0)
+               (add (if (eq qkvRows 8192) 1 0)
+               (add (if (eq qkvCols 2048) 1 0)
+               (add (if (eq taps 4) 1 0)
+               (add (if (eq nch 8192) 1 0)
+                    (if (gt eps 0.0) (if (lt eps 0.001) 1 0) 0))))))))))
+    (let geo-ok (eq geo-n 9))
+
+    (let msl (kxb-msl))
+    (let pQ3 (metal_pipeline msl "form_q3k_dequant_f32"))
+    (let pNrm (metal_pipeline msl "form_mla_rmsnorm_f32"))
+    (let pQ4 (metal_pipeline msl "form_q4_k_matvec_f32"))
+    ; ROLES FLIPPED 2026-08-04, repair landed: pCv is the ORACLE'S broadcast conv, now authored
+    ; locally in the handle cell; pCvc is the corrected depthwise conv, now the SHARED cell's
+    ; form_gdn_conv_f32. Bit 32 still runs the oracle's arithmetic; bit 128 still watches them
+    ; differ and gates the corrected one against Form's own fold.
+    (let pCv (metal_pipeline msl "form_gdn_convb_f32"))
+    (let pCvc (metal_pipeline msl "form_gdn_conv_f32"))
+    (let pipes-n (add (if (gt pQ3 0) 1 0)
+                 (add (if (gt pNrm 0) 1 0)
+                 (add (if (gt pQ4 0) 1 0)
+                 (add (if (gt pCv 0) 1 0)
+                      (if (gt pCvc 0) 1 0))))))
+    (let pipes-ok (eq pipes-n 5))
+
+    (let embedAbs (add base (egg-ti-dataoff h oe)))
+    (let anAbs (add base (egg-ti-dataoff h an)))
+    (let qkvAbs (add base (egg-ti-dataoff h qk)))
+    (let cvAbs (add base (egg-ti-dataoff h cv)))
+    (let rowBytes (kxb-bytes 11 ne0))
+
+    (let bRow (metal_buf_from_file (kce-path) (add embedAbs (mul (kbb-token) rowBytes)) rowBytes))
+    (let bAN (metal_buf_from_file (kce-path) anAbs (kxb-bytes 0 ne0)))
+    (let bQkvW (metal_buf_from_file (kce-path) qkvAbs (kxb-bytes 12 (mul qkvRows qkvCols))))
+    (let bCvW (metal_buf_from_file (kce-path) cvAbs (kxb-bytes 0 (mul taps nch))))
+    (let resident (md-status-has? "mmap_nocopy_buffers=4"))
+
+    (let bEmb (metal_buf_alloc (mul ne0 4)))
+    (let bH (metal_buf_alloc (mul ne0 4)))
+    (let bQkv (metal_buf_alloc (mul qkvRows 4)))
+    (let bWin (metal_buf_alloc (mul (mul nch taps) 4)))
+    (let bCv (metal_buf_alloc (mul nch 4)))
+    (let bWin2 (metal_buf_alloc (mul (mul nch taps) 4)))
+    (let bCv2 (metal_buf_alloc (mul nch 4)))
+
+    (let epsBits (md-f32-bits eps))
+    (let e1 (metal_enqueue pQ3 (md-bind (list bRow bEmb) (list (div ne0 256))) ne0))
+    (let e2 (metal_enqueue pNrm (md-bind (list bEmb bAN bH) (list ne0 epsBits)) 1))
+    (let e3 (metal_enqueue pQ4 (md-bind (list bQkvW bH bQkv) (list qkvRows qkvCols)) qkvRows))
+    (let e4 (metal_enqueue pCv (md-bind (list bWin bQkv bCvW bCv) (list nch taps)) nch))
+    (let e5 (metal_enqueue pCvc (md-bind (list bWin2 bQkv bCvW bCv2) (list nch taps)) nch))
+    (let enq-ok (eq (add (add e1 e2) (add e3 (add e4 e5))) 5))
+
+    ; the first read is the ONE sync; everything after drains nothing
+    (let sEmb (metal_buf_read bEmb 0 (mul ne0 4)))
+    (let sH (metal_buf_read bH 0 (mul ne0 4)))
+    (let sQkv (metal_buf_read bQkv 0 (mul qkvRows 4)))
+    (let sCv (metal_buf_read bCv 0 (mul nch 4)))
+    (let sCv2 (metal_buf_read bCv2 0 (mul nch 4)))
+    (let shape-ok (if (md-status-has? "total_dispatch=5") (md-status-has? "total_sync=1") false))
+
+    ; the Form reference row, decoded once
+    (let vals (kxb-embrow (kbb-token)))
+    (let embed-exact (eq (kxb-embed-agree sEmb vals) ne0))
+
+    ; the oracle's own numbers, re-witnessed 2026-08-04
+    (let counts-ok (if (eq (kxb-nz sEmb ne0) 1578)
+                   (if (eq (kxb-nz sQkv qkvRows) 8080)
+                       (eq (kxb-nz sCv nch) 8080) false) false))
+
+    ; fp64 norm reference: gains from their absolute file offset, eps from the KV
+    (let gains (read_file_slice (kce-path) anAbs (mul ne0 4)))
+    (let inv (div 1.0 (math_sqrt (add (div (kxb-ssq vals 0.0) (add ne0 0.0)) eps))))
+    (let worst (kxb-norm-worst-go sH vals gains inv 0 0.0))
+    (let norm-ok (lt worst 0.0001221))
+
+    ; the correction: differs from the broadcast, and answers to the file's own taps bit for bit
+    (let ndiff (kxb-differ sCv sCv2 nch))
+    (let tapsrc (read_file_slice (kce-path) cvAbs (mul (mul taps nch) 4)))
+    (let convc-ok (if (gt ndiff 0)
+                      (eq (kxb-convc-agree-go sCv2 sQkv tapsrc 0 nch 512 0) 16)
+                      false))
+
+    (add (if live 1 0)
+    (add (if live (if geo-ok 2 0) 0)
+    (add (if live (if pipes-ok 4 0) 0)
+    (add (if live (if resident 8 0) 0)
+    (add (if live (if embed-exact 16 0) 0)
+    (add (if live (if enq-ok (if counts-ok 32 0) 0) 0)
+    (add (if live (if norm-ok 64 0) 0)
+    (add (if live (if convc-ok 128 0) 0)
+         (if live (if shape-ok 256 0) 0))))))))))

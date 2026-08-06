@@ -1,0 +1,96 @@
+; rag-turboquant-lane.fk — the third honest ranking lane: packed float vectors
+; ride the rag index's existing entry shape.
+;
+; preludes: form-stdlib/core.fk form-stdlib/tensor-quant.fk form-stdlib/turboquant-as-recipe.fk form-stdlib/rag-retrieve.fk
+;
+; rag-retrieve teaches "two honest lanes share the entry shape": quantized
+; neural ints ranked by L1, and semantic-v2 code pairs ranked by overlap. This
+; cell adds the third lane without touching either: a TurboQuant pack rides the
+; SAME (id, int-vec) entry — vec = [norm-in-microunits, code0..code(d-1)] —
+; so rag-entry, rag-remove, rag-rev-loop are reused as-is and every stored
+; value stays an integer. Integer rows are the point: identical packs are
+; byte-identical rows (content-addressable, cross-kernel exact, JSONL-ready
+; through the existing codec's int vec); floats exist only at ask time.
+;
+; The lane law (index schema, same discipline as re-semantic-kind): rtq-kind
+; names the packing and rtq-seed names the rotation; writer and reader must
+; share BOTH or vectors silently disagree. The query is rotated ONCE per ask
+; (rtq-qrot) and reused against every row — the store stays coarse (2-bit
+; codes + one int norm), the asker stays fine (full-precision rotated query):
+; TurboQuant's asymmetric scoring, now in the body's own ask shape.
+;
+; Ranking mirrors the rag lane's discipline: highest estimated inner product
+; wins; ties keep the FIRST (oldest, replay-stable) entry; top-k is greedy
+; nearest-remove-repeat; confidence is top-vs-runner on a 0..100 int scale
+; (0 on empty or non-positive best evidence; runner clamps at 0; a lone
+; positive match is 100). Floors named: 2-bit only (the cell it leans on names
+; the same floor); no grounded-row admission gate yet — packs ride the legacy
+; (id, vec) entry, and a nodeid-rag-v2 embedding_kind for packs is a separate
+; tending because ric-grounding-ready? is guarded law.
+;
+; Proven by: form-stdlib/tests/rag-turboquant-lane-band.fk
+
+(do
+    ; ── index schema: packing kind + rotation seed. Change either => new kind. ──
+    (defn rtq-kind () "turboquant2-v1")
+    (defn rtq-seed () 20260716)
+
+    ; ── pack: [norm-microunits, codes...] — every stored value an integer ──
+    (defn rtq-pack-vec (v)
+        (do (let p (tqr-pack v (rtq-seed)))
+            (cons (round (mul (tqr-pack-norm p) 1000000.0))
+                  (tqr-pack-codes p))))
+    (defn rtq-entry (id v) (rag-entry id (rtq-pack-vec v)))
+    (defn rtq-norm (pvec) (div (mul 1.0 (head pvec)) 1000000.0))
+    (defn rtq-codes (pvec) (tail pvec))
+
+    ; ── asymmetric ask: rotate the query once, score every packed row ──
+    (defn rtq-qrot (q) (tqr-query-rot q (rtq-seed)))
+    (defn rtq-table (q) (tqr-table-2bit (len q)))
+    (defn rtq-score-rot (qrot pvec table)
+        (mul (rtq-norm pvec)
+             (tqr-dot qrot (tq-nf4-decode (rtq-codes pvec) 1.0 table))))
+    (defn rtq-score (q e)
+        (rtq-score-rot (rtq-qrot q) (rag-vec e) (rtq-table q)))
+
+    ; ── NEAREST: highest score; ties keep the FIRST entry (replay-stable) ──
+    (defn rtq-best-loop (qrot entries table best best-s)
+        (if (eq (len entries) 0) best
+            (do (let s (rtq-score-rot qrot (rag-vec (head entries)) table))
+                (if (eq (len best) 0)
+                    (rtq-best-loop qrot (tail entries) table (head entries) s)
+                    (if (gt s best-s)
+                        (rtq-best-loop qrot (tail entries) table (head entries) s)
+                        (rtq-best-loop qrot (tail entries) table best best-s))))))
+    (defn rtq-nearest (q entries)
+        (rtq-best-loop (rtq-qrot q) entries (rtq-table q) (empty) 0.0))
+    (defn rtq-nearest-id (q entries)
+        (if (eq (len entries) 0) "" (rag-id (rtq-nearest q entries))))
+
+    ; ── TOP-K: greedy nearest, remove, repeat; ids nearest-first ──
+    (defn rtq-topk-loop (qrot entries table k acc)
+        (if (or (eq k 0) (eq (len entries) 0)) acc
+            (do (let best (rtq-best-loop qrot entries table (empty) 0.0))
+                (rtq-topk-loop qrot (rag-remove (rag-id best) entries)
+                               table (sub k 1) (cons (rag-id best) acc)))))
+    (defn rtq-topk (q entries k)
+        (rag-rev-loop
+            (rtq-topk-loop (rtq-qrot q) entries (rtq-table q) k (empty))
+            (empty)))
+
+    ; ── CONFIDENCE: top-vs-runner, 0..100 ints (rag-overlap-confidence's law
+    ; on this lane's float scores). No positive best evidence => 0.
+    (defn rtq-confidence (q entries)
+        (if (eq (len entries) 0) 0
+            (do (let qrot (rtq-qrot q))
+                (let table (rtq-table q))
+                (let best (rtq-best-loop qrot entries table (empty) 0.0))
+                (let bs (rtq-score-rot qrot (rag-vec best) table))
+                (if (le bs 0.0) 0
+                    (if (eq (len entries) 1) 100
+                        (do (let rest (rag-remove (rag-id best) entries))
+                            (let rb (rtq-best-loop qrot rest table (empty) 0.0))
+                            (let rs (rtq-score-rot qrot (rag-vec rb) table))
+                            (if (le rs 0.0) 100
+                                (round (mul 100.0 (div (sub bs rs) bs))))))))))
+    0)

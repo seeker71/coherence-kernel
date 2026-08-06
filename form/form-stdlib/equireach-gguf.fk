@@ -1,0 +1,177 @@
+; equireach-gguf.fk — the GGUF reach path rewritten against an EQUIREACH byte source.
+;
+; gguf-read.fk and weight-load.fk are correct and four-way proven, and they are written against a byte
+; LIST: `gg-le` reaches a field with `nth bytes off` (O(off)) and `wl-slice` carves a superblock with
+; `take n (drop off bytes)` (O(off+n)). On a band fixture that is invisible. On llama3.2:3b it is the
+; wall: the metadata KV block alone runs to byte 7 837 658, so gg-tinfo-start walks ~7.8M links per
+; field read, and the bridge that would build that list at all (host-abi-string-to-bytes) costs
+; ~1.5e-10*n^2 s — 166 s for 1 MB, PROJECTED ~2.5 hours for the header, and the 2 GB tensor block never.
+;
+; This cell is the SAME structure over equireach.fk's source: identical arithmetic, identical GGUF
+; layout knowledge, identical Q6_K unpack — with the O(k) reach swapped for the O(1) one. Nothing here
+; re-derives the format; the index math is q6k-dequant.fk's own (q6k-h / q6k-l / q6k-g / q6k-is /
+; q6k-qlidx / q6k-s8 / q6k-pow4), so there is still exactly ONE Q6_K spine in the body and this cell is
+; a second reach into it, not a second meaning.
+;
+; NAMING. `egg-*` mirrors `gg-*` (header/KV/tensor-info walk); `ewl-*` mirrors `wl-*` (superblock
+; fields and dequantized weights). Offsets are LOCAL to the window the source was opened over — open
+; the window at the file coordinate you care about and index from 0.
+;
+; WHAT IT BUYS, measured on the real 2 GB blob (3 runs each, .fkb cleared every run):
+;   - locate a NAMED tensor by walking the file's own 7 837 658-byte header — 30 metadata KVs including
+;     the tokenizer's 128 256-element string arrays, then 255 tensor-info records: 4.7 / 4.8 / 5.2 s,
+;     answering blk.0.ffn_down.weight = type 14 (Q6_K), dims 8192x3072, absolute offset 331 055 328.
+;     The list lane cannot do this AT ALL: the header would have to become a list first, and at the
+;     measured ~1.5e-10*n^2 that is PROJECTED ~2.7 hours before the first field is read.
+;   - dequant 65 536 weights (256 superblocks) whose base sits 11 760 / 994 770 / 16 723 350 bytes into
+;     the window: 3.55 / 3.49 / 3.52 s — 18.5k weights/s, FLAT over a 1400x deeper base. The list lane
+;     at the same shape degrades with depth. See the Stone-2 receipt for the full curve.
+;
+; Kin: equireach.fk (eqr-at — the O(1) reach this is built on), gguf-read.fk (gg-* — the list twin,
+; still the four-way-proven spine for fixtures), weight-load.fk (wl-q6k-* / wl-q6k-at-flat — the list
+; twin of the superblock carve and its 210-byte stride), q6k-dequant.fk (the index math, shared),
+; f16-decode.fk (fd-f16 / fd-value — the super-scale and the F32 gains), real-gguf-generate.fk
+; (rgg-* — the generation loop these weights feed).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk
+;
+; Proven by: form-stdlib/tests/equireach-band.fk
+
+(do
+    ; ================= the GGUF header walk, equireach =================
+    (defn egg-u8  (src off) (eqr-at src off))
+    (defn egg-u32 (src off) (eqr-u32 src off))
+    (defn egg-u64 (src off) (eqr-u64 src off))
+
+    (defn egg-magic        (src) (egg-u32 src 0))
+    (defn egg-magic-ok?    (src) (if (eq (egg-u32 src 0) 1179993927) 1 0))
+    (defn egg-version      (src) (egg-u32 src 4))
+    (defn egg-tensor-count (src) (egg-u64 src 8))
+    (defn egg-kv-count     (src) (egg-u64 src 16))
+
+    ; a GGUF string is (u64 length, then `length` bytes)
+    (defn egg-str-len  (src off) (egg-u64 src off))
+    (defn egg-str-next (src off) (add (add off 8) (egg-u64 src off)))
+
+    ; --- metadata KV walk (same value-type sizes and the same O(1) fixed-width array skip) ---
+    (defn egg-vtype-size (t)
+        (if (or (eq t 0) (or (eq t 1) (eq t 7))) 1
+            (if (or (eq t 2) (eq t 3)) 2
+                (if (or (eq t 4) (or (eq t 5) (eq t 6))) 4 8))))
+    (defn egg-val-next (src off t)
+        (if (eq t 8) (egg-str-next src off)
+            (if (eq t 9)
+                (egg-arr-skip src (add off 12) (egg-u32 src off) (egg-u64 src (add off 4)))
+                (add off (egg-vtype-size t)))))
+    (defn egg-arr-skip-var (src off et count)
+        (if (eq count 0) off
+            (egg-arr-skip-var src (egg-val-next src off et) et (sub count 1))))
+    (defn egg-arr-skip (src off et count)
+        (if (or (eq et 8) (eq et 9))
+            (egg-arr-skip-var src off et count)
+            (add off (mul count (egg-vtype-size et)))))
+    (defn egg-kv-next (src off)
+        (egg-val-next src (add (egg-str-next src off) 4) (egg-u32 src (egg-str-next src off))))
+    (defn egg-kv-skip (src off n)
+        (if (eq n 0) off (egg-kv-skip src (egg-kv-next src off) (sub n 1))))
+    (defn egg-tinfo-start (src) (egg-kv-skip src 24 (egg-kv-count src)))
+
+    ; --- tensor-info walk ---
+    (defn egg-ti-ndims   (src off) (egg-u32 src (egg-str-next src off)))
+    (defn egg-ti-dim     (src off k) (egg-u64 src (add (add (egg-str-next src off) 4) (mul k 8))))
+    (defn egg-ti-dim0    (src off) (egg-ti-dim src off 0))
+    (defn egg-ti-tail    (src off) (add (add (egg-str-next src off) 4) (mul (egg-ti-ndims src off) 8)))
+    (defn egg-ti-type    (src off) (egg-u32 src (egg-ti-tail src off)))
+    (defn egg-ti-dataoff (src off) (egg-u64 src (add (egg-ti-tail src off) 4)))
+    (defn egg-ti-next    (src off) (add (egg-ti-tail src off) 12))
+    (defn egg-ti-namelen (src off) (egg-str-len src off))
+
+    ; --- find a tensor by NAME. The target is a host string, so both sides of the comparison are
+    ; equireach and the walk never builds a list. -1 means absent; the engine never invents a match. ---
+    (defn egg-name-bytes-eq (src boff name k n)
+        (if (eq k n) 1
+            (if (eq (eqr-at src (add boff k)) (str_byte_at name k))
+                (egg-name-bytes-eq src boff name (add k 1) n)
+                0)))
+    (defn egg-name-eq (src off name)
+        (if (eq (egg-ti-namelen src off) (str_len name))
+            (egg-name-bytes-eq src (add off 8) name 0 (str_len name))
+            0))
+    (defn egg-find (src off remaining name)
+        (if (eq remaining 0) (sub 0 1)
+            (if (eq (egg-name-eq src off name) 1)
+                off
+                (egg-find src (egg-ti-next src off) (sub remaining 1) name))))
+    (defn egg-find-tensor (src name)
+        (egg-find src (egg-tinfo-start src) (egg-tensor-count src) name))
+
+    ; --- the tensor-data region base, and a named tensor's ABSOLUTE file offset ---
+    (defn egg-tinfo-walk (src off remaining)
+        (if (eq remaining 0) off
+            (egg-tinfo-walk src (egg-ti-next src off) (sub remaining 1))))
+    (defn egg-tinfo-end (src) (egg-tinfo-walk src (egg-tinfo-start src) (egg-tensor-count src)))
+    (defn egg-align-up  (x a) (mul (div (add x (sub a 1)) a) a))
+    (defn egg-data-base (src a) (egg-align-up (egg-tinfo-end src) a))
+    (defn egg-tensor-abs (src a name)
+        (add (egg-data-base src a) (egg-ti-dataoff src (egg-find-tensor src name))))
+
+    ; ================= Q6_K weights, equireach =================
+    ; The Q6_K block at base `b` is ql[128] @b+0 · qh[64] @b+128 · scales[16] @b+192 · d f16 @b+208,
+    ; 210 bytes. The list lane SLICES those four fields out (three O(off+n) carves per weight lookup);
+    ; here each field byte is reached in place, so no slice, no copy, no list.
+    (defn ewl-q6k-stride () 210)
+    (defn ewl-d (src b) (fd-f16 (eqr-u16 src (add b 208))))
+
+    ; the three field reads, at the exact indices q6k-dequant.fk's own decomposition names
+    (defn ewl-ql-byte (src b i) (eqr-at src (add b (q6k-qlidx i))))
+    (defn ewl-qh-byte (src b i) (eqr-at src (add b (add 128 (add (mul (q6k-h i) 32) (q6k-l i))))))
+    (defn ewl-sc-byte (src b i) (eqr-at src (add b (add 192 (add (mul (q6k-h i) 8) (add (q6k-is i) (mul 2 (q6k-g i))))))))
+
+    (defn ewl-nib (src b i)
+        (if (eq (div (q6k-g i) 2) 0)
+            (q6k-mod (ewl-ql-byte src b i) 16)
+            (div (ewl-ql-byte src b i) 16)))
+    (defn ewl-hi (src b i)
+        (q6k-mod (div (ewl-qh-byte src b i) (q6k-pow4 (q6k-g i))) 4))
+    (defn ewl-q  (src b i) (sub (add (ewl-nib src b i) (mul (ewl-hi src b i) 16)) 32))
+    (defn ewl-sc (src b i) (q6k-s8 (ewl-sc-byte src b i)))
+
+    ; one weight, index i INSIDE the block at base b — same wall, same refusal as q6k-at
+    (defn ewl-at (src b i)
+        (if (eq (q6k-index-ok? i) 1)
+            (mul (mul (ewl-d src b) (ewl-sc src b i)) (ewl-q src b i))
+            (form_error "ewl-at: weight index outside the 256-weight Q6_K superblock -- use ewl-flat-at, which strides")))
+
+    ; --- ewl-flat-at: weight `i` of a Q6_K TENSOR whose first superblock starts at `base`, ANY i, at
+    ; O(1) reach. This is the accessor a real width actually needs: llama3.2:3b's row is 3072 weights
+    ; = 12 superblocks, and the whole tensor is 25 165 824 weights. ---
+    (defn ewl-flat-at (src base i)
+        (ewl-at src (add base (mul (ewl-q6k-stride) (div i 256))) (q6k-mod i 256)))
+
+    ; --- n consecutive dequantized weights as an f32 list, built once, in one O(n) pass. The d and the
+    ; three field bytes are re-reached per weight — each O(1), so the pass is linear in n and INDEPENDENT
+    ; of where in the file the window sits. That independence is the whole stone. ---
+    (defn ewl-weights-loop (src base i n acc)
+        (if (ge i n) (reverse acc)
+            (ewl-weights-loop src base (add i 1) n (cons (ewl-flat-at src base i) acc))))
+    (defn ewl-weights (src base n) (ewl-weights-loop src base 0 n (list)))
+
+    ; --- a rows x cols matrix carved from the flat weight list, row-major (the GGUF tensor layout).
+    ; Same shape as real-gguf-generate.fk's rgg-mat; kept here so a caller can go source -> matrix
+    ; without the byte-list lane appearing anywhere in between. ---
+    (defn ewl-take (xs n) (if (eq n 0) (empty) (cons (head xs) (ewl-take (tail xs) (sub n 1)))))
+    (defn ewl-drop (xs n) (if (eq n 0) xs (ewl-drop (tail xs) (sub n 1))))
+    (defn ewl-mat-from (ws rows cols r)
+        (if (eq r rows) (empty)
+            (cons (ewl-take ws cols) (ewl-mat-from (ewl-drop ws cols) rows cols (add r 1)))))
+    (defn ewl-mat (ws rows cols) (ewl-mat-from ws rows cols 0))
+
+    ; --- REAL F32 tensors (the norm gains: attn_norm / ffn_norm / output_norm are stored unquantized).
+    ; f32 is f16-decode's one parameterized recipe at (eb 8, mb 23) — same field extraction, wider fields. ---
+    (defn ewl-f32 (src off) (fd-value (eqr-le src off 4) 8 23))
+    (defn ewl-gain-loop (src off i n acc)
+        (if (ge i n) (reverse acc)
+            (ewl-gain-loop src (add off 4) (add i 1) n (cons (ewl-f32 src off) acc))))
+    (defn ewl-gain (src off n) (ewl-gain-loop src off 0 n (list)))
+
+    0)

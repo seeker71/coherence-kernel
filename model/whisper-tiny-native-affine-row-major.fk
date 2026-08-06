@@ -1,0 +1,110 @@
+; whisper-tiny-native-affine-row-major.fk -- decode each released weight row once.
+;
+; The original affine sequence walks tokens first.  For an S-token sequence it
+; therefore decodes every f32 coefficient S times and performs every multiply
+; and add as a separately boxed Form value.  This Form-native lane reverses the
+; loop nest: decode one released row and reuse it across every token.  The dot
+; remains the established bias-seeded Form left-fold, preserving model bits.
+; The carrier remains the pinned released f32 bytes; no host model, generated
+; C, or C-seed growth participates.
+;
+; For the 35-token valid-STFT utterance, every affine now decodes each weight
+; coefficient once rather than 35 times.  Output remains ordinary Form lists,
+; so layernorm, attention, GELU, residuals, and downstream world cells compose
+; unchanged.
+; witnessed: 2026-07-20 -> exact real-weight parity; lower live dispatch/float cost
+; preludes: form/form-stdlib/core.fk model/whisper-tiny-native-frontend-full.fk
+
+(do
+  ; Decode a released row once.  lbpt-f32-list preserves checkpoint order.
+  (defn wafr-row (carrier byte-offset cols)
+    (lbpt-f32-list carrier byte-offset cols))
+
+  ; wte0-dot-bytes is a forward tail-recursive, bias-seeded left fold.  Keeping
+  ; that exact order matters: a zero-seeded dot followed by bias addition moved
+  ; the real q projection by 5.6676798670940443e-13 and was rejected.
+  (defn wafr-dot-acc (weights xs acc)
+    (if (eq (len xs) 0) acc
+      (wafr-dot-acc (tail weights) (tail xs)
+        (add acc (mul (head weights) (head xs))))))
+  (defn wafr-empty-accs (xs)
+    (if (eq (len xs) 0) (empty)
+      (cons (empty) (wafr-empty-accs (tail xs)))))
+  (defn wafr-reverse-accs (accs)
+    (if (eq (len accs) 0) (empty)
+      (cons (reverse (head accs)) (wafr-reverse-accs (tail accs)))))
+
+  ; One released row is shared by the complete sequence before the next row
+  ; is decoded.  Each token accumulator is built in reverse output-row order.
+  (defn wafr-row-across-seq (weights bias xs accs out)
+    (if (eq (len xs) 0) (reverse out)
+      (wafr-row-across-seq weights bias (tail xs) (tail accs)
+        (cons (cons (wafr-dot-acc weights (head xs) bias)
+                    (head accs)) out))))
+  (defn wafr-affine-rows
+    (carrier weight-offset bias-offset cols rows xs row accs)
+    (if (eq row rows) (wafr-reverse-accs accs)
+      (do
+        (let row-bytes (add weight-offset (mul (mul row cols) 4)))
+        (let weights (wafr-row carrier row-bytes cols))
+        (let bias (if (lt bias-offset 0) 0.0
+          (lbpt-f32 carrier (add bias-offset (mul row 4)))))
+        (wafr-affine-rows carrier weight-offset bias-offset cols rows
+          xs (add row 1)
+          (wafr-row-across-seq weights bias xs accs (empty))))))
+  (defn wafr-affine-seq (carrier weight-offset bias-offset cols rows xs)
+    (wafr-affine-rows carrier weight-offset bias-offset cols rows
+      xs 0 (wafr-empty-accs xs)))
+
+  ; Same released block graph as wte0-layer0, returning only the output so the
+  ; observation lane does not retain diagnostic q/k/v/hidden tensors.
+  (defn wafr-layer0 (carrier positioned)
+    (do
+      (let attn-ln (wte0-layernorm-seq carrier
+        (wte0-attn-ln-weight-off) (wte0-attn-ln-bias-off) positioned))
+      (let q (wafr-affine-seq carrier (wte0-q-weight-off)
+        (wte0-q-bias-off) 384 384 attn-ln))
+      (let k (wafr-affine-seq carrier (wte0-k-weight-off) -1 384 384 attn-ln))
+      (let v (wafr-affine-seq carrier (wte0-v-weight-off)
+        (wte0-v-bias-off) 384 384 attn-ln))
+      (let context (tb-mh-attn q k v 6 64 0.125))
+      (let projected (wafr-affine-seq carrier (wte0-out-weight-off)
+        (wte0-out-bias-off) 384 384 context))
+      (let attended (tb-add-seq positioned projected))
+      (let ffn-ln (wte0-layernorm-seq carrier (wte0-ffn-ln-weight-off)
+        (wte0-ffn-ln-bias-off) attended))
+      (let hidden (wte0-gelu-seq (wafr-affine-seq carrier
+        (wte0-fc1-weight-off) (wte0-fc1-bias-off) 384 1536 ffn-ln)))
+      (let ffn-out (wafr-affine-seq carrier (wte0-fc2-weight-off)
+        (wte0-fc2-bias-off) 1536 384 hidden))
+      (tb-add-seq attended ffn-out)))
+
+  ; Released layers 1..3 share the same carrier layout and optimized row-major
+  ; affine.  Attention and nonlinear operations remain the existing Form cells.
+  (defn wafr-layer (carrier base input)
+    (do
+      (let attn-ln (wte0-layernorm-seq carrier
+        (wte-at base (wte-attn-ln-weight-off))
+        (wte-at base (wte-attn-ln-bias-off)) input))
+      (let q (wafr-affine-seq carrier (wte-at base (wte-q-weight-off))
+        (wte-at base (wte-q-bias-off)) 384 384 attn-ln))
+      (let k (wafr-affine-seq carrier (wte-at base (wte-k-weight-off))
+        -1 384 384 attn-ln))
+      (let v (wafr-affine-seq carrier (wte-at base (wte-v-weight-off))
+        (wte-at base (wte-v-bias-off)) 384 384 attn-ln))
+      (let context (tb-mh-attn q k v 6 64 0.125))
+      (let projected (wafr-affine-seq carrier
+        (wte-at base (wte-out-weight-off))
+        (wte-at base (wte-out-bias-off)) 384 384 context))
+      (let attended (tb-add-seq input projected))
+      (let ffn-ln (wte0-layernorm-seq carrier
+        (wte-at base (wte-ffn-ln-weight-off))
+        (wte-at base (wte-ffn-ln-bias-off)) attended))
+      (let hidden (wte0-gelu-seq (wafr-affine-seq carrier
+        (wte-at base (wte-fc1-weight-off))
+        (wte-at base (wte-fc1-bias-off)) 384 1536 ffn-ln)))
+      (let ffn-out (wafr-affine-seq carrier
+        (wte-at base (wte-fc2-weight-off))
+        (wte-at base (wte-fc2-bias-off)) 1536 384 hidden))
+      (tb-add-seq attended ffn-out)))
+  0)

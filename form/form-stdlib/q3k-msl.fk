@@ -1,0 +1,62 @@
+; q3k-msl.fk — the Q3_K decode as Metal the BODY emits.
+;
+; q3k-dequant.fk is the recipe, at band 255 against an independent transcription
+; of ggml's dequantize_row_q3_K. This is the same meaning as device code, and it
+; is a TRANSCRIPTION of that cell rather than a second derivation: every index
+; expression below has a named counterpart there, so the two can be read side by
+; side and there is still exactly one Q3_K spine in this body.
+;
+;   q3k_scale6(s, is)   q3k-scale6      the per-byte scale unpack
+;   q3k_w(blk, i)       q3k-wint        the 2-bit quant minus 4-when-clear
+;   q3k_at(blk, i)      q3k-at          d * (scale - 32) * w
+;
+; WHY A DEVICE FUNCTION AND NOT ONLY A KERNEL. A matvec wants to decode a weight
+; where it stands rather than materialize a dequantized row first — that is the
+; whole reason the body's other quant cells expose `q6k_f16`-style callables. The
+; kernel below exists for a band and a gate to have something dispatchable; the
+; function is what a real matvec will call.
+;
+; SPINE: `fh16` only, for the f16 super-scale — the same contract
+; moe-route-wide-msl.fk keeps. This cell emits NO spine of its own and is always
+; an APPENDIX, so it can never double-define anything.
+;
+; NO BIT OPERATORS, DELIBERATELY, EVEN THOUGH METAL HAS THEM. The recipe is
+; written in `div`/`mod` because Form has no bitwise ops, and MSL here keeps the
+; same shape. Writing `>>` and `&` on this side would be faster to read for a C
+; programmer and would make the two cells stop being transcriptions of one
+; another — and this is precisely the seam where a divergence hides, because
+; `(x >> 4) & 15` and `(x / 16) % 16` agree on every input right up until one of
+; them is edited.
+;
+;  `half` IS A RESERVED TYPE IN METAL. The first draft named the low/high
+; selector `half`, as the recipe's `q3k-half` does, and the read-back band
+; passed it at 255 — a substring check cannot know a language's keywords. Only
+; the compiler refused, with "cannot combine with previous 'type-name'
+; declaration specifier". The selector is `hf` here and `q3k-half` there, and
+; that asymmetry is deliberate: Form has no reserved words to dodge, and
+; renaming the recipe to match the constraint of its transcription would let a
+; downstream language dictate the vocabulary of the meaning.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn q3m-decl ()
+        (str_concat
+            "static inline int q3k_scale6(device const uchar* s, uint is) { uint g = is / 4u; uint b = is % 4u; uint h2 = uint(s[8u + b]); if (g == 0u) { return int(uint(s[b]) % 16u + 16u * (h2 % 4u)); } if (g == 1u) { return int(uint(s[4u + b]) % 16u + 16u * ((h2 / 4u) % 4u)); } if (g == 2u) { return int(uint(s[b]) / 16u + 16u * ((h2 / 16u) % 4u)); } return int(uint(s[4u + b]) / 16u + 16u * ((h2 / 64u) % 4u)); }\n"
+        (str_concat
+            "static inline uint q3k_pow4(uint e) { uint v = 1u; for (uint t = 0u; t < e; ++t) { v = v * 4u; } return v; }\n"
+        (str_concat
+            "static inline uint q3k_pow2(uint e) { uint v = 1u; for (uint t = 0u; t < e; ++t) { v = v * 2u; } return v; }\n"
+        (str_concat
+            "static inline int q3k_w(device const uchar* blk, uint i) { uint n2 = i / 128u; uint r = i % 128u; uint j = r / 32u; uint hf = (r % 32u) / 16u; uint l = i % 16u; uint qi = n2 * 32u + hf * 16u + l; uint hi = hf * 16u + l; uint q2 = (uint(blk[32u + qi]) / q3k_pow4(j)) % 4u; uint m = q3k_pow2(j + 4u * n2); uint hs = (uint(blk[hi]) / m) % 2u; return int(q2) - (hs == 1u ? 0 : 4); }\n"
+            "static inline float q3k_at(device const uchar* blk, uint i) { uint n2 = i / 128u; uint r = i % 128u; uint j = r / 32u; uint hf = (r % 32u) / 16u; uint is = n2 * 8u + j * 2u + hf; float d = fh16(uint(blk[108]) + 256u * uint(blk[109])); return d * float(q3k_scale6(blk + 96u, is) - 32) * float(q3k_w(blk, i)); }")))))
+
+    ; one thread per weight; blocks is how many 110-byte superblocks follow
+    (defn q3m-dequant-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* q [[buffer(0)]], device float* y [[buffer(1)]], constant uint& nblocks [[buffer(2)]], uint i [[thread_position_in_grid]]) { uint total = nblocks * 256u; if (i >= total) return; uint b = i / 256u; uint k = i % 256u; y[i] = q3k_at(q + b * 110u, k); }")))
+
+    (defn q3m-msl-appendix ()
+        (str_concat (q3m-decl) (q3m-dequant-msl "form_q3k_dequant_f32")))
+    0)

@@ -1,0 +1,85 @@
+; gated-deltanet-msl.fk — the linear-attention layer's four kernels, as Metal
+; the BODY emits.
+;
+; gated-deltanet-layer.fk computes this layer in Form at band 255. These are the
+; same four movements as device kernels, in the order that cell established:
+; conv over the concatenation, l2norm on q and k, the delta-rule state advance,
+; the silu output gate.
+;
+; THE DELTA RULE PARALLELIZES BY STATE ROW, AND THAT IS THE WHOLE DESIGN. For
+; one value head the state S is dv x dk, and the step is
+;     Spred = alpha * S            pred = Spred . k
+;     err   = v - pred             S    = Spred + beta * outer(err, k)
+;     o     = S . q
+; Row i of S is touched only by pred[i], err[i] and o[i] — no row reads another
+; row. So one thread per row is exact, needs no threadgroup memory, no barrier
+; and no reduction. The router next door had to run on ONE thread because a
+; top-k is a competition between all experts; this has no competition in it.
+;
+; WHY THE READ USES THE NEW S. `o = S . q` is read AFTER the write, not from
+; Spred — the token sees its own correction. kimi-kda.fk's kda-step returns S_t
+; and kda-read applies it, in that order, and the band at 255 holds that
+; ordering. Reading before the write is a plausible-looking off-by-one-token
+; that would leave every magnitude intact.
+;
+; SPINE: `fexp` (silu) and `fsqrt` (l2norm) only. This cell emits NO spine of
+; its own and is always an APPENDIX — the same contract moe-route-wide-msl.fk
+; keeps. It calls no metal:: transcendental, so the arithmetic stays the body's.
+;
+; RADIUS: dk <= 256 in the conv's window arithmetic is not a constraint here
+; (the conv is per channel, width from the uniform); the delta kernel is
+; dimension-parameterized with no fixed-size arrays at all, so it has no radius
+; to declare beyond what a buffer can hold. Said explicitly because the sibling
+; router DOES have one, and a reader coming from there will look for it.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    ; ── the causal conv, one thread per channel, window carried in a buffer ──
+    ; win holds k entries per channel, oldest first. The shift and the fold are
+    ; one pass; nothing is read from a future position, which is what makes it
+    ; causal and is exactly what gated-deltanet-conv-band.fk's bits 8 and 16
+    ; falsify on the Form side.
+    ;
+    ; THE TAPS ARE PER CHANNEL: w[b + j], the same c*kw base the window uses.
+    ; This kernel folded w[j] — tap index alone — until 2026-08-04. The lane that
+    ; proved it (metal_gdn_gpu.sh) fed the demo's one tap set shared by every
+    ; channel, where w[j] is right; the real model's ssm_conv1d is kw x nch,
+    ; "each channel convolved with its own taps" (gated-deltanet-conv.fk), and a
+    ; carrier binding that tensor at its base broadcast CHANNEL 0's taps to all
+    ; 8192 channels while every nonzero/finite check stayed green. Found by
+    ; READING the kernel (kat-block0-handle.fk), proven different from the
+    ; broadcast AND bit-exact to Form's own fold on the file's own taps at 16
+    ; sampled channels (kat-block0-handle-band bit 128), landed here by the lane
+    ; that owns those bands. A carrier with genuinely shared taps must now bind
+    ; them replicated per channel — nch*kw floats — which is what the re-gated
+    ; attestant harness does.
+    (defn gdm-conv-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* win [[buffer(0)]], device const float* x [[buffer(1)]], device const float* w [[buffer(2)]], device float* y [[buffer(3)]], constant uint& nch [[buffer(4)]], constant uint& kw [[buffer(5)]], uint c [[thread_position_in_grid]]) { if (c >= nch) return; uint b = c * kw; for (uint j = 0u; j + 1u < kw; ++j) { win[b + j] = win[b + j + 1u]; } win[b + kw - 1u] = x[c]; float acc = 0.0f; for (uint j = 0u; j < kw; ++j) { acc = acc + win[b + j] * w[b + j]; } y[c] = acc; }")))
+
+    ; ── l2norm, one thread per head: x * rsqrt(sum(x*x) + eps) ──────────────
+    (defn gdm-l2norm-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* x [[buffer(0)]], constant uint& nh [[buffer(1)]], constant uint& hd [[buffer(2)]], constant float& eps [[buffer(3)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint o = h * hd; float s = 0.0f; for (uint i = 0u; i < hd; ++i) { float v = x[o + i]; s = s + v * v; } float inv = 1.0f / fsqrt(s + eps); for (uint i = 0u; i < hd; ++i) { x[o + i] = x[o + i] * inv; } }")))
+
+    ; ── the delta rule, ONE THREAD PER STATE ROW ────────────────────────────
+    (defn gdm-delta-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* S [[buffer(0)]], device const float* k [[buffer(1)]], device const float* v [[buffer(2)]], device const float* q [[buffer(3)]], device float* o [[buffer(4)]], constant float& alpha [[buffer(5)]], constant float& beta [[buffer(6)]], constant uint& dv [[buffer(7)]], constant uint& dk [[buffer(8)]], uint i [[thread_position_in_grid]]) { if (i >= dv) return; uint r = i * dk; float pred = 0.0f; for (uint j = 0u; j < dk; ++j) { float sp = alpha * S[r + j]; S[r + j] = sp; pred = pred + sp * k[j]; } float err = v[i] - pred; float bw = beta * err; float acc = 0.0f; for (uint j = 0u; j < dk; ++j) { float sn = S[r + j] + bw * k[j]; S[r + j] = sn; acc = acc + sn * q[j]; } o[i] = acc; }")))
+
+    ; ── the output gate: y = x * silu(z), elementwise. SILU, not sigmoid ────
+    (defn gdm-gate-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* x [[buffer(0)]], device const float* z [[buffer(1)]], constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float zz = z[i]; float sg = 1.0f / (1.0f + fexp(-zz)); x[i] = x[i] * (zz * sg); }")))
+
+    (defn gdm-msl-appendix ()
+        (str_concat (gdm-conv-msl   "form_gdn_conv_f32")
+        (str_concat (gdm-l2norm-msl "form_gdn_l2norm_f32")
+        (str_concat (gdm-delta-msl  "form_gdn_delta_f32")
+                    (gdm-gate-msl   "form_gdn_gate_f32")))))
+    0)

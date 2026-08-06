@@ -1,0 +1,64 @@
+; clip-blob-witness-band.fk — what the two local "clip" blobs actually carry, sealed before anyone
+; plans against what they don't.
+;
+; WHY A BAND ABOUT ABSENCE. The encoder program named three local models; two are tagged `clip`
+; (openai/clip-vit-large-patch14-336 under llava, and moondream2's vision tower). The natural plan —
+; "run the CLIP text tower first, it needs no pixels" — dies on the files themselves: BOTH declare
+; `clip.has_text_encoder = false`, and neither carries CLIP's shared-space projection head. They are
+; llava-style VISION towers plus an mlp projector into a language model's hidden space. A session
+; that plans a text tower from these blobs plans against tensors that are not on disk; this band
+; pins the fact through the body's own header walk so the next plan starts from the file.
+;
+; This band is arm-free (no GPU, no Metal): it walks two GGUF headers with equireach and reads four
+; booleans and two block counts. The bool KVs are GGUF value type 7 (one byte), which gmt-u32
+; deliberately declines — so they are read through gm-int, the manifest's own unsigned renderer,
+; after gmt-find locates them and gmt-vtype confirms the width.
+;
+; THE BITS (predictions written before the first run — from gm-emit-manifest on the Go arm,
+; 2026-08-04, so this is the second walk of the same bytes, on a second kernel):
+;    1  the vit-large blob opens and its magic is GGUF (MAGICOK)
+;    2  vit-large: has_text_encoder = 0 AND has_vision_encoder = 1
+;    4  vit-large: clip.vision.block_count = 23 (the llava tower keeps the penultimate stack)
+;    8  the moondream blob opens and its magic is GGUF
+;   16  moondream: has_text_encoder = 0 AND has_vision_encoder = 1
+;   32  moondream: clip.vision.block_count = 28
+;
+; Verdict 63 when both files say what they said.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/mxfp4-plane-dequant.fk form-stdlib/mxfp8-plane-dequant.fk form-stdlib/gguf-manifest.fk
+
+(do
+    (defn cbw-vitl () "/Users/ursmuff/.ollama/models/blobs/sha256-72d6f08a42f656d36b356dbe0920675899a99ce21192fd66266fb7d82ed07539")
+    (defn cbw-moon () "/Users/ursmuff/.ollama/models/blobs/sha256-4cc1cb3660d87ff56432ebeb7884ad35d67c48c7b9f6b2856f305e39c38eed8f")
+
+    ; a bool KV (type 7), read at its own width; the sentinel -1 for absent or wrong-typed
+    (defn cbw-bool (src key)
+        (do (let off (gmt-find src key))
+            (if (eq off (gmt-absent)) (sub 0 1)
+                (if (eq (gmt-vtype src off) 7) (gm-int src off 7) (sub 0 1)))))
+
+    (defn cbw-towers? (src)
+        (if (eq (cbw-bool src "clip.has_text_encoder") 0)
+            (if (eq (cbw-bool src "clip.has_vision_encoder") 1) 1 0) 0))
+
+    (let v (eqr-of-file (cbw-vitl) 0 (gm-window)))
+    (let m (eqr-of-file (cbw-moon) 0 (gm-window)))
+
+    (let b1  (egg-magic-ok? v))
+    (let b2  (if (eq b1 1) (cbw-towers? v) 0))
+    (let b4  (if (eq b1 1) (if (eq (gmt-u32 v "clip.vision.block_count") 23) 1 0) 0))
+    (let b8  (egg-magic-ok? m))
+    (let b16 (if (eq b8 1) (cbw-towers? m) 0))
+    (let b32 (if (eq b8 1) (if (eq (gmt-u32 m "clip.vision.block_count") 28) 1 0) 0))
+
+    (print (str_concat "bit1  vit-large magic        = " (int_to_str b1)))
+    (print (str_concat "bit2  vit-large towers       = " (int_to_str b2)))
+    (print (str_concat "bit4  vit-large 23 blocks    = " (int_to_str b4)))
+    (print (str_concat "bit8  moondream magic        = " (int_to_str b8)))
+    (print (str_concat "bit16 moondream towers       = " (int_to_str b16)))
+    (print (str_concat "bit32 moondream 28 blocks    = " (int_to_str b32)))
+
+    (let verdict (add b1 (add (mul 2 b2) (add (mul 4 b4)
+                  (add (mul 8 b8) (add (mul 16 b16) (mul 32 b32)))))))
+    (print (str_concat "Verdict: " (int_to_str verdict)))
+    verdict)

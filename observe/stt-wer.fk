@@ -1,0 +1,111 @@
+; stt-wer.fk -- sequence-aligned word error rate for native STT promotion.
+;
+; stt-agree.fk scores set overlap, which is useful but blind to word order.
+; This cell adds the next stricter signal: Levenshtein edit distance over word
+; lists, then WER = edits * 100 / truth length. It is intentionally small and
+; integer-only so fkwu can witness it directly.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn sw-min2 (a b) (if (le a b) a b))
+    (defn sw-min3 (a b c) (sw-min2 (sw-min2 a b) c))
+    (defn sw-cost (a b) (if (str_eq a b) 0 1))
+
+    (defn sw-distance (hyp truth)
+        (if (eq (len hyp) 0) (len truth)
+            (if (eq (len truth) 0) (len hyp)
+                (sw-min3
+                    (add 1 (sw-distance (tail hyp) truth))
+                    (add 1 (sw-distance hyp (tail truth)))
+                    (add (sw-cost (head hyp) (head truth))
+                         (sw-distance (tail hyp) (tail truth)))))))
+
+    (defn sw-denom (truth) (if (eq (len truth) 0) 1 (len truth)))
+    (defn sw-wer (hyp truth) (div (mul (sw-distance hyp truth) 100) (sw-denom truth)))
+    (defn sw-accept? (hyp truth max-wer) (if (le (sw-wer hyp truth) max-wer) 1 0))
+
+    ; The compact recursive distance above is clear and works for tiny witness
+    ; bands, but it is exponential. Real ASR transcripts need the same metric
+    ; computed with a bounded dynamic-programming row walk.
+    (defn swb-range-row (j n)
+        (if (gt j n) (empty) (cons j (swb-range-row (add j 1) n))))
+    (defn swb-rev (xs acc)
+        (if (eq (len xs) 0) acc (swb-rev (tail xs) (cons (head xs) acc))))
+    (defn swb-row-loop (h truth prev j m prevdiag left acc)
+        (if (gt j m) (swb-rev acc (empty))
+            (do
+                (let above (nth prev j))
+                (let diag prevdiag)
+                (let t (nth truth (sub j 1)))
+                (let v (sw-min3
+                            (add above 1)
+                            (add left 1)
+                            (add diag (sw-cost h t))))
+                (swb-row-loop h truth prev (add j 1) m above v (cons v acc)))))
+    (defn swb-next-row (h truth prev i)
+        (swb-row-loop h truth prev 1 (len truth) (nth prev 0) i (list i)))
+    (defn swb-distance-loop (hyp truth prev i)
+        (if (eq (len hyp) 0) (nth prev (len truth))
+            (do
+                (let row (swb-next-row (head hyp) truth prev i))
+                (swb-distance-loop (tail hyp) truth row (add i 1)))))
+    (defn sw-distance-bounded (hyp truth)
+        (swb-distance-loop hyp truth (swb-range-row 0 (len truth)) 1))
+    (defn sw-wer-bounded (hyp truth)
+        (div (mul (sw-distance-bounded hyp truth) 100) (sw-denom truth)))
+    (defn sw-accept-bounded? (hyp truth max-wer)
+        (if (le (sw-wer-bounded hyp truth) max-wer) 1 0))
+
+    ; Compact tokenizer helpers keep broad prelude bands below the current seed's function-table ceiling.
+    (defn sw-reverse-onto (xs acc)
+        (if (eq (len xs) 0) acc
+            (sw-reverse-onto (tail xs) (cons (head xs) acc))))
+    (defn sw-slice-loop (source i end acc)
+        (if (ge i end) acc
+            (sw-slice-loop source (add i 1) end
+                           (str_concat acc (byte_to_str (str_byte_at source i))))))
+
+    (defn sw-token-loop (source i n cur acc)
+        (if (ge i n)
+            (sw-reverse-onto (if (str_eq cur "") acc (cons cur acc)) (empty))
+            (do
+                (let b0 (str_byte_at source i))
+                (if (or (and (ge b0 48) (le b0 57))
+                        (or (and (ge b0 65) (le b0 90))
+                            (and (ge b0 97) (le b0 122))))
+                    (sw-token-loop source (add i 1) n
+                                   (str_concat cur
+                                               (byte_to_str
+                                                   (if (and (ge b0 65) (le b0 90))
+                                                       (add b0 32)
+                                                       b0)))
+                                   acc)
+                    (if (lt b0 128)
+                        (sw-token-loop source (add i 1) n ""
+                                       (if (str_eq cur "") acc (cons cur acc)))
+                        (do
+                            (let size
+                                (if (and (ge b0 192) (le b0 223)) 2
+                                    (if (and (ge b0 224) (le b0 239)) 3
+                                        (if (and (ge b0 240) (le b0 247)) 4 1))))
+                            (let b1 (if (lt (add i 1) n) (str_byte_at source (add i 1)) 0))
+                            (let b2 (if (lt (add i 2) n) (str_byte_at source (add i 2)) 0))
+                            (let unit (sw-slice-loop source i (add i size) ""))
+                            (let flushed (if (str_eq cur "") acc (cons cur acc)))
+                            (if (or
+                                    (and (eq b0 226) (and (eq b1 128) (and (ge b2 144) (le b2 191))))
+                                    (or
+                                        (and (eq b0 227) (and (eq b1 128) (and (ge b2 128) (le b2 191))))
+                                        (or
+                                            (and (eq b0 239) (and (eq b1 188) (and (ge b2 128) (le b2 159))))
+                                            (and (eq b0 216) (or (eq b1 140) (or (eq b1 155) (eq b1 159)))))))
+                                (sw-token-loop source (add i size) n "" flushed)
+                                (if (and (ge b0 228) (le b0 233))
+                                    (sw-token-loop source (add i size) n "" (cons unit flushed))
+                                    (sw-token-loop source (add i size) n
+                                                   (str_concat cur unit)
+                                                   acc)))))))))
+    (defn sw-tokens (text) (sw-token-loop text 0 (str_len text) "" (empty)))
+
+    0)

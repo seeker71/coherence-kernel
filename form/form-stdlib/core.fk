@@ -1,0 +1,478 @@
+; core.fk - direct Form core stdlib.
+;
+; This file is executable by the current `fkwu --src` reader. The older BML
+; class surface still lives at surface/core.fk as the high-grammar reference;
+; this executable core keeps the same public vocabulary while carrying the
+; Num/List/Cell/Task abstraction as inspectable Form data.
+;
+; Do not define wrappers for primitive structural operators such as head, tail,
+; len, nth, cons, list, or empty here. Keeping those primitive names unshadowed
+; lets source witnesses use the kernel's direct access paths.
+
+(do
+    (defn identity (x) x)
+
+    ; The string "narrow waist" — str_len / str_byte_at / byte_to_str (plus
+    ; str_concat) are the native composition floor for string behavior built in
+    ; Form: measure, decompose (one raw byte, 0-255), construct (the exact
+    ; dual), join. str_eq remains an orthogonal compare primitive. Confirmed
+    ; present, byte-identical, on fkwu, Go,
+    ; Rust, and TS (receipts/2026-07-01-narrow-waist-string-cleanup.md).
+    ;
+    ; RE-WITNESSED 2026-07-26, and the sentence above holds for only three of the
+    ; four names. `byte_to_str` is NOT byte-identical across the arms, and the
+    ; "exact dual" is exact on one of them:
+    ;
+    ;   (str_len (byte_to_str n))          n=65  127  128  169  206  255
+    ;     fkwu                                1    1    1    1    1    1
+    ;     go / rust / ts                      1    1    2    2    2    2
+    ;
+    ;   (str_byte_at (byte_to_str n) 0)    n=65  127  128  169  206  255
+    ;     fkwu                               65  127  128  169  206  255   <- the dual
+    ;     go / rust / ts                     65  127  194  194  195  195   <- a lead byte
+    ;
+    ; Above 127 the three walkers read n as a CODEPOINT and hand back its two-byte
+    ; UTF-8 encoding, so decompose-then-construct is not the identity there for
+    ; half the byte range. `str_len` and `str_byte_at` ARE four-way sound on the
+    ; same inputs — 206 and 169 for the two bytes of a lambda on every arm — so
+    ; the waist can take a string apart everywhere and put it back together in
+    ; exactly one place.
+    ;
+    ; This is why `substring` below cannot be trusted to be byte-indexed off fkwu
+    ; even though it is written over the waist: it constructs through byte_to_str.
+    ; Measured, with the loop under a private name so the dispatch override noted
+    ; below could not shadow it, over "Ω+1":
+    ;
+    ;   (str_len (substring "Ω+1" a b))   (0,1) (1,2) (2,3) (0,2) (0,4)
+    ;     fkwu                               1     1     1     2     4    raw bytes
+    ;     the recipe on go/rust/ts           2     2     1     4     6    re-encoded
+    ;     the NATIVE on go/rust/ts           0     2     1     2     4    char-floored
+    ;
+    ; The native the override keeps floors each byte offset to the start of the
+    ; character containing it and then slices whole characters — which is what
+    ; "return the whole char at a start and nothing inside it" means, measured.
+    ;
+    ; Is the capability missing, or only the name? Only the name, on the walkers:
+    ; (write_file_bytes p (list 206 169 65)) then (read_file_slice p 0 3) gives a
+    ; 3-byte string reading 206, 169, 65 on go, rust and ts. On fkwu those two
+    ; names are unbound and recover to `nothing` — no file is written. So each
+    ; side has exactly one door to a raw byte above 127 inside a string, and it is
+    ; a different door on each side. No door is open on all four.
+    ; Pinned by: tests/byte-waist-band.fk.
+    ; Everything below is Form composition over that floor — substring,
+    ; char_at, ord, int_to_str — kept as the portable fallback shape. The
+    ; kernel dispatch override is intentionally narrow: byte-string/cursor
+    ; waist names stay native when same-named fallback definitions are loaded,
+    ; so source compilers and cursors keep byte indexing instead of accidentally
+    ; routing through slower fallback string reconstruction. Other same-named
+    ; Form bindings remain ordinary user definitions.
+
+    (defn fstr-substring-loop (s i end acc)
+        (if (ge i end) acc
+            (fstr-substring-loop s (add i 1) end (str_concat acc (byte_to_str (str_byte_at s i))))))
+    (defn substring (s start end) (fstr-substring-loop s start end ""))
+
+    (defn char_at (s i) (substring s i (add i 1)))
+    (defn ord (c) (if (eq (str_len c) 0) -1 (str_byte_at c 0)))
+
+    ; int_to_str — decimal rendering, built from byte_to_str + arithmetic
+    ; (ASCII '0' is byte 48), not a digit-lookup string. Handles 0 and
+    ; negative numbers explicitly; every existing caller in this codebase
+    ; (HTTP status/content-length, JSON encoding, counts — grep int_to_str
+    ; under form/form-stdlib/) passes an integer, never a bool/null/string,
+    ; so this covers the load-bearing surface; the native's bool/null/string
+    ; pass-through fallback is not reproduced here.
+    ;
+    ; A NON-INTEGER ARGUMENT DIVERGES THREE WAYS — measured 2026-07-26:
+    ;
+    ;     (int_to_str 10.5)     fkwu ""      go "10"     rust "10"     ts "10.5"
+    ;
+    ; fkwu answers the EMPTY STRING, which is the dangerous one: it makes no error and
+    ; the caller's output is simply missing a piece. Found by having four kernels each
+    ; emit the same SVG and hashing the results — three hashes, and the diff was two
+    ; font-size attributes. Every band over that cell read 1023 on all four while the
+    ; pictures differed, because a band folds to a scalar and cannot compare documents.
+    ; The header above says every caller passes an integer; that was true and stayed
+    ; true only by luck the moment someone wrote a font size of 11.5.
+    ; See receipts/2026-07-26-navier-stokes-comes-home.md.
+    (defn fstr-digit-char (d) (byte_to_str (add d 48)))
+    (defn fstr-int-to-str-pos (n)
+        (if (lt n 10)
+            (fstr-digit-char n)
+            (str_concat (fstr-int-to-str-pos (div n 10)) (fstr-digit-char (mod n 10)))))
+    (defn int_to_str (n)
+        (if (eq n 0) "0"
+            (if (lt n 0) (str_concat "-" (fstr-int-to-str-pos (sub 0 n)))
+                (fstr-int-to-str-pos n))))
+
+    ; str_to_int — the inverse of int_to_str. Same digit arithmetic in
+    ; reverse (ASCII '0' is byte 48); leading whitespace is skipped and a
+    ; leading "-" negates. The digit loop STOPS at the first non-digit
+    ; rather than folding its byte into the accumulator.
+    ;
+    ; 2026-07-22 — the unguarded loop answered wrongly, not loudly. Every
+    ; shell-exec builtin returns its stdout with a trailing "\n"; the old
+    ; loop read that newline as a digit and folded (10 - 48) in, so the
+    ; form-native `grep -c` over the corpus came back 2442 instead of 248
+    ; (248*10 - 38). Nothing refused; a plausible integer came out. The
+    ; guard is what makes the body's own shell answerable at all. Kept
+    ; TOTAL (no form_error) because the three sibling kernels ship
+    ; str_to_int as a total native; see receipts/2026-07-22-the-body-
+    ; answers-itself.md for the parity spread across the four arms.
+    (defn fstr-digit-cp? (b) (if (ge b 48) (le b 57) false))
+    (defn fstr-space-cp? (b)
+        (if (eq b 32) true (if (eq b 9) true (if (eq b 10) true (eq b 13)))))
+    (defn fstr-skip-ws (s i len)
+        (if (ge i len) i
+            (if (fstr-space-cp? (str_byte_at s i)) (fstr-skip-ws s (add i 1) len) i)))
+    (defn fstr-to-int-loop (s i len acc)
+        (if (ge i len) acc
+            (if (fstr-digit-cp? (str_byte_at s i))
+                (fstr-to-int-loop s (add i 1) len (add (mul acc 10) (sub (str_byte_at s i) 48)))
+                acc)))
+    (defn str_to_int (s)
+        (do (let flen (str_len s))
+            (let fi (fstr-skip-ws s 0 flen))
+            (if (if (lt fi flen) (eq (str_byte_at s fi) 45) false)
+                (sub 0 (fstr-to-int-loop s (add fi 1) flen 0))
+                (fstr-to-int-loop s fi flen 0))))
+
+    ; str_find — naive substring search from `from`, over the floor.
+    ; O(n*m); nothing in this codebase calls it in a hot loop over long
+    ; strings. -1 when not found, matching fkwu's native convention exactly
+    ; (verified: an empty needle matches immediately at `from`, same as the
+    ; native).
+    (defn fstr-find-loop (h n hlen nlen i)
+        (if (gt (add i nlen) hlen) -1
+            (if (str_eq (substring h i (add i nlen)) n)
+                i
+                (fstr-find-loop h n hlen nlen (add i 1)))))
+    (defn str_find (h n from)
+        (fstr-find-loop h n (str_len h) (str_len n) from))
+
+    ; float_to_str — the missing dual of the native str_to_float. Scoped
+    ; honestly: fixed 6 fractional digits, trailing zeros trimmed, decimal
+    ; notation only — NOT a replacement for fkwu's retired native int_to_str
+    ; float fallback (`sprintf(tmp, "%.15g", ...)`, arbitrary precision,
+    ; switches to scientific notation for extreme magnitudes). Built because
+    ; form-stdlib/json.fk's json-emit-leaf calls int_to_str uniformly for
+    ; every numeric node type, including node_type 7 (a trivial float,
+    ; confirmed: `(node_type (intern_trivial_float "3.14"))` -> `7`) — that
+    ; silently broke the moment int_to_str stopped auto-detecting floats
+    ; (receipts/2026-07-01-c-seed-shrink-substring-int-to-str.md retired the
+    ; native that used to do that detection). json.fk itself is fixed
+    ; separately to dispatch ty 7 here instead of to int_to_str.
+    (defn fstr-pow10 (n) (if (eq n 0) 1 (mul 10 (fstr-pow10 (sub n 1)))))
+    (defn fstr-pad-left (s n)
+        (if (ge (str_len s) n) s (fstr-pad-left (str_concat "0" s) n)))
+    (defn fstr-trim-trailing-zeros (s)
+        (if (eq (str_len s) 0) s
+            (if (str_eq (substring s (sub (str_len s) 1) (str_len s)) "0")
+                (fstr-trim-trailing-zeros (substring s 0 (sub (str_len s) 1)))
+                s)))
+    ; Rounds the WHOLE scaled value (integer-part-and-fraction together) to
+    ; one integer BEFORE splitting it back with div/mod — not the fractional
+    ; digits alone. Splitting first and rounding the fraction independently
+    ; breaks on carry (verified: 2.9999999 rounded that way gave "80",
+    ; garbage — mod/pad-left on an unrounded fractional int can overflow its
+    ; own width when the carry should have bumped the integer part instead).
+    ; div/mod on the pre-rounded combined integer carries correctly for free.
+    (defn float_to_str (f)
+        (do
+            (let neg (lt f 0))
+            (let af (if neg (sub 0 f) f))
+            (let scale (fstr-pow10 6))
+            (let scaled (float_to_int (add 0.5 (mul af scale))))
+            (let ip (div scaled scale))
+            (let fp (mod scaled scale))
+            (let frac (fstr-trim-trailing-zeros (fstr-pad-left (int_to_str fp) 6)))
+            (let body (if (eq (str_len frac) 0) (int_to_str ip) (str_concat (int_to_str ip) (str_concat "." frac))))
+            (if neg (str_concat "-" body) body)))
+
+    ; intern_node_at — intern_node plus source attribution, over the native
+    ; fb_record (record cell provenance: file + packed line/col). Was
+    ; previously reachable only via surface/fourth-shim.fk (the flatten
+    ; lane's own standing prelude, never auto-injected for bare `--src`) —
+    ; confirmed unbound on `fkwu --src` directly: `(intern_node_at (bp "X")
+    ; (list 1 2) "f" 1 1)` -> nothing. json.fk uses this for every composite
+    ; JSON node it builds; without it, every JSON-OBJECT/ARRAY/PAIR/NULL
+    ; construction silently produced nothing. See receipts/2026-07-01-
+    ; json-fk-src-scoping-fix.md.
+    (defn intern_node_at (cat kids file line col)
+        (fb_record (intern_node cat kids) file (add (mul line 65536) col)))
+
+    ; Num<T> public vocabulary.
+    (defn even? (n) (eq (mod n 2) 0))
+    (defn odd? (n) (eq (mod n 2) 1))
+    (defn zero? (n) (eq n 0))
+    (defn positive? (n) (gt n 0))
+    (defn negative? (n) (lt n 0))
+    (defn plus (a b) (add a b))
+    (defn minus (a b) (sub a b))
+    (defn times (a b) (mul a b))
+    (defn divide (a b) (div a b))
+    (defn abs (n) (if (lt n 0) (sub 0 n) n))
+    (defn min2 (a b) (if (lt a b) a b))
+    (defn max2 (a b) (if (gt a b) a b))
+
+    ; List<T> public vocabulary.
+    ;
+    ; `nil?` IS A LIST CELL AND ONLY A LIST CELL. It reads `len`, and `len` counts cons cells; the
+    ; one honest question it answers is "does this list have no elements". Handed a STRING it does
+    ; not answer "is this string empty" on any arm: go, rust and ts return the string's byte length,
+    ; so `(nil? "a")` is 0 and `(nil? "")` is 1 — an emptiness test by coincidence, not by contract.
+    ; fkwu cannot answer at all: its words carry no type (an int is `n << 1`, a string handle is
+    ; `poolidx << 1`), so `len` has nothing to read a string-ness from and returns 0 for every
+    ; non-list. That gap does not close by making one arm behave like the other three — it closes by
+    ; asking the right cell. For "is this string empty", use `(eq (str_len s) 0)`, which agrees
+    ; four-way. For "is there a file", use `fs_exists`, before `read_file` can hand back a null.
+    ; ask-native-lane.fk carries the worked example, and the receipt carries how it was found.
+    (defn nil? (xs) (eq (len xs) 0))
+    (defn map (f xs)
+        (if (nil? xs)
+            (empty)
+            (cons (f (head xs)) (map f (tail xs)))))
+    (defn filter (pred xs)
+        (if (nil? xs)
+            (empty)
+            (if (pred (head xs))
+                (cons (head xs) (filter pred (tail xs)))
+                (filter pred (tail xs)))))
+    (defn foldl (f init xs)
+        (if (nil? xs)
+            init
+            (foldl f (f init (head xs)) (tail xs))))
+    (defn foldr (f init xs)
+        (if (nil? xs)
+            init
+            (f (head xs) (foldr f init (tail xs)))))
+    (defn range (start end)
+        (if (ge start end)
+            (empty)
+            (cons start (range (add start 1) end))))
+    (defn append (xs ys)
+        (if (nil? xs)
+            ys
+            (cons (head xs) (append (tail xs) ys))))
+    (defn take (n xs)
+        (if (or (le n 0) (nil? xs))
+            (empty)
+            (cons (head xs) (take (sub n 1) (tail xs)))))
+    (defn drop (n xs)
+        (if (le n 0)
+            xs
+            (if (nil? xs) (empty) (drop (sub n 1) (tail xs)))))
+    (defn cons-flip (acc x) (cons x acc))
+    (defn reverse-onto (xs acc)
+        (if (nil? xs)
+            acc
+            (reverse-onto (tail xs) (cons (head xs) acc))))
+    (defn reverse (xs) (reverse-onto xs (empty)))
+    (defn sum (xs)
+        (if (nil? xs)
+            0
+            (add (head xs) (sum (tail xs)))))
+    (defn product (xs)
+        (if (nil? xs)
+            1
+            (mul (head xs) (product (tail xs)))))
+    (defn maximum (xs)
+        (if (nil? (tail xs))
+            (head xs)
+            (max2 (head xs) (maximum (tail xs)))))
+    (defn minimum (xs)
+        (if (nil? (tail xs))
+            (head xs)
+            (min2 (head xs) (minimum (tail xs)))))
+    (defn any? (pred xs)
+        (if (nil? xs)
+            false
+            (if (pred (head xs)) true (any? pred (tail xs)))))
+    (defn all? (pred xs)
+        (if (nil? xs)
+            true
+            (if (pred (head xs)) (all? pred (tail xs)) false)))
+
+    ; Cell<T> public vocabulary.
+    (defn cell (kind value origin inverse)
+        (list "cell" kind value origin inverse))
+    (defn cell? (c)
+        (and (gt (len c) 0) (str_eq (head c) "cell")))
+    (defn cell-kind (c) (nth c 1))
+    (defn cell-value (c) (nth c 2))
+    (defn cell-origin (c) (nth c 3))
+    (defn cell-inverse (c) (nth c 4))
+    (defn cell-undo (c)
+        (do
+            (let inverse (cell-inverse c))
+            (inverse c)))
+    (defn cell-do (c) (cell-value c))
+
+    ; Task<T> public vocabulary.
+    (defn task-undo (t) (cell-origin t))
+    (defn task-cell (state value cont origin inverse)
+        (cell "task" (list state value cont) origin inverse))
+    (defn task? (t)
+        (and (cell? t) (str_eq (cell-kind t) "task")))
+    (defn task-state (t) (nth (cell-value t) 0))
+    (defn task-value (t) (nth (cell-value t) 1))
+    (defn task-cont (t) (nth (cell-value t) 2))
+    (defn task-pending (origin cont)
+        (task-cell "pending" (empty) cont origin task-undo))
+    (defn task-resolved (value)
+        (task-cell "resolved" value identity (empty) task-undo))
+    (defn task-failed (failure)
+        (task-cell "failed" failure identity (empty) task-undo))
+    (defn task-resolve (t value)
+        (task-cell "resolved" value (task-cont t) (cell-origin t) (cell-inverse t)))
+    (defn task-reject (t failure)
+        (task-cell "failed" failure (task-cont t) (cell-origin t) (cell-inverse t)))
+    (defn task-await (t)
+        (if (str_eq (task-state t) "resolved") (task-value t) t))
+    (defn task-step (t)
+        (if (str_eq (task-state t) "resolved")
+            (do
+                (let cont (task-cont t))
+                (cont (task-value t)))
+            t))
+    (defn task-ready? (t) (str_eq (task-state t) "resolved"))
+    (defn task-failed? (t) (str_eq (task-state t) "failed"))
+
+    ; Assertion returns 0 when pred holds and provokes the kernel's empty-head
+    ; failure path when it does not. msg remains human source context.
+    (defn assert (pred msg)
+        (if pred 0 (head (empty))))
+
+    ; Queryable trust boundary for the core string composition waist. These are
+    ; the native string operations higher string behavior is built from in Form;
+    ; this is not a scan of every string-related native a host may expose. It is
+    ; not a grammar surface. It is the core layer naming its dependency boundary
+    ; as data.
+    (defn core-waist-op (name role)
+        (list "waist-op" name role))
+    (defn core-waist-op-name (o) (nth o 1))
+    (defn core-waist-op-role (o) (nth o 2))
+    (defn core-native-string-waist ()
+        (list
+            (core-waist-op "str_len" "measure")
+            (core-waist-op "str_byte_at" "decompose-byte")
+            (core-waist-op "byte_to_str" "construct-byte")
+            (core-waist-op "str_concat" "join")))
+    (defn core-composed-string-ops ()
+        (list "substring" "char_at" "ord" "int_to_str" "str_find" "str_to_int" "float_to_str"))
+    (defn core-waist-has? (name ops)
+        (if (nil? ops)
+            0
+            (if (str_eq (core-waist-op-name (head ops)) name)
+                1
+                (core-waist-has? name (tail ops)))))
+    (defn core-name-in? (name names)
+        (if (nil? names)
+            0
+            (if (str_eq (head names) name)
+                1
+                (core-name-in? name (tail names)))))
+
+    ; Queryable semantic model for analyzers, high-grammar lifters, and JIT
+    ; policy code that needs class/method shape without depending on BML syntax.
+    (defn core-method (name arity purity source)
+        (list "method" name arity purity source))
+    (defn core-class (name type-param methods)
+        (list "class" name type-param methods))
+    (defn core-class-name (c) (nth c 1))
+    (defn core-class-type-param (c) (nth c 2))
+    (defn core-class-methods (c) (nth c 3))
+    (defn core-method-name (m) (nth m 1))
+    (defn core-method-arity (m) (nth m 2))
+    (defn core-method-pure? (m) (nth m 3))
+    (defn core-method-source (m) (nth m 4))
+
+    (defn core-num-class ()
+        (core-class "Num" "T"
+            (list
+                (core-method "even?" 1 1 "core")
+                (core-method "odd?" 1 1 "core")
+                (core-method "zero?" 1 1 "core")
+                (core-method "positive?" 1 1 "core")
+                (core-method "negative?" 1 1 "core")
+                (core-method "plus" 2 1 "core")
+                (core-method "minus" 2 1 "core")
+                (core-method "times" 2 1 "core")
+                (core-method "divide" 2 1 "core")
+                (core-method "abs" 1 1 "core")
+                (core-method "min2" 2 1 "core")
+                (core-method "max2" 2 1 "core"))))
+    (defn core-list-class ()
+        (core-class "List" "T"
+            (list
+                (core-method "nil?" 1 1 "core")
+                (core-method "map" 2 1 "core")
+                (core-method "filter" 2 1 "core")
+                (core-method "foldl" 3 1 "core")
+                (core-method "foldr" 3 1 "core")
+                (core-method "range" 2 1 "core")
+                (core-method "append" 2 1 "core")
+                (core-method "take" 2 1 "core")
+                (core-method "drop" 2 1 "core")
+                (core-method "reverse" 1 1 "core")
+                (core-method "sum" 1 1 "core")
+                (core-method "product" 1 1 "core")
+                (core-method "maximum" 1 1 "core")
+                (core-method "minimum" 1 1 "core")
+                (core-method "any?" 2 1 "core")
+                (core-method "all?" 2 1 "core"))))
+    (defn core-cell-class ()
+        (core-class "Cell" "T"
+            (list
+                (core-method "cell" 4 1 "core")
+                (core-method "cell?" 1 1 "core")
+                (core-method "cell-kind" 1 1 "core")
+                (core-method "cell-value" 1 1 "core")
+                (core-method "cell-origin" 1 1 "core")
+                (core-method "cell-inverse" 1 1 "core")
+                (core-method "cell-undo" 1 0 "core")
+                (core-method "cell-do" 1 1 "core"))))
+    (defn core-task-class ()
+        (core-class "Task" "T"
+            (list
+                (core-method "task-undo" 1 1 "core")
+                (core-method "task-cell" 5 1 "core")
+                (core-method "task?" 1 1 "core")
+                (core-method "task-state" 1 1 "core")
+                (core-method "task-value" 1 1 "core")
+                (core-method "task-cont" 1 1 "core")
+                (core-method "task-pending" 2 1 "core")
+                (core-method "task-resolved" 1 1 "core")
+                (core-method "task-failed" 1 1 "core")
+                (core-method "task-resolve" 2 1 "core")
+                (core-method "task-reject" 2 1 "core")
+                (core-method "task-await" 1 1 "core")
+                (core-method "task-step" 1 0 "core")
+                (core-method "task-ready?" 1 1 "core")
+                (core-method "task-failed?" 1 1 "core"))))
+    (defn core-classes ()
+        (list (core-num-class) (core-list-class) (core-cell-class) (core-task-class)))
+    (defn core-section ()
+        (list "section" "form.core" (core-classes)))
+    (defn core-class-count ()
+        (len (core-classes)))
+    (defn core-method-count (c)
+        (len (core-class-methods c)))
+    (defn core-has-class? (name classes)
+        (if (nil? classes)
+            0
+            (if (str_eq (core-class-name (head classes)) name)
+                1
+                (core-has-class? name (tail classes)))))
+    (defn core-check ()
+        (add
+            (if (eq (core-class-count) 4) 1 0)
+            (add
+                (if (core-has-class? "Num" (core-classes)) 2 0)
+                (add
+                    (if (core-has-class? "List" (core-classes)) 4 0)
+                    (add
+                        (if (core-has-class? "Cell" (core-classes)) 8 0)
+                        (if (core-has-class? "Task" (core-classes)) 16 0))))))
+
+    0)

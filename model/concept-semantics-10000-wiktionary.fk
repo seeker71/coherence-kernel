@@ -1,0 +1,209 @@
+; concept-semantics-10000-wiktionary.fk — combined attributed semantic lookup.
+;
+; The canonical WordNet projection remains the first source. Only its explicit
+; method-0 holes consult the Wiktionary morphology overlay. The overlay carries
+; WordNet senses and relations, not generated definitions.
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk model/concept-10000-data.fk model/concept-10000.fk model/concept-semantics-10000-data.fk model/concept-semantics-10000.fk model/concept-semantics-10000-wiktionary-data.fk
+(do
+  (defn cs10w-method-label (semantic)
+    (if (eq (cs10-method semantic) 1) "wordnet-exact"
+      (if (eq (cs10-method semantic) 2) "wordnet-exception"
+        (if (eq (cs10-method semantic) 3) "wiktionary-form+wordnet" "unmatched"))))
+  (defn cs10w-at-in (primary-index primary-payload overlay-index overlay-payload id)
+    (if (and (ge id 0) (lt id (cs10-count)))
+      (if (gt (cs10-method-at primary-index id) 0)
+        (cs10-at-in primary-index primary-payload id)
+        (cs10-at-in overlay-index overlay-payload id))
+      (cs10-miss id)))
+  (defn cs10w-at (id)
+    (cs10w-at-in
+      (read_file (cs10-index-path)) (read_file (cs10-payload-path))
+      (read_file (cs10w-index-path)) (read_file (cs10w-payload-path)) id))
+  (defn cs10w-detect-text-in (ranked lexical-index primary-index primary-payload overlay-index overlay-payload text)
+    (do (let anchor (c10-detect-text-n-in ranked lexical-index text
+                       (c10-index-count-in lexical-index)))
+        (if (c10-missing? anchor) (cs10-miss -1)
+          (cs10w-at-in primary-index primary-payload overlay-index overlay-payload
+            (c10-concept-id anchor)))))
+  (defn cs10w-detect-text (text)
+    (cs10w-detect-text-in
+      (read_file (c10-ranked-path)) (read_file (c10-lexical-index-path))
+      (read_file (cs10-index-path)) (read_file (cs10-payload-path))
+      (read_file (cs10w-index-path)) (read_file (cs10w-payload-path)) text))
+
+  ; audit = (mapped miss exact exception wiktionary poly relation-rows relations-total)
+  (defn cs10w-audit-empty () (list 0 0 0 0 0 0 0 0))
+  (defn cs10w-effective-method-at (primary-index overlay-index id)
+    (do (let method (cs10-method-at primary-index id))
+        (if (gt method 0) method (cs10-method-at overlay-index id))))
+  (defn cs10w-audit-row (primary-index overlay-index id a)
+    (do (let method (cs10w-effective-method-at primary-index overlay-index id))
+        (if (eq method 0)
+          (list (nth a 0) (add (nth a 1) 1) (nth a 2) (nth a 3)
+                (nth a 4) (nth a 5) (nth a 6) (nth a 7))
+          (do (let chosen (if (eq method 3) overlay-index primary-index))
+              (let senses (cs10-senses-at chosen id))
+              (let rels (cs10-relations-at chosen id))
+              (list (add (nth a 0) 1) (nth a 1)
+                    (add (nth a 2) (if (eq method 1) 1 0))
+                    (add (nth a 3) (if (eq method 2) 1 0))
+                    (add (nth a 4) (if (eq method 3) 1 0))
+                    (add (nth a 5) (if (gt senses 1) 1 0))
+                    (add (nth a 6) (if (gt rels 0) 1 0))
+                    (add (nth a 7) rels))))))
+  (defn cs10w-audit-block (primary-index overlay-index i end a)
+    (if (eq i end) a
+      (cs10w-audit-block primary-index overlay-index (add i 1) end
+        (cs10w-audit-row primary-index overlay-index i a))))
+  (defn cs10w-audit-blocks (primary-index overlay-index start a)
+    (if (eq start (cs10-count)) a
+      (cs10w-audit-blocks primary-index overlay-index (add start 100)
+        (cs10w-audit-block primary-index overlay-index start (add start 100) a))))
+  (defn cs10w-audit-in (primary-index overlay-index)
+    (if (and (eq (str_len primary-index) 350000)
+             (eq (str_len overlay-index) 350000))
+      (cs10w-audit-blocks primary-index overlay-index 0 (cs10w-audit-empty))
+      (list -1 -1 -1 -1 -1 -1 -1 -1)))
+  (defn cs10w-audit ()
+    (cs10w-audit-in (read_file (cs10-index-path)) (read_file (cs10w-index-path))))
+
+  ; Source record = (anchor-id page-id revision-id timestamp title English-SHA status candidates)
+  ; Candidate = (Wiktionary-template named-base WordNet-POS).
+  (defn cs10w-source (id page revision timestamp title english-sha status candidates)
+    (list id page revision timestamp title english-sha status candidates))
+  (defn cs10w-source-id (source) (nth source 0))
+  (defn cs10w-source-page-id (source) (nth source 1))
+  (defn cs10w-source-revision-id (source) (nth source 2))
+  (defn cs10w-source-timestamp (source) (nth source 3))
+  (defn cs10w-source-title (source) (nth source 4))
+  (defn cs10w-source-english-sha (source) (nth source 5))
+  (defn cs10w-source-status (source) (nth source 6))
+  (defn cs10w-source-candidates (source) (nth source 7))
+  (defn cs10w-candidate (template base pos) (list template base pos))
+  (defn cs10w-candidate-template (candidate) (nth candidate 0))
+  (defn cs10w-candidate-base (candidate) (nth candidate 1))
+  (defn cs10w-candidate-pos (candidate) (nth candidate 2))
+  (defn cs10w-candidates-go (payload at remaining)
+    (if (eq remaining 0) (empty)
+      (do (let template-len (str_to_int (substring payload at (add at 2))))
+          (let template-start (add at 2))
+          (let template-end (add template-start template-len))
+          (let base-len (str_to_int (substring payload template-end (add template-end 2))))
+          (let base-start (add template-end 2))
+          (let base-end (add base-start base-len))
+          (cons (cs10w-candidate
+                  (substring payload template-start template-end)
+                  (substring payload base-start base-end)
+                  (substring payload base-end (add base-end 1)))
+                (cs10w-candidates-go payload (add base-end 1) (sub remaining 1))))))
+  (defn cs10w-source-at-in (index payload id)
+    (if (and (ge id 0) (lt id (cs10-count)))
+      (do (let base (mul id (cs10w-provenance-index-width)))
+          (let off (str_to_int (substring index base (add base 8))))
+          (let plen (str_to_int (substring index (add base 8) (add base 13))))
+          (if (eq plen 0) (cs10w-source id 0 0 "" "" "" "no-evidence" (empty))
+            (do (let p (substring payload off (add off plen)))
+                (let title-len (str_to_int (substring p 104 106)))
+                (let title-start 106)
+                (let title-end (add title-start title-len))
+                (let status-len (str_to_int (substring p title-end (add title-end 2))))
+                (let status-start (add title-end 2))
+                (let status-end (add status-start status-len))
+                (let candidate-count (str_to_int (substring p status-end (add status-end 2))))
+                (cs10w-source id
+                  (str_to_int (substring p 0 10)) (str_to_int (substring p 10 20))
+                  (c10-rtrim-space (substring p 20 40))
+                  (substring p title-start title-end) (substring p 40 104)
+                  (substring p status-start status-end)
+                  (cs10w-candidates-go p (add status-end 2) candidate-count)))))
+      (cs10w-source id 0 0 "" "" "" "out-of-range" (empty))))
+  (defn cs10w-source-at (id)
+    (cs10w-source-at-in
+      (read_file (cs10w-provenance-index-path))
+      (read_file (cs10w-provenance-payload-path)) id))
+
+  ; Exhaustive source/semantic consistency audit.
+  ; Result = (accepted rejected primary valid failures).
+  ; Every canonical primary must have no overlay/source row. Every canonical
+  ; miss must have evidence, and method 3 exists iff that evidence is accepted.
+  (defn cs10w-candidate-bases-match? (candidates lemma)
+    (if (eq (len candidates) 0) 1
+      (if (str_eq (cs10w-candidate-base (head candidates)) lemma)
+        (cs10w-candidate-bases-match? (tail candidates) lemma) 0)))
+  (defn cs10w-provenance-audit-empty () (list 0 0 0 0 0))
+  (defn cs10w-provenance-audit-pass (a kind)
+    (list
+      (add (nth a 0) (if (eq kind 1) 1 0))
+      (add (nth a 1) (if (eq kind 2) 1 0))
+      (add (nth a 2) (if (eq kind 3) 1 0))
+      (add (nth a 3) 1) (nth a 4)))
+  (defn cs10w-provenance-audit-fail (a)
+    (list (nth a 0) (nth a 1) (nth a 2) (nth a 3) (add (nth a 4) 1)))
+  (defn cs10w-provenance-audit-row
+    (primary-index primary-payload overlay-index overlay-payload
+     provenance-index provenance-payload id a)
+    (do (let primary-method (cs10-method-at primary-index id))
+        (let overlay-method (cs10-method-at overlay-index id))
+        (let source (cs10w-source-at-in provenance-index provenance-payload id))
+        (if (gt primary-method 0)
+          (if (and (eq overlay-method 0)
+                   (str_eq (cs10w-source-status source) "no-evidence"))
+            (cs10w-provenance-audit-pass a 3)
+            (cs10w-provenance-audit-fail a))
+          (if (str_eq (cs10w-source-status source) "accepted")
+            (do (let semantic (cs10-at-in overlay-index overlay-payload id))
+                (let candidates (cs10w-source-candidates source))
+                (if (and (eq overlay-method 3)
+                      (and (gt (len candidates) 0)
+                        (and (cs10w-candidate-bases-match? candidates (cs10-lemma semantic))
+                          (and (gt (cs10w-source-page-id source) 0)
+                            (and (gt (cs10w-source-revision-id source) 0)
+                              (and (gt (str_len (cs10w-source-timestamp source)) 0)
+                                (and (eq (str_len (cs10w-source-english-sha source)) 64)
+                                  (and (gt (str_len (cs10-gloss semantic)) 0)
+                                       (gt (cs10-sense-count semantic) 0)))))))))
+                  (cs10w-provenance-audit-pass a 1)
+                  (cs10w-provenance-audit-fail a)))
+            (if (and (eq overlay-method 0)
+                  (and (gt (str_len (cs10w-source-status source)) 0)
+                    (if (str_eq (cs10w-source-status source) "no-evidence") 0 1)))
+              (cs10w-provenance-audit-pass a 2)
+              (cs10w-provenance-audit-fail a))))))
+  (defn cs10w-provenance-audit-block
+    (primary-index primary-payload overlay-index overlay-payload
+     provenance-index provenance-payload i end a)
+    (if (eq i end) a
+      (cs10w-provenance-audit-block
+        primary-index primary-payload overlay-index overlay-payload
+        provenance-index provenance-payload (add i 1) end
+        (cs10w-provenance-audit-row
+          primary-index primary-payload overlay-index overlay-payload
+          provenance-index provenance-payload i a))))
+  (defn cs10w-provenance-audit-blocks
+    (primary-index primary-payload overlay-index overlay-payload
+     provenance-index provenance-payload start a)
+    (if (eq start (cs10-count)) a
+      (cs10w-provenance-audit-blocks
+        primary-index primary-payload overlay-index overlay-payload
+        provenance-index provenance-payload (add start 100)
+        (cs10w-provenance-audit-block
+          primary-index primary-payload overlay-index overlay-payload
+          provenance-index provenance-payload start (add start 100) a))))
+  (defn cs10w-provenance-audit-in
+    (primary-index primary-payload overlay-index overlay-payload
+     provenance-index provenance-payload)
+    (if (and (eq (str_len primary-index) 350000)
+          (and (eq (str_len overlay-index) 350000)
+               (eq (str_len provenance-index) 130000)))
+      (cs10w-provenance-audit-blocks
+        primary-index primary-payload overlay-index overlay-payload
+        provenance-index provenance-payload 0 (cs10w-provenance-audit-empty))
+      (list -1 -1 -1 -1 -1)))
+  (defn cs10w-provenance-audit ()
+    (cs10w-provenance-audit-in
+      (read_file (cs10-index-path)) (read_file (cs10-payload-path))
+      (read_file (cs10w-index-path)) (read_file (cs10w-payload-path))
+      (read_file (cs10w-provenance-index-path))
+      (read_file (cs10w-provenance-payload-path))))
+)

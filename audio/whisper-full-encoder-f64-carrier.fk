@@ -1,0 +1,83 @@
+; whisper-full-encoder-f64-carrier.fk -- exact process-boundary carrier.
+;
+; The complete 35x384 Form encoder creates more than a billion boxed floats.
+; Decoder work therefore starts in a fresh fkwu process instead of retaining
+; that history.  This cell writes each final value as exact IEEE-754 little-
+; endian f64 bytes and reads it back without decimal rounding.  The carrier is
+; derived state, not learned weights and not a recognition result.
+; witnessed: 2026-07-20 -> live export/readback pending
+; preludes: form/form-stdlib/core.fk form/form-stdlib/format-arith.fk form/form-stdlib/f64-bytes.fk form/form-stdlib/wire-corba-cdr.fk model/lingbot-pytorch-checkpoint.fk
+
+(do
+  (defn waec-path () "/tmp/coherence-whisper-full-encoder-35x384.f64")
+  (defn waec-tokens () 35)
+  (defn waec-width () 384)
+  (defn waec-value-bytes () 8)
+  (defn waec-token-bytes () (mul (waec-width) (waec-value-bytes)))
+  (defn waec-byte-count () (mul (waec-tokens) (waec-token-bytes)))
+
+  (defn waec-f64-string (value)
+    (do
+      (let bytes (f64-bytes value))
+      (str_concat (byte_to_str (nth bytes 0))
+        (str_concat (byte_to_str (nth bytes 1))
+        (str_concat (byte_to_str (nth bytes 2))
+        (str_concat (byte_to_str (nth bytes 3))
+        (str_concat (byte_to_str (nth bytes 4))
+        (str_concat (byte_to_str (nth bytes 5))
+        (str_concat (byte_to_str (nth bytes 6))
+                    (byte_to_str (nth bytes 7)))))))))))
+  (defn waec-token-string-go (values out)
+    (if (eq (len values) 0) out
+      (waec-token-string-go (tail values)
+        (str_concat out (waec-f64-string (head values))))))
+  (defn waec-token-string (values)
+    (waec-token-string-go values ""))
+  (defn waec-encoder-string-go (tokens out)
+    (if (eq (len tokens) 0) out
+      (waec-encoder-string-go (tail tokens)
+        (str_concat out (waec-token-string (head tokens))))))
+  (defn waec-encoder-string (tokens)
+    (waec-encoder-string-go tokens ""))
+
+  (defn waec-mantissa (carrier off)
+    (add (str_byte_at carrier off)
+      (add (mul (str_byte_at carrier (add off 1)) 256)
+      (add (mul (str_byte_at carrier (add off 2)) 65536)
+      (add (mul (str_byte_at carrier (add off 3)) 16777216)
+      (add (mul (str_byte_at carrier (add off 4)) 4294967296)
+      (add (mul (str_byte_at carrier (add off 5)) 1099511627776)
+           (mul (mod (str_byte_at carrier (add off 6)) 16)
+                281474976710656))))))))
+  (defn waec-f64-at (carrier off)
+    (do
+      (let b6 (str_byte_at carrier (add off 6)))
+      (let b7 (str_byte_at carrier (add off 7)))
+      (let sign (div b7 128))
+      (let exponent (add (mul (mod b7 128) 16) (div b6 16)))
+      (cdr-f64-recompose sign exponent (waec-mantissa carrier off))))
+  (defn waec-vector-go (carrier off count out)
+    (if (eq count 0) (reverse out)
+      (waec-vector-go carrier (add off 8) (sub count 1)
+        (cons (waec-f64-at carrier off) out))))
+  (defn waec-vector (carrier token)
+    (waec-vector-go carrier (mul token (waec-token-bytes))
+      (waec-width) (empty)))
+  (defn waec-encoder-go (carrier token out)
+    (if (eq token (waec-tokens)) (reverse out)
+      (waec-encoder-go carrier (add token 1)
+        (cons (waec-vector carrier token) out))))
+  (defn waec-load ()
+    (do
+      (let carrier (fs-read-slice (waec-path) 0 (waec-byte-count)))
+      (list carrier
+        (if (eq (str_len carrier) (waec-byte-count)) 1 0)
+        (if (eq (str_len carrier) (waec-byte-count))
+          (lbpt-crc-string carrier) 0)
+        (if (eq (str_len carrier) (waec-byte-count))
+          (waec-encoder-go carrier 0 (empty)) (empty)))))
+  (defn waec-carrier (pack) (nth pack 0))
+  (defn waec-valid? (pack) (nth pack 1))
+  (defn waec-crc32 (pack) (nth pack 2))
+  (defn waec-output (pack) (nth pack 3))
+  0)

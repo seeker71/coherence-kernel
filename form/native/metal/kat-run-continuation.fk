@@ -1,0 +1,69 @@
+; kat-run-continuation.fk — a real prompt through the whole of KAT-Coder, text to text.
+;
+; tokenize (greedy longest-match over THIS file's own gpt2-style vocabulary — the same stated
+; radius llama3-tokenize.fk keeps: longest-match, not merge-order BPE) -> prefill -> greedy
+; decode -> detokenize through the same vocabulary's byte alphabet. BOS is the FILE's decision:
+; tokenizer.ggml.add_bos_token is read as the bool it is, never assumed.
+;
+; The ids and the text this prints are the body's computation, gated stage-by-stage by
+; tests/kat-token-handle-band.fk; no recorded end-to-end oracle exists for them and none is
+; claimed.
+;
+; preludes: native/metal/kat-token-handle.fk form-stdlib/llama3-tokenize.fk
+
+(do
+    ; a GGUF bool KV: vtype 7, one byte. -1 when absent, so the caller can default honestly.
+    (defn krc-bool (src key)
+        (do (let off (gmt-find src key))
+            (if (eq off (gmt-absent)) (sub 0 1)
+                (if (eq (gmt-vtype src off) 7) (eqr-at src (gmt-valoff src off)) (sub 0 1)))))
+
+    ; encode without the llama cell's unconditional BOS: map, walk, emit, then prepend only if
+    ; the file says so.
+    (defn krc-encode (src text)
+        (do (let m (l3t-map text))
+            (let L (str_len m))
+            (let r (l3t-walk src (gmt-tokens-first src) 0 (gmt-vocab-n src) m L
+                             (l3t-zeros L 0) (l3t-zeros L (sub 0 1))))
+            (let body (l3t-emit (nth r 0) (nth r 1) 0 L (empty)))
+            (if (eq (len body) 0) (empty)
+                (if (eq (krc-bool src "tokenizer.ggml.add_bos_token") 1)
+                    (cons (gmt-u32 src "tokenizer.ggml.bos_token_id") body)
+                    body))))
+
+    ; assemble the continuation text: l3d-pieces answers a (id piece) TABLE for the ids it was
+    ; asked about; the stream's text is those pieces in the STREAM's order.
+    (defn krc-piece-for (table id)
+        (if (eq (len table) 0) ""
+            (if (eq (head (head table)) id) (nth (head table) 1)
+                (krc-piece-for (tail table) id))))
+    (defn krc-text-go (table ids acc)
+        (if (eq (len ids) 0) acc
+            (krc-text-go table (tail ids) (str_concat acc (krc-piece-for table (head ids))))))
+    (defn krc-text (src ids) (krc-text-go (l3d-pieces src ids) ids ""))
+
+    (defn krc-run (ctx src prompt n)
+        (do (let ids (krc-encode src prompt))
+            (if (eq (len ids) 0) (list "tokenize-refused" prompt)
+                (do (let sts (kth-new-state (nth ctx 2)))
+                    (let pf (kth-prefill (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                                         (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0))
+                    (let out (kth-generate (nth ctx 0) (nth ctx 1) (nth ctx 2) (nth ctx 3) sts
+                                           (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                                           (head pf) (nth pf 1)
+                                           (sub n 1) (list (head pf))))
+                    (list "prompt" prompt "ids" ids "out-ids" out
+                          "text" (krc-text src out))))))
+
+    (if (md-door-live?)
+        (do
+            (let ctx (kth-setup 96))
+            (if (kth-pipes-ok? (nth ctx 0))
+                (do (let src (nth ctx 7))
+                    (list
+                        (krc-run ctx src "The capital of France is" 12)
+                        (krc-run ctx src
+                            (str_concat "def fibonacci(n):" (byte_to_str 10))
+                            24)))
+                (list "pipes-failed" (metal_status))))
+        "door-dark"))

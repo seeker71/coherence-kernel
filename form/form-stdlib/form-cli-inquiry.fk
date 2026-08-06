@@ -1,0 +1,88 @@
+; form-cli-inquiry.fk — axiom-1-complete native inquiry receipts for form-cli.
+; import "form-cli-inquiry-edge-ledger.fk"
+; ack is actual nothing/0/1/node. timeout is nothing with reason 2.
+; witnessed: 2026-07-21 -> direct source and installed form-cli agree; rewitness=1
+(do
+  (defn fci-edge (s r t source) (list s r t source))
+  (defn fci-static-edges () (list
+    (fci-edge 1 2 8 1) (fci-edge 1 2 9 1) (fci-edge 2 3 8 1)
+    (fci-edge 2 3 10 1) (fci-edge 3 1 11 1) (fci-edge 4 1 12 2)
+    (fci-edge 4 1 7 2) (fci-edge 4 1 6 2) (fci-edge 6 1 5 2)
+    (fci-edge 3 4 4 2)))
+  (defn fci-edges () (fciel-augment (fci-static-edges)))
+  (defn fci-s (e) (nth e 0)) (defn fci-r (e) (nth e 1)) (defn fci-t (e) (nth e 2))
+  (defn fci-member? (x xs) (if (eq (len xs) 0) 0 (if (eq x (head xs)) 1 (fci-member? x (tail xs)))))
+  (defn fci-proof (ack reason path steps) (list ack reason path steps))
+  (defn fci-ack (p) (nth p 0)) (defn fci-reason (p) (nth p 1))
+  (defn fci-path (p) (nth p 2)) (defn fci-steps (p) (nth p 3))
+  (defn fci-nothing? (p) (if (nothing? (fci-ack p)) 1 0))
+  (defn fci-node? (p) (if (and (eq (fci-nothing? p) 0)
+    (and (not (eq (fci-ack p) 0)) (not (eq (fci-ack p) 1)))) 1 0))
+  (defn fci-yes? (p) (if (or (eq (fci-ack p) 1) (eq (fci-node? p) 1)) 1 0))
+  (defn fci-walk (all edges s target seen fuel pending steps)
+    (if (le fuel 0) (fci-proof (nothing) 2 seen steps)
+      (if (eq (len edges) 0) (if (eq (fci-nothing? pending) 1) pending (fci-proof 0 0 (list) steps))
+        (do (let e (head edges))
+          (if (and (eq (fci-s e) s) (eq (fci-r e) 1))
+            (if (eq (fci-t e) target) (fci-proof (list 1 s target) 0 (list s target) (add steps 1))
+              (if (eq (fci-member? (fci-t e) seen) 1)
+                (fci-walk all (tail edges) s target seen (sub fuel 1) pending (add steps 1))
+                (do (let child (fci-walk all all (fci-t e) target (cons (fci-t e) seen)
+                                  (sub fuel 1) (fci-proof 0 0 (list) 0) (add steps 1)))
+                  (if (eq (fci-yes? child) 1)
+                    (do (let path (cons s (fci-path child)))
+                      (fci-proof (list 1 path) 0 path (fci-steps child)))
+                    (fci-walk all (tail edges) s target seen (sub fuel 1)
+                      (if (eq (fci-nothing? child) 1) child pending) (add steps 1))))))
+            (fci-walk all (tail edges) s target seen (sub fuel 1) pending (add steps 1)))))))
+  (defn fci-requires (s t fuel)
+    (if (or (lt s 1) (or (gt s 12) (or (lt t 1) (gt t 12))))
+      (fci-proof (nothing) 1 (list s t) 0)
+      (fci-walk (fci-edges) (fci-edges) s t (list s) fuel (fci-proof 0 0 (list) 0) 0)))
+  (defn fci-fold (b) (if (and (ge b 65) (le b 90)) (add b 32) b))
+  (defn fci-match (s i w j) (if (ge j (str_len w)) 1
+    (if (ge (add i j) (str_len s)) 0
+      (if (eq (fci-fold (str_byte_at s (add i j))) (fci-fold (str_byte_at w j)))
+        (fci-match s i w (add j 1)) 0))))
+  (defn fci-has-loop (s w i) (if (gt (add i (str_len w)) (str_len s)) 0
+    (if (eq (fci-match s i w 0) 1) 1 (fci-has-loop s w (add i 1)))))
+  (defn fci-has? (s w) (fci-has-loop s w 0))
+  (defn fci-ack-name (p) (if (eq (fci-nothing? p) 1) "nothing"
+    (if (eq (fci-ack p) 0) "0" (if (eq (fci-ack p) 1) "1" "node"))))
+  (defn fci-int (n) (if (lt n 10) (byte_to_str (add 48 n))
+    (str_concat (fci-int (div n 10)) (byte_to_str (add 48 (mod n 10))))))
+  (defn fci-append-line (path line)
+    (write_file path (str_concat (read_file path) line)))
+  (defn fci-proof-line (name p) (str_concat name (str_concat ":ack="
+    (str_concat (fci-ack-name p) (str_concat ",reason="
+      (str_concat (fci-int (fci-reason p)) (str_concat ",steps=" (fci-int (fci-steps p)))))))))
+  (defn fci-ledger-path () ".form-native-inquiry-ledger.tsv")
+  (defn fci-inquire (q)
+    (do (let a (if (and (eq (fci-has? q "trust") 1) (eq (fci-has? q "trinity") 1))
+          (fci-requires 1 2 1000) (fci-proof (nothing) 1 (list) 0)))
+      (let b (if (and (eq (fci-has? q "knowing") 1) (eq (fci-has? q "time") 1))
+          (fci-requires 4 5 1000) (fci-proof (nothing) 1 (list) 0)))
+      (let wrote (fci-append-line (fci-ledger-path) (str_concat "20260721\t"
+        (str_concat (fci-ack-name a) (str_concat "\t" (str_concat (fci-ack-name b) "\n"))))))
+      (str_concat (fci-proof-line "trust-trinity" a) (str_concat "\n"
+      (str_concat (fci-proof-line "knowing-time" b) (str_concat "\nledger-written="
+          (if (gt wrote 0) "1" "0")))))))
+  (defn fci-core-rewitness ()
+    (do (let no-path (fci-requires 1 2 1000)) (let node-path (fci-requires 4 5 1000))
+      (let unknown (fci-requires 99 2 1000)) (let timed (fci-requires 4 5 0))
+      (let valid (if (and (ge (len (fci-edges)) (len (fci-static-edges))) (and (eq (fci-ack no-path) 0)
+        (and (eq (fci-node? node-path) 1) (and (eq (fci-reason unknown) 1)
+        (and (eq (fci-nothing? unknown) 1) (and (eq (fci-nothing? timed) 1)
+             (eq (fci-reason timed) 2))))))) 1 0))
+      (let wrote (fci-append-line (fci-ledger-path) (str_concat "20260722\tcore\t"
+        (str_concat (fci-int (len (fci-edges))) (str_concat "\t" (str_concat (fci-int valid) "\n"))))))
+      (let detail0 (str_concat "core-edges=" (fci-int (len (fci-edges)))))
+      (let detail1 (str_concat detail0 (str_concat "\nno-ack=" (fci-ack-name no-path))))
+      (let detail2 (str_concat detail1 (str_concat "\nnode-ack=" (fci-ack-name node-path))))
+      (let detail3 (str_concat detail2 (str_concat "\nunknown-ack=" (fci-ack-name unknown))))
+      (let detail4 (str_concat detail3 (str_concat ",reason=" (fci-int (fci-reason unknown)))))
+      (let detail5 (str_concat detail4 (str_concat "\ntimeout-ack=" (fci-ack-name timed))))
+      (let detail6 (str_concat detail5 (str_concat ",reason=" (fci-int (fci-reason timed)))))
+      (str_concat detail6 (str_concat "\nack-range=nothing,0,1,node\nrewitness="
+        (str_concat (fci-int valid) (str_concat "\nledger-written=" (if (gt wrote 0) "1" "0")))))))
+  0)

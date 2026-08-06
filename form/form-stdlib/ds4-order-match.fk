@@ -1,0 +1,451 @@
+; ds4-order-match.fk — kernels that reproduce ds4's ARITHMETIC ORDER, not merely its recipe.
+;
+; WHY A CELL FOR THIS. Our lane now agrees with ds4 to r=0.999995 at three tokens and matches its
+; argmax at every prompt length — inside ds4's own backend-to-backend spread. And it still cannot
+; reproduce ds4's greedy TOKEN STREAM past two steps, because greedy decoding is discontinuous: at the
+; third step ds4 chooses between " The" and " It" on a margin of 0.0197 logits out of 24, and whoever
+; is on the wrong side of that tie never converges again (receipts/2026-07-30-tie-budget.md).
+;
+; Matching a stream therefore needs our f32 ERRORS to be ds4's f32 errors, which means matching its
+; association exactly. Read from ds4.c, by line, never guessed:
+;
+;   :10246 dot_f32       — TWO NEON accumulators, 8 elements per step, vfmaq_f32 (FUSED multiply-add),
+;                          reduced by vaddvq_f32(vaddq_f32(acc0, acc1))
+;   :6664  dot_f16_row   — the same two-accumulator FMA shape over widened halves
+;   :6814  dot_q8_0_row  — NOT an f32 fold at all: the ACTIVATION is quantised to int8 (:7051), each
+;                          32-block is an EXACT int32 dot (vdotq_s32, four lanes of four products),
+;                          and only the per-block scale product re-enters f32, through an FMA
+;   :3480  ds4_vec_dot_q2_K_f32 — a plain ASCENDING scalar f32 sum, no NEON, no FMA
+;
+; So there is no single "ds4 order": each type has its own, and one of them is not floating-point
+; arithmetic at all. That is the finding this cell exists to carry.
+;
+; THE TWO THINGS OUR LANE DOES DIFFERENTLY, both deliberate and both now optional:
+;   1. `-ffp-contract=off` on every metallib — no FMA anywhere. ds4 fuses on every product it can.
+;      A fused multiply-add rounds ONCE where ours rounds twice; over 4096 terms that is not noise
+;      the far tail can absorb.
+;   2. a 32-lane strided fold reduced by simd_sum. ds4 has 8 chains, not 32, and reduces pairwise.
+;
+; APORON — WHAT THIS CELL CANNOT GIVE. Matching the association makes the same roundings in the same
+; places; it does NOT make our transcendentals ds4's. mla_exp is a range-reduced Taylor series and
+; ds4 calls libm expf; they differ in the last ulp or two, which the softmax then spreads. So this
+; cell narrows the tie budget, and a claim of stream equality has to be MEASURED, never inferred from
+; "the order matches now".
+;
+; vdotq_s32 semantics, since the whole int path rests on it: lane l of the result gets
+; acc[l] + sum over k in 0..3 of a[4l+k]*b[4l+k], in exact int32. A 32-element int8 dot cannot exceed
+; 32*127*128 = 520 192 < 2^24, so the int32 -> f32 conversion that follows is exact.
+;
+; vaddvq_f32 over four lanes is the ARM pairwise tree (faddp, faddp): (v0+v1) + (v2+v3). Not a left
+; fold — a left fold here would be a different answer and is the obvious wrong transcription.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/ds4-order-match-band.fk (the emitted text and the reduction shape)
+;            and native/metal/metal_dsv4_stack.sh under FORM_DS4_MATCH_ORDER=1, against
+;            `ds4 --head-test`'s own per-stage numbers.
+
+(do
+    ; --- the shape constants, so a band can pin them rather than read them out of a string ---
+    (defn dom-neon-lanes () 4)        ; float32x4_t
+    (defn dom-neon-accs () 2)         ; acc0 and acc1
+    (defn dom-step () 8)              ; 8 elements per loop iteration (2 accs * 4 lanes)
+    (defn dom-q8-block () 32)         ; Q8_0 block elements
+    (defn dom-q8-block-bytes () 34)   ; 2 scale + 32 payload
+    (defn dom-dot-lane-span () 4)     ; vdotq_s32: 4 products per lane
+
+    ; =========================================================================
+    ; THE ACTIVATION QUANTISER (ds4.c:7051 quantize_q8_0_activation), per 32-block.
+    ; d = amax/127, id = 1/d or 0, then lrintf -> clamp. lrintf rounds half to EVEN under the default
+    ; mode, which is metal::rint — NOT metal::round, which rounds half away from zero and would
+    ; disagree on every exact .5 the activation happens to land on.
+    ; =========================================================================
+    (defn dom-q8a-quantize-body ()
+        "kernel void form_dsv4_q8a_quantize_f32 (device const float* x [[buffer(0)]], device char* xq [[buffer(1)]], device float* xs [[buffer(2)]], constant uint& n [[buffer(3)]], uint b [[thread_position_in_grid]]) { uint blocks = (n + 31u) / 32u; if (b >= blocks) return; uint i0 = b * 32u; uint bn = (n - i0 < 32u) ? (n - i0) : 32u; float amax = 0.0f; for (uint i = 0u; i < bn; ++i) { float ax = metal::abs(x[i0 + i]); if (ax > amax) amax = ax; } float d = amax / 127.0f; float id = (d != 0.0f) ? (1.0f / d) : 0.0f; xs[b] = d; for (uint i = 0u; i < bn; ++i) { int v = int(metal::rint(x[i0 + i] * id)); if (v > 127) v = 127; if (v < -128) v = -128; xq[i0 + i] = char(v); } for (uint i = bn; i < 32u; ++i) xq[i0 + i] = char(0); } ")
+
+    ; =========================================================================
+    ; THE Q8_0 ROW DOT (ds4.c:6814), transcribed with its accumulator structure intact.
+    ; ONE THREAD PER ROW — deliberately. A 32-lane split would be a different association, which is
+    ; the whole thing this kernel exists not to do. Blocks are walked in PAIRS, block b landing in
+    ; accv0 and block b+1 in accv1, with an odd tail block folded into accv0, exactly as ds4 does.
+    ; =========================================================================
+    (defn dom-q80-ordered-body ()
+        "kernel void form_dsv4_q80_matvec_ordered (device const uchar* qb [[buffer(0)]], device const char* xq [[buffer(1)]], device const float* xs [[buffer(2)]], device float* y [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; uint blocks = cols / 32u; ulong rowbase = (ulong)r * (ulong)blocks * 34ul; float a0[4]; float a1[4]; for (uint l = 0u; l < 4u; ++l) { a0[l] = 0.0f; a1[l] = 0.0f; } uint b = 0u; for (; b + 1u < blocks; b += 2u) { ulong o0 = rowbase + (ulong)b * 34ul; ulong o1 = rowbase + (ulong)(b + 1u) * 34ul; ushort h0 = (ushort)qb[o0] | ((ushort)qb[o0 + 1ul] << 8); ushort h1 = (ushort)qb[o1] | ((ushort)qb[o1 + 1ul] << 8); float s0 = float(as_type<half>(h0)) * xs[b]; float s1 = float(as_type<half>(h1)) * xs[b + 1u]; for (uint l = 0u; l < 4u; ++l) { int d0 = 0; int d1 = 0; for (uint k = 0u; k < 4u; ++k) { d0 += int((char)qb[o0 + 2ul + (ulong)(4u * l + k)]) * int(xq[b * 32u + 4u * l + k]); d0 += int((char)qb[o0 + 2ul + (ulong)(16u + 4u * l + k)]) * int(xq[b * 32u + 16u + 4u * l + k]); d1 += int((char)qb[o1 + 2ul + (ulong)(4u * l + k)]) * int(xq[(b + 1u) * 32u + 4u * l + k]); d1 += int((char)qb[o1 + 2ul + (ulong)(16u + 4u * l + k)]) * int(xq[(b + 1u) * 32u + 16u + 4u * l + k]); } a0[l] = metal::fma(float(d0), s0, a0[l]); a1[l] = metal::fma(float(d1), s1, a1[l]); } } if (b < blocks) { ulong o0 = rowbase + (ulong)b * 34ul; ushort h0 = (ushort)qb[o0] | ((ushort)qb[o0 + 1ul] << 8); float s0 = float(as_type<half>(h0)) * xs[b]; for (uint l = 0u; l < 4u; ++l) { int d0 = 0; for (uint k = 0u; k < 4u; ++k) { d0 += int((char)qb[o0 + 2ul + (ulong)(4u * l + k)]) * int(xq[b * 32u + 4u * l + k]); d0 += int((char)qb[o0 + 2ul + (ulong)(16u + 4u * l + k)]) * int(xq[b * 32u + 16u + 4u * l + k]); } a0[l] = metal::fma(float(d0), s0, a0[l]); } } float t0 = a0[0] + a1[0]; float t1 = a0[1] + a1[1]; float t2 = a0[2] + a1[2]; float t3 = a0[3] + a1[3]; y[r] = (t0 + t1) + (t2 + t3); } ")
+
+    ; =========================================================================
+    ; THE F16 ROW DOT (ds4.c:6664). Same two-accumulator FMA shape; the halves widen exactly.
+    ; =========================================================================
+    ; THE NEON LANES ARE THE PARALLELISM, and they were being emulated serially. ds4's two
+    ; float32x4_t accumulators are EIGHT INDEPENDENT CHAINS: chain c takes every element j with
+    ; j mod 8 == c, and they never interact until the final reduce. One thread per row put all eight on
+    ; one lane — which mattered nowhere until profiling showed hc_attn_fn is [16384, 24] and
+    ; output_hc_fn is [16384, 4], so this kernel was running on TWENTY-FOUR threads, and four.
+    ; Eight threads per row, each owning one chain, then vaddvq's exact tree: t[l] = c[l] + c[4+l],
+    ; result = (t0+t1) + (t2+t3). BIT-IDENTICAL to the one-thread form — the chains were already
+    ; separate, they were just queued behind each other.
+    ; AND THE LOADS ARE HOISTED, which is where the time actually was. Measured (a reviewer's
+    ; standalone microbenchmark on this exact MSL, 2026-07-31): at [16384, 24] this kernel takes ~380 us
+    ; whether it runs on 32 threads or 3072 — SIXTEEN TIMES the arithmetic for the same wall clock. It
+    ; was never occupancy-bound. Each iteration loaded a weight and an activation and consumed them on
+    ; the next instruction, so roughly one load was ever in flight and 2048 iterations cost ~200 ns
+    ; each: pure exposed memory latency.
+    ; Issuing eight loads before the eight fused multiply-adds fixes it — 380 us -> 81 us — and touches
+    ; NOTHING about the order: chain c still sums j = c, c+8, c+16, ... strictly ascending into one
+    ; accumulator, and the shuffle reduce below is unchanged. The association forbids reordering the
+    ; ADDS and says nothing about when the loads happen. That distinction was worth 4.5x.
+    ; (Rows-per-thread blocking, ds4's N_R0 idea, was measured on the same bench and LOSES here:
+    ; NR=1 86 us, NR=2 102, NR=4 226 — register pressure beats load amortisation at this shape. It is
+    ; why giving the IQ2 kernel four-row blocking bought 1%.)
+    ; EIGHT CHAINS, EIGHT THREADS — the Q8_0 twin of the F16 fix, and the same insight: ds4's a0[4]
+    ; and a1[4] are INDEPENDENT until the final tree, so serialising them in one thread was a choice, not
+    ; the association. Chain (p,l) walks blocks b = p, p+2, ... in ascending order and owns int-dot lane
+    ; l; the combine is vaddvq's exact tree over the eight shuffled results. Even blocks land in a0 and
+    ; odd in a1 exactly as ds4 pairs them, trailing block included. Bit-identical.
+    ; WHAT THE LOOP WAS PAYING BESIDES THE ARITHMETIC. `ulong o = rowbase + (ulong)b * 34ul` is a
+    ; 64-bit multiply-add every iteration, and a GPU has no 64-bit multiplier — the compiler emits a
+    ; sequence for it. The block's f16 scale was read as TWO uchar loads and reassembled, which is one
+    ; memory transaction more per block than the value needs. Neither is arithmetic: the row's blocks
+    ; are 34 bytes apart and the stride is a CONSTANT 68, so a pointer that advances says the same
+    ; thing without a multiply, and packed_uchar4 (alignment 1, so no assumption about where the
+    ; tensor starts) reads both scale bytes at once. The reassembly `x | (y << 8)` is kept exactly,
+    ; so the same little-endian half comes out; the fma order, the chain assignment and the tree are
+    ; untouched. Bit-identical, and it is the loads, not the products, that this kernel is spending on.
+    ;
+    ; HOW WIDE A SIMDGROUP REACHES IN ONE PASS, which is a different question from how many loads it
+    ; issues. The grouped Q8_0 kernel in this same run reads its bytes ONE AT A TIME — 34 scalar uchar
+    ; loads per block — and reaches 383 GB/s, while this one issues six vector loads per eight weight
+    ; bytes and reaches 241. So the count of loads is not what either is paying. What differs is the
+    ; span: grouped gives a simdgroup 32 consecutive blocks of ONE row, 1088 contiguous bytes a pass;
+    ; this one gave it 68 bytes of each of FOUR rows, four thin streams a cache line could not fill.
+    ;
+    ; The fix asks nothing of the association. Chain (p,l) still walks b = p, p+2, p+4 ... in ascending
+    ; order and still folds each block with one fma into its own accumulator — four of those fmas are
+    ; now written out per iteration instead of one. Four steps of a chain is four steps of a chain
+    ; whatever the loop header says; the arithmetic and its order are letter for letter the same. What
+    ; changes is that the eight threads of a row now touch blocks b..b+7 together — 272 contiguous
+    ; bytes, ds4's own footprint — so a fetched line is spent where it is fetched.
+    (defn dom-q80-ordered8-body ()
+        "kernel void form_dsv4_q80_matvec_ordered8 (device const uchar* qb [[buffer(0)]], device const char* xq [[buffer(1)]], device const float* xs [[buffer(2)]], device float* y [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 8u; if (r >= rows) return; uint c = gid - r * 8u; uint p = c / 4u; uint l = c - p * 4u; uint blocks = cols / 32u; device const uchar* sp = qb + (ulong)r * (ulong)blocks * 34ul + (ulong)(p * 34u); device const uchar* wp = sp + 2u + 4u * l; device const char* xp = xq + p * 32u + 4u * l; device const float* zp = xs + p; float acc = 0.0f; uint b = p; for (; b + 6u < blocks; b += 8u) { uchar4 hb0 = uchar4(*(device const packed_uchar4*)(sp)); ushort h0 = (ushort)hb0.x | ((ushort)hb0.y << 8); float s0 = float(as_type<half>(h0)) * zp[0]; char4 wa0 = char4(*(device const packed_char4*)(wp)); char4 xa0 = char4(*(device const packed_char4*)(xp)); char4 wb0 = char4(*(device const packed_char4*)(wp + 16u)); char4 xb0 = char4(*(device const packed_char4*)(xp + 16u)); uchar4 hb1 = uchar4(*(device const packed_uchar4*)(sp + 68u)); ushort h1 = (ushort)hb1.x | ((ushort)hb1.y << 8); float s1 = float(as_type<half>(h1)) * zp[2]; char4 wa1 = char4(*(device const packed_char4*)(wp + 68u)); char4 xa1 = char4(*(device const packed_char4*)(xp + 64)); char4 wb1 = char4(*(device const packed_char4*)(wp + 84u)); char4 xb1 = char4(*(device const packed_char4*)(xp + 80)); uchar4 hb2 = uchar4(*(device const packed_uchar4*)(sp + 136u)); ushort h2 = (ushort)hb2.x | ((ushort)hb2.y << 8); float s2 = float(as_type<half>(h2)) * zp[4]; char4 wa2 = char4(*(device const packed_char4*)(wp + 136u)); char4 xa2 = char4(*(device const packed_char4*)(xp + 128)); char4 wb2 = char4(*(device const packed_char4*)(wp + 152u)); char4 xb2 = char4(*(device const packed_char4*)(xp + 144)); uchar4 hb3 = uchar4(*(device const packed_uchar4*)(sp + 204u)); ushort h3 = (ushort)hb3.x | ((ushort)hb3.y << 8); float s3 = float(as_type<half>(h3)) * zp[6]; char4 wa3 = char4(*(device const packed_char4*)(wp + 204u)); char4 xa3 = char4(*(device const packed_char4*)(xp + 192)); char4 wb3 = char4(*(device const packed_char4*)(wp + 220u)); char4 xb3 = char4(*(device const packed_char4*)(xp + 208)); int d0 = (int(wa0.x) * int(xa0.x) + int(wa0.y) * int(xa0.y) + int(wa0.z) * int(xa0.z) + int(wa0.w) * int(xa0.w)) + (int(wb0.x) * int(xb0.x) + int(wb0.y) * int(xb0.y) + int(wb0.z) * int(xb0.z) + int(wb0.w) * int(xb0.w)); acc = metal::fma(float(d0), s0, acc); int d1 = (int(wa1.x) * int(xa1.x) + int(wa1.y) * int(xa1.y) + int(wa1.z) * int(xa1.z) + int(wa1.w) * int(xa1.w)) + (int(wb1.x) * int(xb1.x) + int(wb1.y) * int(xb1.y) + int(wb1.z) * int(xb1.z) + int(wb1.w) * int(xb1.w)); acc = metal::fma(float(d1), s1, acc); int d2 = (int(wa2.x) * int(xa2.x) + int(wa2.y) * int(xa2.y) + int(wa2.z) * int(xa2.z) + int(wa2.w) * int(xa2.w)) + (int(wb2.x) * int(xb2.x) + int(wb2.y) * int(xb2.y) + int(wb2.z) * int(xb2.z) + int(wb2.w) * int(xb2.w)); acc = metal::fma(float(d2), s2, acc); int d3 = (int(wa3.x) * int(xa3.x) + int(wa3.y) * int(xa3.y) + int(wa3.z) * int(xa3.z) + int(wa3.w) * int(xa3.w)) + (int(wb3.x) * int(xb3.x) + int(wb3.y) * int(xb3.y) + int(wb3.z) * int(xb3.z) + int(wb3.w) * int(xb3.w)); acc = metal::fma(float(d3), s3, acc); sp += 272u; wp += 272u; xp += 256; zp += 8; } for (; b < blocks; b += 2u) { uchar4 hb = uchar4(*(device const packed_uchar4*)(sp)); ushort h = (ushort)hb.x | ((ushort)hb.y << 8); float s = float(as_type<half>(h)) * (*zp); char4 wa = char4(*(device const packed_char4*)(wp)); char4 xa = char4(*(device const packed_char4*)(xp)); char4 wb = char4(*(device const packed_char4*)(wp + 16u)); char4 xb = char4(*(device const packed_char4*)(xp + 16u)); int d = (int(wa.x) * int(xa.x) + int(wa.y) * int(xa.y) + int(wa.z) * int(xa.z) + int(wa.w) * int(xa.w)) + (int(wb.x) * int(xb.x) + int(wb.y) * int(xb.y) + int(wb.z) * int(xb.z) + int(wb.w) * int(xb.w)); acc = metal::fma(float(d), s, acc); sp += 68u; wp += 68u; xp += 64; zp += 2; } uint ob = (lane / 8u) * 8u; float v0 = metal::simd_shuffle(acc, ob); float v1 = metal::simd_shuffle(acc, ob + 1u); float v2 = metal::simd_shuffle(acc, ob + 2u); float v3 = metal::simd_shuffle(acc, ob + 3u); float v4 = metal::simd_shuffle(acc, ob + 4u); float v5 = metal::simd_shuffle(acc, ob + 5u); float v6 = metal::simd_shuffle(acc, ob + 6u); float v7 = metal::simd_shuffle(acc, ob + 7u); if (c != 0u) return; float t0 = v0 + v4; float t1 = v1 + v5; float t2 = v2 + v6; float t3 = v3 + v7; y[r] = (t0 + t1) + (t2 + t3); } "
+)
+
+    ; --- THE Q8_0 MATVEC THE ORACLE'S OWN GPU RUNS (metal/dense.metal kernel_mul_mv_q8_0_f32_impl,
+    ;     dispatched at ds4_metal.m:4346 with nsg = min(8, ceil(in_dim/128)) and nr0 = 2).
+    ;
+    ;     Everything above this line reproduces ds4's CPU association — the NEON path at ds4.c:6814,
+    ;     which quantises the activation to int8 first (:7051) so each block is an exact int32 dot. That
+    ;     is a faithful reading of one arm. It is not the arm ds4 runs on this device: its Metal kernel
+    ;     never quantises the activation at all. `sumq += qs[i] * yl[i]` is int8 weight times FLOAT
+    ;     activation, and the whole q8a_quantize stage — one dispatch before every Q8_0 matvec, 302 a
+    ;     token — exists on our side only to feed an association the reference's GPU does not use.
+    ;
+    ;     The shape is the other half of the finding. ds4 gives a row 128 threads (256-thread group,
+    ;     two rows); ours gave it eight. Thread (ix, il) owns block sgitg*8+ix and its EIGHT CONTIGUOUS
+    ;     payload bytes at il*8, so a simdgroup walks 272 contiguous bytes of a row per pass instead of
+    ;     68, and sixteen times as many requests are in flight. The row loop keeps ds4's two-row block
+    ;     so the activation registers are loaded once and spent twice.
+    ;
+    ;     This CHANGES THE ASSOCIATION, and that is said plainly rather than assumed away: it is
+    ;     tolerated here for the reason freewall (row 971) already recorded — ds4's own CPU and Metal
+    ;     arms produce the identical stream under exactly these two associations — and it is CHECKED,
+    ;     every run, against the reference's thirty tokens. ---
+    (defn dom-q80-mv-ds4-body ()
+        "kernel void form_dsv4_q80_matvec_ds4 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort3 ntg [[threads_per_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { threadgroup float sh[64]; uint nb = cols / 32u; uint r0 = tgpig.x * 2u; uint nsg = (uint)ntg.x / 32u; uint stride = nsg * 8u; ushort ix = tiisg / 4u; ushort il = tiisg - ix * 4u; uint ib0 = (uint)sgitg * 8u + (uint)ix; float sumf0 = 0.0f; float sumf1 = 0.0f; float yl[8]; device const float* yb = x + ib0 * 32u + (uint)il * 8u; for (uint ib = ib0; ib < nb; ib += stride) { packed_float4 ya = *(device const packed_float4*)(yb); packed_float4 yc = *(device const packed_float4*)(yb + 4); yl[0] = ya.x; yl[1] = ya.y; yl[2] = ya.z; yl[3] = ya.w; yl[4] = yc.x; yl[5] = yc.y; yl[6] = yc.z; yl[7] = yc.w; for (ushort row = 0u; row < 2u; ++row) { uint r = r0 + (uint)row; if (r >= rows) continue; ulong bo = ((ulong)r * (ulong)nb + (ulong)ib) * 34ul; ushort h = (ushort)qb[bo] | ((ushort)qb[bo + 1ul] << 8); device const uchar* qs = qb + bo + 2ul + (ulong)((uint)il * 8u); char4 wa = char4(*(device const packed_char4*)(qs)); char4 wc = char4(*(device const packed_char4*)(qs + 4)); float sumq = 0.0f; sumq = sumq + float(wa.x) * yl[0]; sumq = sumq + float(wa.y) * yl[1]; sumq = sumq + float(wa.z) * yl[2]; sumq = sumq + float(wa.w) * yl[3]; sumq = sumq + float(wc.x) * yl[4]; sumq = sumq + float(wc.y) * yl[5]; sumq = sumq + float(wc.z) * yl[6]; sumq = sumq + float(wc.w) * yl[7]; float d = float(as_type<half>(h)); if (row == 0u) sumf0 = sumf0 + sumq * d; else sumf1 = sumf1 + sumq * d; } yb += stride * 32u; } if (sgitg == 0u) { sh[tiisg] = 0.0f; sh[32u + tiisg] = 0.0f; } sumf0 = metal::simd_sum(sumf0); sumf1 = metal::simd_sum(sumf1); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) { sh[sgitg] = sumf0; sh[32u + sgitg] = sumf1; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float t0 = metal::simd_sum(sh[tiisg]); float t1 = metal::simd_sum(sh[32u + tiisg]); if (tiisg == 0u && sgitg == 0u) { if (r0 < rows) y[r0] = t0; if (r0 + 1u < rows) y[r0 + 1u] = t1; } } ")
+
+    ; --- THE ROUTED Q2_K DOWN PROJECTION, WIDENED. The gate and up halves already give a row 32 lanes;
+    ;     the down half was still ONE THREAD PER ROW — 24576 threads walking 2048 elements each, and
+    ;     ds4 gives its own routed Q2_K nr0 = 4 over the ordinary simdgroup shape (ds4_metal.m:26478).
+    ;     The 128 groups of sixteen that make a row are split across 32 lanes instead, and reduced by
+    ;     simd_sum: 786432 threads. Reassociation in f32 only, nothing quantised differently.
+    ;     The scale pair also stops going through q2k_f16 — a mantissa/exponent reconstruction with
+    ;     integer divides and a doubling LOOP, called sixteen times a row — and reads as_type<half>,
+    ;     which is the same value by construction for every finite half and is what the Q8_0 kernels
+    ;     next door already use. ---
+    (defn dom-q2k-experts-wide-body ()
+        "kernel void form_dsv4_q2k_matvec_experts_wide (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint idx = gid / 32u; uint slot = idx / rows; if (slot >= nexp) return; uint r = idx - slot * rows; uint nb = cols / 256u; ulong rowbase = (ulong)ids[slot] * (ulong)stride + (ulong)r * (ulong)nb * 84ul; device const float* xe = x + slot * cols; float sum = 0.0f; uint ngrp = nb * 16u; for (uint gg = lane; gg < ngrp; gg += 32u) { uint blk = gg / 16u; uint g = gg - blk * 16u; device const uchar* b = qb + rowbase + (ulong)blk * 84ul; ushort hd = (ushort)b[80] | ((ushort)b[81] << 8); ushort hm = (ushort)b[82] | ((ushort)b[83] << 8); float d = float(as_type<half>(hd)); float dmin = float(as_type<half>(hm)); uint sc = uint(b[g]); float ds = d * float(sc & 15u); float dm = dmin * float(sc >> 4u); uint qbase = 32u * (g >> 3u) + 16u * (g & 1u); uint sh = ((g >> 1u) & 3u) * 2u; device const uchar* qs = b + 16u + qbase; device const float* xg = xe + blk * 256u + g * 16u; for (uint l = 0u; l < 16u; ++l) { float w = ds * float((uint(qs[l]) >> sh) & 3u) - dm; sum = sum + w * xg[l]; } } float s = metal::simd_sum(sum); if (lane == 0u) y[slot * rows + r] = s; } ")
+
+    ; --- THE F16 MATVEC WIDENED, because ablation said what doubling could not.
+    ;     Doubling this kernel moved the floor 5 ms and it was believed; NOT ENCODING IT AT ALL moves
+    ;     the floor 12 — the second largest cost in the token, for 0.678 GB, which is 57 GB/s on a bus
+    ;     measured at 471. Doubling understated it because the second copy of a small tensor reads a
+    ;     warm cache; the ablation cannot be fooled that way.
+    ;     The cause is thread count, and it is extreme: hc_attn_fn and hc_ffn_fn are 24 rows of 16384,
+    ;     and rows*8 is 192 THREADS on a device with about five thousand lanes. Eight chains a row is
+    ;     ds4.c:6664's NEON association faithfully carried, and it is a ceiling of eight threads a row
+    ;     wherever the row count is small.
+    ;     So: ds4_metal.m:4346's own f16 dispatch instead — nsg = min(8, ceil(in_dim/128)), nr0 = 2, a
+    ;     256-thread group to two rows, every thread striding the row in packed_half4, simd_sum and a
+    ;     simd_sum over the simdgroups' partials. 192 threads become 3072.
+    ;     This reassociates in f32 only — no quantisation changes hands, unlike the Q8_0 pair above —
+    ;     and the stream is checked every run, as the wide RMSNorm was. ---
+    (defn dom-f16-mv-wide-body ()
+        "kernel void form_dsv4_f16_matvec_wide (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint3 tgpig [[threadgroup_position_in_grid]], ushort3 tpitg [[thread_position_in_threadgroup]], ushort3 ntg [[threads_per_threadgroup]], ushort tiisg [[thread_index_in_simdgroup]], ushort sgitg [[simdgroup_index_in_threadgroup]]) { threadgroup float sh[64]; uint r0 = (uint)tgpig.x * 2u; uint tid = (uint)tpitg.x; uint nt = (uint)ntg.x; uint n4 = cols / 4u; float s0 = 0.0f; float s1 = 0.0f; for (uint k = tid; k < n4; k += nt) { uint j = k * 4u; packed_float4 xv = *(device const packed_float4*)(x + j); if (r0 < rows) { device const packed_half4* w = (device const packed_half4*)(qb + ((ulong)r0 * (ulong)cols + (ulong)j) * 2ul); half4 h = half4(*w); s0 = s0 + (float(h.x) * xv.x + float(h.y) * xv.y) + (float(h.z) * xv.z + float(h.w) * xv.w); } if (r0 + 1u < rows) { device const packed_half4* w = (device const packed_half4*)(qb + ((ulong)(r0 + 1u) * (ulong)cols + (ulong)j) * 2ul); half4 h = half4(*w); s1 = s1 + (float(h.x) * xv.x + float(h.y) * xv.y) + (float(h.z) * xv.z + float(h.w) * xv.w); } } for (uint j = n4 * 4u + tid; j < cols; j += nt) { float xv = x[j]; if (r0 < rows) { ushort hb = *(device const ushort*)(qb + ((ulong)r0 * (ulong)cols + (ulong)j) * 2ul); s0 = s0 + float(as_type<half>(hb)) * xv; } if (r0 + 1u < rows) { ushort hb = *(device const ushort*)(qb + ((ulong)(r0 + 1u) * (ulong)cols + (ulong)j) * 2ul); s1 = s1 + float(as_type<half>(hb)) * xv; } } if (sgitg == 0u) { sh[tiisg] = 0.0f; sh[32u + tiisg] = 0.0f; } s0 = metal::simd_sum(s0); s1 = metal::simd_sum(s1); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (tiisg == 0u) { sh[sgitg] = s0; sh[32u + sgitg] = s1; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float t0 = metal::simd_sum(sh[tiisg]); float t1 = metal::simd_sum(sh[32u + tiisg]); if (tiisg == 0u && sgitg == 0u) { if (r0 < rows) y[r0] = t0; if (r0 + 1u < rows) y[r0 + 1u] = t1; } } ")
+
+    ; --- THE DENOMINATOR, MEASURED. Every claim about a matvec being "slow" is a claim about some peak
+    ;     it is not reaching, and the peak had been taken from a spec sheet. This reads a span of the
+    ;     resident file with nothing but 16-byte loads and an xor, so what it times is the bus and not
+    ;     arithmetic, addressing or decode. The sink write is guarded by a value the xor cannot produce
+    ;     often, so the loads cannot be dead-code-eliminated but the store never costs a token. ---
+    (defn dom-bw-probe-body ()
+        "kernel void form_bw_probe (device const uint* src [[buffer(0)]], device float* sink [[buffer(1)]], constant uint& nwords [[buffer(2)]], uint gid [[thread_position_in_grid]], uint gsz [[threads_per_grid]]) { uint acc = 0u; for (uint i = gid * 4u; i + 3u < nwords; i += gsz * 4u) { uint4 v = *(device const uint4*)(src + i); acc = acc ^ v.x; acc = acc ^ v.y; acc = acc ^ v.z; acc = acc ^ v.w; } if (acc == 0xFFFFFFFFu) sink[0] = float(acc); } ")
+
+    (defn dom-f16-ordered8-body ()
+        "kernel void form_dsv4_f16_matvec_ordered8 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 8u; if (r >= rows) return; uint c = gid - r * 8u; ulong base = (ulong)r * (ulong)cols; uint nfull = (cols / 8u) * 8u; float acc = 0.0f; uint j = c; for (; j + 56u < nfull; j += 64u) { ushort h0 = *(device const ushort*)(qb + (base + (ulong)j) * 2ul); ushort h1 = *(device const ushort*)(qb + (base + (ulong)(j + 8u)) * 2ul); ushort h2 = *(device const ushort*)(qb + (base + (ulong)(j + 16u)) * 2ul); ushort h3 = *(device const ushort*)(qb + (base + (ulong)(j + 24u)) * 2ul); ushort h4 = *(device const ushort*)(qb + (base + (ulong)(j + 32u)) * 2ul); ushort h5 = *(device const ushort*)(qb + (base + (ulong)(j + 40u)) * 2ul); ushort h6 = *(device const ushort*)(qb + (base + (ulong)(j + 48u)) * 2ul); ushort h7 = *(device const ushort*)(qb + (base + (ulong)(j + 56u)) * 2ul); float x0 = x[j]; float x1 = x[j + 8u]; float x2 = x[j + 16u]; float x3 = x[j + 24u]; float x4 = x[j + 32u]; float x5 = x[j + 40u]; float x6 = x[j + 48u]; float x7 = x[j + 56u]; acc = metal::fma(float(as_type<half>(h0)), x0, acc); acc = metal::fma(float(as_type<half>(h1)), x1, acc); acc = metal::fma(float(as_type<half>(h2)), x2, acc); acc = metal::fma(float(as_type<half>(h3)), x3, acc); acc = metal::fma(float(as_type<half>(h4)), x4, acc); acc = metal::fma(float(as_type<half>(h5)), x5, acc); acc = metal::fma(float(as_type<half>(h6)), x6, acc); acc = metal::fma(float(as_type<half>(h7)), x7, acc); } for (; j < nfull; j += 8u) { ushort h = *(device const ushort*)(qb + (base + (ulong)j) * 2ul); acc = metal::fma(float(as_type<half>(h)), x[j], acc); } uint ob = (lane / 8u) * 8u; float v0 = metal::simd_shuffle(acc, ob); float v1 = metal::simd_shuffle(acc, ob + 1u); float v2 = metal::simd_shuffle(acc, ob + 2u); float v3 = metal::simd_shuffle(acc, ob + 3u); float v4 = metal::simd_shuffle(acc, ob + 4u); float v5 = metal::simd_shuffle(acc, ob + 5u); float v6 = metal::simd_shuffle(acc, ob + 6u); float v7 = metal::simd_shuffle(acc, ob + 7u); if (c != 0u) return; float t0 = v0 + v4; float t1 = v1 + v5; float t2 = v2 + v6; float t3 = v3 + v7; float s = (t0 + t1) + (t2 + t3); for (uint j = nfull; j < cols; ++j) { ushort h = *(device const ushort*)(qb + (base + (ulong)j) * 2ul); s = s + float(as_type<half>(h)) * x[j]; } y[r] = s; } ")
+
+    (defn dom-f16-ordered-body ()
+        "kernel void form_dsv4_f16_matvec_ordered (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; ulong base = (ulong)r * (ulong)cols; float a0[4]; float a1[4]; for (uint l = 0u; l < 4u; ++l) { a0[l] = 0.0f; a1[l] = 0.0f; } uint i = 0u; for (; i + 8u <= cols; i += 8u) { for (uint l = 0u; l < 4u; ++l) { ushort hv0 = *(device const ushort*)(qb + (base + (ulong)(i + l)) * 2ul); ushort hv1 = *(device const ushort*)(qb + (base + (ulong)(i + 4u + l)) * 2ul); a0[l] = metal::fma(float(as_type<half>(hv0)), x[i + l], a0[l]); a1[l] = metal::fma(float(as_type<half>(hv1)), x[i + 4u + l], a1[l]); } } float t0 = a0[0] + a1[0]; float t1 = a0[1] + a1[1]; float t2 = a0[2] + a1[2]; float t3 = a0[3] + a1[3]; float acc = (t0 + t1) + (t2 + t3); for (; i < cols; ++i) { ushort hv = *(device const ushort*)(qb + (base + (ulong)i) * 2ul); acc = acc + float(as_type<half>(hv)) * x[i]; } y[r] = acc; } ")
+
+    ; =========================================================================
+    ; THE Q2_K ROW DOT (ds4.c:3480) — the easy one, and the one most unlike our own: a PLAIN ASCENDING
+    ; SCALAR SUM. No NEON, no FMA, no blocking. Our fused kernel splits it 32 ways and simd_sums; this
+    ; walks k from 0 upward and adds. q2k_w is q2k-dequant.fk's carver, unchanged.
+    ; =========================================================================
+    ; HOISTED, AND BIT-IDENTICAL. The naive form calls q2k_w per element, which re-derives per-BLOCK
+    ; and per-GROUP constants every time: two f16 decodes (each a divide-and-compare chain) for every
+    ; one of 256 elements that share them, plus a power-of-two loop per element. This walks the same k
+    ; ASCENDING — blk outer, group next, l inner, so k = blk*256 + g*16 + l counts 0,1,2,... — and only
+    ; moves the invariants out. The accumulation order is untouched, which is the whole point: order is
+    ; what fidelity rests on, and decode placement is free.
+    ;   ds = d*(sc mod 16) then ds*q  associates exactly as d*(sc mod 16)*q did (left to right)
+    ;   dm = dmin*(sc/16)             is the per-group min, subtracted per element as before
+    (defn dom-q2k-ordered-body ()
+        "kernel void form_dsv4_q2k_matvec_ordered (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint r [[thread_position_in_grid]]) { if (r >= rows) return; uint nb = cols / 256u; ulong rowbase = (ulong)r * (ulong)nb * 84ul; float sum = 0.0f; for (uint blk = 0u; blk < nb; ++blk) { device const uchar* b = qb + rowbase + (ulong)blk * 84ul; float d = q2k_f16(int(b[80]) + 256 * int(b[81])); float dmin = q2k_f16(int(b[82]) + 256 * int(b[83])); device const float* xb = x + blk * 256u; for (uint g = 0u; g < 16u; ++g) { uint sc = uint(b[g]); float ds = d * float(q2k_umod(sc, 16u)); float dm = dmin * float(sc / 16u); uint qbase = 32u * (g / 8u) + 16u * q2k_umod(g, 2u); uint p2 = q2k_upow2(q2k_umod(g / 2u, 4u) * 2u); device const uchar* qs = b + 16u + qbase; device const float* xg = xb + g * 16u; for (uint l = 0u; l < 16u; ++l) { float w = ds * float(q2k_umod(uint(qs[l]) / p2, 4u)) - dm; sum = sum + w * xg[l]; } } } y[r] = sum; } ")
+
+    ; =========================================================================
+    ; IQ2_XXS, HOISTED. iq2_w re-derives, for EVERY weight: an f16 decode, a 4-byte aux1
+    ; reconstruction, a scale, and TWO power-of-two loops (one to select the sign index, one to pick
+    ; the sign bit). Of those, d/aux1/scalecode/scale are constant across a 32-element sub-block and
+    ; the sign word is constant across each group of 8. Only the grid magnitude and one sign bit vary
+    ; per element. On this file that redundancy is most of the model's work: gate AND up are IQ2_XXS,
+    ; two of every three routed-expert weights.
+    ;
+    ; THE MAP CHANGES, and that is said out loud rather than hidden: each lane now owns whole 32-element
+    ; sub-blocks (lane L takes sub-block L, L+32, ...) instead of striding single columns, so the
+    ; within-lane summation order is NOT the old one. Unlike the Q2_K hoist, this is not bit-identical
+    ; by construction, so the token stream has to be re-measured, not assumed.
+    (defn dom-iq2-hoist-body ()
+        "kernel void form_dsv4_iq2_matvec_hoist (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nsub = cols / 32u; ulong rowbase = (ulong)r * (ulong)(cols / 256u) * 66ul; float acc = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { uint blk = sub / 8u; uint ib32 = sub - blk * 8u; device const uchar* off = qb + rowbase + (ulong)blk * 66ul; float d = iq2_f16(int(off[0]) + 256 * int(off[1])); device const uchar* gbase = off + 2u + 8u * ib32; uint aux1 = uint(gbase[4]) + 256u * uint(gbase[5]) + 65536u * uint(gbase[6]) + 16777216u * uint(gbase[7]); int scalecode = int(uint(gbase[7]) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); device const float* xs = x + sub * 32u; for (uint l = 0u; l < 4u; ++l) { int gidx = int(gbase[l]); uint signidx = (aux1 >> (7u * l)) & 127u; constant uchar* g8 = iq2_grid + uint(gidx) * 8u; device const float* xl = xs + l * 8u; uint sr = uint(iq2_ksigns[signidx]); for (uint j = 0u; j < 8u; ++j) { uint sbit = sr & 1u; sr = sr >> 1u; float sgn = (sbit == 1u) ? -1.0f : 1.0f; acc = acc + ((scale * sgn) * float(g8[j])) * xl[j]; } } } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+
+    ; =========================================================================
+    ; ALL SIX ROUTED EXPERTS IN ONE DISPATCH. The stack was asking the device 81 times per layer where
+    ; ds4 runs a single fused graph, and THIRTY of those were the six experts taken one at a time:
+    ; gate, up, swiglu, down, accumulate, six times over. At 72 us of measured cost per dispatch the
+    ; asking, not the arithmetic, is what is left (callbias, corpus row 967).
+    ;
+    ; The expert ids already live in a device buffer — the router kernel writes them — so the slot loop
+    ; never needed the CPU at all. gid now carries (slot, row, lane); the slot picks its id from that
+    ; buffer and its byte slice from `stride`, exactly as the host was doing per call. Each expert's
+    ; arithmetic is untouched, so every value is bit-identical; only the number of asks changes.
+    (defn dom-iq2-experts-body ()
+        "kernel void form_dsv4_iq2_matvec_experts (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint per = rows * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r = g / 32u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rowbase = ebase + (ulong)r * (ulong)(cols / 256u) * 66ul; float acc = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { uint blk = sub / 8u; uint ib32 = sub - blk * 8u; device const uchar* off = qb + rowbase + (ulong)blk * 66ul; float d = iq2_f16(int(off[0]) + 256 * int(off[1])); device const uchar* gb = off + 2u + 8u * ib32; uint aux1 = uint(gb[4]) + 256u * uint(gb[5]) + 65536u * uint(gb[6]) + 16777216u * uint(gb[7]); int scalecode = int(uint(gb[7]) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); device const float* xs = x + sub * 32u; for (uint l = 0u; l < 4u; ++l) { int gidx = int(gb[l]); uint signidx = (aux1 >> (7u * l)) & 127u; constant uchar* g8 = iq2_grid + uint(gidx) * 8u; device const float* xl = xs + l * 8u; uint sr = uint(iq2_ksigns[signidx]); for (uint j = 0u; j < 8u; ++j) { uint sbit = sr & 1u; sr = sr >> 1u; float sgn = (sbit == 1u) ? -1.0f : 1.0f; acc = acc + ((scale * sgn) * float(g8[j])) * xl[j]; } } } float s = metal::simd_sum(acc); if (lane == 0u) y[slot * rows + r] = s; } ")
+
+    ; FOUR ROWS PER THREAD, THE ACTIVATION HELD IN REGISTERS — read off ds4's own Metal shader
+    ; (metal/moe.metal:3284, N_R0_IQ2_XXS = 4 at :15), which is the second implementation the reference
+    ; carries and which I had never opened (secondoracle, corpus row 969). ds4 loads yl[32] once per
+    ; 32-element sub-block and folds FOUR output rows against it; we were re-reading the same 32
+    ; activations from device memory once per row. Same weights, same lane map, same per-row
+    ; accumulation ORDER — sumf[rr] is added into directly, never via a per-sub-block temporary, so the
+    ; chain each row sees is the chain it saw before. Bit-identical; only the reads change.
+    (defn dom-iq2-experts4-body ()
+        "kernel void form_dsv4_iq2_matvec_experts4 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rg = rows / 4u; uint per = rg * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r0 = (g / 32u) * 4u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rstride = (ulong)(cols / 256u) * 66ul; float sumf[4]; for (uint i = 0u; i < 4u; ++i) sumf[i] = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { float xl[32]; device const float* xsrc = x + sub * 32u; for (uint i = 0u; i < 32u; ++i) xl[i] = xsrc[i]; uint blk = sub / 8u; uint ib32 = sub - blk * 8u; for (uint rr = 0u; rr < 4u; ++rr) { device const uchar* off = qb + ebase + (ulong)(r0 + rr) * rstride + (ulong)blk * 66ul; float d = iq2_f16(int(off[0]) + 256 * int(off[1])); device const uchar* gb = off + 2u + 8u * ib32; uint aux1 = uint(gb[4]) + 256u * uint(gb[5]) + 65536u * uint(gb[6]) + 16777216u * uint(gb[7]); int scalecode = int(uint(gb[7]) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); for (uint l = 0u; l < 4u; ++l) { int gidx = int(gb[l]); uint signidx = (aux1 >> (7u * l)) & 127u; constant uchar* g8 = iq2_grid + uint(gidx) * 8u; uint sr = uint(iq2_ksigns[signidx]); for (uint j = 0u; j < 8u; ++j) { uint sbit = sr & 1u; sr = sr >> 1u; float sgn = (sbit == 1u) ? -1.0f : 1.0f; sumf[rr] = sumf[rr] + ((scale * sgn) * float(g8[j])) * xl[l * 8u + j]; } } } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sumf[rr]); if (lane == 0u) y[slot * rows + r0 + rr] = s; } } ")
+
+    (defn dom-q2k-experts-body ()
+        "kernel void form_dsv4_q2k_matvec_experts (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]]) { uint slot = gid / rows; if (slot >= nexp) return; uint r = gid - slot * rows; uint nb = cols / 256u; ulong rowbase = (ulong)ids[slot] * (ulong)stride + (ulong)r * (ulong)nb * 84ul; device const float* xe = x + slot * cols; float sum = 0.0f; for (uint blk = 0u; blk < nb; ++blk) { device const uchar* b = qb + rowbase + (ulong)blk * 84ul; float d = q2k_f16(int(b[80]) + 256 * int(b[81])); float dmin = q2k_f16(int(b[82]) + 256 * int(b[83])); device const float* xb = xe + blk * 256u; for (uint g = 0u; g < 16u; ++g) { uint sc = uint(b[g]); float ds = d * float(sc & 15u); float dm = dmin * float(sc >> 4u); uint qbase = 32u * (g >> 3u) + 16u * (g & 1u); uint sh = ((g >> 1u) & 3u) * 2u; device const uchar* qs = b + 16u + qbase; device const float* xg = xb + g * 16u; for (uint l = 0u; l < 16u; ++l) { float w = ds * float((uint(qs[l]) >> sh) & 3u) - dm; sum = sum + w * xg[l]; } } } y[slot * rows + r] = sum; } ")
+
+    ; the swiglu over all six slots at once, each with its own routing weight, and the final sum of the
+    ; six down-vectors. ds4 adds the experts in SLOT ORDER (ds4.c layer_routed_moe_one), so the reduce
+    ; ascends over slots and the answer is the host loop's answer, not a reassociation of it.
+    ; the SAME clamp asymmetry as form_dsv4_swiglu_f32 — cl_hi on the gate, cl_hi THEN cl_lo on the up.
+    ; Written by reusing that kernel's own helpers rather than restating the recipe, because my first
+    ; attempt restated it and got it wrong (a symmetric clamp and a stray +1). A fused kernel is a
+    ; rearrangement of dispatches, never a second copy of the arithmetic.
+    (defn dom-swiglu-experts-body ()
+        "kernel void form_dsv4_swiglu_experts (device const float* gate [[buffer(0)]], device const float* up [[buffer(1)]], device float* out [[buffer(2)]], device const float* wts [[buffer(3)]], constant uint& n [[buffer(4)]], constant uint& nexp [[buffer(5)]], constant float& lim [[buffer(6)]], uint gid [[thread_position_in_grid]]) { uint total = n * nexp; if (gid >= total) return; uint slot = gid / n; float g = dm_cl_hi(gate[gid], lim); float u = dm_cl_lo(dm_cl_hi(up[gid], lim), lim); out[gid] = (dm_silu(g) * u) * wts[slot]; } ")
+    (defn dom-moe-reduce-body ()
+        "kernel void form_dsv4_moe_reduce (device const float* parts [[buffer(0)]], device float* out [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& nexp [[buffer(3)]], uint d [[thread_position_in_grid]]) { if (d >= n) return; float s = 0.0f; for (uint slot = 0u; slot < nexp; ++slot) s = s + parts[slot * n + d]; out[d] = s; } ")
+
+    ; two appendices, because the Q2_K one needs q2k-msl.fk's carver in its translation unit and the
+    ; others stand alone. A carrier composes nothing; it takes whichever its unit can compile.
+    ; THE SAME QUANTISER ON A SIMDGROUP INSTEAD OF A THREAD. The kernel above runs one thread per
+    ; 32-element block, which at n=4096 is 128 threads — four simdgroups of a forty-core machine — and
+    ; each of them walks its block TWICE in sequence: once loading to find the maximum, once loading
+    ; again to scale. It is called 302 times a token and costs 2 ms of the 41, which is 6.6 us to read
+    ; 16 KB: not work, exposed latency, the same shape the f16 matvec was carrying before its loads
+    ; were hoisted.
+    ; A block is 32 elements and a simdgroup is 32 lanes, so lane j takes element j: one load, one abs,
+    ; metal::simd_max, then one scale and one store. The amax is BIT-IDENTICAL and not by argument —
+    ; maximum over floats is exact, associative and commutative, so a tree gives the same number as the
+    ; ascending scan, and the lanes past bn contribute 0.0f which cannot raise a maximum of absolute
+    ; values. `d`, `id`, metal::rint and the clamp are the same expressions in the same order.
+    (defn dom-q8a-quantize-par-body ()
+        "kernel void form_dsv4_q8a_quantize_par (device const float* x [[buffer(0)]], device char* xq [[buffer(1)]], device float* xs [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint blocks = (n + 31u) / 32u; uint b = gid / 32u; if (b >= blocks) return; uint i0 = b * 32u; uint bn = (n - i0 < 32u) ? (n - i0) : 32u; float v = (lane < bn) ? x[i0 + lane] : 0.0f; float ax = (lane < bn) ? metal::abs(v) : 0.0f; float amax = metal::simd_max(ax); float d = amax / 127.0f; float id = (d != 0.0f) ? (1.0f / d) : 0.0f; if (lane == 0u) xs[b] = d; int w = 0; if (lane < bn) { w = int(metal::rint(v * id)); if (w > 127) w = 127; if (w < -128) w = -128; } xq[i0 + lane] = char(w); } ")
+
+    (defn dom-msl-appendix ()
+        (str_concat (dom-q8a-quantize-par-body)
+        (str_concat (dom-q8a-quantize-body)
+        (str_concat (dom-q80-ordered-body)
+        (str_concat (dom-q80-ordered8-body)
+        (str_concat (dom-q80-mv-ds4-body)
+        (str_concat (dom-bw-probe-body)
+        (str_concat (dom-f16-mv-wide-body)
+        (str_concat (dom-f16-ordered-body) (dom-f16-ordered8-body))))))))))
+    ; THE SPAN A SIMDGROUP REACHES, asked of the routed experts. The Q8_0 finding above is a statement
+    ; about ADDRESSES AT ONE INSTRUCTION, not about loads: a simdgroup that reaches 1088 contiguous
+    ; bytes runs at 383 GB/s and one that reaches 68 bytes of four rows runs at 241, reading the SAME
+    ; bytes with the same instructions. The routed IQ2 kernels had never been asked this question.
+    ; What they were doing: `sub = lane + 32k` means lane L reads block L/8, so the 32 lanes of a pass
+    ; reach FOUR blocks — 264 bytes of a 1056-byte row (cols=4096: 16 blocks of 66). experts4 makes it
+    ; worse, four such 264-byte windows 1056 bytes apart. Four passes to walk the row, each spending a
+    ; quarter of it.
+    ; What this does instead: lane L owns the FOUR CONSECUTIVE sub-blocks 4L..4L+3. Those four always
+    ; land in one 66-byte block (4L is 8*(L/2) for even L and 8*((L-1)/2)+4 for odd), so lane pair
+    ; (2m, 2m+1) covers block m whole and the 32 lanes of ONE pass cover all 16 blocks: the entire row,
+    ; contiguous, in a single reach. Same weights, same bytes, same per-element association within a
+    ; sub-block — only which lane owns which sub-block changes, so like dom-iq2-hoist-body this is NOT
+    ; bit-identical by construction (the simd_sum tree combines a different partition) and the token
+    ; stream is MEASURED, never assumed.
+    ; Requires nsub = cols/32 to be a multiple of 32, i.e. cols % 1024 == 0; the carrier checks.
+    ; AND IT BOUGHT NOTHING — 43 ms before, 44 after, stream bit-exact either way, with four times the
+    ; threads and four times the reach. It is kept, with its result written on it, because the reasoning
+    ; that produced it is sound and the next reader will otherwise build it again: the Q8_0 span finding
+    ; is TRUE and it is NOT TRANSFERABLE, because it answered a question this kernel was not asking.
+    ; What settled it was two probes rather than an eighth hypothesis (dom-iq2-experts-alu-probe-body,
+    ; dom-iq2-experts-mem-probe-body): the reads alone are 3 of the 7 ms and already run at 372 GB/s.
+    ; There was never any span to recover. The cost was in the decode, and seven memory-shaped
+    ; experiments in a row had been searching the half of the kernel that was already fast.
+    (defn dom-iq2-experts-span-body ()
+        "kernel void form_dsv4_iq2_matvec_experts_span (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint per = rows * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r = g / 32u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; uint spl = nsub / 32u; ulong rowbase = ebase + (ulong)r * (ulong)(cols / 256u) * 66ul; float acc = 0.0f; uint sub0 = lane * spl; for (uint t = 0u; t < spl; ++t) { uint sub = sub0 + t; uint blk = sub / 8u; uint ib32 = sub - blk * 8u; device const uchar* off = qb + rowbase + (ulong)blk * 66ul; float d = iq2_f16(int(off[0]) + 256 * int(off[1])); device const uchar* gb = off + 2u + 8u * ib32; uint aux1 = uint(gb[4]) + 256u * uint(gb[5]) + 65536u * uint(gb[6]) + 16777216u * uint(gb[7]); int scalecode = int(uint(gb[7]) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); device const float* xs = x + sub * 32u; for (uint l = 0u; l < 4u; ++l) { int gidx = int(gb[l]); uint signidx = (aux1 >> (7u * l)) & 127u; constant uchar* g8 = iq2_grid + uint(gidx) * 8u; device const float* xl = xs + l * 8u; uint sr = uint(iq2_ksigns[signidx]); for (uint j = 0u; j < 8u; ++j) { uint sbit = sr & 1u; sr = sr >> 1u; float sgn = (sbit == 1u) ? -1.0f : 1.0f; acc = acc + ((scale * sgn) * float(g8[j])) * xl[j]; } } } float s = metal::simd_sum(acc); if (lane == 0u) y[slot * rows + r] = s; } ")
+
+    ; A MEASURING INSTRUMENT, NOT A KERNEL. It reads exactly the bytes the span kernel reads, in the
+    ; same order, and then throws four of the eight per-element operations away: no sign word, no sign
+    ; bit, no select, no scale*sgn — just scale * mag * x. The answer it computes is WRONG and the
+    ; stream it produces is garbage; what it reports is the EXCHANGE RATE between operations per
+    ; element and milliseconds. If the time does not move, this kernel is waiting on memory and no
+    ; amount of arithmetic thrift will help it. If it halves, every operation removed is time.
+    (defn dom-iq2-experts-alu-probe-body ()
+        "kernel void form_dsv4_iq2_matvec_experts_alu (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint per = rows * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r = g / 32u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rowbase = ebase + (ulong)r * (ulong)(cols / 256u) * 66ul; float acc = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { uint blk = sub / 8u; uint ib32 = sub - blk * 8u; device const uchar* off = qb + rowbase + (ulong)blk * 66ul; float d = iq2_f16(int(off[0]) + 256 * int(off[1])); device const uchar* gb = off + 2u + 8u * ib32; uint aux1 = uint(gb[4]) + 256u * uint(gb[5]) + 65536u * uint(gb[6]) + 16777216u * uint(gb[7]); int scalecode = int(uint(gb[7]) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); device const float* xs = x + sub * 32u; for (uint l = 0u; l < 4u; ++l) { int gidx = int(gb[l]) + int(aux1 & 0u); constant uchar* g8 = iq2_grid + uint(gidx) * 8u; device const float* xl = xs + l * 8u; for (uint j = 0u; j < 8u; ++j) { acc = acc + (scale * float(g8[j])) * xl[j]; } } } float s = metal::simd_sum(acc); if (lane == 0u) y[slot * rows + r] = s; } ")
+
+    ; THE OTHER HALF OF THE SAME QUESTION. The arithmetic probe above removed operations and kept the
+    ; reads; this one keeps the reads and removes EVERYTHING else — no f16 decode, no grid table, no
+    ; signs, no activation. It touches the same ten bytes of every sub-block in the same order and adds
+    ; them. Its answer is garbage. What it reports is what the MEMORY PATH alone costs, which is the
+    ; number the byte count has to be divided by before any GB/s claim about this kernel is honest.
+    (defn dom-iq2-experts-mem-probe-body ()
+        "kernel void form_dsv4_iq2_matvec_experts_mem (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint per = rows * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r = g / 32u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rowbase = ebase + (ulong)r * (ulong)(cols / 256u) * 66ul; uint acc = 0u; for (uint sub = lane; sub < nsub; sub += 32u) { uint blk = sub / 8u; uint ib32 = sub - blk * 8u; device const uchar* off = qb + rowbase + (ulong)blk * 66ul; acc += uint(off[0]) + uint(off[1]); device const uchar* gb = off + 2u + 8u * ib32; for (uint j = 0u; j < 8u; ++j) { acc += uint(gb[j]); } } float s = metal::simd_sum(float(acc)); if (lane == 0u) y[slot * rows + r] = s; } ")
+
+    ; WHAT THE TWO PROBES ABOVE ACTUALLY SAID, measured on this host at 43 ms/token:
+    ;   full kernel  7 ms | reads only  3 ms (1.116 GB -> 372 GB/s, next door to the Q8_0 kernel's 412)
+    ;   half the per-element operations removed  6 ms
+    ; So the memory path was never the problem — seven memory-shaped experiments found nothing because
+    ; there was nothing there — and the DECODE is four of the seven milliseconds. The arithmetic probe
+    ; found only one of those four because it removed the sign work and left the two expensive things
+    ; standing: the grid table read, and iq2_f16.
+    ;
+    ; iq2_f16 is the one that does not belong. Every other kernel in this file widens a stored half with
+    ; `float(as_type<half>(h))` — one instruction. iq2xxs-msl.fk's spine instead REBUILDS the value out
+    ; of arithmetic: two integer divisions for mantissa and exponent, then iq2_pow2, which is a LOOP
+    ; that multiplies by two up to fifteen times. That was written so the GPU decode and the Form-side
+    ; carver could be read as the same recipe, and at one call per weight in a dequant kernel it cost
+    ; nothing worth naming. Here it runs once per 32-element sub-block per row — 135 million times a
+    ; token — and it is a divide-and-loop where the machine has an instruction.
+    ; The values are the same. Half to float is EXACT for every finite half: iq2_f16's two branches are
+    ; the IEEE subnormal (2^-14 * mant/1024) and normal (2^(ex-15) * (1+frac)) forms written out, and
+    ; float has both the exponent range and the mantissa bits to hold either without rounding. They part
+    ; company only at ex == 31, where the hardware yields Inf/NaN and the arithmetic form yields a finite
+    ; 2^16 * (1+frac) — and a block scale of Inf or NaN is not a value a quantiser writes. So this is
+    ; bit-identical on any file that decodes at all, and the stream is measured all the same.
+    ; Two more, both free and both bit-identical: the eight grid magnitudes are read as two four-byte
+    ; loads instead of eight one-byte ones, and `(scale * sgn) * mag` becomes `scale * (sgn * mag)` —
+    ; multiplying by +-1.0f is exact, so both are exactly +-(scale*mag), and one multiply per element
+    ; goes away.
+    (defn dom-iq2-experts-fast-body ()
+        "kernel void form_dsv4_iq2_matvec_experts_fast (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint per = rows * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r = g / 32u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rowbase = ebase + (ulong)r * (ulong)(cols / 256u) * 66ul; float acc = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { uint blk = sub / 8u; uint ib32 = sub - blk * 8u; device const uchar* off = qb + rowbase + (ulong)blk * 66ul; ushort hb = (ushort)off[0] | ((ushort)off[1] << 8); float d = float(as_type<half>(hb)); device const uchar* gb = off + 2u + 8u * ib32; uchar4 g0 = uchar4(*(device const packed_uchar4*)(gb)); uchar4 g1 = uchar4(*(device const packed_uchar4*)(gb + 4u)); uint aux1 = uint(g1.x) + 256u * uint(g1.y) + 65536u * uint(g1.z) + 16777216u * uint(g1.w); int scalecode = int(uint(g1.w) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); device const float* xs = x + sub * 32u; for (uint l = 0u; l < 4u; ++l) { uint gidx = uint(g0[l]); uint signidx = (aux1 >> (7u * l)) & 127u; constant uchar* g8 = iq2_grid + gidx * 8u; uchar4 m0 = uchar4(*(constant packed_uchar4*)(g8)); uchar4 m1 = uchar4(*(constant packed_uchar4*)(g8 + 4u)); device const float* xl = xs + l * 8u; uint sr = uint(iq2_ksigns[signidx]); float b0 = float(m0.x); float b1 = float(m0.y); float b2 = float(m0.z); float b3 = float(m0.w); float b4 = float(m1.x); float b5 = float(m1.y); float b6 = float(m1.z); float b7 = float(m1.w); acc = acc + (scale * (((sr & 1u) == 1u) ? -b0 : b0)) * xl[0]; acc = acc + (scale * ((((sr >> 1u) & 1u) == 1u) ? -b1 : b1)) * xl[1]; acc = acc + (scale * ((((sr >> 2u) & 1u) == 1u) ? -b2 : b2)) * xl[2]; acc = acc + (scale * ((((sr >> 3u) & 1u) == 1u) ? -b3 : b3)) * xl[3]; acc = acc + (scale * ((((sr >> 4u) & 1u) == 1u) ? -b4 : b4)) * xl[4]; acc = acc + (scale * ((((sr >> 5u) & 1u) == 1u) ? -b5 : b5)) * xl[5]; acc = acc + (scale * ((((sr >> 6u) & 1u) == 1u) ? -b6 : b6)) * xl[6]; acc = acc + (scale * ((((sr >> 7u) & 1u) == 1u) ? -b7 : b7)) * xl[7]; } } float s = metal::simd_sum(acc); if (lane == 0u) y[slot * rows + r] = s; } ")
+
+    ; THE SAME DECODE, WITH THE ACTIVATION HELD. What is left after the fast decode is one device read
+    ; of x per element, and dom-iq2-experts4-body already knows the answer to that: hold the 32
+    ; activations of a sub-block in registers and spend them on four output rows. That kernel is here
+    ; with the fast decode inside it — hardware half widening, two-word grid reads, one multiply fewer
+    ; per element — and its per-row accumulation chain untouched: sumf[rr] is added into directly, in l
+    ; then j order, exactly as before.
+    (defn dom-iq2-experts4-fast-body ()
+        "kernel void form_dsv4_iq2_matvec_experts4_fast (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rg = rows / 4u; uint per = rg * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r0 = (g / 32u) * 4u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rstride = (ulong)(cols / 256u) * 66ul; float sumf[4]; for (uint i = 0u; i < 4u; ++i) sumf[i] = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { float xl[32]; device const float* xsrc = x + sub * 32u; for (uint i = 0u; i < 32u; ++i) xl[i] = xsrc[i]; uint blk = sub / 8u; uint ib32 = sub - blk * 8u; for (uint rr = 0u; rr < 4u; ++rr) { device const uchar* off = qb + ebase + (ulong)(r0 + rr) * rstride + (ulong)blk * 66ul; ushort hb = (ushort)off[0] | ((ushort)off[1] << 8); float d = float(as_type<half>(hb)); device const uchar* gb = off + 2u + 8u * ib32; uchar4 g0 = uchar4(*(device const packed_uchar4*)(gb)); uchar4 g1 = uchar4(*(device const packed_uchar4*)(gb + 4u)); uint aux1 = uint(g1.x) + 256u * uint(g1.y) + 65536u * uint(g1.z) + 16777216u * uint(g1.w); int scalecode = int(uint(g1.w) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); for (uint l = 0u; l < 4u; ++l) { uint gidx = uint(g0[l]); uint signidx = (aux1 >> (7u * l)) & 127u; constant uchar* g8 = iq2_grid + gidx * 8u; uchar4 m0 = uchar4(*(constant packed_uchar4*)(g8)); uchar4 m1 = uchar4(*(constant packed_uchar4*)(g8 + 4u)); uint sr = uint(iq2_ksigns[signidx]); float b0 = float(m0.x); float b1 = float(m0.y); float b2 = float(m0.z); float b3 = float(m0.w); float b4 = float(m1.x); float b5 = float(m1.y); float b6 = float(m1.z); float b7 = float(m1.w); sumf[rr] = sumf[rr] + (scale * (((sr & 1u) == 1u) ? -b0 : b0)) * xl[l * 8u + 0u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 1u) & 1u) == 1u) ? -b1 : b1)) * xl[l * 8u + 1u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 2u) & 1u) == 1u) ? -b2 : b2)) * xl[l * 8u + 2u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 3u) & 1u) == 1u) ? -b3 : b3)) * xl[l * 8u + 3u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 4u) & 1u) == 1u) ? -b4 : b4)) * xl[l * 8u + 4u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 5u) & 1u) == 1u) ? -b5 : b5)) * xl[l * 8u + 5u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 6u) & 1u) == 1u) ? -b6 : b6)) * xl[l * 8u + 6u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 7u) & 1u) == 1u) ? -b7 : b7)) * xl[l * 8u + 7u]; } } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sumf[rr]); if (lane == 0u) y[slot * rows + r0 + rr] = s; } } ")
+
+    ; THE Q2_K DOWN PROJECTION, GIVEN THE SAME READING. It never had iq2_f16's loop — it widens its two
+    ; halves with the machine's instruction already — but it reads its bytes one at a time: four scalar
+    ; loads to rebuild d and dmin, sixteen to fetch a group's quants, sixteen more for the activation,
+    ; and it does that for each of the sixteen groups of every block, so the same four scale bytes are
+    ; fetched sixteen times over. This reads d and dmin as ONE four-byte word, the group's sixteen
+    ; quants as four, and the sixteen activations as four — thirty-six scalar loads become nine.
+    ; Nothing about the arithmetic moves: the sixteen terms are still formed as ds*q - dm and still
+    ; added into `sum` in ascending l, one at a time, so the fold is letter for letter the old one.
+    (defn dom-q2k-experts-fast-body ()
+        "kernel void form_dsv4_q2k_matvec_experts_fast (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint idx = gid / 32u; uint slot = idx / rows; if (slot >= nexp) return; uint r = idx - slot * rows; uint nb = cols / 256u; ulong rowbase = (ulong)ids[slot] * (ulong)stride + (ulong)r * (ulong)nb * 84ul; device const float* xe = x + slot * cols; float sum = 0.0f; uint ngrp = nb * 16u; for (uint gg = lane; gg < ngrp; gg += 32u) { uint blk = gg / 16u; uint g = gg - blk * 16u; device const uchar* b = qb + rowbase + (ulong)blk * 84ul; uchar4 hh = uchar4(*(device const packed_uchar4*)(b + 80u)); ushort hd = (ushort)hh.x | ((ushort)hh.y << 8); ushort hm = (ushort)hh.z | ((ushort)hh.w << 8); float d = float(as_type<half>(hd)); float dmin = float(as_type<half>(hm)); uint sc = uint(b[g]); float ds = d * float(sc & 15u); float dm = dmin * float(sc >> 4u); uint qbase = 32u * (g >> 3u) + 16u * (g & 1u); uint sh = ((g >> 1u) & 3u) * 2u; device const uchar* qs = b + 16u + qbase; device const float* xg = xe + blk * 256u + g * 16u; uchar4 q0 = uchar4(*(device const packed_uchar4*)(qs)); uchar4 q1 = uchar4(*(device const packed_uchar4*)(qs + 4u)); uchar4 q2 = uchar4(*(device const packed_uchar4*)(qs + 8u)); uchar4 q3 = uchar4(*(device const packed_uchar4*)(qs + 12u)); float4 v0 = float4(*(device const packed_float4*)(xg)); float4 v1 = float4(*(device const packed_float4*)(xg + 4u)); float4 v2 = float4(*(device const packed_float4*)(xg + 8u)); float4 v3 = float4(*(device const packed_float4*)(xg + 12u)); sum = sum + (ds * float((uint(q0.x) >> sh) & 3u) - dm) * v0.x; sum = sum + (ds * float((uint(q0.y) >> sh) & 3u) - dm) * v0.y; sum = sum + (ds * float((uint(q0.z) >> sh) & 3u) - dm) * v0.z; sum = sum + (ds * float((uint(q0.w) >> sh) & 3u) - dm) * v0.w; sum = sum + (ds * float((uint(q1.x) >> sh) & 3u) - dm) * v1.x; sum = sum + (ds * float((uint(q1.y) >> sh) & 3u) - dm) * v1.y; sum = sum + (ds * float((uint(q1.z) >> sh) & 3u) - dm) * v1.z; sum = sum + (ds * float((uint(q1.w) >> sh) & 3u) - dm) * v1.w; sum = sum + (ds * float((uint(q2.x) >> sh) & 3u) - dm) * v2.x; sum = sum + (ds * float((uint(q2.y) >> sh) & 3u) - dm) * v2.y; sum = sum + (ds * float((uint(q2.z) >> sh) & 3u) - dm) * v2.z; sum = sum + (ds * float((uint(q2.w) >> sh) & 3u) - dm) * v2.w; sum = sum + (ds * float((uint(q3.x) >> sh) & 3u) - dm) * v3.x; sum = sum + (ds * float((uint(q3.y) >> sh) & 3u) - dm) * v3.y; sum = sum + (ds * float((uint(q3.z) >> sh) & 3u) - dm) * v3.z; sum = sum + (ds * float((uint(q3.w) >> sh) & 3u) - dm) * v3.w; } float s = metal::simd_sum(sum); if (lane == 0u) y[slot * rows + r] = s; } ")
+
+    ; THE LAST PIECE OF THE DECODE NOBODY HAD ISOLATED: the grid table itself. Every element costs one
+    ; read of `iq2_grid`, and the index is `gidx * 8 + j` where gidx is a byte out of the weight stream
+    ; — so the 32 lanes of a simdgroup ask for 32 unrelated places in a 2 KB table, every instruction,
+    ; 4.3 billion times a token. `constant` is the address space a GPU serves fastest when a whole
+    ; simdgroup wants the SAME address, which is the opposite of what this does.
+    ; The table is 2048 bytes and the signs are 128. A threadgroup can simply hold both: 256 lanes copy
+    ; 2176 bytes once at entry, meet at a barrier, and every lookup after that is core-local. The
+    ; copying is 836 KB across a dispatch that reads 13 MB of weights, and the values are the same
+    ; bytes from the same table, so this is bit-identical by construction — it changes where the table
+    ; lives, not what is in it.
+    (defn dom-iq2-experts4-tg-body ()
+        "kernel void form_dsv4_iq2_matvec_experts4_tg (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]], uint tid [[thread_position_in_threadgroup]], uint tsz [[threads_per_threadgroup]]) { threadgroup uchar tgrid[2048]; threadgroup uchar tks[128]; for (uint i = tid; i < 2048u; i += tsz) tgrid[i] = iq2_grid[i]; for (uint i = tid; i < 128u; i += tsz) tks[i] = iq2_ksigns[i]; threadgroup_barrier(metal::mem_flags::mem_threadgroup); uint rg = rows / 4u; uint per = rg * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r0 = (g / 32u) * 4u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rstride = (ulong)(cols / 256u) * 66ul; float sumf[4]; for (uint i = 0u; i < 4u; ++i) sumf[i] = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { float xl[32]; device const float* xsrc = x + sub * 32u; for (uint i = 0u; i < 32u; ++i) xl[i] = xsrc[i]; uint blk = sub / 8u; uint ib32 = sub - blk * 8u; for (uint rr = 0u; rr < 4u; ++rr) { device const uchar* off = qb + ebase + (ulong)(r0 + rr) * rstride + (ulong)blk * 66ul; ushort hb = (ushort)off[0] | ((ushort)off[1] << 8); float d = float(as_type<half>(hb)); device const uchar* gb = off + 2u + 8u * ib32; uchar4 g0 = uchar4(*(device const packed_uchar4*)(gb)); uchar4 g1 = uchar4(*(device const packed_uchar4*)(gb + 4u)); uint aux1 = uint(g1.x) + 256u * uint(g1.y) + 65536u * uint(g1.z) + 16777216u * uint(g1.w); int scalecode = int(uint(g1.w) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); for (uint l = 0u; l < 4u; ++l) { uint gidx = uint(g0[l]); uint signidx = (aux1 >> (7u * l)) & 127u; threadgroup uchar* g8 = tgrid + gidx * 8u; uint sr = uint(tks[signidx]); float b0 = float(g8[0]); float b1 = float(g8[1]); float b2 = float(g8[2]); float b3 = float(g8[3]); float b4 = float(g8[4]); float b5 = float(g8[5]); float b6 = float(g8[6]); float b7 = float(g8[7]); sumf[rr] = sumf[rr] + (scale * (((sr & 1u) == 1u) ? -b0 : b0)) * xl[l * 8u + 0u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 1u) & 1u) == 1u) ? -b1 : b1)) * xl[l * 8u + 1u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 2u) & 1u) == 1u) ? -b2 : b2)) * xl[l * 8u + 2u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 3u) & 1u) == 1u) ? -b3 : b3)) * xl[l * 8u + 3u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 4u) & 1u) == 1u) ? -b4 : b4)) * xl[l * 8u + 4u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 5u) & 1u) == 1u) ? -b5 : b5)) * xl[l * 8u + 5u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 6u) & 1u) == 1u) ? -b6 : b6)) * xl[l * 8u + 6u]; sumf[rr] = sumf[rr] + (scale * ((((sr >> 7u) & 1u) == 1u) ? -b7 : b7)) * xl[l * 8u + 7u]; } } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sumf[rr]); if (lane == 0u) y[slot * rows + r0 + rr] = s; } } ")
+
+    ; FOUR ROWS PER THREAD ON THE DOWN PROJECTION. The one lever that has moved these kernels twice is
+    ; not about weights at all — it is that the ACTIVATION is read once per output row, and the rows of
+    ; one expert all read the same numbers. The IQ2 gate/up kernel holds a sub-block's 32 activations
+    ; in registers and spends them on four rows; the Q2_K down projection never had that, and reads its
+    ; sixteen f32 out of device memory once for every one of 4096 rows.
+    ; Here a group's sixteen activations are loaded once into xv[] and folded against four rows. Each
+    ; row's chain is untouched: gg still ascends lane-strided, l still ascends inside the group, and
+    ; sum[rr] is added into directly, never through a per-group temporary. Bit-identical; only the
+    ; reads change. Needs rows % 4 == 0; the carrier checks.
+    (defn dom-q2k-experts4-body ()
+        "kernel void form_dsv4_q2k_matvec_experts4 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rg = rows / 4u; uint idx = gid / 32u; uint slot = idx / rg; if (slot >= nexp) return; uint r0 = (idx - slot * rg) * 4u; uint nb = cols / 256u; ulong ebase = (ulong)ids[slot] * (ulong)stride; ulong rstride = (ulong)nb * 84ul; device const float* xe = x + slot * cols; float sum[4]; for (uint i = 0u; i < 4u; ++i) sum[i] = 0.0f; uint ngrp = nb * 16u; for (uint gg = lane; gg < ngrp; gg += 32u) { uint blk = gg / 16u; uint g = gg - blk * 16u; uint qbase = 32u * (g >> 3u) + 16u * (g & 1u); uint sh = ((g >> 1u) & 3u) * 2u; device const float* xg = xe + blk * 256u + g * 16u; float xv[16]; for (uint i = 0u; i < 16u; ++i) xv[i] = xg[i]; for (uint rr = 0u; rr < 4u; ++rr) { device const uchar* b = qb + ebase + (ulong)(r0 + rr) * rstride + (ulong)blk * 84ul; ushort hd = (ushort)b[80] | ((ushort)b[81] << 8); ushort hm = (ushort)b[82] | ((ushort)b[83] << 8); float d = float(as_type<half>(hd)); float dmin = float(as_type<half>(hm)); uint sc = uint(b[g]); float ds = d * float(sc & 15u); float dm = dmin * float(sc >> 4u); device const uchar* qs = b + 16u + qbase; for (uint l = 0u; l < 16u; ++l) { float w = ds * float((uint(qs[l]) >> sh) & 3u) - dm; sum[rr] = sum[rr] + w * xv[l]; } } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sum[rr]); if (lane == 0u) y[slot * rows + r0 + rr] = s; } } ")
+
+    ; THE GATE AND THE UP IN ONE PASS, AND THE SwiGLU WHERE THE TWO SUMS ALREADY ARE (ds4's own shape:
+    ; metal/moe.metal names kernel_mul_mv_id_iq2_xxs_pair_swiglu_f32). Three dispatches become one.
+    ; The gate stack and the up stack have the same shape, the same type, the same expert ids and the
+    ; same activation, and dom-iq2-experts4-fast-body's whole reason for existing is that a sub-block's
+    ; 32 activations are worth holding in registers: held, they were spent on four rows of one tensor;
+    ; held here they are spent on four rows of BOTH. The decode is not restated — the wsel loop selects
+    ; which stack's bytes the SAME decode reads, so there is exactly one copy of the recipe.
+    ; Every accumulation chain is untouched: sumf[wsel*4+rr] ascends over sub and over l exactly as
+    ; sumf[rr] did in each of the two kernels this replaces, and simd_sum reduces the same lanes. What
+    ; the fusion removes is the round trip: gate and up used to be written to device memory and read
+    ; back by form_dsv4_swiglu_experts. Here the two sums meet in a register, and lane 0 applies the
+    ; SAME clamped SwiGLU — dm_cl_hi / dm_cl_lo / dm_silu from dsv4-moe-msl.fk's one spine, the very
+    ; functions form_dsv4_swiglu_experts calls — and writes mid. Needs rows % 4 == 0; the carrier checks.
+    (defn dom-iq2-experts4-pair-swiglu-body ()
+        "kernel void form_dsv4_iq2_matvec_experts4_pair_swiglu (device const uchar* qg [[buffer(0)]], device const uchar* qu [[buffer(1)]], device const float* x [[buffer(2)]], device float* y [[buffer(3)]], device const uint* ids [[buffer(4)]], device const float* wts [[buffer(5)]], constant uint& rows [[buffer(6)]], constant uint& cols [[buffer(7)]], constant uint& stride [[buffer(8)]], constant uint& nexp [[buffer(9)]], constant float& lim [[buffer(10)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rg = rows / 4u; uint per = rg * 32u; uint slot = gid / per; if (slot >= nexp) return; uint g = gid - slot * per; uint r0 = (g / 32u) * 4u; ulong ebase = (ulong)ids[slot] * (ulong)stride; uint nsub = cols / 32u; ulong rstride = (ulong)(cols / 256u) * 66ul; float sumf[8]; for (uint i = 0u; i < 8u; ++i) sumf[i] = 0.0f; for (uint sub = lane; sub < nsub; sub += 32u) { float xl[32]; device const float* xsrc = x + sub * 32u; for (uint i = 0u; i < 32u; ++i) xl[i] = xsrc[i]; uint blk = sub / 8u; uint ib32 = sub - blk * 8u; for (uint wsel = 0u; wsel < 2u; ++wsel) { device const uchar* qb = (wsel == 0u) ? qg : qu; for (uint rr = 0u; rr < 4u; ++rr) { uint sx = wsel * 4u + rr; device const uchar* off = qb + ebase + (ulong)(r0 + rr) * rstride + (ulong)blk * 66ul; ushort hb = (ushort)off[0] | ((ushort)off[1] << 8); float d = float(as_type<half>(hb)); device const uchar* gb = off + 2u + 8u * ib32; uchar4 g0 = uchar4(*(device const packed_uchar4*)(gb)); uchar4 g1 = uchar4(*(device const packed_uchar4*)(gb + 4u)); uint aux1 = uint(g1.x) + 256u * uint(g1.y) + 65536u * uint(g1.z) + 16777216u * uint(g1.w); int scalecode = int(uint(g1.w) >> 4u); float scale = 0.125f * d * float(2 * scalecode + 1); for (uint l = 0u; l < 4u; ++l) { uint gidx = uint(g0[l]); uint signidx = (aux1 >> (7u * l)) & 127u; constant uchar* g8 = iq2_grid + gidx * 8u; uchar4 m0 = uchar4(*(constant packed_uchar4*)(g8)); uchar4 m1 = uchar4(*(constant packed_uchar4*)(g8 + 4u)); uint sr = uint(iq2_ksigns[signidx]); float b0 = float(m0.x); float b1 = float(m0.y); float b2 = float(m0.z); float b3 = float(m0.w); float b4 = float(m1.x); float b5 = float(m1.y); float b6 = float(m1.z); float b7 = float(m1.w); sumf[sx] = sumf[sx] + (scale * (((sr & 1u) == 1u) ? -b0 : b0)) * xl[l * 8u + 0u]; sumf[sx] = sumf[sx] + (scale * ((((sr >> 1u) & 1u) == 1u) ? -b1 : b1)) * xl[l * 8u + 1u]; sumf[sx] = sumf[sx] + (scale * ((((sr >> 2u) & 1u) == 1u) ? -b2 : b2)) * xl[l * 8u + 2u]; sumf[sx] = sumf[sx] + (scale * ((((sr >> 3u) & 1u) == 1u) ? -b3 : b3)) * xl[l * 8u + 3u]; sumf[sx] = sumf[sx] + (scale * ((((sr >> 4u) & 1u) == 1u) ? -b4 : b4)) * xl[l * 8u + 4u]; sumf[sx] = sumf[sx] + (scale * ((((sr >> 5u) & 1u) == 1u) ? -b5 : b5)) * xl[l * 8u + 5u]; sumf[sx] = sumf[sx] + (scale * ((((sr >> 6u) & 1u) == 1u) ? -b6 : b6)) * xl[l * 8u + 6u]; sumf[sx] = sumf[sx] + (scale * ((((sr >> 7u) & 1u) == 1u) ? -b7 : b7)) * xl[l * 8u + 7u]; } } } } float wt = wts[slot]; for (uint rr = 0u; rr < 4u; ++rr) { float sg = metal::simd_sum(sumf[rr]); float su = metal::simd_sum(sumf[4u + rr]); if (lane == 0u) { float gv = dm_cl_hi(sg, lim); float uv = dm_cl_lo(dm_cl_hi(su, lim), lim); y[slot * rows + r0 + rr] = (dm_silu(gv) * uv) * wt; } } } ")
+
+    ; THE SIX SLOTS SUMMED WHERE THEY ARE COMPUTED (ds4 names its own kernel_mul_mv_id_..._sum6_f32).
+    ; dom-q2k-experts4-body writes six per-slot planes and form_dsv4_moe_reduce reads them back and adds
+    ; them in ascending slot. A simdgroup that already owns four output rows can walk the slots itself:
+    ; the group loop, the sixteen-term ascending fold and the simd_sum are letter for letter the ones
+    ; above, and acc[rr] starts at zero and takes each slot's simd_sum in the SAME ascending order the
+    ; reduce kernel used — so the value is the reduce kernel's value, not a re-association of it.
+    ; What goes away is the nexp*rows plane: written once, read once, and never seen by anything else.
+    ; THE TWO Q2_K READINGS THAT WERE NEVER PUT TOGETHER. dom-q2k-experts-fast-body turned a group's
+    ; thirty-six scalar loads into nine; dom-q2k-experts4-body gave a simdgroup four rows so a group's
+    ; sixteen activations are read once instead of four times. The IQ2 pair got joined long ago
+    ; (dom-iq2-experts4-fast-body IS rows4 with the fast decode inside it); the Q2_K pair never did,
+    ; and the down projection has been running the four-row kernel with d, dmin, the sixteen quants and
+    ; the sixteen activations all fetched one byte and one word at a time. FORM_DS4_DOUBLE prices that
+    ; kernel at 3.2 ms of a 39 ms token.
+    ; Nothing about the arithmetic moves. gg still ascends lane-strided, rr still ascends, l still
+    ; ascends inside the group, each term is still formed as ds*q - dm and added straight into sum[rr].
+    ; Only the width of the reads changes: four scale bytes as one word, sixteen quants as four, and
+    ; the group's sixteen activations as four — the same nine loads the fast kernel already makes.
+    (defn dom-q2k-experts4-fast-body ()
+        "kernel void form_dsv4_q2k_matvec_experts4_fast (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rg = rows / 4u; uint idx = gid / 32u; uint slot = idx / rg; if (slot >= nexp) return; uint r0 = (idx - slot * rg) * 4u; uint nb = cols / 256u; ulong ebase = (ulong)ids[slot] * (ulong)stride; ulong rstride = (ulong)nb * 84ul; device const float* xe = x + slot * cols; float sum[4]; for (uint i = 0u; i < 4u; ++i) sum[i] = 0.0f; uint ngrp = nb * 16u; for (uint gg = lane; gg < ngrp; gg += 32u) { uint blk = gg / 16u; uint g = gg - blk * 16u; uint qbase = 32u * (g >> 3u) + 16u * (g & 1u); uint sh = ((g >> 1u) & 3u) * 2u; device const float* xg = xe + blk * 256u + g * 16u; float4 v0 = float4(*(device const packed_float4*)(xg)); float4 v1 = float4(*(device const packed_float4*)(xg + 4u)); float4 v2 = float4(*(device const packed_float4*)(xg + 8u)); float4 v3 = float4(*(device const packed_float4*)(xg + 12u)); for (uint rr = 0u; rr < 4u; ++rr) { device const uchar* b = qb + ebase + (ulong)(r0 + rr) * rstride + (ulong)blk * 84ul; uchar4 hh = uchar4(*(device const packed_uchar4*)(b + 80u)); ushort hd = (ushort)hh.x | ((ushort)hh.y << 8); ushort hm = (ushort)hh.z | ((ushort)hh.w << 8); float d = float(as_type<half>(hd)); float dmin = float(as_type<half>(hm)); uint sc = uint(b[g]); float ds = d * float(sc & 15u); float dm = dmin * float(sc >> 4u); device const uchar* qs = b + 16u + qbase; uchar4 q0 = uchar4(*(device const packed_uchar4*)(qs)); uchar4 q1 = uchar4(*(device const packed_uchar4*)(qs + 4u)); uchar4 q2 = uchar4(*(device const packed_uchar4*)(qs + 8u)); uchar4 q3 = uchar4(*(device const packed_uchar4*)(qs + 12u)); sum[rr] = sum[rr] + (ds * float((uint(q0.x) >> sh) & 3u) - dm) * v0.x; sum[rr] = sum[rr] + (ds * float((uint(q0.y) >> sh) & 3u) - dm) * v0.y; sum[rr] = sum[rr] + (ds * float((uint(q0.z) >> sh) & 3u) - dm) * v0.z; sum[rr] = sum[rr] + (ds * float((uint(q0.w) >> sh) & 3u) - dm) * v0.w; sum[rr] = sum[rr] + (ds * float((uint(q1.x) >> sh) & 3u) - dm) * v1.x; sum[rr] = sum[rr] + (ds * float((uint(q1.y) >> sh) & 3u) - dm) * v1.y; sum[rr] = sum[rr] + (ds * float((uint(q1.z) >> sh) & 3u) - dm) * v1.z; sum[rr] = sum[rr] + (ds * float((uint(q1.w) >> sh) & 3u) - dm) * v1.w; sum[rr] = sum[rr] + (ds * float((uint(q2.x) >> sh) & 3u) - dm) * v2.x; sum[rr] = sum[rr] + (ds * float((uint(q2.y) >> sh) & 3u) - dm) * v2.y; sum[rr] = sum[rr] + (ds * float((uint(q2.z) >> sh) & 3u) - dm) * v2.z; sum[rr] = sum[rr] + (ds * float((uint(q2.w) >> sh) & 3u) - dm) * v2.w; sum[rr] = sum[rr] + (ds * float((uint(q3.x) >> sh) & 3u) - dm) * v3.x; sum[rr] = sum[rr] + (ds * float((uint(q3.y) >> sh) & 3u) - dm) * v3.y; sum[rr] = sum[rr] + (ds * float((uint(q3.z) >> sh) & 3u) - dm) * v3.z; sum[rr] = sum[rr] + (ds * float((uint(q3.w) >> sh) & 3u) - dm) * v3.w; } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sum[rr]); if (lane == 0u) y[slot * rows + r0 + rr] = s; } } ")
+
+    (defn dom-q2k-experts4-sum-body ()
+        "kernel void form_dsv4_q2k_matvec_experts4_sum (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const uint* ids [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& stride [[buffer(6)]], constant uint& nexp [[buffer(7)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint rg = rows / 4u; uint idx = gid / 32u; if (idx >= rg) return; uint r0 = idx * 4u; uint nb = cols / 256u; ulong rstride = (ulong)nb * 84ul; uint ngrp = nb * 16u; float acc[4]; for (uint i = 0u; i < 4u; ++i) acc[i] = 0.0f; for (uint slot = 0u; slot < nexp; ++slot) { ulong ebase = (ulong)ids[slot] * (ulong)stride; device const float* xe = x + slot * cols; float sum[4]; for (uint i = 0u; i < 4u; ++i) sum[i] = 0.0f; for (uint gg = lane; gg < ngrp; gg += 32u) { uint blk = gg / 16u; uint g = gg - blk * 16u; uint qbase = 32u * (g >> 3u) + 16u * (g & 1u); uint sh = ((g >> 1u) & 3u) * 2u; device const float* xg = xe + blk * 256u + g * 16u; float xv[16]; for (uint i = 0u; i < 16u; ++i) xv[i] = xg[i]; for (uint rr = 0u; rr < 4u; ++rr) { device const uchar* b = qb + ebase + (ulong)(r0 + rr) * rstride + (ulong)blk * 84ul; ushort hd = (ushort)b[80] | ((ushort)b[81] << 8); ushort hm = (ushort)b[82] | ((ushort)b[83] << 8); float d = float(as_type<half>(hd)); float dmin = float(as_type<half>(hm)); uint sc = uint(b[g]); float ds = d * float(sc & 15u); float dm = dmin * float(sc >> 4u); device const uchar* qs = b + 16u + qbase; for (uint l = 0u; l < 16u; ++l) { float w = ds * float((uint(qs[l]) >> sh) & 3u) - dm; sum[rr] = sum[rr] + w * xv[l]; } } } for (uint rr = 0u; rr < 4u; ++rr) { float s = metal::simd_sum(sum[rr]); acc[rr] = acc[rr] + s; } } if (lane == 0u) { for (uint rr = 0u; rr < 4u; ++rr) y[r0 + rr] = acc[rr]; } } ")
+
+    (defn dom-q2k-appendix () (str_concat (dom-q2k-ordered-body) (str_concat (dom-q2k-experts-body) (str_concat (dom-q2k-experts-wide-body) (str_concat (dom-q2k-experts-fast-body) (str_concat (dom-q2k-experts4-body) (str_concat (dom-q2k-experts4-fast-body) (dom-q2k-experts4-sum-body))))))))
+    (defn dom-iq2-appendix () (str_concat (dom-iq2-hoist-body) (str_concat (dom-iq2-experts-body) (str_concat (dom-iq2-experts4-body) (str_concat (dom-iq2-experts-span-body) (str_concat (dom-iq2-experts-alu-probe-body) (str_concat (dom-iq2-experts-mem-probe-body) (str_concat (dom-iq2-experts-fast-body) (str_concat (dom-iq2-experts4-fast-body) (str_concat (dom-iq2-experts4-tg-body) (dom-iq2-experts4-pair-swiglu-body)))))))))))
+    (defn dom-ffn-appendix () (str_concat (dom-swiglu-experts-body) (dom-moe-reduce-body)))
+    0)

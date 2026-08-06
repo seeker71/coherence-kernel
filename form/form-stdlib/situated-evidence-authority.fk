@@ -1,0 +1,219 @@
+; situated-evidence-authority.fk — a sovereign admission membrane for a
+; source-attributed situated observation.
+;
+; Authority here is interior and caller-declared. A policy is:
+;   [allowed-witness-nodes, minimum-distinct-witnesses, maximum-age]
+;
+; An endorsement is:
+;   [witness-node, observation-source, observation-time, observation-lens,
+;    candidate, push, witnessed-at]
+;
+; The repeated observation fields are deliberate: an endorsement binds the
+; complete offered row rather than merely its coordinate. A witness counts
+; only when it is caller-allowed, independent of the observation source,
+; fresh at the caller-supplied `now`, and exact. Duplicate endorsements from
+; one witness count once. A fresh, eligible witness that endorses a different
+; candidate or push for the same source/time/lens has equivocated and stops
+; admission rather than being averaged away.
+;
+; Outcome:
+;   [admitted, reason, fresh-distinct, required,
+;    exact-receipts, stale-exact-receipts, equivocator]
+;
+; reason: 0 admitted, 1 invalid, 2 insufficient quorum,
+;         3 fresh equivocation, 4 authority not required
+;
+; This membrane proves declared relations. It does not claim cryptographic
+; identity or signature verification.
+;
+; preludes: form-stdlib/core.fk form-stdlib/core-word-inquiry.fk form-stdlib/situated-lens-conclusion.fk
+; witnessed: 2026-07-26 -> 2097151 four-way
+
+(do
+    (defn sea-policy (allowed minimum maximum-age)
+        (list allowed minimum maximum-age))
+    (defn sea-p-allowed (policy) (nth policy 0))
+    (defn sea-p-minimum (policy) (nth policy 1))
+    (defn sea-p-maximum-age (policy) (nth policy 2))
+
+    (defn sea-authorities-valid? (authorities)
+        (if (eq (len authorities) 0) 1
+            (if (ge (head authorities) 2)
+                (sea-authorities-valid? (tail authorities))
+                0)))
+    (defn sea-policy-valid? (policy)
+        (if (and (eq (len policy) 3)
+            (and (eq (sea-authorities-valid?
+                        (sea-p-allowed policy)) 1)
+            (and (eq (cwi-unique-ints?
+                        (sea-p-allowed policy)) 1)
+            (and (ge (sea-p-minimum policy) 1)
+            (and (le (sea-p-minimum policy)
+                     (len (sea-p-allowed policy)))
+            (and (ge (sea-p-maximum-age policy) 0)
+                 (le (sea-p-maximum-age policy) 255))))))) 1 0))
+
+    (defn sea-endorsement
+        (witness source time lens candidate push witnessed-at)
+        (list witness source time lens candidate push witnessed-at))
+    (defn sea-e-witness (endorsement) (nth endorsement 0))
+    (defn sea-e-source (endorsement) (nth endorsement 1))
+    (defn sea-e-time (endorsement) (nth endorsement 2))
+    (defn sea-e-lens (endorsement) (nth endorsement 3))
+    (defn sea-e-candidate (endorsement) (nth endorsement 4))
+    (defn sea-e-push (endorsement) (nth endorsement 5))
+    (defn sea-e-witnessed-at (endorsement) (nth endorsement 6))
+
+    (defn sea-endorsement-valid? (endorsement)
+        (if (and (eq (len endorsement) 7)
+            (and (ge (sea-e-witness endorsement) 2)
+            (and (ge (sea-e-source endorsement) 2)
+            (and (eq (cwi-time? (sea-e-time endorsement)) 1)
+            (and (eq (cwi-lens? (sea-e-lens endorsement)) 1)
+            (and (eq (slc-bit? (sea-e-candidate endorsement)) 1)
+            (and (ge (sea-e-push endorsement) 0)
+                 (eq (cwi-time?
+                        (sea-e-witnessed-at endorsement)) 1)))))))) 1 0))
+    (defn sea-endorsements-valid? (endorsements)
+        (if (eq (len endorsements) 0) 1
+            (if (eq (sea-endorsement-valid? (head endorsements)) 1)
+                (sea-endorsements-valid? (tail endorsements))
+                0)))
+
+    (defn sea-fresh? (endorsement now maximum-age)
+        (if (and (le (sea-e-witnessed-at endorsement) now)
+                 (le now (add (sea-e-witnessed-at endorsement)
+                              maximum-age))) 1 0))
+    (defn sea-eligible? (endorsement offered policy)
+        (if (and (eq (cwi-member-int?
+                        (sea-e-witness endorsement)
+                        (sea-p-allowed policy)) 1)
+                 (not (eq (sea-e-witness endorsement)
+                          (slc-r-source offered)))) 1 0))
+    (defn sea-same-context? (endorsement offered)
+        (if (and (eq (sea-e-source endorsement)
+                     (slc-r-source offered))
+            (and (eq (sea-e-time endorsement)
+                     (slc-r-time offered))
+                 (eq (slc-lens-eq?
+                        (sea-e-lens endorsement)
+                        (slc-r-lens offered)) 1))) 1 0))
+    (defn sea-exact? (endorsement offered)
+        (if (and (eq (sea-same-context? endorsement offered) 1)
+            (and (eq (sea-e-candidate endorsement)
+                     (slc-r-candidate offered))
+                 (eq (sea-e-push endorsement)
+                     (slc-r-push offered)))) 1 0))
+    (defn sea-contradicts? (endorsement offered)
+        (if (and (eq (sea-same-context? endorsement offered) 1)
+                 (not (and
+                    (eq (sea-e-candidate endorsement)
+                        (slc-r-candidate offered))
+                    (eq (sea-e-push endorsement)
+                        (slc-r-push offered))))) 1 0))
+
+    (defn sea-distinct-fresh-loop
+        (endorsements offered policy now seen count)
+        (if (eq (len endorsements) 0) count
+            (do
+                (let endorsement (head endorsements))
+                (let witness (sea-e-witness endorsement))
+                (let counts
+                    (and (eq (sea-eligible?
+                                endorsement offered policy) 1)
+                    (and (eq (sea-fresh? endorsement now
+                                (sea-p-maximum-age policy)) 1)
+                    (and (eq (sea-exact? endorsement offered) 1)
+                         (eq (cwi-member-int? witness seen) 0)))))
+                (sea-distinct-fresh-loop
+                    (tail endorsements) offered policy now
+                    (if counts (cons witness seen) seen)
+                    (if counts (add count 1) count)))))
+    (defn sea-distinct-fresh-count
+        (endorsements offered policy now)
+        (sea-distinct-fresh-loop
+            endorsements offered policy now (list) 0))
+
+    (defn sea-exact-count (endorsements offered policy)
+        (if (eq (len endorsements) 0) 0
+            (do
+                (let endorsement (head endorsements))
+                (add
+                    (if (and (eq (sea-eligible?
+                                    endorsement offered policy) 1)
+                             (eq (sea-exact?
+                                    endorsement offered) 1)) 1 0)
+                    (sea-exact-count
+                        (tail endorsements) offered policy)))))
+    (defn sea-stale-exact-count
+        (endorsements offered policy now)
+        (if (eq (len endorsements) 0) 0
+            (do
+                (let endorsement (head endorsements))
+                (add
+                    (if (and (eq (sea-eligible?
+                                    endorsement offered policy) 1)
+                        (and (eq (sea-exact?
+                                    endorsement offered) 1)
+                             (eq (sea-fresh? endorsement now
+                                    (sea-p-maximum-age policy)) 0))) 1 0)
+                    (sea-stale-exact-count
+                        (tail endorsements) offered policy now)))))
+    (defn sea-fresh-equivocator
+        (endorsements offered policy now)
+        (if (eq (len endorsements) 0) 0
+            (do
+                (let endorsement (head endorsements))
+                (if (and (eq (sea-eligible?
+                                endorsement offered policy) 1)
+                    (and (eq (sea-fresh? endorsement now
+                                (sea-p-maximum-age policy)) 1)
+                         (eq (sea-contradicts?
+                                endorsement offered) 1)))
+                    (sea-e-witness endorsement)
+                    (sea-fresh-equivocator
+                        (tail endorsements) offered policy now)))))
+
+    (defn sea-outcome
+        (admitted reason fresh-distinct required
+            exact stale-exact equivocator)
+        (list admitted reason fresh-distinct required
+            exact stale-exact equivocator))
+    (defn sea-o-admitted (outcome) (nth outcome 0))
+    (defn sea-o-reason (outcome) (nth outcome 1))
+    (defn sea-o-fresh-distinct (outcome) (nth outcome 2))
+    (defn sea-o-required (outcome) (nth outcome 3))
+    (defn sea-o-exact (outcome) (nth outcome 4))
+    (defn sea-o-stale-exact (outcome) (nth outcome 5))
+    (defn sea-o-equivocator (outcome) (nth outcome 6))
+    (defn sea-not-required ()
+        (sea-outcome 1 4 0 0 0 0 0))
+
+    (defn sea-admit (offered endorsements policy now)
+        (if (or (eq (slc-row-valid? offered) 0)
+            (or (eq (sea-policy-valid? policy) 0)
+            (or (eq (cwi-time? now) 0)
+                (eq (sea-endorsements-valid? endorsements) 0))))
+            (sea-outcome 0 1 0 0 0 0 0)
+            (do
+                (let fresh-distinct
+                    (sea-distinct-fresh-count
+                        endorsements offered policy now))
+                (let exact
+                    (sea-exact-count endorsements offered policy))
+                (let stale-exact
+                    (sea-stale-exact-count
+                        endorsements offered policy now))
+                (let equivocator
+                    (sea-fresh-equivocator
+                        endorsements offered policy now))
+                (if (gt equivocator 0)
+                    (sea-outcome 0 3 fresh-distinct
+                        (sea-p-minimum policy) exact stale-exact equivocator)
+                    (if (ge fresh-distinct (sea-p-minimum policy))
+                        (sea-outcome 1 0 fresh-distinct
+                            (sea-p-minimum policy) exact stale-exact 0)
+                        (sea-outcome 0 2 fresh-distinct
+                            (sea-p-minimum policy) exact stale-exact 0))))))
+
+    0)

@@ -1,0 +1,88 @@
+; real-gguf-generate.fk — the last seam: REAL GGUF weights enter the autoregressive generation loop.
+; llama-generate.fk closed the loop over weights that were band FIXTURES; this cell closes it over
+; weights carved out of an actual llama3.2:3b .gguf on disk, so the token ids that come out are
+; produced by the file ollama serves rather than by a hand-written list.
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/gguf-read.fk form-stdlib/q4k-dequant.fk form-stdlib/q6k-dequant.fk form-stdlib/weight-load.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/gqa-attn.fk form-stdlib/llama-block.fk form-stdlib/llama-gqa-block.fk form-stdlib/kv-cache.fk form-stdlib/kv-llama-block.fk form-stdlib/kv-gqa-llama-block.fk form-stdlib/multi-layer-stack.fk form-stdlib/gqa-multi-layer-stack.fk form-stdlib/greedy-decode.fk form-stdlib/llama-generate.fk
+;
+; WHY A NEW CELL AND NOT block-join.fk. block-join's bj-row-n / bj-matrix reach weight index i with
+; (wl-q6k-at bytes off i), and wl-q6k-at carves ql/qh/scales out of the ONE superblock at `off`. Past
+; i=255 that index leaves the block and q6k-at returns -0 — silently, with no diagnostic. So bj-matrix
+; is only sound for dim*dim <= 256; every larger matrix it builds is zeros after the first 256 weights
+; and still prints a green verdict. A real tensor row is 3072 weights = 12 superblocks, so the loop
+; needs an accessor that STRIDES: rgg-weights below walks superblock by superblock (each a single
+; wl-load-q6k, the proven 256-at-a-time unpack) and concatenates. Dequant happens ONCE into an f32
+; list; the generation loop that follows is pure list math over already-dequantized weights, which is
+; also what a serving implementation does — you do not re-unpack the file per token.
+;
+; Kin: weight-load.fk (wl-load-q6k — the proven superblock unpack this strides over), gguf-read.fk
+; (gg-ti-dataoff — where a named tensor's bytes begin), llama-generate.fk (lg-generate-cached — the
+; loop this feeds), block-join.fk (the within-one-superblock join this generalizes).
+;
+; Host IO stays outside: a carrier hands in `bytes` (a byte list from read_file_slice + str_byte_at).
+; Every structural and numeric decision below is Form.
+;
+; Proven by: form-stdlib/tests/real-gguf-generate-band.fk
+
+(do
+    ; --- list carving: first n, and all-but-first n (the flat-weight-list cursor) ---
+    (defn rgg-take (xs n) (if (eq n 0) (empty) (cons (head xs) (rgg-take (tail xs) (sub n 1)))))
+    (defn rgg-drop (xs n) (if (eq n 0) xs (rgg-drop (tail xs) (sub n 1))))
+    (defn rgg-append (a b) (if (eq (len a) 0) b (cons (head a) (rgg-append (tail a) b))))
+
+    ; --- STRIDE the superblocks: `n` consecutive Q6_K blocks from `off` -> 256*n dequantized f32.
+    ;     Each block is one proven wl-load-q6k; the concatenation is what crosses the i=255 wall that
+    ;     wl-q6k-at cannot. Q6_K block stride is 210 bytes (ql 128 · qh 64 · scales 16 · d f16 2). ---
+    (defn rgg-q6k-stride () 210)
+    (defn rgg-weights (bytes off n)
+        (if (eq n 0) (empty)
+            (rgg-append (wl-load-q6k bytes off)
+                        (rgg-weights bytes (add off (rgg-q6k-stride)) (sub n 1)))))
+
+    ; --- how many superblocks cover `n` weights (ceiling division by 256, integer arithmetic only) ---
+    (defn rgg-blocks-for (n) (div (add n 255) 256))
+
+    ; --- the first n dequantized weights from a Q6_K tensor at `off` ---
+    (defn rgg-flat (bytes off n) (rgg-take (rgg-weights bytes off (rgg-blocks-for n)) n))
+
+    ; --- a rows×cols matrix carved from a flat weight list, row-major (the GGUF tensor layout) ---
+    (defn rgg-mat-from (ws rows cols r)
+        (if (eq r rows) (empty)
+            (cons (rgg-take ws cols) (rgg-mat-from (rgg-drop ws cols) rows cols (add r 1)))))
+    (defn rgg-mat (ws rows cols) (rgg-mat-from ws rows cols 0))
+
+    ; --- REAL F32 norm gains. attn_norm / ffn_norm / output_norm are stored F32 (not quantized), so a
+    ;     gain vector is n little-endian 4-byte floats decoded by f16-decode's ONE parameterized recipe
+    ;     at (eb 8, mb 23) — f32 is the same field-extraction as f16, different widths. ---
+    (defn rgg-f32 (bytes off) (fd-value (gg-le bytes off 4) 8 23))
+    (defn rgg-gain (bytes off n)
+        (if (eq n 0) (empty)
+            (cons (rgg-f32 bytes off) (rgg-gain bytes (add off 4) (sub n 1)))))
+
+    ; --- one llama layer assembled from a flat real-weight list: the (g1 wq wk wv wo g2 wg wu wd)
+    ;     bundle llama-block.fk / llama-gqa-block.fk consume. Each projection takes dim*dim weights
+    ;     off the cursor in the order the block reads them. ---
+    (defn rgg-layer (ws g1 g2 dim)
+        (list g1
+              (rgg-mat (rgg-drop ws (mul 0 (mul dim dim))) dim dim)
+              (rgg-mat (rgg-drop ws (mul 1 (mul dim dim))) dim dim)
+              (rgg-mat (rgg-drop ws (mul 2 (mul dim dim))) dim dim)
+              (rgg-mat (rgg-drop ws (mul 3 (mul dim dim))) dim dim)
+              g2
+              (rgg-mat (rgg-drop ws (mul 4 (mul dim dim))) dim dim)
+              (rgg-mat (rgg-drop ws (mul 5 (mul dim dim))) dim dim)
+              (rgg-mat (rgg-drop ws (mul 6 (mul dim dim))) dim dim)))
+    ; weights one layer consumes at width dim (4 attention projections + 3 FFN projections)
+    (defn rgg-layer-weights (dim) (mul 7 (mul dim dim)))
+
+    ; --- the tied embed/unembed table: V rows of `dim` real token_embd weights ---
+    (defn rgg-tok (ws v dim) (rgg-mat ws v dim))
+
+    ; --- the generation loop over REAL weights. Same lg-generate-cached the fixture band proves; the
+    ;     only change is that every weight came off the disk. ids in -> ids + `steps` token ids out. ---
+    (defn rgg-generate (ids tok layers gf eps scale n_q n_kv HD c steps)
+        (lg-generate-cached ids tok layers gf tok eps scale n_q n_kv HD c steps))
+    (defn rgg-generate-recompute (ids tok layers gf eps scale n_q n_kv HD c steps)
+        (lg-generate ids tok layers gf tok eps scale n_q n_kv HD c steps))
+
+    0)

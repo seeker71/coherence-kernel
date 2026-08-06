@@ -1,0 +1,152 @@
+; concept-nl-semantic-13.fk — indexed Form access to 10k concept-aligned labels.
+;
+; Data is a pinned 10,000-row TSV. A generated 10,001-offset index gives the
+; byte interval of every row. The API takes both values explicitly, keeping
+; parsing/detection pure; a live carrier may obtain the TSV with read_file.
+;
+; English is the exact frequency-model anchor. Other mapped labels are
+; automatically extracted OMW evidence joined through PWN 3.1 sense keys to
+; PWN 3.0 synsets, therefore state=mapped-unreviewed. Empty cells are absent.
+; There is no seed fallback and no claim that the first lemma is preferred,
+; canonical, fluent, or reviewed.
+; witnessed: 2026-07-18 -> 1023 four-way; 8191 live fkwu
+;
+; preludes: form/form-stdlib/core.fk cognition/concept-nl-semantic-13-metadata.fk cognition/concept-nl-semantic-13-offsets.fk
+(do
+  (defn cnl13-anchor-count () 10000)
+  (defn cnl13-data-path () "cognition/concept-nl-semantic-13-omw.tsv")
+  (defn cnl13-source-codes-path () "cognition/concept-nl-semantic-13-sources.dat")
+  (defn cnl13-locale-codes ()
+    (list "en" "id" "es" "fr" "pt-br" "sw" "de" "ru" "zh" "ja" "ar" "hi" "tr"))
+
+  ; Column 0 is the PWN 3.0 offset-pos synset; locale labels occupy 1..13.
+  (defn cnl13-locale-col (code)
+    (if (str_eq code "en") 1
+      (if (str_eq code "id") 2
+        (if (str_eq code "es") 3
+          (if (str_eq code "fr") 4
+            (if (str_eq code "pt-br") 5
+              (if (str_eq code "sw") 6
+                (if (str_eq code "de") 7
+                  (if (str_eq code "ru") 8
+                    (if (str_eq code "zh") 9
+                      (if (str_eq code "ja") 10
+                        (if (str_eq code "ar") 11
+                          (if (str_eq code "hi") 12
+                            (if (str_eq code "tr") 13 -1))))))))))))))
+
+  (defn cnl13-row-line-from-tail (data offset-tail)
+    (substring data (head offset-tail) (sub (head (tail offset-tail)) 1)))
+  (defn cnl13-offset-tail (offsets index)
+    (if (eq index 0) offsets (cnl13-offset-tail (tail offsets) (sub index 1))))
+  (defn cnl13-row-line (data offsets index)
+    (if (or (lt index 0) (ge index (cnl13-anchor-count))) ""
+      (cnl13-row-line-from-tail data (cnl13-offset-tail offsets index))))
+
+  ; Extract one tab field from an already indexed row, preserving empty cells.
+  (defn cnl13-field-go (line target col start i)
+    (if (ge i (str_len line))
+      (if (eq col target) (substring line start i) "")
+      (if (eq (str_byte_at line i) 9)
+        (if (eq col target) (substring line start i)
+          (cnl13-field-go line target (add col 1) (add i 1) (add i 1)))
+        (cnl13-field-go line target col start (add i 1)))))
+  (defn cnl13-field (line column) (cnl13-field-go line column 0 0 0))
+  (defn cnl13-anchor-at (data offsets index)
+    (cnl13-field (cnl13-row-line data offsets index) 0))
+  (defn cnl13-label-at (data offsets index code)
+    (do (let col (cnl13-locale-col code))
+        (if (lt col 1) "" (cnl13-field (cnl13-row-line data offsets index) col))))
+
+  (defn cnl13-label-state (code label)
+    (if (lt (cnl13-locale-col code) 1) "unknown-locale"
+      (if (str_eq label "") "absent" "mapped-unreviewed")))
+  ; lookup = (index synset locale label state)
+  (defn cnl13-lookup (data offsets index code)
+    (do (let label (cnl13-label-at data offsets index code))
+        (list index (cnl13-anchor-at data offsets index) code label
+              (cnl13-label-state code label))))
+  (defn cnl13-generate (data offsets index code)
+    (cnl13-label-at data offsets index code))
+
+  ; One fixed provenance byte per concept/lens cell, row-major:
+  ; F = frequency anchor, W = Wiktionary OMW, D = dedicated language WordNet,
+  ; C = CLDR, G = Google machine translation (unreviewed), 0 = absent.
+  ; The source matrix is separate from labels so old lookup/generation callers
+  ; keep their exact shape while a stricter caller can demand attribution.
+  (defn cnl13-source-code-at (sources index code)
+    (do (let col (cnl13-locale-col code))
+        (if (or (lt index 0) (ge index (cnl13-anchor-count))) "0"
+          (if (lt col 1) "0"
+            (substring sources (add (mul index 13) (sub col 1))
+                               (add (mul index 13) col))))))
+  (defn cnl13-source-name (source-code)
+    (if (str_eq source-code "F") "frequency-anchor"
+      (if (str_eq source-code "W") "wiktionary-omw"
+        (if (str_eq source-code "D") "dedicated-wordnet"
+          (if (str_eq source-code "C") "cldr-wordnet"
+            (if (str_eq source-code "G") "google-translate-machine" "absent"))))))
+  (defn cnl13-sourced-state (source-code)
+    (if (str_eq source-code "F") "frequency-observed"
+      (if (str_eq source-code "G") "machine-translated-unreviewed"
+        (if (str_eq source-code "0") "absent" "mapped-unreviewed"))))
+  ; sourced lookup = ordinary five-field lookup + exact source name/code.
+  (defn cnl13-lookup-sourced (data offsets sources index code)
+    (do (let base (cnl13-lookup data offsets index code))
+        (let source-code (cnl13-source-code-at sources index code))
+        (list (nth base 0) (nth base 1) (nth base 2) (nth base 3)
+              (cnl13-sourced-state source-code)
+              (cnl13-source-name source-code) source-code)))
+  (defn cnl13-count-source-go (sources i wanted count)
+    (if (eq i (str_len sources)) count
+      (cnl13-count-source-go sources (add i 1) wanted
+        (if (str_eq (substring sources i (add i 1)) wanted)
+          (add count 1) count))))
+  (defn cnl13-count-source (sources wanted)
+    (cnl13-count-source-go sources 0 wanted 0))
+
+  ; Exact label detection returns the first matching anchor. Multiple concepts
+  ; may legitimately share a lemma; callers get the witnessed first-match rule.
+  (defn cnl13-detect-first-go (data offset-tail col code label index)
+    (if (ge index (cnl13-anchor-count)) (empty)
+      (do (let line (cnl13-row-line-from-tail data offset-tail))
+          (let candidate (cnl13-field line col))
+          (if (and (not (str_eq candidate "")) (str_eq candidate label))
+            (list index (cnl13-field line 0) code candidate "mapped-unreviewed")
+            (cnl13-detect-first-go data (tail offset-tail) col code label (add index 1))))))
+  (defn cnl13-detect-first (data offsets code label)
+    (do (let col (cnl13-locale-col code))
+        (if (or (lt col 1) (str_eq label "")) (empty)
+          (cnl13-detect-first-go data offsets col code label 0))))
+
+  ; Recompute exact mapped coverage from the pinned rows, using the index as a
+  ; sequential cursor so the 10k walk stays linear rather than repeated nth.
+  (defn cnl13-count-present-go (data offset-tail col index count)
+    (if (ge index (cnl13-anchor-count)) count
+      (do (let label (cnl13-field (cnl13-row-line-from-tail data offset-tail) col))
+          (cnl13-count-present-go data (tail offset-tail) col (add index 1)
+            (if (str_eq label "") count (add count 1))))))
+  (defn cnl13-count-present (data offsets code)
+    (do (let col (cnl13-locale-col code))
+        (if (lt col 1) 0 (cnl13-count-present-go data offsets col 0 0))))
+
+  (defn cnl13-meta-find-go (rows code)
+    (if (eq (len rows) 0) (empty)
+      (if (str_eq (nth (head rows) 0) code) (head rows)
+        (cnl13-meta-find-go (tail rows) code))))
+  (defn cnl13-locale-meta (code)
+    (cnl13-meta-find-go (cnl13-locale-meta-rows) code))
+  (defn cnl13-meta-present (row) (nth row 2))
+  (defn cnl13-meta-absent (row) (nth row 3))
+  (defn cnl13-meta-source-hash (row) (nth row 4))
+  ; reviewed stays zero until a reviewed source/review receipt is ingested.
+  (defn cnl13-review-summary (code)
+    (do (let row (cnl13-locale-meta code))
+        (if (eq (len row) 0) (list 0 0 0)
+          (list (cnl13-meta-present row) (cnl13-meta-absent row) 0))))
+
+  (defn cnl13-total-present-go (rows total)
+    (if (eq (len rows) 0) total
+      (cnl13-total-present-go (tail rows) (add total (cnl13-meta-present (head rows))))))
+  (defn cnl13-total-present () (cnl13-total-present-go (cnl13-locale-meta-rows) 0))
+)

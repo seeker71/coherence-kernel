@@ -1,0 +1,118 @@
+; language-neutral-symbol-identity.fk — labels are evidence, never identity.
+;
+; A canonical symbol is derived only from its numeric composition.  A surface
+; spelling can resolve to that symbol when its plane and relation agree, but
+; changing or adding spellings cannot change the symbol's identity.
+;
+; The text-plane helpers keep provenance/licence/front-matter bytes outside
+; lexical evidence.  They do not claim that lexical frequency is semantic
+; frequency; callers must carry that claim as `nothing` until context observes it.
+
+(do
+  ; Content-addressable slice coordinates: package/level/type/instance.
+  ; Each coordinate has an independent decimal field; labels never enter.
+  (defn lnsi-node (package level type instance)
+    (add (mul package 1000000000)
+      (add (mul level 1000000) (add (mul type 1000) instance))))
+
+  ; Alias row: [plane, relation, dialect, surface, canonical-node].
+  ; plane 1 = natural language; plane 2 = programming language.
+  (defn lnsi-alias (plane relation dialect surface node)
+    (list plane relation dialect surface node))
+  (defn lnsi-resolve (aliases plane relation dialect surface)
+    (if (eq (len aliases) 0) (nothing)
+      (do (let a (head aliases))
+        (if (and (eq (nth a 0) plane)
+          (and (eq (nth a 1) relation)
+          (and (eq (nth a 2) dialect) (str_eq (nth a 3) surface))))
+          (nth a 4)
+          (lnsi-resolve (tail aliases) plane relation dialect surface)))))
+
+  (defn lnsi-fold (b) (if (and (ge b 65) (le b 90)) (add b 32) b))
+  (defn lnsi-match (s i p j)
+    (if (ge j (str_len p)) 1
+      (if (ge (add i j) (str_len s)) 0
+        (if (eq (lnsi-fold (str_byte_at s (add i j)))
+                (lnsi-fold (str_byte_at p j)))
+          (lnsi-match s i p (add j 1)) 0))))
+  (defn lnsi-find (s p i)
+    (if (gt (add i (str_len p)) (str_len s)) -1
+      (if (eq (lnsi-match s i p 0) 1) i (lnsi-find s p (add i 1)))))
+  (defn lnsi-count-sub-loop (s p i n)
+    (if (gt (add i (str_len p)) (str_len s)) n
+      (if (eq (lnsi-match s i p 0) 1)
+        (lnsi-count-sub-loop s p (add i (str_len p)) (add n 1))
+        (lnsi-count-sub-loop s p (add i 1) n))))
+  (defn lnsi-count-sub (s p) (lnsi-count-sub-loop s p 0 0))
+
+  ; UTF-8 non-ASCII bytes remain part of a surface token. This makes exact
+  ; `santa` distinct from inflected/compounded `santah` and keeps IAST bytes.
+  (defn lnsi-word-byte? (b)
+    (if (or (and (ge b 48) (le b 57))
+      (or (and (ge b 65) (le b 90))
+      (or (and (ge b 97) (le b 122)) (ge b 128)))) 1 0))
+  (defn lnsi-exact-at? (s p i)
+    (if (eq (lnsi-match s i p 0) 0) 0
+      (do (let end (add i (str_len p)))
+        (let left-ok (if (eq i 0) 1
+          (if (eq (lnsi-word-byte? (str_byte_at s (sub i 1))) 0) 1 0)))
+        (let right-ok (if (ge end (str_len s)) 1
+          (if (eq (lnsi-word-byte? (str_byte_at s end)) 0) 1 0)))
+        (if (and (eq left-ok 1) (eq right-ok 1)) 1 0))))
+  (defn lnsi-count-exact-loop (s p i n)
+    (if (gt (add i (str_len p)) (str_len s)) n
+      (if (eq (lnsi-exact-at? s p i) 1)
+        (lnsi-count-exact-loop s p (add i (str_len p)) (add n 1))
+        (lnsi-count-exact-loop s p (add i 1) n))))
+  (defn lnsi-count-exact (s p) (lnsi-count-exact-loop s p 0 0))
+
+  ; Range counting is the corpus-safe plane: it observes the source in place
+  ; instead of copying a multi-megabyte body through repeated concatenation.
+  (defn lnsi-count-exact-range-loop (s p i end n)
+    (if (gt (add i (str_len p)) end) n
+      (if (eq (lnsi-exact-at? s p i) 1)
+        (lnsi-count-exact-range-loop s p (add i (str_len p)) end (add n 1))
+        (lnsi-count-exact-range-loop s p (add i 1) end n))))
+  (defn lnsi-count-exact-range (s p range)
+    (lnsi-count-exact-range-loop s p (nth range 0) (nth range 1) 0))
+  (defn lnsi-count-sub-range-loop (s p i end n)
+    (if (gt (add i (str_len p)) end) n
+      (if (eq (lnsi-match s i p 0) 1)
+        (lnsi-count-sub-range-loop s p (add i (str_len p)) end (add n 1))
+        (lnsi-count-sub-range-loop s p (add i 1) end n))))
+  (defn lnsi-count-sub-range (s p range)
+    (lnsi-count-sub-range-loop s p (nth range 0) (nth range 1) 0))
+
+  (defn lnsi-slice-loop (s i end acc)
+    (if (ge i end) acc
+      (lnsi-slice-loop s (add i 1) end
+        (str_concat acc (byte_to_str (str_byte_at s i))))))
+  (defn lnsi-slice (s start end)
+    (if (or (lt start 0) (lt end start)) "" (lnsi-slice-loop s start end "")))
+
+  ; TEI semantic plane: only <body> descendants, never teiHeader/licence.
+  (defn lnsi-tei-body (s)
+    (do (let open (lnsi-find s "<body" 0))
+      (let start (if (lt open 0) -1 (lnsi-find s ">" open)))
+      (let end (if (lt start 0) -1 (lnsi-find s "</body>" (add start 1))))
+      (if (or (lt start 0) (lt end 0)) "" (lnsi-slice s (add start 1) end))))
+
+  (defn lnsi-tei-body-range (s)
+    (do (let open (lnsi-find s "<body" 0))
+      (let start (if (lt open 0) -1 (lnsi-find s ">" open)))
+      (let end (if (lt start 0) -1 (lnsi-find s "</body>" (add start 1))))
+      (if (or (lt start 0) (lt end 0)) (list 0 0) (list (add start 1) end))))
+
+  ; USFM semantic plane: chapter/verse records, excluding book front matter.
+  ; Inline footnotes remain provenance in this narrow slice; none of the two
+  ; monitored Psalm aliases occur in those notes, which the witness checks by
+  ; exact content counts. A general USFM note-stripper is a separate layer.
+  (defn lnsi-usfm-scripture (s)
+    (do (let start (lnsi-find s "\\c 1" 0))
+      (if (lt start 0) "" (lnsi-slice s start (str_len s)))))
+
+  (defn lnsi-usfm-scripture-range (s)
+    (do (let start (lnsi-find s "\\c 1" 0))
+      (if (lt start 0) (list 0 0) (list start (str_len s)))))
+
+  0)

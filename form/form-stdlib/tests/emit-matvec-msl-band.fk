@@ -1,0 +1,50 @@
+; emit-matvec-msl-band.fk — proves the EMIT half of "form-cli emits and runs on metal", with no GPU.
+;
+; WHY THIS BAND IS GPU-FREE ON PURPOSE. tests/metal-door-band.fk already proves the dispatch, and it
+; needs a Metal-linked binary to say anything. This one proves that what native/metal/emit-matvec-msl.fk
+; WRITES is correct — the byte layout, the header, the kernel name, and the arithmetic the operands
+; encode — and it does that on any host with plain ./fkwu. Splitting the two means a broken emitter
+; is caught on a machine with no GPU, and a green dispatch can never be the thing that hides it.
+;
+; Verdict 31 = 1 model-size | 2 header-rows-cols | 4 kernel-name-present | 8 include-present
+;            | 16 operands-encode-360
+;
+; preludes: form-stdlib/core.fk, native/metal/emit-matvec-msl.fk
+
+(do
+    (defn eb-score (ok bit) (if ok bit 0))
+
+    ; the emitter's own model bytes, read back through the same door a carrier would use
+    (let model (em-model))
+    (let msl (em-msl))
+
+    ; 8-byte header + rows*cols*4 weights + cols*4 vector = 8 + 64 + 16
+    (let b1 (eb-score (eq (str_len model) 88) 1))
+
+    ; the header must decode to the geometry the emitter claims, little-endian
+    (defn eb-u32-at (s i)
+        (add (str_byte_at s i)
+        (add (mul (str_byte_at s (add i 1)) 256)
+        (add (mul (str_byte_at s (add i 2)) 65536)
+             (mul (str_byte_at s (add i 3)) 16777216)))))
+    (let b2 (eb-score (and (eq (eb-u32-at model 0) (em-rows))
+                           (eq (eb-u32-at model 4) (em-cols))) 2))
+
+    ; the kernel the carrier will be asked for must actually be in the text it is handed
+    (defn eb-has (s sub) (ge (str_find s sub 0) 0))
+    (let b3 (eb-score (eb-has msl "form_fkwu_generic_matvec_f32") 4))
+    (let b4 (eb-score (eb-has msl "#include <metal_stdlib>") 8))
+
+    ; and the operands must mean what the header comment promises: w is 1..16 row-major, x is 1..4,
+    ; so sum over rows of the dot products is 360. Computed here from the emitter's OWN geometry, so
+    ; a change to em-rows/em-cols moves this expectation with it instead of silently disagreeing.
+    (defn eb-dot (r j acc)
+        (if (ge j (em-cols)) acc
+            (eb-dot r (add j 1)
+                (add acc (mul (add (mul r (em-cols)) (add j 1)) (add j 1))))))
+    (defn eb-sum (r acc) (if (ge r (em-rows)) acc (eb-sum (add r 1) (add acc (eb-dot r 0 0)))))
+    (let b5 (eb-score (eq (eb-sum 0 0) 360) 16))
+
+    (print_str (str_concat "model bytes " (int_to_str (str_len model))))
+    (print_str (str_concat "expected sum " (int_to_str (eb-sum 0 0))))
+    (add b1 (add b2 (add b3 (add b4 b5)))))

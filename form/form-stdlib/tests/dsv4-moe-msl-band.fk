@@ -1,0 +1,85 @@
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/mla-attn.fk form-stdlib/dsv4-hc.fk form-stdlib/dsv4-forward.fk form-stdlib/dsv4-router-msl.fk form-stdlib/dsv4-moe-msl.fk form-stdlib/dsv4-moe-demo.fk
+;
+; dsv4-moe-msl-band — the DeepSeek-V4-Flash routed-MoE, read back into Form and falsified WITHOUT a GPU.
+; The GPU witness (metal_moe_gpu.sh) proves the emitted kernels agree with the recipe bit-close; this band
+; proves the two things a GPU cannot: (a) the routing/fold MEANING the kernels transcribe is the proven CPU
+; recipe (dsv4-forward.fk, band 63) at these toy dims, pinned to literal answers a mutation must break; and
+; (b) the two asymmetries the stone rests on are LOAD-BEARING — weighting by the biased score instead of the
+; unbiased prob is a different answer (bit 4), and the clamp actually changes the fold (bit 8). Verdict 63.
+;
+; APORON — the declared radius (read before the number). This band is fp64, toy dims (E=8, ne=4, nused=2,
+; ff=6), invented weights from dsv4-forward.fk's generator. It does NOT touch the GPU, the real dims (256
+; experts top-8, E=4096), the quantised expert weights, or whole-model residency. It proves the MEANING and
+; the falsifiers; metal_moe_gpu.sh proves the f32 kernels reproduce that meaning.
+;
+;   bit  1  ROUTER PINNED: dr-select == [0,3] (recipe cons order, 2nd-best at head) and dr-weights ==
+;           [0.7813826745438595, 0.7186173254561405] within 1e-12 — the sqrt(softplus)/biased-select/
+;           unbiased-weight/floored-scale router, to the digit.
+;   bit  2  SUM SANE + NONZERO: sum(dr-weights) == wscale (1.5) within 1e-9 and every weight > 1e-3 — an
+;           all-zero router (edgedrop/zerobirth) would sum to 0 and is refused.
+;   bit  4  BIAS ASYMMETRY LOAD-BEARING: dr-weights differs from dr-weights-biased by > 1e-3. If the kernel
+;           weighted by (probs+bias) the answer would move — the bias-in/weight-out split is not decorative.
+;   bit  8  CLAMP LOAD-BEARING: dm-mid(lim 0.9) differs from dm-mid-noclamp by > 1e-3 on the witness where
+;           gate0/up0 exceed lim. An unapplied clamp (edgedrop) is not a computed identity.
+;   bit 16  WHOLE FOLD PINNED: totalOn (routed MoE + shared, clamp active) reproduces its pinned fp64 vector
+;           within 1e-12 — the matvecs, the clamped SwiGLU, the weighted accumulate, and the shared add.
+;   bit 32  EMITTED TEXT WELL-FORMED: the unit has exactly one #include <metal_stdlib>, zero using-namespace,
+;           one dm_ spine (one float dm_ln), and all 5 kernels present — a dropped or duplicated kernel fails.
+
+(do
+  ; ---- diff / text helpers ----
+  (defn mb-vmax (a b)
+    (if (eq (len a) 0) 0.0
+        (do (let d (tn-abs (sub (head a) (head b))))
+            (let r (mb-vmax (tail a) (tail b)))
+            (if (gt d r) d r))))
+  (defn mb-min (xs best) (if (eq (len xs) 0) best (mb-min (tail xs) (if (lt (head xs) best) (head xs) best))))
+  (defn mb-count-from (h n from c)
+    (do (let i (str_find h n from)) (if (lt i 0) c (mb-count-from h n (add i 1) (add c 1)))))
+  (defn mb-count (h n) (mb-count-from h n 0 0))
+  (defn mb-has (h n) (if (lt (str_find h n 0) 0) 0 1))
+  ; int-list equality (for sel)
+  (defn mb-ieq (a b)
+    (if (eq (len a) 0) (if (eq (len b) 0) 1 0)
+        (if (eq (len b) 0) 0 (if (eq (head a) (head b)) (mb-ieq (tail a) (tail b)) 0))))
+
+  ; ---- fixture surfaces (from dsv4-moe-demo.fk) ----
+  (let probs (dmd-probs))
+  (let bias (dmd-bias))
+  (let k (dmd-nused))
+  (let ws (dmd-wscale))
+  (let sel (dr-select probs bias k))
+  (let wts (dr-weights probs bias k ws))
+  (let wtsB (dr-weights-biased probs bias k ws))
+
+  ; ---- pins (hand-verified via the fixture probe) ----
+  (let sel-ref (list 0 3))
+  (let wts-ref (list 0.7813826745438595 0.7186173254561405))
+  (let total-ref (list -0.10056275798667616 0.4448514864381977 -0.21951907795366324 0.3258951664712106
+                       -0.33847539792065023 -0.4644278008549896 0.04687074313651715 -0.09316820656090163))
+
+  ; --- bit 1: router pinned (selection order + weights) ---
+  (let c1 (if (eq (mb-ieq sel sel-ref) 1) (if (lt (mb-vmax wts wts-ref) 0.000000000001) 1 0) 0))
+  ; --- bit 2: sum == wscale, all weights nonzero ---
+  (let c2 (if (lt (tn-abs (sub (tn-sum wts) ws)) 0.000000001) (if (gt (mb-min wts 1000000.0) 0.001) 2 0) 0))
+  ; --- bit 4: bias asymmetry load-bearing ---
+  (let c4 (if (gt (mb-vmax wts wtsB) 0.001) 4 0))
+  ; --- bit 8: clamp load-bearing ---
+  (let m1 (dm-mid (dmd-gate0) (dmd-up0) (dmd-w0) (dmd-lim-on)))
+  (let m2 (dm-mid-noclamp (dmd-gate0) (dmd-up0) (dmd-w0)))
+  (let c8 (if (gt (mb-vmax m1 m2) 0.001) 8 0))
+  ; --- bit 16: whole fold pinned ---
+  (let c16 (if (lt (mb-vmax (dmd-total-on) total-ref) 0.000000000001) 16 0))
+  ; --- bit 32: emitted text well-formed ---
+  (let U (dsv4-moe-msl-unit))
+  (let hdr (mb-count U "#include <metal_stdlib>"))
+  (let usg (mb-count U "using namespace"))
+  (let spn (mb-count U "float dm_ln"))
+  (let kok (add (mb-has U "kernel void form_dsv4_matvec_f32")
+            (add (mb-has U "kernel void form_dsv4_swiglu_f32")
+            (add (mb-has U "kernel void form_dsv4_scale_f32")
+            (add (mb-has U "kernel void form_dsv4_axpy_f32")
+                 (mb-has U "kernel void form_dsv4_router_f32"))))))
+  (let c32 (if (eq hdr 1) (if (eq usg 0) (if (eq spn 1) (if (eq kok 5) 32 0) 0) 0) 0))
+
+  (add c1 (add c2 (add c4 (add c8 (add c16 c32))))))

@@ -1,0 +1,118 @@
+; concept-video-open-label-live.fk -- real photos through open 10k text sense.
+;
+; A generic Apple Vision carrier sees only opaque image paths and returns its
+; top twenty raw labels. Form scans the complete 10,000-row English surface,
+; retains all exact raw-label concepts above 100,000 ppm, and exposes ids plus
+; raw and text scores. Fixture metadata is used only after observation to score
+; nine positive targets and one deliberately difficult guitar target.
+;
+; Bottom-band occlusion and an 80% center crop are fresh carrier reruns. Their
+; target confidence checks are interventions, not synthetic identity channels.
+; This is open-label classification over the OS model, not detection boxes,
+; video tracking, Form-native learned weights, or 10k visual parity.
+;
+; preludes: form/form-stdlib/core.fk cognition/concept-text-detection-13-runtime.fk model/concept-video-open-label.fk
+
+(do
+  (defn cvoll-dir () "model/fixtures/concept-vision-real-life/")
+  (defn cvoll-bin () "/tmp/concept-video-open-label-classify")
+  ; fixture = slug, expected top-10k id, expected English surface, positive?
+  (defn cvoll-fixtures ()
+    (list
+      (list "airplane" 5209 "airplane" 1)
+      (list "banana" 4731 "banana" 1)
+      (list "bridge" 1520 "bridge" 1)
+      (list "cat" 1040 "cat" 1)
+      (list "coffee" 665 "coffee" 1)
+      (list "dog" 537 "dog" 1)
+      (list "pizza" 2093 "pizza" 1)
+      ; sunflower is not itself in the ranked 10k; visible flower is id 2304.
+      (list "sunflower" 2304 "flower" 1)
+      (list "train" 786 "train" 1)
+      (list "guitar" 2743 "guitar" 0)))
+  (defn cvoll-path (slug)
+    (str_concat (cvoll-dir) (str_concat slug ".jpg")))
+  (defn cvoll-band-path (slug) (str_concat "/tmp/cvoll-band-" (str_concat slug ".jpg")))
+  (defn cvoll-crop-path (slug) (str_concat "/tmp/cvoll-crop-" (str_concat slug ".jpg")))
+  (defn cvoll-compile ()
+    (host-exec (str_concat "swiftc -O presence/carriers/concept-video-vision-classify.swift -o "
+                 (str_concat (cvoll-bin) " >/dev/null 2>&1 && printf 1")) ""))
+  (defn cvoll-classify (path)
+    (host-exec (str_concat (cvoll-bin) (str_concat " " path)) ""))
+  (defn cvoll-transform (fixture)
+    (do (let slug (nth fixture 0))
+        (let source (cvoll-path slug))
+        (let band (host-exec (str_concat "ffmpeg -loglevel error -y -i "
+          (str_concat source (str_concat " -vf drawbox=x=0:y=ih-80:w=iw:h=80:color=magenta:t=fill -frames:v 1 "
+            (str_concat (cvoll-band-path slug) " >/dev/null 2>&1 && printf 1")))) ""))
+        (let crop (host-exec (str_concat "ffmpeg -loglevel error -y -i "
+          (str_concat source (str_concat " -vf crop=iw*0.8:ih*0.8:iw*0.1:ih*0.1 -frames:v 1 "
+            (str_concat (cvoll-crop-path slug) " >/dev/null 2>&1 && printf 1")))) ""))
+        (if (and (str_eq band "1") (str_eq crop "1")) 1 0)))
+  (defn cvoll-transform-all (fixtures count)
+    (if (eq (len fixtures) 0) count
+      (cvoll-transform-all (tail fixtures) (add count (cvoll-transform (head fixtures))))))
+
+  ; result = slug, expected id/surface/positive, expected raw confidences,
+  ;          complete-10k accepted rows, target present in original scan.
+  (defn cvoll-one (runtime fixture)
+    (do (let slug (nth fixture 0))
+        (let expected-id (nth fixture 1))
+        (let expected-label (nth fixture 2))
+        (let raw (cvoll-classify (cvoll-path slug)))
+        (let band-raw (cvoll-classify (cvoll-band-path slug)))
+        (let crop-raw (cvoll-classify (cvoll-crop-path slug)))
+        (let text-candidates (ctd13-runtime-detect-sentence runtime "en" raw))
+        (let accepted (cvol-observations raw text-candidates 100000))
+        (let present (cvol-target-present? accepted expected-id))
+        (list slug expected-id expected-label (nth fixture 3)
+          (cvol-confidence raw expected-label)
+          (cvol-confidence band-raw expected-label)
+          (cvol-confidence crop-raw expected-label)
+          accepted present raw)))
+  (defn cvoll-run-all (runtime fixtures)
+    (if (eq (len fixtures) 0) (empty)
+      (cons (cvoll-one runtime (head fixtures))
+            (cvoll-run-all runtime (tail fixtures)))))
+  (defn cvoll-positive-count (rows field)
+    (if (eq (len rows) 0) 0
+      (add (if (and (eq (nth (head rows) 3) 1)
+                    (gt (nth (head rows) field) 0)) 1 0)
+           (cvoll-positive-count (tail rows) field))))
+  (defn cvoll-negative-held? (rows)
+    (if (eq (len rows) 0) 0
+      (if (eq (nth (head rows) 3) 0)
+        (if (and (eq (nth (head rows) 4) 0)
+              (and (eq (nth (head rows) 5) 0) (eq (nth (head rows) 6) 0))) 1 0)
+        (cvoll-negative-held? (tail rows)))))
+  (defn cvoll-public-row (row)
+    (list (nth row 0) (nth row 1) (nth row 2) (nth row 3)
+      (list "target-confidence-ppm" (nth row 4) (nth row 5) (nth row 6))
+      (list "target-in-complete-10k-scan" (nth row 8))
+      (list "accepted-open-label-observations" (nth row 7))))
+  (defn cvoll-public-rows (rows)
+    (if (eq (len rows) 0) (empty)
+      (cons (cvoll-public-row (head rows)) (cvoll-public-rows (tail rows)))))
+
+  (defn concept-video-open-label-live-run ()
+    (do (let ready (if (str_eq (host-exec
+      "command -v swiftc >/dev/null && command -v ffmpeg >/dev/null && printf 1" "") "1") 1 0))
+      (let compiled (if (eq ready 1) (if (str_eq (cvoll-compile) "1") 1 0) 0))
+      (let fixtures (cvoll-fixtures))
+      (let transformed (if (eq compiled 1) (cvoll-transform-all fixtures 0) 0))
+      (let runtime (ctd13-runtime-open))
+      (let rows (if (eq transformed 10) (cvoll-run-all runtime fixtures) (empty)))
+      (list "concept-video-open-label-live"
+        (list "carrier" ready compiled "Apple-Vision-top20-content-only")
+        (list "fixtures" (len rows) "Wikimedia-Commons-real-photographs" "verified-hashes" 10)
+        (list "positive-targets"
+          (cvoll-positive-count rows 4) 9 "original"
+          (cvoll-positive-count rows 5) 9 "bottom-band"
+          (cvoll-positive-count rows 6) 9 "center-crop"
+          (cvoll-positive-count rows 8) 9 "complete-10k-scan")
+        (list "hard-negative-guitar-unnamed" (cvoll-negative-held? rows) 1)
+        (list "observations" (cvoll-public-rows rows))
+        (list "boundaries" "open-label-not-open-vocabulary-parity"
+          "complete-10k-text-scan" "no-boxes" "no-tracking" "rented-host-weights"))))
+
+  (concept-video-open-label-live-run))

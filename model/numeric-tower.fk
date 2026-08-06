@@ -1,0 +1,214 @@
+; numeric-tower.fk — STONE S9: the numeric tower (bignum / rational / complex) as
+; pure Form recipes COMPOSED over cells. No new kernel primitive; runtime/fkwu-uni.c
+; is untouched. preludes: form-stdlib/core.fk
+;
+; ── AXIOM DERIVATION (the four invariants of re-architecture-stones.form) ──
+;
+; axiom-grounded (axiom-1 + axiom-2):
+;   axiom-1 gives the BASE — the kernel's native machine integer, the atom every
+;   number in the tower resolves down to. axiom-2 gives COMPOSITION — a cell is a
+;   composition of children. The tower is nothing but axiom-2 composition over
+;   axiom-1 atoms:
+;     · a BIGNUM is a cell composing base-B digit-cells (a little-endian list of
+;       native integers, each in [0, B)) — arbitrary precision built ENTIRELY from
+;       composition, never a wider machine word.
+;     · a RATIONAL is a pair-cell (num den) — two composed children.
+;     · a COMPLEX is a pair-cell (re im) — two composed children.
+;   So every tower value is a theorem of "integers (axiom-1) under composition
+;   (axiom-2)", not a bolted-on numeric type. The digit / pair structure is the
+;   axiom-2 tree; the leaves are the axiom-1 integers.
+;
+; core-grounded:
+;   built only on the generic list/cell surface (list / cons / head / tail / len /
+;   nth) and the native integer ops (add sub mul div mod eq lt gt) — ZERO special
+;   cases in the kernel. The same reducer that walks any recipe walks these. No
+;   3-arg let / no append: only the pure-op surface every walker shares.
+;
+; observable:
+;   each op is an offer over cells that produces an ack-cell — bn-add OFFERS two
+;   digit-lists and ACKs a digit-list; rat-reduce OFFERS a pair and ACKs a reduced
+;   pair; cx-mul OFFERS two pairs and ACKs a pair. The carry/borrow/gcd walk is the
+;   trace the observe organ can read: every recursion step is an offer→ack.
+;
+; on-metal-native:
+;   proven via `fkwu --src` on the cc-seed (Mac observed) AND four-way through the
+;   minimal Go/Rust/TS walkers. No Go-as-runtime, no flatten, no clang.
+;
+; ── HARD GATE (proven, see model/tests/numeric-tower-band.fk) ──
+;   bn-add  99999999999999999999 + 1  → digit-list of 100000000000000000000
+;   rat-reduce  4/8                    → 1/2
+;   cx-mul  (1+2i)(3+4i)               → (-5, 10)
+
+; ===========================================================================
+; BIGNUM — arbitrary-precision NON-NEGATIVE integer.
+;   representation: little-endian list of base-B digits, each a native int in
+;   [0, B). B = 10000 (BN-BASE) — chosen so digit*digit < 10^8 stays inside the
+;   native integer for bn-mul, and so the decimal of a digit is at most 4 chars.
+;   The empty list () is the canonical ZERO; no leading-zero digit is ever kept.
+; ===========================================================================
+
+(defn BN-BASE () 10000)
+
+; bn-norm — strip trailing (most-significant) zero digit-cells so equal values
+; share one shape (content-addressing: 5 and 5+0*B are the SAME cell). Walks to
+; the end, dropping a top zero only when nothing non-zero rides above it.
+(defn bn-norm-go (ds rest)
+  (if (eq (len rest) 0)
+      (if (eq (head ds) 0) (list) (cons (head ds) (list)))
+      (cons (head ds) rest)))
+(defn bn-norm (ds)
+  (if (eq (len ds) 0) (list)
+      (bn-norm-go ds (bn-norm (tail ds)))))
+
+; bn-from-int — build a bignum from a native (non-negative) integer by repeated
+; div/mod against the base: the axiom-1 atom decomposed into axiom-2 digit-cells.
+(defn bn-from-int (n)
+  (if (eq n 0) (list)
+      (cons (mod n (BN-BASE)) (bn-from-int (div n (BN-BASE))))))
+
+; bn-add-c — core add with an incoming carry. Offers two digit-lists + a carry,
+; acks the sum digit-list. Each step: s = a0 + b0 + carry; emit (mod s B); recurse
+; with carry = (div s B). Terminates when both lists empty and carry is spent.
+; bn-emit — given a column sum s and the recursive tail-builder result, emit the
+; low digit and prepend (the shared offer→ack of every column).
+(defn bn-add-c (as bs carry)
+  (if (eq (len as) 0)
+      (if (eq (len bs) 0)
+          (if (eq carry 0) (list) (cons carry (list)))
+          (cons (mod (add (head bs) carry) (BN-BASE))
+                (bn-add-c (list) (tail bs) (div (add (head bs) carry) (BN-BASE)))))
+      (if (eq (len bs) 0)
+          (cons (mod (add (head as) carry) (BN-BASE))
+                (bn-add-c (tail as) (list) (div (add (head as) carry) (BN-BASE))))
+          (cons (mod (add (add (head as) (head bs)) carry) (BN-BASE))
+                (bn-add-c (tail as) (tail bs)
+                          (div (add (add (head as) (head bs)) carry) (BN-BASE)))))))
+
+; bn-add — the offered sum of two bignums.
+(defn bn-add (as bs) (bn-norm (bn-add-c as bs 0)))
+
+; bn-scale-c — multiply a bignum by a single native digit d with carry; the inner
+; offer of the schoolbook product.
+(defn bn-scale-c (as d carry)
+  (if (eq (len as) 0)
+      (if (eq carry 0) (list)
+          (cons (mod carry (BN-BASE)) (bn-scale-c (list) d (div carry (BN-BASE)))))
+      (cons (mod (add (mul (head as) d) carry) (BN-BASE))
+            (bn-scale-c (tail as) d (div (add (mul (head as) d) carry) (BN-BASE))))))
+
+; bn-shift — prepend k zero digit-cells (multiply by B^k) — the place-shift of the
+; schoolbook column.
+(defn bn-shift (ds k) (if (eq k 0) ds (cons 0 (bn-shift ds (sub k 1)))))
+
+; bn-mul-at — sum the partial products of bs scaled by each digit of as, each
+; shifted by its place index. Acks the running total.
+(defn bn-mul-at (as bs place)
+  (if (eq (len as) 0) (list)
+      (bn-add
+        (bn-shift (bn-scale-c bs (head as) 0) place)
+        (bn-mul-at (tail as) bs (add place 1)))))
+
+; bn-mul — the offered product of two bignums.
+(defn bn-mul (as bs) (bn-norm (bn-mul-at as bs 0)))
+
+; bn-cmp — structural compare of two NORMALIZED bignums: -1 (a<b), 0 (a=b), 1 (a>b).
+;   longer normalized list = larger magnitude; equal length compares MS digit down.
+(defn bn-cmp-pick (a b sub-c)
+  (if (eq sub-c 0)
+      (if (lt a b) -1 (if (gt a b) 1 0))
+      sub-c))
+(defn bn-cmp-eqlen (as bs)
+  (if (eq (len as) 0) 0
+      (bn-cmp-pick (head as) (head bs) (bn-cmp-eqlen (tail as) (tail bs)))))
+(defn bn-cmp-norm (na nb)
+  (if (lt (len na) (len nb)) -1
+      (if (gt (len na) (len nb)) 1
+          (bn-cmp-eqlen na nb))))
+(defn bn-cmp (as bs) (bn-cmp-norm (bn-norm as) (bn-norm bs)))
+
+; ── bignum decimal rendering (the gate's "its decimal") ──
+; A base-10000 digit is 0..9999. The MOST-significant digit prints bare; every
+; lower digit prints zero-PADDED to 4 places. We render to a native string by
+; composing int_to_str of each padded digit, MS-first.
+
+; bn-pad4 — left-pad a native digit (0..9999) to a 4-char decimal string.
+(defn bn-pad4 (d)
+  (if (lt d 10)    (str_concat "000" (int_to_str d))
+  (if (lt d 100)   (str_concat "00"  (int_to_str d))
+  (if (lt d 1000)  (str_concat "0"   (int_to_str d))
+                   (int_to_str d)))))
+
+; bn-dec-rest — render the lower digits (each padded), MS-first.
+(defn bn-dec-rest (ms)
+  (if (eq (len ms) 0) ""
+      (str_concat (bn-pad4 (head ms)) (bn-dec-rest (tail ms)))))
+
+; bn-dec-ms — render digits given MS-first list; head printed bare, rest padded.
+(defn bn-dec-ms (ms)
+  (if (eq (len ms) 0) "0"
+      (if (eq (len (tail ms)) 0) (int_to_str (head ms))
+          (str_concat (int_to_str (head ms)) (bn-dec-rest (tail ms))))))
+
+; bn-reverse — little-endian → most-significant-first (no append primitive; fold).
+(defn bn-rev-onto (ds acc)
+  (if (eq (len ds) 0) acc (bn-rev-onto (tail ds) (cons (head ds) acc))))
+(defn bn-reverse (ds) (bn-rev-onto ds (list)))
+
+; bn-decimal — the canonical decimal string of a bignum. (String lane: needs
+; int_to_str/str_concat — proven on fkwu --src + the Go walker; the Rust/TS
+; minimal walkers carry no int_to_str, so DECIMAL is three-way by op-coverage,
+; while the ARITHMETIC below it is pure list/int ops and crosses FOUR-WAY.)
+(defn bn-dec-of-norm (n)
+  (if (eq (len n) 0) "0" (bn-dec-ms (bn-reverse n))))
+(defn bn-decimal (ds) (bn-dec-of-norm (bn-norm ds)))
+
+; bn-eq-digits — STRUCTURAL equality of two bignums by their normalized digit-
+; lists, with NO string op: this is the four-way-safe witness that "the digit-list
+; is correct". Compares element by element after normalize (bn-cmp = 0).
+(defn bn-eq (as bs) (eq (bn-cmp as bs) 0))
+
+; ===========================================================================
+; RATIONAL — a pair-cell (num den), den > 0. Composed of two native integers
+; (axiom-2 over axiom-1). Stored unreduced; rat-reduce divides by the gcd.
+; ===========================================================================
+
+(defn rat (n d) (list n d))
+(defn rat-num (q) (nth q 0))
+(defn rat-den (q) (nth q 1))
+
+; gcd — Euclid over native integers; the offer-step is (a b) → (b a-mod-b).
+(defn rat-gcd (a b) (if (eq b 0) a (rat-gcd b (mod a b))))
+
+; rat-reduce — divide num & den by their gcd → lowest terms.
+(defn rat-reduce-by (q g)
+  (if (eq g 0) q (rat (div (rat-num q) g) (div (rat-den q) g))))
+(defn rat-reduce (q) (rat-reduce-by q (rat-gcd (rat-num q) (rat-den q))))
+
+; rat-add — a/b + c/d = (a*d + c*b)/(b*d), then reduced.
+(defn rat-add (p q)
+  (rat-reduce
+    (rat (add (mul (rat-num p) (rat-den q)) (mul (rat-num q) (rat-den p)))
+         (mul (rat-den p) (rat-den q)))))
+
+; rat-mul — (a/b)*(c/d) = (a*c)/(b*d), then reduced.
+(defn rat-mul (p q)
+  (rat-reduce
+    (rat (mul (rat-num p) (rat-num q)) (mul (rat-den p) (rat-den q)))))
+
+; ===========================================================================
+; COMPLEX — a pair-cell (re im). Composed of two native integers (Gaussian
+; integers here; the recipe shape is identical over any ring the leaves carry).
+; ===========================================================================
+
+(defn cx (re im) (list re im))
+(defn cx-re (z) (nth z 0))
+(defn cx-im (z) (nth z 1))
+
+; cx-add — (a+bi) + (c+di) = (a+c) + (b+d)i.
+(defn cx-add (z w)
+  (cx (add (cx-re z) (cx-re w)) (add (cx-im z) (cx-im w))))
+
+; cx-mul — (a+bi)(c+di) = (ac − bd) + (ad + bc)i.
+(defn cx-mul (z w)
+  (cx (sub (mul (cx-re z) (cx-re w)) (mul (cx-im z) (cx-im w)))
+      (add (mul (cx-re z) (cx-im w)) (mul (cx-im z) (cx-re w)))))

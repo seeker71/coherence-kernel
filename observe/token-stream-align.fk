@@ -1,0 +1,103 @@
+; token-stream-align.fk — the ds4 and Form-native token streams, aligned through
+; the bidirectional framebuffer rather than through shell arithmetic.
+;
+; Urs: "bash and python: no. different token stream, using frame-buffer to align."
+;
+; THE TWO STREAMS, both from the SAME weights (the mainline IQ2XXS/Q2K/Q8 file)
+; and the SAME prompt ids [671 6102 294 8760 344], witnessed 2026-07-30:
+;   ds4 (reference, --temp 0):  its greedy continuation, ids from ds4's own
+;       --dump-tokens over the text it generated.
+;   ours (metal_dsv4_stack.sh): the emitted feedback stream.
+;
+; WHAT ALIGNMENT MEANS HERE. Three measurements, each cheap and each a different
+; claim:
+;   positional  — how many positions carry the SAME id in both streams.
+;   bag         — how many of the reference's ids appear ANYWHERE in ours.
+;   echo        — the reference stream CONTAINS THE PROMPT VERBATIM (ds4 quotes
+;                 the question back: positions 6..10 are 671 6102 294 8760 344);
+;                 does ours contain any prompt run of length >= 2?
+; Bag high while positional is zero is the bag-of-words signature: the right
+; words with no order — which is what " the capital in France and and its"
+; already said in prose. Here it is a number on the body's own channel.
+;
+; THE CHANNEL. Each measurement goes out as a transition observation
+; (bfc-envelope direction 0), is adjudicated, and the inbound control decides
+; the next state. The adjudication policy in the channel is transition-count
+; based; the control this cell wants is: if positional agreement is ZERO while
+; bag overlap is nonzero, the honest action is 4 (request evidence) — the
+; per-layer fp64 oracle — not 2 (revise) and not 0 (continue).
+;
+; preludes: form-stdlib/core.fk observe/bidirectional-framebuffer-channel.fk
+
+(do
+    ; ── the streams, as witnessed ────────────────────────────────────────
+    (defn tsa-prompt () (list 671 6102 294 8760 344))
+    (defn tsa-ours ()   (list 270 6102 295 8760 305 305 1009 14 6102 305))
+    (defn tsa-ds4 ()    (list 2581 1309 304 3287 28 582 671 6102 294 8760))
+
+    ; ── positional agreement ─────────────────────────────────────────────
+    (defn tsa-pos-loop (a b acc)
+        (if (eq (len a) 0) acc
+            (if (eq (len b) 0) acc
+                (tsa-pos-loop (tail a) (tail b)
+                    (add acc (if (eq (head a) (head b)) 1 0))))))
+    (defn tsa-positional () (tsa-pos-loop (tsa-ours) (tsa-ds4) 0))
+
+    ; ── bag overlap: reference ids found anywhere in ours ────────────────
+    (defn tsa-memq (x xs)
+        (if (eq (len xs) 0) 0 (if (eq (head xs) x) 1 (tsa-memq x (tail xs)))))
+    (defn tsa-bag-loop (ref acc)
+        (if (eq (len ref) 0) acc
+            (tsa-bag-loop (tail ref) (add acc (tsa-memq (head ref) (tsa-ours))))))
+    (defn tsa-bag () (tsa-bag-loop (tsa-ds4) 0))
+
+    ; ── prompt echo: longest run of consecutive prompt ids inside a stream ─
+    (defn tsa-run-at (s p)
+        (if (eq (len s) 0) 0
+            (if (eq (len p) 0) 0
+                (if (eq (head s) (head p))
+                    (add 1 (tsa-run-at (tail s) (tail p)))
+                    0))))
+    (defn tsa-echo-loop (s best)
+        (if (eq (len s) 0) best
+            (do (let r (tsa-run-at s (tsa-prompt)))
+                (tsa-echo-loop (tail s) (if (gt r best) r best)))))
+    (defn tsa-echo (s) (tsa-echo-loop s 0))
+
+    ; ── the rounds: one exchange per measurement, on the body's channel ──
+    ; transitions payload = (observed, expected-if-healthy); the channel's
+    ; adjudicator rehearses ground (5) when observed > expected, else continues.
+    ; For POSITIONAL the healthy expectation against a REASONING reference is
+    ; genuinely low — ds4 opens "We need to answer" — so expected is 1, and 0
+    ; observed continues. For ECHO the roles invert: ours echoing the prompt
+    ; while the reference's echo is INSIDE A QUOTE is the finding.
+    (defn tsa-round-positional ()
+        (bfc-round 1 (list (tsa-positional) 1) 100 105 -1))
+    (defn tsa-round-bag ()
+        (bfc-round 2 (list (tsa-bag) 3) 100 105 -1))
+    (defn tsa-round-echo ()
+        (bfc-round 3 (list (tsa-echo (tsa-ours)) (tsa-echo (tsa-ds4))) 100 105 -1))
+
+    ; ── the verdict this cell carries outward ────────────────────────────
+    ; encoded as positional*10000 + bag*100 + our-echo*10 + ds4-echo, so one
+    ; number states all four and a reader can decompose it by eye.
+    (defn tsa-field ()
+        (add (mul (tsa-positional) 10000)
+        (add (mul (tsa-bag) 100)
+        (add (mul (tsa-echo (tsa-ours)) 10)
+             (tsa-echo (tsa-ds4))))))
+
+    (defn tsa-report ()
+        (do (print_str (str_concat "positional " (int_to_str (tsa-positional))))
+            (print_str (str_concat "bag        " (int_to_str (tsa-bag))))
+            (print_str (str_concat "echo-ours  " (int_to_str (tsa-echo (tsa-ours)))))
+            (print_str (str_concat "echo-ds4   " (int_to_str (tsa-echo (tsa-ds4)))))
+            (let r1 (tsa-round-positional))
+            (let r2 (tsa-round-bag))
+            (let r3 (tsa-round-echo))
+            (print_str (str_concat "control-positional " (int_to_str (bfc-payload (nth r1 1)))))
+            (print_str (str_concat "control-bag        " (int_to_str (bfc-payload (nth r2 1)))))
+            (print_str (str_concat "control-echo       " (int_to_str (bfc-payload (nth r3 1)))))
+            (print_str (str_concat "field " (int_to_str (tsa-field))))
+            0))
+    (tsa-report))

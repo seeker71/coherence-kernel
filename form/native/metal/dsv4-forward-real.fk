@@ -1,0 +1,196 @@
+; dsv4-forward-real.fk — Stone 34: carrying the DeepSeek-V4-Flash first-token forward INTO the middle,
+; at REAL DIMS over the windowed-resident 85 GiB file. Stone 33 proved the two ends (EMBED in, MXFP8
+; vocab out). This band adds the middle's MoE-FFN dispatches — the routed-expert SwiGLU projections —
+; at real layer-0 dims through the overlapping views, reusing the per-op kernels that were each proven
+; against ds4's own C at toy/small scale. The carrier (metal_dsv4_forward.sh) dispatches; every character
+; of Metal and every geometry number comes from here or from the file's own header.
+;
+; THE EVIDENCE CLASS, named up front (selfgauge / knownsolved). No external oracle can run this exact
+; file — ds4/llama.cpp/ollama REFUSE GGUF types 40/41, so any whole-forward output is UNFALSIFIABLE
+; against a reference on this machine. So each dispatch here stands, individually, on the SAME internal
+; falsifier Stone 33 used: the GPU fused decode+matvec, reading the real quantised bytes straight from
+; the resident view, must agree with an INDEPENDENT CPU decode of the same bytes at the tensor's absolute
+; offset — index for index where the decode is exact, and to float precision where a matvec reassociates
+; the sum (assocwall, row 872). A dead view / unrun kernel reads as a sentinel the check rejects.
+;
+; WHAT THIS BAND NEWLY EXERCISES beyond Stone 33 (which proved F16 embed + MXFP8/type-41 vocab):
+;   * type 40  (MXFP4)  — ffn_gate_exps / ffn_up_exps, the routed experts' gate & up projections,
+;                         [4096 -> 2048] per expert, through the view at the expert's byte slice, by
+;                         mxfp4-msl.fk's OWN proven fused matvec (mx4m-matvec-body), reused unchanged.
+;   * type 1   (F16)    — ffn_gate_inp, the router logit projection [4096 -> 256], a fused F16 matvec.
+;   * type 26  (I32)    — ffn_gate_tid2eid, the layer-0 hash routing table; a pure I32 table read, so
+;                         bit-exact like embed. This realises ds4.c's layer-0 routing CORRECTION (below).
+;
+; THE LAYER-0 ROUTING FINDING, grounded in ds4.c (MIT, /Users/ursmuff/models/ds4-engine/ds4.c),
+; quoted by line, never copied (boundborrow):
+;   ds4.c:511/554  the shape carries n_hash_layer = 3 (config_expect_u32 "hash_layer_count" at :5596).
+;   ds4.c:4806     `if (il < DS4_N_HASH_LAYER && !l->ffn_gate_tid2eid) return false;` — layers 0,1,2 are
+;                  the hash layers; each MUST carry ffn_gate_tid2eid, higher layers must not.
+;   ds4.c:10745    layer_routed_moe_one: `if (layer->ffn_gate_tid2eid) { layer_hash_selected_experts(...) }
+;                  else { layer_topk_selected_experts(...) }`. So layers 0-2 select their 6 experts by a
+;                  TABLE LOOKUP keyed on the token id, NOT by the computed biased top-k.
+;   ds4.c:10567    layer_hash_selected_experts: table is [DS4_N_EXPERT_USED=6, DS4_N_VOCAB=129280] I32
+;                  (t->type == 26); selected[i] = table[token*6 + i]. Selection depends on the TOKEN ONLY,
+;                  not on the hidden state — so for the first token it is fixed before any layer runs.
+;   ds4.c:10588/10601  the router probs are STILL computed (sqrt(softplus(gate_inp·x))) and the six
+;                  selected experts are weighted by their unbiased probs, normalised, scaled by wscale.
+;   This CONFIRMS dsv4-forward.fk's hash_layer_count=3 note is a REAL DeepSeek-V4 feature, not a toy
+;   shortcut. dsv4-forward.fk (the CPU blueprint) computes top-k routing for ALL layers, which is wrong
+;   for layers 0-2; the real forward must lookup-route them. This band reads the real table and shows it.
+;
+; THE FIRST-TOKEN SIMPLIFICATIONS still hold (grounded, receipts/2026-07-22-dsv4-subsystems.md):
+;   compressor + indexer are IDENTITY at the first token (n_comp=0), so they are omitted, faithfully.
+;
+; preludes: form-stdlib/core.fk native/metal/windowed-residency-emit.fk form-stdlib/mxfp8-msl.fk form-stdlib/mxfp4-msl.fk form-stdlib/qk-matvec-lane.fk form-stdlib/iq2xxs-msl.fk form-stdlib/q2k-msl.fk form-stdlib/q8-0-msl.fk form-stdlib/ds4-order-match.fk form-stdlib/dsv4-moe-msl.fk
+;
+; Proven by: native/metal/metal_dsv4_forward.sh (the middle-forward dispatches on the live file, each
+; gated by the offered-interface guard — an unrun kernel reads as a computed zero, so every dispatch is
+; sentinelled before and checked after).
+
+(do
+    ; ================= the MoE routed-expert gate/up projection: MXFP4 (type 40) fused matvec =========
+    ; ffn_gate_exps / ffn_up_exps are [in=4096, out=2048, experts=256] MXFP4. For expert e, output row o,
+    ; the flat element index is e*(4096*2048) + o*4096 + j — i.e. the [rows=2048, cols=4096] slice at the
+    ; expert's byte offset. Binding the view at (inner + e*bytes_per_expert) makes the kernel's own
+    ; r*cols+... indices start at the expert, exactly as Stage 2 bound output.weight at its inner. nel is
+    ; the PER-EXPERT element count (rows*cols); the E8M0 scale plane sits at nel/2 within the slice. This
+    ; is mxfp4-msl.fk's mx4m-matvec-body, reused with our entry name and NOTHING else changed.
+    (defn dsv4-mx4-matvec-msl ()
+        (do
+            (print "MSL")
+            (print (str_concat (qml-msl-header)
+                    (mx4m-matvec-msl "form_dsv4_mx4_matvec")))
+            (print "END")
+            0))
+
+    ; ================= the router logit projection: F16 (type 1) fused matvec ==========================
+    ; ffn_gate_inp is [in=4096, out=256] F16 (row-major, dim0=4096 fastest). y[r] = sum_j W[r*cols+j]·x[j],
+    ; r in 0..256, cols=4096. One thread per output row, a straight sequential fold — the SAME fold order
+    ; the carrier's CPU reference uses, so this is an EQUALITY check with no reassociation (no simd_sum).
+    ; `float(as_type<half>(h))` is the exact IEEE half->single widening, the value the carrier decodes too.
+    (defn dsv4-router-f16-msl ()
+        (do
+            (print "MSL")
+            (print "#include <metal_stdlib>")
+            (print "using namespace metal;")
+            (print "kernel void form_dsv4_router_f16(device const uchar* qb [[buffer(0)]],")
+            (print "                                 device const float* x [[buffer(1)]],")
+            (print "                                 device float* y [[buffer(2)]],")
+            (print "                                 constant uint& rows [[buffer(3)]],")
+            (print "                                 constant uint& cols [[buffer(4)]],")
+            (print "                                 uint r [[thread_position_in_grid]]) {")
+            (print "    if (r >= rows) return;")
+            (print "    float acc = 0.0f;")
+            (print "    ulong base = (ulong)r * (ulong)cols;")
+            (print "    for (uint j = 0u; j < cols; ++j) {")
+            (print "        ushort h = *(device const ushort*)(qb + (base + (ulong)j) * 2ul);")
+            (print "        acc = acc + float(as_type<half>(h)) * x[j];")
+            (print "    }")
+            (print "    y[r] = acc;")
+            (print "}")
+            (print "END")
+            0))
+
+    ; ================= the MoE routed-expert DOWN projection: IQ2_XXS (type 16) FUSED matvec ==========
+    ; ffn_down_exps is [in=2048, out=4096, experts=256] IQ2_XXS. Stone 24 proved the 66-byte / 256-element
+    ; IQ2_XXS superblock DEQUANT on the GPU (iq2xxs-msl.fk), and iq2xxs-msl.fk itself named the gap: "a
+    ; FUSED matvec-over-IQ2 is what the MoE fold ultimately needs." This is that kernel. It wraps
+    ; iq2xxs-msl.fk's OWN `iq2_w` (the per-weight decode, textually the fixture-proven one) in a lane
+    ; matvec: 32 lanes per output row, lane L folds columns L, L+32, ... , reduced by metal::simd_sum. The
+    ; within-lane fold counts DOWN so it keeps tb-dot's right-fold direction (assocwall); only the cross-
+    ; lane reduction reassociates. `qb` is bound by the carrier at the expert's block-0 byte base, so the
+    ; flat element index r*cols+j addresses inside the expert slice — no 32-bit offset for the 85 GiB file.
+    ; IQ2_XXS is a pure block format (no appended scale plane), so no nel argument is needed.
+    (defn dsv4-iq2-matvec-msl ()
+        (do
+            (print "MSL")
+            ; the dm_ spine joins this unit because dom-iq2-experts4-pair-swiglu-body ENDS in the
+            ; clamped SwiGLU, and the only honest way to end in it is to call dsv4-moe-msl.fk's own
+            ; dm_cl_hi / dm_cl_lo / dm_silu — the functions form_dsv4_swiglu_experts calls in the FFN
+            ; unit. One definition, emitted into both units; never a second transcription.
+            (print (str_concat (qml-msl-header)
+                    (str_concat (dsv4-moe-msl-spine)
+                    (str_concat (iq2m-msl-helpers)
+                        (str_concat "kernel void form_dsv4_iq2_matvec (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0u) { k -= 1u; uint j = lane + k * 32u; uint idx = r * cols + j; acc = iq2_w(qb, idx) * x[j] + acc; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }" (dom-iq2-appendix))))))
+            (print "END")
+            0))
+    ; --- Q2_K, the mainline Mac quant's w2/down projections. Same lane-strided fold as the IQ2
+    ; kernel above, one weight function swapped: q2k_w for iq2_w. The mainline
+    ; DeepSeek-V4-Flash-IQ2XXS-w2Q2K file carries 43 of these, one per layer, and without this branch
+    ; gpuExpert dies on "an expert tensor carries type 10".
+    (defn dsv4-q2k-matvec-msl ()
+        (do
+            (print "MSL")
+            (print (str_concat (qml-msl-header)
+                    (str_concat (q2km-msl-helpers)
+                    (str_concat
+                        "kernel void form_dsv4_q2k_matvec (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0u) { k -= 1u; uint j = lane + k * 32u; uint idx = r * cols + j; acc = q2k_w(qb, idx) * x[j] + acc; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }"
+                        ; the INDEPENDENT half of the fused matvec's falsifier: one thread per weight,
+                        ; carving the same bytes through the same q2k_w, so a carrier can dequant a
+                        ; slice and fold it with the body's plain f32 matvec and demand the fused
+                        ; kernel's answer. A fused decode that drifts from its own carver is a fold
+                        ; or map defect, not a decode defect (the decode is q2k-dequant-band's, 511).
+                        (str_concat (q2km-dequant-body "form_q2k_dequant_f32") (dom-q2k-appendix))))))
+            (print "END")
+            0))
+    ; --- Q8_0, the mainline file's DENSE path: attn_q_a/q_b/kv/output_a/output_b and output.weight
+    ; are all type 8 there, where the reap25 file had MXFP8 (41). Same lane-strided fold, q80_w for
+    ; the weight. Without this branch gpuMx8 reads Q8_0 bytes through the MXFP8 decoder and every
+    ; layer output is NaN — which is exactly what the first run on the mainline file reported:
+    ; "native self-witness failed: finite 0/16384".
+    (defn dsv4-q80-matvec-msl ()
+        (do
+            (print "MSL")
+            (print (str_concat (qml-msl-header)
+                    (str_concat (q80-msl-spine)
+                    (str_concat (q80-msl-weight)
+                        "kernel void form_dsv4_q80_matvec (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0u) { k -= 1u; uint j = lane + k * 32u; uint idx = r * cols + j; acc = q80_w(qb, idx) * x[j] + acc; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }"))))
+            (print "END")
+            0))
+    ; --- Q8_0, GROUPED. attn_output_a is type 8 in the mainline file and its rows are grouped by
+    ; oRank — row r reads activation group r/rank. The MXFP8 grouped kernel cannot serve it: that one
+    ; reads a separate SCALE PLANE at qb[nel + ...], which is the planar layout of the reap25 file.
+    ; Q8_0 is blocked (34 bytes per 32: one f16 then 32 int8), so the scale is inside the block and
+    ; the plane offset would read payload as exponents. Same grouping, different reach.
+    ;
+    ; THE SAME BLOCK, READ SIXTEEN TIMES INSTEAD OF SIXTY-FOUR. ds4-order-match.fk's own note on this
+    ; kernel says it "reads its bytes ONE AT A TIME — 34 scalar uchar loads per block" and still
+    ; reaches 383 GB/s on the strength of its span; FORM_DS4_DOUBLE prices it at 2.8 ms of the token.
+    ; The _wide twin takes the block's 32 weight bytes as eight packed_uchar4 and the group's 32
+    ; activations as eight packed_float4, and forms the SAME terms through the SAME q6k_s8 in the SAME
+    ; ascending i — sq is added into directly, never through a per-quad temporary — so it is the scalar
+    ; kernel's float, bit for bit. Only the number of load instructions moves.
+    ; The kernel TEXT is a named value of its own, because two consumers need the same bytes: the
+    ; printer below (the bash lane greps the stream between MSL and END) and dsv4-decode-form.fk's
+    ; rung 6, which hands the text straight to metal_pipeline in process. One definition, two doors —
+    ; never a second transcription.
+    (defn dsv4-q80-grouped-body ()
+        "kernel void form_dsv4_q80_matvec_grouped (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], constant uint& rank [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint grp = r / rank; device const float* xg = x + grp * cols; uint nblk = cols / 32u; ulong rowblk = (ulong)r * (ulong)nblk; float acc = 0.0f; for (uint blk = lane; blk < nblk; blk += 32u) { ulong b = (rowblk + (ulong)blk) * 34ul; ushort hb = (ushort)qb[b] | ((ushort)qb[b + 1ul] << 8); float d = float(as_type<half>(hb)); device const float* xb = xg + blk * 32u; float sq = 0.0f; for (uint i = 0u; i < 32u; ++i) { sq = sq + float(q6k_s8(int(qb[b + 2ul + (ulong)i]))) * xb[i]; } acc = acc + d * sq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } kernel void form_dsv4_q80_matvec_grouped_wide (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], constant uint& rank [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint grp = r / rank; device const float* xg = x + grp * cols; uint nblk = cols / 32u; ulong rowblk = (ulong)r * (ulong)nblk; float acc = 0.0f; for (uint blk = lane; blk < nblk; blk += 32u) { ulong b = (rowblk + (ulong)blk) * 34ul; ushort hb = (ushort)qb[b] | ((ushort)qb[b + 1ul] << 8); float d = float(as_type<half>(hb)); device const float* xb = xg + blk * 32u; device const uchar* wb = qb + b + 2ul; float sq = 0.0f; for (uint k = 0u; k < 8u; ++k) { uchar4 w4 = uchar4(*(device const packed_uchar4*)(wb + 4u * k)); float4 v4 = float4(*(device const packed_float4*)(xb + 4u * k)); sq = sq + float(q6k_s8(int(w4.x))) * v4.x; sq = sq + float(q6k_s8(int(w4.y))) * v4.y; sq = sq + float(q6k_s8(int(w4.z))) * v4.z; sq = sq + float(q6k_s8(int(w4.w))) * v4.w; } acc = acc + d * sq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; }"
+)
+    (defn dsv4-q80-grouped-msl ()
+        (do
+            (print "MSL")
+            (print (str_concat (qml-msl-header)
+                    (str_concat (q80-msl-spine)
+                    (str_concat (q80-msl-weight) (dsv4-q80-grouped-body)))))
+            (print "END")
+            0))
+
+
+
+
+    ; the IQ2_XXS decode tables, emitted from the body's OWN (iq2-grid)/(iq2-ksigns) so the carrier's
+    ; independent CPU reference decodes the SAME grid the GPU does — never a hand-copied table.
+    (defn dsv4-iq2-tables ()
+        (do
+            (print (str_concat "GRID " (iq2m-join (iq2-grid))))
+            (print (str_concat "KSIGNS " (iq2m-join (iq2-ksigns))))
+            0))
+
+    ; per-expert byte stride inside a 3D MXFP4 expert stack: (total tensor bytes) / n_experts. The stride
+    ; is exact — every expert slice is nel/2 payload + nel/32 scale bytes, identical across experts.
+    (defn dsv4-expert-stride (total-bytes n-experts) (div total-bytes n-experts))
+    ; per-expert element count for the [in, out, experts] stack: in*out.
+    (defn dsv4-expert-nel (in-dim out-dim) (mul in-dim out-dim))
+
+    0)

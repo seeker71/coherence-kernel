@@ -1,0 +1,121 @@
+; nl-lenses-13.fk — one executable detector/generator over thirteen NL lenses.
+;
+; The neutral meanings are deliberately tiny:
+;   1 presence, 2 enquiry, 3 affirmation, 4 grounded framing.
+; Detection is phrase-pack evidence scoring. Generation is table selection or
+; open+detail+close composition. Transformation crosses through the numeric
+; meaning and preserves only the caller-supplied detail for meaning 4.
+;
+; Honest boundary: this is deterministic phrase semantics. It is not learned
+; language identification, morphological generation, general translation, or
+; fluency. Unknown text and unknown locale codes return the empty string.
+;
+; preludes: form/form-stdlib/core.fk cognition/nl-lenses-13-data.fk
+(do
+  (defn nl13-id (r) (nth r 0))
+  (defn nl13-code (r) (nth r 1))
+  (defn nl13-name (r) (nth r 2))
+  (defn nl13-script (r) (nth r 3))
+  (defn nl13-presence (r) (nth r 4))
+  (defn nl13-need (r) (nth r 5))
+  (defn nl13-yes (r) (nth r 6))
+  (defn nl13-open (r) (nth r 7))
+  (defn nl13-close (r) (nth r 8))
+  (defn nl13-provenance (r) (nth r 9))
+  (defn nl13-source (r) (nth r 10))
+
+  (defn nl13-count () (len (nl13-data)))
+  (defn nl13-at (i) (nth (nl13-data) i))
+  (defn nl13-find-go (rows code)
+    (if (eq (len rows) 0) (empty)
+      (if (str_eq (nl13-code (head rows)) code) (head rows)
+        (nl13-find-go (tail rows) code))))
+  (defn nl13-find (code) (nl13-find-go (nl13-data) code))
+
+  (defn nl13-frame (row detail)
+    (str_concat (nl13-open row) (str_concat detail (nl13-close row))))
+  ; Runtime-generated detail detector. fkwu, Go, and Rust keep raw UTF-8 byte
+  ; indexing; the minimal TypeScript proof walker currently narrows non-Latin
+  ; literals through its documented latin1 byte waist. The four-way law below
+  ; therefore stays on exact phrase equality, while the native runtime uses
+  ; this prefix/suffix path for arbitrary concept labels.
+  (defn nl13-starts-with? (text prefix)
+    (if (lt (str_len text) (str_len prefix)) 0
+      (if (str_eq (substring text 0 (str_len prefix)) prefix) 1 0)))
+  (defn nl13-ends-with? (text suffix)
+    (if (lt (str_len text) (str_len suffix)) 0
+      (if (str_eq
+            (substring text (sub (str_len text) (str_len suffix)) (str_len text))
+            suffix) 1 0)))
+  (defn nl13-frame-shaped? (row text)
+    (if (and (ge (str_len text)
+                 (add (str_len (nl13-open row)) (str_len (nl13-close row))))
+             (and (eq (nl13-starts-with? text (nl13-open row)) 1)
+                  (eq (nl13-ends-with? text (nl13-close row)) 1))) 1 0))
+  (defn nl13-score (row text)
+    (add (if (str_eq text (nl13-presence row)) 8 0)
+      (add (if (str_eq text (nl13-need row)) 4 0)
+        (add (if (str_eq text (nl13-yes row)) 2 0)
+             (if (str_eq text (nl13-frame row "Form")) 1 0)))))
+  (defn nl13-detect-go (rows text best best-score)
+    (if (eq (len rows) 0) best
+      (do (let row (head rows))
+          (let score (nl13-score row text))
+          (if (gt score best-score)
+            (nl13-detect-go (tail rows) text row score)
+            (nl13-detect-go (tail rows) text best best-score)))))
+  (defn nl13-detect-row (text) (nl13-detect-go (nl13-data) text (empty) 0))
+  (defn nl13-detect (text)
+    (do (let row (nl13-detect-row text))
+        (if (eq (len row) 0) "" (nl13-code row))))
+  (defn nl13-detect-frame-runtime-go (rows text)
+    (if (eq (len rows) 0) ""
+      (if (eq (nl13-frame-shaped? (head rows) text) 1)
+        (nl13-code (head rows))
+        (nl13-detect-frame-runtime-go (tail rows) text))))
+  (defn nl13-detect-generated-runtime (text)
+    (do (let exact (nl13-detect text))
+        (if (str_eq exact "")
+          (nl13-detect-frame-runtime-go (nl13-data) text) exact)))
+
+  (defn nl13-generate-row (row meaning detail)
+    (if (eq meaning 1) (nl13-presence row)
+      (if (eq meaning 2) (nl13-need row)
+        (if (eq meaning 3) (nl13-yes row)
+          (if (eq meaning 4)
+            (nl13-frame row detail)
+            "")))))
+  (defn nl13-generate (code meaning detail)
+    (do (let row (nl13-find code))
+        (if (eq (len row) 0) "" (nl13-generate-row row meaning detail))))
+
+  (defn nl13-meaning (row text)
+    (if (str_eq text (nl13-presence row)) 1
+      (if (str_eq text (nl13-need row)) 2
+        (if (str_eq text (nl13-yes row)) 3
+          (if (str_eq text (nl13-frame row "Form")) 4 0)))))
+  (defn nl13-detail (row text meaning)
+    (if (and (eq meaning 4) (str_eq text (nl13-frame row "Form"))) "Form" ""))
+  ; The transformation is intentionally closed over the four meanings above.
+  (defn nl13-transform (text target-code)
+    (do (let source (nl13-detect-row text))
+        (if (eq (len source) 0) ""
+          (do (let meaning (nl13-meaning source text))
+              (if (eq meaning 0) ""
+                (nl13-generate target-code meaning
+                  (nl13-detail source text meaning)))))))
+
+  ; Structured frame transformation preserves any caller-owned detail without
+  ; trying to infer boundaries through the proof walker's Unicode byte seam.
+  (defn nl13-reframe (source-code target-code detail)
+    (if (and (gt (len (nl13-find source-code)) 0)
+             (gt (len (nl13-find target-code)) 0))
+      (nl13-generate target-code 4 detail) ""))
+
+  (defn nl13-transform-record (text target-code)
+    (do (let source-code (nl13-detect text))
+        (list source-code target-code
+              (if (str_eq source-code "") 0
+                (nl13-meaning (nl13-find source-code) text))
+              (nl13-transform text target-code))))
+)

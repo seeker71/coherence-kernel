@@ -1,0 +1,95 @@
+; jit-tier-policy.fk - category-fed tiering for the Form-native JIT track.
+;
+; This composes three already-named surfaces:
+;   - observe/jit-decision.fk: heat/purity crystallize and melt thresholds
+;   - observe/jit-profile-receipt.fk: numeric category signatures and opt masks
+;   - observe/jit-runtime-fault.fk: source-attributed runtime fault receipts
+;
+; The result is a small policy cell that chooses the next JIT action from the
+; receipt, not from a hand-written guess:
+;   baseline -> hold -> crystallize -> specialize, with deopt/melt exits.
+
+(do
+    (defn jtp-baseline () 1)
+    (defn jtp-hold () 2)
+    (defn jtp-crystallize () 3)
+    (defn jtp-specialize () 4)
+    (defn jtp-deopt () 5)
+    (defn jtp-melt () 6)
+
+    (defn jtp-direct? (r)
+        (if (eq (jpr-field-direct? r) 1) 1
+            (if (eq (jpr-index-direct? r) 1) 1
+                (if (eq (jpr-hash-direct? r) 1) 1
+                    (if (eq (jpr-tree-direct? r) 1) 1 0)))))
+
+    (defn jtp-safe-to-specialize? (r fault)
+        (if (eq (jtp-direct? r) 1)
+            (jrf-attributed? fault)
+            1))
+
+    (defn jtp-specializable? (r fault)
+        (if (gt (jpr-opt-mask r) 1)
+            (jtp-safe-to-specialize? r fault)
+            0))
+
+    (defn jtp-action (r installed fault)
+        (if (eq (jpr-deopt r) (jpr-deopt-none))
+            (if (eq installed 1)
+                (if (eq (jd-melt? (jpr-heat r)) 1)
+                    (jtp-melt)
+                    (if (eq (jd-crystallize? (jpr-heat r) (jpr-pure r)) 1)
+                        (if (eq (jtp-specializable? r fault) 1) (jtp-specialize) (jtp-crystallize))
+                        (if (ge (jpr-heat r) 2) (jtp-hold) (jtp-baseline))))
+                (if (eq (jd-crystallize? (jpr-heat r) (jpr-pure r)) 1)
+                    (if (eq (jtp-specializable? r fault) 1) (jtp-specialize) (jtp-crystallize))
+                    (if (ge (jpr-heat r) 2) (jtp-hold) (jtp-baseline))))
+            (jtp-deopt)))
+
+    (defn jtp-plan (r installed fault)
+        (list (jtp-action r installed fault) (jpr-signature r) (jpr-opt-mask r) installed))
+    (defn jtp-plan-action (p) (nth p 0))
+    (defn jtp-plan-signature (p) (nth p 1))
+    (defn jtp-plan-mask (p) (nth p 2))
+    (defn jtp-plan-installed (p) (nth p 3))
+
+    (defn jtp-same-tier-category? (a b fault)
+        (if (eq (jpr-same-category? a b) 1)
+            (if (eq (jtp-action a 0 fault) (jtp-action b 0 fault)) 1 0)
+            0))
+
+    (defn jtp-hot-basic ()
+        (list 30 1 700 8 1 (jpr-call-poly) (jpr-int) (jpr-none) 0 (jpr-none) 0 (jpr-index-none) (jpr-stack-normal) (jpr-cpu-none) (jpr-gpu-none) (jpr-deopt-none) 11))
+
+    (defn jtp-warm-basic ()
+        (list 31 1 701 3 1 (jpr-call-poly) (jpr-int) (jpr-none) 0 (jpr-none) 0 (jpr-index-none) (jpr-stack-normal) (jpr-cpu-none) (jpr-gpu-none) (jpr-deopt-none) 12))
+
+    (defn jtp-cold-basic ()
+        (list 32 1 702 0 1 (jpr-call-poly) (jpr-int) (jpr-none) 0 (jpr-none) 0 (jpr-index-none) (jpr-stack-normal) (jpr-cpu-none) (jpr-gpu-none) (jpr-deopt-none) 13))
+
+    (defn jtp-bad-fault ()
+        (jrf-exception (jrf-bounds) "array-get" (jrf-source "form" "" 0 0 0) (empty) (list 0 0)))
+
+    (defn jtp-bit (cond bit) (if cond bit 0))
+    (defn jit-tier-policy-check ()
+        (add
+            (jtp-bit (eq (jtp-same-tier-category? (jpr-array-sample 100 40) (jpr-array-sample 101 35) (jrf-bounds-ex)) 1) 1)
+            (add
+                (jtp-bit (eq (jpr-same-category? (jpr-array-sample 100 40) (jpr-array-shape2)) 0) 2)
+                (add
+                    (jtp-bit (eq (jtp-action (jtp-hot-basic) 0 (jrf-bounds-ex)) (jtp-crystallize)) 4)
+                    (add
+                        (jtp-bit (eq (jtp-action (jpr-array-sample 100 40) 0 (jrf-bounds-ex)) (jtp-specialize)) 8)
+                        (add
+                            (jtp-bit (eq (jtp-action (jpr-array-sample 100 40) 0 (jtp-bad-fault)) (jtp-crystallize)) 16)
+                            (add
+                                (jtp-bit (eq (jtp-action (jtp-warm-basic) 0 (jrf-bounds-ex)) (jtp-hold)) 32)
+                                (add
+                                    (jtp-bit (eq (jtp-action (jtp-cold-basic) 0 (jrf-bounds-ex)) (jtp-baseline)) 64)
+                                    (add
+                                        (jtp-bit (eq (jtp-action (jtp-cold-basic) 1 (jrf-bounds-ex)) (jtp-melt)) 128)
+                                        (add
+                                            (jtp-bit (eq (jtp-action (jpr-cool-guard-sample) 1 (jrf-bounds-ex)) (jtp-deopt)) 256)
+                                            (jtp-bit (eq (jtp-action (jpr-gpu-sample) 0 (jrf-bounds-ex)) (jtp-specialize)) 512))))))))))
+
+    0)

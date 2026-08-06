@@ -1,0 +1,145 @@
+; gen-source-walker-table.fk — emit runtime/fkwu-optable.h from the ONE op table.
+;
+; The C source-walker (runtime/fkwu-uni.c fk_sparse) used to carry a hand-written
+; `if (fk_sym_eq(s, hn, "head")) ...` line per op. That is the carrier-last smell:
+; every new op was another C edit. The single source of truth for (name arity tag)
+; is flt-ops in flatten/form-flatten.fk (hand-maintained — a native-op-manifest.fk
+; generator was named once but never came across). This recipe reads that SAME table and
+; the small rewrite-rule table below, and emits a C header the runtime #includes.
+; Adding a value op = a manifest row -> a flt-ops row -> regen; NEVER a C edit.
+;
+; Run on the bootstrap kernel (the executor, like bin-go was for flt-ops). This
+; recipe's ACTION is the write: its final form is
+;   (write_file "runtime/fkwu-optable.h" (header))
+; — write_file is a host-io op (tag 104) the source-walker runtime already
+; carries, so the recipe IS the whole regeneration; no shell stdout-capture.
+; flt-ops lives in form-flatten.fk; the splice that brings it into scope is done
+; in PURE FORM by flatten/gen-source-walker.fk (read_file + str_find/substring,
+; no grep/sed/awk). Regeneration is two fkwu --src calls, zero bash, from repo root:
+;   fkwu --src flatten/gen-source-walker.fk          ; splice -> /tmp/gen-source-walker-combined.fk
+;   fkwu --src /tmp/gen-source-walker-combined.fk     ; this generator -> runtime/fkwu-optable.h
+; The combined driver re-opens one (do over the spliced flt-ops + this recipe's
+; body. The output is committed (same discipline as flt-ops: GENERATED, do not
+; hand-edit; both the flattener and the source-walker read the ONE table).
+;
+; Two generated tables:
+;   1. fk_optab[]  — (name,arity,tag) primitive rows. The generic dispatch in
+;      fk_sparse reads arity args and emits fk_smknode(tag, ...). Pure data.
+;   2. fk_rwtab[]  — (name,arity,template) rewrite rules. A rewrite LOWERS to a
+;      shape of existing nodes (gt/ge/lt/eq/and/or/not/abs), mirroring the
+;      flattener's flt-low rules. The template is a flat int program the generic
+;      C instantiator walks: [PROG ...] where each op is one of
+;        ARG i        -> the i-th parsed operand              (encoded 0 i)
+;        LIT v        -> a literal node fk_smklit(v)          (encoded 1 v)
+;        NODE t n     -> build fk_smknode(t, <n popped kids>) (encoded 2 t n)
+;      The program is POSTFIX (RPN): children are emitted before the NODE that
+;      consumes them, so a single left-to-right pass with a small stack builds
+;      the tree. This is the SAME lowering vocabulary the flattener uses (if/le/
+;      sub on tags 6/5/4, lt/eq on 103/102), expressed as data instead of C.
+
+(do
+    ; ── 1. the primitive op rows, straight from flt-ops (the manifest's table) ──
+    ; Each row is (name arity tag). Only the control forms (defn/do/let/if) keep
+    ; their own fk_sparse handling (special eval semantics). Every VALUE form flows
+    ; through the generic dispatch as data — including (empty) (arity 0 -> tag 18)
+    ; and (list ..) (arity -1 VARIADIC -> fold via cons/19, nil-terminated).
+    (defn rows () (flt-ops))
+
+    ; ── 2. the rewrite rules — name, arity, RPN template (see header note) ──
+    ; ARG i = (list 0 i)  LIT v = (list 1 v)  NODE t n = (list 2 t n)
+    ; gt(a,b) = if(le a b) 0 1   ge(a,b) = le b a   lt = tag103   eq = tag102
+    ; and(a,b)= if a (if b 1 0) 0   or(a,b)= if a 1 (if b 1 0)
+    ; not(a)  = if a 0 1           abs(a) = if(le 0 a) a (sub 0 a)
+    (defn rwa () (list 0 0))
+    (defn rwb () (list 0 1))
+    (defn lit0 () (list 1 0))
+    (defn lit1 () (list 1 1))
+    (defn rwrules ()
+        (list
+            ; gt: a b le(2) -> if(6) lit0 lit1            cond then else
+            (list "gt" 2 (list (rwa) (rwb) (list 2 5 2) (lit0) (lit1) (list 2 6 3)))
+            ; ge: b a le(2)  (le b a)
+            (list "ge" 2 (list (rwb) (rwa) (list 2 5 2)))
+            ; lt: a b -> tag 103
+            (list "lt" 2 (list (rwa) (rwb) (list 2 103 2)))
+            ; eq: a b -> tag 102
+            (list "eq" 2 (list (rwa) (rwb) (list 2 102 2)))
+            ; and: a (b 1 0 if) 0 if   = if a (if b 1 0) 0
+            (list "and" 2 (list (rwa) (rwb) (lit1) (lit0) (list 2 6 3) (lit0) (list 2 6 3)))
+            ; or: a 1 (b 1 0 if) if    = if a 1 (if b 1 0)
+            (list "or" 2 (list (rwa) (lit1) (rwb) (lit1) (lit0) (list 2 6 3) (list 2 6 3)))
+            ; not: a 0 1 if            = if a 0 1
+            (list "not" 1 (list (rwa) (lit0) (lit1) (list 2 6 3)))
+            ; abs: (0 a le) a (0 a sub) if = if(le 0 a) a (sub 0 a)
+            (list "abs" 1 (list (lit0) (rwa) (list 2 5 2) (rwa) (lit0) (rwa) (list 2 4 2) (list 2 6 3)))))
+
+    ; ── emit helpers ──────────────────────────────────────────────────────────
+    (defn nl () (byte_to_str 10))
+    (defn cma () ", ")
+    (defn q () (byte_to_str 34))
+    (defn qs (s) (str_concat (q) (str_concat s (q))))
+
+    ; one fk_optab row:  { "name", arity, tag },
+    (defn op-row (r)
+        (str_concat "  { " (str_concat (qs (nth r 0))
+            (str_concat (cma) (str_concat (int_to_str (nth r 1))
+                (str_concat (cma) (str_concat (int_to_str (nth r 2)) " },")))))))
+    ; balanced divide-and-conquer join (same bytes: rows joined by nl with a trailing nl), at
+    ; O(log n) eval depth — the linear right-fold used one tree-walker C frame per row, which
+    ; overflows on hosts with small default stacks (Windows 1MB) once the table passes ~120 rows.
+    (defn op-rows-range (rs i k)
+        (if (eq k 1)
+            (op-row (nth rs i))
+            (str_concat (op-rows-range rs i (div k 2))
+                (str_concat (nl) (op-rows-range rs (add i (div k 2)) (sub k (div k 2)))))))
+    (defn op-rows (rs)
+        (if (eq (len rs) 0) ""
+            (str_concat (op-rows-range rs 0 (len rs)) (nl))))
+
+    ; one template cell -> "0,i," | "1,v," | "2,t,n,"
+    (defn tpl-cell (c)
+        (if (eq (nth c 0) 2)
+            (str_concat "2," (str_concat (int_to_str (nth c 1)) (str_concat "," (str_concat (int_to_str (nth c 2)) ","))))
+            (str_concat (int_to_str (nth c 0)) (str_concat "," (str_concat (int_to_str (nth c 1)) ",")))))
+    (defn tpl-cells (cs)
+        (if (eq (len cs) 0) ""
+            (str_concat (tpl-cell (head cs)) (tpl-cells (tail cs)))))
+    ; count program ints: ARG/LIT = 2 ints, NODE = 3 ints
+    (defn tpl-ints (cs)
+        (if (eq (len cs) 0) 0
+            (add (if (eq (nth (head cs) 0) 2) 3 2) (tpl-ints (tail cs)))))
+
+    ; one fk_rwtab row: { "name", arity, ntpl, { prog... } },
+    (defn rw-row (r)
+        (str_concat "  { " (str_concat (qs (nth r 0))
+            (str_concat (cma) (str_concat (int_to_str (nth r 1))
+                (str_concat (cma) (str_concat (int_to_str (tpl-ints (nth r 2)))
+                    (str_concat (cma) (str_concat "{ " (str_concat (tpl-cells (nth r 2)) "} },"))))))))))
+    (defn rw-rows (rs)
+        (if (eq (len rs) 0) ""
+            (str_concat (rw-row (head rs)) (str_concat (nl) (rw-rows (tail rs))))))
+
+    ; line s = newline + s.  str_concat is ARITY 2 — every join is strictly
+    ; (str_concat A B); a chain is right-nested (str_concat A (str_concat B ...)).
+    (defn line (s) (str_concat (nl) s))
+    (defn header ()
+        (str_concat "/* GENERATED by flatten/gen-source-walker-table.fk from flt-ops"
+        (str_concat (line "   (form-flatten.fk, the hand-maintained single source of truth). DO NOT HAND-EDIT.")
+        (str_concat (line "   Adding a value op = a manifest row -> a flt-ops row -> regen, NEVER a C edit. */")
+        (str_concat (line "struct fk_optab_row { const char *name; long long arity; long long tag; };")
+        (str_concat (line "static const struct fk_optab_row fk_optab[] = {")
+        (str_concat (line (op-rows (rows)))
+        (str_concat (line "};")
+        (str_concat (line "static const long long fk_optab_n = sizeof(fk_optab)/sizeof(fk_optab[0]);")
+        (str_concat (line "struct fk_rwtab_row { const char *name; long long arity; long long nprog; long long prog[24]; };")
+        (str_concat (line "static const struct fk_rwtab_row fk_rwtab[] = {")
+        (str_concat (line (rw-rows (rwrules)))
+        (str_concat (line "};")
+        (str_concat (line "static const long long fk_rwtab_n = sizeof(fk_rwtab)/sizeof(fk_rwtab[0]);")
+                    (nl)))))))))))))))
+
+    ; The recipe ACTION is the write itself — write_file (tag 104, a host-io
+    ; op the source-walker runtime already carries) lands the header at the path.
+    ; No shell stdout-capture: the recipe is the whole regeneration. The returned
+    ; value is the byte count (irrelevant); the header file is the effect.
+    (write_file "runtime/fkwu-optable.h" (header)))

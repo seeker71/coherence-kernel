@@ -1,0 +1,709 @@
+; dense-token-handle.fk — ONE Form cell for the whole dense-decoder family, loop in the body.
+;
+; llama-token-handle.fk carried llama3.2:3b's decode loop home through the handle door. This cell is
+; the same shape GENERALIZED, so that one body of dispatch code speaks for every dense GGUF this
+; machine holds: llama3.2:1b, MiniCPM5-1B, Nanbeige4.2-3B, DeepSeek-R1-Distill-Qwen-32B, the Qwen2.5
+; pair. Not one geometry number is typed in — every difference between those files is READ from that
+; file's own header:
+;
+;   arch prefix        general.architecture names the KV prefix (llama. / qwen2. / nanbeige.)
+;   head_dim           <arch>.attention.key_length when present (MiniCPM5: 128 while d/nHead = 96),
+;                      else embedding_length / head_count
+;   rope style         llama-arch files carry ADJACENT pairs (the GGUF conversion permutes Q/K for
+;                      exactly this); qwen2-family files are HALF-SPLIT (neox). The style is decided
+;                      by the arch string the file declares, and both kernels are in the unit.
+;   qkv bias           read from the table: blk.N.attn_q.bias present -> added after the matvec.
+;                      A file without the tensor dispatches nothing (qwen2 yes, llama no).
+;   loops              <arch>.num_loops (nanbeige: 2) — the SAME 22 layers applied again, with the
+;                      final norm between passes (skip_loop_final_norm=0) and PER-PASS KV banks
+;                      (cache slot = layer + loop * nLayer), exactly the semantics
+;                      nanbeige-looped-transformer.fk proved four-way on the CPU.
+;   rope freqs         rope_freqs.weight when the file carries one (llama3.2); a buffer of 1.0f the
+;                      cell writes through metal_buf_write when it does not — theta then reduces to
+;                      pos * base^(-i/hd), which is exactly the no-factor rope.
+;   quantization       per TENSOR, from that tensor's own ggml type: Q6_K (14), Q4_K (12), Q8_0 (8)
+;                      matvecs are all in the unit; F32 (0) and F16 (1) are priced for views. An
+;                      unknown type prices to 0 bytes and the zero-length view refuses loudly at
+;                      metal_buf_from_file rather than dispatching garbage.
+;   tied embeddings    the absence of output.weight in the table, never a convention.
+;
+; THE KERNELS ARE THE BODY'S ATTESTANTS, unchanged: q6k/q4k/q80 fused matvec (one thread per row,
+; serial right-fold), form_rmsnorm_f32 (one thread), form_rope_f32 (adjacent pairs, per head),
+; form_gqa_decode_f32, form_swiglu_f32, form_add_f32, form_argmax_f32. Two kernels are this cell's
+; own and both are transcriptions, not inventions: dth-copy-msl is the identity with a shifted
+; destination (the KV-cache move the door's fixed-offset binding makes necessary — llama-token-
+; handle.fk's finding, kept), and dth-neox-msl is form_rope_f32's arithmetic with the pair layout
+; (j, j+rd/2) instead of (i, i+1) and the frequency exponent 2j/rd — the half-split rotation the
+; qwen2 family declares. fp contraction is OFF by pragma in the emitted text, the fix
+; fk-metal-carrier.m's own header says belongs to the Form cell.
+;
+; THE TENSOR TABLE IS WALKED ONCE. egg-find-tensor re-walks the header per lookup — measured O(n^2)
+; at 255 tensors (~74 s of setup) and 771 tensors would pay ~9x that. dth-table carries the cursor
+; through the tensor infos exactly once and keeps (name type d0 d1 dataoff bytes) rows; every later
+; lookup is a list scan. The same one-walk shape l3d-pieces uses for the vocabulary, applied to the
+; table.
+;
+; THE TOKENIZER IS THE ATTESTANT'S, PORTED AND SAID PLAINLY: greedy LONGEST-MATCH over the file's
+; own vocabulary, not BPE merge order — metal_first_token.sh states this about itself at its encode
+; function and the body owes the same statement. gpt2-model vocabs go through the byte-level
+; alphabet FORWARD (text byte -> substitute codepoint -> UTF-8, the exact inverse of
+; llama3-detokenize.fk's map); llama-model (SentencePiece) vocabs go through the space -> U+2581
+; convention. BOS is the file's tokenizer.ggml.bos_token_id, prepended when the file's
+; add_bos_token says so (a BOOL KV, type 7 — read as such, not misread through a u32 door).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/q6k-msl.fk form-stdlib/q4k-msl.fk form-stdlib/q8-0-msl.fk form-stdlib/q5-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/llama-numerics.fk form-stdlib/gguf-meta.fk form-stdlib/trig.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/metal-door.fk form-stdlib/llama3-detokenize.fk
+;
+; Proven by: form/native/metal/tests/dense-family-band.fk
+
+(do
+    ; ================= the translation unit =================
+    (defn dth-copy-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& doff [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; d[doff + i] = s[i]; }")))
+
+    ; Half-split rope: pair (j, j+rd/2) of the first rd dims of each head, theta = pos *
+    ; base^(-2j/rd) / fr[j]. Per head, serial over pairs — form_rope_f32's own shape and rounding
+    ; discipline (named temporaries, the recipe's fpow/fsin/fcos), only the LAYOUT differs.
+    (defn dth-neox-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* v [[buffer(0)]], device const float* fr [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& rd [[buffer(4)]], constant uint& pos [[buffer(5)]], constant float& base [[buffer(6)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint o = h * hd; uint np = rd / 2u; uint j = 0; while (j < np) { float ex = (-2.0f * float(j)) / float(rd); float fq = fpow(base, ex) / fr[j]; float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + j]; float q1 = v[o + j + np]; float t0 = q0 * ca; float t1 = q1 * sa; v[o + j] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; v[o + j + np] = t2 + t3; j += 1u; } }")))
+
+    ; ---- the phi2 appendix: what a parallel-residual, LayerNorm, GELU, Q4_0 block needs ----
+    ; LayerNorm with gain AND bias — mean-centered, unlike RMSNorm. One thread, the family's own
+    ; Newton-50 sqrt seeded at its argument, ascending folds.
+    (defn dth-ln-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device const float* bb [[buffer(2)]], device float* y [[buffer(3)]], constant uint& n [[buffer(4)]], constant float& eps [[buffer(5)]], uint gid [[thread_position_in_grid]]) { if (gid != 0u) return; float s = 0.0f; uint j = 0; while (j < n) { s = s + x[j]; j += 1; } float mean = s / float(n); float v = 0.0f; j = 0; while (j < n) { float c = x[j] - mean; v = v + c * c; j += 1; } float sdv = v / float(n) + eps; float gg = sdv; uint it = 50; while (it > 0) { it -= 1; gg = 0.5f * (gg + sdv / gg); } float inv = 1.0f / gg; j = 0; while (j < n) { y[j] = ((x[j] - mean) * inv) * g[j] + bb[j]; j += 1; } }")))
+
+    ; GELU, tanh form, tanh through the unit's own fexp with the always-bounded e^(-2|t|) shape:
+    ; e is in (0,1], so no overflow path exists and no clamp is invented.
+    (defn dth-gelu-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float xv = x[i]; float t = 0.7978845608028654f * (xv + 0.044715f * xv * xv * xv); float at = (t < 0.0f) ? -t : t; float e = fexp(-2.0f * at); float s = (1.0f - e) / (1.0f + e); float th = (t < 0.0f) ? -s : s; y[i] = 0.5f * xv * (1.0f + th); }")))
+
+    ; d[i] = s[soff + i] — the read-side twin of the cache move, for slicing a fused qkv.
+    (defn dth-copyfrom-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& soff [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; d[i] = s[soff + i]; }")))
+
+    ; Q4_0: { half d; uint8 qs[16]; } — 18 bytes per 32 weights, w = d * (nib - 8). The q4k helpers
+    ; are the unit's; only the weight reach is new.
+    (defn dth-q40-weight-msl ()
+        "static inline float q40_w(device const uchar* qb, uint idx) { uint blk = idx / 32u; uint i = idx - blk * 32u; uint b = blk * 18u; uint half_ = i / 16u; uint j = i - half_ * 16u; int qbyte = int(qb[b + 2u + j]); int nib = (half_ == 0u) ? q4k_mod(qbyte, 16) : qbyte / 16; float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); return d * float(nib - 8); } ")
+    (defn dth-q40-dequant-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = q40_w(qb, off + i); }")))
+    (defn dth-q40-matvec-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = q40_w(qb, uint(i) * cols + j) * float(x[j]); acc = p + acc; } y[i] = acc; }")))
+
+    ; The pragma is the carrier header's own stated fix: this door's default COMPILES CONTRACTED,
+    ; and the cell owns every number, so the cell says so in the text it emits.
+    (defn dth-msl ()
+        (str_concat "#include <metal_stdlib>\n#pragma clang fp contract(off)\n"
+        (str_concat (q6m-msl-unit "form_q6k_dequant_f32" "form_q6k_matvec_f32")
+        (str_concat (q4m-msl-unit "form_q4k_dequant_f32" "form_q4k_matvec_f32")
+        (str_concat (q80-msl-appendix "form_q80_dequant_f32" "form_q80_matvec_f32" "form_q80_matvec_lane_f32")
+        (str_concat (q5m-msl-appendix "form_q5k_dequant_f32" "form_q5k_matvec_f32"
+                                      "form_q50_dequant_f32" "form_q50_matvec_f32")
+        (str_concat (ldm-msl-unit)
+        (str_concat (dth-copy-msl "form_copy_off_f32")
+        (str_concat (dth-neox-msl "form_rope_neox_f32")
+        (str_concat (dth-ln-msl "form_layernorm_f32")
+        (str_concat (dth-gelu-msl "form_gelu_f32")
+        (str_concat (dth-copyfrom-msl "form_copy_from_f32")
+        (str_concat (dth-q40-weight-msl)
+        (str_concat (dth-q40-dequant-msl "form_q40_dequant_f32")
+                    (dth-q40-matvec-msl "form_q40_matvec_f32")))))))))))))))
+
+    ; ================= the file's numbers, in ONE walk =================
+    (defn dth-header-window () 40000000)
+    (defn dth-alignment () 32)
+    (defn dth-src (path) (eqr-of-file path 0 (dth-header-window)))
+
+    (defn dth-ti-name (src off) (substring src (add off 8) (add (add off 8) (egg-ti-namelen src off))))
+    (defn dth-ti-dim1 (src off) (if (gt (egg-ti-ndims src off) 1) (egg-ti-dim src off 1) 1))
+
+    ; bytes by ggml type: F32 0, F16 1, Q5_0 6, Q8_0 8, Q4_K 12, Q5_K 13, Q6_K 14. Anything else
+    ; prices 0, and a zero-length view REFUSES at the door instead of mapping a wrong window.
+    (defn dth-price (t n)
+        (if (eq t 0) (mul n 4)
+        (if (eq t 1) (mul n 2)
+        (if (eq t 2) (mul (div n 32) 18)
+        (if (eq t 6) (mul (div n 32) 22)
+        (if (eq t 8) (mul (div n 32) 34)
+        (if (eq t 12) (mul (div n 256) 144)
+        (if (eq t 13) (mul (div n 256) 176)
+        (if (eq t 14) (mul (div n 256) 210) 0)))))))))
+
+    ; One row: (name type d0 d1 dataoff bytes). One walk builds every row.
+    (defn dth-table-row (src off)
+        (do (let t (egg-ti-type src off))
+            (let d0 (egg-ti-dim0 src off))
+            (let d1 (dth-ti-dim1 src off))
+            (list (dth-ti-name src off) t d0 d1 (egg-ti-dataoff src off) (dth-price t (mul d0 d1)))))
+
+    (defn dth-table-walk (src off n acc)
+        (if (le n 0) acc
+            (dth-table-walk src (egg-ti-next src off) (sub n 1)
+                (append acc (list (dth-table-row src off))))))
+
+    (defn dth-table (src)
+        (dth-table-walk src (egg-tinfo-start src) (egg-tensor-count src) (empty)))
+
+    (defn dth-row-find (tab name)
+        (if (eq (len tab) 0) 0
+            (if (str_eq (nth (head tab) 0) name) (head tab) (dth-row-find (tail tab) name))))
+
+    ; A tensor VIEW from a table row: (handle rows cols type). rows = dim1, cols = dim0.
+    (defn dth-tv (tab base path name)
+        (do (let r (dth-row-find tab name))
+            (if (eq r 0) (list 0 0 0 (sub 0 1))
+                (list (metal_buf_from_file path (add base (nth r 4)) (nth r 5))
+                      (nth r 3) (nth r 2) (nth r 1)))))
+
+    (defn dth-tv-h  (t) (nth t 0))
+    (defn dth-tv-r  (t) (nth t 1))
+    (defn dth-tv-c  (t) (nth t 2))
+    (defn dth-tv-ty (t) (nth t 3))
+    (defn dth-tv-none? (t) (eq (dth-tv-ty t) (sub 0 1)))
+
+    (defn dth-blk (l suffix) (str_concat "blk." (str_concat (int_to_str l) (str_concat "." suffix))))
+
+    ; Twelve entries per layer: the nine every dense block has, then the three biases a qwen2 block
+    ; adds — ABSENT is a fact about the table and dispatches nothing.
+    (defn dth-layer (tab base path l)
+        (list (dth-tv tab base path (dth-blk l "attn_norm.weight"))
+              (dth-tv tab base path (dth-blk l "attn_q.weight"))
+              (dth-tv tab base path (dth-blk l "attn_k.weight"))
+              (dth-tv tab base path (dth-blk l "attn_v.weight"))
+              (dth-tv tab base path (dth-blk l "attn_output.weight"))
+              (dth-tv tab base path (dth-blk l "ffn_norm.weight"))
+              (dth-tv tab base path (dth-blk l "ffn_gate.weight"))
+              (dth-tv tab base path (dth-blk l "ffn_up.weight"))
+              (dth-tv tab base path (dth-blk l "ffn_down.weight"))
+              (dth-tv tab base path (dth-blk l "attn_q.bias"))
+              (dth-tv tab base path (dth-blk l "attn_k.bias"))
+              (dth-tv tab base path (dth-blk l "attn_v.bias"))))
+
+    (defn dth-layers (tab base path l n acc)
+        (if (ge l n) acc
+            (dth-layers tab base path (add l 1) n (append acc (list (dth-layer tab base path l))))))
+
+    (defn dth-out-tv (tab base path)
+        (do (let r (dth-row-find tab "output.weight"))
+            (if (eq r 0) (dth-tv tab base path "token_embd.weight")
+                (dth-tv tab base path "output.weight"))))
+
+    ; ================= metadata by arch prefix =================
+    (defn dth-key (arch suffix) (str_concat arch (str_concat "." suffix)))
+
+    ; A BOOL KV is type 7, one byte. gmt-u32 refuses it; this reads it as what it is.
+    (defn dth-bool (src key dflt)
+        (do (let off (gmt-find src key))
+            (if (eq off (gmt-absent)) dflt
+                (if (eq (gmt-vtype src off) 7) (eqr-at src (gmt-valoff src off)) dflt))))
+
+    (defn dth-u32-or (src key dflt)
+        (do (let v (gmt-u32 src key))
+            (if (eq v (gmt-absent)) dflt v)))
+
+    ; ================= the pool =================
+    ; pipes: 0 q6mv 1 q4mv 2 q80mv 3 q6dq 4 q4dq 5 q80dq 6 rms 7 rope 8 neox 9 attn 10 swiglu
+    ;        11 add 12 argmax 13 copy 14 q5kmv 15 q5kdq 16 q50mv 17 q50dq 18 q40mv 19 q40dq
+    ;        20 layernorm 21 gelu 22 copyfrom
+    (defn dth-pipes (msl)
+        (list (metal_pipeline msl "form_q6k_matvec_f32")
+              (metal_pipeline msl "form_q4k_matvec_f32")
+              (metal_pipeline msl "form_q80_matvec_f32")
+              (metal_pipeline msl "form_q6k_dequant_f32")
+              (metal_pipeline msl "form_q4k_dequant_f32")
+              (metal_pipeline msl "form_q80_dequant_f32")
+              (metal_pipeline msl "form_rmsnorm_f32")
+              (metal_pipeline msl "form_rope_f32")
+              (metal_pipeline msl "form_rope_neox_f32")
+              (metal_pipeline msl "form_gqa_decode_f32")
+              (metal_pipeline msl "form_swiglu_f32")
+              (metal_pipeline msl "form_add_f32")
+              (metal_pipeline msl "form_argmax_f32")
+              (metal_pipeline msl "form_copy_off_f32")
+              (metal_pipeline msl "form_q5k_matvec_f32")
+              (metal_pipeline msl "form_q5k_dequant_f32")
+              (metal_pipeline msl "form_q50_matvec_f32")
+              (metal_pipeline msl "form_q50_dequant_f32")
+              (metal_pipeline msl "form_q40_matvec_f32")
+              (metal_pipeline msl "form_q40_dequant_f32")
+              (metal_pipeline msl "form_layernorm_f32")
+              (metal_pipeline msl "form_gelu_f32")
+              (metal_pipeline msl "form_copy_from_f32")))
+
+    (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
+
+    ; bufs: 0 X 1 Xb 2 Q 3 Ks 4 Vs 5 Attn 6 Proj 7 Ffn 8 Gate 9 Up 10 Act 11 Logits 12 Scratch
+    ;       13 OutI 14 OutV
+    ; Q, Attn are sized qOut = nHead * headDim, which is NOT dModel on every file (nanbeige: 6144
+    ; over d=3072; MiniCPM5: 2048 over 1536).
+    (defn dth-bufs (dModel dFF qOut kvd vocabN nHead maxpos)
+        (list (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul qOut 4))
+              (metal_buf_alloc (mul kvd 4))
+              (metal_buf_alloc (mul kvd 4))
+              (metal_buf_alloc (mul qOut 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dFF 4))
+              (metal_buf_alloc (mul dFF 4))
+              (metal_buf_alloc (mul dFF 4))
+              (metal_buf_alloc (mul vocabN 4))
+              (metal_buf_alloc (mul (mul (mul 2 nHead) maxpos) 4))
+              (metal_buf_alloc 16)
+              (metal_buf_alloc 16)))
+
+    ; nLayer * nLoop cache banks: pass 2 must never read pass 1's history as its own.
+    (defn dth-cache (n kvd maxpos acc)
+        (if (le n 0) acc
+            (dth-cache (sub n 1) kvd maxpos
+                (append acc (list (metal_buf_alloc (mul (mul kvd maxpos) 4)))))))
+
+    ; rope freqs: the file's own rope_freqs.weight, or np words of 1.0f this cell WRITES.
+    (defn dth-ones (n acc) (if (le n 0) acc (dth-ones (sub n 1) (str_concat acc (md-le32 1065353216)))))
+    (defn dth-rope-freqs (tab base path np)
+        (do (let r (dth-row-find tab "rope_freqs.weight"))
+            (if (eq r 0)
+                (do (let h (metal_buf_alloc (mul np 4)))
+                    (metal_buf_write h 0 (dth-ones np ""))
+                    h)
+                (dth-tv-h (dth-tv tab base path "rope_freqs.weight")))))
+
+    ; ================= dispatches =================
+    (defn dth-mv (ps tv xh yh)
+        (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 0)
+                       (if (eq (dth-tv-ty tv) 12) (nth ps 1)
+                       (if (eq (dth-tv-ty tv) 13) (nth ps 14)
+                       (if (eq (dth-tv-ty tv) 6) (nth ps 16)
+                       (if (eq (dth-tv-ty tv) 2) (nth ps 18) (nth ps 2))))))
+                       (md-bind (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)))
+                       (dth-tv-r tv)))
+
+    (defn dth-dq (ps tv yh off n)
+        (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 3)
+                       (if (eq (dth-tv-ty tv) 12) (nth ps 4)
+                       (if (eq (dth-tv-ty tv) 13) (nth ps 15)
+                       (if (eq (dth-tv-ty tv) 6) (nth ps 17)
+                       (if (eq (dth-tv-ty tv) 2) (nth ps 19) (nth ps 5))))))
+                       (md-bind (list (dth-tv-h tv) yh) (list off n))
+                       n))
+
+    (defn dth-rms (ps xh gtv yh n epsBits)
+        (metal_enqueue (nth ps 6) (md-bind (list xh (dth-tv-h gtv) yh) (list n epsBits)) 1))
+
+    ; style 0: adjacent pairs over the whole head. style 1: half-split over the first rd dims.
+    (defn dth-rope (ps style vh ropeH nh hd rd pos baseBits)
+        (if (eq style 1)
+            (metal_enqueue (nth ps 8) (md-bind (list vh ropeH) (list nh hd rd pos baseBits)) nh)
+            (metal_enqueue (nth ps 7) (md-bind (list vh ropeH) (list nh hd pos baseBits)) nh)))
+
+    (defn dth-attn (ps qh kh vh yh sh npos nq nkv hd scaleBits sstride)
+        (metal_enqueue (nth ps 9)
+                       (md-bind (list qh kh vh yh sh) (list npos nq nkv hd scaleBits sstride))
+                       nq))
+
+    (defn dth-elem (ps p ah bh yh n) (metal_enqueue p (md-bind (list ah bh yh) (list n)) n))
+
+    (defn dth-copy (ps sh dh n doff) (metal_enqueue (nth ps 13) (md-bind (list sh dh) (list n doff)) n))
+
+    ; a bias the table does not carry dispatches NOTHING — in-place add is safe for the
+    ; one-thread-per-element kernel (thread i reads and writes index i alone).
+    (defn dth-bias (ps btv xh n)
+        (if (dth-tv-none? btv) 0 (dth-elem ps (nth ps 11) xh (dth-tv-h btv) xh n)))
+
+    ; ================= one block =================
+    ; geo: 0 dModel 1 dFF 2 nHead 3 nKV 4 headDim 5 kvd 6 maxpos 7 vocabN 8 epsBits 9 baseBits
+    ;      10 scaleBits 11 ropeH 12 nLayer 13 qOut 14 ropeStyle 15 ropeDim 16 nLoop
+    (defn dth-block (ps bs geo lay ck cv pos)
+        (do
+            (dth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8))
+            (dth-mv ps (nth lay 1) (nth bs 1) (nth bs 2))
+            (dth-mv ps (nth lay 2) (nth bs 1) (nth bs 3))
+            (dth-mv ps (nth lay 3) (nth bs 1) (nth bs 4))
+            (dth-bias ps (nth lay 9) (nth bs 2) (nth geo 13))
+            (dth-bias ps (nth lay 10) (nth bs 3) (nth geo 5))
+            (dth-bias ps (nth lay 11) (nth bs 4) (nth geo 5))
+            (dth-rope ps (nth geo 14) (nth bs 2) (nth geo 11) (nth geo 2) (nth geo 4) (nth geo 15) pos (nth geo 9))
+            (dth-rope ps (nth geo 14) (nth bs 3) (nth geo 11) (nth geo 3) (nth geo 4) (nth geo 15) pos (nth geo 9))
+            (dth-copy ps (nth bs 3) ck (nth geo 5) (mul pos (nth geo 5)))
+            (dth-copy ps (nth bs 4) cv (nth geo 5) (mul pos (nth geo 5)))
+            (dth-attn ps (nth bs 2) ck cv (nth bs 5) (nth bs 12)
+                      (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6))
+            (dth-mv ps (nth lay 4) (nth bs 5) (nth bs 6))
+            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 6) (nth bs 0) (nth geo 0))
+            (dth-rms ps (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8))
+            (dth-mv ps (nth lay 6) (nth bs 1) (nth bs 8))
+            (dth-mv ps (nth lay 7) (nth bs 1) (nth bs 9))
+            (dth-elem ps (nth ps 10) (nth bs 8) (nth bs 9) (nth bs 10) (nth geo 1))
+            (dth-mv ps (nth lay 8) (nth bs 10) (nth bs 7))
+            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 7) (nth bs 0) (nth geo 0))
+            1))
+
+    (defn dth-blocks (ps bs geo lays cks cvs pos l n loopoff)
+        (if (ge l n) 1
+            (do (dth-block ps bs geo (nth lays l) (nth cks (add l loopoff)) (nth cvs (add l loopoff)) pos)
+                (dth-blocks ps bs geo lays cks cvs pos (add l 1) n loopoff))))
+
+    ; the loop passes: after every pass but the last, the FULL final norm, in place — the released
+    ; nanbeige semantics nanbeige-looped-transformer.fk carries (norm after each pass; the last
+    ; pass's norm is the head's). A one-loop file walks this once and normalizes nowhere.
+    (defn dth-passes (ps bs geo lays cks cvs onormTv pos lp nLoop)
+        (if (ge lp nLoop) 1
+            (do (dth-blocks ps bs geo lays cks cvs pos 0 (nth geo 12) (mul lp (nth geo 12)))
+                (if (lt (add lp 1) nLoop)
+                    (dth-rms ps (nth bs 0) onormTv (nth bs 0) (nth geo 0) (nth geo 8))
+                    0)
+                (dth-passes ps bs geo lays cks cvs onormTv pos (add lp 1) nLoop))))
+
+    (defn dth-head (ps bs geo onormTv projTv)
+        (do
+            (dth-rms ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 8))
+            (dth-mv ps projTv (nth bs 1) (nth bs 11))
+            (metal_enqueue (nth ps 12)
+                           (md-bind (list (nth bs 11) (nth bs 13) (nth bs 14)) (list (nth geo 7)))
+                           1)
+            0))
+
+    (defn dth-u32 (s)
+        (add (str_byte_at s 0)
+        (add (mul (str_byte_at s 1) 256)
+        (add (mul (str_byte_at s 2) 65536)
+             (mul (str_byte_at s 3) 16777216)))))
+
+    (defn dth-forward (ps bs geo lays cks cvs embTv onormTv projTv id pos)
+        (do
+            (dth-dq ps embTv (nth bs 0) (mul id (nth geo 0)) (nth geo 0))
+            (dth-passes ps bs geo lays cks cvs onormTv pos 0 (nth geo 16))
+            (dth-head ps bs geo onormTv projTv)
+            (dth-u32 (metal_buf_read (nth bs 13) 0 4))))
+
+    (defn dth-generate (ps bs geo lays cks cvs embTv onormTv projTv id pos n acc)
+        (if (le n 0) acc
+            (do (let nid (dth-forward ps bs geo lays cks cvs embTv onormTv projTv id pos))
+                (dth-generate ps bs geo lays cks cvs embTv onormTv projTv
+                              nid (add pos 1) (sub n 1) (append acc (list nid))))))
+
+    (defn dth-prefill (ps bs geo lays cks cvs embTv onormTv projTv ids pos)
+        (if (eq (len ids) 1)
+            (list (dth-forward ps bs geo lays cks cvs embTv onormTv projTv (head ids) pos) pos)
+            (do (dth-forward ps bs geo lays cks cvs embTv onormTv projTv (head ids) pos)
+                (dth-prefill ps bs geo lays cks cvs embTv onormTv projTv (tail ids) (add pos 1)))))
+
+    ; ================= the tokenizer: longest match, stated =================
+    ; FORWARD byte-level map (gpt2 vocabs): a text byte to the codepoint the vocabulary spells it
+    ; as, UTF-8 encoded. The inverse of l3d-uni-byte, boundary for boundary.
+    (defn dtk-sub-cp (b)
+        (if (le b 32) (add 256 b)
+        (if (eq b 173) 323
+            (add 256 (sub b 94)))))
+
+    (defn dtk-cp-utf8 (cp)
+        (if (lt cp 128) (byte_to_str cp)
+            (str_concat (byte_to_str (add 192 (div cp 64)))
+                        (byte_to_str (add 128 (mod cp 64))))))
+
+    (defn dtk-gpt2-byte (b)
+        (if (l3d-printable? b) (byte_to_str b) (dtk-cp-utf8 (dtk-sub-cp b))))
+
+    (defn dtk-gpt2-walk (text i n acc)
+        (if (ge i n) acc
+            (dtk-gpt2-walk text (add i 1) n (str_concat acc (dtk-gpt2-byte (str_byte_at text i))))))
+    (defn dtk-gpt2-map (text) (dtk-gpt2-walk text 0 (str_len text) ""))
+
+    ; SentencePiece surface: every space becomes U+2581, and the text leads with one.
+    (defn dtk-sp-walk (text i n acc)
+        (if (ge i n) acc
+            (dtk-sp-walk text (add i 1) n
+                (str_concat acc
+                    (if (eq (str_byte_at text i) 32)
+                        (str_concat (byte_to_str 226) (str_concat (byte_to_str 150) (byte_to_str 129)))
+                        (byte_to_str (str_byte_at text i)))))))
+    (defn dtk-sp-map (text)
+        (str_concat (str_concat (byte_to_str 226) (str_concat (byte_to_str 150) (byte_to_str 129)))
+                    (dtk-sp-walk text 0 (str_len text) "")))
+
+    ; does piece at cursor `at` (len L) equal text[i .. i+L)?
+    (defn dtk-piece-eq (src at L text i k)
+        (if (ge k L) true
+            (if (eq (gmt-token-byte src at k) (str_byte_at text (add i k)))
+                (dtk-piece-eq src at L text i (add k 1))
+                false)))
+
+    ; ONE vocabulary walk per text position: keep the longest piece that matches there. Ties in
+    ; length keep the FIRST id — a rule, stated.
+    (defn dtk-best (src at id n text i rem bestL bestId)
+        (if (le n 0) (list bestId bestL)
+            (do (let L (gmt-token-len src at))
+                (let hit (if (gt L bestL)
+                             (if (le L rem) (dtk-piece-eq src at L text i 0) false)
+                             false))
+                (dtk-best src (gmt-token-next src at) (add id 1) (sub n 1) text i rem
+                          (if hit L bestL) (if hit id bestId)))))
+
+    (defn dtk-ids (src vfirst vn text i n acc)
+        (if (ge i n) acc
+            (do (let b (dtk-best src vfirst 0 vn text i (sub n i) 0 (sub 0 1)))
+                (if (lt (nth b 0) 0) acc
+                    (dtk-ids src vfirst vn text (add i (nth b 1)) n (append acc (list (nth b 0))))))))
+
+    ; text -> ids. model is the file's tokenizer.ggml.model: "gpt2" maps bytes, "llama" maps spaces.
+    (defn dtk-encode (src text)
+        (do (let surface (if (str_eq (gmt-str src "tokenizer.ggml.model") "llama")
+                             (dtk-sp-map text)
+                             (dtk-gpt2-map text)))
+            (let ids (dtk-ids src (gmt-tokens-first src) (gmt-vocab-n src) surface 0
+                              (str_len surface) (empty)))
+            (if (eq (dth-bool src "tokenizer.ggml.add_bos_token" 1) 1)
+                (append (list (gmt-u32 src "tokenizer.ggml.bos_token_id")) ids)
+                ids)))
+
+    ; ================= detokenize (SentencePiece side; gpt2 side is l3d-text) =================
+    (defn dtk-sp-piece (src at L k acc)
+        (if (ge k L) acc
+            (do (let b (gmt-token-byte src at k))
+                (if (eq b 226)
+                    (if (lt (add k 2) L)
+                        (if (eq (gmt-token-byte src at (add k 1)) 150)
+                            (if (eq (gmt-token-byte src at (add k 2)) 129)
+                                (dtk-sp-piece src at L (add k 3) (str_concat acc " "))
+                                (dtk-sp-piece src at L (add k 1) (str_concat acc (byte_to_str b))))
+                            (dtk-sp-piece src at L (add k 1) (str_concat acc (byte_to_str b))))
+                        (dtk-sp-piece src at L (add k 1) (str_concat acc (byte_to_str b))))
+                    (dtk-sp-piece src at L (add k 1) (str_concat acc (byte_to_str b)))))))
+
+    ; one cursor walk for ALL wanted ids (ids need not be sorted; each pass scans the walk once per
+    ; id — ids are few, pieces are many, so the walk is what must not repeat per id).
+    (defn dtk-sp-one (src at id want)
+        (if (eq id want) at
+            (dtk-sp-one src (gmt-token-next src at) (add id 1) want)))
+
+    ; SentencePiece BYTE-FALLBACK pieces spell a byte as the six characters <0xNN>. They decode to
+    ; the byte, not to their spelling.
+    (defn dtk-hex (c)
+        (if (le c 57) (sub c 48)
+            (if (le c 70) (add (sub c 65) 10) (add (sub c 97) 10))))
+    (defn dtk-sp-bytepiece? (src at L)
+        (if (eq L 6)
+            (if (eq (gmt-token-byte src at 0) 60)
+                (if (eq (gmt-token-byte src at 1) 48)
+                    (if (eq (gmt-token-byte src at 2) 120)
+                        (eq (gmt-token-byte src at 5) 62) false) false) false) false))
+    (defn dtk-sp-render (src at L)
+        (if (dtk-sp-bytepiece? src at L)
+            (byte_to_str (add (mul 16 (dtk-hex (gmt-token-byte src at 3)))
+                              (dtk-hex (gmt-token-byte src at 4))))
+            (dtk-sp-piece src at L 0 "")))
+    (defn dtk-sp-text-walk (src vfirst ids acc)
+        (if (eq (len ids) 0) acc
+            (do (let at (dtk-sp-one src vfirst 0 (head ids)))
+                (dtk-sp-text-walk src vfirst (tail ids)
+                    (str_concat acc (dtk-sp-render src at (gmt-token-len src at)))))))
+    (defn dtk-sp-text (src ids) (dtk-sp-text-walk src (gmt-tokens-first src) ids ""))
+
+    ; ================= geometry, assembled =================
+    ; Everything below is READ. Returns the (geo lays cks cvs embTv onormTv projTv) septet a driver
+    ; needs, plus the pipes and buffers, as one list:
+    ;   0 ps 1 bs 2 geo 3 lays 4 cks 5 cvs 6 embTv 7 onormTv 8 projTv 9 arch 10 src
+    (defn dth-open (path maxpos ropeStyleOverride)
+        (do
+            (let src (dth-src path))
+            (let arch (gmt-str src "general.architecture"))
+            (let tab (dth-table src))
+            (let base (egg-data-base src (dth-alignment)))
+            (let nLayer (gmt-u32 src (dth-key arch "block_count")))
+            (let dModel (gmt-u32 src (dth-key arch "embedding_length")))
+            (let dFF (gmt-u32 src (dth-key arch "feed_forward_length")))
+            (let nHead (gmt-u32 src (dth-key arch "attention.head_count")))
+            (let nKV (gmt-u32 src (dth-key arch "attention.head_count_kv")))
+            (let headDim (dth-u32-or src (dth-key arch "attention.key_length") (div dModel nHead)))
+            (let ropeDim (dth-u32-or src (dth-key arch "rope.dimension_count") headDim))
+            (let nLoop (dth-u32-or src (dth-key arch "num_loops") 1))
+            (let ropeBase (gmt-f32 src (dth-key arch "rope.freq_base")))
+            (let rmsEps (gmt-f32 src (dth-key arch "attention.layer_norm_rms_epsilon")))
+            (let kvd (mul nKV headDim))
+            (let qOut (mul nHead headDim))
+            ; qwen2's rope is half-split; llama-arch files were permuted for adjacent pairs at
+            ; conversion. -1 asks the arch; 0/1 force a style so a band can PROBE an undeclared file.
+            (let style (if (ge ropeStyleOverride 0) ropeStyleOverride
+                           (if (str_eq arch "qwen2") 1 0)))
+            (let projTv0 (dth-out-tv tab base path))
+            (let vocabN (dth-tv-r projTv0))
+            (let ps (dth-pipes (dth-msl)))
+            (let bs (dth-bufs dModel dFF qOut kvd vocabN nHead maxpos))
+            (let lays (dth-layers tab base path 0 nLayer (empty)))
+            (let cks (dth-cache (mul nLayer nLoop) kvd maxpos (empty)))
+            (let cvs (dth-cache (mul nLayer nLoop) kvd maxpos (empty)))
+            (let embTv (dth-tv tab base path "token_embd.weight"))
+            (let onormTv (dth-tv tab base path "output_norm.weight"))
+            (let ropeH (dth-rope-freqs tab base path (div headDim 2)))
+            (let geo (list dModel dFF nHead nKV headDim kvd maxpos vocabN
+                           (md-f32-bits rmsEps) (md-f32-bits ropeBase)
+                           (md-f32-bits (div 1.0 (math_sqrt (add headDim 0.0))))
+                           ropeH nLayer qOut style ropeDim nLoop))
+            (list ps bs geo lays cks cvs embTv onormTv projTv0 arch src)))
+
+    ; ================= the phi2 shape: parallel residual, LayerNorm, fused qkv =================
+    ; One norm per block feeds BOTH arms, and the residual adds both:
+    ;   x = x + attn_out(attn(rope(split(qkv(ln(x)))))) + ffn_down(gelu(ffn_up(ln(x))))
+    ; The rope is half-split over the first rope.dimension_count dims (32 of 64), the norm is
+    ; MEAN-CENTERED with gain and bias, the activation is GELU, and every projection carries a
+    ; bias. eps is <arch>.attention.layer_norm_epsilon — the LN key, not the RMS key.
+
+    (defn dth-f32-or (src key dflt)
+        (do (let v (gmt-f32 src key))
+            (if (eq v (gmt-absent)) dflt v)))
+
+    ; ten entries per layer: norm w/b, qkv w/b, attn_output w/b, ffn_up w/b, ffn_down w/b
+    (defn dth-p2-layer (tab base path l)
+        (list (dth-tv tab base path (dth-blk l "attn_norm.weight"))
+              (dth-tv tab base path (dth-blk l "attn_norm.bias"))
+              (dth-tv tab base path (dth-blk l "attn_qkv.weight"))
+              (dth-tv tab base path (dth-blk l "attn_qkv.bias"))
+              (dth-tv tab base path (dth-blk l "attn_output.weight"))
+              (dth-tv tab base path (dth-blk l "attn_output.bias"))
+              (dth-tv tab base path (dth-blk l "ffn_up.weight"))
+              (dth-tv tab base path (dth-blk l "ffn_up.bias"))
+              (dth-tv tab base path (dth-blk l "ffn_down.weight"))
+              (dth-tv tab base path (dth-blk l "ffn_down.bias"))))
+
+    (defn dth-p2-layers (tab base path l n acc)
+        (if (ge l n) acc
+            (dth-p2-layers tab base path (add l 1) n (append acc (list (dth-p2-layer tab base path l))))))
+
+    ; bufs: 0 X 1 Xb 2 QKV 3 Q 4 Ks 5 Vs 6 Attn 7 Proj 8 Ffn 9 Up 10 Act 11 Logits 12 Scratch
+    ;       13 OutI 14 OutV
+    (defn dth-p2-bufs (dModel dFF vocabN nHead maxpos kvd)
+        (list (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul (mul dModel 3) 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul kvd 4))
+              (metal_buf_alloc (mul kvd 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dModel 4))
+              (metal_buf_alloc (mul dFF 4))
+              (metal_buf_alloc (mul dFF 4))
+              (metal_buf_alloc (mul vocabN 4))
+              (metal_buf_alloc (mul (mul (mul 2 nHead) maxpos) 4))
+              (metal_buf_alloc 16)
+              (metal_buf_alloc 16)))
+
+    (defn dth-p2-ln (ps xh gtv btv yh n epsBits)
+        (metal_enqueue (nth ps 20)
+                       (md-bind (list xh (dth-tv-h gtv) (dth-tv-h btv) yh) (list n epsBits)) 1))
+    (defn dth-p2-slice (ps sh dh n soff)
+        (metal_enqueue (nth ps 22) (md-bind (list sh dh) (list n soff)) n))
+    (defn dth-p2-gelu (ps xh yh n)
+        (metal_enqueue (nth ps 21) (md-bind (list xh yh) (list n)) n))
+
+    ; geo as dth-open lays it; style is 1 (half-split) by the arch's own build, rd = 32 of hd 64.
+    (defn dth-p2-block (ps bs geo lay ck cv pos)
+        (do
+            (dth-p2-ln ps (nth bs 0) (nth lay 0) (nth lay 1) (nth bs 1) (nth geo 0) (nth geo 8))
+            (dth-mv ps (nth lay 2) (nth bs 1) (nth bs 2))
+            (dth-bias ps (nth lay 3) (nth bs 2) (mul (nth geo 0) 3))
+            (dth-p2-slice ps (nth bs 2) (nth bs 3) (nth geo 0) 0)
+            (dth-p2-slice ps (nth bs 2) (nth bs 4) (nth geo 5) (nth geo 0))
+            (dth-p2-slice ps (nth bs 2) (nth bs 5) (nth geo 5) (mul (nth geo 0) 2))
+            (dth-rope ps 1 (nth bs 3) (nth geo 11) (nth geo 2) (nth geo 4) (nth geo 15) pos (nth geo 9))
+            (dth-rope ps 1 (nth bs 4) (nth geo 11) (nth geo 3) (nth geo 4) (nth geo 15) pos (nth geo 9))
+            (dth-copy ps (nth bs 4) ck (nth geo 5) (mul pos (nth geo 5)))
+            (dth-copy ps (nth bs 5) cv (nth geo 5) (mul pos (nth geo 5)))
+            (dth-attn ps (nth bs 3) ck cv (nth bs 6) (nth bs 12)
+                      (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6))
+            (dth-mv ps (nth lay 4) (nth bs 6) (nth bs 7))
+            (dth-bias ps (nth lay 5) (nth bs 7) (nth geo 0))
+            (dth-mv ps (nth lay 6) (nth bs 1) (nth bs 9))
+            (dth-bias ps (nth lay 7) (nth bs 9) (nth geo 1))
+            (dth-p2-gelu ps (nth bs 9) (nth bs 10) (nth geo 1))
+            (dth-mv ps (nth lay 8) (nth bs 10) (nth bs 8))
+            (dth-bias ps (nth lay 9) (nth bs 8) (nth geo 0))
+            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 7) (nth bs 0) (nth geo 0))
+            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 8) (nth bs 0) (nth geo 0))
+            1))
+
+    (defn dth-p2-blocks (ps bs geo lays cks cvs pos l n)
+        (if (ge l n) 1
+            (do (dth-p2-block ps bs geo (nth lays l) (nth cks l) (nth cvs l) pos)
+                (dth-p2-blocks ps bs geo lays cks cvs pos (add l 1) n))))
+
+    (defn dth-p2-head (ps bs geo onormTv onormB projTv projB)
+        (do
+            (dth-p2-ln ps (nth bs 0) onormTv onormB (nth bs 1) (nth geo 0) (nth geo 8))
+            (dth-mv ps projTv (nth bs 1) (nth bs 11))
+            (dth-bias ps projB (nth bs 11) (nth geo 7))
+            (metal_enqueue (nth ps 12)
+                           (md-bind (list (nth bs 11) (nth bs 13) (nth bs 14)) (list (nth geo 7)))
+                           1)
+            0))
+
+    (defn dth-p2-forward (ps bs geo lays cks cvs embTv onormTv onormB projTv projB id pos)
+        (do
+            (dth-dq ps embTv (nth bs 0) (mul id (nth geo 0)) (nth geo 0))
+            (dth-p2-blocks ps bs geo lays cks cvs pos 0 (nth geo 12))
+            (dth-p2-head ps bs geo onormTv onormB projTv projB)
+            (dth-u32 (metal_buf_read (nth bs 13) 0 4))))
+
+    (defn dth-p2-generate (ps bs geo lays cks cvs embTv onormTv onormB projTv projB id pos n acc)
+        (if (le n 0) acc
+            (do (let nid (dth-p2-forward ps bs geo lays cks cvs embTv onormTv onormB projTv projB id pos))
+                (dth-p2-generate ps bs geo lays cks cvs embTv onormTv onormB projTv projB
+                                 nid (add pos 1) (sub n 1) (append acc (list nid))))))
+
+    (defn dth-p2-prefill (ps bs geo lays cks cvs embTv onormTv onormB projTv projB ids pos)
+        (if (eq (len ids) 1)
+            (list (dth-p2-forward ps bs geo lays cks cvs embTv onormTv onormB projTv projB (head ids) pos) pos)
+            (do (dth-p2-forward ps bs geo lays cks cvs embTv onormTv onormB projTv projB (head ids) pos)
+                (dth-p2-prefill ps bs geo lays cks cvs embTv onormTv onormB projTv projB (tail ids) (add pos 1)))))
+
+    ; open for the phi2 shape:
+    ;   0 ps 1 bs 2 geo 3 lays 4 cks 5 cvs 6 embTv 7 onormTv 8 onormB 9 projTv 10 projB 11 arch 12 src
+    (defn dth-p2-open (path maxpos)
+        (do
+            (let src (dth-src path))
+            (let arch (gmt-str src "general.architecture"))
+            (let tab (dth-table src))
+            (let base (egg-data-base src (dth-alignment)))
+            (let nLayer (gmt-u32 src (dth-key arch "block_count")))
+            (let dModel (gmt-u32 src (dth-key arch "embedding_length")))
+            (let dFF (gmt-u32 src (dth-key arch "feed_forward_length")))
+            (let nHead (gmt-u32 src (dth-key arch "attention.head_count")))
+            (let nKV (gmt-u32 src (dth-key arch "attention.head_count_kv")))
+            (let headDim (div dModel nHead))
+            (let ropeDim (dth-u32-or src (dth-key arch "rope.dimension_count") headDim))
+            (let ropeBase (dth-f32-or src (dth-key arch "rope.freq_base") 10000.0))
+            (let lnEps (gmt-f32 src (dth-key arch "attention.layer_norm_epsilon")))
+            (let kvd (mul nKV headDim))
+            (let projTv0 (dth-out-tv tab base path))
+            (let vocabN (dth-tv-r projTv0))
+            (let ps (dth-pipes (dth-msl)))
+            (let bs (dth-p2-bufs dModel dFF vocabN nHead maxpos kvd))
+            (let lays (dth-p2-layers tab base path 0 nLayer (empty)))
+            (let cks (dth-cache nLayer kvd maxpos (empty)))
+            (let cvs (dth-cache nLayer kvd maxpos (empty)))
+            (let embTv (dth-tv tab base path "token_embd.weight"))
+            (let onormTv (dth-tv tab base path "output_norm.weight"))
+            (let onormB (dth-tv tab base path "output_norm.bias"))
+            (let projB (dth-tv tab base path "output.bias"))
+            (let ropeH (dth-rope-freqs tab base path (div headDim 2)))
+            (let geo (list dModel dFF nHead nKV headDim kvd maxpos vocabN
+                           (md-f32-bits lnEps) (md-f32-bits ropeBase)
+                           (md-f32-bits (div 1.0 (math_sqrt (add headDim 0.0))))
+                           ropeH nLayer (mul nHead headDim) 1 ropeDim 1))
+            (list ps bs geo lays cks cvs embTv onormTv onormB projTv0 projB arch src)))
+    0)

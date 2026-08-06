@@ -1,0 +1,112 @@
+; jit-stack-frame.fk - stack and frame collapse receipts for the Form-native JIT.
+;
+; This rung names when a frame may be collapsed, tail-looped, or spilled. It
+; consumes profile category signatures rather than per-instance observations,
+; and it requires a root map plus source signature match before any collapse is
+; admitted.
+
+(do
+    (defn jsf-normal () 1)
+    (defn jsf-collapse-frame () 2)
+    (defn jsf-tail-loop () 3)
+    (defn jsf-spill-frame () 4)
+    (defn jsf-deopt-frame () 5)
+
+    ; frame receipt:
+    ; ("frame-plan" fn site argc locals live root-map tail-call recursive spill-slots max-slots source-sig)
+    (defn jsf-frame (fn site argc locals live root-map tail-call recursive spill-slots max-slots source-sig)
+        (list "frame-plan" fn site argc locals live root-map tail-call recursive spill-slots max-slots source-sig))
+    (defn jsf-frame? (f) (if (eq (len f) 12) (str_eq (nth f 0) "frame-plan") 0))
+    (defn jsf-fn (f) (nth f 1))
+    (defn jsf-site (f) (nth f 2))
+    (defn jsf-argc (f) (nth f 3))
+    (defn jsf-locals (f) (nth f 4))
+    (defn jsf-live (f) (nth f 5))
+    (defn jsf-root-map (f) (nth f 6))
+    (defn jsf-tail-call (f) (nth f 7))
+    (defn jsf-recursive (f) (nth f 8))
+    (defn jsf-spill-slots (f) (nth f 9))
+    (defn jsf-max-slots (f) (nth f 10))
+    (defn jsf-source-sig (f) (nth f 11))
+
+    (defn jsf-source-match? (f profile)
+        (if (eq (jsf-source-sig f) (jpr-signature profile)) 1 0))
+
+    (defn jsf-root-map-ok? (f)
+        (if (eq (jsf-root-map f) 1) 1 0))
+
+    (defn jsf-live-fits? (f)
+        (if (le (jsf-live f) (jsf-max-slots f)) 1 0))
+
+    (defn jsf-spill-ok? (f)
+        (if (gt (jsf-spill-slots f) 0)
+            (if (eq (jsf-root-map-ok? f) 1) 1 0)
+            0))
+
+    (defn jsf-tail-loop? (f profile)
+        (if (eq (jpr-stack profile) (jpr-stack-tail))
+            (if (eq (jsf-tail-call f) 1)
+                (if (eq (jsf-recursive f) 1) 1 0)
+                0)
+            0))
+
+    (defn jsf-safe-base? (f profile)
+        (if (eq (jsf-frame? f) 1)
+            (if (eq (jsf-source-match? f profile) 1)
+                (if (eq (jsf-root-map-ok? f) 1)
+                    (jpr-stack-collapse? profile)
+                    0)
+                0)
+            0))
+
+    (defn jsf-action (f profile)
+        (if (eq (jpr-deopt profile) (jpr-deopt-none))
+            (if (eq (jsf-safe-base? f profile) 1)
+                (if (eq (jsf-live-fits? f) 1)
+                    (if (eq (jsf-tail-loop? f profile) 1) (jsf-tail-loop) (jsf-collapse-frame))
+                    (if (eq (jsf-spill-ok? f) 1) (jsf-spill-frame) (jsf-normal)))
+                (jsf-normal))
+            (jsf-deopt-frame)))
+
+    (defn jsf-parity? (native-frame walk-frame profile)
+        (if (eq (jsf-action native-frame profile) (jsf-action walk-frame profile))
+            (if (eq (jsf-source-sig native-frame) (jsf-source-sig walk-frame)) 1 0)
+            0))
+
+    (defn jsf-elided-profile ()
+        (list 40 8 800 9 1 (jpr-call-mono) (jpr-int) (jpr-none) 0 (jpr-none) 0 (jpr-index-none) (jpr-stack-elided) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) 8))
+
+    (defn jsf-tail-sample ()
+        (jsf-frame 7 2 2 3 3 1 1 1 0 8 (jpr-signature (jpr-array-sample 100 40))))
+
+    (defn jsf-elide-sample ()
+        (jsf-frame 40 8 1 1 1 1 0 0 0 8 (jpr-signature (jsf-elided-profile))))
+
+    (defn jsf-spill-sample ()
+        (jsf-frame 7 2 2 12 12 1 1 1 4 8 (jpr-signature (jpr-array-sample 100 40))))
+
+    (defn jsf-source-miss ()
+        (jsf-frame 7 2 2 3 3 1 1 1 0 8 999999))
+
+    (defn jsf-no-root-map ()
+        (jsf-frame 7 2 2 3 3 0 1 1 0 8 (jpr-signature (jpr-array-sample 100 40))))
+
+    (defn jsf-bit (cond bit) (if cond bit 0))
+    (defn jit-stack-frame-check ()
+        (add
+            (jsf-bit (eq (jsf-action (jsf-tail-sample) (jpr-array-sample 100 40)) (jsf-tail-loop)) 1)
+            (add
+                (jsf-bit (eq (jsf-action (jsf-elide-sample) (jsf-elided-profile)) (jsf-collapse-frame)) 2)
+                (add
+                    (jsf-bit (eq (jsf-action (jsf-spill-sample) (jpr-array-sample 100 40)) (jsf-spill-frame)) 4)
+                    (add
+                        (jsf-bit (eq (jsf-action (jsf-source-miss) (jpr-array-sample 100 40)) (jsf-normal)) 8)
+                        (add
+                            (jsf-bit (eq (jsf-action (jsf-no-root-map) (jpr-array-sample 100 40)) (jsf-normal)) 16)
+                            (add
+                                (jsf-bit (eq (jsf-action (jsf-tail-sample) (jpr-cool-guard-sample)) (jsf-deopt-frame)) 32)
+                                (add
+                                    (jsf-bit (eq (jsf-parity? (jsf-tail-sample) (jsf-tail-sample) (jpr-array-sample 100 40)) 1) 64)
+                                    (jsf-bit (eq (jsf-frame? (jsf-tail-sample)) 1) 128))))))))
+
+    0)

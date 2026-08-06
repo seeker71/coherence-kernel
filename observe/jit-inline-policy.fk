@@ -1,0 +1,136 @@
+; jit-inline-policy.fk - call tracking and guarded inlining policy.
+;
+; This is the inlining/call-site rung for the Form-native JIT track. It consumes
+; the category-fed tier policy and adds the call-site facts a native emitter must
+; honor before replacing a call with an inline body:
+;   - monomorphic or low-polymorphic target category
+;   - inline budget and depth limit
+;   - target/source guard
+;   - fallback call path
+;   - deopt receipt when the guard has already failed
+
+(do
+    (defn jip-no-inline () 0)
+    (defn jip-inline () 1)
+    (defn jip-guarded-inline () 2)
+    (defn jip-fallback-call () 3)
+    (defn jip-deopt () 4)
+
+    ; call receipt:
+    ; ("call" caller site callee argc targetcat body-cost depth budget guard fallback deopt source-sig)
+    (defn jip-call (caller site callee argc targetcat body-cost depth budget guard fallback deopt source-sig)
+        (list "call" caller site callee argc targetcat body-cost depth budget guard fallback deopt source-sig))
+    (defn jip-call? (c) (if (eq (len c) 13) (str_eq (nth c 0) "call") 0))
+    (defn jip-caller (c) (nth c 1))
+    (defn jip-site (c) (nth c 2))
+    (defn jip-callee (c) (nth c 3))
+    (defn jip-argc (c) (nth c 4))
+    (defn jip-targetcat (c) (nth c 5))
+    (defn jip-body-cost (c) (nth c 6))
+    (defn jip-depth (c) (nth c 7))
+    (defn jip-budget (c) (nth c 8))
+    (defn jip-guard (c) (nth c 9))
+    (defn jip-fallback (c) (nth c 10))
+    (defn jip-deopt-kind (c) (nth c 11))
+    (defn jip-source-sig (c) (nth c 12))
+
+    (defn jip-budget-ok? (c)
+        (if (le (jip-body-cost c) (jip-budget c))
+            (if (lt (jip-depth c) 4) 1 0)
+            0))
+
+    (defn jip-guard-ok? (c) (if (eq (jip-guard c) 1) 1 0))
+    (defn jip-fallback-ok? (c) (if (eq (jip-fallback c) 1) 1 0))
+
+    (defn jip-tier-inlineable? (profile fault)
+        (if (eq (jtp-action profile 0 fault) (jtp-specialize))
+            1
+            (if (eq (jtp-action profile 0 fault) (jtp-crystallize)) 1 0)))
+
+    (defn jip-mono? (c) (if (eq (jip-targetcat c) (jpr-call-mono)) 1 0))
+    (defn jip-low-poly? (c) (if (eq (jip-targetcat c) (jpr-call-poly)) 1 0))
+
+    (defn jip-source-match? (c profile)
+        (if (eq (jip-source-sig c) (jpr-signature profile)) 1 0))
+
+    (defn jip-safe-base? (c profile fault)
+        (if (eq (jip-call? c) 1)
+            (if (eq (jip-tier-inlineable? profile fault) 1)
+                (if (eq (jip-budget-ok? c) 1)
+                    (if (eq (jip-guard-ok? c) 1)
+                        (if (eq (jip-fallback-ok? c) 1)
+                            (jip-source-match? c profile)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jip-action (c profile fault)
+        (if (eq (jip-deopt-kind c) (jpr-deopt-none))
+            (if (eq (jip-safe-base? c profile fault) 1)
+                (if (eq (jip-mono? c) 1)
+                    (jip-inline)
+                    (if (eq (jip-low-poly? c) 1) (jip-guarded-inline) (jip-fallback-call)))
+                (jip-fallback-call))
+            (jip-deopt)))
+
+    (defn jip-same-call-category? (a b)
+        (if (eq (jip-caller a) (jip-caller b))
+            (if (eq (jip-site a) (jip-site b))
+                (if (eq (jip-targetcat a) (jip-targetcat b))
+                    (if (eq (jip-argc a) (jip-argc b)) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jip-mono-sample ()
+        (jip-call 7 2 90 2 (jpr-call-mono) 12 1 40 1 1 (jpr-deopt-none) (jpr-signature (jpr-array-sample 100 40))))
+
+    (defn jip-mono-sample2 ()
+        (jip-call 7 2 91 2 (jpr-call-mono) 12 1 40 1 1 (jpr-deopt-none) (jpr-signature (jpr-array-sample 101 35))))
+
+    (defn jip-poly-sample ()
+        (jip-call 7 3 91 2 (jpr-call-poly) 14 1 40 1 1 (jpr-deopt-none) (jpr-signature (jpr-array-sample 100 40))))
+
+    (defn jip-mega-sample ()
+        (jip-call 7 4 92 2 (jpr-call-mega) 14 1 40 1 1 (jpr-deopt-none) (jpr-signature (jpr-array-sample 100 40))))
+
+    (defn jip-too-large ()
+        (jip-call 7 5 93 2 (jpr-call-mono) 80 1 40 1 1 (jpr-deopt-none) (jpr-signature (jpr-array-sample 100 40))))
+
+    (defn jip-no-guard ()
+        (jip-call 7 6 94 2 (jpr-call-mono) 12 1 40 0 1 (jpr-deopt-none) (jpr-signature (jpr-array-sample 100 40))))
+
+    (defn jip-no-fallback ()
+        (jip-call 7 7 95 2 (jpr-call-mono) 12 1 40 1 0 (jpr-deopt-none) (jpr-signature (jpr-array-sample 100 40))))
+
+    (defn jip-source-miss ()
+        (jip-call 7 8 96 2 (jpr-call-mono) 12 1 40 1 1 (jpr-deopt-none) 999))
+
+    (defn jip-deopt-sample ()
+        (jip-call 7 9 97 2 (jpr-call-mono) 12 1 40 1 1 (jpr-deopt-guard) (jpr-signature (jpr-array-sample 100 40))))
+
+    (defn jip-bit (cond bit) (if cond bit 0))
+    (defn jit-inline-policy-check ()
+        (add
+            (jip-bit (eq (jip-action (jip-mono-sample) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jip-inline)) 1)
+            (add
+                (jip-bit (eq (jip-action (jip-poly-sample) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jip-guarded-inline)) 2)
+                (add
+                    (jip-bit (eq (jip-action (jip-mega-sample) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jip-fallback-call)) 4)
+                    (add
+                        (jip-bit (eq (jip-action (jip-too-large) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jip-fallback-call)) 8)
+                        (add
+                            (jip-bit (eq (jip-action (jip-no-guard) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jip-fallback-call)) 16)
+                            (add
+                                (jip-bit (eq (jip-action (jip-no-fallback) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jip-fallback-call)) 32)
+                                (add
+                                    (jip-bit (eq (jip-action (jip-source-miss) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jip-fallback-call)) 64)
+                                    (add
+                                        (jip-bit (eq (jip-action (jip-deopt-sample) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jip-deopt)) 128)
+                                        (add
+                                            (jip-bit (eq (jip-action (jip-mono-sample) (jtp-warm-basic) (jrf-bounds-ex)) (jip-fallback-call)) 256)
+                                            (jip-bit (eq (jip-same-call-category? (jip-mono-sample) (jip-mono-sample2)) 1) 512))))))))))
+
+    0)

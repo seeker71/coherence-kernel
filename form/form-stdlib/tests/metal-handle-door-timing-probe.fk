@@ -1,0 +1,164 @@
+; metal-handle-door-timing-probe.fk — what the block actually cost, measured both ways
+; in ONE process so nothing but the door differs.
+;
+; NOT A BAND, on purpose, and named so validate.sh does not read it as one: it answers a
+; duration, and a duration is not a verdict. Two runs of this cell disagree by a few
+; milliseconds and both are right. metal-handle-door-band.fk is where the correctness
+; lives; this cell only says what the door costs.
+;
+; WHAT IS COMPARED. The same 2000 calls, the same 4x4 matvec, the same process:
+;
+;   metal_matvec_f32   text in, compile-cache lookup, copy w and x in, dispatch, BLOCK
+;   metal_enqueue      bind three resident handles, dispatch, return
+;
+; and then ONE metal_sync for the whole batch of 2000. The sync is reported separately
+; rather than folded in, because folding it back would hide the very thing the handle
+; door changes: the waiting is now paid once for the batch instead of once per call, and
+; while it is outstanding the GPU has 2000 dispatches to chew on instead of one.
+;
+; The old number this replaces (receipts/2026-08-03-crosscheap.md, measured across
+; processes with an empty-loop baseline subtracted): ~112 us/call blocking, ~2 us for the
+; bare Form->native seam. Same conclusion, measured better.
+;
+; RUN (the repo-root fkwu, Metal linked automatically by validate.sh's build_fkwu_src):
+;   rm -f form/form-stdlib/tests/metal-handle-door-timing-probe.fkb
+;   ./fkwu form/form-stdlib/tests/metal-handle-door-timing-probe.fk
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn tmp-nl () (byte_to_str 10))
+    (defn tmp-pow2 (k) (if (le k 0) 1 (mul 2 (tmp-pow2 (sub k 1)))))
+    (defn tmp-e (n e) (if (lt n 2) e (tmp-e (floor (div n 2)) (add e 1))))
+    (defn tmp-bits (n)
+        (if (eq n 0) 0
+            (do (let e (tmp-e n 0))
+                (let m (sub (floor (div (mul n 8388608) (tmp-pow2 e))) 8388608))
+                (add (mul (add e 127) 8388608) m))))
+    (defn tmp-u32 (v)
+        (str_concat (byte_to_str (mod v 256))
+        (str_concat (byte_to_str (mod (floor (div v 256)) 256))
+        (str_concat (byte_to_str (mod (floor (div v 65536)) 256))
+                    (byte_to_str (mod (floor (div v 16777216)) 256))))))
+    (defn tmp-f32 (n) (tmp-u32 (tmp-bits n)))
+    (defn tmp-seq (i n acc) (if (gt i n) acc (tmp-seq (add i 1) n (str_concat acc (tmp-f32 i)))))
+    (defn tmp-bind (b0 b1 b2 c0 c1)
+        (str_concat (tmp-u32 3)
+        (str_concat (tmp-u32 b0)
+        (str_concat (tmp-u32 b1)
+        (str_concat (tmp-u32 b2)
+        (str_concat (tmp-u32 2)
+        (str_concat (tmp-u32 c0) (tmp-u32 c1))))))))
+    (defn tmp-msl ()
+        (str_concat "#include <metal_stdlib>" (str_concat (tmp-nl)
+        (str_concat "using namespace metal;" (str_concat (tmp-nl)
+        (str_concat "kernel void form_fkwu_generic_matvec_f32(" (str_concat (tmp-nl)
+        (str_concat "  device const float *w [[buffer(0)]]," (str_concat (tmp-nl)
+        (str_concat "  device const float *x [[buffer(1)]]," (str_concat (tmp-nl)
+        (str_concat "  device float *y [[buffer(2)]]," (str_concat (tmp-nl)
+        (str_concat "  constant uint &rows [[buffer(3)]]," (str_concat (tmp-nl)
+        (str_concat "  constant uint &cols [[buffer(4)]]," (str_concat (tmp-nl)
+        (str_concat "  uint gid [[thread_position_in_grid]]) {" (str_concat (tmp-nl)
+        (str_concat "  if (gid >= rows) return;" (str_concat (tmp-nl)
+        (str_concat "  float a = 0.0f;" (str_concat (tmp-nl)
+        (str_concat "  for (uint j = 0; j < cols; j++) a += w[gid*cols + j] * x[j];" (str_concat (tmp-nl)
+        (str_concat "  y[gid] = a;" (str_concat (tmp-nl)
+                    "}" )))))))))))))))))))))))))))
+    ; the old door's argument: header + w + x, rebuilt nowhere — built once, handed 2000 times
+    (defn tmp-model ()
+        (str_concat (tmp-u32 4)
+        (str_concat (tmp-u32 4)
+        (str_concat (tmp-seq 1 16 "")
+                    (tmp-seq 1 4 "")))))
+
+    ; ---- the three loops. Each takes everything it needs as an argument, because a defn
+    ; ---- frame here cannot see an enclosing let.
+    (defn tmp-seam (i n acc)
+        (if (ge i n) acc (tmp-seam (add i 1) n (add acc (str_len (metal_status))))))
+    (defn tmp-block (i n msl model acc)
+        (if (ge i n) acc
+            (tmp-block (add i 1) n msl model
+                (add acc (str_len (metal_matvec_f32 msl "form_fkwu_generic_matvec_f32" model))))))
+    (defn tmp-enq (i n pipe bind acc)
+        (if (ge i n) acc (tmp-enq (add i 1) n pipe bind (add acc (metal_enqueue pipe bind 4)))))
+
+    (let n 2000)
+
+    ; ---- set the resident side up once ---------------------------------------------------
+    (let hW (metal_buf_alloc 64))
+    (let wW (metal_buf_write hW 0 (tmp-seq 1 16 "")))
+    (let hx (metal_buf_alloc 16))
+    (let wx (metal_buf_write hx 0 (tmp-seq 1 4 "")))
+    (let hy (metal_buf_alloc 16))
+    (let pipe (metal_pipeline (tmp-msl) "form_fkwu_generic_matvec_f32"))
+    (let bind (tmp-bind hW hx hy 4 4))
+    (let model (tmp-model))
+    (let msl (tmp-msl))
+
+    ; warm the old door's pipeline cache so its first call is not charged for a compile
+    (let warm (metal_matvec_f32 msl "form_fkwu_generic_matvec_f32" model))
+
+    ; ---- A. the bare seam: a native call that crosses and returns, no GPU work ------------
+    (let a0 (now_unix_ms))
+    (let ra (tmp-seam 0 n 0))
+    (let a1 (now_unix_ms))
+
+    ; ---- B. the old door: dispatch AND block, every call ----------------------------------
+    (let b0 (now_unix_ms))
+    (let rb (tmp-block 0 n msl model 0))
+    (let b1 (now_unix_ms))
+
+    ; ---- C. the new door: dispatch, no block ---------------------------------------------
+    (let c0 (now_unix_ms))
+    (let rc (tmp-enq 0 n pipe bind 0))
+    (let c1 (now_unix_ms))
+    (let drained (metal_sync))
+    (let c2 (now_unix_ms))
+
+    (print_str (str_concat "calls " (int_to_str n)))
+    (print_str (str_concat "A seam   metal_status    total-ms " (int_to_str (sub a1 a0))))
+    (print_str (str_concat "B block  metal_matvec_f32 total-ms " (int_to_str (sub b1 b0))))
+    (print_str (str_concat "C enq    metal_enqueue   total-ms " (int_to_str (sub c1 c0))))
+    (print_str (str_concat "C sync   one for the batch  total-ms " (int_to_str (sub c2 c1))))
+    (print_str (str_concat "C drained-dispatches " (int_to_str drained)))
+    (print_str (str_concat "enqueue-ok-count " (int_to_str rc)))
+    (print_str (str_concat "us/call A " (int_to_str (floor (div (mul (sub a1 a0) 1000) n)))))
+    (print_str (str_concat "us/call B " (int_to_str (floor (div (mul (sub b1 b0) 1000) n)))))
+    (print_str (str_concat "us/call C " (int_to_str (floor (div (mul (sub c1 c0) 1000) n)))))
+    (print_str (str_concat "us/call C+sync " (int_to_str (floor (div (mul (sub c2 c0) 1000) n)))))
+
+    ; ---- D/E: the ENCODER's dispatch type, serial vs concurrent ---------------------------
+    ; n INDEPENDENT dispatches (each into its own output buffer, so there is no hazard
+    ; and no barrier) built into one batch, then one sync. The same work twice; only the
+    ; encoder's dispatch type differs. Read the caveat before quoting these numbers: the
+    ; kernels here are 4x4 matvecs, far too small to occupy this GPU, so what this
+    ; measures is the DOOR's cost of each mode plus how much the serializer charges for
+    ; ordering tiny kernels — not the 3x a real 43-layer workload saw. The workload-level
+    ; number belongs to the port that runs real kernels through this same surface.
+    (defn tmp-ind (i n pipe hW hx acc)
+        (if (ge i n) acc
+            (do (let hy (metal_buf_alloc 16))
+                (tmp-ind (add i 1) n pipe hW hx
+                    (add acc (metal_enqueue pipe (tmp-bind hW hx hy 4 4) 4))))))
+
+    (let d0 (now_unix_ms))
+    (let rd (tmp-ind 0 n pipe hW hx 0))
+    (let d1 (now_unix_ms))
+    (let ddr (metal_sync))
+    (let d2 (now_unix_ms))
+
+    (let earm (metal_batch_concurrent))
+    (let e0 (now_unix_ms))
+    (let re (tmp-ind 0 n pipe hW hx 0))
+    (let e1x (now_unix_ms))
+    (let edr (metal_sync))
+    (let e2x (now_unix_ms))
+
+    (print_str (str_concat "D serial-encoder   enq-ms " (str_concat (int_to_str (sub d1 d0))
+        (str_concat "  sync-ms " (str_concat (int_to_str (sub d2 d1))
+        (str_concat "  drained " (int_to_str ddr)))))))
+    (print_str (str_concat "E concurrent-enc   enq-ms " (str_concat (int_to_str (sub e1x e0))
+        (str_concat "  sync-ms " (str_concat (int_to_str (sub e2x e1x))
+        (str_concat "  drained " (str_concat (int_to_str edr)
+                    (str_concat "  armed " (int_to_str earm)))))))))
+    (add (sub b1 b0) 0))

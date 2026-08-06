@@ -1,0 +1,92 @@
+; preludes: form-stdlib/core.fk form-stdlib/kimi-quantile-router.fk
+;
+; kimi-quantile-router-band — Kimi K3's quantile-balancing router (kimi-quantile-router.fk),
+; Stone 48. Five claims, verdict 31 when every one crosses.
+;
+; ---------------------------------------------------------------------------
+; APORON — THE DECLARED RADIUS. Read this before believing the number.
+;
+; WHAT THIS BAND PROVES
+;   The ALLOCATION law at E=8, k=3 (and a straddling-tie case at E=3, k=1) with
+;   binary-exact scores: exactly k experts are chosen; the chosen set is the k
+;   largest; the rank cut equals the threshold cut at the k-th-largest score, so
+;   the quantile is real and not a story; permuting experts permutes the choice
+;   identically; a boundary tie breaks toward the lower index so the step is never
+;   over-full; and across a batch under a per-expert capacity the load is counted
+;   and the overflow is REFUSED-and-counted -- routed + overflow = k*ntok exactly.
+;
+;   twinblind: top-k-by-score with a deterministic tie-break is CANONICAL -- one
+;   right answer given the scores -- so a self-check is a real falsifier and no
+;   oracle is rented.
+;
+; WHAT IT DOES NOT PROVE
+;   * NOT the score vector's provenance (the router projection, its weights).
+;   * NOT the gate values applied to the chosen experts (softmax of kept scores).
+;   * NOT real dims except in claim 16's arithmetic (896, 16), where the numbers
+;     only do arithmetic, exactly as dsv4-kv-cache-band.fk's claim 256 does.
+;   * NOT four-way. fkwu-witnessed by this band.
+;
+; Claim 8 exists because a gate reading "k experts chosen" passes on distinct
+; scores even with a broken rank. So it hands a STRADDLING TIE to both ranks: the
+; naive strictly-greater rank chooses k+1 (an over-full step), the tie-broken rank
+; chooses exactly k toward the lower index. The falsifier can itself fail.
+; ---------------------------------------------------------------------------
+;
+;   bit  1  EXACTLY k, THE k LARGEST: scores (.5 .125 .875 .25 .75 .0625 .375 .625)
+;           at k=3 choose experts 2,4,7 -- mask (0 0 1 0 1 0 0 1), count 3. A chosen
+;           expert has rank < 3; the top non-chosen (expert 0) has rank exactly 3.
+;   bit  2  THE QUANTILE IS REAL: the threshold (smallest chosen score) is 0.625,
+;           the 3rd-largest score, and exactly 3 scores sit at or above it -- so the
+;           rank cut and the (1 - k/E) quantile cut are the same cut.
+;   bit  4  EQUIVARIANCE: reverse the experts; the mask reverses identically. Routing
+;           is a function of the scores, not of where an expert sits.
+;   bit  8  THE TIE DOES NOT LEAK, AND THE FALSIFIER FAILS: scores (.5 .5 .25) at k=1
+;           choose exactly one expert (index 0, the tie-break) -- while the naive rank
+;           chooses two, an over-full step, caught red.
+;   bit 16  BALANCING IS COUNTED, OVERFLOW IS REFUSED: a 3-token batch over 4 experts
+;           at k=2, capacity 2, routes 5 and refuses 1, and routed+overflow = 2*3 = 6;
+;           nothing is silently dropped. At K3's shape 896 experts hold 16 active, so
+;           880 are silent per token -- arithmetic, not a feeling.
+
+(do
+    (let sc (list 0.5 0.125 0.875 0.25 0.75 0.0625 0.375 0.625))
+
+    ; --- claim 1: exactly k, the k largest ---
+    (let m (kqr-mask sc 8 3))
+    (let cl1 (if (eq (kqr-veq m (list 0 0 1 0 1 0 0 1)) 1)
+                 (if (eq (kqr-count m) 3)
+                     (if (eq (kqr-select? sc 2 8 3) 1)          ; the top score is chosen
+                         (if (eq (kqr-select? sc 0 8 3) 0)      ; the 4th score is not
+                             (if (eq (kqr-rank sc 0 8) 3) 1 0) 0) 0) 0) 0))
+
+    ; --- claim 2: the quantile is real (rank cut == threshold cut) ---
+    (let thr (kqr-threshold sc m 8))
+    (let cl2 (if (eq thr 0.625)
+                 (if (eq (kqr-count-ge sc thr 8) 3) 2 0)))
+
+    ; --- claim 4: equivariance under a permutation ---
+    (let rev (list 7 6 5 4 3 2 1 0))
+    (let scR (kqr-permute sc rev))
+    (let mR  (kqr-mask scR 8 3))
+    (let cl4 (if (eq (kqr-veq mR (kqr-permute m rev)) 1)
+                 (if (eq (kqr-veq mR (list 1 0 0 1 0 1 0 0)) 1) 4 0)))
+
+    ; --- claim 8: the tie does not leak; the naive rank over-selects ---
+    (let ts (list 0.5 0.5 0.25))
+    (let mt (kqr-mask ts 3 1))
+    (let mn (kqr-mask-naive ts 3 1))
+    (let cl8 (if (eq (kqr-count mt) 1)                          ; tie-broken: exactly k
+                 (if (eq (kqr-veq mt (list 1 0 0)) 1)           ; toward the lower index
+                     (if (eq (kqr-count mn) 2) 8 0) 0)))        ; naive: over-full, caught
+
+    ; --- claim 16: balancing is counted, overflow refused; real numbers ---
+    (let batch (list (list 1 1 0 0) (list 1 1 0 0) (list 1 0 1 0)))   ; loads 3,2,1,0
+    (let routed   (kqr-routed batch 4 2))
+    (let overflow (kqr-overflow batch 4 2))
+    (let cl16 (if (eq routed 5)
+                  (if (eq overflow 1)
+                      (if (eq (add routed overflow) (mul 2 3))
+                          (if (eq (kqr-load-at batch 0) 3)
+                              (if (eq (sub 896 16) 880) 16 0) 0) 0) 0) 0))
+
+    (add cl1 (add cl2 (add cl4 (add cl8 cl16)))))

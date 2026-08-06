@@ -1,0 +1,78 @@
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/endpointing.fk form-stdlib/pause-reading.fk form-stdlib/nearest-shape.fk form-stdlib/turn-taking.fk
+;
+; pause-reading-band — PCM becomes a pause reading becomes a turn, proven four-way.
+;
+; The clip is 16-bit little-endian mono PCM built here, not read from disk: no host I/O crosses
+; four-way for BINARY content (measured 2026-07-30 — fkwu and Go read raw bytes exactly, Rust
+; declines the read as non-text, and TypeScript silently UTF-8-decoded it, turning 19936 bytes into
+; 37558 and byte 255 into 191). So the bytes arrive as data here and the arithmetic is what gets
+; proven; the file lane is named for what it is in pause-reading-file.fk.
+;
+; Six frames at rate 100 / 80ms — 16 bytes, 8 samples each. Three of speech at amplitude 2000, three
+; of a quiet room at 16. The room is 16, not 0: a floor taken from digital silence is the easy case,
+; and the clip that teaches something has a room in it.
+;
+; Verdict 8191 when every claim lands:
+;   1     a frame is a DURATION: 16000Hz × 80ms → 2560 bytes = 1280 samples, and even by construction
+;   2     signed little-endian decode, positive: bytes (208, 7) → 2000
+;   4     …and negative, which is where a naive decode reads 63536: bytes (48, 248) → −2000
+;   8     a partial tail frame is DROPPED, not measured short: 100 bytes at 16/frame → 6 frames
+;   16    the levels read off the clip are [2000 2000 2000 16 16 16] (sum 6048)
+;   32    the floor is the room's own quiet, MEASURED: 16
+;   64    the clip holds contrast at span 1000, so it may be read
+;   128   an all-speech clip holds none and says so — 0, rather than inventing a floor from speech
+;   256   the readings are [0 0 0 1 1 1] — 1 means pause, matching endpointing.fk's sense (sum 3.000)
+;   512   the no-contrast clip yields the EMPTY list, which folds to no change: silence about silence
+;   1024  a mid-level frame reads a FRACTION, not a bucket: floor+250 at span 1000 → 0.750
+;   2048  THE CHAIN, end to end on levels read from PCM: three silence frames × 80ms add exactly
+;         240 ms to the reported pause. Real amplitudes in, real time out.
+;   4096  …and turn-taking.fk crosses on that same pause: stay before the silence, speak after it.
+;         Sound reached the decision. That is the whole point of the two cells together.
+(do
+    ; n samples of one amplitude, as little-endian byte pairs.
+    (defn prb-samples (lo hi n)
+        (if (le n 0) (list) (cons lo (cons hi (prb-samples lo hi (sub n 1))))))
+    (defn prb-cat (a b) (if (eq (len a) 0) b (cons (head a) (prb-cat (tail a) b))))
+
+    (let speech (prb-samples 208 7 24))   ; 24 samples at  2000 = 3 frames of 8
+    (let room   (prb-samples 16 0 24))    ; 24 samples at    16 = 3 frames of 8
+    (let clip   (prb-cat speech room))
+    (let allspeech (prb-samples 208 7 48))
+
+    (let dt 0.08)
+    (let hl 0.24)
+    (let span 1000)
+
+    (let c0 (if (eq (pr-frame-bytes 16000 80) 2560) 1 0))
+    (let c1 (if (eq (pr-sample (list 208 7) 0) 2000) 2 0))
+    (let c2 (if (eq (pr-sample (list 48 248) 0) -2000) 4 0))
+    (let c3 (if (eq (pr-frame-count 100 16) 6) 8 0))
+
+    (let levels (pr-levels clip (len clip) (pr-frame-bytes 100 80) 2))
+    (let c4 (if (eq (sum levels) 6048) 16 0))
+    (let c5 (if (eq (pr-floor levels) 16) 32 0))
+    (let c6 (if (eq (pr-contrast? levels span) 1) 64 0))
+
+    (let aslev (pr-levels allspeech (len allspeech) (pr-frame-bytes 100 80) 2))
+    (let c7 (if (eq (pr-contrast? aslev span) 0) 128 0))
+
+    (let readings (pr-readings-bytes clip (len clip) 100 80 2 span))
+    (let c8 (if (eq (round (mul (sum readings) 1000)) 3000) 256 0))
+    (let c9 (if (eq (len (pr-readings-bytes allspeech (len allspeech) 100 80 2 span)) 0) 512 0))
+    (let c10 (if (eq (round (mul (pr-reading 266 16 1000) 1000)) 750) 1024 0))
+
+    ; the chain: fold the speech prefix, read the pause, fold the silence run, read it again.
+    (let held-speech (ep-fold 1.0 (list 0.0 0.0 0.0) dt hl hl 0))
+    (let held-room (ep-fold held-speech (list 1.0 1.0 1.0) dt hl hl 0))
+    (let pause-before (ep-pause-seconds held-speech hl))
+    (let pause-after (ep-pause-seconds held-room hl))
+    (let c11 (if (eq (round (mul (sub pause-after pause-before) 1000)) 240) 2048 0))
+
+    (let ctx-speak (list 3 5 4))
+    (let learned (list (list "speak" (list 3 5 4)) (list "stay" (list 0 0 0))))
+    (let c12 (if (eq (tt-speak? 0 0 ctx-speak learned 2 pause-before 0.4) 0)
+                (if (eq (tt-speak? 0 0 ctx-speak learned 2 pause-after 0.4) 1) 4096 0)
+                0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 (add c7
+    (add c8 (add c9 (add c10 (add c11 c12)))))))))))))
