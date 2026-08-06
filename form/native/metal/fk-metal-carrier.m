@@ -380,6 +380,18 @@ static long long fk_pending = 0;        // enqueued since the last sync
 static long long fk_total_dispatch = 0;
 static long long fk_total_sync = 0;
 static long long fk_nocopy_bufs = 0;
+// Real GPU device-busy time, not host wall-clock. MTLCommandBuffer.GPUStartTime/
+// GPUEndTime are the host-clock timestamps Metal itself records for when the
+// device actually started and finished a command buffer's work; they read as
+// zero until the buffer completes, so this is only ever added AFTER
+// waitUntilCompleted returns for that buffer. This is a running total across
+// every command buffer this process has drained (inflight fences and the open
+// batch alike), the same accumulation style as fk_total_dispatch/fk_total_sync,
+// so metal_status's callers get the same "since process start" semantics for
+// all three. It answers a different question than sync-ms (Form's own
+// now_unix_ms bracketing of metal_sync): this is what the DEVICE reports about
+// its own busy span, sync-ms is what the HOST clock saw waiting for it.
+static double fk_total_gpu_busy_s = 0.0;
 static NSString *fk_last_err = nil;
 
 // Concurrent batches are OPT-IN, per batch, and the flag arms only the NEXT batch:
@@ -742,6 +754,10 @@ long long fk_metal_sync_external(void) {
             for (NSNumber *key in [fk_inflight allKeys]) {
                 id<MTLCommandBuffer> cb = fk_inflight[key];
                 [cb waitUntilCompleted];
+                // GPUStartTime/GPUEndTime are valid now — the buffer just completed.
+                // Real device-busy span for THIS command buffer, added to the
+                // process-wide running total.
+                fk_total_gpu_busy_s += ([cb GPUEndTime] - [cb GPUStartTime]);
                 if ([cb error] != nil) {
                     fk_err([NSString stringWithFormat:@"dispatch: %@",
                             [[cb error] localizedDescription]]);
@@ -758,6 +774,11 @@ long long fk_metal_sync_external(void) {
             [fk_enc endEncoding];
             [fk_cb commit];
             [fk_cb waitUntilCompleted];
+            // Same accumulation as the inflight loop above: this ONE command
+            // buffer's real device-busy span, covering every dispatch enqueued
+            // into it since the batch opened (all fk_pending of them together —
+            // Metal exposes no finer-grained per-dispatch device timestamp).
+            fk_total_gpu_busy_s += ([fk_cb GPUEndTime] - [fk_cb GPUStartTime]);
             if ([fk_cb error] != nil) {
                 fk_err([NSString stringWithFormat:@"dispatch: %@",
                         [[fk_cb error] localizedDescription]]);
@@ -931,6 +952,13 @@ long long fk_metal_status_external(char *out, long long cap) {
         [r appendFormat:@"in_flight=%lu\n",
             (unsigned long)(fk_inflight == nil ? 0 : [fk_inflight count])];
         [r appendFormat:@"total_dispatch=%lld\ntotal_sync=%lld\n", fk_total_dispatch, fk_total_sync];
+        // Real GPU device-busy time (MTLCommandBuffer.GPUEndTime - GPUStartTime),
+        // summed across every command buffer drained so far, converted to whole
+        // microseconds to match this file's existing integer-reporting style.
+        // This is HOST-CLOCK-STAMPED device occupancy, not a host wall-clock
+        // measurement of waitUntilCompleted itself — see the field's own comment
+        // at fk_total_gpu_busy_s for what it does and does not mean.
+        [r appendFormat:@"gpu_busy_us_total=%lld\n", (long long)(fk_total_gpu_busy_s * 1000000.0)];
         [r appendFormat:@"last_error=%@\n", fk_last_err == nil ? @"none" : fk_last_err];
         return fk_emit(out, cap, r);
     }
