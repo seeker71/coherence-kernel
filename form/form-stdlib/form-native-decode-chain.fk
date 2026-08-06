@@ -1,0 +1,269 @@
+; form-native-decode-chain.fk — the next rung after form-native-decode-timing-concurrent.fk's own
+; honesty: that file (and its serial twin) repeated ONE kernel N times with NO data dependency
+; between any two of the 424 dispatches — 424 DISTINCT output buffers, two read-only resident
+; inputs, no dispatch writing what another reads. That made unconstrained concurrency safe but also
+; meant it proved concurrency helps only the embarrassingly-parallel case. This file builds the
+; opposite shape: a REAL two-stage dependency chain, repeated N times inside one concurrent batch,
+; and measures whether a genuine write-then-read dependency between the two stages of EACH
+; repetition erases the ~12x gain the independent case measured, or costs only what the dependency
+; itself requires.
+;
+; THE TWO REAL STAGES, both real llama3.2:3b bytes, both already-proven kernels (called, not
+; retyped):
+;   stage A — form_rmsnorm_f32 (ldm-rmsnorm-msl, the exact kernel form-native-decode.fk dispatches)
+;             on the real blk.0.attn_norm.weight gain (d_model=3072, F32, unquantized) against the
+;             same closed-form synthetic input fnd-x-list produces. Output: a 3072-wide f32 vector,
+;             one fresh buffer per repetition.
+;   stage B — form_matvec_q4k_stageb (q4k-msl.fk's q4m-matvec-msl, the SAME fused Q4_K matvec
+;             kernel llama-token-handle.fk's form_q4k_matvec_f32 dispatches, called not retyped) on
+;             the real blk.0.attn_q.weight tensor — Q4_K (type 12), 3072x3072, row_bytes=1728,
+;             verified against the CURRENT GGUF at run time via egg-ti-type/egg-ti-dim/egg-tensor-abs
+;             (not trusted from real-gguf-llama-block-fwd.fk's comment, which was read for orientation
+;             only). Its INPUT is stage A's OUTPUT — the genuine real-model shape: RMSNorm's result
+;             feeds directly into the next projection. Output: `fndc-rows` () real rows of the real
+;             Q projection (see SCOPE below for why not all 3072).
+;
+; THE DEPENDENCY, MADE EXPLICIT WITH A BARRIER, NOT ASSUMED SAFE. Stage B for repetition i reads
+; hy_i, the buffer stage A for the SAME repetition just wrote. That is a genuine write-then-read
+; hazard the door does not infer on its own (metal-door.fk's own header: "this door does not guess
+; hazards") — so stage A enqueues with barrier_before=0 (nothing before IT depends on anything
+; outside itself: hx and hg are read-only for the whole batch) and stage B enqueues with
+; barrier_before=1 via md-bind16, which fk-metal-carrier.m's fk_metal_enqueue_external turns into
+; `[fk_enc memoryBarrierWithScope:MTLBarrierScopeBuffers]` immediately before that dispatch is
+; encoded. THIS BARRIER IS COARSE, NOT PER-PAIR, AND THAT IS NAMED HERE RATHER THAN LEFT IMPLICIT:
+; MTLBarrierScopeBuffers settles ALL buffer memory effects encoded before the barrier point, not
+; only hy_i, and DS4's own production header (metal_dsv4_stack.sh, ~line 764) documents that a
+; resource-named barrier was tried and REFUTED — it cost MORE per call and left more of the field
+; dirty, so this door only offers the coarse scope. Every repetition's barrier is therefore a real
+; synchronization point across everything encoded so far in the batch, not a scalpel that touches
+; only its own pair — the measurement below is honest about paying for that coarseness, not for an
+; idealized fine-grained dependency this door cannot express.
+;
+; SCOPE: RESULT ROWS, NOT KERNEL COMPLEXITY. The full Q projection is 3072 real rows; this file
+; computes `fndc-rows` () = 8 of them, on the REAL kernel, REAL bytes, REAL offset — not a smaller
+; placeholder kernel. The scope-down is host-verification cost, not GPU cost: GPU dispatch overhead
+; for 8 vs 3072 threads is the same order of magnitude (dispatch overhead dominates a few thousand
+; ALU ops either way, the same reason RMSNorm's own single-thread reduction was overhead-bound), but
+; verifying EVERY repetition's output against Form's own independent Q4_K dequant+dot (q4m-flat-at,
+; the same transcription q4k-msl-band.fk proves against wl-q4k-at) costs real wall time per element
+; on this tree-walking runtime. Because stage A's input is identical for every repetition (the same
+; real gain, the same synthetic x), stage A's output — and therefore stage B's — is DETERMINISTIC
+; across all N repetitions if the recipe is correct: a genuine race would show up as a repetition
+; whose stage-B output differs from the others, which is exactly what checking EVERY repetition
+; against ONE Form-computed reference (computed once, reused N times) is built to catch, without
+; paying N times for the dequant itself.
+;
+; NOT A BAND, same reason as its kin: a wall-clock duration is not four-way-provable, and Metal has
+; no Go/Rust/TS arm to check a millisecond against. The reference Q4_K dequant here reads real GGUF
+; bytes through eqr-at (str_byte_at), which equireach.fk's own header documents as a TWO-ARM byte
+; door today (fkwu + Go; rust/ts UTF-8-replace invalid bytes) — so even the correctness ARITHMETIC
+; over the real file cannot honestly claim four-way. The genuinely four-way-provable slice (the new
+; pure-Form pieces this file adds: the barrier-tail binding shape and the row-major flat-index
+; composition) is proven separately in tests/form-native-decode-chain-encoding-band.fk, following
+; form-native-decode-encoding-band.fk's exact precedent — a fixed fixture, no Metal, no real file.
+;
+; WHAT THIS DOES AND DOES NOT PROVE. Two real stages, repeated N times with real per-repetition
+; buffers and one real per-repetition dependency, is still not a full 43-op heterogeneous forward
+; pass — it has no varying kernel cost, no cross-layer state, no KV cache, no attention softmax
+; between the stages, and the "N repetitions" shape (built so concurrency has something to work
+; with) is an artifact of this measurement, not a decode's real structure, which runs one chain
+; once per token rather than N chains in parallel. It answers the ONE question the prior file's own
+; honesty left open — does a real dependency inside the chain erase the concurrent gain — and no
+; more.
+;
+; RUN (needs the carrier linked; PR #429 made this fkwu's default build, no separate --src flag,
+; no separate binary):
+;   cd form && ./validate.sh form-stdlib/tests/moe-gate-band.fk   # (or any band) builds ./fkwu
+;   cd .. && ./fkwu form/form-stdlib/form-native-decode-chain.fk
+;
+; Kin: form-stdlib/form-native-decode.fk (fnd-run, fnd-x-list, fnd-maxdiff, fnd-msl — reused
+;      verbatim for stage A), form-stdlib/form-native-decode-timing.fk /
+;      form-native-decode-timing-concurrent.fk (the N-independent-dispatch probes this extends),
+;      form-stdlib/q4k-msl.fk (q4m-matvec-msl — stage B's kernel; q4m-flat-at — the reference this
+;      file's correctness check reads through), form-stdlib/metal-door.fk (md-bind16 — the
+;      barrier_before tail), native/metal/metal_dsv4_stack.sh (~line 764-800 — the barrier-scope
+;      trade-off this file's header quotes, and DS4's own alternation of concurrent-independent with
+;      explicit-barrier-dependent work in one encoder, the same pattern this file runs at chain
+;      scale), native/metal/fk-metal-carrier.m (fk_metal_enqueue_external — the barrier_before ==
+;      1 && !concurrent refusal, and the memoryBarrierWithScope call this file's dependency relies
+;      on).
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/metal-door.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk native/metal/whole-tensor-residency.fk form-stdlib/llama-decode-msl.fk form-stdlib/llama-numerics.fk form-stdlib/form-native-decode.fk form-stdlib/q4k-msl.fk
+
+(do
+    ; N repetitions of the two-stage chain, one concurrent batch. Same 424 the independent-dispatch
+    ; probes used (llama3.2:3b's real per-forward dispatch count), so the two measurements sit next
+    ; to each other on the same N.
+    (defn fndc-n () 424)
+
+    ; stage B's real output width — 8 of the real Q projection's 3072 rows. See header SCOPE.
+    (defn fndc-rows () 8)
+
+    ; ================= locating the real Q4_K tensor, verified against the LIVE file =================
+    (defn fndc-q-abs (src) (egg-tensor-abs src (wtr-alignment) "blk.0.attn_q.weight"))
+    (defn fndc-q-type (src) (egg-ti-type src (egg-find-tensor src "blk.0.attn_q.weight")))
+    (defn fndc-q-dim0 (src) (egg-ti-dim src (egg-find-tensor src "blk.0.attn_q.weight") 0))
+    ; a Q4_K ROW is (cols/256) superblocks of 144 bytes each — for cols=3072 that is 12*144=1728,
+    ; matching real-gguf-llama-block-fwd.fk's own attn-q row_bytes. NOT 144 (that is one
+    ; SUPERBLOCK's stride, not one ROW's — an earlier draft of this file conflated the two, which
+    ; undersized both the GPU buffer window and the Form reference window by 12x and produced a
+    ; wrong reference (max|Δ| 0.32 against the GPU, isolated and root-caused in
+    ; tests/tmp-debug-chain.fk against real-gguf-llama-block-fwd.fk's independently-written
+    ; rgl-row-dot-q4k, which agreed with the GPU to ~1e-6 the whole time).
+    (defn fndc-q-row-bytes (cols) (mul (div cols 256) 144))
+
+    ; ================= the reference: Form's OWN independent Q4_K matvec, computed ONCE =================
+    ; q4m-flat-at(qsrc, base, idx) is the emitted-MSL-transcribed-back-into-Form reference
+    ; (q4k-msl.fk), the same one q4k-msl-band.fk proves bit-identical to weight-load.fk's
+    ; four-way-proven wl-q4k-at. `qsrc` here is an equireach window starting AT the real tensor's
+    ; row-0 byte (mmap'd via eqr-of-file at the real absolute offset), so idx = row*cols+j walks
+    ; row-major across it exactly as the GPU kernel's own `uint(i) * cols + j` does over the
+    ; identical byte window.
+    (defn fndc-ref-dot-loop (qsrc row cols j n xs acc)
+        (if (eq j n) acc
+            (fndc-ref-dot-loop qsrc row cols (add j 1) n (tail xs)
+                (add acc (mul (q4m-flat-at qsrc 0 (add (mul row cols) j)) (head xs))))))
+    (defn fndc-ref-dot (qsrc row cols xs) (fndc-ref-dot-loop qsrc row cols 0 cols xs 0.0))
+
+    (defn fndc-ref-rows-loop (qsrc row rows cols xs acc)
+        (if (eq row rows) (reverse acc)
+            (fndc-ref-rows-loop qsrc (add row 1) rows cols xs
+                (cons (fndc-ref-dot qsrc row cols xs) acc))))
+    (defn fndc-ref-rows (qsrc rows cols xs) (fndc-ref-rows-loop qsrc 0 rows cols xs (list)))
+
+    ; ================= N fresh buffer pairs: stage-A output (d wide) + stage-B output (rows wide) ====
+    (defn fndc-alloc-loop (i n d rows acc-hy acc-hz)
+        (if (ge i n) (list (reverse acc-hy) (reverse acc-hz))
+            (fndc-alloc-loop (add i 1) n d rows
+                (cons (metal_buf_alloc (mul d 4)) acc-hy)
+                (cons (metal_buf_alloc (mul rows 4)) acc-hz))))
+
+    ; ================= the timed enqueue loop: stage A (barrier=0) then stage B (barrier=1) =========
+    (defn fndc-enq-loop (i n pipeA pipeB hx hg hqb d ebits rows cols hys hzs acc)
+        (if (ge i n) acc
+            (fndc-enq-loop (add i 1) n pipeA pipeB hx hg hqb d ebits rows cols (tail hys) (tail hzs)
+                (add acc
+                    (add (metal_enqueue pipeA (md-bind (list hx hg (head hys)) (list d ebits)) 1)
+                         (metal_enqueue pipeB
+                             (md-bind16 (list hqb (head hys) (head hzs)) (list rows cols) 0 0 0 1)
+                             rows))))))
+
+    ; ================= readback + per-repetition verification against the ONE Form reference =======
+    (defn fndc-verify-loop (hzs rows ref-y worst)
+        (if (eq (len hzs) 0) worst
+            (do
+                (let bytes (metal_buf_read (head hzs) 0 (mul rows 4)))
+                (let gy (ewl-gain bytes 0 rows))
+                (let d (fnd-maxdiff ref-y gy))
+                (fndc-verify-loop (tail hzs) rows ref-y (if (gt d worst) d worst)))))
+
+    (defn fndc-run ()
+        (do
+            (let live (md-door-live?))
+            (let path (fnd-blob-path))
+            (let src (fnd-src path))
+            (let d (fnd-dmodel src))
+            (let eps (fnd-eps src))
+            (let ebits (md-f32-bits eps))
+            (let gnabs (fnd-norm-abs src path))
+            (let n (fndc-n))
+            (let rows (fndc-rows))
+            (let cols d)
+
+            ; verified against the LIVE file (not trusted): Q4_K, 2 dims, dim0 = cols.
+            (let qtype (fndc-q-type src))
+            (let qdim0 (fndc-q-dim0 src))
+            (let qabs (fndc-q-abs src))
+
+            ; ---- resident, built ONCE: real gain, synthetic input, real Q4_K weight window ---------
+            (let hg (metal_buf_from_file path gnabs (mul d 4)))
+            (let hx (metal_buf_alloc (mul d 4)))
+            (let wx (metal_buf_write hx 0 (fnd-x-bytes d)))
+            (let hqb (metal_buf_from_file path qabs (mul rows (fndc-q-row-bytes cols))))
+            (let pipeA (metal_pipeline (fnd-msl) "form_rmsnorm_f32"))
+            (let pipeB (metal_pipeline
+                (str_concat "#include <metal_stdlib>\n" (q4m-matvec-msl "form_matvec_q4k_stageb"))
+                "form_matvec_q4k_stageb"))
+
+            ; ---- A: N buffer-pair allocations, timed alone -----------------------------------------
+            (let ta0 (now_unix_ms))
+            (let bufs (fndc-alloc-loop 0 n d rows (list) (list)))
+            (let hys (nth bufs 0))
+            (let hzs (nth bufs 1))
+            (let ta1 (now_unix_ms))
+
+            ; ---- ARM: outside both timed windows, exactly as the independent probe does ------------
+            (let armed (metal_batch_concurrent))
+
+            ; ---- B: N*2 real dispatches enqueued, A(barrier=0) then B(barrier=1) per repetition ----
+            (let te0 (now_unix_ms))
+            (let ok-count (fndc-enq-loop 0 n pipeA pipeB hx hg hqb d ebits rows cols hys hzs 0))
+            (let te1 (now_unix_ms))
+
+            ; ---- C: ONE sync for the whole batch -----------------------------------------------------
+            (let ts0 (now_unix_ms))
+            (let drained (metal_sync))
+            (let ts1 (now_unix_ms))
+
+            ; ---- D: the Form reference, computed ONCE (inputs are identical across all N reps) ------
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let form-y0 (ln-rmsnorm (fnd-x-list d) gains eps))
+            (let qsrc (eqr-of-file path qabs (mul rows (fndc-q-row-bytes cols))))
+            (let ref-y (fndc-ref-rows qsrc rows cols form-y0))
+
+            ; ---- E: read back and verify EVERY repetition's stage-B output against the ONE reference
+            (let tr0 (now_unix_ms))
+            (let worst (fndc-verify-loop hzs rows ref-y 0.0))
+            (let tr1 (now_unix_ms))
+
+            (list live n rows cols qtype qdim0 armed ok-count drained
+                  (sub ta1 ta0) (sub te1 te0) (sub ts1 ts0) (sub tr1 tr0) worst)))
+
+    (defn fndc-us-per (ms n) (floor (div (mul ms 1000) n)))
+
+    (defn fndc-show ()
+        (do
+            (let r (fndc-run))
+            (let live (nth r 0))
+            (let n (nth r 1))
+            (let rows (nth r 2))
+            (let cols (nth r 3))
+            (let qtype (nth r 4))
+            (let qdim0 (nth r 5))
+            (let armed (nth r 6))
+            (let ok-count (nth r 7))
+            (let drained (nth r 8))
+            (let alloc-ms (nth r 9))
+            (let enq-ms (nth r 10))
+            (let sync-ms (nth r 11))
+            (let verify-ms (nth r 12))
+            (let worst (nth r 13))
+            (let ndisp (mul n 2))
+            (let batch-ms (add (add alloc-ms enq-ms) sync-ms))
+
+            (print_str (metal_status))
+            (print_str (str_concat "door-live " (if live "true" "false")))
+            (print_str (str_concat "attn_q.weight type(want=12 Q4_K) " (int_to_str qtype)))
+            (print_str (str_concat "attn_q.weight dim0(want=3072) " (int_to_str qdim0)))
+            (print_str (str_concat "batch_concurrent armed(want=1) " (int_to_str armed)))
+            (print_str (str_concat "n repetitions " (int_to_str n)))
+            (print_str (str_concat "rows(stage B real output width) " (int_to_str rows)))
+            (print_str (str_concat "cols(d_model) " (int_to_str cols)))
+            (print_str (str_concat "total dispatches(2*n) " (int_to_str ndisp)))
+            (print_str (str_concat "ok-count(want=2n) " (int_to_str ok-count)))
+            (print_str (str_concat "drained(want=2n) " (int_to_str drained)))
+            (print_str (str_concat "worst max-abs-delta form-vs-gpu(all n reps) " (float_to_str worst)))
+            (print_str (str_concat "alloc-ms " (int_to_str alloc-ms)))
+            (print_str (str_concat "enqueue-ms " (int_to_str enq-ms)))
+            (print_str (str_concat "sync-ms " (int_to_str sync-ms)))
+            (print_str (str_concat "verify(readback+diff)-ms(" (str_concat (int_to_str n) " reps) ")))
+            (print_str (int_to_str verify-ms))
+            (print_str (str_concat "alloc+enqueue+sync-ms " (int_to_str batch-ms)))
+            (print_str (str_concat "us/dispatch enqueue-only " (int_to_str (fndc-us-per enq-ms ndisp))))
+            (print_str (str_concat "us/dispatch enqueue+sync " (int_to_str (fndc-us-per (add enq-ms sync-ms) ndisp))))
+            (print_str (str_concat "us/repetition enqueue-only " (int_to_str (fndc-us-per enq-ms n))))
+            (print_str (str_concat "us/repetition enqueue+sync " (int_to_str (fndc-us-per (add enq-ms sync-ms) n))))
+
+            (if live (if (eq armed 1) (if (eq ok-count ndisp) (if (eq drained ndisp) (if (lt worst 0.01) 1 0) 0) 0) 0) 0)))
+
+    (fndc-show))
