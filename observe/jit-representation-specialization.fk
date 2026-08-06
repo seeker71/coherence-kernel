@@ -1,0 +1,184 @@
+; jit-representation-specialization.fk - field/container direct access policy.
+;
+; This cell distinguishes cons-list head/tail, indexed array/buffer, field
+; offset, dict lookup, hashmap bucket, and red-black-tree path specialization.
+; Every direct action requires guard, fallback, source signature match, and a
+; source-attributed runtime fault receipt for the exception path.
+
+(do
+    (defn jrs-fallback () 0)
+    (defn jrs-field-offset () 1)
+    (defn jrs-list-head-tail () 2)
+    (defn jrs-array-index () 3)
+    (defn jrs-dict-lookup () 4)
+    (defn jrs-hash-bucket () 5)
+    (defn jrs-tree-path () 6)
+    (defn jrs-deopt () 7)
+
+    (defn jrs-op-field () 201)
+    (defn jrs-op-list () 202)
+    (defn jrs-op-array () 203)
+    (defn jrs-op-dict () 204)
+    (defn jrs-op-hash () 205)
+    (defn jrs-op-tree () 206)
+
+    ; layout receipt:
+    ; ("repr" op container shape version keycat field index length guard fallback collision order source-sig)
+    (defn jrs-layout (op container shape version keycat field index length guard fallback collision order source-sig)
+        (list "repr" op container shape version keycat field index length guard fallback collision order source-sig))
+    (defn jrs-layout? (l) (if (eq (len l) 14) (str_eq (nth l 0) "repr") 0))
+    (defn jrs-op (l) (nth l 1))
+    (defn jrs-container (l) (nth l 2))
+    (defn jrs-shape (l) (nth l 3))
+    (defn jrs-version (l) (nth l 4))
+    (defn jrs-keycat (l) (nth l 5))
+    (defn jrs-field (l) (nth l 6))
+    (defn jrs-index (l) (nth l 7))
+    (defn jrs-length (l) (nth l 8))
+    (defn jrs-guard (l) (nth l 9))
+    (defn jrs-fallback-path (l) (nth l 10))
+    (defn jrs-collision (l) (nth l 11))
+    (defn jrs-order (l) (nth l 12))
+    (defn jrs-source-sig (l) (nth l 13))
+
+    (defn jrs-field-profile ()
+        (list 50 1 900 8 1 (jpr-call-mono) (jpr-int) (jpr-none) 5001 (jpr-none) 2 (jpr-index-none) (jpr-stack-normal) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) 17))
+
+    (defn jrs-list-profile ()
+        (list 51 1 901 8 1 (jpr-call-mono) (jpr-int) (jpr-list) 0 (jpr-none) 0 (jpr-index-head) (jpr-stack-normal) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) 18))
+
+    (defn jrs-dict-profile ()
+        (list 52 1 902 8 1 (jpr-call-mono) (jpr-int) (jpr-dict) 0 (jpr-string) 0 (jpr-index-none) (jpr-stack-normal) (jpr-cpu-scalar) (jpr-gpu-none) (jpr-deopt-none) 19))
+
+    (defn jrs-shape-ok? (l profile)
+        (if (eq (jpr-shape profile) 0)
+            1
+            (if (eq (jrs-shape l) (jpr-shape profile)) 1 0)))
+
+    (defn jrs-source-match? (l profile)
+        (if (eq (jrs-source-sig l) (jpr-signature profile)) 1 0))
+
+    (defn jrs-base-safe? (l profile fault)
+        (if (eq (jrs-layout? l) 1)
+            (if (eq (jrs-guard l) 1)
+                (if (eq (jrs-fallback-path l) 1)
+                    (if (eq (jrs-source-match? l profile) 1)
+                        (jrf-attributed? fault)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jrs-bounds-ok? (l profile)
+        (if (eq (jpr-index profile) (jpr-index-range))
+            (if (gt (jrs-length l) 0) 1 0)
+            (jrf-bounds-ok? (jrs-index l) (jrs-length l))))
+
+    (defn jrs-field-ok? (l profile)
+        (if (eq (jrs-op l) (jrs-op-field))
+            (if (eq (jpr-field-direct? profile) 1)
+                (if (eq (jrs-field l) (jpr-field profile))
+                    (jrs-shape-ok? l profile)
+                    0)
+                0)
+            0))
+
+    (defn jrs-list-ok? (l profile)
+        (if (eq (jrs-op l) (jrs-op-list))
+            (if (eq (jrs-container l) (jpr-list))
+                (jpr-list-direct? profile)
+                0)
+            0))
+
+    (defn jrs-array-ok? (l profile)
+        (if (eq (jrs-op l) (jrs-op-array))
+            (if (eq (jrs-container l) (jpr-container profile))
+                (if (eq (jpr-array-direct? profile) 1) (jrs-bounds-ok? l profile) 0)
+                0)
+            0))
+
+    (defn jrs-dict-ok? (l profile)
+        (if (eq (jrs-op l) (jrs-op-dict))
+            (if (eq (jrs-container l) (jpr-dict))
+                (if (eq (jpr-container profile) (jpr-dict))
+                    (if (eq (jrs-keycat l) (jpr-key profile)) 1 0)
+                    0)
+                0)
+            0))
+
+    (defn jrs-hash-ok? (l profile)
+        (if (eq (jrs-op l) (jrs-op-hash))
+            (if (eq (jrs-container l) (jpr-hashmap))
+                (if (eq (jpr-container profile) (jpr-hashmap))
+                    (if (eq (jrs-keycat l) (jpr-key profile))
+                        (if (eq (jrs-collision l) 0) 1 0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jrs-tree-ok? (l profile)
+        (if (eq (jrs-op l) (jrs-op-tree))
+            (if (eq (jrs-container l) (jpr-rbtree))
+                (if (eq (jpr-container profile) (jpr-rbtree))
+                    (if (eq (jrs-keycat l) (jpr-orderable))
+                        (if (eq (jrs-order l) 1) 1 0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jrs-action (l profile fault)
+        (if (eq (jpr-deopt profile) (jpr-deopt-none))
+            (if (eq (jrs-base-safe? l profile fault) 1)
+                (if (eq (jrs-field-ok? l profile) 1) (jrs-field-offset)
+                    (if (eq (jrs-list-ok? l profile) 1) (jrs-list-head-tail)
+                        (if (eq (jrs-array-ok? l profile) 1) (jrs-array-index)
+                            (if (eq (jrs-dict-ok? l profile) 1) (jrs-dict-lookup)
+                                (if (eq (jrs-hash-ok? l profile) 1) (jrs-hash-bucket)
+                                    (if (eq (jrs-tree-ok? l profile) 1) (jrs-tree-path) (jrs-fallback)))))))
+                (jrs-fallback))
+            (jrs-deopt)))
+
+    (defn jrs-field-layout ()
+        (jrs-layout (jrs-op-field) (jpr-none) 5001 1 (jpr-none) 2 0 0 1 1 0 0 (jpr-signature (jrs-field-profile))))
+    (defn jrs-list-layout ()
+        (jrs-layout (jrs-op-list) (jpr-list) 0 1 (jpr-none) 0 0 4 1 1 0 0 (jpr-signature (jrs-list-profile))))
+    (defn jrs-array-layout ()
+        (jrs-layout (jrs-op-array) (jpr-array) 1201 1 (jpr-none) 0 3 8 1 1 0 0 (jpr-signature (jpr-array-sample 100 40))))
+    (defn jrs-dict-layout ()
+        (jrs-layout (jrs-op-dict) (jpr-dict) 0 3 (jpr-string) 0 0 16 1 1 0 0 (jpr-signature (jrs-dict-profile))))
+    (defn jrs-hash-layout ()
+        (jrs-layout (jrs-op-hash) (jpr-hashmap) 2201 4 (jpr-string) 0 0 16 1 1 0 0 (jpr-signature (jpr-hash-sample))))
+    (defn jrs-tree-layout ()
+        (jrs-layout (jrs-op-tree) (jpr-rbtree) 0 5 (jpr-orderable) 0 0 8 1 1 0 1 (jpr-signature (jpr-tree-sample))))
+    (defn jrs-collision-layout ()
+        (jrs-layout (jrs-op-hash) (jpr-hashmap) 2201 4 (jpr-string) 0 0 16 1 1 1 0 (jpr-signature (jpr-hash-sample))))
+    (defn jrs-source-miss ()
+        (jrs-layout (jrs-op-array) (jpr-array) 1201 1 (jpr-none) 0 3 8 1 1 0 0 999))
+    (defn jrs-bad-fault ()
+        (jrf-exception (jrf-bounds) "array-get" (jrf-source "form" "" 0 0 0) (empty) (list 0 0)))
+
+    (defn jrs-bit (cond bit) (if cond bit 0))
+    (defn jit-representation-specialization-check ()
+        (add
+            (jrs-bit (eq (jrs-action (jrs-field-layout) (jrs-field-profile) (jrf-type-ex)) (jrs-field-offset)) 1)
+            (add
+                (jrs-bit (eq (jrs-action (jrs-list-layout) (jrs-list-profile) (jrf-bounds-ex)) (jrs-list-head-tail)) 2)
+                (add
+                    (jrs-bit (eq (jrs-action (jrs-array-layout) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jrs-array-index)) 4)
+                    (add
+                        (jrs-bit (eq (jrs-action (jrs-dict-layout) (jrs-dict-profile) (jrf-type-ex)) (jrs-dict-lookup)) 8)
+                        (add
+                            (jrs-bit (eq (jrs-action (jrs-hash-layout) (jpr-hash-sample) (jrf-type-ex)) (jrs-hash-bucket)) 16)
+                            (add
+                                (jrs-bit (eq (jrs-action (jrs-tree-layout) (jpr-tree-sample) (jrf-type-ex)) (jrs-tree-path)) 32)
+                                (add
+                                    (jrs-bit (eq (jrs-action (jrs-collision-layout) (jpr-hash-sample) (jrf-type-ex)) (jrs-fallback)) 64)
+                                    (add
+                                        (jrs-bit (eq (jrs-action (jrs-source-miss) (jpr-array-sample 100 40) (jrf-bounds-ex)) (jrs-fallback)) 128)
+                                        (add
+                                            (jrs-bit (eq (jrs-action (jrs-array-layout) (jpr-array-sample 100 40) (jrs-bad-fault)) (jrs-fallback)) 256)
+                                            (jrs-bit (eq (jrs-action (jrs-array-layout) (jpr-cool-guard-sample) (jrf-bounds-ex)) (jrs-deopt)) 512))))))))))
+
+    0)

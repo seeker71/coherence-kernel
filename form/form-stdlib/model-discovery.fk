@@ -1,0 +1,379 @@
+; model-discovery.fk — the body looks at what models are on this host, instead of being told about one.
+;
+; WHAT THIS REPLACES, and why that was never an "input". FORM_DS4_BLOB is a static path to a single
+; GGUF, defaulted in metal_dsv4_stack.sh:43 to one ds4 file. Yesterday I classified it INPUT and kept
+; it, on the reasoning that only the caller knows which model they mean. That reasoning is wrong and
+; it is the same wrongness as every other switch here: THE HOST KNOWS. There are six GGUFs on this
+; machine and the body had been told about one. A switch is what you build when you decide the body
+; cannot look; discovery is what you build when you decide it can.
+;
+; THE DISTINCTION URS DREW, which is the whole design. A STATIC switch is configuration chosen before
+; the body runs, baked into an invocation, invisible afterwards, and multiplied by every other switch
+; into a space nobody can hold. A RUNTIME switch is a choice made while the body is running, from
+; options the body FOUND, visible in the asking. The first makes a body that must be configured; the
+; second makes a body that can be talked to. `models` then `use <n>` is a runtime switch. FORM_DS4_BLOB
+; is not, and it goes.
+;
+; WHY THE ROOT IS AN ARGUMENT AND NOT A CONSTANT. fkwu has no getenv — re-read on 2026-08-03: getenv
+; is declared in fkwu-uni.c and used for TMPDIR and by fk_conf, and it is bound to no Form op — so a
+; cell cannot expand `~`. Passing a root is therefore a real argument, the kind only the caller can
+; supply, not a knob standing in for a question the body could have answered. What the body CAN answer
+; from one named root is which OTHER model homes exist beside it, and md-kin-of asks the host that.
+;
+; WHY ROOTS ARE A LIST. Because one root was the same failure as one file. `~/models` is where a
+; person puts a model on purpose; ollama and huggingface_hub put theirs in caches under different
+; names, and the champion of this body's own registry — llama3.2:3b — lives in one of them under a
+; filename that is a hash. See md-kin-suffixes for the four witnessed here — three blob homes and
+; one ledger home (ollama's manifests, the only place a per-tensor model is one thing).
+;
+; WHAT IT READS. Only the header window: architecture and block count for a GGUF, the self-declared
+; JSON header for a safetensors file, the layer table for a tensor manifest — the facts that decide
+; how a file must be run. It never pages the weights, so listing forty models costs forty small
+; reads and not 100 GiB.
+;
+; preludes: form-stdlib/core.fk, form-stdlib/gguf-meta.fk
+
+(do
+    (defn md-header-bytes () 1048576)   ; the KV block lives at the front; a MiB has held every file here
+    (defn md-join (dir name) (str_concat dir (str_concat "/" name)))
+
+    ; ---- WHAT MAKES A FILE A MODEL: its own first four bytes, never its name. ----
+    ; `.gguf` was a NAME test, and a name test is the same wrongness as a switch one size smaller:
+    ; it trusts a label instead of looking. The champion of this registry — llama3.2:3b, the one
+    ; base.llama32-3b-metal decodes tokens from — is stored by ollama as
+    ;   ~/.ollama/models/blobs/sha256-dde5aa3fc5ff…
+    ; with NO extension at all, and the extension test called it "not a model" with total confidence.
+    ; Sixteen models on this host were invisible for that reason alone. GGUF's own first four bytes
+    ; are the magic "GGUF"; four bytes read is cheaper than any name convention and cannot be fooled
+    ; by a host that renames its files, so this is what the body asks.
+    (defn md-magic () "GGUF")
+    (defn md-gguf? (path)
+        (if (fs_is_dir path) 0
+            (if (str_eq (read_file_slice path 0 4) (md-magic)) 1 0)))
+
+    ; architecture names its own block-count key, so the second read depends on the first
+    (defn md-arch (src) (gmt-str src "general.architecture"))
+    ; …and not every architecture puts its depth under `<arch>.block_count`. `clip` (the moondream and
+    ; llava projectors on this host) declares `clip.vision.block_count`, so a single-key read returns
+    ; the sentinel for it. Two named keys, then an honest absence — never a plausible number.
+    (defn md-nlayer (src arch)
+        (do
+            (let n (gmt-u32 src (str_concat arch ".block_count")))
+            (if (eq n (gmt-absent)) (gmt-u32 src (str_concat arch ".vision.block_count")) n)))
+    (defn md-layers-str (src arch)
+        (do
+            (let n (md-nlayer src arch))
+            (if (eq n (gmt-absent)) "(header declares no block_count)" (int_to_str n))))
+
+    ; A BLOB'S IDENTITY IS NOT ITS FILENAME. ollama's naming lives in
+    ; ~/.ollama/models/manifests/<registry>/<library>/<model>/<tag>, a JSON document whose
+    ; `application/vnd.ollama.image.model` layer digest is the blob file's name. That is ollama's
+    ; ledger about the file. But the file also names ITSELF: `general.name` is in the same header
+    ; window this cell already reads, and it survives being copied, renamed, or reached through a
+    ; runtime that never heard of ollama. So the body asks the file, not the ledger — sha256-dde5aa3f…
+    ; answers "Llama 3.2 3B Instruct" without a manifest being opened.
+    (defn md-name (src)
+        (do (let n (gmt-str src "general.name"))
+            (if (str_eq n "") "(header names no model)" n)))
+
+    (defn md-gguf-describe (path)
+        (do
+            (let src (read_file_slice path 0 (md-header-bytes)))
+            (let arch (md-arch src))
+            (if (str_eq arch "")
+                (str_concat path "   (not a GGUF header this body can read — unfinished, not unsupported)")
+                (str_concat path (str_concat "   arch=" (str_concat arch
+                    (str_concat "  layers=" (str_concat (md-layers-str src arch)
+                        (str_concat "  name=" (md-name src))))))))))
+
+    ; ---- SAFETENSORS: the file declares its own shape, same as GGUF, different spelling. ----
+    ; A safetensors file's first 8 bytes are a little-endian u64 naming its own JSON header's
+    ; length; the header follows and names every tensor with dtype, shape and data_offsets.
+    ; Eleven models on this host were invisible on 2026-08-03 for the same reason the ollama
+    ; blobs once were: the body only asked files one question ("GGUF"?) and called every other
+    ; answer not-a-model. The recognition here is byte-shape, never name: byte 8 must open the
+    ; JSON ({), byte 9 must open its first key ("), and the header's own last byte — at the
+    ; offset the length declares — must be its closing } or the format's space padding. All
+    ; three were read off all eleven real files on 2026-08-04 before being written down here.
+    (defn md-q () "\"")
+    (defn md-safetensors? (path)
+        (if (fs_is_dir path) 0
+            (do (let w (read_file_slice path 0 10))
+                (if (lt (str_len w) 10) 0
+                    (if (and (eq (str_byte_at w 8) 123) (eq (str_byte_at w 9) 34))
+                        (do (let hlen (egg-u64 w 0))
+                            (if (lt hlen 2) 0
+                                (do (let lastb (read_file_slice path (add 7 hlen) 1))
+                                    (if (eq (str_len lastb) 1)
+                                        (if (or (eq (str_byte_at lastb 0) 125)
+                                                (eq (str_byte_at lastb 0) 32)) 1 0)
+                                        0))))
+                        0)))))
+
+    ; THE FIND THAT DOES NOT ALLOCATE. core.fk's str_find warns about itself — "naive substring
+    ; search … nothing in this codebase calls it in a hot loop over long strings" — because its
+    ; inner compare goes through substring, which rebuilds its slice one byte_to_str + str_concat
+    ; at a time. The first draft of this cell called it over megabyte reads and the walk did not
+    ; stall somewhere, it stalled THERE: five minutes of allocating one-byte strings. This matcher
+    ; walks the same native byte waist the format arithmetic already trusts (str_byte_at), compares
+    ; in place, allocates nothing, and is tail-recursive the whole way down.
+    (defn md-match-at? (h n i j nlen)
+        (if (ge j nlen) 1
+            (if (eq (str_byte_at h (add i j)) (str_byte_at n j))
+                (md-match-at? h n i (add j 1) nlen)
+                0)))
+    (defn md-find-loop (h n i hstop nlen)
+        (if (gt i hstop) (sub 0 1)
+            (if (eq (md-match-at? h n i 0 nlen) 1) i
+                (md-find-loop h n (add i 1) hstop nlen))))
+    (defn md-find-bytes (h n from)
+        (md-find-loop h n from (sub (str_len h) (str_len n)) (str_len n)))
+
+    ; digits, read where they stand — the two helpers every JSON number below is read with
+    (defn md-digit? (b) (and (ge b 48) (le b 57)))
+    (defn md-int-at (s i acc)
+        (if (ge i (str_len s)) acc
+            (do (let b (str_byte_at s i))
+                (if (md-digit? b) (md-int-at s (add i 1) (add (mul acc 10) (sub b 48))) acc))))
+    (defn md-skip-digits (s i)
+        (if (ge i (str_len s)) i
+            (if (md-digit? (str_byte_at s i)) (md-skip-digits s (add i 1)) i)))
+
+    ; WHICH PARSER THIS IS, said out loud: a key-scanner, not a JSON parser. form-stdlib holds
+    ; no JSON reader cell (grepped 2026-08-04 — the json hits are emitters and one bf16 slicer),
+    ; and building one to count tensors would be weight this question does not carry. The
+    ; scanner walks every `"data_offsets"` key — one per tensor, by the format's own schema —
+    ; and reads the pair's second number, whose maximum is where the data region ends. Its
+    ; radius: compact serialization (`"data_offsets":[a,b]`, as every witnessed header spells
+    ; it); a tensor NAMED data_offsets would be counted twice, and that is the honest price of
+    ; a scanner, named here rather than hidden.
+    (defn md-st-needle () (str_concat (md-q) (str_concat "data_offsets" (md-q))))
+    (defn md-st-scan (hdr from count maxend)
+        (do (let k (md-find-bytes hdr (md-st-needle) from))
+            (if (lt k 0) (list count maxend)
+                (do (let j (md-skip-digits hdr (add k 16)))
+                    (let e (md-int-at hdr (add j 1) 0))
+                    (md-st-scan hdr (add j 1) (add count 1) (if (gt e maxend) e maxend))))))
+
+    ; config.json beside the file names what KIND of model this is (model_type), when it exists
+    ; and says so. Both absences are reported as themselves, never guessed over. The value read
+    ; is the next quoted string after the key — a string by the convention of every witnessed
+    ; config; a numeric model_type would misread, and the scanner says so here. The key is found
+    ; wherever it FIRST occurs, not only at the top level: parakeet's config names no top-level
+    ; model_type but carries decoding.model_type=tdt, and the scanner reports that — witnessed
+    ; 2026-08-04, and more informative than the absence a top-level-only read would report.
+    (defn md-st-config-hint (path)
+        (do (let cfg (read_file_slice (md-join (md-parent path) "config.json") 0 262144))
+            (if (eq (str_len cfg) 0) "(no config.json beside it)"
+                (do (let k (md-find-bytes cfg (str_concat (md-q) (str_concat "model_type" (md-q))) 0))
+                    (if (lt k 0) "(config.json names no model_type)"
+                        (do (let v1 (md-find-bytes cfg (md-q) (add k 12)))
+                            (let v2 (if (lt v1 0) (sub 0 1) (md-find-bytes cfg (md-q) (add v1 1))))
+                            (if (lt v2 0) "(config.json names no model_type)"
+                                (str_concat "config=" (substring cfg (add v1 1) v2)))))))))
+
+    (defn md-st-describe (path)
+        (do (let hlen (egg-u64 (read_file_slice path 0 8) 0))
+            (let hdr (read_file_slice path 8
+                         (if (gt hlen (md-header-bytes)) (md-header-bytes) hlen)))
+            (if (lt (str_len hdr) hlen)
+                (str_concat path "   (safetensors header wider than this body's read window — unfinished, not unsupported)")
+                (do (let facts (md-st-scan hdr 0 0 0))
+                    (str_concat path (str_concat "   safetensors  tensors="
+                        (str_concat (int_to_str (nth facts 0))
+                        (str_concat "  bytes=" (str_concat (int_to_str (add 8 (add hlen (nth facts 1))))
+                        (str_concat "  " (md-st-config-hint path)))))))))))
+
+    ; ---- PER-TENSOR OLLAMA MODELS: the ledger is the only place the model is one thing. ----
+    ; Six models on this host are stored by ollama as ~254 separate tensor blobs each, one file
+    ; per weight, none of them the model. Their identity lives in
+    ; ~/.ollama/models/manifests/<registry>/<library>/<model>/<tag>: a JSON manifest whose
+    ; layers carry mediaType application/vnd.ollama.image.tensor, each with the tensor's name,
+    ; digest and size. For these the body reads the ledger, because there is no single file to
+    ; ask — and the listing says `tensor-manifest` so nobody hands a manifest to a GGUF loader.
+    ; A manifest whose layers are image.model points at a blob the walk already lists by its own
+    ; bytes, so those are NOT listed here: one model, one line.
+    (defn md-manifest-needle ()
+        (str_concat (md-q) (str_concat "application/vnd.ollama.image.tensor" (md-q))))
+    (defn md-tensor-manifest? (path)
+        (if (fs_is_dir path) 0
+            (do (let first (read_file_slice path 0 1))
+                (if (str_eq first "{")
+                    (do (let src (read_file_slice path 0 (md-header-bytes)))
+                        (if (ge (md-find-bytes src (str_concat (md-q) (str_concat "schemaVersion" (md-q))) 0) 0)
+                            (if (ge (md-find-bytes src (md-manifest-needle) 0) 0) 1 0)
+                            0))
+                    0))))
+    (defn md-mani-scan (src from count total)
+        (do (let k (md-find-bytes src (md-manifest-needle) from))
+            (if (lt k 0) (list count total)
+                (do (let s (md-find-bytes src (str_concat (md-q) (str_concat "size" (md-q))) k))
+                    (let v (if (lt s 0) 0 (md-int-at src (add s 7) 0)))
+                    (md-mani-scan src (add k 1) (add count 1) (add total v))))))
+    (defn md-mani-name (path)
+        (str_concat (md-base (md-parent path)) (str_concat ":" (md-base path))))
+    (defn md-manifest-describe (path)
+        (do (let src (read_file_slice path 0 (md-header-bytes)))
+            (let facts (md-mani-scan src 0 0 0))
+            (str_concat path (str_concat "   tensor-manifest  model=" (str_concat (md-mani-name path)
+                (str_concat "  tensors=" (str_concat (int_to_str (nth facts 0))
+                (str_concat "  bytes=" (int_to_str (nth facts 1))))))))))
+
+    ; ---- ONE FILE, ONE DOOR. huggingface_hub stores every real file in models--*/blobs and
+    ; reaches it through a snapshot symlink one directory over. Listing both is two doors on one
+    ; room (the registry learned this from the ds4 symlink), and only the snapshot door has the
+    ; config.json sitting beside it. So a file whose parent is `blobs` under a `models--` repo
+    ; is left to its snapshot door — GGUF and safetensors alike. The radius: a snapshot file
+    ; nested more than two directories below its snapshot hash sits past md-depth's walk, and
+    ; its blob would then be skipped here with no door left; every witnessed layout is at most
+    ; one directory deep. ollama's blobs directory is not under a models--* parent, so its
+    ; content-addressed files list exactly as before.
+    (defn md-base (p)
+        (do (let k (md-last-slash p 0 (sub 0 1)))
+            (if (lt k 0) p (substring p (add k 1) (str_len p)))))
+    (defn md-starts-with? (s pre)
+        (if (lt (str_len s) (str_len pre)) 0
+            (if (str_eq (substring s 0 (str_len pre)) pre) 1 0)))
+    (defn md-hub-blob? (p)
+        (if (str_eq (md-base (md-parent p)) "blobs")
+            (md-starts-with? (md-base (md-parent (md-parent p))) "models--")
+            0))
+
+    ; A PART IS NOT A MODEL, and the first full walk proved the difference matters: ollama stores
+    ; a per-tensor model as ~254 blobs, and every one of those blobs turned out to be a tiny
+    ; safetensors container in its own right — 366 of them answered the byte test and the listing
+    ; called each shard a model. The bytes were read honestly and the conclusion was still wrong,
+    ; because a shard's identity lives one directory over: a safetensors file inside a `blobs`
+    ; directory that has a sibling `manifests` ledger is a LAYER the ledger claims, and the
+    ; manifest door above lists the whole it belongs to. Same rule as the hub blobs: one model,
+    ; one door. The radius: an orphaned shard no manifest claims goes unlisted here — witnessed
+    ; zero of those today, and an orphan is a cleanup question, not a model.
+    (defn md-ledger-blob? (p)
+        (if (str_eq (md-base (md-parent p)) "blobs")
+            (fs_is_dir (md-join (md-parent (md-parent p)) "manifests"))
+            0))
+
+    ; what makes a file a model, all three spellings, cheapest bytes first
+    (defn md-model-file? (p)
+        (if (fs_is_dir p) 0
+            (if (eq (md-hub-blob? p) 1) 0
+                (if (eq (md-gguf? p) 1) 1
+                    (if (eq (md-safetensors? p) 1)
+                        (if (eq (md-ledger-blob? p) 1) 0 1)
+                        (md-tensor-manifest? p))))))
+
+    (defn md-describe (path)
+        (if (eq (md-gguf? path) 1) (md-gguf-describe path)
+            (if (eq (md-safetensors? path) 1) (md-st-describe path)
+                (if (eq (md-tensor-manifest? path) 1) (md-manifest-describe path)
+                    (str_concat path "   (not a model header this body can read — unfinished, not unsupported)")))))
+
+    ; ---- the walk. One directory deep plus its immediate subdirectories, because that is how the
+    ; models on this host are actually laid out (some loose, some in a per-model folder). ----
+    ; A path is listed once however many roots reach it: ~/models and a kin root derived from it can
+    ; overlap, and a second copy of one file is a second model to every reader downstream.
+    (defn md-path-in? (p ps)
+        (if (eq (len ps) 0) 0
+            (if (str_eq p (head ps)) 1 (md-path-in? p (tail ps)))))
+    (defn md-add (p acc) (if (eq (md-path-in? p acc) 1) acc (cons p acc)))
+
+    (defn md-scan-files (dir names acc)
+        (if (eq (len names) 0) acc
+            (do (let p (md-join dir (head names)))
+                (md-scan-files dir (tail names)
+                    (if (eq (md-model-file? p) 1) (md-add p acc) acc)))))
+
+    ; Four levels, not two. Depth 2 found five of six files under ~/models (ds4-engine/gguf/ is a
+    ; directory inside a directory); then on 2026-08-04 the safetensors under the huggingface hub
+    ; put real files FIVE components below the root — models--X/snapshots/<hash>/<subdir>/file —
+    ; and the manifests ledger keeps its files four below its own root. Depth is named here rather
+    ; than assumed, so when a model appears six deep the gap is a number in this cell and not a
+    ; mystery. The walk still reads only a handful of bytes per file, so the added levels cost
+    ; directory listings, not weight pages.
+    (defn md-depth () 4)
+
+    (defn md-scan-dirs (root names acc depth)
+        (if (eq (len names) 0) acc
+            (do (let n (head names))
+                ; `child`, not `sub`: this path was named `sub` and sat one line above
+                ; `(sub depth 1)`, so the cell held one name for a directory string and for
+                ; subtraction at once. It ran only because the primitive wins in call
+                ; position — fkwu says so out loud, [shadowed-call] at the recursion. A
+                ; binding that survives on a tie-break rule is not held, it is guessed at.
+                (let child (md-join root n))
+                (md-scan-dirs root (tail names)
+                    (if (fs_is_dir child) (md-walk child acc (sub depth 1)) acc)
+                    depth))))
+
+    (defn md-walk (dir acc depth)
+        (do (let names (fs_list dir))
+            (let here (md-scan-files dir names acc))
+            (if (le depth 0) here (md-scan-dirs dir names here depth))))
+
+    ; ---- ROOTS ARE A LIST, because a host keeps its models in more than one place. ----
+    ; One root was the same shape of answer as one file: a smaller world reported with a complete
+    ; world's confidence. This host keeps GGUFs in three places, all witnessed on 2026-08-03:
+    ;   ~/models                       what a person downloaded and put somewhere on purpose
+    ;   ~/.ollama/models/blobs         what ollama pulled — content-addressed, no extension
+    ;   ~/.cache/huggingface/hub       what huggingface_hub cached — models--<org>--<repo>/blobs/<sha>
+    ; and a fourth (lm-studio) is only absent from this list because it is absent from this host.
+    ; A convention nobody has witnessed here is UNFINISHED, not unsupported: add it below and it costs
+    ; one fs_is_dir when it is not there.
+    (defn md-walk-roots (roots acc)
+        (if (eq (len roots) 0) acc
+            (md-walk-roots (tail roots) (md-walk (head roots) acc (md-depth)))))
+    (defn md-find-in (roots) (md-walk-roots roots (list)))
+
+    ; The fourth suffix is a LEDGER home, not a blob home: manifests hold the identity of models
+    ; that exist only as scattered tensor blobs (md-tensor-manifest? above). It rides the same kin
+    ; derivation because it lives beside the blobs on every host that has ollama at all.
+    (defn md-kin-suffixes ()
+        (list "/.ollama/models/blobs" "/.ollama/models/manifests" "/.cache/huggingface/hub" "/models"))
+
+    ; the parent directory of a path — the last '/' decides, and a path with none is its own parent
+    (defn md-last-slash (s i best)
+        (if (ge i (str_len s)) best
+            (md-last-slash s (add i 1) (if (eq (ord (char_at s i)) 47) i best))))
+    (defn md-parent (p)
+        (do (let k (md-last-slash p 0 (sub 0 1)))
+            (if (lt k 0) p (substring p 0 k))))
+
+    ; The kin of a named root: the conventional model homes that ACTUALLY EXIST beside it. Every
+    ; candidate is a question to the host (fs_is_dir), never an assumption; a candidate that is the
+    ; root itself is dropped so one directory is not walked twice.
+    (defn md-kin-try (base sfx root acc)
+        (if (eq (len sfx) 0) acc
+            (do (let cand (str_concat base (head sfx)))
+                (md-kin-try base (tail sfx) root
+                    (if (str_eq cand root) acc
+                        (if (fs_is_dir cand) (md-add cand acc) acc))))))
+    (defn md-kin-of (root)
+        (md-kin-try (md-parent root) (md-kin-suffixes) root
+            (md-kin-try root (md-kin-suffixes) root (list))))
+
+    ; `md-find root` keeps its old signature and gains the host's other model homes: the caller names
+    ; the place they know, and the body adds the places it can SEE. Nothing is compiled in — a host
+    ; without ~/.ollama simply has no kin and the answer is the root alone.
+    (defn md-find (root) (md-find-in (cons root (md-kin-of root))))
+
+    (defn md-report (paths i)
+        (if (eq (len paths) 0) i
+            (do (print_str (str_concat "  [" (str_concat (int_to_str i)
+                           (str_concat "] " (md-describe (head paths))))))
+                (md-report (tail paths) (add i 1)))))
+
+    (defn md-list (root)
+        (do (print_str (str_concat "— models this body can see under " (str_concat root " and its kin —")))
+            (let found (md-find root))
+            (let n (md-report found 0))
+            (print_str (str_concat "  " (str_concat (int_to_str n) " found; choose one at runtime, none is compiled in")))
+            n))
+
+    (defn md-list-in (roots)
+        (do (print_str (str_concat "— models this body can see under "
+                                   (str_concat (int_to_str (len roots)) " named roots —")))
+            (let found (md-find-in roots))
+            (let n (md-report found 0))
+            (print_str (str_concat "  " (str_concat (int_to_str n) " found; choose one at runtime, none is compiled in")))
+            n))
+    0)

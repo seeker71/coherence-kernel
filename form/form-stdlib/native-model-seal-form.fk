@@ -1,0 +1,206 @@
+; native-model-seal-form.fk — pre-training isolation and provenance in Form.
+;
+; Permission bits, symlink state, and Git HEAD identity are host observations;
+; the shell membrane may report them, but it cannot decide.  This recipe admits
+; a receipt only when those observed facts and its semantic scope all agree.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/native-model-evidence.fk
+
+(do
+    ; host-file = tag path regular symlink mode size mtime digest
+    (defn nmfs-host-file (path regular symlink mode size mtime digest)
+        (list "native-model-host-file-v1" path regular symlink mode size mtime digest))
+    (defn nmfs-host-file? (r)
+        (if (and (eq (len r) 8) (str_eq (nth r 0) "native-model-host-file-v1")) 1 0))
+    (defn nmfs-file-path (r) (nth r 1))
+    (defn nmfs-file-regular (r) (nth r 2))
+    (defn nmfs-file-symlink (r) (nth r 3))
+    (defn nmfs-file-mode (r) (nth r 4))
+    (defn nmfs-file-size (r) (nth r 5))
+    (defn nmfs-file-mtime (r) (nth r 6))
+    (defn nmfs-file-digest (r) (nth r 7))
+    (defn nmfs-private-file? (r)
+        (if (eq (nmfs-host-file? r) 1)
+            (if (and (eq (nmfs-file-regular r) 1)
+                     (and (eq (nmfs-file-symlink r) 0)
+                          (and (eq (nmfs-file-mode r) 600)
+                               (and (gt (nmfs-file-size r) 0)
+                                    (eq (nmfe-sha256? (nmfs-file-digest r)) 1))))) 1 0)
+            0))
+    (defn nmfs-artifact-file? (r)
+        (if (eq (nmfs-host-file? r) 1)
+            (if (and (eq (nmfs-file-regular r) 1)
+                     (and (eq (nmfs-file-symlink r) 0)
+                          (and (gt (nmfs-file-size r) 0)
+                               (eq (nmfe-sha256? (nmfs-file-digest r)) 1)))) 1 0)
+            0))
+
+    ; receipt = tag schema lane scope dataset-sha allowed attested-by scoped
+    ;           host-file. `scoped` is consent scope or SPDX/source scope proof.
+    (defn nmfs-receipt
+        (schema lane scope dataset allowed attested scoped host-file)
+        (list "native-model-scoped-receipt-v1" schema lane scope dataset allowed
+              attested scoped host-file))
+    (defn nmfs-receipt? (r)
+        (if (and (eq (len r) 9)
+                 (str_eq (nth r 0) "native-model-scoped-receipt-v1")) 1 0))
+    (defn nmfs-receipt-schema (r) (nth r 1))
+    (defn nmfs-receipt-lane (r) (nth r 2))
+    (defn nmfs-receipt-scope (r) (nth r 3))
+    (defn nmfs-receipt-dataset (r) (nth r 4))
+    (defn nmfs-receipt-allowed (r) (nth r 5))
+    (defn nmfs-receipt-attested (r) (nth r 6))
+    (defn nmfs-receipt-scoped (r) (nth r 7))
+    (defn nmfs-receipt-file (r) (nth r 8))
+    (defn nmfs-receipt-digest (r)
+        (if (eq (nmfs-receipt? r) 1)
+            (if (eq (nmfs-host-file? (nmfs-receipt-file r)) 1)
+                (nmfs-file-digest (nmfs-receipt-file r)) "")
+            ""))
+    (defn nmfs-receipt-valid? (r schema lane dataset)
+        (if (eq (nmfs-receipt? r) 1)
+            (if (and (str_eq (nmfs-receipt-schema r) schema)
+                     (and (str_eq (nmfs-receipt-lane r) lane)
+                          (and (str_eq (nmfs-receipt-scope r)
+                                       "native-model-training-and-heldout")
+                               (str_eq (nmfs-receipt-dataset r) dataset))))
+                (if (and (eq (nmfs-receipt-allowed r) 1)
+                         (and (gt (str_len (nmfs-receipt-attested r)) 0)
+                              (and (eq (nmfs-receipt-scoped r) 1)
+                                   (eq (nmfs-private-file? (nmfs-receipt-file r)) 1)))) 1 0)
+                0)
+            0))
+
+    (defn nmfs-dataset-scope (heldout training)
+        (nmfe-sha256
+            (nmfe-fields
+                (list "native-model-training-and-heldout"
+                      (nmfe-dataset-sha256 heldout)
+                      (nmfe-dataset-sha256 training)))))
+
+    ; seal = tag schema lane created heldout-digest training-digest scope
+    ;        evaluator config max-tokens exact-overlap prompt-overlap
+    ;        consent-hash license-hash isolation self-hash
+    (defn nmfs-seal-unsigned-message
+        (lane created heldout-digest training-digest scope evaluator config max-tokens
+         exact-overlap prompt-overlap consent-hash license-hash isolation)
+        (nmfe-fields
+            (list "native-model-seal-form-v1" lane (int_to_str created)
+                  heldout-digest training-digest scope evaluator config
+                  (int_to_str max-tokens) (int_to_str exact-overlap)
+                  (int_to_str prompt-overlap) consent-hash license-hash
+                  (int_to_str isolation))))
+    (defn nmfs-seal
+        (lane created heldout training evaluator config max-tokens consent license)
+        (do
+            (let heldout-digest (nmfe-dataset-sha256 heldout))
+            (let training-digest (nmfe-dataset-sha256 training))
+            (let scope (nmfs-dataset-scope heldout training))
+            (let exact-overlap
+                (nmfe-overlap-count (nmfe-pair-sha256s heldout)
+                                    (nmfe-pair-sha256s training)))
+            (let prompt-overlap
+                (nmfe-overlap-count (nmfe-prompt-sha256s heldout)
+                                    (nmfe-prompt-sha256s training)))
+            (let receipts-ready
+                (if (and
+                        (eq (nmfs-receipt-valid? consent
+                            "native-model-consent-receipt-v1" lane scope) 1)
+                        (eq (nmfs-receipt-valid? license
+                            "native-model-license-receipt-v1" lane scope) 1)) 1 0))
+            (let isolation
+                (if (and (eq exact-overlap 0)
+                         (and (eq prompt-overlap 0) (eq receipts-ready 1))) 1 0))
+            (let consent-hash (nmfs-receipt-digest consent))
+            (let license-hash (nmfs-receipt-digest license))
+            (let message
+                (nmfs-seal-unsigned-message lane created heldout-digest training-digest
+                    scope evaluator config max-tokens exact-overlap prompt-overlap
+                    consent-hash license-hash isolation))
+            (list "native-model-seal-form-v1" lane created heldout-digest
+                  training-digest scope evaluator config max-tokens exact-overlap
+                  prompt-overlap consent-hash license-hash isolation
+                  (nmfe-sha256 message))))
+    (defn nmfs-seal? (r)
+        (if (and (eq (len r) 15) (str_eq (nth r 0) "native-model-seal-form-v1")) 1 0))
+    (defn nmfs-seal-lane (r) (nth r 1))
+    (defn nmfs-seal-created (r) (nth r 2))
+    (defn nmfs-seal-heldout (r) (nth r 3))
+    (defn nmfs-seal-training (r) (nth r 4))
+    (defn nmfs-seal-scope (r) (nth r 5))
+    (defn nmfs-seal-evaluator (r) (nth r 6))
+    (defn nmfs-seal-config (r) (nth r 7))
+    (defn nmfs-seal-max-tokens (r) (nth r 8))
+    (defn nmfs-seal-exact-overlap (r) (nth r 9))
+    (defn nmfs-seal-prompt-overlap (r) (nth r 10))
+    (defn nmfs-seal-consent (r) (nth r 11))
+    (defn nmfs-seal-license (r) (nth r 12))
+    (defn nmfs-seal-isolation (r) (nth r 13))
+    (defn nmfs-seal-digest (r) (nth r 14))
+    (defn nmfs-seal-valid? (r)
+        (if (eq (nmfs-seal? r) 1)
+            (do
+                (let message
+                    (nmfs-seal-unsigned-message
+                        (nmfs-seal-lane r) (nmfs-seal-created r)
+                        (nmfs-seal-heldout r) (nmfs-seal-training r)
+                        (nmfs-seal-scope r) (nmfs-seal-evaluator r)
+                        (nmfs-seal-config r) (nmfs-seal-max-tokens r)
+                        (nmfs-seal-exact-overlap r) (nmfs-seal-prompt-overlap r)
+                        (nmfs-seal-consent r) (nmfs-seal-license r)
+                        (nmfs-seal-isolation r)))
+                (if (and (eq (nmfs-seal-isolation r) 1)
+                         (and (eq (nmfs-seal-exact-overlap r) 0)
+                              (and (eq (nmfs-seal-prompt-overlap r) 0)
+                                   (str_eq (nmfs-seal-digest r)
+                                           (nmfe-sha256 message))))) 1 0))
+            0))
+
+    ; A local time anchor is evidence only when it predates the candidate and
+    ; binds the exact seal plus training pair set. It is tamper-evident local
+    ; ordering, not an external timestamp claim.
+    ; anchor = tag observed seal training-pair-set clean digest
+    (defn nmfs-anchor-message (observed seal training-pair-set clean)
+        (nmfe-fields (list "native-model-seal-anchor-v1" (int_to_str observed)
+                           seal training-pair-set (int_to_str clean))))
+    (defn nmfs-anchor (observed seal training-pair-set clean)
+        (list "native-model-seal-anchor-v1" observed seal training-pair-set clean
+              (nmfe-sha256 (nmfs-anchor-message observed seal training-pair-set clean))))
+    (defn nmfs-anchor-valid? (anchor seal candidate-mtime)
+        (if (and (eq (len anchor) 6)
+                 (str_eq (nth anchor 0) "native-model-seal-anchor-v1"))
+            (if (and (eq (nth anchor 4) 1)
+                     (and (str_eq (nth anchor 2) (nmfs-seal-digest seal))
+                          (and (str_eq (nth anchor 3) (nmfs-seal-training seal))
+                               (lt (nth anchor 1) candidate-mtime))))
+                (if (str_eq (nth anchor 5)
+                        (nmfe-sha256 (nmfs-anchor-message (nth anchor 1)
+                            (nth anchor 2) (nth anchor 3) (nth anchor 4)))) 1 0)
+                0)
+            0))
+
+    ; Git-review observations are facts from the shell membrane. Form requires
+    ; tracked+clean+HEAD-identical, but never lets a filename grant trust.
+    ; git-row = tag path tracked clean head-identical digest
+    (defn nmfs-git-row (path tracked clean head-identical digest)
+        (list "native-model-git-observation-v1" path tracked clean head-identical digest))
+    (defn nmfs-git-row-valid? (r)
+        (if (and (eq (len r) 6)
+                 (str_eq (nth r 0) "native-model-git-observation-v1"))
+            (if (and (eq (nth r 2) 1)
+                     (and (eq (nth r 3) 1)
+                          (and (eq (nth r 4) 1)
+                               (eq (nmfe-sha256? (nth r 5)) 1)))) 1 0)
+            0))
+
+    (defn nmfs-promotion-ready?
+        (seal anchor candidate-file owner-authorization build-attestation)
+        (if (and (eq (nmfs-seal-valid? seal) 1)
+                 (and (eq (nmfs-artifact-file? candidate-file) 1)
+                      (eq (nmfs-anchor-valid? anchor seal
+                            (nmfs-file-mtime candidate-file)) 1)))
+            (if (and (eq (nmfs-git-row-valid? owner-authorization) 1)
+                     (eq (nmfs-git-row-valid? build-attestation) 1)) 1 0)
+            0))
+
+    0)

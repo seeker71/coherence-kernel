@@ -1,0 +1,250 @@
+; nomic-embed-form.fk — a text EMBEDDING generated form-native: nomic-embed-text-v1.5 (nomic-bert,
+; 12 layers, d=768) held entirely by a Form cell through the handle door.
+;
+; WHAT THIS IS. The first ENCODER in this body. The decode-loop lane (dsv4-decode-form.fk, the llama
+; and KAT handles) answers with a next token; an encoder answers with a VECTOR, and a vector is only
+; useful the way an embedding is used — compared. So the deliverable here is not a token stream but
+; a 768-wide f32 vector per text, and the witness is cosine geometry over texts whose semantic
+; distances are known before the run.
+;
+; THE ONE HOST CROSSING is reading the model file's bytes: metal_buf_from_file maps the WHOLE GGUF
+; once (offset 0, file_size long) and every kernel takes absolute byte offsets into it, read from
+; the file's own header by the body's own walk (equireach-gguf). Every arithmetic op below runs in
+; MSL this cell emits, or in Form's own fp64 where a reference is folded. No Swift, no Python, no
+; external tokenizer — the WordPiece walk is form-stdlib/nomic-wordpiece.fk over the file's own
+; token table.
+;
+; THE ARCHITECTURE, grounded in source text (llama.cpp src/models/bert.cpp, read 2026-08-04), not
+; remembered: token_embd + token_types row 0, embed LayerNorm (w,b, eps from the header); per layer
+; POST-norm: fused qkv (rows Q|K|V), NEOX rope on q,k (pair i,i+32; base from the header, 1000),
+; non-causal attention at 1/sqrt(64), attn_output, +residual, LN; then the gated FFN
+; down( silu(gate.x) * up.x ), +residual, LN. Pooling is MEAN (pooling_type 1 in the header).
+; The final vector is reported RAW (this graph carries no normalizer); callers comparing texts use
+; cosine, which is scale-free.
+;
+; FP CONTRACTION: the door compiles with options:nil and would fuse a*b+c; every kernel below is
+; emitted under `#pragma clang fp contract(off)`, the same pin dsv4-decode-form.fk carries and
+; probes (dfd-contract-ok?).
+;
+; RADIUS. head_dim is read from the header as d/n_head and this cell's attention kernel holds its
+; per-thread accumulator as float[64]; a file whose head_dim is not 64 is declined before any
+; dispatch (nbf-geom-ok?), never computed wrong. Offsets ride u32 constants, which holds for any
+; file under 4 GiB — this one is 274 MB.
+;
+; Kin: form-stdlib/nomic-wordpiece.fk (the ids), form-stdlib/metal-door.fk (md-bind / md-f32-bits),
+; native/metal/dsv4-decode-form.fk (the door pattern this follows), form-stdlib/gguf-manifest.fk
+; (the manifest the band's literals were taken from, on the Go arm).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/mxfp4-plane-dequant.fk form-stdlib/mxfp8-plane-dequant.fk form-stdlib/gguf-manifest.fk form-stdlib/metal-door.fk form-stdlib/nomic-wordpiece.fk
+;
+; Proven by: form/native/metal/tests/nomic-embed-band.fk (synthetic-truth bits, fp64 reference bits,
+;            self-consistency and the cosine ordering, with predictions written before the run).
+
+(do
+    ; ================= little-endian words (the door's wire format) =================
+    (defn nbf-u32 (n)
+        (str_concat
+            (str_concat (byte_to_str (mod n 256)) (byte_to_str (mod (div n 256) 256)))
+            (str_concat (byte_to_str (mod (div n 65536) 256)) (byte_to_str (mod (div n 16777216) 256)))))
+    (defn nbf-rd32 (s o)
+        (add (str_byte_at s o)
+             (add (mul 256 (str_byte_at s (add o 1)))
+                  (add (mul 65536 (str_byte_at s (add o 2)))
+                       (mul 16777216 (str_byte_at s (add o 3)))))))
+    (defn nbf-rd16 (s o) (add (str_byte_at s o) (mul 256 (str_byte_at s (add o 1)))))
+    (defn nbf-f32at (s o) (fd-value (nbf-rd32 s o) 8 23))
+    (defn nbf-f16at (s o) (fd-f16 (nbf-rd16 s o)))
+
+    ; a repeated 4-byte word, for synthetic fills
+    (defn nbf-rep32 (bits k acc) (if (eq k 0) acc (nbf-rep32 bits (sub k 1) (str_concat acc (nbf-u32 bits)))))
+    (defn nbf-rep16 (bits k acc)
+        (if (eq k 0) acc
+            (nbf-rep16 bits (sub k 1)
+                (str_concat acc (str_concat (byte_to_str (mod bits 256)) (byte_to_str (div bits 256)))))))
+
+    ; ================= geometry, read from the file's own header =================
+    (defn nbf-src (path) (eqr-of-file path 0 (gm-window)))
+    (defn nbf-abs (src name)
+        (add (egg-data-base src (gm-alignment)) (egg-ti-dataoff src (egg-find-tensor src name))))
+    (defn nbf-d1 (src name) (gm-dimk src (egg-find-tensor src name) 1))
+    (defn nbf-lname (l suffix) (str_concat "blk." (str_concat (int_to_str l) suffix)))
+
+    (defn nbf-d    (src) (gmt-u32 src "nomic-bert.embedding_length"))
+    (defn nbf-nl   (src) (gmt-u32 src "nomic-bert.block_count"))
+    (defn nbf-nh   (src) (gmt-u32 src "nomic-bert.attention.head_count"))
+    (defn nbf-eps  (src) (gmt-f32 src "nomic-bert.attention.layer_norm_epsilon"))
+    (defn nbf-base (src) (gmt-f32 src "nomic-bert.rope.freq_base"))
+    (defn nbf-hd   (src) (div (nbf-d src) (nbf-nh src)))
+    ; the attention accumulator below is float[64]; a different head_dim is declined, not computed
+    (defn nbf-geom-ok? (src) (if (eq (nbf-hd src) 64) 1 0))
+
+    ; ================= the MSL, emitted here =================
+    (defn nbf-msl () (str_concat
+        "#pragma clang fp contract(off)\n#include <metal_stdlib>\nusing namespace metal;\n"
+        (str_concat
+        "kernel void nb_embed(device const uchar* src [[buffer(0)]], device const uint* ids [[buffer(1)]], device float* y [[buffer(2)]], constant uint& embBase [[buffer(3)]], constant uint& typeBase [[buffer(4)]], constant uint& d [[buffer(5)]], uint gid [[thread_position_in_grid]]) { uint i = gid / d; uint j = gid % d; ushort h = *(device const ushort*)(src + embBase + (ids[i]*d + j)*2u); float t = *(device const float*)(src + typeBase + j*4u); y[gid] = float(as_type<half>(h)) + t; }\n"
+        (str_concat
+        "kernel void nb_ln(device const uchar* src [[buffer(0)]], device float* x [[buffer(1)]], constant uint& wBase [[buffer(2)]], constant uint& bBase [[buffer(3)]], constant uint& d [[buffer(4)]], constant float& eps [[buffer(5)]], uint gid [[thread_position_in_grid]]) { device float* v = x + gid*d; float m = 0.0f; for (uint j=0;j<d;j++){ m += v[j]; } m = m/float(d); float s = 0.0f; for (uint j=0;j<d;j++){ float c = v[j]-m; s += c*c; } s = s/float(d); float inv = 1.0f/sqrt(s+eps); for (uint j=0;j<d;j++){ float w = *(device const float*)(src + wBase + j*4u); float b = *(device const float*)(src + bBase + j*4u); v[j] = (v[j]-m)*inv*w + b; } }\n"
+        (str_concat
+        "kernel void nb_mm(device const uchar* src [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& wBase [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], uint gid [[thread_position_in_grid]]) { uint i = gid / rows; uint r = gid % rows; device const float* xi = x + i*cols; device const uchar* wr = src + wBase + r*cols*2u; float acc = 0.0f; for (uint c=0;c<cols;c++){ ushort h = *(device const ushort*)(wr + c*2u); acc += float(as_type<half>(h)) * xi[c]; } y[i*rows + r] = acc; }\n"
+        (str_concat
+        "kernel void nb_rope(device float* qkv [[buffer(0)]], constant uint& nh [[buffer(1)]], constant uint& hd [[buffer(2)]], constant uint& w [[buffer(3)]], constant float& base [[buffer(4)]], uint gid [[thread_position_in_grid]]) { uint hf = hd/2u; uint per = nh*hf; uint i = gid / per; uint rem = gid % per; uint h = rem / hf; uint p = rem % hf; float theta = float(i) * pow(base, -2.0f*float(p)/float(hd)); float cs = cos(theta); float sn = sin(theta); device float* q = qkv + i*w + h*hd; device float* k = q + nh*hd; float q0=q[p]; float q1=q[p+hf]; q[p]=q0*cs - q1*sn; q[p+hf]=q0*sn + q1*cs; float k0=k[p]; float k1=k[p+hf]; k[p]=k0*cs - k1*sn; k[p+hf]=k0*sn + k1*cs; }\n"
+        (str_concat
+        "kernel void nb_attn(device const float* qkv [[buffer(0)]], device float* y [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& nh [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& w [[buffer(5)]], constant float& scale [[buffer(6)]], uint gid [[thread_position_in_grid]]) { uint i = gid / nh; uint h = gid % nh; device const float* q = qkv + i*w + h*hd; float mx = -3.4e38f; for (uint j=0;j<n;j++){ device const float* k = qkv + j*w + nh*hd + h*hd; float s=0.0f; for (uint d0=0;d0<hd;d0++){ s += q[d0]*k[d0]; } s = s*scale; if (s>mx) mx=s; } float acc[64]; for (uint d0=0;d0<hd;d0++){ acc[d0]=0.0f; } float den=0.0f; for (uint j=0;j<n;j++){ device const float* k = qkv + j*w + nh*hd + h*hd; device const float* v = qkv + j*w + 2u*nh*hd + h*hd; float s=0.0f; for (uint d0=0;d0<hd;d0++){ s += q[d0]*k[d0]; } s = exp(s*scale - mx); den += s; for (uint d0=0;d0<hd;d0++){ acc[d0] += s*v[d0]; } } for (uint d0=0;d0<hd;d0++){ y[i*nh*hd + h*hd + d0] = acc[d0]/den; } }\n"
+        (str_concat
+        "kernel void nb_add(device float* y [[buffer(0)]], device const float* x [[buffer(1)]], uint gid [[thread_position_in_grid]]) { y[gid] += x[gid]; }\n"
+        (str_concat
+        "kernel void nb_gate(device const float* g [[buffer(0)]], device const float* u [[buffer(1)]], device float* y [[buffer(2)]], uint gid [[thread_position_in_grid]]) { float x = g[gid]; y[gid] = (x / (1.0f + exp(-x))) * u[gid]; }\n"
+        "kernel void nb_pool(device const float* x [[buffer(0)]], device float* y [[buffer(1)]], constant uint& d [[buffer(2)]], constant uint& n [[buffer(3)]], uint gid [[thread_position_in_grid]]) { float s = 0.0f; for (uint i=0;i<n;i++){ s += x[i*d + gid]; } y[gid] = s/float(n); }\n"
+        )))))))))
+
+    (defn nbf-pipe (name) (metal_pipeline (nbf-msl) name))
+    (defn nbf-enq (pipe bufs consts threads) (metal_enqueue pipe (md-bind bufs consts) threads))
+
+    ; small list builders, so a call site reads as the binding it is
+    (defn nbf-l1 (a) (cons a 0))
+    (defn nbf-l2 (a b) (cons a (cons b 0)))
+    (defn nbf-l3 (a b c) (cons a (cons b (cons c 0))))
+    (defn nbf-l4 (a b c e) (cons a (cons b (cons c (cons e 0)))))
+    (defn nbf-l5 (a b c e f) (cons a (cons b (cons c (cons e (cons f 0))))))
+
+    ; ids -> the u32 bytes the ids buffer holds
+    (defn nbf-ids-bytes (ids acc) (if (eq (len ids) 0) acc (nbf-ids-bytes (tail ids) (str_concat acc (nbf-u32 (head ids))))))
+
+    ; ================= one layer: twelve dispatches, no waiting =================
+    ; bufs: (fh hs tmp qkv att g u act) — a cons list so the recursion carries one thing
+    (defn nbf-layer (src l d nh hd rows ff n epsb baseb scaleb fh hs tmp qkv att g u act)
+        (do
+            (let qkvAbs  (nbf-abs src (nbf-lname l ".attn_qkv.weight")))
+            (let outAbs  (nbf-abs src (nbf-lname l ".attn_output.weight")))
+            (let aonW    (nbf-abs src (nbf-lname l ".attn_output_norm.weight")))
+            (let aonB    (nbf-abs src (nbf-lname l ".attn_output_norm.bias")))
+            (let gateAbs (nbf-abs src (nbf-lname l ".ffn_gate.weight")))
+            (let upAbs   (nbf-abs src (nbf-lname l ".ffn_up.weight")))
+            (let downAbs (nbf-abs src (nbf-lname l ".ffn_down.weight")))
+            (let lonW    (nbf-abs src (nbf-lname l ".layer_output_norm.weight")))
+            (let lonB    (nbf-abs src (nbf-lname l ".layer_output_norm.bias")))
+            (nbf-enq (nbf-pipe "nb_mm")   (nbf-l3 fh hs qkv) (nbf-l3 qkvAbs rows d) (mul n rows))
+            (nbf-enq (nbf-pipe "nb_rope") (nbf-l1 qkv) (nbf-l4 nh hd rows baseb) (mul n (mul nh (div hd 2))))
+            (nbf-enq (nbf-pipe "nb_attn") (nbf-l2 qkv att) (nbf-l5 n nh hd rows scaleb) (mul n nh))
+            (nbf-enq (nbf-pipe "nb_mm")   (nbf-l3 fh att tmp) (nbf-l3 outAbs d d) (mul n d))
+            (nbf-enq (nbf-pipe "nb_add")  (nbf-l2 tmp hs) 0 (mul n d))
+            (nbf-enq (nbf-pipe "nb_ln")   (nbf-l2 fh tmp) (nbf-l4 aonW aonB d epsb) n)
+            (nbf-enq (nbf-pipe "nb_mm")   (nbf-l3 fh tmp g) (nbf-l3 gateAbs ff d) (mul n ff))
+            (nbf-enq (nbf-pipe "nb_mm")   (nbf-l3 fh tmp u) (nbf-l3 upAbs ff d) (mul n ff))
+            (nbf-enq (nbf-pipe "nb_gate") (nbf-l3 g u act) 0 (mul n ff))
+            (nbf-enq (nbf-pipe "nb_mm")   (nbf-l3 fh act hs) (nbf-l3 downAbs d ff) (mul n d))
+            (nbf-enq (nbf-pipe "nb_add")  (nbf-l2 hs tmp) 0 (mul n d))
+            (nbf-enq (nbf-pipe "nb_ln")   (nbf-l2 fh hs) (nbf-l4 lonW lonB d epsb) n)
+            0))
+
+    (defn nbf-layers (src l nl d nh hd rows ff n epsb baseb scaleb fh hs tmp qkv att g u act)
+        (if (ge l nl) 0
+            (do (nbf-layer src l d nh hd rows ff n epsb baseb scaleb fh hs tmp qkv att g u act)
+                (nbf-layers src (add l 1) nl d nh hd rows ff n epsb baseb scaleb fh hs tmp qkv att g u act))))
+
+    ; ================= the whole forward: ids in, pooled f32 bytes out =================
+    ; Returns (cons pool-bytes (cons qkv-handle (cons hs-handle 0))) — the handles stay live so a
+    ; band can read intermediate rows for its fp64 reference bits without a second forward.
+    (defn nbf-forward (path ids)
+        (do
+            (let src (nbf-src path))
+            (let d (nbf-d src))
+            (let nh (nbf-nh src))
+            (let hd (nbf-hd src))
+            (let nl (nbf-nl src))
+            (let rows (nbf-d1 src "blk.0.attn_qkv.weight"))
+            (let ff (nbf-d1 src "blk.0.ffn_gate.weight"))
+            (let n (len ids))
+            (let epsb (md-f32-bits (nbf-eps src)))
+            (let baseb (md-f32-bits (nbf-base src)))
+            (let scaleb (md-f32-bits (div 1.0 (math_sqrt (mul 1.0 hd)))))
+            (if (eq (nbf-geom-ok? src) 0) 0
+                (do
+                    (let fh (metal_buf_from_file path 0 (file_size path)))
+                    (let hs   (metal_buf_alloc (mul n (mul d 4))))
+                    (let tmp  (metal_buf_alloc (mul n (mul d 4))))
+                    (let qkv  (metal_buf_alloc (mul n (mul rows 4))))
+                    (let att  (metal_buf_alloc (mul n (mul d 4))))
+                    (let g    (metal_buf_alloc (mul n (mul ff 4))))
+                    (let u    (metal_buf_alloc (mul n (mul ff 4))))
+                    (let act  (metal_buf_alloc (mul n (mul ff 4))))
+                    (let idsb (metal_buf_alloc (mul n 4)))
+                    (let pool (metal_buf_alloc (mul d 4)))
+                    (metal_buf_write idsb 0 (nbf-ids-bytes ids ""))
+                    (nbf-enq (nbf-pipe "nb_embed") (nbf-l3 fh idsb hs)
+                             (nbf-l3 (nbf-abs src "token_embd.weight") (nbf-abs src "token_types.weight") d)
+                             (mul n d))
+                    (nbf-enq (nbf-pipe "nb_ln") (nbf-l2 fh hs)
+                             (nbf-l4 (nbf-abs src "token_embd_norm.weight") (nbf-abs src "token_embd_norm.bias") d epsb)
+                             n)
+                    (nbf-layers src 0 nl d nh hd rows ff n epsb baseb scaleb fh hs tmp qkv att g u act)
+                    (nbf-enq (nbf-pipe "nb_pool") (nbf-l2 hs pool) (nbf-l2 d n) d)
+                    ; the read syncs first — this is the ONE wait of the whole forward
+                    (cons (metal_buf_read pool 0 (mul d 4)) (cons qkv (cons hs 0)))))))
+
+    ; ================= renderings a caller folds =================
+    (defn nbf-f32s (bytes i n acc)
+        (if (ge i n) (nwp-rev acc 0)
+            (nbf-f32s bytes (add i 1) n (cons (nbf-f32at bytes (mul i 4)) acc))))
+
+    (defn nbf-norm-go (xs acc) (if (eq (len xs) 0) (math_sqrt acc) (nbf-norm-go (tail xs) (add acc (mul (head xs) (head xs))))))
+    (defn nbf-norm (xs) (nbf-norm-go xs 0.0))
+
+    ; text -> (cons embedding-float-list (cons pool-bytes 0)); src+offs held by the caller so the
+    ; vocabulary walk is paid once per session, not once per text
+    (defn nbf-embed-text (path src offs text)
+        (do
+            (let ids (nwp-ids src offs text))
+            (let facts (nbf-forward path ids))
+            (if (eq facts 0) 0
+                (do (let bytes (head facts))
+                    (cons (nbf-f32s bytes 0 (nbf-d src) 0) (cons bytes 0))))))
+
+    ; ================= fp64 references, folded in Form over the file's own bytes =================
+    ; the CLS row (token id read from the header) sits inside the 8 MB header window — read there
+    (defn nbf-ref-embrow (src embAbs typeAbs id d j acc)
+        (if (ge j d) (nwp-rev acc 0)
+            (nbf-ref-embrow src embAbs typeAbs id d (add j 1)
+                (cons (add (fd-f16 (add (eqr-at src (add embAbs (add (mul (mul id d) 2) (mul j 2))))
+                                        (mul 256 (eqr-at src (add embAbs (add (mul (mul id d) 2) (add (mul j 2) 1)))))))
+                           (ewl-f32 src (add typeAbs (mul j 4))))
+                      acc))))
+
+    (defn nbf-sum (xs acc) (if (eq (len xs) 0) acc (nbf-sum (tail xs) (add acc (head xs)))))
+    (defn nbf-sumsq-dev (xs m acc)
+        (if (eq (len xs) 0) acc
+            (nbf-sumsq-dev (tail xs) m (add acc (mul (sub (head xs) m) (sub (head xs) m))))))
+
+    ; LayerNorm in fp64 over a float list, w/b read f32 from the header window
+    (defn nbf-ref-ln-go (src xs m inv wAbs bAbs j acc)
+        (if (eq (len xs) 0) (nwp-rev acc 0)
+            (nbf-ref-ln-go src (tail xs) m inv wAbs bAbs (add j 1)
+                (cons (add (mul (mul (sub (head xs) m) inv) (ewl-f32 src (add wAbs (mul j 4))))
+                           (ewl-f32 src (add bAbs (mul j 4))))
+                      acc))))
+    (defn nbf-ref-ln (src xs d wAbs bAbs eps)
+        (do (let m (div (nbf-sum xs 0.0) (mul 1.0 d)))
+            (let var (div (nbf-sumsq-dev xs m 0.0) (mul 1.0 d)))
+            (nbf-ref-ln-go src xs m (div 1.0 (math_sqrt (add var eps))) wAbs bAbs 0 0)))
+
+    ; fp64 dot of one f16 weight row (read straight off the FILE at its own offset) with a float
+    ; list; answers (cons dot sum|term|) so the caller judges against the fold's own scale
+    (defn nbf-ref-dot (rowbytes xs j acc mag)
+        (if (eq (len xs) 0) (cons acc mag)
+            (do (let t (mul (fd-f16 (nbf-rd16 rowbytes (mul j 2))) (head xs)))
+                (nbf-ref-dot rowbytes (tail xs) (add j 1) (add acc t)
+                             (add mag (if (lt t 0.0) (sub 0.0 t) t))))))
+
+    (defn nbf-abs-f (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn nbf-maxabs (xs acc) (if (eq (len xs) 0) acc
+        (nbf-maxabs (tail xs) (if (gt (nbf-abs-f (head xs)) acc) (nbf-abs-f (head xs)) acc))))
+
+    ; max |a-b| over two float lists
+    (defn nbf-maxdiff (as bs acc)
+        (if (eq (len as) 0) acc
+            (nbf-maxdiff (tail as) (tail bs)
+                (if (gt (nbf-abs-f (sub (head as) (head bs))) acc)
+                    (nbf-abs-f (sub (head as) (head bs))) acc))))
+
+    0)

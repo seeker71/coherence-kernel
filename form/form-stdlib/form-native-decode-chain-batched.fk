@@ -1,0 +1,220 @@
+; form-native-decode-chain-batched.fk — the same real 2-stage dependency chain as
+; form-native-decode-chain.fk (424 repetitions of stage A = form_rmsnorm_f32 feeding stage B =
+; form_matvec_q4k_stageb, real llama3.2:3b bytes, 8 real output rows, SAME correctness reference),
+; with exactly ONE variable changed: ENCODE ORDER. The predecessor (PR #431, merged, and its five
+; follow-ups #432-#436, all merged) encoded A0,B0(barrier),A1,B1(barrier),...,A423,B423(barrier) —
+; 424 barriers, one immediately after every single stage-B, because barrier_before=1 sat on every
+; stage-B call unconditionally. None of those six PRs ever varied encode order; all varied buffer
+; pooling, kernel choice, or work size while keeping this same repetition-interleaved order and
+; this same "barrier after every dependent dispatch" policy.
+;
+; THE REAL STRUCTURAL QUESTION THOSE SIX PRs NEVER ASKED: is a barrier after every repetition
+; actually required by the DEPENDENCY GRAPH, or only by the ENCODE ORDER chosen to express it?
+; native/metal/metal_dsv4_stack.sh's own header (~line 745-760, "THE BARRIER IS PAID WHERE THE
+; VALUES NEED IT, NOT BEFORE EVERY DISPATCH") documents that DS4's real per-layer stack is five
+; independent chains enqueued WITHOUT barriers between each other, with a barrier firing only when
+; a real hazard is detected against the SPECIFIC buffers a dispatch declares — never one barrier
+; per dispatch as a blanket policy.
+;
+; In the UNPOOLED chain probe (424 distinct hy/hz buffer pairs, this file's own shape, inherited
+; unchanged from form-native-decode-chain.fk): repetition i's hy_i/hz_i are NEVER read or written
+; by repetition j for i != j. The only real write-then-read hazard is WITHIN each repetition
+; (stage A writes hy_i; stage B reads hy_i to produce hz_i). There is NO real hazard BETWEEN
+; repetitions. The predecessor's 424 barriers therefore paid for a hazard that does not exist
+; between repetitions — only the hazard within each pair is real, and MTLBarrierScopeBuffers
+; settles ALL buffer effects encoded before it fires, not just one pair's, so a single barrier can
+; settle every pending A-write at once.
+;
+; THE FIX UNDER TEST, encode order only: TWO PASSES over 0..423, not one interleaved pass.
+;   pass 1 — enqueue ALL 424 stage-A dispatches, barrier_before=0 on every one (none of them
+;            depends on anything but the two resident, read-only, whole-batch inputs hx/hg — no
+;            predecessor in this pass writes anything a later A reads).
+;   pass 2 — enqueue ALL 424 stage-B dispatches. The VERY FIRST one carries barrier_before=1 —
+;            that single barrier settles every A-write encoded in pass 1, because
+;            MTLBarrierScopeBuffers is a scope-wide fence over everything encoded before the
+;            barrier point, not a per-buffer scalpel (the door's own documented coarseness, named
+;            in the predecessor's header too). B1..B423 carry barrier_before=0: each B_i reads
+;            only its OWN hy_i, already fully written before the one barrier fired, and no B_i
+;            writes anything another B_j reads, so there is no new hazard among the 423 remaining
+;            B dispatches either.
+; Same 424 real A/B pairs, same real kernels, same real bytes, same real hazard honored (every
+; write happens-before every read that needs it) — the ONLY thing that changes is that the encode
+; ORDER now matches the REAL dependency graph (batch-wide write phase, then a single settle, then
+; batch-wide read phase) instead of the artificial repetition-interleaved order the predecessor
+; used. Barrier count: 424 -> 1, by construction (see fndc2-enqB-loop below — literally one
+; conditional Yes on i=0, No everywhere else).
+;
+; UNPOOLED BY CONSTRUCTION, ON PURPOSE: since ALL 424 A's must finish writing before ANY B reads
+; (pass 2 starts only after the one barrier), no hy/hz buffer can be reused across repetitions the
+; way a pooled variant might — reusing hy_i for hy_j (i<j) before B_i has read it would silently
+; break B_i's read. This file keeps the predecessor's UNPOOLED 424-distinct-hy + 424-distinct-hz
+; shape unchanged (form-native-decode-chain.fk's fndc-alloc-loop, called verbatim) rather than
+; re-deriving pooling safety under a new encode order — the interleaved order's pooling-safety
+; proof (PR #432 kin) does not transfer to a batched order and is out of scope here.
+;
+; CORRECTNESS CHECK: reused verbatim from form-native-decode-chain.fk — the SAME reference
+; construction (fndc-ref-rows over q4m-flat-at, computed once) and the SAME per-repetition verify
+; loop (fndc-verify-loop) against the SAME 8 real output rows. Encode order is the only changed
+; variable versus that file's baseline; this file cites and calls its reference/verify code
+; directly rather than re-deriving it, so any correctness delta is attributable to the reorder,
+; not to a different check.
+;
+; NOT A BAND, same reasoning as form-native-decode-chain.fk's header: wall-clock duration and
+; live-file Q4_K bytes are not four-way-provable (equireach.fk's own two-arm-today byte door).
+;
+; RUN:
+;   cd form && ./validate.sh form-stdlib/tests/moe-gate-band.fk   # builds ./fkwu (Metal linked)
+;   cd .. && ./fkwu form/form-stdlib/form-native-decode-chain-batched.fk
+;
+; Kin: form-stdlib/form-native-decode-chain.fk (fndc-n, fndc-rows, fndc-q-abs/type/dim0,
+;      fndc-q-row-bytes, fndc-ref-dot-loop/fndc-ref-dot/fndc-ref-rows-loop/fndc-ref-rows,
+;      fndc-alloc-loop, fndc-verify-loop, fndc-us-per — all called here, not retyped),
+;      form-stdlib/metal-door.fk (md-bind, md-bind16 — barrier_before is md-bind16's last arg),
+;      native/metal/metal_dsv4_stack.sh (~line 745-800 — the real independent-chains-then-settle
+;      shape this file's pass-1/pass-2 split is modeled on), native/metal/fk-metal-carrier.m
+;      (fk_metal_enqueue_external — barrier==1 issues exactly one memoryBarrierWithScope call,
+;      confirmed at ~line 688; barrier defaults to 0 when the tail carries no barrier field or
+;      barrier_before=0 is passed explicitly, confirmed at ~line 641/647).
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/metal-door.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk native/metal/whole-tensor-residency.fk form-stdlib/llama-decode-msl.fk form-stdlib/llama-numerics.fk form-stdlib/form-native-decode.fk form-stdlib/q4k-msl.fk form-stdlib/form-native-decode-chain.fk
+
+(do
+    ; ================= pass 1: ALL stage-A dispatches, barrier_before=0 throughout =================
+    ; None of the 424 A's has any predecessor to wait for beyond the fixed, whole-batch, read-only
+    ; resident inputs hx/hg — they are mutually independent, exactly as the independent-dispatch
+    ; probes (form-native-decode-timing-concurrent.fk) already proved for N distinct outputs.
+    (defn fndc2-enqA-loop (i n pipeA hx hg d ebits hys acc)
+        (if (ge i n) acc
+            (fndc2-enqA-loop (add i 1) n pipeA hx hg d ebits (tail hys)
+                (add acc (metal_enqueue pipeA (md-bind (list hx hg (head hys)) (list d ebits)) 1)))))
+
+    ; ================= pass 2: ALL stage-B dispatches, barrier_before=1 ONLY on i=0 =================
+    ; The single barrier on the very first B settles every A-write pass 1 encoded (a scope-wide
+    ; fence, not per-pair), so every B_i's read of its own hy_i is safe. B1..B423 need no barrier of
+    ; their own: no B_i writes anything another B_j reads, so there is no hazard AMONG the B's
+    ; either — only the one write-phase -> read-phase boundary needed settling.
+    (defn fndc2-enqB-loop (i n pipeB hqb rows cols hys hzs acc)
+        (if (ge i n) acc
+            (fndc2-enqB-loop (add i 1) n pipeB hqb rows cols (tail hys) (tail hzs)
+                (add acc
+                    (metal_enqueue pipeB
+                        (md-bind16 (list hqb (head hys) (head hzs)) (list rows cols) 0 0 0 (if (eq i 0) 1 0))
+                        rows)))))
+
+    (defn fndc2-run ()
+        (do
+            (let live (md-door-live?))
+            (let path (fnd-blob-path))
+            (let src (fnd-src path))
+            (let d (fnd-dmodel src))
+            (let eps (fnd-eps src))
+            (let ebits (md-f32-bits eps))
+            (let gnabs (fnd-norm-abs src path))
+            (let n (fndc-n))
+            (let rows (fndc-rows))
+            (let cols d)
+
+            ; verified against the LIVE file (not trusted): Q4_K, 2 dims, dim0 = cols.
+            (let qtype (fndc-q-type src))
+            (let qdim0 (fndc-q-dim0 src))
+            (let qabs (fndc-q-abs src))
+
+            ; ---- resident, built ONCE: real gain, synthetic input, real Q4_K weight window ---------
+            (let hg (metal_buf_from_file path gnabs (mul d 4)))
+            (let hx (metal_buf_alloc (mul d 4)))
+            (let wx (metal_buf_write hx 0 (fnd-x-bytes d)))
+            (let hqb (metal_buf_from_file path qabs (mul rows (fndc-q-row-bytes cols))))
+            (let pipeA (metal_pipeline (fnd-msl) "form_rmsnorm_f32"))
+            (let pipeB (metal_pipeline
+                (str_concat "#include <metal_stdlib>\n" (q4m-matvec-msl "form_matvec_q4k_stageb"))
+                "form_matvec_q4k_stageb"))
+
+            ; ---- 424 distinct buffer pairs, unpooled by construction (see header) ------------------
+            (let ta0 (now_unix_ms))
+            (let bufs (fndc-alloc-loop 0 n d rows (list) (list)))
+            (let hys (nth bufs 0))
+            (let hzs (nth bufs 1))
+            (let ta1 (now_unix_ms))
+
+            ; ---- ARM: outside both timed windows, exactly as the interleaved probe does -------------
+            (let armed (metal_batch_concurrent))
+
+            ; ---- pass 1 + pass 2: 424 A's (barrier=0 all), then 424 B's (barrier=1 on i=0 only) ------
+            (let te0 (now_unix_ms))
+            (let okA (fndc2-enqA-loop 0 n pipeA hx hg d ebits hys 0))
+            (let okB (fndc2-enqB-loop 0 n pipeB hqb rows cols hys hzs 0))
+            (let ok-count (add okA okB))
+            (let te1 (now_unix_ms))
+
+            ; ---- ONE sync for the whole batch --------------------------------------------------------
+            (let ts0 (now_unix_ms))
+            (let drained (metal_sync))
+            (let ts1 (now_unix_ms))
+
+            ; ---- the Form reference, computed ONCE (inputs identical across all N reps) --------------
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let form-y0 (ln-rmsnorm (fnd-x-list d) gains eps))
+            (let qsrc (eqr-of-file path qabs (mul rows (fndc-q-row-bytes cols))))
+            (let ref-y (fndc-ref-rows qsrc rows cols form-y0))
+
+            ; ---- read back and verify EVERY repetition's stage-B output against the ONE reference ----
+            (let tr0 (now_unix_ms))
+            (let worst (fndc-verify-loop hzs rows ref-y 0.0))
+            (let tr1 (now_unix_ms))
+
+            (list live n rows cols qtype qdim0 armed ok-count drained
+                  (sub ta1 ta0) (sub te1 te0) (sub ts1 ts0) (sub tr1 tr0) worst)))
+
+    (defn fndc2-show ()
+        (do
+            (let r (fndc2-run))
+            (let live (nth r 0))
+            (let n (nth r 1))
+            (let rows (nth r 2))
+            (let cols (nth r 3))
+            (let qtype (nth r 4))
+            (let qdim0 (nth r 5))
+            (let armed (nth r 6))
+            (let ok-count (nth r 7))
+            (let drained (nth r 8))
+            (let alloc-ms (nth r 9))
+            (let enq-ms (nth r 10))
+            (let sync-ms (nth r 11))
+            (let verify-ms (nth r 12))
+            (let worst (nth r 13))
+            (let ndisp (mul n 2))
+            (let batch-ms (add (add alloc-ms enq-ms) sync-ms))
+            ; exactly 1 barrier by construction: fndc2-enqA-loop passes plain md-bind (no barrier
+            ; tail at all -> defaults to 0, confirmed against fk-metal-carrier.m ~line 641) on all
+            ; n A's; fndc2-enqB-loop's md-bind16 last argument is `(if (eq i 0) 1 0)` — 1 exactly
+            ; once (i=0), 0 for i=1..n-1. Total barrier_before=1 occurrences across all 2n
+            ; dispatches: 1.
+            (let barrier-count 1)
+
+            (print_str (metal_status))
+            (print_str (str_concat "door-live " (if live "true" "false")))
+            (print_str (str_concat "attn_q.weight type(want=12 Q4_K) " (int_to_str qtype)))
+            (print_str (str_concat "attn_q.weight dim0(want=3072) " (int_to_str qdim0)))
+            (print_str (str_concat "batch_concurrent armed(want=1) " (int_to_str armed)))
+            (print_str (str_concat "n repetitions " (int_to_str n)))
+            (print_str (str_concat "rows(stage B real output width) " (int_to_str rows)))
+            (print_str (str_concat "cols(d_model) " (int_to_str cols)))
+            (print_str (str_concat "total dispatches(2*n) " (int_to_str ndisp)))
+            (print_str (str_concat "ok-count(want=2n) " (int_to_str ok-count)))
+            (print_str (str_concat "drained(want=2n) " (int_to_str drained)))
+            (print_str (str_concat "barrier_before=1 count(want=1, encode-order fix) " (int_to_str barrier-count)))
+            (print_str (str_concat "worst max-abs-delta form-vs-gpu(all n reps) " (float_to_str worst)))
+            (print_str (str_concat "alloc-ms " (int_to_str alloc-ms)))
+            (print_str (str_concat "enqueue-ms " (int_to_str enq-ms)))
+            (print_str (str_concat "sync-ms " (int_to_str sync-ms)))
+            (print_str (str_concat "verify(readback+diff)-ms(" (str_concat (int_to_str n) " reps) ")))
+            (print_str (int_to_str verify-ms))
+            (print_str (str_concat "alloc+enqueue+sync-ms " (int_to_str batch-ms)))
+            (print_str (str_concat "us/dispatch enqueue-only " (int_to_str (fndc-us-per enq-ms ndisp))))
+            (print_str (str_concat "us/dispatch enqueue+sync " (int_to_str (fndc-us-per (add enq-ms sync-ms) ndisp))))
+            (print_str (str_concat "us/repetition enqueue-only " (int_to_str (fndc-us-per enq-ms n))))
+            (print_str (str_concat "us/repetition enqueue+sync " (int_to_str (fndc-us-per (add enq-ms sync-ms) n))))
+
+            (if live (if (eq armed 1) (if (eq ok-count ndisp) (if (eq drained ndisp) (if (lt worst 0.01) 1 0) 0) 0) 0) 0)))
+
+    (fndc2-show))

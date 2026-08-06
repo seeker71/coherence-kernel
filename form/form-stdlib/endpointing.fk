@@ -1,0 +1,113 @@
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk
+;
+; endpointing.fk — the organ that PRODUCES turn-taking.fk's `pause` scalar.
+;
+; turn-taking.fk asks a moment two things before the agent offers its voice unbidden: has a LONG PAUSE
+; opened, and does the moment recognize as "speak"? It reads the second from nearest-shape. The first it
+; simply RECEIVES — `tt-speak?` takes `pause` as a given number, and nothing in this body made one. This
+; cell fills that hole.
+;
+; The teaching came from reading kyutai-labs/unmute (MIT, read 2026-07-30). Looking for its voice-activity
+; detector, there isn't one. Its speech recognizer emits, per 80ms frame, a pause PROBABILITY alongside the
+; words; the client smooths that score and reads the turn off it. The turn boundary lives INSIDE the
+; recognizer, so the whole detector layer disappears rather than gets better. An energy threshold cannot
+; tell a breath from a finish. A recognizer can, because only the thing that heard the sentence knows
+; whether the sentence landed.
+;
+; What arrives here each frame is a READING in [0,1]: how much this frame looks like a pause. Three pieces:
+;
+;   ep-step / ep-fold   — an asymmetric exponential moving average. Two half-lives, one held estimate:
+;                         ATTACK when the reading rises toward silence, RELEASE when it falls toward
+;                         speech. Unmute runs both at 0.01s, which is barely any smoothing — and that is
+;                         the point. The smoothing is not what makes the decision stable; the hysteresis
+;                         below is. The EMA only keeps a single frame's wobble from being the whole story.
+;   ep-pause-seconds    — the bridge. The held estimate is a probability; turn-taking wants SECONDS. After
+;                         t seconds of unbroken silence the attack curve reads held = 1 − 2^(−t/attack), so
+;                         inverting it recovers the pause length the estimate implies. That inversion is
+;                         the whole reason this cell can answer a question turn-taking.fk was already
+;                         asking, in the units it was already asking it in.
+;   ep-turn-over? / ep-barge-in?
+;                       — two thresholds over ONE estimate, deliberately apart (0.6 / 0.4). A score sitting
+;                         near a single line flips on noise; a score has to cross the whole band to change
+;                         the answer. Same recognizer, two floors, no oscillation.
+;
+; The honest seam, named plainly: this body has no organ yet that emits a per-frame pause probability from
+; real sound. The readings are an INPUT here. Fed a crude 0/1 reading (silence/speech) the arithmetic still
+; produces a true pause length, and every piece below is exact under that input; fed a recognizer's own
+; score it becomes what unmute has. The recognizer is the pending part, not the arithmetic.
+;
+; Recipes over already-four-way primitives (trig.fk's posture): no kernel native is added, so this crosses
+; the fourth arm untouched. Composes trig.fk (fln, LN2) and hands its answer to turn-taking.fk.
+; Proven by tests/endpointing-band.fk.
+
+(do
+    ; one EMA step's blend weight: half-life `hl` seconds, stepped `dt` seconds.
+    ; alpha = 1 − 2^(−dt/hl). At dt = hl this is 0.5 — one half-life moves the estimate halfway.
+    (defn ep-alpha (dt hl)
+        (sub 1.0 (math_exp (mul (mul -1.0 (div (mul dt 1.0) hl)) (LN2)))))
+
+    ; one asymmetric step. Rising reading (toward silence) uses `attack`; falling uses `release`.
+    (defn ep-step (held reading dt attack release)
+        (do (let a (ep-alpha dt (if (gt reading held) attack release)))
+            (add (mul (sub 1.0 a) held) (mul a reading))))
+
+    ; fold a frame sequence into the held estimate. The first `warmup` readings are DROPPED, not
+    ; blended: a recognizer's score is unstable until its context fills, and averaging in that noise
+    ; would be treating a not-yet-answer as an answer. Unmute drops 12.
+    (defn ep-fold (held readings dt attack release warmup)
+        (if (eq (len readings) 0) held
+            (if (gt warmup 0)
+                (ep-fold held (tail readings) dt attack release (sub warmup 1))
+                (ep-fold (ep-step held (head readings) dt attack release)
+                         (tail readings) dt attack release 0))))
+
+    ; read the SECONDS of pause the held estimate implies, by inverting the attack curve
+    ; held = 1 − 2^(−t/attack)  ⇒  t = −attack · log2(1 − held).
+    ; A saturated estimate has no finite inverse, so it reports 64 half-lives rather than diverging —
+    ; a ceiling that says "longer than this organ can distinguish", never an infinity dressed as a number.
+    ;
+    ; THE ASSUMPTION, named because it does not survive real sound: this inversion is exact only when
+    ; the readings were a clean 1.0. An EMA fed a CONSTANT reading r converges to r, not to 1 — so on
+    ; real audio, where a quiet frame reads 0.96 rather than 1.00 because the room is never truly
+    ; silent, the estimate settles near 0.97 and this function reads 1.2 s off a 3.3 s pause. Measured
+    ; on a rendered clip 2026-07-30: 41 frames of true silence, reported 1.274 s.
+    ; It is still the right reading of a HELD ESTIMATE, which is what the two threshold questions
+    ; (ep-turn-over?, ep-barge-in?) actually need — unmute never asks the estimate for a duration, only
+    ; for a side of a line. For a DURATION, use ep-pause-run below: the length of a pause is not
+    ; recoverable from a smoothed level, because smoothing is exactly the operation that forgets how
+    ; long. Two questions, two estimators; conflating them is what made a right formula under-read.
+    (defn ep-pause-seconds (held attack)
+        (if (ge held 1.0) (mul attack 64.0)
+            (if (le held 0.0) 0.0
+                (mul (mul -1.0 attack) (div (fln (sub 1.0 held)) (LN2))))))
+
+    ; the whole organ: frames in, the pause scalar turn-taking.fk asks for out.
+    ; The estimate starts at 1.0 — before any sound arrives the room IS silent, and saying so is
+    ; honest; starting at 0 would claim speech nobody made.
+    (defn ep-pause-from-frames (readings dt attack release warmup)
+        (ep-pause-seconds (ep-fold 1.0 readings dt attack release warmup) attack))
+
+    ; the two floors, deliberately apart — the hysteresis band no single threshold can give.
+    (defn EP-OVER () 0.6)
+    (defn EP-BARGE () 0.4)
+
+    ; has the speaker finished? Read only when the agent is listening.
+    (defn ep-turn-over? (held) (if (gt held (EP-OVER)) 1 0))
+
+    ; has the speaker come in over the agent? Read only while the agent is speaking; between the two
+    ; floors the answer does not move, which is what keeps a wobbling score from chopping the voice.
+    (defn ep-barge-in? (held speaking)
+        (if (eq speaking 1) (if (lt held (EP-BARGE)) 1 0) 0))
+
+    ; HOW LONG the room has been quiet — the duration estimator, exact where the inversion above is not.
+    ; Count the TRAILING run of frames reading at or above the turn-over floor and multiply by dt. It is
+    ; trailing on purpose: a pause earlier in the clip has already been answered, and only the one still
+    ; open can decide whether it is the agent's turn now. Reads the readings themselves rather than a
+    ; smoothed level, so a quiet frame at 0.96 counts as fully quiet — which is what it is.
+    (defn ep-run-back (rs n count)
+        (if (le n 0) count
+            (do (let last (nth rs (sub n 1)))
+                (if (ge last (EP-OVER)) (ep-run-back rs (sub n 1) (add count 1)) count))))
+    (defn ep-pause-run (readings dt)
+        (mul (ep-run-back readings (len readings) 0) (mul dt 1.0)))
+    0)

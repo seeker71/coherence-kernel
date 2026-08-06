@@ -1,0 +1,453 @@
+; form-cli-repl.fk — the interactive TTY front door on the emitted walker (fkwu).
+;
+; The INTERACTIVE surface (the headless one is form-cli-main.fk reading fk_src):
+; a read-eval-print loop over real fd 0. read_line (walker tag 114) reads one
+; line of stdin, fc-respond (form-cli.fk, four-way proven) dispatches the verb,
+; print_str (tag 115) writes the response, and the loop recurses. isatty (tag
+; 116) gates an interactive prompt so a piped session stays clean. The loop ends
+; on EOF (read_line returns a negative sentinel) or the quit/exit verb.
+;
+; Deterministic and testable: output is a pure function of the stdin bytes —
+; pipe a fixed transcript, get a fixed response stream (form_cli_test.go).
+; read_line/print_str/isatty are host-io ops the emitted walker carries (tags
+; 114/115/116); they are not in the three host walkers, so this is fkwu-native,
+; the same way input_byte (tag 17) is. One native engine, both surfaces.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/gguf-meta.fk form-stdlib/model-discovery.fk form-stdlib/native-model-native-hierarchy.fk form-stdlib/native-model-control-plane.fk form-stdlib/ask-lane-router.fk form-stdlib/form-cli.fk form-stdlib/form-cli-gguf-cell.fk
+(do
+    ; 'diagnose' reads the live framebuffer the walker is born with — fk_arms[t]
+    ; per-op dispatch counts plus the node/string/arena/value-stack/float
+    ; high-water — back into this running program through kernel_stat (a fkwu-only
+    ; op, tag 127, the read twin of self_source). The readout is the kernel
+    ; inspecting itself mid-session: what it is computing, how big its substrate
+    ; has grown, where its time is going. fkwu-only, so it sits beside source/
+    ; verify in the runtime wrapper, never in the four-way dispatch.
+    (defn fc-diagnose ()
+        (str_concat "fkwu live | ops="
+        (str_concat (int_to_str (kernel_stat 0))
+        (str_concat " distinct="
+        (str_concat (int_to_str (kernel_stat 1))
+        (str_concat " hottest=tag"
+        (str_concat (int_to_str (kernel_stat 2))
+        (str_concat "x"
+        (str_concat (int_to_str (kernel_stat 3))
+        (str_concat " nodes="
+        (str_concat (int_to_str (kernel_stat 4))
+        (str_concat " strings="
+        (str_concat (int_to_str (kernel_stat 5))
+        (str_concat " cons="
+        (str_concat (int_to_str (kernel_stat 6))
+        (str_concat " vstack="
+        (str_concat (int_to_str (kernel_stat 7))
+        (str_concat " floats="
+                    (int_to_str (kernel_stat 8))))))))))))))))))))
+
+    ; The live framebuffer is a distinct observation channel from aggregate
+    ; walker statistics.  Keep its roots and four native arms visible together
+    ; so an inquiry can prove that a record was emitted, retained, and read.
+    (defn fc-framebuffer-status ()
+        (do
+            (let events (framebuffer-events))
+            (str_concat "framebuffer live | events="
+            (str_concat (int_to_str (len events))
+            (str_concat " roots="
+            (str_concat (int_to_str (kernel_stat 9))
+            (str_concat " attributed="
+            (str_concat (int_to_str (kernel_stat 10))
+            (str_concat " rejected="
+            (str_concat (int_to_str (kernel_stat 11))
+            (str_concat " entered="
+            (str_concat (int_to_str (kernel_stat 12))
+            (str_concat " accepted="
+            (str_concat (int_to_str (kernel_stat 13))
+            (str_concat " last-index="
+            (str_concat (int_to_str (kernel_stat 14))
+            (str_concat " fb_record="
+            (str_concat (int_to_str (kernel_stat 228))
+            (str_concat " events_read="
+            (str_concat (int_to_str (kernel_stat 229))
+            (str_concat " source_read="
+            (str_concat (int_to_str (kernel_stat 230))
+            (str_concat " clears="
+                        (int_to_str (kernel_stat 231)))))))))))))))))))))))))
+
+    (defn fc-metal-matvec (arg)
+        (do
+            (let parts (split-on arg " "))
+            (let msl-path (fc-part parts 0 ""))
+            (let kernel (fc-part parts 1 "form_fkwu_generic_matvec_f32"))
+            (let model-path (fc-part parts 2 ""))
+            (if (or (str_eq msl-path "") (str_eq model-path ""))
+                "usage: metal-matvec <msl-path> <kernel-name> <model-path>"
+                (metal_matvec_f32 (read_file msl-path) kernel (read_file model-path)))))
+
+    ; `models <dir>` — the body looks, instead of being told. This is the runtime half of the
+    ; distinction: a static switch names one file before the binary runs; this names a place and asks
+    ; the host what is actually in it. The root is an argument because fkwu has no getenv door, so a
+    ; cell cannot expand `~` — that is a missing door, not a setting.
+    (defn fc-models (arg)
+        (do
+            ; fc-strip-eol is defined further down this cell and a forward reference binds
+            ; numb-empty here, so the trim is done in place rather than borrowed upward.
+            (let n0 (str_len arg))
+            (let n1 (if (and (gt n0 0) (eq (str-byte-at arg (sub n0 1)) 10)) (sub n0 1) n0))
+            (let n2 (if (and (gt n1 0) (eq (str-byte-at arg (sub n1 1)) 13)) (sub n1 1) n1))
+            (let root (substring arg 0 n2))
+            (if (str_eq root "")
+                "usage: models <directory>   (e.g. models /Users/you/models)"
+                (if (fs_is_dir root)
+                    (str_concat "found " (str_concat (int_to_str (md-list root))
+                                                     " model(s) — none is compiled in"))
+                    (str_concat "no such directory: " root)))))
+
+    (defn fc-strip-last-byte-if (s code)
+        (do
+            (let n (str_len s))
+            (if (and (gt n 0) (eq (str-byte-at s (sub n 1)) code))
+                (substring s 0 (sub n 1))
+                s)))
+
+    (defn fc-strip-eol (s)
+        (fc-strip-last-byte-if (fc-strip-last-byte-if s 10) 13))
+
+    (defn fc-json-escape-loop (s i n acc)
+        (if (ge i n) acc
+            (do
+                (let code (str-byte-at s i))
+                (let escaped
+                    (if (eq code 34) "\\\""
+                        (if (eq code 92) "\\\\"
+                            (if (eq code 10) "\\n"
+                                (if (eq code 13) "\\r"
+                                    (if (eq code 9) "\\t"
+                                        (substring s i (add i 1))))))))
+                (fc-json-escape-loop s (add i 1) n
+                    (str_concat acc escaped)))))
+
+    (defn fc-json-escape (s)
+        (fc-json-escape-loop s 0 (str_len s) ""))
+
+    (defn fc-http-body (response)
+        (do
+            (let boundary (str_find response "\r\n\r\n" 0))
+            (if (lt boundary 0) response
+                (substring response (add boundary 4) (str_len response)))))
+
+    ; Nanbeige is a native-only voice door: Form owns the verb, ChatML
+    ; envelope, JSON request, raw HTTP request, and response projection.  The
+    ; pinned author-branch llama.cpp server performs dense tensor execution
+    ; behind the already-emitted fkwu socket membrane. This is an explicit
+    ; comparator, not the native route. JSON is retained only as evidence at
+    ; that loopback membrane; native execution does not need the envelope.
+    (defn fc-nanbeige (prompt)
+        (if (str_eq prompt "")
+            "usage: nanbeige <prompt>"
+            (do
+                (let full (str_concat "<|im_start|>user\n"
+                    (str_concat prompt
+                        "<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\n")))
+                (let body (str_concat "{\"prompt\":\""
+                    (str_concat (fc-json-escape full)
+                        "\",\"n_predict\":256,\"temperature\":0,\"seed\":1}")))
+                (let request (str_concat
+                    "POST /completion HTTP/1.0\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "
+                    (str_concat (int_to_str (str_len body))
+                        (str_concat "\r\n\r\n" body))))
+                (let response (sock_request "127.0.0.1" "18082" request))
+                (if (str_eq response "")
+                    "nanbeige:error:local-runtime-unreachable:127.0.0.1:18082"
+                    (fc-http-body response)))))
+
+    (defn fc-string-bytes-loop (s i n acc)
+        (if (ge i n) acc
+            (fc-string-bytes-loop
+                s
+                (add i 1)
+                n
+                (append acc (list (str-byte-at s i))))))
+
+    (defn fc-string-bytes (s)
+        (fc-string-bytes-loop s 0 (str_len s) (list)))
+
+    (defn fc-model-cell-digest (bytes)
+        (hex-encode (sha256 (fc-string-bytes bytes))))
+
+    (defn fc-metal-model-cell (arg)
+        (if (str_eq arg "")
+            "usage: metal-model-cell <manifest-path>"
+            (do
+                (let manifest (fc-strip-eol (read_file arg)))
+                (let parts (split-on manifest " "))
+                (let kind (fc-part parts 0 ""))
+                (let expected-sha (fc-part parts 1 ""))
+                (let model-path (fc-part parts 2 ""))
+                (let msl-path (fc-part parts 3 ""))
+                (let kernel (fc-part parts 4 "form_fkwu_generic_matvec_f32"))
+                (if (or (or (str_eq kind "") (str_eq expected-sha ""))
+                        (or (str_eq model-path "") (str_eq msl-path "")))
+                    "FAIL model-cell manifest expected: model-cell-v1 <sha256> <model-path> <msl-path> <kernel-name>"
+                    (if (str_eq kind "model-cell-v1")
+                        (do
+                            (let model-bytes (read_file model-path))
+                            (let actual-sha (fc-model-cell-digest model-bytes))
+                            (if (str_eq actual-sha expected-sha)
+                                (str_concat "model_cell_verified=true\n"
+                                (str_concat "model_cell_source=content-addressed-manifest\n"
+                                (str_concat "model_cell_format=f32-matvec-v1\n"
+                                (str_concat "model_cell_sha256="
+                                (str_concat actual-sha
+                                (str_concat "\n"
+                                    (metal_matvec_f32 (read_file msl-path) kernel model-bytes)))))))
+                                (str_concat "FAIL model-cell sha256 mismatch\nmodel_cell_verified=false\nmodel_cell_expected_sha256="
+                                (str_concat expected-sha
+                                (str_concat "\nmodel_cell_sha256=" actual-sha)))))
+                        (str_concat "FAIL model-cell manifest kind=" kind))))))
+
+    ; ---- models -> use -> route: the runtime door onto ask-lane-router.fk ----------------------
+    ;
+    ; WHAT WAS MISSING. ask-lane-router.fk decides which lane carries a request, four-way proven at
+    ; 4095, and nothing called it. A cell nothing calls is a drawing of a door. These three verbs are
+    ; the door: `models <dir>` asks the host what is actually on it, `use <n>` picks one of the files
+    ; it named, `route <request>` hands that pick to the router and reports what the router said.
+    ;
+    ; WHY THIS IS A RUNTIME CHOICE AND NOT A SWITCH. Nothing here is chosen before the binary runs.
+    ; The directory arrives in conversation, the index arrives in conversation, and every other input
+    ; the router needs is READ rather than declared: today comes from now_unix_ms, the Metal answer
+    ; comes from asking the linked carrier, the architecture comes from the GGUF's own header, the
+    ; carriers come from fs_exists on this host. switch-census.fk's ratchet is untouched — no
+    ; environment variable, no flag, no default that quietly decides.
+    ;
+    ; WHAT THE ROUTE DOES NOT DO, said out loud rather than implied. fkwu's op table carries no
+    ; process door (form-flatten.fk flt-ops, read 2026-08-03), so a carried route NAMES the hand and
+    ; does not move it. That is unfinished work with a short next step — the emitted C already
+    ; declares fork/execvp/waitpid for the JIT — and not a limit.
+
+    ; The host reports the day; nothing tells it. now_unix_ms (tag 15) is the one clock fkwu carries,
+    ; and the walk below is the era-arithmetic civil calendar, exact for every day after 1970 because
+    ; no division ever meets a negative. It reads UTC: at UTC+8 this body's day turns over eight hours
+    ; early, which a thirty-day witness TTL cannot feel — named here rather than left to be found.
+    (defn fc-civil (days)
+        (do
+            (let z (add days 719468))
+            (let era (div z 146097))
+            (let doe (sub z (mul era 146097)))
+            (let yoe (div (sub (add (sub doe (div doe 1460)) (div doe 36524)) (div doe 146096)) 365))
+            (let y0 (add yoe (mul era 400)))
+            (let doy (sub doe (add (mul 365 yoe) (sub (div yoe 4) (div yoe 100)))))
+            (let mp (div (add (mul 5 doy) 2) 153))
+            (let d (add (sub doy (div (add (mul 153 mp) 2) 5)) 1))
+            (let m (if (lt mp 10) (add mp 3) (sub mp 9)))
+            (let y (if (le m 2) (add y0 1) y0))
+            (add (mul y 10000) (add (mul m 100) d))))
+    (defn fc-today () (fc-civil (div (now_unix_ms) 86400000)))
+
+    ; Metal is asked, not assumed: the linked carrier answers for itself, and a host without one
+    ; says so in the same breath instead of being described by a constant in this cell.
+    (defn fc-metal-here? ()
+        (if (ge (str_find (metal_matvec_fixture) "metal_linked=true" 0) 0) 1 0))
+
+    ; A carrier path is relative, and form-cli is run both from the repo root and from form/, so both
+    ; are probed and the one that exists is the one reported. A path nobody checked is a rumour.
+    (defn fc-file-here (a b)
+        (if (eq (fs_exists a) 1) a (if (eq (fs_exists b) 1) b "")))
+    (defn fc-carrier-here (rel arch acc)
+        (do
+            (let p (fc-file-here rel (str_concat "form/" rel)))
+            (if (str_eq p "") acc (cons (alr-carrier p arch) acc))))
+    (defn fc-carriers ()
+        (fc-carrier-here "native/metal/metal_ask.sh" "llama"
+            (fc-carrier-here "native/metal/ask_ds4.sh" "deepseek4"
+                (fc-carrier-here "native/metal/metal_kat_block0.sh" "qwen35moe" (list)))))
+
+    ; Only runtimes this body can see are claimed. "host-process" is absent on purpose: fkwu has no
+    ; process door today, so a lane that needs one is honestly unfinished rather than quietly carried.
+    (defn fc-runtimes ()
+        (if (str_eq (fc-file-here "/opt/homebrew/bin/ollama" "/usr/local/bin/ollama") "")
+            (list)
+            (list "ollama")))
+
+    ; The architecture comes out of the file's own header, the same read `models` already does.
+    (defn fc-blob-at (path)
+        (do
+            (let src (read_file_slice path 0 (md-header-bytes)))
+            (let arch (md-arch src))
+            (if (str_eq arch "") (alr-blob path "" 0)
+                (alr-blob path arch (md-nlayer src arch)))))
+
+    ; Which registry row vouches for THIS file — architecture and key together, so a deepseek4 file
+    ; the ds4 lane was never witnessed against does not inherit the ds4 lane's proof.
+    (defn fc-bind-for (blob binds)
+        (if (eq (len binds) 0) (alr-no-bind)
+            (if (eq (alr-blob-answers? blob (head binds)) 1) (head binds)
+                (fc-bind-for blob (tail binds)))))
+
+    (defn fc-digits? (s i n)
+        (if (ge i n) (if (eq n 0) 0 1)
+            (if (and (ge (str-byte-at s i) 48) (le (str-byte-at s i) 57))
+                (fc-digits? s (add i 1) n) 0)))
+    (defn fc-nth-path (paths i)
+        (if (eq (len paths) 0) ""
+            (if (le i 0) (head paths) (fc-nth-path (tail paths) (sub i 1)))))
+    ; `use <n>` re-walks the directory rather than remembering the last listing, so the index means
+    ; what the host holds now and not what it held a minute ago. md-find is order-stable, so the
+    ; number the person read from `models` is the number they get.
+    (defn fc-pick (root nstr)
+        (if (str_eq root "") ""
+            (if (eq (fc-digits? nstr 0 (str_len nstr)) 0) ""
+                (fc-nth-path (md-find root) (str_to_int nstr)))))
+    (defn fc-root-of (arg old)
+        (if (str_eq arg "") old (if (eq (fs_is_dir arg) 1) arg old)))
+
+    (defn fc-needs-str (xs acc)
+        (if (eq (len xs) 0) acc
+            (fc-needs-str (tail xs) (str_concat acc (str_concat " " (head xs))))))
+    (defn fc-hand-note (r)
+        (if (eq (alr-carried? r) 1)
+            "\n    hand    fkwu carries no process door yet, so this names the hand and does not move it"
+            ""))
+    (defn fc-route-say (r request)
+        (str_concat "— route: "
+        (str_concat (alr-route-status r)
+        (str_concat "\n    row     "
+        (str_concat (alr-route-id r)
+        (str_concat "\n    arch    "
+        (str_concat (alr-route-arch r)
+        (str_concat "\n    blob    "
+        (str_concat (alr-route-blob r)
+        (str_concat "\n    carrier "
+        (str_concat (alr-route-carrier r)
+        (str_concat "\n    needs  "
+        (str_concat (fc-needs-str (alr-route-needs r) "")
+        (str_concat "\n    request "
+        (str_concat request
+        (str_concat "\n    because "
+        (str_concat (alr-route-reason r)
+                    (fc-hand-note r))))))))))))))))))
+
+    (defn fc-use (root nstr sel)
+        (if (str_eq root "")
+            "no directory has been looked at yet — run `models <dir>`, then `use <n>`"
+            (if (str_eq sel "")
+                (str_concat "no model at index " (str_concat nstr (str_concat " under " root)))
+                (do
+                    (let blob (fc-blob-at sel))
+                    (str_concat "using " (str_concat sel
+                    (str_concat "   arch=" (str_concat (alr-blob-arch blob)
+                    (str_concat "  layers=" (str_concat (int_to_str (alr-blob-layers blob))
+                                "\n  now: route <request>"))))))))))
+
+    (defn fc-route (sel text)
+        (if (str_eq sel "")
+            "no model is picked — run `models <dir>`, then `use <n>`, then `route <request>`"
+            (if (str_eq text "")
+                "usage: route <request>   (after `models <dir>` and `use <n>`)"
+                (do
+                    (let blob (fc-blob-at sel))
+                    (let binds (alr-bindings))
+                    (let bind (fc-bind-for blob binds))
+                    (let registry (nmcp-registry))
+                    (if (str_eq (alr-bind-id bind) "")
+                        (str_concat "— route: unfinished\n    blob    "
+                        (str_concat sel
+                        (str_concat "\n    arch    "
+                        (str_concat (alr-blob-arch blob)
+                        (str_concat "\n    request "
+                        (str_concat text
+                            "\n    because this host can run that architecture and no registry row vouches for this file — unfinished work, and the row is the work"))))))
+                        (do
+                            (let row (alr-row-by-id registry (alr-bind-id bind)))
+                            (let host (alr-host (fc-today) (fc-metal-here?)
+                                                (list blob) (fc-carriers) (fc-runtimes)))
+                            (let a (alr-ask (nmcp-lane row) (nmcp-modality row) 40 1 0))
+                            (fc-route-say
+                                (alr-ask-door-by-id registry a host binds (alr-bind-id bind))
+                                text)))))))
+
+    ; the native-only verbs read this binary's own baked source via self_source
+    ; (a fkwu-only op), so they live here in the runtime wrapper rather than in
+    ; the four-way dispatch: 'source' prints the Form source the binary was built
+    ; from; 'verify' reports that the binary carries its own source (self-coherence);
+    ; 'diagnose' surfaces the live framebuffer/observability state (see above).
+    ; 'metal-fixture' crosses the same fkwu-only door into a linked native
+    ; Metal carrier when the proof binary supplies one; otherwise it reports a
+    ; skip instead of pretending the bridge exists.
+    ; 'metal-matvec' is the generic successor: MSL source bytes, kernel name, and
+    ; model bytes cross the same fkwu-native door into a linked carrier.
+    ; 'metal-model-cell' proves the model bytes are content-addressed by Form
+    ; before the same native Metal carrier sees them. 'gguf-model-cell'
+    ; proves the same content address gate for GGUF bytes, then parses tensor
+    ; metadata through the GGUF reader shape mirrored inside this fkwu program.
+    ; 'gguf-tensor-slice-math' reads one content-addressed real GGUF tensor
+    ; byte window and runs Q6_K Form math over that slice. 'gguf-tensor-set-cell'
+    ; reads a required-tensor row set from the same full GGUF through fkwu
+    ; read_file_slice and verifies each row's content hash in Form.
+    ; 'gguf-semantic-token-cell' reads one real tokenizer string row from the
+    ; full GGUF, selects a token from manifest logits using Form argmax, and
+    ; emits the decoded token text without HTTP/Ollama.
+    ; 'gguf-fullwidth-logits-cell' walks the full tokenizer width through
+    ; real GGUF token-embedding rows, computes the Q6_K dot4 projection in
+    ; Form, then decodes the argmax token.
+    ; Everything else routes to fc-respond, the four-way-proven brain.
+    (defn fc-native (line)
+        (if (str_eq (fc-verb line) "source") (self_source)
+            (if (str_eq (fc-verb line) "verify")
+                (str_concat "coherent: this binary carries "
+                    (str_concat (int_to_str (str_len (self_source)))
+                                " bytes of its own Form source (run 'source' to print it); program running native on fkwu."))
+                (if (str_eq (fc-verb line) "diagnose") (fc-diagnose)
+                    (if (str_eq (fc-verb line) "framebuffer-status") (fc-framebuffer-status)
+                        (if (str_eq (fc-verb line) "models") (fc-models (fc-arg line))
+                        (if (str_eq (fc-verb line) "metal-fixture") (metal_matvec_fixture)
+                        (if (str_eq (fc-verb line) "metal-matvec") (fc-metal-matvec (fc-arg line))
+                            (if (str_eq (fc-verb line) "metal-model-cell") (fc-metal-model-cell (fc-arg line))
+                            (if (str_eq (fc-verb line) "gguf-model-cell") (fc-gguf-model-cell (fc-arg line))
+                            (if (str_eq (fc-verb line) "gguf-tensor-set-cell") (fc-gguf-tensor-set-cell (fc-arg line))
+                            (if (str_eq (fc-verb line) "gguf-semantic-token-cell") (fc-gguf-semantic-token-cell (fc-arg line))
+                            (if (str_eq (fc-verb line) "gguf-fullwidth-logits-cell") (fc-gguf-fullwidth-logits-cell (fc-arg line))
+                            (if (str_eq (fc-verb line) "gguf-tensor-slice-math") (fc-gguf-tensor-slice-math (fc-arg line))
+                            (if (str_eq (fc-verb line) "model-route") (nmnh-default-id)
+                            (if (str_eq (fc-verb line) "nanbeige") (fc-nanbeige (fc-arg line))
+                                (fc-respond line)))))))))))))))))
+    ; THE LAST PAREN ON THE LINE ABOVE closes `defn fc-native`, and until 2026-08-03 it was not there.
+    ; Sixteen closers shut the fifteen `if`s and left the defn open, so everything below — the repl
+    ; itself and the call that starts it — was reading as extra body forms INSIDE fc-native. It ran
+    ; anyway: the flattener lifts `defn` out of wherever it finds it, so the shape was wrong and the
+    ; answer was right, which is the only kind of wrong that survives. It surfaced the moment a second
+    ; recipe joined that swallowed region: `ping` began answering a bare number instead of pong, the
+    ; same number for every input including `quit`, because no loop was reading stdin at all. Counting
+    ; sixteen identical characters is not a practice; if you add an arm here, add its closer here too,
+    ; and let the voice canary — not the byte size — say whether the carrier still speaks.
+
+    ; `use` and `route` are the two verbs that carry a memory between turns, so they ride here rather
+    ; than inside fc-native: fc-native is a pure function of one line, and keeping it that way is why
+    ; a piped transcript still answers the same bytes every time.
+    (defn fc-turn (line root sel)
+        (if (str_eq (fc-verb line) "use") (fc-use root (fc-strip-eol (fc-arg line)) sel)
+            (if (str_eq (fc-verb line) "route") (fc-route sel (fc-strip-eol (fc-arg line)))
+                (fc-native line))))
+
+    ; one self-recursive loop: prompt (only on a real tty), read a line, and
+    ; either stop (EOF / quit / exit) or respond and loop. read_line is a stored
+    ; let (an effect op) so it fires exactly once per turn, not once per use.
+    ;
+    ; The loop now carries two strings, and they are the whole of the runtime switch: `root` is the
+    ; directory the person last asked the body to look at, `sel` the file they last picked out of what
+    ; it saw. Both start empty — a fresh binary knows no directory and no model — and both are set
+    ; only by something said in the session. That is what makes this a conversation rather than a
+    ; configuration: the state lives in the turn, not in the environment, and it dies with the session.
+    (defn repl (root sel)
+        (do (if (eq (isatty) 2) (print_str "form-cli> ") 0)
+            (let line (read_line))
+            (if (lt line 0) ""
+                (if (str_eq (fc-verb line) "quit") ""
+                    (if (str_eq (fc-verb line) "exit") ""
+                        (do
+                            (let root2 (if (str_eq (fc-verb line) "models")
+                                           (fc-root-of (fc-strip-eol (fc-arg line)) root)
+                                           root))
+                            (let sel2 (if (str_eq (fc-verb line) "use")
+                                          (fc-pick root2 (fc-strip-eol (fc-arg line)))
+                                          sel))
+                            (print_str (fc-turn line root2 sel2))
+                            (repl root2 sel2)))))))
+    (repl "" ""))

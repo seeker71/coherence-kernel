@@ -1,0 +1,392 @@
+; RESULT (3 runs, Apple M4 Max, verdict 1 all three, worst form-vs-gpu delta 0.000006 all three — the
+; n=1 cooperative-kernel correctness gate ALSO passed with delta 0 on every run, before any of the
+; three loops were trusted): gpu_busy_us_total = 2193628 / 2197981 / 2202031us (avg 2197880us), versus
+; full-width-alone's (#435) verified avg 2184716us — a +0.60% DIFFERENCE, essentially noise, and if
+; anything a marginal REGRESSION, not an improvement. Per-dispatch (848 total, same basis as every
+; predecessor): 2591.8us avg, versus #435's 2576.3us — +15.5us WORSE. Per-repetition/per-barrier (424,
+; DS4's own counting unit): 5183.7us avg, versus #435's 5152.6us — gap to DS4's ~20-26us/barrier stays
+; ~199-259x, THE SAME ORDER as full-width alone's own ~198-258x, not narrower. Pooled buffers (#432,
+; alone: no change) and the cooperative kernel (#433, alone: no change) add NOTHING measurable on top
+; of full-width's already-known (and already WORSE-than-baseline) number, even combined together and
+; with full-width. This is OUTCOME (b) from the three named in advance: the combination is the
+; sum/product of the individually-null effects, not a hidden interaction the OFAT tests missed — which
+; means the real bottleneck is a FIFTH factor none of these four touch, exactly the open thread #435's
+; own header already named (cross-layer dispatch overlap / concurrency depth across independent
+; chains, persistent-encoder residency, or GPU clock/power-state differences between a short isolated
+; probe and DS4's long sustained real decode). The OFAT blind spot was a real methodological gap worth
+; closing — but closing it here did not find a hidden gain; it closed the door on "these three
+; factors, in combination" as the explanation, cleanly and without ambiguity.
+;
+; form-native-decode-chain-combined.fk — the INTERACTION test the OFAT chain never ran.
+;
+; THE METHOD GAP THIS FILE CLOSES. Three factors were each tested ONE AT A TIME, every time held
+; against the ORIGINAL unpooled/plain-kernel/8-row baseline (form-native-decode-chain.fk, PR #431,
+; ~890987us gpu_busy_us_total / ~1050us per dispatch, PR #434's real GPU-device-time instrumentation)
+; on every OTHER axis, and each individually showed no improvement or got worse:
+;   - pooled buffers ALONE (form-native-decode-chain-pooled.fk, PR #432): 13 buffers instead of 851,
+;     stage A still the plain single-thread kernel, stage B still 8 rows. ~1058-1060us/dispatch — NO
+;     CHANGE.
+;   - cooperative kernel ALONE (form-native-decode-chain-tg.fk, PR #433): form_rmsnorm_tg_f32 (1024-
+;     way threadgroup reduction) swapped in for stage A, buffers still 851 unpooled, stage B still 8
+;     rows. ~1057-1058us/dispatch — NO CHANGE.
+;   - full-width stage B ALONE (form-native-decode-chain-fullrow.fk, PR #435): stage B widened to all
+;     3072 real rows, buffers still unpooled, stage A still the plain kernel. gpu_busy_us_total grew
+;     only 2.45x for 384x more real compute (a real fixed-cost component exists) but the ABSOLUTE
+;     per-dispatch cost roughly DOUBLED (~2577-2589us/dispatch) — WORSE, not better, in absolute gap
+;     to DS4.
+; Each test held the other two factors at their NAIVE setting. That is classic one-factor-at-a-time
+; (OFAT): if the real gain requires an INTERACTION — pooled buffers only help once the kernel is fast
+; enough to pipeline against, or a fast kernel only matters once there is enough real work per barrier
+; to hide its latency behind, or full width only pays off once the per-repetition overhead (buffer
+; churn, single-thread stage A) is no longer the dominant cost — testing each factor alone while the
+; other two stay naive will show "no effect" for every one of them individually, even if combining
+; them closes real ground. Nobody has tested the COMBINATION. This file does.
+;
+; THE COMBINATION: exactly the three prior files' proven pieces, unmodified, composed:
+;   1. Pooled buffers — form-native-decode-chain-pooled.fk's EXACT pool design: hy depth 2
+;      (fndcc-hy-depth), hz depth 8 (fndcc-hz-depth), 13 buffers total (2 + 8 + hg + hx + hqb). The
+;      encoding-order safety proof for depth 2 on hy (PR #432 header, lines ~31-49) is reproduced by
+;      REFERENCE, not re-derived, because it is a claim about ENCODING ORDER and MTLBarrierScopeBuffers'
+;      documented coarseness (settles ALL buffer memory effects encoded before the barrier point, not
+;      only the matching pair) — a claim that does not mention which kernel stage A dispatches, only
+;      that A(i) is encoded, then a barrier, then B(i), repeated. See CORRECTNESS INTERACTION below
+;      for why swapping the plain kernel for the cooperative kernel does not disturb this proof.
+;   2. Cooperative stage-A kernel — form-native-decode-chain-tg.fk's EXACT binding shape:
+;      form_rmsnorm_tg_f32 via md-bind16 with dispatch_mode=1, ONE threadgroup of fndcc-tg-width()=1024
+;      threads, tgmem=0 (the kernel's `threadgroup float sq[4096]` scratch is compile-time MSL, not a
+;      bound parameter — same as PR #433's header established). Same buffers (x@0,g@1,y@2), same
+;      constants (n@3,eps@4) as the plain kernel — PR #433's own header cites metal_first_token.sh's
+;      `rmsnorm()` reusing ONE bind closure for both kernels as the proof the binding shape doesn't
+;      change, only the dispatch shape. The n=1 alone-correctness gate (fndcc-tg-n1, PR #433's own
+;      pattern) runs BEFORE the 424-repetition loop is trusted, same as PR #433.
+;   3. Full-width stage B — form-native-decode-chain-fullrow.fk's EXACT widening: fndcc-rows()=3072,
+;      the real full Q projection, not the 8-row scope. Same q4m-matvec-msl kernel, same barrier
+;      pattern, parameterized entirely by the `rows` uniform (q4m-matvec-body's `if (i >= rows)
+;      return;` guard) — no kernel or binding change needed for the width, per PR #435's own header
+;      confirmation.
+;   Unchanged from every predecessor: n=424 repetitions, real llama3.2:3b bytes (blk.0.attn_norm.weight
+;   for stage A's gain, blk.0.attn_q.weight for stage B's Q4_K tensor — both verified against the LIVE
+;   GGUF at run time via egg-ti-type/egg-ti-dim/egg-tensor-abs, never trusted from a comment), the
+;   genuine write-then-read dependency (stage B reads what stage A just wrote), barrier_before=0 on
+;   stage A / barrier_before=1 on stage B, ONE metal_batch_concurrent / ONE metal_sync framing.
+;
+; CORRECTNESS INTERACTION, REASONED EXPLICITLY, NOT ASSUMED SAFE (this is the one place the three
+; factors could genuinely interact badly, and it is exactly what the overseeing human asked this file
+; to check before trusting any timing number). The candidate NEW hazard: does the cooperative kernel's
+; DISPATCH SHAPE (dispatchThreadgroups(1,1,1) with 1024 threads cooperating via an internal threadgroup
+; reduction, versus the plain kernel's single-thread dispatchThreads) interact differently with POOLED
+; buffer reuse timing than the plain kernel did?
+;
+; It does not, and the reason is structural, not empirical: MTLBarrierScopeBuffers inserted via
+; memoryBarrierWithScope on a compute command encoder is a DISPATCH-BOUNDARY barrier — it guarantees
+; that every dispatch encoded strictly before the barrier point has FULLY COMPLETED (all its threads
+; finished, all its memory writes visible) before any dispatch encoded strictly after the barrier point
+; begins executing. This guarantee is defined over ENCODING ORDER and DISPATCH COMPLETION, not over a
+; kernel's INTERNAL execution shape. A dispatch is "complete" for this purpose when ALL of its threads
+; — whether that is 1 thread doing two serial passes (the plain kernel) or 1024 threads cooperating
+; through a shared-memory reduction with internal threadgroup barriers (the cooperative kernel) — have
+; finished and their writes are visible. The pooled file's depth-2 safety proof for hy (PR #432 header,
+; lines ~40-49) never inspects what stage A's dispatch does INSIDE itself; it only uses (a) the
+; encoding order A(i), barrier, B(i), A(i+1), barrier, B(i+1), A(i+2), ... and (b) the barrier's
+; documented coarse BEFORE/AFTER partition. Both (a) and (b) are unchanged by which kernel A is. The
+; same argument, reproduced with the kernel identity left as a free variable: the barrier encoded
+; immediately before B(i+1) has a BEFORE-partition containing everything encoded through A(i+1)
+; (including B(i), whichever kernel B is), and an AFTER-partition containing B(i+1) and everything
+; after (including A(i+2)) — so THIS barrier forces A(i+2)'s write of the reused hy slot to wait for
+; B(i)'s read of that slot, regardless of whether A is the plain or cooperative kernel. Depth 1 would
+; still be unsafe for the same reason PR #432 named (B(i) and A(i+1) land in the same after-partition,
+; unordered relative to each other) — again independent of A's kernel identity. hz's safety argument
+; (PR #432 header, lines ~51-61: hz is write-only inside the batch, the only ordering needed is
+; write-after-write between successive B occupants, already guaranteed by "barrier before every B")
+; touches ONLY stage B, which is byte-for-byte unchanged from every predecessor here — so that argument
+; transfers without any adjustment at all, cooperative kernel or not.
+;
+; ONE STRUCTURAL CONSEQUENCE OF COMBINING POOLING WITH FULL WIDTH, NAMED HONESTLY: PR #435's
+; correctness check reads back ALL 424 repetitions' hz output because that file allocates 424 distinct
+; hz buffers. This file's hz is POOLED TO DEPTH 8 (factor 1, unchanged from PR #432) — so only the LAST
+; occupant of each of the 8 slots (repetitions 416-423) still exists in a GPU buffer by the time the
+; single metal_sync drains and host readback begins; the other 416 repetitions' hz buffers were
+; overwritten in-place by later repetitions cycling through the same 8 slots, by design, that being the
+; entire point of pooling. "Full width, every repetition" (PR #435's completeness) and "13 total
+; buffers" (PR #432's pool) are not jointly satisfiable — reading back 424 distinct outputs requires
+; 424 distinct buffers, which is exactly what pooling was built to avoid. The honest combination is
+; therefore PR #432's own already-established narrowing (verify the last occupant of each pool slot,
+; justified there because corruption from an unsound reuse discipline compounds FORWARD through a
+; dependency chain and is more likely to surface at the tail than to self-heal by repetition 416) run
+; at PR #435's full width instead of the 8-row scope: 8 tail repetitions, each checked against ALL 3072
+; real output positions of the ONE Form-computed reference — full-width, unsampled, on every value that
+; survives to be read, which is the maximum completeness pooling structurally permits.
+;
+; WHY THE CORRECTNESS BOUND SHOULD STILL LAND AT #435's ~1e-6 SCALE. Stage B's arithmetic
+; (q4m-matvec-msl / form_matvec_q4k_stageb) is byte-for-byte the kernel every predecessor uses — full
+; width doesn't change its per-row math, only how many rows run, so PR #435's own measured worst
+; max|Δ|=0.000006 is the expected order of magnitude here too. Stage A's cooperative kernel is, per PR
+; #433's header (citing llama-decode-msl.fk directly), "BIT FOR BIT the attestant, not an
+; epsilon-bearing twin" of the plain kernel — same op order, same associativity, same rounding — so
+; swapping it in should not move stage A's output at all, let alone enough to change stage B's
+; downstream tolerance. Both claims are checked below, not assumed: fndcc-tg-n1 gates the cooperative
+; kernel alone before the loop runs, and fndcc-verify-loop reads the actual worst max|Δ| off the real
+; GPU output.
+;
+; NOT A BAND, same reasoning as every predecessor in this chain: a wall-clock/GPU-device-time duration
+; is not four-way-provable, and the reference Q4_K dequant path (eqr-at/str_byte_at) is the same
+; TWO-ARM byte door (fkwu + Go) named in form-native-decode-chain.fk's own header. This file introduces
+; no new pure-Form arithmetic shape — it composes three already-proven shapes (cyclic pool-slot
+; selection via `mod`, dispatch_mode=1 cooperative binding, rows-parameterized matvec dispatch), each
+; already exercised in its own predecessor file with no new claim added here.
+;
+; RUN:
+;   cd form && ./validate.sh form-stdlib/tests/moe-gate-band.fk   # (or any band) builds ./fkwu
+;   cd .. && ./fkwu form/form-stdlib/form-native-decode-chain-combined.fk
+;
+; Kin: form-stdlib/form-native-decode-chain.fk (the unpooled/plain/8-row baseline every factor here is
+;      measured against), form-stdlib/form-native-decode-chain-pooled.fk (PR #432 — factor 1, pool
+;      design and its encoding-order proof, cited not re-derived), form-stdlib/form-native-decode-chain-tg.fk
+;      (PR #433 — factor 2, cooperative kernel binding shape and n=1 gate pattern, cited not
+;      re-derived), form-stdlib/form-native-decode-chain-fullrow.fk (PR #435 — factor 3, full-width
+;      widening and its correctness-cost calibration, cited not re-derived), native/metal/fk-metal-carrier.m
+;      (metal_status's gpu_busy_us_total, PR #434 — the real GPU-device-time number this file reads,
+;      same as every predecessor), native/metal/metal_dsv4_stack.sh (~line 764-800 — DS4's own
+;      ~20-26us/barrier floor this file's result is measured against).
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/metal-door.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk native/metal/whole-tensor-residency.fk form-stdlib/llama-decode-msl.fk form-stdlib/llama-numerics.fk form-stdlib/form-native-decode.fk form-stdlib/q4k-msl.fk
+
+(do
+    ; same N as every predecessor — same real per-forward dispatch count.
+    (defn fndcc-n () 424)
+
+    ; factor 3: stage B's real output width — the FULL real Q projection (PR #435's change).
+    (defn fndcc-rows () 3072)
+
+    ; factor 1: the two pool depths — byte-identical to PR #432 (2 is the PROVEN MINIMUM for hy under
+    ; the unchanged barrier pattern; 8 for hz is a correctness-sample choice, not a safety minimum).
+    (defn fndcc-hy-depth () 2)
+    (defn fndcc-hz-depth () 8)
+
+    ; factor 2: threads per threadgroup for the cooperative kernel's ONE threadgroup — PR #433's own
+    ; value, read from the real decode's own dispatch site (metal_first_token.sh), not guessed.
+    (defn fndcc-tg-width () 1024)
+
+    ; ================= locating the real Q4_K tensor, verified against the LIVE file =================
+    (defn fndcc-q-abs (src) (egg-tensor-abs src (wtr-alignment) "blk.0.attn_q.weight"))
+    (defn fndcc-q-type (src) (egg-ti-type src (egg-find-tensor src "blk.0.attn_q.weight")))
+    (defn fndcc-q-dim0 (src) (egg-ti-dim src (egg-find-tensor src "blk.0.attn_q.weight") 0))
+    ; SAME formula as every predecessor (a Q4_K row is (cols/256) superblocks of 144 bytes).
+    (defn fndcc-q-row-bytes (cols) (mul (div cols 256) 144))
+
+    ; ================= the reference: Form's OWN independent Q4_K matvec, computed ONCE =================
+    (defn fndcc-ref-dot-loop (qsrc row cols j n xs acc)
+        (if (eq j n) acc
+            (fndcc-ref-dot-loop qsrc row cols (add j 1) n (tail xs)
+                (add acc (mul (q4m-flat-at qsrc 0 (add (mul row cols) j)) (head xs))))))
+    (defn fndcc-ref-dot (qsrc row cols xs) (fndcc-ref-dot-loop qsrc row cols 0 cols xs 0.0))
+
+    (defn fndcc-ref-rows-loop (qsrc row rows cols xs acc)
+        (if (eq row rows) (reverse acc)
+            (fndcc-ref-rows-loop qsrc (add row 1) rows cols xs
+                (cons (fndcc-ref-dot qsrc row cols xs) acc))))
+    (defn fndcc-ref-rows (qsrc rows cols xs) (fndcc-ref-rows-loop qsrc 0 rows cols xs (list)))
+
+    ; ================= the small fixed pools: depth handles allocated ONCE, cyclically reused =========
+    (defn fndcc-alloc-pool (i depth bytes acc)
+        (if (ge i depth) (reverse acc)
+            (fndcc-alloc-pool (add i 1) depth bytes (cons (metal_buf_alloc bytes) acc))))
+
+    (defn fndcc-pick (pool depth i) (nth pool (mod i depth)))
+
+    ; ================= the timed enqueue loop: stage A (cooperative, pooled hy, barrier=0) then
+    ; stage B (full-width, pooled hz, barrier=1) ======================================================
+    (defn fndcc-enq-loop (i n pipeA pipeB hx hg hqb d ebits rows cols hy-pool hz-pool hyd hzd acc)
+        (if (ge i n) acc
+            (do
+                (let hy (fndcc-pick hy-pool hyd i))
+                (let hz (fndcc-pick hz-pool hzd i))
+                (fndcc-enq-loop (add i 1) n pipeA pipeB hx hg hqb d ebits rows cols hy-pool hz-pool hyd hzd
+                    (add acc
+                        (add (metal_enqueue pipeA
+                                 (md-bind16 (list hx hg hy) (list d ebits) (fndcc-tg-width) 0 1 0) 1)
+                             (metal_enqueue pipeB
+                                 (md-bind16 (list hqb hy hz) (list rows cols) 0 0 0 1)
+                                 rows)))))))
+
+    ; ================= readback + verification of each hz slot's LAST occupant only, FULL width ======
+    (defn fndcc-verify-loop (hz-pool rows ref-y worst)
+        (if (eq (len hz-pool) 0) worst
+            (do
+                (let bytes (metal_buf_read (head hz-pool) 0 (mul rows 4)))
+                (let gy (ewl-gain bytes 0 rows))
+                (let d (fnd-maxdiff ref-y gy))
+                (fndcc-verify-loop (tail hz-pool) rows ref-y (if (gt d worst) d worst)))))
+
+    ; ================= THE N=1 CORRECTNESS PROOF FOR THE COOPERATIVE KERNEL, ALONE, BEFORE THE LOOP
+    ; TRUSTS IT (PR #433's own pattern, reused verbatim) ===============================================
+    (defn fndcc-tg-n1 ()
+        (do
+            (let live (md-door-live?))
+            (let path (fnd-blob-path))
+            (let src (fnd-src path))
+            (let d (fnd-dmodel src))
+            (let eps (fnd-eps src))
+            (let gnabs (fnd-norm-abs src path))
+
+            (let hg (metal_buf_from_file path gnabs (mul d 4)))
+            (let hx (metal_buf_alloc (mul d 4)))
+            (let wx (metal_buf_write hx 0 (fnd-x-bytes d)))
+            (let hy (metal_buf_alloc (mul d 4)))
+
+            (let pipe (metal_pipeline
+                (str_concat "#include <metal_stdlib>\n" (ldm-rmsnorm-tg-msl "form_rmsnorm_tg_f32"))
+                "form_rmsnorm_tg_f32"))
+            (let bind (md-bind16 (list hx hg hy) (list d (md-f32-bits eps)) (fndcc-tg-width) 0 1 0))
+
+            (let e1 (metal_enqueue pipe bind 1))
+            (let synced (metal_sync))
+            (let ybytes (metal_buf_read hy 0 (mul d 4)))
+
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let gpu-y (ewl-gain ybytes 0 d))
+            (let form-y (ln-rmsnorm (fnd-x-list d) gains eps))
+            (let maxdiff (fnd-maxdiff form-y gpu-y))
+
+            (list live d e1 synced maxdiff)))
+
+    (defn fndcc-run ()
+        (do
+            (let live (md-door-live?))
+            (let path (fnd-blob-path))
+            (let src (fnd-src path))
+            (let d (fnd-dmodel src))
+            (let eps (fnd-eps src))
+            (let ebits (md-f32-bits eps))
+            (let gnabs (fnd-norm-abs src path))
+            (let n (fndcc-n))
+            (let rows (fndcc-rows))
+            (let cols d)
+            (let hyd (fndcc-hy-depth))
+            (let hzd (fndcc-hz-depth))
+
+            ; verified against the LIVE file (not trusted): Q4_K, 2 dims, dim0 = cols.
+            (let qtype (fndcc-q-type src))
+            (let qdim0 (fndcc-q-dim0 src))
+            (let qabs (fndcc-q-abs src))
+
+            ; ---- resident, built ONCE: real gain, synthetic input, real Q4_K weight window ---------
+            (let hg (metal_buf_from_file path gnabs (mul d 4)))
+            (let hx (metal_buf_alloc (mul d 4)))
+            (let wx (metal_buf_write hx 0 (fnd-x-bytes d)))
+            (let hqb (metal_buf_from_file path qabs (mul rows (fndcc-q-row-bytes cols))))
+            ; factor 2: the cooperative kernel, not the plain one.
+            (let pipeA (metal_pipeline
+                (str_concat "#include <metal_stdlib>\n" (ldm-rmsnorm-tg-msl "form_rmsnorm_tg_f32"))
+                "form_rmsnorm_tg_f32"))
+            (let pipeB (metal_pipeline
+                (str_concat "#include <metal_stdlib>\n" (q4m-matvec-msl "form_matvec_q4k_stageb"))
+                "form_matvec_q4k_stageb"))
+
+            ; ---- A: the TWO small pools allocated, timed alone (13 total: 2+8+hg+hx+hqb) -----------
+            (let ta0 (now_unix_ms))
+            (let hy-pool (fndcc-alloc-pool 0 hyd (mul d 4) (list)))
+            (let hz-pool (fndcc-alloc-pool 0 hzd (mul rows 4) (list)))
+            (let ta1 (now_unix_ms))
+
+            ; ---- ARM: outside both timed windows, exactly as every predecessor probe does -----------
+            (let armed (metal_batch_concurrent))
+
+            ; ---- B: N*2 real dispatches enqueued, A(cooperative,barrier=0) then B(full-width,
+            ;         barrier=1) per repetition, hy/hz picked cyclically from the two small pools -----
+            (let te0 (now_unix_ms))
+            (let ok-count (fndcc-enq-loop 0 n pipeA pipeB hx hg hqb d ebits rows cols hy-pool hz-pool hyd hzd 0))
+            (let te1 (now_unix_ms))
+
+            ; ---- C: ONE sync for the whole batch -----------------------------------------------------
+            (let ts0 (now_unix_ms))
+            (let drained (metal_sync))
+            (let ts1 (now_unix_ms))
+
+            ; ---- D: the Form reference, computed ONCE (inputs are identical across all N reps) ------
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let form-y0 (ln-rmsnorm (fnd-x-list d) gains eps))
+            (let qsrc (eqr-of-file path qabs (mul rows (fndcc-q-row-bytes cols))))
+            (let ref-y (fndcc-ref-rows qsrc rows cols form-y0))
+
+            ; ---- E: read back and verify the LAST occupant of each of the hzd hz-pool slots, FULL
+            ;         3072-wide, against the ONE reference (reps n-hzd .. n-1) -----------------------
+            (let tr0 (now_unix_ms))
+            (let worst (fndcc-verify-loop hz-pool rows ref-y 0.0))
+            (let tr1 (now_unix_ms))
+
+            (list live n rows cols qtype qdim0 armed ok-count drained hyd hzd
+                  (sub ta1 ta0) (sub te1 te0) (sub ts1 ts0) (sub tr1 tr0) worst)))
+
+    (defn fndcc-us-per (ms n) (floor (div (mul ms 1000) n)))
+
+    (defn fndcc-show ()
+        (do
+            ; ---- the n=1 correctness proof, first, before the loop is trusted to run at all --------
+            (let r1 (fndcc-tg-n1))
+            (let n1-live (nth r1 0))
+            (let n1-d (nth r1 1))
+            (let n1-e1 (nth r1 2))
+            (let n1-synced (nth r1 3))
+            (let n1-maxdiff (nth r1 4))
+
+            (print_str "==== fndcc-tg-n1: cooperative kernel, ALONE, one dispatch, before the loop ====")
+            (print_str (str_concat "door-live " (if n1-live "true" "false")))
+            (print_str (str_concat "d_model " (int_to_str n1-d)))
+            (print_str (str_concat "enqueue ok(want=1) " (int_to_str n1-e1)))
+            (print_str (str_concat "synced(want=1) " (int_to_str n1-synced)))
+            (print_str (str_concat "n=1 max-abs-delta form-vs-gpu (cooperative kernel) " (float_to_str n1-maxdiff)))
+
+            (let n1-ok (if n1-live (if (eq n1-e1 1) (if (eq n1-synced 1) (if (lt n1-maxdiff 0.01) 1 0) 0) 0) 0))
+            (print_str (str_concat "n=1 correctness gate " (int_to_str n1-ok)))
+
+            (print_str "==== fndcc-show: 424-rep chain, ALL THREE FACTORS: pooled + cooperative + full-width ====")
+            (let r (fndcc-run))
+            (let live (nth r 0))
+            (let n (nth r 1))
+            (let rows (nth r 2))
+            (let cols (nth r 3))
+            (let qtype (nth r 4))
+            (let qdim0 (nth r 5))
+            (let armed (nth r 6))
+            (let ok-count (nth r 7))
+            (let drained (nth r 8))
+            (let hyd (nth r 9))
+            (let hzd (nth r 10))
+            (let alloc-ms (nth r 11))
+            (let enq-ms (nth r 12))
+            (let sync-ms (nth r 13))
+            (let verify-ms (nth r 14))
+            (let worst (nth r 15))
+            (let ndisp (mul n 2))
+            (let batch-ms (add (add alloc-ms enq-ms) sync-ms))
+
+            (print_str (metal_status))
+            (print_str (str_concat "door-live " (if live "true" "false")))
+            (print_str (str_concat "attn_q.weight type(want=12 Q4_K) " (int_to_str qtype)))
+            (print_str (str_concat "attn_q.weight dim0(want=3072) " (int_to_str qdim0)))
+            (print_str (str_concat "batch_concurrent armed(want=1) " (int_to_str armed)))
+            (print_str (str_concat "n repetitions " (int_to_str n)))
+            (print_str (str_concat "rows(stage B real output width, FULL) " (int_to_str rows)))
+            (print_str (str_concat "cols(d_model) " (int_to_str cols)))
+            (print_str (str_concat "hy pool depth " (int_to_str hyd)))
+            (print_str (str_concat "hz pool depth " (int_to_str hzd)))
+            (print_str (str_concat "total dispatches(2*n) " (int_to_str ndisp)))
+            (print_str (str_concat "ok-count(want=2n) " (int_to_str ok-count)))
+            (print_str (str_concat "drained(want=2n) " (int_to_str drained)))
+            (print_str (str_concat "worst max-abs-delta form-vs-gpu(last-occupant of each hz slot, full 3072-wide)" (float_to_str worst)))
+            (print_str (str_concat "alloc-ms " (int_to_str alloc-ms)))
+            (print_str (str_concat "enqueue-ms " (int_to_str enq-ms)))
+            (print_str (str_concat "sync-ms " (int_to_str sync-ms)))
+            (print_str (str_concat "verify(readback+diff)-ms(" (str_concat (int_to_str hzd) " slots, full width) ")))
+            (print_str (int_to_str verify-ms))
+            (print_str (str_concat "alloc+enqueue+sync-ms " (int_to_str batch-ms)))
+            (print_str (str_concat "us/dispatch enqueue-only " (int_to_str (fndcc-us-per enq-ms ndisp))))
+            (print_str (str_concat "us/dispatch enqueue+sync " (int_to_str (fndcc-us-per (add enq-ms sync-ms) ndisp))))
+            (print_str (str_concat "us/repetition enqueue-only " (int_to_str (fndcc-us-per enq-ms n))))
+            (print_str (str_concat "us/repetition enqueue+sync " (int_to_str (fndcc-us-per (add enq-ms sync-ms) n))))
+
+            (let loop-ok (if live (if (eq armed 1) (if (eq ok-count ndisp) (if (eq drained ndisp) (if (lt worst 0.01) 1 0) 0) 0) 0) 0))
+            (if (eq n1-ok 1) loop-ok 0)))
+
+    (fndcc-show))

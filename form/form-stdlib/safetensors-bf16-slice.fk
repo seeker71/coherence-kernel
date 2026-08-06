@@ -1,0 +1,50 @@
+; safetensors-bf16-slice.fk — byte-exact bf16 tensor windows into Form math.
+;
+; A carrier resolves a tensor's data_offsets from the content-addressed JSON
+; header. This cell owns range validation, little-endian decoding, and the
+; actual values supplied to native transformer recipes.
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk
+
+(do
+    (defn sbfs-u16-le (s off)
+        (add (str_byte_at s off)
+             (mul 256 (str_byte_at s (add off 1)))))
+    (defn sbfs-decode-loop (s off remaining acc)
+        (if (eq remaining 0) acc
+            (sbfs-decode-loop s (add off 2) (sub remaining 1)
+                (cons (fd-bf16 (sbfs-u16-le s off)) acc))))
+    (defn sbfs-reverse (xs acc)
+        (if (eq (len xs) 0) acc
+            (sbfs-reverse (tail xs) (cons (head xs) acc))))
+    (defn sbfs-decode (s count)
+        (if (eq (str_len s) (mul count 2))
+            (sbfs-reverse (sbfs-decode-loop s 0 count (empty)) (empty))
+            (empty)))
+    ; Byte-list twin is the four-way proof surface. The live native carrier
+    ; obtains this list from its byte-faithful file slice.
+    (defn sbfs-u16-bytes (bytes off)
+        (add (nth bytes off) (mul 256 (nth bytes (add off 1)))))
+    (defn sbfs-decode-bytes-loop (bytes off remaining acc)
+        (if (eq remaining 0) acc
+            (sbfs-decode-bytes-loop bytes (add off 2) (sub remaining 1)
+                (cons (fd-bf16 (sbfs-u16-bytes bytes off)) acc))))
+    (defn sbfs-decode-bytes (bytes count)
+        (if (eq (len bytes) (mul count 2))
+            (sbfs-reverse
+                (sbfs-decode-bytes-loop bytes 0 count (empty)) (empty))
+            (empty)))
+
+    ; Tensor range is relative to the safetensors data region; file range adds
+    ; the 8-byte header length prefix and the declared JSON header length.
+    (defn sbfs-file-start (header-length tensor-start)
+        (add 8 (add header-length tensor-start)))
+    (defn sbfs-range-valid? (file-size header-length tensor-start tensor-end)
+        (if (and (ge header-length 2) (ge tensor-start 0))
+            (if (gt tensor-end tensor-start)
+                (if (le (sbfs-file-start header-length tensor-end) file-size) 1 0)
+                0)
+            0))
+    (defn sbfs-bf16-shape-bytes (rows cols)
+        (mul 2 (mul rows (if (eq cols 0) 1 cols))))
+    0)

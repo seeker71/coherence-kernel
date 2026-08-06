@@ -1,0 +1,141 @@
+; tensor-ir-band — the ONE precision-explicit tensor IR emits every GPU lane from DATA tables, with NO
+; regression on the metal-PROVEN path. Self-contained (no external prelude): it inlines the IR engine
+; (tensor-ir.fk's tb-slot + shared spine + backend tables) and the PROVEN reference emitters from
+; jit-tensor-emit.fk (MSL) and its CUDA twin, then checks the IR output against them. All recipe ops are
+; defn / str_concat / str_eq / list-via-function-args (no `let`-bound lists), so it crosses FOUR-WAY.
+;
+; Verdict 15 when every claim lands:
+;   1   IR-emitted Mac MSL  ≡ the proven jte-matvec-msl output, BYTE-FOR-BYTE (no regression; diff=0)
+;   2   IR-emitted CUDA     ≡ the proven jte-matvec-cuda output, BYTE-FOR-BYTE (the second ISA from ONE IR)
+;   4   IR-emitted GLSL     carries the SAME two-rounding acc-step `acc = p + acc` (generality, structural)
+;   8   the shared spine splits mul+add through the named temporary `p` (NON-fused — no FMA by construction)
+;
+; The MSL and CUDA bodies are byte-identical save the memory model (kernel/__global__, device/plain ptr,
+; thread index, idx type) — exactly the per-ISA surface the backend TABLE carries; the arithmetic spine is
+; emitted ONCE. Proven on metal: the MSL row is the M4 Max bit-exact reference (metal_matvec_audit), now
+; flowing through this engine. CUDA is structural here (RTX receipts cover its metal run); GLSL is structural
+; (Android receipts cover Adreno/Mali).
+
+; ── the IR engine (verbatim shape of model/tensor-ir.fk) ──────────────────────────────────────────────
+(defn tb-slot (tbl key)
+    (if (eq (len tbl) 0) ""
+        (if (str_eq (head (head tbl)) key) (head (tail (head tbl)))
+            (tb-slot (tail tbl) key))))
+(defn tir-acc (tbl) (tb-slot tbl "acc"))
+(defn tir-ld (tbl ref)
+    (str_concat (tb-slot tbl "ld") (str_concat ref (tb-slot tbl "ldc"))))
+(defn tir-dot-down (tbl)
+    (str_concat (tir-acc tbl)
+    (str_concat " acc = 0.0f; "
+    (str_concat (tb-slot tbl "idx")
+    (str_concat " j = cols; while (j > 0) { j -= 1; "
+    (str_concat (tir-acc tbl)
+    (str_concat " p = "
+    (str_concat (tir-ld tbl (tb-slot tbl "wref"))
+    (str_concat " * "
+    (str_concat (tir-ld tbl (tb-slot tbl "xref"))
+    (str_concat "; acc = p + acc; } " "")))))))))))
+(defn tir-store-y (tbl)
+    (str_concat "y[i] = "
+    (str_concat (tb-slot tbl "st")
+    (str_concat "acc" (str_concat (tb-slot tbl "stc") ";")))))
+(defn tir-emit-matvec (fname tbl)
+    (str_concat (tb-slot tbl "kw")
+    (str_concat fname
+    (str_concat (tb-slot tbl "sig")
+    (str_concat " if (i >= rows) return; "
+    (str_concat (tb-slot tbl "rowdecl")
+    (str_concat (tir-dot-down tbl)
+    (str_concat (tir-store-y tbl)
+    " }"))))))))
+
+; ── the backend TABLES (pure data) ───────────────────────────────────────────────────────────────────
+(defn tir-msl-table ()
+    (list
+        (list "kw" "kernel void ") (list "idx" "uint") (list "acc" "float") (list "elem" "float")
+        (list "rowdecl" "device const float* row = w + i * cols; ")
+        (list "ld" "float(") (list "ldc" ")") (list "wref" "row[j]") (list "xref" "x[j]")
+        (list "st" "float(") (list "stc" ")")
+        (list "sig" "(device const float* w [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) {")))
+(defn tir-cuda-table ()
+    (list
+        (list "kw" "__global__ void ") (list "idx" "unsigned") (list "acc" "float") (list "elem" "float")
+        (list "rowdecl" "const float* row = w + i * cols; ")
+        (list "ld" "float(") (list "ldc" ")") (list "wref" "row[j]") (list "xref" "x[j]")
+        (list "st" "float(") (list "stc" ")")
+        (list "sig" "(const float* w, const float* x, float* y, unsigned rows, unsigned cols) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x;")))
+(defn tir-glsl-table ()
+    (list
+        (list "kw" "void ") (list "idx" "uint") (list "acc" "precise float") (list "elem" "float")
+        (list "rowdecl" "")
+        (list "ld" "") (list "ldc" "") (list "wref" "w[i * cols + uint(j)]") (list "xref" "x[uint(j)]")
+        (list "st" "") (list "stc" "")
+        (list "sig" " { uint i = gl_GlobalInvocationID.x;")))
+
+; ── the PROVEN reference emitters (jit-tensor-emit.fk: jte-matvec-msl-spine + CUDA twin, f32 lane) ─────
+(defn jte-matvec-msl-spine (fname elemty accty)
+    (str_concat "kernel void "
+    (str_concat fname
+    (str_concat "(device const "
+    (str_concat elemty
+    (str_concat "* w [[buffer(0)]], device const "
+    (str_concat elemty
+    (str_concat "* x [[buffer(1)]], device "
+    (str_concat elemty
+    (str_concat "* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; device const "
+    (str_concat elemty
+    (str_concat "* row = w + i * cols; "
+    (str_concat accty
+    (str_concat " acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; "
+    (str_concat accty
+    (str_concat " p = "
+    (str_concat accty
+    (str_concat "(row[j]) * "
+    (str_concat accty
+    (str_concat "(x[j]); acc = p + acc; } y[i] = "
+    (str_concat elemty "(acc); }")))))))))))))))))))))
+(defn jte-matvec-msl (fname) (jte-matvec-msl-spine fname "float" "float"))
+(defn jte-matvec-cuda-spine (fname elemty accty)
+    (str_concat "__global__ void "
+    (str_concat fname
+    (str_concat "(const "
+    (str_concat elemty
+    (str_concat "* w, const "
+    (str_concat elemty
+    (str_concat "* x, "
+    (str_concat elemty
+    (str_concat "* y, unsigned rows, unsigned cols) { unsigned i = blockIdx.x * blockDim.x + threadIdx.x; if (i >= rows) return; const "
+    (str_concat elemty
+    (str_concat "* row = w + i * cols; "
+    (str_concat accty
+    (str_concat " acc = 0.0f; unsigned j = cols; while (j > 0) { j -= 1; "
+    (str_concat accty
+    (str_concat " p = "
+    (str_concat accty
+    (str_concat "(row[j]) * "
+    (str_concat accty
+    (str_concat "(x[j]); acc = p + acc; } y[i] = "
+    (str_concat elemty "(acc); }")))))))))))))))))))))
+(defn jte-matvec-cuda (fname) (jte-matvec-cuda-spine fname "float" "float"))
+
+; ── the verdict: IR output ≡ proven reference, per ISA; generality + non-fusion via exact str_eq ────────
+; (str_eq only — the minimal walkers don't carry str_find; exact match is the strongest gate anyway.)
+(defn tir-band-c0 ()
+    (if (str_eq (tir-emit-matvec "matvec" (tir-msl-table)) (jte-matvec-msl "matvec")) 1 0))
+(defn tir-band-c1 ()
+    (if (str_eq (tir-emit-matvec "matvec" (tir-cuda-table)) (jte-matvec-cuda "matvec")) 2 0))
+; bit-4: GLSL from the SAME IR ≡ the proven form-glsl-shaped matvec body (generality — a third ISA, the
+;        same two-rounding `acc = p + acc`, the `precise` qualifier keeping it unfused on Adreno/Mali).
+(defn tir-glsl-ref ()
+    "void matvec { uint i = gl_GlobalInvocationID.x; if (i >= rows) return; precise float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; precise float p = w[i * cols + uint(j)] * x[uint(j)]; acc = p + acc; } y[i] = acc; }")
+(defn tir-band-c2 ()
+    (if (str_eq (tir-emit-matvec "matvec" (tir-glsl-table)) (tir-glsl-ref)) 4 0))
+; bit-8: the shared dot-down spine splits mul+add through the named temporary `p` — emitting it for the
+;        MSL table yields EXACTLY the proven non-fused acc-step (no FMA by construction).
+(defn tir-dotdown-ref ()
+    "float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = float(row[j]) * float(x[j]); acc = p + acc; } ")
+(defn tir-band-c3 ()
+    (if (str_eq (tir-dot-down (tir-msl-table)) (tir-dotdown-ref)) 8 0))
+(defn tir-band-verdict ()
+    (add (tir-band-c0) (add (tir-band-c1) (add (tir-band-c2) (tir-band-c3)))))
+(tir-band-verdict)

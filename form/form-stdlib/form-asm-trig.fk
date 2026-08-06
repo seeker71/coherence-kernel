@@ -1,0 +1,139 @@
+; form-asm-trig.fk — sin(x)/cos(x) as Form->asm BYTES: the LAST cpu-native nonlinear rung, closing the
+; RoPE (rotary positional embedding) gap named in form-native-models.form ("exp/sin/cos/rsqrt for
+; softmax/RoPE/RMSNorm/SwiGLU as asm"). exp/silu/tanh already run on this lane (form-asm-fam-exp 7,
+; form-asm-fam-silu 7, form-asm-fam-tanh 7); sin/cos is the one missing piece for RoPE's inv-freq
+; rotation — position * inv_freq, then rotate a query/key pair by (cos theta, sin theta) — to run on
+; the CPU-native arm64-bytes lane (distinct from the separate Metal/MSL GPU lane, which computes RoPE
+; in shaders — a different target entirely).
+;
+; ── the algorithm: reduce mod pi, not mod pi/2 ──────────────────────────────────────────────────────
+; The textbook quadrant reduction (k=round(x*2/pi), r=x-k*pi/2, then swap sin<->cos AND flip sign by
+; k mod 4) needs a float conditional-select (fcsel) to pick between two DIFFERENT polynomials per
+; quadrant — a primitive this lane does not have. Reducing mod PI instead needs only ONE polynomial per
+; function and ONE sign flip:
+;   k = round(x / pi)            (frintn, the same rounding primitive fam-exp-reduce proved)
+;   r = x - k*pi                 (fmadd over a materialized -pi constant, |r| <= pi/2)
+;   sin(x) = (-1)^k * sin(r)         cos(x) = (-1)^k * cos(r)          [sin(t+pi)=-sin(t), cos(t+pi)=-cos(t)]
+; sin(r) and cos(r) are each a SINGLE Horner polynomial in u=r^2 (7 terms, matching exp's degree), since
+; each series only has one parity of power: sin(r) = r*Qsin(u), cos(r) = Qcos(u) — reusing fam-horner-
+; list's exact fold, no swap needed. The ONLY new control-flow shape on the lane is the (-1)^k sign:
+; k's parity is tested with UDIV/MUL/CMP (all pre-existing GP encoders, no new bitwise AND/EOR needed)
+; and a b.eq skips a 2-instruction negate block (fmov d,xzr ; fsub, the same "0.0 minus x" trick that
+; already gave fam-exp's family every negation it never needed a dedicated fa-fneg for). For fam-sin the
+; negate lands on r BEFORE u=r*r (sin is odd, so negating r pre-poly == negating the result, and u=r^2
+; is unaffected by r's sign); for fam-cos the negate lands on the poly's OUTPUT (cos is even in r, so
+; negating r would do nothing — the sign must apply after Qcos(u) is computed). Domain: x >= 0 (the
+; UDIV-based parity test is unsigned; every claimed point — the named constants and RoPE's
+; position*inv_freq — is non-negative, so this is a documented domain, not a correctness gap).
+;
+; ── accuracy ─────────────────────────────────────────────────────────────────────────────────────────
+; 7-term Horner in u=r^2 over |r|<=pi/2 (odd terms 1,3,..,13 for sin; even terms 0,2,..,12 for cos)
+; measures max|err| ~6.6e-10 (sin) / ~6.3e-9 (cos) against libm across RoPE's real domain — position 0..
+; 8192, inv_freq = 1/base^(2i/d) for d=128, base=500000 (the llama3 RoPE convention) — comfortably inside
+; the same ~1e-7 bar fam-exp's family already ships at (measured by scripts/form_asm_trig_witness.sh).
+; The single-constant pi/-pi range reduction (no Cody-Waite two-term split) stays accurate at this domain
+; size because the cancellation error is bounded by k * ulp(pi)/2 ~ 2500 * 3.5e-16 ~ 8.7e-13 — five orders
+; of magnitude below the polynomial's own truncation error, not the dominant term.
+;
+; ── layout ───────────────────────────────────────────────────────────────────────────────────────────
+; fam-sin: 38 code words (152 bytes) + a 7-f64 pool (56 bytes) = 208 bytes. Horner LEAD=15, TAIL=16 (the
+; pool starts at word 38; the lead ldr sits at word 23, each tail ldr advances 2 words in code and 2 in
+; the pool together, so the distance is the fam-horner-list-proven invariant).
+; fam-cos: 36 code words (144 bytes) + a 7-f64 pool (56 bytes) = 200 bytes (2 words shorter than sin: no
+; save-r / final r-multiply, and the parity branch+negate sit AFTER the poly instead of before it).
+; Horner LEAD=21, TAIL=22 (pool starts at word 36; lead ldr at word 15).
+; Both byte-identical to the M4 assembler oracle (`as`/`clang -c` of the exact hand-written mnemonic
+; sequence, otool -s __TEXT __text) — proven in tests/form-asm-trig-band.fk.
+;
+; preludes: form-stdlib/format-arith.fk form-stdlib/f64-bytes.fk form-stdlib/form-asm.fk form-stdlib/form-asm-matvec.fk
+
+(do
+    ; ── shared reduction: d0=x in, out d0=r=x-k*pi (|r|<=pi/2), x9=k_int. Scratch x8/d1/d2. ──────────
+    ; Mirrors fam-exp-reduce's shape exactly (mov-imm64 constant -> fmov-d-x -> fmul -> frintn), plus
+    ; the fcvtzs that parks k as an integer (fam-exp's own k_int step) since the parity test needs k as
+    ; a GP value, not just the rounded float. 14 words.
+    (defn trg-reduce ()
+        (append (fa-mov-imm64 8 (f64-bytes (div 1.0 3.141592653589793)))  ; x8 = (1/pi) bits
+            (append (fa-fmov-d-x 1 8)                 ; d1 = 1/pi
+                (append (fa-fmul 1 0 1)                ; d1 = x * (1/pi)
+                    (append (fa-frintn 1 1)           ; d1 = k_float = round(x/pi)
+                        (append (fa-fcvtzs 9 1)       ; x9 = k_int
+                            (append (fa-mov-imm64 8 (f64-bytes -3.141592653589793))  ; x8 = (-pi) bits
+                                (append (fa-fmov-d-x 2 8)             ; d2 = -pi
+                                    (fa-fmadd 0 1 2 0)))))))))        ; d0 = k_float*(-pi)+x = r
+
+    ; ── parity test + branch: x9=k_int (>=0) in. `off` is the RAW fa-bcond offset (target_index minus
+    ; branch_index — the same convention every other fa-bcond call site in this codebase uses), so the
+    ; caller states exactly how many words the EQ (even-k) path must land past. Consumes x10/x11/x12
+    ; scratch (UDIV/MUL/CMP — no bitwise AND/EOR encoder needed for a mod-2 test). 5 words.
+    (defn trg-parity-branch (off)
+        (append (fa-movz 10 2)              ; w10 = 2
+            (append (fa-udiv 11 9 10)       ; w11 = k / 2
+                (append (fa-mul 12 11 10)   ; w12 = (k/2) * 2
+                    (append (fa-cmp-r 9 12) ; flags = k - w12   (0 <=> k even)
+                        (fa-bcond 0 off)))))) ; b.eq +off   (cond EQ = 0)
+
+    ; ── the negate-in-place block: d0 = 0.0 - d0, via fmov-d-x(xzr) + fsub — the same "no fa-fneg
+    ; needed" trick fam-relu/fam-silu/fam-tanh already proved. Uses d<scratch> as the 0.0 carrier. 2 words.
+    (defn trg-negate (scratch) (append (fa-fmov-d-x scratch 31) (fa-fsub 0 scratch 0)))
+
+    ; ── Horner-over-u, inlined (no trailing ret — the composition supplies its own epilogue), mirroring
+    ; fam-exp-htail's exact fold: accumulator in d1 (u stays in d0 across every fma), the FINAL fmadd
+    ; targets d0. `lead`/`tail` are the PC-relative imm19 word-distances the caller derives from the
+    ; surrounding code length (fam-horner-list's own invariant: lead = pool_start - lead_index; every
+    ; tail load advances 2 words in code and 2 in the pool together, so one constant `tail` serves all).
+    (defn trg-horner-tail (cs imm)
+        (if (eq (len cs) 1)
+            (append (fa-ldr-d-lit 2 imm) (fa-fmadd 0 1 0 2))
+            (append (fa-ldr-d-lit 2 imm)
+                (append (fa-fmadd 1 1 0 2)
+                    (trg-horner-tail (tail cs) imm)))))
+    (defn trg-horner (coeffs lead tailoff)
+        (append (fa-ldr-d-lit 1 lead)
+            (trg-horner-tail (tail coeffs) tailoff)))
+
+    ; ── the two coefficient sets: sin(r)=r*Qsin(u), cos(r)=Qcos(u), u=r^2, |r|<=pi/2. Each is the
+    ; Taylor series for its parity, Horner-folded over u (highest degree first, matching fam-horner-
+    ; list's own ordering convention). |err| on [-pi/2,pi/2] is bounded by the first dropped term:
+    ; sin's r^15/15! ~ 2.2e-8, cos's r^14/14! ~ 6.4e-9 — both under the exp-family's ~1e-7 bar.
+    (defn trg-sin-coeffs ()
+        (list (div 1.0 6227020800.0) (sub 0.0 (div 1.0 39916800.0)) (div 1.0 362880.0)
+            (sub 0.0 (div 1.0 5040.0)) (div 1.0 120.0) (sub 0.0 (div 1.0 6.0)) 1.0))
+    (defn trg-cos-coeffs ()
+        (list (div 1.0 479001600.0) (sub 0.0 (div 1.0 3628800.0)) (div 1.0 40320.0)
+            (sub 0.0 (div 1.0 720.0)) (div 1.0 24.0) (sub 0.0 (div 1.0 2.0)) 1.0))
+
+    ; ── fam-sin: sin(x) END-TO-END as Form->asm BYTES. ABI: d0 = x (x >= 0), returns d0 = sin(x).
+    ; Register plan: d0 carries x -> r -> (negated r) -> u=r^2 -> Qsin(u); d4 parks the (signed) r across
+    ; the poly (the poly clobbers d0/d1/d2, mirroring fam-silu's d4-save-before-exp-body trick); x9 is
+    ; k_int, consumed immediately by the parity test right after reduction (no need to survive the poly).
+    ; Layout: reduce(14) + parity-branch(5) + negate(2, skipped when k even) + save-r(1) + u=r*r(1) +
+    ; horner(13, LEAD=15/TAIL=16) + final r-multiply(1) + ret(1) = 38 words, then the 7-f64 pool.
+    (defn fam-sin ()
+        (append (trg-reduce)
+            (append (trg-parity-branch 3)             ; offset 3 = branch + the 2-word negate block
+                (append (trg-negate 3)                 ; d0 = -r  (only reached when k is odd)
+                    (append (fa-fmov 4 0)              ; d4 = r (signed) — survives the poly
+                        (append (fa-fmul 0 0 0)        ; d0 = u = r*r
+                            (append (trg-horner (trg-sin-coeffs) 15 16)   ; d0 = Qsin(u)
+                                (append (fa-fmul 0 0 4)   ; d0 = Qsin(u)*r = sin(x)
+                                    (append (fa-ret)
+                                        (fhl-pool (trg-sin-coeffs)))))))))))
+
+    ; ── fam-cos: cos(x) END-TO-END as Form->asm BYTES. ABI: d0 = x (x >= 0), returns d0 = cos(x).
+    ; No r-save/final-multiply (cos is even in r, so u=r*r is computed straight into d0 and the poly's
+    ; own output IS the unsigned cos(r)); the parity test + negate move to AFTER the poly instead, since
+    ; only the RESULT (not r) carries the sign here. x9=k_int survives the whole poly untouched (the
+    ; Horner tail only reads/writes d0/d1/d2 and the PC-relative pool loads touch no GPR).
+    ; Layout: reduce(14) + u=r*r(1) + horner(13, LEAD=21/TAIL=22) + parity-branch(5) + negate(2, skipped
+    ; when k even) + ret(1) = 36 words, then the 7-f64 pool.
+    (defn fam-cos ()
+        (append (trg-reduce)
+            (append (fa-fmul 0 0 0)                    ; d0 = u = r*r
+                (append (trg-horner (trg-cos-coeffs) 21 22)   ; d0 = Qcos(u) = cos(r)
+                    (append (trg-parity-branch 3)       ; offset 3 = branch + the 2-word negate block
+                        (append (trg-negate 3)          ; d0 = -cos(r)  (only reached when k is odd)
+                            (append (fa-ret)
+                                (fhl-pool (trg-cos-coeffs)))))))))
+
+    0)

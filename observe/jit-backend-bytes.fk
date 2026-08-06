@@ -1,0 +1,147 @@
+; jit-backend-bytes.fk - Form-owned backend byte/op stream emitter witness.
+;
+; This layer emits concrete backend payloads as Form data: x64 bytes, arm64
+; operation words, and PTX-like operation codes. It does not load or execute
+; host machine code. It proves that backend bytes are derived only from a
+; Form-owned, fully mapped packet summary.
+
+(do
+    (defn jbb-x64 () 1)
+    (defn jbb-arm64 () 2)
+    (defn jbb-ptx () 3)
+
+    ; input summary:
+    ; ("bytes-request" owner target ops source guard fault deopt root abi)
+    (defn jbb-request (owner target ops source guard fault deopt root abi)
+        (list "bytes-request" owner target ops source guard fault deopt root abi))
+    (defn jbb-request? (r) (if (eq (len r) 10) (str_eq (nth r 0) "bytes-request") 0))
+    (defn jbb-owner (r) (nth r 1))
+    (defn jbb-target (r) (nth r 2))
+    (defn jbb-ops (r) (nth r 3))
+    (defn jbb-source-map (r) (nth r 4))
+    (defn jbb-guard-map (r) (nth r 5))
+    (defn jbb-fault-map (r) (nth r 6))
+    (defn jbb-deopt-map (r) (nth r 7))
+    (defn jbb-root-map (r) (nth r 8))
+    (defn jbb-abi (r) (nth r 9))
+
+    ; output:
+    ; ("bytes" owner target payload reloc safepoint exception deopt root source)
+    (defn jbb-output (owner target payload reloc safepoint exception deopt root source)
+        (list "bytes" owner target payload reloc safepoint exception deopt root source))
+    (defn jbb-output? (o) (if (eq (len o) 10) (str_eq (nth o 0) "bytes") 0))
+    (defn jbb-out-owner (o) (nth o 1))
+    (defn jbb-out-target (o) (nth o 2))
+    (defn jbb-payload (o) (nth o 3))
+    (defn jbb-reloc (o) (nth o 4))
+    (defn jbb-safepoint (o) (nth o 5))
+    (defn jbb-exception (o) (nth o 6))
+    (defn jbb-deopt (o) (nth o 7))
+    (defn jbb-root (o) (nth o 8))
+    (defn jbb-source (o) (nth o 9))
+
+    (defn jbb-safe-request? (r)
+        (if (eq (jbb-request? r) 1)
+            (if (str_eq (jbb-owner r) "form-backend")
+                (if (gt (jbb-ops r) 0)
+                    (if (eq (jbb-source-map r) 1)
+                        (if (eq (jbb-guard-map r) 1)
+                            (if (eq (jbb-fault-map r) 1)
+                                (if (eq (jbb-deopt-map r) 1)
+                                    (if (eq (jbb-root-map r) 1)
+                                        (if (eq (jbb-abi r) 1) 1 0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jbb-x64-payload ()
+        ; push rbp; mov rbp,rsp; cmp rdi,0; je deopt; mov rax,42; pop rbp; ret
+        (list 85 72 137 229 72 131 255 0 116 5 72 199 192 42 0 0 0 93 195))
+    (defn jbb-arm64-payload ()
+        ; stp fp,lr; mov fp,sp; cbz x0,deopt; mov x0,#42; ret
+        (list 2814377981 239 889192448 138412034 3596554240))
+    (defn jbb-ptx-payload ()
+        ; ld.param; setp; bra; mov; ret, represented as stable op categories
+        (list 501 502 503 504 505))
+
+    (defn jbb-emit (r)
+        (if (eq (jbb-safe-request? r) 1)
+            (if (eq (jbb-target r) (jbb-x64))
+                (jbb-output "form-backend" (jbb-x64) (jbb-x64-payload) 1 1 1 1 1 1)
+                (if (eq (jbb-target r) (jbb-arm64))
+                    (jbb-output "form-backend" (jbb-arm64) (jbb-arm64-payload) 1 1 1 1 1 1)
+                    (if (eq (jbb-target r) (jbb-ptx))
+                        (jbb-output "form-backend" (jbb-ptx) (jbb-ptx-payload) 1 1 1 1 1 1)
+                        (empty))))
+            (empty)))
+
+    (defn jbb-output-safe? (o)
+        (if (eq (jbb-output? o) 1)
+            (if (str_eq (jbb-out-owner o) "form-backend")
+                (if (gt (len (jbb-payload o)) 0)
+                    (if (eq (jbb-reloc o) 1)
+                        (if (eq (jbb-safepoint o) 1)
+                            (if (eq (jbb-exception o) 1)
+                                (if (eq (jbb-deopt o) 1)
+                                    (if (eq (jbb-root o) 1)
+                                        (if (eq (jbb-source o) 1) 1 0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jbb-has? (xs x)
+        (if (eq (len xs) 0)
+            0
+            (if (eq (head xs) x) 1 (jbb-has? (tail xs) x))))
+
+    (defn jbb-last (xs)
+        (if (eq (len (tail xs)) 0) (head xs) (jbb-last (tail xs))))
+
+    (defn jbb-good-x64 () (jbb-request "form-backend" (jbb-x64) 3 1 1 1 1 1 1))
+    (defn jbb-good-arm64 () (jbb-request "form-backend" (jbb-arm64) 3 1 1 1 1 1 1))
+    (defn jbb-good-ptx () (jbb-request "form-backend" (jbb-ptx) 3 1 1 1 1 1 1))
+    (defn jbb-foreign () (jbb-request "c-lowering" (jbb-x64) 3 1 1 1 1 1 1))
+    (defn jbb-no-deopt () (jbb-request "form-backend" (jbb-x64) 3 1 1 1 0 1 1))
+    (defn jbb-no-source () (jbb-request "form-backend" (jbb-x64) 3 0 1 1 1 1 1))
+
+    (defn jbb-bit (cond bit) (if cond bit 0))
+    (defn jit-backend-bytes-check ()
+        (add
+            (jbb-bit (eq (jbb-output-safe? (jbb-emit (jbb-good-x64))) 1) 1)
+            (add
+                (jbb-bit (eq (jbb-output-safe? (jbb-emit (jbb-good-arm64))) 1) 2)
+                (add
+                    (jbb-bit (eq (jbb-output-safe? (jbb-emit (jbb-good-ptx))) 1) 4)
+                    (add
+                        (jbb-bit (eq (len (jbb-payload (jbb-emit (jbb-good-x64)))) 19) 8)
+                        (add
+                            (jbb-bit (eq (head (jbb-payload (jbb-emit (jbb-good-x64)))) 85) 16)
+                            (add
+                                (jbb-bit (eq (jbb-last (jbb-payload (jbb-emit (jbb-good-x64)))) 195) 32)
+                                (add
+                                    (jbb-bit (eq (jbb-has? (jbb-payload (jbb-emit (jbb-good-x64))) 116) 1) 64)
+                                    (add
+                                        (jbb-bit (eq (len (jbb-payload (jbb-emit (jbb-good-arm64)))) 5) 128)
+                                        (add
+                                            (jbb-bit (eq (jbb-last (jbb-payload (jbb-emit (jbb-good-arm64)))) 3596554240) 256)
+                                            (add
+                                                (jbb-bit (eq (len (jbb-payload (jbb-emit (jbb-good-ptx)))) 5) 512)
+                                                (add
+                                                    (jbb-bit (eq (jbb-has? (jbb-payload (jbb-emit (jbb-good-ptx))) 503) 1) 1024)
+                                                    (add
+                                                        (jbb-bit (eq (len (jbb-emit (jbb-foreign))) 0) 2048)
+                                                        (add
+                                                            (jbb-bit (eq (len (jbb-emit (jbb-no-deopt))) 0) 4096)
+                                                            (jbb-bit (eq (len (jbb-emit (jbb-no-source))) 0) 8192))))))))))))))
+
+    0)

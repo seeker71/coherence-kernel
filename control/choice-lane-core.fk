@@ -1,0 +1,137 @@
+; control/choice-lane-core.fk — cut, undo, store, restore, timeout, and
+; lanes: the remaining native control invites, plus the shape "choice"
+; takes when it invites reasoning to walk more than one path.
+;
+; control/offer-ack-core.fk already gives THREE of the eight as thin
+; expressions over ONE mechanism (oac-kind + oac-offer): choice, fail,
+; stop. This file adds the other FIVE the same way — no second mechanism,
+; no per-primitive dispatch chain, nothing new added to the ground.
+;
+; preludes: control/offer-ack-core.fk
+;
+; Ground (axioms/core-axioms.form — unchanged from offer-ack-core.fk):
+;   axiom-5 offer    — oac-offer IS the invocation; every primitive below
+;                      routes through it, never a second call mechanism.
+;   axiom-1 states   — nothing is first-class; a TIMEOUT is nothing, the
+;                      same silence fail/stop already are, only counted.
+;   axiom-4 boundary — the receiving cell sovereignly decides which ack it
+;                      honors; cut/undo/store/restore are the boundary
+;                      choosing what to keep, never throw/catch control flow.
+;   axiom-3          — a checkpoint is a VALUE (content-addressed), never a
+;                      mutated cell; store/restore hand a value back and
+;                      forth, they do not reach into mutable state.
+;
+; THE EIGHT, the native LLM token-invite vocabulary this file completes
+; alongside offer-ack-core.fk (observe/speech-token-stream.fk carries the
+; matching <CHOICE> <CUT> <FAIL> <STOP> <UNDO> <STORE> <RESTORE> <TIMEOUT>
+; tokens a reasoning/speech stream can emit to invite each act):
+;
+;   choice   control/offer-ack-core.fk   oac-choice   first non-nothing wins
+;   fail     control/offer-ack-core.fk   oac-fail     the nothing-ack itself
+;   stop     control/offer-ack-core.fk   oac-stop     halt the offer chain
+;   cut      below                       oac-cut      commit to the FIRST
+;            ack of ANY kind (even nothing), pruning every alternative
+;            after it — the classic Prolog cut, choice's early-commit twin
+;   undo     below                       oac-undo     fall back to the last
+;            store checkpoint automatically, when the current ack failed
+;   store    below                       oac-store    checkpoint the
+;            current lane memory (a value; nothing is mutated)
+;   restore  below                       oac-restore  return to a
+;            checkpoint on request — undo's explicit twin
+;   timeout  below                       oac-timeout-walk  bound a lane
+;            walk by a step budget; exhausting it before every alternative
+;            is tried acks nothing, same as fail — but counted, so a
+;            caller can tell "ran out of budget" from "all declined"
+;
+; LANES — what "choice invites internal thinking, going down different
+; query lanes, collecting nodes along the way" becomes executable code:
+; oac-choice commits to the FIRST winner and stops walking — a decision.
+; oac-lanes below walks EVERY alternative and COLLECTS each lane's ack —
+; the different query lanes a choice invites reasoning to walk BEFORE
+; deciding, each entry the node/memory that lane surfaced. Picking (via
+; oac-choice or oac-cut) is a separate, later act over the collected
+; memory; cut is what prunes the walk early when a caller does not want
+; every lane explored.
+;
+; Proof: control/tests/choice-lane-core-band.fk.
+
+(do
+    ;; ── CUT — commit to the first ack of ANY kind, pruning the rest ──────
+    ;; Where oac-choice SKIPS a nothing-ack and keeps walking, oac-cut takes
+    ;; whatever the first lane says — success or decline — and stops. This
+    ;; is the difference between "keep looking for a yes" (choice) and
+    ;; "take the first answer, don't look further" (cut).
+    (defn oac-cut (alts args)
+        (if (eq (len alts) 0) (oac-nothing)
+            (oac-offer (head alts) args)))
+
+    ;; a cut RECEIPT names what was kept and how many alternatives were
+    ;; pruned (never tried) — so a caller can tell "committed with lanes
+    ;; still unexplored" from "there was nothing left to try".
+    (defn oac-cut-receipt (ack pruned) (list ack pruned))
+    (defn oac-cut-receipt-ack    (r) (nth r 0))
+    (defn oac-cut-receipt-pruned (r) (nth r 1))
+    (defn oac-cut-with-receipt (alts args)
+        (if (eq (len alts) 0) (oac-cut-receipt (oac-nothing) 0)
+            (oac-cut-receipt (oac-offer (head alts) args) (sub (len alts) 1))))
+
+    ;; ── LANES — walk EVERY alternative, collecting each lane's ack ───────
+    ;; The different query lanes a choice invites reasoning to walk before
+    ;; picking; nothing is pruned here, nothing is skipped. Order is
+    ;; preserved so the memory reads back in the same order the lanes were
+    ;; offered.
+    (defn oac-lanes (alts args)
+        (if (eq (len alts) 0) (list)
+            (cons (oac-offer (head alts) args) (oac-lanes (tail alts) args))))
+
+    ;; the winners among a lane walk's memory — every ack that is NOT
+    ;; nothing, in the order the lanes were walked.
+    (defn oac-lanes-winners (memory)
+        (if (eq (len memory) 0) (list)
+            (if (eq (oac-nothing? (head memory)) 1)
+                (oac-lanes-winners (tail memory))
+                (cons (head memory) (oac-lanes-winners (tail memory))))))
+    (defn oac-lanes-winner-count (memory) (len (oac-lanes-winners memory)))
+
+    ;; ── STORE / RESTORE — a checkpoint IS the memory value at a moment ───
+    ;; (axiom-3: content-addressed, never mutated). store hands it back;
+    ;; restore returns to it on request. Both are the identity function —
+    ;; naming the act is the whole point, exactly as oac-fail names nothing
+    ;; and oac-stop names the halt.
+    (defn oac-store (memory) memory)
+    (defn oac-restore (checkpoint) checkpoint)
+
+    ;; ── UNDO — the automatic recovery: when the current ack failed (acked
+    ;; nothing), fall back to the last store checkpoint; otherwise keep the
+    ;; memory the successful lane produced. restore is the explicit ask;
+    ;; undo is the same return wired to fail's own signal (axiom-4: the
+    ;; boundary decides which memory it honors from the ack alone).
+    (defn oac-undo (ack checkpoint memory)
+        (if (eq (oac-nothing? ack) 1) checkpoint memory))
+
+    ;; ── TIMEOUT — bound a lane walk by a step budget ─────────────────────
+    ;; Exhausting the budget before every alternative is tried acks nothing
+    ;; — the SAME silence as fail/stop (axiom-1: timeout IS nothing, not a
+    ;; distinct error arm) — but the walk returns how many alternatives
+    ;; were left untried, so a caller can tell a real timeout (alts still
+    ;; waiting) from honest exhaustion (every lane genuinely declined).
+    ;; Returns (list ack budget-left alts-left).
+    (defn oac-timeout-walk (alts args budget)
+        (if (eq budget 0) (list (oac-nothing) 0 (len alts))
+            (if (eq (len alts) 0) (list (oac-nothing) budget 0)
+                (do (let ack (oac-offer (head alts) args))
+                    (if (eq (oac-nothing? ack) 1)
+                        (oac-timeout-walk (tail alts) args (sub budget 1))
+                        (list ack (sub budget 1) (len (tail alts))))))))
+    (defn oac-timeout-ack        (w) (nth w 0))
+    (defn oac-timeout-budget-left (w) (nth w 1))
+    (defn oac-timeout-alts-left  (w) (nth w 2))
+    ;; a REAL timeout: declined AND alternatives remained untried. Honest
+    ;; exhaustion (every lane was tried and every lane declined) is not a
+    ;; timeout — it is fail, and reads as alts-left = 0.
+    (defn oac-timed-out? (w)
+        (if (and (eq (oac-nothing? (oac-timeout-ack w)) 1) (gt (oac-timeout-alts-left w) 0))
+            1 0))
+
+    0
+)

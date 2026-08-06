@@ -1,0 +1,196 @@
+; lingbot-pytorch-checkpoint.fk — Form-native reader for LingBot-Map's released
+; PyTorch ZIP64 checkpoint carrier.
+;
+; This is a loader, not a claim that the 4.63 GB checkpoint is committed here.
+; It reads the authentic checkpoint's ZIP directory and stored tensor members,
+; checks their CRC, and decodes IEEE-754 float32 values in Form. The committed
+; witness slices are byte-for-byte ranges from robbyant/lingbot-map/lingbot-map.pt.
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/form-fs.fk form/form-stdlib/file-byte-window.fk form/form-stdlib/crc32.fk
+
+(do
+  (defn lbpt-u16 (s i)
+    (add (str_byte_at s i) (mul (str_byte_at s (add i 1)) 256)))
+
+  (defn lbpt-u32 (s i)
+    (add (str_byte_at s i)
+      (add (mul (str_byte_at s (add i 1)) 256)
+        (add (mul (str_byte_at s (add i 2)) 65536)
+             (mul (str_byte_at s (add i 3)) 16777216)))))
+
+  (defn lbpt-u64 (s i)
+    (add (lbpt-u32 s i) (mul (lbpt-u32 s (add i 4)) 4294967296)))
+
+  (defn lbpt-local-signature () 67324752)
+  (defn lbpt-central-signature () 33639248)
+  (defn lbpt-zip64-eocd-signature () 101075792)
+  (defn lbpt-zip64-locator-signature () 117853008)
+  (defn lbpt-eocd-signature () 101010256)
+
+  ; Central-directory entry row:
+  ; (name crc compressed-size size local-header-offset method flags)
+  (defn lbpt-entry (name crc csize size local-offset method flags)
+    (list name crc csize size local-offset method flags))
+  (defn lbpt-entry-name (e) (nth e 0))
+  (defn lbpt-entry-crc (e) (nth e 1))
+  (defn lbpt-entry-compressed-size (e) (nth e 2))
+  (defn lbpt-entry-size (e) (nth e 3))
+  (defn lbpt-entry-local-offset (e) (nth e 4))
+  (defn lbpt-entry-method (e) (nth e 5))
+  (defn lbpt-entry-flags (e) (nth e 6))
+
+  (defn lbpt-central-entry-at (directory header-offset)
+    (do
+      (let name-len (lbpt-u16 directory (add header-offset 28)))
+      (let name-start (add header-offset 46))
+      (if (eq (lbpt-u32 directory header-offset) (lbpt-central-signature))
+        (lbpt-entry
+          (substring directory name-start (add name-start name-len))
+          (lbpt-u32 directory (add header-offset 16))
+          (lbpt-u32 directory (add header-offset 20))
+          (lbpt-u32 directory (add header-offset 24))
+          (lbpt-u32 directory (add header-offset 42))
+          (lbpt-u16 directory (add header-offset 10))
+          (lbpt-u16 directory (add header-offset 8)))
+        (lbpt-entry "" 0 0 0 0 0 0))))
+
+  ; Locate by exact member name. The name starts exactly 46 bytes after its
+  ; central header; validation of both signature and recovered name prevents a
+  ; coincidental name inside tensor bytes from being accepted.
+  (defn lbpt-find-entry (directory name)
+    (do
+      (let name-offset (str_find directory name 0))
+      (if (lt name-offset 46)
+        (lbpt-entry "" 0 0 0 0 0 0)
+        (do
+          (let e (lbpt-central-entry-at directory (sub name-offset 46)))
+          (if (str_eq (lbpt-entry-name e) name)
+            e
+            (lbpt-entry "" 0 0 0 0 0 0))))))
+
+  ; ZIP64 end rows live at the end of the central-directory carrier:
+  ; [ZIP64 EOCD:56][locator:20][classic EOCD:22].
+  ; Returns (entries central-size central-offset archive-size).
+  (defn lbpt-zip64-summary (directory-tail archive-size)
+    (do
+      (let n (str_len directory-tail))
+      (let z64 (sub n 98))
+      (let loc (sub n 42))
+      (let end (sub n 22))
+      (if (and (eq (lbpt-u32 directory-tail z64) (lbpt-zip64-eocd-signature))
+            (and (eq (lbpt-u32 directory-tail loc) (lbpt-zip64-locator-signature))
+                 (eq (lbpt-u32 directory-tail end) (lbpt-eocd-signature))))
+        (list
+          (lbpt-u64 directory-tail (add z64 32))
+          (lbpt-u64 directory-tail (add z64 40))
+          (lbpt-u64 directory-tail (add z64 48))
+          archive-size)
+        (list 0 0 0 archive-size))))
+
+  ; Local member header row: (name data-offset flags method).
+  (defn lbpt-local-header (record)
+    (if (eq (lbpt-u32 record 0) (lbpt-local-signature))
+      (do
+        (let name-len (lbpt-u16 record 26))
+        (let extra-len (lbpt-u16 record 28))
+        (list
+          (substring record 30 (add 30 name-len))
+          (add 30 (add name-len extra-len))
+          (lbpt-u16 record 6)
+          (lbpt-u16 record 8)))
+      (list "" 0 0 0)))
+  (defn lbpt-local-name (h) (nth h 0))
+  (defn lbpt-local-data-offset (h) (nth h 1))
+  (defn lbpt-local-flags (h) (nth h 2))
+  (defn lbpt-local-method (h) (nth h 3))
+
+  ; Read arbitrarily large stored tensors through the body's bounded 4096-byte
+  ; file windows. The full checkpoint path works identically to the fixture.
+  (defn lbpt-read-span-loop (path offset remaining acc)
+    (if (eq remaining 0)
+      acc
+      (do
+        (let take (if (gt remaining (fbw-max-window)) (fbw-max-window) remaining))
+        (let w (fbw-read-window path offset take))
+        (if (or (str_eq (fbw-window-status w) (fbw-status-ready))
+                (str_eq (fbw-window-status w) (fbw-status-short)))
+          (lbpt-read-span-loop path (add offset take) (sub remaining take)
+            (str_concat acc (fbw-window-slice w)))
+          ""))))
+  (defn lbpt-read-span (path offset size)
+    (lbpt-read-span-loop path offset size ""))
+
+  ; Read a named tensor from a complete PyTorch checkpoint using its parsed
+  ; central entry. Stored method 0 is what the released LingBot checkpoint uses.
+  (defn lbpt-load-tensor (checkpoint-path entry)
+    (do
+      (let header (lbpt-read-span checkpoint-path (lbpt-entry-local-offset entry) 256))
+      (let local (lbpt-local-header header))
+      (if (and (str_eq (lbpt-local-name local) (lbpt-entry-name entry))
+            (and (eq (lbpt-local-method local) 0)
+                 (eq (lbpt-entry-method entry) 0)))
+        (lbpt-read-span checkpoint-path
+          (add (lbpt-entry-local-offset entry) (lbpt-local-data-offset local))
+          (lbpt-entry-size entry))
+        "")))
+
+  ; Same loader over an authentic isolated local record. This lets the body
+  ; witness a released tensor without pretending the full 4.63 GB file is git.
+  (defn lbpt-load-record-tensor (record-path entry)
+    (do
+      (let header (lbpt-read-span record-path 0 256))
+      (let local (lbpt-local-header header))
+      (if (and (str_eq (lbpt-local-name local) (lbpt-entry-name entry))
+            (eq (lbpt-local-method local) 0))
+        (lbpt-read-span record-path (lbpt-local-data-offset local) (lbpt-entry-size entry))
+        "")))
+
+  ; Bound recursive byte folds to 1024 bytes, then continue in a shallow outer
+  ; walk. This keeps multi-gigabyte member verification stack-bounded.
+  (defn lbpt-crc-chunk-state (state s i end)
+    (if (ge i end)
+      state
+      (lbpt-crc-chunk-state (crc32-step state (str_byte_at s i)) s (add i 1) end)))
+  (defn lbpt-crc-span-state (state s offset)
+    (if (ge offset (str_len s))
+      state
+      (do
+        (let end (if (gt (add offset 1024) (str_len s)) (str_len s) (add offset 1024)))
+        (lbpt-crc-span-state (lbpt-crc-chunk-state state s offset end) s end))))
+  (defn lbpt-crc-string (s)
+    (add_u32 (bxor (lbpt-crc-span-state 4294967295 s 0) 4294967295) 0))
+  (defn lbpt-tensor-valid? (tensor entry)
+    (and (eq (str_len tensor) (lbpt-entry-size entry))
+         (eq (lbpt-crc-string tensor) (lbpt-entry-crc entry))))
+
+  ; IEEE-754 f32 decode. Every f32 is exactly representable by the walkers'
+  ; f64 arithmetic, so the decoded released values remain four-way comparable.
+  (defn lbpt-p2 (k acc)
+    (if (eq k 0) acc (lbpt-p2 (sub k 1) (mul acc 2.0))))
+  (defn lbpt-pow2 (k) (lbpt-p2 k 1.0))
+  (defn lbpt-f32-mag (ex man)
+    (if (eq ex 0)
+      (div (mul 1.0 man) (lbpt-pow2 149))
+      (if (le 127 ex)
+        (mul (add 1.0 (div (mul 1.0 man) 8388608.0)) (lbpt-pow2 (sub ex 127)))
+        (div (add 1.0 (div (mul 1.0 man) 8388608.0)) (lbpt-pow2 (sub 127 ex))))))
+  (defn lbpt-f32 (s offset)
+    (do
+      (let bits (lbpt-u32 s offset))
+      (let ex (mod (div bits 8388608) 256))
+      (let mag (lbpt-f32-mag ex (mod bits 8388608)))
+      (if (eq (div bits 2147483648) 1) (sub 0.0 mag) mag)))
+
+  (defn lbpt-f32-list-loop (s offset count acc)
+    (if (eq count 0)
+      (reverse acc)
+      (lbpt-f32-list-loop s (add offset 4) (sub count 1)
+        (cons (lbpt-f32 s offset) acc))))
+  (defn lbpt-f32-list (s offset count)
+    (lbpt-f32-list-loop s offset count (list)))
+
+  ; Released data/0 is aggregator.camera_token, shape [1,2,1,1024], float32.
+  (defn lbpt-lingbot-camera-entry ()
+    (lbpt-entry "checkpoint/data/0" 2898498933 8192 8192 268310 0 2056))
+
+  0)

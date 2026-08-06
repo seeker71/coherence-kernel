@@ -1,0 +1,94 @@
+; dsv4-token.fk — the DeepSeek-V4-Flash first-token forward, wired at REAL DIMS over the
+; windowed-resident 85 GiB file. This is the mouth of Stone 33: it emits, from the file's own
+; header, the residency plan (reused from windowed-residency-emit.fk) and the per-stage MSL the
+; carrier dispatches through the overlapping views. The carrier is dumb: every geometry number and
+; every character of Metal comes from here.
+;
+; THE EVIDENCE CLASS, named up front (selfgauge / knownsolved). No external oracle can run this
+; exact file — ds4/llama.cpp/ollama all REFUSE GGUF types 40/41 (`unsupported GGUF type 40`), so a
+; whole-forward output is UNFALSIFIABLE against any reference on this machine. What each stage here
+; CAN stand on is stated per stage:
+;   * EMBED is byte-exact: the F16 embedding row decoded on the GPU through the resident view equals
+;     an independent mmap carve decoded by the carrier's own f16→f32, index for index. That is a true
+;     bit-exact claim, because embed is a pure table read with no accumulation.
+;   * The forward as a whole is "a composition of individually-proven components (each proven vs ds4's
+;     own C at toy/small scale — mla/moe/hc/mx/iq2 GPU rows), wired in forward_first_token_cpu's exact
+;     order, producing a non-degenerate, stable, input-dependent token." NOT bit-exact end to end.
+;
+; THE CONTROL FLOW, read from ds4.c (MIT, /Users/ursmuff/models/ds4-engine), quoted by line, never
+; copied (boundborrow — only the SHAPE of the computation crosses; this body is fp64/fp32):
+;   ds4.c:13848 forward_first_token_cpu  — embed(prompt->v[0]) → hc broadcast → 43 layers → out_hc
+;   ds4.c: 4980 embed_token_f16          — plain F16 row, stride=dim0=4096, NO scaling
+;   ds4.c:10745 layer_routed_moe_one     — FIRST 3 layers (hash_layer_count=3) select experts by
+;                                          tid2eid[token] LOOKUP, not top-k; layers 3..42 compute top-k.
+;                                          This CORRECTS dsv4-forward.fk, which computes routing for all.
+;   ds4.c:13876 output_hc_head_one       — collapse n_hc=4 streams, sigmoid gate, weighted sum
+;   ds4.c:output_logits_one              — RMSNorm → output.weight (MXFP8, type 41) matvec → argmax
+;
+; THE REAL DIMS (from the file's KVs, gguf-manifest.fk over the live file):
+;   n_embd 4096 · n_layer 43 · n_hc 4 · sinkhorn 20 · rms_eps 1e-6 · vocab 129280
+;   heads 64 / kv 1 · q_lora 1024 · kv_lora 512 · rope_dim 64 (trailing) · out_lora 1024 · out_grp 8
+;   experts 256 · used 6 · shared 1 · expert_ff 2048 · wscale 1.5 · weights_norm 1 · hash_layers 3
+;
+; preludes: form-stdlib/core.fk native/metal/windowed-residency-emit.fk form-stdlib/mxfp8-msl.fk form-stdlib/qk-matvec-lane.fk
+;
+; Proven by: native/metal/metal_dsv4_token.sh (the staged forward on the live file, with the
+; offered-interface guard — an unrun kernel reads as a computed zero, so every dispatch is gated).
+
+(do
+    ; ---- config the carrier prints back, so the real dims live in ONE place, read from the file ----
+    ; (the values themselves are read from the KV header by the harness via gguf-manifest.fk; these
+    ; names are the body's record of what forward_first_token_cpu needs.)
+
+    ; ================= STAGE 1: EMBED =================
+    ; The token embedding is F16 (type 1), shape [n_embd=4096, vocab]. Row for token t begins at the
+    ; tensor's byte offset + t*n_embd*2. The carrier gives us the tensor's (view, inner) from the
+    ; residency plan; this kernel reads n_embd halfs at (inner + rowOff) and decodes each to f32.
+    ;
+    ; `as_type<half>` is Metal's bit-reinterpret; float(half) is the exact IEEE-754 half→single widening,
+    ; the same value the carrier's f16_to_f32 computes — so a mismatch is a residency/geometry fault,
+    ; caught, never smoothed. `base` is ulong: the second view begins ~85 GiB in, past 2^32.
+    (defn dsv4-embed-msl ()
+        (do
+            (print "MSL")
+            (print "#include <metal_stdlib>")
+            (print "using namespace metal;")
+            (print "kernel void form_dsv4_embed_f16(device const uchar* src [[buffer(0)]],")
+            (print "                                device float* dst [[buffer(1)]],")
+            (print "                                constant ulong& base [[buffer(2)]],")
+            (print "                                constant uint& n [[buffer(3)]],")
+            (print "                                uint gid [[thread_position_in_grid]]) {")
+            (print "    if (gid < n) {")
+            (print "        ushort h = *(device const ushort*)(src + base + (ulong)gid*2);")
+            (print "        dst[gid] = float(as_type<half>(h));")
+            (print "    }")
+            (print "}")
+            (print "END")
+            0))
+
+    ; the row byte-offset of token t inside an F16 [n_embd, vocab] tensor.
+    (defn dsv4-embed-row-off (token n_embd) (mul (mul token n_embd) 2))
+
+    ; ================= STAGE 2: the vocab-projection EXIT mechanism, MXFP8 at real dims =================
+    ; output.weight is GGUF type 41 (MXFP8, plane-split), shape [n_embd=4096, vocab=129280] — a
+    ; [rows=129280, cols=4096] fused decode+matvec producing the 129280 vocab logits. The kernel is
+    ; mxfp8-msl.fk's OWN proven fused matvec (mx8m-matvec-body), reused unchanged; only the entry name is
+    ; ours. It reads the raw plane-split bytes straight from the resident view: payload at r*cols+g*32+m,
+    ; the E8M0 scale plane at nel = rows*cols. `nel` is the SLICE element count (the exoscalar seam).
+    ;
+    ; WHAT THIS PROVES, and the honest bound (selfgauge). When mxfp8-msl.fk was written the 85 GiB file
+    ; was only ~28 GB downloaded and NO type-41 tensor was resident — its GPU witness ran on a 1056-byte
+    ; committed fixture. The file is now COMPLETE, so this runs the MXFP8 fused matvec on a REAL type-41
+    ; tensor at REAL dims through the windowed views. GPU agreeing with the body's own CPU MXFP8 carve
+    ; proves the TRANSCRIPTION and the residency binding, NOT bit-exactness against an external reference
+    ; (none exists — ds4/llama.cpp refuse type 41). It is a mechanism proof of the forward's EXIT, fed a
+    ; real vector as a probe; it is NOT the real first token, which needs the 43-layer hidden as input.
+    (defn dsv4-mx8-matvec-msl ()
+        (do
+            (print "MSL")
+            (print (str_concat (qml-msl-header)
+                    (mx8m-msl-unit "form_dsv4_mx8_dequant" "form_dsv4_mx8_matvec")))
+            (print "END")
+            0))
+
+    0)

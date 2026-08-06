@@ -1,0 +1,195 @@
+; concept-audio-scale-13.fk -- lazy real-speech carrier for 10k x 13 NL.
+;
+; The semantic payload is the pinned OMW label spoken by a locale-appropriate
+; installed macOS voice.  A quiet, one-second four-window identity envelope is
+; appended after the utterance: marker, concept-high, concept-low, and lens.
+; Form senses that envelope directly from PCM and recovers the exact address.
+; The envelope is an integrity/address channel, not a claim that tones convey
+; word meaning; meaning remains audible in the speech before it.
+;
+; The current source matrix has all 130,000 labels. The resolution law still
+; handles a synthetic/older empty cell by explicitly selecting the English
+; anchor. Kiswahili has a label but no installed sw_ voice on this host,
+; so Samantha is an honestly named voice-carrier fallback, not Swahili TTS.
+; No files are pre-generated: ca13-generate makes exactly one requested cell.
+;
+; witnessed: 2026-07-18 -> 32767 four-way; 30/30 live spoken WAV recoveries
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk model/concept-multimodal-codec.fk cognition/concept-nl-semantic-13-runtime.fk
+
+(do
+  (defn ca13-marker-frequency () 2200)
+  (defn ca13-window-samples () 4000) ; 250 ms at 16 kHz
+  (defn ca13-window-bytes () 8000)
+  (defn ca13-envelope-bytes () 32000)
+
+  (defn ca13-lens-index (code)
+    (if (str_eq code "en") 0
+      (if (str_eq code "id") 1
+        (if (str_eq code "es") 2
+          (if (str_eq code "fr") 3
+            (if (str_eq code "pt-br") 4
+              (if (str_eq code "sw") 5
+                (if (str_eq code "de") 6
+                  (if (str_eq code "ru") 7
+                    (if (str_eq code "zh") 8
+                      (if (str_eq code "ja") 9
+                        (if (str_eq code "ar") 10
+                          (if (str_eq code "hi") 11
+                            (if (str_eq code "tr") 12 -1))))))))))))))
+
+  ; row = locale, installed voice, voice locale, locale-native carrier flag
+  (defn ca13-voice-row (code)
+    (if (str_eq code "en") (list "en" "Samantha" "en_US" 1)
+      (if (str_eq code "id") (list "id" "Damayanti" "id_ID" 1)
+        (if (str_eq code "es") (list "es" "Mónica" "es_ES" 1)
+          (if (str_eq code "fr") (list "fr" "Thomas" "fr_FR" 1)
+            (if (str_eq code "pt-br") (list "pt-br" "Luciana" "pt_BR" 1)
+              (if (str_eq code "sw") (list "sw" "Samantha" "en_US" 0)
+                (if (str_eq code "de") (list "de" "Anna" "de_DE" 1)
+                  (if (str_eq code "ru") (list "ru" "Milena" "ru_RU" 1)
+                    (if (str_eq code "zh") (list "zh" "Tingting" "zh_CN" 1)
+                      (if (str_eq code "ja") (list "ja" "Kyoko" "ja_JP" 1)
+                        (if (str_eq code "ar") (list "ar" "Majed" "ar_001" 1)
+                          (if (str_eq code "hi") (list "hi" "Lekha" "hi_IN" 1)
+                            (if (str_eq code "tr") (list "tr" "Yelda" "tr_TR" 1)
+                              (empty)))))))))))))))
+
+  ; label resolution = spoken text, state, requested mapping, English anchor,
+  ; exact source name and one-byte source code.
+  (defn ca13-resolve-values (requested requested-state requested-source requested-code
+                              english english-source english-code)
+    (if (not (str_eq requested ""))
+      (list requested requested-state requested english requested-source requested-code)
+      (list english "missing-label-fallback-en-anchor" requested english
+            english-source english-code)))
+  (defn ca13-resolve-label (runtime concept-id code)
+    (do (let requested (cnl13-runtime-lookup-sourced runtime concept-id code))
+        (let english (cnl13-runtime-lookup-sourced runtime concept-id "en"))
+        (ca13-resolve-values (nth requested 3) (nth requested 4)
+          (nth requested 5) (nth requested 6)
+          (nth english 3) (nth english 5) (nth english 6))))
+
+  ; Exact address frequencies. Every value is divisible by four, so a 250 ms
+  ; window contains an integral cycle count and Form can recover it exactly.
+  (defn ca13-envelope-frequencies (concept-id lens)
+    (list (ca13-marker-frequency)
+          (add 2400 (mul 4 (div concept-id 100)))
+          (add 3000 (mul 4 (mod concept-id 100)))
+          (add 3600 (mul 20 lens))))
+  (defn ca13-frequencies-concept (high low)
+    (add (mul 100 (div (add (sub high 2400) 2) 4))
+         (div (add (sub low 3000) 2) 4)))
+  (defn ca13-frequency-lens (frequency)
+    (div (add (sub frequency 3600) 10) 20))
+
+  (defn ca13-u32le (bs i)
+    (add (str_byte_at bs i)
+      (add (mul 256 (str_byte_at bs (add i 1)))
+        (add (mul 65536 (str_byte_at bs (add i 2)))
+             (mul 16777216 (str_byte_at bs (add i 3)))))))
+  (defn ca13-data-end (bs data-offset)
+    (add data-offset (ca13-u32le bs (sub data-offset 4))))
+  (defn ca13-window-frequency (bs start window)
+    (mul 4 (cmm-positive-crossings bs
+      (add start (mul window (ca13-window-bytes)))
+      (ca13-window-samples) 0 0 0)))
+
+  ; sense result = concept, lens, marker-valid, four observed frequencies.
+  (defn ca13-sense-bytes (bs)
+    (do (let off (cmm-data-offset bs))
+        (if (eq off 0) (list -1 -1 0 0 0 0 0)
+          (do (let end (ca13-data-end bs off))
+              (if (lt (sub end off) (ca13-envelope-bytes))
+                (list -1 -1 0 0 0 0 0)
+                (do (let start (sub end (ca13-envelope-bytes)))
+                    (let f0 (ca13-window-frequency bs start 0))
+                    (let f1 (ca13-window-frequency bs start 1))
+                    (let f2 (ca13-window-frequency bs start 2))
+                    (let f3 (ca13-window-frequency bs start 3))
+                    (list (ca13-frequencies-concept f1 f2)
+                          (ca13-frequency-lens f3)
+                          (if (eq f0 (ca13-marker-frequency)) 1 0)
+                          f0 f1 f2 f3)))))))
+  (defn ca13-sense-file (path) (ca13-sense-bytes (read_file path)))
+
+  ; Independent evidence that the carrier contains an utterance before the
+  ; identity envelope. This deliberately does not call the envelope detector.
+  (defn ca13-abs (x) (if (lt x 0) (sub 0 x) x))
+  (defn ca13-speech-level-go (bs i end total count)
+    (if (ge i end) (list total count)
+      (ca13-speech-level-go bs (add i 64) end
+        (add total (ca13-abs (cmm-s16 bs i))) (add count 1))))
+  ; result = speech samples before envelope, mean absolute PCM on a 32-sample
+  ; stride, speech-present. Silence cannot earn the third field.
+  (defn ca13-speech-evidence-bytes (bs)
+    (do (let off (cmm-data-offset bs))
+        (if (eq off 0) (list 0 0 0)
+          (do (let end (ca13-data-end bs off))
+              (let speech-end (sub end (ca13-envelope-bytes)))
+              (if (le speech-end off) (list 0 0 0)
+                (do (let measured (ca13-speech-level-go bs off speech-end 0 0))
+                    (let level (if (eq (nth measured 1) 0) 0
+                                 (div (nth measured 0) (nth measured 1))))
+                    (let samples (div (sub speech-end off) 2))
+                    (list samples level
+                      (if (and (gt samples 2000) (gt level 20)) 1 0))))))))
+  (defn ca13-speech-evidence-file (path)
+    (ca13-speech-evidence-bytes (read_file path)))
+
+  ; POSIX-shell single quoting, including embedded apostrophes in real labels.
+  (defn ca13-shell-quote-go (s i out)
+    (if (eq i (str_len s)) (str_concat out "'")
+      (if (eq (str_byte_at s i) 39)
+        (ca13-shell-quote-go s (add i 1) (str_concat out "'\\''"))
+        (ca13-shell-quote-go s (add i 1)
+          (str_concat out (substring s i (add i 1)))))))
+  (defn ca13-shell-quote (s) (ca13-shell-quote-go s 0 "'"))
+  (defn ca13-stem (concept-id lens)
+    (str_concat "/tmp/sema-ca13-" (str_concat (int_to_str concept-id)
+      (str_concat "-" (int_to_str lens)))))
+  (defn ca13-aiff-path (concept-id lens)
+    (str_concat (ca13-stem concept-id lens) ".aiff"))
+
+  (defn ca13-cat (parts)
+    (if (eq (len parts) 0) ""
+      (str_concat (head parts) (ca13-cat (tail parts)))))
+
+  (defn ca13-command (concept-id lens voice label output-path)
+    (do (let fs (ca13-envelope-frequencies concept-id lens))
+        (let aiff (ca13-aiff-path concept-id lens))
+        (ca13-cat (list
+          "say -v " (ca13-shell-quote voice)
+          " -r 155 -o " (ca13-shell-quote aiff) " " (ca13-shell-quote label)
+          " && ffmpeg -loglevel error -y -i " (ca13-shell-quote aiff)
+          " -f lavfi -i \"aevalsrc=0.025*sin(2*PI*if(lt(t\\,0.25)\\,"
+          (int_to_str (nth fs 0))
+          "\\,if(lt(t\\,0.5)\\," (int_to_str (nth fs 1))
+          "\\,if(lt(t\\,0.75)\\," (int_to_str (nth fs 2))
+          "\\," (int_to_str (nth fs 3))
+          ")))*mod(t\\,0.25)):s=16000:d=1\""
+          " -filter_complex \"[0:a]aresample=16000,aformat=sample_fmts=s16:channel_layouts=mono[s];[1:a]aformat=sample_fmts=s16:channel_layouts=mono[w];[s][w]concat=n=2:v=0:a=1[o]\""
+          " -map \"[o]\" -ar 16000 -ac 1 -c:a pcm_s16le "
+          (ca13-shell-quote output-path) " >/dev/null 2>&1 && printf 1"))))
+
+  ; result = status, id, locale, lens, spoken label, label-state, voice row,
+  ;          output path, source name, source code. A caller may pass an alternate installed voice to
+  ;          measure held-out carrier invariance; "" selects the locale row.
+  (defn ca13-generate-with-voice (runtime concept-id code output-path voice-override)
+    (do (let lens (ca13-lens-index code))
+        (let voice-row (ca13-voice-row code))
+        (if (or (lt concept-id 0)
+                (or (ge concept-id 10000)
+                    (or (lt lens 0) (eq (len voice-row) 0))))
+          (list 0 concept-id code lens "" "invalid-request" voice-row output-path)
+          (do (let resolved (ca13-resolve-label runtime concept-id code))
+              (let voice (if (str_eq voice-override "") (nth voice-row 1) voice-override))
+              (let ok (if (str_eq (nth resolved 0) "") 0
+                        (if (str_eq (host-exec
+                              (ca13-command concept-id lens voice (nth resolved 0) output-path) "") "1") 1 0)))
+              (list ok concept-id code lens (nth resolved 0) (nth resolved 1)
+                    (list (nth voice-row 0) voice (nth voice-row 2)
+                          (if (str_eq voice-override "") (nth voice-row 3) 0))
+                    output-path (nth resolved 4) (nth resolved 5))))))
+  (defn ca13-generate (runtime concept-id code output-path)
+    (ca13-generate-with-voice runtime concept-id code output-path ""))
+)

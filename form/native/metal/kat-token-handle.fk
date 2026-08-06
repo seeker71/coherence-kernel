@@ -1,0 +1,702 @@
+; kat-token-handle.fk — a KAT-Coder-V2.5 token with the WHOLE 40-block forward in a Form cell.
+;
+; WHAT THIS IS. Block 0's front half went through the handle door yesterday (kat-block0-handle.fk,
+; band 511). This cell is the rest of the model: the delta rule's back half, the gated norm, the
+; 256-expert MoE, the ten full-attention blocks with their fused query-gate and partial RoPE, the
+; exit head, and the greedy loop — every dispatch order and every binding decided HERE, in the
+; body. No swiftc, no metallib, no host arithmetic on activations; the host crossings are
+; metal_buf_from_file reading the model file's bytes and, once per MoE block, EIGHT ROUTING IDS
+; coming back so the expert weight offsets can be bound — the decode-only bargain moe-msl.fk
+; names ("nb02 * e is a number the host already has, because it is the host that binds").
+;
+; EVERY SEMANTIC BELOW WAS READ, NOT GUESSED — from the two references this file answers to,
+; 2026-08-04: llama.cpp src/models/qwen35moe.cpp + delta-net-base.cpp (the arithmetic that
+; CONSUMES this exact GGUF) and transformers modeling_qwen3_5.py (the parent the config names).
+; The readings that would have been built wrong from this repo's own cells:
+;
+;   * THE CONV OUTPUT IS SILU'D before the q/k/v split (conv_output_silu = ggml_silu(conv_out)).
+;     gated-deltanet-layer.fk does not carry this; the reference does, on both arms.
+;   * VALUE HEAD h BORROWS KEY HEAD (h mod 16) IN THIS FILE. The HF reference repeat_interleaves
+;     (h div 2), but the GGUF CONVERTER REORDERS the V-side heads (v, z, alpha, beta, ssm_a,
+;     dt_bias, the conv's V channels, ssm_out's columns) from grouped to TILED order so ggml's
+;     modulo broadcast is the correct mapping (_LinearAttentionVReorderBase, conversion/qwen.py:
+;     "We reorder V heads to tiled order"). In this file's coordinates the mod is right and the
+;     div is wrong — the exact opposite of the HF text.
+;   * ssm_a HOLDS -exp(A_log) ALREADY (converter: `data_torch = -torch.exp(data_torch)`), so the
+;     log-decay is g = ssm_a[h] * softplus(a[h] + dt_bias[h]) with NO negation here. Probed on
+;     this file: blk.0.ssm_a[0..3] all negative.
+;   * THE GATED NORM IS "NORM BEFORE GATE" (Qwen3_5RMSNormGated's own comment): per value head,
+;     RMS over its 128 dims, times ssm_norm's weight, THEN times silu(z). The cousin order
+;     (gate before norm, Mamba2's) is a smooth substitution no magnitude check would catch.
+;   * THE DELTA READ SCALES q BY 1/sqrt(dk) (delta-net-base.cpp: `scale = 1/sqrtf(S_k)`), which
+;     kimi-kda.fk's band-proven step does not carry because its caller owns the scale.
+;   * FULL-ATTENTION q AND ITS OUTPUT GATE ARE INTERLEAVED PER HEAD: attn_q's 8192 rows are
+;     16 x [query(256) | gate(256)], read at per-head stride 512 (ggml_view_3d with
+;     nb1 = 2*head_dim). The gate is applied SIGMOID (ggml_sigmoid), after attention, before
+;     attn_output — sigmoid HERE and silu on the deltanet norm is the split the 07-28 receipt's
+;     cousin-trap warned about, and both nonlinearities are the reference's own.
+;   * PARTIAL ROPE IS NEOX-SHAPED: pairs (k, k+nrot/2) within the FIRST nrot=64 dims of each
+;     256-dim head, theta_k = pos * base^(-2k/nrot), base = rope.freq_base = 1e7. The KV's
+;     dimension_sections [11,11,10,0] are M-RoPE sections; for TEXT tokens every section's
+;     position stream is the same integer, so the section structure collapses to plain NEOX
+;     partial rope — stated as this cell's radius: text decode only.
+;   * NORM GAINS ARRIVE +1-BAKED (converter adds 1 to every norm.weight except the gated
+;     ssm_norm), so every RMSNorm here multiplies the file's gains as they are.
+;   * MoE: softmax over 256 router logits, top-8, renormalized over the chosen
+;     (build_moe_ffn(..., LLM_FFN_SILU, /*norm_w=*/true, SOFTMAX)); experts are PLAIN SwiGLU —
+;     the ldm form_swiglu_f32 the llama lane proved, which closes the pipeline map's gap 3 by
+;     reuse; the shared expert runs beside them gated by sigmoid(ffn_gate_inp_shexp . x).
+;   * BLOCK 40 IS THE MTP HEAD AND IS NOT RUN (nextn_predict_layers=1; the main pass is
+;     blocks 0..39), full_attention_interval=4: blocks 3,7,...,39 are full attention, the other
+;     thirty are linear.
+;
+; ONE SYNC PER MoE BLOCK PLUS ONE PER TOKEN. Each block's dispatches accumulate without waiting;
+; the routing-id read is the block's single drain, and the argmax id read is the token's.
+; Every mode-0 dispatch caps its threadgroup at 256 (the proven lane's measured number — the
+; 2.9x that was hiding in tpg=0, receipts/2026-08-04-block0-door-and-the-256.md). The encoder
+; is SERIAL: each dispatch's writes are visible to the next, so activations never leave the
+; device between stages.
+;
+; STATE IS PER STREAM. Conv windows (one per linear block), delta states (32 x 128 x 128 per
+; linear block) and the K/V caches (one pair per full block) are allocated fresh by
+; kth-stream-state — metal_buf_alloc zero-fills (fk-metal-carrier.m memsets), so a new stream
+; starts from the zero state without a zeroing pass.
+;
+; RADIUS, STATED: greedy only; text positions (no multimodal sections); maxpos bounds the
+; stream; mla_round-family trig in the emitted rope is exact for the small positions a short
+; prompt reaches (mla-msl.fk's own named radius). The end-to-end token has NO recorded oracle —
+; the band gates every stage against fp64 references and the exit path against the recorded
+; argmax-3637 mechanism witness, and claims exactly that.
+;
+; Kin: native/metal/kat-block0-handle.fk (the proven front half this extends),
+;      native/metal/kat-exit-handle.fk (the exit path and its recorded 3637),
+;      native/metal/llama-token-handle.fk (the loop shape, the 256, the copy kernel),
+;      form-stdlib/gated-deltanet-msl.fk (conv/l2norm — the conv repaired today),
+;      form-stdlib/moe-route-wide-msl.fk (the 256-wide router), form-stdlib/moe-msl.fk (the
+;      gather bargain), form-stdlib/kat-coder-pipeline-map.fk (the ladder this climbs).
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/q6k-dequant.fk form-stdlib/q6k-msl.fk form-stdlib/q8-0-msl.fk form-stdlib/q3k-msl.fk form-stdlib/q4k-dequant.fk form-stdlib/q4k-msl.fk form-stdlib/gated-deltanet-msl.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/tensor-ir.fk form-stdlib/jit-tensor-emit.fk form-stdlib/llama-decode-msl.fk form-stdlib/mla-msl.fk form-stdlib/moe-route-wide-msl.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/gguf-tensor-index.fk form-stdlib/kat-coder-embed.fk form-stdlib/metal-door.fk
+;
+; Proven by: form/native/metal/tests/kat-token-handle-band.fk
+
+(do
+    ; ================= the locally-authored kernels =================
+    ; Each one either moves bytes, or transcribes arithmetic whose Form recipe is named beside it.
+    ; The spine (fexp/fln/fsin/fcos/fpow, round) is ldm-msl-unit's — one definition in the unit.
+
+    ; Q3_K dequant of ONE row out of the whole resident embed tensor. rowblk is the row's first
+    ; superblock; the whole 540 MB tensor is bound once and a token is an offset, not a view.
+    (defn kth-q3krow-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device float* y [[buffer(1)]], constant uint& rowblk [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; uint b = rowblk + i / 256u; y[i] = q3k_at(qb + b * 110u, i % 256u); }")))
+
+    ; q4m-matvec-body's exact fold with ONE addition: ebase, a flat weight-index base, so one
+    ; bound 3D expert tensor serves all 256 experts and the gather is arithmetic on an offset
+    ; (moe-msl.fk's own finding), not 24 views per token per layer.
+    (defn kth-q4moff-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ebase [[buffer(5)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = q4k_w(qb, ebase + uint(i) * cols + j) * float(x[j]); acc = p + acc; } y[i] = acc; }")))
+
+    ; THE SAME OFFSET MATVEC FOR Q3_K — because the census SAID SO, not because the map did:
+    ; probed 2026-08-04, blocks 5..35 quantize their routed experts Q3_K (type 11) while blocks
+    ; 0..4 and 36..39 are Q4_K. The pipeline map's "ffn_*_exps Q4_K" was one block class's truth
+    ; sampled into a claim about all forty; the first symptom was block 5's MoE answering 1e24
+    ; (Q3_K bytes folded through the Q4_K decode — huge, finite, and green to every presence
+    ; gate). The body had a Q3_K dequant (q3k-msl.fk) and NO Q3_K matvec anywhere; this is it,
+    ; the family fold (j descending, p + acc) over q3k_at's superblock decode.
+    (defn kth-q3moff-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& ebase [[buffer(5)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; uint idx = ebase + uint(i) * cols + j; float p = q3k_at(qb + (idx / 256u) * 110u, idx % 256u) * float(x[j]); acc = p + acc; } y[i] = acc; }")))
+
+    ; silu in place — the conv activation the references apply before the split (ldm-silu's
+    ; arithmetic: x * 1/(1+exp(-x)) over the body's fexp).
+    (defn kth-silu-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* x [[buffer(0)]], constant uint& n [[buffer(1)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float v = x[i]; float sig = 1.0f / (1.0f + fexp(-1.0f * v)); x[i] = v * sig; }")))
+
+    ; the deltanet gates, one thread per value head. A[h] is the FILE's ssm_a = -exp(A_log);
+    ; softplus in the stable form gdg-softplus keeps: max(x,0) + ln(1 + exp(-|x|)).
+    (defn kth-gates-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* a [[buffer(0)]], device const float* b [[buffer(1)]], device const float* A [[buffer(2)]], device const float* dtb [[buffer(3)]], device float* alpha [[buffer(4)]], device float* beta [[buffer(5)]], constant uint& nh [[buffer(6)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; float x = a[h] + dtb[h]; float ax = (x < 0.0f) ? -x : x; float sp = ((x > 0.0f) ? x : 0.0f) + fln(1.0f + fexp(-1.0f * ax)); float g = A[h] * sp; alpha[h] = fexp(g); float bb = b[h]; beta[h] = 1.0f / (1.0f + fexp(-1.0f * bb)); }")))
+
+    ; the delta rule over ALL value heads in one dispatch, one thread per state row — the same
+    ; per-row arithmetic gdm-delta-msl proved (decay, correct, write back, read the NEW state),
+    ; with the head plumbing this model needs: alpha/beta from device buffers (they were computed
+    ; on the device and may not cross), key head = h MOD nk (the file's tiled order), and q
+    ; scaled by qscale = 1/sqrt(dk) at the read (delta-net-base.cpp).
+    (defn kth-delta-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* S [[buffer(0)]], device const float* c [[buffer(1)]], device const float* alpha [[buffer(2)]], device const float* beta [[buffer(3)]], device float* o [[buffer(4)]], constant uint& nv [[buffer(5)]], constant uint& dv [[buffer(6)]], constant uint& dk [[buffer(7)]], constant uint& nk [[buffer(8)]], constant float& qscale [[buffer(9)]], uint gid [[thread_position_in_grid]]) { if (gid >= nv * dv) return; uint h = gid / dv; uint i = gid - h * dv; uint kh = h - (h / nk) * nk; device const float* q = c + kh * dk; device const float* k = c + nk * dk + kh * dk; float v = c[2u * nk * dk + h * dv + i]; uint r = (h * dv + i) * dk; float al = alpha[h]; float pred = 0.0f; for (uint j = 0u; j < dk; ++j) { float sp = al * S[r + j]; S[r + j] = sp; pred = pred + sp * k[j]; } float err = v - pred; float bw = beta[h] * err; float acc = 0.0f; for (uint j = 0u; j < dk; ++j) { float sn = S[r + j] + bw * k[j]; S[r + j] = sn; acc = acc + sn * (qscale * q[j]); } o[h * dv + i] = acc; }")))
+
+    ; the gated norm, one thread per value head: RMS over the head's dv dims (ascending
+    ; sum-of-squares, Newton-50 from sdv — ldm-rmsnorm's own recipe), times the SHARED ssm_norm
+    ; gains, then times silu(z). Norm before gate — Qwen3_5RMSNormGated's own comment.
+    (defn kth-gnorm-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* o [[buffer(0)]], device const float* w [[buffer(1)]], device const float* z [[buffer(2)]], device float* out [[buffer(3)]], constant uint& nv [[buffer(4)]], constant uint& dv [[buffer(5)]], constant float& eps [[buffer(6)]], uint h [[thread_position_in_grid]]) { if (h >= nv) return; uint b = h * dv; float ss = 0.0f; for (uint j = 0u; j < dv; ++j) { float v = o[b + j]; ss = ss + v * v; } float meansq = ss / float(dv); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } float inv = 1.0f / gg; for (uint j = 0u; j < dv; ++j) { float nm = (o[b + j] * inv) * w[j]; float zz = z[b + j]; float sg = 1.0f / (1.0f + fexp(-1.0f * zz)); out[b + j] = nm * (zz * sg); }}")))
+
+    ; per-head WEIGHTED RMSNorm (the full blocks' q/k norms): same recipe, gains shared per head.
+    (defn kth-headrmsw-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device const float* w [[buffer(1)]], device float* out [[buffer(2)]], constant uint& nh [[buffer(3)]], constant uint& hd [[buffer(4)]], constant float& eps [[buffer(5)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint b = h * hd; float ss = 0.0f; for (uint j = 0u; j < hd; ++j) { float v = x[b + j]; ss = ss + v * v; } float meansq = ss / float(hd); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } float inv = 1.0f / gg; for (uint j = 0u; j < hd; ++j) { out[b + j] = (x[b + j] * inv) * w[j]; }}")))
+
+    ; deinterleave the fused query||gate projection: per-head stride 2*hd, slice at off.
+    ; A move, no arithmetic (llama's copy precedent).
+    (defn kth-qsplit-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& off [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; uint h = i / hd; uint j = i - h * hd; d[i] = s[h * 2u * hd + off + j]; }")))
+
+    ; partial NEOX rope, in place: pair (k, k+nrot/2) inside the first nrot dims of each head,
+    ; theta_k = pos * base^(-2k/nrot) over the body's fpow/fsin/fcos; dims past nrot untouched.
+    (defn kth-prope-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* v [[buffer(0)]], constant uint& nh [[buffer(1)]], constant uint& hd [[buffer(2)]], constant uint& nrot [[buffer(3)]], constant uint& pos [[buffer(4)]], constant float& base [[buffer(5)]], uint gid [[thread_position_in_grid]]) { uint np = nrot / 2u; if (gid >= nh * np) return; uint h = gid / np; uint k = gid - h * np; uint o = h * hd; float ex = (-2.0f * float(k)) / float(nrot); float fq = fpow(base, ex); float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); uint i0 = o + k; uint i1 = o + k + np; float x0 = v[i0]; float x1 = v[i1]; float t0 = x0 * ca; float t1 = x1 * sa; v[i0] = t0 - t1; float t2 = x0 * sa; float t3 = x1 * ca; v[i1] = t2 + t3; }")))
+
+    ; the full-attention output gate: x *= sigmoid(g). SIGMOID here (qwen35moe.cpp), silu on the
+    ; deltanet side — the two must not be swapped and the band refuses the swap.
+    (defn kth-sigmul-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* x [[buffer(0)]], device const float* g [[buffer(1)]], constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float zz = g[i]; float sg = 1.0f / (1.0f + fexp(-1.0f * zz)); x[i] = x[i] * sg; }")))
+
+    ; the expert accumulation, weights READ FROM THE DEVICE (they were computed there; only the
+    ; ids crossed): y = w[widx]*x sets, y += w[widx]*x accumulates — moe-msl's scale/axpy with
+    ; the constant traded for a device word.
+    (defn kth-scalew-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device float* y [[buffer(1)]], device const float* w [[buffer(2)]], constant uint& widx [[buffer(3)]], constant uint& n [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; y[i] = w[widx] * x[i]; }")))
+    (defn kth-axpyw-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device float* y [[buffer(1)]], device const float* w [[buffer(2)]], constant uint& widx [[buffer(3)]], constant uint& n [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float p = w[widx] * x[i]; y[i] = y[i] + p; }")))
+
+    ; the shared expert's gate: y += sigmoid(s[0]) * x — one scalar dot, sigmoided, gating the
+    ; whole shared path (qwen35moe.cpp's shared_expert_gate).
+    (defn kth-axpysig-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* x [[buffer(0)]], device float* y [[buffer(1)]], device const float* s [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; float sg = 1.0f / (1.0f + fexp(-1.0f * s[0])); float p = sg * x[i]; y[i] = y[i] + p; }")))
+
+    ; the cache placement move — llama-token-handle's kernel, authored here for the same
+    ; fixed-offset-binding reason. No arithmetic.
+    (defn kth-copyoff-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* s [[buffer(0)]], device float* d [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& doff [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; d[doff + i] = s[i]; }")))
+
+    ; ================= the translation unit =================
+    ; q80's spine carries the one q6k_mod/q6k_s8/q6k_f16/q6k_pow2 definition; q6m contributes its
+    ; weight decode and matvec WITHOUT re-emitting that spine; ldm-msl-unit brings the
+    ; transcendental spine (fexp/fln/fsin/fcos/fpow, round) once, plus rmsnorm (+tg twin), the
+    ; GQA attention, swiglu, add, argmax (+two-stage twins). fp contraction off by pragma —
+    ; kat-block0-handle's own rule, kept.
+    (defn kth-msl ()
+        (str_concat "#include <metal_stdlib>\n#pragma clang fp contract(off)\n"
+        (str_concat (q80-msl-unit "form_q8_0_dequant_f32" "form_q8_0_matvec_f32" "form_q8_0_matvec_lane_f32")
+        (str_concat "static inline float fh16(uint b) { return q6k_f16(int(b)); }"
+        (str_concat (q3m-msl-appendix)
+        (str_concat (q4m-msl-helpers)
+        (str_concat (q4m-matvec-body "form_q4k_matvec_f32")
+        (str_concat (q6m-msl-weight)
+        (str_concat (q6m-matvec-body "form_q6k_matvec_f32")
+        (str_concat (ldm-msl-unit)
+        (str_concat (mla-matvec-body)
+        ; the gdn cells' declared spine is fexp + fsqrt; fexp is ldm's, and fsqrt is emitted
+        ; HERE as the body's own tn-sqrt transcription (Newton-50 from the value — the same
+        ; fold mla_sqrt and dm_sqrt carry), NOT metal::sqrt: the attestant lane's shell spine
+        ; reached for the vendor library and this unit keeps the determinism discipline instead.
+        (str_concat "static inline float fsqrt(float v) { if (v <= 0.0f) return 0.0f; float g = v; for (int n = 0; n < 50; ++n) { g = 0.5f * (g + v / g); } return g; } "
+        (str_concat (gdm-conv-msl   "form_gdn_conv_f32")
+        (str_concat (gdm-l2norm-msl "form_gdn_l2norm_f32")
+        (str_concat (mrw-msl-appendix)
+        (str_concat (kth-q3krow-msl   "form_q3k_row_f32")
+        (str_concat (kth-q4moff-msl   "form_q4k_matvec_off_f32")
+        (str_concat (kth-q3moff-msl   "form_q3k_matvec_off_f32")
+        (str_concat (kth-silu-msl     "form_silu_f32")
+        (str_concat (kth-gates-msl    "form_gdn_gates_f32")
+        (str_concat (kth-delta-msl    "form_gdn_delta_heads_f32")
+        (str_concat (kth-gnorm-msl    "form_gdn_norm_gate_f32")
+        (str_concat (kth-headrmsw-msl "form_headrms_w_f32")
+        (str_concat (kth-qsplit-msl   "form_qsplit_f32")
+        (str_concat (kth-prope-msl    "form_partial_rope_f32")
+        (str_concat (kth-sigmul-msl   "form_sig_mul_f32")
+        (str_concat (kth-scalew-msl   "form_scale_w_f32")
+        (str_concat (kth-axpyw-msl    "form_axpy_w_f32")
+        (str_concat (kth-axpysig-msl  "form_axpy_sig_f32")
+                    (kth-copyoff-msl  "form_copy_off_f32"))))))))))))))))))))))))))))))
+
+    ; ================= byte pricing, per declared ggml type =================
+    ; 0 for anything unpriced, so an unknown type refuses to map (kat-exit-handle's rule).
+    (defn kth-tybytes (ty n)
+        (if (eq ty 0)  (mul n 4)
+        (if (eq ty 8)  (mul (div n 32) 34)
+        (if (eq ty 11) (mul (div n 256) 110)
+        (if (eq ty 12) (mul (div n 256) 144)
+        (if (eq ty 14) (mul (div n 256) 210)
+            0))))))
+    (defn kth-nw (src off)
+        (do (let nd (egg-ti-ndims src off))
+            (mul (egg-ti-dim src off 0)
+            (mul (if (gt nd 1) (egg-ti-dim src off 1) 1)
+                 (if (gt nd 2) (egg-ti-dim src off 2) 1)))))
+    (defn kth-bytes (src off) (kth-tybytes (egg-ti-type src off) (kth-nw src off)))
+
+    ; a tensor VIEW from a collected record offset: (handle rows cols type). rows is dim1 —
+    ; for the 3D expert tensors that is the PER-EXPERT row count, and the expert lives in ebase.
+    (defn kth-tv-at (src base path off)
+        (list (metal_buf_from_file path (add base (egg-ti-dataoff src off)) (kth-bytes src off))
+              (if (gt (egg-ti-ndims src off) 1) (egg-ti-dim src off 1) 1)
+              (egg-ti-dim src off 0)
+              (egg-ti-type src off)))
+    (defn kth-tv-h  (t) (nth t 0))
+    (defn kth-tv-r  (t) (nth t 1))
+    (defn kth-tv-c  (t) (nth t 2))
+    (defn kth-tv-ty (t) (nth t 3))
+
+    ; ================= the layer schedule and the collected walks =================
+    ; full attention every 4th block (the KV's own interval): (l+1) mod 4 == 0.
+    (defn kth-full? (l interval) (eq (mod (add l 1) interval) 0))
+
+    (defn kth-suffixes ()
+        (list ".attn_norm.weight" ".post_attention_norm.weight"
+              ".ffn_gate_inp.weight" ".ffn_gate_exps.weight" ".ffn_up_exps.weight"
+              ".ffn_down_exps.weight" ".ffn_gate_inp_shexp.weight" ".ffn_gate_shexp.weight"
+              ".ffn_up_shexp.weight" ".ffn_down_shexp.weight"
+              ".attn_qkv.weight" ".ssm_conv1d.weight" ".ssm_alpha.weight" ".ssm_beta.weight"
+              ".ssm_a" ".ssm_dt.bias" ".ssm_norm.weight" ".attn_gate.weight" ".ssm_out.weight"
+              ".attn_q.weight" ".attn_k.weight" ".attn_v.weight" ".attn_q_norm.weight"
+              ".attn_k_norm.weight" ".attn_output.weight"))
+    (defn kth-tabs-go (src sfx acc)
+        (if (eq (len sfx) 0) (reverse acc)
+            (kth-tabs-go src (tail sfx) (cons (gti-offs-with src (head sfx)) acc))))
+    (defn kth-tabs (src) (kth-tabs-go src (kth-suffixes) (empty)))
+
+    (defn kth-tv-for (src base path tabs k l)
+        (kth-tv-at src base path (gti-off-for (nth tabs k) l)))
+
+    ; one layer's views. Common head: 0 attn_norm 1 post_norm, then the MoE nine
+    ; (2 gate_inp 3 gexps 4 uexps 5 dexps 6 inp_shexp 7 gsh 8 ush 9 dsh), then the kind-specific
+    ; tail: LINEAR 10 qkv 11 conv 12 alpha 13 beta 14 ssm_a 15 dtb 16 ssm_norm 17 z-gate 18 out;
+    ; FULL 10 q 11 k 12 v 13 qnorm 14 knorm 15 wo.
+    (defn kth-layer-common (src base path tabs l)
+        (list (kth-tv-for src base path tabs 0 l)
+              (kth-tv-for src base path tabs 1 l)
+              (kth-tv-for src base path tabs 2 l)
+              (kth-tv-for src base path tabs 3 l)
+              (kth-tv-for src base path tabs 4 l)
+              (kth-tv-for src base path tabs 5 l)
+              (kth-tv-for src base path tabs 6 l)
+              (kth-tv-for src base path tabs 7 l)
+              (kth-tv-for src base path tabs 8 l)
+              (kth-tv-for src base path tabs 9 l)))
+    (defn kth-layer (src base path tabs l interval)
+        (if (kth-full? l interval)
+            (append (kth-layer-common src base path tabs l)
+                    (list (kth-tv-for src base path tabs 19 l)
+                          (kth-tv-for src base path tabs 20 l)
+                          (kth-tv-for src base path tabs 21 l)
+                          (kth-tv-for src base path tabs 22 l)
+                          (kth-tv-for src base path tabs 23 l)
+                          (kth-tv-for src base path tabs 24 l)))
+            (append (kth-layer-common src base path tabs l)
+                    (list (kth-tv-for src base path tabs 10 l)
+                          (kth-tv-for src base path tabs 11 l)
+                          (kth-tv-for src base path tabs 12 l)
+                          (kth-tv-for src base path tabs 13 l)
+                          (kth-tv-for src base path tabs 14 l)
+                          (kth-tv-for src base path tabs 15 l)
+                          (kth-tv-for src base path tabs 16 l)
+                          (kth-tv-for src base path tabs 17 l)
+                          (kth-tv-for src base path tabs 18 l)))))
+    (defn kth-layers-go (src base path tabs l n interval acc)
+        (if (ge l n) acc
+            (kth-layers-go src base path tabs (add l 1) n interval
+                (append acc (list (kth-layer src base path tabs l interval))))))
+    (defn kth-layers (src base path n interval)
+        (kth-layers-go src base path (kth-tabs src) 0 n interval (empty)))
+
+    ; ================= the pool =================
+    ; pipes: 0 q3row 1 q4mv 2 q4mvoff 3 q6mv 4 q80mv 5 rms 6 rmstg 7 conv 8 silu 9 l2 10 gates
+    ;        11 delta 12 gnorm 13 headrmsw 14 qsplit 15 prope 16 gqa 17 sigmul 18 swiglu 19 add
+    ;        20 route 21 scalew 22 axpyw 23 axpysig 24 copyoff 25 argpart 26 argcomb 27 f32mv 28 q3mvoff
+    (defn kth-pipes (msl)
+        (list (metal_pipeline msl "form_q3k_row_f32")
+              (metal_pipeline msl "form_q4k_matvec_f32")
+              (metal_pipeline msl "form_q4k_matvec_off_f32")
+              (metal_pipeline msl "form_q6k_matvec_f32")
+              (metal_pipeline msl "form_q8_0_matvec_f32")
+              (metal_pipeline msl "form_rmsnorm_f32")
+              (metal_pipeline msl "form_rmsnorm_tg_f32")
+              (metal_pipeline msl "form_gdn_conv_f32")
+              (metal_pipeline msl "form_silu_f32")
+              (metal_pipeline msl "form_gdn_l2norm_f32")
+              (metal_pipeline msl "form_gdn_gates_f32")
+              (metal_pipeline msl "form_gdn_delta_heads_f32")
+              (metal_pipeline msl "form_gdn_norm_gate_f32")
+              (metal_pipeline msl "form_headrms_w_f32")
+              (metal_pipeline msl "form_qsplit_f32")
+              (metal_pipeline msl "form_partial_rope_f32")
+              (metal_pipeline msl "form_gqa_decode_f32")
+              (metal_pipeline msl "form_sig_mul_f32")
+              (metal_pipeline msl "form_swiglu_f32")
+              (metal_pipeline msl "form_add_f32")
+              (metal_pipeline msl "form_moe_route_wide_f32")
+              (metal_pipeline msl "form_scale_w_f32")
+              (metal_pipeline msl "form_axpy_w_f32")
+              (metal_pipeline msl "form_axpy_sig_f32")
+              (metal_pipeline msl "form_copy_off_f32")
+              (metal_pipeline msl "form_argmax_part_f32")
+              (metal_pipeline msl "form_argmax_comb_f32")
+              (metal_pipeline msl "form_mla_matvec_f32")
+              (metal_pipeline msl "form_q3k_matvec_off_f32")))
+    (defn kth-pipes-ok? (ps) (if (eq (len ps) 0) true (if (le (head ps) 0) false (kth-pipes-ok? (tail ps)))))
+
+    ; bufs: 0 X 1 H 2 QKV(convdim) 3 A(nv) 4 B(nv) 5 Alpha 6 Beta 7 Z(dinner) 8 O(dinner)
+    ;       9 G(dinner) 10 T(d) 11 Log(nExp) 12 Ids 13 Wts 14 Ge(ff) 15 Ue(ff) 16 Act(ff)
+    ;       17 Eo(d) 18 MoE(d) 19 ShAct(ff) 20 ShOut(d) 21 ShGate 22 Q(nq*hd) 23 Gate(nq*hd)
+    ;       24 K(kvd) 25 V(kvd) 26 Attn(nq*hd) 27 Scratch 28 Voc 29 Pi 30 Pv 31 OutI 32 OutV
+    (defn kth-bufs (d convdim dinner nv ff nExp nqhd kvd maxpos nq vocabN)
+        (list (metal_buf_alloc (mul d 4))
+              (metal_buf_alloc (mul d 4))
+              (metal_buf_alloc (mul convdim 4))
+              (metal_buf_alloc (mul nv 4))
+              (metal_buf_alloc (mul nv 4))
+              (metal_buf_alloc (mul nv 4))
+              (metal_buf_alloc (mul nv 4))
+              (metal_buf_alloc (mul dinner 4))
+              (metal_buf_alloc (mul dinner 4))
+              (metal_buf_alloc (mul dinner 4))
+              (metal_buf_alloc (mul d 4))
+              (metal_buf_alloc (mul nExp 4))
+              (metal_buf_alloc 32)
+              (metal_buf_alloc 32)
+              (metal_buf_alloc (mul ff 4))
+              (metal_buf_alloc (mul ff 4))
+              (metal_buf_alloc (mul ff 4))
+              (metal_buf_alloc (mul d 4))
+              (metal_buf_alloc (mul d 4))
+              (metal_buf_alloc (mul ff 4))
+              (metal_buf_alloc (mul d 4))
+              (metal_buf_alloc 16)
+              (metal_buf_alloc (mul nqhd 4))
+              (metal_buf_alloc (mul nqhd 4))
+              (metal_buf_alloc (mul kvd 4))
+              (metal_buf_alloc (mul kvd 4))
+              (metal_buf_alloc (mul nqhd 4))
+              (metal_buf_alloc (mul (mul (mul 2 nq) maxpos) 4))
+              (metal_buf_alloc (mul vocabN 4))
+              (metal_buf_alloc 4096)
+              (metal_buf_alloc 4096)
+              (metal_buf_alloc 16)
+              (metal_buf_alloc 16)))
+
+    ; per-STREAM state: one conv window + one delta state per linear block, one K + one V cache
+    ; per full block; indexed BY LAYER (non-owners carry 0, never dispatched). Zero-filled by
+    ; the allocator, so a new stream needs no zeroing pass.
+    (defn kth-state-go (l n interval convdim taps nv dv dk kvd maxpos acc)
+        (if (ge l n) acc
+            (kth-state-go (add l 1) n interval convdim taps nv dv dk kvd maxpos
+                (append acc
+                    (if (kth-full? l interval)
+                        (list (list 0 0
+                                    (metal_buf_alloc (mul (mul kvd maxpos) 4))
+                                    (metal_buf_alloc (mul (mul kvd maxpos) 4))))
+                        (list (list (metal_buf_alloc (mul (mul convdim taps) 4))
+                                    (metal_buf_alloc (mul (mul (mul nv dv) dk) 4))
+                                    0 0)))))))
+    (defn kth-stream-state (n interval convdim taps nv dv dk kvd maxpos)
+        (kth-state-go 0 n interval convdim taps nv dv dk kvd maxpos (empty)))
+
+    ; ================= dispatch helpers =================
+    ; SERIAL encoder, tpg 256 everywhere mode 0 runs (the proven 2.9x), barrier 0 (a serial
+    ; batch refuses barriers, correctly — order is already total).
+    (defn kth-b16 (bufs consts) (md-bind16 bufs consts 256 0 0 0))
+
+    (defn kth-mv (ps tv xh yh)
+        (metal_enqueue
+            (if (eq (kth-tv-ty tv) 12) (nth ps 1)
+            (if (eq (kth-tv-ty tv) 14) (nth ps 3)
+            (if (eq (kth-tv-ty tv) 8)  (nth ps 4)
+                                       (nth ps 27))))
+            (kth-b16 (list (kth-tv-h tv) xh yh) (list (kth-tv-r tv) (kth-tv-c tv)))
+            (kth-tv-r tv)))
+    ; the expert matvec dispatches BY THE TENSOR'S OWN DECLARED TYPE — the census taught that
+    ; the routed experts are Q3_K in thirty blocks and Q4_K in ten, so the type is per tensor,
+    ; never per family.
+    (defn kth-mvoff (ps tv xh yh ebase)
+        (metal_enqueue (if (eq (kth-tv-ty tv) 11) (nth ps 28) (nth ps 2))
+            (kth-b16 (list (kth-tv-h tv) xh yh) (list (kth-tv-r tv) (kth-tv-c tv) ebase))
+            (kth-tv-r tv)))
+    ; the cooperative RMSNorm twin: ONE threadgroup of 256 exactly, mode 1
+    (defn kth-rms (ps xh gtv yh n epsBits)
+        (metal_enqueue (nth ps 6)
+            (md-bind16 (list xh (kth-tv-h gtv) yh) (list n epsBits) 256 0 1 0)
+            1))
+    (defn kth-el1 (ps p xh n) (metal_enqueue p (kth-b16 (list xh) (list n)) n))
+
+    ; ================= one LINEAR block =================
+    ; lay: see kth-layer. st: (win S 0 0).
+    (defn kth-linear-attn (ps bs geo lay st)
+        (do
+            (kth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 6))
+            (kth-mv ps (nth lay 10) (nth bs 1) (nth bs 2))
+            (kth-mv ps (nth lay 12) (nth bs 1) (nth bs 3))
+            (kth-mv ps (nth lay 13) (nth bs 1) (nth bs 4))
+            (kth-mv ps (nth lay 17) (nth bs 1) (nth bs 7))
+            (metal_enqueue (nth ps 7)
+                (kth-b16 (list (nth st 0) (nth bs 2) (kth-tv-h (nth lay 11)) (nth bs 2))
+                         (list (nth geo 1) (nth geo 23)))
+                (nth geo 1))
+            (kth-el1 ps (nth ps 8) (nth bs 2) (nth geo 1))
+            (metal_enqueue (nth ps 9)
+                (kth-b16 (list (nth bs 2)) (list (mul 2 (nth geo 2)) (nth geo 4) (nth geo 6)))
+                (mul 2 (nth geo 2)))
+            (metal_enqueue (nth ps 10)
+                (kth-b16 (list (nth bs 3) (nth bs 4) (kth-tv-h (nth lay 14)) (kth-tv-h (nth lay 15))
+                               (nth bs 5) (nth bs 6))
+                         (list (nth geo 3)))
+                (nth geo 3))
+            (metal_enqueue (nth ps 11)
+                (kth-b16 (list (nth st 1) (nth bs 2) (nth bs 5) (nth bs 6) (nth bs 8))
+                         (list (nth geo 3) (nth geo 5) (nth geo 4) (nth geo 2) (nth geo 7)))
+                (mul (nth geo 3) (nth geo 5)))
+            (metal_enqueue (nth ps 12)
+                (kth-b16 (list (nth bs 8) (kth-tv-h (nth lay 16)) (nth bs 7) (nth bs 9))
+                         (list (nth geo 3) (nth geo 5) (nth geo 6)))
+                (nth geo 3))
+            (kth-mv ps (nth lay 18) (nth bs 9) (nth bs 10))
+            (metal_enqueue (nth ps 19)
+                (kth-b16 (list (nth bs 0) (nth bs 10) (nth bs 0)) (list (nth geo 0)))
+                (nth geo 0))
+            1))
+
+    ; NOTE ON THE CONV BINDING: the conv kernel reads x[c] and writes y[c] — it is dispatched
+    ; with bQKV as BOTH: each thread reads its own x[c] BEFORE writing y[c], and thread c
+    ; touches only channel c, so in-place is exact and saves a buffer the size of the
+    ; concatenation. The window shift reads only win.
+
+    ; ================= one FULL block =================
+    ; st: (0 0 ck cv). geo indices: see the pool section.
+    (defn kth-full-attn (ps bs geo lay st pos)
+        (do
+            (kth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 6))
+            (kth-mv ps (nth lay 10) (nth bs 1) (nth bs 2))
+            (kth-mv ps (nth lay 11) (nth bs 1) (nth bs 24))
+            (kth-mv ps (nth lay 12) (nth bs 1) (nth bs 25))
+            (metal_enqueue (nth ps 14)
+                (kth-b16 (list (nth bs 2) (nth bs 22))
+                         (list (mul (nth geo 12) (nth geo 14)) (nth geo 14) 0))
+                (mul (nth geo 12) (nth geo 14)))
+            (metal_enqueue (nth ps 14)
+                (kth-b16 (list (nth bs 2) (nth bs 23))
+                         (list (mul (nth geo 12) (nth geo 14)) (nth geo 14) (nth geo 14)))
+                (mul (nth geo 12) (nth geo 14)))
+            (metal_enqueue (nth ps 13)
+                (kth-b16 (list (nth bs 22) (kth-tv-h (nth lay 13)) (nth bs 22))
+                         (list (nth geo 12) (nth geo 14) (nth geo 6)))
+                (nth geo 12))
+            (metal_enqueue (nth ps 13)
+                (kth-b16 (list (nth bs 24) (kth-tv-h (nth lay 14)) (nth bs 24))
+                         (list (nth geo 13) (nth geo 14) (nth geo 6)))
+                (nth geo 13))
+            (metal_enqueue (nth ps 15)
+                (kth-b16 (list (nth bs 22))
+                         (list (nth geo 12) (nth geo 14) (nth geo 15) pos (nth geo 16)))
+                (mul (nth geo 12) (div (nth geo 15) 2)))
+            (metal_enqueue (nth ps 15)
+                (kth-b16 (list (nth bs 24))
+                         (list (nth geo 13) (nth geo 14) (nth geo 15) pos (nth geo 16)))
+                (mul (nth geo 13) (div (nth geo 15) 2)))
+            (metal_enqueue (nth ps 24)
+                (kth-b16 (list (nth bs 24) (nth st 2)) (list (nth geo 20) (mul pos (nth geo 20))))
+                (nth geo 20))
+            (metal_enqueue (nth ps 24)
+                (kth-b16 (list (nth bs 25) (nth st 3)) (list (nth geo 20) (mul pos (nth geo 20))))
+                (nth geo 20))
+            (metal_enqueue (nth ps 16)
+                (kth-b16 (list (nth bs 22) (nth st 2) (nth st 3) (nth bs 26) (nth bs 27))
+                         (list (add pos 1) (nth geo 12) (nth geo 13) (nth geo 14)
+                               (nth geo 17) (nth geo 18)))
+                (nth geo 12))
+            (metal_enqueue (nth ps 17)
+                (kth-b16 (list (nth bs 26) (nth bs 23)) (list (mul (nth geo 12) (nth geo 14))))
+                (mul (nth geo 12) (nth geo 14)))
+            (kth-mv ps (nth lay 15) (nth bs 26) (nth bs 10))
+            (metal_enqueue (nth ps 19)
+                (kth-b16 (list (nth bs 0) (nth bs 10) (nth bs 0)) (list (nth geo 0)))
+                (nth geo 0))
+            1))
+
+    ; ================= the MoE half, shared by every block =================
+    ; the routing ids are the ONE mid-block readback: 32 bytes, so the host can bind eight
+    ; expert offsets. The weights never cross — scale_w/axpy_w read them where they were born.
+    (defn kth-u32at (s i)
+        (add (str_byte_at s (mul i 4))
+        (add (mul (str_byte_at s (add (mul i 4) 1)) 256)
+        (add (mul (str_byte_at s (add (mul i 4) 2)) 65536)
+             (mul (str_byte_at s (add (mul i 4) 3)) 16777216)))))
+
+    (defn kth-experts-go (ps bs geo lay ids k)
+        (if (ge k (nth geo 9)) 1
+            (do (let e (kth-u32at ids k))
+                (let ebase (mul e (mul (nth geo 10) (nth geo 0))))
+                (kth-mvoff ps (nth lay 3) (nth bs 1) (nth bs 14) ebase)
+                (kth-mvoff ps (nth lay 4) (nth bs 1) (nth bs 15) ebase)
+                (metal_enqueue (nth ps 18)
+                    (kth-b16 (list (nth bs 14) (nth bs 15) (nth bs 16)) (list (nth geo 10)))
+                    (nth geo 10))
+                (kth-mvoff ps (nth lay 5) (nth bs 16) (nth bs 17) ebase)
+                (metal_enqueue (if (eq k 0) (nth ps 21) (nth ps 22))
+                    (kth-b16 (list (nth bs 17) (nth bs 18) (nth bs 13)) (list k (nth geo 0)))
+                    (nth geo 0))
+                (kth-experts-go ps bs geo lay ids (add k 1)))))
+
+    (defn kth-moe (ps bs geo lay)
+        (do
+            (kth-rms ps (nth bs 0) (nth lay 1) (nth bs 1) (nth geo 0) (nth geo 6))
+            (kth-mv ps (nth lay 2) (nth bs 1) (nth bs 11))
+            (metal_enqueue (nth ps 20)
+                (kth-b16 (list (nth bs 11) (nth bs 12) (nth bs 13))
+                         (list (nth geo 8) (nth geo 9)))
+                1)
+            ; THE BLOCK'S ONE SYNC: eight ids cross, nothing else
+            (let ids (metal_buf_read (nth bs 12) 0 32))
+            (kth-experts-go ps bs geo lay ids 0)
+            ; the shared expert, gated by its own sigmoided scalar
+            (kth-mv ps (nth lay 7) (nth bs 1) (nth bs 14))
+            (kth-mv ps (nth lay 8) (nth bs 1) (nth bs 15))
+            (metal_enqueue (nth ps 18)
+                (kth-b16 (list (nth bs 14) (nth bs 15) (nth bs 19)) (list (nth geo 11)))
+                (nth geo 11))
+            (kth-mv ps (nth lay 9) (nth bs 19) (nth bs 20))
+            (kth-mv ps (nth lay 6) (nth bs 1) (nth bs 21))
+            (metal_enqueue (nth ps 23)
+                (kth-b16 (list (nth bs 20) (nth bs 18) (nth bs 21)) (list (nth geo 0)))
+                (nth geo 0))
+            (metal_enqueue (nth ps 19)
+                (kth-b16 (list (nth bs 0) (nth bs 18) (nth bs 0)) (list (nth geo 0)))
+                (nth geo 0))
+            1))
+
+    ; ================= one token =================
+    (defn kth-blocks (ps bs geo lays sts pos l n interval)
+        (if (ge l n) 1
+            (do (if (kth-full? l interval)
+                    (kth-full-attn ps bs geo (nth lays l) (nth sts l) pos)
+                    (kth-linear-attn ps bs geo (nth lays l) (nth sts l)))
+                (kth-moe ps bs geo (nth lays l))
+                (kth-blocks ps bs geo lays sts pos (add l 1) n interval))))
+
+    (defn kth-head (ps bs geo onormTv projTv)
+        (do
+            (kth-rms ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 6))
+            (kth-mv ps projTv (nth bs 1) (nth bs 28))
+            (metal_enqueue (nth ps 25)
+                (kth-b16 (list (nth bs 28) (nth bs 29) (nth bs 30)) (list (nth geo 19) 1024))
+                1024)
+            (metal_enqueue (nth ps 26)
+                (md-bind16 (list (nth bs 29) (nth bs 30) (nth bs 31) (nth bs 32))
+                           (list 1024) 1024 0 1 0)
+                1)
+            0))
+
+    ; embed -> 40 blocks -> exit head -> FOUR BYTES. embTv is the whole resident Q3_K table;
+    ; the token is a superblock offset into it, never a new view.
+    (defn kth-forward (ps bs geo lays sts embTv onormTv projTv id pos)
+        (do
+            (metal_enqueue (nth ps 0)
+                (kth-b16 (list (kth-tv-h embTv) (nth bs 0))
+                         (list (mul id (div (nth geo 0) 256)) (nth geo 0)))
+                (nth geo 0))
+            (kth-blocks ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22))
+            (kth-head ps bs geo onormTv projTv)
+            (kth-u32at (metal_buf_read (nth bs 31) 0 4) 0)))
+
+    ; ================= the loop, in the body =================
+    (defn kth-generate (ps bs geo lays sts embTv onormTv projTv id pos n acc)
+        (if (le n 0) acc
+            (do (let nid (kth-forward ps bs geo lays sts embTv onormTv projTv id pos))
+                (if (lt nid 0) acc
+                    (kth-generate ps bs geo lays sts embTv onormTv projTv
+                                  nid (add pos 1) (sub n 1) (append acc (list nid)))))))
+
+    (defn kth-prefill (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (if (eq (len ids) 1)
+            (list (kth-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos) (add pos 1))
+            (do (kth-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos)
+                (kth-prefill ps bs geo lays sts embTv onormTv projTv (tail ids) (add pos 1)))))
+
+    ; ================= the one setup, shared by band and run cells =================
+    ; Every number below is the file's: the KVs name the geometry, the tensor table names every
+    ; offset, dimension and type. Returns (ps bs geo lays embTv onormTv projTv src base).
+    ; geo: 0 d 1 convdim 2 nkh 3 nvh 4 dk 5 dv 6 epsBits 7 qscaleBits 8 nExp 9 nSel 10 expFF
+    ;      11 shFF 12 nHead 13 nKV 14 headDim 15 nrot 16 ropeBaseBits 17 attnScaleBits
+    ;      18 maxpos 19 vocabN 20 kvd 21 nLayer 22 interval 23 taps
+    (defn kth-geo (src maxpos)
+        (do
+            (let d (gmt-u32 src "qwen35moe.embedding_length"))
+            (let nkh (gmt-u32 src "qwen35moe.ssm.group_count"))
+            (let nvh (gmt-u32 src "qwen35moe.ssm.time_step_rank"))
+            (let dk (gmt-u32 src "qwen35moe.ssm.state_size"))
+            (let dinner (gmt-u32 src "qwen35moe.ssm.inner_size"))
+            (let dv (div dinner nvh))
+            (let taps (gmt-u32 src "qwen35moe.ssm.conv_kernel"))
+            (let eps (gmt-f32 src "qwen35moe.attention.layer_norm_rms_epsilon"))
+            (let nHead (gmt-u32 src "qwen35moe.attention.head_count"))
+            (let nKV (gmt-u32 src "qwen35moe.attention.head_count_kv"))
+            (let headDim (gmt-u32 src "qwen35moe.attention.key_length"))
+            (let nrot (gmt-u32 src "qwen35moe.rope.dimension_count"))
+            (let base (gmt-f32 src "qwen35moe.rope.freq_base"))
+            (let nLayerAll (gmt-u32 src "qwen35moe.block_count"))
+            (let nextn (gmt-u32 src "qwen35moe.nextn_predict_layers"))
+            (list d
+                  (add (mul 2 (mul nkh dk)) dinner)
+                  nkh nvh dk dv
+                  (md-f32-bits eps)
+                  (md-f32-bits (div 1.0 (math_sqrt (add dk 0.0))))
+                  (gmt-u32 src "qwen35moe.expert_count")
+                  (gmt-u32 src "qwen35moe.expert_used_count")
+                  (gmt-u32 src "qwen35moe.expert_feed_forward_length")
+                  (gmt-u32 src "qwen35moe.expert_shared_feed_forward_length")
+                  nHead nKV headDim nrot
+                  (md-f32-bits base)
+                  (md-f32-bits (div 1.0 (math_sqrt (add headDim 0.0))))
+                  maxpos
+                  (gmt-vocab-n src)
+                  (mul nKV headDim)
+                  (sub nLayerAll nextn)
+                  (gmt-u32 src "qwen35moe.full_attention_interval")
+                  taps)))
+
+    (defn kth-setup (maxpos)
+        (do
+            (let path (kce-path))
+            (let src (kce-hdr))
+            (let base (egg-data-base src (kce-align)))
+            (let geo (kth-geo src maxpos))
+            (let ps (kth-pipes (kth-msl)))
+            (let bs (kth-bufs (nth geo 0) (nth geo 1) (mul (nth geo 3) (nth geo 5)) (nth geo 3)
+                              (nth geo 10) (nth geo 8) (mul (nth geo 12) (nth geo 14))
+                              (nth geo 20) maxpos (nth geo 12) (nth geo 19)))
+            (let lays (kth-layers src base path (nth geo 21) (nth geo 22)))
+            (let embTv (kth-tv-at src base path (egg-find-tensor src "token_embd.weight")))
+            (let onormTv (kth-tv-at src base path (egg-find-tensor src "output_norm.weight")))
+            (let projTv (kth-tv-at src base path (egg-find-tensor src "output.weight")))
+            (list ps bs geo lays embTv onormTv projTv src base)))
+
+    (defn kth-new-state (geo)
+        (kth-stream-state (nth geo 21) (nth geo 22) (nth geo 1) (nth geo 23)
+                          (nth geo 3) (nth geo 5) (nth geo 4) (nth geo 20) (nth geo 18)))
+    0)

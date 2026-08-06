@@ -1,0 +1,178 @@
+; native-model-checkpoint-cli.fk -- Form-owned train/continue, keep/revert,
+; atomic visibility, reload, and equivalence report.
+;
+; stdin line 1: previous checkpoint path, or empty for the first checkpoint
+; stdin line 2: candidate temporary path (same directory as destination)
+; stdin line 3: immutable candidate destination path
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/format-arith.fk form-stdlib/f64-bytes.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/transformer-backprop.fk form-stdlib/transformer-corpus-train.fk form-stdlib/neural-lm.fk form-stdlib/native-model-evidence.fk form-stdlib/native-model-live-training.fk form-stdlib/native-model-checkpoint.fk
+
+(do
+    (defn nmckc-kv-int (key value)
+        (str_concat key (str_concat "=" (str_concat (int_to_str value) "\n"))))
+    (defn nmckc-kv-str (key value)
+        (str_concat key (str_concat "=" (str_concat value "\n"))))
+    (defn nmckc-render (lines)
+        (if (eq (len lines) 0) ""
+            (str_concat (head lines) (nmckc-render (tail lines)))))
+    (defn nmckc-generation (stack)
+        (do
+            (let embeddings (nmlt-lm-embeddings))
+            (nl-gen stack embeddings (nl-emb embeddings 0) 6 0.00001)))
+    (defn nmckc-invalid-report (previous-path)
+        (nmckc-render
+            (list
+                "schema=native-model-checkpoint-report-v1\n"
+                "mode=continuation\n"
+                "prior_checkpoint_present=1\n"
+                "prior_checkpoint_valid=0\n"
+                "encoding=ieee754-f64-le-bytes\n"
+                "values_total=192\n"
+                "candidate_improved=0\n"
+                "checkpoint_written=0\n"
+                "write_bytes=0\n"
+                "atomic_rename_observed=0\n"
+                "reload_text_identical=0\n"
+                "reload_canonical=0\n"
+                "weight_bits_identical=0\n"
+                "prediction_equivalent=0\n"
+                "checkpoint_sha256=\n"
+                (nmckc-kv-str "checkpoint_path" previous-path)
+                (nmckc-kv-str "scope" (nmck-scope))
+                "checkpoint_valid=0\n")))
+
+    (defn nmckc-run (previous-path temporary-path destination-path)
+        (do
+            (let has-previous (if (gt (str_len previous-path) 0) 1 0))
+            (let previous-text (if (eq has-previous 1) (read_file previous-path) ""))
+            (let previous-decoded (nmck-decode previous-text))
+            (let previous-valid
+                (if (eq has-previous 1)
+                    (if (and (eq (nmck-decoded-valid? previous-decoded) 1)
+                             (eq (nmck-canonical-roundtrip? previous-text) 1)) 1 0)
+                    1))
+            (if (eq previous-valid 0) (nmckc-invalid-report previous-path)
+                (do
+                    (let incumbent-transformer
+                        (if (eq has-previous 1)
+                            (nmck-decoded-transformer previous-decoded)
+                            (nmck-initial-transformer)))
+                    (let incumbent-lm
+                        (if (eq has-previous 1)
+                            (nmck-decoded-lm previous-decoded)
+                            (nmck-initial-lm)))
+                    (let candidate-transformer
+                        (if (eq has-previous 1)
+                            (nmck-continue-transformer incumbent-transformer)
+                            (nmck-fresh-transformer)))
+                    (let candidate-lm
+                        (if (eq has-previous 1)
+                            (nmck-continue-lm incumbent-lm)
+                            (nmck-fresh-lm)))
+                    (let improved
+                        (nmck-candidate-improves?
+                            incumbent-transformer incumbent-lm
+                            candidate-transformer candidate-lm))
+                    (let accepted improved)
+                    (let selected-transformer
+                        (if (eq accepted 1) candidate-transformer incumbent-transformer))
+                    (let selected-lm (if (eq accepted 1) candidate-lm incumbent-lm))
+                    (let candidate-text
+                        (nmck-checkpoint-text candidate-transformer candidate-lm))
+                    (let write-bytes
+                        (if (eq accepted 1)
+                            (write_file_text temporary-path candidate-text) 0))
+                    (let temporary-text
+                        (if (eq accepted 1) (read_file temporary-path) ""))
+                    (let temporary-admitted
+                        (if (eq accepted 1)
+                            (if (and (eq write-bytes (str_len candidate-text))
+                                     (and (str_eq temporary-text candidate-text)
+                                          (eq (nmck-canonical-roundtrip? temporary-text) 1))) 1 0)
+                            0))
+                    (let rename-result
+                        (if (eq temporary-admitted 1)
+                            (fs_rename temporary-path destination-path) 0))
+                    (let active-path
+                        (if (eq temporary-admitted 1) destination-path previous-path))
+                    (let active-text
+                        (if (gt (str_len active-path) 0) (read_file active-path) ""))
+                    (let active-decoded (nmck-decode active-text))
+                    (let reload-identical
+                        (if (eq temporary-admitted 1)
+                            (if (str_eq active-text candidate-text) 1 0)
+                            (if (and (eq has-previous 1)
+                                     (str_eq active-text previous-text)) 1 0)))
+                    (let reload-canonical (nmck-canonical-roundtrip? active-text))
+                    (let weight-bits-identical reload-canonical)
+                    (let prediction-equivalent
+                        (if (eq (nmck-decoded-valid? active-decoded) 1)
+                            (if (and
+                                (eq (nmck-transformer-heldout-loss-micro
+                                        (nmck-decoded-transformer active-decoded))
+                                    (nmck-transformer-heldout-loss-micro selected-transformer))
+                                (and
+                                    (eq (nmck-lm-heldout-correct
+                                            (nmck-decoded-lm active-decoded))
+                                        (nmck-lm-heldout-correct selected-lm))
+                                    (eq (nmck-list-eq?
+                                            (nmckc-generation (nmck-decoded-lm active-decoded))
+                                            (nmckc-generation selected-lm)) 1))) 1 0)
+                            0))
+                    (let atomic-observed
+                        (if (eq accepted 1)
+                            (if (and (eq temporary-admitted 1)
+                                     (and (lt (file_size temporary-path) 0)
+                                          (gt (file_size destination-path) 0))) 1 0)
+                            1))
+                    (let valid
+                        (if (and
+                                (eq (nmck-decoded-valid? active-decoded) 1)
+                                (and (eq reload-identical 1)
+                                (and (eq reload-canonical 1)
+                                (and (eq weight-bits-identical 1)
+                                (and (eq prediction-equivalent 1)
+                                     (eq atomic-observed 1)))))) 1 0))
+                    (nmckc-render
+                        (list
+                            "schema=native-model-checkpoint-report-v1\n"
+                            (nmckc-kv-str "mode"
+                                (if (eq has-previous 1) "continuation" "fresh"))
+                            (nmckc-kv-int "prior_checkpoint_present" has-previous)
+                            (nmckc-kv-int "prior_checkpoint_valid" previous-valid)
+                            "encoding=ieee754-f64-le-bytes\n"
+                            "values_total=192\n"
+                            "continuation_epochs=20\n"
+                            (nmckc-kv-int "incumbent_transformer_heldout_loss_micro"
+                                (nmck-transformer-heldout-loss-micro incumbent-transformer))
+                            (nmckc-kv-int "candidate_transformer_heldout_loss_micro"
+                                (nmck-transformer-heldout-loss-micro candidate-transformer))
+                            (nmckc-kv-int "selected_transformer_heldout_loss_micro"
+                                (nmck-transformer-heldout-loss-micro selected-transformer))
+                            (nmckc-kv-int "incumbent_lm_heldout_correct"
+                                (nmck-lm-heldout-correct incumbent-lm))
+                            (nmckc-kv-int "candidate_lm_heldout_correct"
+                                (nmck-lm-heldout-correct candidate-lm))
+                            (nmckc-kv-int "selected_lm_heldout_correct"
+                                (nmck-lm-heldout-correct selected-lm))
+                            (nmckc-kv-int "candidate_improved" improved)
+                            (nmckc-kv-int "checkpoint_written" temporary-admitted)
+                            (nmckc-kv-int "write_bytes" write-bytes)
+                            (nmckc-kv-int "atomic_rename_observed" atomic-observed)
+                            (nmckc-kv-int "reload_text_identical" reload-identical)
+                            (nmckc-kv-int "reload_canonical" reload-canonical)
+                            (nmckc-kv-int "weight_bits_identical" weight-bits-identical)
+                            (nmckc-kv-int "prediction_equivalent" prediction-equivalent)
+                            (nmckc-kv-str "training_contract_sha256"
+                                (nmck-training-contract-sha256))
+                            (nmckc-kv-str "checkpoint_sha256"
+                                (if (gt (str_len active-text) 0)
+                                    (nmfe-sha256 active-text) ""))
+                            (nmckc-kv-str "checkpoint_path" active-path)
+                            (nmckc-kv-str "scope" (nmck-scope))
+                            (nmckc-kv-int "checkpoint_valid" valid)))))))
+
+    (let previous-path (read_line))
+    (let temporary-path (read_line))
+    (let destination-path (read_line))
+    (print_str (nmckc-run previous-path temporary-path destination-path)))

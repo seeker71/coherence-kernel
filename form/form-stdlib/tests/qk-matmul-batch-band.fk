@@ -1,0 +1,160 @@
+; preludes: form-stdlib/core.fk form-stdlib/qk-matvec-split.fk form-stdlib/qk-matvec-lane.fk form-stdlib/qk-matmul-batch.fk
+;
+; qk-matmul-batch-band — the token tiling, the grid inversion, the per-token association identity, and
+; the claim that batching needs NO new epsilon. Proven without a GPU.
+;
+; qk-matmul-batch.fk turns the matvec into a matmul by giving one SIMD group EIGHT accumulators and one
+; weight decode. Four things can be wrong in ways no GPU run would reveal, because each still produces
+; a plausible number:
+;
+;   - THE TOKEN TILING. `ntile = ceil(ntok/8)` with a guarded tail is an off-by-one waiting to happen at
+;     every batch size that is not a multiple of 8 — and a prompt is almost never a multiple of 8. Drop
+;     the last token of a batch and the prefill is short one position: the KV cache is missing a row,
+;     attention still runs, a token still comes out, and it is wrong. So the tiling is checked AS a
+;     partition of [0, ntok): the tile counts must sum to EXACTLY ntok, at multiples of 8, at one above
+;     and one below, at 1, and at a real prompt length.
+;   - THE GRID INVERSION. The kernel recovers (row, tile) from gid/32 by integer division. If the row
+;     and the tile are ever swapped or the divisor drifts from ntile, every thread computes a real row
+;     of a real tensor and writes it to the wrong place. Checked by inverting: for every group index,
+;     row-of and tile-of must rebuild it.
+;   - THE ASSOCIATION IDENTITY. The cell's central safety claim is that batching reassociates NOTHING —
+;     that token t's sum inside the batched kernel is bit-for-bit the lane kernel's sum for token t, so
+;     no epsilon at all is needed beyond the one qk-matvec-lane.fk already carries. That is an equation
+;     and is checked as one, including on the catastrophic-cancellation fixture where the lane fold and
+;     the plain right fold are KNOWN to disagree — if the batched sum silently became the plain fold,
+;     bit 8 of qk-matvec-lane-band would still pass and this one would not.
+;   - THE BOUND'S PROVENANCE. qmb-bound-coeff must BE qml-bound-coeff, which must BE qms-bound-coeff at
+;     parts=32. Checked transitively at four widths, so "no new derivation" stays an identity rather
+;     than becoming decoration.
+;
+; WHAT THIS BAND DOES NOT SPEAK FOR — its radius, and it is narrower than it looks.
+;   * It speaks for the TILING, the GRID, the association IDENTITY and the emitted TEXT's shape, in
+;     Form's fp64, on small fixtures.
+;   * It does NOT speak for the batched kernel being bit-exact against P separate lane matvecs IN f32
+;     ON THE GPU. That claim is about an emitted kernel's rounding and cannot be settled in Form: it is
+;     form/native/metal/metal_batched_prefill.sh's GATE B2, which runs the batched kernel against P
+;     sequential lane matvecs on real llama3.2:3b tensors at four batch sizes and demands zero differing
+;     floats out of P*rows.
+;   * It does NOT speak for metal::simd_sum's association, for the MSL compiling, for the GPU, or for a
+;     token. It cannot execute any of them.
+;   * It does NOT speak for the CARRIER's decision to dispatch the decode kernels once per token for
+;     RMSNorm / RoPE / attention. That is bit-exact by construction (the same binary) and is gated
+;     end-to-end by the same harness demanding unchanged token ids.
+;   * It does NOT speak for any SIMD width other than 32, nor for any tile other than 8. Bits 1 and 128
+;     pin both constants so a later edit cannot widen them silently while the emitted text still spells
+;     the old literal.
+;
+; Kin: qk-matmul-batch.fk (under test), qk-matvec-lane.fk (qml-lane-sum / qml-bound-coeff — the
+; association and the bound this must reproduce unchanged), qk-matvec-split.fk (qms-bound-coeff,
+; qms-serial-sum), qk-matvec-lane-band.fk (the band shape this follows).
+;
+; Verdict 255 when the batched matmul is honest:
+;   1   THE TILE IS NAMED            qmb-tile = 8, and both emitted kernels spell the same 8
+;   2   IT IS A PARTITION            the tile counts sum to EXACTLY ntok at six batch sizes, including
+;                                    non-multiples of 8, ntok = 1, and a real prompt length
+;   4   THE GRID INVERTS             row-of and tile-of rebuild every group index of a real shape
+;   8   THE ASSOCIATION IS UNCHANGED qmb-token-sum = qml-lane-sum on fixtures — and on the fixture
+;                                    where the lane fold is KNOWN to differ from the plain right fold,
+;                                    so the equality cannot be an artifact of a blind fixture
+;   16  THE BOUND IS ALREADY DERIVED qmb-bound-coeff = qml-bound-coeff = qms-bound-coeff(cols, 32),
+;                                    transitively, at four widths
+;   32  NO TAIL IS LOST              the last tile of a non-multiple batch carries exactly the
+;                                    remainder, and no tile is ever empty except past the end
+;   64  TWO KERNELS, TWO QUANTS      each text declares its own kernel name; the appendix is EXACTLY
+;                                    the two concatenated; and the Q6_K and Q4_K texts are the same
+;                                    LENGTH and NOT the same TEXT (a copy-paste that forgot to swap
+;                                    q6k for q4k, or 210 for 144, would make them equal)
+;   128 EIGHT ACCUMULATORS, LITERAL  the declaration spells `float acc[8]` and the emitted step spells
+;                                    the same 8 — the tile is a literal for a reason (registers, not
+;                                    local memory), so the literal is pinned to the name
+
+(do
+    (defn qbb-mod (a n) (sub a (mul (div a n) n)))
+    (defn qbb-opens-with (s p)
+        (if (lt (str_len s) (str_len p)) 0
+            (if (str_eq (substring s 0 (str_len p)) p) 1 0)))
+    (defn qbb-has (s p)
+        (if (lt (str_len s) (str_len p)) 0
+            (if (str_eq (substring s 0 (str_len p)) p) 1 (qbb-has (substring s 1 (str_len s)) p))))
+
+    ; --- 1: the tile is named, once ---
+    (let c0 (if (eq (qmb-tile) 8) 1 0))
+
+    ; --- 2: a real partition of the token range. Six batch sizes, chosen so the ceiling arithmetic is
+    ; exercised where it breaks: a clean multiple, one above and one below a multiple, ntok = 1 (the
+    ; degenerate batch that is also the decode path's shape), a real prompt length, and a chunk. ---
+    (let c1 (if (eq (qmb-cover-count 8) 8)
+            (if (eq (qmb-cover-count 9) 9)
+            (if (eq (qmb-cover-count 7) 7)
+            (if (eq (qmb-cover-count 1) 1)
+            (if (eq (qmb-cover-count 6) 6)
+            (if (eq (qmb-cover-count 64) 64) 2 0) 0) 0) 0) 0) 0))
+
+    ; --- 4: the grid inverts. Every group index must rebuild from row-of and tile-of, and the tile
+    ; index must be inside ntile — a swapped pair or a drifted divisor writes real numbers to wrong
+    ; rows, which no epsilon would ever catch. ---
+    (defn qbb-inv (rows ntok g)
+        (if (ge g (qmb-groups rows ntok)) 1
+            (do
+                (let r (qmb-row-of g ntok))
+                (let p (qmb-tile-of g ntok))
+                (if (lt p (qmb-ntile ntok))
+                    (if (eq (add (mul r (qmb-ntile ntok)) p) g)
+                        (if (lt r rows) (qbb-inv rows ntok (add g 1)) 0) 0) 0))))
+    (let c2 (if (eq (qbb-inv 64 6 0) 1)
+            (if (eq (qbb-inv 17 9 0) 1)
+            (if (eq (qbb-inv 5 1 0) 1) 4 0) 0) 0))
+
+    ; --- 8: the association is UNCHANGED, and the fixture proves it is not a blind one. The 34-element
+    ; fixture is qk-matvec-lane-band's: index 0 = 1.0, 32 = 1e16, 33 = -1e16. The lane fold and the
+    ; plain right fold DISAGREE on it. The batched sum must equal the LANE one and therefore must also
+    ; differ from the plain one — if tiling had quietly collapsed the fold, both halves would fail. ---
+    (defn qbb-mk (i n acc)
+        (if (ge i n) (reverse acc)
+            (qbb-mk (add i 1) n
+                (cons (if (eq i 0) 1.0 (if (eq i 32) 1e16 (if (eq i 33) -1e16 0.0))) acc))))
+    (let xs (qbb-mk 0 34 (list)))
+    (defn qbb-ramp (i n acc)
+        (if (ge i n) (reverse acc) (qbb-ramp (add i 1) n (cons (add (mul i 0.25) 0.5) acc))))
+    (let ys (qbb-ramp 0 100 (list)))
+    (let c3 (if (eq (qmb-token-sum xs 34) (qml-lane-sum xs 34))
+            (if (eq (qmb-token-sum ys 100) (qml-lane-sum ys 100))
+            (if (eq (qmb-token-sum xs 34) (qms-serial-sum xs 34)) 0 8) 0) 0))
+
+    ; --- 16: the bound needs no new derivation, transitively, and that is an EQUATION ---
+    (defn qbb-boundeq (cols)
+        (if (eq (qmb-bound-coeff cols) (qml-bound-coeff cols))
+            (if (eq (qmb-bound-coeff cols) (qms-bound-coeff cols 32)) 1 0) 0))
+    (let c4 (if (eq (qbb-boundeq 3072) 1)
+            (if (eq (qbb-boundeq 8192) 1)
+            (if (eq (qbb-boundeq 1024) 1)
+            (if (eq (qbb-boundeq 33) 1) 16 0) 0) 0) 0))
+
+    ; --- 32: no tail is lost and no tile is spuriously empty. The remainder tile must carry exactly
+    ; the remainder; every earlier tile must be full; a tile past the end must be 0. ---
+    (let c5 (if (eq (qmb-tile-n 0 6) 6)
+            (if (eq (qmb-tile-n 0 9) 8)
+            (if (eq (qmb-tile-n 1 9) 1)
+            (if (eq (qmb-tile-n 1 8) 0)
+            (if (eq (qmb-tile-n 7 64) 8)
+            (if (eq (qmb-tile-n 8 64) 0) 32 0) 0) 0) 0) 0) 0))
+
+    ; --- 64: two kernels, two quants, one meaning. Each declares its own name; the appendix is EXACTLY
+    ; the two; and they are the same LENGTH but NOT the same TEXT — which is what a copy-paste that
+    ; forgot to swap q6k/q4k or 210/144 would break. ---
+    (let k6 (qmb-batch-msl "form_q6k_matmul_batch_f32" "q6k" "210"))
+    (let k4 (qmb-batch-msl "form_q4k_matmul_batch_f32" "q4k" "144"))
+    (let c6 (if (eq (qbb-opens-with k6 "kernel void form_q6k_matmul_batch_f32 ") 1)
+            (if (eq (qbb-opens-with k4 "kernel void form_q4k_matmul_batch_f32 ") 1)
+            (if (eq (str_len k6) (str_len k4))
+            (if (str_eq k6 k4) 0
+            (if (eq (str_len (qmb-msl-appendix)) (add (str_len k6) (str_len k4))) 64 0)) 0) 0) 0))
+
+    ; --- 128: eight accumulators, spelled as a literal in BOTH the declaration and the step, and the
+    ; literal is pinned to the name. A dynamically-indexed array would spill to local memory and lose
+    ; the entire win, so the literal is deliberate and must stay in step with qmb-tile. ---
+    (let c7 (if (eq (qbb-has (qmb-decl) "float acc[8];") 1)
+            (if (eq (qbb-has (qmb-step "q6k" "210") "for (uint i = 0; i < 8u; ++i)") 1)
+            (if (eq (qmb-tile) 8) 128 0) 0) 0))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))

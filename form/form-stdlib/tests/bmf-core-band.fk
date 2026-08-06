@@ -1,0 +1,105 @@
+; bmf-core-band.fk — proves the cursor-based BMF core end to end.
+;
+; Demonstrates the dream's load-bearing claims on a minimal worked example:
+;   - a cursor reads a surface (string) with peek / advance
+;   - a grammar is DATA (a pattern + a template), driven by one matcher
+;   - the template emits into the UNIVERSAL vocabulary (bmf-bp "add"), so the
+;     data-driven grammar lands on the same coordinate as a hand-built node
+;   - alternation backtracks with NO sediment (the source cursor is unchanged)
+;   - checkpoint / restore is just returning to an earlier cursor value
+;
+; preludes: form-stdlib/core.fk form-stdlib/bmf-core.fk
+;
+; Note: this is the older ontology-emission integration witness. It returned to
+; green after the source runner stopped leaking prelude binding state into the
+; root value-bearing `(do ...)`; the narrower cursor-language witness remains
+; form/form-stdlib/tests/bmf-cursor-language-band.fk.
+
+(do
+    (let src "12+34")
+    (let c0 (cursor-str src))
+
+    ; 1. peek the surface at position 0
+    (let s-peek (if (str_eq (cur-peek-char c0) "1") 100 0))
+
+    ; 2. advance returns a new cursor; the surface reads "+" at position 2
+    (let c2 (cur-advance c0 2))
+    (let s-advance (if (str_eq (cur-peek-char c2) "+") 100 0))
+
+    ; 3. a data pattern (cap "l" (run "digit")) captures "12" and ends at pos 2
+    (let m3 (match-pat (list "cap" "l" (list "run" "digit")) c0 (caps-empty)))
+    (let s-run
+        (if (and (m-ok? m3)
+                 (and (str_eq (caps-get (m-caps m3) "l") "12")
+                      (eq (cur-pos (m-cur m3)) 2)))
+            100 0))
+
+    ; 4. a full rule (digits "+" digits => emit add[l,r]) lands on the SAME
+    ;    universal coordinate as a hand-built add node — grammar-as-data
+    ;    produces the canonical shape, not a per-language one.
+    (let pat (list "seq"
+                   (list "cap" "l" (list "run" "digit"))
+                   (list "lit" "+")
+                   (list "cap" "r" (list "run" "digit"))))
+    (let tpl (list "emit" "add"
+                   (list (list "splice" "l") (list "splice" "r"))))
+    (let res (run-rule (rule-of pat tpl) c0))
+    (let reference
+        (intern_node (bmf-bp "add")
+                     (list (intern_trivial_string "12")
+                           (intern_trivial_string "34"))))
+    (let s-emit
+        (if (and (run-ok? res)
+                 (and (node_eq (run-node res) reference)
+                      (eq (cur-pos (run-cur res)) 5)))
+            100 0))
+
+    ; 5. alternation leaves no sediment: the first alternative consumes "12"
+    ;    then fails on "X"; the second matches "12" from the SAME cursor;
+    ;    c0 itself is untouched (still pos 0) because nothing mutated.
+    (let alt (list "alt"
+                   (list "seq" (list "lit" "12") (list "lit" "X"))
+                   (list "lit" "12")))
+    (let m5 (match-pat alt c0 (caps-empty)))
+    (let s-backtrack
+        (if (and (m-ok? m5)
+                 (and (eq (cur-pos (m-cur m5)) 2)
+                      (eq (cur-pos c0) 0)))
+            100 0))
+
+    ; 6. checkpoint / restore returns to the saved coordinate
+    (let saved (cur-checkpoint c0))
+    (let moved (cur-advance saved 3))
+    (let back  (cur-restore saved))
+    (let s-restore
+        (if (and (eq (cur-pos moved) 3) (eq (cur-pos back) 0)) 100 0))
+
+    ; 7. a literal with a multi-byte character in it matches — added 2026-07-26.
+    ;    Every claim above this one uses ASCII source, so all four arms read 600
+    ;    while a BMF grammar could not match a literal with an accent in it.
+    ;
+    ;    I first wrote here that the cause was bmf-str-byte-at, repaired the same
+    ;    day from (ord (substring s i (add i 1))) to str_byte_at. It was not. With
+    ;    the old accessor swapped back in, this band still read 600 on go, rust and
+    ;    ts — so the perturbation cleared the accessor and the finding had to move.
+    ;    The cause was cur-peek, carrying the SAME fault in a different spelling:
+    ;    (ord (char_at s p)). Over "Ω+1" at byte 1, inside the two-byte Ω, that
+    ;    reads 169 on fkwu, -1 on go and rust, and -1 on ts (which reads 937, the
+    ;    whole codepoint, at byte 0). match-lit compares the pattern's bytes against
+    ;    cur-peek, so the comparison could never hold. cur-peek reads through
+    ;    str_byte_at now and this claim lands 100 on all four arms.
+    ;
+    ;    Perturbation, cur-peek reverted, everything else repaired: 600 / 600 / 600
+    ;    on go, rust, ts — and 700 on fkwu either way, because fkwu's char_at is
+    ;    byte-indexed and could never have told anyone.
+    (let usrc "Ω+1")
+    (let uc   (cursor-str usrc))
+    (let umat (match-lit (list "lit" "Ω") uc (list)))
+    (let s-utf8 (if (m-ok? umat) 100 0))
+
+    ; Expected total: 700
+    (add s-peek
+    (add s-advance
+    (add s-run
+    (add s-emit
+    (add s-backtrack (add s-restore s-utf8)))))))

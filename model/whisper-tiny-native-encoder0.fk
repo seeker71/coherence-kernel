@@ -1,0 +1,213 @@
+; whisper-tiny-native-encoder0.fk — first complete released Whisper encoder block.
+;
+; The carrier is the exact contiguous safetensors region holding all 1,500x384
+; positional weights, the encoder's final layer norm, and every released tensor
+; in encoder layer 0. The live path is Form only: real CC0 human PCM -> eight
+; Slaney log-mel columns -> six released conv1 tokens -> two released conv2
+; tokens -> two positional rows -> six-head self-attention -> full 1536-wide
+; erf-GELU FFN. Two tokens make attention non-degenerate: each query observes
+; two distinct keys instead of laundering a one-token softmax into an attention
+; claim.
+;
+; All 1,774,080 layer-0 parameters are causal in the output. The first 768
+; positional parameters are causal; the remaining position rows and the final
+; encoder layer norm are carried exactly but correctly wait for layers 1..3.
+; The complete native recognizer therefore remains pending.
+; witnessed: 2026-07-19 -> released encoder layer 0 over two real-speech tokens
+; preludes: form/form-stdlib/core.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/form-fs.fk form/form-stdlib/file-byte-window.fk form/form-stdlib/crc32.fk model/lingbot-pytorch-checkpoint.fk form/form-stdlib/trig.fk form/form-stdlib/mel-frame.fk form/form-stdlib/mel-filterbank.fk form/form-stdlib/transformer-numerics.fk form/form-stdlib/transformer-block.fk form/form-stdlib/transformer-mh.fk form/form-stdlib/transformer-gelu-erf.fk model/whisper-tiny-native-conv1.fk model/whisper-tiny-native-conv2.fk
+
+(do
+  (defn wte0-path ()
+    (str_concat (wtc-root) "encoder-position-layer0.f32"))
+  (defn wte0-byte-count () 9403392)
+  (defn wte0-carried-parameter-count () 2350848)
+  (defn wte0-layer-parameter-count () 1774080)
+  (defn wte0-position-causal-count () 768)
+  (defn wte0-causal-parameter-count ()
+    (add (wt2-stem-parameter-count)
+      (add (wte0-layer-parameter-count) (wte0-position-causal-count))))
+  (defn wte0-total-carried-parameter-count ()
+    (add (wt2-stem-parameter-count) (wte0-carried-parameter-count)))
+
+  ; Relative byte offsets inside the exact contiguous checkpoint carrier.
+  (defn wte0-pos-off () 0)
+  (defn wte0-encoder-ln-bias-off () 2304000)
+  (defn wte0-encoder-ln-weight-off () 2305536)
+  (defn wte0-fc1-bias-off () 2307072)
+  (defn wte0-fc1-weight-off () 2313216)
+  (defn wte0-fc2-bias-off () 4672512)
+  (defn wte0-fc2-weight-off () 4674048)
+  (defn wte0-ffn-ln-bias-off () 7033344)
+  (defn wte0-ffn-ln-weight-off () 7034880)
+  (defn wte0-k-weight-off () 7036416)
+  (defn wte0-out-bias-off () 7626240)
+  (defn wte0-out-weight-off () 7627776)
+  (defn wte0-q-bias-off () 8217600)
+  (defn wte0-q-weight-off () 8219136)
+  (defn wte0-v-bias-off () 8808960)
+  (defn wte0-v-weight-off () 8810496)
+  (defn wte0-attn-ln-bias-off () 9400320)
+  (defn wte0-attn-ln-weight-off () 9401856)
+
+  ; pack = (released conv1/conv2 pack, encoder carrier, carrier-valid).
+  ; Size, tensor boundaries, and live output fingerprints are checked by the
+  ; Form band. The pinned SHA-256 remains supply-chain evidence in the manifest;
+  ; hashing is not delegated from the model's arithmetic to a host process.
+  (defn wte0-load ()
+    (do (let stem (wt2-load-weights))
+        (let carrier (lbpt-read-span (wte0-path) 0 (wte0-byte-count)))
+        (list stem carrier
+          (if (and (eq (wt2-weights-valid? stem) 1)
+                   (eq (str_len carrier) (wte0-byte-count))) 1 0))))
+  (defn wte0-stem (pack) (nth pack 0))
+  (defn wte0-carrier (pack) (nth pack 1))
+  (defn wte0-valid? (pack) (nth pack 2))
+  ; Full-carrier checksum is a separate explicit provenance audit. Inference
+  ; does not secretly pay this 9.4 MB scan on every call.
+  (defn wte0-carrier-crc32 ()
+    (lbpt-crc-string
+      (lbpt-read-span (wte0-path) 0 (wte0-byte-count))))
+  (defn wte0-carrier-crc32-expected () 3539356514)
+  (defn wte0-carrier-provenance-valid? ()
+    (eq (wte0-carrier-crc32) (wte0-carrier-crc32-expected)))
+
+  (defn wte0-log-mel-cols (bytes data-offset)
+    (wt2-log-mel-cols-go bytes data-offset 0 8 (empty)))
+
+  (defn wte0-conv1-go (conv1 cols index out)
+    (if (eq index 6) (reverse out)
+      (wte0-conv1-go conv1 cols (add index 1)
+        (cons (wt2-gelu-map (wtc-token conv1
+          (list (nth cols index) (nth cols (add index 1))
+                (nth cols (add index 2))))) out))))
+  (defn wte0-conv1-tokens (stem normalized-cols)
+    (wte0-conv1-go (wt2-conv1-pack stem) normalized-cols 0 (empty)))
+  (defn wte0-conv2-tokens (stem conv1-tokens)
+    (list
+      (wt2-token stem (list (nth conv1-tokens 1)
+        (nth conv1-tokens 2) (nth conv1-tokens 3)))
+      (wt2-token stem (list (nth conv1-tokens 3)
+        (nth conv1-tokens 4) (nth conv1-tokens 5)))))
+
+  ; Stream a row directly from the f32 carrier alongside the input list. This
+  ; keeps a 1536-wide dot O(n); repeated nth walks would make the real FFN
+  ; accidentally cubic in the vector width.
+  (defn wte0-dot-bytes (carrier byte-offset xs acc)
+    (if (eq (len xs) 0) acc
+      (wte0-dot-bytes carrier (add byte-offset 4) (tail xs)
+        (add acc (mul (lbpt-f32 carrier byte-offset) (head xs))))))
+  (defn wte0-affine-go
+    (carrier weight-offset bias-offset cols rows x row out)
+    (if (eq row rows) (reverse out)
+      (do (let bias (if (lt bias-offset 0) 0.0
+            (lbpt-f32 carrier (add bias-offset (mul row 4)))))
+          (let value (wte0-dot-bytes carrier
+            (add weight-offset (mul (mul row cols) 4)) x bias))
+          (wte0-affine-go carrier weight-offset bias-offset cols rows x
+            (add row 1) (cons value out)))))
+  (defn wte0-affine (carrier weight-offset bias-offset cols rows x)
+    (wte0-affine-go carrier weight-offset bias-offset cols rows x 0 (empty)))
+  (defn wte0-affine-seq (carrier weight-offset bias-offset cols rows xs)
+    (if (eq (len xs) 0) (empty)
+      (cons (wte0-affine carrier weight-offset bias-offset cols rows (head xs))
+        (wte0-affine-seq carrier weight-offset bias-offset cols rows (tail xs)))))
+
+  (defn wte0-affine-norm-go (carrier gamma-offset beta-offset xs i out)
+    (if (eq (len xs) 0) (reverse out)
+      (wte0-affine-norm-go carrier gamma-offset beta-offset (tail xs)
+        (add i 1) (cons (add
+          (mul (head xs) (lbpt-f32 carrier (add gamma-offset (mul i 4))))
+          (lbpt-f32 carrier (add beta-offset (mul i 4)))) out))))
+  (defn wte0-layernorm (carrier gamma-offset beta-offset x)
+    (wte0-affine-norm-go carrier gamma-offset beta-offset
+      (tn-layernorm x 0.00001) 0 (empty)))
+  (defn wte0-layernorm-seq (carrier gamma-offset beta-offset xs)
+    (if (eq (len xs) 0) (empty)
+      (cons (wte0-layernorm carrier gamma-offset beta-offset (head xs))
+        (wte0-layernorm-seq carrier gamma-offset beta-offset (tail xs)))))
+
+  (defn wte0-position-go (carrier token position i out)
+    (if (eq (len token) 0) (reverse out)
+      (wte0-position-go carrier (tail token) position (add i 1)
+        (cons (add (head token) (lbpt-f32 carrier
+          (add (wte0-pos-off) (mul 4 (add (mul position 384) i))))) out))))
+  (defn wte0-position (carrier token position)
+    (wte0-position-go carrier token position 0 (empty)))
+  (defn wte0-position-two (carrier tokens)
+    (list (wte0-position carrier (nth tokens 0) 0)
+          (wte0-position carrier (nth tokens 1) 1)))
+
+  (defn wte0-gelu-seq (xs)
+    (if (eq (len xs) 0) (empty)
+      (cons (tb-gelu-erf-map (head xs)) (wte0-gelu-seq (tail xs)))))
+
+  ; Returns (output, q, k, v, context, attention-residual, ffn-hidden).
+  (defn wte0-layer0 (carrier positioned)
+    (do
+      (let attn-ln (wte0-layernorm-seq carrier
+        (wte0-attn-ln-weight-off) (wte0-attn-ln-bias-off) positioned))
+      (let q (wte0-affine-seq carrier (wte0-q-weight-off)
+        (wte0-q-bias-off) 384 384 attn-ln))
+      (let k (wte0-affine-seq carrier (wte0-k-weight-off) -1
+        384 384 attn-ln))
+      (let v (wte0-affine-seq carrier (wte0-v-weight-off)
+        (wte0-v-bias-off) 384 384 attn-ln))
+      (let context (tb-mh-attn q k v 6 64 0.125))
+      (let projected (wte0-affine-seq carrier (wte0-out-weight-off)
+        (wte0-out-bias-off) 384 384 context))
+      (let attended (tb-add-seq positioned projected))
+      (let ffn-ln (wte0-layernorm-seq carrier (wte0-ffn-ln-weight-off)
+        (wte0-ffn-ln-bias-off) attended))
+      (let hidden-raw (wte0-affine-seq carrier (wte0-fc1-weight-off)
+        (wte0-fc1-bias-off) 384 1536 ffn-ln))
+      (let hidden (wte0-gelu-seq hidden-raw))
+      (let ffn-out (wte0-affine-seq carrier (wte0-fc2-weight-off)
+        (wte0-fc2-bias-off) 1536 384 hidden))
+      (list (tb-add-seq attended ffn-out) q k v context attended hidden)))
+
+  (defn wte0-attention-weights (q k query-index head-index)
+    (tn-softmax (tb-scores
+      (nth (tb-seq-headslice q head-index 64) query-index)
+      (tb-seq-headslice k head-index 64) 0.125)))
+  (defn wte0-vector-distance (a b)
+    (if (eq (len a) 0) 0.0
+      (add (tn-abs (sub (head a) (head b)))
+        (wte0-vector-distance (tail a) (tail b)))))
+
+  ; result fields retain the real intermediate tensors needed for independent
+  ; inspection; no label is inferred from the acoustic block alone.
+  (defn wte0-infer-file (path)
+    (do (let wav (fs-read-slice path 0 (fs-stat-size path)))
+        (let data-offset (wtc-wav-data-offset wav))
+        (let normalized (wtc-normalize-tile
+          (wte0-log-mel-cols wav data-offset)))
+        (let pack (wte0-load))
+        (let conv1 (if (eq (wte0-valid? pack) 1)
+          (wte0-conv1-tokens (wte0-stem pack) (nth normalized 1)) (empty)))
+        (let conv2 (if (eq (len conv1) 6)
+          (wte0-conv2-tokens (wte0-stem pack) conv1) (empty)))
+        (let positioned (if (eq (len conv2) 2)
+          (wte0-position-two (wte0-carrier pack) conv2) (empty)))
+        (let layer (if (eq (len positioned) 2)
+          (wte0-layer0 (wte0-carrier pack) positioned) (empty)))
+        (let output (if (eq (len layer) 7) (nth layer 0) (empty)))
+        (let weights0 (if (eq (len layer) 7)
+          (wte0-attention-weights (nth layer 1) (nth layer 2) 0 0) (empty)))
+        (let weights1 (if (eq (len layer) 7)
+          (wte0-attention-weights (nth layer 1) (nth layer 2) 1 5) (empty)))
+        (list "whisper-tiny-native-encoder0" path (str_len wav) data-offset
+          (nth normalized 0) (len (nth normalized 1)) (len conv1) (len conv2)
+          (len positioned) (len output)
+          (if (eq (len output) 2) (len (head output)) 0)
+          (wte0-causal-parameter-count) (wte0-total-carried-parameter-count)
+          (wte0-valid? pack) weights0 weights1
+          (if (eq (len output) 2) (wt2-fingerprint (nth output 0)) (empty))
+          (if (eq (len output) 2) (wt2-fingerprint (nth output 1)) (empty))
+          (if (eq (len output) 2)
+            (wte0-vector-distance (nth positioned 0) (nth output 0)) 0.0)
+          (if (eq (len output) 2)
+            (wte0-vector-distance (nth output 0) (nth output 1)) 0.0)
+          ; A complete encoder and decoder are still required for recognition.
+          "native-recognizer" 0
+          "pending" "encoder-layers-1-3+final-ln+decoder+tokenizer+search")))
+  0)

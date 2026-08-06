@@ -1,0 +1,75 @@
+; nanbeige-looped-transformer.fk — released two-pass decoder composed from the
+; body's existing GQA transformer.
+;
+; The same `layers` list is consumed on both passes. A full RMSNorm using the
+; released model.norm gain follows each pass. Calling the existing cached GQA
+; stack independently per pass gives each pass its own layer-local KV state.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/gqa-attn.fk form-stdlib/llama-block.fk form-stdlib/llama-gqa-block.fk form-stdlib/kv-cache.fk form-stdlib/kv-llama-block.fk form-stdlib/kv-gqa-llama-block.fk form-stdlib/multi-layer-stack.fk form-stdlib/gqa-multi-layer-stack.fk
+; witnessed: 2026-07-24 -> four-way band 1023
+
+(do
+    (defn nblt-norm-sequence (xs gain eps)
+        (if (eq (len xs) 0) (empty)
+            (cons (ln-rmsnorm (head xs) gain eps)
+                  (nblt-norm-sequence (tail xs) gain eps))))
+
+    (defn nblt-pass-causal (xs layers gain eps scale n-q n-kv head-dim rope)
+        (nblt-norm-sequence
+            (lgqa-stack-causal xs layers eps scale n-q n-kv head-dim rope)
+            gain eps))
+    (defn nblt-pass-generate (xs layers gain eps scale n-q n-kv head-dim rope)
+        (nblt-norm-sequence
+            (lgqa-stack-generate xs layers eps scale n-q n-kv head-dim rope)
+            gain eps))
+
+    ; Exactly two passes: weights are referenced twice, not copied into a
+    ; fabricated 44-layer parameter list.
+    (defn nblt-two-loop-causal (xs layers gain eps scale n-q n-kv head-dim rope)
+        (nblt-pass-causal
+            (nblt-pass-causal xs layers gain eps scale n-q n-kv head-dim rope)
+            layers gain eps scale n-q n-kv head-dim rope))
+    (defn nblt-two-loop-generate (xs layers gain eps scale n-q n-kv head-dim rope)
+        (nblt-pass-generate
+            (nblt-pass-generate xs layers gain eps scale n-q n-kv head-dim rope)
+            layers gain eps scale n-q n-kv head-dim rope))
+
+    ; Pinned safetensors inventory at upstream revision
+    ; 5ff54fb7ed86ce8e216d78bff5417ab9981de3d4.
+    ; 22 layers * 9 tensors + embed + final norm + untied lm_head = 201.
+    (defn nblt-layer-tensors () 9)
+    (defn nblt-layer-count () 22)
+    (defn nblt-global-tensors () 3)
+    (defn nblt-tensor-count ()
+        (add (mul (nblt-layer-count) (nblt-layer-tensors))
+             (nblt-global-tensors)))
+    (defn nblt-total-bytes () 8339601408)
+    (defn nblt-shard1-tensors () 92)
+    (defn nblt-shard2-tensors () 109)
+
+    ; Shape rows: (role rows cols occurrences); vectors use cols=0.
+    (defn nblt-shape-contract ()
+        (list
+            (list "embed" 166144 3072 1)
+            (list "lm-head" 166144 3072 1)
+            (list "final-norm" 3072 0 1)
+            (list "input-norm" 3072 0 22)
+            (list "post-attention-norm" 3072 0 22)
+            (list "q-proj" 6144 3072 22)
+            (list "k-proj" 1024 3072 22)
+            (list "v-proj" 1024 3072 22)
+            (list "o-proj" 3072 6144 22)
+            (list "gate-proj" 10752 3072 22)
+            (list "up-proj" 10752 3072 22)
+            (list "down-proj" 3072 10752 22)))
+    (defn nblt-shape-occurrences (rows)
+        (if (eq (len rows) 0) 0
+            (add (nth (head rows) 3)
+                 (nblt-shape-occurrences (tail rows)))))
+    (defn nblt-manifest-complete? ()
+        (if (eq (nblt-tensor-count) 201)
+            (if (eq (add (nblt-shard1-tensors) (nblt-shard2-tensors)) 201)
+                (if (eq (nblt-shape-occurrences (nblt-shape-contract)) 201) 1 0)
+                0)
+            0))
+    0)

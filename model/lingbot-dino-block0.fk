@@ -1,0 +1,121 @@
+; lingbot-dino-block0.fk -- one complete released DINOv2-L/14 block in Form.
+;
+; All fourteen tensors of aggregator.patch_embed.blocks.0 execute over a
+; bounded two-token sequence produced by real pixels.  This is a complete
+; block's learned arithmetic, not complete DINO: class/register/position
+; tokens, the full patch sequence, and blocks 1..23 remain outside this rung.
+; witnessed: 2026-07-20 -> exact released block carrier, live result gated
+; preludes: form/form-stdlib/core.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/form-fs.fk form/form-stdlib/file-byte-window.fk form/form-stdlib/crc32.fk model/lingbot-pytorch-checkpoint.fk form/form-stdlib/transformer-numerics.fk form/form-stdlib/transformer-block.fk form/form-stdlib/transformer-mh.fk form/form-stdlib/transformer-gelu-erf.fk model/released-row-major-affine.fk
+
+(do
+  (defn ldb0-path ()
+    "model/fixtures/lingbot-map/checkpoint-dino-block0-records.bin")
+  (defn ldb0-directory-path ()
+    "model/fixtures/lingbot-map/checkpoint-central-directory.bin")
+  (defn ldb0-carrier-bytes () 50394880)
+  (defn ldb0-parameter-count () 12598272)
+  (defn ldb0-width () 1024)
+  (defn ldb0-heads () 16)
+  (defn ldb0-head-width () 64)
+  (defn ldb0-attention-scale () 0.125)
+  (defn ldb0-eps () 0.000001)
+
+  ; Complete local-record offsets for data/9..22 inside the exact carrier.
+  (defn ldb0-record-offsets ()
+    (list 0 4224 8448 12591488 12603904 16798336 16802560
+      16806784 16811008 16815232 33592576 33609088 50386432 50390656))
+  (defn ldb0-load-one (directory ordinal)
+    (do
+      (let storage-index (add 9 ordinal))
+      (let record-offset (nth (ldb0-record-offsets) ordinal))
+      (let entry (lbpt-find-entry directory
+        (str_concat "checkpoint/data/" (int_to_str storage-index))))
+      (let header (fs-read-slice (ldb0-path) record-offset 256))
+      (let local (lbpt-local-header header))
+      (let tensor (fs-read-slice (ldb0-path)
+        (add record-offset (lbpt-local-data-offset local))
+        (lbpt-entry-size entry)))
+      (list entry tensor
+        (if (and (str_eq (lbpt-local-name local) (lbpt-entry-name entry))
+              (and (eq (lbpt-local-data-offset local) 112)
+                (and (eq (lbpt-local-method local) 0)
+                     (lbpt-tensor-valid? tensor entry)))) 1 0))))
+  (defn ldb0-load-go (directory ordinal out)
+    (if (eq ordinal 14) (reverse out)
+      (ldb0-load-go directory (add ordinal 1)
+        (cons (ldb0-load-one directory ordinal) out))))
+  (defn ldb0-load ()
+    (do
+      (let directory (fs-read-slice (ldb0-directory-path) 0
+        (fs-stat-size (ldb0-directory-path))))
+      (ldb0-load-go directory 0 (empty))))
+  (defn ldb0-one-valid? (rows)
+    (if (eq (len rows) 0) 1
+      (if (eq (nth (head rows) 2) 1) (ldb0-one-valid? (tail rows)) 0)))
+  (defn ldb0-valid? (pack)
+    (if (and (eq (fs-stat-size (ldb0-path)) (ldb0-carrier-bytes))
+             (eq (len pack) 14)) (ldb0-one-valid? pack) 0))
+  (defn ldb0-tensor (pack ordinal) (nth (nth pack ordinal) 1))
+
+  (defn ldb0-q-seq (qkv)
+    (if (eq (len qkv) 0) (empty)
+      (cons (tb-take (head qkv) 1024) (ldb0-q-seq (tail qkv)))))
+  (defn ldb0-k-seq (qkv)
+    (if (eq (len qkv) 0) (empty)
+      (cons (tb-take (tb-drop 1024 (head qkv)) 1024)
+        (ldb0-k-seq (tail qkv)))))
+  (defn ldb0-v-seq (qkv)
+    (if (eq (len qkv) 0) (empty)
+      (cons (tb-drop 2048 (head qkv)) (ldb0-v-seq (tail qkv)))))
+  (defn ldb0-attention-row (q k query head-index)
+    (tn-softmax (tb-scores
+      (nth (tb-seq-headslice q head-index 64) query)
+      (tb-seq-headslice k head-index 64) (ldb0-attention-scale))))
+
+  ; Returns (attention residual, q0/head0 weights, q1/head15 weights).
+  (defn ldb0-attention (pack input)
+    (do
+      (let normalized (rrma-layernorm-seq
+        (ldb0-tensor pack 0) (ldb0-tensor pack 1) (ldb0-eps) input))
+      (let qkv (rrma-affine-seq (ldb0-tensor pack 2) (ldb0-tensor pack 3)
+        1024 3072 normalized))
+      (let q (ldb0-q-seq qkv))
+      (let k (ldb0-k-seq qkv))
+      (let v (ldb0-v-seq qkv))
+      (let context (tb-mh-attn q k v 16 64 (ldb0-attention-scale)))
+      (let projected (rrma-affine-seq
+        (ldb0-tensor pack 4) (ldb0-tensor pack 5) 1024 1024 context))
+      (let scaled (rrma-scale-seq (ldb0-tensor pack 6) projected))
+      (list (tb-add-seq input scaled)
+        (ldb0-attention-row q k 0 0)
+        (ldb0-attention-row q k 1 15))))
+
+  (defn ldb0-gelu-seq (xs)
+    (if (eq (len xs) 0) (empty)
+      (cons (tb-gelu-erf-map (head xs)) (ldb0-gelu-seq (tail xs)))))
+  (defn ldb0-mlp (pack attended)
+    (do
+      (let normalized (rrma-layernorm-seq
+        (ldb0-tensor pack 7) (ldb0-tensor pack 8) (ldb0-eps) attended))
+      (let hidden (ldb0-gelu-seq (rrma-affine-seq
+        (ldb0-tensor pack 9) (ldb0-tensor pack 10) 1024 4096 normalized)))
+      (let projected (rrma-affine-seq
+        (ldb0-tensor pack 11) (ldb0-tensor pack 12) 4096 1024 hidden))
+      (tb-add-seq attended (rrma-scale-seq (ldb0-tensor pack 13) projected))))
+
+  (defn ldb0-vector-sum (xs acc)
+    (if (eq (len xs) 0) acc (ldb0-vector-sum (tail xs) (add acc (head xs)))))
+  (defn ldb0-vector-abs-sum (xs acc)
+    (if (eq (len xs) 0) acc
+      (ldb0-vector-abs-sum (tail xs) (add acc (abs (head xs))))))
+  (defn ldb0-fingerprint (x)
+    (list (nth x 0) (nth x 1) (nth x 2) (nth x 3)
+      (nth x 255) (nth x 511) (nth x 767) (nth x 1023)
+      (ldb0-vector-sum x 0.0) (ldb0-vector-abs-sum x 0.0)))
+  (defn ldb0-fingerprints (xs)
+    (if (eq (len xs) 0) (empty)
+      (cons (ldb0-fingerprint (head xs)) (ldb0-fingerprints (tail xs)))))
+  (defn ldb0-l1 (a b acc)
+    (if (eq (len a) 0) acc
+      (ldb0-l1 (tail a) (tail b) (add acc (abs (sub (head a) (head b)))))))
+  0)

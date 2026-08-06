@@ -1,0 +1,148 @@
+; kimi-kda.fk — STONE 47: Kimi Delta Attention's beating heart, the gated delta rule, form-native.
+;
+; Kimi K3 (Moonshot, 2.8T params, 896 experts / 16 active) names three attention moves that DS4 did not:
+; Kimi Delta Attention (KDA), Attention Residuals across depth, and a Gated MLA. Of the three, KDA is the
+; one that changes what a token's memory IS. DS4's MLA (Stones 36-41) caches one latent row per token and
+; attends over all of them — memory that only GROWS. KDA instead carries a matrix-valued STATE S that each
+; token EDITS: it reads S at the incoming key, measures how wrong S already is there (the "delta"), and
+; writes a correction. Old memory decays under a gate. That is why a delta net can run in O(1) state instead
+; of O(t) cache — and why it forgets, and why writing the same key twice OVERWRITES instead of piling up.
+;
+; This cell is the gated delta rule at its narrowest true width. Given, per token t:
+;   k_t (a key, dk long), v_t (a value, dv long), q_t (a query, dk long), a decay gate alpha_t in (0,1],
+;   and a write strength beta_t,
+; the state S (a dv-by-dk matrix, S applied to a dk vector gives a dv vector) advances:
+;   Spred = alpha_t * S_{t-1}                 ; the gate shrinks yesterday's memory
+;   pred  = Spred . k_t                       ; what S already believes this key maps to
+;   err   = v_t - pred                        ; the delta: how wrong that belief is
+;   S_t   = Spred + beta_t * outer(err, k_t)  ; a rank-1 correction, nothing else touched
+;   o_t   = S_t . q_t                          ; the read
+; At alpha=1, beta=1 this is the classic DeltaNet delta rule (fast-weight programmers); the gate is what
+; "gated delta" adds. This is the family KDA refines; see the APORON for exactly what is and is not claimed.
+;
+; THE FALSIFIER this cell is built around, named exactly: a delta net that does not actually correct is just
+; linear attention wearing a gate. kda-plain-step is that impostor — it ACCUMULATES outer(v,k) and never
+; reads S first. On a repeated key the two diverge by construction: delta returns the newest value, plain
+; returns the running sum. kimi-kda-band.fk hands both the same repeated key and demands they disagree, with
+; delta right and plain wrong — a falsifier that can itself fail, which is the only kind worth writing.
+;
+; twinblind: every claim here is CANONICAL. The delta rule has one right answer given (k,v,q,alpha,beta);
+; there is no recipe choice, no oracle, no learned weight anywhere in it. So a self-check IS a real
+; falsifier — the same standing dsv4-kv-cache.fk earns on the cache's growth law.
+;
+; APORON — THE DECLARED RADIUS. Read before believing the verdict.
+;   * WHAT IS PROVEN: the gated delta RECURRENCE and its arithmetic — overwrite-on-repeat, causality
+;     (o_t depends only on tokens <= t), the gate's geometric forgetting, the rank-1 write structure, and
+;     clean associative recall on orthogonal keys. Proven on fkwu --src at dk=dv=2 with binary-exact
+;     fixtures (values chosen so f64 arithmetic is exact and `eq` is honest), exactly as the Stone 41 cache
+;     band proves its growth law at hd=4.
+;   * WHAT IS NOT PROVEN, and is therefore NOT claimed: (1) KDA's EXACT proprietary gating — Kimi Delta
+;     Attention is Moonshot's refinement of the gated-delta family; this cell brings home the family's
+;     public recurrence, not a bit-exact reproduction of K3's kernel, which no open spec pins down. (2) The
+;     CHUNK-PARALLEL form (the WY / associative-scan rewrite that makes KDA fast on a GPU). The recurrence
+;     is the ground truth that form would have to match; it is a named-pending stone, not faked here. (3) A
+;     real head count, real dims, real weights, or any GPU witness. This is CPU list arithmetic — the SHAPE
+;     of the state law, the half dsv4-kv-cache.fk is to Stone 41's Metal arena.
+;   * NOT four-way. This is fkwu-witnessed by its own band, and named as such, never claimed Go=Rust=TS=fkwu.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/kimi-kda-band.fk (verdict 63).
+
+(do
+    ; ===========================================================================
+    ; vector arithmetic. Everything is a list of f64; loops are explicit recursion,
+    ; matching dsv4-kv-cache.fk rather than leaning on core's higher-order helpers.
+    ; ===========================================================================
+    (defn kda-dot (a b)
+        (if (eq (len a) 0) 0.0
+            (add (mul (head a) (head b)) (kda-dot (tail a) (tail b)))))
+    (defn kda-vadd (a b)
+        (if (eq (len a) 0) (empty)
+            (cons (add (head a) (head b)) (kda-vadd (tail a) (tail b)))))
+    (defn kda-vsub (a b)
+        (if (eq (len a) 0) (empty)
+            (cons (sub (head a) (head b)) (kda-vsub (tail a) (tail b)))))
+    (defn kda-scale (s v)
+        (if (eq (len v) 0) (empty)
+            (cons (mul s (head v)) (kda-scale s (tail v)))))
+
+    ; ===========================================================================
+    ; the state S is a list of dv rows, each row dk long. S . k applies row by row:
+    ; (S . k)_i = row_i . k. outer(u, w) is the dv-by-dk matrix whose row i is u_i * w.
+    ; ===========================================================================
+    (defn kda-mat-vec (rows k)
+        (if (eq (len rows) 0) (empty)
+            (cons (kda-dot (head rows) k) (kda-mat-vec (tail rows) k))))
+    (defn kda-outer (u w)
+        (if (eq (len u) 0) (empty)
+            (cons (kda-scale (head u) w) (kda-outer (tail u) w))))
+    (defn kda-mat-scale (s rows)
+        (if (eq (len rows) 0) (empty)
+            (cons (kda-scale s (head rows)) (kda-mat-scale s (tail rows)))))
+    (defn kda-mat-add (a b)
+        (if (eq (len a) 0) (empty)
+            (cons (kda-vadd (head a) (head b)) (kda-mat-add (tail a) (tail b)))))
+    ; a zero state of dv rows by dk cols
+    (defn kda-zrow (dk) (if (eq dk 0) (empty) (cons 0.0 (kda-zrow (sub dk 1)))))
+    (defn kda-zeros (dv dk) (if (eq dv 0) (empty) (cons (kda-zrow dk) (kda-zeros (sub dv 1) dk))))
+
+    ; ===========================================================================
+    ; THE GATED DELTA STEP. Returns the new state only; the read is a separate
+    ; question (kda-read) so causality can be probed without advancing the state.
+    ;   Spred = alpha S ; pred = Spred.k ; err = v - pred ; S' = Spred + beta*outer(err,k)
+    ; ===========================================================================
+    (defn kda-step (s k v alpha beta)
+        (do
+            (let spred (kda-mat-scale alpha s))
+            (let pred  (kda-mat-vec spred k))
+            (let err   (kda-vsub v pred))
+            (kda-mat-add spred (kda-outer (kda-scale beta err) k))))
+    ; the read: what this state returns for a query. o = S . q.
+    (defn kda-read (s q) (kda-mat-vec s q))
+
+    ; THE IMPOSTOR — plain linear attention. Accumulates outer(v,k); never reads S,
+    ; never gates. On a repeated key it PILES UP where delta OVERWRITES. This is the
+    ; control the band drives red; a delta net that matches it is not a delta net.
+    (defn kda-plain-step (s k v)
+        (kda-mat-add s (kda-outer v k)))
+
+    ; ===========================================================================
+    ; A STREAM. Fold kda-step over a list of tokens, each token (k v alpha beta).
+    ; kda-run returns the final state; kda-run-outs returns the o_t at each step
+    ; against each token's own query, which is the causal trace the band reads.
+    ; ===========================================================================
+    (defn kda-tok-k     (tk) (nth tk 0))
+    (defn kda-tok-v     (tk) (nth tk 1))
+    (defn kda-tok-alpha (tk) (nth tk 2))
+    (defn kda-tok-beta  (tk) (nth tk 3))
+    (defn kda-tok-q     (tk) (nth tk 4))
+    (defn kda-run (s toks)
+        (if (eq (len toks) 0) s
+            (kda-run (kda-step s (kda-tok-k (head toks)) (kda-tok-v (head toks))
+                                 (kda-tok-alpha (head toks)) (kda-tok-beta (head toks)))
+                     (tail toks))))
+    (defn kda-run-outs (s toks)
+        (if (eq (len toks) 0) (empty)
+            (do
+                (let s1 (kda-step s (kda-tok-k (head toks)) (kda-tok-v (head toks))
+                                    (kda-tok-alpha (head toks)) (kda-tok-beta (head toks))))
+                (cons (kda-read s1 (kda-tok-q (head toks)))
+                      (kda-run-outs s1 (tail toks))))))
+
+    ; ===========================================================================
+    ; falsifier helpers: exact equality on vectors and matrices. The fixtures are
+    ; binary-exact (halves and small integers), so `eq` is the honest test — any
+    ; drift is a bug, not a rounding, the same reasoning dkv-vec-eq stands on.
+    ; ===========================================================================
+    (defn kda-veq (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) 1
+                (if (eq (head a) (head b)) (kda-veq (tail a) (tail b)) 0))
+            0))
+    (defn kda-meq (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) 1
+                (if (eq (kda-veq (head a) (head b)) 1) (kda-meq (tail a) (tail b)) 0))
+            0))
+    0)

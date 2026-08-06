@@ -1,0 +1,63 @@
+; pdf-text-windowed.fk — read a PDF off disk and extract its text on fkwu itself,
+; with no host `read_file_bytes` carrier and no walker in the loop.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/form-fs.fk
+;           form-stdlib/file-byte-window.fk form-stdlib/inflate.fk form-stdlib/pdf-text.fk
+;
+; `pdf-text-file` (pdf-text.fk) reaches disk through `read_file_bytes`, which fkwu
+; does not carry — so that lane runs three-way on the Go/Rust/TS walkers and the
+; band names it as such. The bytes are reachable from here anyway: `read_file_slice`
+; is already in the optable, `file-byte-window.fk` bounds it to 4096 and decodes
+; NUL-safely through the Form-native `str-byte-at`, and `pdf-text-bytes` was always
+; the pure four-way half of the extractor. This cell walks the windows end to end
+; and hands the whole byte list to that half — so the PDF arrives without leaving
+; the kernel it arrives into.
+;
+; The window bound stays honest: nothing here reads more than 4096 bytes at a time.
+; What it does do is materialize the whole file as a byte list in memory, which is
+; exactly what `file-byte-window.fk`'s manifest declines to offer as a *host* read.
+; The refusal there is about the host carrier; the walk is Form.
+;
+; Named gaps: inherits every gap of pdf-text.fk (xref / object streams, octal and
+; control escapes, /ToUnicode remapping). This lane is fkwu-witnessed, never
+; four-way — host I/O is the one family fkwu carries and the walkers do not.
+;
+; Cost, measured on this checkout (receipts/2026-07-25-pdf-native-window-lane.md):
+; materializing bytes is linear once the counted walks of pdf-text.fk are in play.
+; A file's size is known before the walk starts (`fs-stat-size`), so nothing here
+; asks a list how long it is.
+
+(do
+    ; ---- one window's bytes, pushed onto a reversed accumulator ---------------
+    (defn pdfw-window-size () 4096)
+
+    (defn pdfw-push-window (slice i n acc)
+        (if (ge i n)
+            acc
+            (pdfw-push-window slice (add i 1) n (cons (str-byte-at slice i) acc))))
+
+    ; ---- walk the file, window by window, newest byte at the head ------------
+    (defn pdfw-read-loop (path off size acc)
+        (if (ge off size)
+            acc
+            (do (let remaining (sub size off))
+                (let want (if (gt remaining (pdfw-window-size)) (pdfw-window-size) remaining))
+                (let w (fbw-read-window path off want))
+                (let n (fbw-window-observed-len w))
+                (if (eq n 0)
+                    acc
+                    (pdfw-read-loop path (add off n) size
+                                    (pdfw-push-window (fbw-window-slice w) 0 n acc))))))
+
+    ; ---- path -> the file's bytes, in order ---------------------------------
+    (defn pdfw-file-size (path) (if (eq (fs-exists? path) 0) 0 (fs-stat-size path)))
+    (defn pdfw-file-bytes (path)
+        (do (let size (pdfw-file-size path))
+            (rev-onto-n (pdfw-read-loop path 0 size (list)) size (list))))
+
+    ; ---- THE ENTRY POINT: path -> extracted text as a byte list, on fkwu -----
+    (defn pdf-text-file-windowed (path)
+        (do (let size (pdfw-file-size path))
+            (pdf-text-bytes-n (rev-onto-n (pdfw-read-loop path 0 size (list)) size (list)) size)))
+
+    0)

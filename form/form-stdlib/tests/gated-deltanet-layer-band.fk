@@ -1,0 +1,100 @@
+; gated-deltanet-layer-band.fk — the assembled linear-attention layer carries
+; state forward, groups its heads, and gates its output, at toy dims.
+;
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/transformer-numerics.fk form-stdlib/llama-numerics.fk form-stdlib/kimi-kda.fk form-stdlib/gated-deltanet-conv.fk form-stdlib/gated-deltanet-gates.fk form-stdlib/gated-deltanet-layer.fk
+;
+; run: ./fkwu --src form/form-stdlib/tests/gated-deltanet-layer-band.fk   ; -> 255
+;
+; Verdict 255.
+;
+; Toy dims, chosen so every structure is exercised and none is coincidental:
+;   nk 2 key heads, dk 3 ; nv 4 value heads, dv 2 ; conv width 4
+;   concatenation = nk*dk + nk*dk + nv*dv = 6 + 6 + 8 = 20 channels
+; nv/nk = 2, so value heads 0,1 read key head 0 and 2,3 read key head 1.
+;
+; WHAT THIS BAND IS FOR. Every claim below is about the ASSEMBLY — that state
+; threads, that the grouping routes, that the gate bites — and none is a pinned
+; output vector. The arithmetic inside each piece is already witnessed by its own
+; band (kimi-kda 63, conv 127, gates 511); pinning numbers here would only
+; re-assert those through a longer pipe. What no other band can see is whether
+; the pieces were wired in the right order and the state actually carried.
+
+(do
+    (defn gdlb-score (ok bit) (if ok bit 0))
+    (defn gdlb-abs (x) (if (lt x 0.0) (sub 0.0 x) x))
+    (defn gdlb-flat (hs) (if (eq (len hs) 0) (empty) (gdl-cat (head hs) (gdlb-flat (tail hs)))))
+    (defn gdlb-maxdev (a b)
+        (if (eq (len a) 0) 0.0
+            (do (let d (gdlb-abs (sub (head a) (head b))))
+                (let r (gdlb-maxdev (tail a) (tail b)))
+                (if (gt d r) d r))))
+    (defn gdlb-anybig (xs)
+        (if (eq (len xs) 0) 0 (if (gt (gdlb-abs (head xs)) 1e-9) 1 (gdlb-anybig (tail xs)))))
+    (defn gdlb-ramp (i n acc)
+        (if (ge i n) (reverse acc)
+            (gdlb-ramp (add i 1) n (cons (sub (div (mul 1.0 (mod (mul i 7) 13)) 6.0) 1.0) acc))))
+
+    (defn gated-deltanet-layer-band ()
+        (do
+    (let NK 2) (let DK 3) (let NV 4) (let DV 2) (let NCH 20)
+    (let W (list 0.25 (sub 0.0 0.5) 0.75 1.5))
+    (let S0 (gdl-state0 NCH 4 NV DV DK))
+    (let X1 (gdlb-ramp 0 NCH (empty)))
+    (let X2 (gdlb-ramp 5 (add NCH 5) (empty)))
+    (let AS (list 0.5 (sub 0.0 0.5) 1.0 0.0))
+    (let BS (list 1.0 0.5 (sub 0.0 1.0) 2.0))
+    (let ZS (list (list 0.7 (sub 0.0 0.3)) (list 1.1 0.2) (list (sub 0.0 0.6) 0.9) (list 0.4 1.3)))
+
+    (let R1 (gdl-step S0 W X1 AS BS ZS 0.0 1.0 NK DK NV DV))
+    (let O1 (gdl-step-out R1))
+    ; shape: nv heads, each dv long
+    (let c0 (gdlb-score (if (eq (len O1) NV) (eq (len (head O1)) DV) 0) 1))
+    ; the layer is not inert on the first token
+    (let c1 (gdlb-score (eq (gdlb-anybig (gdlb-flat O1)) 1) 2))
+
+    ; STATE THREADS. Token 2 run with token 1's carried state must differ from
+    ; token 2 run from a fresh state. If the conv window or the delta states are
+    ; not carried, these coincide and the layer is memoryless while still
+    ; producing plausible numbers.
+    (let R2 (gdl-step (gdl-step-state R1) W X2 AS BS ZS 0.0 1.0 NK DK NV DV))
+    (let R2f (gdl-step S0 W X2 AS BS ZS 0.0 1.0 NK DK NV DV))
+    (let c2 (gdlb-score (gt (gdlb-maxdev (gdlb-flat (gdl-step-out R2))
+                                         (gdlb-flat (gdl-step-out R2f))) 1e-6) 4))
+
+    ; THE GROUPING ROUTES. Value heads 0 and 1 share key head 0, and 2,3 share
+    ; key head 1 — but each value head has its OWN state and its own v, so their
+    ; outputs must differ. Equal outputs would mean the group collapsed.
+    (let c3 (gdlb-score (gt (gdlb-maxdev (gdl-nth0 O1 0) (gdl-nth0 O1 1)) 1e-9) 8))
+
+    ; THE OUTPUT GATE BITES. silu(0) = 0, so an all-zero gate must zero the
+    ; output exactly — not merely shrink it.
+    (let Z0 (list (list 0.0 0.0) (list 0.0 0.0) (list 0.0 0.0) (list 0.0 0.0)))
+    (let RZ (gdl-step S0 W X1 AS BS Z0 0.0 1.0 NK DK NV DV))
+    (let c4 (gdlb-score (eq (gdlb-anybig (gdlb-flat (gdl-step-out RZ))) 0) 16))
+
+    ; THE CONV IS IN THE PATH. Changing the taps must change the output; a conv
+    ; that was built and then never applied would leave this bit dark.
+    (let W2 (list 1.0 0.0 0.0 0.0))
+    (let RW (gdl-step S0 W2 X1 AS BS ZS 0.0 1.0 NK DK NV DV))
+    (let c5 (gdlb-score (gt (gdlb-maxdev (gdlb-flat O1) (gdlb-flat (gdl-step-out RW))) 1e-6) 32))
+
+    ; THE DECAY GATE IS IN THE PATH. dt_bias moves alpha, so it must move the
+    ; SECOND token's output — and must NOT move the first, whose state starts at
+    ; zero and has nothing to decay. Both halves, because only the pair
+    ; distinguishes "wired" from "wired to the wrong place".
+    (let R1d (gdl-step S0 W X1 AS BS ZS 0.0 6.0 NK DK NV DV))
+    (let R2d (gdl-step (gdl-step-state R1d) W X2 AS BS ZS 0.0 6.0 NK DK NV DV))
+    (let c6 (gdlb-score (if (lt (gdlb-maxdev (gdlb-flat O1) (gdlb-flat (gdl-step-out R1d))) 1e-12)
+                            (gt (gdlb-maxdev (gdlb-flat (gdl-step-out R2))
+                                             (gdlb-flat (gdl-step-out R2d))) 1e-9) 0) 64))
+
+    ; q AND k ARE NORMALIZED AND v IS NOT. Scaling the v slice of the input
+    ; changes the output; the layer must not be scale-invariant on the value
+    ; side the way it is on the key side.
+    (let XV (gdl-cat (gdc-take X1 12) (gdg-scale 3.0 (gdc-drop X1 12))))
+    (let RV (gdl-step S0 W XV AS BS ZS 0.0 1.0 NK DK NV DV))
+    (let c7 (gdlb-score (gt (gdlb-maxdev (gdlb-flat O1) (gdlb-flat (gdl-step-out RV))) 1e-6) 128))
+
+    (add c0 (add c1 (add c2 (add c3 (add c4 (add c5 (add c6 c7))))))))
+    )
+    (gated-deltanet-layer-band))

@@ -1,0 +1,180 @@
+; native-generate.fk — the voice past position 0: a real native autoregressive loop.
+; native-decode-step.fk proved ONE token at pos 0 (RoPE identity, attention-over-one). This
+; adds the two things a sequence needs, both native and oracle-checkable:
+;   · RoPE at arbitrary position — sin/cos as Form Taylor (range-reduced), the fexp discipline;
+;   · causal multi-key attention — real softmax (math_exp) over a growing key/value cache.
+; Each step's LM head still dispatches on the RTX (cuda_matvec_f32), so every generated token
+; carries a bit-exact GPU receipt. The whole sequence is checked token-for-token against the
+; tk-emit-llama projection runner (the independent oracle) — a divergence shows as a wrong word.
+;
+; preludes (cat before this cell): cognition/native-decode-step.fk (reuses nds-f32/nds-i32/
+;   nds-mv/nds-rms/nds-swiglu/nds-addz/nds-floats-loop/nds-bases/nds-token-text/nds-best-loop/
+;   nds-rev). No core.fk (int printer is local) — keeps under the function-table ceiling.
+;
+; Honest floor: f64 walker forward (the projection runner is a sanity oracle, not a bit-oracle);
+; O(seq^2) recompute (no persisted KV cache — correctness over speed; the asm f64 lane is the
+; named speed stone); the sin/cos worst-case error ~1e-4 near +/-pi, negligible under greedy argmax.
+(do
+    ; ── local list plumbing ──────────────────────────────────────────────────
+    (defn ng-take (n xs)
+        (if (or (le n 0) (eq (len xs) 0)) (empty)
+            (cons (head xs) (ng-take (sub n 1) (tail xs)))))
+    (defn ng-last (xs) (if (eq (len (tail xs)) 0) (head xs) (ng-last (tail xs))))
+    (defn ng-snoc (xs x)
+        (if (eq (len xs) 0) (cons x (empty)) (cons (head xs) (ng-snoc (tail xs) x))))
+    (defn ng-slice (xs start n) (ng-take n (ng-drop start xs)))
+    (defn ng-drop (start xs) (if (le start 0) xs (ng-drop (sub start 1) (tail xs))))
+    (defn ng-ldot (a b)
+        (if (eq (len a) 0) 0.0 (add (mul (head a) (head b)) (ng-ldot (tail a) (tail b)))))
+    (defn ng-cat (a b) (if (eq (len a) 0) b (cons (head a) (ng-cat (tail a) b))))
+
+    ; ── sin / cos: range-reduce to [-pi,pi], 6-term Horner Taylor (r2 passed as an ARG —
+    ;    a do/let-bound r2 reused across the deep nest hangs the walker; a param slot is fine) ─
+    (defn ng-2pi () 6.283185307179586)
+    (defn ng-ln1e4 () 9.210340371976182)
+    (defn ng-reduce (x) (sub x (mul (ng-2pi) (math_floor (add (div x (ng-2pi)) 0.5)))))
+    (defn ng-sin-s (r2)
+        (sub 1.0 (mul (div r2 6.0) (sub 1.0 (mul (div r2 20.0) (sub 1.0 (mul (div r2 42.0)
+            (sub 1.0 (mul (div r2 72.0) (sub 1.0 (mul (div r2 110.0) (sub 1.0 (div r2 156.0)))))))))))))
+    (defn ng-cos-s (r2)
+        (sub 1.0 (mul (div r2 2.0) (sub 1.0 (mul (div r2 12.0) (sub 1.0 (mul (div r2 30.0)
+            (sub 1.0 (mul (div r2 56.0) (sub 1.0 (mul (div r2 90.0) (sub 1.0 (div r2 132.0)))))))))))))
+    (defn ng-sin (x) (mul (ng-reduce x) (ng-sin-s (mul (ng-reduce x) (ng-reduce x)))))
+    (defn ng-cos (x) (ng-cos-s (mul (ng-reduce x) (ng-reduce x))))
+
+    ; ── RoPE: rotate adjacent pairs (i,i+1); head_dim=i mod hd; freq=10000^(-head_dim/hd);
+    ;    angle=pos*freq; rotate while i<limit (dim for q, kvd for k), else pass through ──
+    (defn ng-rope-go (xs i pos hd limit acc)
+        (if (eq (len xs) 0) (nds-rev acc (empty))
+            (do (let v0 (head xs))
+                (let v1 (head (tail xs)))
+                (let ang (mul (mul 1.0 pos)
+                    (math_exp (mul (sub 0.0 (div (mul 1.0 (mod i hd)) (mul 1.0 hd))) (ng-ln1e4)))))
+                (let c (ng-cos ang))
+                (let sn (ng-sin ang))
+                (let n0 (if (lt i limit) (sub (mul v0 c) (mul v1 sn)) v0))
+                (let n1 (if (lt i limit) (add (mul v0 sn) (mul v1 c)) v1))
+                (ng-rope-go (tail (tail xs)) (add i 2) pos hd limit (cons n1 (cons n0 acc))))))
+    (defn ng-rope (xs pos hd limit) (ng-rope-go xs 0 pos hd limit (empty)))
+
+    ; ── softmax over a scores list (max-subtract, math_exp, normalize) ─────────
+    (defn ng-lmax (xs m) (if (eq (len xs) 0) m (ng-lmax (tail xs) (if (gt (head xs) m) (head xs) m))))
+    (defn ng-exps (xs m acc)
+        (if (eq (len xs) 0) (nds-rev acc (empty))
+            (ng-exps (tail xs) m (cons (math_exp (sub (head xs) m)) acc))))
+    (defn ng-lsum (xs) (if (eq (len xs) 0) 0.0 (add (head xs) (ng-lsum (tail xs)))))
+    (defn ng-scale (xs r acc)
+        (if (eq (len xs) 0) (nds-rev acc (empty)) (ng-scale (tail xs) r (cons (mul (head xs) r) acc))))
+    (defn ng-softmax (scores)
+        (do (let e (ng-exps scores (ng-lmax scores (sub 0.0 1000000.0)) (empty)))
+            (ng-scale e (div 1.0 (ng-lsum e)) (empty))))
+
+    ; ── one head's attention: scores over the key prefix, softmax, weighted value sum ──
+    (defn ng-scores (qh kpre kvoff hd inv acc)
+        (if (eq (len kpre) 0) (nds-rev acc (empty))
+            (ng-scores qh (tail kpre) kvoff hd inv
+                (cons (mul (ng-ldot qh (ng-slice (head kpre) kvoff hd)) inv) acc))))
+    ; out[d] = sum_j alpha_j * v_j[kvoff+d]
+    (defn ng-wsum (alphas vpre kvoff d acc-unused)
+        (if (eq (len alphas) 0) 0.0
+            (add (mul (head alphas) (nth (head vpre) (add kvoff d)))
+                 (ng-wsum (tail alphas) (tail vpre) kvoff d 0))))
+    (defn ng-headout (alphas vpre kvoff d hd acc)
+        (if (ge d hd) (nds-rev acc (empty))
+            (ng-headout alphas vpre kvoff (add d 1) hd
+                (cons (ng-wsum alphas vpre kvoff d 0) acc))))
+    (defn ng-attend-heads (q kpre vpre h heads hd kvmul inv acc)
+        (if (ge h heads) acc
+            (do (let kvoff (mul (div h kvmul) hd))
+                (let qh (ng-slice q (mul h hd) hd))
+                (let alphas (ng-softmax (ng-scores qh kpre kvoff hd inv (empty))))
+                (ng-attend-heads q kpre vpre (add h 1) heads hd kvmul inv
+                    (ng-cat acc (ng-headout alphas vpre kvoff 0 hd (empty)))))))
+    (defn ng-attend (q kpre vpre heads hd kvmul)
+        (ng-attend-heads q kpre vpre 0 heads hd kvmul
+            (div 1.0 (math_sqrt (mul 1.0 hd))) (empty)))
+
+    ; ── per-position q,k,v (RoPE applied), collected in position order ─────────
+    (defn ng-qkv (s xs p dim kvd hd bs acc)
+        (if (eq (len xs) 0) (nds-rev acc (empty))
+            (do (let xb (nds-rms s (nth bs 0) (head xs) dim))
+                (let q (ng-rope (nds-mv s (nth bs 1) dim dim xb) p hd dim))
+                (let k (ng-rope (nds-mv s (nth bs 2) kvd dim xb) p hd kvd))
+                (let v (nds-mv s (nth bs 3) kvd dim xb))
+                (ng-qkv s (tail xs) (add p 1) dim kvd hd bs
+                    (cons (list q k v) acc)))))
+    (defn ng-qs (qkv) (if (eq (len qkv) 0) (empty) (cons (nth (head qkv) 0) (ng-qs (tail qkv)))))
+    (defn ng-ks (qkv) (if (eq (len qkv) 0) (empty) (cons (nth (head qkv) 1) (ng-ks (tail qkv)))))
+    (defn ng-vs (qkv) (if (eq (len qkv) 0) (empty) (cons (nth (head qkv) 2) (ng-vs (tail qkv)))))
+
+    ; ── step B: attention + wo + residual + ffn, per position, causal over prefix p+1 ──
+    (defn ng-posB (s xs qs ks vs p dim kvd hid hd heads kvmul bs acc)
+        (if (eq (len xs) 0) (nds-rev acc (empty))
+            (do (let att (ng-attend (head qs) (ng-take (add p 1) ks) (ng-take (add p 1) vs)
+                            heads hd kvmul))
+                (let x1 (nds-addz (head xs) (nds-mv s (nth bs 4) dim dim att) dim (empty)))
+                (let xb3 (nds-rms s (nth bs 5) x1 dim))
+                (let h1 (nds-mv s (nth bs 6) hid dim xb3))
+                (let h3 (nds-mv s (nth bs 8) hid dim xb3))
+                (let hh (nds-swiglu h1 h3 hid (empty)))
+                (let x2 (nds-addz x1 (nds-mv s (nth bs 7) dim hid hh) dim (empty)))
+                (ng-posB s (tail xs) (tail qs) ks vs (add p 1) dim kvd hid hd heads kvmul bs
+                    (cons x2 acc)))))
+    (defn ng-layer-seq (s l xs dim kvd hid hd heads kvmul layers ra0)
+        (do (let bs (nds-bases l dim kvd hid layers ra0))
+            (let qkv (ng-qkv s xs 0 dim kvd hd bs (empty)))
+            (ng-posB s xs (ng-qs qkv) (ng-ks qkv) (ng-vs qkv) 0
+                dim kvd hid hd heads kvmul bs (empty))))
+    (defn ng-run-layers (s l layers xs dim kvd hid hd heads kvmul ra0)
+        (if (eq l layers) xs
+            (ng-run-layers s (add l 1) layers
+                (ng-layer-seq s l xs dim kvd hid hd heads kvmul layers ra0)
+                dim kvd hid hd heads kvmul ra0)))
+
+    (defn ng-embed-seq (s toks dim t-emb)
+        (if (eq (len toks) 0) (empty)
+            (cons (nds-floats-loop s (add t-emb (mul (head toks) (mul dim 4))) dim (empty))
+                  (ng-embed-seq s (tail toks) dim t-emb))))
+
+    ; ── one step: forward the whole sequence, LM head on the RTX, argmax ──────
+    (defn ng-i2s-p (n) (if (eq n 0) "" (str_concat (ng-i2s-p (div n 10)) (byte_to_str (add 48 (mod n 10))))))
+    (defn ng-i2s (n) (if (eq n 0) "0" (ng-i2s-p n)))
+    (defn ng-next (s toks dim kvd hid hd heads kvmul layers vocab t-emb ra0 rfin embflat)
+        (do (let xs (ng-run-layers s 0 layers (ng-embed-seq s toks dim t-emb)
+                        dim kvd hid hd heads kvmul ra0))
+            (let xf (nds-rms s rfin (ng-last xs) dim))
+            (let r (cuda_matvec_f32 embflat xf))
+            (if (eq (len r) 0) (sub 0 1) (nds-best-loop (tail (tail r)) 1 0 (head (tail r))))))
+
+    ; ── the greedy loop: append each native token, accumulate the decoded text ─
+    (defn ng-loop (s toks steps dim kvd hid hd heads kvmul layers vocab t-emb ra0 rfin embflat tok txt)
+        (if (eq steps 0) txt
+            (do (let nx (ng-next s toks dim kvd hid hd heads kvmul layers vocab t-emb ra0 rfin embflat))
+                (if (lt nx 0) (str_concat txt " [gpu-refused]")
+                    (ng-loop s (ng-snoc toks nx) (sub steps 1) dim kvd hid hd heads kvmul layers
+                        vocab t-emb ra0 rfin embflat tok
+                        (str_concat txt (nds-token-text tok nx)))))))
+
+    (defn native-generate (ckpt tokpath steps)
+        (do (let s (read_file ckpt))
+            (let tok (read_file tokpath))
+            (let dim (nds-i32 s 0))
+            (let hid (nds-i32 s 4))
+            (let layers (nds-i32 s 8))
+            (let heads (nds-i32 s 12))
+            (let kvh (nds-i32 s 16))
+            (let vocab (nds-i32 s 20))
+            (let hd (div dim heads))
+            (let kvd (mul kvh hd))
+            (let kvmul (div heads kvh))
+            (let t-emb 28)
+            (let ra0 (add t-emb (mul (mul vocab dim) 4)))
+            (let rfin (add t-emb (mul 4 (add (mul vocab dim)
+                (mul layers (add (mul dim 2) (add (mul (mul dim dim) 2)
+                    (add (mul (mul kvd dim) 2) (mul (mul hid dim) 3)))))))))
+            (let embflat (nds-floats-loop s t-emb (mul vocab dim) (empty)))
+            (str_concat "native-generated:["
+                (str_concat (ng-loop s (cons 1 (empty)) steps dim kvd hid hd heads kvmul layers
+                                vocab t-emb ra0 rfin embflat tok "")
+                    "]"))))
+    0)

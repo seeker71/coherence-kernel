@@ -1,0 +1,130 @@
+; jit-live-carrier-probe.fk - live native_call_test carrier probe.
+;
+; This is the compact live observation peer for the remaining host membrane.
+; It does not expose arbitrary byte ingress and does not add C/Rust. It probes
+; the existing `native_call_test` carrier, accepts either correct execution or
+; honest unavailability, and rejects mismatches before any completion claim.
+
+(do
+    (defn jlcp-native () 1)
+    (defn jlcp-deopt () 2)
+    (defn jlcp-exception () 3)
+    (defn jlcp-rewalk () 4)
+    (defn jlcp-melt () 5)
+    (defn jlcp-reject () 6)
+
+    (defn jlcp-ok () 1)
+    (defn jlcp-unavailable () 2)
+    (defn jlcp-mismatch () 3)
+
+    (defn jlcp-status (arg observed)
+        (if (eq observed -1)
+            (jlcp-unavailable)
+            (if (eq observed (add arg 1)) (jlcp-ok) (jlcp-mismatch))))
+    (defn jlcp-admissible? (status)
+        (if (eq status (jlcp-ok)) 1 (if (eq status (jlcp-unavailable)) 1 0)))
+    (defn jlcp-complete? (status) (if (eq status (jlcp-ok)) 1 0))
+
+    ; probe = ("live-carrier-probe" arg observed source maps wx generation)
+    (defn jlcp-probe (arg observed source maps wx generation)
+        (list "live-carrier-probe" arg observed source maps wx generation))
+    (defn jlcp-probe? (p) (if (eq (len p) 7) (str_eq (nth p 0) "live-carrier-probe") 0))
+    (defn jlcp-arg (p) (nth p 1))
+    (defn jlcp-observed (p) (nth p 2))
+    (defn jlcp-source (p) (nth p 3))
+    (defn jlcp-maps (p) (nth p 4))
+    (defn jlcp-wx (p) (nth p 5))
+    (defn jlcp-generation (p) (nth p 6))
+    (defn jlcp-probe-status (p) (jlcp-status (jlcp-arg p) (jlcp-observed p)))
+
+    (defn jlcp-ready? (p)
+        (if (eq (jlcp-probe? p) 1)
+            (if (eq (jlcp-admissible? (jlcp-probe-status p)) 1)
+                (if (eq (jlcp-source p) 1)
+                    (if (eq (jlcp-maps p) 1)
+                        (if (eq (jlcp-wx p) 1)
+                            (if (gt (jlcp-generation p) 0) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jlcp-action (p guard-ok runtime-ok invalidated parity-ok stale)
+        (if (eq (jlcp-ready? p) 1)
+            (if (eq (jlcp-probe-status p) (jlcp-unavailable))
+                (jlcp-deopt)
+                (if (eq stale 1)
+                    (jlcp-melt)
+                    (if (eq invalidated 1)
+                        (jlcp-rewalk)
+                        (if (eq guard-ok 1)
+                            (if (eq runtime-ok 1)
+                                (if (eq parity-ok 1) (jlcp-native) (jlcp-deopt))
+                                (jlcp-exception))
+                            (jlcp-deopt)))))
+            (jlcp-reject)))
+
+    (defn jlcp-live41 () (jlcp-probe 41 (native_call_test 41) 1 1 1 1))
+    (defn jlcp-live99 () (jlcp-probe 99 (native_call_test 99) 1 1 1 1))
+    (defn jlcp-ok41 () (jlcp-probe 41 42 1 1 1 1))
+    (defn jlcp-unavailable41 () (jlcp-probe 41 -1 1 1 1 1))
+    (defn jlcp-mismatch41 () (jlcp-probe 41 0 1 1 1 1))
+    (defn jlcp-no-source () (jlcp-probe 41 42 0 1 1 1))
+    (defn jlcp-no-maps () (jlcp-probe 41 42 1 0 1 1))
+    (defn jlcp-no-wx () (jlcp-probe 41 42 1 1 0 1))
+    (defn jlcp-zero-generation () (jlcp-probe 41 42 1 1 1 0))
+
+    (defn jlcp-current-action-ok? (p)
+        (if (eq (jlcp-probe-status p) (jlcp-ok))
+            (if (eq (jlcp-action p 1 1 0 1 0) (jlcp-native)) 1 0)
+            (if (eq (jlcp-probe-status p) (jlcp-unavailable))
+                (if (eq (jlcp-action p 1 1 0 1 0) (jlcp-deopt)) 1 0)
+                0)))
+
+    (defn jlcp-bit (cond bit) (if cond bit 0))
+    (defn jit-live-carrier-probe-check ()
+        (do
+            (let live41 (jlcp-live41))
+            (let live99 (jlcp-live99))
+            (add
+                (jlcp-bit (eq (jlcp-admissible? (jlcp-probe-status live41)) 1) 1)
+                (add
+                    (jlcp-bit (eq (jlcp-admissible? (jlcp-probe-status live99)) 1) 2)
+                    (add
+                        (jlcp-bit (eq (jlcp-probe-status live41) (jlcp-probe-status live99)) 4)
+                        (add
+                            (jlcp-bit (eq (jlcp-ready? live41) 1) 8)
+                            (add
+                                (jlcp-bit (eq (jlcp-current-action-ok? live41) 1) 16)
+                                (add
+                                    (jlcp-bit (eq (jlcp-complete? (jlcp-ok)) 1) 32)
+                                    (add
+                                        (jlcp-bit (eq (jlcp-action (jlcp-ok41) 1 1 0 1 0) (jlcp-native)) 64)
+                                        (add
+                                            (jlcp-bit (eq (jlcp-action (jlcp-unavailable41) 1 1 0 1 0) (jlcp-deopt)) 128)
+                                            (add
+                                                (jlcp-bit (eq (jlcp-action (jlcp-mismatch41) 1 1 0 1 0) (jlcp-reject)) 256)
+                                                (add
+                                                    (jlcp-bit (eq (jlcp-action (jlcp-ok41) 0 1 0 1 0) (jlcp-deopt)) 512)
+                                                    (add
+                                                        (jlcp-bit (eq (jlcp-action (jlcp-ok41) 1 0 0 1 0) (jlcp-exception)) 1024)
+                                                        (add
+                                                            (jlcp-bit (eq (jlcp-action (jlcp-ok41) 1 1 1 1 0) (jlcp-rewalk)) 2048)
+                                                            (add
+                                                                (jlcp-bit (eq (jlcp-action (jlcp-ok41) 1 1 0 0 0) (jlcp-deopt)) 4096)
+                                                                (add
+                                                                    (jlcp-bit (eq (jlcp-action (jlcp-ok41) 1 1 0 1 1) (jlcp-melt)) 8192)
+                                                                    (add
+                                                                        (jlcp-bit (eq (jlcp-ready? (jlcp-no-source)) 0) 16384)
+                                                                        (add
+                                                                            (jlcp-bit (eq (jlcp-ready? (jlcp-no-maps)) 0) 32768)
+                                                                            (add
+                                                                                (jlcp-bit (eq (jlcp-ready? (jlcp-no-wx)) 0) 65536)
+                                                                                (add
+                                                                                    (jlcp-bit (eq (jlcp-ready? (jlcp-zero-generation)) 0) 131072)
+                                                                                    (add
+                                                                                        (jlcp-bit (eq (jlcp-admissible? (jlcp-mismatch)) 0) 262144)
+                                                                                        (jlcp-bit (eq (jlcp-current-action-ok? live99) 1) 524288)))))))))))))))))))))
+
+    0)

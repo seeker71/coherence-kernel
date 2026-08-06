@@ -1,0 +1,281 @@
+; lingbot-real-life.fk — native-resolution, multi-frame LingBot examples.
+;
+; The first live pipeline proved the complete movement over two 16x16 frames.
+; This organ scales the same body to 24-frame, 518-pixel-wide indoor/outdoor
+; sequences from the pinned upstream repository. A bounded 8x6 tiled encoder
+; visits EVERY source pixel, emits 48 regional tokens plus one frame token, and
+; streams those through the operational GCA cache. Consecutive frames produce
+; composed camera trajectories, 64 relative-depth points per transition, one
+; accumulated world cloud, and ordinary native world-model object rows.
+;
+; The tiles are a deliberate compute budget, not resized-image theater: their
+; boundaries partition width x height exactly, and each tile accumulates every
+; RGB pixel inside it before projection. The 24 selected frames span hundreds
+; of source frames at their original 518x294 or 518x392 resolution.
+;
+; Honest boundary: the visual block is the small native ViT and the geometry is
+; classical relative geometry. Released end-to-end learned LingBot parity stays
+; 0; these examples measure the body's real behavior, not the paper's model.
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/form-fs.fk form/form-stdlib/transformer-numerics.fk cognition/transformer-block.fk model/geometric-camera.fk model/lingbot-vision-input.fk model/lingbot-gca-runtime.fk model/lingbot-geometry-heads.fk model/lingbot-map-runtime.fk form/form-stdlib/world-model-lingbot-map.fk
+
+(do
+  ; ---- deterministic 24-frame decode paths --------------------------------
+  (defn lre-pad6 (n)
+    (if (lt n 10) (str_concat "00000" (int_to_str n))
+      (if (lt n 100) (str_concat "0000" (int_to_str n))
+        (if (lt n 1000) (str_concat "000" (int_to_str n))
+          (if (lt n 10000) (str_concat "00" (int_to_str n))
+            (if (lt n 100000) (str_concat "0" (int_to_str n))
+              (int_to_str n)))))))
+  (defn lre-decoded-path (prefix i)
+    (str_concat prefix (str_concat (lre-pad6 i) ".bmp")))
+  (defn lre-decoded-paths-go (prefix i count)
+    (if (gt i count) (empty)
+      (cons (lre-decoded-path prefix i)
+            (lre-decoded-paths-go prefix (add i 1) count))))
+  (defn lre-decoded-paths (prefix count)
+    (lre-decoded-paths-go prefix 1 count))
+  (defn lre-output-pattern (prefix) (str_concat prefix "%06d.bmp"))
+
+  ; ---- every-pixel tiled projection ---------------------------------------
+  ; stats = (sum-r sum-g sum-b signed-x-luma signed-y-luma pixel-count)
+  (defn lre-tile-row (bytes x x1 y cx cy sr sg sb sx sy count)
+    (if (ge x x1)
+      (list sr sg sb sx sy count)
+      (do
+        (let rgb (lvi-rgb-at bytes x y))
+        (let r (nth rgb 0))
+        (let g (nth rgb 1))
+        (let b (nth rgb 2))
+        (let lum (add (mul 77 r) (add (mul 150 g) (mul 29 b))))
+        (lre-tile-row bytes (add x 1) x1 y cx cy
+          (add sr r) (add sg g) (add sb b)
+          (add sx (mul (sub (mul x 1.0) cx) lum))
+          (add sy (mul (sub (mul y 1.0) cy) lum))
+          (add count 1)))))
+  (defn lre-tile-rows (bytes y y1 x0 x1 cx cy stats)
+    (if (ge y y1)
+      stats
+      (do
+        (let next
+          (lre-tile-row bytes x0 x1 y cx cy
+            (nth stats 0) (nth stats 1) (nth stats 2)
+            (nth stats 3) (nth stats 4) (nth stats 5)))
+        (lre-tile-rows bytes (add y 1) y1 x0 x1 cx cy next))))
+  (defn lre-tile-stats (bytes x0 x1 y0 y1)
+    (do
+      (let cx (div (sub (add x0 x1) 1.0) 2.0))
+      (let cy (div (sub (add y0 y1) 1.0) 2.0))
+      (lre-tile-rows bytes y0 y1 x0 x1 cx cy (list 0 0 0 0.0 0.0 0))))
+
+  ; Pure projection seam used by the four-way band.
+  (defn lre-project-tile (stats tile-width tile-height tx ty cols rows)
+    (do
+      (let count (nth stats 5))
+      (let rgb-den (mul (mul count 1.0) 255.0))
+      (let moment-x-den (mul (mul rgb-den 256.0) (mul tile-width 1.0)))
+      (let moment-y-den (mul (mul rgb-den 256.0) (mul tile-height 1.0)))
+      (list
+        (div (add (nth stats 0) (add (nth stats 1) (nth stats 2)))
+             (mul 3.0 rgb-den))
+        (div (sub (nth stats 0) (nth stats 2)) rgb-den)
+        (add (div (nth stats 3) moment-x-den)
+             (div (mul tx 1.0) (mul cols 1.0)))
+        (add (div (nth stats 4) moment-y-den)
+             (div (mul ty 1.0) (mul rows 1.0))))))
+
+  (defn lre-tile-token (bytes tx ty cols rows)
+    (do
+      (let width (lvi-width bytes))
+      (let height (lvi-height bytes))
+      (let x0 (div (mul tx width) cols))
+      (let x1 (div (mul (add tx 1) width) cols))
+      (let y0 (div (mul ty height) rows))
+      (let y1 (div (mul (add ty 1) height) rows))
+      (lre-project-tile (lre-tile-stats bytes x0 x1 y0 y1)
+        (sub x1 x0) (sub y1 y0) tx ty cols rows)))
+  (defn lre-frame-tokens-go (bytes cols rows i out)
+    (if (eq i (mul cols rows))
+      (reverse out)
+      (lre-frame-tokens-go bytes cols rows (add i 1)
+        (cons (lre-tile-token bytes (mod i cols) (div i cols) cols rows) out))))
+  (defn lre-frame-tokens (bytes cols rows)
+    (lre-frame-tokens-go bytes cols rows 0 (empty)))
+  (defn lre-frame-covered-pixels-go (bytes cols rows i acc)
+    (if (eq i (mul cols rows)) acc
+      (do
+        (let tx (mod i cols))
+        (let ty (div i cols))
+        (let x0 (div (mul tx (lvi-width bytes)) cols))
+        (let x1 (div (mul (add tx 1) (lvi-width bytes)) cols))
+        (let y0 (div (mul ty (lvi-height bytes)) rows))
+        (let y1 (div (mul (add ty 1) (lvi-height bytes)) rows))
+        (lre-frame-covered-pixels-go bytes cols rows (add i 1)
+          (add acc (mul (sub x1 x0) (sub y1 y0)))))))
+  (defn lre-frame-covered-pixels (bytes cols rows)
+    (lre-frame-covered-pixels-go bytes cols rows 0 0))
+
+  (defn lre-encode-images-go (images cols rows released-token)
+    (if (eq (len images) 0) (empty)
+      (do
+        (let tokens (lre-frame-tokens (lvi-image-bytes (head images)) cols rows))
+        (let encoded (lvi-vit-encode tokens))
+        (cons (lmr-inject-camera-token encoded released-token)
+              (lre-encode-images-go (tail images) cols rows released-token)))))
+  (defn lre-encode-images (images cols rows released-token)
+    (lre-encode-images-go images cols rows released-token))
+
+  ; ---- 24-frame GCA stream -------------------------------------------------
+  ; stream result = (final-cache traces last-attended-vector)
+  ; trace = (time retained-rows anchor-frames trajectory-frames window-frames first-vector)
+  (defn lre-stream-go (frames state time anchors window traces last-vector)
+    (if (eq (len frames) 0)
+      (list state (reverse traces) last-vector)
+      (do
+        (let step (lgr-step state time (head frames) anchors window))
+        (let next (nth step 1))
+        (let first-vector (head (nth step 0)))
+        (let trace
+          (list time (lgr-cache-token-count next)
+            (len (lgr-anchors next)) (len (lgr-trajectory next))
+            (len (lgr-window next)) first-vector))
+        (lre-stream-go (tail frames) next (add time 1) anchors window
+          (cons trace traces) first-vector))))
+  (defn lre-stream (frames anchors window)
+    (lre-stream-go frames (lgr-cache-empty) 0 anchors window (empty) (list 0 0 0 0)))
+
+  ; ---- composed trajectory + accumulated cloud ----------------------------
+  (defn lre-push-all (rows acc)
+    (if (eq (len rows) 0) acc
+      (lre-push-all (tail rows) (cons (head rows) acc))))
+  ; geom result = (poses cloud same-cost matched-cost nonworsened samples
+  ;                depth-min depth-sum depth-max depth-count)
+  (defn lre-geometry-go (images n radius focal global poses-rev cloud-rev
+                         same matched nonw samples dmin dsum dmax dcount)
+    (if (le (len images) 1)
+      (list (reverse poses-rev) (reverse cloud-rev)
+        same matched nonw samples dmin dsum dmax dcount)
+      (do
+        (let bytes0 (lvi-image-bytes (head images)))
+        (let bytes1 (lvi-image-bytes (nth images 1)))
+        (let frame0 (lmr-luma-grid bytes0 n))
+        (let frame1 (lmr-luma-grid bytes1 n))
+        (let prediction (lgh-predict frame0 frame1 n radius focal))
+        (let relative (nth prediction 0))
+        (let depths (nth prediction 1))
+        (let comparisons (lgh-output-comparison frame0 frame1 n (nth prediction 2)))
+        (let cloud (lgh-point-cloud depths n
+          (list focal focal (div (sub n 1) 2.0) (div (sub n 1) 2.0)) global))
+        (let next-global (gc-compose global relative))
+        (lre-geometry-go (tail images) n radius focal next-global
+          (cons next-global poses-rev) (lre-push-all cloud cloud-rev)
+          (add same (nth comparisons 0)) (add matched (nth comparisons 1))
+          (add nonw (nth comparisons 4)) (add samples (nth comparisons 5))
+          (min2 dmin (lre-depth-min depths))
+          (add dsum (lre-depth-sum depths))
+          (max2 dmax (lre-depth-max depths))
+          (add dcount (len depths))))))
+  (defn lre-depth-sum-go (rows acc)
+    (if (eq (len rows) 0) acc
+      (lre-depth-sum-go (tail rows) (add acc (nth (head rows) 0)))))
+  (defn lre-depth-sum (rows) (lre-depth-sum-go rows 0.0))
+  (defn lre-depth-min-go (rows best)
+    (if (eq (len rows) 0) best
+      (lre-depth-min-go (tail rows) (min2 best (nth (head rows) 0)))))
+  (defn lre-depth-min (rows) (lre-depth-min-go (tail rows) (nth (head rows) 0)))
+  (defn lre-depth-max-go (rows best)
+    (if (eq (len rows) 0) best
+      (lre-depth-max-go (tail rows) (max2 best (nth (head rows) 0)))))
+  (defn lre-depth-max (rows) (lre-depth-max-go (tail rows) (nth (head rows) 0)))
+  (defn lre-geometry (images n radius focal)
+    (lre-geometry-go images n radius focal
+      (gc-pose (gc-m3-id) (list 0.0 0.0 0.0))
+      (list (gc-pose (gc-m3-id) (list 0.0 0.0 0.0))) (empty)
+      0 0 0 0 1000000000.0 0.0 0.0 0))
+
+  (defn lre-distance3 (a b)
+    (lgh-vnorm3 (list (sub (nth a 0) (nth b 0))
+                       (sub (nth a 1) (nth b 1))
+                       (sub (nth a 2) (nth b 2)))))
+  (defn lre-path-length-go (poses acc)
+    (if (le (len poses) 1) acc
+      (lre-path-length-go (tail poses)
+        (add acc (lre-distance3 (gc-t (head poses)) (gc-t (nth poses 1)))))))
+  (defn lre-path-length (poses) (lre-path-length-go poses 0.0))
+
+  ; ---- scenario execution --------------------------------------------------
+  ; config = (name video-path source-frame-count source-stride)
+  (defn lre-config (name video source-frames stride)
+    (list name video source-frames stride))
+  (defn lre-config-name (c) (nth c 0))
+  (defn lre-config-video (c) (nth c 1))
+  (defn lre-config-source-frames (c) (nth c 2))
+  (defn lre-config-stride (c) (nth c 3))
+  (defn lre-default-configs ()
+    (list
+      (lre-config "loop" "model/fixtures/lingbot-map/real-life/loop-24f.mkv" 237 10)
+      (lre-config "oxford" "model/fixtures/lingbot-map/real-life/oxford-24f.mkv" 320 13)
+      (lre-config "university" "model/fixtures/lingbot-map/real-life/university-24f.mkv" 324 14)
+      (lre-config "courthouse" "model/fixtures/lingbot-map/real-life/courthouse-24f.mkv" 286 12)))
+
+  ; summary = tagged, compact, inspectable result. No image/tensor bulk escapes.
+  (defn lre-run-scene (config)
+    (do
+      (let prefix (str_concat "/tmp/lingbot-real-" (str_concat (lre-config-name config) "-")))
+      (let paths (lre-decoded-paths prefix 24))
+      (let images (lvi-load-video-file (lre-config-video config)
+        (lre-output-pattern prefix) paths))
+      (let first-bytes (lvi-image-bytes (head images)))
+      (let weight (lmr-load-released-camera-token))
+      (let encoded (lre-encode-images images 8 6 (lmr-weight-token weight)))
+      (let stream (lre-stream encoded 3 8))
+      (let cache (nth stream 0))
+      (let traces (nth stream 1))
+      (let visual (nth stream 2))
+      (let geometry (lre-geometry images 8 2 8.0))
+      (let poses (nth geometry 0))
+      (let cloud (nth geometry 1))
+      (let world (wmlm-world-from-cloud cloud visual))
+      (let final-pose (nth poses (sub (len poses) 1)))
+      (list
+        "lingbot-real-life-scene"
+        (lre-config-name config)
+        (list "source" (lre-config-video config)
+          "source-frames" (lre-config-source-frames config)
+          "stride" (lre-config-stride config)
+          "selected" (len images))
+        (list "resolution" (lvi-width first-bytes) (lvi-height first-bytes)
+          "pixels-per-frame" (mul (lvi-width first-bytes) (lvi-height first-bytes))
+          "pixels-covered" (lre-frame-covered-pixels first-bytes 8 6))
+        (list "vision" (len encoded) (len (head encoded)) (len (head (head encoded))))
+        (list "gca" (lgr-cache-token-count cache)
+          (len (lgr-anchors cache)) (len (lgr-trajectory cache)) (len (lgr-window cache))
+          "first" (head traces) "last" (nth traces (sub (len traces) 1)))
+        (list "trajectory" (len poses) (lre-path-length poses)
+          (gc-r final-pose) (gc-t final-pose))
+        (list "depth" (nth geometry 9) (nth geometry 6)
+          (div (nth geometry 7) (mul (nth geometry 9) 1.0)) (nth geometry 8))
+        (list "cloud-world" (len cloud) (lgh-cloud-bounds cloud) (len world)
+          (nth cloud 0) (nth cloud (div (len cloud) 2)) (nth cloud (sub (len cloud) 1)))
+        (list "comparison" (nth geometry 2) (nth geometry 3)
+          (nth geometry 4) (nth geometry 5))
+        (list "released-weight-valid" (lmr-weight-valid? weight)
+          "learned-end-to-end-parity" 0))))
+
+  (defn lre-run-scenes (configs)
+    (if (eq (len configs) 0) (empty)
+      (cons (lre-run-scene (head configs)) (lre-run-scenes (tail configs)))))
+
+  (defn lre-summary-name (s) (nth s 1))
+  (defn lre-summary-source (s) (nth s 2))
+  (defn lre-summary-resolution (s) (nth s 3))
+  (defn lre-summary-vision (s) (nth s 4))
+  (defn lre-summary-gca (s) (nth s 5))
+  (defn lre-summary-trajectory (s) (nth s 6))
+  (defn lre-summary-depth (s) (nth s 7))
+  (defn lre-summary-cloud-world (s) (nth s 8))
+  (defn lre-summary-comparison (s) (nth s 9))
+  (defn lre-summary-weight (s) (nth s 10))
+
+  0)

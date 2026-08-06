@@ -1,0 +1,307 @@
+; native-model-checkpoint.fk -- exact f64 persistence for the bounded native
+; training floor.
+;
+; Every learned value is serialized as its eight IEEE-754 little-endian bytes
+; using f64-bytes.fk, then decoded back in Form and required to re-encode bit
+; identically.  The text envelope is content-addressed by the body's SHA-256
+; recipe and bound to an exact training/data contract.  Text is the present
+; carrier because direct-source fkwu exposes read_file/write_file/fs_rename but
+; not read_form_binary/write_form_binary.  The latter gap is named rather than
+; hidden behind another runtime.
+;
+; This persists a width-2 transformer component and a width-6 one-token-context
+; neural LM.  It is a real checkpoint and reload path, not the useful open-
+; weight generative mind named in HOMECOMING.md.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/format-arith.fk form-stdlib/f64-bytes.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/transformer-backprop.fk form-stdlib/transformer-corpus-train.fk form-stdlib/neural-lm.fk form-stdlib/native-model-evidence.fk form-stdlib/native-model-live-training.fk
+
+(do
+    (defn nmck-append (xs ys)
+        (if (eq (len xs) 0) ys
+            (cons (head xs) (nmck-append (tail xs) ys))))
+    (defn nmck-reverse-loop (xs acc)
+        (if (eq (len xs) 0) acc
+            (nmck-reverse-loop (tail xs) (cons (head xs) acc))))
+    (defn nmck-reverse (xs) (nmck-reverse-loop xs (list)))
+    (defn nmck-list-eq? (a b)
+        (if (eq (len a) (len b))
+            (if (eq (len a) 0) 1
+                (if (eq (head a) (head b))
+                    (nmck-list-eq? (tail a) (tail b)) 0))
+            0))
+    (defn nmck-drop (xs n)
+        (if (le n 0) xs (nmck-drop (tail xs) (sub n 1))))
+    (defn nmck-take-loop (xs n acc)
+        (if (le n 0) (nmck-reverse acc)
+            (nmck-take-loop (tail xs) (sub n 1) (cons (head xs) acc))))
+    (defn nmck-take (xs n) (nmck-take-loop xs n (list)))
+
+    ; ---- Exact value encoding ------------------------------------------
+    (defn nmck-encode-vector (values)
+        (if (eq (len values) 0) (list)
+            (nmck-append (f64-bytes (head values))
+                         (nmck-encode-vector (tail values)))))
+    (defn nmck-encode-matrix (rows)
+        (if (eq (len rows) 0) (list)
+            (nmck-append (nmck-encode-vector (head rows))
+                         (nmck-encode-matrix (tail rows)))))
+    (defn nmck-encode-block (block)
+        (nmck-append (nmck-encode-matrix (tbp-bk-w1 block))
+            (nmck-append (nmck-encode-vector (tbp-bk-b1 block))
+                (nmck-append (nmck-encode-matrix (tbp-bk-w2 block))
+                             (nmck-encode-vector (tbp-bk-b2 block))))))
+    (defn nmck-encode-stack (stack)
+        (nmck-append (nmck-encode-block (tbp-stack-A stack))
+                     (nmck-encode-block (tbp-stack-B stack))))
+    (defn nmck-byte-lines (bytes)
+        (if (eq (len bytes) 0) ""
+            (str_concat (int_to_str (head bytes))
+                (str_concat "\n" (nmck-byte-lines (tail bytes))))))
+
+    ; Decode zero and finite normal f64 values.  Subnormals, infinities, and
+    ; NaNs are outside f64-bytes.fk's declared encoder scope and are refused.
+    (defn nmck-f64-exponent (bytes)
+        (add (mul (mod (nth bytes 7) 128) 16) (div (nth bytes 6) 16)))
+    (defn nmck-f64-mantissa (bytes)
+        (sum (list
+            (mul (mul 1.0 (nth bytes 0)) (fq-pow2 0))
+            (mul (mul 1.0 (nth bytes 1)) (fq-pow2 8))
+            (mul (mul 1.0 (nth bytes 2)) (fq-pow2 16))
+            (mul (mul 1.0 (nth bytes 3)) (fq-pow2 24))
+            (mul (mul 1.0 (nth bytes 4)) (fq-pow2 32))
+            (mul (mul 1.0 (nth bytes 5)) (fq-pow2 40))
+            (mul (mul 1.0 (mod (nth bytes 6) 16)) (fq-pow2 48)))))
+    (defn nmck-byte? (n) (if (and (ge n 0) (le n 255)) 1 0))
+    (defn nmck-bytes-range? (bytes)
+        (if (eq (len bytes) 0) 1
+            (if (eq (nmck-byte? (head bytes)) 1)
+                (nmck-bytes-range? (tail bytes)) 0)))
+    (defn nmck-f64-image-valid? (bytes)
+        (if (and (eq (len bytes) 8) (eq (nmck-bytes-range? bytes) 1))
+            (do
+                (let exponent (nmck-f64-exponent bytes))
+                (let mantissa (nmck-f64-mantissa bytes))
+                (if (eq exponent 2047) 0
+                    (if (eq exponent 0)
+                        (if (eq mantissa 0) 1 0)
+                        1)))
+            0))
+    (defn nmck-f64-from-bytes (bytes)
+        (do
+            (let exponent (nmck-f64-exponent bytes))
+            (let mantissa (nmck-f64-mantissa bytes))
+            (if (eq exponent 0) 0.0
+                (do
+                    (let magnitude
+                        (mul (add 1.0 (div mantissa (fq-pow2 52)))
+                             (fq-pow2 (sub exponent 1023))))
+                    (if (ge (nth bytes 7) 128) (sub 0.0 magnitude) magnitude)))))
+    (defn nmck-f64-roundtrip? (bytes)
+        (if (eq (nmck-f64-image-valid? bytes) 1)
+            (nmck-list-eq? bytes (f64-bytes (nmck-f64-from-bytes bytes))) 0))
+    (defn nmck-f64-images-valid? (bytes)
+        (if (eq (len bytes) 0) 1
+            (if (eq (nmck-f64-roundtrip? (nmck-take bytes 8)) 1)
+                (nmck-f64-images-valid? (nmck-drop bytes 8)) 0)))
+    (defn nmck-decode-values (bytes)
+        (if (eq (len bytes) 0) (list)
+            (cons (nmck-f64-from-bytes (nmck-take bytes 8))
+                  (nmck-decode-values (nmck-drop bytes 8)))))
+
+    ; ---- Training/data identity ----------------------------------------
+    (defn nmck-example-contract (examples)
+        (if (eq (len examples) 0) ""
+            (str_concat (nmck-byte-lines (nmck-encode-vector (tct-ex-x (head examples))))
+                (str_concat (nmck-byte-lines (nmck-encode-vector (tct-ex-t (head examples))))
+                            (nmck-example-contract (tail examples))))))
+    (defn nmck-lm-heldout-contract (held)
+        (if (eq (len held) 0) ""
+            (str_concat (nmck-byte-lines (nmck-encode-vector (nth (head held) 0)))
+                (str_concat "target="
+                    (str_concat (int_to_str (nth (head held) 1))
+                        (str_concat "\n" (nmck-lm-heldout-contract (tail held))))))))
+    (defn nmck-training-contract-text ()
+        (do
+            (let embeddings (nmlt-lm-embeddings))
+            (str_concat "native-model-training-contract-v1\n"
+            (str_concat "transformer_width=2\ntransformer_lr=f64:0.1\ntransformer_epochs=120\n"
+            (str_concat "lm_width=6\nlm_context=1\nlm_lr=f64:0.05\nlm_epochs=400\ncontinuation_epochs=20\n"
+            (str_concat (nmck-example-contract (nmlt-translation-train))
+            (str_concat (nmck-example-contract (nmlt-translation-heldout))
+            (str_concat (nmck-example-contract (nmlt-lm-corpus embeddings))
+                        (nmck-lm-heldout-contract (nmlt-lm-heldout embeddings)))))))))
+    (defn nmck-training-contract-sha256 ()
+        (nmfe-sha256 (nmck-training-contract-text)))
+
+    ; ---- Content-addressed envelope ------------------------------------
+    (defn nmck-payload-text (transformer lm)
+        (str_concat "native-model-checkpoint-payload-v1\n"
+        (str_concat "model=form-native-training-dual\n"
+        (str_concat "scope=small-native-model-not-useful-generative-llm\n"
+        (str_concat "encoding=ieee754-f64-le-bytes\n"
+        (str_concat "transformer_values=24\n"
+        (str_concat "lm_values=168\n"
+        (str_concat "values_total=192\n"
+        (str_concat "bytes_total=1536\n"
+        (str_concat "training_contract_sha256="
+        (str_concat (nmck-training-contract-sha256)
+        (str_concat "\n" (nmck-byte-lines
+            (nmck-append (nmck-encode-stack transformer)
+                         (nmck-encode-stack lm)))))))))))))))
+    (defn nmck-checkpoint-text (transformer lm)
+        (do
+            (let payload (nmck-payload-text transformer lm))
+            (str_concat "native-model-checkpoint-v1\npayload_sha256="
+                (str_concat (nmfe-sha256 payload) (str_concat "\n" payload)))))
+
+    ; ---- Strict envelope/parser ----------------------------------------
+    (defn nmck-lines-loop (s i start acc)
+        (if (ge i (str_len s))
+            (if (lt start (str_len s))
+                (nmck-reverse (cons (substring s start (str_len s)) acc))
+                (nmck-reverse acc))
+            (if (eq (str_byte_at s i) 10)
+                (nmck-lines-loop s (add i 1) (add i 1)
+                    (cons (substring s start i) acc))
+                (nmck-lines-loop s (add i 1) start acc))))
+    (defn nmck-lines (s) (nmck-lines-loop s 0 0 (list)))
+    (defn nmck-canonical-byte-text? (s)
+        (if (and (gt (str_len s) 0) (le (str_len s) 3))
+            (if (str_eq (int_to_str (str_to_int s)) s)
+                (nmck-byte? (str_to_int s)) 0)
+            0))
+    (defn nmck-byte-texts-valid? (lines)
+        (if (eq (len lines) 0) 1
+            (if (eq (nmck-canonical-byte-text? (head lines)) 1)
+                (nmck-byte-texts-valid? (tail lines)) 0)))
+    (defn nmck-byte-values (lines)
+        (if (eq (len lines) 0) (list)
+            (cons (str_to_int (head lines)) (nmck-byte-values (tail lines)))))
+    (defn nmck-payload-valid? (payload)
+        (do
+            (let lines (nmck-lines payload))
+            (if (eq (len lines) 1545)
+                (if (and (str_eq (nth lines 0) "native-model-checkpoint-payload-v1")
+                    (and (str_eq (nth lines 1) "model=form-native-training-dual")
+                    (and (str_eq (nth lines 2) "scope=small-native-model-not-useful-generative-llm")
+                    (and (str_eq (nth lines 3) "encoding=ieee754-f64-le-bytes")
+                    (and (str_eq (nth lines 4) "transformer_values=24")
+                    (and (str_eq (nth lines 5) "lm_values=168")
+                    (and (str_eq (nth lines 6) "values_total=192")
+                    (and (str_eq (nth lines 7) "bytes_total=1536")
+                    (str_eq (nth lines 8)
+                        (str_concat "training_contract_sha256="
+                                    (nmck-training-contract-sha256)))))))))))
+                    (if (eq (nmck-byte-texts-valid? (nmck-drop lines 9)) 1)
+                        (nmck-f64-images-valid?
+                            (nmck-byte-values (nmck-drop lines 9))) 0)
+                    0)
+                0)))
+    (defn nmck-checkpoint-payload (text)
+        (do
+            (let lines (nmck-lines text))
+            (if (ge (len lines) 2)
+                (do
+                    (let prefix (str_concat (nth lines 0)
+                        (str_concat "\n" (str_concat (nth lines 1) "\n"))))
+                    (substring text (str_len prefix) (str_len text)))
+                "")))
+    (defn nmck-checkpoint-valid? (text)
+        (do
+            (let lines (nmck-lines text))
+            (if (eq (len lines) 1547)
+                (if (and (str_eq (nth lines 0) "native-model-checkpoint-v1")
+                         (and (eq (str_len (nth lines 1)) 79)
+                              (str_eq (substring (nth lines 1) 0 15)
+                                      "payload_sha256=")))
+                    (do
+                        (let supplied (substring (nth lines 1) 15 79))
+                        (let payload (nmck-checkpoint-payload text))
+                        (if (and (eq (nmfe-sha256? supplied) 1)
+                                 (and (str_eq supplied (nmfe-sha256 payload))
+                                      (eq (nmck-payload-valid? payload) 1))) 1 0))
+                    0)
+                0)))
+
+    ; ---- Stack reconstruction ------------------------------------------
+    (defn nmck-matrix-from-flat (values width rows)
+        (if (le rows 0) (list)
+            (cons (nmck-take values width)
+                  (nmck-matrix-from-flat (nmck-drop values width)
+                                         width (sub rows 1)))))
+    ; Result: (block remaining-values).
+    (defn nmck-block-from-flat (values width)
+        (do
+            (let matrix-count (mul width width))
+            (let w1 (nmck-matrix-from-flat values width width))
+            (let after-w1 (nmck-drop values matrix-count))
+            (let b1 (nmck-take after-w1 width))
+            (let after-b1 (nmck-drop after-w1 width))
+            (let w2 (nmck-matrix-from-flat after-b1 width width))
+            (let after-w2 (nmck-drop after-b1 matrix-count))
+            (let b2 (nmck-take after-w2 width))
+            (list (tbp-bk w1 b1 w2 b2) (nmck-drop after-w2 width))))
+    ; Result: (two-block-stack remaining-values).
+    (defn nmck-stack-from-flat (values width)
+        (do
+            (let first (nmck-block-from-flat values width))
+            (let second (nmck-block-from-flat (nth first 1) width))
+            (list (list (nth first 0) (nth second 0)) (nth second 1))))
+    ; Result: tag, valid-bit, transformer-stack, lm-stack.
+    (defn nmck-decode (text)
+        (if (eq (nmck-checkpoint-valid? text) 1)
+            (do
+                (let payload-lines (nmck-lines (nmck-checkpoint-payload text)))
+                (let bytes (nmck-byte-values (nmck-drop payload-lines 9)))
+                (let values (nmck-decode-values bytes))
+                (let transformer-result (nmck-stack-from-flat values 2))
+                (let lm-result (nmck-stack-from-flat (nth transformer-result 1) 6))
+                (if (eq (len (nth lm-result 1)) 0)
+                    (list "native-model-checkpoint-decoded-v1" 1
+                          (nth transformer-result 0) (nth lm-result 0))
+                    (list "native-model-checkpoint-decoded-v1" 0 (list) (list))))
+            (list "native-model-checkpoint-decoded-v1" 0 (list) (list))))
+    (defn nmck-decoded-valid? (decoded) (nth decoded 1))
+    (defn nmck-decoded-transformer (decoded) (nth decoded 2))
+    (defn nmck-decoded-lm (decoded) (nth decoded 3))
+    (defn nmck-canonical-roundtrip? (text)
+        (do
+            (let decoded (nmck-decode text))
+            (if (eq (nmck-decoded-valid? decoded) 1)
+                (if (str_eq text
+                        (nmck-checkpoint-text
+                            (nmck-decoded-transformer decoded)
+                            (nmck-decoded-lm decoded))) 1 0)
+                0)))
+
+    ; ---- Train, continue, and keep/revert -------------------------------
+    (defn nmck-initial-transformer ()
+        (list (nmlt-translation-base) (nmlt-translation-tail)))
+    (defn nmck-initial-lm () (list (nmlt-lm-a) (nmlt-lm-b)))
+    (defn nmck-fresh-transformer ()
+        (tct-train (nmck-initial-transformer)
+                   (nmlt-translation-train) 0.1 0.00001 120))
+    (defn nmck-fresh-lm ()
+        (tct-train (nmck-initial-lm)
+                   (nmlt-lm-corpus (nmlt-lm-embeddings)) 0.05 0.00001 400))
+    (defn nmck-continue-transformer (stack)
+        (tct-train stack (nmlt-translation-train) 0.1 0.00001 20))
+    (defn nmck-continue-lm (stack)
+        (tct-train stack (nmlt-lm-corpus (nmlt-lm-embeddings))
+                   0.05 0.00001 20))
+    (defn nmck-transformer-heldout-loss-micro (stack)
+        (round (mul (tct-corpus-loss stack (nmlt-translation-heldout) 0.00001)
+                    1000000.0)))
+    (defn nmck-lm-heldout-correct (stack)
+        (nl-eval-correct stack (nmlt-lm-embeddings)
+                         (nmlt-lm-heldout (nmlt-lm-embeddings)) 0.00001))
+    (defn nmck-candidate-improves? (incumbent-transformer incumbent-lm
+                                     candidate-transformer candidate-lm)
+        (if (and
+                (lt (nmck-transformer-heldout-loss-micro candidate-transformer)
+                    (nmck-transformer-heldout-loss-micro incumbent-transformer))
+                (ge (nmck-lm-heldout-correct candidate-lm)
+                    (nmck-lm-heldout-correct incumbent-lm))) 1 0))
+
+    (defn nmck-scope () "persisted-small-native-checkpoint-not-useful-generative-llm")
+    0)

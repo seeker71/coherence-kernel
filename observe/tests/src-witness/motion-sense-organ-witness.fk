@@ -1,0 +1,1124 @@
+; src-witness: motion-sense-organ — the uplifted motion organ produces the SAME 'motion'-plane feature
+; (heading octant) and routed reading as the original motion-sense.fk, via the sensor-organ-template.
+; Verdict 1111: bit1 feature==orig (E); bit10 feature==orig (N+yaw); bit100 routed value; bit1000 plane 'motion'.
+; fkwu --src — preludes inlined (helpers, geometry/trig, fusion chain, floor, template, original sensor).
+
+(do (defn append (a b) (if (eq (len a) 0) b (cons (head a) (append (tail a) b)))) 0)
+
+; trig.fk — sin, cos, sqrt as FORM RECIPES, not kernel natives.
+;
+; "Those kernel 'needs' can be Form recipes compiled into where they execute, much better than writing them
+; in each kernel." (Urs) — and the pure-math needs are the sharpest case: they were never kernel needs.
+; sin/cos/sqrt are recipes over mul/add/div, which Go, Rust, and TS already have — so writing them ONCE in
+; Form means they run on all three identically (three-way), with NO native added to any kernel. Float is
+; deterministic three-way (the matvec proof). The source-compiler can later LOWER these to a target's native
+; sin/cos for speed — the same recipe, compiled where it runs — but the body needs no kernel surgery to use
+; them today. This is core-abstraction-first: one engine, the cases are data/recipes, never parallel code.
+;
+; NOTE: div is INTEGER division on integer operands; every recipe forces float (a float literal in the chain).
+
+; --- sqrt: Newton/Heron iteration  x ← (x + a/x)/2 ---
+(defn sqrt-iter (a x n)
+  (if (eq n 0) x (sqrt-iter a (div (add x (div a x)) 2.0) (sub n 1))))
+(defn fsqrt (a)
+  (if (le a 0) 0.0
+      (do (let af (mul a 1.0)) (sqrt-iter af af 20))))
+
+; --- sin/cos: range-reduce to [-π, π], then the Taylor series ---
+(defn TAU () 6.283185307179586)
+(defn HALF-PI () 1.5707963267948966)
+(defn range-reduce (x)
+  (sub x (mul (TAU) (round (div x (TAU))))))
+; Taylor recurrence: term_{k+1} = term_k · (-x²) / ((2(k+1))·(2(k+1)+1)); sum the terms.
+(defn sin-acc (x2 term k acc n)
+  (if (ge k n) acc
+      (sin-acc x2
+               (div (mul (mul term -1.0) x2) (mul (mul 2 (add k 1)) (add (mul 2 (add k 1)) 1)))
+               (add k 1) (add acc term) n)))
+(defn fsin (x)
+  (do (let r (range-reduce (mul x 1.0)))
+      (sin-acc (mul r r) r 0 0 10)))
+(defn fcos (x) (fsin (add (mul x 1.0) (HALF-PI))))
+
+; --- ln/log10: split x = m·2^e with m in [1,2), atanh series on z=(m-1)/(m+1) (z <= 1/3, 14 terms
+; reach fp64 depth). Same posture as sin/cos: a recipe over mul/add/div, no kernel native. x > 0.
+(defn LN2 () 0.6931471805599453)
+(defn LOG10-INV () 0.4342944819032518)
+(defn ln-exp-up (a e) (if (ge a 2.0) (ln-exp-up (mul a 0.5) (add e 1)) e))
+(defn ln-exp-down (a e) (if (lt a 1.0) (ln-exp-down (mul a 2.0) (sub e 1)) e))
+(defn ln-exponent (a) (if (ge a 1.0) (ln-exp-up a 0) (ln-exp-down a 0)))
+(defn ln-mantissa (a)
+  (if (ge a 2.0) (ln-mantissa (mul a 0.5)) (if (lt a 1.0) (ln-mantissa (mul a 2.0)) a)))
+(defn ln-ser (z2 zpow j acc n)
+  (if (ge j n) acc
+      (ln-ser z2 (mul zpow z2) (add j 1)
+              (add acc (div (mul zpow z2) (add (mul 2 (add j 1)) 1.0))) n)))
+(defn ln-m (m)
+  (do (let z (div (sub m 1.0) (add m 1.0)))
+      (mul 2.0 (add z (ln-ser (mul z z) z 0 0.0 14)))))
+(defn fln (x)
+  (do (let xf (mul x 1.0))
+      (add (mul (ln-exponent xf) (LN2)) (ln-m (ln-mantissa xf)))))
+(defn flog10 (x) (mul (fln x) (LOG10-INV)))
+
+; --- fpow: real (IEEE float) power, b^e = exp(e·ln b), over fln + the deterministic
+; exp native. The bare `pow` is INTEGER power (with int coercion); this is the float
+; one — and as a recipe over already-four-way primitives it crosses the fourth arm with
+; no new native tag (the same posture as fsin/fcos/fsqrt). b must be > 0; b <= 0 → 0.0.
+(defn fpow (b e) (if (le b 0.0) 0.0 (math_exp (mul e (fln b)))))
+
+; --- fatan/fatan2: arctangent as a Form recipe — the inverse-trig surface that completes
+; sin/cos/sqrt/ln/exp/pow. Same posture: a recipe over the four-way primitives, no kernel
+; native. Range-reduce any x to |z| <= tan(15deg): first x>1 → π/2 − atan(1/x), then
+; x>tan15 → π/6 + atan((x√3−1)/(x+√3)) — where the Taylor series atan(z)=z−z³/3+z⁵/5−…
+; reaches fp64 depth in 16 terms. fatan2 places the angle in the right quadrant in (−π,π].
+; This is what every geocentric longitude, ascendant, and coordinate transform needs.
+(defn PI () 3.141592653589793)
+(defn PI-6 () 0.5235987755982988)
+(defn TAN15 () 0.26794919243112270)
+(defn SQRT3 () 1.7320508075688772)
+; Taylor for small |z|: term_{k+1} = term_k · (−z²) · (2k+1)/(2k+3)
+(defn atan-ser (z2 term k acc n)
+  (if (ge k n) acc
+      (atan-ser z2
+                (div (mul (mul term (mul -1.0 z2)) (add (mul 2 k) 1)) (add (mul 2 k) 3))
+                (add k 1) (add acc term) n)))
+(defn atan-small (z) (atan-ser (mul z z) z 0 0.0 16))
+(defn atan-unit (x)
+  (if (gt x (TAN15))
+      (add (PI-6) (atan-small (div (sub (mul x (SQRT3)) 1.0) (add x (SQRT3)))))
+      (atan-small x)))
+(defn atan-pos (x)
+  (if (gt x 1.0) (sub (HALF-PI) (atan-unit (div 1.0 x))) (atan-unit x)))
+(defn fatan (x)
+  (if (lt x 0.0) (mul -1.0 (atan-pos (mul -1.0 x))) (atan-pos (mul x 1.0))))
+(defn fatan2 (y x)
+  (if (gt x 0.0) (fatan (div (mul y 1.0) x))
+  (if (lt x 0.0)
+      (do (let a (fatan (div (mul y 1.0) x)))
+          (if (ge y 0.0) (add a (PI)) (sub a (PI))))
+  (if (gt y 0.0) (HALF-PI)
+  (if (lt y 0.0) (mul -1.0 (HALF-PI)) 0.0)))))
+
+; geometry.fk — 3D geometry primitives: the computable floor of depth, shape, light, shadow.
+;
+; Under "image generation / depth / shape / light and shadow" is geometry, and geometry
+; is pure float math — so it is Form-native and four-way from the start (trig.fk's fsqrt
+; is the only transcendental needed). This is the FIRST native cell of the visual loopback
+; (visual-loopback.form): the generator side. A third-party renderer makes a frame; this
+; recipe makes the same pixel from geometry; the loopback A/B's them until the native is
+; proven. No image library, no GPU host call for the math itself.
+;
+;   vectors:  v3 vadd vsub vscale vdot vlen vnorm
+;   DEPTH:    (ray-sphere-t o d c r)  -> distance along ray d (from o) to a sphere
+;             (center c, radius r), or -1 on miss. Depth perception is "how far to the
+;             surface"; this is exactly that.
+;   LIGHT:    (lambert n l)           -> max(0, n.l): surface brightness facing a light;
+;             0 is dark (a face turned away, or in shadow).
+;   RENDER:   (render-pixel o d c r l) -> one ray-traced pixel: 0 on miss, else the
+;             Lambert shade of the lit sphere surface. Shape (the sphere's silhouette),
+;             depth (the hit), and light/shadow (the shade) in one computed pixel.
+;
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk
+;
+
+(do
+    ;; --- a 3-vector is (list x y z) ----------------------------------
+    (defn v3 (x y z) (list x y z))
+    (defn vx (v) (nth v 0))
+    (defn vy (v) (nth v 1))
+    (defn vz (v) (nth v 2))
+    (defn vadd (a b) (v3 (add (vx a) (vx b)) (add (vy a) (vy b)) (add (vz a) (vz b))))
+    (defn vsub (a b) (v3 (sub (vx a) (vx b)) (sub (vy a) (vy b)) (sub (vz a) (vz b))))
+    (defn vscale (s a) (v3 (mul s (vx a)) (mul s (vy a)) (mul s (vz a))))
+    (defn vdot (a b) (add (add (mul (vx a) (vx b)) (mul (vy a) (vy b))) (mul (vz a) (vz b))))
+    (defn vlen (a) (fsqrt (vdot a a)))
+    (defn vnorm (a) (vscale (div 1.0 (vlen a)) a))
+
+    ;; --- DEPTH: ray-sphere intersection ------------------------------
+    ;; ray origin o, UNIT direction d; sphere center c, radius r.
+    ;; oc = o - c; near root t = -(oc.d) - sqrt((oc.d)^2 - (oc.oc - r^2)).
+    ;; returns t > 0 (the depth to the front surface) or -1.0 on miss / behind.
+    (defn ray-sphere-t (o d c r)
+        (do
+            (let oc (vsub o c))
+            (let b (vdot oc d))
+            (let disc (sub (mul b b) (sub (vdot oc oc) (mul r r))))
+            (if (lt disc 0.0) -1.0
+                (do
+                    (let t (sub (sub 0.0 b) (fsqrt disc)))
+                    (if (gt t 0.0) t -1.0)))))
+
+    ;; --- LIGHT / SHADOW: Lambert shading -----------------------------
+    ;; brightness of a surface with unit normal n lit from unit direction l.
+    ;; max(0, n.l): a face turned away (or shadowed) is 0 (dark).
+    (defn lambert (n l)
+        (do (let i (vdot n l)) (if (gt i 0.0) i 0.0)))
+
+    ;; --- RENDER: one ray-traced pixel --------------------------------
+    ;; miss -> 0.0; hit -> Lambert shade at the surface point. l is the unit
+    ;; direction from the surface toward the light.
+    (defn render-pixel (o d c r l)
+        (do
+            (let t (ray-sphere-t o d c r))
+            (if (lt t 0.0) 0.0
+                (do
+                    (let p (vadd o (vscale t d)))
+                    (let n (vnorm (vsub p c)))
+                    (lambert n l)))))
+
+    (defn geometry-teaching () "lc-cross-modal-unity")
+
+    0)
+
+; spatial-fusion.fk — fuse several sensors' CALIBRATED BUCKETS of one spatial quantity (a coarse
+; location cell, a speed band, a heading octant) into a single ROUGH estimate, weighted by each
+; sensor's confidence. The integer-bucket sibling of confidence-weighted-vote.fk: that recipe fuses
+; STRING labels (model votes) by summed trust; this fuses INTEGER bands (sensor readings) the same
+; way, because a spatial reading is naturally a bucket on a scale, not a name. cc-bucket (from
+; confidence-calibrate.fk) is what makes the bands comparable across unlike sensors first — GPS speed,
+; accelerometer motion, and Wi-Fi access-point transition rate all calibrate to the SAME 0..k speed
+; band before they are allowed to vote, so "band 2" means the same thing whoever read it.
+;
+; THE GOAL (Urs): a rough estimate of location, speed, and direction from MORE THAN ONE sensor, so
+; that each can be trained separately, the sensors learn from each other, and the estimate still holds
+; when one sensor is less accurate than another. This recipe is the fusion brick of that goal:
+;
+;   - FUSE: each sensor casts a ballot (band weight) — the band it read, weighted by its current
+;     confidence. sf-consensus returns the band carrying the greatest summed confidence (weighted
+;     plurality, the same max-select spine as cw-winner). A trusted GPS fix outweighs a drifty accel
+;     integration; many small trusted reads accumulate. This is the rough estimate.
+;
+;   - LEARN FROM EACH OTHER: sf-residual is how far one sensor's band sits from the fused consensus —
+;     the training signal. A sensor that chronically lands far from consensus has its confidence
+;     lowered next round (feed the residual to confidence-calibrate / trust-decay); one that tracks
+;     consensus earns weight. The sensors co-calibrate against the body's own agreement, not an oracle.
+;
+;   - WORK WHEN ONE IS INACCURATE: a sensor with no current reading simply casts no ballot (or weight
+;     0, a present-but-silent vote that sums to nothing), so the consensus forms from whoever remains.
+;     Drop GPS in a tunnel and accel + Wi-Fi still fuse to an estimate — graceful degradation, never a
+;     gap. sf-agree counts how many sensors read the consensus band: more agreement = more redundancy
+;     = more trust in the rough estimate, the same agreement-as-grounding the four kernels live by.
+;
+; A ballot is a two-element list (band weight): (nth b 0) the integer band, (nth b 1) the integer
+; confidence weight. Integers only — bands and weights and residuals are counts on a scale, never
+; floats; the estimate is deliberately ROUGH (a band, not a precise coordinate), which is the honest
+; shape a fusion of noisy sensors can carry without a division it cannot prove.
+;
+; Kin: confidence-weighted-vote.fk (the string-label sibling this mirrors), confidence-calibrate.fk
+; (cc-bucket calibrates each sensor's raw reading to a band before it votes), trust-weighted-colearning.fk
+; (admits a peer's learning by trust — the federation gate above this fusion), mesh-organ-senses.fk
+; (the observed / absent / nothing degradation a silent sensor takes). The carriers (phone GPS, accel,
+; magnetometer, Wi-Fi; Mac organs) only produce the (band weight) ballots; the fusion is Form,
+; kernel-executable, four-way-identical — the Mac and the phone fuse the same ballots to the same band.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/spatial-fusion-band.fk (four-way at validate.sh)
+
+(do
+    ; --- SUMMED CONFIDENCE behind a band: walk the ballots; when a ballot's band eq the target, ADD
+    ;     its weight (nth b 1) into the running sum; else skip. A SUM of confidence, not a tally of
+    ;     hands — the integer-band counterpart of cw-weight-for's str_eq walk. ---
+    (defn sf-weight-for (ballots band)
+        (if (eq (len ballots) 0) 0
+            (if (eq (nth (head ballots) 0) band)
+                (add (nth (head ballots) 1) (sf-weight-for (tail ballots) band))
+                (sf-weight-for (tail ballots) band))))
+
+    ; --- MAX-SELECT over the candidate bands: the band with the greatest summed confidence (weighted
+    ;     plurality). Carry the best band + its best summed weight; a STRICTLY-greater sum replaces it,
+    ;     so the FIRST candidate offered keeps a tie. Seed band 0 / score 0 — any band whose summed
+    ;     confidence is >= 1 takes the lead off the seed; all-silent ballots fall through to band 0. ---
+    (defn sf-winner-loop (ballots candidates best best-score)
+        (if (eq (len candidates) 0) (list best best-score)
+            (if (gt (sf-weight-for ballots (head candidates)) best-score)
+                (sf-winner-loop ballots (tail candidates)
+                    (head candidates) (sf-weight-for ballots (head candidates)))
+                (sf-winner-loop ballots (tail candidates) best best-score))))
+
+    ; the fused rough estimate: the band carrying the greatest summed confidence.
+    (defn sf-consensus (ballots candidates)
+        (nth (sf-winner-loop ballots candidates 0 0) 0))
+
+    ; confidence in that estimate = the winning summed confidence (how much trust stood behind it).
+    (defn sf-confidence (ballots candidates)
+        (nth (sf-winner-loop ballots candidates 0 0) 1))
+
+    ; --- AGREEMENT: how many sensors read the consensus band. More agreeing sensors = more redundancy
+    ;     = more trust in the estimate (agreement-as-grounding). A count of hands here, on purpose. ---
+    (defn sf-agree (ballots consensus)
+        (if (eq (len ballots) 0) 0
+            (if (eq (nth (head ballots) 0) consensus)
+                (add 1 (sf-agree (tail ballots) consensus))
+                (sf-agree (tail ballots) consensus))))
+
+    ; --- RESIDUAL: how far one sensor's band sits from the consensus — the train-from-each-other
+    ;     signal. |band - consensus| via core's abs; a sensor with a large residual has read the world
+    ;     differently than the body agreed it is, and earns lower confidence on the next round. ---
+    (defn sf-residual (sensor-band consensus) (abs (sub sensor-band consensus)))
+
+    0)
+
+; confidence-weighted-vote.fk — fuse model votes WEIGHTED by each model's proven reliability, so a
+; trusted model outweighs a flaky one (a sharper fusion than plain plurality).
+;
+; ensemble-vote.fk is the EQUAL-PEERS fusion: every classifier gets exactly one vote, the answer is the
+; label the MOST of them named, confidence is the raw HAND-COUNT. This is the WEIGHTED counterpart: each
+; ballot arrives as (label weight), and the score of a label is the SUM of the weights of every ballot
+; that named it — not a count of hands but a count of trust. A circle of five cheap classifiers where one
+; has earned weight 9 can be outvoted by it even when four weak ones (weight 1 each) name something else;
+; conversely many small trusted votes accumulate. Same max-select spine as ensemble-vote.fk's ev-winner
+; and recognition-router.fk's rr-select — only the per-label score is a WEIGHT-SUM walked over the
+; ballots (recursion + add of each weight), not a +1 tally and not a follower-count. The fusion is Form:
+; kernel-executable, three-way-identical, the carriers swappable behind the same (label weight) ballot.
+;
+; A vote is a two-element list (label weight): (nth v 0) is the label string, (nth v 1) the integer weight.
+; cw-weight-for sums the weights of the votes whose label matches; cw-winner picks the label with the
+; greatest summed weight (ties keep the first candidate offered); cw-score returns that winning sum.
+;
+; Honest lane: this is WEIGHTED PLURALITY — the greatest summed weight wins, with no majority-of-total
+; floor and no abstention gate; it always names its leader even when the field is split, the same way
+; ensemble-vote always names its plurality leader (gating "too-split / below-trust to call" is the
+; router's rr-passes? lane, a later compose, not this brick). A tie in the top summed weight keeps the
+; FIRST candidate offered — the max-select uses strict gt, so a later equal-weight candidate cannot
+; displace the earlier one; the answer is stable under replay, not order-random. Weights and summed
+; scores are integers 0..N (no floats, by the primitive set); a weight of 0 is a present-but-silent
+; ballot and contributes nothing, an unseen candidate sums to an honest 0.
+;
+; Proven by: form-stdlib/tests/confidence-weighted-vote-band.fk (three-way at validate.sh)
+
+(do
+    ; --- WEIGHT-FOR: the summed trust behind a label. Walk the votes; when a vote's label str_eq the
+    ; target, ADD its weight (nth v 1) into the running sum; otherwise skip. A SUM of weights, not a
+    ; tally of hands — this is the one place the weighted fusion diverges from ensemble-vote's ev-votes. ---
+    (defn cw-weight-for (votes label)
+        (if (eq (len votes) 0) 0
+            (if (str_eq (nth (head votes) 0) label)
+                (add (nth (head votes) 1) (cw-weight-for (tail votes) label))
+                (cw-weight-for (tail votes) label))))
+
+    ; --- MAX-SELECT: among the candidates, the one with the greatest summed weight (weighted plurality). ---
+    ; Same spine as ev-winner-loop / rr-select: carry the best candidate + its best summed weight; a
+    ; STRICTLY-greater sum replaces it, so the FIRST candidate offered keeps a tie. Seed with "" 0 — any
+    ; candidate whose summed weight is >= 1 can take the lead off the seed.
+    (defn cw-winner-loop (votes candidates best-label best-score)
+        (if (eq (len candidates) 0) (list best-label best-score)
+            (if (gt (cw-weight-for votes (head candidates)) best-score)
+                (cw-winner-loop votes (tail candidates)
+                    (head candidates) (cw-weight-for votes (head candidates)))
+                (cw-winner-loop votes (tail candidates) best-label best-score))))
+
+    ; the fused answer: the candidate carrying the greatest summed weight (its weighted-plurality leader).
+    (defn cw-winner (votes candidates)
+        (nth (cw-winner-loop votes candidates "" 0) 0))
+
+    ; the confidence in that answer = the winning summed weight (how much trust stood behind it).
+    (defn cw-score (votes candidates)
+        (nth (cw-winner-loop votes candidates "" 0) 1))
+
+    0)
+; mesh-sense-7w.fk — the mesh sense organ's FUSION BODY: fuse a multi-cell stream of wmg-sense
+; readings into one coherent answer on each of the SEVEN inquiry-planes (what / where / when / how /
+; why / who / which), each answer carrying its source-cells, channel, and confidence.
+;
+; living-mesh.form step 2: "fuse the multi-cell wmg-sense stream (over field-relay, routes chosen by
+; channel-protocol-choice) into a coherent answer on each of the seven inquiry-planes, source + channel
+; + confidence attributed." This recipe is that fusion body. It is COMPOSITION, not green-field: every
+; brick already crosses four-way and this recipe only routes readings to the right one per plane.
+;
+; A READING is the mesh-safe row each organ reports (the wmg-sense shape from sensor-organ-channel /
+; gpu-mesh-sense, narrowed to what fusion needs): a five-element list
+;     (reading plane value source-cell channel confidence)
+;   - plane       the inquiry-plane word this reading answers ("where", "who", "when", ...)
+;   - value       the reading's claim — an INTEGER band for banded planes (where/when/which), a STRING
+;                 label for named planes (who/what/how/why). The plane's KIND (inquiry-planes.fk)
+;                 decides which fusion brick reads it.
+;   - source-cell the device-cell that reported it (string) — the attribution this recipe must carry.
+;   - channel     the route it arrived over (string) — also carried, and used by channel-protocol-choice
+;                 logic to weight a route's contribution.
+;   - confidence  the integer trust behind this reading (0..N) — the ballot weight in either fusion.
+;
+; THE TWO FUSION BRICKS, dispatched per plane KIND, never re-implemented:
+;   - BANDED planes (where / when / which — computable, integer buckets): each reading is a (band weight)
+;     ballot fused by spatial-fusion's sf-consensus / sf-confidence / sf-agree. WHERE demonstrates it:
+;     two device-cells report the same place-sense room bucket -> one coherent room, summed confidence.
+;   - NAMED planes (who / what / how / why — learned, string labels): each reading is a (label weight)
+;     ballot fused by confidence-weighted-vote's cw-winner / cw-score. WHO demonstrates it: two cells
+;     report speaker-id / field-identity labels -> who is present, by summed trust.
+;
+; This SUBSUMES "here-now": the single-place case is just the WHERE plane with one cell's readings; the
+; multi-cell case is the same recipe with more ballots. No special path for one cell vs many.
+;
+; CHANNEL WEIGHTING (channel-protocol-choice-floor): a reading's effective ballot weight is its own
+; confidence scaled by how fit its CHANNEL is for that plane — the right channel for the right info. A
+; mic answering "who" is more fit than a network relay echoing it; a place fix over GPS more fit than a
+; coarse Wi-Fi guess. The fitness is a small integer multiplier (per channel, defaulting to 1) so the
+; fusion stays integer-only and four-way-identical. The carrier sets the fitness table; the fusion is Form.
+;
+; Integers + strings only — bands, weights, and confidences are counts on a scale; labels and channels
+; and cells are strings; no float crosses the recipe (the honest shape a noisy-sensor fusion can carry).
+;
+; Kin: spatial-fusion.fk (WHERE/banded fusion), confidence-weighted-vote.fk (WHO/named fusion),
+; inquiry-planes.fk (the seven planes + computable/learned KIND that selects the brick), place-sense.fk
+; (the room buckets WHERE fuses), speaker-id.fk / field-identity.fk (the labels WHO fuses),
+; sensor-organ-channel.fk / gpu-mesh-sense.fk (the wmg-sense reading shape), channel-protocol-choice-
+; floor.fk (the route fitness that weights a reading). The carriers (phones, the Mac, the relay) only
+; produce the readings; the fusion is Form, kernel-executable, four-way-identical — every cell fuses the
+; same readings to the same answer.
+;
+; preludes: form-stdlib/core.fk
+;
+; Proven by: form-stdlib/tests/mesh-sense-7w-band.fk (four-way at validate.sh)
+
+(do
+    ; ── a reading: the mesh-safe row a device-cell reports into the stream ──
+    (defn reading (plane value source-cell channel confidence)
+        (list "reading" plane value source-cell channel confidence))
+    (defn rd-plane      (r) (nth r 1))
+    (defn rd-value      (r) (nth r 2))
+    (defn rd-source     (r) (nth r 3))
+    (defn rd-channel    (r) (nth r 4))
+    (defn rd-confidence (r) (nth r 5))
+
+    ; ── PLANE KIND: which fusion brick reads this plane. The seven planes split into BANDED (integer
+    ;    bucket — where/when/which, the computable planes) and NAMED (string label — who/what/how/why,
+    ;    the learned planes). The split mirrors inquiry-planes.fk's computable/learned KIND exactly. ──
+    (defn ms-banded? (plane)
+        (if (str_eq plane "where") 1
+            (if (str_eq plane "when") 1
+                (if (str_eq plane "which") 1 0))))
+
+    ; ── CHANNEL FITNESS: the right channel for the right info (channel-protocol-choice). A reading's
+    ;    effective ballot weight is confidence * channel-fitness(plane, channel). Fitness is a small
+    ;    integer multiplier; an unlisted channel is fit 1 (present, unboosted). The carrier owns the
+    ;    table; here is the floor the demonstration uses — a direct local route is fitter for its own
+    ;    plane than an echoed relay. ──
+    (defn ms-channel-fitness (plane channel)
+        (if (str_eq plane "where")
+            (if (str_eq channel "gps") 3
+                (if (str_eq channel "wifi") 2
+                    (if (str_eq channel "relay") 1 1)))
+            (if (str_eq plane "who")
+                (if (str_eq channel "mic") 3
+                    (if (str_eq channel "field") 2
+                        (if (str_eq channel "relay") 1 1)))
+                1)))
+
+    ; the effective ballot weight of a reading: its confidence, scaled by its channel's fitness for its
+    ; plane — the place channel-protocol-choice enters the fusion.
+    (defn ms-weight (r)
+        (mul (rd-confidence r) (ms-channel-fitness (rd-plane r) (rd-channel r))))
+
+    ; ── PARTITION the stream by plane: keep only the readings that answer `plane`. The multi-cell
+    ;    stream arrives interleaved (every cell reports every plane it senses); each plane fuses only
+    ;    its own readings. ──
+    (defn ms-for-plane (readings plane)
+        (if (eq (len readings) 0) (list)
+            (if (str_eq (rd-plane (head readings)) plane)
+                (cons (head readings) (ms-for-plane (tail readings) plane))
+                (ms-for-plane (tail readings) plane))))
+
+    ; ── BALLOTS for a banded plane: each reading becomes a (band weight) ballot for spatial-fusion,
+    ;    band = the integer value, weight = the channel-weighted confidence. ──
+    (defn ms-band-ballots (readings)
+        (if (eq (len readings) 0) (list)
+            (cons (list (rd-value (head readings)) (ms-weight (head readings)))
+                (ms-band-ballots (tail readings)))))
+
+    ; ── BALLOTS for a named plane: each reading becomes a (label weight) ballot for confidence-weighted-
+    ;    vote, label = the string value, weight = the channel-weighted confidence. ──
+    (defn ms-label-ballots (readings)
+        (if (eq (len readings) 0) (list)
+            (cons (list (rd-value (head readings)) (ms-weight (head readings)))
+                (ms-label-ballots (tail readings)))))
+
+    ; ── CANDIDATE bands offered to the banded fusion: the distinct values seen across the readings.
+    ;    (For a closed plane the carrier can offer a fixed candidate set; here we derive it so the
+    ;    demonstration needs no external band map.) ──
+    (defn ms-member? (xs x)
+        (if (eq (len xs) 0) 0
+            (if (eq (head xs) x) 1 (ms-member? (tail xs) x))))
+    (defn ms-band-candidates (readings)
+        (if (eq (len readings) 0) (list)
+            (do
+                (let rest (ms-band-candidates (tail readings)))
+                (if (eq (ms-member? rest (rd-value (head readings))) 1)
+                    rest
+                    (cons (rd-value (head readings)) rest)))))
+
+    ; distinct string labels seen, for the named fusion's candidate set.
+    (defn ms-str-member? (xs x)
+        (if (eq (len xs) 0) 0
+            (if (str_eq (head xs) x) 1 (ms-str-member? (tail xs) x))))
+    (defn ms-label-candidates (readings)
+        (if (eq (len readings) 0) (list)
+            (do
+                (let rest (ms-label-candidates (tail readings)))
+                (if (eq (ms-str-member? rest (rd-value (head readings))) 1)
+                    rest
+                    (cons (rd-value (head readings)) rest)))))
+
+    ; ── BANDED FUSION (WHERE / WHEN / WHICH): spatial-fusion's weighted-plurality over the band ballots.
+    ;    Returns the consensus band, the summed confidence behind it, and how many cells agreed. ──
+    (defn ms-band-consensus (readings)
+        (sf-consensus (ms-band-ballots readings) (ms-band-candidates readings)))
+    (defn ms-band-confidence (readings)
+        (sf-confidence (ms-band-ballots readings) (ms-band-candidates readings)))
+    (defn ms-band-agree (readings)
+        (sf-agree (ms-band-ballots readings) (ms-band-consensus readings)))
+
+    ; ── NAMED FUSION (WHO / WHAT / HOW / WHY): confidence-weighted-vote over the label ballots.
+    ;    Returns the consensus label and the summed confidence behind it. ──
+    (defn ms-label-consensus (readings)
+        (cw-winner (ms-label-ballots readings) (ms-label-candidates readings)))
+    (defn ms-label-confidence (readings)
+        (cw-score (ms-label-ballots readings) (ms-label-candidates readings)))
+
+    ; ── ATTRIBUTION: which cells contributed the WINNING answer, and over which channels. The fusion is
+    ;    only trustworthy when it names its sources. ms-contributors walks the plane's readings and keeps
+    ;    the source-cell of each whose value equals the fused answer — for a banded plane (integer eq) or
+    ;    a named plane (string eq). ──
+    (defn ms-band-contributors (readings answer)
+        (if (eq (len readings) 0) (list)
+            (if (eq (rd-value (head readings)) answer)
+                (cons (rd-source (head readings)) (ms-band-contributors (tail readings) answer))
+                (ms-band-contributors (tail readings) answer))))
+    (defn ms-label-contributors (readings answer)
+        (if (eq (len readings) 0) (list)
+            (if (str_eq (rd-value (head readings)) answer)
+                (cons (rd-source (head readings)) (ms-label-contributors (tail readings) answer))
+                (ms-label-contributors (tail readings) answer))))
+    (defn ms-band-channels (readings answer)
+        (if (eq (len readings) 0) (list)
+            (if (eq (rd-value (head readings)) answer)
+                (cons (rd-channel (head readings)) (ms-band-channels (tail readings) answer))
+                (ms-band-channels (tail readings) answer))))
+    (defn ms-label-channels (readings answer)
+        (if (eq (len readings) 0) (list)
+            (if (str_eq (rd-value (head readings)) answer)
+                (cons (rd-channel (head readings)) (ms-label-channels (tail readings) answer))
+                (ms-label-channels (tail readings) answer))))
+
+    ; ── A FUSED ANSWER on one plane: the coherent answer + its attribution. The carried shape:
+    ;     (answer PLANE VALUE CONFIDENCE AGREE SOURCE-CELLS CHANNELS)
+    ;   - value        the fused claim (band integer or label string)
+    ;   - confidence   the summed trust behind it
+    ;   - agree        how many cells read the consensus (banded) — redundancy = grounding
+    ;   - source-cells the cells that contributed the winning answer (attribution)
+    ;   - channels     the channels those contributions arrived over (attribution) ──
+    (defn ms-answer (plane value confidence agree cells channels)
+        (list "answer" plane value confidence agree cells channels))
+    (defn ms-a-plane      (a) (nth a 1))
+    (defn ms-a-value      (a) (nth a 2))
+    (defn ms-a-confidence (a) (nth a 3))
+    (defn ms-a-agree      (a) (nth a 4))
+    (defn ms-a-cells      (a) (nth a 5))
+    (defn ms-a-channels   (a) (nth a 6))
+
+    ; ── FUSE one plane: partition the stream to that plane, dispatch to the right brick by plane KIND,
+    ;    and return the fused answer with its attribution. One recipe, the plane KIND is DATA. ──
+    (defn ms-fuse-plane (readings plane)
+        (do
+            (let rs (ms-for-plane readings plane))
+            (if (eq (ms-banded? plane) 1)
+                (do
+                    (let v (ms-band-consensus rs))
+                    (ms-answer plane v (ms-band-confidence rs) (ms-band-agree rs)
+                        (ms-band-contributors rs v) (ms-band-channels rs v)))
+                (do
+                    (let v (ms-label-consensus rs))
+                    ; a NAMED plane has no integer-band agree count; report the contributor count.
+                    (ms-answer plane v (ms-label-confidence rs)
+                        (len (ms-label-contributors rs v))
+                        (ms-label-contributors rs v) (ms-label-channels rs v))))))
+
+    ; ── THE SEVEN PLANES, fused: walk every inquiry-plane, fuse each from the same stream. The whole
+    ;    mesh sense answer is one list of seven fused answers — one engine, planes as DATA. ──
+    (defn ms-the-seven ()
+        (list "what" "where" "when" "how" "why" "who" "which"))
+    (defn ms-fuse (readings)
+        (ms-fuse-all readings (ms-the-seven)))
+    (defn ms-fuse-all (readings planes)
+        (if (eq (len planes) 0) (list)
+            (cons (ms-fuse-plane readings (head planes))
+                (ms-fuse-all readings (tail planes)))))
+
+    ; pick one plane's fused answer back out of the full result (for inspection / a single-plane query).
+    (defn ms-pick (answers plane)
+        (if (eq (len answers) 0) (list)
+            (if (str_eq (ms-a-plane (head answers)) plane) (head answers)
+                (ms-pick (tail answers) plane))))
+
+    0)
+
+; fused-observation.fk — fuse ALL the native classifiers into ONE coherent observed set per presence:
+; "all senses fusing together to a single set of native observed senses." Each organ already answers ONE
+; question of one presence — presence-feature says someone is THERE (present), identity-match says WHO,
+; sound-classify says WHAT (the sound), scene-features says WHERE (the room/objects). This stone is the
+; fusion that takes those independent organ answers and returns ONE observed cell:
+;     (observed PRESENT WHO WHAT WHERE CONFIDENCE)
+; the confidence rising with cross-witness agreement — more independent organs/devices naming the same
+; thing on a plane raises the trust; organs that disagree on a plane lower it and name the frontier.
+;
+; This COMPOSES the existing tissue, it does not reinvent it. mesh-sense-7w.fk already fuses a multi-cell
+; reading stream into a coherent per-plane answer (ms-fuse-plane dispatches BANDED vs NAMED planes to
+; spatial-fusion / confidence-weighted-vote and carries source-cell attribution). fused-observation maps
+; each presence-organ to its inquiry-plane and runs that SAME per-plane fusion, then gathers the four
+; planes a presence-observation needs into one cell:
+;   - present  <- presence-feature.fk's pf-present? (occupancy -> 1/0 someone is THERE). A BANDED plane:
+;                 each organ's 1/0 occupancy verdict is a band ballot; the fused band is "is anyone here".
+;   - who      <- identity-match.fk's im-match / im-category (the matched persistent identity / kind). A
+;                 NAMED plane: each organ casts a (label weight) ballot, cw-winner fuses them.
+;   - what     <- sound-classify.fk's sc-classify (the sound label: voice / music / bird / ambient). NAMED.
+;   - where    <- scene-features.fk's room/objects banded read (the place bucket). A BANDED plane.
+; The carriers (presence-feature, identity-match, sound-classify, scene-features) RUN the organs and
+; produce the per-organ readings; THIS recipe only routes each reading to its plane and fuses — one engine,
+; the plane KIND is DATA (mesh-sense-7w's ms-banded? table), no per-organ special path.
+;
+; A READING is the narrowed organ row a presence-observation needs (the mesh wmg-sense shape minus the
+; channel, since cross-witness confidence here counts independent organs/devices, not route fitness):
+;     (reading plane value source-cell confidence)
+;   - plane       the observation plane this organ answers ("present" / "who" / "what" / "where")
+;   - value       the organ's claim — an INTEGER band for present/where, a STRING label for who/what
+;   - source-cell the organ/device that reported it (string) — the attribution + the independent-witness id
+;   - confidence  the organ's own integer trust behind this reading (the ballot weight)
+; A reading composes ms-fuse's `reading` with channel "organ" (an unlisted channel = fitness 1, so the
+; organ's own confidence IS its ballot weight — cross-witness counting, not channel weighting).
+;
+; THE THREE DECISIONS:
+;   fo-fuse(readings)       -> one observed cell (observed PRESENT WHO WHAT WHERE CONFIDENCE): route each
+;                              reading to its plane via ms-fuse-plane, take the agreed value per plane, and
+;                              attach the cross-witness confidence. The single set of native observed senses.
+;   fo-confidence(readings) -> the cross-witness confidence: how many independent organs/devices AGREE,
+;                              summed across the planes (more agreeing senses -> higher confidence). This is
+;                              cross-witness-economy's cwe-confidence read (cw-score, summed trust) lifted
+;                              over every plane of the observation — the mesh's own redundancy, measured.
+;   fo-conflict?(readings)  -> 1 if organs DISAGREE on any plane (two organs name different values for the
+;                              same plane). The disagreement is the low-agreement frontier: the confidence
+;                              drops there, and this coin is the escalation signal (the one place a rented
+;                              oracle is worth its rent — cross-witness-economy's spend frontier).
+;
+; All integer for the verdict; bands and confidences are counts on a scale, labels and cells are strings.
+;
+; preludes: form-stdlib/core.fk form-stdlib/spatial-fusion.fk form-stdlib/confidence-weighted-vote.fk form-stdlib/mesh-sense-7w.fk
+;
+; Proven by: form-stdlib/tests/fused-observation-band.fk (four-way at validate.sh, incl. fkwu)
+
+(do
+    ; ── a presence-observation reading: the narrowed organ row (channel dropped; cross-witness here
+    ;    counts independent organs, so the organ's confidence IS its ballot weight). Composes ms-fuse's
+    ;    `reading` shape with the neutral channel "organ" (unlisted -> ms-channel-fitness 1). ──
+    (defn fo-reading (plane value source-cell confidence)
+        (reading plane value source-cell "organ" confidence))
+
+    ; ── THE OBSERVATION PLANES a presence-observation needs, in cell order. present + where are BANDED
+    ;    (integer bucket — ms-banded? already names "where"); who + what are NAMED (string label). The
+    ;    plane KIND is DATA: ms-banded? routes the right fusion brick, never re-implemented here. present
+    ;    is added to the banded set below; where/who/what already fall on the right side of ms-banded?. ──
+    (defn fo-banded? (plane)
+        (if (str_eq plane "present") 1 (ms-banded? plane)))
+
+    ; ── FUSE ONE PLANE: the SAME per-plane fusion mesh-sense-7w runs, with present routed banded. Partition
+    ;    the stream to the plane, dispatch by KIND, return the fused ms-answer (value + summed confidence +
+    ;    agree count + contributing cells). One engine; we only widen ms-banded? to include "present". ──
+    (defn fo-fuse-plane (readings plane)
+        (do
+            (let rs (ms-for-plane readings plane))
+            (if (eq (fo-banded? plane) 1)
+                (do
+                    (let v (ms-band-consensus rs))
+                    (ms-answer plane v (ms-band-confidence rs) (ms-band-agree rs)
+                        (ms-band-contributors rs v) (ms-band-channels rs v)))
+                (do
+                    (let v (ms-label-consensus rs))
+                    (ms-answer plane v (ms-label-confidence rs)
+                        (len (ms-label-contributors rs v))
+                        (ms-label-contributors rs v) (ms-label-channels rs v))))))
+
+    ; the fused VALUE on one plane (the agreed band or label) — the plane's coherent answer.
+    (defn fo-plane-value (readings plane) (ms-a-value (fo-fuse-plane readings plane)))
+    ; the fused CONFIDENCE on one plane (the summed trust behind the agreed value).
+    (defn fo-plane-confidence (readings plane) (ms-a-confidence (fo-fuse-plane readings plane)))
+
+    ; ── THE OBSERVED CELL: one coherent set of native observed senses for the presence. present/who/what/
+    ;    where each fused from the SAME stream, plus the cross-witness confidence across all of them. The
+    ;    "single set of native observed senses" fo-fuse promises — all the organs collapsed into one cell. ──
+    (defn fo-observed (present who what where confidence)
+        (list "observed" present who what where confidence))
+    (defn fo-o-present    (o) (nth o 1))
+    (defn fo-o-who        (o) (nth o 2))
+    (defn fo-o-what       (o) (nth o 3))
+    (defn fo-o-where      (o) (nth o 4))
+    (defn fo-o-confidence (o) (nth o 5))
+
+    ; ── fo-fuse: route each reading to its plane and take the agreed value per plane, into ONE observed
+    ;    cell carrying the cross-witness confidence. The fusion of all senses into a single native observed
+    ;    set. ──
+    (defn fo-fuse (readings)
+        (fo-observed
+            (fo-plane-value readings "present")
+            (fo-plane-value readings "who")
+            (fo-plane-value readings "what")
+            (fo-plane-value readings "where")
+            (fo-confidence readings)))
+
+    ; ── CROSS-WITNESS CONFIDENCE: how many independent organs/devices AGREE, summed across the planes.
+    ;    Each plane's fused confidence is the summed trust behind its agreed value (cross-witness-economy's
+    ;    cwe-confidence = cw-score, the SAME summed-trust read); the observation's confidence is the sum
+    ;    over the four planes — more agreeing senses on more planes -> higher confidence. A presence seen
+    ;    AND identified AND heard AND located by agreeing organs accumulates a HIGH cross-witness confidence;
+    ;    a thin or split observation accumulates little. ──
+    (defn fo-confidence (readings)
+        (add (fo-plane-confidence readings "present")
+            (add (fo-plane-confidence readings "who")
+                (add (fo-plane-confidence readings "what")
+                    (fo-plane-confidence readings "where")))))
+
+    ; ── PLANE CONFLICT: do the organs that reported this plane DISAGREE? The plane's readings are a (value
+    ;    weight) ballot field; the AGREE count of the winning value is how many organs named it. If FEWER
+    ;    organs named the winner than reported the plane, at least one organ named something else — a
+    ;    conflict. For a banded plane the agree count is ms-band-agree; for a named plane it is the count of
+    ;    winning-label contributors. fo-plane-agree reads whichever the plane's KIND uses. ──
+    (defn fo-plane-agree (readings plane)
+        (do
+            (let rs (ms-for-plane readings plane))
+            (if (eq (fo-banded? plane) 1)
+                (ms-band-agree rs)
+                (len (ms-label-contributors rs (ms-label-consensus rs))))))
+
+    (defn fo-plane-conflict? (readings plane)
+        (do
+            (let rs (ms-for-plane readings plane))
+            (if (lt (fo-plane-agree readings plane) (len rs)) 1 0)))
+
+    ; ── fo-conflict?: 1 if organs disagree on ANY plane — the observation has a contested plane. The
+    ;    disagreement is named (which plane lost agreement) and the confidence there is lower (fewer
+    ;    summed-trust ballots backed the winner); this coin is the escalation frontier — the one place a
+    ;    rented oracle earns its rent (cross-witness-economy's spend gate). No conflict = every organ that
+    ;    spoke on a plane agreed; the mesh is its own teacher and nothing need escalate. ──
+    (defn fo-conflict? (readings)
+        (if (eq (fo-plane-conflict? readings "present") 1) 1
+            (if (eq (fo-plane-conflict? readings "who") 1) 1
+                (if (eq (fo-plane-conflict? readings "what") 1) 1
+                    (if (eq (fo-plane-conflict? readings "where") 1) 1 0)))))
+
+    0)
+
+; world-sensor-floor.fk — the standing FLOOR every platform and every sensor stands on.
+;
+; PR #12 (coherence-kernel) wired Windows wifi/bt/battery/memory as host sensors. This
+; canonicalizes that one-platform pattern into the INVARIANT contract, so adding ANY sensor
+; on ANY platform is "implement the carrier, the rest is already proven."
+;
+; THE CONTRACT (host-kernel.form organs-and-ports · sensor-organ-channel.fk · inquiry-planes.fk
+; · fused-observation.fk):
+;   A world resource is a VIA-HOST afferent PORT (world-sensors / world-audio / world-video,
+;   direction afferent: world -> cell). It MAPS to an INQUIRY-PLANE (the kind of question it
+;   answers). It produces a MESH-SAFE READING that fuses and streams.
+;
+;   INVARIANT: port (afferent) + plane + reading-shape + fusion.
+;   PER-PLATFORM: the carrier (the OS API) — the only thing a new platform implements.
+;
+; This COMPOSES the existing tissue, it does not reinvent it:
+;   - the READING is fused-observation.fk's `fo-reading (plane value source-cell confidence)` —
+;     the narrowed organ row the mesh already fuses (no new reading engine).
+;   - the FUSION is fused-observation.fk's `fo-fuse` — the SAME per-plane fusion that collapses
+;     all senses into ONE observed cell (observed PRESENT WHO WHAT WHERE CONFIDENCE).
+;   - the PLANES are inquiry-planes.fk's words. where/who/what already fuse via fo-fuse;
+;     "vitality" extends the seven with the body's own health plane — battery/memory answer
+;     "how alive is the carrier right now", which IS host-resource-access condition-2
+;     (measure-its-health-on-the-body). A vitality reading rides the same reading shape and
+;     streams; the four-plane fuse stays exactly fo-fuse.
+;
+; Integers + strings only; confidences are counts on a scale (the carrier's own trust weight).
+;
+; preludes: form-stdlib/core.fk form-stdlib/spatial-fusion.fk form-stdlib/confidence-weighted-vote.fk form-stdlib/mesh-sense-7w.fk form-stdlib/fused-observation.fk
+;
+; Proven by: form-stdlib/tests/world-sensor-floor-band.fk
+
+(do
+    ; ── a world-sensor spec: an afferent VIA-HOST port routed to its inquiry plane ──
+    ; The port is invariant (direction afferent, organ world-sensors); the carrier varies
+    ; per platform. The spec names what a sensor IS, before any carrier exists.
+    (defn wsf-sensor (name plane)
+        (list "world-sensor" name "afferent" plane))
+    (defn wsf-name   (s) (nth s 1))
+    (defn wsf-dir    (s) (nth s 2))            ; always "afferent" — world -> cell
+    (defn wsf-plane  (s) (nth s 3))            ; the inquiry plane the sensor answers
+    (defn wsf-afferent? (s) (if (str_eq (wsf-dir s) "afferent") 1 0))
+
+    ; ── the canonical floor roster — standard world-sensors mapped to inquiry planes ──
+    ; where: position/place sensors. who: identity/presence sensors. what: scene sensors.
+    ; vitality: the carrier's own health (host-resource-access condition-2).
+    (defn wsf-roster ()
+        (list
+            (wsf-sensor "wifi"         "where")     ; nearby networks -> place
+            (wsf-sensor "bluetooth"    "who")       ; nearby devices  -> who is present
+            (wsf-sensor "gps"          "where")     ; coordinate      -> place
+            (wsf-sensor "camera"       "what")      ; image scene     -> what is here
+            (wsf-sensor "mic"          "who")       ; voices          -> who is speaking
+            (wsf-sensor "battery"      "vitality")  ; charge          -> body health
+            (wsf-sensor "memory"       "vitality")  ; free RAM        -> body health
+            (wsf-sensor "proximity"    "where")     ; near/far        -> place
+            (wsf-sensor "magnetometer" "where")     ; heading         -> place
+            (wsf-sensor "barometer"    "where")))   ; altitude        -> place
+
+    (defn wsf-find (roster name)
+        (if (eq (len roster) 0) (empty)
+            (if (str_eq (wsf-name (head roster)) name) (head roster)
+                (wsf-find (tail roster) name))))
+
+    ; the plane a named sensor answers, looked up in a roster ("" if not on the floor)
+    (defn wsf-plane-of (roster name)
+        (do (let found (wsf-find roster name))
+            (if (eq (len found) 0) "" (wsf-plane found))))
+
+    ; ── a mesh-safe reading routed to its plane ──
+    ; THIS IS fused-observation.fk's fo-reading: (reading plane value source "organ" confidence) —
+    ; the plane it answers, the value sensed, the carrier source-cell, and the carrier's confidence.
+    ; The floor produces exactly the row the mesh already fuses; no new reading engine.
+    (defn wsf-route (sensor value confidence)
+        (fo-reading (wsf-plane sensor) value (wsf-name sensor) confidence))
+
+    ; ── per-platform floor state: which floor sensors a platform carries vs is missing ──
+    ; platform-sensors is the list of sensor NAMES the platform's carriers actually provide.
+    (defn wsf-has? (names name)
+        (if (eq (len names) 0) 0
+            (if (str_eq (head names) name) 1 (wsf-has? (tail names) name))))
+
+    ; how many roster sensors the platform carries
+    (defn wsf-carried-count (platform-sensors roster)
+        (if (eq (len roster) 0) 0
+            (add (wsf-has? platform-sensors (wsf-name (head roster)))
+                 (wsf-carried-count platform-sensors (tail roster)))))
+
+    ; the names of the roster sensors the platform is missing
+    (defn wsf-missing (platform-sensors roster)
+        (if (eq (len roster) 0) (empty)
+            (if (eq (wsf-has? platform-sensors (wsf-name (head roster))) 1)
+                (wsf-missing platform-sensors (tail roster))
+                (cons (wsf-name (head roster))
+                      (wsf-missing platform-sensors (tail roster))))))
+
+    ; floor-complete? -> a state row (state carried total missing).
+    ; state is "floor-complete" when every roster sensor is carried, else "floor-partial".
+    (defn wsf-floor-complete? (platform-sensors roster)
+        (do (let carried (wsf-carried-count platform-sensors roster))
+            (let total (len roster))
+            (list
+                (if (eq carried total) "floor-complete" "floor-partial")
+                carried
+                total
+                (wsf-missing platform-sensors roster))))
+    (defn wfc-state    (f) (nth f 0))
+    (defn wfc-carried  (f) (nth f 1))
+    (defn wfc-total    (f) (nth f 2))
+    (defn wfc-missing  (f) (nth f 3))
+    (defn wfc-complete? (f) (if (str_eq (wfc-state f) "floor-complete") 1 0))
+
+    ; ── fuse the routed readings into ONE observed cell ──
+    ; THIS IS fused-observation.fk's fo-fuse: the SAME per-plane fusion that collapses all senses
+    ; into one (observed PRESENT WHO WHAT WHERE CONFIDENCE). The floor's readings become the one
+    ; observed cell the mesh already understands — no second fusion engine. where/who/what fuse
+    ; directly; vitality readings ride the same shape and stream alongside.
+    (defn wsf-fuse (routed) (fo-fuse routed))
+)
+
+; sensor-organ-template.fk — the HIGH-GRAMMAR base TEMPLATE every observe/ sensor stands on.
+;
+; THE FINDING this file embodies. The whole observe/ sensing family — scene-features, motion-sense,
+; same-room, presence-event, device-model, sense-discernment, remote-mind-sensors, context-signature —
+; repeats ONE shape: a SENSOR reads a raw SAMPLE off a carrier, extracts a FEATURE, routes that feature
+; to its inquiry PLANE as a mesh-safe READING, and the readings FUSE into one observed cell. The shape is
+; already named once, as the contract in world-sensor-floor.fk: `port (afferent) + plane + reading-shape
+; + fusion`. But each sensor RE-INLINES that contract — every body re-calls wsf-sensor / wsf-route /
+; wsf-fuse and re-threads the four pieces by hand. That re-inlining is the ~33% of the family that is
+; structure-without-vitality: the SAME spine, copied N times.
+;
+; THE HIGH-GRAMMAR MOVE. world-sensor-floor.fk is the base CONTRACT; this file makes it a base TEMPLATE
+; with NAMED ATTRIBUTES, expressed in the SAME declarative-attribute grammar the body already speaks for
+; field domains (grammars/field-domain-grammars.form: each domain is a DATA declaration of its
+; (carrier)(fiber)(patterns)(recipes) attributes, interpreted by one engine). A SENSOR-ORGAN is the same
+; idea one altitude down — a DATA declaration of the organ's THREE invariant CONTRACT attributes:
+;
+;   (so-organ NAME PLANE CARRIER)
+;       NAME    — the organ's id (a string)
+;       PLANE   — the inquiry plane it answers ("where"/"who"/"what"/"motion"/"vitality") — inquiry-planes.fk
+;       CARRIER — the world-sensor name (the OS-API port: "camera"/"accelerometer"/"wifi"…) — the ONLY
+;                 thing a new platform implements; world-sensor-floor's wsf-sensor mints the afferent port
+;
+; The two VARYING attributes — the FEATURE-FN (raw sample -> banded feature) and the FUSION-FN (how this
+; organ's readings collapse) — are first-class function VALUES (the kernel's stone-2c function-values: a
+; fn is a value the reducer dispatches on). They are supplied as ARGUMENTS to the template's recipes, not
+; baked into the organ's data list. WHY arguments and not list-cell attributes: on the `fkwu --src`
+; source-runner a fn-value stored in a composed list and pulled back out by `nth` does not resolve to a
+; callable head (it acks `nothing` — the closure/stored-fn-value lane is the kernel's NAMED next gap,
+; receipts/2026-06-29-S2c-function-values.md). A fn-value passed as a DIRECT ARG and called `(fn x)` DOES
+; resolve on `--src`. So the organ list carries the data the floor needs; the varying recipes ride in as
+; arguments — genuinely high-grammar (declared attributes + dispatched function-values), and honest on the
+; current source-runner. When the stored-fn-value lane lands, FEATURE-FN/FUSION-FN can move INTO the
+; organ list with no caller change to the shape.
+;
+; THE TEMPLATE INHERITS THE FLOOR. so-port mints the afferent VIA-HOST port via world-sensor-floor's
+; wsf-sensor (so the organ stands on the proven roster contract); so-read applies a FEATURE-FN to a
+; sample (the one varying step); so-route hands the feature to world-sensor-floor's wsf-route (=
+; fused-observation's fo-reading row the mesh fuses); so-observe runs the whole arc sample -> feature ->
+; reading -> fused cell. A sensor re-expressed as a so-organ DECLARES its three contract attributes and
+; supplies its ONE feature recipe; the route+fuse spine lives HERE, once, for the whole family.
+;
+; This invents no new metric and no new reading engine: it is world-sensor-floor.fk's own contract,
+; promoted from "a thing every sensor re-implements" to "a thing every sensor DECLARES".
+;
+; preludes: form-stdlib/core.fk form-stdlib/spatial-fusion.fk form-stdlib/confidence-weighted-vote.fk form-stdlib/mesh-sense-7w.fk form-stdlib/fused-observation.fk form-stdlib/world-sensor-floor.fk
+;
+; Proven by: observe/tests/src-witness/sensor-organ-template-witness.fk (fkwu --src), and
+;            observe/tests/sensor-organ-template-band.fk (four-way at validate.sh).
+
+(do
+    ; ── the ORGAN: a DATA declaration of the three invariant CONTRACT attributes over the floor.
+    ;    NAME / PLANE / CARRIER name what the organ IS before any carrier exists; the varying FEATURE-FN
+    ;    and FUSION-FN ride in as arguments to the recipes below. ──
+    (defn so-organ (name plane carrier)
+        (list "sensor-organ" name plane carrier))
+    (defn so-name    (o) (nth o 1))
+    (defn so-plane   (o) (nth o 2))
+    (defn so-carrier (o) (nth o 3))
+
+    ; ── INHERIT THE FLOOR: mint the organ's afferent VIA-HOST port via world-sensor-floor's wsf-sensor.
+    ;    The organ stands on the proven roster contract — port direction afferent, organ world-sensors,
+    ;    routed to its inquiry plane. The carrier (the OS API) is the only per-platform piece. ──
+    (defn so-port (o) (wsf-sensor (so-carrier o) (so-plane o)))
+
+    ; ── READ: apply the supplied FEATURE-FN to a raw sample — the single varying step. feature-fn is a
+    ;    function value (stone-2c) passed as a direct arg; so-read dispatches it. Returns the feature. ──
+    (defn so-read (o feature-fn sample) (feature-fn sample))
+
+    ; ── ROUTE: hand the extracted feature to world-sensor-floor's wsf-route (= fused-observation's
+    ;    fo-reading) — the mesh-safe row the mesh already fuses (plane value carrier confidence). The
+    ;    route spine lives HERE, once, for every organ; a sensor never re-writes it. ──
+    (defn so-route (o feature-fn sample confidence)
+        (wsf-route (so-port o) (so-read o feature-fn sample) confidence))
+
+    ; ── ROUTE-ALL / OBSERVE: the whole arc for one organ over a list of samples — each sample ->
+    ;    feature -> routed reading, then fuse all readings with the supplied FUSION-FN into one cell.
+    ;    The floor's wsf-fuse (= fo-fuse) is the default fusion most organs pass; an organ that fuses by
+    ;    a different relation (e.g. same-room's set-overlap grouping) supplies its own. ──
+    (defn so-route-all (o feature-fn samples confidence)
+        (if (eq (len samples) 0) (empty)
+            (cons (so-route o feature-fn (head samples) confidence)
+                  (so-route-all o feature-fn (tail samples) confidence))))
+    (defn so-observe (o feature-fn fusion-fn samples confidence)
+        (fusion-fn (so-route-all o feature-fn samples confidence)))
+
+    ; ── attribute readouts a caller / band can assert against (the organ IS legible as data) ──
+    (defn so-afferent? (o) (wsf-afferent? (so-port o)))       ; inherits the floor's afferent check
+    (defn so-answers?  (o plane) (if (str_eq (so-plane o) plane) 1 0))
+
+    0)
+
+; motion-sense.fk — LOCATION, DIRECTION, SPEED, ACCELERATION from the device's
+; motion world-sensors (accelerometer, gyroscope, GPS) as mesh-safe readings
+; routed to inquiry planes. This is why the app shows only luminance today: the
+; camera carrier exists and routes to "what", but the MOTION world-sensors had
+; no recipe yet — so accel/gyro/gps sensed nothing the mesh could fuse.
+;
+; THE GROUND THIS COMPOSES (it does not reinvent any of it):
+;   - world-sensor-floor.fk: gps/proximity/magnetometer/barometer are already
+;     ROSTER sensors (afferent VIA-HOST ports mapped to inquiry planes); gps maps
+;     to "where". A reading is wsf-route(sensor value confidence) = fused-
+;     observation.fk's fo-reading row the mesh already fuses. We add accelerometer
+;     and gyroscope as MOTION-plane sensors over that SAME contract — implement the
+;     carrier, the rest is already proven (host-kernel.form's via-host afferent
+;     port: SensorManager / CoreMotion deliver the raw samples).
+;   - geometry.fk: the accelerometer/gyroscope sample IS a v3; magnitude is vlen
+;     (fsqrt of vdot), heading is the horizontal-plane direction. No new vector math.
+;   - fused-observation.fk: the routed motion + location readings fuse via fo-fuse
+;     into the ONE observed cell the mesh already understands — "where" carries the
+;     place, "motion" carries the heading/speed band, alongside who/what.
+;
+; A SAMPLE is a v3 (geometry.fk): an accel-reading is (ax ay az) in m/s², a gyro-
+; reading is (gx gy gz) angular rate, a gps-reading is (lat lon) degrees. Floats
+; through the math; verdicts scale to ints the band way (round(mul 100.0 x)).
+;
+; THE FIVE DECISIONS:
+;   ms-acceleration(accel)        -> (magnitude vector): how hard the device is
+;                                    accelerating right now (m/s²) and along what
+;                                    axes. magnitude = vlen (geometry's fsqrt vdot).
+;   ms-speed(accel-history dt)    -> speed by integrating |acceleration| over the
+;                                    window: sum of |a_i| * dt across the samples.
+;                                    Constant accel -> linearly rising speed.
+;   ms-direction(accel gyro)      -> a coarse heading band (0..7, the eight compass
+;                                    octants) from the horizontal accel direction,
+;                                    nudged by the gyro's yaw sign. A banded "where
+;                                    am I heading" the mesh can fuse.
+;   ms-location(gps)              -> the place: lat/lon folded to a "where" band
+;                                    (a coarse geo-cell), the device's coordinate
+;                                    answer to the where plane.
+;   ms-route(motion)              -> the mesh-safe readings routed to planes via
+;                                    wsf-route: gps -> WHERE, accel/speed/direction
+;                                    -> a MOTION reading, so they fuse with the rest.
+;
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/geometry.fk form-stdlib/spatial-fusion.fk form-stdlib/confidence-weighted-vote.fk form-stdlib/mesh-sense-7w.fk form-stdlib/fused-observation.fk form-stdlib/world-sensor-floor.fk
+;
+; Proven by: form-stdlib/tests/motion-sense-band.fk (four-way at validate.sh, incl. fkwu)
+
+(do
+    ; ── the MOTION world-sensors as floor sensors over the world-sensor-floor
+    ;    contract: afferent VIA-HOST ports mapped to inquiry planes. gps already
+    ;    rides the roster ("where"); accelerometer + gyroscope answer "motion". ──
+    (defn ms-accel-sensor () (wsf-sensor "accelerometer" "motion"))
+    (defn ms-gyro-sensor  () (wsf-sensor "gyroscope"      "motion"))
+    (defn ms-gps-sensor   () (wsf-sensor "gps"            "where"))
+
+    ; ── ms-acceleration: the acceleration magnitude + vector from an accel sample.
+    ;    The sample IS a v3; magnitude is geometry.fk's vlen (fsqrt of vdot). ──
+    (defn ms-acceleration (accel)
+        (list "acceleration" (vlen accel) accel))
+    (defn ms-acc-magnitude (a) (nth a 1))
+    (defn ms-acc-vector    (a) (nth a 2))
+
+    ; ── ms-speed: integrate |acceleration| over the time window. Each sample
+    ;    contributes |a_i| * dt to the speed (numeric integration, v = ∫|a| dt).
+    ;    Constant acceleration over the window -> speed rising linearly with it. ──
+    (defn ms-speed-accum (history dt)
+        (if (eq (len history) 0) 0.0
+            (add (mul (vlen (head history)) dt)
+                 (ms-speed-accum (tail history) dt))))
+    (defn ms-speed (history dt) (ms-speed-accum history dt))
+
+    ; ── ms-direction: a coarse heading OCTANT (0..7) from the horizontal accel
+    ;    direction, nudged by the gyro yaw sign. The horizontal plane is (ax, ay);
+    ;    the octant is which of the eight compass sectors the (ax,ay) vector points
+    ;    into. Stable integer band — the "where am I heading" the mesh fuses. ──
+    ;    Sectors by the signs and dominance of ax/ay:
+    ;      ax>=0 ay>=0: |ax|>=|ay| -> 0 (E)  else 1 (NE)
+    ;      ax< 0 ay>=0: |ay|>=|ax| -> 2 (N)  else 3 (NW)
+    ;      ax< 0 ay< 0: |ax|>=|ay| -> 4 (W)  else 5 (SW)
+    ;      ax>=0 ay< 0: |ay|>=|ax| -> 6 (S)  else 7 (SE)
+    (defn ms-octant (ax ay)
+        (if (and (ge ax 0.0) (ge ay 0.0))
+            (if (ge (fabs2 ax) (fabs2 ay)) 0 1)
+            (if (and (lt ax 0.0) (ge ay 0.0))
+                (if (ge (fabs2 ay) (fabs2 ax)) 2 3)
+                (if (and (lt ax 0.0) (lt ay 0.0))
+                    (if (ge (fabs2 ax) (fabs2 ay)) 4 5)
+                    (if (ge (fabs2 ay) (fabs2 ax)) 6 7)))))
+    ; |x| over floats (core's abs is integer-shaped; the horizontal plane is float).
+    (defn fabs2 (x) (if (lt x 0.0) (sub 0.0 x) x))
+    ; gyro yaw (gz) turns the heading: a positive yaw rate advances the octant by 1,
+    ; a negative one steps it back — the heading the device is rotating toward.
+    (defn ms-yaw-nudge (octant gz)
+        (if (gt gz 0.0) (mod (add octant 1) 8)
+            (if (lt gz 0.0) (mod (add octant 7) 8) octant)))
+    (defn ms-direction (accel gyro)
+        (ms-yaw-nudge (ms-octant (vx accel) (vy accel)) (vz gyro)))
+
+    ; ── ms-location: the place from a gps sample. (lat lon) in degrees fold to a
+    ;    coarse geo-cell band: floor each to its integer degree and pack into one
+    ;    band (lat+90)*360 + (lon+180) — a stable "where" bucket the where-plane
+    ;    fusion already understands (banded plane). The device's coordinate answer. ──
+    (defn gps-lat (g) (nth g 0))
+    (defn gps-lon (g) (nth g 1))
+    (defn ms-location (gps)
+        (do
+            (let lat (round (gps-lat gps)))
+            (let lon (round (gps-lon gps)))
+            (add (mul (add lat 90) 360) (add lon 180))))
+
+    ; ── ms-route: route the motion observation to its planes as mesh-safe readings
+    ;    via world-sensor-floor's wsf-route (= fo-reading rows the mesh fuses). gps
+    ;    -> WHERE (the located place band); acceleration/speed/direction -> a single
+    ;    MOTION reading whose value is the heading band, carried on the accelerometer
+    ;    sensor's plane. So the motion senses fuse alongside who/what/where. ──
+    ;    A motion observation is (gps accel-history gyro dt confidence).
+    (defn motion-obs (gps history gyro dt confidence)
+        (list "motion-obs" gps history gyro dt confidence))
+    (defn mo-gps     (m) (nth m 1))
+    (defn mo-history (m) (nth m 2))
+    (defn mo-gyro    (m) (nth m 3))
+    (defn mo-dt      (m) (nth m 4))
+    (defn mo-conf    (m) (nth m 5))
+
+    (defn ms-route (motion)
+        (do
+            (let conf (mo-conf motion))
+            (let accel (head (mo-history motion)))   ; the current accel sample
+            (let heading (ms-direction accel (mo-gyro motion)))
+            (list
+                ; gps -> WHERE: the located place band
+                (wsf-route (ms-gps-sensor) (ms-location (mo-gps motion)) conf)
+                ; accel/speed/direction -> a MOTION reading carrying the heading band
+                (wsf-route (ms-accel-sensor) heading conf))))
+
+    ; the fused observed cell from a motion observation (composes fo-fuse).
+    (defn ms-fuse (motion) (wsf-fuse (ms-route motion)))
+
+    0)
+
+; motion-sense-organ.fk — motion-sense re-expressed as a THIN sensor-organ over the high-grammar
+; sensor-organ-template.fk. The structural spine (mint the afferent port, route the feature to its plane
+; as a mesh-safe reading) LIVES IN THE TEMPLATE; this file declares only what makes motion-sense
+; motion-sense: its three contract ATTRIBUTES and its ONE feature recipe.
+;
+; THE DECLARED ATTRIBUTES (the so-organ data row):
+;   NAME    "motion"        — the organ's id
+;   PLANE   "motion"        — motion-sense answers the MOTION plane (which way am I heading) — inquiry-planes.fk
+;   CARRIER "accelerometer" — the OS-API port (CoreMotion / SensorManager deliver accel + gyro samples)
+;
+; THE ONE FEATURE RECIPE: ms-direction reads an (accel gyro) sample into a coarse heading OCTANT (0..7,
+; the eight compass sectors) from the horizontal accel direction, nudged by the gyro yaw sign. This is the
+; exact octant math the original motion-sense.fk proves (ms-octant / ms-yaw-nudge over the horizontal
+; plane); the organ's banded "motion" value IS that heading octant — a stable integer band the mesh fuses.
+;
+; EVERYTHING ELSE — the afferent port (so-port -> wsf-sensor "accelerometer" "motion"), the mesh-safe
+; reading (so-route -> wsf-route -> fo-reading), the fusion (wsf-fuse) — is INHERITED from the template.
+; motion-sense no longer re-inlines wsf-sensor / wsf-route; it DECLARES and INHERITS.
+;
+; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/geometry.fk form-stdlib/spatial-fusion.fk form-stdlib/confidence-weighted-vote.fk form-stdlib/mesh-sense-7w.fk form-stdlib/fused-observation.fk form-stdlib/world-sensor-floor.fk form-stdlib/sensor-organ-template.fk
+;
+; Proven by: observe/tests/src-witness/motion-sense-organ-witness.fk (fkwu --src — SAME verdict as the
+;            original motion-sense heading math), and observe/tests/sensor-organ-template-band.fk.
+
+(do
+    ; ── the ORGAN: motion-sense' three contract attributes, declared over the template. ──
+    (defn motion-organ () (so-organ "motion" "motion" "accelerometer"))
+
+    ; ── the heading feature REUSES the original motion-sense recipe (ms-direction) verbatim — the organ
+    ;    inherits the route+fuse spine from the template, and inherits the FEATURE math from the sensor it
+    ;    re-expresses. This is what makes the uplift byte-identical: the one varying recipe is the proven
+    ;    one, not a re-implementation. A SAMPLE is (accel gyro), each a v3 list (geometry.fk): accel =
+    ;    (ax ay az), gyro = (gx gy gz). The banded "motion" value is the heading octant ms-direction reads. ──
+    (defn ms-feature (sample)
+        (ms-direction (nth sample 0) (nth sample 1)))
+
+    ; ── INHERIT the route spine from the template: the reading is so-route over the organ + the feature-fn.
+    ;    No wsf-sensor / wsf-route re-inlined here — the template carries it. ──
+    (defn motion-route (sample confidence) (so-route (motion-organ) ms-feature sample confidence))
+
+    0)
+
+(do
+  ; a heading-east sample: accel (1,0,0), gyro (0,0,0) -> octant 0, no nudge -> 0
+  (defn accelE () (list 1.0 0.0 0.0))
+  (defn gyro0 () (list 0.0 0.0 0.0))
+  ; a heading-north sample with +yaw: accel (0,1,0) -> octant 2, +yaw -> 3
+  (defn accelN () (list 0.0 1.0 0.0))
+  (defn gyroP () (list 0.0 0.0 1.0))
+  ; ORIGINAL
+  (defn orig-E () (ms-direction (accelE) (gyro0)))
+  (defn orig-N () (ms-direction (accelN) (gyroP)))
+  ; UPLIFTED organ feature
+  (defn up-E () (ms-feature (list (accelE) (gyro0))))
+  (defn up-N () (ms-feature (list (accelN) (gyroP))))
+  ; routed reading value + plane
+  (defn up-reading-E () (motion-route (list (accelE) (gyro0)) 90))
+  (defn k (c bit) (if c bit 0))
+  (defn motion-cmp ()
+    (add (add (add
+      (k (eq (up-E) (orig-E)) 1)
+      (k (eq (up-N) (orig-N)) 10))
+      (k (eq (nth (up-reading-E) 2) (orig-E)) 100))
+      (k (str_eq (nth (up-reading-E) 1) "motion") 1000)))
+  (motion-cmp))
+

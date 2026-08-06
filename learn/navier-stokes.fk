@@ -1,0 +1,225 @@
+; navier-stokes.fk — the incompressible Navier–Stokes equations as a cell this body
+; can CHECK, not a paragraph it can recite.
+;
+; preludes: form-stdlib/core.fk
+;
+; WHY IT IS SHAPED THIS WAY. Knowledge that arrives as prose cannot fail. This body's
+; way of holding something is a cell that returns a folded scalar and a band that can
+; go red, so the question here was not "how do I write down Navier–Stokes" but "what
+; about Navier–Stokes can this kernel be WRONG about, out loud". Two things can:
+;
+;   · dimensional homogeneity — every term of the momentum equation carries the same
+;     physical dimension, and that is arithmetic on exponent triples, so a wrong
+;     exponent anywhere makes the check fall over. Perturbation-verified below.
+;   · the Reynolds number — it is the ratio of the convective term's magnitude to the
+;     viscous term's, and it is dimensionless. Both of those are computable, and this
+;     cell computes the ratio TWO WAYS (from the group ρUL/μ, and from the two term
+;     magnitudes separately) and asks whether they agree.
+;
+; THE EQUATIONS, for a constant-density Newtonian fluid:
+;
+;     ρ (∂u/∂t)  +  ρ (u·∇)u   =   −∇p   +   μ ∇²u   +   ρ g          [momentum]
+;                                  ∇·u = 0                            [continuity]
+;
+;     u  velocity        p  pressure     ρ  mass density
+;     μ  dynamic viscosity               g  body acceleration (gravity)
+;
+; Read left to right, the momentum equation is a sentence about a parcel of fluid:
+; what it does on its own (unsteady), what carrying itself around does to it
+; (convective), what being squeezed does (pressure), what its neighbours' shear does
+; (viscous), and what the world outside does (body force). Continuity says the parcel
+; cannot change volume.
+;
+; DIMENSIONS carried as (M L T) exponent triples — mass, length, time:
+;
+;     ρ  ( 1 -3  0)     u  ( 0  1 -1)     p  ( 1 -1 -2)
+;     μ  ( 1 -1 -1)     g  ( 0  1 -2)     x  ( 0  1  0)     t  ( 0  0  1)
+;
+; Every momentum term reduces to ( 1 -2 -2) — force per unit volume. That equality is
+; not decoration: it is the reason the five terms may be added at all.
+;
+; WHAT THIS CELL DOES NOT CLAIM. Whether smooth, globally defined solutions always
+; exist in three dimensions is OPEN — one of the Clay Millennium Prize problems, and
+; unsettled as of this cell's writing. It is recorded here as pending, because pending
+; is honest and a cell that answered it would be lying. `ns-existence-3d-settled?` is
+; 0 and the band asserts that it is 0; the day that changes, this band goes red and
+; someone updates the body on purpose.
+;
+; Proven by learn/tests/navier-stokes-band.fk.
+; witnessed: 2026-07-26 -> band 1023 on fkwu, Go, Rust and TypeScript, and again on all
+; three minimal walkers in walkers/ — seven independent evaluators.
+; Perturbation-verified the same day; each slip is LOCATED by which bits drop:
+;   pressure's length exponent −1 -> −2        1023 -> 1022
+;   viscous term made first-order              1023 ->  510
+;   Reynolds' milli-unit scaling dropped       1023 ->  943
+
+(do
+    ; ── dimensions as (M L T) exponent triples ───────────────────────────────
+    (defn ns-dim (m l t) (list m l t))
+    (defn ns-dim-m (d) (nth d 0))
+    (defn ns-dim-l (d) (nth d 1))
+    (defn ns-dim-t (d) (nth d 2))
+    (defn ns-dim-mul (a b)                      ; multiplying quantities adds exponents
+        (ns-dim (add (ns-dim-m a) (ns-dim-m b))
+                (add (ns-dim-l a) (ns-dim-l b))
+                (add (ns-dim-t a) (ns-dim-t b))))
+    (defn ns-dim-div (a b)                      ; dividing subtracts them
+        (ns-dim (sub (ns-dim-m a) (ns-dim-m b))
+                (sub (ns-dim-l a) (ns-dim-l b))
+                (sub (ns-dim-t a) (ns-dim-t b))))
+    (defn ns-dim-eq? (a b)
+        (and (eq (ns-dim-m a) (ns-dim-m b))
+             (and (eq (ns-dim-l a) (ns-dim-l b))
+                  (eq (ns-dim-t a) (ns-dim-t b)))))
+    (defn ns-dim-none () (ns-dim 0 0 0))        ; dimensionless
+
+    ; ── the base quantities ──────────────────────────────────────────────────
+    (defn ns-d-density ()   (ns-dim 1 (sub 0 3) 0))
+    (defn ns-d-velocity ()  (ns-dim 0 1 (sub 0 1)))
+    (defn ns-d-length ()    (ns-dim 0 1 0))
+    (defn ns-d-time ()      (ns-dim 0 0 1))
+    (defn ns-d-pressure ()  (ns-dim 1 (sub 0 1) (sub 0 2)))
+    (defn ns-d-viscosity () (ns-dim 1 (sub 0 1) (sub 0 1)))
+    (defn ns-d-gravity ()   (ns-dim 0 1 (sub 0 2)))
+
+    ; ── the five momentum terms, each built from its factors ────────────────
+    ; ρ ∂u/∂t
+    (defn ns-term-unsteady ()
+        (ns-dim-mul (ns-d-density) (ns-dim-div (ns-d-velocity) (ns-d-time))))
+    ; ρ (u·∇)u  — one velocity carried, one doing the carrying, one gradient
+    (defn ns-term-convective ()
+        (ns-dim-mul (ns-d-density)
+            (ns-dim-div (ns-dim-mul (ns-d-velocity) (ns-d-velocity)) (ns-d-length))))
+    ; ∇p
+    (defn ns-term-pressure ()
+        (ns-dim-div (ns-d-pressure) (ns-d-length)))
+    ; μ ∇²u  — a SECOND derivative, so length twice
+    (defn ns-term-viscous ()
+        (ns-dim-mul (ns-d-viscosity)
+            (ns-dim-div (ns-d-velocity) (ns-dim-mul (ns-d-length) (ns-d-length)))))
+    ; ρ g
+    (defn ns-term-body ()
+        (ns-dim-mul (ns-d-density) (ns-d-gravity)))
+
+    ; what they all have to be: force per unit volume
+    (defn ns-d-force-density () (ns-dim 1 (sub 0 2) (sub 0 2)))
+
+    (defn ns-momentum-terms ()
+        (list (ns-term-unsteady) (ns-term-convective) (ns-term-pressure)
+              (ns-term-viscous) (ns-term-body)))
+
+    ; counted walk — `len` walks the list on fkwu, so emptiness is never asked by len
+    (defn ns-all-eq-loop (terms n target)
+        (if (eq n 0)
+            1
+            (if (ns-dim-eq? (head terms) target)
+                (ns-all-eq-loop (tail terms) (sub n 1) target)
+                0)))
+    (defn ns-momentum-homogeneous? ()
+        (ns-all-eq-loop (ns-momentum-terms) 5 (ns-d-force-density)))
+
+    ; ── continuity: ∇·u, a rate, one over time ──────────────────────────────
+    (defn ns-term-continuity () (ns-dim-div (ns-d-velocity) (ns-d-length)))
+    (defn ns-d-rate () (ns-dim 0 0 (sub 0 1)))
+
+    ; ── Reynolds number: ρUL/μ, and it must be dimensionless ────────────────
+    (defn ns-d-reynolds ()
+        (ns-dim-div
+            (ns-dim-mul (ns-dim-mul (ns-d-density) (ns-d-velocity)) (ns-d-length))
+            (ns-d-viscosity)))
+    (defn ns-reynolds-dimensionless? ()
+        (if (ns-dim-eq? (ns-d-reynolds) (ns-dim-none)) 1 0))
+
+    ; Numerically, in milli-units so the arithmetic stays whole: density kg/m³,
+    ; velocity mm/s, length mm, viscosity mPa·s. Re = ρ U L / μ.
+    (defn ns-reynolds (rho u-mm-s l-mm mu-mpas)
+        (div (mul (mul rho u-mm-s) l-mm) (mul mu-mpas 1000)))
+
+    ; Water at 1 m/s across 1 m: ρ 1000, U 1000 mm/s, L 1000 mm, μ 1 mPa·s -> 10^6.
+    (defn ns-water-reynolds () (ns-reynolds 1000 1000 1000 1))
+
+    ; The SAME number from the two term magnitudes, which is what Re MEANS:
+    ;   convective ~ ρU²/L      viscous ~ μU/L²      ratio = ρUL/μ
+    ; Both magnitudes in milli-units of force density, then divided.
+    (defn ns-convective-magnitude (rho u-mm-s l-mm)
+        (div (mul rho (mul u-mm-s u-mm-s)) l-mm))
+    (defn ns-viscous-magnitude (mu-mpas u-mm-s l-mm)
+        (div (mul (mul mu-mpas u-mm-s) 1000) (mul l-mm l-mm)))
+    (defn ns-reynolds-from-terms (rho u-mm-s l-mm mu-mpas)
+        (div (ns-convective-magnitude rho u-mm-s l-mm)
+             (ns-viscous-magnitude mu-mpas u-mm-s l-mm)))
+    (defn ns-reynolds-agrees? (rho u-mm-s l-mm mu-mpas)
+        (if (eq (ns-reynolds rho u-mm-s l-mm mu-mpas)
+                (ns-reynolds-from-terms rho u-mm-s l-mm mu-mpas))
+            1 0))
+
+    ; ── the shape of the system, countable ──────────────────────────────────
+    (defn ns-momentum-term-count () 5)
+    (defn ns-constraint-count () 1)
+
+    ; ── the open question, held as pending ──────────────────────────────────
+    ; Global existence and smoothness in three dimensions: unsettled. Recorded as a
+    ; value the band asserts, so the day it changes the body notices on purpose.
+    (defn ns-existence-3d-settled? () 0)
+
+    ; ── the terms as speakable rows, so the body can describe itself ────────
+    ; Index order is the order the momentum equation is written in. These are the
+    ; only place the term names live; the plate and the description both read them
+    ; from here rather than carrying their own copies.
+    (defn ns-term-name (i)
+        (if (eq i 0) "unsteady"
+        (if (eq i 1) "convective"
+        (if (eq i 2) "pressure"
+        (if (eq i 3) "viscous" "body force")))))
+    (defn ns-term-symbol (i)
+        (if (eq i 0) "rho du/dt"
+        (if (eq i 1) "rho (u.grad)u"
+        (if (eq i 2) "-grad p"
+        (if (eq i 3) "mu lap u" "rho g")))))
+    (defn ns-term-says (i)
+        (if (eq i 0) "what the parcel does on its own"
+        (if (eq i 1) "what carrying itself around does to it"
+        (if (eq i 2) "what being squeezed does"
+        (if (eq i 3) "what the shear of its neighbours does"
+                     "what the world outside does")))))
+    (defn ns-term-dim (i)
+        (if (eq i 0) (ns-term-unsteady)
+        (if (eq i 1) (ns-term-convective)
+        (if (eq i 2) (ns-term-pressure)
+        (if (eq i 3) (ns-term-viscous) (ns-term-body))))))
+
+    ; ── two exact solutions the body can compute and then check ─────────────
+    ; Both are unidirectional, so (u.grad)u vanishes identically and the balance
+    ; collapses to the terms that remain. Scaled so the arithmetic stays whole:
+    ; take the peak as H*H and the half-gap as H, and every value is an integer.
+    ;
+    ; plane Poiseuille, driven by a pressure gradient between two fixed walls:
+    ;   u(y) = H^2 - y^2            zero at y = +/-H, peak H^2 at the centre
+    (defn ns-poiseuille (h y) (sub (mul h h) (mul y y)))
+    ; plane Couette, driven by one wall sliding at speed 2*H*k:
+    ;   u(y) = k (y + H)            linear, zero at the fixed wall
+    (defn ns-couette (h k y) (mul k (add y h)))
+
+    ; The discrete second difference IS mu lap u up to the constant mu. For a
+    ; parabola it is the same everywhere and not zero — which is exactly why
+    ; Poiseuille needs a pressure gradient to stand against it. For a straight
+    ; line it is zero, and Couette needs no pressure gradient at all.
+    (defn ns-curvature-poiseuille (h y)
+        (add (sub (ns-poiseuille h (sub y 1)) (mul 2 (ns-poiseuille h y)))
+             (ns-poiseuille h (add y 1))))
+    (defn ns-curvature-couette (h k y)
+        (add (sub (ns-couette h k (sub y 1)) (mul 2 (ns-couette h k y)))
+             (ns-couette h k (add y 1))))
+
+    ; ── perturbation: does the homogeneity check actually discriminate? ──────
+    ; The viscous term with ONE length instead of two — the single most plausible
+    ; slip, since it is the only second derivative in the equation.
+    (defn ns-term-viscous-first-order ()
+        (ns-dim-mul (ns-d-viscosity) (ns-dim-div (ns-d-velocity) (ns-d-length))))
+    (defn ns-broken-terms ()
+        (list (ns-term-unsteady) (ns-term-convective) (ns-term-pressure)
+              (ns-term-viscous-first-order) (ns-term-body)))
+    (defn ns-broken-homogeneous? ()
+        (ns-all-eq-loop (ns-broken-terms) 5 (ns-d-force-density)))
+
+    0)

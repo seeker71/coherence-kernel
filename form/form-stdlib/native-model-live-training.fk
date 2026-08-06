@@ -1,0 +1,208 @@
+; native-model-live-training.fk -- actual bounded native training measurements.
+;
+; preludes: form-stdlib/core.fk form-stdlib/transformer-numerics.fk form-stdlib/transformer-block.fk form-stdlib/transformer-backprop.fk form-stdlib/transformer-corpus-train.fk form-stdlib/neural-lm.fk
+;
+; Two runs live here, both executed by fkwu rather than described by a host:
+;   1. a two-block transformer component trained on 13 real EN->FR UI feature
+;      pairs and checked on five held-out pairs;
+;   2. a small generative neural LM trained on six next-token transitions.
+;
+; This is actual in-memory weight training and held-out measurement.  It is not
+; a useful large language checkpoint: width is 2/6 and context is one token.
+; native-model-checkpoint.fk now persists these exact learned f64 images, but
+; that small checkpoint cannot impersonate the missing useful native LLM.
+;
+; witnessed: 2026-07-15 -> direct-source band 255; both live report verdicts 1
+
+(do
+    (defn nmlt-translation-base ()
+        (tbp-bk (list (list 0.3 -0.2) (list 0.1 0.4)) (list 0.0 0.0)
+                (list (list 0.5 0.2) (list -0.3 0.6)) (list 0.0 0.0)))
+    (defn nmlt-translation-tail ()
+        (tbp-bk (list (list 0.2 0.1) (list -0.1 0.3)) (list 0.0 0.0)
+                (list (list 0.4 -0.2) (list 0.3 0.5)) (list 0.0 0.0)))
+
+    ; Real translated UI strings reduced to [character-length, word-count].
+    ; The reduction makes this a transformer component test, not prose emission.
+    (defn nmlt-translation-train ()
+        (list
+            (list (list 0.185714 0.25) (list 0.2 0.25))
+            (list (list 0.214286 0.25) (list 0.257143 0.25))
+            (list (list 0.228571 0.25) (list 0.271429 0.25))
+            (list (list 0.271429 0.25) (list 0.471429 0.416667))
+            (list (list 0.3 0.25) (list 0.457143 0.416667))
+            (list (list 0.314286 0.25) (list 0.4 0.333333))
+            (list (list 0.371429 0.416667) (list 0.842857 0.666667))
+            (list (list 0.385714 0.416667) (list 0.685714 0.75))
+            (list (list 0.414286 0.5) (list 0.414286 0.5))
+            (list (list 0.485714 0.583333) (list 0.585714 0.583333))
+            (list (list 0.542857 0.666667) (list 0.628571 0.833333))
+            (list (list 0.6 0.833333) (list 0.742857 0.833333))
+            (list (list 0.757143 0.75) (list 0.857143 0.833333))))
+    (defn nmlt-translation-heldout ()
+        (list
+            (list (list 0.142857 0.25) (list 0.228571 0.25))
+            (list (list 0.257143 0.333333) (list 0.271429 0.333333))
+            (list (list 0.328571 0.333333) (list 0.442857 0.416667))
+            (list (list 0.442857 0.583333) (list 0.385714 0.5))
+            (list (list 0.657143 0.75) (list 0.7 0.666667))))
+
+    (defn nmlt-baseline-loss (mean held)
+        (if (eq (len held) 0) 0.0
+            (add (tbp-sse mean (tct-ex-t (head held)))
+                 (nmlt-baseline-loss mean (tail held)))))
+
+    ; result fields: tag, train rows, heldout rows, epochs, train-before,
+    ; train-after, heldout-before, heldout-after, mean-baseline, moved-micro.
+    (defn nmlt-transformer-run ()
+        (do
+            (let ba (nmlt-translation-base))
+            (let bb (nmlt-translation-tail))
+            (let train (nmlt-translation-train))
+            (let held (nmlt-translation-heldout))
+            (let eps 0.00001)
+            (let trained (tct-train-blocks ba bb train 0.1 eps 120))
+            (let initial (list ba bb))
+            (let train-before
+                (round (mul (tct-corpus-loss initial train eps) 1000000.0)))
+            (let train-after
+                (round (mul (tct-corpus-loss trained train eps) 1000000.0)))
+            (let heldout-before
+                (round (mul (tct-corpus-loss initial held eps) 1000000.0)))
+            (let heldout-after
+                (round (mul (tct-corpus-loss trained held eps) 1000000.0)))
+            (let mean-baseline
+                (round (mul (nmlt-baseline-loss (list 0.524176 0.532051) held)
+                            1000000.0)))
+            (let moved
+                (round (mul
+                    (tn-abs (sub (head (head (tbp-bk-w1 (nth trained 0)))) 0.3))
+                    1000000.0)))
+            (list "form-native-transformer-training-v1" (len train) (len held) 120
+                  train-before train-after heldout-before heldout-after
+                  mean-baseline moved)))
+
+    (defn nmlt-transformer-valid? (r)
+        (if (and (eq (len r) 10)
+                 (str_eq (nth r 0) "form-native-transformer-training-v1"))
+            (if (and (gt (nth r 4) 0) (lt (nth r 5) (nth r 4)))
+                (if (and (lt (nth r 7) (nth r 6)) (lt (nth r 7) (nth r 8)))
+                    (if (gt (nth r 9) 0) 1 0) 0)
+                0)
+            0))
+
+    (defn nmlt-lm-embeddings ()
+        (list
+            (list 1.0 0.0 0.0 0.0 0.0 0.0)
+            (list 0.0 1.0 0.0 0.0 0.0 0.0)
+            (list 0.0 0.0 1.0 0.0 0.0 0.0)
+            (list 0.0 0.0 0.0 1.0 0.0 0.0)
+            (list 0.0 0.0 0.0 0.0 1.0 0.0)
+            (list 0.0 0.0 0.0 0.0 0.0 1.0)))
+
+    (defn nmlt-lm-a ()
+        (do
+            (let z (list 0.0 0.0 0.0 0.0 0.0 0.0))
+            (let w1 (list
+                (list 0.30 -0.20 0.10 0.05 0.12 -0.08)
+                (list 0.10 0.40 -0.15 0.20 -0.05 0.18)
+                (list -0.05 0.25 0.35 -0.10 0.22 0.07)
+                (list 0.15 -0.30 0.20 0.30 -0.12 0.09)
+                (list 0.08 0.18 -0.22 0.14 0.28 -0.16)
+                (list -0.18 0.06 0.24 -0.20 0.10 0.32)))
+            (let w2 (list
+                (list 0.50 0.20 -0.10 0.15 -0.06 0.11)
+                (list -0.30 0.60 0.25 -0.05 0.13 -0.09)
+                (list 0.10 -0.20 0.45 0.30 -0.14 0.08)
+                (list 0.20 0.35 -0.25 0.40 0.07 -0.12)
+                (list -0.09 0.16 0.21 -0.18 0.33 0.05)
+                (list 0.12 -0.07 0.19 0.24 -0.21 0.29)))
+            (tbp-bk w1 z w2 z)))
+    (defn nmlt-lm-b ()
+        (do
+            (let z (list 0.0 0.0 0.0 0.0 0.0 0.0))
+            (let w1 (list
+                (list 0.30 -0.20 0.10 0.05 0.12 -0.08)
+                (list 0.10 0.40 -0.15 0.20 -0.05 0.18)
+                (list -0.05 0.25 0.35 -0.10 0.22 0.07)
+                (list 0.15 -0.30 0.20 0.30 -0.12 0.09)
+                (list 0.08 0.18 -0.22 0.14 0.28 -0.16)
+                (list -0.18 0.06 0.24 -0.20 0.10 0.32)))
+            (let w2 (list
+                (list 0.50 0.20 -0.10 0.15 -0.06 0.11)
+                (list -0.30 0.60 0.25 -0.05 0.13 -0.09)
+                (list 0.10 -0.20 0.45 0.30 -0.14 0.08)
+                (list 0.20 0.35 -0.25 0.40 0.07 -0.12)
+                (list -0.09 0.16 0.21 -0.18 0.33 0.05)
+                (list 0.12 -0.07 0.19 0.24 -0.21 0.29)))
+            (tbp-bk w2 z w1 z)))
+
+    (defn nmlt-lm-corpus (e)
+        (list
+            (list (nl-emb e 0) (nl-emb e 1))
+            (list (nl-emb e 1) (nl-emb e 2))
+            (list (nl-emb e 2) (nl-emb e 1))
+            (list (nl-emb e 3) (nl-emb e 2))
+            (list (nl-emb e 4) (nl-emb e 5))
+            (list (nl-emb e 5) (nl-emb e 4))))
+    (defn nmlt-lm-heldout (e)
+        (list
+            (list (nl-emb e 0) 1) (list (nl-emb e 1) 2)
+            (list (nl-emb e 2) 1) (list (nl-emb e 3) 2)
+            (list (nl-emb e 4) 5) (list (nl-emb e 5) 4)))
+
+    ; result fields: tag, train rows, heldout rows, epochs, initial-correct,
+    ; trained-correct.  This is a small neural LM, never labeled an LLM.
+    (defn nmlt-lm-run ()
+        (do
+            (let e (nmlt-lm-embeddings))
+            (let a (nmlt-lm-a))
+            (let b (nmlt-lm-b))
+            (let corpus (nmlt-lm-corpus e))
+            (let held (nmlt-lm-heldout e))
+            (let initial (list a b))
+            (let trained (tct-train-blocks a b corpus 0.05 0.00001 400))
+            (list "form-native-neural-lm-training-v1" (len corpus) (len held) 400
+                  (nl-eval-correct initial e held 0.00001)
+                  (nl-eval-correct trained e held 0.00001))))
+
+    (defn nmlt-lm-valid? (r)
+        (if (and (eq (len r) 6)
+                 (str_eq (nth r 0) "form-native-neural-lm-training-v1"))
+            (if (and (lt (nth r 4) (nth r 5)) (eq (nth r 5) (nth r 2))) 1 0)
+            0))
+
+    (defn nmlt-kv (key value)
+        (str_concat key (str_concat "=" (str_concat (int_to_str value) "\n"))))
+    (defn nmlt-render-transformer (r)
+        (str_concat "engine=form-native-transformer-component\n"
+        (str_concat "scope=actual-in-memory-training-not-native-llm-checkpoint\n"
+        (str_concat (nmlt-kv "train_rows" (nth r 1))
+        (str_concat (nmlt-kv "heldout_rows" (nth r 2))
+        (str_concat (nmlt-kv "epochs" (nth r 3))
+        (str_concat (nmlt-kv "train_loss_before_micro" (nth r 4))
+        (str_concat (nmlt-kv "train_loss_after_micro" (nth r 5))
+        (str_concat (nmlt-kv "heldout_loss_before_micro" (nth r 6))
+        (str_concat (nmlt-kv "heldout_loss_after_micro" (nth r 7))
+        (str_concat (nmlt-kv "heldout_mean_baseline_micro" (nth r 8))
+        (str_concat (nmlt-kv "weight_delta_micro" (nth r 9))
+                    (nmlt-kv "training_valid" (nmlt-transformer-valid? r))))))))))))))
+
+    (defn nmlt-render-lm (r)
+        (str_concat "engine=form-native-neural-lm\n"
+        (str_concat "scope=actual-small-next-token-training-not-large-language-model\n"
+        (str_concat (nmlt-kv "train_transitions" (nth r 1))
+        (str_concat (nmlt-kv "heldout_transitions" (nth r 2))
+        (str_concat (nmlt-kv "epochs" (nth r 3))
+        (str_concat (nmlt-kv "heldout_correct_before" (nth r 4))
+        (str_concat (nmlt-kv "heldout_correct_after" (nth r 5))
+                    (nmlt-kv "training_valid" (nmlt-lm-valid? r)))))))))
+
+    (defn nmlt-live-report ()
+        (do
+            (let transformer (nmlt-transformer-run))
+            (let lm (nmlt-lm-run))
+            (str_concat (nmlt-render-transformer transformer)
+                (str_concat "---\n" (nmlt-render-lm lm)))))
+
+    0)

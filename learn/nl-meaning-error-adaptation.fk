@@ -1,0 +1,133 @@
+; nl-meaning-error-adaptation.fk — witnessed mistakes become training signal,
+; while a separate untouched partition adjudicates whether adaptation transfers.
+import "nl-meaning-inquiry-learning.fk"
+
+(do
+  (defn nmea-split-loop (rows index adapt eval)
+    (if (eq (len rows) 0) (list adapt eval)
+      (if (eq (mod index 2) 0)
+        (nmea-split-loop (tail rows) (add index 1) (cons (head rows) adapt) eval)
+        (nmea-split-loop (tail rows) (add index 1) adapt (cons (head rows) eval)))))
+  (defn nmea-split (rows) (nmea-split-loop rows 0 (list) (list)))
+
+  (defn nmea-errors (stack rows protos)
+    (if (eq (len rows) 0) (list)
+      (do (let row (head rows))
+        (let predicted (nmn-classify stack
+          (nmn-vec-norm (nmc-ex-text row) (nmil-d)) protos (nmil-eps)))
+        (if (eq predicted (nmc-ex-class row))
+          (nmea-errors stack (tail rows) protos)
+          (cons row (nmea-errors stack (tail rows) protos))))))
+
+  (defn nmea-predict (stack row protos)
+    (nmn-classify stack (nmn-vec-norm (nmc-ex-text row) (nmil-d))
+      protos (nmil-eps)))
+
+  ; Transition counts are [correct->wrong, wrong->correct,
+  ; correct->correct, wrong->wrong]. They observe behavior directly.
+  (defn nmea-transition-add (counts truth before after)
+    (do (let before-ok (if (eq before truth) 1 0))
+      (let after-ok (if (eq after truth) 1 0))
+      (if (and (eq before-ok 1) (eq after-ok 0))
+        (list (add (nth counts 0) 1) (nth counts 1) (nth counts 2) (nth counts 3))
+        (if (and (eq before-ok 0) (eq after-ok 1))
+          (list (nth counts 0) (add (nth counts 1) 1) (nth counts 2) (nth counts 3))
+          (if (eq before-ok 1)
+            (list (nth counts 0) (nth counts 1) (add (nth counts 2) 1) (nth counts 3))
+            (list (nth counts 0) (nth counts 1) (nth counts 2) (add (nth counts 3) 1)))))))
+
+  ; Returns [error-only transitions, rehearsal transitions, changed rows].
+  ; A changed row is [text-hash, byte-length, truth, base, error-only, rehearsal].
+  (defn nmea-observe-transitions (rows protos base error-only rehearsal errc rehc changed)
+    (if (eq (len rows) 0) (list errc rehc changed)
+      (do (let row (head rows))
+        (let truth (nmc-ex-class row))
+        (let p0 (nmea-predict base row protos))
+        (let pe (nmea-predict error-only row protos))
+        (let pr (nmea-predict rehearsal row protos))
+        (let record (list (nmn-hash (nmc-ex-text row))
+                          (str_len (nmc-ex-text row)) truth p0 pe pr))
+        (nmea-observe-transitions (tail rows) protos base error-only rehearsal
+          (nmea-transition-add errc truth p0 pe)
+          (nmea-transition-add rehc truth p0 pr)
+          (if (or (not (eq p0 pe)) (not (eq p0 pr)))
+            (cons record changed) changed)))))
+
+  (defn nmea-observation-witness ()
+    (do (let original (nmil-training-raw))
+      (let split (nmea-split (nmil-held-raw)))
+      (let adapt (nth split 0))
+      (let eval (nth split 1))
+      (let protos (nmil-protos))
+      (let base (nmn-train (nmn-stack (nmil-d))
+        (nmil-encode-training original) 0.02 (nmil-eps) 40))
+      (let errors (nmea-errors base adapt protos))
+      (let error-only (nmn-train base (nmil-encode-training errors)
+        0.01 (nmil-eps) 60))
+      (let replay (nmc-concat (nmil-encode-training original)
+                              (nmil-encode-training errors)))
+      (let rehearsal (nmn-train base replay 0.01 (nmil-eps) 20))
+      (let observed (nmea-observe-transitions eval protos base error-only rehearsal
+        (list 0 0 0 0) (list 0 0 0 0) (list)))
+      (let error-transitions (nth observed 0))
+      (let rehearsal-transitions (nth observed 1))
+      (let changed (nth observed 2))
+      (framebuffer-clear)
+      (let event0 (fb_record (intern_trivial_int (nth error-transitions 0))
+        "nl-meaning-error-adaptation.fk" 10))
+      (let event1 (fb_record (intern_trivial_int (nth error-transitions 1))
+        "nl-meaning-error-adaptation.fk" 11))
+      (let event2 (fb_record (intern_trivial_int (nth rehearsal-transitions 0))
+        "nl-meaning-error-adaptation.fk" 12))
+      (let event3 (fb_record (intern_trivial_int (nth rehearsal-transitions 1))
+        "nl-meaning-error-adaptation.fk" 13))
+      (let frames (len (framebuffer-events)))
+      (list (nothing) 0 1 1001099005 (len eval)
+        error-transitions rehearsal-transitions changed frames
+        (if (and (gt (nth error-transitions 0) (nth error-transitions 1))
+          (and (gt (nth rehearsal-transitions 1) (nth rehearsal-transitions 0))
+               (eq frames 4))) 1 0))))
+
+  (defn nmea-witness ()
+    (do (let original (nmil-training-raw))
+      (let split (nmea-split (nmil-held-raw)))
+      (let adapt (nth split 0))
+      (let eval (nth split 1))
+      (let protos (nmil-protos))
+      (let base (nmn-train (nmn-stack (nmil-d))
+        (nmil-encode-training original) 0.02 (nmil-eps) 40))
+      (let before (nmil-evaluate base eval protos (list 0 0 0)))
+      (let errors (nmea-errors base adapt protos))
+      ; Observed misses enter learning alongside a replay of the established
+      ; ground. The separate transition witness measures whether this changes
+      ; regressions; no internal causal mechanism is asserted here.
+      (let rehearsal (nmc-concat (nmil-encode-training original)
+                                 (nmil-encode-training errors)))
+      (let adapted (nmn-train base rehearsal 0.01 (nmil-eps) 20))
+      (let after (nmil-evaluate adapted eval protos (list 0 0 0)))
+      (let before-correct (nth before 0))
+      (let after-correct (nth after 0))
+      (let inquiry-ok (nth after 2))
+      (let expected-inquiries (mul (len eval) 7))
+      (let trace-before (list (fb-frame 0 1 1) (fb-frame 1 before-correct 1)))
+      (let trace-after (list (fb-frame 0 1 1) (fb-frame 1 after-correct 1)))
+      (let adaptation-divergence (diverge trace-before trace-after))
+      (framebuffer-clear)
+      (let event0 (fb_record (intern_trivial_int (len errors))
+        "nl-meaning-error-adaptation.fk" 1))
+      (let event1 (fb_record (intern_trivial_int before-correct)
+        "nl-meaning-error-adaptation.fk" 2))
+      (let event2 (fb_record (intern_trivial_int after-correct)
+        "nl-meaning-error-adaptation.fk" 3))
+      (let event3 (fb_record (intern_trivial_int inquiry-ok)
+        "nl-meaning-error-adaptation.fk" 4))
+      (let frames (len (framebuffer-events)))
+      (list (nothing) 0 1 1001099004
+        (len original) (len adapt) (len errors) (len eval)
+        before-correct after-correct inquiry-ok expected-inquiries
+        adaptation-divergence frames
+        (if (and (gt (len errors) 0)
+          (and (gt after-correct before-correct)
+          (and (eq inquiry-ok expected-inquiries)
+          (and (eq adaptation-divergence 1) (eq frames 4))))) 1 0))))
+  0)

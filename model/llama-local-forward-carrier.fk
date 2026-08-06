@@ -1,0 +1,40 @@
+; llama-local-forward-carrier.fk — the kernel runs a REAL local llama checkpoint's full forward /
+; greedy-generate loop with its own hands, on this cell:
+;   1. (tk-emit-llama)          — model/transformer-kernel.fk (cat it before this file) emits the
+;                                 hosted C runner as one string: RMSNorm, RoPE, GQA-ready KV cache,
+;                                 SwiGLU, tied classifier, llama2.c-format checkpoint + tokenizer.
+;   2. (write_file ...)    — the Form body writes the emitted C to disk itself (op 104).
+;   3. (host-exec "gcc ...")    — ONE host cc invocation as the build witness. This is the
+;                                 projection lane, named openly: hati-os-targets calls this oracle
+;                                 "optional-clang-llvm-build-witness". It is NOT the native-walker
+;                                 llama; rope/rmsnorm/swiglu as .fk recipes and the x64 f64 asm
+;                                 lane remain the named next stones (docs/inheritance worklist).
+;   4. (host-exec ".\\tk-llama.exe <ckpt> <tok> <steps>") — the forward/generate loop runs on this
+;                                 metal; captured stdout (story text + tok/s line) is relayed and
+;                                 lowered into the verdict.
+; host-exec is optag 136, the same VIA-HOST port proof/four-way-run uses to exec the walkers.
+; Verdict bits (63 = all pass):
+;   1  emitted C is real (>= 6000 bytes)        2  it carries an entry point ("int main(")
+;   4  the write landed every byte              8  the compile output names no error
+;   16 the run produced real text (>= 200 B)    32 the run reports its tok/s line
+(do
+    (defn llf-has (hay needle)
+        (if (eq (str_find hay needle 0) -1) 0 1))
+
+    (defn llama-local-forward (ckpt tok steps)
+        (do
+            (let src (tk-emit-llama))
+            (let wrote (write_file "tk-llama.c" src))
+            (let ccout (host-exec "gcc -O2 -ffp-contract=off -o tk-llama.exe tk-llama.c 2>&1" ""))
+            (let runout (host-exec
+                (str_concat ".\\tk-llama.exe "
+                    (str_concat ckpt (str_concat " " (str_concat tok (str_concat " " steps)))))
+                ""))
+            (print_str runout)
+            (add (if (le 6000 (str_len src)) 1 0)
+                (add (if (llf-has src "int main(") 2 0)
+                    (add (if (eq wrote (str_len src)) 4 0)
+                        (add (if (eq (llf-has ccout "rror") 0) 8 0)
+                            (add (if (le 200 (str_len runout)) 16 0)
+                                (if (llf-has runout "tok/s") 32 0))))))))
+    0)

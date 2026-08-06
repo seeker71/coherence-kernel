@@ -1,0 +1,126 @@
+; nl-neutral-trace-sweep.fk — sweep ALL 10,000 concept rows into the persisted
+; nodeid-rag-v2 index (north-star step 1 of the nl-neutral-trace organ).
+;
+; The single command:
+;
+;     ./fkwu --src cognition/tests/nl-neutral-trace-sweep-live.fk
+;
+; It truncates the index home, appends one content-addressed row per concept
+; (key = answer_key = sha256 of the exact committed TSV row bytes, vec = the
+; form-semantic-v2 features of those bytes, cell = @10.3.99.<row>), prints
+; progress every 500 rows through the native print_str door, records the row
+; count in a sibling meta cell, and then witnesses three queries through the
+; PRODUCTION ra-grounded-hit-at path against the file it just wrote.
+;
+; Shapes that keep a 10k x ~850-byte sweep linear and inside the stack wall:
+;   - the offset tail is carried forward one cons per row (never re-walked
+;     from the head — that re-walk is the O(n^2) that costs minutes);
+;   - every row is appended through the native file_append_bytes (never
+;     accumulated into one growing string — repeated str_concat over a
+;     megabyte body is quadratic byte copying);
+;   - the row count lives in index-rows.txt because counting lines over the
+;     finished 8+ MB file would recurse one frame per byte into the wall.
+;
+; The ASCII tokenizer boundary is inherited and named: the semantic vec
+; carries the latin-script seats of each row; the other scripts ride in the
+; answer bytes, not in retrieval features, until the tokenizer grows.
+;
+; witnessed: 2026-07-18 -> 10000 rows swept; see the receipt for the run
+;
+; preludes: form/form-stdlib/core.fk form/form-stdlib/str-byte-at.fk form/form-stdlib/string-byte-fold-src-shim.fk form/form-stdlib/record-src-shim.fk
+; preludes: form/form-stdlib/form-ontology-loader.fk form/form-stdlib/line-grammar.fk form/form-stdlib/bmf-core.fk form/form-stdlib/bmf-grammar.fk form/form-stdlib/string-case.fk form/form-stdlib/nl-lexicon-data.fk form/form-stdlib/nl-translate.fk cognition/nl-pivot-de.fk
+; preludes: form/form-stdlib/sha256.fk form/form-stdlib/hex.fk
+; preludes: form/form-stdlib/text-tokenize.fk form/form-stdlib/rag-embed.fk
+; preludes: form/form-stdlib/rag-retrieve.fk form/form-stdlib/rag-index-codec.fk
+; preludes: form/form-stdlib/rag-ask.fk form/form-stdlib/choice-receipt.fk
+; preludes: form/form-stdlib/form-fs.fk cognition/concept-nl-semantic-13-metadata.fk cognition/concept-nl-semantic-13-offsets.fk cognition/concept-nl-semantic-13.fk cognition/concept-nl-semantic-13-runtime.fk
+; preludes: model/concept-10000-data.fk model/concept-10000.fk
+; preludes: model/concept-semantics-10000-data.fk model/concept-semantics-10000.fk
+; preludes: cognition/concept-text-senses-10000-metadata.fk cognition/concept-text-senses-10000-offsets.fk cognition/concept-text-senses-10000.fk
+; preludes: cognition/nl-lenses-13-data.fk cognition/nl-lenses-13.fk cognition/nl-neutral-trace.fk
+(do
+  (defn nns-append-line (path line)
+    (fs-append-bytes path (nnt-bytes (str_concat line "\n"))))
+  (defn nns-codes-str-go (codes out first)
+    (if (eq (len codes) 0) out
+      (nns-codes-str-go (tail codes)
+        (str_concat out (str_concat (if (eq first 1) "" " ")
+          (int_to_str (head codes)))) 0)))
+  (defn nns-codes-str (codes) (nns-codes-str-go codes "" 1))
+  ; one row: the vec is computed ONCE and feeds both the index line and the
+  ; rank sidecar; the sidecar records the line's byte interval so the fast
+  ; lane can fetch it without any scan. Returns the appended line's length.
+  (defn nns-row (path side-path data otail i offset)
+    (do (let answer (cnl13-row-line-from-tail data otail))
+        (let vec (re-semantic-vec answer))
+        (let line (nnt-rag-row-vec i answer "swept concept row" vec))
+        (nns-append-line path line)
+        (nns-append-line side-path (nnt-cat (list
+          (int_to_str i) (byte_to_str 9)
+          (int_to_str offset) (byte_to_str 9)
+          (int_to_str (str_len line)) (byte_to_str 9)
+          (nns-codes-str vec))))
+        (str_len line)))
+  ; the offset tail advances one cons per row — linear, never re-walked;
+  ; the byte offset advances by each appended line's length + newline
+  (defn nns-batch (path side-path data otail i end offset)
+    (if (ge i end) offset
+      (do (let llen (nns-row path side-path data otail i offset))
+          (nns-batch path side-path data (tail otail) (add i 1) end
+            (add offset (add llen 1))))))
+  (defn nns-batch-tail (otail i end)
+    (if (ge i end) otail (nns-batch-tail (tail otail) (add i 1) end)))
+  (defn nns-progress (i total)
+    (print_str (nnt-cat (list "  swept " (int_to_str i) " / " (int_to_str total) " rows\n"))))
+  (defn nns-sweep-go (path side-path data otail i total offset)
+    (if (ge i total) 0
+      (do (let next (if (lt (add i 500) total) (add i 500) total))
+          (let offset2 (nns-batch path side-path data otail i next offset))
+          (nns-progress next total)
+          (nns-sweep-go path side-path data (nns-batch-tail otail i next)
+            next total offset2))))
+  ; the row meta is reset first, so an interrupted sweep reads as
+  ; "interrupted" instead of wearing the previous sweep's claim
+  (defn nns-sweep-to (path total)
+    (do (host-abi-mkdir ".coherence-network")
+        (host-abi-mkdir ".coherence-network/rag-index")
+        (write_file (nnt-rows-meta) "0\n")
+        (write_file path "")
+        (write_file (nnt-vec-side-path) "")
+        (let rt (cnl13-runtime-open))
+        (nns-sweep-go path (nnt-vec-side-path)
+          (cnl13-runtime-data rt) (cnl13-runtime-offsets rt) 0 total 0)
+        (write_file (nnt-rows-meta) (str_concat (int_to_str total) "\n"))
+        (file_size path)))
+  (defn nns-sweep () (nns-sweep-to (nnt-rag-index-home) (cnl13-anchor-count)))
+
+  ; witness one query through the fast lane: sidecar rank + production
+  ; codec/cryptographic admission on the selected row
+  (defn nns-witness (query)
+    (do (let hit (nnt-fast-hit query))
+        (nnt-cat (list "  query '" query "': "
+          (if (eq (ra-hit? hit) 0) "MISS"
+            (nnt-cat (list (ra-hit-node-id hit)
+              " score/runner/qtotal/confidence "
+              (int_to_str (ra-hit-score hit)) "/" (int_to_str (ra-hit-runner-score hit)) "/"
+              (int_to_str (ra-hit-query-total hit)) "/" (int_to_str (ra-hit-confidence hit)))))
+          "\n"))))
+
+  (defn nns-run ()
+    (do (nnt-emit "[boot] full-body sweep stream is LIVE - progress every 500 rows")
+        (let size (nns-sweep))
+        (nnt-emit (nnt-cat (list
+          "[done] swept " (int_to_str (cnl13-anchor-count)) " rows, " (int_to_str size)
+          " bytes -> " (nnt-rag-index-home))))
+        (nnt-emit (nnt-cat (list
+          "[done] rank sidecar: " (int_to_str (file_size (nnt-vec-side-path)))
+          " bytes -> " (nnt-vec-side-path) " (regenerable cache, never truth)")))
+        (nnt-emit "[done] every concept is now grounded:@10.3.99.<row>, key = sha256 of its committed row bytes")
+        (nnt-emit "[witness] fast-lane queries (sidecar rank, production admission on the selected row):")
+        (nnt-emit (nns-witness "Wasser"))
+        (nnt-emit (nns-witness "air"))
+        (nnt-emit (nns-witness "api"))
+        (nnt-emit "[witness] a tied runner drops confidence toward 0 - shared labels across concepts are shown, never hidden")
+        (nnt-emit "follow-up: ./fkwu --src cognition/tests/nl-neutral-trace-live.fk now answers from this index")
+        "sweep stream complete"))
+  0)

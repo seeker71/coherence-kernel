@@ -1,0 +1,142 @@
+; jit-loader-contract.fk - Form-owned native payload loader/executor contract.
+;
+; This is the final contract before real host execution. It models loading a
+; Form-emitted backend payload into an executable slot with W^X sealing, ABI,
+; source, guard, fault, deopt, root, and parity gates. It does not call mmap or
+; a host function pointer.
+
+(do
+    (defn jlc-native () 1)
+    (defn jlc-deopt () 2)
+    (defn jlc-exception () 3)
+    (defn jlc-rewalk () 4)
+    (defn jlc-reject () 5)
+
+    ; payload summary:
+    ; ("payload" owner target bytes source guard fault deopt root abi reloc safepoint exception)
+    (defn jlc-payload (owner target bytes source guard fault deopt root abi reloc safepoint exception)
+        (list "payload" owner target bytes source guard fault deopt root abi reloc safepoint exception))
+    (defn jlc-payload? (p) (if (eq (len p) 13) (str_eq (nth p 0) "payload") 0))
+    (defn jlc-owner (p) (nth p 1))
+    (defn jlc-target (p) (nth p 2))
+    (defn jlc-bytes (p) (nth p 3))
+    (defn jlc-source (p) (nth p 4))
+    (defn jlc-guard (p) (nth p 5))
+    (defn jlc-fault (p) (nth p 6))
+    (defn jlc-deopt-map (p) (nth p 7))
+    (defn jlc-root (p) (nth p 8))
+    (defn jlc-abi (p) (nth p 9))
+    (defn jlc-reloc (p) (nth p 10))
+    (defn jlc-safepoint (p) (nth p 11))
+    (defn jlc-exception-map (p) (nth p 12))
+
+    ; loaded slot:
+    ; ("loaded" payload writable executable sealed generation)
+    (defn jlc-loaded (payload writable executable sealed generation)
+        (list "loaded" payload writable executable sealed generation))
+    (defn jlc-loaded? (l) (if (eq (len l) 6) (str_eq (nth l 0) "loaded") 0))
+    (defn jlc-loaded-payload (l) (nth l 1))
+    (defn jlc-writable (l) (nth l 2))
+    (defn jlc-executable (l) (nth l 3))
+    (defn jlc-sealed (l) (nth l 4))
+    (defn jlc-generation (l) (nth l 5))
+
+    (defn jlc-payload-safe? (p)
+        (if (eq (jlc-payload? p) 1)
+            (if (str_eq (jlc-owner p) "form-backend")
+                (if (gt (jlc-bytes p) 0)
+                    (if (eq (jlc-source p) 1)
+                        (if (eq (jlc-guard p) 1)
+                            (if (eq (jlc-fault p) 1)
+                                (if (eq (jlc-deopt-map p) 1)
+                                    (if (eq (jlc-root p) 1)
+                                        (if (eq (jlc-abi p) 1)
+                                            (if (eq (jlc-reloc p) 1)
+                                                (if (eq (jlc-safepoint p) 1)
+                                                    (if (eq (jlc-exception-map p) 1) 1 0)
+                                                    0)
+                                                0)
+                                            0)
+                                        0)
+                                    0)
+                                0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jlc-load (payload generation)
+        (if (eq (jlc-payload-safe? payload) 1)
+            (jlc-loaded payload 0 1 1 generation)
+            (empty)))
+
+    (defn jlc-loaded-safe? (l)
+        (if (eq (jlc-loaded? l) 1)
+            (if (eq (jlc-payload-safe? (jlc-loaded-payload l)) 1)
+                (if (eq (jlc-writable l) 0)
+                    (if (eq (jlc-executable l) 1)
+                        (if (eq (jlc-sealed l) 1)
+                            (if (gt (jlc-generation l) 0) 1 0)
+                            0)
+                        0)
+                    0)
+                0)
+            0))
+
+    (defn jlc-execute-action (loaded guard-ok runtime-ok invalidated parity-ok)
+        (if (eq (jlc-loaded-safe? loaded) 1)
+            (if (eq invalidated 1)
+                (jlc-rewalk)
+                (if (eq guard-ok 1)
+                    (if (eq runtime-ok 1)
+                        (if (eq parity-ok 1) (jlc-native) (jlc-deopt))
+                        (jlc-exception))
+                    (jlc-deopt)))
+            (jlc-reject)))
+
+    (defn jlc-execute-value (loaded guard-ok runtime-ok invalidated parity-ok native-value walker-value exception-kind)
+        (if (eq (jlc-execute-action loaded guard-ok runtime-ok invalidated parity-ok) (jlc-native))
+            native-value
+            (if (eq (jlc-execute-action loaded guard-ok runtime-ok invalidated parity-ok) (jlc-exception))
+                exception-kind
+                walker-value)))
+
+    (defn jlc-good-payload () (jlc-payload "form-backend" 1 19 1 1 1 1 1 1 1 1 1))
+    (defn jlc-foreign-payload () (jlc-payload "c-lowering" 1 19 1 1 1 1 1 1 1 1 1))
+    (defn jlc-no-deopt-payload () (jlc-payload "form-backend" 1 19 1 1 1 0 1 1 1 1 1))
+    (defn jlc-no-source-payload () (jlc-payload "form-backend" 1 19 0 1 1 1 1 1 1 1 1))
+    (defn jlc-writable-loaded () (jlc-loaded (jlc-good-payload) 1 1 0 1))
+    (defn jlc-loaded-good () (jlc-load (jlc-good-payload) 1))
+
+    (defn jlc-bit (cond bit) (if cond bit 0))
+    (defn jit-loader-contract-check ()
+        (add
+            (jlc-bit (eq (jlc-loaded-safe? (jlc-loaded-good)) 1) 1)
+            (add
+                (jlc-bit (eq (len (jlc-load (jlc-foreign-payload) 1)) 0) 2)
+                (add
+                    (jlc-bit (eq (len (jlc-load (jlc-no-deopt-payload) 1)) 0) 4)
+                    (add
+                        (jlc-bit (eq (len (jlc-load (jlc-no-source-payload) 1)) 0) 8)
+                        (add
+                            (jlc-bit (eq (jlc-loaded-safe? (jlc-writable-loaded)) 0) 16)
+                            (add
+                                (jlc-bit (eq (jlc-execute-action (jlc-loaded-good) 1 1 0 1) (jlc-native)) 32)
+                                (add
+                                    (jlc-bit (eq (jlc-execute-value (jlc-loaded-good) 1 1 0 1 42 41 106) 42) 64)
+                                    (add
+                                        (jlc-bit (eq (jlc-execute-action (jlc-loaded-good) 0 1 0 1) (jlc-deopt)) 128)
+                                        (add
+                                            (jlc-bit (eq (jlc-execute-value (jlc-loaded-good) 0 1 0 1 42 41 106) 41) 256)
+                                            (add
+                                                (jlc-bit (eq (jlc-execute-action (jlc-loaded-good) 1 0 0 1) (jlc-exception)) 512)
+                                                (add
+                                                    (jlc-bit (eq (jlc-execute-value (jlc-loaded-good) 1 0 0 1 42 41 106) 106) 1024)
+                                                    (add
+                                                        (jlc-bit (eq (jlc-execute-action (jlc-loaded-good) 1 1 1 1) (jlc-rewalk)) 2048)
+                                                        (add
+                                                            (jlc-bit (eq (jlc-execute-action (jlc-loaded-good) 1 1 0 0) (jlc-deopt)) 4096)
+                                                            (jlc-bit (eq (jlc-execute-action (empty) 1 1 0 1) (jlc-reject)) 8192))))))))))))))
+
+    0)
