@@ -306,6 +306,26 @@
         (str_concat fname
             " (device const float* v [[buffer(0)]], device const float* fr [[buffer(1)]], device float* d [[buffer(2)]], constant uint& nh [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& pos [[buffer(5)]], constant float& base [[buffer(6)]], constant uint& doff [[buffer(7)]], uint gid [[thread_position_in_grid]]) { uint np = hd / 2u; if (gid >= nh * np) return; uint h = gid / np; uint pr = gid - h * np; uint i = pr * 2u; uint o = h * hd; float ex = (-1.0f * float(i)) / float(hd); float fq = fpow(base, ex) / fr[i / 2u]; float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + i]; float q1 = v[o + i + 1u]; float t0 = q0 * ca; float t1 = q1 * sa; d[doff + o + i] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; d[doff + o + i + 1u] = t2 + t3; }")))
 
+    ; ---- the GPU-RESIDENT id chain (2026-08-09, round three, stone two). The decode loop's
+    ; one hard serialization was the host: every forward ended in a 4-byte read of the argmax
+    ; so the CPU could pass the SAME number back as the next embedding offset. These kernels
+    ; remove the round trip: the argmax result is copied on-device into a slot of an id
+    ; buffer (form_copy_u32 — bytes are bytes), and the next forward's embedding gather reads
+    ; its row index FROM that buffer (form_*_dequant_idx_f32 — the attestant dequant body with
+    ; off = ids[slot] * n, the multiply the Form cell used to do on the host, now done by the
+    ; kernel on the same u32). Value for value the same gather; only WHERE the index travels
+    ; changed. The whole stream then reads back in ONE sync at the end.
+    (defn dth-copyu32-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uint* s [[buffer(0)]], device uint* d [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& doff [[buffer(3)]], constant uint& soff [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; d[doff + i] = s[soff + i]; }")))
+
+    (defn dth-dq-idx-msl (fname wfn)
+        (str_concat "kernel void "
+        (str_concat fname
+        (str_concat " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], device const uint* ids [[buffer(2)]], constant uint& slot [[buffer(3)]], constant uint& n [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; w[i] = "
+        (str_concat wfn "(qb, ids[slot] * n + i); }")))))
+
     ; The pragma is the carrier header's own stated fix: this door's default COMPILES CONTRACTED,
     ; and the cell owns every number, so the cell says so in the text it emits.
     (defn dth-msl ()
@@ -344,7 +364,14 @@
         (str_concat (dth-addrms-msl)
         (str_concat (dth-add2ln-msl)
         (str_concat (dth-neox-pair-store-msl "form_rope_neox_pair_store_f32")
-                    (dth-pair-store-msl "form_rope_pair_store_f32"))))))))))))))))))))))))))))))))))))
+        (str_concat (dth-pair-store-msl "form_rope_pair_store_f32")
+        (str_concat (dth-copyu32-msl "form_copy_u32")
+        (str_concat (dth-dq-idx-msl "form_q6k_dequant_idx_f32" "q6k_w")
+        (str_concat (dth-dq-idx-msl "form_q4k_dequant_idx_f32" "q4k_w")
+        (str_concat (dth-dq-idx-msl "form_q80_dequant_idx_f32" "q80_w")
+        (str_concat (dth-dq-idx-msl "form_q5k_dequant_idx_f32" "q5k_w")
+        (str_concat (dth-dq-idx-msl "form_q50_dequant_idx_f32" "q50_w")
+                    (dth-dq-idx-msl "form_q40_dequant_idx_f32" "q40_w")))))))))))))))))))))))))))))))))))))))))))
 
     ; ================= the file's numbers, in ONE walk =================
     (defn dth-header-window () 40000000)
@@ -453,6 +480,9 @@
     ;        46 add_rmsnorm_wide 47 add2_layernorm_wide 48 rope_neox_pair_store
     ;        49 rope_pair_store   (round three's stage fusions — residual+norm in one dispatch,
     ;        K rope stored straight into its cache row; bounds at their kernels)
+    ;        50 copy_u32 51 q6idx 52 q4kidx 53 q80idx 54 q5kidx 55 q50idx 56 q40idx   (the
+    ;        GPU-resident id chain, round three stone two — the argmax lands in an id buffer
+    ;        on-device and the next embedding gather reads it there)
     (defn dth-pipes (msl)
         (list (metal_pipeline msl "form_q6k_matvec_f32")
               (metal_pipeline msl "form_q4k_matvec_f32")
@@ -503,7 +533,14 @@
               (metal_pipeline msl "form_add_rmsnorm_wide_f32")
               (metal_pipeline msl "form_add2_layernorm_wide_f32")
               (metal_pipeline msl "form_rope_neox_pair_store_f32")
-              (metal_pipeline msl "form_rope_pair_store_f32")))
+              (metal_pipeline msl "form_rope_pair_store_f32")
+              (metal_pipeline msl "form_copy_u32")
+              (metal_pipeline msl "form_q6k_dequant_idx_f32")
+              (metal_pipeline msl "form_q4k_dequant_idx_f32")
+              (metal_pipeline msl "form_q80_dequant_idx_f32")
+              (metal_pipeline msl "form_q5k_dequant_idx_f32")
+              (metal_pipeline msl "form_q50_dequant_idx_f32")
+              (metal_pipeline msl "form_q40_dequant_idx_f32")))
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
@@ -586,6 +623,17 @@
                        (if (eq (dth-tv-ty tv) 6) (nth ps 17)
                        (if (eq (dth-tv-ty tv) 2) (nth ps 19) (nth ps 5))))))
                        (md-bind16 (list (dth-tv-h tv) yh) (list off n) 256 0 0 bb)
+                       n))
+
+    ; the embedding gather whose row index lives ON THE DEVICE: ids[slot] instead of a host
+    ; constant — the same dequant body, the same product, the id never crossing the seam.
+    (defn dth-dq-idx (ps tv yh idsH slot n bb)
+        (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 51)
+                       (if (eq (dth-tv-ty tv) 12) (nth ps 52)
+                       (if (eq (dth-tv-ty tv) 13) (nth ps 54)
+                       (if (eq (dth-tv-ty tv) 6) (nth ps 55)
+                       (if (eq (dth-tv-ty tv) 2) (nth ps 56) (nth ps 53))))))
+                       (md-bind16 (list (dth-tv-h tv) yh idsH) (list slot n) 256 0 0 bb)
                        n))
 
     ; the WIDE RMSNorm (pipe 44) dispatches: reassociated sum of squares under the nonnegative
@@ -756,11 +804,47 @@
             (dth-head ps bs geo onormTv projTv pend)
             (dth-u32 (metal_buf_read (nth bs 13) 0 4))))
 
+    ; ================= the PIPELINED stream (2026-08-09, round three, stone two) =============
+    ; The old loop was forward -> READ -> forward: every token paid the whole CPU encode
+    ; (hundreds of enqueue crossings) IN SERIES with the GPU, because the host had to hold the
+    ; argmax before it could place the next embedding offset. With the id chain resident
+    ; (dth-dq-idx reads ids[t], form_copy_u32 lands the argmax in ids[t+1]), each forward is
+    ; its own SUBMITTED batch — committed, not waited (the door's fence surface, built for
+    ; exactly this) — and the CPU encodes token t+1 while token t flies. Batches touching the
+    ; same tracked MTLBuffers are ordered by the device; the witness's stream equality is the
+    ; measured gate on that ordering, run per model. ONE sync closes the whole stream: the
+    ; id-buffer read. Dispatch for dispatch the forwards are stone one's, plus one copy_u32.
+    (defn dth-gen-one (ps bs geo lays cks cvs embTv onormTv projTv idsH t pos)
+        (do (metal_batch_concurrent)
+            (dth-dq-idx ps embTv (nth bs 0) idsH t (nth geo 0) 0)
+            (let pend (dth-passes ps bs geo lays cks cvs onormTv pos 0 (nth geo 16) 0))
+            (dth-head ps bs geo onormTv projTv pend)
+            (metal_enqueue (nth ps 50)
+                           (md-bind16 (list (nth bs 13) idsH) (list 1 (add t 1) 0) 256 0 0 1) 1)
+            (metal_submit)))
+
+    (defn dth-gen-loop (ps bs geo lays cks cvs embTv onormTv projTv idsH t pos n)
+        (if (ge t n) 0
+            (do (dth-gen-one ps bs geo lays cks cvs embTv onormTv projTv idsH t pos)
+                (dth-gen-loop ps bs geo lays cks cvs embTv onormTv projTv idsH
+                              (add t 1) (add pos 1) n))))
+
+    (defn dth-u32s (s i n acc)
+        (if (ge i n) acc
+            (dth-u32s s (add i 1) n
+                (append acc (list (add (str_byte_at s (mul i 4))
+                                  (add (mul (str_byte_at s (add (mul i 4) 1)) 256)
+                                  (add (mul (str_byte_at s (add (mul i 4) 2)) 65536)
+                                       (mul (str_byte_at s (add (mul i 4) 3)) 16777216)))))))))
+
     (defn dth-generate (ps bs geo lays cks cvs embTv onormTv projTv id pos n acc)
         (if (le n 0) acc
-            (do (let nid (dth-forward ps bs geo lays cks cvs embTv onormTv projTv id pos))
-                (dth-generate ps bs geo lays cks cvs embTv onormTv projTv
-                              nid (add pos 1) (sub n 1) (append acc (list nid))))))
+            (do (let idsH (metal_buf_alloc (mul (add n 1) 4)))
+                (metal_buf_write idsH 0 (md-le32 id))
+                (dth-gen-loop ps bs geo lays cks cvs embTv onormTv projTv idsH 0 pos n)
+                (let got (dth-u32s (metal_buf_read idsH 4 (mul n 4)) 0 n acc))
+                (metal_buf_free idsH)
+                got)))
 
     (defn dth-prefill (ps bs geo lays cks cvs embTv onormTv projTv ids pos)
         (if (eq (len ids) 1)
@@ -1029,11 +1113,30 @@
             (dth-p2-head ps bs geo onormTv onormB projTv projB af)
             (dth-u32 (metal_buf_read (nth bs 13) 0 4))))
 
+    ; the pipelined stream, phi2 shape — dth-generate's own pattern, dispatch for dispatch.
+    (defn dth-p2-gen-one (ps bs geo lays cks cvs embTv onormTv onormB projTv projB idsH t pos)
+        (do (metal_batch_concurrent)
+            (dth-dq-idx ps embTv (nth bs 0) idsH t (nth geo 0) 0)
+            (let af (dth-p2-blocks ps bs geo lays cks cvs pos 0 (nth geo 12) 0))
+            (dth-p2-head ps bs geo onormTv onormB projTv projB af)
+            (metal_enqueue (nth ps 50)
+                           (md-bind16 (list (nth bs 13) idsH) (list 1 (add t 1) 0) 256 0 0 1) 1)
+            (metal_submit)))
+
+    (defn dth-p2-gen-loop (ps bs geo lays cks cvs embTv onormTv onormB projTv projB idsH t pos n)
+        (if (ge t n) 0
+            (do (dth-p2-gen-one ps bs geo lays cks cvs embTv onormTv onormB projTv projB idsH t pos)
+                (dth-p2-gen-loop ps bs geo lays cks cvs embTv onormTv onormB projTv projB idsH
+                                 (add t 1) (add pos 1) n))))
+
     (defn dth-p2-generate (ps bs geo lays cks cvs embTv onormTv onormB projTv projB id pos n acc)
         (if (le n 0) acc
-            (do (let nid (dth-p2-forward ps bs geo lays cks cvs embTv onormTv onormB projTv projB id pos))
-                (dth-p2-generate ps bs geo lays cks cvs embTv onormTv onormB projTv projB
-                                 nid (add pos 1) (sub n 1) (append acc (list nid))))))
+            (do (let idsH (metal_buf_alloc (mul (add n 1) 4)))
+                (metal_buf_write idsH 0 (md-le32 id))
+                (dth-p2-gen-loop ps bs geo lays cks cvs embTv onormTv onormB projTv projB idsH 0 pos n)
+                (let got (dth-u32s (metal_buf_read idsH 4 (mul n 4)) 0 n acc))
+                (metal_buf_free idsH)
+                got)))
 
     (defn dth-p2-prefill (ps bs geo lays cks cvs embTv onormTv onormB projTv projB ids pos)
         (if (eq (len ids) 1)
