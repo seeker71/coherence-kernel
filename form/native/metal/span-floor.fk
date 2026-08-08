@@ -1,0 +1,160 @@
+; span-floor.fk — the floor RE-PRICED per span, because one big-span bandwidth number is not
+; what a token's reads actually see.
+;
+; floor-derive.fk priced every live byte at the 477 GB/s the bw-probe reads over its own large
+; test span. Round two's mv-probe found the lane2 matvecs running AT the probe's own time on
+; the big tensors — but at 330-420 GB/s, not 477: the span-size bandwidth curve is real, and a
+; floor priced above it calls "gap" what is actually the machine.
+;
+; THE ARTIFACT THIS CELL REFUSED (2026-08-09, first draft witnessed it): k passes over ONE
+; span reads 705 GB/s on a 17 MB tensor — past this machine's DRAM — because the repeats hit
+; the system-level cache, which a token cycling 1.3-47 GB of weights never does. So the probe
+; here walks a tensor CLASS the way the token walks it: every layer's copy of that tensor,
+; each once per pass, the working set nLayer spans wide — past the cache for every class that
+; matters — and only the SPAN-SIZE effect remains in the number:
+;
+;   for every blk.0.* row >= 256 KB: k passes, each pass one free-running form_bw_probe
+;   dispatch per layer over that layer's own span; bw = class_bytes * k / elapsed. The head
+;   (output.weight, or token_embd when tied) is one big span, measured plain. Rows under
+;   256 KB (norms, biases) ride fused stages in the token and their bytes are priced at the
+;   best measured class rate — printed, so the smallness is witnessed, not asserted.
+;   floor_us = SUM(class costs) * nLoop + head.
+;
+; Blob path in /tmp/mv-probe-target (mv-probe's own convention; run them together).
+;
+; PROOF LEVEL: FOURTH-ARM ONLY
+;
+; preludes: native/metal/dense-token-handle.fk form-stdlib/ds4-order-match.fk
+
+(do
+    (defn spf-target ()
+        (do (let s (read_file "/tmp/mv-probe-target"))
+            (let n (str_len s))
+            (if (str_eq (substring s (sub n 1) n) "\n") (substring s 0 (sub n 1)) s)))
+
+    (defn spf-clamp (k lo hi) (if (lt k lo) lo (if (gt k hi) hi k)))
+
+    ; k passes over a CLASS sized to ~10 GB of traffic, capped so the enqueue seam cannot
+    ; become the number.
+    (defn spf-k (classBytes) (spf-clamp (div 10000000000 (if (le classBytes 0) 1 classBytes)) 4 1500))
+
+    (defn spf-suffix (name) (substring name 6 (str_len name)))
+
+    ; the per-layer views of one class: (handle nwords) rows, one per layer
+    (defn spf-views (tab path dbase suffix l n acc)
+        (if (ge l n) acc
+            (do (let r (dth-row-find tab (dth-blk l suffix)))
+                (if (eq r 0) acc
+                    (spf-views tab path dbase suffix (add l 1) n
+                        (append acc (list (list (metal_buf_from_file path (add dbase (nth r 4)) (nth r 5))
+                                                (div (nth r 5) 4)))))))))
+
+    (defn spf-pass (bwp vs sink)
+        (if (eq (len vs) 0) 0
+            (do (metal_enqueue bwp (md-bind16 (list (nth (head vs) 0) sink)
+                                              (list (nth (head vs) 1)) 256 0 0 0) 65536)
+                (spf-pass bwp (tail vs) sink))))
+
+    (defn spf-passes (bwp vs sink k)
+        (if (le k 0) 0 (do (spf-pass bwp vs sink) (spf-passes bwp vs sink (sub k 1)))))
+
+    ; layers may not share one quantization (llama3b mixes Q6/Q4_K), so the class bytes are
+    ; the sum of each layer's OWN priced span, never blk.0's times the count.
+    (defn spf-sumb (vs acc)
+        (if (eq (len vs) 0) acc (spf-sumb (tail vs) (add acc (mul (nth (head vs) 1) 4)))))
+
+    ; one class: returns ns cost of reading the WHOLE class once (all layers, one pass).
+    (defn spf-class (bwp tab path dbase suffix bytes nLayer sink)
+        (do (let vs (spf-views tab path dbase suffix 0 nLayer (empty)))
+            (let classBytes (spf-sumb vs 0))
+            (let k (spf-k classBytes))
+            (spf-passes bwp vs sink 2)
+            (metal_sync)
+            (let tA (now_unix_ms))
+            (spf-passes bwp vs sink k)
+            (metal_sync)
+            (let tB (now_unix_ms))
+            (let ms (sub tB tA))
+            (let gbps (if (le ms 0) 0 (div (mul classBytes k) (mul ms 1000000))))
+            (print (str_concat "blk.*." (str_concat suffix (str_concat
+                " spanMB=" (str_concat (int_to_str (div bytes 1048576)) (str_concat
+                " classMB=" (str_concat (int_to_str (div classBytes 1048576)) (str_concat
+                " k=" (str_concat (int_to_str k) (str_concat
+                " ms=" (str_concat (int_to_str ms) (str_concat
+                " GBps=" (int_to_str gbps)))))))))))))
+            (div (mul ms 1000000) k)))
+
+    (defn spf-blk0? (name)
+        (if (ge (str_len name) 6) (str_eq (substring name 0 6) "blk.0.") false))
+
+    ; walk blk.0 rows: classes >= 256 KB measured, smaller summed as bytes for the tail price.
+    ; returns (ns tinyBytes bestGbpsNs...) — fold as two accumulators.
+    (defn spf-walk (bwp tab path dbase rows nLayer sink nsAcc tinyAcc)
+        (if (eq (len rows) 0) (list nsAcc tinyAcc)
+            (do (let r (head rows))
+                (if (spf-blk0? (nth r 0))
+                    (if (ge (nth r 5) 262144)
+                        (spf-walk bwp tab path dbase (tail rows) nLayer sink
+                            (add nsAcc (spf-class bwp tab path dbase (spf-suffix (nth r 0))
+                                                  (nth r 5) nLayer sink))
+                            tinyAcc)
+                        (spf-walk bwp tab path dbase (tail rows) nLayer sink nsAcc
+                            (add tinyAcc (mul (nth r 5) nLayer))))
+                    (spf-walk bwp tab path dbase (tail rows) nLayer sink nsAcc tinyAcc)))))
+
+    ; the head: one big span, k passes plain (it is larger than any cache that could flatter it)
+    (defn spf-head (bwp path dbase row sink)
+        (do (let h (metal_buf_from_file path (add dbase (nth row 4)) (nth row 5)))
+            (let k (spf-k (nth row 5)))
+            (spf-passes bwp (list (list h (div (nth row 5) 4))) sink 2)
+            (metal_sync)
+            (let tA (now_unix_ms))
+            (spf-passes bwp (list (list h (div (nth row 5) 4))) sink k)
+            (metal_sync)
+            (let tB (now_unix_ms))
+            (let ms (sub tB tA))
+            (let gbps (if (le ms 0) 0 (div (mul (nth row 5) k) (mul ms 1000000))))
+            (print (str_concat (nth row 0) (str_concat
+                " MB=" (str_concat (int_to_str (div (nth row 5) 1048576)) (str_concat
+                " k=" (str_concat (int_to_str k) (str_concat
+                " ms=" (str_concat (int_to_str ms) (str_concat
+                " GBps=" (int_to_str gbps))))))))))
+            (div (mul ms 1000000) k)))
+
+    (let path (spf-target))
+    (print (str_concat "blob=" path))
+    (let src (dth-src path))
+    (let arch (gmt-str src "general.architecture"))
+    (let tab (dth-table src))
+    (let dbase (egg-data-base src (dth-alignment)))
+    (let nLayer (gmt-u32 src (dth-key arch "block_count")))
+    (let nLoop (dth-u32-or src (dth-key arch "num_loops") 1))
+    (let msl (str_concat (dth-msl) (dom-bw-probe-body)))
+    (let bwp (metal_pipeline msl "form_bw_probe"))
+    (print (str_concat "arch=" (str_concat arch (str_concat
+           " nLayer=" (str_concat (int_to_str nLayer) (str_concat
+           " nLoop=" (int_to_str nLoop)))))))
+    (print (str_concat "bwp_ok=" (if (eq bwp 0) "0" "1")))
+    (let sink (metal_buf_alloc 16))
+
+    (let walked (spf-walk bwp tab path dbase tab nLayer sink 0 0))
+    (let layersNs (nth walked 0))
+    (let tinyB (nth walked 1))
+
+    (let tiedR (dth-row-find tab "output.weight"))
+    (let headRow (if (eq tiedR 0) (dth-row-find tab "token_embd.weight") tiedR))
+    (let headNs (spf-head bwp path dbase headRow sink))
+
+    ; tiny bytes priced at 400 GB/s (any measured class rate makes them < 100 us family-wide;
+    ; the print is the witness of smallness)
+    (let tinyNs (div (mul tinyB 5) 2000))
+    (print (str_concat "tiny_bytes=" (str_concat (int_to_str tinyB)
+           (str_concat " tiny_us_at_400GBps=" (int_to_str (div tinyNs 1000))))))
+
+    (let floorUs (div (add (mul (add layersNs tinyNs) nLoop) headNs) 1000))
+    (print (str_concat "blk_read_us_per_pass=" (int_to_str (div layersNs 1000))))
+    (print (str_concat "head_read_us=" (int_to_str (div headNs 1000))))
+    (print (str_concat "floor_repriced_us=" (int_to_str floorUs)))
+    (print (str_concat "floor_repriced_toks=" (int_to_str (div 1000000 (if (le floorUs 0) 1 floorUs)))))
+    (print (metal_status))
+    0)
