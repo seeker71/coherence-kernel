@@ -1,0 +1,106 @@
+; layer-probe.fk — every kernel of one dense layer, timed as a FENCED ladder of k, real weights.
+;
+; The token is fenced stages, so the honest per-kernel cost is the fenced one: k dispatches,
+; every one barrier_before=1, one sync closing the clock. Blob in /tmp/mv-probe-target.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY
+;
+; preludes: native/metal/dense-token-handle.fk
+
+(do
+    (defn lyp-target ()
+        (do (let s (read_file "/tmp/mv-probe-target"))
+            (let n (str_len s))
+            (if (str_eq (substring s (sub n 1) n) "\n") (substring s 0 (sub n 1)) s)))
+
+    (defn lyp-k () 256)
+
+    (defn lyp-rms-loop (ps bs lay geo k)
+        (if (le k 0) 0 (do (dth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8) 1)
+                           (lyp-rms-loop ps bs lay geo (sub k 1)))))
+    (defn lyp-mv-loop (ps tv xh yh k)
+        (if (le k 0) 0 (do (dth-mv ps tv xh yh 1) (lyp-mv-loop ps tv xh yh (sub k 1)))))
+    (defn lyp-bias-loop (ps lay bs geo k)
+        (if (le k 0) 0 (do (dth-bias ps (nth lay 9) (nth bs 2) (nth geo 13) 1)
+                           (lyp-bias-loop ps lay bs geo (sub k 1)))))
+    (defn lyp-rope-loop (ps bs geo k)
+        (if (le k 0) 0 (do (dth-rope ps (nth geo 14) (nth bs 2) (nth geo 11) (nth geo 2) (nth geo 4) (nth geo 15) 5 (nth geo 9) 1)
+                           (lyp-rope-loop ps bs geo (sub k 1)))))
+    (defn lyp-copy-loop (ps bs ck geo k)
+        (if (le k 0) 0 (do (dth-copy ps (nth bs 3) ck (nth geo 5) 0 1)
+                           (lyp-copy-loop ps bs ck geo (sub k 1)))))
+    (defn lyp-attn-loop (ps bs ck cv geo k)
+        (if (le k 0) 0 (do (dth-attn ps (nth bs 2) ck cv (nth bs 5) (nth bs 12)
+                                     20 (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6) 1)
+                           (lyp-attn-loop ps bs ck cv geo (sub k 1)))))
+    (defn lyp-elem-loop (ps p ah bh yh n k)
+        (if (le k 0) 0 (do (dth-elem ps p ah bh yh n 1) (lyp-elem-loop ps p ah bh yh n (sub k 1)))))
+    (defn lyp-argmax-loop (ps bs geo k)
+        (if (le k 0) 0 (do (dth-argmax ps bs (nth geo 7)) (lyp-argmax-loop ps bs geo (sub k 1)))))
+
+    (defn lyp-say (name t0 t1)
+        (print (str_concat name (str_concat "_us=" (int_to_str (div (mul (sub t1 t0) 1000) (lyp-k)))))))
+
+    (let path (lyp-target))
+    (let st (dth-open path 256 (sub 0 1)))
+    (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2))
+    (let lays (nth st 3)) (let cks (nth st 4)) (let cvs (nth st 5))
+    (let lay (nth lays 0))
+    (print (str_concat "arch=" (nth st 9)))
+    (print (str_concat "pipes_ok=" (if (dth-pipe-ok? ps) "1" "0")))
+    (metal_batch_concurrent)
+
+    (lyp-rms-loop ps bs lay geo 8) (metal_sync) (metal_batch_concurrent)
+    (let a0 (now_unix_ms)) (lyp-rms-loop ps bs lay geo (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let a1 (now_unix_ms)) (lyp-say "rms5120" a0 a1)
+
+    (lyp-mv-loop ps (nth lay 1) (nth bs 1) (nth bs 2) 8) (metal_sync) (metal_batch_concurrent)
+    (let b0 (now_unix_ms)) (lyp-mv-loop ps (nth lay 1) (nth bs 1) (nth bs 2) (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let b1 (now_unix_ms)) (lyp-say "mv_q" b0 b1)
+
+    (lyp-mv-loop ps (nth lay 2) (nth bs 1) (nth bs 3) 8) (metal_sync) (metal_batch_concurrent)
+    (let c0 (now_unix_ms)) (lyp-mv-loop ps (nth lay 2) (nth bs 1) (nth bs 3) (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let c1 (now_unix_ms)) (lyp-say "mv_k" c0 c1)
+
+    (lyp-mv-loop ps (nth lay 4) (nth bs 5) (nth bs 6) 8) (metal_sync) (metal_batch_concurrent)
+    (let d0 (now_unix_ms)) (lyp-mv-loop ps (nth lay 4) (nth bs 5) (nth bs 6) (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let d1 (now_unix_ms)) (lyp-say "mv_o" d0 d1)
+
+    (lyp-mv-loop ps (nth lay 6) (nth bs 1) (nth bs 8) 8) (metal_sync) (metal_batch_concurrent)
+    (let e0 (now_unix_ms)) (lyp-mv-loop ps (nth lay 6) (nth bs 1) (nth bs 8) (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let e1 (now_unix_ms)) (lyp-say "mv_gate" e0 e1)
+
+    (lyp-mv-loop ps (nth lay 8) (nth bs 10) (nth bs 7) 8) (metal_sync) (metal_batch_concurrent)
+    (let f0 (now_unix_ms)) (lyp-mv-loop ps (nth lay 8) (nth bs 10) (nth bs 7) (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let f1 (now_unix_ms)) (lyp-say "mv_down" f0 f1)
+
+    (lyp-bias-loop ps lay bs geo 8) (metal_sync) (metal_batch_concurrent)
+    (let g0 (now_unix_ms)) (lyp-bias-loop ps lay bs geo (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let g1 (now_unix_ms)) (lyp-say "bias_q" g0 g1)
+
+    (lyp-rope-loop ps bs geo 8) (metal_sync) (metal_batch_concurrent)
+    (let h0 (now_unix_ms)) (lyp-rope-loop ps bs geo (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let h1 (now_unix_ms)) (lyp-say "rope_q" h0 h1)
+
+    (lyp-copy-loop ps bs (nth cks 0) geo 8) (metal_sync) (metal_batch_concurrent)
+    (let i0 (now_unix_ms)) (lyp-copy-loop ps bs (nth cks 0) geo (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let i1 (now_unix_ms)) (lyp-say "copy_k" i0 i1)
+
+    (lyp-attn-loop ps bs (nth cks 0) (nth cvs 0) geo 8) (metal_sync) (metal_batch_concurrent)
+    (let j0 (now_unix_ms)) (lyp-attn-loop ps bs (nth cks 0) (nth cvs 0) geo (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let j1 (now_unix_ms)) (lyp-say "attn3" j0 j1)
+
+    (lyp-elem-loop ps (nth ps 10) (nth bs 8) (nth bs 9) (nth bs 10) (nth geo 1) 8) (metal_sync) (metal_batch_concurrent)
+    (let k0 (now_unix_ms)) (lyp-elem-loop ps (nth ps 10) (nth bs 8) (nth bs 9) (nth bs 10) (nth geo 1) (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let k1 (now_unix_ms)) (lyp-say "swiglu" k0 k1)
+
+    (lyp-elem-loop ps (nth ps 11) (nth bs 0) (nth bs 6) (nth bs 0) (nth geo 0) 8) (metal_sync) (metal_batch_concurrent)
+    (let l0 (now_unix_ms)) (lyp-elem-loop ps (nth ps 11) (nth bs 0) (nth bs 6) (nth bs 0) (nth geo 0) (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let l1 (now_unix_ms)) (lyp-say "add" l0 l1)
+
+    (lyp-argmax-loop ps bs geo 8) (metal_sync) (metal_batch_concurrent)
+    (let m0 (now_unix_ms)) (lyp-argmax-loop ps bs geo (lyp-k)) (metal_sync) (metal_batch_concurrent)
+    (let m1 (now_unix_ms)) (lyp-say "argmax2" m0 m1)
+
+    (print (metal_status))
+    0)

@@ -1,0 +1,89 @@
+; mv-probe.fk — ONE matvec shape timed through the door, beside the bus's own ceiling.
+;
+; The round-two question: after factored scales, is the dense matvec bandwidth-bound or not?
+; The trusted instrument is wall time through the SAME door the token uses: k enqueues, one
+; sync closing the clock (bw-probe.fk's shape). Two clocks per tensor: the lane2 matvec, and
+; form_bw_probe reading the very same byte span. Their ratio IS the answer — no profiler.
+;
+; Blob path arrives in /tmp/mv-probe-target (same convention as the witness).
+;
+; PROOF LEVEL: FOURTH-ARM ONLY
+;
+; preludes: native/metal/dense-token-handle.fk form-stdlib/ds4-order-match.fk
+
+(do
+    (defn mvp-target ()
+        (do (let s (read_file "/tmp/mv-probe-target"))
+            (let n (str_len s))
+            (if (str_eq (substring s (sub n 1) n) "\n") (substring s 0 (sub n 1)) s)))
+
+    (defn mvp-k () 20)
+
+    (defn mvp-mv-loop (p tv xh yh k)
+        (if (le k 0) 0
+            (do (metal_enqueue p (md-bind16 (list (dth-tv-h tv) xh yh)
+                                            (list (dth-tv-r tv) (dth-tv-c tv)) 256 0 0 0)
+                               (mul (dth-tv-r tv) 32))
+                (mvp-mv-loop p tv xh yh (sub k 1)))))
+
+    (defn mvp-bw-loop (p h sink nwords k)
+        (if (le k 0) 0
+            (do (metal_enqueue p (md-bind16 (list h sink) (list nwords) 256 0 0 0) 65536)
+                (mvp-bw-loop p h sink nwords (sub k 1)))))
+
+    (defn mvp-pipe-for (ps ty)
+        (if (eq ty 14) (nth ps 33)
+        (if (eq ty 12) (nth ps 34)
+        (if (eq ty 13) (nth ps 36)
+        (if (eq ty 6) (nth ps 37)
+        (if (eq ty 2) (nth ps 38) (nth ps 35)))))))
+
+    (defn mvp-one (ps bwp tab base path name)
+        (do (let tv (dth-tv tab base path name))
+            (if (dth-tv-none? tv) (print (str_concat name "=ABSENT"))
+                (do (let rows (dth-tv-r tv))
+                    (let cols (dth-tv-c tv))
+                    (let bytes (dth-price (dth-tv-ty tv) (mul rows cols)))
+                    (let xh (metal_buf_alloc (mul cols 4)))
+                    (let yh (metal_buf_alloc (mul rows 4)))
+                    (let sink (metal_buf_alloc 16))
+                    ; warm both once
+                    (mvp-mv-loop (mvp-pipe-for ps (dth-tv-ty tv)) tv xh yh 1)
+                    (metal_sync)
+                    (let tA (now_unix_ms))
+                    (mvp-mv-loop (mvp-pipe-for ps (dth-tv-ty tv)) tv xh yh (mvp-k))
+                    (metal_sync)
+                    (let tB (now_unix_ms))
+                    (mvp-bw-loop bwp (dth-tv-h tv) sink (div bytes 4) 1)
+                    (metal_sync)
+                    (let tC (now_unix_ms))
+                    (mvp-bw-loop bwp (dth-tv-h tv) sink (div bytes 4) (mvp-k))
+                    (metal_sync)
+                    (let tD (now_unix_ms))
+                    (print (str_concat name (str_concat
+                        " type/rows/cols/MB=" (str_concat
+                        (int_to_str (dth-tv-ty tv)) (str_concat " " (str_concat
+                        (int_to_str rows) (str_concat " " (str_concat
+                        (int_to_str cols) (str_concat " " (str_concat
+                        (int_to_str (div bytes 1048576)) (str_concat
+                        " mv_ms20=" (str_concat (int_to_str (sub tB tA))
+                        (str_concat " bw_ms20=" (int_to_str (sub tD tC)))))))))))))))
+                    0))))
+
+    (let path (mvp-target))
+    (print (str_concat "blob=" path))
+    (let src (dth-src path))
+    (let tab (dth-table src))
+    (let base (egg-data-base src (dth-alignment)))
+    (let msl (str_concat (dth-msl) (dom-bw-probe-body)))
+    (let ps (dth-pipes msl))
+    (let bwp (metal_pipeline msl "form_bw_probe"))
+    (print (str_concat "pipes_ok=" (if (dth-pipe-ok? ps) "1" "0")))
+    (print (str_concat "bwp_ok=" (if (eq bwp 0) "0" "1")))
+    (mvp-one ps bwp tab base path "blk.0.ffn_up.weight")
+    (mvp-one ps bwp tab base path "blk.0.ffn_down.weight")
+    (mvp-one ps bwp tab base path "blk.0.attn_q.weight")
+    (mvp-one ps bwp tab base path "blk.0.attn_v.weight")
+    (mvp-one ps bwp tab base path "output.weight")
+    (print (metal_status))
+    0)

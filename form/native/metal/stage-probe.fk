@@ -1,0 +1,67 @@
+; stage-probe.fk — what one barrier-fenced stage COSTS, asked of the door directly.
+;
+; The 32B token spends ~55 ms moving matvec bytes at the measured rate and ~150 ms on the wall
+; clock. The candidate for the difference is per-stage serialization: a 64-layer forward is
+; ~1093 dispatches in ~13 fenced stages a layer. This cell times three ladders, k=512 each,
+; one sync closing each clock:
+;
+;   A  512 tiny add_f32 dispatches (n=5120), EVERY one barrier_before=1  -> serialized stage cost
+;   B  512 tiny add_f32 dispatches, barrier_before=0                     -> the free-running quantum
+;   C  512 gqa attn dispatches at the 32B shape (40 heads, hd 128, npos 20)
+;
+; PROOF LEVEL: FOURTH-ARM ONLY
+;
+; preludes: native/metal/dense-token-handle.fk
+
+(do
+    (defn stp-k () 512)
+
+    (defn stp-add-loop (p ah bh yh n bb k)
+        (if (le k 0) 0
+            (do (metal_enqueue p (md-bind16 (list ah bh yh) (list n) 256 0 0 bb) n)
+                (stp-add-loop p ah bh yh n bb (sub k 1)))))
+
+    (defn stp-attn-loop (p qh kh vh yh sh k)
+        (if (le k 0) 0
+            (do (metal_enqueue p (md-bind16 (list qh kh vh yh sh)
+                                            (list 20 40 8 128 (md-f32-bits 0.0883883476) 256)
+                                            256 0 0 1)
+                               40)
+                (stp-attn-loop p qh kh vh yh sh (sub k 1)))))
+
+    (let msl (dth-msl))
+    (let ps (dth-pipes msl))
+    (print (str_concat "pipes_ok=" (if (dth-pipe-ok? ps) "1" "0")))
+    (let ah (metal_buf_alloc 20480))
+    (let bh (metal_buf_alloc 20480))
+    (let yh (metal_buf_alloc 20480))
+    (metal_batch_concurrent)
+    (stp-add-loop (nth ps 11) ah bh yh 5120 1 8)
+    (metal_sync)
+    (let tA (now_unix_ms))
+    (metal_batch_concurrent)
+    (stp-add-loop (nth ps 11) ah bh yh 5120 1 (stp-k))
+    (metal_sync)
+    (let tB (now_unix_ms))
+    (metal_batch_concurrent)
+    (stp-add-loop (nth ps 11) ah bh yh 5120 0 (stp-k))
+    (metal_sync)
+    (let tC (now_unix_ms))
+    (print (str_concat "fenced_512_ms=" (int_to_str (sub tB tA))))
+    (print (str_concat "free_512_ms=" (int_to_str (sub tC tB))))
+    (let qh (metal_buf_alloc 20480))
+    (let kh (metal_buf_alloc (mul (mul 1024 256) 4)))
+    (let vh (metal_buf_alloc (mul (mul 1024 256) 4)))
+    (let oh (metal_buf_alloc 20480))
+    (let sh (metal_buf_alloc (mul (mul (mul 2 40) 256) 4)))
+    (metal_batch_concurrent)
+    (stp-attn-loop (nth ps 9) qh kh vh oh sh 8)
+    (metal_sync)
+    (let tD (now_unix_ms))
+    (metal_batch_concurrent)
+    (stp-attn-loop (nth ps 9) qh kh vh oh sh (stp-k))
+    (metal_sync)
+    (let tE (now_unix_ms))
+    (print (str_concat "attn_512_ms=" (int_to_str (sub tE tD))))
+    (print (metal_status))
+    0)
