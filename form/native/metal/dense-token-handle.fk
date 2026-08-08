@@ -92,6 +92,17 @@
         (str_concat fname
             " (device float* v [[buffer(0)]], device const float* fr [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& rd [[buffer(4)]], constant uint& pos [[buffer(5)]], constant float& base [[buffer(6)]], uint h [[thread_position_in_grid]]) { if (h >= nh) return; uint o = h * hd; uint np = rd / 2u; uint j = 0; while (j < np) { float ex = (-2.0f * float(j)) / float(rd); float fq = fpow(base, ex) / fr[j]; float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + j]; float q1 = v[o + j + np]; float t0 = q0 * ca; float t1 = q1 * sa; v[o + j] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; v[o + j + np] = t2 + t3; j += 1u; } }")))
 
+    ; Half-split rope at PAIR grain (2026-08-08, round two): dth-neox-msl's inner iteration is
+    ; independent per pair (j, j+rd/2) — theta reads only (base, pos, j, rd, fr[j]) — so unrolling
+    ; the per-head serial loop across nh*(rd/2) threads is a thread map, BIT FOR BIT the per-head
+    ; kernel, the same argument form_rope_pair_f32 carries for adjacent pairs. RADIUS: rd even —
+    ; at odd rd the serial kernel stays (its while (j < np) drops nothing, but np pairs of an odd
+    ; rd do not tile; the carrier checks).
+    (defn dth-neox-pair-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device float* v [[buffer(0)]], device const float* fr [[buffer(1)]], constant uint& nh [[buffer(2)]], constant uint& hd [[buffer(3)]], constant uint& rd [[buffer(4)]], constant uint& pos [[buffer(5)]], constant float& base [[buffer(6)]], uint gid [[thread_position_in_grid]]) { uint np = rd / 2u; if (gid >= nh * np) return; uint h = gid / np; uint j = gid - h * np; uint o = h * hd; float ex = (-2.0f * float(j)) / float(rd); float fq = fpow(base, ex) / fr[j]; float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + j]; float q1 = v[o + j + np]; float t0 = q0 * ca; float t1 = q1 * sa; v[o + j] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; v[o + j + np] = t2 + t3; }")))
+
     ; ---- the phi2 appendix: what a parallel-residual, LayerNorm, GELU, Q4_0 block needs ----
     ; LayerNorm with gain AND bias — mean-centered, unlike RMSNorm. One thread, the family's own
     ; Newton-50 sqrt seeded at its argument, ascending folds.
@@ -149,6 +160,96 @@
         (str_concat fname
             " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; uint curblk = 4294967295u; uint b = 0u; float d = 0.0f; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0) { k -= 1; uint j = lane + k * 32u; uint idx = r * cols + j; uint blk = idx / 32u; if (blk != curblk) { curblk = blk; b = blk * 18u; d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); } uint i = idx - blk * 32u; uint half_ = i / 16u; uint sj = i - half_ * 16u; int qbyte = int(qb[b + 2u + sj]); int nib = (half_ == 0u) ? q4k_mod(qbyte, 16) : qbyte / 16; float pr = d * float(nib - 8) * float(x[j]); acc = pr + acc; } float s = metal::simd_sum(acc); if (lane == 0) y[r] = s; }")))
 
+    ; ---- the FACTORED-SCALE lane matvecs (2026-08-08, round two). Round one's lane kernels
+    ; still recomputed per-weight what the format prices per GROUP: Q6_K re-derived sc and the
+    ; index decomposition per weight, Q4_K/Q5_K the 6-bit sc/mn chains, Q8_0/Q5_0/Q4_0 the block
+    ; scale, all through div/mod helper calls and (for the K quants) the q*_f16 multiply-loop
+    ; decode. qk-matvec-lane.fk's own header named the remaining distance: factor the scale OUT
+    ; of the inner sum, decode with bitmasks. These six kernels take exactly that and nothing
+    ; else:
+    ;
+    ;   * lane l owns whole SCALE GROUPS (Q8_0/Q5_0/Q4_0: the 32-weight block; Q4_K/Q5_K: the
+    ;     32-weight sub-block; Q6_K: the 16-weight group) at G = l, l+32, ... — so the group's
+    ;     invariants are computed ONCE per group instead of once per weight. Within-group fold
+    ;     ASCENDING, group chain ascending, metal::simd_sum the one cross-lane reassociation
+    ;     (any tree over 32 terms has depth < 32 — round one's argument, unchanged).
+    ;   * the scale enters ONCE per group: acc += (d*sc)*SUM(q*x) [- (dmin*mn)*SUM(x) where the
+    ;     format carries mins]. d*sc and dmin*mn are EXACT in f32 (f16 11-bit significand times
+    ;     a <=8-bit int). For Q6_K this is pure reassociation under the SAME anchor
+    ;     SUM|w_j x_j| as round one's epsilon; for Q8_0/Q5_0/Q4_0 likewise (coefficient ~2x);
+    ;     for Q4_K/Q5_K the min-term DISTRIBUTION enlarges the anchor to
+    ;     SUM(|ds*nib*x| + |dm*mn*x|) — stated plainly, and gated by the measured two-prompt
+    ;     stream, not argued into the old bound.
+    ;   * bitmask decode (& 15, >> 4, >> 2g, bit tests) replaces the div/mod helper chains —
+    ;     value-identical on uchar bytes; as_type<half> replaces the q*_f16 multiply-loop —
+    ;     value-identical for every finite half (q8-0-msl.fk and ds4-order-match.fk precedent).
+    ;   * NOT taken: int8 activation quantization (ds4's CPU dot_q8_0_row). Its int32 block dot
+    ;     is exact (32*127*128 < 2^24) — but only relative to a QUANTIZED activation, a value
+    ;     change ~2^-8, no u-scale bound exists against the attestant fold. betterwrong
+    ;     (corpus 951): equality wins. Activations stay f32.
+    ;
+    ; The serial attestants and round one's lane kernels all STAY in the unit; these dispatch.
+    (defn dth-q80-lane2-msl ()
+        "kernel void form_q80_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 32u; ulong rowbase = (ulong)r * (ulong)nb * 34ul; float acc = 0.0f; for (uint b = lane; b < nb; b += 32u) { device const uchar* bp = qb + rowbase + (ulong)b * 34ul; ushort h = (ushort)bp[0] | ((ushort)bp[1] << 8); float d = float(as_type<half>(h)); device const uchar* qs = bp + 2u; device const float* xb = x + b * 32u; float sumq = 0.0f; for (uint i = 0u; i < 32u; i += 4u) { char4 w = char4(*(device const packed_char4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + i)); sumq = sumq + float(w.x) * xv.x; sumq = sumq + float(w.y) * xv.y; sumq = sumq + float(w.z) * xv.z; sumq = sumq + float(w.w) * xv.w; } acc = acc + d * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+
+    (defn dth-q40-lane2-msl ()
+        "kernel void form_q40_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 32u; ulong rowbase = (ulong)r * (ulong)nb * 18ul; float acc = 0.0f; for (uint b = lane; b < nb; b += 32u) { device const uchar* bp = qb + rowbase + (ulong)b * 18ul; ushort h = (ushort)bp[0] | ((ushort)bp[1] << 8); float d = float(as_type<half>(h)); device const uchar* qs = bp + 2u; device const float* xb = x + b * 32u; float sumq = 0.0f; for (uint i = 0u; i < 16u; i += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + i)); sumq = sumq + float(int(w.x & 15u) - 8) * xv.x; sumq = sumq + float(int(w.y & 15u) - 8) * xv.y; sumq = sumq + float(int(w.z & 15u) - 8) * xv.z; sumq = sumq + float(int(w.w & 15u) - 8) * xv.w; } for (uint i = 0u; i < 16u; i += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + 16u + i)); sumq = sumq + float(int(w.x >> 4u) - 8) * xv.x; sumq = sumq + float(int(w.y >> 4u) - 8) * xv.y; sumq = sumq + float(int(w.z >> 4u) - 8) * xv.z; sumq = sumq + float(int(w.w >> 4u) - 8) * xv.w; } acc = acc + d * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+
+    (defn dth-q50-lane2-msl ()
+        "kernel void form_q50_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 32u; ulong rowbase = (ulong)r * (ulong)nb * 22ul; float acc = 0.0f; for (uint b = lane; b < nb; b += 32u) { device const uchar* bp = qb + rowbase + (ulong)b * 22ul; ushort h = (ushort)bp[0] | ((ushort)bp[1] << 8); float d = float(as_type<half>(h)); uint qh = uint(bp[2]) | (uint(bp[3]) << 8u) | (uint(bp[4]) << 16u) | (uint(bp[5]) << 24u); device const uchar* qs = bp + 6u; device const float* xb = x + b * 32u; float sumq = 0.0f; for (uint i = 0u; i < 16u; i += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + i)); sumq = sumq + float(int((w.x & 15u) | (((qh >> i) & 1u) << 4u)) - 16) * xv.x; sumq = sumq + float(int((w.y & 15u) | (((qh >> (i + 1u)) & 1u) << 4u)) - 16) * xv.y; sumq = sumq + float(int((w.z & 15u) | (((qh >> (i + 2u)) & 1u) << 4u)) - 16) * xv.z; sumq = sumq + float(int((w.w & 15u) | (((qh >> (i + 3u)) & 1u) << 4u)) - 16) * xv.w; } for (uint i = 0u; i < 16u; i += 4u) { uint ii = i + 16u; uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + ii)); sumq = sumq + float(int((w.x >> 4u) | (((qh >> ii) & 1u) << 4u)) - 16) * xv.x; sumq = sumq + float(int((w.y >> 4u) | (((qh >> (ii + 1u)) & 1u) << 4u)) - 16) * xv.y; sumq = sumq + float(int((w.z >> 4u) | (((qh >> (ii + 2u)) & 1u) << 4u)) - 16) * xv.z; sumq = sumq + float(int((w.w >> 4u) | (((qh >> (ii + 3u)) & 1u) << 4u)) - 16) * xv.w; } acc = acc + d * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+
+    (defn dth-q6k-lane2-msl ()
+        "kernel void form_q6k_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ng = cols / 16u; ulong rowbase = (ulong)r * (ulong)(cols / 256u) * 210ul; float acc = 0.0f; for (uint g = lane; g < ng; g += 32u) { uint blk = g >> 4u; uint gi = g & 15u; device const uchar* b = qb + rowbase + (ulong)blk * 210ul; uint hh = gi >> 3u; uint rem = gi & 7u; uint gp = rem >> 1u; uint is = rem & 1u; ushort hd = (ushort)b[208] | ((ushort)b[209] << 8); float d = float(as_type<half>(hd)); int sci = int(b[192u + hh * 8u + is + 2u * gp]); int sc = sci < 128 ? sci : sci - 256; device const uchar* ql = b + hh * 64u + is * 16u + (gp & 1u) * 32u; device const uchar* qh = b + 128u + hh * 32u + is * 16u; uint sh4 = (gp >> 1u) * 4u; uint sh2 = gp * 2u; device const float* xg = x + g * 16u; float sumq = 0.0f; for (uint t = 0u; t < 16u; t += 4u) { uchar4 lb = uchar4(*(device const packed_uchar4*)(ql + t)); uchar4 hb = uchar4(*(device const packed_uchar4*)(qh + t)); float4 xv = float4(*(device const packed_float4*)(xg + t)); sumq = sumq + float(int(((lb.x >> sh4) & 15u) + ((hb.x >> sh2) & 3u) * 16u) - 32) * xv.x; sumq = sumq + float(int(((lb.y >> sh4) & 15u) + ((hb.y >> sh2) & 3u) * 16u) - 32) * xv.y; sumq = sumq + float(int(((lb.z >> sh4) & 15u) + ((hb.z >> sh2) & 3u) * 16u) - 32) * xv.z; sumq = sumq + float(int(((lb.w >> sh4) & 15u) + ((hb.w >> sh2) & 3u) * 16u) - 32) * xv.w; } acc = acc + (d * float(sc)) * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+
+    (defn dth-q4k-lane2-msl ()
+        "kernel void form_q4k_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ns = cols / 32u; ulong rowbase = (ulong)r * (ulong)(cols / 256u) * 144ul; float acc = 0.0f; for (uint sb = lane; sb < ns; sb += 32u) { uint blk = sb >> 3u; uint j = sb & 7u; device const uchar* b = qb + rowbase + (ulong)blk * 144ul; ushort hd = (ushort)b[0] | ((ushort)b[1] << 8); ushort hm = (ushort)b[2] | ((ushort)b[3] << 8); float d = float(as_type<half>(hd)); float dmin = float(as_type<half>(hm)); uint sc; uint mn; if (j < 4u) { sc = uint(b[4u + j]) & 63u; mn = uint(b[8u + j]) & 63u; } else { sc = (uint(b[8u + j]) & 15u) | ((uint(b[j]) >> 6u) << 4u); mn = (uint(b[8u + j]) >> 4u) | ((uint(b[4u + j]) >> 6u) << 4u); } float ds = d * float(sc); float dm = dmin * float(mn); uint c = j >> 1u; uint sh = (j & 1u) * 4u; device const uchar* qs = b + 16u + c * 32u; device const float* xg = x + sb * 32u; float sumq = 0.0f; float sumx = 0.0f; for (uint t = 0u; t < 32u; t += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + t)); float4 xv = float4(*(device const packed_float4*)(xg + t)); sumq = sumq + float((w.x >> sh) & 15u) * xv.x; sumx = sumx + xv.x; sumq = sumq + float((w.y >> sh) & 15u) * xv.y; sumx = sumx + xv.y; sumq = sumq + float((w.z >> sh) & 15u) * xv.z; sumx = sumx + xv.z; sumq = sumq + float((w.w >> sh) & 15u) * xv.w; sumx = sumx + xv.w; } acc = acc + (ds * sumq - dm * sumx); } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+
+    (defn dth-q5k-lane2-msl ()
+        "kernel void form_q5k_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ns = cols / 32u; ulong rowbase = (ulong)r * (ulong)(cols / 256u) * 176ul; float acc = 0.0f; for (uint sb = lane; sb < ns; sb += 32u) { uint blk = sb >> 3u; uint j = sb & 7u; device const uchar* b = qb + rowbase + (ulong)blk * 176ul; ushort hd = (ushort)b[0] | ((ushort)b[1] << 8); ushort hm = (ushort)b[2] | ((ushort)b[3] << 8); float d = float(as_type<half>(hd)); float dmin = float(as_type<half>(hm)); uint sc; uint mn; if (j < 4u) { sc = uint(b[4u + j]) & 63u; mn = uint(b[8u + j]) & 63u; } else { sc = (uint(b[8u + j]) & 15u) | ((uint(b[j]) >> 6u) << 4u); mn = (uint(b[8u + j]) >> 4u) | ((uint(b[4u + j]) >> 6u) << 4u); } float ds = d * float(sc); float dm = dmin * float(mn); uint c = j >> 1u; uint sh = (j & 1u) * 4u; device const uchar* qs = b + 48u + c * 32u; device const uchar* qh = b + 16u; device const float* xg = x + sb * 32u; float sumq = 0.0f; float sumx = 0.0f; for (uint t = 0u; t < 32u; t += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + t)); uchar4 hb = uchar4(*(device const packed_uchar4*)(qh + t)); float4 xv = float4(*(device const packed_float4*)(xg + t)); sumq = sumq + float(((w.x >> sh) & 15u) | (((hb.x >> j) & 1u) << 4u)) * xv.x; sumx = sumx + xv.x; sumq = sumq + float(((w.y >> sh) & 15u) | (((hb.y >> j) & 1u) << 4u)) * xv.y; sumx = sumx + xv.y; sumq = sumq + float(((w.z >> sh) & 15u) | (((hb.z >> j) & 1u) << 4u)) * xv.z; sumx = sumx + xv.z; sumq = sumq + float(((w.w >> sh) & 15u) | (((hb.w >> j) & 1u) << 4u)) * xv.w; sumx = sumx + xv.w; } acc = acc + (ds * sumq - dm * sumx); } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+
+    ; ---- the TILED cooperative RMSNorm (2026-08-08, round two). form_rmsnorm_tg_f32's radius is
+    ; a COMPILE-TIME 4096-float scratch, so d=5120 (qwen2-32B) and d=8192 (72B) stayed on the
+    ; one-thread attestant — 129 serial norms a token on the 32B, each paying full device latency
+    ; 2n times. This kernel removes the radius WITHOUT touching the order: squares are staged into
+    ; the same 4096-float scratch one TILE at a time, thread 0 folds each tile ASCENDING into the
+    ; same running sum (j = 0, 1, ... n-1, exactly the attestant's fold), Newton-50 unchanged, the
+    ; elementwise normalize spread over the group. BIT FOR BIT the attestant at ANY n; must be
+    ; dispatched as EXACTLY ONE threadgroup (mode 1).
+    (defn dth-rms2-msl ()
+        "kernel void form_rmsnorm_tg2_f32 (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]]) { threadgroup float sq[4096]; threadgroup float sinv[1]; float ss = 0.0f; uint base = 0u; while (base < n) { uint m = n - base; if (m > 4096u) m = 4096u; uint j = t; while (j < m) { float xv = x[base + j]; sq[j] = xv * xv; j += nt; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { uint k = 0u; while (k < m) { ss = ss + sq[k]; k += 1u; } } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); base += 4096u; } if (t == 0u) { float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } sinv[0] = 1.0f / gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float inv = sinv[0]; uint j = t; while (j < n) { float nm = x[j] * inv; y[j] = nm * g[j]; j += nt; } } ")
+
+    ; ---- attention in THREE dispatches (2026-08-08, round two), and every fold keeps its
+    ; element's association. form_gqa_decode_f32 gives one thread a whole head: at the 32B shape
+    ; that is 40 threads serially walking the cache — measured 394 us per dispatch (stage-probe.fk),
+    ; ~25 ms of a 64-layer token. The three pieces are maps over independent elements:
+    ;   scores: thread (h,t) computes score(h,t) — the dot's c-descending fold UNCHANGED per score
+    ;   soft:   thread h does the attestant's max/exp/normalize middle verbatim (serial per head)
+    ;   out:    thread (h,i) folds t ASCENDING for output element i — the attestant's own t-then-i
+    ;           nesting reads element-wise as exactly this fold, value for value
+    ; BIT FOR BIT the one-dispatch attestant, which stays in the unit.
+    (defn dth-attn-scores-msl ()
+        "kernel void form_gqa_scores_f32 (device const float* q [[buffer(0)]], device const float* kc [[buffer(1)]], device float* sc [[buffer(2)]], constant uint& npos [[buffer(3)]], constant uint& nq [[buffer(4)]], constant uint& nkv [[buffer(5)]], constant uint& hd [[buffer(6)]], constant float& scale [[buffer(7)]], constant uint& sstride [[buffer(8)]], uint gid [[thread_position_in_grid]]) { if (gid >= nq * npos) return; uint h = gid / npos; uint t = gid - h * npos; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint qoff = h * hd; uint koff = kvh * hd; uint S = h * sstride; float acc = 0.0f; uint c = hd; while (c > 0) { c -= 1; float p = q[qoff + c] * kc[t * KVD + koff + c]; acc = p + acc; } sc[S + t] = acc * scale; } ")
+
+    (defn dth-attn-soft-msl ()
+        "kernel void form_gqa_soft_f32 (device float* sc [[buffer(0)]], constant uint& npos [[buffer(1)]], constant uint& nq [[buffer(2)]], constant uint& sstride [[buffer(3)]], uint h [[thread_position_in_grid]]) { if (h >= nq) return; uint S = h * sstride; uint E = (nq + h) * sstride; float mx = sc[S + 0]; uint t = 1; while (t < npos) { if (sc[S + t] > mx) { mx = sc[S + t]; } t += 1; } float sumes = 0.0f; t = 0; while (t < npos) { float e = fexp(sc[S + t] - mx); sc[E + t] = e; sumes = sumes + e; t += 1; } float invs = 1.0f / sumes; t = 0; while (t < npos) { sc[S + t] = sc[E + t] * invs; t += 1; } } ")
+
+    (defn dth-attn-out-msl ()
+        "kernel void form_gqa_out_f32 (device const float* vc [[buffer(0)]], device const float* sc [[buffer(1)]], device float* y [[buffer(2)]], constant uint& npos [[buffer(3)]], constant uint& nq [[buffer(4)]], constant uint& nkv [[buffer(5)]], constant uint& hd [[buffer(6)]], constant uint& sstride [[buffer(7)]], uint gid [[thread_position_in_grid]]) { if (gid >= nq * hd) return; uint h = gid / hd; uint i = gid - h * hd; uint grp = nq / nkv; uint kvh = h / grp; uint KVD = nkv * hd; uint S = h * sstride; uint koff = kvh * hd; float acc = 0.0f; uint t = 0; while (t < npos) { float pv = vc[t * KVD + koff + i] * sc[S + t]; acc = acc + pv; t += 1; } y[h * hd + i] = acc; } ")
+
+    ; ---- the WIDE RMSNorm (2026-08-08, round two) — the norm takes the lane fold's standing.
+    ; The bit-exact tiled twin above measured 316 us at d=5120 (layer-probe.fk, fenced): the
+    ; ascending sum is ONE thread's dependent chain and cannot go wider without reassociating.
+    ; At 129 norms a token that was 41 ms of the 32B's 109 — the largest single term. This twin
+    ; REASSOCIATES the sum of squares: thread t folds x[t], x[t+256], ... ascending (chain depth
+    ; ceil(n/256)), metal::simd_sum per simdgroup, thread 0 folds the 8 partials ascending.
+    ; The terms are all NONNEGATIVE, so there is no cancellation and the bound is plain:
+    ; |ss_wide - ss*| <= (ceil(n/256) + 32 + 8) * 2^-24 * ss — relative ~2e-6 at n=8192 — and it
+    ; carries into 1/rms as the same relative order, the same magnitude the lane matvec's named
+    ; epsilon already admits per element. Newton-50 and the normalize are UNCHANGED. The
+    ; bit-exact twins (serial + tiled) stay in the unit; the gate is the measured stream.
+    (defn dth-rms-wide-msl ()
+        "kernel void form_rmsnorm_wide_f32 (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) { threadgroup float part[32]; threadgroup float sinv[1]; float a = 0.0f; uint j = t; while (j < n) { float xv = x[j]; a = a + xv * xv; j += nt; } float sa = metal::simd_sum(a); if (lane == 0u) part[sg] = sa; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { uint nsg = (nt + 31u) / 32u; float ss = 0.0f; uint k = 0u; while (k < nsg) { ss = ss + part[k]; k += 1u; } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } sinv[0] = 1.0f / gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float inv = sinv[0]; j = t; while (j < n) { float nm = x[j] * inv; y[j] = nm * g[j]; j += nt; } } ")
+
     ; The pragma is the carrier header's own stated fix: this door's default COMPILES CONTRACTED,
     ; and the cell owns every number, so the cell says so in the text it emits.
     (defn dth-msl ()
@@ -170,7 +271,19 @@
         (str_concat (qml-msl-appendix)
         (str_concat (dth-q5k-lane-msl "form_q5k_matvec_lane_f32")
         (str_concat (dth-q50-lane-msl "form_q50_matvec_lane_f32")
-                    (dth-q40-lane-msl "form_q40_matvec_lane_f32")))))))))))))))))))
+        (str_concat (dth-q40-lane-msl "form_q40_matvec_lane_f32")
+        (str_concat (dth-q80-lane2-msl)
+        (str_concat (dth-q40-lane2-msl)
+        (str_concat (dth-q50-lane2-msl)
+        (str_concat (dth-q6k-lane2-msl)
+        (str_concat (dth-q4k-lane2-msl)
+        (str_concat (dth-q5k-lane2-msl)
+        (str_concat (dth-rms2-msl)
+        (str_concat (dth-attn-scores-msl)
+        (str_concat (dth-attn-soft-msl)
+        (str_concat (dth-attn-out-msl)
+        (str_concat (dth-neox-pair-msl "form_rope_neox_pair_f32")
+                    (dth-rms-wide-msl)))))))))))))))))))))))))))))))
 
     ; ================= the file's numbers, in ONE walk =================
     (defn dth-header-window () 40000000)
@@ -272,6 +385,9 @@
     ;        adopted 2026-08-08 from the llama lane where each carries its stated radius)
     ;        27 q6lane 28 q4lane 29 q80lane 30 q5klane 31 q50lane 32 q40lane   (the SIMD-group
     ;        matvecs — one group per row, the one reassociation is simd_sum, epsilon named above)
+    ;        33 q6lane2 34 q4klane2 35 q80lane2 36 q5klane2 37 q50lane2 38 q40lane2   (the
+    ;        FACTORED-SCALE lane matvecs, 2026-08-08 round two — scale once per group, bitmask
+    ;        decode, bounds in the kernel block above; these are the dispatched ones)
     (defn dth-pipes (msl)
         (list (metal_pipeline msl "form_q6k_matvec_f32")
               (metal_pipeline msl "form_q4k_matvec_f32")
@@ -305,7 +421,19 @@
               (metal_pipeline msl "form_q80_matvec_lane_f32")
               (metal_pipeline msl "form_q5k_matvec_lane_f32")
               (metal_pipeline msl "form_q50_matvec_lane_f32")
-              (metal_pipeline msl "form_q40_matvec_lane_f32")))
+              (metal_pipeline msl "form_q40_matvec_lane_f32")
+              (metal_pipeline msl "form_q6k_matvec_lane2_f32")
+              (metal_pipeline msl "form_q4k_matvec_lane2_f32")
+              (metal_pipeline msl "form_q80_matvec_lane2_f32")
+              (metal_pipeline msl "form_q5k_matvec_lane2_f32")
+              (metal_pipeline msl "form_q50_matvec_lane2_f32")
+              (metal_pipeline msl "form_q40_matvec_lane2_f32")
+              (metal_pipeline msl "form_rmsnorm_tg2_f32")
+              (metal_pipeline msl "form_gqa_scores_f32")
+              (metal_pipeline msl "form_gqa_soft_f32")
+              (metal_pipeline msl "form_gqa_out_f32")
+              (metal_pipeline msl "form_rope_neox_pair_f32")
+              (metal_pipeline msl "form_rmsnorm_wide_f32")))
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
@@ -359,11 +487,11 @@
     ; attestants stay in the unit and the band's CPU twins still answer to them; the lane twins
     ; answer to the named epsilon and to the measured stream gate.
     (defn dth-mv (ps tv xh yh bb)
-        (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 27)
-                       (if (eq (dth-tv-ty tv) 12) (nth ps 28)
-                       (if (eq (dth-tv-ty tv) 13) (nth ps 30)
-                       (if (eq (dth-tv-ty tv) 6) (nth ps 31)
-                       (if (eq (dth-tv-ty tv) 2) (nth ps 32) (nth ps 29))))))
+        (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 33)
+                       (if (eq (dth-tv-ty tv) 12) (nth ps 34)
+                       (if (eq (dth-tv-ty tv) 13) (nth ps 36)
+                       (if (eq (dth-tv-ty tv) 6) (nth ps 37)
+                       (if (eq (dth-tv-ty tv) 2) (nth ps 38) (nth ps 35))))))
                        (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv))
                                   256 0 0 bb)
                        (mul (dth-tv-r tv) 32)))
@@ -377,33 +505,42 @@
                        (md-bind16 (list (dth-tv-h tv) yh) (list off n) 256 0 0 bb)
                        n))
 
-    ; the cooperative RMSNorm is BIT FOR BIT the attestant inside its stated radius (n <= 4096,
-    ; ONE threadgroup, honored by mode 1) — outside it (qwen2-32B d=5120, 72B d=8192) the serial
-    ; attestant stays, because past the radius the twin is WRONG, not slow.
+    ; the WIDE RMSNorm (pipe 44) dispatches: reassociated sum of squares under the nonnegative
+    ; bound stated at its kernel, gated by the measured stream. The bit-exact twins — the serial
+    ; attestant (pipe 6) and the tiled cooperative form (pipe 39, any n) — stay in the unit and
+    ; the CPU twins still answer to them. ONE threadgroup, honored by mode 1.
     (defn dth-rms (ps xh gtv yh n epsBits bb)
-        (if (le n 4096)
-            (metal_enqueue (nth ps 23) (md-bind16 (list xh (dth-tv-h gtv) yh) (list n epsBits)
-                                                  256 0 1 bb) 1)
-            (metal_enqueue (nth ps 6) (md-bind16 (list xh (dth-tv-h gtv) yh) (list n epsBits)
-                                                 256 0 0 bb) 1)))
+        (metal_enqueue (nth ps 44) (md-bind16 (list xh (dth-tv-h gtv) yh) (list n epsBits)
+                                              256 0 1 bb) 1))
 
     ; style 0: adjacent pairs over the whole head — at PAIR grain (a thread map, not an order;
     ; radius: hd even, else the per-head attestant). style 1: half-split over the first rd dims.
     (defn dth-rope (ps style vh ropeH nh hd rd pos baseBits bb)
         (if (eq style 1)
-            (metal_enqueue (nth ps 8) (md-bind16 (list vh ropeH) (list nh hd rd pos baseBits)
-                                                 256 0 0 bb) nh)
+            (if (eq (mod rd 2) 0)
+                (metal_enqueue (nth ps 43) (md-bind16 (list vh ropeH) (list nh hd rd pos baseBits)
+                                                      256 0 0 bb) (mul nh (div rd 2)))
+                (metal_enqueue (nth ps 8) (md-bind16 (list vh ropeH) (list nh hd rd pos baseBits)
+                                                     256 0 0 bb) nh))
             (if (eq (mod hd 2) 0)
                 (metal_enqueue (nth ps 26) (md-bind16 (list vh ropeH) (list nh hd pos baseBits)
                                                       256 0 0 bb) (mul nh (div hd 2)))
                 (metal_enqueue (nth ps 7) (md-bind16 (list vh ropeH) (list nh hd pos baseBits)
                                                      256 0 0 bb) nh))))
 
+    ; three dispatches, two inner fences: scores must precede soft, soft must precede out. The
+    ; one-thread-per-head attestant (pipe 9) stays in the unit; these are its bit-exact maps.
     (defn dth-attn (ps qh kh vh yh sh npos nq nkv hd scaleBits sstride bb)
-        (metal_enqueue (nth ps 9)
-                       (md-bind16 (list qh kh vh yh sh) (list npos nq nkv hd scaleBits sstride)
-                                  256 0 0 bb)
-                       nq))
+        (do (metal_enqueue (nth ps 40)
+                           (md-bind16 (list qh kh sh) (list npos nq nkv hd scaleBits sstride)
+                                      256 0 0 bb)
+                           (mul nq npos))
+            (metal_enqueue (nth ps 41)
+                           (md-bind16 (list sh) (list npos nq sstride) 256 0 0 1)
+                           nq)
+            (metal_enqueue (nth ps 42)
+                           (md-bind16 (list vh sh yh) (list npos nq nkv hd sstride) 256 0 0 1)
+                           (mul nq hd))))
 
     (defn dth-elem (ps p ah bh yh n bb)
         (metal_enqueue p (md-bind16 (list ah bh yh) (list n) 256 0 0 bb) n))
