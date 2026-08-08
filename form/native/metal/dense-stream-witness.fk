@@ -1,0 +1,89 @@
+; dense-stream-witness.fk — the FULL two-prompt id stream for any dense blob, one driver.
+;
+; The stream gate this repo learned: first-token-only is blind (the dense band's own M-2/M-4
+; mutations survived it; the stream caught them). So before and after every lane change, THIS
+; driver prints the complete 16-id stream for two prompts, and the two prints must be equal.
+;
+; Direct-source Form does not read argv, so the blob path arrives in a file:
+;
+;   echo /path/to/blob > /tmp/dense-stream-witness-target
+;   ./fkwu-metal --src form/native/metal/dense-stream-witness.fk
+;
+; The phi2 arch walks its own open/forward (parallel residual, fused qkv); every other dense
+; arch walks dth-open. Sequential prompts through one open are clean: positions restart at 0
+; and attention reads only rows 0..pos, all rewritten by the new prompt.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY
+;
+; preludes: native/metal/dense-token-handle.fk
+
+(do
+    (defn dsw-target-file () "/tmp/dense-stream-witness-target")
+    (defn dsw-trim-loop (s n)
+        (if (le n 0) ""
+            (if (str_eq (substring s (sub n 1) n) "\n") (dsw-trim-loop s (sub n 1))
+                (substring s 0 n))))
+    (defn dsw-target ()
+        (if (eq (fs_exists (dsw-target-file)) 0) ""
+            (dsw-trim-loop (read_file (dsw-target-file))
+                           (str_len (read_file (dsw-target-file))))))
+
+    (defn dsw-join (xs acc)
+        (if (eq (len xs) 0) acc
+            (dsw-join (tail xs) (str_concat acc (str_concat " " (int_to_str (head xs)))))))
+
+    (defn dsw-prompts () (list "The capital of France is" "Once upon a time"))
+
+    (defn dsw-run (st tag prompt n)
+        (do (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2))
+            (let lays (nth st 3)) (let cks (nth st 4)) (let cvs (nth st 5))
+            (let src (nth st 10))
+            (let ids (dtk-encode src prompt))
+            (let tE (now_unix_ms))
+            (let pf (dth-prefill ps bs geo lays cks cvs (nth st 6) (nth st 7) (nth st 8) ids 0))
+            (let first (nth pf 0))
+            (let rest (dth-generate ps bs geo lays cks cvs (nth st 6) (nth st 7) (nth st 8)
+                                    first (len ids) (sub n 1) (empty)))
+            (let tH (now_unix_ms))
+            (print (str_concat tag (str_concat "_ids=" (dsw-join (append (list first) rest) ""))))
+            (print (str_concat tag (str_concat "_ms=" (int_to_str (sub tH tE)))))
+            0))
+
+    (defn dsw-p2-run (st tag prompt n)
+        (do (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2))
+            (let lays (nth st 3)) (let cks (nth st 4)) (let cvs (nth st 5))
+            (let src (nth st 12))
+            (let ids (dtk-encode src prompt))
+            (let tE (now_unix_ms))
+            (let pf (dth-p2-prefill ps bs geo lays cks cvs (nth st 6) (nth st 7) (nth st 8)
+                                    (nth st 9) (nth st 10) ids 0))
+            (let first (nth pf 0))
+            (let rest (dth-p2-generate ps bs geo lays cks cvs (nth st 6) (nth st 7) (nth st 8)
+                                       (nth st 9) (nth st 10) first (len ids) (sub n 1) (empty)))
+            (let tH (now_unix_ms))
+            (print (str_concat tag (str_concat "_ids=" (dsw-join (append (list first) rest) ""))))
+            (print (str_concat tag (str_concat "_ms=" (int_to_str (sub tH tE)))))
+            0))
+
+    (let path (dsw-target))
+    (if (eq (str_len path) 0)
+        (print "dense-stream-witness: write the blob path to /tmp/dense-stream-witness-target first")
+        (do (let live (md-door-live?))
+            (print (if live "door=live" "door=DEAD"))
+            (print (str_concat "blob=" path))
+            (let hdr (dth-src path))
+            (let arch (gmt-str hdr "general.architecture"))
+            (print (str_concat "arch=" arch))
+            (if (str_eq arch "phi2")
+                (do (let st (dth-p2-open path 256))
+                    (print (str_concat "pipes_ok=" (if (dth-pipe-ok? (nth st 0)) "1" "0")))
+                    (dsw-p2-run st "p1" (nth (dsw-prompts) 0) 16)
+                    (dsw-p2-run st "p2" (nth (dsw-prompts) 1) 16)
+                    0)
+                (do (let st (dth-open path 256 (sub 0 1)))
+                    (print (str_concat "pipes_ok=" (if (dth-pipe-ok? (nth st 0)) "1" "0")))
+                    (dsw-run st "p1" (nth (dsw-prompts) 0) 16)
+                    (dsw-run st "p2" (nth (dsw-prompts) 1) 16)
+                    0))
+            (print (metal_status))))
+    0)

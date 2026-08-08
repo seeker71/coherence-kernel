@@ -1,0 +1,82 @@
+; bw-probe.fk — re-derive THIS host's memory bandwidth through the body's own door.
+;
+; A standing memory of this body: never quote a denominator you did not re-derive. The floor
+; table divides bytes-touched-per-token by this number, so this cell measures it fresh on every
+; run rather than citing July's ~471 GB/s.
+;
+; Two probes, both Form-emitted MSL through the handle door:
+;   read:  T threads, each folds float4s at grid stride (coalesced), one f32 written per thread.
+;          Traffic per dispatch = the buffer, read once.
+;   copy:  d[i] = s[i] over float4 — traffic per dispatch = 2x the buffer (read + write).
+;
+; k dispatches are enqueued in one batch and ONE sync closes the clock, so the wall time holds
+; k full passes and no per-dispatch wait. GB/s = k * traffic / wall.
+;
+; preludes: form-stdlib/core.fk form-stdlib/metal-door.fk
+;
+; PROOF LEVEL: FOURTH-ARM ONLY
+
+(do
+    (defn bwp-msl ()
+        (str_concat "#include <metal_stdlib>\n#pragma clang fp contract(off)\n"
+        (str_concat "kernel void bwp_read(device const float4* a [[buffer(0)]], device float* y [[buffer(1)]], constant uint& n4 [[buffer(2)]], constant uint& t [[buffer(3)]], uint gid [[thread_position_in_grid]]) { float4 acc = float4(0.0f); uint i = gid; while (i < n4) { acc += a[i]; i += t; } y[gid] = acc.x + acc.y + acc.z + acc.w; }"
+                    "kernel void bwp_copy(device const float4* s [[buffer(0)]], device float4* d [[buffer(1)]], constant uint& n4 [[buffer(2)]], uint gid [[thread_position_in_grid]]) { if (gid < n4) d[gid] = s[gid]; }")))
+
+    (defn bwp-mb () 1024)                       ; buffer size, MB
+    (defn bwp-bytes () (mul (bwp-mb) 1048576))
+    (defn bwp-n4 () (div (bwp-bytes) 16))
+    (defn bwp-threads () 262144)
+    (defn bwp-k () 8)                           ; dispatches per timed batch
+
+    (defn bwp-enq-read (p a y n)
+        (if (le n 0) 0
+            (do (metal_enqueue p (md-bind16 (list a y) (list (bwp-n4) (bwp-threads)) 256 0 0 0)
+                               (bwp-threads))
+                (bwp-enq-read p a y (sub n 1)))))
+
+    (defn bwp-enq-copy (p a b n)
+        (if (le n 0) 0
+            (do (metal_enqueue p (md-bind16 (list a b) (list (bwp-n4)) 256 0 0 0) (bwp-n4))
+                (bwp-enq-copy p a b (sub n 1)))))
+
+    ; GB/s scaled by 1000: bytes / (ms * 1e6)
+    (defn bwp-rate (bytes ms) (div (div bytes ms) 1000000))
+
+    (let live (md-door-live?))
+    (print (if live "door=live" "door=DEAD"))
+    (let pRead (metal_pipeline (bwp-msl) "bwp_read"))
+    (let pCopy (metal_pipeline (bwp-msl) "bwp_copy"))
+    (print (str_concat "pipes_ok=" (if (eq pRead 0) "0" (if (eq pCopy 0) "0" "1"))))
+
+    (let a (metal_buf_alloc (bwp-bytes)))
+    (let b (metal_buf_alloc (bwp-bytes)))
+    (let y (metal_buf_alloc (mul (bwp-threads) 4)))
+
+    ; touch both buffers once so first-use page faults are outside the clock
+    (bwp-enq-copy pCopy a b 1)
+    (metal_sync)
+
+    ; warm read, then timed
+    (bwp-enq-read pRead a y 2)
+    (metal_sync)
+    (let t0 (now_unix_ms))
+    (bwp-enq-read pRead a y (bwp-k))
+    (metal_sync)
+    (let t1 (now_unix_ms))
+    (let readMs (sub t1 t0))
+    (print (str_concat "read_ms=" (int_to_str readMs)))
+    (print (str_concat "read_GBps=" (int_to_str (bwp-rate (mul (bwp-k) (bwp-bytes)) readMs))))
+
+    ; warm copy, then timed
+    (bwp-enq-copy pCopy a b 2)
+    (metal_sync)
+    (let t2 (now_unix_ms))
+    (bwp-enq-copy pCopy a b (bwp-k))
+    (metal_sync)
+    (let t3 (now_unix_ms))
+    (let copyMs (sub t3 t2))
+    (print (str_concat "copy_ms=" (int_to_str copyMs)))
+    (print (str_concat "copy_GBps=" (int_to_str (bwp-rate (mul (mul 2 (bwp-k)) (bwp-bytes)) copyMs))))
+
+    (print (metal_status))
+    0)
