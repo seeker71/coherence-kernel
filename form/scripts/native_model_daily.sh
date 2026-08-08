@@ -14,7 +14,6 @@ after="$temp_dir/artifacts-after"
 native_way="$temp_dir/native-vs-rented.fk"
 training="$temp_dir/training"
 rag="$temp_dir/rag"
-diagnostic_output="$temp_dir/diagnostic-output"
 real_flows="$temp_dir/real-flows"
 tally="$temp_dir/tally"
 summary="$temp_dir/daily-summary"
@@ -59,22 +58,13 @@ if [ "$ground" != 42 ] || [ "$recursive" != 55 ] ||
     exit 1
 fi
 
-diagnostic=not-requested
-if [ "${NATIVE_MODEL_OLLAMA_DIAGNOSTIC:-1}" = 1 ]; then
-    if "$NM_SCRIPT_DIR/native_model_eval.sh" > "$diagnostic_output"
-    then
-        diagnostic=paired-form-scored-and-logged
-    else
-        diagnostic=failed-and-logged-if-observable
-    fi
-fi
 "$NM_SCRIPT_DIR/native_model_real_flows.sh" > "$real_flows"
 "$NM_SCRIPT_DIR/native_model_tally.sh" > "$tally"
 
 day=$(date -u +%Y%m%d)
 epoch=$(date +%s)
 {
-    printf 'schema=native-model-form-daily-v1\n'
+    printf 'schema=native-model-form-daily-v2\n'
     printf 'day=%s\n' "$day"
     printf 'ground=%s\n' "$ground"
     printf 'recursive=%s\n' "$recursive"
@@ -86,11 +76,7 @@ epoch=$(date +%s)
     printf 'sha256_band=%s\n' "$sha256_band"
     printf 'replacement_band=%s\n' "$replacement_band"
     cat "$rag"
-    printf 'ollama_diagnostic=%s\n' "$diagnostic"
     cat "$training"
-    if [ -s "$diagnostic_output" ]; then
-        cat "$diagnostic_output"
-    fi
     cat "$real_flows"
     cat "$tally"
 } > "$summary"

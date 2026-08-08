@@ -64,16 +64,18 @@ The replacement host surface is intentionally thin:
   old borrowed comparator explicitly. `LOCAL_MODEL_ROUTE=nanbeige42` selects
   the explicitly named Nanbeige challenger carrier; availability still does
   not grant admission or authority.
-- `form/scripts/native_model_eval.sh` performs paired local candidate/incumbent
-  I/O while Form owns normalization, scores, comparison, and authority refusal.
+- `form/scripts/native_model_eval.sh` is an explicit, bounded integration
+  witness—not a daily path. It requires `NATIVE_MODEL_OLLAMA_INTEGRATION=1`
+  before paired local candidate/incumbent I/O; Form owns normalization, scores,
+  comparison, and authority refusal.
 - `form/scripts/native_model_tally.sh` asks Form to classify the event ledger
   and compute final-work shares.
 - `form/scripts/native_model_real_flows.sh` sequences the real session-world,
   session-grounding, and trained-artifact-lineage witnesses and writes their
   compact daily overview.
 - `form/scripts/native_model_daily.sh` re-grounds the checkout and sequences
-  Form training, exact keep/revert, native RAG, the optional paired local
-  diagnostic, the three real flows, and the Form tally.
+  Form training, exact keep/revert, native RAG, the three real flows, and the
+  Form tally. It makes no Ollama or localhost inference call.
 
 The evaluator keeps prompt, expected text, and model responses in a private
 temporary directory and passes them to Form over standard input. The durable
