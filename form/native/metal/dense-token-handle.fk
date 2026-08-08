@@ -27,14 +27,31 @@
 ;                      metal_buf_from_file rather than dispatching garbage.
 ;   tied embeddings    the absence of output.weight in the table, never a convention.
 ;
-; THE KERNELS ARE THE BODY'S ATTESTANTS, unchanged, plus (2026-08-08) THE BIT-EXACT TWINS the
-; llama lane proved on 2026-08-04, adopted family-wide: form_rmsnorm_tg_f32 inside its stated
-; radius (n <= 4096, one threadgroup; past it — qwen2-32B d=5120, 72B d=8192 — the serial
-; attestant stays because the twin there is WRONG, not slow), form_rope_pair_f32 (a thread map,
-; hd even), form_argmax_part/comb_f32 (comparison and selection only, ties still to the lowest
-; index), tpg=256 on every mode-0 dispatch, and concurrent batches whose hazards THIS CELL
-; declares per dispatch (barrier_before = "must I see my predecessors' writes"). Equality with
-; the attestants, not an epsilon — gated by the full two-prompt id stream per model.
+; THE KERNELS ARE THE BODY'S ATTESTANTS, and (2026-08-08) THE BODY'S NAMED TWINS. The serial
+; attestants (q6k/q4k/q80/q5k/q50/q40 fused matvec — one thread per row, serial right-fold;
+; form_rmsnorm_f32; form_rope_f32; form_argmax_f32) all stay in the unit and the CPU twins still
+; answer to them. The DISPATCHED path took the two growths the llama lane proved on 2026-08-04
+; and this stone swept family-wide on 2026-08-08, gated by the full two-prompt id stream per
+; model (first-token-only is blind — this band's own M-2/M-4):
+;
+;   BIT-EXACT twins (equality, not epsilon): form_rmsnorm_tg_f32 inside its stated radius
+;   (n <= 4096, one threadgroup; past it — qwen2-32B d=5120, 72B d=8192 — the serial attestant
+;   stays because the twin there is WRONG, not slow), form_rope_pair_f32 (a thread map, hd even),
+;   form_argmax_part/comb_f32 (comparison and selection only, ties still to the lowest index),
+;   tpg=256 on every mode-0 dispatch, and concurrent batches whose hazards THIS CELL declares
+;   per dispatch (barrier_before = "must I see my predecessors' writes").
+;
+;   EPSILON-BEARING twins, the reassociation ARGUED and WITNESSED: every matvec dispatches the
+;   LANE kernel — one SIMD group of 32 per row, lane l folding columns l, l+32, ... with k
+;   counting DOWN (the within-lane fold keeps tb-dot's right-fold direction), per-block scale
+;   invariants hoisted (exact same f32 values, association untouched), metal::simd_sum the ONE
+;   reassociation. qk-matvec-lane.fk derives the bound: |y_lane - y_serial| <=
+;   (cols + ceil(cols/32) + 32) * 2^-24 * SUM|w_j*x_j|, valid for ANY simd_sum tree since 32
+;   terms cannot exceed depth 31. Q6_K/Q4_K lane kernels are that cell's own; Q8_0's is
+;   q8-0-msl.fk's; Q5_K/Q5_0/Q4_0 are transcribed HERE from their attestants' own weight
+;   decompositions, split at the block invariant and nowhere else. The witnessed gate: the full
+;   16-id stream for two prompts, per model, equal before and after (2026-08-08, this stone).
+;
 ; Two kernels are this cell's own and both are transcriptions, not inventions: dth-copy-msl is
 ; the identity with a shifted destination (the KV-cache move the door's fixed-offset binding
 ; makes necessary — llama-token-handle.fk's finding, kept), and dth-neox-msl is form_rope_f32's
@@ -109,6 +126,29 @@
         (str_concat fname
             " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= rows) return; float acc = 0.0f; uint j = cols; while (j > 0) { j -= 1; float p = q40_w(qb, uint(i) * cols + j) * float(x[j]); acc = p + acc; } y[i] = acc; }")))
 
+    ; ---- the three lane matvecs qk-matvec-lane.fk does not carry, same shape lane for lane:
+    ; one SIMD group per row, lane l takes columns l, l+32, ..., k counting DOWN so the
+    ; within-lane fold keeps tb-dot's right-fold direction, per-block invariants hoisted (exact
+    ; values, association untouched), metal::simd_sum the one reassociation. The named epsilon is
+    ; qk-matvec-lane.fk's own at parts=32 — (cols + ceil(cols/32) + 32) * 2^-24 * SUM|w_j*x_j| —
+    ; unchanged because ANY association of 32 lane partials has depth < 32. Each weight
+    ; decomposition below is that quant's own *_w body (q5-msl.fk / this cell's q40), split at
+    ; the block invariant and nowhere else.
+    (defn dth-q5k-lane-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; uint curblk = 4294967295u; uint b = 0u; float2 inv = float2(0.0f, 0.0f); uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0) { k -= 1; uint j = lane + k * 32u; uint idx = r * cols + j; uint blk = idx / 256u; if (blk != curblk) { curblk = blk; b = blk * 176u; inv = float2(q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])), q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u]))); } int i = int(idx - blk * 256u); int c = i / 64; int within = q4k_mod(i, 64); int hf = within / 32; int l = q4k_mod(within, 32); int sj = 2 * c + hf; int qbyte = int(qb[b + 48u + uint(c * 32 + l)]); int nib = (hf == 0) ? q4k_mod(qbyte, 16) : qbyte / 16; int hb = q5k_bit(int(qb[b + 16u + uint(l)]), sj); float pr = ((inv.x * float(q4k_sc(qb, b, sj))) * float(nib + 16 * hb) - inv.y * float(q4k_mn(qb, b, sj))) * float(x[j]); acc = pr + acc; } float s = metal::simd_sum(acc); if (lane == 0) y[r] = s; }")))
+
+    (defn dth-q50-lane-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; uint curblk = 4294967295u; uint b = 0u; float d = 0.0f; uint qh = 0u; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0) { k -= 1; uint j = lane + k * 32u; uint idx = r * cols + j; uint blk = idx / 32u; if (blk != curblk) { curblk = blk; b = blk * 22u; d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); qh = uint(qb[b + 2u]) + 256u * uint(qb[b + 3u]) + 65536u * uint(qb[b + 4u]) + 16777216u * uint(qb[b + 5u]); } uint i = idx - blk * 32u; uint half_ = i / 16u; uint sj = i - half_ * 16u; int qbyte = int(qb[b + 6u + sj]); int nib = (half_ == 0u) ? q4k_mod(qbyte, 16) : qbyte / 16; int hb = int(q50_bit(qh, i)); float pr = d * float(nib + 16 * hb - 16) * float(x[j]); acc = pr + acc; } float s = metal::simd_sum(acc); if (lane == 0) y[r] = s; }")))
+
+    (defn dth-q40-lane-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; float acc = 0.0f; uint curblk = 4294967295u; uint b = 0u; float d = 0.0f; uint nk = (cols > lane) ? ((cols - lane + 31u) / 32u) : 0u; uint k = nk; while (k > 0) { k -= 1; uint j = lane + k * 32u; uint idx = r * cols + j; uint blk = idx / 32u; if (blk != curblk) { curblk = blk; b = blk * 18u; d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); } uint i = idx - blk * 32u; uint half_ = i / 16u; uint sj = i - half_ * 16u; int qbyte = int(qb[b + 2u + sj]); int nib = (half_ == 0u) ? q4k_mod(qbyte, 16) : qbyte / 16; float pr = d * float(nib - 8) * float(x[j]); acc = pr + acc; } float s = metal::simd_sum(acc); if (lane == 0) y[r] = s; }")))
+
     ; The pragma is the carrier header's own stated fix: this door's default COMPILES CONTRACTED,
     ; and the cell owns every number, so the cell says so in the text it emits.
     (defn dth-msl ()
@@ -126,7 +166,11 @@
         (str_concat (dth-copyfrom-msl "form_copy_from_f32")
         (str_concat (dth-q40-weight-msl)
         (str_concat (dth-q40-dequant-msl "form_q40_dequant_f32")
-                    (dth-q40-matvec-msl "form_q40_matvec_f32")))))))))))))))
+        (str_concat (dth-q40-matvec-msl "form_q40_matvec_f32")
+        (str_concat (qml-msl-appendix)
+        (str_concat (dth-q5k-lane-msl "form_q5k_matvec_lane_f32")
+        (str_concat (dth-q50-lane-msl "form_q50_matvec_lane_f32")
+                    (dth-q40-lane-msl "form_q40_matvec_lane_f32")))))))))))))))))))
 
     ; ================= the file's numbers, in ONE walk =================
     (defn dth-header-window () 40000000)
@@ -226,6 +270,8 @@
     ;        20 layernorm 21 gelu 22 copyfrom
     ;        23 rmsnorm_tg 24 argmax_part 25 argmax_comb 26 rope_pair   (the bit-exact twins,
     ;        adopted 2026-08-08 from the llama lane where each carries its stated radius)
+    ;        27 q6lane 28 q4lane 29 q80lane 30 q5klane 31 q50lane 32 q40lane   (the SIMD-group
+    ;        matvecs — one group per row, the one reassociation is simd_sum, epsilon named above)
     (defn dth-pipes (msl)
         (list (metal_pipeline msl "form_q6k_matvec_f32")
               (metal_pipeline msl "form_q4k_matvec_f32")
@@ -253,7 +299,13 @@
               (metal_pipeline msl "form_rmsnorm_tg_f32")
               (metal_pipeline msl "form_argmax_part_f32")
               (metal_pipeline msl "form_argmax_comb_f32")
-              (metal_pipeline msl "form_rope_pair_f32")))
+              (metal_pipeline msl "form_rope_pair_f32")
+              (metal_pipeline msl "form_q6k_matvec_lane_f32")
+              (metal_pipeline msl "form_q4k_matvec_lane_f32")
+              (metal_pipeline msl "form_q80_matvec_lane_f32")
+              (metal_pipeline msl "form_q5k_matvec_lane_f32")
+              (metal_pipeline msl "form_q50_matvec_lane_f32")
+              (metal_pipeline msl "form_q40_matvec_lane_f32")))
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
@@ -303,15 +355,18 @@
     ; 3x), adopted here 2026-08-08. bb on each helper is exactly "must I see my predecessors'
     ; writes": independent runs (q/k/v off one normed vector, gate/up, the two ropes, the two
     ; cache copies) share a stage, everything else fences.
+    ; every matvec is a LANE matvec (one SIMD group of 32 per row, grid = rows * 32): the serial
+    ; attestants stay in the unit and the band's CPU twins still answer to them; the lane twins
+    ; answer to the named epsilon and to the measured stream gate.
     (defn dth-mv (ps tv xh yh bb)
-        (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 0)
-                       (if (eq (dth-tv-ty tv) 12) (nth ps 1)
-                       (if (eq (dth-tv-ty tv) 13) (nth ps 14)
-                       (if (eq (dth-tv-ty tv) 6) (nth ps 16)
-                       (if (eq (dth-tv-ty tv) 2) (nth ps 18) (nth ps 2))))))
+        (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 27)
+                       (if (eq (dth-tv-ty tv) 12) (nth ps 28)
+                       (if (eq (dth-tv-ty tv) 13) (nth ps 30)
+                       (if (eq (dth-tv-ty tv) 6) (nth ps 31)
+                       (if (eq (dth-tv-ty tv) 2) (nth ps 32) (nth ps 29))))))
                        (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv))
                                   256 0 0 bb)
-                       (dth-tv-r tv)))
+                       (mul (dth-tv-r tv) 32)))
 
     (defn dth-dq (ps tv yh off n bb)
         (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 3)
