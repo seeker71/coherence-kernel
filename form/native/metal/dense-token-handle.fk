@@ -188,24 +188,31 @@
     ;     change ~2^-8, no u-scale bound exists against the attestant fold. betterwrong
     ;     (corpus 951): equality wins. Activations stay f32.
     ;
+    ;   * (2026-08-09, round three) a BIAS EPILOGUE rides on every lane2 kernel: when bflag=1,
+    ;     lane 0 stores s + bias[r] instead of s. The attestant did the same add in its own
+    ;     dispatch — matvec stored y[r], form_add_f32 read it back and added — and an f32
+    ;     store/load is the identity, so the fused add is the SAME one add on the SAME two
+    ;     values: a bit-exact fusion, one fenced stage fewer per biased layer. bflag=0 stores
+    ;     s exactly as before; callers without a bias bind y itself at the slot and 0.
+    ;
     ; The serial attestants and round one's lane kernels all STAY in the unit; these dispatch.
     (defn dth-q80-lane2-msl ()
-        "kernel void form_q80_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 32u; ulong rowbase = (ulong)r * (ulong)nb * 34ul; float acc = 0.0f; for (uint b = lane; b < nb; b += 32u) { device const uchar* bp = qb + rowbase + (ulong)b * 34ul; ushort h = (ushort)bp[0] | ((ushort)bp[1] << 8); float d = float(as_type<half>(h)); device const uchar* qs = bp + 2u; device const float* xb = x + b * 32u; float sumq = 0.0f; for (uint i = 0u; i < 32u; i += 4u) { char4 w = char4(*(device const packed_char4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + i)); sumq = sumq + float(w.x) * xv.x; sumq = sumq + float(w.y) * xv.y; sumq = sumq + float(w.z) * xv.z; sumq = sumq + float(w.w) * xv.w; } acc = acc + d * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+        "kernel void form_q80_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const float* bias [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& bflag [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 32u; ulong rowbase = (ulong)r * (ulong)nb * 34ul; float acc = 0.0f; for (uint b = lane; b < nb; b += 32u) { device const uchar* bp = qb + rowbase + (ulong)b * 34ul; ushort h = (ushort)bp[0] | ((ushort)bp[1] << 8); float d = float(as_type<half>(h)); device const uchar* qs = bp + 2u; device const float* xb = x + b * 32u; float sumq = 0.0f; for (uint i = 0u; i < 32u; i += 4u) { char4 w = char4(*(device const packed_char4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + i)); sumq = sumq + float(w.x) * xv.x; sumq = sumq + float(w.y) * xv.y; sumq = sumq + float(w.z) * xv.z; sumq = sumq + float(w.w) * xv.w; } acc = acc + d * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = (bflag != 0u) ? (s + bias[r]) : s; } ")
 
     (defn dth-q40-lane2-msl ()
-        "kernel void form_q40_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 32u; ulong rowbase = (ulong)r * (ulong)nb * 18ul; float acc = 0.0f; for (uint b = lane; b < nb; b += 32u) { device const uchar* bp = qb + rowbase + (ulong)b * 18ul; ushort h = (ushort)bp[0] | ((ushort)bp[1] << 8); float d = float(as_type<half>(h)); device const uchar* qs = bp + 2u; device const float* xb = x + b * 32u; float sumq = 0.0f; for (uint i = 0u; i < 16u; i += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + i)); sumq = sumq + float(int(w.x & 15u) - 8) * xv.x; sumq = sumq + float(int(w.y & 15u) - 8) * xv.y; sumq = sumq + float(int(w.z & 15u) - 8) * xv.z; sumq = sumq + float(int(w.w & 15u) - 8) * xv.w; } for (uint i = 0u; i < 16u; i += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + 16u + i)); sumq = sumq + float(int(w.x >> 4u) - 8) * xv.x; sumq = sumq + float(int(w.y >> 4u) - 8) * xv.y; sumq = sumq + float(int(w.z >> 4u) - 8) * xv.z; sumq = sumq + float(int(w.w >> 4u) - 8) * xv.w; } acc = acc + d * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+        "kernel void form_q40_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const float* bias [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& bflag [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 32u; ulong rowbase = (ulong)r * (ulong)nb * 18ul; float acc = 0.0f; for (uint b = lane; b < nb; b += 32u) { device const uchar* bp = qb + rowbase + (ulong)b * 18ul; ushort h = (ushort)bp[0] | ((ushort)bp[1] << 8); float d = float(as_type<half>(h)); device const uchar* qs = bp + 2u; device const float* xb = x + b * 32u; float sumq = 0.0f; for (uint i = 0u; i < 16u; i += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + i)); sumq = sumq + float(int(w.x & 15u) - 8) * xv.x; sumq = sumq + float(int(w.y & 15u) - 8) * xv.y; sumq = sumq + float(int(w.z & 15u) - 8) * xv.z; sumq = sumq + float(int(w.w & 15u) - 8) * xv.w; } for (uint i = 0u; i < 16u; i += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + 16u + i)); sumq = sumq + float(int(w.x >> 4u) - 8) * xv.x; sumq = sumq + float(int(w.y >> 4u) - 8) * xv.y; sumq = sumq + float(int(w.z >> 4u) - 8) * xv.z; sumq = sumq + float(int(w.w >> 4u) - 8) * xv.w; } acc = acc + d * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = (bflag != 0u) ? (s + bias[r]) : s; } ")
 
     (defn dth-q50-lane2-msl ()
-        "kernel void form_q50_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 32u; ulong rowbase = (ulong)r * (ulong)nb * 22ul; float acc = 0.0f; for (uint b = lane; b < nb; b += 32u) { device const uchar* bp = qb + rowbase + (ulong)b * 22ul; ushort h = (ushort)bp[0] | ((ushort)bp[1] << 8); float d = float(as_type<half>(h)); uint qh = uint(bp[2]) | (uint(bp[3]) << 8u) | (uint(bp[4]) << 16u) | (uint(bp[5]) << 24u); device const uchar* qs = bp + 6u; device const float* xb = x + b * 32u; float sumq = 0.0f; for (uint i = 0u; i < 16u; i += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + i)); sumq = sumq + float(int((w.x & 15u) | (((qh >> i) & 1u) << 4u)) - 16) * xv.x; sumq = sumq + float(int((w.y & 15u) | (((qh >> (i + 1u)) & 1u) << 4u)) - 16) * xv.y; sumq = sumq + float(int((w.z & 15u) | (((qh >> (i + 2u)) & 1u) << 4u)) - 16) * xv.z; sumq = sumq + float(int((w.w & 15u) | (((qh >> (i + 3u)) & 1u) << 4u)) - 16) * xv.w; } for (uint i = 0u; i < 16u; i += 4u) { uint ii = i + 16u; uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + ii)); sumq = sumq + float(int((w.x >> 4u) | (((qh >> ii) & 1u) << 4u)) - 16) * xv.x; sumq = sumq + float(int((w.y >> 4u) | (((qh >> (ii + 1u)) & 1u) << 4u)) - 16) * xv.y; sumq = sumq + float(int((w.z >> 4u) | (((qh >> (ii + 2u)) & 1u) << 4u)) - 16) * xv.z; sumq = sumq + float(int((w.w >> 4u) | (((qh >> (ii + 3u)) & 1u) << 4u)) - 16) * xv.w; } acc = acc + d * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+        "kernel void form_q50_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const float* bias [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& bflag [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 32u; ulong rowbase = (ulong)r * (ulong)nb * 22ul; float acc = 0.0f; for (uint b = lane; b < nb; b += 32u) { device const uchar* bp = qb + rowbase + (ulong)b * 22ul; ushort h = (ushort)bp[0] | ((ushort)bp[1] << 8); float d = float(as_type<half>(h)); uint qh = uint(bp[2]) | (uint(bp[3]) << 8u) | (uint(bp[4]) << 16u) | (uint(bp[5]) << 24u); device const uchar* qs = bp + 6u; device const float* xb = x + b * 32u; float sumq = 0.0f; for (uint i = 0u; i < 16u; i += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + i)); sumq = sumq + float(int((w.x & 15u) | (((qh >> i) & 1u) << 4u)) - 16) * xv.x; sumq = sumq + float(int((w.y & 15u) | (((qh >> (i + 1u)) & 1u) << 4u)) - 16) * xv.y; sumq = sumq + float(int((w.z & 15u) | (((qh >> (i + 2u)) & 1u) << 4u)) - 16) * xv.z; sumq = sumq + float(int((w.w & 15u) | (((qh >> (i + 3u)) & 1u) << 4u)) - 16) * xv.w; } for (uint i = 0u; i < 16u; i += 4u) { uint ii = i + 16u; uchar4 w = uchar4(*(device const packed_uchar4*)(qs + i)); float4 xv = float4(*(device const packed_float4*)(xb + ii)); sumq = sumq + float(int((w.x >> 4u) | (((qh >> ii) & 1u) << 4u)) - 16) * xv.x; sumq = sumq + float(int((w.y >> 4u) | (((qh >> (ii + 1u)) & 1u) << 4u)) - 16) * xv.y; sumq = sumq + float(int((w.z >> 4u) | (((qh >> (ii + 2u)) & 1u) << 4u)) - 16) * xv.z; sumq = sumq + float(int((w.w >> 4u) | (((qh >> (ii + 3u)) & 1u) << 4u)) - 16) * xv.w; } acc = acc + d * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = (bflag != 0u) ? (s + bias[r]) : s; } ")
 
     (defn dth-q6k-lane2-msl ()
-        "kernel void form_q6k_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ng = cols / 16u; ulong rowbase = (ulong)r * (ulong)(cols / 256u) * 210ul; float acc = 0.0f; for (uint g = lane; g < ng; g += 32u) { uint blk = g >> 4u; uint gi = g & 15u; device const uchar* b = qb + rowbase + (ulong)blk * 210ul; uint hh = gi >> 3u; uint rem = gi & 7u; uint gp = rem >> 1u; uint is = rem & 1u; ushort hd = (ushort)b[208] | ((ushort)b[209] << 8); float d = float(as_type<half>(hd)); int sci = int(b[192u + hh * 8u + is + 2u * gp]); int sc = sci < 128 ? sci : sci - 256; device const uchar* ql = b + hh * 64u + is * 16u + (gp & 1u) * 32u; device const uchar* qh = b + 128u + hh * 32u + is * 16u; uint sh4 = (gp >> 1u) * 4u; uint sh2 = gp * 2u; device const float* xg = x + g * 16u; float sumq = 0.0f; for (uint t = 0u; t < 16u; t += 4u) { uchar4 lb = uchar4(*(device const packed_uchar4*)(ql + t)); uchar4 hb = uchar4(*(device const packed_uchar4*)(qh + t)); float4 xv = float4(*(device const packed_float4*)(xg + t)); sumq = sumq + float(int(((lb.x >> sh4) & 15u) + ((hb.x >> sh2) & 3u) * 16u) - 32) * xv.x; sumq = sumq + float(int(((lb.y >> sh4) & 15u) + ((hb.y >> sh2) & 3u) * 16u) - 32) * xv.y; sumq = sumq + float(int(((lb.z >> sh4) & 15u) + ((hb.z >> sh2) & 3u) * 16u) - 32) * xv.z; sumq = sumq + float(int(((lb.w >> sh4) & 15u) + ((hb.w >> sh2) & 3u) * 16u) - 32) * xv.w; } acc = acc + (d * float(sc)) * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+        "kernel void form_q6k_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const float* bias [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& bflag [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ng = cols / 16u; ulong rowbase = (ulong)r * (ulong)(cols / 256u) * 210ul; float acc = 0.0f; for (uint g = lane; g < ng; g += 32u) { uint blk = g >> 4u; uint gi = g & 15u; device const uchar* b = qb + rowbase + (ulong)blk * 210ul; uint hh = gi >> 3u; uint rem = gi & 7u; uint gp = rem >> 1u; uint is = rem & 1u; ushort hd = (ushort)b[208] | ((ushort)b[209] << 8); float d = float(as_type<half>(hd)); int sci = int(b[192u + hh * 8u + is + 2u * gp]); int sc = sci < 128 ? sci : sci - 256; device const uchar* ql = b + hh * 64u + is * 16u + (gp & 1u) * 32u; device const uchar* qh = b + 128u + hh * 32u + is * 16u; uint sh4 = (gp >> 1u) * 4u; uint sh2 = gp * 2u; device const float* xg = x + g * 16u; float sumq = 0.0f; for (uint t = 0u; t < 16u; t += 4u) { uchar4 lb = uchar4(*(device const packed_uchar4*)(ql + t)); uchar4 hb = uchar4(*(device const packed_uchar4*)(qh + t)); float4 xv = float4(*(device const packed_float4*)(xg + t)); sumq = sumq + float(int(((lb.x >> sh4) & 15u) + ((hb.x >> sh2) & 3u) * 16u) - 32) * xv.x; sumq = sumq + float(int(((lb.y >> sh4) & 15u) + ((hb.y >> sh2) & 3u) * 16u) - 32) * xv.y; sumq = sumq + float(int(((lb.z >> sh4) & 15u) + ((hb.z >> sh2) & 3u) * 16u) - 32) * xv.z; sumq = sumq + float(int(((lb.w >> sh4) & 15u) + ((hb.w >> sh2) & 3u) * 16u) - 32) * xv.w; } acc = acc + (d * float(sc)) * sumq; } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = (bflag != 0u) ? (s + bias[r]) : s; } ")
 
     (defn dth-q4k-lane2-msl ()
-        "kernel void form_q4k_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ns = cols / 32u; ulong rowbase = (ulong)r * (ulong)(cols / 256u) * 144ul; float acc = 0.0f; for (uint sb = lane; sb < ns; sb += 32u) { uint blk = sb >> 3u; uint j = sb & 7u; device const uchar* b = qb + rowbase + (ulong)blk * 144ul; ushort hd = (ushort)b[0] | ((ushort)b[1] << 8); ushort hm = (ushort)b[2] | ((ushort)b[3] << 8); float d = float(as_type<half>(hd)); float dmin = float(as_type<half>(hm)); uint sc; uint mn; if (j < 4u) { sc = uint(b[4u + j]) & 63u; mn = uint(b[8u + j]) & 63u; } else { sc = (uint(b[8u + j]) & 15u) | ((uint(b[j]) >> 6u) << 4u); mn = (uint(b[8u + j]) >> 4u) | ((uint(b[4u + j]) >> 6u) << 4u); } float ds = d * float(sc); float dm = dmin * float(mn); uint c = j >> 1u; uint sh = (j & 1u) * 4u; device const uchar* qs = b + 16u + c * 32u; device const float* xg = x + sb * 32u; float sumq = 0.0f; float sumx = 0.0f; for (uint t = 0u; t < 32u; t += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + t)); float4 xv = float4(*(device const packed_float4*)(xg + t)); sumq = sumq + float((w.x >> sh) & 15u) * xv.x; sumx = sumx + xv.x; sumq = sumq + float((w.y >> sh) & 15u) * xv.y; sumx = sumx + xv.y; sumq = sumq + float((w.z >> sh) & 15u) * xv.z; sumx = sumx + xv.z; sumq = sumq + float((w.w >> sh) & 15u) * xv.w; sumx = sumx + xv.w; } acc = acc + (ds * sumq - dm * sumx); } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+        "kernel void form_q4k_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const float* bias [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& bflag [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ns = cols / 32u; ulong rowbase = (ulong)r * (ulong)(cols / 256u) * 144ul; float acc = 0.0f; for (uint sb = lane; sb < ns; sb += 32u) { uint blk = sb >> 3u; uint j = sb & 7u; device const uchar* b = qb + rowbase + (ulong)blk * 144ul; ushort hd = (ushort)b[0] | ((ushort)b[1] << 8); ushort hm = (ushort)b[2] | ((ushort)b[3] << 8); float d = float(as_type<half>(hd)); float dmin = float(as_type<half>(hm)); uint sc; uint mn; if (j < 4u) { sc = uint(b[4u + j]) & 63u; mn = uint(b[8u + j]) & 63u; } else { sc = (uint(b[8u + j]) & 15u) | ((uint(b[j]) >> 6u) << 4u); mn = (uint(b[8u + j]) >> 4u) | ((uint(b[4u + j]) >> 6u) << 4u); } float ds = d * float(sc); float dm = dmin * float(mn); uint c = j >> 1u; uint sh = (j & 1u) * 4u; device const uchar* qs = b + 16u + c * 32u; device const float* xg = x + sb * 32u; float sumq = 0.0f; float sumx = 0.0f; for (uint t = 0u; t < 32u; t += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + t)); float4 xv = float4(*(device const packed_float4*)(xg + t)); sumq = sumq + float((w.x >> sh) & 15u) * xv.x; sumx = sumx + xv.x; sumq = sumq + float((w.y >> sh) & 15u) * xv.y; sumx = sumx + xv.y; sumq = sumq + float((w.z >> sh) & 15u) * xv.z; sumx = sumx + xv.z; sumq = sumq + float((w.w >> sh) & 15u) * xv.w; sumx = sumx + xv.w; } acc = acc + (ds * sumq - dm * sumx); } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = (bflag != 0u) ? (s + bias[r]) : s; } ")
 
     (defn dth-q5k-lane2-msl ()
-        "kernel void form_q5k_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ns = cols / 32u; ulong rowbase = (ulong)r * (ulong)(cols / 256u) * 176ul; float acc = 0.0f; for (uint sb = lane; sb < ns; sb += 32u) { uint blk = sb >> 3u; uint j = sb & 7u; device const uchar* b = qb + rowbase + (ulong)blk * 176ul; ushort hd = (ushort)b[0] | ((ushort)b[1] << 8); ushort hm = (ushort)b[2] | ((ushort)b[3] << 8); float d = float(as_type<half>(hd)); float dmin = float(as_type<half>(hm)); uint sc; uint mn; if (j < 4u) { sc = uint(b[4u + j]) & 63u; mn = uint(b[8u + j]) & 63u; } else { sc = (uint(b[8u + j]) & 15u) | ((uint(b[j]) >> 6u) << 4u); mn = (uint(b[8u + j]) >> 4u) | ((uint(b[4u + j]) >> 6u) << 4u); } float ds = d * float(sc); float dm = dmin * float(mn); uint c = j >> 1u; uint sh = (j & 1u) * 4u; device const uchar* qs = b + 48u + c * 32u; device const uchar* qh = b + 16u; device const float* xg = x + sb * 32u; float sumq = 0.0f; float sumx = 0.0f; for (uint t = 0u; t < 32u; t += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + t)); uchar4 hb = uchar4(*(device const packed_uchar4*)(qh + t)); float4 xv = float4(*(device const packed_float4*)(xg + t)); sumq = sumq + float(((w.x >> sh) & 15u) | (((hb.x >> j) & 1u) << 4u)) * xv.x; sumx = sumx + xv.x; sumq = sumq + float(((w.y >> sh) & 15u) | (((hb.y >> j) & 1u) << 4u)) * xv.y; sumx = sumx + xv.y; sumq = sumq + float(((w.z >> sh) & 15u) | (((hb.z >> j) & 1u) << 4u)) * xv.z; sumx = sumx + xv.z; sumq = sumq + float(((w.w >> sh) & 15u) | (((hb.w >> j) & 1u) << 4u)) * xv.w; sumx = sumx + xv.w; } acc = acc + (ds * sumq - dm * sumx); } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = s; } ")
+        "kernel void form_q5k_matvec_lane2_f32 (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], device const float* bias [[buffer(3)]], constant uint& rows [[buffer(4)]], constant uint& cols [[buffer(5)]], constant uint& bflag [[buffer(6)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ns = cols / 32u; ulong rowbase = (ulong)r * (ulong)(cols / 256u) * 176ul; float acc = 0.0f; for (uint sb = lane; sb < ns; sb += 32u) { uint blk = sb >> 3u; uint j = sb & 7u; device const uchar* b = qb + rowbase + (ulong)blk * 176ul; ushort hd = (ushort)b[0] | ((ushort)b[1] << 8); ushort hm = (ushort)b[2] | ((ushort)b[3] << 8); float d = float(as_type<half>(hd)); float dmin = float(as_type<half>(hm)); uint sc; uint mn; if (j < 4u) { sc = uint(b[4u + j]) & 63u; mn = uint(b[8u + j]) & 63u; } else { sc = (uint(b[8u + j]) & 15u) | ((uint(b[j]) >> 6u) << 4u); mn = (uint(b[8u + j]) >> 4u) | ((uint(b[4u + j]) >> 6u) << 4u); } float ds = d * float(sc); float dm = dmin * float(mn); uint c = j >> 1u; uint sh = (j & 1u) * 4u; device const uchar* qs = b + 48u + c * 32u; device const uchar* qh = b + 16u; device const float* xg = x + sb * 32u; float sumq = 0.0f; float sumx = 0.0f; for (uint t = 0u; t < 32u; t += 4u) { uchar4 w = uchar4(*(device const packed_uchar4*)(qs + t)); uchar4 hb = uchar4(*(device const packed_uchar4*)(qh + t)); float4 xv = float4(*(device const packed_float4*)(xg + t)); sumq = sumq + float(((w.x >> sh) & 15u) | (((hb.x >> j) & 1u) << 4u)) * xv.x; sumx = sumx + xv.x; sumq = sumq + float(((w.y >> sh) & 15u) | (((hb.y >> j) & 1u) << 4u)) * xv.y; sumx = sumx + xv.y; sumq = sumq + float(((w.z >> sh) & 15u) | (((hb.z >> j) & 1u) << 4u)) * xv.z; sumx = sumx + xv.z; sumq = sumq + float(((w.w >> sh) & 15u) | (((hb.w >> j) & 1u) << 4u)) * xv.w; sumx = sumx + xv.w; } acc = acc + (ds * sumq - dm * sumx); } float s = metal::simd_sum(acc); if (lane == 0u) y[r] = (bflag != 0u) ? (s + bias[r]) : s; } ")
 
     ; ---- the TILED cooperative RMSNorm (2026-08-08, round two). form_rmsnorm_tg_f32's radius is
     ; a COMPILE-TIME 4096-float scratch, so d=5120 (qwen2-32B) and d=8192 (72B) stayed on the
@@ -261,6 +268,44 @@
     (defn dth-ln-wide-msl ()
         "kernel void form_layernorm_wide_f32 (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device const float* bb [[buffer(2)]], device float* y [[buffer(3)]], constant uint& n [[buffer(4)]], constant float& eps [[buffer(5)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) { threadgroup float part[32]; threadgroup float sh2[2]; float a = 0.0f; uint j = t; while (j < n) { a = a + x[j]; j += nt; } float saa = metal::simd_sum(a); if (lane == 0u) part[sg] = saa; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { uint nsg = (nt + 31u) / 32u; float s = 0.0f; uint k = 0u; while (k < nsg) { s = s + part[k]; k += 1u; } sh2[0] = s / float(n); } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float mean = sh2[0]; float v = 0.0f; j = t; while (j < n) { float c = x[j] - mean; v = v + c * c; j += nt; } float sv = metal::simd_sum(v); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (lane == 0u) part[sg] = sv; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { uint nsg = (nt + 31u) / 32u; float s = 0.0f; uint k = 0u; while (k < nsg) { s = s + part[k]; k += 1u; } float sdv = s / float(n) + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } sh2[1] = 1.0f / gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float inv = sh2[1]; j = t; while (j < n) { y[j] = ((x[j] - mean) * inv) * g[j] + bb[j]; j += nt; } } ")
 
+    ; ---- the FUSED residual+norm (2026-08-09, round three). Round two's wall decomposition
+    ; said the remaining gap is STAGES, not bytes: ~13.7 us of fenced-stage quantum per stage,
+    ; 13-15 stages a layer. Every block spent two of them on "add the residual" then "norm the
+    ; sum" — two dispatches whose data dependency is total. This kernel is their composition in
+    ; ONE dispatch: when addflag=1 the group first writes x[j] = x[j] + h[j] (each thread its
+    ; own j's — the attestant add kernel's exact elementwise op, a bit-exact map), barriers on
+    ; device memory, then runs form_rmsnorm_wide_f32's body UNCHANGED on the updated x. The
+    ; fusion itself introduces NO new reassociation: the add is exact composition, the norm
+    ; carries the wide twin's already-stated bound. addflag=0 skips the add (h unread) and IS
+    ; the wide norm. ONE threadgroup, mode 1, like both parents.
+    (defn dth-addrms-msl ()
+        "kernel void form_add_rmsnorm_wide_f32 (device float* x [[buffer(0)]], device const float* h [[buffer(1)]], device const float* g [[buffer(2)]], device float* y [[buffer(3)]], constant uint& n [[buffer(4)]], constant float& eps [[buffer(5)]], constant uint& addflag [[buffer(6)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) { threadgroup float part[32]; threadgroup float sinv[1]; if (addflag != 0u) { uint jj = t; while (jj < n) { x[jj] = x[jj] + h[jj]; jj += nt; } } metal::threadgroup_barrier(metal::mem_flags::mem_device); float a = 0.0f; uint j = t; while (j < n) { float xv = x[j]; a = a + xv * xv; j += nt; } float sa = metal::simd_sum(a); if (lane == 0u) part[sg] = sa; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { uint nsg = (nt + 31u) / 32u; float ss = 0.0f; uint k = 0u; while (k < nsg) { ss = ss + part[k]; k += 1u; } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } sinv[0] = 1.0f / gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float inv = sinv[0]; j = t; while (j < n) { float nm = x[j] * inv; y[j] = nm * g[j]; j += nt; } } ")
+
+    ; The phi2 twin: the parallel-residual block ends with TWO adds — x = (x + attn) + ffn, in
+    ; that association, the attestant's own two-dispatch order — then the next norm reads the
+    ; sum. Fused the same way: both adds per element in one thread (same association, bit-exact
+    ; map), device barrier, then form_layernorm_wide_f32's body unchanged (its stated bounds).
+    (defn dth-add2ln-msl ()
+        "kernel void form_add2_layernorm_wide_f32 (device float* x [[buffer(0)]], device const float* h1 [[buffer(1)]], device const float* h2 [[buffer(2)]], device const float* g [[buffer(3)]], device const float* bb [[buffer(4)]], device float* y [[buffer(5)]], constant uint& n [[buffer(6)]], constant float& eps [[buffer(7)]], constant uint& addflag [[buffer(8)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) { threadgroup float part[32]; threadgroup float sh2[2]; if (addflag != 0u) { uint jj = t; while (jj < n) { x[jj] = (x[jj] + h1[jj]) + h2[jj]; jj += nt; } } metal::threadgroup_barrier(metal::mem_flags::mem_device); float a = 0.0f; uint j = t; while (j < n) { a = a + x[j]; j += nt; } float saa = metal::simd_sum(a); if (lane == 0u) part[sg] = saa; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { uint nsg = (nt + 31u) / 32u; float s = 0.0f; uint k = 0u; while (k < nsg) { s = s + part[k]; k += 1u; } sh2[0] = s / float(n); } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float mean = sh2[0]; float v = 0.0f; j = t; while (j < n) { float c = x[j] - mean; v = v + c * c; j += nt; } float sv = metal::simd_sum(v); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (lane == 0u) part[sg] = sv; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { uint nsg = (nt + 31u) / 32u; float s = 0.0f; uint k = 0u; while (k < nsg) { s = s + part[k]; k += 1u; } float sdv = s / float(n) + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } sh2[1] = 1.0f / gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float inv = sh2[1]; j = t; while (j < n) { y[j] = ((x[j] - mean) * inv) * g[j] + bb[j]; j += nt; } } ")
+
+    ; ---- rope that STORES (2026-08-09, round three). The K rope rotated in place and a copy
+    ; then moved the whole vector into the cache — a dispatch and a fenced stage whose only work
+    ; was a shifted destination. These twins are the pair-grain rope kernels with d[doff+...]
+    ; as the destination instead of v itself: identical arithmetic per pair, a bit-exact map
+    ; (the ds4 reference keeps the ROTATION's arithmetic unfused for exactness; the same
+    ; boundary is kept here — only the STORE moved). RADIUS: every element of the head must be
+    ; a rotated pair, or the unrotated tail would never reach the cache — the neox form asks
+    ; rd == hd and rd even, the adjacent form hd even; outside it the in-place rope + copy stay.
+    (defn dth-neox-pair-store-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* v [[buffer(0)]], device const float* fr [[buffer(1)]], device float* d [[buffer(2)]], constant uint& nh [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& rd [[buffer(5)]], constant uint& pos [[buffer(6)]], constant float& base [[buffer(7)]], constant uint& doff [[buffer(8)]], uint gid [[thread_position_in_grid]]) { uint np = rd / 2u; if (gid >= nh * np) return; uint h = gid / np; uint j = gid - h * np; uint o = h * hd; float ex = (-2.0f * float(j)) / float(rd); float fq = fpow(base, ex) / fr[j]; float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + j]; float q1 = v[o + j + np]; float t0 = q0 * ca; float t1 = q1 * sa; d[doff + o + j] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; d[doff + o + j + np] = t2 + t3; }")))
+
+    (defn dth-pair-store-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+            " (device const float* v [[buffer(0)]], device const float* fr [[buffer(1)]], device float* d [[buffer(2)]], constant uint& nh [[buffer(3)]], constant uint& hd [[buffer(4)]], constant uint& pos [[buffer(5)]], constant float& base [[buffer(6)]], constant uint& doff [[buffer(7)]], uint gid [[thread_position_in_grid]]) { uint np = hd / 2u; if (gid >= nh * np) return; uint h = gid / np; uint pr = gid - h * np; uint i = pr * 2u; uint o = h * hd; float ex = (-1.0f * float(i)) / float(hd); float fq = fpow(base, ex) / fr[i / 2u]; float a = float(pos) * fq; float ca = fcos(a); float sa = fsin(a); float q0 = v[o + i]; float q1 = v[o + i + 1u]; float t0 = q0 * ca; float t1 = q1 * sa; d[doff + o + i] = t0 - t1; float t2 = q0 * sa; float t3 = q1 * ca; d[doff + o + i + 1u] = t2 + t3; }")))
+
     ; The pragma is the carrier header's own stated fix: this door's default COMPILES CONTRACTED,
     ; and the cell owns every number, so the cell says so in the text it emits.
     (defn dth-msl ()
@@ -295,7 +340,11 @@
         (str_concat (dth-attn-out-msl)
         (str_concat (dth-neox-pair-msl "form_rope_neox_pair_f32")
         (str_concat (dth-rms-wide-msl)
-                    (dth-ln-wide-msl))))))))))))))))))))))))))))))))
+        (str_concat (dth-ln-wide-msl)
+        (str_concat (dth-addrms-msl)
+        (str_concat (dth-add2ln-msl)
+        (str_concat (dth-neox-pair-store-msl "form_rope_neox_pair_store_f32")
+                    (dth-pair-store-msl "form_rope_pair_store_f32"))))))))))))))))))))))))))))))))))))
 
     ; ================= the file's numbers, in ONE walk =================
     (defn dth-header-window () 40000000)
@@ -399,7 +448,11 @@
     ;        matvecs — one group per row, the one reassociation is simd_sum, epsilon named above)
     ;        33 q6lane2 34 q4klane2 35 q80lane2 36 q5klane2 37 q50lane2 38 q40lane2   (the
     ;        FACTORED-SCALE lane matvecs, 2026-08-08 round two — scale once per group, bitmask
-    ;        decode, bounds in the kernel block above; these are the dispatched ones)
+    ;        decode, bounds in the kernel block above; these are the dispatched ones, and since
+    ;        2026-08-09 round three each carries the bit-exact bias epilogue)
+    ;        46 add_rmsnorm_wide 47 add2_layernorm_wide 48 rope_neox_pair_store
+    ;        49 rope_pair_store   (round three's stage fusions — residual+norm in one dispatch,
+    ;        K rope stored straight into its cache row; bounds at their kernels)
     (defn dth-pipes (msl)
         (list (metal_pipeline msl "form_q6k_matvec_f32")
               (metal_pipeline msl "form_q4k_matvec_f32")
@@ -446,7 +499,11 @@
               (metal_pipeline msl "form_gqa_out_f32")
               (metal_pipeline msl "form_rope_neox_pair_f32")
               (metal_pipeline msl "form_rmsnorm_wide_f32")
-              (metal_pipeline msl "form_layernorm_wide_f32")))
+              (metal_pipeline msl "form_layernorm_wide_f32")
+              (metal_pipeline msl "form_add_rmsnorm_wide_f32")
+              (metal_pipeline msl "form_add2_layernorm_wide_f32")
+              (metal_pipeline msl "form_rope_neox_pair_store_f32")
+              (metal_pipeline msl "form_rope_pair_store_f32")))
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
@@ -499,15 +556,28 @@
     ; every matvec is a LANE matvec (one SIMD group of 32 per row, grid = rows * 32): the serial
     ; attestants stay in the unit and the band's CPU twins still answer to them; the lane twins
     ; answer to the named epsilon and to the measured stream gate.
-    (defn dth-mv (ps tv xh yh bb)
-        (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 33)
-                       (if (eq (dth-tv-ty tv) 12) (nth ps 34)
-                       (if (eq (dth-tv-ty tv) 13) (nth ps 36)
-                       (if (eq (dth-tv-ty tv) 6) (nth ps 37)
-                       (if (eq (dth-tv-ty tv) 2) (nth ps 38) (nth ps 35))))))
-                       (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv))
-                                  256 0 0 bb)
+    ; the bias rides the matvec's own epilogue (round three): a present bias binds at slot 3
+    ; with bflag=1 — the same one f32 add the attestant's separate dispatch performed, fused
+    ; bit-exactly; an absent bias binds y itself (unread) with bflag=0 and the store is s
+    ; exactly as before.
+    (defn dth-mv-pipe (ps tv)
+        (if (eq (dth-tv-ty tv) 14) (nth ps 33)
+        (if (eq (dth-tv-ty tv) 12) (nth ps 34)
+        (if (eq (dth-tv-ty tv) 13) (nth ps 36)
+        (if (eq (dth-tv-ty tv) 6) (nth ps 37)
+        (if (eq (dth-tv-ty tv) 2) (nth ps 38) (nth ps 35)))))))
+
+    (defn dth-mvb (ps tv xh yh bh bf bb)
+        (metal_enqueue (dth-mv-pipe ps tv)
+                       (md-bind16 (list (dth-tv-h tv) xh yh bh)
+                                  (list (dth-tv-r tv) (dth-tv-c tv) bf) 256 0 0 bb)
                        (mul (dth-tv-r tv) 32)))
+
+    (defn dth-mv (ps tv xh yh bb) (dth-mvb ps tv xh yh yh 0 bb))
+
+    (defn dth-mvbias (ps tv xh yh btv bb)
+        (if (dth-tv-none? btv) (dth-mv ps tv xh yh bb)
+            (dth-mvb ps tv xh yh (dth-tv-h btv) 1 bb)))
 
     (defn dth-dq (ps tv yh off n bb)
         (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 3)
@@ -526,6 +596,14 @@
         (metal_enqueue (nth ps 44) (md-bind16 (list xh (dth-tv-h gtv) yh) (list n epsBits)
                                               256 0 1 bb) 1))
 
+    ; residual + norm as ONE stage (pipe 46): ph is the pending residual handle, 0 when the
+    ; entry has none (first block of a pass — x is the embedding or a freshly normed pass
+    ; boundary). ph=0 binds x itself unread and IS the wide norm, dispatch for dispatch.
+    (defn dth-addrms (ps xh ph gtv yh n epsBits bb)
+        (metal_enqueue (nth ps 46)
+                       (md-bind16 (list xh (if (eq ph 0) xh ph) (dth-tv-h gtv) yh)
+                                  (list n epsBits (if (eq ph 0) 0 1)) 256 0 1 bb) 1))
+
     ; style 0: adjacent pairs over the whole head — at PAIR grain (a thread map, not an order;
     ; radius: hd even, else the per-head attestant). style 1: half-split over the first rd dims.
     (defn dth-rope (ps style vh ropeH nh hd rd pos baseBits bb)
@@ -540,6 +618,38 @@
                                                       256 0 0 bb) (mul nh (div hd 2)))
                 (metal_enqueue (nth ps 7) (md-bind16 (list vh ropeH) (list nh hd pos baseBits)
                                                      256 0 0 bb) nh))))
+
+    ; rope that stores into the cache row (pipes 48/49): legal only when every element of the
+    ; head is a rotated pair (neox: rd == hd and rd even; adjacent: hd even) — outside that
+    ; radius an unrotated tail would never reach the cache, so the in-place rope + copy stay.
+    (defn dth-ropestore-ok? (style hd rd)
+        (if (eq style 1)
+            (if (eq rd hd) (eq (mod rd 2) 0) false)
+            (eq (mod hd 2) 0)))
+
+    (defn dth-rope-store (ps style vh ropeH dh doff nh hd rd pos baseBits bb)
+        (if (eq style 1)
+            (metal_enqueue (nth ps 48)
+                           (md-bind16 (list vh ropeH dh) (list nh hd rd pos baseBits doff)
+                                      256 0 0 bb) (mul nh (div rd 2)))
+            (metal_enqueue (nth ps 49)
+                           (md-bind16 (list vh ropeH dh) (list nh hd pos baseBits doff)
+                                      256 0 0 bb) (mul nh (div hd 2)))))
+
+    ; the K/V path to the cache in ONE stage beside rope-q: K rope-stores straight into its
+    ; cache row (bit-exact map, destination shifted), V is the plain copy — all three
+    ; independent, so the stage that existed only to move rotated K is gone. Outside the
+    ; rope-store radius the old shape stays: in-place rope, then a fenced copy stage.
+    (defn dth-kv-cache (ps bs geo ck cv pos)
+        (if (dth-ropestore-ok? (nth geo 14) (nth geo 4) (nth geo 15))
+            (do (dth-rope-store ps (nth geo 14) (nth bs 3) (nth geo 11) ck
+                                (mul pos (nth geo 5)) (nth geo 3) (nth geo 4) (nth geo 15)
+                                pos (nth geo 9) 0)
+                (dth-copy ps (nth bs 4) cv (nth geo 5) (mul pos (nth geo 5)) 0))
+            (do (dth-rope ps (nth geo 14) (nth bs 3) (nth geo 11) (nth geo 3) (nth geo 4)
+                          (nth geo 15) pos (nth geo 9) 0)
+                (dth-copy ps (nth bs 3) ck (nth geo 5) (mul pos (nth geo 5)) 1)
+                (dth-copy ps (nth bs 4) cv (nth geo 5) (mul pos (nth geo 5)) 0))))
 
     ; three dispatches, two inner fences: scores must precede soft, soft must precede out. The
     ; one-thread-per-head attestant (pipe 9) stays in the unit; these are its bit-exact maps.
@@ -561,11 +671,6 @@
     (defn dth-copy (ps sh dh n doff bb)
         (metal_enqueue (nth ps 13) (md-bind16 (list sh dh) (list n doff) 256 0 0 bb) n))
 
-    ; a bias the table does not carry dispatches NOTHING — in-place add is safe for the
-    ; one-thread-per-element kernel (thread i reads and writes index i alone).
-    (defn dth-bias (ps btv xh n bb)
-        (if (dth-tv-none? btv) 0 (dth-elem ps (nth ps 11) xh (dth-tv-h btv) xh n bb)))
-
     ; greedy selection in two stages, tie rule intact by construction (comparison and selection
     ; only — EQUALITY with the attestant): 1024 contiguous chunks, then one group folds ascending.
     (defn dth-argmax (ps bs vocabN)
@@ -581,54 +686,58 @@
     ; ================= one block =================
     ; geo: 0 dModel 1 dFF 2 nHead 3 nKV 4 headDim 5 kvd 6 maxpos 7 vocabN 8 epsBits 9 baseBits
     ;      10 scaleBits 11 ropeH 12 nLayer 13 qOut 14 ropeStyle 15 ropeDim 16 nLoop
-    ; barrier plan: q/k/v matvecs share a stage off one normed vector; so do the three biases,
-    ; the two ropes, and the two cache copies. A block whose file carries no biases loses those
-    ; dispatches entirely and rope-q's own barrier still fences the matvecs — the plan is robust
-    ; to the absent-tensor case by placing the fence on the consumer, never on the maybe-absent.
-    (defn dth-block (ps bs geo lay ck cv pos)
+    ; ROUND THREE'S SHAPE (2026-08-09): the wall decomposition said the small-model gap is the
+    ; stage quantum times the stage count, so the block was refolded around its data
+    ; dependencies with every fusion a stated map:
+    ;   * the residual add rides the NEXT norm's dispatch (form_add_rmsnorm_wide_f32): each
+    ;     block takes a PENDING residual handle in, adds it inside its entry norm, and returns
+    ;     its ffn_down output as the next pending — two stages per block become zero.
+    ;   * the three qkv biases ride their matvecs' epilogues (bflag) — one stage gone.
+    ;   * rotated K stores straight into its cache row (rope_*_store), V's copy beside it in
+    ;     rope-q's own stage — the copy stage gone.
+    ; A llama block is now 16 dispatches in 10 fenced stages (was 19 in 14); a qwen2 block lost
+    ; its bias stage too. The barrier plan still places every fence on the consumer.
+    ; Returns the block's pending-residual handle.
+    (defn dth-block (ps bs geo lay ck cv pos pend)
         (do
-            (dth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8) 1)
-            (dth-mv ps (nth lay 1) (nth bs 1) (nth bs 2) 1)
-            (dth-mv ps (nth lay 2) (nth bs 1) (nth bs 3) 0)
-            (dth-mv ps (nth lay 3) (nth bs 1) (nth bs 4) 0)
-            (dth-bias ps (nth lay 9) (nth bs 2) (nth geo 13) 1)
-            (dth-bias ps (nth lay 10) (nth bs 3) (nth geo 5) 0)
-            (dth-bias ps (nth lay 11) (nth bs 4) (nth geo 5) 0)
+            (dth-addrms ps (nth bs 0) pend (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8) 1)
+            (dth-mvbias ps (nth lay 1) (nth bs 1) (nth bs 2) (nth lay 9) 1)
+            (dth-mvbias ps (nth lay 2) (nth bs 1) (nth bs 3) (nth lay 10) 0)
+            (dth-mvbias ps (nth lay 3) (nth bs 1) (nth bs 4) (nth lay 11) 0)
             (dth-rope ps (nth geo 14) (nth bs 2) (nth geo 11) (nth geo 2) (nth geo 4) (nth geo 15) pos (nth geo 9) 1)
-            (dth-rope ps (nth geo 14) (nth bs 3) (nth geo 11) (nth geo 3) (nth geo 4) (nth geo 15) pos (nth geo 9) 0)
-            (dth-copy ps (nth bs 3) ck (nth geo 5) (mul pos (nth geo 5)) 1)
-            (dth-copy ps (nth bs 4) cv (nth geo 5) (mul pos (nth geo 5)) 0)
+            (dth-kv-cache ps bs geo ck cv pos)
             (dth-attn ps (nth bs 2) ck cv (nth bs 5) (nth bs 12)
                       (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6) 1)
             (dth-mv ps (nth lay 4) (nth bs 5) (nth bs 6) 1)
-            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 6) (nth bs 0) (nth geo 0) 1)
-            (dth-rms ps (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8) 1)
+            (dth-addrms ps (nth bs 0) (nth bs 6) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8) 1)
             (dth-mv ps (nth lay 6) (nth bs 1) (nth bs 8) 1)
             (dth-mv ps (nth lay 7) (nth bs 1) (nth bs 9) 0)
             (dth-elem ps (nth ps 10) (nth bs 8) (nth bs 9) (nth bs 10) (nth geo 1) 1)
             (dth-mv ps (nth lay 8) (nth bs 10) (nth bs 7) 1)
-            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 7) (nth bs 0) (nth geo 0) 1)
-            1))
+            (nth bs 7)))
 
-    (defn dth-blocks (ps bs geo lays cks cvs pos l n loopoff)
-        (if (ge l n) 1
-            (do (dth-block ps bs geo (nth lays l) (nth cks (add l loopoff)) (nth cvs (add l loopoff)) pos)
-                (dth-blocks ps bs geo lays cks cvs pos (add l 1) n loopoff))))
+    (defn dth-blocks (ps bs geo lays cks cvs pos l n loopoff pend)
+        (if (ge l n) pend
+            (dth-blocks ps bs geo lays cks cvs pos (add l 1) n loopoff
+                (dth-block ps bs geo (nth lays l) (nth cks (add l loopoff))
+                           (nth cvs (add l loopoff)) pos pend))))
 
-    ; the loop passes: after every pass but the last, the FULL final norm, in place — the released
-    ; nanbeige semantics nanbeige-looped-transformer.fk carries (norm after each pass; the last
-    ; pass's norm is the head's). A one-loop file walks this once and normalizes nowhere.
-    (defn dth-passes (ps bs geo lays cks cvs onormTv pos lp nLoop)
-        (if (ge lp nLoop) 1
-            (do (dth-blocks ps bs geo lays cks cvs pos 0 (nth geo 12) (mul lp (nth geo 12)))
+    ; the loop passes: after every pass but the last, the pending residual folds into the FULL
+    ; final norm, in place — the released nanbeige semantics (norm after each pass; the last
+    ; pass's norm is the head's), the add now fused into that very dispatch. Each pass hands
+    ; its successor a clean x and no pending. A one-loop file walks this once.
+    (defn dth-passes (ps bs geo lays cks cvs onormTv pos lp nLoop pend)
+        (if (ge lp nLoop) pend
+            (do (let p2 (dth-blocks ps bs geo lays cks cvs pos 0 (nth geo 12)
+                                    (mul lp (nth geo 12)) pend))
                 (if (lt (add lp 1) nLoop)
-                    (dth-rms ps (nth bs 0) onormTv (nth bs 0) (nth geo 0) (nth geo 8) 1)
-                    0)
-                (dth-passes ps bs geo lays cks cvs onormTv pos (add lp 1) nLoop))))
+                    (do (dth-addrms ps (nth bs 0) p2 onormTv (nth bs 0) (nth geo 0) (nth geo 8) 1)
+                        (dth-passes ps bs geo lays cks cvs onormTv pos (add lp 1) nLoop 0))
+                    (dth-passes ps bs geo lays cks cvs onormTv pos (add lp 1) nLoop p2)))))
 
-    (defn dth-head (ps bs geo onormTv projTv)
+    (defn dth-head (ps bs geo onormTv projTv pend)
         (do
-            (dth-rms ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 8) 1)
+            (dth-addrms ps (nth bs 0) pend onormTv (nth bs 1) (nth geo 0) (nth geo 8) 1)
             (dth-mv ps projTv (nth bs 1) (nth bs 11) 1)
             (dth-argmax ps bs (nth geo 7))
             0))
@@ -643,8 +752,8 @@
         (do
             (metal_batch_concurrent)
             (dth-dq ps embTv (nth bs 0) (mul id (nth geo 0)) (nth geo 0) 0)
-            (dth-passes ps bs geo lays cks cvs onormTv pos 0 (nth geo 16))
-            (dth-head ps bs geo onormTv projTv)
+            (let pend (dth-passes ps bs geo lays cks cvs onormTv pos 0 (nth geo 16) 0))
+            (dth-head ps bs geo onormTv projTv pend)
             (dth-u32 (metal_buf_read (nth bs 13) 0 4))))
 
     (defn dth-generate (ps bs geo lays cks cvs embTv onormTv projTv id pos n acc)
@@ -861,23 +970,29 @@
               (metal_buf_alloc 4096)
               (metal_buf_alloc 4096)))
 
-    ; the WIDE LayerNorm (pipe 45) dispatches — one threadgroup, mode 1; the serial attestant
-    ; (pipe 20) stays in the unit, the same standing as the RMSNorm pair.
-    (defn dth-p2-ln (ps xh gtv btv yh n epsBits bb)
-        (metal_enqueue (nth ps 45)
-                       (md-bind16 (list xh (dth-tv-h gtv) (dth-tv-h btv) yh) (list n epsBits)
-                                  256 0 1 bb) 1))
+    ; the parallel residual's two adds ride the next LayerNorm's dispatch (pipe 47) the same
+    ; way the dense path's single add rides pipe 46: x = (x + attn) + ffn in the attestant's
+    ; own association, then form_layernorm_wide_f32's body unchanged. aflag=0 (the first
+    ; block — x is the embedding) binds bs7/bs8 unread and IS the wide LayerNorm.
+    (defn dth-p2-addln (ps xh h1 h2 gtv btv yh n epsBits aflag bb)
+        (metal_enqueue (nth ps 47)
+                       (md-bind16 (list xh h1 h2 (dth-tv-h gtv) (dth-tv-h btv) yh)
+                                  (list n epsBits aflag) 256 0 1 bb) 1))
     (defn dth-p2-slice (ps sh dh n soff bb)
         (metal_enqueue (nth ps 22) (md-bind16 (list sh dh) (list n soff) 256 0 0 bb) n))
     (defn dth-p2-gelu (ps xh yh n bb)
         (metal_enqueue (nth ps 21) (md-bind16 (list xh yh) (list n) 256 0 0 bb) n))
 
-    ; geo as dth-open lays it; style is 1 (half-split) by the arch's own build, rd = 32 of hd 64.
-    (defn dth-p2-block (ps bs geo lay ck cv pos)
+    ; geo as dth-open lays it; style is 1 (half-split) by the arch's own build, rd = 32 of hd 64
+    ; — INSIDE the unrotated-tail radius, so the in-place rope + copy stay dispatched here.
+    ; Round three's fusions applied: both residual adds ride the next LayerNorm (aflag), every
+    ; bias rides its matvec's epilogue. A phi2 block is 14 dispatches in 10 fenced stages
+    ; (was 21 in 16). aflag is the pending mark: 0 only for the first block.
+    (defn dth-p2-block (ps bs geo lay ck cv pos aflag)
         (do
-            (dth-p2-ln ps (nth bs 0) (nth lay 0) (nth lay 1) (nth bs 1) (nth geo 0) (nth geo 8) 1)
-            (dth-mv ps (nth lay 2) (nth bs 1) (nth bs 2) 1)
-            (dth-bias ps (nth lay 3) (nth bs 2) (mul (nth geo 0) 3) 1)
+            (dth-p2-addln ps (nth bs 0) (nth bs 7) (nth bs 8) (nth lay 0) (nth lay 1)
+                          (nth bs 1) (nth geo 0) (nth geo 8) aflag 1)
+            (dth-mvbias ps (nth lay 2) (nth bs 1) (nth bs 2) (nth lay 3) 1)
             (dth-p2-slice ps (nth bs 2) (nth bs 3) (nth geo 0) 0 1)
             (dth-p2-slice ps (nth bs 2) (nth bs 4) (nth geo 5) (nth geo 0) 0)
             (dth-p2-slice ps (nth bs 2) (nth bs 5) (nth geo 5) (mul (nth geo 0) 2) 0)
@@ -887,27 +1002,22 @@
             (dth-copy ps (nth bs 5) cv (nth geo 5) (mul pos (nth geo 5)) 0)
             (dth-attn ps (nth bs 3) ck cv (nth bs 6) (nth bs 12)
                       (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6) 1)
-            (dth-mv ps (nth lay 4) (nth bs 6) (nth bs 7) 1)
-            (dth-bias ps (nth lay 5) (nth bs 7) (nth geo 0) 1)
-            (dth-mv ps (nth lay 6) (nth bs 1) (nth bs 9) 0)
-            (dth-bias ps (nth lay 7) (nth bs 9) (nth geo 1) 1)
+            (dth-mvbias ps (nth lay 4) (nth bs 6) (nth bs 7) (nth lay 5) 1)
+            (dth-mvbias ps (nth lay 6) (nth bs 1) (nth bs 9) (nth lay 7) 0)
             (dth-p2-gelu ps (nth bs 9) (nth bs 10) (nth geo 1) 1)
-            (dth-mv ps (nth lay 8) (nth bs 10) (nth bs 8) 1)
-            (dth-bias ps (nth lay 9) (nth bs 8) (nth geo 0) 1)
-            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 7) (nth bs 0) (nth geo 0) 1)
-            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 8) (nth bs 0) (nth geo 0) 1)
+            (dth-mvbias ps (nth lay 8) (nth bs 10) (nth bs 8) (nth lay 9) 1)
             1))
 
-    (defn dth-p2-blocks (ps bs geo lays cks cvs pos l n)
-        (if (ge l n) 1
-            (do (dth-p2-block ps bs geo (nth lays l) (nth cks l) (nth cvs l) pos)
-                (dth-p2-blocks ps bs geo lays cks cvs pos (add l 1) n))))
+    (defn dth-p2-blocks (ps bs geo lays cks cvs pos l n aflag)
+        (if (ge l n) aflag
+            (do (dth-p2-block ps bs geo (nth lays l) (nth cks l) (nth cvs l) pos aflag)
+                (dth-p2-blocks ps bs geo lays cks cvs pos (add l 1) n 1))))
 
-    (defn dth-p2-head (ps bs geo onormTv onormB projTv projB)
+    (defn dth-p2-head (ps bs geo onormTv onormB projTv projB aflag)
         (do
-            (dth-p2-ln ps (nth bs 0) onormTv onormB (nth bs 1) (nth geo 0) (nth geo 8) 1)
-            (dth-mv ps projTv (nth bs 1) (nth bs 11) 1)
-            (dth-bias ps projB (nth bs 11) (nth geo 7) 1)
+            (dth-p2-addln ps (nth bs 0) (nth bs 7) (nth bs 8) onormTv onormB
+                          (nth bs 1) (nth geo 0) (nth geo 8) aflag 1)
+            (dth-mvbias ps projTv (nth bs 1) (nth bs 11) projB 1)
             (dth-argmax ps bs (nth geo 7))
             0))
 
@@ -915,8 +1025,8 @@
         (do
             (metal_batch_concurrent)
             (dth-dq ps embTv (nth bs 0) (mul id (nth geo 0)) (nth geo 0) 0)
-            (dth-p2-blocks ps bs geo lays cks cvs pos 0 (nth geo 12))
-            (dth-p2-head ps bs geo onormTv onormB projTv projB)
+            (let af (dth-p2-blocks ps bs geo lays cks cvs pos 0 (nth geo 12) 0))
+            (dth-p2-head ps bs geo onormTv onormB projTv projB af)
             (dth-u32 (metal_buf_read (nth bs 13) 0 4))))
 
     (defn dth-p2-generate (ps bs geo lays cks cvs embTv onormTv onormB projTv projB id pos n acc)
