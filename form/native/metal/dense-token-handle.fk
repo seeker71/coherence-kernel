@@ -250,6 +250,17 @@
     (defn dth-rms-wide-msl ()
         "kernel void form_rmsnorm_wide_f32 (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device float* y [[buffer(2)]], constant uint& n [[buffer(3)]], constant float& eps [[buffer(4)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) { threadgroup float part[32]; threadgroup float sinv[1]; float a = 0.0f; uint j = t; while (j < n) { float xv = x[j]; a = a + xv * xv; j += nt; } float sa = metal::simd_sum(a); if (lane == 0u) part[sg] = sa; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { uint nsg = (nt + 31u) / 32u; float ss = 0.0f; uint k = 0u; while (k < nsg) { ss = ss + part[k]; k += 1u; } float meansq = ss / float(n); float sdv = meansq + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } sinv[0] = 1.0f / gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float inv = sinv[0]; j = t; while (j < n) { float nm = x[j] * inv; y[j] = nm * g[j]; j += nt; } } ")
 
+    ; ---- the WIDE LayerNorm (2026-08-09, round two) — phi2's norm takes the same standing the
+    ; RMSNorm just did. The serial attestant (dth-ln-msl) is one thread over 3n device reads;
+    ; this twin reassociates BOTH folds: thread t sums x[t], x[t+256], ... ascending, simd_sum,
+    ; thread 0 folds 8 partials ascending -> mean; the same shape again over (x-mean)^2 -> var.
+    ; The mean's terms are SIGNED, so its bound anchors to the magnitude sum:
+    ; |m_wide - m*| <= (ceil(n/256)+40) * 2^-24 * SUM|x_j| / n; the variance terms are
+    ; nonnegative and bound as the RMSNorm's. Newton-50 and the normalize are the attestant's
+    ; own lines. The serial attestant stays in the unit; the gate is the measured stream.
+    (defn dth-ln-wide-msl ()
+        "kernel void form_layernorm_wide_f32 (device const float* x [[buffer(0)]], device const float* g [[buffer(1)]], device const float* bb [[buffer(2)]], device float* y [[buffer(3)]], constant uint& n [[buffer(4)]], constant float& eps [[buffer(5)]], uint t [[thread_position_in_threadgroup]], uint nt [[threads_per_threadgroup]], uint lane [[thread_index_in_simdgroup]], uint sg [[simdgroup_index_in_threadgroup]]) { threadgroup float part[32]; threadgroup float sh2[2]; float a = 0.0f; uint j = t; while (j < n) { a = a + x[j]; j += nt; } float saa = metal::simd_sum(a); if (lane == 0u) part[sg] = saa; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { uint nsg = (nt + 31u) / 32u; float s = 0.0f; uint k = 0u; while (k < nsg) { s = s + part[k]; k += 1u; } sh2[0] = s / float(n); } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float mean = sh2[0]; float v = 0.0f; j = t; while (j < n) { float c = x[j] - mean; v = v + c * c; j += nt; } float sv = metal::simd_sum(v); metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (lane == 0u) part[sg] = sv; metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); if (t == 0u) { uint nsg = (nt + 31u) / 32u; float s = 0.0f; uint k = 0u; while (k < nsg) { s = s + part[k]; k += 1u; } float sdv = s / float(n) + eps; float gg = sdv; uint it = 50u; while (it > 0u) { it -= 1u; gg = 0.5f * (gg + sdv / gg); } sh2[1] = 1.0f / gg; } metal::threadgroup_barrier(metal::mem_flags::mem_threadgroup); float inv = sh2[1]; j = t; while (j < n) { y[j] = ((x[j] - mean) * inv) * g[j] + bb[j]; j += nt; } } ")
+
     ; The pragma is the carrier header's own stated fix: this door's default COMPILES CONTRACTED,
     ; and the cell owns every number, so the cell says so in the text it emits.
     (defn dth-msl ()
@@ -283,7 +294,8 @@
         (str_concat (dth-attn-soft-msl)
         (str_concat (dth-attn-out-msl)
         (str_concat (dth-neox-pair-msl "form_rope_neox_pair_f32")
-                    (dth-rms-wide-msl)))))))))))))))))))))))))))))))
+        (str_concat (dth-rms-wide-msl)
+                    (dth-ln-wide-msl))))))))))))))))))))))))))))))))
 
     ; ================= the file's numbers, in ONE walk =================
     (defn dth-header-window () 40000000)
@@ -433,7 +445,8 @@
               (metal_pipeline msl "form_gqa_soft_f32")
               (metal_pipeline msl "form_gqa_out_f32")
               (metal_pipeline msl "form_rope_neox_pair_f32")
-              (metal_pipeline msl "form_rmsnorm_wide_f32")))
+              (metal_pipeline msl "form_rmsnorm_wide_f32")
+              (metal_pipeline msl "form_layernorm_wide_f32")))
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
@@ -848,10 +861,12 @@
               (metal_buf_alloc 4096)
               (metal_buf_alloc 4096)))
 
+    ; the WIDE LayerNorm (pipe 45) dispatches — one threadgroup, mode 1; the serial attestant
+    ; (pipe 20) stays in the unit, the same standing as the RMSNorm pair.
     (defn dth-p2-ln (ps xh gtv btv yh n epsBits bb)
-        (metal_enqueue (nth ps 20)
+        (metal_enqueue (nth ps 45)
                        (md-bind16 (list xh (dth-tv-h gtv) (dth-tv-h btv) yh) (list n epsBits)
-                                  256 0 0 bb) 1))
+                                  256 0 1 bb) 1))
     (defn dth-p2-slice (ps sh dh n soff bb)
         (metal_enqueue (nth ps 22) (md-bind16 (list sh dh) (list n soff) 256 0 0 bb) n))
     (defn dth-p2-gelu (ps xh yh n bb)
