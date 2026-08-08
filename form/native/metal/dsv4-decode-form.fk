@@ -1178,10 +1178,12 @@
         (str_concat (dfd-msl-pragma)
         (str_concat (qml-msl-header)
             "kernel void dfd_kv_append(device const float* src [[buffer(0)]], device float* cache [[buffer(1)]], constant uint& row [[buffer(2)]], constant uint& hd [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i < hd) cache[row * hd + i] = src[i]; }")))
-    ; position as f32 bits and as fp64, from a table rather than a conversion — five literals a
-    ; reader can check by eye against the IEEE layout
-    (defn dfd-posbits (t) (nth (cons 0 (cons 1065353216 (cons 1073741824 (cons 1077936128 (cons 1082130432 0))))) t))
-    (defn dfd-posf (t) (nth (cons 0.0 (cons 1.0 (cons 2.0 (cons 3.0 (cons 4.0 0))))) t))
+    ; position as f32 bits and as fp64, from a table rather than a conversion — eight literals a
+    ; reader can check by eye against the IEEE layout (5.0=0x40A00000, 6.0=0x40C00000, 7.0=0x40E00000)
+    (defn dfd-posbits (t) (nth (cons 0 (cons 1065353216 (cons 1073741824 (cons 1077936128
+        (cons 1082130432 (cons 1084227584 (cons 1086324736 (cons 1088421888 0)))))))) t))
+    (defn dfd-posf (t) (nth (cons 0.0 (cons 1.0 (cons 2.0 (cons 3.0
+        (cons 4.0 (cons 5.0 (cons 6.0 (cons 7.0 0)))))))) t))
 
     ; one position of the prefill: nine dispatches, five reads, four checks. H is the handle list:
     ; 0 pe, 1 pr, 2 pa, 3 pmkv, 4 pro, 5 pkq, 6 pap, 7 embh, 8 gh, 9 kvh, 10 kvanh, 11 fb,
@@ -1438,6 +1440,419 @@
                 (cons (head (tail (nth recs 2))) (cons (head (tail (nth recs 3)))
                 (cons (head (tail (nth recs 4))) (cons asm (cons relatt5
                 (cons (add eabs rowoff) 0)))))))))))
+
+    ; ═══════════════ RUNG 9: the SECOND cache — the compressor lane on the first ratio-4 layer ═════
+    ; blk.2 is the first layer whose compress_ratio is nonzero (the file's own
+    ; deepseek4.attention.compress_ratios array, walked by the Go arm: 0 0 4 128 4 128 ...), so it is
+    ; the first layer that carries the second cache's four tensors. The RECIPE is
+    ; dsv4-compressor.fk's — five-way mutation-proven at band 2047, the ratio-4 eight-candidate trap
+    ; documented inside it — and the KERNEL TEXT is the same file's dcp-msl-appendix, the exact bytes
+    ; the bash lane compiles into its kv unit. This cell adds only the pragma the door's options:nil
+    ; compile needs, and the dispatches.
+    ;
+    ; THE RAW LANE ON A RATIO LAYER ROPES WITH THE COMPRESSED-BASE TABLE. ropeFreqs(il) in the oracle
+    ; builds ONE freq table per layer: base 160000 (deepseek4.attention.compress_rope_freq_base) with
+    ; the YaRN ramp, used by the raw k rope at TRUE pos, the q rope, AND the compressor's comp_pos
+    ; rope alike. So rung 9's eight raw positions are ALSO the first witness of the YaRN table in the
+    ; k chain. The scalars, each read from the file's own KV by the Go arm:
+    ;     scaling.factor 16 -> fscale = 1/16 = 0.0625      original_context_length 65536
+    ;     yarn_beta_fast 32, yarn_beta_slow 1              compress_rope_freq_base 160000
+    ; The ramp bounds are DERIVED, then pinned: corr(beta) = nrot*ln(octx/(2*pi*beta))/(2*ln(base)),
+    ; corr(32) = 15.4533 -> lo = 15, corr(1) = 24.7084 -> hi = 25. Both are far from an integer, so
+    ; the f32/fp64 seam cannot move the floor/ceil. The device computes the table; the band pins
+    ; freqs[0] (identity 1.0), freqs[1] (pure pow, below the ramp), freqs[20] (INSIDE the ramp,
+    ; factor 0.0625*0.5 + 0.5 = 0.53125) and freqs[25] (past it, factor 0.0625) against Form fp64.
+    (defn dfd-yarn-msl ()
+        (str_concat (dfd-msl-pragma)
+        (str_concat "#include <metal_stdlib>\nusing namespace metal;\n"
+            "kernel void dfd_yarn_freqs(device float* f [[buffer(0)]], constant uint& npair [[buffer(1)]], constant uint& nrot [[buffer(2)]], constant float& base [[buffer(3)]], constant float& fscale [[buffer(4)]], constant float& lo [[buffer(5)]], constant float& hi [[buffer(6)]], uint k [[thread_position_in_grid]]) { if (k >= npair) return; float t = metal::pow(base, -2.0f * float(k) / float(nrot)); float y = (float(k) - lo) / metal::max(0.001f, hi - lo); float ramp = 1.0f - metal::min(1.0f, metal::max(0.0f, y)); f[k] = t * (fscale * (1.0f - ramp) + ramp); }")))
+
+    ; the compressor unit and the f16 matvec, both the body's own texts, pragma prepended (note 1)
+    (defn dfd-comp-msl ()
+        (str_concat (dfd-msl-pragma) (str_concat (qml-msl-header) (dcp-msl-appendix))))
+    (defn dfd-f16-msl ()
+        (str_concat (dfd-msl-pragma) (str_concat (qml-msl-header) (dsv4-f16-matvec-body))))
+
+    ; ── the f16 projections are checked by EXACT f32-fold EMULATION, not by an fp64 tolerance.
+    ; form_dsv4_f16_matvec is one thread per row folding ASCENDING in f32 — a serial 4096-term fold
+    ; whose accumulation error grows with n, and it was MEASURED here at 4499 ppb against fp64, over
+    ; the 1e-6 bar that fits the tree-folded kernels. The honest response is not a looser bar: every
+    ; step of that fold is exactly representable in fp64 (an f16 x f32 product is 35 mantissa bits),
+    ; and fq-quant(...,23) reproduces each f32 rounding, so the fold can be emulated BIT-EXACTLY and
+    ; the check upgraded to equality. This also witnesses fold ORDER and contraction: an fma where
+    ; the pragma failed, or a reordered fold, lands on different bits.
+    (defn dfd-fq32 (v) (if (eq v 0.0) 0.0 (fq-quant v 23)))
+    (defn dfd-f16dot-sim (wraw xraw r cols j acc)
+        (if (ge j cols) acc
+            (dfd-f16dot-sim wraw xraw r cols (add j 1)
+                (dfd-fq32 (add acc (dfd-fq32 (mul (dfd-f16at wraw (mul (add (mul r cols) j) 2))
+                                                  (dfd-f32at xraw (mul j 4)))))))))
+    (defn dfd-f16mv-simeq (wraw cols xraw got rowsl acc)
+        (if (eq (len rowsl) 0) acc
+            (do (let r (head rowsl))
+                (let s (dfd-f16dot-sim wraw xraw r cols 0 0.0))
+                (dfd-f16mv-simeq wraw cols xraw got (tail rowsl)
+                    (mul acc (if (eq s (dfd-f32at got (mul r 4))) 1 0))))))
+
+    ; buffer read-backs as Form fp64 lists, for the recipe's state machine
+    (defn dfd-f32list (s i n)
+        (if (ge i n) 0 (cons (dfd-f32at s (mul i 4)) (dfd-f32list s (add i 1) n))))
+    ; the ape plane as a flat Form list, widened from the FILE's own f16 bytes — the independent
+    ; anchor for the bias the device's state kernel reads through its handle
+    (defn dfd-f16list (s i n)
+        (if (ge i n) 0 (cons (dfd-f16at s (mul i 2)) (dfd-f16list s (add i 1) n))))
+    ; vector-scale relative error between a GPU row and a Form fp64 list
+    (defn dfd-lst-md (got lst i acc)
+        (if (eq (len lst) 0) acc
+            (do (let d (abs (sub (dfd-f32at got (mul i 4)) (head lst))))
+                (dfd-lst-md got (tail lst) (add i 1) (if (gt d acc) d acc)))))
+    (defn dfd-lst-mr (lst acc)
+        (if (eq (len lst) 0) acc
+            (do (let a (abs (head lst)))
+                (dfd-lst-mr (tail lst) (if (gt a acc) a acc)))))
+
+    ; ── one position of the compressor lane, AFTER dfd-kvc-pos has run the raw lane at the same
+    ; position (the comp projections read the SAME xn the raw kv projection read — buffer H14, still
+    ; intact because the batch is serial and position t+1 has not started).
+    ; C: 0 pf16, 1 pcstate, 2 pcpool, 3 pcshift, 4 ckvh, 5 cgth, 6 apeh, 7 cnmh,
+    ;    8 ckvb, 9 cscb, 10 skvb, 11 sscb, 12 pooledb, 13 ib4, 14 nrmb, 15 crb, 16 cqb, 17 ccacheb
+    ; Returns (cons st2 (projkv projsc wrec)) where wrec = 0 off-boundary, else
+    ; (poolrel normrel nope tailrel roundeq cqraw).
+    (defn dfd-cp9-pos (H C t st apeflat ckvw cgtw cnmw fraw)
+        (do
+            (let ekv (metal_enqueue (nth C 0)
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth C 4)) (dfd-u32 (nth H 14))) (dfd-u32 (nth C 8))))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1024) (dfd-u32 4096)))) 1024))
+            (let esc (metal_enqueue (nth C 0)
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth C 5)) (dfd-u32 (nth H 14))) (dfd-u32 (nth C 9))))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1024) (dfd-u32 4096)))) 1024))
+            ; the ratio-4 two-lane row: the CURRENT window writes rows [ratio, 2*ratio) — row 4 + t%4.
+            ; This offset is the trap dsv4-compressor.fk documents; mutation S1 removes it.
+            (let est (metal_enqueue (nth C 1)
+                (str_concat (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 (nth C 8)) (dfd-u32 (nth C 9)))
+                                                                (str_concat (str_concat (dfd-u32 (nth C 6)) (dfd-u32 (nth C 10))) (dfd-u32 (nth C 11)))))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 1024) (dfd-u32 (add 4 (mod t 4)))) (dfd-u32 (mod t 4))))) 1024))
+            (let obraw (metal_buf_read (nth H 14) 0 16384))
+            (let ckvraw (metal_buf_read (nth C 8) 0 4096))
+            (let cscraw (metal_buf_read (nth C 9) 0 4096))
+            ; sampled rows BIT-EQUAL to the exact f32-fold emulation over the file's bytes at the
+            ; pinned addresses and the GPU's own xn (induction) — 1 when every sampled row matches
+            (let prows (cons t (cons (add t 512) 0)))
+            (let pkv (dfd-f16mv-simeq ckvw 4096 obraw ckvraw prows 1))
+            (let psc (dfd-f16mv-simeq cgtw 4096 obraw cscraw prows 1))
+            ; the recipe's state machine takes the GPU's OWN projections (induction — they are
+            ; anchored by pkv/psc) and the ape read from the FILE, not from the device
+            (let st1 (dcp-update st 4 512 t (dfd-f32list ckvraw 0 1024) (dfd-f32list cscraw 0 1024) apeflat))
+            (if (eq (mod (add t 1) 4) 0)
+                (do
+                    (let epl (metal_enqueue (nth C 2)
+                        (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth C 10)) (dfd-u32 (nth C 11))) (dfd-u32 (nth C 12))))
+                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 4)))) 512))
+                    (let esh (metal_enqueue (nth C 3)
+                        (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth C 10)) (dfd-u32 (nth C 11))))
+                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 1024) (dfd-u32 4)))) 4096))
+                    (let er (metal_enqueue (nth H 1) (dfd-bind-tg
+                        (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth C 12)) (dfd-u32 (nth C 13))))
+                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
+                    (let ea (metal_enqueue (nth H 2)
+                        (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth C 12)) (dfd-u32 (nth C 7)))
+                                                                        (str_concat (dfd-u32 (nth C 14)) (dfd-u32 (nth C 13)))))
+                                    (str_concat (dfd-u32 1) (dfd-u32 512))) 512))
+                    ; comp_pos = t+1-ratio, rotated with the LAYER'S OWN compressed freqs (H11)
+                    (let ero (metal_enqueue (nth H 4)
+                        (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth C 14)) (dfd-u32 (nth C 15))) (dfd-u32 (nth H 11))))
+                                    (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 1) (dfd-u32 512))
+                                        (str_concat (dfd-u32 64) (str_concat (dfd-u32 (dfd-posbits (sub t 3))) (dfd-u32 1065353216)))))) 512))
+                    (let ekq (metal_enqueue (nth H 5) (dfd-bind-tg
+                        (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth C 15)) (dfd-u32 (nth C 16))))
+                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 64)))) 512 0) 512))
+                    (let eap (metal_enqueue (nth H 6)
+                        (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth C 16)) (dfd-u32 (nth C 17))))
+                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 (div (sub t 3) 4)) (dfd-u32 512)))) 512))
+                    (let pooledraw (metal_buf_read (nth C 12) 0 2048))
+                    (let nrmraw (metal_buf_read (nth C 14) 0 2048))
+                    (let crraw (metal_buf_read (nth C 15) 0 2048))
+                    (let cqraw (metal_buf_read (nth C 16) 0 2048))
+                    ; the pool against the RECIPE in fp64 — the state evolved entirely on the Form
+                    ; side, so a wrong device row index, a wrong ape column, a wrong candidate offset
+                    ; or a missing shift cannot move both sides together
+                    (let pref (dcp-pool st1 4 512))
+                    (let poolrel (div (dfd-lst-md pooledraw pref 0 0.0) (dfd-lst-mr pref 0.0)))
+                    (let normrel (dfd-rms-ref pooledraw cnmw nrmraw 512))
+                    (let nope (dfd-nope-eq nrmraw crraw 0 0 0))
+                    (let tailrel (div (dfd-rope-tail-md nrmraw crraw fraw 0 (dfd-posf (sub t 3)) 0 0.0)
+                                      (dfd-rope-tail-mr nrmraw fraw 0 (dfd-posf (sub t 3)) 0 0.0)))
+                    (let roundeq (dfd-kvq-cmp crraw cqraw 0 1.0 0))
+                    (cons (dcp-shift st1 4 512)
+                          (cons pkv (cons psc (cons (cons poolrel (cons normrel (cons nope (cons tailrel (cons roundeq (cons cqraw 0)))))) 0)))))
+                (cons st1 (cons pkv (cons psc (cons 0 0)))))))
+
+    (defn dfd-cp9-max2 (a b) (if (gt a b) a b))
+    ; the loop: raw lane first (dfd-kvc-pos, unchanged), then the comp lane at the same position.
+    ; Returns a list of (rawrec projkv projsc wrec) per position.
+    (defn dfd-cp9-loop (path H C ids t st apeflat ckvw cgtw cnmw fraw eabs kvraw nembd)
+        (if (eq (len ids) 0) 0
+            (do (let kr (dfd-kvc-pos path H (head ids) t eabs kvraw 8 nembd))
+                (let cr (dfd-cp9-pos H C t st apeflat ckvw cgtw cnmw fraw))
+                (cons (cons kr (tail cr))
+                      (dfd-cp9-loop path H C (tail ids) (add t 1) (head cr)
+                                    apeflat ckvw cgtw cnmw fraw eabs kvraw nembd)))))
+
+    ; comp cache row w must be bit-equal to the round's own output the moment window w closed
+    (defn dfd-cp9-asm (ccraw recs w acc)
+        (if (eq (len recs) 0) acc
+            (do (let wrec (nth (head recs) 3))
+                (if (eq (len wrec) 0)
+                    (dfd-cp9-asm ccraw (tail recs) w acc)
+                    (dfd-cp9-asm ccraw (tail recs) (add w 1)
+                        (mul acc (if (eq (dfd-kvc-roweq ccraw (nth wrec 5) w 0 0) 512) 1 0)))))))
+    (defn dfd-cp9-wfold (recs which acc)
+        (if (eq (len recs) 0) acc
+            (do (let wrec (nth (head recs) 3))
+                (if (eq (len wrec) 0)
+                    (dfd-cp9-wfold (tail recs) which acc)
+                    (dfd-cp9-wfold (tail recs) which (dfd-cp9-max2 acc (nth wrec which)))))))
+    (defn dfd-cp9-wmin (recs which acc)
+        (if (eq (len recs) 0) acc
+            (do (let wrec (nth (head recs) 3))
+                (if (eq (len wrec) 0)
+                    (dfd-cp9-wmin (tail recs) which acc)
+                    (dfd-cp9-wmin (tail recs) which (if (lt (nth wrec which) acc) (nth wrec which) acc))))))
+    (defn dfd-cp9-pfold (recs acc)
+        (if (eq (len recs) 0) acc
+            (dfd-cp9-pfold (tail recs) (mul acc (head (nth (head recs) 0))))))
+    (defn dfd-cp9-projfold (recs acc)
+        (if (eq (len recs) 0) acc
+            (dfd-cp9-projfold (tail recs) (mul acc (mul (nth (head recs) 1) (nth (head recs) 2))))))
+    (defn dfd-cp9-rowaddr (recs i) (head (tail (nth (nth recs i) 0))))
+
+    (defn dfd-comp-run (path ids)
+        (do
+            (let src (dfd-src path))
+            (let nembd (dfd-td0 src "token_embd.weight"))
+            (let eabs (dfd-tabs src path "token_embd.weight"))
+            (let ebytes (dfd-tbytes src "token_embd.weight"))
+            (let gabs (dfd-tabs src path "blk.2.attn_norm.weight"))
+            (let gbytes (dfd-tbytes src "blk.2.attn_norm.weight"))
+            (let kvabs (dfd-tabs src path "blk.2.attn_kv.weight"))
+            (let kvbytes (dfd-tbytes src "blk.2.attn_kv.weight"))
+            (let kvty (dfd-ttype src "blk.2.attn_kv.weight"))
+            (let kvanabs (dfd-tabs src path "blk.2.attn_kv_a_norm.weight"))
+            (let kvanbytes (dfd-tbytes src "blk.2.attn_kv_a_norm.weight"))
+            (let qabs (dfd-tabs src path "blk.2.attn_q_a.weight"))
+            (let qbytes (dfd-tbytes src "blk.2.attn_q_a.weight"))
+            (let qaty (dfd-ttype src "blk.2.attn_q_a.weight"))
+            (let qanabs (dfd-tabs src path "blk.2.attn_q_a_norm.weight"))
+            (let qanbytes (dfd-tbytes src "blk.2.attn_q_a_norm.weight"))
+            (let qbabs (dfd-tabs src path "blk.2.attn_q_b.weight"))
+            (let qbbytes (dfd-tbytes src "blk.2.attn_q_b.weight"))
+            (let qbty (dfd-ttype src "blk.2.attn_q_b.weight"))
+            (let snkabs (dfd-tabs src path "blk.2.attn_sinks.weight"))
+            (let snkbytes (dfd-tbytes src "blk.2.attn_sinks.weight"))
+            (let ckvabs (dfd-tabs src path "blk.2.attn_compressor_kv.weight"))
+            (let ckvbytes (dfd-tbytes src "blk.2.attn_compressor_kv.weight"))
+            (let ckvty (dfd-ttype src "blk.2.attn_compressor_kv.weight"))
+            (let cgtabs (dfd-tabs src path "blk.2.attn_compressor_gate.weight"))
+            (let cgtbytes (dfd-tbytes src "blk.2.attn_compressor_gate.weight"))
+            (let apeabs (dfd-tabs src path "blk.2.attn_compressor_ape.weight"))
+            (let apebytes (dfd-tbytes src "blk.2.attn_compressor_ape.weight"))
+            (let aped0 (dfd-td0 src "blk.2.attn_compressor_ape.weight"))
+            (let aped1 (dfd-td1 src "blk.2.attn_compressor_ape.weight"))
+            (let cnmabs (dfd-tabs src path "blk.2.attn_compressor_norm.weight"))
+            (let cnmbytes (dfd-tbytes src "blk.2.attn_compressor_norm.weight"))
+            (let cnmd0 (dfd-td0 src "blk.2.attn_compressor_norm.weight"))
+            (let nr (len ids))
+            (print (str_concat "GEOM blk2 comp ckv/cgt/ape/cnm abs=" (str_concat (int_to_str ckvabs)
+                   (str_concat "/" (str_concat (int_to_str cgtabs)
+                   (str_concat "/" (str_concat (int_to_str apeabs)
+                   (str_concat "/" (int_to_str cnmabs)))))))))
+            (print (str_concat "GEOM blk2 ape dims=" (str_concat (int_to_str aped0)
+                   (str_concat "x" (str_concat (int_to_str aped1)
+                   (str_concat " cnm n=" (str_concat (int_to_str cnmd0)
+                   (str_concat " ckv type=" (int_to_str ckvty)))))))))
+            (print (str_concat "GEOM blk2 attn_norm/kv/q_a/q_b/sinks abs=" (str_concat (int_to_str gabs)
+                   (str_concat "/" (str_concat (int_to_str kvabs)
+                   (str_concat "/" (str_concat (int_to_str qabs)
+                   (str_concat "/" (str_concat (int_to_str qbabs)
+                   (str_concat "/" (int_to_str snkabs)))))))))))
+
+            (let mslm (str_concat (dfd-msl-pragma) (mla-msl-unit)))
+            (let pe (metal_pipeline (dfd-embed-msl) "form_dsv4_embed_f16_u32"))
+            (let pr (metal_pipeline mslm "form_mla_rmsnorm_reduce_f32"))
+            (let pa (metal_pipeline mslm "form_mla_rmsnorm_apply_f32"))
+            (let ph (metal_pipeline mslm "form_mla_headrms_f32"))
+            (let pro (metal_pipeline mslm "form_mla_rope_f32"))
+            (let pam (metal_pipeline mslm "form_mla_attend_mixed_f32"))
+            (let pf (metal_pipeline (dfd-yarn-msl) "dfd_yarn_freqs"))
+            (let pkq (metal_pipeline (dfd-kvq-msl) "form_dsv4_kv_fp8_f16_round_par"))
+            (let pap (metal_pipeline (dfd-append-msl) "dfd_kv_append"))
+            (let pmkv (dfd-mv-pipe kvty))
+            (let pmqa (dfd-mv-pipe qaty))
+            (let pmqb (dfd-mv-pipe qbty))
+            (let cmsl (dfd-comp-msl))
+            (let pci (metal_pipeline cmsl "form_dsv4_comp_init_f32"))
+            (let pcs (metal_pipeline cmsl "form_dsv4_comp_state_f32"))
+            (let pcp (metal_pipeline cmsl "form_dsv4_comp_pool_f32"))
+            (let pcsh (metal_pipeline cmsl "form_dsv4_comp_shift_f32"))
+            (let pf16 (metal_pipeline (dfd-f16-msl) "form_dsv4_f16_matvec"))
+
+            (let embh (metal_buf_from_file path eabs ebytes))
+            (let gh (metal_buf_from_file path gabs gbytes))
+            (let kvh (metal_buf_from_file path kvabs kvbytes))
+            (let kvanh (metal_buf_from_file path kvanabs kvanbytes))
+            (let qah (metal_buf_from_file path qabs qbytes))
+            (let qanh (metal_buf_from_file path qanabs qanbytes))
+            (let qbh (metal_buf_from_file path qbabs qbbytes))
+            (let snkh (metal_buf_from_file path snkabs snkbytes))
+            (let ckvh (metal_buf_from_file path ckvabs ckvbytes))
+            (let cgth (metal_buf_from_file path cgtabs cgtbytes))
+            (let apeh (metal_buf_from_file path apeabs apebytes))
+            (let cnmh (metal_buf_from_file path cnmabs cnmbytes))
+            (let fb (metal_buf_alloc 128))
+            (let xb (metal_buf_alloc (mul nembd 4)))
+            (let ib (metal_buf_alloc 4))
+            (let ob (metal_buf_alloc (mul nembd 4)))
+            (let klb (metal_buf_alloc 2048))
+            (let ib3 (metal_buf_alloc 4))
+            (let klnb (metal_buf_alloc 2048))
+            (let krb (metal_buf_alloc 2048))
+            (let kqb (metal_buf_alloc 2048))
+            (let cacheb (metal_buf_alloc (mul nr 2048)))
+            (let ckvb (metal_buf_alloc 4096))
+            (let cscb (metal_buf_alloc 4096))
+            (let skvb (metal_buf_alloc 32768))
+            (let sscb (metal_buf_alloc 32768))
+            (let pooledb (metal_buf_alloc 2048))
+            (let ib4 (metal_buf_alloc 4))
+            (let nrmb (metal_buf_alloc 2048))
+            (let crb (metal_buf_alloc 2048))
+            (let cqb (metal_buf_alloc 2048))
+            (let ccacheb (metal_buf_alloc 4096))
+            (let qlb (metal_buf_alloc 4096))
+            (let ib2 (metal_buf_alloc 4))
+            (let qlnb (metal_buf_alloc 4096))
+            (let qqb (metal_buf_alloc 131072))
+            (let qhb (metal_buf_alloc 131072))
+            (let qrb (metal_buf_alloc 131072))
+            (let hab (metal_buf_alloc 131072))
+            ; 17 pipeline requests dedupe to 15 (the three Q8_0 matvecs share one text+name);
+            ; witnessed by metal_status: buffers=39 (12 nocopy file views + 27 device), pipelines=15
+            (print "RUNG9 handles: 15 pipelines + 12 file views + 27 device buffers this rung (54 of 8192)")
+
+            ; the YaRN table, computed ON the device: base 160000.0f (bits 1209810944), fscale
+            ; 0.0625f (1031798784), lo 15.0f (1097859072), hi 25.0f (1103626240) — all four IEEE
+            ; layouts checkable by eye; base and factor provenanced to the file's own KV above
+            (let ef (metal_enqueue pf
+                (str_concat (str_concat (dfd-u32 1) (dfd-u32 fb))
+                            (str_concat (dfd-u32 6) (str_concat (str_concat (dfd-u32 32) (dfd-u32 64))
+                                (str_concat (str_concat (dfd-u32 1209810944) (dfd-u32 1031798784))
+                                            (str_concat (dfd-u32 1097859072) (dfd-u32 1103626240)))))) 32))
+            ; the comp state planes, born 0 / NEG_INF by the recipe's own init kernel
+            (let ei (metal_enqueue pci
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 skvb) (dfd-u32 sscb)))
+                            (str_concat (dfd-u32 1) (dfd-u32 8192))) 8192))
+            (let fraw (metal_buf_read fb 0 128))
+            (print (str_concat "YARN freqs[0] bits=" (int_to_str (dfd-rd32 fraw 0))))
+
+            (let H (cons pe (cons pr (cons pa (cons pmkv (cons pro (cons pkq (cons pap
+                    (cons embh (cons gh (cons kvh (cons kvanh (cons fb
+                    (cons xb (cons ib (cons ob (cons klb (cons ib3 (cons klnb
+                    (cons krb (cons kqb (cons cacheb 0))))))))))))))))))))))
+            (let C (cons pf16 (cons pcs (cons pcp (cons pcsh
+                    (cons ckvh (cons cgth (cons apeh (cons cnmh
+                    (cons ckvb (cons cscb (cons skvb (cons sscb
+                    (cons pooledb (cons ib4 (cons nrmb (cons crb (cons cqb (cons ccacheb 0)))))))))))))))))))
+            (let kvraw (eqr-of-file path kvabs kvbytes))
+            (let ckvw (eqr-of-file path ckvabs ckvbytes))
+            (let cgtw (eqr-of-file path cgtabs cgtbytes))
+            (let apew (eqr-of-file path apeabs apebytes))
+            (let cnmw (eqr-of-file path cnmabs cnmbytes))
+            (let apeflat (dfd-f16list apew 0 4096))
+            (let st0 (dcp-state-new 4 512))
+            (let recs (dfd-cp9-loop path H C ids 0 st0 apeflat ckvw cgtw cnmw fraw eabs kvraw nembd))
+
+            (let pflag (dfd-cp9-pfold recs 1))
+            (let projeq (dfd-cp9-projfold recs 1))
+            (let poolrel (dfd-cp9-wfold recs 0 0.0))
+            (let normrel (dfd-cp9-wfold recs 1 0.0))
+            (let nopemin (dfd-cp9-wmin recs 2 448))
+            (let tailrel (dfd-cp9-wfold recs 3 0.0))
+            (let roundmin (dfd-cp9-wmin recs 4 512))
+            (print (str_concat "CP9 raw pflag=" (int_to_str pflag)))
+            (print (str_concat "CP9 f16 projections f32-fold bit-equal (32 rows) = " (int_to_str projeq)))
+            (print (str_concat "CP9 REL pool vs recipe (ppb)=" (float_to_str (mul poolrel 1000000000.0))))
+            (print (str_concat "CP9 REL comp norm (ppb)=" (float_to_str (mul normrel 1000000000.0))))
+            (print (str_concat "CP9 comp rope NOPE min=" (str_concat (int_to_str nopemin) " of 448")))
+            (print (str_concat "CP9 REL comp rope tails (ppb)=" (float_to_str (mul tailrel 1000000000.0))))
+            (print (str_concat "CP9 comp round bit-equal min=" (str_concat (int_to_str roundmin) " of 512")))
+
+            ; the LAST token's q chain at the last position, layer-2 tensors, the YaRN table
+            (let lastid (nth ids (sub nr 1)))
+            (let lastpos (sub nr 1))
+            (let rowoff (mul (mul lastid nembd) 2))
+            (let f0 (metal_enqueue pe
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 embh) (dfd-u32 xb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 rowoff) (dfd-u32 nembd)))) nembd))
+            (let f1 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 xb) (dfd-u32 ib)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 nembd) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
+            (let f2 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 xb) (dfd-u32 gh))
+                                                                (str_concat (dfd-u32 ob) (dfd-u32 ib))))
+                            (str_concat (dfd-u32 1) (dfd-u32 nembd))) nembd))
+            (let f3 (dfd-mv-enq pmqa qaty qah ob qlb 1024 nembd))
+            (let f4 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 qlb) (dfd-u32 ib2)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1024) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
+            (let f5 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 qlb) (dfd-u32 qanh))
+                                                                (str_concat (dfd-u32 qlnb) (dfd-u32 ib2))))
+                            (str_concat (dfd-u32 1) (dfd-u32 1024))) 1024))
+            (let f6 (dfd-mv-enq pmqb qbty qbh qlnb qqb 32768 1024))
+            (let f7 (metal_enqueue ph
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 qqb) (dfd-u32 qhb)))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512)) (dfd-u32 (dfd-eps-bits))))) 64))
+            (let f8 (metal_enqueue pro
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 qhb) (dfd-u32 qrb)) (dfd-u32 fb)))
+                            (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512))
+                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 (dfd-posbits lastpos)) (dfd-u32 1065353216)))))) 32768))
+            ; ONE softmax over the raw window AND the compressed rows — attend_mixed, nrows=8 ncomp=2
+            (let f9 (metal_enqueue pam
+                (str_concat (str_concat (dfd-u32 5) (str_concat (str_concat (str_concat (dfd-u32 qrb) (dfd-u32 cacheb))
+                                                                            (str_concat (dfd-u32 ccacheb) (dfd-u32 hab)))
+                                                                (dfd-u32 snkh)))
+                            (str_concat (dfd-u32 5) (str_concat (str_concat (str_concat (dfd-u32 64) (dfd-u32 512)) (dfd-u32 nr))
+                                                                (str_concat (dfd-u32 2) (dfd-u32 1026884851))))) 64))
+
+            (let qrraw (metal_buf_read qrb 0 131072))
+            (let habraw (metal_buf_read hab 0 131072))
+            (let cacheraw (metal_buf_read cacheb 0 (mul nr 2048)))
+            (let ccraw (metal_buf_read ccacheb 0 4096))
+            (let snkraw (eqr-of-file path snkabs snkbytes))
+
+            (let asm (dfd-cp9-asm ccraw recs 0 1))
+            (print (str_concat "CP9 comp cache assembly rows bit-equal = " (int_to_str asm)))
+
+            ; the fp64 mixed reference IS the multi-row reference over the CONCATENATED planes:
+            ; attend_mixed folds raw rows 0..nr-1 then comp rows 0..1 in that order, which is exactly
+            ; dfd-a5-heads over the 10 contiguous rows of (raw ++ comp)
+            (let allrows (str_concat cacheraw ccraw))
+            (let scale (div 1.0 (tn-sqrt 512.0)))
+            (let hl (cons 0 (cons 21 (cons 42 (cons 63 0)))))
+            (let mdmr (dfd-a5-heads qrraw allrows snkraw habraw hl (add nr 2) scale (cons 0.0 (cons 0.0 0))))
+            (let relmix (div (head mdmr) (head (tail mdmr))))
+            (print (str_concat "CP9 REL attend-mixed 4 heads 10 rows (ppb)=" (float_to_str (mul relmix 1000000000.0))))
+            (print (metal_status))
+            (cons pflag (cons projeq (cons poolrel (cons normrel (cons nopemin (cons tailrel
+                (cons roundmin (cons asm (cons relmix
+                (cons ckvabs (cons cgtabs (cons apeabs (cons cnmabs
+                (cons gabs (cons kvabs (cons qabs (cons qbabs (cons snkabs
+                (cons aped0 (cons aped1 (cons cnmd0 (cons ckvty
+                (cons (dfd-rd32 fraw 0) (cons (dfd-rd32 fraw 4) (cons (dfd-rd32 fraw 80) (cons (dfd-rd32 fraw 100)
+                (cons (dfd-cp9-rowaddr recs 5) (cons (dfd-cp9-rowaddr recs 6) (cons (dfd-cp9-rowaddr recs 7)
+                (cons (metal_status)
+                (cons (dfd-cp9-rowaddr recs 0) (cons (dfd-cp9-rowaddr recs 1) (cons (dfd-cp9-rowaddr recs 2)
+                (cons (dfd-cp9-rowaddr recs 3) (cons (dfd-cp9-rowaddr recs 4) 0)))))))))))))))))))))))))))))))))))))
 
     ; ================= UNFINISHED, named so it cannot be mistaken for done =================
     ; - the full MLA attention block for layer 0 at pos 7 now runs end to end from this cell
