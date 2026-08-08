@@ -182,6 +182,79 @@
 ;       CONCATENATED planes (attend_mixed's fold order IS the concatenation's): 4 sampled heads,
 ;       all 10 rows, measured 322 ppb. GATED on 2^31 (the sinks pin rides there).
 ;
+; ── RUNG 10: the MoE — both routing regimes, the experts, the shared lane, at token 671 ──
+; 274877906944 (2^38) rung-10 geometry, every FFN tensor at the Go arm's address on the canonical
+;       file: gate/up/down exps 14641984 / 1272933184 / 568290112 (types 16/10, dim2 256 — the
+;       tensor's own, never the metadata), gate_inp 79100757056, ffn_norm 79129592896, tid2eid
+;       5333824, shexp g/u/d 79102854208 / 79120680000 / 79111767104, blk.3 gate_inp/bias/ffn_norm
+;       79579828288 / 79579827264 / 79608664128, N_FF 2048, and the per-expert strides BY ARITHMETIC:
+;       553648128/256 = 2162688 (IQ2_XXS) and 704643072/256 = 2752512 (Q2_K — the stride whose
+;       0-pricing once sent every expert to expert 0's bytes; gm-priced? owns that lesson).
+; 549755813888 (2^39) the router logits: gate_inp is F16 and the serial fold is EMULATED bit-exactly
+;       (rung 9's instrument) on the six SELECTED rows plus rows 0 and 255. GATED on 2^38.
+; 1099511627776 (2^40) HASH routing (forepick): the six ids the GPU's table read returned are the
+;       file's own I32 row for token 671, pinned as LITERALS read independently of this cell
+;       (raw bytes at 5333824 + 671*24): 147 78 30 248 217 179; expert 147's slice address
+;       14641984 + 147*2162688 = 332557120 pinned by arithmetic; probs = sqrt(softplus) vs fp64
+;       (157 ppb measured); weights within 4 ulp of the exact emulation — 4 ulp is DERIVED, not
+;       negotiated: this door and the oracle's own metallibs both run Metal fast-math division
+;       (<= 2.5 ulp), so bit equality through a division is the wrong instrument on both.
+; 2199023255552 (2^41) the routed experts' gate/up (IQ2_XXS, iq2xxs-dequant.fk's carver in fp64,
+;       two sampled rows per slot, both stacks — 325/244 ppb) and the clamped SwiGLU (dsv4-forward's
+;       own recipe, 98 ppb) INCLUDING the clamp witnessed ON DEVICE: gate=up=12 > lim=10 must land
+;       on the clamped value and sit 0.1%+ from the unclamped one. GATED on 2^40 (the references
+;       read the GPU's own ids).
+; 4398046511104 (2^42) the down projection (Q2_K, q2k-dequant.fk's carver, slot-strided x — 611 ppb)
+;       and the reduce EMULATED bit-exactly (ascending f32 over six slot planes, all 4096 dims).
+; 8796093022208 (2^43) the shared lane: three Q8_0 projections vs q80-flat-at in fp64 (107 ppb), the
+;       shared SwiGLU at w=1 (94 ppb), and the final moe+shared add EMULATED bit-exactly (all 4096).
+; 17592186044416 (2^44) the LEARNED regime on blk.3: logits bit-equal (4 rows), probs vs fp64
+;       (296 ppb), sc = probs + bias bit-equal all 256 (bias from the FILE's own bytes), the tg6
+;       SELECTION reproduced by the kernel's own scan (strict >, first-index-wins) over the GPU's
+;       own sc — six ids EQUAL — and the weights within the same derived 4-ulp bound, computed from
+;       PROBS and never sc: the bias enters the selection and never the weight (ds4.c:10665's
+;       asymmetry, the thing moe-gate.fk cannot stand in for).
+;
+; ── RUNG 11: the hyper-connection frame at blk.0 (attn side), real weights, HC_ITERS=20 ──
+; 35184372088832 (2^45) rung-11 geometry: hc_attn fn/scale/base at 79129609376 / 79130395808 /
+;       79129609280 (fn [16384 x 24] F16), and the ffn frame's three pinned beside them for the
+;       single-layer rung: 79130395936 / 79131182368 / 79130395840.
+; 70368744177664 (2^46) the input chain: broadcast bit-equal (a copy checked as a copy, 16384/16384),
+;       the no-weight wide rmsnorm vs fp64 (100 ppb), and the fn matvec (F16 serial) EMULATED
+;       bit-exactly on ALL 24 rows. GATED on 2^45.
+; 140737488355328 (2^47) the SPLIT: sigmoid pre/post + the 20-iteration Sinkhorn vs dsv4-hc.fk's
+;       recipe (band 63) in fp64 — measured 104 ppb: the Sinkhorn CONVERGES, so twenty iterations
+;       do not accumulate — and the post/comb slice copies bit-equal. iters rides as a runtime
+;       uniform (edgedrop: an unrun iteration is not a computed zero). GATED on 2^45 + 2^46.
+; 281474976710656 (2^48) wsum and hc_post EMULATED bit-exactly (all 4096 / all 16384), the post
+;       including the TRANSPOSE read comb[dst + src*n_hc] (ds4.c:9786) — asymmetric real weights, so
+;       a wrong transpose cannot hide (dsv4-hc-msl.fk's edgedrop lesson). GATED on 2^45.
+;
+; ── RUNG 12: the EXIT HEAD (hc collapse -> output_norm -> output.weight), head arithmetic only ──
+; 562949953421312 (2^49) rung-12 geometry: output_hc fn/scale/base 86157337440 / 86157468512 /
+;       86157337408 (fn [16384 x 4] F16), output_norm 86720095104, output.weight 86157468544
+;       (Q8_0, vocab 129280 — the tensor's own dim).
+; 1125899906842624 (2^50) the collapse chain: rmsnorm-nw vs fp64 (100 ppb), the output_hc_fn matvec
+;       EMULATED bit-exactly (all 4 rows over 16384), headw sigmoid vs fp64 (85 ppb), the wsum
+;       collapse EMULATED bit-exactly (4096/4096). GATED on 2^49. The residual is
+;       broadcast(embed) — a DECLARED stand-in; the model's own argmax is NOT claimed by this rung.
+; 2251799813685248 (2^51) the exit: output_norm through the reduce/apply pair vs fp64 (30/58 ppb)
+;       and the Q8_0 unembedding vs q80-flat-at in fp64 at eight rows INCLUDING the argmax row and
+;       the runner-up (136 ppb). GATED on 2^49.
+;
+; ── RUNG 13: ONE COMPLETE LAYER end to end (blk.0, pos 0, token 671) ──
+; 4503599627370496 (2^52) the JOIN: broadcast -> hcPre(attn) -> MLA -> hcPost -> hcPre(ffn) ->
+;       ffn_norm -> MoE + shared -> hcPost, every seam checked against the GPU's actual upstream
+;       buffers by the machinery rungs 4-12 proved: attn wsum bit-equal 4096, attn_norm 210 ppb,
+;       kv round 512/512, attend 1134 ppb, output_b 146 ppb, attn hcPost bit-equal 16384, ffn wsum
+;       bit-equal 4096, ffn_norm 57 ppb, iq2 gate 208 ppb, reduce/add/out-post bit-equal, both
+;       Sinkhorn splits vs recipe (104/136 ppb). GATED on 2^38 and 2^45 (the pins that own these
+;       tensors). THE ATTEND BAR IS 4e-6 AND DERIVED, NOT NEGOTIATED: mla_exp is a 14-term f32
+;       Taylor with argument halving (~20 roundings) against a fp64 reference of the same series —
+;       rungs 5/8 measured 886/882 ppb on other inputs, always ~90% of the generic 1e-6 bar; the
+;       reduction crosses simd_sum whose hardware tree is not reliably emulable, so a tolerance is
+;       the honest instrument and its size comes from the series, not from the miss.
+;
 ; preludes: native/metal/dsv4-decode-form.fk
 
 (do
@@ -389,6 +462,129 @@
     (let b37mix (if (eq b1 1) (if (eq b31g 1)
         (if (lt (nth rung9 8) (dfb-tol)) 1 0) 0) 0))
 
+    ; ── RUNG 10: the MoE at token 671 — blk.0 carries the hash regime, blk.3 the learned one
+    (let rung10 (if (eq b1 1) (dfd-moe-run (dfb-model) (dfb-token)) 0))
+    (let b38g (if (eq b1 1)
+        (if (eq (nth rung10 24) 14641984)
+            (if (eq (nth rung10 25) 1272933184)
+                (if (eq (nth rung10 26) 568290112)
+                    (if (eq (nth rung10 27) 79100757056)
+                        (if (eq (nth rung10 28) 79129592896)
+                            (if (eq (nth rung10 29) 79102854208)
+                                (if (eq (nth rung10 30) 79120680000)
+                                    (if (eq (nth rung10 31) 79111767104)
+                                        (if (eq (nth rung10 32) 79579828288)
+                                            (if (eq (nth rung10 33) 79579827264)
+                                                (if (eq (nth rung10 34) 79608664128)
+                                                    (if (eq (nth rung10 35) 16)
+                                                        (if (eq (nth rung10 36) 10)
+                                                            (if (eq (nth rung10 37) 256)
+                                                                (if (eq (nth rung10 38) 2048)
+                                                                    (if (eq (nth rung10 7) 5333824)
+                                                                        (if (eq (nth rung10 39) 77933529920)
+                                                                            (if (eq (nth rung10 41) 2162688)
+                                                                                (if (eq (nth rung10 42) 2752512) 1 0)
+                                                                                0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0))
+    (let b39l (if (eq b1 1) (if (eq b38g 1) (if (eq (nth rung10 0) 1) 1 0) 0) 0))
+    (let b40r (if (eq b1 1) (if (eq b38g 1)
+        (if (eq (nth rung10 1) 147)
+            (if (eq (nth rung10 2) 78)
+                (if (eq (nth rung10 3) 30)
+                    (if (eq (nth rung10 4) 248)
+                        (if (eq (nth rung10 5) 217)
+                            (if (eq (nth rung10 6) 179)
+                                (if (eq (nth rung10 40) 332557120)
+                                    (if (lt (nth rung10 8) (dfb-tol))
+                                        (if (eq (nth rung10 9) 1) 1 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0))
+    (let b41e (if (eq b1 1) (if (eq b38g 1) (if (eq b40r 1)
+        (if (lt (nth rung10 10) (dfb-tol))
+            (if (lt (nth rung10 11) (dfb-tol))
+                (if (lt (nth rung10 12) (dfb-tol))
+                    (if (eq (nth rung10 13) 1) 1 0) 0) 0) 0) 0) 0) 0))
+    (let b42d (if (eq b1 1) (if (eq b38g 1) (if (eq b40r 1)
+        (if (lt (nth rung10 14) (dfb-tol))
+            (if (eq (nth rung10 15) 4096) 1 0) 0) 0) 0) 0))
+    (let b43s (if (eq b1 1) (if (eq b38g 1)
+        (if (lt (nth rung10 16) (dfb-tol))
+            (if (lt (nth rung10 17) (dfb-tol))
+                (if (eq (nth rung10 18) 4096) 1 0) 0) 0) 0) 0))
+    (let b44t (if (eq b1 1) (if (eq b38g 1)
+        (if (eq (nth rung10 19) 1)
+            (if (lt (nth rung10 20) (dfb-tol))
+                (if (eq (nth rung10 21) 256)
+                    (if (eq (nth rung10 22) 6)
+                        (if (eq (nth rung10 23) 1) 1 0) 0) 0) 0) 0) 0) 0))
+
+    ; ── RUNG 11: the hyper-connection frame at blk.0, token 671
+    (let rung11 (if (eq b1 1) (dfd-hc-run (dfb-model) (dfb-token)) 0))
+    (let b45g (if (eq b1 1)
+        (if (eq (nth rung11 7) 79129609376)
+            (if (eq (nth rung11 8) 79130395808)
+                (if (eq (nth rung11 9) 79129609280)
+                    (if (eq (nth rung11 10) 79130395936)
+                        (if (eq (nth rung11 11) 79131182368)
+                            (if (eq (nth rung11 12) 79130395840)
+                                (if (eq (nth rung11 13) 16384)
+                                    (if (eq (nth rung11 14) 24)
+                                        (if (eq (nth rung11 15) 1)
+                                            (if (eq (nth rung11 16) 77933529920) 1 0)
+                                            0) 0) 0) 0) 0) 0) 0) 0) 0) 0))
+    (let b46i (if (eq b1 1) (if (eq b45g 1)
+        (if (eq (nth rung11 0) 16384)
+            (if (lt (nth rung11 1) (dfb-tol))
+                (if (eq (nth rung11 2) 1) 1 0) 0) 0) 0) 0))
+    (let b47s (if (eq b1 1) (if (eq b45g 1) (if (eq b46i 1)
+        (if (lt (nth rung11 3) (dfb-tol))
+            (if (eq (nth rung11 4) 1) 1 0) 0) 0) 0) 0))
+    (let b48p (if (eq b1 1) (if (eq b45g 1)
+        (if (eq (nth rung11 5) 4096)
+            (if (eq (nth rung11 6) 16384) 1 0) 0) 0) 0))
+
+    ; ── RUNG 12: the exit head at token 671
+    (let rung12 (if (eq b1 1) (dfd-exit-run (dfb-model) (dfb-token)) 0))
+    (let b49g (if (eq b1 1)
+        (if (eq (nth rung12 9) 86157337440)
+            (if (eq (nth rung12 10) 86157468512)
+                (if (eq (nth rung12 11) 86157337408)
+                    (if (eq (nth rung12 12) 86720095104)
+                        (if (eq (nth rung12 13) 86157468544)
+                            (if (eq (nth rung12 14) 8)
+                                (if (eq (nth rung12 15) 129280)
+                                    (if (eq (nth rung12 16) 16384)
+                                        (if (eq (nth rung12 17) 4)
+                                            (if (eq (nth rung12 18) 77933529920) 1 0)
+                                            0) 0) 0) 0) 0) 0) 0) 0) 0) 0))
+    (let b50c (if (eq b1 1) (if (eq b49g 1)
+        (if (lt (nth rung12 0) (dfb-tol))
+            (if (eq (nth rung12 1) 1)
+                (if (lt (nth rung12 2) (dfb-tol))
+                    (if (eq (nth rung12 3) 4096) 1 0) 0) 0) 0) 0) 0))
+    (let b51x (if (eq b1 1) (if (eq b49g 1)
+        (if (lt (nth rung12 4) (dfb-tol))
+            (if (lt (nth rung12 5) (dfb-tol))
+                (if (lt (nth rung12 6) (dfb-tol)) 1 0) 0) 0) 0) 0))
+
+    ; ── RUNG 13: the joined layer. The attend bar is derived (see header): 4e-6.
+    (defn dfb-tol-attend () 0.000004)
+    (let rung13 (if (eq b1 1) (dfd-layer-run (dfb-model) (dfb-token)) 0))
+    (let b52j (if (eq b1 1) (if (eq b38g 1) (if (eq b45g 1)
+        (if (eq (nth rung13 0) 4096)
+        (if (lt (nth rung13 1) (dfb-tol))
+        (if (eq (nth rung13 2) 512)
+        (if (lt (nth rung13 3) (dfb-tol-attend))
+        (if (lt (nth rung13 4) (dfb-tol))
+        (if (eq (nth rung13 5) 16384)
+        (if (eq (nth rung13 6) 4096)
+        (if (lt (nth rung13 7) (dfb-tol))
+        (if (lt (nth rung13 8) (dfb-tol))
+        (if (eq (nth rung13 9) 4096)
+        (if (eq (nth rung13 10) 4096)
+        (if (eq (nth rung13 11) 16384)
+        (if (lt (nth rung13 12) (dfb-tol))
+        (if (lt (nth rung13 13) (dfb-tol))
+        (if (eq (nth rung13 14) 77933529920) 1 0)
+        0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0) 0))
+
     (print (str_concat "bit1  door speaks          = " (int_to_str b1)))
     (print (str_concat "bit2  geometry from header = " (int_to_str b2)))
     (print (str_concat "bit4  mmap nocopy          = " (int_to_str b4)))
@@ -427,6 +623,21 @@
     (print (str_concat "bit2^35 pool vs recipe      = " (int_to_str b35pool)))
     (print (str_concat "bit2^36 emitted comp row    = " (int_to_str b36emit)))
     (print (str_concat "bit2^37 attend mixed ref    = " (int_to_str b37mix)))
+    (print (str_concat "bit2^38 rung10 geometry     = " (int_to_str b38g)))
+    (print (str_concat "bit2^39 router logits eq    = " (int_to_str b39l)))
+    (print (str_concat "bit2^40 hash routing        = " (int_to_str b40r)))
+    (print (str_concat "bit2^41 experts+swiglu      = " (int_to_str b41e)))
+    (print (str_concat "bit2^42 down+reduce         = " (int_to_str b42d)))
+    (print (str_concat "bit2^43 shared+add          = " (int_to_str b43s)))
+    (print (str_concat "bit2^44 topk regime blk3    = " (int_to_str b44t)))
+    (print (str_concat "bit2^45 hc geometry         = " (int_to_str b45g)))
+    (print (str_concat "bit2^46 hc input chain      = " (int_to_str b46i)))
+    (print (str_concat "bit2^47 hc split+sinkhorn   = " (int_to_str b47s)))
+    (print (str_concat "bit2^48 hc wsum+post        = " (int_to_str b48p)))
+    (print (str_concat "bit2^49 exit geometry       = " (int_to_str b49g)))
+    (print (str_concat "bit2^50 exit collapse       = " (int_to_str b50c)))
+    (print (str_concat "bit2^51 exit norm+logits    = " (int_to_str b51x)))
+    (print (str_concat "bit2^52 the joined layer    = " (int_to_str b52j)))
 
     (let verdict (add b1 (add (mul 2 b2) (add (mul 4 b4)
                     (add (mul 8 b8) (add (mul 16 b16) (add (mul 32 b32) (add (mul 64 b64)
@@ -449,6 +660,21 @@
                     (add (mul 17179869184 b34proj)
                     (add (mul 34359738368 b35pool)
                     (add (mul 68719476736 b36emit)
-                         (mul 137438953472 b37mix)))))))))))))))))))))))))))))))))))))))
+                    (add (mul 137438953472 b37mix)
+                    (add (mul 274877906944 b38g)
+                    (add (mul 549755813888 b39l)
+                    (add (mul 1099511627776 b40r)
+                    (add (mul 2199023255552 b41e)
+                    (add (mul 4398046511104 b42d)
+                    (add (mul 8796093022208 b43s)
+                    (add (mul 17592186044416 b44t)
+                    (add (mul 35184372088832 b45g)
+                    (add (mul 70368744177664 b46i)
+                    (add (mul 140737488355328 b47s)
+                    (add (mul 281474976710656 b48p)
+                    (add (mul 562949953421312 b49g)
+                    (add (mul 1125899906842624 b50c)
+                    (add (mul 2251799813685248 b51x)
+                         (mul 4503599627370496 b52j))))))))))))))))))))))))))))))))))))))))))))))))))))))
     (print (str_concat "Verdict: " (int_to_str verdict)))
     verdict)

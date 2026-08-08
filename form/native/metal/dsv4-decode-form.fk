@@ -1854,21 +1854,1448 @@
                 (cons (dfd-cp9-rowaddr recs 0) (cons (dfd-cp9-rowaddr recs 1) (cons (dfd-cp9-rowaddr recs 2)
                 (cons (dfd-cp9-rowaddr recs 3) (cons (dfd-cp9-rowaddr recs 4) 0)))))))))))))))))))))))))))))))))))))
 
+    ; ═══════════════ RUNG 10: the MoE — both routing regimes, the experts, the shared lane ═════════
+    ; The FFN half of a layer, on the canonical imatrix file, whose expert stacks are UNIFORM and read
+    ; from the file's own table (never the metadata): every layer's gate/up is IQ2_XXS (type 16)
+    ; [4096 x 2048 x 256] and every down is Q2_K (type 10) [2048 x 4096 x 256] — 256 experts at ALL 43
+    ; layers (dim[2] == 256 throughout; the 192-expert REAP pruning lives on the reap25 specimen, not
+    ; here). Routing: blk.0-2 by the ffn_gate_tid2eid I32 table on the TOKEN id (forepick, row 867),
+    ; blk.3+ by sqrt-softplus biased-top-6 (ds4.c:10665, form_dsv4_topk_weights's split twins) —
+    ; NOT moe-gate.fk, whose softmax rule is a different animal (rung-9 receipt carries the probe).
+    ; Scalars from the file's own KV via the Go arm: expert_used_count 6, expert_weights_scale 1.5,
+    ; expert_gating_func 4, hash_layer_count 3, swiglu_clamp_exp = 10.0 at every one of 43 layers.
+    ; Every kernel text is the body's own, already carried by this cell's prelude closure; this cell
+    ; adds only the pragma (door note 1) and the dispatches.
+    (defn dfd-ffn-msl ()
+        (str_concat (dfd-msl-pragma)
+        (str_concat (dsv4-moe-msl-unit)
+        (str_concat (dsv4-hash-select-body)
+        (str_concat (dsv4-hash-probs-body)
+        (str_concat (dsv4-hash-wts-body)
+        (str_concat (dsv4-topk-split-body)
+        (str_concat (dsv4-topk-select-tg6-body) (dom-ffn-appendix)))))))))
+    ; the routed-expert units, minimal: header + that type's own proven helpers + the experts kernel.
+    ; dom-iq2-experts4-body is documented bit-identical to the one-expert-at-a-time kernel (only the
+    ; reads change); dom-q2k-experts-body is ds4.c:3480's own plain ASCENDING scalar sum, which is
+    ; also exactly the shape a fp64 reference can fold.
+    (defn dfd-iq2e-msl ()
+        (str_concat (dfd-msl-pragma)
+        (str_concat (qml-msl-header)
+        (str_concat (iq2m-msl-helpers) (dom-iq2-experts4-body)))))
+    (defn dfd-q2ke-msl ()
+        (str_concat (dfd-msl-pragma)
+        (str_concat (qml-msl-header)
+        (str_concat (q2km-msl-helpers) (dom-q2k-experts-body)))))
+
+    ; ── the IQ2_XXS fp64 reference: iq2xxs-dequant.fk's OWN carver (band-proven, a different text
+    ; from the MSL), fed per-block byte LISTS built from the file's own bytes at the computed slice.
+    (defn dfd-blist (s off n)
+        (if (eq n 0) 0 (cons (str_byte_at s off) (dfd-blist s (add off 1) (sub n 1)))))
+    (defn dfd-iq2dot-blk (bl xraw x0 j acc)
+        (if (ge j 256) acc
+            (dfd-iq2dot-blk bl xraw x0 (add j 1)
+                (add acc (mul (iq2-at bl 0 j) (dfd-f32at xraw (mul (add x0 j) 4)))))))
+    (defn dfd-iq2dot-row (rowraw xraw blk nblk acc)
+        (if (ge blk nblk) acc
+            (dfd-iq2dot-row rowraw xraw (add blk 1) nblk
+                (dfd-iq2dot-blk (dfd-blist rowraw (mul blk 66) 66) xraw (mul blk 256) 0 acc))))
+    ; two sampled rows per slot, both expert stacks; got index = slot*rows + r. The slice address is
+    ; base + id*stride + r*rowbytes, id read from the GPU's OWN ids buffer (induction — the routing
+    ; bit owns the ids), stride from the file's own byte count / 256.
+    (defn dfd-iq2e-md (path base stride idsraw xraw got rows sl acc)
+        (if (ge sl 6) acc
+            (do (let id (dfd-rd32 idsraw (mul sl 4)))
+                (let r1 sl)
+                (let r2 (add (div rows 2) sl))
+                (let b1 (add base (add (mul id stride) (mul r1 1056))))
+                (let b2 (add base (add (mul id stride) (mul r2 1056))))
+                (let d1 (abs (sub (dfd-f32at got (mul (add (mul sl rows) r1) 4))
+                                  (dfd-iq2dot-row (eqr-of-file path b1 1056) xraw 0 16 0.0))))
+                (let d2 (abs (sub (dfd-f32at got (mul (add (mul sl rows) r2) 4))
+                                  (dfd-iq2dot-row (eqr-of-file path b2 1056) xraw 0 16 0.0))))
+                (dfd-iq2e-md path base stride idsraw xraw got rows (add sl 1)
+                    (if (gt d1 acc) (if (gt d2 d1) d2 d1) (if (gt d2 acc) d2 acc))))))
+    (defn dfd-iq2e-mr (path base stride idsraw xraw rows sl acc)
+        (if (ge sl 6) acc
+            (do (let id (dfd-rd32 idsraw (mul sl 4)))
+                (let b1 (add base (add (mul id stride) (mul sl 1056))))
+                (let a1 (abs (dfd-iq2dot-row (eqr-of-file path b1 1056) xraw 0 16 0.0)))
+                (dfd-iq2e-mr path base stride idsraw xraw rows (add sl 1) (if (gt a1 acc) a1 acc)))))
+    ; the Q2_K fp64 reference: q2k-dequant.fk's carver (string-based), same sampling shape; the down
+    ; kernel's x is SLOT-STRIDED (xe = x + slot*cols), mirrored here.
+    (defn dfd-q2kdot-row (rowraw midraw x0 cols j acc)
+        (if (ge j cols) acc
+            (dfd-q2kdot-row rowraw midraw x0 cols (add j 1)
+                (add acc (mul (q2k-at rowraw 0 j) (dfd-f32at midraw (mul (add x0 j) 4)))))))
+    (defn dfd-q2ke-md (path base stride idsraw midraw got rows cols sl acc)
+        (if (ge sl 6) acc
+            (do (let id (dfd-rd32 idsraw (mul sl 4)))
+                (let r1 sl)
+                (let r2 (add (div rows 2) sl))
+                (let rb (mul (div cols 256) 84))
+                (let b1 (add base (add (mul id stride) (mul r1 rb))))
+                (let b2 (add base (add (mul id stride) (mul r2 rb))))
+                (let d1 (abs (sub (dfd-f32at got (mul (add (mul sl rows) r1) 4))
+                                  (dfd-q2kdot-row (eqr-of-file path b1 rb) midraw (mul sl cols) cols 0 0.0))))
+                (let d2 (abs (sub (dfd-f32at got (mul (add (mul sl rows) r2) 4))
+                                  (dfd-q2kdot-row (eqr-of-file path b2 rb) midraw (mul sl cols) cols 0 0.0))))
+                (dfd-q2ke-md path base stride idsraw midraw got rows cols (add sl 1)
+                    (if (gt d1 acc) (if (gt d2 d1) d2 d1) (if (gt d2 acc) d2 acc))))))
+    (defn dfd-q2ke-mr (path base stride idsraw midraw rows cols sl acc)
+        (if (ge sl 6) acc
+            (do (let id (dfd-rd32 idsraw (mul sl 4)))
+                (let rb (mul (div cols 256) 84))
+                (let b1 (add base (add (mul id stride) (mul sl rb))))
+                (let a1 (abs (dfd-q2kdot-row (eqr-of-file path b1 rb) midraw (mul sl cols) cols 0 0.0)))
+                (dfd-q2ke-mr path base stride idsraw midraw rows cols (add sl 1) (if (gt a1 acc) a1 acc)))))
+
+    ; ── the router weights, EMULATED bit-for-bit: w[j] = f32(f32(p/s) * wscale) with s the ascending
+    ; f32 sum of the six selected probs, floored at 2^-14 — the kernel's own expression, per step, on
+    ; the GPU's OWN probs (induction; the probs bit owns them). Equality, not a tolerance.
+    ; f32 DIVISION, emulated exactly. fq-quant(div p s) rounds TWICE (fp64 then f32) where the
+    ; kernel's division rounds once — a double-rounding hazard that BIT this rung: blk.3's weights
+    ; read 5/6 equal on the first run while blk.0's read 6/6, both from the same emulation. The
+    ; correctly-rounded f32 quotient is the candidate c minimizing |p - c*s| — EXACT in fp64, because
+    ; c*s is a 24x24-bit product (48 bits) and p is f32 — with a tie taken by the even mantissa
+    ; (representable in 22 bits). The wrong instrument was not the tolerance this time; it was the
+    ; emulation itself, and the fix is a residual argmin, not a looser bar.
+    (defn dfd-f32ulp (c) (fq-pow2 (sub (fq-exponent (abs c)) 23)))
+    (defn dfd-mant-even? (c) (if (eq (fq-quant c 22) c) 1 0))
+    (defn dfd-resid (p s c) (abs (sub p (mul c s))))
+    (defn dfd-f32div-pick (p s a b)
+        (do (let ra (dfd-resid p s a))
+            (let rb (dfd-resid p s b))
+            (if (lt rb ra) b
+                (if (eq rb ra) (if (eq (dfd-mant-even? b) 1) b a) a))))
+    (defn dfd-f32div (p s)
+        (if (eq p 0.0) 0.0
+            (do (let c0 (dfd-fq32 (div p s)))
+                (let u (dfd-f32ulp c0))
+                (let cp (dfd-fq32 (add c0 u)))
+                (let cm (dfd-fq32 (sub c0 u)))
+                (dfd-f32div-pick p s (dfd-f32div-pick p s c0 cp) cm))))
+
+    (defn dfd-wts-sum (probsraw idsraw j n acc)
+        (if (ge j n) acc
+            (dfd-wts-sum probsraw idsraw (add j 1) n
+                (dfd-fq32 (add acc (dfd-f32at probsraw (mul (dfd-rd32 idsraw (mul j 4)) 4)))))))
+    ; THE WEIGHT CHECK IS A DERIVED BOUND, NOT BIT EQUALITY, AND THE REASON IS THE DOOR'S DIVISION.
+    ; First written as bit equality against the residual-argmin division above, it read 6/6 on blk.0
+    ; and 2/6 on blk.3 — the mismatches all ONE ULP. The cause is not the emulation: this door
+    ; compiles options:nil and the ORACLE's own metallibs compile with only -ffp-contract=off, so
+    ; BOTH run Metal fast-math division (a reciprocal shape, <= 2.5 ulp by the MSL precision table),
+    ; and a correctly-rounded reference cannot be bit-equal to it. The recorded stream's own division
+    ; is this one. So the bound is DERIVED: 2.5 ulp (fast div) + 0.5 (the *wscale round) with margin
+    ; -> 4 ulp of the correctly-rounded weight. The bias-in-weight asymmetry this check exists to
+    ; catch sits ~1e6 ulp away; the discrimination is untouched. blk.0's first-run 6/6 was LUCK.
+    (defn dfd-wts-eq (probsraw idsraw wtsraw s j n acc)
+        (if (ge j n) acc
+            (do (let p (dfd-f32at probsraw (mul (dfd-rd32 idsraw (mul j 4)) 4)))
+                (let w (dfd-fq32 (mul (dfd-f32div p s) 1.5)))
+                (let g (dfd-f32at wtsraw (mul j 4)))
+                (let ok (if (le (abs (sub g w)) (mul 4.0 (dfd-f32ulp w))) 1 0))
+                (if (eq ok 0)
+                    (print (str_concat "WTS OUT OF BOUND slot " (str_concat (int_to_str j)
+                           (str_concat " emu=" (str_concat (float_to_str w)
+                           (str_concat " gpu=" (float_to_str g)))))))
+                    0)
+                (dfd-wts-eq probsraw idsraw wtsraw s (add j 1) n (mul acc ok)))))
+    (defn dfd-wts-check (probsraw idsraw wtsraw n)
+        (do (let s0 (dfd-wts-sum probsraw idsraw 0 n 0.0))
+            (let s (if (lt s0 0.00006103515625) 0.00006103515625 s0))
+            (dfd-wts-eq probsraw idsraw wtsraw s 0 n 1)))
+
+    ; ── sqrt-softplus probs vs fp64, the kernel's own branch rule (z>20 pass, z<-20 exp, else
+    ; ln(1+exp)) folded with tn-exp / fln / tn-sqrt — the body's own series in fp64.
+    (defn dfd-softplus64 (z)
+        (if (gt z 20.0) z (if (lt z -20.0) (tn-exp z) (fln (add 1.0 (tn-exp z))))))
+    (defn dfd-probs-md (lraw praw i n acc)
+        (if (ge i n) acc
+            (do (let r (tn-sqrt (dfd-softplus64 (dfd-f32at lraw (mul i 4)))))
+                (let d (abs (sub (dfd-f32at praw (mul i 4)) r)))
+                (dfd-probs-md lraw praw (add i 1) n (if (gt d acc) d acc)))))
+    (defn dfd-probs-mr (lraw i n acc)
+        (if (ge i n) acc
+            (do (let r (abs (tn-sqrt (dfd-softplus64 (dfd-f32at lraw (mul i 4))))))
+                (dfd-probs-mr lraw (add i 1) n (if (gt r acc) r acc)))))
+
+    ; ── the clamped-SwiGLU reference per element (dsv4-forward.fk's own dsv4-cl-hi/lo + ln-silu):
+    (defn dfd-mid64 (g u w lim)
+        (mul (mul (ln-silu (dsv4-cl-hi g lim)) (dsv4-cl-lo (dsv4-cl-hi u lim) lim)) w))
+    ; sampled dims 0..31 of every slot, against the GPU's own gate/up/wts (induction)
+    (defn dfd-mid-md (gateraw upraw wtsraw midraw n sl j acc)
+        (if (ge sl 6) acc
+            (if (ge j 32)
+                (dfd-mid-md gateraw upraw wtsraw midraw n (add sl 1) 0 acc)
+                (do (let o (mul (add (mul sl n) j) 4))
+                    (let r (dfd-mid64 (dfd-f32at gateraw o) (dfd-f32at upraw o)
+                                      (dfd-f32at wtsraw (mul sl 4)) 10.0))
+                    (let d (abs (sub (dfd-f32at midraw o) r)))
+                    (dfd-mid-md gateraw upraw wtsraw midraw n sl (add j 1) (if (gt d acc) d acc))))))
+    (defn dfd-mid-mr (gateraw upraw wtsraw n sl j acc)
+        (if (ge sl 6) acc
+            (if (ge j 32)
+                (dfd-mid-mr gateraw upraw wtsraw n (add sl 1) 0 acc)
+                (do (let o (mul (add (mul sl n) j) 4))
+                    (let r (abs (dfd-mid64 (dfd-f32at gateraw o) (dfd-f32at upraw o)
+                                           (dfd-f32at wtsraw (mul sl 4)) 10.0)))
+                    (dfd-mid-mr gateraw upraw wtsraw n sl (add j 1) (if (gt r acc) r acc))))))
+
+    ; ── the reduce, EMULATED: out[d] = ascending f32 sum over the six slot planes. All 4096 dims.
+    (defn dfd-red-one (partsraw d n sl acc)
+        (if (ge sl 6) acc
+            (dfd-red-one partsraw d n (add sl 1)
+                (dfd-fq32 (add acc (dfd-f32at partsraw (mul (add (mul sl n) d) 4)))))))
+    (defn dfd-red-eq (partsraw moeraw n d acc)
+        (if (ge d n) acc
+            (dfd-red-eq partsraw moeraw n (add d 1)
+                (add acc (if (eq (dfd-red-one partsraw d n 0 0.0) (dfd-f32at moeraw (mul d 4))) 1 0)))))
+    ; the final add: ffn_out[d] = f32(moe[d] + shared[d]) (scale a=1 writes moe exactly; axpy's
+    ; p = 1.0*shared is exact; ONE f32 add). All 4096, equality.
+    (defn dfd-add-eq (moeraw sharedraw outraw n d acc)
+        (if (ge d n) acc
+            (dfd-add-eq moeraw sharedraw outraw n (add d 1)
+                (add acc (if (eq (dfd-fq32 (add (dfd-f32at moeraw (mul d 4)) (dfd-f32at sharedraw (mul d 4))))
+                             (dfd-f32at outraw (mul d 4))) 1 0)))))
+
+    ; ── the shared expert's Q8_0 fp64 reference over sampled rows (q80-flat-at, q8-0-msl.fk's
+    ; band-proven reader — a different text from the MSL).
+    (defn dfd-q80dot (wraw cols xraw r j acc)
+        (if (ge j cols) acc
+            (dfd-q80dot wraw cols xraw r (add j 1)
+                (add acc (mul (q80-flat-at wraw 0 (add (mul r cols) j)) (dfd-f32at xraw (mul j 4)))))))
+    (defn dfd-q80-md-rows (wraw cols xraw got rowsl acc)
+        (if (eq (len rowsl) 0) acc
+            (do (let r (head rowsl))
+                (let ref (dfd-q80dot wraw cols xraw r 0 0.0))
+                (let d (abs (sub (dfd-f32at got (mul r 4)) ref)))
+                (dfd-q80-md-rows wraw cols xraw got (tail rowsl) (if (gt d acc) d acc)))))
+    (defn dfd-q80-mr-rows (wraw cols xraw rowsl acc)
+        (if (eq (len rowsl) 0) acc
+            (do (let r (head rowsl))
+                (let a (abs (dfd-q80dot wraw cols xraw r 0 0.0)))
+                (dfd-q80-mr-rows wraw cols xraw (tail rowsl) (if (gt a acc) a acc)))))
+
+    ; ── the biased-top-k SELECTION reference: the kernel's own scan (strict >, first-index-wins,
+    ; shift-down) run in Form over the GPU's OWN sc buffer — comparisons on exact f32 values, so the
+    ; six chosen ids must be EQUAL, not close. The bias enters ONLY here; the weight emulation above
+    ; reads probs, never sc — a kernel that weighted by the biased score fails the weight equality.
+    (defn dfd-tk-take (sl n) (if (eq n 0) 0 (cons (head sl) (dfd-tk-take (tail sl) (sub n 1)))))
+    (defn dfd-tk-ins (sl i si j)
+        (if (eq j 0) (cons (cons i (cons si 0)) (dfd-tk-take sl (sub (len sl) 1)))
+            (cons (head sl) (dfd-tk-ins (tail sl) i si (sub j 1)))))
+    (defn dfd-tk-findj (sl si j)
+        (if (ge j (len sl)) -1
+            (do (let e (nth sl j))
+                (if (lt (head e) 0) j
+                    (if (gt si (head (tail e))) j (dfd-tk-findj sl si (add j 1)))))))
+    (defn dfd-tk-scan (scraw i n sl)
+        (if (ge i n) sl
+            (do (let si (dfd-f32at scraw (mul i 4)))
+                (let j (dfd-tk-findj sl si 0))
+                (dfd-tk-scan scraw (add i 1) n (if (lt j 0) sl (dfd-tk-ins sl i si j))))))
+    (defn dfd-tk-empty (n) (if (eq n 0) 0 (cons (cons -1 (cons 0.0 0)) (dfd-tk-empty (sub n 1)))))
+    (defn dfd-tk-ideq (sl idsraw j acc)
+        (if (eq (len sl) 0) acc
+            (dfd-tk-ideq (tail sl) idsraw (add j 1)
+                (add acc (if (eq (head (head sl)) (dfd-rd32 idsraw (mul j 4))) 1 0)))))
+    ; sc bit-equality: sc[i] = f32(probs[i] + bias[i]) — one f32 add on the GPU's own probs and the
+    ; FILE's own bias bytes. All 256, equality.
+    (defn dfd-sc-eq (praw biasraw scraw i n acc)
+        (if (ge i n) acc
+            (dfd-sc-eq praw biasraw scraw (add i 1) n
+                (add acc (if (eq (dfd-fq32 (add (dfd-f32at praw (mul i 4)) (dfd-f32at biasraw (mul i 4))))
+                             (dfd-f32at scraw (mul i 4))) 1 0)))))
+
+    ; shared-lane swiglu reference over dims 0..63 at w = 1
+    (defn dfd-smid-md (gv uv mv j acc)
+        (if (ge j 64) acc
+            (do (let r (dfd-mid64 (dfd-f32at gv (mul j 4)) (dfd-f32at uv (mul j 4)) 1.0 10.0))
+                (let d (abs (sub (dfd-f32at mv (mul j 4)) r)))
+                (dfd-smid-md gv uv mv (add j 1) (if (gt d acc) d acc)))))
+    (defn dfd-smid-mr (gv uv j acc)
+        (if (ge j 64) acc
+            (do (let r (abs (dfd-mid64 (dfd-f32at gv (mul j 4)) (dfd-f32at uv (mul j 4)) 1.0 10.0)))
+                (dfd-smid-mr gv uv (add j 1) (if (gt r acc) r acc)))))
+
+    (defn dfd-moe-run (path token)
+        (do
+            (let src (dfd-src path))
+            (let nembd (dfd-td0 src "token_embd.weight"))
+            (let eabs (dfd-tabs src path "token_embd.weight"))
+            (let ebytes (dfd-tbytes src "token_embd.weight"))
+            (let fnabs (dfd-tabs src path "blk.0.ffn_norm.weight"))
+            (let fnbytes (dfd-tbytes src "blk.0.ffn_norm.weight"))
+            (let giabs (dfd-tabs src path "blk.0.ffn_gate_inp.weight"))
+            (let gibytes (dfd-tbytes src "blk.0.ffn_gate_inp.weight"))
+            (let girows (dfd-td1 src "blk.0.ffn_gate_inp.weight"))
+            (let tid2abs (dfd-tabs src path "blk.0.ffn_gate_tid2eid.weight"))
+            (let tid2bytes (dfd-tbytes src "blk.0.ffn_gate_tid2eid.weight"))
+            (let gxabs (dfd-tabs src path "blk.0.ffn_gate_exps.weight"))
+            (let gxbytes (dfd-tbytes src "blk.0.ffn_gate_exps.weight"))
+            (let gxty (dfd-ttype src "blk.0.ffn_gate_exps.weight"))
+            (let gxd2 (gm-dimk src (egg-find-tensor src "blk.0.ffn_gate_exps.weight") 2))
+            (let uxabs (dfd-tabs src path "blk.0.ffn_up_exps.weight"))
+            (let uxbytes (dfd-tbytes src "blk.0.ffn_up_exps.weight"))
+            (let dxabs (dfd-tabs src path "blk.0.ffn_down_exps.weight"))
+            (let dxbytes (dfd-tbytes src "blk.0.ffn_down_exps.weight"))
+            (let dxty (dfd-ttype src "blk.0.ffn_down_exps.weight"))
+            (let nff (dfd-td1 src "blk.0.ffn_gate_exps.weight"))
+            (let strideg (div gxbytes gxd2))
+            (let strided (div dxbytes gxd2))
+            (let sgabs (dfd-tabs src path "blk.0.ffn_gate_shexp.weight"))
+            (let sgbytes (dfd-tbytes src "blk.0.ffn_gate_shexp.weight"))
+            (let suabs (dfd-tabs src path "blk.0.ffn_up_shexp.weight"))
+            (let subytes (dfd-tbytes src "blk.0.ffn_up_shexp.weight"))
+            (let sdabs (dfd-tabs src path "blk.0.ffn_down_shexp.weight"))
+            (let sdbytes (dfd-tbytes src "blk.0.ffn_down_shexp.weight"))
+            (let sgty (dfd-ttype src "blk.0.ffn_gate_shexp.weight"))
+            (let fn3abs (dfd-tabs src path "blk.3.ffn_norm.weight"))
+            (let fn3bytes (dfd-tbytes src "blk.3.ffn_norm.weight"))
+            (let gi3abs (dfd-tabs src path "blk.3.ffn_gate_inp.weight"))
+            (let gi3bytes (dfd-tbytes src "blk.3.ffn_gate_inp.weight"))
+            (let bi3abs (dfd-tabs src path "blk.3.exp_probs_b.bias"))
+            (let bi3bytes (dfd-tbytes src "blk.3.exp_probs_b.bias"))
+            (print (str_concat "GEOM ffn gate/up/down exps abs=" (str_concat (int_to_str gxabs)
+                   (str_concat "/" (str_concat (int_to_str uxabs)
+                   (str_concat "/" (str_concat (int_to_str dxabs)
+                   (str_concat " types=" (str_concat (int_to_str gxty)
+                   (str_concat "/" (str_concat (int_to_str dxty)
+                   (str_concat " d2=" (str_concat (int_to_str gxd2)
+                   (str_concat " nff=" (int_to_str nff)))))))))))))))
+            (print (str_concat "GEOM strides g/d=" (str_concat (int_to_str strideg)
+                   (str_concat "/" (str_concat (int_to_str strided)
+                   (str_concat " gate_inp=" (str_concat (int_to_str giabs)
+                   (str_concat " tid2eid=" (str_concat (int_to_str tid2abs)
+                   (str_concat " ffn_norm=" (int_to_str fnabs)))))))))))
+            (print (str_concat "GEOM shexp g/u/d abs=" (str_concat (int_to_str sgabs)
+                   (str_concat "/" (str_concat (int_to_str suabs)
+                   (str_concat "/" (str_concat (int_to_str sdabs)
+                   (str_concat " blk3 gi/bias/fn=" (str_concat (int_to_str gi3abs)
+                   (str_concat "/" (str_concat (int_to_str bi3abs)
+                   (str_concat "/" (int_to_str fn3abs)))))))))))))
+
+            (let mslm (str_concat (dfd-msl-pragma) (mla-msl-unit)))
+            (let fmsl (dfd-ffn-msl))
+            (let pe (metal_pipeline (dfd-embed-msl) "form_dsv4_embed_f16_u32"))
+            (let pr (metal_pipeline mslm "form_mla_rmsnorm_reduce_f32"))
+            (let pa (metal_pipeline mslm "form_mla_rmsnorm_apply_f32"))
+            (let pf16 (metal_pipeline (dfd-f16-msl) "form_dsv4_f16_matvec"))
+            (let phsel (metal_pipeline fmsl "form_dsv4_hash_select"))
+            (let phprb (metal_pipeline fmsl "form_dsv4_hash_probs"))
+            (let phwts (metal_pipeline fmsl "form_dsv4_hash_wts"))
+            (let ptkp (metal_pipeline fmsl "form_dsv4_topk_probs"))
+            (let ptks (metal_pipeline fmsl "form_dsv4_topk_select_tg6"))
+            (let pswg (metal_pipeline fmsl "form_dsv4_swiglu_f32"))
+            (let pswge (metal_pipeline fmsl "form_dsv4_swiglu_experts"))
+            (let pmred (metal_pipeline fmsl "form_dsv4_moe_reduce"))
+            (let pscl (metal_pipeline fmsl "form_dsv4_scale_f32"))
+            (let paxp (metal_pipeline fmsl "form_dsv4_axpy_f32"))
+            (let piq2 (metal_pipeline (dfd-iq2e-msl) "form_dsv4_iq2_matvec_experts4"))
+            (let pq2k (metal_pipeline (dfd-q2ke-msl) "form_dsv4_q2k_matvec_experts"))
+            (let pq80 (dfd-mv-pipe sgty))
+
+            (let embh (metal_buf_from_file path eabs ebytes))
+            (let fnh (metal_buf_from_file path fnabs fnbytes))
+            (let gih (metal_buf_from_file path giabs gibytes))
+            (let tid2h (metal_buf_from_file path tid2abs tid2bytes))
+            (let gxh (metal_buf_from_file path gxabs gxbytes))
+            (let uxh (metal_buf_from_file path uxabs uxbytes))
+            (let dxh (metal_buf_from_file path dxabs dxbytes))
+            (let sgh (metal_buf_from_file path sgabs sgbytes))
+            (let suh (metal_buf_from_file path suabs subytes))
+            (let sdh (metal_buf_from_file path sdabs sdbytes))
+            (let fn3h (metal_buf_from_file path fn3abs fn3bytes))
+            (let gi3h (metal_buf_from_file path gi3abs gi3bytes))
+            (let bi3h (metal_buf_from_file path bi3abs bi3bytes))
+            (let xb (metal_buf_alloc (mul nembd 4)))
+            (let ib (metal_buf_alloc 4))
+            (let nrmb (metal_buf_alloc (mul nembd 4)))
+            (let logitsb (metal_buf_alloc 1024))
+            (let idsb (metal_buf_alloc 24))
+            (let wtsb (metal_buf_alloc 24))
+            (let probsb (metal_buf_alloc 1024))
+            (let gateb (metal_buf_alloc 49152))
+            (let upb (metal_buf_alloc 49152))
+            (let midb (metal_buf_alloc 49152))
+            (let partsb (metal_buf_alloc 98304))
+            (let moeb (metal_buf_alloc (mul nembd 4)))
+            (let sgvb (metal_buf_alloc (mul nff 4)))
+            (let suvb (metal_buf_alloc (mul nff 4)))
+            (let smidb (metal_buf_alloc (mul nff 4)))
+            (let sharedb (metal_buf_alloc (mul nembd 4)))
+            (let ffnoutb (metal_buf_alloc (mul nembd 4)))
+            (let logits3b (metal_buf_alloc 1024))
+            (let probs3b (metal_buf_alloc 1024))
+            (let sc3b (metal_buf_alloc 1024))
+            (let ids3b (metal_buf_alloc 24))
+            (let wts3b (metal_buf_alloc 24))
+            (let clvb (metal_buf_alloc 16))
+            (let club (metal_buf_alloc 16))
+            (let clob (metal_buf_alloc 16))
+            (print "RUNG10 handles: 15 pipeline requests (embed/rmsnorm/f16/q80 dedupe with the chain's) + 13 file views + 26 device buffers")
+
+            ; ── blk.0, the HASH layer: embed -> ffn_norm rmsnorm -> router logits -> table read ->
+            ; probs -> weights -> gate/up experts -> swiglu -> down -> reduce -> shared -> add.
+            (let rowoff (mul (mul token nembd) 2))
+            (let e0 (metal_enqueue pe
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 embh) (dfd-u32 xb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 rowoff) (dfd-u32 nembd)))) nembd))
+            (let e1 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 xb) (dfd-u32 ib)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 nembd) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
+            (let e2 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 xb) (dfd-u32 fnh))
+                                                                (str_concat (dfd-u32 nrmb) (dfd-u32 ib))))
+                            (str_concat (dfd-u32 1) (dfd-u32 nembd))) nembd))
+            (let e3 (metal_enqueue pf16
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 gih) (dfd-u32 nrmb)) (dfd-u32 logitsb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 girows) (dfd-u32 nembd)))) girows))
+            (let e4 (metal_enqueue phsel
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 tid2h) (dfd-u32 idsb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 token) (dfd-u32 6)))) 6))
+            (let e5 (metal_enqueue phprb (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 logitsb) (dfd-u32 probsb)))
+                            (str_concat (dfd-u32 1) (dfd-u32 256))) 32 0) 256))
+            ; wscale 1.5f = bits 1069547520
+            (let e6 (metal_enqueue phwts
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 probsb) (dfd-u32 idsb)) (dfd-u32 wtsb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 6) (dfd-u32 1069547520)))) 1))
+            (let e7 (metal_enqueue piq2 (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 gxh) (dfd-u32 nrmb))
+                                                                (str_concat (dfd-u32 gateb) (dfd-u32 idsb))))
+                            (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 nff) (dfd-u32 nembd))
+                                                                (str_concat (dfd-u32 strideg) (dfd-u32 6)))))
+                64 0) (mul 6 (mul (div nff 4) 32))))
+            (let e8 (metal_enqueue piq2 (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 uxh) (dfd-u32 nrmb))
+                                                                (str_concat (dfd-u32 upb) (dfd-u32 idsb))))
+                            (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 nff) (dfd-u32 nembd))
+                                                                (str_concat (dfd-u32 strideg) (dfd-u32 6)))))
+                64 0) (mul 6 (mul (div nff 4) 32))))
+            ; clamp 10.0f = bits 1092616192
+            (let e9 (metal_enqueue pswge (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 gateb) (dfd-u32 upb))
+                                                                (str_concat (dfd-u32 midb) (dfd-u32 wtsb))))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 nff) (dfd-u32 6)) (dfd-u32 1092616192))))
+                32 0) (mul 6 nff)))
+            (let e10 (metal_enqueue pq2k (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 dxh) (dfd-u32 midb))
+                                                                (str_concat (dfd-u32 partsb) (dfd-u32 idsb))))
+                            (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 nembd) (dfd-u32 nff))
+                                                                (str_concat (dfd-u32 strided) (dfd-u32 6)))))
+                64 0) (mul 6 nembd)))
+            (let e11 (metal_enqueue pmred (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 partsb) (dfd-u32 moeb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 nembd) (dfd-u32 6)))) 32 0) nembd))
+            ; the shared lane: two Q8_0 projections off ffn_norm, swiglu at w=1, the down projection
+            (let e12 (dfd-mv-enq pq80 sgty sgh nrmb sgvb nff nembd))
+            (let e13 (dfd-mv-enq pq80 sgty suh nrmb suvb nff nembd))
+            (let e14 (metal_enqueue pswg
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 sgvb) (dfd-u32 suvb)) (dfd-u32 smidb)))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 nff) (dfd-u32 1065353216)) (dfd-u32 1092616192)))) nff))
+            (let e15 (dfd-mv-enq pq80 sgty sdh smidb sharedb nembd nff))
+            ; SET-then-ADD, never memset (asktoll): scale a=1 defines ffn_out, axpy adds the shared
+            (let e16 (metal_enqueue pscl (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 moeb) (dfd-u32 ffnoutb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1065353216) (dfd-u32 nembd)))) 32 0) nembd))
+            (let e17 (metal_enqueue paxp (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 sharedb) (dfd-u32 ffnoutb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1065353216) (dfd-u32 nembd)))) 32 0) nembd))
+            (print (str_concat "ENQ rung10 blk0 18 dispatches sum=" (int_to_str (add e0 (add e1 (add e2 (add e3
+                (add e4 (add e5 (add e6 (add e7 (add e8 (add e9 (add e10 (add e11
+                (add e12 (add e13 (add e14 (add e15 (add e16 e17))))))))))))))))))))
+
+            ; ── the reads drain the batch; every reference below reads the GPU's ACTUAL buffers
+            (let nrmraw (metal_buf_read nrmb 0 (mul nembd 4)))
+            (let logitsraw (metal_buf_read logitsb 0 1024))
+            (let idsraw (metal_buf_read idsb 0 24))
+            (let probsraw (metal_buf_read probsb 0 1024))
+            (let wtsraw (metal_buf_read wtsb 0 24))
+            (let gateraw (metal_buf_read gateb 0 49152))
+            (let upraw (metal_buf_read upb 0 49152))
+            (let midraw (metal_buf_read midb 0 49152))
+            (let partsraw (metal_buf_read partsb 0 98304))
+            (let moeraw (metal_buf_read moeb 0 (mul nembd 4)))
+            (let sgvraw (metal_buf_read sgvb 0 (mul nff 4)))
+            (let suvraw (metal_buf_read suvb 0 (mul nff 4)))
+            (let smidraw (metal_buf_read smidb 0 (mul nff 4)))
+            (let sharedraw (metal_buf_read sharedb 0 (mul nembd 4)))
+            (let ffnoutraw (metal_buf_read ffnoutb 0 (mul nembd 4)))
+
+            ; router logits: the F16 serial fold, bit-equal by exact f32 emulation (rung 9's upgraded
+            ; instrument) on the six SELECTED rows plus rows 0 and 255
+            (let giraw (eqr-of-file path giabs gibytes))
+            (let selrows (cons (dfd-rd32 idsraw 0) (cons (dfd-rd32 idsraw 4) (cons (dfd-rd32 idsraw 8)
+                         (cons (dfd-rd32 idsraw 12) (cons (dfd-rd32 idsraw 16) (cons (dfd-rd32 idsraw 20)
+                         (cons 0 (cons 255 0)))))))))
+            (let f16eq (dfd-f16mv-simeq giraw nembd nrmraw logitsraw selrows 1))
+            (print (str_concat "MOE router logits f32-fold bit-equal (8 rows) = " (int_to_str f16eq)))
+            (print (str_concat "MOE hash ids = " (str_concat (int_to_str (dfd-rd32 idsraw 0))
+                   (str_concat " " (str_concat (int_to_str (dfd-rd32 idsraw 4))
+                   (str_concat " " (str_concat (int_to_str (dfd-rd32 idsraw 8))
+                   (str_concat " " (str_concat (int_to_str (dfd-rd32 idsraw 12))
+                   (str_concat " " (str_concat (int_to_str (dfd-rd32 idsraw 16))
+                   (str_concat " " (int_to_str (dfd-rd32 idsraw 20))))))))))))))
+            (let relprobs (div (dfd-probs-md logitsraw probsraw 0 256 0.0)
+                               (dfd-probs-mr logitsraw 0 256 0.0)))
+            (print (str_concat "MOE REL probs sqrt-softplus (ppb)=" (float_to_str (mul relprobs 1000000000.0))))
+            (let wtseq (dfd-wts-check probsraw idsraw wtsraw 6))
+            (print (str_concat "MOE weights within 4 ulp of exact (fast-math div declared) = " (int_to_str wtseq)))
+
+            (let relgate (div (dfd-iq2e-md path gxabs strideg idsraw nrmraw gateraw nff 0 0.0)
+                              (dfd-iq2e-mr path gxabs strideg idsraw nrmraw nff 0 0.0)))
+            (let relup (div (dfd-iq2e-md path uxabs strideg idsraw nrmraw upraw nff 0 0.0)
+                            (dfd-iq2e-mr path uxabs strideg idsraw nrmraw nff 0 0.0)))
+            (print (str_concat "MOE REL iq2 gate experts 12 rows (ppb)=" (float_to_str (mul relgate 1000000000.0))))
+            (print (str_concat "MOE REL iq2 up experts 12 rows (ppb)=" (float_to_str (mul relup 1000000000.0))))
+            (let relmid (div (dfd-mid-md gateraw upraw wtsraw midraw nff 0 0 0.0)
+                             (dfd-mid-mr gateraw upraw wtsraw nff 0 0 0.0)))
+            (print (str_concat "MOE REL swiglu 6x32 (ppb)=" (float_to_str (mul relmid 1000000000.0))))
+            (let reldown (div (dfd-q2ke-md path dxabs strided idsraw midraw partsraw nembd nff 0 0.0)
+                              (dfd-q2ke-mr path dxabs strided idsraw midraw nembd nff 0 0.0)))
+            (print (str_concat "MOE REL q2k down experts 12 rows (ppb)=" (float_to_str (mul reldown 1000000000.0))))
+            (let redeq (dfd-red-eq partsraw moeraw nembd 0 0))
+            (print (str_concat "MOE reduce f32-emulated bit-equal dims=" (str_concat (int_to_str redeq)
+                   (str_concat " of " (int_to_str nembd)))))
+
+            (let sgraw (eqr-of-file path sgabs sgbytes))
+            (let suraw (eqr-of-file path suabs subytes))
+            (let sdraw (eqr-of-file path sdabs sdbytes))
+            (let shrows (cons 0 (cons 1 (cons 1000 (cons 2047 0)))))
+            (let sdrows (cons 0 (cons 1 (cons 2000 (cons 4095 0)))))
+            (let relsg (div (dfd-q80-md-rows sgraw nembd nrmraw sgvraw shrows 0.0)
+                            (dfd-q80-mr-rows sgraw nembd nrmraw shrows 0.0)))
+            (let relsu (div (dfd-q80-md-rows suraw nembd nrmraw suvraw shrows 0.0)
+                            (dfd-q80-mr-rows suraw nembd nrmraw shrows 0.0)))
+            (let relsd (div (dfd-q80-md-rows sdraw nff smidraw sharedraw sdrows 0.0)
+                            (dfd-q80-mr-rows sdraw nff smidraw sdrows 0.0)))
+            (let relsh (dfd-cp9-max2 relsg (dfd-cp9-max2 relsu relsd)))
+            (print (str_concat "MOE REL shared q8_0 g/u/d 4 rows each (ppb)=" (float_to_str (mul relsh 1000000000.0))))
+            ; shared swiglu at w=1 over dims 0..63
+            (let relsmid (div (dfd-smid-md sgvraw suvraw smidraw 0 0.0)
+                              (dfd-smid-mr sgvraw suvraw 0 0.0)))
+            (print (str_concat "MOE REL shared swiglu 64 dims (ppb)=" (float_to_str (mul relsmid 1000000000.0))))
+            (let addeq (dfd-add-eq moeraw sharedraw ffnoutraw nembd 0 0))
+            (print (str_concat "MOE final add bit-equal dims=" (str_concat (int_to_str addeq)
+                   (str_concat " of " (int_to_str nembd)))))
+
+            ; ── the CLAMP witnessed on the device: gate = up = 12.0 (bits 1094713344) > lim = 10,
+            ; w = 1. The GPU must land on the CLAMPED fp64 value and be far from the unclamped one.
+            (let c1 (dfd-fill clvb 0 4 1094713344))
+            (let c2 (dfd-fill club 0 4 1094713344))
+            (let ec (metal_enqueue pswg
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 clvb) (dfd-u32 club)) (dfd-u32 clob)))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 4) (dfd-u32 1065353216)) (dfd-u32 1092616192)))) 4))
+            (let clraw (metal_buf_read clob 0 16))
+            (let clref (dfd-mid64 12.0 12.0 1.0 10.0))
+            (let clnref (dfd-mid64 12.0 12.0 1.0 0.0))
+            (let clgot (dfd-f32at clraw 0))
+            (let clampok (if (lt (div (abs (sub clgot clref)) (abs clref)) 0.000001)
+                             (if (gt (div (abs (sub clgot clnref)) (abs clnref)) 0.001) 1 0) 0))
+            (print (str_concat "MOE clamp witness got/clamped/unclamped = " (str_concat (float_to_str clgot)
+                   (str_concat "/" (str_concat (float_to_str clref) (str_concat "/" (float_to_str clnref)))))))
+
+            ; ── blk.3, the LEARNED regime: the same activation machinery at blk.3's ffn_norm, the
+            ; router logits, then sqrt-softplus probs + biased sc and the tg6 selection.
+            (let f0 (metal_enqueue pe
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 embh) (dfd-u32 xb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 rowoff) (dfd-u32 nembd)))) nembd))
+            (let f1 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 xb) (dfd-u32 ib)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 nembd) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
+            (let f2 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 xb) (dfd-u32 fn3h))
+                                                                (str_concat (dfd-u32 nrmb) (dfd-u32 ib))))
+                            (str_concat (dfd-u32 1) (dfd-u32 nembd))) nembd))
+            (let f3 (metal_enqueue pf16
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 gi3h) (dfd-u32 nrmb)) (dfd-u32 logits3b)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 girows) (dfd-u32 nembd)))) girows))
+            (let f4 (metal_enqueue ptkp (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 logits3b) (dfd-u32 bi3h))
+                                                                (str_concat (dfd-u32 probs3b) (dfd-u32 sc3b))))
+                            (str_concat (dfd-u32 1) (dfd-u32 256))) 32 0) 256))
+            (let f5 (metal_enqueue ptks (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 probs3b) (dfd-u32 sc3b))
+                                                                (str_concat (dfd-u32 ids3b) (dfd-u32 wts3b))))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 256) (dfd-u32 6)) (dfd-u32 1069547520))))
+                256 0) 256))
+            (let nrm3raw (metal_buf_read nrmb 0 (mul nembd 4)))
+            (let logits3raw (metal_buf_read logits3b 0 1024))
+            (let probs3raw (metal_buf_read probs3b 0 1024))
+            (let sc3raw (metal_buf_read sc3b 0 1024))
+            (let ids3raw (metal_buf_read ids3b 0 24))
+            (let wts3raw (metal_buf_read wts3b 0 24))
+            (let gi3raw (eqr-of-file path gi3abs gi3bytes))
+            (let bi3raw (eqr-of-file path bi3abs bi3bytes))
+            (let rows3 (cons 0 (cons 100 (cons 200 (cons 255 0)))))
+            (let f16eq3 (dfd-f16mv-simeq gi3raw nembd nrm3raw logits3raw rows3 1))
+            (let relprobs3 (div (dfd-probs-md logits3raw probs3raw 0 256 0.0)
+                                (dfd-probs-mr logits3raw 0 256 0.0)))
+            (let sceq3 (dfd-sc-eq probs3raw bi3raw sc3raw 0 256 0))
+            (let sel3 (dfd-tk-scan sc3raw 0 256 (dfd-tk-empty 6)))
+            (let seleq3 (dfd-tk-ideq sel3 ids3raw 0 0))
+            (let wtseq3 (dfd-wts-check probs3raw ids3raw wts3raw 6))
+            (print (str_concat "MOE blk3 topk ids = " (str_concat (int_to_str (dfd-rd32 ids3raw 0))
+                   (str_concat " " (str_concat (int_to_str (dfd-rd32 ids3raw 4))
+                   (str_concat " " (str_concat (int_to_str (dfd-rd32 ids3raw 8))
+                   (str_concat " " (str_concat (int_to_str (dfd-rd32 ids3raw 12))
+                   (str_concat " " (str_concat (int_to_str (dfd-rd32 ids3raw 16))
+                   (str_concat " " (int_to_str (dfd-rd32 ids3raw 20))))))))))))))
+            (print (str_concat "MOE blk3 logits bit-equal 4 rows=" (str_concat (int_to_str f16eq3)
+                   (str_concat " REL probs (ppb)=" (str_concat (float_to_str (mul relprobs3 1000000000.0))
+                   (str_concat " sc bit-equal=" (str_concat (int_to_str sceq3)
+                   (str_concat " sel-eq=" (str_concat (int_to_str seleq3)
+                   (str_concat " wts-4ulp=" (int_to_str wtseq3)))))))))))
+            (print (metal_status))
+            ; facts, indexed — the band pins the addresses to the Go arm's literals, the hash ids to
+            ; the file's own row (read independently and pinned as literals), and the derived
+            ; expert-147 slice address 14641984 + 147*2162688 = 332557120.
+            (cons f16eq (cons (dfd-rd32 idsraw 0) (cons (dfd-rd32 idsraw 4) (cons (dfd-rd32 idsraw 8)
+            (cons (dfd-rd32 idsraw 12) (cons (dfd-rd32 idsraw 16) (cons (dfd-rd32 idsraw 20)
+            (cons tid2abs (cons relprobs (cons wtseq
+            (cons relgate (cons relup (cons relmid (cons clampok
+            (cons reldown (cons redeq (cons relsh (cons relsmid (cons addeq
+            (cons f16eq3 (cons relprobs3 (cons sceq3 (cons seleq3 (cons wtseq3
+            (cons gxabs (cons uxabs (cons dxabs (cons giabs (cons fnabs
+            (cons sgabs (cons suabs (cons sdabs
+            (cons gi3abs (cons bi3abs (cons fn3abs
+            (cons gxty (cons dxty (cons gxd2 (cons nff
+            (cons (add eabs rowoff)
+            (cons (add gxabs (mul (dfd-rd32 idsraw 0) strideg))
+            (cons strideg (cons strided
+            (cons (metal_status) 0))))))))))))))))))))))))))))))))))))))))))))))
+
+    ; ═══════════════ RUNG 11: the hyper-connection frame — broadcast, split, Sinkhorn, wsum, post ══
+    ; HC is the residual stream of this model: there is no plain residual anywhere in it. The kernels
+    ; are dsv4-hc-msl.fk's own (the same texts the bash lane compiles), the fp64 recipe is
+    ; dsv4-hc.fk's (band 63, proven against an independent ds4.c transcription to 1e-9). Real
+    ; weights: blk.0's hc_attn_fn [16384 x 24] F16, hc_attn_scale [3] F32, hc_attn_base [24] F32.
+    ; The block_out fed to hc_post here is the embedded row itself — a real vector through a proven
+    ; step, DECLARED as a stand-in: the real wiring (MLA out -> hc_post) is the single-layer rung's.
+    ; HC_ITERS = 20 and HC_EPS = f32(1e-6) — the oracle's own scalars (metal_dsv4_stack.sh:238).
+    (defn dfd-slice-msl ()
+        (str_concat (dfd-msl-pragma)
+        (str_concat (qml-msl-header)
+            "kernel void dfd_slice(device const float* src [[buffer(0)]], device float* dst [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& n [[buffer(3)]], uint i [[thread_position_in_grid]]) { if (i < n) dst[i] = src[off + i]; }")))
+    (defn dfd-hc-msl () (str_concat (dfd-msl-pragma) (hc-msl-unit)))
+
+    ; broadcast is a copy and is checked as a copy: out[h*n+d] must be bit-equal to x[d], all 4*4096
+    (defn dfd-bc-eq (xraw outraw g n acc)
+        (if (ge g (mul 4 n)) acc
+            (dfd-bc-eq xraw outraw (add g 1) n
+                (add acc (if (eq (dfd-rd32 outraw (mul g 4)) (dfd-rd32 xraw (mul (mod g n) 4))) 1 0)))))
+    ; the no-weight rmsnorm in fp64 (inv from the body's own fold; the wide kernel's tree fold and
+    ; fast-math division land at rounding scale, judged against the vector's scale)
+    (defn dfd-nw-md (xraw outraw inv i n acc)
+        (if (ge i n) acc
+            (do (let d (abs (sub (dfd-f32at outraw (mul i 4)) (mul (dfd-f32at xraw (mul i 4)) inv))))
+                (dfd-nw-md xraw outraw inv (add i 1) n (if (gt d acc) d acc)))))
+    (defn dfd-nw-mr (xraw inv i n acc)
+        (if (ge i n) acc
+            (do (let r (abs (mul (dfd-f32at xraw (mul i 4)) inv)))
+                (dfd-nw-mr xraw inv (add i 1) n (if (gt r acc) r acc)))))
+    ; wsum, emulated bit-exactly: acc = fq32(acc + fq32(stream*w)) ascending over the 4 streams
+    (defn dfd-wsum-one (residraw splitraw d n h acc)
+        (if (ge h 4) acc
+            (dfd-wsum-one residraw splitraw d n (add h 1)
+                (dfd-fq32 (add acc (dfd-fq32 (mul (dfd-f32at residraw (mul (add (mul h n) d) 4))
+                                                  (dfd-f32at splitraw (mul h 4)))))))))
+    (defn dfd-wsum-eq (residraw splitraw curraw n d acc)
+        (if (ge d n) acc
+            (dfd-wsum-eq residraw splitraw curraw n (add d 1)
+                (add acc (if (eq (dfd-wsum-one residraw splitraw d n 0 0.0)
+                             (dfd-f32at curraw (mul d 4))) 1 0)))))
+    ; hc_post, emulated bit-exactly, INCLUDING the transpose read comb[dst + src*n_hc] (ds4.c:9786):
+    ; the ascending src fold, then block_out[d]*post[dst] + acc — one mul, one add, each rounds once
+    (defn dfd-post-acc (combraw residraw dst d n src acc)
+        (if (ge src 4) acc
+            (dfd-post-acc combraw residraw dst d n (add src 1)
+                (dfd-fq32 (add acc (dfd-fq32 (mul (dfd-f32at combraw (mul (add dst (mul src 4)) 4))
+                                                  (dfd-f32at residraw (mul (add (mul src n) d) 4)))))))))
+    (defn dfd-post-eq (blockraw residraw postraw combraw outraw n g acc)
+        (if (ge g (mul 4 n)) acc
+            (do (let dst (div g n))
+                (let d (mod g n))
+                (let ref (dfd-fq32 (add (dfd-fq32 (mul (dfd-f32at blockraw (mul d 4))
+                                                       (dfd-f32at postraw (mul dst 4))))
+                                        (dfd-post-acc combraw residraw dst d n 0 0.0))))
+                (dfd-post-eq blockraw residraw postraw combraw outraw n (add g 1)
+                    (add acc (if (eq ref (dfd-f32at outraw (mul g 4))) 1 0))))))
+    ; a slice is a copy and is checked as a copy
+    (defn dfd-slice-eq (splitraw sliceraw off n i acc)
+        (if (ge i n) acc
+            (dfd-slice-eq splitraw sliceraw off n (add i 1)
+                (mul acc (if (eq (dfd-rd32 sliceraw (mul i 4)) (dfd-rd32 splitraw (mul (add off i) 4))) 1 0)))))
+    (defn dfd-iota (i n) (if (ge i n) 0 (cons i (dfd-iota (add i 1) n))))
+
+    (defn dfd-hc-run (path token)
+        (do
+            (let src (dfd-src path))
+            (let nembd (dfd-td0 src "token_embd.weight"))
+            (let eabs (dfd-tabs src path "token_embd.weight"))
+            (let ebytes (dfd-tbytes src "token_embd.weight"))
+            (let hafabs (dfd-tabs src path "blk.0.hc_attn_fn.weight"))
+            (let hafbytes (dfd-tbytes src "blk.0.hc_attn_fn.weight"))
+            (let hafd0 (dfd-td0 src "blk.0.hc_attn_fn.weight"))
+            (let hafd1 (dfd-td1 src "blk.0.hc_attn_fn.weight"))
+            (let hafty (dfd-ttype src "blk.0.hc_attn_fn.weight"))
+            (let hasabs (dfd-tabs src path "blk.0.hc_attn_scale.weight"))
+            (let hasbytes (dfd-tbytes src "blk.0.hc_attn_scale.weight"))
+            (let habsabs (dfd-tabs src path "blk.0.hc_attn_base.weight"))
+            (let habsbytes (dfd-tbytes src "blk.0.hc_attn_base.weight"))
+            (let hffabs (dfd-tabs src path "blk.0.hc_ffn_fn.weight"))
+            (let hfsabs (dfd-tabs src path "blk.0.hc_ffn_scale.weight"))
+            (let hfbabs (dfd-tabs src path "blk.0.hc_ffn_base.weight"))
+            (print (str_concat "GEOM hc_attn fn/scale/base abs=" (str_concat (int_to_str hafabs)
+                   (str_concat "/" (str_concat (int_to_str hasabs)
+                   (str_concat "/" (str_concat (int_to_str habsabs)
+                   (str_concat " fn dims=" (str_concat (int_to_str hafd0)
+                   (str_concat "x" (str_concat (int_to_str hafd1)
+                   (str_concat " type=" (int_to_str hafty)))))))))))))
+            (print (str_concat "GEOM hc_ffn fn/scale/base abs=" (str_concat (int_to_str hffabs)
+                   (str_concat "/" (str_concat (int_to_str hfsabs)
+                   (str_concat "/" (int_to_str hfbabs)))))))
+
+            (let hmsl (dfd-hc-msl))
+            (let pe (metal_pipeline (dfd-embed-msl) "form_dsv4_embed_f16_u32"))
+            (let pbc (metal_pipeline hmsl "form_hc_broadcast_f32"))
+            (let pnw (metal_pipeline hmsl "form_hc_rmsnorm_nw_wide_f32"))
+            (let pf16 (metal_pipeline (dfd-f16-msl) "form_dsv4_f16_matvec"))
+            (let psq4 (metal_pipeline hmsl "form_hc_split_seq4_f32"))
+            (let pwsum (metal_pipeline hmsl "form_hc_wsum_f32"))
+            (let ppost (metal_pipeline hmsl "form_hc_post_f32"))
+            (let pslc (metal_pipeline (dfd-slice-msl) "dfd_slice"))
+
+            (let embh (metal_buf_from_file path eabs ebytes))
+            (let hafh (metal_buf_from_file path hafabs hafbytes))
+            (let hash (metal_buf_from_file path hasabs hasbytes))
+            (let habh (metal_buf_from_file path habsabs habsbytes))
+            (let xb (metal_buf_alloc (mul nembd 4)))
+            (let residb (metal_buf_alloc (mul (mul 4 nembd) 4)))
+            (let flatb (metal_buf_alloc (mul (mul 4 nembd) 4)))
+            (let mixb (metal_buf_alloc 96))
+            (let splitb (metal_buf_alloc 96))
+            (let postb (metal_buf_alloc 16))
+            (let combb (metal_buf_alloc 64))
+            (let curb (metal_buf_alloc (mul nembd 4)))
+            (let hcoutb (metal_buf_alloc (mul (mul 4 nembd) 4)))
+            (print "RUNG11 handles: 8 pipeline requests (embed/f16 dedupe) + 4 file views + 9 device buffers")
+
+            (let rowoff (mul (mul token nembd) 2))
+            (let e0 (metal_enqueue pe
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 embh) (dfd-u32 xb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 rowoff) (dfd-u32 nembd)))) nembd))
+            (let e1 (metal_enqueue pbc
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 xb) (dfd-u32 residb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 nembd)))) (mul 4 nembd)))
+            ; the wide norm: ONE 1024-thread group striding the 16384-wide row (the oracle's own shape)
+            (let e2 (metal_enqueue pnw (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 residb) (dfd-u32 flatb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 (mul 4 nembd)) (dfd-u32 (dfd-eps-bits))))) 1024 0) 1024))
+            (let e3 (metal_enqueue pf16
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 hafh) (dfd-u32 flatb)) (dfd-u32 mixb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 hafd1) (dfd-u32 (mul 4 nembd))))) hafd1))
+            ; the split: sigmoid pre/post + the 20-iteration Sinkhorn, one thread, iters a RUNTIME
+            ; uniform (an unrun iteration is not a computed zero — edgedrop)
+            (let e4 (metal_enqueue psq4
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 mixb) (dfd-u32 hash))
+                                                                (str_concat (dfd-u32 habh) (dfd-u32 splitb))))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 4) (dfd-u32 20)) (dfd-u32 (dfd-eps-bits))))) 1))
+            ; post/comb slices for hc_post — the door binds handles at fixed offsets, so a slice is
+            ; an explicit COPY dispatch, checked as a copy
+            (let e5 (metal_enqueue pslc
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 splitb) (dfd-u32 postb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4)))) 4))
+            (let e6 (metal_enqueue pslc
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 splitb) (dfd-u32 combb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 8) (dfd-u32 16)))) 16))
+            (let e7 (metal_enqueue pwsum
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 residb) (dfd-u32 splitb)) (dfd-u32 curb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 nembd)))) nembd))
+            (let e8 (metal_enqueue ppost
+                (str_concat (str_concat (dfd-u32 5) (str_concat (str_concat (str_concat (dfd-u32 xb) (dfd-u32 residb))
+                                                                            (str_concat (dfd-u32 postb) (dfd-u32 combb)))
+                                                                (dfd-u32 hcoutb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 nembd)))) (mul 4 nembd)))
+            (print (str_concat "ENQ rung11 9 dispatches sum=" (int_to_str (add e0 (add e1 (add e2 (add e3
+                (add e4 (add e5 (add e6 (add e7 e8)))))))))))
+
+            (let xraw (metal_buf_read xb 0 (mul nembd 4)))
+            (let residraw (metal_buf_read residb 0 (mul (mul 4 nembd) 4)))
+            (let flatraw (metal_buf_read flatb 0 (mul (mul 4 nembd) 4)))
+            (let mixraw (metal_buf_read mixb 0 96))
+            (let splitraw (metal_buf_read splitb 0 96))
+            (let postraw (metal_buf_read postb 0 16))
+            (let combraw (metal_buf_read combb 0 64))
+            (let curraw (metal_buf_read curb 0 (mul nembd 4)))
+            (let hcoutraw (metal_buf_read hcoutb 0 (mul (mul 4 nembd) 4)))
+
+            (let bceq (dfd-bc-eq xraw residraw 0 nembd 0))
+            (print (str_concat "HC broadcast bit-equal=" (str_concat (int_to_str bceq)
+                   (str_concat " of " (int_to_str (mul 4 nembd))))))
+            (let ss (dfd-sumsq-f32 residraw 0 (mul 4 nembd) 0.0))
+            (let inv (div 1.0 (tn-sqrt (add (div ss (mul 4 nembd)) (fd-value (dfd-eps-bits) 8 23)))))
+            (let relnw (div (dfd-nw-md residraw flatraw inv 0 (mul 4 nembd) 0.0)
+                            (dfd-nw-mr residraw inv 0 (mul 4 nembd) 0.0)))
+            (print (str_concat "HC REL rmsnorm-nw wide (ppb)=" (float_to_str (mul relnw 1000000000.0))))
+            (let hafraw (eqr-of-file path hafabs hafbytes))
+            (let fneq (dfd-f16mv-simeq hafraw (mul 4 nembd) flatraw mixraw (dfd-iota 0 hafd1) 1))
+            (print (str_concat "HC fn matvec f32-fold bit-equal (24 rows)=" (int_to_str fneq)))
+            ; the split vs the RECIPE (dsv4-hc.fk, band 63) in fp64: mix from the GPU (anchored by the
+            ; fn bit), scale and base from the FILE's own bytes at the pinned addresses
+            (let hasraw (eqr-of-file path hasabs hasbytes))
+            (let habraw (eqr-of-file path habsabs habsbytes))
+            (let sref (hc-split-flat (hc-split (dfd-f32list mixraw 0 24)
+                                              (dfd-f32list hasraw 0 3)
+                                              (dfd-f32list habraw 0 24)
+                                              4 20 (fd-value (dfd-eps-bits) 8 23))))
+            (let relsplit (div (dfd-lst-md splitraw sref 0 0.0) (dfd-lst-mr sref 0.0)))
+            (print (str_concat "HC REL split+sinkhorn20 vs recipe (ppb)=" (float_to_str (mul relsplit 1000000000.0))))
+            (let sliceeq (mul (dfd-slice-eq splitraw postraw 4 4 0 1)
+                              (dfd-slice-eq splitraw combraw 8 16 0 1)))
+            (print (str_concat "HC post/comb slices bit-equal=" (int_to_str sliceeq)))
+            (let wsumeq (dfd-wsum-eq residraw splitraw curraw nembd 0 0))
+            (print (str_concat "HC wsum f32-emulated bit-equal dims=" (str_concat (int_to_str wsumeq)
+                   (str_concat " of " (int_to_str nembd)))))
+            (let posteq (dfd-post-eq xraw residraw postraw combraw hcoutraw nembd 0 0))
+            (print (str_concat "HC post f32-emulated bit-equal (transpose read)=" (str_concat (int_to_str posteq)
+                   (str_concat " of " (int_to_str (mul 4 nembd))))))
+            (print (metal_status))
+            (cons bceq (cons relnw (cons fneq (cons relsplit (cons sliceeq (cons wsumeq (cons posteq
+                (cons hafabs (cons hasabs (cons habsabs (cons hffabs (cons hfsabs (cons hfbabs
+                (cons hafd0 (cons hafd1 (cons hafty
+                (cons (add eabs rowoff) (cons (metal_status) 0))))))))))))))))))))
+
+    ; ═══════════════ RUNG 12: the EXIT HEAD — hc collapse -> output_norm -> output.weight -> argmax ═
+    ; The oracle's nativeExitHead, dispatch for dispatch: rmsnorm_nw over the four streams -> the
+    ; output_hc_fn F16 matvec (4 rows) -> headw (sigmoid weights) -> wsum collapse -> output_norm
+    ; rmsnorm -> the Q8_0 unembedding [4096 -> 129280] -> argmax. The residual fed here is
+    ; broadcast(embed) — a real vector through proven steps, DECLARED as a stand-in exactly as rung
+    ; 11 declares its block_out: this rung owns the HEAD's arithmetic; the model's actual argmax
+    ; belongs to the stacked rungs and is NOT claimed here.
+    (defn dfd-headw-md (preraw scraw bsraw hwraw i acc)
+        (if (ge i 4) acc
+            (do (let z (add (mul (dfd-f32at preraw (mul i 4)) (dfd-f32at scraw 0))
+                            (dfd-f32at bsraw (mul i 4))))
+                (let r (add (div 1.0 (add 1.0 (tn-exp (sub 0.0 z)))) (fd-value (dfd-eps-bits) 8 23)))
+                (let d (abs (sub (dfd-f32at hwraw (mul i 4)) r)))
+                (dfd-headw-md preraw scraw bsraw hwraw (add i 1) (if (gt d acc) d acc)))))
+    (defn dfd-headw-mr (preraw scraw bsraw i acc)
+        (if (ge i 4) acc
+            (do (let z (add (mul (dfd-f32at preraw (mul i 4)) (dfd-f32at scraw 0))
+                            (dfd-f32at bsraw (mul i 4))))
+                (let r (abs (add (div 1.0 (add 1.0 (tn-exp (sub 0.0 z)))) (fd-value (dfd-eps-bits) 8 23))))
+                (dfd-headw-mr preraw scraw bsraw (add i 1) (if (gt r acc) r acc)))))
+    ; Form argmax over the GPU's logits: exact f32 comparisons, ties to the LOWEST index (strict >)
+    (defn dfd-argmax-go (lraw i n bi bv)
+        (if (ge i n) (cons bi (cons bv 0))
+            (do (let v (dfd-f32at lraw (mul i 4)))
+                (if (gt v bv) (dfd-argmax-go lraw (add i 1) n i v)
+                    (dfd-argmax-go lraw (add i 1) n bi bv)))))
+    ; the runner-up, for the tie margin the stream rung will need
+    (defn dfd-arg2-go (lraw i n skip bi bv)
+        (if (ge i n) (cons bi (cons bv 0))
+            (do (let v (dfd-f32at lraw (mul i 4)))
+                (if (eq i skip) (dfd-arg2-go lraw (add i 1) n skip bi bv)
+                    (if (gt v bv) (dfd-arg2-go lraw (add i 1) n skip i v)
+                        (dfd-arg2-go lraw (add i 1) n skip bi bv))))))
+
+    (defn dfd-exit-run (path token)
+        (do
+            (let src (dfd-src path))
+            (let nembd (dfd-td0 src "token_embd.weight"))
+            (let eabs (dfd-tabs src path "token_embd.weight"))
+            (let ebytes (dfd-tbytes src "token_embd.weight"))
+            (let ohfabs (dfd-tabs src path "output_hc_fn.weight"))
+            (let ohfbytes (dfd-tbytes src "output_hc_fn.weight"))
+            (let ohfd0 (dfd-td0 src "output_hc_fn.weight"))
+            (let ohfd1 (dfd-td1 src "output_hc_fn.weight"))
+            (let ohsabs (dfd-tabs src path "output_hc_scale.weight"))
+            (let ohsbytes (dfd-tbytes src "output_hc_scale.weight"))
+            (let ohbabs (dfd-tabs src path "output_hc_base.weight"))
+            (let ohbbytes (dfd-tbytes src "output_hc_base.weight"))
+            (let onabs (dfd-tabs src path "output_norm.weight"))
+            (let onbytes (dfd-tbytes src "output_norm.weight"))
+            (let owabs (dfd-tabs src path "output.weight"))
+            (let owbytes (dfd-tbytes src "output.weight"))
+            (let owty (dfd-ttype src "output.weight"))
+            (let vocab (dfd-td1 src "output.weight"))
+            (print (str_concat "GEOM exit ohf/ohs/ohb abs=" (str_concat (int_to_str ohfabs)
+                   (str_concat "/" (str_concat (int_to_str ohsabs)
+                   (str_concat "/" (str_concat (int_to_str ohbabs)
+                   (str_concat " fn dims=" (str_concat (int_to_str ohfd0)
+                   (str_concat "x" (int_to_str ohfd1)))))))))))
+            (print (str_concat "GEOM exit onorm/oweight abs=" (str_concat (int_to_str onabs)
+                   (str_concat "/" (str_concat (int_to_str owabs)
+                   (str_concat " ow type=" (str_concat (int_to_str owty)
+                   (str_concat " vocab=" (int_to_str vocab)))))))))
+
+            (let hmsl (dfd-hc-msl))
+            (let mslm (str_concat (dfd-msl-pragma) (mla-msl-unit)))
+            (let pe (metal_pipeline (dfd-embed-msl) "form_dsv4_embed_f16_u32"))
+            (let pbc (metal_pipeline hmsl "form_hc_broadcast_f32"))
+            (let pnw (metal_pipeline hmsl "form_hc_rmsnorm_nw_wide_f32"))
+            (let pf16 (metal_pipeline (dfd-f16-msl) "form_dsv4_f16_matvec"))
+            (let phw (metal_pipeline hmsl "form_hc_headw_f32"))
+            (let pwsum (metal_pipeline hmsl "form_hc_wsum_f32"))
+            (let pr (metal_pipeline mslm "form_mla_rmsnorm_reduce_f32"))
+            (let pa (metal_pipeline mslm "form_mla_rmsnorm_apply_f32"))
+            (let pq80 (dfd-mv-pipe owty))
+
+            (let embh (metal_buf_from_file path eabs ebytes))
+            (let ohfh (metal_buf_from_file path ohfabs ohfbytes))
+            (let ohsh (metal_buf_from_file path ohsabs ohsbytes))
+            (let ohbh (metal_buf_from_file path ohbabs ohbbytes))
+            (let onh (metal_buf_from_file path onabs onbytes))
+            (let owh (metal_buf_from_file path owabs owbytes))
+            (let xb (metal_buf_alloc (mul nembd 4)))
+            (let residb (metal_buf_alloc (mul (mul 4 nembd) 4)))
+            (let flatb (metal_buf_alloc (mul (mul 4 nembd) 4)))
+            (let preb (metal_buf_alloc 16))
+            (let hwb (metal_buf_alloc 16))
+            (let collb (metal_buf_alloc (mul nembd 4)))
+            (let ib (metal_buf_alloc 4))
+            (let normedb (metal_buf_alloc (mul nembd 4)))
+            (let logitsb (metal_buf_alloc (mul vocab 4)))
+            (print "RUNG12 handles: 9 pipeline requests (most dedupe) + 6 file views + 9 device buffers")
+
+            (let rowoff (mul (mul token nembd) 2))
+            (let e0 (metal_enqueue pe
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 embh) (dfd-u32 xb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 rowoff) (dfd-u32 nembd)))) nembd))
+            (let e1 (metal_enqueue pbc
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 xb) (dfd-u32 residb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 nembd)))) (mul 4 nembd)))
+            (let e2 (metal_enqueue pnw (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 residb) (dfd-u32 flatb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 (mul 4 nembd)) (dfd-u32 (dfd-eps-bits))))) 1024 0) 1024))
+            (let e3 (metal_enqueue pf16
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 ohfh) (dfd-u32 flatb)) (dfd-u32 preb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 ohfd1) (dfd-u32 (mul 4 nembd))))) ohfd1))
+            (let e4 (metal_enqueue phw
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 preb) (dfd-u32 ohsh))
+                                                                (str_concat (dfd-u32 ohbh) (dfd-u32 hwb))))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 (dfd-eps-bits))))) 4))
+            (let e5 (metal_enqueue pwsum
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 residb) (dfd-u32 hwb)) (dfd-u32 collb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 nembd)))) nembd))
+            (let e6 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 collb) (dfd-u32 ib)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 nembd) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
+            (let e7 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 collb) (dfd-u32 onh))
+                                                                (str_concat (dfd-u32 normedb) (dfd-u32 ib))))
+                            (str_concat (dfd-u32 1) (dfd-u32 nembd))) nembd))
+            (let e8 (dfd-mv-enq pq80 owty owh normedb logitsb vocab nembd))
+            (print (str_concat "ENQ rung12 9 dispatches sum=" (int_to_str (add e0 (add e1 (add e2 (add e3
+                (add e4 (add e5 (add e6 (add e7 e8)))))))))))
+
+            (let residraw (metal_buf_read residb 0 (mul (mul 4 nembd) 4)))
+            (let flatraw (metal_buf_read flatb 0 (mul (mul 4 nembd) 4)))
+            (let preraw (metal_buf_read preb 0 16))
+            (let hwraw (metal_buf_read hwb 0 16))
+            (let collraw (metal_buf_read collb 0 (mul nembd 4)))
+            (let ivraw (metal_buf_read ib 0 4))
+            (let normedraw (metal_buf_read normedb 0 (mul nembd 4)))
+            (let logitsraw (metal_buf_read logitsb 0 (mul vocab 4)))
+
+            (let ss (dfd-sumsq-f32 residraw 0 (mul 4 nembd) 0.0))
+            (let inv (div 1.0 (tn-sqrt (add (div ss (mul 4 nembd)) (fd-value (dfd-eps-bits) 8 23)))))
+            (let relnw (div (dfd-nw-md residraw flatraw inv 0 (mul 4 nembd) 0.0)
+                            (dfd-nw-mr residraw inv 0 (mul 4 nembd) 0.0)))
+            (print (str_concat "EXIT REL rmsnorm-nw (ppb)=" (float_to_str (mul relnw 1000000000.0))))
+            (let ohfraw (eqr-of-file path ohfabs ohfbytes))
+            (let preeq (dfd-f16mv-simeq ohfraw (mul 4 nembd) flatraw preraw (dfd-iota 0 ohfd1) 1))
+            (print (str_concat "EXIT pre matvec f32-fold bit-equal (4 rows)=" (int_to_str preeq)))
+            (let ohsraw (eqr-of-file path ohsabs ohsbytes))
+            (let ohbraw (eqr-of-file path ohbabs ohbbytes))
+            (let relhw (div (dfd-headw-md preraw ohsraw ohbraw hwraw 0 0.0)
+                            (dfd-headw-mr preraw ohsraw ohbraw 0 0.0)))
+            (print (str_concat "EXIT REL headw sigmoid (ppb)=" (float_to_str (mul relhw 1000000000.0))))
+            (let colleq (dfd-wsum-eq residraw hwraw collraw nembd 0 0))
+            (print (str_concat "EXIT collapse wsum bit-equal dims=" (str_concat (int_to_str colleq)
+                   (str_concat " of " (int_to_str nembd)))))
+            ; output_norm: rung-2's own reference machinery over the GPU's collapsed vector
+            (let onraw (eqr-of-file path onabs onbytes))
+            (let inv2 (dfd-f32at ivraw 0))
+            (let refms (div (dfd-sumsq-f32 collraw 0 nembd 0.0) nembd))
+            (let impms (sub (div 1.0 (mul inv2 inv2)) (fd-value (dfd-eps-bits) 8 23)))
+            (let relred (div (abs (sub impms refms)) refms))
+            (let relon (dfd-rms-ref collraw onraw normedraw nembd))
+            (print (str_concat "EXIT REL output_norm reduce/apply (ppb)=" (str_concat
+                   (float_to_str (mul relred 1000000000.0))
+                   (str_concat "/" (float_to_str (mul relon 1000000000.0))))))
+            ; the unembedding at eight sampled rows INCLUDING the argmax row and the runner-up
+            (let am (dfd-argmax-go logitsraw 0 vocab 0 (dfd-f32at logitsraw 0)))
+            (let am2 (dfd-arg2-go logitsraw 0 vocab (head am) 0 (sub (dfd-f32at logitsraw 0) 1000000.0)))
+            (let owraw (eqr-of-file path owabs owbytes))
+            (let lrows (cons (head am) (cons (head am2) (cons 0 (cons 1 (cons 64639 (cons 64640
+                       (cons 129278 (cons 129279 0)))))))))
+            (let rellog (div (dfd-q80-md-rows owraw nembd normedraw logitsraw lrows 0.0)
+                             (dfd-q80-mr-rows owraw nembd normedraw lrows 0.0)))
+            (print (str_concat "EXIT REL logits 8 rows (ppb)=" (float_to_str (mul rellog 1000000000.0))))
+            (print (str_concat "EXIT head-on-embedding argmax id/logit=" (str_concat (int_to_str (head am))
+                   (str_concat "/" (str_concat (float_to_str (head (tail am)))
+                   (str_concat "  runner-up " (str_concat (int_to_str (head am2))
+                   (str_concat "/" (float_to_str (head (tail am2)))))))))))
+            (print (metal_status))
+            (cons relnw (cons preeq (cons relhw (cons colleq (cons relred (cons relon (cons rellog
+                (cons (head am) (cons (head am2)
+                (cons ohfabs (cons ohsabs (cons ohbabs (cons onabs (cons owabs
+                (cons owty (cons vocab (cons ohfd0 (cons ohfd1
+                (cons (add eabs rowoff) (cons (metal_status) 0))))))))))))))))))))))
+
+    ; ═══════════════ RUNG 13: ONE COMPLETE LAYER, END TO END, at one position ═══════════════
+    ; blk.0 at pos 0 for token 671, every stage wired the way the oracle wires it: broadcast ->
+    ; hcPre(attn) -> MLA (rungs 4-7's chain, input = the hc-reduced stream, growing cache nrows=1)
+    ; -> hcPost -> hcPre(ffn) -> ffn_norm -> MoE + shared (rung 10) -> hcPost. No stage input is a
+    ; stand-in any more; every seam is checked by the reference machinery the earlier rungs proved,
+    ; reading the GPU's ACTUAL upstream buffers (induction).
+    (defn dfd-layer-run (path token)
+        (do
+            (let src (dfd-src path))
+            (let nembd (dfd-td0 src "token_embd.weight"))
+            (let eabs (dfd-tabs src path "token_embd.weight"))
+            (let ebytes (dfd-tbytes src "token_embd.weight"))
+            (let gabs (dfd-tabs src path "blk.0.attn_norm.weight"))
+            (let gbytes (dfd-tbytes src "blk.0.attn_norm.weight"))
+            (let qabs (dfd-tabs src path "blk.0.attn_q_a.weight"))
+            (let qbytes (dfd-tbytes src "blk.0.attn_q_a.weight"))
+            (let qaty (dfd-ttype src "blk.0.attn_q_a.weight"))
+            (let kvabs (dfd-tabs src path "blk.0.attn_kv.weight"))
+            (let kvbytes (dfd-tbytes src "blk.0.attn_kv.weight"))
+            (let qanabs (dfd-tabs src path "blk.0.attn_q_a_norm.weight"))
+            (let qanbytes (dfd-tbytes src "blk.0.attn_q_a_norm.weight"))
+            (let kvanabs (dfd-tabs src path "blk.0.attn_kv_a_norm.weight"))
+            (let kvanbytes (dfd-tbytes src "blk.0.attn_kv_a_norm.weight"))
+            (let qbabs (dfd-tabs src path "blk.0.attn_q_b.weight"))
+            (let qbbytes (dfd-tbytes src "blk.0.attn_q_b.weight"))
+            (let snkabs (dfd-tabs src path "blk.0.attn_sinks.weight"))
+            (let snkbytes (dfd-tbytes src "blk.0.attn_sinks.weight"))
+            (let oaabs (dfd-tabs src path "blk.0.attn_output_a.weight"))
+            (let oabytes (dfd-tbytes src "blk.0.attn_output_a.weight"))
+            (let oaty (dfd-ttype src "blk.0.attn_output_a.weight"))
+            (let obabs (dfd-tabs src path "blk.0.attn_output_b.weight"))
+            (let obbytes (dfd-tbytes src "blk.0.attn_output_b.weight"))
+            (let obty (dfd-ttype src "blk.0.attn_output_b.weight"))
+            (let hafabs (dfd-tabs src path "blk.0.hc_attn_fn.weight"))
+            (let hafbytes (dfd-tbytes src "blk.0.hc_attn_fn.weight"))
+            (let hasabs (dfd-tabs src path "blk.0.hc_attn_scale.weight"))
+            (let hasbytes (dfd-tbytes src "blk.0.hc_attn_scale.weight"))
+            (let habsabs (dfd-tabs src path "blk.0.hc_attn_base.weight"))
+            (let habsbytes (dfd-tbytes src "blk.0.hc_attn_base.weight"))
+            (let hffabs (dfd-tabs src path "blk.0.hc_ffn_fn.weight"))
+            (let hffbytes (dfd-tbytes src "blk.0.hc_ffn_fn.weight"))
+            (let hfsabs (dfd-tabs src path "blk.0.hc_ffn_scale.weight"))
+            (let hfsbytes (dfd-tbytes src "blk.0.hc_ffn_scale.weight"))
+            (let hfbabs (dfd-tabs src path "blk.0.hc_ffn_base.weight"))
+            (let hfbbytes (dfd-tbytes src "blk.0.hc_ffn_base.weight"))
+            (let fnabs (dfd-tabs src path "blk.0.ffn_norm.weight"))
+            (let fnbytes (dfd-tbytes src "blk.0.ffn_norm.weight"))
+            (let giabs (dfd-tabs src path "blk.0.ffn_gate_inp.weight"))
+            (let gibytes (dfd-tbytes src "blk.0.ffn_gate_inp.weight"))
+            (let tid2abs (dfd-tabs src path "blk.0.ffn_gate_tid2eid.weight"))
+            (let tid2bytes (dfd-tbytes src "blk.0.ffn_gate_tid2eid.weight"))
+            (let gxabs (dfd-tabs src path "blk.0.ffn_gate_exps.weight"))
+            (let gxbytes (dfd-tbytes src "blk.0.ffn_gate_exps.weight"))
+            (let uxabs (dfd-tabs src path "blk.0.ffn_up_exps.weight"))
+            (let uxbytes (dfd-tbytes src "blk.0.ffn_up_exps.weight"))
+            (let dxabs (dfd-tabs src path "blk.0.ffn_down_exps.weight"))
+            (let dxbytes (dfd-tbytes src "blk.0.ffn_down_exps.weight"))
+            (let sgabs (dfd-tabs src path "blk.0.ffn_gate_shexp.weight"))
+            (let sgbytes (dfd-tbytes src "blk.0.ffn_gate_shexp.weight"))
+            (let suabs (dfd-tabs src path "blk.0.ffn_up_shexp.weight"))
+            (let subytes (dfd-tbytes src "blk.0.ffn_up_shexp.weight"))
+            (let sdabs (dfd-tabs src path "blk.0.ffn_down_shexp.weight"))
+            (let sdbytes (dfd-tbytes src "blk.0.ffn_down_shexp.weight"))
+            (let sgty (dfd-ttype src "blk.0.ffn_gate_shexp.weight"))
+            (let nff 2048)
+            (let strideg (div gxbytes 256))
+            (let strided (div dxbytes 256))
+
+            (let hmsl (dfd-hc-msl))
+            (let mslm (str_concat (dfd-msl-pragma) (mla-msl-unit)))
+            (let fmsl (dfd-ffn-msl))
+            (let pe (metal_pipeline (dfd-embed-msl) "form_dsv4_embed_f16_u32"))
+            (let pbc (metal_pipeline hmsl "form_hc_broadcast_f32"))
+            (let pnw (metal_pipeline hmsl "form_hc_rmsnorm_nw_wide_f32"))
+            (let pf16 (metal_pipeline (dfd-f16-msl) "form_dsv4_f16_matvec"))
+            (let psq4 (metal_pipeline hmsl "form_hc_split_seq4_f32"))
+            (let pwsum (metal_pipeline hmsl "form_hc_wsum_f32"))
+            (let ppost (metal_pipeline hmsl "form_hc_post_f32"))
+            (let pslc (metal_pipeline (dfd-slice-msl) "dfd_slice"))
+            (let pr (metal_pipeline mslm "form_mla_rmsnorm_reduce_f32"))
+            (let pa (metal_pipeline mslm "form_mla_rmsnorm_apply_f32"))
+            (let ph (metal_pipeline mslm "form_mla_headrms_f32"))
+            (let pro (metal_pipeline mslm "form_mla_rope_f32"))
+            (let pat (metal_pipeline mslm "form_mla_attend_f32"))
+            (let pf (metal_pipeline (dfd-freqs-msl) "dfd_freqs"))
+            (let pkq (metal_pipeline (dfd-kvq-msl) "form_dsv4_kv_fp8_f16_round_par"))
+            (let pap (metal_pipeline (dfd-append-msl) "dfd_kv_append"))
+            (let pmv (dfd-mv-pipe qaty))
+            (let pg (dfd-mvg-pipe oaty))
+            (let phsel (metal_pipeline fmsl "form_dsv4_hash_select"))
+            (let phprb (metal_pipeline fmsl "form_dsv4_hash_probs"))
+            (let phwts (metal_pipeline fmsl "form_dsv4_hash_wts"))
+            (let pswg (metal_pipeline fmsl "form_dsv4_swiglu_f32"))
+            (let pswge (metal_pipeline fmsl "form_dsv4_swiglu_experts"))
+            (let pmred (metal_pipeline fmsl "form_dsv4_moe_reduce"))
+            (let pscl (metal_pipeline fmsl "form_dsv4_scale_f32"))
+            (let paxp (metal_pipeline fmsl "form_dsv4_axpy_f32"))
+            (let piq2 (metal_pipeline (dfd-iq2e-msl) "form_dsv4_iq2_matvec_experts4"))
+            (let pq2k (metal_pipeline (dfd-q2ke-msl) "form_dsv4_q2k_matvec_experts"))
+
+            (let embh (metal_buf_from_file path eabs ebytes))
+            (let gh (metal_buf_from_file path gabs gbytes))
+            (let qah (metal_buf_from_file path qabs qbytes))
+            (let kvh (metal_buf_from_file path kvabs kvbytes))
+            (let qanh (metal_buf_from_file path qanabs qanbytes))
+            (let kvanh (metal_buf_from_file path kvanabs kvanbytes))
+            (let qbh (metal_buf_from_file path qbabs qbbytes))
+            (let snkh (metal_buf_from_file path snkabs snkbytes))
+            (let oah (metal_buf_from_file path oaabs oabytes))
+            (let obh (metal_buf_from_file path obabs obbytes))
+            (let hafh (metal_buf_from_file path hafabs hafbytes))
+            (let hash (metal_buf_from_file path hasabs hasbytes))
+            (let habh (metal_buf_from_file path habsabs habsbytes))
+            (let hffh (metal_buf_from_file path hffabs hffbytes))
+            (let hfsh (metal_buf_from_file path hfsabs hfsbytes))
+            (let hfbh (metal_buf_from_file path hfbabs hfbbytes))
+            (let fnh (metal_buf_from_file path fnabs fnbytes))
+            (let gih (metal_buf_from_file path giabs gibytes))
+            (let tid2h (metal_buf_from_file path tid2abs tid2bytes))
+            (let gxh (metal_buf_from_file path gxabs gxbytes))
+            (let uxh (metal_buf_from_file path uxabs uxbytes))
+            (let dxh (metal_buf_from_file path dxabs dxbytes))
+            (let sgh (metal_buf_from_file path sgabs sgbytes))
+            (let suh (metal_buf_from_file path suabs subytes))
+            (let sdh (metal_buf_from_file path sdabs sdbytes))
+
+            (let xb (metal_buf_alloc (mul nembd 4)))
+            (let residb (metal_buf_alloc 65536))
+            (let flatb (metal_buf_alloc 65536))
+            (let amixb (metal_buf_alloc 96))
+            (let asplitb (metal_buf_alloc 96))
+            (let apostb (metal_buf_alloc 16))
+            (let acombb (metal_buf_alloc 64))
+            (let acurb (metal_buf_alloc (mul nembd 4)))
+            (let ib (metal_buf_alloc 4))
+            (let xnb (metal_buf_alloc (mul nembd 4)))
+            (let qlb (metal_buf_alloc 4096))
+            (let ib2 (metal_buf_alloc 4))
+            (let qlnb (metal_buf_alloc 4096))
+            (let klb (metal_buf_alloc 2048))
+            (let ib3 (metal_buf_alloc 4))
+            (let klnb (metal_buf_alloc 2048))
+            (let qqb (metal_buf_alloc 131072))
+            (let qhb (metal_buf_alloc 131072))
+            (let fb (metal_buf_alloc 128))
+            (let qrb (metal_buf_alloc 131072))
+            (let krb (metal_buf_alloc 2048))
+            (let kqb (metal_buf_alloc 2048))
+            (let cacheb (metal_buf_alloc 2048))
+            (let hab (metal_buf_alloc 131072))
+            (let hub (metal_buf_alloc 131072))
+            (let lob (metal_buf_alloc 32768))
+            (let aob (metal_buf_alloc (mul nembd 4)))
+            (let aftb (metal_buf_alloc 65536))
+            (let fflatb (metal_buf_alloc 65536))
+            (let fmixb (metal_buf_alloc 96))
+            (let fsplitb (metal_buf_alloc 96))
+            (let fpostb (metal_buf_alloc 16))
+            (let fcombb (metal_buf_alloc 64))
+            (let fcurb (metal_buf_alloc (mul nembd 4)))
+            (let ib4 (metal_buf_alloc 4))
+            (let fnrmb (metal_buf_alloc (mul nembd 4)))
+            (let logitsb (metal_buf_alloc 1024))
+            (let idsb (metal_buf_alloc 24))
+            (let wtsb (metal_buf_alloc 24))
+            (let probsb (metal_buf_alloc 1024))
+            (let gateb (metal_buf_alloc 49152))
+            (let upb (metal_buf_alloc 49152))
+            (let midb (metal_buf_alloc 49152))
+            (let partsb (metal_buf_alloc 98304))
+            (let moeb (metal_buf_alloc (mul nembd 4)))
+            (let sgvb (metal_buf_alloc (mul nff 4)))
+            (let suvb (metal_buf_alloc (mul nff 4)))
+            (let smidb (metal_buf_alloc (mul nff 4)))
+            (let sharedb (metal_buf_alloc (mul nembd 4)))
+            (let ffnoutb (metal_buf_alloc (mul nembd 4)))
+            (let outb (metal_buf_alloc 65536))
+            (print "RUNG13 handles: 27 pipeline requests (heavy dedupe) + 25 file views + 47 device buffers")
+
+            (let rowoff (mul (mul token nembd) 2))
+            ; A. embed -> broadcast
+            (let a0 (metal_enqueue pe
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 embh) (dfd-u32 xb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 rowoff) (dfd-u32 nembd)))) nembd))
+            (let a1 (metal_enqueue pbc
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 xb) (dfd-u32 residb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 nembd)))) 16384))
+            ; B. attn hcPre
+            (let b0 (metal_enqueue pnw (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 residb) (dfd-u32 flatb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 16384) (dfd-u32 (dfd-eps-bits))))) 1024 0) 1024))
+            (let b1 (metal_enqueue pf16
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 hafh) (dfd-u32 flatb)) (dfd-u32 amixb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 24) (dfd-u32 16384)))) 24))
+            (let b2 (metal_enqueue psq4
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 amixb) (dfd-u32 hash))
+                                                                (str_concat (dfd-u32 habh) (dfd-u32 asplitb))))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 4) (dfd-u32 20)) (dfd-u32 (dfd-eps-bits))))) 1))
+            (let b3 (metal_enqueue pslc
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 asplitb) (dfd-u32 apostb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4)))) 4))
+            (let b4 (metal_enqueue pslc
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 asplitb) (dfd-u32 acombb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 8) (dfd-u32 16)))) 16))
+            (let b5 (metal_enqueue pwsum
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 residb) (dfd-u32 asplitb)) (dfd-u32 acurb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 nembd)))) nembd))
+            ; C. the MLA block on acurb at pos 0 (nrows = 1)
+            (let c0 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 acurb) (dfd-u32 ib)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 nembd) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
+            (let c1 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 acurb) (dfd-u32 gh))
+                                                                (str_concat (dfd-u32 xnb) (dfd-u32 ib))))
+                            (str_concat (dfd-u32 1) (dfd-u32 nembd))) nembd))
+            (let c2 (dfd-mv-enq pmv qaty qah xnb qlb 1024 nembd))
+            (let c3 (dfd-mv-enq pmv qaty kvh xnb klb 512 nembd))
+            (let c4 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 qlb) (dfd-u32 ib2)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1024) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
+            (let c5 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 qlb) (dfd-u32 qanh))
+                                                                (str_concat (dfd-u32 qlnb) (dfd-u32 ib2))))
+                            (str_concat (dfd-u32 1) (dfd-u32 1024))) 1024))
+            (let c6 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 klb) (dfd-u32 ib3)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
+            (let c7 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 klb) (dfd-u32 kvanh))
+                                                                (str_concat (dfd-u32 klnb) (dfd-u32 ib3))))
+                            (str_concat (dfd-u32 1) (dfd-u32 512))) 512))
+            (let c8 (dfd-mv-enq pmv qaty qbh qlnb qqb 32768 1024))
+            (let c9 (metal_enqueue ph
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 qqb) (dfd-u32 qhb)))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512)) (dfd-u32 (dfd-eps-bits))))) 64))
+            (let c10 (metal_enqueue pf
+                (str_concat (str_concat (dfd-u32 1) (dfd-u32 fb))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 32) (dfd-u32 64)) (dfd-u32 1176256512)))) 32))
+            (let c11 (metal_enqueue pro
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 qhb) (dfd-u32 qrb)) (dfd-u32 fb)))
+                            (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512))
+                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 0) (dfd-u32 1065353216)))))) 32768))
+            (let c12 (metal_enqueue pro
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 klnb) (dfd-u32 krb)) (dfd-u32 fb)))
+                            (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 1) (dfd-u32 512))
+                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 0) (dfd-u32 1065353216)))))) 512))
+            (let c13 (metal_enqueue pkq (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 krb) (dfd-u32 kqb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 64)))) 512 0) 512))
+            (let c14 (metal_enqueue pap
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 kqb) (dfd-u32 cacheb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 0) (dfd-u32 512)))) 512))
+            (let c15 (metal_enqueue pat
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 qrb) (dfd-u32 cacheb))
+                                                                (str_concat (dfd-u32 hab) (dfd-u32 snkh))))
+                            (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512))
+                                (str_concat (dfd-u32 1) (dfd-u32 1026884851))))) 64))
+            (let c16 (metal_enqueue pro
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 hab) (dfd-u32 hub)) (dfd-u32 fb)))
+                            (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512))
+                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 0) (dfd-u32 3212836864)))))) 32768))
+            (let c17 (dfd-mvg-enq pg oah hub lob 8192 4096 1024))
+            (let c18 (dfd-mv-enq pmv obty obh lob aob 4096 8192))
+            ; D. afterAttn = hcPost(attnOut, resid, attn split)
+            (let d0 (metal_enqueue ppost
+                (str_concat (str_concat (dfd-u32 5) (str_concat (str_concat (str_concat (dfd-u32 aob) (dfd-u32 residb))
+                                                                            (str_concat (dfd-u32 apostb) (dfd-u32 acombb)))
+                                                                (dfd-u32 aftb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 nembd)))) 16384))
+            ; E. ffn hcPre
+            (let f0 (metal_enqueue pnw (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 aftb) (dfd-u32 fflatb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 16384) (dfd-u32 (dfd-eps-bits))))) 1024 0) 1024))
+            (let f1 (metal_enqueue pf16
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 hffh) (dfd-u32 fflatb)) (dfd-u32 fmixb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 24) (dfd-u32 16384)))) 24))
+            (let f2 (metal_enqueue psq4
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 fmixb) (dfd-u32 hfsh))
+                                                                (str_concat (dfd-u32 hfbh) (dfd-u32 fsplitb))))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 4) (dfd-u32 20)) (dfd-u32 (dfd-eps-bits))))) 1))
+            (let f3 (metal_enqueue pslc
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 fsplitb) (dfd-u32 fpostb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4)))) 4))
+            (let f4 (metal_enqueue pslc
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 fsplitb) (dfd-u32 fcombb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 8) (dfd-u32 16)))) 16))
+            (let f5 (metal_enqueue pwsum
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 aftb) (dfd-u32 fsplitb)) (dfd-u32 fcurb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 nembd)))) nembd))
+            ; F. ffn_norm -> MoE + shared -> add
+            (let g0 (metal_enqueue pr (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 fcurb) (dfd-u32 ib4)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 nembd) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
+            (let g1 (metal_enqueue pa
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 fcurb) (dfd-u32 fnh))
+                                                                (str_concat (dfd-u32 fnrmb) (dfd-u32 ib4))))
+                            (str_concat (dfd-u32 1) (dfd-u32 nembd))) nembd))
+            (let g2 (metal_enqueue pf16
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 gih) (dfd-u32 fnrmb)) (dfd-u32 logitsb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 256) (dfd-u32 nembd)))) 256))
+            (let g3 (metal_enqueue phsel
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 tid2h) (dfd-u32 idsb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 token) (dfd-u32 6)))) 6))
+            (let g4 (metal_enqueue phprb (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 logitsb) (dfd-u32 probsb)))
+                            (str_concat (dfd-u32 1) (dfd-u32 256))) 32 0) 256))
+            (let g5 (metal_enqueue phwts
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 probsb) (dfd-u32 idsb)) (dfd-u32 wtsb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 6) (dfd-u32 1069547520)))) 1))
+            (let g6 (metal_enqueue piq2 (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 gxh) (dfd-u32 fnrmb))
+                                                                (str_concat (dfd-u32 gateb) (dfd-u32 idsb))))
+                            (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 nff) (dfd-u32 nembd))
+                                                                (str_concat (dfd-u32 strideg) (dfd-u32 6)))))
+                64 0) 98304))
+            (let g7 (metal_enqueue piq2 (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 uxh) (dfd-u32 fnrmb))
+                                                                (str_concat (dfd-u32 upb) (dfd-u32 idsb))))
+                            (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 nff) (dfd-u32 nembd))
+                                                                (str_concat (dfd-u32 strideg) (dfd-u32 6)))))
+                64 0) 98304))
+            (let g8 (metal_enqueue pswge (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 gateb) (dfd-u32 upb))
+                                                                (str_concat (dfd-u32 midb) (dfd-u32 wtsb))))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 nff) (dfd-u32 6)) (dfd-u32 1092616192))))
+                32 0) 12288))
+            (let g9 (metal_enqueue pq2k (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 dxh) (dfd-u32 midb))
+                                                                (str_concat (dfd-u32 partsb) (dfd-u32 idsb))))
+                            (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 nembd) (dfd-u32 nff))
+                                                                (str_concat (dfd-u32 strided) (dfd-u32 6)))))
+                64 0) 24576))
+            (let g10 (metal_enqueue pmred (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 partsb) (dfd-u32 moeb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 nembd) (dfd-u32 6)))) 32 0) nembd))
+            (let g11 (dfd-mv-enq pmv sgty sgh fnrmb sgvb nff nembd))
+            (let g12 (dfd-mv-enq pmv sgty suh fnrmb suvb nff nembd))
+            (let g13 (metal_enqueue pswg
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 sgvb) (dfd-u32 suvb)) (dfd-u32 smidb)))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 nff) (dfd-u32 1065353216)) (dfd-u32 1092616192)))) nff))
+            (let g14 (dfd-mv-enq pmv sgty sdh smidb sharedb nembd nff))
+            (let g15 (metal_enqueue pscl (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 moeb) (dfd-u32 ffnoutb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1065353216) (dfd-u32 nembd)))) 32 0) nembd))
+            (let g16 (metal_enqueue paxp (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 sharedb) (dfd-u32 ffnoutb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1065353216) (dfd-u32 nembd)))) 32 0) nembd))
+            ; G. out streams = hcPost(ffnOut, afterAttn, ffn split)
+            (let g17 (metal_enqueue ppost
+                (str_concat (str_concat (dfd-u32 5) (str_concat (str_concat (str_concat (dfd-u32 ffnoutb) (dfd-u32 aftb))
+                                                                            (str_concat (dfd-u32 fpostb) (dfd-u32 fcombb)))
+                                                                (dfd-u32 outb)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 nembd)))) 16384))
+            (print "ENQ rung13 ~48 dispatches enqueued, one batch")
+
+            ; ── the reads drain the batch; the join checks, each on the GPU's ACTUAL buffers
+            (let residraw (metal_buf_read residb 0 65536))
+            (let asplitraw (metal_buf_read asplitb 0 96))
+            (let acurraw (metal_buf_read acurb 0 (mul nembd 4)))
+            (let xnraw (metal_buf_read xnb 0 (mul nembd 4)))
+            (let krraw (metal_buf_read krb 0 2048))
+            (let kqraw (metal_buf_read kqb 0 2048))
+            (let qrraw (metal_buf_read qrb 0 131072))
+            (let habraw (metal_buf_read hab 0 131072))
+            (let loraw (metal_buf_read lob 0 32768))
+            (let aoraw (metal_buf_read aob 0 (mul nembd 4)))
+            (let apostraw (metal_buf_read apostb 0 16))
+            (let acombraw (metal_buf_read acombb 0 64))
+            (let aftraw (metal_buf_read aftb 0 65536))
+            (let fsplitraw (metal_buf_read fsplitb 0 96))
+            (let fcurraw (metal_buf_read fcurb 0 (mul nembd 4)))
+            (let fnrmraw (metal_buf_read fnrmb 0 (mul nembd 4)))
+            (let idsraw (metal_buf_read idsb 0 24))
+            (let partsraw (metal_buf_read partsb 0 98304))
+            (let moeraw (metal_buf_read moeb 0 (mul nembd 4)))
+            (let sharedraw (metal_buf_read sharedb 0 (mul nembd 4)))
+            (let ffnoutraw (metal_buf_read ffnoutb 0 (mul nembd 4)))
+            (let fpostraw (metal_buf_read fpostb 0 16))
+            (let fcombraw (metal_buf_read fcombb 0 64))
+            (let outraw (metal_buf_read outb 0 65536))
+
+            (let j1 (dfd-wsum-eq residraw asplitraw acurraw nembd 0 0))
+            (let gwraw (eqr-of-file path gabs (mul nembd 4)))
+            (let j2 (dfd-rms-ref acurraw gwraw xnraw nembd))
+            (let j3 (dfd-kvq-cmp krraw kqraw 0 1.0 0))
+            (let snkraw (eqr-of-file path snkabs snkbytes))
+            (let j4md (dfd-att-all-md qrraw kqraw snkraw habraw 0 0.0))
+            (let j4 (div j4md (dfd-att-all-mr qrraw kqraw snkraw 0 0.0)))
+            (let obwraw (eqr-of-file path obabs obbytes))
+            (let brows (cons 0 (cons 1 (cons 2047 (cons 4095 0)))))
+            (let j5 (div (dfd-mx8-md-rows obty obwraw (mul 4096 8192) 8192 loraw aoraw brows 0.0)
+                         (dfd-mx8-mr-rows obty obwraw (mul 4096 8192) 8192 loraw brows 0.0)))
+            (let j6 (dfd-post-eq aoraw residraw apostraw acombraw aftraw nembd 0 0))
+            (let j7 (dfd-wsum-eq aftraw fsplitraw fcurraw nembd 0 0))
+            (let fnwraw (eqr-of-file path fnabs (mul nembd 4)))
+            (let j8 (dfd-rms-ref fcurraw fnwraw fnrmraw nembd))
+            (let j9 (div (dfd-iq2e-md path gxabs strideg idsraw fnrmraw (metal_buf_read gateb 0 49152) nff 0 0.0)
+                         (dfd-iq2e-mr path gxabs strideg idsraw fnrmraw nff 0 0.0)))
+            (let j10 (dfd-red-eq partsraw moeraw nembd 0 0))
+            (let j11 (dfd-add-eq moeraw sharedraw ffnoutraw nembd 0 0))
+            (let j12 (dfd-post-eq ffnoutraw aftraw fpostraw fcombraw outraw nembd 0 0))
+            ; the two splits vs the recipe, mix from the GPU, scale/base from the file
+            (let hasraw (eqr-of-file path hasabs hasbytes))
+            (let habraw2 (eqr-of-file path habsabs habsbytes))
+            (let amixraw (metal_buf_read amixb 0 96))
+            (let asref (hc-split-flat (hc-split (dfd-f32list amixraw 0 24) (dfd-f32list hasraw 0 3)
+                                               (dfd-f32list habraw2 0 24) 4 20 (fd-value (dfd-eps-bits) 8 23))))
+            (let j13 (div (dfd-lst-md asplitraw asref 0 0.0) (dfd-lst-mr asref 0.0)))
+            (let hfsraw (eqr-of-file path hfsabs hfsbytes))
+            (let hfbraw (eqr-of-file path hfbabs hfbbytes))
+            (let fmixraw (metal_buf_read fmixb 0 96))
+            (let fsref (hc-split-flat (hc-split (dfd-f32list fmixraw 0 24) (dfd-f32list hfsraw 0 3)
+                                               (dfd-f32list hfbraw 0 24) 4 20 (fd-value (dfd-eps-bits) 8 23))))
+            (let j14 (div (dfd-lst-md fsplitraw fsref 0 0.0) (dfd-lst-mr fsref 0.0)))
+            (print (str_concat "LAYER j1 attn-wsum bit=" (str_concat (int_to_str j1)
+                   (str_concat " j2 attn_norm ppb=" (str_concat (float_to_str (mul j2 1000000000.0))
+                   (str_concat " j3 kvround=" (str_concat (int_to_str j3)
+                   (str_concat " j4 attend ppb=" (float_to_str (mul j4 1000000000.0))))))))))
+            (print (str_concat "LAYER j5 output_b ppb=" (str_concat (float_to_str (mul j5 1000000000.0))
+                   (str_concat " j6 attn-post bit=" (str_concat (int_to_str j6)
+                   (str_concat " j7 ffn-wsum bit=" (str_concat (int_to_str j7)
+                   (str_concat " j8 ffn_norm ppb=" (float_to_str (mul j8 1000000000.0))))))))))
+            (print (str_concat "LAYER j9 iq2-gate ppb=" (str_concat (float_to_str (mul j9 1000000000.0))
+                   (str_concat " j10 reduce bit=" (str_concat (int_to_str j10)
+                   (str_concat " j11 add bit=" (str_concat (int_to_str j11)
+                   (str_concat " j12 out-post bit=" (int_to_str j12)))))))))
+            (print (str_concat "LAYER j13 attn-split ppb=" (str_concat (float_to_str (mul j13 1000000000.0))
+                   (str_concat " j14 ffn-split ppb=" (float_to_str (mul j14 1000000000.0))))))
+            (print (metal_status))
+            (cons j1 (cons j2 (cons j3 (cons j4 (cons j5 (cons j6 (cons j7 (cons j8
+                (cons j9 (cons j10 (cons j11 (cons j12 (cons j13 (cons j14
+                (cons (add eabs rowoff) (cons (metal_status) 0))))))))))))))))))
+
     ; ================= UNFINISHED, named so it cannot be mistaken for done =================
-    ; - the full MLA attention block for layer 0 at pos 7 runs end to end from this cell
-    ;   (embed -> ... -> rope -> fp8+f16 KV round -> attend -> inverse rope -> grouped output_a ->
-    ;   output_b, 19 dispatches); the RAW KV cache GROWS over the real prompt (rung 8); and the
-    ;   COMPRESSED second cache now runs on blk.2 (rung 9: the compressor's four kernels, the YaRN
-    ;   table at four pinned regimes, comp_pos rope, the packed plane, and attend_mixed's one
-    ;   softmax over 8 raw + 2 comp rows). The indexer mask stays inert below 2048 tokens and is
-    ;   declared, not implemented (dsv4-compressor.fk's aporon radius).
-    ; - the 43-layer stack. Still unwritten here: two routing regimes (hash blk.0-2 via
-    ;   ffn_gate_tid2eid, learned top-6 via form_dsv4_topk_weights — NOT moe-gate.fk, whose
-    ;   softmax rule is a different animal from ds4's sqrt-softplus), six expert quantizations
-    ;   (MXFP4/IQ2_XXS/Q2_K/Q8_0/MXFP8/F16), the shared expert + swiglu, the 4 hyper-connection
-    ;   streams + 20-iteration sinkhorn (dsv4-hc-msl.fk), the exit head (hc collapse ->
-    ;   output_norm -> output.weight -> argmax), the MLA scores/stats/acc split.
-    ; - the one-token argmax against metal_dsv4_stack.sh, then the greedy stream diffed against
-    ;   the restored bash lane's ids on the canonical file. Not attempted — there is no stack yet
-    ;   to take an argmax of. Claiming it from a working block would be a fabrication.
+    ; - Rungs 1-13 run and are banded from this cell: the attention block, both KV caches, the MoE
+    ;   (both routing regimes on this file's uniform IQ2_XXS/Q2_K experts, the shared lane, the
+    ;   clamp witnessed on device), the hyper-connection frames with the 20-iteration Sinkhorn, the
+    ;   exit head, and the JOINED single layer (blk.0 end to end at pos 0).
+    ; - The 43-layer stack and the greedy stream live in native/metal/dsv4-decode-stack.fk
+    ;   (rung 14), which preludes this cell and adds the LOOP, not new arithmetic. The stream is
+    ;   diffed against the bash lane's receipt-recorded ids on the canonical file
+    ;   (receipts/2026-07-30-order-match.md): 24/24, plus the lane's own 25th.
+    ; - Still open past rung 14: SPEED (ms/token vs the recorded 28 t/s — the Form-side argmax and
+    ;   the serial encode are the first costs; measure quiet, never under a sibling's load); the
+    ;   ratio-128 layers' emitted rows (no run has crossed pos 127 on this device); the indexer
+    ;   mask stays inert below 2048 tokens (top_k 512) and is declared, not implemented
+    ;   (dsv4-compressor.fk's aporon radius); the MLA scores/stats/acc split (the oracle's
+    ;   production attend) is not mirrored — attend_mixed carries the fold here.
+    ; - Instrument boundary, learned at rung 10 and carried forward: EQUALITY is for PINNED ops
+    ;   (adds, muls — they held bit equality across every lane asked); an op whose rounding the
+    ;   COMPILER owns (fast-math division, on this door and in the oracle's own metallibs alike)
+    ;   gets a bound DERIVED from its documented ulp, never a negotiated tolerance.
     0)
