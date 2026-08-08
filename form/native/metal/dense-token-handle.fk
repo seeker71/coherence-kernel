@@ -27,15 +27,20 @@
 ;                      metal_buf_from_file rather than dispatching garbage.
 ;   tied embeddings    the absence of output.weight in the table, never a convention.
 ;
-; THE KERNELS ARE THE BODY'S ATTESTANTS, unchanged: q6k/q4k/q80 fused matvec (one thread per row,
-; serial right-fold), form_rmsnorm_f32 (one thread), form_rope_f32 (adjacent pairs, per head),
-; form_gqa_decode_f32, form_swiglu_f32, form_add_f32, form_argmax_f32. Two kernels are this cell's
-; own and both are transcriptions, not inventions: dth-copy-msl is the identity with a shifted
-; destination (the KV-cache move the door's fixed-offset binding makes necessary — llama-token-
-; handle.fk's finding, kept), and dth-neox-msl is form_rope_f32's arithmetic with the pair layout
-; (j, j+rd/2) instead of (i, i+1) and the frequency exponent 2j/rd — the half-split rotation the
-; qwen2 family declares. fp contraction is OFF by pragma in the emitted text, the fix
-; fk-metal-carrier.m's own header says belongs to the Form cell.
+; THE KERNELS ARE THE BODY'S ATTESTANTS, unchanged, plus (2026-08-08) THE BIT-EXACT TWINS the
+; llama lane proved on 2026-08-04, adopted family-wide: form_rmsnorm_tg_f32 inside its stated
+; radius (n <= 4096, one threadgroup; past it — qwen2-32B d=5120, 72B d=8192 — the serial
+; attestant stays because the twin there is WRONG, not slow), form_rope_pair_f32 (a thread map,
+; hd even), form_argmax_part/comb_f32 (comparison and selection only, ties still to the lowest
+; index), tpg=256 on every mode-0 dispatch, and concurrent batches whose hazards THIS CELL
+; declares per dispatch (barrier_before = "must I see my predecessors' writes"). Equality with
+; the attestants, not an epsilon — gated by the full two-prompt id stream per model.
+; Two kernels are this cell's own and both are transcriptions, not inventions: dth-copy-msl is
+; the identity with a shifted destination (the KV-cache move the door's fixed-offset binding
+; makes necessary — llama-token-handle.fk's finding, kept), and dth-neox-msl is form_rope_f32's
+; arithmetic with the pair layout (j, j+rd/2) instead of (i, i+1) and the frequency exponent
+; 2j/rd — the half-split rotation the qwen2 family declares. fp contraction is OFF by pragma in
+; the emitted text, the fix fk-metal-carrier.m's own header says belongs to the Form cell.
 ;
 ; THE TENSOR TABLE IS WALKED ONCE. egg-find-tensor re-walks the header per lookup — measured O(n^2)
 ; at 255 tensors (~74 s of setup) and 771 tensors would pay ~9x that. dth-table carries the cursor
@@ -219,6 +224,8 @@
     ; pipes: 0 q6mv 1 q4mv 2 q80mv 3 q6dq 4 q4dq 5 q80dq 6 rms 7 rope 8 neox 9 attn 10 swiglu
     ;        11 add 12 argmax 13 copy 14 q5kmv 15 q5kdq 16 q50mv 17 q50dq 18 q40mv 19 q40dq
     ;        20 layernorm 21 gelu 22 copyfrom
+    ;        23 rmsnorm_tg 24 argmax_part 25 argmax_comb 26 rope_pair   (the bit-exact twins,
+    ;        adopted 2026-08-08 from the llama lane where each carries its stated radius)
     (defn dth-pipes (msl)
         (list (metal_pipeline msl "form_q6k_matvec_f32")
               (metal_pipeline msl "form_q4k_matvec_f32")
@@ -242,12 +249,16 @@
               (metal_pipeline msl "form_q40_dequant_f32")
               (metal_pipeline msl "form_layernorm_f32")
               (metal_pipeline msl "form_gelu_f32")
-              (metal_pipeline msl "form_copy_from_f32")))
+              (metal_pipeline msl "form_copy_from_f32")
+              (metal_pipeline msl "form_rmsnorm_tg_f32")
+              (metal_pipeline msl "form_argmax_part_f32")
+              (metal_pipeline msl "form_argmax_comb_f32")
+              (metal_pipeline msl "form_rope_pair_f32")))
 
     (defn dth-pipe-ok? (ps) (if (eq (len ps) 0) true (if (eq (head ps) 0) false (dth-pipe-ok? (tail ps)))))
 
     ; bufs: 0 X 1 Xb 2 Q 3 Ks 4 Vs 5 Attn 6 Proj 7 Ffn 8 Gate 9 Up 10 Act 11 Logits 12 Scratch
-    ;       13 OutI 14 OutV
+    ;       13 OutI 14 OutV 15 PartI 16 PartV (the two-stage argmax partials, 1024 entries)
     ; Q, Attn are sized qOut = nHead * headDim, which is NOT dModel on every file (nanbeige: 6144
     ; over d=3072; MiniCPM5: 2048 over 1536).
     (defn dth-bufs (dModel dFF qOut kvd vocabN nHead maxpos)
@@ -265,7 +276,9 @@
               (metal_buf_alloc (mul vocabN 4))
               (metal_buf_alloc (mul (mul (mul 2 nHead) maxpos) 4))
               (metal_buf_alloc 16)
-              (metal_buf_alloc 16)))
+              (metal_buf_alloc 16)
+              (metal_buf_alloc 4096)
+              (metal_buf_alloc 4096)))
 
     ; nLayer * nLoop cache banks: pass 2 must never read pass 1's history as its own.
     (defn dth-cache (n kvd maxpos acc)
@@ -284,73 +297,112 @@
                 (dth-tv-h (dth-tv tab base path "rope_freqs.weight")))))
 
     ; ================= dispatches =================
-    (defn dth-mv (ps tv xh yh)
+    ; EVERY MODE-0 DISPATCH CAPS ITS GROUP AT 256 and EVERY BATCH IS CONCURRENT with hazards
+    ; DECLARED BY THIS CELL via barrier_before — the llama lane's own proven shape (2026-08-04:
+    ; 1083 ms/token at the 1024 ceiling against 388 at 256; serial -> concurrent was the twins'
+    ; 3x), adopted here 2026-08-08. bb on each helper is exactly "must I see my predecessors'
+    ; writes": independent runs (q/k/v off one normed vector, gate/up, the two ropes, the two
+    ; cache copies) share a stage, everything else fences.
+    (defn dth-mv (ps tv xh yh bb)
         (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 0)
                        (if (eq (dth-tv-ty tv) 12) (nth ps 1)
                        (if (eq (dth-tv-ty tv) 13) (nth ps 14)
                        (if (eq (dth-tv-ty tv) 6) (nth ps 16)
                        (if (eq (dth-tv-ty tv) 2) (nth ps 18) (nth ps 2))))))
-                       (md-bind (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv)))
+                       (md-bind16 (list (dth-tv-h tv) xh yh) (list (dth-tv-r tv) (dth-tv-c tv))
+                                  256 0 0 bb)
                        (dth-tv-r tv)))
 
-    (defn dth-dq (ps tv yh off n)
+    (defn dth-dq (ps tv yh off n bb)
         (metal_enqueue (if (eq (dth-tv-ty tv) 14) (nth ps 3)
                        (if (eq (dth-tv-ty tv) 12) (nth ps 4)
                        (if (eq (dth-tv-ty tv) 13) (nth ps 15)
                        (if (eq (dth-tv-ty tv) 6) (nth ps 17)
                        (if (eq (dth-tv-ty tv) 2) (nth ps 19) (nth ps 5))))))
-                       (md-bind (list (dth-tv-h tv) yh) (list off n))
+                       (md-bind16 (list (dth-tv-h tv) yh) (list off n) 256 0 0 bb)
                        n))
 
-    (defn dth-rms (ps xh gtv yh n epsBits)
-        (metal_enqueue (nth ps 6) (md-bind (list xh (dth-tv-h gtv) yh) (list n epsBits)) 1))
+    ; the cooperative RMSNorm is BIT FOR BIT the attestant inside its stated radius (n <= 4096,
+    ; ONE threadgroup, honored by mode 1) — outside it (qwen2-32B d=5120, 72B d=8192) the serial
+    ; attestant stays, because past the radius the twin is WRONG, not slow.
+    (defn dth-rms (ps xh gtv yh n epsBits bb)
+        (if (le n 4096)
+            (metal_enqueue (nth ps 23) (md-bind16 (list xh (dth-tv-h gtv) yh) (list n epsBits)
+                                                  256 0 1 bb) 1)
+            (metal_enqueue (nth ps 6) (md-bind16 (list xh (dth-tv-h gtv) yh) (list n epsBits)
+                                                 256 0 0 bb) 1)))
 
-    ; style 0: adjacent pairs over the whole head. style 1: half-split over the first rd dims.
-    (defn dth-rope (ps style vh ropeH nh hd rd pos baseBits)
+    ; style 0: adjacent pairs over the whole head — at PAIR grain (a thread map, not an order;
+    ; radius: hd even, else the per-head attestant). style 1: half-split over the first rd dims.
+    (defn dth-rope (ps style vh ropeH nh hd rd pos baseBits bb)
         (if (eq style 1)
-            (metal_enqueue (nth ps 8) (md-bind (list vh ropeH) (list nh hd rd pos baseBits)) nh)
-            (metal_enqueue (nth ps 7) (md-bind (list vh ropeH) (list nh hd pos baseBits)) nh)))
+            (metal_enqueue (nth ps 8) (md-bind16 (list vh ropeH) (list nh hd rd pos baseBits)
+                                                 256 0 0 bb) nh)
+            (if (eq (mod hd 2) 0)
+                (metal_enqueue (nth ps 26) (md-bind16 (list vh ropeH) (list nh hd pos baseBits)
+                                                      256 0 0 bb) (mul nh (div hd 2)))
+                (metal_enqueue (nth ps 7) (md-bind16 (list vh ropeH) (list nh hd pos baseBits)
+                                                     256 0 0 bb) nh))))
 
-    (defn dth-attn (ps qh kh vh yh sh npos nq nkv hd scaleBits sstride)
+    (defn dth-attn (ps qh kh vh yh sh npos nq nkv hd scaleBits sstride bb)
         (metal_enqueue (nth ps 9)
-                       (md-bind (list qh kh vh yh sh) (list npos nq nkv hd scaleBits sstride))
+                       (md-bind16 (list qh kh vh yh sh) (list npos nq nkv hd scaleBits sstride)
+                                  256 0 0 bb)
                        nq))
 
-    (defn dth-elem (ps p ah bh yh n) (metal_enqueue p (md-bind (list ah bh yh) (list n)) n))
+    (defn dth-elem (ps p ah bh yh n bb)
+        (metal_enqueue p (md-bind16 (list ah bh yh) (list n) 256 0 0 bb) n))
 
-    (defn dth-copy (ps sh dh n doff) (metal_enqueue (nth ps 13) (md-bind (list sh dh) (list n doff)) n))
+    (defn dth-copy (ps sh dh n doff bb)
+        (metal_enqueue (nth ps 13) (md-bind16 (list sh dh) (list n doff) 256 0 0 bb) n))
 
     ; a bias the table does not carry dispatches NOTHING — in-place add is safe for the
     ; one-thread-per-element kernel (thread i reads and writes index i alone).
-    (defn dth-bias (ps btv xh n)
-        (if (dth-tv-none? btv) 0 (dth-elem ps (nth ps 11) xh (dth-tv-h btv) xh n)))
+    (defn dth-bias (ps btv xh n bb)
+        (if (dth-tv-none? btv) 0 (dth-elem ps (nth ps 11) xh (dth-tv-h btv) xh n bb)))
+
+    ; greedy selection in two stages, tie rule intact by construction (comparison and selection
+    ; only — EQUALITY with the attestant): 1024 contiguous chunks, then one group folds ascending.
+    (defn dth-argmax (ps bs vocabN)
+        (do (metal_enqueue (nth ps 24)
+                           (md-bind16 (list (nth bs 11) (nth bs 15) (nth bs 16))
+                                      (list vocabN 1024) 256 0 0 1)
+                           1024)
+            (metal_enqueue (nth ps 25)
+                           (md-bind16 (list (nth bs 15) (nth bs 16) (nth bs 13) (nth bs 14))
+                                      (list 1024) 1024 0 1 1)
+                           1)))
 
     ; ================= one block =================
     ; geo: 0 dModel 1 dFF 2 nHead 3 nKV 4 headDim 5 kvd 6 maxpos 7 vocabN 8 epsBits 9 baseBits
     ;      10 scaleBits 11 ropeH 12 nLayer 13 qOut 14 ropeStyle 15 ropeDim 16 nLoop
+    ; barrier plan: q/k/v matvecs share a stage off one normed vector; so do the three biases,
+    ; the two ropes, and the two cache copies. A block whose file carries no biases loses those
+    ; dispatches entirely and rope-q's own barrier still fences the matvecs — the plan is robust
+    ; to the absent-tensor case by placing the fence on the consumer, never on the maybe-absent.
     (defn dth-block (ps bs geo lay ck cv pos)
         (do
-            (dth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8))
-            (dth-mv ps (nth lay 1) (nth bs 1) (nth bs 2))
-            (dth-mv ps (nth lay 2) (nth bs 1) (nth bs 3))
-            (dth-mv ps (nth lay 3) (nth bs 1) (nth bs 4))
-            (dth-bias ps (nth lay 9) (nth bs 2) (nth geo 13))
-            (dth-bias ps (nth lay 10) (nth bs 3) (nth geo 5))
-            (dth-bias ps (nth lay 11) (nth bs 4) (nth geo 5))
-            (dth-rope ps (nth geo 14) (nth bs 2) (nth geo 11) (nth geo 2) (nth geo 4) (nth geo 15) pos (nth geo 9))
-            (dth-rope ps (nth geo 14) (nth bs 3) (nth geo 11) (nth geo 3) (nth geo 4) (nth geo 15) pos (nth geo 9))
-            (dth-copy ps (nth bs 3) ck (nth geo 5) (mul pos (nth geo 5)))
-            (dth-copy ps (nth bs 4) cv (nth geo 5) (mul pos (nth geo 5)))
+            (dth-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 8) 1)
+            (dth-mv ps (nth lay 1) (nth bs 1) (nth bs 2) 1)
+            (dth-mv ps (nth lay 2) (nth bs 1) (nth bs 3) 0)
+            (dth-mv ps (nth lay 3) (nth bs 1) (nth bs 4) 0)
+            (dth-bias ps (nth lay 9) (nth bs 2) (nth geo 13) 1)
+            (dth-bias ps (nth lay 10) (nth bs 3) (nth geo 5) 0)
+            (dth-bias ps (nth lay 11) (nth bs 4) (nth geo 5) 0)
+            (dth-rope ps (nth geo 14) (nth bs 2) (nth geo 11) (nth geo 2) (nth geo 4) (nth geo 15) pos (nth geo 9) 1)
+            (dth-rope ps (nth geo 14) (nth bs 3) (nth geo 11) (nth geo 3) (nth geo 4) (nth geo 15) pos (nth geo 9) 0)
+            (dth-copy ps (nth bs 3) ck (nth geo 5) (mul pos (nth geo 5)) 1)
+            (dth-copy ps (nth bs 4) cv (nth geo 5) (mul pos (nth geo 5)) 0)
             (dth-attn ps (nth bs 2) ck cv (nth bs 5) (nth bs 12)
-                      (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6))
-            (dth-mv ps (nth lay 4) (nth bs 5) (nth bs 6))
-            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 6) (nth bs 0) (nth geo 0))
-            (dth-rms ps (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8))
-            (dth-mv ps (nth lay 6) (nth bs 1) (nth bs 8))
-            (dth-mv ps (nth lay 7) (nth bs 1) (nth bs 9))
-            (dth-elem ps (nth ps 10) (nth bs 8) (nth bs 9) (nth bs 10) (nth geo 1))
-            (dth-mv ps (nth lay 8) (nth bs 10) (nth bs 7))
-            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 7) (nth bs 0) (nth geo 0))
+                      (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6) 1)
+            (dth-mv ps (nth lay 4) (nth bs 5) (nth bs 6) 1)
+            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 6) (nth bs 0) (nth geo 0) 1)
+            (dth-rms ps (nth bs 0) (nth lay 5) (nth bs 1) (nth geo 0) (nth geo 8) 1)
+            (dth-mv ps (nth lay 6) (nth bs 1) (nth bs 8) 1)
+            (dth-mv ps (nth lay 7) (nth bs 1) (nth bs 9) 0)
+            (dth-elem ps (nth ps 10) (nth bs 8) (nth bs 9) (nth bs 10) (nth geo 1) 1)
+            (dth-mv ps (nth lay 8) (nth bs 10) (nth bs 7) 1)
+            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 7) (nth bs 0) (nth geo 0) 1)
             1))
 
     (defn dth-blocks (ps bs geo lays cks cvs pos l n loopoff)
@@ -365,17 +417,15 @@
         (if (ge lp nLoop) 1
             (do (dth-blocks ps bs geo lays cks cvs pos 0 (nth geo 12) (mul lp (nth geo 12)))
                 (if (lt (add lp 1) nLoop)
-                    (dth-rms ps (nth bs 0) onormTv (nth bs 0) (nth geo 0) (nth geo 8))
+                    (dth-rms ps (nth bs 0) onormTv (nth bs 0) (nth geo 0) (nth geo 8) 1)
                     0)
                 (dth-passes ps bs geo lays cks cvs onormTv pos (add lp 1) nLoop))))
 
     (defn dth-head (ps bs geo onormTv projTv)
         (do
-            (dth-rms ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 8))
-            (dth-mv ps projTv (nth bs 1) (nth bs 11))
-            (metal_enqueue (nth ps 12)
-                           (md-bind (list (nth bs 11) (nth bs 13) (nth bs 14)) (list (nth geo 7)))
-                           1)
+            (dth-rms ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 8) 1)
+            (dth-mv ps projTv (nth bs 1) (nth bs 11) 1)
+            (dth-argmax ps bs (nth geo 7))
             0))
 
     (defn dth-u32 (s)
@@ -386,7 +436,8 @@
 
     (defn dth-forward (ps bs geo lays cks cvs embTv onormTv projTv id pos)
         (do
-            (dth-dq ps embTv (nth bs 0) (mul id (nth geo 0)) (nth geo 0))
+            (metal_batch_concurrent)
+            (dth-dq ps embTv (nth bs 0) (mul id (nth geo 0)) (nth geo 0) 0)
             (dth-passes ps bs geo lays cks cvs onormTv pos 0 (nth geo 16))
             (dth-head ps bs geo onormTv projTv)
             (dth-u32 (metal_buf_read (nth bs 13) 0 4))))
@@ -601,40 +652,43 @@
               (metal_buf_alloc (mul vocabN 4))
               (metal_buf_alloc (mul (mul (mul 2 nHead) maxpos) 4))
               (metal_buf_alloc 16)
-              (metal_buf_alloc 16)))
+              (metal_buf_alloc 16)
+              (metal_buf_alloc 4096)
+              (metal_buf_alloc 4096)))
 
-    (defn dth-p2-ln (ps xh gtv btv yh n epsBits)
+    (defn dth-p2-ln (ps xh gtv btv yh n epsBits bb)
         (metal_enqueue (nth ps 20)
-                       (md-bind (list xh (dth-tv-h gtv) (dth-tv-h btv) yh) (list n epsBits)) 1))
-    (defn dth-p2-slice (ps sh dh n soff)
-        (metal_enqueue (nth ps 22) (md-bind (list sh dh) (list n soff)) n))
-    (defn dth-p2-gelu (ps xh yh n)
-        (metal_enqueue (nth ps 21) (md-bind (list xh yh) (list n)) n))
+                       (md-bind16 (list xh (dth-tv-h gtv) (dth-tv-h btv) yh) (list n epsBits)
+                                  256 0 0 bb) 1))
+    (defn dth-p2-slice (ps sh dh n soff bb)
+        (metal_enqueue (nth ps 22) (md-bind16 (list sh dh) (list n soff) 256 0 0 bb) n))
+    (defn dth-p2-gelu (ps xh yh n bb)
+        (metal_enqueue (nth ps 21) (md-bind16 (list xh yh) (list n) 256 0 0 bb) n))
 
     ; geo as dth-open lays it; style is 1 (half-split) by the arch's own build, rd = 32 of hd 64.
     (defn dth-p2-block (ps bs geo lay ck cv pos)
         (do
-            (dth-p2-ln ps (nth bs 0) (nth lay 0) (nth lay 1) (nth bs 1) (nth geo 0) (nth geo 8))
-            (dth-mv ps (nth lay 2) (nth bs 1) (nth bs 2))
-            (dth-bias ps (nth lay 3) (nth bs 2) (mul (nth geo 0) 3))
-            (dth-p2-slice ps (nth bs 2) (nth bs 3) (nth geo 0) 0)
-            (dth-p2-slice ps (nth bs 2) (nth bs 4) (nth geo 5) (nth geo 0))
-            (dth-p2-slice ps (nth bs 2) (nth bs 5) (nth geo 5) (mul (nth geo 0) 2))
-            (dth-rope ps 1 (nth bs 3) (nth geo 11) (nth geo 2) (nth geo 4) (nth geo 15) pos (nth geo 9))
-            (dth-rope ps 1 (nth bs 4) (nth geo 11) (nth geo 3) (nth geo 4) (nth geo 15) pos (nth geo 9))
-            (dth-copy ps (nth bs 4) ck (nth geo 5) (mul pos (nth geo 5)))
-            (dth-copy ps (nth bs 5) cv (nth geo 5) (mul pos (nth geo 5)))
+            (dth-p2-ln ps (nth bs 0) (nth lay 0) (nth lay 1) (nth bs 1) (nth geo 0) (nth geo 8) 1)
+            (dth-mv ps (nth lay 2) (nth bs 1) (nth bs 2) 1)
+            (dth-bias ps (nth lay 3) (nth bs 2) (mul (nth geo 0) 3) 1)
+            (dth-p2-slice ps (nth bs 2) (nth bs 3) (nth geo 0) 0 1)
+            (dth-p2-slice ps (nth bs 2) (nth bs 4) (nth geo 5) (nth geo 0) 0)
+            (dth-p2-slice ps (nth bs 2) (nth bs 5) (nth geo 5) (mul (nth geo 0) 2) 0)
+            (dth-rope ps 1 (nth bs 3) (nth geo 11) (nth geo 2) (nth geo 4) (nth geo 15) pos (nth geo 9) 1)
+            (dth-rope ps 1 (nth bs 4) (nth geo 11) (nth geo 3) (nth geo 4) (nth geo 15) pos (nth geo 9) 0)
+            (dth-copy ps (nth bs 4) ck (nth geo 5) (mul pos (nth geo 5)) 1)
+            (dth-copy ps (nth bs 5) cv (nth geo 5) (mul pos (nth geo 5)) 0)
             (dth-attn ps (nth bs 3) ck cv (nth bs 6) (nth bs 12)
-                      (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6))
-            (dth-mv ps (nth lay 4) (nth bs 6) (nth bs 7))
-            (dth-bias ps (nth lay 5) (nth bs 7) (nth geo 0))
-            (dth-mv ps (nth lay 6) (nth bs 1) (nth bs 9))
-            (dth-bias ps (nth lay 7) (nth bs 9) (nth geo 1))
-            (dth-p2-gelu ps (nth bs 9) (nth bs 10) (nth geo 1))
-            (dth-mv ps (nth lay 8) (nth bs 10) (nth bs 8))
-            (dth-bias ps (nth lay 9) (nth bs 8) (nth geo 0))
-            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 7) (nth bs 0) (nth geo 0))
-            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 8) (nth bs 0) (nth geo 0))
+                      (add pos 1) (nth geo 2) (nth geo 3) (nth geo 4) (nth geo 10) (nth geo 6) 1)
+            (dth-mv ps (nth lay 4) (nth bs 6) (nth bs 7) 1)
+            (dth-bias ps (nth lay 5) (nth bs 7) (nth geo 0) 1)
+            (dth-mv ps (nth lay 6) (nth bs 1) (nth bs 9) 0)
+            (dth-bias ps (nth lay 7) (nth bs 9) (nth geo 1) 1)
+            (dth-p2-gelu ps (nth bs 9) (nth bs 10) (nth geo 1) 1)
+            (dth-mv ps (nth lay 8) (nth bs 10) (nth bs 8) 1)
+            (dth-bias ps (nth lay 9) (nth bs 8) (nth geo 0) 1)
+            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 7) (nth bs 0) (nth geo 0) 1)
+            (dth-elem ps (nth ps 11) (nth bs 0) (nth bs 8) (nth bs 0) (nth geo 0) 1)
             1))
 
     (defn dth-p2-blocks (ps bs geo lays cks cvs pos l n)
@@ -644,17 +698,16 @@
 
     (defn dth-p2-head (ps bs geo onormTv onormB projTv projB)
         (do
-            (dth-p2-ln ps (nth bs 0) onormTv onormB (nth bs 1) (nth geo 0) (nth geo 8))
-            (dth-mv ps projTv (nth bs 1) (nth bs 11))
-            (dth-bias ps projB (nth bs 11) (nth geo 7))
-            (metal_enqueue (nth ps 12)
-                           (md-bind (list (nth bs 11) (nth bs 13) (nth bs 14)) (list (nth geo 7)))
-                           1)
+            (dth-p2-ln ps (nth bs 0) onormTv onormB (nth bs 1) (nth geo 0) (nth geo 8) 1)
+            (dth-mv ps projTv (nth bs 1) (nth bs 11) 1)
+            (dth-bias ps projB (nth bs 11) (nth geo 7) 1)
+            (dth-argmax ps bs (nth geo 7))
             0))
 
     (defn dth-p2-forward (ps bs geo lays cks cvs embTv onormTv onormB projTv projB id pos)
         (do
-            (dth-dq ps embTv (nth bs 0) (mul id (nth geo 0)) (nth geo 0))
+            (metal_batch_concurrent)
+            (dth-dq ps embTv (nth bs 0) (mul id (nth geo 0)) (nth geo 0) 0)
             (dth-p2-blocks ps bs geo lays cks cvs pos 0 (nth geo 12))
             (dth-p2-head ps bs geo onormTv onormB projTv projB)
             (dth-u32 (metal_buf_read (nth bs 13) 0 4))))
