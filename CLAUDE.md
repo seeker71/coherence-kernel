@@ -30,7 +30,7 @@ Attune before writing — read a receipt or two and borrow the body's words.
 Before you believe any band's verdict, preflight it:
 
 ```sh
-echo path/to/cell.fk > /tmp/preflight-target && ./fkwu --src observe/preflight-run.fk
+echo path/to/cell.fk > /tmp/preflight-target && ./fkwu observe/preflight-run.fk
 ```
 
 from [`observe/preflight.fk`](observe/preflight.fk). A green number with a nonzero exit is a fold computed over

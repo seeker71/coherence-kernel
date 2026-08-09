@@ -19,4 +19,4 @@ fi
     wc -c < "$gguf" | tr -d ' '
     nm_sha256_file "$gguf"
     printf '%s\n' "$runtime_revision"
-} | "$NM_FKWU" --src form/form-stdlib/nanbeige-gguf-admission-cli.fk
+} | "$NM_FKWU" form/form-stdlib/nanbeige-gguf-admission-cli.fk

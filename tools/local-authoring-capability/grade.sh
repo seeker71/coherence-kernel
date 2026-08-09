@@ -52,7 +52,7 @@ for j in "$OUT"/*__t1.json; do
     a="$OUT/${SLUG}__${t}.txt"; [ -e "$a" ] || continue
     # strip markdown fences if the model added them despite being told not to
     sed -e 's/^```.*$//' "$a" > "$OUT/${SLUG}__${t}.fk"
-    fk="$(./fkwu --src "$OUT/${SLUG}__${t}.fk" 2>&1 | grep -v 'stale\|dylib' | tail -1)"
+    fk="$(./fkwu "$OUT/${SLUG}__${t}.fk" 2>&1 | grep -v 'stale\|dylib' | tail -1)"
     cat form/form-stdlib/core.fk "$OUT/${SLUG}__${t}.fk" > "$OUT/${SLUG}__${t}.go.fk"
     go="$(./form/form-kernel-go/bin-go "$OUT/${SLUG}__${t}.go.fk" 2>&1 | tail -1)"
     if [ "$fk" = "$want" ] && [ "$go" = "$want" ]; then verdict "$t" PASS "fkwu=$fk bin-go=$go"

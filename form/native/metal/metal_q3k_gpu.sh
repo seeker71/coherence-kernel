@@ -29,14 +29,14 @@ fi
 
 PRE='; preludes: form-stdlib/core.fk form-stdlib/f16-decode.fk form-stdlib/q3k-dequant.fk form-stdlib/q3k-demo.fk'
 { echo "$PRE"; echo '(q3d-emit-all)'; } > "$work/demo.fk"
-./fkwu --src "$work/demo.fk" 2>"$work/demo.err" | sed -n '1,/^END$/p' > "$work/demo.txt"
+./fkwu "$work/demo.fk" 2>"$work/demo.err" | sed -n '1,/^END$/p' > "$work/demo.txt"
 grep -qx 'END' "$work/demo.txt" || { echo "FAIL  fixture truncated"; tail -5 "$work/demo.err"; exit 1; }
 echo "PASS  fixture emitted on fkwu ($(wc -l < "$work/demo.txt" | tr -d ' ') lines)"
 
 { echo '; preludes: form-stdlib/core.fk form-stdlib/q3k-msl.fk'; echo '(print_str (q3m-msl-appendix))'; } > "$work/emit.fk"
 # fh16 is the spine this appendix expects; the harness supplies it, as the cell's contract says.
 { printf '#include <metal_stdlib>\ninline float fh16(uint b) { return float(as_type<half>(ushort(b))); }\n'
-  ./fkwu --src "$work/emit.fk" 2>/dev/null | sed '$d'; } > "$work/q3k.metal"
+  ./fkwu "$work/emit.fk" 2>/dev/null | sed '$d'; } > "$work/q3k.metal"
 xcrun -sdk macosx metal -O2 -std=metal3.0 -ffp-contract=off -fno-fast-math \
       -c "$work/q3k.metal" -o "$work/q3k.air" 2>"$work/metal.err" \
   && xcrun -sdk macosx metallib "$work/q3k.air" -o "$work/q3k.metallib" 2>>"$work/metal.err" \

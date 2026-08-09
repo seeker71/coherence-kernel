@@ -35,8 +35,8 @@ walker and the per-target Form emitters.
 ## Verify Direct Source Bootstrap
 
 ```sh
-./fkwu --src bootstrap/ground.fk
-./fkwu --src bootstrap/ground-recursive.fk 10
+./fkwu bootstrap/ground.fk
+./fkwu bootstrap/ground-recursive.fk 10
 ```
 
 Expected output:
@@ -53,7 +53,7 @@ convention; direct-source Form does not yet read argv without a table entry.
 ## A number is not a pass
 
 Every check on this page compares an expected number, and that habit is exactly
-how this body has been fooled. `fkwu --src` prints the root value on stdout and
+how this body has been fooled. `fkwu` prints the root value on stdout and
 its diagnostics on stderr, and **exits nonzero when the compile carried errors**
 — so a cell whose chain has an unresolved name still prints a plausible verdict
 (axiom-5 recovers the call to `nothing` and the fold computes over it) while
@@ -62,14 +62,14 @@ exiting 1. Reading the number alone reports a pass that is not one.
 So, from here on:
 
 ```sh
-./fkwu --src <cell>; echo "exit=$?"
+./fkwu <cell>; echo "exit=$?"
 ```
 
 and before trusting a cell you did not just write:
 
 ```sh
 echo path/to/cell.fk > /tmp/preflight-target
-./fkwu --src observe/preflight-run.fk
+./fkwu observe/preflight-run.fk
 ```
 
 Preflight forces a fresh compile — a warm cache replaces the error with a tally
@@ -82,7 +82,7 @@ the practice and what each rule cost.
 
 ```sh
 ( cat observe/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > /tmp/nvr.fk
-./fkwu --src /tmp/nvr.fk
+./fkwu /tmp/nvr.fk
 ```
 
 Expected output:
@@ -101,7 +101,7 @@ flatten, or `T_flat`.
 After freshness and real grounding, a fast Form-native protocol check is:
 
 ```sh
-./fkwu --src observe/tests/bidirectional-framebuffer-channel-band.fk
+./fkwu observe/tests/bidirectional-framebuffer-channel-band.fk
 ```
 
 Its final field must be `1`. This checks correlated observation/control frames,
@@ -116,7 +116,7 @@ required for every checkout bootstrap.
 cat form/form-stdlib/hati-os-targets.fk \
     form/form-stdlib/host-os-membrane.fk \
     form/form-stdlib/tests/host-os-membrane-band.fk > /tmp/host-os-membrane.fk
-./fkwu --src /tmp/host-os-membrane.fk
+./fkwu /tmp/host-os-membrane.fk
 ```
 
 Expected output:
@@ -143,4 +143,4 @@ The direct source bootstrap is the standing entry; no flattened
 
 The optional flattened `form-eval-cli-loop` path is a cache/parity door for the
 Form meta-evaluator, not a gate for running the body. If a richer cell does not
-fit the current `--src` surface, name the actual coverage gap.
+fit the current the source door surface, name the actual coverage gap.

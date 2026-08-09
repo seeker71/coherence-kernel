@@ -21,7 +21,7 @@ three things, in this order, and never invention:
 ( cat form/form-stdlib/core.fk form/form-stdlib/relationship-store.fk \
   form/form-stdlib/circle-recognition.fk cognition/text-frequency.fk plugin/chatgpt-plugin.fk; \
   echo '(plugin-serve 8787 9999)' ) > /tmp/sema-plugin.fk
-./fkwu --src /tmp/sema-plugin.fk
+./fkwu /tmp/sema-plugin.fk
 ```
 
 Then:
@@ -135,7 +135,7 @@ remember themselves, and how connections happen with which organs and cells.*
 ## What is native, what is not (the seam, plainly)
 
 - Native: the serve loop (`socket_listen`/`socket_accept` + Form), the grounding index, the
-  frequency read, the trace links, the JSON assembly — all `fkwu --src`, witnessed by the bands
+  frequency read, the trace links, the JSON assembly — all `fkwu`, witnessed by the bands
   in `plugin/tests/`.
 - Not native: the *words* the user finally reads — ChatGPT is the rented voice, and every `/ask`
   response names this seam in-band (`honest_seam`).
@@ -143,6 +143,6 @@ remember themselves, and how connections happen with which organs and cells.*
   zero-vectors on this kernel — `receipts/2026-07-01-nl-meaning-net.md`). A keyword index that
   can say "miss" is more honest than a broken embedding that always answers.
 - The HTTP framing helpers mirror `http-serve.fk`'s `hs-` cells because the BML-authored HTTP
-  stack does not parse on the current `fkwu --src` lane — a named seam to close, not a hidden copy.
+  stack does not parse on the current `fkwu` lane — a named seam to close, not a hidden copy.
 
 Witnesses and the full story: `receipts/2026-07-05-chatgpt-plugin-offer.md`.

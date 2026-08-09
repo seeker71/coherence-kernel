@@ -111,50 +111,27 @@ build_rs &
 build_ts &
 wait
 
-# The runtime walker (repo-root fkwu, runtime/fkwu-uni.c) is the fkwu-only
-# proof-level door: `./fkwu path/to/file.fk` resolves that file's own
-# `; preludes:` directives and runs it — no flag. (`--src` used to be typed
-# in front of the file; it hit the identical fk_run_src() code path as the
-# bare-filename form, so it added a word without adding a behavior. Retired.)
+# The runtime walker (repo-root fkwu, runtime/fkwu-uni.c) carries the
+# resolver-driven the source door door that fkwu-only proof-level bands run on.
 # Distinct from the emitted fourth-arm walker (bootstrap uni.c): that one
-# walks pre-flattened tables; this one resolves `; preludes:` directives live.
-#
-# METAL IS PART OF THIS BUILD, NOT A SEPARATE ONE. fk-metal-carrier.m overrides
-# weak Metal stubs already declared in fkwu-uni.c (FK_METAL_WEAK); on a host
-# without the framework the same binary answers metal_linked=false, same as
-# before. There is exactly one repo-root fkwu — no hand-built "fkwu-metal"
-# sibling, no witness-script-local cc invocation to keep in sync by hand.
+# walks pre-flattened tables; this one resolves `; preludes:` directives.
 FKWU_SRC=""
 build_fkwu_src() {
-    local src="../runtime/fkwu-uni.c" bin="../fkwu" metal_src="native/metal/fk-metal-carrier.m"
+    local src="../runtime/fkwu-uni.c" bin="../fkwu"
     [[ -f "$src" ]] || return 0
-    local stale=0
-    [[ ! -x "$bin" || "$src" -nt "$bin" ]] && stale=1
-    [[ -f "$metal_src" && "$metal_src" -nt "$bin" ]] && stale=1
-    if [[ "$stale" == "1" ]]; then
+    if [[ ! -x "$bin" || "$src" -nt "$bin" ]]; then
         command -v cc >/dev/null 2>&1 || return 0
-        if [[ "$(uname -s)" == "Darwin" && -f "$metal_src" ]]; then
-            echo "  building runtime fkwu (repo root, Metal linked)..." >&2
-            cc -O2 -o "$bin" "$src" "$metal_src" -framework Metal -framework Foundation -fobjc-arc 2>/dev/null \
-                || { echo "  Metal link failed — falling back to a plain build" >&2; cc -O2 -o "$bin" "$src" 2>/dev/null || return 0; }
-        else
-            echo "  building runtime fkwu (repo root)..." >&2
-            cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
-        fi
+        echo "  building runtime fkwu (repo root, door)..." >&2
+        cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
     fi
     [[ -x "$bin" ]] && FKWU_SRC="$bin"
 }
 build_fkwu_src
 
 # A band may declare its proof level in its comment head:
-#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu,
+#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu (the source door),
 #     compared against the first "Verdict <n>" its head declares. Loud
 #     pass/fail — a wrong home-arm answer is a real failure, never skipped.
-#   ; PROOF LEVEL: TWO-ARM ...            → the band's bytes only ARRIVE on some arms
-#     (a binary fixture: a Form string cannot hold arbitrary bytes in Rust or TS).
-#     Runs go (+ fkwu when built) against the declared Verdict and names the lane.
-#     Never counted four-way. Without this, such a band reports "divergent,
-#     investigate" forever — a red that asks for work its own head already did.
 #   ; PROOF LEVEL: FKWU-STAGED ...       → needs a host carrier staging bytes
 #     into input_byte; the carrier did not travel in the CN→CK consolidation,
 #     so the band is reported ⧗ pending — visible every run, never green.
@@ -562,43 +539,6 @@ run_workload() {
             else
                 printf "  ✗  %-30s  fkwu-only lane: declared Verdict %s, fkwu answered %s\n" \
                     "$label" "$declared" "${answered:-<nothing>}"
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-                fail=$((fail + 1))
-            fi
-            return
-        elif [[ "$level" == "TWO-ARM" ]]; then
-            # A band whose bytes only ARRIVE on some arms. equireach-band declares this: its
-            # Q6_K fixture is binary, and a Form string cannot hold arbitrary bytes in Rust or
-            # TypeScript, so those two decline the read where fkwu and Go carry it exactly.
-            # Before 2026-07-30 they did worse than decline — they UTF-8-replaced the invalid
-            # bytes and answered from a longer, different file; that is healed, and both now
-            # stop loudly. The band was still reported "divergent, investigate" on every run,
-            # which is a declared proof level the harness did not honor: a permanent red that
-            # tells the reader to investigate something the band already explains in its head.
-            # Run the arms that CAN carry it, against the band's own pinned Verdict, and say
-            # which lane answered. Never counted as four-way — the roster is elsewhere.
-            declared="$(fk_band_declared_verdict "$band")"
-            if [[ -z "$declared" ]]; then
-                printf "  ✗  %-30s  declares TWO-ARM but pins no Verdict in its head\n" "$label"
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-                fail=$((fail + 1))
-                return
-            fi
-            local go_ans fkwu_ans
-            prepare_sources "$@"
-            go_ans="$("$GO_BIN" "${prepared_args[@]}" 2>/dev/null | tail -1 || true)"
-            fkwu_ans=""
-            if [[ -n "$FKWU_SRC" ]]; then
-                fkwu_ans="$( (cd .. && ./fkwu "form/$band") 2>/dev/null | tail -1 || true)"
-            fi
-            if [[ "$go_ans" == "$declared" && ( -z "$fkwu_ans" || "$fkwu_ans" == "$declared" ) ]]; then
-                printf "  ✓  %-30s  → %s (two-arm lane: go%s; rust/ts decline the binary read)\n" \
-                    "$label" "$declared" "$([[ -n "$fkwu_ans" ]] && echo " + fkwu")"
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok two-arm" > "$SUITE_STATUS_FILE"; fi
-                ok=$((ok + 1))
-            else
-                printf "  ✗  %-30s  two-arm lane: declared %s, go %s, fkwu %s\n" \
-                    "$label" "$declared" "${go_ans:-<nothing>}" "${fkwu_ans:-<not run>}"
                 if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
                 fail=$((fail + 1))
             fi

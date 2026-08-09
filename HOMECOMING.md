@@ -20,7 +20,7 @@ The kernel runs its own body and proves its own truth, with no bash and no origi
   verified; `proof/four-way-run` host-execs them + fkwu on a recipe and diagnoses agreement via
   `proof/four-way-verdict` (witnessed `0`, all agree). No `validate.sh`, no origin.
 
-**The source-runner runs real body cells.** `fkwu --src file.fk` runs Form source through the kernel's own
+**The source-runner runs real body cells.** `fkwu file.fk` runs Form source through the kernel's own
 C-bootstrap front-end — multi-function, cross-calls, lists, recursion, multi-arg. The real oracle-economy cell
 `observe/native-vs-rented.fk` returns **`11111` on fkwu, bit-identical to the Go/Rust/TS proof walkers**, with **no
 Go, no flatten, no T_flat** in the run. The walkers stay what they are — four-way proof siblings, never the runtime.

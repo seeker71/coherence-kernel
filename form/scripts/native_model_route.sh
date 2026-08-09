@@ -155,7 +155,7 @@ fi
     printf '%s\n' "$units"
     printf '\n'
     printf '\n'
-} | "$NM_FKWU" --src form/form-stdlib/native-model-event-cli.fk > "$event_result"
+} | "$NM_FKWU" form/form-stdlib/native-model-event-cli.fk > "$event_result"
 
 if ! grep -q '^append_ok=1$' "$event_result"; then
     printf 'Form rejected the occurrence; model output withheld\n' >&2

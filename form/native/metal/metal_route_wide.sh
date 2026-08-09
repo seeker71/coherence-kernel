@@ -48,12 +48,12 @@ cat > "$WORK/emit.fk" <<'EOF'
 EOF
 # fkwu prints the top-level result after print_str's output. Drop it BY POSITION with `sed '$d'`,
 # never by content: filtering `^0$` would also delete any emitted line that is legitimately "0".
-./fkwu --src "$WORK/emit.fk" 2>/dev/null | sed '$d' > "$WORK/body.msl"
+./fkwu "$WORK/emit.fk" 2>/dev/null | sed '$d' > "$WORK/body.msl"
 bytes=$(wc -c < "$WORK/body.msl" | tr -d ' ')
 gate "1 the body emits a non-empty appendix ($bytes bytes)" "$([ "$bytes" -gt 200 ] && echo 1 || echo 0)"
 
 # ── the read-back band still agrees ─────────────────────────────────────────
-verdict=$(./fkwu --src form/form-stdlib/tests/moe-route-wide-msl-band.fk 2>/dev/null | tail -1)
+verdict=$(./fkwu form/form-stdlib/tests/moe-route-wide-msl-band.fk 2>/dev/null | tail -1)
 gate "2 read-back band = 255 (got $verdict)" "$([ "$verdict" = "255" ] && echo 1 || echo 0)"
 
 spine() { printf '#include <metal_stdlib>\ninline float fexp(float x) { return metal::exp(x); }\n'; }

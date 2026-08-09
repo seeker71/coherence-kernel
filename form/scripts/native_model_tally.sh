@@ -66,7 +66,7 @@ else
     printf '%s\n' "$observed_lines" 0 "$observed_lines" > "$form_input"
 fi
 
-"$NM_FKWU" --src form/form-stdlib/native-model-tally-cli.fk \
+"$NM_FKWU" form/form-stdlib/native-model-tally-cli.fk \
     < "$form_input" > "$result"
 sed '/^$/d; /^0$/d; /^fkwu: warning:/d' "$result"
 if ! grep -q '^invalid_rows=0$' "$result"; then

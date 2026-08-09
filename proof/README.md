@@ -11,7 +11,7 @@ The clean kernel no longer borrows the origin's `validate.sh`. It crosses its ow
 Run it, from the repository root:
 
 ```
-./fkwu --src proof/four-way-run-recipe42.fk      ->  0   (FOUR-WAY)
+./fkwu proof/four-way-run-recipe42.fk      ->  0   (FOUR-WAY)
 ```
 
 This line used to read `fkwu proof/four-way-run.tbl`. That stopped working when `.tbl` execution

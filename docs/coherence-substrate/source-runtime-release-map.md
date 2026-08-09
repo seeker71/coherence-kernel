@@ -36,7 +36,7 @@ flowchart TD
     Observe --> Compiler
 ```
 
-`--src` becomes a compiler front door: it may read source and produce fresh
+the source door becomes a compiler front door: it may read source and produce fresh
 artifacts, but it is no longer the normal runtime path when a fresh artifact
 exists.
 
@@ -86,7 +86,7 @@ The checkout witness is green: `ground.fk` returned `42`,
 `15`, and the native-vs-rented witness returned `11111`.
 
 The 2026-07-05 runtime selector is installed in the checkout witness:
-`fkwu file.fk` and `fkwu --src file.fk` derive `file.fkb` plus `file.sym`, scan
+`fkwu file.fk` and `fkwu file.fk` derive `file.fkb` plus `file.sym`, scan
 the `.fk` dependency closure, try a fresh callable `.dylib`, prefer a fresh
 `.fkb` with matching embedded source-unit identity over reparsing source,
 recompile when the root or any dependency changes, and `./fkwu file.fkb`
@@ -151,7 +151,7 @@ code, or when a missing cluster blocks an active release gate.
 | R3 runtime selector | loader chooses fresh `.dylib`, then fresh `.fkb`, then source compile only on stale/missing artifacts | installed for `.fk`, `.fkb`, and `.dylib` executable inputs; `.fk` freshness includes imported `.fk` dependencies |
 | R3a import declaration migration | `.fk` files use import declarations; `preludes:` remains only compatibility | runtime supports bare `import "path.fk"` and comment-safe `; import "path.fk"`; validator expands comment-safe imports recursively; 2,418 anchored legacy `; preludes:` declarations remain to migrate |
 | R4 `.tbl` release | `.tbl` is not a supported runtime input | closed: `fkwu file.tbl` reports retired `.tbl` execution |
-| R5 `--src` release | `--src` is an explicit compiler/admission spelling, not the only source invocation path | closed: plain `fkwu file.fk` uses the selector too |
+| R5 the source door release | the source door is an explicit compiler/admission spelling, not the only source invocation path | closed: plain `fkwu file.fk` uses the selector too |
 | R6 C seed shrink | no runtime meaning grows in `runtime/fkwu-uni.c`; seed code only carries the current checkout witness until the native body owns the door | open: this pass added artifact IO/selection to the checkout witness, not new language semantics |
 | R7 lift-on-touch | every file touched by R1-R6 moves to the highest available grammar, or records the missing grammar that blocked the lift | standing rule |
 

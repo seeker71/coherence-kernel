@@ -81,9 +81,9 @@ in `BOOTSTRAP.md` and `AGENTS.md`:
 
 ```sh
 cc -O2 -o fkwu runtime/fkwu-uni.c
-./fkwu --src bootstrap/ground.fk                                # -> 42
-./fkwu --src bootstrap/ground-recursive.fk 10                   # -> 55
-./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk    # -> 31 (anything else: REBUILD first)
+./fkwu bootstrap/ground.fk                                # -> 42
+./fkwu bootstrap/ground-recursive.fk 10                   # -> 55
+./fkwu form/form-stdlib/tests/binary-freshness-band.fk    # -> 15 (anything else: REBUILD first)
 ```
 
 The **binary-freshness canary** (third line) exists because `fkwu` is gitignored and a stale local binary
@@ -120,11 +120,11 @@ Current state per region. **Chronology is deliberately not kept here** — the f
   the **wire-serialization lane** — `wire-registry.fk` (registry + universal `WIRE-NULL`), `cell-serialize.fk`
   (JSON, values+types+identity round-trip by axiom-3), `wire-xml.fk`, `wire-corba-cdr.fk` (real IEEE754 doubles),
   `wire-path.fk` (native path-select — `xpath`/`xmlpath` off the shell applet), `wire-rpc.fk` (the CORBA-DII-shaped
-  executor closing tool-grammar's GAP-T1); `json.fk` (full parser/emitter, proven on `--src`, real true/false by
+  executor closing tool-grammar's GAP-T1); `json.fk` (full parser/emitter, proven on the source door, real true/false by
   node identity); the HTTP body (`kernel-http` + parse/render/request/serve/client/adapter/socket + BML lanes,
   `http-negotiate.fk` REST content-negotiation); arrival/reception-consent/relationship-store (the come-in flow);
   host-os-membrane, somatic-coherence-loop, observed-auto-learning, tool-channel (native xpath), auth/resource/
-  storage ports. Two `fkwu --src` truths every stdlib file honors: top-level `let` is invisible inside `defn`
+  storage ports. Two `fkwu` truths every stdlib file honors: top-level `let` is invisible inside `defn`
   bodies (use zero-arg `defn`s for constants), and band tests wrap their checks in a named `defn` called
   explicitly (bare top-level `(do (let ...))` probes are unreliable).
 
@@ -154,11 +154,11 @@ Current state per region. **Chronology is deliberately not kept here** — the f
   capture-correction (canonical home), world models, ~89 band tests. Internally cross-referenced and
   receipt-grounded throughout. Future-session usage lives in
   `docs/live-dynamic-diagnostics.md`; the fast protocol band and real learning integration both execute on
-  `fkwu --src` without growing the C seed.
+  `fkwu` without growing the C seed.
 - **`learn/`** — the learning witness ledger: serial dated trials (speech corpus batches, neural pair windows,
   trial windows, intakes) each with its own band verdict; summary ledgers (`speech-current-status-ledger`,
   `speech-model-metrics-report`) compose them; learning-theory recipes (champion-challenger, oracle-taught,
-  satsang-oracle, cross-witness-economy); the Sema teaching set (proven at porting on `fkwu --src` — see
+  satsang-oracle, cross-witness-economy); the Sema teaching set (proven at porting on `fkwu` — see
   `docs/inheritance/proven-bodies-from-old-repo.txt`; origin four-way bands did not come across, re-proof bands
   are honest pending work). Global speech authority remains oracle-held; scoped trial windows are native —
   the ledgers carry the exact counts.

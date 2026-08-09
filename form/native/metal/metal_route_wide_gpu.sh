@@ -45,7 +45,7 @@ PRE='; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equi
 # precisely 0.0 that way, shifting every later index by one — and six of eight gates still
 # passed, weights agreeing to 1.1e-7. A terminator and a datum printing the same character is
 # the failure the TTS ingest named; the sentinel is content-independent and cannot confuse them.
-./fkwu --src "$work/demo.fk" 2>"$work/demo.err" | sed -n '1,/^END$/p' > "$work/demo.txt"
+./fkwu "$work/demo.fk" 2>"$work/demo.err" | sed -n '1,/^END$/p' > "$work/demo.txt"
 grep -qx 'END' "$work/demo.txt" || { echo "FAIL  fixture stream truncated"; tail -5 "$work/demo.err"; exit 1; }
 echo "PASS  fixture emitted on fkwu ($(wc -l < "$work/demo.txt" | tr -d ' ') lines)"
 
@@ -53,7 +53,7 @@ echo "PASS  fixture emitted on fkwu ($(wc -l < "$work/demo.txt" | tr -d ' ') lin
 { echo '; preludes: form-stdlib/core.fk form-stdlib/moe-route-wide-msl.fk'; echo '(print_str (mrw-msl-appendix))'; } > "$work/emit.fk"
 { printf '#include <metal_stdlib>\ninline float fexp(float x) { return metal::exp(x); }\n'
   # `sed '$d'` drops fkwu's trailing result line BY POSITION, not by content.
-  ./fkwu --src "$work/emit.fk" 2>/dev/null | sed '$d'; } > "$work/router.metal"
+  ./fkwu "$work/emit.fk" 2>/dev/null | sed '$d'; } > "$work/router.metal"
 xcrun -sdk macosx metal -O2 -std=metal3.0 -ffp-contract=off -fno-fast-math \
       -c "$work/router.metal" -o "$work/router.air" 2>"$work/metal.err" \
   && xcrun -sdk macosx metallib "$work/router.air" -o "$work/router.metallib" 2>>"$work/metal.err" \

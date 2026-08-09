@@ -59,7 +59,7 @@ cat > "$work/hdr.fk" <<'EOF'
   (print_str "END")
   0)
 EOF
-./fkwu --src "$work/hdr.fk" 2>/dev/null | sed -n '1,/^END$/p' > "$work/hdr.txt"
+./fkwu "$work/hdr.fk" 2>/dev/null | sed -n '1,/^END$/p' > "$work/hdr.txt"
 grep -qx 'END' "$work/hdr.txt" || { echo "FAIL  header read failed"; exit 1; }
 get() { grep "^$1 " "$work/hdr.txt" | head -1 | awk '{print $2}'; }
 EMBED_ABS=$(get EMBED_ABS); EMBED_NE0=$(get EMBED_NE0); EMBED_TYPE=$(get EMBED_TYPE)
@@ -81,7 +81,7 @@ cat > "$work/emit.fk" <<'EOF'
            (str_concat (q3m-msl-appendix) (str_concat (mla-msl-spine) (mla-rmsnorm-body))))))
 EOF
 { printf '#include <metal_stdlib>\n'
-  ./fkwu --src "$work/emit.fk" 2>"$work/emit.err" | sed '$d'; } > "$work/kat.metal"
+  ./fkwu "$work/emit.fk" 2>"$work/emit.err" | sed '$d'; } > "$work/kat.metal"
 if [ "$(wc -c < "$work/kat.metal")" -lt 500 ]; then
     echo "FAIL  emission short"; head -5 "$work/emit.err"; exit 1; fi
 xcrun -sdk macosx metal -O2 -std=metal3.0 -ffp-contract=off -fno-fast-math \

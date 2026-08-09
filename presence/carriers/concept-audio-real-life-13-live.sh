@@ -27,7 +27,7 @@ while [ "$index" -lt "$end" ]; do
   source_file="$run_dir/row-$index.fk"
   sed '$d' "$repo_root/presence/concept-audio-real-life-13-live.fk" > "$source_file"
   printf '\n(carl13-index-execute %s)\n' "$index" >> "$source_file"
-  output=$(cd "$repo_root" && ./fkwu --src "$source_file" 2>/dev/null)
+  output=$(cd "$repo_root" && ./fkwu "$source_file" 2>/dev/null)
   printf '%s\n' "$output"
   verdict=$(printf '%s\n' "$output" | tail -n 1)
   printf 'row=%02d verdict=%s\n' "$index" "$verdict"
