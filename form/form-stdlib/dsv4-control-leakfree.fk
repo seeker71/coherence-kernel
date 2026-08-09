@@ -1,0 +1,82 @@
+; dsv4-control-leakfree.fk — a GENUINE leakage-free split of the BMF control corpus.
+;
+; The shipped corpus (dsv4-control-training-corpus.fk) holds out ROWS: heldout indices
+; 120..149 per class, whose sanitized template (context + " " + state) already appears among
+; the train indices 0..119. dca-leakage counts 150 — every held-out situation is memorized, so
+; the adapter's 142/150 diagonal is recall, not generalization, and dca-report HONESTLY refuses it.
+;
+; This cell holds out whole TEMPLATE FAMILIES instead. Each situation's sanitized template is
+; exactly (context(i mod 12), state(class, i mod 5)) — a family f = i mod 60 (CRT: 12 and 5 are
+; coprime, so i mod 60 pins both). We split by family, not by row:
+;
+;   held-out families H = { f : (f mod 12) < 6  AND  (f mod 5) < 2 }
+;     = 6 contexts x 2 states = 12 families per class.
+;
+; Every held-out CONTEXT (0..5) still appears in train paired with states 2,3,4; every held-out
+; STATE (0,1) still appears in train paired with contexts 6..11. So the held-out rows are UNSEEN
+; COMBINATIONS of SEEN vocabulary — the honest shape of generalization. No held-out sanitized
+; template can appear in train, because train and held-out families are disjoint by construction;
+; dca-leakage (borrowed unchanged) proves it empirically = 0.
+;
+; i ranges 0..119 per class, so each family 0..59 appears exactly twice:
+;   held-out: 12 families x 2 x 5 classes = 120 rows (24 per class, balanced -> baseline 20%)
+;   train   : 48 families x 2 x 5 classes = 480 rows
+;
+; preludes: form-stdlib/dsv4-control-adapter.fk
+
+(do
+    (defn dclf-fam (i) (mod i 60))
+    (defn dclf-heldout-fam? (f)
+        (if (lt (mod f 12) 6) (if (lt (mod f 5) 2) 1 0) 0))
+    (defn dclf-split (i)
+        (if (eq (dclf-heldout-fam? (dclf-fam i)) 1) "heldout-boundary" "train"))
+
+    (defn dclf-class-rows (class i stop)
+        (if (eq i stop) (empty)
+            (cons (dcc-row class i (dclf-split i))
+                  (dclf-class-rows class (add i 1) stop))))
+    (defn dclf-cat (a b) (if (eq (len a) 0) b (cons (head a) (dclf-cat (tail a) b))))
+    (defn dclf-corpus-classes (names)
+        (if (eq (len names) 0) (empty)
+            (dclf-cat (dclf-class-rows (head names) 0 120)
+                      (dclf-corpus-classes (tail names)))))
+    (defn dclf-corpus () (dclf-corpus-classes (dct-names)))
+
+    ; matrix total (all held-out predictions land here)
+    (defn dclf-msum (m i) (if (eq i 25) 0 (add (nth m i) (dclf-msum m (add i 1)))))
+    ; per-actual-class held-out row total = row of the confusion matrix
+    (defn dclf-row-total (m a p) (if (eq p 5) 0 (add (nth m (add (mul a 5) p)) (dclf-row-total m a (add p 1)))))
+    (defn dclf-baseline (m a best)
+        (if (eq a 5) best
+            (do (let c (dclf-row-total m a 0))
+                (dclf-baseline m (add a 1) (if (gt c best) c best)))))
+
+    ; distinct sanitized held-out templates (structural check the split is a clean 12-family partition)
+    (defn dclf-mem? (x lst) (if (eq (len lst) 0) 0 (if (eq (head lst) x) 1 (dclf-mem? x (tail lst)))))
+    (defn dclf-uniq-held (rows acc)
+        (if (eq (len rows) 0) acc
+            (do (let r (head rows))
+                (dclf-uniq-held (tail rows)
+                    (if (eq (nth r 0) "heldout-boundary")
+                        (if (eq (dclf-mem? (dca-input r) acc) 1) acc (cons (dca-input r) acc))
+                        acc)))))
+    (defn dclf-distinct-held (rows) (len (dclf-uniq-held rows (empty))))
+    (defn dclf-count-tag (rows tag)
+        (if (eq (len rows) 0) 0
+            (add (if (eq (nth (head rows) 0) tag) 1 0) (dclf-count-tag (tail rows) tag))))
+
+    ; the report: (matrix diagonal leakage total baseline distinct-held train-count held-count)
+    (defn dclf-report ()
+        (do (let rows (dclf-corpus))
+            (let names (dct-names))
+            (let models (dca-fit rows names))
+            (let matrix (dca-eval rows names models (dca-zero-n 25)))
+            (list matrix
+                  (dca-diagonal matrix 0)
+                  (dca-leakage rows rows)
+                  (dclf-msum matrix 0)
+                  (dclf-baseline matrix 0 0)
+                  (dclf-distinct-held rows)
+                  (dclf-count-tag rows "train")
+                  (dclf-count-tag rows "heldout-boundary"))))
+    0)
