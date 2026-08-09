@@ -6666,6 +6666,505 @@ static long long fk_walk(long long i, long long fp) {
     }
     return fk_walk_cold(t, i, fp);
 }
+/* ── Form binary artifact door (FORMBIN2): value_kind, read_form_binary,
+ * write_form_binary. The wire format mirrors form-kernel-go's serializeArtifact /
+ * deserializeArtifact (form/form-kernel-go/main.go) byte-for-byte so all four
+ * kernels agree:
+ *   magic "FORMBIN2" | u32BE strCount | (u32BE len, raw bytes)* | node
+ * node = u32BE tag; then:
+ *   tag 0 = leaf     : u32BE pkg, level, type, inst
+ *                      (a trivial STRING leaf, level==1 && type==2, carries the
+ *                       LOCAL string-table index in inst, not its pool index)
+ *   tag 1 = composite: node(category), u32BE childCount, node(child)*
+ *   tag 2 = float64  : 8 bytes IEEE-754 little-endian (value, not index)
+ *   tag 3 = int64    : 8 bytes signed little-endian    (value, not index)
+ * A trivial int is a TrivInt leaf while it fits int32, else an int64 node --
+ * the same split form-kernel-go/internTrivialInt makes. Sibling to the Go, Rust
+ * and TypeScript binary artifact helpers; same byte layout. */
+
+static const char *fk_value_kind_name(long long v) {
+    if (v == fk_nothing) {
+        return "null";
+    }
+    if (fk_is_str(v)) {
+        return "string";
+    }
+    if (fk_isf(v)) {
+        return "float";
+    }
+    if (fk_is_fnval(v)) {
+        return "closure";
+    }
+    if (v < 0 && ((0 - v) & 1) == 1) {
+        long long ni = fk_nidx(v);
+        if (ni >= 1 && ni <= fk_np) {
+            return "node_id";
+        }
+    }
+    if (fk_isrec(v)) {
+        return "record";
+    }
+    if (v == 1) {
+        return "list";
+    }
+    if (v > 0 && (v & 1) == 1) {
+        long long p = v >> 1;
+        if (p >= 1 && p <= fk_hp) {
+            return "list";
+        }
+    }
+    if ((v & 1) == 0) {
+        return "int";
+    }
+    return "unknown";
+}
+
+/* ── writer: growable big-endian byte buffer + first-encounter string table ── */
+static unsigned char *fk_fb_buf;
+static long long fk_fb_len;
+static long long fk_fb_cap;
+static long long *fk_fb_str; /* pool index per local string-table slot */
+static long long fk_fb_nstr;
+static long long fk_fb_strcap;
+
+static void fk_fb_byte(unsigned char b) {
+    if (fk_fb_len >= fk_fb_cap) {
+        fk_fb_cap = fk_fb_cap ? fk_fb_cap * 2 : 65536;
+        fk_fb_buf = realloc(fk_fb_buf, fk_fb_cap);
+        if (fk_fb_buf == 0) {
+            fk_die("write_form_binary: out of memory growing byte buffer");
+        }
+    }
+    fk_fb_buf[fk_fb_len] = b;
+    fk_fb_len = fk_fb_len + 1;
+}
+static void fk_fb_u32(unsigned long v) {
+    fk_fb_byte((unsigned char)((v >> 24) & 255));
+    fk_fb_byte((unsigned char)((v >> 16) & 255));
+    fk_fb_byte((unsigned char)((v >> 8) & 255));
+    fk_fb_byte((unsigned char)(v & 255));
+}
+static void fk_fb_u64le(unsigned long long u) {
+    long long k = 0;
+    while (k < 8) {
+        fk_fb_byte((unsigned char)((u >> (8 * k)) & 255));
+        k = k + 1;
+    }
+}
+static long long fk_fb_str_local(long long poolidx) {
+    long long j = 0;
+    while (j < fk_fb_nstr) {
+        if (fk_fb_str[j] == poolidx) {
+            return j;
+        }
+        j = j + 1;
+    }
+    if (fk_fb_nstr >= fk_fb_strcap) {
+        fk_fb_strcap = fk_fb_strcap ? fk_fb_strcap * 2 : 4096;
+        fk_fb_str = realloc(fk_fb_str, fk_fb_strcap * 8);
+        if (fk_fb_str == 0) {
+            fk_die("write_form_binary: out of memory growing string table");
+        }
+    }
+    fk_fb_str[fk_fb_nstr] = poolidx;
+    fk_fb_nstr = fk_fb_nstr + 1;
+    return fk_fb_nstr - 1;
+}
+/* pre-order collect (category first, then children) -- Go's collectArtifactStrings */
+static void fk_fb_collect(long long v) {
+    if (v >= 0) {
+        return;
+    }
+    if (((0 - v) & 1) != 1) {
+        return;
+    }
+    long long ni = fk_nidx(v);
+    if (ni < 1 || ni > fk_np) {
+        return;
+    }
+    if (fk_nkind[ni] == 2) {
+        fk_fb_collect(fk_ncat[ni]);
+        long long p = fk_nkids[ni] >> 1;
+        while (p >= 1 && p <= fk_hp) {
+            fk_fb_collect(fk_hh[p]);
+            p = fk_ht[p] >> 1;
+        }
+        return;
+    }
+    if (fk_nkind[ni] == 1 && fk_nid[ni][2] == 2) {
+        fk_fb_str_local(fk_nid[ni][3]);
+    }
+}
+static void fk_fb_node(long long v) {
+    long long ni = fk_nidx(v);
+    if (v >= 0 || ((0 - v) & 1) != 1 || ni < 1 || ni > fk_np) {
+        /* a non-node in node position: emit an empty-string leaf so the shape
+         * stays readable rather than truncating the artifact mid-tree. */
+        fk_fb_u32(0);
+        fk_fb_u32(1);
+        fk_fb_u32(1);
+        fk_fb_u32(2);
+        fk_fb_u32((unsigned long)fk_fb_str_local(0));
+        return;
+    }
+    if (fk_nkind[ni] == 2) {
+        fk_fb_u32(1);
+        fk_fb_node(fk_ncat[ni]);
+        long long p = fk_nkids[ni] >> 1;
+        long long cnt = 0;
+        while (p >= 1 && p <= fk_hp) {
+            cnt = cnt + 1;
+            p = fk_ht[p] >> 1;
+        }
+        fk_fb_u32((unsigned long)cnt);
+        p = fk_nkids[ni] >> 1;
+        while (p >= 1 && p <= fk_hp) {
+            fk_fb_node(fk_hh[p]);
+            p = fk_ht[p] >> 1;
+        }
+        return;
+    }
+    if (fk_nkind[ni] == 1) {
+        long long ty = fk_nid[ni][2];
+        if (ty == 7 || ty == 6) {
+            union {
+                double d;
+                unsigned long long u;
+            } c;
+            c.d = fk_num(fk_nval[ni]);
+            fk_fb_u32(2);
+            fk_fb_u64le(c.u);
+            return;
+        }
+        if (ty == 1) {
+            long long val = fk_nid[ni][3];
+            if (val >= -2147483648LL && val <= 2147483647LL) {
+                fk_fb_u32(0);
+                fk_fb_u32(1);
+                fk_fb_u32(1);
+                fk_fb_u32(1);
+                fk_fb_u32((unsigned long)(unsigned int)(int)val);
+            } else {
+                fk_fb_u32(3);
+                fk_fb_u64le((unsigned long long)val);
+            }
+            return;
+        }
+        if (ty == 2) {
+            fk_fb_u32(0);
+            fk_fb_u32(1);
+            fk_fb_u32(1);
+            fk_fb_u32(2);
+            fk_fb_u32((unsigned long)fk_fb_str_local(fk_nid[ni][3]));
+            return;
+        }
+        /* bool (3) and any other trivial: emit its raw 4-tuple */
+        fk_fb_u32(0);
+        fk_fb_u32((unsigned long)fk_nid[ni][0]);
+        fk_fb_u32((unsigned long)fk_nid[ni][1]);
+        fk_fb_u32((unsigned long)fk_nid[ni][2]);
+        fk_fb_u32((unsigned long)fk_nid[ni][3]);
+        return;
+    }
+    /* nkind 3: a bare leaf NodeID -- its 4-tuple rides the wire */
+    fk_fb_u32(0);
+    fk_fb_u32((unsigned long)fk_nid[ni][0]);
+    fk_fb_u32((unsigned long)fk_nid[ni][1]);
+    fk_fb_u32((unsigned long)fk_nid[ni][2]);
+    fk_fb_u32((unsigned long)fk_nid[ni][3]);
+}
+
+/* ── node constructors (mirror the intern_trivial_* / intern_node / make_nodeid
+ * eval arms exactly, so a read-back node is node_eq to the original) ── */
+static long long fk_mk_int_node(long long val) {
+    long long iv = val << 1;
+    long long ix = 1;
+    while (ix <= fk_np) {
+        if (fk_nkind[ix] == 1 && fk_nid[ix][2] == 1 && fk_nval[ix] == iv) {
+            return fk_nbox(ix);
+        }
+        ix = ix + 1;
+    }
+    if (fk_np + 1 >= FK_NODE_CAP) {
+        fk_die("read_form_binary: fk value-node table full (FK_NODE_CAP)");
+    }
+    fk_np = fk_np + 1;
+    fk_nkind[fk_np] = 1;
+    fk_nval[fk_np] = iv;
+    fk_nkids[fk_np] = 1;
+    fk_ncat[fk_np] = 0;
+    fk_nid[fk_np][0] = 1;
+    fk_nid[fk_np][1] = 1;
+    fk_nid[fk_np][2] = 1;
+    fk_nid[fk_np][3] = val;
+    return fk_nbox(fk_np);
+}
+static long long fk_mk_str_node(long long poolidx) {
+    long long sv = fk_strv(poolidx);
+    long long ix = 1;
+    while (ix <= fk_np) {
+        if (fk_nkind[ix] == 1 && fk_nid[ix][2] == 2 && fk_nval[ix] == sv) {
+            return fk_nbox(ix);
+        }
+        ix = ix + 1;
+    }
+    if (fk_np + 1 >= FK_NODE_CAP) {
+        fk_die("read_form_binary: fk value-node table full (FK_NODE_CAP)");
+    }
+    fk_np = fk_np + 1;
+    fk_nkind[fk_np] = 1;
+    fk_nval[fk_np] = sv;
+    fk_nkids[fk_np] = 1;
+    fk_ncat[fk_np] = 0;
+    fk_nid[fk_np][0] = 1;
+    fk_nid[fk_np][1] = 1;
+    fk_nid[fk_np][2] = 2;
+    fk_nid[fk_np][3] = poolidx;
+    return fk_nbox(fk_np);
+}
+static long long fk_mk_bool_node(long long b) {
+    long long se = (b != 0) ? (0 - 9223372036854775807LL) : (0 - 9223372036854775805LL);
+    long long ix = 1;
+    while (ix <= fk_np) {
+        if (fk_nkind[ix] == 1 && fk_nid[ix][2] == 3 && fk_nval[ix] == se) {
+            return fk_nbox(ix);
+        }
+        ix = ix + 1;
+    }
+    if (fk_np + 1 >= FK_NODE_CAP) {
+        fk_die("read_form_binary: fk value-node table full (FK_NODE_CAP)");
+    }
+    fk_np = fk_np + 1;
+    fk_nkind[fk_np] = 1;
+    fk_nval[fk_np] = se;
+    fk_nkids[fk_np] = 1;
+    fk_ncat[fk_np] = 0;
+    fk_nid[fk_np][0] = 1;
+    fk_nid[fk_np][1] = 1;
+    fk_nid[fk_np][2] = 3;
+    fk_nid[fk_np][3] = (b != 0) ? 1 : 0;
+    return fk_nbox(fk_np);
+}
+static long long fk_mk_float_node(double d) {
+    long long fb = fk_fbox(d);
+    if (fk_np + 1 >= FK_NODE_CAP) {
+        fk_die("read_form_binary: fk value-node table full (FK_NODE_CAP)");
+    }
+    fk_np = fk_np + 1;
+    fk_nkind[fk_np] = 1;
+    fk_nval[fk_np] = fb;
+    fk_nkids[fk_np] = 1;
+    fk_ncat[fk_np] = 0;
+    fk_nid[fk_np][0] = 1;
+    fk_nid[fk_np][1] = 1;
+    fk_nid[fk_np][2] = 7;
+    fk_nid[fk_np][3] = 0;
+    return fk_nbox(fk_np);
+}
+static long long fk_mk_leaf_node(long long p, long long l, long long ty, long long in) {
+    long long ix = 1;
+    while (ix <= fk_np) {
+        if (fk_nkind[ix] == 3 && fk_nid[ix][0] == p && fk_nid[ix][1] == l &&
+            fk_nid[ix][2] == ty && fk_nid[ix][3] == in) {
+            return fk_nbox(ix);
+        }
+        ix = ix + 1;
+    }
+    if (fk_np + 1 >= FK_NODE_CAP) {
+        fk_die("read_form_binary: fk value-node table full (FK_NODE_CAP)");
+    }
+    fk_np = fk_np + 1;
+    fk_nkind[fk_np] = 3;
+    fk_ncat[fk_np] = 0;
+    fk_nkids[fk_np] = 1;
+    fk_nval[fk_np] = 0;
+    fk_nid[fk_np][0] = p;
+    fk_nid[fk_np][1] = l;
+    fk_nid[fk_np][2] = ty;
+    fk_nid[fk_np][3] = in;
+    return fk_nbox(fk_np);
+}
+static long long fk_mk_comp_node(long long cat, long long kids) {
+    long long ix = 1;
+    while (ix <= fk_np) {
+        if (fk_nkind[ix] == 2 && fk_veq(fk_ncat[ix], cat) != 0 &&
+            fk_veq(fk_nkids[ix], kids) != 0) {
+            return fk_nbox(ix);
+        }
+        ix = ix + 1;
+    }
+    if (fk_np + 1 >= FK_NODE_CAP) {
+        fk_die("read_form_binary: fk value-node table full (FK_NODE_CAP)");
+    }
+    fk_np = fk_np + 1;
+    fk_nkind[fk_np] = 2;
+    fk_ncat[fk_np] = cat;
+    fk_nkids[fk_np] = kids;
+    fk_nval[fk_np] = 0;
+    fk_nid[fk_np][0] = 0;
+    fk_nid[fk_np][1] = 0;
+    fk_nid[fk_np][2] = 0;
+    fk_nid[fk_np][3] = fk_np;
+    if (cat < 0) {
+        long long ci = fk_nidx(cat);
+        if (ci >= 1 && ci <= fk_np) {
+            fk_nid[fk_np][1] = fk_nid[ci][1];
+            fk_nid[fk_np][2] = fk_nid[ci][2];
+        }
+    }
+    return fk_nbox(fk_np);
+}
+
+/* ── reader: cursor over the file bytes + local string table (pool indices) ── */
+static const unsigned char *fk_rd_buf;
+static long long fk_rd_pos;
+static long long fk_rd_end;
+static int fk_rd_err;
+static long long *fk_rd_str;
+static long long fk_rd_nstr;
+
+/* grow-only cons for building read-back child lists: a pure realloc keeps every
+ * live heap index stable, so the C-local child values (unrooted for the melt
+ * collector) survive -- unlike tag-19 cons, this never compacts. */
+static long long fk_rd_cons(long long h, long long t) {
+    if (fk_cap == 0) {
+        fk_arena();
+    }
+    if (fk_hp + 1 >= fk_cap) {
+        long long nc = fk_cap * 2;
+        long long *nh = realloc(fk_hh, nc * 8);
+        long long *nt = realloc(fk_ht, nc * 8);
+        if (nh == 0 || nt == 0) {
+            fk_die("read_form_binary: out of memory growing heap");
+        }
+        fk_hh = nh;
+        fk_ht = nt;
+        fk_cap = nc;
+    }
+    fk_hp = fk_hp + 1;
+    fk_hh[fk_hp] = h;
+    fk_ht[fk_hp] = t;
+    return (fk_hp << 1) | 1;
+}
+static unsigned long fk_rd_u32(void) {
+    if (fk_rd_err || fk_rd_pos + 4 > fk_rd_end) {
+        fk_rd_err = 1;
+        return 0;
+    }
+    unsigned long v = ((unsigned long)fk_rd_buf[fk_rd_pos] << 24) |
+                      ((unsigned long)fk_rd_buf[fk_rd_pos + 1] << 16) |
+                      ((unsigned long)fk_rd_buf[fk_rd_pos + 2] << 8) |
+                      (unsigned long)fk_rd_buf[fk_rd_pos + 3];
+    fk_rd_pos = fk_rd_pos + 4;
+    return v;
+}
+static unsigned long long fk_rd_u64le(void) {
+    if (fk_rd_err || fk_rd_pos + 8 > fk_rd_end) {
+        fk_rd_err = 1;
+        return 0;
+    }
+    unsigned long long u = 0;
+    long long k = 0;
+    while (k < 8) {
+        u = u | ((unsigned long long)fk_rd_buf[fk_rd_pos + k] << (8 * k));
+        k = k + 1;
+    }
+    fk_rd_pos = fk_rd_pos + 8;
+    return u;
+}
+static long long fk_rd_node(long long depth) {
+    if (fk_rd_err || depth > 256) {
+        fk_rd_err = 1;
+        return fk_nothing;
+    }
+    unsigned long tag = fk_rd_u32();
+    if (fk_rd_err) {
+        return fk_nothing;
+    }
+    if (tag == 2) {
+        union {
+            double d;
+            unsigned long long u;
+        } c;
+        c.u = fk_rd_u64le();
+        if (fk_rd_err) {
+            return fk_nothing;
+        }
+        return fk_mk_float_node(c.d);
+    }
+    if (tag == 3) {
+        unsigned long long u = fk_rd_u64le();
+        if (fk_rd_err) {
+            return fk_nothing;
+        }
+        return fk_mk_int_node((long long)u);
+    }
+    if (tag == 0) {
+        unsigned long p = fk_rd_u32();
+        unsigned long l = fk_rd_u32();
+        unsigned long ty = fk_rd_u32();
+        unsigned long in = fk_rd_u32();
+        if (fk_rd_err) {
+            return fk_nothing;
+        }
+        if (l == 1 && ty == 2) {
+            if ((long long)in >= fk_rd_nstr) {
+                fk_rd_err = 1;
+                return fk_nothing;
+            }
+            return fk_mk_str_node(fk_rd_str[in]);
+        }
+        if (l == 1 && ty == 1) {
+            return fk_mk_int_node((long long)(int)(unsigned int)in);
+        }
+        if (l == 1 && ty == 3) {
+            return fk_mk_bool_node(in != 0 ? 1 : 0);
+        }
+        if (l == 1 && ty == 6) {
+            union {
+                float f;
+                unsigned int u;
+            } c;
+            c.u = (unsigned int)in;
+            return fk_mk_float_node((double)c.f);
+        }
+        return fk_mk_leaf_node((long long)p, (long long)l, (long long)ty, (long long)in);
+    }
+    if (tag == 1) {
+        long long cat = fk_rd_node(depth + 1);
+        if (fk_rd_err) {
+            return fk_nothing;
+        }
+        unsigned long cnt = fk_rd_u32();
+        if (fk_rd_err) {
+            return fk_nothing;
+        }
+        long long *ch = malloc((cnt ? (long long)cnt : 1) * 8);
+        if (ch == 0) {
+            fk_die("read_form_binary: out of memory reading children");
+        }
+        unsigned long k = 0;
+        while (k < cnt) {
+            ch[k] = fk_rd_node(depth + 1);
+            if (fk_rd_err) {
+                free(ch);
+                return fk_nothing;
+            }
+            k = k + 1;
+        }
+        long long kids = 1;
+        long long kk = (long long)cnt - 1;
+        while (kk >= 0) {
+            kids = fk_rd_cons(ch[kk], kids);
+            kk = kk - 1;
+        }
+        free(ch);
+        return fk_mk_comp_node(cat, kids);
+    }
+    fk_rd_err = 1;
+    return fk_nothing;
+}
+
 static long long fk_walk_cold(long long t, long long i, long long fp) {
     if (t == 9) {
         putchar((int)(fk_walk(fk_node[i][1], fp) >> 1));
@@ -8157,6 +8656,145 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
             gj = gj + 1;
         }
         return fk_strv(fk_sintern(fk_sbp, fk_gen_len));
+    }
+    if (t == 143) {
+        /* value_kind v -> the kind name string. Mirrors form-kernel-go's
+         * valueKindName / rust value_kind_name / ts valueKindName. */
+        const char *vk = fk_value_kind_name(fk_walk(fk_node[i][1], fp));
+        return fk_sbuf(vk, fk_cstrlen(vk));
+    }
+    if (t == 144) {
+        /* read_form_binary path -> a Form node deserialized from the FORMBIN2
+         * artifact at path, or `nothing` (host VNull) when the file is missing,
+         * short, or malformed. */
+        static char rp144[4096];
+        fk_cstr(fk_walk(fk_node[i][1], fp), rp144, 4096);
+        int fd144 = open(rp144, O_RDBIN);
+        if (fd144 < 0) {
+            return fk_nothing;
+        }
+        long long sz144 = lseek(fd144, 0, 2);
+        if (sz144 < 0) {
+            close(fd144);
+            return fk_nothing;
+        }
+        lseek(fd144, 0, 0);
+        unsigned char *b144 = malloc((sz144 ? sz144 : 1));
+        if (b144 == 0) {
+            close(fd144);
+            fk_die("read_form_binary: out of memory reading file");
+        }
+        long long got144 = fk_read_all_bounded(fd144, (char *)b144, sz144);
+        close(fd144);
+        if (got144 != sz144) {
+            free(b144);
+            return fk_nothing;
+        }
+        const char *mg = "FORMBIN2";
+        const char *m1 = "FORMBIN1";
+        long long okmg = (sz144 >= 8);
+        long long j144 = 0;
+        while (okmg && j144 < 8) {
+            if (b144[j144] != (unsigned char)mg[j144] && b144[j144] != (unsigned char)m1[j144]) {
+                okmg = 0;
+            }
+            j144 = j144 + 1;
+        }
+        if (!okmg) {
+            free(b144);
+            return fk_nothing;
+        }
+        fk_rd_buf = b144;
+        fk_rd_pos = 8;
+        fk_rd_end = sz144;
+        fk_rd_err = 0;
+        unsigned long sc144 = fk_rd_u32();
+        if (fk_rd_err) {
+            free(b144);
+            return fk_nothing;
+        }
+        if (fk_rd_str) {
+            free(fk_rd_str);
+            fk_rd_str = 0;
+        }
+        fk_rd_str = malloc((sc144 ? (long long)sc144 : 1) * 8);
+        if (fk_rd_str == 0) {
+            free(b144);
+            fk_die("read_form_binary: out of memory for string table");
+        }
+        fk_rd_nstr = 0;
+        unsigned long si144 = 0;
+        while (si144 < sc144) {
+            unsigned long slen = fk_rd_u32();
+            if (fk_rd_err || fk_rd_pos + (long long)slen > fk_rd_end) {
+                fk_rd_err = 1;
+                break;
+            }
+            fk_rd_str[fk_rd_nstr] = fk_stri(fk_sbuf((const char *)(b144 + fk_rd_pos), slen));
+            fk_rd_pos = fk_rd_pos + slen;
+            fk_rd_nstr = fk_rd_nstr + 1;
+            si144 = si144 + 1;
+        }
+        long long root144 = fk_nothing;
+        if (!fk_rd_err) {
+            root144 = fk_rd_node(0);
+        }
+        free(fk_rd_str);
+        fk_rd_str = 0;
+        free(b144);
+        fk_rd_buf = 0;
+        if (fk_rd_err) {
+            return fk_nothing;
+        }
+        return root144;
+    }
+    if (t == 145) {
+        /* write_form_binary path node -> bytes written (int), or -1 on I/O
+         * failure. Emits the FORMBIN2 artifact (magic, string table, tree). */
+        static char wp145[4096];
+        fk_cstr(fk_walk(fk_node[i][1], fp), wp145, 4096);
+        long long root145 = fk_walk(fk_node[i][2], fp);
+        fk_fb_len = 0;
+        fk_fb_nstr = 0;
+        const char *mg145 = "FORMBIN2";
+        long long j145 = 0;
+        while (j145 < 8) {
+            fk_fb_byte((unsigned char)mg145[j145]);
+            j145 = j145 + 1;
+        }
+        fk_fb_collect(root145);
+        fk_fb_u32((unsigned long)fk_fb_nstr);
+        long long s145 = 0;
+        while (s145 < fk_fb_nstr) {
+            long long poolidx = fk_fb_str[s145];
+            long long slen = fk_sl[poolidx];
+            long long base = fk_so[poolidx];
+            fk_fb_u32((unsigned long)slen);
+            long long bj = 0;
+            while (bj < slen) {
+                fk_fb_byte((unsigned char)fk_sb[base + bj]);
+                bj = bj + 1;
+            }
+            s145 = s145 + 1;
+        }
+        fk_fb_node(root145);
+        int fd145 = open(wp145, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+        if (fd145 < 0) {
+            return -2;
+        }
+        long long wr145 = 0;
+        while (wr145 < fk_fb_len) {
+            long long w145 = write(fd145, fk_fb_buf + wr145, fk_fb_len - wr145);
+            if (w145 <= 0) {
+                break;
+            }
+            wr145 = wr145 + w145;
+        }
+        close(fd145);
+        if (wr145 < fk_fb_len) {
+            return -2;
+        }
+        return fk_fb_len << 1;
     }
     return 0;
 }
