@@ -63,6 +63,27 @@
     (defn dfd-st-hashcount (src)
         (gm-int src (gmt-find src "deepseek4.hash_layer_count") 4))
 
+    ; ── the GPU-resident id chain (dense round three's donor, ported to DS4). The argmax id never
+    ; travels to the host mid-generation: it is copied device-to-device into a per-position id buffer,
+    ; and the next token's embed and hash-select read their row index FROM that buffer. base = id*n*2
+    ; is the same offset the host constant computed; hash-select's token is the same row. copy_u32 is
+    ; bytes-are-bytes. Three kernels in one unit; the stack appends them as P36/37/38.
+    (defn dfd-idchain-msl ()
+        (str_concat (dfd-msl-pragma)
+        (str_concat "#include <metal_stdlib>\nusing namespace metal;\n"
+        (str_concat "kernel void form_dsv4_embed_f16_u32_idx(device const uchar* src [[buffer(0)]], device float* dst [[buffer(1)]], device const uint* idp [[buffer(2)]], constant uint& pos [[buffer(3)]], constant uint& n [[buffer(4)]], uint gid [[thread_position_in_grid]]) { if (gid < n) { uint base = idp[pos] * n * 2u; ushort h = *(device const ushort*)(src + base + gid*2u); dst[gid] = float(as_type<half>(h)); } }"
+        (str_concat " kernel void form_dsv4_hash_select_idx (device const uchar* tb [[buffer(0)]], device uint* ids [[buffer(1)]], device const uint* idp [[buffer(2)]], constant uint& pos [[buffer(3)]], constant uint& nused [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= nused) return; uint token = idp[pos]; ulong off = ((ulong)token * (ulong)nused + (ulong)i) * 4ul; uint v = uint(tb[off]) + 256u * uint(tb[off + 1ul]) + 65536u * uint(tb[off + 2ul]) + 16777216u * uint(tb[off + 3ul]); ids[i] = v; }"
+                    " kernel void form_dsv4_copy_u32 (device const uint* s [[buffer(0)]], device uint* d [[buffer(1)]], constant uint& n [[buffer(2)]], constant uint& doff [[buffer(3)]], constant uint& soff [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= n) return; d[doff + i] = s[soff + i]; }")))))
+
+    ; seed the id buffer with the prompt tokens (host->device, before any batch opens)
+    (defn dfd-seed-ids (h ids i)
+        (if (eq (len ids) 0) 0
+            (do (metal_buf_write h (mul i 4) (dfd-u32 (head ids)))
+                (dfd-seed-ids h (tail ids) (add i 1)))))
+    ; read n u32 ids out of a raw byte string
+    (defn dfd-read-ids (raw i n)
+        (if (ge i n) 0 (cons (dfd-rd32 raw (mul i 4)) (dfd-read-ids raw (add i 1) n))))
+
     ; one layer's handles and arenas, resolved once. Fields:
     ;  0 nrmh  1 qaty  2 qah  3 qanh  4 kvh  5 kvanh  6 qbh  7 snkh  8 oah  9 oaty  10 obh  11 obty
     ; 12 hafh 13 hash 14 habh 15 hffh 16 hfsh 17 hfbh 18 fnwh
@@ -298,9 +319,9 @@
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth L 19)) (dfd-u32 (nth S 33))) (dfd-u32 (nth S 34))))
                             (str_concat (dfd-u32 2) (str_concat (dfd-u32 256) (dfd-u32 4096)))) 256))
             (let g5 (if (eq (nth L 21) 1)
-                (do (let g3 (metal_enqueue (nth P 18)
-                        (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth L 20)) (dfd-u32 (nth S 35))))
-                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 token) (dfd-u32 6)))) 6))
+                (do (let g3 (metal_enqueue (nth P 37)
+                        (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth L 20)) (dfd-u32 (nth S 35))) (dfd-u32 (nth S 58))))
+                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 pos) (dfd-u32 6)))) 6))
                     (let g4 (metal_enqueue (nth P 19) (dfd-bind-tg
                         (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 34)) (dfd-u32 (nth S 37))))
                                     (str_concat (dfd-u32 1) (dfd-u32 256))) 32 0) 256))
@@ -402,9 +423,11 @@
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth X 11)) (dfd-u32 (nth X 12)))
                                                                 (str_concat (dfd-u32 (nth X 13)) (dfd-u32 (nth X 14)))))
                             (str_concat (dfd-u32 1) (dfd-u32 512))) 512 0) 512))
-            (let outs (metal_buf_read (nth X 13) 0 4))
-            (let ovs (metal_buf_read (nth X 14) 0 4))
-            (cons (dfd-rd32 outs 0) (cons (dfd-f32at ovs 0) (cons 0 (cons 0.0 0))))))
+            ; the argmax id (X13) lands device-to-device in idbuf[pos+1] (S58). Nothing is read to the
+            ; host mid-generation; the winning logit (X14) is diagnostic and no longer computed off-path.
+            (metal_enqueue (nth P 38)
+                (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth X 13)) (dfd-u32 (nth S 58))))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 1) (dfd-u32 (add pos 1))) (dfd-u32 0)))) 1)))
 
     ; the decode loop: prompt prefill then greedy continuation. Returns the generated ids, in order.
     (defn dfd-st-compinit (pci Ls)
@@ -417,27 +440,23 @@
                                         (str_concat (dfd-u32 1) (dfd-u32 n))) n))
                     0)
                 (dfd-st-compinit pci (tail Ls)))))
-    (defn dfd-st-step (P S Ls X ids pos ntotal promptlen gen)
-        (if (ge pos ntotal) gen
-            (do (let token (nth ids pos))
-                (let e0 (metal_enqueue (nth P 0)
-                    (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 63)) (dfd-u32 (nth S 0))))
-                                (str_concat (dfd-u32 2) (str_concat (dfd-u32 (mul (mul token 4096) 2)) (dfd-u32 4096)))) 4096))
+    ; the decode loop is now pure enqueue: the embed reads its token id from idbuf[pos] (S58), the
+    ; head lands the next id in idbuf[pos+1], and no id is read to the host until the whole generation
+    ; has been submitted. The dispatch sequence is id-INDEPENDENT (the routing reads device ids), so
+    ; the entire greedy stream is one submit; dfd-stack-stream reads all ids once at the end.
+    (defn dfd-st-step (P S Ls X pos ntotal promptlen)
+        (if (ge pos ntotal) 0
+            (do (let e0 (metal_enqueue (nth P 36)
+                    (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth S 63)) (dfd-u32 (nth S 0))) (dfd-u32 (nth S 58))))
+                                (str_concat (dfd-u32 2) (str_concat (dfd-u32 pos) (dfd-u32 4096)))) 4096))
                 (let e1 (metal_enqueue (nth P 1)
                     (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 0)) (dfd-u32 (nth S 1))))
                                 (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 16384))
-                (let fin (dfd-st-layers-go P S Ls 0 pos token (nth S 1) (nth S 2)))
+                (let fin (dfd-st-layers-go P S Ls 0 pos 0 (nth S 1) (nth S 2)))
                 (if (lt pos (sub promptlen 1))
-                    (dfd-st-step P S Ls X ids (add pos 1) ntotal promptlen gen)
-                    (do (let am (dfd-st-head P S X pos fin))
-                        (let nid (head am))
-                        (print (str_concat "STREAM pos=" (str_concat (int_to_str pos)
-                               (str_concat " next=" (str_concat (int_to_str nid)
-                               (str_concat " logit=" (str_concat (float_to_str (head (tail am)))
-                               (str_concat " runner=" (str_concat (int_to_str (nth am 2))
-                               (str_concat "/" (float_to_str (nth am 3))))))))))))
-                        (dfd-st-step P S Ls X (dfd-append1 ids nid) (add pos 1) ntotal promptlen
-                                     (dfd-append1 gen nid)))))))
+                    (dfd-st-step P S Ls X (add pos 1) ntotal promptlen)
+                    (do (dfd-st-head P S X pos fin)
+                        (dfd-st-step P S Ls X (add pos 1) ntotal promptlen))))))
 
 
     (defn dfd-stack-stream (path promptids nsteps)
@@ -499,7 +518,11 @@
                    ; The interpreted fold over 129,280 logits cost 1227 ms per generated token
                    ; (dsl-l3-probe L2d, 2026-08-09); these two dispatches and an 8-byte read replace it.
                    (cons (metal_pipeline amsl "form_argmax_part_f32")
-                   (cons (metal_pipeline amsl "form_argmax_comb_f32") 0)))))))))))))))))))))))))))))))))))))
+                   (cons (metal_pipeline amsl "form_argmax_comb_f32")
+                   ; 36/37/38 — the GPU-resident id chain: embed-by-id, hash-select-by-id, copy_u32.
+                   (cons (metal_pipeline (dfd-idchain-msl) "form_dsv4_embed_f16_u32_idx")
+                   (cons (metal_pipeline (dfd-idchain-msl) "form_dsv4_hash_select_idx")
+                   (cons (metal_pipeline (dfd-idchain-msl) "form_dsv4_copy_u32") 0))))))))))))))))))))))))))))))))))))))))
             (let pci (metal_pipeline cmsl "form_dsv4_comp_init_f32"))
 
             (let S (cons (metal_buf_alloc 16384)      ; 0 xb
@@ -560,8 +583,11 @@
                    (cons (metal_buf_alloc 2048)       ; 55 cnrmb
                    (cons (metal_buf_alloc 2048)       ; 56 crb
                    (cons (metal_buf_alloc 2048)       ; 57 cqb
-                   (cons 0 (cons 0 (cons 0 (cons 0 (cons 0
+                   (cons (metal_buf_alloc (mul kvcap 4)) ; 58 idbuf (per-position token ids, device-resident)
+                   (cons 0 (cons 0 (cons 0 (cons 0
                    (cons embh 0)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
+            ; seed the prompt tokens into idbuf before any batch opens (host->device, no hazard)
+            (let seed (dfd-seed-ids (nth S 58) promptids 0))
             ; the two freq tables, computed ON the device (rung 5 and rung 9's kernels and scalars)
             (let ef0 (metal_enqueue (nth P 13)
                 (str_concat (str_concat (dfd-u32 1) (dfd-u32 (nth S 49)))
@@ -593,7 +619,11 @@
                    (cons (metal_buf_alloc 4)          ; 14 argmax winning logit
                          0))))))))))))))))
             (print (metal_status))
-            (let gen (dfd-st-step P S Ls X promptids 0 (add (len promptids) nsteps) (len promptids) 0))
+            ; one submit: enqueue the whole greedy stream, then read all generated ids at once. The
+            ; single metal_buf_read below is the only host fence of the generation (was one per token).
+            (dfd-st-step P S Ls X 0 (add (len promptids) nsteps) (len promptids))
+            (let raw (metal_buf_read (nth S 58) (mul (len promptids) 4) (mul nsteps 4)))
+            (let gen (dfd-read-ids raw 0 nsteps))
             (print (metal_status))
             gen))
     0)
