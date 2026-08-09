@@ -6719,6 +6719,226 @@ static const char *fk_value_kind_name(long long v) {
     return "unknown";
 }
 
+/* ── native_blueprint (op 146): a native name -> its Form category NodeID,
+ * or `nothing` (host VNull) for an unregistered name. The category is the
+ * Form-shape the native expresses; this table is GENERATED from
+ * form/form-kernel-go/main.go register(Env)Native(name, catX()) call sites
+ * (the canonical surface Rust and TypeScript mirror), so all four kernels
+ * answer the same category for the same name. cat->{type,inst}:
+ *   catWitness @1.2.6.1  catCall @1.2.10.1  catCompare @1.2.13.1
+ *   catAccess @1.2.15.1  catMethod @1.2.27.1  catListNat @1.2.34.1
+ *   catUndefined @1.2.0.0. NodeID pkg=1 level=2 (LevelBasic) throughout. */
+struct fk_native_cat_row { const char *name; long long ty; long long inst; };
+static const struct fk_native_cat_row fk_native_cat[] = {
+  { "_dict_get", 15, 1 },
+  { "_dict_has", 13, 1 },
+  { "_dict_keys", 15, 1 },
+  { "_dict_new", 34, 1 },
+  { "_dict_set", 27, 1 },
+  { "_dict_values", 15, 1 },
+  { "_get", 15, 1 },
+  { "_in", 13, 1 },
+  { "_iter", 34, 1 },
+  { "_len", 15, 1 },
+  { "_list_append", 34, 1 },
+  { "_plus", 27, 1 },
+  { "abs", 27, 1 },
+  { "add_u32", 27, 1 },
+  { "band", 27, 1 },
+  { "bnot_u32", 27, 1 },
+  { "bor", 27, 1 },
+  { "bp", 6, 1 },
+  { "bxor", 27, 1 },
+  { "byte_to_str", 15, 1 },
+  { "bytes_to_recipe", 6, 1 },
+  { "ceil", 27, 1 },
+  { "char_at", 15, 1 },
+  { "cons", 34, 1 },
+  { "deserialize-recipe", 6, 1 },
+  { "dominant_band_delta", 27, 1 },
+  { "dot_product", 27, 1 },
+  { "empty", 34, 1 },
+  { "fb_record", 6, 1 },
+  { "file_append_bytes", 10, 1 },
+  { "file_byte_at", 10, 1 },
+  { "file_mtime", 10, 1 },
+  { "file_size", 10, 1 },
+  { "float_to_int", 27, 1 },
+  { "float_value", 27, 1 },
+  { "floor", 27, 1 },
+  { "form-error", 6, 1 },
+  { "form_error", 6, 1 },
+  { "form_table_text", 27, 1 },
+  { "framebuffer-clear", 6, 1 },
+  { "framebuffer-counts", 6, 1 },
+  { "framebuffer-event-rows", 6, 1 },
+  { "framebuffer-events", 6, 1 },
+  { "framebuffer-observe-active?", 13, 1 },
+  { "framebuffer-observe-start", 6, 1 },
+  { "framebuffer-observe-stop", 6, 1 },
+  { "fs_exists", 10, 1 },
+  { "fs_is_dir", 10, 1 },
+  { "fs_list", 10, 1 },
+  { "fs_mkdir", 10, 1 },
+  { "fs_remove", 10, 1 },
+  { "fs_rename", 10, 1 },
+  { "fs_rmdir", 10, 1 },
+  { "head", 34, 1 },
+  { "host-exec", 27, 1 },
+  { "host-read", 27, 1 },
+  { "host-write", 27, 1 },
+  { "host_dir_list", 10, 1 },
+  { "host_dir_mkdir", 10, 1 },
+  { "host_dir_rmdir", 10, 1 },
+  { "host_file_append_bytes", 10, 1 },
+  { "host_file_mtime", 10, 1 },
+  { "host_file_read_slice", 10, 1 },
+  { "host_file_read_text", 10, 1 },
+  { "host_file_size", 10, 1 },
+  { "host_file_write_text", 10, 1 },
+  { "host_path_exists", 10, 1 },
+  { "host_path_is_dir", 10, 1 },
+  { "host_path_remove", 10, 1 },
+  { "host_path_rename", 10, 1 },
+  { "host_temp_dir", 10, 1 },
+  { "installed_leaf?", 13, 1 },
+  { "int_to_str", 27, 1 },
+  { "intern_node", 6, 1 },
+  { "intern_node_at", 6, 1 },
+  { "intern_trivial_bool", 6, 1 },
+  { "intern_trivial_float", 6, 1 },
+  { "intern_trivial_int", 6, 1 },
+  { "intern_trivial_string", 6, 1 },
+  { "jit-stats", 6, 1 },
+  { "jit_aliased?", 13, 1 },
+  { "jit_compile", 6, 1 },
+  { "jit_compile_value", 6, 1 },
+  { "jit_compiled?", 13, 1 },
+  { "jit_emit_c", 6, 1 },
+  { "jit_install", 6, 1 },
+  { "len", 15, 1 },
+  { "list", 34, 1 },
+  { "magnitude", 27, 1 },
+  { "make_float32", 6, 1 },
+  { "make_float64", 6, 1 },
+  { "make_nodeid", 6, 1 },
+  { "math_acos", 27, 1 },
+  { "math_ceil", 27, 1 },
+  { "math_exp", 27, 1 },
+  { "math_floor", 27, 1 },
+  { "math_log", 27, 1 },
+  { "math_pi", 27, 1 },
+  { "math_pow", 27, 1 },
+  { "math_sqrt", 27, 1 },
+  { "max", 27, 1 },
+  { "method_define", 27, 1 },
+  { "method_has", 15, 1 },
+  { "method_invoke", 27, 1 },
+  { "min", 27, 1 },
+  { "native_blueprint", 6, 1 },
+  { "node_category", 6, 1 },
+  { "node_children", 6, 1 },
+  { "node_eq", 13, 1 },
+  { "node_inst", 6, 1 },
+  { "node_level", 6, 1 },
+  { "node_pkg", 6, 1 },
+  { "node_source", 6, 1 },
+  { "node_type", 6, 1 },
+  { "node_value", 6, 1 },
+  { "now_unix_ms", 10, 1 },
+  { "nth", 15, 1 },
+  { "ord", 15, 1 },
+  { "pair_angle", 27, 1 },
+  { "pow", 27, 1 },
+  { "print", 10, 1 },
+  { "print_float", 27, 1 },
+  { "random_bytes", 10, 1 },
+  { "read_file", 10, 1 },
+  { "read_file_bytes", 10, 1 },
+  { "read_file_slice", 10, 1 },
+  { "read_form_binary", 10, 1 },
+  { "recipe_to_bytes", 6, 1 },
+  { "record?", 15, 1 },
+  { "record_blueprint", 15, 1 },
+  { "record_get", 15, 1 },
+  { "record_has", 15, 1 },
+  { "record_keys", 15, 1 },
+  { "record_new", 27, 1 },
+  { "record_set", 27, 1 },
+  { "register_jit", 6, 1 },
+  { "rotr_u32", 27, 1 },
+  { "round", 27, 1 },
+  { "round_ndigits", 27, 1 },
+  { "scan_run", 15, 1 },
+  { "seeded_bytes", 10, 1 },
+  { "serialize-recipe", 6, 1 },
+  { "shl_u32", 27, 1 },
+  { "shr_u32", 27, 1 },
+  { "socket_accept", 10, 1 },
+  { "socket_close", 10, 1 },
+  { "socket_connect", 10, 1 },
+  { "socket_listen", 10, 1 },
+  { "socket_port", 10, 1 },
+  { "socket_recv", 10, 1 },
+  { "socket_send", 10, 1 },
+  { "source_inventory", 10, 1 },
+  { "source_scan_file", 10, 1 },
+  { "str_ascii_prefix", 15, 1 },
+  { "str_byte_at", 15, 1 },
+  { "str_concat", 27, 1 },
+  { "str_eq", 13, 1 },
+  { "str_find", 15, 1 },
+  { "str_len", 15, 1 },
+  { "str_line_at", 15, 1 },
+  { "str_to_float", 27, 1 },
+  { "str_to_int", 27, 1 },
+  { "string_byte_fold", 10, 1 },
+  { "string_bytes", 15, 1 },
+  { "substrate_counts", 6, 1 },
+  { "substrate_gc", 6, 1 },
+  { "substrate_mark", 6, 1 },
+  { "substrate_release", 6, 1 },
+  { "substring", 15, 1 },
+  { "sum", 27, 1 },
+  { "sum_bytes_list", 10, 1 },
+  { "tail", 34, 1 },
+  { "temp_dir", 10, 1 },
+  { "trace", 0, 0 },
+  { "trunc", 27, 1 },
+  { "unregister_jit", 6, 1 },
+  { "value-kind", 6, 1 },
+  { "value_eq", 13, 1 },
+  { "value_kind", 6, 1 },
+  { "value_str", 27, 1 },
+  { "vector_cosine", 27, 1 },
+  { "walk-cache-clear", 6, 1 },
+  { "walk-cache-size", 6, 1 },
+  { "walk-cache-stats", 6, 1 },
+  { "walk-cached", 6, 1 },
+  { "walk-parallel", 6, 1 },
+  { "walk-parallel-cached", 6, 1 },
+  { "walk_parallel", 6, 1 },
+  { "walk_parallel_cached", 6, 1 },
+  { "walk_recipe", 6, 1 },
+  { "walk_recipe_here", 6, 1 },
+  { "write_file", 10, 1 },
+  { "write_file_bytes", 10, 1 },
+  { "write_file_text", 10, 1 },
+  { "write_form_binary", 10, 1 },
+};
+static long long fk_native_cat_lookup(const char *name, long long *ty, long long *inst) {
+    long long n = (long long)(sizeof(fk_native_cat) / sizeof(fk_native_cat[0]));
+    long long k = 0;
+    while (k < n) {
+        const char *a = fk_native_cat[k].name;
+        const char *b = name;
+        while (*a && *a == *b) { a++; b++; }
+        if (*a == 0 && *b == 0) { *ty = fk_native_cat[k].ty; *inst = fk_native_cat[k].inst; return 1; }
+        k = k + 1;
+    }
+    return 0;
+}
+
 /* ── writer: growable big-endian byte buffer + first-encounter string table ── */
 static unsigned char *fk_fb_buf;
 static long long fk_fb_len;
@@ -8662,6 +8882,32 @@ static long long fk_walk_cold(long long t, long long i, long long fp) {
          * valueKindName / rust value_kind_name / ts valueKindName. */
         const char *vk = fk_value_kind_name(fk_walk(fk_node[i][1], fp));
         return fk_sbuf(vk, fk_cstrlen(vk));
+    }
+    if (t == 146) {
+        /* native_blueprint name -> the native's Form category NodeID
+         * (@1.2.<type>.<inst>), or `nothing` (host VNull) for a name that is
+         * not a registered native. Mirrors form-kernel-go's native_blueprint
+         * (rust/ts siblings); the name->category table is fk_native_cat above. */
+        static char nbname[512];
+        fk_cstr(fk_walk(fk_node[i][1], fp), nbname, 512);
+        long long nbty = 0;
+        long long nbin = 0;
+        if (!fk_native_cat_lookup(nbname, &nbty, &nbin)) {
+            return fk_nothing;
+        }
+        if (fk_np + 1 >= FK_NODE_CAP) {
+            fk_die("native_blueprint: fk value-node table full (FK_NODE_CAP)");
+        }
+        fk_np = fk_np + 1;
+        fk_nkind[fk_np] = 3;
+        fk_ncat[fk_np] = 0;
+        fk_nkids[fk_np] = 1;
+        fk_nval[fk_np] = 0;
+        fk_nid[fk_np][0] = 1;
+        fk_nid[fk_np][1] = 2;
+        fk_nid[fk_np][2] = nbty;
+        fk_nid[fk_np][3] = nbin;
+        return fk_nbox(fk_np);
     }
     if (t == 144) {
         /* read_form_binary path -> a Form node deserialized from the FORMBIN2
