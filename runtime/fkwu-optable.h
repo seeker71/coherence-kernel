@@ -180,6 +180,10 @@ static const struct fk_optab_row fk_optab[] = {
   { "list", -1, 19 },
   { "nothing", 0, 137 },
   { "nothing?", 1, 138 },
+  { "value_kind", 1, 143 },
+  { "value-kind", 1, 143 },
+  { "read_form_binary", 1, 144 },
+  { "write_form_binary", 2, 145 },
 
 };
 static const long long fk_optab_n = sizeof(fk_optab)/sizeof(fk_optab[0]);
