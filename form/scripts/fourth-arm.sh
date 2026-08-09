@@ -86,11 +86,8 @@ FOURTH_BOOTSTRAP_UNI_STAMP="form-stdlib/bootstrap/fkwu-uni.stamp"
 # self-host). The trailing fn-0 value + arm profile fkwu prints after
 # ==T-END== falls outside every per-band marker range, so the split ignores it.
 FOURTH_FLATTEN_TABLE="form-stdlib/fourth-flatten-table.txt"
-# T_flat is a compiler workload: large dependency closures recurse much more
-# deeply than an already-flattened runtime table. The emitted walker owns an
-# explicit stack-size door, so give this phase the measured stack that carries
-# the largest manifest band instead of relying on the 256 MiB runtime default.
-FOURTH_FLATTEN_STACK_MB="${FOURTH_FLATTEN_STACK_MB:-2048}"
+# T_flat is a compiler workload: large dependency closures recurse deeply.
+# The emitted walker carries its measured 2 GiB virtual stack directly.
 
 # BML reaches the fourth-arm flattener through executable Form text.  The
 # primary source compiler emits a durable .fkb image + loader; the final module
@@ -627,7 +624,7 @@ fourth_table() {
             # one-band request → fkwu walks T_flat → marker-framed table; the
             # trailing fn-0 value + arm profile sit past ==T-END==, outside the range.
             { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
-                | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
+                | "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
                 | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
             local statuses=("${PIPESTATUS[@]}")
             if [[ "${statuses[1]}" -ne 0 || ! -s "$out.tmp" ]]; then
@@ -652,7 +649,7 @@ fourth_flatten_sources() {
     [[ "${#srcs[@]}" -ge 1 ]] || return 1
     if fourth_selfhost; then
         { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
-            | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
+            | "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
             | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
         local statuses=("${PIPESTATUS[@]}")
         if [[ "${statuses[1]}" -ne 0 || ! -s "$out.tmp" ]]; then
@@ -689,8 +686,7 @@ fourth_table_for_band() {
 fourth_run_chunk() {
     local driver="$1" plan="$2" out_all="$1.out"
     if fourth_selfhost; then
-        if ! FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" \
-            "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 < "$driver" > "$out_all"; then
+        if ! "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 < "$driver" > "$out_all"; then
             echo "fourth arm: fkwu failed while flattening:" >&2
             cut -f1 "$plan" | sed 's/^/  - /' >&2
             rm -f "$out_all"

@@ -12,7 +12,12 @@ kernel's home. New runtime meaning belongs in Form/native-walker cells proven on
 current checkout witness reachable while the seed is reduced toward zero.
 
 ```sh
-# macOS / Linux — temporary checkout witness
+# macOS — the canonical fkwu is always linked to the host's Metal organ.
+# There is no separate fkwu-metal mode or opt-in build.
+cc -O2 -o fkwu runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
+  -framework Metal -framework Foundation -fobjc-arc
+
+# Linux — temporary checkout witness (Metal is a Darwin host organ)
 cc -O2 -o fkwu runtime/fkwu-uni.c
 
 # Windows (mingw-w64 / TDM-GCC) — temporary checkout witness with host-carrier libs

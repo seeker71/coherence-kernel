@@ -13,7 +13,7 @@
 ; 114/115/116); they are not in the three host walkers, so this is fkwu-native,
 ; the same way input_byte (tag 17) is. One native engine, both surfaces.
 ;
-; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/gguf-meta.fk form-stdlib/model-discovery.fk form-stdlib/native-model-native-hierarchy.fk form-stdlib/native-model-control-plane.fk form-stdlib/ask-lane-router.fk form-stdlib/form-cli.fk form-stdlib/form-cli-gguf-cell.fk
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/gguf-meta.fk form-stdlib/model-discovery.fk form-stdlib/native-model-native-hierarchy.fk form-stdlib/native-model-control-plane.fk form-stdlib/ask-lane-router.fk form-stdlib/form-cli.fk form-stdlib/form-cli-gguf-cell.fk form-stdlib/dsv4-tokenizer.fk form-stdlib/dsv4-validation-protocol.fk form-stdlib/dsv4-validation-calibrator.fk native/metal/dsv4-validation-live.fk native/metal/dense-token-handle.fk
 (do
     ; 'diagnose' reads the live framebuffer the walker is born with — fk_arms[t]
     ; per-op dispatch counts plus the node/string/arena/value-stack/float
@@ -256,7 +256,7 @@
             (if (str_eq p "") acc (cons (alr-carrier p arch) acc))))
     (defn fc-carriers ()
         (fc-carrier-here "native/metal/metal_ask.sh" "llama"
-            (fc-carrier-here "native/metal/ask_ds4.sh" "deepseek4"
+            (fc-carrier-here "native/metal/dsv4-decode-stack.fk" "deepseek4"
                 (fc-carrier-here "native/metal/metal_kat_block0.sh" "qwen35moe" (list)))))
 
     ; Only runtimes this body can see are claimed. "host-process" is absent on purpose: fkwu has no
@@ -303,7 +303,9 @@
             (fc-needs-str (tail xs) (str_concat acc (str_concat " " (head xs))))))
     (defn fc-hand-note (r)
         (if (eq (alr-carried? r) 1)
-            "\n    hand    fkwu carries no process door yet, so this names the hand and does not move it"
+            (if (ge (str_find (alr-route-carrier r) ".fk" 0) 0)
+                "\n    hand    callable now: ask/askn walks this Form recipe directly; no process or network door"
+                "\n    hand    this carrier is named but still needs a native callable transition")
             ""))
     (defn fc-route-say (r request)
         (str_concat "— route: "
@@ -363,6 +365,134 @@
                                 (alr-ask-door-by-id registry a host binds (alr-bind-id bind))
                                 text)))))))
 
+    ; ---- ask <text>: decode a real answer from the SELECTED model, form-native --------------------
+    ; The three verbs above (models/use/route) name the lane; `ask` walks it. The selected blob's own
+    ; header names the architecture; the arch's own tokenizer turns the text into ids; the arch's decode
+    ; entry runs the forward on the linked Metal carrier and returns generated ids; the arch's own
+    ; detokenizer renders them back to words. No shell in the answer path — every step is a folded cell.
+    ; RADIUS: greedy argmax, base-model continuation (no chat template, no BOS beyond what the file's
+    ; own tokenizer prepends), a hard step stop. Deepseek4 decodes at ~270 ms/token, so the default
+    ; 24-token answer is a deliberate honest wait, not a limit.
+    (defn fca-steps () 24)
+
+    ; dense family (llama/qwen2/phi2/minicpm/nanbeige): open the file once (every geometry number read
+    ; from its own header, none typed in), tokenize with the handle's own longest-match encoder, prefill
+    ; the prompt, greedy-generate nsteps, detokenize the whole continuation.
+    (defn fca-dense (path text nsteps)
+        (do (let st (dth-open path 256 (sub 0 1)))
+            (let src (nth st 10))
+            (let ids (dtk-encode src text))
+            (let pf (dth-prefill (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) ids 0))
+            (let first (nth pf 0))
+            (let rest (dth-generate (nth st 0) (nth st 1) (nth st 2) (nth st 3) (nth st 4) (nth st 5) (nth st 6) (nth st 7) (nth st 8) first (len ids) (sub nsteps 1) (list)))
+            (l3d-text src (append (list first) rest))))
+
+    (defn fca-ids-str (ids)
+        (if (eq (len ids) 0) ""
+            (str_concat (int_to_str (head ids)) (str_concat " " (fca-ids-str (tail ids))))))
+
+    ; Fast flattened-image diagnostic for the exact integer wire, Metal buffer
+    ; round-trip, and generated MSL texts the DS4 stack consumes.  It performs
+    ; no model inference and exposes no private prompt/answer payload.
+    (defn fca-msl-fingerprint (label source)
+        (str_concat label (str_concat "-bytes=" (str_concat (int_to_str (str_len source))
+        (str_concat "\n" (str_concat label (str_concat "-sha256="
+                    (hex-encode (sha256-stream-string source)))))))))
+    (defn fca-substrate-probe ()
+        (do (let ids (list 671 6102 294 8760 344))
+            (let h (metal_buf_alloc 20))
+            (let seeded (dfd-seed-ids h ids 0))
+            (let raw (metal_buf_read h 0 20))
+            (let readback (dfd-read-ids raw 0 5))
+            (let embed-msl (dfd-embed-msl))
+            (let idchain-msl (dfd-idchain-msl))
+            (str_concat "route=local-ds4-substrate-probe"
+            (str_concat "\nu32-roundtrip=" (str_concat (int_to_str (dfd-rd32 (dfd-u32 11111) 0))
+            (str_concat "\nseeded-count=" (str_concat (int_to_str seeded)
+            (str_concat "\nreadback-token-ids=" (str_concat (fca-ids-str readback)
+            (str_concat "\n" (str_concat (fca-msl-fingerprint "embed-msl" embed-msl)
+            (str_concat "\n" (str_concat (fca-msl-fingerprint "idchain-msl" idchain-msl)
+            (str_concat "\n--- metal status ---\n" (metal_status)))))))))))))))
+    ; deepseek4: model-owned tokenizer -> the Form-held 43-layer decode stack -> model-owned
+    ; detokenizer.  This is the same dfd-stack-stream used by the 25/25 stream seal; no shell,
+    ; environment variable, or external inference server enters this call.
+    (defn fca-ds4 (path text nsteps)
+        (do (let src (tkz-src path))
+            (let prompt-ids (tkz-encode src text))
+            (let generated-ids (dfd-stack-stream path prompt-ids nsteps))
+            (let response (tkz-decode-text src generated-ids))
+            (str_concat "route=local-ds4-native"
+            (str_concat "\nprompt-token-count=" (str_concat (int_to_str (len prompt-ids))
+            (str_concat "\nprompt-token-ids=" (str_concat (fca-ids-str prompt-ids)
+            (str_concat "\ngenerated-token-count=" (str_concat (int_to_str (len generated-ids))
+            (str_concat "\ngenerated-token-ids=" (str_concat (fca-ids-str generated-ids)
+            (str_concat "\n--- actual prompt ---\n" (str_concat text
+            (str_concat "\n--- actual response ---\n" (str_concat response
+            (str_concat "\n--- metal status ---\n" (metal_status)))))))))))))))))
+
+    ; validate <query> || <candidate> || <evidence> || <recipe>
+    ; The DS4-specific chat markers are assembled by ID, the actual prompt and response are returned,
+    ; and malformed/calibrator-disagreeing responses remain visibly unresolved.
+    (defn fcv-ids-tail (ids acc)
+        (if (eq (len ids) 0) acc
+            (fcv-ids-tail (tail ids)
+                (str_concat acc (str_concat " " (int_to_str (head ids)))))))
+    (defn fcv-ids-text (ids)
+        (if (eq (len ids) 0) ""
+            (fcv-ids-tail (tail ids) (int_to_str (head ids)))))
+    (defn fcv-capture-text (capture)
+        (do (let parsed (nth capture 5))
+            (str_concat "route=local-ds4-validation"
+            (str_concat "\ncalibrator-agrees=" (str_concat (int_to_str (nth capture 7))
+            (str_concat "\nparsed-valid=" (str_concat (int_to_str (nth parsed 0))
+            (str_concat "\nparsed-state=" (str_concat (int_to_str (nth parsed 1))
+            (str_concat "\ncalibrated-state=" (str_concat (int_to_str (nth capture 6))
+            (str_concat "\nprompt-token-count=" (str_concat (int_to_str (len (nth capture 2)))
+            (str_concat "\nresponse-token-count=" (str_concat (int_to_str (len (nth capture 3)))
+            (str_concat "\ngenerated-token-ids=" (str_concat (fcv-ids-text (nth capture 3))
+            (str_concat "\n--- actual prompt ---\n" (str_concat (nth capture 1)
+            (str_concat "\n--- actual response ---\n" (nth capture 4)))))))))))))))))))))
+
+    (defn fc-validate (sel text)
+        (if (str_eq sel "")
+            "no DS4 model is picked — run `models <dir>`, then `use <n>`, then `validate ...`"
+            (if (not (str_eq (alr-blob-arch (fc-blob-at sel)) "deepseek4"))
+                "validate requires a selected deepseek4 model"
+                (do (let parts (split-on text " || "))
+                    (if (not (eq (len parts) 4))
+                        "usage: validate <query> || <candidate> || <evidence> || <recipe>"
+                        (fcv-capture-text (dvl-run-visible sel
+                            (dvp-payload (nth parts 0) (nth parts 1) (nth parts 2) (nth parts 3))
+                            128)))))))
+
+    (defn fca-answer (arch path text nsteps)
+        (if (str_eq arch "deepseek4") (fca-ds4 path text nsteps)
+            (if (str_eq arch "qwen35moe") (str_concat "qwen35moe (KAT) decode not yet wired in ask — arch=" arch)
+                (if (str_eq arch "") "this file has no architecture in its header — not a model ask can run"
+                    (fca-dense path text nsteps)))))
+
+    (defn fc-ask (sel text)
+        (if (str_eq sel "")
+            "no model is picked — run `models <dir>`, then `use <n>`, then `ask <text>`"
+            (if (str_eq text "")
+                "usage: ask <text>   (greedy base-model continuation, no chat template, hard 24-token stop)"
+                (fca-answer (alr-blob-arch (fc-blob-at sel)) sel text (fca-steps)))))
+
+    ; Uncapped caller-owned diagnostic/generation width.  The number is data in
+    ; the Form request, not an environment setting or compiled routing limit.
+    ; Example: askn 8 || The capital of France is
+    (defn fc-askn (sel text)
+        (if (str_eq sel "")
+            "no model is picked — run `models <dir>`, then `use <n>`, then `askn <steps> || <text>`"
+            (do (let cut (str_find text " || " 0))
+                (if (le cut 0)
+                    "usage: askn <positive-steps> || <text>"
+                    (do (let nsteps (str_to_int (substring text 0 cut)))
+                        (let prompt (substring text (add cut 4) (str_len text)))
+                        (if (or (le nsteps 0) (str_eq prompt ""))
+                            "usage: askn <positive-steps> || <text>"
+                            (fca-answer (alr-blob-arch (fc-blob-at sel)) sel prompt nsteps)))))))
+
     ; the native-only verbs read this binary's own baked source via self_source
     ; (a fkwu-only op), so they live here in the runtime wrapper rather than in
     ; the four-way dispatch: 'source' prints the Form source the binary was built
@@ -389,6 +519,7 @@
     ; Form, then decodes the argmax token.
     ; Everything else routes to fc-respond, the four-way-proven brain.
     (defn fc-native (line)
+        (if (str_eq (fc-verb line) "ds4-substrate-probe") (fca-substrate-probe)
         (if (str_eq (fc-verb line) "source") (self_source)
             (if (str_eq (fc-verb line) "verify")
                 (str_concat "coherent: this binary carries "
@@ -407,7 +538,7 @@
                             (if (str_eq (fc-verb line) "gguf-tensor-slice-math") (fc-gguf-tensor-slice-math (fc-arg line))
                             (if (str_eq (fc-verb line) "model-route") (nmnh-default-id)
                             (if (str_eq (fc-verb line) "nanbeige") (fc-nanbeige (fc-arg line))
-                                (fc-respond line)))))))))))))))))
+                                (fc-respond line))))))))))))))))))
     ; THE LAST PAREN ON THE LINE ABOVE closes `defn fc-native`, and until 2026-08-03 it was not there.
     ; Sixteen closers shut the fifteen `if`s and left the defn open, so everything below — the repl
     ; itself and the call that starts it — was reading as extra body forms INSIDE fc-native. It ran
@@ -424,7 +555,10 @@
     (defn fc-turn (line root sel)
         (if (str_eq (fc-verb line) "use") (fc-use root (fc-strip-eol (fc-arg line)) sel)
             (if (str_eq (fc-verb line) "route") (fc-route sel (fc-strip-eol (fc-arg line)))
-                (fc-native line))))
+                (if (str_eq (fc-verb line) "askn") (fc-askn sel (fc-strip-eol (fc-arg line)))
+                    (if (str_eq (fc-verb line) "ask") (fc-ask sel (fc-strip-eol (fc-arg line)))
+                        (if (str_eq (fc-verb line) "validate") (fc-validate sel (fc-strip-eol (fc-arg line)))
+                            (fc-native line)))))))
 
     ; one self-recursive loop: prompt (only on a real tty), read a line, and
     ; either stop (EOF / quit / exit) or respond and loop. read_line is a stored

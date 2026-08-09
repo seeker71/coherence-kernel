@@ -40,7 +40,7 @@
 ; and number CLASSES beyond ASCII+CJK (ds4.c's glm4_unicode_* tables) — a prompt using them may split
 ; differently; the band exercises ASCII, digits, punctuation, and CJK.
 ;
-; preludes: form-stdlib/gguf-meta.fk
+; preludes: form-stdlib/gguf-meta.fk form-stdlib/keyed-map.fk
 ;
 ; Proven by: form-stdlib/tests/dsv4-tokenizer-band.fk (byte-map both ways, decode round-trip in byte
 ;            space, the joyai split, and encode ids matched against ds4's own --dump-tokens).
@@ -131,16 +131,38 @@
     (defn tkz-decode-id-bytes (src id)
         (do (let at (gmt-token-off src id))
             (tkz-dec-piece-acc src at 0 (gmt-token-len src at) (empty))))
-    ; a whole id list -> one raw byte list
-    (defn tkz-decode-bytes-acc (src ids acc)
+    ; Decode a whole id stream with ONE vocabulary walk.  The former door called
+    ; gmt-token-off once per generated id; that re-walked the variable-width
+    ; array from its beginning for every token.  Collect the requested pieces
+    ; while the cursor advances once, then replay them in generation order.
+    (defn tkz-id-member? (id ids)
+        (if (eq (len ids) 0) 0
+            (if (eq id (head ids)) 1 (tkz-id-member? id (tail ids)))))
+    (defn tkz-piece-rows (src tat id n ids acc)
+        (if (eq id n) acc
+            (tkz-piece-rows src (gmt-token-next src tat) (add id 1) n ids
+                (if (eq (tkz-id-member? id ids) 1)
+                    (append acc (list (list id
+                        (tkz-dec-piece-acc src tat 0 (gmt-token-len src tat) (empty)))))
+                    acc))))
+    (defn tkz-piece-row (id rows)
+        (if (eq (len rows) 0) (empty)
+            (if (eq id (head (head rows))) (nth (head rows) 1)
+                (tkz-piece-row id (tail rows)))))
+    (defn tkz-decode-join (ids rows acc)
         (if (eq (len ids) 0) acc
-            (tkz-decode-bytes-acc src (tail ids)
-                (tkz-cat acc (tkz-decode-id-bytes src (head ids))))))
-    (defn tkz-decode-bytes (src ids) (tkz-decode-bytes-acc src ids (empty)))
+            (tkz-decode-join (tail ids) rows
+                (tkz-cat acc (tkz-piece-row (head ids) rows)))))
+    (defn tkz-decode-bytes (src ids)
+        (tkz-decode-join ids
+            (tkz-piece-rows src (gmt-tokens-first src) 0 (tkz-vocab-n src) ids (empty))
+            (empty)))
 
     ; list concat helper (append every element of b to a)
-    (defn tkz-cat (a b)
-        (if (eq (len b) 0) a (tkz-cat (append a (list (head b))) (tail b))))
+    (defn tkz-cat-n (a b remaining)
+        (if (eq remaining 0) a
+            (tkz-cat-n (append a (list (head b))) (tail b) (sub remaining 1))))
+    (defn tkz-cat (a b) (tkz-cat-n a b (len b)))
 
     ; render a raw byte list to a Form string. EXACT for bytes < 128 (ASCII), the radius byte_to_str
     ; allows; a byte >= 128 renders as its UTF-8 codepoint (host rune path), so multi-byte scripts are
@@ -333,31 +355,61 @@
     (defn tkz-pres (inp L b)
         (if (eq b 256) (empty) (cons (tkz-has-byte inp L b 0) (tkz-pres inp L (add b 1)))))
 
-    ; --- the positions of the input still viable as a match start, narrowed one byte at a time ---
-    (defn tkz-pos0 (L i) (if (eq i L) (empty) (cons i (tkz-pos0 L (add i 1)))))
-    (defn tkz-pfilt (inp L pos j b)      ; keep p where inp[p+j] = b
-        (if (eq (len pos) 0) (empty)
-            (do (let p (head pos))
-                (if (if (lt (add p j) L) (eq (str_byte_at inp (add p j)) b) 0)
-                    (cons p (tkz-pfilt inp L (tail pos) j b))
-                    (tkz-pfilt inp L (tail pos) j b)))))
-
-    ; --- walk one merge record's codepoints, narrowing positions; abort the moment none survive.
-    ; Returns the split index (how many bytes are the LEFT symbol) or -1 for "can never apply".
-    ; A non-separator codepoint that cp2b cannot map is -1 and rejects, exactly as tkz-me-left does.
-    (defn tkz-cand-walk (src at mo mlen inp L pos j split)
-        (if (eq (len pos) 0) (sub 0 1)
+    ; The old candidate test materialized a fresh list of every still-viable
+    ; input position for every byte of every merge.  fkwu deliberately retains
+    ; its arena, so a ~900-byte validation prompt grew past 15 GiB before BPE.
+    ; Candidate testing is now allocation-bounded: ASCII prompts use the native
+    ; string-search door after rendering one tiny merge string; arbitrary UTF-8
+    ; uses a direct byte comparison and carries only integer cursors.
+    (defn tkz-ascii-input? (inp i L)
+        (if (eq i L) 1
+            (if (lt (str_byte_at inp i) 128)
+                (tkz-ascii-input? inp (add i 1) L) 0)))
+    (defn tkz-merge-ascii (src at mo mlen acc seen-separator)
         (if (lt mo mlen)
             (do (let b0 (tkz-rec-byte src at mo))
-                (let cp (if (lt b0 128) b0 (add (mul (sub b0 192) 64) (sub (tkz-rec-byte src at (add mo 1)) 128))))
+                (let cp (if (lt b0 128) b0
+                    (add (mul (sub b0 192) 64)
+                         (sub (tkz-rec-byte src at (add mo 1)) 128))))
                 (let nlen (if (lt b0 128) 1 2))
                 (if (eq cp 32)
-                    (if (lt split 0) (tkz-cand-walk src at (add mo nlen) mlen inp L pos j j) (sub 0 1))
+                    (if (eq seen-separator 0)
+                        (tkz-merge-ascii src at (add mo nlen) mlen acc 1) "")
                     (do (let by (tkz-cp2b cp))
-                        (if (lt by 0) (sub 0 1)
-                            (tkz-cand-walk src at (add mo nlen) mlen inp L
-                                (tkz-pfilt inp L pos j by) (add j 1) split)))))
-            (if (lt split 0) (sub 0 1) split))))
+                        (if (or (lt by 0) (ge by 128)) ""
+                            (tkz-merge-ascii src at (add mo nlen) mlen
+                                (str_concat acc (byte_to_str by)) seen-separator)))))
+            (if (eq seen-separator 1) acc "")))
+    (defn tkz-cand-ascii (src at mlen inp)
+        (do (let needle (tkz-merge-ascii src at 0 mlen "" 0))
+            (if (str_eq needle "") 0
+                (if (lt (str_find inp needle 0) 0) 0 1))))
+
+    ; Compare one merge (with its literal separator skipped) at input byte p.
+    (defn tkz-cand-at (src at mo mlen inp L p j seen-separator)
+        (if (lt mo mlen)
+            (do (let b0 (tkz-rec-byte src at mo))
+                (let cp (if (lt b0 128) b0
+                    (add (mul (sub b0 192) 64)
+                         (sub (tkz-rec-byte src at (add mo 1)) 128))))
+                (let nlen (if (lt b0 128) 1 2))
+                (if (eq cp 32)
+                    (if (eq seen-separator 0)
+                        (tkz-cand-at src at (add mo nlen) mlen inp L p j 1) 0)
+                    (do (let by (tkz-cp2b cp))
+                        (if (and (ge by 0)
+                                 (and (lt (add p j) L)
+                                      (eq (str_byte_at inp (add p j)) by)))
+                            (tkz-cand-at src at (add mo nlen) mlen inp L p (add j 1) seen-separator)
+                            0))))
+            seen-separator))
+    (defn tkz-cand-any (src at mlen inp L p)
+        (if (eq p L) 0
+            (if (eq (tkz-cand-at src at 0 mlen inp L p 0 0) 1) 1
+                (tkz-cand-any src at mlen inp L (add p 1)))))
+    (defn tkz-cand-present (src at mlen inp L ascii)
+        (if (eq ascii 1) (tkz-cand-ascii src at mlen inp)
+            (tkz-cand-any src at mlen inp L 0)))
 
     ; --- a survivor's two byte lists (the separator is the split) ---
     (defn tkz-mrg-left (src at mo mlen acc)
@@ -378,13 +430,13 @@
             acc))
 
     ; --- THE ONE PASS. Rank order in, rank order out. Each element is (leftbytes rightbytes). ---
-    (defn tkz-cands (src at rem inp L pres pos0 acc)
+    (defn tkz-cands (src at rem inp L pres ascii acc)
         (if (eq rem 0) acc
             (do (let mlen (tkz-rec-len src at))
                 (let by (tkz-merge-fb src at))
-                (tkz-cands src (tkz-rec-next src at) (sub rem 1) inp L pres pos0
+                (tkz-cands src (tkz-rec-next src at) (sub rem 1) inp L pres ascii
                     (if (if (lt by 0) 0 (eq (nth pres by) 1))
-                        (if (lt (tkz-cand-walk src at 0 mlen inp L pos0 0 (sub 0 1)) 0)
+                        (if (eq (tkz-cand-present src at mlen inp L ascii) 0)
                             acc
                             (append acc (list (list (tkz-mrg-left src at 0 mlen (empty))
                                                    (tkz-mrg-right src at 0 mlen (empty) 0)))))
@@ -436,13 +488,15 @@
                 (tkz-id-scan src (gmt-token-next src tat) (add id 1) n sym))))
 
     ; map a final symbol list to ids (one vocab pass per symbol; fallback: per-byte ids)
-    (defn tkz-ids-of-syms (src syms acc)
-        (if (eq (len syms) 0) acc
+    (defn tkz-ids-of-syms-n (src syms remaining acc)
+        (if (eq remaining 0) acc
             (do (let id (tkz-id-of src (head syms)))
-                (tkz-ids-of-syms src (tail syms)
+                (tkz-ids-of-syms-n src (tail syms) (sub remaining 1)
                     (if (lt id 0)
                         (tkz-cat acc (tkz-ids-of-bytes src (head syms) 0))
                         (append acc (list id)))))))
+    (defn tkz-ids-of-syms (src syms acc)
+        (tkz-ids-of-syms-n src syms (len syms) acc))
     ; fallback for an unknown symbol: emit the single-byte token id of each byte (ds4.c bpe_emit_piece)
     (defn tkz-ids-of-bytes (src sym k)
         (if (lt k (len sym))
@@ -462,6 +516,64 @@
                     (if (eq b0 (add 192 (div cp 64))) (eq (gmt-token-byte src tat 1) (add 128 (mod cp 64))) 0))
                 0)))
 
+    ; ================= one-walk vocabulary index for an encode =================
+    ; The final BPE symbols are known before IDs are requested.  Bucket those
+    ; symbols by first raw byte, then walk the variable-width GGUF vocabulary
+    ; exactly once.  A vocabulary row compares only with the few requested
+    ; symbols in its byte bucket; the resulting symbol->id map is reused for
+    ; every occurrence.  This removes O(output-symbols * vocabulary) cold work
+    ; while retaining exact token-piece equality and first-ID-wins semantics.
+    (defn tkz-sym-member? (sym syms)
+        (if (eq (len syms) 0) 0
+            (if (eq (tkz-leq sym (head syms)) 1) 1
+                (tkz-sym-member? sym (tail syms)))))
+    (defn tkz-symbol-buckets-n (syms remaining buckets)
+        (if (eq remaining 0) buckets
+            (do (let sym (head syms))
+                (let key (list (head sym)))
+                (let bucket (km-get buckets key (empty)))
+                (tkz-symbol-buckets-n (tail syms) (sub remaining 1)
+                    (if (eq (tkz-sym-member? sym bucket) 1) buckets
+                        (km-put buckets key (cons sym bucket)))))))
+    (defn tkz-symbol-buckets (syms)
+        (tkz-symbol-buckets-n syms (len syms) (km-for 256)))
+    (defn tkz-token-first-byte (src tat)
+        (do (let plen (gmt-token-len src tat))
+            (if (eq plen 0) (sub 0 1)
+                (do (let b0 (gmt-token-byte src tat 0))
+                    (let cp (if (lt b0 128) b0
+                        (if (lt plen 2) (sub 0 1)
+                            (add (mul (sub b0 192) 64)
+                                 (sub (gmt-token-byte src tat 1) 128)))))
+                    (tkz-cp2b cp)))))
+    (defn tkz-token-bucket-match (src tat bucket)
+        (if (eq (len bucket) 0) (empty)
+            (if (eq (tkz-tok-eq src tat (head bucket)) 1) (head bucket)
+                (tkz-token-bucket-match src tat (tail bucket)))))
+    (defn tkz-vocab-id-map (src buckets tat id n found)
+        (if (eq id n) found
+            (do (let first (tkz-token-first-byte src tat))
+                (let bucket (if (lt first 0) (empty)
+                    (km-get buckets (list first) (empty))))
+                (let sym (tkz-token-bucket-match src tat bucket))
+                (tkz-vocab-id-map src buckets (gmt-token-next src tat) (add id 1) n
+                    (if (eq (len sym) 0) found
+                        (if (eq (km-has? found sym) 1) found
+                            (km-put found sym id)))))))
+    (defn tkz-id-map-for (src syms)
+        (tkz-vocab-id-map src (tkz-symbol-buckets syms)
+            (gmt-tokens-first src) 0 (tkz-vocab-n src) (km-for (len syms))))
+    (defn tkz-ids-from-map-n (src syms remaining idmap acc)
+        (if (eq remaining 0) acc
+            (do (let sym (head syms))
+                (let id (km-get idmap sym (sub 0 1)))
+                (tkz-ids-from-map-n src (tail syms) (sub remaining 1) idmap
+                    (if (lt id 0)
+                        (tkz-cat acc (tkz-ids-of-bytes src sym 0))
+                        (append acc (list id)))))))
+    (defn tkz-ids-from-map (src syms idmap)
+        (tkz-ids-from-map-n src syms (len syms) idmap (empty)))
+
     ; ================= ENCODE: text -> ids =================
     ; walk pieces; BPE each; concatenate ids. add_bos/add_eos are 0 on this file (Stone 21), so no
     ; special ids are prepended — the oracle `--dump-tokens` shows none either.
@@ -471,13 +583,20 @@
                 (tkz-encode-from src cands inp L end
                     (tkz-ids-of-syms src (tkz-bpe-c cands (tkz-syms inp pos end)) acc)))
             acc))
+    (defn tkz-symbols-from (cands inp L pos acc)
+        (if (lt pos L)
+            (do (let end (tkz-next-piece inp L pos))
+                (tkz-symbols-from cands inp L end
+                    (tkz-cat acc (tkz-bpe-c cands (tkz-syms inp pos end)))))
+            acc))
     ; ONE pass over the merge table for the whole prompt (tkz-cands), then BPE per piece over the
     ; survivors. The ids are the reference ids: see tkz-bpe-c's why-this-is-the-same-answer note.
     (defn tkz-encode (src inp)
         (do (let L (str_len inp))
-            (tkz-encode-from src
+            (let cands
                 (tkz-cands src (tkz-merges-first src) (tkz-merges-n src) inp L
-                           (tkz-pres inp L 0) (tkz-pos0 L 0) (empty))
-                inp L 0 (empty))))
+                           (tkz-pres inp L 0) (tkz-ascii-input? inp 0 L) (empty)))
+            (let syms (tkz-symbols-from cands inp L 0 (empty)))
+            (tkz-ids-from-map src syms (tkz-id-map-for src syms))))
 
     0)

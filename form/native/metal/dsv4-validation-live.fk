@@ -1,0 +1,93 @@
+; dsv4-validation-live.fk -- actual DS4 prompt -> native 43-layer stream ->
+; detokenized surface -> strict parser -> learned calibrator.
+;
+; No shell, HTTP, environment variable, remote oracle, or alternate tokenizer
+; participates.  The caller supplies the GGUF path as ordinary Form data.  The
+; full prompt and response are returned in the capture row; they are not copied
+; into the framebuffer.
+;
+; capture = [payload,prompt,prompt-ids,generated-ids,response,parsed,
+;            calibrated-state,calibrator-agrees]
+;
+; preludes: form-stdlib/core.fk form-stdlib/dsv4-tokenizer.fk form-stdlib/dsv4-validation-protocol.fk form-stdlib/dsv4-validation-calibrator.fk native/metal/dsv4-decode-stack.fk
+; witnessed: pending live semantic run
+
+(do
+  (defn dvl-capture (payload prompt prompt-ids generated-ids response parsed predicted agrees)
+    (list payload prompt prompt-ids generated-ids response parsed predicted agrees))
+  (defn dvl-response (capture) (nth capture 4))
+  (defn dvl-parsed (capture) (nth capture 5))
+  (defn dvl-predicted (capture) (nth capture 6))
+  (defn dvl-agrees? (capture) (nth capture 7))
+
+  (defn dvl-bind-response (payload prompt prompt-ids generated-ids response)
+    (do (let parsed (dvp-parse response))
+      (let model (dvc-train))
+      (let predicted (if (eq (nth parsed 0) 1)
+        (dvc-predict model (dvc-features-from-parse parsed))
+        (dvp-state-invalid)))
+      (dvl-capture payload prompt prompt-ids generated-ids response parsed predicted
+        (if (and (eq (nth parsed 0) 1) (eq predicted (nth parsed 1))) 1 0))))
+
+  (defn dvl-run (path payload nsteps)
+    (do (let src (tkz-src path))
+      (let prompt (dvp-prompt payload))
+      (let prompt-ids (dvp-chat-ids (tkz-encode src prompt)))
+      (let generated-ids (dfd-stack-stream path prompt-ids nsteps))
+      (let response (tkz-decode-text src generated-ids))
+      (dvl-bind-response payload prompt prompt-ids generated-ids response)))
+
+  ; The CLI door keeps the same computation but exposes each membrane while it
+  ; is crossed.  These are ordinary stdout events (including the complete
+  ; prompt), never summaries substituted for payload.  Arena/stack counters
+  ; make a stalled stage inspectable without copying private text into the
+  ; framebuffer.
+  (defn dvl-stage (name detail)
+    (do (let a (str_concat "stage=" name))
+      (let b (str_concat a (str_concat " | " detail)))
+      (let c (str_concat b (str_concat " | arena=" (int_to_str (kernel_stat 6)))))
+      (let d (str_concat c (str_concat " vstack=" (int_to_str (kernel_stat 7)))))
+      (print_str d)))
+  (defn dvl-show-prompt (prompt)
+    (add (dvl-stage "prompt-ready" (str_concat "bytes=" (int_to_str (str_len prompt))))
+      (add (print_str "--- actual prompt ---") (print_str prompt))))
+  (defn dvl-ids-legal? (ids vocab)
+    (if (eq (len ids) 0) 1
+      (if (and (ge (head ids) 0) (lt (head ids) vocab))
+        (dvl-ids-legal? (tail ids) vocab) 0)))
+  ; The GGUF declares EOS=1.  The device stream is window-authored today, so a
+  ; window can contain work after EOS; the semantic response ends before EOS and
+  ; never feeds a special token to ordinary detokenization.
+  (defn dvl-before-eos (ids acc)
+    (if (eq (len ids) 0) acc
+      (if (eq (head ids) 1) acc
+        (dvl-before-eos (tail ids) (append acc (list (head ids)))))))
+  (defn dvl-run-visible (path payload nsteps)
+    (do (let src (tkz-src path))
+      (let prompt (dvp-prompt payload))
+      (let seen-prompt (dvl-show-prompt prompt))
+      (let token-begin (dvl-stage "tokenizer-begin" "model-tokenizer=deepseek4-joyai-gpt2-bpe"))
+      (let prompt-ids (if (and (eq seen-prompt 0) (eq token-begin 0))
+        (dvp-chat-ids (tkz-encode src prompt)) (empty)))
+      (let token-done (dvl-stage "tokenizer-complete"
+        (str_concat "prompt-tokens=" (int_to_str (len prompt-ids)))))
+      (let model-begin (dvl-stage "model-begin"
+        (str_concat "path=" (str_concat path
+          (str_concat " max-new-tokens=" (int_to_str nsteps))))))
+      (let generated-ids (if (and (eq token-done 0) (eq model-begin 0))
+        (dfd-stack-stream path prompt-ids nsteps) (empty)))
+      (let legal (dvl-ids-legal? generated-ids (tkz-vocab-n src)))
+      (let model-done (dvl-stage "model-complete"
+        (str_concat "generated-tokens=" (str_concat (int_to_str (len generated-ids))
+          (str_concat " legal-token-ids=" (str_concat (int_to_str legal)
+            (str_concat " | " (metal_status))))))))
+      (let decode-begin (dvl-stage "detokenizer-begin" "one-vocabulary-walk"))
+      (let response-ids (if (eq legal 1) (dvl-before-eos generated-ids (empty)) (empty)))
+      (let response (if (and (eq model-done 0) (eq decode-begin 0))
+        (tkz-decode-text src response-ids) ""))
+      (let decode-done (dvl-stage "detokenizer-complete"
+        (str_concat "response-bytes=" (int_to_str (str_len response)))))
+      (if (eq decode-done 0)
+        (dvl-bind-response payload prompt prompt-ids generated-ids response)
+        (dvl-bind-response payload prompt prompt-ids (empty) ""))))
+  0)

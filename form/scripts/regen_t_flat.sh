@@ -1,32 +1,28 @@
 #!/usr/bin/env bash
-# regen_t_flat.sh — maintainer bridge that refreshes the committed
-# fourth-arm self-host flattener table through the Go proof sibling.
-# This carrier retires when fkwu owns the one-shot bootstrap flatten directly.
+# regen_t_flat.sh — refresh the committed fourth-arm self-host flattener table
+# by executing its Form recipe directly on fkwu.
 set -euo pipefail
 
 FORM="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-GO_KERNEL="$FORM/form-kernel-go/bin-go"
-
-# Rebuild the proof sibling so ignored local binaries never author a fresh
-# table from stale source.
-(cd "$FORM/form-kernel-go" && go build -o bin-go .)
 
 cd "$FORM"
 # shellcheck source=scripts/fourth-arm.sh
 source scripts/fourth-arm.sh
-export GO_BIN="$GO_KERNEL"
 
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
 
-# The module list must carry form-flatten.fk's WHOLE prelude closure — the
-# same modules FOURTH_FLATTEN_CHAIN walks — or the flattened flattener holds
-# unresolved calls that axiom-5 recovers to literal 0. That exact gap shipped
-# a T_flat whose host-effect-op? answered 0 for every op, so effect-bound
-# do-lets inside defns lowered as inline re-evaluations: read_line re-fired
-# once per USE and every carrier the self-host arm authored was aphonic
-# (receipts/2026-07-17-regen-lane-aphonic-carrier.md).
-fourth_flatten_expr fks \
+build_fourth
+[[ -n "$FKWU" && -x "$FKWU" ]] || {
+    echo "regen_t_flat: native fkwu carrier is unavailable" >&2
+    exit 1
+}
+
+# T_flat is already a Form flattener running on fkwu.  Ask that living image to
+# compile the current flattener sources into its successor.  The new primitive
+# vocabulary is ordinary data in form-flatten.fk, so the previous image can
+# carry it without knowing or executing the added host opcodes itself.
+if ! fourth_flatten_sources t-flat-refresh fks "$work_dir/T.txt" \
     form-stdlib/minimal-surface.fk \
     form-stdlib/hati-os-kernel.fk \
     form-stdlib/fkc-table-serialize.fk \
@@ -36,49 +32,41 @@ fourth_flatten_expr fks \
     form-stdlib/bmf-grammar.fk \
     form-stdlib/host-effect-grammar.fk \
     form-stdlib/form-flatten.fk \
-    form-stdlib/fourth-flatten-driver.fk \
-    > "$work_dir/expr.fk"
-
-"$GO_KERNEL" "${FOURTH_FLATTEN_CHAIN[@]}" "$work_dir/expr.fk" \
-    > "$work_dir/T.txt" \
-    2> "$work_dir/go.err"
-
-if [[ ! -s "$work_dir/T.txt" ]]; then
-    sed -n '1,20p' "$work_dir/go.err" >&2
+    form-stdlib/fourth-flatten-driver.fk; then
+    echo "regen_t_flat: fkwu self-rebuild did not produce T_flat" >&2
     exit 1
 fi
 
-build_fourth
 sources=()
 while IFS= read -r source; do
     sources+=("$source")
-done < <(fourth_prep_srcs adler32)
+done < <(fourth_prep_srcs native-vs-rented)
 
 if [[ "${#sources[@]}" -lt 1 ]]; then
-    echo "regen_t_flat: source-text preparation failed for adler32" >&2
+    echo "regen_t_flat: source preparation failed for native-vs-rented" >&2
     exit 1
 fi
 
-{ printf '1\n'; fourth_band_request adler32 fks "${sources[@]}"; } \
+{ printf '1\n'; fourth_band_request native-vs-rented fks "${sources[@]}"; } \
     | "$FKWU" "$work_dir/T.txt" 0 \
-        > "$work_dir/adler-framed.txt" \
-        2> "$work_dir/adler-flatten.err"
+        > "$work_dir/native-framed.txt" \
+        2> "$work_dir/native-flatten.err"
 
-sed -n '/^==T-adler32==$/,/^==T-END==$/p' "$work_dir/adler-framed.txt" \
+sed -n '/^==T-native-vs-rented==$/,/^==T-END==$/p' "$work_dir/native-framed.txt" \
     | sed -e '1d' -e '$d' \
-    > "$work_dir/adler-table.txt"
+    > "$work_dir/native-table.txt"
 
-if [[ ! -s "$work_dir/adler-table.txt" ]]; then
-    echo "regen_t_flat: fkwu smoke failed — no adler32 table between markers" >&2
+if [[ ! -s "$work_dir/native-table.txt" ]]; then
+    echo "regen_t_flat: fkwu smoke failed — no native-vs-rented table between markers" >&2
     exit 1
 fi
 
-"$FKWU" "$work_dir/adler-table.txt" 0 \
-    > "$work_dir/adler-result.txt" \
-    2> "$work_dir/adler-run.err"
-verdict="$(sed -n '1p' "$work_dir/adler-result.txt")"
-if [[ "$verdict" != "5" ]]; then
-    echo "regen_t_flat: fkwu smoke failed — adler32 verdict=$verdict, expected 5" >&2
+"$FKWU" "$work_dir/native-table.txt" 0 \
+    > "$work_dir/native-result.txt" \
+    2> "$work_dir/native-run.err"
+verdict="$(sed -n '1p' "$work_dir/native-result.txt")"
+if [[ "$verdict" != "11111" ]]; then
+    echo "regen_t_flat: fkwu smoke failed — native-vs-rented verdict=$verdict, expected 11111" >&2
     exit 1
 fi
 
@@ -102,6 +90,32 @@ fi
 verdict="$(printf 'ping\n' | "$FKWU" "$work_dir/voice-table.txt" 0 2>/dev/null | sed -n '1p')"
 if [[ "$verdict" != "ping/ping" ]]; then
     echo "regen_t_flat: voice smoke failed — effect-let answered '$verdict', expected 'ping/ping' (aphonic T_flat)" >&2
+    exit 1
+fi
+
+# Composite-effect smoke — a lexical let must snapshot its whole value even
+# when the effect is nested below a pure constructor. Root-op classification
+# once inlined `(list (metal_buf_alloc ...) ...)` at every use, so the writer
+# and reader received different handles while every primitive reported success.
+{ printf '1\n'; fourth_band_request let-composite-effect-once fks \
+    form-stdlib/core.fk \
+    form-stdlib/tests/let-composite-effect-once-band.fk; } \
+    | "$FKWU" "$work_dir/T.txt" 0 \
+        > "$work_dir/composite-framed.txt" \
+        2> "$work_dir/composite-flatten.err"
+sed -n '/^==T-let-composite-effect-once==$/,/^==T-END==$/p' "$work_dir/composite-framed.txt" \
+    | sed -e '1d' -e '$d' \
+    > "$work_dir/composite-table.txt"
+if [[ ! -s "$work_dir/composite-table.txt" ]]; then
+    echo "regen_t_flat: composite-effect smoke failed — no table between markers" >&2
+    exit 1
+fi
+"$FKWU" "$work_dir/composite-table.txt" 0 \
+    > "$work_dir/composite-result.txt" \
+    2> "$work_dir/composite-run.err"
+verdict="$(sed -n '1p' "$work_dir/composite-result.txt")"
+if [[ "$verdict" != "111" ]]; then
+    echo "regen_t_flat: composite-effect smoke failed — verdict=$verdict, expected 111" >&2
     exit 1
 fi
 

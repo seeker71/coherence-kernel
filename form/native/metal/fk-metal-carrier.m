@@ -9,7 +9,7 @@
 // that missing side. Nothing in the kernel changes; linking this translation unit in overrides
 // the weak stubs, and the SAME Form cell that printed SKIP yesterday dispatches on the GPU.
 //
-//   cc -O2 -o fkwu-metal runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
+//   cc -O2 -o fkwu runtime/fkwu-uni.c form/native/metal/fk-metal-carrier.m \
 //      -framework Metal -framework Foundation -fobjc-arc
 //
 // WHY THIS IS NATIVE AND THAT IS NOT A COMPROMISE. Metal is reachable only through an Objective-C
@@ -362,6 +362,7 @@ static long long fk_free_slots[FK_MAX_BUF];
 static long long fk_free_top = 0;
 static NSMutableArray *fk_pipe_objs = nil;  // handle h -> element h-1
 static NSMutableDictionary *fk_pipe_by_key = nil;  // msl+name -> NSNumber handle
+static NSMutableDictionary *fk_lib_by_src = nil;   // msl -> compiled MTLLibrary
 
 // The open batch. One command buffer and one compute encoder stay open across
 // enqueues, so N dispatches become ONE GPU submission at sync. Within a single
@@ -427,6 +428,7 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
         if (fk_pipe_objs == nil) {
             fk_pipe_objs = [NSMutableArray array];
             fk_pipe_by_key = [NSMutableDictionary dictionary];
+            fk_lib_by_src = [NSMutableDictionary dictionary];
         }
         NSString *src = [[NSString alloc] initWithBytes:msl length:(NSUInteger)msl_len
                                                encoding:NSUTF8StringEncoding];
@@ -446,11 +448,21 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
             return 0;
         }
         NSError *e = nil;
-        id<MTLLibrary> lib = [fk_dev newLibraryWithSource:src options:nil error:&e];
+        // One MSL unit commonly carries several kernels.  The Form stack asks
+        // for one pipeline handle per function, but recompiling identical
+        // source for every function paid the Metal compiler 41 times during
+        // setup.  Compile the unit once, then specialize all named pipelines
+        // from that persistent library.  Pipeline handles remain keyed by
+        // source+function and retain exactly the same Form-visible identity.
+        id<MTLLibrary> lib = fk_lib_by_src[src];
         if (lib == nil) {
-            // The compiler's own words, kept whole. metal_status speaks them.
-            fk_err([NSString stringWithFormat:@"msl compile: %@", [e localizedDescription]]);
-            return 0;
+            lib = [fk_dev newLibraryWithSource:src options:nil error:&e];
+            if (lib == nil) {
+                // The compiler's own words, kept whole. metal_status speaks them.
+                fk_err([NSString stringWithFormat:@"msl compile: %@", [e localizedDescription]]);
+                return 0;
+            }
+            fk_lib_by_src[src] = lib;
         }
         id<MTLFunction> f = [lib newFunctionWithName:fn];
         if (f == nil) {
@@ -914,8 +926,9 @@ long long fk_metal_status_external(char *out, long long cap) {
         NSMutableString *r = [NSMutableString string];
         [r appendString:@"metal_owner=fkwu-form-cli\nmetal_linked=true\nmetal_door=handle\n"];
         [r appendFormat:@"device=%@\nunified_memory=%d\n", [fk_dev name], (int)[fk_dev hasUnifiedMemory]];
-        [r appendFormat:@"buffers=%lld\npipelines=%lu\n",
-            (long long)[fk_buf_objs count] - fk_free_top, (unsigned long)[fk_pipe_objs count]];
+        [r appendFormat:@"buffers=%lld\npipelines=%lu\nlibraries=%lu\n",
+            (long long)[fk_buf_objs count] - fk_free_top, (unsigned long)[fk_pipe_objs count],
+            (unsigned long)[fk_lib_by_src count]];
         [r appendFormat:@"buffer_slots=%lu\nfree_slots=%lld\n",
             (unsigned long)[fk_buf_objs count], fk_free_top];
         [r appendFormat:@"mmap_nocopy_buffers=%lld\n", fk_nocopy_bufs];

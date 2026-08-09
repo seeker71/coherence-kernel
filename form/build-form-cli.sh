@@ -24,18 +24,6 @@ FORM_CLI_FORCE_LINK="${FORM_CLI_FORCE_LINK:-0}"
 FORM_CLI_EXTRA_SRC="${FORM_CLI_EXTRA_SRC:-}"
 FORM_CLI_EXTRA_LDFLAGS="${FORM_CLI_EXTRA_LDFLAGS:-}"
 
-# The accelerator this host HAS is not a question for the caller. The kernel already settles the
-# Windows side with no flag at all — fkwu-uni.c LoadLibraryA's nvcuda.dll at runtime, JITs the
-# Form-emitted PTX, and reports absence if no driver answers. Darwin gets the same treatment here:
-# Metal.framework ships on every Mac, so there is nothing to opt into, and the carrier itself
-# returns SKIP when MTLCreateSystemDefaultDevice() finds no device. A build that asked
-# FORM_CLI_EXTRA_SRC for this was asking the caller a question the host already answers, which is
-# how a body ends up not knowing what it is capable of.
-if [[ "$(uname -s 2>/dev/null)" == "Darwin" && -f "native/metal/fk-metal-carrier.m" ]]; then
-    FORM_CLI_EXTRA_SRC="native/metal/fk-metal-carrier.m${FORM_CLI_EXTRA_SRC:+ $FORM_CLI_EXTRA_SRC}"
-    FORM_CLI_EXTRA_LDFLAGS="-framework Metal -framework Foundation -fobjc-arc${FORM_CLI_EXTRA_LDFLAGS:+ $FORM_CLI_EXTRA_LDFLAGS}"
-fi
-
 is_windows_host() {
     [[ "${OS:-}" == "Windows_NT" || "${OSTYPE:-}" == msys* || "${OSTYPE:-}" == cygwin* ]]
 }
@@ -64,9 +52,10 @@ EMIT_CHAIN="$S/minimal-surface.fk $S/hati-os-kernel.fk $S/host-io-fs-fkwu-emit.f
 FLAT_CHAIN="$EMIT_CHAIN $S/core.fk $S/form-parse.fk $S/bmf-core.fk $S/bmf-grammar.fk $S/host-effect-grammar.fk $S/form-flatten.fk"
 # Keep the ask support modules before the dispatcher; default ask receipts stay
 # local through fkwu RAG while http-client remains available to legacy carriers.
-MODS="(list (read_file \"$S/fourth-shim.fk\") (read_file \"$S/core.fk\") (read_file \"$S/grammars/sanskrit-roots.fk\") (read_file \"$S/resource-port.fk\") (read_file \"$S/bml-native-interface-package-import.fk\") (read_file \"$S/hati-os-targets.fk\") (read_file \"$S/form-native-resource-interfaces.fk\") (read_file \"$S/form-fs.fk\") (read_file \"$S/storage-port.fk\") (read_file \"$S/host-kernel-carrier.fk\") (read_file \"$S/fnri-standin.fk\") (read_file \"$S/fnri-receipt.fk\") (read_file \"$S/http-client.fk\") (read_file \"$S/line-grammar.fk\") (read_file \"$S/str-byte-at.fk\") (read_file \"$S/sha256.fk\") (read_file \"$S/hmac-sha256.fk\") (read_file \"$S/hex.fk\") (read_file \"$S/format-arith.fk\") (read_file \"$S/f16-decode.fk\") (read_file \"$S/q6k-dequant.fk\") (read_file \"$S/equireach.fk\") (read_file \"$S/equireach-gguf.fk\") (read_file \"$S/gguf-meta.fk\") (read_file \"$S/model-discovery.fk\") (read_file \"$S/q4k-dequant.fk\") (read_file \"$S/weight-load.fk\") (read_file \"$S/voice-traits.fk\") (read_file \"$S/nearest-shape.fk\") (read_file \"$S/co-learning.fk\") (read_file \"$S/co-learning-stream.fk\") (read_file \"$S/mesh-dispatch.fk\") (read_file \"$S/surprise-salience.fk\") (read_file \"$S/host-sense-organ.fk\") (read_file \"$S/speech-organ.fk\") (read_file \"$S/native-host-instance.fk\") (read_file \"$S/text-tokenize.fk\") (read_file \"$S/rag-embed.fk\") (read_file \"$S/rag-index-codec.fk\") (read_file \"$S/rag-retrieve.fk\") (read_file \"$S/rag-ask.fk\") (read_file \"$S/form-cli-ask.fk\") (read_file \"$S/form-cli-router.fk\") (read_file \"$S/form-cli-judge.fk\") (read_file \"$S/confidence-weighted-vote.fk\") (read_file \"$S/lineage-discounted-vote.fk\") (read_file \"$S/form-cli-oracle-loop.fk\") (read_file \"$S/form-cli-sufficiency.fk\") (read_file \"$S/form-freq-check.fk\") (read_file \"$S/trust-row.fk\") (read_file \"$S/form-cli-ask-gate.fk\") (read_file \"$S/form-cli-staged-trace.fk\") (read_file \"$S/form-cli-request.fk\") (read_file \"$S/form-cli-carrier.fk\") (read_file \"$S/form-cli-ask-plus.fk\") (read_file \"$S/form-cli-surface-inquiry.fk\") (read_file \"$S/current-branch-landing.fk\") (read_file \"$S/form-cli-inquiry.fk\") (read_file \"$S/form-cli.fk\") (read_file \"$S/form-cli-gguf-cell.fk\"))"
+MODS="(list (read_file \"$S/fourth-shim.fk\") (read_file \"$S/core.fk\") (read_file \"$S/grammars/sanskrit-roots.fk\") (read_file \"$S/resource-port.fk\") (read_file \"$S/bml-native-interface-package-import.fk\") (read_file \"$S/hati-os-targets.fk\") (read_file \"$S/form-native-resource-interfaces.fk\") (read_file \"$S/form-fs.fk\") (read_file \"$S/storage-port.fk\") (read_file \"$S/host-kernel-carrier.fk\") (read_file \"$S/fnri-standin.fk\") (read_file \"$S/fnri-receipt.fk\") (read_file \"$S/http-client.fk\") (read_file \"$S/line-grammar.fk\") (read_file \"$S/str-byte-at.fk\") (read_file \"$S/sha256.fk\") (read_file \"$S/hmac-sha256.fk\") (read_file \"$S/hex.fk\") (read_file \"$S/format-arith.fk\") (read_file \"$S/f16-decode.fk\") (read_file \"$S/q6k-dequant.fk\") (read_file \"$S/equireach.fk\") (read_file \"$S/equireach-gguf.fk\") (read_file \"$S/gguf-meta.fk\") (read_file \"$S/model-discovery.fk\") (read_file \"$S/q4k-dequant.fk\") (read_file \"$S/weight-load.fk\") (read_file \"$S/q6k-msl.fk\") (read_file \"$S/q4k-msl.fk\") (read_file \"$S/q8-0-msl.fk\") (read_file \"$S/q5-msl.fk\") (read_file \"$S/transformer-numerics.fk\") (read_file \"$S/transformer-block.fk\") (read_file \"$S/llama-numerics.fk\") (read_file \"$S/trig.fk\") (read_file \"$S/tensor-ir.fk\") (read_file \"$S/jit-tensor-emit.fk\") (read_file \"$S/llama-decode-msl.fk\") (read_file \"$S/qk-matvec-split.fk\") (read_file \"$S/qk-matvec-lane.fk\") (read_file \"$S/metal-door.fk\") (read_file \"$S/llama3-detokenize.fk\") (read_file \"$S/keyed-map.fk\") (read_file \"$S/dsv4-tokenizer.fk\") (read_file \"native/metal/dense-token-handle.fk\") (read_file \"$S/voice-traits.fk\") (read_file \"$S/nearest-shape.fk\") (read_file \"$S/co-learning.fk\") (read_file \"$S/co-learning-stream.fk\") (read_file \"$S/mesh-dispatch.fk\") (read_file \"$S/surprise-salience.fk\") (read_file \"$S/host-sense-organ.fk\") (read_file \"$S/speech-organ.fk\") (read_file \"$S/native-host-instance.fk\") (read_file \"$S/text-tokenize.fk\") (read_file \"$S/rag-embed.fk\") (read_file \"$S/rag-index-codec.fk\") (read_file \"$S/rag-retrieve.fk\") (read_file \"$S/rag-ask.fk\") (read_file \"$S/form-cli-ask.fk\") (read_file \"$S/form-cli-router.fk\") (read_file \"$S/form-cli-judge.fk\") (read_file \"$S/confidence-weighted-vote.fk\") (read_file \"$S/lineage-discounted-vote.fk\") (read_file \"$S/form-cli-oracle-loop.fk\") (read_file \"$S/form-cli-sufficiency.fk\") (read_file \"$S/form-freq-check.fk\") (read_file \"$S/trust-row.fk\") (read_file \"$S/form-cli-ask-gate.fk\") (read_file \"$S/form-cli-staged-trace.fk\") (read_file \"$S/form-cli-request.fk\") (read_file \"$S/form-cli-carrier.fk\") (read_file \"$S/form-cli-ask-plus.fk\") (read_file \"$S/form-cli-surface-inquiry.fk\") (read_file \"$S/current-branch-landing.fk\") (read_file \"$S/form-cli-inquiry.fk\") (read_file \"$S/form-cli.fk\") (read_file \"$S/form-cli-gguf-cell.fk\"))"
 MODS="${MODS%)} (read_file \"$S/relational-inquiry-metabolism.fk\") (read_file \"$S/native-model-native-hierarchy.fk\"))"
 MODS="${MODS/ (read_file \"$S\/form-cli.fk\")/ (read_file \"$S\/ds4-query-channel.fk\") (read_file \"$S\/form-cli.fk\")}"
+MODS="${MODS%)} (read_file \"$S/mxfp4-plane-dequant.fk\") (read_file \"$S/mxfp8-plane-dequant.fk\") (read_file \"$S/gguf-manifest.fk\") (read_file \"$S/iq2xxs-dequant.fk\") (read_file \"$S/q2k-dequant.fk\") (read_file \"$S/mxfp4-msl.fk\") (read_file \"$S/mxfp8-msl.fk\") (read_file \"$S/iq2xxs-msl.fk\") (read_file \"$S/q2k-msl.fk\") (read_file \"$S/rope.fk\") (read_file \"$S/transformer-mh.fk\") (read_file \"$S/mla-attn.fk\") (read_file \"$S/dsv4-hc.fk\") (read_file \"$S/dsv4-forward.fk\") (read_file \"$S/dsv4-router-msl.fk\") (read_file \"$S/dsv4-moe-msl.fk\") (read_file \"$S/dsv4-kv-cache.fk\") (read_file \"$S/dsv4-compressor.fk\") (read_file \"$S/ds4-order-match.fk\") (read_file \"$S/mla-msl.fk\") (read_file \"$S/dsv4-hc-msl.fk\") (read_file \"$S/dsv4-validation-protocol.fk\") (read_file \"$S/dsv4-validation-calibrator.fk\") (read_file \"native/metal/windowed-residency.fk\") (read_file \"native/metal/windowed-residency-emit.fk\") (read_file \"native/metal/dsv4-token.fk\") (read_file \"native/metal/dsv4-mla-real.fk\") (read_file \"native/metal/dsv4-forward-real.fk\") (read_file \"native/metal/dsv4-layer-real.fk\") (read_file \"native/metal/dsv4-stack-real.fk\") (read_file \"native/metal/dsv4-decode-form.fk\") (read_file \"native/metal/dsv4-decode-stack.fk\") (read_file \"native/metal/dsv4-validation-live.fk\"))"
 BAND="(read_file \"$S/form-cli-repl.fk\")"
 
 # Prefer fkwu self-host flatten (no Go) when T_flat + cached fkwu are warm.
@@ -84,6 +73,19 @@ FORM_CLI_SRCS=(
     "$S/host-kernel-carrier.fk" "$S/fnri-standin.fk" "$S/fnri-receipt.fk"
     "$S/http-client.fk" "$S/format-arith.fk" "$S/f16-decode.fk"
     "$S/q6k-dequant.fk" "$S/equireach.fk" "$S/equireach-gguf.fk" "$S/gguf-meta.fk" "$S/model-discovery.fk" "$S/q4k-dequant.fk" "$S/weight-load.fk"
+    "$S/q6k-msl.fk" "$S/q4k-msl.fk" "$S/q8-0-msl.fk" "$S/q5-msl.fk"
+    "$S/transformer-numerics.fk" "$S/transformer-block.fk" "$S/llama-numerics.fk" "$S/trig.fk"
+    "$S/tensor-ir.fk" "$S/jit-tensor-emit.fk" "$S/llama-decode-msl.fk" "$S/qk-matvec-split.fk"
+    "$S/qk-matvec-lane.fk" "$S/metal-door.fk" "$S/llama3-detokenize.fk" "$S/keyed-map.fk" "$S/dsv4-tokenizer.fk"
+    "$S/mxfp4-plane-dequant.fk" "$S/mxfp8-plane-dequant.fk" "$S/gguf-manifest.fk" "$S/iq2xxs-dequant.fk" "$S/q2k-dequant.fk"
+    "$S/mxfp4-msl.fk" "$S/mxfp8-msl.fk" "$S/iq2xxs-msl.fk" "$S/q2k-msl.fk"
+    "$S/rope.fk" "$S/transformer-mh.fk" "$S/mla-attn.fk" "$S/dsv4-hc.fk" "$S/dsv4-forward.fk" "$S/dsv4-router-msl.fk" "$S/dsv4-moe-msl.fk"
+    "$S/dsv4-kv-cache.fk" "$S/dsv4-compressor.fk" "$S/ds4-order-match.fk" "$S/mla-msl.fk" "$S/dsv4-hc-msl.fk"
+    "$S/dsv4-validation-protocol.fk" "$S/dsv4-validation-calibrator.fk"
+    "native/metal/windowed-residency.fk" "native/metal/windowed-residency-emit.fk"
+    "native/metal/dsv4-token.fk" "native/metal/dsv4-mla-real.fk" "native/metal/dsv4-forward-real.fk" "native/metal/dsv4-layer-real.fk"
+    "native/metal/dsv4-stack-real.fk" "native/metal/dsv4-decode-form.fk" "native/metal/dsv4-decode-stack.fk" "native/metal/dsv4-validation-live.fk"
+    "native/metal/dense-token-handle.fk"
     "$S/voice-traits.fk"
     "$S/nearest-shape.fk" "$S/co-learning.fk" "$S/co-learning-stream.fk"
     "$S/mesh-dispatch.fk" "$S/surprise-salience.fk" "$S/host-sense-organ.fk"
@@ -124,7 +126,9 @@ if [[ -z "${FKWU:-}" ]]; then
     fi
 fi
 
-want_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
+# A compiler change changes executable meaning even when every program source
+# byte is unchanged; keep stale flattened tables ineligible.
+want_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}" "$S/fourth-flatten-table.stamp")"
 want_source_sha256="$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")"
 bootstrap_carrier_fresh=0
 if form_cli_verify_bootstrap \
@@ -171,7 +175,21 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/storage-port.fk" "$S/host-kernel-carrier.fk" "$S/fnri-standin.fk" "$S/fnri-receipt.fk"
     "$S/http-client.fk" "$S/line-grammar.fk" "$S/str-byte-at.fk" "$S/sha256.fk"
     "$S/hmac-sha256.fk" "$S/hex.fk" "$S/format-arith.fk" "$S/f16-decode.fk"
-    "$S/q6k-dequant.fk" "$S/equireach.fk" "$S/equireach-gguf.fk" "$S/gguf-meta.fk" "$S/model-discovery.fk" "$S/q4k-dequant.fk" "$S/weight-load.fk" "$S/voice-traits.fk"
+    "$S/q6k-dequant.fk" "$S/equireach.fk" "$S/equireach-gguf.fk" "$S/gguf-meta.fk" "$S/model-discovery.fk" "$S/q4k-dequant.fk" "$S/weight-load.fk"
+    "$S/q6k-msl.fk" "$S/q4k-msl.fk" "$S/q8-0-msl.fk" "$S/q5-msl.fk"
+    "$S/transformer-numerics.fk" "$S/transformer-block.fk" "$S/llama-numerics.fk" "$S/trig.fk"
+    "$S/tensor-ir.fk" "$S/jit-tensor-emit.fk" "$S/llama-decode-msl.fk" "$S/qk-matvec-split.fk"
+    "$S/qk-matvec-lane.fk" "$S/metal-door.fk" "$S/llama3-detokenize.fk" "$S/keyed-map.fk" "$S/dsv4-tokenizer.fk"
+    "$S/mxfp4-plane-dequant.fk" "$S/mxfp8-plane-dequant.fk" "$S/gguf-manifest.fk" "$S/iq2xxs-dequant.fk" "$S/q2k-dequant.fk"
+    "$S/mxfp4-msl.fk" "$S/mxfp8-msl.fk" "$S/iq2xxs-msl.fk" "$S/q2k-msl.fk"
+    "$S/rope.fk" "$S/transformer-mh.fk" "$S/mla-attn.fk" "$S/dsv4-hc.fk" "$S/dsv4-forward.fk" "$S/dsv4-router-msl.fk" "$S/dsv4-moe-msl.fk"
+    "$S/dsv4-kv-cache.fk" "$S/dsv4-compressor.fk" "$S/ds4-order-match.fk" "$S/mla-msl.fk" "$S/dsv4-hc-msl.fk"
+    "$S/dsv4-validation-protocol.fk" "$S/dsv4-validation-calibrator.fk"
+    "native/metal/windowed-residency.fk" "native/metal/windowed-residency-emit.fk"
+    "native/metal/dsv4-token.fk" "native/metal/dsv4-mla-real.fk" "native/metal/dsv4-forward-real.fk" "native/metal/dsv4-layer-real.fk"
+    "native/metal/dsv4-stack-real.fk" "native/metal/dsv4-decode-form.fk" "native/metal/dsv4-decode-stack.fk" "native/metal/dsv4-validation-live.fk"
+    "native/metal/dense-token-handle.fk"
+    "$S/voice-traits.fk"
     "$S/nearest-shape.fk" "$S/co-learning.fk" "$S/co-learning-stream.fk" "$S/mesh-dispatch.fk"
     "$S/surprise-salience.fk" "$S/host-sense-organ.fk" "$S/speech-organ.fk"
     "$S/native-host-instance.fk" "$S/text-tokenize.fk" "$S/rag-embed.fk" "$S/rag-index-codec.fk"
@@ -212,9 +230,11 @@ grep -q fk_prog "$W/form-cli.c" || { echo "emit missing baked program"; exit 1; 
 #    print it and you can rebuild from the binary alone. It's the file-marked
 #    concatenation of every recipe the build reads plus this script, appended as a
 #    byte array (escape-free) and read at runtime by self_source (walker tag 117).
-SOURCES="minimal-surface hati-os-kernel fkc-table-serialize hati-os-kernel-emit core form-parse bmf-core bmf-grammar host-effect-grammar form-flatten fourth-shim resource-port bml-native-interface-package-import hati-os-targets form-native-resource-interfaces form-fs storage-port host-kernel-carrier fnri-standin fnri-receipt line-grammar str-byte-at sha256 hmac-sha256 hex format-arith f16-decode q6k-dequant equireach equireach-gguf gguf-meta model-discovery q4k-dequant weight-load voice-traits nearest-shape co-learning co-learning-stream mesh-dispatch surprise-salience host-sense-organ speech-organ native-host-instance text-tokenize rag-embed rag-index-codec rag-retrieve rag-ask form-cli-ask form-cli-router form-cli-judge confidence-weighted-vote lineage-discounted-vote form-cli-oracle-loop form-cli-sufficiency form-freq-check trust-row form-cli-ask-gate form-cli-staged-trace form-cli-request form-cli-carrier form-cli-ask-plus form-cli-surface-inquiry current-branch-landing form-cli form-cli-gguf-cell native-model-control-plane ask-lane-router form-cli-main form-cli-repl"
+SOURCES="minimal-surface hati-os-kernel fkc-table-serialize hati-os-kernel-emit core form-parse bmf-core bmf-grammar host-effect-grammar form-flatten fourth-shim resource-port bml-native-interface-package-import hati-os-targets form-native-resource-interfaces form-fs storage-port host-kernel-carrier fnri-standin fnri-receipt line-grammar str-byte-at sha256 hmac-sha256 hex format-arith f16-decode q6k-dequant equireach equireach-gguf gguf-meta model-discovery q4k-dequant weight-load q6k-msl q4k-msl q8-0-msl q5-msl transformer-numerics transformer-block llama-numerics trig tensor-ir jit-tensor-emit llama-decode-msl qk-matvec-split qk-matvec-lane metal-door llama3-detokenize dsv4-tokenizer mxfp4-plane-dequant mxfp8-plane-dequant gguf-manifest iq2xxs-dequant q2k-dequant mxfp4-msl mxfp8-msl iq2xxs-msl q2k-msl rope transformer-mh mla-attn dsv4-hc dsv4-forward dsv4-router-msl dsv4-moe-msl dsv4-kv-cache dsv4-compressor ds4-order-match mla-msl dsv4-hc-msl dsv4-validation-protocol dsv4-validation-calibrator voice-traits nearest-shape co-learning co-learning-stream mesh-dispatch surprise-salience host-sense-organ speech-organ native-host-instance text-tokenize rag-embed rag-index-codec rag-retrieve rag-ask form-cli-ask form-cli-router form-cli-judge confidence-weighted-vote lineage-discounted-vote form-cli-oracle-loop form-cli-sufficiency form-freq-check trust-row form-cli-ask-gate form-cli-staged-trace form-cli-request form-cli-carrier form-cli-ask-plus form-cli-surface-inquiry current-branch-landing form-cli form-cli-gguf-cell native-model-control-plane ask-lane-router form-cli-main form-cli-repl"
 {
   for f in $SOURCES; do printf ';;;; ==== FILE: %s/%s.fk ====\n' "$S" "$f"; cat "$S/$f.fk"; done
+  for f in windowed-residency windowed-residency-emit dsv4-token dsv4-mla-real dsv4-forward-real dsv4-layer-real dsv4-stack-real dsv4-decode-form dsv4-decode-stack dsv4-validation-live; do printf ';;;; ==== FILE: native/metal/%s.fk ====\n' "$f"; cat "native/metal/$f.fk"; done
+  printf ';;;; ==== FILE: native/metal/dense-token-handle.fk ====\n'; cat native/metal/dense-token-handle.fk
   printf ';;;; ==== FILE: scripts/form_cli_bootstrap_proof.sh ====\n'; cat scripts/form_cli_bootstrap_proof.sh
   printf ';;;; ==== FILE: build-form-cli.sh ====\n'; cat "$(basename "$0")"
 } > "$W/genesis.txt"
@@ -239,6 +259,18 @@ clang_args=(
   -Wno-incompatible-library-redeclaration
   -o "$OUT" "$W/form-cli.c"
 )
+# On the Darwin body Metal is an organ, not a selectable route.  The former
+# FORM_CLI_EXTRA_SRC path made the handle opcodes compile while leaving their
+# carrier absent in an ordinary build; form-cli then returned plausible zeros
+# and node-shaped status values.  Link the committed carrier every time.
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  clang_args+=(
+    native/metal/fk-metal-carrier.m
+    -framework Metal
+    -framework Foundation
+    -fobjc-arc
+  )
+fi
 if [[ -n "$FORM_CLI_EXTRA_SRC" ]]; then
   # shellcheck disable=SC2206
   extra_srcs=($FORM_CLI_EXTRA_SRC)
