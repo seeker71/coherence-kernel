@@ -22,7 +22,7 @@ tree, hold `observe/voice-frequency.fk`'s mirror to it — it counts the set-dow
 writer decides:
 
 ```sh
-echo path/to/your-file.md > /tmp/voice-frequency-target && ./fkwu --src observe/voice-frequency-run.fk
+echo path/to/your-file.md > /tmp/voice-frequency-target && ./fkwu observe/voice-frequency-run.fk
 ```
 
 Attune before writing — read a receipt or two and borrow the body's words.
