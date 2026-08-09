@@ -108,6 +108,6 @@ be run against.
 ## Frontier question
 
 *What names fixing a voice by substitution, so it passes the count and still
-sounds wrong?* → **tonelaunder**. 0 hits before offering. Corpus row **1000**.
+sounds wrong?* → **inert** (landed as `tonelaunder`, folded 2026-08-09). 0 hits before offering. Corpus row **997** (`inert` — this row folded into it; see the corpus note).
 
 Corpus band `32767`, 395 rows.

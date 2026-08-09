@@ -89,6 +89,6 @@ automation mine to run rather than yours to approve.
 ## Frontier question
 
 *What names a change that passes every check because it changes nothing?* →
-**inert-edit**. 0 hits before offering. Corpus row **998**.
+**inert-edit**. 0 hits before offering. Corpus row **997** (`inert` — this row folded into it; see the corpus note).
 
 Corpus band `32767`, 393 rows. tree-heal `127`. The healer is running.

@@ -89,7 +89,7 @@ are not a note.
 ## Frontier question
 
 *What names a required form that selects nothing and is copied because it is
-there?* → **cargo-flag**. 0 hits before offering. Corpus row **997**.
+there?* → **inert** (landed as `cargo-flag`, folded 2026-08-09). 0 hits before offering. Corpus row **997** (`inert` — folded with 998 and 1000 on 2026-08-09; the three were one noticing).
 
 Corpus band `32767`, 392 rows. preflight `1023`, conformance `262143`,
 MDL `65535`, review-ask `511`, nl-extract `255` — all exit 0.
