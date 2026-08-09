@@ -22,7 +22,7 @@ while [ "$index" -lt 13 ]; do
   source_file="$run_dir/row-$index.fk"
   sed -n 'p' "$repo_root/presence/concept-audio-open-real-life-13-live.fk" > "$source_file"
   printf '\n(cao10rl-execute %s)\n' "$index" >> "$source_file"
-  output=$(cd "$repo_root" && ./fkwu --src "$source_file" 2>/dev/null)
+  output=$(cd "$repo_root" && ./fkwu "$source_file" 2>/dev/null)
   printf '%s\n' "$output" >> "$evidence"
   summary=$(printf '%s\n' "$output" | sed -n '1p')
   printf '%s\n' "$summary"

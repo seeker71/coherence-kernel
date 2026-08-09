@@ -64,7 +64,7 @@ exploration trail; this file keeps only what still describes the current state.
 
 ## 2026-06-29 to 2026-07-01 - Kernel Floor
 
-- `fkwu --src` runs real Form source cells from the C checkout witness.
+- `fkwu` runs real Form source cells from the C checkout witness.
 - Native-vs-rented returns `11111`.
 - Flatten remains optional speed/parity, not the grounding gate.
 - The C seed remains a shrink target; new runtime meaning belongs in

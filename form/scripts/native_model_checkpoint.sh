@@ -61,7 +61,7 @@ nm_build_checkpoint_source "$band_source" \
 nm_build_checkpoint_source "$cli_source" \
     form/form-stdlib/native-model-checkpoint-cli.fk
 
-band=$($NM_FKWU --src "$band_source")
+band=$($NM_FKWU "$band_source")
 if [ "$band" != 4095 ]; then
     printf 'Form checkpoint band failed: expected 4095, observed %s\n' "$band" >&2
     exit 1
@@ -74,7 +74,7 @@ destination="$NM_STATE_DIR/checkpoint-${day}-${epoch}.nmck"
 candidate_temporary="$NM_STATE_DIR/.checkpoint-${day}-${epoch}-$$.tmp"
 
 printf '%s\n%s\n%s\n' "$previous" "$candidate_temporary" "$destination" | \
-    "$NM_FKWU" --src "$cli_source" > "$raw_report"
+    "$NM_FKWU" "$cli_source" > "$raw_report"
 sed '/^$/d; /^0$/d; /^fkwu: warning:/d' "$raw_report" > "$report"
 
 if ! grep -q '^checkpoint_valid=1$' "$report"; then

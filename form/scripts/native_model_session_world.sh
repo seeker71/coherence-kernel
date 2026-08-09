@@ -236,14 +236,14 @@ chmod 600 "$form_input"
 nm_build_session_world_source "$band_source" \
     form/form-stdlib/tests/native-model-session-world-band.fk
 
-band=$($NM_FKWU --src "$band_source")
+band=$($NM_FKWU "$band_source")
 if [ "$band" != 4095 ]; then
     printf 'session world-model band failed: expected 4095, observed %s\n' \
         "$band" >&2
     exit 1
 fi
 
-$NM_FKWU --src "$cli_source" < "$form_input" > "$raw_report"
+$NM_FKWU "$cli_source" < "$form_input" > "$raw_report"
 sed '/^$/d; /^0$/d; /^fkwu: warning:/d' "$raw_report" > "$report"
 if ! grep -q '^world_model_valid=1$' "$report"; then
     printf 'real session world-model report failed validation\n' >&2

@@ -50,4 +50,4 @@ printf '\n(concept-open-content-runtime-execute %s "%s" "%s" %s "%s")\n' \
   "$id" "$code" "$pl" "$position" "$suffix" >> "$source_file"
 
 cd "$repo_root"
-./fkwu --src "$source_file"
+./fkwu "$source_file"

@@ -143,4 +143,4 @@ The direct source bootstrap is the standing entry; no flattened
 
 The optional flattened `form-eval-cli-loop` path is a cache/parity door for the
 Form meta-evaluator, not a gate for running the body. If a richer cell does not
-fit the current the source-runner surface, name the actual coverage gap.
+fit the current the source door surface, name the actual coverage gap.

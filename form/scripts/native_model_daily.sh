@@ -14,7 +14,6 @@ after="$temp_dir/artifacts-after"
 native_way="$temp_dir/native-vs-rented.fk"
 training="$temp_dir/training"
 rag="$temp_dir/rag"
-diagnostic_output="$temp_dir/diagnostic-output"
 real_flows="$temp_dir/real-flows"
 tally="$temp_dir/tally"
 summary="$temp_dir/daily-summary"
@@ -29,17 +28,17 @@ trap cleanup EXIT HUP INT TERM
 cd "$NM_REPO_ROOT"
 cc -O2 -o "$NM_FKWU" runtime/fkwu-uni.c
 
-ground=$($NM_FKWU --src bootstrap/ground.fk)
-recursive=$($NM_FKWU --src bootstrap/ground-recursive.fk 10)
-freshness=$($NM_FKWU --src form/form-stdlib/tests/binary-freshness-band.fk)
+ground=$($NM_FKWU bootstrap/ground.fk)
+recursive=$($NM_FKWU bootstrap/ground-recursive.fk 10)
+freshness=$($NM_FKWU form/form-stdlib/tests/binary-freshness-band.fk)
 {
     cat observe/native-vs-rented.fk
     printf '%s\n' '(native-vs-rented-check)'
 } > "$native_way"
-native=$($NM_FKWU --src "$native_way")
-live_loop=$($NM_FKWU --src form/form-stdlib/tests/native-model-live-loop-band.fk)
-sha256_band=$($NM_FKWU --src form/form-stdlib/tests/sha256-band.fk)
-replacement_band=$($NM_FKWU --src form/form-stdlib/tests/native-model-form-replacement-band.fk)
+native=$($NM_FKWU "$native_way")
+live_loop=$($NM_FKWU form/form-stdlib/tests/native-model-live-loop-band.fk)
+sha256_band=$($NM_FKWU form/form-stdlib/tests/sha256-band.fk)
+replacement_band=$($NM_FKWU form/form-stdlib/tests/native-model-form-replacement-band.fk)
 
 "$NM_SCRIPT_DIR/native_model_rag.sh" > "$rag"
 rag_band=$(awk -F= '$1 == "rag_band" { print $2; exit }' "$rag")
@@ -59,22 +58,13 @@ if [ "$ground" != 42 ] || [ "$recursive" != 55 ] ||
     exit 1
 fi
 
-diagnostic=not-requested
-if [ "${NATIVE_MODEL_OLLAMA_DIAGNOSTIC:-1}" = 1 ]; then
-    if "$NM_SCRIPT_DIR/native_model_eval.sh" > "$diagnostic_output"
-    then
-        diagnostic=paired-form-scored-and-logged
-    else
-        diagnostic=failed-and-logged-if-observable
-    fi
-fi
 "$NM_SCRIPT_DIR/native_model_real_flows.sh" > "$real_flows"
 "$NM_SCRIPT_DIR/native_model_tally.sh" > "$tally"
 
 day=$(date -u +%Y%m%d)
 epoch=$(date +%s)
 {
-    printf 'schema=native-model-form-daily-v1\n'
+    printf 'schema=native-model-form-daily-v2\n'
     printf 'day=%s\n' "$day"
     printf 'ground=%s\n' "$ground"
     printf 'recursive=%s\n' "$recursive"
@@ -86,11 +76,7 @@ epoch=$(date +%s)
     printf 'sha256_band=%s\n' "$sha256_band"
     printf 'replacement_band=%s\n' "$replacement_band"
     cat "$rag"
-    printf 'ollama_diagnostic=%s\n' "$diagnostic"
     cat "$training"
-    if [ -s "$diagnostic_output" ]; then
-        cat "$diagnostic_output"
-    fi
     cat "$real_flows"
     cat "$tally"
 } > "$summary"

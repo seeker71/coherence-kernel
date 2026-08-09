@@ -1,0 +1,290 @@
+; form-native-decode-chain-pooled.fk — the buffer-residency alignment test against
+; form-native-decode-chain.fk (PR #431) and native/metal/metal_dsv4_stack.sh's `enc()` (DS4's
+; hand-rolled Swift barrier lane, ~line 749-825).
+;
+; THE GAP BEING TESTED. form-native-decode-chain.fk measured ~1058-1069us/dispatch enqueue+sync
+; for 424 repetitions of a real two-stage dependency chain (RMSNorm -> Q4_K matvec), each
+; repetition allocating a FRESH buffer pair that stays resident for the whole batch — its own
+; printed `buffers=851` (424*2 + 3 resident) names that. DS4's own measured header comments
+; (metal_dsv4_stack.sh ~line 766) report ~1510-1844 barriers per token averaging ~20-26us EACH —
+; roughly 100x cheaper. DS4's hazard tracker RESETS on every barrier (`hzBarrier()` calls
+; `.removeAll()`) and its dispatches draw buffers from a REUSED POOL (`poolTake`), not fresh
+; permanent allocations. The hypothesis: memoryBarrierWithScope:.buffers's real cost scales with
+; the TOTAL buffer count the encoder has bound so far, not with the work since the last barrier —
+; so bounding the live buffer set (instead of letting it grow with repetition count) should close
+; most of the gap toward DS4's per-barrier floor.
+;
+; THE POOL DESIGN, AND THE RACE IT HAD TO ANSWER FIRST. metal_buf_write_external
+; (fk-metal-carrier.m) is a plain host-side memcpy with no dependency on GPU completion, and this
+; door's whole batch (fk_cb) never commits until the ONE metal_sync at the end — so a design that
+; called metal_buf_write mid-loop to refresh a reused buffer's CONTENTS would race for certain
+; (the host write always lands before the GPU has even started, since nothing executes until
+; commit). This file sidesteps that hazard entirely: stage A's input (hx, hg) is IDENTICAL across
+; all 424 repetitions (same real gain, same synthetic x — form-native-decode-chain.fk's own header
+; already leans on this determinism for its single computed-once reference), so NO per-repetition
+; host write is needed anywhere. Both hy (stage A's output / stage B's input) and hz (stage B's
+; output) are written ONLY by GPU dispatches inside the batch, picked from small fixed pools by
+; cyclic index (`mod i depth`), and the only correctness question left is whether the GPU's own
+; scheduling of those dispatches (MTLDispatchTypeConcurrent — no order implied by encoding order,
+; only by explicit barriers) respects reuse.
+;
+;   hy pool, depth 2 (fndcp-hy-depth), SAME barrier_before PATTERN AS THE UNPOOLED FILE, NO
+;   DEVIATION. hy is a write(stage A)-then-read(stage B) buffer, and reuse adds a NEW hazard the
+;   unpooled file never had: rep i+2's stage A WRITES the same hy slot rep i's stage B just READ
+;   (a write-after-read hazard across a 2-generation gap) — a barrier is needed between them or
+;   the GPU is free to run them concurrently. The unpooled file's own header already names why
+;   this door's barrier is COARSE: "MTLBarrierScopeBuffers settles ALL buffer memory effects
+;   encoded before the barrier point, not only hy_i" (form-native-decode-chain.fk line ~34). That
+;   coarseness, a performance cost there, is exactly what makes depth 2 safe here with ZERO
+;   pattern change: barrier_before=1 stays on stage B ONLY, exactly as before. Proof by encoding
+;   order (three dispatch positions per repetition: A(i), [barrier], B(i)): take the barrier
+;   encoded immediately before B(i+1). Its BEFORE-partition is everything encoded up through
+;   A(i+1) — which includes B(i), encoded strictly earlier. Its AFTER-partition is B(i+1) and
+;   everything after, including A(i+2). So THIS SAME BARRIER (already required by the unpooled
+;   pattern to order A(i+1)-before-B(i+1)) also, as a side effect of its coarseness, forces
+;   A(i+2)'s write of the reused hy slot to wait for B(i)'s read of that same slot — because with
+;   depth 2, i+2 reuses slot i%2. Depth 1 does NOT work: the barrier before B(i) puts B(i) and
+;   A(i+1) in the SAME after-partition (peers, unordered relative to each other), so a
+;   depth-1 pool races B(i)'s read against A(i+1)'s write. Depth 2 is therefore the PROVEN MINIMUM
+;   for hy under this barrier pattern, not an arbitrary safety margin.
+;
+;   hz pool, depth 8 (fndcp-hz-depth), no protection needed beyond what "barrier before every
+;   stage B" already gives for free. hz is write-only inside the batch (stage B writes it; nothing
+;   else in the batch ever reads it — the only reader is the HOST, via metal_buf_read, and that
+;   call happens strictly after the single metal_sync, i.e. after every GPU write in the whole
+;   batch has already completed). So there is no GPU-side reader to race against; the only hazard
+;   is write-after-write between successive occupants of the SAME hz slot, and that is exactly the
+;   ordering "barrier before every B" already guarantees (each such barrier's BEFORE-partition
+;   includes every earlier B, by the same argument above), independent of pool depth. Depth 8 was
+;   chosen not for safety but for a RICHER correctness sample than depth 1 would give: with n=424
+;   dividing evenly by 8, each of the 8 slots' FINAL occupant is one of repetitions 416..423 — 8
+;   independently-checkable tail values instead of 1, at negligible extra buffer cost (8 vs 1).
+;
+; WHAT THIS FILE DOES AND DOES NOT CHANGE relative to form-native-decode-chain.fk: same two real
+; kernels (form_rmsnorm_f32 on the real attn_norm.weight gain, form_matvec_q4k_stageb / q4m-matvec-msl
+; on the real attn_q.weight Q4_K tensor), same fndc-rows=8 scope, same n=424 repetitions, same
+; barrier_before pattern (0 on stage A, 1 on stage B), same single metal_batch_concurrent /
+; metal_sync framing, same reference computed ONCE via q4m-flat-at. The ONLY change is buffer
+; provenance: fresh-per-repetition (851 total, unpooled) versus two small fixed pools (13 total:
+; hy-pool(2) + hz-pool(8) + hg + hx + hqb, pooled) — an "as isolated as this door allows" test of
+; the buffer-residency hypothesis, not a rewrite of the dependency shape being measured.
+;
+; VERIFICATION IS THEREFORE NARROWER THAN THE UNPOOLED FILE'S, NAMED HONESTLY: the unpooled file
+; reads back and checks ALL 424 repetitions' hz because each has its own buffer. Pooling hz to
+; depth 8 makes that impossible without keeping 424 output buffers (which would defeat the very
+; thing under test) — only the LAST occupant of each of the 8 slots survives to be read back. This
+; file checks those 8 tail values (reps 416..423) against the SAME Form reference, not all 424.
+; That is a real, not cosmetic, narrowing: a race confined to an EARLY repetition whose slot gets
+; correctly overwritten by a later, correctly-ordered write would not show up in this check. What
+; IS still decisive: reps 416-423 are the LAST users of pool slots that were cycled through
+; dozens of times each (53 rotations through every slot at depth 8 over 424 reps) — if the pool's
+; synchronization discipline were unsound, corruption compounds forward through a dependency chain
+; (each hz depends on its hy which depends on the previous occupant's cycle having completed) and
+; is, if anything, MORE likely to surface at the tail than to self-heal by repetition 416.
+;
+; NOT A BAND: same reasoning as form-native-decode-chain.fk's own header (a wall-clock duration is
+; not four-way-provable, Metal has no Go/Rust/TS arm). No NEW pure-Form arithmetic claim is added
+; here beyond what form-native-decode-chain-encoding-band.fk already proves (md-bind16's
+; barrier=0/1 tail, the row-major flat index, the row-bytes formula) — the only new shape, cyclic
+; pool-slot selection via `(mod i depth)`, is core `mod`/`nth`, both already primitive-proven
+; elsewhere (primitive-registry.fk), not a new claim this file would be the first to make.
+;
+; RUN:
+;   cd form && ./validate.sh form-stdlib/tests/moe-gate-band.fk   # (or any band) builds ./fkwu
+;   cd .. && ./fkwu form/form-stdlib/form-native-decode-chain-pooled.fk
+;
+; Kin: form-stdlib/form-native-decode-chain.fk (the unpooled baseline this file diffs against,
+;      byte-identical stages/scope/barrier-pattern), form-stdlib/metal-door.fk (md-bind16 — the
+;      barrier_before tail), native/metal/metal_dsv4_stack.sh (~line 749-825 enc(), ~line 766 the
+;      per-barrier cost this file's pooled number is measured against), native/metal/fk-metal-carrier.m
+;      (fk_metal_buf_write_external — the host-write-races-an-uncommitted-batch hazard this file's
+;      design avoids by never writing per-repetition; fk_metal_enqueue_external — the barrier's
+;      coarse BEFORE/AFTER partition semantics this file's correctness proof relies on).
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/metal-door.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk native/metal/whole-tensor-residency.fk form-stdlib/llama-decode-msl.fk form-stdlib/llama-numerics.fk form-stdlib/form-native-decode.fk form-stdlib/q4k-msl.fk
+
+(do
+    ; same N as the unpooled file — same real per-forward dispatch count, so the two measurements
+    ; sit next to each other on the same N.
+    (defn fndcp-n () 424)
+
+    ; stage B's real output width — identical scope to the unpooled file.
+    (defn fndcp-rows () 8)
+
+    ; the two pool depths, each justified in the header above: 2 is the PROVEN MINIMUM for hy
+    ; under the unchanged barrier pattern; 8 for hz is a correctness-sample choice (424/8=53,
+    ; evenly cycling), not a safety minimum (hz needs no reuse protection at all — see header).
+    (defn fndcp-hy-depth () 2)
+    (defn fndcp-hz-depth () 8)
+
+    ; ================= locating the real Q4_K tensor, verified against the LIVE file =================
+    (defn fndcp-q-abs (src) (egg-tensor-abs src (wtr-alignment) "blk.0.attn_q.weight"))
+    (defn fndcp-q-type (src) (egg-ti-type src (egg-find-tensor src "blk.0.attn_q.weight")))
+    (defn fndcp-q-dim0 (src) (egg-ti-dim src (egg-find-tensor src "blk.0.attn_q.weight") 0))
+    ; SAME formula as the unpooled file's fndc-q-row-bytes (a Q4_K row is (cols/256) superblocks
+    ; of 144 bytes) — duplicated rather than called cross-file since form-native-decode-chain.fk
+    ; is a live self-executing witness (see its own encoding-band header for why it is not preluded).
+    (defn fndcp-q-row-bytes (cols) (mul (div cols 256) 144))
+
+    ; ================= the reference: Form's OWN independent Q4_K matvec, computed ONCE =================
+    (defn fndcp-ref-dot-loop (qsrc row cols j n xs acc)
+        (if (eq j n) acc
+            (fndcp-ref-dot-loop qsrc row cols (add j 1) n (tail xs)
+                (add acc (mul (q4m-flat-at qsrc 0 (add (mul row cols) j)) (head xs))))))
+    (defn fndcp-ref-dot (qsrc row cols xs) (fndcp-ref-dot-loop qsrc row cols 0 cols xs 0.0))
+
+    (defn fndcp-ref-rows-loop (qsrc row rows cols xs acc)
+        (if (eq row rows) (reverse acc)
+            (fndcp-ref-rows-loop qsrc (add row 1) rows cols xs
+                (cons (fndcp-ref-dot qsrc row cols xs) acc))))
+    (defn fndcp-ref-rows (qsrc rows cols xs) (fndcp-ref-rows-loop qsrc 0 rows cols xs (list)))
+
+    ; ================= the small fixed pools: depth handles allocated ONCE, cyclically reused =========
+    (defn fndcp-alloc-pool (i depth bytes acc)
+        (if (ge i depth) (reverse acc)
+            (fndcp-alloc-pool (add i 1) depth bytes (cons (metal_buf_alloc bytes) acc))))
+
+    (defn fndcp-pick (pool depth i) (nth pool (mod i depth)))
+
+    ; ================= the timed enqueue loop: stage A (barrier=0) then stage B (barrier=1) =========
+    ; identical shape to the unpooled file's fndc-enq-loop, except hy/hz come from a cyclic pool
+    ; pick instead of consuming a fresh handle off a per-repetition list.
+    (defn fndcp-enq-loop (i n pipeA pipeB hx hg hqb d ebits rows cols hy-pool hz-pool hyd hzd acc)
+        (if (ge i n) acc
+            (do
+                (let hy (fndcp-pick hy-pool hyd i))
+                (let hz (fndcp-pick hz-pool hzd i))
+                (fndcp-enq-loop (add i 1) n pipeA pipeB hx hg hqb d ebits rows cols hy-pool hz-pool hyd hzd
+                    (add acc
+                        (add (metal_enqueue pipeA (md-bind (list hx hg hy) (list d ebits)) 1)
+                             (metal_enqueue pipeB
+                                 (md-bind16 (list hqb hy hz) (list rows cols) 0 0 0 1)
+                                 rows)))))))
+
+    ; ================= readback + verification of each hz slot's LAST occupant only ==================
+    (defn fndcp-verify-loop (hz-pool rows ref-y worst)
+        (if (eq (len hz-pool) 0) worst
+            (do
+                (let bytes (metal_buf_read (head hz-pool) 0 (mul rows 4)))
+                (let gy (ewl-gain bytes 0 rows))
+                (let d (fnd-maxdiff ref-y gy))
+                (fndcp-verify-loop (tail hz-pool) rows ref-y (if (gt d worst) d worst)))))
+
+    (defn fndcp-run ()
+        (do
+            (let live (md-door-live?))
+            (let path (fnd-blob-path))
+            (let src (fnd-src path))
+            (let d (fnd-dmodel src))
+            (let eps (fnd-eps src))
+            (let ebits (md-f32-bits eps))
+            (let gnabs (fnd-norm-abs src path))
+            (let n (fndcp-n))
+            (let rows (fndcp-rows))
+            (let cols d)
+            (let hyd (fndcp-hy-depth))
+            (let hzd (fndcp-hz-depth))
+
+            ; verified against the LIVE file (not trusted): Q4_K, 2 dims, dim0 = cols.
+            (let qtype (fndcp-q-type src))
+            (let qdim0 (fndcp-q-dim0 src))
+            (let qabs (fndcp-q-abs src))
+
+            ; ---- resident, built ONCE: real gain, synthetic input, real Q4_K weight window ---------
+            (let hg (metal_buf_from_file path gnabs (mul d 4)))
+            (let hx (metal_buf_alloc (mul d 4)))
+            (let wx (metal_buf_write hx 0 (fnd-x-bytes d)))
+            (let hqb (metal_buf_from_file path qabs (mul rows (fndcp-q-row-bytes cols))))
+            (let pipeA (metal_pipeline (fnd-msl) "form_rmsnorm_f32"))
+            (let pipeB (metal_pipeline
+                (str_concat "#include <metal_stdlib>\n" (q4m-matvec-msl "form_matvec_q4k_stageb"))
+                "form_matvec_q4k_stageb"))
+
+            ; ---- A: the TWO small pools allocated, timed alone (should be near-zero: 2+8 allocs,
+            ;         not 2*424) --------------------------------------------------------------------
+            (let ta0 (now_unix_ms))
+            (let hy-pool (fndcp-alloc-pool 0 hyd (mul d 4) (list)))
+            (let hz-pool (fndcp-alloc-pool 0 hzd (mul rows 4) (list)))
+            (let ta1 (now_unix_ms))
+
+            ; ---- ARM: outside both timed windows, exactly as the unpooled probe does ----------------
+            (let armed (metal_batch_concurrent))
+
+            ; ---- B: N*2 real dispatches enqueued, A(barrier=0) then B(barrier=1) per repetition,
+            ;         hy/hz picked cyclically from the two small pools ---------------------------------
+            (let te0 (now_unix_ms))
+            (let ok-count (fndcp-enq-loop 0 n pipeA pipeB hx hg hqb d ebits rows cols hy-pool hz-pool hyd hzd 0))
+            (let te1 (now_unix_ms))
+
+            ; ---- C: ONE sync for the whole batch -----------------------------------------------------
+            (let ts0 (now_unix_ms))
+            (let drained (metal_sync))
+            (let ts1 (now_unix_ms))
+
+            ; ---- D: the Form reference, computed ONCE (inputs are identical across all N reps) ------
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let form-y0 (ln-rmsnorm (fnd-x-list d) gains eps))
+            (let qsrc (eqr-of-file path qabs (mul rows (fndcp-q-row-bytes cols))))
+            (let ref-y (fndcp-ref-rows qsrc rows cols form-y0))
+
+            ; ---- E: read back and verify the LAST occupant of each of the hzd hz-pool slots
+            ;         (reps n-hzd .. n-1) against the ONE reference -------------------------------------
+            (let tr0 (now_unix_ms))
+            (let worst (fndcp-verify-loop hz-pool rows ref-y 0.0))
+            (let tr1 (now_unix_ms))
+
+            (list live n rows cols qtype qdim0 armed ok-count drained hyd hzd
+                  (sub ta1 ta0) (sub te1 te0) (sub ts1 ts0) (sub tr1 tr0) worst)))
+
+    (defn fndcp-us-per (ms n) (floor (div (mul ms 1000) n)))
+
+    (defn fndcp-show ()
+        (do
+            (let r (fndcp-run))
+            (let live (nth r 0))
+            (let n (nth r 1))
+            (let rows (nth r 2))
+            (let cols (nth r 3))
+            (let qtype (nth r 4))
+            (let qdim0 (nth r 5))
+            (let armed (nth r 6))
+            (let ok-count (nth r 7))
+            (let drained (nth r 8))
+            (let hyd (nth r 9))
+            (let hzd (nth r 10))
+            (let alloc-ms (nth r 11))
+            (let enq-ms (nth r 12))
+            (let sync-ms (nth r 13))
+            (let verify-ms (nth r 14))
+            (let worst (nth r 15))
+            (let ndisp (mul n 2))
+            (let batch-ms (add (add alloc-ms enq-ms) sync-ms))
+
+            (print_str (metal_status))
+            (print_str (str_concat "door-live " (if live "true" "false")))
+            (print_str (str_concat "attn_q.weight type(want=12 Q4_K) " (int_to_str qtype)))
+            (print_str (str_concat "attn_q.weight dim0(want=3072) " (int_to_str qdim0)))
+            (print_str (str_concat "batch_concurrent armed(want=1) " (int_to_str armed)))
+            (print_str (str_concat "n repetitions " (int_to_str n)))
+            (print_str (str_concat "rows(stage B real output width) " (int_to_str rows)))
+            (print_str (str_concat "cols(d_model) " (int_to_str cols)))
+            (print_str (str_concat "hy pool depth " (int_to_str hyd)))
+            (print_str (str_concat "hz pool depth " (int_to_str hzd)))
+            (print_str (str_concat "total dispatches(2*n) " (int_to_str ndisp)))
+            (print_str (str_concat "ok-count(want=2n) " (int_to_str ok-count)))
+            (print_str (str_concat "drained(want=2n) " (int_to_str drained)))
+            (print_str (str_concat "worst max-abs-delta form-vs-gpu(last-occupant of each hz slot)" (float_to_str worst)))
+            (print_str (str_concat "alloc-ms " (int_to_str alloc-ms)))
+            (print_str (str_concat "enqueue-ms " (int_to_str enq-ms)))
+            (print_str (str_concat "sync-ms " (int_to_str sync-ms)))
+            (print_str (str_concat "verify(readback+diff)-ms(" (str_concat (int_to_str hzd) " slots) ")))
+            (print_str (int_to_str verify-ms))
+            (print_str (str_concat "alloc+enqueue+sync-ms " (int_to_str batch-ms)))
+            (print_str (str_concat "us/dispatch enqueue-only " (int_to_str (fndcp-us-per enq-ms ndisp))))
+            (print_str (str_concat "us/dispatch enqueue+sync " (int_to_str (fndcp-us-per (add enq-ms sync-ms) ndisp))))
+            (print_str (str_concat "us/repetition enqueue-only " (int_to_str (fndcp-us-per enq-ms n))))
+            (print_str (str_concat "us/repetition enqueue+sync " (int_to_str (fndcp-us-per (add enq-ms sync-ms) n))))
+
+            (if live (if (eq armed 1) (if (eq ok-count ndisp) (if (eq drained ndisp) (if (lt worst 0.01) 1 0) 0) 0) 0) 0)))
+
+    (fndcp-show))

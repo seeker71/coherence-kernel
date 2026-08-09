@@ -83,7 +83,7 @@ in `BOOTSTRAP.md` and `AGENTS.md`:
 cc -O2 -o fkwu runtime/fkwu-uni.c
 ./fkwu bootstrap/ground.fk                                # -> 42
 ./fkwu bootstrap/ground-recursive.fk 10                   # -> 55
-./fkwu form/form-stdlib/tests/binary-freshness-band.fk    # -> 31 (anything else: REBUILD first)
+./fkwu form/form-stdlib/tests/binary-freshness-band.fk    # -> 15 (anything else: REBUILD first)
 ```
 
 The **binary-freshness canary** (third line) exists because `fkwu` is gitignored and a stale local binary
@@ -120,7 +120,7 @@ Current state per region. **Chronology is deliberately not kept here** — the f
   the **wire-serialization lane** — `wire-registry.fk` (registry + universal `WIRE-NULL`), `cell-serialize.fk`
   (JSON, values+types+identity round-trip by axiom-3), `wire-xml.fk`, `wire-corba-cdr.fk` (real IEEE754 doubles),
   `wire-path.fk` (native path-select — `xpath`/`xmlpath` off the shell applet), `wire-rpc.fk` (the CORBA-DII-shaped
-  executor closing tool-grammar's GAP-T1); `json.fk` (full parser/emitter, proven on the source-runner, real true/false by
+  executor closing tool-grammar's GAP-T1); `json.fk` (full parser/emitter, proven on the source door, real true/false by
   node identity); the HTTP body (`kernel-http` + parse/render/request/serve/client/adapter/socket + BML lanes,
   `http-negotiate.fk` REST content-negotiation); arrival/reception-consent/relationship-store (the come-in flow);
   host-os-membrane, somatic-coherence-loop, observed-auto-learning, tool-channel (native xpath), auth/resource/

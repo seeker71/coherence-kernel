@@ -360,13 +360,13 @@ nm_build_lineage_source "$band_source" \
 nm_build_lineage_source "$cli_source" \
     form/form-stdlib/native-model-lineage-cli.fk
 
-band=$($NM_FKWU --src "$band_source")
+band=$($NM_FKWU "$band_source")
 if [ "$band" != 33554431 ]; then
     printf 'lineage band failed: expected 33554431, observed %s\n' "$band" >&2
     exit 1
 fi
 
-$NM_FKWU --src "$cli_source" < "$form_input" > "$raw_report"
+$NM_FKWU "$cli_source" < "$form_input" > "$raw_report"
 sed '/^$/d; /^0$/d; /^fkwu: warning:/d' "$raw_report" > "$report"
 for required_verdict in \
     lineage_valid=1 q4_copy_equality=1 served_event_bound=1 \

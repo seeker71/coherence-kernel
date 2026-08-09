@@ -1,0 +1,44 @@
+; e2e-run-forward-real.fk — the driver's forward+sample stages on REAL llama3.2:3b weights at the
+; width that is real today: dim=4, one layer, V=4, carved from the actual Q6_K blk.0.ffn_down.weight
+; superblocks and F32 blk.0.attn_norm gains of the GGUF blob ollama serves (the same offsets
+; tests/real-gguf-generate-band.fk pins against ggml's own dequant). The seed ids are DECLARED
+; capability-floor ids (0 1) — they are NOT the prompt's tokens, because the tokenize binding is
+; pending; this file shows the loop the prompt's ids will enter, producing real model-derived token
+; ids through the driver's ed-generate binding. Carrier witness (absolute host path) for
+; scripts/e2e_driver_witness.sh; portable proof lives in the bands.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/form-fs.fk form-stdlib/format-arith.fk form-stdlib/f16-decode.fk form-stdlib/gguf-read.fk form-stdlib/q4k-dequant.fk form-stdlib/q6k-dequant.fk form-stdlib/weight-load.fk form-stdlib/transformer-numerics.fk form-stdlib/trig.fk form-stdlib/llama-numerics.fk form-stdlib/rope.fk form-stdlib/transformer-block.fk form-stdlib/transformer-mh.fk form-stdlib/gqa-attn.fk form-stdlib/llama-block.fk form-stdlib/llama-gqa-block.fk form-stdlib/kv-cache.fk form-stdlib/kv-llama-block.fk form-stdlib/kv-gqa-llama-block.fk form-stdlib/multi-layer-stack.fk form-stdlib/gqa-multi-layer-stack.fk form-stdlib/greedy-decode.fk form-stdlib/llama-generate.fk form-stdlib/real-gguf-generate.fk form-stdlib/e2e-driver.fk
+;
+; Output: (header-ok tensor-count (seed+8 generated real-weight token ids) cached==recompute)
+(do
+    (defn erf-ieq (a b)
+      (if (eq (len a) 0) (if (eq (len b) 0) 1 0)
+          (if (eq (len b) 0) 0
+              (if (eq (head a) (head b)) (erf-ieq (tail a) (tail b)) 0))))
+
+    (let path "/Users/ursmuff/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff")
+    (let dim 4)  (let v 4)  (let steps 8)
+
+    (let hdr (host-abi-string-to-bytes (read_file_slice path 0 24)))
+    (let ok  (gg-magic-ok? hdr))
+    (let tc  (gg-tensor-count hdr))
+
+    ; real Q6_K weights: blk.0.ffn_down.weight superblocks (absolute 331055328), real F32 gains
+    ; from blk.0.attn_norm.weight (absolute 331043040) — the band-pinned offsets
+    (let qb (host-abi-string-to-bytes (read_file_slice path 331055328 630)))
+    (let ws (rgg-weights qb 0 3))
+    (let nb (host-abi-string-to-bytes (read_file_slice path 331043040 64)))
+    (let g1 (rgg-gain nb 0 dim))
+    (let g2 (rgg-gain nb 16 dim))
+    (let gf (rgg-gain nb 32 dim))
+
+    (let layers (list (rgg-layer ws g1 g2 dim)))
+    (let tok    (rgg-tok (rgg-drop ws (rgg-layer-weights dim)) v dim))
+    (let seed   (list 0 1))
+    (let cfg    (rope-cfg 10000.0 32.0 1.0 4.0 8192.0))
+    (let sc     (div 1.0 (tn-sqrt 4.0)))
+
+    ; the DRIVER's forward+sample binding over the real weights
+    (let gen (ed-generate           seed tok layers gf 0.00001 sc 1 1 dim cfg steps))
+    (let grc (ed-generate-recompute seed tok layers gf 0.00001 sc 1 1 dim cfg steps))
+    (list ok tc gen (erf-ieq gen grc)))

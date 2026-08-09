@@ -33,7 +33,7 @@ The covenant is a predicate, not a mood: `cognition/dialogue-covenant.fk` models
 move as data (`advise` grounded-or-not, `miss`, `flatter`, `elevate`, `stretch`), scores what an
 exchange did *for the enquiry*, and holds any exchange against the covenant — held iff zero
 fabrications, zero flattery, and at least one lifting move. Witnessed by
-`cognition/tests/dialogue-covenant-band.fk` (verdict 11111 on `fkwu --src`).
+`cognition/tests/dialogue-covenant-band.fk` (verdict 11111 on `fkwu`).
 
 The honest floor, named: move *kinds* are assigned by the observer today; the classifier that
 reads kinds off raw transcript text natively is pending, the same way `cognition/text-frequency.fk`
@@ -87,5 +87,5 @@ The full trials, verdicts, and measurements: `receipts/2026-07-15-door-verified-
   ground first, attune, never fabricate; this teaching adds the advice-and-dialogue stance
   on top of it.
 
-; witnessed: 2026-07-13 -> band 11111 (fkwu --src, fresh kernel)
+; witnessed: 2026-07-13 -> band 11111 (fkwu, fresh kernel)
 ; witnessed: 2026-07-15 -> band 1111111 (receivability floor added after the embodiment trial)

@@ -1,0 +1,154 @@
+; form-native-decode.fk — ONE decode-step orchestration: a Form cell drives the handle door end to
+; end over REAL llama3.2:3b bytes, and nothing but this cell decides the sequence.
+;
+; WHAT THIS IS, AND WHAT IT DELIBERATELY IS NOT. Every existing Metal decode lane (llama-token-
+; handle.fk, dense-token-handle.fk, kat-token-handle.fk, dsv4-*, moe-token.fk — all merged, all
+; already running a full multi-layer token through the handle door) proves the WHOLE model belongs
+; to the body. This cell proves something narrower and more legible: the smallest possible slice of
+; that same pattern, small enough that a reader can hold the whole sequence in one read — open a
+; real tensor's bytes on the GPU, bind them into a real kernel dispatch, enqueue, sync ONCE, read
+; back, and check the answer against Form's own arithmetic. It exists next to the token-scale cells
+; as the minimal witness of the SHAPE, not as a smaller model.
+;
+; THE ONE TENSOR. blk.0.attn_norm.weight is llama3.2:3b's smallest real tensor family — F32, not
+; quantized, one gain per channel (d_model = 3072 floats, 12288 bytes) — so its bytes cross the door
+; with no dequant step between the file and the kernel: metal_buf_from_file mmaps them directly.
+; Locating it reuses the body's own GGUF reach path verbatim (equireach-gguf.fk's egg-find-tensor /
+; egg-ti-dataoff / egg-data-base — the same three calls first-token.fk's REFRMS reference uses),
+; not a re-walk of the format.
+;
+; THE ONE KERNEL. form_rmsnorm_f32 (llama-decode-msl.fk's ldm-rmsnorm-msl) is the exact MSL text an
+; already-proven recipe emits — not retyped, called. It is the single-thread attestant (the fast
+; cooperative twin form_rmsnorm_tg_f32 is a different kernel; this cell dispatches the plain one,
+; matching metal_first_token.sh's `s.go(pRms, 1, bind)` — one thread, plain md-bind, no dispatch
+; tail) so the binding shape stays the smallest one the door offers: 3 buffers, 2 constants.
+;
+; THE INPUT VECTOR IS SYNTHETIC AND SAYS SO. RMSNorm needs a second operand the same width as the
+; gain, and reading a real activation row would mean dequantizing a real Q6_K token embedding first —
+; a second op this slice does not need in order to prove the ORCHESTRATION pattern (open bytes, bind,
+; dispatch, sync, read, compare). fnd-x-val is a small closed-form formula (i mod 11) + 1), written
+; here rather than borrowed, so a reader can regenerate every element by hand without running
+; anything. The gain vector is the only tensor this cell reads off the real file; the input vector is
+; Form's own, and both cross to the GPU through the primitives this task scopes: metal_buf_from_file
+; for the file bytes, metal_buf_alloc + metal_buf_write for the synthetic ones.
+;
+; THE COMPARISON REUSES THE REFERENCE, NOT A NEW ONE. fnd-verify decodes the GPU's own output bytes
+; back into a Form float list with equireach-gguf.fk's ewl-gain (the SAME f32 decoder first-token.fk
+; uses to read the real gain tensor in the first place — one decoder, two reaches) and diffs it
+; against llama-numerics.fk's ln-rmsnorm computed independently, in Form, over the SAME gain values.
+; Two arithmetic paths — Metal's kernel, Form's tree-walk — meeting at max|Δ|.
+;
+; md-door-live? gates every claim below it: a door that never linked or that answers a matvec-only
+; carrier's numb 0 must not be read as a passing comparison, the exact discipline metal-door.fk's own
+; header states and metal-handle-door-band.fk's bit 1 enforces.
+;
+; RADIUS THIS CELL SPEAKS FOR. One block's attn_norm gain, d_model = 3072, one token-shaped vector,
+; one sync. It does not speak for a layer, a cache, or a second dispatch chained off this one's
+; output — that is the token-scale cells' proof, already standing. It speaks for the primitive
+; sequence metal_buf_from_file -> metal_pipeline -> metal_enqueue -> metal_sync -> metal_buf_read
+; belonging to ONE Form cell with zero Swift/Obj-C written for this task.
+;
+; Kin: form-stdlib/metal-door.fk (md-bind / md-f32-bits / md-door-live? — the bytes and the canary),
+;      form-stdlib/llama-decode-msl.fk (ldm-rmsnorm-msl — the kernel text, called not copied),
+;      form-stdlib/llama-numerics.fk (ln-rmsnorm — the independent Form arithmetic this checks
+;      against), form-stdlib/equireach-gguf.fk (egg-* / ewl-gain — locate and decode the real tensor),
+;      native/metal/first-token.fk (ft-emit-ref — the same three-call tensor-location pattern),
+;      native/metal/llama-token-handle.fk (the full-token orchestration this is the smallest slice of).
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/metal-door.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk native/metal/whole-tensor-residency.fk form-stdlib/llama-decode-msl.fk form-stdlib/llama-numerics.fk
+;
+; Proven by: form-stdlib/tests/form-native-decode-band.fk (the encoding arithmetic, four-way) and,
+;            witnessed only (Metal is a host organ, fkwu-only by nature — not a four-way claim), the
+;            same file's GPU section, run through the linked carrier on real hardware.
+
+(do
+    ; ================= the real file =================
+    ; Same default HOME-anchored path metal_first_token.sh reads (FORM_GGUF_BLOB there; hardcoded
+    ; here because this cell, like first-token.fk and llama-token-handle.fk, is a native Metal
+    ; witness and not a four-way band — there is no host-argv door on the other three arms to feed).
+    (defn fnd-blob-path () "/Users/ursmuff/.ollama/models/blobs/sha256-dde5aa3fc5ffc17176b5e8bdc82f587b24b2678c6c66101bf7da77af9f7ccdff")
+
+    ; the header window: same size first-token.fk opens, comfortably past the tensor-info table.
+    (defn fnd-src (path) (eqr-of-file path 0 (wtr-header-window)))
+
+    (defn fnd-dmodel (src) (gmt-u32 src "llama.embedding_length"))
+    (defn fnd-eps (src) (gmt-f32 src "llama.attention.layer_norm_rms_epsilon"))
+    (defn fnd-norm-abs (src path)
+        (add (egg-data-base src (wtr-alignment))
+             (egg-ti-dataoff src (egg-find-tensor src "blk.0.attn_norm.weight"))))
+
+    ; ================= the synthetic input vector =================
+    ; x_i = (i mod 11) + 1 — a closed form, not a random fill, so a reader can regenerate any element
+    ; without running this cell. Deliberately not a real tensor: see the header for why.
+    (defn fnd-x-val (i) (add 1.0 (mul (mod i 11) 1.0)))
+    (defn fnd-x-list-loop (i n acc)
+        (if (eq i n) (reverse acc) (fnd-x-list-loop (add i 1) n (cons (fnd-x-val i) acc))))
+    (defn fnd-x-list (n) (fnd-x-list-loop 0 n (list)))
+    (defn fnd-x-bytes-loop (i n acc)
+        (if (eq i n) acc
+            (fnd-x-bytes-loop (add i 1) n (str_concat acc (md-le32 (md-f32-bits (fnd-x-val i)))))))
+    (defn fnd-x-bytes (n) (fnd-x-bytes-loop 0 n ""))
+
+    ; ================= the kernel =================
+    ; The exact MSL an already-proven recipe emits, called rather than retyped. `#include
+    ; <metal_stdlib>` leads (this kernel calls nothing from it — no metal:: name appears in
+    ; ldm-rmsnorm-msl's body — but the header is included for the same reason ft-emit-msl and
+    ; lth-msl always lead their units with it: one convention for the door's whole unit family).
+    (defn fnd-msl () (str_concat "#include <metal_stdlib>\n" (ldm-rmsnorm-msl "form_rmsnorm_f32")))
+
+    ; ================= the comparison =================
+    ; DEFINED BEFORE ITS CALLER — a forward reference here binds numb-empty on the flattening arm
+    ; (metal-door.fk's own header names this trap) and a maxdiff read that way would print a
+    ; plausible 0.0 regardless of whether the GPU agreed with anything.
+    (defn fnd-maxdiff (a b)
+        (if (eq (len a) 0) 0.0
+            (do (let hd (fq-abs (sub (head a) (head b))))
+                (let rest (fnd-maxdiff (tail a) (tail b)))
+                (if (gt hd rest) hd rest))))
+
+    ; ================= the orchestration =================
+    ; ONE Form cell, in order: open real bytes -> compile -> bind -> enqueue -> ONE sync -> read back
+    ; -> decode -> compare. Nothing here is Swift; the only host crossing is metal_buf_from_file
+    ; reading the model file's bytes, exactly as the task's discipline requires.
+    (defn fnd-run ()
+        (do
+            (let live (md-door-live?))
+            (let path (fnd-blob-path))
+            (let src (fnd-src path))
+            (let d (fnd-dmodel src))
+            (let eps (fnd-eps src))
+            (let gnabs (fnd-norm-abs src path))
+
+            ; step (a): the real tensor's bytes, resident on the GPU, mmap'd not copied.
+            (let hg (metal_buf_from_file path gnabs (mul d 4)))
+
+            ; the synthetic input: real host->device write, the door's other resident path.
+            (let hx (metal_buf_alloc (mul d 4)))
+            (let wx (metal_buf_write hx 0 (fnd-x-bytes d)))
+            (let hy (metal_buf_alloc (mul d 4)))
+
+            ; step (b): compile the called (not retyped) kernel, build the exact binding the door
+            ; specifies — 3 buffers (x, g, y) then 2 constants (n, eps-as-bits) — matching
+            ; ldm-rmsnorm-msl's buffer(0..4) layout exactly.
+            (let pipe (metal_pipeline (fnd-msl) "form_rmsnorm_f32"))
+            (let bind (md-bind (list hx hg hy) (list d (md-f32-bits eps))))
+
+            ; step (c): ONE dispatch, ONE sync, ONE read-back. form_rmsnorm_f32 is `if (gid != 0u)
+            ; return;` — a single thread does the whole reduction, so the dispatch is 1 thread, no
+            ; tail (mode 0, the plain form), the same shape metal_first_token.sh's attestant path
+            ; dispatches with.
+            (let e1 (metal_enqueue pipe bind 1))
+            (let synced (metal_sync))
+            (let ybytes (metal_buf_read hy 0 (mul d 4)))
+
+            ; step (d): decode the GPU's own bytes with the body's one f32-list decoder (the same
+            ; call first-token.fk's REFRMS reference uses to read the file), and diff against Form's
+            ; independent RMSNorm over the SAME real gain values.
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let gpu-y (ewl-gain ybytes 0 d))
+            (let form-y (ln-rmsnorm (fnd-x-list d) gains eps))
+            (let maxdiff (fnd-maxdiff form-y gpu-y))
+
+            (list live d eps gnabs hg hx hy pipe e1 synced maxdiff)))
+
+    0)
