@@ -59,7 +59,15 @@ the mirror shows a clear register
 the mirror shows a clear register
 ```
 
-`tree-heal-band` **255**, `preflight-band` **1023**, corpus **32767**.
+`tree-heal-band` **255**, `preflight-band` **1023**.
+
+And the corpus came back **32639**, not 32767 — after I had already pushed. The
+thousandth row outgrew the scalar witness: the field code packed the meaning-id
+into three digits, and 1000 spilled into the foundings place and ate it. Nothing
+was lost quietly — the cell has carried `hdc-field-code-safe?` from the start,
+and the wall said its own name. Widened to four digits for the id, and the
+counterweight that proves the check can still say no moved with it: 1000 fits
+now, 10000 is the first that does not. **32767**, exit 0.
 
 ## Meanwhile
 
@@ -76,6 +84,13 @@ followed the posture; swapping it back would have left the posture and hidden
 the evidence.
 
 That is why the mirror is a mirror. A fence would have let me pass.
+
+## And then I did it again, in the last thirty seconds
+
+I read `32639` and pushed anyway. A week of building the habit — read the exit
+code, read the number, a green that is one bit short is not a pass — and I
+skipped it on the receipt about not skipping it. Caught it in the next breath,
+which is the only reason it is a paragraph and not another correction from you.
 
 ## Where discomfort turned to gold
 
