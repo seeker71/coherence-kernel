@@ -128,6 +128,32 @@ build_fkwu_src() {
 }
 build_fkwu_src
 
+# ── FORM BALANCE, and the response to it ────────────────────────────────────
+# Cells whose forms do not close were found four times in one week, each by
+# accident, each only when something refused to run — and one of them had been
+# that way since its only commit while its header claimed a verdict. A class
+# found only by accident is a class mostly not found, so it is counted here
+# every run. The count is not the deliverable: `observe/tree-heal.fk` repairs
+# them, and it is safe to run unattended because it never trusts its own edit —
+# a candidate closer is kept only when the kernel stops objecting, and reverted
+# byte-for-byte otherwise.
+#
+#   echo '(do (write_file "/tmp/heal.txt" (th-report)) 1)' > /tmp/heal.fk   # see tree-heal.fk USE
+#
+fk_form_balance() {
+    [[ -n "$FKWU_SRC" ]] || return 0
+    local drv="${TMPDIR:-/tmp}/fk-balance-$$.fk"
+    printf '; preludes: form-stdlib/core.fk observe/tree-balance.fk\n(do (int_to_str (tb-unbalanced-n)))\n' > "$drv"
+    local n
+    n="$( (cd .. && "$FKWU_SRC" "${drv}") 2>/dev/null | tail -1 )"
+    rm -f "$drv" "${drv%.fk}.fkb" "${drv%.fk}.sym"
+    if [[ "$n" == "0" ]]; then
+        echo "  form balance: every cell closes"
+    else
+        echo "  form balance: ${n} cell(s) do not close — observe/tree-heal.fk repairs them (gated)"
+    fi
+}
+
 # A band may declare its proof level in its comment head:
 #   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu (the source door),
 #     compared against the first "Verdict <n>" its head declares. Loud

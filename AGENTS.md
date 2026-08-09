@@ -143,6 +143,14 @@ seam is named, never hidden. Naming it *is* the practice.
      carried exactly that for five days: it said `host-exec` was fkwu-only, and its band answers **511 on Go**.
      `(pf-arm-mask "host-exec")` is 9 — go + fkwu — and takes one call.
 
+   **And a count is not a deliverable.** When preflight or `observe/tree-balance.fk`
+   names a broken cell, the response is `observe/tree-heal.fk`, not a paragraph
+   about it. That loop is safe to run unattended for one reason: it never trusts
+   its own edit. A candidate closer is placed where the form leaked, the kernel
+   is asked, and the change is kept only if the kernel stops objecting — zero
+   diagnostics, exit 0, and the cell's band clean if it has one. Everything else
+   is reverted byte-for-byte. The edit is a guess; the verdict is evidence.
+
    Only one arm looks. Go, Rust and TypeScript bind names when execution *reaches* them, so a bad symbol in an
    unreached branch exits 0 there; fkwu resolves every call site in the whole prelude chain. That is why fkwu
    finds these, and why its findings arrive as a chain-wide wall rather than as one cell's problem — preflight
