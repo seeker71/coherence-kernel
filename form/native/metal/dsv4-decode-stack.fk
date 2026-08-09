@@ -12,6 +12,37 @@
 
 (do
     (defn dfd-append1 (l x) (if (eq (len l) 0) (cons x 0) (cons (head l) (dfd-append1 (tail l) x))))
+    ; ═══════════════ RUNG 15: SEAMSTARVE — the serial barrier between correct fast kernels ═══════════
+    ; The layer runs at 30 GB/s while its kernels hit 285 GB/s isolated: 62 serial dispatches with a
+    ; full barrier after each starve the GPU between kernels (receipts/2026-08-09-ds4-drain-ledger.md).
+    ; The door's concurrent batch (tag 253) lets independent dispatches overlap; THIS cell declares the
+    ; hazards per dispatch via barrier_before (base+16 tail: tpg tgbytes mode barrier). The pattern is
+    ; llama-token-handle.fk's, proven: barrier_before=1 marks a dispatch that reads a buffer a prior
+    ; dispatch in the same batch just wrote (true read-after-write); a fan-out sibling that reads the
+    ; SAME already-visible input and writes a DISJOINT output takes barrier_before=0 and overlaps. A
+    ; missing barrier moves an id (the 25/25 stream seal catches it); an extra barrier just costs.
+    ; dfd-b16 wraps a base binding (no tail) -> base+16; dfd-t16 wraps a base+8 (dfd-bind-tg) -> base+16.
+    (defn dfd-b16 (base bb)
+        (str_concat base (str_concat (dfd-u32 0) (str_concat (dfd-u32 0) (str_concat (dfd-u32 0) (dfd-u32 bb))))))
+    (defn dfd-t16 (base bb)
+        (str_concat base (str_concat (dfd-u32 0) (dfd-u32 bb))))
+    ; barrier-aware twins of dfd-mv-enq / dfd-mvg-enq (dsv4-decode-form.fk): same binding, base+16 tail.
+    (defn dfd-mv16 (p ty w x y rows cols bb)
+        (if (eq ty 8)
+            (metal_enqueue p (dfd-t16 (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 w) (dfd-u32 x)) (dfd-u32 y)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 rows) (dfd-u32 cols))))
+                256 0) bb) (mul (div (add rows 1) 2) 256))
+            (metal_enqueue p (dfd-t16 (dfd-bind-tg
+                (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 w) (dfd-u32 x)) (dfd-u32 y)))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 rows) (dfd-u32 cols)) (dfd-u32 (mul rows cols)))))
+                256 0) bb) (mul rows 32))))
+    (defn dfd-mvg16 (p w x y rows cols rank bb)
+        (metal_enqueue p (dfd-t16 (dfd-bind-tg
+            (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 w) (dfd-u32 x)) (dfd-u32 y)))
+                        (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 rows) (dfd-u32 cols))
+                                                            (str_concat (dfd-u32 (mul rows cols)) (dfd-u32 rank)))))
+            64 0) bb) (mul rows 32)))
     ; ═══════════════ RUNG 14: the 43-LAYER STACK and the GREEDY STREAM ═══════════════
     ; The whole forward, held by this cell: per-layer weight views resolved once from the file's own
     ; header (never a constant), two freq tables (plain base-10000 for ratio-0 layers, the YaRN
@@ -153,42 +184,42 @@
         (do (let ratio (nth L 31))
             (let w (nth L 40))
             (let row (if (eq ratio 4) (add ratio (mod pos ratio)) (mod pos ratio)))
-            (let e0 (metal_enqueue (nth P 3)
+            (let e0 (metal_enqueue (nth P 3) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth L 33)) (dfd-u32 (nth S 10))) (dfd-u32 (nth S 51))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 w) (dfd-u32 4096)))) w))
-            (let e1 (metal_enqueue (nth P 3)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 w) (dfd-u32 4096)))) 1) w))
+            (let e1 (metal_enqueue (nth P 3) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth L 34)) (dfd-u32 (nth S 10))) (dfd-u32 (nth S 52))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 w) (dfd-u32 4096)))) w))
-            (let e2 (metal_enqueue (nth P 30)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 w) (dfd-u32 4096)))) 0) w))
+            (let e2 (metal_enqueue (nth P 30) (dfd-b16
                 (str_concat (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 (nth S 51)) (dfd-u32 (nth S 52)))
                                                                 (str_concat (str_concat (dfd-u32 (nth L 35)) (dfd-u32 (nth L 37))) (dfd-u32 (nth L 38)))))
-                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 w) (dfd-u32 row)) (dfd-u32 (mod pos ratio))))) w))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 w) (dfd-u32 row)) (dfd-u32 (mod pos ratio))))) 1) w))
             (if (eq (mod (add pos 1) ratio) 0)
-                (do (let e3 (metal_enqueue (nth P 31)
+                (do (let e3 (metal_enqueue (nth P 31) (dfd-b16
                         (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth L 37)) (dfd-u32 (nth L 38))) (dfd-u32 (nth S 53))))
-                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 ratio)))) 512))
+                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 ratio)))) 1) 512))
                     (let e4 (if (eq ratio 4)
-                        (metal_enqueue (nth P 32)
+                        (metal_enqueue (nth P 32) (dfd-b16
                             (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth L 37)) (dfd-u32 (nth L 38))))
-                                        (str_concat (dfd-u32 2) (str_concat (dfd-u32 w) (dfd-u32 ratio)))) (mul ratio w))
+                                        (str_concat (dfd-u32 2) (str_concat (dfd-u32 w) (dfd-u32 ratio)))) 1) (mul ratio w))
                         0))
-                    (let e5 (metal_enqueue (nth P 8) (dfd-bind-tg
+                    (let e5 (metal_enqueue (nth P 8) (dfd-t16 (dfd-bind-tg
                         (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 53)) (dfd-u32 (nth S 54))))
-                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
-                    (let e6 (metal_enqueue (nth P 9)
+                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 (dfd-eps-bits))))) 32 0) 1) 32))
+                    (let e6 (metal_enqueue (nth P 9) (dfd-b16
                         (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth S 53)) (dfd-u32 (nth L 36)))
                                                                         (str_concat (dfd-u32 (nth S 55)) (dfd-u32 (nth S 54)))))
-                                    (str_concat (dfd-u32 1) (dfd-u32 512))) 512))
-                    (let e7 (metal_enqueue (nth P 11)
+                                    (str_concat (dfd-u32 1) (dfd-u32 512))) 1) 512))
+                    (let e7 (metal_enqueue (nth P 11) (dfd-b16
                         (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth S 55)) (dfd-u32 (nth S 56))) (dfd-u32 (nth S 50))))
                                     (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 1) (dfd-u32 512))
-                                        (str_concat (dfd-u32 64) (str_concat (dfd-u32 (dfd-posbits-gen (sub (add pos 1) ratio))) (dfd-u32 1065353216)))))) 512))
-                    (let e8 (metal_enqueue (nth P 14) (dfd-bind-tg
+                                        (str_concat (dfd-u32 64) (str_concat (dfd-u32 (dfd-posbits-gen (sub (add pos 1) ratio))) (dfd-u32 1065353216)))))) 1) 512))
+                    (let e8 (metal_enqueue (nth P 14) (dfd-t16 (dfd-bind-tg
                         (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 56)) (dfd-u32 (nth S 57))))
-                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 64)))) 512 0) 512))
-                    (metal_enqueue (nth P 15)
+                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 64)))) 512 0) 1) 512))
+                    (metal_enqueue (nth P 15) (dfd-b16
                         (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 57)) (dfd-u32 (nth L 39))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 (sub (div (add pos 1) ratio) 1)) (dfd-u32 512)))) 512))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 (sub (div (add pos 1) ratio) 1)) (dfd-u32 512)))) 1) 512))
                 0)))
 
     ; one layer, dispatches only. P: 0 pe 1 pbc 2 pnw 3 pf16 4 psq4 5 pwsum 6 ppost 7 pslc
@@ -205,182 +236,191 @@
         (do (let ratio (nth L 31))
             (let fbh (if (eq ratio 0) (nth S 49) (nth S 50)))
             (let pb (dfd-posbits-gen pos))
-            ; attn hcPre
-            (let b0 (metal_enqueue (nth P 2) (dfd-bind-tg
+            ; attn hcPre — stage-opener barriers: 1 opens a new ordered stage (global fence over all
+            ; prior dispatches), 0 joins the current stage and overlaps its siblings. b3/b4/b5 all read
+            ; asplitb (S5) and write disjoint outputs, so they are one stage.
+            (let b0 (metal_enqueue (nth P 2) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 rin) (dfd-u32 (nth S 3))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 16384) (dfd-u32 (dfd-eps-bits))))) 1024 0) 1024))
-            (let b1 (metal_enqueue (nth P 3)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 16384) (dfd-u32 (dfd-eps-bits))))) 1024 0) 1) 1024))
+            (let b1 (metal_enqueue (nth P 3) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth L 12)) (dfd-u32 (nth S 3))) (dfd-u32 (nth S 4))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 24) (dfd-u32 16384)))) 24))
-            (let b2 (metal_enqueue (nth P 4)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 24) (dfd-u32 16384)))) 1) 24))
+            (let b2 (metal_enqueue (nth P 4) (dfd-b16
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth S 4)) (dfd-u32 (nth L 13)))
                                                                 (str_concat (dfd-u32 (nth L 14)) (dfd-u32 (nth S 5)))))
-                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 4) (dfd-u32 20)) (dfd-u32 (dfd-eps-bits))))) 1))
-            (let b3 (metal_enqueue (nth P 7)
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 4) (dfd-u32 20)) (dfd-u32 (dfd-eps-bits))))) 1) 1))
+            (let b3 (metal_enqueue (nth P 7) (dfd-b16
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 5)) (dfd-u32 (nth S 6))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4)))) 4))
-            (let b4 (metal_enqueue (nth P 7)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4)))) 1) 4))
+            (let b4 (metal_enqueue (nth P 7) (dfd-b16
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 5)) (dfd-u32 (nth S 7))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 8) (dfd-u32 16)))) 16))
-            (let b5 (metal_enqueue (nth P 5)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 8) (dfd-u32 16)))) 0) 16))
+            (let b5 (metal_enqueue (nth P 5) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 rin) (dfd-u32 (nth S 5))) (dfd-u32 (nth S 8))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 4096))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 0) 4096))
             ; MLA
-            (let c0 (metal_enqueue (nth P 8) (dfd-bind-tg
+            (let c0 (metal_enqueue (nth P 8) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 8)) (dfd-u32 (nth S 9))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4096) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
-            (let c1 (metal_enqueue (nth P 9)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4096) (dfd-u32 (dfd-eps-bits))))) 32 0) 1) 32))
+            (let c1 (metal_enqueue (nth P 9) (dfd-b16
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth S 8)) (dfd-u32 (nth L 0)))
                                                                 (str_concat (dfd-u32 (nth S 10)) (dfd-u32 (nth S 9)))))
-                            (str_concat (dfd-u32 1) (dfd-u32 4096))) 4096))
-            (let c2 (dfd-mv-enq (nth P 16) (nth L 1) (nth L 2) (nth S 10) (nth S 11) 1024 4096))
-            (let c3 (dfd-mv-enq (nth P 16) (nth L 1) (nth L 4) (nth S 10) (nth S 14) 512 4096))
+                            (str_concat (dfd-u32 1) (dfd-u32 4096))) 1) 4096))
+            ; q_a and kv both read xnb (S10); disjoint outputs -> one stage (kv overlaps q_a)
+            (let c2 (dfd-mv16 (nth P 16) (nth L 1) (nth L 2) (nth S 10) (nth S 11) 1024 4096 1))
+            (let c3 (dfd-mv16 (nth P 16) (nth L 1) (nth L 4) (nth S 10) (nth S 14) 512 4096 0))
             (let cc (if (gt ratio 0) (dfd-st-comp P S L pos) 0))
-            (let c4 (metal_enqueue (nth P 8) (dfd-bind-tg
+            (let c4 (metal_enqueue (nth P 8) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 11)) (dfd-u32 (nth S 12))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1024) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
-            (let c5 (metal_enqueue (nth P 9)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1024) (dfd-u32 (dfd-eps-bits))))) 32 0) 1) 32))
+            (let c5 (metal_enqueue (nth P 9) (dfd-b16
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth S 11)) (dfd-u32 (nth L 3)))
                                                                 (str_concat (dfd-u32 (nth S 13)) (dfd-u32 (nth S 12)))))
-                            (str_concat (dfd-u32 1) (dfd-u32 1024))) 1024))
-            (let c6 (metal_enqueue (nth P 8) (dfd-bind-tg
+                            (str_concat (dfd-u32 1) (dfd-u32 1024))) 1) 1024))
+            ; c6 reads klb (S14, fenced by c4); independent of c5 -> joins c5's stage
+            (let c6 (metal_enqueue (nth P 8) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 14)) (dfd-u32 (nth S 15))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
-            (let c7 (metal_enqueue (nth P 9)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 (dfd-eps-bits))))) 32 0) 0) 32))
+            (let c7 (metal_enqueue (nth P 9) (dfd-b16
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth S 14)) (dfd-u32 (nth L 5)))
                                                                 (str_concat (dfd-u32 (nth S 16)) (dfd-u32 (nth S 15)))))
-                            (str_concat (dfd-u32 1) (dfd-u32 512))) 512))
-            (let c8 (dfd-mv-enq (nth P 16) (nth L 1) (nth L 6) (nth S 13) (nth S 17) 32768 1024))
-            (let c9 (metal_enqueue (nth P 10)
+                            (str_concat (dfd-u32 1) (dfd-u32 512))) 1) 512))
+            ; c8 reads qlnb (S13, from c5, fenced by c7); independent of c7 -> joins c7's stage
+            (let c8 (dfd-mv16 (nth P 16) (nth L 1) (nth L 6) (nth S 13) (nth S 17) 32768 1024 0))
+            (let c9 (metal_enqueue (nth P 10) (dfd-b16
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 17)) (dfd-u32 (nth S 18))))
-                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512)) (dfd-u32 (dfd-eps-bits))))) 64))
-            (let c11 (metal_enqueue (nth P 11)
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512)) (dfd-u32 (dfd-eps-bits))))) 1) 64))
+            (let c11 (metal_enqueue (nth P 11) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth S 18)) (dfd-u32 (nth S 19))) (dfd-u32 fbh)))
                             (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512))
-                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 pb) (dfd-u32 1065353216)))))) 32768))
-            (let c12 (metal_enqueue (nth P 11)
+                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 pb) (dfd-u32 1065353216)))))) 1) 32768))
+            ; c12 ropes klnb (S16, from c7, fenced by c9); independent of c11 -> joins c11's stage
+            (let c12 (metal_enqueue (nth P 11) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth S 16)) (dfd-u32 (nth S 20))) (dfd-u32 fbh)))
                             (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 1) (dfd-u32 512))
-                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 pb) (dfd-u32 1065353216)))))) 512))
-            (let c13 (metal_enqueue (nth P 14) (dfd-bind-tg
+                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 pb) (dfd-u32 1065353216)))))) 0) 512))
+            (let c13 (metal_enqueue (nth P 14) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 20)) (dfd-u32 (nth S 21))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 64)))) 512 0) 512))
-            (let c14 (metal_enqueue (nth P 15)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 512) (dfd-u32 64)))) 512 0) 1) 512))
+            (let c14 (metal_enqueue (nth P 15) (dfd-b16
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 21)) (dfd-u32 (nth L 32))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 pos) (dfd-u32 512)))) 512))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 pos) (dfd-u32 512)))) 1) 512))
             (let ncomp (if (gt ratio 0) (div (add pos 1) ratio) 0))
-            (let c15 (metal_enqueue (nth P 12)
+            (let c15 (metal_enqueue (nth P 12) (dfd-b16
                 (str_concat (str_concat (dfd-u32 5) (str_concat (str_concat (str_concat (dfd-u32 (nth S 19)) (dfd-u32 (nth L 32)))
                                                                             (str_concat (dfd-u32 (if (gt ratio 0) (nth L 39) (nth L 32))) (dfd-u32 (nth S 22))))
                                                                 (dfd-u32 (nth L 7))))
                             (str_concat (dfd-u32 5) (str_concat (str_concat (str_concat (dfd-u32 64) (dfd-u32 512)) (dfd-u32 (add pos 1)))
-                                                                (str_concat (dfd-u32 ncomp) (dfd-u32 1026884851))))) 64))
-            (let c16 (metal_enqueue (nth P 11)
+                                                                (str_concat (dfd-u32 ncomp) (dfd-u32 1026884851))))) 1) 64))
+            (let c16 (metal_enqueue (nth P 11) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth S 22)) (dfd-u32 (nth S 23))) (dfd-u32 fbh)))
                             (str_concat (dfd-u32 5) (str_concat (str_concat (dfd-u32 64) (dfd-u32 512))
-                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 pb) (dfd-u32 3212836864)))))) 32768))
-            (let c17 (dfd-mvg-enq (nth P 17) (nth L 8) (nth S 23) (nth S 24) 8192 4096 1024))
-            (let c18 (dfd-mv-enq (nth P 16) (nth L 11) (nth L 10) (nth S 24) (nth S 25) 4096 8192))
+                                (str_concat (dfd-u32 64) (str_concat (dfd-u32 pb) (dfd-u32 3212836864)))))) 1) 32768))
+            (let c17 (dfd-mvg16 (nth P 17) (nth L 8) (nth S 23) (nth S 24) 8192 4096 1024 1))
+            (let c18 (dfd-mv16 (nth P 16) (nth L 11) (nth L 10) (nth S 24) (nth S 25) 4096 8192 1))
             ; attn hcPost
-            (let d0 (metal_enqueue (nth P 6)
+            (let d0 (metal_enqueue (nth P 6) (dfd-b16
                 (str_concat (str_concat (dfd-u32 5) (str_concat (str_concat (str_concat (dfd-u32 (nth S 25)) (dfd-u32 rin))
                                                                             (str_concat (dfd-u32 (nth S 6)) (dfd-u32 (nth S 7))))
                                                                 (dfd-u32 (nth S 26))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 16384))
-            ; ffn hcPre
-            (let f0 (metal_enqueue (nth P 2) (dfd-bind-tg
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 1) 16384))
+            ; ffn hcPre — f3/f4/f5 all read fsplitb (S28) -> one stage
+            (let f0 (metal_enqueue (nth P 2) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 26)) (dfd-u32 (nth S 3))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 16384) (dfd-u32 (dfd-eps-bits))))) 1024 0) 1024))
-            (let f1 (metal_enqueue (nth P 3)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 16384) (dfd-u32 (dfd-eps-bits))))) 1024 0) 1) 1024))
+            (let f1 (metal_enqueue (nth P 3) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth L 15)) (dfd-u32 (nth S 3))) (dfd-u32 (nth S 27))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 24) (dfd-u32 16384)))) 24))
-            (let f2 (metal_enqueue (nth P 4)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 24) (dfd-u32 16384)))) 1) 24))
+            (let f2 (metal_enqueue (nth P 4) (dfd-b16
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth S 27)) (dfd-u32 (nth L 16)))
                                                                 (str_concat (dfd-u32 (nth L 17)) (dfd-u32 (nth S 28)))))
-                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 4) (dfd-u32 20)) (dfd-u32 (dfd-eps-bits))))) 1))
-            (let f3 (metal_enqueue (nth P 7)
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 4) (dfd-u32 20)) (dfd-u32 (dfd-eps-bits))))) 1) 1))
+            (let f3 (metal_enqueue (nth P 7) (dfd-b16
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 28)) (dfd-u32 (nth S 29))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4)))) 4))
-            (let f4 (metal_enqueue (nth P 7)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4)))) 1) 4))
+            (let f4 (metal_enqueue (nth P 7) (dfd-b16
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 28)) (dfd-u32 (nth S 30))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 8) (dfd-u32 16)))) 16))
-            (let f5 (metal_enqueue (nth P 5)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 8) (dfd-u32 16)))) 0) 16))
+            (let f5 (metal_enqueue (nth P 5) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth S 26)) (dfd-u32 (nth S 28))) (dfd-u32 (nth S 31))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 4096))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 0) 4096))
             ; ffn_norm + router + experts + shared
-            (let g0 (metal_enqueue (nth P 8) (dfd-bind-tg
+            (let g0 (metal_enqueue (nth P 8) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 31)) (dfd-u32 (nth S 32))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4096) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
-            (let g1 (metal_enqueue (nth P 9)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4096) (dfd-u32 (dfd-eps-bits))))) 32 0) 1) 32))
+            (let g1 (metal_enqueue (nth P 9) (dfd-b16
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth S 31)) (dfd-u32 (nth L 18)))
                                                                 (str_concat (dfd-u32 (nth S 33)) (dfd-u32 (nth S 32)))))
-                            (str_concat (dfd-u32 1) (dfd-u32 4096))) 4096))
-            (let g2 (metal_enqueue (nth P 3)
+                            (str_concat (dfd-u32 1) (dfd-u32 4096))) 1) 4096))
+            (let g2 (metal_enqueue (nth P 3) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth L 19)) (dfd-u32 (nth S 33))) (dfd-u32 (nth S 34))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 256) (dfd-u32 4096)))) 256))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 256) (dfd-u32 4096)))) 1) 256))
             (let g5 (if (eq (nth L 21) 1)
-                (do (let g3 (metal_enqueue (nth P 37)
+                (do (let g3 (metal_enqueue (nth P 37) (dfd-b16
                         (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth L 20)) (dfd-u32 (nth S 35))) (dfd-u32 (nth S 58))))
-                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 pos) (dfd-u32 6)))) 6))
-                    (let g4 (metal_enqueue (nth P 19) (dfd-bind-tg
+                                    (str_concat (dfd-u32 2) (str_concat (dfd-u32 pos) (dfd-u32 6)))) 1) 6))
+                    (let g4 (metal_enqueue (nth P 19) (dfd-t16 (dfd-bind-tg
                         (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 34)) (dfd-u32 (nth S 37))))
-                                    (str_concat (dfd-u32 1) (dfd-u32 256))) 32 0) 256))
-                    (metal_enqueue (nth P 20)
+                                    (str_concat (dfd-u32 1) (dfd-u32 256))) 32 0) 0) 256))
+                    (metal_enqueue (nth P 20) (dfd-b16
                         (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth S 37)) (dfd-u32 (nth S 35))) (dfd-u32 (nth S 36))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 6) (dfd-u32 1069547520)))) 1))
-                (do (let g3 (metal_enqueue (nth P 21) (dfd-bind-tg
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 6) (dfd-u32 1069547520)))) 1) 1))
+                (do (let g3 (metal_enqueue (nth P 21) (dfd-t16 (dfd-bind-tg
                         (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth S 34)) (dfd-u32 (nth L 20)))
                                                                         (str_concat (dfd-u32 (nth S 37)) (dfd-u32 (nth S 38)))))
-                                    (str_concat (dfd-u32 1) (dfd-u32 256))) 32 0) 256))
-                    (metal_enqueue (nth P 22) (dfd-bind-tg
+                                    (str_concat (dfd-u32 1) (dfd-u32 256))) 32 0) 1) 256))
+                    (metal_enqueue (nth P 22) (dfd-t16 (dfd-bind-tg
                         (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth S 37)) (dfd-u32 (nth S 38)))
                                                                         (str_concat (dfd-u32 (nth S 35)) (dfd-u32 (nth S 36)))))
                                     (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 256) (dfd-u32 6)) (dfd-u32 1069547520))))
-                        256 0) 256))))
-            (let g6 (metal_enqueue (nth P 28) (dfd-bind-tg
+                        256 0) 1) 256))))
+            ; gate and up experts both read fnrmb (S33) + ids (S35); disjoint outputs -> one stage
+            (let g6 (metal_enqueue (nth P 28) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth L 22)) (dfd-u32 (nth S 33)))
                                                                 (str_concat (dfd-u32 (nth S 39)) (dfd-u32 (nth S 35)))))
                             (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 2048) (dfd-u32 4096))
                                                                 (str_concat (dfd-u32 (nth L 25)) (dfd-u32 6)))))
-                64 0) 98304))
-            (let g7 (metal_enqueue (nth P 28) (dfd-bind-tg
+                64 0) 1) 98304))
+            (let g7 (metal_enqueue (nth P 28) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth L 23)) (dfd-u32 (nth S 33)))
                                                                 (str_concat (dfd-u32 (nth S 40)) (dfd-u32 (nth S 35)))))
                             (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 2048) (dfd-u32 4096))
                                                                 (str_concat (dfd-u32 (nth L 25)) (dfd-u32 6)))))
-                64 0) 98304))
-            (let g8 (metal_enqueue (nth P 24) (dfd-bind-tg
+                64 0) 0) 98304))
+            (let g8 (metal_enqueue (nth P 24) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth S 39)) (dfd-u32 (nth S 40)))
                                                                 (str_concat (dfd-u32 (nth S 41)) (dfd-u32 (nth S 36)))))
                             (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 2048) (dfd-u32 6)) (dfd-u32 1092616192))))
-                32 0) 12288))
-            (let g9 (metal_enqueue (nth P 29) (dfd-bind-tg
+                32 0) 1) 12288))
+            (let g9 (metal_enqueue (nth P 29) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth L 24)) (dfd-u32 (nth S 41)))
                                                                 (str_concat (dfd-u32 (nth S 42)) (dfd-u32 (nth S 35)))))
                             (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 4096) (dfd-u32 2048))
                                                                 (str_concat (dfd-u32 (nth L 26)) (dfd-u32 6)))))
-                64 0) 24576))
-            (let g10 (metal_enqueue (nth P 25) (dfd-bind-tg
+                64 0) 1) 24576))
+            (let g10 (metal_enqueue (nth P 25) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 42)) (dfd-u32 (nth S 43))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4096) (dfd-u32 6)))) 32 0) 4096))
-            (let g11 (dfd-mv-enq (nth P 16) (nth L 30) (nth L 27) (nth S 33) (nth S 44) 2048 4096))
-            (let g12 (dfd-mv-enq (nth P 16) (nth L 30) (nth L 28) (nth S 33) (nth S 45) 2048 4096))
-            (let g13 (metal_enqueue (nth P 23)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4096) (dfd-u32 6)))) 32 0) 1) 4096))
+            ; shared gate and up both read fnrmb (S33); disjoint outputs -> one stage
+            (let g11 (dfd-mv16 (nth P 16) (nth L 30) (nth L 27) (nth S 33) (nth S 44) 2048 4096 1))
+            (let g12 (dfd-mv16 (nth P 16) (nth L 30) (nth L 28) (nth S 33) (nth S 45) 2048 4096 0))
+            (let g13 (metal_enqueue (nth P 23) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth S 44)) (dfd-u32 (nth S 45))) (dfd-u32 (nth S 46))))
-                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 2048) (dfd-u32 1065353216)) (dfd-u32 1092616192)))) 2048))
-            (let g14 (dfd-mv-enq (nth P 16) (nth L 30) (nth L 29) (nth S 46) (nth S 47) 4096 2048))
-            (let g15 (metal_enqueue (nth P 26) (dfd-bind-tg
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 2048) (dfd-u32 1065353216)) (dfd-u32 1092616192)))) 1) 2048))
+            (let g14 (dfd-mv16 (nth P 16) (nth L 30) (nth L 29) (nth S 46) (nth S 47) 4096 2048 1))
+            ; g15 scales moe out (S43, from g10); g16 axpys shared (S47) into it -> both need prior writes
+            (let g15 (metal_enqueue (nth P 26) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 43)) (dfd-u32 (nth S 48))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1065353216) (dfd-u32 4096)))) 32 0) 4096))
-            (let g16 (metal_enqueue (nth P 27) (dfd-bind-tg
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1065353216) (dfd-u32 4096)))) 32 0) 1) 4096))
+            (let g16 (metal_enqueue (nth P 27) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 47)) (dfd-u32 (nth S 48))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1065353216) (dfd-u32 4096)))) 32 0) 4096))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 1065353216) (dfd-u32 4096)))) 32 0) 1) 4096))
             ; ffn hcPost -> rout
-            (metal_enqueue (nth P 6)
+            (metal_enqueue (nth P 6) (dfd-b16
                 (str_concat (str_concat (dfd-u32 5) (str_concat (str_concat (str_concat (dfd-u32 (nth S 48)) (dfd-u32 (nth S 26)))
                                                                             (str_concat (dfd-u32 (nth S 29)) (dfd-u32 (nth S 30))))
                                                                 (dfd-u32 rout)))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 16384)))
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 1) 16384)))
 
     (defn dfd-st-layers-go (P S Ls il pos token rin rout)
         (if (eq (len Ls) 0) rin
@@ -389,45 +429,45 @@
 
     ; exit head on the final streams; returns the argmax (id logit runnerup-id runnerup-logit)
     (defn dfd-st-head (P S X pos resid)
-        (do (let h0 (metal_enqueue (nth P 2) (dfd-bind-tg
+        (do (let h0 (metal_enqueue (nth P 2) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 resid) (dfd-u32 (nth S 3))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 16384) (dfd-u32 (dfd-eps-bits))))) 1024 0) 1024))
-            (let h1 (metal_enqueue (nth P 3)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 16384) (dfd-u32 (dfd-eps-bits))))) 1024 0) 1) 1024))
+            (let h1 (metal_enqueue (nth P 3) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth X 0)) (dfd-u32 (nth S 3))) (dfd-u32 (nth X 5))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 16384)))) 4))
-            (let h2 (metal_enqueue (nth P 33)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 16384)))) 1) 4))
+            (let h2 (metal_enqueue (nth P 33) (dfd-b16
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth X 5)) (dfd-u32 (nth X 1)))
                                                                 (str_concat (dfd-u32 (nth X 2)) (dfd-u32 (nth X 6)))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 (dfd-eps-bits))))) 4))
-            (let h3 (metal_enqueue (nth P 5)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 (dfd-eps-bits))))) 1) 4))
+            (let h3 (metal_enqueue (nth P 5) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 resid) (dfd-u32 (nth X 6))) (dfd-u32 (nth X 7))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 4096))
-            (let h4 (metal_enqueue (nth P 8) (dfd-bind-tg
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 1) 4096))
+            (let h4 (metal_enqueue (nth P 8) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth X 7)) (dfd-u32 (nth X 8))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4096) (dfd-u32 (dfd-eps-bits))))) 32 0) 32))
-            (let h5 (metal_enqueue (nth P 9)
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 4096) (dfd-u32 (dfd-eps-bits))))) 32 0) 1) 32))
+            (let h5 (metal_enqueue (nth P 9) (dfd-b16
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth X 7)) (dfd-u32 (nth X 3)))
                                                                 (str_concat (dfd-u32 (nth X 9)) (dfd-u32 (nth X 8)))))
-                            (str_concat (dfd-u32 1) (dfd-u32 4096))) 4096))
-            (let h6 (dfd-mv-enq (nth P 16) 8 (nth X 4) (nth X 9) (nth X 10) 129280 4096))
+                            (str_concat (dfd-u32 1) (dfd-u32 4096))) 1) 4096))
+            (let h6 (dfd-mv16 (nth P 16) 8 (nth X 4) (nth X 9) (nth X 10) 129280 4096 1))
             ; the argmax runs where the logits already live. The interpreted fold this replaces read
             ; 517,120 bytes to the host and cost 1227 ms per token (dsl-l3-probe L2d); the two-stage
             ; kernels select on-device and the host reads EIGHT bytes. Ties still to the lowest index
             ; (both stages use strict >), so the greedy stream is unchanged — the 25/25 seal is the
             ; gate. The runner-up fields are no longer computed on this path (they were diagnostic);
             ; probes that want them read the logits buffer themselves.
-            (let hp (metal_enqueue (nth P 34)
+            (let hp (metal_enqueue (nth P 34) (dfd-b16
                 (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth X 10)) (dfd-u32 (nth X 11))) (dfd-u32 (nth X 12))))
-                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 129280) (dfd-u32 512)))) 512))
-            (let hc (metal_enqueue (nth P 35) (dfd-bind-tg
+                            (str_concat (dfd-u32 2) (str_concat (dfd-u32 129280) (dfd-u32 512)))) 1) 512))
+            (let hc (metal_enqueue (nth P 35) (dfd-t16 (dfd-bind-tg
                 (str_concat (str_concat (dfd-u32 4) (str_concat (str_concat (dfd-u32 (nth X 11)) (dfd-u32 (nth X 12)))
                                                                 (str_concat (dfd-u32 (nth X 13)) (dfd-u32 (nth X 14)))))
-                            (str_concat (dfd-u32 1) (dfd-u32 512))) 512 0) 512))
+                            (str_concat (dfd-u32 1) (dfd-u32 512))) 512 0) 1) 512))
             ; the argmax id (X13) lands device-to-device in idbuf[pos+1] (S58). Nothing is read to the
             ; host mid-generation; the winning logit (X14) is diagnostic and no longer computed off-path.
-            (metal_enqueue (nth P 38)
+            (metal_enqueue (nth P 38) (dfd-b16
                 (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth X 13)) (dfd-u32 (nth S 58))))
-                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 1) (dfd-u32 (add pos 1))) (dfd-u32 0)))) 1)))
+                            (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 1) (dfd-u32 (add pos 1))) (dfd-u32 0)))) 1) 1)))
 
     ; the decode loop: prompt prefill then greedy continuation. Returns the generated ids, in order.
     (defn dfd-st-compinit (pci Ls)
@@ -446,12 +486,12 @@
     ; the entire greedy stream is one submit; dfd-stack-stream reads all ids once at the end.
     (defn dfd-st-step (P S Ls X pos ntotal promptlen)
         (if (ge pos ntotal) 0
-            (do (let e0 (metal_enqueue (nth P 36)
+            (do (let e0 (metal_enqueue (nth P 36) (dfd-b16
                     (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 (nth S 63)) (dfd-u32 (nth S 0))) (dfd-u32 (nth S 58))))
-                                (str_concat (dfd-u32 2) (str_concat (dfd-u32 pos) (dfd-u32 4096)))) 4096))
-                (let e1 (metal_enqueue (nth P 1)
+                                (str_concat (dfd-u32 2) (str_concat (dfd-u32 pos) (dfd-u32 4096)))) 1) 4096))
+                (let e1 (metal_enqueue (nth P 1) (dfd-b16
                     (str_concat (str_concat (dfd-u32 2) (str_concat (dfd-u32 (nth S 0)) (dfd-u32 (nth S 1))))
-                                (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 16384))
+                                (str_concat (dfd-u32 2) (str_concat (dfd-u32 4) (dfd-u32 4096)))) 1) 16384))
                 (let fin (dfd-st-layers-go P S Ls 0 pos 0 (nth S 1) (nth S 2)))
                 (if (lt pos (sub promptlen 1))
                     (dfd-st-step P S Ls X (add pos 1) ntotal promptlen)
@@ -588,6 +628,10 @@
                    (cons embh 0)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))
             ; seed the prompt tokens into idbuf before any batch opens (host->device, no hazard)
             (let seed (dfd-seed-ids (nth S 58) promptids 0))
+            ; RUNG 15: open the ONE concurrent batch that carries the whole stream. Every dispatch below
+            ; declares its own hazards via barrier_before (the base+16 tail); independent dispatches
+            ; overlap. Armed before the first enqueue (ef0); the batch stays open until the final read.
+            (let cbatch (metal_batch_concurrent))
             ; the two freq tables, computed ON the device (rung 5 and rung 9's kernels and scalars)
             (let ef0 (metal_enqueue (nth P 13)
                 (str_concat (str_concat (dfd-u32 1) (dfd-u32 (nth S 49)))
