@@ -1,0 +1,282 @@
+; native-model-session-grounding-native-discovery.fk -- select recent root
+; sessions and minimize the public local RAG index entirely in Form.
+; preludes: form-stdlib/core.fk form-stdlib/form-fs.fk observe/live-call-framebuffer.fk form-stdlib/native-model-session-grounding-native-common.fk form-stdlib/native-model-session-grounding-native-json-string.fk form-stdlib/native-model-session-grounding-native-candidate.fk form-stdlib/native-model-session-grounding-native-session.fk
+
+(do
+    ; Session descriptor shape is shared with the transient reducer; discovery
+    ; owns only selection and ordering.
+    (defn nmsgn-root-cwd? (cwd repo-root)
+        (if (or (str_eq cwd repo-root)
+                (nmsgn-suffix? cwd "/coherence-kernel")) 1 0))
+    (defn nmsgn-session-metadata-frame
+        (address entry-index stage magnitude offset window-started)
+        (lcfb-call-stream "native-session-grounding" "session-metadata"
+            "modify" "form-native" stage
+            (lcfb-resource-target
+                (nmsgn-cat (list address ":" stage ":"
+                    (int_to_str magnitude))))
+            (add 20000 (add (mul entry-index 8) offset)) window-started
+            "form/form-stdlib/native-model-session-grounding-native-discovery.fk"
+            13 9))
+    (defn nmsgn-session-from-path
+        (path repo-root cutoff address entry-index window-started)
+        (do
+            (let size (fs-stat-size path))
+            (let mtime (fs-stat-mtime path))
+            (if (or (le size 0) (lt mtime cutoff)) (list)
+                (do
+                    (let first (nmsgn-read-line path size 0))
+                    (let metadata (nmsgn-file-line-text first))
+                    (let read-frame
+                        (nmsgn-session-metadata-frame address entry-index
+                            "metadata-read" (str_len metadata) 0 window-started))
+                    (let cwd (nmsgn-json-string metadata "cwd"))
+                    (let cwd-frame
+                        (nmsgn-session-metadata-frame address entry-index
+                            "metadata-cwd" (str_len cwd) 1 window-started))
+                    (let parent (nmsgn-json-string metadata "parent_thread_id"))
+                    (let parent-frame
+                        (nmsgn-session-metadata-frame address entry-index
+                            "metadata-parent" (str_len parent) 2 window-started))
+                    (let started-at (nmsgn-json-string metadata "timestamp"))
+                    (let started-frame
+                        (nmsgn-session-metadata-frame address entry-index
+                            "metadata-started" (str_len started-at) 3
+                            window-started))
+                    (if (and (eq (nmsgn-root-cwd? cwd repo-root) 1)
+                             (and (str_eq parent "")
+                                  (gt (str_len started-at) 0)))
+                        (nmsgn-session path started-at mtime)
+                        (list))))))
+    (defn nmsgn-session-insert (row rows limit)
+        (if (le limit 0) (list)
+            (if (eq (len rows) 0) (list row)
+                (if (gt (nmsgn-session-mtime row)
+                        (nmsgn-session-mtime (head rows)))
+                    (cons row (nmsgn-take rows (sub limit 1)))
+                    (cons (head rows)
+                        (nmsgn-session-insert row (tail rows)
+                            (sub limit 1)))))))
+    ; Selection is a resumable aggregate cell: valid root sessions observed,
+    ; at most `limit` newest descriptors, directories observed, and immediate
+    ; directory entries observed.  No recursive inventory list is constructed.
+    (defn nmsgn-session-selection (source-count selected dirs entries)
+        (list "native-session-selection-v2" source-count selected dirs entries))
+    (defn nmsgn-selection-source-count (state) (nth state 1))
+    (defn nmsgn-selection-selected (state) (nth state 2))
+    (defn nmsgn-selection-dirs (state) (nth state 3))
+    (defn nmsgn-selection-entries (state) (nth state 4))
+    (defn nmsgn-empty-selection ()
+        (nmsgn-session-selection 0 (list) 0 0))
+    (defn nmsgn-selection-observe-session (candidate limit state)
+        (if (eq (len candidate) 0) state
+            (nmsgn-session-selection
+                (add (nmsgn-selection-source-count state) 1)
+                (nmsgn-session-insert candidate
+                    (nmsgn-selection-selected state) limit)
+                (nmsgn-selection-dirs state)
+                (nmsgn-selection-entries state))))
+    (defn nmsgn-selection-observe-directory (state entry-count)
+        (nmsgn-session-selection
+            (nmsgn-selection-source-count state)
+            (nmsgn-selection-selected state)
+            (add (nmsgn-selection-dirs state) 1)
+            (add (nmsgn-selection-entries state) entry-count)))
+
+    ; A directory is one bounded membrane cell.  Its private path never enters
+    ; the framebuffer projection: the target is its local SHA-256 identity.
+    ; Directory mtime prunes old subtrees before their child lists are opened.
+    (defn nmsgn-session-entry-frame
+        (root-address entry-address entry-index state phase phase-offset
+         started)
+        (lcfb-call-stream "native-session-grounding"
+            "session-inventory-entry" phase "form-native"
+            "bounded-metadata-filter"
+            (lcfb-resource-target
+                (nmsgn-cat (list root-address ":" (int_to_str entry-index) ":"
+                    entry-address ":"
+                    (int_to_str (nmsgn-selection-source-count state)))))
+            (add 1000 (add (mul entry-index 2) phase-offset)) started
+            "form/form-stdlib/native-model-session-grounding-native-discovery.fk"
+            92 9))
+    (defn nmsgn-session-tree-loop
+        (root names repo-root cutoff limit state started root-address
+         entry-index)
+        (if (eq (len names) 0) state
+            (do
+                (let path (fs-path-join root (head names)))
+                (let next-index (add entry-index 1))
+                (let entry-address (nmsgn-sha256 path))
+                (let entered
+                    (nmsgn-session-entry-frame root-address entry-address
+                        next-index state "enter" 0 started))
+                (if (eq (fs-is-dir? path) 1)
+                    (if (lt (fs-stat-mtime path) cutoff)
+                        (do
+                            (let left
+                                (nmsgn-session-entry-frame root-address
+                                    entry-address next-index state "leave" 1
+                                    started))
+                            (nmsgn-session-tree-loop root (tail names) repo-root
+                                cutoff limit state started root-address
+                                next-index))
+                        (do
+                            (let child-state
+                                (nmsgn-session-tree-root path repo-root cutoff
+                                    limit state started))
+                            (let left
+                                (nmsgn-session-entry-frame root-address
+                                    entry-address next-index child-state
+                                    "leave" 1 started))
+                            (nmsgn-session-tree-loop root (tail names) repo-root
+                                cutoff limit child-state started root-address
+                                next-index)))
+                    (do
+                        (let next-state
+                            (if (and (eq (nmsgn-suffix? path ".jsonl") 1)
+                                     (ge (fs-stat-mtime path) cutoff))
+                                (nmsgn-selection-observe-session
+                                    (nmsgn-session-from-path path repo-root cutoff
+                                        entry-address next-index started)
+                                    limit state)
+                                state))
+                        (let left
+                            (nmsgn-session-entry-frame root-address entry-address
+                                next-index next-state "leave" 1 started))
+                        (nmsgn-session-tree-loop root (tail names) repo-root
+                            cutoff limit next-state started root-address
+                            next-index))))))
+    (defn nmsgn-session-tree-root
+        (root repo-root cutoff limit state started)
+        (if (eq (fs-is-dir? root) 0) state
+            (do
+                (let ordinal
+                    (add 100 (mul (nmsgn-selection-dirs state) 2)))
+                (let address (nmsgn-sha256 root))
+                (let entered
+                    (lcfb-call-stream "native-session-grounding"
+                        "session-inventory-directory" "enter" "form-native"
+                        "bounded-fs-list" address ordinal started
+                        "form/form-stdlib/native-model-session-grounding-native-discovery.fk"
+                        157 21))
+                (let names (fs-list root))
+                (let observed
+                    (nmsgn-selection-observe-directory state (len names)))
+                (let left
+                    (lcfb-call-stream "native-session-grounding"
+                        "session-inventory-directory" "leave" "form-native"
+                        "bounded-fs-list"
+                        (nmsgn-cat (list address ":"
+                            (int_to_str (len names))))
+                        (add ordinal 1) started
+                        "form/form-stdlib/native-model-session-grounding-native-discovery.fk"
+                        166 21))
+                (nmsgn-session-tree-loop root names repo-root cutoff limit
+                    observed started address 0))))
+    (defn nmsgn-select-sessions
+        (codex-home repo-root limit now-seconds started)
+        (do
+            (let cutoff (sub now-seconds 10368000))
+            (let active
+                (nmsgn-session-tree-root
+                    (fs-path-join codex-home "sessions") repo-root cutoff limit
+                    (nmsgn-empty-selection) started))
+            (nmsgn-session-tree-root
+                (fs-path-join codex-home "archived_sessions") repo-root cutoff
+                limit active started)))
+
+    ; Candidate index parsing.  The public index is observed as a stream.  The
+    ; state retains only the valid-row count, at most `limit` rows cited by the
+    ; selected completion, and at most `limit` lexical fallback rows.  No full
+    ; index list exists at any point in the evaluation.
+    (defn nmsgn-candidate-id-in? (id rows)
+        (if (eq (len rows) 0) 0
+            (if (str_eq id (nmsgn-candidate-id (head rows))) 1
+                (nmsgn-candidate-id-in? id (tail rows)))))
+    (defn nmsgn-candidate-from-line (repo-root index-path line)
+        (do
+            (let path (nmsgn-json-string line "source_path"))
+            (let snippet (nmsgn-json-string line "snippet"))
+            (if (and (eq (nmsgn-safe-path? path) 1)
+                     (and (gt (str_len snippet) 0)
+                          (eq (fs-is-file? (fs-path-join repo-root path)) 1)))
+                (nmsgn-candidate path
+                    (nmsgn-cat (list path " "
+                        (substring snippet 0 (nmsgn-min 384 (str_len snippet))))))
+                (list))))
+    (defn nmsgn-index-row-insert (row rows limit)
+        (if (le limit 0) (list)
+            (if (eq (len rows) 0) (list row)
+                (if (lt (nmsgn-str-cmp (nmsgn-candidate-id row)
+                        (nmsgn-candidate-id (head rows))) 0)
+                    (cons row (nmsgn-take rows (sub limit 1)))
+                    (cons (head rows)
+                        (nmsgn-index-row-insert row (tail rows)
+                            (sub limit 1)))))))
+    ; tag, valid public rows observed, bounded cited rows, bounded fallback rows
+    (defn nmsgn-index-state (valid cited fallback)
+        (list "native-session-streaming-index-v1" valid cited fallback))
+    (defn nmsgn-index-valid (state) (nth state 1))
+    (defn nmsgn-index-cited (state) (nth state 2))
+    (defn nmsgn-index-fallback (state) (nth state 3))
+    (defn nmsgn-index-accept (candidate completion limit state)
+        (if (eq (len candidate) 0) state
+            (do
+                (let id (nmsgn-candidate-id candidate))
+                (let cited (nmsgn-index-cited state))
+                (let fallback (nmsgn-index-fallback state))
+                (let already
+                    (or (nmsgn-candidate-id-in? id cited)
+                        (nmsgn-candidate-id-in? id fallback)))
+                (if (eq already 1)
+                    (nmsgn-index-state (add (nmsgn-index-valid state) 1)
+                        cited fallback)
+                    (if (ge (str_find completion id 0) 0)
+                        (nmsgn-index-state
+                            (add (nmsgn-index-valid state) 1)
+                            (nmsgn-index-row-insert candidate cited limit)
+                            fallback)
+                        (nmsgn-index-state
+                            (add (nmsgn-index-valid state) 1) cited
+                            (nmsgn-index-row-insert candidate fallback
+                                limit)))))))
+    (defn nmsgn-index-scan-loop
+        (repo-root path size offset completion limit state started rows
+         path-address)
+        (if (ge offset size)
+            state
+            (do
+                (let line-row (nmsgn-read-line path size offset))
+                (let line (nmsgn-file-line-text line-row))
+                (let candidate
+                    (if (gt (str_len line) 0)
+                        (nmsgn-candidate-from-line repo-root path line) (list)))
+                (let next-state
+                    (nmsgn-index-accept candidate completion limit state))
+                (let next-rows (add rows 1))
+                ; The live cell is part of the evaluation contract: the
+                ; observer must not remain on a stale index frame for the
+                ; roughly 12-18 seconds a 64-row quantum took in the real
+                ; witness.  Eight rows kept the measured update interval near
+                ; two seconds without changing selection or retaining text.
+                (let progress
+                    (if (eq (mod next-rows 8) 0)
+                        (lcfb-call-stream "native-session-grounding"
+                            "public-index-cursor" "modify" "form-native"
+                            "bounded-jsonl-cursor"
+                            (nmsgn-cat (list path-address ":"
+                                (int_to_str (nmsgn-file-line-next line-row)) ":"
+                                (int_to_str (nmsgn-index-valid next-state))))
+                            (add 30000 next-rows) started
+                            "form/form-stdlib/native-model-session-grounding-native-discovery.fk"
+                            264 25)
+                        0))
+                (nmsgn-index-scan-loop repo-root path size
+                    (nmsgn-file-line-next line-row) completion limit
+                    next-state started next-rows path-address))))
+    (defn nmsgn-index-scan (repo-root path completion limit started)
+        (nmsgn-index-scan-loop repo-root path (fs-stat-size path) 0
+            completion limit (nmsgn-index-state 0 (list) (list)) started 0
+            (nmsgn-sha256 path)))
+
+    0)

@@ -1,0 +1,114 @@
+; live-call-framebuffer.fk -- source-attributed eyes inside long Form calls.
+;
+; A long-running Form body must never make the observer infer progress from CPU
+; or elapsed time alone.  Callers place one bounded cell at each meaningful
+; enter/modify/leave boundary.  The cell itself stays in the kernel
+; framebuffer with source coordinates; a privacy-bounded text projection makes
+; the latest in-process cell observable while the child remains active.
+;
+; This membrane stores no payload, prompt, answer, corpus row, or model byte.
+; Actor, modifier, target, and call are opaque offered labels.  It does not
+; grant authority, choose a route, or invent a timeout/default.
+;
+; preludes: form/form-stdlib/core.fk
+
+(do
+  (let LCFB-CALL (bp "LCFB-CALL"))
+
+  ; children: schema, trace, call, phase, actor, modifier, target, ordinal,
+  ;           elapsed-ms.  Source attribution is carried by intern_node_at.
+  (defn lcfb-call-cell (trace call phase actor modifier target ordinal
+                        elapsed file line col)
+    (intern_node_at LCFB-CALL
+      (list
+        (intern_trivial_string "v1")
+        (intern_trivial_string trace)
+        (intern_trivial_string call)
+        (intern_trivial_string phase)
+        (intern_trivial_string actor)
+        (intern_trivial_string modifier)
+        (intern_trivial_string target)
+        (intern_trivial_int ordinal)
+        (intern_trivial_int elapsed))
+      file line col))
+
+  (defn lcfb-cat (parts)
+    (if (eq (len parts) 0) ""
+      (str_concat (head parts) (lcfb-cat (tail parts)))))
+
+  ; Append a privacy-safe native resource lens to an already-safe target.
+  ; Fields are compact because the supervisor accepts one opaque target token:
+  ; total op dispatches, value nodes, interned strings, live cons cursor,
+  ; value-stack high-water, floats, framebuffer roots, attributed nodes,
+  ; fb_record calls, and explicit framebuffer-events reads. No payload, path,
+  ; prompt, answer, corpus row, or authority enters this projection.
+  (defn lcfb-resource-target (target)
+    (lcfb-cat (list target
+      ":o" (int_to_str (kernel_stat 0))
+      ":n" (int_to_str (kernel_stat 4))
+      ":s" (int_to_str (kernel_stat 5))
+      ":c" (int_to_str (kernel_stat 6))
+      ":v" (int_to_str (kernel_stat 7))
+      ":f" (int_to_str (kernel_stat 8))
+      ":r" (int_to_str (kernel_stat 9))
+      ":a" (int_to_str (kernel_stat 10))
+      ":b" (int_to_str (kernel_stat 228))
+      ":e" (int_to_str (kernel_stat 229)))))
+
+  ; `projected-frames` counts cells carried by this bounded text projection,
+  ; not all cells retained in the native framebuffer. A live line projects
+  ; exactly the cell just admitted. Retained-history count/readback remains an
+  ; explicit boundary operation through framebuffer-events.
+  (defn lcfb-call-line (trace call phase actor modifier target ordinal
+                        elapsed projected-frames)
+    (lcfb-cat (list
+      "child-call-framebuffer|schema=v1|trace=" trace
+      "|call=" call
+      "|phase=" phase
+      "|actor=" actor
+      "|modifier=" modifier
+      "|target=" target
+      "|ordinal=" (int_to_str ordinal)
+      "|elapsed-ms=" (int_to_str elapsed)
+      "|frames=" (int_to_str projected-frames))))
+
+  ; Append a call cell to the current window using an already-observed elapsed
+  ; value.  This is the safe entry point for nested witness code: it never
+  ; clears or reopens the framebuffer, so observing a call cannot erase the
+  ; causal cells that preceded it.  A nested caller without a shared window
+  ; clock may honestly supply zero; ordering remains carried by ordinal and by
+  ; the framebuffer event sequence.
+  (defn lcfb-call-stream-elapsed (trace call phase actor modifier target
+                                  ordinal elapsed file line col)
+    (do
+      (let event (lcfb-call-cell trace call phase actor modifier target ordinal
+                    elapsed file line col))
+      (let emitted (print_str
+        (lcfb-call-line trace call phase actor modifier target ordinal
+          elapsed 1)))
+      event))
+
+  ; Emits after the attributed cell has entered the framebuffer.  The line is
+  ; only an inspection projection; framebuffer-events/node_source retain the
+  ; causal evidence in-process. Emission never drains retained history, so its
+  ; cost does not grow with the number of preceding cells in the window.
+  (defn lcfb-call-stream (trace call phase actor modifier target ordinal
+                          started file line col)
+    (do
+      (let now (now_unix_ms))
+      (lcfb-call-stream-elapsed trace call phase actor modifier target ordinal
+        (sub now started) file line col)))
+
+  ; One clear per bounded observation window.  The returned timestamp binds
+  ; later elapsed readings without requiring a host clock or side channel.
+  (defn lcfb-open-stream (trace actor modifier target file line col)
+    (do
+      (framebuffer-clear)
+      (let started (now_unix_ms))
+      (let opened (lcfb-call-stream trace "window" "enter" actor modifier
+                    target 0 started file line col))
+      started))
+
+  (defn lcfb-call? (cell)
+    (if (node_eq (node_category cell) LCFB-CALL) 1 0))
+  0)

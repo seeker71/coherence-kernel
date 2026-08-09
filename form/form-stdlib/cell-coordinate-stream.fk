@@ -1,0 +1,442 @@
+; cell-coordinate-stream.fk -- registry-free, identity-preserving Recipe text.
+;
+; Blueprint names are lenses, not prerequisites for continuity.  A composite
+; therefore carries either the four exact coordinates of its category or the
+; exact source-native category string, followed by its ordered children.  The
+; decoder rebuilds coordinate categories with make_nodeid and canonically
+; interns source-native category strings.  Neither arm consults a registry or
+; assigns a guessed name.
+; witnessed: 2026-08-08 -> tree 32767, DAG 32767, durable 32767 on fkwu
+;
+; The stream is deliberately narrow and self-delimiting:
+;   n<pkg>,<level>,<type>,<inst>,<arity>:<child>...  composite
+;   q<cat-len>:<category><arity>:<child>...          source category
+;   i<len>:<decimal>                                integer
+;   s<len>:<raw bytes>                              string
+;   b0 | b1                                         boolean
+;   f<len>:<canonical decimal>                      finite float
+;   c<pkg>,<level>,<type>,<inst>:                   coordinate category atom
+;   p<cat-len>:<category>                           source category atom
+;
+; String payloads need no escaping because their byte length is explicit.
+; Floats are admitted only when the body's present decimal lens re-interns to
+; the exact value.  More difficult floats, unknown trivial kinds, malformed
+; or hostile streams are not silently converted to null/nothing: supported?
+; refuses them and leaves room for a future exact carrier.
+;
+; New emission is a canonical DAG stream:
+;   d<node-count>:<record>...                    children-first DAG
+; Records reuse the leaf/category forms above, but composite children are
+; prior zero-based record indexes terminated by `:`.  Ordered first encounter
+; determines the children-first numbering; content-equal recurrence therefore
+; becomes a reference instead of repeated tree expansion.  Historical n/q
+; tree streams remain decodable and canonically checkable through their own
+; tree re-emission path.
+;
+; This is not authenticated storage.  It is identity-preserving continuity:
+; content-addressing re-deduplicates every record during decode, while the DAG
+; carrier keeps recurrence explicit and bounded by distinct reachable cells.
+;
+; preludes: form-stdlib/core.fk
+
+(defn ccs-scan-byte (text at byte)
+    (if (ge at (str_len text)) at
+        (if (eq (str_byte_at text at) byte) at
+            (ccs-scan-byte text (add at 1) byte))))
+
+(defn ccs-prefix-value (text start delimiter)
+    (do
+        (let end (ccs-scan-byte text start delimiter))
+        (list (str_to_int (substring text start end)) (add end 1))))
+
+(defn ccs-pair-value (pair) (nth pair 0))
+(defn ccs-pair-next (pair) (nth pair 1))
+
+(defn ccs-composite-at? (text at)
+    (if (ge at (str_len text)) 0
+        (do
+            (let tag (str_byte_at text at))
+            (if (or (eq tag 100)
+                    (or (eq tag 110) (eq tag 113))) 1 0))))
+
+(defn ccs-float-supported? (node)
+    (do
+        (let value (node_value node))
+        (let text (float_to_str value))
+        (if (eq (node_value (intern_trivial_float text)) value) 1 0)))
+
+(defn ccs-coordinate-category? (category)
+    (if (node_eq category
+            (make_nodeid
+                (node_pkg category)
+                (node_level category)
+                (node_type category)
+                (node_inst category))) 1 0))
+
+(defn ccs-source-category? (category)
+    (if (eq (ccs-coordinate-category? category) 1) 0
+        (if (str_eq
+                (node_value (intern_trivial_string category))
+                category) 1 0)))
+
+(defn ccs-category-supported? (category)
+    (if (or (eq (ccs-coordinate-category? category) 1)
+            (eq (ccs-source-category? category) 1)) 1 0))
+
+; Blueprint/category atoms are first-class cells.  They are not zero-child
+; composites: rebuilding one with intern_node preserves its visible category
+; and shape but changes its exact content identity.  The explicit c/p arms
+; keep that distinction durable without consulting a registry.
+(defn ccs-category-atom? (node)
+    (if (and (not (eq (node_level node) 1))
+             (node_eq node (node_category node))) 1 0))
+
+(defn ccs-node-member? (wanted nodes)
+    (if (eq (len nodes) 0) 0
+        (if (node_eq wanted (head nodes)) 1
+            (ccs-node-member? wanted (tail nodes)))))
+
+; Accumulate each content identity once.  Children are visited before their
+; parent; the accumulator is reversed once to obtain canonical children-first
+; record order.  Form nodes cannot contain a not-yet-interned self-reference,
+; so the reachable content graph is a DAG rather than a cyclic object graph.
+(defn ccs-dag-collect-items (items seen)
+    (if (eq (len items) 0) seen
+        (do
+            (let next (ccs-dag-collect (head items) seen))
+            (ccs-dag-collect-items (tail items) next))))
+
+(defn ccs-dag-collect (node seen)
+    (if (eq (ccs-node-member? node seen) 1) seen
+        (if (eq (node_level node) 1)
+            (cons node seen)
+            (cons node
+                (ccs-dag-collect-items (node_children node) seen)))))
+
+(defn ccs-dag-nodes (node)
+    (reverse (ccs-dag-collect node (empty))))
+
+(defn ccs-node-supported? (node)
+    (if (eq (node_level node) 1)
+        (do
+            (let kind (node_type node))
+            (if (or (eq kind 1) (or (eq kind 2) (eq kind 3))) 1
+                (if (eq kind 7) (ccs-float-supported? node) 0)))
+        (ccs-category-supported? (node_category node))))
+
+(defn ccs-nodes-supported? (nodes)
+    (if (eq (len nodes) 0) 1
+        (if (eq (ccs-node-supported? (head nodes)) 1)
+            (ccs-nodes-supported? (tail nodes)) 0)))
+
+(defn ccs-supported? (node)
+    (ccs-nodes-supported? (ccs-dag-nodes node)))
+
+(defn ccs-length-value (tag text)
+    (str_concat tag
+        (str_concat (int_to_str (str_len text))
+            (str_concat ":" text))))
+
+(defn ccs-tree-emit-items (items)
+    (if (eq (len items) 0) ""
+        (str_concat (ccs-tree-emit (head items))
+            (ccs-tree-emit-items (tail items)))))
+
+(defn ccs-emit-coordinate-category (category arity)
+    (str_concat "n"
+        (str_concat (int_to_str (node_pkg category))
+        (str_concat "," (str_concat (int_to_str (node_level category))
+        (str_concat "," (str_concat (int_to_str (node_type category))
+        (str_concat "," (str_concat (int_to_str (node_inst category))
+        (str_concat "," (str_concat (int_to_str arity) ":")))))))))))
+
+(defn ccs-emit-source-category (category arity)
+    (str_concat (ccs-length-value "q" category)
+        (str_concat (int_to_str arity) ":")))
+
+(defn ccs-emit-category (category arity)
+    (if (eq (ccs-coordinate-category? category) 1)
+        (ccs-emit-coordinate-category category arity)
+        (ccs-emit-source-category category arity)))
+
+(defn ccs-emit-coordinate-atom (category)
+    (str_concat "c"
+        (str_concat (int_to_str (node_pkg category))
+        (str_concat "," (str_concat (int_to_str (node_level category))
+        (str_concat "," (str_concat (int_to_str (node_type category))
+        (str_concat "," (str_concat (int_to_str (node_inst category))
+            ":")))))))))
+
+(defn ccs-emit-source-atom (category)
+    (ccs-length-value "p" category))
+
+(defn ccs-emit-category-atom (category)
+    (if (eq (ccs-coordinate-category? category) 1)
+        (ccs-emit-coordinate-atom category)
+        (ccs-emit-source-atom category)))
+
+(defn ccs-emit-leaf (node kind)
+    (if (eq kind 1)
+        (ccs-length-value "i" (int_to_str (node_value node)))
+    (if (eq kind 2)
+        (ccs-length-value "s" (node_value node))
+    (if (eq kind 3)
+        (if (node_value node) "b1" "b0")
+    (if (eq kind 7)
+        (ccs-length-value "f" (float_to_str (node_value node)))
+        "")))))
+
+(defn ccs-tree-emit (node)
+    (if (eq (node_level node) 1)
+        (ccs-emit-leaf node (node_type node))
+        (if (eq (ccs-category-atom? node) 1)
+            (ccs-emit-category-atom node)
+            (do
+                (let children (node_children node))
+                (str_concat
+                    (ccs-emit-category (node_category node) (len children))
+                    (ccs-tree-emit-items children))))))
+
+(defn ccs-node-index-from (wanted nodes index)
+    (if (eq (len nodes) 0) -1
+        (if (node_eq wanted (head nodes)) index
+            (ccs-node-index-from wanted (tail nodes) (add index 1)))))
+
+(defn ccs-node-index (wanted nodes)
+    (ccs-node-index-from wanted nodes 0))
+
+(defn ccs-emit-reference-items (items nodes)
+    (if (eq (len items) 0) ""
+        (str_concat
+            (str_concat (int_to_str (ccs-node-index (head items) nodes)) ":")
+            (ccs-emit-reference-items (tail items) nodes))))
+
+(defn ccs-emit-dag-record (node nodes)
+    (if (eq (node_level node) 1)
+        (ccs-emit-leaf node (node_type node))
+        (if (eq (ccs-category-atom? node) 1)
+            (ccs-emit-category-atom node)
+            (do
+                (let children (node_children node))
+                (str_concat
+                    (ccs-emit-category (node_category node) (len children))
+                    (ccs-emit-reference-items children nodes))))))
+
+(defn ccs-emit-dag-records (remaining nodes)
+    (if (eq (len remaining) 0) ""
+        (str_concat (ccs-emit-dag-record (head remaining) nodes)
+            (ccs-emit-dag-records (tail remaining) nodes))))
+
+(defn ccs-emit (node)
+    (do
+        (let nodes (ccs-dag-nodes node))
+        (str_concat "d"
+            (str_concat (int_to_str (len nodes))
+                (str_concat ":" (ccs-emit-dag-records nodes nodes))))))
+
+; Result shape: (decoded-node next-byte-offset).
+(defn ccs-parse-sized (text at kind)
+    (do
+        (let length-pair (ccs-prefix-value text (add at 1) 58))
+        (let size (ccs-pair-value length-pair))
+        (let start (ccs-pair-next length-pair))
+        (let end (add start size))
+        (let raw (substring text start end))
+        (if (eq kind 1)
+            (list (intern_trivial_int (str_to_int raw)) end)
+        (if (eq kind 2)
+            (list (intern_trivial_string raw) end)
+            (list (intern_trivial_float raw) end)))))
+
+(defn ccs-parse-children (text at remaining acc)
+    (if (eq remaining 0) (list (reverse acc) at)
+        (do
+            (let child (ccs-parse-at text at))
+            (ccs-parse-children text (ccs-pair-next child)
+                (sub remaining 1) (cons (ccs-pair-value child) acc)))))
+
+(defn ccs-parse-coordinate-atom (text at)
+    (do
+        (let package-pair (ccs-prefix-value text (add at 1) 44))
+        (let level-pair
+            (ccs-prefix-value text (ccs-pair-next package-pair) 44))
+        (let type-pair
+            (ccs-prefix-value text (ccs-pair-next level-pair) 44))
+        (let instance-pair
+            (ccs-prefix-value text (ccs-pair-next type-pair) 58))
+        (list
+            (make_nodeid
+                (ccs-pair-value package-pair)
+                (ccs-pair-value level-pair)
+                (ccs-pair-value type-pair)
+                (ccs-pair-value instance-pair))
+            (ccs-pair-next instance-pair))))
+
+(defn ccs-parse-source-atom (text at)
+    (do
+        (let length-pair (ccs-prefix-value text (add at 1) 58))
+        (let size (ccs-pair-value length-pair))
+        (let start (ccs-pair-next length-pair))
+        (let end (add start size))
+        (let raw-category (substring text start end))
+        (list (bp raw-category) end)))
+
+(defn ccs-parse-composite (text at)
+    (do
+        (let package-pair (ccs-prefix-value text (add at 1) 44))
+        (let level-pair (ccs-prefix-value text (ccs-pair-next package-pair) 44))
+        (let type-pair (ccs-prefix-value text (ccs-pair-next level-pair) 44))
+        (let instance-pair (ccs-prefix-value text (ccs-pair-next type-pair) 44))
+        (let arity-pair (ccs-prefix-value text (ccs-pair-next instance-pair) 58))
+        (let children
+            (ccs-parse-children text (ccs-pair-next arity-pair)
+                (ccs-pair-value arity-pair) (list)))
+        (let category
+            (make_nodeid
+                (ccs-pair-value package-pair)
+                (ccs-pair-value level-pair)
+                (ccs-pair-value type-pair)
+                (ccs-pair-value instance-pair)))
+        (list (intern_node category (ccs-pair-value children))
+              (ccs-pair-next children))))
+
+(defn ccs-parse-source-composite (text at)
+    (do
+        (let length-pair (ccs-prefix-value text (add at 1) 58))
+        (let size (ccs-pair-value length-pair))
+        (let category-start (ccs-pair-next length-pair))
+        (let category-end (add category-start size))
+        (let raw-category (substring text category-start category-end))
+        (let category
+            (node_value (intern_trivial_string raw-category)))
+        (let arity-pair (ccs-prefix-value text category-end 58))
+        (let children
+            (ccs-parse-children text (ccs-pair-next arity-pair)
+                (ccs-pair-value arity-pair) (list)))
+        (list (intern_node category (ccs-pair-value children))
+              (ccs-pair-next children))))
+
+(defn ccs-parse-reference-children
+    (text at remaining built-reverse record-index acc)
+    (if (eq remaining 0) (list (reverse acc) at)
+        (do
+            (let reference-pair (ccs-prefix-value text at 58))
+            (let reference (ccs-pair-value reference-pair))
+            ; Canonical emission refers only to earlier records.  Hostile
+            ; streams remain outside this local trusted-carrier boundary.
+            (let reverse-index (sub (sub record-index 1) reference))
+            (let child (nth built-reverse reverse-index))
+            (ccs-parse-reference-children text
+                (ccs-pair-next reference-pair) (sub remaining 1)
+                built-reverse record-index (cons child acc)))))
+
+(defn ccs-parse-dag-composite
+    (text at built-reverse record-index)
+    (do
+        (let package-pair (ccs-prefix-value text (add at 1) 44))
+        (let level-pair
+            (ccs-prefix-value text (ccs-pair-next package-pair) 44))
+        (let type-pair
+            (ccs-prefix-value text (ccs-pair-next level-pair) 44))
+        (let instance-pair
+            (ccs-prefix-value text (ccs-pair-next type-pair) 44))
+        (let arity-pair
+            (ccs-prefix-value text (ccs-pair-next instance-pair) 58))
+        (let children
+            (ccs-parse-reference-children text (ccs-pair-next arity-pair)
+                (ccs-pair-value arity-pair) built-reverse record-index
+                (empty)))
+        (let category
+            (make_nodeid
+                (ccs-pair-value package-pair)
+                (ccs-pair-value level-pair)
+                (ccs-pair-value type-pair)
+                (ccs-pair-value instance-pair)))
+        (list (intern_node category (ccs-pair-value children))
+              (ccs-pair-next children))))
+
+(defn ccs-parse-dag-source-composite
+    (text at built-reverse record-index)
+    (do
+        (let length-pair (ccs-prefix-value text (add at 1) 58))
+        (let size (ccs-pair-value length-pair))
+        (let category-start (ccs-pair-next length-pair))
+        (let category-end (add category-start size))
+        (let raw-category (substring text category-start category-end))
+        (let category (node_value (intern_trivial_string raw-category)))
+        (let arity-pair (ccs-prefix-value text category-end 58))
+        (let children
+            (ccs-parse-reference-children text (ccs-pair-next arity-pair)
+                (ccs-pair-value arity-pair) built-reverse record-index
+                (empty)))
+        (list (intern_node category (ccs-pair-value children))
+              (ccs-pair-next children))))
+
+(defn ccs-parse-dag-record (text at built-reverse record-index)
+    (do
+        (let tag (str_byte_at text at))
+        (if (eq tag 99) (ccs-parse-coordinate-atom text at)
+        (if (eq tag 112) (ccs-parse-source-atom text at)
+        (if (eq tag 110)
+            (ccs-parse-dag-composite text at built-reverse record-index)
+        (if (eq tag 113)
+            (ccs-parse-dag-source-composite text at built-reverse record-index)
+        (if (eq tag 105) (ccs-parse-sized text at 1)
+        (if (eq tag 115) (ccs-parse-sized text at 2)
+        (if (eq tag 102) (ccs-parse-sized text at 7)
+        (if (eq tag 98)
+            (list (intern_trivial_bool
+                    (if (eq (str_byte_at text (add at 1)) 49) true false))
+                  (add at 2))
+            (list (head (empty)) at)))))))))))
+
+(defn ccs-parse-dag-records
+    (text at remaining built-reverse record-index)
+    (if (eq remaining 0) (list (head built-reverse) at)
+        (do
+            (let record
+                (ccs-parse-dag-record text at built-reverse record-index))
+            (ccs-parse-dag-records text (ccs-pair-next record)
+                (sub remaining 1)
+                (cons (ccs-pair-value record) built-reverse)
+                (add record-index 1)))))
+
+(defn ccs-parse-dag (text at)
+    (do
+        (let count-pair (ccs-prefix-value text (add at 1) 58))
+        (ccs-parse-dag-records text (ccs-pair-next count-pair)
+            (ccs-pair-value count-pair) (empty) 0)))
+
+(defn ccs-parse-at (text at)
+    (do
+        (let tag (str_byte_at text at))
+        (if (eq tag 100) (ccs-parse-dag text at)
+        (if (eq tag 99) (ccs-parse-coordinate-atom text at)
+        (if (eq tag 112) (ccs-parse-source-atom text at)
+        (if (eq tag 110) (ccs-parse-composite text at)
+        (if (eq tag 113) (ccs-parse-source-composite text at)
+        (if (eq tag 105) (ccs-parse-sized text at 1)
+        (if (eq tag 115) (ccs-parse-sized text at 2)
+        (if (eq tag 102) (ccs-parse-sized text at 7)
+        (if (eq tag 98)
+            (list (intern_trivial_bool
+                    (if (eq (str_byte_at text (add at 1)) 49) true false))
+                  (add at 2))
+            ; Deliberately loud for an unrecognized tag.  Callers that admit
+            ; external text must establish their own hostile-input boundary.
+            (list (head (empty)) at))))))))))))
+
+(defn ccs-decode (text) (ccs-pair-value (ccs-parse-at text 0)))
+(defn ccs-decoded-size (text) (ccs-pair-next (ccs-parse-at text 0)))
+
+(defn ccs-canonical? (text)
+    (if (eq (str_len text) 0) 0
+        (do
+            (let parsed (ccs-parse-at text 0))
+            (let value (ccs-pair-value parsed))
+            (let reemitted
+                (if (eq (str_byte_at text 0) 100)
+                    (ccs-emit value)
+                    (ccs-tree-emit value)))
+            (if (and (eq (ccs-pair-next parsed) (str_len text))
+                     (str_eq reemitted text)) 1 0))))

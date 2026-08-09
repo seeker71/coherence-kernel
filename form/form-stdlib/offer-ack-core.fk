@@ -15,7 +15,8 @@
 ;                      invocation (a function-value applied to its args) IS the
 ;                      offer; we compose it, we do not reinvent it.
 ;   axiom-1 states   — nothing is first-class, the ground always available;
-;                      a TIMEOUT is nothing, never a separate error mode.
+;                      expiry with no declared default condenses to nothing,
+;                      while the timed contract keeps how it arrived there.
 ;   axiom-4 boundary — the receiving cell sovereignly decides what it accepts;
 ;                      "choice", "catch", "stop" are all the boundary deciding
 ;                      which ack it honors — never throw/catch control flow.
@@ -35,10 +36,21 @@
 ;   oac-kind reads the arm-blueprint and returns its integer tag — every
 ;   primitive branches on THIS, never on a per-primitive shape.
 ;
-;     NOTHING  → OAC-NOTHING   silence / decline / timeout (the ground)
+;     NOTHING  → OAC-NOTHING   immediate silence/decline, or an expired
+;                               timed contract with no declared default
 ;     ZERO     → OAC-ZERO      received: no / false / not-this
 ;     ONE      → OAC-ONE       received: the expected result (carries a payload)
 ;     NODE     → OAC-NODE      a counter-offer: a cell back (re-enters the offer)
+;
+; An ALTERNATIVE is not a fifth terminal arm. It is the explicit structured
+; counter-offer carried by NODE: reference, offered possibility, and evidence
+; remain inspectable instead of collapsing into yes/no. A TIMEOUT likewise
+; does not become a fifth arm. It is a sender-authored contract carrying an
+; expiration condition, optional default acknowledgment, and evidence. Before
+; expiry it is PENDING. At expiry it condenses to the declared default, or to
+; NOTHING only when no default exists. The timed outcome retains the contract
+; and observed boundary, so immediate nothing and expired-to-nothing are not
+; the same history. Axiom-5's four acknowledgment arms remain exact.
 ;
 ; Proof: form-stdlib/tests/offer-ack-core-band.fk → four-way (Go/Rust/TS/fkwu).
 
@@ -47,6 +59,11 @@
 (let OAC-ZERO    (bp "OAC-ZERO"))
 (let OAC-ONE     (bp "OAC-ONE"))
 (let OAC-NODE    (bp "OAC-NODE"))
+(let OAC-ALTERNATIVE    (bp "OAC-ALTERNATIVE"))
+(let OAC-TIMEOUT        (bp "OAC-TIMEOUT"))
+(let OAC-NO-DEFAULT     (bp "OAC-NO-DEFAULT"))
+(let OAC-TIME-PENDING   (bp "OAC-TIME-PENDING"))
+(let OAC-TIME-OUTCOME   (bp "OAC-TIME-OUTCOME"))
 
 ;; the discriminator's integer vocabulary — the single set everything
 ;; branches on. (axiom-1: nothing is first, the ground.)
@@ -66,6 +83,78 @@
 
 ;; the payload an ack carries (ONE for a result, NODE for the counter-offer).
 (defn oac-payload (ack) (head (node_children ack)))
+
+;; --- explicit counter-offer and timeout evidence -------------------
+;; ALTERNATIVE travels through the existing NODE arm. `reference` names the
+;; exact offer or answer being answered; `offered` is the possibility being
+;; returned; `evidence` is caller-owned tissue. No domain vocabulary enters.
+(defn oac-alternative (reference offered evidence)
+    (intern_node OAC-ALTERNATIVE (list reference offered evidence)))
+(defn oac-alternative? (cell)
+    (if (node_eq (node_category cell) OAC-ALTERNATIVE) 1 0))
+(defn oac-alternative-reference (alternative)
+    (nth (node_children alternative) 0))
+(defn oac-alternative-offered (alternative)
+    (nth (node_children alternative) 1))
+(defn oac-alternative-evidence (alternative)
+    (nth (node_children alternative) 2))
+(defn oac-alternative-ack (reference offered evidence)
+    (oac-node (oac-alternative reference offered evidence)))
+
+;; A sender may declare no default, or any valid four-arm acknowledgment as
+;; the value to which an expired offer condenses. Time itself is supplied as
+;; observed cells; this core does not claim a clock or scheduler.
+(defn oac-no-default () (intern_node OAC-NO-DEFAULT (empty)))
+(defn oac-no-default? (cell)
+    (if (node_eq (node_category cell) OAC-NO-DEFAULT) 1 0))
+
+; children: expiration cell, default ack or OAC-NO-DEFAULT, evidence
+(defn oac-timeout (expiration default-response evidence)
+    (intern_node OAC-TIMEOUT
+        (list expiration default-response evidence)))
+(defn oac-timeout? (cell)
+    (if (node_eq (node_category cell) OAC-TIMEOUT) 1 0))
+(defn oac-timeout-expiration (timeout)
+    (nth (node_children timeout) 0))
+(defn oac-timeout-default (timeout)
+    (nth (node_children timeout) 1))
+(defn oac-timeout-evidence (timeout)
+    (nth (node_children timeout) 2))
+
+(defn oac-timeout-expired? (timeout observed)
+    (if (ge (node_value observed)
+            (node_value (oac-timeout-expiration timeout))) 1 0))
+
+(defn oac-time-pending (timeout observed)
+    (intern_node OAC-TIME-PENDING (list timeout observed)))
+(defn oac-time-pending? (cell)
+    (if (node_eq (node_category cell) OAC-TIME-PENDING) 1 0))
+(defn oac-time-pending-timeout (pending)
+    (nth (node_children pending) 0))
+(defn oac-time-pending-observed (pending)
+    (nth (node_children pending) 1))
+
+(defn oac-time-outcome (timeout observed ack)
+    (intern_node OAC-TIME-OUTCOME (list timeout observed ack)))
+(defn oac-time-outcome? (cell)
+    (if (node_eq (node_category cell) OAC-TIME-OUTCOME) 1 0))
+(defn oac-time-outcome-timeout (outcome)
+    (nth (node_children outcome) 0))
+(defn oac-time-outcome-observed (outcome)
+    (nth (node_children outcome) 1))
+(defn oac-time-outcome-ack (outcome)
+    (nth (node_children outcome) 2))
+
+(defn oac-timeout-condensed-ack (timeout)
+    (if (eq (oac-no-default? (oac-timeout-default timeout)) 1)
+        (oac-nothing)
+        (oac-timeout-default timeout)))
+
+(defn oac-timeout-condense (timeout observed)
+    (if (eq (oac-timeout-expired? timeout observed) 0)
+        (oac-time-pending timeout observed)
+        (oac-time-outcome timeout observed
+            (oac-timeout-condensed-ack timeout))))
 
 ;; --- THE ONE DISCRIMINATOR ------------------------------------------
 ;; oac-kind reads an ack's arm by NodeID identity and returns its tag.
@@ -88,6 +177,20 @@
 (defn oac-zero?    (ack) (if (eq (oac-kind ack) (oac-tag-zero))    1 0))
 (defn oac-one?     (ack) (if (eq (oac-kind ack) (oac-tag-one))     1 0))
 (defn oac-node?    (ack) (if (eq (oac-kind ack) (oac-tag-node))    1 0))
+(defn oac-alternative-ack? (ack)
+    (if (and (eq (oac-node? ack) 1)
+             (eq (oac-alternative? (oac-payload ack)) 1)) 1 0))
+(defn oac-valid-ack? (ack)
+    (if (or (eq (oac-nothing? ack) 1)
+            (or (eq (oac-zero? ack) 1)
+                (or (eq (oac-one? ack) 1)
+                    (eq (oac-node? ack) 1)))) 1 0))
+(defn oac-timeout-valid? (timeout)
+    (if (and (eq (oac-timeout? timeout) 1)
+             (or (eq (oac-no-default?
+                        (oac-timeout-default timeout)) 1)
+                 (eq (oac-valid-ack?
+                        (oac-timeout-default timeout)) 1))) 1 0))
 
 ;; --- THE ONE OFFER --------------------------------------------------
 ;; offer a cell (a 1-arg recipe) with its args-list; the ack it returns
@@ -150,8 +253,9 @@
             ack)))
 
 ;; (5) ASYNC — a PENDING offer. oac-async returns a future that holds the
-;;     deferred (cell, args); it is NOTHING until awaited (timeout==nothing,
-;;     axiom-1); oac-await resolves it to the ack. The pure pending/await
+;;     deferred (cell, args); an unresolved peek immediately acknowledges
+;;     NOTHING, while a timed wait uses the explicit contract above;
+;;     oac-await resolves it to the ack. The pure pending/await
 ;;     state-machine crosses four-way: a future is the LIQUID pending-state —
 ;;     a transient list (cell, args), never an interned node, because the
 ;;     deferred cell is a recipe (a function-value), and a function-value
@@ -171,7 +275,8 @@
 (defn oac-async (cell args) (list cell args))
 (defn oac-future-cell (f) (head f))
 (defn oac-future-args (f) (head (tail f)))
-;; a fresh future is unresolved — peeking before await is NOTHING.
+;; a fresh future is unresolved — peeking now before await is NOTHING. This is
+;; not itself an expired timeout; expiry requires an OAC-TIMEOUT contract.
 (defn oac-peek (f) (oac-nothing))
 ;; await resolves the pending offer: run the held cell over its args
 ;; THROUGH the one offer. The resolved value is one of the four arms,

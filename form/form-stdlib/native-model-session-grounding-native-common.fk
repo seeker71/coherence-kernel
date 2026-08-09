@@ -1,0 +1,115 @@
+; native-model-session-grounding-native-common.fk -- bounded native strings,
+; digests, file-line cursors, and content-blind JSON access for the private
+; replay carrier.  No session payload is rendered or written here.
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/form-fs.fk
+
+(do
+    (defn nmsgn-reverse-loop (xs acc)
+        (if (eq (len xs) 0) acc
+            (nmsgn-reverse-loop (tail xs) (cons (head xs) acc))))
+    (defn nmsgn-reverse (xs) (nmsgn-reverse-loop xs (list)))
+    (defn nmsgn-cat-lists (a b)
+        (if (eq (len a) 0) b
+            (cons (head a) (nmsgn-cat-lists (tail a) b))))
+    (defn nmsgn-take (xs remaining)
+        (if (or (le remaining 0) (eq (len xs) 0)) (list)
+            (cons (head xs) (nmsgn-take (tail xs) (sub remaining 1)))))
+    (defn nmsgn-cat (parts)
+        (if (eq (len parts) 0) ""
+            (str_concat (head parts) (nmsgn-cat (tail parts)))))
+    (defn nmsgn-kvs (key value)
+        (nmsgn-cat (list key "=" value "\n")))
+    (defn nmsgn-kvi (key value)
+        (nmsgn-kvs key (int_to_str value)))
+    (defn nmsgn-min (a b) (if (lt a b) a b))
+
+    ; Bytewise lexical comparison: -1, 0, 1.  It introduces no vocabulary.
+    (defn nmsgn-str-cmp-loop (a b i n)
+        (if (ge i n)
+            (if (lt (str_len a) (str_len b)) -1
+                (if (gt (str_len a) (str_len b)) 1 0))
+            (do
+                (let aa (ord (char_at a i)))
+                (let bb (ord (char_at b i)))
+                (if (lt aa bb) -1
+                    (if (gt aa bb) 1
+                        (nmsgn-str-cmp-loop a b (add i 1) n))))))
+    (defn nmsgn-str-cmp (a b)
+        (nmsgn-str-cmp-loop a b 0 (nmsgn-min (str_len a) (str_len b))))
+    (defn nmsgn-prefix? (text prefix)
+        (if (lt (str_len text) (str_len prefix)) 0
+            (if (str_eq (substring text 0 (str_len prefix)) prefix) 1 0)))
+    (defn nmsgn-suffix? (text suffix)
+        (if (lt (str_len text) (str_len suffix)) 0
+            (if (str_eq
+                    (substring text (sub (str_len text) (str_len suffix))
+                        (str_len text)) suffix) 1 0)))
+    ; Resolve a source-inventory row without giving discovery or reporting
+    ; ownership over the other.  Absolute rows remain exact; relative rows are
+    ; confined beneath the caller-provided root by the filesystem membrane.
+    (defn nmsgn-full-path (root relative)
+        (if (and (gt (str_len relative) 0)
+                 (str_eq (substring relative 0 1) "/"))
+            relative (fs-path-join root relative)))
+
+    ; This carrier needs only the encoding half of the general hex cell.  Keep
+    ; that envelope here as four small Form recipes so content addressing does
+    ; not inherit the hex decoder's ontology-loader or raw-byte dependencies.
+    (defn nmsgn-hex-char (n)
+        (substring "0123456789abcdef" n (add n 1)))
+    (defn nmsgn-hex-byte (byte)
+        (str_concat (nmsgn-hex-char (div byte 16))
+                    (nmsgn-hex-char (mod byte 16))))
+    (defn nmsgn-hex-encode-loop (bytes acc)
+        (if (eq (len bytes) 0) acc
+            (nmsgn-hex-encode-loop (tail bytes)
+                (str_concat acc (nmsgn-hex-byte (head bytes))))))
+    (defn nmsgn-hex-encode (bytes)
+        (nmsgn-hex-encode-loop bytes ""))
+
+    ; A streaming SHA-256 string identity entirely inside Form.  The byte read
+    ; stays a Form char_at/ord recipe rather than depending on str-byte-at.fkb.
+    (defn nmsgn-sha256-fold (state text index)
+        (if (ge index (str_len text)) state
+            (nmsgn-sha256-fold
+                (sha256-stream-byte-step state (ord (char_at text index)))
+                text (add index 1))))
+    (defn nmsgn-sha256 (text)
+        (nmsgn-hex-encode
+            (sha256-stream-finalize
+                (nmsgn-sha256-fold (sha256-stream-initial) text 0))))
+
+    ; File-line cursor: tag, line, next offset, eof-after-line.
+    (defn nmsgn-file-line (line next eof)
+        (list "native-session-file-line-v1" line next eof))
+    (defn nmsgn-file-line-text (row) (nth row 1))
+    (defn nmsgn-file-line-next (row) (nth row 2))
+    (defn nmsgn-file-line-eof (row) (nth row 3))
+    (defn nmsgn-read-line-loop (path size offset acc)
+        (if (ge offset size)
+            (nmsgn-file-line acc size 1)
+            (do
+                (let chunk (fs-read-slice path offset
+                    (nmsgn-min 65536 (sub size offset))))
+                (let newline (str_find chunk "\n" 0))
+                (if (ge newline 0)
+                    (do
+                        ; Direct Form's portable substring fallback rebuilds a
+                        ; prefix byte by byte. For a 22 KiB session metadata
+                        ; line that interns roughly one growing prefix per byte.
+                        ; Re-read the already-bounded exact prefix through the
+                        ; native filesystem membrane instead: one string value,
+                        ; identical bytes, no payload leaves this process.
+                        (let prefix (fs-read-slice path offset newline))
+                        (nmsgn-file-line
+                            (str_concat acc prefix)
+                            (add offset (add newline 1))
+                            (if (ge (add offset (add newline 1)) size) 1 0)))
+                    (nmsgn-read-line-loop path size
+                        (add offset (str_len chunk))
+                        (str_concat acc chunk))))))
+    (defn nmsgn-read-line (path size offset)
+        (nmsgn-read-line-loop path size offset ""))
+
+
+    0)

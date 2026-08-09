@@ -63,6 +63,50 @@ For ordinary successful work with no meaningful branch or surprise, a new window
 is optional. The practice exists to increase diagnostic resolution, not to add
 ceremony to every command.
 
+## Live call visibility is a runtime contract
+
+A native call that may outlive the first few seconds must place a causal cell in
+the same child framebuffer before the observer waits at a distance.  Use
+`observe/live-call-framebuffer.fk` at meaningful enter, modify, and leave
+boundaries.  Each `LCFB-CALL` carries only an offered trace/call identity, phase,
+actor, modifier, target, ordinal, elapsed time, and source attribution.  It must
+not carry prompts, answers, corpus rows, session text, or model bytes.
+
+Open or clear exactly once at the outer bounded window.  Nested organs call
+`lcfb-call-stream-elapsed`; they append to the current window and never reopen
+it.  The streamed `child-call-framebuffer|...` line is only a privacy-safe view
+of the cell already stored inside the running `fkwu` process.  A missing or blank
+projection is `unavailable`, not `nothing` and not evidence that evaluation is
+healthy.
+
+Each live line carries `frames=1`: one newly admitted cell in that bounded text
+projection. It does not count retained history. Emission must never call
+`framebuffer-events`, because that primitive materializes the complete retained
+root sequence; doing so for every new cell makes observation cost grow with
+history. Read the complete event sequence only at an explicit comparison,
+control, or close boundary. This preserves every content-addressed attributed
+cell while keeping live progress emission constant with respect to prior cells.
+
+For a long native phase whose resource shape is itself in question, wrap an
+already privacy-safe target with `lcfb-resource-target`. The resulting target
+adds compact native operation, node, string, cons, value-stack, float,
+framebuffer-root, attribution, record, and explicit-read counters. These are
+observations, not health verdicts: a changing counter says what the carrier
+allocated or invoked, while the direct call phase says what it was doing.
+
+If a content-addressed builder is referenced repeatedly during the same window,
+`form/form-stdlib/framebuffer-value-cache.fk` can hold its immutable result as an
+`FBVC-ENTRY`.  Presence is separate from value, so zero, nothing, alternatives,
+and unknown cells remain valid values rather than absence sentinels.  Clearing
+the bounded window releases the entry.  This is evaluation reuse, not learning,
+durable memory, admission, or authority.
+
+The observation supervisor reads only a bounded tail of the child's text
+projection.  Its cost therefore stays bounded instead of growing with the whole
+run.  If one call phase accumulates rapidly without a matching transition, stop
+and inspect recurrence/reconstruction before continuing; CPU activity alone does
+not establish progress.
+
 ## Fast checkout witness
 
 After the normal ground and freshness checks:
@@ -116,6 +160,8 @@ The witnessed vector is documented in
 - `observe/tests/bidirectional-framebuffer-learning-band.fk` — real integration.
 - `observe/thought-framebuffer.fk` — token/margin trace and divergence helpers.
 - `observe/framebuffer-runtime-observation.fk` — richer runtime/stage observation.
+- `observe/live-call-framebuffer.fk` — same-child attributed call phases.
+- `form/form-stdlib/framebuffer-value-cache.fk` — window-bounded immutable reuse.
 - `form/form-stdlib/form-cli-surface-inquiry.fk` — bounded CLI read/inquiry surface.
 - `cognition/native-cognition-cycle.fk` — full knowledge → inquiry → awareness →
   recognition → action → response → routing composition, including a

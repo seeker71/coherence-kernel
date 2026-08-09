@@ -1,0 +1,249 @@
+; native-model-session-grounding-native-minimize.fk -- transient user/completion
+; pairing, path-label minimization, salted identity, and bounded admission.
+; Raw language never leaves local variables in this Form evaluation.
+; preludes: form-stdlib/core.fk observe/live-call-framebuffer.fk form-stdlib/native-model-session-grounding-native-common.fk form-stdlib/native-model-session-grounding-native-json-string.fk form-stdlib/native-model-session-grounding-native-candidate.fk form-stdlib/native-model-session-grounding-native-session.fk
+
+(do
+    ; Bound labels to exact live local candidate identifiers cited by the
+    ; completion.  Completion language is never retained by this reducer.
+    (defn nmsgn-labels-loop (completion candidates labels)
+        (if (eq (len candidates) 0) (nmsgn-reverse labels)
+            (do
+                (let id (nmsgn-candidate-id (head candidates)))
+                (if (and (ge (str_find completion id 0) 0)
+                         (eq (nmsgn-string-in? id labels) 0))
+                    (nmsgn-labels-loop completion (tail candidates)
+                        (cons id labels))
+                    (nmsgn-labels-loop completion (tail candidates) labels)))))
+    (defn nmsgn-labels (completion candidates)
+        (nmsgn-labels-loop completion candidates (list)))
+
+    ; Replay scan state: tag, pending query/time, completed, labeled,
+    ; latest time/query/query digest/labels/completion.  The completion exists
+    ; only until the bounded public-index stream has selected cited rows; the
+    ; finalize recipe removes it before any safe projection or report exists.
+    (defn nmsgn-pairs (query query-when completed labeled latest-when
+                             latest-query latest-digest latest-labels
+                             latest-completion)
+        (list "native-session-pairs-v1" query query-when completed labeled
+              latest-when latest-query latest-digest latest-labels
+              latest-completion))
+    (defn nmsgn-pairs-query (state) (nth state 1))
+    (defn nmsgn-pairs-query-when (state) (nth state 2))
+    (defn nmsgn-pairs-completed (state) (nth state 3))
+    (defn nmsgn-pairs-labeled (state) (nth state 4))
+    (defn nmsgn-pairs-latest-when (state) (nth state 5))
+    (defn nmsgn-pairs-latest-query (state) (nth state 6))
+    (defn nmsgn-pairs-latest-digest (state) (nth state 7))
+    (defn nmsgn-pairs-latest-labels (state) (nth state 8))
+    (defn nmsgn-pairs-latest-completion (state) (nth state 9))
+    (defn nmsgn-empty-pairs ()
+        (nmsgn-pairs "" "" 0 0 "" "" "" (list) ""))
+    (defn nmsgn-pairs-reset-pending (state)
+        (nmsgn-pairs "" "" (nmsgn-pairs-completed state)
+            (nmsgn-pairs-labeled state) (nmsgn-pairs-latest-when state)
+            (nmsgn-pairs-latest-query state)
+            (nmsgn-pairs-latest-digest state)
+            (nmsgn-pairs-latest-labels state)
+            (nmsgn-pairs-latest-completion state)))
+    (defn nmsgn-pairs-user (state when query)
+        (nmsgn-pairs query when (nmsgn-pairs-completed state)
+            (nmsgn-pairs-labeled state) (nmsgn-pairs-latest-when state)
+            (nmsgn-pairs-latest-query state)
+            (nmsgn-pairs-latest-digest state)
+            (nmsgn-pairs-latest-labels state)
+            (nmsgn-pairs-latest-completion state)))
+    (defn nmsgn-pairs-complete (state completion)
+        (if (or (eq (str_len (nmsgn-pairs-query state)) 0)
+                (eq (str_len completion) 0)) state
+            (do
+                (let completed (add (nmsgn-pairs-completed state) 1))
+                (let newer
+                    (if (ge (nmsgn-str-cmp
+                            (nmsgn-pairs-query-when state)
+                            (nmsgn-pairs-latest-when state)) 0) 1 0))
+                (nmsgn-pairs "" "" completed 0
+                    (if (eq newer 1) (nmsgn-pairs-query-when state)
+                        (nmsgn-pairs-latest-when state))
+                    (if (eq newer 1) (nmsgn-pairs-query state)
+                        (nmsgn-pairs-latest-query state))
+                    "" (list)
+                    (if (eq newer 1) completion
+                        (nmsgn-pairs-latest-completion state))))))
+    (defn nmsgn-pairs-finalize (state labels salt)
+        (do
+            (let labeled
+                (if (and (gt (str_len (nmsgn-pairs-latest-query state)) 0)
+                         (gt (len labels) 0)) 1 0))
+            (let digest
+                (if (eq labeled 1)
+                    (nmsgn-sha256 (nmsgn-cat
+                        (list salt "\n" (nmsgn-pairs-latest-query state))))
+                    ""))
+            (nmsgn-pairs "" "" (nmsgn-pairs-completed state) labeled
+                (nmsgn-pairs-latest-when state)
+                (nmsgn-pairs-latest-query state) digest
+                (if (eq labeled 1) labels (list)) "")))
+    (defn nmsgn-session-event (line state)
+        (if (lt (str_find line "\"event_msg\"" 0) 0) state
+            (if (and (lt (str_find line "\"user_message\"" 0) 0)
+                     (lt (str_find line "\"task_complete\"" 0) 0)) state
+                (do
+                    (if (ge (str_find line "\"user_message\"" 0) 0)
+                        (nmsgn-pairs-user state
+                            (nmsgn-json-string line "timestamp")
+                            (nmsgn-json-string line "message"))
+                        (if (ge (str_find line "\"task_complete\"" 0) 0)
+                            (nmsgn-pairs-complete state
+                                (nmsgn-json-string line "last_agent_message"))
+                            state))))))
+    ; A pair cursor may spend meaningful time reading or interpreting one
+    ; large JSONL row.  Keep that work visible without projecting its text:
+    ; only the salted session address, row/byte coordinates, observed length,
+    ; and native resource counters enter the live framebuffer target.
+    (defn nmsgn-pair-row-frame
+        (session-address stage rows offset magnitude ordinal started source-line)
+        (lcfb-call-stream "native-session-grounding"
+            "session-pair-row" "modify" "form-native" stage
+            (lcfb-resource-target
+                (nmsgn-cat (list session-address ":" stage ":"
+                    (int_to_str rows) ":" (int_to_str offset) ":"
+                    (int_to_str magnitude))))
+            ordinal started
+            "form/form-stdlib/native-model-session-grounding-native-minimize.fk"
+            source-line 17))
+    (defn nmsgn-scan-session-loop
+        (path size offset state session-address started rows)
+        (if (ge offset size) (nmsgn-pairs-reset-pending state)
+            (do
+                (let reading
+                    (nmsgn-pair-row-frame session-address "line-read"
+                        rows offset (sub size offset)
+                        (add 30000 (mul rows 3)) started 119))
+                (let line-row (nmsgn-read-line path size offset))
+                (let decoding
+                    (nmsgn-pair-row-frame session-address "event-decode"
+                        rows (nmsgn-file-line-next line-row)
+                        (str_len (nmsgn-file-line-text line-row))
+                        (add 30001 (mul rows 3)) started 125))
+                (let next-state
+                    (nmsgn-session-event (nmsgn-file-line-text line-row)
+                        state))
+                (let next-rows (add rows 1))
+                (let progress
+                    (nmsgn-pair-row-frame session-address "cursor-advance"
+                        next-rows (nmsgn-file-line-next line-row)
+                        (nmsgn-pairs-completed next-state)
+                        (add 30002 (mul rows 3)) started 133))
+                (nmsgn-scan-session-loop path size
+                    (nmsgn-file-line-next line-row) next-state
+                    session-address started next-rows))))
+    (defn nmsgn-scan-sessions-loop (sessions state started session-index)
+        (if (eq (len sessions) 0) state
+            (do
+                (let session (head sessions))
+                (let address (nmsgn-session-address session))
+                (let entered
+                    (lcfb-call-stream "native-session-grounding"
+                        "session-pair-cursor" "enter" "form-native"
+                        "bounded-line-cursor" address
+                        (add 10000 (mul session-index 2)) started
+                        "form/form-stdlib/native-model-session-grounding-native-minimize.fk"
+                        147 21))
+                (let next-state
+                    (nmsgn-scan-session-loop
+                        (nmsgn-session-path session)
+                        (fs-stat-size (nmsgn-session-path session)) 0
+                        (nmsgn-pairs-reset-pending state) address started 0))
+                (let left
+                    (lcfb-call-stream "native-session-grounding"
+                        "session-pair-cursor" "leave" "form-native"
+                        "bounded-line-cursor" address
+                        (add 10001 (mul session-index 2)) started
+                        "form/form-stdlib/native-model-session-grounding-native-minimize.fk"
+                        159 21))
+                (nmsgn-scan-sessions-loop (tail sessions) next-state started
+                    (add session-index 1)))))
+
+    ; Deterministic admission: every observed label plus the lexically smallest
+    ; live distractors up to the requested bound, then a four-row sort.
+    (defn nmsgn-candidate-by-id (id candidates)
+        (if (eq (len candidates) 0) (list)
+            (if (str_eq id (nmsgn-candidate-id (head candidates)))
+                (head candidates)
+                (nmsgn-candidate-by-id id (tail candidates)))))
+    (defn nmsgn-label-candidates (labels candidates)
+        (if (eq (len labels) 0) (list)
+            (cons (nmsgn-candidate-by-id (head labels) candidates)
+                (nmsgn-label-candidates (tail labels) candidates))))
+    (defn nmsgn-candidate-insert (row rows)
+        (if (eq (len rows) 0) (list row)
+            (if (lt (nmsgn-str-cmp (nmsgn-candidate-id row)
+                    (nmsgn-candidate-id (head rows))) 0)
+                (cons row rows)
+                (cons (head rows)
+                    (nmsgn-candidate-insert row (tail rows))))))
+    (defn nmsgn-candidate-sort-loop (rows acc)
+        (if (eq (len rows) 0) acc
+            (nmsgn-candidate-sort-loop (tail rows)
+                (nmsgn-candidate-insert (head rows) acc))))
+    (defn nmsgn-candidate-sort (rows)
+        (nmsgn-candidate-sort-loop rows (list)))
+    (defn nmsgn-smallest-distractors-loop
+        (candidates labels limit selected)
+        (if (eq (len candidates) 0) (nmsgn-take selected limit)
+            (do
+                (let row (head candidates))
+                (if (eq (nmsgn-string-in? (nmsgn-candidate-id row) labels) 1)
+                    (nmsgn-smallest-distractors-loop (tail candidates)
+                        labels limit selected)
+                    (nmsgn-smallest-distractors-loop (tail candidates)
+                        labels limit
+                        (nmsgn-take (nmsgn-candidate-insert row selected)
+                            limit))))))
+    (defn nmsgn-admit (labels candidates limit)
+        (do
+            (let label-rows (nmsgn-label-candidates labels candidates))
+            (let distractor-count (if (gt (len label-rows) limit) 0
+                (sub limit (len label-rows))))
+            (nmsgn-candidate-sort
+                (nmsgn-cat-lists label-rows
+                    (nmsgn-smallest-distractors-loop candidates labels
+                        distractor-count (list))))))
+
+    (defn nmsgn-label-message (labels)
+        (if (eq (len labels) 0) ""
+            (str_concat (head labels)
+                (if (eq (len (tail labels)) 0) ""
+                    (str_concat "," (nmsgn-label-message (tail labels)))))))
+    (defn nmsgn-candidate-message (rows)
+        (if (eq (len rows) 0) ""
+            (nmsgn-cat (list
+                (nmsgn-candidate-id (head rows)) "\n"
+                (nmsgn-candidate-text (head rows)) "\n"
+                (nmsgn-candidate-message (tail rows))))))
+
+    ; Durable-safe projection of the transient pair state.  It has no query or
+    ; completion text position: tag, address, time, salted query digest,
+    ; bounded path labels, completed count, labeled count.
+    (defn nmsgn-safe-pairs (state)
+        (do
+            (let when (nmsgn-pairs-latest-when state))
+            (let digest (nmsgn-pairs-latest-digest state))
+            (let labels (nmsgn-pairs-latest-labels state))
+            (let completed (nmsgn-pairs-completed state))
+            (let labeled (nmsgn-pairs-labeled state))
+            (let address
+                (nmsgn-sha256 (nmsgn-cat (list
+                    when "\n" digest "\n" (nmsgn-label-message labels) "\n"
+                    (int_to_str completed) "\n" (int_to_str labeled)))))
+            (list "native-session-safe-observation-cell-v1" address when
+                  digest labels completed labeled)))
+    (defn nmsgn-safe-pairs-address (row) (nth row 1))
+    (defn nmsgn-safe-pairs-when (row) (nth row 2))
+    (defn nmsgn-safe-pairs-digest (row) (nth row 3))
+    (defn nmsgn-safe-pairs-labels (row) (nth row 4))
+    (defn nmsgn-safe-pairs-completed (row) (nth row 5))
+    (defn nmsgn-safe-pairs-labeled (row) (nth row 6))
+
+    0)
