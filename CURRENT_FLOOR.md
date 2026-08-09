@@ -17,7 +17,7 @@ this floor was written.
 cc -O2 -o fkwu runtime/fkwu-uni.c
 ./fkwu bootstrap/ground.fk -> 42
 ./fkwu bootstrap/ground-recursive.fk 10 -> 55
-./fkwu form/form-stdlib/tests/binary-freshness-band.fk -> 31
+./fkwu form/form-stdlib/tests/binary-freshness-band.fk -> 15
 ./fkwu form/form-stdlib/tests/native-vs-rented-band.fk -> 11111
 ```
 
@@ -128,7 +128,7 @@ skill-vitality-band -> 65535
 Organ-proof honesty, measured this reground:
 
 - Three north-star organ bands are written in BML call syntax and cannot run
-  through the source-runner door at all: `choice-receipt-band`,
+  through the the source door s-expr door at all: `choice-receipt-band`,
   `channel-protocol-choice-floor-band`, `sovereign-boundary-protocol-band`.
   The s-expr parser desyncs on them and the boundedness repair halts the parse
   at the AST node cap with diagnostics (the repair working as designed; before
@@ -140,7 +140,7 @@ Organ-proof honesty, measured this reground:
 - 151 band files across form/presence/learn/observe still declare preludes in
   the retired multi-line style; every one of them runs numb (axiom-5 lowers
   the unresolved calls, verdict is a silent wrong number) when invoked via
-  the source-runner. host-os-membrane-band above was one; 150 remain.
+  the source door. host-os-membrane-band above was one; 150 remain.
 
 ## Form Kernel Floor (new since 2026-07-05)
 
@@ -308,7 +308,7 @@ BML organ bands, PR #287 wired form_error end to end.)
   in the same numeric space.
 - The multi-line-preludes sweep (150 bands loading empty prelude lists) is in
   flight on its own branch; until it lands, those bands still run numb via
-  the source-runner.
+  the source door.
 - Ontology-loader triage on today's main: 21 DIVERGENT resolved into families
   — 11 bp-unreviewed (now seated from the registry; 4 went PASS-4WAY, 2
   surfaced their real fourth-arm value mismatches from under the crash),

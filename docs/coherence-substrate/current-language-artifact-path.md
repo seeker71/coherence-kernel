@@ -43,7 +43,7 @@ flowchart TD
 
 ## What Is Current
 
-- The source floor enters through `fkwu file.fk` or `fkwu --src file.fk`,
+- The source floor enters through `fkwu file.fk` or `fkwu file.fk`,
   directly off the supported Form surface. A fresh callable `.dylib` wins; a
   fresh `.fkb` with matching embedded source-unit identity runs next; stale or
   missing artifacts compile source and emit `.fkb/.sym`. A program image can
@@ -130,7 +130,7 @@ artifact layers decide when those values become program image material.
 
 ## What Still Has To Close
 
-- `--src` still has a C-seed parser/compiler path when artifacts are stale or
+- the source door still has a C-seed parser/compiler path when artifacts are stale or
   missing. Fresh artifacts now skip that parse path and load `.fkb`; the
   remaining shrink work is to move this artifact door into the native body as
   the seed recedes.
@@ -153,7 +153,7 @@ The current path is:
            -> runtime selector -> running body
 ```
 
-`--src` remains an explicit compiler/admission spelling. Plain `fkwu file.fk`
+the source door remains an explicit compiler/admission spelling. Plain `fkwu file.fk`
 uses the same selector. `.tbl` is not a supported runtime artifact.
 
 ## Import Declaration Shape

@@ -68,7 +68,7 @@ ceremony to every command.
 After the normal ground and freshness checks:
 
 ```sh
-./fkwu --src observe/tests/bidirectional-framebuffer-channel-band.fk
+./fkwu observe/tests/bidirectional-framebuffer-channel-band.fk
 ```
 
 Expected final field: `1`. This is a fast protocol regression, not learning
@@ -77,7 +77,7 @@ evidence.
 ## Real learning integration
 
 ```sh
-./fkwu --src observe/tests/bidirectional-framebuffer-learning-band.fk
+./fkwu observe/tests/bidirectional-framebuffer-learning-band.fk
 ```
 
 The integration trains the existing language learner and feeds its real per-row

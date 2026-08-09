@@ -26,7 +26,7 @@ while [ "$index" -lt "$end" ]; do
   source_file="$run_dir/row-$index.fk"
   sed '$d' "$repo_root/presence/concept-audio-asr-13-live.fk" > "$source_file"
   printf '\n(casr13l-index-verdict %s)\n' "$index" >> "$source_file"
-  verdict=$(cd "$repo_root" && ./fkwu --src "$source_file" 2>/dev/null | tail -n 1)
+  verdict=$(cd "$repo_root" && ./fkwu "$source_file" 2>/dev/null | tail -n 1)
   printf 'row=%02d verdict=%s\n' "$index" "$verdict"
   if [ "$verdict" = 127 ]; then
     passed=$((passed + 1))

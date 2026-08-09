@@ -112,7 +112,7 @@ build_ts &
 wait
 
 # The runtime walker (repo-root fkwu, runtime/fkwu-uni.c) carries the
-# resolver-driven `--src` door that fkwu-only proof-level bands run on.
+# resolver-driven the source door door that fkwu-only proof-level bands run on.
 # Distinct from the emitted fourth-arm walker (bootstrap uni.c): that one
 # walks pre-flattened tables; this one resolves `; preludes:` directives.
 FKWU_SRC=""
@@ -121,22 +121,43 @@ build_fkwu_src() {
     [[ -f "$src" ]] || return 0
     if [[ ! -x "$bin" || "$src" -nt "$bin" ]]; then
         command -v cc >/dev/null 2>&1 || return 0
-        echo "  building runtime fkwu (repo root, --src door)..." >&2
+        echo "  building runtime fkwu (repo root, door)..." >&2
         cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
     fi
     [[ -x "$bin" ]] && FKWU_SRC="$bin"
 }
 build_fkwu_src
 
+# ── FORM BALANCE, and the response to it ────────────────────────────────────
+# Cells whose forms do not close were found four times in one week, each by
+# accident, each only when something refused to run — and one of them had been
+# that way since its only commit while its header claimed a verdict. A class
+# found only by accident is a class mostly not found, so it is counted here
+# every run. The count is not the deliverable: `observe/tree-heal.fk` repairs
+# them, and it is safe to run unattended because it never trusts its own edit —
+# a candidate closer is kept only when the kernel stops objecting, and reverted
+# byte-for-byte otherwise.
+#
+#   echo '(do (write_file "/tmp/heal.txt" (th-report)) 1)' > /tmp/heal.fk   # see tree-heal.fk USE
+#
+fk_form_balance() {
+    [[ -n "$FKWU_SRC" ]] || return 0
+    local drv="${TMPDIR:-/tmp}/fk-balance-$$.fk"
+    printf '; preludes: form-stdlib/core.fk observe/tree-balance.fk\n(do (int_to_str (tb-unbalanced-n)))\n' > "$drv"
+    local n
+    n="$( (cd .. && "$FKWU_SRC" "${drv}") 2>/dev/null | tail -1 )"
+    rm -f "$drv" "${drv%.fk}.fkb" "${drv%.fk}.sym"
+    if [[ "$n" == "0" ]]; then
+        echo "  form balance: every cell closes"
+    else
+        echo "  form balance: ${n} cell(s) do not close — observe/tree-heal.fk repairs them (gated)"
+    fi
+}
+
 # A band may declare its proof level in its comment head:
-#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu (--src),
+#   ; PROOF LEVEL: FOURTH-ARM ONLY ...   → runs on the runtime fkwu (the source door),
 #     compared against the first "Verdict <n>" its head declares. Loud
 #     pass/fail — a wrong home-arm answer is a real failure, never skipped.
-#   ; PROOF LEVEL: TWO-ARM ...            → the band's bytes only ARRIVE on some arms
-#     (a binary fixture: a Form string cannot hold arbitrary bytes in Rust or TS).
-#     Runs go (+ fkwu when built) against the declared Verdict and names the lane.
-#     Never counted four-way. Without this, such a band reports "divergent,
-#     investigate" forever — a red that asks for work its own head already did.
 #   ; PROOF LEVEL: FKWU-STAGED ...       → needs a host carrier staging bytes
 #     into input_byte; the carrier did not travel in the CN→CK consolidation,
 #     so the band is reported ⧗ pending — visible every run, never green.
@@ -527,7 +548,7 @@ run_workload() {
             # AND zero axiom-5 diagnostics on stderr.
             local lane_out lane_diags
             lane_out="$(mktemp "${TMPDIR:-/tmp}/form-fkwu-lane.XXXXXX")"
-            answered="$( (cd .. && ./fkwu --src "form/$band") 2>"$lane_out" | tail -1 || true)"
+            answered="$( (cd .. && ./fkwu "form/$band") 2>"$lane_out" | tail -1 || true)"
             lane_diags="$(grep -c "unresolved-call\|error:" "$lane_out" 2>/dev/null || true)"
             rm -f "$lane_out"
             if [[ "${lane_diags:-0}" -gt 0 ]]; then
@@ -544,43 +565,6 @@ run_workload() {
             else
                 printf "  ✗  %-30s  fkwu-only lane: declared Verdict %s, fkwu answered %s\n" \
                     "$label" "$declared" "${answered:-<nothing>}"
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-                fail=$((fail + 1))
-            fi
-            return
-        elif [[ "$level" == "TWO-ARM" ]]; then
-            # A band whose bytes only ARRIVE on some arms. equireach-band declares this: its
-            # Q6_K fixture is binary, and a Form string cannot hold arbitrary bytes in Rust or
-            # TypeScript, so those two decline the read where fkwu and Go carry it exactly.
-            # Before 2026-07-30 they did worse than decline — they UTF-8-replaced the invalid
-            # bytes and answered from a longer, different file; that is healed, and both now
-            # stop loudly. The band was still reported "divergent, investigate" on every run,
-            # which is a declared proof level the harness did not honor: a permanent red that
-            # tells the reader to investigate something the band already explains in its head.
-            # Run the arms that CAN carry it, against the band's own pinned Verdict, and say
-            # which lane answered. Never counted as four-way — the roster is elsewhere.
-            declared="$(fk_band_declared_verdict "$band")"
-            if [[ -z "$declared" ]]; then
-                printf "  ✗  %-30s  declares TWO-ARM but pins no Verdict in its head\n" "$label"
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
-                fail=$((fail + 1))
-                return
-            fi
-            local go_ans fkwu_ans
-            prepare_sources "$@"
-            go_ans="$("$GO_BIN" "${prepared_args[@]}" 2>/dev/null | tail -1 || true)"
-            fkwu_ans=""
-            if [[ -n "$FKWU_SRC" ]]; then
-                fkwu_ans="$( (cd .. && ./fkwu --src "form/$band") 2>/dev/null | tail -1 || true)"
-            fi
-            if [[ "$go_ans" == "$declared" && ( -z "$fkwu_ans" || "$fkwu_ans" == "$declared" ) ]]; then
-                printf "  ✓  %-30s  → %s (two-arm lane: go%s; rust/ts decline the binary read)\n" \
-                    "$label" "$declared" "$([[ -n "$fkwu_ans" ]] && echo " + fkwu")"
-                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "ok two-arm" > "$SUITE_STATUS_FILE"; fi
-                ok=$((ok + 1))
-            else
-                printf "  ✗  %-30s  two-arm lane: declared %s, go %s, fkwu %s\n" \
-                    "$label" "$declared" "${go_ans:-<nothing>}" "${fkwu_ans:-<not run>}"
                 if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
                 fail=$((fail + 1))
             fi
@@ -760,7 +744,7 @@ elif [[ $ok -gt 0 ]]; then
     echo "              scripts/fourth-arm.sh fourth_emit_chain_stamp."
 fi
 if [[ $fkwu_only -gt 0 ]]; then
-    echo "  fkwu-only lanes: $fkwu_only band(s) at declared proof level (runtime fkwu --src)"
+    echo "  fkwu-only lanes: $fkwu_only band(s) at declared proof level (runtime fkwu)"
 fi
 if [[ $staged -gt 0 ]]; then
     echo "  staged lanes pending: $staged band(s) need an absent host carrier — not witnessed"

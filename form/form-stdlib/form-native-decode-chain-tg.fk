@@ -1,0 +1,311 @@
+; form-native-decode-chain-tg.fk — the SLOW-KERNEL hypothesis test against form-native-decode-chain.fk
+; (PR #431, ~1058-1069us/dispatch) and its pooled twin form-native-decode-chain-pooled.fk (PR #432,
+; which REFUTED residency as the driver: pooling 851 buffers down to 13 changed nothing, 1060 ->
+; 1058us/dispatch).
+;
+; THE HYPOTHESIS. form-native-decode.fk's own header already named the thing this file tests, in
+; passing, months before either barrier measurement existed: "the fast cooperative twin
+; form_rmsnorm_tg_f32 is a different kernel; this cell dispatches the plain one" (line ~22). The
+; plain kernel (form_rmsnorm_f32, llama-decode-msl.fk's ldm-rmsnorm-msl) is `if (gid != 0u) return;`
+; — ONE thread walking 3072 elements twice (once to fold sum-of-squares, once to normalize+scale),
+; each element a full device-memory round trip with nothing to overlap it. llama-decode-msl.fk's own
+; header (Stone 16) measured that shape at 0.55ms EACH in a real decode, ~31ms of a ~52ms token.
+;
+; barrier_before=1 makes stage B wait for stage A to actually FINISH, not merely to have been
+; encoded. If stage A is genuinely slow to complete, the "barrier cost" the unpooled and pooled
+; files both measured (~1058-1060us/dispatch) may not be memoryBarrierWithScope overhead at all —
+; it may be the REAL wall-clock completion time of a single-thread kernel that the independent-
+; dispatch probes never had to wait for (the GPU could overlap many slow independent dispatches
+; against each other, hiding each one's latency), while THIS file's dependency forces waiting for
+; one specific slow completion, every repetition. DS4's own real per-layer kernels (metal_dsv4_stack.sh)
+; are far more parallel than a 1-thread reduction, which is offered as one candidate explanation for
+; its ~20-26us/barrier floor, ~100x below this chain's number.
+;
+; THE ONE CHANGE FROM form-native-decode-chain.fk, NOTHING ELSE: stage A dispatches
+; form_rmsnorm_tg_f32 (llama-decode-msl.fk's ldm-rmsnorm-tg-msl, "STONE 16, THE COOPERATIVE
+; RMSNORM") instead of form_rmsnorm_f32. Same buffers (x@0, g@1, y@2), same constants (n@3, eps@4)
+; — metal_first_token.sh's own `rmsnorm()` reuses ONE `bind` closure for both `fastOps` true and
+; false, proving the binding shape does not change between the two kernels, only the dispatch
+; shape. The cooperative kernel reduces across a THREADGROUP, not a grid, so it needs
+; dispatch_mode=1 (metal-door.fk's md-bind16 tail, "the op's threads argument is the GROUP COUNT"):
+; ONE threadgroup of `fndc-tg-width` () threads, dispatchThreadgroups(1,1,1). Same op order, same
+; associativity, same rounding as the plain kernel — llama-decode-msl.fk's header states this is
+; BIT FOR BIT the attestant, not an epsilon-bearing twin, so the correctness bar stays the same
+; max|Δ| the plain-kernel chain already met, not a relaxed one.
+;
+; Stage B (the Q4_K matvec, its barrier_before=1, its dependency on stage A's output, its 424
+; repetitions, its one Form reference computed once) is UNCHANGED — copied verbatim from
+; form-native-decode-chain.fk. Buffer pooling is NOT reintroduced (PR #432 already closed that
+; question); this file allocates a fresh buffer pair per repetition exactly as the unpooled file
+; did, so ONLY the stage-A kernel identity differs between this measurement and PR #431's.
+;
+; THE COOPERATIVE KERNEL HAS NEVER BEEN DISPATCHED THROUGH THIS DOOR BEFORE. Every existing use of
+; form_rmsnorm_tg_f32 was either text-only (llama-decode-msl-band.fk checks the emitted MSL string
+; contains the right declaration, never runs it) or driven from Swift (metal_first_token.sh's own
+; `s.go1(pRmsT, rmsTG, bind)`, gated there against the plain kernel's own token ids, not against
+; this Form door's md-bind16/dispatch_mode=1 path). So fndc-tg-n1 below dispatches it ONCE, alone,
+; through exactly the primitives this file's loop uses, and diffs it against Form's own ln-rmsnorm
+; over the SAME real gain — the same proof shape form-native-decode.fk's fnd-run already established
+; for the plain kernel — before the 424-repetition loop is allowed to trust it.
+;
+; NOT A BAND, same reasons as its kin (header of form-native-decode-chain.fk): wall-clock duration is
+; not four-way-provable, and the Q4_K reference reads real GGUF bytes through a two-arm byte door.
+;
+; RUN (needs the carrier linked; PR #429 made this fkwu's default build):
+;   cd form && ./validate.sh form-stdlib/tests/moe-gate-band.fk   # (or any band) builds ./fkwu
+;   cd .. && ./fkwu form/form-stdlib/form-native-decode-chain-tg.fk
+;
+; Kin: form-stdlib/form-native-decode-chain.fk (the file this modifies exactly one thing in),
+;      form-stdlib/form-native-decode-chain-pooled.fk (the sibling hypothesis, refuted),
+;      form-stdlib/llama-decode-msl.fk (ldm-rmsnorm-tg-msl — the cooperative kernel text, Stone 16),
+;      form-stdlib/form-native-decode.fk (fnd-run — the n=1 correctness pattern this file's
+;      fndc-tg-n1 reuses for the cooperative kernel), native/metal/metal_first_token.sh (~line
+;      355-368, 441-451, 598-606 — the real decode's dispatch shape for pRmsT, the binding this
+;      file's tpg/mode/tail values are read from, not guessed), native/metal/fk-metal-carrier.m
+;      (~line 88-130, 605-729 — dispatch_mode=1's exact semantics and the tgmax refusal check).
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/metal-door.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk native/metal/whole-tensor-residency.fk form-stdlib/llama-decode-msl.fk form-stdlib/llama-numerics.fk form-stdlib/form-native-decode.fk form-stdlib/q4k-msl.fk
+
+(do
+    ; N repetitions — same 424 as form-native-decode-chain.fk, so the two measurements sit on the
+    ; same N and only the stage-A kernel identity differs.
+    (defn fndc-n () 424)
+
+    ; stage B's real output width — unchanged.
+    (defn fndc-rows () 8)
+
+    ; threads per threadgroup for the cooperative kernel's ONE threadgroup. metal_first_token.sh's
+    ; own default (FORM_RMS_TG unset -> 1024, then min'd against the pipeline's real
+    ; maxTotalThreadsPerThreadgroup) — read from the real decode's own dispatch site, not guessed.
+    ; This door's dispatch_mode=1 REFUSES (not clamps) a tpg past the pipeline's ceiling
+    ; (fk-metal-carrier.m ~line 700-705), so a too-large value here shows up as e1=-1 / ok-count !=
+    ; ndisp rather than a silently wrong dispatch — fndc-tg-n1 below is where that would first show.
+    (defn fndc-tg-width () 1024)
+
+    ; ================= locating the real Q4_K tensor, verified against the LIVE file (unchanged) ====
+    (defn fndc-q-abs (src) (egg-tensor-abs src (wtr-alignment) "blk.0.attn_q.weight"))
+    (defn fndc-q-type (src) (egg-ti-type src (egg-find-tensor src "blk.0.attn_q.weight")))
+    (defn fndc-q-dim0 (src) (egg-ti-dim src (egg-find-tensor src "blk.0.attn_q.weight") 0))
+    (defn fndc-q-row-bytes (cols) (mul (div cols 256) 144))
+
+    ; ================= the reference: Form's OWN independent Q4_K matvec, computed ONCE (unchanged) =
+    (defn fndc-ref-dot-loop (qsrc row cols j n xs acc)
+        (if (eq j n) acc
+            (fndc-ref-dot-loop qsrc row cols (add j 1) n (tail xs)
+                (add acc (mul (q4m-flat-at qsrc 0 (add (mul row cols) j)) (head xs))))))
+    (defn fndc-ref-dot (qsrc row cols xs) (fndc-ref-dot-loop qsrc row cols 0 cols xs 0.0))
+
+    (defn fndc-ref-rows-loop (qsrc row rows cols xs acc)
+        (if (eq row rows) (reverse acc)
+            (fndc-ref-rows-loop qsrc (add row 1) rows cols xs
+                (cons (fndc-ref-dot qsrc row cols xs) acc))))
+    (defn fndc-ref-rows (qsrc rows cols xs) (fndc-ref-rows-loop qsrc 0 rows cols xs (list)))
+
+    ; ================= N fresh buffer pairs (unchanged — no pooling, PR #432 already closed that) ===
+    (defn fndc-alloc-loop (i n d rows acc-hy acc-hz)
+        (if (ge i n) (list (reverse acc-hy) (reverse acc-hz))
+            (fndc-alloc-loop (add i 1) n d rows
+                (cons (metal_buf_alloc (mul d 4)) acc-hy)
+                (cons (metal_buf_alloc (mul rows 4)) acc-hz))))
+
+    ; ================= the timed enqueue loop: stage A (cooperative, barrier=0) then stage B
+    ; (barrier=1) ===================================================================================
+    ; ONLY stage A's call changed: md-bind -> md-bind16 with dispatch_mode=1 (ONE threadgroup of
+    ; fndc-tg-width threads — the "threads" argument passed to metal_enqueue is the GROUP COUNT
+    ; under mode=1, so it stays literally 1, same as the plain kernel's "1 thread", now reread as
+    ; "1 threadgroup"). tgmem=0: the cooperative kernel's scratch (`threadgroup float sq[4096]`) is
+    ; a compile-time array inside the MSL text, not a `[[threadgroup(0)]]` parameter, so no
+    ; setThreadgroupMemoryLength call is needed — confirmed against fk-metal-carrier.m, which only
+    ; sets it when tgmem > 0 (~line 694), and against the kernel text itself, which binds no such
+    ; parameter. Stage B is byte-for-byte form-native-decode-chain.fk's.
+    (defn fndc-enq-loop (i n pipeA pipeB hx hg hqb d ebits rows cols hys hzs acc)
+        (if (ge i n) acc
+            (fndc-enq-loop (add i 1) n pipeA pipeB hx hg hqb d ebits rows cols (tail hys) (tail hzs)
+                (add acc
+                    (add (metal_enqueue pipeA
+                             (md-bind16 (list hx hg (head hys)) (list d ebits) (fndc-tg-width) 0 1 0) 1)
+                         (metal_enqueue pipeB
+                             (md-bind16 (list hqb (head hys) (head hzs)) (list rows cols) 0 0 0 1)
+                             rows))))))
+
+    ; ================= readback + per-repetition verification against the ONE Form reference
+    ; (unchanged) =====================================================================================
+    (defn fndc-verify-loop (hzs rows ref-y worst)
+        (if (eq (len hzs) 0) worst
+            (do
+                (let bytes (metal_buf_read (head hzs) 0 (mul rows 4)))
+                (let gy (ewl-gain bytes 0 rows))
+                (let d (fnd-maxdiff ref-y gy))
+                (fndc-verify-loop (tail hzs) rows ref-y (if (gt d worst) d worst)))))
+
+    ; ================= THE N=1 CORRECTNESS PROOF FOR THE COOPERATIVE KERNEL, ALONE, BEFORE THE LOOP
+    ; TRUSTS IT =========================================================================================
+    ; The exact shape form-native-decode.fk's fnd-run already proved for the PLAIN kernel (open real
+    ; bytes -> compile -> bind -> ONE dispatch -> ONE sync -> read back -> decode -> diff against
+    ; Form's own ln-rmsnorm), reusing fnd-run's own helpers (fnd-blob-path, fnd-src, fnd-dmodel,
+    ; fnd-eps, fnd-norm-abs, fnd-x-list, fnd-x-bytes, fnd-maxdiff — all already in scope via the
+    ; form-native-decode.fk prelude), with the ONLY differences being the kernel (TG, not plain) and
+    ; the dispatch tail (mode=1, ONE threadgroup, tpg=fndc-tg-width). This is its own separate batch,
+    ; fully drained (metal_sync) before fndc-run below opens the timed batch.
+    (defn fndc-tg-n1 ()
+        (do
+            (let live (md-door-live?))
+            (let path (fnd-blob-path))
+            (let src (fnd-src path))
+            (let d (fnd-dmodel src))
+            (let eps (fnd-eps src))
+            (let gnabs (fnd-norm-abs src path))
+
+            (let hg (metal_buf_from_file path gnabs (mul d 4)))
+            (let hx (metal_buf_alloc (mul d 4)))
+            (let wx (metal_buf_write hx 0 (fnd-x-bytes d)))
+            (let hy (metal_buf_alloc (mul d 4)))
+
+            (let pipe (metal_pipeline
+                (str_concat "#include <metal_stdlib>\n" (ldm-rmsnorm-tg-msl "form_rmsnorm_tg_f32"))
+                "form_rmsnorm_tg_f32"))
+            (let bind (md-bind16 (list hx hg hy) (list d (md-f32-bits eps)) (fndc-tg-width) 0 1 0))
+
+            (let e1 (metal_enqueue pipe bind 1))
+            (let synced (metal_sync))
+            (let ybytes (metal_buf_read hy 0 (mul d 4)))
+
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let gpu-y (ewl-gain ybytes 0 d))
+            (let form-y (ln-rmsnorm (fnd-x-list d) gains eps))
+            (let maxdiff (fnd-maxdiff form-y gpu-y))
+
+            (list live d e1 synced maxdiff)))
+
+    (defn fndc-run ()
+        (do
+            (let live (md-door-live?))
+            (let path (fnd-blob-path))
+            (let src (fnd-src path))
+            (let d (fnd-dmodel src))
+            (let eps (fnd-eps src))
+            (let ebits (md-f32-bits eps))
+            (let gnabs (fnd-norm-abs src path))
+            (let n (fndc-n))
+            (let rows (fndc-rows))
+            (let cols d)
+
+            (let qtype (fndc-q-type src))
+            (let qdim0 (fndc-q-dim0 src))
+            (let qabs (fndc-q-abs src))
+
+            ; ---- resident, built ONCE: real gain, synthetic input, real Q4_K weight window ---------
+            (let hg (metal_buf_from_file path gnabs (mul d 4)))
+            (let hx (metal_buf_alloc (mul d 4)))
+            (let wx (metal_buf_write hx 0 (fnd-x-bytes d)))
+            (let hqb (metal_buf_from_file path qabs (mul rows (fndc-q-row-bytes cols))))
+            ; the ONE change from form-native-decode-chain.fk: the cooperative kernel + its header.
+            (let pipeA (metal_pipeline
+                (str_concat "#include <metal_stdlib>\n" (ldm-rmsnorm-tg-msl "form_rmsnorm_tg_f32"))
+                "form_rmsnorm_tg_f32"))
+            (let pipeB (metal_pipeline
+                (str_concat "#include <metal_stdlib>\n" (q4m-matvec-msl "form_matvec_q4k_stageb"))
+                "form_matvec_q4k_stageb"))
+
+            ; ---- A: N buffer-pair allocations, timed alone -----------------------------------------
+            (let ta0 (now_unix_ms))
+            (let bufs (fndc-alloc-loop 0 n d rows (list) (list)))
+            (let hys (nth bufs 0))
+            (let hzs (nth bufs 1))
+            (let ta1 (now_unix_ms))
+
+            ; ---- ARM: outside both timed windows, exactly as the independent/dependent probes do ----
+            (let armed (metal_batch_concurrent))
+
+            ; ---- B: N*2 real dispatches enqueued, A(barrier=0) then B(barrier=1) per repetition ----
+            (let te0 (now_unix_ms))
+            (let ok-count (fndc-enq-loop 0 n pipeA pipeB hx hg hqb d ebits rows cols hys hzs 0))
+            (let te1 (now_unix_ms))
+
+            ; ---- C: ONE sync for the whole batch -----------------------------------------------------
+            (let ts0 (now_unix_ms))
+            (let drained (metal_sync))
+            (let ts1 (now_unix_ms))
+
+            ; ---- D: the Form reference, computed ONCE (inputs are identical across all N reps) ------
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let form-y0 (ln-rmsnorm (fnd-x-list d) gains eps))
+            (let qsrc (eqr-of-file path qabs (mul rows (fndc-q-row-bytes cols))))
+            (let ref-y (fndc-ref-rows qsrc rows cols form-y0))
+
+            ; ---- E: read back and verify EVERY repetition's stage-B output against the ONE reference
+            (let tr0 (now_unix_ms))
+            (let worst (fndc-verify-loop hzs rows ref-y 0.0))
+            (let tr1 (now_unix_ms))
+
+            (list live n rows cols qtype qdim0 armed ok-count drained
+                  (sub ta1 ta0) (sub te1 te0) (sub ts1 ts0) (sub tr1 tr0) worst)))
+
+    (defn fndc-us-per (ms n) (floor (div (mul ms 1000) n)))
+
+    (defn fndc-show ()
+        (do
+            ; ---- the n=1 correctness proof, first, before the loop is trusted to run at all --------
+            (let r1 (fndc-tg-n1))
+            (let n1-live (nth r1 0))
+            (let n1-d (nth r1 1))
+            (let n1-e1 (nth r1 2))
+            (let n1-synced (nth r1 3))
+            (let n1-maxdiff (nth r1 4))
+
+            (print_str "==== fndc-tg-n1: cooperative kernel, ALONE, one dispatch, before the loop ====")
+            (print_str (str_concat "door-live " (if n1-live "true" "false")))
+            (print_str (str_concat "d_model " (int_to_str n1-d)))
+            (print_str (str_concat "enqueue ok(want=1) " (int_to_str n1-e1)))
+            (print_str (str_concat "synced(want=1) " (int_to_str n1-synced)))
+            (print_str (str_concat "n=1 max-abs-delta form-vs-gpu (cooperative kernel) " (float_to_str n1-maxdiff)))
+
+            (let n1-ok (if n1-live (if (eq n1-e1 1) (if (eq n1-synced 1) (if (lt n1-maxdiff 0.01) 1 0) 0) 0) 0))
+            (print_str (str_concat "n=1 correctness gate " (int_to_str n1-ok)))
+
+            (print_str "==== fndc-show: 424-repetition dependency chain, stage A = cooperative rmsnorm ====")
+            (let r (fndc-run))
+            (let live (nth r 0))
+            (let n (nth r 1))
+            (let rows (nth r 2))
+            (let cols (nth r 3))
+            (let qtype (nth r 4))
+            (let qdim0 (nth r 5))
+            (let armed (nth r 6))
+            (let ok-count (nth r 7))
+            (let drained (nth r 8))
+            (let alloc-ms (nth r 9))
+            (let enq-ms (nth r 10))
+            (let sync-ms (nth r 11))
+            (let verify-ms (nth r 12))
+            (let worst (nth r 13))
+            (let ndisp (mul n 2))
+            (let batch-ms (add (add alloc-ms enq-ms) sync-ms))
+
+            (print_str (metal_status))
+            (print_str (str_concat "door-live " (if live "true" "false")))
+            (print_str (str_concat "attn_q.weight type(want=12 Q4_K) " (int_to_str qtype)))
+            (print_str (str_concat "attn_q.weight dim0(want=3072) " (int_to_str qdim0)))
+            (print_str (str_concat "batch_concurrent armed(want=1) " (int_to_str armed)))
+            (print_str (str_concat "n repetitions " (int_to_str n)))
+            (print_str (str_concat "rows(stage B real output width) " (int_to_str rows)))
+            (print_str (str_concat "cols(d_model) " (int_to_str cols)))
+            (print_str (str_concat "total dispatches(2*n) " (int_to_str ndisp)))
+            (print_str (str_concat "ok-count(want=2n) " (int_to_str ok-count)))
+            (print_str (str_concat "drained(want=2n) " (int_to_str drained)))
+            (print_str (str_concat "worst max-abs-delta form-vs-gpu(all n reps) " (float_to_str worst)))
+            (print_str (str_concat "alloc-ms " (int_to_str alloc-ms)))
+            (print_str (str_concat "enqueue-ms " (int_to_str enq-ms)))
+            (print_str (str_concat "sync-ms " (int_to_str sync-ms)))
+            (print_str (str_concat "verify(readback+diff)-ms(" (str_concat (int_to_str n) " reps) ")))
+            (print_str (int_to_str verify-ms))
+            (print_str (str_concat "alloc+enqueue+sync-ms " (int_to_str batch-ms)))
+            (print_str (str_concat "us/dispatch enqueue-only " (int_to_str (fndc-us-per enq-ms ndisp))))
+            (print_str (str_concat "us/dispatch enqueue+sync " (int_to_str (fndc-us-per (add enq-ms sync-ms) ndisp))))
+            (print_str (str_concat "us/repetition enqueue-only " (int_to_str (fndc-us-per enq-ms n))))
+            (print_str (str_concat "us/repetition enqueue+sync " (int_to_str (fndc-us-per (add enq-ms sync-ms) n))))
+
+            (let loop-ok (if live (if (eq armed 1) (if (eq ok-count ndisp) (if (eq drained ndisp) (if (lt worst 0.01) 1 0) 0) 0) 0) 0))
+            (if (eq n1-ok 1) loop-ok 0)))
+
+    (fndc-show))

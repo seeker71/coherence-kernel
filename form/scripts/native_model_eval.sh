@@ -1,10 +1,17 @@
 #!/bin/sh
-# Run one fixed paired local diagnostic. Ollama performs inference and the
-# shell observes process identity; Form alone normalizes, scores, compares,
-# hashes the dataset/evaluator, and refuses promotion authority.
+# Explicit, short-lived paired local integration diagnostic. Ollama performs
+# inference only when its owner opens this integration window; Form alone
+# normalizes, scores, compares, hashes the dataset/evaluator, and refuses
+# promotion authority. This is never part of the daily native witness.
 
 set -eu
 . "$(CDPATH= cd "$(dirname "$0")" && pwd)/native_model_form_common.sh"
+
+if [ "${NATIVE_MODEL_OLLAMA_INTEGRATION:-0}" != 1 ]; then
+    printf '%s\n' \
+        'native_model_eval.sh is integration-only; set NATIVE_MODEL_OLLAMA_INTEGRATION=1 for one bounded run' >&2
+    exit 64
+fi
 
 nm_require_command curl
 nm_require_command jq
@@ -128,7 +135,7 @@ do
         cat "$temp_dir/incumbent-before-identity" "$temp_dir/incumbent-after-identity"
         cat "$temp_dir/incumbent-latency" "$temp_dir/incumbent-error"
         sed -n '1p' "$temp_dir/incumbent-output" "$prompt_file" "$expected_file"
-    } | "$NM_FKWU" --src form/form-stdlib/native-model-eval-cli.fk >> "$form_result"
+    } | "$NM_FKWU" form/form-stdlib/native-model-eval-cli.fk >> "$form_result"
 done < "$case_stream"
 
 sed '/^$/d; /^0$/d; /^fkwu: warning:/d' "$form_result" > "$summary"
@@ -174,7 +181,7 @@ append_eval_event() {
         printf '%s\n' "$event_artifact_after" "$event_identity_before" "$event_identity_after"
         printf '%s\n' "$input_sha" "$event_output" "$event_latency" "$event_units"
         printf '\n\n'
-    } | "$NM_FKWU" --src form/form-stdlib/native-model-event-cli.fk \
+    } | "$NM_FKWU" form/form-stdlib/native-model-event-cli.fk \
         > "$event_result"
     if ! grep -q '^append_ok=1$' "$event_result"; then
         printf 'Form rejected %s evaluation occurrence\n' "$event_model" >&2

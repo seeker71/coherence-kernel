@@ -55,13 +55,13 @@ nm_build_training_source "$band_source" \
 nm_build_training_source "$report_source" \
     form/form-stdlib/native-model-live-training-main.fk
 
-band=$($NM_FKWU --src "$band_source")
+band=$($NM_FKWU "$band_source")
 if [ "$band" != "255" ]; then
     printf 'Form training band failed: expected 255, observed %s\n' "$band" >&2
     exit 1
 fi
 
-$NM_FKWU --src "$report_source" > "$raw_report"
+$NM_FKWU "$report_source" > "$raw_report"
 # The direct-source runner prints the top-level value returned by print_str.
 # Keep only the Form report itself, not that carrier-level trailing zero.
 sed '/^$/d; /^0$/d; /^fkwu: warning:/d' "$raw_report" > "$report"

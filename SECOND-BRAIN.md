@@ -96,11 +96,11 @@ a door makes, with the body's own string engine on its own kernel:
 ```sh
 ( cat form/form-stdlib/core.fk grammars/line-grammar.fk observe/door-link-health.fk; \
   echo '(door-link-health-check)' ) > /tmp/dlh.fk
-./fkwu --src /tmp/dlh.fk      # -> 31 (self-check)
+./fkwu /tmp/dlh.fk      # -> 31 (self-check)
 
 ( cat form/form-stdlib/core.fk grammars/line-grammar.fk observe/door-link-health.fk; \
   echo '(dlh-field-code)' ) > /tmp/dlhf.fk
-./fkwu --src /tmp/dlhf.fk     # -> doors*10^6 + links*10^3 + broken
+./fkwu /tmp/dlhf.fk     # -> doors*10^6 + links*10^3 + broken
 ```
 
 witnessed: 2026-07-16 → self-check `31`; door ring `12033000` (12 doors, 33 links, 0 broken).
@@ -121,7 +121,7 @@ re-running is what detects stale.
 ( cat form/form-stdlib/core.fk grammars/line-grammar.fk observe/door-link-health.fk \
       learn/homecoming-distillation-corpus.fk observe/autopoietic-pulse.fk; \
   echo '(ap-tend)' ) > /tmp/ap.fk
-./fkwu --src /tmp/ap.fk       # -> 2 (portrait produced, body coherent)
+./fkwu /tmp/ap.fk       # -> 2 (portrait produced, body coherent)
 ```
 
 witnessed: 2026-07-16 → self-check `31`; `ap-tend` → `2`; field `2059303300`. Idempotent
@@ -185,7 +185,7 @@ wiki" would never have counted them.
 cat form/form-stdlib/core.fk grammars/line-grammar.fk observe/door-link-health.fk \
     observe/body-link-graph.fk > /tmp/blgbase.fk
 ( cat /tmp/blgbase.fk; echo '(blg-field-code)' ) > /tmp/blgf.fk
-./fkwu --src /tmp/blgf.fk     # -> orphans*10^6 + broken*10^3 + candidates
+./fkwu /tmp/blgf.fk     # -> orphans*10^6 + broken*10^3 + candidates
 ```
 
 witnessed: 2026-07-16 → self-check `63`; field `14156031` (14 orphans, 156 broken, 31 candidates)

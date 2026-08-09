@@ -34,13 +34,13 @@ fi
 PRE='; preludes: form-stdlib/core.fk form-stdlib/trig.fk form-stdlib/transformer-numerics.fk form-stdlib/llama-numerics.fk form-stdlib/kimi-kda.fk form-stdlib/gated-deltanet-conv.fk form-stdlib/gated-deltanet-gates.fk form-stdlib/gated-deltanet-layer.fk form-stdlib/gated-deltanet-demo.fk'
 
 { echo "$PRE"; echo '(gdd-emit-all)'; } > "$work/demo.fk"
-./fkwu --src "$work/demo.fk" 2>"$work/demo.err" | sed -n '1,/^END$/p' > "$work/demo.txt"
+./fkwu "$work/demo.fk" 2>"$work/demo.err" | sed -n '1,/^END$/p' > "$work/demo.txt"
 grep -qx 'END' "$work/demo.txt" || { echo "FAIL  fixture truncated"; tail -5 "$work/demo.err"; exit 1; }
 echo "PASS  fixture emitted on fkwu ($(wc -l < "$work/demo.txt" | tr -d ' ') lines)"
 
 { echo '; preludes: form-stdlib/core.fk form-stdlib/gated-deltanet-msl.fk'; echo '(print_str (gdm-msl-appendix))'; } > "$work/emit.fk"
 { printf '#include <metal_stdlib>\ninline float fexp(float x) { return metal::exp(x); }\ninline float fsqrt(float x) { return metal::sqrt(x); }\n'
-  ./fkwu --src "$work/emit.fk" 2>/dev/null | sed '$d'; } > "$work/gdn.metal"
+  ./fkwu "$work/emit.fk" 2>/dev/null | sed '$d'; } > "$work/gdn.metal"
 xcrun -sdk macosx metal -O2 -std=metal3.0 -ffp-contract=off -fno-fast-math \
       -c "$work/gdn.metal" -o "$work/gdn.air" 2>"$work/metal.err" \
   && xcrun -sdk macosx metallib "$work/gdn.air" -o "$work/gdn.metallib" 2>>"$work/metal.err" \

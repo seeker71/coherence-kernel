@@ -32,7 +32,7 @@ echo "PASS  fixture present, $(wc -c < "$FIX" | tr -d ' ') bytes"
 { echo '; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/f16-decode.fk form-stdlib/q2k-dequant.fk'
   echo '(do (defn qg-loop (src i m) (if (eq i m) 0 (do (print_str (int_to_str (float_to_int (mul 1000000.0 (q2k-at src 0 i))))) (qg-loop src (add i 1) m))))'
   echo "    (do (let src (read_file_slice \"$FIX\" 0 168)) (qg-loop src 0 512) 0))"; } > "$work/cpu.fk"
-./fkwu --src "$work/cpu.fk" 2>"$work/cpu.err" | grep -E '^-?[0-9]+$' | sed '$d' > "$work/cpu.txt"
+./fkwu "$work/cpu.fk" 2>"$work/cpu.err" | grep -E '^-?[0-9]+$' | sed '$d' > "$work/cpu.txt"
 [ "$(wc -l < "$work/cpu.txt" | tr -d ' ')" = "512" ] || {
     echo "FAIL  CPU carver produced $(wc -l < "$work/cpu.txt" | tr -d ' ') values, expected 512"
     tail -5 "$work/cpu.err"; exit 1; }
@@ -42,7 +42,7 @@ echo "PASS  CPU carver answered all 512 weights"
 { echo '; preludes: form-stdlib/core.fk form-stdlib/q2k-dequant.fk form-stdlib/q2k-msl.fk'
   echo '(do (print_str (q2km-msl-helpers)) (print_str (q2km-dequant-body "form_q2k_dequant_f32")) 0)'; } > "$work/emit.fk"
 { printf '#include <metal_stdlib>\nusing namespace metal;\n'
-  ./fkwu --src "$work/emit.fk" 2>"$work/emit.err" | sed '$d'; } > "$work/q2k.metal"
+  ./fkwu "$work/emit.fk" 2>"$work/emit.err" | sed '$d'; } > "$work/q2k.metal"
 grep -q 'kernel void form_q2k_dequant_f32' "$work/q2k.metal" || {
     echo "FAIL  the body did not emit form_q2k_dequant_f32"; tail -5 "$work/emit.err"; exit 1; }
 echo "PASS  body emitted $(wc -c < "$work/q2k.metal" | tr -d ' ') bytes of MSL, every character from a .fk cell"

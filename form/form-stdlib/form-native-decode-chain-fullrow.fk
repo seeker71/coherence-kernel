@@ -1,0 +1,293 @@
+; RESULT (3 runs, Apple M4 Max, verdict 511 all three, worst form-vs-gpu delta 0.000006 all three —
+; every one of 424 repetitions checked against every one of 3072 real output positions of the ONE
+; computed-once reference, no sampling): gpu_busy_us_total = 2184810 / 2181703 / 2187635us
+; (avg 2184716us), versus the rows=8 baseline's verified 890987us — a 2.452x increase in GPU-device
+; time for 384x more real compute (rows 8->3072). That is DRAMATICALLY sub-linear: PARTIALLY
+; CONFIRMS the fixed-barrier-cost hypothesis in the narrow sense the header below poses it (cost did
+; NOT scale with compute, so much of the rows=8 floor was not real work) — but the hypothesis's
+; INTENDED PAYLOAD, that this mechanism explains DS4's absolute advantage, is REFUTED BY MAGNITUDE:
+; per-dispatch (848 total, the same basis the ~40-50x history figure uses), cost went 1050.7us
+; (rows=8) -> 2576.8us (rows=3072) — the gap to DS4's ~20-26us/barrier grew from ~40-53x to
+; ~99-129x, roughly DOUBLING, not closing. Per-repetition/per-barrier (424, DS4's own counting
+; unit), 2101.4us -> 5153.6us, gap ~81-105x -> ~198-258x. Doing 384x more real work per barrier made
+; the probe's cost-per-FLOP ~157x better (384/2.452) while making its ABSOLUTE per-barrier cost
+; ~2.45x WORSE and the gap to DS4's absolute floor ~2.45x WIDER. If "more real work dilutes the same
+; fixed tax" were DS4's whole advantage, matching or exceeding DS4's typical per-barrier compute
+; density (this probe's single 3072x3072 matvec is not smaller than what sits between many of DS4's
+; own barriers) should have moved this probe's absolute number toward DS4's floor — it moved away.
+; The elimination chain's four tested hypotheses (residency, stage-A parallelism, host-timing
+; artifact, fixed-barrier-cost-diluted-by-compute) are now each precisely accounted for: three
+; refuted outright, and the fourth confirmed only in its narrow scaling-shape sense while its
+; explanatory claim is refuted by absolute magnitude. The real mechanism behind DS4's ~20-26us/barrier
+; floor remains open and is NOT any of the five structural differences this chain has tested —
+; candidates it did not yet test: cross-layer dispatch overlap/pipeline depth (DS4 interleaves many
+; independent layers' work across 1510-1844 barriers, giving the GPU far more concurrent work to hide
+; latency behind than this probe's single strictly-serial 2-stage chain), persistent-encoder or
+; pipeline-state-object residency effects, or GPU clock/power-state differences between a short
+; isolated probe and a long sustained real decode. Named precisely, not chased further here.
+;
+; form-native-decode-chain-fullrow.fk — the fixed-barrier-cost-vs-real-compute test against
+; form-native-decode-chain.fk (PR #431, unpooled baseline) and form-native-decode-chain-pooled.fk
+; (PR #432, REFUTED) / form-native-decode-chain-tg.fk (PR #433, REFUTED). Those two ruled out buffer
+; residency and stage-A kernel parallelism as the source of the ~1049us/dispatch GPU-device-busy
+; floor (PR #434 proved that floor is genuinely GPU-device-resident, not a host-timing artifact, by
+; adding `gpu_busy_us_total` to metal_status from `[cb GPUEndTime]-[cb GPUStartTime]` — the same
+; properties DS4's own harvest() reads). This file tests the one remaining structural difference
+; named in that chain: DS4's real barriers (metal_dsv4_stack.sh, ~20-26us/barrier average) sit
+; between MUCH LARGER real computations than this probe's stage B, which the unpooled file's own
+; header scoped to 8 of the real 3072 attn_q.weight rows — for HOST-SIDE Form-reference
+; verification cost on a tree-walking runtime, not GPU dispatch cost (that file's SCOPE section is
+; explicit about this and is the reason a wider run was always the next honest step, not a redesign).
+;
+; THE HYPOTHESIS UNDER TEST: if memoryBarrierWithScope:.buffers's real hardware cost is roughly
+; FIXED per call (a genuine pipeline drain, largely independent of how much real compute preceded
+; it), then the unpooled file's ~1049us/dispatch average (890987us / 848 dispatches, PR #434's
+; verified gpu_busy_us_total) is mostly FIXED BARRIER OVERHEAD at rows=8's tiny stage-B compute —
+; and DS4's ~20-26us/barrier isn't a cheaper barrier mechanism, it is the SAME fixed cost divided by
+; far more real compute per call. Scaling stage B from 8 to the full 3072 real rows (384x the real
+; compute, SAME barrier pattern, SAME n=424 repetitions) tests this directly: if gpu_busy_us_total
+; grows roughly PROPORTIONALLY with the added compute, the ~1049us floor was mostly real work (the
+; hypothesis is REFUTED). If it grows only a little relative to 384x, the floor was mostly fixed
+; barrier overhead now being diluted (the hypothesis is CONFIRMED, and DS4's real advantage has a
+; concrete mechanism: more real work per barrier, not a cheaper barrier).
+;
+; THE TWO REAL STAGES: identical to form-native-decode-chain.fk in every respect (same kernels
+; called, not retyped; same real llama3.2:3b bytes; same barrier_before=0 on stage A / 1 on stage B;
+; same n=424; same single metal_batch_concurrent/metal_sync framing). The ONLY change is
+; `fndcf-rows` = 3072 instead of 8 — the full real Q projection width, not a placeholder. q4k-msl.fk's
+; q4m-matvec-body kernel was read to confirm this is legitimate: its dispatch guard is
+; `if (i >= rows) return;`, parameterized entirely by the `rows` uniform bound at enqueue time
+; (md-bind16) and by the `metal_enqueue pipeB ... rows` thread count passed from this file — nothing
+; about row width is hardcoded in the kernel or the binding shape. fk-metal-carrier.m's dispatch path
+; (fk_metal_enqueue_external, ~line 707-735) uses `dispatchThreads:MTLSizeMake(threads,1,1)
+; threadsPerThreadgroup:MTLSizeMake(min(maxTotalThreadsPerThreadgroup,threads),1,1)` — Apple GPUs
+; (M-series, family 4+) support non-uniform threadgroups under dispatchThreads, so 3072 threads is
+; not a new code path, just a wider grid.
+;
+; THE CORRECTNESS TRADEOFF, CALIBRATED, NOT GUESSED. The unpooled file scoped to 8 rows specifically
+; because verifying every repetition's output against Form's own independent Q4_K dequant+dot
+; (q4m-flat-at) costs real wall time on this tree-walking runtime, and the header named that as the
+; open question a wider run would have to answer. Rather than assume the cost is prohibitive at
+; full width, it was measured directly: a throwaway timing probe computed the SAME reference loop
+; this file uses (fndcf-ref-rows) at rows=8, 64, and 256 against the SAME real tensor window,
+; isolated from GPU dispatch entirely. Results: rows=8 -> 173ms, rows=64 -> 1386ms (8.01x rows,
+; 8.01x time), rows=256 -> 5561ms (32x rows, 32.1x time) — clean LINEAR scaling, ~21.7ms per row
+; (173/8=21.6, 1386/64=21.66, 5561/256=21.72). At rows=3072 that extrapolates to ~66.7s for the ONE
+; reference computation this file still does only ONCE (inputs are identical across all 424
+; repetitions, exactly as the unpooled file's own header establishes — a genuine race would show up
+; as a repetition whose stage-B output differs from the others, which checking every repetition
+; against one Form-computed reference is built to catch, without paying N times for the dequant
+; itself). That one-time ~67s cost — and the per-repetition readback+diff cost below it, which is
+; pure elementwise subtract/abs/max over already-dequantized floats, not a second dequant pass, and
+; extrapolates from the unpooled file's own 22ms/424reps-at-8-wide to roughly 8.5s at
+; 424reps-at-3072-wide — both land ENTIRELY in Part D/E, AFTER the single metal_sync (ts1) and
+; BEFORE this file's own verify timer starts, i.e. entirely OUTSIDE the GPU-timed window this
+; experiment measures (alloc-ms, enqueue-ms, sync-ms, and metal_status's gpu_busy_us_total). Given
+; that headroom, this file does NOT sample: it checks EVERY ONE of the 424 repetitions against
+; EVERY ONE of the 3072 real output positions of the ONE computed-once reference — the exact same
+; completeness the unpooled file already provides at rows=8, just wider, because the calibration
+; showed the honest full check is affordable rather than requiring an under-verified shortcut.
+;
+; THE BARRIER: unchanged from the unpooled file — MTLBarrierScopeBuffers is coarse (settles ALL
+; buffer memory effects encoded before the barrier point, not only the matching pair), named there
+; and not repeated in full here; see form-native-decode-chain.fk lines ~26-40 for the complete
+; argument. This file makes no new claim about the barrier's semantics, only about what sits either
+; side of it.
+;
+; NOT A BAND, same reasoning as its kin: a wall-clock/GPU-device-time duration is not
+; four-way-provable, and Metal has no Go/Rust/TS arm to check a microsecond against. The reference
+; Q4_K dequant path (eqr-at / str_byte_at) is the same TWO-ARM byte door (fkwu + Go) named in the
+; unpooled file's own header — no new correctness claim beyond what q4k-msl-band.fk already proves
+; for the transcription is added here; this file adds no new pure-Form arithmetic shape (no new
+; band needed, per form-native-decode-chain-pooled.fk's identical precedent for `mod`-based reuse
+; not needing a fresh proof).
+;
+; RUN:
+;   cd form && ./validate.sh form-stdlib/tests/moe-gate-band.fk   # (or any band) builds ./fkwu
+;   cd .. && ./fkwu form/form-stdlib/form-native-decode-chain-fullrow.fk
+;
+; Kin: form-stdlib/form-native-decode-chain.fk (the rows=8 baseline this file widens, byte-identical
+;      stages/barrier-pattern/n; PR #431's own SCOPE section is what this file's calibration
+;      answers), form-stdlib/form-native-decode-chain-pooled.fk / -tg.fk (PR #432/#433, both
+;      REFUTED — buffer residency and stage-A parallelism), native/metal/fk-metal-carrier.m
+;      (metal_status's gpu_busy_us_total, PR #434 — the real device-time number this file reads,
+;      same as the unpooled file; fk_metal_enqueue_external's dispatchThreads sizing, read here to
+;      confirm rows=3072 needs no code change), form-stdlib/q4k-msl.fk (q4m-matvec-body — stage B's
+;      kernel, read here to confirm `rows` fully parameterizes dispatch width; q4m-flat-at — the
+;      reference this file's correctness check reads through, at full width, calibrated above),
+;      native/metal/metal_dsv4_stack.sh (~line 764-800 — DS4's own per-barrier average this file's
+;      result is measured against).
+;
+; preludes: form-stdlib/core.fk form-stdlib/format-arith.fk form-stdlib/metal-door.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk native/metal/whole-tensor-residency.fk form-stdlib/llama-decode-msl.fk form-stdlib/llama-numerics.fk form-stdlib/form-native-decode.fk form-stdlib/q4k-msl.fk
+
+(do
+    ; SAME N as the unpooled file — same real per-forward dispatch count, so the two measurements
+    ; sit next to each other on the same N.
+    (defn fndcf-n () 424)
+
+    ; stage B's real output width — the FULL real Q projection, not the unpooled file's 8-row scope.
+    ; This is the ONLY structural change from form-native-decode-chain.fk.
+    (defn fndcf-rows () 3072)
+
+    ; ================= locating the real Q4_K tensor, verified against the LIVE file =================
+    (defn fndcf-q-abs (src) (egg-tensor-abs src (wtr-alignment) "blk.0.attn_q.weight"))
+    (defn fndcf-q-type (src) (egg-ti-type src (egg-find-tensor src "blk.0.attn_q.weight")))
+    (defn fndcf-q-dim0 (src) (egg-ti-dim src (egg-find-tensor src "blk.0.attn_q.weight") 0))
+    ; SAME formula as the unpooled file's fndc-q-row-bytes (a Q4_K row is (cols/256) superblocks of
+    ; 144 bytes) — duplicated rather than called cross-file, same precedent as -pooled.fk /-tg.fk
+    ; (form-native-decode-chain.fk is a live self-executing witness, not preluded by its kin).
+    (defn fndcf-q-row-bytes (cols) (mul (div cols 256) 144))
+
+    ; ================= the reference: Form's OWN independent Q4_K matvec, computed ONCE =================
+    ; Identical shape to the unpooled file's fndc-ref-*, calibrated above to ~67s at rows=3072 —
+    ; affordable because it runs exactly ONCE regardless of n=424 (inputs are identical every rep).
+    (defn fndcf-ref-dot-loop (qsrc row cols j n xs acc)
+        (if (eq j n) acc
+            (fndcf-ref-dot-loop qsrc row cols (add j 1) n (tail xs)
+                (add acc (mul (q4m-flat-at qsrc 0 (add (mul row cols) j)) (head xs))))))
+    (defn fndcf-ref-dot (qsrc row cols xs) (fndcf-ref-dot-loop qsrc row cols 0 cols xs 0.0))
+
+    (defn fndcf-ref-rows-loop (qsrc row rows cols xs acc)
+        (if (eq row rows) (reverse acc)
+            (fndcf-ref-rows-loop qsrc (add row 1) rows cols xs
+                (cons (fndcf-ref-dot qsrc row cols xs) acc))))
+    (defn fndcf-ref-rows (qsrc rows cols xs) (fndcf-ref-rows-loop qsrc 0 rows cols xs (list)))
+
+    ; ================= N fresh buffer pairs: stage-A output (d wide) + stage-B output (rows wide) ====
+    (defn fndcf-alloc-loop (i n d rows acc-hy acc-hz)
+        (if (ge i n) (list (reverse acc-hy) (reverse acc-hz))
+            (fndcf-alloc-loop (add i 1) n d rows
+                (cons (metal_buf_alloc (mul d 4)) acc-hy)
+                (cons (metal_buf_alloc (mul rows 4)) acc-hz))))
+
+    ; ================= the timed enqueue loop: stage A (barrier=0) then stage B (barrier=1) =========
+    (defn fndcf-enq-loop (i n pipeA pipeB hx hg hqb d ebits rows cols hys hzs acc)
+        (if (ge i n) acc
+            (fndcf-enq-loop (add i 1) n pipeA pipeB hx hg hqb d ebits rows cols (tail hys) (tail hzs)
+                (add acc
+                    (add (metal_enqueue pipeA (md-bind (list hx hg (head hys)) (list d ebits)) 1)
+                         (metal_enqueue pipeB
+                             (md-bind16 (list hqb (head hys) (head hzs)) (list rows cols) 0 0 0 1)
+                             rows))))))
+
+    ; ================= readback + per-repetition verification against the ONE Form reference =======
+    ; FULL width, EVERY repetition — no sampling. See header calibration for why this is affordable.
+    (defn fndcf-verify-loop (hzs rows ref-y worst)
+        (if (eq (len hzs) 0) worst
+            (do
+                (let bytes (metal_buf_read (head hzs) 0 (mul rows 4)))
+                (let gy (ewl-gain bytes 0 rows))
+                (let d (fnd-maxdiff ref-y gy))
+                (fndcf-verify-loop (tail hzs) rows ref-y (if (gt d worst) d worst)))))
+
+    (defn fndcf-run ()
+        (do
+            (let live (md-door-live?))
+            (let path (fnd-blob-path))
+            (let src (fnd-src path))
+            (let d (fnd-dmodel src))
+            (let eps (fnd-eps src))
+            (let ebits (md-f32-bits eps))
+            (let gnabs (fnd-norm-abs src path))
+            (let n (fndcf-n))
+            (let rows (fndcf-rows))
+            (let cols d)
+
+            ; verified against the LIVE file (not trusted): Q4_K, 2 dims, dim0 = cols.
+            (let qtype (fndcf-q-type src))
+            (let qdim0 (fndcf-q-dim0 src))
+            (let qabs (fndcf-q-abs src))
+
+            ; ---- resident, built ONCE: real gain, synthetic input, real Q4_K weight window ---------
+            (let hg (metal_buf_from_file path gnabs (mul d 4)))
+            (let hx (metal_buf_alloc (mul d 4)))
+            (let wx (metal_buf_write hx 0 (fnd-x-bytes d)))
+            (let hqb (metal_buf_from_file path qabs (mul rows (fndcf-q-row-bytes cols))))
+            (let pipeA (metal_pipeline (fnd-msl) "form_rmsnorm_f32"))
+            (let pipeB (metal_pipeline
+                (str_concat "#include <metal_stdlib>\n" (q4m-matvec-msl "form_matvec_q4k_stageb"))
+                "form_matvec_q4k_stageb"))
+
+            ; ---- A: N buffer-pair allocations, timed alone -----------------------------------------
+            (let ta0 (now_unix_ms))
+            (let bufs (fndcf-alloc-loop 0 n d rows (list) (list)))
+            (let hys (nth bufs 0))
+            (let hzs (nth bufs 1))
+            (let ta1 (now_unix_ms))
+
+            ; ---- ARM: outside both timed windows, exactly as the unpooled probe does ------------
+            (let armed (metal_batch_concurrent))
+
+            ; ---- B: N*2 real dispatches enqueued, A(barrier=0) then B(barrier=1) per repetition ----
+            (let te0 (now_unix_ms))
+            (let ok-count (fndcf-enq-loop 0 n pipeA pipeB hx hg hqb d ebits rows cols hys hzs 0))
+            (let te1 (now_unix_ms))
+
+            ; ---- C: ONE sync for the whole batch -----------------------------------------------------
+            (let ts0 (now_unix_ms))
+            (let drained (metal_sync))
+            (let ts1 (now_unix_ms))
+
+            ; ---- D: the Form reference, computed ONCE (inputs are identical across all N reps) ------
+            ; calibrated at ~67s for rows=3072 — outside every timed window above and below.
+            (let gains (ewl-gain (eqr-of-file path gnabs (mul d 4)) 0 d))
+            (let form-y0 (ln-rmsnorm (fnd-x-list d) gains eps))
+            (let qsrc (eqr-of-file path qabs (mul rows (fndcf-q-row-bytes cols))))
+            (let ref-y (fndcf-ref-rows qsrc rows cols form-y0))
+
+            ; ---- E: read back and verify EVERY repetition's stage-B output against the ONE reference
+            (let tr0 (now_unix_ms))
+            (let worst (fndcf-verify-loop hzs rows ref-y 0.0))
+            (let tr1 (now_unix_ms))
+
+            (list live n rows cols qtype qdim0 armed ok-count drained
+                  (sub ta1 ta0) (sub te1 te0) (sub ts1 ts0) (sub tr1 tr0) worst)))
+
+    (defn fndcf-us-per (ms n) (floor (div (mul ms 1000) n)))
+
+    (defn fndcf-show ()
+        (do
+            (let r (fndcf-run))
+            (let live (nth r 0))
+            (let n (nth r 1))
+            (let rows (nth r 2))
+            (let cols (nth r 3))
+            (let qtype (nth r 4))
+            (let qdim0 (nth r 5))
+            (let armed (nth r 6))
+            (let ok-count (nth r 7))
+            (let drained (nth r 8))
+            (let alloc-ms (nth r 9))
+            (let enq-ms (nth r 10))
+            (let sync-ms (nth r 11))
+            (let verify-ms (nth r 12))
+            (let worst (nth r 13))
+            (let ndisp (mul n 2))
+            (let batch-ms (add (add alloc-ms enq-ms) sync-ms))
+
+            (print_str (metal_status))
+            (print_str (str_concat "door-live " (if live "true" "false")))
+            (print_str (str_concat "attn_q.weight type(want=12 Q4_K) " (int_to_str qtype)))
+            (print_str (str_concat "attn_q.weight dim0(want=3072) " (int_to_str qdim0)))
+            (print_str (str_concat "batch_concurrent armed(want=1) " (int_to_str armed)))
+            (print_str (str_concat "n repetitions " (int_to_str n)))
+            (print_str (str_concat "rows(stage B real output width, FULL) " (int_to_str rows)))
+            (print_str (str_concat "cols(d_model) " (int_to_str cols)))
+            (print_str (str_concat "total dispatches(2*n) " (int_to_str ndisp)))
+            (print_str (str_concat "ok-count(want=2n) " (int_to_str ok-count)))
+            (print_str (str_concat "drained(want=2n) " (int_to_str drained)))
+            (print_str (str_concat "worst max-abs-delta form-vs-gpu(all n reps, all 3072 positions) " (float_to_str worst)))
+            (print_str (str_concat "alloc-ms " (int_to_str alloc-ms)))
+            (print_str (str_concat "enqueue-ms " (int_to_str enq-ms)))
+            (print_str (str_concat "sync-ms " (int_to_str sync-ms)))
+            (print_str (str_concat "verify(readback+diff)-ms(" (str_concat (int_to_str n) " reps, full width) ")))
+            (print_str (int_to_str verify-ms))
+            (print_str (str_concat "alloc+enqueue+sync-ms " (int_to_str batch-ms)))
+            (print_str (str_concat "us/dispatch enqueue-only " (int_to_str (fndcf-us-per enq-ms ndisp))))
+            (print_str (str_concat "us/dispatch enqueue+sync " (int_to_str (fndcf-us-per (add enq-ms sync-ms) ndisp))))
+            (print_str (str_concat "us/repetition enqueue-only " (int_to_str (fndcf-us-per enq-ms n))))
+            (print_str (str_concat "us/repetition enqueue+sync " (int_to_str (fndcf-us-per (add enq-ms sync-ms) n))))
+
+            (if live (if (eq armed 1) (if (eq ok-count ndisp) (if (eq drained ndisp) (if (lt worst 0.01) 1 0) 0) 0) 0) 0)))
+
+    (fndcf-show))
