@@ -29,4 +29,4 @@ done
     nm_sha256_file "$config"
     nm_sha256_file "$tokenizer"
     nm_sha256_file "$index"
-} | "$NM_FKWU" --src form/form-stdlib/nanbeige-package-admission-cli.fk
+} | "$NM_FKWU" form/form-stdlib/nanbeige-package-admission-cli.fk

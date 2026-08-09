@@ -54,7 +54,7 @@ while IFS="$(printf '\t')" read -r index code concept_id transcription speaker s
     sed -n 'p' "$repo_root/presence/concept-audio-human-13-live.fk" > "$source_file_fk"
     printf '\n(cah13-execute-unavailable %s "download-failed" "%s")\n' \
       "$index" "$retrieved" >> "$source_file_fk"
-    output=$(cd "$repo_root" && ./fkwu --src "$source_file_fk" 2>>"$evidence")
+    output=$(cd "$repo_root" && ./fkwu "$source_file_fk" 2>>"$evidence")
     printf '%s\n' "$output" >> "$evidence"
     printf '%s\n' "$output" | sed -n '/^human-sample=/p' | sed -n '1p'
     sleep "$download_delay"
@@ -69,7 +69,7 @@ while IFS="$(printf '\t')" read -r index code concept_id transcription speaker s
     sed -n 'p' "$repo_root/presence/concept-audio-human-13-live.fk" > "$source_file_fk"
     printf '\n(cah13-execute-unavailable %s "source-hash-or-size-mismatch" "%s")\n' \
       "$index" "$retrieved" >> "$source_file_fk"
-    output=$(cd "$repo_root" && ./fkwu --src "$source_file_fk" 2>>"$evidence")
+    output=$(cd "$repo_root" && ./fkwu "$source_file_fk" 2>>"$evidence")
     printf '%s\n' "$output" >> "$evidence"
     printf '%s\n' "$output" | sed -n '/^human-sample=/p' | sed -n '1p'
     sleep "$download_delay"
@@ -82,7 +82,7 @@ while IFS="$(printf '\t')" read -r index code concept_id transcription speaker s
     sed -n 'p' "$repo_root/presence/concept-audio-human-13-live.fk" > "$source_file_fk"
     printf '\n(cah13-execute-unavailable %s "audio-decode-failed" "%s")\n' \
       "$index" "$retrieved" >> "$source_file_fk"
-    output=$(cd "$repo_root" && ./fkwu --src "$source_file_fk" 2>>"$evidence")
+    output=$(cd "$repo_root" && ./fkwu "$source_file_fk" 2>>"$evidence")
     printf '%s\n' "$output" >> "$evidence"
     printf '%s\n' "$output" | sed -n '/^human-sample=/p' | sed -n '1p'
     sleep "$download_delay"
@@ -106,7 +106,7 @@ while IFS="$(printf '\t')" read -r index code concept_id transcription speaker s
   printf '\n(cah13-execute-file %s "%s" "%s" "%s" %s "%s" "%s" "%s" "%s")\n' \
     "$index" "$source_file" "$wav_file" "$actual_sha256" "$actual_bytes" "$retrieved" \
     "$rms_db" "$peak_db" "$noise_floor_db" >> "$source_file_fk"
-  output=$(cd "$repo_root" && SEMA_WHISPER_MODEL="$model" ./fkwu --src "$source_file_fk" 2>>"$evidence")
+  output=$(cd "$repo_root" && SEMA_WHISPER_MODEL="$model" ./fkwu "$source_file_fk" 2>>"$evidence")
   printf '%s\n' "$output" >> "$evidence"
   summary=$(printf '%s\n' "$output" | sed -n '/^human-sample=/p' | sed -n '1p')
   printf '%s\n' "$summary"

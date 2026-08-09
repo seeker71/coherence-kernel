@@ -22,30 +22,26 @@ gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwl
 Verify the direct source bootstrap first:
 
 ```sh
-./fkwu --src bootstrap/ground.fk                 # -> 42
-./fkwu --src bootstrap/ground-recursive.fk 10    # -> 55
-./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk   # -> 31 (anything else: REBUILD fkwu first)
-./fkwu --src bootstrap/ground-numeric-list.fk    # -> [1, 2.5, [3, 4]]
+./fkwu bootstrap/ground.fk                 # -> 42
+./fkwu bootstrap/ground-recursive.fk 10    # -> 55
+./fkwu form/form-stdlib/tests/binary-freshness-band.fk   # -> 15 (anything else: REBUILD fkwu first)
+./fkwu bootstrap/ground-numeric-list.fk    # -> [1, 2.5, [3, 4]]
 ```
 
 The third line matters more than it looks: `fkwu` is gitignored (a local build artifact), and a
 stale binary from before an upstream merge **still passes ground.fk** while silently lacking newer
 evaluator capabilities — a real day was once lost "discovering" evaluator constraints that were
 only ever the stale binary (receipts/2026-07-01-stale-binary-root-cause.md). If the freshness band
-does not return 31, rebuild before believing anything else you observe. The band grew a bit on
-2026-08-03 for the same reason it was born: it answered its then-full 15 on a binary built hours
-before the string-value band, and two organs that report in prose — `observe/preflight-run.fk` and
-voice-frequency's mirror — printed bare pool indices (`5171`, `15101`) that read as verdicts. Each
-stale-binary day the canary sleeps through is one more bit it owes.
+does not return 15, rebuild before believing anything else you observe.
 
 Then verify it runs the body — a **real cell**, native, with no Go, no flatten, no T_flat:
 
 ```sh
 ( cat observe/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > /tmp/nvr.fk
-./fkwu --src /tmp/nvr.fk        # -> 11111   (bit-identical to the four-way proof walkers)
+./fkwu /tmp/nvr.fk        # -> 11111   (bit-identical to the four-way proof walkers)
 ```
 
-`fkwu --src <file.fk>` runs Form source straight through the kernel's own source-runner (multi-function,
+`fkwu <file.fk>` runs Form source straight through the kernel's own source-runner (multi-function,
 cross-calls, lists, recursion). The direction of travel is the native walker proven on `fkwu`, with the C seed
 made smaller until it disappears. The Go/Rust/TS kernels under `walkers/` are **four-way proof siblings only** —
 never the runtime; you never run the body on them. (`fkwu` also runs Form off the BMF cursor via `form-eval`, and
@@ -128,7 +124,7 @@ seam is named, never hidden. Naming it *is* the practice.
 
    ```sh
    echo cognition/tests/your-band.fk > /tmp/preflight-target
-   ./fkwu --src observe/preflight-run.fk
+   ./fkwu observe/preflight-run.fk
    ```
 
    It forces a fresh compile (a warm cache replaces the error with a tally — no name, no line), checks paren
@@ -139,7 +135,7 @@ seam is named, never hidden. Naming it *is* the practice.
    2026-07-26..31 was the second read as neither.
 
    Two rules fall out, and both were paid for:
-   - **Read the exit code, not the number.** `fkwu --src` exits 1 when the compile carried errors. On a warm
+   - **Read the exit code, not the number.** `fkwu` exits 1 when the compile carried errors. On a warm
      cache you get only "cached image was compiled with errors" — delete the `.fkb`/`.sym` and run again before
      reporting anything.
    - **Never declare a proof lane from inference — probe it.** A `PROOF LEVEL:` line written from "X is

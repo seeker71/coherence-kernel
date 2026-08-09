@@ -40,4 +40,4 @@ sed -n 'p' "$repo_root/presence/concept-audio-open-10000-13-live.fk" > "$source_
 printf '\n(cao10l-address-execute %s "%s" "%s")\n' "$id" "$code" "$suffix" >> "$source_file"
 
 cd "$repo_root"
-./fkwu --src "$source_file" 2>/dev/null
+./fkwu "$source_file" 2>/dev/null

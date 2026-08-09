@@ -28,17 +28,17 @@ trap cleanup EXIT HUP INT TERM
 cd "$NM_REPO_ROOT"
 cc -O2 -o "$NM_FKWU" runtime/fkwu-uni.c
 
-ground=$($NM_FKWU --src bootstrap/ground.fk)
-recursive=$($NM_FKWU --src bootstrap/ground-recursive.fk 10)
-freshness=$($NM_FKWU --src form/form-stdlib/tests/binary-freshness-band.fk)
+ground=$($NM_FKWU bootstrap/ground.fk)
+recursive=$($NM_FKWU bootstrap/ground-recursive.fk 10)
+freshness=$($NM_FKWU form/form-stdlib/tests/binary-freshness-band.fk)
 {
     cat observe/native-vs-rented.fk
     printf '%s\n' '(native-vs-rented-check)'
 } > "$native_way"
-native=$($NM_FKWU --src "$native_way")
-live_loop=$($NM_FKWU --src form/form-stdlib/tests/native-model-live-loop-band.fk)
-sha256_band=$($NM_FKWU --src form/form-stdlib/tests/sha256-band.fk)
-replacement_band=$($NM_FKWU --src form/form-stdlib/tests/native-model-form-replacement-band.fk)
+native=$($NM_FKWU "$native_way")
+live_loop=$($NM_FKWU form/form-stdlib/tests/native-model-live-loop-band.fk)
+sha256_band=$($NM_FKWU form/form-stdlib/tests/sha256-band.fk)
+replacement_band=$($NM_FKWU form/form-stdlib/tests/native-model-form-replacement-band.fk)
 
 "$NM_SCRIPT_DIR/native_model_rag.sh" > "$rag"
 rag_band=$(awk -F= '$1 == "rag_band" { print $2; exit }' "$rag")
