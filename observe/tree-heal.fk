@@ -1,0 +1,156 @@
+; tree-heal.fk — the count becomes a diff.
+;
+; observe/tree-balance.fk counts cells whose forms do not close. A count is a
+; paragraph with a number: it tells someone that work exists, which is how work
+; gets handed back instead of done. This cell does the work, and the only reason
+; it is safe to run unattended is that IT NEVER TRUSTS ITS OWN EDIT.
+;
+; THE GATE IS THE WHOLE DESIGN.
+;   Balance is not structure. A closer appended at the end of a file makes the
+;   parens balance and can still nest the body wrongly — neutral-rule-mdl-admission.fk
+;   balanced, parsed, and CRASHED until the closer moved from the `(list ...)`
+;   tail to the `(let gate ...)` it belonged to. So a candidate repair is not
+;   accepted because it balances. It is accepted only when the kernel stops
+;   objecting: zero diagnostics AND exit 0 on a fresh compile — and, when the
+;   cell has a band, that band running clean too. Anything else is reverted and
+;   the cell is left exactly as it was, named as unhealed with the reason.
+;
+;   That inverts who is trusted. The edit is a guess; the verdict is evidence.
+;   A guess that cannot produce evidence is discarded, so the loop can run
+;   without anyone watching it and the worst case is that nothing changes.
+;
+; WHERE IT TRIES, and why not just the end.
+;   A leaking form is located, not global: the depth between top-level defns
+;   drifts at the defn that leaked. The candidates are those drift points, in
+;   order, and the end of file last — the same search done by hand three times
+;   this week, made repeatable.
+;
+; PROOF LEVEL: FOURTH-ARM ONLY — the loop compiles through host-exec.
+;
+; USE
+;   (th-heal "path/to/cell.fk")   ; one cell: 1 healed, 0 left alone
+;   (th-report)                   ; sweep every unbalanced cell, return the page
+;
+; preludes: form-stdlib/core.fk observe/tree-balance.fk
+
+(do
+    (defn th-run (cmd) (host-exec (str_concat cmd " 2>&1") ""))
+    (defn th-cat (xs) (if (eq (len xs) 0) "" (str_concat (head xs) (th-cat (tail xs)))))
+    (defn th-sub (s mark v)
+        (do (let i (str_find s mark 0))
+            (if (lt i 0) s
+                (str_concat (substring s 0 i)
+                    (str_concat v (substring s (add i (str_len mark)) (str_len s)))))))
+
+    ;; ── the refusal gate ────────────────────────────────────────────
+    ;; Fresh, always: a warm cache answers with a tally and hides the name, so a
+    ;; repair could be accepted on the strength of a cached success.
+    (defn th-artifacts (p)
+        (do (th-run (th-cat (list "rm -f " (th-sub p ".fk" ".fkb") " " (th-sub p ".fk" ".sym")))) 1))
+    (defn th-compiles? (p)
+        (do (th-artifacts p)
+            (let out (th-run (th-cat (list "./fkwu " p " >/dev/null 2>/tmp/th.err; echo rc=$?; cat /tmp/th.err"))))
+            (if (lt (str_find out "rc=0" 0) 0) 0
+                (if (ge (str_find out "error" 0) 0) 0 1))))
+
+    ;; a cell's band, if it has one: tests/<name>-band.fk beside it
+    (defn th-band-path (p)
+        (do (let i (str_find p "/" 0))
+            (th-run (th-cat (list "d=$(dirname " p "); b=$(basename " p " .fk); "
+                                  "f=$d/tests/$b-band.fk; [ -f \"$f\" ] && printf %s \"$f\"")))))
+    (defn th-band-ok? (p)
+        (do (let b (th-band-path p))
+            (if (eq (str_len b) 0) 1
+                (do (th-artifacts b)
+                    (let out (th-run (th-cat (list "./fkwu " b " >/dev/null 2>&1; echo rc=$?"))))
+                    (if (ge (str_find out "rc=0" 0) 0) 1 0)))))
+    ;; ACCEPTED means the kernel stopped objecting, not that the parens count.
+    (defn th-accepts? (p) (if (eq (th-compiles? p) 1) (th-band-ok? p) 0))
+
+    ;; ── where a form leaked ─────────────────────────────────────────
+    ;; the byte offset at the end of each line whose top-level entry depth is
+    ;; not 1 — the drift points, in order, then the end of file
+    (defn th-eol (s i n)
+        (if (ge i n) n (if (str_eq (substring s i (add i 1)) "\n") i (th-eol s (add i 1) n))))
+    ;; THE DRIFT IS DETECTED ONE LINE LATE, and the repair belongs to the line
+    ;; before it. The depth is read at the START of each top-level defn; the
+    ;; defn that LEAKED is the previous one, so its end — `lastend` — is the
+    ;; candidate, not the position where the drift was noticed. The first
+    ;; version proposed the noticing line and healed nothing: every candidate
+    ;; was one form too late, the gate refused all of them, and the file came
+    ;; back untouched. The gate did its job; the search had not yet done its.
+    (defn th-scan (s i n d instr acc prev lastend)
+        (if (ge i n) acc
+            (do (let e (th-eol s i n))
+                (let line (substring s i e))
+                (let d2 (tb-depth-loop line 0 (str_len line) d instr))
+                (let top (if (ge (str_find line "(defn " 0) 0) 1 0))
+                (th-scan s (add e 1) n d2 0
+                    (if (eq top 1) (if (eq d prev) acc (cons lastend acc)) acc)
+                    (if (eq top 1) d prev)
+                    e))))
+    (defn th-drifts (p)
+        (do (let s (read_file p)) (th-scan s 0 (str_len s) 0 0 (list) 1 0)))
+
+    (defn th-insert (s at) (str_concat (substring s 0 at) (str_concat ")" (substring s at (str_len s)))))
+
+    ;; ── one cell ────────────────────────────────────────────────────
+    (defn th-try-loop (p orig ps)
+        (if (eq (len ps) 0) (do (write_file p orig) 0)
+            (do (write_file p (th-insert orig (head ps)))
+                (if (eq (th-accepts? p) 1) 1 (th-try-loop p orig (tail ps))))))
+    ;; TWO PRECONDITIONS, both paid for by the band on its first run.
+    ;;
+    ;; 1. ONLY A BROKEN CELL. Without this, `th-heal` on an already-whole cell
+    ;;    still tried candidates — and one was ACCEPTED, because it landed at
+    ;;    the end of the `; preludes:` comment line where a stray `)` is
+    ;;    invisible to the reader. The cell compiled, the gate said yes, and
+    ;;    the loop reported a repair it had invented. "The kernel stops
+    ;;    objecting" is not sufficient on its own: an INERT edit passes it.
+    ;;    A cell that closes is not a cell to repair.
+    ;;
+    ;; 2. NO CANDIDATE INSIDE A COMMENT. Same finding from the other side: a
+    ;;    position the reader never reads can absorb any closer and change
+    ;;    nothing, so the loop would "heal" a broken cell by writing a `)` into
+    ;;    a comment and leaving the real leak untouched — a green with the
+    ;;    wound still open, which is the exact family this whole week is about.
+    (defn th-in-comment? (s at)
+        (do (let ls (th-line-start s at))
+            (let line (substring s ls at))
+            (if (ge (str_find line ";" 0) 0) 1 0)))
+    (defn th-line-start (s at)
+        (if (le at 0) 0
+            (if (str_eq (substring s (sub at 1) at) "\n") at (th-line-start s (sub at 1)))))
+    (defn th-keep (s ps)
+        (if (eq (len ps) 0) (list)
+            (if (eq (th-in-comment? s (head ps)) 1) (th-keep s (tail ps))
+                (cons (head ps) (th-keep s (tail ps))))))
+    (defn th-heal (p)
+        (do (let orig (read_file p))
+            (if (eq (tb-depth p) 0) 0
+                (th-try-loop p orig
+                    (th-keep orig (append (th-drifts p) (list (str_len orig))))))))
+
+    ;; ── every unbalanced cell ───────────────────────────────────────
+    (defn th-line-at (s i n) (substring s i (th-eol s i n)))
+    (defn th-after-tab (l)
+        (do (let i (str_find l "\t" 0)) (if (lt i 0) l (substring l (add i 1) (str_len l)))))
+    (defn th-sweep-loop (s i n healed left names)
+        (if (ge i n) (list healed left names)
+            (do (let l (th-line-at s i n))
+                (let nx (add (th-eol s i n) 1))
+                (if (eq (str_len l) 0) (th-sweep-loop s nx n healed left names)
+                    (do (let p (th-after-tab l))
+                        (if (eq (th-heal p) 1)
+                            (th-sweep-loop s nx n (add healed 1) left
+                                (str_concat names (str_concat "  healed  " (str_concat p "\n"))))
+                            (th-sweep-loop s nx n healed (add left 1)
+                                (str_concat names (str_concat "  left    " (str_concat p "\n"))))))))))
+    (defn th-sweep () (do (let s (tb-list)) (th-sweep-loop s 0 (str_len s) 0 0 "")))
+    (defn th-report ()
+        (do (let r (th-sweep))
+            (th-cat (list "tree-heal\n  healed  " (int_to_str (nth r 0))
+                          "\n  left    " (int_to_str (nth r 1))
+                          "\n" (nth r 2)))))
+
+    0)
