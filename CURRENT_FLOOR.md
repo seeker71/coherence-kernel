@@ -5,7 +5,7 @@ Date: 2026-07-19 (reground on base `7667fad`, after the 2026-07-17 floor)
 This file is the current release floor for this worktree. Receipts preserve the
 history, but the claims below are only the state that is present now. Every
 witness value below was re-measured on this date through the resolver-driven
-`./fkwu --src` door unless a different door is named; a claim whose witness
+`./fkwu` door unless a different door is named; a claim whose witness
 could not be located or re-run today is said so plainly, not carried forward.
 
 ## Grounding
@@ -15,10 +15,10 @@ this floor was written.
 
 ```text
 cc -O2 -o fkwu runtime/fkwu-uni.c
-./fkwu --src bootstrap/ground.fk -> 42
-./fkwu --src bootstrap/ground-recursive.fk 10 -> 55
-./fkwu --src form/form-stdlib/tests/binary-freshness-band.fk -> 31
-./fkwu --src form/form-stdlib/tests/native-vs-rented-band.fk -> 11111
+./fkwu bootstrap/ground.fk -> 42
+./fkwu bootstrap/ground-recursive.fk 10 -> 55
+./fkwu form/form-stdlib/tests/binary-freshness-band.fk -> 31
+./fkwu form/form-stdlib/tests/native-vs-rented-band.fk -> 11111
 ```
 
 The C file is a checkout witness and shrink target. New runtime meaning belongs
@@ -28,9 +28,9 @@ in Form/native-walker cells, not in a larger C seed.
 
 ```text
 cc -O2 -o fkwu runtime/fkwu-uni.c
-./fkwu --src bootstrap/ground.fk -> 42
-./fkwu --src bootstrap/ground-recursive.fk 10 -> 55
-./fkwu --src cognition/tests/nl-neutral-trace-band.fk -> 4194303   (22 bits)
+./fkwu bootstrap/ground.fk -> 42
+./fkwu bootstrap/ground-recursive.fk 10 -> 55
+./fkwu cognition/tests/nl-neutral-trace-band.fk -> 4194303   (22 bits)
 ```
 
 - **The nl-neutral-trace lane** (`cognition/nl-neutral-trace.fk`, live door
@@ -105,7 +105,7 @@ trust, sovereignty, vitality, play, and wonder. Audio is one current organ using
 that floor.
 
 Focused direct-source witnesses observed in this reground (all re-run
-2026-07-17 through `./fkwu --src`):
+2026-07-17 through `./fkwu`):
 
 ```text
 host-os-membrane-band -> 8191   (healed this reground: its preludes were
@@ -128,7 +128,7 @@ skill-vitality-band -> 65535
 Organ-proof honesty, measured this reground:
 
 - Three north-star organ bands are written in BML call syntax and cannot run
-  through the `--src` s-expr door at all: `choice-receipt-band`,
+  through the source-runner door at all: `choice-receipt-band`,
   `channel-protocol-choice-floor-band`, `sovereign-boundary-protocol-band`.
   The s-expr parser desyncs on them and the boundedness repair halts the parse
   at the AST node cap with diagnostics (the repair working as designed; before
@@ -140,7 +140,7 @@ Organ-proof honesty, measured this reground:
 - 151 band files across form/presence/learn/observe still declare preludes in
   the retired multi-line style; every one of them runs numb (axiom-5 lowers
   the unresolved calls, verdict is a silent wrong number) when invoked via
-  `--src`. host-os-membrane-band above was one; 150 remain.
+  the source-runner. host-os-membrane-band above was one; 150 remain.
 
 ## Form Kernel Floor (new since 2026-07-05)
 
@@ -308,7 +308,7 @@ BML organ bands, PR #287 wired form_error end to end.)
   in the same numeric space.
 - The multi-line-preludes sweep (150 bands loading empty prelude lists) is in
   flight on its own branch; until it lands, those bands still run numb via
-  `--src`.
+  the source-runner.
 - Ontology-loader triage on today's main: 21 DIVERGENT resolved into families
   — 11 bp-unreviewed (now seated from the registry; 4 went PASS-4WAY, 2
   surfaced their real fourth-arm value mismatches from under the crash),
@@ -396,7 +396,7 @@ new curation needed, PR #285) plus the organ bands came home (PR #286); step
    intercepts call-position resolution ahead of the loader's Form-level `bp`,
    so the loader's guard still cannot raise on the fourth arm. Acceptance:
    with the loader's "property" row removed on a scratch branch,
-   `fkwu --src .../nl-reason-band.fk` dies with the RUNTIME form_error raise
+   `fkwu .../nl-reason-band.fk` dies with the RUNTIME form_error raise
    (not merely compile diagnostics), matching go/rust.
 2. Land the multi-line-preludes sweep; then no band can load an empty
    prelude list silently.
