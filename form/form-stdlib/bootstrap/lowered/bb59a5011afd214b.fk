@@ -1,0 +1,27 @@
+; http-client.fk - Form-native HTTP client surface.
+;
+; preludes: form-stdlib/core.fk
+;
+; Authored in the source-level Form/BML maintenance grammar. Kernel execution
+; receives lowered Form recipes from source-compiler.fk.
+;
+; Plain HTTP verbs are recipes over the host socket floor:
+; socket_connect / socket_send / socket_recv / socket_close. http_get remains a
+; compatibility native outside the method layer. sock_request is retained only as
+; a native fallback when the decomposed socket_connect path cannot open the peer.
+
+(do (defn kh-render-request (method path host body) (do (let blen (str_len body)) (let target (str_concat (str_concat method " ") path)) (let request_line (str_concat target " HTTP/1.0
+Host: ")) (let host_line (str_concat (str_concat request_line host) "
+Connection: close
+")) (if (gt blen 0) (str_concat (str_concat (str_concat (str_concat host_line "Content-Type: application/json
+Content-Length: ") (int_to_str blen)) "
+
+") body) (str_concat host_line "
+")))) (defn http-open (host port) (socket_connect host (str_to_int port))) (defn http-send-all-step (conn bytes from) (do (let n (socket_send conn (substring bytes from (str_len bytes)))) (if (le n 0) from (http-send-all conn bytes (add from n))))) (defn http-send-all (conn bytes from) (if (ge from (str_len bytes)) from (http-send-all-step conn bytes from))) (defn http-send-on-socket (conn method path host body) (do (let req (kh-render-request method path host body)) (http-send-all conn req 0))) (defn http-body-offset (msg) (do (let crlf (str_find msg "
+
+" 0)) (let lf (str_find msg "
+
+" 0)) (if (ge crlf 0) (add crlf 4) (if (ge lf 0) (add lf 2) -1)))) (defn http-header-end-from (msg start) (do (let crlf (str_find msg "
+" start)) (if (ge crlf 0) crlf (str_find msg "
+" start)))) (defn http-content-length-from (msg key at) (do (let start (add at (str_len key))) (let stop (http-header-end-from msg start)) (str_to_int (substring msg start (if (lt stop 0) (str_len msg) stop))))) (defn http-content-length (msg) (do (let key "Content-Length: ") (let at (str_find msg key 0)) (if (lt at 0) -1 (http-content-length-from msg key at)))) (defn http-response-complete-at (msg body-start) (do (let expected (http-content-length msg)) (if (lt expected 0) true (ge (sub (str_len msg) body-start) expected)))) (defn http-response-complete? (msg) (do (let body-start (http-body-offset msg)) (if (lt body-start 0) false (http-response-complete-at msg body-start)))) (defn http-recv-response-next (conn acc chunk) (do (let next (str_concat acc chunk)) (if (http-response-complete? next) next (http-recv-response-into conn next)))) (defn http-recv-response-into (conn acc) (do (let chunk (socket_recv conn 65536)) (if (eq (str_len chunk) 0) acc (http-recv-response-next conn acc chunk)))) (defn http-recv-response (conn) (socket_recv conn 65536)) (defn http-plain-request-connected (conn req) (do (let sent (http-send-all conn req 0)) (let response (if (gt sent 0) (http-recv-response conn) "")) (socket_close conn) response)) (defn http-plain-request-response-or-fallback (host port conn req) (do (let response (http-plain-request-connected conn req)) (if (gt (str_len response) 0) response (sock_request host port req)))) (defn http-plain-request (host port req) (do (let conn (http-open host port)) (if (lt conn 0) (sock_request host port req) (http-plain-request-response-or-fallback host port conn req)))) (defn http-fetch (method url body) (do (let https (eq (str_find url "https://" 0) 0)) (let after (substring url (if https 8 7) (str_len url))) (let slash (str_find after "/" 0)) (let hostport (if (eq slash -1) after (substring after 0 slash))) (let path (if (eq slash -1) "/" (substring after slash (str_len after)))) (let colon (str_find hostport ":" 0)) (let host (if (eq colon -1) hostport (substring hostport 0 colon))) (let port (if (eq colon -1) (if https "443" "80") (substring hostport (add colon 1) (str_len hostport)))) (let req (kh-render-request method path host body)) (if https (tls_request host port req) (http-plain-request host port req)))) (defn kh-msg-body-framed (msg body-start body-len) (do (let body-end (if (lt body-len 0) (str_len msg) (add body-start body-len))) (substring msg body-start body-end))) (defn kh-msg-body (msg) (do (let body-start (http-body-offset msg)) (let body-len (http-content-length msg)) (if (lt body-start 0) "" (kh-msg-body-framed msg body-start body-len)))) (defn kh-msg-start-line (msg) (do (let nl (str_find msg "
+" 0)) (if (gt nl -1) (substring msg 0 nl) msg))) (defn kh-status-of-rest (rest) (do (let sp2 (str_find rest " " 0)) (str_to_int (if (eq sp2 -1) rest (substring rest 0 sp2))))) (defn kh-status-of (response) (do (let line (kh-msg-start-line response)) (let sp (str_find line " " 0)) (if (eq sp -1) 0 (kh-status-of-rest (substring line (add sp 1) (str_len line)))))))

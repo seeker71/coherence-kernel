@@ -1,0 +1,89 @@
+; Small local proposal -> DS4 clear/repair -> remote only on unresolved.
+import "../local-validation-ladder.fk"
+
+(do
+  (defn lvlb-primary (request) 9001)
+  (defn lvlb-no-primary (request) (nothing))
+  (defn lvlb-health ()
+    (lfsm-health (fc-certified-form-reading 1 1) 1 1 1 1))
+  (defn lvlb-clear (request proposal)
+    (lvl-validation (lvl-state-clear) proposal "local-clear" (lvlb-health) 96 7001 0))
+  (defn lvlb-repair (request proposal)
+    (lvl-validation (lvl-state-repaired) 9002 "local-repair" (lvlb-health) 93 7002 7102))
+  (defn lvlb-unclear (request proposal)
+    (lvl-validation (lvl-state-unresolved) (nothing) "" (lvl-candidate-health) 41 7003 7103))
+  (defn lvlb-untrusted-clear (request proposal)
+    (lvl-validation (lvl-state-clear) proposal "uncertain" (lvl-candidate-health) 52 7004 7104))
+  (defn lvlb-remote-clear (request proposal local)
+    (lvl-validation (lvl-state-clear) 9010 "remote-answer" (lvlb-health) 99 8001 0))
+  (defn lvlb-remote-unresolved (request proposal local)
+    (lvl-validation (lvl-state-unresolved) (nothing) "" (lvl-candidate-health) 20 8002 8102))
+  ; If this validator were wrongly called on a local-clear/repair path, its
+  ; selected result and route would expose the crossing immediately.
+  (defn lvlb-remote-poison (request proposal local)
+    (lvl-validation (lvl-state-clear) 9999 "remote-was-called" (lvlb-health) 100 8999 0))
+
+  (defn lvlb-request (surface epoch)
+    (lfsm-request 1 surface
+      (list (lfsm-word (cwi-word-node "we") 24 7)
+            (lfsm-word (cwi-word-node "do") 32 6))
+      3 (cwi-lens 2 5 6 7) 7001 4 epoch 5 (lvlb-health)))
+  (defn lvlb-bit (condition bit) (if condition bit 0))
+
+  (defn lvlb-witness ()
+    (do (framebuffer-clear)
+      (let request (lvlb-request 101 10))
+      (let clear-result (lvl-enter (km-for 16) request lvlb-primary
+        lvlb-clear lvlb-remote-poison))
+      (let clear-memory (lvl-result-memory clear-result))
+      (let lookup-result (lvl-enter clear-memory (lvlb-request 202 11)
+        lvlb-no-primary lvlb-unclear lvlb-remote-poison))
+      (let repair-result (lvl-enter (km-for 16) request lvlb-primary
+        lvlb-repair lvlb-remote-poison))
+      (let remote-result (lvl-enter (km-for 16) request lvlb-primary
+        lvlb-unclear lvlb-remote-clear))
+      (let uncertain-result (lvl-enter (km-for 16) request lvlb-primary
+        lvlb-untrusted-clear lvlb-remote-clear))
+      (let no-primary-result (lvl-enter (km-for 16) request lvlb-no-primary
+        lvlb-clear lvlb-remote-clear))
+      (let unresolved-result (lvl-enter (km-for 16) request lvlb-primary
+        lvlb-unclear lvlb-remote-unresolved))
+      (let frames (len (framebuffer-events)))
+
+      (let score
+        (add
+          (lvlb-bit (and (eq (lvl-result-route clear-result) (lvl-route-local-clear))
+                         (eq (lvl-result-selected clear-result) 9001)) 1)
+          (add (lvlb-bit (and (eq (lvl-result-route lookup-result) (lvl-route-native-lookup))
+                              (eq (lvl-result-selected lookup-result) 9001)) 2)
+          (add (lvlb-bit (and (eq (lvl-result-route repair-result) (lvl-route-local-repair))
+                              (eq (lvl-result-selected repair-result) 9002)) 4)
+          (add (lvlb-bit (and (eq (lvl-result-route remote-result) (lvl-route-remote-answer))
+                              (eq (lvl-result-selected remote-result) 9010)) 8)
+          (add (lvlb-bit (eq (lvl-result-route uncertain-result)
+                             (lvl-route-remote-answer)) 16)
+          (add (lvlb-bit (eq (lvl-result-route no-primary-result)
+                             (lvl-route-remote-answer)) 32)
+          (add (lvlb-bit (and (eq (lvl-result-route unresolved-result)
+                                  (lvl-route-unresolved))
+                              (nothing? (lvl-result-selected unresolved-result))) 64)
+          (add (lvlb-bit (eq (nth (lvl-result-capture clear-result) 5) 0) 128)
+          (add (lvlb-bit (eq (nth (lvl-result-capture repair-result) 5) 0) 256)
+          (add (lvlb-bit (and (gt frames 0)
+                 (eq (lfsm-entry-state
+                   (km-get (lvl-result-memory remote-result) (lfsm-key request) (list)))
+                   (lfsm-water))) 512)
+               (lvlb-bit (and
+                 (eq (lfsm-entry-result
+                   (km-get (lvl-result-memory no-primary-result) (lfsm-key request) (list))) 9010)
+                 (eq (lfsm-entry-state
+                   (km-get (lvl-result-memory no-primary-result) (lfsm-key request) (list)))
+                   (lfsm-water))) 1024))))))))))))
+      ; [nothing,0,1,node,score,frames,clear,lookup,repair,remote,
+      ;  uncertain,no-primary,unresolved,success]
+      (list (nothing) 0 1 1001099799 score frames
+        (lvl-result-route clear-result) (lvl-result-route lookup-result)
+        (lvl-result-route repair-result) (lvl-result-route remote-result)
+        (lvl-result-route uncertain-result) (lvl-result-route no-primary-result)
+        (lvl-result-route unresolved-result) (if (eq score 2047) 1 0))))
+  (lvlb-witness))

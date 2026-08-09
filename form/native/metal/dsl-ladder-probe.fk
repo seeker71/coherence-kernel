@@ -1,0 +1,109 @@
+; dsl-ladder-probe.fk — the progressive ladder's levels 1-2, seconds-scale iteration instrument.
+; Level 1: ONE dispatch (blk.0.attn_output_a, Q8_0, the biggest dense projection) — k enqueues,
+;          one read closing the clock; beside it the span's own byte floor.
+; Level 2: the same dispatch DECOMPOSED — binding built fresh per call (the decode loop's shape),
+;          binding prebuilt (the seam alone), binding construction alone (no door) — each x1000,
+;          each in microseconds. The three numbers say what rides a dispatch besides its bytes.
+; Witness probe, committed with its receipt. preludes only the proof cell (~30 s compile), never the stack.
+; preludes: native/metal/dsv4-decode-form.fk
+
+(do
+    (defn dslp-bind (w x y r c)
+        (dfd-bind-tg
+            (str_concat (str_concat (dfd-u32 3) (str_concat (str_concat (dfd-u32 w) (dfd-u32 x)) (dfd-u32 y)))
+                        (str_concat (dfd-u32 2) (str_concat (dfd-u32 r) (dfd-u32 c))))
+            256 0))
+    (defn dslp-enq-loop (p bind grid n)
+        (if (le n 0) 0 (do (metal_enqueue p bind grid) (dslp-enq-loop p bind grid (sub n 1)))))
+    (defn dslp-build-loop (w x y r c n acc)
+        (if (le n 0) acc (dslp-build-loop w x y r c (sub n 1) (add acc (str_len (dslp-bind w x y r c))))))
+    (defn dslp-fresh-loop (p w x y r c n)
+        (if (le n 0) 0 (do (dfd-mv-enq p 8 w x y r c) (dslp-fresh-loop p w x y r c (sub n 1)))))
+
+    (let path "/Users/ursmuff/models/ds4-engine/gguf/DeepSeek-V4-Flash-IQ2XXS-w2Q2K-AProjQ8-SExpQ8-OutQ8-chat-v2-imatrix.gguf")
+    (let src (dfd-src path))
+    (let name "blk.0.attn_output_a.weight")
+    (let abs (dfd-tabs src path name))
+    (let bytes (dfd-tbytes src name))
+    (let cols (dfd-td0 src name))
+    (let rows (dfd-td1 src name))
+    (let ty (dfd-ttype src name))
+    (print (str_concat "tensor " (str_concat name (str_concat " ty=" (str_concat (int_to_str ty)
+        (str_concat " rows=" (str_concat (int_to_str rows) (str_concat " cols=" (str_concat (int_to_str cols)
+        (str_concat " bytes=" (int_to_str bytes)))))))))))
+    (let wh (metal_buf_from_file path abs bytes))
+    (let xh (metal_buf_alloc (mul cols 4)))
+    (let yh (metal_buf_alloc (mul rows 4)))
+    (let p (dfd-mv-pipe 8))
+    (let grid (mul (div (add rows 1) 2) 256))
+
+    ; ── LEVEL 1: k dispatches, one read closes the clock (bw-probe's shape) ──
+    (let e0 (dfd-mv-enq p 8 wh xh yh rows cols))
+    (let r0 (metal_buf_read yh 0 4))
+    (let k 64)
+    (let bind1 (dslp-bind wh xh yh rows cols))
+    (let t0 (now_unix_ms))
+    (let l1 (dslp-enq-loop p bind1 grid k))
+    (let r1 (metal_buf_read yh 0 4))
+    (let t1 (now_unix_ms))
+    (let l1ms (sub t1 t0))
+    (print (str_concat "L1 k=" (str_concat (int_to_str k)
+        (str_concat " wall_ms=" (str_concat (int_to_str l1ms)
+        (str_concat " us_per_dispatch=" (str_concat (int_to_str (div (mul l1ms 1000) k))
+        (str_concat " floor_us_at_477GBs=" (str_concat (int_to_str (div bytes 477000))
+        (str_concat " achieved_GBs=" (int_to_str (div (mul bytes k) (mul (if (le l1ms 0) 1 l1ms) 1000000)))))))))))))
+
+    ; ── LEVEL 2a: binding construction alone, x1000 (no door touched) ──
+    (let t2 (now_unix_ms))
+    (let l2a (dslp-build-loop wh xh yh rows cols 1000 0))
+    (let t3 (now_unix_ms))
+    (print (str_concat "L2a binding_build_x1000_ms=" (str_concat (int_to_str (sub t3 t2))
+        (str_concat " -> us_per_binding=" (int_to_str (sub t3 t2))))))
+
+    ; ── LEVEL 2b: the seam alone — prebuilt binding, 1000 enqueues, no sync in the clock ──
+    (let t4 (now_unix_ms))
+    (let l2b (dslp-enq-loop p bind1 grid 1000))
+    (let t5 (now_unix_ms))
+    (print (str_concat "L2b enqueue_prebuilt_x1000_ms=" (str_concat (int_to_str (sub t5 t4))
+        (str_concat " -> us_per_enqueue=" (int_to_str (sub t5 t4))))))
+    (let r2 (metal_buf_read yh 0 4))
+
+    ; ── LEVEL 2c: the decode loop's actual per-dispatch shape — fresh binding + enqueue, x1000 ──
+    (let t6 (now_unix_ms))
+    (let l2c (dslp-fresh-loop p wh xh yh rows cols 1000))
+    (let t7 (now_unix_ms))
+    (print (str_concat "L2c fresh_bind_enqueue_x1000_ms=" (str_concat (int_to_str (sub t7 t6))
+        (str_concat " -> us_per_dispatch=" (int_to_str (sub t7 t6))))))
+    (let r3 (metal_buf_read yh 0 4))
+
+    ; ── LEVEL 2d: the decode loop's OTHER host work — the 517,120-byte logits read and the
+    ; interpreted argmax pair over 129,280 lanes, exactly as dfd-st-head runs them per token ──
+    (let vb (metal_buf_alloc 517120))
+    (let t8 (now_unix_ms))
+    (let lraw (metal_buf_read wh 0 517120))
+    (let t9 (now_unix_ms))
+    (let am (dfd-argmax-go lraw 0 129280 0 (dfd-f32at lraw 0)))
+    (let t10 (now_unix_ms))
+    (let am2 (dfd-arg2-go lraw 0 129280 (head am) 0 (sub (dfd-f32at lraw 0) 1000000.0)))
+    (let t11 (now_unix_ms))
+    (print (str_concat "L2d read517k_ms=" (str_concat (int_to_str (sub t9 t8))
+        (str_concat " argmax_ms=" (str_concat (int_to_str (sub t10 t9))
+        (str_concat " arg2_ms=" (int_to_str (sub t11 t10))))))))
+
+    ; ── LEVEL 2e: the same two instruments AFTER the heap holds millions of nodes — does the
+    ; interpreter's cost grow with the table it allocates into? (make_nodeid content addressing)
+    (defn dslp-bloat (n acc) (if (le n 0) acc (dslp-bloat (sub n 1) (cons n acc))))
+    (let t12 (now_unix_ms))
+    (let junk (dslp-bloat 2000000 0))
+    (let t13 (now_unix_ms))
+    (let t14 (now_unix_ms))
+    (let l2a2 (dslp-build-loop wh xh yh rows cols 1000 0))
+    (let t15 (now_unix_ms))
+    (let am3 (dfd-argmax-go lraw 0 129280 0 (dfd-f32at lraw 0)))
+    (let t16 (now_unix_ms))
+    (print (str_concat "L2e bloat2M_ms=" (str_concat (int_to_str (sub t13 t12))
+        (str_concat " keep=" (str_concat (int_to_str (len junk))
+        (str_concat " binding_x1000_ms_after=" (str_concat (int_to_str (sub t15 t14))
+        (str_concat " argmax_ms_after=" (int_to_str (sub t16 t15))))))))))
+    (print (metal_status))
+    0)
