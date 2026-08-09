@@ -1,0 +1,261 @@
+; work-replay-sense.fk — the WORK-REPLAY loop's reader, its judge tables, and its living rows.
+;
+; WHY. Urs, 2026-08-09, twice on the first replay battery: "remove bash and non-form code
+; please", then "we prefer alive in favor of static... the loop iteration and evaluation is
+; healthier when fully integrated instead of moved into an external layer." So: no scorer
+; layer beside the loop, and no report as the deliverable. The sensing organ lives in
+; form-cli-judge.fk (fcj-sense-*, the judge extended to sense without an oracle crossing);
+; this cell carries what is replay-SPECIFIC: the corpus reader, each episode's judge line
+; compiled to needle groups, the salience of an outcome, and the row shape the loop appends
+; to the living ledger — learn/work-replay-rows.txt — which any fold re-answers from at any
+; time, the way hdc-field-code is computed fresh from rows and never stored as a report.
+;
+; THE CORPUS is learn/work-replay-corpus.jsonl, 19 episodes from the real session logs,
+; read directly by a minimal JSON key-scanner written here (the safetensors reader's
+; precedent: read the foreign shape, decode only what the bytes carry — \n, \", \t, \\,
+; \uXXXX -> UTF-8). The .jsonl stays the imported original; nothing is hand-copied.
+;
+; SALIENCE (surprise-salience.fk's magnitude lane, 0..100): the rented record is the
+; prediction, the sensed outcome the actual. A hit the record did not predict is the
+; loudest (90); a miss where the record carried is loud (60); a hit that needed the loop's
+; feedback is quiet news (30); both minds missing is quieter (10); the expected hit is 0.
+;
+; A LIVING ROW is one line, ten space-separated fields, appended the moment the episode
+; closes (file_append_bytes, the log-structured door — mid-run, the fold already answers
+; over what has landed):  id type lane attempts sensed coverm covert rented sal ms
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/form-cli-judge.fk form-stdlib/surprise-salience.fk learn/homecoming-work-census.fk
+;
+; Proven by: learn/tests/work-replay-sense-band.fk
+
+(do
+    (defn wrs-corpus-path () "learn/work-replay-corpus.jsonl")
+    (defn wrs-rows-path () "learn/work-replay-rows.txt")
+
+    ; ---- lines (real newlines only; in-string newlines are still \n escapes)
+    (defn wrs-lines-loop (s i n acc)
+        (do (let j (str_find s "\n" i))
+            (if (lt j 0)
+                (if (lt i n) (append acc (list (substring s i n))) acc)
+                (wrs-lines-loop s (add j 1) n
+                    (if (lt i j) (append acc (list (substring s i j))) acc)))))
+    (defn wrs-lines (s) (wrs-lines-loop s 0 (str_len s) (empty)))
+
+    ; ---- JSON string decoding, byte by byte
+    (defn wrs-hex-val (b)
+        (if (and (ge b 48) (le b 57)) (sub b 48)
+            (if (and (ge b 97) (le b 102)) (sub b 87)
+                (if (and (ge b 65) (le b 70)) (sub b 55) 0))))
+    (defn wrs-utf8 (cp)
+        (if (lt cp 128) (byte_to_str cp)
+            (if (lt cp 2048)
+                (str_concat (byte_to_str (add 192 (div cp 64)))
+                            (byte_to_str (add 128 (mod cp 64))))
+                (str_concat (byte_to_str (add 224 (div cp 4096)))
+                    (str_concat (byte_to_str (add 128 (mod (div cp 64) 64)))
+                                (byte_to_str (add 128 (mod cp 64))))))))
+    (defn wrs-decode-loop (s i n acc)
+        (if (ge i n) acc
+            (do (let b (str_byte_at s i))
+                (if (eq b 34) acc
+                    (if (eq b 92)
+                        (do (let e (str_byte_at s (add i 1)))
+                            (if (eq e 110) (wrs-decode-loop s (add i 2) n (str_concat acc (byte_to_str 10)))
+                            (if (eq e 116) (wrs-decode-loop s (add i 2) n (str_concat acc (byte_to_str 9)))
+                            (if (eq e 117)
+                                (do (let cp (add (mul 4096 (wrs-hex-val (str_byte_at s (add i 2))))
+                                            (add (mul 256 (wrs-hex-val (str_byte_at s (add i 3))))
+                                            (add (mul 16 (wrs-hex-val (str_byte_at s (add i 4))))
+                                                 (wrs-hex-val (str_byte_at s (add i 5)))))))
+                                    (wrs-decode-loop s (add i 6) n (str_concat acc (wrs-utf8 cp))))
+                                (wrs-decode-loop s (add i 2) n (str_concat acc (byte_to_str e)))))))
+                        (wrs-decode-loop s (add i 1) n (str_concat acc (byte_to_str b))))))))
+
+    ; ---- field readers: "key": "value" (decoded) and "key": true
+    (defn wrs-field (line key)
+        (do (let patt (str_concat "\"" (str_concat key "\": \"")))
+            (let ki (str_find line patt 0))
+            (if (lt ki 0) ""
+                (wrs-decode-loop line (add ki (str_len patt)) (str_len line) ""))))
+    (defn wrs-flag (line key)
+        (if (ge (str_find line (str_concat "\"" (str_concat key "\": true")) 0) 0) 1 0))
+
+    ; ---- episodes: (id type context ground-truth rented-hit)
+    (defn wrs-episode (line)
+        (list (wrs-field line "id") (wrs-field line "type") (wrs-field line "context")
+              (wrs-field line "ground_truth") (wrs-flag line "rented_hit")))
+    (defn wrs-ep-id     (e) (nth e 0))
+    (defn wrs-ep-type   (e) (nth e 1))
+    (defn wrs-ep-ctx    (e) (nth e 2))
+    (defn wrs-ep-gt     (e) (nth e 3))
+    (defn wrs-ep-rented (e) (nth e 4))
+    (defn wrs-episodes-loop (ls acc)
+        (if (eq (len ls) 0) acc
+            (wrs-episodes-loop (tail ls) (append acc (list (wrs-episode (head ls)))))))
+    (defn wrs-episodes () (wrs-episodes-loop (wrs-lines (read_file (wrs-corpus-path))) (empty)))
+
+    (defn wrs-ep-for-id-loop (eps id)
+        (if (eq (len eps) 0) (empty)
+            (if (str_eq (wrs-ep-id (head eps)) id) (head eps)
+                (wrs-ep-for-id-loop (tail eps) id))))
+    (defn wrs-ep-for-id (eps id) (wrs-ep-for-id-loop eps id))
+
+    (defn wrs-type-in? (t types)
+        (if (eq (len types) 0) 0
+            (if (str_eq t (head types)) 1 (wrs-type-in? t (tail types)))))
+    (defn wrs-of-types-loop (eps types acc)
+        (if (eq (len eps) 0) acc
+            (wrs-of-types-loop (tail eps) types
+                (if (eq (wrs-type-in? (wrs-ep-type (head eps)) types) 1)
+                    (append acc (list (head eps))) acc))))
+    (defn wrs-of-types (eps types) (wrs-of-types-loop eps types (empty)))
+
+    (defn wrs-types () (list "predict-mutation-verdict" "diagnose-defect-from-symptom"
+                             "write-small-Form-fix" "answer-from-source" "choose-next-probe"))
+
+    ; ---- each episode's judge line, compiled to fcj needle groups (lowercase needles —
+    ;      the loop lowers the hay with hwc-lower before sensing)
+    (defn wrs-judge (id)
+        (if (str_eq id "wr-01") (list (list (fcj-needle 1 "127")))
+        (if (str_eq id "wr-02") (list (list (fcj-needle 1 "187"))
+                                      (list (fcj-needle 2 "bit 4") (fcj-needle 2 "bit 64")))
+        (if (str_eq id "wr-03") (list (list (fcj-needle 1 "23")))
+        (if (str_eq id "wr-04") (list (list (fcj-needle 1 "479"))
+                                      (list (fcj-needle 2 "bit 32") (fcj-needle 0 "dark")))
+        (if (str_eq id "wr-05") (list (list (fcj-needle 2 "mod")))
+        (if (str_eq id "wr-06") (list (list (fcj-needle 0 "special") (fcj-needle 0 "atomic"))
+                                      (list (fcj-needle 0 "special") (fcj-needle 0 "split"))
+                                      (list (fcj-needle 0 "special") (fcj-needle 0 "single"))
+                                      (list (fcj-needle 0 "special") (fcj-needle 0 "fragment")))
+        (if (str_eq id "wr-07") (list (list (fcj-needle 0 "utf") (fcj-needle 0 "advance"))
+                                      (list (fcj-needle 0 "utf") (fcj-needle 0 "width"))
+                                      (list (fcj-needle 0 "utf") (fcj-needle 0 "swallow"))
+                                      (list (fcj-needle 0 "multi-byte") (fcj-needle 0 "advance"))
+                                      (list (fcj-needle 0 "multi-byte") (fcj-needle 0 "width"))
+                                      (list (fcj-needle 0 "multi-byte") (fcj-needle 0 "swallow")))
+        (if (str_eq id "wr-08") (list (list (fcj-needle 0 "mtime") (fcj-needle 0 "second"))
+                                      (list (fcj-needle 0 "timestamp") (fcj-needle 0 "second"))
+                                      (list (fcj-needle 0 "mtime") (fcj-needle 0 "granular"))
+                                      (list (fcj-needle 0 "timestamp") (fcj-needle 0 "granular")))
+        (if (str_eq id "wr-09") (list (list (fcj-needle 0 "prelude") (fcj-needle 0 "split"))
+                                      (list (fcj-needle 0 "prelude") (fcj-needle 0 "move"))
+                                      (list (fcj-needle 0 "split") (fcj-needle 0 "arm")))
+        (if (str_eq id "wr-10") (list (list (fcj-needle 1 "249") (fcj-needle 1 "2492492854")))
+        (if (str_eq id "wr-11") (list (list (fcj-needle 0 "str_find")))
+        (if (str_eq id "wr-12") (list (list (fcj-needle 0 "sub 0 1")))
+        (if (str_eq id "wr-13") (list (list (fcj-needle 3 "0)))))))))))))")))
+        (if (str_eq id "wr-14") (list (list (fcj-needle 0 "mtime") (fcj-needle 0 "path") (fcj-needle 2 "no"))
+                                      (list (fcj-needle 0 "mtime") (fcj-needle 0 "path") (fcj-needle 2 "not"))
+                                      (list (fcj-needle 0 "mtime") (fcj-needle 0 "byte") (fcj-needle 2 "no"))
+                                      (list (fcj-needle 0 "mtime") (fcj-needle 0 "byte") (fcj-needle 2 "not"))
+                                      (list (fcj-needle 0 "mtime") (fcj-needle 0 "never")))
+        (if (str_eq id "wr-15") (list (list (fcj-needle 1 "2492492854")))
+        (if (str_eq id "wr-16") (list (list (fcj-needle 0 "genesis") (fcj-needle 0 "flatten"))
+                                      (list (fcj-needle 0 "source text") (fcj-needle 0 "flatten"))
+                                      (list (fcj-needle 0 "genesis") (fcj-needle 0 "table"))
+                                      (list (fcj-needle 0 "flatten") (fcj-needle 0 "table")))
+        (if (str_eq id "wr-17") (list (list (fcj-needle 0 "touch") (fcj-needle 0 "mtime"))
+                                      (list (fcj-needle 0 "touch") (fcj-needle 0 "timestamp"))
+                                      (list (fcj-needle 0 "mtime") (fcj-needle 0 "same bytes"))
+                                      (list (fcj-needle 0 "mtime") (fcj-needle 0 "forward")))
+        (if (str_eq id "wr-18") (list (list (fcj-needle 0 "paren") (fcj-needle 0 "string"))
+                                      (list (fcj-needle 0 "paren") (fcj-needle 0 "literal")))
+        (if (str_eq id "wr-19") (list (list (fcj-needle 0 "grep") (fcj-needle 0 "binary"))
+                                      (list (fcj-needle 0 "strings") (fcj-needle 0 "binary"))
+                                      (list (fcj-needle 0 "nm ") (fcj-needle 0 "binary"))
+                                      (list (fcj-needle 0 "build script") (fcj-needle 0 "binary"))
+                                      (list (fcj-needle 0 "grep") (fcj-needle 0 "stub"))
+                                      (list (fcj-needle 0 "grep") (fcj-needle 0 "build")))
+        (empty)))))))))))))))))))))
+
+    ; ---- the in-loop sense: lower the continuation, ask the judge organ
+    (defn wrs-sense-carries? (text id)
+        (fcj-sense-carries? (hwc-lower text) (wrs-judge id)))
+    (defn wrs-sense-best (text id)
+        (fcj-sense-best (hwc-lower text) (wrs-judge id)))
+
+    ; ---- salience: the rented record predicts; the sensed outcome answers
+    (defn wrs-salience (sensed rented attempts)
+        (if (and (eq sensed 1) (eq rented 0)) 90
+            (if (and (eq sensed 0) (eq rented 1)) 60
+                (if (and (eq sensed 1) (gt attempts 1)) 30
+                    (if (and (eq sensed 0) (eq rented 0)) 10 0)))))
+    (defn wrs-salience-floor () 50)
+
+    ; ---- living rows: id type lane attempts sensed coverm covert rented sal ms
+    (defn wrs-row (id type lane attempts sensed coverm covert rented sal ms)
+        (str_concat id (str_concat " " (str_concat type (str_concat " " (str_concat lane
+        (str_concat " " (str_concat (int_to_str attempts)
+        (str_concat " " (str_concat (int_to_str sensed)
+        (str_concat " " (str_concat (int_to_str coverm)
+        (str_concat " " (str_concat (int_to_str covert)
+        (str_concat " " (str_concat (int_to_str rented)
+        (str_concat " " (str_concat (int_to_str sal)
+        (str_concat " " (int_to_str ms))))))))))))))))))))
+    (defn wrs-split-loop (s i n acc)
+        (do (let j (str_find s " " i))
+            (if (lt j 0)
+                (if (lt i n) (append acc (list (substring s i n))) acc)
+                (wrs-split-loop s (add j 1) n
+                    (if (lt i j) (append acc (list (substring s i j))) acc)))))
+    (defn wrs-split (s) (wrs-split-loop s 0 (str_len s) (empty)))
+    (defn wrs-row-id       (r) (nth (wrs-split r) 0))
+    (defn wrs-row-type     (r) (nth (wrs-split r) 1))
+    (defn wrs-row-lane     (r) (nth (wrs-split r) 2))
+    (defn wrs-row-attempts (r) (str_to_int (nth (wrs-split r) 3)))
+    (defn wrs-row-sensed   (r) (str_to_int (nth (wrs-split r) 4)))
+    (defn wrs-row-coverm   (r) (str_to_int (nth (wrs-split r) 5)))
+    (defn wrs-row-covert   (r) (str_to_int (nth (wrs-split r) 6)))
+    (defn wrs-row-rented   (r) (str_to_int (nth (wrs-split r) 7)))
+    (defn wrs-row-sal      (r) (str_to_int (nth (wrs-split r) 8)))
+    (defn wrs-row-ms       (r) (str_to_int (nth (wrs-split r) 9)))
+
+    ; string -> byte list, for the append door
+    (defn wrs-str-bytes-loop (s i n acc)
+        (if (ge i n) acc
+            (wrs-str-bytes-loop s (add i 1) n (append acc (list (str_byte_at s i))))))
+    (defn wrs-str-bytes (s) (wrs-str-bytes-loop s 0 (str_len s) (empty)))
+    (defn wrs-append-row (path row)
+        (file_append_bytes path (wrs-str-bytes (str_concat row (byte_to_str 10)))))
+
+    ; ---- the ledger, read fresh; history keeps every row, the current view keeps the
+    ;      LAST row per id (adding without forgetting — the stream fold's teaching)
+    (defn wrs-ledger-rows ()
+        (if (eq (fs_exists (wrs-rows-path)) 0) (empty)
+            (wrs-lines (read_file (wrs-rows-path)))))
+    (defn wrs-latest-put (acc row)
+        (if (eq (len acc) 0) (list row)
+            (if (str_eq (wrs-row-id (head acc)) (wrs-row-id row))
+                (append (list row) (tail acc))
+                (append (list (head acc)) (wrs-latest-put (tail acc) row)))))
+    (defn wrs-latest-loop (rows acc)
+        (if (eq (len rows) 0) acc
+            (wrs-latest-loop (tail rows) (wrs-latest-put acc (head rows)))))
+    (defn wrs-latest-rows (rows) (wrs-latest-loop rows (empty)))
+
+    ; ---- folds over rows (the alive counterpart of a table)
+    (defn wrs-rows-sensed-of-type (rows t acc)
+        (if (eq (len rows) 0) acc
+            (wrs-rows-sensed-of-type (tail rows) t
+                (if (str_eq (wrs-row-type (head rows)) t)
+                    (add acc (wrs-row-sensed (head rows))) acc))))
+    (defn wrs-rows-count-of-type (rows t acc)
+        (if (eq (len rows) 0) acc
+            (wrs-rows-count-of-type (tail rows) t
+                (if (str_eq (wrs-row-type (head rows)) t) (add acc 1) acc))))
+    (defn wrs-eps-count-of-type (eps t acc)
+        (if (eq (len eps) 0) acc
+            (wrs-eps-count-of-type (tail eps) t
+                (if (str_eq (wrs-ep-type (head eps)) t) (add acc 1) acc))))
+    (defn wrs-eps-rented-of-type (eps t acc)
+        (if (eq (len eps) 0) acc
+            (wrs-eps-rented-of-type (tail eps) t
+                (if (str_eq (wrs-ep-type (head eps)) t)
+                    (add acc (wrs-ep-rented (head eps))) acc))))
+    ; rows -> surprise-salience's (label magnitude) shape, for ss-peak / ss-count-salient
+    (defn wrs-surprises-loop (rows acc)
+        (if (eq (len rows) 0) acc
+            (wrs-surprises-loop (tail rows)
+                (append acc (list (list (wrs-row-id (head rows)) (wrs-row-sal (head rows))))))))
+    (defn wrs-surprises (rows) (wrs-surprises-loop rows (empty)))
+    0)
