@@ -22,7 +22,7 @@ tree, hold `observe/voice-frequency.fk`'s mirror to it — it counts the set-dow
 writer decides:
 
 ```sh
-echo path/to/your-file.md > /tmp/voice-frequency-target && ./fkwu --src observe/voice-frequency-run.fk
+echo path/to/your-file.md > /tmp/voice-frequency-target && ./fkwu observe/voice-frequency-run.fk
 ```
 
 Attune before writing — read a receipt or two and borrow the body's words.
@@ -30,7 +30,7 @@ Attune before writing — read a receipt or two and borrow the body's words.
 Before you believe any band's verdict, preflight it:
 
 ```sh
-echo path/to/cell.fk > /tmp/preflight-target && ./fkwu --src observe/preflight-run.fk
+echo path/to/cell.fk > /tmp/preflight-target && ./fkwu observe/preflight-run.fk
 ```
 
 from [`observe/preflight.fk`](observe/preflight.fk). A green number with a nonzero exit is a fold computed over
