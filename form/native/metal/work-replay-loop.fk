@@ -1,0 +1,120 @@
+; work-replay-loop.fk — the WORK-REPLAY loop: ask, sense in-line, adapt, land a living row.
+;
+; Urs, 2026-08-09, on the first battery: "remove bash and non-form code please", then
+; "we prefer alive in favor of static... the loop iteration and evaluation is healthier
+; when fully integrated instead of moved into an external layer." This cell is both
+; corrections at once. The loop is Form recursion; each episode's context goes through
+; the dense Metal lane as a completion; the continuation is sensed INSIDE the loop by
+; the judge organ (form-cli-judge.fk's fcj-sense-*, needles compiled from the episode's
+; recorded judge line); and the sensed outcome shapes what happens next: a red answer
+; feeds back into one more ask — the model's own words returned to it with the red
+; spoken plainly — and a green one closes the episode. The moment an episode closes,
+; its row lands in the living ledger (learn/work-replay-rows.txt, atomic append), so
+; any fold anywhere re-answers over what has landed, mid-run included. The printed
+; lines here are a view; the rows are the truth.
+;
+; The only host touches are the kernel's own organs: read_file for the corpus,
+; file_append_bytes for the rows, the Metal door for the asks.
+;
+; One model per process (an open holds ~197 of 198 buffer slots — the dense-run
+; family's precedent), so each model gets a thin driver beside this cell:
+;   form/native/metal/work-replay-run-dsr1q32.fk      reasoning episodes -> R1-32B
+;   form/native/metal/work-replay-run-qwencoder32.fk  code episodes -> Coder-32B
+;
+; run FROM THE REPO ROOT: ./fkwu-metal --src form/native/metal/work-replay-run-dsr1q32.fk
+;
+; PROOF LEVEL: FOURTH-ARM ONLY (sensing proven by learn/tests/work-replay-sense-band.fk)
+;
+; preludes: native/metal/dense-token-handle.fk learn/work-replay-sense.fk
+
+(do
+    (defn wrl-ask (st prompt n)
+        (do (let ps (nth st 0)) (let bs (nth st 1)) (let geo (nth st 2))
+            (let lays (nth st 3)) (let cks (nth st 4)) (let cvs (nth st 5))
+            (let src (nth st 10))
+            (let ids (dtk-encode src prompt))
+            (let pf (dth-prefill ps bs geo lays cks cvs (nth st 6) (nth st 7) (nth st 8) ids 0))
+            (let first (nth pf 0))
+            (let rest (dth-generate ps bs geo lays cks cvs (nth st 6) (nth st 7) (nth st 8)
+                                    first (len ids) (sub n 1) (empty)))
+            (list (l3d-text src (append (list first) rest)) (len ids))))
+
+    ; the feedback ask: the model's first answer returned to it, the red spoken plainly
+    (defn wrl-feedback-prompt (ctx first-text)
+        (str_concat ctx (str_concat first-text
+            "\n\nThat answer was sensed red against the record. A sharper answer:")))
+
+    (defn wrl-print-attempt (tag text)
+        (do (print (str_concat "<<TEXT " (str_concat tag ">>")))
+            (print text)
+            (print "<<END>>")
+            0))
+
+    (defn wrl-episode (st ep n lane)
+        (do (let id (wrs-ep-id ep))
+            (let tA (now_unix_ms))
+            (let a1 (wrl-ask st (wrs-ep-ctx ep) n))
+            (let text1 (nth a1 0))
+            (let s1 (wrs-sense-carries? text1 id))
+            (print (str_concat "episode=" (str_concat id
+                (str_concat " type=" (str_concat (wrs-ep-type ep)
+                (str_concat " prompt_tokens=" (str_concat (int_to_str (nth a1 1))
+                (str_concat " sense1=" (int_to_str s1)))))))))
+            (wrl-print-attempt "attempt-1" text1)
+            (let final
+                (if (eq s1 1) (list 1 1 text1)
+                    (do (let a2 (wrl-ask st (wrl-feedback-prompt (wrs-ep-ctx ep) text1) n))
+                        (let text2 (nth a2 0))
+                        (let s2 (wrs-sense-carries? text2 id))
+                        (wrl-print-attempt "attempt-2" text2)
+                        (list s2 2 text2))))
+            (let sensed (nth final 0))
+            (let attempts (nth final 1))
+            (let best (wrs-sense-best (nth final 2) id))
+            (let tB (now_unix_ms))
+            (let sal (wrs-salience sensed (wrs-ep-rented ep) attempts))
+            (let row (wrs-row id (wrs-ep-type ep) lane attempts sensed
+                              (nth best 0) (nth best 1) (wrs-ep-rented ep) sal (sub tB tA)))
+            (wrs-append-row (wrs-rows-path) row)
+            (print (str_concat "row=" row))
+            (print (str_concat "expect=" (wrs-ep-gt ep)))
+            sensed))
+
+    (defn wrl-loop (st eps n lane acc)
+        (if (eq (len eps) 0) acc
+            (wrl-loop st (tail eps) n lane (add acc (wrl-episode st (head eps) n lane)))))
+
+    ; the end-of-run view: the same fold any kernel can re-answer from the ledger
+    (defn wrl-view (tag eps)
+        (do (let rows (wrs-latest-rows (wrs-ledger-rows)))
+            (let surprises (wrs-surprises rows))
+            (print (str_concat tag (str_concat "_ledger_rows=" (int_to_str (len rows)))))
+            (print (str_concat tag (str_concat "_salient="
+                (int_to_str (ss-count-salient surprises (wrs-salience-floor))))))
+            (let peak (ss-peak surprises))
+            (if (gt (len peak) 0)
+                (print (str_concat tag (str_concat "_peak=" (str_concat (nth peak 0)
+                    (str_concat ":" (int_to_str (ss-mag peak)))))))
+                0)
+            0))
+
+    (defn wrl-battery (tag blob types n)
+        (do (let live (md-door-live?))
+            (print (if live "door=live" "door=DEAD"))
+            (if live
+                (do (let eps (wrs-of-types (wrs-episodes) types))
+                    (print (str_concat tag (str_concat "_episodes=" (int_to_str (len eps)))))
+                    (let tA (now_unix_ms))
+                    (let st (dth-open blob 1024 (sub 0 1)))
+                    (let tB (now_unix_ms))
+                    (print (str_concat tag (str_concat "_arch=" (nth st 9))))
+                    (print (str_concat tag (str_concat "_open_ms=" (int_to_str (sub tB tA)))))
+                    (let sensed (wrl-loop st eps n tag 0))
+                    (print (str_concat tag (str_concat "_sensed="
+                        (str_concat (int_to_str sensed)
+                        (str_concat "/" (int_to_str (len eps)))))))
+                    (wrl-view tag eps)
+                    (print (metal_status))
+                    0)
+                0)))
+    0)
