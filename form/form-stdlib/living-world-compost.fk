@@ -1,0 +1,196 @@
+; living-world-compost.fk -- consented root release, never overwrite.
+;
+; A target may leave the current world only when every attribution that holds
+; it (directly or through a dependent composition) is inactive and every
+; historical holder unanimously acknowledges one exact compost proposal.
+; Integration mints a new world root with all target-bearing entries released.
+; The receipt retains the prior world, so reversal is possible while it is
+; held.  Physical collection remains the substrate's ordinary reachability
+; consequence after callers release the transition/receipt and old root.
+; witnessed: 2026-08-09 -> 1023
+;
+; preludes: form-stdlib/core.fk form-stdlib/offer-ack-core.fk form-stdlib/living-world-organ.fk form-stdlib/living-world-tending.fk form-stdlib/living-world-resonance-evidence.fk
+
+(let LWC-PLAN    (bp "LWC-PLAN"))
+(let LWC-RECEIPT (bp "LWC-RECEIPT"))
+
+; Category identity is part of a node's present composition.  Descending only
+; through children would miss a target used as a blueprint/category.  Worlds
+; are content-addressed DAGs, not trees: thread an exact-identity visited field
+; through one explicit worklist so shared derivations are inspected once rather
+; than once per incoming edge.  This single recursive surface avoids relying
+; on foreign-style forward declaration or mutual-recursion visibility.  The
+; result pair is [found, visited].
+(defn lwc-contains-items-seen (items target seen)
+    (if (eq (len items) 0) (list 0 seen)
+        (do
+            (let cell (head items))
+            (if (or (node_eq cell target)
+                    (node_eq (node_category cell) target))
+                (list 1 seen)
+                (if (eq (lwo-field-has? seen cell) 1)
+                    (lwc-contains-items-seen (tail items) target seen)
+                    (lwc-contains-items-seen
+                        (append (node_children cell) (tail items)) target
+                        (lwo-field-add seen cell)))))))
+
+(defn lwc-contains-seen (cell target seen)
+    (lwc-contains-items-seen (list cell) target seen))
+
+(defn lwc-contains-items? (items target)
+    (nth (lwc-contains-items-seen
+            items target (lwo-empty-field)) 0))
+
+(defn lwc-contains? (cell target)
+    (nth (lwc-contains-seen cell target (lwo-empty-field)) 0))
+
+(defn lwc-attributions-containing-items (items target acc)
+    (if (eq (len items) 0) acc
+        (lwc-attributions-containing-items (tail items) target
+            (if (eq (lwc-contains? (head items) target) 1)
+                (lwo-field-add acc (head items)) acc))))
+
+(defn lwc-attributions-containing (world target)
+    (lwc-attributions-containing-items
+        (lwo-field-items (lwo-world-attributions world)) target
+        (lwo-empty-field)))
+
+(defn lwc-any-active-attribution? (world items)
+    (if (eq (len items) 0) 0
+        (if (eq (lwo-active-attribution? world (head items)) 1) 1
+            (lwc-any-active-attribution? world (tail items)))))
+
+(defn lwc-attribution-participants (attributions)
+    (lwt-sources-from-attributions
+        (lwo-field-items attributions) (lwo-empty-field)))
+
+; children: target, affected attributions, participants, current world root
+(defn lwc-plan (target attributions participants world)
+    (intern_node LWC-PLAN
+        (list target attributions participants world)))
+(defn lwc-plan? (cell) (lwo-category? cell LWC-PLAN))
+(defn lwc-plan-target (plan) (nth (node_children plan) 0))
+(defn lwc-plan-attributions (plan) (nth (node_children plan) 1))
+(defn lwc-plan-participants (plan) (nth (node_children plan) 2))
+(defn lwc-plan-world (plan) (nth (node_children plan) 3))
+
+(defn lwc-compost-proposal (world target)
+    (do
+        (let attributions (lwc-attributions-containing world target))
+        (let participants (lwc-attribution-participants attributions))
+        (if (or (eq (lwo-field-size attributions) 0)
+                (or (eq (lwo-field-size participants) 0)
+                    (eq (lwc-any-active-attribution? world
+                            (lwo-field-items attributions)) 1)))
+            (lwo-none)
+            (do
+                (let plan (lwc-plan target attributions participants world))
+                (lwt-proposal plan participants plan)))))
+
+; The response cells consenting to this exact proposal necessarily contain its
+; target through their proposal child.  They are the one active reference that
+; authorizes rather than blocks this proposal.
+(defn lwc-authorizing-response? (cell proposal)
+    (if (and (eq (lwt-response? cell) 1)
+             (node_eq (lwt-response-proposal cell) proposal)) 1 0))
+
+(defn lwc-plan-attributions-items (items target proposal acc)
+    (if (eq (len items) 0) acc
+        (do
+            (let attribution (head items))
+            (let payload (lwo-attribution-payload attribution))
+            (lwc-plan-attributions-items (tail items) target proposal
+                (if (and (eq (lwc-contains? attribution target) 1)
+                         (eq (lwc-authorizing-response?
+                                 payload proposal) 0))
+                    (lwo-field-add acc attribution) acc)))))
+
+(defn lwc-plan-attributions-current (world target proposal)
+    (lwc-plan-attributions-items
+        (lwo-field-items (lwo-world-attributions world)) target proposal
+        (lwo-empty-field)))
+
+(defn lwc-active-blocker-items? (world items target proposal)
+    (if (eq (len items) 0) 0
+        (do
+            (let attribution (head items))
+            (let payload (lwo-attribution-payload attribution))
+            (if (and (eq (lwo-active-attribution? world attribution) 1)
+                     (and (eq (lwc-contains? attribution target) 1)
+                          (eq (lwc-authorizing-response?
+                                  payload proposal) 0)))
+                1
+                (lwc-active-blocker-items? world (tail items)
+                    target proposal)))))
+
+(defn lwc-plan-current? (world proposal plan)
+    (do
+        (let current
+            (lwc-plan-attributions-current
+                world (lwc-plan-target plan) proposal))
+        (if (and (node_eq current (lwc-plan-attributions plan))
+                 (eq (lwc-active-blocker-items? world
+                         (lwo-field-items current)
+                         (lwc-plan-target plan) proposal) 0)) 1 0)))
+
+(defn lwc-filter-items (items target acc)
+    (if (eq (len items) 0) acc
+        (lwc-filter-items (tail items) target
+            (if (eq (lwc-contains? (head items) target) 1) acc
+                (lwo-field-add acc (head items))))))
+
+(defn lwc-filter-field (field target)
+    (lwc-filter-items (lwo-field-items field) target (lwo-empty-field)))
+
+(defn lwc-release-world-root (world target)
+    (lwo-world
+        (lwc-filter-field (lwo-world-cells world) target)
+        (lwc-filter-field (lwo-world-relations world) target)
+        (lwc-filter-field (lwo-world-attributions world) target)
+        (lwc-filter-field (lwo-world-revocations world) target)
+        (lwc-filter-field (lwo-world-events world) target)))
+
+(defn lwc-world-contains? (world target)
+    (if (or (eq (lwc-contains? (lwo-world-cells world) target) 1)
+            (or (eq (lwc-contains? (lwo-world-relations world) target) 1)
+                (or (eq (lwc-contains?
+                            (lwo-world-attributions world) target) 1)
+                    (or (eq (lwc-contains?
+                                (lwo-world-revocations world) target) 1)
+                        (eq (lwc-contains?
+                                (lwo-world-events world) target) 1))))) 1 0))
+
+; children: target, prior world, successor world, affected attributions,
+;           unanimous outcome
+(defn lwc-receipt (plan prior successor outcome)
+    (intern_node LWC-RECEIPT
+        (list (lwc-plan-target plan) prior successor
+              (lwc-plan-attributions plan) outcome)))
+(defn lwc-receipt? (cell) (lwo-category? cell LWC-RECEIPT))
+(defn lwc-receipt-target (receipt) (nth (node_children receipt) 0))
+(defn lwc-receipt-prior-world (receipt) (nth (node_children receipt) 1))
+(defn lwc-receipt-successor-world (receipt) (nth (node_children receipt) 2))
+(defn lwc-receipt-attributions (receipt) (nth (node_children receipt) 3))
+(defn lwc-receipt-outcome (receipt) (nth (node_children receipt) 4))
+
+(defn lwc-integrate (world proposal)
+    (if (or (eq (lwt-proposal? proposal) 0)
+            (eq (lwc-plan? (lwt-proposal-candidate proposal)) 0))
+        (lwo-transition world (oac-zero))
+        (do
+            (let plan (lwt-proposal-candidate proposal))
+            (let outcome (lwt-evaluate-proposal world proposal))
+            (if (or (not (node_eq (lwt-outcome-status outcome)
+                                  (lwt-status-acknowledged)))
+                    (eq (lwc-plan-current? world proposal plan) 0))
+                (lwo-transition world (oac-zero))
+                (do
+                    (let successor
+                        (lwc-release-world-root world
+                            (lwc-plan-target plan)))
+                    (if (eq (lwc-world-contains? successor
+                                (lwc-plan-target plan)) 1)
+                        (lwo-transition world (oac-zero))
+                        (lwo-transition successor
+                            (oac-node
+                                (lwc-receipt plan world successor outcome)))))))))

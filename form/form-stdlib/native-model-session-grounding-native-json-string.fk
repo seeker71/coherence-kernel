@@ -1,0 +1,136 @@
+; native-model-session-grounding-native-json-string.fk -- a minimal,
+; Unicode-correct JSON string-field lens.  It interns no surrounding document;
+; private JSONL remains a transient string and only explicitly named strings
+; are decoded.
+; preludes: form-stdlib/core.fk form-stdlib/native-model-session-grounding-native-common.fk
+
+(do
+    ; Minimal JSON string lens.  It never interns the surrounding document and
+    ; therefore never turns a private session line into a durable AST cell.
+    ; Only a specifically named string field is decoded.  Missing, null, and
+    ; non-string values condense to the empty string.
+    (defn nmsgn-json-hex-value (cp)
+        (if (and (ge cp 48) (le cp 57)) (sub cp 48)
+        (if (and (ge cp 65) (le cp 70)) (add 10 (sub cp 65))
+        (if (and (ge cp 97) (le cp 102)) (add 10 (sub cp 97)) 0))))
+    (defn nmsgn-json-hex4 (text index)
+        (add
+            (mul (nmsgn-json-hex-value (ord (char_at text index))) 4096)
+            (add
+                (mul (nmsgn-json-hex-value
+                    (ord (char_at text (add index 1)))) 256)
+                (add
+                    (mul (nmsgn-json-hex-value
+                        (ord (char_at text (add index 2)))) 16)
+                    (nmsgn-json-hex-value
+                        (ord (char_at text (add index 3))))))))
+    (defn nmsgn-json-high-surrogate? (cp)
+        (if (and (ge cp 55296) (le cp 56319)) 1 0))
+    (defn nmsgn-json-low-surrogate? (cp)
+        (if (and (ge cp 56320) (le cp 57343)) 1 0))
+    (defn nmsgn-json-surrogate-pair (hi lo)
+        (add 65536 (add (mul (sub hi 55296) 1024) (sub lo 56320))))
+    (defn nmsgn-json-utf8 (cp)
+        (if (lt cp 128) (byte_to_str cp)
+        (if (lt cp 2048)
+            (str_concat (byte_to_str (add 192 (div cp 64)))
+                (byte_to_str (add 128 (mod cp 64))))
+        (if (lt cp 65536)
+            (str_concat (byte_to_str (add 224 (div cp 4096)))
+                (str_concat
+                    (byte_to_str (add 128 (mod (div cp 64) 64)))
+                    (byte_to_str (add 128 (mod cp 64)))))
+            (str_concat (byte_to_str (add 240 (div cp 262144)))
+                (str_concat
+                    (byte_to_str (add 128 (mod (div cp 4096) 64)))
+                    (str_concat
+                        (byte_to_str (add 128 (mod (div cp 64) 64)))
+                        (byte_to_str (add 128 (mod cp 64))))))))))
+    (defn nmsgn-json-basic-escape (cp)
+        (if (eq cp 34) "\""
+        (if (eq cp 47) "/"
+        (if (eq cp 92) "\\"
+        (if (eq cp 98) (byte_to_str 8)
+        (if (eq cp 102) (byte_to_str 12)
+        (if (eq cp 110) (byte_to_str 10)
+        (if (eq cp 114) (byte_to_str 13)
+        (if (eq cp 116) (byte_to_str 9) (byte_to_str cp))))))))))
+    (defn nmsgn-json-unescape-loop (text index acc)
+        (do
+            (let slash (str_find text "\\" index))
+            (if (lt slash 0) (str_concat acc
+                    (substring text index (str_len text)))
+                (do
+                    (let next-acc
+                        (str_concat acc (substring text index slash)))
+                    (if (ge (add slash 1) (str_len text))
+                        (str_concat next-acc "\\")
+                        (do
+                            (let escape (ord (char_at text (add slash 1))))
+                            (if (and (eq escape 117)
+                                     (le (add slash 6) (str_len text)))
+                                (do
+                                    (let cp (nmsgn-json-hex4 text (add slash 2)))
+                                    (if (and
+                                            (eq (nmsgn-json-high-surrogate? cp) 1)
+                                            (and (le (add slash 12) (str_len text))
+                                                (and (eq (ord (char_at text
+                                                        (add slash 6))) 92)
+                                                     (eq (ord (char_at text
+                                                        (add slash 7))) 117))))
+                                        (do
+                                            (let low (nmsgn-json-hex4 text
+                                                (add slash 8)))
+                                            (if (eq
+                                                    (nmsgn-json-low-surrogate? low) 1)
+                                                (nmsgn-json-unescape-loop text
+                                                    (add slash 12)
+                                                    (str_concat next-acc
+                                                        (nmsgn-json-utf8
+                                                            (nmsgn-json-surrogate-pair
+                                                                cp low))))
+                                                (nmsgn-json-unescape-loop text
+                                                    (add slash 6)
+                                                    (str_concat next-acc
+                                                        (nmsgn-json-utf8 cp)))))
+                                        (nmsgn-json-unescape-loop text
+                                            (add slash 6)
+                                            (str_concat next-acc
+                                                (nmsgn-json-utf8 cp)))))
+                                (nmsgn-json-unescape-loop text (add slash 2)
+                                    (str_concat next-acc
+                                        (nmsgn-json-basic-escape escape))))))))))
+    (defn nmsgn-json-string-end (text index)
+        (if (ge index (str_len text)) (str_len text)
+            (do
+                (let cp (ord (char_at text index)))
+                (if (eq cp 34) index
+                    (if (eq cp 92)
+                        (nmsgn-json-string-end text (add index 2))
+                        (nmsgn-json-string-end text (add index 1)))))))
+    (defn nmsgn-json-skip-space (text index)
+        (if (ge index (str_len text)) index
+            (do
+                (let cp (ord (char_at text index)))
+                (if (or (eq cp 32)
+                        (or (eq cp 9) (or (eq cp 10) (eq cp 13))))
+                    (nmsgn-json-skip-space text (add index 1)) index))))
+    (defn nmsgn-json-string (text key)
+        (do
+            (let marker (nmsgn-cat (list "\"" key "\":")))
+            (let found (str_find text marker 0))
+            (if (lt found 0) ""
+                (do
+                    (let start (nmsgn-json-skip-space text
+                        (add found (str_len marker))))
+                    (if (or (ge start (str_len text))
+                            (not (eq (ord (char_at text start)) 34))) ""
+                        (do
+                            (let content-start (add start 1))
+                            (let content-end
+                                (nmsgn-json-string-end text content-start))
+                            (nmsgn-json-unescape-loop
+                                (substring text content-start content-end)
+                                0 "")))))))
+
+    0)

@@ -1,0 +1,116 @@
+; child-framebuffer-channel.fk -- a live, privacy-bounded same-process bridge.
+;
+; The child reads its own framebuffer, emits only aggregate counters through
+; print_str, waits for a correlated offered control on read_line, actuates it,
+; and re-observes.  Payload cells never cross the text boundary.
+;
+; Minimal text codec:
+;   child-control|schema=v1|exchange=<nonnegative-int>|action=<nonnegative-int>
+;
+; The sender's alternative/default remains optional: `nothing` means that no
+; default was declared.  Missing, malformed, mismatched, and unoffered control
+; therefore remain observable without being collapsed into an invented answer.
+; preludes: form/form-stdlib/core.fk
+
+import "bidirectional-framebuffer-channel.fk"
+
+(do
+  (defn cfc-action-offered? (actions action)
+    (if (nil? actions) 0
+      (if (eq (head actions) action) 1
+        (cfc-action-offered? (tail actions) action))))
+
+  ; [valid, value].  Exact decimal roundtrip prevents malformed text from
+  ; becoming action zero through str_to_int's recovery floor.
+  (defn cfc-field-int (text marker)
+    (do (let at (str_find text marker 0))
+      (if (lt at 0) (list 0 0)
+        (do (let start (add at (str_len marker)))
+          (let found-end (str_find text "|" start))
+          (let end (if (lt found-end 0) (str_len text) found-end))
+          (if (eq start end) (list 0 0)
+            (do (let raw (substring text start end))
+              (let value (str_to_int raw))
+              (if (and (ge value 0) (str_eq raw (int_to_str value)))
+                (list 1 value)
+                (list 0 0))))))))
+
+  (defn cfc-control-line (line expected-exchange offered-actions alternative)
+    (if (not (eq (str_find line "child-control|schema=v1|" 0) 0))
+      (nothing)
+      (do (let exchange-field (cfc-field-int line "exchange="))
+        (let action-field (cfc-field-int line "action="))
+        (if (and (eq (nth exchange-field 0) 1)
+          (and (eq (nth action-field 0) 1)
+          (and (eq (nth exchange-field 1) expected-exchange)
+               (eq (cfc-action-offered? offered-actions (nth action-field 1)) 1))))
+          (bfc-envelope 1 expected-exchange 1 (nth action-field 1) alternative)
+          (nothing)))))
+
+  (defn cfc-attributed-count (events)
+    (if (nil? events) 0
+      (add (if (eq (len (node_source (head events))) 3) 1 0)
+           (cfc-attributed-count (tail events)))))
+
+  (defn cfc-same-state? (a b)
+    (if (nothing? a)
+      (if (nothing? b) 1 0)
+      (if (nothing? b) 0 (node_eq a b))))
+
+  (defn cfc-status-line (exchange stage events attributed accepted
+                         default-present action state-changed)
+    (str_concat "child-framebuffer|schema=v1|exchange="
+      (str_concat (int_to_str exchange)
+      (str_concat "|stage="
+      (str_concat stage
+      (str_concat "|events="
+      (str_concat (int_to_str events)
+      (str_concat "|attributed="
+      (str_concat (int_to_str attributed)
+      (str_concat "|accepted="
+      (str_concat (int_to_str accepted)
+      (str_concat "|default-present="
+      (str_concat (int_to_str default-present)
+      (str_concat "|action="
+      (str_concat (int_to_str action)
+      (str_concat "|state-changed="
+                  (int_to_str state-changed)))))))))))))))))
+
+  ; Result:
+  ; [outbound, inbound-or-nothing, selected-state, events-before,
+  ;  events-after, attributed-after, accepted, default-present, changed]
+  (defn cfc-live-round (exchange current-state rehearsed-state alternative
+                        offered-actions)
+    (do (framebuffer-clear)
+      (let outbound (bfc-envelope 0 exchange 0 (list 0 0) alternative))
+      (let out-event (bfc-record-out outbound (mul exchange 2)))
+      (let first-events (framebuffer-events))
+      (let events-before (len first-events))
+      (let attributed-before (cfc-attributed-count first-events))
+      (let default-present (if (nothing? alternative) 0 1))
+      (let first-line (cfc-status-line exchange "outbound" events-before
+        attributed-before 0 default-present (sub 0 1) 0))
+      (let first-emitted (print_str first-line))
+      (let raw-control (read_line))
+      (let inbound (if (lt raw-control 0) (nothing)
+        (cfc-control-line raw-control exchange offered-actions alternative)))
+      (let accepted (if (nothing? inbound) 0 1))
+      (let in-event (if (eq accepted 1)
+        (bfc-record-in inbound (add (mul exchange 2) 1))
+        (nothing)))
+      (let selected (bfc-apply outbound inbound current-state rehearsed-state))
+      (let action (if (eq accepted 1) (bfc-payload inbound) (sub 0 1)))
+      (let changed (if (eq (cfc-same-state? selected current-state) 1) 0 1))
+      (let reobserve (bfc-envelope 0 (add exchange 1) 0
+        (list events-before (len (framebuffer-events))) alternative))
+      (let reobserve-event (bfc-record-out reobserve (add (mul exchange 2) 2)))
+      (let final-events (framebuffer-events))
+      (let events-after (len final-events))
+      (let attributed-after (cfc-attributed-count final-events))
+      (let second-line (cfc-status-line exchange "integrated" events-after
+        attributed-after accepted default-present action changed))
+      (let second-emitted (print_str second-line))
+      (list outbound inbound selected events-before events-after
+        attributed-after accepted default-present changed)))
+
+  0)

@@ -1,0 +1,225 @@
+; living-world-multilens-plan.fk -- optional concurrent lenses keep distinct views.
+;
+; An active lens declaration may have no default, no applied layers, any number
+; of unapplied alternatives, and an optional unknowable remainder. Each applied
+; lens payload is treated only as an offered relation cell and derives its own
+; bounded relation plan over the exact offered node field.
+;
+; The bundle never votes across lenses and never orders lenses by NodeID:
+;
+;   OPEN       no lens is applied;
+;   ALIGNED    every applied view is READY with one identical sequence;
+;   DIVERGENT  every applied view is READY but sequences differ;
+;   UNRESOLVED at least one view is AMBIGUOUS or CYCLE.
+;
+; Ready, ambiguous, and cyclic views remain separately inspectable even under
+; UNRESOLVED. Unapplied lenses remain alternatives. Declared unknown and
+; derived unknown are separate optional cells. Only ALIGNED carries a primary
+; sequence; all other states leave it absent.
+;
+; preludes: form-stdlib/core.fk form-stdlib/offer-ack-core.fk form-stdlib/living-world-organ.fk form-stdlib/living-world-tending.fk form-stdlib/living-world-lens-channel.fk form-stdlib/living-world-symbol.fk form-stdlib/living-world-symbol-learning.fk form-stdlib/living-world-relation-learning.fk form-stdlib/living-world-relation-plan.fk
+
+(let LWMP-VIEW       (bp "LWMP-VIEW"))
+(let LWMP-COLLECTION (bp "LWMP-COLLECTION"))
+(let LWMP-BUNDLE     (bp "LWMP-BUNDLE"))
+(let LWMP-OPEN       (bp "LWMP-OPEN"))
+(let LWMP-ALIGNED    (bp "LWMP-ALIGNED"))
+(let LWMP-DIVERGENT  (bp "LWMP-DIVERGENT"))
+(let LWMP-UNRESOLVED (bp "LWMP-UNRESOLVED"))
+
+(defn lwmp-open () (intern_node LWMP-OPEN (empty)))
+(defn lwmp-aligned () (intern_node LWMP-ALIGNED (empty)))
+(defn lwmp-divergent () (intern_node LWMP-DIVERGENT (empty)))
+(defn lwmp-unresolved () (intern_node LWMP-UNRESOLVED (empty)))
+(defn lwmp-open? (cell) (lwo-category? cell LWMP-OPEN))
+(defn lwmp-aligned? (cell) (lwo-category? cell LWMP-ALIGNED))
+(defn lwmp-divergent? (cell) (lwo-category? cell LWMP-DIVERGENT))
+(defn lwmp-unresolved? (cell) (lwo-category? cell LWMP-UNRESOLVED))
+
+; children: exact lens, its offered relation payload, local plan, local path
+(defn lwmp-view (lens plan)
+    (intern_node LWMP-VIEW
+        (list lens (lwlc-lens-payload lens) plan (lwo-local-path))))
+(defn lwmp-view? (cell) (lwo-category? cell LWMP-VIEW))
+(defn lwmp-view-lens (view) (nth (node_children view) 0))
+(defn lwmp-view-relation (view) (nth (node_children view) 1))
+(defn lwmp-view-plan (view) (nth (node_children view) 2))
+(defn lwmp-view-path (view) (nth (node_children view) 3))
+
+(defn lwmp-field-union-items (items field)
+    (if (eq (len items) 0) field
+        (lwmp-field-union-items (tail items)
+            (lwo-field-add field (head items)))))
+
+; children: views, ready views, ambiguous views, cycle views,
+;           distinct ready sequences, attribution witnesses
+(defn lwmp-collection
+    (views ready ambiguous cycles sequences witnesses)
+    (intern_node LWMP-COLLECTION
+        (list views ready ambiguous cycles sequences witnesses)))
+(defn lwmp-collection-views (collection)
+    (nth (node_children collection) 0))
+(defn lwmp-collection-ready (collection)
+    (nth (node_children collection) 1))
+(defn lwmp-collection-ambiguous (collection)
+    (nth (node_children collection) 2))
+(defn lwmp-collection-cycles (collection)
+    (nth (node_children collection) 3))
+(defn lwmp-collection-sequences (collection)
+    (nth (node_children collection) 4))
+(defn lwmp-collection-witnesses (collection)
+    (nth (node_children collection) 5))
+(defn lwmp-empty-collection ()
+    (lwmp-collection
+        (lwo-empty-field) (lwo-empty-field) (lwo-empty-field)
+        (lwo-empty-field) (lwo-empty-field) (lwo-empty-field)))
+
+(defn lwmp-collect-view (collection view)
+    (do
+        (let plan (lwmp-view-plan view))
+        (let status (lwrp-plan-status plan))
+        (let views
+            (lwo-field-add (lwmp-collection-views collection) view))
+        (let witnesses
+            (lwmp-field-union-items
+                (lwo-field-items
+                    (lwrp-group-witnesses (lwrp-plan-group plan)))
+                (lwmp-collection-witnesses collection)))
+        (if (eq (lwrp-ready? status) 1)
+            (lwmp-collection views
+                (lwo-field-add (lwmp-collection-ready collection) view)
+                (lwmp-collection-ambiguous collection)
+                (lwmp-collection-cycles collection)
+                (lwo-field-add (lwmp-collection-sequences collection)
+                    (lwrp-plan-sequence plan)) witnesses)
+            (if (eq (lwrp-ambiguous? status) 1)
+                (lwmp-collection views
+                    (lwmp-collection-ready collection)
+                    (lwo-field-add
+                        (lwmp-collection-ambiguous collection) view)
+                    (lwmp-collection-cycles collection)
+                    (lwmp-collection-sequences collection) witnesses)
+                (lwmp-collection views
+                    (lwmp-collection-ready collection)
+                    (lwmp-collection-ambiguous collection)
+                    (lwo-field-add
+                        (lwmp-collection-cycles collection) view)
+                    (lwmp-collection-sequences collection) witnesses)))))
+
+(defn lwmp-collect-lenses (world items nodes collection)
+    (if (eq (len items) 0) collection
+        (do
+            (let lens (head items))
+            (let plan
+                (lwrp-plan-for world (lwlc-lens-payload lens) nodes))
+            (lwmp-collect-lenses world (tail items) nodes
+                (lwmp-collect-view collection (lwmp-view lens plan))))))
+
+(defn lwmp-status-for (collection)
+    (do
+        (let view-count
+            (lwo-field-size (lwmp-collection-views collection)))
+        (let unresolved-count
+            (add
+                (lwo-field-size (lwmp-collection-ambiguous collection))
+                (lwo-field-size (lwmp-collection-cycles collection))))
+        (let sequence-count
+            (lwo-field-size (lwmp-collection-sequences collection)))
+        (if (eq view-count 0) (lwmp-open)
+            (if (gt unresolved-count 0) (lwmp-unresolved)
+                (if (eq sequence-count 1)
+                    (lwmp-aligned) (lwmp-divergent))))))
+
+(defn lwmp-primary-sequence (collection status)
+    (if (eq (lwmp-aligned? status) 0) (lwo-none)
+        (head (lwo-field-items
+                (lwmp-collection-sequences collection)))))
+
+(defn lwmp-alternative-sequences (collection status)
+    (if (eq (lwmp-divergent? status) 1)
+        (lwmp-collection-sequences collection) (lwo-empty-field)))
+
+(defn lwmp-derived-unknown (collection status)
+    (if (or (eq (lwmp-open? status) 1)
+            (or (eq (lwmp-divergent? status) 1)
+                (eq (lwmp-unresolved? status) 1)))
+        (lwlc-unknown collection) (lwo-none)))
+
+; children: declaration, offered nodes, all views, ready views,
+;           ambiguous views, cycle views, unapplied alternative lenses,
+;           distinct ready sequences, status, optional primary sequence,
+;           alternative sequences, declared unknown, derived unknown,
+;           attribution witnesses, local path
+(defn lwmp-bundle-cell
+    (declaration nodes collection status primary alternative-sequences
+     witnesses)
+    (do
+        (let stack (lwlc-declaration-stack declaration))
+        (intern_node LWMP-BUNDLE
+            (list declaration nodes
+                  (lwmp-collection-views collection)
+                  (lwmp-collection-ready collection)
+                  (lwmp-collection-ambiguous collection)
+                  (lwmp-collection-cycles collection)
+                  (lwlc-stack-alternatives stack)
+                  (lwmp-collection-sequences collection)
+                  status primary alternative-sequences
+                  (lwlc-stack-unknown stack)
+                  (lwmp-derived-unknown collection status)
+                  witnesses (lwo-local-path)))))
+(defn lwmp-bundle? (cell) (lwo-category? cell LWMP-BUNDLE))
+(defn lwmp-bundle-declaration (bundle) (nth (node_children bundle) 0))
+(defn lwmp-bundle-nodes (bundle) (nth (node_children bundle) 1))
+(defn lwmp-bundle-views (bundle) (nth (node_children bundle) 2))
+(defn lwmp-bundle-ready-views (bundle) (nth (node_children bundle) 3))
+(defn lwmp-bundle-ambiguous-views (bundle) (nth (node_children bundle) 4))
+(defn lwmp-bundle-cycle-views (bundle) (nth (node_children bundle) 5))
+(defn lwmp-bundle-unapplied-lenses (bundle) (nth (node_children bundle) 6))
+(defn lwmp-bundle-sequences (bundle) (nth (node_children bundle) 7))
+(defn lwmp-bundle-status (bundle) (nth (node_children bundle) 8))
+(defn lwmp-bundle-primary-sequence (bundle) (nth (node_children bundle) 9))
+(defn lwmp-bundle-alternative-sequences (bundle)
+    (nth (node_children bundle) 10))
+(defn lwmp-bundle-declared-unknown (bundle) (nth (node_children bundle) 11))
+(defn lwmp-bundle-derived-unknown (bundle) (nth (node_children bundle) 12))
+(defn lwmp-bundle-witnesses (bundle) (nth (node_children bundle) 13))
+(defn lwmp-bundle-path (bundle) (nth (node_children bundle) 14))
+
+(defn lwmp-bundle-for (world declaration nodes)
+    (if (or (eq (lwlc-declaration-current? world declaration) 0)
+            (or (eq (lwo-category? nodes LWO-FIELD) 0)
+                (or (eq (lwo-field-size nodes) 0)
+                    (eq (lwrp-all-nodes-current?
+                          world (lwo-field-items nodes)) 0))))
+        (lwo-none)
+        (do
+            (let lenses
+                (lwlc-stack-applied-lenses
+                    (lwlc-declaration-stack declaration)))
+            (let collection
+                (lwmp-collect-lenses world lenses nodes
+                    (lwmp-empty-collection)))
+            (let status (lwmp-status-for collection))
+            (let witnesses
+                (lwmp-field-union-items
+                    (lwo-field-items
+                        (lwo-active-attributions-for world declaration))
+                    (lwmp-collection-witnesses collection)))
+            (lwmp-bundle-cell declaration nodes collection status
+                (lwmp-primary-sequence collection status)
+                (lwmp-alternative-sequences collection status)
+                witnesses))))
+
+(defn lwmp-bundle-aligned? (bundle)
+    (if (and (eq (lwmp-bundle? bundle) 1)
+             (eq (lwmp-aligned?
+                   (lwmp-bundle-status bundle)) 1)) 1 0))
+
+(defn lwmp-bundle-current? (world bundle)
+    (if (eq (lwmp-bundle? bundle) 0) 0
+        (if (node_eq bundle
+                (lwmp-bundle-for world
+                    (lwmp-bundle-declaration bundle)
+                    (lwmp-bundle-nodes bundle))) 1 0)))
+
+0

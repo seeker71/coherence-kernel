@@ -1,0 +1,187 @@
+; source-runner-framebuffer.fk -- consented, attributed resident Form source.
+;
+; The temporary checkout bootstrap must parse this body before any Form cell can
+; speak.  Once resident, however, new source arrives as an offered cell and is
+; evaluated by the Form-native cursor walker.  Each top-level expression in a
+; `do` is a bounded step with enter/leave framebuffer cells, source offsets, an
+; exact result cell, and threaded environment.  A single expression is one
+; step.  No source text, binding name, artifact path, or value is projected to
+; stdout; those remain content-addressed inside the process.
+;
+; Only a ONE acknowledgement opens evaluation.  NOTHING-now, ZERO, and a NODE
+; alternative return unchanged.  A sender may resolve its optional timeout
+; contract before offering; pending and expired-to-default histories therefore
+; stay distinct without adding another terminal arm here.
+;
+; This is not yet the checkout CLI handoff and does not make bootstrap parsing
+; visible.  It is the Form-owned resident door that such a handoff can enter.
+; It performs no whole-file read, artifact write, remote call, or C-seed growth.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-eval-full.fk form-stdlib/offer-ack-core.fk observe/live-call-framebuffer.fk
+
+(let SRFB-OFFER  (bp "SRFB-OFFER"))
+(let SRFB-STEP   (bp "SRFB-STEP"))
+(let SRFB-RESULT (bp "SRFB-RESULT"))
+
+; children: offered source, acknowledgement, provenance, optional lens.
+(defn srfb-offer (source ack provenance lens)
+    (intern_node SRFB-OFFER
+        (list (intern_trivial_string source) ack provenance lens)))
+(defn srfb-offer? (cell)
+    (if (node_eq (node_category cell) SRFB-OFFER) 1 0))
+(defn srfb-offer-source-cell (offer) (nth (node_children offer) 0))
+(defn srfb-offer-source (offer) (node_value (srfb-offer-source-cell offer)))
+(defn srfb-offer-ack (offer) (nth (node_children offer) 1))
+(defn srfb-offer-provenance (offer) (nth (node_children offer) 2))
+(defn srfb-offer-lens (offer) (nth (node_children offer) 3))
+
+; children: exact offer, expression ordinal, start/end offsets, result value.
+(defn srfb-step (offer index start end value line)
+    (intern_node_at SRFB-STEP
+        (list offer
+              (intern_trivial_int index)
+              (intern_trivial_int start)
+              (intern_trivial_int end)
+              (intern_trivial_int value))
+        "form/form-stdlib/source-runner-framebuffer.fk" line 1))
+(defn srfb-step? (cell)
+    (if (node_eq (node_category cell) SRFB-STEP) 1 0))
+(defn srfb-step-index (step) (node_value (nth (node_children step) 1)))
+(defn srfb-step-start (step) (node_value (nth (node_children step) 2)))
+(defn srfb-step-end (step) (node_value (nth (node_children step) 3)))
+(defn srfb-step-value (step) (node_value (nth (node_children step) 4)))
+
+; children: exact offer, ordered derivation steps, final value.
+(defn srfb-result (offer steps value)
+    (intern_node SRFB-RESULT
+        (list offer steps (intern_trivial_int value))))
+(defn srfb-result? (cell)
+    (if (node_eq (node_category cell) SRFB-RESULT) 1 0))
+(defn srfb-result-offer (result) (nth (node_children result) 0))
+(defn srfb-result-steps (result) (nth (node_children result) 1))
+(defn srfb-result-value (result)
+    (node_value (nth (node_children result) 2)))
+
+(defn srfb-cat (parts)
+    (if (eq (len parts) 0) ""
+        (str_concat (head parts) (srfb-cat (tail parts)))))
+
+(defn srfb-target (stage index offset total)
+    (srfb-cat
+        (list "stage:" stage
+              ":expression:" (int_to_str index)
+              ":offset:" (int_to_str offset)
+              ":total:" (int_to_str total))))
+
+(defn srfb-emit (call phase modifier target ordinal started line)
+    (lcfb-call-stream "source-runner" call phase "form-native"
+        modifier target ordinal started
+        "form/form-stdlib/source-runner-framebuffer.fk" line 1))
+
+; state children: cursor result, ordered steps, next framebuffer ordinal,
+; next expression index.
+(defn srfb-state (cursor-result steps ordinal index)
+    (list cursor-result steps ordinal index))
+(defn srfb-state-cursor (state) (nth state 0))
+(defn srfb-state-steps (state) (nth state 1))
+(defn srfb-state-ordinal (state) (nth state 2))
+(defn srfb-state-index (state) (nth state 3))
+
+(defn srfb-do-body-position (source)
+    (do
+        (let open (fef-skip source 0))
+        (if (or (ge open (fef-len source))
+                (not (eq (fef-at source open) 40))) 0
+            (do
+                (let name-start (fef-skip source (add open 1)))
+                (let name-end (fef-sym-end source name-start))
+                (if (str_eq (substring source name-start name-end) "do")
+                    name-end 0)))))
+
+(defn srfb-eval-do-loop
+    (offer source pos env steps last ordinal index started total)
+    (do
+        (let at (fef-skip source pos))
+        (if (eq (fef-at source at) 41)
+            (srfb-state (fef-res last (add at 1) env)
+                steps ordinal index)
+            (do
+                (let enter
+                    (srfb-emit "expression" "enter" "fef-expr"
+                        (srfb-target "evaluate" index at total)
+                        ordinal started 110))
+                (let evaluated (fef-expr source at env))
+                (let step
+                    (srfb-step offer index at (fef-p evaluated)
+                        (fef-v evaluated) 115))
+                (let leave
+                    (srfb-emit "expression" "leave" "fef-expr"
+                        (srfb-target "evaluated" index (fef-p evaluated) total)
+                        (add ordinal 1) started 118))
+                (srfb-eval-do-loop offer source (fef-p evaluated)
+                    (fef-e evaluated) (fef-snoc steps step) (fef-v evaluated)
+                    (add ordinal 2) (add index 1) started total)))))
+
+(defn srfb-eval-single (offer source ordinal started total)
+    (do
+        (let at (fef-skip source 0))
+        (let enter
+            (srfb-emit "expression" "enter" "fef-expr"
+                (srfb-target "evaluate" 0 at total)
+                ordinal started 129))
+        (let evaluated
+            (fef-expr source at (list (list "" 0 0 0))))
+        (let step
+            (srfb-step offer 0 at (fef-p evaluated) (fef-v evaluated) 135))
+        (let leave
+            (srfb-emit "expression" "leave" "fef-expr"
+                (srfb-target "evaluated" 0 (fef-p evaluated) total)
+                (add ordinal 1) started 137))
+        (srfb-state evaluated (list step) (add ordinal 2) 1)))
+
+(defn srfb-evaluate-one (offer started)
+    (do
+        (let source (srfb-offer-source offer))
+        (let total (str_len source))
+        (let boundary-enter
+            (srfb-emit "offer" "enter" "srfb-evaluate-one"
+                (srfb-target "accepted" 0 0 total) 1 started 147))
+        (let body-position (srfb-do-body-position source))
+        (let state
+            (if (eq body-position 0)
+                (srfb-eval-single offer source 2 started total)
+                (srfb-eval-do-loop offer source body-position
+                    (list (list "" 0 0 0)) (empty) 0 2 0 started total)))
+        (let cursor (srfb-state-cursor state))
+        (let result
+            (srfb-result offer (srfb-state-steps state) (fef-v cursor)))
+        (let boundary-leave
+            (srfb-emit "offer" "leave" "srfb-evaluate-one"
+                (srfb-target "completed" (srfb-state-index state)
+                    (fef-p cursor) total)
+                (srfb-state-ordinal state) started 159))
+        (oac-one result)))
+
+; The offered acknowledgement is also the authority boundary.  Only ONE opens
+; the evaluator; all other arms return with no expression call.
+(defn srfb-run (offer)
+    (do
+        (let source-total
+            (if (eq (srfb-offer? offer) 1)
+                (str_len (srfb-offer-source offer)) 0))
+        (let started
+            (lcfb-open-stream "source-runner" "form-native" "srfb-run"
+                (srfb-target "offered" 0 0 source-total)
+                "form/form-stdlib/source-runner-framebuffer.fk" 173 1))
+        (if (eq (srfb-offer? offer) 0)
+            (oac-zero)
+            (if (eq (oac-one? (srfb-offer-ack offer)) 1)
+                (srfb-evaluate-one offer started)
+                (do
+                    (let closed
+                        (srfb-emit "offer" "leave" "srfb-run"
+                            (srfb-target "not-accepted" 0 0 source-total)
+                            1 started 182))
+                    (srfb-offer-ack offer))))))
+
+; witnessed: 2026-08-09 -> 1023 on fkwu

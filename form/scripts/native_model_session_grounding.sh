@@ -381,8 +381,8 @@ if [ "${NATIVE_MODEL_SESSION_GROUNDING_PREFLIGHT_ONLY:-0}" -eq 1 ]; then
     exit 0
 fi
 
-# Use the native program-image selector for these canonical Form cells.  the source door
-# deliberately bypasses the fresh .fkb cache and repeatedly reparses this large
+# Use the native program-image selector for these canonical Form cells.  The
+# source-forcing path bypasses the fresh .fkb cache and repeatedly reparses this large
 # replay closure; a plain .fk invocation emits/loads the same Form program image.
 band=$($NM_FKWU form/form-stdlib/tests/native-model-session-grounding-band.fk)
 if [ "$band" != 4095 ]; then
