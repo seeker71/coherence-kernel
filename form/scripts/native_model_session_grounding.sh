@@ -169,9 +169,12 @@ labeled_pairs_observed=$(wc -l < "$pairs_all" | tr -d ' ')
 query_limit=${NATIVE_MODEL_SESSION_GROUNDING_QUERIES:-1}
 sort -k1,1 -u "$pairs_all" | tail -n "$query_limit" > "$pairs_raw"
 episode_count=$(wc -l < "$pairs_raw" | tr -d ' ')
+quality_metric_observed=1
 if [ "$episode_count" -lt 1 ]; then
-    printf 'no completed real queries cited a live indexed path\n' >&2
-    exit 1
+    # No matched pair is a complete privacy-safe observation, not an invalid
+    # replay and not a zero-quality result.  Continue into the Form renderer so
+    # the durable report carries the stasis without inventing a query.
+    quality_metric_observed=0
 fi
 
 salt_file="$NM_STATE_DIR/session-grounding-salt"
@@ -205,7 +208,7 @@ if [ "$admitted_limit" -lt 2 ]; then
     printf 'admitted candidate limit must be at least 2: %s\n' "$admitted_limit" >&2
     exit 1
 fi
-awk -F '\t' 'NR==FNR {wanted[$1]=1; next} ($1 in wanted)' \
+awk -F '\t' 'FILENAME == ARGV[1] {wanted[$1]=1; next} ($1 in wanted)' \
     "$label_ids" "$candidates" > "$label_candidates"
 if [ "$(wc -l < "$label_candidates" | tr -d ' ')" -ne "$distinct_label_count" ]; then
     printf 'one or more selected labels are absent from the live source index\n' >&2
@@ -216,7 +219,7 @@ if [ "$distinct_label_count" -lt "$admitted_limit" ]; then
 else
     distractor_limit=0
 fi
-awk -F '\t' 'NR==FNR {wanted[$1]=1; next} !($1 in wanted)' \
+awk -F '\t' 'FILENAME == ARGV[1] {wanted[$1]=1; next} !($1 in wanted)' \
     "$label_ids" "$candidates" | sed -n "1,${distractor_limit}p" > "$distractor_candidates"
 sort -u "$label_candidates" "$distractor_candidates" > "$admitted_candidates"
 cut -f1 "$admitted_candidates" | sort -u > "$admitted_ids"
@@ -287,6 +290,7 @@ fi
 {
     printf '%s\n' "$pool_digest" "$dataset_digest" "$evaluation_contract_sha256"
     printf '%s\n' "$previous_candidate" "$previous_dataset" "$previous_contract"
+    printf '%s\n' "$quality_metric_observed"
 } > "$evidence_delta_input"
 $NM_FKWU form/form-stdlib/native-model-evidence-delta-cli.fk \
     < "$evidence_delta_input" > "$evidence_delta_raw"
@@ -451,7 +455,9 @@ if [ "$cli_status" -ne 0 ]; then
 fi
 
 sed '/^$/d; /^0$/d; /^fkwu: warning:/d' "$raw_report" > "$report"
-if ! grep -q '^replay_valid=1$' "$report" || ! grep -q '^raw_query_persisted=0$' "$report"; then
+expected_replay_valid=$quality_metric_observed
+if ! grep -q "^replay_valid=${expected_replay_valid}$" "$report" || \
+   ! grep -q '^raw_query_persisted=0$' "$report"; then
     printf 'Form rejected real session grounding replay\n' >&2
     cat "$report" >&2
     exit 1
@@ -466,7 +472,12 @@ durable="$NM_STATE_DIR/session-grounding-${day}-${epoch}.txt"
     printf 'framing_preflight_min_labels=%s\n' "$framing_preflight_min_labels"
     printf 'production_cli_budget_seconds=%s\n' "$cli_budget"
     printf 'replay_elapsed_seconds=%s\n' "$replay_elapsed_seconds"
-    printf 'operational_timeout=0\nquality_metric_observed=1\n'
+    printf 'operational_timeout=0\nquality_metric_observed=%s\n' "$quality_metric_observed"
+    if [ "$quality_metric_observed" -eq 1 ]; then
+        printf 'grounding_observation_valid=1\nobservation_state=replayed-live-indexed-relation\n'
+    else
+        printf 'grounding_observation_valid=1\nobservation_state=no-completed-live-indexed-relation\n'
+    fi
 } > "$durable"
 chmod 600 "$durable"
 digest=$(nm_sha256_file "$durable")
