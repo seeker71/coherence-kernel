@@ -55,6 +55,28 @@ nm_bind_child_report() {
     fi
 }
 
+nm_require_grounding_observation() {
+    report=$1
+    nm_require_report_value "$report" grounding_observation_valid 1
+    nm_require_report_value "$report" raw_query_persisted 0
+    nm_require_report_value "$report" grounding_band 4095
+    observation_state=$(nm_report_value "$report" observation_state)
+    case "$observation_state" in
+        replayed-live-indexed-relation)
+            nm_require_report_value "$report" replay_valid 1
+            nm_require_report_value "$report" quality_metric_observed 1 ;;
+        no-completed-live-indexed-relation)
+            nm_require_report_value "$report" replay_valid 0
+            nm_require_report_value "$report" quality_metric_observed 0 ;;
+        *)
+            printf 'real-flow grounding observation state is invalid: %s\n' \
+                "${observation_state:-missing}" >&2
+            cat "$report" >&2
+            exit 1 ;;
+    esac
+    nm_bind_child_report "$report" grounding_report_sha256 grounding_report_path
+}
+
 nm_reuse_child_report() {
     destination=$1
     child_path=$2
@@ -103,10 +125,7 @@ else
     nm_require_report_value "$world" world_model_band 4095
     nm_bind_child_report "$world" world_model_report_sha256 world_model_report_path
     "$NM_SCRIPT_DIR/native_model_session_grounding.sh" > "$grounding"
-    nm_require_report_value "$grounding" replay_valid 1
-    nm_require_report_value "$grounding" raw_query_persisted 0
-    nm_require_report_value "$grounding" grounding_band 4095
-    nm_bind_child_report "$grounding" grounding_report_sha256 grounding_report_path
+    nm_require_grounding_observation "$grounding"
     "$NM_SCRIPT_DIR/native_model_lineage.sh" > "$lineage"
     nm_require_report_value "$lineage" lineage_valid 1
     nm_require_report_value "$lineage" q4_copy_equality 1
@@ -122,10 +141,7 @@ nm_require_report_value "$world" full_pool_evaluated 1
 nm_require_report_value "$world" world_model_band 4095
 nm_bind_child_report "$world" world_model_report_sha256 world_model_report_path
 
-nm_require_report_value "$grounding" replay_valid 1
-nm_require_report_value "$grounding" raw_query_persisted 0
-nm_require_report_value "$grounding" grounding_band 4095
-nm_bind_child_report "$grounding" grounding_report_sha256 grounding_report_path
+nm_require_grounding_observation "$grounding"
 
 nm_require_report_value "$lineage" lineage_valid 1
 nm_require_report_value "$lineage" q4_copy_equality 1
@@ -156,6 +172,10 @@ durable="$NM_STATE_DIR/real-flows-${day}-${epoch}.txt"
         "$(nm_report_value "$world" model_accuracy_delta_ppm)"
     printf 'session_grounding_queries=%s\n' \
         "$(nm_report_value "$grounding" replayed_queries)"
+    printf 'session_grounding_observation_state=%s\n' \
+        "$(nm_report_value "$grounding" observation_state)"
+    printf 'session_grounding_quality_metric_observed=%s\n' \
+        "$(nm_report_value "$grounding" quality_metric_observed)"
     printf 'session_grounding_top1_ppm=%s\n' \
         "$(nm_report_value "$grounding" top1_ppm)"
     printf 'session_grounding_top3_ppm=%s\n' \
