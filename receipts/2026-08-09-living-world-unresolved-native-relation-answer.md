@@ -42,15 +42,37 @@ this aggregate.
 - Direct witness compile: `0` on `./fkwu <file>`.
 - Pre-stamp band: `2147483647` (`31/31`), runner exit `0`.
 - Post-stamp band: `2147483647` (`31/31`), runner exit `0`.
+- Post-rebase band on current `origin/main`: `2147483647` (`31/31`), runner
+  exit `0` after rebuilding the gitignored checkout witness.
+- Direct dependency bands after structural repair: action learning `32767`,
+  Recipe hypothesis field `32767`, profile outcome `2147483647`.
 - No `--src`, Python, Bash runtime path, remote oracle, imported answer set, or
   C-seed growth was used.
 - Recipe, model, voice, and promotion authority remained inactive.
 
 Final direct source sizes were 18,966 bytes (organ), 30,242 (witness), and
-8,372 (band).  Their native compiled artifacts were 2,931,963, 5,195,907, and
-5,239,840 bytes.  There was no separate generated-source file.  `/bin/ps` was
+8,372 (band).  Their post-rebase native compiled artifacts were 2,935,489,
+5,199,952, and 5,243,904 bytes.  There was no separate generated-source file.  `/bin/ps` was
 denied, so direct host stack sampling was unavailable; the supervisor's direct
 Form call cells identified evaluation rather than compilation.
+
+## Rebase compatibility observation
+
+Rebasing onto current main activated the native reader's completed-input
+refusal and exposed four real open function boundaries that the earlier
+permissive reader had auto-closed: two in action learning, one in Recipe
+hypothesis source-name classification, and one in profile-outcome progress
+projection.  The exact `defn` boundaries were closed.  The deeply nested
+binary-`or` classifier was then expressed as the equivalent explicit `if`
+chain because the current reader otherwise consumed its final balanced closer
+as a stray value.  The framebuffer category also moved from an enclosing
+`let`, invisible to a `defn` frame, to an explicit zero-argument Form cell.
+
+The post-rebase live run entered its first causal call cell at 40 seconds and
+remained in observable Form evaluation thereafter.  Its final cell reported
+`answer-current:0:query-current:1:relation-current:1`; the log ended in
+`2147483647`.  This repairs truthful readability and visibility; it does not
+add model authority or claim a new quality trend.
 
 ## Live visibility repair
 
@@ -88,12 +110,23 @@ successful witnesses.
   `496dfa4661c4f497dd9f7a6ae5bb1e96e7cc35ba2e2daf11d8d5f2c7bacd77fb`
 - post-stamp band log:
   `f2743d672678147b77b189fce5cc0b70456250269a6033eadfd31d8fc2c8fdda`
+- post-rebase band log:
+  `a265a69ca9e432900959a63e50f9bb0160f2ceb4b3c157efe037c16164258f19`
+- live call framebuffer:
+  `8e7fad7f6914a5f21fad93c30916147b281c9447830f325f0c7639809e648b78`
+- action cycle:
+  `8c02613a6fc9b832ff8d778924b3d3a5b91b30e206afb742df280519c816db8f`
+- Recipe hypothesis:
+  `a0d5d77bb5c459ee9509171f70aeeac931bc597d913a62d53ac7b637daa8ec77`
+- profile outcome:
+  `0a7722def261a54ac5412ba582bfc631ea62fd2586416c5b1db351ed7b87d946`
 
 Exact evidence paths:
 
 - `/var/folders/xt/5zt6_wmn77x22yf_wgv97cb40000gn/T/native-model-observe.oszLxC/runner.log`
 - `/var/folders/xt/5zt6_wmn77x22yf_wgv97cb40000gn/T/native-model-observe.9ZjNUY/runner.log`
 - `/var/folders/xt/5zt6_wmn77x22yf_wgv97cb40000gn/T/native-model-observe.AicEGL/runner.log`
+- `/var/folders/xt/5zt6_wmn77x22yf_wgv97cb40000gn/T/native-model-observe.m3I0Nf/runner.log`
 
 These hashes are freshness identities, not static seals.  The cells remain
 reversible and must be re-witnessed when their ground changes.
