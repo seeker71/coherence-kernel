@@ -2,6 +2,10 @@
 
 Date: 2026-07-19 (reground on base `7667fad`, after the 2026-07-17 floor)
 
+Amended 2026-08-13 only for the binary-freshness canary: bit 16 landed on
+2026-08-03 to witness runtime-built string values, so the current verdict is
+31. All other observations below retain their original witness dates.
+
 This file is the current release floor for this worktree. Receipts preserve the
 history, but the claims below are only the state that is present now. Every
 witness value below was re-measured on this date through the resolver-driven
@@ -17,7 +21,7 @@ this floor was written.
 cc -O2 -o fkwu runtime/fkwu-uni.c
 ./fkwu bootstrap/ground.fk -> 42
 ./fkwu bootstrap/ground-recursive.fk 10 -> 55
-./fkwu form/form-stdlib/tests/binary-freshness-band.fk -> 15
+./fkwu form/form-stdlib/tests/binary-freshness-band.fk -> 31
 ./fkwu form/form-stdlib/tests/native-vs-rented-band.fk -> 11111
 ```
 

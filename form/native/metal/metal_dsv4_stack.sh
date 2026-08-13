@@ -91,7 +91,7 @@ PROMPT_IDS="${FORM_DS4_PROMPT_IDS:-}"
 # authority on what a token is, and no text parsing enters this carrier. Explicit ids still win if
 # both are given: a caller who has already tokenized is not overridden.
 if [ -z "$PROMPT_IDS" ] && [ -n "${FORM_DS4_PROMPT:-}" ]; then
-    _tok="$ROOT/form-stdlib/dsv4-tokenizer-cli.fk"
+    _tok="$ROOT/${FORM_DS4_TOKENIZER:-form-stdlib/dsv4-tokenizer-cli.fk}"
     _fkwu="$ROOT/../fkwu"
     [ -x "$_fkwu" ] || { echo "FAIL native fkwu tokenizer carrier missing: $_fkwu"; exit 1; }
     PROMPT_IDS="$(printf 'encode %s\n' "$FORM_DS4_PROMPT" | "$_fkwu" "$_tok" 2>/dev/null \
