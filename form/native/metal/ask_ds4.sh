@@ -151,7 +151,7 @@ printf '\n%s%s\n' "$PROMPT" "$answer"
 printf '\n  [form-native · 43 layers · %s · %ss wall · greedy, base-model continuation]\n' \
        "${speed:-speed unmeasured}" "$((t1 - t0))"
 printf '  [weights: %s]\n' "${blob:-unnamed}"
-printf '  [token swap: %s · %sms / %s B/ms · live carrier retains default until an in-loop recipe hook is witnessed]\n' \
+printf '  [token swap: %s · %sms / %s B/ms · Form loop hook witnessed in dsv4-decode-token-hook.fk; this Swift carrier is the next attention row]\n' \
        "$TOKENSWAP" "$TOKENBUDGETMS" "$METALBANDWIDTHBMS"
 [[ -n "$verdict" ]] && printf '  [%s]\n' "$verdict"
 printf '  [token ids: %s]\n' "${ids:-none}"
