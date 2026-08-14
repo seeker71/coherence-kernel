@@ -101,8 +101,11 @@ build_ts() {
         done
     fi
     if [[ "$stale" == "1" ]]; then
-        echo "  bundling ts kernel..." >&2
-        npx --yes esbuild "$TS_DIR/src/main.ts" --bundle --platform=node             --format=esm --outfile="$bundle" --log-level=warning >&2 || rm -f "$bundle"
+        if [[ -x "$TS_DIR/node_modules/.bin/esbuild" ]]; then
+            echo "  bundling ts kernel..." >&2
+            "$TS_DIR/node_modules/.bin/esbuild" "$TS_DIR/src/main.ts" --bundle --platform=node \
+                --format=esm --outfile="$bundle" --log-level=warning >&2
+        fi
     fi
 }
 
@@ -219,12 +222,23 @@ fi
 run_ts() {
     local bundle="$TS_DIR/dist/main.mjs"
     local loader="$PWD/$TS_DIR/node_modules/tsx/dist/loader.mjs"
-    if [[ -f "$bundle" ]]; then
+    local current=1 f
+    if [[ ! -f "$bundle" ]]; then
+        current=0
+    else
+        for f in "$TS_DIR"/src/*.ts; do
+            [[ "$f" -nt "$bundle" ]] && { current=0; break; }
+        done
+    fi
+    if [[ "$current" == "1" ]]; then
         node "$bundle" "$@"
+    elif node --experimental-strip-types --version >/dev/null 2>&1; then
+        node --experimental-strip-types "$TS_DIR/src/main.ts" "$@"
     elif [[ -x "$TS_DIR/node_modules/.bin/tsx" ]]; then
         node --import "$loader" "$TS_DIR/src/main.ts" "$@"
     else
-        npx --yes tsx "$TS_DIR/src/main.ts" "$@"
+        echo "validate.sh: TypeScript arm needs Node strip-types or a local tsx install" >&2
+        return 1
     fi
 }
 
@@ -249,6 +263,16 @@ fk_declared_deps() {
         /^;[ \t]*import([ \t:]|")/ {
             s = $0
             sub(/^;[ \t]*import[ \t:]*/, "", s)
+            if (match(s, /"[^"]+\.fk"/)) {
+                emit(substr(s, RSTART + 1, RLENGTH - 2))
+            } else {
+                n = split(s, a, /[ \t,;]+/)
+                if (n >= 1) emit(a[1])
+            }
+        }
+        /^[ \t]*import([ \t:]|")/ {
+            s = $0
+            sub(/^[ \t]*import[ \t:]*/, "", s)
             if (match(s, /"[^"]+\.fk"/)) {
                 emit(substr(s, RSTART + 1, RLENGTH - 2))
             } else {

@@ -142,6 +142,39 @@ corpus shards
   -> optional token-recipe challenger
 ```
 
+## Observed frequency activation and local meaning growth
+
+`model/form-neutral-language-world-model-activation.fk` now turns observed
+corpus frequency into a context-sized active body. A frequency cell binds a
+complete existing mapping to a named corpus, exact hit/total counts, evidence,
+and observed claim state `2`. Exact rational ranking avoids score buckets; an
+occurrence ordinal resolves ties, so the same evidence converges on the same
+activation even when it arrives in another order.
+
+Activation selects only mappings for the offered non-general context, keeps the
+highest-frequency mappings within the chosen limit, and carries just their
+anchor/recipe symbols and relations into a tightly measured shard. The step
+size therefore follows the context: narrow when little is alive, wider when
+the context and evidence support more.
+
+The shard can open a numeric `form-cli` local offer. A local selection points
+to one mapping already present in the shard and remains claim state `1`. From
+that grounded selection, the local lane may compose a new numeric meaning
+recipe from dictionary cells. That recipe receives its own content-addressed
+symbol immediately and joins the shard through a residue-bearing candidate
+relation. Meaning generation is alive at this boundary; what remains open is
+participant-observed shared adoption of its mapping.
+
+Earlier activations remain addressable without being frozen. When new observed
+frequency supports a wider shard, an explicit successor cell relates the
+earlier activation to the larger one. The successor holds both continuity and
+growth: identity is traceable, while evidence can expand the active world.
+
+The 26-reading four-arm band witnesses canonical ranking, context filtering,
+tight sharding, local-only offer validation, local selection, sovereign meaning
+composition, candidate overlay, evidence-led growth, and the directed successor
+as `67108863` on fkwu, Go, Rust, and TypeScript.
+
 The last step is intentionally not claimed yet. The rebased repository now has
 `dsv4-token-recipe-swap.fk`, which can let a bounded Form recipe challenge one
 LLM token. A future language-world recipe can use this graph only after a
@@ -173,9 +206,8 @@ Still open:
 
 - participant-bound semantic selection and claim state `3`;
 - native-speaker and cultural review;
-- frequency-ranked contextual activation and shard replacement;
 - all-language, symbol, and meme-phrase coverage;
 - actual tokenizer IDs and graph-guided token generation;
-- performance measurements for large active graphs.
+- corpus-scale activation scheduling, active-shard release, and performance.
 
-; witnessed: 2026-08-14 -> native integration band 65535; active envelope 87362 / 16777216 bytes
+; witnessed: 2026-08-14 -> native integration band 65535; four-arm activation band 67108863; active envelope 87362 / 16777216 bytes

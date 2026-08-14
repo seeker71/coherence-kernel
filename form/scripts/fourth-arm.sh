@@ -338,6 +338,19 @@ fourth_prepare_source_text() {
     [[ -s "$cached" ]] && printf '%s\n' "$cached"
 }
 
+fourth_prepare_import_source() {
+    local src="$1" key cached tmp
+    mkdir -p "$FOURTH_SOURCE_TEXT_DIR"
+    key="$(fourth_hash16 "$src")-imports-v1"
+    cached="$FOURTH_SOURCE_TEXT_DIR/$key.fk"
+    if [[ ! -s "$cached" ]]; then
+        tmp="$(mktemp "$FOURTH_SOURCE_TEXT_DIR/.${key}.XXXXXX")"
+        awk '!/^[ \t]*import([ \t:]|")/ { print }' "$src" > "$tmp"
+        mv -f "$tmp" "$cached"
+    fi
+    printf '%s\n' "$cached"
+}
+
 # fourth_fkwu_cache_stamp — cache key for the standing fkwu binary (emitter chain + committed uni.c).
 fourth_fkwu_cache_stamp() {
     fourth_hash16 "${FOURTH_CHAIN[@]}" "$FOURTH_BOOTSTRAP_UNI_C"
@@ -539,8 +552,89 @@ fourth_band_prelude_mods() {
     fourth_band_prelude_mods_raw "$1" | grep -vE '(^|/)core\.fk$' | grep . || true
 }
 
+fourth_file_import_mods() {
+    awk '
+        function emit(tok) {
+            gsub(/^[ \t,;"]+|[ \t,;"]+$/, "", tok)
+            if (tok ~ /\.(fk|bml|form|grammar)$/) print tok
+        }
+        /^[ \t]*import([ \t:]|")/ {
+            s = $0
+            sub(/^[ \t]*import[ \t:]*/, "", s)
+            if (match(s, /"[^"]+\.(fk|bml|form|grammar)"/))
+                emit(substr(s, RSTART + 1, RLENGTH - 2))
+            else {
+                n = split(s, a, /[ \t,;]+/)
+                if (n >= 1) emit(a[1])
+            }
+        }
+        /^;[ \t]*import([ \t:]|")/ {
+            s = $0
+            sub(/^;[ \t]*import[ \t:]*/, "", s)
+            if (match(s, /"[^"]+\.(fk|bml|form|grammar)"/))
+                emit(substr(s, RSTART + 1, RLENGTH - 2))
+            else {
+                n = split(s, a, /[ \t,;]+/)
+                if (n >= 1) emit(a[1])
+            }
+        }
+    ' "$1" 2>/dev/null || true
+}
+
+fourth_file_declared_mods() {
+    fourth_band_prelude_mods_raw "$1"
+    fourth_file_import_mods "$1"
+}
+
+fourth_resolve_dep_path() {
+    local owner="$1" token="$2" dir cand
+    case "$token" in
+        /*|[A-Za-z]:*) printf '%s\n' "$token"; return ;;
+    esac
+    dir="$(dirname "$owner")"
+    cand="$dir/$token"
+    if [[ -f "$cand" ]]; then
+        printf '%s\n' "$cand"
+    elif [[ -f "$token" ]]; then
+        printf '%s\n' "$token"
+    elif [[ "$token" == form/* && -f "${token#form/}" ]]; then
+        printf '%s\n' "${token#form/}"
+    elif [[ -f "../$token" ]]; then
+        printf '%s\n' "../$token"
+    else
+        printf '%s\n' "$cand"
+    fi
+}
+
+fourth_src_seen=()
+fourth_src_order=()
+
+fourth_src_seen_contains() {
+    local needle="$1" item
+    [[ ${#fourth_src_seen[@]} -eq 0 ]] && return 1
+    for item in "${fourth_src_seen[@]}"; do
+        [[ "$item" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+fourth_collect_source_dep() {
+    local file="$1" token dep
+    fourth_src_seen_contains "$file" && return 0
+    fourth_src_seen+=("$file")
+    [[ -f "$file" ]] || return 1
+    while IFS= read -r token; do
+        [[ -n "$token" ]] || continue
+        dep="$(fourth_resolve_dep_path "$file" "$token")"
+        fourth_collect_source_dep "$dep" || return 1
+    done < <(fourth_file_declared_mods "$file")
+    if [[ "$file" != */core.fk && "$file" != core.fk ]]; then
+        fourth_src_order+=("$file")
+    fi
+}
+
 fourth_band_srcs() {
-    local stem="$1" mods band
+    local stem="$1" mods band token dep
     band="form-stdlib/tests/${stem}-band.fk"
     # A manifest stem maps to tests/<stem>-band.fk OR the plain tests/<stem>.fk —
     # fourth_band_stem strips -band when reading, so both are the same band.
@@ -550,9 +644,19 @@ fourth_band_srcs() {
     # Drop ONLY the exact core.fk prelude (the shim mirrors it). Anchor the match
     # to a path boundary so sibling-named modules — substrate-core.fk, bmf-core.fk
     # — keep their place in the source list instead of vanishing as substrings.
-    mods="$(fourth_band_prelude_mods "$band")"
-    [[ -z "$mods" && -f "form-stdlib/${stem}.fk" ]] && mods="form-stdlib/${stem}.fk"
-    printf '%s\n' $mods "$band"
+    fourth_src_seen=()
+    fourth_src_order=()
+    mods="$(fourth_file_declared_mods "$band")"
+    if [[ -z "$mods" && -f "form-stdlib/${stem}.fk" ]]; then
+        fourth_collect_source_dep "form-stdlib/${stem}.fk" || return 1
+    else
+        while IFS= read -r token; do
+            [[ -n "$token" ]] || continue
+            dep="$(fourth_resolve_dep_path "$band" "$token")"
+            fourth_collect_source_dep "$dep" || return 1
+        done <<< "$mods"
+    fi
+    printf '%s\n' "${fourth_src_order[@]}" "$band"
 }
 
 # fourth_prep_srcs — prepared source paths for a stem, one per line.  A
@@ -574,6 +678,10 @@ fourth_prep_srcs() {
         [[ -f "$f" ]] || return 1
         if grep -Eq '^[[:space:]]*section \[' "$f"; then
             prepared="$(fourth_prepare_source_text "$f")"
+            [[ -n "$prepared" && -s "$prepared" ]] || return 1
+            prepared_srcs+=("$prepared")
+        elif grep -Eq '^[[:space:]]*import([[:space:]:]|")' "$f"; then
+            prepared="$(fourth_prepare_import_source "$f")"
             [[ -n "$prepared" && -s "$prepared" ]] || return 1
             prepared_srcs+=("$prepared")
         else
