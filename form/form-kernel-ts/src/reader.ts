@@ -414,7 +414,11 @@ function readDefn(k: Kernel, s: ParseState): NodeID {
 
   const body = readOne(k, s);
   const close = consume(s);
-  if (close.kind !== "rparen") throw new Error("defn: expected )");
+  if (close.kind !== "rparen") {
+    throw new Error(
+      `defn ${nameTok.text}: expected ) at source offset ${close.pos}, got ${close.kind}`,
+    );
+  }
   const nameTrivial: NodeID = {
     pkg: 1,
     level: Level.TRIVIAL,
