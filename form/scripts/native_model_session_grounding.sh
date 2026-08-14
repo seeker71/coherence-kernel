@@ -245,7 +245,6 @@ build_source() {
         append_source "$destination" form/form-stdlib/str-byte-at.fk
         append_source "$destination" form/form-stdlib/base64.fk
     fi
-    append_source "$destination" form/form-stdlib/record-src-shim.fk
     for part in \
         form/form-stdlib/rag-embed.fk \
         form/form-stdlib/rag-retrieve.fk \

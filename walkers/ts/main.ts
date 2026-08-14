@@ -27,7 +27,8 @@
 // GGUF/model, formats, generated tables, the higher-architecture recipe
 // modules (blanket/project/generative/proof/vector/parallel/…), and all tests.
 
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, realpathSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 
 // ===========================================================================
 // Substrate — NodeID + Recipe + intern table   (from kernel.ts)
@@ -1503,8 +1504,70 @@ function invokeClosure(
 }
 
 // ===========================================================================
-// CLI — concatenate the .fk file list, evaluate, render one value.
+// CLI — read recursive imports, evaluate, render one value.
 // ===========================================================================
+
+function importPath(line: string): string | null {
+  let source = line.trim();
+  if (source.endsWith(";")) source = source.slice(0, -1).trim();
+  if (!source.startsWith('import "') || !source.endsWith('"')) return null;
+  const path = source.slice(8, -1);
+  return path.length > 0 ? path : null;
+}
+
+function resolveImport(owner: string, imported: string): string {
+  const candidates = isAbsolute(imported)
+    ? [imported]
+    : [
+        join(dirname(owner), imported),
+        imported,
+        ...(imported.startsWith("form/") ? [imported.slice(5)] : []),
+      ];
+  if (!isAbsolute(imported)) {
+    let directory = dirname(owner);
+    while (true) {
+      candidates.push(join(directory, imported));
+      candidates.push(join(directory, "form", imported));
+      const parent = dirname(directory);
+      if (parent === directory) break;
+      directory = parent;
+    }
+  }
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(
+    "import \"" + imported + "\" from " + owner + ": file not found",
+  );
+}
+
+function loadSourceFile(
+  path: string,
+  seen: Set<string>,
+  parts: string[],
+): void {
+  const canonical = realpathSync(path);
+  if (seen.has(canonical)) return;
+  seen.add(canonical);
+  const source = readFileSync(canonical, "latin1");
+  const body: string[] = [];
+  for (const line of source.split("\n")) {
+    const imported = importPath(line);
+    if (imported !== null) {
+      loadSourceFile(resolveImport(canonical, imported), seen, parts);
+    } else {
+      body.push(line);
+    }
+  }
+  parts.push(body.join("\n"));
+}
+
+function loadSourceClosure(paths: string[]): string {
+  const seen = new Set<string>();
+  const parts: string[] = [];
+  for (const path of paths) loadSourceFile(path, seen, parts);
+  return parts.join("\n");
+}
 
 function main(): void {
   const paths = process.argv.slice(2);
@@ -1528,7 +1591,7 @@ function main(): void {
   // str-byte-at-band grew non-ASCII claims: this walker read 15 where the other
   // six evaluators read 511. Reading latin1 makes the source bytes the string's
   // units, which is what the natives already assumed.
-  const src = paths.map((p) => readFileSync(p, "latin1")).join("\n");
+  const src = loadSourceClosure(paths);
   const k = new Kernel();
   const frame = new Frame(null);
   const node = readAll(k, src);
