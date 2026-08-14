@@ -32,34 +32,6 @@ printf 'regen: fkwu-%s (%s bytes) stamp=%s\n' \
     "$(wc -c < "form-stdlib/bootstrap/fkwu-${slug}" | tr -d ' ')" \
     "$fkwu_stamp"
 
-FORM_CLI_SRCS=(
-    form-stdlib/fourth-shim.fk form-stdlib/core.fk form-stdlib/line-grammar.fk
-    form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hmac-sha256.fk form-stdlib/hex.fk
-    form-stdlib/resource-port.fk form-stdlib/bml-native-interface-package-import.fk form-stdlib/hati-os-targets.fk
-    form-stdlib/form-native-resource-interfaces.fk form-stdlib/form-fs.fk
-    form-stdlib/storage-port.fk form-stdlib/host-kernel-carrier.fk
-    form-stdlib/fnri-standin.fk form-stdlib/fnri-receipt.fk form-stdlib/http-client.fk
-    form-stdlib/format-arith.fk form-stdlib/f16-decode.fk
-    form-stdlib/q6k-dequant.fk form-stdlib/q4k-dequant.fk form-stdlib/weight-load.fk
-    form-stdlib/voice-traits.fk form-stdlib/nearest-shape.fk
-    form-stdlib/co-learning.fk form-stdlib/co-learning-stream.fk
-    form-stdlib/mesh-dispatch.fk form-stdlib/surprise-salience.fk form-stdlib/host-sense-organ.fk
-    form-stdlib/speech-organ.fk form-stdlib/native-host-instance.fk
-    form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
-    form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk
-    form-stdlib/rag-ask.fk form-stdlib/ask-cost-receipt.fk form-stdlib/ask-native-lane.fk form-stdlib/form-cli-ask.fk
-    form-stdlib/form-cli-router.fk form-stdlib/form-cli-judge.fk
-    form-stdlib/confidence-weighted-vote.fk form-stdlib/lineage-discounted-vote.fk
-    form-stdlib/form-cli-oracle-loop.fk
-    form-stdlib/form-cli-sufficiency.fk form-stdlib/form-freq-check.fk
-    form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
-    form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
-    form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk
-    form-stdlib/current-branch-landing.fk form-stdlib/form-cli.fk
-    form-stdlib/form-cli-gguf-cell.fk form-stdlib/form-cli-repl.fk
-)
-form_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
-
 # A maintainer regeneration must relink the carrier even when the Form program
 # stamp is unchanged: the binary's self-source genesis also includes the build
 # and behavioral-proof scripts, whose bytes are intentionally outside the
@@ -67,6 +39,15 @@ form_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
 FORM_STANDARD_LANE=0 FORM_CLI_FORCE_LINK=1 ./build-form-cli.sh
 [[ -x form-cli ]] || {
     printf '%s\n' 'form-cli build failed' >&2
+    exit 1
+}
+# build-form-cli.sh has already compared the complete canonical source set with
+# the freshly regenerated table.  Reuse that witnessed stamp instead of
+# maintaining a second source list here: a drifted duplicate can correctly
+# relink a carrier and then falsely label the platform copy stale.
+form_cli_stamp="$(tr -d '\r\n' < form-stdlib/bootstrap/form-cli.stamp)"
+[[ "$form_cli_stamp" =~ ^[0-9a-f]{16}$ ]] || {
+    printf '%s\n' 'form-cli canonical bootstrap stamp is missing or malformed' >&2
     exit 1
 }
 cp form-cli "form-stdlib/bootstrap/form-cli-${slug}"
