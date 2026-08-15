@@ -46,8 +46,15 @@ form_cli_verify_binary_identity() {
         echo "form-cli bootstrap: binary is missing or not executable: $binary" >&2
         return 1
     }
-    actual_id="$(printf 'carrier-id\n' | "$binary")"
-    actual_challenge="$(printf 'carrier-challenge %s\n' "$nonce" | "$binary")"
+    # Take the carrier-id / carrier-challenge LINE, not the whole answer. On
+    # 2026-08-14 form-cli.fk grew fc-with-share, which prepends the share stamp
+    # to every response, so these two verbs now answer two lines — the stamp,
+    # then the identity. Comparing the whole output made a correct carrier read
+    # as a mismatch (the same assumption the regen voice canary carried, and the
+    # same repair). Grepping the identity line keeps the check exact: a carrier
+    # that cannot produce the line still fails.
+    actual_id="$(printf 'carrier-id\n' | "$binary" | grep -m1 '^carrier-id|')"
+    actual_challenge="$(printf 'carrier-challenge %s\n' "$nonce" | "$binary" | grep -m1 '^carrier-challenge|')"
     if [[ "$actual_id" != "$expected_id" ]]; then
         printf 'form-cli bootstrap: carrier-id mismatch\n  have=%s\n  want=%s\n' \
             "$actual_id" "$expected_id" >&2

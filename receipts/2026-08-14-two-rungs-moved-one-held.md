@@ -38,7 +38,7 @@ fluency, 0..5. At least **20** items. Native earns it when its total *reaches* r
 different claim than the one written.
 
 Blindness is a protocol fact the cell carries as a caller-asserted flag and does **not** pretend to
-verify by computing. A cell that faked that check would be the thing it guards against.
+verify by computing. A cell that faked that check would be the thing it exists to notice.
 
 Four of the band's ten bits exist to catch the rule answering in the body's favour whatever arrives —
 a losing batch earns nothing, an unblind one earns nothing, a short one earns nothing, an empty one

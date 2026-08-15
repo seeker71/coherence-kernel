@@ -36,14 +36,14 @@ FORM_CLI_SRCS=(
     form-stdlib/surprise-salience.fk form-stdlib/host-sense-organ.fk form-stdlib/speech-organ.fk
     form-stdlib/native-host-instance.fk form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
     form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk form-stdlib/rag-ask.fk
-    form-stdlib/form-cli-ask.fk form-stdlib/form-cli-router.fk form-stdlib/form-cli-judge.fk
+    form-stdlib/form-cli-ask.fk form-stdlib/form-cli-offline.fk form-stdlib/form-cli-router.fk form-stdlib/form-cli-judge.fk
     form-stdlib/confidence-weighted-vote.fk form-stdlib/lineage-discounted-vote.fk
     form-stdlib/form-cli-oracle-loop.fk
     form-stdlib/form-cli-sufficiency.fk form-stdlib/form-freq-check.fk
     form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
     form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
     form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk form-stdlib/form-cli-surface-inquiry.fk
-    form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry.fk form-stdlib/relational-inquiry-metabolism.fk form-stdlib/native-model-native-hierarchy.fk form-stdlib/ds4-query-channel.fk form-stdlib/form-cli.fk
+    form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry-edge-ledger.fk form-stdlib/form-cli-inquiry.fk form-stdlib/relational-inquiry-metabolism.fk form-stdlib/native-model-native-hierarchy.fk form-stdlib/ds4-query-channel.fk form-stdlib/form-cli.fk
     form-stdlib/native-model-control-plane.fk form-stdlib/ask-lane-router.fk
     form-stdlib/form-cli-gguf-cell.fk form-stdlib/form-cli-repl.fk
 )
@@ -161,14 +161,14 @@ FORM_CLI_SELFHOST_ORDER=(
     form-stdlib/surprise-salience.fk form-stdlib/host-sense-organ.fk form-stdlib/speech-organ.fk
     form-stdlib/native-host-instance.fk form-stdlib/text-tokenize.fk form-stdlib/rag-embed.fk
     form-stdlib/rag-index-codec.fk form-stdlib/rag-retrieve.fk form-stdlib/rag-ask.fk
-    form-stdlib/form-cli-ask.fk form-stdlib/form-cli-router.fk form-stdlib/form-cli-judge.fk
+    form-stdlib/form-cli-ask.fk form-stdlib/form-cli-offline.fk form-stdlib/form-cli-router.fk form-stdlib/form-cli-judge.fk
     form-stdlib/confidence-weighted-vote.fk form-stdlib/lineage-discounted-vote.fk
     form-stdlib/form-cli-oracle-loop.fk
     form-stdlib/form-cli-sufficiency.fk form-stdlib/form-freq-check.fk
     form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
     form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
     form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk form-stdlib/form-cli-surface-inquiry.fk
-    form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry.fk form-stdlib/ds4-query-channel.fk form-stdlib/form-cli.fk
+    form-stdlib/current-branch-landing.fk form-stdlib/form-cli-inquiry-edge-ledger.fk form-stdlib/form-cli-inquiry.fk form-stdlib/ds4-query-channel.fk form-stdlib/form-cli.fk
     form-stdlib/form-cli-gguf-cell.fk form-stdlib/relational-inquiry-metabolism.fk form-stdlib/native-model-native-hierarchy.fk
     form-stdlib/native-model-control-plane.fk form-stdlib/ask-lane-router.fk
 )
@@ -206,7 +206,7 @@ stdlib=form-stdlib
 core_src="$(compile_bml "$stdlib/core.fk")"
 http_client_src="$(compile_bml "$stdlib/http-client.fk")"
 form_cli_ask_src="$(compile_bml "$stdlib/form-cli-ask.fk")"
-modules="(list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/grammars/sanskrit-roots.fk\") (read_file \"$stdlib/resource-port.fk\") (read_file \"$stdlib/bml-native-interface-package-import.fk\") (read_file \"$stdlib/hati-os-targets.fk\") (read_file \"$stdlib/form-native-resource-interfaces.fk\") (read_file \"$stdlib/form-fs.fk\") (read_file \"$stdlib/storage-port.fk\") (read_file \"$stdlib/host-kernel-carrier.fk\") (read_file \"$stdlib/fnri-standin.fk\") (read_file \"$stdlib/fnri-receipt.fk\") (read_file \"$http_client_src\") (read_file \"$stdlib/line-grammar.fk\") (read_file \"$stdlib/str-byte-at.fk\") (read_file \"$stdlib/sha256.fk\") (read_file \"$stdlib/hmac-sha256.fk\") (read_file \"$stdlib/hex.fk\") (read_file \"$stdlib/format-arith.fk\") (read_file \"$stdlib/f16-decode.fk\") (read_file \"$stdlib/q6k-dequant.fk\") (read_file \"$stdlib/equireach.fk\") (read_file \"$stdlib/equireach-gguf.fk\") (read_file \"$stdlib/gguf-meta.fk\") (read_file \"$stdlib/model-discovery.fk\") (read_file \"$stdlib/q4k-dequant.fk\") (read_file \"$stdlib/weight-load.fk\") (read_file \"$stdlib/voice-traits.fk\") (read_file \"$stdlib/nearest-shape.fk\") (read_file \"$stdlib/co-learning.fk\") (read_file \"$stdlib/co-learning-stream.fk\") (read_file \"$stdlib/mesh-dispatch.fk\") (read_file \"$stdlib/surprise-salience.fk\") (read_file \"$stdlib/host-sense-organ.fk\") (read_file \"$stdlib/speech-organ.fk\") (read_file \"$stdlib/native-host-instance.fk\") (read_file \"$stdlib/text-tokenize.fk\") (read_file \"$stdlib/rag-embed.fk\") (read_file \"$stdlib/rag-index-codec.fk\") (read_file \"$stdlib/rag-retrieve.fk\") (read_file \"$stdlib/rag-ask.fk\") (read_file \"$form_cli_ask_src\") (read_file \"$stdlib/form-cli-router.fk\") (read_file \"$stdlib/form-cli-judge.fk\") (read_file \"$stdlib/confidence-weighted-vote.fk\") (read_file \"$stdlib/lineage-discounted-vote.fk\") (read_file \"$stdlib/form-cli-oracle-loop.fk\") (read_file \"$stdlib/form-cli-sufficiency.fk\") (read_file \"$stdlib/form-freq-check.fk\") (read_file \"$stdlib/trust-row.fk\") (read_file \"$stdlib/form-cli-ask-gate.fk\") (read_file \"$stdlib/form-cli-staged-trace.fk\") (read_file \"$stdlib/form-cli-request.fk\") (read_file \"$carrier_src\") (read_file \"$stdlib/form-cli-ask-plus.fk\") (read_file \"$stdlib/form-cli-surface-inquiry.fk\") (read_file \"$stdlib/current-branch-landing.fk\") (read_file \"$stdlib/form-cli-inquiry.fk\") (read_file \"$stdlib/form-cli.fk\") (read_file \"$stdlib/form-cli-gguf-cell.fk\"))"
+modules="(list (read_file \"$stdlib/fourth-shim.fk\") (read_file \"$core_src\") (read_file \"$stdlib/grammars/sanskrit-roots.fk\") (read_file \"$stdlib/resource-port.fk\") (read_file \"$stdlib/bml-native-interface-package-import.fk\") (read_file \"$stdlib/hati-os-targets.fk\") (read_file \"$stdlib/form-native-resource-interfaces.fk\") (read_file \"$stdlib/form-fs.fk\") (read_file \"$stdlib/storage-port.fk\") (read_file \"$stdlib/host-kernel-carrier.fk\") (read_file \"$stdlib/fnri-standin.fk\") (read_file \"$stdlib/fnri-receipt.fk\") (read_file \"$http_client_src\") (read_file \"$stdlib/line-grammar.fk\") (read_file \"$stdlib/str-byte-at.fk\") (read_file \"$stdlib/sha256.fk\") (read_file \"$stdlib/hmac-sha256.fk\") (read_file \"$stdlib/hex.fk\") (read_file \"$stdlib/format-arith.fk\") (read_file \"$stdlib/f16-decode.fk\") (read_file \"$stdlib/q6k-dequant.fk\") (read_file \"$stdlib/equireach.fk\") (read_file \"$stdlib/equireach-gguf.fk\") (read_file \"$stdlib/gguf-meta.fk\") (read_file \"$stdlib/model-discovery.fk\") (read_file \"$stdlib/q4k-dequant.fk\") (read_file \"$stdlib/weight-load.fk\") (read_file \"$stdlib/voice-traits.fk\") (read_file \"$stdlib/nearest-shape.fk\") (read_file \"$stdlib/co-learning.fk\") (read_file \"$stdlib/co-learning-stream.fk\") (read_file \"$stdlib/mesh-dispatch.fk\") (read_file \"$stdlib/surprise-salience.fk\") (read_file \"$stdlib/host-sense-organ.fk\") (read_file \"$stdlib/speech-organ.fk\") (read_file \"$stdlib/native-host-instance.fk\") (read_file \"$stdlib/text-tokenize.fk\") (read_file \"$stdlib/rag-embed.fk\") (read_file \"$stdlib/rag-index-codec.fk\") (read_file \"$stdlib/rag-retrieve.fk\") (read_file \"$stdlib/rag-ask.fk\") (read_file \"$form_cli_ask_src\") (read_file \"$stdlib/form-cli-offline.fk\") (read_file \"$stdlib/form-cli-router.fk\") (read_file \"$stdlib/form-cli-judge.fk\") (read_file \"$stdlib/confidence-weighted-vote.fk\") (read_file \"$stdlib/lineage-discounted-vote.fk\") (read_file \"$stdlib/form-cli-oracle-loop.fk\") (read_file \"$stdlib/form-cli-sufficiency.fk\") (read_file \"$stdlib/form-freq-check.fk\") (read_file \"$stdlib/trust-row.fk\") (read_file \"$stdlib/form-cli-ask-gate.fk\") (read_file \"$stdlib/form-cli-staged-trace.fk\") (read_file \"$stdlib/form-cli-request.fk\") (read_file \"$carrier_src\") (read_file \"$stdlib/form-cli-ask-plus.fk\") (read_file \"$stdlib/form-cli-surface-inquiry.fk\") (read_file \"$stdlib/current-branch-landing.fk\") (read_file \"$stdlib/form-cli-inquiry-edge-ledger.fk\") (read_file \"$stdlib/form-cli-inquiry.fk\") (read_file \"$stdlib/form-cli.fk\") (read_file \"$stdlib/form-cli-gguf-cell.fk\"))"
 modules="${modules%)} (read_file \"$stdlib/relational-inquiry-metabolism.fk\") (read_file \"$stdlib/native-model-native-hierarchy.fk\") (read_file \"$stdlib/native-model-control-plane.fk\") (read_file \"$stdlib/ask-lane-router.fk\"))"
 modules="${modules/ (read_file \"$stdlib\/form-cli.fk\")/ (read_file \"$stdlib\/ds4-query-channel.fk\") (read_file \"$stdlib\/form-cli.fk\")}"
 band="(read_file \"$stdlib/form-cli-repl.fk\")"
@@ -264,8 +264,17 @@ table_shape="$(form_cli_validate_table "$table_tmp")"
 # (receipts/2026-07-17-regen-lane-aphonic-carrier.md) dies here instead of
 # shipping. Shape validation alone cannot catch a table that runs mute.
 if [[ -n "${FKWU:-}" && -x "${FKWU:-}" ]]; then
-    voice="$(printf 'ping\n' | "$FKWU" "$table_tmp" 0 2>/dev/null | sed -n '1p')"
-    if [[ "$voice" != "pong" ]]; then
+    # Read the WHOLE answer, not line 1. On 2026-08-14 form-cli.fk grew
+    # fc-with-share, which prepends the share stamp to every response — so ping
+    # now answers two lines, the stamp then "pong", and a line-1 test saw the
+    # stamp and called a healthy carrier aphonic. The canary asks whether the
+    # carrier SPEAKS; requiring pong to be first was an assumption about layout,
+    # not about voice. It still fails a mute table: a carrier that says nothing
+    # matches nothing. Kept strict on the word itself — pong must be a whole
+    # line, so a table that merely quotes the word somewhere does not pass.
+    voice="$(printf 'ping\n' | "$FKWU" "$table_tmp" 0 2>/dev/null | grep -cx 'pong')"
+    if [[ "$voice" == "0" ]]; then
+        voice="$(printf 'ping\n' | "$FKWU" "$table_tmp" 0 2>/dev/null | tr '\n' ' ')"
         printf "regen: voice canary failed — ping answered '%s', not pong (aphonic carrier)\n" "$voice" >&2
         exit 1
     fi

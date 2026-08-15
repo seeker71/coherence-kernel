@@ -29,7 +29,7 @@ ng-next  ->  ng-run-layers  ->  cuda_matvec_f32  ->  nds-best-loop      (argmax)
 ng-loop  ->  append the word, recurse
 ```
 
-The only branch anywhere in the loop is `(if (lt nx 0) …)`, a GPU-refusal guard. Every step
+The only branch anywhere in the loop is `(if (lt nx 0) …)`, a GPU-refusal branch. Every step
 forwards, takes the argmax, appends a word. **There is no position in the stream where an act could
 stand instead of a token.** Not partial — absent.
 
@@ -50,7 +50,7 @@ servable act runs and its result folds into the stream. An act the native lane c
 invent a value — it answers with the escalation sentinel, that step is marked unhealthy, and
 `atk-escalated` counts exactly what the learning lane is owed. That count is the hook for link 6.
 
-The guard is the whole reason it can be trusted, and it is the pair from `perturbation-pair.fk`
+That branch is the whole reason it can be trusted, and it is the pair from `perturbation-pair.fk`
 aimed at the loop itself:
 
 - **HOLD** — on a word-only stream the loop is byte-for-byte the plain argmax it replaces

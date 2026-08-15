@@ -1,0 +1,114 @@
+; stated-constant-audit.fk — the body counting its own stated constants, in Form.
+;
+; preludes: form-stdlib/core.fk
+;
+; WHY THIS IS NOT A REGEX. On 2026-08-15 I audited this tree for constants whose
+; name claims observation, and I did it with a Python regex. It answered 1912,
+; then 73, then 60, then 8 — four numbers, three of them wrong, and every
+; correction came from making the PATTERN sharper rather than from fixing
+; anything. Urs asked: you used regex, really?
+;
+; The failure is structural, not sloppiness. A regex matches text; it cannot tell
+; `jlee-total-dylib-live-proof-suite` (a pinned verdict whose SUBJECT is a
+; live-proof-suite) from `fcl-this-turn` (a nullary over literals whose name
+; claims a turn was observed). One is honest, one was not, and they differ by
+; grammar, not by spelling. This body has a parser. It has scan_run as a native on
+; every arm (fkwu / go / rust), and learn/tests/homecoming-distillation-corpus-band.fk
+; already walks a 316KB source token-shaped with it and is four-way proven. The
+; tool was here; I reached past it for a foreign one and paid three wrong numbers.
+;
+; WHAT THIS WALKS. Token-shaped, following that band's proven idiom: find each
+; `(defn `, take the name as an alpha run, require the parameter list to be
+; exactly `()`, then walk the body to its closing paren counting ALPHA RUNS. A
+; body with zero alpha runs is a bare number — a stated constant, no call, no
+; reference, nothing that could vary.
+;
+; THE RADIUS, DECLARED. A body like `(list 270 128981 3675 418)` contains the
+; alpha run `list` and is NOT counted here, though it is just as stated. This
+; walker finds bare-number constants only. That is a real limit and it is written
+; down rather than papered over — the same discipline the light-code sheet uses
+; when it answers honest absence. Widening it to literal-list bodies is the next
+; row, not a claim made today.
+;
+; This cell does not judge whether a constant is dishonest. A constant is honest
+; when it declares a constant; it lies when its NAME says the value was taken.
+; That reading is a person's to make. This only counts what is stated, so the
+; person is arguing from the body's own number instead of a foreign tool's.
+;
+; Proven by observe/tests/stated-constant-audit-band.fk.
+; ARM, measured not assumed: scan_run is native in fkwu, the full Go kernel and the
+; full Rust kernel, but the three MINIMAL walkers do not carry it, so this band is
+; read on the fkwu arm. The header first said four-way; that was written before it
+; was run, which is the failure this cell audits, committed in this cell.
+; witnessed: 2026-08-15 -> band 255 on fkwu
+
+(do
+    ; ---- byte helpers, the corpus band's shape ----
+    (defn sca-byte (t n i) (if (or (lt i 0) (ge i n)) 0 (str_byte_at t i)))
+    (defn sca-ws? (b) (if (or (eq b 32) (or (eq b 10) (or (eq b 9) (eq b 13)))) 1 0))
+
+    ; skip whitespace forward
+    (defn sca-skip-ws (t n i)
+        (if (ge i n) i (if (eq (sca-ws? (sca-byte t n i)) 1) (sca-skip-ws t n (add i 1)) i)))
+
+    ; ---- the body walk: from i (just past "()"), to this defn's closing paren.
+    ; Returns the count of alpha runs seen. Zero means a bare number. ----
+    (defn sca-body-alpha (t n i depth acc)
+        (if (ge i n) acc
+            (do
+                (let b (sca-byte t n i))
+                (if (eq b 40) (sca-body-alpha t n (add i 1) (add depth 1) acc)
+                    (if (eq b 41)
+                        (if (eq depth 0) acc (sca-body-alpha t n (add i 1) (sub depth 1) acc))
+                        (do
+                            (let ae (scan_run t i 2))
+                            (if (gt ae i)
+                                (sca-body-alpha t n ae depth (add acc 1))
+                                (sca-body-alpha t n (add i 1) depth acc))))))))
+
+    ; ---- at a "(defn " head: is this a nullary over a bare number? ----
+    ; i points just past "(defn ". Take the name run, then require "()" .
+    ; A name is NOT an alpha run. `a-thing` is alpha, hyphen, alpha — the corpus
+    ; band says so in its own comment (row-638 splits into three runs) and I read
+    ; past it, so the first version of this walker scored 126 instead of 255: it
+    ; found no defn at all because the name ended at the first hyphen. A name runs
+    ; until whitespace or a paren.
+    (defn sca-skip-name (t n i)
+        (if (ge i n) i
+            (do (let b (sca-byte t n i))
+                (if (or (eq (sca-ws? b) 1) (or (eq b 40) (eq b 41))) i
+                    (sca-skip-name t n (add i 1))))))
+
+    (defn sca-at-defn (t n i)
+        (do
+            (let s (sca-skip-ws t n i))
+            (let ne (sca-skip-name t n s))
+            (if (le ne s) 0
+                (do
+                    (let p (sca-skip-ws t n ne))
+                    (if (eq (sca-byte t n p) 40)
+                        (do
+                            (let q (sca-skip-ws t n (add p 1)))
+                            (if (eq (sca-byte t n q) 41)
+                                (if (eq (sca-body-alpha t n (add q 1) 0 0) 0) 1 0)
+                                0))
+                        0)))))
+
+    ; ---- sweep every "(defn " in the text ----
+    (defn sca-mark () "(defn ")
+    (defn sca-sweep (t n from acc)
+        (do
+            (let h (str_find t (sca-mark) from))
+            (if (lt h 0) acc
+                (sca-sweep t n (add h 6) (add acc (sca-at-defn t n (add h 6)))))))
+
+    (defn sca-audit-text (t) (sca-sweep t (str_len t) 0 0))
+    (defn sca-audit (path) (sca-audit-text (read_file path)))
+
+    ; ---- fixtures, so the walker is checked on text it cannot have been fitted to ----
+    (defn sca-fx-none () "(defn a-thing (x) (add x 1))")            ; not nullary
+    (defn sca-fx-one  () "(defn a-thing () 42)")                    ; bare number
+    (defn sca-fx-call () "(defn a-thing () (other-thing))")         ; nullary, but a call
+    (defn sca-fx-two  () "(defn a () 1) (defn b () 2)")             ; two bare numbers
+    (defn sca-fx-nest () "(defn a () (add 1 2))")                   ; nullary, arithmetic
+    0)
