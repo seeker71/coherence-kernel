@@ -7229,6 +7229,7 @@ fn native_bypasses_form_binding(k: &Kernel, name: NameID) -> bool {
             | "char_at"
             | "str_find"
             | "scan_run"
+            | "form_table_text"
     )
 }
 
@@ -7432,9 +7433,10 @@ fn walk_inner(k: &mut Kernel, a: &mut Arena, n: NodeID, env: FrameId) -> Value {
                     }
                 }
                 // Most user bindings still shadow same-named natives. The
-                // exception is the byte-string/cursor waist: source compilers
-                // and BMF cursors depend on those names staying byte-indexed
-                // when portable fallback definitions from core.fk are loaded.
+                // exception is the byte-string/cursor and table-image waist:
+                // source compilers and BMF cursors depend on those names staying
+                // byte-indexed, and universal table emission depends on its
+                // linear native serializer, when portable fallbacks are loaded.
                 // Copy the entry out so the natives-map borrow releases before
                 // we call &mut k.
                 let ne_opt = k.natives.get(&name).copied();
