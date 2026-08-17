@@ -40,15 +40,37 @@ fourth_flatten_expr fks \
     form-stdlib/fourth-flatten-driver.fk \
     > "$work_dir/expr.fk"
 
-"$GO_KERNEL" "${FOURTH_FLATTEN_CHAIN[@]}" "$work_dir/expr.fk" \
-    > "$work_dir/T.txt" \
-    2> "$work_dir/go.err"
-
-if [[ ! -s "$work_dir/T.txt" ]]; then
+echo "regen_t_flat: emitting shared Form table" >&2
+if ! "$GO_KERNEL" "${FOURTH_FLATTEN_CHAIN[@]}" "$work_dir/expr.fk" \
+    > "$work_dir/T.raw" \
+    2> "$work_dir/go.err"; then
+    echo "regen_t_flat: Go bootstrap flatten failed" >&2
     sed -n '1,20p' "$work_dir/go.err" >&2
     exit 1
 fi
 
+if [[ ! -s "$work_dir/T.raw" ]]; then
+    sed -n '1,20p' "$work_dir/go.err" >&2
+    exit 1
+fi
+
+# fourth-flatten-driver prints the serialized numeric image as an effect and
+# then returns Form nothing.  The Go proof sibling renders that final value as
+# a separate `null` line.  It is not part of the table: the whole-image fkwu
+# reader rightly rejects it.  Remove only that exact renderer residue; any
+# other terminal shape stays in the candidate and is witnessed by the smoke.
+if [[ "$(tail -n 1 "$work_dir/T.raw")" == "null" ]]; then
+    sed '$d' "$work_dir/T.raw" > "$work_dir/T.txt"
+else
+    cp "$work_dir/T.raw" "$work_dir/T.txt"
+fi
+
+if [[ ! -s "$work_dir/T.txt" ]]; then
+    echo "regen_t_flat: emitted table was empty after separating the Form return" >&2
+    exit 1
+fi
+
+echo "regen_t_flat: building emitted walker" >&2
 build_fourth
 sources=()
 while IFS= read -r source; do
@@ -60,10 +82,22 @@ if [[ "${#sources[@]}" -lt 1 ]]; then
     exit 1
 fi
 
-{ printf '1\n'; fourth_band_request adler32 fks "${sources[@]}"; } \
+echo "regen_t_flat: flattening adler32 smoke" >&2
+if ! { printf '1\n'; fourth_band_request adler32 fks "${sources[@]}"; } \
     | "$FKWU" "$work_dir/T.txt" 0 \
         > "$work_dir/adler-framed.txt" \
-        2> "$work_dir/adler-flatten.err"
+        2> "$work_dir/adler-flatten.err"; then
+    echo "regen_t_flat: fkwu could not read the candidate shared table" >&2
+    wc -c "$work_dir/T.txt" >&2
+    printf 'candidate head: ' >&2
+    head -c 200 "$work_dir/T.txt" >&2
+    printf '\ncandidate tail: ' >&2
+    tail -c 200 "$work_dir/T.txt" >&2
+    printf '\n' >&2
+    sed -n '1,20p' "$work_dir/adler-flatten.err" >&2
+    sed -n '1,20p' "$work_dir/adler-framed.txt" >&2
+    exit 1
+fi
 
 sed -n '/^==T-adler32==$/,/^==T-END==$/p' "$work_dir/adler-framed.txt" \
     | sed -e '1d' -e '$d' \
@@ -74,9 +108,14 @@ if [[ ! -s "$work_dir/adler-table.txt" ]]; then
     exit 1
 fi
 
-"$FKWU" "$work_dir/adler-table.txt" 0 \
+if ! "$FKWU" "$work_dir/adler-table.txt" 0 \
     > "$work_dir/adler-result.txt" \
-    2> "$work_dir/adler-run.err"
+    2> "$work_dir/adler-run.err"; then
+    echo "regen_t_flat: emitted walker could not read the adler32 table" >&2
+    sed -n '1,20p' "$work_dir/adler-run.err" >&2
+    sed -n '1,20p' "$work_dir/adler-result.txt" >&2
+    exit 1
+fi
 verdict="$(sed -n '1p' "$work_dir/adler-result.txt")"
 if [[ "$verdict" != "5" ]]; then
     echo "regen_t_flat: fkwu smoke failed — adler32 verdict=$verdict, expected 5" >&2
@@ -89,10 +128,16 @@ fi
 # stdin, gets EOF, and the echo answers wrong.
 printf '(defn echo-once ()\n    (do (let line (read_line))\n        (str_concat line (str_concat "/" line))))\n(echo-once)\n' \
     > "$work_dir/voice-band.fk"
-{ printf '1\n'; fourth_band_request voice fks form-stdlib/core.fk "$work_dir/voice-band.fk"; } \
+echo "regen_t_flat: flattening single-read voice smoke" >&2
+if ! { printf '1\n'; fourth_band_request voice fks form-stdlib/core.fk "$work_dir/voice-band.fk"; } \
     | "$FKWU" "$work_dir/T.txt" 0 \
         > "$work_dir/voice-framed.txt" \
-        2> "$work_dir/voice-flatten.err"
+        2> "$work_dir/voice-flatten.err"; then
+    echo "regen_t_flat: fkwu could not flatten the voice smoke" >&2
+    sed -n '1,20p' "$work_dir/voice-flatten.err" >&2
+    sed -n '1,20p' "$work_dir/voice-framed.txt" >&2
+    exit 1
+fi
 sed -n '/^==T-voice==$/,/^==T-END==$/p' "$work_dir/voice-framed.txt" \
     | sed -e '1d' -e '$d' \
     > "$work_dir/voice-table.txt"
@@ -100,7 +145,11 @@ if [[ ! -s "$work_dir/voice-table.txt" ]]; then
     echo "regen_t_flat: voice smoke failed — no table between markers" >&2
     exit 1
 fi
-verdict="$(printf 'ping\n' | "$FKWU" "$work_dir/voice-table.txt" 0 2>/dev/null | sed -n '1p')"
+if ! verdict="$(printf 'ping\n' | "$FKWU" "$work_dir/voice-table.txt" 0 2>"$work_dir/voice-run.err" | sed -n '1p')"; then
+    echo "regen_t_flat: emitted walker could not read the voice table" >&2
+    sed -n '1,20p' "$work_dir/voice-run.err" >&2
+    exit 1
+fi
 if [[ "$verdict" != "ping/ping" ]]; then
     echo "regen_t_flat: voice smoke failed — effect-let answered '$verdict', expected 'ping/ping' (aphonic T_flat)" >&2
     exit 1
