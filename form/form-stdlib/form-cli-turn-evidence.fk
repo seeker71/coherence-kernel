@@ -1,0 +1,181 @@
+; form-cli-turn-evidence.fk — validate one completed Codex turn and derive
+; an explicitly scoped event share from it.
+;
+; preludes: form-stdlib/core.fk form-stdlib/line-grammar.fk
+;
+; The host carrier emits measurements, never prose content. This cell owns
+; trust: a row is observed only when its identity, time, provider usage,
+; tool accounting, form-run byte accounting, lane totals, source, and
+; completion flag reconcile. The three-way percentage is not a universal
+; measure of contribution. It is a largest-remainder normalization of
+; carrier boundary events for one completed turn:
+;   native = completed fkwu command rows
+;   local  = completed non-fkwu tool-output events
+;   remote = provider token-usage events (one per model call)
+
+(defn fcte-tag () "turn-evidence-v1")
+(defn fcte-source-kind () "codex-rollout-jsonl+state-sqlite")
+(defn fcte-field-count () 35)
+
+(defn fcte-parse (row) (split-on row "|"))
+
+(defn fcte-thread-id (e) (nth e 1))
+(defn fcte-turn-id (e) (nth e 2))
+(defn fcte-model-provider (e) (nth e 3))
+(defn fcte-model (e) (nth e 4))
+(defn fcte-started-ms (e) (str_to_int (nth e 5)))
+(defn fcte-ended-ms (e) (str_to_int (nth e 6)))
+(defn fcte-duration-ms (e) (str_to_int (nth e 7)))
+(defn fcte-ttft-ms (e) (str_to_int (nth e 8)))
+(defn fcte-final-output-bytes (e) (str_to_int (nth e 9)))
+(defn fcte-model-calls (e) (str_to_int (nth e 10)))
+(defn fcte-input-tokens (e) (str_to_int (nth e 11)))
+(defn fcte-cached-input-tokens (e) (str_to_int (nth e 12)))
+(defn fcte-uncached-input-tokens (e) (str_to_int (nth e 13)))
+(defn fcte-cache-write-input-tokens (e) (str_to_int (nth e 14)))
+(defn fcte-output-tokens (e) (str_to_int (nth e 15)))
+(defn fcte-reasoning-output-tokens (e) (str_to_int (nth e 16)))
+(defn fcte-total-tokens (e) (str_to_int (nth e 17)))
+(defn fcte-tool-calls (e) (str_to_int (nth e 18)))
+(defn fcte-tool-outputs (e) (str_to_int (nth e 19)))
+(defn fcte-tool-wall-ms (e) (str_to_int (nth e 20)))
+(defn fcte-tool-output-bytes (e) (str_to_int (nth e 21)))
+(defn fcte-form-commands (e) (str_to_int (nth e 22)))
+(defn fcte-form-failures (e) (str_to_int (nth e 23)))
+(defn fcte-form-stdout-bytes (e) (str_to_int (nth e 24)))
+(defn fcte-form-stderr-bytes (e) (str_to_int (nth e 25)))
+(defn fcte-form-shown-bytes (e) (str_to_int (nth e 26)))
+(defn fcte-native-commands (e) (str_to_int (nth e 27)))
+(defn fcte-native-failures (e) (str_to_int (nth e 28)))
+(defn fcte-local-events (e) (str_to_int (nth e 29)))
+(defn fcte-remote-events (e) (str_to_int (nth e 30)))
+(defn fcte-total-events (e) (str_to_int (nth e 31)))
+(defn fcte-patch-events (e) (str_to_int (nth e 32)))
+(defn fcte-source (e) (nth e 33))
+(defn fcte-complete (e) (str_to_int (nth e 34)))
+
+(defn fcte-digits-loop? (s i)
+    (if (eq i (str_len s)) 1
+        (if (is-digit-cp (ord (char_at s i)))
+            (fcte-digits-loop? s (add i 1)) 0)))
+
+(defn fcte-digits? (s)
+    (if (eq (str_len s) 0) 0 (fcte-digits-loop? s 0)))
+
+(defn fcte-numeric-fields-loop? (e i)
+    (if (eq i 33)
+        (fcte-digits? (nth e 34))
+        (if (fcte-digits? (nth e i))
+            (fcte-numeric-fields-loop? e (add i 1)) 0)))
+
+(defn fcte-shape? (e)
+    (if (eq (len e) (fcte-field-count))
+        (if (str_eq (nth e 0) (fcte-tag)) 1 0) 0))
+
+(defn fcte-identity? (e)
+    (if (and (gt (str_len (fcte-thread-id e)) 0)
+        (and (gt (str_len (fcte-turn-id e)) 0)
+        (and (gt (str_len (fcte-model-provider e)) 0)
+             (gt (str_len (fcte-model e)) 0)))) 1 0))
+
+(defn fcte-time-valid? (e)
+    (if (and (ge (fcte-ended-ms e) (fcte-started-ms e))
+        (and (eq (fcte-duration-ms e)
+                 (sub (fcte-ended-ms e) (fcte-started-ms e)))
+        (and (le (fcte-ttft-ms e) (fcte-duration-ms e))
+             (ge (fcte-final-output-bytes e) 0)))) 1 0))
+
+(defn fcte-token-valid? (e)
+    (if (and (le (fcte-cached-input-tokens e) (fcte-input-tokens e))
+        (and (eq (fcte-uncached-input-tokens e)
+                 (sub (fcte-input-tokens e) (fcte-cached-input-tokens e)))
+        (and (le (fcte-reasoning-output-tokens e) (fcte-output-tokens e))
+        (and (eq (fcte-total-tokens e)
+                 (add (fcte-input-tokens e) (fcte-output-tokens e)))
+             (eq (fcte-model-calls e) (fcte-remote-events e)))))) 1 0))
+
+(defn fcte-tool-valid? (e)
+    (if (and (eq (fcte-tool-calls e) (fcte-tool-outputs e))
+        (and (ge (fcte-tool-wall-ms e) 0)
+             (ge (fcte-tool-output-bytes e) 0))) 1 0))
+
+(defn fcte-form-valid? (e)
+    (if (and (le (fcte-form-failures e) (fcte-form-commands e))
+        (and (eq (fcte-form-shown-bytes e)
+                 (add (fcte-form-stdout-bytes e) (fcte-form-stderr-bytes e)))
+        (and (le (fcte-native-commands e) (fcte-form-commands e))
+             (le (fcte-native-failures e) (fcte-native-commands e))))) 1 0))
+
+(defn fcte-lanes-valid? (e)
+    (if (eq (fcte-total-events e)
+            (add (fcte-native-commands e)
+                 (add (fcte-local-events e) (fcte-remote-events e)))) 1 0))
+
+(defn fcte-carrier-present? (e)
+    (if (fcte-shape? e)
+        (if (fcte-identity? e)
+            (fcte-numeric-fields-loop? e 5) 0) 0))
+
+(defn fcte-valid? (e)
+    (if (fcte-carrier-present? e)
+        (if (and (fcte-time-valid? e)
+            (and (fcte-token-valid? e)
+            (and (fcte-tool-valid? e)
+            (and (fcte-form-valid? e)
+            (and (fcte-lanes-valid? e)
+            (and (str_eq (fcte-source e) (fcte-source-kind))
+                 (eq (fcte-complete e) 1))))))) 1 0)
+        0))
+
+; Declared means there is no usable carrier row. Embodied means a carrier row
+; crossed the body but did not completely reconcile. Observed is earned only
+; by the full validation above.
+(defn fcte-kind-declared () 0)
+(defn fcte-kind-observed () 1)
+(defn fcte-kind-embodied () 2)
+(defn fcte-kind (e)
+    (if (eq (fcte-valid? e) 1) (fcte-kind-observed)
+        (if (eq (fcte-carrier-present? e) 1)
+            (fcte-kind-embodied) (fcte-kind-declared))))
+(defn fcte-kind-name (e)
+    (if (eq (fcte-kind e) (fcte-kind-observed)) "observed"
+        (if (eq (fcte-kind e) (fcte-kind-embodied)) "embodied" "declared")))
+
+; Deterministic largest-remainder apportionment. Ties resolve native, local,
+; remote so the same evidence is bit-identical on all proof walkers.
+(defn fcte-share-base (part total) (div (mul part 100) total))
+(defn fcte-share-rem (part total) (mod (mul part 100) total))
+
+(defn fcte-first-winner (rn rl rr)
+    (if (and (ge rn rl) (ge rn rr)) 0
+        (if (ge rl rr) 1 2)))
+
+(defn fcte-second-winner (first rn rl rr)
+    (if (eq first 0) (if (ge rl rr) 1 2)
+        (if (eq first 1) (if (ge rn rr) 0 2)
+            (if (ge rn rl) 0 1))))
+
+(defn fcte-boundary-share (e)
+    (do
+        (let native (fcte-native-commands e))
+        (let local (fcte-local-events e))
+        (let remote (fcte-remote-events e))
+        (let total (fcte-total-events e))
+        (if (eq total 0) (list 0 0 0)
+            (do
+                (let bn (fcte-share-base native total))
+                (let bl (fcte-share-base local total))
+                (let br (fcte-share-base remote total))
+                (let left (sub 100 (add bn (add bl br))))
+                (let rn (fcte-share-rem native total))
+                (let rl (fcte-share-rem local total))
+                (let rr (fcte-share-rem remote total))
+                (let first (fcte-first-winner rn rl rr))
+                (let second (fcte-second-winner first rn rl rr))
+                (list
+                    (add bn (add (if (and (ge left 1) (eq first 0)) 1 0)
+                                 (if (and (eq left 2) (eq second 0)) 1 0)))
+                    (add bl (add (if (and (ge left 1) (eq first 1)) 1 0)
+                                 (if (and (eq left 2) (eq second 1)) 1 0)))
+                    (add br (add (if (and (ge left 1) (eq first 2)) 1 0)
+                                 (if (and (eq left 2) (eq second 2)) 1 0))))))))
