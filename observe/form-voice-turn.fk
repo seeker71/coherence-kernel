@@ -1,0 +1,398 @@
+; form-voice-turn.fk -- the Form-owned membrane between a candidate voice and
+; the exact final bytes rendered to a person.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk
+; preludes: form-stdlib/string-byte-fold-src-shim.fk form-stdlib/sha256.fk
+; preludes: form-stdlib/form-ontology-bp.fk form-stdlib/hex.fk
+; preludes: form-stdlib/form-agent-protocol.fk form-stdlib/choice-receipt.fk
+; preludes: form-stdlib/form-agent-tree.fk form-stdlib/tool-channel.fk
+; preludes: form-stdlib/form-cli-membrane.fk
+;
+; This organ does not claim a native generative voice.  It makes one truth
+; executable: a local agent's words can be rendered only after Form binds the
+; request/candidate/final identities, admits every required tool call, receives
+; each observed result back into its agent tree, and refuses any outer rewrite.
+;
+; Raw prompt, tool, and answer bytes may remain in a consented transient mailbox.
+; The public receipt contains only hashes, byte counts, route/provenance, and
+; revisit coordinates.  Current fkwu host-exec drops stdin, captures stdout
+; alone, and has no child exit status; this module names that carrier floor.
+; Proven by: observe/tests/form-voice-turn-band.fk
+
+(let FVT-TAG-REF "fvt-content-ref-v1")
+(let FVT-TAG-ROUTE "fvt-route-v1")
+(let FVT-TAG-OFFER "fvt-tool-offer-v1")
+(let FVT-TAG-TURN "fvt-turn-v1")
+(let FVT-TAG-PROPOSAL "fvt-tool-proposal-v1")
+(let FVT-TAG-STEP "fvt-observed-tool-step-v1")
+(let FVT-TAG-PROVENANCE "fvt-voice-provenance-v1")
+(let FVT-TAG-CLAIM "fvt-claim-v1")
+(let FVT-TAG-CANDIDATE "fvt-candidate-v1")
+(let FVT-TAG-FINAL "fvt-final-v1")
+
+(do
+    ; -- content identities ---------------------------------------------------
+    (defn fvt-cat (parts)
+        (if (eq (len parts) 0) ""
+            (str_concat (head parts) (fvt-cat (tail parts)))))
+    (defn fvt-sha256 (content)
+        (hex-encode (sha256-stream-string content)))
+    (defn fvt-ref-from-digest (retention digest byte-count local-path)
+        (list FVT-TAG-REF retention digest byte-count local-path))
+    (defn fvt-content-ref (retention content local-path)
+        (fvt-ref-from-digest retention (fvt-sha256 content) (str_len content) local-path))
+    (defn fvt-ref? (value) (cr-tagged? value FVT-TAG-REF 5))
+    (defn fvt-ref-retention (ref) (nth ref 1))
+    (defn fvt-ref-sha256 (ref) (nth ref 2))
+    (defn fvt-ref-bytes (ref) (nth ref 3))
+    (defn fvt-ref-local-path (ref) (nth ref 4))
+    (defn fvt-retention-known? (retention)
+        (or (str_eq retention "hash-only")
+            (str_eq retention "consented-local-retention")))
+    (defn fvt-ref-valid? (ref)
+        (if (fvt-ref? ref)
+            (and (fvt-retention-known? (fvt-ref-retention ref))
+                 (and (eq (str_len (fvt-ref-sha256 ref)) 64)
+                      (and (eq (hex-valid? (fvt-ref-sha256 ref)) 1)
+                           (and (ge (fvt-ref-bytes ref) 0)
+                                (if (str_eq (fvt-ref-retention ref) "hash-only")
+                                    (str_eq (fvt-ref-local-path ref) "")
+                                    (gt (str_len (fvt-ref-local-path ref)) 0))))))
+            false))
+    (defn fvt-ref-equal? (a b)
+        (if (and (fvt-ref-valid? a) (fvt-ref-valid? b))
+            (and (str_eq (fvt-ref-sha256 a) (fvt-ref-sha256 b))
+                 (eq (fvt-ref-bytes a) (fvt-ref-bytes b)))
+            false))
+
+    ; -- route order ----------------------------------------------------------
+    ; No local agent may be selected before a native result and a terminal
+    ; Metal negative.  "rented-voice" is therefore an explicit late lane.
+    (defn fvt-route (native-state metal-state local-state)
+        (list FVT-TAG-ROUTE native-state metal-state local-state))
+    (defn fvt-route? (value) (cr-tagged? value FVT-TAG-ROUTE 4))
+    (defn fvt-route-native (route) (nth route 1))
+    (defn fvt-route-metal (route) (nth route 2))
+    (defn fvt-route-local (route) (nth route 3))
+    (defn fvt-native-state-known? (state)
+        (or (str_eq state "native-grounded") (str_eq state "native-no-answer")))
+    (defn fvt-metal-negative? (state)
+        (or (str_eq state "metal-refused") (str_eq state "metal-unavailable")))
+    (defn fvt-metal-state-known? (state)
+        (or (str_eq state "metal-not-attempted")
+            (or (str_eq state "metal-answer-validated")
+                (fvt-metal-negative? state))))
+    (defn fvt-local-state-known? (state)
+        (or (str_eq state "local-not-escalated")
+            (or (str_eq state "local-awaiting-return")
+                (str_eq state "local-returned"))))
+    (defn fvt-route-valid? (route)
+        (if (fvt-route? route)
+            (and (fvt-native-state-known? (fvt-route-native route))
+                 (and (fvt-metal-state-known? (fvt-route-metal route))
+                      (and (fvt-local-state-known? (fvt-route-local route))
+                           (if (str_eq (fvt-route-native route) "native-grounded")
+                               (and (str_eq (fvt-route-metal route) "metal-not-attempted")
+                                    (str_eq (fvt-route-local route) "local-not-escalated"))
+                               (if (str_eq (fvt-route-metal route) "metal-answer-validated")
+                                   (str_eq (fvt-route-local route) "local-not-escalated")
+                                   (if (fvt-metal-negative? (fvt-route-metal route))
+                                       true
+                                       (str_eq (fvt-route-local route)
+                                                   "local-not-escalated")))))))
+            false))
+
+    ; -- Form-offered tools ---------------------------------------------------
+    ; Args enter the transcript as a content identity.  The agent proposes a
+    ; call, but only a Form offer whose tool/capability/id/hash all match admits it.
+    (defn fvt-offer (call-id tool capability args-ref)
+        (list FVT-TAG-OFFER call-id tool capability args-ref))
+    (defn fvt-offer? (value) (cr-tagged? value FVT-TAG-OFFER 5))
+    (defn fvt-offer-id (offer) (nth offer 1))
+    (defn fvt-offer-tool (offer) (nth offer 2))
+    (defn fvt-offer-capability (offer) (nth offer 3))
+    (defn fvt-offer-args-ref (offer) (nth offer 4))
+    (defn fvt-offer-valid? (offer)
+        (if (fvt-offer? offer)
+            (and (gt (str_len (fvt-offer-id offer)) 0)
+                 (and (fvt-ref-valid? (fvt-offer-args-ref offer))
+                      (str_eq
+                          (tc-plan-status (tc-plan-tool
+                              (fvt-offer-tool offer) (fvt-offer-capability offer)))
+                          "tool/plan")))
+            false))
+    (defn fvt-offers-valid? (offers)
+        (if (eq (len offers) 0) true
+            (if (fvt-offer-valid? (head offers))
+                (fvt-offers-valid? (tail offers))
+                false)))
+
+    ; -- the turn's public shape ---------------------------------------------
+    (defn fvt-turn (turn-id retention prompt-ref route offers)
+        (list FVT-TAG-TURN turn-id retention prompt-ref route offers))
+    (defn fvt-turn? (value) (cr-tagged? value FVT-TAG-TURN 6))
+    (defn fvt-turn-id (turn) (nth turn 1))
+    (defn fvt-turn-retention (turn) (nth turn 2))
+    (defn fvt-turn-prompt-ref (turn) (nth turn 3))
+    (defn fvt-turn-route (turn) (nth turn 4))
+    (defn fvt-turn-offers (turn) (nth turn 5))
+    (defn fvt-turn-valid? (turn)
+        (if (fvt-turn? turn)
+            (and (gt (str_len (fvt-turn-id turn)) 0)
+                 (and (fvt-retention-known? (fvt-turn-retention turn))
+                      (and (fvt-ref-valid? (fvt-turn-prompt-ref turn))
+                           (and (str_eq (fvt-turn-retention turn)
+                                        (fvt-ref-retention (fvt-turn-prompt-ref turn)))
+                                (and (fvt-route-valid? (fvt-turn-route turn))
+                                     (fvt-offers-valid? (fvt-turn-offers turn)))))))
+            false))
+
+    ; -- proposal -> observation -> Form agent child -------------------------
+    (defn fvt-proposal (turn-id sequence call-id tool capability args-ref)
+        (list FVT-TAG-PROPOSAL turn-id sequence
+              (ap-tool-call call-id tool (fvt-ref-sha256 args-ref))
+              capability args-ref))
+    (defn fvt-proposal? (value) (cr-tagged? value FVT-TAG-PROPOSAL 6))
+    (defn fvt-proposal-turn-id (proposal) (nth proposal 1))
+    (defn fvt-proposal-sequence (proposal) (nth proposal 2))
+    (defn fvt-proposal-call (proposal) (nth proposal 3))
+    (defn fvt-proposal-capability (proposal) (nth proposal 4))
+    (defn fvt-proposal-args-ref (proposal) (nth proposal 5))
+    (defn fvt-proposal-valid? (proposal)
+        (if (fvt-proposal? proposal)
+            (do
+                (let call (fvt-proposal-call proposal))
+                (and (gt (str_len (fvt-proposal-turn-id proposal)) 0)
+                     (and (gt (fvt-proposal-sequence proposal) 0)
+                          (and (str_eq (ap-part-kind call) "tool_call")
+                               (and (fvt-ref-valid? (fvt-proposal-args-ref proposal))
+                                    (and (str_eq (ap-tc-args call)
+                                                 (fvt-ref-sha256
+                                                     (fvt-proposal-args-ref proposal)))
+                                         (str_eq (tc-plan-status (tc-plan-tool
+                                             (ap-tc-name call)
+                                             (fvt-proposal-capability proposal)))
+                                             "tool/plan")))))))
+            false))
+    (defn fvt-offer-matches? (offer proposal)
+        (if (and (fvt-offer-valid? offer) (fvt-proposal-valid? proposal))
+            (do
+                (let call (fvt-proposal-call proposal))
+                (and (str_eq (fvt-offer-id offer) (ap-tc-id call))
+                     (and (str_eq (fvt-offer-tool offer) (ap-tc-name call))
+                          (and (str_eq (fvt-offer-capability offer)
+                                       (fvt-proposal-capability proposal))
+                               (fvt-ref-equal? (fvt-offer-args-ref offer)
+                                               (fvt-proposal-args-ref proposal))))))
+            false))
+    (defn fvt-offers-admit? (offers proposal)
+        (if (eq (len offers) 0) false
+            (if (fvt-offer-matches? (head offers) proposal) true
+                (fvt-offers-admit? (tail offers) proposal))))
+    (defn fvt-proposal-admitted? (turn proposal)
+        (if (and (fvt-turn-valid? turn) (fvt-proposal-valid? proposal))
+            (and (str_eq (fvt-turn-id turn) (fvt-proposal-turn-id proposal))
+                 (fvt-offers-admit? (fvt-turn-offers turn) proposal))
+            false))
+
+    ; Existing fat-step makes the returned result a new Form agent state and a
+    ; choice receipt; the parent remains a checkpoint.
+    (defn fvt-observed-step (parent proposal result-ref crossing outcome certainty tick)
+        (list FVT-TAG-STEP parent proposal result-ref crossing outcome certainty tick
+              (fat-step parent (fvt-proposal-call proposal)
+                        (fvt-ref-sha256 result-ref) outcome certainty tick)))
+    (defn fvt-step? (value) (cr-tagged? value FVT-TAG-STEP 9))
+    (defn fvt-step-proposal (step) (nth step 2))
+    (defn fvt-step-result-ref (step) (nth step 3))
+    (defn fvt-step-crossing (step) (nth step 4))
+    (defn fvt-step-outcome (step) (nth step 5))
+    (defn fvt-step-tick (step) (nth step 7))
+    (defn fvt-step-node (step) (nth step 8))
+    (defn fvt-step-carried-result? (step)
+        (if (and (fvt-step? step) (fat-node? (fvt-step-node step)))
+            (do
+                (let state (fat-node-state (fvt-step-node step)))
+                (let message (nth state (sub (len state) 1)))
+                (let parts (ap-msg-parts message))
+                (if (eq (len parts) 1)
+                    (do
+                        (let result-part (head parts))
+                        (and (str_eq (ap-part-kind result-part) "tool_result")
+                             (and (str_eq (ap-tr-id result-part)
+                                          (ap-tc-id (fvt-proposal-call
+                                              (fvt-step-proposal step))))
+                                  (str_eq (ap-tr-content result-part)
+                                      (fvt-ref-sha256 (fvt-step-result-ref step))))))
+                    false))
+            false))
+    (defn fvt-step-valid? (turn step)
+        (if (fvt-step? step)
+            (and (fvt-proposal-admitted? turn (fvt-step-proposal step))
+                 (and (fvt-ref-valid? (fvt-step-result-ref step))
+                      (and (cr-outcome-known? (fvt-step-outcome step))
+                           (and (fcm-crossing-valid? (fvt-step-crossing step)
+                                                     "form-voice-turn" "Form"
+                                                     (fvt-step-tick step))
+                                (and (fat-node? (fvt-step-node step))
+                                     (fvt-step-carried-result? step))))))
+            false))
+    (defn fvt-steps-valid? (turn steps)
+        (if (eq (len steps) 0) true
+            (if (fvt-step-valid? turn (head steps))
+                (fvt-steps-valid? turn (tail steps))
+                false)))
+    (defn fvt-step-has-id? (steps call-id)
+        (if (eq (len steps) 0) false
+            (if (str_eq (ap-tc-id (fvt-proposal-call
+                         (fvt-step-proposal (head steps)))) call-id)
+                true
+                (fvt-step-has-id? (tail steps) call-id))))
+    (defn fvt-required-steps-present? (required-ids steps)
+        (if (eq (len required-ids) 0) true
+            (if (fvt-step-has-id? steps (head required-ids))
+                (fvt-required-steps-present? (tail required-ids) steps)
+                false)))
+
+    ; -- voice provenance, claims, candidate, final -------------------------
+    ; "rented-voice" can never claim a native surface.  The ordinary turn
+    ; names the crossing Form actually receives: a correlated local CLI return.
+    ; A separate carrier observation may later add its own network evidence;
+    ; absence is not a field this turn needs in order to be whole.
+    (defn fvt-provenance
+        (voice-author immediate-surface carrier-event adapter-ref completion-evidence)
+        (list FVT-TAG-PROVENANCE voice-author immediate-surface carrier-event
+              adapter-ref completion-evidence))
+    (defn fvt-provenance? (value) (cr-tagged? value FVT-TAG-PROVENANCE 6))
+    (defn fvt-voice-author (provenance) (nth provenance 1))
+    (defn fvt-immediate-surface (provenance) (nth provenance 2))
+    (defn fvt-carrier-event (provenance) (nth provenance 3))
+    (defn fvt-adapter-ref (provenance) (nth provenance 4))
+    (defn fvt-completion-evidence (provenance) (nth provenance 5))
+    (defn fvt-provenance-valid? (provenance)
+        (if (fvt-provenance? provenance)
+            (and (fvt-ref-valid? (fvt-adapter-ref provenance))
+                 (if (str_eq (fvt-voice-author provenance) "rented-voice")
+                     (and (str_eq (fvt-immediate-surface provenance)
+                                  (fcm-surface-local-oracle))
+                          (and (str_eq (fvt-carrier-event provenance)
+                                       "local-cli-return")
+                               (str_eq (fvt-completion-evidence provenance)
+                                           "adapter-manifest-bound")))
+                     (if (str_eq (fvt-voice-author provenance) "fixture")
+                         (and (str_eq (fvt-immediate-surface provenance)
+                                      (fcm-surface-kernel))
+                              (and (str_eq (fvt-carrier-event provenance) "fixture-return")
+                                   (str_eq (fvt-completion-evidence provenance)
+                                               "fixture-observed")))
+                         false)))
+            false))
+    (defn fvt-claim (claim-id fragment-ref evidence-ref semantic-state)
+        (list FVT-TAG-CLAIM claim-id fragment-ref evidence-ref semantic-state))
+    (defn fvt-claim? (value) (cr-tagged? value FVT-TAG-CLAIM 5))
+    (defn fvt-claim-valid? (claim)
+        (if (fvt-claim? claim)
+            (and (gt (str_len (nth claim 1)) 0)
+                 (and (fvt-ref-valid? (nth claim 2))
+                      (and (fvt-ref-valid? (nth claim 3))
+                           ; Hash binding is not semantic entailment.
+                           (str_eq (nth claim 4) "unjudged"))))
+            false))
+    (defn fvt-claims-valid? (claims)
+        (if (eq (len claims) 0) true
+            (if (fvt-claim-valid? (head claims))
+                (fvt-claims-valid? (tail claims))
+                false)))
+    (defn fvt-candidate
+        (turn-id answer-ref provenance required-tool-ids claims frequency-state)
+        (list FVT-TAG-CANDIDATE turn-id answer-ref provenance required-tool-ids
+              claims frequency-state))
+    (defn fvt-candidate? (value) (cr-tagged? value FVT-TAG-CANDIDATE 7))
+    (defn fvt-candidate-turn-id (candidate) (nth candidate 1))
+    (defn fvt-candidate-answer-ref (candidate) (nth candidate 2))
+    (defn fvt-candidate-provenance (candidate) (nth candidate 3))
+    (defn fvt-candidate-required-tools (candidate) (nth candidate 4))
+    (defn fvt-candidate-claims (candidate) (nth candidate 5))
+    (defn fvt-candidate-frequency (candidate) (nth candidate 6))
+    (defn fvt-candidate-valid? (candidate)
+        (if (fvt-candidate? candidate)
+            (and (gt (str_len (fvt-candidate-turn-id candidate)) 0)
+                 (and (fvt-ref-valid? (fvt-candidate-answer-ref candidate))
+                      (and (fvt-provenance-valid? (fvt-candidate-provenance candidate))
+                           (and (fvt-claims-valid? (fvt-candidate-claims candidate))
+                                ; There is not yet a calibrated semantic witness.
+                                (str_eq (fvt-candidate-frequency candidate)
+                                            "unmeasured")))))
+            false))
+    (defn fvt-final (turn-id mode output-ref transform-recipe)
+        (list FVT-TAG-FINAL turn-id mode output-ref transform-recipe))
+    (defn fvt-final? (value) (cr-tagged? value FVT-TAG-FINAL 5))
+    (defn fvt-final-turn-id (final) (nth final 1))
+    (defn fvt-final-mode (final) (nth final 2))
+    (defn fvt-final-output-ref (final) (nth final 3))
+    (defn fvt-final-transform (final) (nth final 4))
+    ; v1 admits only an exact identity render.  Form has no native prose
+    ; transformation recipe to claim today.
+    (defn fvt-final-valid? (candidate final)
+        (if (and (fvt-candidate-valid? candidate) (fvt-final? final))
+            (and (str_eq (fvt-candidate-turn-id candidate)
+                         (fvt-final-turn-id final))
+                 (and (str_eq (fvt-final-mode final) "identity-render")
+                      (and (str_eq (fvt-final-transform final) "none")
+                           (fvt-ref-equal? (fvt-candidate-answer-ref candidate)
+                                           (fvt-final-output-ref final)))))
+            false))
+
+    ; -- conclusion and public, content-blind witness ------------------------
+    (defn fvt-decision (turn candidate steps final)
+        (if (eq (fvt-turn-valid? turn) 0) "refused-route-or-turn"
+            (if (eq (fvt-candidate-valid? candidate) 0) "refused-candidate"
+                (if (eq (str_eq (fvt-turn-id turn)
+                                 (fvt-candidate-turn-id candidate)) 0)
+                    "refused-uncorrelated-return"
+                    (if (eq (fvt-steps-valid? turn steps) 0)
+                        "refused-invalid-tool-observation"
+                        (if (eq (fvt-required-steps-present?
+                                    (fvt-candidate-required-tools candidate) steps) 0)
+                            "refused-missing-tool-result"
+                            (if (eq (fvt-final-valid? candidate final) 0)
+                                "refused-untracked-transform"
+                                "accepted-exact-candidate")))))))
+    ; This is the only raw-byte release.  The returned bytes equal the candidate
+    ; bytes Form hashed; an outer narrator cannot substitute a paraphrase.
+    (defn fvt-render-exact (turn candidate steps final candidate-content)
+        (if (and (str_eq (fvt-decision turn candidate steps final)
+                         "accepted-exact-candidate")
+                 (and (str_eq (fvt-sha256 candidate-content)
+                              (fvt-ref-sha256 (fvt-candidate-answer-ref candidate)))
+                      (eq (str_len candidate-content)
+                          (fvt-ref-bytes (fvt-candidate-answer-ref candidate)))))
+            candidate-content
+            "FORM-VOICE-TURN-REFUSED"))
+    (defn fvt-report (turn candidate steps final)
+        (fvt-cat (list
+            "schema=form-voice-turn-v1\n"
+            "turn_id=" (fvt-turn-id turn)
+            "\nroute_native=" (fvt-route-native (fvt-turn-route turn))
+            "\nroute_metal=" (fvt-route-metal (fvt-turn-route turn))
+            "\nroute_local=" (fvt-route-local (fvt-turn-route turn))
+            "\nvoice_author=" (fvt-voice-author
+                (fvt-candidate-provenance candidate))
+            "\nimmediate_surface=" (fvt-immediate-surface
+                (fvt-candidate-provenance candidate))
+            "\ncarrier_event=" (fvt-carrier-event
+                (fvt-candidate-provenance candidate))
+            "\ncompletion_evidence=" (fvt-completion-evidence
+                (fvt-candidate-provenance candidate))
+            "\ncandidate_sha256=" (fvt-ref-sha256
+                (fvt-candidate-answer-ref candidate))
+            "\nfinal_sha256=" (fvt-ref-sha256 (fvt-final-output-ref final))
+            "\ntool_steps=" (int_to_str (len steps))
+            "\nfrequency=" (fvt-candidate-frequency candidate)
+            "\nsemantic_claims=unjudged"
+            "\nlearning=observation-only"
+            "\npromotion=owner-reviewed-form-gate-required"
+            "\ndecision=" (fvt-decision turn candidate steps final)
+            "\nrevisit_surface=fvt-decision"
+            "\nrevisit_source=observe/form-voice-turn.fk"
+            "\nrevisit_status=controller-not-yet-emitted\n")))
+    0)

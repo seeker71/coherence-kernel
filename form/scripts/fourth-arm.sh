@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 # fourth-arm.sh — the emitted fourth kernel as a validate.sh leg.
 #
 # Sourced by validate.sh (cwd = form/). The fourth sibling is the universal
@@ -16,13 +16,12 @@
 # workload is mandatory: preparation, execution, and agreement failures fail
 # validation instead of silently reducing the proof to three siblings.
 
-# Bash-only: the array loops below index from 0. Sourced into zsh (arrays
-# 1-based) they SILENTLY malform every flatten expr — ${srcs[0]} reads empty
-# so a (read_file "") row rides the module list, and ${srcs[last]} grabs the
-# wrong band file. Die loudly instead of authoring a malformed carrier.
+# The flatten lists are zero-based. Zsh normally indexes arrays from 1, which
+# would silently turn ${srcs[0]} into an empty read_file row and shift the
+# band source. KSH_ARRAYS gives this source-compatible carrier the same
+# zero-based indexing without making Bash a condition of Form publication.
 if [[ -n "${ZSH_VERSION:-}" ]]; then
-    echo "fourth-arm.sh: bash-only (zsh arrays are 1-indexed; flatten exprs would be silently malformed) — source this under bash" >&2
-    return 1 2>/dev/null || exit 1
+    setopt KSH_ARRAYS
 fi
 
 FOURTH_DIR="form-stdlib/.cache/fourth"
@@ -35,6 +34,7 @@ FOURTH_CHAIN=(
     form-stdlib/minimal-surface.fk
     form-stdlib/hati-os-kernel.fk
     form-stdlib/host-io-fs-fkwu-emit.fk
+    form-stdlib/form-table-text.fk
     form-stdlib/fkc-table-serialize.fk
     form-stdlib/hati-os-kernel-emit.fk
     form-stdlib/core.fk
@@ -52,6 +52,7 @@ FOURTH_CHAIN=(
 FOURTH_FLATTEN_CHAIN=(
     form-stdlib/minimal-surface.fk
     form-stdlib/hati-os-kernel.fk
+    form-stdlib/form-table-text.fk
     form-stdlib/fkc-table-serialize.fk
     form-stdlib/core.fk
     form-stdlib/form-parse.fk
@@ -70,6 +71,7 @@ FOURTH_EMIT_CHAIN=(
     form-stdlib/minimal-surface.fk
     form-stdlib/hati-os-kernel.fk
     form-stdlib/host-io-fs-fkwu-emit.fk
+    form-stdlib/form-table-text.fk
     form-stdlib/fkc-table-serialize.fk
     form-stdlib/hati-os-kernel-emit.fk
 )
@@ -713,6 +715,47 @@ fourth_flatten_expr() {
     fi
 }
 
+# fourth_flatten_pipe — the one flatten pipeline, run so its status is readable.
+#
+# Two callers below had a byte-identical copy of this differing only in an error
+# string, and both inferred fkwu's exit from ${PIPESTATUS[@]}. This file is a
+# SHARED library: ten scripts source it, seven bash and three zsh. The two shells
+# spell that reading differently AND number it differently —
+#   bash  PIPESTATUS  0-indexed  -> the fkwu stage is [1]
+#   zsh   pipestatus  1-indexed  -> the fkwu stage is [2]
+# and each name is simply unset in the other shell, so under `set -u` whichever
+# shell was not the author's died on the check itself:
+#   zsh   "fourth_flatten_sources:9: PIPESTATUS[@]: parameter not set"
+#   bash  "scripts/fourth-arm.sh: line 735: pipestatus[@]: unbound variable"
+# Both were reached today from opposite directions — build-form-cli.sh (zsh) and
+# validate.sh (bash) — and each ended with no word about the real work.
+#
+# So fkwu is no longer a stage inside a pipe. It runs as its own command and $? is
+# its own answer, which means the same thing in every shell. The stage-numbering
+# question is not answered here, it is gone.
+fourth_flatten_pipe() {
+    local stem="$1" kind="$2" out="$3" label="$4"
+    shift 4
+    local req="$out.req" raw="$out.raw" rc=0
+    { printf '1\n'; fourth_band_request "$stem" "$kind" "$@"; } > "$req"
+    FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
+        < "$req" > "$raw" || rc=$?
+    if [[ "$rc" -ne 0 ]]; then
+        echo "fourth arm: fkwu failed to produce $label (exit $rc)" >&2
+        rm -f "$req" "$raw"
+        return 1
+    fi
+    # the marker window: the trailing fn-0 value + arm profile sit past ==T-END==.
+    sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" "$raw" | sed -e '1d' -e '$d' > "$out.tmp"
+    rm -f "$req" "$raw"
+    if [[ ! -s "$out.tmp" ]]; then
+        echo "fourth arm: fkwu produced no rows for $label" >&2
+        rm -f "$out.tmp"
+        return 1
+    fi
+    mv -f "$out.tmp" "$out"
+}
+
 # fourth_table — cached flattened node-table for one band (path on stdout).
 # Flattens only through fkwu walking the committed T_flat. The old Go fallback
 # concatenated the whole fourth chain plus the workload into a giant driver; that
@@ -734,16 +777,7 @@ fourth_table() {
         if fourth_selfhost; then
             # one-band request → fkwu walks T_flat → marker-framed table; the
             # trailing fn-0 value + arm profile sit past ==T-END==, outside the range.
-            { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
-                | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
-                | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
-            local statuses=("${PIPESTATUS[@]}")
-            if [[ "${statuses[1]}" -ne 0 || ! -s "$out.tmp" ]]; then
-                echo "fourth arm: fkwu failed to produce a table for $stem" >&2
-                rm -f "$out.tmp"
-                return 1
-            fi
-            mv -f "$out.tmp" "$out"
+            fourth_flatten_pipe "$stem" "$kind" "$out" "a table for $stem" "${srcs[@]}" || return 1
         fi
     fi
     [[ -s "$out" ]] && printf '%s\n' "$out"
@@ -759,16 +793,7 @@ fourth_flatten_sources() {
     local srcs=("$@")
     [[ "${#srcs[@]}" -ge 1 ]] || return 1
     if fourth_selfhost; then
-        { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
-            | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
-            | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
-        local statuses=("${PIPESTATUS[@]}")
-        if [[ "${statuses[1]}" -ne 0 || ! -s "$out.tmp" ]]; then
-            echo "fourth arm: fkwu failed to produce ad-hoc table $stem" >&2
-            rm -f "$out.tmp"
-            return 1
-        fi
-        mv -f "$out.tmp" "$out"
+        fourth_flatten_pipe "$stem" "$kind" "$out" "ad-hoc table $stem" "${srcs[@]}" || return 1
     fi
     [[ -s "$out" ]]
 }

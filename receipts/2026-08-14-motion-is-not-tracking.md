@@ -4,7 +4,7 @@
 **Status:** witnessed four-way, perturbation-verified live
 **Cells:** [`learn/perturbation-pair.fk`](../learn/perturbation-pair.fk),
 [`learn/tests/perturbation-pair-band.fk`](../learn/tests/perturbation-pair-band.fk) → **4095**
-**Corpus:** row 1001, `tallyleak` — [`learn/homecoming-distillation-corpus.fk`](../learn/homecoming-distillation-corpus.fk)
+**Corpus:** row 1006, `tallyleak` — [`learn/homecoming-distillation-corpus.fk`](../learn/homecoming-distillation-corpus.fk)
 
 ## What arrived
 

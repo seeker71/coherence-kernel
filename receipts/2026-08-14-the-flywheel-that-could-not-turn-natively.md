@@ -4,7 +4,7 @@
 **Status:** witnessed; one repair landed, one seam left honestly red
 **Repaired:** `form/form-stdlib/tests/training-catalog-band.fk`,
 `form/form-stdlib/tests/form-cli-loop-band.fk` — one word each
-**Corpus:** row 1004, `bundlemask`
+**Corpus:** row 1009, `bundlemask`
 
 ## The question
 

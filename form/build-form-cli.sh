@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 # build-form-cli.sh — produce the standalone native form-cli binary.
 #
 # Build-time honest floor (2026-06-24):
@@ -20,9 +20,23 @@ CC_BIN="${CC:-clang}"
 CLI_BOOTSTRAP_C="$S/bootstrap/form-cli-emitted.c"
 CLI_BOOTSTRAP_STAMP="$S/bootstrap/form-cli.stamp"
 CLI_BOOTSTRAP_SOURCE_SHA256="$S/bootstrap/form-cli.source.sha256"
+CLI_BOOTSTRAP_ATTESTATION="$S/bootstrap/form-cli.generation.attestation"
 FORM_CLI_FORCE_LINK="${FORM_CLI_FORCE_LINK:-0}"
-FORM_CLI_EXTRA_SRC="${FORM_CLI_EXTRA_SRC:-}"
-FORM_CLI_EXTRA_LDFLAGS="${FORM_CLI_EXTRA_LDFLAGS:-}"
+FORM_CLI_CALLER_EXTRA_SRC="${FORM_CLI_EXTRA_SRC:-}"
+FORM_CLI_CALLER_EXTRA_LDFLAGS="${FORM_CLI_EXTRA_LDFLAGS:-}"
+FORM_CLI_EXTRA_SRC="$FORM_CLI_CALLER_EXTRA_SRC"
+FORM_CLI_EXTRA_LDFLAGS="$FORM_CLI_CALLER_EXTRA_LDFLAGS"
+
+# Canonical bootstrap/platform publication is not an extension point.  The
+# normal build command may still accept an explicit local carrier addition,
+# but a publisher has to produce the exact source-defined carrier rather than
+# inherit arbitrary objects or linker flags from its environment.  The host's
+# built-in Metal carrier is appended below after this check.
+if [[ "${FORM_CLI_CANONICAL_PUBLISH:-0}" == 1 ]] && \
+        [[ -n "$FORM_CLI_CALLER_EXTRA_SRC" || -n "$FORM_CLI_CALLER_EXTRA_LDFLAGS" ]]; then
+    printf '%s\n' 'form-cli canonical publish refuses FORM_CLI_EXTRA_SRC/FORM_CLI_EXTRA_LDFLAGS' >&2
+    exit 1
+fi
 
 # The accelerator this host HAS is not a question for the caller. The kernel already settles the
 # Windows side with no flag at all — fkwu-uni.c LoadLibraryA's nvcuda.dll at runtime, JITs the
@@ -58,16 +72,24 @@ fi
 
 W="$(mktemp -d)"
 trap 'rm -rf "$W"' EXIT
+BOOTSTRAP_SNAPSHOT_DIR="$W/bootstrap-snapshot"
+SNAPSHOT_TABLE="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-table.txt"
+SNAPSHOT_EMITTED_C="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-emitted.c"
+SNAPSHOT_STAMP="$BOOTSTRAP_SNAPSHOT_DIR/form-cli.stamp"
+SNAPSHOT_SOURCE_SHA256="$BOOTSTRAP_SNAPSHOT_DIR/form-cli.source.sha256"
+SNAPSHOT_ATTESTATION="$BOOTSTRAP_SNAPSHOT_DIR/form-cli.generation.attestation"
+SNAPSHOT_PLATFORM_BIN="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-platform"
+SNAPSHOT_PLATFORM_STAMP="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-platform.stamp"
+SNAPSHOT_PLATFORM_ATTESTATION="$BOOTSTRAP_SNAPSHOT_DIR/form-cli-platform.generation.attestation"
 
-# the emit chain (plain Form) + the flatten chain.
-EMIT_CHAIN="$S/minimal-surface.fk $S/hati-os-kernel.fk $S/host-io-fs-fkwu-emit.fk $S/fkc-table-serialize.fk $S/hati-os-kernel-emit.fk"
-FLAT_CHAIN="$EMIT_CHAIN $S/core.fk $S/form-parse.fk $S/bmf-core.fk $S/bmf-grammar.fk $S/host-effect-grammar.fk $S/form-flatten.fk"
-# Keep the ask support modules before the dispatcher; default ask receipts stay
-# local through fkwu RAG while http-client remains available to legacy carriers.
-MODS="(list (read_file \"$S/fourth-shim.fk\") (read_file \"$S/core.fk\") (read_file \"$S/grammars/sanskrit-roots.fk\") (read_file \"$S/resource-port.fk\") (read_file \"$S/bml-native-interface-package-import.fk\") (read_file \"$S/hati-os-targets.fk\") (read_file \"$S/form-native-resource-interfaces.fk\") (read_file \"$S/form-fs.fk\") (read_file \"$S/storage-port.fk\") (read_file \"$S/host-kernel-carrier.fk\") (read_file \"$S/fnri-standin.fk\") (read_file \"$S/fnri-receipt.fk\") (read_file \"$S/http-client.fk\") (read_file \"$S/line-grammar.fk\") (read_file \"$S/str-byte-at.fk\") (read_file \"$S/sha256.fk\") (read_file \"$S/hmac-sha256.fk\") (read_file \"$S/hex.fk\") (read_file \"$S/format-arith.fk\") (read_file \"$S/f16-decode.fk\") (read_file \"$S/q6k-dequant.fk\") (read_file \"$S/equireach.fk\") (read_file \"$S/equireach-gguf.fk\") (read_file \"$S/gguf-meta.fk\") (read_file \"$S/model-discovery.fk\") (read_file \"$S/q4k-dequant.fk\") (read_file \"$S/weight-load.fk\") (read_file \"$S/voice-traits.fk\") (read_file \"$S/nearest-shape.fk\") (read_file \"$S/co-learning.fk\") (read_file \"$S/co-learning-stream.fk\") (read_file \"$S/mesh-dispatch.fk\") (read_file \"$S/surprise-salience.fk\") (read_file \"$S/host-sense-organ.fk\") (read_file \"$S/speech-organ.fk\") (read_file \"$S/native-host-instance.fk\") (read_file \"$S/text-tokenize.fk\") (read_file \"$S/rag-embed.fk\") (read_file \"$S/rag-index-codec.fk\") (read_file \"$S/rag-retrieve.fk\") (read_file \"$S/rag-ask.fk\") (read_file \"$S/form-cli-ask.fk\") (read_file \"$S/form-cli-offline.fk\") (read_file \"$S/form-cli-router.fk\") (read_file \"$S/form-cli-judge.fk\") (read_file \"$S/confidence-weighted-vote.fk\") (read_file \"$S/lineage-discounted-vote.fk\") (read_file \"$S/form-cli-oracle-loop.fk\") (read_file \"$S/form-cli-sufficiency.fk\") (read_file \"$S/form-freq-check.fk\") (read_file \"$S/trust-row.fk\") (read_file \"$S/form-cli-ask-gate.fk\") (read_file \"$S/form-cli-staged-trace.fk\") (read_file \"$S/form-cli-request.fk\") (read_file \"$S/form-cli-carrier.fk\") (read_file \"$S/form-cli-ask-plus.fk\") (read_file \"$S/form-cli-surface-inquiry.fk\") (read_file \"$S/current-branch-landing.fk\") (read_file \"$S/form-cli-inquiry-edge-ledger.fk\") (read_file \"$S/form-cli-inquiry.fk\") (read_file \"$S/form-cli.fk\") (read_file \"$S/form-cli-gguf-cell.fk\"))"
-MODS="${MODS%)} (read_file \"$S/relational-inquiry-metabolism.fk\") (read_file \"$S/native-model-native-hierarchy.fk\"))"
-MODS="${MODS/ (read_file \"$S\/form-cli.fk\")/ (read_file \"$S\/ds4-query-channel.fk\") (read_file \"$S\/form-cli.fk\")}"
-BAND="(read_file \"$S/form-cli-repl.fk\")"
+# EMIT_CHAIN, FLAT_CHAIN, MODS and BAND stood here and were assigned, never read.
+# Four of the "SIX lists, one program" below, kept in step by hand for nothing: a
+# cell added to them reached no build and a cell missing from them broke none.
+# form_cli_source_list.sh is the one identity now, so they are gone rather than
+# reconciled — two lines had each edited MODS in the same hour, which is the cost
+# of mirroring a list that no reader ever consults. Found by reading every
+# capitalised assignment in this file for a matching read: 3 of 31 had none, and
+# EMIT_CHAIN's only reader was FLAT_CHAIN, itself dead.
 
 # Prefer fkwu self-host flatten (no Go) when T_flat + cached fkwu are warm.
 # This list authors the stamp the build compares against the one
@@ -76,36 +98,12 @@ BAND="(read_file \"$S/form-cli-repl.fk\")"
 # build with "source stamp stale (have=... want=...)" — two hashes and no
 # filename — which reads like a stale tree and is a mirroring gap. See the
 # "SIX lists, one program" note in that script.
-FORM_CLI_SRCS=(
-    "$S/fourth-shim.fk" "$S/core.fk" "$S/grammars/sanskrit-roots.fk" "$S/line-grammar.fk"
-    "$S/str-byte-at.fk" "$S/sha256.fk" "$S/hmac-sha256.fk" "$S/hex.fk"
-    "$S/resource-port.fk" "$S/bml-native-interface-package-import.fk" "$S/hati-os-targets.fk"
-    "$S/form-native-resource-interfaces.fk" "$S/form-fs.fk" "$S/storage-port.fk"
-    "$S/host-kernel-carrier.fk" "$S/fnri-standin.fk" "$S/fnri-receipt.fk"
-    "$S/http-client.fk" "$S/format-arith.fk" "$S/f16-decode.fk"
-    "$S/q6k-dequant.fk" "$S/equireach.fk" "$S/equireach-gguf.fk" "$S/gguf-meta.fk" "$S/model-discovery.fk" "$S/q4k-dequant.fk" "$S/weight-load.fk"
-    "$S/voice-traits.fk"
-    "$S/nearest-shape.fk" "$S/co-learning.fk" "$S/co-learning-stream.fk"
-    "$S/mesh-dispatch.fk" "$S/surprise-salience.fk" "$S/host-sense-organ.fk"
-    "$S/speech-organ.fk" "$S/native-host-instance.fk"
-    "$S/text-tokenize.fk" "$S/rag-embed.fk" "$S/rag-index-codec.fk" "$S/rag-retrieve.fk" "$S/rag-ask.fk"
-    "$S/form-cli-ask.fk"
-    "$S/form-cli-offline.fk" "$S/form-cli-router.fk" "$S/form-cli-judge.fk"
-    "$S/confidence-weighted-vote.fk" "$S/lineage-discounted-vote.fk" "$S/form-cli-oracle-loop.fk"
-    "$S/form-cli-sufficiency.fk"
-    "$S/form-freq-check.fk" "$S/trust-row.fk" "$S/form-cli-ask-gate.fk"
-    "$S/form-cli-staged-trace.fk" "$S/form-cli-request.fk" "$S/form-cli-carrier.fk" "$S/form-cli-ask-plus.fk" "$S/form-cli-surface-inquiry.fk"
-    "$S/current-branch-landing.fk"
-    "$S/form-cli-inquiry-edge-ledger.fk" "$S/form-cli-inquiry.fk"
-    "$S/relational-inquiry-metabolism.fk"
-    "$S/native-model-native-hierarchy.fk"
-    "$S/ds4-query-channel.fk"
-    "$S/form-cli.fk"
-    "$S/native-model-control-plane.fk"
-    "$S/ask-lane-router.fk"
-    "$S/form-cli-gguf-cell.fk"
-    "$S/form-cli-repl.fk"
-)
+# One source identity is shared by the build, bootstrap regeneration, and
+# platform-carrier regeneration.  The retired host turn carrier is neither
+# part of this identity nor a Form flatten input.
+# shellcheck source=scripts/form_cli_source_list.sh
+source scripts/form_cli_source_list.sh
+form_cli_load_sources
 # shellcheck source=scripts/fourth-arm.sh
 source scripts/fourth-arm.sh
 # shellcheck source=scripts/form_cli_bootstrap_proof.sh
@@ -113,6 +111,7 @@ source scripts/form_cli_bootstrap_proof.sh
 slug="$(fourth_platform_slug)"
 CLI_BOOTSTRAP_BIN="$S/bootstrap/form-cli-${slug}"
 CLI_BOOTSTRAP_BIN_STAMP="$S/bootstrap/form-cli-${slug}.stamp"
+CLI_BOOTSTRAP_BIN_ATTESTATION="$S/bootstrap/form-cli-${slug}.generation.attestation"
 stamp="$(fourth_fkwu_cache_stamp)"
 cached_fkwu="$FOURTH_DIR/fkwu-$stamp"
 [[ -x "$cached_fkwu" ]] && FKWU="$cached_fkwu"
@@ -126,19 +125,65 @@ fi
 
 want_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
 want_source_sha256="$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")"
+
+snapshot_regular_file() {
+    local source="$1" destination="$2"
+    [[ -f "$source" && ! -L "$source" ]] || {
+        printf 'form-cli bootstrap: missing regular input for snapshot: %s\n' "$source" >&2
+        return 1
+    }
+    cp "$source" "$destination"
+    [[ -f "$destination" && ! -L "$destination" ]]
+}
+
+verify_staged_bootstrap_carrier() {
+    form_cli_verify_bootstrap \
+        "$SNAPSHOT_TABLE" "$SNAPSHOT_EMITTED_C" "$SNAPSHOT_STAMP" "$want_cli_stamp" \
+        && form_cli_verify_source_digest "$SNAPSHOT_SOURCE_SHA256" "$want_source_sha256" \
+        && form_cli_verify_generation_attestation \
+            "$SNAPSHOT_ATTESTATION" "$want_source_sha256" "$want_cli_stamp" \
+            "$SNAPSHOT_TABLE" "$SNAPSHOT_EMITTED_C" "not-applicable"
+}
+
+snapshot_bootstrap_carrier() {
+    mkdir "$BOOTSTRAP_SNAPSHOT_DIR"
+    snapshot_regular_file "$S/bootstrap/form-cli-table.txt" "$SNAPSHOT_TABLE" \
+        && snapshot_regular_file "$CLI_BOOTSTRAP_C" "$SNAPSHOT_EMITTED_C" \
+        && snapshot_regular_file "$CLI_BOOTSTRAP_STAMP" "$SNAPSHOT_STAMP" \
+        && snapshot_regular_file "$CLI_BOOTSTRAP_SOURCE_SHA256" "$SNAPSHOT_SOURCE_SHA256" \
+        && snapshot_regular_file "$CLI_BOOTSTRAP_ATTESTATION" "$SNAPSHOT_ATTESTATION" \
+        && verify_staged_bootstrap_carrier
+}
+
+snapshot_platform_carrier() {
+    snapshot_regular_file "$CLI_BOOTSTRAP_BIN" "$SNAPSHOT_PLATFORM_BIN" \
+        && snapshot_regular_file "$CLI_BOOTSTRAP_BIN_STAMP" "$SNAPSHOT_PLATFORM_STAMP" \
+        && snapshot_regular_file "$CLI_BOOTSTRAP_BIN_ATTESTATION" "$SNAPSHOT_PLATFORM_ATTESTATION" \
+        && [[ -x "$SNAPSHOT_PLATFORM_BIN" ]] \
+        && [[ "$(cat "$SNAPSHOT_PLATFORM_STAMP")" == "$want_cli_stamp" ]] \
+        && form_cli_verify_generation_attestation \
+            "$SNAPSHOT_PLATFORM_ATTESTATION" "$want_source_sha256" "$want_cli_stamp" \
+            "$SNAPSHOT_TABLE" "$SNAPSHOT_EMITTED_C" "$slug" "$SNAPSHOT_PLATFORM_BIN" \
+            "$SNAPSHOT_ATTESTATION"
+}
+
 bootstrap_carrier_fresh=0
-if form_cli_verify_bootstrap \
-        "$S/bootstrap/form-cli-table.txt" "$CLI_BOOTSTRAP_C" \
-        "$CLI_BOOTSTRAP_STAMP" "$want_cli_stamp" \
-        && form_cli_verify_source_digest "$CLI_BOOTSTRAP_SOURCE_SHA256" "$want_source_sha256"; then
+if snapshot_bootstrap_carrier; then
     bootstrap_carrier_fresh=1
+else
+    printf '%s\n' 'form-cli bootstrap: staged generation attestation missing or mixed; regeneration required' >&2
+fi
+platform_carrier_fresh=0
+if [[ "$bootstrap_carrier_fresh" == 1 ]] && snapshot_platform_carrier; then
+    platform_carrier_fresh=1
 fi
 
-# Standard lane: copy committed platform binary when stamp matches (no clang).
+# Standard lane: copy a verified private snapshot of the platform carrier (no
+# clang).  Its attestation is checked against the snapshot bootstrap hash, so
+# a publisher cannot replace table/C between a live check and this copy.
 if [[ "${FORM_STANDARD_LANE:-0}" == 1 ]]; then
-    got_cli_boot="$(cat "$CLI_BOOTSTRAP_BIN_STAMP" 2>/dev/null || true)"
-    if [[ "$bootstrap_carrier_fresh" == 1 && -x "$CLI_BOOTSTRAP_BIN" && "$got_cli_boot" == "$want_cli_stamp" ]]; then
-        cp "$CLI_BOOTSTRAP_BIN" "$OUT"
+    if [[ "$bootstrap_carrier_fresh" == 1 && "$platform_carrier_fresh" == 1 ]]; then
+        cp "$SNAPSHOT_PLATFORM_BIN" "$OUT"
         chmod +x "$OUT"
         form_cli_verify_binary_identity "$OUT" "$want_source_sha256"
         echo "standard lane: $OUT from bootstrap/${slug} (no clang)" >&2
@@ -148,23 +193,27 @@ if [[ "${FORM_STANDARD_LANE:-0}" == 1 ]]; then
     exit 1
 fi
 
-# Warm path: copy platform binary before invoking clang when available.
-got_cli_boot="$(cat "$CLI_BOOTSTRAP_BIN_STAMP" 2>/dev/null || true)"
-if [[ "$bootstrap_carrier_fresh" == 1 && "$FORM_CLI_FORCE_LINK" != 1 && -z "$FORM_CLI_EXTRA_SRC" && -x "$CLI_BOOTSTRAP_BIN" && "$got_cli_boot" == "$want_cli_stamp" ]]; then
-    cp "$CLI_BOOTSTRAP_BIN" "$OUT"
-    chmod +x "$OUT"
-    form_cli_verify_binary_identity "$OUT" "$want_source_sha256"
-    echo "  link: bootstrap form-cli-${slug} (no clang)" >&2
-    exit 0
+# Warm path: same snapshot rule before invoking clang when available.
+if [[ "$bootstrap_carrier_fresh" == 1 && "$platform_carrier_fresh" == 1 && "$FORM_CLI_FORCE_LINK" != 1 && -z "$FORM_CLI_EXTRA_SRC" ]]; then
+    if form_cli_verify_generation_attestation \
+            "$SNAPSHOT_PLATFORM_ATTESTATION" "$want_source_sha256" "$want_cli_stamp" \
+            "$SNAPSHOT_TABLE" "$SNAPSHOT_EMITTED_C" "$slug" "$SNAPSHOT_PLATFORM_BIN" \
+            "$SNAPSHOT_ATTESTATION"; then
+        cp "$SNAPSHOT_PLATFORM_BIN" "$OUT"
+        chmod +x "$OUT"
+        form_cli_verify_binary_identity "$OUT" "$want_source_sha256"
+        echo "  link: bootstrap form-cli-${slug} (no clang)" >&2
+        exit 0
+    fi
+    printf '%s\n' 'form-cli bootstrap: staged platform carrier attestation missing or mixed; relinking from staged C' >&2
 fi
 
 # 1. flatten form-cli-repl into its program table (string pool rides behind it).
-# The self-host fallback list mirrors the MODS order above with the shim
-# dropped (fourth_band_request prepends it) — flattening FORM_CLI_SRCS
-# directly double-rode the shim (+77 duplicate fn rows) in a different module
-# order than the arm that authors the committed bootstrap. Caveat, pre-dating
-# this fix: BML-dialect sources (http-client.fk) ride raw here — the compiled
-# lowering lives only in scripts/regen_form_cli_bootstrap.sh.
+# The self-host fallback list is the executable no-Go program order, with the
+# shim dropped because fourth_band_request prepends it.  It is deliberately
+# separate from the source-identity list: shell carrier files are stamped but
+# never parsed as Form.  BML-dialect sources (http-client.fk) ride raw here;
+# the compiled lowering lives in scripts/regen_form_cli_bootstrap.sh.
 FORM_CLI_SELFHOST_SRCS=(
     "$S/core.fk" "$S/grammars/sanskrit-roots.fk" "$S/resource-port.fk" "$S/bml-native-interface-package-import.fk"
     "$S/hati-os-targets.fk" "$S/form-native-resource-interfaces.fk" "$S/form-fs.fk"
@@ -175,7 +224,7 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/nearest-shape.fk" "$S/co-learning.fk" "$S/co-learning-stream.fk" "$S/mesh-dispatch.fk"
     "$S/surprise-salience.fk" "$S/host-sense-organ.fk" "$S/speech-organ.fk"
     "$S/native-host-instance.fk" "$S/text-tokenize.fk" "$S/rag-embed.fk" "$S/rag-index-codec.fk"
-    "$S/rag-retrieve.fk" "$S/rag-ask.fk" "$S/form-cli-ask.fk" "$S/form-cli-offline.fk" "$S/form-cli-router.fk"
+    "$S/rag-retrieve.fk" "$S/rag-ask.fk" "$S/ask-cost-receipt.fk" "$S/ask-native-lane.fk" "$S/form-cli-ask.fk" "$S/form-cli-router.fk"
     "$S/form-cli-judge.fk" "$S/confidence-weighted-vote.fk" "$S/lineage-discounted-vote.fk"
     "$S/form-cli-oracle-loop.fk" "$S/form-cli-sufficiency.fk" "$S/form-freq-check.fk"
     "$S/trust-row.fk" "$S/form-cli-ask-gate.fk" "$S/form-cli-staged-trace.fk"
@@ -188,7 +237,11 @@ FORM_CLI_SELFHOST_SRCS=(
     "$S/form-cli-repl.fk"
 )
 if [[ "$bootstrap_carrier_fresh" == 1 ]]; then
-    cp "$S/bootstrap/form-cli-table.txt" "$W/table.txt"
+    verify_staged_bootstrap_carrier || {
+        printf '%s\n' 'form-cli bootstrap: staged table/C identity changed before flatten; refusing link' >&2
+        exit 1
+    }
+    cp "$SNAPSHOT_TABLE" "$W/table.txt"
     echo "  flatten: bootstrap table (no Go)" >&2
 elif fourth_selfhost && fourth_flatten_sources form-cli-build fks "$W/table.txt" "${FORM_CLI_SELFHOST_SRCS[@]}"; then
     echo "  flatten: fkwu self-host (no Go)" >&2
@@ -200,7 +253,11 @@ fi
 
 # 2. emit the combined walker with the table baked in (fk_prog).
 if [[ "$bootstrap_carrier_fresh" == 1 ]]; then
-    cp "$CLI_BOOTSTRAP_C" "$W/form-cli.c"
+    verify_staged_bootstrap_carrier || {
+        printf '%s\n' 'form-cli bootstrap: staged table/C identity changed before emit; refusing link' >&2
+        exit 1
+    }
+    cp "$SNAPSHOT_EMITTED_C" "$W/form-cli.c"
     echo "  emit: bootstrap (no Go)" >&2
 else
     echo "  emit: unavailable — need bootstrap/form-cli-emitted.c (maintainer: scripts/regen_form_cli_bootstrap.sh)" >&2
@@ -208,17 +265,26 @@ else
 fi
 grep -q fk_prog "$W/form-cli.c" || { echo "emit missing baked program"; exit 1; }
 
-# 3. bake the GENESIS — this binary's own Form source — so 'form-cli source' can
-#    print it and you can rebuild from the binary alone. It's the file-marked
-#    concatenation of every recipe the build reads plus this script, appended as a
-#    byte array (escape-free) and read at runtime by self_source (walker tag 117).
-SOURCES="minimal-surface hati-os-kernel fkc-table-serialize hati-os-kernel-emit core form-parse bmf-core bmf-grammar host-effect-grammar form-flatten fourth-shim resource-port bml-native-interface-package-import hati-os-targets form-native-resource-interfaces form-fs storage-port host-kernel-carrier fnri-standin fnri-receipt line-grammar str-byte-at sha256 hmac-sha256 hex format-arith f16-decode q6k-dequant equireach equireach-gguf gguf-meta model-discovery q4k-dequant weight-load voice-traits nearest-shape co-learning co-learning-stream mesh-dispatch surprise-salience host-sense-organ speech-organ native-host-instance text-tokenize rag-embed rag-index-codec rag-retrieve rag-ask form-cli-ask form-cli-offline form-cli-router form-cli-judge confidence-weighted-vote lineage-discounted-vote form-cli-oracle-loop form-cli-sufficiency form-freq-check trust-row form-cli-ask-gate form-cli-staged-trace form-cli-request form-cli-carrier form-cli-ask-plus form-cli-surface-inquiry current-branch-landing form-cli form-cli-gguf-cell native-model-control-plane ask-lane-router form-cli-main form-cli-repl"
+# 3. Bake GENESIS from this same canonical identity list. It is both the
+#    source digest's input and the file-marked source carried by the binary, so
+#    a new active compiler/carrier input cannot be stamped without being
+#    re-observable through the source verb.
 {
-  for f in $SOURCES; do printf ';;;; ==== FILE: %s/%s.fk ====\n' "$S" "$f"; cat "$S/$f.fk"; done
-  printf ';;;; ==== FILE: scripts/form_cli_bootstrap_proof.sh ====\n'; cat scripts/form_cli_bootstrap_proof.sh
-  printf ';;;; ==== FILE: build-form-cli.sh ====\n'; cat "$(basename "$0")"
+  while IFS= read -r source; do
+    printf ';;;; ==== FILE: %s ====\n' "$source"
+    cat "$source"
+  done < <(form_cli_source_list)
 } > "$W/genesis.txt"
 GEN_LEN=$(wc -c < "$W/genesis.txt" | tr -d ' ')
+# The source identity is not a promise made at the start of a long link.  It
+# must still name the bytes just carried into genesis; otherwise leave the
+# prior carrier in place and ask for a fresh regeneration/build.
+current_cli_stamp="$(fourth_hash16 "${FORM_CLI_SRCS[@]}")"
+current_source_sha256="$(form_cli_source_sha256 "${FORM_CLI_SRCS[@]}")"
+[[ "$current_cli_stamp" == "$want_cli_stamp" && "$current_source_sha256" == "$want_source_sha256" ]] || {
+  printf '%s\n' 'form-cli build: canonical source identity changed during genesis; refusing link' >&2
+  exit 1
+}
 {
   printf '\nconst unsigned char fk_genesis[] = {'
   od -An -v -tu1 "$W/genesis.txt" | tr -s ' \n' ',' | sed 's/^,//; s/,$//'
@@ -240,13 +306,11 @@ clang_args=(
   -o "$OUT" "$W/form-cli.c"
 )
 if [[ -n "$FORM_CLI_EXTRA_SRC" ]]; then
-  # shellcheck disable=SC2206
-  extra_srcs=($FORM_CLI_EXTRA_SRC)
+  extra_srcs=(${=FORM_CLI_EXTRA_SRC})
   clang_args+=("${extra_srcs[@]}")
 fi
 if [[ -n "$FORM_CLI_EXTRA_LDFLAGS" ]]; then
-  # shellcheck disable=SC2206
-  extra_ldflags=($FORM_CLI_EXTRA_LDFLAGS)
+  extra_ldflags=(${=FORM_CLI_EXTRA_LDFLAGS})
   clang_args+=("${extra_ldflags[@]}")
 fi
 if is_windows_host; then

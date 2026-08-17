@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 # Shared integrity checks for the committed form-cli bootstrap carrier.
 #
 # The source stamp proves which Form source set authored the bootstrap.  The
@@ -46,15 +46,25 @@ form_cli_verify_binary_identity() {
         echo "form-cli bootstrap: binary is missing or not executable: $binary" >&2
         return 1
     }
-    # Take the carrier-id / carrier-challenge LINE, not the whole answer. On
-    # 2026-08-14 form-cli.fk grew fc-with-share, which prepends the share stamp
-    # to every response, so these two verbs now answer two lines — the stamp,
-    # then the identity. Comparing the whole output made a correct carrier read
-    # as a mismatch (the same assumption the regen voice canary carried, and the
-    # same repair). Grepping the identity line keeps the check exact: a carrier
-    # that cannot produce the line still fails.
+    # Take the carrier-id / carrier-challenge LINE, not the whole answer. This
+    # began as a repair for fc-with-share prepending a share stamp to every
+    # response; that prefix is gone now (share became an explicit verb), and the
+    # line grep is kept anyway because it stays exact — a carrier that cannot
+    # produce the line still fails.
+    #
+    # The two filters are NOT the same word. carrier-id answers
+    #   carrier-id|form-cli-carrier-v2|<sha>|...
+    # while the challenge answers a VERSIONED head:
+    #   carrier-challenge-v1|<sha>|<nonce>|<digest>
+    # The challenge filter here read '^carrier-challenge|' and so matched
+    # nothing. grep exited 1 under `set -e` and the whole build ended with two
+    # printed lines and no third — a correct, freshly linked, pong-answering
+    # binary reported as a build failure with no reason given. The expected
+    # string one line above always carried the -v1; only the filter had dropped
+    # it. Copying a sibling line and editing the middle is how a check ends up
+    # looking right and matching nothing.
     actual_id="$(printf 'carrier-id\n' | "$binary" | grep -m1 '^carrier-id|')"
-    actual_challenge="$(printf 'carrier-challenge %s\n' "$nonce" | "$binary" | grep -m1 '^carrier-challenge|')"
+    actual_challenge="$(printf 'carrier-challenge %s\n' "$nonce" | "$binary" | grep -m1 '^carrier-challenge-v1|')"
     if [[ "$actual_id" != "$expected_id" ]]; then
         printf 'form-cli bootstrap: carrier-id mismatch\n  have=%s\n  want=%s\n' \
             "$actual_id" "$expected_id" >&2
@@ -107,6 +117,7 @@ form_cli_validate_table() {
             if (function_count < 1 || cursor + function_count - 1 > token_count) {
                 die("function roots")
             }
+            function_root_start = cursor
             cursor += function_count
             if (cursor > token_count) {
                 die("missing node count")
@@ -114,6 +125,26 @@ form_cli_validate_table() {
             node_count = token[cursor++]
             if (node_count < 1 || cursor + (node_count * 4) - 1 > token_count) {
                 die("node rows")
+            }
+            node_start = cursor
+            # A shape-valid table can still be aphonic if a function root or
+            # a direct CALL points outside the serialized function/node
+            # ranges.  Validate those links before a candidate reaches the
+            # voice canary.
+            for (root_index = 0; root_index < function_count; root_index++) {
+                root = token[function_root_start + root_index]
+                if (root < 0 || root >= node_count) {
+                    die("function root index")
+                }
+            }
+            for (node_index = 0; node_index < node_count; node_index++) {
+                node_cursor = node_start + (node_index * 4)
+                if (token[node_cursor] == 12) {
+                    call_target = token[node_cursor + 1]
+                    if (call_target < 0 || call_target >= function_count) {
+                        die("call target")
+                    }
+                }
             }
             cursor += node_count * 4
             if (cursor > token_count) {
@@ -219,11 +250,11 @@ form_cli_verify_bootstrap() {
 }
 
 form_cli_sha256_file() {
-    local path="$1"
+    local file_path="$1"
     if command -v shasum >/dev/null 2>&1; then
-        shasum -a 256 "$path" | awk '{print $1}'
+        shasum -a 256 "$file_path" | awk '{print $1}'
     elif command -v sha256sum >/dev/null 2>&1; then
-        sha256sum "$path" | awk '{print $1}'
+        sha256sum "$file_path" | awk '{print $1}'
     else
         echo "form-cli bootstrap: SHA-256 tool unavailable" >&2
         return 1
@@ -276,7 +307,12 @@ form_cli_behavioral_proof() (
 
     [[ "$binary" == */* ]] || binary="./$binary"
     binary="$(cd -P "$(dirname "$binary")" && pwd)/$(basename "$binary")"
-    script_dir="$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if [[ -n "${ZSH_VERSION:-}" ]]; then
+        script_path="${(%):-%N}"
+    else
+        script_path="${BASH_SOURCE[0]}"
+    fi
+    script_dir="$(cd -P "$(dirname "$script_path")" && pwd)"
     form_dir="$(cd -P "$script_dir/.." && pwd)"
     if [[ -z "$expected_source_sha256" ]]; then
         expected_source_sha256="$(tr -d '\r\n' < "$form_dir/form-stdlib/bootstrap/form-cli.source.sha256")"
@@ -466,10 +502,12 @@ success"
     printf 'form-cli behavioral proof: OK (identity, v2/v1, exact bytes, 1546-row rank, embed batch/cap, request HMAC/replay)\n'
 )
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    if [[ $# -lt 1 || $# -gt 2 ]]; then
-        echo "usage: $0 FORM_CLI_BINARY [EXPECTED_SOURCE_SHA256]" >&2
-        exit 2
+if [[ -z "${ZSH_VERSION:-}" ]]; then
+    if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+        if [[ $# -lt 1 || $# -gt 2 ]]; then
+            echo "usage: $0 FORM_CLI_BINARY [EXPECTED_SOURCE_SHA256]" >&2
+            exit 2
+        fi
+        form_cli_behavioral_proof "$@"
     fi
-    form_cli_behavioral_proof "$@"
 fi
