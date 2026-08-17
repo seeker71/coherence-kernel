@@ -4409,7 +4409,7 @@ func (k *Kernel) registerNatives() {
 
 func (k *Kernel) nativeBypassesFormBinding(name NameID) bool {
 	switch k.nameStr(name) {
-	case "str_len", "str_byte_at", "byte_to_str", "substring", "char_at", "str_find", "scan_run":
+	case "str_len", "str_byte_at", "byte_to_str", "substring", "char_at", "str_find", "scan_run", "form_table_text":
 		return true
 	default:
 		return false
@@ -4679,9 +4679,10 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 				}
 			}
 			// Most user bindings still shadow same-named natives. The exception
-			// is the byte-string/cursor waist: source compilers and BMF cursors
-			// depend on those names staying byte-indexed when portable fallback
-			// definitions from core.fk are loaded.
+			// is the byte-string/cursor and table-image waist: source compilers and
+			// BMF cursors depend on those names staying byte-indexed, and universal
+			// table emission depends on its linear native serializer, when portable
+			// fallback definitions are loaded.
 			if ne, ok := k.natives[name]; ok {
 				if _, hasUserBinding := env.Lookup(name); !hasUserBinding || k.nativeBypassesFormBinding(name) {
 					args := make([]Value, len(kids)-1)

@@ -29,6 +29,7 @@ trap 'rm -rf "$work_dir"' EXIT
 fourth_flatten_expr fks \
     form-stdlib/minimal-surface.fk \
     form-stdlib/hati-os-kernel.fk \
+    form-stdlib/form-table-text.fk \
     form-stdlib/fkc-table-serialize.fk \
     form-stdlib/core.fk \
     form-stdlib/form-parse.fk \
