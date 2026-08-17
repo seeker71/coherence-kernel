@@ -1545,7 +1545,11 @@ func (wkr *goServeWorker) serve(w http.ResponseWriter, r *http.Request) {
 				where = nativeRouteWhere(activeRoute, r)
 			}
 			operation := fmt.Sprintf("request=%s %s %s", r.Method, r.URL.RequestURI(), where)
-			formStack := append([]string(nil), wkr.k.formStack...)
+			// Frames are stored raw and rendered only here, on the crash path.
+			formStack := make([]string, 0, len(wkr.k.formStack))
+			for _, f := range wkr.k.formStack {
+				formStack = append(formStack, wkr.k.renderFormFrame(f))
+			}
 			// The pooled worker serves the next request with a clean stack.
 			wkr.k.formStack = wkr.k.formStack[:0]
 			tracePath := writeKernelCrashTraceWithContext(

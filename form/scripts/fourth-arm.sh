@@ -502,12 +502,22 @@ build_fourth() {
 # against the sample's own three-kernel output — a false divergence. Anchoring
 # to the tests/ path keeps the stem the contract for the real band only.
 fourth_band_stem() {
-    local band="$1" stem
+    local band="$1" stem hit
     [[ "$band" == form-stdlib/tests/* || "$band" == */form-stdlib/tests/* ]] || return 0
     stem="$(basename "$band")"
     stem="${stem%.fk}"
-    stem="${stem%-band}"
     [[ -f "$FOURTH_MANIFEST" ]] || return 0
+    # Exact name FIRST, stripped second. Stripping -band unconditionally sent a
+    # file literally named <x>-band.fk to look up row <x>, so the four rows whose
+    # registered name KEEPS the -band suffix (form-cli-band, form-cli-repl-
+    # control-band) were unreachable from the file side: fourth_prepare_all built
+    # their tables from the manifest side and validate.sh then ran the file
+    # three-arm with no fourth leg and no registered-verdict gate — declared
+    # four-way, run three-way, and nothing said so. fourth_band_srcs already
+    # accepts both spellings; this reader now does too.
+    hit="$(awk -v b="$stem" '$1==b{print $1; exit}' "$FOURTH_MANIFEST")"
+    if [[ -n "$hit" ]]; then printf '%s\n' "$hit"; return 0; fi
+    stem="${stem%-band}"
     awk -v b="$stem" '$1==b{print $1; exit}' "$FOURTH_MANIFEST"
 }
 

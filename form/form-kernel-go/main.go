@@ -599,7 +599,7 @@ type Kernel struct {
 	// when the body recipe is attributed). Pushed at dispatch, truncated
 	// on the walk's success path — so after a panic the frames that were
 	// live at the crash are still here for the recover site to surface.
-	formStack []string
+	formStack []formFrame
 	// readingFiles — line map for the source currently being read:
 	// (file_name_id, first_global_line) per concatenated part. When
 	// non-empty, readSexpr attributes every parenthesized form so fatal
@@ -1328,6 +1328,31 @@ func (k *Kernel) resolveReadingLine(globalLine uint32) (NameID, uint32, bool) {
 	return fileID, local, found
 }
 
+// formFrame — one live Form call frame, stored RAW. Until 2026-08-17 the
+// stack held rendered strings, and the closure-dispatch site built each one
+// eagerly: a sourceAttr map lookup plus an fmt.Sprintf allocation on EVERY
+// function call, paid so that an error which almost never happens could print
+// a chain. On a BML compile that is hundreds of millions of dispatches; the
+// json-codec-bml band's Go leg was sampled live at 49 minutes with
+// walkInner→formFrameLabel→fmt.Sprintf standing in the hot tower. The only
+// reader of this stack is formStackDisplay, an error path — so frames now
+// carry the raw NameID/NodeID and rendering happens where reading happens.
+type formFrame struct {
+	name    NameID
+	body    NodeID
+	hasBody bool
+}
+
+// renderFormFrame — the display form of one frame, built only at read time.
+// Closure frames render through formFrameLabel exactly as the eager path did,
+// so the printed chain is byte-identical to what receipts already quote.
+func (k *Kernel) renderFormFrame(f formFrame) string {
+	if !f.hasBody {
+		return k.nameStr(f.name)
+	}
+	return k.formFrameLabel(f.name, f.body)
+}
+
 // formStackDisplay — the live Form call chain, innermost first, capped.
 func (k *Kernel) formStackDisplay(max int) string {
 	if len(k.formStack) == 0 {
@@ -1336,7 +1361,7 @@ func (k *Kernel) formStackDisplay(max int) string {
 	total := len(k.formStack)
 	var frames []string
 	for i := total - 1; i >= 0 && len(frames) < max; i-- {
-		frames = append(frames, k.formStack[i])
+		frames = append(frames, k.renderFormFrame(k.formStack[i]))
 	}
 	out := strings.Join(frames, " < ")
 	if total > max {
@@ -4672,7 +4697,7 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 						k.Trace.recordNative(k.nameStr(ne.Name))
 					}
 					k.observeNamedDispatch("observe/go/native-dispatch", ne.Name)
-					k.formStack = append(k.formStack, k.nameStr(ne.Name))
+					k.formStack = append(k.formStack, formFrame{name: ne.Name})
 					v := ne.Fn(k, env, args)
 					k.formStack = k.formStack[:len(k.formStack)-1]
 					return v
@@ -4696,7 +4721,7 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 						k.Trace.recordNative(k.nameStr(ne.Name))
 					}
 					k.observeNamedDispatch("observe/go/native-dispatch", ne.Name)
-					k.formStack = append(k.formStack, k.nameStr(ne.Name))
+					k.formStack = append(k.formStack, formFrame{name: ne.Name})
 					v := ne.Fn(k, args)
 					k.formStack = k.formStack[:len(k.formStack)-1]
 					return v
@@ -4828,11 +4853,11 @@ func (k *Kernel) walkInner(n NodeID, env *Frame) Value {
 				k.Trace.recordFn(k.nameStr(cl.Name))
 			}
 			k.observeNamedDispatch("observe/go/function-dispatch", cl.Name)
-			if label := k.formFrameLabel(cl.Name, cl.Body); myFrame >= 0 && myFrame < len(k.formStack) {
-				k.formStack[myFrame] = label
+			if frame := (formFrame{name: cl.Name, body: cl.Body, hasBody: true}); myFrame >= 0 && myFrame < len(k.formStack) {
+				k.formStack[myFrame] = frame
 			} else {
 				myFrame = len(k.formStack)
-				k.formStack = append(k.formStack, label)
+				k.formStack = append(k.formStack, frame)
 			}
 			n = cl.Body // TCO: closure body is in tail position.
 			env = call
@@ -5741,7 +5766,10 @@ func main() {
 			fmt.Fprintf(os.Stderr, "form-kernel-go: %v\n", r)
 			var stack []string
 			if crashK != nil {
-				stack = crashK.formStack
+				// Raw frames render on this crash path, the read site.
+				for _, f := range crashK.formStack {
+					stack = append(stack, crashK.renderFormFrame(f))
+				}
 				// The Form-level call chain live at the crash, innermost
 				// first — the line that produced the fatal is the innermost
 				// attributed frame.

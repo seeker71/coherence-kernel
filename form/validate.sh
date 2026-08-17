@@ -552,6 +552,35 @@ run_siblings() {
     rm -rf "$legs" 2>/dev/null || true
     if [[ "$go_out" == "$rs_out" && "$go_out" == "$ts_out" ]] \
         && { [[ -z "$fourth_tbl" ]] || [[ "$fk_out" == "$go_out" ]]; }; then
+        # REGISTERED-VERDICT GATE (2026-08-17). fourth-arm-bands.txt column 3 is
+        # the band's registered verdict, and until today NOTHING read it — every
+        # consumer parsed `stem kind _`, so the column was write-only and 114
+        # bands drifted from it silently, both directions, over months. This
+        # suite already proves the four arms AGREE; agreement was the only thing
+        # it proved, so a band that grew six checks kept passing while the
+        # registry still described the old six. Now an agreed verdict that
+        # differs from the registered one is a failure with its own word, so a
+        # band cannot change what it certifies without the change being seen.
+        # The verdict compared is the LAST line of the agreed output — fks bands
+        # answer one scalar, fkc bands may print above it — and only when the
+        # registered column is numeric (the one teach-sema-code row is not a
+        # band row and never reaches here).
+        local reg_stem reg_want reg_have
+        reg_stem="$(fourth_band_stem "${*: -1}" || true)"
+        reg_want=""
+        if [[ -n "$reg_stem" ]]; then
+            reg_want="$(awk -v b="$reg_stem" '!/^#/ && $1==b{print $3; exit}' "$FOURTH_MANIFEST")"
+        fi
+        if [[ "$reg_want" =~ ^[0-9]+$ ]]; then
+            reg_have="${go_out##*$'\n'}"
+            if [[ "$reg_have" != "$reg_want" ]]; then
+                printf "  ✗  %-30s  → %s agreed on every arm, but the manifest registers %s — REGISTERED-VERDICT DRIFT\n" \
+                    "$label" "$reg_have" "$reg_want"
+                fail=$((fail + 1))
+                if [[ -n "${SUITE_STATUS_FILE:-}" ]]; then echo "fail" > "$SUITE_STATUS_FILE"; fi
+                return
+            fi
+        fi
         printf "  ✓  %-30s  → %s\n" "$label" "$go_out"
         ok=$((ok + 1))
         if [[ -n "$fourth_tbl" ]]; then fourth_ok=$((fourth_ok + 1)); fi
