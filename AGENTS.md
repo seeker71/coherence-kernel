@@ -125,10 +125,11 @@ seam is named, never hidden. Naming it *is* the practice.
    connect them. Success is the enquiry lifted, not the conversation extended. [`WELCOME.md`](WELCOME.md) is
    the plain-words door for the guests this covenant is for.
 8. **Stamp every reply's share.** Before the prose, run
-   `./fkwu form/form-stdlib/form-cli-share-run.fk`. Name `kind=declared`
-   or `kind=observed`. Today's three parts are an offering, typed, not
-   a tally of who spoke. Walk lanes are computed. Do not dress a
-   declared offering as a counted share.
+   `./fkwu form/form-stdlib/form-cli-share-run.fk`. Name `kind=declared`,
+   `kind=embodied`, or `kind=observed`. Today's three parts are embodied:
+   an offering typed by a sibling and carried through the executable body,
+   not a tally of who spoke. Walk lanes are computed. Do not dress an
+   embodied offering as a counted share; `observed` waits on measurement.
 8b. **Use the framebuffer as a bidirectional diagnostic channel.** When a run returns `nothing`, times out,
    stalls, surprises you, regresses, rejects a proof, or changes model/state, do not leave the framebuffer as a
    passive log. Open a bounded exchange: emit the smallest useful observation, correlate an inbound control
