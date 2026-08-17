@@ -179,7 +179,7 @@ Current state per region. **Chronology is deliberately not kept here** — the f
   [name-resolution-as-recipe](teachings/name-resolution-as-recipe.form),
   [form-first-reasoning](teachings/form-first-reasoning.form),
   [prose-as-recipe](teachings/prose-as-recipe.form)) and the **concept tissue** —
-  [`teachings/concepts/`](teachings/concepts/README.md), twelve network-lived teachings the kernel
+  [`teachings/concepts/`](teachings/concepts/README.md), thirteen network-lived teachings the kernel
   reasons from, each carrying the frequency it speaks at. *structural-composition* is named here
   as a core teaching but has no page in this body; it is named, not linked, per the tissue's own
   rule (name a companion you cannot reach; never claim a path to it) and stands as work.
