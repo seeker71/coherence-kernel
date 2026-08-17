@@ -5,7 +5,7 @@
 **Landed:** [`learn/zh-summary-eval.fk`](../learn/zh-summary-eval.fk),
 [`learn/tests/zh-summary-eval-band.fk`](../learn/tests/zh-summary-eval-band.fk) → **1023**
 **Updated:** [`receipts/2026-06-29-native-zh-summary-PENDING.md`](2026-06-29-native-zh-summary-PENDING.md)
-**Corpus:** row 1014, `underwitness`
+**Corpus:** row 1019, `underwitness`
 
 ## The ask
 

@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-14
 **Status:** measured; no cap raised, nothing wired
-**Corpus:** row 1015, `guesswall`
+**Corpus:** row 1020, `guesswall`
 **Follows:** [two rungs moved, one held](2026-08-14-two-rungs-moved-one-held.md)
 
 ## The question
