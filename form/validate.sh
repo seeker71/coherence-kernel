@@ -15,6 +15,50 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
+# --- THE SEAL: a verdict belongs to the tree it was read from ---------------
+# Laid 2026-08-17, from a run that was still going while the files under it
+# changed three times. It would have printed a number, and the number would have
+# been about a tree that no longer existed — green or red equally meaningless.
+# Nothing caught that; it was noticed by hand, from a timestamp, and only
+# because someone happened to wonder. Once is luck.
+#
+# This body already knew the shape: scripts/fourth-arm.sh seals its table to a
+# generation and voids it when the sources move underneath ("table index
+# generation changed"). That guard sat one level down from the run that needed
+# it. This is the same guard at the top.
+#
+# A sweep here takes over an hour, so the window is wide and an edit inside it
+# is ordinary, not careless. What must never be ordinary is READING the result
+# afterward as though it said something. Exit 3 is a void reading — not a pass
+# and not a failure, an answer about nothing. Re-run on the settled tree.
+#
+# RADIUS, stated rather than implied: this compares the tree at the start against
+# the tree at the end. An edit that is made and undone entirely inside the window
+# leaves both stamps equal and passes unseen. It catches the drift that persists,
+# which is the drift that misleads a reader afterward. A per-file mtime watch
+# would close the rest and is the next stone if this one is ever the reason
+# something got through.
+_validate_tree_generation() {
+    printf '%s:%s\n' \
+        "$(git rev-parse HEAD 2>/dev/null || echo no-git)" \
+        "$(git status --porcelain=v1 2>/dev/null | shasum -a 256 | cut -d' ' -f1)"
+}
+VALIDATE_TREE_AT_START="$(_validate_tree_generation)"
+_validate_seal() {
+    local rc=$? now
+    now="$(_validate_tree_generation)"
+    if [[ "$now" != "$VALIDATE_TREE_AT_START" ]]; then
+        echo "validate.sh: VOID READING — the tree moved while this run was in flight." >&2
+        echo "              start $VALIDATE_TREE_AT_START" >&2
+        echo "              end   $now" >&2
+        echo "              This run's verdict describes a tree that is no longer here." >&2
+        echo "              It is neither a pass nor a failure. Re-run on the settled tree." >&2
+        exit 3
+    fi
+    exit $rc
+}
+trap _validate_seal EXIT
+
 # Keep package-manager advisory text out of sibling-kernel output comparison.
 # The TypeScript arm may invoke npm/npx when tsx is not locally installed; an
 # update notice on stdout makes identical kernel results look divergent.
