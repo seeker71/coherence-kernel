@@ -6,7 +6,7 @@
 [`learn/tests/deadgreen-band.fk`](../learn/tests/deadgreen-band.fk) → **255**
 **Repaired:** [`learn/world-model-pair.fk`](../learn/world-model-pair.fk) → band **16383** (was 8191)
 **Withdrawn:** `learn/scale-hold.fk`, its band, and the receipt that carried it
-**Corpus:** row 1008, re-aimed from `scalehold` to `deadgreen`
+**Corpus:** row 1012, re-aimed from `scalehold` to `deadgreen`
 
 ## What was withdrawn, and why
 
