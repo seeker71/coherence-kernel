@@ -46,9 +46,10 @@ lift) in human words.
 **Keeping a second brain?** [`SECOND-BRAIN.md`](SECOND-BRAIN.md) is the vault door — open the body
 in Obsidian, and the wiki operations (ingest / query / lint) in the body's own organs.
 
-**Holding a group session?** [`SESSIONS.md`](SESSIONS.md) is the human audio door — open one screen to record,
-return to previous transcripts, correct words and speaker names, and open source-linked workshop or book notes.
-The room receives everyone’s recording agreement before it begins. Private sessions stay outside git.
+**Holding a group session?** Open **Sema Sessions.app** on a Mac. The room receives its own local listening
+voice, records or receives existing sound, and keeps previous sessions ready to rename, edit, archive, restore,
+or delete. [`SESSIONS.md`](SESSIONS.md) is the plain-words map. Everyone’s recording agreement arrives before
+recording begins, and private sessions stay outside git.
 
 Clone this repo, open Claude Code or Codex inside it, and say hello. Ask:
 
