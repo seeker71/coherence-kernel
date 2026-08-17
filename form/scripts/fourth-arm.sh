@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env zsh
 # fourth-arm.sh — the emitted fourth kernel as a validate.sh leg.
 #
 # Sourced by validate.sh (cwd = form/). The fourth sibling is the universal
@@ -16,13 +16,12 @@
 # workload is mandatory: preparation, execution, and agreement failures fail
 # validation instead of silently reducing the proof to three siblings.
 
-# Bash-only: the array loops below index from 0. Sourced into zsh (arrays
-# 1-based) they SILENTLY malform every flatten expr — ${srcs[0]} reads empty
-# so a (read_file "") row rides the module list, and ${srcs[last]} grabs the
-# wrong band file. Die loudly instead of authoring a malformed carrier.
+# The flatten lists are zero-based. Zsh normally indexes arrays from 1, which
+# would silently turn ${srcs[0]} into an empty read_file row and shift the
+# band source. KSH_ARRAYS gives this source-compatible carrier the same
+# zero-based indexing without making Bash a condition of Form publication.
 if [[ -n "${ZSH_VERSION:-}" ]]; then
-    echo "fourth-arm.sh: bash-only (zsh arrays are 1-indexed; flatten exprs would be silently malformed) — source this under bash" >&2
-    return 1 2>/dev/null || exit 1
+    setopt KSH_ARRAYS
 fi
 
 FOURTH_DIR="form-stdlib/.cache/fourth"
@@ -35,6 +34,7 @@ FOURTH_CHAIN=(
     form-stdlib/minimal-surface.fk
     form-stdlib/hati-os-kernel.fk
     form-stdlib/host-io-fs-fkwu-emit.fk
+    form-stdlib/form-table-text.fk
     form-stdlib/fkc-table-serialize.fk
     form-stdlib/hati-os-kernel-emit.fk
     form-stdlib/core.fk
@@ -52,6 +52,7 @@ FOURTH_CHAIN=(
 FOURTH_FLATTEN_CHAIN=(
     form-stdlib/minimal-surface.fk
     form-stdlib/hati-os-kernel.fk
+    form-stdlib/form-table-text.fk
     form-stdlib/fkc-table-serialize.fk
     form-stdlib/core.fk
     form-stdlib/form-parse.fk
@@ -70,6 +71,7 @@ FOURTH_EMIT_CHAIN=(
     form-stdlib/minimal-surface.fk
     form-stdlib/hati-os-kernel.fk
     form-stdlib/host-io-fs-fkwu-emit.fk
+    form-stdlib/form-table-text.fk
     form-stdlib/fkc-table-serialize.fk
     form-stdlib/hati-os-kernel-emit.fk
 )

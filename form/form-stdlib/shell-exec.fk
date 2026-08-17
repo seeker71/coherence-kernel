@@ -1,10 +1,10 @@
 ; shell-exec.fk — the form-native shell executor (v2: exit codes + && / || + builtins).
 ;
-; Walks the fncall AST from shell-grammar.fk and RUNS it. Two tiers, exactly the
-; presence-host model (native builtin vs cmd= popen):
+; Walks the fncall AST from shell-grammar.fk and RUNS it. Two tiers:
 ;   - NATIVE form builtins compute output IN FORM — no host tool. Each is a native
 ;     form version of the unix tool, the thing that replaces passthrough.
-;   - PASSTHROUGH for every other command: labelled for the host to run by popen.
+;   - PASSTHROUGH for every other command: an explicit non-executing label.  It
+;     never invokes a host shell, popen, or another process.
 ;
 ; Every evaluation returns (list stdout env exit): exit is the command's status,
 ; stored back in env as $? so `&&`/`||`/test compose. Pure, so a band asserts the
@@ -373,7 +373,10 @@
                 (let env2 (sh-env-set env var item))
                 (let r (sh-eval-in body env2 ""))
                 (sh-eval-for-items var (tail items) body (r-env r) (str_concat acc (r-out r))))))
-    (defn sh-eval-command (node env stdin)
+    ; The default command evaluator is a named seam.  A closed Form extension
+    ; may late-bind `sh-eval-command` and delegate every other command here;
+    ; this base shell owns no process-execution route.
+    (defn sh-eval-command-default (node env stdin)
         (do (let name (sh-tag node))
             (if (sh-assign? name)
                 (list "" (sh-env-set env (sh-assign-name name) (sh-assign-val name)) 0)
@@ -382,6 +385,9 @@
                         (do (let br (sh-run-builtin name args stdin)) (let e (nth br 1))
                             (list (nth br 0) (sh-env-set env "?" (int_to_str e)) e))
                         (list (str_concat "[passthrough] " (sh-cmdline name args)) (sh-env-set env "?" "0") 0))))))
+
+    (defn sh-eval-command (node env stdin)
+        (sh-eval-command-default node env stdin))
 
     ;; convenience
     (defn sh-out (src) (r-out (sh-eval (sh-parse src) (sh-env-empty))))
@@ -401,14 +407,24 @@
                 (sh-plan-command node))))))
     (defn sh-plan-list (xs)
         (if (nil? xs) (empty) (append (sh-plan-node (head xs)) (sh-plan-list (tail xs)))))
-    (defn sh-plan-command (node)
+    ; As with evaluation, planners extend through a named default rather than
+    ; by teaching the base shell a host-facing command.
+    (defn sh-plan-kind-default (name)
+        (if (sh-builtin? name) "native" "passthrough"))
+    ; Keep the former public helper available while extensions delegate through
+    ; the default seam above.
+    (defn sh-plan-kind (name)
+        (sh-plan-kind-default name))
+    (defn sh-plan-command-default (node)
         (do (let name (sh-tag node))
             (if (sh-assign? name)
                 (list (list "assign" (sh-assign-name name) (list (sh-assign-val name)) (empty)))
                 (do (let parts (sh-rest node))
                     (let args (sh-collect-args parts (sh-env-empty)))
                     (let redirs (sh-collect-redirs parts))
-                    (list (list (if (sh-builtin? name) "native" "passthrough") name args redirs))))))
+                    (list (list (sh-plan-kind-default name) name args redirs))))))
+    (defn sh-plan-command (node)
+        (sh-plan-command-default node))
     (defn sh-step-kind (s) (nth s 0))
     (defn sh-step-name (s) (nth s 1))
     (defn sh-step-args (s) (nth s 2))
