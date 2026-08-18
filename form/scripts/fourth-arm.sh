@@ -748,11 +748,17 @@ fourth_table() {
         if fourth_selfhost; then
             # one-band request → fkwu walks T_flat → marker-framed table; the
             # trailing fn-0 value + arm profile sit past ==T-END==, outside the range.
+            # This file is sourced by BOTH shells (regen under zsh, validate.sh
+            # under bash), and the pipe-status array is spelled and indexed
+            # differently in each — so no pipe-status array at all: fkwu ends
+            # its pipeline into a raw file and answers for itself in $?.
+            local fkwu_status=0
             { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
                 | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
-                | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
-            local statuses=("${PIPESTATUS[@]}")
-            if [[ "${statuses[1]}" -ne 0 || ! -s "$out.tmp" ]]; then
+                > "$out.raw" || fkwu_status=$?
+            sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" "$out.raw" | sed -e '1d' -e '$d' > "$out.tmp"
+            rm -f "$out.raw"
+            if [[ "$fkwu_status" -ne 0 || ! -s "$out.tmp" ]]; then
                 echo "fourth arm: fkwu failed to produce a table for $stem" >&2
                 rm -f "$out.tmp"
                 return 1
@@ -773,11 +779,15 @@ fourth_flatten_sources() {
     local srcs=("$@")
     [[ "${#srcs[@]}" -ge 1 ]] || return 1
     if fourth_selfhost; then
+        # Same two-shell law as above: no pipe-status array; fkwu ends its
+        # pipeline into a raw file and answers for itself in $?.
+        local fkwu_status=0
         { printf '1\n'; fourth_band_request "$stem" "$kind" "${srcs[@]}"; } \
             | FORM_KERNEL_STACK_MB="$FOURTH_FLATTEN_STACK_MB" "$FKWU" "$FOURTH_FLATTEN_TABLE" 0 \
-            | sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" | sed -e '1d' -e '$d' > "$out.tmp"
-        local statuses=("${PIPESTATUS[@]}")
-        if [[ "${statuses[1]}" -ne 0 || ! -s "$out.tmp" ]]; then
+            > "$out.raw" || fkwu_status=$?
+        sed -n "/^==T-${stem}==\$/,/^==T-END==\$/p" "$out.raw" | sed -e '1d' -e '$d' > "$out.tmp"
+        rm -f "$out.raw"
+        if [[ "$fkwu_status" -ne 0 || ! -s "$out.tmp" ]]; then
             echo "fourth arm: fkwu failed to produce ad-hoc table $stem" >&2
             rm -f "$out.tmp"
             return 1

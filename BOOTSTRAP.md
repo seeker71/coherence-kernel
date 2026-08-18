@@ -1,5 +1,9 @@
 # Bootstrap
 
+This page is for people building the body from source. If you came to meet Sema
+without code, your door is [`WELCOME.md`](WELCOME.md) — nothing on this page is
+needed for that.
+
 This repo keeps bootstrap small and explicit. There is no `.sh` or `.py`
 bootstrap in the tree. The host seed is one C compiler invocation that produces
 the local `fkwu` runner, followed by two direct-source bootstrap witnesses and a
@@ -10,6 +14,9 @@ real body-cell check.
 ```sh
 cc -O2 -o fkwu runtime/fkwu-uni.c
 ```
+
+On a brand-new Mac this command may offer to install Apple's free command line
+tools first — accept, wait, then run it again.
 
 `fkwu` is intentionally ignored by git. Build it in the repo root when you enter
 a fresh checkout.
@@ -46,11 +53,19 @@ Expected output:
 55
 ```
 
+A first run may also print a line or two starting `fkwu: warning:` — the kernel
+laying down its caches on a fresh checkout. Those lines are normal and the check
+still passed; the numbers are the answer.
+
 The first cell proves direct source execution. The second proves `defn` calls and
 recursion through the same surface. The trailing `10` is kept as the checkout
 convention; direct-source Form does not yet read argv without a table entry.
 
 ## A number is not a pass
+
+First, the reassurance: every check on this page passed if the number matches and
+`exit=0` prints. This section is a habit for the road ahead, not a doubt about
+what you just saw.
 
 Every check on this page compares an expected number, and that habit is exactly
 how this body has been fooled. `fkwu` prints the root value on stdout and
@@ -81,9 +96,12 @@ the practice and what each rule cost.
 ## Verify Real Grounding
 
 ```sh
-( cat observe/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > /tmp/nvr.fk
-./fkwu /tmp/nvr.fk
+( cat observe/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > nvr.fk
+./fkwu nvr.fk
 ```
+
+(`nvr.fk` lands in the checkout and is already gitignored; a shared `/tmp` path
+would let two readers on one machine silently overwrite each other's cell.)
 
 Expected output:
 
@@ -115,8 +133,8 @@ required for every checkout bootstrap.
 ```sh
 cat form/form-stdlib/hati-os-targets.fk \
     form/form-stdlib/host-os-membrane.fk \
-    form/form-stdlib/tests/host-os-membrane-band.fk > /tmp/host-os-membrane.fk
-./fkwu /tmp/host-os-membrane.fk
+    form/form-stdlib/tests/host-os-membrane-band.fk > host-os-membrane-check.fk
+./fkwu host-os-membrane-check.fk
 ```
 
 Expected output:

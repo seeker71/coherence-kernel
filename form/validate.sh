@@ -165,11 +165,21 @@ wait
 FKWU_SRC=""
 build_fkwu_src() {
     local src="../runtime/fkwu-uni.c" bin="../fkwu"
+    local carrier="native/metal/fk-metal-carrier.m"
     [[ -f "$src" ]] || return 0
-    if [[ ! -x "$bin" || "$src" -nt "$bin" ]]; then
+    if [[ ! -x "$bin" || "$src" -nt "$bin" || ( -f "$carrier" && "$carrier" -nt "$bin" ) ]]; then
         command -v cc >/dev/null 2>&1 || return 0
         echo "  building runtime fkwu (repo root, door)..." >&2
-        cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+        # One binary carries its own doors: on Darwin the Metal carrier links in
+        # by default (fk-metal-carrier.m header's own claim), and a link failure
+        # falls back to the plain build — weak stubs answer SKIP, never crash.
+        if [[ "$(uname -s)" == "Darwin" && -f "$carrier" ]]; then
+            cc -O2 -o "$bin" "$src" "$carrier" \
+                -framework Metal -framework Foundation -fobjc-arc 2>/dev/null \
+                || cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+        else
+            cc -O2 -o "$bin" "$src" 2>/dev/null || return 0
+        fi
     fi
     [[ -x "$bin" ]] && FKWU_SRC="$bin"
 }
