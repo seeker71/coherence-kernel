@@ -4,21 +4,51 @@
 ; speech carrier, renders the library, and receives human transcript edits.
 ; The browser contributes only its microphone and page surface.
 ;
-; preludes: form-stdlib/core.fk form-stdlib/session-evidence.fk
-;           form-stdlib/session-app.fk
+; preludes: form-stdlib/core.fk form-stdlib/session-evidence.fk form-stdlib/session-app.fk
 
 (do
     (defn sal-root () ".sema-sessions")
+    (defn sal-archive-root () ".sema-sessions/archive")
     (defn sal-models () ".sema-sessions/models")
     (defn sal-tools () ".sema-sessions/tools")
+    (defn sal-native-whisper () "form/native/audio/darwin-arm64/whisper-cli")
     (defn sal-path (id name)
         (str_concat (sal-root) (str_concat "/" (str_concat id (str_concat "/" name)))))
+    (defn sal-archive-path (id name)
+        (str_concat (sal-archive-root) (str_concat "/" (str_concat id (str_concat "/" name)))))
+    (defn sal-path-at (id name archived)
+        (if (eq archived 1) (sal-archive-path id name) (sal-path id name)))
     (defn sal-exists? (p) (host_path_exists p))
     (defn sal-read (p) (if (eq (sal-exists? p) 1) (host_file_read_text p) ""))
     (defn sal-write (p s) (host_file_write_text p s))
     (defn sal-mkdir (p) (host_dir_mkdir p))
     (defn sal-init ()
-        (do (sal-mkdir (sal-root)) (sal-mkdir (sal-models)) (sal-mkdir (sal-tools)) 1))
+        (do (sal-mkdir (sal-root)) (sal-mkdir (sal-archive-root))
+            (sal-mkdir (sal-models)) (sal-mkdir (sal-tools)) 1))
+    (defn sal-cat (xs)
+        (if (nil? xs) "" (str_concat (head xs) (sal-cat (tail xs)))))
+    (defn sal-byte-cat (a b)
+        (if (nil? a) b (cons (head a) (sal-byte-cat (tail a) b))))
+    (defn sal-u16 (v)
+        (list (mod v 256) (mod (div v 256) 256)))
+    (defn sal-u32 (v)
+        (list (mod v 256) (mod (div v 256) 256)
+              (mod (div v 65536) 256) (mod (div v 16777216) 256)))
+    (defn sal-wav-header (rate nsamples)
+        (do
+            (let dlen (mul nsamples 2))
+            (sal-byte-cat (list 82 73 70 70)
+            (sal-byte-cat (sal-u32 (add 36 dlen))
+            (sal-byte-cat (list 87 65 86 69)
+            (sal-byte-cat (list 102 109 116 32)
+            (sal-byte-cat (sal-u32 16)
+            (sal-byte-cat (sal-u16 1)
+            (sal-byte-cat (sal-u16 1)
+            (sal-byte-cat (sal-u32 rate)
+            (sal-byte-cat (sal-u32 (mul rate 2))
+            (sal-byte-cat (sal-u16 2)
+            (sal-byte-cat (sal-u16 16)
+            (sal-byte-cat (list 100 97 116 97) (sal-u32 dlen)))))))))))))))
 
     (defn sal-trim-right (s)
         (if (eq (str_len s) 0) ""
@@ -31,6 +61,9 @@
         (if (str_eq (sal-platform-from-os (host-exec "echo %OS%" "")) "windows") 1 0))
     (defn sal-home ()
         (sal-trim-right (host-exec (if (eq (sal-windows?) 1) "echo %USERPROFILE%" "cd; pwd") "")))
+    (defn sal-darwin? ()
+        (if (and (eq (sal-windows?) 0)
+                 (str_eq (sal-trim-right (host-exec "uname -s" "")) "Darwin")) 1 0))
     (defn sal-win-local-app-data ()
         (sal-trim-right (host-exec "echo %LOCALAPPDATA%" "")))
     (defn sal-quote-for (windows path)
@@ -40,6 +73,8 @@
     (defn sal-quote (path) (sal-quote-for (sal-windows?) path))
     (defn sal-own-model-sha ()
         "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe")
+    (defn sal-native-whisper-sha ()
+        "c273da13b492d3f4138f3967d0c38bafb3a54e4362a6afe51145b6e22ef609c5")
     (defn sal-file-sha (path)
         (if (eq (sal-windows?) 1)
             (sal-trim-right (host-exec
@@ -68,15 +103,22 @@
             (host-exec (sal-command-probe (sal-windows?) name) "")) "yes"))
     (defn sal-whisper-exe ()
         (do (let own (str_concat (sal-tools) "/whisper/Release/whisper-cli.exe"))
-            (if (and (eq (sal-windows?) 1) (eq (sal-exists? own) 1)) own "whisper-cli")))
+            (if (and (eq (sal-windows?) 1) (eq (sal-exists? own) 1)) own
+                (if (and (eq (sal-darwin?) 1) (eq (sal-exists? (sal-native-whisper)) 1))
+                    (sal-native-whisper) "whisper-cli"))))
     (defn sal-ffmpeg-exe ()
         (do (let link (str_concat (sal-win-local-app-data) "/Microsoft/WinGet/Links/ffmpeg.exe"))
             (if (and (eq (sal-windows?) 1) (eq (sal-exists? link) 1)) link "ffmpeg")))
     (defn sal-exe-ready? (exe command-name)
         (if (eq (sal-exists? exe) 1) 1 (sal-command? command-name)))
+    (defn sal-whisper-ready? ()
+        (if (and (eq (sal-darwin?) 1) (eq (sal-exists? (sal-native-whisper)) 1))
+            (if (str_eq (sal-file-sha (sal-native-whisper)) (sal-native-whisper-sha)) 1 0)
+            (sal-exe-ready? (sal-whisper-exe) "whisper-cli")))
     (defn sal-ready? ()
-        (if (and (sal-exe-ready? (sal-whisper-exe) "whisper-cli")
-                 (and (sal-exe-ready? (sal-ffmpeg-exe) "ffmpeg")
+        (if (and (sal-whisper-ready?)
+                 (and (if (eq (sal-darwin?) 1) (sal-exists? "/usr/bin/afconvert")
+                          (sal-exe-ready? (sal-ffmpeg-exe) "ffmpeg"))
                       (gt (str_len (sal-model)) 0))) 1 0))
 
     ; request parsing
@@ -158,59 +200,161 @@
                         "</p><a href='/'>Return to Sessions</a></section>"))))))
 
     (defn sal-style ()
-        "<style>*{box-sizing:border-box}body{margin:0;background:#f5f0e7;color:#20342f;font:16px system-ui,sans-serif}header{padding:22px 30px;border-bottom:1px solid #d8d0c3;display:flex;justify-content:space-between;align-items:center}header strong{font:32px Georgia,serif}.wrap{max-width:1050px;margin:0 auto;padding:42px 28px}.hero{text-align:center;padding:55px 12px}.hero h1{font:58px Georgia,serif;line-height:1.05;margin:14px auto;max-width:780px}.button,button{display:inline-block;border:0;border-radius:12px;background:#2d6657;color:white;padding:13px 20px;font-weight:700;text-decoration:none;cursor:pointer}.soft{background:#fffaf2;color:#29473f;border:1px solid #d8d0c3}.sessions{display:grid;gap:12px;margin:28px 0}.card,.editor,.attention{background:#fffaf2;border:1px solid #ddd4c7;border-radius:18px;padding:22px}.card a{font:24px Georgia,serif;color:#20342f}.muted{color:#65756f}.hidden{display:none}label{display:block;font-weight:700;margin:16px 0 7px}input,textarea{width:100%;border:1px solid #cfc5b7;border-radius:10px;padding:12px;font:inherit;background:white}textarea{min-height:300px;line-height:1.6}audio{width:100%;margin:18px 0}.progress{margin:18px 0;font-weight:700}.attention{border-left:6px solid #cb6b4c}.source{font-variant-numeric:tabular-nums;color:#2d6657}@media(max-width:700px){header{padding:16px}header strong{font-size:25px}.wrap{padding:24px 16px}.hero{padding:30px 0}.hero h1{font-size:40px}.button,button{margin:4px 0}}</style>")
+        "<style>*{box-sizing:border-box}body{margin:0;background:#f5f0e7;color:#20342f;font:16px system-ui,sans-serif}header{padding:22px 30px;border-bottom:1px solid #d8d0c3;display:flex;justify-content:space-between;align-items:center;gap:20px}header strong{font:32px Georgia,serif}nav{display:flex;gap:8px;flex-wrap:wrap}.wrap{max-width:1050px;margin:0 auto;padding:42px 28px}.hero{text-align:center;padding:44px 12px}.hero h1{font:58px Georgia,serif;line-height:1.05;margin:14px auto;max-width:780px}.button,button{display:inline-block;border:0;border-radius:12px;background:#2d6657;color:white;padding:13px 20px;font-weight:700;text-decoration:none;cursor:pointer}.soft{background:#fffaf2;color:#29473f;border:1px solid #d8d0c3}.danger{background:#8a3f32}.sessions{display:grid;gap:12px;margin:24px 0}.card,.editor,.attention,.readiness{background:#fffaf2;border:1px solid #ddd4c7;border-radius:18px;padding:22px}.card{display:flex;justify-content:space-between;align-items:center;gap:16px}.card h3{font:24px Georgia,serif;margin:0 0 6px}.card a{color:#20342f}.muted{color:#65756f}.hidden{display:none}label{display:block;font-weight:700;margin:16px 0 7px}input,textarea{width:100%;border:1px solid #cfc5b7;border-radius:10px;padding:12px;font:inherit;background:white}textarea{min-height:340px;line-height:1.6}audio{width:100%;margin:18px 0}.progress{margin:18px 0;font-weight:700}.attention{border-left:6px solid #cb6b4c}.readiness{border-left:6px solid #6c8f82}.readiness h2{font:32px Georgia,serif;margin-top:0}.pulse{display:inline-block;width:10px;height:10px;border-radius:50%;background:#2d6657;animation:pulse 1.4s infinite}.source{font-variant-numeric:tabular-nums;color:#2d6657}.actions{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:22px}.actions form{margin:0}.confirm{padding:16px;background:#f4e5df;border-radius:12px;margin-top:28px}@keyframes pulse{50%{opacity:.25}}@media(max-width:700px){header{padding:16px;align-items:flex-start;flex-direction:column}header strong{font-size:25px}.wrap{padding:24px 16px}.hero{padding:24px 0}.hero h1{font-size:40px}.button,button{margin:4px 0}.card{align-items:flex-start;flex-direction:column}}</style>")
     (defn sal-script ()
-        "<script>let media,active='',uploadQueue=Promise.resolve();const q=s=>document.querySelector(s),note=s=>q('#note').textContent=s,keep=()=>note('Everything that reached the room is still here. Return to this session and continue.');async function begin(kind){let stream=null;try{if(!q('#consent').checked){note(\"Let everyone's yes arrive first.\");return}let file=null;if(kind==='file'){file=q('#file').files[0];if(!file){note('Choose a recording first.');return}}else{if(!navigator.mediaDevices?.getUserMedia){note('This browser has no microphone door. Bring a recording instead.');return}stream=await navigator.mediaDevices.getUserMedia({audio:true})}let title=encodeURIComponent(q('#title').value||'Untitled session');let r=await fetch('/start?consent=yes&title='+title,{method:'POST'});let j=await r.json();if(!r.ok){stream?.getTracks().forEach(t=>t.stop());note(j.message+' '+j.next);return}active=j.id;if(kind==='record'){uploadQueue=Promise.resolve();media=new MediaRecorder(stream,{audioBitsPerSecond:24000});media.ondataavailable=e=>{if(e.data.size)uploadQueue=uploadQueue.then(()=>sendBlob(e.data))};media.onerror=keep;media.start(1000);q('#stop').classList.remove('hidden');q('#begin').classList.add('hidden');note('The room is being heard.')}else{await sendFile(file);await finish()}}catch(e){stream?.getTracks().forEach(t=>t.stop());if(!active)note('The microphone stayed closed. Bring a recording, or let the browser receive it and begin again.');else keep()}}async function stop(){try{let stopped=new Promise(r=>media.addEventListener('stop',r,{once:true}));media.stop();media.stream.getTracks().forEach(t=>t.stop());await stopped;await uploadQueue;await finish()}catch(e){keep()}}async function sendFile(f){for(let p=0;p<f.size;p+=65536)await sendBlob(f.slice(p,Math.min(p+65536,f.size)))}async function sendBlob(b){let r=await fetch('/chunk?id='+active,{method:'POST',body:b});if(!r.ok)throw Error('piece')}async function finish(){note('Listening for the words…');let r=await fetch('/finish?id='+active,{method:'POST'});let j=await r.json();if(r.ok)location='/session?id='+active;else note(j.message+' '+j.next)}function seek(ms){let a=q('#audio');a.currentTime=ms/1000;a.play()}window.addEventListener('unhandledrejection',keep);</script>")
+        "<script>let active='',uploadQueue=Promise.resolve(),stream,context,source,processor,silence,resampleCarry=new Float32Array(0),resampleAt=0;const q=s=>document.querySelector(s),note=s=>{let n=q('#note');if(n)n.textContent=s},keep=()=>note('Everything that reached the room is still here. Return to this session and continue.');function pcm16(samples){let b=new ArrayBuffer(samples.length*2),v=new DataView(b);for(let i=0;i<samples.length;i++){let s=Math.max(-1,Math.min(1,samples[i]));v.setInt16(i*2,s<0?s*32768:s*32767,true)}return b}function pcm16at16k(samples,inputRate){if(inputRate===16000)return pcm16(samples);let joined=new Float32Array(resampleCarry.length+samples.length);joined.set(resampleCarry);joined.set(samples,resampleCarry.length);let ratio=inputRate/16000,out=[];while(resampleAt+1<joined.length){let i=Math.floor(resampleAt),f=resampleAt-i;out.push(joined[i]+(joined[i+1]-joined[i])*f);resampleAt+=ratio}let used=Math.floor(resampleAt);resampleCarry=joined.slice(used);resampleAt-=used;return pcm16(new Float32Array(out))}async function readiness(){let box=q('#readiness');if(!box)return;try{let r=await fetch('/prepare');let j=await r.json();if(r.ok&&j.ready){location='/';return}box.querySelector('p').textContent='The listening voice is still arriving. Sessions will keep tending this here.'}catch(e){box.querySelector('p').textContent='The listening voice is resting. Sessions will try again here.'}setTimeout(readiness,15000)}async function begin(kind){try{if(!q('#consent').checked){note(\"Let everyone's yes arrive first.\");return}let file=null,rate=0,capture='upload';if(kind==='file'){file=q('#file').files[0];if(!file){note('Choose a recording first.');return}}else{if(!navigator.mediaDevices?.getUserMedia){note('This browser has no microphone door. Bring a recording instead.');return}stream=await navigator.mediaDevices.getUserMedia({audio:true});context=new AudioContext({sampleRate:16000});rate=16000;resampleCarry=new Float32Array(0);resampleAt=0;capture='pcm'}let title=encodeURIComponent(q('#title').value||'Untitled session');let r=await fetch('/start?consent=yes&title='+title+'&capture='+capture+'&rate='+rate,{method:'POST'});let j=await r.json();if(!r.ok){stream?.getTracks().forEach(t=>t.stop());note(j.message+' '+j.next);return}active=j.id;if(kind==='record'){uploadQueue=Promise.resolve();source=context.createMediaStreamSource(stream);processor=context.createScriptProcessor(4096,1,1);silence=context.createGain();silence.gain.value=0;processor.onaudioprocess=e=>{let bytes=pcm16at16k(e.inputBuffer.getChannelData(0),context.sampleRate);if(bytes.byteLength)uploadQueue=uploadQueue.then(()=>sendBlob(bytes))};source.connect(processor);processor.connect(silence);silence.connect(context.destination);q('#stop').classList.remove('hidden');q('#begin').classList.add('hidden');note('The room is being heard.')}else{await sendFile(file);await finish()}}catch(e){stream?.getTracks().forEach(t=>t.stop());if(!active)note('The microphone stayed closed. Bring a recording, or let the browser receive it and begin again.');else keep()}}async function stop(){try{processor.onaudioprocess=null;source.disconnect();processor.disconnect();silence.disconnect();stream.getTracks().forEach(t=>t.stop());await context.close();await uploadQueue;await finish()}catch(e){keep()}}async function sendFile(f){for(let p=0;p<f.size;p+=65536)await sendBlob(f.slice(p,Math.min(p+65536,f.size)))}async function sendBlob(b){let r=await fetch('/chunk?id='+active,{method:'POST',body:b});if(!r.ok)throw Error('piece')}async function finish(){note('Listening for the words…');let r=await fetch('/finish?id='+active,{method:'POST'});let j=await r.json();if(r.ok)location='/session?id='+active;else note(j.message+' '+j.next)}function seek(ms){let a=q('#audio');a.currentTime=ms/1000;a.play()}window.addEventListener('unhandledrejection',keep);window.addEventListener('DOMContentLoaded',readiness);</script>")
     (defn sal-shell (inside)
         (str_concat "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width'><title>Sema · Sessions</title><link rel='icon' href='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 64 64%22%3E%3Ccircle cx=%2232%22 cy=%2232%22 r=%2230%22 fill=%22%2320342f%22/%3E%3Ctext x=%2232%22 y=%2243%22 text-anchor=%22middle%22 font-size=%2234%22 fill=%22white%22%3ES%3C/text%3E%3C/svg%3E'>"
-        (str_concat (sal-style) (str_concat "</head><body><header><strong>Sema <small>Sessions</small></strong><a class='button soft' href='/'>Past sessions</a></header><main class='wrap'>"
+        (str_concat (sal-style) (str_concat "</head><body><header><strong>Sema <small>Sessions</small></strong><nav><a class='button soft' href='/'>Sessions</a><a class='button soft' href='/archive'>Archive</a></nav></header><main class='wrap'>"
         (str_concat inside (str_concat "</main>" (str_concat (sal-script) "</body></html>")))))))
 
-    (defn sal-session-links (ids)
+    (defn sal-session-links-at (ids archived)
         (if (nil? ids) ""
             (do
                 (let id (head ids))
-                (let title (sal-read (sal-path id "title.txt")))
-                (let state (sal-read (sal-path id "status.txt")))
+                (let title (sal-read (sal-path-at id "title.txt" archived)))
+                (let state (sal-read (sal-path-at id "status.txt" archived)))
+                (let suffix (if (eq archived 1) "&archived=yes" ""))
                 (str_concat
-                    (if (and (eq (sa-session-id? id) 1) (eq (sal-exists? (sal-path id "title.txt")) 1))
-                        (str_concat "<article class='card'><a href='/session?id="
-                        (str_concat id (str_concat "'>" (str_concat (sa-html title)
-                        (str_concat "</a><p class='muted'>" (str_concat (sa-html state) "</p></article>"))))))
+                    (if (and (eq (sa-session-id? id) 1) (eq (sal-exists? (sal-path-at id "title.txt" archived)) 1))
+                        (sal-cat (list
+                            "<article class='card'><div><h3><a href='/session?id=" id suffix "'>"
+                            (sa-html title) "</a></h3><span class='muted'>" (sa-html state)
+                            "</span></div><a class='button soft' href='/session?id=" id suffix
+                            "'>Open</a></article>"))
                         "")
-                    (sal-session-links (tail ids))))))
+                    (sal-session-links-at (tail ids) archived)))))
+    (defn sal-session-links (ids) (sal-session-links-at ids 0))
     (defn sal-home-html ()
         (do (sal-init)
-            (let prep (if (eq (sal-ready?) 1)
-                "" "<p><a class='button soft' href='/prepare'>Prepare speech</a></p>"))
+            (let ready (sal-ready?))
+            (let room (if (eq ready 1)
+                "<section class='editor'><h2>New session</h2><label>Gathering name</label><input id='title' value='Our gathering'><label><input id='consent' type='checkbox' style='width:auto'> Everyone present has agreed to this recording.</label><label>Or bring an existing audio recording</label><input id='file' type='file' accept='audio/*'><div id='begin'><p><button onclick=\"begin('record')\">Begin recording</button> <button class='soft' onclick=\"begin('file')\">Bring recording</button></p></div><button id='stop' class='hidden' onclick='stop()'>Finish recording</button><p id='note' class='progress'></p></section>"
+                "<section id='readiness' class='readiness'><h2><span class='pulse'></span> Sessions is receiving its listening voice</h2><p>This happens here on the first opening. Keep this page open; the room will appear when it is ready.</p></section>"))
+            (let links (sal-session-links (host_dir_list (sal-root))))
             (sal-shell (str_concat
-                "<section class='hero'><p>A room that remembers with care</p><h1>Hold the conversation.<br>Return to what was said.</h1><p>Record together or bring a recording. The words stay here for you to hear and tend.</p></section><section class='editor'><h2>New session</h2><label>Gathering name</label><input id='title' value='Our gathering'><label><input id='consent' type='checkbox' style='width:auto'> Everyone present has agreed to this recording.</label><label>Or choose an existing recording</label><input id='file' type='file' accept='audio/*,video/*'><div id='begin'><p><button onclick=\"begin('record')\">Begin recording</button> <button class='soft' onclick=\"begin('file')\">Bring recording</button></p></div><button id='stop' class='hidden' onclick='stop()'>Finish recording</button><p id='note' class='progress'></p>"
-                (str_concat prep (str_concat "</section><h2>Past sessions</h2><section class='sessions'>"
-                    (str_concat (sal-session-links (host_dir_list (sal-root))) "</section>")))))))
+                "<section class='hero'><p>A room that remembers with care</p><h1>Hold the conversation.<br>Return to what was said.</h1><p>Record together or bring a recording. The words stay here for you to hear and tend.</p></section>"
+                (str_concat room (str_concat "<h2>Sessions</h2><section class='sessions'>"
+                    (str_concat (if (eq (str_len links) 0) "<p class='muted'>Your first gathering will rest here.</p>" links)
+                                "</section>")))))))
 
-    (defn sal-session-html (id)
-        (if (or (eq (sa-session-id? id) 0) (eq (sal-exists? (sal-path id "title.txt")) 0))
+    (defn sal-archive-html ()
+        (do (sal-init)
+            (let links (sal-session-links-at (host_dir_list (sal-archive-root)) 1))
+            (sal-shell (str_concat "<section class='hero'><p>Kept, but out of the way</p><h1>Archive</h1><p>Restore a gathering whenever its words are needed again.</p></section><section class='sessions'>"
+                (str_concat (if (eq (str_len links) 0) "<p class='muted'>Nothing is archived.</p>" links) "</section>")))))
+
+    (defn sal-session-html-at (id archived)
+        (if (or (eq (sa-session-id? id) 0) (eq (sal-exists? (sal-path-at id "title.txt" archived)) 0))
             (sal-shell (sal-attention-html "session-unknown"))
             (do
-                (let title (sal-read (sal-path id "title.txt")))
-                (let text (sal-read (sal-path id "transcript.txt")))
-                (let speaker (sal-read (sal-path id "speaker.txt")))
-                (let state (sal-read (sal-path id "status.txt")))
-                (let audio (if (eq (sal-exists? (sal-path id "audio/source.wav")) 1)
-                    (str_concat "<audio id='audio' controls src='/audio?id="
-                        (str_concat id "'></audio><button class='soft source' onclick='seek(0)'>00:00</button>"))
+                (let title (sal-read (sal-path-at id "title.txt" archived)))
+                (let text (sal-read (sal-path-at id "transcript.txt" archived)))
+                (let speaker (sal-read (sal-path-at id "speaker.txt" archived)))
+                (let state (sal-read (sal-path-at id "status.txt" archived)))
+                (let audio (if (eq (sal-exists? (sal-path-at id "audio/source.wav" archived)) 1)
+                    (sal-cat (list "<audio id='audio' controls src='/audio?id=" id
+                        (if (eq archived 1) "&archived=yes" "")
+                        "'></audio><button class='soft source' onclick='seek(0)'>00:00</button>"))
                     ""))
-                (let opening (str_concat "<article class='editor'><p class='muted'>"
-                    (str_concat (sa-html state) (str_concat "</p><h1>"
-                    (str_concat (sa-html title) (str_concat "</h1>" audio))))))
-                (let fields (str_concat "<form method='post' action='/save?id="
-                    (str_concat id (str_concat "'><label>Gathering name</label><input name='title' value='"
-                    (str_concat (sa-html title) (str_concat "'><label>Speaker name, when a participant has seen it</label><input name='speaker' value='"
-                    (str_concat (sa-html speaker) (str_concat "' placeholder='Unknown speaker'><label>Transcript</label><textarea name='text'>"
-                    (str_concat (sa-html text) "</textarea><p><button>Save the words</button></p></form>")))))))))
-                (let closing (str_concat "<p><a href='/manual?id="
-                    (str_concat id "'>Workshop draft</a></p></article>")))
-                (sal-shell (str_concat opening (str_concat fields closing))))))
+                (let opening (sal-cat (list "<article class='editor'><p class='muted'>"
+                    (sa-html state) "</p><h1>" (sa-html title) "</h1>" audio)))
+                (let fields (if (eq archived 1)
+                    (sal-cat (list "<h2>Transcript</h2><p class='muted'>Restore this gathering to tend its name or words again.</p><pre>"
+                        (sa-html text) "</pre>"))
+                    (sal-cat (list "<form method='post' action='/save?id=" id
+                        "'><label>Gathering name</label><input name='title' value='" (sa-html title)
+                        "'><label>Speaker name, when a participant has seen it</label><input name='speaker' value='"
+                        (sa-html speaker)
+                        "' placeholder='Unknown speaker'><label>Transcript — tend any words here</label><textarea name='text'>"
+                        (sa-html text)
+                        "</textarea><p><button>Save name and transcript</button></p></form>"))))
+                (let closing (if (eq archived 1)
+                    (sal-cat (list "<div class='actions'><form method='post' action='/restore?id=" id
+                        "'><button>Restore session</button></form></div><form class='confirm' method='post' action='/delete?id=" id
+                        "'><strong>Delete permanently</strong><p>This removes the recording and transcript from this Mac.</p><label><input style='width:auto' type='checkbox' name='confirm' value='delete' required> I want to remove this archived session.</label><button class='danger'>Delete permanently</button></form></article>"))
+                    (sal-cat (list "<div class='actions'><a class='button soft' href='/manual?id=" id
+                        "'>Workshop draft</a><form method='post' action='/archive?id=" id
+                        "'><button class='soft'>Archive session</button></form></div></article>"))))
+                (sal-shell (sal-cat (list opening fields closing))))))
+    (defn sal-session-html (id) (sal-session-html-at id 0))
+
+    (defn sal-archive-session (q)
+        (do (let id (sal-param q "id"))
+            (if (or (eq (sa-session-id? id) 0) (eq (sal-exists? (sal-path id "title.txt")) 0))
+                (list 404 (sal-shell (sal-attention-html "session-unknown")))
+                (do (sal-init)
+                    (let moved (fs_rename (str_concat (sal-root) (str_concat "/" id))
+                                          (str_concat (sal-archive-root) (str_concat "/" id))))
+                    (if (eq moved 0) (list 200 (sal-archive-html))
+                        (list 500 (sal-shell "<section class='attention'><h2>The session stayed where it was.</h2><p>Its recording and words are still present. Return and archive it again.</p><a href='/'>Return to Sessions</a></section>")))))))
+
+    (defn sal-restore-session (q)
+        (do (let id (sal-param q "id"))
+            (if (or (eq (sa-session-id? id) 0) (eq (sal-exists? (sal-archive-path id "title.txt")) 0))
+                (list 404 (sal-shell (sal-attention-html "session-unknown")))
+                (do
+                    (let moved (fs_rename (str_concat (sal-archive-root) (str_concat "/" id))
+                                          (str_concat (sal-root) (str_concat "/" id))))
+                    (if (eq moved 0) (list 200 (sal-session-html id))
+                        (list 500 (sal-shell "<section class='attention'><h2>The session remained in the archive.</h2><p>Its recording and words are still present. Return and restore it again.</p><a href='/archive'>Return to Archive</a></section>")))))))
+
+    (defn sal-none-exist? (paths)
+        (if (nil? paths) 1
+            (if (eq (sal-exists? (head paths)) 1) 0
+                (sal-none-exist? (tail paths)))))
+
+    (defn sal-remove-known-files (id)
+        (do
+            (fs_remove (sal-archive-path id "status.txt"))
+            (fs_remove (sal-archive-path id "transcript.txt"))
+            (fs_remove (sal-archive-path id "speaker.txt"))
+            (fs_remove (sal-archive-path id "capture.txt"))
+            (fs_remove (sal-archive-path id "sample-rate.txt"))
+            (fs_remove (sal-archive-path id "heard.csv"))
+            (fs_remove (sal-archive-path id "heard.txt"))
+            (fs_remove (sal-archive-path id "audio/original.webm"))
+            (fs_remove (sal-archive-path id "audio/original.pcm"))
+            (fs_remove (sal-archive-path id "audio/original.upload"))
+            (fs_remove (sal-archive-path id "audio/source.wav"))
+            (fs_remove (sal-archive-path id "drafts/workshop-manual.md"))
+            (fs_remove (sal-archive-path id "drafts/book-source-ledger.md"))
+            (fs_rmdir (sal-archive-path id "audio"))
+            (fs_rmdir (sal-archive-path id "drafts"))
+            (let clear (sal-none-exist? (list
+                (sal-archive-path id "status.txt")
+                (sal-archive-path id "transcript.txt")
+                (sal-archive-path id "speaker.txt")
+                (sal-archive-path id "capture.txt")
+                (sal-archive-path id "sample-rate.txt")
+                (sal-archive-path id "heard.csv")
+                (sal-archive-path id "heard.txt")
+                (sal-archive-path id "audio/original.webm")
+                (sal-archive-path id "audio/original.pcm")
+                (sal-archive-path id "audio/original.upload")
+                (sal-archive-path id "audio/source.wav")
+                (sal-archive-path id "drafts/workshop-manual.md")
+                (sal-archive-path id "drafts/book-source-ledger.md")
+                (sal-archive-path id "audio")
+                (sal-archive-path id "drafts"))))
+            (if (eq clear 0) 0
+                (do
+                    (fs_remove (sal-archive-path id "title.txt"))
+                    (fs_rmdir (str_concat (sal-archive-root) (str_concat "/" id)))
+                    (if (eq (sal-exists? (str_concat (sal-archive-root) (str_concat "/" id))) 0) 1 0)))))
+
+    (defn sal-delete-session (q body)
+        (do (let id (sal-param q "id"))
+            (let confirm (sal-param body "confirm"))
+            (if (or (eq (sa-session-id? id) 0) (eq (sal-exists? (sal-archive-path id "title.txt")) 0))
+                (list 404 (sal-shell (sal-attention-html "session-unknown")))
+                (if (not (str_eq confirm "delete"))
+                    (list 400 (sal-session-html-at id 1))
+                    (do
+                        (let removed (sal-remove-known-files id))
+                        (if (eq removed 1)
+                            (list 200 (sal-archive-html))
+                            (list 500 (sal-shell "<section class='attention'><h2>The session remains in the archive.</h2><p>Some part of it stayed present, so its name was kept and it can still be opened.</p><a href='/archive'>Return to Archive</a></section>"))))))))
 
     (defn sal-json-att (code)
         (do (let a (sa-attention code))
@@ -225,6 +369,9 @@
         (do
             (let consent (sal-param q "consent"))
             (let title (sal-param q "title"))
+            (let capture (sal-param q "capture"))
+            (let asked-rate (str_to_int (sal-param q "rate")))
+            (let rate (if (and (ge asked-rate 8000) (le asked-rate 192000)) asked-rate 16000))
             (if (not (str_eq consent "yes"))
                 (list 400 (sal-json-att "consent"))
                 (do
@@ -235,11 +382,13 @@
                     (let c (sal-mkdir (str_concat dir "/drafts")))
                     (let t (sal-write (sal-path id "title.txt") (if (eq (str_len title) 0) "Untitled session" title)))
                     (let s (sal-write (sal-path id "status.txt") (sa-state-receiving)))
-                    (let o (sal-write (sal-path id "audio/original.webm") ""))
+                    (let k (sal-write (sal-path id "capture.txt") (if (str_eq capture "pcm") "pcm" "upload")))
+                    (let r (sal-write (sal-path id "sample-rate.txt") (int_to_str rate)))
+                    (let o (sal-write (sal-path id (if (str_eq capture "pcm") "audio/original.pcm" "audio/original.upload")) ""))
                     (if (and (eq (sal-exists? dir) 1)
                              (and (eq (sal-exists? (str_concat dir "/audio")) 1)
                                   (and (eq (sal-exists? (str_concat dir "/drafts")) 1)
-                                       (and (ge t 0) (and (ge s 0) (ge o 0))))))
+                                       (and (ge t 0) (and (ge s 0) (and (ge k 0) (and (ge r 0) (ge o 0))))))))
                         (list 201 (str_concat "{\"id\":\"" (str_concat id "\"}")))
                         (list 500 (sal-json-att "session-create")))))))
     (defn sal-chunk (q body)
@@ -247,7 +396,9 @@
             (if (or (eq (sa-session-id? id) 0) (eq (sal-exists? (sal-path id "title.txt")) 0))
                 (list 404 (sal-json-att "session-unknown"))
                 (do
-                    (let total (file_append_bytes (sal-path id "audio/original.webm") (sal-string-bytes body)))
+                    (let capture (sal-read (sal-path id "capture.txt")))
+                    (let original (sal-path id (if (str_eq capture "pcm") "audio/original.pcm" "audio/original.upload")))
+                    (let total (file_append_bytes original (sal-string-bytes body)))
                     (if (lt total 1)
                         (list 400 (sal-json-att "recording-interrupted"))
                         (list 200 (str_concat "{\"bytes\":" (str_concat (int_to_str total) "}"))))))))
@@ -267,15 +418,40 @@
     (defn sal-csv-text (s)
         (do (let first (str_find s "\n" 0))
             (if (lt first 0) "" (sal-csv-text-lines s (add first 1) ""))))
-    (defn sal-convert-audio (original wav)
+    (defn sal-copy-bytes (from to offset size)
+        (if (ge offset size) (host_file_size to)
+            (do
+                (let amount (if (gt (sub size offset) 65536) 65536 (sub size offset)))
+                (let chunk (host_file_read_slice from offset amount))
+                (let wrote (file_append_bytes to (sal-string-bytes chunk)))
+                (if (lt wrote 0) -1 (sal-copy-bytes from to (add offset amount) size)))))
+    (defn sal-wrap-pcm (raw wav rate)
         (do
-            (let command (str_concat (sal-quote (sal-ffmpeg-exe))
-                (str_concat " -hide_banner -loglevel error -y -i "
-                (str_concat (sal-quote original) (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le "
-                (str_concat (sal-quote wav)
-                    (if (eq (sal-windows?) 1) " && echo yes" " && printf yes")))))))
+            (let size (host_file_size raw))
+            (let gone (fs_remove wav))
+            (let header (file_append_bytes wav (sal-wav-header rate (div size 2))))
+            (if (or (le size 0) (lt header 44)) 0
+                (if (eq (sal-copy-bytes raw wav 0 size) (add size 44)) 1 0))))
+    (defn sal-convert-upload (original wav)
+        (do
+            (let command (if (eq (sal-darwin?) 1)
+                (str_concat "/usr/bin/afconvert -f WAVE -d LEI16@16000 -c 1 "
+                    (str_concat (sal-quote original) (str_concat " " (str_concat (sal-quote wav) " && printf yes"))))
+                (str_concat (sal-quote (sal-ffmpeg-exe))
+                    (str_concat " -hide_banner -loglevel error -y -i "
+                    (str_concat (sal-quote original) (str_concat " -ar 16000 -ac 1 -c:a pcm_s16le "
+                    (str_concat (sal-quote wav)
+                        (if (eq (sal-windows?) 1) " && echo yes" " && printf yes"))))))))
             (let answer (sal-trim-right (host-exec command "")))
             (if (and (str_eq answer "yes") (gt (host_file_size wav) 44)) 1 0)))
+    (defn sal-convert-audio (id)
+        (do
+            (let capture (sal-read (sal-path id "capture.txt")))
+            (let wav (sal-path id "audio/source.wav"))
+            (if (str_eq capture "pcm")
+                (sal-wrap-pcm (sal-path id "audio/original.pcm") wav
+                              (str_to_int (sal-read (sal-path id "sample-rate.txt"))))
+                (sal-convert-upload (sal-path id "audio/original.upload") wav))))
     (defn sal-hear-audio (model wav stem)
         (do
             (let command (str_concat (sal-quote (sal-whisper-exe))
@@ -303,7 +479,8 @@
                         "speech-returned-nothing" "ready")))))
     (defn sal-run-transcript (id)
         (do
-            (let original (sal-path id "audio/original.webm"))
+            (let capture (sal-read (sal-path id "capture.txt")))
+            (let original (sal-path id (if (str_eq capture "pcm") "audio/original.pcm" "audio/original.upload")))
             (let wav (sal-path id "audio/source.wav"))
             (let stem (sal-path id "heard"))
             (let bytes (host_file_size original))
@@ -312,7 +489,7 @@
                     (let ready (sal-ready?))
                     (if (eq ready 0) (sal-hearing-result bytes ready 0 0 0)
                         (do
-                            (let converted (sal-convert-audio original wav))
+                            (let converted (sal-convert-audio id))
                             (if (eq converted 0) (sal-hearing-result bytes ready converted 0 0)
                                 (do
                                     (let heard (sal-hear-audio (sal-model) wav stem))
@@ -362,10 +539,21 @@
     (defn sal-windows-model-prepare-command (model)
         (str_concat "powershell -NoProfile -ExecutionPolicy Bypass -Command \"$ErrorActionPreference='Stop'; Invoke-WebRequest -UseBasicParsing 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true' -OutFile '"
             (str_concat model "'; Write-Output yes\"")))
+    (defn sal-posix-model-prepare-command (model)
+        (do
+            (let part (str_concat model ".part"))
+            (sal-cat (list
+                "/usr/bin/curl -L --fail --silent --show-error 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true' -o "
+                (sal-quote-for 0 part)
+                " && test \"$(/usr/bin/shasum -a 256 " (sal-quote-for 0 part)
+                " | /usr/bin/cut -d ' ' -f 1)\" = " (sal-quote-for 0 (sal-own-model-sha))
+                " && /bin/mv " (sal-quote-for 0 part) " " (sal-quote-for 0 model)
+                " && printf yes || { /bin/rm -f " (sal-quote-for 0 part) "; printf no; }"))))
     (defn sal-prepare ()
         (do
-            (let tools-ready (and (sal-exe-ready? (sal-whisper-exe) "whisper-cli")
-                                  (sal-exe-ready? (sal-ffmpeg-exe) "ffmpeg")))
+            (let tools-ready (and (sal-whisper-ready?)
+                                  (if (eq (sal-darwin?) 1) (sal-exists? "/usr/bin/afconvert")
+                                      (sal-exe-ready? (sal-ffmpeg-exe) "ffmpeg"))))
             (let install (if tools-ready "yes"
                 (if (eq (sal-windows?) 1)
                     (do
@@ -374,15 +562,16 @@
                         (let ffmpeg (if (sal-exe-ready? (sal-ffmpeg-exe) "ffmpeg") "yes"
                             (sal-trim-right (host-exec (sal-windows-ffmpeg-prepare-command) ""))))
                         (if (and (str_eq whisper "yes") (str_eq ffmpeg "yes")) "yes" "no"))
-                    (host-exec "command -v brew >/dev/null 2>&1 && brew install whisper-cpp ffmpeg >/dev/null 2>&1 && printf yes || printf no" ""))))
+                    (if (eq (sal-darwin?) 1) "no"
+                        (host-exec "command -v whisper-cli >/dev/null 2>&1 && command -v ffmpeg >/dev/null 2>&1 && printf yes || printf no" "")))))
             (let model (str_concat (sal-models) "/ggml-base.bin"))
             (let download (if (gt (str_len (sal-model)) 0) "yes"
                 (if (eq (sal-windows?) 1)
                     (host-exec (sal-windows-model-prepare-command model) "")
-                    (host-exec (str_concat "curl -L --fail --silent --show-error 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin?download=true' -o '"
-                        (str_concat model "' && printf yes || printf no")) ""))))
-            (if (eq (sal-ready?) 1) (sal-home-html)
-                (sal-shell (sal-attention-html "speech-not-ready")))))
+                    (host-exec (sal-posix-model-prepare-command model) ""))))
+            (if (eq (sal-ready?) 1)
+                (list 200 "{\"ready\":true}")
+                (list 503 "{\"ready\":false}"))))
 
     (defn sal-send-file (conn path kind)
         (if (eq (sal-exists? path) 0)
@@ -402,6 +591,39 @@
                 (let sent (socket_send conn chunk))
                 (if (le sent 0) -1 (sal-send-file-loop conn path (add offset sent) size)))))
 
+    (defn sal-get-route (path q)
+        (if (str_eq path "/")
+            (list 200 (sal-home-html))
+        (if (str_eq path "/archive")
+            (list 200 (sal-archive-html))
+        (if (str_eq path "/session")
+            (list 200 (sal-session-html-at (sal-param q "id")
+                (if (str_eq (sal-param q "archived") "yes") 1 0)))
+        (if (str_eq path "/prepare")
+            (sal-prepare)
+        (if (str_eq path "/manual")
+            (list 200 (sal-shell (str_concat "<article class='editor'><pre>"
+                (str_concat (sa-html (sal-read (sal-path (sal-param q "id") "drafts/workshop-manual.md")))
+                            "</pre></article>"))))
+            (list 404 (sal-shell (sal-attention-html "request-unread")))))))))
+    (defn sal-post-route (path q body)
+        (if (str_eq path "/start") (sal-start q)
+        (if (str_eq path "/chunk") (sal-chunk q body)
+        (if (str_eq path "/finish") (sal-finish q)
+        (if (str_eq path "/save") (sal-save q body)
+        (if (str_eq path "/archive") (sal-archive-session q)
+        (if (str_eq path "/restore") (sal-restore-session q)
+        (if (str_eq path "/delete") (sal-delete-session q body)
+            (list 404 (sal-shell (sal-attention-html "request-unread")))))))))))
+    (defn sal-route (method path q body)
+        (if (str_eq method "GET") (sal-get-route path q)
+            (if (str_eq method "POST") (sal-post-route path q body)
+                (list 404 (sal-shell (sal-attention-html "request-unread"))))))
+    (defn sal-json-path? (path)
+        (if (or (str_eq path "/prepare")
+             (or (str_eq path "/start")
+             (or (str_eq path "/chunk") (str_eq path "/finish")))) 1 0))
+
     (defn sal-handle (conn raw)
         (do
             (let method (sal-method raw))
@@ -409,29 +631,11 @@
             (let path (sal-path-only target))
             (let q (sal-query target))
             (if (and (str_eq method "GET") (str_eq path "/audio"))
-                (sal-send-file conn (sal-path (sal-param q "id") "audio/source.wav") "audio/wav")
+                (sal-send-file conn (sal-path-at (sal-param q "id") "audio/source.wav"
+                    (if (str_eq (sal-param q "archived") "yes") 1 0)) "audio/wav")
                 (do
-                    (let result
-                        (if (and (str_eq method "GET") (str_eq path "/"))
-                            (list 200 (sal-home-html))
-                        (if (and (str_eq method "GET") (str_eq path "/session"))
-                            (list 200 (sal-session-html (sal-param q "id")))
-                        (if (and (str_eq method "GET") (str_eq path "/prepare"))
-                            (list 200 (sal-prepare))
-                        (if (and (str_eq method "GET") (str_eq path "/manual"))
-                            (list 200 (sal-shell (str_concat "<article class='editor'><pre>"
-                                (str_concat (sa-html (sal-read (sal-path (sal-param q "id") "drafts/workshop-manual.md")))
-                                            "</pre></article>"))))
-                        (if (and (str_eq method "POST") (str_eq path "/start"))
-                            (sal-start q)
-                        (if (and (str_eq method "POST") (str_eq path "/chunk"))
-                            (sal-chunk q (sal-body raw))
-                        (if (and (str_eq method "POST") (str_eq path "/finish"))
-                            (sal-finish q)
-                        (if (and (str_eq method "POST") (str_eq path "/save"))
-                            (sal-save q (sal-body raw))
-                            (list 404 (sal-shell (sal-attention-html "request-unread"))))))))))))
-                    (let kind (if (or (str_eq path "/start") (or (str_eq path "/chunk") (str_eq path "/finish")))
+                    (let result (sal-route method path q (sal-body raw)))
+                    (let kind (if (eq (sal-json-path? path) 1)
                                   "application/json; charset=utf-8" "text/html; charset=utf-8"))
                     (sal-send-all conn (sal-wire (head result) kind (nth result 1)) 0)))))
 
