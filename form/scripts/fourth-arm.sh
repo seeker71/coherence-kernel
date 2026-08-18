@@ -658,7 +658,19 @@ fourth_band_srcs() {
             fourth_collect_source_dep "$dep" || return 1
         done <<< "$mods"
     fi
-    printf '%s\n' "${fourth_src_order[@]}" "$band"
+    # A band whose ONLY declared prelude is core.fk collects nothing — the loop
+    # above drops core.fk on purpose, because the shim mirrors it. That is a
+    # legitimate state (the header two comments up already anticipates it), but
+    # bash 3.2 under `set -u` treats "${empty[@]}" as unbound and kills the whole
+    # run. validate.sh then aborts with exit 1 before a single band is read, so
+    # the honest degradation never happens and the suite cannot be reached at
+    # all. Witnessed 2026-08-17 on indirect-call-runtime-probe, whose band
+    # declares core.fk and nothing else.
+    if [[ ${#fourth_src_order[@]} -gt 0 ]]; then
+        printf '%s\n' "${fourth_src_order[@]}" "$band"
+    else
+        printf '%s\n' "$band"
+    fi
 }
 
 # fourth_prep_srcs — prepared source paths for a stem, one per line.  A
