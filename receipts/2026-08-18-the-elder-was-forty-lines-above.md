@@ -12,9 +12,13 @@ Form" — whose close named "the keystone left standing." Urs asked: *standing f
 `codec.fk` — the standing-red cell whose section flooded 185 errors on fkwu — is **lensed by fkwu
 itself, through Form alone**: the source-text lens chain runs on the seed kernel and its output is
 **byte-identical to go's** on the same input. `adler32.fk`, a brace-surface cell, lenses the same
-way: the lens is the brace door too. The family sweep through the elder lane was at 35 of 117
-section-bearing cells, **35 OK, 0 FAIL**, still walking when this receipt was written; its id is
-`bddlwmc6y` and its report is the scratchpad's `family-elder.txt`.
+way: the lens is the brace door too. The family sweep through the elder lane finished after this
+receipt was first written: **116 of 117 section-bearing cells lens clean on fkwu.** The 117th is
+`seedbank/tests/bml-section-syntax.fk` — a section **as an expression** inside a `(let …)`, with a
+nested inner section and a `})` closing line the line-scanner deliberately does not own. It tests
+the host-reader-era section-object door itself; before today it spun the scanner forever, and now
+it is refused by name (`section not closed before end of source`). One cell, named, its shape
+exact.
 
 `json-emitter-band`: go, rust and TypeScript now all answer the registered **31** — running
 fkwu-lensed text. Before today the TS leg crashed on a raw `section` and the band answered nothing
