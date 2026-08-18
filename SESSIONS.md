@@ -3,12 +3,27 @@
 Sessions is one ordinary room for recording a gathering, returning to what was
 said, and tending the words together.
 
-On macOS, double-click **Open Sema Sessions.command**. On Windows, double-click
-**Open Sema Sessions.cmd**. The Sessions page opens in the browser. There is no
+This room lives inside the project folder. If the project is not on your
+computer yet, Step 1 of [`YOUR-OWN-COMPUTER.md`](YOUR-OWN-COMPUTER.md) walks you
+through copying it down. To see the folder: open Finder, choose Go → Home from
+the menu bar at the top of the screen, and open the folder called
+`coherence-kernel`.
+
+Inside it, on macOS, double-click **Open Sema Sessions.command**. On Windows,
+double-click **Open Sema Sessions.cmd**. The Sessions page opens in the browser. There is no
 mode to choose, configuration to write, environment variable to set, or command
 line to learn.
 
+One honest thing before you plan a gathering around it: this room is young. It
+has been walked end-to-end by its builders, but a real gathering of several
+people has not yet crossed it. If yours is the first, that is welcome — and
+worth knowing before you invite the neighbors. The builders' detailed honesty
+about what has and hasn't been observed is at the bottom of this page.
+
 ## The living path
+
+This next section is in the builders' language — the words for using the room
+continue at "Begin and return", just below.
 
 The application is Form:
 
