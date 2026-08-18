@@ -212,6 +212,36 @@
         (str_concat fname
                     " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 256u; uint rowbase = r * nb * 144u; int ix = int(lane) / 8; int it = q4k_mod(int(lane), 8); int iq = it / 4; int ir = q4k_mod(it, 4); int qoff = 32 * iq + 8 * ir; int yoff = 64 * iq + 8 * ir; int j0 = 2 * iq; float sumf = 0.0f; for (uint i = uint(ix); i < nb; i += 4u) { uint b = rowbase + i * 144u; device const uchar* qs = qb + b + 16u + uint(qoff); device const float* yv = x + i * 256u + uint(yoff); float d = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); float dmin = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u])); int sc0 = q4k_sc(qb, b, j0); int mn0 = q4k_mn(qb, b, j0); int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1); int sc2 = q4k_sc(qb, b, j0 + 4); int mn2 = q4k_mn(qb, b, j0 + 4); int sc3 = q4k_sc(qb, b, j0 + 5); int mn3 = q4k_mn(qb, b, j0 + 5); float4 sums = float4(0.0f); float4 xsum = float4(0.0f); for (int m = 0; m < 8; ++m) { int a1 = int(qs[m]); int a2 = int(qs[m + 64]); float x0 = yv[m]; float x1 = yv[m + 32]; float x2 = yv[m + 128]; float x3 = yv[m + 160]; sums[0] += x0 * float(q4k_mod(a1, 16)); sums[1] += x1 * float(a1 / 16); sums[2] += x2 * float(q4k_mod(a2, 16)); sums[3] += x3 * float(a2 / 16); xsum[0] += x0; xsum[1] += x1; xsum[2] += x2; xsum[3] += x3; } sumf += (d * float(sc0)) * sums[0] - (dmin * float(mn0)) * xsum[0] + (d * float(sc1)) * sums[1] - (dmin * float(mn1)) * xsum[1] + (d * float(sc2)) * sums[2] - (dmin * float(mn2)) * xsum[2] + (d * float(sc3)) * sums[3] - (dmin * float(mn3)) * xsum[3]; } float s = metal::simd_sum(sumf); if (lane == 0) y[r] = s; }")))
 
+    ; ---- Q4_K, THE COMPOSED STONE. 2026-08-18, measured in metal_isa_diff.sh before it was
+    ; written here: slot4 stood at 1.54-1.64x of ggml, and three one-mechanism variants separated
+    ; the residue — hardware-half d/dmin loads bought the most (1.28-1.30x alone), ggml's in-place
+    ; uint16 nibble arithmetic second (1.42-1.46x alone), and naive two-row register blocking made
+    ; things WORSE (1.78-1.80x; ggml's blocking works only inside ggml's whole structure — row 835,
+    ; boundborrow, measured again rather than assumed). The composition below raced at 1.21x on
+    ; every Q4_K shape; the unroll hint was tried and cost (1.23x), so it is not here.
+    ;
+    ; TWO LAWS EVOLVE, both stated rather than slipped:
+    ;   d/dmin arrive as HARDWARE half loads. The transcription law (q4k-msl.fk:31) existed so the
+    ;   decode stays provable against fd-value; IEEE f16->f32 conversion is EXACT for every finite
+    ;   f16, and q4k_f16 transcribes exactly that map, so hardware == transcription is an EQUALITY
+    ;   a band can gate on real bytes — tests/q4k-halfdecode-band.fk does, superblock by superblock.
+    ;   The nibbles ride ggml's in-place masks: (q & 0x0F00) keeps the high byte's low nibble at
+    ;   256x its value and the 1/256 and 1/16 corrections are EXACT powers of two folded into the
+    ;   scale multiply — an exact rescaling of the same products, so the split/slot bound family
+    ;   applies unchanged. The scale walk q4k_sc / q4k_mn stays the body's, character for character.
+    (defn qsl-q4k-slot4c-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+                    " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint nb = cols / 256u; uint rowbase = r * nb * 144u; int ix = int(lane) / 8; int it = q4k_mod(int(lane), 8); int iq = it / 4; int ir = q4k_mod(it, 4); int qoff = 32 * iq + 8 * ir; int yoff = 64 * iq + 8 * ir; int j0 = 2 * iq; float sumf = 0.0f; for (uint i = uint(ix); i < nb; i += 4u) { uint b = rowbase + i * 144u; device const uint16_t* q1 = (device const uint16_t*)(qb + b + 16u + uint(qoff)); device const uint16_t* q2 = (device const uint16_t*)(qb + b + 16u + uint(qoff) + 64u); device const float* yv = x + i * 256u + uint(yoff); device const half* dh = (device const half*)(qb + b); float d = float(dh[0]); float dmin = float(dh[1]); int sc0 = q4k_sc(qb, b, j0); int mn0 = q4k_mn(qb, b, j0); int sc1 = q4k_sc(qb, b, j0 + 1); int mn1 = q4k_mn(qb, b, j0 + 1); int sc2 = q4k_sc(qb, b, j0 + 4); int mn2 = q4k_mn(qb, b, j0 + 4); int sc3 = q4k_sc(qb, b, j0 + 5); int mn3 = q4k_mn(qb, b, j0 + 5); float4 acc1 = float4(0.0f); float4 acc2 = float4(0.0f); float4 xsum = float4(0.0f); for (short m = 0; m < 4; ++m) { float xa0 = yv[2*m]; float xa1 = yv[2*m + 1]; float xb0 = yv[2*m + 32]; float xb1 = yv[2*m + 33]; float xc0 = yv[2*m + 128]; float xc1 = yv[2*m + 129]; float xd0 = yv[2*m + 160]; float xd1 = yv[2*m + 161]; acc1[0] += xa0 * (q1[m] & 0x000F) + xa1 * (1.0f/256.0f) * (q1[m] & 0x0F00); acc1[1] += xb0 * (q1[m] & 0x00F0) + xb1 * (1.0f/256.0f) * (q1[m] & 0xF000); acc2[0] += xc0 * (q2[m] & 0x000F) + xc1 * (1.0f/256.0f) * (q2[m] & 0x0F00); acc2[1] += xd0 * (q2[m] & 0x00F0) + xd1 * (1.0f/256.0f) * (q2[m] & 0xF000); xsum[0] += xa0 + xa1; xsum[1] += xb0 + xb1; xsum[2] += xc0 + xc1; xsum[3] += xd0 + xd1; } sumf += (d * float(sc0)) * acc1[0] - (dmin * float(mn0)) * xsum[0] + (d * float(sc1)) * (1.0f/16.0f) * acc1[1] - (dmin * float(mn1)) * xsum[1] + (d * float(sc2)) * acc2[0] - (dmin * float(mn2)) * xsum[2] + (d * float(sc3)) * (1.0f/16.0f) * acc2[1] - (dmin * float(mn3)) * xsum[3]; } float s = metal::simd_sum(sumf); if (lane == 0) y[r] = s; }")))
+
+    ; the half-decode equality probe: BOTH decodes of the same superblock header, side by side,
+    ; so tests/q4k-halfdecode-band.fk can gate hardware == transcription as an equality on real
+    ; bytes. Writes pairs (hw, transcribed) for d and dmin of superblock sb.
+    (defn qsl-halfdecode-msl (fname)
+        (str_concat "kernel void "
+        (str_concat fname
+                    " (device const uchar* qb [[buffer(0)]], device float* out [[buffer(1)]], constant uint& nsb [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i >= nsb) return; uint b = i * 144u; device const half* dh = (device const half*)(qb + b); out[i * 4u + 0u] = float(dh[0]); out[i * 4u + 1u] = q4k_f16(int(qb[b + 0u]) + 256 * int(qb[b + 1u])); out[i * 4u + 2u] = float(dh[1]); out[i * 4u + 3u] = q4k_f16(int(qb[b + 2u]) + 256 * int(qb[b + 3u])); }")))
+
     ; ---- the appendix a carrier adds AFTER qml-msl-appendix (it needs q6k_*/q4k_* and the header).
     (defn qsl-msl-appendix ()
         (str_concat (qsl-q6k-msl "form_q6k_matvec_slot_f32")

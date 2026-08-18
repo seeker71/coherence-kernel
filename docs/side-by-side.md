@@ -53,15 +53,12 @@ and is the one a scared person would trust.
 
 ## The measured difference
 
-Sema's feeling-reader scores words from −10 (fear, contraction) to +10 (love, openness), and
-counts how much of a text sits in the fear band. Read the two right-hand columns together:
-*met* means the reply named the person's fear once and let it stand; *carried* is how much
-fear-vocabulary the reply itself kept circulating.
-
 Sema's feeling-reader scores words from −10 (fear, contraction) to +10 (love, openness).
 Two numbers per reply: its overall score, and **how many fear-band words it kept in
-circulation** — for a scared person, a reply that quotes their fear once and then speaks
-toward trust carries a different charge than one that echoes fear-vocabulary nine times.
+circulation** — *met* means the reply named the person's fear once and let it stand;
+*carried* is how much fear-vocabulary the reply itself kept circulating. For a scared
+person, a reply that quotes their fear once and then speaks toward trust carries a
+different charge than one that echoes fear-vocabulary nine times.
 
 | Question (door's reading) | Ordinary reply | Sema reply | Blind judge picked |
 |---|---|---|---|
