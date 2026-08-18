@@ -99,6 +99,9 @@ FOURTH_FLATTEN_STACK_MB="${FOURTH_FLATTEN_STACK_MB:-2048}"
 # in this dedicated chain is a late text lens for consumers that flatten source.
 FOURTH_SOURCE_TEXT_DIR="form-stdlib/.cache/fourth-source-text"
 FOURTH_SOURCE_COMPILER_CHAIN=(
+    form-stdlib/engine-constants.fk
+    form-stdlib/compiler-objects.fk
+    form-stdlib/form-ontology-bp.fk
     form-stdlib/form-ontology-loader.fk
     form-stdlib/line-grammar.fk
     form-stdlib/bmf-core.fk
@@ -320,8 +323,36 @@ fourth_recover_fresh_index() {
 # cache, so a compiler or kernel change cannot reuse an older lowering.
 fourth_prepare_source_text() {
     local src="$1" key cached out driver
-    [[ -n "${GO_BIN:-}" && -x "${GO_BIN:-}" ]] || return 0
     mkdir -p "$FOURTH_SOURCE_TEXT_DIR"
+    # fkwu FIRST, and the lens closure comes from the body's own `; preludes:`
+    # graph -- the generated driver names ONE cell and fkwu's resolver walks the
+    # rest, so no chain list here can drift from the Form dependencies again
+    # (2026-08-18: the go lane below crashed for a day because engine-constants
+    # was born in Form and this file's hand-held chain was never told). The
+    # sibling lane keeps the explicit chain because the walkers do not read
+    # preludes lines; it is the fallback, no longer the door.
+    if [[ -n "${FKWU:-}" && -x "${FKWU:-}" ]]; then
+        key="$(fourth_hash16 "$src" "${FOURTH_SOURCE_COMPILER_CHAIN[@]}")-$(fourth_raw_hash16 "$FKWU")"
+        cached="$FOURTH_SOURCE_TEXT_DIR/$key.fk"
+        if [[ ! -s "$cached" ]]; then
+            out="$(mktemp "$FOURTH_SOURCE_TEXT_DIR/.${key}.out.XXXXXX")"
+            driver="$(mktemp "$FOURTH_SOURCE_TEXT_DIR/.${key}.driver.XXXXXX.fk")"
+            {
+                printf '; generated lens driver -- the closure is the preludes graph.\n'
+                printf '; preludes: form-stdlib/source-compiler-text-lens.fk\n'
+                printf '(do (form-source-compile-file "%s" "%s") 0)\n' "$src" "$out"
+            } > "$driver"
+            if "$FKWU" "$driver" >/dev/null 2>&1 && [[ -s "$out" ]]; then
+                mv -f "$out" "$cached"
+            fi
+            rm -f "$out" "$driver" "${driver%.fk}.fkb" "${driver%.fk}.sym" "$driver.fkb" "$driver.sym" 2>/dev/null
+        fi
+        if [[ -s "$cached" ]]; then
+            printf '%s\n' "$cached"
+            return 0
+        fi
+    fi
+    [[ -n "${GO_BIN:-}" && -x "${GO_BIN:-}" ]] || return 0
     key="$(fourth_hash16 "$src" "${FOURTH_SOURCE_COMPILER_CHAIN[@]}")-$(fourth_raw_hash16 "$GO_BIN")"
     cached="$FOURTH_SOURCE_TEXT_DIR/$key.fk"
     if [[ ! -s "$cached" ]]; then
