@@ -1,0 +1,329 @@
+; qwen35-artifact-fetch.fk — resumable Qwen3.8 GGUF movement owned by Form.
+;
+; The host membrane performs only TLS bytes and the already-existing Metal
+; file-handle operations.  Redirect choice, range arithmetic, admission,
+; persistence checks, and the durable committed offset all live here.
+; Source freshness marker: the first smoke must compile cleanly before network IO.
+;
+; A positive metal_buf_from_file length remains the private model-read mode.
+; This cell alone uses the explicit negative-length writable-file mode.
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-fs.fk form-stdlib/kernel-http.fk native/metal/sha256-arm64-jit.fk
+
+(do
+    (defn qaf-spec (name url target state-path chunk-bytes)
+        (list "qaf-spec" name url target state-path chunk-bytes))
+    (defn qaf-spec-name (s) (nth s 1))
+    (defn qaf-spec-url (s) (nth s 2))
+    (defn qaf-spec-target (s) (nth s 3))
+    (defn qaf-spec-state-path (s) (nth s 4))
+    (defn qaf-spec-chunk-bytes (s) (nth s 5))
+
+    (defn qaf-default-spec ()
+        (qaf-spec
+            "qwen3.8-27b-q8_0"
+            "https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-Q8_0.gguf?download=true"
+            "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.form-part.gguf"
+            "/Users/ursmuff/models/qwen38-27b/Qwen3.8-27B-Q8_0.form-part.state"
+            134217728))
+
+    ; manifest = (qaf-manifest status signed-url linked-size linked-sha detail)
+    (defn qaf-manifest (status signed-url linked-size linked-sha detail)
+        (list "qaf-manifest" status signed-url linked-size linked-sha detail))
+    (defn qaf-manifest-status (m) (nth m 1))
+    (defn qaf-manifest-url (m) (nth m 2))
+    (defn qaf-manifest-size (m) (nth m 3))
+    (defn qaf-manifest-sha (m) (nth m 4))
+    (defn qaf-manifest-detail (m) (nth m 5))
+    (defn qaf-manifest-ready? (m) (str_eq (qaf-manifest-status m) "ready"))
+    (defn qaf-unquote-http-value (value)
+        (if (lt (str_len value) 2) value
+            (if (and (eq (str_byte_at value 0) 34)
+                     (eq (str_byte_at value (sub (str_len value) 1)) 34))
+                (substring value 1 (sub (str_len value) 1))
+                value)))
+
+    (defn qaf-observe-manifest (spec)
+        (do
+            (let response (http_get (qaf-spec-url spec) (empty) 120000))
+            (let status (_get response "status_code"))
+            (let headers (_get response "headers"))
+            (let location (kh-header-value-or headers "Location" ""))
+            (let size-text (kh-header-value-or headers "X-Linked-Size" ""))
+            (let linked-size (str_to_int size-text))
+            (let linked-sha (qaf-unquote-http-value
+                (kh-header-value-or headers "X-Linked-ETag" "")))
+            (let error (_get response "error"))
+            (if (and (eq status 302)
+                 (and (gt (str_len location) 0)
+                  (and (gt linked-size 0)
+                   (and (eq (str_len linked-sha) 64) (str_eq error "")))))
+                (qaf-manifest "ready" location linked-size linked-sha "")
+                (qaf-manifest "refused" "" linked-size linked-sha
+                    (str_concat "redirect-status="
+                        (str_concat (int_to_str status)
+                            (str_concat ";location-bytes="
+                                (str_concat (int_to_str (str_len location))
+                                    (str_concat ";sha-bytes="
+                                        (str_concat (int_to_str (str_len linked-sha))
+                                            (str_concat ";error-bytes="
+                                                (int_to_str (str_len error)))))))))))))
+
+    (defn qaf-state-prefix () "qaf1:")
+    (defn qaf-state-v2-prefix () "qaf2:")
+    (defn qaf-hex-digit (n)
+        (substring "0123456789abcdef" n (add n 1)))
+    (defn qaf-hex-byte (b)
+        (str_concat (qaf-hex-digit (div b 16)) (qaf-hex-digit (mod b 16))))
+    (defn qaf-string-hex-from (raw index acc)
+        (if (eq index (str_len raw)) acc
+            (qaf-string-hex-from raw (add index 1)
+                (str_concat acc (qaf-hex-byte (str_byte_at raw index))))))
+    (defn qaf-string-hex (raw) (qaf-string-hex-from raw 0 ""))
+    (defn qaf-hex-value (b)
+        (if (and (ge b 48) (le b 57)) (sub b 48)
+            (if (and (ge b 97) (le b 102)) (add 10 (sub b 97)) -1)))
+    (defn qaf-hex-string-from (hex index acc)
+        (if (eq index (str_len hex)) acc
+            (do
+                (let hi (qaf-hex-value (str_byte_at hex index)))
+                (let lo (qaf-hex-value (str_byte_at hex (add index 1))))
+                (if (or (lt hi 0) (lt lo 0)) ""
+                    (qaf-hex-string-from hex (add index 2)
+                        (str_concat acc (byte_to_str (add (mul hi 16) lo))))))))
+    (defn qaf-hex-string (hex)
+        (if (not (eq (mod (str_len hex) 2) 0)) ""
+            (qaf-hex-string-from hex 0 "")))
+    (defn qaf-state-text (offset hash-state)
+        (str_concat (qaf-state-v2-prefix)
+            (str_concat (int_to_str offset)
+                (str_concat ":" (qaf-string-hex hash-state)))))
+    (defn qaf-state-offset-of (text)
+        (if (and (ge (str_len text) (str_len (qaf-state-v2-prefix)))
+                 (str_eq (substring text 0 (str_len (qaf-state-v2-prefix)))
+                         (qaf-state-v2-prefix)))
+            (do
+                (let colon (str_find text ":" (str_len (qaf-state-v2-prefix))))
+                (if (lt colon 0) -1
+                    (str_to_int (substring text (str_len (qaf-state-v2-prefix)) colon))))
+            (if (lt (str_len text) (str_len (qaf-state-prefix))) -1
+                (if (not (str_eq
+                        (substring text 0 (str_len (qaf-state-prefix)))
+                        (qaf-state-prefix))) -1
+                    (str_to_int (substring text (str_len (qaf-state-prefix)) (str_len text)))))))
+    (defn qaf-state-hash-of (text)
+        (if (not (and (ge (str_len text) (str_len (qaf-state-v2-prefix)))
+                   (str_eq (substring text 0 (str_len (qaf-state-v2-prefix)))
+                           (qaf-state-v2-prefix)))) ""
+            (do
+                (let colon (str_find text ":" (str_len (qaf-state-v2-prefix))))
+                (if (lt colon 0) ""
+                    (do
+                        (let decoded (qaf-hex-string
+                            (substring text (add colon 1) (str_len text))))
+                        (if (eq (str_len decoded) 32) decoded ""))))))
+    (defn qaf-committed-offset (spec)
+        (if (eq (fs-exists? (qaf-spec-state-path spec)) 1)
+            (qaf-state-offset-of (fs-read-text (qaf-spec-state-path spec)))
+            (if (eq (fs-exists? (qaf-spec-target spec)) 0) 0
+                (if (eq (fs-stat-size (qaf-spec-target spec)) 0) 0 -1))))
+    (defn qaf-integrity-state (spec offset)
+        (do
+            (let recorded
+                (if (eq (fs-exists? (qaf-spec-state-path spec)) 1)
+                    (qaf-state-hash-of (fs-read-text (qaf-spec-state-path spec))) ""))
+            (if (eq (str_len recorded) 32) recorded
+                (saj-file-prefix-state (qaf-spec-target spec)
+                    (sub offset (mod offset 64))))))
+    (defn qaf-commit-offset (spec offset hash-state)
+        (do
+            (let next-path (str_concat (qaf-spec-state-path spec) ".next"))
+            (let text (qaf-state-text offset hash-state))
+            (let written (fs-write-text next-path text))
+            (if (not (eq written (str_len text))) -1
+                (if (eq (fs-rename next-path (qaf-spec-state-path spec)) 0)
+                    offset -1))))
+    (defn qaf-seal-prefix () "qaf-seal1:")
+    (defn qaf-seal-path-for (path) (str_concat path ".form-seal"))
+    (defn qaf-seal-text (total sha)
+        (str_concat (qaf-seal-prefix)
+            (str_concat (int_to_str total) (str_concat ":" sha))))
+    (defn qaf-commit-seal (path total sha)
+        (do
+            (let seal-path (qaf-seal-path-for path))
+            (let next-path (str_concat seal-path ".next"))
+            (let text (qaf-seal-text total sha))
+            (let written (fs-write-text next-path text))
+            (if (not (eq written (str_len text))) 0
+                (if (eq (fs-rename next-path seal-path) 0) 1 0))))
+    (defn qaf-seal-fields (path)
+        (if (not (eq (fs-exists? (qaf-seal-path-for path)) 1)) (list -1 "")
+            (do
+                (let text (fs-read-text (qaf-seal-path-for path)))
+                (if (not (and (ge (str_len text) (add (str_len (qaf-seal-prefix)) 66))
+                         (str_eq (substring text 0 (str_len (qaf-seal-prefix)))
+                                 (qaf-seal-prefix)))) (list -1 "")
+                    (do
+                        (let colon (str_find text ":" (str_len (qaf-seal-prefix))))
+                        (if (lt colon 0) (list -1 "")
+                            (list
+                                (str_to_int (substring text (str_len (qaf-seal-prefix)) colon))
+                                (substring text (add colon 1) (str_len text)))))))))
+    (defn qaf-seal-valid? (path)
+        (do
+            (let fields (qaf-seal-fields path))
+            (if (and (eq (file_size path) (nth fields 0))
+                     (eq (str_len (nth fields 1)) 64)) 1 0)))
+    (defn qaf-verify-sealed-file (path)
+        (if (not (eq (qaf-seal-valid? path) 1)) 0
+            (do
+                (let fields (qaf-seal-fields path))
+                (let digest (saj-file-digest path (nth fields 0)))
+                (if (str_eq (qaf-string-hex digest) (nth fields 1)) 1 0))))
+
+    ; step = (qaf-step status start end total http-status body-bytes write-bytes
+    ;         committed-offset linked-sha detail)
+    (defn qaf-step (status start end total http-status body-bytes write-bytes committed linked-sha detail)
+        (list "qaf-step" status start end total http-status body-bytes write-bytes committed linked-sha detail))
+    (defn qaf-step-status (s) (nth s 1))
+    (defn qaf-step-start (s) (nth s 2))
+    (defn qaf-step-end (s) (nth s 3))
+    (defn qaf-step-total (s) (nth s 4))
+    (defn qaf-step-http-status (s) (nth s 5))
+    (defn qaf-step-body-bytes (s) (nth s 6))
+    (defn qaf-step-write-bytes (s) (nth s 7))
+    (defn qaf-step-committed (s) (nth s 8))
+    (defn qaf-step-linked-sha (s) (nth s 9))
+    (defn qaf-step-detail (s) (nth s 10))
+    (defn qaf-min (a b) (if (lt a b) a b))
+
+    (defn qaf-range-value (start end)
+        (str_concat "bytes="
+            (str_concat (int_to_str start)
+                (str_concat "-" (int_to_str (sub end 1))))))
+    (defn qaf-content-range (start end total)
+        (str_concat "bytes "
+            (str_concat (int_to_str start)
+                (str_concat "-"
+                    (str_concat (int_to_str (sub end 1))
+                        (str_concat "/" (int_to_str total)))))))
+    (defn qaf-edge-bytes () 64)
+    (defn qaf-persisted-edges? (path body start count)
+        (do
+            (let edge (qaf-min (qaf-edge-bytes) count))
+            (let tail-start (sub count edge))
+            (and
+                (str_eq (read_file_slice path start edge) (substring body 0 edge))
+                (str_eq (read_file_slice path (add start tail-start) edge)
+                        (substring body tail-start count)))))
+
+    (defn qaf-step-with-manifest (spec manifest)
+        (do
+            (let total (qaf-manifest-size manifest))
+            (let linked-sha (qaf-manifest-sha manifest))
+            (let start (qaf-committed-offset spec))
+            (let hash-state
+                (if (and (ge start 0) (le start total))
+                    (qaf-integrity-state spec start) ""))
+            (if (not (qaf-manifest-ready? manifest))
+                (qaf-step "refused" start start total 0 0 0 start linked-sha
+                    (qaf-manifest-detail manifest))
+            (if (or (lt start 0) (gt start total))
+                (qaf-step "refused" start start total 0 0 0 start linked-sha
+                    "committed offset is absent, malformed, or past linked size")
+            (if (not (eq (str_len hash-state) 32))
+                (qaf-step "refused" start start total 0 0 0 start linked-sha
+                    "resumable SHA-256 state could not be witnessed")
+            (if (eq start total)
+                (do
+                    (let tail-size (mod total 64))
+                    (let tail-bytes (read_file_slice (qaf-spec-target spec)
+                        (sub total tail-size) tail-size))
+                    (let digest (saj-final-digest-from-state hash-state tail-bytes total))
+                    (let digest-hex (qaf-string-hex digest))
+                    (if (str_eq digest-hex linked-sha)
+                        (if (eq (qaf-commit-seal (qaf-spec-target spec) total linked-sha) 1)
+                            (qaf-step "complete" start start total 0 0 0 start linked-sha "")
+                            (qaf-step "refused" start start total 0 0 0 start linked-sha
+                                "verified bytes but atomic seal write failed"))
+                        (qaf-step "refused" start start total 0 0 0 start linked-sha
+                            (str_concat "sha256=" digest-hex))))
+                (do
+                    (let count (qaf-min (qaf-spec-chunk-bytes spec) (sub total start)))
+                    (let end (add start count))
+                    (let headers (list (kh-header "Range" (qaf-range-value start end))))
+                    (let response (http_get (qaf-manifest-url manifest) headers 300000))
+                    (let http-status (_get response "status_code"))
+                    (let response-headers (_get response "headers"))
+                    (let body (_get response "body"))
+                    (let body-bytes (str_len body))
+                    (let content-range (kh-header-value-or response-headers "Content-Range" ""))
+                    (let response-error (_get response "error"))
+                    (if (not (and (eq http-status 206)
+                              (and (eq body-bytes count)
+                               (and (str_eq content-range (qaf-content-range start end total))
+                                (and (str_eq response-error "")
+                                 (if (eq start 0)
+                                     (str_eq (substring body 0 4) "GGUF") true))))))
+                        (qaf-step "refused" start start total http-status body-bytes 0 start linked-sha
+                            (str_concat "range="
+                                (str_concat content-range
+                                    (str_concat ";error=" response-error))))
+                        (do
+                            (let handle (metal_buf_from_file
+                                (qaf-spec-target spec) start (sub 0 count)))
+                            (if (le handle 0)
+                                (qaf-step "refused" start start total http-status body-bytes 0 start linked-sha
+                                    "writable shared mapping refused")
+                                (do
+                                    (let write-bytes (metal_buf_write handle 0 body))
+                                    (let edges-ok
+                                        (if (eq write-bytes count)
+                                            (qaf-persisted-edges? (qaf-spec-target spec) body start count)
+                                            false))
+                                    (let next-hash
+                                        (if edges-ok
+                                            (saj-compress-handle-state handle hash-state (div count 64)) ""))
+                                    (let freed (metal_buf_free handle))
+                                    (if (not (and edges-ok
+                                             (and (eq (str_len next-hash) 32)
+                                              (and (eq freed 1)
+                                              (ge (fs-stat-size (qaf-spec-target spec)) end)))))
+                                        (qaf-step "refused" start start total http-status body-bytes write-bytes start linked-sha
+                                            "persisted edge, size, or handle-free witness failed")
+                                        (do
+                                            (let committed (qaf-commit-offset spec end next-hash))
+                                            (if (eq committed end)
+                                                (qaf-step "wrote" start end total http-status body-bytes write-bytes committed linked-sha "")
+                                                (qaf-step "refused" start start total http-status body-bytes write-bytes start linked-sha
+                                                    "atomic committed-offset update failed")))))))))))))))
+
+    (defn qaf-step-render (s)
+        (str_concat "status="
+            (str_concat (qaf-step-status s)
+                (str_concat ";start="
+                    (str_concat (int_to_str (qaf-step-start s))
+                        (str_concat ";end="
+                            (str_concat (int_to_str (qaf-step-end s))
+                                (str_concat ";total="
+                                    (str_concat (int_to_str (qaf-step-total s))
+                                        (str_concat ";body="
+                                            (str_concat (int_to_str (qaf-step-body-bytes s))
+                                                (str_concat ";detail=" (qaf-step-detail s)))))))))))))
+
+    (defn qaf-batch-go (spec manifest remaining last-step)
+        (if (le remaining 0) last-step
+            (do
+                (let step (qaf-step-with-manifest spec manifest))
+                (print_str (qaf-step-render step))
+                (if (str_eq (qaf-step-status step) "wrote")
+                    (qaf-batch-go spec manifest (sub remaining 1) step)
+                    step))))
+    (defn qaf-batch (spec chunks)
+        (do
+            (let manifest (qaf-observe-manifest spec))
+            (if (qaf-manifest-ready? manifest)
+                (qaf-batch-go spec manifest chunks (empty))
+                (qaf-step "refused" 0 0 (qaf-manifest-size manifest) 0 0 0 0
+                    (qaf-manifest-sha manifest) (qaf-manifest-detail manifest)))))
+    0)

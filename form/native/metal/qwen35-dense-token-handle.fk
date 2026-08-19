@@ -1,0 +1,432 @@
+; qwen35-dense-token-handle.fk — dense Qwen3.5/Qwen3.8 decode held by Form through Metal.
+;
+; The architecture, geometry, tensor names, tensor types, tokenizer width, context limit, special
+; token ids, and MTP count all arrive from the selected GGUF.  The only architecture decision here
+; is the qwen35 algorithm itself: three Gated DeltaNet blocks followed by one full-attention block,
+; dense SwiGLU after every attention half, and sigmoid on the full-attention output gate.
+; MSL is assembled by Form and passed to metal_pipeline, so every kernel is JIT-compiled for the
+; device that actually answered metal_status.  Model bytes remain mmap-backed no-copy buffers.
+;
+; preludes: native/metal/kat-token-handle.fk
+
+(do
+    ; Dense and MoE Qwen3.5 share the full-attention x * sigmoid(g) gate.  kth-msl owns that
+    ; proven kernel at pipeline 17; dense appends the wide Q8_0 matvec whose 256-thread group owns
+    ; two output rows.  The ordinary kth Q8 lane remains available to its existing callers.
+    (defn q38-msl ()
+        (str_concat (kth-msl) (q80-matvec-wide-body "form_q8_0_matvec_wide_f32")))
+
+    ; kth-pipes owns indices 0..28.  Dense Qwen adds the cooperative Q8_0 matvec and the Q8_0 row
+    ; dequant used by token_embd.weight.
+    (defn q38-pipes (msl)
+        (append (kth-pipes msl)
+            (list (metal_pipeline msl "form_q8_0_matvec_wide_f32")
+                  (metal_pipeline msl "form_q8_0_dequant_f32"))))
+
+    ; One exact 256-thread group per output-row pair for Q8_0.  All other declared types retain the
+    ; already-proven KAT dispatches.  Qwen3.8-27B-Q8_0 declares every large matrix type 8 and every
+    ; norm type 0.  md-bind16's mode=1 makes the op's threads argument a group count.
+    ; A dense forward runs in the carrier's concurrent encoder.  The last bit is an explicit
+    ; buffer-scope dependency before this dispatch: independent projections carry 0; their first
+    ; consumer carries 1.  Nothing about dependency order is left to encoder insertion order.
+    (defn q38-b16 (bufs consts mode barrier)
+        (md-bind16 bufs consts 256 0 mode barrier))
+    (defn q38-rms (ps xh gtv yh n epsBits barrier)
+        (metal_enqueue (nth ps 6)
+            (q38-b16 (list xh (kth-tv-h gtv) yh) (list n epsBits) 1 barrier) 1))
+    (defn q38-mv (ps tv xh yh barrier)
+        (if (eq (kth-tv-ty tv) 8)
+            (metal_enqueue (nth ps 29)
+                (md-bind16 (list (kth-tv-h tv) xh yh) (list (kth-tv-r tv) (kth-tv-c tv))
+                    256 0 1 barrier)
+                (div (add (kth-tv-r tv) 1) 2))
+            (metal_enqueue
+                (if (eq (kth-tv-ty tv) 12) (nth ps 1)
+                (if (eq (kth-tv-ty tv) 14) (nth ps 3)
+                (if (eq (kth-tv-ty tv) 8) (nth ps 4) (nth ps 27))))
+                (q38-b16 (list (kth-tv-h tv) xh yh)
+                    (list (kth-tv-r tv) (kth-tv-c tv)) 0 barrier)
+                (kth-tv-r tv))))
+
+    ; Dense layer table.  Common indices 0..4 are attn norm, post-attn norm, gate/up/down.  The tail
+    ; is 5..13 for linear attention or 5..10 for full attention; its shape is selected from the
+    ; file-declared interval, and every record offset/type/dimension comes from the tensor table.
+    (defn q38-suffixes ()
+        (list ".attn_norm.weight" ".post_attention_norm.weight"
+              ".ffn_gate.weight" ".ffn_up.weight" ".ffn_down.weight"
+              ".attn_qkv.weight" ".ssm_conv1d.weight" ".ssm_alpha.weight"
+              ".ssm_beta.weight" ".ssm_a" ".ssm_dt.bias" ".ssm_norm.weight"
+              ".attn_gate.weight" ".ssm_out.weight"
+              ".attn_q.weight" ".attn_k.weight" ".attn_v.weight"
+              ".attn_q_norm.weight" ".attn_k_norm.weight" ".attn_output.weight"))
+    (defn q38-tabs-go (src sfx acc)
+        (if (eq (len sfx) 0) (reverse acc)
+            (q38-tabs-go src (tail sfx) (cons (gti-offs-with src (head sfx)) acc))))
+    (defn q38-tabs (src) (q38-tabs-go src (q38-suffixes) (empty)))
+    (defn q38-tv-for (src base path tabs k l)
+        (kth-tv-at src base path (gti-off-for (nth tabs k) l)))
+    (defn q38-layer-common (src base path tabs l)
+        (list (q38-tv-for src base path tabs 0 l)
+              (q38-tv-for src base path tabs 1 l)
+              (q38-tv-for src base path tabs 2 l)
+              (q38-tv-for src base path tabs 3 l)
+              (q38-tv-for src base path tabs 4 l)))
+    (defn q38-layer (src base path tabs l interval)
+        (if (kth-full? l interval)
+            (append (q38-layer-common src base path tabs l)
+                (list (q38-tv-for src base path tabs 14 l)
+                      (q38-tv-for src base path tabs 15 l)
+                      (q38-tv-for src base path tabs 16 l)
+                      (q38-tv-for src base path tabs 17 l)
+                      (q38-tv-for src base path tabs 18 l)
+                      (q38-tv-for src base path tabs 19 l)))
+            (append (q38-layer-common src base path tabs l)
+                (list (q38-tv-for src base path tabs 5 l)
+                      (q38-tv-for src base path tabs 6 l)
+                      (q38-tv-for src base path tabs 7 l)
+                      (q38-tv-for src base path tabs 8 l)
+                      (q38-tv-for src base path tabs 9 l)
+                      (q38-tv-for src base path tabs 10 l)
+                      (q38-tv-for src base path tabs 11 l)
+                      (q38-tv-for src base path tabs 12 l)
+                      (q38-tv-for src base path tabs 13 l)))))
+    (defn q38-layers-go (src base path tabs l n interval acc)
+        (if (ge l n) acc
+            (q38-layers-go src base path tabs (add l 1) n interval
+                (append acc (list (q38-layer src base path tabs l interval))))))
+    (defn q38-layers (src base path n interval)
+        (q38-layers-go src base path (q38-tabs src) 0 n interval (empty)))
+
+    (defn q38-linear-attn (ps bs geo lay st)
+        (do
+            (q38-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 6) 1)
+            (q38-mv ps (nth lay 5) (nth bs 1) (nth bs 2) 1)
+            (q38-mv ps (nth lay 7) (nth bs 1) (nth bs 3) 0)
+            (q38-mv ps (nth lay 8) (nth bs 1) (nth bs 4) 0)
+            (q38-mv ps (nth lay 12) (nth bs 1) (nth bs 7) 0)
+            (metal_enqueue (nth ps 7)
+                (q38-b16 (list (nth st 0) (nth bs 2) (kth-tv-h (nth lay 6)) (nth bs 2))
+                         (list (nth geo 1) (nth geo 23)) 0 1)
+                (nth geo 1))
+            (metal_enqueue (nth ps 8)
+                (q38-b16 (list (nth bs 2)) (list (nth geo 1)) 0 1) (nth geo 1))
+            (metal_enqueue (nth ps 9)
+                (q38-b16 (list (nth bs 2))
+                    (list (mul 2 (nth geo 2)) (nth geo 4) (nth geo 6)) 0 1)
+                (mul 2 (nth geo 2)))
+            (metal_enqueue (nth ps 10)
+                (q38-b16 (list (nth bs 3) (nth bs 4) (kth-tv-h (nth lay 9)) (kth-tv-h (nth lay 10))
+                               (nth bs 5) (nth bs 6))
+                         (list (nth geo 3)) 0 0)
+                (nth geo 3))
+            (metal_enqueue (nth ps 11)
+                (q38-b16 (list (nth st 1) (nth bs 2) (nth bs 5) (nth bs 6) (nth bs 8))
+                         (list (nth geo 3) (nth geo 5) (nth geo 4) (nth geo 2) (nth geo 7)) 0 1)
+                (mul (nth geo 3) (nth geo 5)))
+            (metal_enqueue (nth ps 12)
+                (q38-b16 (list (nth bs 8) (kth-tv-h (nth lay 11)) (nth bs 7) (nth bs 9))
+                         (list (nth geo 3) (nth geo 5) (nth geo 6)) 0 1)
+                (nth geo 3))
+            (q38-mv ps (nth lay 13) (nth bs 9) (nth bs 10) 1)
+            (metal_enqueue (nth ps 19)
+                (q38-b16 (list (nth bs 0) (nth bs 10) (nth bs 0)) (list (nth geo 0)) 0 1)
+                (nth geo 0))
+            1))
+
+    (defn q38-full-attn (ps bs geo lay st pos)
+        (do
+            (q38-rms ps (nth bs 0) (nth lay 0) (nth bs 1) (nth geo 0) (nth geo 6) 1)
+            (q38-mv ps (nth lay 5) (nth bs 1) (nth bs 2) 1)
+            (q38-mv ps (nth lay 6) (nth bs 1) (nth bs 24) 0)
+            (q38-mv ps (nth lay 7) (nth bs 1) (nth bs 25) 0)
+            (metal_enqueue (nth ps 14)
+                (q38-b16 (list (nth bs 2) (nth bs 22))
+                         (list (mul (nth geo 12) (nth geo 14)) (nth geo 14) 0) 0 1)
+                (mul (nth geo 12) (nth geo 14)))
+            (metal_enqueue (nth ps 14)
+                (q38-b16 (list (nth bs 2) (nth bs 23))
+                         (list (mul (nth geo 12) (nth geo 14)) (nth geo 14) (nth geo 14)) 0 0)
+                (mul (nth geo 12) (nth geo 14)))
+            (metal_enqueue (nth ps 13)
+                (q38-b16 (list (nth bs 22) (kth-tv-h (nth lay 8)) (nth bs 22))
+                         (list (nth geo 12) (nth geo 14) (nth geo 6)) 0 1)
+                (nth geo 12))
+            (metal_enqueue (nth ps 13)
+                (q38-b16 (list (nth bs 24) (kth-tv-h (nth lay 9)) (nth bs 24))
+                         (list (nth geo 13) (nth geo 14) (nth geo 6)) 0 0)
+                (nth geo 13))
+            (metal_enqueue (nth ps 15)
+                (q38-b16 (list (nth bs 22))
+                         (list (nth geo 12) (nth geo 14) (nth geo 15) pos (nth geo 16)) 0 1)
+                (mul (nth geo 12) (div (nth geo 15) 2)))
+            (metal_enqueue (nth ps 15)
+                (q38-b16 (list (nth bs 24))
+                         (list (nth geo 13) (nth geo 14) (nth geo 15) pos (nth geo 16)) 0 0)
+                (mul (nth geo 13) (div (nth geo 15) 2)))
+            (metal_enqueue (nth ps 24)
+                (q38-b16 (list (nth bs 24) (nth st 2))
+                    (list (nth geo 20) (mul pos (nth geo 20))) 0 1)
+                (nth geo 20))
+            (metal_enqueue (nth ps 24)
+                (q38-b16 (list (nth bs 25) (nth st 3))
+                    (list (nth geo 20) (mul pos (nth geo 20))) 0 0)
+                (nth geo 20))
+            (metal_enqueue (nth ps 16)
+                (q38-b16 (list (nth bs 22) (nth st 2) (nth st 3) (nth bs 26) (nth bs 27))
+                         (list (add pos 1) (nth geo 12) (nth geo 13) (nth geo 14)
+                               (nth geo 17) (nth geo 18)) 0 1)
+                (nth geo 12))
+            (metal_enqueue (nth ps 17)
+                (q38-b16 (list (nth bs 26) (nth bs 23))
+                    (list (mul (nth geo 12) (nth geo 14))) 0 1)
+                (mul (nth geo 12) (nth geo 14)))
+            (q38-mv ps (nth lay 10) (nth bs 26) (nth bs 10) 1)
+            (metal_enqueue (nth ps 19)
+                (q38-b16 (list (nth bs 0) (nth bs 10) (nth bs 0)) (list (nth geo 0)) 0 1)
+                (nth geo 0))
+            1))
+
+    (defn q38-ffn (ps bs geo lay)
+        (do
+            (q38-rms ps (nth bs 0) (nth lay 1) (nth bs 1) (nth geo 0) (nth geo 6) 1)
+            (q38-mv ps (nth lay 2) (nth bs 1) (nth bs 14) 1)
+            (q38-mv ps (nth lay 3) (nth bs 1) (nth bs 15) 0)
+            (metal_enqueue (nth ps 18)
+                (q38-b16 (list (nth bs 14) (nth bs 15) (nth bs 16))
+                    (list (nth geo 10)) 0 1)
+                (nth geo 10))
+            (q38-mv ps (nth lay 4) (nth bs 16) (nth bs 17) 1)
+            (metal_enqueue (nth ps 19)
+                (q38-b16 (list (nth bs 0) (nth bs 17) (nth bs 0)) (list (nth geo 0)) 0 1)
+                (nth geo 0))
+            1))
+
+    (defn q38-blocks (ps bs geo lays sts pos l n interval)
+        (if (ge l n) 1
+            (do (if (kth-full? l interval)
+                    (q38-full-attn ps bs geo (nth lays l) (nth sts l) pos)
+                    (q38-linear-attn ps bs geo (nth lays l) (nth sts l)))
+                (q38-ffn ps bs geo (nth lays l))
+                (q38-blocks ps bs geo lays sts pos (add l 1) n interval))))
+
+    (defn q38-head (ps bs geo onormTv projTv)
+        (do
+            (q38-rms ps (nth bs 0) onormTv (nth bs 1) (nth geo 0) (nth geo 6) 1)
+            (q38-mv ps projTv (nth bs 1) (nth bs 28) 1)
+            (metal_enqueue (nth ps 25)
+                (q38-b16 (list (nth bs 28) (nth bs 29) (nth bs 30))
+                    (list (nth geo 19) 1024) 0 1)
+                1024)
+            (metal_enqueue (nth ps 26)
+                (md-bind16 (list (nth bs 29) (nth bs 30) (nth bs 31) (nth bs 32))
+                           (list 1024) 1024 0 1 1)
+                1)
+            0))
+
+    (defn q38-forward (ps bs geo lays sts embTv onormTv projTv id pos)
+        (do
+            (metal_batch_concurrent)
+            (metal_enqueue (nth ps 30)
+                (q38-b16 (list (kth-tv-h embTv) (nth bs 0))
+                         (list (mul id (nth geo 0)) (nth geo 0)) 0 0)
+                (nth geo 0))
+            (q38-blocks ps bs geo lays sts pos 0 (nth geo 21) (nth geo 22))
+            (q38-head ps bs geo onormTv projTv)
+            (kth-u32at (metal_buf_read (nth bs 31) 0 4) 0)))
+
+    (defn q38-stop? (id stops)
+        (if (eq (len stops) 0) 0
+            (if (eq id (head stops)) 1 (q38-stop? id (tail stops)))))
+    (defn q38-generate (ps bs geo lays sts embTv onormTv projTv id pos n stops acc)
+        (if (le n 0) acc
+            (do (let nid (q38-forward ps bs geo lays sts embTv onormTv projTv id pos))
+                (if (if (lt nid 0) 1 (q38-stop? nid stops)) acc
+                    (q38-generate ps bs geo lays sts embTv onormTv projTv
+                                  nid (add pos 1) (sub n 1) stops (append acc (list nid)))))))
+
+    (defn q38-prefill (ps bs geo lays sts embTv onormTv projTv ids pos)
+        (if (eq (len ids) 1)
+            (list (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos) (add pos 1))
+            (do (q38-forward ps bs geo lays sts embTv onormTv projTv (head ids) pos)
+                (q38-prefill ps bs geo lays sts embTv onormTv projTv (tail ids) (add pos 1)))))
+
+    (defn q38-key (arch suffix) (str_concat arch (str_concat "." suffix)))
+
+    ; A pipeline can compile against a sparse/truncated file, and mmap can accept many early tensor
+    ; extents before a late one crosses EOF.  Neither is artifact admission.  Walk every tensor-info
+    ; record, price its declared ggml type, and compute the last byte the file must contain before a
+    ; single model handle is created.  Unknown types refuse with -1 instead of becoming zero bytes.
+    (defn q38-required-size-go (src base off remaining high)
+        (if (eq remaining 0) high
+            (do (let bytes (kth-bytes src off))
+                (if (le bytes 0) (sub 0 1)
+                    (do (let end (add base (add (egg-ti-dataoff src off) bytes)))
+                        (q38-required-size-go src base (egg-ti-next src off) (sub remaining 1)
+                            (if (gt end high) end high)))))))
+    (defn q38-required-size (src base)
+        (q38-required-size-go src base (egg-tinfo-start src) (egg-tensor-count src) base))
+    (defn q38-artifact-required (path)
+        (do (let src (eqr-of-file path 0 40000000))
+            (q38-required-size src (egg-data-base src 32))))
+    (defn q38-artifact-complete? (path)
+        (do (let required (q38-artifact-required path))
+            (if (le required 0) 0 (if (ge (file_size path) required) 1 0))))
+
+    ; Same index contract as kth-geo, so the proven linear/full attention helpers remain reusable.
+    (defn q38-geo (src maxpos)
+        (do (let a (gmt-str src "general.architecture"))
+            (let d (gmt-u32 src (q38-key a "embedding_length")))
+            (let nkh (gmt-u32 src (q38-key a "ssm.group_count")))
+            (let nvh (gmt-u32 src (q38-key a "ssm.time_step_rank")))
+            (let dk (gmt-u32 src (q38-key a "ssm.state_size")))
+            (let dinner (gmt-u32 src (q38-key a "ssm.inner_size")))
+            (let dv (div dinner nvh))
+            (let taps (gmt-u32 src (q38-key a "ssm.conv_kernel")))
+            (let eps (gmt-f32 src (q38-key a "attention.layer_norm_rms_epsilon")))
+            (let nHead (gmt-u32 src (q38-key a "attention.head_count")))
+            (let nKV (gmt-u32 src (q38-key a "attention.head_count_kv")))
+            (let headDim (gmt-u32 src (q38-key a "attention.key_length")))
+            (let nrot (gmt-u32 src (q38-key a "rope.dimension_count")))
+            (let base (gmt-f32 src (q38-key a "rope.freq_base")))
+            (let nLayerAll (gmt-u32 src (q38-key a "block_count")))
+            (let nextn (gmt-u32 src (q38-key a "nextn_predict_layers")))
+            (let ff (gmt-u32 src (q38-key a "feed_forward_length")))
+            (list d
+                  (add (mul 2 (mul nkh dk)) dinner)
+                  nkh nvh dk dv
+                  (md-f32-bits eps)
+                  (md-f32-bits (div 1.0 (math_sqrt (add dk 0.0))))
+                  1 1 ff ff
+                  nHead nKV headDim nrot
+                  (md-f32-bits base)
+                  (md-f32-bits (div 1.0 (math_sqrt (add headDim 0.0))))
+                  maxpos (gmt-vocab-n src) (mul nKV headDim)
+                  (sub nLayerAll nextn)
+                  (gmt-u32 src (q38-key a "full_attention_interval"))
+                  taps)))
+
+    ; Returns the same setup shape as KAT plus the selected path at index 9.  No model path or model
+    ; geometry is compiled in.  The header window is a carrier window; egg-data-base determines the
+    ; real data boundary (10,996,704 bytes on the observed Qwen3.8 Q8_0 file).
+    (defn q38-open (path maxpos)
+        (if (eq (q38-artifact-complete? path) 0) (empty)
+        (do (let src (eqr-of-file path 0 40000000))
+            (let base (egg-data-base src 32))
+            (let geo (q38-geo src maxpos))
+            (let ps (q38-pipes (q38-msl)))
+            (let qout (mul 2 (mul (nth geo 12) (nth geo 14))))
+            (let convcap (if (gt qout (nth geo 1)) qout (nth geo 1)))
+            (let bs (kth-bufs (nth geo 0) convcap (mul (nth geo 3) (nth geo 5)) (nth geo 3)
+                              (nth geo 10) 1 (mul (nth geo 12) (nth geo 14))
+                              (nth geo 20) maxpos (nth geo 12) (nth geo 19)))
+            (let lays (q38-layers src base path (nth geo 21) (nth geo 22)))
+            (let embTv (kth-tv-at src base path (egg-find-tensor src "token_embd.weight")))
+            (let onormTv (kth-tv-at src base path (egg-find-tensor src "output_norm.weight")))
+            (let projTv (kth-tv-at src base path (egg-find-tensor src "output.weight")))
+            (list ps bs geo lays embTv onormTv projTv src base path))))
+
+    (defn q38-new-state (geo)
+        (kth-stream-state (nth geo 21) (nth geo 22) (nth geo 1) (nth geo 23)
+                          (nth geo 3) (nth geo 5) (nth geo 4) (nth geo 20) (nth geo 18)))
+
+    ; A REPL can select and run more than one model in one carrier lifetime.  Every
+    ; per-run allocation and no-copy tensor view therefore has an explicit Form
+    ; closer; only content-addressed pipeline handles remain cached by the carrier.
+    (defn q38-handle-ok? (h) (if (gt h 0) 1 0))
+    (defn q38-handles-ok? (hs)
+        (if (eq (len hs) 0) 1
+            (if (eq (q38-handle-ok? (head hs)) 1)
+                (q38-handles-ok? (tail hs)) 0)))
+    (defn q38-tvs-ok? (tvs)
+        (if (eq (len tvs) 0) 1
+            (if (eq (q38-handle-ok? (kth-tv-h (head tvs))) 1)
+                (q38-tvs-ok? (tail tvs)) 0)))
+    (defn q38-layers-ok? (lays)
+        (if (eq (len lays) 0) 1
+            (if (eq (q38-tvs-ok? (head lays)) 1)
+                (q38-layers-ok? (tail lays)) 0)))
+    (defn q38-state-row-ok? (row)
+        (and (if (eq (nth row 0) 0) 1 (q38-handle-ok? (nth row 0)))
+        (and (if (eq (nth row 1) 0) 1 (q38-handle-ok? (nth row 1)))
+        (and (if (eq (nth row 2) 0) 1 (q38-handle-ok? (nth row 2)))
+             (if (eq (nth row 3) 0) 1 (q38-handle-ok? (nth row 3)))))))
+    (defn q38-state-ok? (sts)
+        (if (eq (len sts) 0) 1
+            (if (eq (q38-state-row-ok? (head sts)) 1)
+                (q38-state-ok? (tail sts)) 0)))
+    (defn q38-context-ok? (ctx)
+        (if (lt (len ctx) 10) 0
+            (and (q38-handles-ok? (nth ctx 1))
+             (and (q38-layers-ok? (nth ctx 3))
+              (and (q38-handle-ok? (kth-tv-h (nth ctx 4)))
+               (and (q38-handle-ok? (kth-tv-h (nth ctx 5)))
+                    (q38-handle-ok? (kth-tv-h (nth ctx 6)))))))))
+
+    (defn q38-free-handle (h)
+        (if (le h 0) 0 (if (eq (metal_buf_free h) 1) 1 0)))
+    (defn q38-free-handles (hs)
+        (if (eq (len hs) 0) 0
+            (add (q38-free-handle (head hs)) (q38-free-handles (tail hs)))))
+    (defn q38-free-tvs (tvs)
+        (if (eq (len tvs) 0) 0
+            (add (q38-free-handle (kth-tv-h (head tvs)))
+                 (q38-free-tvs (tail tvs)))))
+    (defn q38-free-layers (lays)
+        (if (eq (len lays) 0) 0
+            (add (q38-free-tvs (head lays)) (q38-free-layers (tail lays)))))
+    (defn q38-free-state-row (row)
+        (sum (list (q38-free-handle (nth row 0))
+                   (q38-free-handle (nth row 1))
+                   (q38-free-handle (nth row 2))
+                   (q38-free-handle (nth row 3)))))
+    (defn q38-free-state (sts)
+        (if (eq (len sts) 0) 0
+            (add (q38-free-state-row (head sts)) (q38-free-state (tail sts)))))
+    (defn q38-layer-handle-count (lays)
+        (if (eq (len lays) 0) 0
+            (add (len (head lays)) (q38-layer-handle-count (tail lays)))))
+    ; Exact resident weight traffic of one token forward.  Large matrices are
+    ; streamed in full; token_embd contributes one selected row.  This is read
+    ; from the opened tensor views, not inferred from a model-size label.
+    (defn q38-tv-storage-bytes (tv)
+        (kth-tybytes (kth-tv-ty tv) (mul (kth-tv-r tv) (kth-tv-c tv))))
+    (defn q38-tv-row-bytes (tv)
+        (kth-tybytes (kth-tv-ty tv) (kth-tv-c tv)))
+    (defn q38-tvs-storage-bytes (tvs)
+        (if (eq (len tvs) 0) 0
+            (add (q38-tv-storage-bytes (head tvs))
+                 (q38-tvs-storage-bytes (tail tvs)))))
+    (defn q38-layers-storage-bytes (lays)
+        (if (eq (len lays) 0) 0
+            (add (q38-tvs-storage-bytes (head lays))
+                 (q38-layers-storage-bytes (tail lays)))))
+    (defn q38-forward-weight-bytes (ctx)
+        (sum (list
+            (q38-tv-row-bytes (nth ctx 4))
+            (q38-tv-storage-bytes (nth ctx 5))
+            (q38-tv-storage-bytes (nth ctx 6))
+            (q38-layers-storage-bytes (nth ctx 3)))))
+    (defn q38-state-row-handle-count (row)
+        (sum (list (if (gt (nth row 0) 0) 1 0)
+                   (if (gt (nth row 1) 0) 1 0)
+                   (if (gt (nth row 2) 0) 1 0)
+                   (if (gt (nth row 3) 0) 1 0))))
+    (defn q38-state-handle-count (sts)
+        (if (eq (len sts) 0) 0
+            (add (q38-state-row-handle-count (head sts))
+                 (q38-state-handle-count (tail sts)))))
+    (defn q38-close-expected (ctx sts)
+        (add (len (nth ctx 1))
+            (add (q38-layer-handle-count (nth ctx 3))
+                 (add 3 (q38-state-handle-count sts)))))
+    (defn q38-close (ctx sts)
+        (do
+            (metal_sync)
+            (sum (list
+                (q38-free-handles (nth ctx 1))
+                (q38-free-layers (nth ctx 3))
+                (q38-free-handle (kth-tv-h (nth ctx 4)))
+                (q38-free-handle (kth-tv-h (nth ctx 5)))
+                (q38-free-handle (kth-tv-h (nth ctx 6)))
+                (q38-free-state sts)))))
+    0)
