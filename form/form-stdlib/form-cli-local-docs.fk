@@ -1,0 +1,157 @@
+; form-cli-local-docs.fk — Form-native query over a local folder.
+;
+; Yes asked: enable as much as possible so anyone with a free ChatGPT
+; account can use Form-native queries and responses for documents and
+; folders on their own machine.
+;
+; Honest floor, 2026-08-19 (OpenAI help, updated this week):
+;   personal ChatGPT accounts cannot create or publish new GPTs.
+;   ChatGPT's cloud cannot see a local disk. The public Sema GPT
+;   Action hits hati.earth, which holds this body, not a visitor's
+;   files. So a free account cannot point ChatGPT at their folder.
+;
+; What this cell enables anyway:
+;   1. form-cli asks the folder. Form retrieves. Miss is a miss.
+;   2. a paste-pack: they drop the Form ground into free ChatGPT,
+;      which is told to speak only from those hits.
+; ChatGPT is the rented voice. The folder never leaves the machine
+; unless they choose to paste.
+;
+; preludes: form-stdlib/core.fk
+; Proven by: form-stdlib/tests/form-cli-local-docs-band.fk
+; witnessed: 2026-08-19 -> 1023
+
+(do
+    (defn fld-doc (path tokens snippet) (list path tokens snippet))
+    (defn fld-path    (d) (nth d 0))
+    (defn fld-tokens  (d) (nth d 1))
+    (defn fld-snippet (d) (nth d 2))
+
+    (defn fld-lower-byte (b) (if (and (ge b 65) (le b 90)) (add b 32) b))
+    (defn fld-alnum? (b)
+        (or (and (ge b 48) (le b 57)) (and (ge b 97) (le b 122))))
+    (defn fld-tokens-loop (s i n cur acc)
+        (if (ge i n)
+            (if (gt (str_len cur) 3) (cons cur acc) acc)
+            (let b (fld-lower-byte (str_byte_at s i))
+                (if (fld-alnum? b)
+                    (fld-tokens-loop s (add i 1) n
+                        (str_concat cur (byte_to_str b)) acc)
+                    (if (gt (str_len cur) 3)
+                        (fld-tokens-loop s (add i 1) n "" (cons cur acc))
+                        (fld-tokens-loop s (add i 1) n "" acc))))))
+    (defn fld-tokenize (s)
+        (fld-tokens-loop s 0 (str_len s) "" (empty)))
+
+    (defn fld-cap (s n)
+        (if (gt (str_len s) n) (substring s 0 n) s))
+
+    (defn fld-in? (t keys)
+        (if (eq (len keys) 0) 0
+            (if (str_eq (head keys) t) 1 (fld-in? t (tail keys)))))
+    (defn fld-score-tokens (qkeys dkeys)
+        (if (eq (len qkeys) 0) 0
+            (add (fld-in? (head qkeys) dkeys)
+                 (fld-score-tokens (tail qkeys) dkeys))))
+    (defn fld-score (qkeys d) (fld-score-tokens qkeys (fld-tokens d)))
+
+    (defn fld-best-loop (qkeys docs best bestscore)
+        (if (eq (len docs) 0) (list best bestscore)
+            (let s (fld-score qkeys (head docs))
+                (if (gt s bestscore)
+                    (fld-best-loop qkeys (tail docs) (head docs) s)
+                    (fld-best-loop qkeys (tail docs) best bestscore)))))
+    (defn fld-best (qkeys docs) (fld-best-loop qkeys docs (empty) 0))
+
+    (defn fld-others (qkeys docs best-path)
+        (if (eq (len docs) 0) (empty)
+            (let d (head docs)
+                (if (gt (fld-score qkeys d) 0)
+                    (if (str_eq (fld-path d) best-path)
+                        (fld-others qkeys (tail docs) best-path)
+                        (cons d (fld-others qkeys (tail docs) best-path)))
+                    (fld-others qkeys (tail docs) best-path)))))
+
+    (defn fld-take (n xs)
+        (if (if (eq n 0) 1 (eq (len xs) 0)) (empty)
+            (cons (head xs) (fld-take (sub n 1) (tail xs)))))
+
+    (defn fld-ask (question docs)
+        (let qkeys (fld-tokenize question)
+        (let pair (fld-best qkeys docs)
+        (let best (nth pair 0)
+        (let score (nth pair 1)
+            (if (eq score 0)
+                (list "miss" (empty) question)
+                (list "hit"
+                    (cons best (fld-take 2 (fld-others qkeys docs (fld-path best))))
+                    question)))))))
+
+    (defn fld-status (ans) (nth ans 0))
+    (defn fld-hits   (ans) (nth ans 1))
+    (defn fld-q      (ans) (nth ans 2))
+
+    (defn fld-hit-line (d)
+        (str_concat "- path: "
+        (str_concat (fld-path d)
+        (str_concat "\n  snippet: " (fld-snippet d)))))
+    (defn fld-hit-lines (hits)
+        (if (eq (len hits) 0) "(none)"
+            (if (eq (len (tail hits)) 0) (fld-hit-line (head hits))
+                (str_concat (fld-hit-line (head hits))
+                (str_concat "\n" (fld-hit-lines (tail hits)))))))
+
+    ; Paste this into free ChatGPT. It is the only free-ChatGPT joint
+    ; for a local folder: no new GPT, no Action, no disk reach.
+    (defn fld-pack (ans)
+        (str_concat "Form-native ground from a local folder.\n"
+        (str_concat "Speak ONLY from the hits. If grounded_status is miss, say the folder does not hold this yet. Do not invent. Cite paths.\n\n"
+        (str_concat "question: "
+        (str_concat (fld-q ans)
+        (str_concat "\ngrounded_status: "
+        (str_concat (fld-status ans)
+        (str_concat "\nhits:\n"
+        (str_concat (fld-hit-lines (fld-hits ans))
+        "\n\nhonest_seam: The voice is ChatGPT. The ground is Form, from files on this machine.\n")))))))))
+
+    (defn fld-dotdot? (s)
+        (if (ge (str_find s ".." 0) 0) 1 0))
+    (defn fld-ext-ok? (name)
+        (let n (str_len name)
+            (if (if (ge n 4) (str_eq (substring name (sub n 4) n) ".txt") 0) 1
+                (if (if (ge n 3) (str_eq (substring name (sub n 3) n) ".md") 0) 1
+                    (if (if (ge n 3) (str_eq (substring name (sub n 3) n) ".fk") 0) 1
+                        (if (if (ge n 5) (str_eq (substring name (sub n 5) n) ".form") 0) 1
+                            0))))))
+
+    (defn fld-demo-docs ()
+        (list
+            (fld-doc "garden-notes.txt"
+                (list "tomato" "soil" "water" "garden" "seed")
+                "Tomatoes want warm soil and a steady drink.")
+            (fld-doc "travel.txt"
+                (list "train" "ticket" "paris" "travel")
+                "The morning train to Paris leaves at seven.")
+            (fld-doc "recipes.txt"
+                (list "bread" "flour" "salt" "water" "recipe")
+                "Bread is flour, water, salt, and time.")))
+
+    (defn fld-garden ()
+        (fld-ask "how do I water tomatoes in the garden" (fld-demo-docs)))
+    (defn fld-miss-demo ()
+        (fld-ask "quantum chromodynamics" (fld-demo-docs)))
+    (defn fldk (cond bit) (if cond bit 0))
+    (defn fld-check ()
+        (add (add (add (add (add (add (add (add (add
+            (fldk (eq (len (fld-demo-docs)) 3) 1)
+            (fldk (str_eq (fld-status (fld-garden)) "hit") 2))
+            (fldk (str_eq (fld-path (head (fld-hits (fld-garden)))) "garden-notes.txt") 4))
+            (fldk (str_eq (fld-status (fld-miss-demo)) "miss") 8))
+            (fldk (eq (len (fld-hits (fld-miss-demo))) 0) 16))
+            (fldk (ge (str_find (fld-pack (fld-garden)) "garden-notes.txt" 0) 0) 32))
+            (fldk (ge (str_find (fld-pack (fld-garden)) "Speak ONLY from the hits" 0) 0) 64))
+            (fldk (ge (str_find (fld-pack (fld-garden)) "The voice is ChatGPT" 0) 0) 128))
+            (fldk (eq (fld-dotdot? "../secret") 1) 256))
+            (fldk (and (eq (fld-ext-ok? "a.txt") 1) (eq (fld-ext-ok? "a.bin") 0)) 512)))
+
+    0)

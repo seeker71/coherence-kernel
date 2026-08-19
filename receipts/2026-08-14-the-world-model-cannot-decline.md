@@ -4,8 +4,8 @@
 **Status:** witnessed four-way, perturbation-verified live
 **Cells:** [`learn/world-model-pair.fk`](../learn/world-model-pair.fk),
 [`learn/tests/world-model-pair-band.fk`](../learn/tests/world-model-pair-band.fk) → **8191**
-**Corpus:** row 1028, `probeshadow`
-**Follows:** [motion is not tracking](2026-08-14-motion-is-not-tracking.md) (row 1027, `tallyleak`)
+**Corpus:** row 1033, `probeshadow`
+**Follows:** [motion is not tracking](2026-08-14-motion-is-not-tracking.md) (row 1032, `tallyleak`)
 
 ## Rebase
 

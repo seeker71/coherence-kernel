@@ -4,7 +4,7 @@
 **Status:** witnessed four-way; the mechanism stands, it is not wired
 **Landed:** [`learn/act-token.fk`](../learn/act-token.fk),
 [`learn/tests/act-token-band.fk`](../learn/tests/act-token-band.fk) → **1023**
-**Corpus:** row 1033, `wordbound`
+**Corpus:** row 1038, `wordbound`
 
 ## The ask, in links
 
