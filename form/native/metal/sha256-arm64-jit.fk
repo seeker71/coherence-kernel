@@ -1,0 +1,192 @@
+; sha256-arm64-jit.fk — Form-emitted SHA-256 compression for Apple arm64.
+;
+; Form owns the instruction image, state, constants, padding, file admission,
+; and digest rendering.  The existing form_cpu_jit carrier only installs and
+; calls these bytes over unified handles.  Four SHA rounds are performed by
+; each SHA256H/SHA256H2 pair; SHA256SU0/SU1 extend the rolling schedule.
+;
+; ABI fixed by the carrier:
+;   x0 = void **buffers  [message, state, round constants]
+;   x1 = uint32_t *constants  [64-byte block count]
+;   x2 = thread count (unused)
+;
+; preludes: form-stdlib/form-asm.fk form-stdlib/sha256.fk form-stdlib/metal-door.fk
+
+(do
+    (defn saj-byte-string (bytes)
+        (if (eq (len bytes) 0) ""
+            (str_concat (byte_to_str (head bytes))
+                        (saj-byte-string (tail bytes)))))
+
+    (defn saj-u32-le (w)
+        (list (band w 255)
+              (band (shr_u32 w 8) 255)
+              (band (shr_u32 w 16) 255)
+              (band (shr_u32 w 24) 255)))
+    (defn saj-u32-list-le (words)
+        (if (eq (len words) 0) (list)
+            (append-list (saj-u32-le (head words))
+                         (saj-u32-list-le (tail words)))))
+    (defn saj-initial-state-bytes ()
+        (saj-byte-string (saj-u32-list-le (sha256-h-init))))
+    (defn saj-round-constant-bytes ()
+        (saj-byte-string (saj-u32-list-le (sha256-k))))
+
+    (defn saj-msg-reg (group) (add 4 (mod group 4)))
+    (defn saj-round-instructions (group)
+        (do
+            (let msg (saj-msg-reg group))
+            (let next (saj-msg-reg (add group 1)))
+            (let next2 (saj-msg-reg (add group 2)))
+            (let next3 (saj-msg-reg (add group 3)))
+            (let schedule
+                (if (lt group 4) (list)
+                    (list (fa-sha256su0 msg next)
+                          (fa-sha256su1 msg next2 next3))))
+            (append-list schedule
+                (list
+                    (fa-vorr 16 msg msg)          ; wk = message vector
+                    (fa-ldr-q 18 5 group)         ; k[group*4 .. group*4+3]
+                    (fa-vadd-s 16 16 18)          ; wk += k
+                    (fa-vorr 17 0 0)              ; save old abcd
+                    (fa-sha256h 0 1 16)
+                    (fa-sha256h2 1 17 16)))))
+    (defn saj-rounds (group)
+        (if (eq group 16) (list)
+            (append-list (saj-round-instructions group)
+                         (saj-rounds (add group 1)))))
+
+    (defn saj-loop-core ()
+        (append-list
+            (list
+                (fa-vorr 2 0 0)       ; saved abcd
+                (fa-vorr 3 1 1)       ; saved efgh
+                (fa-ldr-q 4 3 0)
+                (fa-ldr-q 5 3 1)
+                (fa-ldr-q 6 3 2)
+                (fa-ldr-q 7 3 3)
+                (fa-vrev32-b 4 4)
+                (fa-vrev32-b 5 5)
+                (fa-vrev32-b 6 6)
+                (fa-vrev32-b 7 7))
+            (append-list (saj-rounds 0)
+                (list
+                    (fa-vadd-s 0 0 2)
+                    (fa-vadd-s 1 1 3)
+                    (fa-add-x-imm 3 3 64)
+                    (fa-sub 6 6 1)
+                    (fa-cmp 6 0)))))
+
+    (defn saj-instruction-list ()
+        (do
+            (let loop-core (saj-loop-core))
+            (append-list
+                (list
+                    (fa-ldr 3 0 0)       ; message buffer
+                    (fa-ldr 4 0 1)       ; state buffer
+                    (fa-ldr 5 0 2)       ; K buffer
+                    (fa-ldr-w 6 1 0)     ; block count
+                    (fa-ldr-q 0 4 0)     ; abcd
+                    (fa-ldr-q 1 4 1))    ; efgh
+                (append-list loop-core
+                    (list
+                        (fa-bcond 1 (sub 0 (len loop-core))) ; b.ne block loop
+                        (fa-str-q 0 4 0)
+                        (fa-str-q 1 4 1)
+                        (fa-ret))))))
+    (defn saj-image () (fa-image (saj-instruction-list)))
+    (defn saj-code () (saj-byte-string (saj-image)))
+
+    ; Convert the two little-endian Q stores back to SHA's canonical byte order.
+    (defn saj-word-be-from-state (raw off)
+        (str_concat (byte_to_str (str_byte_at raw (add off 3)))
+        (str_concat (byte_to_str (str_byte_at raw (add off 2)))
+        (str_concat (byte_to_str (str_byte_at raw (add off 1)))
+                    (byte_to_str (str_byte_at raw off))))))
+    (defn saj-state-digest-from (raw off)
+        (if (eq off 32) ""
+            (str_concat (saj-word-be-from-state raw off)
+                        (saj-state-digest-from raw (add off 4)))))
+    (defn saj-state-digest (raw) (saj-state-digest-from raw 0))
+
+    (defn saj-zero-string (count)
+        (if (le count 0) ""
+            (str_concat (byte_to_str 0) (saj-zero-string (sub count 1)))))
+    (defn saj-be64-list (n remaining acc)
+        (if (eq remaining 0) acc
+            (saj-be64-list (div n 256) (sub remaining 1)
+                           (cons (mod n 256) acc))))
+    (defn saj-padding-block (tail-bytes total-bytes)
+        (do
+            (let used (str_len tail-bytes))
+            (str_concat tail-bytes
+                (str_concat (byte_to_str 128)
+                    (str_concat (saj-zero-string (sub 55 used))
+                        (saj-byte-string
+                            (saj-be64-list (mul total-bytes 8) 8 (list))))))))
+
+    ; Continue an unpadded SHA state across a handle whose byte count is an
+    ; exact number of 64-byte blocks.  This is the resumable downloader seam:
+    ; the returned 32 bytes are the actual eight hardware-updated state words.
+    (defn saj-compress-handle-state (message state-raw block-count)
+        (if (not (eq (str_len state-raw) 32)) ""
+            (if (eq block-count 0) state-raw
+                (do
+                    (let state (metal_buf_alloc 32))
+                    (let rounds (metal_buf_alloc 256))
+                    (if (or (le message 0) (or (le state 0) (le rounds 0))) ""
+                        (do
+                            (let sw (metal_buf_write state 0 state-raw))
+                            (let kw (metal_buf_write rounds 0 (saj-round-constant-bytes)))
+                            (let pipeline (metal_pipeline (saj-code) "form_cpu_jit"))
+                            (let ran
+                                (if (and (eq sw 32) (eq kw 256))
+                                    (metal_enqueue pipeline
+                                        (md-bind (list message state rounds) (list block-count)) 1)
+                                    0))
+                            (let raw (if (eq ran 1) (metal_buf_read state 0 32) ""))
+                            (let f0 (metal_buf_free state))
+                            (let f1 (metal_buf_free rounds))
+                            (if (and (eq (str_len raw) 32) (and (eq f0 1) (eq f1 1)))
+                                raw "")))))))
+
+    (defn saj-file-prefix-state (path byte-count)
+        (if (or (lt byte-count 0) (not (eq (mod byte-count 64) 0))) ""
+            (if (eq byte-count 0) (saj-initial-state-bytes)
+                (do
+                    (let message (metal_buf_from_file path 0 byte-count))
+                    (if (le message 0) ""
+                        (do
+                            (let raw (saj-compress-handle-state message
+                                (saj-initial-state-bytes) (div byte-count 64)))
+                            (let freed (metal_buf_free message))
+                            (if (eq freed 1) raw "")))))))
+
+    (defn saj-final-digest-from-state (state-raw tail-bytes total-bytes)
+        (if (or (not (eq (str_len state-raw) 32))
+             (or (not (eq (str_len tail-bytes) (mod total-bytes 64)))
+                 (ge (str_len tail-bytes) 56))) ""
+            (do
+                (let padding (saj-padding-block tail-bytes total-bytes))
+                (let pad (metal_buf_alloc 64))
+                (if (le pad 0) ""
+                    (do
+                        (let pw (metal_buf_write pad 0 padding))
+                        (let raw
+                            (if (eq pw 64)
+                                (saj-compress-handle-state pad state-raw 1) ""))
+                        (let freed (metal_buf_free pad))
+                        (if (and (eq freed 1) (eq (str_len raw) 32))
+                            (saj-state-digest raw) ""))))))
+
+    ; Returns canonical 32 digest bytes, or an empty string on any admission
+    ; failure.  The caller compares it with artifact manifest data.
+    (defn saj-file-digest (path total-bytes)
+        (if (or (le total-bytes 0) (ge (mod total-bytes 64) 56)) ""
+            (do
+                (let tail-size (mod total-bytes 64))
+                (let prefix-size (sub total-bytes tail-size))
+                (let state-raw (saj-file-prefix-state path prefix-size))
+                (let tail (read_file_slice path prefix-size tail-size))
+                (saj-final-digest-from-state state-raw tail total-bytes))))
+    0)
