@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-14
 **Status:** witnessed; five bands repaired to their registered verdicts, one seam measured and left standing
-**Corpus:** rows 1022 `carrygap`, 1023 `primshadow`
+**Corpus:** row 1034 `carrygap`, 1023 `primshadow`
 
 ## What was handed back, twice
 
@@ -75,8 +75,8 @@ nothing from either. Repairing that at the source — one line in `json.fk`, one
 is why this is five band repairs and not 201 prelude edits.
 
 > **frontier questions**
-> what names an unused import that carries the absences of what it names? → **carrygap** (row 1022)
-> what names a definition that never runs because the kernel owns its name? → **primshadow** (row 1023)
+> what names an unused import that carries the absences of what it names? → **carrygap** (row 1034)
+> what names a definition that never runs because the kernel owns its name? → **primshadow** (row 1035)
 
 Corpus re-probed: 402 rows / 402 admissible / max-mid 1009 / 0 duplicate ids / field code
 402040221009. Band **32767**, exit 0.

@@ -73,7 +73,14 @@ sed "s/FORM_CLI_SOURCE_SHA256_PLACEHOLDER/$want_source_sha256/g" \
 
 source_cache="form-stdlib/.cache/source-compiled"
 mkdir -p "$source_cache"
+# The go lane's explicit closure (walkers do not read `; preludes:` lines).
+# engine-constants / compiler-objects / form-ontology-bp joined 2026-08-19 —
+# their Form births crashed this hand-held mirror at fol-core-row, the same
+# drift the other three copies of this list had already suffered.
 SOURCE_COMPILE_CHAIN=(
+    form-stdlib/engine-constants.fk
+    form-stdlib/compiler-objects.fk
+    form-stdlib/form-ontology-bp.fk
     form-stdlib/form-ontology-loader.fk
     form-stdlib/line-grammar.fk
     form-stdlib/bmf-core.fk
@@ -95,6 +102,21 @@ compile_bml() {
 
     key="$(fourth_hash16 "$src" "${SOURCE_COMPILE_CHAIN[@]}" "$GO_KERNEL")"
     cached="$source_cache/$key.fk"
+    # fkwu first: the thin driver's closure is the body's `; preludes:` graph,
+    # so no list here can drift for this lane. go stays as the fallback below.
+    if [[ ! -s "$cached" && -n "${FKWU:-}" && -x "${FKWU:-}" ]]; then
+        out="$(mktemp "$source_cache/.tmp.XXXXXX")"
+        driver="$work_dir/compile-fkwu.fk"
+        {
+            printf '; generated lens driver -- the closure is the preludes graph.\n'
+            printf '; preludes: form-stdlib/source-compiler-text-lens.fk\n'
+            printf '(do (form-source-compile-file "%s" "%s") 0)\n' "$src" "$out"
+        } > "$driver"
+        if "$FKWU" "$driver" >/dev/null 2>&1 && [[ -s "$out" ]]; then
+            mv -f "$out" "$cached"
+        fi
+        rm -f "$out" "$driver" "${driver%.fk}.fkb" "${driver%.fk}.sym" 2>/dev/null
+    fi
     if [[ ! -s "$cached" ]]; then
         out="$(mktemp "$source_cache/.tmp.XXXXXX")"
         driver="$work_dir/compile.fk"

@@ -1,0 +1,58 @@
+; llama-token-slot.fk — the SAME decode loop, with the matvecs carried by the SLOT twins, and the
+; epsilon that buys the rate STATED rather than waved at.
+;
+; THE LAW THIS RUNG ANSWERS. llama-token-handle.fk keeps its matvecs serial and says why: "a rate
+; bought with an epsilon belongs to a rung with its own stated bound." This cell is that rung. It
+; changes ONE function: lth-mv. Everything else — the pool, the layer walk, the KV cache, the
+; barriers, the bit-exact cooperative twins, the two-stage argmax, the four-byte drain — is the
+; attestant cell's, reached by prelude, never copied. The rebind is the program's own law,
+; witnessed before it was leaned on (2026-08-18, shadow probe): a later defn of a name rebinds
+; every call to it in the program, including calls written earlier. This cell says that loudly so
+; no reader is surprised: PRELUDING THIS CELL CHANGES WHAT lth-prefill AND lth-generate DISPATCH.
+; A program that wants the serial attestants preludes llama-token-handle.fk alone.
+;
+; THE BOUND, the family's own (qk-matvec-split.fk's epsilon block; coefficient carried by
+; qk-matvec-slot.fk). For one row of cols products, both kernels sum the SAME exact real terms in
+; different tree shapes, so
+;
+;     |slot_r − serial_r|  <=  (qsl-bound-coeff cols) * u * B_r,   u = 2^-24,  B_r = SUM_j |w_rj*x_j|
+;
+; Tensor-scale witnesses: tests/qk-matvec-slot-band.fk (the map, position by position against the
+; dequant cells) and tests/qk-matvec-split-band.fk (the bound, every row of a real tensor). The
+; stream-level consequence — seventeen greedy forwards, not one argmax flipped — is what
+; tests/llama-token-slot-band.fk gates, next to this bound re-checked on real full-width rows of
+; the LM head at the decisive final position.
+;
+; KERNEL CHOICE, from the stones that measured before building: Q6_K rides
+; form_q6k_matvec_slot_f32 (1.05–1.06x of ggml, stone 10 — the map is ggml's, the arithmetic the
+; body's, character for character); Q4_K rides form_q4k_matvec_slot4_f32 (1.57–1.67x of ggml,
+; stone 11 — the four-wide map; the stone still owed at Q4_K is named there, not hidden here).
+; 32 lanes per row, so the thread grid is rows*32; every simdgroup is exactly one row, and the
+; carrier's 256-wide groups hold eight rows each.
+;
+; preludes: native/metal/llama-token-handle.fk
+
+(do
+    ; the translation unit: the attestant's, plus the slot appendix (helpers already inside),
+    ; plus the composed Q4_K stone (2026-08-18, raced at 1.21x of ggml in metal_isa_diff.sh;
+    ; its hardware-half law is gated by tests/q4k-halfdecode-band.fk as an equality)
+    (defn lts-msl () (str_concat (lth-msl)
+                     (str_concat (qsl-msl-appendix)
+                                 (qsl-q4k-slot4c-msl "form_q4k_matvec_slot4c_f32"))))
+
+    ; pipes 0..14 are the attestant's own, by the same list; 15 = Q6_K slot, 16 = Q4_K slot4,
+    ; 17 = Q4_K slot4c (the composed stone, the one the Q4_K arm dispatches)
+    (defn lts-pipes (msl)
+        (append (lth-pipes msl)
+                (list (metal_pipeline msl "form_q6k_matvec_slot_f32")
+                      (metal_pipeline msl "form_q4k_matvec_slot4_f32")
+                      (metal_pipeline msl "form_q4k_matvec_slot4c_f32"))))
+
+    ; THE ONE CHANGED FUNCTION. Same buffers, same binding tail, same barrier word — the pipeline
+    ; index moves to the twins and the grid grows 32-wide.
+    (defn lth-mv (ps tv xh yh bb)
+        (metal_enqueue (if (eq (lth-tv-ty tv) 14) (nth ps 15) (nth ps 17))
+                       (md-bind16 (list (lth-tv-h tv) xh yh) (list (lth-tv-r tv) (lth-tv-c tv))
+                                  256 0 0 bb)
+                       (mul (lth-tv-r tv) 32)))
+    0)

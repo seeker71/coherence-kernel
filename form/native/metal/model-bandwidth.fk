@@ -1,0 +1,64 @@
+; model-bandwidth.fk — measure this Metal device against bytes from the selected model.
+;
+; A one-GiB no-copy view begins at the GGUF's own egg-data-base, so the source is the actual model
+; weight mapping, not a synthetic allocation.  Form emits and JITs a uint4 streaming copy kernel,
+; warms it once, then enqueues eight full passes into one command buffer.  metal_status reports the
+; device's own GPUEndTime-GPUStartTime accumulation; callers compute read+write bytes / device time.
+; This is a memory-stream ceiling, not a claim that decode can attain it: decode's effective weight
+; bandwidth is measured separately from actual tokens and compared with this ceiling.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/equireach.fk form-stdlib/equireach-gguf.fk form-stdlib/gguf-meta.fk form-stdlib/metal-door.fk
+
+(do
+    (defn mbw-msl ()
+        "#include <metal_stdlib>\nusing namespace metal; kernel void form_model_stream_copy(device const uint4* s [[buffer(0)]], device uint4* d [[buffer(1)]], constant uint& n [[buffer(2)]], uint i [[thread_position_in_grid]]) { if (i < n) d[i] = s[i]; }")
+    (defn mbw-bytes () 1073741824)
+    (defn mbw-passes () 8)
+    (defn mbw-field (name value)
+        (str_concat name (str_concat "=" (str_concat (int_to_str value) "\n"))))
+    (defn mbw-status-int (status name)
+        (do
+            (let key (str_concat name "="))
+            (let at (str_find status key 0))
+            (if (lt at 0) -1
+                (do
+                    (let start (add at (str_len key)))
+                    (let stop (str_find status "\n" start))
+                    (if (lt stop 0) -1
+                        (str_to_int (substring status start stop)))))))
+    (defn mbw-enqueue (p s d words rem)
+        (if (le rem 0) 0
+            (do (metal_enqueue p (md-bind16 (list s d) (list words) 256 0 0 0) words)
+                (mbw-enqueue p s d words (sub rem 1)))))
+    (defn mbw-run-sized (path limit passes)
+        (do (let src (eqr-of-file path 0 40000000))
+            (let base (egg-data-base src 32))
+            (let avail (sub (file_size path) base))
+            (let bytes (if (lt avail limit) avail limit))
+            (let aligned (mul (div bytes 16) 16))
+            (let words (div aligned 16))
+            (let s (metal_buf_from_file path base aligned))
+            (let d (metal_buf_alloc aligned))
+            (let p (metal_pipeline (mbw-msl) "form_model_stream_copy"))
+            ; warm pages, pipeline, and clocks before the measured status delta
+            (metal_enqueue p (md-bind16 (list s d) (list words) 256 0 0 0) words)
+            (metal_sync)
+            (let before (metal_status))
+            (mbw-enqueue p s d words passes)
+            (metal_sync)
+            (let traffic (mul 2 (mul aligned passes)))
+            (let after (metal_status))
+            (let before-us (mbw-status-int before "gpu_busy_us_total"))
+            (let after-us (mbw-status-int after "gpu_busy_us_total"))
+            (let busy-us (sub after-us before-us))
+            ; decimal GB/s x10 = bytes * 10 / (microseconds * 1000).
+            (let gbps-x10 (if (gt busy-us 0) (div (mul traffic 10) (mul busy-us 1000)) 0))
+            (str_concat (mbw-field "model_bytes_per_pass" aligned)
+            (str_concat (mbw-field "passes" passes)
+            (str_concat (mbw-field "traffic_bytes_read_plus_write" traffic)
+            (str_concat (mbw-field "gpu_busy_us" busy-us)
+            (str_concat (mbw-field "throughput_gbps_x10" gbps-x10)
+            (str_concat "status_before:\n" (str_concat before
+            (str_concat "status_after:\n" after))))))))))
+    (defn mbw-run (path) (mbw-run-sized path (mbw-bytes) (mbw-passes)))
+    0)

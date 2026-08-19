@@ -5,7 +5,7 @@
 [`tests/engine-constants-band.fk`](../form/form-stdlib/tests/engine-constants-band.fk) → **15 four-way**,
 [`form-bml-cursor-parse-band`](../form/form-stdlib/tests/form-bml-cursor-parse-band.fk) → **123 on fkwu from source** (was: no verdict),
 the compiler.fk scope split, the Go kernel's lazy form-frames
-**Corpus:** row 1026, `twotongue` — count 420 / max-mid 1026 / field-code 420042021026, band 32767
+**Corpus:** row 1038, `twotongue` — count 420 / max-mid 1026 / field-code 420042021026, band 32767
 **Direction held:** focus fkwu; align the siblings through Form-native code only
 
 ## The ask

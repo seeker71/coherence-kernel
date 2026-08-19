@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-18
 **Status:** witnessed on fkwu + go byte-identical; walkers three-way at the registered word; fourth-arm fold open, named with its signature
-**Corpus:** row 1027, `eldertwin` — 421 rows / 421 admissible / max-mid 1027 / 0 duplicates / field-code 421042121027, band 32767
+**Corpus:** row 1039, `eldertwin` — 421 rows / 421 admissible / max-mid 1027 / 0 duplicates / field-code 421042121027, band 32767
 **Follows:** commit 5dbe503a, "The BML family healed to fkwu's own reading, layer by layer, in
 Form" — whose close named "the keystone left standing." Urs asked: *standing for who?* — and then:
 *700+ bash for fourth-arm.* This receipt is what those two questions opened.

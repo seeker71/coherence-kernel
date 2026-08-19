@@ -1,0 +1,164 @@
+; dsv4-decode-hook-door.fk — the RESIDENT door: a Form recipe answers between
+; exit-head argmax and the next embedding, live, over one stdin/stdout crossing.
+;
+; This is the stone named on 2026-08-13 ("the current stack does not yet call an
+; arbitrary Form function between exit-head argmax and the next embedding") walked:
+; the decode carrier spawns ONE fkwu process serving this cell and asks it once per
+; generation step. The toy table in dsv4-decode-token-hook.fk proved the law's shape;
+; this door carries the law itself — dtrs-select over real clocks — to the live loop.
+;
+; THE PROTOCOL, keyed so a carrier parses by NAME and never by position.
+; One request line per token, fields in this order, situation LAST because it is
+; free text and takes the rest of the line:
+;
+;   offer step=<n> default=<token> deadline_ms=<abs unix ms> context=<id,id,...> situation=<text>
+;
+; The reply is keyed lines ending in end=1, so a carrier reads to the marker or to
+; its own deadline, whichever comes first:
+;
+;   channel=ds4.decode-hook.form-native
+;   step=<n> ... chosen=<token> reason=<...> state=<...> ... end=1
+;
+; THE LAW IS THE SWAP CELL'S, not this door's: dtrs-select decides, with a window
+; built from the carrier's absolute deadline and this door's own clock reading at
+; request receipt. nothing / decline / lateness / over-bandwidth / a tie keeps the
+; default token; only an admissible, strictly-more-vital offer replaces it. The
+; recipe call is measured with now_unix_ms on both sides (the dtrs-run-live shape,
+; widened to carry situation and step). A deadline already passed at receipt is
+; timeout-nothing without running the recipe at all — axiom 1, not an error.
+;
+; THE RECIPE CROSSES AS THREE FUNCTION VALUES — (dhd-serve idf preparef offerf) —
+; composed by a two-line serve cell whose preludes name the recipe cell. This door
+; alone names no recipe, so it preflights clean and any Form recipe may stand in
+; the slot: that is the "arbitrary Form function" of the stone, made a value.
+;     idf      ()                                                    -> recipe id string
+;     preparef ()                                                    -> state, once at spawn
+;     offerf   (state situation context default-token step deadline) -> dtrs-offer
+;
+; THE BOUNDARY FLAGS are structural here, not fixture data: offered=1 (only a
+; probe-composed recipe runs), trusted=1 (the probe is written from the ask
+; contract's TOKENRECIPE decision), observed=1 (every choice is emitted as keyed
+; lines), reversible=1 (the default token is always retained as the fallback).
+;
+; THE DEFAULT'S VITALITY is 0 with its witness named: vitality is unconsulted
+; unless an admissible offer crosses, and on a DECLARED situation the base head's
+; control-task correctness is measured 0 (gate 93: argmax 201, never a control
+; token, unaided). A recipe claiming a task other than the control verdict needs
+; its own default measurement — that is the next attention row, said here rather
+; than discovered by surprise.
+;
+; preludes: form-stdlib/core.fk form-stdlib/dsv4-token-recipe-swap.fk
+;
+; Proven by: form-stdlib/tests/dsv4-decode-hook-door-band.fk (law + parse, fixture-free)
+;            form-stdlib/tests/dsv4-decode-hook-door-live.fk (the resident crossing, real clocks)
+
+(do
+    ; ---- keyed request parsing: value between "key=" and the next key ----
+    (defn dhd-field-at (line key) (str_find line key 0))
+    (defn dhd-field (line key nextkey)
+        (do (let at (dhd-field-at line key))
+            (if (lt at 0) ""
+                (do (let from (add at (str_len key)))
+                    (let stop (if (eq (str_len nextkey) 0)
+                                  (str_len line)
+                                  (str_find line nextkey from)))
+                    (if (lt stop 0) ""
+                        (substring line from stop))))))
+    (defn dhd-field-int (line key nextkey)
+        (do (let v (dhd-field line key nextkey))
+            (if (eq (str_len v) 0) -1 (str_to_int v))))
+
+    (defn dhd-req-step     (line) (dhd-field-int line "step=" " default="))
+    (defn dhd-req-default  (line) (dhd-field-int line "default=" " deadline_ms="))
+    (defn dhd-req-deadline (line) (dhd-field-int line "deadline_ms=" " context="))
+    (defn dhd-req-context  (line) (dhd-field line "context=" " situation="))
+    (defn dhd-req-situation (line) (dhd-field line "situation=" ""))
+    (defn dhd-req-offer? (line)
+        (if (ge (str_len line) 6) (str_eq (substring line 0 6) "offer ") false))
+    (defn dhd-req-valid? (line)
+        (if (dhd-req-offer? line)
+            (and (ge (dhd-req-step line) 0)
+            (and (ge (dhd-req-default line) 0)
+                 (gt (dhd-req-deadline line) 0)))
+            false))
+
+    ; ---- the default candidate: vitality 0, witness named in the header ----
+    (defn dhd-default-witness ()
+        "vitality unconsulted unless an admissible offer crosses; on a declared situation gate-93 measures the control-task default at 0")
+    (defn dhd-window (started deadline)
+        (dtrs-window started (sub deadline started)
+            (dtrs-dsv4-bandwidth-bytes-per-ms) (dtrs-dsv4-default-bytes)))
+    (defn dhd-default-cand (w token)
+        (dtrs-default-candidate w (dtrs-initial-baseline 0) token 0 (dhd-default-witness)))
+
+    ; ---- one measured recipe run through the axiom-4 boundary ----
+    (defn dhd-run-recipe (idf offerf state situation context default-token step deadline)
+        (do (let started (now_unix_ms))
+            (let offer (offerf state situation context default-token step deadline))
+            (let finished (now_unix_ms))
+            (dtrs-candidate (idf) offer started finished 1 1 1 1)))
+
+    ; ---- the choice for one request line ----
+    (defn dhd-choose (idf offerf state line started)
+        (do (let deadline (dhd-req-deadline line))
+            (let w (dhd-window started deadline))
+            (let default (dhd-default-cand w (dhd-req-default line)))
+            (if (ge started deadline)
+                (dtrs-choice default "timeout-nothing" "deadline-passed-at-receipt")
+                (dtrs-select w default
+                    (dhd-run-recipe idf offerf state
+                        (dhd-req-situation line) (dhd-req-context line)
+                        (dhd-req-default line) (dhd-req-step line) deadline)))))
+
+    ; ---- keyed reply emission, one meaning per line, end marker last ----
+    (defn dhd-line (k v) (print_str (str_concat k v)))
+    (defn dhd-line-int (k n) (dhd-line k (int_to_str n)))
+    (defn dhd-emit-reply (step default choice started)
+        (do (dhd-line "channel=" "ds4.decode-hook.form-native")
+            (dhd-line-int "step=" step)
+            (dhd-line-int "default=" default)
+            (dhd-line-int "chosen=" (dtrs-choice-token choice))
+            (dhd-line "reason=" (dtrs-choice-reason choice))
+            (dhd-line "state=" (dtrs-choice-alternative-state choice))
+            (dhd-line "recipe=" (dtrs-choice-recipe choice))
+            (dhd-line-int "vitality_chosen="
+                (dtrs-candidate-vitality (dtrs-choice-candidate choice)))
+            (dhd-line-int "started_ms=" started)
+            (dhd-line-int "finished_ms=" (now_unix_ms))
+            (dhd-line "end=" "1")
+            0))
+    (defn dhd-emit-invalid (line started)
+        (do (dhd-line "channel=" "ds4.decode-hook.form-native")
+            (dhd-line-int "step=" (dhd-req-step line))
+            (dhd-line-int "default=" (dhd-req-default line))
+            (dhd-line-int "chosen=" (dhd-req-default line))
+            (dhd-line "reason=" "invalid-request")
+            (dhd-line "state=" "invalid-request")
+            (dhd-line "recipe=" "none")
+            (dhd-line-int "vitality_chosen=" 0)
+            (dhd-line-int "started_ms=" started)
+            (dhd-line-int "finished_ms=" (now_unix_ms))
+            (dhd-line "end=" "1")
+            0))
+
+    (defn dhd-handle (idf offerf state line)
+        (do (let started (now_unix_ms))
+            (if (dhd-req-valid? line)
+                (dhd-emit-reply (dhd-req-step line) (dhd-req-default line)
+                    (dhd-choose idf offerf state line started) started)
+                (dhd-emit-invalid line started))))
+
+    ; ---- the resident loop: serve every request line until stdin closes ----
+    (defn dhd-serve-loop (idf offerf state)
+        (do (let line (read_line))
+            (if (eq line -1) 0
+                (do (dhd-handle idf offerf state line)
+                    (dhd-serve-loop idf offerf state)))))
+    (defn dhd-serve (idf preparef offerf)
+        (do (let t0 (now_unix_ms))
+            (let state (preparef))
+            (dhd-line "ready=" "1")
+            (dhd-line "recipe=" (idf))
+            (dhd-line-int "prepare_ms=" (sub (now_unix_ms) t0))
+            (dhd-serve-loop idf offerf state)))
+    0)

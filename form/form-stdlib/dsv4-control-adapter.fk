@@ -32,7 +32,7 @@
     ; The classifier sees only the observed situation.
     (defn dca-input (row)
         (do (let s (nth row 3))
-            (let begin (if (eq (nth row 0) "train") 9 24))
+            (let begin (if (str_eq (nth row 0) "train") 9 24))
             (let stop (str_find s "; decide whether" begin))
             (let body (substring s begin stop))
             (let case-at (str_find body " for case " 0))
@@ -49,7 +49,7 @@
         (if (eq (len rows) 0) acc
             (do (let row (head rows))
                 (dca-fit-class (tail rows) class
-                    (if (if (eq (nth row 0) "train") (eq (nth row 1) class) 0)
+                    (if (if (str_eq (nth row 0) "train") (str_eq (nth row 1) class) 0)
                         (dca-vadd acc (dca-features (dca-input row)))
                         acc)))))
     (defn dca-fit (rows names)
@@ -72,35 +72,40 @@
         (dca-best models (dca-features s) 0 0 -1 1))
     (defn dca-index (names name i)
         (if (eq (len names) 0) -1
-            (if (eq (head names) name) i (dca-index (tail names) name (add i 1)))))
+            (if (str_eq (head names) name) i (dca-index (tail names) name (add i 1)))))
 
     ; Row-major confusion matrix: actual class * 5 + predicted class.
-    (defn dca-eval (rows names models matrix)
+    ; Split-parameterized (2026-08-18) so the fresh leakage-free rows are
+    ; judged by the same fold; dca-eval keeps its original meaning composed.
+    (defn dca-eval-on (rows names models matrix split)
         (if (eq (len rows) 0) matrix
             (do (let row (head rows))
-                (if (eq (nth row 0) "heldout-boundary")
+                (if (str_eq (nth row 0) split)
                     (do (let actual (dca-index names (nth row 1) 0))
                         (let predicted (dca-predict-index models (dca-input row)))
-                        (dca-eval (tail rows) names models
-                            (dca-vinc matrix (add (mul actual 5) predicted) 0)))
-                    (dca-eval (tail rows) names models matrix)))))
+                        (dca-eval-on (tail rows) names models
+                            (dca-vinc matrix (add (mul actual 5) predicted) 0) split))
+                    (dca-eval-on (tail rows) names models matrix split)))))
+    (defn dca-eval (rows names models matrix)
+        (dca-eval-on rows names models matrix "heldout-boundary"))
     (defn dca-diagonal (m i)
         (if (eq i 5) 0 (add (nth m (add (mul i 5) i)) (dca-diagonal m (add i 1)))))
 
     ; Exact post-sanitization template overlap between heldout and training.
     (defn dca-seen-train? (rows input)
         (if (eq (len rows) 0) 0
-            (if (if (eq (nth (head rows) 0) "train")
-                    (eq (dca-input (head rows)) input) 0)
+            (if (if (str_eq (nth (head rows) 0) "train")
+                    (str_eq (dca-input (head rows)) input) 0)
                 1
                 (dca-seen-train? (tail rows) input))))
-    (defn dca-leakage (all rows)
+    (defn dca-leakage-on (all rows split)
         (if (eq (len rows) 0) 0
             (add
-                (if (eq (nth (head rows) 0) "heldout-boundary")
+                (if (str_eq (nth (head rows) 0) split)
                     (dca-seen-train? all (dca-input (head rows)))
                     0)
-                (dca-leakage all (tail rows)))))
+                (dca-leakage-on all (tail rows) split))))
+    (defn dca-leakage (all rows) (dca-leakage-on all rows "heldout-boundary"))
 
     (defn dca-report ()
         (do (let rows (dcc-corpus))
@@ -111,4 +116,24 @@
                   (if (gt (dca-leakage rows rows) 75)
                       "insufficient-template-leakage"
                       "candidate-for-semantic-evaluation"))))
+
+    ; ── the leakage-free evaluation, 2026-08-18 ─────────────────────────────
+    ; Fit on train rows only (dca-fit filters split "train" — the fresh rows
+    ; can never leak into the centroids by construction), evaluate on the
+    ; authored heldout-fresh rows, audit their post-sanitization overlap with
+    ; train by the cell's own instrument. The majority baseline over five
+    ; balanced classes is 30 of 150; whether the adapter beats it is the
+    ; OUTCOME, reported never presumed — an honest fail here is a passing
+    ; trial of the machinery.
+    (defn dca-fresh-report ()
+        (do (let rows (dcc-corpus-with-fresh))
+            (let names (dct-names))
+            (let models (dca-fit rows names))
+            (let matrix (dca-eval-on rows names models (dca-zero-n 25) "heldout-fresh"))
+            (let correct (dca-diagonal matrix 0))
+            (let leak (dca-leakage-on rows rows "heldout-fresh"))
+            (list matrix correct leak
+                  (if (gt leak 0) "leaked-not-fresh"
+                      (if (gt correct 30) "beats-majority-leakage-free"
+                          "fails-majority-honestly")))))
     0)

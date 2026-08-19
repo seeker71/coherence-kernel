@@ -18,7 +18,7 @@ def recipe(defn, entry, tpl):
 
 header = (
     "; form-ptx.fk - emit PTX (NVIDIA's documented virtual ISA, text assembly) DIRECTLY from Form,\n"
-    "; the GPU twin of form-asm-x64.fk: no nvcc, no nvrtc, no CUDA compiler EVER. The driver's built-in\n"
+    "; the GPU companion to Form's native lowering vocabulary: no nvcc, no nvrtc, no CUDA compiler EVER. The driver's built-in\n"
     "; PTX JIT (part of nvcuda.dll, intrinsic to the GPU) lowers it; loaded at CU_JIT_OPTIMIZATION_LEVEL=0\n"
     "; the explicit mul.f32 + add.f32/sub.f32 stay two roundings, so the GPU result equals the recipe's\n"
     "; CPU right-fold to the last bit (proven by native/cuda/form_cuda_ptx_host.c and\n"
