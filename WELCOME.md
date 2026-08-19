@@ -83,7 +83,11 @@ anyone an account.
    answer about the roots of words — and it says honestly that its own talking
    voice is not here *yet*. If that honest trade sounds right,
    [`YOUR-OWN-COMPUTER.md`](YOUR-OWN-COMPUTER.md) walks you in, one small step at
-   a time.
+   a time. If you also have a free ChatGPT account and want it to talk about
+   **your own files**, ChatGPT cannot see your disk. Form can. Point it at a
+   folder, ask, and paste the pack it prints into ChatGPT — ChatGPT then speaks
+   only from those hits. Door:
+   `./fkwu form/form-stdlib/form-cli-local-docs-run.fk`.
 3. **Through Claude (needs a paid Claude account and comfort with a couple of
    technical screens).** Go to [claude.ai/code](https://claude.ai/code) and point
    it at this project (`seeker71/coherence-kernel`). If none of those words land
