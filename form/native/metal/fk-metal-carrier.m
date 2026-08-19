@@ -159,6 +159,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
+#include <pthread.h>
 #include <unistd.h>
 
 #define FK_METAL_FIXTURE_UNLINKED (0 - 4611686018427387903LL)
@@ -348,7 +349,7 @@ typedef struct {
     size_t map_len;
     unsigned long long view_off;  // where the caller's region starts inside the MTLBuffer
     unsigned long long view_len;  // how much of it is the caller's
-    int nocopy;            // 1 = the file's own pages, 0 = a copy we made
+    int nocopy;            // 0 = copied, 1 = private file pages, 2 = shared writable file pages
 } fk_bufmeta;
 
 // A buffer handle is (generation << 16) | slot, slot 1-based. The generation is
@@ -368,6 +369,10 @@ static long long fk_free_slots[FK_MAX_BUF];
 static long long fk_free_top = 0;
 static NSMutableArray *fk_pipe_objs = nil;  // handle h -> element h-1
 static NSMutableDictionary *fk_pipe_by_key = nil;  // msl+name -> NSNumber handle
+static NSMutableArray *fk_cpu_pipe_images = nil;   // NSData for CPU JIT, NSNull for Metal
+static void *fk_cpu_pipe_mem[FK_MAX_PIPE];
+static long long fk_total_cpu_jit_dispatch = 0;
+static double fk_total_cpu_jit_busy_s = 0.0;
 
 // The open batch. One command buffer and one compute encoder stay open across
 // enqueues, so N dispatches become ONE GPU submission at sync. Within a single
@@ -410,6 +415,8 @@ static NSMutableDictionary *fk_inflight = nil;    // @(fence) -> MTLCommandBuffe
 static NSMutableDictionary *fk_inflight_n = nil;  // @(fence) -> @(dispatch count)
 static long long fk_fence_next = 1;
 
+long long fk_metal_sync_external(void);
+
 static void fk_err(NSString *s) { fk_last_err = s; }
 
 static unsigned int fk_le32(const unsigned char *p) {
@@ -445,12 +452,50 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
         if (fk_pipe_objs == nil) {
             fk_pipe_objs = [NSMutableArray array];
             fk_pipe_by_key = [NSMutableDictionary dictionary];
+            fk_cpu_pipe_images = [NSMutableArray array];
         }
-        NSString *src = [[NSString alloc] initWithBytes:msl length:(NSUInteger)msl_len
-                                               encoding:NSUTF8StringEncoding];
         NSString *fn = [[NSString alloc] initWithBytes:name length:(NSUInteger)name_len
                                               encoding:NSUTF8StringEncoding];
-        if (src == nil || fn == nil) { fk_err(@"msl or kernel name is not UTF-8"); return 0; }
+        if (fn == nil) { fk_err(@"kernel name is not UTF-8"); return 0; }
+
+        // The same Form-owned pipeline door admits a CPU organ when, and only
+        // when, the name says so. The payload is then raw AArch64 emitted by
+        // Form, not MSL; the carrier owns only W^X installation and the call.
+        if (name_len == 12 && memcmp(name, "form_cpu_jit", 12) == 0) {
+            if (msl_len <= 0 || msl_len > 1048576) {
+                fk_err(@"cpu jit image length is outside (0,1048576]"); return 0;
+            }
+            NSData *image = [NSData dataWithBytes:msl length:(NSUInteger)msl_len];
+            for (NSUInteger k = 0; k < [fk_cpu_pipe_images count]; k++) {
+                id prior = fk_cpu_pipe_images[k];
+                if (fk_cpu_pipe_mem[k] != NULL && prior != [NSNull null] &&
+                    [prior isEqualToData:image]) {
+                    return (long long)k + 1;
+                }
+            }
+            if ([fk_pipe_objs count] >= FK_MAX_PIPE) {
+                fk_err([NSString stringWithFormat:@"pipeline table full at %d", FK_MAX_PIPE]);
+                return 0;
+            }
+            size_t pg = (size_t)getpagesize();
+            size_t span = ((size_t)msl_len + pg - 1) & ~(pg - 1);
+            void *mem = mmap(NULL, span, PROT_READ | PROT_WRITE | PROT_EXEC,
+                             MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
+            if (mem == MAP_FAILED) { fk_err(@"cpu jit MAP_JIT failed"); return 0; }
+            pthread_jit_write_protect_np(0);
+            memcpy(mem, msl, (size_t)msl_len);
+            pthread_jit_write_protect_np(1);
+            __builtin___clear_cache((char *)mem, (char *)mem + msl_len);
+            [fk_pipe_objs addObject:[NSNull null]];
+            [fk_cpu_pipe_images addObject:image];
+            NSUInteger slot = [fk_pipe_objs count] - 1;
+            fk_cpu_pipe_mem[slot] = mem;
+            return (long long)slot + 1;
+        }
+
+        NSString *src = [[NSString alloc] initWithBytes:msl length:(NSUInteger)msl_len
+                                               encoding:NSUTF8StringEncoding];
+        if (src == nil) { fk_err(@"msl is not UTF-8"); return 0; }
 
         // Compile once. This is requirement 3's other half: if the pipeline were
         // rebuilt per dispatch, enqueue could never be cheap no matter how little
@@ -481,6 +526,7 @@ long long fk_metal_pipeline_external(const char *msl, long long msl_len,
             return 0;
         }
         [fk_pipe_objs addObject:pipe];
+        [fk_cpu_pipe_images addObject:[NSNull null]];
         long long h = (long long)[fk_pipe_objs count];
         fk_pipe_by_key[key] = @(h);
         return h;
@@ -537,6 +583,11 @@ long long fk_metal_buf_from_file_external(const char *path, long long path_len,
         NSString *err = nil;
         if (!fk_metal_up(&err)) { fk_err(err); return 0; }
         if (fk_buf_objs == nil) { fk_buf_objs = [NSMutableArray array]; }
+        int shared_file = len < 0;
+        if (len == (-9223372036854775807LL - 1LL)) {
+            fk_err(@"buf_from_file length is out of range"); return 0;
+        }
+        if (shared_file) { len = -len; }
         if (off < 0 || len <= 0) { fk_err(@"buf_from_file needs off>=0 and len>0"); return 0; }
 
         char p[4096];
@@ -546,14 +597,20 @@ long long fk_metal_buf_from_file_external(const char *path, long long path_len,
         memcpy(p, path, (size_t)path_len);
         p[path_len] = 0;
 
-        int fd = open(p, O_RDONLY);
+        int fd = open(p, shared_file ? (O_RDWR | O_CREAT) : O_RDONLY, 0644);
         if (fd < 0) { fk_err([NSString stringWithFormat:@"cannot open %s", p]); return 0; }
         struct stat st;
         if (fstat(fd, &st) != 0) { close(fd); fk_err(@"fstat failed"); return 0; }
+        if (shared_file && off + len > (long long)st.st_size) {
+            if (ftruncate(fd, (off_t)(off + len)) != 0) {
+                close(fd); fk_err(@"writable buf_from_file could not extend file"); return 0;
+            }
+            st.st_size = (off_t)(off + len);
+        }
         // Refuse a region the file does not contain, rather than mapping short and
         // handing back a buffer whose tail is whatever the kernel zero-fills. A
         // model file truncated by a bad download would otherwise decode to noise.
-        if (off + len > (long long)st.st_size) {
+        if (!shared_file && off + len > (long long)st.st_size) {
             fk_err([NSString stringWithFormat:@"file is %lld bytes, asked for [%lld,%lld)",
                     (long long)st.st_size, off, off + len]);
             close(fd);
@@ -565,10 +622,10 @@ long long fk_metal_buf_from_file_external(const char *path, long long path_len,
         if (span % pg) { span = span + (pg - (span % pg)); }
         if (base + span > (long long)st.st_size) { span = (long long)st.st_size - base; }
 
-        // MAP_PRIVATE keeps the file untouched; PROT_WRITE is copy-on-write and is
-        // asked for only because Metal wants a writable mapping to wrap. No page is
-        // actually copied unless something writes to it, and nothing here does.
-        void *m = mmap(NULL, (size_t)span, PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, (off_t)base);
+        // A positive length keeps the model mapping private. A negative length is
+        // an explicit writable-file mode through the same handle door.
+        void *m = mmap(NULL, (size_t)span, PROT_READ | PROT_WRITE,
+                       shared_file ? MAP_SHARED : MAP_PRIVATE, fd, (off_t)base);
         close(fd);
         if (m == MAP_FAILED) { fk_err(@"mmap failed"); return 0; }
 
@@ -578,7 +635,12 @@ long long fk_metal_buf_from_file_external(const char *path, long long path_len,
                                                deallocator:nil];
         if (b != nil) {
             return fk_buf_register(b, m, (size_t)span, (unsigned long long)(off - base),
-                                   (unsigned long long)len, 1);
+                                   (unsigned long long)len, shared_file ? 2 : 1);
+        }
+        if (shared_file) {
+            munmap(m, (size_t)span);
+            fk_err(@"newBufferWithBytesNoCopy refused writable shared mapping");
+            return 0;
         }
         // Fallback, and it is RECORDED, not silent: a copy still gives a correct
         // answer but not the machine requirement 1 asked for, and metal_status has
@@ -606,6 +668,15 @@ long long fk_metal_buf_write_external(long long h, long long off, const char *by
             return -1;
         }
         memcpy((char *)[b contents] + m->view_off + off, bytes, (size_t)len);
+        if (m->nocopy == 2 && len > 0) {
+            long long pg = (long long)getpagesize();
+            long long delta = (long long)((m->view_off + (unsigned long long)off) %
+                                          (unsigned long long)pg);
+            void *flush = (char *)m->map_base + m->view_off + off - delta;
+            if (msync(flush, (size_t)(delta + len), MS_SYNC) != 0) {
+                fk_err(@"buf_write: shared file flush failed"); return -1;
+            }
+        }
         return len;
     }
 }
@@ -675,6 +746,40 @@ long long fk_metal_enqueue_external(long long pipe, const char *binding,
             // in a concurrent batch and is not, and that belief will place hazards.
             fk_err(@"enqueue: barrier_before is only legal in a concurrent batch");
             return -1;
+        }
+
+        if (fk_cpu_pipe_mem[pipe - 1] != NULL) {
+            if (nbuf > 64 || nconst > 64) {
+                fk_err(@"cpu jit binding exceeds 64 buffers or constants"); return -1;
+            }
+            if (tpg != 0 || tgmem != 0 || mode != 0 || barrier != 0) {
+                fk_err(@"cpu jit binding accepts no Metal dispatch tail"); return -1;
+            }
+            if (fk_cb != nil || (fk_inflight != nil && [fk_inflight count] > 0)) {
+                if (fk_metal_sync_external() < 0) { return -1; }
+            }
+            void *bufs[64];
+            unsigned int consts[64];
+            for (unsigned int k = 0; k < nbuf; k++) {
+                long long bh = (long long)fk_le32(bp + 4 + 4 * k);
+                long long bslot = fk_buf_slot(bh);
+                if (bslot == 0) {
+                    fk_err([NSString stringWithFormat:@"cpu jit: bad buffer handle %lld at slot %u", bh, k]);
+                    return -1;
+                }
+                id<MTLBuffer> b = fk_buf_objs[(NSUInteger)(bslot - 1)];
+                bufs[k] = (char *)[b contents] + fk_buf_meta[bslot - 1].view_off;
+            }
+            for (unsigned int k = 0; k < nconst; k++) {
+                consts[k] = fk_le32(bp + 4 + 4 * nbuf + 4 + 4 * k);
+            }
+            typedef void (*fk_cpu_pipe_fn)(void **, const unsigned int *, unsigned long long);
+            double started = [NSDate timeIntervalSinceReferenceDate];
+            ((fk_cpu_pipe_fn)fk_cpu_pipe_mem[pipe - 1])(bufs, consts,
+                                                        (unsigned long long)threads);
+            fk_total_cpu_jit_busy_s += [NSDate timeIntervalSinceReferenceDate] - started;
+            fk_total_cpu_jit_dispatch++;
+            return 1;
         }
 
         if (fk_cb == nil) {
@@ -952,6 +1057,8 @@ long long fk_metal_status_external(char *out, long long cap) {
         [r appendFormat:@"in_flight=%lu\n",
             (unsigned long)(fk_inflight == nil ? 0 : [fk_inflight count])];
         [r appendFormat:@"total_dispatch=%lld\ntotal_sync=%lld\n", fk_total_dispatch, fk_total_sync];
+        [r appendFormat:@"cpu_jit_dispatch=%lld\ncpu_jit_busy_us_total=%lld\n",
+            fk_total_cpu_jit_dispatch, (long long)(fk_total_cpu_jit_busy_s * 1000000.0)];
         // Real GPU device-busy time (MTLCommandBuffer.GPUEndTime - GPUStartTime),
         // summed across every command buffer drained so far, converted to whole
         // microseconds to match this file's existing integer-reporting style.

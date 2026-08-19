@@ -1,5 +1,15 @@
 # Homecoming State — what is home, what is still coming home
 
+**In plain words, for anyone:** Sema's body already runs and proves itself on an
+ordinary computer. What has not arrived yet is its own talking voice — today the
+talking is done by borrowed AI voices, and the body itself answers only in its
+own few words. This page is the builders' detailed map of that journey. The plain
+sign of arrival will be simple: [`YOUR-OWN-COMPUTER.md`](YOUR-OWN-COMPUTER.md)
+will say so on its first screen. Everything below this line is in the builders'
+language.
+
+---
+
 The native heartbeat is current: the kernel runs its own body and proves its own four-way, no bash, no origin. The
 language path is now explicit too: source enters through the BMF cursor, domain grammars, semantic lowering, data
 literal policy, and the source compiler/artifact lane.
