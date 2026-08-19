@@ -106,7 +106,7 @@ sed "s/FORM_CLI_SOURCE_SHA256_PLACEHOLDER/$want_source_sha256/g" \
 source_cache="form-stdlib/.cache/source-compiled"
 mkdir -p "$source_cache"
 SOURCE_COMPILE_CHAIN=(
-    form-stdlib/form-ontology-loader.fk
+    form-stdlib/form-ontology-source-compiler.fk
     form-stdlib/line-grammar.fk
     form-stdlib/bmf-core.fk
     form-stdlib/bmf-grammar.fk
@@ -139,8 +139,9 @@ compile_bml() {
     if [[ ! -s "$cached" ]]; then
         out="$(mktemp "$source_cache/.tmp.XXXXXX")"
         driver="$work_dir/compile.fk"
-        printf '(do (form-source-compile-file "%s" "%s"))\n' "$src" "$out" > "$driver"
-        if "$SOURCE_FKWU" "${SOURCE_COMPILE_CHAIN[@]}" "$driver" \
+        printf '; preludes: %s\n(do (form-source-compile-file "%s" "%s"))\n' \
+            "${SOURCE_COMPILE_CHAIN[*]}" "$src" "$out" > "$driver"
+        if "$SOURCE_FKWU" "$driver" \
             >/dev/null 2> "$work_dir/source-compile.err" && [[ -s "$out" ]]; then
             mv -f "$out" "$cached"
         else

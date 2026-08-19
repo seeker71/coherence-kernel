@@ -15,23 +15,16 @@
 ;
 ; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/sha256.fk form-stdlib/hex.fk form-stdlib/gguf-meta.fk form-stdlib/model-discovery.fk form-stdlib/native-model-native-hierarchy.fk form-stdlib/native-model-control-plane.fk form-stdlib/ask-lane-router.fk form-stdlib/form-cli.fk form-stdlib/form-cli-gguf-cell.fk form-stdlib/dsv4-tokenizer.fk form-stdlib/dsv4-validation-protocol.fk form-stdlib/dsv4-validation-calibrator.fk native/metal/dsv4-validation-live.fk native/metal/dense-token-handle.fk
 (do
-    ; 'diagnose' reads the live framebuffer the walker is born with — fk_arms[t]
-    ; per-op dispatch counts plus the node/string/arena/value-stack/float
-    ; high-water — back into this running program through kernel_stat (a fkwu-only
+    ; 'diagnose' reads the substrate high-water marks without maintaining an
+    ; operation counter on every walked node.  The production emitter compiles
+    ; that counter path out; the framebuffer remains the live causal channel.
+    ; These values come back through kernel_stat (a fkwu-only
     ; op, tag 127, the read twin of self_source). The readout is the kernel
     ; inspecting itself mid-session: what it is computing, how big its substrate
     ; has grown, where its time is going. fkwu-only, so it sits beside source/
     ; verify in the runtime wrapper, never in the four-way dispatch.
     (defn fc-diagnose ()
-        (str_concat "fkwu live | ops="
-        (str_concat (int_to_str (kernel_stat 0))
-        (str_concat " distinct="
-        (str_concat (int_to_str (kernel_stat 1))
-        (str_concat " hottest=tag"
-        (str_concat (int_to_str (kernel_stat 2))
-        (str_concat "x"
-        (str_concat (int_to_str (kernel_stat 3))
-        (str_concat " nodes="
+        (str_concat "fkwu live | nodes="
         (str_concat (int_to_str (kernel_stat 4))
         (str_concat " strings="
         (str_concat (int_to_str (kernel_stat 5))
@@ -40,7 +33,7 @@
         (str_concat " vstack="
         (str_concat (int_to_str (kernel_stat 7))
         (str_concat " floats="
-                    (int_to_str (kernel_stat 8))))))))))))))))))))
+                    (int_to_str (kernel_stat 8))))))))))))
 
     ; The live framebuffer is a distinct observation channel from aggregate
     ; walker statistics.  Keep its roots and four native arms visible together
@@ -61,15 +54,7 @@
             (str_concat " accepted="
             (str_concat (int_to_str (kernel_stat 13))
             (str_concat " last-index="
-            (str_concat (int_to_str (kernel_stat 14))
-            (str_concat " fb_record="
-            (str_concat (int_to_str (kernel_stat 228))
-            (str_concat " events_read="
-            (str_concat (int_to_str (kernel_stat 229))
-            (str_concat " source_read="
-            (str_concat (int_to_str (kernel_stat 230))
-            (str_concat " clears="
-                        (int_to_str (kernel_stat 231)))))))))))))))))))))))))
+                        (int_to_str (kernel_stat 14)))))))))))))))))
 
     (defn fc-metal-matvec (arg)
         (do
@@ -371,8 +356,9 @@
     ; entry runs the forward on the linked Metal carrier and returns generated ids; the arch's own
     ; detokenizer renders them back to words. No shell in the answer path — every step is a folded cell.
     ; RADIUS: greedy argmax, base-model continuation (no chat template, no BOS beyond what the file's
-    ; own tokenizer prepends), a hard step stop. Deepseek4 decodes at ~270 ms/token, so the default
-    ; 24-token answer is a deliberate honest wait, not a limit.
+    ; own tokenizer prepends), a caller-selected step count.  Do not promise a per-token speed here:
+    ; the native path currently evaluates both prompt and generated positions, and live validation
+    ; timing belongs in observable output rather than a stale source comment.
     (defn fca-steps () 24)
 
     ; dense family (llama/qwen2/phi2/minicpm/nanbeige): open the file once (every geometry number read
@@ -406,13 +392,21 @@
             (let readback (dfd-read-ids raw 0 5))
             (let embed-msl (dfd-embed-msl))
             (let idchain-msl (dfd-idchain-msl))
+            ; Same source + function must return the same persistent handle.
+            ; This is the direct JIT witness: the first call compiles the MSL,
+            ; the second reuses the process-owned pipeline cache.
+            (let jit1 (metal_pipeline embed-msl "form_dsv4_embed_f16_u32"))
+            (let jit2 (metal_pipeline embed-msl "form_dsv4_embed_f16_u32"))
             (str_concat "route=local-ds4-substrate-probe"
             (str_concat "\nu32-roundtrip=" (str_concat (int_to_str (dfd-rd32 (dfd-u32 11111) 0))
             (str_concat "\nseeded-count=" (str_concat (int_to_str seeded)
             (str_concat "\nreadback-token-ids=" (str_concat (fca-ids-str readback)
+            (str_concat "\njit-pipeline-first=" (str_concat (int_to_str jit1)
+            (str_concat "\njit-pipeline-second=" (str_concat (int_to_str jit2)
+            (str_concat "\njit-pipeline-reused=" (str_concat (int_to_str (if (eq jit1 jit2) 1 0))
             (str_concat "\n" (str_concat (fca-msl-fingerprint "embed-msl" embed-msl)
             (str_concat "\n" (str_concat (fca-msl-fingerprint "idchain-msl" idchain-msl)
-            (str_concat "\n--- metal status ---\n" (metal_status)))))))))))))))
+            (str_concat "\n--- metal status ---\n" (metal_status)))))))))))))))))))))
     ; deepseek4: model-owned tokenizer -> the Form-held 43-layer decode stack -> model-owned
     ; detokenizer.  This is the same dfd-stack-stream used by the 25/25 stream seal; no shell,
     ; environment variable, or external inference server enters this call.
