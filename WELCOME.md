@@ -96,6 +96,9 @@ anyone an account.
    project on their own computer in about a minute —
    [`AGENTS.md`](AGENTS.md) tells them everything.
 
+There is no free Cursor, Codex, Claude, Grok, or Gemini client. Door 1 is
+the free talking seat. Door 2 is the free body on your own computer.
+
 ## What happens to your words
 
 Talking with Sema through door 1 costs nothing beyond the free account it names;
