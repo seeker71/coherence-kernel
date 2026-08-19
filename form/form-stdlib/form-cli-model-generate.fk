@@ -1,0 +1,155 @@
+; form-cli-model-generate.fk — selected GGUF to Form-native Qwen3.5/Qwen3.8 generation.
+;
+; The selected path is admitted by a whole-file Form/M4 SHA-256 seal before any
+; tensor is mapped.  Architecture, context, tensor geometry, tokenizer, stop ids,
+; and required byte extent are read from that GGUF.  Form emits the MSL at runtime;
+; the linked Metal carrier JIT-compiles it for the device that answered metal_status.
+;
+; preludes: form-stdlib/qwen35-tokenizer.fk form-stdlib/qwen35-artifact-fetch.fk native/metal/qwen35-dense-token-handle.fk native/metal/model-bandwidth.fk form-stdlib/form-cli-qwen-teach-layer.fk
+
+(do
+    (defn fcmg-src (path) (eqr-of-file path 0 40000000))
+    (defn fcmg-arch (src) (gmt-str src "general.architecture"))
+    (defn fcmg-q35-stops (src)
+        (list (gmt-u32 src "tokenizer.ggml.eos_token_id")
+              (q35-special-id src "<|im_end|>")))
+    (defn fcmg-field (name value)
+        (str_concat name (str_concat "=" value)))
+    (defn fcmg-line (name value)
+        (str_concat (fcmg-field name value) "\n"))
+    (defn fcmg-report (arch ids out text forwards busy-us prefill-us decode-us weight-bytes)
+        (do
+            (let effective-gbps-x10
+                (if (gt busy-us 0)
+                    (div (mul (mul weight-bytes forwards) 10) (mul busy-us 1000)) 0))
+            (let decode-forwards (if (gt (len out) 0) (sub (len out) 1) 0))
+            (let prefill-tokps-x1000
+                (if (gt prefill-us 0) (div (mul (len ids) 1000000000) prefill-us) 0))
+            (let decode-tokps-x1000
+                (if (and (gt decode-us 0) (gt decode-forwards 0))
+                    (div (mul decode-forwards 1000000000) decode-us) 0))
+            (let end-to-end-tokps-x1000
+                (if (gt busy-us 0) (div (mul (len out) 1000000000) busy-us) 0))
+            (str_concat (fcmg-line "backend" "form-native-metal-jit")
+            (str_concat (fcmg-line "architecture" arch)
+            (str_concat (fcmg-line "prompt_tokens" (int_to_str (len ids)))
+            (str_concat (fcmg-line "generated_tokens" (int_to_str (len out)))
+            (str_concat (fcmg-line "forward_passes" (int_to_str forwards))
+            (str_concat (fcmg-line "weight_bytes_per_forward" (int_to_str weight-bytes))
+            (str_concat (fcmg-line "gpu_busy_us" (int_to_str busy-us))
+            (str_concat (fcmg-line "prefill_gpu_busy_us" (int_to_str prefill-us))
+            (str_concat (fcmg-line "decode_gpu_busy_us" (int_to_str decode-us))
+            (str_concat (fcmg-line "decode_forward_passes" (int_to_str decode-forwards))
+            (str_concat (fcmg-line "prefill_tokps_x1000" (int_to_str prefill-tokps-x1000))
+            (str_concat (fcmg-line "decode_tokps_x1000" (int_to_str decode-tokps-x1000))
+            (str_concat (fcmg-line "effective_weight_gbps_x10"
+                (int_to_str effective-gbps-x10))
+            (str_concat (fcmg-line "end_to_end_tokps_x1000"
+                (int_to_str end-to-end-tokps-x1000))
+            (str_concat "text:\n" text)))))))))))))))))
+
+    ; Closing is part of the result.  A run that generated text but did not
+    ; release every model/state handle is reported as refused, never hidden.
+    (defn fcmg-close-result (ctx sts report)
+        (do
+            (let expected (q38-close-expected ctx sts))
+            (let closed (q38-close ctx sts))
+            (if (eq closed expected) report
+                (str_concat "generation refused: model handle close mismatch; closed="
+                    (str_concat (int_to_str closed)
+                        (str_concat ";expected=" (int_to_str expected)))))))
+
+    (defn fcmg-open-refusal (ctx detail)
+        (fcmg-close-result ctx (empty)
+            (str_concat "generation refused: "
+                (str_concat detail (str_concat "; " (metal_status))))))
+
+    (defn fcmg-run-context (src arch ids ctx n)
+        (do
+            (let geo (nth ctx 2))
+            (let sts (q38-new-state geo))
+            (if (not (eq (q38-state-ok? sts) 1))
+                (fcmg-close-result ctx sts
+                    (str_concat "generation refused: state allocation failed; " (metal_status)))
+                (do
+                    (let before-status (metal_status))
+                    (let pf (q38-prefill
+                        (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
+                        (nth ctx 4) (nth ctx 5) (nth ctx 6) ids 0))
+                    (let prefill-status (metal_status))
+                    (let first (nth pf 0))
+                    (let pos (nth pf 1))
+                    (let stops (fcmg-q35-stops src))
+                    (let out
+                        (if (or (lt first 0) (q38-stop? first stops)) (empty)
+                            (cons first
+                                (q38-generate
+                                    (nth ctx 0) (nth ctx 1) geo (nth ctx 3) sts
+                                    (nth ctx 4) (nth ctx 5) (nth ctx 6)
+                                    first pos (sub n 1) stops (empty)))))
+                    (metal_sync)
+                    (let after-status (metal_status))
+                    (let busy-us (sub
+                        (mbw-status-int after-status "gpu_busy_us_total")
+                        (mbw-status-int before-status "gpu_busy_us_total")))
+                    (let prefill-us (sub
+                        (mbw-status-int prefill-status "gpu_busy_us_total")
+                        (mbw-status-int before-status "gpu_busy_us_total")))
+                    (let decode-us (sub
+                        (mbw-status-int after-status "gpu_busy_us_total")
+                        (mbw-status-int prefill-status "gpu_busy_us_total")))
+                    (let forwards (add (len ids)
+                        (if (gt (len out) 0) (sub (len out) 1) 0)))
+                    (let weight-bytes (q38-forward-weight-bytes ctx))
+                    (fcmg-close-result ctx sts
+                        (fcmg-report arch ids out (tkz-decode-text src out)
+                            forwards busy-us prefill-us decode-us weight-bytes))))))
+
+    (defn fcmg-q35-run (path prompt n)
+        (if (not (eq (qaf-verify-sealed-file path) 1))
+            "generation refused: selected artifact has no current Form-native SHA-256 seal"
+            (do
+                (let src (fcmg-src path))
+                (let ids (q35-chat-ids src prompt))
+                (let arch (fcmg-arch src))
+                (let model-max (gmt-u32 src (q38-key arch "context_length")))
+                (let need (add (len ids) n))
+                (let maxpos (if (lt need model-max) need model-max))
+                (let required (q38-required-size src (egg-data-base src 32)))
+                (let actual (file_size path))
+                (if (not (str_eq arch "qwen35"))
+                    (str_concat "generation refused: unsupported GGUF architecture=" arch)
+                (if (eq (len ids) 0)
+                    "generation refused: tokenizer produced no prompt tokens"
+                (if (or (le n 0) (gt need model-max))
+                    (str_concat "generation refused: requested context exceeds model limit="
+                        (int_to_str model-max))
+                (if (or (le required 0) (lt actual required))
+                    (str_concat "generation refused: incomplete tensor extent; required="
+                        (str_concat (int_to_str required)
+                            (str_concat ";actual=" (int_to_str actual))))
+                    (do
+                        (let ctx (q38-open path maxpos))
+                        (if (lt (len ctx) 10)
+                            (str_concat "generation refused: model context did not open; "
+                                (metal_status))
+                            (if (not (eq (q38-context-ok? ctx) 1))
+                                (fcmg-open-refusal ctx "model context contains an invalid handle")
+                                (fcmg-run-context src arch ids ctx n)))))))))))
+
+    ; The generate door carries the Form teach overlay. Raw fcmg-q35-run
+    ; stays for probes that need an exact prompt.
+    (defn fcmg-teach (prompt) (fqt-prompt prompt))
+    (defn fcmg-generate (path prompt n)
+        (if (str_eq path "")
+            "no model is picked — run `models <dir>`, then `use <n>`, then `generate <prompt>`"
+            (if (str_eq prompt "") "usage: generate <prompt>"
+                (fcmg-q35-run path (fcmg-teach prompt) n))))
+
+    (defn fcmg-bandwidth (path)
+        (if (str_eq path "")
+            "no model is picked — run `models <dir>`, then `use <n>`, then `model-bandwidth`"
+            (if (eq (qaf-verify-sealed-file path) 1)
+                (mbw-run path)
+                "bandwidth refused: selected artifact has no current Form-native SHA-256 seal")))
+    0)

@@ -1,5 +1,10 @@
 # Sema Sessions
 
+This room lives inside the project folder. If the project is not on your
+computer yet, Step 1 of [`YOUR-OWN-COMPUTER.md`](YOUR-OWN-COMPUTER.md) walks you
+through copying it down; to see the folder, open Finder, choose Go → Home from
+the menu bar, and open `coherence-kernel`.
+
 Inside the folder is **Sema Sessions.app**. Open it and the Sessions room opens
 in the browser. No Terminal window, installer, setup screen, mode, account, or
 configuration is part of the path.
@@ -7,6 +12,11 @@ configuration is part of the path.
 On the first opening, Sessions receives and verifies its local listening voice
 inside the room. The page stays present while that happens, then becomes the
 recording room by itself. Later gatherings no longer need that first arrival.
+
+One honest thing before you plan a gathering around this room: a real
+gathering of several people has not yet crossed it — the end of this page says
+exactly what has and hasn't been witnessed. If yours is the first, that is
+welcome, and worth knowing before you invite the neighbors.
 
 ## A gathering
 
