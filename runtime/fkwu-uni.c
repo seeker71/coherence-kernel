@@ -5531,10 +5531,10 @@ static long long fk_https_get_ssl(long long urlv, long long headersv, long long 
         }
         wr = wr + nwr;
     }
-    static char resp[268435456];
+    static char resp[65536];
     long long total = 0;
-    while (total < 268435455) {
-        int got = SSL_read(ssl, resp + total, (int)(268435455 - total));
+    while (total < 65535) {
+        int got = SSL_read(ssl, resp + total, (int)(65535 - total));
         if (got <= 0) {
             break;
         }
