@@ -377,11 +377,12 @@ print(String(format: "pooled: %.1f MB of activation + KV state, allocated ONCE f
 // still one thread folding right-to-left, bit for bit what the attestant folds.
 final class Step {
     let cb: MTLCommandBuffer, enc: MTLComputeCommandEncoder
+    let requestedTG = Int(ProcessInfo.processInfo.environment["FORM_METAL_TG"] ?? "256") ?? 256
     init() { cb = queue.makeCommandBuffer()!; enc = cb.makeComputeCommandEncoder(dispatchType: .concurrent)! }
     func go(_ p: MTLComputePipelineState, _ width: Int, barrier: Bool = true, tgMul32: Bool = false,
             _ bind: (MTLComputeCommandEncoder) -> Void) {
         enc.setComputePipelineState(p); bind(enc)
-        var tg = min(p.maxTotalThreadsPerThreadgroup, 256)
+        var tg = min(p.maxTotalThreadsPerThreadgroup, max(1, requestedTG))
         // the lane kernel folds one row per SIMD GROUP, so a threadgroup that is not a whole number of
         // simdgroups would split a row across two of them and lose part of its sum. Rounded down here,
         // stated rather than assumed to be true of 256.
@@ -920,7 +921,7 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || {
 # prints "NO DENOMINATOR" rather than dividing by a figure nobody here can re-derive. Regenerate with
 # form/native/metal/ollama_oracle.sh — and regenerate it on an IDLE machine, since this harness itself
 # depresses ollama by ~2.5x while it runs.
-ORACLE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/.ollama-oracle.env"
+ORACLE="$ROOT/native/metal/.ollama-oracle.env"
 if [[ -f "$ORACLE" ]]; then
     set -a; . "$ORACLE"; set +a
     echo "  external denominator: ollama $OLLAMA_MODEL decode $OLLAMA_DECODE tok/s (measured $OLLAMA_WHEN, $OLLAMA_RUNS runs, spread $OLLAMA_DECODE_MIN-$OLLAMA_DECODE_MAX)"
