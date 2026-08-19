@@ -1,0 +1,149 @@
+; fsh-native-port-jit-admission.fk -- a direct Form bridge from one closed
+; shell AST shape to a pure JIT witness plan.
+;
+; This is deliberately not a port executor.  It admits only the bare shell
+; AST for `native-port-check <64 lowercase hexadecimal bytes>`, keeps the
+; identity as receipt data, and constructs one fixed Form-owned ARM64 typed u32
+; leaf request.
+; It does not invoke the native carrier, install code, select a resource, read
+; stdin, spawn a child, or touch a filesystem/network path.  The JIT plan is
+; therefore an admission witness, not an execution claim.
+;
+; A future native port needs its own separately observed ABI.  Until then,
+; nonbare, malformed, or unknown shell ASTs are refused before a JIT plan can
+; be constructed.
+;
+; preludes: form-stdlib/core.fk form-stdlib/str-byte-at.fk form-stdlib/form-ontology-bp.fk form-stdlib/line-grammar.fk form-stdlib/bmf-core.fk form-stdlib/bmf-grammar.fk form-stdlib/grammar-loader.fk form-stdlib/shell-grammar.fk form-stdlib/fsh-turn-process-spec.fk observe/jit-arm64-u32-leaf-carrier.fk
+;
+; Proven by: form-stdlib/tests/fsh-native-port-jit-admission-band.fk
+
+(do
+    (defn fnpja-schema () "fsh-native-port-jit-admission-v3")
+    (defn fnpja-command-name () "native-port-check")
+    (defn fnpja-execution () "plan-only")
+    (defn fnpja-admitted-decision () "admitted-structural-arm64-u32-leaf-plan")
+    (defn fnpja-refused-decision () "refused-nonbare-or-invalid-native-port-check")
+
+    ; The shell grammar represents even one command as
+    ; __seq__ -> __andor__ -> __pipe__ -> command.  Each wrapper must have
+    ; exactly one child: sequences, pipelines, and and/or forms never enter.
+    (defn fnpja-node-children (node) (node_children node))
+    (defn fnpja-node-tag (node)
+        (if (nil? (fnpja-node-children node)) ""
+            (node_value (head (fnpja-node-children node)))))
+    (defn fnpja-node-rest (node)
+        (if (nil? (fnpja-node-children node)) (empty)
+            (tail (fnpja-node-children node))))
+    (defn fnpja-singleton-tag? (node tag)
+        (if (str_eq (fnpja-node-tag node) tag)
+            (if (eq (len (fnpja-node-rest node)) 1) 1 0)
+            0))
+
+    ; A result keeps an absent command out of node operations.  The second
+    ; field is read only after its presence bit has been established.
+    (defn fnpja-no-command () (list 0 ""))
+    (defn fnpja-command-result (node) (list 1 node))
+    (defn fnpja-command-present? (result) (eq (nth result 0) 1))
+    (defn fnpja-command-node (result) (nth result 1))
+    (defn fnpja-bare-command (ast)
+        (if (eq (fnpja-singleton-tag? ast "__seq__") 1)
+            (do
+                (let andor-node (head (fnpja-node-rest ast)))
+                (if (eq (fnpja-singleton-tag? andor-node "__andor__") 1)
+                    (do
+                        (let pipe-node (head (fnpja-node-rest andor-node)))
+                        (if (eq (fnpja-singleton-tag? pipe-node "__pipe__") 1)
+                            (fnpja-command-result (head (fnpja-node-rest pipe-node)))
+                            (fnpja-no-command)))
+                    (fnpja-no-command)))
+            (fnpja-no-command)))
+
+    ; The argument must be a literal leaf.  A variable, substitution, redir,
+    ; or additional word cannot become an identity through this door.
+    (defn fnpja-command-id (node)
+        (if (str_eq (fnpja-node-tag node) (fnpja-command-name))
+            (if (eq (len (fnpja-node-rest node)) 1)
+                (do
+                    (let argument (head (fnpja-node-rest node)))
+                    (if (nil? (fnpja-node-children argument))
+                        (node_value argument)
+                        ""))
+                "")
+            ""))
+    (defn fnpja-id-from-ast (ast)
+        (do
+            (let command (fnpja-bare-command ast))
+            (if (eq (fnpja-command-present? command) 1)
+                (fnpja-command-id (fnpja-command-node command))
+                "")))
+    (defn fnpja-admitted-id? (exchange-id)
+        (fshps-exchange-id? exchange-id))
+
+    ; The accepted structural request is fixed.  In particular, the caller
+    ; identity never occupies an opcode, code payload, argument, or native entrypoint.
+    ; It is data only: this cell does not cross the native call boundary.
+    (defn fnpja-jit-program () (jau-add1-prog))
+    (defn fnpja-jit-root () 2)
+    (defn fnpja-jit-arg () 41)
+    (defn fnpja-jit-witness-plan ()
+        (list (fnpja-jit-program) (fnpja-jit-root) (fnpja-jit-arg)))
+    ; `eq` does not make independently built rows equal, so state this fixed
+    ; program by its exact V1 rows rather than comparing list identities.
+    (defn fnpja-arg-row? (row)
+        (if (eq (len row) 1) (if (eq (nth row 0) 2) 1 0) 0))
+    (defn fnpja-lit1-row? (row)
+        (if (eq (len row) 2)
+            (if (eq (nth row 0) 1) (if (eq (nth row 1) 1) 1 0) 0)
+            0))
+    (defn fnpja-add-row? (row)
+        (if (eq (len row) 3)
+            (if (eq (nth row 0) 3)
+                (if (eq (nth row 1) 0) (if (eq (nth row 2) 1) 1 0) 0)
+                0)
+            0))
+    (defn fnpja-fixed-program? (program)
+        (if (eq (len program) 3)
+            (if (fnpja-arg-row? (nth program 0))
+                (if (fnpja-lit1-row? (nth program 1))
+                    (fnpja-add-row? (nth program 2))
+                    0)
+                0)
+            0))
+    (defn fnpja-typed-plan? (plan)
+        (if (eq (len plan) 3)
+            (if (fnpja-fixed-program? (nth plan 0))
+                (if (eq (nth plan 1) (fnpja-jit-root))
+                    (if (eq (nth plan 2) (fnpja-jit-arg))
+                        (jau-request-shape? (nth plan 0) (nth plan 1) (nth plan 2))
+                        0)
+                    0)
+                0)
+            0))
+    (defn fnpja-admission (ast)
+        (do
+            (let exchange-id (fnpja-id-from-ast ast))
+            (if (eq (fnpja-admitted-id? exchange-id) 1)
+                (list (fnpja-schema) (fnpja-execution) "admitted" exchange-id
+                      (fnpja-jit-witness-plan) (fnpja-admitted-decision))
+                (list (fnpja-schema) (fnpja-execution) "refused" "" (empty)
+                      (fnpja-refused-decision)))))
+    (defn fnpja-from-line (line) (fnpja-admission (sh-parse line)))
+    (defn fnpja-admission-schema (admission) (nth admission 0))
+    (defn fnpja-status (admission) (nth admission 2))
+    (defn fnpja-exchange-id (admission) (nth admission 3))
+    (defn fnpja-plan (admission) (nth admission 4))
+    (defn fnpja-decision (admission) (nth admission 5))
+    (defn fnpja-admitted? (admission)
+        (if (str_eq (fnpja-admission-schema admission) (fnpja-schema))
+            (if (str_eq (fnpja-status admission) "admitted")
+                (if (eq (fnpja-admitted-id? (fnpja-exchange-id admission)) 1)
+                    (fnpja-typed-plan? (fnpja-plan admission))
+                    0)
+                0)
+            0))
+    (defn fnpja-structural-program (admission)
+        (if (eq (fnpja-admitted? admission) 1)
+            (nth (fnpja-plan admission) 0)
+            (empty)))
+
+    0)
