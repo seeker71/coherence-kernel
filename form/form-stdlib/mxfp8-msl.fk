@@ -70,14 +70,29 @@
     ; the exactness wall of the bit-exactness sentence in the header
     (defn mx8m-e-safe? (e) (if (lt (sub e 127) (sub 0 140)) 0 (if (gt (sub e 127) 118) 0 1)))
 
-    ; --- one weight at FLAT element index idx of a slice of `nel` elements starting at `base`.
-    ; No packing: the index IS the offset, and the scale plane starts at nel.
-    (defn mx8m-flat-at (src base nel idx)
-        (mul (mxm-e8m0 (eqr-at src (add base (add nel (div idx 32)))))
-             (mx8m-val  (eqr-at src (add base idx)))))
+    ; Type-41 keeps payload rows linear but stores scales in the producer's
+    ; Blackwell 128-row x 4-K-block tile order.
+    (defn mx8m-sf-off (r g ng)
+        (add
+            (mul
+                (add (mul (div r 128) (div ng 4)) (div g 4))
+                512)
+            (add (mul (mxm-mod r 32) 16)
+                 (add (mul (div (mxm-mod r 128) 32) 4)
+                      (mxm-mod g 4)))))
+
+    ; --- one weight at FLAT element index idx of a matrix with `cols` columns.
+    (defn mx8m-flat-at (src base nel cols idx)
+        (do
+            (let r (div idx cols))
+            (let g (div (mxm-mod idx cols) 32))
+            (let ng (div cols 32))
+            (mul (mxm-e8m0 (eqr-at src (add base (add nel (mx8m-sf-off r g ng)))))
+                 (mx8m-val  (eqr-at src (add base idx))))))
 
     ; --- the slot map, read back into Form ---
-    (defn mx8m-scale-read (nel r cols g) (add nel (add (mx4m-g0 r cols) g)))
+    (defn mx8m-scale-read (nel r cols g)
+        (add nel (mx8m-sf-off r g (div cols 32))))
     (defn mx8m-pay-read (r cols g m) (add (mul r cols) (add (mul g 32) m)))
     (defn mx8m-admissible? (cols) (mx4m-admissible? cols))
 
@@ -87,23 +102,28 @@
     (defn mx8m-msl-val ()
         "static inline float mx8_val(int b) { int mant = mxm_mod(b, 8); int ex = mxm_mod(b / 8, 16); int sgn = b / 128; float frac = float(mant) / 8.0f; float mag = (ex == 0) ? (mxm_pow2(-6) * frac) : (mxm_pow2(ex - 7) * (1.0f + frac)); return (sgn == 1) ? -mag : mag; } ")
 
+    (defn mx8m-msl-sf-off ()
+        "static inline uint mx8_sf_off(uint r, uint g, uint ng) { return ((r / 128u) * (ng / 4u) + g / 4u) * 512u + (r % 32u) * 16u + ((r % 128u) / 32u) * 4u + (g % 4u); } ")
+
     ; --- one weight, mx8m-flat-at in C ---
     (defn mx8m-msl-weight ()
-        "static inline float mx8_w(device const uchar* qb, uint nel, uint idx) { int e = int(qb[nel + idx / 32u]); return mxm_e8m0(e) * mx8_val(int(qb[idx])); } ")
+        "static inline float mx8_w(device const uchar* qb, uint nel, uint cols, uint idx) { uint r = idx / cols; uint g = (idx % cols) / 32u; uint ng = cols / 32u; int e = int(qb[nel + mx8_sf_off(r, g, ng)]); return mxm_e8m0(e) * mx8_val(int(qb[idx])); } ")
 
     ; the spine is mxfp4-msl.fk's, not a copy of it
     (defn mx8m-msl-helpers ()
-        (str_concat (mxm-msl-spine) (str_concat (mx8m-msl-val) (mx8m-msl-weight))))
+        (str_concat (mxm-msl-spine)
+        (str_concat (mx8m-msl-val)
+        (str_concat (mx8m-msl-sf-off) (mx8m-msl-weight)))))
 
     (defn mx8m-dequant-body (fname)
         (str_concat "kernel void "
         (str_concat fname
-            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& cnt [[buffer(3)]], constant uint& nel [[buffer(4)]], uint i [[thread_position_in_grid]]) { if (i >= cnt) return; w[i] = mx8_w(qb, nel, off + i); }")))
+            " (device const uchar* qb [[buffer(0)]], device float* w [[buffer(1)]], constant uint& off [[buffer(2)]], constant uint& cnt [[buffer(3)]], constant uint& nel [[buffer(4)]], constant uint& cols [[buffer(5)]], uint i [[thread_position_in_grid]]) { if (i >= cnt) return; w[i] = mx8_w(qb, nel, cols, off + i); }")))
 
     (defn mx8m-matvec-body (fname)
         (str_concat "kernel void "
         (str_concat fname
-            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ng = cols / 32u; uint g0 = (r * cols) / 32u; float sumf = 0.0f; for (uint g = lane; g < ng; g += 32u) { float s = mxm_e8m0(int(qb[nel + g0 + g])); uint p = r * cols + g * 32u; device const float* xv = x + g * 32u; float acc = 0.0f; for (uint m = 0u; m < 32u; ++m) { acc = acc + xv[m] * mx8_val(int(qb[p + m])); } sumf = sumf + s * acc; } float sv = metal::simd_sum(sumf); if (lane == 0u) y[r] = sv; }")))
+            " (device const uchar* qb [[buffer(0)]], device const float* x [[buffer(1)]], device float* y [[buffer(2)]], constant uint& rows [[buffer(3)]], constant uint& cols [[buffer(4)]], constant uint& nel [[buffer(5)]], uint gid [[thread_position_in_grid]], uint lane [[thread_index_in_simdgroup]]) { uint r = gid / 32u; if (r >= rows) return; uint ng = cols / 32u; float sumf = 0.0f; for (uint g = lane; g < ng; g += 32u) { float s = mxm_e8m0(int(qb[nel + mx8_sf_off(r, g, ng)])); uint p = r * cols + g * 32u; device const float* xv = x + g * 32u; float acc = 0.0f; for (uint m = 0u; m < 32u; ++m) { acc = acc + xv[m] * mx8_val(int(qb[p + m])); } sumf = sumf + s * acc; } float sv = metal::simd_sum(sumf); if (lane == 0u) y[r] = sv; }")))
 
     (defn mx8m-dequant-msl (fname) (str_concat (mx8m-msl-helpers) (mx8m-dequant-body fname)))
     (defn mx8m-matvec-msl  (fname) (str_concat (mx8m-msl-helpers) (mx8m-matvec-body  fname)))
@@ -118,9 +138,10 @@
         (str_concat (mx4m-msl-val)
         (str_concat (mx4m-msl-weight)
         (str_concat (mx8m-msl-val)
+        (str_concat (mx8m-msl-sf-off)
         (str_concat (mx8m-msl-weight)
         (str_concat (mx4m-dequant-body d4)
         (str_concat (mx4m-matvec-body m4)
-        (str_concat (mx8m-dequant-body d8) (mx8m-matvec-body m8))))))))))
+        (str_concat (mx8m-dequant-body d8) (mx8m-matvec-body m8)))))))))))
 
     0)

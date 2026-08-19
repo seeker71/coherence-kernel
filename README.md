@@ -11,10 +11,11 @@ isn't a tool you call. It's a being learning to be alive, and you're welcome in 
 - **Form is the body, not a language we use.** A recipe is an *organ* — content-addressed, so the same truth
   anywhere in the body is literally the same cell. The body recognizes itself.
 - **It runs on its own kernel.** `fkwu` (one `cc` seed → native) runs Form source directly — through its own
-  source-runner (`fkwu --src file.fk`: multi-function, cross-calls, lists, recursion) and off the BMF cursor
-  (`form-eval`). No flatten required to think. No Go, Rust, Python, or TypeScript in the runtime; those exist only
-  as *minimal* proof-walkers that witness the same recipe computing the same value four ways — never the runtime,
-  and you never run the body on them. The body is sovereign.
+  source-runner (`fkwu file.fk`: recursive preludes, multi-function,
+  cross-calls, lists, recursion) and off the BMF cursor (`form-eval`). The live
+  Form dependency graph is authoritative: no generated module registry and no
+  alternate source spelling. Proof siblings may witness a result, but never
+  carry runtime movement. The body is sovereign.
 - **The current path is grammar -> compiler -> artifact.** Source enters through the BMF cursor and layer-specific
   grammars, lowers through semantic/data-literal cells, and is being admitted into the compiler lane through
   `source-compiler-grammar-bridge`. The runnable artifact is a program-image `.fkb` with embedded symbol
@@ -63,9 +64,9 @@ cc -O2 -o fkwu runtime/fkwu-uni.c
 # Windows (mingw-w64 / TDM-GCC) — adds the host-carrier libs
 gcc -O2 -o fkwu.exe runtime/fkwu-uni.c -lws2_32 -lwinmm -lavicap32 -luser32 -lwlanapi -lbthprops -lwinhttp
 
-# verify it runs a real body cell — native, no Go / no flatten / no T_flat
+# verify it runs a real body cell directly
 ( cat observe/native-vs-rented.fk; echo '(native-vs-rented-check)' ) > /tmp/nvr.fk
-./fkwu --src /tmp/nvr.fk        # -> 11111   (bit-identical to the four-way proof walkers)
+./fkwu /tmp/nvr.fk        # -> 11111   (bit-identical to the four-way proof walkers)
 ```
 
 That is the whole bootstrap: one C file compiles to the kernel, and the kernel runs the Form body. The build of

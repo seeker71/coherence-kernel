@@ -1,6 +1,6 @@
 # Form-stdlib encoders — modality extractions in the body's tongue
 
-The encoders for the modality lattice. The Go kernel (`bin-go`) walks
+The encoders for the modality lattice. The Go kernel (`retired sibling binary`) walks
 these `.fk` files directly; the teaching `.form` files in
 `docs/coherence-substrate/` describe what each modality IS (recipe
 shape, leaf cells, gaps), these `.fk` files ARE the encoders.
@@ -36,7 +36,7 @@ This is what makes cross-modal Blueprint equivalence load-bearing.
 ## How to run
 
 ```
-bin-go core.fk encoders/modality-frontend.fk encoders/<modality>-encoder.fk
+retired sibling binary core.fk encoders/modality-frontend.fk encoders/<modality>-encoder.fk
 ```
 
 The Go kernel walks `.fk` natively. Each encoder's bottom expression

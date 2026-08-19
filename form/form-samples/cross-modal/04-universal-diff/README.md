@@ -10,14 +10,13 @@ human wanted.
 
 ```bash
 cd <repo-root>
-go build -o /tmp/form-kernel-go ./form/form-kernel-go
 
 # Textual diff — what every diff tool gives you
 diff form/form-samples/cross-modal/04-universal-diff/recursive.fk \
      form/form-samples/cross-modal/04-universal-diff/iterative.fk
 
 # Structural diff — what the substrate gives you
-/tmp/form-kernel-go form/form-samples/cross-modal/04-universal-diff/structural-diff.fk
+./fkwu form/form-samples/cross-modal/04-universal-diff/structural-diff.fk
 ```
 
 ## The two algorithms

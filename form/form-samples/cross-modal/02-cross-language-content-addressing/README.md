@@ -9,8 +9,7 @@ property of the structural tree the tongue compiles to.
 
 ```bash
 cd <repo-root>
-go build -o /tmp/form-kernel-go ./form/form-kernel-go
-/tmp/form-kernel-go form/form-samples/cross-modal/02-cross-language-content-addressing/converge.fk
+./fkwu form/form-samples/cross-modal/02-cross-language-content-addressing/converge.fk
 ```
 
 Output:

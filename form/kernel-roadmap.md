@@ -405,7 +405,7 @@ When picking the next breath: read this top-down, find the first unchecked item,
 ./validate.sh --bench
 
 # Run a single kernel directly (for development / debugging)
-./form-kernel-go/bin-go      form-samples/fact.fk
+./form-kernel-go/retired sibling binary      form-samples/fact.fk
 ./form-kernel-rust/target/release/form-kernel-rust  form-samples/fact.fk
 npx tsx form-kernel-ts/src/main.ts form-samples/fact.fk
 ```

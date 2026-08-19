@@ -55,6 +55,7 @@ FORM_CLI_SRCS=(
     form-stdlib/trust-row.fk form-stdlib/form-cli-ask-gate.fk
     form-stdlib/form-cli-staged-trace.fk form-stdlib/form-cli-request.fk
     form-stdlib/form-cli-carrier.fk form-stdlib/form-cli-ask-plus.fk
+    form-stdlib/form-cli-adaptive-generation.fk form-stdlib/form-cli-adaptive-execute.fk
     form-stdlib/current-branch-landing.fk form-stdlib/form-cli.fk
     form-stdlib/form-cli-gguf-cell.fk form-stdlib/form-cli-repl.fk
 )

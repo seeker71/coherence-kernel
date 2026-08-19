@@ -1,0 +1,176 @@
+; adaptive-local-learning-ladder.fk — model-level local-first inference and learning.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk
+;
+; This joins the tier router's held-out honesty to oracle-distillation's learning
+; receipts.  A model name is never a law.  For each inquiry the body first chooses
+; the cheapest fresh local candidate with sufficient held-out evidence.  If that
+; answer is adjudicated insufficient it chooses the strongest distinct fresh local
+; candidate.  Remote is an explicit third attempt, not an implicit default.
+;
+; Every completed attempt can become a content-addressed prompt => response row.
+; A correction is retained beside the original response; it does not overwrite
+; history.  Adapter lineage names both the base and adapter digests, so continued
+; fine-tuning creates a new descendant rather than silently changing a model name.
+;
+; Proven by: form-stdlib/tests/adaptive-local-learning-ladder-band.fk
+
+(do
+    ; Encode only the SHA-256 byte-list we produce here.  Keeping this small
+    ; avoids pulling the decode sentinel and ontology loader into the hot lane.
+    (defn ail-hex-char (n)
+        (substring "0123456789abcdef" n (add n 1)))
+    (defn ail-hex-loop (bytes acc)
+        (if (eq (len bytes) 0) acc
+            (ail-hex-loop (tail bytes)
+                (str_concat acc
+                    (str_concat (ail-hex-char (div (head bytes) 16))
+                                (ail-hex-char (mod (head bytes) 16)))))))
+    (defn ail-sha256-string (s)
+        (ail-hex-loop (sha256-stream-string s) ""))
+
+    ; model = name, membrane, cost, capacity, heldout passes/attempts,
+    ; observed-at, freshness-window, base digest, adapter digest.
+    (defn ail-model (name membrane cost capacity passes attempts observed-at fresh-for base adapter)
+        (list name membrane cost capacity passes attempts observed-at fresh-for base adapter))
+    (defn ail-m-name (m) (nth m 0))
+    (defn ail-m-membrane (m) (nth m 1))
+    (defn ail-m-cost (m) (nth m 2))
+    (defn ail-m-capacity (m) (nth m 3))
+    (defn ail-m-passes (m) (nth m 4))
+    (defn ail-m-attempts (m) (nth m 5))
+    (defn ail-m-observed-at (m) (nth m 6))
+    (defn ail-m-fresh-for (m) (nth m 7))
+    (defn ail-m-base (m) (nth m 8))
+    (defn ail-m-adapter (m) (nth m 9))
+
+    (defn ail-rate (m)
+        (if (eq (ail-m-attempts m) 0) 0
+            (div (mul 100 (ail-m-passes m)) (ail-m-attempts m))))
+    (defn ail-local? (m) (if (str_eq (ail-m-membrane m) "local") 1 0))
+    (defn ail-fresh? (m now)
+        (if (le (sub now (ail-m-observed-at m)) (ail-m-fresh-for m)) 1 0))
+    (defn ail-lineaged? (m)
+        (if (and (eq (str_len (ail-m-base m)) 64)
+                 (eq (str_len (ail-m-adapter m)) 64)) 1 0))
+    (defn ail-eligible? (m threshold min-samples now)
+        (if (and (eq (ail-local? m) 1)
+            (and (eq (ail-fresh? m now) 1)
+            (and (eq (ail-lineaged? m) 1)
+            (and (ge (ail-m-attempts m) min-samples)
+                 (ge (ail-rate m) threshold))))) 1 0))
+
+    (defn ail-cheaper (a b)
+        (if (lt (ail-m-cost a) (ail-m-cost b)) a
+            (if (gt (ail-m-cost a) (ail-m-cost b)) b
+                (if (gt (ail-rate a) (ail-rate b)) a b))))
+    (defn ail-stronger (a b)
+        (if (gt (ail-m-capacity a) (ail-m-capacity b)) a
+            (if (lt (ail-m-capacity a) (ail-m-capacity b)) b
+                (if (gt (ail-rate a) (ail-rate b)) a b))))
+
+    (defn ail-cheapest-loop (models threshold min-samples now best)
+        (if (eq (len models) 0) best
+            (do (let m (head models))
+                (ail-cheapest-loop (tail models) threshold min-samples now
+                    (if (eq (ail-eligible? m threshold min-samples now) 0) best
+                        (if (eq (len best) 0) m (ail-cheaper m best)))))))
+    (defn ail-cheapest (models threshold min-samples now)
+        (ail-cheapest-loop models threshold min-samples now (empty)))
+
+    (defn ail-strongest-distinct-loop (models excluded threshold min-samples now best)
+        (if (eq (len models) 0) best
+            (do (let m (head models))
+                (ail-strongest-distinct-loop (tail models) excluded threshold min-samples now
+                    (if (or (str_eq (ail-m-name m) excluded)
+                            (eq (ail-eligible? m threshold min-samples now) 0)) best
+                        (if (eq (len best) 0) m (ail-stronger m best)))))))
+    (defn ail-strongest-distinct (models excluded threshold min-samples now)
+        (ail-strongest-distinct-loop models excluded threshold min-samples now (empty)))
+
+    ; plan = cheap candidate, strongest distinct candidate, remote policy.
+    (defn ail-plan (models threshold min-samples now)
+        (do (let cheap (ail-cheapest models threshold min-samples now))
+            (list cheap
+                  (if (eq (len cheap) 0) (empty)
+                      (ail-strongest-distinct models (ail-m-name cheap)
+                                               threshold min-samples now))
+                  "remote-only-after-both-local-attempts-are-insufficient")))
+    (defn ail-plan-cheap (p) (nth p 0))
+    (defn ail-plan-strong (p) (nth p 1))
+    (defn ail-plan-remote-policy (p) (nth p 2))
+
+    ; An attempt contains the exact inspectable pair and the adjudication that
+    ; decides whether another membrane crossing is nutritious.
+    (defn ail-attempt (prompt response correction model stage verdict score at)
+        (list prompt response correction model stage verdict score at
+              (ail-sha256-string prompt)
+              (ail-sha256-string response)))
+    (defn ail-a-prompt (a) (nth a 0))
+    (defn ail-a-response (a) (nth a 1))
+    (defn ail-a-correction (a) (nth a 2))
+    (defn ail-a-model (a) (nth a 3))
+    (defn ail-a-stage (a) (nth a 4))
+    (defn ail-a-verdict (a) (nth a 5))
+    (defn ail-a-score (a) (nth a 6))
+    (defn ail-a-at (a) (nth a 7))
+    (defn ail-a-prompt-sha256 (a) (nth a 8))
+    (defn ail-a-response-sha256 (a) (nth a 9))
+    (defn ail-sufficient? (a threshold)
+        (if (and (str_eq (ail-a-verdict a) "accepted")
+                 (ge (ail-a-score a) threshold)) 1 0))
+    (defn ail-trainable? (a)
+        (if (and (gt (str_len (ail-a-prompt a)) 0)
+            (and (gt (str_len (ail-a-response a)) 0)
+            (and (eq (str_len (ail-a-prompt-sha256 a)) 64)
+                 (eq (str_len (ail-a-response-sha256 a)) 64)))) 1 0))
+
+    ; Preserve the observed response.  The target is the correction when one was
+    ; supplied, otherwise the accepted response.
+    (defn ail-training-target (a)
+        (if (gt (str_len (ail-a-correction a)) 0)
+            (ail-a-correction a) (ail-a-response a)))
+    (defn ail-training-pair (a base-digest adapter-parent)
+        (list "prompt-response-v1"
+              (ail-a-prompt a)
+              (ail-training-target a)
+              (ail-a-response a)
+              (ail-a-verdict a)
+              (ail-a-score a)
+              (ail-a-model a)
+              (ail-a-stage a)
+              base-digest
+              adapter-parent
+              (ail-a-prompt-sha256 a)
+              (ail-a-response-sha256 a)
+              (ail-a-at a)))
+
+    ; next = local-cheap, local-strong, remote, or complete.
+    (defn ail-next (plan attempts threshold)
+        (if (eq (len attempts) 0) "local-cheap"
+            (do (let latest (head attempts))
+                (if (eq (ail-sufficient? latest threshold) 1) "complete"
+                    (if (str_eq (ail-a-stage latest) "local-cheap")
+                        (if (eq (len (ail-plan-strong plan)) 0) "remote" "local-strong")
+                        (if (str_eq (ail-a-stage latest) "local-strong") "remote"
+                            (if (str_eq (ail-a-stage latest) "remote") "complete"
+                                "local-cheap")))))))
+
+    ; A miss after every offered membrane has been walked is not ordinary
+    ; uncertainty.  It is the capability whose support is maximally outsourced.
+    ; Priority rises with capability importance, remote dependence, consecutive
+    ; misses, and the absence of a fresh trainable pair.
+    (defn ail-health-gap (capability importance remote-used consecutive-misses trainable-pair)
+        (list capability
+              (add (mul importance 1000)
+                   (add (mul remote-used 100)
+                        (add (mul consecutive-misses 10)
+                             (if (eq trainable-pair 0) 9 0))))
+              "form-cli-exhausted-native-cheap-local-strong-local-and-remote"
+              remote-used consecutive-misses trainable-pair))
+    (defn ail-gap-capability (g) (nth g 0))
+    (defn ail-gap-priority (g) (nth g 1))
+    (defn ail-higher-gap (a b)
+        (if (gt (ail-gap-priority a) (ail-gap-priority b)) a b))
+
+    0)

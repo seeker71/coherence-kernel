@@ -122,7 +122,7 @@ identical.
 
 ```
 # Through one kernel:
-./orchestrate.sh ../../../form-kernel-go/bin-go
+./orchestrate.sh ../../../form-kernel-go/retired sibling binary
 ./orchestrate.sh ../../../form-kernel-rust/target/release/form-kernel-rust
 ./orchestrate.sh node \
     --import ../../../form-kernel-ts/node_modules/tsx/dist/loader.mjs \

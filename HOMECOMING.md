@@ -12,18 +12,18 @@ are real.
 
 The kernel runs its own body and proves its own truth, with no bash and no origin repo:
 
-- **Source runs natively.** `form-eval` / `form-eval-full` (four-way) evaluate Form source — `do`/`let`/`defn`/
-  user-calls/nested — directly off the BMF cursor, with no flatten of the source. `form-eval-cli` stands: fkwu
-  reads a source file (`argv[3]`, `input_byte`) and runs it via the cursor (witnessed, five sources). Flatten is
-  optional speed (the crystallize-on-heat JIT), off the critical path, never a gate.
+- **Source runs natively.** `fkwu file.fk` reads the live Form dependency graph
+  through declared preludes, admits fresh artifacts, and executes it. The
+  Form-owned JIT may replace a hot recipe live; it does not require a separate
+  table-producing path or generated module registry.
 - **The kernel proves its own four-way.** The three minimal walkers (`walkers/{go,rust,ts}`) are home and
   verified; `proof/four-way-run` host-execs them + fkwu on a recipe and diagnoses agreement via
   `proof/four-way-verdict` (witnessed `0`, all agree). No `validate.sh`, no origin.
 
-**The source-runner runs real body cells.** `fkwu --src file.fk` runs Form source through the kernel's own
+**The source-runner runs real body cells.** `fkwu file.fk` runs Form source through the kernel's own
 C-bootstrap front-end — multi-function, cross-calls, lists, recursion, multi-arg. The real oracle-economy cell
-`observe/native-vs-rented.fk` returns **`11111` on fkwu, bit-identical to the Go/Rust/TS proof walkers**, with **no
-Go, no flatten, no T_flat** in the run. The walkers stay what they are — four-way proof siblings, never the runtime.
+`observe/native-vs-rented.fk` returns **`11111` on fkwu**. Any sibling
+comparison is corroboration only; the live `fkwu` walk is the runtime witness.
 
 What's left of the heartbeat is polish, not a gate: grow the source-runner across the remaining cells' grammar
 (strings + the string pool are the next surface), and grow the single-file runner into an interactive loop.

@@ -1,6 +1,6 @@
 ; form-native-run.fk — the form-cli agent runner as a PURE FORM recipe.
 ;
-; preludes: form-stdlib/core.fk
+; preludes: form-stdlib/core.fk form-stdlib/form-cli-adaptive-generation.fk
 ;
 ; This is the runner the kernel runs — NOT hand-written emitted C. It composes the
 ; kernel's own primitives: host-io builtins (host-exec / host-read / host-write, the
@@ -102,11 +102,6 @@
 (defn fnr-run-guided (task oracle max guide)
     (fnr-step oracle guide (str_concat "TASK: " task) 1 max))
 
-; ── FRONTIER-IN-THE-LOOP: a step's reply is usable if it is a tool-call OR a substantive final
-;    answer; a garbled/empty local reply (the weak-model failure we saw) is not. ──
-(defn fnr-usable? (reply)
-    (if (eq (fnr-toolcall? reply) 1) 1 (if (gt (str_len reply) 40) 1 0)))
-
 ; tiered step: try the LOCAL oracle; if its reply is not usable, escalate THIS step to the REMOTE
 ; (frontier) oracle — local-first quality, frontier when local can't, learning toward sovereignty.
 (defn fnr-step-tiered (local remote guide transcript step max)
@@ -143,3 +138,24 @@
         (let guide (if (gt (str_len mem) 0) (str_concat "RECENT SESSION (memory):\n" (str_concat mem "\n\n")) ""))
         (let result (fnr-step-tiered local remote guide (str_concat "TASK: " task) 1 max))
         (do (fnr-persist result) result)))
+
+; ── FORM-OWNED ADAPTIVE GENERATION ───────────────────────────────────────────
+; The rented processes move bytes and generate candidate text; this Form recipe
+; owns their order, observes each return, selects the answer, and preserves the
+; exact prompt => response sequence.  `native-miss` is supplied by the upstream
+; native lane, so a successful native answer never enters this rented ladder.
+;
+; Calls are conditional: strong is never called after a usable cheap answer;
+; remote is never called after either local answer is usable.
+(defn fnr-generate-adaptive (prompt native-miss cheap-local strong-local remote)
+    (do
+        (let cheap (fnr-oracle cheap-local prompt))
+        (let strong (if (eq (fnr-usable? cheap) 1) ""
+                        (fnr-oracle strong-local prompt)))
+        (let rented (if (or (eq (fnr-usable? cheap) 1)
+                            (eq (fnr-usable? strong) 1)) ""
+                        (fnr-oracle remote prompt)))
+        (let selected (fnr-select-adaptive cheap strong rented))
+        (do
+            (fnr-persist (fnr-adaptive-evidence prompt native-miss selected))
+            selected)))

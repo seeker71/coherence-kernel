@@ -8,8 +8,7 @@ content-addressed, the same recipe always produces the same bytes.
 
 ```bash
 cd <repo-root>
-go build -o /tmp/form-kernel-go ./form/form-kernel-go
-/tmp/form-kernel-go form/form-samples/cross-modal/01-image-as-recipe/gradient-circles.fk
+./fkwu form/form-samples/cross-modal/01-image-as-recipe/gradient-circles.fk
 ```
 
 This emits `gradient-circles.svg` next to the recipe and prints the byte length

@@ -37,18 +37,36 @@
 # zerobirth/edgedrop: every output buffer is NaN-sentinelled and cb.error/cb.status checked.
 # onelean/lapspan: every weight of every layer is reached through the overlapping bytesNoCopy views.
 #
-# Run:  form/native/metal/metal_dsv4_stack.sh
-#   FORM_DS4_STACK_LAYERS=<n>     how many layers to stack (default: the file's block_count)
-#   FORM_DS4_ORACLE_DIR0/DIR7     reuse an already-computed oracle stack instead of running one
-#   FORM_DS4_PROMPT_TOKEN=<id>
+# Run:
+#   form/native/metal/metal_dsv4_stack.sh <model.gguf> <prompt-token> [--rewitness]
+#   form/native/metal/metal_dsv4_stack.sh <model.gguf> <first-token> --generate <token-csv> <n-predict>
 # Off-Mac (or with no swiftc) it SKIPs with exit 2, like every Metal row in GPU_GAPS.md.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"      # .../form
-GO_BIN="$ROOT/form-kernel-go/bin-go"
-BLOB="${FORM_DS4_BLOB:-$HOME/models/ds4/ds4flash-v5mx-reap25-type40-mxfp8lt-dspark-v1.gguf}"
+REPO="$(cd "$ROOT/.." && pwd)"
+FKWU="$REPO/fkwu"
+if (( $# < 2 )); then
+    echo "usage: $0 <model.gguf> <prompt-token> [--rewitness | --generate <token-csv> <n-predict>]"; exit 2
+fi
+BLOB="$1"
 CACHE="$ROOT/native/metal/.metallib-cache"
-TOKEN="${FORM_DS4_PROMPT_TOKEN:-671}"
+TOKEN="$2"
+REWITNESS=0
+GENERATE=0
+PROMPT_IDS="$TOKEN"
+NPREDICT=0
+if (( $# == 3 )); then
+    [[ "$3" == "--rewitness" ]] || { echo "FAIL unknown mode: $3"; exit 2; }
+    REWITNESS=1
+elif (( $# == 5 )); then
+    [[ "$3" == "--generate" ]] || { echo "FAIL unknown mode: $3"; exit 2; }
+    GENERATE=1
+    PROMPT_IDS="$4"
+    NPREDICT="$5"
+elif (( $# != 2 )); then
+    echo "FAIL invalid argument shape"; exit 2
+fi
 POS_A=0
 POS_B=7
 
@@ -56,21 +74,33 @@ if [[ "$(uname -s)" != "Darwin" ]] || ! command -v swiftc >/dev/null; then
     echo "SKIP  no Darwin/Metal toolchain on this host — the GPU witness needs an Apple GPU + swiftc"; exit 2
 fi
 if [[ ! -f "$BLOB" ]]; then
-    echo "SKIP  the ds4 GGUF is not on this host: $BLOB   (set FORM_DS4_BLOB)"; exit 2
+    echo "SKIP  the configured ds4 GGUF is not on this host: $BLOB"; exit 2
 fi
-if [[ ! -x "$GO_BIN" ]]; then
-    echo "  building the Go kernel..."; (cd "$ROOT/form-kernel-go" && go build -o bin-go .) || { echo "FAIL go build"; exit 1; }
+if [[ ! -x "$FKWU" ]]; then
+    echo "FAIL the native fkwu kernel is not executable: $FKWU"; exit 1
 fi
 FSIZE=$(stat -f%z "$BLOB")
-work="$(mktemp -d)"; trap 'rm -rf "$work"' EXIT
+RUN_ROOT="$REPO/.coherence-network/runtime/ds4"
+mkdir -p "$RUN_ROOT"
+work="$(mktemp -d "$RUN_ROOT/request.XXXXXX")"
+run_complete=0
+retain_or_release_run() {
+    if [[ "$run_complete" == 1 ]]; then
+        rm -rf "$work"
+    else
+        printf 'TRACE framebuffer.retained=%s outcome=incomplete inquiry=inspect-retained-run\n' "$work" >&2
+    fi
+}
+trap retain_or_release_run EXIT
 echo "ds4 blob: $FSIZE bytes at $(date '+%H:%M:%S')   THE HETEROGENEOUS STACK (token=$TOKEN)"
 
-# ── the `; preludes:` directives are LIVE recursive load instructions; walked, never hand-catted ──
-fk_deps(){ awk 'BEGIN{IGNORECASE=1} /^;[ \t]*preludes:/{ s=$0; sub(/^;[ \t]*preludes:[ \t]*/,"",s); n=split(s,a,/[ \t]+/); for(i=1;i<=n;i++){ if(a[i]=="\\"||tolower(a[i])=="none"||tolower(a[i])=="(none)"||a[i]=="")continue; if(a[i]~/\.fk$/)print a[i] } }' "$1" 2>/dev/null; }
-fk_path(){ local dir; dir="$(dirname "$1")"; if [[ -f "$dir/$2" ]]; then printf '%s\n' "$dir/$2"; elif [[ -f "$2" ]]; then printf '%s\n' "$2"; elif [[ "$2" == form/* && -f "${2#form/}" ]]; then printf '%s\n' "${2#form/}"; else printf '%s\n' "$dir/$2"; fi; }
-fk_expand(){ local f="$1" d p; case " $FK_SEEN " in *" $f "*) return ;; esac; FK_SEEN="$FK_SEEN $f"; while read -r d; do [[ -z "$d" ]] && continue; p="$(fk_path "$f" "$d")"; fk_expand "$p"; done < <(fk_deps "$f"); printf '%s\n' "$f"; }
-cd "$ROOT"
-FK_SEEN=""; FILES=(); while read -r x; do FILES+=("$x"); done < <(fk_expand native/metal/dsv4-stack-real.fk)
+cd "$REPO"
+run_form() {
+    "$FKWU" "$1"
+}
+form_entry() {
+    printf '; preludes: form/native/metal/dsv4-stack-real.fk\n(defn print (s) (print_str s))\n%s\n' "$2" > "$1"
+}
 
 # ── 1. measure the device ─────────────────────────────────────────────────────────────────────────
 cat > "$work/probe.swift" <<'SWIFT'
@@ -87,13 +117,13 @@ echo "device: $DEVNAME  maxBufferLength=$MAXBUF  page=$PAGE"
 
 # ── 2. the body's residency plan + the manifest, walked over the LIVE file ─────────────────────────
 echo "walking the file header for the residency plan and the manifest..."
-printf '(wre-emit "%s" %s %s %s)\n' "$BLOB" "$FSIZE" "$MAXBUF" "$PAGE" > "$work/plan.fk"
-"$GO_BIN" "${FILES[@]}" "$work/plan.fk" > "$work/plan.out" 2>"$work/plan.err" || { echo "FAIL plan emission"; tail -5 "$work/plan.err"; exit 1; }
+form_entry "$work/plan.fk" "(wre-emit \"$BLOB\" $FSIZE $MAXBUF $PAGE)"
+run_form "$work/plan.fk" > "$work/plan.out" 2>"$work/plan.err" || { echo "FAIL plan emission"; tail -5 "$work/plan.err"; exit 1; }
 grep -qx 'END' "$work/plan.out" || { echo "FAIL plan stream truncated"; exit 1; }
 WR=($(awk '$1=="WR"{print; exit}' "$work/plan.out"))
 STEP=${WR[7]}; VIEWLIMIT=${WR[5]}; NVIEWS=${WR[9]}
-printf '(gm-emit-manifest "%s")\n' "$BLOB" > "$work/man.fk"
-"$GO_BIN" "${FILES[@]}" "$work/man.fk" > "$work/man.out" 2>"$work/man.err" || { echo "FAIL manifest emission"; tail -5 "$work/man.err"; exit 1; }
+form_entry "$work/man.fk" "(gm-emit-manifest \"$BLOB\")"
+run_form "$work/man.fk" > "$work/man.out" 2>"$work/man.err" || { echo "FAIL manifest emission"; tail -5 "$work/man.err"; exit 1; }
 echo "  plan: view_limit=$VIEWLIMIT step=$STEP nviews=$NVIEWS"
 
 # the KV stream the manifest emits is `KV <i> <vtype> <key>` followed by its own value line, so a scalar
@@ -104,13 +134,19 @@ kvf(){ awk -v k="$1" '$1=="KV" && $4==k {w=1; next}
                       $1=="KV" { w=0 }' "$work/man.out"; }
 NLAYER="$(kvf deepseek4.block_count)"
 if [[ -z "$NLAYER" ]]; then echo "FAIL the manifest does not carry deepseek4.block_count"; exit 1; fi
-WANT_LAYERS="${FORM_DS4_STACK_LAYERS:-$NLAYER}"
+WANT_LAYERS="$NLAYER"
+EOS_TOKEN="$(kvf tokenizer.ggml.eos_token_id)"; EOS_TOKEN="${EOS_TOKEN:-1}"
 echo "  the file declares $NLAYER blocks; this run stacks $WANT_LAYERS"
 
 # ── 2a. the WANT list: every tensor every stacked layer touches, named, then resolved in ONE pass ──
 : > "$work/want.txt"
 : > "$work/flags.txt"
 echo "EMB token_embd.weight" >> "$work/want.txt"
+echo "OHF output_hc_fn.weight" >> "$work/want.txt"
+echo "OHS output_hc_scale.weight" >> "$work/want.txt"
+echo "OHB output_hc_base.weight" >> "$work/want.txt"
+echo "ON output_norm.weight" >> "$work/want.txt"
+echo "OUT output.weight" >> "$work/want.txt"
 for ((il=0; il<WANT_LAYERS; il++)); do
     P="blk.$il"
     for pair in "NORM attn_norm" "QA attn_q_a" "QAN attn_q_a_norm" "QB attn_q_b" "KV attn_kv" \
@@ -122,6 +158,17 @@ for ((il=0; il<WANT_LAYERS; il++)); do
         k="${pair%% *}"; t="${pair#* }"
         echo "L${il}_${k} $P.$t.weight" >> "$work/want.txt"
     done
+    # Compressed layers carry their own learned cache recipe. Presence is read from
+    # the live tensor table; no layer number or ratio is assumed here.
+    if awk -v n="$P.attn_compressor_kv.weight" '$1=="T" && $2==n{f=1} END{exit !f}' "$work/man.out"; then
+        echo "L${il}_ACK $P.attn_compressor_kv.weight" >> "$work/want.txt"
+        echo "L${il}_ACG $P.attn_compressor_gate.weight" >> "$work/want.txt"
+        echo "L${il}_ACA $P.attn_compressor_ape.weight" >> "$work/want.txt"
+        echo "L${il}_ACN $P.attn_compressor_norm.weight" >> "$work/want.txt"
+        echo "L${il}_COMPRESSED 1" >> "$work/flags.txt"
+    else
+        echo "L${il}_COMPRESSED 0" >> "$work/flags.txt"
+    fi
     # the two routing regimes carry DIFFERENT tensors; which one a layer has IS the regime.
     if awk -v n="$P.ffn_gate_tid2eid.weight" '$1=="T" && $2==n{f=1} END{exit !f}' "$work/man.out"; then
         echo "L${il}_HT $P.ffn_gate_tid2eid.weight" >> "$work/want.txt"
@@ -157,8 +204,8 @@ BETA_FAST="$(kvf deepseek4.rope.scaling.yarn_beta_fast)";         BETA_FAST="${B
 BETA_SLOW="$(kvf deepseek4.rope.scaling.yarn_beta_slow)";         BETA_SLOW="${BETA_SLOW:-1.0}"
 # the per-layer compress ratios are a HYPER-PARAMETER wearing an array's clothes, and the body already
 # has a reader for exactly that case (gguf-manifest.fk, gm-emit-array). Walked, never guessed.
-printf '(gm-emit-array "%s" "deepseek4.attention.compress_ratios")\n' "$BLOB" > "$work/arr.fk"
-"$GO_BIN" "${FILES[@]}" "$work/arr.fk" > "$work/arr.out" 2>"$work/arr.err" || { echo "FAIL ratio array emission"; tail -5 "$work/arr.err"; exit 1; }
+form_entry "$work/arr.fk" "(gm-emit-array \"$BLOB\" \"deepseek4.attention.compress_ratios\")"
+run_form "$work/arr.fk" > "$work/arr.out" 2>"$work/arr.err" || { echo "FAIL ratio array emission"; tail -5 "$work/arr.err"; exit 1; }
 grep -q '^ARR deepseek4.attention.compress_ratios' "$work/arr.out" || { echo "FAIL the file carries no deepseek4.attention.compress_ratios"; cat "$work/arr.out"; exit 1; }
 RATIOS="$(awk '$1=="A"{ s = s (n++ ? "," : "") $3 } END{ print s }' "$work/arr.out")"
 NRATIO="$(awk '$1=="A"{n++} END{print n+0}' "$work/arr.out")"
@@ -196,14 +243,22 @@ HC_EPS $HC_EPS
 RMS_EPS $RMS_EPS
 WSCALE $WSCALE
 CLAMP $CLAMP
+REWITNESS $REWITNESS
+GENERATE $GENERATE
+PROMPT_IDS $PROMPT_IDS
+NPREDICT $NPREDICT
+EOS_TOKEN $EOS_TOKEN
 EOF
 awk 'NF < 2 { print "FAIL missing value for " $1 > "/dev/stderr"; exit 1 }' "$work/params.txt" || exit 1
 
 # ── 2b. THE RENTED ORACLE, in `stack` mode, at BOTH positions (hushfold) ───────────────────────────
 ORACLE="$ROOT/form-stdlib/tests/dsv4-mla-core-oracle.py"
-[[ -f "$ORACLE" ]] || { echo "FAIL the rented oracle is missing: $ORACLE"; exit 1; }
-ORA0="${FORM_DS4_ORACLE_DIR0:-}"; ORA7="${FORM_DS4_ORACLE_DIR7:-}"
-if [[ -z "$ORA0" || -z "$ORA7" ]]; then
+ORA0=""; ORA7=""
+if [[ "$REWITNESS" == 0 ]]; then
+    ORA0="-"; ORA7="-"
+    echo "  production walk: the already-rewitnessed Metal cells move first; the scalar oracle remains an optional comparison offer"
+elif [[ -z "$ORA0" || -z "$ORA7" ]]; then
+    [[ -f "$ORACLE" ]] || { echo "FAIL the rented oracle is missing: $ORACLE"; exit 1; }
     ORA0="$work/ora$POS_A"; ORA7="$work/ora$POS_B"; mkdir -p "$ORA0" "$ORA7"
     echo "  renting the oracle in STACK mode at pos $POS_A and pos $POS_B over $WANT_LAYERS layers..."
     DSV4_ORACLE_MODE=stack DSV4_ORACLE_OUT="$ORA0" python3 "$ORACLE" "$BLOB" "$TOKEN" "$POS_A" "$WANT_LAYERS" > "$work/ora0.txt" 2>&1 &
@@ -225,8 +280,10 @@ fi
 # the per-layer tilt: the size of the gap an f32 carrier was MEASURED to have when ONE layer is run alone
 # from this oracle's own input (the "THIS LAYER ALONE" gates below report it at every layer; the largest observed is 1.4e-5).
 PERSTEP=1.4e-5
-PER0="${FORM_DS4_PERTURB_DIR0:-}"; PER7="${FORM_DS4_PERTURB_DIR7:-}"
-if [[ -z "$PER0" || -z "$PER7" ]]; then
+PER0=""; PER7=""
+if [[ "$REWITNESS" == 0 ]]; then
+    PER0="-"; PER7="-"
+elif [[ -z "$PER0" || -z "$PER7" ]]; then
     PER0="$work/per$POS_A"; PER7="$work/per$POS_B"; mkdir -p "$PER0" "$PER7"
     echo "  renting the oracle AGAIN, tilted by $PERSTEP after EVERY layer, to measure how far two runs of"
     echo "  the same recipe drift apart when one is nudged each layer by as much as f32 nudges it..."
@@ -238,26 +295,30 @@ if [[ -z "$PER0" || -z "$PER7" ]]; then
 else
     echo "  reusing pre-computed one-ulp sensitivity stacks: $PER0 and $PER7"
 fi
-# a partial oracle still gates a PREFIX; how far it got is read from its own done ledger, never assumed.
+# A partial oracle can still witness a prefix; how far it got is read from its own done ledger, never assumed.
 done_count(){ local n; n=$(wc -l < "$1/oracle-done.txt" 2>/dev/null | tr -d ' '); echo "${n:-0}"; }
 AVAIL=$WANT_LAYERS
-for d in "$ORA0" "$ORA7" "$PER0" "$PER7"; do n=$(done_count "$d"); (( n < AVAIL )) && AVAIL=$n; done
-if (( AVAIL < WANT_LAYERS )); then
-    echo "  the oracle has completed $AVAIL/$WANT_LAYERS layers at both positions — gating that PREFIX (aporon)"
+if [[ "$REWITNESS" != 0 ]]; then
+  for d in "$ORA0" "$ORA7" "$PER0" "$PER7"; do n=$(done_count "$d"); (( n < AVAIL )) && AVAIL=$n; done
+fi
+if [[ "$REWITNESS" != 0 ]] && (( AVAIL < WANT_LAYERS )); then
+    echo "  the oracle has completed $AVAIL/$WANT_LAYERS layers at both positions — witnessing that PREFIX (aporon)"
     WANT_LAYERS=$AVAIL
     sed -i '' "s/^NLAYERS .*/NLAYERS $WANT_LAYERS/" "$work/params.txt"
 fi
-(( WANT_LAYERS > 0 )) || { echo "FAIL the oracle produced no completed layer"; exit 1; }
-if cmp -s "$ORA0/oracle-L$((WANT_LAYERS-1))-out_hc.f64" "$ORA7/oracle-L$((WANT_LAYERS-1))-out_hc.f64"; then
+(( WANT_LAYERS > 0 )) || { echo "FAIL no layer is available to walk"; exit 1; }
+if [[ "$REWITNESS" != 0 ]] && cmp -s "$ORA0/oracle-L$((WANT_LAYERS-1))-out_hc.f64" "$ORA7/oracle-L$((WANT_LAYERS-1))-out_hc.f64"; then
     echo "FAIL hushfold: the ORACLE's own stack output is identical at pos $POS_A and pos $POS_B"; exit 1
 fi
-echo "  hushfold: the ORACLE's stack output already differs between pos $POS_A and pos $POS_B — the GPU must too"
+if [[ "$REWITNESS" != 0 ]]; then
+    echo "  hushfold: the ORACLE's stack output already differs between pos $POS_A and pos $POS_B — the GPU must too"
+fi
 
 # ── 3. compile the translation units, cached by sha ────────────────────────────────────────────────
 compile_unit() { # $1 emit-form  $2 grep-token  $3 cache-prefix -> echoes LIB path
     local form="$1" tok="$2" pre="$3" lib sha
-    echo "($form)" > "$work/$pre.fk"
-    "$GO_BIN" "${FILES[@]}" "$work/$pre.fk" > "$work/$pre.out" 2>"$work/$pre.err" || { echo "FAIL $pre MSL emission" >&2; cat "$work/$pre.err" >&2; return 1; }
+    form_entry "$work/$pre.fk" "($form)"
+    run_form "$work/$pre.fk" > "$work/$pre.out" 2>"$work/$pre.err" || { echo "FAIL $pre MSL emission" >&2; cat "$work/$pre.err" >&2; return 1; }
     awk '/^MSL$/{d=1;next} /^END$/{d=0;next} d{print}' "$work/$pre.out" > "$work/$pre.metal"
     grep -q "$tok" "$work/$pre.metal" || { echo "FAIL $pre kernel $tok not emitted" >&2; return 1; }
     sha="$(shasum -a 256 "$work/$pre.metal" | cut -c1-16)"; lib="$CACHE/$pre-$sha.metallib"
@@ -279,6 +340,7 @@ LIB_HC="$(compile_unit   dsv4-hc-unit          form_hc_split_f32              ds
 LIB_MX4="$(compile_unit  dsv4-mx4-matvec-msl   form_dsv4_mx4_matvec           dsv4mx4)"    || exit 1
 LIB_IQ2="$(compile_unit  dsv4-iq2-matvec-msl   form_dsv4_iq2_matvec           dsv4iq2)"    || exit 1
 LIB_FFN="$(compile_unit  dsv4-stack-ffn-unit   form_dsv4_topk_weights         dsv4stkffn)" || exit 1
+LIB_KV="$(compile_unit    dkv-append-msl-unit   form_dkv_append_f32            dsv4kv)"      || exit 1
 
 # ── 4. the carrier ─────────────────────────────────────────────────────────────────────────────────
 cat > "$work/runner.swift" <<'SWIFT'
@@ -296,8 +358,13 @@ func I(_ k: String) -> Int { guard let v = P[k], let n = Int(v) else { print("FA
 func F(_ k: String) -> Float { guard let v = P[k], let n = Float(v) else { print("FAIL missing float param \(k)"); exit(1) }; return n }
 let libEmb = argv[3], libMla = argv[4], lib8 = argv[5], libCore = argv[6], libHc = argv[7]
 let libMx4 = argv[8], libIq2 = argv[9], libFfn = argv[10]
-let oraDirA = argv[11], oraDirB = argv[12]
-let perDirA = argv[13], perDirB = argv[14]
+let libKv = argv[11]
+let oraDirA = argv[12], oraDirB = argv[13]
+let perDirA = argv[14], perDirB = argv[15]
+let reWitness = I("REWITNESS") != 0
+let generateMode = I("GENERATE") != 0
+let promptIds = (P["PROMPT_IDS"] ?? "").split(separator: ",").compactMap { Int($0) }
+let nPredict = I("NPREDICT")
 
 struct Tn { let abs: Int, bytes: Int, idx: Int, inner: Int, holds: Int, d0: Int, d1: Int, d2: Int, type: Int
             var rows: Int { d1 }
@@ -308,6 +375,8 @@ func T(_ k: String) -> Tn {
               holds: I(k+"_HOLDS"), d0: I(k+"_D0"), d1: I(k+"_D1"), d2: I(k+"_D2"), type: I(k+"_TYPE"))
 }
 let emb = T("EMB")
+let ohf = T("OHF"), ohs = T("OHS"), ohb = T("OHB")
+let outNorm = T("ON"), outWeight = T("OUT")
 let step = I("STEP"), viewLimit = I("VIEWLIMIT"), nviews = I("NVIEWS"), token = I("TOKEN")
 let nLayers = I("NLAYERS")
 let nEmbd = I("N_EMBD"), nHead = I("N_HEAD"), headDim = I("HEAD_DIM"), nRot = I("N_ROT"), oRank = I("O_RANK")
@@ -323,6 +392,7 @@ struct LayerW {
     let nrm, qa, qan, qb, kv, kvan, snk, oa, ob: Tn
     let haf, has, hab, hff, hfs, hfb: Tn
     let fnw, rt, gx, ux, dx, sgw, suw, sdw: Tn
+    let ack, acg, aca, acn: Tn?
     let ht: Tn?, bias: Tn?
     let hashed: Bool, ratio: Int
     var nExpStack: Int { gx.d2 }          // the PER-LAYER expert count: the tensor's own dim[2]
@@ -337,6 +407,10 @@ func layerW(_ il: Int) -> LayerW {
                   hff: T(p+"HFF"), hfs: T(p+"HFS"), hfb: T(p+"HFB"),
                   fnw: T(p+"FN"), rt: T(p+"RT"), gx: T(p+"GX"), ux: T(p+"UX"), dx: T(p+"DX"),
                   sgw: T(p+"SG"), suw: T(p+"SU"), sdw: T(p+"SD"),
+                  ack: I(p+"COMPRESSED") == 1 ? T(p+"ACK") : nil,
+                  acg: I(p+"COMPRESSED") == 1 ? T(p+"ACG") : nil,
+                  aca: I(p+"COMPRESSED") == 1 ? T(p+"ACA") : nil,
+                  acn: I(p+"COMPRESSED") == 1 ? T(p+"ACN") : nil,
                   ht: hashed ? T(p+"HT") : nil, bias: hashed ? nil : T(p+"BI"),
                   hashed: hashed, ratio: I(p+"RATIO"))
 }
@@ -344,18 +418,21 @@ let LW = (0..<nLayers).map { layerW($0) }
 
 guard let dev = MTLCreateSystemDefaultDevice() else { print("SKIP no Metal device"); exit(2) }
 func lib(_ p: String) -> MTLLibrary { return try! dev.makeLibrary(URL: URL(fileURLWithPath: p)) }
+let libraryLoadStarted = Date()
 let lEmb = lib(libEmb), lMla = lib(libMla), l8 = lib(lib8), lCore = lib(libCore), lHc = lib(libHc)
-let lMx4 = lib(libMx4), lIq2 = lib(libIq2), lFfn = lib(libFfn)
+let lMx4 = lib(libMx4), lIq2 = lib(libIq2), lFfn = lib(libFfn), lKv = lib(libKv)
+let libraryLoadMs = Date().timeIntervalSince(libraryLoadStarted) * 1000.0
 let queue = dev.makeCommandQueue()!
 var failures = 0, gpuErrors = 0
 var gpuFirstError: String? = nil
-var gateNo = 0
+var observationNo = 0
 func check(_ ok: Bool, _ pass: String, _ fail: String) {
-    gateNo += 1
-    if ok { print("PASS  gate \(gateNo) " + pass) } else { print("FAIL  gate \(gateNo) " + fail); failures += 1 }
+    observationNo += 1
+    if ok { print("WITNESSED  observation \(observationNo) " + pass) } else { print("UNWITNESSED  observation \(observationNo) " + fail); failures += 1 }
 }
 
 // ---- the file, mmapped once and wrapped in the body's own overlapping views (onelean/lapspan) ----
+let modelMapStarted = Date()
 let fd = open(blobPath, O_RDONLY)
 guard fd >= 0 else { print("FAIL cannot open blob"); exit(1) }
 var st = stat(); fstat(fd, &st)
@@ -372,16 +449,24 @@ for i in 0..<nviews {
     }
     views.append(buf)
 }
+let modelMapMs = Date().timeIntervalSince(modelMapStarted) * 1000.0
 check(views.count == nviews,
   "the views map: all \(nviews) overlapping page-aligned bytesNoCopy views of the \(fileLen) B file wrap on \(dev.name) — one buffer over the whole file cannot (maxBufferLength \(dev.maxBufferLength))",
   "only \(views.count)/\(nviews) views mapped")
 if failures > 0 { print("VERDICT FAIL the views did not map"); exit(1) }
+print(String(format: "TRACE membrane.form-msl-to-metal-library needed=1 why=gpu-execution-currently-requires-loaded-metallib source=form-recipes destination=metal-runtime shape=9-libraries data=compiled-kernels elapsed-ms=%.3f copy=load native-without-crossing=candidate-form-jit-direct-install freshness=this-process outcome=success", libraryLoadMs))
+print("TRACE membrane.gguf-file-to-metal-view needed=1 why=current-metal-cell-addresses-local-weight-pages source=os-mmap destination=metal-shared-buffer shape=\(fileLen)-bytes+\(nviews)-overlapping-views data=model-weights elapsed-ms=\(String(format: "%.3f", modelMapMs)) copy=bytesNoCopy native-without-crossing=candidate-native-metal-file-page-owner freshness=this-open outcome=success")
 
 // ---- gate 2: RESIDENCY over EVERY tensor of EVERY stacked layer, and the per-layer table said out loud
 var spanning: [String] = []
 var groups: [String: [Int]] = [:]
 func resident(_ n: String, _ t: Tn) { if t.holds != 1 || t.idx >= nviews { spanning.append(n) } }
 resident("token_embd", emb)
+resident("output_hc_fn", ohf)
+resident("output_hc_scale", ohs)
+resident("output_hc_base", ohb)
+resident("output_norm", outNorm)
+resident("output", outWeight)
 for il in 0..<nLayers {
     let w = LW[il]
     let named: [(String, Tn)] = [("attn_norm", w.nrm), ("attn_q_a", w.qa), ("attn_q_a_norm", w.qan),
@@ -538,6 +623,7 @@ let pHcRmsNw = pipe(lHc, "form_hc_rmsnorm_nw_f32")
 let pHcSplit = pipe(lHc, "form_hc_split_f32")
 let pHcWsum = pipe(lHc, "form_hc_wsum_f32")
 let pHcPost = pipe(lHc, "form_hc_post_f32")
+let pHcHeadw = pipe(lHc, "form_hc_headw_f32")
 let pMx4 = pipe(lMx4, "form_dsv4_mx4_matvec")
 let pIq2 = pipe(lIq2, "form_dsv4_iq2_matvec")
 let pSwiglu = pipe(lFfn, "form_dsv4_swiglu_f32")
@@ -546,6 +632,11 @@ let pAxpy = pipe(lFfn, "form_dsv4_axpy_f32")
 let pHashSel = pipe(lFfn, "form_dsv4_hash_select")
 let pHashW = pipe(lFfn, "form_dsv4_hash_weights")
 let pTopkW = pipe(lFfn, "form_dsv4_topk_weights")
+let pKvAppend = pipe(lKv, "form_dkv_append_f32")
+let pCompStage = pipe(lKv, "form_dkv_compressor_stage_f32")
+let pCompPool = pipe(lKv, "form_dkv_compressor_pool_f32")
+let pCompRoll4 = pipe(lKv, "form_dkv_compressor_roll4_f32")
+let pAttendMixed = pipe(lKv, "form_dkv_attend_mixed_f32")
 
 func gpuRmsnorm(_ x: MTLBuffer, _ n: Int, _ t: Tn) -> MTLBuffer {
     let out = sentinelled(n); var n32 = UInt32(n), e = eps
@@ -620,14 +711,58 @@ func gpuKvRound(_ v: MTLBuffer) -> MTLBuffer {
                            c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) }
     return out
 }
-func gpuAttend(_ q: MTLBuffer, _ rows: MTLBuffer, _ snk: Tn) -> MTLBuffer {
+func gpuAttend(_ q: MTLBuffer, _ rows: MTLBuffer, _ snk: Tn, _ nrows: Int) -> MTLBuffer {
     let out = sentinelled(nHead*headDim)
-    var a = UInt32(nHead), b = UInt32(headDim), c32 = UInt32(1), sc = 1.0/sqrtf(Float(headDim))
+    var a = UInt32(nHead), b = UInt32(headDim), c32 = UInt32(nrows), sc = 1.0/sqrtf(Float(headDim))
     enc(pAttend, nHead, 32) { c in c.setBuffer(q, offset: 0, index: 0); c.setBuffer(rows, offset: 0, index: 1)
                                    c.setBuffer(out, offset: 0, index: 2)
                                    c.setBuffer(views[snk.idx], offset: snk.inner, index: 3)
                                    c.setBytes(&a, length: 4, index: 4); c.setBytes(&b, length: 4, index: 5)
                                    c.setBytes(&c32, length: 4, index: 6); c.setBytes(&sc, length: 4, index: 7) }
+    return out
+}
+func gpuCompStage(_ kv: MTLBuffer, _ score: MTLBuffer, _ ape: Tn,
+                  _ stateKV: MTLBuffer, _ stateScore: MTLBuffer,
+                  _ width: Int, _ ratio: Int, _ pos: Int) {
+    var w = UInt32(width), r = UInt32(ratio), p = UInt32(pos)
+    enc(pCompStage, width, 256) { c in
+        c.setBuffer(kv, offset: 0, index: 0); c.setBuffer(score, offset: 0, index: 1)
+        c.setBuffer(views[ape.idx], offset: ape.inner, index: 2)
+        c.setBuffer(stateKV, offset: 0, index: 3); c.setBuffer(stateScore, offset: 0, index: 4)
+        c.setBytes(&w, length: 4, index: 5); c.setBytes(&r, length: 4, index: 6)
+        c.setBytes(&p, length: 4, index: 7)
+    }
+}
+func gpuCompPool(_ stateKV: MTLBuffer, _ stateScore: MTLBuffer, _ ratio: Int) -> MTLBuffer {
+    let out = sentinelled(headDim)
+    var hd = UInt32(headDim), r = UInt32(ratio)
+    enc(pCompPool, headDim, 256) { c in
+        c.setBuffer(stateKV, offset: 0, index: 0); c.setBuffer(stateScore, offset: 0, index: 1)
+        c.setBuffer(out, offset: 0, index: 2)
+        c.setBytes(&hd, length: 4, index: 3); c.setBytes(&r, length: 4, index: 4)
+    }
+    return out
+}
+func gpuCompRoll4(_ stateKV: MTLBuffer, _ stateScore: MTLBuffer, _ width: Int) {
+    var w = UInt32(width)
+    enc(pCompRoll4, 4 * width, 256) { c in
+        c.setBuffer(stateKV, offset: 0, index: 0); c.setBuffer(stateScore, offset: 0, index: 1)
+        c.setBytes(&w, length: 4, index: 2)
+    }
+}
+func gpuAttendMixed(_ q: MTLBuffer, _ raw: MTLBuffer, _ comp: MTLBuffer,
+                    _ snk: Tn, _ nraw: Int, _ ncomp: Int) -> MTLBuffer {
+    let out = sentinelled(nHead * headDim)
+    var nh = UInt32(nHead), hd = UInt32(headDim), nr = UInt32(nraw), nc = UInt32(ncomp)
+    var sc = 1.0 / sqrtf(Float(headDim))
+    enc(pAttendMixed, nHead, 32) { c in
+        c.setBuffer(q, offset: 0, index: 0); c.setBuffer(raw, offset: 0, index: 1)
+        c.setBuffer(comp, offset: 0, index: 2); c.setBuffer(out, offset: 0, index: 3)
+        c.setBuffer(views[snk.idx], offset: snk.inner, index: 4)
+        c.setBytes(&nh, length: 4, index: 5); c.setBytes(&hd, length: 4, index: 6)
+        c.setBytes(&nr, length: 4, index: 7); c.setBytes(&nc, length: 4, index: 8)
+        c.setBytes(&sc, length: 4, index: 9)
+    }
     return out
 }
 func gpuGrouped(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
@@ -645,6 +780,58 @@ func gpuF16mv(_ t: Tn, _ x: MTLBuffer) -> MTLBuffer {
                                     c.setBuffer(out, offset: 0, index: 2)
                                     c.setBytes(&r, length: 4, index: 3); c.setBytes(&c32, length: 4, index: 4) }
     return out
+}
+
+// The real output head: ds4.c output_hc_head_one -> output RMSNorm ->
+// output.weight. Every arithmetic kernel is emitted by the Form body above;
+// this carrier binds the live GGUF tensors and makes the final argmax visible.
+func gpuOutputHead(_ streams: MTLBuffer) -> (Int, Float, Int) {
+    let flat = sentinelled(hcDim)
+    do {
+        var n = UInt32(hcDim), e0 = eps
+        enc(pHcRmsNw, 1, 1) { c in
+            c.setBuffer(streams, offset: 0, index: 0)
+            c.setBuffer(flat, offset: 0, index: 1)
+            c.setBytes(&n, length: 4, index: 2)
+            c.setBytes(&e0, length: 4, index: 3)
+        }
+    }
+    let pre = gpuF16mv(ohf, flat)
+    let weights = sentinelled(nHc)
+    do {
+        var nh = UInt32(nHc), e0 = eps
+        enc(pHcHeadw, nHc, 64) { c in
+            c.setBuffer(pre, offset: 0, index: 0)
+            c.setBuffer(views[ohs.idx], offset: ohs.inner, index: 1)
+            c.setBuffer(views[ohb.idx], offset: ohb.inner, index: 2)
+            c.setBuffer(weights, offset: 0, index: 3)
+            c.setBytes(&nh, length: 4, index: 4)
+            c.setBytes(&e0, length: 4, index: 5)
+        }
+    }
+    let collapsed = sentinelled(nEmbd)
+    do {
+        var nh = UInt32(nHc), ne = UInt32(nEmbd)
+        enc(pHcWsum, nEmbd, 256) { c in
+            c.setBuffer(streams, offset: 0, index: 0)
+            c.setBuffer(weights, offset: 0, index: 1)
+            c.setBuffer(collapsed, offset: 0, index: 2)
+            c.setBytes(&nh, length: 4, index: 3)
+            c.setBytes(&ne, length: 4, index: 4)
+        }
+    }
+    let normalized = gpuRmsnorm(collapsed, nEmbd, outNorm)
+    let logits = gpuMx8(outWeight, normalized, outWeight.d1, outWeight.d0)
+    let lp = logits.contents().bindMemory(to: Float.self, capacity: outWeight.d1)
+    var best = 0, bestv = -Float.greatestFiniteMagnitude, finite = 0
+    for i in 0..<outWeight.d1 {
+        let v = lp[i]
+        if v.isFinite {
+            finite += 1
+            if v > bestv { best = i; bestv = v }
+        }
+    }
+    return (best, bestv, finite)
 }
 // THE PER-LAYER TYPE DISPATCH. The view is bound at the EXPERT's own byte slice, so the kernel's
 // r*cols+j indices address inside that expert and never form a 32-bit offset into an 85 GiB file.
@@ -683,6 +870,27 @@ struct LayerOut {
     let moe: MTLBuffer, shared: MTLBuffer, ffnOut: MTLBuffer, outHc: MTLBuffer
 }
 
+final class DKVState {
+    let ratio: Int, rawCap: Int, compCap: Int, width: Int
+    let raw: MTLBuffer, comp: MTLBuffer, stateKV: MTLBuffer, stateScore: MTLBuffer
+    var nRaw = 0, nComp = 0
+
+    init(device: MTLDevice, headWidth: Int, ratio: Int, totalPositions: Int) {
+        self.ratio = ratio
+        rawCap = min(128, totalPositions)
+        compCap = ratio > 0 ? (totalPositions / ratio + 2) : 1
+        width = ratio == 4 ? 2 * headWidth : headWidth
+        raw = device.makeBuffer(length: max(1, rawCap * headWidth * 4), options: .storageModeShared)!
+        comp = device.makeBuffer(length: max(1, compCap * headWidth * 4), options: .storageModeShared)!
+        let stateRows = ratio > 0 ? (ratio == 4 ? 8 : ratio) : 1
+        stateKV = device.makeBuffer(length: max(1, stateRows * width * 4), options: .storageModeShared)!
+        stateScore = device.makeBuffer(length: max(1, stateRows * width * 4), options: .storageModeShared)!
+        let kp = stateKV.contents().bindMemory(to: Float.self, capacity: max(1, stateRows * width))
+        let sp = stateScore.contents().bindMemory(to: Float.self, capacity: max(1, stateRows * width))
+        for i in 0..<max(1, stateRows * width) { kp[i] = 0; sp[i] = -Float.greatestFiniteMagnitude }
+    }
+}
+
 func hcPre(_ resid: MTLBuffer, _ fn: Tn, _ sc: Tn, _ bs: Tn) -> (MTLBuffer, MTLBuffer) {
     let flat = sentinelled(hcDim)
     do { var n = UInt32(hcDim), e0 = eps
@@ -713,7 +921,7 @@ func hcPost(_ blockOut: MTLBuffer, _ resid: MTLBuffer, _ split: MTLBuffer) -> MT
                                   c.setBytes(&a, length: 4, index: 5); c.setBytes(&b, length: 4, index: 6) }
     return out
 }
-func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
+func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int, _ caches: [DKVState]?) -> MTLBuffer {
     let w = LW[il]
     let xn = gpuRmsnorm(input, nEmbd, w.nrm)
     let ql = gpuMx8(w.qa, xn, w.qa.rows, w.qa.cols)
@@ -725,16 +933,73 @@ func mlaBlock(_ input: MTLBuffer, _ pos: Int, _ il: Int) -> MTLBuffer {
     let kln = gpuRmsnorm(kl, w.kv.rows, w.kvan)
     let kr = gpuRope(kln, 1, pos, il, false)
     let kq = gpuKvRound(kr)
-    let ha = gpuAttend(qr, kq, w.snk)
+    let rows: MTLBuffer
+    let nrows: Int
+    if let allCaches = caches {
+        let cache = allCaches[il]
+        guard cache.nRaw < cache.rawCap else {
+            print("FAIL raw-SWA ring rollover is not yet witnessed at layer \(il), position \(pos)")
+            exit(1)
+        }
+        rows = cache.raw
+        var hd32 = UInt32(headDim), pos32 = UInt32(cache.nRaw), cap32 = UInt32(cache.rawCap)
+        enc(pKvAppend, headDim, 256) { c in
+            c.setBuffer(kq, offset: 0, index: 0)
+            c.setBuffer(rows, offset: 0, index: 1)
+            c.setBytes(&hd32, length: 4, index: 2)
+            c.setBytes(&pos32, length: 4, index: 3)
+            c.setBytes(&cap32, length: 4, index: 4)
+        }
+        cache.nRaw += 1
+        if cache.ratio > 0 {
+            guard let ack = w.ack, let acg = w.acg, let aca = w.aca, let acn = w.acn else {
+                print("FAIL compressed layer \(il) has ratio \(cache.ratio) but no learned compressor tensors")
+                exit(1)
+            }
+            let kvCur = gpuF16mv(ack, xn)
+            let scoreCur = gpuF16mv(acg, xn)
+            gpuCompStage(kvCur, scoreCur, aca, cache.stateKV, cache.stateScore,
+                         cache.width, cache.ratio, pos)
+            if (pos + 1) % cache.ratio == 0 {
+                let pooled = gpuCompPool(cache.stateKV, cache.stateScore, cache.ratio)
+                let normalized = gpuRmsnorm(pooled, headDim, acn)
+                // ds4.c compressor_decode_one: the summary belongs to the first
+                // position of its source window, not to its ordinal in comp_kv.
+                let compPos = pos + 1 - cache.ratio
+                let rotated = gpuRope(normalized, 1, compPos, il, false)
+                let rounded = gpuKvRound(rotated)
+                var cp = UInt32(cache.nComp), cc = UInt32(cache.compCap)
+                enc(pKvAppend, headDim, 256) { c in
+                    c.setBuffer(rounded, offset: 0, index: 0); c.setBuffer(cache.comp, offset: 0, index: 1)
+                    c.setBytes(&hd32, length: 4, index: 2); c.setBytes(&cp, length: 4, index: 3)
+                    c.setBytes(&cc, length: 4, index: 4)
+                }
+                cache.nComp += 1
+                if cache.ratio == 4 { gpuCompRoll4(cache.stateKV, cache.stateScore, cache.width) }
+            }
+            nrows = cache.nRaw + cache.nComp
+        } else {
+            nrows = cache.nRaw
+        }
+    } else {
+        rows = kq
+        nrows = 1
+    }
+    let ha: MTLBuffer
+    if let cache = caches?[il], cache.ratio > 0 {
+        ha = gpuAttendMixed(qr, cache.raw, cache.comp, w.snk, cache.nRaw, cache.nComp)
+    } else {
+        ha = gpuAttend(qr, rows, w.snk, nrows)
+    }
     let hu = gpuRope(ha, nHead, pos, il, true)
     let lo = gpuGrouped(w.oa, hu)
     return gpuMx8(w.ob, lo, w.ob.rows, w.ob.cols)
 }
 
-func runLayer(_ il: Int, _ pos: Int, _ residHc: MTLBuffer) -> LayerOut {
+func runLayer(_ il: Int, _ pos: Int, _ residHc: MTLBuffer, _ tokenId: Int, _ caches: [DKVState]? = nil) -> LayerOut {
     let w = LW[il]
     let (attnCur, attnSplit) = hcPre(residHc, w.haf, w.has, w.hab)
-    let attnOut = mlaBlock(attnCur, pos, il)
+    let attnOut = mlaBlock(attnCur, pos, il, caches)
     let afterAttn = hcPost(attnOut, residHc, attnSplit)
 
     let (ffnCur, ffnSplit) = hcPre(afterAttn, w.hff, w.hfs, w.hfb)
@@ -747,7 +1012,7 @@ func runLayer(_ il: Int, _ pos: Int, _ residHc: MTLBuffer) -> LayerOut {
         // forepick (row 867): the six experts come from an I32 TABLE READ on the token id, and the
         // router only WEIGHTS them. A top-k here would be the layer-3-and-up recipe applied to a hash layer.
         let ht = w.ht!
-        var t32 = UInt32(token), nu = UInt32(nUsed)
+        var t32 = UInt32(tokenId), nu = UInt32(nUsed)
         enc(pHashSel, nUsed, 8) { c in c.setBuffer(views[ht.idx], offset: ht.inner, index: 0)
                                        c.setBuffer(idsBuf, offset: 0, index: 1)
                                        c.setBytes(&t32, length: 4, index: 2); c.setBytes(&nu, length: 4, index: 3) }
@@ -808,7 +1073,9 @@ func runLayer(_ il: Int, _ pos: Int, _ residHc: MTLBuffer) -> LayerOut {
                     ids: ids, wts: wts, gate0: g0, up0: u0, mid0: m0, down0: d0,
                     moe: moe, shared: shared, ffnOut: ffnOut, outHc: outHc)
 }
-func fp(_ b: MTLBuffer, _ n: Int) -> UnsafeMutablePointer<Float> { return b.contents().bindMemory(to: Float.self, capacity: n) }
+func fp(_ b: MTLBuffer, _ n: Int) -> UnsafeMutablePointer<Float> {
+    return b.contents().bindMemory(to: Float.self, capacity: n)
+}
 // the oracle's own fp64 vector, rounded to f32 and handed to the device: an INJECTED input, so a kernel
 // can be judged without the stack's accumulated drift standing between it and its reference.
 func oracleBuf(_ dir: String, _ il: Int, _ key: String) -> (MTLBuffer, Int) {
@@ -825,16 +1092,28 @@ func sentinelledCopy(_ a: [Float]) -> MTLBuffer {
     return b
 }
 
-// ---- the token's embedding, broadcast to the four streams: THE stack's input (ds4.c:9764) ----
-let rowOff = token * nEmbd * 2
-let x0 = sentinelled(nEmbd)
-do { var b64 = UInt64(emb.inner + rowOff), c32 = UInt32(nEmbd)
-     enc(pEmb, nEmbd, 256) { c in c.setBuffer(views[emb.idx], offset: 0, index: 0); c.setBuffer(x0, offset: 0, index: 1)
-                                  c.setBytes(&b64, length: 8, index: 2); c.setBytes(&c32, length: 4, index: 3) } }
-let residHc0 = sentinelled(hcDim)
-do { var a = UInt32(nHc), b = UInt32(nEmbd)
-     enc(pHcBcast, hcDim, 256) { c in c.setBuffer(x0, offset: 0, index: 0); c.setBuffer(residHc0, offset: 0, index: 1)
-                                      c.setBytes(&a, length: 4, index: 2); c.setBytes(&b, length: 4, index: 3) } }
+// ---- token embedding, broadcast to the four streams (ds4.c:9764) ----
+func embedToken(_ tokenId: Int) -> MTLBuffer {
+    let rowOff = tokenId * nEmbd * 2
+    let x = sentinelled(nEmbd)
+    do { var b64 = UInt64(emb.inner + rowOff), c32 = UInt32(nEmbd)
+         enc(pEmb, nEmbd, 256) { c in
+            c.setBuffer(views[emb.idx], offset: 0, index: 0)
+            c.setBuffer(x, offset: 0, index: 1)
+            c.setBytes(&b64, length: 8, index: 2)
+            c.setBytes(&c32, length: 4, index: 3)
+         } }
+    let hc = sentinelled(hcDim)
+    do { var a = UInt32(nHc), b = UInt32(nEmbd)
+         enc(pHcBcast, hcDim, 256) { c in
+            c.setBuffer(x, offset: 0, index: 0)
+            c.setBuffer(hc, offset: 0, index: 1)
+            c.setBytes(&a, length: 4, index: 2)
+            c.setBytes(&b, length: 4, index: 3)
+         } }
+    return hc
+}
+let residHc0 = embedToken(token)
 
 // the WITNESS layers: the first layer of every distinct group, plus layer 1. Those get the full gate set
 // (the routing decision, the six weights, the first expert's whole path, the two accumulations); every
@@ -865,10 +1144,25 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
     for il in 0..<nLayers {
         let w = LW[il]
         let t0 = Date()
-        let R = runLayer(il, pos, resid)
+        let R = runLayer(il, pos, resid, token)
         let ms = Date().timeIntervalSince(t0) * 1000.0
         msPerLayer[il, default: []].append(ms)
         let tag = "blk.\(il) [gate/up \(w.gx.type) down \(w.dx.type) n_exp \(w.nExpStack) \(w.hashed ? "hash" : "top-k") rope \(w.ratio == 0 ? "plain" : "compressed(\(w.ratio))")]"
+
+        if !reWitness {
+            let routeOK = !R.ids.isEmpty && R.ids.allSatisfy { $0 >= 0 && $0 < w.nExpStack }
+            check(routeOK && gpuErrors == 0,
+              "\(tag) production slice pos \(pos): routed experts \(R.ids), \(String(format: "%.1f", ms)) ms, command buffers clean",
+              "\(tag) production slice pos \(pos): invalid route \(R.ids) or \(gpuErrors) command-buffer errors")
+            if !(routeOK && gpuErrors == 0) { layerFail += 1 }
+            resid = R.outHc
+            if il == nLayers - 1 {
+                var v = [Float](repeating: 0, count: hcDim)
+                let op = fp(R.outHc, hcDim); for i in 0..<hcDim { v[i] = op[i] }
+                finalByPos[pos] = v
+            }
+            continue
+        }
 
         // selfgauge: no number below was chosen to make this harness green. The envelope is measured
         // from the reference's own one-ulp sensitivity, and the floor is Stone 37's measured single-layer
@@ -957,7 +1251,7 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
         do {
             let (inR, inN) = il == 0 ? (residHc0, hcDim) : oracleBuf(oraDir, il-1, "out_hc")
             if inN == hcDim {
-                let J = runLayer(il, pos, inR)
+                let J = runLayer(il, pos, inR, token)
                 let ref = readOracle(oraDir, il, "out_hc")
                 let (ok, nd, _, _, mr, nn, ds, mn, mx, l2) = cmpOra(fp(J.outHc, hcDim), ref, [], 3e-5)
                 injNd[il, default: []].append(nd)
@@ -978,8 +1272,112 @@ func runStack(_ pos: Int, _ oraDir: String, _ perDir: String) {
     }
 }
 
+if generateMode {
+    guard !promptIds.isEmpty, nPredict > 0 else {
+        print("FAIL generation request needs prompt tokens and n-predict > 0")
+        exit(1)
+    }
+    let eosToken = I("EOS_TOKEN")
+    let cacheCap = promptIds.count + nPredict
+    let caches = (0..<nLayers).map {
+        DKVState(device: dev, headWidth: headDim, ratio: LW[$0].ratio, totalPositions: cacheCap)
+    }
+    print("TRACE request.model=\(blobPath)")
+    print("TRACE request.prompt-token-count=\(promptIds.count)")
+    print("TRACE request.prompt-tokens=\(promptIds.map(String.init).joined(separator: ","))")
+    print("TRACE request.n-predict=\(nPredict)")
+    print("TRACE dependency.layers=gguf:deepseek4.block_count:\(nLayers)")
+    print("TRACE dependency.eos=gguf:tokenizer.ggml.eos_token_id:\(eosToken)")
+    print("TRACE membrane.host-to-metal-command needed=1 why=current-form-kernels-execute-on-gpu source=swift-carrier destination=metal-command-queue shape=\(nLayers)-layers+x\(promptIds.count)-prompt-tokens data=buffer-bindings+dispatches elapsed-ms=pending copy=bindings-only native-without-crossing=candidate-form-native-command-encoder freshness=this-request outcome=entered")
+    print("TRACE state.raw-swa=\(nLayers)x\(min(128, cacheCap))x\(headDim)x4")
+    print("TRACE state.compress-ratios=\(LW.map { String($0.ratio) }.joined(separator: ","))")
+
+    func decodeToken(_ tokenId: Int, _ pos: Int) -> (Int, Float, Int, Double) {
+        let started = Date()
+        var resid = embedToken(tokenId)
+        for il in 0..<nLayers {
+            let r = runLayer(il, pos, resid, tokenId, caches)
+            guard !r.ids.isEmpty && r.ids.allSatisfy({ $0 >= 0 && $0 < LW[il].nExpStack }) else {
+                print("FAIL decode route at layer \(il), position \(pos): \(r.ids)")
+                exit(1)
+            }
+            resid = r.outHc
+        }
+        let (next, logit, finite) = gpuOutputHead(resid)
+        return (next, logit, finite, Date().timeIntervalSince(started) * 1000.0)
+    }
+
+    // ds4.c prefill_layer_major_cpu: every prompt row crosses layer 0 before
+    // any row crosses layer 1.  Decode below remains token-major.
+    let prefillStarted = Date()
+    var promptState = promptIds.map { embedToken($0) }
+    for il in 0..<nLayers {
+        let layerStarted = Date()
+        for pos in 0..<promptIds.count {
+            let r = runLayer(il, pos, promptState[pos], promptIds[pos], caches)
+            guard !r.ids.isEmpty && r.ids.allSatisfy({ $0 >= 0 && $0 < LW[il].nExpStack }) else {
+                print("FAIL prefill route at layer \(il), position \(pos): \(r.ids)")
+                exit(1)
+            }
+            promptState[pos] = r.outHc
+        }
+        print("TRACE stage.prefill.layer=\(il) positions=\(promptIds.count) raw-rows=\(caches[il].nRaw) compressed-rows=\(caches[il].nComp) elapsed-ms=\(String(format: "%.1f", Date().timeIntervalSince(layerStarted) * 1000.0))")
+    }
+    let first = gpuOutputHead(promptState[promptState.count - 1])
+    var next = first.0
+    print("TRACE stage.prefill.schedule=layer-major")
+    print("TRACE stage.prefill.last-position=\(promptIds.count - 1) input-token=\(promptIds.last!) next-token=\(first.0) logit=\(first.1) finite-logits=\(first.2) elapsed-ms=\(String(format: "%.1f", Date().timeIntervalSince(prefillStarted) * 1000.0))")
+    guard first.2 == outWeight.d1 else {
+        print("FAIL non-finite prefill logits at final position")
+        exit(1)
+    }
+
+    var generated: [Int] = []
+    var stop = "n-predict"
+    for i in 0..<nPredict {
+        if next == eosToken {
+            stop = "eos-before-emit"
+            break
+        }
+        generated.append(next)
+        print("TRACE stage.decode.index=\(i) emitted-token=\(next)")
+        if i + 1 < nPredict {
+            let pos = promptIds.count + i
+            let r = decodeToken(next, pos)
+            print("TRACE stage.decode.position=\(pos) input-token=\(next) next-token=\(r.0) logit=\(r.1) finite-logits=\(r.2) elapsed-ms=\(String(format: "%.1f", r.3))")
+            guard r.2 == outWeight.d1 else {
+                print("FAIL non-finite decode logits at position \(pos)")
+                exit(1)
+            }
+            next = r.0
+        }
+    }
+    print("DS4-GENERATED-TOKEN-IDS \(generated.map(String.init).joined(separator: ","))")
+    print("TRACE result.stop=\(stop)")
+    print("TRACE state.kv-positions=\(promptIds.count + max(0, generated.count - 1))")
+    print("TRACE state.raw-rows=\(caches.map { String($0.nRaw) }.joined(separator: ","))")
+    print("TRACE state.compressed-rows=\(caches.map { String($0.nComp) }.joined(separator: ","))")
+    let generationElapsedMs = Date().timeIntervalSince(prefillStarted) * 1000.0
+    print("TRACE membrane.metal-to-host-result needed=1 why=form-tokenizer-needs-selected-token-ids source=metal-shared-results destination=swift-carrier shape=\(generated.count)-u32-token-ids data=\(generated.map(String.init).joined(separator: ",")) elapsed-ms=\(String(format: "%.3f", generationElapsedMs)) copy=shared-buffer-read native-without-crossing=candidate-tokenizer-on-metal-or-form-owned-shared-result freshness=this-request outcome=success")
+    print("ACK 1 offline-generation witnessed prompt=\(promptIds.count) generated=\(generated.count) remote=0 go=0 python=0")
+    exit(0)
+}
+
 let tA = Date(); runStack(posA, oraDirA, perDirA); let wallA = Date().timeIntervalSince(tA)
 let tB = Date(); runStack(posB, oraDirB, perDirB); let wallB = Date().timeIntervalSince(tB)
+
+if let final = finalByPos[posA] {
+    let finalBuf = dev.makeBuffer(bytes: final, length: final.count * 4,
+                                  options: .storageModeShared)!
+    let (tokenId, tokenLogit, finiteLogits) = gpuOutputHead(finalBuf)
+    let tokenOK = tokenId >= 0 && tokenId < outWeight.d1 &&
+                  finiteLogits == outWeight.d1 && tokenLogit.isFinite
+    check(tokenOK,
+      "REAL OUTPUT HEAD: HC collapse -> output RMSNorm -> MXFP8 vocab projection produced token id \(tokenId), logit \(tokenLogit), with \(finiteLogits)/\(outWeight.d1) finite logits",
+      "output head token \(tokenId), logit \(tokenLogit), finite \(finiteLogits)/\(outWeight.d1)")
+    print("DS4-FIRST-TOKEN-ID \(tokenId)")
+    print("DS4-FIRST-TOKEN-LOGIT \(tokenLogit)")
+}
 
 // ── hushfold at STACK scale ────────────────────────────────────────────────────────────────────────
 var posDiff = 0; var maxDelta: Float = 0
@@ -987,8 +1385,10 @@ if let a = finalByPos[posA], let b = finalByPos[posB] {
     for i in 0..<min(a.count, b.count) { if a[i] != b[i] { posDiff += 1; maxDelta = max(maxDelta, abs(a[i]-b[i])) } }
 }
 check(posDiff > 0 && layerFail == 0,
-  "hushfold at stack scale: the same token's output after all \(nLayers) layers differs between pos \(posA) and pos \(posB) in \(posDiff)/\(hcDim) entries (max delta \(maxDelta)) while every layer of both runs agrees with its OWN oracle",
-  "hushfold: \(posDiff) differing entries, \(layerFail) failed layer gates")
+  reWitness
+    ? "hushfold at stack scale: the same token's output after all \(nLayers) layers differs between pos \(posA) and pos \(posB) in \(posDiff)/\(hcDim) entries (max delta \(maxDelta)) while every layer of both runs agrees with its OWN oracle"
+    : "production hushfold: position changed \(posDiff)/\(hcDim) final-state entries (max delta \(maxDelta)); all live routing and command-buffer checks passed",
+  "hushfold: \(posDiff) differing entries, \(layerFail) unwitnessed layer observations")
 
 if gpuErrors > 0 { print("=== \(gpuErrors) COMMAND BUFFER ERROR(S) — first: \(gpuFirstError ?? "unknown") ===") }
 // unispan: a per-layer time from ONE run is a guess; each layer is timed at BOTH positions.
@@ -1019,9 +1419,13 @@ print(String(format: "      device.currentAllocatedSize = %ld B (%.2f GiB) — t
 
 let ok = failures == 0 && gpuErrors == 0
 if ok {
-    print("VERDICT PASS  \(gateNo) gates — \(nLayers) HETEROGENEOUS DeepSeek-V4-Flash LAYERS STACKED at real dims over the 85 GiB file, the four hyper-connection streams carried from each layer into the next, every per-layer decision (expert count, gate/up and down type, routing regime, rope regime) read from the file's own tensor table, at TWO positions, every choosing surface against a rented fp64 ds4.c transcription and every dispatch sentinelled")
+    if reWitness {
+        print("ACK 1  \(observationNo) observations witnessed — \(nLayers) HETEROGENEOUS DeepSeek-V4-Flash LAYERS STACKED at real dims over the 85 GiB file, the four hyper-connection streams carried from each layer into the next, every per-layer decision (expert count, gate/up and down type, routing regime, rope regime) read from the file's own tensor table, at TWO positions, every choosing surface compared with a rented fp64 ds4.c transcription and every dispatch sentinelled")
+    } else {
+        print("ACK 1  \(observationNo) live observations witnessed — \(nLayers) HETEROGENEOUS DeepSeek-V4-Flash LAYERS moved on cached Form-emitted Metal cells at TWO positions; scalar comparison was not requested")
+    }
 } else {
-    print("VERDICT FAIL  \(failures) gate(s), \(gpuErrors) cb errors")
+    print("ACK 0  \(failures) unwitnessed observation(s), \(gpuErrors) command-buffer errors; movement remains free and the trace offers the next inquiry")
 }
 exit(ok ? 0 : 1)
 SWIFT
@@ -1029,6 +1433,9 @@ swiftc -O -o "$work/runner" "$work/runner.swift" 2>"$work/swift.err" || { echo "
 
 "$work/runner" "$work/params.txt" "$BLOB" \
     "$LIB_EMB" "$LIB_MLA" "$LIB8" "$LIB_CORE" "$LIB_HC" \
-    "$LIB_MX4" "$LIB_IQ2" "$LIB_FFN" "$ORA0" "$ORA7" "$PER0" "$PER7"
+    "$LIB_MX4" "$LIB_IQ2" "$LIB_FFN" "$LIB_KV" "$ORA0" "$ORA7" "$PER0" "$PER7"
 rc=$?
+if [[ "$rc" == 0 ]]; then
+    run_complete=1
+fi
 exit $rc
