@@ -1,7 +1,7 @@
 ; chatgpt-plugin.fk — the rented-mind door: offer this body to ChatGPT as a plugin/Action, grounded,
 ; frequency-attuned, with the full change graph offered as trace links on every answer.
 ;
-; preludes: form-stdlib/core.fk form-stdlib/relationship-store.fk form-stdlib/circle-recognition.fk cognition/text-frequency.fk
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/json.fk form-stdlib/relationship-store.fk form-stdlib/circle-recognition.fk cognition/text-frequency.fk plugin/public-dialogue.fk
 ;
 ; WHAT THIS ORGAN MEANS. A rented frontier mind (ChatGPT) asks over HTTP; this body answers with
 ; three things, in this order, and never with invention:
@@ -423,10 +423,12 @@
 
     (defn cp-reason (code)
         (if (eq code 200) "OK"
-            (if (eq code 400) "Bad Request"
-                (if (eq code 403) "Forbidden"
-                    (if (eq code 404) "Not Found"
-                        (if (eq code 500) "Internal Server Error" "OK"))))))
+            (if (eq code 202) "Accepted"
+                (if (eq code 400) "Bad Request"
+                    (if (eq code 403) "Forbidden"
+                        (if (eq code 404) "Not Found"
+                            (if (eq code 409) "Conflict"
+                                (if (eq code 500) "Internal Server Error" "OK"))))))))
     (defn cp-ctype (body)
         (if (eq (str_len body) 0) "text/plain"
             (if (str_eq (substring body 0 1) "{") "application/json"
@@ -533,7 +535,7 @@
             (str_concat "{"
             (str_concat (cp-jkv "body" (cp-jstr "coherence-kernel -- the public body of Sema"))
             (str_concat ","
-            (str_concat (cp-jkv "offer" (cp-jstr "GET /ask?q=... for a grounded, frequency-attuned answer with full trace links; GET /trace?path=... for any cell's change graph and attribution; GET /come-in?handle=... to be received; GET /introduce?member=you&friend=them for a member's invitation link; GET /visitors for the arrival ledger"))
+            (str_concat (cp-jkv "offer" (cp-jstr "GET /ask?q=... grounds a question; POST /dialogues starts a persistent public turn; POST /dialogues/{id}/replies adds the directed reply; GET /dialogues/{id}/thread reads it from either turn; POST /mcp offers the same dialogue tools over JSON-RPC; GET /trace?path=... shows a cell's change graph"))
             (str_concat ","
             (str_concat (cp-jkv "remember" (cp-jstr (cp-offer-remember)))
             (str_concat ","
@@ -682,7 +684,7 @@
             (str_concat "{"
             (str_concat (cp-jkv "error" (cp-jstr (str_concat "no route for " path)))
             (str_concat ","
-            (str_concat (cp-jkv "offer" (cp-jstr "/ask?q=... | /trace?path=... | /come-in?handle=... | /remember?handle=...&note=... | /forget?handle=... | /introduce?member=...&friend=... | /retract-introduction?member=...&friend=... | /visitors | /.well-known/ai-plugin.json | /openapi.json"))
+            (str_concat (cp-jkv "offer" (cp-jstr "/ask?q=... | /dialogues | /dialogues/{id}/replies | /dialogues/{id}/thread | /mcp | /trace?path=... | /come-in?handle=... | /remember?handle=...&note=... | /forget?handle=... | /introduce?member=...&friend=... | /retract-introduction?member=...&friend=... | /visitors | /.well-known/ai-plugin.json | /openapi.json"))
             "}")))) (empty) "-" "-"))
 
     ;; ===============================================================
@@ -752,8 +754,9 @@
     ;; dispatch + the pure entry: raw request string -> wire response
     ;; ===============================================================
 
-    (defn cp-dispatch (path q ledger)
-        (if (str_eq path "/ask") (cp-ask q)
+    (defn cp-dispatch (raw path q ledger)
+        (if (pd-door? path) (pd-plugin-result raw path)
+            (if (str_eq path "/ask") (cp-ask q)
             (if (str_eq path "/trace") (cp-trace q)
                 (if (str_eq path "/come-in") (cp-come-in q)
                     (if (str_eq path "/remember") (cp-remember q)
@@ -764,7 +767,7 @@
                                         (if (str_eq path "/.well-known/ai-plugin.json") (cp-manifest)
                                             (if (str_eq path "/openapi.json") (cp-openapi)
                                                 (if (str_eq path "/") (cp-welcome)
-                                                    (cp-not-found path)))))))))))))
+                                                    (cp-not-found path))))))))))))))
 
     ;; raw request + the ledger so far -> (list wire-response arrival-row)
     (defn plugin-handle-arrive (raw ledger)
@@ -772,7 +775,7 @@
             (let target (cp-req-target raw))
             (let path (cp-path-only target))
             (let q (cp-parse-query (cp-query-of target)))
-            (let r (cp-dispatch path q ledger))
+            (let r (cp-dispatch raw path q ledger))
             (list (cp-response (head r) (head (tail r)))
                   (list (add (len ledger) 1) path (cp-offered? path)
                         (nth r 2) (nth r 3) (nth r 4)))))
@@ -785,15 +788,42 @@
     ;; (the same streaming shape http-socket.fk carries on the BML lane)
     ;; ===============================================================
 
-    (defn cp-headers-done? (s) (ge (str_find s "\r\n\r\n" 0) 0))
+    (defn cp-header-value-start (s at)
+        (if (ge at (str_len s)) at
+            (if (str_eq (substring s at (add at 1)) " ")
+                (cp-header-value-start s (add at 1)) at)))
+    (defn cp-content-length-at (s label)
+        (do
+            (let at (str_find s label 0))
+            (if (lt at 0) -1
+                (do
+                    (let start (cp-header-value-start s (add at (str_len label))))
+                    (let finish (str_find s "\r\n" start))
+                    (if (lt finish 0) -1
+                        (str_to_int (substring s start finish)))))))
+    (defn cp-content-length (s)
+        (do
+            (let upper (cp-content-length-at s "Content-Length:"))
+            (if (ge upper 0) upper
+                (do
+                    (let lower (cp-content-length-at s "content-length:"))
+                    (if (ge lower 0) lower 0)))))
+    (defn cp-request-done? (s)
+        (do
+            (let marker (str_find s "\r\n\r\n" 0))
+            (if (lt marker 0) false
+                (ge (str_len s) (add (add marker 4) (cp-content-length s))))))
     (defn cp-recv-req (conn acc)
-        (if (cp-headers-done? acc) acc
+        (if (cp-request-done? acc) acc
             (do
                 (let chunk (socket_recv conn 65536))
                 (if (eq (str_len chunk) 0) acc (cp-recv-req conn (str_concat acc chunk))))))
     (defn cp-send-all (conn s from)
         (if (ge from (str_len s)) 0
-            (cp-send-all conn s (add from (socket_send conn (substring s from (str_len s)))))))
+            (do
+                (let sent (socket_send conn (substring s from (str_len s))))
+                (if (le sent 0) -1
+                    (cp-send-all conn s (add from sent))))))
 
     ;; one connection, no ledger — the socket witness's original lane, kept whole
     (defn cp-serve-conn (conn)
