@@ -1,0 +1,83 @@
+; qwen35-tokenizer.fk — Qwen3.5/Qwen3.8 GPT-2 byte BPE from the selected GGUF.
+;
+; Vocab, merges, special-token text, and ids are read from tokenizer.ggml.*.  Qwen's pre-tokenizer
+; differs from the existing joyai lane at one load-bearing ASCII rule: every decimal digit is its own
+; piece, rather than a run capped at three.  The remaining byte-oriented splitter carries ordinary
+; UTF-8 letter runs, contractions, punctuation/newline runs, and whitespace without constructing
+; invalid byte strings.  The BPE candidate filter, merge-rank fold, vocab lookup, and byte-exact
+; decode are the already-proven dsv4-tokenizer recipes.
+;
+; The one-user-message chat sequence is rendered from the model's own special-token strings.  Its
+; layout is the enable_thinking=false branch of tokenizer.chat_template stored in the GGUF:
+; user turn, assistant turn, then an empty <think></think> block.  No numeric special id is compiled
+; in; q35-special-id finds each literal in tokenizer.ggml.tokens at runtime.
+;
+; preludes: form-stdlib/dsv4-tokenizer.fk
+
+(do
+    (defn q35-next-piece (s L pos)
+        (do (let c (str_byte_at s pos))
+            (let e
+                (if (eq (tkz-digit c) 1) (tkz-eat-digits s L pos 1)
+                (if (eq (tkz-cjk s pos) 1) (tkz-eat-cjk s L pos)
+                (if (if (if (eq (tkz-punct c) 1) (lt (add pos 1) L) 0)
+                        (tkz-alpha (str_byte_at s (add pos 1))) 0)
+                    (tkz-eat-alpha s L (add pos 1))
+                (if (eq (tkz-letter-like s pos) 1) (tkz-eat-letters s L pos)
+                (if (if (if (if (eq (tkz-newline c) 0) (eq (tkz-punct c) 0) 0)
+                            (lt (add pos 1) L) 0)
+                        (tkz-letter-like s (add pos 1)) 0)
+                    (tkz-eat-letters s L (add pos 1))
+                (if (if (if (eq c 32) (lt (add pos 1) L) 0)
+                        (tkz-punct (str_byte_at s (add pos 1))) 0)
+                    (tkz-eat-newlines s L (tkz-eat-punct s L (add pos 1)))
+                (if (eq (tkz-punct c) 1) (tkz-eat-newlines s L (tkz-eat-punct s L pos))
+                (if (eq (tkz-space c) 1) (tkz-space-end s L pos)
+                    (add pos (tkz-ulen s pos)))))))))))
+            (if (eq e pos) (add pos (tkz-ulen s pos)) e)))
+
+    (defn q35-encode-from (src cands inp L pos acc)
+        (if (lt pos L)
+            (do (let end (q35-next-piece inp L pos))
+                (q35-encode-from src cands inp L end
+                    (tkz-ids-of-syms src (tkz-bpe-c cands (tkz-syms inp pos end)) acc)))
+            acc))
+    (defn q35-encode (src inp)
+        (do (let L (str_len inp))
+            (q35-encode-from src
+                (tkz-cands src (tkz-merges-first src) (tkz-merges-n src) inp L
+                           (tkz-pres inp L 0) (tkz-pos0 L 0) (empty))
+                inp L 0 (empty))))
+
+    (defn q35-lit-bytes-eq (src at literal j n)
+        (if (eq j n) 1
+            (if (eq (gmt-token-byte src at j) (str_byte_at literal j))
+                (q35-lit-bytes-eq src at literal (add j 1) n)
+                0)))
+    (defn q35-lit-eq (src at literal)
+        (do (let n (gmt-token-len src at))
+            (if (eq n (str_len literal)) (q35-lit-bytes-eq src at literal 0 n) 0)))
+    (defn q35-special-scan (src at id n literal)
+        (if (eq id n) (sub 0 1)
+            (if (q35-lit-eq src at literal) id
+                (q35-special-scan src (gmt-token-next src at) (add id 1) n literal))))
+    (defn q35-special-id (src literal)
+        (q35-special-scan src (gmt-tokens-first src) 0 (gmt-vocab-n src) literal))
+    (defn q35-one (x) (list x))
+    (defn q35-chat-ids (src prompt)
+        (do (let ims (q35-special-id src "<|im_start|>"))
+            (let ime (q35-special-id src "<|im_end|>"))
+            (let ths (q35-special-id src "<think>"))
+            (let the (q35-special-id src "</think>"))
+            (tkz-cat (q35-one ims)
+            (tkz-cat (q35-encode src "user\n")
+            (tkz-cat (q35-encode src prompt)
+            (tkz-cat (q35-one ime)
+            (tkz-cat (q35-encode src "\n")
+            (tkz-cat (q35-one ims)
+            (tkz-cat (q35-encode src "assistant\n")
+            (tkz-cat (q35-one ths)
+            (tkz-cat (q35-encode src "\n\n")
+            (tkz-cat (q35-one the)
+                     (q35-encode src "\n\n")))))))))))))
+    0)
