@@ -1,0 +1,462 @@
+; public-dialogue.fk — persistent public dialogue cells, edges, HTTP, and MCP in Form.
+;
+; preludes: form-stdlib/core.fk form-stdlib/sha256.fk form-stdlib/json.fk form-stdlib/relationship-store.fk
+;
+; A turn owns its own removal capability.  Public reads expose the turn and its
+; directed parent edge, never the capability or its digest.  Release removes
+; the turn's content and leaves a content-free tombstone so the graph can still
+; be observed from either connected turn after a restart.
+
+(do
+    (defn pd-dir () "plugin/dialogues")
+    (defn pd-disclosure () "public-unlisted-thread-v2")
+
+    ; ----- bounded public text ---------------------------------------------
+    (defn pd-text-ok-loop (s i)
+        (if (eq i (str_len s)) 1
+            (do
+                (let b (str_byte_at s i))
+                (if (lt b 32) 0 (pd-text-ok-loop s (add i 1))))))
+    (defn pd-text-ok? (s maximum)
+        (if (gt (str_len s) 0)
+            (if (le (str_len s) maximum) (pd-text-ok-loop s 0) 0)
+            0))
+    (defn pd-locale-ok? (s) (pd-text-ok? s 80))
+    (defn pd-id-char-ok? (b)
+        (or (and (ge b 48) (le b 57))
+            (or (and (ge b 97) (le b 122)) (eq b 45))))
+    (defn pd-id-ok-loop (s i)
+        (if (eq i (str_len s)) 1
+            (if (pd-id-char-ok? (str_byte_at s i))
+                (pd-id-ok-loop s (add i 1)) 0)))
+    (defn pd-id-ok? (s)
+        (if (gt (str_len s) 0)
+            (if (le (str_len s) 80) (pd-id-ok-loop s 0) 0)
+            0))
+
+    ; ----- ids and private capability digests -----------------------------
+    (defn pd-hex-digit (n)
+        (if (lt n 10) (byte_to_str (add 48 n)) (byte_to_str (add 87 n))))
+    (defn pd-hex-byte (b)
+        (str_concat (pd-hex-digit (div b 16)) (pd-hex-digit (mod b 16))))
+    (defn pd-hex-loop (bytes out)
+        (if (eq (len bytes) 0) out
+            (pd-hex-loop (tail bytes) (str_concat out (pd-hex-byte (head bytes))))))
+    (defn pd-hex-string-loop (bytes index out)
+        (if (eq index (str_len bytes)) out
+            (pd-hex-string-loop bytes (add index 1)
+                (str_concat out (pd-hex-byte (str_byte_at bytes index))))))
+    (defn pd-random-hex (count)
+        (pd-hex-string-loop (read_file_slice "/dev/urandom" 0 count) 0 ""))
+    (defn pd-new-id () (str_concat "dlg-" (pd-random-hex 16)))
+    (defn pd-new-token () (str_concat "remove-" (pd-random-hex 32)))
+    (defn pd-token-digest (token)
+        (pd-hex-loop (sha256-stream-string token) ""))
+    (defn pd-constant-match-loop (left right index difference)
+        (if (eq index (str_len left)) (if (eq difference 0) 1 0)
+            (pd-constant-match-loop left right (add index 1)
+                (bor difference
+                    (bxor (str_byte_at left index) (str_byte_at right index))))))
+    (defn pd-constant-match? (left right)
+        (if (eq (str_len left) (str_len right))
+            (pd-constant-match-loop left right 0 0) 0))
+
+    ; ----- durable field cells --------------------------------------------
+    (defn pd-key (id field) (str_concat id (str_concat "-" field)))
+    (defn pd-has-field? (dir id field) (rs-known? dir (pd-key id field)))
+    (defn pd-read (dir id field)
+        (if (pd-has-field? dir id field) (rs-recall dir (pd-key id field)) ""))
+    (defn pd-write (dir id field value) (rs-remember dir (pd-key id field) value))
+    (defn pd-forget (dir id field) (rs-forget dir (pd-key id field)))
+    (defn pd-record? (dir id) (pd-has-field? dir id "state"))
+    (defn pd-active? (dir id)
+        (if (pd-record? dir id)
+            (if (str_eq (pd-read dir id "state") "tombstoned") 0 1)
+            0))
+
+    ; ----- comma list of safe dialogue ids --------------------------------
+    (defn pd-csv-loop (s start)
+        (do
+            (let comma (str_find s "," start))
+            (if (eq comma -1)
+                (list (substring s start (str_len s)))
+                (cons (substring s start comma) (pd-csv-loop s (add comma 1))))))
+    (defn pd-csv (s) (if (eq (str_len s) 0) (empty) (pd-csv-loop s 0)))
+    (defn pd-root-turns (dir root) (pd-csv (pd-read dir root "turns")))
+    (defn pd-append-turn (dir root id)
+        (do
+            (let current (pd-read dir root "turns"))
+            (pd-write dir root "turns"
+                (if (eq (str_len current) 0) id
+                    (str_concat current (str_concat "," id))))))
+
+    ; ----- JSON ------------------------------------------------------------
+    (defn pd-jesc-byte (b)
+        (if (eq b 34) "\\\""
+            (if (eq b 92) "\\\\"
+                (if (eq b 10) "\\n"
+                    (if (eq b 13) "\\r"
+                        (if (eq b 9) "\\t"
+                            (if (lt b 32) " " (byte_to_str b))))))))
+    (defn pd-jesc-loop (s i out)
+        (if (eq i (str_len s)) out
+            (pd-jesc-loop s (add i 1)
+                (str_concat out (pd-jesc-byte (str_byte_at s i))))))
+    (defn pd-jstr (s) (str_concat "\"" (str_concat (pd-jesc-loop s 0 "") "\"")))
+    (defn pd-jkv (key value) (str_concat (pd-jstr key) (str_concat ":" value)))
+    (defn pd-error-json (message)
+        (str_concat "{" (str_concat (pd-jkv "error" (pd-jstr message)) "}")))
+    (defn pd-result (code body) (list code body))
+    (defn pd-code (result) (nth result 0))
+    (defn pd-body (result) (nth result 1))
+
+    (defn pd-turn-json (dir id)
+        (do
+            (let state (pd-read dir id "state"))
+            (let parent (pd-read dir id "parent"))
+            (if (str_eq state "tombstoned")
+                (str_concat "{"
+                    (str_concat (pd-jkv "id" (pd-jstr id))
+                    (str_concat ","
+                    (str_concat (pd-jkv "state" (pd-jstr "tombstoned"))
+                    (str_concat ","
+                    (str_concat (pd-jkv "parent_dialogue_id"
+                        (if (eq (str_len parent) 0) "null" (pd-jstr parent)))
+                    "}"))))))
+                (str_concat "{"
+                    (str_concat (pd-jkv "id" (pd-jstr id))
+                    (str_concat ","
+                    (str_concat (pd-jkv "state" (pd-jstr state))
+                    (str_concat ","
+                    (str_concat (pd-jkv "question" (pd-jstr (pd-read dir id "question")))
+                    (str_concat ","
+                    (str_concat (pd-jkv "point_of_view" (pd-jstr (pd-read dir id "point")))
+                    (str_concat ","
+                    (str_concat (pd-jkv "locale" (pd-jstr (pd-read dir id "locale")))
+                    (str_concat ","
+                    (str_concat (pd-jkv "parent_dialogue_id"
+                        (if (eq (str_len parent) 0) "null" (pd-jstr parent)))
+                    (str_concat ","
+                    (str_concat (pd-jkv "created_at_unix_ms" (pd-read dir id "created"))
+                    "}")))))))))))))))))
+
+    (defn pd-turns-json (dir ids)
+        (if (eq (len ids) 0) ""
+            (if (eq (len ids) 1) (pd-turn-json dir (head ids))
+                (str_concat (pd-turn-json dir (head ids))
+                    (str_concat "," (pd-turns-json dir (tail ids)))))))
+    (defn pd-edge-json (dir id)
+        (str_concat "{"
+            (str_concat (pd-jkv "from" (pd-jstr (pd-read dir id "parent")))
+            (str_concat ","
+            (str_concat (pd-jkv "to" (pd-jstr id))
+            (str_concat "," (str_concat (pd-jkv "relation" (pd-jstr "reply")) "}")))))))
+    (defn pd-edges-json (dir ids)
+        (if (eq (len ids) 0) ""
+            (do
+                (let id (head ids))
+                (let parent (pd-read dir id "parent"))
+                (if (eq (str_len parent) 0)
+                    (pd-edges-json dir (tail ids))
+                    (do
+                        (let rest (pd-edges-json dir (tail ids)))
+                        (if (eq (str_len rest) 0) (pd-edge-json dir id)
+                            (str_concat (pd-edge-json dir id) (str_concat "," rest))))))))
+
+    ; ----- create, read, release -------------------------------------------
+    (defn pd-create-response (id token parent)
+        (pd-result 202
+            (str_concat "{"
+                (str_concat (pd-jkv "id" (pd-jstr id))
+                (str_concat ","
+                (str_concat (pd-jkv "state" (pd-jstr "offered"))
+                (str_concat ","
+                (str_concat (pd-jkv "parent_dialogue_id"
+                    (if (eq (str_len parent) 0) "null" (pd-jstr parent)))
+                (str_concat ","
+                (str_concat (pd-jkv "removal_token" (pd-jstr token))
+                (str_concat ","
+                (str_concat (pd-jkv "poll_url"
+                    (pd-jstr (str_concat "/dialogues/" id)))
+                "}"))))))))))))
+
+    (defn pd-write-turn (dir id token parent root question point locale disclosure)
+        (do
+            (pd-write dir id "state" "offered")
+            (pd-write dir id "question" question)
+            (pd-write dir id "point" point)
+            (pd-write dir id "locale" locale)
+            (pd-write dir id "parent" parent)
+            (pd-write dir id "root" root)
+            (pd-write dir id "disclosure" disclosure)
+            (pd-write dir id "token-digest" (pd-token-digest token))
+            (pd-write dir id "created" (int_to_str (now_unix_ms)))
+            (pd-append-turn dir root id)
+            (pd-create-response id token parent)))
+
+    (defn pd-create-with (dir id token parent question point locale disclosure)
+        (if (eq (pd-id-ok? id) 0)
+            (pd-result 400 (pd-error-json "dialogue id is not a safe capability id"))
+            (if (pd-record? dir id)
+                (pd-result 409 (pd-error-json "dialogue id already exists"))
+                (if (eq (pd-text-ok? question 1200) 0)
+                    (pd-result 400 (pd-error-json "question must be 1..1200 visible bytes"))
+                    (if (eq (pd-text-ok? point 240) 0)
+                        (pd-result 400 (pd-error-json "point_of_view must be 1..240 visible bytes"))
+                        (if (eq (pd-locale-ok? locale) 0)
+                            (pd-result 400 (pd-error-json "locale must be 1..80 visible bytes"))
+                            (if (str_eq disclosure (pd-disclosure))
+                                (if (eq (str_len parent) 0)
+                                    (pd-write-turn dir id token "" id question point locale disclosure)
+                                    (if (eq (pd-id-ok? parent) 0)
+                                        (pd-result 400 (pd-error-json "parent_dialogue_id is malformed"))
+                                        (if (eq (pd-active? dir parent) 0)
+                                            (pd-result 404 (pd-error-json "parent dialogue is unavailable"))
+                                            (if (str_eq (pd-read dir parent "disclosure") (pd-disclosure))
+                                                (pd-write-turn dir id token parent
+                                                    (pd-read dir parent "root")
+                                                    question point locale disclosure)
+                                                (pd-result 403 (pd-error-json "parent does not disclose its thread"))))))
+                                (pd-result 400 (pd-error-json "public-unlisted-thread-v2 acknowledgement is needed")))))))))
+
+    (defn pd-create (dir parent question point locale disclosure)
+        (pd-create-with dir (pd-new-id) (pd-new-token)
+            parent question point locale disclosure))
+
+    (defn pd-get (dir id)
+        (if (eq (pd-id-ok? id) 0)
+            (pd-result 400 (pd-error-json "dialogue id is malformed"))
+            (if (pd-record? dir id)
+                (pd-result 200 (pd-turn-json dir id))
+                (pd-result 404 (pd-error-json "dialogue not found")))))
+
+    (defn pd-thread (dir anchor)
+        (if (eq (pd-id-ok? anchor) 0)
+            (pd-result 400 (pd-error-json "dialogue id is malformed"))
+            (if (pd-record? dir anchor)
+                (if (str_eq (pd-read dir anchor "disclosure") (pd-disclosure))
+                    (do
+                        (let root (pd-read dir anchor "root"))
+                        (let ids (pd-root-turns dir root))
+                        (pd-result 200
+                            (str_concat "{"
+                                (str_concat (pd-jkv "anchor_dialogue_id" (pd-jstr anchor))
+                                (str_concat ","
+                                (str_concat (pd-jkv "root_dialogue_id" (pd-jstr root))
+                                (str_concat ","
+                                (str_concat (pd-jkv "turns"
+                                    (str_concat "[" (str_concat (pd-turns-json dir ids) "]")))
+                                (str_concat ","
+                                (str_concat (pd-jkv "directed_edges"
+                                    (str_concat "[" (str_concat (pd-edges-json dir ids) "]")))
+                                "}"))))))))))
+                    (pd-result 403 (pd-error-json "dialogue does not disclose its thread")))
+                (pd-result 404 (pd-error-json "dialogue not found")))))
+
+    (defn pd-released-json (id)
+        (str_concat "{"
+            (str_concat (pd-jkv "id" (pd-jstr id))
+                (str_concat ","
+                    (str_concat (pd-jkv "state" (pd-jstr "tombstoned"))
+                        (str_concat ","
+                            (str_concat (pd-jkv "released" "true") "}")))))))
+    (defn pd-release-record (dir id)
+        (do
+            (pd-write dir id "state" "tombstoned")
+            (pd-forget dir id "question")
+            (pd-forget dir id "point")
+            (pd-forget dir id "locale")
+            (pd-result 200 (pd-released-json id))))
+    (defn pd-release-known (dir id token)
+        (if (eq (pd-constant-match?
+                    (pd-read dir id "token-digest") (pd-token-digest token)) 1)
+            (pd-release-record dir id)
+            (pd-result 403 (pd-error-json "removal capability did not match"))))
+    (defn pd-release-with (dir id token)
+        (if (eq (pd-id-ok? id) 0)
+            (pd-result 400 (pd-error-json "dialogue id is malformed"))
+            (if (pd-record? dir id)
+                (pd-release-known dir id token)
+                (pd-result 404 (pd-error-json "dialogue not found")))))
+
+    ; ----- HTTP request membrane ------------------------------------------
+    (defn pd-method-at (raw at)
+        (if (lt at 0) "" (substring raw 0 at)))
+    (defn pd-method (raw) (pd-method-at raw (str_find raw " " 0)))
+    (defn pd-body-at (raw marker)
+        (if (lt marker 0) "" (substring raw (add marker 4) (str_len raw))))
+    (defn pd-body-of (raw) (pd-body-at raw (str_find raw "\r\n\r\n" 0)))
+    (defn pd-hex-value (b)
+        (if (and (ge b 48) (le b 57)) (sub b 48)
+            (if (and (ge b 65) (le b 70)) (sub b 55)
+                (if (and (ge b 97) (le b 102)) (sub b 87) -1))))
+    (defn pd-url-decode-loop (s i out)
+        (if (ge i (str_len s)) out
+            (do
+                (let b (str_byte_at s i))
+                (if (eq b 43)
+                    (pd-url-decode-loop s (add i 1) (str_concat out " "))
+                    (if (and (eq b 37) (lt (add i 2) (str_len s)))
+                        (do
+                            (let hi (pd-hex-value (str_byte_at s (add i 1))))
+                            (let lo (pd-hex-value (str_byte_at s (add i 2))))
+                            (if (or (lt hi 0) (lt lo 0))
+                                (pd-url-decode-loop s (add i 1) (str_concat out (byte_to_str b)))
+                                (pd-url-decode-loop s (add i 3)
+                                    (str_concat out (byte_to_str (add (mul hi 16) lo))))))
+                        (pd-url-decode-loop s (add i 1) (str_concat out (byte_to_str b))))))))
+    (defn pd-url-decode (s) (pd-url-decode-loop s 0 ""))
+    (defn pd-form-pair (text)
+        (do
+            (let at (str_find text "=" 0))
+            (if (lt at 0) (list (pd-url-decode text) "")
+                (list (pd-url-decode (substring text 0 at))
+                      (pd-url-decode (substring text (add at 1) (str_len text)))))))
+    (defn pd-form-loop (body start)
+        (do
+            (let amp (str_find body "&" start))
+            (if (lt amp 0)
+                (list (pd-form-pair (substring body start (str_len body))))
+                (cons (pd-form-pair (substring body start amp))
+                      (pd-form-loop body (add amp 1))))))
+    (defn pd-form (body)
+        (if (eq (str_len body) 0) (empty) (pd-form-loop body 0)))
+    (defn pd-param (params key)
+        (if (eq (len params) 0) ""
+            (if (str_eq (nth (head params) 0) key) (nth (head params) 1)
+                (pd-param (tail params) key))))
+    (defn pd-prefix? (text prefix)
+        (if (lt (str_len text) (str_len prefix)) false
+            (str_eq (substring text 0 (str_len prefix)) prefix)))
+    (defn pd-suffix? (text suffix)
+        (if (lt (str_len text) (str_len suffix)) false
+            (str_eq (substring text (sub (str_len text) (str_len suffix)) (str_len text)) suffix)))
+    (defn pd-path-id (path)
+        (if (pd-prefix? path "/dialogues/")
+            (do
+                (let slash (str_find path "/" 11))
+                (if (lt slash 0) (substring path 11 (str_len path))
+                    (substring path 11 slash)))
+            ""))
+    (defn pd-turn-path? (path id)
+        (str_eq path (str_concat "/dialogues/" id)))
+    (defn pd-reply-path? (path id)
+        (str_eq path (str_concat "/dialogues/" (str_concat id "/replies"))))
+    (defn pd-thread-path? (path id)
+        (str_eq path (str_concat "/dialogues/" (str_concat id "/thread"))))
+
+    (defn pd-start-from-params (dir params parent)
+        (pd-create dir parent
+            (pd-param params "question")
+            (pd-param params "point_of_view")
+            (pd-param params "locale")
+            (pd-param params "public_disclosure_ack")))
+
+    ; ----- MCP JSON-RPC membrane -----------------------------------------
+    (defn pd-json-string (obj key)
+        (if (json-object-has? obj key)
+            (json-string-value (json-object-get obj key)) ""))
+    (defn pd-mcp-tools ()
+        "{\"tools\":[{\"name\":\"start_dialogue\",\"description\":\"Offer one persistent public dialogue turn.\",\"inputSchema\":{\"type\":\"object\",\"required\":[\"question\",\"point_of_view\",\"locale\",\"public_disclosure_ack\"],\"properties\":{\"question\":{\"type\":\"string\"},\"point_of_view\":{\"type\":\"string\"},\"locale\":{\"type\":\"string\"},\"public_disclosure_ack\":{\"const\":\"public-unlisted-thread-v2\"}}}},{\"name\":\"reply_dialogue\",\"description\":\"Offer a reply with a directed parent edge.\",\"inputSchema\":{\"type\":\"object\",\"required\":[\"parent_dialogue_id\",\"question\",\"point_of_view\",\"locale\",\"public_disclosure_ack\"],\"properties\":{\"parent_dialogue_id\":{\"type\":\"string\"},\"question\":{\"type\":\"string\"},\"point_of_view\":{\"type\":\"string\"},\"locale\":{\"type\":\"string\"},\"public_disclosure_ack\":{\"const\":\"public-unlisted-thread-v2\"}}}},{\"name\":\"get_dialogue\",\"description\":\"Observe one unlisted turn.\",\"inputSchema\":{\"type\":\"object\",\"required\":[\"dialogue_id\"],\"properties\":{\"dialogue_id\":{\"type\":\"string\"}}}},{\"name\":\"get_dialogue_thread\",\"description\":\"Observe the connected directed thread from either turn id.\",\"inputSchema\":{\"type\":\"object\",\"required\":[\"dialogue_id\"],\"properties\":{\"dialogue_id\":{\"type\":\"string\"}}}},{\"name\":\"remove_dialogue\",\"description\":\"Release one turn into a content-free tombstone with its own capability.\",\"inputSchema\":{\"type\":\"object\",\"required\":[\"dialogue_id\",\"removal_token\"],\"properties\":{\"dialogue_id\":{\"type\":\"string\"},\"removal_token\":{\"type\":\"string\"}}}}]}" )
+    (defn pd-mcp-domain-call (dir name args)
+        (if (str_eq name "start_dialogue")
+            (pd-create dir ""
+                (pd-json-string args "question")
+                (pd-json-string args "point_of_view")
+                (pd-json-string args "locale")
+                (pd-json-string args "public_disclosure_ack"))
+            (if (str_eq name "reply_dialogue")
+                (pd-create dir
+                    (pd-json-string args "parent_dialogue_id")
+                    (pd-json-string args "question")
+                    (pd-json-string args "point_of_view")
+                    (pd-json-string args "locale")
+                    (pd-json-string args "public_disclosure_ack"))
+                (if (str_eq name "get_dialogue")
+                    (pd-get dir (pd-json-string args "dialogue_id"))
+                    (if (str_eq name "get_dialogue_thread")
+                        (pd-thread dir (pd-json-string args "dialogue_id"))
+                        (if (str_eq name "remove_dialogue")
+                            (pd-release-with dir
+                                (pd-json-string args "dialogue_id")
+                                (pd-json-string args "removal_token"))
+                            (pd-result 404 (pd-error-json "unknown MCP dialogue tool"))))))))
+    (defn pd-mcp-response (id-text result)
+        (do
+            (let failed (ge (pd-code result) 400))
+            (let content
+                (str_concat "{\"type\":\"text\",\"text\":"
+                    (str_concat (pd-jstr (pd-body result)) "}")))
+            (let payload
+                (str_concat "{\"content\":["
+                    (str_concat content
+                        (str_concat "],\"structuredContent\":"
+                            (str_concat (pd-body result)
+                                (str_concat ",\"isError\":"
+                                    (str_concat (if failed "true" "false") "}")))))))
+            (let response
+                (str_concat "{\"jsonrpc\":\"2.0\",\"id\":"
+                    (str_concat id-text
+                        (str_concat ",\"result\":" (str_concat payload "}")))))
+            (pd-result 200 response)))
+    (defn pd-mcp-error (id-text code message)
+        (pd-result 200
+            (str_concat "{\"jsonrpc\":\"2.0\",\"id\":"
+                (str_concat id-text
+                    (str_concat ",\"error\":{\"code\":"
+                        (str_concat (int_to_str code)
+                            (str_concat ",\"message\":"
+                                (str_concat (pd-jstr message) "}}"))))))))
+    (defn pd-mcp (dir raw)
+        (do
+            (let root (parse-json "mcp" (pd-body-of raw)))
+            (let id-text
+                (if (json-object-has? root "id")
+                    (json-emit (json-object-get root "id")) "null"))
+            (let method (pd-json-string root "method"))
+            (if (if (str_eq (pd-json-string root "jsonrpc") "2.0")
+                    (gt (str_len method) 0) false)
+                (if (str_eq method "tools/list")
+                    (pd-result 200
+                        (str_concat "{\"jsonrpc\":\"2.0\",\"id\":"
+                            (str_concat id-text
+                                (str_concat ",\"result\":" (str_concat (pd-mcp-tools) "}")))))
+                    (if (str_eq method "tools/call")
+                        (do
+                            (let params (json-object-get root "params"))
+                            (let name (pd-json-string params "name"))
+                            (let args (json-object-get params "arguments"))
+                            (pd-mcp-response id-text (pd-mcp-domain-call dir name args)))
+                        (pd-mcp-error id-text -32601 "method not found")))
+                (pd-mcp-error id-text -32600 "invalid JSON-RPC request"))))
+
+    (defn pd-door? (path)
+        (or (str_eq path "/dialogues")
+            (or (pd-prefix? path "/dialogues/") (str_eq path "/mcp"))))
+
+    (defn pd-handle-in (dir raw path)
+        (do
+            (let method (pd-method raw))
+            (let params (pd-form (pd-body-of raw)))
+            (let id (pd-path-id path))
+            (if (and (str_eq method "POST") (str_eq path "/dialogues"))
+                (pd-start-from-params dir params "")
+                (if (and (str_eq method "POST") (pd-reply-path? path id))
+                    (pd-start-from-params dir params id)
+                    (if (and (str_eq method "GET") (pd-thread-path? path id))
+                        (pd-thread dir id)
+                        (if (and (str_eq method "GET") (pd-turn-path? path id))
+                            (pd-get dir id)
+                            (if (and (str_eq method "DELETE") (pd-turn-path? path id))
+                                (pd-release-with dir id (pd-param params "removal_token"))
+                                (if (and (str_eq method "POST") (str_eq path "/mcp"))
+                                    (pd-mcp dir raw)
+                                    (pd-result 404 (pd-error-json "no public dialogue route for this method and path"))))))))))
+    (defn pd-handle (raw path) (pd-handle-in (pd-dir) raw path))
+    (defn pd-plugin-result (raw path)
+        (do
+            (let r (pd-handle raw path))
+            (list (pd-code r) (pd-body r)
+                (list "plugin/public-dialogue.fk") "-" "-")))
+
+    0)
