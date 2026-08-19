@@ -1,0 +1,86 @@
+; grammars/form-lift.fk — a local self-upgrade of form.bml.
+;
+; Invented 2026-08-19 so new features can be authored without s-expr
+; call-form and without a remote oracle. Cursor-only: the line compiler
+; does not verify this dialect. Existing form.bml stays untouched.
+;
+; New rules, above form.bml:
+;   infix  >= <= > < == + - *  and  or
+;   unless c then t else e     -> if (not c) t e
+;   when c then t              -> if c t 0
+;   ice / liquid / compost     -> 2 / 1 / 0
+;
+; preludes: form-stdlib/core.fk form-stdlib/form-ontology-bp.fk form-stdlib/line-grammar.fk form-stdlib/bmf-core.fk form-stdlib/bmf-grammar.fk
+; Proven by: form-stdlib/tests/form-cli-lift-ice-band.fk
+
+(do
+    (defn form-lift-rules () (list
+        (rule3 "section" (p-cap "ds" (p-rep (p-ref "topstmt"))) (t-emit "do" (list (t-splices "ds"))))
+        (rule3 "topstmt" (p-cap "v" (list "alt" (p-ref "defblock") (p-ref "fdef") (p-ref "exprstmt"))) (t-splice "v"))
+
+        (rule3 "defblock" (list "seq"
+            (p-lit "def") (p-cap "name" (p-run "bmlname"))
+            (p-lit "(") (p-cap "ps" (p-sep (p-run "bmlname") (p-lit ","))) (p-lit ")")
+            (p-lit "{") (p-cap "body" (p-rep (p-ref "blockstmt"))) (p-lit "}"))
+          (t-emit "fndef" (list (t-splice "name") (t-emit "do" (list (t-splices "ps"))) (t-emit "do" (list (t-splices "body"))))))
+
+        (rule3 "fdef" (list "seq"
+            (p-lit "def") (p-cap "name" (p-run "bmlname"))
+            (p-lit "(") (p-cap "ps" (p-sep (p-run "bmlname") (p-lit ","))) (p-lit ")")
+            (p-lit "=") (p-cap "e" (p-ref "expr")) (p-lit ";"))
+          (t-emit "fndef" (list (t-splice "name") (t-emit "do" (list (t-splices "ps"))) (t-splice "e"))))
+
+        (rule3 "blockstmt" (p-cap "v" (list "alt" (p-ref "letstmt") (p-ref "exprstmt"))) (t-splice "v"))
+        (rule3 "letstmt" (list "seq" (p-lit "let") (p-cap "n" (p-run "bmlname")) (p-lit "=") (p-cap "e" (p-ref "expr")) (p-lit ";"))
+          (t-emit "let" (list (t-splice "n") (t-splice "e"))))
+        (rule3 "exprstmt" (list "seq" (p-cap "e" (p-ref "expr")) (p-lit ";")) (t-splice "e"))
+
+        (rule3 "expr" (p-cap "v" (list "alt" (p-ref "ifx") (p-ref "unlessx") (p-ref "whenx") (p-ref "inx"))) (t-splice "v"))
+        (rule3 "ifx" (list "seq"
+            (p-lit "if") (p-cap "c" (p-ref "expr"))
+            (p-lit "then") (p-cap "t" (p-ref "expr"))
+            (p-lit "else") (p-cap "e" (p-ref "expr")))
+          (t-emit "if" (list (t-splice "c") (t-splice "t") (t-splice "e"))))
+        (rule3 "unlessx" (list "seq"
+            (p-lit "unless") (p-cap "c" (p-ref "expr"))
+            (p-lit "then") (p-cap "t" (p-ref "expr"))
+            (p-lit "else") (p-cap "e" (p-ref "expr")))
+          (t-emit "if" (list
+            (t-emit "fncall" (list (t-emit "ident" (list (t-const "not"))) (t-splice "c")))
+            (t-splice "t")
+            (t-splice "e"))))
+        (rule3 "whenx" (list "seq"
+            (p-lit "when") (p-cap "c" (p-ref "expr"))
+            (p-lit "then") (p-cap "t" (p-ref "expr")))
+          (t-emit "if" (list (t-splice "c") (t-splice "t") (t-const-int 0))))
+
+        (rule3 "inx" (p-cap "v" (p-infix (p-ref "callchain") (list
+            (list "or" "or" 1)
+            (list "and" "and" 2)
+            (list "==" "eq" 3)
+            (list ">=" "ge" 4) (list "<=" "le" 4)
+            (list "<" "lt" 4) (list ">" "gt" 4)
+            (list "+" "add" 5) (list "-" "sub" 5) (list "*" "mul" 6))))
+          (t-splice "v"))
+
+        (rule3 "callchain" (p-cap "v" (p-chain (p-ref "primary") (p-ref "expr"))) (t-splice "v"))
+
+        (rule3 "primary" (p-cap "v" (list "alt"
+            (p-ref "litice") (p-ref "litliquid") (p-ref "litcompost")
+            (p-ref "litempty") (p-ref "littrue") (p-ref "litfalse")
+            (p-ref "litnum") (p-ref "litstr") (p-ref "ident") (p-ref "paren"))) (t-splice "v"))
+        (rule3 "litice"     (p-lit "ice")     (t-const-int 2))
+        (rule3 "litliquid"  (p-lit "liquid")  (t-const-int 1))
+        (rule3 "litcompost" (p-lit "compost") (t-const-int 0))
+        (rule3 "litempty" (p-lit "empty") (t-emit "fncall" (list (t-emit "ident" (list (t-const "empty"))))))
+        (rule3 "littrue"  (p-lit "true")  (t-const-bool 1))
+        (rule3 "litfalse" (p-lit "false") (t-const-bool 0))
+        (rule3 "paren" (list "seq" (p-lit "(") (p-cap "e" (p-ref "expr")) (p-lit ")")) (t-splice "e"))
+        (rule3 "litstr" (p-cap "v" (p-str)) (t-splice "v"))
+        (rule3 "litnum" (p-cap "v" (p-num)) (t-splice-int "v"))
+        (rule3 "ident"  (p-cap "v" (p-run "bmlname")) (t-emit "ident" (list (t-splice "v"))))
+        ))
+
+    (defn form-lift-grammar () (grammar "fdef" (form-lift-rules)))
+    (defn form-lift-section-grammar () (grammar "section" (form-lift-rules)))
+    0)
