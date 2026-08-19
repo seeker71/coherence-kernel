@@ -1,0 +1,78 @@
+; bearing-chain.fk — the spatial awareness actually reachable tonight, and where it stops.
+;
+; Grounded 2026-07-23 00:18 on R5CW20DK17A. Two organs, one die, one clock:
+;   stereo mic ...... Channel count 2, mask 0x3 (front-left/front-right), ~160 mm apart
+;   rotation vector .. quaternion at ~53 Hz, perm: n/a, last sample 23:39:09
+;                      -0.41, 0.04, 0.91, 0.04, -1.00
+;
+; Chain them and you get a world-frame direction to a sound: the mic pair gives a bearing
+; in the PHONE's frame, the rotation vector turns the phone's frame into the world's. That
+; is real spatial awareness from one pocket, needing no cross-device clock and no camera.
+;
+; The fifth number is the whole lesson. Android's rotation vector carries its estimated
+; heading accuracy in radians as values[4], and -1 means UNAVAILABLE. The attitude sensor
+; is reporting that it does not know how good it is. So the chain has a measured first
+; link and an unmeasured second one, and a chain's error is the sum of its links: a known
+; 2.5 degrees composed with an unknown is UNKNOWN, not 2.5. This cell computes the device
+; frame exactly and answers -1 for the world frame, rather than quietly reporting the half
+; it happens to know.
+;
+; What the chain yields even when complete: a RAY, not a point. One baseline gives
+; direction; range wants a second station, a reflection, or motion between two fixes.
+;
+; Angles are millidegrees throughout (integer math; 57296 millideg per radian).
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    (defn bc-mm-per-s () 343000)
+    (defn bc-mdeg-per-rad () 57296)
+
+    ; --- how far sound travels in one sample: the finest path difference resolvable ---
+    (defn bc-sample-mm (rate-hz) (div (bc-mm-per-s) rate-hz))
+
+    ; --- the bearing step at broadside: one sample of path difference across the baseline.
+    ; dtheta ~= dpath / baseline (radians) where the pair looks sideways-on. Near endfire
+    ; the same sample buys far less angle; broadside is the optimistic end and is named so.
+    (defn bc-broadside-mdeg (baseline-mm rate-hz)
+        (div (mul (bc-sample-mm rate-hz) (bc-mdeg-per-rad)) baseline-mm))
+
+    ; --- an angle, at a distance, is a cross-range error ---
+    (defn bc-cross-range-mm (mdeg range-mm)
+        (div (mul range-mm mdeg) (bc-mdeg-per-rad)))
+
+    ; --- composing the two links. A negative accuracy is the sensor saying it does not
+    ; know; the sum inherits that and stays -1, which is the point of the cell. ---
+    (defn bc-world-mdeg (device-mdeg attitude-mdeg)
+        (if (lt attitude-mdeg 0) (sub 0 1) (add device-mdeg attitude-mdeg)))
+    (defn bc-world-known? (device-mdeg attitude-mdeg)
+        (if (lt (bc-world-mdeg device-mdeg attitude-mdeg) 0) 0 1))
+
+    ; --- what a single baseline yields: 1 = a ray (direction only), never a point ---
+    (defn bc-yields-point? (stations) (if (ge stations 2) 1 0))
+
+    ; --- the measured configuration ---
+    (defn bc-baseline-mm () 160)
+    (defn bc-attitude-reported () (sub 0 1))   ; values[4] = -1, heading accuracy unavailable
+
+    ; --- self-check ---
+    (defn bck (cond bit) (if cond bit 0))
+    (defn bc-s48 ()   (bck (eq (bc-sample-mm 48000) 7) 1))
+    (defn bc-s16 ()   (bck (eq (bc-sample-mm 16000) 21) 2))
+    (defn bc-b48 ()   (bck (eq (bc-broadside-mdeg (bc-baseline-mm) 48000) 2506) 4))
+    (defn bc-b16 ()   (bck (eq (bc-broadside-mdeg (bc-baseline-mm) 16000) 7520) 8))
+    ; 2.5 degrees at three metres is 131 mm of cross-range — a hand's width, at 48 kHz
+    (defn bc-cross () (bck (eq (bc-cross-range-mm 2506 3000) 131) 16))
+    ; and the second link is unmeasured, so the world frame is unknown despite the first
+    (defn bc-world-unknown ()
+        (bck (eq (bc-world-mdeg 2506 (bc-attitude-reported)) (sub 0 1)) 32))
+    (defn bc-world-flag () (bck (eq (bc-world-known? 2506 (bc-attitude-reported)) 0) 64))
+    ; with a calibrated compass reporting 5 degrees, the chain closes at 7.5
+    (defn bc-world-closed () (bck (eq (bc-world-mdeg 2506 5000) 7506) 128))
+    ; one phone is one station: a ray
+    (defn bc-ray ()   (bck (eq (bc-yields-point? 1) 0) 256))
+    (defn bearing-chain-check ()
+        (add (add (add (bc-s48) (bc-s16)) (add (bc-b48) (bc-b16)))
+        (add (add (add (bc-cross) (bc-world-unknown)) (add (bc-world-flag) (bc-world-closed)))
+             (bc-ray))))
+)

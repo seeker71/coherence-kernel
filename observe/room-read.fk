@@ -1,0 +1,110 @@
+; room-read.fk — the eighteen open doors, actually walked through.
+;
+; Urs, 2026-07-23 00:32: "show me please". So these are the real last readings from
+; R5CW20DK17A's permission-free sensors, read at 00:32 WITA, turned into facts a person
+; can hold. Nothing here is a fixture; every input is a number the phone reported.
+;
+;   accelerometer  21:38:54  -0.01137,  0.24227, 10.08395  m/s^2
+;   linear accel   00:06:13   0.01,     0.00,     0.01     m/s^2
+;   gyroscope      18:57:37   0.00061, -0.00015,  0.00015  rad/s
+;   magnetometer   14:53:01 -23.94,   -22.76,     7.54     uT, accuracy 3 (HIGH)
+;   pressure       23:07:54 958.50 hPa
+;   rotation vec   00:06:13  -0.41, 0.06, 0.91, 0.10, -1.00
+;
+; All inputs are carried as milli-units so the arithmetic stays integer. Lengths in mm,
+; fields in nanotesla, pressure in pascals, angles in millidegrees.
+;
+; THE CONTRADICTION THIS CELL EXISTS TO HOLD: the magnetometer reports accuracy 3, which is
+; Android's SENSOR_STATUS_ACCURACY_HIGH — the compass says it is well calibrated. The fused
+; rotation vector, which is built ON that magnetometer, reports its heading accuracy as -1,
+; unavailable. One organ is confident and the organ downstream of it declines to say. Both
+; are the phone's own words, seconds apart in the same dump. The cell reports both and
+; refuses to reconcile them, because the reconciliation would be invention.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    ; --- integer square root, Newton, on non-negative input ---
+    (defn rr-isqrt-walk (n c)
+        (do (let next (div (add c (div n c)) 2))
+            (if (ge next c) c (rr-isqrt-walk n next))))
+    (defn rr-isqrt (n) (if (le n 1) n (rr-isqrt-walk n (div (add n 1) 2))))
+
+    (defn rr-mag3 (x y z)
+        (rr-isqrt (add (mul x x) (add (mul y y) (mul z z)))))
+
+    ; --- the measured readings, in milli-units ---
+    (defn rr-accel-x () (sub 0 11)) (defn rr-accel-y () 242) (defn rr-accel-z () 10084)
+    (defn rr-lin-x ()   10)         (defn rr-lin-y ()   0)   (defn rr-lin-z ()   10)
+    (defn rr-mag-x ()   (sub 0 23940)) (defn rr-mag-y () (sub 0 22760)) (defn rr-mag-z () 7540)
+    (defn rr-mag-accuracy () 3)        ; SENSOR_STATUS_ACCURACY_HIGH, the phone's own word
+    (defn rr-heading-accuracy () (sub 0 1))  ; and the fused vector's, from the same dump
+    (defn rr-pressure-pa () 95850)
+    (defn rr-standard-pa () 101325)
+    (defn rr-g-milli () 9807)
+
+    ; --- what the numbers say ---
+    ; 1. total acceleration: at rest this is gravity, and the excess over 9.807 is bias
+    (defn rr-accel-mag () (rr-mag3 (rr-accel-x) (rr-accel-y) (rr-accel-z)))
+    (defn rr-accel-bias-permille ()
+        (div (mul (sub (rr-accel-mag) (rr-g-milli)) 1000) (rr-g-milli)))
+
+    ; 2. how far off flat: the z axis carries almost all of gravity when a phone lies
+    ; face up, so the tilt is the angle whose cosine is z/|a|. Small angles only, via the
+    ; sine approximation from the horizontal component — honest inside ~15 degrees.
+    (defn rr-horiz () (rr-isqrt (add (mul (rr-accel-x) (rr-accel-x))
+                                     (mul (rr-accel-y) (rr-accel-y)))))
+    ; The linear step sin(t) ~= t holds near zero and nowhere else. Past about 15 degrees
+    ; it under-reads and keeps looking like a number: the live 00:39 reading (horiz 7517,
+    ; magnitude 10030) is truly 48.6 degrees and this arithmetic would answer 42.9. So the
+    ; domain is enforced rather than described. Out of domain answers -1, and the caller
+    ; learns it needs a real arcsin instead of receiving a confident wrong angle.
+    ; Found by running the cell against the phone 20 minutes after writing it.
+    (defn rr-tilt-in-domain? (horiz mag) (if (gt (mul horiz 100) (mul mag 26)) 0 1))
+    (defn rr-tilt-of (horiz mag)
+        (if (eq (rr-tilt-in-domain? horiz mag) 1) (div (mul horiz 57296) mag) (sub 0 1)))
+    (defn rr-tilt-mdeg () (rr-tilt-of (rr-horiz) (rr-accel-mag)))
+
+    ; 3. motion: linear acceleration has gravity already removed, so this IS movement
+    (defn rr-motion-milli () (rr-mag3 (rr-lin-x) (rr-lin-y) (rr-lin-z)))
+    (defn rr-still? () (if (lt (rr-motion-milli) 50) 1 0))
+
+    ; 4. the magnetic field the phone is sitting in, nanotesla
+    (defn rr-field-nt () (rr-mag3 (rr-mag-x) (rr-mag-y) (rr-mag-z)))
+    ; earth's field near this latitude runs about 45000 nT; a large shortfall indoors is
+    ; shielding and steel, not a broken sensor
+    (defn rr-field-shortfall-pct ()
+        (div (mul (sub 45000 (rr-field-nt)) 100) 45000))
+
+    ; 5. barometric height above the standard sea-level datum. The exponent is not
+    ; available in integer form, so this uses the low-altitude linear approximation:
+    ; near sea level, 1 hPa is about 8.3 m. Good to a few percent under ~1000 m, and it is
+    ; the ABSOLUTE figure that is soft — the sensor's own resolution resolves centimetres,
+    ; which is why this recipe is worth having at all.
+    (defn rr-altitude-m () (div (mul (sub (rr-standard-pa) (rr-pressure-pa)) 83) 1000))
+
+    ; 6. the disagreement, kept rather than resolved
+    (defn rr-compass-confident? () (if (ge (rr-mag-accuracy) 3) 1 0))
+    (defn rr-heading-known? () (if (ge (rr-heading-accuracy) 0) 1 0))
+    (defn rr-organs-disagree? ()
+        (if (eq (rr-compass-confident?) 1) (if (eq (rr-heading-known?) 0) 1 0) 0))
+
+    ; --- self-check ---
+    (defn rrk (cond bit) (if cond bit 0))
+    (defn rr-isqrt-ok ()  (rrk (eq (rr-isqrt 101745) 318) 1))
+    (defn rr-a-mag ()     (rrk (eq (rr-accel-mag) 10086) 2))
+    (defn rr-bias ()      (rrk (eq (rr-accel-bias-permille) 28) 4))
+    (defn rr-flat ()      (rrk (lt (rr-tilt-mdeg) 2000) 8))
+    (defn rr-motion ()    (rrk (eq (rr-motion-milli) 14) 16))
+    (defn rr-is-still ()  (rrk (eq (rr-still?) 1) 32))
+    (defn rr-field ()     (rrk (eq (rr-field-nt) 33882) 64))
+    (defn rr-alt ()       (rrk (eq (rr-altitude-m) 454) 128))
+    (defn rr-disagree ()  (rrk (eq (rr-organs-disagree?) 1) 256))
+    ; the live 00:39 posture, propped near 49 degrees, is outside the linear step and is
+    ; answered -1 rather than with the 42940 the arithmetic would otherwise produce
+    (defn rr-live-out ()  (rrk (eq (rr-tilt-of 7517 10030) (sub 0 1)) 512))
+    (defn room-read-check ()
+        (add (add (add (rr-isqrt-ok) (rr-a-mag)) (add (rr-bias) (rr-flat)))
+        (add (add (add (rr-motion) (rr-is-still)) (add (rr-field) (rr-alt)))
+             (add (rr-disagree) (rr-live-out)))))
+)

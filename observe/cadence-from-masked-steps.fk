@@ -1,0 +1,84 @@
+; cadence-from-masked-steps.fk — reading tempo out of a sensor that refuses to
+; tell you its values.
+;
+; Witnessed 2026-07-22 on R5CW20DK17A (Galaxy S23 Ultra), over USB. The phone's
+; step_counter runs constantly — `active-count = 1`, sampling every 200 ms — and
+; it is protected: android.permission.ACTIVITY_RECOGNITION. Asking it for its
+; readings gives exactly this:
+;
+;     step_counter Non-wakeup: last 50 events
+;       ... (ts=..., wall=07-22 16:40:33.283) [value masked]
+;       ... (ts=..., wall=07-22 16:40:33.952) [value masked]
+;
+; The COUNT is masked. The CLOCK is not. And a step's value was never the
+; interesting part — the interval between steps is the gait, and the gait is a
+; tempo. Six masked events at 16:40 carry 669, 506, 562, 365, 955 ms between
+; them, and that arithmetic is a cadence in steps per minute that nobody
+; granted permission for.
+;
+; This is TRAFFIC ANALYSIS in the plain signals sense: what you learn from the
+; pattern of events — when, how often, how spaced — with no access to content.
+; The body should hold this knowingly rather than discover it by accident, in
+; both directions: it is a real organ for sensing a person's rhythm with no
+; permission asked, AND it is a real leak out of every masked sensor that still
+; timestamps. Naming it is what lets a person decide about it.
+;
+; The honest floor kept here: a tempo needs at least TWO intervals. One interval
+; is a coincidence, not a rhythm, and this cell answers -1 rather than divide.
+;
+; preludes: form-stdlib/core.fk
+
+(do
+    ; a pause, not a step: intervals at or above this are a break BETWEEN runs,
+    ; not a gait interval. 3 s at a walking cadence is four missed steps.
+    (defn cd-gap-ms () 3000)
+    ; a rhythm needs at least this many intervals to be called one
+    (defn cd-min-intervals () 2)
+
+    ; --- consecutive differences of a timestamp list (ms) ---
+    (defn cd-deltas (ts)
+        (if (lt (len ts) 2) (list)
+            (cons (sub (nth ts 1) (nth ts 0)) (cd-deltas (tail ts)))))
+
+    ; --- keep only the intervals that are gait, dropping the pauses ---
+    (defn cd-gait (ds)
+        (if (eq (len ds) 0) (list)
+            (if (lt (head ds) (cd-gap-ms))
+                (cons (head ds) (cd-gait (tail ds)))
+                (cd-gait (tail ds)))))
+
+    (defn cd-sum (ds) (if (eq (len ds) 0) 0 (add (head ds) (cd-sum (tail ds)))))
+    (defn cd-mean (ds) (if (eq (len ds) 0) 0 (div (cd-sum ds) (len ds))))
+
+    ; --- the reading: steps per minute, or -1 when the evidence is too thin ---
+    ; -1 is not "no movement". It is "not enough intervals to call this a tempo",
+    ; which is a different claim and stays a different number.
+    (defn cd-cadence (ts)
+        (do (let g (cd-gait (cd-deltas ts)))
+            (if (lt (len g) (cd-min-intervals)) (sub 0 1)
+                (if (eq (cd-mean g) 0) (sub 0 1)
+                    (div 60000 (cd-mean g))))))
+
+    ; how many usable gait intervals a window actually offered — the honesty
+    ; companion to the cadence, so a reader can see the evidence behind it
+    (defn cd-evidence (ts) (len (cd-gait (cd-deltas ts))))
+
+    ; --- the witnessed window: six masked step events, 2026-07-22 16:40:33-36,
+    ; as ms past 16:40:33.000 ---
+    (defn cd-witnessed-1640 () (list 283 952 1458 2020 2385 3340))
+    ; --- an earlier walk, 15:20:09-15:20:58, where long pauses split the run ---
+    (defn cd-witnessed-1520 () (list 9897 10482 43243 58624))
+
+    ; --- self-check ---
+    (defn cdk (cond bit) (if cond bit 0))
+    (defn cd-five ()     (cdk (eq (len (cd-deltas (cd-witnessed-1640))) 5) 1))
+    (defn cd-sum-ok ()   (cdk (eq (cd-sum (cd-deltas (cd-witnessed-1640))) 3057) 2))
+    (defn cd-mean-ok ()  (cdk (eq (cd-mean (cd-deltas (cd-witnessed-1640))) 611) 4))
+    (defn cd-tempo ()    (cdk (eq (cd-cadence (cd-witnessed-1640)) 98) 8))
+    (defn cd-gappy ()    (cdk (eq (cd-evidence (cd-witnessed-1520)) 1) 16))
+    (defn cd-gappy-honest () (cdk (eq (cd-cadence (cd-witnessed-1520)) (sub 0 1)) 32))
+    (defn cd-single ()   (cdk (eq (cd-cadence (list 500)) (sub 0 1)) 64))
+    (defn cadence-from-masked-steps-check ()
+        (add (add (add (cd-five) (cd-sum-ok)) (add (cd-mean-ok) (cd-tempo)))
+             (add (add (cd-gappy) (cd-gappy-honest)) (cd-single))))
+)
